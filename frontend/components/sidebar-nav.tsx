@@ -16,6 +16,8 @@ import {
   Lock,
   Network,
   LogOut,
+  ShieldAlert,
+  Ban,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -39,6 +41,8 @@ const groups = [
   {
     title: "安全",
     items: [
+      { href: "/security-events/", label: "安全事件", icon: ShieldAlert },
+      { href: "/ip-lists/", label: "IP 黑白名单", icon: Ban },
       { href: "/policies/", label: "策略", icon: FileText },
       { href: "/rules/", label: "规则", icon: Shield },
       { href: "/protection/", label: "防护设置", icon: Shield },

@@ -15,7 +15,9 @@ import (
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/health"
 	"My-OpenWaf/internal/core/lifecycle"
+	coreredis "My-OpenWaf/internal/core/redis"
 	"My-OpenWaf/internal/dataplane"
+	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
@@ -38,14 +40,25 @@ func Run() {
 		os.Exit(1)
 	}
 
-	token, err := store.SeedDefaults(rt.DB, rt.Config.AdminBind, logger.New("seed"))
+	seedLog := logger.New("seed")
+	token, password, err := store.SeedDefaults(rt.DB, rt.Config.AdminBind, seedLog)
 	if err != nil {
 		log.Error("seed defaults failed", slog.Any("err", err))
 		os.Exit(1)
 	}
-	if token != "" {
-		log.Info("=== FIRST RUN: admin API token (save it, shown only once) ===",
-			slog.String("token", token))
+	if token != "" || password != "" {
+		var bannerLines []string
+		bannerLines = append(bannerLines, "FIRST RUN — save these credentials (shown only once)")
+		bannerLines = append(bannerLines, "")
+		if password != "" {
+			bannerLines = append(bannerLines, "  Admin Username : admin")
+			bannerLines = append(bannerLines, "  Admin Password : "+password)
+		}
+		if token != "" {
+			bannerLines = append(bannerLines, "  API Token      : "+token)
+		}
+		bannerLines = append(bannerLines, "")
+		logger.Banner(bannerLines...)
 	}
 
 	if err := rt.ReloadSnapshot(); err != nil {
@@ -57,12 +70,14 @@ func Run() {
 	jwtSecret := resolveJWTSecret(rt)
 
 	repos := repository.New(rt.DB)
-	reload := func() error {
-		if err := store.BumpRevision(rt.DB); err != nil {
-			return err
-		}
-		return rt.ReloadSnapshot()
-	}
+
+	// Security event writer (async batch insert, non-blocking).
+	eventWriter := observability.NewEventWriter(repos.SecurityEvent, logger.New("events"))
+	defer eventWriter.Close()
+
+	// Event archiver (auto-delete events older than 30 days).
+	archiver := observability.NewArchiver(repos.SecurityEvent, logger.New("archiver"), 30)
+	defer archiver.Close()
 
 	// Data-plane metrics (shared across all data listeners).
 	metrics := dataplane.NewMetrics()
@@ -78,7 +93,61 @@ func Run() {
 	defer reqRL.Close()
 	defer errRL.Close()
 
-	eng := engine.New(rt.Snapshot, reqRL, errRL)
+	// IP reputation (blacklist + whitelist + auto-ban).
+	ipRep := waf.NewIPReputation()
+	defer ipRep.Close()
+	loadIPLists(ipRep, repos.IPList)
+	ipRep.ConfigureAutoBan(prot.AutoBanEnabled, prot.AutoBanThreshold, prot.AutoBanWindow, prot.AutoBanDuration)
+
+	eng := engine.New(rt.Snapshot, reqRL, errRL, ipRep)
+
+	// Redis config sync (distributed reload notifications).
+	configSync := coreredis.NewConfigSync(rt.Redis, logger.New("config_sync"))
+	if configSync != nil {
+		defer configSync.Close()
+	}
+
+	// Prometheus-compatible metrics collector.
+	promMetrics := observability.NewMetrics()
+
+	reload := func() error {
+		if err := store.BumpRevision(rt.DB); err != nil {
+			return err
+		}
+		if err := rt.ReloadSnapshot(); err != nil {
+			return err
+		}
+		// Refresh rate limiter + IP reputation from latest protection config.
+		if sn := rt.Snapshot.Load(); sn != nil {
+			p := sn.Protection
+			reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
+			errRL.Reconfigure(p.ErrorRateLimitWindow, p.ErrorRateLimitMax, p.ErrorRateLimitEnabled)
+			ipRep.ConfigureAutoBan(p.AutoBanEnabled, p.AutoBanThreshold, p.AutoBanWindow, p.AutoBanDuration)
+		}
+		loadIPLists(ipRep, repos.IPList)
+		// Notify other nodes via Redis pub/sub.
+		if configSync != nil {
+			configSync.PublishReload()
+		}
+		return nil
+	}
+
+	// Start Redis config sync subscriber in background.
+	if configSync != nil {
+		go configSync.Subscribe(func() error {
+			if err := rt.ReloadSnapshot(); err != nil {
+				return err
+			}
+			if sn := rt.Snapshot.Load(); sn != nil {
+				p := sn.Protection
+				reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
+				errRL.Reconfigure(p.ErrorRateLimitWindow, p.ErrorRateLimitMax, p.ErrorRateLimitEnabled)
+				ipRep.ConfigureAutoBan(p.AutoBanEnabled, p.AutoBanThreshold, p.AutoBanWindow, p.AutoBanDuration)
+			}
+			loadIPLists(ipRep, repos.IPList)
+			return nil
+		})
+	}
 
 	hc := health.New(rt.DB, rt.Snapshot)
 	lm := lifecycle.New(log)
@@ -88,6 +157,7 @@ func Run() {
 	adminSrv.GET("/healthz", hc.LivenessHandler())
 	adminSrv.GET("/readyz", hc.ReadinessHandler())
 	adminSrv.GET("/status", hc.StatusHandler())
+	adminSrv.GET("/metrics", observability.PrometheusHandler(promMetrics))
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
 		Repos:     repos,
 		Reload:    reload,
@@ -104,11 +174,12 @@ func Run() {
 		for lid, l := range sn.DataListeners {
 			srv := server.Default(server.WithHostPorts(l.Bind))
 			handler := dataplane.Handler(dataplane.Options{
-				ListenerID: lid,
-				Holder:     rt.Snapshot,
-				Engine:     eng,
-				Metrics:    metrics,
-				Log:        dpLog,
+				ListenerID:  lid,
+				Holder:      rt.Snapshot,
+				Engine:      eng,
+				Metrics:     metrics,
+				EventWriter: eventWriter,
+				Log:         dpLog,
 			})
 			srv.Use(handler)
 			lm.AddHertz("data:"+l.Bind, srv)
@@ -123,6 +194,29 @@ func Run() {
 
 	lm.Start()
 	lm.WaitForSignal()
+}
+
+func loadIPLists(rep *waf.IPReputation, repo *repository.IPListRepo) {
+	if repo == nil {
+		return
+	}
+	items, err := repo.AllEnabled()
+	if err != nil {
+		return
+	}
+	var blacks, whites []waf.IPListEntry
+	for _, it := range items {
+		e, ok := waf.ParseIPListEntry(it.Value, it.Note)
+		if !ok {
+			continue
+		}
+		if it.Kind == store.IPListBlack {
+			blacks = append(blacks, e)
+		} else if it.Kind == store.IPListWhite {
+			whites = append(whites, e)
+		}
+	}
+	rep.SetLists(blacks, whites)
 }
 
 func resolveJWTSecret(rt *core.Runtime) []byte {

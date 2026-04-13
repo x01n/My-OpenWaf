@@ -1,14 +1,46 @@
 package rules
 
 import (
+	"encoding/json"
 	"net"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Matcher tests a single condition against request fields.
 type Matcher interface {
 	Match(ip net.IP, path, query string, headers map[string]string) bool
+}
+
+// ── compound matchers ──
+
+type andMatcher struct{ children []Matcher }
+
+func (m *andMatcher) Match(ip net.IP, path, query string, headers map[string]string) bool {
+	for _, c := range m.children {
+		if !c.Match(ip, path, query, headers) {
+			return false
+		}
+	}
+	return len(m.children) > 0
+}
+
+type orMatcher struct{ children []Matcher }
+
+func (m *orMatcher) Match(ip net.IP, path, query string, headers map[string]string) bool {
+	for _, c := range m.children {
+		if c.Match(ip, path, query, headers) {
+			return true
+		}
+	}
+	return false
+}
+
+type notMatcher struct{ child Matcher }
+
+func (m *notMatcher) Match(ip net.IP, path, query string, headers map[string]string) bool {
+	return !m.child.Match(ip, path, query, headers)
 }
 
 // ── concrete matchers ──
@@ -68,9 +100,41 @@ func (m *headerRegexMatcher) Match(_ net.IP, _, _ string, headers map[string]str
 	return false
 }
 
+type exactPathMatcher struct{ path string }
+
+func (m *exactPathMatcher) Match(_ net.IP, path, _ string, _ map[string]string) bool {
+	return path == m.path
+}
+
+type methodMatcher struct{ method string }
+
+func (m *methodMatcher) Match(_ net.IP, _, _ string, headers map[string]string) bool {
+	for k, v := range headers {
+		if strings.EqualFold(k, ":method") || strings.EqualFold(k, "X-HTTP-Method") {
+			return strings.EqualFold(v, m.method)
+		}
+	}
+	return false
+}
+
+type contentTypeMatcher struct{ ctype string }
+
+func (m *contentTypeMatcher) Match(_ net.IP, _, _ string, headers map[string]string) bool {
+	for k, v := range headers {
+		if strings.EqualFold(k, "Content-Type") {
+			return strings.Contains(strings.ToLower(v), strings.ToLower(m.ctype))
+		}
+	}
+	return false
+}
+
 type alwaysMatcher struct{}
 
 func (m *alwaysMatcher) Match(net.IP, string, string, map[string]string) bool { return true }
+
+type neverMatcher struct{}
+
+func (m *neverMatcher) Match(net.IP, string, string, map[string]string) bool { return false }
 
 // buildMatcher creates a Matcher from a parsed kind:arg pattern.
 func buildMatcher(kind, arg string) Matcher {
@@ -125,8 +189,20 @@ func buildMatcher(kind, arg string) Matcher {
 		}
 		return &headerRegexMatcher{name: name, re: re}
 
+	case "block_path_exact":
+		return &exactPathMatcher{path: arg}
+
+	case "block_method":
+		return &methodMatcher{method: strings.ToUpper(arg)}
+
+	case "block_content_type":
+		return &contentTypeMatcher{ctype: arg}
+
+	case "compound":
+		return parseCompoundJSON(arg)
+
 	default:
-		return &alwaysMatcher{}
+		return &neverMatcher{}
 	}
 }
 
@@ -136,4 +212,77 @@ func splitHeaderArg(arg string) (string, string) {
 		return arg[:i], arg[i+1:]
 	}
 	return arg, ""
+}
+
+// ── regex cache ──
+
+var regexCache = struct {
+	mu    sync.RWMutex
+	cache map[string]*regexp.Regexp
+}{cache: make(map[string]*regexp.Regexp)}
+
+// cachedCompile returns a compiled regexp, reusing a cached instance if available.
+func cachedCompile(pattern string) (*regexp.Regexp, error) {
+	regexCache.mu.RLock()
+	if re, ok := regexCache.cache[pattern]; ok {
+		regexCache.mu.RUnlock()
+		return re, nil
+	}
+	regexCache.mu.RUnlock()
+
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	regexCache.mu.Lock()
+	regexCache.cache[pattern] = re
+	regexCache.mu.Unlock()
+	return re, nil
+}
+
+// ── compound JSON condition ──
+
+// compoundCondition represents a JSON-encoded compound rule condition.
+// Format: {"op":"and|or|not","children":[...]} or {"kind":"block_ip","arg":"1.2.3.0/24"}
+type compoundCondition struct {
+	Op       string              `json:"op"`
+	Kind     string              `json:"kind"`
+	Arg      string              `json:"arg"`
+	Children []compoundCondition `json:"children"`
+}
+
+func parseCompoundJSON(raw string) Matcher {
+	var cond compoundCondition
+	if err := json.Unmarshal([]byte(raw), &cond); err != nil {
+		return &neverMatcher{}
+	}
+	return buildCompound(cond)
+}
+
+func buildCompound(cond compoundCondition) Matcher {
+	switch cond.Op {
+	case "and":
+		children := make([]Matcher, 0, len(cond.Children))
+		for _, ch := range cond.Children {
+			children = append(children, buildCompound(ch))
+		}
+		return &andMatcher{children: children}
+	case "or":
+		children := make([]Matcher, 0, len(cond.Children))
+		for _, ch := range cond.Children {
+			children = append(children, buildCompound(ch))
+		}
+		return &orMatcher{children: children}
+	case "not":
+		if len(cond.Children) == 0 {
+			return &neverMatcher{}
+		}
+		return &notMatcher{child: buildCompound(cond.Children[0])}
+	default:
+		if cond.Kind != "" {
+			return buildMatcher(cond.Kind, cond.Arg)
+		}
+		return &neverMatcher{}
+	}
 }

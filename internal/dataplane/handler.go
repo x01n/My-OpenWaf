@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"log/slog"
+	"net"
 	"strings"
 	"sync/atomic"
 
@@ -14,19 +15,22 @@ import (
 	"My-OpenWaf/internal/core/adminweb"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/proxy"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
+	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf"
 )
 
 // Options configures a single data listener handler.
 type Options struct {
-	ListenerID uint
-	Holder     *snapshot.Holder
-	Engine     *engine.Engine
-	Metrics    *Metrics
-	Log        *slog.Logger
+	ListenerID   uint
+	Holder       *snapshot.Holder
+	Engine       *engine.Engine
+	Metrics      *Metrics
+	EventWriter  *observability.EventWriter
+	Log          *slog.Logger
 }
 
 // Handler returns a Hertz middleware: maintenance → WAF → block fuse or reverse proxy.
@@ -64,27 +68,24 @@ func Handler(opts Options) app.HandlerFunc {
 		path := string(c.Path())
 		rawQ := string(c.URI().QueryString())
 
-		// Build request headers for WAF inspection.
-		headers := make(map[string]string)
+		// Build request context from pool to reduce GC pressure.
+		reqCtx := pipeline.AcquireCtx()
+		reqCtx.RequestID = reqID
+		reqCtx.ListenerID = opts.ListenerID
+		reqCtx.ClientIP = clientIP
+		reqCtx.Method = string(c.Method())
+		reqCtx.Path = path
+		reqCtx.RawQuery = rawQ
+		reqCtx.Host = host
 		c.Request.Header.VisitAll(func(k, v []byte) {
-			headers[string(k)] = string(v)
+			reqCtx.Headers[string(k)] = string(v)
 		})
-
-		// Run unified engine.
-		reqCtx := &pipeline.RequestCtx{
-			RequestID:  reqID,
-			ListenerID: opts.ListenerID,
-			ClientIP:   clientIP,
-			Method:     string(c.Method()),
-			Path:       path,
-			RawQuery:   rawQ,
-			Host:       host,
-			Headers:    headers,
-		}
+		defer pipeline.ReleaseCtx(reqCtx)
 
 		result := opts.Engine.Process(reqCtx)
 
 		// Log observe hits.
+		ua := string(c.UserAgent())
 		for _, obs := range result.ObserveHits {
 			if opts.Metrics != nil {
 				opts.Metrics.RecordWAFObserve()
@@ -101,6 +102,22 @@ func Handler(opts Options) app.HandlerFunc {
 				slog.String("match", obs.MatchDesc),
 				slog.String("category", obs.Category),
 			)
+			if opts.EventWriter != nil {
+				opts.EventWriter.Record(store.SecurityEvent{
+					RequestID: reqID,
+					ClientIP:  clientIPStr(clientIP),
+					Host:      host,
+					Path:      path,
+					Method:    string(c.Method()),
+					UserAgent: ua,
+					RuleID:    obs.RuleID,
+					RuleIDStr: obs.RuleIDStr,
+					Phase:     obs.Phase,
+					Action:    "observe",
+					Category:  obs.Category,
+					MatchDesc: obs.MatchDesc,
+				})
+			}
 		}
 
 		// Maintenance mode.
@@ -134,6 +151,23 @@ func Handler(opts Options) app.HandlerFunc {
 				slog.String("match", result.Action.MatchDesc),
 				slog.String("category", result.Action.Category),
 			)
+			if opts.EventWriter != nil {
+				opts.EventWriter.Record(store.SecurityEvent{
+					RequestID:  reqID,
+					ClientIP:   clientIPStr(clientIP),
+					Host:       host,
+					Path:       path,
+					Method:     string(c.Method()),
+					UserAgent:  ua,
+					RuleID:     result.Action.RuleID,
+					RuleIDStr:  result.Action.RuleIDStr,
+					Phase:      result.Action.Phase,
+					Action:     "intercept",
+					Category:   result.Action.Category,
+					MatchDesc:  result.Action.MatchDesc,
+					StatusCode: 403,
+				})
+			}
 			waf.WriteBlockResponse(c, reqID, result.Site, sn, result.Action)
 			logAccess(accessLog, reqID, c, "intercept")
 			return
@@ -223,6 +257,9 @@ func serveOWAFStatic(c *app.RequestContext, webFS fs.FS) bool {
 }
 
 func logAccess(log *slog.Logger, reqID string, c *app.RequestContext, wafAction string) {
+	if !log.Enabled(context.Background(), slog.LevelInfo) {
+		return
+	}
 	log.Info("access",
 		slog.String("request_id", reqID),
 		slog.String("method", string(c.Method())),
@@ -236,4 +273,11 @@ func logAccess(log *slog.Logger, reqID string, c *app.RequestContext, wafAction 
 // ShouldBlock checks if an action result requires blocking (legacy helper).
 func ShouldBlock(res action.Result) bool {
 	return res.IsTerminal()
+}
+
+func clientIPStr(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }

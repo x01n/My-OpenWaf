@@ -10,6 +10,7 @@ import (
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/database"
 	redisx "My-OpenWaf/internal/core/redis"
+	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/snapshot"
 )
 
@@ -18,6 +19,7 @@ type Runtime struct {
 	Config   Config
 	DB       *gorm.DB
 	Redis    *goredis.Client
+	RedisKV  *cache.RedisKV
 	Snapshot *snapshot.Holder
 	Cache    *cache.Layer
 }
@@ -25,6 +27,17 @@ type Runtime struct {
 // NewRuntime opens DB (and optional Redis) from env-based Config.
 func NewRuntime(ctx context.Context) (*Runtime, error) {
 	cfg := LoadConfigFromEnv()
+
+	// Validate configuration before proceeding.
+	log := logger.New("config")
+	warnings, err := cfg.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	for _, w := range warnings {
+		log.Warn(w)
+	}
+
 	db, err := database.Open(database.Options{
 		Driver:  cfg.DBDriver,
 		DSN:     cfg.DBDSN,
@@ -50,10 +63,17 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("cache: %w", err)
 	}
 
+	// Create Redis KV cache for distributed shared state.
+	redisKV := cache.NewRedisKV(rcli)
+	if redisKV != nil {
+		log.Info("redis distributed cache enabled")
+	}
+
 	return &Runtime{
 		Config:   cfg,
 		DB:       db,
 		Redis:    rcli,
+		RedisKV:  redisKV,
 		Snapshot: &snapshot.Holder{},
 		Cache:    cl,
 	}, nil

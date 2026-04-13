@@ -47,7 +47,7 @@ export default function APIKeysPage() {
 
   async function handleDelete(id: number) {
     if (!confirm("确认删除？")) return;
-    await api(`/api/v1/api-keys/${id}`, { method: "DELETE" });
+    await api(`/api/v1/api-keys/${id}/delete`, { method: "POST" });
     toast.success("已删除");
     load();
   }

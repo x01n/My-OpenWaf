@@ -55,13 +55,21 @@ func Compile(rs []store.Rule) []Compiled {
 }
 
 // ParsePattern extracts kind and arg from a DSL string like "block_ip:1.2.3.0/24".
+// Supports both simple patterns and JSON compound conditions.
 func ParsePattern(p string) (kind, arg string) {
 	p = strings.TrimSpace(p)
+
+	// JSON compound condition: {"op":"and","children":[...]}
+	if len(p) > 0 && p[0] == '{' {
+		return "compound", p
+	}
+
 	prefixes := []string{
 		"allow_ip:", "block_ip:",
-		"block_path:", "block_path_regex:",
+		"block_path:", "block_path_regex:", "block_path_exact:",
 		"block_query_contains:", "block_query_regex:",
 		"block_header:", "block_header_regex:",
+		"block_method:", "block_content_type:",
 	}
 	for _, pfx := range prefixes {
 		if strings.HasPrefix(p, pfx) {

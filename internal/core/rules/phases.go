@@ -119,6 +119,91 @@ func (p *reqRateLimitPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 	return result, result.IsTerminal()
 }
 
+// ── IP Reputation phase ──
+
+type ipReputationPhase struct {
+	rep *waf.IPReputation
+}
+
+func NewIPReputationPhase(rep *waf.IPReputation) pipeline.Phase {
+	return &ipReputationPhase{rep: rep}
+}
+
+func (p *ipReputationPhase) Name() string { return "ip_reputation" }
+
+func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	if p.rep == nil || ctx.ClientIP == nil {
+		return action.Pass(), false
+	}
+	d := p.rep.Check(ctx.ClientIP)
+	if !d.Matched {
+		return action.Pass(), false
+	}
+	if d.Allowed {
+		// Whitelist: pass through but mark.
+		return action.Result{
+			Type:      action.Allow,
+			Phase:     "ip_reputation",
+			MatchDesc: "whitelist: " + d.Reason,
+			Matched:   true,
+			Category:  "whitelist",
+		}, true
+	}
+	// Blocked.
+	result := action.Result{
+		Type:      action.Intercept,
+		Phase:     "ip_reputation",
+		MatchDesc: d.Category + ": " + d.Reason,
+		Matched:   true,
+		Category:  d.Category,
+		RuleIDStr: "iprep:" + d.Category,
+	}
+	return result, true
+}
+
+// ── Bot Detection phase ──
+
+type botPhase struct {
+	rep *waf.IPReputation // optional, for recording violations
+}
+
+func NewBotPhase(rep *waf.IPReputation) pipeline.Phase {
+	return &botPhase{rep: rep}
+}
+
+func (p *botPhase) Name() string { return "bot_detection" }
+
+func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	br := waf.NewBotRequest(ctx.Method, ctx.Path, ctx.Headers)
+	v := waf.CheckBot(br)
+	if v.Category == "malicious" {
+		if p.rep != nil && ctx.ClientIP != nil {
+			p.rep.RecordViolation(ctx.ClientIP)
+		}
+		result := action.Result{
+			Type:      action.Intercept,
+			Phase:     "bot_detection",
+			MatchDesc: v.Reason,
+			Matched:   true,
+			Category:  "bot_malicious",
+			RuleIDStr: v.RuleID,
+		}
+		return result, true
+	}
+	if v.Category == "suspicious" {
+		result := action.Result{
+			Type:      action.Observe,
+			Phase:     "bot_detection",
+			MatchDesc: v.Reason,
+			Matched:   true,
+			Category:  "bot_suspicious",
+			RuleIDStr: v.RuleID,
+		}
+		return result, false
+	}
+	return action.Pass(), false
+}
+
 // ── OWASP Default phase ──
 
 type owaspPhase struct {

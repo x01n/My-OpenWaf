@@ -9,11 +9,19 @@ import (
 type OWASPCategory string
 
 const (
-	CatSQLi     OWASPCategory = "sqli"
-	CatWebshell OWASPCategory = "webshell"
-	CatRevShell OWASPCategory = "revshell"
-	CatXSS      OWASPCategory = "xss"
-	CatPathTrav OWASPCategory = "path_traversal"
+	CatSQLi       OWASPCategory = "sqli"
+	CatWebshell   OWASPCategory = "webshell"
+	CatRevShell   OWASPCategory = "revshell"
+	CatXSS        OWASPCategory = "xss"
+	CatPathTrav   OWASPCategory = "path_traversal"
+	CatSSRF       OWASPCategory = "ssrf"
+	CatCmdInject  OWASPCategory = "cmd_injection"
+	CatXXE        OWASPCategory = "xxe"
+	CatLDAPI      OWASPCategory = "ldap_injection"
+	CatFileUpload OWASPCategory = "file_upload"
+	CatProtoViol  OWASPCategory = "protocol_violation"
+	CatNoSQLi     OWASPCategory = "nosql_injection"
+	CatTmplInject OWASPCategory = "template_injection"
 )
 
 const BuiltinVersion = "builtin_owasp_v1"
@@ -49,8 +57,38 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		if hit, ok := checkPathTraversal(normalized, threshold); ok {
 			hits = append(hits, hit)
 		}
+		if hit, ok := checkSSRF(normalized, threshold); ok {
+			hits = append(hits, hit)
+		}
+		if hit, ok := checkCmdInjection(normalized, threshold); ok {
+			hits = append(hits, hit)
+		}
+		if hit, ok := checkXXE(normalized, threshold); ok {
+			hits = append(hits, hit)
+		}
+		if hit, ok := checkLDAPInjection(normalized, threshold); ok {
+			hits = append(hits, hit)
+		}
+		if hit, ok := checkNoSQLi(normalized, threshold); ok {
+			hits = append(hits, hit)
+		}
+		if hit, ok := checkTemplateInjection(normalized, threshold); ok {
+			hits = append(hits, hit)
+		}
 	}
+
+	// Protocol-level checks that inspect headers directly (not normalized).
+	if hit, ok := checkProtocolViolation(headers, threshold); ok {
+		hits = append(hits, hit)
+	}
+
 	return hits
+}
+
+// CheckFileUpload inspects filename/content-type for dangerous uploads.
+// Called separately because it needs the raw filename, not normalized.
+func CheckFileUpload(filename, contentType string) (OWASPHit, bool) {
+	return checkFileUpload(filename, contentType)
 }
 
 func sensitivityThreshold(s string) int {
@@ -64,11 +102,40 @@ func sensitivityThreshold(s string) int {
 	}
 }
 
+// skipHeaders lists standard headers whose values are not user-controlled payloads.
+// Scanning these causes false positives (e.g. Host: 127.0.0.1 → SSRF alert).
+var skipHeaders = map[string]bool{
+	"host":                      true,
+	"connection":                true,
+	"content-length":            true,
+	"content-type":              true,
+	"accept":                    true,
+	"accept-language":           true,
+	"accept-encoding":           true,
+	"cookie":                    true,
+	"authorization":             true,
+	"cache-control":             true,
+	"pragma":                    true,
+	"if-modified-since":         true,
+	"if-none-match":             true,
+	"upgrade":                   true,
+	"upgrade-insecure-requests": true,
+	"dnt":                       true,
+	"te":                        true,
+	"origin":                    true,
+	"sec-fetch-mode":            true,
+	"sec-fetch-site":            true,
+	"sec-fetch-dest":            true,
+	"sec-fetch-user":            true,
+	"sec-ch-ua":                 true,
+	"sec-ch-ua-mobile":          true,
+	"sec-ch-ua-platform":        true,
+}
+
 func collectTargets(path, query string, headers map[string]string) []string {
 	out := []string{path, query}
 	for k, v := range headers {
-		lk := strings.ToLower(k)
-		if lk == "cookie" || lk == "authorization" {
+		if skipHeaders[strings.ToLower(k)] {
 			continue
 		}
 		out = append(out, v)
@@ -109,6 +176,17 @@ var sqliPatterns = []struct {
 	{regexp.MustCompile(`(?i)(char|chr|concat|hex|unhex|conv)\s*\(`), 3, "owasp:sqli:007"},
 	{regexp.MustCompile(`(?i)0x[0-9a-f]{4,}`), 2, "owasp:sqli:008"},
 	{regexp.MustCompile(`(?i)information_schema|sysobjects|sys\.`), 4, "owasp:sqli:009"},
+	// Boolean-based blind SQLi
+	{regexp.MustCompile(`(?i)\b(or|and)\s+\d+\s*=\s*\d+`), 4, "owasp:sqli:010"},
+	{regexp.MustCompile(`(?i)\b(or|and)\s+['"]\w+['"]\s*=\s*['"]\w+['"]`), 4, "owasp:sqli:011"},
+	// Stacked queries with comments
+	{regexp.MustCompile(`(?i);\s*--`), 3, "owasp:sqli:012"},
+	// Out-of-band exfiltration
+	{regexp.MustCompile(`(?i)(load_file|outfile|dumpfile)\s*\(`), 5, "owasp:sqli:013"},
+	// Database fingerprinting
+	{regexp.MustCompile(`(?i)@@(version|hostname|datadir|basedir)`), 3, "owasp:sqli:014"},
+	// EXTRACTVALUE / UPDATEXML error-based SQLi
+	{regexp.MustCompile(`(?i)(extractvalue|updatexml)\s*\(`), 5, "owasp:sqli:015"},
 }
 
 func checkSQLi(s string, threshold int) (OWASPHit, bool) {
@@ -201,11 +279,23 @@ var xssPatterns = []struct {
 	id    string
 }{
 	{regexp.MustCompile(`(?i)<script[\s>]`), 4, "owasp:xss:001"},
-	{regexp.MustCompile(`(?i)on(error|load|click|mouseover|focus)\s*=`), 3, "owasp:xss:002"},
+	{regexp.MustCompile(`(?i)on(error|load|click|mouseover|focus|blur|change|submit)\s*=`), 3, "owasp:xss:002"},
 	{regexp.MustCompile(`(?i)javascript\s*:`), 3, "owasp:xss:003"},
 	{regexp.MustCompile(`(?i)<img\s+[^>]*src\s*=\s*['"]\s*x\s+onerror`), 4, "owasp:xss:004"},
 	{regexp.MustCompile(`(?i)<iframe`), 2, "owasp:xss:005"},
-	{regexp.MustCompile(`(?i)document\.(cookie|location|write)`), 3, "owasp:xss:006"},
+	{regexp.MustCompile(`(?i)document\.(cookie|location|write|domain)`), 3, "owasp:xss:006"},
+	// SVG / MathML XSS carriers
+	{regexp.MustCompile(`(?i)<svg[\s>]`), 3, "owasp:xss:007"},
+	{regexp.MustCompile(`(?i)<math[\s>]`), 3, "owasp:xss:008"},
+	// data: URL with script content
+	{regexp.MustCompile(`(?i)data:text/html`), 4, "owasp:xss:009"},
+	// Window/eval/Function references
+	{regexp.MustCompile(`(?i)window\.(location|name|open)`), 3, "owasp:xss:010"},
+	{regexp.MustCompile(`(?i)\b(eval|setTimeout|setInterval)\s*\(\s*['"]`), 4, "owasp:xss:011"},
+	// DOM-based sinks
+	{regexp.MustCompile(`(?i)innerhtml\s*=`), 3, "owasp:xss:012"},
+	// Encoded script tags
+	{regexp.MustCompile(`(?i)&#x?0*3c;?\s*script`), 4, "owasp:xss:013"},
 }
 
 func checkXSS(s string, threshold int) (OWASPHit, bool) {

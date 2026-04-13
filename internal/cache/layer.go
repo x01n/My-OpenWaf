@@ -1,5 +1,10 @@
-// Package cache provides in-process (L1) caching via ristretto.
-// Optional Redis is constructed in internal/core/redis for distributed cache later.
+// Package cache provides process-local caching for immutable config snapshots.
+//
+// Design:
+//   - Snapshot cache: purely in-process (ristretto). The Snapshot struct is an in-memory
+//     object held via atomic.Pointer — serializing it to Redis would be wasteful.
+//   - Distributed KV cache: see RedisKV for cross-node shared state (rate limit counters,
+//     API response caching, etc.).
 package cache
 
 import (
@@ -11,12 +16,15 @@ import (
 	"My-OpenWaf/internal/snapshot"
 )
 
-// Layer is a small process-local cache keyed by config revision (invalidates wholesale).
+// Layer is the process-local snapshot cache backed by ristretto.
+// Each WAF node holds its own copy; cross-node sync is handled by Redis pub/sub
+// (config_sync) which triggers a DB reload, not by sharing cached snapshots.
 type Layer struct {
 	rev   atomic.Uint64
 	inner *ristretto.Cache
 }
 
+// NewLayer creates a local snapshot cache.
 func NewLayer() (*Layer, error) {
 	c, err := ristretto.NewCache(&ristretto.Config{
 		NumCounters: 1e4,
@@ -31,15 +39,15 @@ func NewLayer() (*Layer, error) {
 
 const snapKey = "snapshot"
 
-// SetSnapshot caches the immutable snapshot under current revision marker.
+// SetSnapshot caches the immutable snapshot under the given revision.
 func (l *Layer) SetSnapshot(rev uint64, sn *snapshot.Snapshot) {
 	l.rev.Store(rev)
-	// Cost 1 — we store one blob per process; revision bump clears logically by key including rev.
 	k := fmt.Sprintf("%s:%d", snapKey, rev)
 	l.inner.Set(k, sn, 1)
 	l.inner.Wait()
 }
 
+// GetSnapshot retrieves a cached snapshot by revision. Returns nil on miss.
 func (l *Layer) GetSnapshot(rev uint64) (*snapshot.Snapshot, bool) {
 	k := fmt.Sprintf("%s:%d", snapKey, rev)
 	v, ok := l.inner.Get(k)
@@ -50,6 +58,7 @@ func (l *Layer) GetSnapshot(rev uint64) (*snapshot.Snapshot, bool) {
 	return sn, sn != nil
 }
 
+// InvalidateAll clears the entire local cache.
 func (l *Layer) InvalidateAll() {
 	l.inner.Clear()
 }

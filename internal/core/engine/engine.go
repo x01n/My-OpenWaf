@@ -17,16 +17,21 @@ type Engine struct {
 	resolver       *sites.Resolver
 	reqRateLimiter *waf.RateLimiter
 	errRateLimiter *waf.RateLimiter
+	ipRep          *waf.IPReputation
 }
 
 // New creates a WAF engine backed by the given snapshot holder and rate limiters.
-func New(holder *snapshot.Holder, reqRL, errRL *waf.RateLimiter) *Engine {
+func New(holder *snapshot.Holder, reqRL, errRL *waf.RateLimiter, ipRep *waf.IPReputation) *Engine {
 	return &Engine{
 		resolver:       sites.NewResolver(holder),
 		reqRateLimiter: reqRL,
 		errRateLimiter: errRL,
+		ipRep:          ipRep,
 	}
 }
+
+// IPReputation returns the underlying IP reputation system.
+func (e *Engine) IPReputation() *waf.IPReputation { return e.ipRep }
 
 type ProcessResult struct {
 	Action      action.Result
@@ -64,7 +69,18 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	compiled := convertAndCompile(rt.Rules)
 
 	var phases []pipeline.Phase
+
+	// IP reputation runs first: whitelist short-circuits, blacklist blocks.
+	if e.ipRep != nil {
+		phases = append(phases, rules.NewIPReputationPhase(e.ipRep))
+	}
+
 	phases = append(phases, rules.NewACLPhase(compiled))
+
+	// Bot detection before rate limiting (malicious tools should be blocked early).
+	if sn.Protection.BotDetectionEnabled {
+		phases = append(phases, rules.NewBotPhase(e.ipRep))
+	}
 
 	if sn.Protection.RequestRateLimitEnabled && e.reqRateLimiter != nil {
 		act := action.Type(sn.Protection.RequestRateLimitAction)

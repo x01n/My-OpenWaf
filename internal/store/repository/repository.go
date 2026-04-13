@@ -14,6 +14,8 @@ type Repos struct {
 	AdminAPIKey       *AdminAPIKeyRepo
 	AdminAccount      *AdminAccountRepo
 	RefreshToken      *RefreshTokenRepo
+	SecurityEvent     *SecurityEventRepo
+	IPList            *IPListRepo
 }
 
 func New(db *gorm.DB) *Repos {
@@ -28,5 +30,7 @@ func New(db *gorm.DB) *Repos {
 		AdminAPIKey:       NewAdminAPIKeyRepo(db),
 		AdminAccount:      NewAdminAccountRepo(db),
 		RefreshToken:      NewRefreshTokenRepo(db),
+		SecurityEvent:     NewSecurityEventRepo(db),
+		IPList:            NewIPListRepo(db),
 	}
 }

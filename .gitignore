@@ -21,3 +21,10 @@ rad.json
 #Test results file
 TestResults.xml
 internal/core/adminweb/dist/
+bin/
+.claude/
+frontend/package-lock.json
+data/
+*.exe
+*.db
+

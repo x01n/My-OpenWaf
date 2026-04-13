@@ -18,6 +18,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&ConfigRevision{},
 		&AdminAccount{},
 		&RefreshToken{},
+		&SecurityEvent{},
+		&IPListEntry{},
 	)
 }
 

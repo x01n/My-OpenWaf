@@ -69,7 +69,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id" }
         await api(apiPath, { method: "POST", body: JSON.stringify(editing) });
         toast.success("创建成功");
       } else {
-        await api(`${apiPath}/${editing[idField]}`, { method: "PUT", body: JSON.stringify(editing) });
+        await api(`${apiPath}/${editing[idField]}/update`, { method: "POST", body: JSON.stringify(editing) });
         toast.success("更新成功");
       }
       setOpen(false);
@@ -82,7 +82,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id" }
   async function handleDelete(item: Record<string, unknown>) {
     if (!confirm("确认删除？")) return;
     try {
-      await api(`${apiPath}/${item[idField]}`, { method: "DELETE" });
+      await api(`${apiPath}/${item[idField]}/delete`, { method: "POST" });
       toast.success("已删除");
       load();
     } catch {

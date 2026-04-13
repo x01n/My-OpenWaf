@@ -198,6 +198,53 @@ type RefreshToken struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// ─── IP List (Blacklist / Whitelist) ──────────────────────────────
+
+type IPListKind string
+
+const (
+	IPListBlack IPListKind = "blacklist"
+	IPListWhite IPListKind = "whitelist"
+)
+
+type IPListEntry struct {
+	ID        uint           `gorm:"primaryKey" json:"id"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+
+	Kind    IPListKind `gorm:"size:16;not null;index" json:"kind"`
+	Value   string     `gorm:"size:64;not null;index" json:"value"` // IP or CIDR
+	Note    string     `gorm:"size:255" json:"note"`
+	Enabled bool       `gorm:"default:true" json:"enabled"`
+}
+
+// ─── Security Event ────────────────────────────────────────────────
+
+type SecurityEvent struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+
+	RequestID string `gorm:"size:64;index" json:"request_id"`
+	ClientIP  string `gorm:"size:45;index" json:"client_ip"`
+	Host      string `gorm:"size:255;index" json:"host"`
+	Path      string `gorm:"size:2048" json:"path"`
+	Method    string `gorm:"size:16" json:"method"`
+	UserAgent string `gorm:"size:512" json:"user_agent"`
+
+	RuleID    uint   `gorm:"index" json:"rule_id"`
+	RuleIDStr string `gorm:"size:64;index" json:"rule_id_str"`
+	Phase     string `gorm:"size:32;index" json:"phase"`
+	Action    string `gorm:"size:16;index" json:"action"`
+	Category  string `gorm:"size:32;index" json:"category"`
+	MatchDesc string `gorm:"size:512" json:"match_desc"`
+
+	GeoCountry string `gorm:"size:2" json:"geo_country"`
+	GeoCity    string `gorm:"size:128" json:"geo_city"`
+
+	StatusCode int `gorm:"default:0" json:"status_code"`
+}
+
 // ─── Config Revision ───────────────────────────────────────────────
 
 type ConfigRevision struct {
@@ -228,6 +275,15 @@ type ProtectionConfig struct {
 	MaintenanceGlobalEnabled bool   `json:"maintenance_global_enabled"`
 	MaintenanceGlobalHTML    string `json:"maintenance_global_html"`
 	MaintenanceGlobalStatus  int    `json:"maintenance_global_status"`
+
+	// Bot detection
+	BotDetectionEnabled bool `json:"bot_detection_enabled"`
+
+	// IP auto-ban (based on violations count within a window)
+	AutoBanEnabled   bool `json:"auto_ban_enabled"`
+	AutoBanThreshold int  `json:"auto_ban_threshold"`
+	AutoBanWindow    int  `json:"auto_ban_window"`    // seconds
+	AutoBanDuration  int  `json:"auto_ban_duration"`  // seconds
 }
 
 func DefaultProtectionConfig() ProtectionConfig {
@@ -243,5 +299,10 @@ func DefaultProtectionConfig() ProtectionConfig {
 		OWASPSensitivity:        "mid",
 		OWASPAction:             "intercept",
 		MaintenanceGlobalStatus: 503,
+		BotDetectionEnabled:     false,
+		AutoBanEnabled:          false,
+		AutoBanThreshold:        10,
+		AutoBanWindow:           60,
+		AutoBanDuration:         3600,
 	}
 }

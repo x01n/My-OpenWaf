@@ -31,6 +31,11 @@ interface ProtectionConfig {
   maintenance_global_enabled: boolean;
   maintenance_global_html: string;
   maintenance_global_status: number;
+  bot_detection_enabled: boolean;
+  auto_ban_enabled: boolean;
+  auto_ban_threshold: number;
+  auto_ban_window: number;
+  auto_ban_duration: number;
 }
 
 export default function ProtectionPage() {
@@ -49,7 +54,7 @@ export default function ProtectionPage() {
     if (!cfg) return;
     setSaving(true);
     try {
-      await api("/api/v1/protection-settings", { method: "PUT", body: JSON.stringify(cfg) });
+      await api("/api/v1/protection-settings", { method: "POST", body: JSON.stringify(cfg) });
       toast.success("已保存，配置重载后生效");
     } catch {
       toast.error("保存失败");
@@ -196,7 +201,56 @@ export default function ProtectionPage() {
         </CardContent>
       </Card>
 
-      {/* D: Maintenance */}
+      {/* D: Bot Detection */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base">Bot 检测</CardTitle>
+              <CardDescription>启用后，结合 User-Agent 签名和请求指纹评分识别恶意 Bot，高分直接拦截。</CardDescription>
+            </div>
+            <Switch checked={cfg.bot_detection_enabled} onCheckedChange={(v) => update("bot_detection_enabled", v)} />
+          </div>
+        </CardHeader>
+        <CardContent>
+          <p className="text-xs text-muted-foreground">
+            检测覆盖已知安全工具（sqlmap/nikto/burp 等）+ 请求指纹分析（缺少 Accept/Language/Encoding 等浏览器标准头）。
+            恶意评分 ≥80 拦截，50-79 观察记录。
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* E: Auto-ban */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base">IP 自动封禁</CardTitle>
+              <CardDescription>当同一 IP 在时间窗口内触发安全规则达到阈值时，自动临时封禁。</CardDescription>
+            </div>
+            <Switch checked={cfg.auto_ban_enabled} onCheckedChange={(v) => update("auto_ban_enabled", v)} />
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-3 gap-4">
+            <div className="space-y-1">
+              <Label>触发阈值（次）</Label>
+              <Input type="number" min={1} value={cfg.auto_ban_threshold} onChange={(e) => update("auto_ban_threshold", +e.target.value)} disabled={!cfg.auto_ban_enabled} />
+            </div>
+            <div className="space-y-1">
+              <Label>统计窗口（秒）</Label>
+              <Input type="number" min={1} value={cfg.auto_ban_window} onChange={(e) => update("auto_ban_window", +e.target.value)} disabled={!cfg.auto_ban_enabled} />
+            </div>
+            <div className="space-y-1">
+              <Label>封禁时长（秒）</Label>
+              <Input type="number" min={1} value={cfg.auto_ban_duration} onChange={(e) => update("auto_ban_duration", +e.target.value)} disabled={!cfg.auto_ban_enabled} />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">默认：60 秒内触发 10 次规则命中 → 自动封禁 1 小时。</p>
+        </CardContent>
+      </Card>
+
+      {/* F: Maintenance */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
