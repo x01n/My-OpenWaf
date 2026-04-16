@@ -10,8 +10,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
+import { Shield, Gauge, Bug, Bot, Ban, Wrench } from "lucide-react";
 
 interface ProtectionConfig {
   request_ratelimit_enabled: boolean;
@@ -135,18 +137,18 @@ export default function ProtectionPage() {
           <div className="space-y-2">
             <Label>计入错误的响应类型</Label>
             <div className="flex flex-wrap gap-4 text-sm">
-              <label className="flex items-center gap-1.5">
+              <Label className="flex items-center gap-1.5 font-normal">
                 <Switch checked={cfg.error_ratelimit_count_4xx} onCheckedChange={(v) => update("error_ratelimit_count_4xx", v)} disabled={!cfg.error_ratelimit_enabled} />
                 上游 4xx
-              </label>
-              <label className="flex items-center gap-1.5">
+              </Label>
+              <Label className="flex items-center gap-1.5 font-normal">
                 <Switch checked={cfg.error_ratelimit_count_5xx} onCheckedChange={(v) => update("error_ratelimit_count_5xx", v)} disabled={!cfg.error_ratelimit_enabled} />
                 上游 5xx
-              </label>
-              <label className="flex items-center gap-1.5">
+              </Label>
+              <Label className="flex items-center gap-1.5 font-normal">
                 <Switch checked={cfg.error_ratelimit_count_block} onCheckedChange={(v) => update("error_ratelimit_count_block", v)} disabled={!cfg.error_ratelimit_enabled} />
                 WAF 拦截响应
-              </label>
+              </Label>
             </div>
           </div>
           <div className="space-y-1">

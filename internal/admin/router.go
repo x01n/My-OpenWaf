@@ -107,7 +107,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	// System Settings
 	api.GET("/settings", ListSettings(r.SystemSettings))
 	api.GET("/settings/:key", GetSetting(r.SystemSettings))
+	api.POST("/settings", CreateSetting(r.SystemSettings, reload))
 	api.POST("/settings/:key", SetSetting(r.SystemSettings, reload))
+	api.POST("/settings/:key/update", SetSetting(r.SystemSettings, reload))
 	api.POST("/settings/:key/delete", DeleteSetting(r.SystemSettings, reload))
 
 	// Protection Settings

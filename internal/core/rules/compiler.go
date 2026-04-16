@@ -21,7 +21,7 @@ type Compiled struct {
 
 // Match delegates to the pre-built matcher.
 func (c *Compiled) Match(ctx MatchCtx) bool {
-	return c.matcher.Match(ctx.ClientIP, ctx.Path, ctx.Query, ctx.Headers)
+	return c.matcher.Match(ctx.ClientIP, ctx.Method, ctx.Path, ctx.Query, ctx.Headers)
 }
 
 // Compile converts persisted Rule models into sorted, matcher-ready Compiled slices.
@@ -70,10 +70,11 @@ func ParsePattern(p string) (kind, arg string) {
 		"block_query_contains:", "block_query_regex:",
 		"block_header:", "block_header_regex:",
 		"block_method:", "block_content_type:",
+		"block_user_agent:", "block_user_agent_regex:",
 	}
 	for _, pfx := range prefixes {
-		if strings.HasPrefix(p, pfx) {
-			return strings.TrimSuffix(pfx, ":"), strings.TrimSpace(strings.TrimPrefix(p, pfx))
+		if arg, ok := strings.CutPrefix(p, pfx); ok {
+			return strings.TrimSuffix(pfx, ":"), strings.TrimSpace(arg)
 		}
 	}
 	return "", ""

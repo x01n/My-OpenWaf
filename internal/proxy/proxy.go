@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -16,20 +17,56 @@ import (
 	"My-OpenWaf/internal/snapshot"
 )
 
-func transportFor(rt snapshot.SiteRuntime) *http.Transport {
+// transportKey identifies a unique upstream TLS configuration.
+type transportKey struct {
+	tlsServerName string
+	tlsSkipVerify bool
+	isHTTPS       bool
+}
+
+var (
+	transportMu   sync.RWMutex
+	transportPool = make(map[transportKey]*http.Transport)
+)
+
+// SharedTransport returns a cached http.Transport for the given site runtime.
+// Transports are keyed by TLS config so connections are reused across requests.
+func SharedTransport(rt snapshot.SiteRuntime) *http.Transport {
+	isHTTPS := len(rt.UpstreamURLs) > 0 && strings.HasPrefix(rt.UpstreamURLs[0], "https://")
+	key := transportKey{
+		tlsServerName: rt.Site.UpstreamTLSServerName,
+		tlsSkipVerify: rt.Site.UpstreamTLSSkipVerify,
+		isHTTPS:       isHTTPS,
+	}
+
+	transportMu.RLock()
+	if tr, ok := transportPool[key]; ok {
+		transportMu.RUnlock()
+		return tr
+	}
+	transportMu.RUnlock()
+
 	tr := &http.Transport{
 		MaxIdleConns:        128,
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
-	if len(rt.UpstreamURLs) > 0 && strings.HasPrefix(rt.UpstreamURLs[0], "https://") {
+	if isHTTPS {
 		tr.TLSClientConfig = &tls.Config{
 			ServerName:         rt.Site.UpstreamTLSServerName,
 			InsecureSkipVerify: rt.Site.UpstreamTLSSkipVerify,
 			MinVersion:         tls.VersionTLS12,
 		}
 	}
+
+	transportMu.Lock()
+	if existing, ok := transportPool[key]; ok {
+		transportMu.Unlock()
+		return existing
+	}
+	transportPool[key] = tr
+	transportMu.Unlock()
 	return tr
 }
 
@@ -67,14 +104,27 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 
 	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.Forwarding)
 
-	hc := &http.Client{Transport: transportFor(rt), Timeout: 0}
+	hc := &http.Client{Transport: SharedTransport(rt), Timeout: 60 * time.Second}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
+	// Strip hop-by-hop headers from upstream response before forwarding to client.
+	hopByHop := []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
 	for k, vv := range resp.Header {
+		skip := false
+		for _, h := range hopByHop {
+			if strings.EqualFold(k, h) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
 		for _, v := range vv {
 			c.Response.Header.Add(k, v)
 		}

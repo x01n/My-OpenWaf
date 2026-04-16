@@ -10,6 +10,8 @@ const routeMeta = [
   { prefix: "/sites/", title: "站点", description: "按 Host 绑定上游、证书、维护页与阻断页。" },
   { prefix: "/certificates/", title: "证书", description: "维护站点与监听器使用的 TLS 证书。" },
   { prefix: "/forwarding-profiles/", title: "转发配置", description: "配置 XFF 信任链、Host 复写与转发策略。" },
+  { prefix: "/security-events/", title: "安全事件", description: "查看 WAF 拦截与观察日志，按 IP、类型与时间筛选。" },
+  { prefix: "/ip-lists/", title: "IP 黑白名单", description: "按 IP 或 CIDR 管理黑名单与白名单条目。" },
   { prefix: "/policies/", title: "策略", description: "按策略分组组织规则并绑定到站点。" },
   { prefix: "/rules/", title: "规则", description: "管理拦截、观察与放行规则，覆盖多个评估阶段。" },
   { prefix: "/protection/", title: "防护设置", description: "统一配置限流、内置 OWASP 与全局维护模式。" },

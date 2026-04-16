@@ -27,4 +27,4 @@ frontend/package-lock.json
 data/
 *.exe
 *.db
-
+temp/

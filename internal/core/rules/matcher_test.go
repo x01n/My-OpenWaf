@@ -44,21 +44,22 @@ func TestCompoundJSONPattern(t *testing.T) {
 
 	mc := MatchCtx{
 		ClientIP: net.ParseIP("1.2.3.4"),
+		Method:   "POST",
 		Path:     "/admin/users",
 		Query:    "",
-		Headers:  map[string]string{":method": "POST"},
+		Headers:  map[string]string{},
 	}
 	if !rules[0].Match(mc) {
 		t.Error("expected match for POST /admin/users")
 	}
 
-	mc.Headers[":method"] = "GET"
+	mc.Method = "GET"
 	if rules[0].Match(mc) {
 		t.Error("expected no match for GET /admin/users")
 	}
 
 	mc.Path = "/public"
-	mc.Headers[":method"] = "POST"
+	mc.Method = "POST"
 	if rules[0].Match(mc) {
 		t.Error("expected no match for POST /public")
 	}
@@ -135,12 +136,12 @@ func TestMethodMatcher(t *testing.T) {
 		t.Fatal("expected 1 compiled rule")
 	}
 
-	mc := MatchCtx{Headers: map[string]string{":method": "TRACE"}}
+	mc := MatchCtx{Method: "TRACE", Headers: map[string]string{}}
 	if !rules[0].Match(mc) {
 		t.Error("expected match for TRACE")
 	}
 
-	mc.Headers[":method"] = "GET"
+	mc.Method = "GET"
 	if rules[0].Match(mc) {
 		t.Error("expected no match for GET")
 	}
@@ -162,5 +163,58 @@ func TestContentTypeMatcher(t *testing.T) {
 	mc.Headers["Content-Type"] = "application/json"
 	if rules[0].Match(mc) {
 		t.Error("expected no match for application/json")
+	}
+}
+
+func TestUserAgentMatcher(t *testing.T) {
+	rules := Compile([]store.Rule{
+		{Phase: "acl", Pattern: "block_user_agent:sqlmap", Action: "intercept", Priority: 1, Enabled: true},
+	})
+	if len(rules) != 1 {
+		t.Fatal("expected 1 compiled rule")
+	}
+
+	mc := MatchCtx{Headers: map[string]string{"User-Agent": "sqlmap/1.7.8 (https://sqlmap.org)"}}
+	if !rules[0].Match(mc) {
+		t.Error("expected match for sqlmap User-Agent")
+	}
+
+	mc.Headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+	if rules[0].Match(mc) {
+		t.Error("expected no match for normal browser UA")
+	}
+}
+
+func TestUserAgentRegexMatcher(t *testing.T) {
+	rules := Compile([]store.Rule{
+		{Phase: "acl", Pattern: `block_user_agent_regex:(?i)(sqlmap|nikto|nessus|nmap|masscan|zgrab|nuclei)`, Action: "intercept", Priority: 1, Enabled: true},
+	})
+	if len(rules) != 1 {
+		t.Fatal("expected 1 compiled rule")
+	}
+
+	for _, ua := range []string{"sqlmap/1.7", "Nikto/2.1.6", "Nessus Agent", "masscan/1.3"} {
+		mc := MatchCtx{Headers: map[string]string{"User-Agent": ua}}
+		if !rules[0].Match(mc) {
+			t.Errorf("expected match for scanner UA: %s", ua)
+		}
+	}
+
+	mc := MatchCtx{Headers: map[string]string{"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1)"}}
+	if rules[0].Match(mc) {
+		t.Error("expected no match for Googlebot")
+	}
+}
+
+func TestUserAgentRegexCached(t *testing.T) {
+	// Compile the same regex-based rule twice; both should match identically,
+	// verifying the regex cache returns the correct compiled pattern.
+	pattern := `block_user_agent_regex:(?i)dirbuster`
+	r1 := Compile([]store.Rule{{Phase: "acl", Pattern: pattern, Action: "intercept", Priority: 1, Enabled: true}})
+	r2 := Compile([]store.Rule{{Phase: "acl", Pattern: pattern, Action: "intercept", Priority: 1, Enabled: true}})
+
+	mc := MatchCtx{Headers: map[string]string{"User-Agent": "DirBuster-1.0"}}
+	if !r1[0].Match(mc) || !r2[0].Match(mc) {
+		t.Error("both rule compilations should match DirBuster")
 	}
 }

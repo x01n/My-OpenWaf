@@ -1,28 +1,73 @@
 "use client";
 import { CrudPage } from "@/components/crud-page";
+import { RulePatternBuilder } from "@/components/rule-pattern-builder";
 
 export default function RulesPage() {
   return (
     <CrudPage
       title="规则"
-      description="安全规则按策略分组，支持 ACL、签名、自定义阶段。动作可选拦截（阻断）或观察（仅日志）。DSL 示例：block_ip:1.2.3.0/24、block_path_regex:(?i)/admin、block_query_contains:union+select"
+      description="管理安全规则（ACL、签名、自定义匹配等）。可通过可视化编辑器构建规则或直接输入 DSL。"
       apiPath="/api/v1/rules"
       fields={[
-        { key: "policy_id", label: "策略 ID", type: "number" },
-        { key: "phase", label: "阶段", type: "select", defaultValue: "acl", options: [
-          { value: "acl", label: "ACL" },
-          { value: "rate_limit", label: "请求限流" },
-          { value: "owasp_default", label: "内置 OWASP" },
-          { value: "signature", label: "签名" },
-          { value: "custom", label: "自定义" },
-        ]},
-        { key: "pattern", label: "匹配模式 (DSL)" },
-        { key: "action", label: "动作", type: "select", defaultValue: "intercept", options: [
-          { value: "intercept", label: "拦截" },
-          { value: "observe", label: "观察" },
-          { value: "allow", label: "放行" },
-        ]},
-        { key: "priority", label: "优先级", type: "number" },
+        { key: "name", label: "名称", placeholder: "封禁恶意 IP 段" },
+        {
+          key: "policy_id",
+          label: "所属策略",
+          type: "async-select",
+          asyncOptions: {
+            apiPath: "/api/v1/policies",
+            labelKey: (item) => `${item.name}`,
+          },
+          description: "规则所属的安全策略",
+        },
+        {
+          key: "phase",
+          label: "阶段",
+          type: "select",
+          options: [
+            { value: "acl", label: "ACL（IP 层）" },
+            { value: "signature", label: "签名匹配" },
+            { value: "custom", label: "自定义" },
+          ],
+          defaultValue: "acl",
+          description: "规则在请求处理管线的哪个阶段执行",
+        },
+        {
+          key: "pattern",
+          label: "匹配模式",
+          customInput: ({ value, onChange }) => (
+            <RulePatternBuilder
+              value={String(value ?? "")}
+              onChange={(v) => onChange(v)}
+            />
+          ),
+          render: (value) => {
+            const s = String(value ?? "");
+            // Show kind:arg in a friendly format
+            const colonIdx = s.indexOf(":");
+            if (colonIdx > 0 && !s.startsWith("{")) {
+              return (
+                <span className="font-mono text-xs">
+                  <span className="text-blue-600 dark:text-blue-400">{s.slice(0, colonIdx)}</span>
+                  :{s.slice(colonIdx + 1)}
+                </span>
+              );
+            }
+            return <span className="font-mono text-xs">{s.length > 50 ? s.slice(0, 50) + "…" : s}</span>;
+          },
+        },
+        {
+          key: "action",
+          label: "动作",
+          type: "select",
+          defaultValue: "block",
+          options: [
+            { value: "block", label: "阻断" },
+            { value: "allow", label: "放行" },
+            { value: "log", label: "仅记录" },
+          ],
+        },
+        { key: "priority", label: "优先级", type: "number", defaultValue: 100, description: "数字越小优先级越高" },
         { key: "enabled", label: "启用", type: "boolean", defaultValue: true },
       ]}
     />

@@ -80,6 +80,18 @@ func Handler(opts Options) app.HandlerFunc {
 		c.Request.Header.VisitAll(func(k, v []byte) {
 			reqCtx.Headers[string(k)] = string(v)
 		})
+
+		// Read body for WAF scanning (capped to avoid memory abuse).
+		const maxWAFBody = 65536
+		if body := c.Request.Body(); len(body) > 0 {
+			if len(body) > maxWAFBody {
+				reqCtx.Body = body[:maxWAFBody]
+			} else {
+				reqCtx.Body = body
+			}
+			reqCtx.ContentType = string(c.ContentType())
+		}
+
 		defer pipeline.ReleaseCtx(reqCtx)
 
 		result := opts.Engine.Process(reqCtx)

@@ -7,9 +7,13 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
 )
+
+// Default graceful shutdown timeout for individual servers.
+const defaultShutdownTimeout = 10 * time.Second
 
 // Server is any stoppable server managed by the lifecycle manager.
 type Server interface {
@@ -26,32 +30,109 @@ func (s *hertzServer) Shutdown(ctx context.Context) error { return s.h.Shutdown(
 // Manager coordinates startup, shutdown, and signal handling for multiple servers.
 type Manager struct {
 	log     *slog.Logger
-	entries []entry
+	entries map[string]entry
 	mu      sync.Mutex
 }
 
 type entry struct {
 	name string
 	srv  Server
+	// tag is an opaque fingerprint used to detect configuration drift.
+	// When reconciling, if the tag for an existing name has changed the
+	// caller should Remove+Add to restart the server with new settings.
+	tag string
 }
 
 // New creates a lifecycle manager with the given logger.
 func New(log *slog.Logger) *Manager {
-	return &Manager{log: log}
+	return &Manager{log: log, entries: make(map[string]entry)}
 }
 
 // AddHertz registers a Hertz server under a human-readable name.
 func (m *Manager) AddHertz(name string, h *server.Hertz) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries = append(m.entries, entry{name: name, srv: &hertzServer{h: h}})
+	m.entries[name] = entry{name: name, srv: &hertzServer{h: h}}
+}
+
+// AddHertzWithTag registers a Hertz server with a configuration tag.
+// The tag is used for drift detection during reconciliation.
+func (m *Manager) AddHertzWithTag(name string, h *server.Hertz, tag string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[name] = entry{name: name, srv: &hertzServer{h: h}, tag: tag}
 }
 
 // Add registers a generic server.
 func (m *Manager) Add(name string, srv Server) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries = append(m.entries, entry{name: name, srv: srv})
+	m.entries[name] = entry{name: name, srv: srv}
+}
+
+// Tag returns the configuration tag for the named server, or empty string.
+func (m *Manager) Tag(name string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.entries[name]; ok {
+		return e.tag
+	}
+	return ""
+}
+
+// Has returns true if a server with the given name is registered.
+func (m *Manager) Has(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.entries[name]
+	return ok
+}
+
+// Names returns all registered server names.
+func (m *Manager) Names() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.entries))
+	for name := range m.entries {
+		out = append(out, name)
+	}
+	return out
+}
+
+// Remove gracefully shuts down and removes a server by name.
+func (m *Manager) Remove(name string) {
+	m.mu.Lock()
+	ent, ok := m.entries[name]
+	if ok {
+		delete(m.entries, name)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	m.log.Info("removing server", slog.String("name", name))
+	ctx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+	defer cancel()
+	if err := ent.srv.Shutdown(ctx); err != nil {
+		m.log.Error("remove shutdown error", slog.String("name", name), slog.Any("err", err))
+	} else {
+		m.log.Info("server removed", slog.String("name", name))
+	}
+}
+
+// StartOne starts a single named server in a background goroutine.
+func (m *Manager) StartOne(name string) {
+	m.mu.Lock()
+	ent, ok := m.entries[name]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	go func() {
+		m.log.Info("server starting", slog.String("name", ent.name))
+		ent.srv.Spin()
+		m.log.Info("server stopped", slog.String("name", ent.name))
+	}()
 }
 
 // Start spins up all registered servers in background goroutines.

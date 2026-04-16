@@ -127,9 +127,14 @@ func (e *Engine) ErrRateLimiter() *waf.RateLimiter { return e.errRateLimiter }
 func convertAndCompile(sr []snapshot.CompiledRule) []rules.Compiled {
 	storeRules := make([]store.Rule, len(sr))
 	for i, r := range sr {
+		// Compound rules store raw JSON as arg; reconstruct the original pattern.
+		pattern := r.Kind + ":" + r.Arg
+		if r.Kind == "compound" {
+			pattern = r.Arg // compound patterns are raw JSON starting with "{"
+		}
 		storeRules[i] = store.Rule{
 			Phase:    r.Phase,
-			Pattern:  r.Kind + ":" + r.Arg,
+			Pattern:  pattern,
 			Action:   r.Action,
 			Priority: r.Priority,
 			Enabled:  true,

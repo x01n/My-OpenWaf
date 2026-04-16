@@ -27,6 +27,7 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.RawQuery = ""
 	ctx.Host = ""
 	ctx.Body = nil
+	ctx.ContentType = ""
 	ctx.QueryParams = nil
 	for k := range ctx.Headers {
 		delete(ctx.Headers, k)

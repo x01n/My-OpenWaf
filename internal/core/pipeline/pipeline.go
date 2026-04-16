@@ -8,15 +8,16 @@ import (
 
 // RequestCtx carries all decoded request data through the pipeline.
 type RequestCtx struct {
-	RequestID  string
-	ListenerID uint
-	ClientIP   net.IP
-	Method     string
-	Path       string
-	RawQuery   string
-	Host       string
-	Headers    map[string]string
-	Body       []byte
+	RequestID   string
+	ListenerID  uint
+	ClientIP    net.IP
+	Method      string
+	Path        string
+	RawQuery    string
+	Host        string
+	Headers     map[string]string
+	Body        []byte
+	ContentType string
 
 	QueryParams map[string]string
 }

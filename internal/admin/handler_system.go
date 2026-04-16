@@ -20,6 +20,31 @@ func ListSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	}
 }
 
+type createSettingBody struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+func CreateSetting(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var body createSettingBody
+		if err := c.BindJSON(&body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if body.Key == "" {
+			c.JSON(400, map[string]string{"error": "key is required"})
+			return
+		}
+		if err := repo.Set(body.Key, body.Value); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		_ = reload()
+		c.JSON(201, map[string]string{"key": body.Key, "value": body.Value})
+	}
+}
+
 func GetSetting(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		key := c.Param("key")

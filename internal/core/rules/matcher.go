@@ -10,16 +10,16 @@ import (
 
 // Matcher tests a single condition against request fields.
 type Matcher interface {
-	Match(ip net.IP, path, query string, headers map[string]string) bool
+	Match(ip net.IP, method, path, query string, headers map[string]string) bool
 }
 
 // ── compound matchers ──
 
 type andMatcher struct{ children []Matcher }
 
-func (m *andMatcher) Match(ip net.IP, path, query string, headers map[string]string) bool {
+func (m *andMatcher) Match(ip net.IP, method, path, query string, headers map[string]string) bool {
 	for _, c := range m.children {
-		if !c.Match(ip, path, query, headers) {
+		if !c.Match(ip, method, path, query, headers) {
 			return false
 		}
 	}
@@ -28,9 +28,9 @@ func (m *andMatcher) Match(ip net.IP, path, query string, headers map[string]str
 
 type orMatcher struct{ children []Matcher }
 
-func (m *orMatcher) Match(ip net.IP, path, query string, headers map[string]string) bool {
+func (m *orMatcher) Match(ip net.IP, method, path, query string, headers map[string]string) bool {
 	for _, c := range m.children {
-		if c.Match(ip, path, query, headers) {
+		if c.Match(ip, method, path, query, headers) {
 			return true
 		}
 	}
@@ -39,45 +39,45 @@ func (m *orMatcher) Match(ip net.IP, path, query string, headers map[string]stri
 
 type notMatcher struct{ child Matcher }
 
-func (m *notMatcher) Match(ip net.IP, path, query string, headers map[string]string) bool {
-	return !m.child.Match(ip, path, query, headers)
+func (m *notMatcher) Match(ip net.IP, method, path, query string, headers map[string]string) bool {
+	return !m.child.Match(ip, method, path, query, headers)
 }
 
 // ── concrete matchers ──
 
 type ipCIDRMatcher struct{ cidr *net.IPNet }
 
-func (m *ipCIDRMatcher) Match(ip net.IP, _, _ string, _ map[string]string) bool {
+func (m *ipCIDRMatcher) Match(ip net.IP, _, _, _ string, _ map[string]string) bool {
 	return ip != nil && m.cidr.Contains(ip)
 }
 
 type pathPrefixMatcher struct{ prefix string }
 
-func (m *pathPrefixMatcher) Match(_ net.IP, path, _ string, _ map[string]string) bool {
+func (m *pathPrefixMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string) bool {
 	return strings.HasPrefix(path, m.prefix)
 }
 
 type pathRegexMatcher struct{ re *regexp.Regexp }
 
-func (m *pathRegexMatcher) Match(_ net.IP, path, _ string, _ map[string]string) bool {
+func (m *pathRegexMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string) bool {
 	return m.re.MatchString(path)
 }
 
 type queryContainsMatcher struct{ substr string }
 
-func (m *queryContainsMatcher) Match(_ net.IP, _, query string, _ map[string]string) bool {
+func (m *queryContainsMatcher) Match(_ net.IP, _, _, query string, _ map[string]string) bool {
 	return strings.Contains(query, m.substr)
 }
 
 type queryRegexMatcher struct{ re *regexp.Regexp }
 
-func (m *queryRegexMatcher) Match(_ net.IP, _, query string, _ map[string]string) bool {
+func (m *queryRegexMatcher) Match(_ net.IP, _, _, query string, _ map[string]string) bool {
 	return m.re.MatchString(query)
 }
 
 type headerContainsMatcher struct{ name, substr string }
 
-func (m *headerContainsMatcher) Match(_ net.IP, _, _ string, headers map[string]string) bool {
+func (m *headerContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string) bool {
 	for k, v := range headers {
 		if strings.EqualFold(k, m.name) && strings.Contains(v, m.substr) {
 			return true
@@ -91,7 +91,7 @@ type headerRegexMatcher struct {
 	re   *regexp.Regexp
 }
 
-func (m *headerRegexMatcher) Match(_ net.IP, _, _ string, headers map[string]string) bool {
+func (m *headerRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string) bool {
 	for k, v := range headers {
 		if strings.EqualFold(k, m.name) && m.re.MatchString(v) {
 			return true
@@ -102,24 +102,19 @@ func (m *headerRegexMatcher) Match(_ net.IP, _, _ string, headers map[string]str
 
 type exactPathMatcher struct{ path string }
 
-func (m *exactPathMatcher) Match(_ net.IP, path, _ string, _ map[string]string) bool {
+func (m *exactPathMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string) bool {
 	return path == m.path
 }
 
 type methodMatcher struct{ method string }
 
-func (m *methodMatcher) Match(_ net.IP, _, _ string, headers map[string]string) bool {
-	for k, v := range headers {
-		if strings.EqualFold(k, ":method") || strings.EqualFold(k, "X-HTTP-Method") {
-			return strings.EqualFold(v, m.method)
-		}
-	}
-	return false
+func (m *methodMatcher) Match(_ net.IP, method, _, _ string, _ map[string]string) bool {
+	return strings.EqualFold(method, m.method)
 }
 
 type contentTypeMatcher struct{ ctype string }
 
-func (m *contentTypeMatcher) Match(_ net.IP, _, _ string, headers map[string]string) bool {
+func (m *contentTypeMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string) bool {
 	for k, v := range headers {
 		if strings.EqualFold(k, "Content-Type") {
 			return strings.Contains(strings.ToLower(v), strings.ToLower(m.ctype))
@@ -130,11 +125,11 @@ func (m *contentTypeMatcher) Match(_ net.IP, _, _ string, headers map[string]str
 
 type alwaysMatcher struct{}
 
-func (m *alwaysMatcher) Match(net.IP, string, string, map[string]string) bool { return true }
+func (m *alwaysMatcher) Match(net.IP, string, string, string, map[string]string) bool { return true }
 
 type neverMatcher struct{}
 
-func (m *neverMatcher) Match(net.IP, string, string, map[string]string) bool { return false }
+func (m *neverMatcher) Match(net.IP, string, string, string, map[string]string) bool { return false }
 
 // buildMatcher creates a Matcher from a parsed kind:arg pattern.
 func buildMatcher(kind, arg string) Matcher {
@@ -144,7 +139,7 @@ func buildMatcher(kind, arg string) Matcher {
 		if err != nil {
 			ip := net.ParseIP(strings.TrimSpace(arg))
 			if ip == nil {
-				return &alwaysMatcher{}
+				return &neverMatcher{} // invalid IP/CIDR: match nothing instead of everything
 			}
 			if ip4 := ip.To4(); ip4 != nil {
 				_, cidr, _ = net.ParseCIDR(ip.String() + "/32")
@@ -153,7 +148,7 @@ func buildMatcher(kind, arg string) Matcher {
 			}
 		}
 		if cidr == nil {
-			return &alwaysMatcher{}
+			return &neverMatcher{}
 		}
 		return &ipCIDRMatcher{cidr: cidr}
 
@@ -161,9 +156,9 @@ func buildMatcher(kind, arg string) Matcher {
 		return &pathPrefixMatcher{prefix: arg}
 
 	case "block_path_regex":
-		re, err := regexp.Compile(arg)
+		re, err := cachedCompile(arg)
 		if err != nil {
-			return &alwaysMatcher{}
+			return &neverMatcher{} // invalid regex: match nothing
 		}
 		return &pathRegexMatcher{re: re}
 
@@ -171,9 +166,9 @@ func buildMatcher(kind, arg string) Matcher {
 		return &queryContainsMatcher{substr: arg}
 
 	case "block_query_regex":
-		re, err := regexp.Compile(arg)
+		re, err := cachedCompile(arg)
 		if err != nil {
-			return &alwaysMatcher{}
+			return &neverMatcher{} // invalid regex: match nothing
 		}
 		return &queryRegexMatcher{re: re}
 
@@ -183,9 +178,9 @@ func buildMatcher(kind, arg string) Matcher {
 
 	case "block_header_regex":
 		name, pattern := splitHeaderArg(arg)
-		re, err := regexp.Compile(pattern)
+		re, err := cachedCompile(pattern)
 		if err != nil {
-			return &alwaysMatcher{}
+			return &neverMatcher{} // invalid regex: match nothing
 		}
 		return &headerRegexMatcher{name: name, re: re}
 
@@ -197,6 +192,17 @@ func buildMatcher(kind, arg string) Matcher {
 
 	case "block_content_type":
 		return &contentTypeMatcher{ctype: arg}
+
+	// User-Agent convenience matchers (equivalent to block_header:User-Agent:<value>).
+	case "block_user_agent":
+		return &headerContainsMatcher{name: "User-Agent", substr: arg}
+
+	case "block_user_agent_regex":
+		re, err := cachedCompile(arg)
+		if err != nil {
+			return &neverMatcher{}
+		}
+		return &headerRegexMatcher{name: "User-Agent", re: re}
 
 	case "compound":
 		return parseCompoundJSON(arg)

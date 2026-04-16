@@ -21,6 +21,7 @@ type Listener struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
+	Name       string       `gorm:"size:128" json:"name"`
 	Role       ListenerRole `gorm:"size:16;not null;index" json:"role"`
 	Bind       string       `gorm:"size:255;not null" json:"bind"`
 	Network    string       `gorm:"size:16;default:tcp" json:"network"`
@@ -117,6 +118,7 @@ type Rule struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
+	Name     string     `gorm:"size:128" json:"name"`
 	PolicyID uint       `gorm:"not null;index" json:"policy_id"`
 	Phase    RulePhase  `gorm:"size:32;not null;index" json:"phase"`
 	Pattern  string     `gorm:"type:text;not null" json:"pattern"`

@@ -7,6 +7,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { Plus, Trash2, Copy } from "lucide-react";
@@ -23,6 +33,7 @@ export default function APIKeysPage() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [newToken, setNewToken] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<APIKey | null>(null);
 
   const load = useCallback(async () => {
     const data = await api<{ items: APIKey[] }>("/api/v1/api-keys");
@@ -45,11 +56,16 @@ export default function APIKeysPage() {
     }
   }
 
-  async function handleDelete(id: number) {
-    if (!confirm("确认删除？")) return;
-    await api(`/api/v1/api-keys/${id}/delete`, { method: "POST" });
-    toast.success("已删除");
-    load();
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    try {
+      await api(`/api/v1/api-keys/${deleteTarget.id}/delete`, { method: "POST" });
+      toast.success("已删除");
+      setDeleteTarget(null);
+      load();
+    } catch {
+      toast.error("删除失败");
+    }
   }
 
   return (
@@ -77,19 +93,27 @@ export default function APIKeysPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {keys.map((k) => (
-                <TableRow key={k.id}>
-                  <TableCell>{k.id}</TableCell>
-                  <TableCell>{k.name}</TableCell>
-                  <TableCell className="text-xs">{k.created_at}</TableCell>
-                  <TableCell className="text-xs">{k.last_used_at ?? "—"}</TableCell>
-                  <TableCell>
-                    <Button variant="ghost" size="icon" onClick={() => handleDelete(k.id)}>
-                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                    </Button>
+              {keys.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="h-20 text-center text-muted-foreground">
+                    暂无 API 密钥
                   </TableCell>
                 </TableRow>
-              ))}
+              ) : (
+                keys.map((k) => (
+                  <TableRow key={k.id}>
+                    <TableCell className="font-mono text-xs">{k.id}</TableCell>
+                    <TableCell>{k.name}</TableCell>
+                    <TableCell className="text-xs">{new Date(k.created_at).toLocaleString("zh-CN")}</TableCell>
+                    <TableCell className="text-xs">{k.last_used_at ? new Date(k.last_used_at).toLocaleString("zh-CN") : "—"}</TableCell>
+                    <TableCell>
+                      <Button variant="ghost" size="icon" onClick={() => setDeleteTarget(k)}>
+                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
             </TableBody>
           </Table>
         </CardContent>
@@ -127,6 +151,21 @@ export default function APIKeysPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              删除 API 密钥「{deleteTarget?.name}」后，使用该密钥的自动化调用将立即失效。此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={handleDelete}>删除</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

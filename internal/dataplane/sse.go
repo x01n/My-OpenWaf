@@ -3,15 +3,14 @@ package dataplane
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/proxy"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 )
@@ -49,21 +48,7 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	})
 	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.Forwarding)
 
-	tr := &http.Transport{
-		MaxIdleConns:          16,
-		IdleConnTimeout:       90 * time.Second,
-		ForceAttemptHTTP2:     false,
-		ResponseHeaderTimeout: 0,
-	}
-	if len(rt.UpstreamURLs) > 0 && strings.HasPrefix(rt.UpstreamURLs[0], "https://") {
-		tr.TLSClientConfig = &tls.Config{
-			ServerName:         rt.Site.UpstreamTLSServerName,
-			InsecureSkipVerify: rt.Site.UpstreamTLSSkipVerify,
-			MinVersion:         tls.VersionTLS12,
-		}
-	}
-
-	hc := &http.Client{Transport: tr, Timeout: 0}
+	hc := &http.Client{Transport: proxy.SharedTransport(rt), Timeout: 0}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return err
