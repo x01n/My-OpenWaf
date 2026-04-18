@@ -316,4 +316,263 @@ func TestCheckOWASP_SQLi_GroupByWithComment(t *testing.T) {
 	}
 }
 
+// ── sqli:022 和 sqli:003 误报抑制测试 ──
 
+// sqli:022: if(length) 作为 JavaScript 变量检查不触发
+func TestCheckOWASP_Clean_JSIfLength(t *testing.T) {
+	hits := CheckOWASP("mid", "/api", "", nil, []string{"if (length === 0) return null;"})
+	if hasCategory(hits, CatSQLi) {
+		t.Fatal("if(length) as JavaScript variable guard should not trigger SQLi")
+	}
+}
+
+// sqli:022: if(count) 作为 JavaScript 变量检查不触发
+func TestCheckOWASP_Clean_JSIfCount(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "limit=10&sort=if(count>0,asc,desc)", nil, nil)
+	if hasCategory(hits, CatSQLi) {
+		t.Fatal("if(count) as JavaScript comparison should not trigger SQLi")
+	}
+}
+
+// sqli:022: if(ascii(...)) 仍然触发（SQL 特有函数）
+func TestCheckOWASP_SQLi_IfAscii(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=if(ascii(substr(user(),1,1))=115,1,0)", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("if(ascii(substr(user()))) should still trigger SQLi")
+	}
+}
+
+// sqli:022: if(length(password)>5,1,0) 作为 SQL 函数调用仍然触发
+func TestCheckOWASP_SQLi_IfLengthFunc(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=1 and if(length(password)>5,1,0)--", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("if(length(password)) SQL function call should trigger SQLi")
+	}
+}
+
+// sqli:003: JavaScript sleep() 不触发
+func TestCheckOWASP_Clean_JSSleep(t *testing.T) {
+	hits := CheckOWASP("mid", "/api", "", nil, []string{
+		"function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }",
+	})
+	if hasCategory(hits, CatSQLi) {
+		t.Fatal("JavaScript sleep() function definition should not trigger SQLi")
+	}
+}
+
+// sqli:003: SQL sleep() 仍然触发（有 SQL 上下文）
+func TestCheckOWASP_SQLi_SleepWithContext(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=1 AND (SELECT sleep(5))", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("sleep() with SQL SELECT context should trigger SQLi")
+	}
+}
+
+// sqli:003: 注入模式 "1); sleep(5)--" 仍然触发
+func TestCheckOWASP_SQLi_SleepInjection(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=1); sleep(5)--", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("1); sleep(5)-- injection pattern should trigger SQLi")
+	}
+}
+
+// 路径穿越: ../../etc/passwd 仍然触发
+func TestCheckOWASP_PathTrav_EtcPasswdStillDetected(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "file=../../etc/passwd", nil, nil)
+	if !hasCategory(hits, CatPathTrav) {
+		t.Fatal("../../etc/passwd should still trigger path traversal")
+	}
+}
+
+// ── sqli:001 suppressor tests ──
+
+// 搜索引擎查询中含 "union select" 不触发（FP 场景：开发者在 segmentfault 搜索 SQL 语法）
+func TestCheckOWASP_Clean_UnionSelectSearchQuery(t *testing.T) {
+	hits := CheckOWASP("mid", "/search", "q=union+select+%E5%85%B3%E9%94%AE%E5%AD%97%E6%80%8E%E4%B9%88%E7%94%A8", nil, nil)
+	if hasCategory(hits, CatSQLi) {
+		t.Fatalf("'union select' in search query without SQL markers should not trigger, got %+v", hits)
+	}
+}
+
+// Bing autocomplete bq 参数含 "union select" 不触发（FP 场景）
+func TestCheckOWASP_Clean_UnionSelectBingQuery(t *testing.T) {
+	hits := CheckOWASP("mid", "/AS/Suggestions", "bq=site:segmentfault.com+union+select+syntax", nil, nil)
+	if hasCategory(hits, CatSQLi) {
+		t.Fatalf("'union select' in Bing autocomplete bq param should not trigger, got %+v", hits)
+	}
+}
+
+// 真实 UNION SELECT 带列列表仍然触发
+func TestCheckOWASP_SQLi_UnionSelectColumns(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=1 UNION SELECT 1,2,3--", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("UNION SELECT with column list should still trigger")
+	}
+}
+
+// 真实 UNION SELECT FROM 仍然触发
+func TestCheckOWASP_SQLi_UnionSelectFrom(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=1 UNION SELECT * FROM users", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("UNION SELECT FROM should still trigger")
+	}
+}
+
+// 真实 UNION SELECT NULL 仍然触发
+func TestCheckOWASP_SQLi_UnionSelectNull(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=1 UNION SELECT NULL,NULL,NULL", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("UNION SELECT NULL should still trigger")
+	}
+}
+
+// ── sqli:017 suppressor tests ──
+
+// AWS Aurora 文档 "INTO OUTFILE S3" 不触发（无引号路径）
+func TestCheckOWASP_Clean_IntoOutfileS3(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "", nil, []string{"SELECT INTO OUTFILE S3 the following statement exports"})
+	if hasCategory(hits, CatSQLi) {
+		t.Fatalf("'INTO OUTFILE S3' without quoted path should not trigger, got %+v", hits)
+	}
+}
+
+// 真实 INTO OUTFILE 带引号路径仍然触发
+func TestCheckOWASP_SQLi_IntoOutfileWithPath(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "q=1 INTO OUTFILE '/var/www/html/shell.php'", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("INTO OUTFILE with quoted path should still trigger")
+	}
+}
+
+// ── xss:002 suppressor tests ──
+
+// CDN onload 回调参数不触发（Cloudflare Turnstile 模式）
+func TestCheckOWASP_Clean_CDNOnloadCallback(t *testing.T) {
+	hits := CheckOWASP("mid", "/turnstile/v0/g/api.js", "onload=_cf_chl_turnstile_l&render=explicit", nil, nil)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("CDN ?onload=callback should not trigger XSS, got %+v", hits)
+	}
+}
+
+// CDN onload 回调在高敏感度下也不应触发（xss:002 FP 在 threshold≤2 时绕过了 isXSSFalsePositive）
+func TestCheckOWASP_Clean_CDNOnloadCallback_High(t *testing.T) {
+	hits := CheckOWASP("high", "/turnstile/v0/g/api.js", "onload=_cf_chl_turnstile_l&render=explicit", nil, nil)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("CDN ?onload=callback should not trigger XSS at high sensitivity, got %+v", hits)
+	}
+}
+
+// reCAPTCHA onload 回调在高敏感度下也不应触发
+func TestCheckOWASP_Clean_ReCaptchaOnload_High(t *testing.T) {
+	hits := CheckOWASP("high", "/recaptcha/api.js", "onload=captchaOnload&render=explicit", nil, nil)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("reCAPTCHA ?onload=callback should not trigger XSS at high sensitivity, got %+v", hits)
+	}
+}
+
+// S3 ARN 通配符不触发 SQLi（arn:aws:s3:::bucket01/* 中 1/* 匹配 sqli:005）
+func TestCheckOWASP_Clean_S3ARNWildcard(t *testing.T) {
+	hits := CheckOWASP("high", "/", "source=arn:aws:s3:::sample-loaddata01/*&format=json", nil, nil)
+	if hasCategory(hits, CatSQLi) {
+		t.Fatalf("S3 ARN wildcard should not trigger SQLi, got %+v", hits)
+	}
+}
+
+// 真实 SQL 注入用 /* 未闭合注释仍然检出（sqli:005 /* 分支）
+func TestCheckOWASP_SQLi_SlashStarComment(t *testing.T) {
+	// Unclosed /* comment (not stripped by stripSQLComments) — real SQL injection probing
+	hits := CheckOWASP("high", "/", "id=queryvalue1/*", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("SQL unclosed /* comment injection should still trigger SQLi")
+	}
+}
+
+// Google reCAPTCHA onload 回调参数不触发
+func TestCheckOWASP_Clean_ReCaptchaOnload(t *testing.T) {
+	hits := CheckOWASP("mid", "/recaptcha/api.js", "onload=captchaOnload&render=explicit", nil, nil)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("reCAPTCHA ?onload=callback should not trigger XSS, got %+v", hits)
+	}
+}
+
+// 真实 onload=alert(1) 仍然触发
+func TestCheckOWASP_XSS_OnloadAlert(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "q=onload=alert(1)", nil, nil)
+	if !hasCategory(hits, CatXSS) {
+		t.Fatal("onload=alert(1) should still trigger XSS")
+	}
+}
+
+// ── sqli:006 suppressor tests ──
+
+// CSP 报告中 'use strict'; concat(...) 不触发
+func TestCheckOWASP_Clean_CSPReportUseStrict(t *testing.T) {
+	hits := CheckOWASP("mid", "/api/report", "", nil, []string{
+		"'use strict'; if (length > 0) { return concat(a, b); }",
+	})
+	if hasCategory(hits, CatSQLi) {
+		t.Fatalf("CSP/NEL report with JavaScript 'use strict'; concat() should not trigger SQLi, got %+v", hits)
+	}
+}
+
+// NEL 报告中裸 JS 语句不触发
+func TestCheckOWASP_Clean_NELReportJS(t *testing.T) {
+	hits := CheckOWASP("mid", "/csp/report.htm", "", nil, []string{
+		"'strict'; if (length > 0) { return result; }",
+	})
+	if hasCategory(hits, CatSQLi) {
+		t.Fatalf("NEL report with JavaScript should not trigger SQLi, got %+v", hits)
+	}
+}
+
+// sqli:006 真实注入场景仍然触发（带 FROM 上下文）
+func TestCheckOWASP_SQLi_006WithSQLContext(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=1' ; SELECT * FROM users--", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("sqli:006 with SELECT FROM context should still trigger")
+	}
+}
+
+// sqli:006 真实注入场景仍然触发（带 DROP TABLE 上下文）
+func TestCheckOWASP_SQLi_006WithDropTable(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "name='; DROP TABLE users--", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatal("sqli:006 with DROP TABLE context should still trigger")
+	}
+}
+
+// ── Sec-Ch-Ua 扩展请求头不触发测试 ──
+
+// Sec-Ch-Ua-Full-Version-List 含引号和分号不触发
+func TestCheckOWASP_Clean_SecChUaFullVersionList(t *testing.T) {
+	headers := map[string]string{
+		"Sec-Ch-Ua-Full-Version-List": `"Not.A/Brand";v="8.0.0.0", "Chromium";v="114.0.5735.199", "Google Chrome";v="114.0.5735.199"`,
+		"Sec-Ch-Ua-Platform-Version":  `"14.0.0"`,
+		"Sec-Ch-Ua-Arch":              `"x86"`,
+	}
+	hits := CheckOWASP("mid", "/AS/Suggestions", "qry=test", headers, nil)
+	if len(hits) > 0 {
+		t.Fatalf("extended Client Hints headers should not trigger any detection, got %+v", hits)
+	}
+}
+
+// X-Client-Data 请求头（Google Chrome 发送的 base64 数据）不触发
+func TestCheckOWASP_Clean_XClientData(t *testing.T) {
+	headers := map[string]string{
+		"X-Client-Data": "CJG2yQEIpLbJAQipncoBCMKTywEIkqHLAQj6mM0BCIWgzQEIpL3NAQ==",
+	}
+	hits := CheckOWASP("mid", "/recaptcha/api.js", "onload=captchaOnload&render=explicit", headers, nil)
+	if hasCategory(hits, CatXSS) || hasCategory(hits, CatSQLi) {
+		t.Fatalf("X-Client-Data header should not trigger any detection, got %+v", hits)
+	}
+}
+
+// ── 调试测试：真实 Bing CSP 报告正文（application/reports+json）──
+func TestCheckOWASP_Debug_BingCSPReport(t *testing.T) {
+	// 真实 Bing CSP 报告正文（application/reports+json 内容类型，单个文本 blob 扫描）
+	body := `[{"age":9694,"body":{"blockedURL":"https://r.bing.com/rp/ICf9X-WMafiZOnS_3M9RpM8994E.gz.js","disposition":"report","documentURL":"https://cn.bing.com/","effectiveDirective":"script-src-elem","lineNumber":1,"originalPolicy":"script-src https: 'strict-dynamic' 'report-sample' 'nonce-z35bKtCXz88W1OJrsFFgnLdDdiySmR6T76aMSP6v1Ec='; base-uri 'self';report-to csp-endpoint","referrer":"","sample":"","sourceFile":"https://cn.bing.com/","statusCode":200},"type":"csp-violation","url":"https://cn.bing.com/","user_agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"}]`
+	hits := CheckOWASP("mid", "/api/report", "cat=bingcsp", nil, []string{body})
+	if hasCategory(hits, CatSQLi) {
+		t.Fatalf("Bing CSP report body should not trigger SQLi, got %+v", hits)
+	}
+}

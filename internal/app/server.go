@@ -133,64 +133,69 @@ func Run() {
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
 	// It also detects config drift (bind address changes, TLS toggle, cert changes)
 	// and restarts affected listeners automatically.
+	//
+	// This implementation now works at the Site level: each enabled Site with valid
+	// configuration gets its own Hertz server instance, allowing per-site start/stop.
 	reconcileListeners := func() {
 		newSn := rt.Snapshot.Load()
 		if newSn == nil {
 			return
 		}
 
-		// Build set of desired data listener names + fingerprints.
+		// Build set of desired site-based listeners.
 		type desiredEntry struct {
-			listener store.Listener
-			tag      string // config fingerprint for drift detection
+			siteID uint
+			siteRT snapshotpkg.SiteRuntime
+			tag    string
 		}
 		desired := make(map[string]desiredEntry)
-		for lid, l := range newSn.DataListeners {
-			name := dataListenerName(lid, l.Bind)
-			tag := listenerFingerprint(lid, l, newSn)
-			desired[name] = desiredEntry{listener: l, tag: tag}
+
+		// Iterate through all sites in the snapshot to create per-site listeners.
+		for _, siteRT := range newSn.Sites {
+			// Each site gets its own listener instance.
+			name := siteListenerName(siteRT.Site.ID, siteRT.Bind)
+			tag := siteListenerFingerprint(siteRT.Site.ID, siteRT, newSn)
+			desired[name] = desiredEntry{
+				siteID: siteRT.Site.ID,
+				siteRT: siteRT,
+				tag:    tag,
+			}
 		}
 
-		// Remove listeners that no longer exist or whose config has changed.
+		// Remove stale or changed site listeners.
 		for _, name := range lm.Names() {
-			if !strings.HasPrefix(name, "data:") {
+			if !strings.HasPrefix(name, "site:") {
 				continue
 			}
 			de, wantExists := desired[name]
 			if !wantExists {
-				// Listener was deleted or its bind address changed (new name).
-				log.Info("removing stale data listener", slog.String("name", name))
+				log.Info("removing stale site listener", slog.String("name", name))
 				lm.Remove(name)
 				continue
 			}
-			// Listener still exists — check if config drifted (TLS toggle, cert change, etc.).
 			if lm.Tag(name) != de.tag {
-				log.Info("restarting data listener due to config change",
+				log.Info("restarting site listener due to config change",
 					slog.String("name", name),
 					slog.String("old_tag", lm.Tag(name)),
 					slog.String("new_tag", de.tag),
 				)
 				lm.Remove(name)
-				// Will be re-added in the next loop below.
 			}
 		}
 
-		// Add new or restarted listeners.
+		// Add new or restarted site listeners.
 		for name, de := range desired {
 			if lm.Has(name) {
 				continue
 			}
-			l := de.listener
-			lid := listenerIDFromName(name, newSn.DataListeners)
-
-			srv := buildDataServer(l, lid, newSn, dpOpts)
-
+			srv := buildDataServer(de.siteRT, newSn, dpOpts)
 			lm.AddHertzWithTag(name, srv, de.tag)
 			lm.StartOne(name)
-			log.Info("hot-started data listener",
-				slog.String("bind", l.Bind),
-				slog.Uint64("listener_id", uint64(lid)),
-				slog.Bool("tls", l.TLSEnabled),
+			log.Info("hot-started site listener",
+				slog.String("name", name),
+				slog.Uint64("site_id", uint64(de.siteID)),
+				slog.String("bind", de.siteRT.Bind),
+				slog.Bool("tls", de.siteRT.Site.TLSEnabled),
 			)
 		}
 	}
@@ -254,11 +259,12 @@ func Run() {
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
 	// ─── Data-plane listener(s) ───
+	// Initialize site-based listeners from snapshot.
 	if sn != nil {
-		for lid, l := range sn.DataListeners {
-			name := dataListenerName(lid, l.Bind)
-			tag := listenerFingerprint(lid, l, sn)
-			srv := buildDataServer(l, lid, sn, dpOpts)
+		for _, siteRT := range sn.Sites {
+			name := siteListenerName(siteRT.Site.ID, siteRT.Bind)
+			tag := siteListenerFingerprint(siteRT.Site.ID, siteRT, sn)
+			srv := buildDataServer(siteRT, sn, dpOpts)
 			lm.AddHertzWithTag(name, srv, tag)
 		}
 	}
@@ -273,19 +279,9 @@ func Run() {
 	lm.WaitForSignal()
 }
 
-// dataListenerName creates a consistent name for a data listener.
-func dataListenerName(lid uint, bind string) string {
-	return fmt.Sprintf("data:%d:%s", lid, bind)
-}
-
-// listenerIDFromName finds the listener ID by matching the name in the DataListeners map.
-func listenerIDFromName(name string, listeners map[uint]store.Listener) uint {
-	for lid, l := range listeners {
-		if dataListenerName(lid, l.Bind) == name {
-			return lid
-		}
-	}
-	return 0
+// siteListenerName creates a consistent name for a site-based listener.
+func siteListenerName(siteID uint, bind string) string {
+	return fmt.Sprintf("site:%d:%s", siteID, bind)
 }
 
 func loadIPLists(rep *waf.IPReputation, repo *repository.IPListRepo) {
@@ -330,13 +326,14 @@ func resolveJWTSecret(rt *core.Runtime) []byte {
 
 // buildDataServer creates a Hertz server for a data-plane listener,
 // optionally configured with TLS termination when the listener has TLS enabled.
-func buildDataServer(l store.Listener, lid uint, sn *snapshotpkg.Snapshot, dpOpts dataplane.Options) *server.Hertz {
+func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, dpOpts dataplane.Options) *server.Hertz {
+	site := siteRT.Site
 	opts := []config.Option{
-		server.WithHostPorts(l.Bind),
+		server.WithHostPorts(site.Bind),
 	}
 
-	if l.TLSEnabled {
-		tlsCfg := buildListenerTLS(lid, l, sn)
+	if site.TLSEnabled {
+		tlsCfg := buildListenerTLS(siteRT, sn)
 		if tlsCfg != nil {
 			opts = append(opts,
 				server.WithTLS(tlsCfg),
@@ -347,31 +344,38 @@ func buildDataServer(l store.Listener, lid uint, sn *snapshotpkg.Snapshot, dpOpt
 
 	srv := server.Default(opts...)
 	o := dpOpts
-	o.ListenerID = lid
+	o.Bind = site.Bind
 	handler := dataplane.Handler(o)
 	srv.Use(handler)
 	return srv
 }
 
 // buildListenerTLS constructs a *tls.Config for a data listener.
-// It uses the listener's own certificate and adds SNI-based per-site certs.
-func buildListenerTLS(lid uint, l store.Listener, sn *snapshotpkg.Snapshot) *tls.Config {
+// It uses the site's certificate and TLS configuration.
+func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) *tls.Config {
 	if sn == nil {
 		return nil
 	}
 
-	// Collect all certificates: listener default + per-site SNI.
+	site := siteRT.Site
 	var certs []tls.Certificate
 
-	// Listener-level default cert (already parsed in snapshot build).
-	if cert, ok := sn.ListenerTLSCert[lid]; ok {
-		certs = append(certs, cert)
+	// Use the site's TLS config if available
+	if siteRT.TLSConfig != nil {
+		return siteRT.TLSConfig
 	}
 
-	// Per-site SNI certs for this listener (key is "sni:<lid>\x00<host>").
+	// Fallback: build from site certificate
+	if siteRT.Certificate != nil {
+		cert, err := tls.X509KeyPair([]byte(siteRT.Certificate.CertPEM), []byte(siteRT.Certificate.KeyPEM))
+		if err == nil {
+			certs = append(certs, cert)
+		}
+	}
+
+	// Per-site SNI certs for this bind address
 	for sniKey, cert := range sn.SiteTLSCertBySNI {
-		// SNI keys are prefixed with "sni:<lid>\x00<host>", check listener ID.
-		prefix := "sni:" + fmt.Sprintf("%d", lid) + "\x00"
+		prefix := "sni:" + site.Bind + "\x00"
 		if strings.HasPrefix(sniKey, prefix) {
 			certs = append(certs, cert)
 		}
@@ -382,8 +386,8 @@ func buildListenerTLS(lid uint, l store.Listener, sn *snapshotpkg.Snapshot) *tls
 	}
 
 	// Parse TLS version bounds.
-	minVer := parseTLSVersion(l.MinTLSVersion)
-	maxVer := parseTLSVersion(l.MaxTLSVersion)
+	minVer := parseTLSVersion(site.MinTLSVersion)
+	maxVer := parseTLSVersion(site.MaxTLSVersion)
 	if minVer == 0 {
 		minVer = tls.VersionTLS12
 	}
@@ -393,8 +397,8 @@ func buildListenerTLS(lid uint, l store.Listener, sn *snapshotpkg.Snapshot) *tls
 
 	// Parse ALPN protocols.
 	var alpn []string
-	if l.ALPN != "" {
-		for _, p := range strings.Split(l.ALPN, ",") {
+	if site.ALPN != "" {
+		for _, p := range strings.Split(site.ALPN, ",") {
 			if s := strings.TrimSpace(p); s != "" {
 				alpn = append(alpn, s)
 			}
@@ -427,24 +431,22 @@ func parseTLSVersion(v string) uint16 {
 
 // ─── Config drift fingerprint ───────────────────────────────────────
 
-// listenerFingerprint produces a short hash that changes whenever the
-// listener's effective configuration (bind, TLS, cert content) changes.
+// siteListenerFingerprint produces a short hash that changes whenever the
+// site's listener configuration (bind, TLS, cert content) changes.
 // This is used by reconcileListeners to detect drift and restart servers.
-func listenerFingerprint(lid uint, l store.Listener, sn *snapshotpkg.Snapshot) string {
+func siteListenerFingerprint(siteID uint, siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) string {
+	site := siteRT.Site
 	h := sha256.New()
-	fmt.Fprintf(h, "lid=%d bind=%s tls=%v min=%s max=%s alpn=%s",
-		lid, l.Bind, l.TLSEnabled, l.MinTLSVersion, l.MaxTLSVersion, l.ALPN)
+	fmt.Fprintf(h, "site=%d bind=%s tls=%v min=%s max=%s alpn=%s",
+		siteID, site.Bind, site.TLSEnabled, site.MinTLSVersion, site.MaxTLSVersion, site.ALPN)
 
-	// Include listener cert raw bytes in the fingerprint.
-	if cert, ok := sn.ListenerTLSCert[lid]; ok && len(cert.Certificate) > 0 {
-		fmt.Fprintf(h, " certlen=%d", len(cert.Certificate[0]))
-		if len(cert.Certificate[0]) >= 16 {
-			fmt.Fprintf(h, " certhead=%x", cert.Certificate[0][:16])
-		}
+	// Include site cert raw bytes in the fingerprint.
+	if siteRT.Certificate != nil {
+		fmt.Fprintf(h, " cert=%s", siteRT.Certificate.CertPEM[:min(64, len(siteRT.Certificate.CertPEM))])
 	}
 
-	// Include per-site SNI cert fingerprints for this listener.
-	prefix := "sni:" + fmt.Sprintf("%d", lid) + "\x00"
+	// Include per-site SNI cert fingerprints for this bind address.
+	prefix := "sni:" + site.Bind + "\x00"
 	for sniKey, cert := range sn.SiteTLSCertBySNI {
 		if strings.HasPrefix(sniKey, prefix) && len(cert.Certificate) > 0 {
 			fmt.Fprintf(h, " sni=%s:len=%d", sniKey, len(cert.Certificate[0]))
@@ -452,4 +454,11 @@ func listenerFingerprint(lid uint, l store.Listener, sn *snapshotpkg.Snapshot) s
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

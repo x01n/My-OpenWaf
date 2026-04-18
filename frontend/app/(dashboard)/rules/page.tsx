@@ -1,6 +1,6 @@
 "use client";
 import { CrudPage } from "@/components/crud-page";
-import { RulePatternBuilder } from "@/components/rule-pattern-builder";
+import { RuleBuilder } from "@/components/rule-builder";
 
 export default function RulesPage() {
   return (
@@ -36,7 +36,7 @@ export default function RulesPage() {
           key: "pattern",
           label: "匹配模式",
           customInput: ({ value, onChange }) => (
-            <RulePatternBuilder
+            <RuleBuilder
               value={String(value ?? "")}
               onChange={(v) => onChange(v)}
             />

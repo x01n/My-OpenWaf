@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"crypto/tls"
-	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -24,11 +23,21 @@ type SiteRuntime struct {
 	Site         store.Site
 	PolicyID     uint
 	Rules        []CompiledRule
-	Forwarding   *store.ForwardingProfile
 	UpstreamURLs []string
 	Certificate  *store.Certificate
-	ListenerCert *store.Certificate
-	Listener     store.Listener
+
+	// Listener configuration (now embedded in Site)
+	Bind      string
+	TLSConfig *tls.Config
+
+	// Bot and attack protection
+	BotProtection    store.BotProtectionConfig
+	AttackProtection store.AttackProtectionConfig
+
+	// Forwarding settings (now in Site model)
+	XFFMode              string
+	TrustedCIDR          string
+	PreserveOriginalHost bool
 
 	// Per-site maintenance
 	MaintenanceEnabled bool
@@ -44,40 +53,42 @@ type SiteRuntime struct {
 type Snapshot struct {
 	Revision uint64
 
-	DataListeners map[uint]store.Listener
-	Sites         map[string]SiteRuntime
+	Sites map[string]SiteRuntime
 
 	DefaultBlockHTML string
 
-	ListenerTLSCert  map[uint]tls.Certificate
 	SiteTLSCertBySNI map[string]tls.Certificate
 
 	// Protection settings loaded from SystemSettings.
 	Protection store.ProtectionConfig
 }
 
-func SiteMapKey(listenerID uint, host string) string {
-	return strconv.FormatUint(uint64(listenerID), 10) + "\x00" + strings.ToLower(strings.TrimSpace(host))
+func SiteMapKey(bind string, host string) string {
+	return bind + "\x00" + strings.ToLower(strings.TrimSpace(host))
 }
 
-func SNICertKey(listenerID uint, sni string) string {
-	return "sni:" + strconv.FormatUint(uint64(listenerID), 10) + "\x00" + strings.ToLower(strings.TrimSpace(sni))
+func SNICertKey(bind string, sni string) string {
+	return "sni:" + bind + "\x00" + strings.ToLower(strings.TrimSpace(sni))
 }
 
-func (sn *Snapshot) MatchSite(listenerID uint, hostHeader string) (SiteRuntime, bool) {
+func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool) {
 	host := strings.ToLower(strings.TrimSpace(hostHeader))
 	if i := strings.Index(host, ":"); i >= 0 {
 		host = host[:i]
 	}
-	if host == "" {
-		return SiteRuntime{}, false
-	}
-	if rt, ok := sn.Sites[SiteMapKey(listenerID, host)]; ok {
+	key := bind + "\x00" + host
+	if rt, ok := sn.Sites[key]; ok {
 		return rt, true
 	}
 	if idx := strings.Index(host, "."); idx > 0 {
 		wild := "*." + host[idx+1:]
-		if rt, ok := sn.Sites[SiteMapKey(listenerID, wild)]; ok {
+		if rt, ok := sn.Sites[bind+"\x00"+wild]; ok {
+			return rt, true
+		}
+	}
+	// Fallback: match any site on this bind address
+	for k, rt := range sn.Sites {
+		if strings.HasPrefix(k, bind+"\x00") {
 			return rt, true
 		}
 	}

@@ -8,6 +8,22 @@ import (
 
 // ── SSRF (Server-Side Request Forgery) ──
 
+// hasSSRFIndicator returns true when the string contains URL schemes or known
+// private/cloud-internal addresses that may indicate an SSRF payload.
+// Avoids running 13 SSRF regexes on every clean request.
+func hasSSRFIndicator(s string) bool {
+	return strings.Contains(s, "://") ||
+		strings.Contains(s, "169.254.169.254") ||
+		strings.Contains(s, "metadata.google") ||
+		strings.Contains(s, "100.100.100.200") ||
+		strings.Contains(s, "x-aws-ec2-metadata") ||
+		strings.Contains(s, "localhost") ||
+		strings.Contains(s, "127.0.") ||
+		strings.Contains(s, "::ffff:") ||
+		strings.Contains(s, "::1") ||
+		strings.Contains(s, "0x7f") // hex 127.x
+}
+
 var ssrfPatterns = []struct {
 	re    *regexp.Regexp
 	score int
@@ -30,7 +46,7 @@ var ssrfPatterns = []struct {
 	// DNS rebinding / encoding bypasses — require URL scheme to avoid matching CSS hex colors (#DEADBEEF)
 	{regexp.MustCompile(`(?i)https?://\s*0x[0-9a-f]{8}\b`), 4, "owasp:ssrf:009"},
 	// file:// / gopher:// / dict:// schemes
-	{regexp.MustCompile(`(?i)(file|gopher|dict|ldap|sftp|tftp)://`), 5, "owasp:ssrf:010"},
+	{regexp.MustCompile(`(?i)(file|gopher|dict|ldap|sftp|tftp|php|expect|phar)://`), 5, "owasp:ssrf:010"},
 	// Decimal/octal IP encoding (e.g., http://2130706433 = 127.0.0.1)
 	{regexp.MustCompile(`(?i)https?://\d{8,10}(/|$|\s|:)`), 4, "owasp:ssrf:011"},
 	// IPv6-mapped IPv4 private addresses
@@ -40,6 +56,9 @@ var ssrfPatterns = []struct {
 }
 
 func checkSSRF(s string, threshold int) (OWASPHit, bool) {
+	if !hasSSRFIndicator(s) {
+		return OWASPHit{}, false
+	}
 	total := 0
 	best := ""
 	for _, p := range ssrfPatterns {
@@ -76,8 +95,8 @@ var cmdInjectPatterns = []struct {
 	{regexp.MustCompile(`(?i)(>|>>)\s*/(etc|tmp|var|root|home)/`), 4, "owasp:cmd:004"},
 	// Explicit command execution
 	{regexp.MustCompile(`(?i)(^|[\s;|&])(wget|curl)\s+https?://`), 3, "owasp:cmd:005"},
-	// Null byte / newline injection
-	{regexp.MustCompile(`%00|\x00|%0a|%0d`), 3, "owasp:cmd:006"},
+	// Null byte / newline injection (includes actual newline/CR bytes from URL-decode)
+	{regexp.MustCompile(`(?i)%00|\x00|%0[aAdD]|\x0a|\x0d`), 3, "owasp:cmd:006"},
 	// Common discovery commands followed by semicolon
 	{regexp.MustCompile(`(?i)\b(id|uname|whoami|hostname|ifconfig|ipconfig)\s*;`), 3, "owasp:cmd:007"},
 	// Pipe to shell commands — same (?:[\s;|&`]|$) fix to avoid URL-param false positives
@@ -96,6 +115,10 @@ var cmdInjectPatterns = []struct {
 	{regexp.MustCompile(`\$'\s*\\[xX0][0-9a-fA-F]`), 4, "owasp:cmd:014"},
 	// Tee / dd / base64 piped to shell — alternative command execution chain
 	{regexp.MustCompile(`(?i)(base64\s+-d|dd\s+if=|tee\s+/tmp)\s*\|`), 4, "owasp:cmd:015"},
+	// Newline/CR-separated command injection (%0a / %0d bypass semicolon filters)
+	{regexp.MustCompile("(?i)[\\r\\n]\\s*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|python|perl|ruby|php|echo|rm|chmod|kill|nslookup|dig|ping|sleep|find|awk|sed)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:016"},
+	// Server-Side Include (SSI) injection: <!--#exec cmd="..."--> and <!--#include virtual="...">
+	{regexp.MustCompile(`(?i)<!--\s*#\s*(exec|include|echo|config|fsize|flastmod)\b`), 5, "owasp:cmd:017"},
 }
 
 func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
@@ -120,6 +143,14 @@ func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
 
 // ── XXE (XML External Entity) ──
 
+// hasXXEIndicator returns true when the string contains XML markup that
+// could carry an XXE payload.
+func hasXXEIndicator(s string) bool {
+	return strings.Contains(s, "<!") ||
+		strings.Contains(s, "xi:include") ||
+		strings.Contains(s, "system ") // SYSTEM keyword in DTD declarations
+}
+
 var xxePatterns = []struct {
 	re    *regexp.Regexp
 	score int
@@ -138,6 +169,9 @@ var xxePatterns = []struct {
 }
 
 func checkXXE(s string, threshold int) (OWASPHit, bool) {
+	if !hasXXEIndicator(s) {
+		return OWASPHit{}, false
+	}
 	total := 0
 	best := ""
 	for _, p := range xxePatterns {
@@ -156,6 +190,15 @@ func checkXXE(s string, threshold int) (OWASPHit, bool) {
 
 // ── LDAP Injection ──
 
+// hasLDAPInjectionIndicator returns true when the string contains LDAP filter
+// structure characters specific to LDAP injection payloads.
+func hasLDAPInjectionIndicator(s string) bool {
+	return strings.Contains(s, ")(") ||
+		strings.Contains(s, "objectclass") ||
+		strings.Contains(s, ")(|") ||
+		strings.Contains(s, ")(&")
+}
+
 var ldapiPatterns = []struct {
 	re    *regexp.Regexp
 	score int
@@ -169,6 +212,9 @@ var ldapiPatterns = []struct {
 }
 
 func checkLDAPInjection(s string, threshold int) (OWASPHit, bool) {
+	if !hasLDAPInjectionIndicator(s) {
+		return OWASPHit{}, false
+	}
 	total := 0
 	best := ""
 	for _, p := range ldapiPatterns {
@@ -229,7 +275,7 @@ var tmplInjectPatterns = []struct {
 	id    string
 }{
 	// Jinja2 / Django / Twig
-	{regexp.MustCompile(`\{\{\s*\d+\s*[\*\+\-/]\s*\d+\s*\}\}`), 5, "owasp:ssti:001"},
+	{regexp.MustCompile(`\{\{\s*\d+\s*[\*\+\-/]\s*['"]?\d+['"]?\s*\}\}`), 5, "owasp:ssti:001"},
 	{regexp.MustCompile(`\{\{\s*config\.`), 5, "owasp:ssti:002"},
 	{regexp.MustCompile(`\{\{\s*['"]\w*['"]\.__class__`), 6, "owasp:ssti:003"},
 	// ${...} Freemarker / Velocity / JSP EL
@@ -254,6 +300,10 @@ var tmplInjectPatterns = []struct {
 	{regexp.MustCompile(`(?i)\{\{\s*(lookup|with|each|log)\s+`), 2, "owasp:ssti:013"},
 	// Tornado / Mako: ${self.module / caller.body}
 	{regexp.MustCompile(`(?i)\$\{self\.(module|template|loader|init_code)\b`), 5, "owasp:ssti:014"},
+	// ThinkPHP template injection: {pbohome/Indexot:if(...)} or {pboot:if(...)}
+	{regexp.MustCompile(`(?i)\{[a-z]+[:/][a-z]+:[a-z]+\(`), 5, "owasp:ssti:015"},
+	// Generic template tag with function call: {tag:function(...)}
+	{regexp.MustCompile(`(?i)\{[a-z_]+:[a-z_]+\([^}]{0,200}\)\}`), 4, "owasp:ssti:016"},
 }
 
 // hasTemplateInjectionIndicator returns true when the string contains markers
@@ -372,6 +422,19 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 
 // ── JNDI / Log4Shell Injection ──
 
+// hasJNDIIndicator returns true when the string contains JNDI/Log4Shell-style
+// injection markers.
+func hasJNDIIndicator(s string) bool {
+	return strings.Contains(s, "jndi:") ||
+		strings.Contains(s, "${lower") ||
+		strings.Contains(s, "${upper") ||
+		strings.Contains(s, "${env:") ||
+		strings.Contains(s, "${sys:") ||
+		strings.Contains(s, "${java:") ||
+		strings.Contains(s, "${base64:") ||
+		strings.Contains(s, "\\u0024\\u007") // Unicode-escaped ${
+}
+
 var jndiPatterns = []struct {
 	re    *regexp.Regexp
 	score int
@@ -390,6 +453,9 @@ var jndiPatterns = []struct {
 }
 
 func checkJNDI(s string, threshold int) (OWASPHit, bool) {
+	if !hasJNDIIndicator(s) {
+		return OWASPHit{}, false
+	}
 	total := 0
 	best := ""
 	for _, p := range jndiPatterns {
@@ -438,6 +504,19 @@ func checkCRLF(s string, threshold int) (OWASPHit, bool) {
 
 // ── Expression Language Injection (Spring EL, OGNL, SpEL) ──
 
+// hasELIndicator returns true when the string contains expression language
+// injection markers (Spring EL, OGNL, SpEL) specific enough to justify
+// running the full EL regex battery.
+func hasELIndicator(s string) bool {
+	return strings.Contains(s, "#{t(") ||
+		strings.Contains(s, "${t(") ||
+		strings.Contains(s, "java.lang.") ||
+		strings.Contains(s, "getclass()") ||
+		strings.Contains(s, "getruntime") ||
+		strings.Contains(s, "#rt") ||
+		strings.Contains(s, "@java.")
+}
+
 var exprLangPatterns = []struct {
 	re    *regexp.Regexp
 	score int
@@ -455,6 +534,9 @@ var exprLangPatterns = []struct {
 }
 
 func checkExprLang(s string, threshold int) (OWASPHit, bool) {
+	if !hasELIndicator(s) {
+		return OWASPHit{}, false
+	}
 	total := 0
 	best := ""
 	for _, p := range exprLangPatterns {
@@ -480,8 +562,12 @@ var deserialPatterns = []struct {
 }{
 	// Java serialization magic bytes
 	{regexp.MustCompile(`\xac\xed\x00\x05`), 6, "owasp:deser:001"},
+	// Java serialization hex-encoded: aced0005 (common in URL params)
+	{regexp.MustCompile(`(?i)aced0005`), 6, "owasp:deser:008"},
 	// PHP serialization
 	{regexp.MustCompile(`(?i)O:\d+:"[^"]+"`), 4, "owasp:deser:002"},
+	// PHP serialization in URL params: s:11:"key";s:16:"value"
+	{regexp.MustCompile(`(?i)s:\d+:"[^"]*";s:\d+:`), 4, "owasp:deser:009"},
 	// Python pickle
 	{regexp.MustCompile(`(?i)c(os|posix|nt)\n(system|popen)`), 5, "owasp:deser:003"},
 	// .NET ViewState

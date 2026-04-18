@@ -59,19 +59,15 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	r := deps.Repos
 	reload := deps.Reload
 
-	// Listeners
-	api.GET("/listeners", ListListeners(r.Listener))
-	api.GET("/listeners/:id", GetListener(r.Listener))
-	api.POST("/listeners", CreateListener(r.Listener, reload))
-	api.POST("/listeners/:id/update", UpdateListener(r.Listener, reload))
-	api.POST("/listeners/:id/delete", DeleteListener(r.Listener, reload))
-
 	// Sites
 	api.GET("/sites", ListSites(r.Site))
 	api.GET("/sites/:id", GetSite(r.Site))
 	api.POST("/sites", CreateSite(r.Site, reload))
 	api.POST("/sites/:id/update", UpdateSite(r.Site, reload))
 	api.POST("/sites/:id/delete", DeleteSite(r.Site, reload))
+	api.POST("/sites/:id/start", StartSite(r.Site))
+	api.POST("/sites/:id/stop", StopSite(r.Site))
+	api.GET("/sites/:id/status", GetSiteStatus(r.Site))
 
 	// Certificates
 	api.GET("/certificates", ListCertificates(r.Certificate))
@@ -94,15 +90,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	api.POST("/rules/:id/update", UpdateRule(r.Rule, reload))
 	api.POST("/rules/:id/delete", DeleteRule(r.Rule, reload))
 	api.POST("/rules/test", TestRule())
+	api.POST("/rules/validate", ValidateRule())
+	api.GET("/rules/templates", GetRuleTemplates())
 	api.GET("/rules/export", ExportRules(r.Rule))
 	api.POST("/rules/import", ImportRules(r.Rule, reload))
-
-	// Forwarding Profiles
-	api.GET("/forwarding-profiles", ListForwardingProfiles(r.ForwardingProfile))
-	api.GET("/forwarding-profiles/:id", GetForwardingProfile(r.ForwardingProfile))
-	api.POST("/forwarding-profiles", CreateForwardingProfile(r.ForwardingProfile, reload))
-	api.POST("/forwarding-profiles/:id/update", UpdateForwardingProfile(r.ForwardingProfile, reload))
-	api.POST("/forwarding-profiles/:id/delete", DeleteForwardingProfile(r.ForwardingProfile, reload))
 
 	// System Settings
 	api.GET("/settings", ListSettings(r.SystemSettings))

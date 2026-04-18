@@ -1,15 +1,21 @@
 package store
 
 import (
+	"My-OpenWaf/internal/store/migrations"
+
 	"gorm.io/gorm"
 )
 
 // AutoMigrate applies schema for all domain models.
 func AutoMigrate(db *gorm.DB) error {
+	// Run data migrations first
+	if err := migrations.V2MigrateSingleSite(db); err != nil {
+		return err
+	}
+
+	// Then apply schema migrations
 	return db.AutoMigrate(
-		&Listener{},
 		&Certificate{},
-		&ForwardingProfile{},
 		&Policy{},
 		&Rule{},
 		&Site{},

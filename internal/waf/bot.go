@@ -57,16 +57,23 @@ func NewBotRequest(method, path string, headers map[string]string) BotRequest {
 // ── verified legitimate crawlers ──
 
 var goodBotUA = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)googlebot|google-inspectiontool`),
-	regexp.MustCompile(`(?i)bingbot|msnbot`),
-	regexp.MustCompile(`(?i)yandexbot`),
-	regexp.MustCompile(`(?i)duckduckbot`),
+	regexp.MustCompile(`(?i)googlebot|google-inspectiontool|storebot-google`),
+	regexp.MustCompile(`(?i)bingbot|msnbot|bingpreview`),
+	regexp.MustCompile(`(?i)yandexbot|yandex\.com/bots`),
+	regexp.MustCompile(`(?i)duckduckbot|duckduckgo-favicons-bot`),
 	regexp.MustCompile(`(?i)baiduspider`),
-	regexp.MustCompile(`(?i)applebot`),
-	regexp.MustCompile(`(?i)facebookexternalhit`),
-	regexp.MustCompile(`(?i)twitterbot`),
-	regexp.MustCompile(`(?i)linkedinbot`),
-	regexp.MustCompile(`(?i)slackbot`),
+	regexp.MustCompile(`(?i)applebot|applebot-extended`),
+	regexp.MustCompile(`(?i)facebookexternalhit|facebookcatalog`),
+	regexp.MustCompile(`(?i)twitterbot|tweetmemebot`),
+	regexp.MustCompile(`(?i)linkedinbot|linkedin`),
+	regexp.MustCompile(`(?i)slackbot|slack-imgproxy`),
+	regexp.MustCompile(`(?i)discordbot|discord`),
+	regexp.MustCompile(`(?i)telegrambot`),
+	regexp.MustCompile(`(?i)whatsapp`),
+	regexp.MustCompile(`(?i)pinterestbot`),
+	regexp.MustCompile(`(?i)redditbot`),
+	regexp.MustCompile(`(?i)amazonbot`),
+	regexp.MustCompile(`(?i)semrushbot|ahrefs|mj12bot|dotbot`),
 }
 
 // ── hacking tools / malicious UA ──
@@ -80,14 +87,22 @@ var maliciousToolUA = []struct {
 	{regexp.MustCompile(`(?i)nikto`), "nikto", "bot:mal:002"},
 	{regexp.MustCompile(`(?i)nmap|masscan|zmap`), "port_scanner", "bot:mal:003"},
 	{regexp.MustCompile(`(?i)acunetix|netsparker|burpsuite|burp suite`), "web_scanner", "bot:mal:004"},
-	{regexp.MustCompile(`(?i)dirbuster|gobuster|wfuzz|ffuf`), "dir_bruteforcer", "bot:mal:005"},
+	{regexp.MustCompile(`(?i)dirbuster|gobuster|wfuzz|ffuf|feroxbuster`), "dir_bruteforcer", "bot:mal:005"},
 	{regexp.MustCompile(`(?i)nessus|openvas|qualys`), "vuln_scanner", "bot:mal:006"},
 	{regexp.MustCompile(`(?i)havij|pangolin`), "sqli_tool", "bot:mal:007"},
 	{regexp.MustCompile(`(?i)metasploit\b|\bmsf\b`), "metasploit", "bot:mal:008"},
-	{regexp.MustCompile(`(?i)hydra|medusa|patator`), "password_cracker", "bot:mal:009"},
+	{regexp.MustCompile(`(?i)hydra|medusa|patator|thc-hydra`), "password_cracker", "bot:mal:009"},
 	{regexp.MustCompile(`(?i)nuclei`), "nuclei", "bot:mal:010"},
 	{regexp.MustCompile(`(?i)zgrab`), "zgrab", "bot:mal:011"},
 	{regexp.MustCompile(`(?i)xspider|crawler4j`), "malicious_crawler", "bot:mal:012"},
+	{regexp.MustCompile(`(?i)commix|xsser|beef`), "exploit_tool", "bot:mal:013"},
+	{regexp.MustCompile(`(?i)w3af|skipfish|arachni`), "web_app_scanner", "bot:mal:014"},
+	{regexp.MustCompile(`(?i)joomscan|wpscan|droopescan`), "cms_scanner", "bot:mal:015"},
+	{regexp.MustCompile(`(?i)shodan|censys|zoomeye`), "recon_bot", "bot:mal:016"},
+	{regexp.MustCompile(`(?i)scrapy|beautifulsoup|selenium`), "scraper_lib", "bot:mal:017"},
+	{regexp.MustCompile(`(?i)python-requests|python-urllib|go-http-client`), "http_lib", "bot:mal:018"},
+	{regexp.MustCompile(`(?i)curl|wget|libwww-perl|lwp-`), "cli_tool", "bot:mal:019"},
+	{regexp.MustCompile(`(?i)postman|insomnia|httpie`), "api_client", "bot:mal:020"},
 }
 
 // ── fingerprint signals ──
@@ -131,14 +146,18 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
 	}
 
 	// SDK / library user agents that claim to be a browser but lack browser headers.
-	if strings.Contains(strings.ToLower(ua), "python-requests") ||
-		strings.Contains(strings.ToLower(ua), "python-urllib") ||
-		strings.Contains(strings.ToLower(ua), "go-http-client") ||
-		strings.HasPrefix(strings.ToLower(ua), "java/") ||
-		strings.HasPrefix(strings.ToLower(ua), "curl/") ||
-		strings.HasPrefix(strings.ToLower(ua), "wget/") ||
-		strings.Contains(strings.ToLower(ua), "libwww-perl") ||
-		strings.Contains(strings.ToLower(ua), "okhttp") {
+	uaLower := strings.ToLower(ua)
+	if strings.Contains(uaLower, "python-requests") ||
+		strings.Contains(uaLower, "python-urllib") ||
+		strings.Contains(uaLower, "go-http-client") ||
+		strings.HasPrefix(uaLower, "java/") ||
+		strings.HasPrefix(uaLower, "curl/") ||
+		strings.HasPrefix(uaLower, "wget/") ||
+		strings.Contains(uaLower, "libwww-perl") ||
+		strings.Contains(uaLower, "okhttp") ||
+		strings.Contains(uaLower, "apache-httpclient") ||
+		strings.Contains(uaLower, "node-fetch") ||
+		strings.Contains(uaLower, "axios/") {
 		score += 50
 		reasons = append(reasons, "automation_lib_ua")
 	}
@@ -163,11 +182,41 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
 		reasons = append(reasons, "no_cookie_post")
 	}
 
+	// Additional fingerprint checks
+
+	// Suspicious path patterns (common scanner paths)
+	if strings.Contains(r.Path, "/.env") ||
+		strings.Contains(r.Path, "/phpMyAdmin") ||
+		strings.Contains(r.Path, "/wp-admin") ||
+		strings.Contains(r.Path, "/.git") ||
+		strings.Contains(r.Path, "/admin") && r.Method == "GET" && !r.HasCookie {
+		score += 10
+		reasons = append(reasons, "scanner_path")
+	}
+
+	// Referer anomalies
+	if r.Method == "POST" && r.Referer == "" {
+		score += 8
+		reasons = append(reasons, "post_no_referer")
+	}
+
+	// User-Agent version mismatch patterns
+	if strings.Contains(uaLower, "chrome") && !strings.Contains(uaLower, "safari") {
+		score += 15
+		reasons = append(reasons, "chrome_without_safari")
+	}
+
 	return score, reasons
 }
 
 // CheckBot evaluates the full bot signal (UA signature + fingerprint score).
+// The level parameter controls detection sensitivity: "low", "medium", "high".
 func CheckBot(r BotRequest) BotVerdict {
+	return CheckBotWithLevel(r, "medium")
+}
+
+// CheckBotWithLevel evaluates bot signals with configurable protection level.
+func CheckBotWithLevel(r BotRequest, level string) BotVerdict {
 	ua := strings.TrimSpace(r.UserAgent)
 
 	// Known good bots short-circuit.
@@ -195,9 +244,27 @@ func CheckBot(r BotRequest) BotVerdict {
 		}
 	}
 
-	// Cumulative fingerprint scoring.
+	// Cumulative fingerprint scoring with level-based thresholds.
 	score, reasons := fingerprintScore(r)
-	if score >= 80 {
+
+	// Adjust thresholds based on protection level
+	var maliciousThreshold, suspiciousHighThreshold, suspiciousLowThreshold int
+	switch level {
+	case "low":
+		maliciousThreshold = 90
+		suspiciousHighThreshold = 70
+		suspiciousLowThreshold = 40
+	case "high":
+		maliciousThreshold = 60
+		suspiciousHighThreshold = 35
+		suspiciousLowThreshold = 15
+	default: // "medium"
+		maliciousThreshold = 80
+		suspiciousHighThreshold = 50
+		suspiciousLowThreshold = 25
+	}
+
+	if score >= maliciousThreshold {
 		return BotVerdict{
 			IsBot:    true,
 			Score:    score,
@@ -206,7 +273,7 @@ func CheckBot(r BotRequest) BotVerdict {
 			RuleID:   "bot:fp:001",
 		}
 	}
-	if score >= 50 {
+	if score >= suspiciousHighThreshold {
 		return BotVerdict{
 			IsBot:    true,
 			Score:    score,
@@ -215,7 +282,7 @@ func CheckBot(r BotRequest) BotVerdict {
 			RuleID:   "bot:fp:002",
 		}
 	}
-	if score >= 25 {
+	if score >= suspiciousLowThreshold {
 		return BotVerdict{
 			IsBot:    true,
 			Score:    score,

@@ -12,23 +12,17 @@ import {
   Activity,
   AlertTriangle,
   Zap,
+  Globe,
+  CheckCircle2,
+  XCircle,
+  Target,
+  TrendingUp,
 } from "lucide-react";
 import { toast } from "sonner";
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  BarChart,
-  Bar,
-  Legend,
-} from "recharts";
+import { RealtimeQPSChart } from "@/components/charts/realtime-qps-chart";
+import { AttackHeatmap } from "@/components/charts/attack-heatmap";
+import { CategoryPieChart } from "@/components/charts/category-pie-chart";
+import { TopListCard } from "@/components/charts/top-list-card";
 
 interface DashboardData {
   qps_1s: number;
@@ -63,11 +57,6 @@ interface QPSPoint {
   qps: number;
 }
 
-const PIE_COLORS = [
-  "#ef4444", "#f97316", "#eab308", "#22c55e",
-  "#06b6d4", "#3b82f6", "#8b5cf6", "#ec4899",
-];
-
 const CATEGORY_LABELS: Record<string, string> = {
   sqli: "SQL 注入",
   xss: "XSS",
@@ -94,6 +83,7 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<StatsData | null>(null);
   const [timeline, setTimeline] = useState<TimelinePoint[]>([]);
   const [qpsHistory, setQpsHistory] = useState<QPSPoint[]>([]);
+  const [sites, setSites] = useState<{ id: number; name: string; enabled: boolean }[]>([]);
   const [error, setError] = useState("");
   const [reloading, setReloading] = useState(false);
 
@@ -118,12 +108,14 @@ export default function DashboardPage() {
 
   const loadStats = useCallback(async () => {
     try {
-      const [s, t] = await Promise.all([
+      const [s, t, siteList] = await Promise.all([
         api<StatsData>("/api/v1/security-events/stats?hours=24"),
         api<{ items: TimelinePoint[] | null }>("/api/v1/security-events/timeline?hours=24"),
+        api<{ items: { id: number; name: string; enabled: boolean }[] }>("/api/v1/sites"),
       ]);
       setStats(s);
       setTimeline(t.items || []);
+      setSites(siteList.items || []);
     } catch {
       // non-critical
     }
@@ -152,6 +144,22 @@ export default function DashboardPage() {
     } finally {
       setReloading(false);
     }
+  }
+
+  async function handleAddToBlacklist(value: string) {
+    // Create a new ACL rule to block this IP
+    await api("/api/v1/rules", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `Auto-block ${value}`,
+        enabled: true,
+        priority: 100,
+        pattern: `block_ip:${value}`,
+        action: "block",
+        description: `Automatically added from dashboard`,
+      }),
+    });
+    await api("/api/v1/reload", { method: "POST" });
   }
 
   if (error) {
@@ -225,129 +233,131 @@ export default function DashboardPage() {
         />
       </div>
 
+      {/* Site Status Overview */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Globe className="h-4 w-4 text-green-500" />
+            站点状态概览
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {sites.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {sites.map((site) => (
+                <div
+                  key={site.id}
+                  className="flex items-center justify-between p-3 rounded-lg border bg-card hover:bg-muted/50 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    {site.enabled ? (
+                      <CheckCircle2 className="h-5 w-5 text-green-500" />
+                    ) : (
+                      <XCircle className="h-5 w-5 text-gray-400" />
+                    )}
+                    <div>
+                      <p className="text-sm font-medium">{site.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {site.enabled ? "运行中" : "已停用"}
+                      </p>
+                    </div>
+                  </div>
+                  <Badge variant={site.enabled ? "default" : "secondary"}>
+                    {site.enabled ? "启用" : "禁用"}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex h-[100px] items-center justify-center text-sm text-muted-foreground">
+              暂无站点配置
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Charts row */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* QPS trend */}
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">QPS 趋势</CardTitle>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Activity className="h-4 w-4 text-blue-500" />
+              实时 QPS 趋势
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="h-[240px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={qpsHistory}>
-                  <defs>
-                    <linearGradient id="qpsGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                  <XAxis dataKey="time" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} />
-                  <Tooltip />
-                  <Area
-                    type="monotone"
-                    dataKey="qps"
-                    stroke="#3b82f6"
-                    fill="url(#qpsGradient)"
-                    strokeWidth={2}
-                    name="QPS"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
+            <RealtimeQPSChart data={qpsHistory} height={280} />
           </CardContent>
         </Card>
 
         {/* Attack type distribution */}
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">24h 攻击类型分布</CardTitle>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Target className="h-4 w-4 text-red-500" />
+              24h 攻击类型分布
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="h-[240px]">
-              {pieData.length > 0 ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={pieData}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={50}
-                      outerRadius={90}
-                      paddingAngle={2}
-                      dataKey="value"
-                    >
-                      {pieData.map((_, index) => (
-                        <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip />
-                    <Legend
-                      layout="vertical"
-                      align="right"
-                      verticalAlign="middle"
-                      wrapperStyle={{ fontSize: 11 }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                  暂无攻击数据
-                </div>
-              )}
-            </div>
+            {pieData.length > 0 ? (
+              <CategoryPieChart data={pieData} height={280} />
+            ) : (
+              <div className="flex h-[280px] items-center justify-center text-sm text-muted-foreground">
+                暂无攻击数据
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
 
       {/* Timeline chart */}
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium">24h 安全事件时间线</CardTitle>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-orange-500" />
+            24h 攻击时间线热力图
+          </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="h-[200px]">
-            {timelineData.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={timelineData}>
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                  <XAxis dataKey="hour" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} />
-                  <Tooltip />
-                  <Bar dataKey="count" fill="#ef4444" radius={[2, 2, 0, 0]} name="事件数" />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                暂无时间线数据
-              </div>
-            )}
-          </div>
+          {timelineData.length > 0 ? (
+            <AttackHeatmap data={timelineData} height={280} />
+          ) : (
+            <div className="flex h-[280px] items-center justify-center text-sm text-muted-foreground">
+              暂无时间线数据
+            </div>
+          )}
         </CardContent>
       </Card>
 
       {/* Top rankings */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-        <RankingCard
+        <TopListCard
           title="Top 10 攻击 IP"
+          icon={<Shield className="h-4 w-4 text-red-500" />}
           items={(stats?.top_ips || []).map((ip) => ({
             label: ip.client_ip,
+            value: ip.client_ip,
             count: ip.count,
+            actionable: true,
           }))}
+          onAddToBlacklist={handleAddToBlacklist}
         />
-        <RankingCard
+        <TopListCard
           title="Top 10 攻击路径"
+          icon={<Globe className="h-4 w-4 text-blue-500" />}
           items={(stats?.top_paths || []).map((p) => ({
-            label: p.path,
+            label: p.path.length > 30 ? p.path.slice(0, 30) + "..." : p.path,
+            value: p.path,
             count: p.count,
           }))}
         />
-        <RankingCard
+        <TopListCard
           title="Top 10 触发规则"
+          icon={<Zap className="h-4 w-4 text-yellow-500" />}
           items={(stats?.top_rules || []).map((r) => ({
             label: r.rule_id_str,
+            value: r.rule_id_str,
             count: r.count,
           }))}
         />
@@ -374,7 +384,7 @@ function MetricCard({
   secondary: string;
 }) {
   return (
-    <Card>
+    <Card className="hover:shadow-md transition-shadow">
       <CardHeader className="flex flex-row items-center justify-between pb-2">
         <CardTitle className="text-sm font-medium text-muted-foreground">
           {title}
@@ -384,53 +394,6 @@ function MetricCard({
       <CardContent>
         <div className="text-3xl font-bold tabular-nums">{primary.toLocaleString()}</div>
         <p className="mt-1 text-xs text-muted-foreground">{secondary}</p>
-      </CardContent>
-    </Card>
-  );
-}
-
-function RankingCard({
-  title,
-  items,
-}: {
-  title: string;
-  items: { label: string; count: number }[];
-}) {
-  const maxCount = items.length > 0 ? items[0].count : 1;
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {items.length === 0 ? (
-          <div className="py-4 text-center text-sm text-muted-foreground">
-            暂无数据
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {items.slice(0, 10).map((item, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <span className="w-5 text-right text-xs font-medium text-muted-foreground">
-                  {i + 1}
-                </span>
-                <div className="relative flex-1">
-                  <div
-                    className="absolute inset-y-0 left-0 rounded bg-muted"
-                    style={{ width: `${(item.count / maxCount) * 100}%` }}
-                  />
-                  <span className="relative truncate px-1.5 text-xs font-mono">
-                    {item.label}
-                  </span>
-                </div>
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {item.count.toLocaleString()}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
       </CardContent>
     </Card>
   );

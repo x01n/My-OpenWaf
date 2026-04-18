@@ -20,7 +20,7 @@ func AcquireCtx() *RequestCtx {
 // ReleaseCtx returns a RequestCtx to the pool after clearing its fields.
 func ReleaseCtx(ctx *RequestCtx) {
 	ctx.RequestID = ""
-	ctx.ListenerID = 0
+	ctx.Bind = ""
 	ctx.ClientIP = nil
 	ctx.Method = ""
 	ctx.Path = ""

@@ -9,15 +9,15 @@ import {
   LayoutDashboard,
   Shield,
   Globe,
-  Server,
   Key,
   FileText,
   Settings,
   Lock,
-  Network,
   LogOut,
   ShieldAlert,
   Ban,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -32,10 +32,8 @@ const groups = [
   {
     title: "接入",
     items: [
-      { href: "/listeners/", label: "监听器", icon: Server },
       { href: "/sites/", label: "站点", icon: Globe },
       { href: "/certificates/", label: "证书", icon: Lock },
-      { href: "/forwarding-profiles/", label: "转发配置", icon: Network },
     ],
   },
   {
@@ -57,7 +55,12 @@ const groups = [
   },
 ];
 
-export function SidebarNav() {
+interface SidebarNavProps {
+  collapsed: boolean;
+  onToggle: () => void;
+}
+
+export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -67,48 +70,75 @@ export function SidebarNav() {
   }
 
   return (
-    <aside className="flex w-56 flex-col border-r bg-sidebar text-sidebar-foreground">
-      <div className="flex h-14 items-center px-4 font-semibold tracking-tight">
-        My-OpenWAF
+    <aside
+      className={cn(
+        "flex flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-all duration-300 card-shadow-lg",
+        collapsed ? "w-16" : "w-64"
+      )}
+    >
+      <div className="flex h-14 items-center justify-between px-4">
+        {!collapsed && (
+          <div className="font-bold text-lg tracking-tight bg-gradient-to-r from-primary to-chart-2 bg-clip-text text-transparent">
+            My-OpenWAF
+          </div>
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onToggle}
+          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+        >
+          {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+        </Button>
       </div>
-      <Separator />
-      <nav className="flex-1 overflow-y-auto px-2 py-3 text-sm">
+      <Separator className="bg-sidebar-border" />
+      <nav className="flex-1 overflow-y-auto px-2 py-4 text-sm space-y-6">
         {groups.map((g) => (
-          <div key={g.title} className="mb-4">
-            <div className="mb-1 px-2 text-xs font-medium uppercase text-muted-foreground">
-              {g.title}
+          <div key={g.title}>
+            {!collapsed && (
+              <div className="mb-2 px-3 text-xs font-semibold uppercase text-muted-foreground tracking-wider">
+                {g.title}
+              </div>
+            )}
+            <div className="space-y-1">
+              {g.items.map((item) => {
+                const active = pathname === item.href || pathname?.startsWith(item.href.replace(/\/$/, "") + "/");
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      "flex items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-200",
+                      active
+                        ? "nav-item-active"
+                        : "text-muted-foreground nav-item-hover",
+                      collapsed && "justify-center"
+                    )}
+                    title={collapsed ? item.label : undefined}
+                  >
+                    <item.icon className={cn("h-5 w-5 flex-shrink-0", active && "text-primary")} />
+                    {!collapsed && <span className="truncate">{item.label}</span>}
+                  </Link>
+                );
+              })}
             </div>
-            {g.items.map((item) => {
-              const active = pathname === item.href || pathname?.startsWith(item.href.replace(/\/$/, "") + "/");
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    "flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors",
-                    active
-                      ? "bg-accent font-medium text-accent-foreground"
-                      : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-                  )}
-                >
-                  <item.icon className="h-4 w-4" />
-                  {item.label}
-                </Link>
-              );
-            })}
           </div>
         ))}
       </nav>
-      <Separator />
+      <Separator className="bg-sidebar-border" />
       <div className="p-2">
         <Button
           variant="ghost"
           size="sm"
-          className="w-full justify-start gap-2 text-muted-foreground"
+          className={cn(
+            "w-full gap-3 text-muted-foreground hover:text-foreground hover:bg-destructive/10",
+            collapsed ? "justify-center px-2" : "justify-start"
+          )}
           onClick={handleLogout}
+          title={collapsed ? "退出登录" : undefined}
         >
-          <LogOut className="h-4 w-4" />
-          退出登录
+          <LogOut className="h-4 w-4 flex-shrink-0" />
+          {!collapsed && "退出登录"}
         </Button>
       </div>
     </aside>

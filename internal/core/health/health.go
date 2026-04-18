@@ -72,7 +72,12 @@ func (c *Checker) StatusHandler() app.HandlerFunc {
 		if sn != nil {
 			rev = sn.Revision
 			sites = len(sn.Sites)
-			listeners = len(sn.DataListeners)
+			// Count unique listener bind addresses from sites
+			listenerSet := make(map[string]bool)
+			for _, site := range sn.Sites {
+				listenerSet[site.Bind] = true
+			}
+			listeners = len(listenerSet)
 		}
 		rc.JSON(200, map[string]any{
 			"alive":      c.Alive(),

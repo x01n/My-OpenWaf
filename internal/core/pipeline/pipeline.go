@@ -9,7 +9,7 @@ import (
 // RequestCtx carries all decoded request data through the pipeline.
 type RequestCtx struct {
 	RequestID   string
-	ListenerID  uint
+	Bind        string // Listener bind address (e.g., ":443")
 	ClientIP    net.IP
 	Method      string
 	Path        string

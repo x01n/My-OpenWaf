@@ -46,7 +46,7 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 		}
 		req.Header.Add(string(k), string(v))
 	})
-	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.Forwarding)
+	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.PreserveOriginalHost)
 
 	hc := &http.Client{Transport: proxy.SharedTransport(rt), Timeout: 0}
 	resp, err := hc.Do(req)

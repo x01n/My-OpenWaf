@@ -25,7 +25,7 @@ import (
 
 // Options configures a single data listener handler.
 type Options struct {
-	ListenerID   uint
+	Bind         string
 	Holder       *snapshot.Holder
 	Engine       *engine.Engine
 	Metrics      *Metrics
@@ -58,20 +58,25 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		host := string(c.Host())
-		rt, ok := sn.MatchSite(opts.ListenerID, host)
+		rt, ok := sn.MatchSite(opts.Bind, host)
 		if !ok {
+			opts.Log.Warn("no site match",
+				slog.String("host", host),
+				slog.String("bind", opts.Bind),
+				slog.Int("sites", len(sn.Sites)),
+			)
 			c.String(404, "unknown virtual host")
 			return
 		}
 
-		clientIP := security.ResolveClientIP(c, rt.Forwarding)
+		clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR)
 		path := string(c.Path())
 		rawQ := string(c.URI().QueryString())
 
 		// Build request context from pool to reduce GC pressure.
 		reqCtx := pipeline.AcquireCtx()
 		reqCtx.RequestID = reqID
-		reqCtx.ListenerID = opts.ListenerID
+		reqCtx.Bind = opts.Bind
 		reqCtx.ClientIP = clientIP
 		reqCtx.Method = string(c.Method())
 		reqCtx.Path = path

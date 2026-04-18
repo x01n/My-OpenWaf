@@ -102,7 +102,7 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		req.Header.Add(string(k), string(v))
 	})
 
-	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.Forwarding)
+	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.PreserveOriginalHost)
 
 	hc := &http.Client{Transport: SharedTransport(rt), Timeout: 60 * time.Second}
 	resp, err := hc.Do(req)

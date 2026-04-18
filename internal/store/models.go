@@ -6,33 +6,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// ─── Listener ──────────────────────────────────────────────────────
-
-type ListenerRole string
-
-const (
-	ListenerRoleAdmin ListenerRole = "admin"
-	ListenerRoleData  ListenerRole = "data"
-)
-
-type Listener struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
-
-	Name       string       `gorm:"size:128" json:"name"`
-	Role       ListenerRole `gorm:"size:16;not null;index" json:"role"`
-	Bind       string       `gorm:"size:255;not null" json:"bind"`
-	Network    string       `gorm:"size:16;default:tcp" json:"network"`
-	Enabled    bool         `gorm:"default:true" json:"enabled"`
-	TLSEnabled bool         `gorm:"default:false" json:"tls_enabled"`
-	CertID     *uint        `json:"cert_id,omitempty"`
-
-	MinTLSVersion string `gorm:"size:32;default:TLS12" json:"min_tls_version"`
-	MaxTLSVersion string `gorm:"size:32;default:TLS13" json:"max_tls_version"`
-	ALPN          string `gorm:"size:255;default:h2,http/1.1" json:"alpn"`
-}
+// ─── Listener (DEPRECATED - merged into Site) ─────────────────────
+// Kept for migration purposes only
 
 // ─── Certificate ───────────────────────────────────────────────────
 
@@ -47,20 +22,8 @@ type Certificate struct {
 	KeyPEM  string `gorm:"type:text;not null" json:"key_pem"`
 }
 
-// ─── ForwardingProfile ─────────────────────────────────────────────
-
-type ForwardingProfile struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
-
-	Name                 string `gorm:"size:128;not null" json:"name"`
-	XFFMode              string `gorm:"size:64;default:strip_all_and_set_remote" json:"xff_mode"`
-	TrustedCIDR          string `gorm:"type:text" json:"trusted_cidr"`
-	OutboundHostRewrite  string `gorm:"size:255" json:"outbound_host_rewrite"`
-	PreserveOriginalHost bool   `gorm:"default:false" json:"preserve_original_host"`
-}
+// ─── ForwardingProfile (DEPRECATED - merged into Site) ────────────
+// Kept for migration purposes only
 
 const (
 	XFFModeStrip      = "strip_all_and_set_remote"
@@ -135,17 +98,36 @@ type Site struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
-	ListenerID   uint   `gorm:"not null;index" json:"listener_id"`
+	// Basic site info
 	Host         string `gorm:"size:255;not null;index" json:"host"`
 	UpstreamURLs string `gorm:"type:text;not null" json:"upstream_urls"`
 
-	CertID              *uint `json:"cert_id,omitempty"`
-	InheritListenerCert bool  `gorm:"default:false" json:"inherit_listener_cert"`
-	PolicyID            *uint `json:"policy_id,omitempty"`
-	ForwardingProfileID *uint `json:"forwarding_profile_id,omitempty"`
+	// Listener configuration (merged from Listener model)
+	Bind    string `gorm:"size:255;not null;index" json:"bind"`
+	Network string `gorm:"size:16;default:tcp" json:"network"`
+	Enabled bool   `gorm:"default:true" json:"enabled"`
 
-	MaxBodyBytes int64 `gorm:"default:10485760" json:"max_body_bytes"`
+	// TLS configuration
+	TLSEnabled    bool   `gorm:"default:false" json:"tls_enabled"`
+	CertID        *uint  `json:"cert_id,omitempty"`
+	MinTLSVersion string `gorm:"size:32;default:TLS12" json:"min_tls_version"`
+	MaxTLSVersion string `gorm:"size:32;default:TLS13" json:"max_tls_version"`
+	CipherSuites  string `gorm:"type:text" json:"cipher_suites"`
+	ALPN          string `gorm:"size:255;default:h2,http/1.1" json:"alpn"`
 
+	// Protection configuration
+	PolicyID              *uint  `json:"policy_id,omitempty"`
+	BotProtectionEnabled  bool   `gorm:"default:false" json:"bot_protection_enabled"`
+	BotProtectionLevel    string `gorm:"size:16;default:medium" json:"bot_protection_level"`
+	AttackProtectionLevel string `gorm:"size:16;default:medium" json:"attack_protection_level"`
+
+	// Forwarding configuration (merged from ForwardingProfile)
+	XFFMode              string `gorm:"size:64;default:strip_all_and_set_remote" json:"xff_mode"`
+	TrustedCIDR          string `gorm:"type:text" json:"trusted_cidr"`
+	PreserveOriginalHost bool   `gorm:"default:false" json:"preserve_original_host"`
+
+	// Body and upstream settings
+	MaxBodyBytes          int64  `gorm:"default:10485760" json:"max_body_bytes"`
 	UpstreamTLSSkipVerify bool   `gorm:"default:false" json:"upstream_tls_skip_verify"`
 	UpstreamTLSServerName string `gorm:"size:255" json:"upstream_tls_server_name"`
 
@@ -157,6 +139,11 @@ type Site struct {
 	// Per-site block page (empty = use global default)
 	BlockHTML   string `gorm:"type:text" json:"block_html"`
 	BlockStatus int    `gorm:"default:403" json:"block_status"`
+
+	// Legacy fields (deprecated, kept for migration compatibility)
+	ListenerID          uint  `gorm:"index" json:"listener_id,omitempty"`
+	ForwardingProfileID *uint `json:"forwarding_profile_id,omitempty"`
+	InheritListenerCert bool  `gorm:"default:false" json:"inherit_listener_cert,omitempty"`
 }
 
 // ─── SystemSettings ────────────────────────────────────────────────
@@ -306,5 +293,41 @@ func DefaultProtectionConfig() ProtectionConfig {
 		AutoBanThreshold:        10,
 		AutoBanWindow:           60,
 		AutoBanDuration:         3600,
+	}
+}
+
+// ─── Bot Protection Config ─────────────────────────────────────────
+
+type BotProtectionConfig struct {
+	Enabled bool   `json:"enabled"`
+	Level   string `json:"level"`  // "low", "medium", "high"
+	Action  string `json:"action"` // "intercept", "observe"
+}
+
+func DefaultBotProtectionConfig() BotProtectionConfig {
+	return BotProtectionConfig{
+		Enabled: false,
+		Level:   "medium",
+		Action:  "intercept",
+	}
+}
+
+// ─── Attack Protection Config ──────────────────────────────────────
+
+type AttackProtectionConfig struct {
+	OWASPEnabled     bool   `json:"owasp_enabled"`
+	OWASPSensitivity string `json:"owasp_sensitivity"` // "low", "mid", "high"
+	OWASPAction      string `json:"owasp_action"`
+	SignatureEnabled bool   `json:"signature_enabled"`
+	SignatureAction  string `json:"signature_action"`
+}
+
+func DefaultAttackProtectionConfig() AttackProtectionConfig {
+	return AttackProtectionConfig{
+		OWASPEnabled:     true,
+		OWASPSensitivity: "mid",
+		OWASPAction:      "intercept",
+		SignatureEnabled: false,
+		SignatureAction:  "intercept",
 	}
 }

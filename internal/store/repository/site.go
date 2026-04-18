@@ -22,9 +22,14 @@ func (r *SiteRepo) List(offset, limit int) ([]store.Site, int64, error) {
 	return items, total, nil
 }
 
-func (r *SiteRepo) ListByListener(listenerID uint) ([]store.Site, error) {
+func (r *SiteRepo) FindEnabled() ([]store.Site, error) {
 	var items []store.Site
-	return items, r.db.Where("listener_id = ?", listenerID).Order("id ASC").Find(&items).Error
+	return items, r.db.Where("enabled = ?", true).Order("id ASC").Find(&items).Error
+}
+
+func (r *SiteRepo) FindByBind(bind string) ([]store.Site, error) {
+	var items []store.Site
+	return items, r.db.Where("bind = ? AND enabled = ?", bind, true).Order("id ASC").Find(&items).Error
 }
 
 func (r *SiteRepo) Get(id uint) (*store.Site, error) {

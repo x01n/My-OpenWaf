@@ -289,7 +289,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 		return extractMultipartFieldValues(body, contentType)
 	case strings.Contains(ct, "text/") || strings.Contains(ct, "application/xml") || strings.Contains(ct, "application/soap"):
 		// Text-like content types: scan as a single target but with a size limit.
-		limit := 4096
+		limit := 8192
 		if len(body) < limit {
 			limit = len(body)
 		}
@@ -310,7 +310,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 		if float64(printable)/float64(len(sample)) < 0.9 {
 			return nil // Binary data — skip scanning to avoid false positives
 		}
-		limit := 4096
+		limit := 8192
 		if len(body) < limit {
 			limit = len(body)
 		}
@@ -319,28 +319,37 @@ func extractBodyTargets(body []byte, contentType string) []string {
 }
 
 // extractFormValues splits form-urlencoded body into individual decoded values.
+// Both parameter names (keys) and values are scanned — attackers may inject
+// payloads via key names (e.g. `1 UNION SELECT--=x`).
 func extractFormValues(body string) []string {
 	var vals []string
 	for body != "" {
-		key := body
-		if i := strings.IndexByte(key, '&'); i >= 0 {
-			key, body = key[:i], key[i+1:]
+		pair := body
+		if i := strings.IndexByte(pair, '&'); i >= 0 {
+			pair, body = pair[:i], pair[i+1:]
 		} else {
 			body = ""
 		}
-		if key == "" {
+		if pair == "" {
 			continue
 		}
-		value := ""
-		if i := strings.IndexByte(key, '='); i >= 0 {
-			value = key[i+1:]
+		paramKey, value, hasEq := strings.Cut(pair, "=")
+		if hasEq {
+			dv, err := url.QueryUnescape(value)
+			if err != nil {
+				dv = value
+			}
+			if dv != "" {
+				vals = append(vals, dv)
+			}
 		}
-		dv, err := url.QueryUnescape(value)
+		// Also scan the parameter name for injected payloads.
+		dk, err := url.QueryUnescape(paramKey)
 		if err != nil {
-			dv = value
+			dk = paramKey
 		}
-		if dv != "" {
-			vals = append(vals, dv)
+		if dk != "" {
+			vals = append(vals, dk)
 		}
 	}
 	return vals
@@ -358,7 +367,7 @@ func extractJSONValues(body []byte) []string {
 }
 
 func walkJSON(v any, vals *[]string, depth int) {
-	if depth > 10 || len(*vals) > 50 {
+	if depth > 10 || len(*vals) > 100 {
 		return
 	}
 	switch val := v.(type) {

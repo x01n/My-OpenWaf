@@ -9,8 +9,8 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// ResolveClientIP applies forwarding profile XFF semantics for WAF decisions.
-func ResolveClientIP(c *app.RequestContext, fwd *store.ForwardingProfile) net.IP {
+// ResolveClientIP applies XFF semantics for WAF decisions.
+func ResolveClientIP(c *app.RequestContext, xffMode, trustedCIDR string) net.IP {
 	remoteHost, _, err := net.SplitHostPort(c.RemoteAddr().String())
 	if err != nil {
 		remoteHost = c.RemoteAddr().String()
@@ -20,16 +20,15 @@ func ResolveClientIP(c *app.RequestContext, fwd *store.ForwardingProfile) net.IP
 		return nil
 	}
 
-	mode := store.XFFModeStrip
-	if fwd != nil && fwd.XFFMode != "" {
-		mode = fwd.XFFMode
+	if xffMode == "" {
+		xffMode = store.XFFModeStrip
 	}
 
-	switch mode {
+	switch xffMode {
 	case store.XFFModeStrip:
 		return direct
 	case store.XFFModeTrustOuter:
-		if fwd == nil || !remoteInTrustedCIDR(direct, fwd.TrustedCIDR) {
+		if !remoteInTrustedCIDR(direct, trustedCIDR) {
 			return direct
 		}
 		xff := strings.TrimSpace(c.Request.Header.Get("X-Forwarded-For"))

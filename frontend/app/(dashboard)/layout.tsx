@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { AuthGuard } from "@/components/auth-guard";
 import { DashboardTopbar } from "@/components/dashboard-topbar";
 import { SidebarNav } from "@/components/sidebar-nav";
@@ -10,14 +11,19 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
   return (
     <AuthGuard>
-      <div className="flex h-svh overflow-hidden bg-background">
-        <SidebarNav />
+      <div className="flex h-svh overflow-hidden gradient-bg">
+        <SidebarNav
+          collapsed={sidebarCollapsed}
+          onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+        />
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <DashboardTopbar />
           <main className="flex-1 overflow-y-auto">
-            <div className="mx-auto max-w-6xl px-6 py-6">{children}</div>
+            <div className="mx-auto max-w-7xl px-6 py-6">{children}</div>
           </main>
         </div>
       </div>

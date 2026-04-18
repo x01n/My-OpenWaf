@@ -13,21 +13,11 @@ import (
 
 // Build loads DB into an immutable Snapshot.
 func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
-	var listeners []store.Listener
-	if err := db.Where("enabled = ?", true).Find(&listeners).Error; err != nil {
+	var sites []store.Site
+	if err := db.Where("enabled = ?", true).Find(&sites).Error; err != nil {
 		return nil, err
-	}
-	dataListeners := make(map[uint]store.Listener)
-	for _, l := range listeners {
-		if l.Role == store.ListenerRoleData {
-			dataListeners[l.ID] = l
-		}
 	}
 
-	var sites []store.Site
-	if err := db.Find(&sites).Error; err != nil {
-		return nil, err
-	}
 	var certs []store.Certificate
 	if err := db.Find(&certs).Error; err != nil {
 		return nil, err
@@ -35,15 +25,6 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	certByID := make(map[uint]store.Certificate)
 	for _, c := range certs {
 		certByID[c.ID] = c
-	}
-
-	var profiles []store.ForwardingProfile
-	if err := db.Find(&profiles).Error; err != nil {
-		return nil, err
-	}
-	profByID := make(map[uint]store.ForwardingProfile)
-	for _, p := range profiles {
-		profByID[p.ID] = p
 	}
 
 	var rules []store.Rule
@@ -65,93 +46,88 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		rulesByPolicy[pid] = rs
 	}
 
-	listenerTLS := make(map[uint]tls.Certificate)
-	for lid, l := range dataListeners {
-		if l.CertID != nil {
-			if c, ok := certByID[*l.CertID]; ok {
-				if cert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
-					listenerTLS[lid] = cert
-				}
-			}
-		}
-	}
-
 	sniCerts := make(map[string]tls.Certificate)
 	siteMap := make(map[string]SiteRuntime)
+
 	for _, s := range sites {
-		l, ok := dataListeners[s.ListenerID]
-		if !ok {
-			continue
-		}
-
-		// TLS/443 policy: if listener is TLS-enabled and site has no cert, skip it.
-		if l.TLSEnabled {
-			hasCert := s.CertID != nil
-			hasInherited := s.InheritListenerCert && l.CertID != nil
-			if !hasCert && !hasInherited {
-				continue
-			}
-		}
-
 		urls := parseUpstreamURLs(s.UpstreamURLs)
 		if len(urls) == 0 {
 			continue
 		}
-		var fwd *store.ForwardingProfile
-		if s.ForwardingProfileID != nil {
-			if p, ok := profByID[*s.ForwardingProfileID]; ok {
-				fwd = &p
-			}
-		}
+
+		// Build TLS config if site has certificate
+		var tlsConfig *tls.Config
 		var cert *store.Certificate
 		if s.CertID != nil {
 			if c, ok := certByID[*s.CertID]; ok {
 				cert = &c
+				if tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
+					tlsConfig = &tls.Config{
+						Certificates: []tls.Certificate{tlsCert},
+						MinVersion:   tls.VersionTLS12,
+					}
+					// Register SNI cert
+					h := strings.ToLower(strings.TrimSpace(s.Host))
+					if h != "" {
+						sniCerts[SNICertKey(s.Bind, h)] = tlsCert
+					}
+				}
 			}
 		}
-		var lcert *store.Certificate
-		if l.CertID != nil {
-			if c, ok := certByID[*l.CertID]; ok {
-				lcert = &c
-			}
-		}
+
 		policyID := uint(0)
 		if s.PolicyID != nil {
 			policyID = *s.PolicyID
 		}
 		compiled := compileRules(rulesByPolicy[policyID])
 
+		// Build protection configs from site fields
+		botProtection := store.BotProtectionConfig{
+			Enabled: s.BotProtectionEnabled,
+			Level:   s.BotProtectionLevel,
+			Action:  "intercept",
+		}
+		if botProtection.Level == "" {
+			botProtection.Level = "medium"
+		}
+
+		attackProtection := store.AttackProtectionConfig{
+			OWASPEnabled:     true,
+			OWASPSensitivity: s.AttackProtectionLevel,
+			OWASPAction:      "intercept",
+			SignatureEnabled: false,
+			SignatureAction:  "intercept",
+		}
+		if attackProtection.OWASPSensitivity == "" {
+			attackProtection.OWASPSensitivity = "medium"
+		}
+
+		// Get forwarding settings from site
+		xffMode := s.XFFMode
+		if xffMode == "" {
+			xffMode = store.XFFModeStrip
+		}
+
 		rt := SiteRuntime{
-			Site:               s,
-			PolicyID:           policyID,
-			Rules:              compiled,
-			Forwarding:         fwd,
-			UpstreamURLs:       urls,
-			Certificate:        cert,
-			ListenerCert:       lcert,
-			Listener:           l,
-			MaintenanceEnabled: s.MaintenanceEnabled,
-			MaintenanceHTML:    s.MaintenanceHTML,
-			MaintenanceStatus:  s.MaintenanceStatus,
-			BlockHTML:          s.BlockHTML,
-			BlockStatus:        s.BlockStatus,
+			Site:                 s,
+			PolicyID:             policyID,
+			Rules:                compiled,
+			UpstreamURLs:         urls,
+			Certificate:          cert,
+			Bind:                 s.Bind,
+			TLSConfig:            tlsConfig,
+			BotProtection:        botProtection,
+			AttackProtection:     attackProtection,
+			XFFMode:              xffMode,
+			TrustedCIDR:          s.TrustedCIDR,
+			PreserveOriginalHost: s.PreserveOriginalHost,
+			MaintenanceEnabled:   s.MaintenanceEnabled,
+			MaintenanceHTML:      s.MaintenanceHTML,
+			MaintenanceStatus:    s.MaintenanceStatus,
+			BlockHTML:            s.BlockHTML,
+			BlockStatus:          s.BlockStatus,
 		}
 		registerSiteKeys(siteMap, rt)
-
-		h := strings.ToLower(strings.TrimSpace(s.Host))
-		if h != "" {
-			if s.CertID != nil {
-				if c, ok := certByID[*s.CertID]; ok {
-					if cert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
-						sniCerts[SNICertKey(s.ListenerID, h)] = cert
-					}
-				}
-			} else if s.InheritListenerCert {
-				if cert, ok := listenerTLS[s.ListenerID]; ok {
-					sniCerts[SNICertKey(s.ListenerID, h)] = cert
-				}
-			}
-		}
 	}
 
 	// Load protection settings from SystemSettings.
@@ -159,10 +135,8 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 
 	return &Snapshot{
 		Revision:         rev,
-		DataListeners:    dataListeners,
 		Sites:            siteMap,
 		DefaultBlockHTML: "",
-		ListenerTLSCert:  listenerTLS,
 		SiteTLSCertBySNI: sniCerts,
 		Protection:       protection,
 	}, nil
@@ -173,8 +147,8 @@ func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) {
 	if h == "" {
 		return
 	}
-	lid := rt.Site.ListenerID
-	m[SiteMapKey(lid, h)] = rt
+	bind := rt.Bind
+	m[SiteMapKey(bind, h)] = rt
 }
 
 func parseUpstreamURLs(raw string) []string {

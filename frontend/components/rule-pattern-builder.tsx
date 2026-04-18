@@ -13,14 +13,19 @@ const RULE_KINDS = [
   { value: "block_ip", label: "封禁 IP / CIDR", placeholder: "192.168.1.0/24", group: "ACL" },
   { value: "allow_ip", label: "放行 IP / CIDR", placeholder: "10.0.0.0/8", group: "ACL" },
   { value: "block_path", label: "路径前缀匹配", placeholder: "/admin", group: "路径" },
+  { value: "allow_path", label: "放行路径前缀", placeholder: "/health", group: "路径" },
   { value: "block_path_exact", label: "路径精确匹配", placeholder: "/.env", group: "路径" },
   { value: "block_path_regex", label: "路径正则匹配", placeholder: "(?i)/admin.*\\.php", group: "路径" },
+  { value: "allow_path_regex", label: "放行路径正则", placeholder: "(?i)/api/public/.*", group: "路径" },
   { value: "block_query_contains", label: "查询参数包含", placeholder: "union+select", group: "查询" },
   { value: "block_query_regex", label: "查询参数正则", placeholder: "(?i)union\\s+select", group: "查询" },
   { value: "block_header", label: "请求头包含", placeholder: "User-Agent:BadBot", group: "请求头" },
+  { value: "allow_header", label: "放行请求头", placeholder: "X-API-Key:secret", group: "请求头" },
   { value: "block_header_regex", label: "请求头正则", placeholder: "User-Agent:(?i)bot|crawl", group: "请求头" },
   { value: "block_method", label: "HTTP 方法", placeholder: "DELETE", group: "协议" },
   { value: "block_content_type", label: "Content-Type", placeholder: "application/xml", group: "协议" },
+  { value: "block_body_contains", label: "Body包含", placeholder: "eval(", group: "Body" },
+  { value: "block_body_regex", label: "Body正则", placeholder: "(?i)<script", group: "Body" },
 ] as const;
 
 interface Condition {
@@ -155,10 +160,21 @@ export function RulePatternBuilder({ value, onChange }: RulePatternBuilderProps)
                 <SelectValue placeholder="匹配类型" />
               </SelectTrigger>
               <SelectContent>
-                {RULE_KINDS.map((k) => (
-                  <SelectItem key={k.value} value={k.value}>
-                    {k.label}
-                  </SelectItem>
+                {Object.entries(
+                  RULE_KINDS.reduce((acc, k) => {
+                    if (!acc[k.group]) acc[k.group] = [];
+                    acc[k.group].push(k);
+                    return acc;
+                  }, {} as Record<string, typeof RULE_KINDS[number][]>)
+                ).map(([group, items]) => (
+                  <div key={group}>
+                    <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">{group}</div>
+                    {items.map((k) => (
+                      <SelectItem key={k.value} value={k.value}>
+                        {k.label}
+                      </SelectItem>
+                    ))}
+                  </div>
                 ))}
               </SelectContent>
             </Select>

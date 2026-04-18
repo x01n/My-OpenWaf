@@ -10,25 +10,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// SeedDefaults ensures default admin listener, API key, and admin account exist.
+// SeedDefaults ensures default API key and admin account exist.
 // Returns the first-run API token and admin password (empty if not first run).
 func SeedDefaults(db *gorm.DB, adminBind string, log *slog.Logger) (firstRunToken string, firstRunPassword string, err error) {
-	var lCount int64
-	if err := db.Model(&Listener{}).Where("role = ?", ListenerRoleAdmin).Count(&lCount).Error; err != nil {
-		return "", "", fmt.Errorf("seed: count listeners: %w", err)
-	}
-	if lCount == 0 {
-		l := Listener{
-			Role:    ListenerRoleAdmin,
-			Bind:    adminBind,
-			Network: "tcp",
-			Enabled: true,
-		}
-		if err := db.Create(&l).Error; err != nil {
-			return "", "", fmt.Errorf("seed: create admin listener: %w", err)
-		}
-		log.Info("created default admin listener", slog.String("bind", adminBind))
-	}
+	// Admin listener is no longer needed - admin server is always started separately
 
 	var kCount int64
 	if err := db.Model(&AdminAPIKey{}).Count(&kCount).Error; err != nil {

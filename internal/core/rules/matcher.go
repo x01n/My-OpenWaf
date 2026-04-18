@@ -131,6 +131,38 @@ type neverMatcher struct{}
 
 func (m *neverMatcher) Match(net.IP, string, string, string, map[string]string) bool { return false }
 
+type bodyContainsMatcher struct{ substr string }
+
+func (m *bodyContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string) bool {
+	// Body matching requires special handling in the engine
+	// This matcher is a placeholder that always returns false here
+	// The actual body check happens in the request context
+	return false
+}
+
+type queryParamMatcher struct {
+	param string
+	value string
+}
+
+func (m *queryParamMatcher) Match(_ net.IP, _, _, query string, _ map[string]string) bool {
+	if query == "" {
+		return false
+	}
+	// Parse query string for specific parameter
+	for _, pair := range strings.Split(query, "&") {
+		if kv := strings.SplitN(pair, "=", 2); len(kv) == 2 {
+			if kv[0] == m.param {
+				if m.value == "" {
+					return true // Just check param exists
+				}
+				return strings.Contains(kv[1], m.value)
+			}
+		}
+	}
+	return false
+}
+
 // buildMatcher creates a Matcher from a parsed kind:arg pattern.
 func buildMatcher(kind, arg string) Matcher {
 	switch kind {
@@ -203,6 +235,22 @@ func buildMatcher(kind, arg string) Matcher {
 			return &neverMatcher{}
 		}
 		return &headerRegexMatcher{name: "User-Agent", re: re}
+
+	// New matcher types
+	case "header_regex":
+		name, pattern := splitHeaderArg(arg)
+		re, err := cachedCompile(pattern)
+		if err != nil {
+			return &neverMatcher{}
+		}
+		return &headerRegexMatcher{name: name, re: re}
+
+	case "body_contains":
+		return &bodyContainsMatcher{substr: arg}
+
+	case "query_param":
+		param, value := splitHeaderArg(arg) // Reuse split logic for param:value
+		return &queryParamMatcher{param: param, value: value}
 
 	case "compound":
 		return parseCompoundJSON(arg)

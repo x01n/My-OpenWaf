@@ -3,12 +3,19 @@ package admin
 import (
 	"context"
 	"strconv"
+	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
+)
+
+// siteStatusMap tracks runtime status of sites (running/stopped).
+var (
+	siteStatusMap   = make(map[uint]string)
+	siteStatusMutex sync.RWMutex
 )
 
 func ListSites(repo *repository.SiteRepo) app.HandlerFunc {
@@ -96,5 +103,76 @@ func DeleteSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc 
 		}
 		_ = reload()
 		c.JSON(204, nil)
+	}
+}
+
+func StartSite(repo *repository.SiteRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		id, err := utils.ParseUint(c.Param("id"))
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		_, err = repo.Get(id)
+		if err != nil {
+			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+
+		siteStatusMutex.Lock()
+		siteStatusMap[id] = "running"
+		siteStatusMutex.Unlock()
+
+		c.JSON(200, map[string]string{"status": "running", "message": "site started"})
+	}
+}
+
+func StopSite(repo *repository.SiteRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		id, err := utils.ParseUint(c.Param("id"))
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		_, err = repo.Get(id)
+		if err != nil {
+			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+
+		siteStatusMutex.Lock()
+		siteStatusMap[id] = "stopped"
+		siteStatusMutex.Unlock()
+
+		c.JSON(200, map[string]string{"status": "stopped", "message": "site stopped"})
+	}
+}
+
+func GetSiteStatus(repo *repository.SiteRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		id, err := utils.ParseUint(c.Param("id"))
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		site, err := repo.Get(id)
+		if err != nil {
+			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+
+		siteStatusMutex.RLock()
+		status, exists := siteStatusMap[id]
+		siteStatusMutex.RUnlock()
+
+		if !exists {
+			status = "stopped"
+		}
+
+		c.JSON(200, map[string]any{
+			"id":     site.ID,
+			"host":   site.Host,
+			"status": status,
+		})
 	}
 }

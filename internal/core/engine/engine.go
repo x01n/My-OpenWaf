@@ -47,7 +47,7 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 		return ProcessResult{}
 	}
 
-	rt, ok := sn.MatchSite(reqCtx.ListenerID, reqCtx.Host)
+	rt, ok := sn.MatchSite(reqCtx.Bind, reqCtx.Host)
 	if !ok {
 		return ProcessResult{}
 	}
