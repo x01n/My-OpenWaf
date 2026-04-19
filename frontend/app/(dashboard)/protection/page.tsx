@@ -1,19 +1,52 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useEffect, useState, useCallback } from "react";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Separator } from "@/components/ui/separator";
-import { Badge } from "@/components/ui/badge";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { Shield, Gauge, Bug, Bot, Ban, Wrench } from "lucide-react";
+
+// Mode: off / observe / mid / high
+type ModuleMode = "off" | "observe" | "mid" | "high";
+
+interface OWASPModuleSetting {
+  key: string;
+  label: string;
+  mode: ModuleMode;
+}
+
+const DEFAULT_MODULES: OWASPModuleSetting[] = [
+  { key: "sqli", label: "SQL 注入检测", mode: "mid" },
+  { key: "xss", label: "XSS 检测", mode: "mid" },
+  { key: "file_upload", label: "文件上传检测", mode: "mid" },
+  { key: "path_traversal", label: "文件包含检测", mode: "mid" },
+  { key: "cmd_injection", label: "命令注入检测", mode: "mid" },
+  { key: "java_code_injection", label: "JAVA 代码注入检测", mode: "mid" },
+  { key: "java_deserialization", label: "JAVA 反序列化检测", mode: "mid" },
+  { key: "php_deserialization", label: "PHP 反序列化检测", mode: "mid" },
+  { key: "php_code_injection", label: "PHP 代码注入检测", mode: "mid" },
+  { key: "asp_code_injection", label: "ASP 代码注入检测", mode: "mid" },
+  { key: "ssrf", label: "SSRF 检测", mode: "mid" },
+  { key: "xxe", label: "XXE 检测", mode: "mid" },
+  { key: "crlf", label: "CRLF 注入检测", mode: "mid" },
+  { key: "ldap_injection", label: "LDAP 注入检测", mode: "mid" },
+];
 
 interface ProtectionConfig {
   request_ratelimit_enabled: boolean;
@@ -38,25 +71,67 @@ interface ProtectionConfig {
   auto_ban_threshold: number;
   auto_ban_window: number;
   auto_ban_duration: number;
+  owasp_modules?: Record<string, ModuleMode>;
 }
 
 export default function ProtectionPage() {
   const [cfg, setCfg] = useState<ProtectionConfig | null>(null);
+  const [modules, setModules] = useState<OWASPModuleSetting[]>(DEFAULT_MODULES);
+  const [useCustomConfig, setUseCustomConfig] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    api<ProtectionConfig>("/api/v1/protection-settings").then(setCfg).catch(() => {});
+    api<ProtectionConfig>("/api/v1/protection-settings")
+      .then((data) => {
+        setCfg(data);
+        if (data.owasp_modules) {
+          setUseCustomConfig(true);
+          setModules((prev) =>
+            prev.map((m) => ({
+              ...m,
+              mode: data.owasp_modules![m.key] || m.mode,
+            }))
+          );
+        }
+      })
+      .catch(() => {});
   }, []);
 
-  function update<K extends keyof ProtectionConfig>(key: K, value: ProtectionConfig[K]) {
-    setCfg((prev) => prev ? { ...prev, [key]: value } : prev);
-  }
+  const setModuleMode = useCallback((key: string, mode: ModuleMode) => {
+    setModules((prev) =>
+      prev.map((m) => (m.key === key ? { ...m, mode } : m))
+    );
+  }, []);
+
+  const batchSetAll = useCallback((mode: ModuleMode) => {
+    setModules((prev) => prev.map((m) => ({ ...m, mode })));
+  }, []);
 
   async function handleSave() {
     if (!cfg) return;
     setSaving(true);
     try {
-      await api("/api/v1/protection-settings", { method: "POST", body: JSON.stringify(cfg) });
+      const moduleMap: Record<string, ModuleMode> = {};
+      modules.forEach((m) => {
+        moduleMap[m.key] = m.mode;
+      });
+
+      const anyEnabled = modules.some((m) => m.mode !== "off");
+      const hasIntercept = modules.some(
+        (m) => m.mode === "mid" || m.mode === "high"
+      );
+
+      const payload: ProtectionConfig = {
+        ...cfg,
+        builtin_owasp_enabled: anyEnabled,
+        builtin_owasp_on_hit: hasIntercept ? "intercept" : "observe",
+        owasp_modules: useCustomConfig ? moduleMap : undefined,
+      };
+
+      await api("/api/v1/protection-settings", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
       toast.success("已保存，配置重载后生效");
     } catch {
       toast.error("保存失败");
@@ -65,232 +140,166 @@ export default function ProtectionPage() {
     }
   }
 
-  if (!cfg) return <p className="text-sm text-muted-foreground">加载中…</p>;
+  if (!cfg)
+    return (
+      <p className="text-sm text-gray-500 py-12 text-center">加载中...</p>
+    );
 
   return (
     <div className="space-y-6">
+      {/* 页面标题 */}
       <div>
-        <h1 className="text-2xl font-semibold">防护设置</h1>
-        <p className="text-sm text-muted-foreground">
-          配置请求/错误限流、内置 OWASP 命中动作（拦截/观察）、以及维护模式。限流与错误拦截默认关闭；维护模式请谨慎开启。
+        <h1 className="text-2xl font-semibold text-gray-900">攻击防护</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          配置语义分析引擎的各检测模块及防护级别
         </p>
       </div>
 
-      {/* A: Request Rate Limit */}
-      <Card>
-        <CardHeader>
+      {/* 主卡片 */}
+      <Card className="bg-white shadow-sm border border-gray-200">
+        <CardContent className="p-6 space-y-4">
+          {/* 顶部操作栏 */}
           <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base">启用请求限流</CardTitle>
-              <CardDescription>开启后，按客户端 IP 与 Host 在设定时间窗口内限制最大请求次数。</CardDescription>
+            {/* Tab 切换按钮 */}
+            <div className="flex items-center rounded-md border border-gray-200 overflow-hidden">
+              <button
+                onClick={() => setUseCustomConfig(false)}
+                className={`px-4 py-2 text-sm transition-colors ${
+                  !useCustomConfig
+                    ? "bg-teal-500 text-white"
+                    : "bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                跟随全局配置
+              </button>
+              <button
+                onClick={() => setUseCustomConfig(true)}
+                className={`px-4 py-2 text-sm border-l border-gray-200 transition-colors ${
+                  useCustomConfig
+                    ? "bg-teal-500 text-white"
+                    : "bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                使用自定义配置
+              </button>
             </div>
-            <Switch checked={cfg.request_ratelimit_enabled} onCheckedChange={(v) => update("request_ratelimit_enabled", v)} />
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <Label>统计窗口（秒）</Label>
-              <Input type="number" min={1} value={cfg.request_ratelimit_window} onChange={(e) => update("request_ratelimit_window", +e.target.value)} disabled={!cfg.request_ratelimit_enabled} />
-            </div>
-            <div className="space-y-1">
-              <Label>窗口内最大请求数</Label>
-              <Input type="number" min={1} value={cfg.request_ratelimit_max} onChange={(e) => update("request_ratelimit_max", +e.target.value)} disabled={!cfg.request_ratelimit_enabled} />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <Label>超限动作</Label>
-            <Select value={cfg.request_ratelimit_action} onValueChange={(v) => update("request_ratelimit_action", v)} disabled={!cfg.request_ratelimit_enabled}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="intercept">拦截（返回 429，不转发上游）</SelectItem>
-                <SelectItem value="observe">观察（仅记日志，仍转发上游）</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <p className="text-xs text-muted-foreground">当前版本为全局配置，对所有数据面站点生效。</p>
-        </CardContent>
-      </Card>
 
-      {/* B: Error Rate Limit */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base">启用错误响应限流</CardTitle>
-              <CardDescription>开启后，同一客户端在窗口内产生过多错误类响应时，短期内不再转发上游。</CardDescription>
-            </div>
-            <Switch checked={cfg.error_ratelimit_enabled} onCheckedChange={(v) => update("error_ratelimit_enabled", v)} />
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <Label>统计窗口（秒）</Label>
-              <Input type="number" min={1} value={cfg.error_ratelimit_window} onChange={(e) => update("error_ratelimit_window", +e.target.value)} disabled={!cfg.error_ratelimit_enabled} />
-            </div>
-            <div className="space-y-1">
-              <Label>窗口内最大错误次数</Label>
-              <Input type="number" min={1} value={cfg.error_ratelimit_max} onChange={(e) => update("error_ratelimit_max", +e.target.value)} disabled={!cfg.error_ratelimit_enabled} />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label>计入错误的响应类型</Label>
-            <div className="flex flex-wrap gap-4 text-sm">
-              <Label className="flex items-center gap-1.5 font-normal">
-                <Switch checked={cfg.error_ratelimit_count_4xx} onCheckedChange={(v) => update("error_ratelimit_count_4xx", v)} disabled={!cfg.error_ratelimit_enabled} />
-                上游 4xx
-              </Label>
-              <Label className="flex items-center gap-1.5 font-normal">
-                <Switch checked={cfg.error_ratelimit_count_5xx} onCheckedChange={(v) => update("error_ratelimit_count_5xx", v)} disabled={!cfg.error_ratelimit_enabled} />
-                上游 5xx
-              </Label>
-              <Label className="flex items-center gap-1.5 font-normal">
-                <Switch checked={cfg.error_ratelimit_count_block} onCheckedChange={(v) => update("error_ratelimit_count_block", v)} disabled={!cfg.error_ratelimit_enabled} />
-                WAF 拦截响应
-              </Label>
-            </div>
-          </div>
-          <div className="space-y-1">
-            <Label>超限动作</Label>
-            <Select value={cfg.error_ratelimit_action} onValueChange={(v) => update("error_ratelimit_action", v)} disabled={!cfg.error_ratelimit_enabled}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="intercept">拦截</SelectItem>
-                <SelectItem value="observe">观察</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* C: OWASP */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base">启用内置 OWASP 默认防护</CardTitle>
-              <CardDescription>对 SQL 注入、Webshell、反弹 shell 等做多信号模糊检测（含 URL/编码归一化）。非完整 CRS。</CardDescription>
-            </div>
-            <Switch checked={cfg.builtin_owasp_enabled} onCheckedChange={(v) => update("builtin_owasp_enabled", v)} />
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <Label>敏感度</Label>
-              <Select value={cfg.builtin_owasp_sensitivity} onValueChange={(v) => update("builtin_owasp_sensitivity", v)} disabled={!cfg.builtin_owasp_enabled}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+            {/* 批量配置下拉（仅自定义模式显示） */}
+            {useCustomConfig && (
+              <Select onValueChange={(v) => batchSetAll(v as ModuleMode)}>
+                <SelectTrigger className="w-40 border-gray-200 text-sm">
+                  <SelectValue placeholder="批量配置为" />
+                </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="low">低（仅高置信）</SelectItem>
-                  <SelectItem value="mid">中（平衡）</SelectItem>
-                  <SelectItem value="high">高（更易命中，误报可能增加）</SelectItem>
+                  <SelectItem value="off">禁用</SelectItem>
+                  <SelectItem value="observe">仅观察</SelectItem>
+                  <SelectItem value="mid">平衡防护</SelectItem>
+                  <SelectItem value="high">高强度防护</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-            <div className="space-y-1">
-              <Label>命中动作</Label>
-              <Select value={cfg.builtin_owasp_on_hit} onValueChange={(v) => update("builtin_owasp_on_hit", v)} disabled={!cfg.builtin_owasp_enabled}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="intercept">拦截（阻断，不转发上游）</SelectItem>
-                  <SelectItem value="observe">观察（仅写安全日志，正常响应）</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            )}
           </div>
-          <p className="text-xs text-muted-foreground">内置类别含 SQL 注入、Webshell、反弹 shell、XSS、路径穿越等；日志中带分类 ID。</p>
+
+          {/* 自定义配置表格 */}
+          {useCustomConfig && (
+            <div className="rounded-lg border border-gray-200 overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-gray-50 hover:bg-gray-50">
+                    <TableHead className="w-[240px] text-gray-600 font-medium py-3 pl-4">
+                      检测模块
+                    </TableHead>
+                    <TableHead className="text-center text-gray-600 font-medium py-3">
+                      禁用
+                    </TableHead>
+                    <TableHead className="text-center text-gray-600 font-medium py-3">
+                      仅观察
+                    </TableHead>
+                    <TableHead className="text-center text-gray-600 font-medium py-3">
+                      平衡防护
+                    </TableHead>
+                    <TableHead className="text-center text-gray-600 font-medium py-3">
+                      高强度防护
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {modules.map((mod) => (
+                    <TableRow
+                      key={mod.key}
+                      className="border-t border-gray-100 hover:bg-gray-50"
+                    >
+                      <TableCell className="font-medium text-gray-800 py-3 pl-4">
+                        {mod.label}
+                      </TableCell>
+                      {(["off", "observe", "mid", "high"] as ModuleMode[]).map(
+                        (mode) => (
+                          <TableCell key={mode} className="text-center py-3">
+                            <RadioGroup
+                              value={mod.mode}
+                              onValueChange={(v) =>
+                                setModuleMode(mod.key, v as ModuleMode)
+                              }
+                              className="flex justify-center"
+                            >
+                              <RadioGroupItem
+                                value={mode}
+                                className="mx-auto accent-teal-500"
+                              />
+                            </RadioGroup>
+                          </TableCell>
+                        )
+                      )}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+
+          {/* 全局配置提示 */}
+          {!useCustomConfig && (
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-6 text-center text-sm text-gray-500">
+              当前使用全局配置：
+              <span className="font-medium text-gray-800 ml-1">
+                {cfg.builtin_owasp_enabled ? "已启用" : "已禁用"}
+              </span>
+              {cfg.builtin_owasp_enabled && (
+                <>
+                  ，敏感度：
+                  <span className="font-medium text-gray-800">
+                    {cfg.builtin_owasp_sensitivity === "low"
+                      ? "低"
+                      : cfg.builtin_owasp_sensitivity === "mid"
+                        ? "中"
+                        : "高"}
+                  </span>
+                  ，命中动作：
+                  <span className="font-medium text-gray-800">
+                    {cfg.builtin_owasp_on_hit === "intercept" ? "拦截" : "观察"}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
 
-      {/* D: Bot Detection */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base">Bot 检测</CardTitle>
-              <CardDescription>启用后，结合 User-Agent 签名和请求指纹评分识别恶意 Bot，高分直接拦截。</CardDescription>
-            </div>
-            <Switch checked={cfg.bot_detection_enabled} onCheckedChange={(v) => update("bot_detection_enabled", v)} />
-          </div>
-        </CardHeader>
-        <CardContent>
-          <p className="text-xs text-muted-foreground">
-            检测覆盖已知安全工具（sqlmap/nikto/burp 等）+ 请求指纹分析（缺少 Accept/Language/Encoding 等浏览器标准头）。
-            恶意评分 ≥80 拦截，50-79 观察记录。
-          </p>
-        </CardContent>
-      </Card>
-
-      {/* E: Auto-ban */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base">IP 自动封禁</CardTitle>
-              <CardDescription>当同一 IP 在时间窗口内触发安全规则达到阈值时，自动临时封禁。</CardDescription>
-            </div>
-            <Switch checked={cfg.auto_ban_enabled} onCheckedChange={(v) => update("auto_ban_enabled", v)} />
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-3 gap-4">
-            <div className="space-y-1">
-              <Label>触发阈值（次）</Label>
-              <Input type="number" min={1} value={cfg.auto_ban_threshold} onChange={(e) => update("auto_ban_threshold", +e.target.value)} disabled={!cfg.auto_ban_enabled} />
-            </div>
-            <div className="space-y-1">
-              <Label>统计窗口（秒）</Label>
-              <Input type="number" min={1} value={cfg.auto_ban_window} onChange={(e) => update("auto_ban_window", +e.target.value)} disabled={!cfg.auto_ban_enabled} />
-            </div>
-            <div className="space-y-1">
-              <Label>封禁时长（秒）</Label>
-              <Input type="number" min={1} value={cfg.auto_ban_duration} onChange={(e) => update("auto_ban_duration", +e.target.value)} disabled={!cfg.auto_ban_enabled} />
-            </div>
-          </div>
-          <p className="text-xs text-muted-foreground">默认：60 秒内触发 10 次规则命中 → 自动封禁 1 小时。</p>
-        </CardContent>
-      </Card>
-
-      {/* F: Maintenance */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="text-base">维护模式</CardTitle>
-              <CardDescription>开启后，全部请求均返回下方维护页，不转发上游。WebSocket 不升级；SSE 返回维护内容。</CardDescription>
-            </div>
-            <Switch checked={cfg.maintenance_global_enabled} onCheckedChange={(v) => update("maintenance_global_enabled", v)} />
-          </div>
-        </CardHeader>
-        {cfg.maintenance_global_enabled && (
-          <CardContent className="space-y-4">
-            <Alert>
-              <AlertDescription>维护模式影响全部流量，请确认后再保存。</AlertDescription>
-            </Alert>
-            <div className="space-y-1">
-              <Label>维护页内容（HTML）</Label>
-              <Textarea rows={6} value={cfg.maintenance_global_html} onChange={(e) => update("maintenance_global_html", e.target.value)} />
-            </div>
-            <div className="space-y-1">
-              <Label>HTTP 状态码</Label>
-              <Select value={String(cfg.maintenance_global_status)} onValueChange={(v) => update("maintenance_global_status", +v)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="503">503 Service Unavailable</SelectItem>
-                  <SelectItem value="200">200 OK（仅展示页）</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </CardContent>
-        )}
-      </Card>
-
-      <Separator />
-
-      <div className="flex justify-end gap-2">
-        <Button onClick={handleSave} disabled={saving}>
-          {saving ? "保存中…" : "保存设置"}
+      {/* 底部操作按钮 */}
+      <div className="flex justify-end gap-3">
+        <Button
+          variant="outline"
+          onClick={() => window.location.reload()}
+          className="text-teal-500 border-teal-500 hover:bg-teal-50 hover:text-teal-600"
+        >
+          取消
+        </Button>
+        <Button
+          onClick={handleSave}
+          disabled={saving}
+          className="bg-teal-500 hover:bg-teal-600 text-white border-0"
+        >
+          {saving ? "保存中..." : "保存"}
         </Button>
       </div>
     </div>

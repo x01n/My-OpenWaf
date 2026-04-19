@@ -1,5 +1,5 @@
 import type { Metadata } from "next"
-import { Geist, Geist_Mono, Noto_Serif } from "next/font/google"
+import { Geist, Geist_Mono } from "next/font/google"
 
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
@@ -9,8 +9,6 @@ export const metadata: Metadata = {
   title: "My-OpenWAF",
   description: "开源 Web 应用防火墙管理控制台",
 }
-
-const notoSerif = Noto_Serif({subsets:['latin'],variable:'--font-serif'});
 
 const fontSans = Geist({
   subsets: ["latin"],
@@ -31,7 +29,7 @@ export default function RootLayout({
     <html
       lang="zh-CN"
       suppressHydrationWarning
-      className={cn("antialiased", fontSans.variable, fontMono.variable, "font-serif", notoSerif.variable)}
+      className={cn("antialiased", fontSans.variable, fontMono.variable, "font-sans")}
     >
       <body>
         <ThemeProvider>{children}</ThemeProvider>

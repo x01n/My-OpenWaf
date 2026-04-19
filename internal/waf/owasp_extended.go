@@ -21,7 +21,8 @@ func hasSSRFIndicator(s string) bool {
 		strings.Contains(s, "127.0.") ||
 		strings.Contains(s, "::ffff:") ||
 		strings.Contains(s, "::1") ||
-		strings.Contains(s, "0x7f") // hex 127.x
+		strings.Contains(s, "0x7f") ||
+		strings.Contains(s, "unix:")
 }
 
 var ssrfPatterns = []struct {
@@ -33,26 +34,25 @@ var ssrfPatterns = []struct {
 	{regexp.MustCompile(`(?i)169\.254\.169\.254`), 6, "owasp:ssrf:001"}, // AWS/Azure/GCP metadata
 	{regexp.MustCompile(`(?i)metadata\.google\.internal`), 6, "owasp:ssrf:002"},
 	{regexp.MustCompile(`(?i)100\.100\.100\.200`), 6, "owasp:ssrf:003"}, // Alibaba Cloud
-	// Private IP ranges — require URL-scheme or path-separator context to avoid false positives
-	// on legitimate payloads that merely mention an IP address (e.g. logging, network tools).
-	// Raising score to 4 so a single hit at mid-sensitivity (threshold=4) triggers correctly.
-	{regexp.MustCompile(`(?i)(https?://|ftps?://|[/@])10\.\d{1,3}\.\d{1,3}\.\d{1,3}`), 4, "owasp:ssrf:004"},
-	{regexp.MustCompile(`(?i)(https?://|ftps?://|[/@])172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}`), 4, "owasp:ssrf:005"},
-	{regexp.MustCompile(`(?i)(https?://|ftps?://|[/@])192\.168\.\d{1,3}\.\d{1,3}`), 4, "owasp:ssrf:006"},
-	// Localhost variants — score raised to 5: http://127.0.0.1 is an unambiguous SSRF attempt
-	// and must trigger at mid-sensitivity (threshold=4) without needing to combine with others.
+	// Private IP ranges — raise to 5 for new threshold
+	{regexp.MustCompile(`(?i)(https?://|ftps?://|[/@])10\.\d{1,3}\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:004"},
+	{regexp.MustCompile(`(?i)(https?://|ftps?://|[/@])172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:005"},
+	{regexp.MustCompile(`(?i)(https?://|ftps?://|[/@])192\.168\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:006"},
+	// Localhost variants
 	{regexp.MustCompile(`(?i)(https?://|[/@])(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost)(:\d+|/)`), 5, "owasp:ssrf:007"},
 	{regexp.MustCompile(`(?i)(https?://|[/@])(\[::1\]|\[::\]|0\.0\.0\.0)(:\d+|/)`), 5, "owasp:ssrf:008"},
-	// DNS rebinding / encoding bypasses — require URL scheme to avoid matching CSS hex colors (#DEADBEEF)
-	{regexp.MustCompile(`(?i)https?://\s*0x[0-9a-f]{8}\b`), 4, "owasp:ssrf:009"},
+	// DNS rebinding / encoding bypasses
+	{regexp.MustCompile(`(?i)https?://\s*0x[0-9a-f]{8}\b`), 5, "owasp:ssrf:009"},
 	// file:// / gopher:// / dict:// schemes
 	{regexp.MustCompile(`(?i)(file|gopher|dict|ldap|sftp|tftp|php|expect|phar)://`), 5, "owasp:ssrf:010"},
 	// Decimal/octal IP encoding (e.g., http://2130706433 = 127.0.0.1)
-	{regexp.MustCompile(`(?i)https?://\d{8,10}(/|$|\s|:)`), 4, "owasp:ssrf:011"},
+	{regexp.MustCompile(`(?i)https?://\d{8,10}(/|$|\s|:)`), 5, "owasp:ssrf:011"},
 	// IPv6-mapped IPv4 private addresses
-	{regexp.MustCompile(`(?i)::ffff:(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)`), 4, "owasp:ssrf:012"},
+	{regexp.MustCompile(`(?i)::ffff:(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)`), 5, "owasp:ssrf:012"},
 	// AWS IMDSv2 token header (indicates SSRF exploit chain)
 	{regexp.MustCompile(`(?i)x-aws-ec2-metadata-token`), 5, "owasp:ssrf:013"},
+	// Unix socket SSRF (CVE-2023-46809 style): unix:path|http://...
+	{regexp.MustCompile(`(?i)\bunix:[^\s]{10,}`), 4, "owasp:ssrf:014"},
 }
 
 func checkSSRF(s string, threshold int) (OWASPHit, bool) {
@@ -86,9 +86,9 @@ var cmdInjectPatterns = []struct {
 	// Using (?:[\s;|&`]|$) instead of \b prevents matching URL key=value params:
 	// "a=1;id=123" → ";id" followed by "=" → no match.
 	// "host=x;id" at end of string → matches via $.
-	{regexp.MustCompile("(?i)[;|&]\\s*(ls|cat|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:001"},
+	{regexp.MustCompile("(?i)[;|&]\\s*(ls|cat|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|echo|rm|chmod|chown|ping|touch|kill|python|perl|ruby|php|node|java|nslookup|dig)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:001"},
 	// Backtick command substitution — require a known shell command inside (avoids Markdown FP)
-	{regexp.MustCompile("(?i)`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`"), 4, "owasp:cmd:002"},
+	{regexp.MustCompile("(?i)`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`"), 3, "owasp:cmd:002"},
 	// $() with shell commands inside (excludes jQuery selectors)
 	{regexp.MustCompile(`\$\([^)]*\b(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|dd|nslookup|dig|ping|sleep|kill|find|grep|awk|sed|head|tail|wc|sort|xxd|od)\b`), 4, "owasp:cmd:003"},
 	// Redirections that typically indicate injection
@@ -119,6 +119,20 @@ var cmdInjectPatterns = []struct {
 	{regexp.MustCompile("(?i)[\\r\\n]\\s*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|python|perl|ruby|php|echo|rm|chmod|kill|nslookup|dig|ping|sleep|find|awk|sed)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:016"},
 	// Server-Side Include (SSI) injection: <!--#exec cmd="..."--> and <!--#include virtual="...">
 	{regexp.MustCompile(`(?i)<!--\s*#\s*(exec|include|echo|config|fsize|flastmod)\b`), 5, "owasp:cmd:017"},
+	// Backtick concatenation evasion: wh``oami, c``at, i``d — empty backticks split command names
+	{regexp.MustCompile("(?i)(?:^|[;|&\\s])(w``?h``?o``?a``?m``?i|i``d|c``?a``?t|u``?n``?a``?m``?e)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:018"},
+	// touch/rm with path — file creation/deletion as RCE proof
+	{regexp.MustCompile(`(?i)[;|&]\s*(?:touch|rm)\s+/`), 5, "owasp:cmd:019"},
+	// Git argument injection: --open-files-in-pager, --upload-pack, --exec, etc.
+	{regexp.MustCompile(`(?i)--(?:open-files-in-pager|upload-pack|exec|receive-pack)\s*=`), 5, "owasp:cmd:020"},
+	// ${IFS} as space substitute in shell command injection.
+	{regexp.MustCompile(`(?i)\$\{IFS\}`), 5, "owasp:cmd:021"},
+	// $(command) subshell execution in parameter value context.
+	{regexp.MustCompile(`\$\(\s*\w+[\s$]`), 4, "owasp:cmd:022"},
+	// Backtick-split evasion with empty backticks inside command: wh``oami, ca``t.
+	{regexp.MustCompile("(?i)\\b\\w+``\\w+\\b"), 4, "owasp:cmd:023"},
+	// Backtick command execution: `ping ...`, `touch ...`, `whoami`
+	{regexp.MustCompile("(?i)`\\s*(ping|curl|wget|whoami|id|cat|ls|touch|rm|chmod|nc|nslookup|dig|python|perl|ruby|php|bash|sh|uname)\\b"), 5, "owasp:cmd:024"},
 }
 
 func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
@@ -241,7 +255,7 @@ var nosqliPatterns = []struct {
 	{regexp.MustCompile(`(?i)\$where\b`), 5, "owasp:nosql:001"},
 	{regexp.MustCompile(`(?i)\$ne\b`), 3, "owasp:nosql:002"},
 	{regexp.MustCompile(`(?i)\$gt\b`), 3, "owasp:nosql:003"},
-	{regexp.MustCompile(`(?i)\$regex\b`), 3, "owasp:nosql:004"},
+	{regexp.MustCompile(`(?i)\$regex\b`), 4, "owasp:nosql:004"},
 	{regexp.MustCompile(`(?i)\$or\b\s*:\s*\[`), 3, "owasp:nosql:005"},
 	{regexp.MustCompile(`(?i)\$exists\b`), 3, "owasp:nosql:006"},
 	// MongoDB aggregation pipeline injection
@@ -284,7 +298,7 @@ var tmplInjectPatterns = []struct {
 	// <%= ... %> ERB / JSP
 	{regexp.MustCompile(`<%=.*?%>`), 3, "owasp:ssti:006"},
 	// Smarty {php}...{/php} template execution
-	{regexp.MustCompile(`(?i)\{/?php\}`), 4, "owasp:ssti:007"},
+	{regexp.MustCompile(`(?i)\{/?php\}`), 5, "owasp:ssti:007"},
 	// Python dunder attribute traversal (__subclasses__, __builtins__, __import__)
 	{regexp.MustCompile(`(?i)__(subclasses|builtins|globals|import|init|reduce)__`), 5, "owasp:ssti:008"},
 	// Pebble template engine: beans / getClass access
@@ -304,6 +318,8 @@ var tmplInjectPatterns = []struct {
 	{regexp.MustCompile(`(?i)\{[a-z]+[:/][a-z]+:[a-z]+\(`), 5, "owasp:ssti:015"},
 	// Generic template tag with function call: {tag:function(...)}
 	{regexp.MustCompile(`(?i)\{[a-z_]+:[a-z_]+\([^}]{0,200}\)\}`), 4, "owasp:ssti:016"},
+	// DedeCMS template injection: {dede:field name='source' runphp='yes'}
+	{regexp.MustCompile(`(?i)\{dede:\w+\s+[^}]*runphp`), 5, "owasp:ssti:017"},
 }
 
 // hasTemplateInjectionIndicator returns true when the string contains markers
@@ -318,12 +334,14 @@ func hasTemplateInjectionIndicator(s string) bool {
 		strings.Contains(s, "__subclasses__") ||
 		strings.Contains(s, "__builtins__") ||
 		strings.Contains(s, "__import__") ||
-		strings.Contains(s, "constructor") ||
+		// constructor only in template context ({{...constructor...}})
+		(strings.Contains(s, "constructor") && (strings.Contains(s, "{{") || strings.Contains(s, "${") || strings.Contains(s, "<%"))) ||
 		strings.Contains(s, "getclass(") ||
 		strings.Contains(s, "java.lang.") ||
 		strings.Contains(s, "process.env") ||
 		strings.Contains(s, "{php}") ||
-		strings.Contains(s, "$self.")
+		strings.Contains(s, "$self.") ||
+		strings.Contains(s, "{dede:")
 }
 
 func checkTemplateInjection(s string, threshold int) (OWASPHit, bool) {
@@ -479,7 +497,7 @@ var crlfPatterns = []struct {
 	score int
 	id    string
 }{
-	{regexp.MustCompile(`\r\n\s*(set-cookie|location|content-type|x-)\s*:`), 6, "owasp:crlf:001"},
+	{regexp.MustCompile(`\r\n\s*(set-cookie|location|content-type|x-[\w-]+)\s*:`), 6, "owasp:crlf:001"},
 	{regexp.MustCompile(`%0d%0a\s*(set-cookie|location|content-type)\s*:`), 6, "owasp:crlf:002"},
 	{regexp.MustCompile(`%0d%0a%0d%0a`), 5, "owasp:crlf:003"},
 	{regexp.MustCompile(`\r\n\r\n`), 4, "owasp:crlf:004"},
@@ -510,11 +528,16 @@ func checkCRLF(s string, threshold int) (OWASPHit, bool) {
 func hasELIndicator(s string) bool {
 	return strings.Contains(s, "#{t(") ||
 		strings.Contains(s, "${t(") ||
+		strings.Contains(s, "${") ||
 		strings.Contains(s, "java.lang.") ||
 		strings.Contains(s, "getclass()") ||
 		strings.Contains(s, "getruntime") ||
 		strings.Contains(s, "#rt") ||
-		strings.Contains(s, "@java.")
+		strings.Contains(s, "@java.") ||
+		strings.Contains(s, "#context") ||
+		strings.Contains(s, "%{#") ||
+		strings.Contains(s, "new java.") ||
+		strings.Contains(s, "newjava.")
 }
 
 var exprLangPatterns = []struct {
@@ -529,8 +552,18 @@ var exprLangPatterns = []struct {
 	{regexp.MustCompile(`(?i)%\{.*getClass\(\)`), 5, "owasp:el:003"},
 	{regexp.MustCompile(`(?i)\(#rt\s*=\s*@java\.lang\.Runtime\)`), 6, "owasp:el:004"},
 	// Generic class/runtime access
-	{regexp.MustCompile(`(?i)java\.lang\.(runtime|processbuilder|class)`), 4, "owasp:el:005"},
+	{regexp.MustCompile(`(?i)java\.lang\.(runtime|processbuilder|class|system)`), 4, "owasp:el:005"},
 	{regexp.MustCompile(`(?i)getruntime\(\)\s*\.\s*exec\s*\(`), 5, "owasp:el:006"},
+	// Struts2 OGNL: %{#context['com.opensymphony...
+	{regexp.MustCompile(`(?i)%\{#context\[`), 5, "owasp:el:007"},
+	// OGNL redirect/action: redirect:${...} or action:${...}
+	{regexp.MustCompile(`(?i)(redirect|action)\s*:\s*\$\{`), 5, "owasp:el:008"},
+	// OGNL static method call: @class@method
+	{regexp.MustCompile(`(?i)@java\.\w+\.\w+@\w+`), 5, "owasp:el:009"},
+	// java.net.URL / new java construct
+	{regexp.MustCompile(`(?i)\bnew\s*java\.\w+\.`), 4, "owasp:el:010"},
+	// OGNL #context.get / #req=#context
+	{regexp.MustCompile(`(?i)#(req|request|response|session|application|context)\s*[=.]`), 5, "owasp:el:011"},
 }
 
 func checkExprLang(s string, threshold int) (OWASPHit, bool) {
@@ -578,9 +611,21 @@ var deserialPatterns = []struct {
 	{regexp.MustCompile(`(?i)AAEAAAD//`), 5, "owasp:deser:006"},
 	// Node.js serialize-javascript RCE pattern
 	{regexp.MustCompile(`(?i)\{"rce":\s*"_\$\$ND_FUNC\$\$_`), 5, "owasp:deser:007"},
+	// Java serialization base64 magic: rO0AB (base64 of \xac\xed\x00\x05)
+	{regexp.MustCompile(`rO0AB`), 5, "owasp:deser:010"},
+	// .NET ViewState base64 marker
+	{regexp.MustCompile(`(?i)javax\.faces\.ViewState\s*=\s*rO0AB`), 6, "owasp:deser:011"},
+	// Raw Java serialization magic bytes (URL-encoded or hex)
+	{regexp.MustCompile(`(?i)(%ac%ed|aced0005)`), 5, "owasp:deser:012"},
+	// XStream gadget chains
+	{regexp.MustCompile(`(?i)<(sorted-set|tree-map|java\.util|dynamic-proxy|javax\.\w+\.|jdk\.\w+\.)`), 5, "owasp:deser:013"},
 }
 
 func checkDeserialization(s string, threshold int) (OWASPHit, bool) {
+	// Direct binary Java serialization magic byte check
+	if strings.Contains(s, "\xac\xed\x00\x05") {
+		return OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:001", Score: 5, Desc: "Java serialization magic bytes"}, true
+	}
 	total := 0
 	best := ""
 	for _, p := range deserialPatterns {

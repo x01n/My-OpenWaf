@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -124,24 +122,22 @@ export default function SecurityEventsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">安全事件</h1>
-          <p className="text-sm text-muted-foreground">
+          <h1 className="text-xl font-semibold text-gray-800">安全事件</h1>
+          <p className="text-gray-500 text-sm">
             WAF 拦截与观察事件记录
           </p>
         </div>
         <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant="outline"
+          <button
+            className="inline-flex items-center px-3 py-1.5 text-sm border border-gray-300 rounded-md bg-white text-gray-700 hover:border-cyan-400 hover:text-cyan-600 transition-colors disabled:opacity-50"
             onClick={() => exportCSV(events)}
             disabled={events.length === 0}
           >
             <Download className="mr-1 h-3.5 w-3.5" />
             导出 CSV
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
+          </button>
+          <button
+            className="inline-flex items-center px-3 py-1.5 text-sm border border-gray-300 rounded-md bg-white text-gray-700 hover:border-cyan-400 hover:text-cyan-600 transition-colors disabled:opacity-50"
             onClick={() => {
               loadEvents();
               loadStats();
@@ -152,84 +148,60 @@ export default function SecurityEventsPage() {
               className={`mr-1 h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
             />
             刷新
-          </Button>
+          </button>
         </div>
       </div>
 
       {/* Stats cards */}
       {stats && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                24h 事件总数
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold tabular-nums">
-                {stats.total.toLocaleString()}
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                攻击类型分布
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap gap-1">
-                {(stats.categories || []).slice(0, 5).map((c) => (
-                  <Badge key={c.category} variant="outline">
-                    {c.category}: {c.count}
-                  </Badge>
-                ))}
-                {(!stats.categories || stats.categories.length === 0) && (
-                  <span className="text-xs text-muted-foreground">暂无数据</span>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Top 攻击来源 IP
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-1 text-xs">
-                {(stats.top_ips || []).slice(0, 3).map((ip) => (
-                  <div key={ip.client_ip} className="flex justify-between">
-                    <span className="font-mono">{ip.client_ip}</span>
-                    <span className="text-muted-foreground">{ip.count}</span>
-                  </div>
-                ))}
-                {(!stats.top_ips || stats.top_ips.length === 0) && (
-                  <span className="text-muted-foreground">暂无数据</span>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Top 触发规则
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-1 text-xs">
-                {(stats.top_rules || []).slice(0, 3).map((r) => (
-                  <div key={r.rule_id_str} className="flex justify-between">
-                    <span className="font-mono">{r.rule_id_str}</span>
-                    <span className="text-muted-foreground">{r.count}</span>
-                  </div>
-                ))}
-                {(!stats.top_rules || stats.top_rules.length === 0) && (
-                  <span className="text-muted-foreground">暂无数据</span>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+          <div className="bg-white rounded-lg border border-gray-200 p-4">
+            <div className="text-gray-500 text-xs mb-2">24h 事件总数</div>
+            <div className="text-gray-900 text-2xl font-bold tabular-nums">
+              {stats.total.toLocaleString()}
+            </div>
+          </div>
+          <div className="bg-white rounded-lg border border-gray-200 p-4">
+            <div className="text-gray-500 text-xs mb-2">攻击类型分布</div>
+            <div className="flex flex-wrap gap-1">
+              {(stats.categories || []).slice(0, 5).map((c) => (
+                <span key={c.category} className="inline-flex items-center border border-gray-200 rounded px-2 py-0.5 text-xs text-gray-600">
+                  {c.category}: {c.count}
+                </span>
+              ))}
+              {(!stats.categories || stats.categories.length === 0) && (
+                <span className="text-xs text-gray-400">暂无数据</span>
+              )}
+            </div>
+          </div>
+          <div className="bg-white rounded-lg border border-gray-200 p-4">
+            <div className="text-gray-500 text-xs mb-2">Top 攻击来源 IP</div>
+            <div className="space-y-1 text-xs">
+              {(stats.top_ips || []).slice(0, 3).map((ip) => (
+                <div key={ip.client_ip} className="flex justify-between">
+                  <span className="font-mono text-gray-700">{ip.client_ip}</span>
+                  <span className="text-gray-400">{ip.count}</span>
+                </div>
+              ))}
+              {(!stats.top_ips || stats.top_ips.length === 0) && (
+                <span className="text-gray-400">暂无数据</span>
+              )}
+            </div>
+          </div>
+          <div className="bg-white rounded-lg border border-gray-200 p-4">
+            <div className="text-gray-500 text-xs mb-2">Top 触发规则</div>
+            <div className="space-y-1 text-xs">
+              {(stats.top_rules || []).slice(0, 3).map((r) => (
+                <div key={r.rule_id_str} className="flex justify-between">
+                  <span className="font-mono text-gray-700">{r.rule_id_str}</span>
+                  <span className="text-gray-400">{r.count}</span>
+                </div>
+              ))}
+              {(!stats.top_rules || stats.top_rules.length === 0) && (
+                <span className="text-gray-400">暂无数据</span>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -242,7 +214,7 @@ export default function SecurityEventsPage() {
             setPage(1);
           }}
         >
-          <SelectTrigger className="w-[140px]">
+          <SelectTrigger className="w-[140px] h-8 text-sm">
             <SelectValue placeholder="动作" />
           </SelectTrigger>
           <SelectContent>
@@ -258,7 +230,7 @@ export default function SecurityEventsPage() {
             setPage(1);
           }}
         >
-          <SelectTrigger className="w-[160px]">
+          <SelectTrigger className="w-[160px] h-8 text-sm">
             <SelectValue placeholder="类别" />
           </SelectTrigger>
           <SelectContent>
@@ -283,7 +255,7 @@ export default function SecurityEventsPage() {
         </Select>
         <Input
           placeholder="按 IP 筛选"
-          className="w-[180px]"
+          className="w-[180px] h-8 text-sm"
           value={filterIP}
           onChange={(e) => {
             setFilterIP(e.target.value);
@@ -299,91 +271,90 @@ export default function SecurityEventsPage() {
       )}
 
       {/* Events table */}
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
+      <div className="rounded-lg border border-gray-200 overflow-hidden bg-white">
+        <Table>
+          <TableHeader>
+            <TableRow className="bg-gray-50 hover:bg-gray-50">
+              <TableHead className="w-[160px] text-gray-600 font-medium text-xs">时间</TableHead>
+              <TableHead className="text-gray-600 font-medium text-xs">IP</TableHead>
+              <TableHead className="text-gray-600 font-medium text-xs">方法</TableHead>
+              <TableHead className="text-gray-600 font-medium text-xs">路径</TableHead>
+              <TableHead className="text-gray-600 font-medium text-xs">动作</TableHead>
+              <TableHead className="text-gray-600 font-medium text-xs">类别</TableHead>
+              <TableHead className="text-gray-600 font-medium text-xs">规则</TableHead>
+              <TableHead className="text-gray-600 font-medium text-xs">阶段</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {events.length === 0 && (
               <TableRow>
-                <TableHead className="w-[160px]">时间</TableHead>
-                <TableHead>IP</TableHead>
-                <TableHead>方法</TableHead>
-                <TableHead>路径</TableHead>
-                <TableHead>动作</TableHead>
-                <TableHead>类别</TableHead>
-                <TableHead>规则</TableHead>
-                <TableHead>阶段</TableHead>
+                <TableCell colSpan={8} className="text-center text-gray-400 py-8">
+                  暂无安全事件
+                </TableCell>
               </TableRow>
-            </TableHeader>
-            <TableBody>
-              {events.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
-                    暂无安全事件
-                  </TableCell>
-                </TableRow>
-              )}
-              {events.map((ev) => (
-                <TableRow
-                  key={ev.id}
-                  className="cursor-pointer hover:bg-muted/50"
-                  onClick={() => setSelected(ev)}
-                >
-                  <TableCell className="text-xs font-mono">
-                    {new Date(ev.created_at).toLocaleString("zh-CN")}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {ev.client_ip}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline" className="text-xs">
-                      {ev.method}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="max-w-[200px] truncate text-xs font-mono">
-                    {ev.path}
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={ev.action === "intercept" ? "destructive" : "secondary"}
-                      className="text-xs"
-                    >
-                      {ev.action === "intercept" ? "拦截" : "观察"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-xs">{ev.category}</TableCell>
-                  <TableCell className="text-xs font-mono">
-                    {ev.rule_id_str || ev.rule_id}
-                  </TableCell>
-                  <TableCell className="text-xs">{ev.phase}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+            )}
+            {events.map((ev) => (
+              <TableRow
+                key={ev.id}
+                className="cursor-pointer hover:bg-gray-50"
+                onClick={() => setSelected(ev)}
+              >
+                <TableCell className="text-xs font-mono">
+                  {new Date(ev.created_at).toLocaleString("zh-CN")}
+                </TableCell>
+                <TableCell className="font-mono text-xs">
+                  {ev.client_ip}
+                </TableCell>
+                <TableCell>
+                  <span className="bg-gray-100 text-gray-600 rounded px-1.5 py-0.5 text-xs font-mono">
+                    {ev.method}
+                  </span>
+                </TableCell>
+                <TableCell className="max-w-[200px] truncate text-xs font-mono">
+                  {ev.path}
+                </TableCell>
+                <TableCell>
+                  {ev.action === "intercept" ? (
+                    <span className="bg-red-50 text-red-600 border border-red-200 rounded px-2 py-0.5 text-xs">
+                      拦截
+                    </span>
+                  ) : (
+                    <span className="bg-amber-50 text-amber-600 border border-amber-200 rounded px-2 py-0.5 text-xs">
+                      观察
+                    </span>
+                  )}
+                </TableCell>
+                <TableCell className="text-xs">{ev.category}</TableCell>
+                <TableCell className="text-xs font-mono">
+                  {ev.rule_id_str || ev.rule_id}
+                </TableCell>
+                <TableCell className="text-xs">{ev.phase}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
 
       {/* Pagination */}
       <div className="flex items-center justify-between text-sm">
-        <span className="text-muted-foreground">
+        <span className="text-gray-400 text-xs">
           共 {total} 条，第 {page}/{totalPages} 页
         </span>
         <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
+          <button
+            className="inline-flex items-center justify-center h-8 w-8 border border-gray-300 rounded-md bg-white text-gray-600 hover:border-cyan-400 hover:text-cyan-600 transition-colors disabled:opacity-50"
             disabled={page <= 1}
             onClick={() => setPage((p) => p - 1)}
           >
             <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
+          </button>
+          <button
+            className="inline-flex items-center justify-center h-8 w-8 border border-gray-300 rounded-md bg-white text-gray-600 hover:border-cyan-400 hover:text-cyan-600 transition-colors disabled:opacity-50"
             disabled={page >= totalPages}
             onClick={() => setPage((p) => p + 1)}
           >
             <ChevronRight className="h-4 w-4" />
-          </Button>
+          </button>
         </div>
       </div>
 
@@ -461,7 +432,7 @@ function Row({
 }) {
   return (
     <div className="flex gap-3">
-      <span className="w-28 shrink-0 text-muted-foreground">{label}</span>
+      <span className="w-28 shrink-0 text-gray-500">{label}</span>
       <span className={`break-all ${mono ? "font-mono text-xs" : ""}`}>
         {value || "-"}
       </span>

@@ -166,24 +166,23 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">{title}</h1>
-          {description && <p className="text-sm text-muted-foreground mt-1 max-w-2xl">{description}</p>}
+          <h1 className="text-xl font-semibold text-gray-800">{title}</h1>
+          {description && <p className="text-sm text-gray-500 mt-0.5 max-w-2xl">{description}</p>}
         </div>
-        <Button size="sm" onClick={openNew}>
+        <Button size="sm" onClick={openNew} className="bg-teal-500 hover:bg-teal-600 text-white">
           <Plus className="mr-1 h-4 w-4" /> 新增
         </Button>
       </div>
 
-      <Card>
-        <CardContent className="p-0">
+      <div className="rounded-lg border border-gray-200 overflow-hidden bg-white">
           <Table>
             <TableHeader>
-              <TableRow>
-                <TableHead className="w-16">ID</TableHead>
+              <TableRow className="bg-gray-50">
+                <TableHead className="w-16 text-gray-600 font-medium">ID</TableHead>
                 {tableCols.map((f) => (
-                  <TableHead key={f.key}>{f.label}</TableHead>
+                  <TableHead key={f.key} className="text-gray-600 font-medium">{f.label}</TableHead>
                 ))}
-                <TableHead className="w-24">操作</TableHead>
+                <TableHead className="w-24 text-gray-600 font-medium">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -233,8 +232,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
               )}
             </TableBody>
           </Table>
-        </CardContent>
-      </Card>
+      </div>
 
       {/* Edit/Create Dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
@@ -311,8 +309,8 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
             ))}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>
-            <Button onClick={handleSave} disabled={saving}>
+            <Button variant="outline" onClick={() => setOpen(false)} className="text-teal-600 border-teal-500">取消</Button>
+            <Button onClick={handleSave} disabled={saving} className="bg-teal-500 hover:bg-teal-600 text-white">
               {saving && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
               {isNew ? "创建" : "保存"}
             </Button>

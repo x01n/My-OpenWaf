@@ -1,8 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { ChevronRight, User, Moon, Sun } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { ChevronRight, User } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,7 +16,7 @@ import { useRouter } from "next/navigation";
 
 const routeMeta = [
   { prefix: "/dashboard/", title: "仪表盘", description: "查看流量、错误、拦截与配置修订概览。", breadcrumb: "仪表盘" },
-  { prefix: "/sites/", title: "站点", description: "按 Host 绑定上游、证书、维护页与阻断页。", breadcrumb: "站点管理" },
+  { prefix: "/sites/", title: "防护应用", description: "管理您的 Web 应用防护配置与上游服务。", breadcrumb: "防护应用" },
   { prefix: "/certificates/", title: "证书", description: "维护站点与监听器使用的 TLS 证书。", breadcrumb: "证书管理" },
   { prefix: "/security-events/", title: "安全事件", description: "查看 WAF 拦截与观察日志，按 IP、类型与时间筛选。", breadcrumb: "安全事件" },
   { prefix: "/ip-lists/", title: "IP 黑白名单", description: "按 IP 或 CIDR 管理黑名单与白名单条目。", breadcrumb: "IP 黑白名单" },
@@ -45,25 +44,21 @@ export function DashboardTopbar() {
   }
 
   return (
-    <header className="border-b border-border bg-card/50 backdrop-blur-xl card-shadow">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-3">
+    <header className="border-b border-gray-200 bg-white">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-2.5">
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <span className="hover:text-foreground cursor-pointer transition-colors">控制台</span>
-            <ChevronRight className="h-4 w-4" />
-            <span className="text-foreground font-medium truncate">{meta.breadcrumb}</span>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-gray-400 cursor-pointer hover:text-gray-600 transition-colors">控制台</span>
+            <ChevronRight className="h-4 w-4 text-gray-400" />
+            <span className="text-gray-700 font-medium truncate">{meta.breadcrumb}</span>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
-          <Badge variant="outline" className="font-mono text-[10px] hidden sm:inline-flex">
-            {pathname || "/"}
-          </Badge>
-
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full">
-                <User className="h-4 w-4" />
+                <User className="h-4 w-4 text-gray-500" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
@@ -75,11 +70,6 @@ export function DashboardTopbar() {
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-      </div>
-
-      <div className="mx-auto max-w-7xl px-6 pb-4">
-        <h1 className="text-2xl font-bold tracking-tight">{meta.title}</h1>
-        <p className="text-sm text-muted-foreground mt-1">{meta.description}</p>
       </div>
     </header>
   );

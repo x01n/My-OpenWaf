@@ -22,7 +22,7 @@ export default function DashboardLayout({
         />
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <DashboardTopbar />
-          <main className="flex-1 overflow-y-auto">
+          <main className="flex-1 overflow-y-auto bg-gray-50">
             <div className="mx-auto max-w-7xl px-6 py-6">{children}</div>
           </main>
         </div>

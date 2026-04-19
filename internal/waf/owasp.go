@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"html"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -57,11 +58,36 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		if raw == "" {
 			continue
 		}
+		// Fast path: skip targets that are clearly safe (pure alphanumeric + safe chars).
+		if isCleanTarget(raw) {
+			continue
+		}
 		// Truncate oversized targets to bound regex scan time.
 		if len(raw) > maxTargetLen {
 			raw = raw[:maxTargetLen]
 		}
 		normalized := normalizeWithDecode(raw)
+		// Check raw string for Java serialization patterns that get mangled by normalize.
+		if strings.Contains(raw, "%ac%ed") || strings.Contains(raw, "%AC%ED") ||
+			strings.Contains(raw, "aced0005") || strings.Contains(raw, "ACED0005") {
+			return []OWASPHit{{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java serialization magic bytes (URL-encoded)"}}
+		}
+		// CRLF check on URL-decoded (but not whitespace-normalized) input,
+		// because normalize() replaces \r\n with spaces.
+		if strings.Contains(raw, "%0d") || strings.Contains(raw, "%0D") ||
+			strings.Contains(raw, "%0a") || strings.Contains(raw, "%0A") ||
+			strings.ContainsAny(raw, "\r\n") {
+			urlDec := raw
+			if d, err := url.PathUnescape(raw); err == nil {
+				urlDec = d
+			}
+			lower := strings.ToLower(urlDec)
+			if hit, ok := checkCRLF(lower, threshold); ok {
+				if !isCRLFFalsePositive(lower, hit.RuleID) {
+					return []OWASPHit{hit}
+				}
+			}
+		}
 		if !hasSuspiciousContent(normalized) {
 			continue
 		}
@@ -96,10 +122,14 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 			return []OWASPHit{hit}
 		}
 		if hit, ok := checkPathTraversal(normalized, threshold); ok {
-			return []OWASPHit{hit}
+			if threshold <= 2 || !isPathTravFalsePositive(normalized, hit.RuleID) {
+				return []OWASPHit{hit}
+			}
 		}
 		if hit, ok := checkSSRF(normalized, threshold); ok {
-			hits = append(hits, hit)
+			if !isSSRFFalsePositive(normalized, hit.RuleID) {
+				hits = append(hits, hit)
+			}
 		}
 		if hit, ok := checkXXE(normalized, threshold); ok {
 			return []OWASPHit{hit}
@@ -163,20 +193,49 @@ func CheckFileUpload(filename, contentType string) (OWASPHit, bool) {
 	return checkFileUpload(filename, contentType)
 }
 
-// checkPathFileUpload detects dangerous file extensions accessed via URL path,
-// e.g. /uploadfiles/shell.php.jpg — a double-extension bypass frequently used
-// to serve webshells through upload directories.
+var webExecutableExtensions = map[string]bool{
+	".php": true, ".php3": true, ".php4": true, ".php5": true,
+	".phtml": true, ".phar": true, ".jsp": true, ".jspx": true,
+	".asp": true, ".aspx": true, ".cer": true, ".cfm": true,
+	".pl": true, ".py": true, ".rb": true, ".htaccess": true,
+}
+
+var safeWebExtensions = map[string]bool{
+	".js": true, ".css": true, ".html": true, ".htm": true,
+	".json": true, ".xml": true, ".txt": true, ".map": true,
+	".svg": true, ".woff": true, ".woff2": true, ".ttf": true,
+	".eot": true, ".ico": true, ".png": true, ".jpg": true,
+	".jpeg": true, ".gif": true, ".webp": true, ".avif": true,
+}
+
+// checkPathFileUpload detects double-extension bypass patterns in URL paths,
+// e.g. /uploadfiles/shell.php.jpg. Single extensions like /page.php are normal
+// web requests and should not trigger.
 func checkPathFileUpload(path string) (OWASPHit, bool) {
 	if path == "" || !strings.Contains(path, ".") {
 		return OWASPHit{}, false
 	}
-	// Extract the last path segment (filename portion).
 	idx := strings.LastIndexByte(path, '/')
 	filename := path[idx+1:]
 	if filename == "" || !strings.Contains(filename, ".") {
 		return OWASPHit{}, false
 	}
-	return checkFileUpload(filename, "")
+	lower := strings.ToLower(filename)
+	ext := strings.ToLower(filepath.Ext(lower))
+	if ext == "" {
+		return OWASPHit{}, false
+	}
+	withoutExt := lower[:len(lower)-len(ext)]
+	secondExt := filepath.Ext(withoutExt)
+	if secondExt != "" && dangerousExtensions[secondExt] && webExecutableExtensions[secondExt] {
+		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:002", Score: 5,
+			Desc: "double extension in path: " + secondExt + ext}, true
+	}
+	if strings.Contains(lower, "\x00") || strings.Contains(lower, "%00") {
+		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:001", Score: 6,
+			Desc: "null byte in path filename"}, true
+	}
+	return OWASPHit{}, false
 }
 
 // checkDangerousPath detects CVE-specific dangerous API endpoints and paths
@@ -214,13 +273,63 @@ func checkDangerousPath(path string) (OWASPHit, bool) {
 		return OWASPHit{Category: CatWebshell, RuleID: "owasp:path:007", Score: 6,
 			Desc: "ThinkPHP invokefunction RCE"}, true
 	}
+	// Atlassian gadgets makeRequest SSRF (CVE-2019-3396 and similar)
+	if strings.Contains(lower, "/gadgets/makerequest") {
+		return OWASPHit{Category: CatSSRF, RuleID: "owasp:path:008", Score: 5,
+			Desc: "Atlassian gadgets SSRF endpoint"}, true
+	}
+	// Nexus Repository Manager RCE
+	if strings.Contains(lower, "coreui_user") || strings.Contains(lower, "coreui_component") {
+		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:009", Score: 5,
+			Desc: "Nexus Repository Manager RCE"}, true
+	}
+	// Coremail config leak
+	if strings.Contains(lower, "/mailsms/") {
+		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:010", Score: 5,
+			Desc: "Coremail config leak"}, true
+	}
+	if strings.Contains(lower, "/.git/") || strings.HasSuffix(lower, "/.git") {
+		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:011", Score: 5,
+			Desc: ".git directory access"}, true
+	}
+	if strings.Contains(lower, "/securityrealm/") && strings.Contains(lower, "descriptorbyname") {
+		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:012", Score: 5,
+			Desc: "Jenkins Script Security RCE"}, true
+	}
+	if strings.Contains(lower, "deleteusername") || strings.Contains(lower, "deleteuserrequestinfobyxml") {
+		return OWASPHit{Category: CatXXE, RuleID: "owasp:path:013", Score: 5,
+			Desc: "OFS XXE endpoint"}, true
+	}
+	// Semicolon path parameter bypass (Tomcat/Spring)
+	if strings.Contains(lower, ";") && (strings.Contains(lower, "swagger") ||
+		strings.Contains(lower, "actuator") || strings.Contains(lower, "admin") ||
+		strings.Contains(lower, "console") || strings.Contains(lower, "manager")) {
+		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:014", Score: 5,
+			Desc: "Semicolon path parameter bypass"}, true
+	}
+	// Joomla API config leak (CVE-2023-23752)
+	if strings.Contains(lower, "/api/index.php/v1/config/") ||
+		(strings.Contains(lower, "/api/") && strings.Contains(lower, "/v1/config/application")) {
+		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5,
+			Desc: "Joomla API config information leak"}, true
+	}
+	// Nexus Repository Manager RCE
+	if strings.Contains(lower, "/service/rest/") && strings.Contains(lower, "/repositories/") {
+		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:016", Score: 5,
+			Desc: "Nexus Repository Manager API"}, true
+	}
+	// Service extdirect RCE
+	if strings.Contains(lower, "/service/extdirect") {
+		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:017", Score: 5,
+			Desc: "ExtDirect RCE endpoint"}, true
+	}
 	return OWASPHit{}, false
 }
 
 func sensitivityThreshold(s string) int {
 	switch strings.ToLower(s) {
 	case "low":
-		return 6
+		return 7
 	case "high":
 		return 3 // Raised from 2 to 3 to reduce false positives
 	default:
@@ -234,8 +343,8 @@ var skipHeaders = map[string]bool{
 	"host":                          true,
 	"connection":                    true,
 	"content-length":                true,
-	"content-type":                  true,
-	"accept":                        true,
+	"content-type":                  false,
+	"accept":                        false,
 	"accept-language":               true,
 	"accept-encoding":               true,
 	"cookie":                        true,
@@ -385,16 +494,65 @@ func normalize(s string) string {
 	if strings.Contains(s, "\\") {
 		s = decodeJSEscapes(s)
 	}
+	// Post-JS-escape URL decode: JS escapes may produce percent-encoded chars
+	// (e.g. \u0025\u0032\u0038 → %28 → '('). Multi-pass to handle double/triple encoding.
+	for range 3 {
+		if !strings.Contains(s, "%") {
+			break
+		}
+		d, err := url.PathUnescape(s)
+		if err != nil || d == s {
+			break
+		}
+		s = d
+	}
 	// UTF-7 decode: +ADw- → <, +AD4- → >, etc. (used in XSS attacks with charset=UTF-7).
 	if strings.Contains(s, "+A") {
 		s = decodeUTF7Sequences(s)
 	}
 	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "\x00", " ")
 	// Strip inline SQL/C-style comments to defeat comment-splitting evasion.
 	// Empty replacement joins adjacent tokens: sel/**/ect → select, un/**/ion → union.
 	s = stripSQLComments(s)
-	s = reWhitespace.ReplaceAllString(s, " ")
+	s = collapseWhitespace(s)
 	return s
+}
+
+// collapseWhitespace replaces runs of whitespace with a single space.
+// Faster than regexp for this simple case.
+func collapseWhitespace(s string) string {
+	needsWork := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' {
+			needsWork = true
+			break
+		}
+		if c == ' ' && i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\t' || s[i+1] == '\n' || s[i+1] == '\r') {
+			needsWork = true
+			break
+		}
+	}
+	if !needsWork {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	inSpace := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c <= ' ' && (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') {
+			if !inSpace {
+				b.WriteByte(' ')
+				inSpace = true
+			}
+		} else {
+			b.WriteByte(c)
+			inSpace = false
+		}
+	}
+	return b.String()
 }
 
 // decodeJSEscapes replaces JavaScript escape sequences with their characters:
@@ -504,37 +662,115 @@ func decodeUTF7Sequences(s string) string {
 // normalizeWithDecode normalizes and attempts base64 decoding of suspicious tokens.
 func normalizeWithDecode(raw string) string {
 	s := normalize(raw)
-	// Extract base64 candidate tokens from both the raw string AND the URL-decoded
-	// form (normalize already did the URL decoding). Using both catches tokens that
-	// are URL-encoded in the raw but visible after decoding.
-	// Limit raised from 5 to 20 to cover payloads with multiple encoded params.
-	seen := make(map[string]bool)
+	// Fast path: if normalized string has no base64-length tokens, skip expensive scanning.
+	if len(s) < 8 || !hasBase64Candidate(s) && !hasBase64Candidate(raw) {
+		return s
+	}
+	// Build a case-preserving URL-decoded version for base64 extraction.
+	// normalize() lowercases which destroys base64 case sensitivity,
+	// and raw may have %XX wrapping base64 boundaries (e.g. %22TOKEN%22).
+	urlDecoded := raw
+	for i := range 3 {
+		var d string
+		var err error
+		if i == 0 {
+			d, err = url.QueryUnescape(urlDecoded)
+		} else {
+			d, err = url.PathUnescape(urlDecoded)
+		}
+		if err != nil || d == urlDecoded {
+			break
+		}
+		urlDecoded = d
+	}
+	sources := []string{raw, s}
+	if urlDecoded != raw {
+		sources = append(sources, urlDecoded)
+	}
+	// Build a case-preserving JS-escape-decoded version for base64 extraction.
+	// \u00XX escapes may encode base64 characters that are case-sensitive.
+	if strings.Contains(urlDecoded, "\\") {
+		jsDecoded := decodeJSEscapes(urlDecoded)
+		if jsDecoded != urlDecoded {
+			sources = append(sources, jsDecoded)
+		}
+	}
 	var b strings.Builder
-	b.WriteString(s)
-	for _, src := range []string{raw, s} {
+	seen := make(map[string]bool, 8)
+	found := false
+	for _, src := range sources {
 		for _, tok := range reBase64Token.FindAllString(src, 20) {
 			if seen[tok] {
 				continue
 			}
 			seen[tok] = true
 			if decoded := decodeBase64IfSuspicious(tok); decoded != "" {
+				if !found {
+					b.Grow(len(s) + 256)
+					b.WriteString(s)
+					found = true
+				}
+				normalizedDecoded := normalize(decoded)
 				b.WriteByte(' ')
-				b.WriteString(normalize(decoded))
-				// Second-level: some payloads double-encode (base64 of base64).
-				for _, tok2 := range reBase64Token.FindAllString(decoded, 10) {
-					if seen[tok2] {
-						continue
-					}
-					seen[tok2] = true
-					if decoded2 := decodeBase64IfSuspicious(tok2); decoded2 != "" {
-						b.WriteByte(' ')
-						b.WriteString(normalize(decoded2))
+				b.WriteString(normalizedDecoded)
+				decodedForB64 := decoded
+				if strings.Contains(decoded, "\\") {
+					decodedForB64 = decodeJSEscapes(decoded)
+				}
+				for _, src2 := range []string{decoded, decodedForB64} {
+					for _, tok2 := range reBase64Token.FindAllString(src2, 10) {
+						if seen[tok2] {
+							continue
+						}
+						seen[tok2] = true
+						if decoded2 := decodeBase64IfSuspicious(tok2); decoded2 != "" {
+							normalizedDecoded2 := normalize(decoded2)
+							b.WriteByte(' ')
+							b.WriteString(normalizedDecoded2)
+							decodedForB64_2 := decoded2
+							if strings.Contains(decoded2, "\\") {
+								decodedForB64_2 = decodeJSEscapes(decoded2)
+							}
+							for _, src3 := range []string{decoded2, decodedForB64_2} {
+								for _, tok3 := range reBase64Token.FindAllString(src3, 10) {
+									if seen[tok3] {
+										continue
+									}
+									seen[tok3] = true
+									if decoded3 := decodeBase64IfSuspicious(tok3); decoded3 != "" {
+										b.WriteByte(' ')
+										b.WriteString(normalize(decoded3))
+									}
+								}
+							}
+						}
 					}
 				}
 			}
 		}
 	}
-	return b.String()
+	if found {
+		return b.String()
+	}
+	return s
+}
+
+// hasBase64Candidate quickly checks if a string might contain a base64 token.
+// Looks for 8+ consecutive base64 chars. Much cheaper than regex.
+func hasBase64Candidate(s string) bool {
+	run := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' {
+			run++
+			if run >= 8 {
+				return true
+			}
+		} else {
+			run = 0
+		}
+	}
+	return false
 }
 
 var reBase64Token = regexp.MustCompile(`[A-Za-z0-9+/]{8,}={0,2}`)
@@ -609,12 +845,54 @@ func decodeBase64IfSuspicious(s string) string {
 		}
 	}
 	if float64(printable)/float64(len(decoded)) < 0.8 {
+		// Binary output might be caused by a non-base64 prefix (e.g. path '/')
+		// that happens to be valid base64 but shifts the decode alignment.
+		if len(s) > 8 && !isBase64AlphaNum(s[0]) {
+			return decodeBase64IfSuspicious(s[1:])
+		}
 		return ""
 	}
 	return string(decoded)
 }
 
+func isBase64AlphaNum(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
+}
+
 // ── Performance: fast pre-filter ──
+
+// cleanCharSet marks bytes that are safe in target values (no attack potential).
+// Alphanumeric + hyphen + underscore + period + space + comma + @.
+var cleanCharSet [256]bool
+
+func init() {
+	for c := byte('a'); c <= 'z'; c++ {
+		cleanCharSet[c] = true
+	}
+	for c := byte('A'); c <= 'Z'; c++ {
+		cleanCharSet[c] = true
+	}
+	for c := byte('0'); c <= '9'; c++ {
+		cleanCharSet[c] = true
+	}
+	for _, c := range []byte{'-', '_', '.', ' ', ',', '@'} {
+		cleanCharSet[c] = true
+	}
+}
+
+// isCleanTarget returns true if the raw string contains only safe chars
+// that cannot form any attack pattern. This skips all normalization and scanning.
+func isCleanTarget(s string) bool {
+	if len(s) > 256 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !cleanCharSet[s[i]] {
+			return false
+		}
+	}
+	return true
+}
 
 var suspiciousCharSet [256]bool
 
@@ -667,8 +945,6 @@ func hasSuspiciousKeywords(s string) bool {
 		strings.Contains(s, "benchmark")
 }
 
-var reWhitespace = regexp.MustCompile(`\s+`)
-
 // ── Category-level fast keyword pre-filters ──
 // These run BEFORE the regex battery to skip entire categories when the
 // normalized string contains no plausible indicator for that attack type.
@@ -707,12 +983,14 @@ func hasSQLiIndicator(s string) bool {
 		strings.Contains(s, "substring(") ||
 		strings.Contains(s, "concat(") ||
 		strings.Contains(s, "char(") ||
+		strings.Contains(s, "chr(") ||
 		strings.Contains(s, "case when") ||
 		strings.Contains(s, "load_file") ||
 		strings.Contains(s, "xp_") ||
 		strings.Contains(s, "procedure") ||
 		strings.Contains(s, "having ") ||
 		strings.Contains(s, "utl_http") ||
+		strings.Contains(s, "utl_inaddr") ||
 		strings.Contains(s, "utl_file") ||
 		strings.Contains(s, "dbms_") ||
 		strings.Contains(s, " like ") ||
@@ -758,8 +1036,16 @@ func hasXSSIndicator(s string) bool {
 		strings.Contains(s, "prompt(") ||
 		strings.Contains(s, "confirm(") ||
 		strings.Contains(s, ".source") ||
-		strings.Contains(s, "constructor") ||
-		strings.Contains(s, "prototype") ||
+		strings.Contains(s, "atob(") ||
+		strings.Contains(s, "alert.") ||
+		strings.Contains(s, "prompt.") ||
+		strings.Contains(s, "data:image/svg") ||
+		strings.Contains(s, "+{}") ||
+		strings.Contains(s, "+[]") ||
+		strings.Contains(s, "(![") ||
+		// constructor/prototype only suspicious in template/JS-execution context
+		strings.Contains(s, "constructor.constructor") ||
+		strings.Contains(s, "constructor.prototype[") ||
 		// Specific HTML event handler names — avoids matching "connection","function","location" etc.
 		strings.Contains(s, "onclick") ||
 		strings.Contains(s, "onload") ||
@@ -838,7 +1124,18 @@ func hasWebshellIndicator(s string) bool {
 		strings.Contains(s, "create_function(") ||
 		strings.Contains(s, "preg_replace(") ||
 		strings.Contains(s, "hex2bin(") ||
-		strings.Contains(s, "call_user_func")
+		strings.Contains(s, "call_user_func") ||
+		strings.Contains(s, "#post_render") ||
+		strings.Contains(s, "#pre_render") ||
+		strings.Contains(s, "#lazy_builder") ||
+		strings.Contains(s, "<java.") ||
+		strings.Contains(s, "\\think\\") ||
+		strings.Contains(s, "invokefunction") ||
+		strings.Contains(s, "<%eval") ||
+		strings.Contains(s, "<%execute") ||
+		strings.Contains(s, "file_put_contents") ||
+		strings.Contains(s, ">shell.") ||
+		strings.Contains(s, "connector.minimal")
 }
 
 // hasRevShellIndicator returns true when the string contains a term
@@ -919,10 +1216,18 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		if !reBoolSQLContext.MatchString(lower) && !reSQLDMLContext.MatchString(lower) {
 			return true
 		}
+		// Also suppress pure ";insert" / ";update" without column/table context
+		// that appears in CMS content or programming blogs.
+		if strings.Contains(lower, ";insert") && !strings.Contains(lower, "into") {
+			return true
+		}
 	case "owasp:sqli:010": // \b(or|and)\s+\d+\s*=\s*\d+
-		// Pure digit=digit comparisons after OR/AND are highly specific to SQLi probes.
-		// Both tautologies (1=1) and false conditions (1=2) are classic blind SQLi patterns.
-		// No false positive suppression: "or 1=1" / "and 1=2" in URL params is always suspicious.
+		if len(lower) > 500 && !strings.Contains(lower, "union") &&
+			!strings.Contains(lower, "select") &&
+			!strings.Contains(lower, "sleep(") &&
+			!strings.Contains(lower, "benchmark(") {
+			return true
+		}
 		return false
 	case "owasp:sqli:011": // \b(or|and)\s+'...'\s*=\s*'...'
 		// "or 'x'='x'" is always malicious — no false positive suppression.
@@ -938,7 +1243,7 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		if strings.Contains(lower, "arn:aws:s3") || strings.Contains(lower, "arn%3aaws%3as3") {
 			return true
 		}
-		// sqli:005 is a low-confidence rule (score=2). For long inputs (analytics beacons,
+		// sqli:005 is a low-confidence rule (score=3). For long inputs (analytics beacons,
 		// telemetry payloads, documentation text > 200 chars), it fires on Aurora MySQL docs
 		// (contain both -- and /* syntax examples), URL path wildcards, etc.
 		// Require explicit SQL injection operators to suppress these false positives.
@@ -962,12 +1267,34 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		}
 		// Path-like strings with /* at the end (e.g., /api/v1/*, /static/*)
 		// are common in routing configs, not SQL comments.
-		if strings.HasSuffix(lower, "/*") && !reSQLiInjectionOps.MatchString(lower) {
+		// Only suppress if the string looks like a URL path (starts with /) and has no other SQLi indicators.
+		if strings.HasSuffix(lower, "/*") && strings.HasPrefix(lower, "/") && !reSQLiInjectionOps.MatchString(lower) {
 			return true
 		}
 	case "owasp:sqli:012": // ;\s*--
 		// Semicolons followed by double-dash can appear in legitimate CSS or JS snippets.
 		if len(lower) < 10 {
+			return true
+		}
+	case "owasp:sqli:021": // substr/substring/mid with numeric args
+		// JavaScript also uses substring(start, end) heavily.
+		// Suppress unless SQL context is present (SQL keywords or SQL-specific functions).
+		if reBoolSQLContext.MatchString(lower) || reSQLTerminatorCtx.MatchString(lower) {
+			return false
+		}
+		// SQL-specific function calls inside the substr confirm injection context.
+		if reSQLi022ClauseCtx.MatchString(lower) {
+			return false
+		}
+		if strings.Contains(lower, "ascii(") || strings.Contains(lower, "ord(") ||
+			strings.Contains(lower, "user()") || strings.Contains(lower, "database()") ||
+			strings.Contains(lower, "version()") || strings.Contains(lower, "@@") {
+			return false
+		}
+		return true
+	case "owasp:sqli:030": // LIMIT n,n with SQL terminator
+		// LIMIT 10,20 is standard MySQL pagination. Suppress unless SQL context confirms injection.
+		if !reSQLTerminatorCtx.MatchString(lower) && !reBoolSQLContext.MatchString(lower) {
 			return true
 		}
 	case "owasp:sqli:022": // \bif\s*\(\s*(select|ord|ascii|substr|length|count|version)\b
@@ -988,11 +1315,15 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		// No SQL function call or clause found: likely a JavaScript variable/property.
 		return true
 	case "owasp:sqli:001": // union (all) select
-		// "union select" appears in developer search queries, documentation, and analytics
-		// beacon parameters (e.g. Google Analytics dl=, Bing bq=, referer URLs).
-		// Suppress when no SQL structural markers are present alongside the phrase.
 		if !reUnionSelectAttackCtx.MatchString(lower) {
 			return true
+		}
+		if len(lower) > 40 && strings.Contains(lower, " the ") || strings.Contains(lower, " a ") || strings.Contains(lower, " each ") {
+			if !strings.Contains(lower, "null") && !strings.Contains(lower, "@@") &&
+				!strings.Contains(lower, "information_schema") && !strings.Contains(lower, "--") &&
+				!strings.Contains(lower, "/*") && !strings.Contains(lower, "0x") {
+				return true
+			}
 		}
 	case "owasp:sqli:017": // INTO OUTFILE/DUMPFILE
 		// MySQL requires a quoted file path: INTO OUTFILE '/tmp/x.php'.
@@ -1021,12 +1352,17 @@ func hasActiveXSSContext(normalized string) bool {
 		strings.Contains(normalized, "vbscript:") ||
 		strings.Contains(normalized, "data:text/html") ||
 		strings.Contains(normalized, "<script") ||
+		strings.Contains(normalized, ":script") ||
 		strings.Contains(normalized, "eval(") ||
+		strings.Contains(normalized, "alert(") ||
+		strings.Contains(normalized, "prompt(") ||
+		strings.Contains(normalized, "confirm(") ||
 		strings.Contains(normalized, "fromcharcode") ||
 		strings.Contains(normalized, "document.cookie") ||
 		strings.Contains(normalized, "document.write") ||
 		strings.Contains(normalized, "innerhtml") ||
-		reXSSEventHandler.MatchString(normalized)
+		reXSSEventHandler.MatchString(normalized) ||
+		reJSProtocolObfuscated.MatchString(normalized)
 }
 
 // isXSSFalsePositive returns true when the XSS hit came only from passive
@@ -1037,12 +1373,59 @@ func hasActiveXSSContext(normalized string) bool {
 // At high sensitivity (threshold ≤ 2), this check is bypassed by the caller.
 func isXSSFalsePositive(normalized, firstRuleID string) bool {
 	switch firstRuleID {
+	case "owasp:xss:032": // /regex/.source concatenation
+		return false
+	case "owasp:xss:052": // global[( JSFuck
+		return !hasActiveXSSContext(normalized)
+	case "owasp:xss:001": // <script[\s>]
+		lower := strings.ToLower(normalized)
+		if len(normalized) > 200 {
+			if !strings.Contains(lower, "alert(") &&
+				!strings.Contains(lower, "eval(") &&
+				!strings.Contains(lower, "document.cookie") &&
+				!strings.Contains(lower, "document.write") &&
+				!strings.Contains(lower, "prompt(") &&
+				!strings.Contains(lower, "confirm(") &&
+				!strings.Contains(lower, "fromcharcode") &&
+				!strings.Contains(lower, "</script") &&
+				!strings.Contains(lower, "src=") &&
+				!strings.Contains(lower, "onerror") &&
+				!strings.Contains(lower, "onload") &&
+				!strings.Contains(lower, "fetch(") &&
+				!strings.Contains(lower, "innerhtml") &&
+				!strings.Contains(lower, "xmlhttp") &&
+				!strings.Contains(lower, "\\u00") &&
+				!strings.Contains(lower, "base64") {
+				return true
+			}
+		}
+		if !strings.Contains(lower, "</script") && !strings.Contains(lower, "alert(") &&
+			!strings.Contains(lower, "eval(") && !strings.Contains(lower, "src=") &&
+			!strings.Contains(lower, "onerror") && !strings.Contains(lower, "onload") {
+			idx := strings.Index(lower, "<script")
+			if idx >= 0 {
+				after := lower[idx+7:]
+				if len(after) > 0 && after[0] != '>' && after[0] != ' ' && after[0] != '\t' {
+					return true
+				}
+				if !strings.Contains(after, "(") && !strings.Contains(after, "=") {
+					return true
+				}
+			}
+		}
 	case "owasp:xss:002": // \bon(event)\s*= — HTML event handler attribute
-		// CDN script loaders use ?onload=callbackName as a standard API pattern.
-		// The callback value is a plain identifier (no parentheses, no HTML context).
-		// Real XSS attacks: onload=alert(1) have a function call with `(`.
 		if isXSSHandlerFunctionRef(normalized) {
 			return true
+		}
+		if len(normalized) > 300 {
+			lower := strings.ToLower(normalized)
+			isCode := strings.Contains(lower, "const ") || strings.Contains(lower, "function ") ||
+				strings.Contains(lower, "=> ") || strings.Contains(lower, "import ") ||
+				strings.Contains(lower, "export ") || strings.Contains(lower, "return (")
+			if isCode && !strings.Contains(lower, "alert(") && !strings.Contains(lower, "eval(") &&
+				!strings.Contains(lower, "document.cookie") && !strings.Contains(lower, "document.write") {
+				return true
+			}
 		}
 	case "owasp:xss:003": // javascript: URI
 		// javascript:void(0) and javascript:; are ubiquitous in legitimate HTML
@@ -1066,7 +1449,7 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 			return true
 		}
 	case "owasp:xss:005", "owasp:xss:007", "owasp:xss:008",
-		"owasp:xss:012", "owasp:xss:015", "owasp:xss:018",
+		"owasp:xss:012", "owasp:xss:015",
 		"owasp:xss:022", "owasp:xss:024", "owasp:xss:028":
 		return !hasActiveXSSContext(normalized)
 	case "owasp:xss:006", "owasp:xss:010":
@@ -1102,6 +1485,7 @@ func isXSSHandlerFunctionRef(normalized string) bool {
 
 // reXSSEventHandler matches inline event handler attributes (on<event>=).
 var reXSSEventHandler = regexp.MustCompile(`(?i)\bon\w+\s*=`)
+var reJSProtocolObfuscated = regexp.MustCompile(`(?i)j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:`)
 
 // reBacktickInjectionCtx: backtick command substitution is in shell injection position when
 // the opening backtick is at start-of-string or immediately preceded by a shell operator
@@ -1135,15 +1519,11 @@ var reCmdHighConfidence = regexp.MustCompile(
 func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 	switch ruleID {
 	case "owasp:cmd:002": // backtick command substitution (score=4)
-		// Backtick-enclosed command names in Markdown / documentation / code references
-		// (e.g. "Use `echo` to print", "run `grep -r`") are not injection.
-		// Suppress unless the backtick is in an injection position: preceded by =, ;, |, &, $
-		// or at the start of the string (bare `cmd` value).
-		// Also keep when the string contains shell operators (;|&&||) indicating an attack chain.
 		if reBacktickInjectionCtx.MatchString(normalized) {
 			return false
 		}
-		if strings.ContainsAny(normalized, ";|") || strings.Contains(normalized, "&&") {
+		if strings.ContainsAny(normalized, ";|") || strings.Contains(normalized, "&&") ||
+			strings.Contains(normalized, "$(") || strings.Contains(normalized, "${") {
 			return false
 		}
 		return true
@@ -1187,11 +1567,13 @@ var reUnionSelectAttackCtx = regexp.MustCompile(`(?i)(` +
 	`|\bfrom\s+[\w` + "`" + `'"]` + // FROM table reference
 	`|@@\w` + // MySQL global variable
 	`|\binformation_schema\b` + // schema enumeration
-	`|\b(user|database|version|schema)\s*\(` + // SQL function calls
+	`|\b(user|database|version|schema|sleep|benchmark|group_concat|extractvalue|updatexml|load_file|char|unhex)\s*\(` + // SQL function calls
 	`|\(\s*select\b` + // subquery SELECT
 	`|(--|/\*)` + // SQL comment terminator
 	`|['"]\s*(and|or|where|having|group|order|union)\b` + // operator after quote
 	`|union\s+(all\s+)?select\s+['"\d(@]` + // UNION SELECT followed by column value
+	`|\bwhere\s+\d+\s*=\s*\d+` + // WHERE 1=1 tautology
+	`|\border\s+by\s+\d` + // ORDER BY n probing
 	`)`)
 
 // reIntoOutfileWithPath confirms that an INTO OUTFILE/DUMPFILE hit (sqli:017) carries a
@@ -1236,7 +1618,7 @@ var reSQLi008AttackCtx = regexp.MustCompile(`(?i)(` +
 // rePathTravSensitive detects path traversal payloads targeting known sensitive OS files
 // or directories. Used to suppress the `../../` FP for relative paths in build/config files.
 var rePathTravSensitive = regexp.MustCompile(
-	`(?i)(etc/passwd|etc/shadow|etc/hosts|/etc/|proc/self|/proc/|windows/system32|win\.ini|boot\.ini|cmd\.exe|/root/|/home/\w|\.env$|web\.xml|nginx\.conf|apache\.conf|web-inf|meta-inf|\.git/|\.svn/|\.htpasswd|\.aws/|\.ssh/)`)
+	`(?i)(etc/passwd|etc/shadow|etc/hosts|/etc/|proc/self|/proc/|windows/system32|win\.ini|boot\.ini|cmd\.exe|/root/|/home/\w|\.env$|web\.xml|nginx\.conf|apache\.conf|web-inf|meta-inf|\.git/|\.svn/|\.htpasswd|\.aws/|\.ssh/|/bin/sh|/bin/bash|/bin/cat|/usr/bin|/var/log|/tmp/|/dev/)`)
 
 // reTautology detects boolean tautologies like "or 1=1", "and 2=2" (same number both sides).
 // Go regexp doesn't support backreferences, so we extract and compare manually.
@@ -1275,6 +1657,26 @@ func isPathTravFalsePositive(normalized, ruleID string) bool {
 	}
 	return false
 }
+func isSSRFFalsePositive(normalized, ruleID string) bool {
+	switch ruleID {
+	case "owasp:ssrf:007":
+		lower := strings.ToLower(normalized)
+		if strings.Contains(lower, "gopher://") ||
+			strings.Contains(lower, "file://") ||
+			strings.Contains(lower, "dict://") {
+			return false
+		}
+		if strings.Contains(lower, "localhost") && !strings.Contains(lower, "127.") {
+			if len(normalized) > 100 && !strings.Contains(lower, "@") &&
+				!strings.Contains(lower, "metadata") &&
+				!strings.Contains(lower, "169.254.") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func isDeserFalsePositive(raw, ruleID string) bool {
 	switch ruleID {
 	case "owasp:deser:005": // Ruby marshal magic \x04\x08
@@ -1381,7 +1783,7 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 }
 
 // reNoSQLAttackCtx matches MongoDB operator injection context: {"key":{"$ne":val}} or ?k[$ne]=v
-var reNoSQLAttackCtx = regexp.MustCompile(`(?i)(\[|\{|:|=)\s*["']?\s*\$(ne|gt|lt|gte|lte|regex|in|nin)\b`)
+var reNoSQLAttackCtx = regexp.MustCompile(`(?i)(\[|\{|:|=)\s*\\?["']?\s*\$(ne|gt|lt|gte|lte|regex|in|nin)\b`)
 
 // ── SQL Injection ──
 
@@ -1393,18 +1795,18 @@ var sqliPatterns = []struct {
 	{regexp.MustCompile(`(?i)union\s*(all\s*)?select`), 5, "owasp:sqli:001"},
 	{regexp.MustCompile(`(?i)'\s*(or|and)\s+['"]?\d`), 5, "owasp:sqli:002"},
 	{regexp.MustCompile(`(?i)(sleep|benchmark|waitfor\s+delay|pg_sleep)\s*\(`), 5, "owasp:sqli:003"},
-	// Stacked query with DDL/DML/SELECT — includes SELECT for "1; SELECT user()--"
-	{regexp.MustCompile(`(?i);\s*(select|drop|alter|create|truncate|delete|update|insert)\s`), 4, "owasp:sqli:004"},
+	// Stacked query with DDL/DML/SELECT in SQL injection context
+	{regexp.MustCompile(`(?i);\s*(select|drop|alter|create|truncate|delete|update|insert)\s`), 5, "owasp:sqli:004"},
 	// SQL comment terminator preceded by quote or digit (-- requires trailing space/end-of-string, no # to avoid URL fragment FP)
-	{regexp.MustCompile(`(?i)['"\d]\s*(--(?:[\s/]|$)|/\*)`), 2, "owasp:sqli:005"},
+	{regexp.MustCompile(`(?i)['"\d]\s*(--(?:[\s/]|$)|/\*)`), 3, "owasp:sqli:005"},
 	{regexp.MustCompile(`(?i)'\s*;\s*\w`), 3, "owasp:sqli:006"},
-	{regexp.MustCompile(`(?i)(char|chr|concat|hex|unhex|conv)\s*\(`), 3, "owasp:sqli:007"},
+	{regexp.MustCompile(`(?i)(chr|unhex|conv)\s*\(`), 3, "owasp:sqli:007"},
 	// Hex literal with SQLi context (require preceding operator or comma)
 	{regexp.MustCompile(`(?i)[,=(]\s*0x[0-9a-f]{4,}`), 2, "owasp:sqli:008"},
-	{regexp.MustCompile(`(?i)information_schema|sysobjects|sys\.\w+tables`), 4, "owasp:sqli:009"},
+	{regexp.MustCompile(`(?i)information_schema|sysobjects|sys\.\w+tables`), 5, "owasp:sqli:009"},
 	// Boolean-based blind SQLi
-	{regexp.MustCompile(`(?i)\b(or|and)\s+\d+\s*=\s*\d+`), 4, "owasp:sqli:010"},
-	{regexp.MustCompile(`(?i)\b(or|and)\s+['"]\w*['"]\s*=\s*['"]\w*['"]`), 4, "owasp:sqli:011"},
+	{regexp.MustCompile(`(?i)\b(or|and)\s+\d+\s*=\s*\d+`), 5, "owasp:sqli:010"},
+	{regexp.MustCompile(`(?i)\b(or|and)\s+['"]\w*['"]\s*=\s*['"]\w*['"]`), 5, "owasp:sqli:011"},
 	// Stacked queries with comments
 	{regexp.MustCompile(`(?i);\s*--`), 3, "owasp:sqli:012"},
 	// Out-of-band exfiltration
@@ -1419,51 +1821,63 @@ var sqliPatterns = []struct {
 	// CASE WHEN time-based
 	{regexp.MustCompile(`(?i)case\s+when\s+.*then\s+(sleep|benchmark|pg_sleep)`), 5, "owasp:sqli:018"},
 	// ORDER BY with suspicious trailing syntax (SQL comment/semicolon = probing)
-	{regexp.MustCompile(`(?i)\border\s+by\s+\d+\s*(--\s?|/\*|;\s*$)`), 4, "owasp:sqli:019"},
+	{regexp.MustCompile(`(?i)\border\s+by\s+\d+\s*(--\s?|/\*|;\s*$)`), 5, "owasp:sqli:019"},
 	// MySQL version-specific inline comment bypass /*!50000union*/
-	{regexp.MustCompile(`(?i)/\*!\d*\s*(select|union|insert|update|delete|drop|alter|where|from|and|or)\b`), 4, "owasp:sqli:020"},
+	{regexp.MustCompile(`(?i)/\*!\d*\s*(select|union|insert|update|delete|drop|alter|where|from|and|or)\b`), 5, "owasp:sqli:020"},
 	// Blind SQLi extraction: substr/substring/mid with numeric offset args
 	{regexp.MustCompile(`(?i)(substr|substring|mid)\s*\(.+,\s*\d+\s*,\s*\d+\s*\)`), 4, "owasp:sqli:021"},
 	// Conditional blind SQLi: IF(select/ascii/ord/...)
-	{regexp.MustCompile(`(?i)\bif\s*\(\s*(select|ord|ascii|substr|length|count|version)\b`), 4, "owasp:sqli:022"},
+	{regexp.MustCompile(`(?i)\bif\s*\(\s*(select|ord|ascii|substr|length|count|version)\b`), 5, "owasp:sqli:022"},
 	// Bitwise/arithmetic operators in injection context (e.g., id=1&1, id=1^1)
 	{regexp.MustCompile(`(?i)'\s*(\^|&|<<|>>)\s*'`), 3, "owasp:sqli:023"},
 	// MSSQL stored procedure for OS command execution
 	{regexp.MustCompile(`(?i)\bxp_(cmdshell|regread|regwrite|loginconfig|enumdsn|availablemedia|ntsec)\b`), 6, "owasp:sqli:024"},
 	// MySQL PROCEDURE ANALYSE — used to enumerate column types
-	{regexp.MustCompile(`(?i)\bprocedure\s+analyse\s*\(`), 4, "owasp:sqli:025"},
+	{regexp.MustCompile(`(?i)\bprocedure\s+analyse\s*\(`), 5, "owasp:sqli:025"},
 	// Oracle UTL_HTTP / UTL_FILE / DBMS out-of-band exfiltration
 	{regexp.MustCompile(`(?i)\b(utl_http|utl_file|dbms_pipe|dbms_output)\s*\.\s*\w+`), 5, "owasp:sqli:026"},
 	// HAVING with tautology (blind SQLi enumeration)
-	{regexp.MustCompile(`(?i)\bhaving\s+\d+\s*=\s*\d+`), 4, "owasp:sqli:027"},
+	{regexp.MustCompile(`(?i)\bhaving\s+\d+\s*=\s*\d+`), 5, "owasp:sqli:027"},
 	// Subquery in numeric comparison: 1=(SELECT 1 FROM ...)
-	{regexp.MustCompile(`(?i)\d+\s*=\s*\(\s*select\b`), 4, "owasp:sqli:028"},
+	{regexp.MustCompile(`(?i)\d+\s*=\s*\(\s*select\b`), 5, "owasp:sqli:028"},
 	// LIKE-based blind SQLi with wildcard
-	{regexp.MustCompile(`(?i)'\s*like\s+'[%_]`), 4, "owasp:sqli:029"},
-	// LIMIT/OFFSET injection for MySQL enumeration
-	{regexp.MustCompile(`(?i)\blimit\s+\d+\s*,\s*\d+\s*(--|;|$)`), 4, "owasp:sqli:030"},
+	{regexp.MustCompile(`(?i)'\s*like\s+'[%_]`), 5, "owasp:sqli:029"},
+	// LIMIT/OFFSET injection for MySQL enumeration with terminator
+	{regexp.MustCompile(`(?i)\blimit\s+\d+\s*,\s*\d+\s*(--|;)`), 5, "owasp:sqli:030"},
 	// Subquery in comparison: id=1=(SELECT 1 FROM...) or id IN (SELECT ...)
-	{regexp.MustCompile(`(?i)(=\s*|\bIN\s*)\(\s*SELECT\b`), 4, "owasp:sqli:031"},
+	{regexp.MustCompile(`(?i)(=\s*|\bIN\s*)\(\s*SELECT\b`), 5, "owasp:sqli:031"},
 	// GROUP BY column enumeration with explicit SQL terminator
-	{regexp.MustCompile(`(?i)\bGROUP\s+BY\s+\d+(\s*,\s*\d+)*\s*(--|;|/\*)`), 4, "owasp:sqli:032"},
-	// LIMIT x OFFSET y injection (MySQL/PostgreSQL enumeration)
-	{regexp.MustCompile(`(?i)\blimit\s+\d+\s+offset\s+\d+\s*(--|;|/\*|$)`), 4, "owasp:sqli:033"},
+	{regexp.MustCompile(`(?i)\bGROUP\s+BY\s+\d+(\s*,\s*\d+)*\s*(--|;|/\*)`), 5, "owasp:sqli:032"},
+	// LIMIT x OFFSET y injection (MySQL/PostgreSQL enumeration) — require SQL terminator
+	{regexp.MustCompile(`(?i)\blimit\s+\d+\s+offset\s+\d+\s*(--|;|/\*)`), 5, "owasp:sqli:033"},
 	// MSSQL EXEC with stored procedures / system procs
 	{regexp.MustCompile(`(?i);\s*exec(?:\s+|\s*\()(?:xp_|sp_|master\.\.)\w`), 5, "owasp:sqli:034"},
 	// MSSQL WAITFOR DELAY without parentheses: WAITFOR DELAY '0:0:10'
 	{regexp.MustCompile(`(?i)\bwaitfor\s+delay\s+['"]`), 5, "owasp:sqli:035"},
 	// Empty string tautology: or ''=' or and ""="
-	{regexp.MustCompile(`(?i)\b(or|and)\s+['"]['"]\s*=\s*['"]`), 4, "owasp:sqli:036"},
+	{regexp.MustCompile(`(?i)\b(or|and)\s+['"]['"]\s*=\s*['"]`), 5, "owasp:sqli:036"},
 	// PostgreSQL COPY TO PROGRAM (command execution via SQL)
 	{regexp.MustCompile(`(?i)\bcopy\b.{0,200}\bto\s+program\b`), 5, "owasp:sqli:037"},
-	// Standalone SELECT ... FROM: select * from tablename, select col from tbl
-	{regexp.MustCompile(`(?i)\bselect\s+[\*\w]+(?:\s*,\s*[\*\w]+)*\s+from\s+\w`), 4, "owasp:sqli:038"},
+	// Standalone SELECT ... FROM with SQL injection context (terminator/tautology/union)
+	{regexp.MustCompile(`(?i)\bselect\b.{0,100}\bfrom\s+\w+\s*(--|;|/\*|\bwhere\s+\d+=\d+|\bunion\b)`), 5, "owasp:sqli:038"},
 	// AND/OR before subquery: and (select ...), or (select ...)
-	{regexp.MustCompile(`(?i)\b(and|or)\s*\(\s*select\b`), 4, "owasp:sqli:039"},
+	{regexp.MustCompile(`(?i)\b(and|or)\s*\(\s*select\b`), 5, "owasp:sqli:039"},
 	// SELECT CASE WHEN without sleep (conditional error/division blind SQLi)
-	{regexp.MustCompile(`(?i)\bselect\s+case\s+when\b`), 4, "owasp:sqli:040"},
-	// SELECT CAST/CONVERT (type casting for data extraction)
-	{regexp.MustCompile(`(?i)\bselect\s+(cast|convert)\s*\(`), 4, "owasp:sqli:041"},
+	{regexp.MustCompile(`(?i)\bselect\s+case\s+when\b`), 5, "owasp:sqli:040"},
+	// SELECT CAST/CONVERT (type casting for data extraction) — require SQL context
+	{regexp.MustCompile(`(?i)\bselect\s+(cast|convert)\s*\([^)]{0,80}\)\s*(from\b|,\s*\w|--)`), 5, "owasp:sqli:041"},
+	// chr() or char() concatenation — Oracle/PostgreSQL/SQL Server string building
+	{regexp.MustCompile(`(?i)\bchr\s*\(\s*\d+\s*\)\s*(\+|\|\|)\s*chr\s*\(`), 5, "owasp:sqli:043"},
+	// utl_inaddr.get_host_name — Oracle OOB data exfiltration
+	{regexp.MustCompile(`(?i)utl_inaddr\s*\.\s*get_host`), 5, "owasp:sqli:044"},
+	// EXEC master..xp_dirtree / xp_cmdshell — MSSQL stored procedure abuse
+	{regexp.MustCompile(`(?i)\b(exec|execute)\s+.{0,30}\bxp_(dirtree|cmdshell|regread|fileexist|subdirs)\b`), 5, "owasp:sqli:045"},
+	// Nested SELECT: SELECT CAST((SELECT ... FROM ...) AS type)
+	{regexp.MustCompile(`(?i)\bselect\b[^;]{0,20}\(\s*select\b`), 5, "owasp:sqli:046"},
+	// Bare SELECT * FROM — very specific pattern
+	{regexp.MustCompile(`(?i)\bselect\s+\*\s+from\s+\w`), 4, "owasp:sqli:047"},
+	// EXEC master.. — MSSQL linked server / system stored procedure call
+	{regexp.MustCompile(`(?i)\bexec\s+master\s*\.\.\s*\w`), 5, "owasp:sqli:048"},
 }
 
 func checkSQLi(s string, threshold int) (OWASPHit, bool) {
@@ -1515,6 +1929,22 @@ var webshellPatterns = []struct {
 	{regexp.MustCompile(`(?i)(gzinflate|gzuncompress|str_rot13|hex2bin|base64_decode)\s*\(\s*['"]`), 4, "owasp:webshell:013"},
 	// PHP call_user_func for dynamic invocation: call_user_func('system', $_GET['cmd'])
 	{regexp.MustCompile(`(?i)call_user_func\s*\(\s*['"]?\s*(system|exec|passthru|shell_exec|popen|proc_open|assert)\b`), 5, "owasp:webshell:014"},
+	// Drupal Drupalgeddon2/3: mail[#post_render][]=exec, mail[#type]=markup
+	{regexp.MustCompile(`(?i)\[\s*#\s*(post_render|pre_render|lazy_builder|markup|type)\s*\]`), 4, "owasp:webshell:015"},
+	// Java XML deserialization / XStream RCE: <java.util.PriorityQueue serialization=...>
+	{regexp.MustCompile(`(?i)<java\.\w+\.`), 5, "owasp:webshell:016"},
+	// ThinkPHP invokefunction RCE: /index.php?s=index/\think\app/invokefunction&function=call_user_func
+	{regexp.MustCompile(`(?i)invokefunction.*call_user_func|call_user_func.*invokefunction`), 5, "owasp:webshell:017"},
+	// Generic call_user_func without dangerous function name — ThinkPHP/CodeIgniter
+	{regexp.MustCompile(`(?i)\\think\\(app|request|template|view)\b`), 5, "owasp:webshell:018"},
+	// ASP/JSP eval patterns: <%eval, <%execute, request("cmd")
+	{regexp.MustCompile(`(?i)<%\s*(eval|execute|response\.write)`), 5, "owasp:webshell:019"},
+	// PHP file operations: file_put_contents + file_get_contents combined
+	{regexp.MustCompile(`(?i)file_put_contents\s*\(.*file_get_contents|file_get_contents\s*\(.*file_put_contents`), 5, "owasp:webshell:020"},
+	// elFinder connector RCE: cmd=...&name=...>*.php
+	{regexp.MustCompile(`(?i)\bname\s*=\s*[^&]*>\s*\w+\.(php|jsp|asp|aspx|sh)\b`), 5, "owasp:webshell:021"},
+	// file_put_contents or file_get_contents with .php file path
+	{regexp.MustCompile(`(?i)file_put_contents\b.*\.\s*php\b`), 5, "owasp:webshell:022"},
 }
 
 func checkWebshell(s string, threshold int) (OWASPHit, bool) {
@@ -1589,40 +2019,39 @@ var xssPatterns = []struct {
 	score int
 	id    string
 }{
-	{regexp.MustCompile(`(?i)<script[\s>]`), 4, "owasp:xss:001"},
+	{regexp.MustCompile(`(?i)<script[\s>]`), 5, "owasp:xss:001"},
 	// HTML event handler — extended to cover all standard DOM event names.
-	// Score 4: event-handler injection is a strong XSS signal even without surrounding tag.
-	{regexp.MustCompile(`(?i)\bon(error|load|click|dblclick|mouse(over|out|down|up|enter|leave|move|wheel)|focus(in)?|blur|change|submit|toggle|input|key(down|up|press)|drag(start|end|over|enter|leave)?|drop|copy|cut|paste|pointer(over|down|up|cancel|move|enter|leave)|animation(start|end|iteration)|transition(end|start|run|cancel)|scroll|wheel|resize|contextmenu|message|hashchange|popstate|beforeunload|unload|invalid|select|fullscreenchange|touchstart|touchend|touchmove|touchcancel|beforeinput|show)\s*=`), 4, "owasp:xss:002"},
-	{regexp.MustCompile(`(?i)javascript\s*:`), 4, "owasp:xss:003"},
-	{regexp.MustCompile(`(?i)<img\s+[^>]*src\s*=\s*['"]\s*x\s+onerror`), 4, "owasp:xss:004"},
-	{regexp.MustCompile(`(?i)<iframe`), 2, "owasp:xss:005"},
+	{regexp.MustCompile(`(?i)\bon(error|load|click|dblclick|mouse(over|out|down|up|enter|leave|move|wheel)|focus(in)?|blur|change|submit|toggle|input|key(down|up|press)|drag(start|end|over|enter|leave)?|drop|copy|cut|paste|pointer(over|down|up|cancel|move|enter|leave)|animation(start|end|iteration)|transition(end|start|run|cancel)|scroll|wheel|resize|contextmenu|message|hashchange|popstate|beforeunload|unload|invalid|select|fullscreenchange|touchstart|touchend|touchmove|touchcancel|beforeinput|show)\s*=`), 5, "owasp:xss:002"},
+	{regexp.MustCompile(`(?i)javascript\s*:`), 5, "owasp:xss:003"},
+	{regexp.MustCompile(`(?i)<img\s+[^>]*src\s*=\s*['"]\s*x\s+onerror`), 5, "owasp:xss:004"},
+	{regexp.MustCompile(`(?i)<iframe[\s>]`), 3, "owasp:xss:005"},
 	{regexp.MustCompile(`(?i)document\.(cookie|location|write|domain)`), 4, "owasp:xss:006"},
-	// SVG / MathML XSS carriers
-	{regexp.MustCompile(`(?i)<svg[\s>]`), 3, "owasp:xss:007"},
+	// SVG / MathML XSS carriers — low score, require combination with active context
+	{regexp.MustCompile(`(?i)<svg[\s>]`), 2, "owasp:xss:007"},
 	{regexp.MustCompile(`(?i)<math[\s>]`), 2, "owasp:xss:008"},
 	// data: URL with script content
-	{regexp.MustCompile(`(?i)data:text/html`), 4, "owasp:xss:009"},
+	{regexp.MustCompile(`(?i)data:text/html`), 5, "owasp:xss:009"},
 	// Window/eval/Function references
 	{regexp.MustCompile(`(?i)window\.(location|name|open)`), 4, "owasp:xss:010"},
-	{regexp.MustCompile(`(?i)\b(eval|setTimeout|setInterval)\s*\(\s*['"]`), 4, "owasp:xss:011"},
+	{regexp.MustCompile(`(?i)\b(eval|setTimeout|setInterval)\s*\(\s*['"]`), 5, "owasp:xss:011"},
 	// DOM-based sinks
-	{regexp.MustCompile(`(?i)innerhtml\s*=`), 4, "owasp:xss:012"},
+	{regexp.MustCompile(`(?i)innerhtml\s*=`), 5, "owasp:xss:012"},
 	// Encoded script tags
-	{regexp.MustCompile(`(?i)&#x?0*3c;?\s*script`), 4, "owasp:xss:013"},
+	{regexp.MustCompile(`(?i)&#x?0*3c;?\s*script`), 5, "owasp:xss:013"},
 	// HTML tag with inline event handler (generic catch-all for tag+onX=)
-	{regexp.MustCompile(`(?i)<\w+\b[^>]+\bon\w+\s*=`), 4, "owasp:xss:014"},
+	{regexp.MustCompile(`(?i)<\w+\b[^>]+\bon\w+\s*=`), 5, "owasp:xss:014"},
 	// <embed>/<object> with data/src attributes
 	{regexp.MustCompile(`(?i)<(embed|object)\b[^>]*(data|src)\s*=`), 3, "owasp:xss:015"},
 	// <form> with javascript: action
-	{regexp.MustCompile(`(?i)<form\b[^>]*action\s*=\s*['"]?\s*javascript:`), 4, "owasp:xss:016"},
+	{regexp.MustCompile(`(?i)<form\b[^>]*action\s*=\s*['"]?\s*javascript:`), 5, "owasp:xss:016"},
 	// String.fromCharCode encoding bypass
-	{regexp.MustCompile(`(?i)string\s*\.\s*fromcharcode\s*\(`), 4, "owasp:xss:017"},
+	{regexp.MustCompile(`(?i)string\s*\.\s*fromcharcode\s*\(`), 5, "owasp:xss:017"},
 	// <base href> tag injection
 	{regexp.MustCompile(`(?i)<base\b[^>]+href\s*=`), 3, "owasp:xss:018"},
 	// fetch/XMLHttpRequest data exfiltration
 	{regexp.MustCompile(`(?i)(fetch|xmlhttprequest)\s*\(\s*['"]https?://`), 4, "owasp:xss:019"},
 	// vbscript: protocol (Internet Explorer XSS)
-	{regexp.MustCompile(`(?i)vbscript\s*:`), 4, "owasp:xss:020"},
+	{regexp.MustCompile(`(?i)vbscript\s*:`), 5, "owasp:xss:020"},
 	// CSS expression() injection (Internet Explorer)
 	{regexp.MustCompile(`(?i)\bexpression\s*\(\s*(document|window|eval|this|alert)`), 3, "owasp:xss:021"},
 	// srcdoc attribute — allows HTML injection without separate request
@@ -1630,30 +2059,29 @@ var xssPatterns = []struct {
 	// Angular/Vue/Template constructor chain: {{constructor.constructor(...)()}}
 	{regexp.MustCompile(`(?i)\{\{.*?(constructor|__proto__|__defineGetter__).*?\}\}`), 5, "owasp:xss:023"},
 	// document.write/writeln with injection context
-	{regexp.MustCompile(`(?i)document\s*\.\s*(write|writeln)\s*\(`), 4, "owasp:xss:024"},
+	{regexp.MustCompile(`(?i)document\s*\.\s*(write|writeln)\s*\(`), 5, "owasp:xss:024"},
 	// location.href / window.open assignment with javascript:
-	{regexp.MustCompile(`(?i)(location\s*\.\s*(href|assign|replace)|window\s*\.\s*open)\s*\(\s*['"]?\s*javascript\s*:`), 4, "owasp:xss:025"},
+	{regexp.MustCompile(`(?i)(location\s*\.\s*(href|assign|replace)|window\s*\.\s*open)\s*\(\s*['"]?\s*javascript\s*:`), 5, "owasp:xss:025"},
 	// HTML5 <details ontoggle> — fires without user interaction in auto-opened detail
-	{regexp.MustCompile(`(?i)<details\b[^>]*\bopen\b[^>]*\bontoggle\s*=`), 4, "owasp:xss:026"},
+	{regexp.MustCompile(`(?i)<details\b[^>]*\bopen\b[^>]*\bontoggle\s*=`), 5, "owasp:xss:026"},
 	// <input autofocus onfocus> — fires on page load
-	{regexp.MustCompile(`(?i)<input\b[^>]*\bautofocus\b[^>]*\bonfocus\s*=`), 4, "owasp:xss:027"},
+	{regexp.MustCompile(`(?i)<input\b[^>]*\bautofocus\b[^>]*\bonfocus\s*=`), 5, "owasp:xss:027"},
 	// <link rel=import> — HTML import XSS (older browsers)
 	{regexp.MustCompile(`(?i)<link\b[^>]*\brel\s*=\s*['"]?\s*import\b`), 4, "owasp:xss:028"},
 	// DOM clobbering: <img name=...> overwriting DOM properties
 	{regexp.MustCompile(`(?i)<img\b[^>]*\bname\s*=\s*['"]?\s*(documentElement|body|head|domain)\b`), 4, "owasp:xss:029"},
 	// Bracket property access on global objects: window['alert'], self['eval'], globalThis['alert'], etc.
-	// Catches JS obfuscation where dot-notation is replaced with bracket+string.
 	{regexp.MustCompile(`(?i)\b(window|self|top|parent|frames|globalthis|this)\s*\[\s*['"\x60]`), 4, "owasp:xss:030"},
 	// Dangerous function accessed via bracket notation: ['alert'], ["eval"], [`confirm`].
 	{regexp.MustCompile(`(?i)\[\s*['"\x60]\s*(alert|eval|prompt|confirm|settimeout|setinterval|atob|btoa|fetch|open|execscript)\s*['"\x60]\s*\]`), 5, "owasp:xss:031"},
 	// Regex source concatenation XSS: /al/.source+/ert/.source (bypasses string detection).
-	{regexp.MustCompile(`(?i)/\w+/\s*\.\s*source`), 3, "owasp:xss:032"},
+	{regexp.MustCompile(`(?i)/\w+/\s*\.\s*source`), 4, "owasp:xss:032"},
 	// JSFuck / bracket overload obfuscation: (![] or (+{} or (![]+[] patterns.
-	{regexp.MustCompile(`\(!(\[\]|!\[\])\)|(\+\{\}|\+\[\])`), 3, "owasp:xss:033"},
+	{regexp.MustCompile(`\(!(\[\]|!\[\])\)|(\+\{\}|\+\[\])`), 4, "owasp:xss:033"},
 	// UTF-7 encoded XSS: +ADw- (< in UTF-7), +ADo- (: in UTF-7), +AGk- (i), etc.
 	{regexp.MustCompile(`(?i)\+A[A-Za-z0-9]{1,3}[-+]`), 3, "owasp:xss:034"},
-	// Prototype/constructor chain abuse: toString.constructor.prototype.
-	{regexp.MustCompile(`(?i)\bconstructor\s*\.\s*prototype`), 4, "owasp:xss:035"},
+	// Prototype/constructor chain abuse: toString.constructor.prototype — require exploit context
+	{regexp.MustCompile(`(?i)\bconstructor\s*\.\s*prototype\s*\[`), 4, "owasp:xss:035"},
 	// <param name=url|src|data|code value=...> inside <object>/<embed>.
 	{regexp.MustCompile(`(?i)<param\b[^>]*\bname\s*=\s*['"]?\s*(url|src|data|code|movie|allowscriptaccess)\b`), 4, "owasp:xss:036"},
 	// <body background=...> or <table background=...> or <input type=image src=...> pointing to remote.
@@ -1661,11 +2089,11 @@ var xssPatterns = []struct {
 	// <base target="alert(1)"> or other target= injection.
 	{regexp.MustCompile(`(?i)<base\b[^>]*\btarget\s*=\s*['"]\s*[^'"]*\(.*\)`), 4, "owasp:xss:038"},
 	// <meta http-equiv="refresh" content="0;url=javascript:..."> or charset override.
-	{regexp.MustCompile(`(?i)<meta\b[^>]*\bhttp-equiv\s*=\s*['"]?(refresh|content-type|set-cookie)\b`), 3, "owasp:xss:039"},
+	{regexp.MustCompile(`(?i)<meta\b[^>]*\bhttp-equiv\s*=\s*['"]?(refresh|content-type|set-cookie)\b`), 4, "owasp:xss:039"},
 	// <embed code=... type=text/html> (embed with code attribute pointing to external resource).
 	{regexp.MustCompile(`(?i)<embed\b[^>]*\bcode\s*=`), 4, "owasp:xss:040"},
 	// <use href="data:..."> or <use xlink:href=...> in SVG (SVG use element injection).
-	{regexp.MustCompile(`(?i)<use\b[^>]*(href|xlink:href)\s*=`), 3, "owasp:xss:041"},
+	{regexp.MustCompile(`(?i)<use\b[^>]*(href|xlink:href)\s*=`), 4, "owasp:xss:041"},
 	// <animate> or <set> with xlink:href pointing to another element.
 	{regexp.MustCompile(`(?i)<(animate|set|animatetransform)\b[^>]*(xlink:href|href)\s*=`), 3, "owasp:xss:042"},
 	// onafterscriptexecute — rare but valid event handler in older Firefox.
@@ -1673,9 +2101,30 @@ var xssPatterns = []struct {
 	// document['...'] bracket notation for document property access.
 	{regexp.MustCompile(`(?i)document\s*\[\s*['"\x60]\s*(cookie|location|domain|write|body|title|url)\b`), 4, "owasp:xss:044"},
 	// Standalone alert/confirm/prompt call (XSS proof-of-concept payload).
-	{regexp.MustCompile(`(?i)\b(alert|confirm|prompt)\s*\(\s*[\d'"` + "`" + `]`), 4, "owasp:xss:045"},
+	{regexp.MustCompile(`(?i)\b(alert|confirm|prompt)\s*\(\s*[\d'"` + "`" + `]`), 5, "owasp:xss:045"},
 	// constructor.constructor('code')() — JS prototype chain RCE in template contexts.
 	{regexp.MustCompile(`(?i)\bconstructor\s*\.\s*constructor\s*\(`), 5, "owasp:xss:046"},
+	// <a download=...> attribute — file download injection
+	{regexp.MustCompile(`(?i)<a\b[^>]*\bdownload\s*=`), 3, "owasp:xss:047"},
+	// Regex source concatenation for function call: obj[/x/.source+/y/.source](args)
+	{regexp.MustCompile(`(?i)\[\s*/\w+/\s*\.\s*source\s*\+\s*/\w+/\s*\.\s*source\s*\]`), 5, "owasp:xss:048"},
+	// eval(atob(...)) — base64 encoded XSS payload execution.
+	{regexp.MustCompile(`(?i)\b(eval|function)\s*\(\s*atob\s*\(`), 5, "owasp:xss:049"},
+	// Namespaced script tag: <x:script xmlns:x="..."> bypasses <script> filters.
+	{regexp.MustCompile(`(?i)<\w+:\s*script\b`), 5, "owasp:xss:050"},
+	// data:image/svg+xml — SVG data URI (can contain <script> inside SVG).
+	{regexp.MustCompile(`(?i)data\s*:\s*image/svg\+xml`), 4, "owasp:xss:051"},
+	// Global object bracket access with non-string (JSFuck): this[(...)] window[(...)]
+	{regexp.MustCompile(`(?i)\b(window|self|top|parent|frames|globalthis|this)\s*\[\s*[\(/!+\[]`), 4, "owasp:xss:052"},
+	// toString().constructor.prototype.charAt=[].join — AngularJS sandbox bypass
+	{regexp.MustCompile(`(?i)\.constructor\s*\.\s*prototype\s*\.\s*\w+\s*=`), 5, "owasp:xss:053"},
+	// prompt.call / alert.call — function.call() XSS
+	{regexp.MustCompile(`(?i)\b(alert|prompt|confirm)\s*\.\s*(call|apply)\s*\(`), 5, "owasp:xss:054"},
+	// <a download=...> with file extension — more specific to avoid FP
+	{regexp.MustCompile(`(?i)<a\b[^>]*\bdownload\s*=\s*['"]?\s*\w+\.\w{2,5}\b`), 4, "owasp:xss:055"},
+	// Whitespace-obfuscated javascript: protocol (e.g. j a v a s c r i p t :)
+	{regexp.MustCompile(`(?i)j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:`), 5, "owasp:xss:056"},
+	{regexp.MustCompile(`(?i)<(body|table|thead|td|th|tr)\b[^>]*\bbackground\s*=\s*['"]?\s*(//|https?:)`), 4, "owasp:xss:057"},
 }
 
 func checkXSS(s string, threshold int) (OWASPHit, bool) {
@@ -1731,6 +2180,8 @@ var pathTravPatterns = []struct {
 	{regexp.MustCompile(`(?i)(web-inf|meta-inf)[/\\]web\.xml`), 5, "owasp:path_traversal:014"},
 	// ../ access to .git, .env, .ssh or other sensitive root files
 	{regexp.MustCompile(`(?i)\.\.[/\\]*(\.git[/\\]|\.env|\.htpasswd|\.aws[/\\]|\.ssh[/\\]|config\.php|settings\.py|\.DS_Store)`), 4, "owasp:path_traversal:015"},
+	// Single ../ or ..\ to admin/login/config paths
+	{regexp.MustCompile(`(?i)\.\.[/\\](admin|login|manager|console|config|passwd|shadow|private)`), 4, "owasp:path_traversal:016"},
 }
 
 func checkPathTraversal(s string, threshold int) (OWASPHit, bool) {
