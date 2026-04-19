@@ -52,6 +52,7 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		sn := opts.Holder.Load()
+
 		if sn == nil {
 			c.String(503, "configuration snapshot not loaded")
 			return
@@ -189,6 +190,7 @@ func Handler(opts Options) app.HandlerFunc {
 			logAccess(accessLog, reqID, c, "intercept")
 			return
 		}
+
 
 		// Forward to upstream.
 		if result.Site == nil || len(result.Site.UpstreamURLs) == 0 {

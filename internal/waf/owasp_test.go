@@ -73,7 +73,7 @@ func TestCheckOWASP_Clean(t *testing.T) {
 func TestNormalize(t *testing.T) {
 	input := "%27%20OR%201%3D1%20--%20"
 	result := normalize(input)
-	if result != "' or 1=1 -- " {
+	if result != "' or 1=1 " {
 		t.Fatalf("unexpected normalize result: %q", result)
 	}
 }

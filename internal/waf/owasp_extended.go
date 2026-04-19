@@ -532,6 +532,7 @@ func hasELIndicator(s string) bool {
 		strings.Contains(s, "java.lang.") ||
 		strings.Contains(s, "getclass()") ||
 		strings.Contains(s, "getruntime") ||
+		strings.Contains(s, "getdeclaredmethods") ||
 		strings.Contains(s, "#rt") ||
 		strings.Contains(s, "@java.") ||
 		strings.Contains(s, "#context") ||
@@ -564,6 +565,10 @@ var exprLangPatterns = []struct {
 	{regexp.MustCompile(`(?i)\bnew\s*java\.\w+\.`), 4, "owasp:el:010"},
 	// OGNL #context.get / #req=#context
 	{regexp.MustCompile(`(?i)#(req|request|response|session|application|context)\s*[=.]`), 5, "owasp:el:011"},
+	// OGNL reflection chain: getDeclaredMethods + invoke
+	{regexp.MustCompile(`(?i)getdeclaredmethods\b.*\.invoke\s*\(`), 5, "owasp:el:012"},
+	// OGNL reflection chain: getClass().forName() or Class.forName()
+	{regexp.MustCompile(`(?i)(getclass\(\)|class)\s*\.\s*forname\s*\(`), 4, "owasp:el:013"},
 }
 
 func checkExprLang(s string, threshold int) (OWASPHit, bool) {

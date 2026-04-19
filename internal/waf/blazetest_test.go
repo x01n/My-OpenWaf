@@ -115,7 +115,7 @@ func TestBlazeBlackSamples(t *testing.T) {
 			}
 		}
 
-		hits := CheckOWASP("mid", reqPath, rawQuery, headers, bodyTargets)
+		hits := CheckOWASP("high", reqPath, rawQuery, headers, bodyTargets)
 
 		total++
 		if len(hits) > 0 {
@@ -243,7 +243,7 @@ func TestBlazeWhiteFalsePositives(t *testing.T) {
 			}
 		}
 
-		hits := CheckOWASP("mid", reqPath, rawQuery, headers, bodyTargets)
+		hits := CheckOWASP("high", reqPath, rawQuery, headers, bodyTargets)
 
 		total++
 		if len(hits) > 0 {

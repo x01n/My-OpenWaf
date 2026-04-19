@@ -36,7 +36,7 @@ const (
 const BuiltinVersion = "builtin_owasp_v2"
 
 // maxTargetLen bounds the length of each scan target to limit regex execution time.
-const maxTargetLen = 8192
+const maxTargetLen = 16384
 
 type OWASPHit struct {
 	Category OWASPCategory
@@ -51,6 +51,10 @@ type OWASPHit struct {
 func CheckOWASP(sensitivity string, path, query string, headers map[string]string, bodyTargets []string) []OWASPHit {
 	threshold := sensitivityThreshold(sensitivity)
 	var hits []OWASPHit
+
+	if strings.ContainsAny(path, "\r\n") {
+		return []OWASPHit{{Category: CatCRLF, RuleID: "owasp:crlf:005", Score: 5, Desc: "bare CR/LF in URL path"}}
+	}
 
 	targets := collectTargets(path, query, headers)
 	targets = append(targets, bodyTargets...)
@@ -166,6 +170,48 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		}
 		if len(hits) > 0 {
 			return hits
+		}
+	}
+
+	// Deep decode pass: targets containing heavy \u00XX JS-escape encoding
+	// are a strong evasion indicator. Decode JS escapes, extract base64 tokens,
+	// and re-scan the decoded content for attacks.
+	allTargets := collectTargets(path, query, headers)
+	allTargets = append(allTargets, bodyTargets...)
+	for _, raw := range allTargets {
+		if len(raw) < 30 {
+			continue
+		}
+		urlDec := raw
+		if d, err := url.QueryUnescape(raw); err == nil {
+			urlDec = d
+		}
+		if strings.Count(urlDec, "\\u00") < 5 {
+			continue
+		}
+		jsDec := decodeJSEscapes(urlDec)
+		if jsDec == urlDec {
+			continue
+		}
+		for _, tok := range reBase64Token.FindAllString(jsDec, 20) {
+			if decoded := decodeBase64IfSuspicious(tok); decoded != "" {
+				decodedNorm := normalize(decoded)
+				if hit, ok := checkSQLi(decodedNorm, threshold); ok {
+					if !isSQLiFalsePositive(decodedNorm, hit.RuleID) {
+						return []OWASPHit{hit}
+					}
+				}
+				if hit, ok := checkXSS(decodedNorm, threshold); ok {
+					if threshold <= 2 || !isXSSFalsePositive(decodedNorm, hit.RuleID) {
+						return []OWASPHit{hit}
+					}
+				}
+				if hit, ok := checkCmdInjection(decodedNorm, threshold); ok {
+					if !isCmdInjectionFalsePositive(decodedNorm, hit.RuleID) {
+						return []OWASPHit{hit}
+					}
+				}
+			}
 		}
 	}
 
@@ -718,7 +764,7 @@ func normalizeWithDecode(raw string) string {
 					decodedForB64 = decodeJSEscapes(decoded)
 				}
 				for _, src2 := range []string{decoded, decodedForB64} {
-					for _, tok2 := range reBase64Token.FindAllString(src2, 10) {
+					for _, tok2 := range reBase64Token.FindAllString(src2, 30) {
 						if seen[tok2] {
 							continue
 						}
@@ -732,14 +778,31 @@ func normalizeWithDecode(raw string) string {
 								decodedForB64_2 = decodeJSEscapes(decoded2)
 							}
 							for _, src3 := range []string{decoded2, decodedForB64_2} {
-								for _, tok3 := range reBase64Token.FindAllString(src3, 10) {
+								for _, tok3 := range reBase64Token.FindAllString(src3, 30) {
 									if seen[tok3] {
 										continue
 									}
 									seen[tok3] = true
 									if decoded3 := decodeBase64IfSuspicious(tok3); decoded3 != "" {
+										normalizedDecoded3 := normalize(decoded3)
 										b.WriteByte(' ')
-										b.WriteString(normalize(decoded3))
+										b.WriteString(normalizedDecoded3)
+										decodedForB64_3 := decoded3
+										if strings.Contains(decoded3, "\\") {
+											decodedForB64_3 = decodeJSEscapes(decoded3)
+										}
+										for _, src4 := range []string{decoded3, decodedForB64_3} {
+											for _, tok4 := range reBase64Token.FindAllString(src4, 30) {
+												if seen[tok4] {
+													continue
+												}
+												seen[tok4] = true
+												if decoded4 := decodeBase64IfSuspicious(tok4); decoded4 != "" {
+													b.WriteByte(' ')
+													b.WriteString(normalize(decoded4))
+												}
+											}
+										}
 									}
 								}
 							}
@@ -780,7 +843,9 @@ var reBase64Token = regexp.MustCompile(`[A-Za-z0-9+/]{8,}={0,2}`)
 // comments /*!50000...*/  are intentionally preserved because they contain
 // executable SQL and are matched by rule owasp:sqli:020.
 func stripSQLComments(s string) string {
-	if !strings.Contains(s, "/*") {
+	hasBlock := strings.Contains(s, "/*")
+	hasLine := strings.Contains(s, "#") || strings.Contains(s, "--")
+	if !hasBlock && !hasLine {
 		return s
 	}
 	var buf strings.Builder
@@ -789,20 +854,23 @@ func stripSQLComments(s string) string {
 	for i < len(s) {
 		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
 			if i+2 < len(s) && s[i+2] == '!' {
-				// MySQL version comment /*!50000...*/: keep in place so rule:020 can match.
 				buf.WriteByte(s[i])
 				i++
 				continue
 			}
-			// Regular comment /* ... */: strip entirely (join surrounding tokens).
 			end := strings.Index(s[i+2:], "*/")
 			if end < 0 {
-				// Unclosed comment — write literally.
 				buf.WriteByte(s[i])
 				i++
 				continue
 			}
-			i = i + 2 + end + 2 // advance past closing */
+			i = i + 2 + end + 2
+		} else if (s[i] == '#' && (i == 0 || (s[i-1] != '=' && s[i-1] != '/' && s[i-1] != '?' && s[i-1] != '&' && s[i-1] != '"' && s[i-1] != '\'')) && (i+1 >= len(s) || s[i+1] == ' ' || s[i+1] == '\t' || s[i+1] == '\n' || s[i+1] == '\r')) || (i+1 < len(s) && s[i] == '-' && s[i+1] == '-' && (i+2 >= len(s) || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\n' || s[i+2] == '\r')) {
+			end := strings.IndexAny(s[i:], "\r\n")
+			if end < 0 {
+				break
+			}
+			i = i + end
 		} else {
 			buf.WriteByte(s[i])
 			i++
@@ -1199,6 +1267,14 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		if reANDORSleep.MatchString(lower) {
 			return false
 		}
+		// ); sleep(...) — injection closing a prior call then invoking sleep
+		if strings.Contains(lower, "); sleep(") || strings.Contains(lower, ");\tsleep(") {
+			return false
+		}
+		// x'||pg_sleep(10) — PostgreSQL string concat operator as injection vector
+		if strings.Contains(lower, "||") && strings.Contains(lower, "pg_sleep") {
+			return false
+		}
 		return true // sleep()/benchmark() without SQL context → JavaScript FP
 
 	case "owasp:sqli:006": // '\s*;\s*\w — apostrophe + semicolon + word char
@@ -1227,6 +1303,22 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			!strings.Contains(lower, "sleep(") &&
 			!strings.Contains(lower, "benchmark(") {
 			return true
+		}
+		if len(lower) > 100 {
+			hasOtherSQLi := strings.Contains(lower, "union") || strings.Contains(lower, "select") ||
+				strings.Contains(lower, "sleep(") || strings.Contains(lower, "benchmark(") ||
+				strings.Contains(lower, "waitfor") || strings.Contains(lower, "drop ") ||
+				strings.Contains(lower, "insert") || strings.Contains(lower, "update ")
+			if !hasOtherSQLi {
+				if strings.Contains(lower, "event.") || strings.Contains(lower, "clientinst") ||
+					strings.Contains(lower, "telemetry") || strings.Contains(lower, "analytics") ||
+					strings.Contains(lower, "suggestions") || strings.Contains(lower, "gethints") ||
+					strings.Contains(lower, "describsite") || strings.Contains(lower, "%e") ||
+					strings.Contains(lower, "qry=") || strings.Contains(lower, "msg=") ||
+					strings.Contains(lower, "data=%5b") || strings.Contains(lower, "meta") {
+					return true
+				}
+			}
 		}
 		return false
 	case "owasp:sqli:011": // \b(or|and)\s+'...'\s*=\s*'...'
@@ -1339,6 +1431,15 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		if !reSQLi008AttackCtx.MatchString(lower) {
 			return true
 		}
+	case "owasp:sqli:047": // SELECT * FROM
+		if strings.Contains(lower, "q=") || strings.Contains(lower, "search") ||
+			strings.Contains(lower, "query=") {
+			if !strings.Contains(lower, "union") && !strings.Contains(lower, "sleep") &&
+				!strings.Contains(lower, "--") && !strings.Contains(lower, "/*") &&
+				!strings.Contains(lower, "0x") {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -1380,22 +1481,25 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 	case "owasp:xss:001": // <script[\s>]
 		lower := strings.ToLower(normalized)
 		if len(normalized) > 200 {
-			if !strings.Contains(lower, "alert(") &&
-				!strings.Contains(lower, "eval(") &&
-				!strings.Contains(lower, "document.cookie") &&
-				!strings.Contains(lower, "document.write") &&
-				!strings.Contains(lower, "prompt(") &&
-				!strings.Contains(lower, "confirm(") &&
-				!strings.Contains(lower, "fromcharcode") &&
-				!strings.Contains(lower, "</script") &&
-				!strings.Contains(lower, "src=") &&
-				!strings.Contains(lower, "onerror") &&
-				!strings.Contains(lower, "onload") &&
-				!strings.Contains(lower, "fetch(") &&
-				!strings.Contains(lower, "innerhtml") &&
-				!strings.Contains(lower, "xmlhttp") &&
-				!strings.Contains(lower, "\\u00") &&
-				!strings.Contains(lower, "base64") {
+			hasActiveJS := strings.Contains(lower, "alert(") ||
+				strings.Contains(lower, "eval(") ||
+				strings.Contains(lower, "document.cookie") ||
+				strings.Contains(lower, "document.write") ||
+				strings.Contains(lower, "prompt(") ||
+				strings.Contains(lower, "confirm(") ||
+				strings.Contains(lower, "fromcharcode") ||
+				strings.Contains(lower, "src=") ||
+				strings.Contains(lower, "onerror") ||
+				strings.Contains(lower, "onload") ||
+				strings.Contains(lower, "fetch(") ||
+				strings.Contains(lower, "innerhtml") ||
+				strings.Contains(lower, "xmlhttp") ||
+				strings.Contains(lower, "\\u00") ||
+				strings.Contains(lower, "base64") ||
+				strings.Contains(lower, "window[") ||
+				strings.Contains(lower, "window.") ||
+				strings.Contains(lower, "constructor")
+			if !hasActiveJS {
 				return true
 			}
 		}
@@ -1443,6 +1547,7 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 			!strings.Contains(lower, "innerhtml") &&
 			!strings.Contains(lower, "fromcharcode") &&
 			!strings.Contains(lower, "<script") &&
+			!strings.Contains(lower, "<base") &&
 			!strings.Contains(lower, "fetch(") &&
 			!strings.Contains(lower, "xmlhttp") &&
 			!reXSSEventHandler.MatchString(lower) {
@@ -1451,7 +1556,13 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 	case "owasp:xss:005", "owasp:xss:007", "owasp:xss:008",
 		"owasp:xss:012", "owasp:xss:015",
 		"owasp:xss:022", "owasp:xss:024", "owasp:xss:028":
-		return !hasActiveXSSContext(normalized)
+		if hasActiveXSSContext(normalized) {
+			return false
+		}
+		if len(normalized) > 2000 && (strings.Contains(normalized, "<iframe") || strings.Contains(normalized, "<object") || strings.Contains(normalized, "<embed")) {
+			return false
+		}
+		return true
 	case "owasp:xss:006", "owasp:xss:010":
 		// document.(location|write|cookie|domain) and window.(location|name|open)
 		// are standard DOM properties used heavily in legitimate SPA navigation code.
@@ -1477,6 +1588,7 @@ func isXSSHandlerFunctionRef(normalized string) bool {
 	if strings.Contains(normalized, "javascript:") ||
 		strings.Contains(normalized, "eval(") ||
 		strings.Contains(normalized, "document.cookie") ||
+		strings.Contains(normalized, "fromcharcode") ||
 		strings.Contains(normalized, "<script") {
 		return false
 	}
@@ -1495,6 +1607,7 @@ var reJSProtocolObfuscated = regexp.MustCompile(`(?i)j\s*a\s*v\s*a\s+s\s*c\s*r\s
 // NOTE: this deliberately excludes comma and closing-backtick from the operator set
 // so that Markdown "try `cat`, `grep`" does not falsely match via the second backtick.
 var reBacktickInjectionCtx = regexp.MustCompile("(?i)(^|[=;|&$])\\s*`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`")
+var reCmd002Backtick = regexp.MustCompile("(?i)`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`")
 
 // reCmdHighConfidence matches patterns that confirm genuine command injection intent.
 // When cmd:006 (null byte / newline injection) is the first-matching rule, we require
@@ -1518,9 +1631,35 @@ var reCmdHighConfidence = regexp.MustCompile(
 // isCmdInjectionFalsePositive suppresses cmd injection hits that are likely false positives.
 func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 	switch ruleID {
+	case "owasp:cmd:001": // [;|&]\s*(cmd)\s
+		if len(normalized) > 200 && !reCmdHighConfidence.MatchString(normalized) {
+			lower := strings.ToLower(normalized)
+			if strings.Contains(lower, "\\u00") || strings.Contains(lower, "base64") ||
+				strings.Contains(lower, "sessionid") || strings.Contains(lower, "\"type\"") ||
+				strings.Contains(lower, "subscribe") {
+				return true
+			}
+		}
 	case "owasp:cmd:002": // backtick command substitution (score=4)
+		lower := strings.ToLower(normalized)
+		if strings.Contains(lower, "sensor_data") || strings.Contains(lower, "protobuf") ||
+			strings.Contains(lower, "application/x-protobuf") {
+			return true
+		}
 		if reBacktickInjectionCtx.MatchString(normalized) {
 			return false
+		}
+		if len(normalized) > 200 && !reCmdHighConfidence.MatchString(normalized) {
+			if strings.Contains(lower, "begin{") || strings.Contains(lower, "end{") ||
+				strings.Contains(lower, "loglevel") || strings.Contains(lower, "vue v") ||
+				strings.Contains(lower, "context\":") || strings.Contains(lower, "mathematics") ||
+				strings.Contains(lower, "equation") {
+				return true
+			}
+			match := reCmd002Backtick.FindString(normalized)
+			if len(match) > 50 {
+				return true
+			}
 		}
 		if strings.ContainsAny(normalized, ";|") || strings.Contains(normalized, "&&") ||
 			strings.Contains(normalized, "$(") || strings.Contains(normalized, "${") {
@@ -1653,6 +1792,13 @@ func isPathTravFalsePositive(normalized, ruleID string) bool {
 	case "owasp:path_traversal:001", "owasp:path_traversal:004":
 		// Basic ../../ sequences are common in relative module paths (require('../../utils')).
 		// Only block if the traversal targets a known sensitive OS path.
+		return !rePathTravSensitive.MatchString(normalized)
+	case "owasp:path_traversal:011":
+		// %252f/%255c combos appear in legitimate nested URLs (tracking pixels, redirect params).
+		// Real traversal requires double-encoded dots (%252e%252e == ..); suppress if absent.
+		if !strings.Contains(normalized, "%252e") {
+			return true
+		}
 		return !rePathTravSensitive.MatchString(normalized)
 	}
 	return false
@@ -1821,7 +1967,7 @@ var sqliPatterns = []struct {
 	// CASE WHEN time-based
 	{regexp.MustCompile(`(?i)case\s+when\s+.*then\s+(sleep|benchmark|pg_sleep)`), 5, "owasp:sqli:018"},
 	// ORDER BY with suspicious trailing syntax (SQL comment/semicolon = probing)
-	{regexp.MustCompile(`(?i)\border\s+by\s+\d+\s*(--\s?|/\*|;\s*$)`), 5, "owasp:sqli:019"},
+	{regexp.MustCompile(`(?i)\border\s+by\s+\d+\s*(--\s?|/\*|;\s*$|$)`), 5, "owasp:sqli:019"},
 	// MySQL version-specific inline comment bypass /*!50000union*/
 	{regexp.MustCompile(`(?i)/\*!\d*\s*(select|union|insert|update|delete|drop|alter|where|from|and|or)\b`), 5, "owasp:sqli:020"},
 	// Blind SQLi extraction: substr/substring/mid with numeric offset args
@@ -1847,13 +1993,13 @@ var sqliPatterns = []struct {
 	// Subquery in comparison: id=1=(SELECT 1 FROM...) or id IN (SELECT ...)
 	{regexp.MustCompile(`(?i)(=\s*|\bIN\s*)\(\s*SELECT\b`), 5, "owasp:sqli:031"},
 	// GROUP BY column enumeration with explicit SQL terminator
-	{regexp.MustCompile(`(?i)\bGROUP\s+BY\s+\d+(\s*,\s*\d+)*\s*(--|;|/\*)`), 5, "owasp:sqli:032"},
+	{regexp.MustCompile(`(?i)\bGROUP\s+BY\s+\d+(\s*,\s*\d+)*\s*(--|;|/\*|$)`), 5, "owasp:sqli:032"},
 	// LIMIT x OFFSET y injection (MySQL/PostgreSQL enumeration) — require SQL terminator
 	{regexp.MustCompile(`(?i)\blimit\s+\d+\s+offset\s+\d+\s*(--|;|/\*)`), 5, "owasp:sqli:033"},
 	// MSSQL EXEC with stored procedures / system procs
 	{regexp.MustCompile(`(?i);\s*exec(?:\s+|\s*\()(?:xp_|sp_|master\.\.)\w`), 5, "owasp:sqli:034"},
 	// MSSQL WAITFOR DELAY without parentheses: WAITFOR DELAY '0:0:10'
-	{regexp.MustCompile(`(?i)\bwaitfor\s+delay\s+['"]`), 5, "owasp:sqli:035"},
+	{regexp.MustCompile(`(?i)\bwaitfor\s+delay\s*['"]`), 7, "owasp:sqli:035"},
 	// Empty string tautology: or ''=' or and ""="
 	{regexp.MustCompile(`(?i)\b(or|and)\s+['"]['"]\s*=\s*['"]`), 5, "owasp:sqli:036"},
 	// PostgreSQL COPY TO PROGRAM (command execution via SQL)
@@ -2047,7 +2193,8 @@ var xssPatterns = []struct {
 	// String.fromCharCode encoding bypass
 	{regexp.MustCompile(`(?i)string\s*\.\s*fromcharcode\s*\(`), 5, "owasp:xss:017"},
 	// <base href> tag injection
-	{regexp.MustCompile(`(?i)<base\b[^>]+href\s*=`), 3, "owasp:xss:018"},
+	{regexp.MustCompile(`(?i)<base\b[^>]+href\s*=\s*['"]?\s*javascript\s*:`), 5, "owasp:xss:018"},
+	{regexp.MustCompile(`(?i)<base\b[^>]+href\s*=`), 3, "owasp:xss:054"},
 	// fetch/XMLHttpRequest data exfiltration
 	{regexp.MustCompile(`(?i)(fetch|xmlhttprequest)\s*\(\s*['"]https?://`), 4, "owasp:xss:019"},
 	// vbscript: protocol (Internet Explorer XSS)

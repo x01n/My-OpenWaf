@@ -434,9 +434,13 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 		if err != nil {
 			break
 		}
-		// Skip file upload parts — their filenames are checked separately.
+		// For file upload parts, scan the first bytes of content for embedded code.
 		if part.FileName() != "" {
+			buf, _ := io.ReadAll(io.LimitReader(part, 4096))
 			part.Close()
+			if len(buf) > 0 {
+				vals = append(vals, string(buf))
+			}
 			continue
 		}
 		// Read field value, limited to 4096 bytes to bound regex scan time.
