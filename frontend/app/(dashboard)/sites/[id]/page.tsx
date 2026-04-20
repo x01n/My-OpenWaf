@@ -2,8 +2,8 @@ import SiteDetailClient from "./client";
 
 export const dynamicParams = false;
 
-export async function generateStaticParams() {
-  return [{ id: "0" }];
+export function generateStaticParams() {
+  return [{ id: "_" }];
 }
 
 export default function SiteDetailPage() {

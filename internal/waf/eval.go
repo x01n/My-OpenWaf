@@ -2,13 +2,13 @@ package waf
 
 import (
 	"net"
+	"strings"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 )
 
-// Evaluate runs phases in order (legacy entry point, delegates to core/rules logic).
 func Evaluate(clientIP net.IP, path string, rawQuery string, rules []snapshot.CompiledRule) action.Result {
 	if res := evalACL(clientIP, rules); res.Matched {
 		return res
@@ -17,6 +17,71 @@ func Evaluate(clientIP net.IP, path string, rawQuery string, rules []snapshot.Co
 		return res
 	}
 	return action.Pass()
+}
+
+// EvaluateWithBot performs full WAF evaluation including bot detection.
+// headers is the request headers map; headerKeys is kept for API compatibility.
+func EvaluateWithBot(clientIP net.IP, method, path, rawQuery string, headers map[string]string, headerKeys []string, rules []snapshot.CompiledRule, botLevel string) (action.Result, BotVerdict) {
+	// Standard WAF evaluation
+	if res := evalACL(clientIP, rules); res.Matched {
+		return res, BotVerdict{}
+	}
+	if res := evalPathQuery(rules, path, rawQuery, []store.RulePhase{store.PhaseSignature, store.PhaseCustom}); res.Matched {
+		return res, BotVerdict{}
+	}
+
+	// Bot detection with fingerprint scoring
+	br := NewBotRequest(method, path, headers)
+	br.HeaderKeys = headerKeys
+	br.ClientIP = clientIP
+	verdict := CheckBotWithLevel(br, botLevel)
+
+	// If already classified as good or definite malicious, skip deep fingerprint
+	if verdict.Category != "good" && verdict.Score < 100 {
+		// Deep TLS/HTTP2 fingerprint scoring (JA3/JA4/H2/header order)
+		fpResult := DeepFingerprintScore(br)
+		if fpResult.Score > 0 {
+			verdict.Score += fpResult.Score
+			fpReason := "tls_fp:" + strings.Join(fpResult.Reasons, ",")
+			if verdict.Reason != "" {
+				verdict.Reason += "; " + fpReason
+			} else {
+				verdict.Reason = fpReason
+			}
+			// Re-evaluate category based on combined score
+			if verdict.Score >= 80 {
+				verdict.IsBot = true
+				verdict.Category = "malicious"
+				if verdict.RuleID == "" {
+					verdict.RuleID = "bot:fp:deep:001"
+				}
+			} else if verdict.Score >= 50 && verdict.Category != "malicious" {
+				verdict.IsBot = true
+				verdict.Category = "suspicious"
+				if verdict.RuleID == "" {
+					verdict.RuleID = "bot:fp:deep:002"
+				}
+			}
+		}
+	}
+
+	// If bot detection triggers a block-level response
+	if verdict.Category == "malicious" && verdict.Score >= 80 {
+		// Bot score >= 80 uses Drop (highest severity) when available.
+		actType := action.Block
+		if verdict.Score >= 80 {
+			actType = action.Drop
+		}
+		return action.Result{
+			Type:      actType,
+			RuleIDStr: verdict.RuleID,
+			Matched:   true,
+			Phase:     "bot",
+			MatchDesc: verdict.Reason,
+		}, verdict
+	}
+
+	return action.Pass(), verdict
 }
 
 func evalACL(clientIP net.IP, rules []snapshot.CompiledRule) action.Result {

@@ -7,6 +7,7 @@ const (
 	Allow     Type = "allow"
 	Intercept Type = "intercept"
 	Observe   Type = "observe"
+	Drop      Type = "drop" // Highest priority: close TCP immediately, no response
 
 	// Legacy aliases for backward compatibility with existing DB data.
 	Block   Type = "block"
@@ -39,13 +40,20 @@ type Result struct {
 // IsTerminal returns true when this action must short-circuit
 // the pipeline — no upstream, no further phases.
 func (r Result) IsTerminal() bool {
-	return r.Matched && Normalize(r.Type) == Intercept
+	t := Normalize(r.Type)
+	return r.Matched && (t == Intercept || t == Drop)
+}
+
+// IsDrop returns true when this action requires an immediate TCP connection close
+// without sending any HTTP response.
+func (r Result) IsDrop() bool {
+	return r.Matched && Normalize(r.Type) == Drop
 }
 
 // ShouldLog returns true when the match warrants a security log entry.
 func (r Result) ShouldLog() bool {
 	t := Normalize(r.Type)
-	return r.Matched && (t == Intercept || t == Observe)
+	return r.Matched && (t == Intercept || t == Observe || t == Drop)
 }
 
 // Pass returns an unmatched allow result (default passthrough).

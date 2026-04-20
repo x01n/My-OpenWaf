@@ -567,9 +567,7 @@ func TestCheckOWASP_Clean_XClientData(t *testing.T) {
 	}
 }
 
-// ── 调试测试：真实 Bing CSP 报告正文（application/reports+json）──
 func TestCheckOWASP_Debug_BingCSPReport(t *testing.T) {
-	// 真实 Bing CSP 报告正文（application/reports+json 内容类型，单个文本 blob 扫描）
 	body := `[{"age":9694,"body":{"blockedURL":"https://r.bing.com/rp/ICf9X-WMafiZOnS_3M9RpM8994E.gz.js","disposition":"report","documentURL":"https://cn.bing.com/","effectiveDirective":"script-src-elem","lineNumber":1,"originalPolicy":"script-src https: 'strict-dynamic' 'report-sample' 'nonce-z35bKtCXz88W1OJrsFFgnLdDdiySmR6T76aMSP6v1Ec='; base-uri 'self';report-to csp-endpoint","referrer":"","sample":"","sourceFile":"https://cn.bing.com/","statusCode":200},"type":"csp-violation","url":"https://cn.bing.com/","user_agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"}]`
 	hits := CheckOWASP("mid", "/api/report", "cat=bingcsp", nil, []string{body})
 	if hasCategory(hits, CatSQLi) {

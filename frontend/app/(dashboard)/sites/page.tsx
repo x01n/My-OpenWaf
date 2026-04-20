@@ -23,7 +23,7 @@ import {
 } from "@/components/protection-mode-dialog";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { Globe, Plus, Trash2, AlignJustify } from "lucide-react";
+import { Globe, Plus, Trash2, AlignJustify, Power } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Site {
@@ -68,6 +68,26 @@ export default function SitesPage() {
   useEffect(() => {
     loadSites();
   }, [loadSites]);
+
+  const [toggleLoading, setToggleLoading] = useState<number | null>(null);
+
+  const handleToggleEnabled = async (site: Site) => {
+    setToggleLoading(site.id);
+    try {
+      const endpoint = site.enabled ? "stop" : "start";
+      await api(`/api/v1/sites/${site.id}/${endpoint}`, { method: "POST" });
+      await api(`/api/v1/sites/${site.id}/update`, {
+        method: "POST",
+        body: JSON.stringify({ ...site, enabled: !site.enabled }),
+      });
+      toast.success(site.enabled ? "应用已停用" : "应用已启用");
+      await loadSites();
+    } catch (err) {
+      toast.error("操作失败: " + String(err));
+    } finally {
+      setToggleLoading(null);
+    }
+  };
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
@@ -228,6 +248,20 @@ export default function SitesPage() {
                       )}
                     >
                       {protectionModeLabel(mode)}
+                    </button>
+
+                    <button
+                      onClick={() => handleToggleEnabled(site)}
+                      disabled={toggleLoading === site.id}
+                      title={site.enabled ? "停用应用" : "启用应用"}
+                      className={cn(
+                        "rounded p-1.5 transition-colors",
+                        site.enabled
+                          ? "text-teal-500 hover:text-teal-700 hover:bg-teal-50"
+                          : "text-gray-400 hover:text-teal-500 hover:bg-teal-50"
+                      )}
+                    >
+                      <Power className="h-4 w-4" />
                     </button>
 
                     <button

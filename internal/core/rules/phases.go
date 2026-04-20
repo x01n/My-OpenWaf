@@ -169,27 +169,58 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 	return result, true
 }
 
-// ── Bot Detection phase ──
+// ── Bot Detection phase (two-phase: PreScreen → DeepScore) ──
 
 type botPhase struct {
-	rep *waf.IPReputation // optional, for recording violations
+	rep       *waf.IPReputation    // optional, for recording violations
+	geo       *waf.MaxMindResolver // optional, for GeoIP scoring
+	threshold int                  // score threshold for blocking
 }
 
+// NewBotPhase creates a bot-detection pipeline phase using the legacy
+// single-pass check (no GeoIP weighting). Kept for backward compatibility.
 func NewBotPhase(rep *waf.IPReputation) pipeline.Phase {
-	return &botPhase{rep: rep}
+	return &botPhase{rep: rep, threshold: 80}
+}
+
+// NewBotPhaseWithGeo creates a bot-detection pipeline phase that uses the
+// two-phase PreScreen → DeepScore flow with GeoIP weighting.
+func NewBotPhaseWithGeo(rep *waf.IPReputation, geo *waf.MaxMindResolver, threshold int) pipeline.Phase {
+	if threshold <= 0 {
+		threshold = 80
+	}
+	return &botPhase{rep: rep, geo: geo, threshold: threshold}
 }
 
 func (p *botPhase) Name() string { return "bot_detection" }
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	br := waf.NewBotRequest(ctx.Method, ctx.Path, ctx.Headers)
+	br.ClientIP = ctx.ClientIP
+
+	// If GeoIP resolver is available, use the two-phase flow.
+	if p.geo != nil {
+		v, _ := waf.CheckBotTwoPhase(br, p.rep, p.geo, p.threshold)
+		return p.verdictToResult(v, ctx)
+	}
+
+	// Fallback: legacy single-pass check.
 	v := waf.CheckBot(br)
+	return p.verdictToResult(v, ctx)
+}
+
+func (p *botPhase) verdictToResult(v waf.BotVerdict, ctx *pipeline.RequestCtx) (action.Result, bool) {
 	if v.Category == "malicious" {
 		if p.rep != nil && ctx.ClientIP != nil {
 			p.rep.RecordViolation(ctx.ClientIP)
 		}
+		// Use Drop for high-score malicious bots (score >= threshold).
+		actType := action.Type(action.Intercept)
+		if v.Score >= p.threshold {
+			actType = action.Drop
+		}
 		result := action.Result{
-			Type:      action.Intercept,
+			Type:      actType,
 			Phase:     "bot_detection",
 			MatchDesc: v.Reason,
 			Matched:   true,
@@ -267,6 +298,61 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		MatchDesc: best.Desc,
 		Matched:   true,
 		Category:  string(best.Category),
+	}
+	return result, result.IsTerminal()
+}
+
+// ── CVE Detection phase ──
+
+type cvePhase struct {
+	cfg      store.ProtectionConfig
+	detector *waf.CVEDetector
+}
+
+// NewCVEPhase creates a pipeline phase that runs CVE-specific detection.
+func NewCVEPhase(cfg store.ProtectionConfig, detector *waf.CVEDetector) pipeline.Phase {
+	return &cvePhase{cfg: cfg, detector: detector}
+}
+
+func (p *cvePhase) Name() string { return "cve_detection" }
+
+func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	if !p.cfg.CVEEnabled || p.detector == nil {
+		return action.Pass(), false
+	}
+
+	req := waf.BuildCVERequest(ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType)
+	matches := p.detector.Detect(req)
+	if len(matches) == 0 {
+		return action.Pass(), false
+	}
+
+	// Use the first (highest-priority) match.
+	best := matches[0]
+
+	// Default: use configured CVE action.
+	act := action.Intercept
+	cveAction := p.cfg.CVEAction
+	if cveAction == "" {
+		cveAction = "intercept"
+	}
+	act = action.Type(cveAction)
+
+	// Auto-escalate to Drop for critical/high severity CVEs.
+	switch best.Severity {
+	case "critical":
+		act = action.Drop
+	case "high":
+		act = action.Drop
+	}
+
+	result := action.Result{
+		Type:      act,
+		RuleIDStr: "cve:" + best.CVEID,
+		Phase:     "cve_detection",
+		MatchDesc: best.Description + " [" + best.Pattern + "]",
+		Matched:   true,
+		Category:  "cve_" + best.Category,
 	}
 	return result, result.IsTerminal()
 }

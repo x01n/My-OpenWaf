@@ -44,6 +44,7 @@ func New(phases ...Phase) *Pipeline {
 }
 
 // Run executes each phase in order.
+// Drop results short-circuit immediately (highest priority, TCP close).
 // Intercept results short-circuit immediately; observe results are collected for logging.
 func (p *Pipeline) Run(ctx *RequestCtx) RunResult {
 	var observeHits []action.Result
@@ -53,6 +54,10 @@ func (p *Pipeline) Run(ctx *RequestCtx) RunResult {
 			return RunResult{Action: result, ObserveHits: observeHits}
 		}
 		if result.Matched {
+			// Drop is highest priority — immediate short-circuit.
+			if result.IsDrop() {
+				return RunResult{Action: result, ObserveHits: observeHits}
+			}
 			if result.IsTerminal() {
 				return RunResult{Action: result, ObserveHits: observeHits}
 			}

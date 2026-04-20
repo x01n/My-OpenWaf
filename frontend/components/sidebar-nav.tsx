@@ -17,6 +17,9 @@ import {
   LogOut,
   ChevronLeft,
   ChevronRight,
+  Bug,
+  Ban,
+  Fingerprint,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -27,7 +30,11 @@ const navItems = [
   { href: "/protection/", label: "攻击防护", icon: ShieldAlert },
   { href: "/ip-lists/", label: "黑白名单", icon: List },
   { href: "/cc-protection/", label: "CC 防护", icon: Zap },
-  { href: "/captcha/", label: "人机验证", icon: Bot },
+  { href: "/bot-protection/", label: "Bot 防护", icon: Bot },
+  { href: "/cve-rules/", label: "CVE 规则", icon: Bug },
+  { href: "/drop-policy/", label: "阻断策略", icon: Ban },
+  { href: "/fingerprints/", label: "指纹分析", icon: Fingerprint },
+  { href: "/captcha/", label: "人机验证", icon: Key },
   { href: "/auth-settings/", label: "身份认证", icon: Key },
   { href: "/settings/", label: "通用设置", icon: Settings },
 ];

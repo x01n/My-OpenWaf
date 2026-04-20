@@ -57,6 +57,7 @@ const (
 	ActionAllow     RuleAction = "allow"
 	ActionIntercept RuleAction = "intercept"
 	ActionObserve   RuleAction = "observe"
+	ActionDrop      RuleAction = "drop" // TCP connection close, no HTTP response
 
 	// Legacy values for backward compatibility with existing DB rows.
 	ActionBlock   RuleAction = "block"
@@ -214,17 +215,17 @@ type SecurityEvent struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time `gorm:"index" json:"created_at"`
 
-	RequestID string `gorm:"size:64;index" json:"request_id"`
+	RequestID string `gorm:"size:64" json:"request_id"`
 	ClientIP  string `gorm:"size:45;index" json:"client_ip"`
-	Host      string `gorm:"size:255;index" json:"host"`
+	Host      string `gorm:"size:255" json:"host"`
 	Path      string `gorm:"size:2048" json:"path"`
 	Method    string `gorm:"size:16" json:"method"`
 	UserAgent string `gorm:"size:512" json:"user_agent"`
 
-	RuleID    uint   `gorm:"index" json:"rule_id"`
-	RuleIDStr string `gorm:"size:64;index" json:"rule_id_str"`
-	Phase     string `gorm:"size:32;index" json:"phase"`
-	Action    string `gorm:"size:16;index" json:"action"`
+	RuleID    uint   `json:"rule_id"`
+	RuleIDStr string `gorm:"size:64" json:"rule_id_str"`
+	Phase     string `gorm:"size:32" json:"phase"`
+	Action    string `gorm:"size:16" json:"action"`
 	Category  string `gorm:"size:32;index" json:"category"`
 	MatchDesc string `gorm:"size:512" json:"match_desc"`
 
@@ -271,8 +272,25 @@ type ProtectionConfig struct {
 	// IP auto-ban (based on violations count within a window)
 	AutoBanEnabled   bool `json:"auto_ban_enabled"`
 	AutoBanThreshold int  `json:"auto_ban_threshold"`
-	AutoBanWindow    int  `json:"auto_ban_window"`    // seconds
-	AutoBanDuration  int  `json:"auto_ban_duration"`  // seconds
+	AutoBanWindow    int  `json:"auto_ban_window"`   // seconds
+	AutoBanDuration  int  `json:"auto_ban_duration"` // seconds
+
+	// CC protection extras
+	WaitingRoomEnabled bool   `json:"waiting_room_enabled"`
+	CCUseCustom        bool   `json:"cc_use_custom"`
+	CCRules            string `json:"cc_rules,omitempty"` // JSON-encoded []CCRule
+
+	// Per-module OWASP sensitivity: map[module_key] -> "off"|"observe"|"mid"|"high"
+	OWASPModules string `json:"owasp_modules,omitempty"` // JSON-encoded map[string]string
+
+	// CVE detection
+	CVEEnabled bool   `json:"cve_enabled"`
+	CVEAction  string `json:"cve_action"` // "intercept" (default), "observe"
+
+	// Login security policy
+	LoginMinPasswordLength int `json:"login_min_password_length"`
+	LoginMaxAttempts       int `json:"login_max_attempts"`
+	LoginLockoutMinutes    int `json:"login_lockout_minutes"`
 }
 
 func DefaultProtectionConfig() ProtectionConfig {
@@ -293,6 +311,9 @@ func DefaultProtectionConfig() ProtectionConfig {
 		AutoBanThreshold:        10,
 		AutoBanWindow:           60,
 		AutoBanDuration:         3600,
+		LoginMinPasswordLength:  8,
+		LoginMaxAttempts:        5,
+		LoginLockoutMinutes:     30,
 	}
 }
 
@@ -330,4 +351,105 @@ func DefaultAttackProtectionConfig() AttackProtectionConfig {
 		SignatureEnabled: false,
 		SignatureAction:  "intercept",
 	}
+}
+
+// ─── Token Blacklist ────────────────────────────────────────────────
+
+type TokenBlacklist struct {
+	ID        uint      `gorm:"primarykey" json:"id"`
+	JTI       string    `gorm:"uniqueIndex;size:64" json:"jti"`
+	ExpiresAt time.Time `gorm:"index" json:"expires_at"`
+	Reason    string    `gorm:"size:128" json:"reason"` // logout, force_logout, key_rotation
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ─── Login Attempt ──────────────────────────────────────────────────
+
+type LoginAttempt struct {
+	ID        uint      `gorm:"primarykey" json:"id"`
+	Username  string    `gorm:"index;size:64" json:"username"`
+	IP        string    `gorm:"index;size:45" json:"ip"`
+	Success   bool      `json:"success"`
+	UserAgent string    `gorm:"size:256" json:"user_agent"`
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+}
+
+// ─── Active Session ─────────────────────────────────────────────────
+
+type ActiveSession struct {
+	ID           uint      `gorm:"primarykey" json:"id"`
+	Username     string    `gorm:"index;size:64" json:"username"`
+	JTI          string    `gorm:"uniqueIndex;size:64" json:"jti"`
+	IP           string    `gorm:"size:45" json:"ip"`
+	UserAgent    string    `gorm:"size:256" json:"user_agent"`
+	DeviceInfo   string    `gorm:"size:128" json:"device_info"`
+	LoginAt      time.Time `json:"login_at"`
+	LastActiveAt time.Time `json:"last_active_at"`
+	ExpiresAt    time.Time `gorm:"index" json:"expires_at"`
+}
+
+// ─── RBAC Role Constants ────────────────────────────────────────────
+
+const (
+	RoleAdmin    = "admin"
+	RoleOperator = "operator"
+	RoleReadonly = "readonly"
+)
+
+// ─── Drop Event ─────────────────────────────────────────────────────
+
+// DropEvent records a TCP connection drop (no HTTP response sent).
+type DropEvent struct {
+	ID        uint      `gorm:"primarykey" json:"id"`
+	ClientIP  string    `gorm:"index;size:45" json:"client_ip"`
+	Source    string    `gorm:"size:32" json:"source"`   // bot, cve, rule, ip_reputation
+	RuleID    string    `gorm:"size:64" json:"rule_id"`
+	Detail    string    `gorm:"size:512" json:"detail"`
+	Host      string    `gorm:"size:256" json:"host"`
+	Path      string    `gorm:"size:512" json:"path"`
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+}
+
+// ─── Bot Score Log ──────────────────────────────────────────────────
+
+// BotScoreLog records the result of a bot scoring evaluation.
+type BotScoreLog struct {
+	ID               uint      `gorm:"primarykey" json:"id"`
+	ClientIP         string    `gorm:"index;size:45" json:"client_ip"`
+	Host             string    `gorm:"size:256" json:"host"`
+	Path             string    `gorm:"size:512" json:"path"`
+	TotalScore       int       `gorm:"index" json:"total_score"`
+	GeoIPScore       int       `json:"geoip_score"`
+	FingerprintScore int       `json:"fingerprint_score"`
+	BehaviorScore    int       `json:"behavior_score"`
+	IPRepScore       int       `json:"ip_rep_score"`
+	IsHighRisk       bool      `json:"is_high_risk"`
+	Action           string    `gorm:"size:16" json:"action"` // allow, challenge, block, drop
+	Details          string    `gorm:"type:text" json:"details"`
+	CreatedAt        time.Time `gorm:"index" json:"created_at"`
+}
+
+// ─── Fingerprint Record ─────────────────────────────────────────────
+
+// FingerprintRecord stores aggregated fingerprint statistics.
+type FingerprintRecord struct {
+	ID          uint      `gorm:"primarykey" json:"id"`
+	JA3Hash     string    `gorm:"index;size:64" json:"ja3_hash"`
+	Browser     string    `gorm:"size:64" json:"browser"`
+	Count       int64     `json:"count"`
+	LastSeen    time.Time `json:"last_seen"`
+	IsKnownGood bool      `json:"is_known_good"`
+}
+
+// ─── CVE Sync Log ───────────────────────────────────────────────────
+
+// CVESyncLog records the result of a CVE feed synchronisation run.
+type CVESyncLog struct {
+	ID         uint      `gorm:"primarykey" json:"id"`
+	Source     string    `gorm:"size:32" json:"source"` // nvd, github
+	Status     string    `gorm:"size:16" json:"status"` // success, failed, running
+	RulesAdded int       `json:"rules_added"`
+	Error      string    `gorm:"size:512" json:"error"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
 }

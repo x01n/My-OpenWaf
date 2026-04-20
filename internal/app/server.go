@@ -10,12 +10,14 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/common/config"
 	"github.com/cloudwego/hertz/pkg/network/standard"
 
 	"My-OpenWaf/internal/admin"
+	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/health"
@@ -106,6 +108,21 @@ func Run() {
 	ipRep.ConfigureAutoBan(prot.AutoBanEnabled, prot.AutoBanThreshold, prot.AutoBanWindow, prot.AutoBanDuration)
 
 	eng := engine.New(rt.Snapshot, reqRL, errRL, ipRep)
+
+	// Drop executor (TCP connection close strategy).
+	dropCfg := rt.Config.Drop
+	dropExec := waf.NewDropExecutor(dropCfg.Enabled, logger.New("drop"))
+	eng.SetDropExecutor(dropExec)
+
+	// GeoIP resolver for bot two-phase scoring (graceful degradation if DB missing).
+	var geoResolver *waf.MaxMindResolver
+	botCfg := rt.Config.Bot
+	if botCfg.Enabled {
+		geoResolver = waf.NewMaxMindResolver(botCfg.GeoIPDBPath, botCfg.GeoIPDBPath, botCfg)
+		eng.SetGeoResolver(geoResolver, botCfg.ScoreThreshold)
+		// Also set the global GeoResolver so LookupGeo works everywhere.
+		waf.SetGeoResolver(geoResolver)
+	}
 
 	// Redis config sync (distributed reload notifications).
 	configSync := coreredis.NewConfigSync(rt.Redis, logger.New("config_sync"))
@@ -242,6 +259,11 @@ func Run() {
 		})
 	}
 
+	// ─── Auth subsystems ───
+	tokenMgr := auth.NewTokenManager(jwtSecret, rt.DB)
+	bruteForce := auth.NewBruteForceDetector(5, 15*time.Minute)
+	sessionMgr := auth.NewSessionManager(rt.DB)
+
 	// ─── Admin control-plane server ───
 	adminSrv := server.Default(server.WithHostPorts(rt.Config.AdminBind))
 	adminSrv.GET("/healthz", hc.LivenessHandler())
@@ -249,12 +271,15 @@ func Run() {
 	adminSrv.GET("/status", hc.StatusHandler())
 	adminSrv.GET("/metrics", observability.PrometheusHandler(promMetrics))
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
-		Repos:     repos,
-		Reload:    reload,
-		StaticFS:  rt.Config.AdminStaticDir,
-		JWTSecret: jwtSecret,
-		Metrics:   metrics,
-		DB:        rt.DB,
+		Repos:      repos,
+		Reload:     reload,
+		StaticFS:   rt.Config.AdminStaticDir,
+		JWTSecret:  jwtSecret,
+		Metrics:    metrics,
+		DB:         rt.DB,
+		TokenMgr:   tokenMgr,
+		BruteForce: bruteForce,
+		SessionMgr: sessionMgr,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 

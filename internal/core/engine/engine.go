@@ -18,6 +18,10 @@ type Engine struct {
 	reqRateLimiter *waf.RateLimiter
 	errRateLimiter *waf.RateLimiter
 	ipRep          *waf.IPReputation
+	geoResolver    *waf.MaxMindResolver // nil when GeoIP DB is unavailable
+	botThreshold   int                  // score threshold for bot blocking
+	cveDetector    *waf.CVEDetector     // CVE-specific vulnerability detection
+	dropExecutor   *waf.DropExecutor    // TCP drop executor
 }
 
 // New creates a WAF engine backed by the given snapshot holder and rate limiters.
@@ -27,6 +31,16 @@ func New(holder *snapshot.Holder, reqRL, errRL *waf.RateLimiter, ipRep *waf.IPRe
 		reqRateLimiter: reqRL,
 		errRateLimiter: errRL,
 		ipRep:          ipRep,
+		botThreshold:   80,
+		cveDetector:    waf.NewCVEDetector(),
+	}
+}
+
+// SetGeoResolver attaches a MaxMind GeoIP resolver for bot two-phase scoring.
+func (e *Engine) SetGeoResolver(geo *waf.MaxMindResolver, threshold int) {
+	e.geoResolver = geo
+	if threshold > 0 {
+		e.botThreshold = threshold
 	}
 }
 
@@ -79,7 +93,11 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 
 	// Bot detection before rate limiting (malicious tools should be blocked early).
 	if sn.Protection.BotDetectionEnabled {
-		phases = append(phases, rules.NewBotPhase(e.ipRep))
+		if e.geoResolver != nil {
+			phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
+		} else {
+			phases = append(phases, rules.NewBotPhase(e.ipRep))
+		}
 	}
 
 	if sn.Protection.RequestRateLimitEnabled && e.reqRateLimiter != nil {
@@ -89,6 +107,11 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 
 	if sn.Protection.OWASPEnabled {
 		phases = append(phases, rules.NewOWASPPhase(sn.Protection))
+	}
+
+	// CVE detection runs after OWASP (OWASP covers generic attacks, CVE covers targeted exploits).
+	if sn.Protection.CVEEnabled && e.cveDetector != nil {
+		phases = append(phases, rules.NewCVEPhase(sn.Protection, e.cveDetector))
 	}
 
 	phases = append(phases,
@@ -123,6 +146,13 @@ func (e *Engine) Evaluate(clientIP net.IP, path, rawQuery string, siteRules []sn
 
 func (e *Engine) Resolver() *sites.Resolver        { return e.resolver }
 func (e *Engine) ErrRateLimiter() *waf.RateLimiter { return e.errRateLimiter }
+func (e *Engine) CVEDetector() *waf.CVEDetector    { return e.cveDetector }
+func (e *Engine) DropExecutor() *waf.DropExecutor  { return e.dropExecutor }
+
+// SetDropExecutor attaches a drop executor to the engine.
+func (e *Engine) SetDropExecutor(d *waf.DropExecutor) {
+	e.dropExecutor = d
+}
 
 func convertAndCompile(sr []snapshot.CompiledRule) []rules.Compiled {
 	storeRules := make([]store.Rule, len(sr))

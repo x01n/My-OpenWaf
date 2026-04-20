@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/google/uuid"
@@ -71,6 +72,9 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR)
+		if clientIP != nil && opts.Metrics != nil {
+			opts.Metrics.RecordClientIP(clientIP.String())
+		}
 		path := string(c.Path())
 		rawQ := string(c.URI().QueryString())
 
@@ -156,10 +160,65 @@ func Handler(opts Options) app.HandlerFunc {
 		if result.Action.IsTerminal() {
 			if opts.Metrics != nil {
 				opts.Metrics.RecordWAFBlock()
+				if clientIP != nil {
+					opts.Metrics.RecordAttackIP(clientIP.String())
+				}
 				if result.Action.Phase == "owasp_default" {
 					opts.Metrics.RecordBuiltinHit()
 				}
 			}
+
+			// Drop action: close TCP connection immediately, no response.
+			if result.Action.IsDrop() {
+				secLog.Warn("drop",
+					slog.String("request_id", reqID),
+					slog.String("rule_id", result.Action.RuleIDStr),
+					slog.Uint64("rule_id_num", uint64(result.Action.RuleID)),
+					slog.String("phase", result.Action.Phase),
+					slog.String("action", "drop"),
+					slog.String("match", result.Action.MatchDesc),
+					slog.String("category", result.Action.Category),
+				)
+				if opts.EventWriter != nil {
+					opts.EventWriter.Record(store.SecurityEvent{
+						RequestID:  reqID,
+						ClientIP:   clientIPStr(clientIP),
+						Host:       host,
+						Path:       path,
+						Method:     string(c.Method()),
+						UserAgent:  ua,
+						RuleID:     result.Action.RuleID,
+						RuleIDStr:  result.Action.RuleIDStr,
+						Phase:      result.Action.Phase,
+						Action:     "drop",
+						Category:   result.Action.Category,
+						MatchDesc:  result.Action.MatchDesc,
+						StatusCode: 0, // no HTTP response sent
+					})
+				}
+				// Execute TCP drop via the engine's DropExecutor.
+				dropExec := opts.Engine.DropExecutor()
+				if dropExec != nil && dropExec.Enabled() {
+					conn := c.GetConn()
+					dropExec.Execute(conn, waf.DropReason{
+						Source:    result.Action.Phase,
+						RuleID:   result.Action.RuleIDStr,
+						Detail:   result.Action.MatchDesc,
+						ClientIP: clientIPStr(clientIP),
+						Host:     host,
+						Path:     path,
+						Timestamp: time.Now(),
+					})
+				} else {
+					// Fallback: close connection directly if no executor available.
+					conn := c.GetConn()
+					if conn != nil {
+						conn.Close()
+					}
+				}
+				return
+			}
+
 			secLog.Info("intercept",
 				slog.String("request_id", reqID),
 				slog.String("rule_id", result.Action.RuleIDStr),

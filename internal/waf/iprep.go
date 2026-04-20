@@ -58,7 +58,6 @@ func (r *IPReputation) Close() {
 	r.wg.Wait()
 }
 
-// SetLists atomically replaces blacklist and whitelist.
 func (r *IPReputation) SetLists(black, white []IPListEntry) {
 	r.mu.Lock()
 	r.blacklist = black
@@ -84,7 +83,7 @@ type IPDecision struct {
 	Allowed   bool
 	Matched   bool
 	Reason    string
-	Category  string // "whitelist", "blacklist", "auto_ban"
+	Category  string 
 }
 
 // Check returns the reputation decision for the given IP.
@@ -124,8 +123,6 @@ func (r *IPReputation) Check(ip net.IP) IPDecision {
 	return IPDecision{Allowed: true}
 }
 
-// RecordViolation is called when an IP triggers a security rule.
-// Returns true if auto-ban has been triggered.
 func (r *IPReputation) RecordViolation(ip net.IP) bool {
 	if ip == nil || !r.autoBanEnabled.Load() {
 		return false
@@ -157,7 +154,6 @@ func (r *IPReputation) RecordViolation(ip net.IP) bool {
 	return false
 }
 
-// StatusSnapshot returns a readable summary of current ban state.
 type BanEntry struct {
 	IP        string `json:"ip"`
 	Count     int64  `json:"count"`

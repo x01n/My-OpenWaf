@@ -141,6 +141,7 @@ Pattern format: `kind:arg` (e.g., `block_path:/admin`, `allow_ip:1.2.3.0/24`, `b
 | `internal/waf` | OWASP detection, rate limiters (local fixed-window + Redis sliding-window), IP reputation, bot detection |
 | `internal/observability` | Async security event writer, event archiver (30-day retention), Prometheus `/metrics` |
 | `internal/pkg` | Shared utilities: `logger` (slog), `apierr` (error responses) |
+| `internal/security` | Client IP resolution (XFF + trusted CIDR) and outbound request forwarding headers |
 
 ### Admin API Pattern
 

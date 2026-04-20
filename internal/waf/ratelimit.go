@@ -37,7 +37,6 @@ func (rl *RateLimiter) Enabled() bool { return rl.enabled.Load() }
 
 func (rl *RateLimiter) SetEnabled(v bool) { rl.enabled.Store(v) }
 
-// Reconfigure updates window and max parameters atomically.
 func (rl *RateLimiter) Reconfigure(windowSec, maxReqs int, enabled bool) {
 	rl.mu.Lock()
 	rl.windowS = int64(windowSec)
@@ -46,7 +45,6 @@ func (rl *RateLimiter) Reconfigure(windowSec, maxReqs int, enabled bool) {
 	rl.enabled.Store(enabled)
 }
 
-// Allow returns true if the request should proceed. False = over limit.
 func (rl *RateLimiter) Allow(key string) bool {
 	if !rl.enabled.Load() {
 		return true

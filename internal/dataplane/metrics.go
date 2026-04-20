@@ -20,6 +20,11 @@ type Metrics struct {
 	ringIdx   int
 	ring      [qpsRingSize]ringEntry
 	startTime time.Time
+
+	uniqueIPs   sync.Map // clientIP -> struct{}
+	attackIPs   sync.Map // clientIP -> struct{}
+	uniqueIPCnt atomic.Int64
+	attackIPCnt atomic.Int64
 }
 
 const qpsRingSize = 10 // 10 × 1s buckets
@@ -63,6 +68,18 @@ func (m *Metrics) RecordWAFBlock()   { m.WAFBlocks.Add(1) }
 func (m *Metrics) RecordWAFObserve() { m.WAFObserves.Add(1) }
 func (m *Metrics) RecordBuiltinHit() { m.BuiltinHits.Add(1) }
 
+func (m *Metrics) RecordClientIP(ip string) {
+	if _, loaded := m.uniqueIPs.LoadOrStore(ip, struct{}{}); !loaded {
+		m.uniqueIPCnt.Add(1)
+	}
+}
+
+func (m *Metrics) RecordAttackIP(ip string) {
+	if _, loaded := m.attackIPs.LoadOrStore(ip, struct{}{}); !loaded {
+		m.attackIPCnt.Add(1)
+	}
+}
+
 // QPS returns approximate queries-per-second over the last windowSec seconds.
 func (m *Metrics) QPS(windowSec int) float64 {
 	if windowSec <= 0 {
@@ -96,6 +113,8 @@ type Summary struct {
 	WAFObserves int64   `json:"waf_observes"`
 	BuiltinHits int64   `json:"builtin_hits"`
 	UptimeSec   int64   `json:"uptime_sec"`
+	UniqueIPs   int64   `json:"unique_ips"`
+	AttackIPs   int64   `json:"attack_ips"`
 }
 
 func (m *Metrics) Summary() Summary {
@@ -110,5 +129,7 @@ func (m *Metrics) Summary() Summary {
 		WAFObserves: m.WAFObserves.Load(),
 		BuiltinHits: m.BuiltinHits.Load(),
 		UptimeSec:   m.UptimeSeconds(),
+		UniqueIPs:   m.uniqueIPCnt.Load(),
+		AttackIPs:   m.attackIPCnt.Load(),
 	}
 }

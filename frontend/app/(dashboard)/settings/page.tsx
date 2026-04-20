@@ -361,10 +361,11 @@ function ConsoleTab() {
   const [submitting, setSubmitting] = useState(false);
   const [visibleKeyId, setVisibleKeyId] = useState<number | null>(null);
 
-  /* password policy (placeholder, no backend API yet) */
+  /* password policy */
   const [minLength, setMinLength] = useState("8");
   const [maxAttempts, setMaxAttempts] = useState("5");
   const [lockoutMinutes, setLockoutMinutes] = useState("30");
+  const [savingPolicy, setSavingPolicy] = useState(false);
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -377,6 +378,17 @@ function ConsoleTab() {
     } finally {
       setLoadingKeys(false);
     }
+  }, []);
+
+  // Load login security policy from protection-settings
+  useEffect(() => {
+    api<{ login_min_password_length?: number; login_max_attempts?: number; login_lockout_minutes?: number }>(
+      "/api/v1/protection-settings"
+    ).then((data) => {
+      if (data.login_min_password_length) setMinLength(String(data.login_min_password_length));
+      if (data.login_max_attempts) setMaxAttempts(String(data.login_max_attempts));
+      if (data.login_lockout_minutes) setLockoutMinutes(String(data.login_lockout_minutes));
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -519,8 +531,33 @@ function ConsoleTab() {
             </div>
           </div>
           <div className="flex justify-end mt-6">
-            <Button className="bg-teal-500 hover:bg-teal-600 text-white px-8">
-              保存设置
+            <Button
+              className="bg-teal-500 hover:bg-teal-600 text-white px-8"
+              disabled={savingPolicy}
+              onClick={async () => {
+                setSavingPolicy(true);
+                try {
+                  // Merge into existing protection settings
+                  const existing = await api<Record<string, unknown>>("/api/v1/protection-settings");
+                  await api("/api/v1/protection-settings", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      ...existing,
+                      login_min_password_length: parseInt(minLength) || 8,
+                      login_max_attempts: parseInt(maxAttempts) || 5,
+                      login_lockout_minutes: parseInt(lockoutMinutes) || 30,
+                    }),
+                  });
+                  // toast not imported here, use alert
+                  alert("登录安全设置已保存");
+                } catch {
+                  alert("保存失败");
+                } finally {
+                  setSavingPolicy(false);
+                }
+              }}
+            >
+              {savingPolicy ? "保存中..." : "保存设置"}
             </Button>
           </div>
         </CardContent>

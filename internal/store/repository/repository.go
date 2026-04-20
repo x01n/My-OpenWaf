@@ -14,6 +14,11 @@ type Repos struct {
 	RefreshToken   *RefreshTokenRepo
 	SecurityEvent  *SecurityEventRepo
 	IPList         *IPListRepo
+	BotScore       *BotScoreRepo
+	CVERule        *CVERuleRepo
+	CVESyncLog     *CVESyncLogRepo
+	DropEvent      *DropEventRepo
+	Fingerprint    *FingerprintRepo
 }
 
 func New(db *gorm.DB) *Repos {
@@ -28,5 +33,10 @@ func New(db *gorm.DB) *Repos {
 		RefreshToken:   NewRefreshTokenRepo(db),
 		SecurityEvent:  NewSecurityEventRepo(db),
 		IPList:         NewIPListRepo(db),
+		BotScore:       NewBotScoreRepo(db),
+		CVERule:        NewCVERuleRepo(db),
+		CVESyncLog:     NewCVESyncLogRepo(db),
+		DropEvent:      NewDropEventRepo(db),
+		Fingerprint:    NewFingerprintRepo(db),
 	}
 }

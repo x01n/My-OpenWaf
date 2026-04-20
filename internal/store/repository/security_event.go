@@ -56,7 +56,11 @@ func (r *SecurityEventRepo) BatchCreate(items []store.SecurityEvent) error {
 	if len(items) == 0 {
 		return nil
 	}
-	return r.db.CreateInBatches(items, 100).Error
+	// Wrap in an explicit transaction so that all rows are inserted in a single
+	// fsync (critical for SQLite WAL performance with SkipDefaultTransaction).
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		return tx.CreateInBatches(items, 100).Error
+	})
 }
 
 // DeleteOlderThan removes events older than the given time. Returns deleted count.

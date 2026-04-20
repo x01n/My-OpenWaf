@@ -42,6 +42,7 @@ interface ProtectionConfig {
   auto_ban_duration: number;
   waiting_room_enabled?: boolean;
   cc_use_custom?: boolean;
+  cc_rules?: string; // JSON-encoded CCRule[]
   [key: string]: unknown;
 }
 
@@ -77,6 +78,7 @@ const MATCH_OPERATORS = [
 
 export default function CCProtectionPage() {
   const [cfg, setCfg] = useState<ProtectionConfig | null>(null);
+  const [ccRules, setCCRules] = useState<CCRule[]>([]);
   const [saving, setSaving] = useState(false);
   const [showRuleDialog, setShowRuleDialog] = useState(false);
   const [editingSection, setEditingSection] = useState<string | null>(null);
@@ -93,7 +95,16 @@ export default function CCProtectionPage() {
 
   useEffect(() => {
     api<ProtectionConfig>("/api/v1/protection-settings")
-      .then(setCfg)
+      .then((data) => {
+        setCfg(data);
+        if (data.cc_rules) {
+          try {
+            setCCRules(JSON.parse(data.cc_rules));
+          } catch {
+            setCCRules([]);
+          }
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -110,7 +121,7 @@ export default function CCProtectionPage() {
     try {
       await api("/api/v1/protection-settings", {
         method: "POST",
-        body: JSON.stringify(cfg),
+        body: JSON.stringify({ ...cfg, cc_rules: JSON.stringify(ccRules) }),
       });
       toast.success("已保存，配置重载后生效");
     } catch {
@@ -282,6 +293,44 @@ export default function CCProtectionPage() {
           </div>
         </div>
       </div>
+
+      {/* Custom CC Rules list */}
+      {ccRules.length > 0 && (
+        <div className="rounded-lg border border-gray-200 bg-white">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-3">
+            <span className="w-1 h-5 rounded bg-teal-500 inline-block" />
+            <span className="font-medium text-gray-800">自定义规则</span>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {ccRules.map((rule, idx) => (
+              <div key={idx} className="flex items-center justify-between px-4 py-3">
+                <div>
+                  <p className="text-sm font-medium text-gray-700">{rule.name}</p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {rule.window}s 内触发 {rule.threshold} 次 → {rule.action === "captcha" ? "人机验证" : "直接封禁"} {rule.duration} 分钟
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    const updated = ccRules.filter((_, i) => i !== idx);
+                    setCCRules(updated);
+                    if (cfg) {
+                      const updatedCfg = { ...cfg, cc_rules: JSON.stringify(updated) };
+                      api("/api/v1/protection-settings", {
+                        method: "POST",
+                        body: JSON.stringify(updatedCfg),
+                      }).then(() => toast.success("规则已删除")).catch(() => toast.error("保存失败"));
+                    }
+                  }}
+                  className="text-gray-400 hover:text-rose-500 transition-colors"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Edit Parameter Dialog */}
       <Dialog
@@ -477,7 +526,28 @@ export default function CCProtectionPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowRuleDialog(false)} className="text-teal-600 border-teal-500">取消</Button>
-            <Button onClick={() => { toast.success("规则已添加"); setShowRuleDialog(false); }} className="bg-teal-500 hover:bg-teal-600 text-white">提交</Button>
+            <Button onClick={() => {
+              const newRule: CCRule = {
+                name: ruleName || `规则 ${ccRules.length + 1}`,
+                conditions: ruleConditions,
+                window: ruleWindow,
+                threshold: ruleThreshold,
+                action: ruleAction,
+                duration: ruleDuration,
+              };
+              const updated = [...ccRules, newRule];
+              setCCRules(updated);
+              if (cfg) {
+                const updatedCfg = { ...cfg, cc_rules: JSON.stringify(updated) };
+                api("/api/v1/protection-settings", {
+                  method: "POST",
+                  body: JSON.stringify(updatedCfg),
+                }).then(() => toast.success("规则已添加")).catch(() => toast.error("保存失败"));
+              }
+              setShowRuleDialog(false);
+              setRuleName("");
+              setRuleConditions([{ target: "url_path", operator: "equals", value: "" }]);
+            }} className="bg-teal-500 hover:bg-teal-600 text-white">提交</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

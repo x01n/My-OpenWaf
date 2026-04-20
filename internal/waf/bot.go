@@ -1,11 +1,25 @@
 package waf
 
 import (
+	"net"
 	"regexp"
 	"strings"
 )
 
-// BotVerdict represents the bot detection result.
+// ── Result types ──
+
+// BotScore holds the itemised result of a full (deep) bot evaluation.
+type BotScore struct {
+	Total            int
+	GeoIPScore       int
+	FingerprintScore int
+	BehaviorScore    int // reserved for future behavioral analysis
+	IPRepScore       int
+	IsHighRisk       bool
+	Details          map[string]string // human-readable reason per category
+}
+
+// BotVerdict represents the bot detection result (kept for backward compat).
 // Score is 0-100; higher means more likely a bot/attacker.
 type BotVerdict struct {
 	IsBot    bool
@@ -15,18 +29,24 @@ type BotVerdict struct {
 	RuleID   string
 }
 
+// ── Request surface ──
+
 // BotRequest is the minimal request surface needed for fingerprint scoring.
 type BotRequest struct {
 	UserAgent      string
 	Method         string
 	Path           string
 	Headers        map[string]string
+	HeaderKeys     []string // Ordered list of header keys for TLS/HTTP2 fingerprint analysis
 	AcceptHeader   string
 	AcceptLanguage string
 	AcceptEncoding string
 	Referer        string
 	Connection     string
 	HasCookie      bool
+
+	// Fields used by the two-phase flow (optional for legacy callers).
+	ClientIP net.IP
 }
 
 // NewBotRequest builds a BotRequest from a header map for quick pipeline use.
@@ -54,7 +74,7 @@ func NewBotRequest(method, path string, headers map[string]string) BotRequest {
 	return br
 }
 
-// ── verified legitimate crawlers ──
+// ── Known-bot / tool patterns ──
 
 var goodBotUA = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)googlebot|google-inspectiontool|storebot-google`),
@@ -75,8 +95,6 @@ var goodBotUA = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)amazonbot`),
 	regexp.MustCompile(`(?i)semrushbot|ahrefs|mj12bot|dotbot`),
 }
-
-// ── hacking tools / malicious UA ──
 
 var maliciousToolUA = []struct {
 	re     *regexp.Regexp
@@ -105,17 +123,110 @@ var maliciousToolUA = []struct {
 	{regexp.MustCompile(`(?i)postman|insomnia|httpie`), "api_client", "bot:mal:020"},
 }
 
-// ── fingerprint signals ──
+// ── Phase 1: Fast Pre-Screening ──
+
+// PreScreen performs a cheap, nanosecond-level check to decide whether a
+// request warrants the full deep-scoring pipeline. Returns true if the
+// request should be considered high-risk and must enter Phase 2.
 //
-// Modern browsers send a predictable set of headers (Accept, Accept-Language,
-// Accept-Encoding, User-Agent) in characteristic combinations. Automated tools
-// skip or malform some of these. We score the divergence from a "browser-like"
-// baseline rather than relying solely on the UA string.
+// Criteria checked (any hit → high-risk):
+//   - IP in blacklist / auto-ban (via IPReputation)
+//   - GeoIP IsHighRisk (datacenter/VPN ASN, high-risk country)
+//   - UA matches a known malicious tool
+func PreScreen(r BotRequest, ipRep *IPReputation, geo *MaxMindResolver) bool {
+	// 1. Known-malicious UA → always high risk (very cheap regex).
+	ua := strings.TrimSpace(r.UserAgent)
+	for _, p := range maliciousToolUA {
+		if p.re.MatchString(ua) {
+			return true
+		}
+	}
+
+	// 2. IP reputation: blacklisted or auto-banned.
+	if ipRep != nil && r.ClientIP != nil {
+		dec := ipRep.Check(r.ClientIP)
+		if dec.Matched && !dec.Allowed {
+			return true
+		}
+	}
+
+	// 3. GeoIP fast check.
+	if geo != nil && r.ClientIP != nil {
+		if geo.IsHighRisk(r.ClientIP) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ── Phase 2: Deep Scoring ──
+
+// DeepScore runs the full bot evaluation, combining GeoIP weighting,
+// fingerprint analysis, and IP reputation. Only called for high-risk IPs.
+func DeepScore(r BotRequest, ipRep *IPReputation, geo *MaxMindResolver) BotScore {
+	bs := BotScore{
+		IsHighRisk: true,
+		Details:    make(map[string]string),
+	}
+
+	// ── GeoIP scoring ──
+	if geo != nil && r.ClientIP != nil {
+		bs.GeoIPScore = geo.ScoreIP(r.ClientIP)
+		if bs.GeoIPScore > 0 {
+			info := geo.Lookup(r.ClientIP)
+			if info.ASN != 0 {
+				bs.Details["geoip_asn"] = info.ASNOrg
+			}
+			if info.Country != "" {
+				bs.Details["geoip_country"] = info.Country
+			}
+		}
+	}
+
+	// ── UA/header heuristic fingerprint scoring ──
+	fpScore, fpReasons := fingerprintScore(r)
+
+	// ── TLS/HTTP2 deep fingerprint scoring (JA3/JA4/H2/header order) ──
+	tlsFpResult := DeepFingerprintScore(r)
+	fpScore += tlsFpResult.Score
+	if len(tlsFpResult.Reasons) > 0 {
+		fpReasons = append(fpReasons, tlsFpResult.Reasons...)
+	}
+	if tlsFpResult.MatchedDB != "" {
+		bs.Details["tls_fingerprint_match"] = tlsFpResult.MatchedDB
+	}
+
+	bs.FingerprintScore = fpScore
+	if len(fpReasons) > 0 {
+		bs.Details["fingerprint"] = strings.Join(fpReasons, ",")
+	}
+
+	// ── IP reputation scoring ──
+	if ipRep != nil && r.ClientIP != nil {
+		dec := ipRep.Check(r.ClientIP)
+		if dec.Matched && !dec.Allowed {
+			switch dec.Category {
+			case "blacklist":
+				bs.IPRepScore = 30
+			case "auto_ban":
+				bs.IPRepScore = 25
+			default:
+				bs.IPRepScore = 15
+			}
+			bs.Details["iprep"] = dec.Category + ": " + dec.Reason
+		}
+	}
+
+	// ── Total ──
+	bs.Total = bs.GeoIPScore + bs.FingerprintScore + bs.BehaviorScore + bs.IPRepScore
+	return bs
+}
+
+// ── Fingerprint heuristics (unchanged logic) ──
 
 func fingerprintScore(r BotRequest) (score int, reasons []string) {
 	ua := strings.TrimSpace(r.UserAgent)
-
-	// Missing / empty User-Agent.
 	if ua == "" {
 		score += 40
 		reasons = append(reasons, "empty_ua")
@@ -123,8 +234,6 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
 		score += 25
 		reasons = append(reasons, "short_ua")
 	}
-
-	// Missing Accept header — almost all real browsers send one.
 	if r.AcceptHeader == "" {
 		score += 20
 		reasons = append(reasons, "no_accept")
@@ -132,20 +241,14 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
 		score += 5
 		reasons = append(reasons, "unusual_accept")
 	}
-
-	// Missing Accept-Language — browsers always send it for non-XHR navigations.
 	if r.AcceptLanguage == "" {
 		score += 15
 		reasons = append(reasons, "no_accept_language")
 	}
-
-	// Missing Accept-Encoding.
 	if r.AcceptEncoding == "" {
 		score += 10
 		reasons = append(reasons, "no_accept_encoding")
 	}
-
-	// SDK / library user agents that claim to be a browser but lack browser headers.
 	uaLower := strings.ToLower(ua)
 	if strings.Contains(uaLower, "python-requests") ||
 		strings.Contains(uaLower, "python-urllib") ||
@@ -161,30 +264,18 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
 		score += 50
 		reasons = append(reasons, "automation_lib_ua")
 	}
-
-	// "Mozilla/5.0" claim without the expected trailing browser tokens.
 	if strings.HasPrefix(ua, "Mozilla/") && !strings.Contains(ua, "(") {
 		score += 30
 		reasons = append(reasons, "fake_mozilla")
 	}
-
-	// Connection header is almost always "keep-alive" in browsers; "close" is
-	// a mild signal unless it's a legitimate old HTTP/1.0 client.
 	if strings.EqualFold(r.Connection, "close") {
 		score += 5
 		reasons = append(reasons, "conn_close")
 	}
-
-	// Presence of Cookie usually indicates a real session. Lack of it on a POST
-	// to an authenticated-looking path is a small signal.
 	if !r.HasCookie && (r.Method == "POST" || r.Method == "PUT") {
 		score += 5
 		reasons = append(reasons, "no_cookie_post")
 	}
-
-	// Additional fingerprint checks
-
-	// Suspicious path patterns (common scanner paths)
 	if strings.Contains(r.Path, "/.env") ||
 		strings.Contains(r.Path, "/phpMyAdmin") ||
 		strings.Contains(r.Path, "/wp-admin") ||
@@ -193,14 +284,10 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
 		score += 10
 		reasons = append(reasons, "scanner_path")
 	}
-
-	// Referer anomalies
 	if r.Method == "POST" && r.Referer == "" {
 		score += 8
 		reasons = append(reasons, "post_no_referer")
 	}
-
-	// User-Agent version mismatch patterns
 	if strings.Contains(uaLower, "chrome") && !strings.Contains(uaLower, "safari") {
 		score += 15
 		reasons = append(reasons, "chrome_without_safari")
@@ -209,17 +296,16 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
 	return score, reasons
 }
 
-// CheckBot evaluates the full bot signal (UA signature + fingerprint score).
-// The level parameter controls detection sensitivity: "low", "medium", "high".
+// ── Legacy API (backward-compatible) ──
+
+// CheckBot runs the original single-pass bot detection (no GeoIP weighting).
 func CheckBot(r BotRequest) BotVerdict {
 	return CheckBotWithLevel(r, "medium")
 }
 
-// CheckBotWithLevel evaluates bot signals with configurable protection level.
+// CheckBotWithLevel runs single-pass detection with a configurable sensitivity level.
 func CheckBotWithLevel(r BotRequest, level string) BotVerdict {
 	ua := strings.TrimSpace(r.UserAgent)
-
-	// Known good bots short-circuit.
 	for _, re := range goodBotUA {
 		if re.MatchString(ua) {
 			return BotVerdict{
@@ -230,8 +316,6 @@ func CheckBotWithLevel(r BotRequest, level string) BotVerdict {
 			}
 		}
 	}
-
-	// Known malicious tools → immediate block.
 	for _, p := range maliciousToolUA {
 		if p.re.MatchString(ua) {
 			return BotVerdict{
@@ -243,11 +327,7 @@ func CheckBotWithLevel(r BotRequest, level string) BotVerdict {
 			}
 		}
 	}
-
-	// Cumulative fingerprint scoring with level-based thresholds.
 	score, reasons := fingerprintScore(r)
-
-	// Adjust thresholds based on protection level
 	var maliciousThreshold, suspiciousHighThreshold, suspiciousLowThreshold int
 	switch level {
 	case "low":
@@ -258,7 +338,7 @@ func CheckBotWithLevel(r BotRequest, level string) BotVerdict {
 		maliciousThreshold = 60
 		suspiciousHighThreshold = 35
 		suspiciousLowThreshold = 15
-	default: // "medium"
+	default:
 		maliciousThreshold = 80
 		suspiciousHighThreshold = 50
 		suspiciousLowThreshold = 25
@@ -295,8 +375,80 @@ func CheckBotWithLevel(r BotRequest, level string) BotVerdict {
 	return BotVerdict{IsBot: false, Score: score, Category: "human"}
 }
 
-// CheckBotByUA is a legacy helper that wraps CheckBot with only a user-agent.
-// Kept for API compatibility; new code should call CheckBot with a BotRequest.
+// CheckBotByUA is a convenience wrapper for UA-only checks.
 func CheckBotByUA(userAgent string) BotVerdict {
 	return CheckBot(BotRequest{UserAgent: userAgent})
+}
+
+// defaultFingerprintScorer is a package-level scorer instance for reuse.
+var defaultFingerprintScorer = NewFingerprintScorer()
+
+// DeepFingerprintScore performs TLS/HTTP2/browser fingerprint scoring.
+// It extracts JA3/JA4, HTTP/2 settings, and header order fingerprints,
+// then evaluates them against the known fingerprint database.
+func DeepFingerprintScore(r BotRequest) FingerprintResult {
+	info := ExtractFingerprint(r.Headers, r.HeaderKeys)
+	return defaultFingerprintScorer.ScoreFingerprint(info)
+}
+
+// ── Two-phase combined entry point ──
+
+// CheckBotTwoPhase runs the complete two-phase bot detection pipeline.
+// It first runs PreScreen; if the IP is not flagged, it returns a clean verdict.
+// Otherwise it runs DeepScore and translates the result into a BotVerdict.
+func CheckBotTwoPhase(r BotRequest, ipRep *IPReputation, geo *MaxMindResolver, threshold int) (BotVerdict, BotScore) {
+	// Quick check for known good bots first (always, regardless of risk).
+	ua := strings.TrimSpace(r.UserAgent)
+	for _, re := range goodBotUA {
+		if re.MatchString(ua) {
+			return BotVerdict{
+				IsBot: true, Score: 0, Category: "good",
+				Reason: "verified legitimate crawler",
+			}, BotScore{}
+		}
+	}
+
+	// Phase 1 – pre-screen.
+	if !PreScreen(r, ipRep, geo) {
+		// Not high-risk → fast path, skip deep scoring.
+		return BotVerdict{IsBot: false, Score: 0, Category: "human"}, BotScore{}
+	}
+
+	// Phase 2 – deep score.
+	bs := DeepScore(r, ipRep, geo)
+
+	if threshold <= 0 {
+		threshold = 80
+	}
+
+	verdict := BotVerdict{Score: bs.Total}
+	switch {
+	case bs.Total >= threshold:
+		verdict.IsBot = true
+		verdict.Category = "malicious"
+		verdict.RuleID = "bot:deep:001"
+	case bs.Total >= threshold*60/100:
+		verdict.IsBot = true
+		verdict.Category = "suspicious"
+		verdict.RuleID = "bot:deep:002"
+	default:
+		verdict.Category = "suspicious"
+		verdict.IsBot = true
+		verdict.RuleID = "bot:deep:003"
+	}
+
+	// Build a combined reason string.
+	var parts []string
+	if bs.GeoIPScore > 0 {
+		parts = append(parts, "geoip:"+bs.Details["geoip_country"])
+	}
+	if fp, ok := bs.Details["fingerprint"]; ok {
+		parts = append(parts, "fp:"+fp)
+	}
+	if ir, ok := bs.Details["iprep"]; ok {
+		parts = append(parts, "iprep:"+ir)
+	}
+	verdict.Reason = strings.Join(parts, "; ")
+
+	return verdict, bs
 }

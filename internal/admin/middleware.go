@@ -15,11 +15,11 @@ import (
 
 // AuthMiddleware supports JWT (Bearer) or API Key authentication.
 // Whitelisted paths are skipped (health, auth endpoints).
-func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, jwtSecret []byte) app.HandlerFunc {
+func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, sessionMgr *auth.SessionManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		path := string(c.Path())
 
-		// Whitelist: health + auth endpoints
+		// Whitelist: health + auth endpoints (login/refresh/logout).
 		if path == "/api/v1/health" ||
 			strings.HasPrefix(path, "/api/v1/auth/") {
 			c.Next(ctx)
@@ -40,10 +40,18 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, jwtSecret []byte) app.H
 			return
 		}
 
-		// Try JWT first.
-		if claims, err := auth.VerifyAccessToken(token, jwtSecret); err == nil {
+		// Try JWT first (via TokenManager with key rotation + blacklist support).
+		if claims, err := tm.VerifyAccessToken(token); err == nil {
 			c.Set("auth_user", claims.Username)
 			c.Set("auth_method", "jwt")
+			c.Set("auth_role", claims.Role)
+			c.Set("auth_jti", claims.ID)
+
+			// Update session last active time.
+			if claims.ID != "" && sessionMgr != nil {
+				sessionMgr.UpdateLastActive(claims.ID)
+			}
+
 			c.Next(ctx)
 			return
 		}
@@ -58,6 +66,31 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, jwtSecret []byte) app.H
 		c.Set("auth_user", key.Name)
 		c.Set("auth_method", "api_key")
 		c.Set("api_key_id", key.ID)
+		c.Set("auth_role", auth.RoleAdmin) // API keys get admin role by default.
+		c.Next(ctx)
+	}
+}
+
+// RequireRole returns a middleware that checks if the authenticated user has one of the allowed roles.
+// Usage: api.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator))
+func RequireRole(allowedRoles ...string) app.HandlerFunc {
+	roleSet := make(map[string]bool, len(allowedRoles))
+	for _, r := range allowedRoles {
+		roleSet[r] = true
+	}
+	return func(ctx context.Context, c *app.RequestContext) {
+		roleVal, exists := c.Get("auth_role")
+		if !exists {
+			c.JSON(403, map[string]string{"error": "access denied: no role"})
+			c.Abort()
+			return
+		}
+		role, _ := roleVal.(string)
+		if !roleSet[role] {
+			c.JSON(403, map[string]string{"error": "access denied: insufficient permissions"})
+			c.Abort()
+			return
+		}
 		c.Next(ctx)
 	}
 }
