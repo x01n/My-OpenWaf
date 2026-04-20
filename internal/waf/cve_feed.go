@@ -30,22 +30,22 @@ type CVEFeedManager struct {
 
 // CVERuleModel is the database model for CVE rules (auto-generated or user-created).
 type CVERuleModel struct {
-	ID            uint           `gorm:"primaryKey" json:"id"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
-	CVEID         string         `gorm:"size:32;index" json:"cve_id"`
-	Category      string         `gorm:"size:32" json:"category"`
-	Pattern       string         `gorm:"type:text" json:"pattern"`
-	Target        string         `gorm:"size:32" json:"target"` // url, body, header, cookie
-	Severity      string         `gorm:"size:16" json:"severity"`
-	Action        string         `gorm:"size:16;default:drop" json:"action"`
-	Enabled       bool           `gorm:"default:false" json:"enabled"`
-	Description   string         `gorm:"type:text" json:"description"`
-	Source        string         `gorm:"size:32" json:"source"` // auto_generated, manual, nvd, github
-	Approved      bool           `gorm:"default:false" json:"approved"`
-	CVSSScore     float64        `gorm:"default:0" json:"cvss_score"`
-	CWEType       string         `gorm:"size:32" json:"cwe_type"`
+	ID          uint           `gorm:"primaryKey" json:"id"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	CVEID       string         `gorm:"size:32;index" json:"cve_id"`
+	Category    string         `gorm:"size:32" json:"category"`
+	Pattern     string         `gorm:"type:text" json:"pattern"`
+	Target      string         `gorm:"size:32" json:"target"` // url, body, header, cookie
+	Severity    string         `gorm:"size:16" json:"severity"`
+	Action      string         `gorm:"size:16;default:drop" json:"action"`
+	Enabled     bool           `gorm:"default:false" json:"enabled"`
+	Description string         `gorm:"type:text" json:"description"`
+	Source      string         `gorm:"size:32" json:"source"` // auto_generated, manual, nvd, github
+	Approved    bool           `gorm:"default:false" json:"approved"`
+	CVSSScore   float64        `gorm:"default:0" json:"cvss_score"`
+	CWEType     string         `gorm:"size:32" json:"cwe_type"`
 }
 
 // TableName for GORM.
@@ -206,10 +206,10 @@ type nvdVuln struct {
 }
 
 type nvdCVE struct {
-	ID          string        `json:"id"`
-	Descriptions []nvdDesc   `json:"descriptions"`
-	Metrics     nvdMetrics    `json:"metrics"`
-	Weaknesses  []nvdWeakness `json:"weaknesses"`
+	ID           string        `json:"id"`
+	Descriptions []nvdDesc     `json:"descriptions"`
+	Metrics      nvdMetrics    `json:"metrics"`
+	Weaknesses   []nvdWeakness `json:"weaknesses"`
 }
 
 type nvdDesc struct {
@@ -335,14 +335,14 @@ func (m *CVEFeedManager) processNVDCVE(cve nvdCVE) bool {
 // ── GitHub Advisory API ──
 
 type ghAdvisory struct {
-	GHSAID      string        `json:"ghsa_id"`
-	CVEID       string        `json:"cve_id"`
-	Summary     string        `json:"summary"`
-	Description string        `json:"description"`
-	Severity    string        `json:"severity"`
-	CVSS        ghCVSS        `json:"cvss"`
-	CWEs        []ghCWE       `json:"cwes"`
-	Vulnerabilities []ghVuln  `json:"vulnerabilities"`
+	GHSAID          string   `json:"ghsa_id"`
+	CVEID           string   `json:"cve_id"`
+	Summary         string   `json:"summary"`
+	Description     string   `json:"description"`
+	Severity        string   `json:"severity"`
+	CVSS            ghCVSS   `json:"cvss"`
+	CWEs            []ghCWE  `json:"cwes"`
+	Vulnerabilities []ghVuln `json:"vulnerabilities"`
 }
 
 type ghCVSS struct {

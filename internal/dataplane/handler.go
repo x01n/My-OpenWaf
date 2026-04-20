@@ -26,12 +26,12 @@ import (
 
 // Options configures a single data listener handler.
 type Options struct {
-	Bind         string
-	Holder       *snapshot.Holder
-	Engine       *engine.Engine
-	Metrics      *Metrics
-	EventWriter  *observability.EventWriter
-	Log          *slog.Logger
+	Bind        string
+	Holder      *snapshot.Holder
+	Engine      *engine.Engine
+	Metrics     *Metrics
+	EventWriter *observability.EventWriter
+	Log         *slog.Logger
 }
 
 // Handler returns a Hertz middleware: maintenance → WAF → block fuse or reverse proxy.
@@ -202,11 +202,11 @@ func Handler(opts Options) app.HandlerFunc {
 					conn := c.GetConn()
 					dropExec.Execute(conn, waf.DropReason{
 						Source:    result.Action.Phase,
-						RuleID:   result.Action.RuleIDStr,
-						Detail:   result.Action.MatchDesc,
-						ClientIP: clientIPStr(clientIP),
-						Host:     host,
-						Path:     path,
+						RuleID:    result.Action.RuleIDStr,
+						Detail:    result.Action.MatchDesc,
+						ClientIP:  clientIPStr(clientIP),
+						Host:      host,
+						Path:      path,
 						Timestamp: time.Now(),
 					})
 				} else {
@@ -249,7 +249,6 @@ func Handler(opts Options) app.HandlerFunc {
 			logAccess(accessLog, reqID, c, "intercept")
 			return
 		}
-
 
 		// Forward to upstream.
 		if result.Site == nil || len(result.Site.UpstreamURLs) == 0 {

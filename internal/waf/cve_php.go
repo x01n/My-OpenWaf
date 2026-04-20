@@ -21,9 +21,9 @@ type phpCVERule struct {
 // Compiled regex patterns (init-time, no runtime compilation).
 var (
 	// PHP object deserialization (CVE-2015-6835 and related)
-	rePHPSerObj       = regexp.MustCompile(`(?i)O:\d+:"`)
-	rePHPSerArray     = regexp.MustCompile(`(?i)a:\d+:\{`)
-	rePHPUnserialize  = regexp.MustCompile(`(?i)unserialize\s*\(`)
+	rePHPSerObj      = regexp.MustCompile(`(?i)O:\d+:"`)
+	rePHPSerArray    = regexp.MustCompile(`(?i)a:\d+:\{`)
+	rePHPUnserialize = regexp.MustCompile(`(?i)unserialize\s*\(`)
 
 	// PHP stream wrappers / file inclusion (CVE-2018-xxxx family)
 	rePHPFilterStream = regexp.MustCompile(`(?i)php://filter/`)
@@ -46,11 +46,11 @@ var (
 	reLaravel4 = regexp.MustCompile(`(?i)Illuminate\\\\Foundation\\\\Testing`)
 
 	// Webshell upload detection
-	rePHPTag     = regexp.MustCompile(`(?i)<\?php`)
-	rePHPEval    = regexp.MustCompile(`(?i)\beval\s*\(`)
-	rePHPSystem  = regexp.MustCompile(`(?i)\bsystem\s*\(`)
-	rePHPExec    = regexp.MustCompile(`(?i)\bexec\s*\(`)
-	rePHPPassthru = regexp.MustCompile(`(?i)\bpassthru\s*\(`)
+	rePHPTag       = regexp.MustCompile(`(?i)<\?php`)
+	rePHPEval      = regexp.MustCompile(`(?i)\beval\s*\(`)
+	rePHPSystem    = regexp.MustCompile(`(?i)\bsystem\s*\(`)
+	rePHPExec      = regexp.MustCompile(`(?i)\bexec\s*\(`)
+	rePHPPassthru  = regexp.MustCompile(`(?i)\bpassthru\s*\(`)
 	rePHPShellExec = regexp.MustCompile(`(?i)\bshell_exec\s*\(`)
 	rePHPExtUpload = regexp.MustCompile(`(?i)\.(php[345s7]?|phtml|pht|phps|phar)\b`)
 

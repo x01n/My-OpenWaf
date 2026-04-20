@@ -25,14 +25,14 @@ type GeoInfo struct {
 
 // MaxMindResolver wraps one or two MaxMind MMDB readers (GeoLite2-City / ASN).
 type MaxMindResolver struct {
-	mu      sync.RWMutex
-	cityDB  *maxminddb.Reader
-	asnDB   *maxminddb.Reader
+	mu     sync.RWMutex
+	cityDB *maxminddb.Reader
+	asnDB  *maxminddb.Reader
 
 	// Pre-computed lookup sets built from BotConfig for O(1) checks.
-	dcASNs       map[uint]struct{}
-	vpnASNs      map[uint]struct{}
-	hrCountries  map[string]struct{}
+	dcASNs      map[uint]struct{}
+	vpnASNs     map[uint]struct{}
+	hrCountries map[string]struct{}
 }
 
 // maxmindCity is the minimal structure we decode from GeoLite2-City.
@@ -47,7 +47,7 @@ type maxmindCity struct {
 
 // maxmindASN is the minimal structure we decode from GeoLite2-ASN.
 type maxmindASN struct {
-	ASN uint `maxminddb:"autonomous_system_number"`
+	ASN uint   `maxminddb:"autonomous_system_number"`
 	Org string `maxminddb:"autonomous_system_organization"`
 }
 

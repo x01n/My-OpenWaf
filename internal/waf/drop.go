@@ -26,11 +26,11 @@ type DropExecutor struct {
 // DropReason describes why a connection was dropped.
 type DropReason struct {
 	Source    string // "bot", "cve", "rule", "ip_reputation"
-	RuleID   string // rule that triggered the drop
-	Detail   string // human-readable explanation
-	ClientIP string
-	Host     string
-	Path     string
+	RuleID    string // rule that triggered the drop
+	Detail    string // human-readable explanation
+	ClientIP  string
+	Host      string
+	Path      string
 	Timestamp time.Time
 }
 

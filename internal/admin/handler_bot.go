@@ -24,12 +24,12 @@ type BotSettingsResponse struct {
 
 // BotSettingsUpdate represents the request body for updating bot settings.
 type BotSettingsUpdate struct {
-	Enabled           *bool     `json:"enabled"`
-	ScoreThreshold    *int      `json:"score_threshold"`
-	HighRiskCountries []string  `json:"high_risk_countries"`
-	DatacenterASNs    []uint32  `json:"datacenter_asns"`
-	VPNProxyASNs      []uint32  `json:"vpn_proxy_asns"`
-	GeoIPDBPath       *string   `json:"geoip_db_path"`
+	Enabled           *bool    `json:"enabled"`
+	ScoreThreshold    *int     `json:"score_threshold"`
+	HighRiskCountries []string `json:"high_risk_countries"`
+	DatacenterASNs    []uint32 `json:"datacenter_asns"`
+	VPNProxyASNs      []uint32 `json:"vpn_proxy_asns"`
+	GeoIPDBPath       *string  `json:"geoip_db_path"`
 }
 
 func GetBotSettings(settingsRepo *repository.SystemSettingsRepo) app.HandlerFunc {

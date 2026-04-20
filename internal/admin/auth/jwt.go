@@ -24,10 +24,10 @@ const (
 // Claims carried inside the short-lived access JWT.
 type Claims struct {
 	jwt.RegisteredClaims
-	Username    string `json:"username"`
-	Role        string `json:"role"`
-	IPHash      string `json:"ip_hash,omitempty"`
-	DeviceHash  string `json:"device_hash,omitempty"`
+	Username   string `json:"username"`
+	Role       string `json:"role"`
+	IPHash     string `json:"ip_hash,omitempty"`
+	DeviceHash string `json:"device_hash,omitempty"`
 }
 
 const (
@@ -42,13 +42,13 @@ const (
 
 // TokenManager handles JWT signing, verification, key rotation, and token blacklisting.
 type TokenManager struct {
-	mu         sync.RWMutex
-	primary    []byte   // current signing key
-	secondary  []byte   // previous key (for rotation transition)
-	db         *gorm.DB // for persistent blacklist
+	mu        sync.RWMutex
+	primary   []byte   // current signing key
+	secondary []byte   // previous key (for rotation transition)
+	db        *gorm.DB // for persistent blacklist
 
 	// In-memory blacklist (jti -> expiry)
-	blacklist     sync.Map
+	blacklist sync.Map
 }
 
 // NewTokenManager creates a TokenManager with the given primary secret.

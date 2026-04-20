@@ -402,7 +402,7 @@ const (
 type DropEvent struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
 	ClientIP  string    `gorm:"index;size:45" json:"client_ip"`
-	Source    string    `gorm:"size:32" json:"source"`   // bot, cve, rule, ip_reputation
+	Source    string    `gorm:"size:32" json:"source"` // bot, cve, rule, ip_reputation
 	RuleID    string    `gorm:"size:64" json:"rule_id"`
 	Detail    string    `gorm:"size:512" json:"detail"`
 	Host      string    `gorm:"size:256" json:"host"`

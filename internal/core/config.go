@@ -27,17 +27,17 @@ func DefaultBotConfig() BotConfig {
 		HighRiskCountries: nil,
 		// Common cloud / datacenter ASNs (AWS, GCP, Azure, DigitalOcean, Vultr, Linode, OVH, Hetzner).
 		DataCenterASNs: []uint{
-			16509, 14618,        // AWS
-			15169, 396982,       // Google Cloud
-			8075,                // Microsoft Azure
-			14061,               // DigitalOcean
-			20473,               // Vultr / Choopa
-			63949,               // Linode / Akamai Connected Cloud
-			16276,               // OVH
-			24940,               // Hetzner
-			13238,               // Yandex Cloud
-			45090,               // Tencent Cloud
-			37963,               // Alibaba Cloud
+			16509, 14618, // AWS
+			15169, 396982, // Google Cloud
+			8075,  // Microsoft Azure
+			14061, // DigitalOcean
+			20473, // Vultr / Choopa
+			63949, // Linode / Akamai Connected Cloud
+			16276, // OVH
+			24940, // Hetzner
+			13238, // Yandex Cloud
+			45090, // Tencent Cloud
+			37963, // Alibaba Cloud
 		},
 		// Common VPN / proxy ASNs.
 		VPNProxyASNs: []uint{

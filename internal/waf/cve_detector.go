@@ -21,12 +21,12 @@ type CVEDetector struct {
 }
 
 type CVEMatch struct {
-	CVEID       string 
-	Category    string 
-	Severity    string 
+	CVEID       string
+	Category    string
+	Severity    string
 	Description string
-	MatchedPart string 
-	Pattern     string 
+	MatchedPart string
+	Pattern     string
 	Action      string // drop, block, log
 }
 

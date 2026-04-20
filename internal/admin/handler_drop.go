@@ -14,18 +14,18 @@ import (
 
 // DropPolicyResponse represents the drop policy configuration.
 type DropPolicyResponse struct {
-	Enabled              bool `json:"enabled"`
-	BotScoreThreshold    int  `json:"bot_score_threshold"`
-	CVEAutoDropCritical  bool `json:"cve_auto_drop_critical"`
-	CVEAutoDropHigh      bool `json:"cve_auto_drop_high"`
+	Enabled             bool `json:"enabled"`
+	BotScoreThreshold   int  `json:"bot_score_threshold"`
+	CVEAutoDropCritical bool `json:"cve_auto_drop_critical"`
+	CVEAutoDropHigh     bool `json:"cve_auto_drop_high"`
 }
 
 // DropPolicyUpdate represents the request body for updating drop policy.
 type DropPolicyUpdate struct {
-	Enabled              *bool `json:"enabled"`
-	BotScoreThreshold    *int  `json:"bot_score_threshold"`
-	CVEAutoDropCritical  *bool `json:"cve_auto_drop_critical"`
-	CVEAutoDropHigh      *bool `json:"cve_auto_drop_high"`
+	Enabled             *bool `json:"enabled"`
+	BotScoreThreshold   *int  `json:"bot_score_threshold"`
+	CVEAutoDropCritical *bool `json:"cve_auto_drop_critical"`
+	CVEAutoDropHigh     *bool `json:"cve_auto_drop_high"`
 }
 
 func GetDropPolicy(settingsRepo *repository.SystemSettingsRepo) app.HandlerFunc {

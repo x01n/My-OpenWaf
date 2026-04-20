@@ -15,9 +15,9 @@ type BruteForceDetector struct {
 }
 
 type attemptRecord struct {
-	failures  int
-	lockedAt  time.Time
-	lastFail  time.Time
+	failures int
+	lockedAt time.Time
+	lastFail time.Time
 }
 
 // NewBruteForceDetector creates a detector with configurable limits.
