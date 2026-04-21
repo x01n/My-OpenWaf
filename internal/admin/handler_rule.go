@@ -54,7 +54,10 @@ func CreateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": item})
+			return
+		}
 		c.JSON(201, item)
 	}
 }
@@ -80,7 +83,10 @@ func UpdateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": existing})
+			return
+		}
 		c.JSON(200, existing)
 	}
 }
@@ -96,7 +102,10 @@ func DeleteRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+			return
+		}
 		c.JSON(204, nil)
 	}
 }
@@ -190,7 +199,10 @@ func ImportRules(repo *repository.RuleRepo, reload func() error) app.HandlerFunc
 			}
 			created++
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "imported": created, "total": len(body.Rules)})
+			return
+		}
 		c.JSON(200, map[string]any{"imported": created, "total": len(body.Rules)})
 	}
 }

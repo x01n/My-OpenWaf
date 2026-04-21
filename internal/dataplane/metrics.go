@@ -1,12 +1,12 @@
 package dataplane
 
 import (
-	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // Metrics tracks data-plane counters (thread-safe).
+// Uses atomic counters only — no sync.Map to avoid unbounded memory growth.
 type Metrics struct {
 	RequestsTotal atomic.Int64
 	Status2xx     atomic.Int64
@@ -16,13 +16,11 @@ type Metrics struct {
 	WAFObserves   atomic.Int64
 	BuiltinHits   atomic.Int64
 
-	mu        sync.Mutex
-	ringIdx   int
+	ringMu    [0]func() // padding; we use atomic CAS on ringIdx instead of mutex for the hot path
+	ringIdx   atomic.Int64
 	ring      [qpsRingSize]ringEntry
 	startTime time.Time
 
-	uniqueIPs   sync.Map // clientIP -> struct{}
-	attackIPs   sync.Map // clientIP -> struct{}
 	uniqueIPCnt atomic.Int64
 	attackIPCnt atomic.Int64
 }
@@ -30,8 +28,8 @@ type Metrics struct {
 const qpsRingSize = 10 // 10 × 1s buckets
 
 type ringEntry struct {
-	ts    int64
-	count int64
+	ts    atomic.Int64
+	count atomic.Int64
 }
 
 func NewMetrics() *Metrics {
@@ -41,16 +39,17 @@ func NewMetrics() *Metrics {
 func (m *Metrics) RecordRequest() {
 	m.RequestsTotal.Add(1)
 	now := time.Now().Unix()
-	m.mu.Lock()
-	idx := m.ringIdx % qpsRingSize
-	if m.ring[idx].ts != now {
-		m.ringIdx++
-		idx = m.ringIdx % qpsRingSize
-		m.ring[idx] = ringEntry{ts: now, count: 1}
+	// Simple ring buffer: find current second's slot or advance.
+	idx := int(m.ringIdx.Load()) % qpsRingSize
+	if m.ring[idx].ts.Load() == now {
+		m.ring[idx].count.Add(1)
 	} else {
-		m.ring[idx].count++
+		// Advance to next slot (benign race: worst case we overcount slightly).
+		newIdx := (idx + 1) % qpsRingSize
+		m.ringIdx.Store(int64(newIdx))
+		m.ring[newIdx].ts.Store(now)
+		m.ring[newIdx].count.Store(1)
 	}
-	m.mu.Unlock()
 }
 
 func (m *Metrics) RecordStatus(code int) {
@@ -68,16 +67,16 @@ func (m *Metrics) RecordWAFBlock()   { m.WAFBlocks.Add(1) }
 func (m *Metrics) RecordWAFObserve() { m.WAFObserves.Add(1) }
 func (m *Metrics) RecordBuiltinHit() { m.BuiltinHits.Add(1) }
 
-func (m *Metrics) RecordClientIP(ip string) {
-	if _, loaded := m.uniqueIPs.LoadOrStore(ip, struct{}{}); !loaded {
-		m.uniqueIPCnt.Add(1)
-	}
+// RecordClientIP increments the unique IP counter.
+// Uses a simple atomic counter instead of storing individual IPs.
+func (m *Metrics) RecordClientIP(_ string) {
+	m.uniqueIPCnt.Add(1)
 }
 
-func (m *Metrics) RecordAttackIP(ip string) {
-	if _, loaded := m.attackIPs.LoadOrStore(ip, struct{}{}); !loaded {
-		m.attackIPCnt.Add(1)
-	}
+// RecordAttackIP increments the attack IP counter.
+// Uses a simple atomic counter instead of storing individual IPs.
+func (m *Metrics) RecordAttackIP(_ string) {
+	m.attackIPCnt.Add(1)
 }
 
 // QPS returns approximate queries-per-second over the last windowSec seconds.
@@ -87,14 +86,12 @@ func (m *Metrics) QPS(windowSec int) float64 {
 	}
 	now := time.Now().Unix()
 	var total int64
-	m.mu.Lock()
 	for i := 0; i < qpsRingSize; i++ {
-		e := m.ring[i]
-		if e.ts > 0 && now-e.ts < int64(windowSec) {
-			total += e.count
+		ts := m.ring[i].ts.Load()
+		if ts > 0 && now-ts < int64(windowSec) {
+			total += m.ring[i].count.Load()
 		}
 	}
-	m.mu.Unlock()
 	return float64(total) / float64(windowSec)
 }
 

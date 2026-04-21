@@ -182,6 +182,8 @@ type RefreshToken struct {
 	ID         uint      `gorm:"primaryKey" json:"id"`
 	JTI        string    `gorm:"size:128;uniqueIndex;not null" json:"jti"`
 	TokenHash  string    `gorm:"size:255;not null" json:"-"`
+	Username   string    `gorm:"size:64;not null;default:''" json:"username"`
+	Role       string    `gorm:"size:32;not null;default:'admin'" json:"role"`
 	ExpiresAt  time.Time `gorm:"not null" json:"expires_at"`
 	Revoked    bool      `gorm:"default:false" json:"revoked"`
 	ReplacedBy string    `gorm:"size:128" json:"replaced_by,omitempty"`

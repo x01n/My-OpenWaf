@@ -24,20 +24,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { toast } from "sonner";
-import { Loader2, ChevronLeft, ChevronRight, Plus, X } from "lucide-react";
+import { Loader2, Plus, X } from "lucide-react";
+import { Pagination } from "@/components/pagination";
+import { formatDate } from "@/lib/utils";
 
 const PAGE_SIZE = 20;
-
-function formatDate(s: string) {
-  if (!s) return "-";
-  return new Date(s).toLocaleString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 // ── Tag Input Component ──
 function TagInput({
@@ -374,18 +365,13 @@ function ScoreLogsTab() {
 
       {/* Pagination */}
       {total > PAGE_SIZE && (
-        <div className="flex items-center justify-between text-sm text-gray-500">
-          <span>{PAGE_SIZE} 条每页，共 {total} 条</span>
-          <div className="flex items-center gap-1">
-            <Button variant="outline" size="icon" className="h-7 w-7" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-              <ChevronLeft className="h-4 w-4" />
-            </Button>
-            <span className="px-2">{page} / {totalPages}</span>
-            <Button variant="outline" size="icon" className="h-7 w-7" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          pageSize={PAGE_SIZE}
+          onPageChange={setPage}
+        />
       )}
     </div>
   );

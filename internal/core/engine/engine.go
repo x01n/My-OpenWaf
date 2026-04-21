@@ -2,6 +2,7 @@ package engine
 
 import (
 	"net"
+	"sync"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
@@ -11,6 +12,13 @@ import (
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf"
 )
+
+// compiledRules holds pre-compiled, pre-partitioned rules for a site.
+type compiledRules struct {
+	ACL       []rules.Compiled
+	Signature []rules.Compiled
+	Custom    []rules.Compiled
+}
 
 // Engine orchestrates the full WAF processing pipeline for each request.
 type Engine struct {
@@ -22,6 +30,12 @@ type Engine struct {
 	botThreshold   int                  // score threshold for bot blocking
 	cveDetector    *waf.CVEDetector     // CVE-specific vulnerability detection
 	dropExecutor   *waf.DropExecutor    // TCP drop executor
+
+	// Per-snapshot rule compilation cache. Key: snapshotRevision<<32 | policyID.
+	// Cleared on snapshot change via revision check.
+	compiledMu       sync.RWMutex
+	compiledRevision uint64
+	compiledCache    map[uint]*compiledRules
 }
 
 // New creates a WAF engine backed by the given snapshot holder and rate limiters.
@@ -33,6 +47,7 @@ func New(holder *snapshot.Holder, reqRL, errRL *waf.RateLimiter, ipRep *waf.IPRe
 		ipRep:          ipRep,
 		botThreshold:   80,
 		cveDetector:    waf.NewCVEDetector(),
+		compiledCache:  make(map[uint]*compiledRules),
 	}
 }
 
@@ -52,6 +67,47 @@ type ProcessResult struct {
 	Site        *snapshot.SiteRuntime
 	ObserveHits []action.Result
 	Maintenance bool
+}
+
+// getCompiledRules returns pre-compiled, pre-partitioned rules for a site,
+// compiling them once per snapshot revision per policy.
+func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime) *compiledRules {
+	rev := sn.Revision
+	policyID := rt.PolicyID
+
+	e.compiledMu.RLock()
+	if e.compiledRevision == rev {
+		if cr, ok := e.compiledCache[policyID]; ok {
+			e.compiledMu.RUnlock()
+			return cr
+		}
+	}
+	e.compiledMu.RUnlock()
+
+	// Compile rules (this is the expensive operation we want to do only once).
+	all := convertAndCompile(rt.Rules)
+	cr := &compiledRules{}
+	for i := range all {
+		switch all[i].Phase {
+		case "acl":
+			cr.ACL = append(cr.ACL, all[i])
+		case "signature":
+			cr.Signature = append(cr.Signature, all[i])
+		case "custom":
+			cr.Custom = append(cr.Custom, all[i])
+		}
+	}
+
+	e.compiledMu.Lock()
+	if e.compiledRevision != rev {
+		// Snapshot changed — clear old cache.
+		e.compiledCache = make(map[uint]*compiledRules)
+		e.compiledRevision = rev
+	}
+	e.compiledCache[policyID] = cr
+	e.compiledMu.Unlock()
+
+	return cr
 }
 
 // Process runs a request through maintenance check, site resolution, and WAF pipeline.
@@ -80,7 +136,8 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 		}
 	}
 
-	compiled := convertAndCompile(rt.Rules)
+	// Use pre-compiled, pre-partitioned rules (compiled once per snapshot revision per policy).
+	cr := e.getCompiledRules(sn, &rt)
 
 	var phases []pipeline.Phase
 
@@ -89,7 +146,7 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 		phases = append(phases, rules.NewIPReputationPhase(e.ipRep))
 	}
 
-	phases = append(phases, rules.NewACLPhase(compiled))
+	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
 
 	// Bot detection before rate limiting (malicious tools should be blocked early).
 	if sn.Protection.BotDetectionEnabled {
@@ -115,8 +172,8 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	}
 
 	phases = append(phases,
-		rules.NewSignaturePhase(compiled),
-		rules.NewCustomPhase(compiled),
+		rules.NewSignaturePhasePrecompiled(cr.Signature),
+		rules.NewCustomPhasePrecompiled(cr.Custom),
 	)
 
 	pipe := pipeline.New(phases...)
@@ -154,6 +211,8 @@ func (e *Engine) SetDropExecutor(d *waf.DropExecutor) {
 	e.dropExecutor = d
 }
 
+// convertAndCompile converts snapshot CompiledRules to engine-ready rules.Compiled.
+// Used by Evaluate (testing helper) and getCompiledRules (cached per snapshot).
 func convertAndCompile(sr []snapshot.CompiledRule) []rules.Compiled {
 	storeRules := make([]store.Rule, len(sr))
 	for i, r := range sr {

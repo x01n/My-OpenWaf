@@ -1,27 +1,36 @@
 package observability
 
 import (
+	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
+
+	goredis "github.com/redis/go-redis/v9"
 
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
 
+const redisEventListKey = "openwaf:security_events"
+
 // EventWriter accepts security events on a buffered channel and batch-writes
-// them to the database. This ensures the data-plane hot path is never blocked
-// by a DB write.
+// them to the database. When Redis is configured, events are also pushed to a
+// Redis list for real-time consumption by external consumers (SIEM, dashboards).
+// This ensures the data-plane hot path is never blocked by a DB write.
 type EventWriter struct {
 	repo    *repository.SecurityEventRepo
+	redis   *goredis.Client
 	ch      chan store.SecurityEvent
 	log     *slog.Logger
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 
 	// Tuning knobs.
-	batchSize    int
+	batchSize     int
 	flushInterval time.Duration
+	redisTTL      time.Duration // TTL for the Redis event list key
 }
 
 func NewEventWriter(repo *repository.SecurityEventRepo, log *slog.Logger) *EventWriter {
@@ -32,10 +41,17 @@ func NewEventWriter(repo *repository.SecurityEventRepo, log *slog.Logger) *Event
 		stopCh:        make(chan struct{}),
 		batchSize:     64,
 		flushInterval: 2 * time.Second,
+		redisTTL:      7 * 24 * time.Hour, // keep Redis events for 7 days
 	}
 	w.wg.Add(1)
 	go w.loop()
 	return w
+}
+
+// SetRedis enables Redis dual-write. Events are pushed to a Redis list
+// in addition to the database. Safe to call before or after construction.
+func (w *EventWriter) SetRedis(client *goredis.Client) {
+	w.redis = client
 }
 
 // Record enqueues an event. Non-blocking: drops if buffer full.
@@ -98,7 +114,38 @@ func (w *EventWriter) flush(buf []store.SecurityEvent) {
 	}
 	batch := make([]store.SecurityEvent, len(buf))
 	copy(batch, buf)
+
+	// Write to Redis first (low-latency path for real-time consumers).
+	if w.redis != nil {
+		w.pushToRedis(batch)
+	}
+
+	// Write to database (durable storage).
 	if err := w.repo.BatchCreate(batch); err != nil {
 		w.log.Error("failed to write security events", slog.Any("err", err), slog.Int("count", len(batch)))
+	}
+}
+
+// pushToRedis pushes a batch of events to a Redis list using a pipeline.
+// Events are serialized as JSON. The list key gets a TTL to prevent unbounded growth.
+func (w *EventWriter) pushToRedis(batch []store.SecurityEvent) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pipe := w.redis.Pipeline()
+	for _, ev := range batch {
+		data, err := json.Marshal(ev)
+		if err != nil {
+			continue
+		}
+		pipe.LPush(ctx, redisEventListKey, data)
+	}
+	// Cap the list to prevent unbounded memory usage (keep last 100k events).
+	pipe.LTrim(ctx, redisEventListKey, 0, 99999)
+	// Refresh TTL so the key doesn't linger after WAF shutdown.
+	pipe.Expire(ctx, redisEventListKey, w.redisTTL)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		w.log.Warn("failed to push events to Redis", slog.Any("err", err), slog.Int("count", len(batch)))
 	}
 }

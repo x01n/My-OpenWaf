@@ -35,6 +35,9 @@ type aclPhase struct{ rules []Compiled }
 
 func NewACLPhase(rules []Compiled) pipeline.Phase { return &aclPhase{rules: filterPhase(rules, "acl")} }
 
+// NewACLPhasePrecompiled creates an ACL phase from already-partitioned rules (no filtering needed).
+func NewACLPhasePrecompiled(rules []Compiled) pipeline.Phase { return &aclPhase{rules: rules} }
+
 func (p *aclPhase) Name() string { return "acl" }
 
 func (p *aclPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
@@ -59,6 +62,11 @@ func NewSignaturePhase(rules []Compiled) pipeline.Phase {
 	return &signaturePhase{rules: filterPhase(rules, "signature")}
 }
 
+// NewSignaturePhasePrecompiled creates a signature phase from already-partitioned rules.
+func NewSignaturePhasePrecompiled(rules []Compiled) pipeline.Phase {
+	return &signaturePhase{rules: rules}
+}
+
 func (p *signaturePhase) Name() string { return "signature" }
 
 func (p *signaturePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
@@ -78,6 +86,11 @@ type customPhase struct{ rules []Compiled }
 
 func NewCustomPhase(rules []Compiled) pipeline.Phase {
 	return &customPhase{rules: filterPhase(rules, "custom")}
+}
+
+// NewCustomPhasePrecompiled creates a custom phase from already-partitioned rules.
+func NewCustomPhasePrecompiled(rules []Compiled) pipeline.Phase {
+	return &customPhase{rules: rules}
 }
 
 func (p *customPhase) Name() string { return "custom" }
@@ -282,9 +295,38 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 				return result, result.IsTerminal()
 			}
 		}
+		// Fallback: scan raw body for filenames that Go's multipart parser
+		// may miss (path traversal stripped by filepath.Base, space-extension bypass).
+		if uploadHit, ok := waf.CheckRawMultipartFilenames(ctx.Body); ok {
+			act := action.Type(p.cfg.OWASPAction)
+			result := action.Result{
+				Type:      act,
+				RuleIDStr: uploadHit.RuleID,
+				Phase:     "owasp_default",
+				MatchDesc: uploadHit.Desc,
+				Matched:   true,
+				Category:  string(uploadHit.Category),
+			}
+			return result, result.IsTerminal()
+		}
 	}
 
 	bodyTargets := extractBodyTargets(ctx.Body, ctx.ContentType)
+
+	// Check HTTP method for unusual/dangerous methods before full OWASP scan.
+	if methodHit, ok := waf.CheckMethodViolation(ctx.Method, ctx.Headers); ok {
+		act := action.Type(p.cfg.OWASPAction)
+		result := action.Result{
+			Type:      act,
+			RuleIDStr: methodHit.RuleID,
+			Phase:     "owasp_default",
+			MatchDesc: methodHit.Desc,
+			Matched:   true,
+			Category:  string(methodHit.Category),
+		}
+		return result, result.IsTerminal()
+	}
+
 	hits := waf.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets)
 	if len(hits) == 0 {
 		return action.Pass(), false

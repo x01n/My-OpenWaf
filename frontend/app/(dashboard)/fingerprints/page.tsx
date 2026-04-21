@@ -21,18 +21,9 @@ import {
   type PieLabelRenderProps,
 } from "recharts";
 import { AlertTriangle } from "lucide-react";
+import { formatDate } from "@/lib/utils";
 
 const PIE_COLORS = ["#14b8a6", "#f59e0b", "#6366f1", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"];
-
-function formatDate(s: string) {
-  if (!s) return "-";
-  return new Date(s).toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 export default function FingerprintsPage() {
   const [data, setData] = useState<FingerprintStats | null>(null);

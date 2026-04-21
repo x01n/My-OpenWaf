@@ -4,6 +4,8 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ── Result types ──
@@ -121,6 +123,80 @@ var maliciousToolUA = []struct {
 	{regexp.MustCompile(`(?i)python-requests|python-urllib|go-http-client`), "http_lib", "bot:mal:018"},
 	{regexp.MustCompile(`(?i)curl|wget|libwww-perl|lwp-`), "cli_tool", "bot:mal:019"},
 	{regexp.MustCompile(`(?i)postman|insomnia|httpie`), "api_client", "bot:mal:020"},
+}
+
+// ── Good Bot DNS Verification ──
+
+// goodBotDNSCache caches DNS-verified good bot IPs for 1 hour.
+// Key: IP string, Value: goodBotCacheEntry.
+var goodBotDNSCache sync.Map
+
+type goodBotCacheEntry struct {
+	verified bool
+	expiry   time.Time
+}
+
+// goodBotDNSPatterns maps goodBotUA index to allowed reverse DNS suffixes.
+var goodBotDNSPatterns = map[int][]string{
+	0: {".googlebot.com.", ".google.com."},           // Googlebot
+	1: {".search.msn.com."},                          // Bingbot
+	2: {".yandex.ru.", ".yandex.net.", ".yandex.com."}, // Yandexbot
+	5: {".apple.com.", ".applebot.apple.com."},       // Applebot
+}
+
+// verifyGoodBotDNS checks if the client IP reverse-resolves to an allowed domain
+// for the given bot pattern index. Results are cached for 1 hour.
+func verifyGoodBotDNS(ip net.IP, patternIdx int) bool {
+	suffixes, needsVerify := goodBotDNSPatterns[patternIdx]
+	if !needsVerify {
+		// No DNS verification configured for this bot — trust the UA.
+		return true
+	}
+	ipStr := ip.String()
+	cacheKey := ipStr + ":" + string(rune(patternIdx+'0'))
+
+	// Check cache first.
+	if v, ok := goodBotDNSCache.Load(cacheKey); ok {
+		entry := v.(goodBotCacheEntry)
+		if time.Now().Before(entry.expiry) {
+			return entry.verified
+		}
+		// Expired — will re-verify below.
+	}
+
+	verified := false
+	names, err := net.LookupAddr(ipStr)
+	if err == nil {
+		for _, name := range names {
+			nameLower := strings.ToLower(name)
+			for _, suffix := range suffixes {
+				if strings.HasSuffix(nameLower, suffix) {
+					// Forward-confirm: resolve the hostname back to an IP.
+					addrs, err2 := net.LookupHost(name)
+					if err2 == nil {
+						for _, a := range addrs {
+							if a == ipStr {
+								verified = true
+								break
+							}
+						}
+					}
+					if verified {
+						break
+					}
+				}
+			}
+			if verified {
+				break
+			}
+		}
+	}
+
+	goodBotDNSCache.Store(cacheKey, goodBotCacheEntry{
+		verified: verified,
+		expiry:   time.Now().Add(1 * time.Hour),
+	})
+	return verified
 }
 
 // ── Phase 1: Fast Pre-Screening ──
@@ -306,8 +382,14 @@ func CheckBot(r BotRequest) BotVerdict {
 // CheckBotWithLevel runs single-pass detection with a configurable sensitivity level.
 func CheckBotWithLevel(r BotRequest, level string) BotVerdict {
 	ua := strings.TrimSpace(r.UserAgent)
-	for _, re := range goodBotUA {
+	for i, re := range goodBotUA {
 		if re.MatchString(ua) {
+			// DNS verification for bots that support it.
+			if r.ClientIP != nil && !verifyGoodBotDNS(r.ClientIP, i) {
+				// DNS verification failed — don't mark as good bot,
+				// let it proceed through normal scoring.
+				break
+			}
 			return BotVerdict{
 				IsBot:    true,
 				Score:    0,
@@ -399,8 +481,12 @@ func DeepFingerprintScore(r BotRequest) FingerprintResult {
 func CheckBotTwoPhase(r BotRequest, ipRep *IPReputation, geo *MaxMindResolver, threshold int) (BotVerdict, BotScore) {
 	// Quick check for known good bots first (always, regardless of risk).
 	ua := strings.TrimSpace(r.UserAgent)
-	for _, re := range goodBotUA {
+	for i, re := range goodBotUA {
 		if re.MatchString(ua) {
+			// DNS verification for bots that support it.
+			if r.ClientIP != nil && !verifyGoodBotDNS(r.ClientIP, i) {
+				break // DNS verification failed — continue to scoring.
+			}
 			return BotVerdict{
 				IsBot: true, Score: 0, Category: "good",
 				Reason: "verified legitimate crawler",

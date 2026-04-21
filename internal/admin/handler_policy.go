@@ -52,7 +52,10 @@ func CreatePolicy(repo *repository.PolicyRepo, reload func() error) app.HandlerF
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": item})
+			return
+		}
 		c.JSON(201, item)
 	}
 }
@@ -78,7 +81,10 @@ func UpdatePolicy(repo *repository.PolicyRepo, reload func() error) app.HandlerF
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": existing})
+			return
+		}
 		c.JSON(200, existing)
 	}
 }
@@ -94,7 +100,10 @@ func DeletePolicy(repo *repository.PolicyRepo, reload func() error) app.HandlerF
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+			return
+		}
 		c.JSON(204, nil)
 	}
 }

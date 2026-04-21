@@ -23,6 +23,10 @@ cd frontend && npm run build   # outputs to frontend/out
 
 # Run
 ./bin/my-openwaf               # admin UI at :9443, SQLite by default
+
+# Docker
+docker build -t my-openwaf .   # multi-stage: node→golang→alpine
+docker run -p 9443:9443 -v waf-data:/app/data my-openwaf
 ```
 
 Build flow: `npx next build` → copy `frontend/out` → `internal/core/adminweb/dist` → `go build` (frontend is embedded via Go embed).
@@ -87,11 +91,13 @@ All runtime config (sites, rules, listeners, policies, protection settings) is c
 
 ### WAF Pipeline (`internal/core/engine` → `internal/core/pipeline`)
 
-Phases run in this exact order: **IPReputation → ACL → BotDetection → RequestRateLimit → OWASP → Signature → Custom**
+Phases run in this exact order: **IPReputation → ACL → BotDetection → RequestRateLimit → OWASP → CVE → Signature → Custom**
 
+- BotDetection, RequestRateLimit, OWASP, and CVE are conditional — they only run if their respective protection settings are enabled.
 - Each phase returns `allow`, `intercept`, or `observe`. The first `intercept` short-circuits the remaining phases.
-- **ACL `allow` rules bypass the entire pipeline** — a request matching an allow rule skips OWASP, Signature, and Custom phases entirely. This is the whitelist mechanism.
+- **ACL `allow` rules bypass the entire pipeline** — a request matching an allow rule skips all subsequent phases. This is the whitelist mechanism.
 - Phase implementations are in `internal/core/rules/phases.go` and `internal/waf/`. The engine is in `internal/core/engine/engine.go`.
+- CVE detection (`internal/waf/cve_detector.go`) runs after OWASP — OWASP covers generic attacks while CVE covers targeted known-vulnerability exploits.
 
 ### Data-Plane Flow (`internal/dataplane/handler.go`)
 
@@ -138,7 +144,7 @@ Pattern format: `kind:arg` (e.g., `block_path:/admin`, `allow_ip:1.2.3.0/24`, `b
 | `internal/proxy` | HTTP reverse proxy to upstream (shared transport pool) |
 | `internal/snapshot` | Immutable config holder (`atomic.Pointer[Snapshot]`) |
 | `internal/store` | GORM models (13 tables), migrations, seeding, `repository/` for per-model CRUD |
-| `internal/waf` | OWASP detection, rate limiters (local fixed-window + Redis sliding-window), IP reputation, bot detection |
+| `internal/waf` | OWASP detection, CVE detection, rate limiters (local fixed-window + Redis sliding-window), IP reputation, bot detection |
 | `internal/observability` | Async security event writer, event archiver (30-day retention), Prometheus `/metrics` |
 | `internal/pkg` | Shared utilities: `logger` (slog), `apierr` (error responses) |
 | `internal/security` | Client IP resolution (XFF + trusted CIDR) and outbound request forwarding headers |
@@ -148,6 +154,8 @@ Pattern format: `kind:arg` (e.g., `block_path:/admin`, `allow_ip:1.2.3.0/24`, `b
 Handlers in `internal/admin/handler_*.go` follow: `func Name(deps) app.HandlerFunc`. Routes registered in `internal/admin/router.go`. Auth: JWT access token (15m, HS256) + httpOnly refresh cookie (7d, with token rotation), or admin API key (bcrypt-hashed in DB).
 
 **All mutating operations use `POST` only** — routes follow `POST /resource/:id/update` and `POST /resource/:id/delete` patterns (no `PUT`/`DELETE`). This is intentional to simplify reverse-proxy and CORS configuration.
+
+**RBAC roles**: `admin` (full access), `operator` (manage sites/rules/policies/protection), `readonly` (view only). Role enforcement via `RequireRole()` middleware in router.go.
 
 All config mutations must call `deps.Reload()` to trigger snapshot rebuild.
 

@@ -81,10 +81,13 @@ func Run() {
 
 	// Security event writer (async batch insert, non-blocking).
 	eventWriter := observability.NewEventWriter(repos.SecurityEvent, logger.New("events"))
+	if rt.Redis != nil {
+		eventWriter.SetRedis(rt.Redis)
+	}
 	defer eventWriter.Close()
 
-	// Event archiver (auto-delete events older than 30 days).
-	archiver := observability.NewArchiver(repos.SecurityEvent, logger.New("archiver"), 30)
+	// Event archiver (auto-delete security events and drop events older than 30 days).
+	archiver := observability.NewArchiver(repos.SecurityEvent, repos.DropEvent, logger.New("archiver"), 30)
 	defer archiver.Close()
 
 	// Data-plane metrics (shared across all data listeners).

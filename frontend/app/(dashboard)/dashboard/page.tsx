@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { api } from "@/lib/api";
 import {
   BarChart,
@@ -104,7 +104,11 @@ export default function DashboardPage() {
 
   useEffect(() => {
     load();
-    const id = setInterval(load, 5000);
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        load();
+      }
+    }, 5000);
     return () => clearInterval(id);
   }, [load]);
 
@@ -124,29 +128,16 @@ export default function DashboardPage() {
   const block4xx = Math.min(blocks, err4xx);
   const block4xxRate = err4xx > 0 ? ((block4xx / err4xx) * 100).toFixed(2) + "%" : "0%";
 
-  // Fake country data derived from real stats
-  const countryData = useMemo(() => {
-    if (!d) return [];
-    const total = d.requests_total;
-    return [
-      { name: "中国", count: Math.floor(total * 0.62) },
-      { name: "美国", count: Math.floor(total * 0.15) },
-      { name: "日本", count: Math.floor(total * 0.06) },
-      { name: "德国", count: Math.floor(total * 0.04) },
-      { name: "韩国", count: Math.floor(total * 0.03) },
-      { name: "新加坡", count: Math.floor(total * 0.02) },
-      { name: "英国", count: Math.floor(total * 0.02) },
-      { name: "法国", count: Math.floor(total * 0.01) },
-    ].filter((c) => c.count > 0);
-  }, [d]);
+  // Country data not available from backend API
+  const countryData: { name: string; count: number }[] = [];
 
   const statsRow1 = [
     { label: "请求次数", value: fmt(totalRequests) },
     { label: "访问次数(PV)", value: fmt(pv) },
-    { label: "独立访客(UV)", value: fmt(Math.floor(totalRequests * 0.3)) },
-    { label: "独立IP", value: fmt(Math.floor(totalRequests * 0.25)) },
+    { label: "独立访客(UV)", value: "暂无数据" },
+    { label: "独立IP", value: "暂无数据" },
     { label: "拦截次数", value: fmt(blocks) },
-    { label: "攻击IP", value: fmt(Math.floor(blocks * 0.4)) },
+    { label: "攻击IP", value: "暂无数据" },
   ];
 
   const statsRow2 = [

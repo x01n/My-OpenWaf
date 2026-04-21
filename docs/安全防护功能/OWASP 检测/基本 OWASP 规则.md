@@ -353,14 +353,14 @@ Trigger --> [*]
 
 ```mermaid
 flowchart TD
-PathInput[路径输入] --> CheckSensitive{是否包含敏感路径}
-CheckSensitive --> |否| NormalPath[普通路径]
-CheckSensitive --> |是| CheckContext{是否在受保护环境中}
-CheckContext --> |是| Trigger[触发检测]
-CheckContext --> |否| Suppress[抑制检测]
-NormalPath --> [*]
-Trigger --> [*]
-Suppress --> [*]
+PathInput["路径输入"] --> CheckSensitive{"是否包含敏感路径"}
+CheckSensitive --> |否| NormalPath["普通路径"]
+CheckSensitive --> |是| CheckContext{"是否在受保护环境中"}
+CheckContext --> |是| Trigger["触发检测"]
+CheckContext --> |否| Suppress["抑制检测"]
+NormalPath --> End1[("结束")]
+Trigger --> End2[("结束")]
+Suppress --> End3[("结束")]
 ```
 
 **图表来源**

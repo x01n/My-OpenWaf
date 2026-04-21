@@ -62,7 +62,10 @@ func CreateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": body})
+			return
+		}
 		c.JSON(201, body)
 	}
 }
@@ -90,7 +93,10 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": body})
+			return
+		}
 		c.JSON(200, body)
 	}
 }
@@ -106,7 +112,10 @@ func DeleteIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+			return
+		}
 		c.JSON(204, nil)
 	}
 }

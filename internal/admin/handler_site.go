@@ -59,7 +59,10 @@ func CreateSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc 
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": item})
+			return
+		}
 		c.JSON(201, item)
 	}
 }
@@ -85,7 +88,10 @@ func UpdateSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc 
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": existing})
+			return
+		}
 		c.JSON(200, existing)
 	}
 }
@@ -101,7 +107,10 @@ func DeleteSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc 
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+			return
+		}
 		c.JSON(204, nil)
 	}
 }

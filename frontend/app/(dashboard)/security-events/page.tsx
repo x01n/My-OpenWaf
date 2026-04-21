@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -26,7 +26,8 @@ import {
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { api } from "@/lib/api";
-import { RefreshCw, ChevronLeft, ChevronRight, Download } from "lucide-react";
+import { RefreshCw, Download } from "lucide-react";
+import { Pagination } from "@/components/pagination";
 
 interface SecurityEvent {
   id: number;
@@ -70,6 +71,17 @@ export default function SecurityEventsPage() {
   const [filterAction, setFilterAction] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
   const [filterIP, setFilterIP] = useState("");
+  const [debouncedIP, setDebouncedIP] = useState("");
+
+  // Debounce IP filter
+  const ipDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    ipDebounceRef.current = setTimeout(() => {
+      setDebouncedIP(filterIP);
+      setPage(1);
+    }, 300);
+    return () => { if (ipDebounceRef.current) clearTimeout(ipDebounceRef.current); };
+  }, [filterIP]);
 
   const pageSize = 20;
 
@@ -82,7 +94,7 @@ export default function SecurityEventsPage() {
       });
       if (filterAction) params.set("action", filterAction);
       if (filterCategory) params.set("category", filterCategory);
-      if (filterIP) params.set("client_ip", filterIP);
+      if (debouncedIP) params.set("client_ip", debouncedIP);
 
       const data = await api<{ items: SecurityEvent[]; total: number }>(
         `/api/v1/security-events?${params}`,
@@ -95,7 +107,7 @@ export default function SecurityEventsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, filterAction, filterCategory, filterIP]);
+  }, [page, filterAction, filterCategory, debouncedIP]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -259,7 +271,6 @@ export default function SecurityEventsPage() {
           value={filterIP}
           onChange={(e) => {
             setFilterIP(e.target.value);
-            setPage(1);
           }}
         />
       </div>
@@ -336,27 +347,13 @@ export default function SecurityEventsPage() {
       </div>
 
       {/* Pagination */}
-      <div className="flex items-center justify-between text-sm">
-        <span className="text-gray-400 text-xs">
-          共 {total} 条，第 {page}/{totalPages} 页
-        </span>
-        <div className="flex items-center gap-2">
-          <button
-            className="inline-flex items-center justify-center h-8 w-8 border border-gray-300 rounded-md bg-white text-gray-600 hover:border-cyan-400 hover:text-cyan-600 transition-colors disabled:opacity-50"
-            disabled={page <= 1}
-            onClick={() => setPage((p) => p - 1)}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-          <button
-            className="inline-flex items-center justify-center h-8 w-8 border border-gray-300 rounded-md bg-white text-gray-600 hover:border-cyan-400 hover:text-cyan-600 transition-colors disabled:opacity-50"
-            disabled={page >= totalPages}
-            onClick={() => setPage((p) => p + 1)}
-          >
-            <ChevronRight className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
+      <Pagination
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        pageSize={pageSize}
+        onPageChange={setPage}
+      />
 
       {/* Detail dialog */}
       <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>

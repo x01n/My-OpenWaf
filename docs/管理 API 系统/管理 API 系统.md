@@ -15,8 +15,16 @@
 - [internal/admin/handler_system.go](file://internal/admin/handler_system.go)
 - [internal/admin/handler_ip_list.go](file://internal/admin/handler_ip_list.go)
 - [internal/admin/handler_security_event.go](file://internal/admin/handler_security_event.go)
+- [internal/admin/handler_cve.go](file://internal/admin/handler_cve.go)
+- [internal/admin/handler_bot.go](file://internal/admin/handler_bot.go)
+- [internal/admin/handler_drop.go](file://internal/admin/handler_drop.go)
 - [internal/store/models.go](file://internal/store/models.go)
 - [internal/store/repository/repository.go](file://internal/store/repository/repository.go)
+- [internal/store/repository/cve_rule.go](file://internal/store/repository/cve_rule.go)
+- [internal/store/repository/bot_score.go](file://internal/store/repository/bot_score.go)
+- [internal/store/repository/drop_event.go](file://internal/store/repository/drop_event.go)
+- [internal/waf/cve_detector.go](file://internal/waf/cve_detector.go)
+- [internal/waf/cve_general.go](file://internal/waf/cve_general.go)
 </cite>
 
 ## 目录
@@ -32,7 +40,7 @@
 10. [附录：API 参考与最佳实践](#附录api-参考与最佳实践)
 
 ## 简介
-本文件为管理 API 系统的权威技术文档，面向开发者与运维人员，系统化阐述 RESTful API 的设计原则与实现细节；深入解析认证授权机制（JWT 令牌、API 密钥、会话 Cookie）；详解路由注册、中间件链与请求处理流程；覆盖站点管理、规则管理、策略配置、证书管理、系统设置、安全事件、IP 黑白名单等全部管理接口；提供完整的 API 参考（请求参数、响应格式、错误码与示例路径）、版本控制与向后兼容策略，以及客户端集成指南与最佳实践。
+本文件为管理 API 系统的权威技术文档，面向开发者与运维人员，系统化阐述 RESTful API 的设计原则与实现细节；深入解析认证授权机制（JWT 令牌、API 密钥、会话 Cookie）；详解路由注册、中间件链与请求处理流程；覆盖站点管理、规则管理、策略配置、证书管理、系统设置、安全事件、IP 黑白名单、CVE 规则管理、机器人保护、阻断策略等全部管理接口；提供完整的 API 参考（请求参数、响应格式、错误码与示例路径）、版本控制与向后兼容策略，以及客户端集成指南与最佳实践。
 
 ## 项目结构
 系统采用分层与职责分离的组织方式：
@@ -63,10 +71,16 @@ H_CERT["internal/admin/handler_certificate.go<br/>证书管理"]
 H_SYS["internal/admin/handler_system.go<br/>系统设置/API密钥/重载"]
 H_IP["internal/admin/handler_ip_list.go<br/>IP黑白名单"]
 H_EVT["internal/admin/handler_security_event.go<br/>安全事件"]
+H_CVE["internal/admin/handler_cve.go<br/>CVE规则管理"]
+H_BOT["internal/admin/handler_bot.go<br/>机器人保护"]
+H_DROP["internal/admin/handler_drop.go<br/>阻断策略"]
 end
 subgraph "存储与模型"
 REPOS["internal/store/repository/repository.go<br/>仓库聚合"]
 MODELS["internal/store/models.go<br/>实体与配置模型"]
+CVE_REPO["internal/store/repository/cve_rule.go<br/>CVE规则仓库"]
+BOT_REPO["internal/store/repository/bot_score.go<br/>机器人分数仓库"]
+DROP_REPO["internal/store/repository/drop_event.go<br/>阻断事件仓库"]
 end
 M --> S
 S --> R
@@ -80,14 +94,20 @@ R --> H_CERT
 R --> H_SYS
 R --> H_IP
 R --> H_EVT
+R --> H_CVE
+R --> H_BOT
+R --> H_DROP
 S --> REPOS
 REPOS --> MODELS
+REPOS --> CVE_REPO
+REPOS --> BOT_REPO
+REPOS --> DROP_REPO
 ```
 
-图表来源
+**图表来源**
 - [cmd/main.go:1-10](file://cmd/main.go#L1-L10)
 - [internal/app/server.go:33-280](file://internal/app/server.go#L33-L280)
-- [internal/admin/router.go:36-137](file://internal/admin/router.go#L36-L137)
+- [internal/admin/router.go:36-210](file://internal/admin/router.go#L36-L210)
 - [internal/admin/middleware.go:18-63](file://internal/admin/middleware.go#L18-L63)
 - [internal/admin/auth/jwt.go:24-55](file://internal/admin/auth/jwt.go#L24-L55)
 - [internal/admin/handler_auth.go:25-132](file://internal/admin/handler_auth.go#L25-L132)
@@ -98,30 +118,36 @@ REPOS --> MODELS
 - [internal/admin/handler_system.go:12-162](file://internal/admin/handler_system.go#L12-L162)
 - [internal/admin/handler_ip_list.go:14-113](file://internal/admin/handler_ip_list.go#L14-L113)
 - [internal/admin/handler_security_event.go:16-127](file://internal/admin/handler_security_event.go#L16-L127)
+- [internal/admin/handler_cve.go:15-217](file://internal/admin/handler_cve.go#L15-L217)
+- [internal/admin/handler_bot.go:15-154](file://internal/admin/handler_bot.go#L15-L154)
+- [internal/admin/handler_drop.go:15-140](file://internal/admin/handler_drop.go#L15-L140)
 - [internal/store/repository/repository.go:5-33](file://internal/store/repository/repository.go#L5-L33)
-- [internal/store/models.go:14-350](file://internal/store/models.go#L14-L350)
+- [internal/store/models.go:14-456](file://internal/store/models.go#L14-L456)
+- [internal/store/repository/cve_rule.go:10-96](file://internal/store/repository/cve_rule.go#L10-L96)
+- [internal/store/repository/bot_score.go:11-134](file://internal/store/repository/bot_score.go#L11-L134)
+- [internal/store/repository/drop_event.go:11-77](file://internal/store/repository/drop_event.go#L11-L77)
 
-章节来源
+**章节来源**
 - [cmd/main.go:1-10](file://cmd/main.go#L1-L10)
 - [internal/app/server.go:33-280](file://internal/app/server.go#L33-L280)
-- [internal/admin/router.go:36-137](file://internal/admin/router.go#L36-L137)
+- [internal/admin/router.go:36-210](file://internal/admin/router.go#L36-L210)
 
 ## 核心组件
 - 应用运行时与监听器协调：负责数据库迁移、默认凭据生成、快照加载、WAF 引擎与速率限制器初始化、IP 名单与自动封禁配置、Redis 分布式通知、控制面与数据面服务启动与热重启。
 - 控制面路由与中间件：统一的安全头、访问日志、认证中间件（支持 Bearer JWT 与 API Key），以及所有管理接口的路由注册。
 - 认证与授权：基于 HS256 的短期访问令牌与长期刷新令牌（含哈希存储与轮换），支持 Cookie 刷新与登出。
-- 数据访问层：以仓库模式聚合各实体（站点、证书、策略、规则、系统设置、API Key、安全事件、IP 名单）的 CRUD 操作。
-- 管理接口：覆盖站点、规则、策略、证书、系统设置、安全事件、IP 黑白名单等全量管理能力，并提供规则测试、导入导出、快照重载等高级功能。
+- 数据访问层：以仓库模式聚合各实体（站点、证书、策略、规则、系统设置、API Key、安全事件、IP 名单、CVE 规则、机器人分数、阻断事件）的 CRUD 操作。
+- 管理接口：覆盖站点、规则、策略、证书、系统设置、安全事件、IP 黑白名单、CVE 规则管理、机器人保护、阻断策略等全量管理能力，并提供规则测试、导入导出、快照重载等高级功能。
 
-章节来源
+**章节来源**
 - [internal/app/server.go:33-280](file://internal/app/server.go#L33-L280)
-- [internal/admin/router.go:36-137](file://internal/admin/router.go#L36-L137)
+- [internal/admin/router.go:36-210](file://internal/admin/router.go#L36-L210)
 - [internal/admin/middleware.go:18-63](file://internal/admin/middleware.go#L18-L63)
 - [internal/admin/auth/jwt.go:24-55](file://internal/admin/auth/jwt.go#L24-L55)
 - [internal/store/repository/repository.go:5-33](file://internal/store/repository/repository.go#L5-L33)
 
 ## 架构总览
-控制面 Admin 通过 Hertz 提供 REST API，中间件链在进入业务处理器前完成认证与审计；认证支持两种路径：短效 JWT（Bearer）与 API Key；刷新令牌使用 Cookie 并进行哈希校验与轮换；路由按资源域划分（站点、规则、策略、证书、系统设置、安全事件、IP 名单），并提供 SPA 前端回退与静态资源托管。
+控制面 Admin 通过 Hertz 提供 REST API，中间件链在进入业务处理器前完成认证与审计；认证支持两种路径：短效 JWT（Bearer）与 API Key；刷新令牌使用 Cookie 并进行哈希校验与轮换；路由按资源域划分（站点、规则、策略、证书、系统设置、安全事件、IP 名单、CVE 规则、机器人保护、阻断策略），并提供 SPA 前端回退与静态资源托管。
 
 ```mermaid
 sequenceDiagram
@@ -146,10 +172,10 @@ HANDLER-->>HZ : "构造响应"
 HZ-->>C : "HTTP 响应"
 ```
 
-图表来源
+**图表来源**
 - [internal/admin/middleware.go:18-63](file://internal/admin/middleware.go#L18-L63)
 - [internal/admin/auth/jwt.go:24-55](file://internal/admin/auth/jwt.go#L24-L55)
-- [internal/admin/router.go:36-137](file://internal/admin/router.go#L36-L137)
+- [internal/admin/router.go:36-210](file://internal/admin/router.go#L36-L210)
 
 ## 详细组件分析
 
@@ -177,11 +203,11 @@ Login->>Cookie : "设置刷新Cookie"
 Login-->>Client : "{access_token, expires_at, username}"
 ```
 
-图表来源
+**图表来源**
 - [internal/admin/handler_auth.go:25-61](file://internal/admin/handler_auth.go#L25-L61)
 - [internal/admin/auth/jwt.go:24-55](file://internal/admin/auth/jwt.go#L24-L55)
 
-章节来源
+**章节来源**
 - [internal/admin/auth/jwt.go:13-79](file://internal/admin/auth/jwt.go#L13-L79)
 - [internal/admin/handler_auth.go:25-132](file://internal/admin/handler_auth.go#L25-L132)
 
@@ -213,12 +239,12 @@ Inject --> Route
 Route --> End(["响应返回"])
 ```
 
-图表来源
+**图表来源**
 - [internal/admin/middleware.go:18-63](file://internal/admin/middleware.go#L18-L63)
-- [internal/admin/router.go:36-137](file://internal/admin/router.go#L36-L137)
+- [internal/admin/router.go:36-210](file://internal/admin/router.go#L36-L210)
 
-章节来源
-- [internal/admin/router.go:36-137](file://internal/admin/router.go#L36-L137)
+**章节来源**
+- [internal/admin/router.go:36-210](file://internal/admin/router.go#L36-L210)
 - [internal/admin/middleware.go:18-97](file://internal/admin/middleware.go#L18-L97)
 
 ### 站点管理
@@ -243,11 +269,11 @@ Handler->>Reload : "触发重载"
 Handler-->>Client : "200/201/204"
 ```
 
-图表来源
+**图表来源**
 - [internal/admin/handler_site.go:67-91](file://internal/admin/handler_site.go#L67-L91)
-- [internal/admin/router.go:62-70](file://internal/admin/router.go#L62-L70)
+- [internal/admin/router.go:142-146](file://internal/admin/router.go#L142-L146)
 
-章节来源
+**章节来源**
 - [internal/admin/handler_site.go:21-179](file://internal/admin/handler_site.go#L21-L179)
 - [internal/store/models.go:95-147](file://internal/store/models.go#L95-L147)
 
@@ -274,12 +300,12 @@ Handler->>Reload : "触发重载"
 Handler-->>Client : "{imported, total}"
 ```
 
-图表来源
+**图表来源**
 - [internal/admin/handler_rule.go:115-156](file://internal/admin/handler_rule.go#L115-L156)
 - [internal/admin/handler_rule.go:171-196](file://internal/admin/handler_rule.go#L171-L196)
-- [internal/admin/router.go:86-96](file://internal/admin/router.go#L86-L96)
+- [internal/admin/router.go:159-164](file://internal/admin/router.go#L159-L164)
 
-章节来源
+**章节来源**
 - [internal/admin/handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
 - [internal/store/models.go:78-91](file://internal/store/models.go#L78-L91)
 
@@ -287,7 +313,7 @@ Handler-->>Client : "{imported, total}"
 - 列表/详情：分页与单条。
 - 创建/更新/删除：持久化后触发重载。
 
-章节来源
+**章节来源**
 - [internal/admin/handler_policy.go:14-101](file://internal/admin/handler_policy.go#L14-L101)
 - [internal/store/models.go:35-42](file://internal/store/models.go#L35-L42)
 
@@ -296,7 +322,7 @@ Handler-->>Client : "{imported, total}"
 - 创建/更新：校验证书与私钥配对有效性后再持久化，失败返回错误。
 - 删除：删除后重载。
 
-章节来源
+**章节来源**
 - [internal/admin/handler_certificate.go:15-110](file://internal/admin/handler_certificate.go#L15-L110)
 - [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
 
@@ -305,7 +331,7 @@ Handler-->>Client : "{imported, total}"
 - API 密钥：列出、创建（返回明文一次性令牌）、删除。
 - 快照重载：手动触发重载以应用最新配置。
 
-章节来源
+**章节来源**
 - [internal/admin/handler_system.go:12-162](file://internal/admin/handler_system.go#L12-L162)
 - [internal/store/models.go:151-188](file://internal/store/models.go#L151-L188)
 
@@ -315,7 +341,7 @@ Handler-->>Client : "{imported, total}"
 - 时间线：按时间桶统计事件趋势。
 - 详情：按 ID 获取事件。
 
-章节来源
+**章节来源**
 - [internal/admin/handler_security_event.go:16-127](file://internal/admin/handler_security_event.go#L16-L127)
 - [internal/store/models.go:213-235](file://internal/store/models.go#L213-L235)
 
@@ -323,9 +349,43 @@ Handler-->>Client : "{imported, total}"
 - 列表/详情：分页与单条。
 - 创建/更新/删除：校验类型与值后持久化，失败返回错误；变更后触发重载。
 
-章节来源
+**章节来源**
 - [internal/admin/handler_ip_list.go:14-113](file://internal/admin/handler_ip_list.go#L14-L113)
 - [internal/store/models.go:199-209](file://internal/store/models.go#L199-L209)
+
+### CVE 规则管理
+- 列表：支持按类别、严重级别、来源、启用状态过滤，分页查询。
+- 创建：支持正则表达式模式验证，自动标记来源为 custom。
+- 更新：支持选择性字段更新，包含正则表达式验证。
+- 删除：仅允许删除 custom 来源的规则。
+- 启用/禁用：切换规则启用状态。
+- 同步：手动触发 CVE 规则同步。
+- 状态查询：获取 CVE 规则源同步状态和待审批数量。
+
+**章节来源**
+- [internal/admin/handler_cve.go:15-217](file://internal/admin/handler_cve.go#L15-L217)
+- [internal/store/repository/cve_rule.go:16-96](file://internal/store/repository/cve_rule.go#L16-L96)
+- [internal/waf/cve_detector.go:33-49](file://internal/waf/cve_detector.go#L33-L49)
+
+### 机器人保护管理
+- 设置查询：获取机器人检测配置，包含阈值、高风险国家、数据中心 ASN、VPN 代理 ASN 等。
+- 设置更新：支持部分字段更新，更新后触发重载。
+- 机器人分数：支持按 IP、分数范围、时间范围过滤，分页查询。
+- 指纹统计：获取 JA3 指纹统计和浏览器分布情况。
+
+**章节来源**
+- [internal/admin/handler_bot.go:15-154](file://internal/admin/handler_bot.go#L15-L154)
+- [internal/store/repository/bot_score.go:17-134](file://internal/store/repository/bot_score.go#L17-L134)
+
+### 阻断策略管理
+- 策略查询：获取阻断策略配置，包含启用状态、机器人分数阈值、CVE 自动阻断设置等。
+- 策略更新：支持部分字段更新，更新后触发重载。
+- 统计查询：获取 24 小时阻断统计，按来源分类。
+- 事件查询：支持按 IP、来源、时间范围过滤，分页查询阻断事件。
+
+**章节来源**
+- [internal/admin/handler_drop.go:15-140](file://internal/admin/handler_drop.go#L15-L140)
+- [internal/store/repository/drop_event.go:17-77](file://internal/store/repository/drop_event.go#L17-L77)
 
 ## 依赖分析
 - 控制面路由依赖仓库聚合与运行时依赖（JWT 秘钥、度量、数据库、重载函数）。
@@ -341,6 +401,7 @@ Deps --> Reload["reload()"]
 Deps --> JWT["JWTSecret"]
 Deps --> Metrics["Metrics"]
 Deps --> DB["gorm.DB"]
+Deps --> CVEFeedMgr["CVEFeedManager"]
 Middleware["admin/middleware.go"] --> JWTTool["auth/jwt.go"]
 Middleware --> KeyRepo["AdminAPIKeyRepo"]
 Handlers["各业务处理器"] --> Repos
@@ -350,14 +411,14 @@ App --> Repos
 App --> Reload
 ```
 
-图表来源
-- [internal/admin/router.go:19-27](file://internal/admin/router.go#L19-L27)
+**图表来源**
+- [internal/admin/router.go:21-33](file://internal/admin/router.go#L21-L33)
 - [internal/admin/middleware.go:18-63](file://internal/admin/middleware.go#L18-L63)
 - [internal/admin/auth/jwt.go:24-55](file://internal/admin/auth/jwt.go#L24-L55)
 - [internal/app/server.go:251-258](file://internal/app/server.go#L251-L258)
 
-章节来源
-- [internal/admin/router.go:19-27](file://internal/admin/router.go#L19-L27)
+**章节来源**
+- [internal/admin/router.go:21-33](file://internal/admin/router.go#L21-L33)
 - [internal/store/repository/repository.go:5-33](file://internal/store/repository/repository.go#L5-L33)
 - [internal/app/server.go:251-258](file://internal/app/server.go#L251-L258)
 
@@ -365,8 +426,9 @@ App --> Reload
 - 认证与日志：中间件开销极低，建议在反向代理层开启缓存与限流，避免重复认证。
 - 重载与热重启：变更触发快照重载与数据面监听器热重启，注意批量化变更以减少重启次数。
 - 速率限制与 IP 名单：根据保护配置动态调整，建议结合上游负载均衡与 CDN 缓存。
-- 数据库：分页查询与索引字段（如系统设置键、事件时间戳、IP 名单值）可显著降低查询成本。
+- 数据库：分页查询与索引字段（如系统设置键、事件时间戳、IP 名单值、阻断事件来源）可显著降低查询成本。
 - 前端静态资源：SPA 回退与静态文件服务适合内网或受控环境，公网建议配合 CDN 与缓存策略。
+- CVE 规则：正则表达式编译需要 CPU 资源，建议合理控制规则数量和复杂度。
 
 ## 故障排查指南
 - 401 未授权：
@@ -381,13 +443,24 @@ App --> Reload
 - 重载无效：
   - 手动调用重载端点确认返回状态。
   - 检查分布式重载订阅是否正常，确认 Redis 连通性。
+- CVE 规则错误：
+  - 检查正则表达式格式是否正确。
+  - 确认规则来源为 custom 才能删除。
+- 机器人保护问题：
+  - 检查 GeoIP 数据库路径配置。
+  - 验证 ASN 列表格式是否正确。
+- 阻断策略异常：
+  - 确认阻断事件来源字段值是否正确。
+  - 检查 24 小时统计逻辑是否正常。
 
-章节来源
+**章节来源**
 - [internal/admin/middleware.go:18-63](file://internal/admin/middleware.go#L18-L63)
 - [internal/admin/handler_system.go:142-150](file://internal/admin/handler_system.go#L142-L150)
+- [internal/admin/handler_cve.go:48-54](file://internal/admin/handler_cve.go#L48-L54)
+- [internal/admin/handler_cve.go:142-146](file://internal/admin/handler_cve.go#L142-L146)
 
 ## 结论
-本系统以清晰的分层与职责分离实现了高可用的管理 API：控制面通过统一中间件链保障安全与可观测性，认证机制兼顾短期令牌与 API Key；路由设计简洁明确，便于扩展；业务处理器围绕仓库模式实现一致的数据访问体验；快照重载与数据面热重启确保配置变更的即时生效。建议在生产环境中结合反向代理、CDN 与监控告警体系，持续优化性能与可靠性。
+本系统以清晰的分层与职责分离实现了高可用的管理 API：控制面通过统一中间件链保障安全与可观测性，认证机制兼顾短期令牌与 API Key；路由设计简洁明确，便于扩展；业务处理器围绕仓库模式实现一致的数据访问体验；快照重载与数据面热重启确保配置变更的即时生效。新增的 CVE 规则管理、机器人保护和阻断策略接口进一步完善了系统的安全防护能力。建议在生产环境中结合反向代理、CDN 与监控告警体系，持续优化性能与可靠性。
 
 ## 附录：API 参考与最佳实践
 
@@ -395,8 +468,8 @@ App --> Reload
 - 版本前缀：/api/v1，遵循语义化版本控制约定，新增端点不破坏现有契约。
 - 向后兼容：字段新增与默认值设定遵循兼容策略；动作枚举保留历史值映射（如 block/log_only 映射为 intercept/observe）。
 
-章节来源
-- [internal/admin/router.go:36-137](file://internal/admin/router.go#L36-L137)
+**章节来源**
+- [internal/admin/router.go:36-210](file://internal/admin/router.go#L36-L210)
 - [internal/store/models.go:66-76](file://internal/store/models.go#L66-L76)
 
 ### 客户端集成指南与最佳实践
@@ -413,6 +486,10 @@ App --> Reload
 - 安全：
   - 严格限制 API Key 权限范围，避免在公共代码库中泄露。
   - 使用 HTTPS 传输，Cookie 设置 HttpOnly 与 SameSite 策略。
+- 新增功能最佳实践：
+  - CVE 规则：合理设置正则表达式复杂度，避免影响性能。
+  - 机器人保护：根据业务特点调整阈值和高风险国家列表。
+  - 阻断策略：结合业务流量特征设置合适的阻断阈值。
 
 ### 管理接口一览（按资源域）
 - 认证与用户
@@ -472,12 +549,30 @@ App --> Reload
   - POST /api/v1/ip-lists：创建（校验类型与值）。
   - POST /api/v1/ip-lists/:id/update：更新。
   - POST /api/v1/ip-lists/:id/delete：删除。
+- CVE 规则管理
+  - GET /api/v1/cve-rules：分页列表（支持过滤）。
+  - POST /api/v1/cve-rules：创建（仅管理员）。
+  - PUT /api/v1/cve-rules/:id：更新（仅管理员）。
+  - DELETE /api/v1/cve-rules/:id：删除（仅管理员，仅 custom 来源）。
+  - PUT /api/v1/cve-rules/:id/toggle：启用/禁用（仅操作员）。
+  - POST /api/v1/cve-rules/sync：同步 CVE 规则（仅操作员）。
+  - GET /api/v1/cve-feed/status：获取 CVE 规则源同步状态。
+- 机器人保护
+  - GET /api/v1/bot-settings：获取机器人检测配置。
+  - PUT /api/v1/bot-settings：更新机器人检测配置（仅操作员）。
+  - GET /api/v1/bot-scores：获取机器人分数（支持过滤）。
+  - GET /api/v1/fingerprints：获取指纹统计。
+- 阻断策略
+  - GET /api/v1/drop-policy：获取阻断策略配置。
+  - PUT /api/v1/drop-policy：更新阻断策略配置（仅管理员）。
+  - GET /api/v1/drop-stats：获取 24 小时阻断统计。
+  - GET /api/v1/drop-events：获取阻断事件（支持过滤）。
 - 快照与健康
   - POST /api/v1/reload：手动重载。
   - GET /api/v1/health：健康检查。
 
-章节来源
-- [internal/admin/router.go:41-137](file://internal/admin/router.go#L41-L137)
+**章节来源**
+- [internal/admin/router.go:53-210](file://internal/admin/router.go#L53-L210)
 - [internal/admin/handler_auth.go:25-132](file://internal/admin/handler_auth.go#L25-L132)
 - [internal/admin/handler_site.go:21-179](file://internal/admin/handler_site.go#L21-L179)
 - [internal/admin/handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
@@ -486,3 +581,6 @@ App --> Reload
 - [internal/admin/handler_system.go:12-162](file://internal/admin/handler_system.go#L12-L162)
 - [internal/admin/handler_security_event.go:16-127](file://internal/admin/handler_security_event.go#L16-L127)
 - [internal/admin/handler_ip_list.go:14-113](file://internal/admin/handler_ip_list.go#L14-L113)
+- [internal/admin/handler_cve.go:15-217](file://internal/admin/handler_cve.go#L15-L217)
+- [internal/admin/handler_bot.go:15-154](file://internal/admin/handler_bot.go#L15-L154)
+- [internal/admin/handler_drop.go:15-140](file://internal/admin/handler_drop.go#L15-L140)

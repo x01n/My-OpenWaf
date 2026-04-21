@@ -170,7 +170,7 @@ var xxePatterns = []struct {
 	score int
 	id    string
 }{
-	{regexp.MustCompile(`(?i)<!doctype[^>]+\[`), 5, "owasp:xxe:001"},
+	{regexp.MustCompile(`(?i)<!doctype[^>]{1,100}\[`), 5, "owasp:xxe:001"},
 	{regexp.MustCompile(`(?i)<!entity\s+\w+\s+system`), 6, "owasp:xxe:002"},
 	{regexp.MustCompile(`(?i)<!entity\s+\w+\s+public`), 6, "owasp:xxe:003"},
 	// Parametric entity expansion (exclude common HTML entities)
@@ -185,6 +185,21 @@ var xxePatterns = []struct {
 func checkXXE(s string, threshold int) (OWASPHit, bool) {
 	if !hasXXEIndicator(s) {
 		return OWASPHit{}, false
+	}
+	// Suppress XXE detection in large JSON/analytics payloads that contain serialized
+	// HTML with <!DOCTYPE html> but no actual XML entity declarations.
+	// Real XXE attacks require <!ENTITY or SYSTEM/PUBLIC keywords in DTD context.
+	// Use precise patterns: "<!entity" (DTD decl), " system " or " public " (DTD keywords),
+	// not just substrings like "system" which match JSON property names like ":systemId".
+	if len(s) > 500 {
+		lower := strings.ToLower(s)
+		hasEntity := strings.Contains(lower, "<!entity") || strings.Contains(lower, "!entity")
+		hasSystem := strings.Contains(lower, " system ") || strings.Contains(lower, " system\"") || strings.Contains(lower, " system'")
+		hasPublic := strings.Contains(lower, " public ") || strings.Contains(lower, " public\"") || strings.Contains(lower, " public'")
+		hasXInclude := strings.Contains(lower, "xi:include")
+		if !hasEntity && !hasSystem && !hasPublic && !hasXInclude {
+			return OWASPHit{}, false
+		}
 	}
 	total := 0
 	best := ""
@@ -406,10 +421,21 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 			Desc: "null byte in filename"}, true
 	}
 
-	// Double extension e.g. shell.php.jpg
-	ext := filepath.Ext(lower)
+	// Path traversal in filename (e.g. ../../tmp/shell.php)
+	if strings.Contains(lower, "../") || strings.Contains(lower, "..\\") {
+		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:006", Score: 6,
+			Desc: "path traversal in filename"}, true
+	}
+
+	// Normalize spaces in filename for extension checks.
+	// Evasion: "shell.php .jpg" uses space to defeat filepath.Ext double-extension detection.
+	// Apache on Windows strips trailing spaces, so "shell.php .jpg" serves as PHP.
+	normalized := strings.ReplaceAll(lower, " ", "")
+
+	// Double extension e.g. shell.php.jpg or shell.php .jpg
+	ext := filepath.Ext(normalized)
 	if ext != "" {
-		withoutExt := lower[:len(lower)-len(ext)]
+		withoutExt := normalized[:len(normalized)-len(ext)]
 		secondExt := filepath.Ext(withoutExt)
 		if secondExt != "" && dangerousExtensions[secondExt] {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:002", Score: 5,
@@ -422,6 +448,13 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 			Desc: "dangerous file extension: " + ext}, true
 	}
 
+	// Also check the original extension without space normalization
+	origExt := filepath.Ext(lower)
+	if origExt != ext && dangerousExtensions[origExt] {
+		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:003", Score: 5,
+			Desc: "dangerous file extension: " + origExt}, true
+	}
+
 	// .htaccess override attempt
 	if strings.HasSuffix(lower, ".htaccess") || lower == ".htaccess" {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:004", Score: 5,
@@ -429,7 +462,7 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 	}
 
 	// Content-Type mismatch with image extension
-	if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif") &&
+	if (origExt == ".jpg" || origExt == ".jpeg" || origExt == ".png" || origExt == ".gif") &&
 		contentType != "" && !strings.HasPrefix(strings.ToLower(contentType), "image/") {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:005", Score: 3,
 			Desc: "content-type mismatch for image"}, true
@@ -692,5 +725,92 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 		}
 	}
 
+	return OWASPHit{}, false
+}
+
+// checkMethodViolation flags unusual HTTP methods that are commonly abused.
+// CORS preflight OPTIONS requests (with Origin and Access-Control-Request-Method)
+// are excluded as legitimate.
+func checkMethodViolation(method string, headers map[string]string) (OWASPHit, bool) {
+	switch strings.ToUpper(method) {
+	case "TRACE", "TRACK":
+		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:004", Score: 5,
+			Desc: "dangerous HTTP method: " + method}, true
+	case "CONNECT":
+		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:005", Score: 5,
+			Desc: "CONNECT method (tunneling)"}, true
+	case "DEBUG":
+		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:006", Score: 5,
+			Desc: "DEBUG method (ASP.NET diagnostics)"}, true
+	case "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK":
+		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:007", Score: 4,
+			Desc: "WebDAV method: " + method}, true
+	case "PATCH":
+		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:008", Score: 3,
+			Desc: "PATCH method (uncommon)"}, true
+	case "OPTIONS":
+		// Allow CORS preflight requests (have Origin + Access-Control-Request-Method).
+		origin := ""
+		acrm := ""
+		for k, v := range headers {
+			lk := strings.ToLower(k)
+			if lk == "origin" {
+				origin = v
+			}
+			if lk == "access-control-request-method" {
+				acrm = v
+			}
+		}
+		if origin != "" && acrm != "" {
+			// Legitimate CORS preflight — not suspicious.
+			return OWASPHit{}, false
+		}
+		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:009", Score: 3,
+			Desc: "OPTIONS method (non-CORS)"}, true
+	}
+	return OWASPHit{}, false
+}
+
+// ── GraphQL Injection ──
+
+// hasGraphQLIndicator returns true when the string contains GraphQL
+// introspection or injection markers.
+func hasGraphQLIndicator(s string) bool {
+	return strings.Contains(s, "__schema") ||
+		strings.Contains(s, "__type") ||
+		strings.Contains(s, "introspectionquery")
+}
+
+var graphqlPatterns = []struct {
+	re    *regexp.Regexp
+	score int
+	id    string
+}{
+	// GraphQL introspection query with query keyword context
+	{regexp.MustCompile(`(?i)\bquery\b[^}]{0,200}__schema\b`), 6, "owasp:graphql:001"},
+	{regexp.MustCompile(`(?i)\bquery\b[^}]{0,200}__type\b`), 5, "owasp:graphql:002"},
+	{regexp.MustCompile(`(?i)\bintrospectionquery\b`), 5, "owasp:graphql:003"},
+	// Direct __schema access in a GraphQL body (e.g., {"query":"{ __schema { ... } }"})
+	{regexp.MustCompile(`(?i)\{\s*__schema\b`), 5, "owasp:graphql:004"},
+	{regexp.MustCompile(`(?i)\{\s*__type\b`), 5, "owasp:graphql:005"},
+}
+
+func checkGraphQLi(s string, threshold int) (OWASPHit, bool) {
+	if !hasGraphQLIndicator(s) {
+		return OWASPHit{}, false
+	}
+	total := 0
+	best := ""
+	for _, p := range graphqlPatterns {
+		if p.re.MatchString(s) {
+			total += p.score
+			if best == "" {
+				best = p.id
+			}
+			if total >= threshold {
+				return OWASPHit{Category: CatGraphQLi, RuleID: best, Score: total, Desc: "GraphQL introspection/injection signals"}, true
+			}
+		}
+	}
 	return OWASPHit{}, false
 }

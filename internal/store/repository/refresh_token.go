@@ -12,10 +12,12 @@ type RefreshTokenRepo struct{ db *gorm.DB }
 
 func NewRefreshTokenRepo(db *gorm.DB) *RefreshTokenRepo { return &RefreshTokenRepo{db: db} }
 
-func (r *RefreshTokenRepo) Create(jti, tokenHash string, expiresAt time.Time) (*store.RefreshToken, error) {
+func (r *RefreshTokenRepo) Create(jti, tokenHash, username, role string, expiresAt time.Time) (*store.RefreshToken, error) {
 	rt := &store.RefreshToken{
 		JTI:       jti,
 		TokenHash: tokenHash,
+		Username:  username,
+		Role:      role,
 		ExpiresAt: expiresAt,
 	}
 	return rt, r.db.Create(rt).Error

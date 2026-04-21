@@ -75,11 +75,11 @@ func (m *queryRegexMatcher) Match(_ net.IP, _, _, query string, _ map[string]str
 	return m.re.MatchString(query)
 }
 
-type headerContainsMatcher struct{ name, substr string }
+type headerContainsMatcher struct{ name, substr string } // name is pre-lowercased
 
 func (m *headerContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string) bool {
 	for k, v := range headers {
-		if strings.EqualFold(k, m.name) && strings.Contains(v, m.substr) {
+		if strings.ToLower(k) == m.name && strings.Contains(v, m.substr) {
 			return true
 		}
 	}
@@ -87,13 +87,13 @@ func (m *headerContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[stri
 }
 
 type headerRegexMatcher struct {
-	name string
+	name string // pre-lowercased
 	re   *regexp.Regexp
 }
 
 func (m *headerRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string) bool {
 	for k, v := range headers {
-		if strings.EqualFold(k, m.name) && m.re.MatchString(v) {
+		if strings.ToLower(k) == m.name && m.re.MatchString(v) {
 			return true
 		}
 	}
@@ -112,12 +112,12 @@ func (m *methodMatcher) Match(_ net.IP, method, _, _ string, _ map[string]string
 	return strings.EqualFold(method, m.method)
 }
 
-type contentTypeMatcher struct{ ctype string }
+type contentTypeMatcher struct{ ctype string } // ctype is pre-lowercased
 
 func (m *contentTypeMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string) bool {
 	for k, v := range headers {
 		if strings.EqualFold(k, "Content-Type") {
-			return strings.Contains(strings.ToLower(v), strings.ToLower(m.ctype))
+			return strings.Contains(strings.ToLower(v), m.ctype)
 		}
 	}
 	return false
@@ -206,7 +206,7 @@ func buildMatcher(kind, arg string) Matcher {
 
 	case "block_header":
 		name, substr := splitHeaderArg(arg)
-		return &headerContainsMatcher{name: name, substr: substr}
+		return &headerContainsMatcher{name: strings.ToLower(name), substr: substr}
 
 	case "block_header_regex":
 		name, pattern := splitHeaderArg(arg)
@@ -214,7 +214,7 @@ func buildMatcher(kind, arg string) Matcher {
 		if err != nil {
 			return &neverMatcher{} // invalid regex: match nothing
 		}
-		return &headerRegexMatcher{name: name, re: re}
+		return &headerRegexMatcher{name: strings.ToLower(name), re: re}
 
 	case "block_path_exact":
 		return &exactPathMatcher{path: arg}
@@ -223,18 +223,18 @@ func buildMatcher(kind, arg string) Matcher {
 		return &methodMatcher{method: strings.ToUpper(arg)}
 
 	case "block_content_type":
-		return &contentTypeMatcher{ctype: arg}
+		return &contentTypeMatcher{ctype: strings.ToLower(arg)}
 
 	// User-Agent convenience matchers (equivalent to block_header:User-Agent:<value>).
 	case "block_user_agent":
-		return &headerContainsMatcher{name: "User-Agent", substr: arg}
+		return &headerContainsMatcher{name: "user-agent", substr: arg}
 
 	case "block_user_agent_regex":
 		re, err := cachedCompile(arg)
 		if err != nil {
 			return &neverMatcher{}
 		}
-		return &headerRegexMatcher{name: "User-Agent", re: re}
+		return &headerRegexMatcher{name: "user-agent", re: re}
 
 	// New matcher types
 	case "header_regex":
@@ -243,7 +243,7 @@ func buildMatcher(kind, arg string) Matcher {
 		if err != nil {
 			return &neverMatcher{}
 		}
-		return &headerRegexMatcher{name: name, re: re}
+		return &headerRegexMatcher{name: strings.ToLower(name), re: re}
 
 	case "body_contains":
 		return &bodyContainsMatcher{substr: arg}

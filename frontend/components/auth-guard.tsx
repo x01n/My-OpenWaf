@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { getAccessToken } from "@/lib/api";
+import { getAccessToken, refreshAccess } from "@/lib/api";
 
 function AuthGuardInner({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -18,10 +18,17 @@ function AuthGuardInner({ children }: { children: React.ReactNode }) {
       setMessage("You do not have permission to access that resource.");
     }
 
-    if (!getAccessToken()) {
-      router.replace("/login/");
-    } else {
+    if (getAccessToken()) {
       setOk(true);
+    } else {
+      // Attempt to refresh before redirecting to login
+      refreshAccess().then((refreshed) => {
+        if (refreshed) {
+          setOk(true);
+        } else {
+          router.replace("/login/");
+        }
+      });
     }
   }, [router, searchParams]);
 

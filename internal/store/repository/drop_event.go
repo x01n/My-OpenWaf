@@ -62,6 +62,12 @@ type DropStatsSummary struct {
 	ByIPReputation int64 `json:"by_ip_reputation"`
 }
 
+// DeleteOlderThan removes drop events older than the given time. Returns deleted count.
+func (r *DropEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
+	tx := r.db.Where("created_at < ?", before).Delete(&store.DropEvent{})
+	return tx.RowsAffected, tx.Error
+}
+
 func (r *DropEventRepo) Stats24h() (*DropStatsSummary, error) {
 	since := time.Now().Add(-24 * time.Hour)
 	var stats DropStatsSummary

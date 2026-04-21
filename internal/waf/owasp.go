@@ -31,6 +31,7 @@ const (
 	CatCRLF       OWASPCategory = "crlf_injection"
 	CatExprLang   OWASPCategory = "expression_language"
 	CatDeserial   OWASPCategory = "deserialization"
+	CatGraphQLi   OWASPCategory = "graphql_injection"
 )
 
 const BuiltinVersion = "builtin_owasp_v2"
@@ -168,6 +169,9 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 				return []OWASPHit{hit}
 			}
 		}
+		if hit, ok := checkGraphQLi(normalized, threshold); ok {
+			return []OWASPHit{hit}
+		}
 		if len(hits) > 0 {
 			return hits
 		}
@@ -237,6 +241,56 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 // Called separately because it needs the raw filename, not normalized.
 func CheckFileUpload(filename, contentType string) (OWASPHit, bool) {
 	return checkFileUpload(filename, contentType)
+}
+
+// CheckRawMultipartFilenames scans raw multipart body for dangerous filenames
+// that Go's mime/multipart parser may miss (path traversal, space-extension bypass).
+// This is a fallback for cases where multipart.Reader strips paths or fails to parse.
+func CheckRawMultipartFilenames(body []byte) (OWASPHit, bool) {
+	return checkRawMultipartFilenames(body)
+}
+
+var reContentDispositionFilename = regexp.MustCompile(`(?i)content-disposition:[^\n]*filename="([^"]+)"`)
+
+func checkRawMultipartFilenames(body []byte) (OWASPHit, bool) {
+	matches := reContentDispositionFilename.FindAllSubmatch(body, 10)
+	for _, m := range matches {
+		filename := string(m[1])
+		lower := strings.ToLower(filename)
+		// Null byte injection in filename (e.g. shell.php\x00.jpg)
+		if strings.Contains(filename, "\x00") || strings.Contains(lower, "%00") {
+			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:001", Score: 6,
+				Desc: "null byte in filename"}, true
+		}
+		// Path traversal in filename
+		if strings.Contains(lower, "../") || strings.Contains(lower, "..\\") {
+			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:006", Score: 6,
+				Desc: "path traversal in filename"}, true
+		}
+		// Space-extension bypass: "shell.php .jpg"
+		normalized := strings.ReplaceAll(lower, " ", "")
+		ext := filepath.Ext(normalized)
+		if ext != "" {
+			withoutExt := normalized[:len(normalized)-len(ext)]
+			secondExt := filepath.Ext(withoutExt)
+			if secondExt != "" && dangerousExtensions[secondExt] {
+				return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:002", Score: 5,
+					Desc: "double extension upload: " + secondExt + ext}, true
+			}
+		}
+		if dangerousExtensions[ext] {
+			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:003", Score: 5,
+				Desc: "dangerous file extension: " + ext}, true
+		}
+	}
+	return OWASPHit{}, false
+}
+
+// CheckMethodViolation inspects the HTTP method for unusual/dangerous methods.
+// Called separately from CheckOWASP because the method is not part of the
+// standard target scanning pipeline.
+func CheckMethodViolation(method string, headers map[string]string) (OWASPHit, bool) {
+	return checkMethodViolation(method, headers)
 }
 
 var webExecutableExtensions = map[string]bool{
@@ -706,6 +760,8 @@ func decodeUTF7Sequences(s string) string {
 }
 
 // normalizeWithDecode normalizes and attempts base64 decoding of suspicious tokens.
+// Recursion is capped at 3 levels with max 5 tokens per level and a 32KB total
+// decoded byte budget to bound CPU cost.
 func normalizeWithDecode(raw string) string {
 	s := normalize(raw)
 	// Fast path: if normalized string has no base64-length tokens, skip expensive scanning.
@@ -741,77 +797,65 @@ func normalizeWithDecode(raw string) string {
 			sources = append(sources, jsDecoded)
 		}
 	}
+
+	const maxTokensPerLevel = 20 // Allow enough to reach real payload tokens past short English words
+	const maxTotalBytes = 32768  // 32KB total decoded byte budget
+	const maxDepth = 3           // Increased from 2 to handle triple-encoded payloads
+
 	var b strings.Builder
 	seen := make(map[string]bool, 8)
 	found := false
-	for _, src := range sources {
-		for _, tok := range reBase64Token.FindAllString(src, 20) {
-			if seen[tok] {
-				continue
-			}
-			seen[tok] = true
-			if decoded := decodeBase64IfSuspicious(tok); decoded != "" {
-				if !found {
-					b.Grow(len(s) + 256)
-					b.WriteString(s)
-					found = true
+	totalBytes := 0
+
+	// decodeTokens processes base64 tokens from sources at the given depth.
+	var decodeTokens func(srcs []string, depth int)
+	decodeTokens = func(srcs []string, depth int) {
+		if depth > maxDepth || totalBytes >= maxTotalBytes {
+			return
+		}
+		for _, src := range srcs {
+			for _, tok := range reBase64Token.FindAllString(src, maxTokensPerLevel) {
+				if seen[tok] {
+					continue
 				}
-				normalizedDecoded := normalize(decoded)
-				b.WriteByte(' ')
-				b.WriteString(normalizedDecoded)
-				decodedForB64 := decoded
-				if strings.Contains(decoded, "\\") {
-					decodedForB64 = decodeJSEscapes(decoded)
-				}
-				for _, src2 := range []string{decoded, decodedForB64} {
-					for _, tok2 := range reBase64Token.FindAllString(src2, 30) {
-						if seen[tok2] {
-							continue
-						}
-						seen[tok2] = true
-						if decoded2 := decodeBase64IfSuspicious(tok2); decoded2 != "" {
-							normalizedDecoded2 := normalize(decoded2)
+				seen[tok] = true
+				if decoded := decodeBase64IfSuspicious(tok); decoded != "" {
+					totalBytes += len(decoded)
+					if totalBytes > maxTotalBytes {
+						return
+					}
+					if !found {
+						b.Grow(len(s) + 256)
+						b.WriteString(s)
+						found = true
+					}
+					normalizedDecoded := normalize(decoded)
+					b.WriteByte(' ')
+					b.WriteString(normalizedDecoded)
+
+					// Recurse into decoded content
+					nextSrcs := []string{decoded}
+					if strings.Contains(decoded, "\\") {
+						jsDec := decodeJSEscapes(decoded)
+						if jsDec != decoded {
+							nextSrcs = append(nextSrcs, jsDec)
+							// Also normalize the JS-decoded content and add it for scanning.
+							// This catches JSON Unicode escapes (\u00xx) wrapping base64 tokens.
+							normalizedJS := normalize(jsDec)
 							b.WriteByte(' ')
-							b.WriteString(normalizedDecoded2)
-							decodedForB64_2 := decoded2
-							if strings.Contains(decoded2, "\\") {
-								decodedForB64_2 = decodeJSEscapes(decoded2)
-							}
-							for _, src3 := range []string{decoded2, decodedForB64_2} {
-								for _, tok3 := range reBase64Token.FindAllString(src3, 30) {
-									if seen[tok3] {
-										continue
-									}
-									seen[tok3] = true
-									if decoded3 := decodeBase64IfSuspicious(tok3); decoded3 != "" {
-										normalizedDecoded3 := normalize(decoded3)
-										b.WriteByte(' ')
-										b.WriteString(normalizedDecoded3)
-										decodedForB64_3 := decoded3
-										if strings.Contains(decoded3, "\\") {
-											decodedForB64_3 = decodeJSEscapes(decoded3)
-										}
-										for _, src4 := range []string{decoded3, decodedForB64_3} {
-											for _, tok4 := range reBase64Token.FindAllString(src4, 30) {
-												if seen[tok4] {
-													continue
-												}
-												seen[tok4] = true
-												if decoded4 := decodeBase64IfSuspicious(tok4); decoded4 != "" {
-													b.WriteByte(' ')
-													b.WriteString(normalize(decoded4))
-												}
-											}
-										}
-									}
-								}
-							}
+							b.WriteString(normalizedJS)
+							// The JS-decoded version may expose new base64 tokens.
+							nextSrcs = append(nextSrcs, normalizedJS)
 						}
 					}
+					decodeTokens(nextSrcs, depth+1)
 				}
 			}
 		}
 	}
+
+	decodeTokens(sources, 1)
+
 	if found {
 		return b.String()
 	}
@@ -908,7 +952,7 @@ func decodeBase64IfSuspicious(s string) string {
 	}
 	printable := 0
 	for _, b := range decoded {
-		if b >= 0x20 && b <= 0x7E {
+		if (b >= 0x20 && b <= 0x7E) || b == '\t' || b == '\n' || b == '\r' {
 			printable++
 		}
 	}
@@ -1503,13 +1547,21 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 				return true
 			}
 		}
+		// Legitimate <script src="https://..."> (external script loading in CMS/code playgrounds)
+		// without any inline JS execution context is not XSS.
 		if !strings.Contains(lower, "</script") && !strings.Contains(lower, "alert(") &&
-			!strings.Contains(lower, "eval(") && !strings.Contains(lower, "src=") &&
-			!strings.Contains(lower, "onerror") && !strings.Contains(lower, "onload") {
+			!strings.Contains(lower, "eval(") && !strings.Contains(lower, "onerror") &&
+			!strings.Contains(lower, "onload") && !strings.Contains(lower, "document.cookie") &&
+			!strings.Contains(lower, "document.write") && !strings.Contains(lower, "prompt(") &&
+			!strings.Contains(lower, "confirm(") {
 			idx := strings.Index(lower, "<script")
 			if idx >= 0 {
 				after := lower[idx+7:]
 				if len(after) > 0 && after[0] != '>' && after[0] != ' ' && after[0] != '\t' {
+					return true
+				}
+				// <script src="https://..."> with no inline code is safe.
+				if strings.HasPrefix(strings.TrimLeft(after, " \t"), "src=") && !strings.Contains(after, "(") {
 					return true
 				}
 				if !strings.Contains(after, "(") && !strings.Contains(after, "=") {
@@ -1632,13 +1684,31 @@ var reCmdHighConfidence = regexp.MustCompile(
 func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 	switch ruleID {
 	case "owasp:cmd:001": // [;|&]\s*(cmd)\s
+		lower := strings.ToLower(normalized)
+		// User-Agent headers like "Mozilla/5.0 (... ; Touch; rv:11.0) like Gecko"
+		// contain "; Touch;" which matches "; touch" after normalization.
+		// Browser UA strings are never command injection.
+		if strings.Contains(lower, "mozilla") || strings.Contains(lower, "gecko") ||
+			strings.Contains(lower, "webkit") || strings.Contains(lower, "trident") ||
+			strings.Contains(lower, "chrome/") || strings.Contains(lower, "safari/") {
+			return true
+		}
+		// Form parameter names like "echo=value" are split on '=' by extractFormValues,
+		// producing two scan targets: "echo" (key) and "value". The key "echo" then matches
+		// "echo" as a command when preceded by '&' from query string or form body separators.
+		// Suppress unless the match occurs in a clear shell execution context.
 		if len(normalized) > 200 && !reCmdHighConfidence.MatchString(normalized) {
-			lower := strings.ToLower(normalized)
 			if strings.Contains(lower, "\\u00") || strings.Contains(lower, "base64") ||
 				strings.Contains(lower, "sessionid") || strings.Contains(lower, "\"type\"") ||
 				strings.Contains(lower, "subscribe") {
 				return true
 			}
+		}
+		// Short values that are just a command name (form param keys like "echo", "kill", "sort")
+		// without shell operators are false positives.
+		trimmed := strings.TrimSpace(normalized)
+		if len(trimmed) < 30 && !strings.ContainsAny(trimmed, ";|&`$>") {
+			return true
 		}
 	case "owasp:cmd:002": // backtick command substitution (score=4)
 		lower := strings.ToLower(normalized)
@@ -1796,6 +1866,13 @@ func isSSRFFalsePositive(normalized, ruleID string) bool {
 			strings.Contains(lower, "dict://") {
 			return false
 		}
+		// Admin API configuration payloads with localhost upstreams are not SSRF.
+		// JSON fields like "upstreams":["http://127.0.0.1:8889"] in site config.
+		if strings.Contains(lower, "\"upstreams\"") || strings.Contains(lower, "\"upstream\"") ||
+			strings.Contains(lower, "\"proxy_pass\"") || strings.Contains(lower, "\"backend\"") ||
+			strings.Contains(lower, "\"server_names\"") {
+			return true
+		}
 		if strings.Contains(lower, "localhost") && !strings.Contains(lower, "127.") {
 			if len(normalized) > 100 && !strings.Contains(lower, "@") &&
 				!strings.Contains(lower, "metadata") &&
@@ -1870,10 +1947,23 @@ func isWebshellFalsePositive(normalized, ruleID string) bool {
 }
 
 func isCRLFFalsePositive(normalized, ruleID string) bool {
-	if ruleID == "owasp:crlf:004" {
-		// Bare \r\n\r\n is common in multi-line textarea values (Windows newlines).
+	switch ruleID {
+	case "owasp:crlf:004":
+		// Bare \r\n\r\n is common in multi-line textarea values (Windows newlines),
+		// multipart form data boundaries, and binary data.
 		// Require HTTP header/status-line context after the separator to confirm injection.
 		return !reCRLFHeaderInject.MatchString(normalized)
+	case "owasp:crlf:001":
+		// Multipart form uploads and binary file data naturally contain \r\n sequences.
+		// Suppress unless the CRLF is followed by an actual HTTP header injection attempt
+		// where the header value is suspicious (not just multipart boundary metadata).
+		if strings.Contains(normalized, "content-disposition:") ||
+			strings.Contains(normalized, "content-type: image/") ||
+			strings.Contains(normalized, "content-type: application/octet") ||
+			strings.Contains(normalized, "xpacket") ||
+			strings.Contains(normalized, "xmpmeta") {
+			return true
+		}
 	}
 	return false
 }

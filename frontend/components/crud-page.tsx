@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -67,9 +67,13 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
   const [deleteTarget, setDeleteTarget] = useState<Record<string, unknown> | null>(null);
   // Async-select options cache: field key → options array
   const [asyncOpts, setAsyncOpts] = useState<Record<string, { value: string; label: string }[]>>({});
+  const asyncOptsLoadedRef = useRef(false);
 
-  // Load async-select options on mount (for table display) and when dialog opens (for form).
+  // Load async-select options once on mount.
   useEffect(() => {
+    if (asyncOptsLoadedRef.current) return;
+    asyncOptsLoadedRef.current = true;
+
     const asyncFields = fields.filter((f) => f.type === "async-select" && f.asyncOptions);
     if (asyncFields.length === 0) return;
 
@@ -94,7 +98,8 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
         // Silently fail — will show empty select
       }
     });
-  }, [fields]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const load = useCallback(async () => {
     try {

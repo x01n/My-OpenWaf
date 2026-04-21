@@ -40,7 +40,10 @@ func CreateSetting(repo *repository.SystemSettingsRepo, reload func() error) app
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "key": body.Key, "value": body.Value})
+			return
+		}
 		c.JSON(201, map[string]string{"key": body.Key, "value": body.Value})
 	}
 }
@@ -73,7 +76,10 @@ func SetSetting(repo *repository.SystemSettingsRepo, reload func() error) app.Ha
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "key": key, "value": body.Value})
+			return
+		}
 		c.JSON(200, map[string]string{"key": key, "value": body.Value})
 	}
 }
@@ -85,7 +91,10 @@ func DeleteSetting(repo *repository.SystemSettingsRepo, reload func() error) app
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		_ = reload()
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+			return
+		}
 		c.JSON(204, nil)
 	}
 }

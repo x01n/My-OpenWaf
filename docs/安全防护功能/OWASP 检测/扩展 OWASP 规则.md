@@ -256,13 +256,13 @@ LDAP 注入检测关注以下关键模式：
 
 ```mermaid
 flowchart LR
-INPUT[LDAP 查询输入] --> CHECK1[检查过滤器结构]
-CHECK1 --> FILTER1{包含)(|模式?}
-FILTER1 --> |是| DETECT[检测到 LDAP 注入]
-FILTER1 --> |否| CHECK2[检查对象类]
-CHECK2 --> OBJECT1{包含objectclass?}
-OBJECT1 --> |是| DETECT
-OBJECT1 --> |否| SAFE[安全]
+INPUT["LDAP 查询输入"] --> CHECK1["检查过滤器结构"]
+CHECK1 --> FILTER1{"包含)(|模式?"}
+FILTER1 --> |"是"| DETECT["检测到 LDAP 注入"]
+FILTER1 --> |"否"| CHECK2["检查对象类"]
+CHECK2 --> OBJECT1{"包含objectclass?"}
+OBJECT1 --> |"是"| DETECT
+OBJECT1 --> |"否"| SAFE["安全"]
 ```
 
 **图表来源**

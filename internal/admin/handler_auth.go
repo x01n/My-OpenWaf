@@ -102,7 +102,7 @@ func LoginHandler(d *AuthDeps) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": "token generation failed"})
 			return
 		}
-		if _, err := d.RTRepo.Create(jti, hashRT, time.Now().Add(auth.RefreshTTL)); err != nil {
+		if _, err := d.RTRepo.Create(jti, hashRT, acct.Username, string(role), time.Now().Add(auth.RefreshTTL)); err != nil {
 			c.JSON(500, map[string]string{"error": "token storage failed"})
 			return
 		}
@@ -146,6 +146,18 @@ func RefreshHandler(d *AuthDeps) app.HandlerFunc {
 			return
 		}
 
+		// Extract user identity from the old refresh token.
+		clientIP := string(c.ClientIP())
+		userAgent := string(c.GetHeader("User-Agent"))
+		role := rt.Role
+		username := rt.Username
+		if role == "" {
+			role = auth.RoleAdmin
+		}
+		if username == "" {
+			username = "admin"
+		}
+
 		// Rotate: revoke old, issue new.
 		newJTI, newRaw, newHash, err := auth.GenerateRefreshToken()
 		if err != nil {
@@ -153,15 +165,10 @@ func RefreshHandler(d *AuthDeps) app.HandlerFunc {
 			return
 		}
 		_ = d.RTRepo.Revoke(jti, newJTI)
-		if _, err := d.RTRepo.Create(newJTI, newHash, time.Now().Add(auth.RefreshTTL)); err != nil {
+		if _, err := d.RTRepo.Create(newJTI, newHash, username, role, time.Now().Add(auth.RefreshTTL)); err != nil {
 			c.JSON(500, map[string]string{"error": "token storage failed"})
 			return
 		}
-
-		clientIP := string(c.ClientIP())
-		userAgent := string(c.GetHeader("User-Agent"))
-		role := auth.RoleAdmin
-		username := "admin"
 
 		var accessToken string
 		var accessJTI string
@@ -294,12 +301,12 @@ func ForceLogoutSessionHandler(d *AuthDeps) app.HandlerFunc {
 
 func setRefreshCookie(c *app.RequestContext, value string, ttl time.Duration) {
 	c.SetCookie("my_openwaf_rt", value, int(ttl.Seconds()), "/api/v1/auth", "",
-		protocol.CookieSameSiteLaxMode, false, true)
+		protocol.CookieSameSiteLaxMode, true, true)
 }
 
 func clearRefreshCookie(c *app.RequestContext) {
 	c.SetCookie("my_openwaf_rt", "", -1, "/api/v1/auth", "",
-		protocol.CookieSameSiteLaxMode, false, true)
+		protocol.CookieSameSiteLaxMode, true, true)
 }
 
 func splitRefreshCookie(val string) (jti, raw string, ok bool) {

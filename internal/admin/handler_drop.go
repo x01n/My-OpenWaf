@@ -91,7 +91,10 @@ func UpdateDropPolicy(settingsRepo *repository.SystemSettingsRepo, reload func()
 		}
 
 		if reload != nil {
-			_ = reload()
+			if err := reload(); err != nil {
+				c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "policy": current})
+				return
+			}
 		}
 		c.JSON(200, current)
 	}

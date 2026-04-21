@@ -4,16 +4,32 @@ const BASE = "";
 // Refresh token continues to use HttpOnly cookie (handled by browser automatically).
 let accessToken: string | null = null;
 
+const TOKEN_KEY = "owaf_access_token";
+
 export function setAccessToken(t: string | null) {
   accessToken = t;
-  // No longer persisted to sessionStorage for security.
+  if (typeof window !== "undefined") {
+    if (t) {
+      sessionStorage.setItem(TOKEN_KEY, t);
+    } else {
+      sessionStorage.removeItem(TOKEN_KEY);
+    }
+  }
 }
 
 export function getAccessToken(): string | null {
-  return accessToken;
+  if (accessToken) return accessToken;
+  if (typeof window !== "undefined") {
+    const stored = sessionStorage.getItem(TOKEN_KEY);
+    if (stored) {
+      accessToken = stored;
+      return stored;
+    }
+  }
+  return null;
 }
 
-async function refreshAccess(): Promise<boolean> {
+export async function refreshAccess(): Promise<boolean> {
   try {
     const res = await fetch(`${BASE}/api/v1/auth/refresh`, {
       method: "POST",

@@ -45,7 +45,7 @@ var (
 	reNodePathTrav4 = regexp.MustCompile(`(?i)\.\.\\`)
 
 	// EJS template injection (CVE-2022-29078)
-	reEJS1 = regexp.MustCompile(`(?i)<%[-=]?\s*`)
+	reEJS1 = regexp.MustCompile(`(?i)<%-?\s*(include|require|process|global|root|console)\b|<%=\s*(process|require|global|root|console)\b`)
 	reEJS2 = regexp.MustCompile(`(?i)settings\s*\[\s*['"]view\s*options`)
 
 	// vm2 sandbox escape (CVE-2023-32314)
