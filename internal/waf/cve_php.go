@@ -60,6 +60,19 @@ var (
 
 	// PHPUnit RCE (CVE-2017-9841)
 	rePHPUnit = regexp.MustCompile(`(?i)/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin\.php`)
+
+	// PHP-CGI argument injection via soft-hyphen (CVE-2024-4577)
+	// Soft-hyphen (0xAD) is "best-fit" mapped to real hyphen by Windows,
+	// allowing argument injection into php-cgi.exe.
+	rePHPCGI_SoftHyphenArg = regexp.MustCompile(`(?i)%[aA][dD].*-[drnfem]`)
+	rePHPCGI_AutoPrepend   = regexp.MustCompile(`(?i)auto_prepend_file\s*=\s*php://`)
+	rePHPCGI_AllowInclude  = regexp.MustCompile(`(?i)allow_url_include\s*=\s*[1oOyY]`)
+
+	// WordPress arbitrary file read (CVE-2024-2961)
+	reWPFileRead = regexp.MustCompile(`(?i)/wp-admin/admin-ajax\.php.*action=.*file`)
+
+	// Craft CMS RCE (CVE-2023-41892)
+	reCraftCMS = regexp.MustCompile(`(?i)/actions/conditions/render.*configObject`)
 )
 
 // NewPHPCVEDetector creates a PHP CVE detector with all built-in rules.
@@ -112,6 +125,18 @@ func NewPHPCVEDetector() *PHPCVEDetector {
 			cveID: "CVE-2017-9841", severity: "high",
 			description: "PHPUnit RCE via eval-stdin.php",
 			patterns:    []*regexp.Regexp{rePHPUnit},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2024-4577", severity: "critical",
+			description: "PHP-CGI argument injection via Windows soft-hyphen Best-Fit mapping",
+			patterns:    []*regexp.Regexp{rePHPCGI_SoftHyphenArg, rePHPCGI_AutoPrepend, rePHPCGI_AllowInclude},
+			target:      "all",
+		},
+		{
+			cveID: "CVE-2023-41892", severity: "critical",
+			description: "Craft CMS RCE via conditions/render endpoint",
+			patterns:    []*regexp.Regexp{reCraftCMS},
 			target:      "url",
 		},
 	}

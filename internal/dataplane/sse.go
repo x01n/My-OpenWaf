@@ -56,9 +56,15 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	defer resp.Body.Close()
 
 	for k, vv := range resp.Header {
+		if proxy.IsHopByHop(k) {
+			continue
+		}
 		for _, v := range vv {
 			c.Response.Header.Add(k, v)
 		}
+	}
+	if resp.Header.Get("Server") == "" {
+		c.Response.Header.Del("Server")
 	}
 	c.SetStatusCode(resp.StatusCode)
 

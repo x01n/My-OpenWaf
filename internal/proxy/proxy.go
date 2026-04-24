@@ -70,6 +70,31 @@ func SharedTransport(rt snapshot.SiteRuntime) *http.Transport {
 	return tr
 }
 
+// clientPool caches http.Client instances keyed by transport to avoid repeated allocation.
+var (
+	clientPoolMu sync.RWMutex
+	clientCache  = make(map[*http.Transport]*http.Client)
+)
+
+func sharedClient(tr *http.Transport) *http.Client {
+	clientPoolMu.RLock()
+	if hc, ok := clientCache[tr]; ok {
+		clientPoolMu.RUnlock()
+		return hc
+	}
+	clientPoolMu.RUnlock()
+
+	hc := &http.Client{Transport: tr, Timeout: 60 * time.Second}
+	clientPoolMu.Lock()
+	if existing, ok := clientCache[tr]; ok {
+		clientPoolMu.Unlock()
+		return existing
+	}
+	clientCache[tr] = hc
+	clientPoolMu.Unlock()
+	return hc
+}
+
 // ForwardHTTP copies the incoming request to upstream and streams the response.
 func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) error {
 	path := string(c.Path())
@@ -95,8 +120,7 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := strings.ToLower(string(k))
-		switch key {
-		case "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade":
+		if _, skip := hopByHopHeaders[key]; skip {
 			return
 		}
 		req.Header.Add(string(k), string(v))
@@ -104,7 +128,8 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 
 	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.PreserveOriginalHost)
 
-	hc := &http.Client{Transport: SharedTransport(rt), Timeout: 60 * time.Second}
+	tr := SharedTransport(rt)
+	hc := sharedClient(tr)
 	resp, err := hc.Do(req)
 	if err != nil {
 		return err
@@ -112,24 +137,40 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	defer resp.Body.Close()
 
 	// Strip hop-by-hop headers from upstream response before forwarding to client.
-	hopByHop := []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
-		"Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
 	for k, vv := range resp.Header {
-		skip := false
-		for _, h := range hopByHop {
-			if strings.EqualFold(k, h) {
-				skip = true
-				break
-			}
-		}
-		if skip {
+		if isHopByHop(k) {
 			continue
 		}
 		for _, v := range vv {
 			c.Response.Header.Add(k, v)
 		}
 	}
+	// Remove any Server header added by the framework — let upstream's header stand.
+	if resp.Header.Get("Server") == "" {
+		c.Response.Header.Del("Server")
+	}
 	c.Status(resp.StatusCode)
 	_, err = io.Copy(c.Response.BodyWriter(), resp.Body)
 	return err
 }
+
+var hopByHopHeaders = map[string]struct{}{
+	"connection":          {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"proxy-connection":    {},
+	"te":                  {},
+	"trailer":             {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+}
+
+func isHopByHop(name string) bool {
+	_, ok := hopByHopHeaders[strings.ToLower(name)]
+	return ok
+}
+
+// IsHopByHop returns whether the given header name is a hop-by-hop header
+// that should be stripped when forwarding responses.
+func IsHopByHop(name string) bool { return isHopByHop(name) }

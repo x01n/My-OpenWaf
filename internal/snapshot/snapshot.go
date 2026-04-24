@@ -10,12 +10,14 @@ import (
 
 // CompiledRule is a lightweight runtime rule (MVP ACL parser).
 type CompiledRule struct {
-	ID       uint
-	Phase    store.RulePhase
-	Action   store.RuleAction
-	Priority int
-	Kind     string
-	Arg      string
+	ID         uint
+	Phase      store.RulePhase
+	Action     store.RuleAction
+	Priority   int
+	Kind       string
+	Arg        string
+	StatusCode int    // custom HTTP status code (0 = default)
+	RedirectTo string // URL for redirect action
 }
 
 // SiteRuntime holds resolved site for routing.
@@ -47,6 +49,10 @@ type SiteRuntime struct {
 	// Per-site block page
 	BlockHTML   string
 	BlockStatus int
+
+	// Per-site protection overrides (merged from Site fields).
+	// nil = use global ProtectionConfig.
+	EffectiveProtection *store.ProtectionConfig
 }
 
 // Snapshot is an immutable view for the dataplane (atomic pointer swap).

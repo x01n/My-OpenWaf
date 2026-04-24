@@ -100,8 +100,8 @@ func (d *DropExecutor) recordStats(reason DropReason) {
 }
 
 // GetStats returns a snapshot of the current drop statistics.
-func (d *DropExecutor) GetStats() DropStats {
-	var s DropStats
+func (d *DropExecutor) GetStats() *DropStats {
+	s := &DropStats{}
 	s.TotalDropped.Store(d.stats.TotalDropped.Load())
 	s.DroppedByBot.Store(d.stats.DroppedByBot.Load())
 	s.DroppedByCVE.Store(d.stats.DroppedByCVE.Load())

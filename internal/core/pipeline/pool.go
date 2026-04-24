@@ -6,7 +6,8 @@ import "sync"
 var ctxPool = sync.Pool{
 	New: func() any {
 		return &RequestCtx{
-			Headers: make(map[string]string, 16),
+			Headers:    make(map[string]string, 16),
+			HeaderKeys: make([]string, 0, 16),
 		}
 	},
 }
@@ -29,6 +30,7 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.Body = nil
 	ctx.ContentType = ""
 	ctx.QueryParams = nil
+	ctx.HeaderKeys = ctx.HeaderKeys[:0]
 	for k := range ctx.Headers {
 		delete(ctx.Headers, k)
 	}

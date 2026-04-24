@@ -48,6 +48,20 @@ var (
 	reShiro1        = regexp.MustCompile(`(?i)rememberMe=[A-Za-z0-9+/=]{100,}`)
 	reJackson1      = regexp.MustCompile(`(?i)\["org\.apache\.commons\.`)
 	reJackson2      = regexp.MustCompile(`(?i)com\.sun\.org\.apache\.xalan`)
+
+	// Apache OFBiz Auth Bypass + RCE (CVE-2023-49070, CVE-2023-51467)
+	reOFBiz1 = regexp.MustCompile(`(?i)/webtools/control/(xmlrpc|main|ViewHandlerExt)`)
+	reOFBiz2 = regexp.MustCompile(`(?i)/accounting/control/.*requirePasswordChange=Y`)
+
+	// Apache Tomcat deserialization (CVE-2025-24813)
+	reTomcat1 = regexp.MustCompile(`(?i)\.session\.\d+\.ser`)
+
+	// Apache ActiveMQ RCE (CVE-2023-46604)
+	reActiveMQ = regexp.MustCompile(`(?i)ExceptionResponse.*ClassPathXmlApplicationContext|ClassInfo.*org\.springframework`)
+
+	// Confluence OGNL injection (CVE-2022-26134)
+	reConfluence1 = regexp.MustCompile(`(?i)/\$\{[^}]*\}/?$`)
+	reConfluence2 = regexp.MustCompile(`(?i)#a=@java\.lang\.Runtime@getRuntime`)
 )
 
 func NewJavaCVEDetector() *JavaCVEDetector {
@@ -94,6 +108,24 @@ func NewJavaCVEDetector() *JavaCVEDetector {
 			description: "Jackson deserialization via polymorphic type handling",
 			patterns:    []*regexp.Regexp{reJackson1, reJackson2},
 			target:      "body",
+		},
+		{
+			cveID: "CVE-2023-49070", severity: "critical",
+			description: "Apache OFBiz auth bypass and RCE via webtools endpoint",
+			patterns:    []*regexp.Regexp{reOFBiz1, reOFBiz2},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2023-46604", severity: "critical",
+			description: "Apache ActiveMQ RCE via ClassPathXml deserialization",
+			patterns:    []*regexp.Regexp{reActiveMQ},
+			target:      "body",
+		},
+		{
+			cveID: "CVE-2022-26134", severity: "critical",
+			description: "Confluence OGNL injection via URL path expression",
+			patterns:    []*regexp.Regexp{reConfluence1, reConfluence2},
+			target:      "all",
 		},
 	}
 	return d

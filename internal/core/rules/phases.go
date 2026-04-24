@@ -23,10 +23,15 @@ type MatchCtx struct {
 	Path     string
 	Query    string
 	Headers  map[string]string
+	Host     string
+	Body     []byte
 }
 
 func ctxFromPipeline(ctx *pipeline.RequestCtx) MatchCtx {
-	return MatchCtx{ClientIP: ctx.ClientIP, Path: ctx.Path, Query: ctx.RawQuery, Headers: ctx.Headers, Method: ctx.Method}
+	return MatchCtx{
+		ClientIP: ctx.ClientIP, Path: ctx.Path, Query: ctx.RawQuery,
+		Headers: ctx.Headers, Method: ctx.Method, Host: ctx.Host, Body: ctx.Body,
+	}
 }
 
 // ── ACL phase ──
@@ -208,8 +213,14 @@ func NewBotPhaseWithGeo(rep *waf.IPReputation, geo *waf.MaxMindResolver, thresho
 func (p *botPhase) Name() string { return "bot_detection" }
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	// Skip challenge for requests that already passed JS verification.
+	if cookie, ok := ctx.Headers["Cookie"]; ok && strings.Contains(cookie, "__waf_passed=1") {
+		return action.Pass(), false
+	}
+
 	br := waf.NewBotRequest(ctx.Method, ctx.Path, ctx.Headers)
 	br.ClientIP = ctx.ClientIP
+	br.HeaderKeys = ctx.HeaderKeys
 
 	// If GeoIP resolver is available, use the two-phase flow.
 	if p.geo != nil {
@@ -227,7 +238,6 @@ func (p *botPhase) verdictToResult(v waf.BotVerdict, ctx *pipeline.RequestCtx) (
 		if p.rep != nil && ctx.ClientIP != nil {
 			p.rep.RecordViolation(ctx.ClientIP)
 		}
-		// Use Drop for high-score malicious bots (score >= threshold).
 		actType := action.Type(action.Intercept)
 		if v.Score >= p.threshold {
 			actType = action.Drop
@@ -243,6 +253,19 @@ func (p *botPhase) verdictToResult(v waf.BotVerdict, ctx *pipeline.RequestCtx) (
 		return result, true
 	}
 	if v.Category == "suspicious" {
+		// High-score suspicious bots get a JS challenge; low-score get observe.
+		suspiciousThreshold := p.threshold * 60 / 100
+		if v.Score >= suspiciousThreshold {
+			result := action.Result{
+				Type:      action.Challenge,
+				Phase:     "bot_detection",
+				MatchDesc: v.Reason,
+				Matched:   true,
+				Category:  "bot_suspicious",
+				RuleIDStr: v.RuleID,
+			}
+			return result, true
+		}
 		result := action.Result{
 			Type:      action.Observe,
 			Phase:     "bot_detection",
@@ -599,12 +622,14 @@ func hit(c Compiled) action.Result {
 		desc = "compound:{...}"
 	}
 	return action.Result{
-		Type:      action.Normalize(c.Action),
-		RuleID:    c.ID,
-		RuleIDStr: "rule:" + c.Phase + ":" + c.Kind,
-		Phase:     c.Phase,
-		MatchDesc: desc,
-		Matched:   true,
-		Category:  c.Kind,
+		Type:       action.Normalize(c.Action),
+		RuleID:     c.ID,
+		RuleIDStr:  "rule:" + c.Phase + ":" + c.Kind,
+		Phase:      c.Phase,
+		MatchDesc:  desc,
+		Matched:    true,
+		Category:   c.Kind,
+		StatusCode: c.StatusCode,
+		RedirectTo: c.RedirectTo,
 	}
 }

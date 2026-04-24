@@ -263,6 +263,11 @@ func DeepScore(r BotRequest, ipRep *IPReputation, geo *MaxMindResolver) BotScore
 	// ── UA/header heuristic fingerprint scoring ──
 	fpScore, fpReasons := fingerprintScore(r)
 
+	// ── Header order analysis ──
+	hoScore, hoReasons := headerOrderScore(r)
+	fpScore += hoScore
+	fpReasons = append(fpReasons, hoReasons...)
+
 	// ── TLS/HTTP2 deep fingerprint scoring (JA3/JA4/H2/header order) ──
 	tlsFpResult := DeepFingerprintScore(r)
 	fpScore += tlsFpResult.Score
@@ -469,7 +474,11 @@ var defaultFingerprintScorer = NewFingerprintScorer()
 // It extracts JA3/JA4, HTTP/2 settings, and header order fingerprints,
 // then evaluates them against the known fingerprint database.
 func DeepFingerprintScore(r BotRequest) FingerprintResult {
-	info := ExtractFingerprint(r.Headers, r.HeaderKeys)
+	clientIP := ""
+	if r.ClientIP != nil {
+		clientIP = r.ClientIP.String()
+	}
+	info := ExtractFingerprintWithIP(r.Headers, r.HeaderKeys, clientIP)
 	return defaultFingerprintScorer.ScoreFingerprint(info)
 }
 
@@ -537,4 +546,51 @@ func CheckBotTwoPhase(r BotRequest, ipRep *IPReputation, geo *MaxMindResolver, t
 	verdict.Reason = strings.Join(parts, "; ")
 
 	return verdict, bs
+}
+
+// ── Header order analysis ──
+
+// headerOrderScore evaluates whether the header order is consistent with
+// known browser behavior. Automated tools often send headers in a different
+// order than real browsers.
+func headerOrderScore(r BotRequest) (score int, reasons []string) {
+	keys := r.HeaderKeys
+	if len(keys) == 0 {
+		return 0, nil
+	}
+
+	lowerKeys := make([]string, len(keys))
+	for i, k := range keys {
+		lowerKeys[i] = strings.ToLower(k)
+	}
+
+	// Browsers always send Host first (HTTP/1.1 requirement).
+	if len(lowerKeys) > 0 && lowerKeys[0] != "host" {
+		score += 10
+		reasons = append(reasons, "host_not_first")
+	}
+
+	// Browsers that claim Chrome/Edge should have sec-ch-ua headers.
+	uaLower := strings.ToLower(r.UserAgent)
+	if strings.Contains(uaLower, "chrome") || strings.Contains(uaLower, "edg") {
+		hasSecCH := false
+		for _, k := range lowerKeys {
+			if strings.HasPrefix(k, "sec-ch-") {
+				hasSecCH = true
+				break
+			}
+		}
+		if !hasSecCH {
+			score += 15
+			reasons = append(reasons, "chrome_no_sec_ch")
+		}
+	}
+
+	// Very few headers is suspicious for a browser claim.
+	if len(keys) < 4 && strings.Contains(uaLower, "mozilla") {
+		score += 10
+		reasons = append(reasons, "too_few_headers_for_browser")
+	}
+
+	return score, reasons
 }

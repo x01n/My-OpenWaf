@@ -139,6 +139,12 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	// Use pre-compiled, pre-partitioned rules (compiled once per snapshot revision per policy).
 	cr := e.getCompiledRules(sn, &rt)
 
+	// Use per-site effective protection (merged global + site overrides).
+	prot := sn.Protection
+	if rt.EffectiveProtection != nil {
+		prot = *rt.EffectiveProtection
+	}
+
 	var phases []pipeline.Phase
 
 	// IP reputation runs first: whitelist short-circuits, blacklist blocks.
@@ -149,7 +155,7 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
 
 	// Bot detection before rate limiting (malicious tools should be blocked early).
-	if sn.Protection.BotDetectionEnabled {
+	if prot.BotDetectionEnabled {
 		if e.geoResolver != nil {
 			phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
 		} else {
@@ -157,18 +163,18 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 		}
 	}
 
-	if sn.Protection.RequestRateLimitEnabled && e.reqRateLimiter != nil {
-		act := action.Type(sn.Protection.RequestRateLimitAction)
+	if prot.RequestRateLimitEnabled && e.reqRateLimiter != nil {
+		act := action.Type(prot.RequestRateLimitAction)
 		phases = append(phases, rules.NewReqRateLimitPhase(e.reqRateLimiter, act))
 	}
 
-	if sn.Protection.OWASPEnabled {
-		phases = append(phases, rules.NewOWASPPhase(sn.Protection))
+	if prot.OWASPEnabled {
+		phases = append(phases, rules.NewOWASPPhase(prot))
 	}
 
 	// CVE detection runs after OWASP (OWASP covers generic attacks, CVE covers targeted exploits).
-	if sn.Protection.CVEEnabled && e.cveDetector != nil {
-		phases = append(phases, rules.NewCVEPhase(sn.Protection, e.cveDetector))
+	if prot.CVEEnabled && e.cveDetector != nil {
+		phases = append(phases, rules.NewCVEPhase(prot, e.cveDetector))
 	}
 
 	phases = append(phases,
@@ -222,11 +228,13 @@ func convertAndCompile(sr []snapshot.CompiledRule) []rules.Compiled {
 			pattern = r.Arg // compound patterns are raw JSON starting with "{"
 		}
 		storeRules[i] = store.Rule{
-			Phase:    r.Phase,
-			Pattern:  pattern,
-			Action:   r.Action,
-			Priority: r.Priority,
-			Enabled:  true,
+			Phase:      r.Phase,
+			Pattern:    pattern,
+			Action:     r.Action,
+			Priority:   r.Priority,
+			Enabled:    true,
+			StatusCode: r.StatusCode,
+			RedirectTo: r.RedirectTo,
 		}
 		storeRules[i].ID = r.ID
 	}

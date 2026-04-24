@@ -112,6 +112,10 @@ func Run() {
 
 	eng := engine.New(rt.Snapshot, reqRL, errRL, ipRep)
 
+	// TLS fingerprinter for native JA3 capture.
+	tlsFP := waf.NewTLSFingerprinter()
+	waf.SetTLSFingerprinter(tlsFP)
+
 	// Drop executor (TCP connection close strategy).
 	dropCfg := rt.Config.Drop
 	dropExec := waf.NewDropExecutor(dropCfg.Enabled, logger.New("drop"))
@@ -433,12 +437,17 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 		}
 	}
 
-	return &tls.Config{
+	cfg := &tls.Config{
 		Certificates: certs,
 		MinVersion:   minVer,
 		MaxVersion:   maxVer,
 		NextProtos:   alpn,
 	}
+	// Wrap with TLS fingerprinter to capture JA3 from ClientHello.
+	if fp := waf.GetTLSFingerprinter(); fp != nil {
+		cfg = fp.WrapTLSConfig(cfg)
+	}
+	return cfg
 }
 
 // parseTLSVersion converts a string like "TLS12" to a tls version constant.

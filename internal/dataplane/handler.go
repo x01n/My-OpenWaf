@@ -48,6 +48,8 @@ func Handler(opts Options) app.HandlerFunc {
 
 		reqID := uuid.NewString()
 		c.Response.Header.Set("X-Request-ID", reqID)
+		// Remove framework-injected Server header — upstream's header will be set by proxy.
+		c.Response.Header.Del("Server")
 		if opts.Metrics != nil {
 			opts.Metrics.RecordRequest()
 		}
@@ -75,6 +77,35 @@ func Handler(opts Options) app.HandlerFunc {
 		if clientIP != nil && opts.Metrics != nil {
 			opts.Metrics.RecordClientIP(clientIP.String())
 		}
+
+		// JS Challenge verification: if a POST carries valid challenge tokens,
+		// set a short-lived cookie to bypass future challenges and redirect to GET.
+		if string(c.Method()) == "POST" {
+			challengeTS := string(c.FormValue("__waf_challenge_ts"))
+			challengeToken := string(c.FormValue("__waf_challenge_token"))
+			challengeRID := string(c.FormValue("__waf_challenge_rid"))
+			if challengeTS != "" && challengeToken != "" && challengeRID != "" {
+				if waf.VerifyChallengeToken(challengeRID, challengeTS, challengeToken, 5*time.Minute) {
+					// Challenge passed — set cookie and redirect to original page.
+					cookie := "__waf_passed=1; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600"
+					if rt.Site.TLSEnabled {
+						cookie += "; Secure"
+					}
+					c.Response.Header.Set("Set-Cookie", cookie)
+					referer := string(c.GetHeader("Referer"))
+					if referer == "" {
+						referer = "/"
+					}
+					c.Redirect(302, []byte(referer))
+					accessLog.Info("challenge_passed",
+						slog.String("request_id", reqID),
+						slog.String("client_ip", clientIPStr(clientIP)),
+					)
+					return
+				}
+			}
+		}
+
 		path := string(c.Path())
 		rawQ := string(c.URI().QueryString())
 
@@ -88,7 +119,9 @@ func Handler(opts Options) app.HandlerFunc {
 		reqCtx.RawQuery = rawQ
 		reqCtx.Host = host
 		c.Request.Header.VisitAll(func(k, v []byte) {
-			reqCtx.Headers[string(k)] = string(v)
+			key := string(k)
+			reqCtx.Headers[key] = string(v)
+			reqCtx.HeaderKeys = append(reqCtx.HeaderKeys, key)
 		})
 
 		// Read body for WAF scanning (capped to avoid memory abuse).
@@ -156,8 +189,10 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
-		// Intercept (block fuse).
+		// Terminal actions: drop, challenge, redirect, intercept.
 		if result.Action.IsTerminal() {
+			actType := action.Normalize(result.Action.Type)
+			actStr := string(actType)
 			if opts.Metrics != nil {
 				opts.Metrics.RecordWAFBlock()
 				if clientIP != nil {
@@ -193,10 +228,9 @@ func Handler(opts Options) app.HandlerFunc {
 						Action:     "drop",
 						Category:   result.Action.Category,
 						MatchDesc:  result.Action.MatchDesc,
-						StatusCode: 0, // no HTTP response sent
+						StatusCode: 0,
 					})
 				}
-				// Execute TCP drop via the engine's DropExecutor.
 				dropExec := opts.Engine.DropExecutor()
 				if dropExec != nil && dropExec.Enabled() {
 					conn := c.GetConn()
@@ -210,7 +244,6 @@ func Handler(opts Options) app.HandlerFunc {
 						Timestamp: time.Now(),
 					})
 				} else {
-					// Fallback: close connection directly if no executor available.
 					conn := c.GetConn()
 					if conn != nil {
 						conn.Close()
@@ -219,12 +252,75 @@ func Handler(opts Options) app.HandlerFunc {
 				return
 			}
 
+			// Challenge action: serve JS challenge page.
+			if result.Action.IsChallenge() {
+				secLog.Info("challenge",
+					slog.String("request_id", reqID),
+					slog.String("rule_id", result.Action.RuleIDStr),
+					slog.String("phase", result.Action.Phase),
+					slog.String("match", result.Action.MatchDesc),
+				)
+				statusCode := result.Action.EffectiveStatusCode(403)
+				if opts.EventWriter != nil {
+					opts.EventWriter.Record(store.SecurityEvent{
+						RequestID:  reqID,
+						ClientIP:   clientIPStr(clientIP),
+						Host:       host,
+						Path:       path,
+						Method:     string(c.Method()),
+						UserAgent:  ua,
+						RuleID:     result.Action.RuleID,
+						RuleIDStr:  result.Action.RuleIDStr,
+						Phase:      result.Action.Phase,
+						Action:     "challenge",
+						Category:   result.Action.Category,
+						MatchDesc:  result.Action.MatchDesc,
+						StatusCode: statusCode,
+					})
+				}
+				waf.WriteChallengeResponse(c, reqID, result.Site, statusCode)
+				logAccess(accessLog, reqID, c, "challenge")
+				return
+			}
+
+			// Redirect action: HTTP redirect.
+			if result.Action.IsRedirect() {
+				secLog.Info("redirect",
+					slog.String("request_id", reqID),
+					slog.String("rule_id", result.Action.RuleIDStr),
+					slog.String("redirect_to", result.Action.RedirectTo),
+				)
+				statusCode := result.Action.EffectiveStatusCode(302)
+				if opts.EventWriter != nil {
+					opts.EventWriter.Record(store.SecurityEvent{
+						RequestID:  reqID,
+						ClientIP:   clientIPStr(clientIP),
+						Host:       host,
+						Path:       path,
+						Method:     string(c.Method()),
+						UserAgent:  ua,
+						RuleID:     result.Action.RuleID,
+						RuleIDStr:  result.Action.RuleIDStr,
+						Phase:      result.Action.Phase,
+						Action:     "redirect",
+						Category:   result.Action.Category,
+						MatchDesc:  result.Action.MatchDesc,
+						StatusCode: statusCode,
+					})
+				}
+				c.Redirect(statusCode, []byte(result.Action.RedirectTo))
+				logAccess(accessLog, reqID, c, "redirect")
+				return
+			}
+
+			// Intercept (block).
+			statusCode := result.Action.EffectiveStatusCode(403)
 			secLog.Info("intercept",
 				slog.String("request_id", reqID),
 				slog.String("rule_id", result.Action.RuleIDStr),
 				slog.Uint64("rule_id_num", uint64(result.Action.RuleID)),
 				slog.String("phase", result.Action.Phase),
-				slog.String("action", "intercept"),
+				slog.String("action", actStr),
 				slog.String("match", result.Action.MatchDesc),
 				slog.String("category", result.Action.Category),
 			)
@@ -239,14 +335,14 @@ func Handler(opts Options) app.HandlerFunc {
 					RuleID:     result.Action.RuleID,
 					RuleIDStr:  result.Action.RuleIDStr,
 					Phase:      result.Action.Phase,
-					Action:     "intercept",
+					Action:     actStr,
 					Category:   result.Action.Category,
 					MatchDesc:  result.Action.MatchDesc,
-					StatusCode: 403,
+					StatusCode: statusCode,
 				})
 			}
 			waf.WriteBlockResponse(c, reqID, result.Site, sn, result.Action)
-			logAccess(accessLog, reqID, c, "intercept")
+			logAccess(accessLog, reqID, c, actStr)
 			return
 		}
 
@@ -271,7 +367,15 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		if upstreamErr != nil {
-			c.String(502, "upstream error")
+			errCode := 502
+			if isTimeoutError(upstreamErr) {
+				errCode = 504
+			}
+			waf.WriteUpstreamErrorResponse(c, reqID, errCode)
+		}
+		// Remove framework-injected Server header after proxy (upstream's header already set).
+		if c.Response.Header.Get("Server") != "" && !hasUpstreamServerHeader(c) {
+			c.Response.Header.Del("Server")
 		}
 
 		statusCode := c.Response.StatusCode()
@@ -357,4 +461,22 @@ func clientIPStr(ip net.IP) string {
 		return ""
 	}
 	return ip.String()
+}
+
+func hasUpstreamServerHeader(c *app.RequestContext) bool {
+	sv := string(c.Response.Header.Peek("Server"))
+	return sv != "" && sv != "hertz"
+}
+
+func isTimeoutError(err error) bool {
+	if err == context.DeadlineExceeded {
+		return true
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true
+	}
+	if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline") {
+		return true
+	}
+	return false
 }

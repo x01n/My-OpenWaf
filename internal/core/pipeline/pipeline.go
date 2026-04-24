@@ -16,6 +16,7 @@ type RequestCtx struct {
 	RawQuery    string
 	Host        string
 	Headers     map[string]string
+	HeaderKeys  []string // Ordered header keys for fingerprinting
 	Body        []byte
 	ContentType string
 

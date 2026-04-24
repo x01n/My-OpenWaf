@@ -40,56 +40,69 @@ func NewFingerprintScorer() *FingerprintScorer {
 }
 
 // ExtractFingerprint extracts fingerprint info from request headers and context.
-// In a reverse proxy scenario, TLS termination happens at the WAF layer.
-// JA3/JA4 hashes can be passed via request headers (e.g. X-JA3-Hash) from TLS layer,
-// or computed from available TLS connection state information.
+// It first checks for native TLS fingerprints captured during TLS handshake,
+// then falls back to X-JA3-Hash headers for external TLS terminators.
 func ExtractFingerprint(headers map[string]string, headerKeys []string) FingerprintInfo {
+	return ExtractFingerprintWithIP(headers, headerKeys, "")
+}
+
+// ExtractFingerprintWithIP extracts fingerprints with native TLS lookup by client IP.
+func ExtractFingerprintWithIP(headers map[string]string, headerKeys []string, clientIP string) FingerprintInfo {
 	info := FingerprintInfo{}
 
-	// Extract JA3 from header (set by TLS listener or upstream proxy)
-	if ja3, ok := headers["x-ja3-hash"]; ok {
-		info.JA3Hash = ja3
-	} else if ja3, ok := headers["X-JA3-Hash"]; ok {
-		info.JA3Hash = ja3
+	// Try native TLS fingerprint first (captured from actual TLS handshake).
+	if clientIP != "" {
+		if nativeJA3 := LookupTLSFingerprint(clientIP); nativeJA3 != "" {
+			info.JA3Hash = nativeJA3
+			if fp := GetTLSFingerprinter(); fp != nil {
+				if tlsInfo := fp.Lookup(clientIP); tlsInfo != nil {
+					info.TLSVersion = tlsInfo.TLSVersion
+				}
+			}
+		}
 	}
 
-	// Extract JA4 from header
+	// Fall back to headers if no native fingerprint available.
+	if info.JA3Hash == "" {
+		if ja3, ok := headers["x-ja3-hash"]; ok {
+			info.JA3Hash = ja3
+		} else if ja3, ok := headers["X-JA3-Hash"]; ok {
+			info.JA3Hash = ja3
+		}
+	}
+
 	if ja4, ok := headers["x-ja4-hash"]; ok {
 		info.JA4Hash = ja4
 	} else if ja4, ok := headers["X-JA4-Hash"]; ok {
 		info.JA4Hash = ja4
 	}
 
-	// Extract TLS version from header (numeric string representation)
-	if tlsVer, ok := headers["x-tls-version"]; ok {
-		info.TLSVersion = parseTLSVersion(tlsVer)
-	} else if tlsVer, ok := headers["X-TLS-Version"]; ok {
-		info.TLSVersion = parseTLSVersion(tlsVer)
+	if info.TLSVersion == 0 {
+		if tlsVer, ok := headers["x-tls-version"]; ok {
+			info.TLSVersion = parseTLSVersion(tlsVer)
+		} else if tlsVer, ok := headers["X-TLS-Version"]; ok {
+			info.TLSVersion = parseTLSVersion(tlsVer)
+		}
 	}
 
-	// Extract HTTP/2 settings fingerprint if available
 	if h2s, ok := headers["x-h2-settings"]; ok {
 		info.HTTP2Settings = h2s
 	} else if h2s, ok := headers["X-H2-Settings"]; ok {
 		info.HTTP2Settings = h2s
 	}
 
-	// Extract H2 window size
 	if ws, ok := headers["x-h2-window-size"]; ok {
 		info.H2WindowSize = parseUint32(ws)
 	} else if ws, ok := headers["X-H2-Window-Size"]; ok {
 		info.H2WindowSize = parseUint32(ws)
 	}
 
-	// Determine claimed browser from User-Agent
 	ua := getHeaderCI(headers, "user-agent")
 	info.ClaimedBrowser = BrowserFamilyFromUA(ua)
 
-	// Accept-Language and Accept-Encoding
 	info.AcceptLang = getHeaderCI(headers, "accept-language")
 	info.AcceptEnc = getHeaderCI(headers, "accept-encoding")
 
-	// Compute header order hash
 	info.HeaderOrder = computeHeaderOrderHash(headerKeys)
 
 	return info

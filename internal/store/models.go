@@ -57,7 +57,11 @@ const (
 	ActionAllow     RuleAction = "allow"
 	ActionIntercept RuleAction = "intercept"
 	ActionObserve   RuleAction = "observe"
-	ActionDrop      RuleAction = "drop" // TCP connection close, no HTTP response
+	ActionDrop      RuleAction = "drop"       // TCP connection close, no HTTP response
+	ActionChallenge RuleAction = "challenge"   // JS challenge or CAPTCHA
+	ActionRedirect  RuleAction = "redirect"    // HTTP redirect
+	ActionRateLimit RuleAction = "rate_limit"  // Per-rule rate limiting
+	ActionTag       RuleAction = "tag"         // Tag request (non-terminal)
 
 	// Legacy values for backward compatibility with existing DB rows.
 	ActionBlock   RuleAction = "block"
@@ -82,13 +86,15 @@ type Rule struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
-	Name     string     `gorm:"size:128" json:"name"`
-	PolicyID uint       `gorm:"not null;index" json:"policy_id"`
-	Phase    RulePhase  `gorm:"size:32;not null;index" json:"phase"`
-	Pattern  string     `gorm:"type:text;not null" json:"pattern"`
-	Action   RuleAction `gorm:"size:16;not null" json:"action"`
-	Priority int        `gorm:"default:100" json:"priority"`
-	Enabled  bool       `gorm:"default:true" json:"enabled"`
+	Name       string     `gorm:"size:128" json:"name"`
+	PolicyID   uint       `gorm:"not null;index" json:"policy_id"`
+	Phase      RulePhase  `gorm:"size:32;not null;index" json:"phase"`
+	Pattern    string     `gorm:"type:text;not null" json:"pattern"`
+	Action     RuleAction `gorm:"size:16;not null" json:"action"`
+	Priority   int        `gorm:"default:100" json:"priority"`
+	Enabled    bool       `gorm:"default:true" json:"enabled"`
+	StatusCode int        `gorm:"default:0" json:"status_code"`     // custom HTTP status code (0 = default)
+	RedirectTo string     `gorm:"size:2048" json:"redirect_to"`     // URL for redirect action
 }
 
 // ─── Site ──────────────────────────────────────────────────────────
@@ -121,6 +127,17 @@ type Site struct {
 	BotProtectionEnabled  bool   `gorm:"default:false" json:"bot_protection_enabled"`
 	BotProtectionLevel    string `gorm:"size:16;default:medium" json:"bot_protection_level"`
 	AttackProtectionLevel string `gorm:"size:16;default:medium" json:"attack_protection_level"`
+
+	// Per-site protection overrides (empty/false = inherit from global ProtectionConfig)
+	OWASPEnabled       *bool  `gorm:"default:null" json:"owasp_enabled,omitempty"`
+	OWASPSensitivity   string `gorm:"size:16" json:"owasp_sensitivity,omitempty"`
+	OWASPAction        string `gorm:"size:16" json:"owasp_action,omitempty"`
+	CVEEnabled         *bool  `gorm:"default:null" json:"cve_enabled,omitempty"`
+	CVEAction          string `gorm:"size:16" json:"cve_action,omitempty"`
+	RateLimitEnabled   *bool  `gorm:"default:null" json:"rate_limit_enabled,omitempty"`
+	RateLimitWindow    int    `gorm:"default:0" json:"rate_limit_window,omitempty"`
+	RateLimitMax       int    `gorm:"default:0" json:"rate_limit_max,omitempty"`
+	RateLimitAction    string `gorm:"size:16" json:"rate_limit_action,omitempty"`
 
 	// Forwarding configuration (merged from ForwardingProfile)
 	XFFMode              string `gorm:"size:64;default:strip_all_and_set_remote" json:"xff_mode"`

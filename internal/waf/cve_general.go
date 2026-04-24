@@ -50,6 +50,32 @@ var (
 
 	// HTTP header injection
 	reHeaderInject = regexp.MustCompile(`(?i)%0[dD]%0[aA]\s*(HTTP/|Content-|Location:|Set-Cookie)`)
+
+	// SAP NetWeaver Visual Composer (CVE-2025-31324)
+	reSAPMetadataUploader = regexp.MustCompile(`(?i)/developmentserver/metadatauploader`)
+	reSAPIRJServlet       = regexp.MustCompile(`(?i)/irj/servlet`)
+
+	// PHP-CGI argument injection (CVE-2024-4577)
+	rePHPCGISoftHyphen = regexp.MustCompile(`(?i)[%\x00-\xff]ad.*-[dD]\s*(allow_url_include|auto_prepend_file)`)
+	rePHPCGIArgInject  = regexp.MustCompile(`(?i)php://input.*allow_url_include|auto_prepend_file.*php://input`)
+	rePHPCGISoftHyphen2 = regexp.MustCompile(`%[aA][dD]`)
+
+	// PAN-OS GlobalProtect (CVE-2024-3400)
+	rePANOSCookieTraversal = regexp.MustCompile(`(?i)SESSID=.*\.\.`)
+	rePANOSGlobalProtect   = regexp.MustCompile(`(?i)/ssl-vpn/hipreport\.esp`)
+
+	// Confluence RCE (CVE-2023-22527)
+	reConfluenceOGNL = regexp.MustCompile(`(?i)/template/aui/text-inline\.vm`)
+
+	// Citrix Bleed (CVE-2023-4966)
+	reCitrixBleed = regexp.MustCompile(`(?i)/vpn/\.\./vpns/|/vpn/index\.html`)
+
+	// Apache Struts path traversal (CVE-2024-53677)
+	reStrutsUpload = regexp.MustCompile(`(?i)top\["[^"]*"\]\s*=`)
+
+	// Ivanti Connect Secure (CVE-2024-21887, CVE-2025-0282)
+	reIvantiCSAPI = regexp.MustCompile(`(?i)/api/v1/totp/user-backup-code/\.\.;/`)
+	reIvantiCSWeb = regexp.MustCompile(`(?i)/dana-na/auth/url_default/welcome\.cgi`)
 )
 
 // NewGeneralCVEDetector creates a general CVE detector with built-in rules.
@@ -100,6 +126,49 @@ func NewGeneralCVEDetector() *GeneralCVEDetector {
 			description: "HTTP header injection via CRLF in parameter values",
 			patterns:    []*regexp.Regexp{reHeaderInject},
 			target:      "all",
+		},
+		// 2024-2025 Critical CVEs
+		{
+			cveID: "CVE-2025-31324", severity: "critical",
+			description: "SAP NetWeaver Visual Composer unauthenticated file upload RCE",
+			patterns:    []*regexp.Regexp{reSAPMetadataUploader},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2024-4577", severity: "critical",
+			description: "PHP-CGI argument injection via soft-hyphen (Best-Fit mapping bypass)",
+			patterns:    []*regexp.Regexp{rePHPCGISoftHyphen, rePHPCGIArgInject},
+			target:      "all",
+		},
+		{
+			cveID: "CVE-2024-3400", severity: "critical",
+			description: "PAN-OS GlobalProtect command injection via SESSID cookie traversal",
+			patterns:    []*regexp.Regexp{rePANOSCookieTraversal, rePANOSGlobalProtect},
+			target:      "all",
+		},
+		{
+			cveID: "CVE-2023-22527", severity: "critical",
+			description: "Confluence Server OGNL injection via template endpoint",
+			patterns:    []*regexp.Regexp{reConfluenceOGNL},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2023-4966", severity: "critical",
+			description: "Citrix Bleed information disclosure via path traversal",
+			patterns:    []*regexp.Regexp{reCitrixBleed},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2024-53677", severity: "critical",
+			description: "Apache Struts file upload path traversal RCE",
+			patterns:    []*regexp.Regexp{reStrutsUpload},
+			target:      "all",
+		},
+		{
+			cveID: "CVE-2024-21887", severity: "critical",
+			description: "Ivanti Connect Secure path traversal and command injection",
+			patterns:    []*regexp.Regexp{reIvantiCSAPI, reIvantiCSWeb},
+			target:      "url",
 		},
 	}
 	return d

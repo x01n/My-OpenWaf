@@ -10,18 +10,20 @@ import (
 
 // Compiled is a runtime-ready rule with a pre-built matcher.
 type Compiled struct {
-	ID       uint
-	Phase    string
-	Action   action.Type
-	Priority int
-	Kind     string
-	Arg      string
-	matcher  Matcher
+	ID         uint
+	Phase      string
+	Action     action.Type
+	Priority   int
+	Kind       string
+	Arg        string
+	StatusCode int    // custom HTTP status code (0 = default)
+	RedirectTo string // URL for redirect action
+	matcher    Matcher
 }
 
 // Match delegates to the pre-built matcher.
 func (c *Compiled) Match(ctx MatchCtx) bool {
-	return c.matcher.Match(ctx.ClientIP, ctx.Method, ctx.Path, ctx.Query, ctx.Headers)
+	return c.matcher.Match(ctx.ClientIP, ctx.Method, ctx.Path, ctx.Query, ctx.Headers, ctx.Body)
 }
 
 // Compile converts persisted Rule models into sorted, matcher-ready Compiled slices.
@@ -36,13 +38,15 @@ func Compile(rs []store.Rule) []Compiled {
 			continue
 		}
 		out = append(out, Compiled{
-			ID:       r.ID,
-			Phase:    string(r.Phase),
-			Action:   action.Type(r.Action),
-			Priority: r.Priority,
-			Kind:     kind,
-			Arg:      arg,
-			matcher:  buildMatcher(kind, arg),
+			ID:         r.ID,
+			Phase:      string(r.Phase),
+			Action:     action.Type(r.Action),
+			Priority:   r.Priority,
+			Kind:       kind,
+			Arg:        arg,
+			StatusCode: r.StatusCode,
+			RedirectTo: r.RedirectTo,
+			matcher:    buildMatcher(kind, arg),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -71,7 +75,8 @@ func ParsePattern(p string) (kind, arg string) {
 		"block_header:", "block_header_regex:",
 		"block_method:", "block_content_type:",
 		"block_user_agent:", "block_user_agent_regex:",
-		"header_regex:", "body_contains:", "query_param:",
+		"header_regex:", "body_contains:", "body_regex:", "query_param:",
+		"host:", "cookie_contains:", "referer_contains:",
 	}
 	for _, pfx := range prefixes {
 		if arg, ok := strings.CutPrefix(p, pfx); ok {

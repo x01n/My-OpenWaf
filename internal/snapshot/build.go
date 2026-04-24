@@ -128,10 +128,18 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 			BlockStatus:          s.BlockStatus,
 		}
 		registerSiteKeys(siteMap, rt)
+		// EffectiveProtection is computed later once global protection is loaded.
 	}
 
 	// Load protection settings from SystemSettings.
 	protection := loadProtectionConfig(db)
+
+	// Compute effective per-site protection by merging site overrides onto global config.
+	for key, rt := range siteMap {
+		ep := mergeProtection(protection, rt.Site)
+		rt.EffectiveProtection = &ep
+		siteMap[key] = rt
+	}
 
 	return &Snapshot{
 		Revision:         rev,
@@ -140,6 +148,52 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		SiteTLSCertBySNI: sniCerts,
 		Protection:       protection,
 	}, nil
+}
+
+// mergeProtection creates a ProtectionConfig for a site by overlaying
+// per-site overrides onto the global config. nil/*false = inherit global.
+func mergeProtection(global store.ProtectionConfig, site store.Site) store.ProtectionConfig {
+	p := global // shallow copy
+
+	// Bot detection: per-site override
+	if site.BotProtectionEnabled {
+		p.BotDetectionEnabled = true
+	}
+
+	// OWASP override
+	if site.OWASPEnabled != nil {
+		p.OWASPEnabled = *site.OWASPEnabled
+	}
+	if site.OWASPSensitivity != "" {
+		p.OWASPSensitivity = site.OWASPSensitivity
+	}
+	if site.OWASPAction != "" {
+		p.OWASPAction = site.OWASPAction
+	}
+
+	// CVE override
+	if site.CVEEnabled != nil {
+		p.CVEEnabled = *site.CVEEnabled
+	}
+	if site.CVEAction != "" {
+		p.CVEAction = site.CVEAction
+	}
+
+	// Rate limit override
+	if site.RateLimitEnabled != nil {
+		p.RequestRateLimitEnabled = *site.RateLimitEnabled
+	}
+	if site.RateLimitWindow > 0 {
+		p.RequestRateLimitWindow = site.RateLimitWindow
+	}
+	if site.RateLimitMax > 0 {
+		p.RequestRateLimitMax = site.RateLimitMax
+	}
+	if site.RateLimitAction != "" {
+		p.RequestRateLimitAction = site.RateLimitAction
+	}
+
+	return p
 }
 
 func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) {
@@ -170,7 +224,8 @@ func compileRules(rs []store.Rule) []CompiledRule {
 			continue
 		}
 		out = append(out, CompiledRule{
-			ID: r.ID, Phase: r.Phase, Action: r.Action, Priority: r.Priority, Kind: kind, Arg: arg,
+			ID: r.ID, Phase: r.Phase, Action: r.Action, Priority: r.Priority,
+			Kind: kind, Arg: arg, StatusCode: r.StatusCode, RedirectTo: r.RedirectTo,
 		})
 	}
 	return out
@@ -191,6 +246,9 @@ func ParsePattern(p string) (kind, arg string) {
 		"block_query_contains:", "block_query_regex:",
 		"block_header:", "block_header_regex:",
 		"block_method:", "block_content_type:",
+		"block_user_agent:", "block_user_agent_regex:",
+		"header_regex:", "body_contains:", "body_regex:", "query_param:",
+		"host:", "cookie_contains:", "referer_contains:",
 	}
 	for _, pfx := range prefixes {
 		if strings.HasPrefix(p, pfx) {
