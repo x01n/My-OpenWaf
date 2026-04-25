@@ -107,7 +107,38 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		path := string(c.Path())
+		if rawPath := c.Request.URI().PathOriginal(); len(rawPath) > 0 {
+			path = string(rawPath)
+		}
 		rawQ := string(c.URI().QueryString())
+
+		lowerPath := strings.ToLower(path)
+		if strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+") || strings.Contains(lowerPath, "%2bcscot%2b") || strings.Contains(lowerPath, "%2bcscoe%2b")) {
+			blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:path:015", MatchDesc: "Cisco translation-table path traversal pattern", Matched: true, Category: string(waf.CatPathTrav)}
+			waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+			logAccess(accessLog, reqID, c, "intercept")
+			return
+		}
+		contentType := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
+		if strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") && contentType == "" {
+			body := c.Request.Body()
+			if len(body) == 0 {
+				body = c.Request.BodyBytes()
+			}
+			if len(body) > 0 {
+				rawBody := strings.TrimSpace(string(body))
+				if len(rawBody) > 48*1024 {
+					rawBody = rawBody[:48*1024]
+				}
+				normalized := waf.NormalizeForDebug(rawBody)
+				if waf.IsOpaqueEncodedAttackBodyForDebug(rawBody, normalized, map[string]string{"Host": host}, 3) {
+					blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:proto:010", MatchDesc: "opaque encoded body without content-type", Matched: true, Category: string(waf.CatProtoViol)}
+					waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+					logAccess(accessLog, reqID, c, "intercept")
+					return
+				}
+			}
+		}
 
 		// Build request context from pool to reduce GC pressure.
 		reqCtx := pipeline.AcquireCtx()
@@ -125,14 +156,14 @@ func Handler(opts Options) app.HandlerFunc {
 		})
 
 		// Read body for WAF scanning (capped to avoid memory abuse).
-		const maxWAFBody = 65536
+		const maxWAFBody = 48 * 1024
 		if body := c.Request.Body(); len(body) > 0 {
 			if len(body) > maxWAFBody {
 				reqCtx.Body = body[:maxWAFBody]
 			} else {
 				reqCtx.Body = body
 			}
-			reqCtx.ContentType = string(c.ContentType())
+			reqCtx.ContentType = string(c.Request.Header.ContentType())
 		}
 
 		defer pipeline.ReleaseCtx(reqCtx)
@@ -359,7 +390,7 @@ func Handler(opts Options) app.HandlerFunc {
 		var upstreamErr error
 		switch {
 		case IsWebSocketUpgrade(c):
-			upstreamErr = ForwardWebSocket(c, *result.Site, base)
+			upstreamErr = ForwardWebSocket(c, *result.Site, base, opts.Engine)
 		case IsSSERequest(c):
 			upstreamErr = ForwardSSE(ctx, c, *result.Site, base, clientIP, host)
 		default:

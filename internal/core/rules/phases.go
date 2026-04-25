@@ -446,8 +446,13 @@ func extractBodyTargets(body []byte, contentType string) []string {
 		}
 		return []string{string(body[:limit])}
 	default:
-		// Binary or unknown content types: only scan if the body looks like text
-		// (≥90% printable ASCII in the first 512 bytes).
+		limit := 48 * 1024
+		if len(body) < limit {
+			limit = len(body)
+		}
+		if ct == "" {
+			return []string{string(body[:limit])}
+		}
 		sample := body
 		if len(sample) > 512 {
 			sample = body[:512]
@@ -459,11 +464,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 			}
 		}
 		if float64(printable)/float64(len(sample)) < 0.9 {
-			return nil // Binary data — skip scanning to avoid false positives
-		}
-		limit := 8192
-		if len(body) < limit {
-			limit = len(body)
+			return nil
 		}
 		return []string{string(body[:limit])}
 	}

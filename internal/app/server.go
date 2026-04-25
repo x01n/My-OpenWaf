@@ -362,6 +362,9 @@ func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, d
 	site := siteRT.Site
 	opts := []config.Option{
 		server.WithHostPorts(site.Bind),
+		server.WithUseRawPath(true),
+		server.WithUnescapePathValues(false),
+		server.WithDisablePreParseMultipartForm(true),
 	}
 
 	if site.TLSEnabled {

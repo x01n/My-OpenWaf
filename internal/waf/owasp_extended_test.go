@@ -217,6 +217,61 @@ func TestCheckOWASP_CookieSessionIDSkipped(t *testing.T) {
 	}
 }
 
+func TestCheckOWASP_BlazeFalsePositive_TSXImport(t *testing.T) {
+	hits := CheckOWASP("high", "/run", "file=demo.tsx", nil, []string{"import type { MenuProps } from 'antd'; import { Dropdown } from 'antd';"})
+	if hasCategory(hits, CatSQLi) {
+		t.Fatalf("TSX import snippet should not trigger SQLi, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_PerformanceBeaconScriptWord(t *testing.T) {
+	hits := CheckOWASP("high", "/web/performance", `param={"val_url":"https://open.163.com/newview/search/for power, binary<script is incorrect","performance":true}`, nil, nil)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("telemetry URL text containing '<script' should not trigger XSS, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_AdminUpstreamLocalhost(t *testing.T) {
+	headers := map[string]string{"Content-Type": "application/json"}
+	body := []string{"{\"upstreams\":[\"http://127.0.0.1:8889\"],\"server_names\":[\"1111\"]}"}
+	hits := CheckOWASP("high", "/api/Website", "", headers, body)
+	if hasCategory(hits, CatSSRF) {
+		t.Fatalf("admin upstream config should not trigger SSRF, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeOpaqueEncodedBodyWithoutContentType(t *testing.T) {
+	raw := "qSKqCpjt2Khc2zp3xWlArathZXZB3kZwxj3fvikMvpxI5+g7xgkuPnyZlAa5DN9U9solP15s9JWe6WKDTdOrc8kw0EOTAtkuR+lZMWsETMkmDg6t2Pvo2UyjDM0nAuNHhj6SwP/6qnqUIrborod5T4GQrBa7jPeGVAkRHWmxUck+o76fkJeJlCTcJfEkjM1GmDZbycXWyHQs3NeBeXCKCVKiJ1wxlfyrh7xv+e3gIVTr6fnd/8FW5bFtXBAyNdycLyAbUr6TderOfYXV18501EENBsCxA4hj+IabICZ5Ro+AlaqYHeRt3CTX1F6t2r5D9snHpg8eyYcPog8ZJmzdDQrK3kzfX7aJKILHr2yOzB8cwdi22aeBRDCu94nhlvlR7fVefFUjzOvEQyA9LZ2UCtIjFvvISe2MVXM6OYalvXdFnbw6jJCRfrfO3gu8IAtJFuYb6p8tfGNVZk59rHM2yXGVw+pR66djbiDEz0VFABoeiZPB0VG76hB5szYEfwNvgYUWEQZaQKvp/gvI3+ckwNcwK8qQc0RVshQTuQs/jRcjVDR7hhEWC8+u1DZergAaV89Hf9FZzFuQzAn3Q/Bt7XVP2yyAI7Nke+aFgNDb6jl8CosvA722yIAim92Valte/0vxxbqXekVL5i05WOgRYmBjvfhseIIXYyHbHNGRlQnvkbNBNSONtLZUrUs+gzkOIpOaW+3XPF2SNKGcaJB6Gbft2YULbFbzUEPDAcpj399tQlZ3JH38iLd0jf8DITCvkIB6cOTREj6MmfEYMSSU2Wbp8fgMZAKY107yUzQpeUTHyj3ytAgwvXKLfCvhm98xGcksMQHMkBco4LcO6X9A7mazaIRsXsi5fALdGG1BfcTIohXAINmt/Ka4bIIBrqx/DXqu3UAjPsyTqnJgbuBdJxxFvsZCgYKgmR3lUJot1wpHayrIzoAKQcE3mGRnyksyXIYVxkyxrheMsQZKRhNv+X2BjJMxntw21pCiRsUxtg0RfixBQtOMO/kTOi4QcdLqtCFOUEtwOG//1LADFRxj1VQS03BMUFj4GjwCbwjSWRmT6rJO2QRCZemLVQLpH4fEzRLbPuQG8rzMQfh4NhaOyvQlxiLEmvtyzZ/AtxQ8/t/sQ5g2t9LhWDQgiwVGw8IzvBSXzxoIn7LwCgVQq1drjF2s7pB2R0nJL41jP4SLgEC8e60voCBV88eBCDv6SHgBhEeSyrBtG1nXMfDbUujJIapZlmIhDROEfgcozAna10KXDxzv7l5YgPBv9ENDAbhhUVOh3+Yd8xjGD11sEy2I0JzHRcIvVNl4N+/FQm5cITdlLGjyl7BDKP5cd5IPTqiQzb0zvnBIhZQ6EOHEa21v6F8opRUDRx0/5Zq6AxPW2i+bH5lHjj69zwf9pK2FBUAdQ1AcNisgkkRUgKJAJVbr0eITvkdTrU5xlgysjLntSUnbMjs89YiFz4RtJGSViToJ2VVrfsH2mzKL+0C3GLkm6WDxI0kg8cEHn8WC/yla9w3CYbEKL7E0l1dqw2uekyK6OtUBgkXIkCRbvHCERFAtMEScBfWHTId3awys//Q/Vs7qTbHT+wsECpN/kvOkxyw+"
+	hits := CheckOWASP("high", "/uc/feedback/api/v1/pc/feedback/add", "", map[string]string{"Host": "10.10.3.128:2280"}, []string{raw})
+	if !hasCategory(hits, CatProtoViol) {
+		t.Fatalf("opaque long base64-like body without content-type should trigger protocol violation, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_CodePenInlineScript(t *testing.T) {
+	body := []string{"https://codepen.io https://cpwebassets.codepen.io <script src=\"https://cpwebassets.codepen.io/assets/editor/iframe/iframeConsoleRunner.js\"></script> React.createElement createRoot preventDefault target=\"_blank\""}
+	hits := CheckOWASP("high", "/cpe/boomboom/store", "", map[string]string{"Content-Type": "application/json"}, body)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("CodePen editor payload should not trigger XSS, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_CTripJavaDeserializeMessage(t *testing.T) {
+	body := []string{"Cannot deserialize instance of java.util.ArrayList<java.lang.Integer> out of VALUE_STRING token; resource.c-ctrip.com load success"}
+	hits := CheckOWASP("high", "/bee/collect", "", map[string]string{"Content-Type": "application/json"}, body)
+	if hasCategory(hits, CatWebshell) {
+		t.Fatalf("ctrip deserialize error text should not trigger webshell, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalseNegative_QueryValueBase64UnionSelect(t *testing.T) {
+	hits := CheckOWASP("high", "/", "multi=register&prepare=encapsulate&report=TlM4cUlHRndjR1Z1WkdOdmJXMWxiblJ6Y25OelptVmhkSFZ5WldOeVpXVndZMkZqYUdWamIyNTBZV2x1YzJSeVlXZHZibVpzZVcxaGRHTm9kbTlwWkdSd1kyME5hbk52Ym1sdGNHOXlkSE5oYkdsbmJteGxablIwWVdKcGJtUmxlSEpsWTNSemMyTnliMnhzWW1GeURRMGdLaTlCYm1RTk5Rb2pJR1psWkc5eVlXRm1kR1Z5Ym05dmJtWnZjbU5sWkc1aGRHbDJaU0FLUFNNZ1pHRjBaWFJwYldWd2JHRjVjMmx1WjJ4bElBb3pMeW9nWVdKemIyeDFkR1Z2Y21sbGJuUmhkR2x2Ym5WdVkyeHZjMlZrQ25CdmFXNTBjMkZ0WVhsaGIyeGtiMjVzYjJGa0lDb3ZMUzBnWTI5eWNtVmpkSE5yZVhCbGNHeGhlWE4wWVhScGIyNXdjbVZtWlhKeVpXUnZjSFJuY205MWNHbHVkR1Z5ZG1Gc1pYaHdZVzVrYjJOb1lXNW5aV1J5WlhGMVpYTjBaV1FnQ25WdVNVOU9MeW9nY25WdWRHbHRaWGRwYkd4d1lYSmxiblFLSUNvdlUwVk1SVU4wRFMwdElITjBhV05yZVhadmFXUnpaV04wYVc5dWMzTmhkSFZ5WkdGNVpHbHlaV04wYVhabGMyeHBjM1J1WVhScGRtVnlkV2xrWkc5MVlteGxJQW94Q2lNPQ%3D%3D", nil, nil)
+	if !hasCategory(hits, CatSQLi) {
+		t.Fatalf("nested base64 query payload should trigger SQLi, got %+v", hits)
+	}
+}
+
+
 func TestNormalize_HTMLEntity(t *testing.T) {
 	input := "&#60;script&#62;alert(1)&#60;/script&#62;"
 	result := normalize(input)
