@@ -13,6 +13,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 )
@@ -95,15 +96,28 @@ func sharedClient(tr *http.Transport) *http.Client {
 	return hc
 }
 
-// ForwardHTTP copies the incoming request to upstream and streams the response.
-func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) error {
+// HTTPResponse is a buffered upstream response used by the cache path.
+type HTTPResponse struct {
+	StatusCode  int
+	ContentType string
+	Body        []byte
+	Header      http.Header
+}
+
+func requestPath(c *app.RequestContext) string {
+	if rawPath := c.Request.URI().PathOriginal(); len(rawPath) > 0 {
+		return string(rawPath)
+	}
 	path := string(c.Path())
 	if path == "" {
-		path = "/"
+		return "/"
 	}
-	q := c.URI().QueryString()
-	full := strings.TrimRight(base, "/") + path
-	if len(q) > 0 {
+	return path
+}
+
+func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base string, clientIP net.IP, origHost string, preserveOriginalHost bool) (*http.Request, error) {
+	full := strings.TrimRight(base, "/") + requestPath(c)
+	if q := c.URI().QueryString(); len(q) > 0 {
 		full += "?" + string(q)
 	}
 
@@ -115,7 +129,7 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 
 	req, err := http.NewRequestWithContext(ctx, string(c.Method()), full, rdr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	c.Request.Header.VisitAll(func(k, v []byte) {
@@ -126,7 +140,113 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		req.Header.Add(string(k), string(v))
 	})
 
-	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.PreserveOriginalHost)
+	security.ApplyOutboundForwarding(req, clientIP, origHost, preserveOriginalHost)
+	return req, nil
+}
+
+func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
+	for k, vv := range src {
+		if isHopByHop(k) {
+			continue
+		}
+		for _, v := range vv {
+			dst.Response.Header.Add(k, v)
+		}
+	}
+	if src.Get("Server") == "" {
+		dst.Response.Header.Del("Server")
+	}
+}
+
+// FetchHTTP performs the upstream request and returns a buffered response.
+func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*HTTPResponse, error) {
+	req, err := buildUpstreamRequest(ctx, c, base, clientIP, origHost, rt.PreserveOriginalHost)
+	if err != nil {
+		return nil, err
+	}
+
+	tr := SharedTransport(rt)
+	hc := sharedClient(tr)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return &HTTPResponse{
+		StatusCode:  resp.StatusCode,
+		ContentType: resp.Header.Get("Content-Type"),
+		Body:        respBody,
+		Header:      resp.Header.Clone(),
+	}, nil
+}
+
+func ForwardBufferedResponse(c *app.RequestContext, resp *HTTPResponse) {
+	if resp == nil {
+		return
+	}
+	if resp.Header != nil {
+		copyResponseHeaders(c, resp.Header)
+	}
+	if resp.ContentType != "" && (resp.Header == nil || resp.Header.Get("Content-Type") == "") {
+		c.SetContentType(resp.ContentType)
+	}
+	c.Status(resp.StatusCode)
+	c.Response.SetBodyRaw(resp.Body)
+}
+
+func ForwardCachedResponse(c *app.RequestContext, entryStatus int, contentType string, body []byte) {
+	if contentType != "" {
+		c.SetContentType(contentType)
+	}
+	c.Status(entryStatus)
+	c.Response.SetBodyRaw(body)
+}
+
+func ShouldCacheResponse(method string, statusCode int, body []byte) bool {
+	return strings.EqualFold(method, "GET") && statusCode == 200 && len(body) > 0
+}
+
+func SiteCacheTTL(rt snapshot.SiteRuntime, path string) int64 {
+	if !rt.CacheEnabled {
+		return 0
+	}
+	for _, rule := range rt.CacheRules {
+		if strings.HasPrefix(path, rule.Path) {
+			return int64(rule.TTL)
+		}
+	}
+	if rt.CacheDefaultTTL > 0 {
+		return int64(rt.CacheDefaultTTL)
+	}
+	return 0
+}
+
+func SiteCacheKey(c *app.RequestContext) string {
+	return cache.CacheKey(string(c.Method()), string(c.Host()), requestPath(c), string(c.URI().QueryString()))
+}
+
+func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (string, int64) {
+	if !rt.CacheEnabled || !strings.EqualFold(string(c.Method()), "GET") {
+		return "", 0
+	}
+	ttl := SiteCacheTTL(rt, requestPath(c))
+	if ttl <= 0 {
+		return "", 0
+	}
+	return SiteCacheKey(c), ttl
+}
+
+// ForwardHTTP copies the incoming request to upstream and streams the response.
+func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) error {
+	req, err := buildUpstreamRequest(ctx, c, base, clientIP, origHost, rt.PreserveOriginalHost)
+	if err != nil {
+		return err
+	}
 
 	tr := SharedTransport(rt)
 	hc := sharedClient(tr)
@@ -136,19 +256,7 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	}
 	defer resp.Body.Close()
 
-	// Strip hop-by-hop headers from upstream response before forwarding to client.
-	for k, vv := range resp.Header {
-		if isHopByHop(k) {
-			continue
-		}
-		for _, v := range vv {
-			c.Response.Header.Add(k, v)
-		}
-	}
-	// Remove any Server header added by the framework — let upstream's header stand.
-	if resp.Header.Get("Server") == "" {
-		c.Response.Header.Del("Server")
-	}
+	copyResponseHeaders(c, resp.Header)
 	c.Status(resp.StatusCode)
 	_, err = io.Copy(c.Response.BodyWriter(), resp.Body)
 	return err

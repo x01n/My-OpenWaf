@@ -6,6 +6,7 @@ import { getAccessToken } from "@/lib/api";
 
 export default function RootPage() {
   const router = useRouter();
+
   useEffect(() => {
     if (getAccessToken()) {
       router.replace("/dashboard/");
@@ -13,5 +14,6 @@ export default function RootPage() {
       router.replace("/login/");
     }
   }, [router]);
+
   return null;
 }

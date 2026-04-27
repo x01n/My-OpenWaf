@@ -15,19 +15,21 @@ export default function DashboardLayout({
 
   return (
     <AuthGuard>
-      <div className="flex h-svh overflow-hidden gradient-bg">
+      <div className="console-app-shell flex min-h-svh bg-slate-100/80 text-slate-950">
         <SidebarNav
           collapsed={sidebarCollapsed}
-          onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+          onToggle={() => setSidebarCollapsed((value) => !value)}
         />
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="flex min-w-0 flex-1 flex-col">
           <DashboardTopbar />
-          <main className="flex-1 overflow-y-auto bg-gray-50">
-            <div className="mx-auto max-w-7xl px-6 py-6">{children}</div>
+          <main className="min-w-0 flex-1 overflow-y-auto">
+            <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 px-5 py-6 md:px-7">
+              {children}
+            </div>
           </main>
         </div>
       </div>
-      <Toaster />
+      <Toaster richColors />
     </AuthGuard>
   );
 }

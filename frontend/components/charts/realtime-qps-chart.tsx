@@ -63,7 +63,7 @@ export function RealtimeQPSChart({ data, height = 280 }: RealtimeQPSChartProps) 
             boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
           }}
           labelStyle={{ color: "#374151", fontWeight: 600 }}
-          formatter={(value: any) => [`${value ?? 0} req/s`, "QPS"]}
+          formatter={(value) => [`${value ?? 0} req/s`, "QPS"]}
         />
         <Area
           type="monotone"

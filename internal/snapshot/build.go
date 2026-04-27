@@ -107,6 +107,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		if xffMode == "" {
 			xffMode = store.XFFModeStrip
 		}
+		cacheRules := parseSiteCacheRules(s.CacheRules)
 
 		rt := SiteRuntime{
 			Site:                 s,
@@ -121,6 +122,9 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 			XFFMode:              xffMode,
 			TrustedCIDR:          s.TrustedCIDR,
 			PreserveOriginalHost: s.PreserveOriginalHost,
+			CacheEnabled:         s.CacheEnabled,
+			CacheDefaultTTL:      s.CacheDefaultTTL,
+			CacheRules:           cacheRules,
 			MaintenanceEnabled:   s.MaintenanceEnabled,
 			MaintenanceHTML:      s.MaintenanceHTML,
 			MaintenanceStatus:    s.MaintenanceStatus,
@@ -256,6 +260,31 @@ func ParsePattern(p string) (kind, arg string) {
 		}
 	}
 	return "", ""
+}
+
+func parseSiteCacheRules(raw string) []store.SiteCacheRule {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var rules []store.SiteCacheRule
+	if err := json.Unmarshal([]byte(raw), &rules); err != nil {
+		return nil
+	}
+	filtered := make([]store.SiteCacheRule, 0, len(rules))
+	for _, rule := range rules {
+		rule.Path = strings.TrimSpace(rule.Path)
+		if rule.Path == "" || rule.TTL <= 0 {
+			continue
+		}
+		if !strings.HasPrefix(rule.Path, "/") {
+			rule.Path = "/" + rule.Path
+		}
+		filtered = append(filtered, rule)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return len(filtered[i].Path) > len(filtered[j].Path)
+	})
+	return filtered
 }
 
 func loadProtectionConfig(db *gorm.DB) store.ProtectionConfig {

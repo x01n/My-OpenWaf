@@ -1,7 +1,9 @@
 "use client";
 
-import { usePathname } from "next/navigation";
-import { ChevronRight, User } from "lucide-react";
+import { Bell, ChevronRight, RefreshCcw, User } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { logout } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,33 +12,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Button } from "@/components/ui/button";
-import { logout } from "@/lib/api";
-import { useRouter } from "next/navigation";
-
-const routeMeta = [
-  { prefix: "/dashboard/", title: "仪表盘", description: "查看流量、错误、拦截与配置修订概览。", breadcrumb: "仪表盘" },
-  { prefix: "/sites/", title: "防护应用", description: "管理您的 Web 应用防护配置与上游服务。", breadcrumb: "防护应用" },
-  { prefix: "/certificates/", title: "证书", description: "维护站点与监听器使用的 TLS 证书。", breadcrumb: "证书管理" },
-  { prefix: "/security-events/", title: "安全事件", description: "查看 WAF 拦截与观察日志，按 IP、类型与时间筛选。", breadcrumb: "安全事件" },
-  { prefix: "/ip-lists/", title: "IP 黑白名单", description: "按 IP 或 CIDR 管理黑名单与白名单条目。", breadcrumb: "IP 黑白名单" },
-  { prefix: "/policies/", title: "策略", description: "按策略分组组织规则并绑定到站点。", breadcrumb: "策略管理" },
-  { prefix: "/rules/", title: "规则", description: "管理拦截、观察与放行规则，覆盖多个评估阶段。", breadcrumb: "规则管理" },
-  { prefix: "/protection/", title: "防护设置", description: "统一配置限流、内置 OWASP 与全局维护模式。", breadcrumb: "防护设置" },
-  { prefix: "/settings/", title: "系统设置", description: "查看与维护系统级键值配置。", breadcrumb: "系统设置" },
-  { prefix: "/api-keys/", title: "API 密钥", description: "管理自动化访问使用的长期 Bearer Token。", breadcrumb: "API 密钥" },
-];
-
-const defaultMeta = {
-  title: "控制台",
-  description: "统一管理多站点 WAF 的接入、防护与系统配置。",
-  breadcrumb: "控制台",
-};
+import { getNavMeta } from "@/lib/console";
 
 export function DashboardTopbar() {
   const pathname = usePathname();
   const router = useRouter();
-  const meta = routeMeta.find((item) => pathname?.startsWith(item.prefix)) ?? defaultMeta;
+  const meta = getNavMeta(pathname);
 
   async function handleLogout() {
     await logout();
@@ -44,27 +25,38 @@ export function DashboardTopbar() {
   }
 
   return (
-    <header className="border-b border-gray-200 bg-white">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-2.5">
-        <div className="flex items-center gap-3 min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-gray-400 cursor-pointer hover:text-gray-600 transition-colors">控制台</span>
-            <ChevronRight className="h-4 w-4 text-gray-400" />
-            <span className="text-gray-700 font-medium truncate">{meta.breadcrumb}</span>
+    <header className="sticky top-0 z-30 border-b border-slate-200/70 bg-white/78 backdrop-blur-xl">
+      <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4 px-5 py-4 md:px-7">
+        <div className="min-w-0 space-y-2">
+          <div className="flex items-center gap-2 text-xs font-medium tracking-[0.18em] text-slate-400 uppercase">
+            <span>控制台</span>
+            <ChevronRight className="h-3.5 w-3.5" />
+            <span>{meta.group}</span>
+          </div>
+          <div>
+            <h2 className="truncate text-xl font-semibold tracking-tight text-slate-950">{meta.label}</h2>
+            <p className="mt-1 truncate text-sm text-slate-500">{meta.description}</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" className="hidden rounded-xl border-slate-200 text-slate-600 md:inline-flex" onClick={() => window.location.reload()}>
+            <RefreshCcw className="mr-2 h-4 w-4" />
+            刷新数据
+          </Button>
+          <Button variant="ghost" size="icon-sm" className="rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-900">
+            <Bell className="h-4 w-4" />
+          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full">
-                <User className="h-4 w-4 text-gray-500" />
+              <Button variant="ghost" size="icon-sm" className="rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-950">
+                <User className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuContent align="end" className="w-56 rounded-2xl border-slate-200 bg-white/96 backdrop-blur">
               <DropdownMenuLabel>管理员账户</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleLogout} className="text-destructive cursor-pointer">
+              <DropdownMenuItem onClick={handleLogout} className="text-rose-600 cursor-pointer">
                 退出登录
               </DropdownMenuItem>
             </DropdownMenuContent>

@@ -1,15 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
+import { useEffect, useState } from "react";
+import { Eye, Shield, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Shield, Eye, Wrench } from "lucide-react";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 export type ProtectionMode = "protect" | "observe" | "maintenance";
@@ -26,91 +20,81 @@ const modes = [
   {
     key: "protect" as const,
     label: "防护模式",
-    description: "发现攻击后将自动拦截，并记录攻击事件",
+    description: "命中攻击时直接拦截，并写入安全事件。",
     icon: Shield,
-    borderColor: "border-teal-500",
-    bgColor: "bg-teal-500/10",
-    textColor: "text-teal-600 dark:text-teal-400",
-    ringColor: "ring-teal-500",
+    classes: "border-cyan-300 bg-cyan-50 text-cyan-900",
+    iconBox: "bg-cyan-100 text-cyan-700",
   },
   {
     key: "observe" as const,
     label: "观察模式",
-    description: "发现攻击后仅记录攻击事件，不拦截",
+    description: "仅记录攻击事件，不中断访问链路。",
     icon: Eye,
-    borderColor: "border-amber-500",
-    bgColor: "bg-amber-500/10",
-    textColor: "text-amber-600 dark:text-amber-400",
-    ringColor: "ring-amber-500",
+    classes: "border-amber-300 bg-amber-50 text-amber-900",
+    iconBox: "bg-amber-100 text-amber-700",
   },
   {
     key: "maintenance" as const,
     label: "维护模式",
-    description: "展示维护页面，任何人都将无法访问您的应用",
+    description: "直接返回维护页面，不再继续访问上游。",
     icon: Wrench,
-    borderColor: "border-rose-500",
-    bgColor: "bg-rose-500/10",
-    textColor: "text-rose-600 dark:text-rose-400",
-    ringColor: "ring-rose-500",
+    classes: "border-rose-300 bg-rose-50 text-rose-900",
+    iconBox: "bg-rose-100 text-rose-700",
   },
 ];
 
-export function ProtectionModeDialog({
-  open,
-  onOpenChange,
-  currentMode,
-  onConfirm,
-  loading,
-}: ProtectionModeDialogProps) {
+export function ProtectionModeDialog({ open, onOpenChange, currentMode, onConfirm, loading }: ProtectionModeDialogProps) {
   const [selected, setSelected] = useState<ProtectionMode>(currentMode);
+
+  useEffect(() => {
+    setSelected(currentMode);
+  }, [currentMode, open]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>选择防护模式</DialogTitle>
+      <DialogContent className="max-w-2xl rounded-[28px] p-0">
+        <DialogHeader className="border-b border-white/10 bg-[linear-gradient(135deg,rgba(10,19,34,0.96),rgba(11,27,48,0.9)_55%,rgba(10,69,88,0.5))] px-6 py-6 text-left text-white">
+          <DialogTitle className="text-2xl font-semibold tracking-tight">选择防护模式</DialogTitle>
+          <DialogDescription className="mt-2 text-sm leading-6 text-slate-300/90">该设置用于切换站点的即时处理策略，确认后会走真实更新接口并触发运行时生效。</DialogDescription>
         </DialogHeader>
-        <div className="grid gap-3 py-4">
-          {modes.map((mode) => (
-            <button
-              key={mode.key}
-              onClick={() => setSelected(mode.key)}
-              className={cn(
-                "flex items-start gap-4 rounded-lg border-2 p-4 text-left transition-all hover:shadow-md",
-                selected === mode.key
-                  ? `${mode.borderColor} ${mode.bgColor} ring-2 ${mode.ringColor} ring-offset-2`
-                  : "border-border hover:border-muted-foreground/30"
-              )}
-            >
-              <div
+
+        <div className="grid gap-4 px-6 py-6 md:grid-cols-3">
+          {modes.map((mode) => {
+            const Icon = mode.icon;
+            const active = selected === mode.key;
+            return (
+              <button
+                key={mode.key}
+                type="button"
+                onClick={() => setSelected(mode.key)}
                 className={cn(
-                  "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
-                  mode.bgColor
+                  "rounded-[24px] border p-5 text-left transition-all",
+                  active ? `${mode.classes} shadow-[0_18px_40px_rgba(15,23,42,0.08)]` : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300 hover:bg-white"
                 )}
               >
-                <mode.icon className={cn("h-5 w-5", mode.textColor)} />
-              </div>
-              <div>
-                <div className={cn("font-semibold", mode.textColor)}>
-                  {mode.label}
+                <div className={cn("flex h-11 w-11 items-center justify-center rounded-2xl", active ? mode.iconBox : "bg-white text-slate-500")}>
+                  <Icon className="h-5 w-5" />
                 </div>
-                <div className="mt-1 text-sm text-muted-foreground">
-                  {mode.description}
+                <div className="mt-4 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-semibold">{mode.label}</div>
+                    <span className={active ? "console-badge border-white/40 bg-white/70 text-slate-900" : "console-badge bg-slate-100 text-slate-500 border-slate-200"}>
+                      {active ? "当前选择" : "可切换"}
+                    </span>
+                  </div>
+                  <p className={active ? "text-xs leading-6 text-current/85" : "text-xs leading-6 text-slate-500"}>{mode.description}</p>
                 </div>
-              </div>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+
+        <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
+          <Button variant="outline" className="rounded-xl" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button
-            onClick={() => onConfirm(selected)}
-            disabled={loading}
-            className="bg-teal-600 hover:bg-teal-700 text-white"
-          >
-            确认
+          <Button onClick={() => onConfirm(selected)} disabled={loading} className="rounded-xl bg-slate-950 text-white hover:bg-slate-800">
+            {loading ? "保存中..." : "确认切换"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -118,15 +102,12 @@ export function ProtectionModeDialog({
   );
 }
 
-export function getProtectionMode(site: {
-  maintenance_enabled?: boolean;
-  attack_protection_level?: string;
-}): ProtectionMode {
+export function getProtectionMode(site: { maintenance_enabled?: boolean; attack_protection_level?: string }): ProtectionMode {
   if (site.maintenance_enabled) return "maintenance";
   if (site.attack_protection_level === "observe") return "observe";
   return "protect";
 }
 
 export function protectionModeLabel(mode: ProtectionMode): string {
-  return modes.find((m) => m.key === mode)?.label ?? "防护模式";
+  return modes.find((item) => item.key === mode)?.label ?? "防护模式";
 }

@@ -1,171 +1,184 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
+import { Copy, KeyRound, Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { api } from "@/lib/api";
-import { toast } from "sonner";
-import { Plus, Trash2, Copy } from "lucide-react";
-
-interface APIKey {
-  id: number;
-  name: string;
-  created_at: string;
-  last_used_at: string | null;
-}
+import { EmptyState, InlineMeta, PageIntro, Surface } from "@/components/console-shell";
+import { createAPIKey, getAPIKeys, removeAPIKey, type APIKey } from "@/lib/api";
+import { formatDate } from "@/lib/utils";
 
 export default function APIKeysPage() {
   const [keys, setKeys] = useState<APIKey[]>([]);
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [newToken, setNewToken] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [newKeyName, setNewKeyName] = useState("");
+  const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<APIKey | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  const load = useCallback(async () => {
-    const data = await api<{ items: APIKey[] }>("/api/v1/api-keys");
-    setKeys(data.items || []);
+  function load() {
+    setLoading(true);
+    getAPIKeys()
+      .then((data) => setKeys(data.items || []))
+      .catch((error) => toast.error(String(error)))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    load();
   }, []);
-
-  useEffect(() => { load(); }, [load]);
 
   async function handleCreate() {
     try {
-      const res = await api<{ token: string }>("/api/v1/api-keys", {
-        method: "POST",
-        body: JSON.stringify({ name: name || "unnamed" }),
-      });
-      setNewToken(res.token);
-      toast.success("创建成功，请立即保存 Token");
+      const response = await createAPIKey(newKeyName || "unnamed");
+      setCreatedToken(response.token || null);
+      setNewKeyName("");
+      toast.success("密钥已创建，请立即复制明文 Token。");
       load();
-    } catch {
-      toast.error("创建失败");
+    } catch (error) {
+      toast.error(String(error));
     }
   }
 
   async function handleDelete() {
     if (!deleteTarget) return;
+    setDeleting(true);
+    setBusyId(deleteTarget.id);
     try {
-      await api(`/api/v1/api-keys/${deleteTarget.id}/delete`, { method: "POST" });
-      toast.success("已删除");
+      await removeAPIKey(deleteTarget.id);
+      toast.success("API 密钥已删除");
       setDeleteTarget(null);
       load();
-    } catch {
-      toast.error("删除失败");
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setDeleting(false);
+      setBusyId(null);
     }
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">API 密钥</h1>
-          <p className="text-sm text-muted-foreground">用于自动化或机器调用的 Bearer Token。人机登录使用密码。</p>
-        </div>
-        <Button size="sm" onClick={() => { setOpen(true); setNewToken(""); setName(""); }}>
-          <Plus className="mr-1 h-4 w-4" /> 新增
-        </Button>
-      </div>
+    <div className="space-y-6">
+      <PageIntro
+        eyebrow="Automation Access"
+        title="API 密钥"
+        description="为自动化任务、CI/CD 或运维脚本生成 Bearer Token。后端只会在创建成功时返回一次明文 Token。"
+        actions={
+          <Button className="rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={() => { setDialogOpen(true); setCreatedToken(null); setNewKeyName(""); }}>
+            <Plus className="mr-2 h-4 w-4" /> 创建密钥
+          </Button>
+        }
+      />
 
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>ID</TableHead>
-                <TableHead>名称</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead>最近使用</TableHead>
-                <TableHead className="w-16">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {keys.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={5} className="h-20 text-center text-muted-foreground">
-                    暂无 API 密钥
-                  </TableCell>
-                </TableRow>
-              ) : (
-                keys.map((k) => (
-                  <TableRow key={k.id}>
-                    <TableCell className="font-mono text-xs">{k.id}</TableCell>
-                    <TableCell>{k.name}</TableCell>
-                    <TableCell className="text-xs">{new Date(k.created_at).toLocaleString("zh-CN")}</TableCell>
-                    <TableCell className="text-xs">{k.last_used_at ? new Date(k.last_used_at).toLocaleString("zh-CN") : "—"}</TableCell>
-                    <TableCell>
-                      <Button variant="ghost" size="icon" onClick={() => setDeleteTarget(k)}>
-                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+      <Surface title="密钥清单" description="当前账户下所有 API 密钥的名称、创建时间与最近使用情况。">
+        {loading ? (
+          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
+        ) : keys.length === 0 ? (
+          <EmptyState title="还没有 API 密钥" description="创建后可用于自动化访问管理 API。建议按用途拆分，便于审计与吊销。" />
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-2">
+            {keys.map((item) => (
+              <Surface key={item.id} className="overflow-hidden">
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-50 text-cyan-700">
+                        <KeyRound className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h2 className="text-lg font-semibold text-slate-950">{item.name}</h2>
+                        <p className="mt-1 text-sm text-slate-500">ID #{item.id}</p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="rounded-xl text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                      disabled={busyId === item.id}
+                      onClick={() => setDeleteTarget(item)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <InlineMeta label="创建时间" value={formatDate(item.created_at)} />
+                    <InlineMeta label="最近使用" value={item.last_used_at ? formatDate(item.last_used_at) : "从未使用"} />
+                  </div>
+                </div>
+              </Surface>
+            ))}
+          </div>
+        )}
+      </Surface>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="max-w-lg rounded-[28px]">
           <DialogHeader>
-            <DialogTitle>新增 API 密钥</DialogTitle>
+            <DialogTitle>{createdToken ? "令牌已创建" : "创建 API 密钥"}</DialogTitle>
+            <DialogDescription>{createdToken ? "请立即复制返回的明文 Token。" : "创建后仅会返回一次明文 Token。"}</DialogDescription>
           </DialogHeader>
-          {!newToken ? (
-            <div className="space-y-3">
-              <div className="space-y-1">
-                <Label>名称</Label>
-                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="用途备注" />
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-sm font-medium text-destructive">请立即复制此 Token，关闭后将无法再查看。</p>
-              <div className="flex gap-2">
-                <Input readOnly value={newToken} className="font-mono text-xs" />
-                <Button size="icon" variant="outline" onClick={() => { navigator.clipboard.writeText(newToken); toast.success("已复制"); }}>
+          {createdToken ? (
+            <div className="space-y-4">
+              <p className="text-sm leading-6 text-slate-500">请立即复制此 Token，关闭后将无法再次查看明文。</p>
+              <div className="flex gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                <code className="flex-1 break-all text-xs text-slate-700">{createdToken}</code>
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  className="rounded-xl"
+                  onClick={() => {
+                    navigator.clipboard.writeText(createdToken);
+                    toast.success("已复制到剪贴板");
+                  }}
+                >
                   <Copy className="h-4 w-4" />
                 </Button>
               </div>
             </div>
+          ) : (
+            <div className="space-y-2">
+              <Label htmlFor="api-key-name">密钥名称</Label>
+              <Input
+                id="api-key-name"
+                value={newKeyName}
+                onChange={(event) => setNewKeyName(event.target.value)}
+                placeholder="例如：CI Deploy / Terraform / Alert Sync"
+                className="rounded-xl"
+              />
+            </div>
           )}
           <DialogFooter>
-            {!newToken ? (
-              <Button onClick={handleCreate}>创建</Button>
+            {createdToken ? (
+              <Button onClick={() => setDialogOpen(false)}>完成</Button>
             ) : (
-              <Button onClick={() => setOpen(false)}>完成</Button>
+              <Button onClick={handleCreate}>创建</Button>
             )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>确认删除</AlertDialogTitle>
-            <AlertDialogDescription>
-              删除 API 密钥「{deleteTarget?.name}」后，使用该密钥的自动化调用将立即失效。此操作不可撤销。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={handleDelete}>删除</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent className="max-w-md rounded-[28px]">
+          <DialogHeader>
+            <DialogTitle>确认删除 API 密钥</DialogTitle>
+            <DialogDescription>删除后该密钥将立即失效，相关自动化任务需要改用新的 Token。</DialogDescription>
+          </DialogHeader>
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-900">
+            目标密钥：{deleteTarget?.name || "-"}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button className="bg-rose-600 hover:bg-rose-500" disabled={deleting} onClick={handleDelete}>
+              {deleting ? "删除中..." : "删除"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

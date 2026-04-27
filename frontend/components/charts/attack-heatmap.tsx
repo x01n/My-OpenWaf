@@ -65,7 +65,7 @@ export function AttackHeatmap({ data, height = 280 }: AttackHeatmapProps) {
             boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
           }}
           labelStyle={{ color: "#374151", fontWeight: 600 }}
-          formatter={(value: any) => [`${value ?? 0} 次`, "攻击"]}
+          formatter={(value) => [`${value ?? 0} 次`, "攻击"]}
         />
         <Bar dataKey="count" radius={[4, 4, 0, 0]} animationDuration={500}>
           {data.map((_, index) => (

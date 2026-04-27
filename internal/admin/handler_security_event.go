@@ -72,7 +72,108 @@ func GetSecurityEvent(repo *repository.SecurityEventRepo) app.HandlerFunc {
 	}
 }
 
+func ListSiteSecurityEvents(siteRepo *repository.SiteRepo, repo *repository.SecurityEventRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		siteID, err := parseUintParam(c, "id")
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		site, err := siteRepo.Get(siteID)
+		if err != nil {
+			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+		page, _ := strconv.Atoi(string(c.Query("page")))
+		pageSize, _ := strconv.Atoi(string(c.Query("page_size")))
+		offset, limit := utils.Paginate(page, pageSize)
+		f := repository.SecurityEventFilter{
+			Action:   string(c.Query("action")),
+			Phase:    string(c.Query("phase")),
+			Category: string(c.Query("category")),
+			ClientIP: string(c.Query("client_ip")),
+			Path:     string(c.Query("path")),
+			Host:     site.Host,
+		}
+		items, total, err := repo.ListBySite(siteID, offset, limit, f)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		c.JSON(200, map[string]any{"items": items, "total": total, "page": page})
+	}
+}
+
 // ─── Security Events Statistics ───────────────────────────────────
+
+func SiteSecurityEventStats(siteRepo *repository.SiteRepo, repo *repository.SecurityEventRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		siteID, err := parseUintParam(c, "id")
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		if _, err := siteRepo.Get(siteID); err != nil {
+			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+		hours := 24
+		if h := string(c.Query("hours")); h != "" {
+			if v, err := strconv.Atoi(h); err == nil && v > 0 {
+				hours = v
+			}
+		}
+		since := time.Now().Add(-time.Duration(hours) * time.Hour)
+		categories, _ := repo.CategoryStatsBySite(siteID, since)
+		topIPs, _ := repo.TopIPsBySite(siteID, since, 10)
+		topPaths, _ := repo.TopPathsBySite(siteID, since, 10)
+		topRules, _ := repo.TopRulesBySite(siteID, since, 10)
+		total, _ := repo.CountBySite(siteID, repository.SecurityEventFilter{Since: &since})
+		intercepts, _ := repo.CountTerminalBySite(siteID, since)
+		observes, _ := repo.CountObserveBySite(siteID, since)
+		requestCount, _ := repo.DistinctRequestCountBySite(siteID, since)
+		c.JSON(200, map[string]any{
+			"total": total,
+			"hours": hours,
+			"categories": categories,
+			"top_ips": topIPs,
+			"top_paths": topPaths,
+			"top_rules": topRules,
+			"intercepts": intercepts,
+			"observes": observes,
+			"requests": requestCount,
+		})
+	}
+}
+
+func SiteSecurityEventTimeline(siteRepo *repository.SiteRepo, repo *repository.SecurityEventRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		siteID, err := parseUintParam(c, "id")
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		if _, err := siteRepo.Get(siteID); err != nil {
+			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+		hours := 24
+		if h := string(c.Query("hours")); h != "" {
+			if v, err := strconv.Atoi(h); err == nil && v > 0 {
+				hours = v
+			}
+		}
+		until := time.Now()
+		since := until.Add(-time.Duration(hours) * time.Hour)
+		buckets, err := repo.TimelineBySite(siteID, since, until)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		c.JSON(200, map[string]any{"buckets": buckets, "hours": hours})
+	}
+}
+
 
 func SecurityEventStats(repo *repository.SecurityEventRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {

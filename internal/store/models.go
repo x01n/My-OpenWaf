@@ -149,6 +149,11 @@ type Site struct {
 	UpstreamTLSSkipVerify bool   `gorm:"default:false" json:"upstream_tls_skip_verify"`
 	UpstreamTLSServerName string `gorm:"size:255" json:"upstream_tls_server_name"`
 
+	// Per-site response cache
+	CacheEnabled    bool   `gorm:"default:false" json:"cache_enabled"`
+	CacheDefaultTTL int    `gorm:"default:0" json:"cache_default_ttl"`
+	CacheRules      string `gorm:"type:text" json:"cache_rules"`
+
 	// Per-site maintenance mode
 	MaintenanceEnabled bool   `gorm:"default:false" json:"maintenance_enabled"`
 	MaintenanceHTML    string `gorm:"type:text" json:"maintenance_html"`
@@ -234,6 +239,7 @@ type SecurityEvent struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time `gorm:"index" json:"created_at"`
 
+	SiteID    uint   `gorm:"index" json:"site_id"`
 	RequestID string `gorm:"size:64" json:"request_id"`
 	ClientIP  string `gorm:"size:45;index" json:"client_ip"`
 	Host      string `gorm:"size:255" json:"host"`
@@ -252,6 +258,29 @@ type SecurityEvent struct {
 	GeoCity    string `gorm:"size:128" json:"geo_city"`
 
 	StatusCode int `gorm:"default:0" json:"status_code"`
+}
+
+// AccessLog records every inbound request outcome for querying and auditing.
+type AccessLog struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	CreatedAt  time.Time `gorm:"index" json:"created_at"`
+	SiteID     uint      `gorm:"index" json:"site_id"`
+	RequestID  string    `gorm:"size:64;index" json:"request_id"`
+	ClientIP   string    `gorm:"size:45;index" json:"client_ip"`
+	Host       string    `gorm:"size:255;index" json:"host"`
+	Path       string    `gorm:"size:2048" json:"path"`
+	Method     string    `gorm:"size:16" json:"method"`
+	StatusCode int       `gorm:"index" json:"status_code"`
+	WAFAction  string    `gorm:"size:32;index" json:"waf_action"`
+	CacheState string    `gorm:"size:16;index" json:"cache_state"`
+	Upstream   string    `gorm:"size:512" json:"upstream"`
+	UserAgent  string    `gorm:"size:512" json:"user_agent"`
+}
+
+// SiteCacheRule defines a directory-tree cache rule stored in Site.CacheRules.
+type SiteCacheRule struct {
+	Path string `json:"path"`
+	TTL  int    `json:"ttl"`
 }
 
 // ─── Config Revision ───────────────────────────────────────────────
@@ -420,6 +449,7 @@ const (
 // DropEvent records a TCP connection drop (no HTTP response sent).
 type DropEvent struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
+	SiteID    uint      `gorm:"index" json:"site_id"`
 	ClientIP  string    `gorm:"index;size:45" json:"client_ip"`
 	Source    string    `gorm:"size:32" json:"source"` // bot, cve, rule, ip_reputation
 	RuleID    string    `gorm:"size:64" json:"rule_id"`
@@ -460,7 +490,29 @@ type FingerprintRecord struct {
 	IsKnownGood bool      `json:"is_known_good"`
 }
 
-// ─── CVE Sync Log ───────────────────────────────────────────────────
+// ─── CVE Rules / Sync ───────────────────────────────────────────────
+
+// CVERuleRecord stores custom and feed-synchronised CVE rules.
+type CVERuleRecord struct {
+	ID          uint           `gorm:"primarykey" json:"id"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	CVEID       string         `gorm:"size:32;index" json:"cve_id"`
+	Category    string         `gorm:"size:32" json:"category"`
+	Pattern     string         `gorm:"type:text" json:"pattern"`
+	Target      string         `gorm:"size:32" json:"target"`
+	Severity    string         `gorm:"size:16" json:"severity"`
+	Action      string         `gorm:"size:16;default:drop" json:"action"`
+	Enabled     bool           `gorm:"default:false" json:"enabled"`
+	Description string         `gorm:"type:text" json:"description"`
+	Source      string         `gorm:"size:32" json:"source"`
+	Approved    bool           `gorm:"default:false" json:"approved"`
+	CVSSScore   float64        `gorm:"default:0" json:"cvss_score"`
+	CWEType     string         `gorm:"size:32" json:"cwe_type"`
+}
+
+func (CVERuleRecord) TableName() string { return "cve_rules" }
 
 // CVESyncLog records the result of a CVE feed synchronisation run.
 type CVESyncLog struct {

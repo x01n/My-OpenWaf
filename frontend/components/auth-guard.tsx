@@ -1,47 +1,43 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getAccessToken, refreshAccess } from "@/lib/api";
 
 function AuthGuardInner({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [ok, setOk] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [ok, setOk] = useState(() => !!getAccessToken());
+
+  const message = useMemo(() => {
+    const reason = searchParams.get("reason");
+    if (reason === "session_expired") return "Your session has expired. Please log in again.";
+    if (reason === "forbidden") return "You do not have permission to access that resource.";
+    return null;
+  }, [searchParams]);
 
   useEffect(() => {
-    const reason = searchParams.get("reason");
-    if (reason === "session_expired") {
-      setMessage("Your session has expired. Please log in again.");
-    } else if (reason === "forbidden") {
-      setMessage("You do not have permission to access that resource.");
-    }
-
-    if (getAccessToken()) {
-      setOk(true);
-    } else {
-      // Attempt to refresh before redirecting to login
-      refreshAccess().then((refreshed) => {
-        if (refreshed) {
-          setOk(true);
-        } else {
-          router.replace("/login/");
-        }
-      });
-    }
-  }, [router, searchParams]);
+    if (ok) return;
+    refreshAccess().then((refreshed) => {
+      if (refreshed) {
+        setOk(true);
+      } else {
+        router.replace("/login/");
+      }
+    });
+  }, [ok, router]);
 
   if (!ok) {
     if (message) {
       return (
-        <div className="flex items-center justify-center min-h-screen">
+        <div className="flex min-h-screen items-center justify-center">
           <p className="text-sm text-muted-foreground">{message}</p>
         </div>
       );
     }
     return null;
   }
+
   return <>{children}</>;
 }
 

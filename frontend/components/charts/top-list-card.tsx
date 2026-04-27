@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Ban, TrendingUp } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
 
 interface TopItem {
   label: string;

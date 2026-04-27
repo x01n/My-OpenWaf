@@ -62,18 +62,42 @@ func routeCandidates(requestPath string) []string {
 		return []string{"index.html"}
 	}
 
+	variants := []string{clean}
+	variants = append(variants, dynamicRouteVariants(clean)...)
+
 	var candidates []string
-	if strings.HasSuffix(requestPath, "/") {
-		candidates = append(candidates, clean+"/index.html")
+	for _, variant := range uniqueStrings(variants) {
+		if strings.HasSuffix(requestPath, "/") {
+			candidates = append(candidates, variant+"/index.html")
+		}
+		candidates = append(candidates, variant)
+		if !strings.Contains(path.Base(variant), ".") {
+			candidates = append(candidates, variant+"/index.html", variant+".html")
+		}
 	}
-
-	candidates = append(candidates, clean)
-
 	if !strings.Contains(path.Base(clean), ".") {
-		candidates = append(candidates, clean+"/index.html", clean+".html", "index.html")
+		candidates = append(candidates, "index.html")
 	}
 
 	return uniqueStrings(candidates)
+}
+
+func dynamicRouteVariants(clean string) []string {
+	parts := strings.Split(clean, "/")
+	if len(parts) < 2 {
+		return nil
+	}
+	out := make([]string, 0, len(parts)-1)
+	for i := 1; i < len(parts); i++ {
+		segment := parts[i]
+		if segment == "" || segment == "_" || strings.HasPrefix(segment, "__next") || strings.HasPrefix(segment, "_next") {
+			continue
+		}
+		replaced := append([]string(nil), parts...)
+		replaced[i] = "_"
+		out = append(out, strings.Join(replaced, "/"))
+	}
+	return out
 }
 
 func uniqueStrings(items []string) []string {

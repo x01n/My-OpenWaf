@@ -27,6 +27,31 @@ func ListRules(repo *repository.RuleRepo) app.HandlerFunc {
 	}
 }
 
+func ListSiteRules(siteRepo *repository.SiteRepo, repo *repository.RuleRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		id, err := utils.ParseUint(c.Param("id"))
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		site, err := siteRepo.Get(id)
+		if err != nil {
+			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+		if site.PolicyID == nil {
+			c.JSON(200, map[string]any{"items": []store.Rule{}, "total": 0})
+			return
+		}
+		items, err := repo.ListByPolicy(*site.PolicyID)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		c.JSON(200, map[string]any{"items": items, "total": len(items), "policy_id": *site.PolicyID})
+	}
+}
+
 func GetRule(repo *repository.RuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))

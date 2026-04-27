@@ -25,6 +25,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&AdminAccount{},
 		&RefreshToken{},
 		&SecurityEvent{},
+		&AccessLog{},
 		&IPListEntry{},
 		&TokenBlacklist{},
 		&LoginAttempt{},
@@ -32,6 +33,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&DropEvent{},
 		&BotScoreLog{},
 		&FingerprintRecord{},
+		&CVERuleRecord{},
 		&CVESyncLog{},
 	)
 }

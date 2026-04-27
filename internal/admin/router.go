@@ -111,6 +111,14 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/security-events/stats", SecurityEventStats(r.SecurityEvent))
 		readGroup.GET("/security-events/timeline", SecurityEventTimeline(r.SecurityEvent))
 		readGroup.GET("/security-events/:id", GetSecurityEvent(r.SecurityEvent))
+		readGroup.GET("/access-logs", ListAccessLogs(r.AccessLog))
+		readGroup.GET("/sites/:id/security-events", ListSiteSecurityEvents(r.Site, r.SecurityEvent))
+		readGroup.GET("/sites/:id/security-events/stats", SiteSecurityEventStats(r.Site, r.SecurityEvent))
+		readGroup.GET("/sites/:id/security-events/timeline", SiteSecurityEventTimeline(r.Site, r.SecurityEvent))
+		readGroup.GET("/sites/:id/access-logs", ListSiteAccessLogs(r.Site, r.AccessLog))
+		readGroup.GET("/sites/:id/drop-events", ListSiteDropEvents(r.Site, r.DropEvent))
+		readGroup.GET("/sites/:id/drop-stats", SiteDropStats(r.Site, r.DropEvent))
+		readGroup.GET("/sites/:id/rules", ListSiteRules(r.Site, r.Rule))
 
 		// Dashboard
 		dashDeps := &DashboardDeps{Metrics: deps.Metrics, DB: deps.DB}

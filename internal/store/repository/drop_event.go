@@ -16,6 +16,7 @@ func NewDropEventRepo(db *gorm.DB) *DropEventRepo {
 
 // DropEventFilter holds query filters for listing drop events.
 type DropEventFilter struct {
+	SiteID    uint
 	ClientIP  string
 	Source    string
 	StartTime *time.Time
@@ -28,6 +29,9 @@ func (r *DropEventRepo) Create(item *store.DropEvent) error {
 
 func (r *DropEventRepo) List(offset, limit int, f DropEventFilter) ([]store.DropEvent, int64, error) {
 	q := r.db.Model(&store.DropEvent{})
+	if f.SiteID > 0 {
+		q = q.Where("site_id = ?", f.SiteID)
+	}
 	if f.ClientIP != "" {
 		q = q.Where("client_ip = ?", f.ClientIP)
 	}
@@ -69,14 +73,22 @@ func (r *DropEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
 }
 
 func (r *DropEventRepo) Stats24h() (*DropStatsSummary, error) {
+	return r.Stats24hBySite(0)
+}
+
+func (r *DropEventRepo) Stats24hBySite(siteID uint) (*DropStatsSummary, error) {
 	since := time.Now().Add(-24 * time.Hour)
 	var stats DropStatsSummary
+	q := r.db.Model(&store.DropEvent{}).Where("created_at >= ?", since)
+	if siteID > 0 {
+		q = q.Where("site_id = ?", siteID)
+	}
 
-	r.db.Model(&store.DropEvent{}).Where("created_at >= ?", since).Count(&stats.Total24h)
-	r.db.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'bot'", since).Count(&stats.ByBot)
-	r.db.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'cve'", since).Count(&stats.ByCVE)
-	r.db.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'rule'", since).Count(&stats.ByRule)
-	r.db.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'ip_reputation'", since).Count(&stats.ByIPReputation)
+	q.Count(&stats.Total24h)
+	q.Where("source = 'bot'").Count(&stats.ByBot)
+	q.Where("source = 'cve'").Count(&stats.ByCVE)
+	q.Where("source = 'rule'").Count(&stats.ByRule)
+	q.Where("source = 'ip_reputation'").Count(&stats.ByIPReputation)
 
 	return &stats, nil
 }

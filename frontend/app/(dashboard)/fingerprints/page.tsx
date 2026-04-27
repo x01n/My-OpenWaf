@@ -1,168 +1,98 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getFingerprints, type FingerprintStats } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  PieChart,
-  Pie,
-  Cell,
-  ResponsiveContainer,
-  Tooltip,
-  Legend,
-  type PieLabelRenderProps,
-} from "recharts";
-import { AlertTriangle } from "lucide-react";
-import { formatDate } from "@/lib/utils";
-
-const PIE_COLORS = ["#14b8a6", "#f59e0b", "#6366f1", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"];
+import { Fingerprint, Globe2, ShieldAlert } from "lucide-react";
+import { PageIntro, InlineMeta, Surface } from "@/components/console-shell";
+import { getDashboardSummary, getFingerprints, type DashboardSummary, type FingerprintStats } from "@/lib/api";
 
 export default function FingerprintsPage() {
-  const [data, setData] = useState<FingerprintStats | null>(null);
+  const [stats, setStats] = useState<FingerprintStats | null>(null);
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    getFingerprints()
-      .then(setData)
-      .catch(() => {})
+    Promise.all([getFingerprints(), getDashboardSummary()])
+      .then(([fingerprintStats, dashboardSummary]) => {
+        setStats(fingerprintStats);
+        setSummary(dashboardSummary);
+      })
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) {
-    return (
-      <div className="space-y-5">
-        <div>
-          <h1 className="text-xl font-semibold text-gray-800">指纹分析</h1>
-          <p className="text-gray-500 text-sm mt-0.5">TLS指纹统计与异常分析</p>
-        </div>
-        <div className="py-12 text-center text-gray-400">加载中...</div>
-      </div>
-    );
-  }
-
-  const ja3Top = data?.ja3_top ?? [];
-  const ja4Top = data?.ja4_top ?? [];
-  const browserDist = data?.browser_distribution ?? [];
-  const anomalies = data?.anomalies ?? [];
+  const topJA3 = stats?.top_ja3 ?? [];
+  const browsers = stats?.browser_distribution ?? [];
 
   return (
-    <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold text-gray-800">指纹分析</h1>
-        <p className="text-gray-500 text-sm mt-0.5">TLS指纹统计与异常分析</p>
-      </div>
+    <div className="space-y-6">
+      <PageIntro
+        eyebrow="Fingerprint Intelligence"
+        title="指纹分析"
+        description="当前后端提供 TLS JA3 聚合与浏览器分布数据，帮助识别自动化流量与未知客户端特征。"
+      />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        {/* JA3 Top */}
-        <div className="bg-white border border-gray-200 rounded-lg p-5">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">JA3 Top 指纹</h3>
-          {ja3Top.length === 0 ? (
-            <div className="py-8 text-center text-sm text-gray-400">暂无数据</div>
+      <div className="grid gap-6 xl:grid-cols-3">
+        <Surface title="核心指标" description="聚合自 /api/v1/fingerprints 与总览接口。" className="xl:col-span-1">
+          <div className="grid gap-3">
+            <InlineMeta label="指纹总量" value={stats ? stats.total_count.toLocaleString() : "--"} />
+            <InlineMeta label="异常指纹（24h）" value={summary ? summary.fingerprint_anomaly_24h.toLocaleString() : "--"} />
+            <InlineMeta label="浏览器类型" value={browsers.length ? browsers.length : "--"} />
+          </div>
+        </Surface>
+
+        <Surface title="JA3 热点指纹" description="按累计出现次数倒序展示后端返回的 top_ja3。" className="xl:col-span-2">
+          {loading ? (
+            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
+          ) : topJA3.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">暂无 JA3 聚合数据。</div>
           ) : (
-            <div className="space-y-2">
-              {ja3Top.map((item, i) => (
-                <div key={item.hash} className="flex items-center gap-3">
-                  <span className="text-xs text-gray-400 w-5">{i + 1}</span>
-                  <code className="text-xs font-mono text-gray-600 truncate flex-1">{item.hash}</code>
-                  <Badge variant="secondary" className="text-xs tabular-nums">{item.count}</Badge>
+            <div className="space-y-3">
+              {topJA3.map((item, index) => (
+                <div key={`${item.ja3_hash}-${index}`} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white">
+                      <Fingerprint className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-mono text-xs text-slate-700 truncate">{item.ja3_hash || "(empty)"}</div>
+                      <div className="text-xs text-slate-500">{item.is_known_good ? "已知良性" : "待人工确认"}</div>
+                    </div>
+                  </div>
+                  <div className="text-sm font-medium text-slate-950">{item.count.toLocaleString()}</div>
                 </div>
               ))}
             </div>
           )}
-        </div>
+        </Surface>
+      </div>
 
-        {/* JA4 Top */}
-        <div className="bg-white border border-gray-200 rounded-lg p-5">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">JA4 Top 指纹</h3>
-          {ja4Top.length === 0 ? (
-            <div className="py-8 text-center text-sm text-gray-400">暂无数据</div>
-          ) : (
-            <div className="space-y-2">
-              {ja4Top.map((item, i) => (
-                <div key={item.hash} className="flex items-center gap-3">
-                  <span className="text-xs text-gray-400 w-5">{i + 1}</span>
-                  <code className="text-xs font-mono text-gray-600 truncate flex-1">{item.hash}</code>
-                  <Badge variant="secondary" className="text-xs tabular-nums">{item.count}</Badge>
+      <Surface title="浏览器分布" description="Fingerprint 仓库仅返回 browser_distribution 聚合。">
+        {loading ? (
+          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
+        ) : browsers.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">暂无浏览器分布数据。</div>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {browsers.map((item, index) => (
+              <div key={`${item.browser}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-900">
+                  <Globe2 className="h-4 w-4 text-cyan-700" />
+                  {item.browser || "未知浏览器"}
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Browser Distribution */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
-        <h3 className="text-sm font-medium text-gray-700 mb-3">浏览器分布</h3>
-        {browserDist.length === 0 ? (
-          <div className="py-8 text-center text-sm text-gray-400">暂无数据</div>
-        ) : (
-          <div className="flex flex-col lg:flex-row items-center gap-6">
-            <ResponsiveContainer width="100%" height={280}>
-              <PieChart>
-                <Pie
-                  data={browserDist}
-                  dataKey="count"
-                  nameKey="name"
-                  cx="50%"
-                  cy="50%"
-                  outerRadius={100}
-                  label={(props: PieLabelRenderProps) => `${props.name ?? ""} ${((props.percent ?? 0) * 100).toFixed(0)}%`}
-                >
-                  {browserDist.map((_, i) => (
-                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
+                <div className="text-2xl font-semibold text-slate-950">{item.count.toLocaleString()}</div>
+              </div>
+            ))}
           </div>
         )}
-      </div>
+      </Surface>
 
-      {/* Anomalies */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
-        <div className="flex items-center gap-2 mb-3">
-          <AlertTriangle className="h-4 w-4 text-amber-500" />
-          <h3 className="text-sm font-medium text-gray-700">异常指纹告警</h3>
+      <Surface title="当前接口说明" description="为避免误导，页面只展示后端实际可用数据。">
+        <div className="flex gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm leading-6 text-amber-900">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>
+            当前后端指纹接口未提供 JA4 排行与异常详情列表，因此新版页面不再展示伪造占位数据；异常数量仍可在总览页通过 fingerprint_anomaly_24h 观察。
+          </p>
         </div>
-        {anomalies.length === 0 ? (
-          <div className="py-8 text-center text-sm text-gray-400">暂无异常指纹</div>
-        ) : (
-          <div className="rounded-lg border border-gray-200 overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-gray-50">
-                  <TableHead className="text-gray-600 font-medium">指纹Hash</TableHead>
-                  <TableHead className="text-gray-600 font-medium">异常原因</TableHead>
-                  <TableHead className="text-gray-600 font-medium w-[80px]">次数</TableHead>
-                  <TableHead className="text-gray-600 font-medium w-[130px]">最后出现</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {anomalies.map((a) => (
-                  <TableRow key={a.hash} className="hover:bg-gray-50">
-                    <TableCell className="font-mono text-xs">{a.hash}</TableCell>
-                    <TableCell className="text-sm text-gray-600">{a.reason}</TableCell>
-                    <TableCell>
-                      <Badge variant="destructive" className="text-xs">{a.count}</Badge>
-                    </TableCell>
-                    <TableCell className="text-sm text-gray-500">{formatDate(a.last_seen)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </div>
+      </Surface>
     </div>
   );
 }

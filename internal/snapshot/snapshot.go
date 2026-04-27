@@ -50,6 +50,11 @@ type SiteRuntime struct {
 	BlockHTML   string
 	BlockStatus int
 
+	// Per-site response cache
+	CacheEnabled    bool
+	CacheDefaultTTL int
+	CacheRules      []store.SiteCacheRule
+
 	// Per-site protection overrides (merged from Site fields).
 	// nil = use global ProtectionConfig.
 	EffectiveProtection *store.ProtectionConfig

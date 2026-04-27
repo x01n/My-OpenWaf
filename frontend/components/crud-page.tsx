@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { EmptyState, PageIntro, Surface } from "@/components/console-shell";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,20 +24,15 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
-import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Loader2 } from "lucide-react";
 
 export interface FieldDef {
   key: string;
   label: string;
   type?: "text" | "number" | "textarea" | "boolean" | "select" | "async-select";
   options?: { value: string; label: string }[];
-  /** For async-select: API path to fetch options from. Response must have { items: [...] }. */
   asyncOptions?: {
     apiPath: string;
-    /** Field name to use as option value (default: "id") */
     valueKey?: string;
-    /** Field name(s) to use as option label. Can be a string or a function. */
     labelKey?: string | ((item: Record<string, unknown>) => string);
   };
   hideInTable?: boolean;
@@ -44,7 +41,6 @@ export interface FieldDef {
   placeholder?: string;
   description?: string;
   render?: (value: unknown, item: Record<string, unknown>) => React.ReactNode;
-  /** Custom input component for the form dialog. Receives value and onChange. */
   customInput?: (props: { value: unknown; onChange: (val: unknown) => void }) => React.ReactNode;
 }
 
@@ -65,60 +61,59 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Record<string, unknown> | null>(null);
-  // Async-select options cache: field key → options array
   const [asyncOpts, setAsyncOpts] = useState<Record<string, { value: string; label: string }[]>>({});
   const asyncOptsLoadedRef = useRef(false);
 
-  // Load async-select options once on mount.
   useEffect(() => {
     if (asyncOptsLoadedRef.current) return;
     asyncOptsLoadedRef.current = true;
 
-    const asyncFields = fields.filter((f) => f.type === "async-select" && f.asyncOptions);
+    const asyncFields = fields.filter((field) => field.type === "async-select" && field.asyncOptions);
     if (asyncFields.length === 0) return;
 
-    asyncFields.forEach(async (f) => {
+    asyncFields.forEach(async (field) => {
       try {
-        const cfg = f.asyncOptions!;
-        const data = await api<{ items: Record<string, unknown>[] }>(cfg.apiPath);
-        const items = data.items || [];
-        const vk = cfg.valueKey || "id";
-        const opts = items.map((item) => {
-          const labelStr = typeof cfg.labelKey === "function"
-            ? cfg.labelKey(item)
-            : String(item[cfg.labelKey || "name"] ?? item[vk] ?? "");
-          return { value: String(item[vk] ?? ""), label: labelStr };
-        });
-        // Add a "none" option for nullable fields
-        if (f.nullable) {
-          opts.unshift({ value: "__null__", label: "— 不选择 —" });
+        const config = field.asyncOptions!;
+        const data = await api<{ items: Record<string, unknown>[] }>(config.apiPath);
+        const valueKey = config.valueKey || "id";
+        const options = (data.items || []).map((item) => ({
+          value: String(item[valueKey] ?? ""),
+          label:
+            typeof config.labelKey === "function"
+              ? config.labelKey(item)
+              : String(item[config.labelKey || "name"] ?? item[valueKey] ?? ""),
+        }));
+        if (field.nullable) {
+          options.unshift({ value: "__null__", label: "— 不选择 —" });
         }
-        setAsyncOpts((prev) => ({ ...prev, [f.key]: opts }));
+        setAsyncOpts((prev) => ({ ...prev, [field.key]: options }));
       } catch {
-        // Silently fail — will show empty select
+        setAsyncOpts((prev) => ({ ...prev, [field.key]: [] }));
       }
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fields]);
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
-      setLoading(true);
       const data = await api<{ items: Record<string, unknown>[] }>(apiPath);
       setItems(data.items || []);
-    } catch {
-      toast.error("加载失败");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载失败");
+      setItems([]);
     } finally {
       setLoading(false);
     }
   }, [apiPath]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   function openNew() {
     const defaults: Record<string, unknown> = {};
-    fields.forEach((f) => {
-      defaults[f.key] = getDefaultValue(f);
+    fields.forEach((field) => {
+      defaults[field.key] = getDefaultValue(field);
     });
     setEditing(defaults);
     setIsNew(true);
@@ -133,20 +128,23 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
 
   async function handleSave() {
     if (!editing) return;
+    setSaving(true);
     try {
-      setSaving(true);
       if (isNew) {
         await api(apiPath, { method: "POST", body: JSON.stringify(editing) });
         toast.success("创建成功，配置已自动生效");
       } else {
-        await api(`${apiPath}/${editing[idField]}/update`, { method: "POST", body: JSON.stringify(editing) });
+        await api(`${apiPath}/${editing[idField]}/update`, {
+          method: "POST",
+          body: JSON.stringify(editing),
+        });
         toast.success("更新成功，配置已自动生效");
       }
       setOpen(false);
-      load();
       onAfterSave?.();
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "操作失败");
+      load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "操作失败");
     } finally {
       setSaving(false);
     }
@@ -158,183 +156,191 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
       await api(`${apiPath}/${deleteTarget[idField]}/delete`, { method: "POST" });
       toast.success("已删除，配置已自动生效");
       setDeleteTarget(null);
-      load();
       onAfterSave?.();
+      load();
     } catch {
       toast.error("删除失败");
     }
   }
 
-  const tableCols = fields.filter((f) => !f.hideInTable);
+  const tableColumns = fields.filter((field) => !field.hideInTable);
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-gray-800">{title}</h1>
-          {description && <p className="text-sm text-gray-500 mt-0.5 max-w-2xl">{description}</p>}
-        </div>
-        <Button size="sm" onClick={openNew} className="bg-teal-500 hover:bg-teal-600 text-white">
-          <Plus className="mr-1 h-4 w-4" /> 新增
-        </Button>
-      </div>
+    <div className="space-y-6">
+      <PageIntro
+        eyebrow="Resource Manager"
+        title={title}
+        description={description || "通过真实后端 API 管理资源，并在配置写入后触发即时生效。"}
+        actions={
+          <Button className="rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={openNew}>
+            <Plus className="mr-2 h-4 w-4" /> 新增{title}
+          </Button>
+        }
+      />
 
-      <div className="rounded-lg border border-gray-200 overflow-hidden bg-white">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-gray-50">
-                <TableHead className="w-16 text-gray-600 font-medium">ID</TableHead>
-                {tableCols.map((f) => (
-                  <TableHead key={f.key} className="text-gray-600 font-medium">{f.label}</TableHead>
-                ))}
-                <TableHead className="w-24 text-gray-600 font-medium">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {loading ? (
-                Array.from({ length: 3 }).map((_, i) => (
-                  <TableRow key={i}>
-                    <TableCell><Skeleton className="h-4 w-8" /></TableCell>
-                    {tableCols.map((f) => (
-                      <TableCell key={f.key}><Skeleton className="h-4 w-24" /></TableCell>
-                    ))}
-                    <TableCell><Skeleton className="h-4 w-16" /></TableCell>
-                  </TableRow>
-                ))
-              ) : items.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={tableCols.length + 2} className="h-20 text-center text-muted-foreground">
-                    暂无数据
-                  </TableCell>
+      <Surface title={`${title}列表`} description="点击编辑可调整单条记录，删除操作会直接调用后端 delete 接口。">
+        {loading ? (
+          <div className="overflow-hidden rounded-[24px] border border-slate-200">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-slate-50">
+                  <TableHead className="w-16">ID</TableHead>
+                  {tableColumns.map((field) => (
+                    <TableHead key={field.key}>{field.label}</TableHead>
+                  ))}
+                  <TableHead className="w-24 text-right">操作</TableHead>
                 </TableRow>
-              ) : (
-                items.map((item) => (
-                  <TableRow key={String(item[idField])}>
-                    <TableCell className="font-mono text-xs">{String(item[idField])}</TableCell>
-                    {tableCols.map((f) => (
-                      <TableCell key={f.key} className="max-w-xs truncate text-sm">
-                        {f.render
-                          ? f.render(item[f.key], item)
-                          : f.type === "boolean"
-                            ? (item[f.key] ? "✓" : "✗")
-                            : f.type === "async-select" && asyncOpts[f.key]
-                              ? (asyncOpts[f.key].find((o) => o.value === String(item[f.key]))?.label ?? String(item[f.key] ?? ""))
-                              : String(item[f.key] ?? "")}
+              </TableHeader>
+              <TableBody>
+                {Array.from({ length: 4 }).map((_, index) => (
+                  <TableRow key={index}>
+                    <TableCell><Skeleton className="h-4 w-8" /></TableCell>
+                    {tableColumns.map((field) => (
+                      <TableCell key={field.key}><Skeleton className="h-4 w-28" /></TableCell>
+                    ))}
+                    <TableCell><Skeleton className="h-4 w-12" /></TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ) : items.length === 0 ? (
+          <EmptyState title={`暂无${title}`} description="创建第一条记录后，这里会显示真实后端返回的数据列表。" />
+        ) : (
+          <div className="overflow-hidden rounded-[24px] border border-slate-200">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-slate-50 text-xs uppercase tracking-[0.16em] text-slate-500">
+                  <TableHead className="w-16">ID</TableHead>
+                  {tableColumns.map((field) => (
+                    <TableHead key={field.key}>{field.label}</TableHead>
+                  ))}
+                  <TableHead className="w-24 text-right">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.map((item) => (
+                  <TableRow key={String(item[idField])} className="hover:bg-slate-50">
+                    <TableCell className="font-mono text-xs text-slate-500">{String(item[idField])}</TableCell>
+                    {tableColumns.map((field) => (
+                      <TableCell key={field.key} className="max-w-[300px] truncate text-sm text-slate-700">
+                        {field.render
+                          ? field.render(item[field.key], item)
+                          : field.type === "boolean"
+                            ? item[field.key]
+                              ? "已启用"
+                              : "已禁用"
+                            : field.type === "async-select" && asyncOpts[field.key]
+                              ? asyncOpts[field.key].find((option) => option.value === String(item[field.key]))?.label ?? String(item[field.key] ?? "")
+                              : String(item[field.key] ?? "")}
                       </TableCell>
                     ))}
                     <TableCell>
-                      <div className="flex gap-1">
-                        <Button variant="ghost" size="icon" onClick={() => openEdit(item)}>
-                          <Pencil className="h-3.5 w-3.5" />
+                      <div className="flex items-center justify-end gap-1">
+                        <Button variant="ghost" size="icon-sm" className="rounded-xl" onClick={() => openEdit(item)}>
+                          <Pencil className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="icon" onClick={() => setDeleteTarget(item)}>
-                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                        <Button variant="ghost" size="icon-sm" className="rounded-xl text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeleteTarget(item)}>
+                          <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
                     </TableCell>
                   </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-      </div>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </Surface>
 
-      {/* Edit/Create Dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-lg">
+        <DialogContent className="max-h-[84vh] overflow-y-auto rounded-[28px] sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>{isNew ? `新增${title}` : `编辑${title}`}</DialogTitle>
+            <DialogDescription>{isNew ? "填写真实后端字段后立即创建资源。" : "调整当前资源字段并在保存后即时生效。"}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
-            {fields.map((f) => (
-              <div key={f.key} className="space-y-2">
-                <Label htmlFor={`field-${f.key}`}>{f.label}</Label>
-                {f.description && (
-                  <p className="text-xs text-muted-foreground">{f.description}</p>
-                )}
-                {f.customInput ? (
-                  f.customInput({
-                    value: editing?.[f.key] ?? "",
-                    onChange: (val) => setEditing((p) => p ? { ...p, [f.key]: val } : p),
+            {fields.map((field) => (
+              <div key={field.key} className="space-y-2">
+                <Label htmlFor={`field-${field.key}`}>{field.label}</Label>
+                {field.description ? <p className="text-xs text-slate-500">{field.description}</p> : null}
+                {field.customInput ? (
+                  field.customInput({
+                    value: editing?.[field.key] ?? "",
+                    onChange: (value) => setEditing((prev) => (prev ? { ...prev, [field.key]: value } : prev)),
                   })
-                ) : f.type === "textarea" ? (
+                ) : field.type === "textarea" ? (
                   <Textarea
-                    id={`field-${f.key}`}
-                    placeholder={f.placeholder}
-                    value={String(editing?.[f.key] ?? "")}
-                    onChange={(e) => setEditing((p) => p ? { ...p, [f.key]: e.target.value } : p)}
-                    className="min-h-[80px] font-mono text-sm"
+                    id={`field-${field.key}`}
+                    placeholder={field.placeholder}
+                    value={String(editing?.[field.key] ?? "")}
+                    onChange={(event) => setEditing((prev) => (prev ? { ...prev, [field.key]: event.target.value } : prev))}
+                    className="min-h-[120px] rounded-xl font-mono text-sm"
                   />
-                ) : f.type === "boolean" ? (
-                  <div className="flex items-center gap-2">
+                ) : field.type === "boolean" ? (
+                  <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                     <Switch
-                      id={`field-${f.key}`}
-                      checked={!!editing?.[f.key]}
-                      onCheckedChange={(checked) => setEditing((p) => p ? { ...p, [f.key]: checked } : p)}
+                      id={`field-${field.key}`}
+                      checked={!!editing?.[field.key]}
+                      onCheckedChange={(checked) => setEditing((prev) => (prev ? { ...prev, [field.key]: checked } : prev))}
                     />
-                    <Label htmlFor={`field-${f.key}`} className="text-sm text-muted-foreground">
-                      {editing?.[f.key] ? "已启用" : "已禁用"}
-                    </Label>
+                    <span className="text-sm text-slate-600">{editing?.[field.key] ? "已启用" : "已禁用"}</span>
                   </div>
-                ) : f.type === "select" || f.type === "async-select" ? (
+                ) : field.type === "select" || field.type === "async-select" ? (
                   <Select
-                    value={editing?.[f.key] == null ? (f.nullable ? "__null__" : "") : String(editing?.[f.key])}
-                    onValueChange={(val) => {
-                      const resolved = val === "__null__" ? null : (f.asyncOptions ? Number(val) : val);
-                      setEditing((p) => p ? { ...p, [f.key]: resolved } : p);
+                    value={editing?.[field.key] == null ? (field.nullable ? "__null__" : "") : String(editing?.[field.key])}
+                    onValueChange={(value) => {
+                      const resolved = value === "__null__" ? null : field.asyncOptions ? Number(value) : value;
+                      setEditing((prev) => (prev ? { ...prev, [field.key]: resolved } : prev));
                     }}
                   >
-                    <SelectTrigger id={`field-${f.key}`}>
-                      <SelectValue placeholder="请选择" />
-                    </SelectTrigger>
+                    <SelectTrigger className="rounded-xl"><SelectValue placeholder="请选择" /></SelectTrigger>
                     <SelectContent>
-                      {(f.type === "async-select" ? (asyncOpts[f.key] || []) : (f.options || [])).map((o) => (
-                        <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                      {(field.type === "async-select" ? asyncOpts[field.key] || [] : field.options || []).map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 ) : (
                   <Input
-                    id={`field-${f.key}`}
-                    type={f.type || "text"}
-                    placeholder={f.placeholder}
-                    value={editing?.[f.key] == null ? "" : String(editing?.[f.key])}
-                    onChange={(e) => {
-                      let val: unknown = e.target.value;
-                      if (f.nullable && e.target.value === "") {
-                        val = null;
-                      } else if (f.type === "number") {
-                        val = e.target.value === "" ? 0 : Number(e.target.value);
+                    id={`field-${field.key}`}
+                    type={field.type || "text"}
+                    placeholder={field.placeholder}
+                    value={editing?.[field.key] == null ? "" : String(editing?.[field.key])}
+                    onChange={(event) => {
+                      let value: unknown = event.target.value;
+                      if (field.nullable && event.target.value === "") {
+                        value = null;
+                      } else if (field.type === "number") {
+                        value = event.target.value === "" ? 0 : Number(event.target.value);
                       }
-                      setEditing((p) => p ? { ...p, [f.key]: val } : p);
+                      setEditing((prev) => (prev ? { ...prev, [field.key]: value } : prev));
                     }}
+                    className="rounded-xl"
                   />
                 )}
               </div>
             ))}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)} className="text-teal-600 border-teal-500">取消</Button>
-            <Button onClick={handleSave} disabled={saving} className="bg-teal-500 hover:bg-teal-600 text-white">
-              {saving && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+            <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>
+            <Button onClick={handleSave} disabled={saving} className="rounded-2xl bg-slate-950 text-white hover:bg-slate-800">
+              {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               {isNew ? "创建" : "保存"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Delete Confirmation Dialog */}
-      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <AlertDialogContent>
+      <AlertDialog open={!!deleteTarget} onOpenChange={(visible) => !visible && setDeleteTarget(null)}>
+        <AlertDialogContent className="rounded-[28px]">
           <AlertDialogHeader>
             <AlertDialogTitle>确认删除</AlertDialogTitle>
-            <AlertDialogDescription>
-              此操作不可撤销。确定要删除这条记录吗？
-            </AlertDialogDescription>
+            <AlertDialogDescription>此操作不可撤销。删除后，相关配置将立即从当前资源列表中移除。</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={handleDelete}>删除</AlertDialogAction>
+            <AlertDialogAction className="bg-rose-600 hover:bg-rose-500" onClick={handleDelete}>删除</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -343,20 +349,10 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
 }
 
 function getDefaultValue(field: FieldDef): unknown {
-  if (field.defaultValue !== undefined) {
-    return field.defaultValue;
-  }
-  if (field.nullable) {
-    return null;
-  }
-  if (field.type === "boolean") {
-    return false;
-  }
-  if (field.type === "number") {
-    return 0;
-  }
-  if (field.type === "select") {
-    return field.options?.[0]?.value ?? "";
-  }
+  if (field.defaultValue !== undefined) return field.defaultValue;
+  if (field.nullable) return null;
+  if (field.type === "boolean") return false;
+  if (field.type === "number") return 0;
+  if (field.type === "select") return field.options?.[0]?.value ?? "";
   return "";
 }

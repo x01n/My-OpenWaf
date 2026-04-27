@@ -13,6 +13,7 @@ type Repos struct {
 	AdminAccount   *AdminAccountRepo
 	RefreshToken   *RefreshTokenRepo
 	SecurityEvent  *SecurityEventRepo
+	AccessLog      *AccessLogRepo
 	IPList         *IPListRepo
 	BotScore       *BotScoreRepo
 	CVERule        *CVERuleRepo
@@ -32,6 +33,7 @@ func New(db *gorm.DB) *Repos {
 		AdminAccount:   NewAdminAccountRepo(db),
 		RefreshToken:   NewRefreshTokenRepo(db),
 		SecurityEvent:  NewSecurityEventRepo(db),
+		AccessLog:      NewAccessLogRepo(db),
 		IPList:         NewIPListRepo(db),
 		BotScore:       NewBotScoreRepo(db),
 		CVERule:        NewCVERuleRepo(db),

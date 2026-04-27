@@ -18,6 +18,7 @@ import (
 
 	"My-OpenWaf/internal/admin"
 	"My-OpenWaf/internal/admin/auth"
+	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/health"
@@ -86,9 +87,16 @@ func Run() {
 	}
 	defer eventWriter.Close()
 
-	// Event archiver (auto-delete security events and drop events older than 30 days).
-	archiver := observability.NewArchiver(repos.SecurityEvent, repos.DropEvent, logger.New("archiver"), 30)
+	// Access log writer (async batch insert, non-blocking).
+	accessLogWriter := observability.NewAccessLogWriter(repos.AccessLog, logger.New("access_logs"))
+	defer accessLogWriter.Close()
+
+	// Event archiver (auto-delete security events, access logs and drop events older than 30 days).
+	archiver := observability.NewArchiver(repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
 	defer archiver.Close()
+
+	responseCache := cache.NewResponseCache(64, 60)
+	defer responseCache.Close()
 
 	// Data-plane metrics (shared across all data listeners).
 	metrics := dataplane.NewMetrics()
@@ -147,11 +155,14 @@ func Run() {
 
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
 	dpOpts := dataplane.Options{
-		Holder:      rt.Snapshot,
-		Engine:      eng,
-		Metrics:     metrics,
-		EventWriter: eventWriter,
-		Log:         dpLog,
+		Holder:          rt.Snapshot,
+		Engine:          eng,
+		Metrics:         metrics,
+		EventWriter:     eventWriter,
+		AccessLogWriter: accessLogWriter,
+		DropEventRepo:   repos.DropEvent,
+		ResponseCache:   responseCache,
+		Log:             dpLog,
 	}
 
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.

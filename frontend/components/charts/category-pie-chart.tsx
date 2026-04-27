@@ -109,7 +109,7 @@ export function CategoryPieChart({ data, height = 300 }: CategoryPieChartProps) 
             borderRadius: "8px",
             boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
           }}
-          formatter={(value: any) => [
+          formatter={(value) => [
             `${value ?? 0} 次 (${((Number(value ?? 0) / total) * 100).toFixed(1)}%)`,
             "攻击",
           ]}

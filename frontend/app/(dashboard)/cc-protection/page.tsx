@@ -1,556 +1,156 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { api } from "@/lib/api";
+import { Radar, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
-import { ShieldAlert, Clock, Zap, AlertTriangle, Plus, Trash2, Pencil } from "lucide-react";
-
-interface ProtectionConfig {
-  request_ratelimit_enabled: boolean;
-  request_ratelimit_window: number;
-  request_ratelimit_max: number;
-  request_ratelimit_action: string;
-  error_ratelimit_enabled: boolean;
-  error_ratelimit_window: number;
-  error_ratelimit_max: number;
-  error_ratelimit_action: string;
-  error_ratelimit_count_4xx: boolean;
-  error_ratelimit_count_5xx: boolean;
-  error_ratelimit_count_block: boolean;
-  auto_ban_enabled: boolean;
-  auto_ban_threshold: number;
-  auto_ban_window: number;
-  auto_ban_duration: number;
-  waiting_room_enabled?: boolean;
-  cc_use_custom?: boolean;
-  cc_rules?: string; // JSON-encoded CCRule[]
-  [key: string]: unknown;
-}
-
-interface RuleCondition {
-  target: string;
-  operator: string;
-  value: string;
-}
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { EmptyState, InlineMeta, PageIntro, Surface } from "@/components/console-shell";
+import { getProtectionSettings, updateProtectionSettings, type ProtectionSettings } from "@/lib/api";
 
 interface CCRule {
   name: string;
-  conditions: RuleCondition[];
+  conditions: Array<{ target: string; operator: string; value: string }>;
   window: number;
   threshold: number;
   action: string;
   duration: number;
 }
 
-const MATCH_TARGETS = [
-  { value: "url_path", label: "URL 路径" },
-  { value: "header", label: "请求 Header" },
-  { value: "query", label: "Query 参数" },
-  { value: "source_ip", label: "源 IP" },
-  { value: "method", label: "请求方法" },
-];
-
-const MATCH_OPERATORS = [
-  { value: "equals", label: "等于" },
-  { value: "contains", label: "包含" },
-  { value: "prefix", label: "前缀关键字" },
-  { value: "regex", label: "正则匹配" },
-];
+const emptyRule: CCRule = {
+  name: "",
+  conditions: [{ target: "url_path", operator: "equals", value: "" }],
+  window: 60,
+  threshold: 100,
+  action: "captcha",
+  duration: 5,
+};
 
 export default function CCProtectionPage() {
-  const [cfg, setCfg] = useState<ProtectionConfig | null>(null);
-  const [ccRules, setCCRules] = useState<CCRule[]>([]);
+  const [settings, setSettings] = useState<ProtectionSettings | null>(null);
+  const [rules, setRules] = useState<CCRule[]>([]);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [draft, setDraft] = useState<CCRule>(emptyRule);
   const [saving, setSaving] = useState(false);
-  const [showRuleDialog, setShowRuleDialog] = useState(false);
-  const [editingSection, setEditingSection] = useState<string | null>(null);
-
-  // Rule dialog state
-  const [ruleName, setRuleName] = useState("");
-  const [ruleConditions, setRuleConditions] = useState<RuleCondition[]>([
-    { target: "url_path", operator: "equals", value: "" },
-  ]);
-  const [ruleWindow, setRuleWindow] = useState(60);
-  const [ruleThreshold, setRuleThreshold] = useState(100);
-  const [ruleAction, setRuleAction] = useState("captcha");
-  const [ruleDuration, setRuleDuration] = useState(5);
 
   useEffect(() => {
-    api<ProtectionConfig>("/api/v1/protection-settings")
-      .then((data) => {
-        setCfg(data);
-        if (data.cc_rules) {
-          try {
-            setCCRules(JSON.parse(data.cc_rules));
-          } catch {
-            setCCRules([]);
-          }
-        }
-      })
-      .catch(() => {});
+    getProtectionSettings().then((data) => {
+      setSettings(data);
+      setRules(Array.isArray(data.cc_rules) ? (data.cc_rules as CCRule[]) : []);
+    }).catch((error) => toast.error(String(error)));
   }, []);
 
-  function update<K extends keyof ProtectionConfig>(
-    key: K,
-    value: ProtectionConfig[K]
-  ) {
-    setCfg((prev) => (prev ? { ...prev, [key]: value } : prev));
+  async function persist(nextRules: CCRule[], nextSettings?: ProtectionSettings) {
+    const payload = {
+      ...(nextSettings || settings),
+      cc_rules: nextRules,
+    } as ProtectionSettings;
+    const result = await updateProtectionSettings(payload);
+    setSettings(result);
+    setRules(Array.isArray(result.cc_rules) ? (result.cc_rules as CCRule[]) : []);
   }
 
-  async function handleSave() {
-    if (!cfg) return;
+  async function saveRule() {
+    if (!settings) return;
     setSaving(true);
     try {
-      await api("/api/v1/protection-settings", {
-        method: "POST",
-        body: JSON.stringify({ ...cfg, cc_rules: JSON.stringify(ccRules) }),
-      });
-      toast.success("已保存，配置重载后生效");
-    } catch {
-      toast.error("保存失败");
+      const nextRules = [...rules, draft];
+      await persist(nextRules);
+      toast.success("CC 规则已保存");
+      setDialogOpen(false);
+      setDraft(emptyRule);
+    } catch (error) {
+      toast.error(String(error));
     } finally {
       setSaving(false);
     }
   }
 
-  function addCondition() {
-    setRuleConditions((prev) => [
-      ...prev,
-      { target: "url_path", operator: "equals", value: "" },
-    ]);
+  if (!settings) {
+    return <Surface className="min-h-[320px] animate-pulse"><div className="h-full" /></Surface>;
   }
-
-  function removeCondition(index: number) {
-    setRuleConditions((prev) => prev.filter((_, i) => i !== index));
-  }
-
-  function updateCondition(
-    index: number,
-    field: keyof RuleCondition,
-    value: string
-  ) {
-    setRuleConditions((prev) =>
-      prev.map((c, i) => (i === index ? { ...c, [field]: value } : c))
-    );
-  }
-
-  function openEditDialog(section: string) {
-    setEditingSection(section);
-    if (section === "request") {
-      setRuleWindow(cfg?.request_ratelimit_window || 60);
-      setRuleThreshold(cfg?.request_ratelimit_max || 100);
-      setRuleDuration(5);
-    } else if (section === "attack") {
-      setRuleWindow(cfg?.auto_ban_window || 60);
-      setRuleThreshold(cfg?.auto_ban_threshold || 10);
-      setRuleDuration(Math.floor((cfg?.auto_ban_duration || 3600) / 60));
-    } else if (section === "error") {
-      setRuleWindow(cfg?.error_ratelimit_window || 60);
-      setRuleThreshold(cfg?.error_ratelimit_max || 50);
-      setRuleDuration(5);
-    }
-    setShowRuleDialog(false);
-  }
-
-  function saveEditDialog() {
-    if (!cfg || !editingSection) return;
-    if (editingSection === "request") {
-      update("request_ratelimit_window", ruleWindow);
-      update("request_ratelimit_max", ruleThreshold);
-    } else if (editingSection === "attack") {
-      update("auto_ban_window", ruleWindow);
-      update("auto_ban_threshold", ruleThreshold);
-      update("auto_ban_duration", ruleDuration * 60);
-    } else if (editingSection === "error") {
-      update("error_ratelimit_window", ruleWindow);
-      update("error_ratelimit_max", ruleThreshold);
-    }
-    setEditingSection(null);
-    handleSave();
-  }
-
-  if (!cfg)
-    return (
-      <p className="text-sm text-muted-foreground py-12 text-center">
-        加载中...
-      </p>
-    );
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-gray-800">CC 防护</h1>
-          <p className="text-sm text-gray-500 mt-0.5">配置频率限制与自动封禁策略，防止 CC 攻击</p>
-        </div>
-        <Button onClick={() => setShowRuleDialog(true)} className="bg-teal-500 hover:bg-teal-600 text-white">
-          <Plus className="h-4 w-4 mr-1.5" />
-          添加规则
-        </Button>
-      </div>
+    <div className="space-y-6">
+      <PageIntro
+        eyebrow="Traffic Pressure Control"
+        title="CC 防护"
+        description="管理等待室、全局 CC 自定义开关和基于 protection-settings 存储的 cc_rules 数组。"
+        actions={<Button onClick={() => setDialogOpen(true)}>新增规则</Button>}
+      />
 
-      {/* Waiting Room */}
-      <div className="rounded-lg border border-gray-200 bg-white p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="w-1 h-5 rounded bg-teal-500 inline-block" />
-            <div>
-              <span className="font-medium text-gray-800">等候室</span>
-              <p className="text-xs text-gray-500 mt-0.5">启用后，当并发访问量过高时，新访客将进入等候队列，按序放行</p>
-            </div>
+      <div className="grid gap-6 xl:grid-cols-[1fr_1.1fr]">
+        <Surface title="全局控制" description="全部写入 protection-settings。">
+          <div className="grid gap-4">
+            <ToggleRow label="启用等待室" checked={settings.waiting_room_enabled || false} onChange={async (value) => { const next = { ...settings, waiting_room_enabled: value }; setSettings(next); await persist(rules, next); }} />
+            <ToggleRow label="使用自定义 CC 规则" checked={settings.cc_use_custom || false} onChange={async (value) => { const next = { ...settings, cc_use_custom: value }; setSettings(next); await persist(rules, next); }} />
+            <InlineMeta label="请求限流" value={settings.request_ratelimit_enabled ? `${settings.request_ratelimit_max}/${settings.request_ratelimit_window}s` : "关闭"} />
+            <InlineMeta label="自动封禁" value={settings.auto_ban_enabled ? `${settings.auto_ban_threshold}/${settings.auto_ban_window}s` : "关闭"} />
           </div>
-          <Switch
-            checked={cfg.waiting_room_enabled || false}
-            onCheckedChange={(v) => update("waiting_room_enabled", v)}
-          />
-        </div>
-      </div>
+        </Surface>
 
-      {/* Frequency Limit Section */}
-      <div className="rounded-lg border border-gray-200 bg-white">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
-          <div className="flex items-center gap-3">
-            <span className="w-1 h-5 rounded bg-teal-500 inline-block" />
-            <span className="font-medium text-gray-800">频率限制</span>
-          </div>
-          <div className="flex items-center gap-0 rounded-md border border-gray-200 overflow-hidden">
-            <button
-              onClick={() => update("cc_use_custom", false)}
-              className={`px-3 py-1.5 text-xs transition-colors ${!cfg.cc_use_custom ? "bg-teal-500 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
-            >跟随全局配置</button>
-            <button
-              onClick={() => update("cc_use_custom", true)}
-              className={`px-3 py-1.5 text-xs transition-colors ${cfg.cc_use_custom ? "bg-teal-500 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
-            >使用自定义配置</button>
-          </div>
-        </div>
-
-        <div className="p-4 space-y-3">
-          {/* High Frequency Access */}
-          <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <Switch checked={cfg.request_ratelimit_enabled} onCheckedChange={(v) => update("request_ratelimit_enabled", v)} />
-                <div>
-                  <p className="text-sm font-medium text-gray-700">高频访问限制</p>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    某 IP 在 <span className="text-teal-600 font-medium">{cfg.request_ratelimit_window}</span> 秒内请求达到 <span className="text-teal-600 font-medium">{cfg.request_ratelimit_max}</span> 次，需要进行人机验证
-                  </p>
-                </div>
-              </div>
-              <button onClick={() => openEditDialog("request")} className="text-xs text-teal-600 hover:text-teal-700">编辑</button>
-            </div>
-          </div>
-
-          {/* High Frequency Attack */}
-          <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <Switch checked={cfg.auto_ban_enabled} onCheckedChange={(v) => update("auto_ban_enabled", v)} />
-                <div>
-                  <p className="text-sm font-medium text-gray-700">高频攻击限制</p>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    某 IP 在 <span className="text-teal-600 font-medium">{cfg.auto_ban_window}</span> 秒内触发攻击拦截次数达到 <span className="text-teal-600 font-medium">{cfg.auto_ban_threshold}</span> 次，<span className="text-teal-600 font-medium">{Math.floor(cfg.auto_ban_duration / 60)}</span> 分钟内再次访问需要进行人机验证
-                  </p>
-                </div>
-              </div>
-              <button onClick={() => openEditDialog("attack")} className="text-xs text-teal-600 hover:text-teal-700">编辑</button>
-            </div>
-          </div>
-
-          {/* High Frequency Error */}
-          <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <Switch checked={cfg.error_ratelimit_enabled} onCheckedChange={(v) => update("error_ratelimit_enabled", v)} />
-                <div>
-                  <p className="text-sm font-medium text-gray-700">高频错误限制</p>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    某 IP 在 <span className="text-teal-600 font-medium">{cfg.error_ratelimit_window}</span> 秒内触发 4xx 错误码达到 <span className="text-teal-600 font-medium">{cfg.error_ratelimit_max}</span> 次，自动封禁此 IP
-                  </p>
-                </div>
-              </div>
-              <button onClick={() => openEditDialog("error")} className="text-xs text-teal-600 hover:text-teal-700">编辑</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Custom CC Rules list */}
-      {ccRules.length > 0 && (
-        <div className="rounded-lg border border-gray-200 bg-white">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-3">
-            <span className="w-1 h-5 rounded bg-teal-500 inline-block" />
-            <span className="font-medium text-gray-800">自定义规则</span>
-          </div>
-          <div className="divide-y divide-gray-100">
-            {ccRules.map((rule, idx) => (
-              <div key={idx} className="flex items-center justify-between px-4 py-3">
-                <div>
-                  <p className="text-sm font-medium text-gray-700">{rule.name}</p>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {rule.window}s 内触发 {rule.threshold} 次 → {rule.action === "captcha" ? "人机验证" : "直接封禁"} {rule.duration} 分钟
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    const updated = ccRules.filter((_, i) => i !== idx);
-                    setCCRules(updated);
-                    if (cfg) {
-                      const updatedCfg = { ...cfg, cc_rules: JSON.stringify(updated) };
-                      api("/api/v1/protection-settings", {
-                        method: "POST",
-                        body: JSON.stringify(updatedCfg),
-                      }).then(() => toast.success("规则已删除")).catch(() => toast.error("保存失败"));
-                    }
-                  }}
-                  className="text-gray-400 hover:text-rose-500 transition-colors"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Edit Parameter Dialog */}
-      <Dialog
-        open={editingSection !== null}
-        onOpenChange={(open) => !open && setEditingSection(null)}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>
-              编辑
-              {editingSection === "request"
-                ? "高频访问限制"
-                : editingSection === "attack"
-                  ? "高频攻击限制"
-                  : "高频错误限制"}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-1.5">
-              <Label>经过时间（秒）</Label>
-              <Input
-                type="number"
-                min={1}
-                value={ruleWindow}
-                onChange={(e) => setRuleWindow(+e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>
-                {editingSection === "error"
-                  ? "错误次数达到"
-                  : editingSection === "attack"
-                    ? "拦截次数达到"
-                    : "请求次数达到"}
-              </Label>
-              <Input
-                type="number"
-                min={1}
-                value={ruleThreshold}
-                onChange={(e) => setRuleThreshold(+e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>限制时间（分钟）</Label>
-              <Input
-                type="number"
-                min={1}
-                value={ruleDuration}
-                onChange={(e) => setRuleDuration(+e.target.value)}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditingSection(null)}>
-              取消
-            </Button>
-            <Button onClick={saveEditDialog}>保存</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Add Rule Dialog */}
-      <Dialog open={showRuleDialog} onOpenChange={setShowRuleDialog}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>添加规则</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-2 max-h-[60vh] overflow-y-auto">
-            <div className="space-y-1.5">
-              <Label>名称</Label>
-              <Input
-                value={ruleName}
-                onChange={(e) => setRuleName(e.target.value)}
-                placeholder="输入规则名称"
-              />
-            </div>
-
-            {/* Condition builder */}
+        <Surface title="当前规则概览" description="cc_rules 目前仅在 protection-settings 中以 JSON 数组形式存储。">
+          {rules.length === 0 ? (
+            <EmptyState title="还没有 CC 自定义规则" description="新增规则后，可基于 URL、Header、IP 或 Method 定义频率阈值与动作。" />
+          ) : (
             <div className="space-y-3">
-              <Label>匹配条件</Label>
-              {ruleConditions.map((cond, index) => (
-                <div key={index} className="flex items-center gap-2">
-                  <Select
-                    value={cond.target}
-                    onValueChange={(v) => updateCondition(index, "target", v)}
-                  >
-                    <SelectTrigger className="w-[130px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {MATCH_TARGETS.map((t) => (
-                        <SelectItem key={t.value} value={t.value}>
-                          {t.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Select
-                    value={cond.operator}
-                    onValueChange={(v) =>
-                      updateCondition(index, "operator", v)
-                    }
-                  >
-                    <SelectTrigger className="w-[120px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {MATCH_OPERATORS.map((o) => (
-                        <SelectItem key={o.value} value={o.value}>
-                          {o.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Input
-                    className="flex-1"
-                    value={cond.value}
-                    onChange={(e) =>
-                      updateCondition(index, "value", e.target.value)
-                    }
-                    placeholder="匹配内容"
-                  />
-                  {ruleConditions.length > 1 && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => removeCondition(index)}
-                    >
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
-                    </Button>
-                  )}
+              {rules.map((rule, index) => (
+                <div key={`${rule.name}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-900">
+                    <Radar className="h-4 w-4 text-cyan-700" />
+                    {rule.name || `规则 ${index + 1}`}
+                  </div>
+                  <div className="text-sm text-slate-600">{rule.window}s 内触发 {rule.threshold} 次 → {rule.action} {rule.duration} 分钟</div>
+                  <div className="mt-2 text-xs text-slate-500">条件数：{rule.conditions.length}</div>
+                  <div className="mt-3 flex justify-end">
+                    <Button variant="ghost" size="sm" className="text-rose-600" onClick={async () => { const next = rules.filter((_, current) => current !== index); await persist(next); toast.success("规则已删除"); }}>删除</Button>
+                  </div>
                 </div>
               ))}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={addCondition}
-                className="w-full"
-              >
-                <Plus className="h-3.5 w-3.5 mr-1" />
-                添加一个 AND 条件
-              </Button>
             </div>
+          )}
+        </Surface>
+      </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label>经过时间（秒）</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={ruleWindow}
-                  onChange={(e) => setRuleWindow(+e.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>请求次数达到</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={ruleThreshold}
-                  onChange={(e) => setRuleThreshold(+e.target.value)}
-                />
-              </div>
-            </div>
+      <Surface title="接口说明" description="避免制造不存在的后端资源。">
+        <div className="flex gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm leading-6 text-amber-900">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>当前 CC 规则并不是独立资源接口，而是 protection-settings 里的 cc_rules JSON 数组。新版页面已改为按真实存储模型编辑。</p>
+        </div>
+      </Surface>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label>限制结果</Label>
-                <Select value={ruleAction} onValueChange={setRuleAction}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="captcha">人机验证</SelectItem>
-                    <SelectItem value="block">直接封禁</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label>
-                  {ruleAction === "captcha"
-                    ? "人机验证时间（分钟）"
-                    : "封禁时间（分钟）"}
-                </Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={ruleDuration}
-                  onChange={(e) => setRuleDuration(+e.target.value)}
-                />
-              </div>
-            </div>
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="max-w-2xl rounded-[28px]">
+          <DialogHeader>
+            <DialogTitle>新增 CC 规则</DialogTitle>
+            <DialogDescription>新增的规则会保存到 protection-settings.cc_rules。</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 md:grid-cols-2">
+            <Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="规则名称" className="rounded-xl" />
+            <Input value={String(draft.window)} onChange={(event) => setDraft({ ...draft, window: Number(event.target.value) })} placeholder="时间窗口（秒）" type="number" className="rounded-xl" />
+            <Input value={String(draft.threshold)} onChange={(event) => setDraft({ ...draft, threshold: Number(event.target.value) })} placeholder="触发阈值" type="number" className="rounded-xl" />
+            <Input value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })} placeholder="动作：captcha / block" className="rounded-xl" />
+            <Input value={String(draft.duration)} onChange={(event) => setDraft({ ...draft, duration: Number(event.target.value) })} placeholder="持续时间（分钟）" type="number" className="rounded-xl" />
+            <Input value={draft.conditions[0]?.target || ""} onChange={(event) => setDraft({ ...draft, conditions: [{ ...draft.conditions[0], target: event.target.value }] })} placeholder="条件目标" className="rounded-xl" />
+            <Input value={draft.conditions[0]?.operator || ""} onChange={(event) => setDraft({ ...draft, conditions: [{ ...draft.conditions[0], operator: event.target.value }] })} placeholder="条件操作符" className="rounded-xl" />
+            <Input value={draft.conditions[0]?.value || ""} onChange={(event) => setDraft({ ...draft, conditions: [{ ...draft.conditions[0], value: event.target.value }] })} placeholder="条件值" className="rounded-xl md:col-span-2" />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowRuleDialog(false)} className="text-teal-600 border-teal-500">取消</Button>
-            <Button onClick={() => {
-              const newRule: CCRule = {
-                name: ruleName || `规则 ${ccRules.length + 1}`,
-                conditions: ruleConditions,
-                window: ruleWindow,
-                threshold: ruleThreshold,
-                action: ruleAction,
-                duration: ruleDuration,
-              };
-              const updated = [...ccRules, newRule];
-              setCCRules(updated);
-              if (cfg) {
-                const updatedCfg = { ...cfg, cc_rules: JSON.stringify(updated) };
-                api("/api/v1/protection-settings", {
-                  method: "POST",
-                  body: JSON.stringify(updatedCfg),
-                }).then(() => toast.success("规则已添加")).catch(() => toast.error("保存失败"));
-              }
-              setShowRuleDialog(false);
-              setRuleName("");
-              setRuleConditions([{ target: "url_path", operator: "equals", value: "" }]);
-            }} className="bg-teal-500 hover:bg-teal-600 text-white">提交</Button>
+            <Button variant="outline" onClick={() => setDialogOpen(false)}>取消</Button>
+            <Button onClick={saveRule} disabled={saving}>{saving ? "保存中..." : "保存规则"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function ToggleRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void | Promise<void> }) {
+  return (
+    <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+      <span className="text-sm font-medium text-slate-900">{label}</span>
+      <input type="checkbox" checked={checked} onChange={(event) => void onChange(event.target.checked)} className="h-4 w-4" />
     </div>
   );
 }
