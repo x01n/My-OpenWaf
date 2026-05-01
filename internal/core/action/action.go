@@ -8,10 +8,15 @@ const (
 	Intercept Type = "intercept"
 	Observe   Type = "observe"
 	Drop      Type = "drop"       // Highest priority: close TCP immediately, no response
-	Challenge Type = "challenge"   // JS challenge or CAPTCHA verification
+	Challenge Type = "challenge"  // JS challenge or CAPTCHA verification
 	Redirect  Type = "redirect"   // HTTP redirect to specified URL
-	RateLimit Type = "rate_limit"  // Per-rule rate limiting
-	Tag       Type = "tag"         // Tag request for downstream processing (non-terminal)
+	RateLimit Type = "rate_limit" // Per-rule rate limiting
+	Tag       Type = "tag"        // Tag request for downstream processing (non-terminal)
+
+	// Advanced challenge types
+	CaptchaChallenge Type = "captcha_challenge" // CAPTCHA image verification (click/slide/rotate/drag)
+	ShieldChallenge  Type = "shield_challenge"  // 5-second shield: CAPTCHA + PoW + env fingerprint
+	ChainChallenge   Type = "chain_challenge"   // Multi-step chain challenge with state machine
 
 	// Legacy aliases for backward compatibility with existing DB data.
 	Block   Type = "block"
@@ -44,10 +49,11 @@ type Result struct {
 }
 
 // IsTerminal returns true when this action must short-circuit
-// the pipeline — no upstream, no further phases.
+// the pipeline - no upstream, no further phases.
 func (r Result) IsTerminal() bool {
 	t := Normalize(r.Type)
-	return r.Matched && (t == Intercept || t == Drop || t == Challenge || t == Redirect)
+	return r.Matched && (t == Intercept || t == Drop || t == Challenge || t == Redirect ||
+		t == CaptchaChallenge || t == ShieldChallenge || t == ChainChallenge)
 }
 
 // IsDrop returns true when this action requires an immediate TCP connection close
@@ -56,9 +62,25 @@ func (r Result) IsDrop() bool {
 	return r.Matched && Normalize(r.Type) == Drop
 }
 
-// IsChallenge returns true when the request should be served a JS challenge page.
+// IsChallenge returns true when the request should be served a challenge page.
 func (r Result) IsChallenge() bool {
-	return r.Matched && Normalize(r.Type) == Challenge
+	t := Normalize(r.Type)
+	return r.Matched && (t == Challenge || t == CaptchaChallenge || t == ShieldChallenge || t == ChainChallenge)
+}
+
+// IsCaptchaChallenge returns true when the request requires a CAPTCHA challenge.
+func (r Result) IsCaptchaChallenge() bool {
+	return r.Matched && Normalize(r.Type) == CaptchaChallenge
+}
+
+// IsShieldChallenge returns true when the request requires a 5-second shield challenge.
+func (r Result) IsShieldChallenge() bool {
+	return r.Matched && Normalize(r.Type) == ShieldChallenge
+}
+
+// IsChainChallenge returns true when the request requires a multi-step chain challenge.
+func (r Result) IsChainChallenge() bool {
+	return r.Matched && Normalize(r.Type) == ChainChallenge
 }
 
 // IsRedirect returns true when the request should be redirected.
@@ -69,7 +91,8 @@ func (r Result) IsRedirect() bool {
 // ShouldLog returns true when the match warrants a security log entry.
 func (r Result) ShouldLog() bool {
 	t := Normalize(r.Type)
-	return r.Matched && (t == Intercept || t == Observe || t == Drop || t == Challenge || t == Redirect)
+	return r.Matched && (t == Intercept || t == Observe || t == Drop || t == Challenge || t == Redirect ||
+		t == CaptchaChallenge || t == ShieldChallenge || t == ChainChallenge)
 }
 
 // EffectiveStatusCode returns the status code to use, falling back to the

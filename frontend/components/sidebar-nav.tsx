@@ -31,7 +31,7 @@ export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
   return (
     <aside
       className={cn(
-        "relative hidden h-svh shrink-0 flex-col border-r border-white/8 bg-[linear-gradient(180deg,#09111f_0%,#0d182b_42%,#0b1120_100%)] text-white shadow-[30px_0_80px_rgba(2,6,23,0.35)] lg:flex",
+        "relative flex h-svh shrink-0 flex-col border-r border-white/8 bg-[linear-gradient(180deg,#09111f_0%,#0d182b_42%,#0b1120_100%)] text-white shadow-[30px_0_80px_rgba(2,6,23,0.35)]",
         collapsed ? "w-[92px]" : "w-[316px]",
       )}
     >

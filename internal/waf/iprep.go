@@ -9,10 +9,11 @@ import (
 
 // IPListEntry is an IP or CIDR with metadata.
 type IPListEntry struct {
-	CIDR    *net.IPNet
-	Single  net.IP
-	Note    string
-	ExpireAt int64 // unix seconds; 0 = permanent
+	CIDR     *net.IPNet
+	Single   net.IP
+	Note     string
+	ExpireAt int64  // unix seconds; 0 = permanent
+	Action   string // "intercept" or "block"
 }
 
 // IPReputation manages blacklist/whitelist + auto-ban.
@@ -25,10 +26,11 @@ type IPReputation struct {
 	violations sync.Map // map[string]*violationCounter
 
 	// Auto-ban settings
-	autoBanEnabled    atomic.Bool
-	autoBanThreshold  atomic.Int64
-	autoBanWindow     atomic.Int64 // seconds
-	autoBanDuration   atomic.Int64 // seconds
+	autoBanEnabled   atomic.Bool
+	autoBanThreshold atomic.Int64
+	autoBanWindow    atomic.Int64 // seconds
+	autoBanDuration  atomic.Int64 // seconds
+	autoBanAction    atomic.Value // string: "intercept" or "block"
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -48,6 +50,7 @@ func NewIPReputation() *IPReputation {
 	r.autoBanThreshold.Store(10)
 	r.autoBanWindow.Store(60)
 	r.autoBanDuration.Store(3600)
+	r.autoBanAction.Store("intercept")
 	r.wg.Add(1)
 	go r.cleaner()
 	return r
@@ -78,12 +81,20 @@ func (r *IPReputation) ConfigureAutoBan(enabled bool, threshold, windowSec, dura
 	}
 }
 
+// ConfigureAutoBanAction sets the action taken when an IP is auto-banned.
+func (r *IPReputation) ConfigureAutoBanAction(action string) {
+	if action == "intercept" || action == "block" {
+		r.autoBanAction.Store(action)
+	}
+}
+
 // Decision for an IP lookup.
 type IPDecision struct {
-	Allowed   bool
-	Matched   bool
-	Reason    string
-	Category  string 
+	Allowed  bool
+	Matched  bool
+	Reason   string
+	Category string
+	Action   string // "block" for TCP RST, "intercept" for HTTP 403
 }
 
 // Check returns the reputation decision for the given IP.
@@ -102,7 +113,7 @@ func (r *IPReputation) Check(ip net.IP) IPDecision {
 	for _, e := range r.blacklist {
 		if entryMatches(e, ip) {
 			r.mu.RUnlock()
-			return IPDecision{Allowed: false, Matched: true, Reason: e.Note, Category: "blacklist"}
+			return IPDecision{Allowed: false, Matched: true, Reason: e.Note, Category: "blacklist", Action: e.Action}
 		}
 	}
 	r.mu.RUnlock()
@@ -115,7 +126,8 @@ func (r *IPReputation) Check(ip net.IP) IPDecision {
 			bt := vc.bannedTil
 			vc.mu.Unlock()
 			if bt > time.Now().Unix() {
-				return IPDecision{Allowed: false, Matched: true, Reason: "auto-banned", Category: "auto_ban"}
+				act, _ := r.autoBanAction.Load().(string)
+				return IPDecision{Allowed: false, Matched: true, Reason: "auto-banned", Category: "auto_ban", Action: act}
 			}
 		}
 	}
@@ -193,16 +205,20 @@ func entryMatches(e IPListEntry, ip net.IP) bool {
 }
 
 // ParseIPListEntry parses a CIDR or single IP string into an IPListEntry.
-func ParseIPListEntry(s string, note string) (IPListEntry, bool) {
+func ParseIPListEntry(s string, note string, action ...string) (IPListEntry, bool) {
 	s = trimSpace(s)
 	if s == "" {
 		return IPListEntry{}, false
 	}
+	act := "intercept"
+	if len(action) > 0 && action[0] != "" {
+		act = action[0]
+	}
 	if _, cidr, err := net.ParseCIDR(s); err == nil {
-		return IPListEntry{CIDR: cidr, Note: note}, true
+		return IPListEntry{CIDR: cidr, Note: note, Action: act}, true
 	}
 	if ip := net.ParseIP(s); ip != nil {
-		return IPListEntry{Single: ip, Note: note}, true
+		return IPListEntry{Single: ip, Note: note, Action: act}, true
 	}
 	return IPListEntry{}, false
 }

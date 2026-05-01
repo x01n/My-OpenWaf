@@ -1,0 +1,50 @@
+package repository
+
+import (
+	"My-OpenWaf/internal/store"
+
+	"gorm.io/gorm"
+)
+
+type SiteListenerRepo struct{ db *gorm.DB }
+
+func NewSiteListenerRepo(db *gorm.DB) *SiteListenerRepo { return &SiteListenerRepo{db: db} }
+
+// All returns every listener (including disabled) ordered by site/bind.
+func (r *SiteListenerRepo) All() ([]store.SiteListener, error) {
+	var items []store.SiteListener
+	return items, r.db.Order("site_id ASC, bind ASC").Find(&items).Error
+}
+
+// AllEnabled returns only listeners marked enabled.
+func (r *SiteListenerRepo) AllEnabled() ([]store.SiteListener, error) {
+	var items []store.SiteListener
+	return items, r.db.Where("enabled = ?", true).Order("site_id ASC, bind ASC").Find(&items).Error
+}
+
+// ListBySite returns listeners for a specific site ordered by bind.
+func (r *SiteListenerRepo) ListBySite(siteID uint) ([]store.SiteListener, error) {
+	var items []store.SiteListener
+	return items, r.db.Where("site_id = ?", siteID).Order("bind ASC").Find(&items).Error
+}
+
+func (r *SiteListenerRepo) Get(id uint) (*store.SiteListener, error) {
+	var item store.SiteListener
+	return &item, r.db.First(&item, id).Error
+}
+
+func (r *SiteListenerRepo) Create(item *store.SiteListener) error {
+	return r.db.Create(item).Error
+}
+
+func (r *SiteListenerRepo) Update(item *store.SiteListener) error {
+	return r.db.Save(item).Error
+}
+
+func (r *SiteListenerRepo) Delete(id uint) error {
+	return r.db.Delete(&store.SiteListener{}, id).Error
+}
+
+func (r *SiteListenerRepo) DeleteBySite(siteID uint) error {
+	return r.db.Where("site_id = ?", siteID).Delete(&store.SiteListener{}).Error
+}

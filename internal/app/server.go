@@ -117,6 +117,7 @@ func Run() {
 	defer ipRep.Close()
 	loadIPLists(ipRep, repos.IPList)
 	ipRep.ConfigureAutoBan(prot.AutoBanEnabled, prot.AutoBanThreshold, prot.AutoBanWindow, prot.AutoBanDuration)
+	ipRep.ConfigureAutoBanAction(prot.AutoBanAction)
 
 	eng := engine.New(rt.Snapshot, reqRL, errRL, ipRep)
 
@@ -153,6 +154,32 @@ func Run() {
 
 	dpLog := logger.New("dataplane")
 
+	// Challenge managers: CAPTCHA, Shield (5-second), Chain.
+	captchaMgr := waf.NewCaptchaManager(rt.Redis, time.Duration(prot.CaptchaTimeout)*time.Second)
+	shieldMgr := waf.NewShieldManager(captchaMgr, rt.Redis, prot.ShieldDifficulty)
+	chainMgr := waf.NewChainChallengeManager(captchaMgr, rt.Redis)
+
+	// Anti-replay nonce protection manager.
+	antiReplayMgr := waf.NewAntiReplayManager("", rt.Redis, 5*time.Minute)
+	eng.SetAntiReplayManager(antiReplayMgr)
+
+	// Escalation (step-up response) manager.
+	escalationMgr := waf.NewEscalationManager(rt.Redis)
+	if prot.EscalationEnabled {
+		steps := prot.GetEscalationSteps()
+		wafSteps := make([]waf.EscalationStep, len(steps))
+		for i, s := range steps {
+			wafSteps[i] = waf.EscalationStep{Threshold: s.Threshold, Action: s.Action}
+		}
+		escalationMgr.SetDefaultConfig(waf.EscalationConfig{
+			Enabled:    true,
+			WindowSecs: prot.EscalationWindowSecs,
+			Steps:      wafSteps,
+		})
+	}
+	eng.SetEscalationManager(escalationMgr)
+	defer escalationMgr.Close()
+
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
 	dpOpts := dataplane.Options{
 		Holder:          rt.Snapshot,
@@ -163,6 +190,9 @@ func Run() {
 		DropEventRepo:   repos.DropEvent,
 		ResponseCache:   responseCache,
 		Log:             dpLog,
+		CaptchaManager:  captchaMgr,
+		ShieldManager:   shieldMgr,
+		ChainManager:    chainMgr,
 	}
 
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
@@ -248,6 +278,22 @@ func Run() {
 			reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
 			errRL.Reconfigure(p.ErrorRateLimitWindow, p.ErrorRateLimitMax, p.ErrorRateLimitEnabled)
 			ipRep.ConfigureAutoBan(p.AutoBanEnabled, p.AutoBanThreshold, p.AutoBanWindow, p.AutoBanDuration)
+			ipRep.ConfigureAutoBanAction(p.AutoBanAction)
+			// Refresh escalation config.
+			if p.EscalationEnabled {
+				steps := p.GetEscalationSteps()
+				wafSteps := make([]waf.EscalationStep, len(steps))
+				for i, s := range steps {
+					wafSteps[i] = waf.EscalationStep{Threshold: s.Threshold, Action: s.Action}
+				}
+				escalationMgr.SetDefaultConfig(waf.EscalationConfig{
+					Enabled:    true,
+					WindowSecs: p.EscalationWindowSecs,
+					Steps:      wafSteps,
+				})
+			} else {
+				escalationMgr.SetDefaultConfig(waf.EscalationConfig{Enabled: false})
+			}
 		}
 		loadIPLists(ipRep, repos.IPList)
 		// Hot-reload data-plane listeners.
@@ -270,6 +316,7 @@ func Run() {
 				reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
 				errRL.Reconfigure(p.ErrorRateLimitWindow, p.ErrorRateLimitMax, p.ErrorRateLimitEnabled)
 				ipRep.ConfigureAutoBan(p.AutoBanEnabled, p.AutoBanThreshold, p.AutoBanWindow, p.AutoBanDuration)
+				ipRep.ConfigureAutoBanAction(p.AutoBanAction)
 			}
 			loadIPLists(ipRep, repos.IPList)
 			reconcileListeners()
@@ -337,7 +384,7 @@ func loadIPLists(rep *waf.IPReputation, repo *repository.IPListRepo) {
 	}
 	var blacks, whites []waf.IPListEntry
 	for _, it := range items {
-		e, ok := waf.ParseIPListEntry(it.Value, it.Note)
+		e, ok := waf.ParseIPListEntry(it.Value, it.Note, it.Action)
 		if !ok {
 			continue
 		}

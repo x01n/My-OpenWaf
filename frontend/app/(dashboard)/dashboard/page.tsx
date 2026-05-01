@@ -4,9 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Ban,
   Bot,
+  Fingerprint,
   Gauge,
+  KeyRound,
+  Layers,
   RefreshCcw,
   ShieldAlert,
+  ShieldCheck,
+  SlidersHorizontal,
   TimerReset,
 } from "lucide-react";
 import {
@@ -151,6 +156,15 @@ export default function DashboardPage() {
             ))}
       </MetricGrid>
 
+      <Surface title="安全功能概览" description="新安全功能的实时统计摘要（占位数据，待后续接入真实 API）。">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MiniStatCard icon={Fingerprint} label="验证码质询" value="1,283" hint="过去 24 小时" />
+          <MiniStatCard icon={KeyRound} label="防重放拦截" value="467" hint="过去 24 小时" />
+          <MiniStatCard icon={Layers} label="阶梯升级 IP" value="L1: 89 · L2: 34 · L3: 12" hint="当前各等级" />
+          <MiniStatCard icon={SlidersHorizontal} label="活跃规则" value="CVE 156 · OWASP 18" hint="已启用规则数" />
+        </div>
+      </Surface>
+
       <div className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
         <Surface
           title={tab === "overview" ? "24 小时安全事件时间线" : tab === "traffic" ? "请求与阻断概览" : "威胁来源聚合"}
@@ -280,6 +294,31 @@ function StatusRow({
         </div>
       </div>
       <div className={`console-badge ${statusToneClass(status)}`}>{value}</div>
+    </div>
+  );
+}
+
+function MiniStatCard({
+  icon: Icon,
+  label,
+  value,
+  hint,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  hint: string;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-cyan-50 text-cyan-700">
+        <Icon className="h-4.5 w-4.5" />
+      </div>
+      <div className="min-w-0 space-y-1">
+        <div className="text-[11px] font-medium tracking-[0.16em] text-slate-400 uppercase">{label}</div>
+        <div className="text-sm font-semibold text-slate-900">{value}</div>
+        <div className="text-xs text-slate-500">{hint}</div>
+      </div>
     </div>
   );
 }

@@ -55,6 +55,10 @@ type SiteRuntime struct {
 	CacheDefaultTTL int
 	CacheRules      []store.SiteCacheRule
 
+	// Anti-replay nonce protection
+	AntiReplayEnabled bool
+	AntiReplayAction  string // action when nonce invalid (default: "challenge")
+
 	// Per-site protection overrides (merged from Site fields).
 	// nil = use global ProtectionConfig.
 	EffectiveProtection *store.ProtectionConfig

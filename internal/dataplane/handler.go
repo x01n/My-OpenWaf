@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -27,15 +28,38 @@ import (
 
 // Options configures a single data listener handler.
 type Options struct {
-	Bind            string
 	Holder          *snapshot.Holder
 	Engine          *engine.Engine
 	Metrics         *Metrics
 	EventWriter     *observability.EventWriter
 	AccessLogWriter *observability.AccessLogWriter
-	DropEventRepo   interface{ Create(item *store.DropEvent) error }
-	ResponseCache   *cache.ResponseCache
-	Log             *slog.Logger
+	DropEventRepo   interface {
+		Create(item *store.DropEvent) error
+	}
+	ResponseCache  *cache.ResponseCache
+	Log            *slog.Logger
+	Bind           string
+	CaptchaManager *waf.CaptchaManager
+	ShieldManager  *waf.ShieldManager
+	ChainManager   *waf.ChainChallengeManager
+}
+
+const bindContextKey = "dataplane_bind"
+
+func HandlerForBind(bind string, handler app.HandlerFunc) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		c.Set(bindContextKey, bind)
+		handler(ctx, c)
+	}
+}
+
+func listenerBind(c *app.RequestContext) string {
+	if value, ok := c.Get(bindContextKey); ok {
+		if bind, ok := value.(string); ok {
+			return bind
+		}
+	}
+	return ""
 }
 
 // Handler returns a Hertz middleware: maintenance → WAF → block fuse or reverse proxy.
@@ -47,6 +71,11 @@ func Handler(opts Options) app.HandlerFunc {
 
 	return func(ctx context.Context, c *app.RequestContext) {
 		if serveOWAFStatic(c, staticFS) {
+			return
+		}
+
+		// Handle challenge verification endpoints
+		if handleChallengeVerify(c, opts) {
 			return
 		}
 
@@ -64,14 +93,15 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		host := string(c.Host())
-		rt, ok := sn.MatchSite(opts.Bind, host)
+		bind := listenerBind(c)
+		rt, ok := sn.MatchSite(bind, host)
 		if !ok {
 			opts.Log.Warn("no site match",
 				slog.String("host", host),
-				slog.String("bind", opts.Bind),
+				slog.String("bind", bind),
 				slog.Int("sites", len(sn.Sites)),
 			)
-			c.String(404, "unknown virtual host")
+			waf.WriteWelcomePage(ctx, c)
 			return
 		}
 
@@ -82,59 +112,91 @@ func Handler(opts Options) app.HandlerFunc {
 
 		if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil {
 			decision := ipRep.Check(clientIP)
-			if decision.Matched && !decision.Allowed && decision.Category == "blacklist" {
+			if decision.Matched && !decision.Allowed {
 				if opts.Metrics != nil {
 					opts.Metrics.RecordWAFBlock()
 					opts.Metrics.RecordAttackIP(clientIP.String())
 				}
+
+				// Determine action: "block" → TCP RST (drop), default → HTTP 403 (intercept)
+				ipAction := decision.Action
+				if ipAction == "" {
+					ipAction = "intercept"
+				}
+				useDropAction := ipAction == "block"
+
+				var actType action.Type
+				var actStr string
+				if useDropAction {
+					actType = action.Drop
+					actStr = "drop"
+				} else {
+					actType = action.Intercept
+					actStr = "intercept"
+				}
+
 				blockAction := action.Result{
-					Type:      action.Drop,
+					Type:      actType,
 					Phase:     "ip_reputation",
-					RuleIDStr: "ip:blacklist",
+					RuleIDStr: "ip:" + decision.Category,
 					MatchDesc: decision.Reason,
 					Matched:   true,
-					Category:  "blacklist",
+					Category:  decision.Category,
 				}
 				if opts.EventWriter != nil {
 					opts.EventWriter.Record(store.SecurityEvent{
-						SiteID:     rt.Site.ID,
-						RequestID:  reqID,
-						ClientIP:   clientIPStr(clientIP),
-						Host:       host,
-						Path:       string(c.Path()),
-						Method:     string(c.Method()),
-						UserAgent:  string(c.UserAgent()),
-						RuleIDStr:  blockAction.RuleIDStr,
-						Phase:      blockAction.Phase,
-						Action:     "drop",
-						Category:   blockAction.Category,
-						MatchDesc:  blockAction.MatchDesc,
-						StatusCode: 0,
+						SiteID:    rt.Site.ID,
+						RequestID: reqID,
+						ClientIP:  clientIPStr(clientIP),
+						Host:      host,
+						Path:      string(c.Path()),
+						Method:    string(c.Method()),
+						UserAgent: string(c.UserAgent()),
+						RuleIDStr: blockAction.RuleIDStr,
+						Phase:     blockAction.Phase,
+						Action:    actStr,
+						Category:  blockAction.Category,
+						MatchDesc: blockAction.MatchDesc,
+						StatusCode: func() int {
+							if useDropAction {
+								return 0
+							}
+							return 403
+						}(),
 					})
 				}
-				logAccess(accessLog, reqID, c, "drop")
-				recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "drop", "bypass", "")
-				recordDropEvent(opts, rt.Site.ID, clientIP, waf.DropReason{
-					Source:    "ip_reputation",
-					RuleID:    blockAction.RuleIDStr,
-					Detail:    blockAction.MatchDesc,
-					Host:      host,
-					Path:      string(c.Path()),
-					Timestamp: time.Now(),
-				})
-				dropExec := opts.Engine.DropExecutor()
-				if dropExec != nil && dropExec.Enabled() {
-					dropExec.Execute(c.GetConn(), waf.DropReason{
+
+				if useDropAction {
+					// TCP RST — close connection immediately, no HTTP response
+					logAccess(accessLog, reqID, c, "drop")
+					recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "drop", "bypass", "")
+					recordDropEvent(opts, rt.Site.ID, clientIP, waf.DropReason{
 						Source:    "ip_reputation",
 						RuleID:    blockAction.RuleIDStr,
 						Detail:    blockAction.MatchDesc,
-						ClientIP:  clientIPStr(clientIP),
 						Host:      host,
 						Path:      string(c.Path()),
 						Timestamp: time.Now(),
 					})
-				} else if conn := c.GetConn(); conn != nil {
-					conn.Close()
+					dropExec := opts.Engine.DropExecutor()
+					if dropExec != nil && dropExec.Enabled() {
+						dropExec.Execute(c.GetConn(), waf.DropReason{
+							Source:    "ip_reputation",
+							RuleID:    blockAction.RuleIDStr,
+							Detail:    blockAction.MatchDesc,
+							ClientIP:  clientIPStr(clientIP),
+							Host:      host,
+							Path:      string(c.Path()),
+							Timestamp: time.Now(),
+						})
+					} else if conn := c.GetConn(); conn != nil {
+						conn.Close()
+					}
+				} else {
+					// HTTP 403 — return block page
+					waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+					logAccess(accessLog, reqID, c, "intercept")
+					recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "intercept", "bypass", "")
 				}
 				return
 			}
@@ -172,6 +234,106 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 		rawQ := string(c.URI().QueryString())
 
+		// ── Anti-replay nonce check (per-site, before pipeline) ──────
+		if rt.AntiReplayEnabled {
+			lp := strings.ToLower(path)
+			skipNonce := strings.HasPrefix(lp, "/__owaf/") || isStaticAsset(lp)
+			if !skipNonce {
+				if ar := opts.Engine.AntiReplay(); ar != nil {
+					cipStr := clientIPStr(clientIP)
+					nonceCookie := string(c.Cookie(waf.NonceKey))
+					if nonceCookie == "" {
+						// First visit — issue nonce cookie and let through.
+						newNonce := ar.GenerateNonce(cipStr)
+						setNonceCookie(c, newNonce, rt.Site.TLSEnabled)
+					} else {
+						valid, isReplay, newNonce := ar.ValidateAndRotate(nonceCookie, cipStr)
+						switch {
+						case valid:
+							// Good nonce — rotate cookie.
+							setNonceCookie(c, newNonce, rt.Site.TLSEnabled)
+						case isReplay:
+							// Replay attack — intercept immediately.
+							blockAction := action.Result{
+								Type:      action.Intercept,
+								Phase:     "anti_replay",
+								RuleIDStr: "antireplay:nonce_reuse",
+								MatchDesc: "replayed nonce detected",
+								Matched:   true,
+								Category:  "replay",
+							}
+							if opts.Metrics != nil {
+								opts.Metrics.RecordWAFBlock()
+							}
+							if opts.EventWriter != nil {
+								opts.EventWriter.Record(store.SecurityEvent{
+									SiteID:     rt.Site.ID,
+									RequestID:  reqID,
+									ClientIP:   cipStr,
+									Host:       host,
+									Path:       path,
+									Method:     string(c.Method()),
+									UserAgent:  string(c.UserAgent()),
+									RuleIDStr:  blockAction.RuleIDStr,
+									Phase:      blockAction.Phase,
+									Action:     "intercept",
+									Category:   blockAction.Category,
+									MatchDesc:  blockAction.MatchDesc,
+									StatusCode: 403,
+								})
+							}
+							waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+							logAccess(accessLog, reqID, c, "intercept")
+							recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "intercept", "bypass", "")
+							return
+						default:
+							// Expired or invalid nonce — trigger configured action (default: challenge).
+							antiReplayAct := rt.AntiReplayAction
+							if antiReplayAct == "" || antiReplayAct == "shield_challenge" {
+								antiReplayAct = "challenge"
+							}
+							challengeResult := action.Result{
+								Type:      action.Type(antiReplayAct),
+								Phase:     "anti_replay",
+								RuleIDStr: "antireplay:invalid_nonce",
+								MatchDesc: "expired or invalid nonce",
+								Matched:   true,
+								Category:  "replay",
+							}
+							if opts.Metrics != nil {
+								opts.Metrics.RecordWAFBlock()
+							}
+							if opts.EventWriter != nil {
+								opts.EventWriter.Record(store.SecurityEvent{
+									SiteID:     rt.Site.ID,
+									RequestID:  reqID,
+									ClientIP:   cipStr,
+									Host:       host,
+									Path:       path,
+									Method:     string(c.Method()),
+									UserAgent:  string(c.UserAgent()),
+									RuleIDStr:  challengeResult.RuleIDStr,
+									Phase:      challengeResult.Phase,
+									Action:     antiReplayAct,
+									Category:   challengeResult.Category,
+									MatchDesc:  challengeResult.MatchDesc,
+									StatusCode: 403,
+								})
+							}
+							if action.Type(antiReplayAct) == action.Challenge {
+								waf.WriteChallengeResponse(c, reqID, &rt, 403)
+							} else {
+								waf.WriteBlockResponse(c, reqID, &rt, sn, challengeResult)
+							}
+							logAccess(accessLog, reqID, c, antiReplayAct)
+							recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, antiReplayAct, "bypass", "")
+							return
+						}
+					}
+				}
+			}
+		}
+
 		lowerPath := strings.ToLower(path)
 		if strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+") || strings.Contains(lowerPath, "%2bcscot%2b") || strings.Contains(lowerPath, "%2bcscoe%2b")) {
 			blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:path:015", MatchDesc: "Cisco translation-table path traversal pattern", Matched: true, Category: string(waf.CatPathTrav)}
@@ -205,7 +367,7 @@ func Handler(opts Options) app.HandlerFunc {
 
 		reqCtx := pipeline.AcquireCtx()
 		reqCtx.RequestID = reqID
-		reqCtx.Bind = opts.Bind
+		reqCtx.Bind = bind
 		reqCtx.ClientIP = clientIP
 		reqCtx.Method = string(c.Method())
 		reqCtx.Path = path
@@ -283,6 +445,26 @@ func Handler(opts Options) app.HandlerFunc {
 		if result.Action.IsTerminal() {
 			actType := action.Normalize(result.Action.Type)
 			actStr := string(actType)
+
+			// ── Escalation: record hit and potentially upgrade action ──
+			if em := opts.Engine.Escalation(); em != nil && clientIP != nil {
+				em.RecordHit(clientIP.String(), rt.Site.ID, nil)
+				if upgraded := em.Evaluate(clientIP.String(), rt.Site.ID, nil); upgraded != "" {
+					if waf.ActionSeverity(upgraded) > waf.ActionSeverity(actStr) {
+						switch upgraded {
+						case "block", "drop":
+							result.Action.Type = action.Drop
+						case "intercept":
+							result.Action.Type = action.Intercept
+						case "challenge":
+							result.Action.Type = action.Challenge
+						}
+						actType = action.Normalize(result.Action.Type)
+						actStr = string(actType)
+						result.Action.MatchDesc += " [escalated→" + upgraded + "]"
+					}
+				}
+			}
 			if opts.Metrics != nil {
 				opts.Metrics.RecordWAFBlock()
 				if clientIP != nil {
@@ -358,6 +540,7 @@ func Handler(opts Options) app.HandlerFunc {
 					slog.String("rule_id", result.Action.RuleIDStr),
 					slog.String("phase", result.Action.Phase),
 					slog.String("match", result.Action.MatchDesc),
+					slog.String("challenge_type", string(result.Action.Type)),
 				)
 				statusCode := result.Action.EffectiveStatusCode(403)
 				if opts.EventWriter != nil {
@@ -372,13 +555,24 @@ func Handler(opts Options) app.HandlerFunc {
 						RuleID:     result.Action.RuleID,
 						RuleIDStr:  result.Action.RuleIDStr,
 						Phase:      result.Action.Phase,
-						Action:     "challenge",
+						Action:     string(result.Action.Type),
 						Category:   result.Action.Category,
 						MatchDesc:  result.Action.MatchDesc,
 						StatusCode: statusCode,
 					})
 				}
-				waf.WriteChallengeResponse(c, reqID, result.Site, statusCode)
+				// Route to appropriate challenge handler
+				switch {
+				case result.Action.IsCaptchaChallenge() && opts.CaptchaManager != nil:
+					waf.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager)
+				case result.Action.IsShieldChallenge() && opts.ShieldManager != nil:
+					origURL := string(c.Request.URI().RequestURI())
+					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL)
+				case result.Action.IsChainChallenge() && opts.ChainManager != nil:
+					waf.WriteChainChallengeResponse(c, reqID, opts.ChainManager)
+				default:
+					waf.WriteChallengeResponse(c, reqID, result.Site, statusCode)
+				}
 				logAccess(accessLog, reqID, c, "challenge")
 				recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "challenge", "bypass", "")
 				return
@@ -496,7 +690,15 @@ func Handler(opts Options) app.HandlerFunc {
 			if isTimeoutError(upstreamErr) {
 				errCode = 504
 			}
-			waf.WriteUpstreamErrorResponse(c, reqID, errCode)
+			waf.WriteErrorPage(ctx, c, errCode, nil)
+		} else if !IsWebSocketUpgrade(c) && !IsSSERequest(c) {
+			// Upstream empty body fallback: if upstream returns empty body
+			// with a non-204/304 status, render a friendly error page.
+			respStatus := c.Response.StatusCode()
+			respBodyLen := len(c.Response.Body())
+			if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
+				waf.WriteErrorPage(ctx, c, respStatus, nil)
+			}
 		}
 		if c.Response.Header.Get("Server") != "" && !hasUpstreamServerHeader(c) {
 			c.Response.Header.Del("Server")
@@ -610,7 +812,6 @@ func recordDropEvent(opts Options, siteID uint, clientIP net.IP, reason waf.Drop
 	})
 }
 
-// ShouldBlock checks if an action result requires blocking (legacy helper).
 func ShouldBlock(res action.Result) bool {
 	return res.IsTerminal()
 }
@@ -652,4 +853,130 @@ func isTimeoutError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// handleChallengeVerify handles POST requests to challenge verification endpoints.
+// Returns true if the request was handled (caller should return early).
+func handleChallengeVerify(c *app.RequestContext, opts Options) bool {
+	if string(c.Method()) != "POST" {
+		return false
+	}
+
+	path := string(c.Path())
+	switch path {
+	case "/__owaf/captcha/verify":
+		return handleCaptchaVerify(c, opts)
+	case "/__owaf/shield/verify":
+		return handleShieldVerify(c, opts)
+	case "/__owaf/chain/verify":
+		return handleChainVerify(c, opts)
+	}
+	return false
+}
+
+func handleCaptchaVerify(c *app.RequestContext, opts Options) bool {
+	if opts.CaptchaManager == nil {
+		c.String(503, "captcha not configured")
+		return true
+	}
+
+	sessionID := string(c.FormValue("__waf_captcha_session"))
+	answer := string(c.FormValue("__waf_captcha_answer"))
+
+	if sessionID == "" || answer == "" {
+		c.Redirect(302, []byte("/"))
+		return true
+	}
+
+	if opts.CaptchaManager.Verify(sessionID, answer) {
+		setChallengeCookie(c, opts)
+		referer := string(c.GetHeader("Referer"))
+		if referer == "" {
+			referer = "/"
+		}
+		c.Redirect(302, []byte(referer))
+	} else {
+		c.Redirect(302, []byte(string(c.GetHeader("Referer"))))
+	}
+	return true
+}
+
+func handleShieldVerify(c *app.RequestContext, opts Options) bool {
+	if opts.ShieldManager == nil {
+		c.String(503, "shield not configured")
+		return true
+	}
+
+	sessionID := string(c.FormValue("__waf_shield_session"))
+	captchaAnswer := string(c.FormValue("__waf_captcha_answer"))
+	counterStr := string(c.FormValue("__waf_pow_counter"))
+	hash := string(c.FormValue("__waf_pow_hash"))
+	envFP := string(c.FormValue("__waf_env_fp"))
+
+	var counter int64
+	if counterStr != "" {
+		counter, _ = strconv.ParseInt(counterStr, 10, 64)
+	}
+
+	passed, originalURL := opts.ShieldManager.VerifyChallenge(sessionID, captchaAnswer, counter, hash, envFP)
+	if passed {
+		setChallengeCookie(c, opts)
+		if originalURL == "" {
+			originalURL = "/"
+		}
+		c.Redirect(302, []byte(originalURL))
+	} else {
+		// Re-challenge
+		c.Redirect(302, []byte(string(c.GetHeader("Referer"))))
+	}
+	return true
+}
+
+func handleChainVerify(c *app.RequestContext, opts Options) bool {
+	if opts.ChainManager == nil {
+		c.String(503, "chain challenge not configured")
+		return true
+	}
+
+	sessionID := string(c.FormValue("__waf_chain_session"))
+	stepType := string(c.FormValue("__waf_chain_step"))
+
+	formData := map[string]string{
+		"env_fp":         string(c.FormValue("__waf_env_fp")),
+		"pow_counter":    string(c.FormValue("__waf_pow_counter")),
+		"pow_hash":       string(c.FormValue("__waf_pow_hash")),
+		"captcha_answer": string(c.FormValue("__waf_captcha_answer")),
+		"step_type":      stepType,
+	}
+
+	passed, redirectURL, nextHTML := opts.ChainManager.ProcessStep(sessionID, formData)
+	if passed {
+		setChallengeCookie(c, opts)
+		if redirectURL == "" {
+			redirectURL = "/"
+		}
+		c.Redirect(302, []byte(redirectURL))
+	} else if nextHTML != "" {
+		c.Data(403, "text/html; charset=utf-8", []byte(nextHTML))
+	} else {
+		c.Redirect(302, []byte("/"))
+	}
+	return true
+}
+
+func setChallengeCookie(c *app.RequestContext, opts Options) {
+	sn := opts.Holder.Load()
+	tlsEnabled := false
+	if sn != nil {
+		host := string(c.Host())
+		bind := listenerBind(c)
+		if rt, ok := sn.MatchSite(bind, host); ok {
+			tlsEnabled = rt.Site.TLSEnabled
+		}
+	}
+	cookie := "__waf_passed=1; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600"
+	if tlsEnabled {
+		cookie += "; Secure"
+	}
+	c.Response.Header.Set("Set-Cookie", cookie)
 }

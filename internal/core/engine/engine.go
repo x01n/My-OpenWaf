@@ -26,10 +26,12 @@ type Engine struct {
 	reqRateLimiter *waf.RateLimiter
 	errRateLimiter *waf.RateLimiter
 	ipRep          *waf.IPReputation
-	geoResolver    *waf.MaxMindResolver // nil when GeoIP DB is unavailable
-	botThreshold   int                  // score threshold for bot blocking
-	cveDetector    *waf.CVEDetector     // CVE-specific vulnerability detection
-	dropExecutor   *waf.DropExecutor    // TCP drop executor
+	geoResolver    *waf.MaxMindResolver   // nil when GeoIP DB is unavailable
+	botThreshold   int                    // score threshold for bot blocking
+	cveDetector    *waf.CVEDetector       // CVE-specific vulnerability detection
+	dropExecutor   *waf.DropExecutor      // TCP drop executor
+	antiReplay     *waf.AntiReplayManager // nonce-based replay prevention
+	escalation     *waf.EscalationManager // step-up response escalation
 
 	// Per-snapshot rule compilation cache. Key: snapshotRevision<<32 | policyID.
 	// Cleared on snapshot change via revision check.
@@ -147,14 +149,22 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 
 	var phases []pipeline.Phase
 
-	// IP reputation runs first: whitelist short-circuits, blacklist blocks.
+	// ── Stage 0: IP reputation → anti-replay nonce → whitelist/blacklist ──
 	if e.ipRep != nil {
 		phases = append(phases, rules.NewIPReputationPhase(e.ipRep))
 	}
+	if e.antiReplay != nil {
+		phases = append(phases, rules.NewAntiReplayPhase(e.antiReplay))
+	}
 
+	// ── Stage 1: OWASP + CVE parallel detection → hit = terminate ──
+	if prot.OWASPEnabled || (prot.CVEEnabled && e.cveDetector != nil) {
+		phases = append(phases, rules.NewParallelOWASPCVEPhase(prot, e.cveDetector))
+	}
+
+	// ── Stage 2: ACL → Bot → rate limit → escalation → signature → custom ──
 	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
 
-	// Bot detection before rate limiting (malicious tools should be blocked early).
 	if prot.BotDetectionEnabled {
 		if e.geoResolver != nil {
 			phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
@@ -166,15 +176,6 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	if prot.RequestRateLimitEnabled && e.reqRateLimiter != nil {
 		act := action.Type(prot.RequestRateLimitAction)
 		phases = append(phases, rules.NewReqRateLimitPhase(e.reqRateLimiter, act))
-	}
-
-	if prot.OWASPEnabled {
-		phases = append(phases, rules.NewOWASPPhase(prot))
-	}
-
-	// CVE detection runs after OWASP (OWASP covers generic attacks, CVE covers targeted exploits).
-	if prot.CVEEnabled && e.cveDetector != nil {
-		phases = append(phases, rules.NewCVEPhase(prot, e.cveDetector))
 	}
 
 	phases = append(phases,
@@ -207,14 +208,26 @@ func (e *Engine) Evaluate(clientIP net.IP, path, rawQuery string, siteRules []sn
 	return pipe.Run(ctx).Action
 }
 
-func (e *Engine) Resolver() *sites.Resolver        { return e.resolver }
-func (e *Engine) ErrRateLimiter() *waf.RateLimiter { return e.errRateLimiter }
-func (e *Engine) CVEDetector() *waf.CVEDetector    { return e.cveDetector }
-func (e *Engine) DropExecutor() *waf.DropExecutor  { return e.dropExecutor }
+func (e *Engine) Resolver() *sites.Resolver          { return e.resolver }
+func (e *Engine) ErrRateLimiter() *waf.RateLimiter   { return e.errRateLimiter }
+func (e *Engine) CVEDetector() *waf.CVEDetector      { return e.cveDetector }
+func (e *Engine) DropExecutor() *waf.DropExecutor    { return e.dropExecutor }
+func (e *Engine) AntiReplay() *waf.AntiReplayManager { return e.antiReplay }
+func (e *Engine) Escalation() *waf.EscalationManager { return e.escalation }
 
 // SetDropExecutor attaches a drop executor to the engine.
 func (e *Engine) SetDropExecutor(d *waf.DropExecutor) {
 	e.dropExecutor = d
+}
+
+// SetAntiReplayManager attaches an anti-replay manager to the engine.
+func (e *Engine) SetAntiReplayManager(m *waf.AntiReplayManager) {
+	e.antiReplay = m
+}
+
+// SetEscalationManager attaches an escalation manager to the engine.
+func (e *Engine) SetEscalationManager(m *waf.EscalationManager) {
+	e.escalation = m
 }
 
 // convertAndCompile converts snapshot CompiledRules to engine-ready rules.Compiled.

@@ -53,6 +53,16 @@ var ssrfPatterns = []struct {
 	{regexp.MustCompile(`(?i)x-aws-ec2-metadata-token`), 5, "owasp:ssrf:013"},
 	// Unix socket SSRF (CVE-2023-46809 style): unix:path|http://...
 	{regexp.MustCompile(`(?i)\bunix:[^\s]{10,}`), 4, "owasp:ssrf:014"},
+	// Azure Instance Metadata Service (IMDS)
+	{regexp.MustCompile(`(?i)169\.254\.169\.254.{0,50}metadata/instance`), 6, "owasp:ssrf:015"},
+	// GCP metadata with flavor header
+	{regexp.MustCompile(`(?i)metadata\.google\.internal.{0,50}(computeMetadata|v1/)`), 6, "owasp:ssrf:016"},
+	// AWS IMDSv2 token PUT request pattern
+	{regexp.MustCompile(`(?i)PUT.{0,100}169\.254\.169\.254.{0,50}api/token`), 6, "owasp:ssrf:017"},
+	// DigitalOcean metadata endpoint
+	{regexp.MustCompile(`(?i)169\.254\.169\.254.{0,50}/metadata/v1`), 5, "owasp:ssrf:018"},
+	// Oracle Cloud IMDS
+	{regexp.MustCompile(`(?i)169\.254\.169\.254.{0,50}opc/v[12]/`), 5, "owasp:ssrf:019"},
 }
 
 func checkSSRF(s string, threshold int) (OWASPHit, bool) {
@@ -277,6 +287,16 @@ var nosqliPatterns = []struct {
 	{regexp.MustCompile(`(?i)\$lookup\b\s*:\s*\{`), 4, "owasp:nosql:007"},
 	// JavaScript-based NoSQL injection in $where context
 	{regexp.MustCompile(`(?i)this\.\w+\s*(==|!=|===|!==)\s*['"]`), 3, "owasp:nosql:008"},
+	// MongoDB $function operator injection
+	{regexp.MustCompile(`(?i)\$function\b\s*:\s*\{`), 5, "owasp:nosql:009"},
+	// MongoDB $accumulator operator injection
+	{regexp.MustCompile(`(?i)\$accumulator\b\s*:\s*\{`), 4, "owasp:nosql:010"},
+	// CouchDB _all_docs / _find / _view injection
+	{regexp.MustCompile(`(?i)(/_all_docs|/_find|/_view/)\b`), 4, "owasp:nosql:011"},
+	// Redis protocol injection: EVAL / EVALSHA commands
+	{regexp.MustCompile(`(?i)\b(eval|evalsha)\s+['"]`), 4, "owasp:nosql:012"},
+	// Cassandra CQL injection: ALLOW FILTERING
+	{regexp.MustCompile(`(?i)\ballow\s+filtering\b`), 3, "owasp:nosql:013"},
 }
 
 func checkNoSQLi(s string, threshold int) (OWASPHit, bool) {
@@ -793,6 +813,14 @@ var graphqlPatterns = []struct {
 	// Direct __schema access in a GraphQL body (e.g., {"query":"{ __schema { ... } }"})
 	{regexp.MustCompile(`(?i)\{\s*__schema\b`), 5, "owasp:graphql:004"},
 	{regexp.MustCompile(`(?i)\{\s*__type\b`), 5, "owasp:graphql:005"},
+	// GraphQL batching attack: array of operations
+	{regexp.MustCompile(`(?i)\[\s*\{\s*"query"\s*:`), 4, "owasp:graphql:006"},
+	// GraphQL directive abuse: @skip/@include with variable injection
+	{regexp.MustCompile(`(?i)@(skip|include)\s*\(\s*if\s*:\s*\$`), 3, "owasp:graphql:007"},
+	// GraphQL subscription abuse
+	{regexp.MustCompile(`(?i)\bsubscription\b\s*\{`), 3, "owasp:graphql:008"},
+	// GraphQL field suggestion / enumeration probing
+	{regexp.MustCompile(`(?i)"(did you mean|cannot query field|unknown field)"?`), 3, "owasp:graphql:009"},
 }
 
 func checkGraphQLi(s string, threshold int) (OWASPHit, bool) {

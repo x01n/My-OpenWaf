@@ -147,6 +147,13 @@
       linear-gradient(180deg, rgba(243, 247, 252, 0.98), rgba(238, 243, 249, 0.96));
   }
 
+  :is(.dark) .console-app-shell {
+    background-image:
+      radial-gradient(circle at top, rgba(14, 165, 233, 0.08), transparent 26%),
+      radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.05), transparent 20%),
+      linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.96));
+  }
+
   .console-glass {
     @apply border border-white/10 bg-white/6 backdrop-blur-xl;
     box-shadow: 0 22px 60px rgba(2, 6, 23, 0.16);
@@ -154,6 +161,10 @@
 
   .console-panel {
     @apply rounded-[28px] border border-slate-200/70 bg-white/92 backdrop-blur shadow-[0_22px_60px_rgba(15,23,42,0.07)];
+  }
+
+  :is(.dark) .console-panel {
+    @apply border-white/10 bg-slate-900/90;
   }
 
   .console-sidebar-link {
@@ -170,6 +181,10 @@
 
   .console-badge {
     @apply inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium tracking-wide;
+  }
+
+  :is(.dark) .console-badge {
+    @apply border-white/10;
   }
 
   .console-data-grid {

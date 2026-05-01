@@ -2,7 +2,59 @@ package waf
 
 import (
 	"regexp"
+	"strings"
 )
+
+func init() {
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-rsc-flight-rce",
+		Name:     "React Server Components Flight Protocol RCE",
+		CVE:      "CVE-2025-55182",
+		Severity: "critical",
+		Category: "cve_node",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			// Detect Flight protocol + prototype chain in body
+			if reRSCFlightRef.MatchString(body) &&
+				(reRSCProtoConstructor.MatchString(body) || reRSCConstructorChain.MatchString(body)) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-55182",
+					Category:    "cve_node",
+					Severity:    "critical",
+					Description: "React2Shell: RSC Flight protocol with prototype chain attack",
+					MatchedPart: "body",
+					Pattern:     "rsc-flight-rce",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-nextjs-middleware-bypass",
+		Name:     "Next.js Middleware Authorization Bypass",
+		CVE:      "CVE-2025-29927",
+		Severity: "critical",
+		Category: "cve_node",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			for k, v := range headers {
+				if strings.EqualFold(k, "x-middleware-subrequest") && strings.Contains(strings.ToLower(v), "middleware") {
+					return &CVEMatch{
+						CVEID:       "CVE-2025-29927",
+						Category:    "cve_node",
+						Severity:    "critical",
+						Description: "Next.js middleware authorization bypass via x-middleware-subrequest header",
+						MatchedPart: "header",
+						Pattern:     "nextjs-middleware-bypass",
+						Action:      "drop",
+					}
+				}
+			}
+			return nil
+		},
+	})
+}
 
 // NodeCVEDetector detects Node.js / React / Express specific CVE exploitation attempts.
 type NodeCVEDetector struct {
@@ -56,31 +108,16 @@ var (
 	reNextSSRF1 = regexp.MustCompile(`(?i)x-middleware-subrequest`)
 
 	// React2Shell / React Server Components RCE (CVE-2025-55182, CVSS 10.0)
-	// The Flight protocol uses a custom serialization format. Attackers craft
-	// payloads that traverse the prototype chain: __proto__ → constructor →
-	// Function constructor → arbitrary code execution.
-	//
-	// Flight wire format: lines like "$N:I..." where N is a reference ID.
-	// Exploit payloads contain prototype chain traversal + code execution.
-
-	// Flight protocol reference syntax: $<number>:<type>... in POST body
-	reRSCFlightRef = regexp.MustCompile(`\$\d+:[A-Z]`)
-	// Prototype chain to Function constructor — the core attack chain
+	reRSCFlightRef        = regexp.MustCompile(`\$\d+:[A-Z]`)
 	reRSCProtoConstructor = regexp.MustCompile(`(?i)__proto__\s*[\[.]\s*["']?constructor`)
-	// constructor.constructor pattern (reaches Function via any object)
 	reRSCConstructorChain = regexp.MustCompile(`(?i)constructor\s*[\[.]\s*["']?constructor`)
-	// Direct Function constructor invocation with code string
-	reRSCFunctionNew = regexp.MustCompile(`(?i)Function\s*\(\s*['"][^'"]*(?:require|process|child_process|exec|spawn)`)
-	// Blob/Response trick used in advanced exploit variants
-	reRSCBlobHandler = regexp.MustCompile(`(?i)new\s+Blob\s*\(.*new\s+Response`)
-	// require('child_process') in any context within RSC body
-	reRSCChildProcess = regexp.MustCompile(`(?i)require\s*\(\s*['"]child_process['"].*(?:exec|spawn|fork)`)
-	// Promise-based execution chains used in Flight exploits
-	reRSCPromiseExec = regexp.MustCompile(`(?i)\.then\s*\(.*(?:eval|Function|require)\s*\(`)
-	// Import expression abuse
-	reRSCDynamicImport = regexp.MustCompile(`(?i)import\s*\(\s*['"](?:child_process|fs|net|http|os)['"]`)
+	reRSCFunctionNew      = regexp.MustCompile(`(?i)Function\s*\(\s*['"][^'"]*(?:require|process|child_process|exec|spawn)`)
+	reRSCBlobHandler      = regexp.MustCompile(`(?i)new\s+Blob\s*\(.*new\s+Response`)
+	reRSCChildProcess     = regexp.MustCompile(`(?i)require\s*\(\s*['"]child_process['"].*(?:exec|spawn|fork)`)
+	reRSCPromiseExec      = regexp.MustCompile(`(?i)\.then\s*\(.*(?:eval|Function|require)\s*\(`)
+	reRSCDynamicImport    = regexp.MustCompile(`(?i)import\s*\(\s*['"](?:child_process|fs|net|http|os)['"]`)
 
-	// Next.js App Router RCE (CVE-2025-66478) — chained with RSC
+	// Next.js App Router RCE (CVE-2025-66478)
 	reNextAction = regexp.MustCompile(`(?i)^Next-Action:\s*.+`)
 
 	// Next.js middleware bypass (CVE-2025-29927)

@@ -5,6 +5,55 @@ import (
 	"strings"
 )
 
+func init() {
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-graphql-introspection",
+		Name:     "GraphQL Introspection Probe",
+		CVE:      "CVE-2023-GRAPHQL",
+		Severity: "medium",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			combined := strings.ToLower(uri + body)
+			if strings.Contains(combined, "__schema") || strings.Contains(combined, "__type") ||
+				strings.Contains(combined, "introspectionquery") {
+				return &CVEMatch{
+					CVEID:       "CVE-2023-GRAPHQL",
+					Category:    "cve_general",
+					Severity:    "medium",
+					Description: "GraphQL introspection query probe detected",
+					MatchedPart: "body",
+					Pattern:     "graphql-introspection",
+					Action:      "log",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-shellshock-ua",
+		Name:     "ShellShock via User-Agent",
+		CVE:      "CVE-2014-6271",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reShellShock.MatchString(ua) {
+				return &CVEMatch{
+					CVEID:       "CVE-2014-6271",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "ShellShock Bash injection via User-Agent header",
+					MatchedPart: "header",
+					Pattern:     "shellshock-ua",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+}
+
 // GeneralCVEDetector detects technology-agnostic CVE exploitation patterns.
 type GeneralCVEDetector struct {
 	rules []generalCVERule
@@ -56,8 +105,8 @@ var (
 	reSAPIRJServlet       = regexp.MustCompile(`(?i)/irj/servlet`)
 
 	// PHP-CGI argument injection (CVE-2024-4577)
-	rePHPCGISoftHyphen = regexp.MustCompile(`(?i)[%\x00-\xff]ad.*-[dD]\s*(allow_url_include|auto_prepend_file)`)
-	rePHPCGIArgInject  = regexp.MustCompile(`(?i)php://input.*allow_url_include|auto_prepend_file.*php://input`)
+	rePHPCGISoftHyphen  = regexp.MustCompile(`(?i)[%\x00-\xff]ad.*-[dD]\s*(allow_url_include|auto_prepend_file)`)
+	rePHPCGIArgInject   = regexp.MustCompile(`(?i)php://input.*allow_url_include|auto_prepend_file.*php://input`)
 	rePHPCGISoftHyphen2 = regexp.MustCompile(`%[aA][dD]`)
 
 	// PAN-OS GlobalProtect (CVE-2024-3400)

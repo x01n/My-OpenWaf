@@ -1,15 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ShieldAlert, ShieldCheck, ShieldX } from "lucide-react";
+import { Ban, ShieldAlert, ShieldCheck, ShieldX, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { api, type IPListItem } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import { Pagination } from "@/components/pagination";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyState, InlineMeta, PageIntro, Surface, statusToneClass } from "@/components/console-shell";
 
 interface ListResponse {
@@ -22,8 +24,31 @@ const emptyForm = {
   kind: "whitelist",
   value: "",
   note: "",
+  action: "intercept" as string,
   enabled: true,
 };
+
+const actionOptions = [
+  { value: "intercept", label: "拦截 (403)", description: "返回 403 拦截页面" },
+  { value: "block", label: "阻断 (TCP RST)", description: "直接断开 TCP 连接" },
+] as const;
+
+function ActionBadge({ action }: { action?: string }) {
+  if (!action || action === "intercept") {
+    return (
+      <Badge variant="outline" className="gap-1 rounded-xl border-amber-200 bg-amber-50 text-amber-700">
+        <Ban className="h-3 w-3" />
+        拦截 403
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="gap-1 rounded-xl border-rose-200 bg-rose-50 text-rose-700">
+      <Zap className="h-3 w-3" />
+      TCP RST
+    </Badge>
+  );
+}
 
 export default function IPListsPage() {
   const [items, setItems] = useState<IPListItem[]>([]);
@@ -85,6 +110,7 @@ export default function IPListsPage() {
       kind: item.kind,
       value: item.value,
       note: item.note,
+      action: item.action || "intercept",
       enabled: item.enabled,
     });
     setDialogOpen(true);
@@ -95,6 +121,7 @@ export default function IPListsPage() {
       kind: form.kind,
       value: form.value.trim(),
       note: form.note.trim(),
+      action: form.kind === "blacklist" ? form.action : undefined,
       enabled: form.enabled,
     };
 
@@ -144,12 +171,25 @@ export default function IPListsPage() {
     }
   }
 
+  async function handleActionChange(item: IPListItem, newAction: string) {
+    try {
+      await api(`/api/v1/ip-lists/${item.id}/update`, {
+        method: "POST",
+        body: JSON.stringify({ ...item, action: newAction }),
+      });
+      toast.success("动作类型已更新");
+      load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "更新失败");
+    }
+  }
+
   return (
     <div className="space-y-6">
       <PageIntro
         eyebrow="Access Control"
         title="IP 黑白名单"
-        description="管理 IP 黑名单与白名单条目。页面只映射 /api/v1/ip-lists 的真实字段，并在保存后触发运行时 reload。"
+        description="管理 IP 黑名单与白名单条目。黑名单条目支持选择拦截动作（403 页面或 TCP RST），保存后立即触发运行时 reload。"
         actions={<Button onClick={openCreate}>新增条目</Button>}
       />
 
@@ -215,7 +255,27 @@ export default function IPListsPage() {
                         <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-700 break-all">
                           {item.value}
                         </div>
-                        <div>{isCIDR ? "CIDR 网段" : "单 IP 条目"}</div>
+                        <div className="flex items-center justify-between">
+                          <span>{isCIDR ? "CIDR 网段" : "单 IP 条目"}</span>
+                          {item.kind === "blacklist" && <ActionBadge action={item.action} />}
+                        </div>
+                        {item.kind === "blacklist" && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-slate-500 shrink-0">动作：</span>
+                            <Select
+                              value={item.action || "intercept"}
+                              onValueChange={(value) => handleActionChange(item, value)}
+                            >
+                              <SelectTrigger className="h-8 rounded-xl text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="intercept">拦截 (403 页面)</SelectItem>
+                                <SelectItem value="block">阻断 (TCP RST)</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
                         <div className="text-xs text-slate-500">备注：{item.note || "无"}</div>
                         <div className="text-xs text-slate-500">更新时间：{formatDate(item.updated_at)}</div>
                       </div>
@@ -277,6 +337,32 @@ export default function IPListsPage() {
                 <p className="mt-2 text-xs leading-5 text-slate-500">命中后进入阻断链路，适合恶意来源或封禁网段。</p>
               </button>
             </div>
+
+            {form.kind === "blacklist" && (
+              <div className="space-y-2">
+                <Label>阻断动作</Label>
+                <div className="grid gap-3 md:grid-cols-2">
+                  {actionOptions.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setForm((current) => ({ ...current, action: opt.value }))}
+                      className={
+                        form.action === opt.value
+                          ? "rounded-2xl border-2 border-cyan-300 bg-cyan-50 p-4 text-left"
+                          : "rounded-2xl border border-slate-200 bg-slate-50 p-4 text-left"
+                      }
+                    >
+                      <div className="flex items-center gap-2 text-sm font-medium text-slate-900">
+                        {opt.value === "intercept" ? <Ban className="h-4 w-4 text-amber-600" /> : <Zap className="h-4 w-4 text-rose-600" />}
+                        {opt.label}
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-slate-500">{opt.description}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label htmlFor="ip-value">IP / CIDR</Label>

@@ -5,6 +5,55 @@ import (
 	"strings"
 )
 
+func init() {
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-php-cgi-softyhphen",
+		Name:     "PHP-CGI Soft-Hyphen Argument Injection",
+		CVE:      "CVE-2024-4577",
+		Severity: "critical",
+		Category: "cve_php",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			combined := uri + body
+			if rePHPCGI_SoftHyphenArg.MatchString(combined) &&
+				(rePHPCGI_AutoPrepend.MatchString(combined) || rePHPCGI_AllowInclude.MatchString(combined)) {
+				return &CVEMatch{
+					CVEID:       "CVE-2024-4577",
+					Category:    "cve_php",
+					Severity:    "critical",
+					Description: "PHP-CGI argument injection via soft-hyphen with auto_prepend/allow_url_include",
+					MatchedPart: "all",
+					Pattern:     "php-cgi-softhyphen",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-wordpress-file-read",
+		Name:     "WordPress Arbitrary File Read",
+		CVE:      "CVE-2024-2961",
+		Severity: "high",
+		Category: "cve_php",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reWPFileRead.MatchString(uri) {
+				return &CVEMatch{
+					CVEID:       "CVE-2024-2961",
+					Category:    "cve_php",
+					Severity:    "high",
+					Description: "WordPress arbitrary file read via admin-ajax.php",
+					MatchedPart: "url",
+					Pattern:     "wp-file-read",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+}
+
 // PHPCVEDetector detects PHP-specific CVE exploitation attempts.
 type PHPCVEDetector struct {
 	rules []phpCVERule
@@ -62,8 +111,6 @@ var (
 	rePHPUnit = regexp.MustCompile(`(?i)/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin\.php`)
 
 	// PHP-CGI argument injection via soft-hyphen (CVE-2024-4577)
-	// Soft-hyphen (0xAD) is "best-fit" mapped to real hyphen by Windows,
-	// allowing argument injection into php-cgi.exe.
 	rePHPCGI_SoftHyphenArg = regexp.MustCompile(`(?i)%[aA][dD].*-[drnfem]`)
 	rePHPCGI_AutoPrepend   = regexp.MustCompile(`(?i)auto_prepend_file\s*=\s*php://`)
 	rePHPCGI_AllowInclude  = regexp.MustCompile(`(?i)allow_url_include\s*=\s*[1oOyY]`)

@@ -4,6 +4,71 @@ import (
 	"regexp"
 )
 
+func init() {
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-log4j-obfuscated",
+		Name:     "Log4Shell Obfuscated JNDI Lookup",
+		CVE:      "CVE-2021-44228",
+		Severity: "critical",
+		Category: "cve_java",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			// Check all inputs for obfuscated log4j patterns
+			for _, s := range []string{uri, body, ua} {
+				if reLog4j1.MatchString(s) || reLog4j2.MatchString(s) || reLog4j3.MatchString(s) ||
+					reLog4j4.MatchString(s) || reLog4j5.MatchString(s) || reLog4j6.MatchString(s) || reLog4j7.MatchString(s) {
+					return &CVEMatch{
+						CVEID:       "CVE-2021-44228",
+						Category:    "cve_java",
+						Severity:    "critical",
+						Description: "Log4Shell JNDI injection via obfuscated lookup",
+						MatchedPart: "all",
+						Pattern:     "log4j-obfuscated",
+						Action:      "drop",
+					}
+				}
+			}
+			// Also check header values
+			for _, v := range headers {
+				if reLog4j1.MatchString(v) || reLog4j5.MatchString(v) {
+					return &CVEMatch{
+						CVEID:       "CVE-2021-44228",
+						Category:    "cve_java",
+						Severity:    "critical",
+						Description: "Log4Shell JNDI injection via HTTP header",
+						MatchedPart: "header",
+						Pattern:     "log4j-header",
+						Action:      "drop",
+					}
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-tomcat-session-deser",
+		Name:     "Apache Tomcat Session Deserialization",
+		CVE:      "CVE-2025-24813",
+		Severity: "critical",
+		Category: "cve_java",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reTomcat1.MatchString(uri) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-24813",
+					Category:    "cve_java",
+					Severity:    "critical",
+					Description: "Apache Tomcat session deserialization via .ser file path",
+					MatchedPart: "url",
+					Pattern:     "tomcat-session-deser",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+}
+
 // JavaCVEDetector detects Java-specific CVE exploitation attempts.
 type JavaCVEDetector struct {
 	rules []javaCVERule

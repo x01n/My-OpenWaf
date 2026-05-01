@@ -20,6 +20,7 @@ type Repos struct {
 	CVESyncLog     *CVESyncLogRepo
 	DropEvent      *DropEventRepo
 	Fingerprint    *FingerprintRepo
+	SiteListener   *SiteListenerRepo
 }
 
 func New(db *gorm.DB) *Repos {
@@ -40,5 +41,6 @@ func New(db *gorm.DB) *Repos {
 		CVESyncLog:     NewCVESyncLogRepo(db),
 		DropEvent:      NewDropEventRepo(db),
 		Fingerprint:    NewFingerprintRepo(db),
+		SiteListener:   NewSiteListenerRepo(db),
 	}
 }

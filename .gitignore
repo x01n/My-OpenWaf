@@ -30,3 +30,7 @@ data/
 temp/
 .qoder/
 tools/
+.playwright-mcp/
+.serena/
+cmd/genfiles/
+gen_init.go

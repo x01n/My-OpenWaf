@@ -147,6 +147,123 @@ func (m *bodyRegexMatcher) Match(_ net.IP, _, _, _ string, _ map[string]string, 
 	return len(body) > 0 && m.re.Match(body)
 }
 
+// bodyJSONPathMatcher checks if a dot-notation JSON path exists and optionally matches a pattern.
+type bodyJSONPathMatcher struct {
+	jsonPath string // e.g. "$.user.role"
+	pattern  *regexp.Regexp
+}
+
+func (m *bodyJSONPathMatcher) Match(_ net.IP, _, _, _ string, _ map[string]string, body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var raw map[string]any
+	if json.Unmarshal(body, &raw) != nil {
+		return false
+	}
+	// Strip leading "$." if present.
+	path := m.jsonPath
+	if strings.HasPrefix(path, "$.") {
+		path = path[2:]
+	}
+	parts := strings.Split(path, ".")
+	var current any = raw
+	for _, part := range parts {
+		obj, ok := current.(map[string]any)
+		if !ok {
+			return false
+		}
+		current, ok = obj[part]
+		if !ok {
+			return false
+		}
+	}
+	// Path exists. If no pattern, just check existence.
+	if m.pattern == nil {
+		return true
+	}
+	// Convert value to string for pattern match.
+	var val string
+	switch v := current.(type) {
+	case string:
+		val = v
+	default:
+		b, _ := json.Marshal(v)
+		val = string(b)
+	}
+	return m.pattern.MatchString(val)
+}
+
+// multipartMatcher checks multipart upload filenames for suspicious extensions.
+type multipartMatcher struct{ re *regexp.Regexp }
+
+func (m *multipartMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	ct := ""
+	for k, v := range headers {
+		if strings.EqualFold(k, "Content-Type") {
+			ct = v
+			break
+		}
+	}
+	if !strings.Contains(strings.ToLower(ct), "multipart/form-data") {
+		return false
+	}
+	// Extract boundary and scan part headers for filenames.
+	idx := strings.Index(strings.ToLower(ct), "boundary=")
+	if idx < 0 {
+		return false
+	}
+	boundary := ct[idx+len("boundary="):]
+	if q := strings.IndexByte(boundary, ';'); q >= 0 {
+		boundary = boundary[:q]
+	}
+	boundary = strings.Trim(boundary, `"' `)
+	if boundary == "" {
+		return false
+	}
+	// Scan raw body for Content-Disposition filename values.
+	bodyStr := string(body)
+	parts := strings.Split(bodyStr, "--"+boundary)
+	for _, part := range parts {
+		low := strings.ToLower(part)
+		if fi := strings.Index(low, "filename="); fi >= 0 {
+			fnStart := fi + len("filename=")
+			if fnStart < len(part) {
+				fname := part[fnStart:]
+				// Trim quotes and extract until end of line.
+				fname = strings.TrimLeft(fname, `"' `)
+				if nl := strings.IndexAny(fname, "\r\n\""); nl >= 0 {
+					fname = fname[:nl]
+				}
+				if m.re.MatchString(fname) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// geoBlockMatcher blocks requests based on geo country code headers.
+type geoBlockMatcher struct{ countries map[string]bool }
+
+func (m *geoBlockMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
+	// Check common geo-country headers.
+	for k, v := range headers {
+		lk := strings.ToLower(k)
+		if lk == "x-geo-country" || lk == "cf-ipcountry" {
+			code := strings.TrimSpace(strings.ToUpper(v))
+			if m.countries[code] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type queryParamMatcher struct {
 	param string
 	value string
@@ -321,6 +438,42 @@ func buildMatcher(kind, arg string) Matcher {
 
 	case "referer_contains":
 		return &refererContainsMatcher{substr: arg}
+
+	case "block_body_json_path":
+		// arg format: "$.path.to.field" or "$.path.to.field:regex_pattern"
+		jsonPath, pattern := splitHeaderArg(arg)
+		var re *regexp.Regexp
+		if pattern != "" {
+			var err error
+			re, err = cachedCompile(pattern)
+			if err != nil {
+				return &neverMatcher{}
+			}
+		}
+		return &bodyJSONPathMatcher{jsonPath: jsonPath, pattern: re}
+
+	case "block_multipart":
+		// arg is a regex pattern to match against uploaded filenames
+		if arg == "" {
+			arg = `(?i)\.(php[0-9]?|phtml|jsp|jspx|asp|aspx|exe|dll|sh|bat|cmd|cgi|pl|py|rb|war|ear)$`
+		}
+		re, err := cachedCompile(arg)
+		if err != nil {
+			return &neverMatcher{}
+		}
+		return &multipartMatcher{re: re}
+
+	case "geo_block":
+		// arg is comma-separated country codes, e.g. "CN,RU,KP"
+		codes := strings.Split(arg, ",")
+		countries := make(map[string]bool, len(codes))
+		for _, c := range codes {
+			c = strings.TrimSpace(strings.ToUpper(c))
+			if c != "" {
+				countries[c] = true
+			}
+		}
+		return &geoBlockMatcher{countries: countries}
 
 	case "compound":
 		return parseCompoundJSON(arg)

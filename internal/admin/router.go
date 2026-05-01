@@ -87,6 +87,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites", ListSites(r.Site))
 		readGroup.GET("/sites/:id", GetSite(r.Site))
 		readGroup.GET("/sites/:id/status", GetSiteStatus(r.Site))
+		readGroup.GET("/sites/:id/listeners", ListSiteListeners(r.Site, r.SiteListener))
 
 		readGroup.GET("/certificates", ListCertificates(r.Certificate))
 		readGroup.GET("/certificates/:id", GetCertificate(r.Certificate))
@@ -134,7 +135,30 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		// CVE rules
 		readGroup.GET("/cve-rules", ListCVERules(r.CVERule))
+		readGroup.GET("/cve-rules/stats", GetCVERuleStats(r.CVERule))
 		readGroup.GET("/cve-feed/status", GetCVEFeedStatus(deps.CVEFeedMgr, r.CVERule))
+
+		// OWASP rules (registry-based)
+		readGroup.GET("/owasp-rules", ListOWASPRulesFromRegistry(r.SystemSettings))
+		readGroup.GET("/owasp-rules/stats", GetOWASPRuleStats(r.SystemSettings))
+
+		// Captcha configuration
+		readGroup.GET("/captcha/config", GetCaptchaConfig(r.SystemSettings))
+
+		// Chain challenge configuration
+		readGroup.GET("/chain/config", GetChainConfig(r.SystemSettings))
+		readGroup.GET("/chain/sessions", ListChainSessions())
+
+		// Sensitivity configuration
+		readGroup.GET("/protection/:id/sensitivity", GetSensitivityConfig(r.SystemSettings))
+
+		// Escalation configuration
+		readGroup.GET("/protection/:id/escalation", GetEscalationConfig(r.SystemSettings))
+		readGroup.GET("/escalation/status/:ip", GetEscalationIPStatus())
+
+		// Error pages
+		readGroup.GET("/sites/:id/error-pages", GetSiteErrorPages(r.Site))
+		readGroup.GET("/error-pages/defaults", GetDefaultErrorPages())
 
 		// Drop policy
 		readGroup.GET("/drop-policy", GetDropPolicy(r.SystemSettings))
@@ -152,6 +176,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites/:id/delete", DeleteSite(r.Site, reload))
 		opsGroup.POST("/sites/:id/start", StartSite(r.Site))
 		opsGroup.POST("/sites/:id/stop", StopSite(r.Site))
+		opsGroup.POST("/sites/:id/listeners", CreateSiteListener(r.Site, r.SiteListener, reload))
+		opsGroup.POST("/sites/:id/listeners/:lid/update", UpdateSiteListener(r.Site, r.SiteListener, reload))
+		opsGroup.POST("/sites/:id/listeners/:lid/delete", DeleteSiteListener(r.Site, r.SiteListener, reload))
 
 		// Certificates
 		opsGroup.POST("/certificates", CreateCertificate(r.Certificate, reload))
@@ -187,7 +214,32 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		// CVE rules (operator can toggle/sync)
 		opsGroup.POST("/cve-rules/:id/toggle", ToggleCVERule(r.CVERule))
+		opsGroup.POST("/cve-rules/:id/update", UpdateSingleCVERule(r.CVERule))
+		opsGroup.POST("/cve-rules/batch", BatchUpdateCVERules(r.CVERule))
 		opsGroup.POST("/cve-rules/sync", SyncCVERules(deps.CVEFeedMgr))
+
+		// OWASP rules (operator can update)
+		opsGroup.POST("/owasp-rules/:id/update", UpdateSingleOWASPRule(r.SystemSettings, reload))
+		opsGroup.POST("/owasp-rules/batch", BatchUpdateOWASPRules(r.SystemSettings, reload))
+
+		// Captcha configuration
+		opsGroup.POST("/captcha/config", UpdateCaptchaConfig(r.SystemSettings, reload))
+		opsGroup.POST("/captcha/test", TestCaptcha(r.SystemSettings))
+
+		// Chain challenge configuration
+		opsGroup.POST("/chain/config", UpdateChainConfig(r.SystemSettings, reload))
+		opsGroup.POST("/chain/sessions/:id/delete", DeleteChainSession())
+
+		// Sensitivity configuration
+		opsGroup.POST("/protection/:id/sensitivity", UpdateSensitivityConfig(r.SystemSettings, reload))
+
+		// Escalation configuration
+		opsGroup.POST("/protection/:id/escalation", UpdateEscalationConfig(r.SystemSettings, reload))
+		opsGroup.POST("/escalation/status/:ip/reset", ResetEscalationIPStatus())
+
+		// Error pages
+		opsGroup.POST("/sites/:id/error-pages", UpdateSiteErrorPages(r.Site, reload))
+		opsGroup.POST("/error-pages/preview", PreviewErrorPage())
 	}
 
 	// ── Admin-only routes (system settings, API keys management) ──

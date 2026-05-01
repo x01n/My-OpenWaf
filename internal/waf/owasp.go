@@ -2150,6 +2150,18 @@ var sqliPatterns = []struct {
 	{regexp.MustCompile(`(?i)\bselect\b[^;]{0,20}\(\s*select\b`), 5, "owasp:sqli:046"},
 	{regexp.MustCompile(`(?i)\bselect\s+\*\s+from\s+\w`), 4, "owasp:sqli:047"},
 	{regexp.MustCompile(`(?i)\bexec\s+master\s*\.\.\s*\w`), 5, "owasp:sqli:048"},
+	// Unicode bypass: fullwidth/halfwidth character alternation in SQL keywords
+	{regexp.MustCompile(`(?i)[\x{FF10}-\x{FF5A}]{3,}.{0,20}(select|union|insert|update|delete)`), 5, "owasp:sqli:049"},
+	// Nested comment obfuscation: /*/**/union/**/select/**/
+	{regexp.MustCompile(`(?i)/\*[^*]*/\*.*?\*/.*?\*/`), 5, "owasp:sqli:050"},
+	// MySQL conditional comment: /*!50000 UNION*/
+	{regexp.MustCompile(`(?i)/\*!\d{5}\s*(union|select|insert|update|delete|drop)\b`), 6, "owasp:sqli:051"},
+	// MySQL versioned conditional comment variant
+	{regexp.MustCompile(`(?i)/\*!\s*(union|select|concat|group_concat)\b`), 5, "owasp:sqli:052"},
+	// Fullwidth Unicode SQL keywords (e.g. ＳＥＬＥＣＴ)
+	{regexp.MustCompile(`[\x{FF33}\x{FF53}][\x{FF25}\x{FF45}][\x{FF2C}\x{FF4C}][\x{FF25}\x{FF45}][\x{FF23}\x{FF43}][\x{FF34}\x{FF54}]`), 5, "owasp:sqli:053"},
+	// Double URL encoding detection: %2527 (%25 = %, so %2527 = %27 = ')
+	{regexp.MustCompile(`(?i)%25(27|22|3[bB]|2[dD]2[dD])`), 5, "owasp:sqli:054"},
 }
 
 func checkSQLi(s string, threshold int) (OWASPHit, bool) {
@@ -2349,6 +2361,24 @@ var xssPatterns = []struct {
 	{regexp.MustCompile(`(?i)<a\b[^>]*\bdownload\s*=\s*['"]?\s*\w+\.\w{2,5}\b`), 4, "owasp:xss:055"},
 	{regexp.MustCompile(`(?i)j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:`), 5, "owasp:xss:056"},
 	{regexp.MustCompile(`(?i)<(body|table|thead|td|th|tr)\b[^>]*\bbackground\s*=\s*['"]?\s*(//|https?:)`), 4, "owasp:xss:057"},
+	// DOM Clobbering: overwriting DOM properties via name/id attributes
+	{regexp.MustCompile(`(?i)<(form|input|img|a|embed|object)\b[^>]*\b(name|id)\s*=\s*['"]?(document|window|location|navigator|top|self|frames)\b`), 5, "owasp:xss:058"},
+	// DOM Clobbering via named access on document
+	{regexp.MustCompile(`(?i)<(a|area)\b[^>]*\bname\s*=\s*['"]?__proto__`), 5, "owasp:xss:059"},
+	// mXSS mutation: noscript/noembed/noframes content reinterpretation
+	{regexp.MustCompile(`(?i)<(noscript|noembed|noframes)\b[^>]*>.*?<(script|img|svg|iframe)\b`), 5, "owasp:xss:060"},
+	// mXSS via namespace confusion in math/svg
+	{regexp.MustCompile(`(?i)<(math|svg)\b[^>]*>.*?<(style|mglyph|malignmark)\b`), 5, "owasp:xss:061"},
+	// SVG foreignObject: embedding HTML in SVG context
+	{regexp.MustCompile(`(?i)<svg\b[^>]*>.*?<foreignobject\b`), 5, "owasp:xss:062"},
+	// SVG animation event handlers
+	{regexp.MustCompile(`(?i)<(animate|animatetransform|set)\b[^>]*\bon(begin|end|repeat)\s*=`), 5, "owasp:xss:063"},
+	// Namespace confusion: using xlink:href in SVG to execute JS
+	{regexp.MustCompile(`(?i)xlink:href\s*=\s*['"]?\s*javascript:`), 5, "owasp:xss:064"},
+	// DOMPurify bypass via clobbered properties
+	{regexp.MustCompile(`(?i)<[^>]+(sanitize|purify|dompurify)[^>]*>`), 3, "owasp:xss:065"},
+	// Template literal XSS: ${...} inside backtick strings
+	{regexp.MustCompile("(?i)`[^`]*\\$\\{[^}]*(document|window|location|cookie|alert|fetch|eval)[^}]*\\}[^`]*`"), 5, "owasp:xss:066"},
 }
 
 func checkXSS(s string, threshold int) (OWASPHit, bool) {

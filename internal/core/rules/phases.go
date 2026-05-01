@@ -2,18 +2,23 @@ package rules
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // MatchCtx is the subset of request data matchers need.
@@ -351,6 +356,13 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 
 	hits := waf.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets)
+
+	// Apply per-rule overrides and path whitelists.
+	if len(hits) > 0 && p.cfg.OWASPRulesConfig != "" && p.cfg.OWASPRulesConfig != "{}" {
+		overrides := waf.ParseOWASPRulesConfig(p.cfg.OWASPRulesConfig)
+		hits = waf.FilterHits(hits, ctx.Path, overrides)
+	}
+
 	if len(hits) == 0 {
 		return action.Pass(), false
 	}
@@ -603,6 +615,160 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 		}
 	}
 	return vals
+}
+
+// ── Anti-Replay Nonce phase ──
+
+type antiReplayPhase struct {
+	mgr *waf.AntiReplayManager
+}
+
+func NewAntiReplayPhase(mgr *waf.AntiReplayManager) pipeline.Phase {
+	return &antiReplayPhase{mgr: mgr}
+}
+
+func (p *antiReplayPhase) Name() string { return "anti_replay" }
+
+func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	if p.mgr == nil {
+		return action.Pass(), false
+	}
+	// Extract nonce from X-Nonce header.
+	nonce := ctx.Headers["X-Nonce"]
+	if nonce == "" {
+		nonce = ctx.Headers["x-nonce"]
+	}
+	if nonce == "" {
+		// No nonce provided — skip replay check.
+		return action.Pass(), false
+	}
+	clientIP := ""
+	if ctx.ClientIP != nil {
+		clientIP = ctx.ClientIP.String()
+	}
+	valid, isReplay, _ := p.mgr.ValidateAndRotate(nonce, clientIP)
+	if !valid || isReplay {
+		result := action.Result{
+			Type:      action.Intercept,
+			Phase:     "anti_replay",
+			MatchDesc: "request replay detected or invalid nonce",
+			Matched:   true,
+			Category:  "replay",
+			RuleIDStr: "antireplay:nonce",
+		}
+		return result, true
+	}
+	return action.Pass(), false
+}
+
+// ── Parallel OWASP + CVE Detection phase ──
+
+type parallelOWASPCVEPhase struct {
+	cfg      store.ProtectionConfig
+	detector *waf.CVEDetector
+}
+
+// NewParallelOWASPCVEPhase creates a phase that runs OWASP and CVE detection
+// concurrently using errgroup. If either hits a terminal action, the other is
+// cancelled immediately.
+func NewParallelOWASPCVEPhase(cfg store.ProtectionConfig, detector *waf.CVEDetector) pipeline.Phase {
+	return &parallelOWASPCVEPhase{cfg: cfg, detector: detector}
+}
+
+func (p *parallelOWASPCVEPhase) Name() string { return "owasp_cve_parallel" }
+
+func (p *parallelOWASPCVEPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	owaspEnabled := p.cfg.OWASPEnabled
+	cveEnabled := p.cfg.CVEEnabled && p.detector != nil
+
+	if !owaspEnabled && !cveEnabled {
+		return action.Pass(), false
+	}
+
+	// If only one is enabled, run it directly without goroutine overhead.
+	if owaspEnabled && !cveEnabled {
+		return p.checkOWASP(ctx)
+	}
+	if !owaspEnabled && cveEnabled {
+		return p.checkCVE(ctx)
+	}
+
+	// Both enabled — run in parallel with errgroup.
+	gctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	g, gctx := errgroup.WithContext(gctx)
+
+	var (
+		owaspResult action.Result
+		owaspStop   bool
+		cveResult   action.Result
+		cveStop     bool
+		mu          sync.Mutex
+	)
+
+	g.Go(func() error {
+		select {
+		case <-gctx.Done():
+			return gctx.Err()
+		default:
+			result, stop := p.checkOWASP(ctx)
+			if stop {
+				mu.Lock()
+				owaspResult = result
+				owaspStop = true
+				mu.Unlock()
+				return fmt.Errorf("owasp hit")
+			}
+			mu.Lock()
+			owaspResult = result
+			mu.Unlock()
+			return nil
+		}
+	})
+
+	g.Go(func() error {
+		select {
+		case <-gctx.Done():
+			return gctx.Err()
+		default:
+			result, stop := p.checkCVE(ctx)
+			if stop {
+				mu.Lock()
+				cveResult = result
+				cveStop = true
+				mu.Unlock()
+				return fmt.Errorf("cve hit")
+			}
+			mu.Lock()
+			cveResult = result
+			mu.Unlock()
+			return nil
+		}
+	})
+
+	_ = g.Wait()
+
+	// Return the first terminal hit found.
+	if owaspStop {
+		return owaspResult, true
+	}
+	if cveStop {
+		return cveResult, true
+	}
+	return action.Pass(), false
+}
+
+// checkOWASP runs the OWASP detection logic (same as owaspPhase.Execute).
+func (p *parallelOWASPCVEPhase) checkOWASP(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	ph := &owaspPhase{cfg: p.cfg}
+	return ph.Execute(ctx)
+}
+
+// checkCVE runs the CVE detection logic (same as cvePhase.Execute).
+func (p *parallelOWASPCVEPhase) checkCVE(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	ph := &cvePhase{cfg: p.cfg, detector: p.detector}
+	return ph.Execute(ctx)
 }
 
 // ── helpers ──

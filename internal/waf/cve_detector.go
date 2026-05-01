@@ -48,6 +48,84 @@ type compiledCustomRule struct {
 	re   *regexp.Regexp
 }
 
+// CVERule 表示一条颗粒化的 CVE 检测规则
+type CVERule struct {
+	ID          string                                                          // 唯一标识，如 "cve-2021-44228"
+	Name        string                                                          // 规则名称
+	Description string                                                          // 规则描述
+	CVE         string                                                          // CVE 编号
+	Severity    string                                                          // critical/high/medium/low
+	Category    string                                                          // cve_general/cve_java/cve_node/cve_php
+	Enabled     bool                                                            // 是否启用
+	Sensitivity string                                                          // 敏感度级别覆盖
+	CheckFunc   func(uri, body, ua string, headers map[string]string) *CVEMatch // 检测函数
+}
+
+// CVERuleOverride 支持 JSON 配置禁用/敏感度覆盖
+type CVERuleOverride struct {
+	Enabled     *bool  `json:"enabled,omitempty"`
+	Sensitivity string `json:"sensitivity,omitempty"`
+}
+
+// CVERuleRegistry 线程安全的规则注册表
+type CVERuleRegistry struct {
+	mu    sync.RWMutex
+	rules []*CVERule          // 保持插入顺序
+	index map[string]*CVERule // 按ID快速查找
+}
+
+var globalCVERuleRegistry = &CVERuleRegistry{
+	index: make(map[string]*CVERule),
+}
+
+// Register 注册一条颗粒化规则到注册表（不重复注册）
+func (r *CVERuleRegistry) Register(rule *CVERule) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.index[rule.ID]; exists {
+		return
+	}
+	r.rules = append(r.rules, rule)
+	r.index[rule.ID] = rule
+}
+
+// ApplyOverrides 应用 JSON 配置的禁用/敏感度覆盖
+func (r *CVERuleRegistry) ApplyOverrides(overrides map[string]CVERuleOverride) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, ov := range overrides {
+		if rule, ok := r.index[id]; ok {
+			if ov.Enabled != nil {
+				rule.Enabled = *ov.Enabled
+			}
+			if ov.Sensitivity != "" {
+				rule.Sensitivity = ov.Sensitivity
+			}
+		}
+	}
+}
+
+// DetectAll 执行注册表中所有启用的颗粒化规则
+func (r *CVERuleRegistry) DetectAll(uri, body, ua string, headers map[string]string) []CVEMatch {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var matches []CVEMatch
+	for _, rule := range r.rules {
+		if !rule.Enabled {
+			continue
+		}
+		if m := rule.CheckFunc(uri, body, ua, headers); m != nil {
+			matches = append(matches, *m)
+		}
+	}
+	return matches
+}
+
+// GetGlobalCVERuleRegistry 返回全局颗粒化规则注册表
+func GetGlobalCVERuleRegistry() *CVERuleRegistry {
+	return globalCVERuleRegistry
+}
+
 // CVERequest holds the normalised request data for CVE scanning.
 type CVERequest struct {
 	Path        string
@@ -108,13 +186,20 @@ func BuildCVERequest(path, rawQuery string, headers map[string]string, body []by
 	}
 }
 
-// Detect runs all sub-detectors and custom rules, returning all matches.
+// Detect runs all sub-detectors, custom rules, and registry rules, returning all matches.
 // Runs detectors sequentially with early exit for performance — spawning
 // 4 goroutines per request adds ~10μs overhead that's significant at scale.
-func (d *CVEDetector) Detect(req *CVERequest) []CVEMatch {
+// The optional categorySensitivity map allows per-category sensitivity override;
+// setting a category to "none" skips that sub-detector entirely.
+func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]string) []CVEMatch {
 	// Fast path: skip CVE scanning for short clean requests.
 	if !hasCVESuspiciousContent(req) {
 		return nil
+	}
+
+	var catSens map[string]string
+	if len(categorySensitivity) > 0 {
+		catSens = categorySensitivity[0]
 	}
 
 	var matches []CVEMatch
@@ -122,17 +207,25 @@ func (d *CVEDetector) Detect(req *CVERequest) []CVEMatch {
 	// Run detectors sequentially. Most requests won't match any, and
 	// sequential execution avoids goroutine spawn/sync overhead.
 	// General detector runs first as it covers the broadest set.
-	if m := d.generalDetector.Detect(req); len(m) > 0 {
-		matches = append(matches, m...)
+	if catSens == nil || catSens["cve_general"] != "none" {
+		if m := d.generalDetector.Detect(req); len(m) > 0 {
+			matches = append(matches, m...)
+		}
 	}
-	if m := d.phpDetector.Detect(req); len(m) > 0 {
-		matches = append(matches, m...)
+	if catSens == nil || catSens["cve_php"] != "none" {
+		if m := d.phpDetector.Detect(req); len(m) > 0 {
+			matches = append(matches, m...)
+		}
 	}
-	if m := d.javaDetector.Detect(req); len(m) > 0 {
-		matches = append(matches, m...)
+	if catSens == nil || catSens["cve_java"] != "none" {
+		if m := d.javaDetector.Detect(req); len(m) > 0 {
+			matches = append(matches, m...)
+		}
 	}
-	if m := d.nodeDetector.Detect(req); len(m) > 0 {
-		matches = append(matches, m...)
+	if catSens == nil || catSens["cve_node"] != "none" {
+		if m := d.nodeDetector.Detect(req); len(m) > 0 {
+			matches = append(matches, m...)
+		}
 	}
 
 	// Custom rules.
@@ -157,6 +250,15 @@ func (d *CVEDetector) Detect(req *CVERequest) []CVEMatch {
 			})
 		}
 	}
+
+	// 执行注册表中的颗粒化规则
+	uri := req.DecodedPath
+	if req.DecodedQuery != "" {
+		uri = uri + "?" + req.DecodedQuery
+	}
+	ua := req.Headers["User-Agent"]
+	regMatches := globalCVERuleRegistry.DetectAll(uri, req.Body, ua, req.Headers)
+	matches = append(matches, regMatches...)
 
 	return matches
 }
@@ -204,7 +306,9 @@ func hasCVESuspiciousContent(req *CVERequest) bool {
 			strings.Contains(lower, "developmentserver") ||
 			strings.Contains(lower, "metadatauploader") ||
 			strings.Contains(lower, "globalprotect") ||
-			strings.Contains(lower, "x-middleware") {
+			strings.Contains(lower, "x-middleware") ||
+			strings.Contains(lower, "graphql") ||
+			strings.Contains(lower, "introspection") {
 			return true
 		}
 	}

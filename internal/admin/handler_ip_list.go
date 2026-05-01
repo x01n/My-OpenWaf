@@ -58,6 +58,14 @@ func CreateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			c.JSON(400, map[string]string{"error": "value required"})
 			return
 		}
+		// Default and validate action field
+		if body.Action == "" {
+			body.Action = "intercept"
+		}
+		if body.Action != "intercept" && body.Action != "block" {
+			c.JSON(400, map[string]string{"error": "action must be intercept or block"})
+			return
+		}
 		if err := repo.Create(&body); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -85,6 +93,14 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 		var body store.IPListEntry
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		// Default and validate action field
+		if body.Action == "" {
+			body.Action = "intercept"
+		}
+		if body.Action != "intercept" && body.Action != "block" {
+			c.JSON(400, map[string]string{"error": "action must be intercept or block"})
 			return
 		}
 		body.ID = existing.ID

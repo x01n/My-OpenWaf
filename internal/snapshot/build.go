@@ -130,6 +130,8 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 			MaintenanceStatus:    s.MaintenanceStatus,
 			BlockHTML:            s.BlockHTML,
 			BlockStatus:          s.BlockStatus,
+			AntiReplayEnabled:    s.AntiReplayEnabled,
+			AntiReplayAction:     s.AntiReplayAction,
 		}
 		registerSiteKeys(siteMap, rt)
 		// EffectiveProtection is computed later once global protection is loaded.

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"time"
 
 	"gorm.io/gorm"
@@ -58,10 +59,10 @@ const (
 	ActionIntercept RuleAction = "intercept"
 	ActionObserve   RuleAction = "observe"
 	ActionDrop      RuleAction = "drop"       // TCP connection close, no HTTP response
-	ActionChallenge RuleAction = "challenge"   // JS challenge or CAPTCHA
-	ActionRedirect  RuleAction = "redirect"    // HTTP redirect
-	ActionRateLimit RuleAction = "rate_limit"  // Per-rule rate limiting
-	ActionTag       RuleAction = "tag"         // Tag request (non-terminal)
+	ActionChallenge RuleAction = "challenge"  // JS challenge or CAPTCHA
+	ActionRedirect  RuleAction = "redirect"   // HTTP redirect
+	ActionRateLimit RuleAction = "rate_limit" // Per-rule rate limiting
+	ActionTag       RuleAction = "tag"        // Tag request (non-terminal)
 
 	// Legacy values for backward compatibility with existing DB rows.
 	ActionBlock   RuleAction = "block"
@@ -93,8 +94,8 @@ type Rule struct {
 	Action     RuleAction `gorm:"size:16;not null" json:"action"`
 	Priority   int        `gorm:"default:100" json:"priority"`
 	Enabled    bool       `gorm:"default:true" json:"enabled"`
-	StatusCode int        `gorm:"default:0" json:"status_code"`     // custom HTTP status code (0 = default)
-	RedirectTo string     `gorm:"size:2048" json:"redirect_to"`     // URL for redirect action
+	StatusCode int        `gorm:"default:0" json:"status_code"` // custom HTTP status code (0 = default)
+	RedirectTo string     `gorm:"size:2048" json:"redirect_to"` // URL for redirect action
 }
 
 // ─── Site ──────────────────────────────────────────────────────────
@@ -128,16 +129,21 @@ type Site struct {
 	BotProtectionLevel    string `gorm:"size:16;default:medium" json:"bot_protection_level"`
 	AttackProtectionLevel string `gorm:"size:16;default:medium" json:"attack_protection_level"`
 
+	// Anti-replay nonce protection
+	AntiReplayEnabled bool   `json:"anti_replay_enabled" gorm:"default:false"`
+	AntiReplayTTL     int    `json:"anti_replay_ttl" gorm:"default:300"`
+	AntiReplayAction  string `json:"anti_replay_action" gorm:"default:'shield_challenge'"`
+
 	// Per-site protection overrides (empty/false = inherit from global ProtectionConfig)
-	OWASPEnabled       *bool  `gorm:"default:null" json:"owasp_enabled,omitempty"`
-	OWASPSensitivity   string `gorm:"size:16" json:"owasp_sensitivity,omitempty"`
-	OWASPAction        string `gorm:"size:16" json:"owasp_action,omitempty"`
-	CVEEnabled         *bool  `gorm:"default:null" json:"cve_enabled,omitempty"`
-	CVEAction          string `gorm:"size:16" json:"cve_action,omitempty"`
-	RateLimitEnabled   *bool  `gorm:"default:null" json:"rate_limit_enabled,omitempty"`
-	RateLimitWindow    int    `gorm:"default:0" json:"rate_limit_window,omitempty"`
-	RateLimitMax       int    `gorm:"default:0" json:"rate_limit_max,omitempty"`
-	RateLimitAction    string `gorm:"size:16" json:"rate_limit_action,omitempty"`
+	OWASPEnabled     *bool  `gorm:"default:null" json:"owasp_enabled,omitempty"`
+	OWASPSensitivity string `gorm:"size:16" json:"owasp_sensitivity,omitempty"`
+	OWASPAction      string `gorm:"size:16" json:"owasp_action,omitempty"`
+	CVEEnabled       *bool  `gorm:"default:null" json:"cve_enabled,omitempty"`
+	CVEAction        string `gorm:"size:16" json:"cve_action,omitempty"`
+	RateLimitEnabled *bool  `gorm:"default:null" json:"rate_limit_enabled,omitempty"`
+	RateLimitWindow  int    `gorm:"default:0" json:"rate_limit_window,omitempty"`
+	RateLimitMax     int    `gorm:"default:0" json:"rate_limit_max,omitempty"`
+	RateLimitAction  string `gorm:"size:16" json:"rate_limit_action,omitempty"`
 
 	// Forwarding configuration (merged from ForwardingProfile)
 	XFFMode              string `gorm:"size:64;default:strip_all_and_set_remote" json:"xff_mode"`
@@ -163,10 +169,39 @@ type Site struct {
 	BlockHTML   string `gorm:"type:text" json:"block_html"`
 	BlockStatus int    `gorm:"default:403" json:"block_status"`
 
+	// Custom error pages: JSON map[int]ErrorPageConfig
+	CustomErrorPages string `json:"custom_error_pages" gorm:"type:text;default:'{}'"`
+
 	// Legacy fields (deprecated, kept for migration compatibility)
 	ListenerID          uint  `gorm:"index" json:"listener_id,omitempty"`
 	ForwardingProfileID *uint `json:"forwarding_profile_id,omitempty"`
 	InheritListenerCert bool  `gorm:"default:false" json:"inherit_listener_cert,omitempty"`
+}
+
+// GetCustomErrorPages parses the CustomErrorPages JSON field.
+func (s *Site) GetCustomErrorPages() map[int]interface{} {
+	if s.CustomErrorPages == "" || s.CustomErrorPages == "{}" {
+		return nil
+	}
+	var m map[int]interface{}
+	if err := json.Unmarshal([]byte(s.CustomErrorPages), &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// SetCustomErrorPages serialises the map into the CustomErrorPages JSON field.
+func (s *Site) SetCustomErrorPages(pages map[int]interface{}) {
+	if len(pages) == 0 {
+		s.CustomErrorPages = "{}"
+		return
+	}
+	b, err := json.Marshal(pages)
+	if err != nil {
+		s.CustomErrorPages = "{}"
+		return
+	}
+	s.CustomErrorPages = string(b)
 }
 
 // ─── SystemSettings ────────────────────────────────────────────────
@@ -231,6 +266,7 @@ type IPListEntry struct {
 	Value   string     `gorm:"size:64;not null;index" json:"value"` // IP or CIDR
 	Note    string     `gorm:"size:255" json:"note"`
 	Enabled bool       `gorm:"default:true" json:"enabled"`
+	Action  string     `json:"action" gorm:"default:'intercept'"` // "intercept" or "block"
 }
 
 // ─── Security Event ────────────────────────────────────────────────
@@ -283,6 +319,42 @@ type SiteCacheRule struct {
 	TTL  int    `json:"ttl"`
 }
 
+// SiteListener represents one network endpoint of a Site.
+type SiteListener struct {
+	ID        uint           `gorm:"primaryKey" json:"id"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+
+	SiteID     uint   `gorm:"index;not null" json:"site_id"`
+	Bind       string `gorm:"size:255;not null;index" json:"bind"`
+	Network    string `gorm:"size:16;default:tcp" json:"network"`
+	TLSEnabled bool   `gorm:"default:false" json:"tls_enabled"`
+	CertID     *uint  `json:"cert_id,omitempty"`
+	Enabled    bool   `gorm:"default:true" json:"enabled"`
+	Note       string `gorm:"size:255" json:"note,omitempty"`
+}
+
+// SiteForwardingRule represents a path-prefix routing rule that maps a sub-path
+// to dedicated upstream targets. Stored as JSON in Site.ForwardingRules.
+type SiteForwardingRule struct {
+	ID         string   `json:"id,omitempty"`
+	Note       string   `json:"note,omitempty"`
+	PathPrefix string   `json:"path_prefix"`
+	Upstreams  []string `json:"upstreams"`
+	Enabled    bool     `json:"enabled"`
+}
+
+// SiteHeaderOp represents a single Header operation applied to upstream
+// requests or downstream responses. Stored as JSON in Site.HeaderOps.
+type SiteHeaderOp struct {
+	ID     string `json:"id,omitempty"`
+	Phase  string `json:"phase"`  // "request" | "response"
+	Action string `json:"action"` // "add" | "set" | "remove"
+	Name   string `json:"name"`
+	Value  string `json:"value,omitempty"`
+}
+
 // ─── Config Revision ───────────────────────────────────────────────
 
 type ConfigRevision struct {
@@ -332,13 +404,41 @@ type ProtectionConfig struct {
 	OWASPModules string `json:"owasp_modules,omitempty"` // JSON-encoded map[string]string
 
 	// CVE detection
-	CVEEnabled bool   `json:"cve_enabled"`
-	CVEAction  string `json:"cve_action"` // "intercept" (default), "observe"
+	CVEEnabled     bool   `json:"cve_enabled"`
+	CVEAction      string `json:"cve_action"`       // "intercept" (default), "observe"
+	CVERulesConfig string `json:"cve_rules_config"` // JSON map[string]CVERuleOverride
+
+	// IP auto-ban action
+	AutoBanAction string `json:"auto_ban_action" gorm:"default:'intercept'"`
+
+	// Per-category sensitivity overrides: JSON map[string]string
+	CategorySensitivity string `json:"category_sensitivity,omitempty" gorm:"column:category_sensitivity;type:text;default:'{}'"`
+
+	// OWASP rules per-rule override config: JSON map[string]OWASPRuleOverride
+	OWASPRulesConfig string `json:"owasp_rules_config" gorm:"type:text;default:'{}'"`
 
 	// Login security policy
 	LoginMinPasswordLength int `json:"login_min_password_length"`
 	LoginMaxAttempts       int `json:"login_max_attempts"`
 	LoginLockoutMinutes    int `json:"login_lockout_minutes"`
+
+	// CAPTCHA challenge configuration
+	CaptchaEnabled bool   `json:"captcha_enabled"`
+	CaptchaType    string `json:"captcha_type"`    // "math", "click", "slide", "rotate"
+	CaptchaTimeout int    `json:"captcha_timeout"` // seconds, default 120
+
+	// Shield (5-second) challenge configuration
+	ShieldEnabled    bool `json:"shield_enabled"`
+	ShieldDifficulty int  `json:"shield_difficulty"` // PoW difficulty (leading zeros), default 4
+
+	// Chain challenge configuration
+	ChainEnabled bool   `json:"chain_enabled"`
+	ChainSteps   string `json:"chain_steps,omitempty"` // JSON-encoded []ChainStepConfig
+
+	// Escalation (step-up response) configuration
+	EscalationEnabled    bool   `json:"escalation_enabled"`
+	EscalationWindowSecs int    `json:"escalation_window_secs"`
+	EscalationSteps      string `json:"escalation_steps,omitempty"` // JSON-encoded []EscalationStepDef
 }
 
 func DefaultProtectionConfig() ProtectionConfig {
@@ -362,7 +462,97 @@ func DefaultProtectionConfig() ProtectionConfig {
 		LoginMinPasswordLength:  8,
 		LoginMaxAttempts:        5,
 		LoginLockoutMinutes:     30,
+		CaptchaType:             "math",
+		CaptchaTimeout:          120,
+		ShieldDifficulty:        4,
+		EscalationWindowSecs:    60,
 	}
+}
+
+// GetCategorySensitivity parses the CategorySensitivity JSON field into a map.
+func (p *ProtectionConfig) GetCategorySensitivity() map[string]string {
+	if p.CategorySensitivity == "" || p.CategorySensitivity == "{}" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(p.CategorySensitivity), &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// SetCategorySensitivity serialises the map into the CategorySensitivity JSON field.
+func (p *ProtectionConfig) SetCategorySensitivity(m map[string]string) {
+	if len(m) == 0 {
+		p.CategorySensitivity = "{}"
+		return
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		p.CategorySensitivity = "{}"
+		return
+	}
+	p.CategorySensitivity = string(b)
+}
+
+// GetOWASPRulesConfig parses the OWASPRulesConfig JSON field into a map.
+func (p *ProtectionConfig) GetOWASPRulesConfig() map[string]interface{} {
+	if p.OWASPRulesConfig == "" || p.OWASPRulesConfig == "{}" {
+		return nil
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(p.OWASPRulesConfig), &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// ─── Escalation step helpers ────────────────────────────────────────
+
+// EscalationStepDef is the JSON-friendly step definition stored in ProtectionConfig.
+type EscalationStepDef struct {
+	Threshold int    `json:"threshold"`
+	Action    string `json:"action"`
+}
+
+// GetEscalationSteps parses the EscalationSteps JSON field.
+func (p *ProtectionConfig) GetEscalationSteps() []EscalationStepDef {
+	if p.EscalationSteps == "" || p.EscalationSteps == "[]" {
+		return nil
+	}
+	var steps []EscalationStepDef
+	if err := json.Unmarshal([]byte(p.EscalationSteps), &steps); err != nil {
+		return nil
+	}
+	return steps
+}
+
+// SetEscalationSteps serialises the steps into the EscalationSteps JSON field.
+func (p *ProtectionConfig) SetEscalationSteps(steps []EscalationStepDef) {
+	if len(steps) == 0 {
+		p.EscalationSteps = "[]"
+		return
+	}
+	b, err := json.Marshal(steps)
+	if err != nil {
+		p.EscalationSteps = "[]"
+		return
+	}
+	p.EscalationSteps = string(b)
+}
+
+// SetOWASPRulesConfig serialises the map into the OWASPRulesConfig JSON field.
+func (p *ProtectionConfig) SetOWASPRulesConfig(config map[string]interface{}) {
+	if len(config) == 0 {
+		p.OWASPRulesConfig = "{}"
+		return
+	}
+	b, err := json.Marshal(config)
+	if err != nil {
+		p.OWASPRulesConfig = "{}"
+		return
+	}
+	p.OWASPRulesConfig = string(b)
 }
 
 // ─── Bot Protection Config ─────────────────────────────────────────

@@ -228,6 +228,41 @@ export interface Site {
   updated_at: string;
 }
 
+export interface SiteListener {
+  id: number;
+  site_id: number;
+  bind: string;
+  network: string;
+  tls_enabled: boolean;
+  cert_id: number | null;
+  enabled: boolean;
+  note: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listSiteListeners(siteId: number): Promise<{ items: SiteListener[] }> {
+  return api<{ items: SiteListener[] }>(`/api/v1/sites/${siteId}/listeners`);
+}
+
+export async function createSiteListener(siteId: number, data: Partial<SiteListener>): Promise<SiteListener> {
+  return api<SiteListener>(`/api/v1/sites/${siteId}/listeners`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateSiteListener(siteId: number, listenerId: number, data: Partial<SiteListener>): Promise<SiteListener> {
+  return api<SiteListener>(`/api/v1/sites/${siteId}/listeners/${listenerId}/update`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteSiteListener(siteId: number, listenerId: number): Promise<void> {
+  await api(`/api/v1/sites/${siteId}/listeners/${listenerId}/delete`, { method: "POST" });
+}
+
 export interface SiteStatus {
   id: number;
   host: string;
@@ -332,6 +367,7 @@ export interface IPListItem {
   kind: "blacklist" | "whitelist" | string;
   value: string;
   note: string;
+  action?: "intercept" | "block" | string;
   enabled: boolean;
   created_at: string;
   updated_at: string;
