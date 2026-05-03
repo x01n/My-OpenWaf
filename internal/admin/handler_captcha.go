@@ -42,10 +42,8 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 			return
 		}
 
-		// Validate captcha type
-		validTypes := map[string]bool{"math": true, "click": true, "slide": true, "rotate": true, "drag": true}
-		if req.CaptchaType != "" && !validTypes[req.CaptchaType] {
-			c.JSON(400, map[string]string{"error": "captcha_type must be one of: math, click, slide, rotate, drag"})
+		if req.CaptchaType != "" && req.CaptchaType != "math" {
+			c.JSON(400, map[string]string{"error": "captcha_type must be math"})
 			return
 		}
 
@@ -84,11 +82,11 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 func TestCaptcha(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		cfg := loadProtectionConfig(repo)
-		c.JSON(200, map[string]any{
+		c.JSON(501, map[string]any{
+			"error":        "captcha test preview is not implemented",
+			"implemented":  false,
 			"captcha_type": cfg.CaptchaType,
 			"difficulty":   cfg.ShieldDifficulty,
-			"preview":      "captcha-test-token-placeholder",
-			"message":      "captcha test generated successfully",
 		})
 	}
 }
@@ -100,7 +98,7 @@ func loadProtectionConfig(repo *repository.SystemSettingsRepo) store.ProtectionC
 	if err != nil {
 		return store.DefaultProtectionConfig()
 	}
-	var cfg store.ProtectionConfig
+	cfg := store.DefaultProtectionConfig()
 	if json.Unmarshal([]byte(val), &cfg) != nil {
 		return store.DefaultProtectionConfig()
 	}

@@ -6,14 +6,8 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api } from "@/lib/api";
-
-interface Certificate {
-  id: number;
-  name: string;
-}
+import { api, getCertificates, type Certificate } from "@/lib/api";
 
 interface AddSiteDialogProps {
   open: boolean;
@@ -34,7 +28,7 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
 
   useEffect(() => {
     if (!open) return;
-    api<{ items: Certificate[] }>("/api/v1/certificates")
+    getCertificates()
       .then((data) => setCertificates(data.items || []))
       .catch(() => setCertificates([]));
   }, [open]);

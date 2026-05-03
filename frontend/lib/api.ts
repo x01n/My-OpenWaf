@@ -161,6 +161,22 @@ export interface Policy {
   updated_at: string;
 }
 
+export async function getCertificates() {
+  return api<{ items: Certificate[] }>("/api/v1/certificates");
+}
+
+export async function createCertificate(payload: Pick<Certificate, "name" | "cert_pem" | "key_pem">) {
+  return api<Certificate>("/api/v1/certificates", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteCertificate(id: number) {
+  return api(`/api/v1/certificates/${id}/delete`, { method: "POST" });
+}
+
+
 export interface Rule {
   id: number;
   name: string;
@@ -207,6 +223,12 @@ export interface Site {
   rate_limit_window?: number;
   rate_limit_max?: number;
   rate_limit_action?: string;
+  anti_replay_enabled?: boolean;
+  anti_replay_ttl?: number;
+  anti_replay_action?: string;
+  listener_summary?: string;
+  tls_summary?: string;
+  managed_listener_count?: number;
   xff_mode?: string;
   trusted_cidr?: string;
   preserve_original_host?: boolean;
@@ -402,6 +424,7 @@ export interface ProtectionSettings {
   auto_ban_threshold: number;
   auto_ban_window: number;
   auto_ban_duration: number;
+  auto_ban_action?: string;
   waiting_room_enabled?: boolean;
   cc_use_custom?: boolean;
   cc_rules?: unknown[];
@@ -736,8 +759,11 @@ export async function deleteCVERule(id: number): Promise<void> {
   await api(`/api/v1/cve-rules/${id}/delete`, { method: "POST" });
 }
 
-export async function toggleCVERule(id: number): Promise<void> {
-  await api(`/api/v1/cve-rules/${id}/toggle`, { method: "POST" });
+export async function toggleCVERule(id: number, enabled?: boolean): Promise<void> {
+  await api(`/api/v1/cve-rules/${id}/toggle`, {
+    method: "POST",
+    body: enabled === undefined ? undefined : JSON.stringify({ enabled }),
+  });
 }
 
 export async function syncCVERules(): Promise<{ message?: string }> {

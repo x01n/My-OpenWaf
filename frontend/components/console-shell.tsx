@@ -124,6 +124,73 @@ export function InlineMeta({ label, value }: { label: string; value: React.React
   );
 }
 
+export function Notice({
+  tone = "amber",
+  title,
+  children,
+  action,
+  className,
+  size = "md",
+}: {
+  tone?: "amber" | "sky" | "emerald" | "slate";
+  title?: React.ReactNode;
+  children: React.ReactNode;
+  action?: React.ReactNode;
+  className?: string;
+  size?: "sm" | "md";
+}) {
+  const toneClass = {
+    amber: "border-amber-200 bg-amber-50 text-amber-900",
+    sky: "border-sky-200 bg-sky-50 text-sky-900",
+    emerald: "border-emerald-200 bg-emerald-50 text-emerald-900",
+    slate: "border-slate-200 bg-slate-50 text-slate-700",
+  }[tone];
+
+  return (
+    <div className={cn("rounded-md border", size === "sm" ? "px-3 py-3 text-xs" : "px-4 py-3 text-sm", toneClass, className)}>
+      <div className={cn("space-y-1", size === "sm" ? "leading-5" : "leading-6")}>
+        {title ? <div className="font-medium">{title}</div> : null}
+        <div>{children}</div>
+      </div>
+      {action ? <div className="mt-2">{action}</div> : null}
+    </div>
+  );
+}
+
+export function SourceSiteNotice({
+  sourceSite,
+  scope,
+  onBack,
+  backHref,
+  className,
+}: {
+  sourceSite: React.ReactNode;
+  scope: React.ReactNode;
+  onBack?: () => void;
+  backHref?: string;
+  className?: string;
+}) {
+  const backAction = onBack ? (
+    <button
+      type="button"
+      onClick={onBack}
+      className="text-sm font-medium text-amber-900 underline underline-offset-4"
+    >
+      返回当前站点
+    </button>
+  ) : backHref ? (
+    <a href={backHref} className="text-sm font-medium text-amber-900 underline underline-offset-4">
+      返回当前站点
+    </a>
+  ) : null;
+
+  return (
+    <Notice tone="amber" className={className} action={backAction}>
+      你是从站点 “{sourceSite}” 跳转过来的。当前页面配置的是{scope}，修改后会影响所有站点。
+    </Notice>
+  );
+}
+
 export function PlanningNotice({ title, description, href }: { title: string; description: string; href?: string }) {
   return (
     <Surface title={title} description={description}>

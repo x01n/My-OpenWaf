@@ -1,39 +1,69 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, RefreshCcw } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Download, RefreshCcw, Search } from "lucide-react";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { EmptyState, InlineMeta, PageIntro, Surface, statusToneClass } from "@/components/console-shell";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Pagination } from "@/components/pagination";
 import { getAccessLogs, type AccessLog } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 
 const PAGE_SIZE = 20;
 
+function StatusBadge({ code }: { code: number }) {
+  let cls = "border-slate-200 bg-slate-50 text-slate-600";
+  if (code >= 200 && code < 300)
+    cls = "border-emerald-200 bg-emerald-50 text-emerald-700";
+  else if (code >= 300 && code < 400)
+    cls = "border-blue-200 bg-blue-50 text-blue-700";
+  else if (code >= 400 && code < 500)
+    cls = "border-amber-200 bg-amber-50 text-amber-700";
+  else if (code >= 500) cls = "border-red-200 bg-red-50 text-red-700";
+
+  return <Badge className={`${cls} hover:${cls} font-mono`}>{code}</Badge>;
+}
+
+function MethodBadge({ method }: { method: string }) {
+  const colors: Record<string, string> = {
+    GET: "border-cyan-200 bg-cyan-50 text-cyan-700",
+    POST: "border-indigo-200 bg-indigo-50 text-indigo-700",
+    PUT: "border-amber-200 bg-amber-50 text-amber-700",
+    DELETE: "border-red-200 bg-red-50 text-red-700",
+    PATCH: "border-purple-200 bg-purple-50 text-purple-700",
+  };
+  const cls = colors[method] ?? "border-slate-200 bg-slate-50 text-slate-600";
+  return <Badge className={`${cls} hover:${cls} font-mono text-[11px]`}>{method}</Badge>;
+}
+
 function exportCSV(items: AccessLog[]) {
-  const headers = ["ID", "时间", "Request ID", "站点", "IP", "方法", "路径", "状态", "WAF", "缓存", "上游"];
-  const rows = items.map((item) => [
-    item.id,
-    formatDate(item.created_at),
-    item.request_id,
-    item.host,
-    item.client_ip,
-    item.method,
-    item.path,
-    item.status_code,
-    item.waf_action,
-    item.cache_state,
-    item.upstream,
+  const headers = [
+    "ID", "时间", "Request ID", "站点", "IP", "方法", "路径",
+    "状态", "WAF", "缓存", "上游",
+  ];
+  const rows = items.map((i) => [
+    i.id, formatDate(i.created_at), i.request_id, i.host,
+    i.client_ip, i.method, i.path, i.status_code,
+    i.waf_action, i.cache_state, i.upstream,
   ]);
-  const csv = [headers.join(","), ...rows.map((row) => row.map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
+  const csv = [
+    headers.join(","),
+    ...rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")),
+  ].join("\n");
   const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `access-logs-${new Date().toISOString().slice(0, 10)}.csv`;
-  anchor.click();
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `access-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
   URL.revokeObjectURL(url);
 }
 
@@ -42,141 +72,172 @@ export default function AccessLogsPage() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [host, setHost] = useState("");
+  const [pathSearch, setPathSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [clientIP, setClientIP] = useState("");
-  const [cacheState, setCacheState] = useState("all");
-  const [wafAction, setWafAction] = useState("all");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await getAccessLogs({
+      const params: Record<string, unknown> = {
         page,
         page_size: PAGE_SIZE,
-        host: host || undefined,
-        client_ip: clientIP || undefined,
-        cache_state: cacheState === "all" ? undefined : cacheState,
-        waf_action: wafAction === "all" ? undefined : wafAction,
-      });
-      setItems(response.items ?? []);
-      setTotal(response.total ?? 0);
+      };
+      if (pathSearch) params.path = pathSearch;
+      if (clientIP) params.client_ip = clientIP;
+      // status filter: 2xx, 3xx, 4xx, 5xx
+      // API doesn't have status_code filter directly, but pass it
+      if (statusFilter !== "all") {
+        params.status_group = statusFilter;
+      }
+      const res = await getAccessLogs(params as Parameters<typeof getAccessLogs>[0]);
+      setItems(res.items ?? []);
+      setTotal(res.total ?? 0);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, [page, host, clientIP, cacheState, wafAction]);
+  }, [page, pathSearch, statusFilter, clientIP]);
 
   useEffect(() => {
     load();
   }, [load]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const stats = useMemo(() => {
-    const hits = items.filter((item) => item.cache_state === "hit").length;
-    const misses = items.filter((item) => item.cache_state === "miss").length;
-    const blocked = items.filter((item) => item.waf_action !== "none" && item.waf_action !== "observe").length;
-    return { hits, misses, blocked };
-  }, [items]);
 
   return (
     <div className="space-y-6">
-      <PageIntro
-        eyebrow="Request Audit"
-        title="访问日志"
-        description="基于 /api/v1/access-logs 查看请求结果、缓存命中与上游访问情况，用于排障、审计与缓存验证。"
-        actions={
-          <>
-            <Button variant="secondary" className="rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={load}>
-              <RefreshCcw className="mr-2 h-4 w-4" /> 刷新
-            </Button>
-            <Button variant="secondary" className="rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={() => exportCSV(items)} disabled={items.length === 0}>
-              <Download className="mr-2 h-4 w-4" /> 导出 CSV
-            </Button>
-          </>
-        }
-      />
-
-      <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-        <Surface title="当前页统计" description="快速确认缓存与阻断效果。">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <InlineMeta label="记录数" value={items.length.toLocaleString()} />
-            <InlineMeta label="缓存命中" value={stats.hits.toLocaleString()} />
-            <InlineMeta label="缓存回源" value={stats.misses.toLocaleString()} />
-            <InlineMeta label="终端动作" value={stats.blocked.toLocaleString()} />
-          </div>
-        </Surface>
-
-        <Surface title="筛选条件" description="按 Host、IP、缓存状态与 WAF 动作过滤。">
-          <div className="grid gap-3 md:grid-cols-2">
-            <Input value={host} onChange={(event) => { setHost(event.target.value); setPage(1); }} placeholder="按 Host 筛选" className="rounded-xl" />
-            <Input value={clientIP} onChange={(event) => { setClientIP(event.target.value); setPage(1); }} placeholder="按客户端 IP 筛选" className="rounded-xl" />
-            <Select value={cacheState} onValueChange={(value) => { setCacheState(value); setPage(1); }}>
-              <SelectTrigger className="rounded-xl"><SelectValue placeholder="缓存状态" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部缓存状态</SelectItem>
-                <SelectItem value="hit">命中</SelectItem>
-                <SelectItem value="miss">回源</SelectItem>
-                <SelectItem value="bypass">绕过</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={wafAction} onValueChange={(value) => { setWafAction(value); setPage(1); }}>
-              <SelectTrigger className="rounded-xl"><SelectValue placeholder="WAF 动作" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部动作</SelectItem>
-                <SelectItem value="none">放行</SelectItem>
-                <SelectItem value="observe">观察</SelectItem>
-                <SelectItem value="intercept">拦截</SelectItem>
-                <SelectItem value="drop">丢弃</SelectItem>
-                <SelectItem value="challenge">挑战</SelectItem>
-                <SelectItem value="redirect">重定向</SelectItem>
-                <SelectItem value="maintenance">维护</SelectItem>
-                <SelectItem value="challenge_passed">挑战通过</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </Surface>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-900">访问日志</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            查看请求结果、状态码与上游响应，用于排障与审计
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5 rounded-lg"
+            onClick={load}
+          >
+            <RefreshCcw className="h-3.5 w-3.5" /> 刷新
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5 rounded-lg"
+            onClick={() => exportCSV(items)}
+            disabled={items.length === 0}
+          >
+            <Download className="h-3.5 w-3.5" /> 导出 CSV
+          </Button>
+        </div>
       </div>
 
-      <Surface title="日志列表" description="包含缓存状态、WAF 结果与上游目标。">
+      {/* Search / Filter bar */}
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+          <Input
+            value={pathSearch}
+            onChange={(e) => { setPathSearch(e.target.value); setPage(1); }}
+            placeholder="搜索路径"
+            className="w-[200px] rounded-lg pl-8"
+          />
+        </div>
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+          <Input
+            value={clientIP}
+            onChange={(e) => { setClientIP(e.target.value); setPage(1); }}
+            placeholder="搜索源 IP"
+            className="w-[180px] rounded-lg pl-8"
+          />
+        </div>
+        <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(1); }}>
+          <SelectTrigger className="w-[140px] rounded-lg">
+            <SelectValue placeholder="状态码" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部状态码</SelectItem>
+            <SelectItem value="2xx">2xx 成功</SelectItem>
+            <SelectItem value="3xx">3xx 重定向</SelectItem>
+            <SelectItem value="4xx">4xx 客户端错误</SelectItem>
+            <SelectItem value="5xx">5xx 服务端错误</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Table */}
+      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
         {loading ? (
-          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
+          <div className="p-16 text-center text-sm text-slate-400">加载中...</div>
         ) : items.length === 0 ? (
-          <EmptyState title="没有访问日志" description="当前筛选条件下暂无记录，请稍后重试或调整筛选。" />
+          <div className="p-16 text-center text-sm text-slate-400">
+            当前筛选条件下暂无访问日志
+          </div>
         ) : (
-          <div className="space-y-4">
-            <div className="overflow-hidden rounded-[24px] border border-slate-200">
-              <table className="min-w-full divide-y divide-slate-200 bg-white text-sm">
-                <thead className="bg-slate-50 text-left text-xs uppercase tracking-[0.16em] text-slate-500">
-                  <tr>
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-xs font-medium text-slate-500">
                     <th className="px-4 py-3">时间</th>
-                    <th className="px-4 py-3">Host</th>
                     <th className="px-4 py-3">方法</th>
                     <th className="px-4 py-3">路径</th>
-                    <th className="px-4 py-3">状态</th>
+                    <th className="px-4 py-3">状态码</th>
+                    <th className="px-4 py-3">源 IP</th>
                     <th className="px-4 py-3">WAF</th>
-                    <th className="px-4 py-3">缓存</th>
                     <th className="px-4 py-3">上游</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-slate-50">
                   {items.map((item) => (
-                    <tr key={item.id} className="transition-colors hover:bg-slate-50">
-                      <td className="px-4 py-3 text-xs text-slate-500">{formatDate(item.created_at)}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-slate-700">{item.host}</td>
-                      <td className="px-4 py-3 text-xs text-slate-700">{item.method}</td>
-                      <td className="max-w-[340px] truncate px-4 py-3 font-mono text-xs text-slate-700">{item.path}</td>
-                      <td className="px-4 py-3 text-xs text-slate-700">{item.status_code}</td>
-                      <td className="px-4 py-3"><span className={`console-badge ${statusToneClass(item.waf_action)}`}>{item.waf_action}</span></td>
-                      <td className="px-4 py-3"><span className={`console-badge ${statusToneClass(item.cache_state)}`}>{item.cache_state}</span></td>
-                      <td className="max-w-[260px] truncate px-4 py-3 font-mono text-xs text-slate-500">{item.upstream || "-"}</td>
+                    <tr
+                      key={item.id}
+                      className="transition-colors hover:bg-slate-50/50"
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">
+                        {formatDate(item.created_at)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <MethodBadge method={item.method} />
+                      </td>
+                      <td className="max-w-[300px] truncate px-4 py-3 font-mono text-xs text-slate-600">
+                        {item.path}
+                      </td>
+                      <td className="px-4 py-3">
+                        <StatusBadge code={item.status_code} />
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-slate-700">
+                        {item.client_ip}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-500">
+                        {item.waf_action || "-"}
+                      </td>
+                      <td className="max-w-[200px] truncate px-4 py-3 font-mono text-xs text-slate-400">
+                        {item.upstream || "-"}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <Pagination page={page} totalPages={totalPages} total={total} pageSize={PAGE_SIZE} onPageChange={setPage} />
-          </div>
+            <div className="border-t border-slate-100 p-3">
+              <Pagination
+                page={page}
+                totalPages={totalPages}
+                total={total}
+                pageSize={PAGE_SIZE}
+                onPageChange={setPage}
+              />
+            </div>
+          </>
         )}
-      </Surface>
+      </div>
     </div>
   );
 }

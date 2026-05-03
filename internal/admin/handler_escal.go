@@ -25,10 +25,12 @@ var (
 
 func GetEscalationConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		_, err := utils.ParseUint(c.Param("id"))
-		if err != nil {
-			c.JSON(400, map[string]string{"error": "invalid id"})
-			return
+		id := c.Param("id")
+		if id != "global" {
+			if _, err := utils.ParseUint(id); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid id"})
+				return
+			}
 		}
 		cfg := loadProtectionConfig(repo)
 		steps := cfg.GetEscalationSteps()
@@ -45,10 +47,12 @@ func GetEscalationConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 
 func UpdateEscalationConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		_, err := utils.ParseUint(c.Param("id"))
-		if err != nil {
-			c.JSON(400, map[string]string{"error": "invalid id"})
-			return
+		id := c.Param("id")
+		if id != "global" {
+			if _, err := utils.ParseUint(id); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid id"})
+				return
+			}
 		}
 		var req struct {
 			EscalationEnabled    bool                      `json:"escalation_enabled"`

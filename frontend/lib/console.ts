@@ -1,24 +1,24 @@
 import {
-  Activity,
-  BadgeAlert,
-  Blocks,
+  AlertTriangle,
+  Ban,
+  BarChart3,
   Bot,
+  Bug,
   FileText,
-  FileWarning,
   Fingerprint,
+  FolderCog,
   Globe,
-  KeyRound,
+  Key,
   LayoutDashboard,
+  List,
+  ListChecks,
   Lock,
-  Radar,
-  Server,
-  Settings2,
+  Settings,
   Shield,
   ShieldAlert,
   ShieldCheck,
-  SlidersHorizontal,
   TriangleAlert,
-  Waypoints,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 
@@ -32,165 +32,60 @@ export interface ConsoleNavItem {
   exact?: boolean;
 }
 
-export const consoleNavItems: ConsoleNavItem[] = [
+export interface ConsoleNavGroup {
+  title: string;
+  items: ConsoleNavItem[];
+}
+
+export const consoleNavGroups: ConsoleNavGroup[] = [
   {
-    href: "/dashboard/",
-    label: "总览",
-    description: "查看流量、拦截、Bot、CVE 与运行状态总览。",
-    icon: LayoutDashboard,
-    group: "概览",
+    title: "概览",
+    items: [
+      { href: "/dashboard/", label: "总览", description: "查看流量、拦截、Bot、CVE 与运行状态总览。", icon: BarChart3, group: "概览" },
+      { href: "/sites/", label: "防护应用", description: "管理站点接入、转发目标和站点级防护策略。", icon: Globe, group: "概览" },
+      { href: "/security-events/", label: "安全事件", description: "按动作、类别、IP 和时间检索安全事件。", icon: ShieldAlert, group: "概览" },
+      { href: "/access-logs/", label: "访问日志", description: "查看请求结果、缓存命中与上游访问情况。", icon: FileText, group: "概览" },
+    ],
   },
   {
-    href: "/sites/",
-    label: "防护应用",
-    description: "管理站点接入、转发目标和站点级防护策略。",
-    icon: Globe,
-    group: "概览",
+    title: "防护",
+    items: [
+      { href: "/protection/", label: "攻击防护", description: "配置 OWASP、限流、维护模式和登录安全策略。", icon: Shield, group: "防护" },
+      { href: "/cc-protection/", label: "CC 防护", description: "管理 CC 防护、自定义规则和等待室策略。", icon: Zap, group: "防护" },
+      { href: "/bot-protection/", label: "Bot 防护", description: "调整 Bot 阈值、风险国家、ASN 和评分日志。", icon: Bot, group: "防护" },
+      { href: "/security/", label: "安全策略", description: "验证码、5秒盾、连锁策略、防重放与阶梯升级。", icon: ShieldCheck, group: "防护" },
+      { href: "/drop-policy/", label: "阻断策略", description: "管理主动断连策略和阻断事件。", icon: Ban, group: "防护" },
+    ],
   },
   {
-    href: "/security-events/",
-    label: "安全事件",
-    description: "按动作、类别、IP 和时间检索安全事件。",
-    icon: Activity,
-    group: "概览",
+    title: "规则",
+    items: [
+      { href: "/rules/cve/", label: "CVE 规则", description: "筛选、搜索、批量操作和编辑 CVE 检测规则。", icon: Bug, group: "规则" },
+      { href: "/rules/owasp/", label: "OWASP 规则", description: "按类别管理 OWASP 规则和敏感度矩阵。", icon: AlertTriangle, group: "规则" },
+      { href: "/rules/", label: "自定义规则", description: "管理 ACL 与自定义匹配规则。", icon: ListChecks, group: "规则", exact: false },
+      { href: "/ip-lists/", label: "IP 黑白名单", description: "按 IP 或 CIDR 管理黑白名单条目。", icon: List, group: "规则" },
+    ],
   },
   {
-    href: "/access-logs/",
-    label: "访问日志",
-    description: "查看请求结果、缓存命中与上游访问情况。",
-    icon: FileText,
-    group: "概览",
+    title: "分析",
+    items: [
+      { href: "/fingerprints/", label: "指纹分析", description: "查看 TLS 指纹聚合统计和异常特征。", icon: Fingerprint, group: "分析" },
+    ],
   },
   {
-    href: "/protection/",
-    label: "攻击防护",
-    description: "配置 OWASP、限流、维护模式和登录安全策略。",
-    icon: ShieldAlert,
-    group: "防护",
-  },
-  {
-    href: "/cc-protection/",
-    label: "CC 防护",
-    description: "管理 CC 防护、自定义规则和等待室策略。",
-    icon: Radar,
-    group: "防护",
-  },
-  {
-    href: "/bot-protection/",
-    label: "Bot 防护",
-    description: "调整 Bot 阈值、风险国家、ASN 和评分日志。",
-    icon: Bot,
-    group: "防护",
-  },
-  {
-    href: "/drop-policy/",
-    label: "阻断策略",
-    description: "管理主动断连策略和阻断事件。",
-    icon: Blocks,
-    group: "防护",
-  },
-  {
-    href: "/fingerprints/",
-    label: "指纹分析",
-    description: "查看 TLS 指纹聚合统计和异常特征。",
-    icon: Fingerprint,
-    group: "防护",
-  },
-  {
-    href: "/security/",
-    label: "安全策略",
-    description: "验证码、5秒盾、连锁策略、防重放与阶梯升级。",
-    icon: ShieldCheck,
-    group: "防护",
-  },
-  {
-    href: "/cve-rules/",
-    label: "CVE 规则",
-    description: "同步、审阅和维护漏洞检测规则。",
-    icon: BadgeAlert,
-    group: "防护",
-  },
-  {
-    href: "/rules/cve/",
-    label: "CVE 规则管理",
-    description: "筛选、搜索、批量操作和编辑 CVE 检测规则。",
-    icon: BadgeAlert,
-    group: "防护",
-  },
-  {
-    href: "/rules/owasp/",
-    label: "OWASP 规则管理",
-    description: "按类别管理 OWASP 规则和敏感度矩阵。",
-    icon: ShieldCheck,
-    group: "防护",
-  },
-  {
-    href: "/error-pages/",
-    label: "错误页面",
-    description: "管理默认和站点级自定义错误页面。",
-    icon: FileWarning,
-    group: "配置",
-  },
-  {
-    href: "/policies/",
-    label: "策略",
-    description: "管理策略对象并为规则分组。",
-    icon: Shield,
-    group: "配置",
-  },
-  {
-    href: "/rules/",
-    label: "规则管理",
-    description: "管理 CVE 规则、OWASP 规则、ACL 与自定义匹配规则。",
-    icon: SlidersHorizontal,
-    group: "配置",
-    exact: false,
-  },
-  {
-    href: "/certificates/",
-    label: "证书",
-    description: "维护 TLS 证书并分配给 HTTPS 站点。",
-    icon: Lock,
-    group: "配置",
-  },
-  {
-    href: "/ip-lists/",
-    label: "IP 黑白名单",
-    description: "按 IP 或 CIDR 管理黑白名单条目。",
-    icon: Shield,
-    group: "配置",
-  },
-  {
-    href: "/api-keys/",
-    label: "API 密钥",
-    description: "管理用于自动化访问的 Bearer Token。",
-    icon: KeyRound,
-    group: "配置",
-  },
-  {
-    href: "/settings/",
-    label: "系统设置",
-    description: "查看系统级配置、登录策略和平台资源。",
-    icon: Settings2,
-    group: "配置",
-  },
-  {
-    href: "/listeners/",
-    label: "监听器（规划中）",
-    description: "当前后端未暴露独立监听器接口，页面仅做架构说明。",
-    icon: Server,
-    group: "架构",
-    enabled: false,
-  },
-  {
-    href: "/forwarding-profiles/",
-    label: "转发配置（规划中）",
-    description: "当前后端未暴露独立转发配置接口，已并入站点配置。",
-    icon: Waypoints,
-    group: "架构",
-    enabled: false,
+    title: "配置",
+    items: [
+      { href: "/error-pages/", label: "错误页面", description: "管理默认和站点级自定义错误页面。", icon: TriangleAlert, group: "配置" },
+      { href: "/certificates/", label: "证书管理", description: "维护 TLS 证书并分配给 HTTPS 站点。", icon: Lock, group: "配置" },
+      { href: "/policies/", label: "策略管理", description: "管理策略对象并为规则分组。", icon: FolderCog, group: "配置" },
+      { href: "/api-keys/", label: "API 密钥", description: "管理用于自动化访问的 Bearer Token。", icon: Key, group: "配置" },
+      { href: "/settings/", label: "系统设置", description: "查看系统级配置、登录策略和平台资源。", icon: Settings, group: "配置" },
+    ],
   },
 ];
+
+// Flat list for backward compatibility
+export const consoleNavItems: ConsoleNavItem[] = consoleNavGroups.flatMap((g) => g.items);
 
 export const dashboardTabs = [
   { key: "overview", label: "态势总览" },

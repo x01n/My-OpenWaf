@@ -76,6 +76,25 @@ func NewCaptchaManager(redis *goredis.Client, timeout time.Duration) *CaptchaMan
 	return cm
 }
 
+func (cm *CaptchaManager) SetTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	cm.mu.Lock()
+	cm.timeout = timeout
+	cm.mu.Unlock()
+}
+
+func (cm *CaptchaManager) timeoutValue() time.Duration {
+	cm.mu.RLock()
+	timeout := cm.timeout
+	cm.mu.RUnlock()
+	if timeout <= 0 {
+		return 120 * time.Second
+	}
+	return timeout
+}
+
 // Generate creates a new CAPTCHA challenge of the specified type.
 // Returns the challenge data to render to the client.
 func (cm *CaptchaManager) Generate(captchaType CaptchaType) (*CaptchaChallenge, error) {
@@ -134,7 +153,7 @@ func (cm *CaptchaManager) generateMath() (*CaptchaChallenge, error) {
 		Type:      CaptchaTypeMath,
 		Answer:    fmt.Sprintf("%d", answer),
 		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(cm.timeout),
+		ExpiresAt: time.Now().Add(cm.timeoutValue()),
 	}
 
 	if err := cm.storeSession(session); err != nil {
@@ -217,7 +236,8 @@ func (cm *CaptchaManager) storeSession(session *CaptchaSession) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		key := cm.prefix + session.ID
-		err := cm.redis.Set(ctx, key, data, cm.timeout).Err()
+		timeout := cm.timeoutValue()
+		err := cm.redis.Set(ctx, key, data, timeout).Err()
 		if err == nil {
 			return nil
 		}

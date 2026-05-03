@@ -23,6 +23,23 @@ func TestCheckOWASP_SQLi_Low(t *testing.T) {
 	}
 }
 
+func TestCheckOWASP_CategorySensitivity_OffDisablesSQLi(t *testing.T) {
+	hits := CheckOWASP("mid", "/", "id=1' UNION SELECT * FROM users--", nil, nil, map[string]string{"sqli": "off"})
+	if len(hits) > 0 {
+		t.Fatalf("expected SQLi category to be disabled, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_CategorySensitivity_OverrideRaisesSensitivity(t *testing.T) {
+	hits := CheckOWASP("low", "/", "id=1; SELECT user()--", nil, nil, map[string]string{"sqli": "strict"})
+	if len(hits) == 0 {
+		t.Fatal("expected strict category override to detect SQLi under low global sensitivity")
+	}
+	if hits[0].Category != CatSQLi {
+		t.Fatalf("expected sqli category, got %s", hits[0].Category)
+	}
+}
+
 func TestCheckOWASP_Webshell(t *testing.T) {
 	hits := CheckOWASP("mid", "/upload.php", "<?php eval($_POST['cmd'])", nil, nil)
 	if len(hits) == 0 {
@@ -564,6 +581,20 @@ func TestCheckOWASP_Clean_XClientData(t *testing.T) {
 	hits := CheckOWASP("mid", "/recaptcha/api.js", "onload=captchaOnload&render=explicit", headers, nil)
 	if hasCategory(hits, CatXSS) || hasCategory(hits, CatSQLi) {
 		t.Fatalf("X-Client-Data header should not trigger any detection, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_CategorySensitivityDisablesCategory(t *testing.T) {
+	hits := CheckOWASP("high", "/", `q=<base href="https://evil.com/">`, nil, nil, map[string]string{string(CatXSS): "off"})
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("disabled XSS category should not trigger, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_CategorySensitivityOverridesGlobalLevel(t *testing.T) {
+	hits := CheckOWASP("mid", "/", `q=<base href="https://evil.com/">`, nil, nil, map[string]string{string(CatXSS): "strict"})
+	if !hasCategory(hits, CatXSS) {
+		t.Fatal("strict XSS override should trigger when global sensitivity is mid")
 	}
 }
 

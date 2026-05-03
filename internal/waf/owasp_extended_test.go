@@ -80,6 +80,17 @@ func TestCheckOWASP_ProtocolViolation_Smuggling(t *testing.T) {
 	}
 }
 
+func TestCheckOWASP_ProtocolViolation_CanBeDisabledByCategorySensitivity(t *testing.T) {
+	headers := map[string]string{
+		"Content-Length":    "10",
+		"Transfer-Encoding": "chunked",
+	}
+	hits := CheckOWASP("mid", "/", "", headers, nil, map[string]string{"protocol_violation": "off"})
+	if hasCategory(hits, CatProtoViol) {
+		t.Fatalf("expected protocol_violation category to be disabled, got %+v", hits)
+	}
+}
+
 func TestCheckFileUpload_DangerousExt(t *testing.T) {
 	hit, ok := CheckFileUpload("shell.php", "image/jpeg")
 	if !ok || hit.Category != CatFileUpload {

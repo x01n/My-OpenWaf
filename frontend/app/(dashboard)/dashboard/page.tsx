@@ -2,21 +2,19 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  Ban,
-  Bot,
-  Fingerprint,
-  Gauge,
-  KeyRound,
-  Layers,
+  Activity,
+  ArrowDownRight,
+  ArrowUpRight,
+  Eye,
   RefreshCcw,
+  Shield,
   ShieldAlert,
   ShieldCheck,
-  SlidersHorizontal,
-  TimerReset,
+  Users,
 } from "lucide-react";
 import {
-  Bar,
-  BarChart,
+  Area,
+  AreaChart,
   CartesianGrid,
   Cell,
   Pie,
@@ -27,11 +25,20 @@ import {
   YAxis,
 } from "recharts";
 import { Button } from "@/components/ui/button";
-import { PageIntro, MetricCard, MetricGrid, Surface, InlineMeta, statusToneClass } from "@/components/console-shell";
-import { dashboardTabs } from "@/lib/console";
-import { getDashboardSummary, getSecurityTimeline, type DashboardSummary, type TimelineBucket } from "@/lib/api";
+import {
+  getDashboardSummary,
+  getSecurityEvents,
+  getSecurityEventStats,
+  getSecurityTimeline,
+  type DashboardSummary,
+  type SecurityEvent,
+  type SecurityStats,
+  type TimelineBucket,
+} from "@/lib/api";
+import { formatDate } from "@/lib/utils";
+import { toast } from "sonner";
 
-const chartColors = ["#06b6d4", "#22c55e", "#f59e0b", "#fb7185", "#8b5cf6", "#64748b"];
+const PIE_COLORS = ["#06b6d4", "#f59e0b", "#ef4444", "#8b5cf6", "#22c55e", "#64748b"];
 
 function fmt(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -39,29 +46,28 @@ function fmt(value: number) {
   return value.toLocaleString();
 }
 
-function formatUptime(seconds: number) {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
-  return `${hours}h ${minutes}m`;
-}
-
 export default function DashboardPage() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [timeline, setTimeline] = useState<TimelineBucket[]>([]);
-  const [tab, setTab] = useState<(typeof dashboardTabs)[number]["key"]>("overview");
+  const [stats, setStats] = useState<SecurityStats | null>(null);
+  const [events, setEvents] = useState<SecurityEvent[]>([]);
   const [loading, setLoading] = useState(true);
 
   async function load() {
     setLoading(true);
     try {
-      const [dashboard, timelineResponse] = await Promise.all([
+      const [dashRes, tlRes, statsRes, eventsRes] = await Promise.all([
         getDashboardSummary(),
         getSecurityTimeline(24),
+        getSecurityEventStats(24),
+        getSecurityEvents({ limit: 5, page_size: 5 }),
       ]);
-      setSummary(dashboard);
-      setTimeline(timelineResponse.buckets ?? []);
+      setSummary(dashRes);
+      setTimeline(tlRes.buckets ?? []);
+      setStats(statsRes);
+      setEvents(eventsRes.items ?? []);
+    } catch (err) {
+      toast.error(String(err));
     } finally {
       setLoading(false);
     }
@@ -70,254 +76,285 @@ export default function DashboardPage() {
   useEffect(() => {
     load();
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible") {
-        load();
-      }
+      if (document.visibilityState === "visible") load();
     }, 15000);
     return () => clearInterval(timer);
   }, []);
 
-  const dropPie = useMemo(() => {
-    if (!summary) return [];
-    return Object.entries(summary.drop_by_source_24h || {})
-      .map(([key, value]) => ({ key, value }))
-      .filter((item) => item.value > 0);
-  }, [summary]);
+  const timelineData = useMemo(
+    () =>
+      timeline.map((b) => ({
+        time: b.bucket.includes(" ") ? b.bucket.split(" ").pop() : b.bucket,
+        count: b.count,
+      })),
+    [timeline],
+  );
 
-  const cvePhasePie = useMemo(() => summary?.cve_by_type_24h ?? [], [summary]);
+  const categoryData = useMemo(
+    () => (stats?.categories ?? []).filter((c) => c.count > 0),
+    [stats],
+  );
 
-  const metricCards = summary
+  const statCards = summary
     ? [
         {
-          label: "实时 QPS",
-          value: summary.qps_5s.toFixed(1),
-          hint: `1 秒窗口 ${summary.qps_1s.toFixed(1)}`,
-          tone: "default" as const,
-        },
-        {
-          label: "请求总数",
+          label: "PV 总量",
           value: fmt(summary.requests_total),
-          hint: `2xx ${fmt(summary.status_2xx)} · 版本修订 ${summary.revision}`,
-          tone: "default" as const,
+          icon: Eye,
+          change: `${fmt(summary.status_2xx)} 成功`,
+          up: true,
         },
         {
-          label: "WAF 拦截",
+          label: "拦截数",
           value: fmt(summary.waf_blocks),
-          hint: `观察事件 ${fmt(summary.waf_observes)} · 内建命中 ${fmt(summary.builtin_hits)}`,
-          tone: "danger" as const,
+          icon: ShieldAlert,
+          change: `${fmt(summary.waf_observes)} 观察`,
+          up: summary.waf_blocks > 0,
         },
         {
-          label: "上游错误",
-          value: fmt(summary.errors_upstream_4xx + summary.errors_upstream_5xx),
-          hint: `4xx ${fmt(summary.errors_upstream_4xx)} · 5xx ${fmt(summary.errors_upstream_5xx)}`,
-          tone: "warning" as const,
+          label: "独立访客 (UV)",
+          value: fmt(summary.bot_total_24h),
+          icon: Users,
+          change: "近 24 小时",
+          up: true,
+        },
+        {
+          label: "活跃规则数",
+          value: fmt(summary.builtin_hits),
+          icon: ShieldCheck,
+          change: `修订版本 ${summary.revision}`,
+          up: true,
         },
       ]
     : [];
 
+  const actionLabel = (action: string) => {
+    const map: Record<string, { text: string; cls: string }> = {
+      intercept: { text: "拦截", cls: "bg-red-50 text-red-700" },
+      block: { text: "阻断", cls: "bg-red-50 text-red-700" },
+      observe: { text: "观察", cls: "bg-amber-50 text-amber-700" },
+      drop: { text: "丢弃", cls: "bg-rose-50 text-rose-700" },
+      challenge: { text: "质询", cls: "bg-cyan-50 text-cyan-700" },
+    };
+    return map[action] ?? { text: action, cls: "bg-gray-100 text-gray-700" };
+  };
+
   return (
     <div className="space-y-6">
-      <PageIntro
-        eyebrow="Runtime Overview"
-        title="安全态势总览"
-        description="基于当前真实 API 汇总请求吞吐、WAF 命中、Bot 评分、CVE 事件、阻断来源与运行修订。页面会在窗口可见时自动刷新。"
-        actions={
-          <>
-            <div className="inline-flex rounded-full border border-white/10 bg-white/5 p-1">
-              {dashboardTabs.map((item) => (
-                <button
-                  key={item.key}
-                  onClick={() => setTab(item.key)}
-                  className={
-                    tab === item.key
-                      ? "rounded-full bg-white px-4 py-2 text-xs font-medium text-slate-950"
-                      : "rounded-full px-4 py-2 text-xs font-medium text-white/70"
-                  }
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-            <Button variant="secondary" className="rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={load}>
-              <RefreshCcw className="mr-2 h-4 w-4" />
-              刷新
-            </Button>
-          </>
-        }
-      />
-
-      <MetricGrid>
-        {loading && !summary
-          ? Array.from({ length: 4 }).map((_, index) => (
-              <MetricCard key={index} label="加载中" value="--" hint="等待后端响应" />
-            ))
-          : metricCards.map((item) => (
-              <MetricCard key={item.label} {...item} />
-            ))}
-      </MetricGrid>
-
-      <Surface title="安全功能概览" description="新安全功能的实时统计摘要（占位数据，待后续接入真实 API）。">
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <MiniStatCard icon={Fingerprint} label="验证码质询" value="1,283" hint="过去 24 小时" />
-          <MiniStatCard icon={KeyRound} label="防重放拦截" value="467" hint="过去 24 小时" />
-          <MiniStatCard icon={Layers} label="阶梯升级 IP" value="L1: 89 · L2: 34 · L3: 12" hint="当前各等级" />
-          <MiniStatCard icon={SlidersHorizontal} label="活跃规则" value="CVE 156 · OWASP 18" hint="已启用规则数" />
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">总览仪表板</h1>
+          <p className="mt-1 text-sm text-gray-500">实时安全态势与流量统计</p>
         </div>
-      </Surface>
-
-      <div className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
-        <Surface
-          title={tab === "overview" ? "24 小时安全事件时间线" : tab === "traffic" ? "请求与阻断概览" : "威胁来源聚合"}
-          description={
-            tab === "overview"
-              ? "安全事件时间桶来自 /api/v1/security-events/timeline，帮助识别攻击峰值。"
-              : tab === "traffic"
-                ? "从总览接口展示当前吞吐与关键运行指标。"
-                : "聚合展示 Bot、CVE、指纹异常与阻断来源。"
-          }
+        <Button
+          onClick={load}
+          disabled={loading}
+          className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
         >
-          {tab === "overview" ? (
-            <div className="min-w-0 h-[340px]">
-              <ResponsiveContainer width="100%" height={340} minWidth={0}>
-                <BarChart data={timeline} margin={{ top: 8, right: 12, left: -20, bottom: 18 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                  <XAxis dataKey="bucket" tick={{ fontSize: 11, fill: "#64748b" }} minTickGap={24} />
-                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} width={36} />
-                  <Tooltip />
-                  <Bar dataKey="count" radius={[8, 8, 0, 0]} fill="#0891b2" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          ) : tab === "traffic" ? (
-            <div className="grid gap-4 md:grid-cols-2">
-              <InlineMeta label="运行时长" value={summary ? formatUptime(summary.uptime_sec) : "--"} />
-              <InlineMeta label="配置修订" value={summary ? `rev-${summary.revision}` : "--"} />
-              <InlineMeta label="Bot 高风险（24h）" value={summary ? fmt(summary.bot_high_risk_24h) : "--"} />
-              <InlineMeta label="阻断事件（24h）" value={summary ? fmt(summary.drop_total_24h) : "--"} />
-            </div>
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2">
-              <InlineMeta label="Bot 检测总数" value={summary ? fmt(summary.bot_total_24h) : "--"} />
-              <InlineMeta label="Bot 已阻断" value={summary ? fmt(summary.bot_blocked_24h) : "--"} />
-              <InlineMeta label="CVE 命中总数" value={summary ? fmt(summary.cve_total_24h) : "--"} />
-              <InlineMeta label="指纹异常" value={summary ? fmt(summary.fingerprint_anomaly_24h) : "--"} />
-            </div>
-          )}
-        </Surface>
-
-        <Surface title="运行状态" description="面向值班与排障的关键观测数据。">
-          <div className="space-y-3">
-            <StatusRow icon={Gauge} label="请求速率" value={summary ? `${summary.qps_5s.toFixed(1)} req/s` : "--"} status="running" />
-            <StatusRow icon={ShieldAlert} label="拦截动作" value={summary ? fmt(summary.waf_blocks) : "--"} status="block" />
-            <StatusRow icon={Bot} label="Bot 风险" value={summary ? fmt(summary.bot_high_risk_24h) : "--"} status="warning" />
-            <StatusRow icon={Ban} label="主动阻断" value={summary ? fmt(summary.drop_total_24h) : "--"} status="error" />
-            <StatusRow icon={TimerReset} label="运行时间" value={summary ? formatUptime(summary.uptime_sec) : "--"} status="success" />
-          </div>
-        </Surface>
+          <RefreshCcw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          刷新
+        </Button>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-2">
-        <Surface title="阻断来源分布" description="drop_by_source_24h 按来源聚合。">
-          <div className="grid gap-5 lg:grid-cols-[320px_1fr] lg:items-center">
-            <div className="min-w-0 h-[260px]">
-              <ResponsiveContainer width="100%" height={260} minWidth={0}>
-                <PieChart>
-                  <Pie data={dropPie} dataKey="value" nameKey="key" innerRadius={55} outerRadius={92} paddingAngle={4}>
-                    {dropPie.map((entry, index) => (
-                      <Cell key={entry.key} fill={chartColors[index % chartColors.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="space-y-3">
-              {dropPie.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">24 小时内暂无主动阻断事件。</div>
-              ) : (
-                dropPie.map((entry, index) => (
-                  <div key={entry.key} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
-                    <div className="flex items-center gap-3 text-slate-700">
-                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: chartColors[index % chartColors.length] }} />
-                      <span>{entry.key}</span>
-                    </div>
-                    <span className="font-medium text-slate-950">{fmt(entry.value)}</span>
+      {/* Stat Cards */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {loading && !summary
+          ? Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="h-[120px] animate-pulse rounded-lg bg-white shadow-sm" />
+            ))
+          : statCards.map((card) => (
+              <div
+                key={card.label}
+                className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-gray-500">{card.label}</span>
+                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-50">
+                    <card.icon className="h-4.5 w-4.5 text-cyan-600" />
                   </div>
-                ))
-              )}
-            </div>
-          </div>
-        </Surface>
-
-        <Surface title="CVE 阶段分布" description="cve_by_type_24h 使用 phase 聚合，帮助判断规则命中位置。">
-          <div className="grid gap-3">
-            {cvePhasePie.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">24 小时内暂无 CVE 事件。</div>
-            ) : (
-              cvePhasePie.map((entry, index) => (
-                <div key={`${entry.category}-${index}`} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
-                  <div className="flex items-center gap-3 text-slate-700">
-                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: chartColors[index % chartColors.length] }} />
-                    <span>{entry.category}</span>
-                  </div>
-                  <span className="font-medium text-slate-950">{fmt(entry.count)}</span>
                 </div>
-              ))
+                <div className="mt-2 text-2xl font-bold text-gray-900">{card.value}</div>
+                <div className="mt-1 flex items-center text-xs text-gray-500">
+                  {card.up ? (
+                    <ArrowUpRight className="mr-1 h-3.5 w-3.5 text-emerald-500" />
+                  ) : (
+                    <ArrowDownRight className="mr-1 h-3.5 w-3.5 text-red-500" />
+                  )}
+                  {card.change}
+                </div>
+              </div>
+            ))}
+      </div>
+
+      {/* Charts Row */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+        {/* Traffic Trend - 2/3 */}
+        <div className="col-span-1 rounded-lg border border-gray-200 bg-white p-5 shadow-sm xl:col-span-2">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <h3 className="text-base font-semibold text-gray-900">流量趋势</h3>
+              <p className="text-xs text-gray-500">近 24 小时安全事件时间线</p>
+            </div>
+            <Activity className="h-5 w-5 text-gray-400" />
+          </div>
+          <div className="h-[300px]">
+            {timelineData.length === 0 ? (
+              <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-gray-300 bg-gray-50 text-sm text-gray-400">
+                暂无时间线数据
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={300}>
+                <AreaChart data={timelineData} margin={{ top: 8, right: 12, left: -20, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="colorCount" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                  <XAxis
+                    dataKey="time"
+                    tick={{ fontSize: 11, fill: "#94a3b8" }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 11, fill: "#94a3b8" }}
+                    axisLine={false}
+                    tickLine={false}
+                    width={40}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      borderRadius: 8,
+                      border: "1px solid #e2e8f0",
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+                    }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="count"
+                    stroke="#06b6d4"
+                    strokeWidth={2}
+                    fill="url(#colorCount)"
+                    name="事件数"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
             )}
           </div>
-        </Surface>
-      </div>
-    </div>
-  );
-}
-
-function StatusRow({
-  icon: Icon,
-  label,
-  value,
-  status,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  status: string;
-}) {
-  return (
-    <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3">
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white">
-          <Icon className="h-4 w-4" />
         </div>
-        <div>
-          <div className="text-sm font-medium text-slate-900">{label}</div>
-          <div className="text-xs text-slate-500">实时读取当前运行状态</div>
+
+        {/* Security Event Pie - 1/3 */}
+        <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+          <div className="mb-4">
+            <h3 className="text-base font-semibold text-gray-900">安全事件分类</h3>
+            <p className="text-xs text-gray-500">按攻击类型分布</p>
+          </div>
+          {categoryData.length === 0 ? (
+            <div className="flex h-[300px] items-center justify-center rounded-lg border border-dashed border-gray-300 bg-gray-50 text-sm text-gray-400">
+              暂无分类数据
+            </div>
+          ) : (
+            <>
+              <div className="flex justify-center">
+                <ResponsiveContainer width={220} height={220}>
+                  <PieChart>
+                    <Pie
+                      data={categoryData}
+                      dataKey="count"
+                      nameKey="category"
+                      innerRadius={55}
+                      outerRadius={90}
+                      paddingAngle={3}
+                      strokeWidth={0}
+                    >
+                      {categoryData.map((_, i) => (
+                        <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="mt-3 space-y-2">
+                {categoryData.slice(0, 5).map((c, i) => (
+                  <div key={c.category} className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ backgroundColor: PIE_COLORS[i % PIE_COLORS.length] }}
+                      />
+                      <span className="text-gray-600">{c.category}</span>
+                    </div>
+                    <span className="font-medium text-gray-900">{fmt(c.count)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </div>
-      <div className={`console-badge ${statusToneClass(status)}`}>{value}</div>
-    </div>
-  );
-}
 
-function MiniStatCard({
-  icon: Icon,
-  label,
-  value,
-  hint,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  hint: string;
-}) {
-  return (
-    <div className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-cyan-50 text-cyan-700">
-        <Icon className="h-4.5 w-4.5" />
-      </div>
-      <div className="min-w-0 space-y-1">
-        <div className="text-[11px] font-medium tracking-[0.16em] text-slate-400 uppercase">{label}</div>
-        <div className="text-sm font-semibold text-slate-900">{value}</div>
-        <div className="text-xs text-slate-500">{hint}</div>
+      {/* Recent Security Events Table */}
+      <div className="rounded-lg border border-gray-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
+          <div>
+            <h3 className="text-base font-semibold text-gray-900">最近安全事件</h3>
+            <p className="text-xs text-gray-500">最近 5 条安全事件记录</p>
+          </div>
+          <Shield className="h-5 w-5 text-gray-400" />
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-gray-100 bg-gray-50/80">
+                <th className="px-5 py-3 font-medium text-gray-500">时间</th>
+                <th className="px-5 py-3 font-medium text-gray-500">类型</th>
+                <th className="px-5 py-3 font-medium text-gray-500">客户端 IP</th>
+                <th className="px-5 py-3 font-medium text-gray-500">动作</th>
+                <th className="px-5 py-3 font-medium text-gray-500">描述</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-5 py-10 text-center text-gray-400">
+                    暂无安全事件
+                  </td>
+                </tr>
+              ) : (
+                events.map((ev) => {
+                  const a = actionLabel(ev.action);
+                  return (
+                    <tr key={ev.id} className="border-b border-gray-50 hover:bg-gray-50/50">
+                      <td className="whitespace-nowrap px-5 py-3 text-gray-600">
+                        {formatDate(ev.created_at)}
+                      </td>
+                      <td className="px-5 py-3">
+                        <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">
+                          {ev.category || "-"}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3 font-mono text-xs text-gray-700">
+                        {ev.client_ip}
+                      </td>
+                      <td className="px-5 py-3">
+                        <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${a.cls}`}>
+                          {a.text}
+                        </span>
+                      </td>
+                      <td className="max-w-[300px] truncate px-5 py-3 text-gray-500">
+                        {ev.match_desc || ev.path || "-"}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

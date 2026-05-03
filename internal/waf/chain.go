@@ -53,19 +53,63 @@ type ChainChallengeManager struct {
 
 // NewChainChallengeManager creates a new ChainChallengeManager with default steps.
 func NewChainChallengeManager(captcha *CaptchaManager, redis *goredis.Client) *ChainChallengeManager {
-	defaultSteps := []ChainStepConfig{
-		{Type: ChainStepEnv, Condition: "all"},
-		{Type: ChainStepPoW, Condition: "all"},
-		{Type: ChainStepCaptcha, Condition: "env_score>30"},
-	}
 	return &ChainChallengeManager{
 		captcha:    captcha,
 		redis:      redis,
 		prefix:     "owaf:chain:",
 		difficulty: 4,
-		steps:      defaultSteps,
+		steps:      defaultChainSteps(),
 		states:     make(map[string]*ChainState),
 	}
+}
+
+func defaultChainSteps() []ChainStepConfig {
+	return []ChainStepConfig{
+		{Type: ChainStepEnv, Condition: "all"},
+		{Type: ChainStepPoW, Condition: "all"},
+		{Type: ChainStepCaptcha, Condition: "env_score>30"},
+	}
+}
+
+func normalizeChainSteps(steps []ChainStepConfig) []ChainStepConfig {
+	out := make([]ChainStepConfig, 0, len(steps))
+	for _, step := range steps {
+		switch step.Type {
+		case ChainStepEnv, ChainStepPoW, ChainStepCaptcha:
+			out = append(out, step)
+		}
+	}
+	if len(out) == 0 {
+		return defaultChainSteps()
+	}
+	return out
+}
+
+func (cm *ChainChallengeManager) Reconfigure(steps []ChainStepConfig, difficulty int) {
+	if difficulty <= 0 {
+		difficulty = 4
+	}
+	cm.mu.Lock()
+	cm.steps = normalizeChainSteps(steps)
+	cm.difficulty = difficulty
+	cm.mu.Unlock()
+}
+
+func (cm *ChainChallengeManager) configuredSteps() []ChainStepConfig {
+	cm.mu.RLock()
+	steps := append([]ChainStepConfig(nil), cm.steps...)
+	cm.mu.RUnlock()
+	return normalizeChainSteps(steps)
+}
+
+func (cm *ChainChallengeManager) difficultyValue() int {
+	cm.mu.RLock()
+	difficulty := cm.difficulty
+	cm.mu.RUnlock()
+	if difficulty <= 0 {
+		return 4
+	}
+	return difficulty
 }
 
 // StartChain begins a new chain challenge and returns the session ID and HTML for the first step.
@@ -74,7 +118,7 @@ func (cm *ChainChallengeManager) StartChain(originalURL string) (string, string)
 	state := &ChainState{
 		SessionID:   sid,
 		CurrentStep: 0,
-		Steps:       cm.steps,
+		Steps:       cm.configuredSteps(),
 		Scores:      make(map[string]int),
 		OriginalURL: originalURL,
 		Nonce:       GeneratePoWNonce(),
@@ -111,7 +155,7 @@ func (cm *ChainChallengeManager) ProcessStep(sessionID string, formData map[stri
 		counterStr := formData["pow_counter"]
 		var counter int64
 		fmt.Sscanf(counterStr, "%d", &counter)
-		if !VerifyPoW(state.Nonce, counter, hash, cm.difficulty) {
+		if !VerifyPoW(state.Nonce, counter, hash, cm.difficultyValue()) {
 			state.Nonce = GeneratePoWNonce()
 			cm.saveChainState(state)
 			return false, "", cm.renderStepHTML(state)
@@ -201,7 +245,7 @@ func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 	case ChainStepEnv:
 		body = fmt.Sprintf(chainEnvHTML, stepNum, total, dots, EnvCheckJS(), state.SessionID)
 	case ChainStepPoW:
-		body = fmt.Sprintf(chainPowHTML, stepNum, total, dots, GeneratePoWScript(cm.difficulty, state.Nonce), state.SessionID)
+		body = fmt.Sprintf(chainPowHTML, stepNum, total, dots, GeneratePoWScript(cm.difficultyValue(), state.Nonce), state.SessionID)
 	case ChainStepCaptcha:
 		captchaBlock := ""
 		ch, _ := cm.captcha.Generate(CaptchaTypeMath)

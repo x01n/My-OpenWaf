@@ -68,7 +68,7 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 
 		// Re-marshal to ProtectionConfig (string fields will be set below)
 		plainBytes, _ := json.Marshal(raw)
-		var cfg store.ProtectionConfig
+		cfg := store.DefaultProtectionConfig()
 		if err := json.Unmarshal(plainBytes, &cfg); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid config"})
 			return

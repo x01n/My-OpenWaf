@@ -20,6 +20,7 @@ type CVEFeedManager struct {
 	syncInterval time.Duration
 	nvdAPIKey    string
 	autoApprove  bool
+	feedEnabled  bool
 	stopCh       chan struct{}
 	log          *slog.Logger
 	mu           sync.Mutex
@@ -60,6 +61,10 @@ type SyncStatus struct {
 
 // NewCVEFeedManager creates a new feed manager.
 func NewCVEFeedManager(db *gorm.DB, detector *CVEDetector, interval time.Duration, nvdAPIKey string, autoApprove bool, log *slog.Logger) *CVEFeedManager {
+	return NewCVEFeedManagerWithFeed(db, detector, interval, nvdAPIKey, autoApprove, true, log)
+}
+
+func NewCVEFeedManagerWithFeed(db *gorm.DB, detector *CVEDetector, interval time.Duration, nvdAPIKey string, autoApprove bool, feedEnabled bool, log *slog.Logger) *CVEFeedManager {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -69,6 +74,7 @@ func NewCVEFeedManager(db *gorm.DB, detector *CVEDetector, interval time.Duratio
 		syncInterval: interval,
 		nvdAPIKey:    nvdAPIKey,
 		autoApprove:  autoApprove,
+		feedEnabled:  feedEnabled,
 		stopCh:       make(chan struct{}),
 		log:          log,
 	}
@@ -84,6 +90,10 @@ func (m *CVEFeedManager) Start() {
 
 	// Load existing rules into the detector.
 	m.loadRulesIntoDetector()
+	if !m.feedEnabled {
+		m.log.Info("cve_feed: background sync disabled")
+		return
+	}
 
 	go m.loop()
 	m.log.Info("cve_feed: started", slog.Duration("interval", m.syncInterval))
@@ -91,7 +101,9 @@ func (m *CVEFeedManager) Start() {
 
 // Stop signals the background loop to exit.
 func (m *CVEFeedManager) Stop() {
-	close(m.stopCh)
+	if m.feedEnabled {
+		close(m.stopCh)
+	}
 }
 
 // SyncNow triggers an immediate sync (blocking).
@@ -108,6 +120,10 @@ func (m *CVEFeedManager) GetSyncStatus() SyncStatus {
 		LastError: m.lastError,
 		Syncing:   m.syncing,
 	}
+}
+
+func (m *CVEFeedManager) ReloadRules() {
+	m.loadRulesIntoDetector()
 }
 
 func (m *CVEFeedManager) loop() {

@@ -128,10 +128,6 @@
   body {
     @apply bg-background text-foreground;
     min-height: 100vh;
-    background-image:
-      radial-gradient(circle at 20% 10%, rgba(14, 165, 233, 0.14), transparent 30%),
-      radial-gradient(circle at 80% 0%, rgba(16, 185, 129, 0.12), transparent 26%),
-      linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(241, 245, 249, 0.92));
   }
 
   ::selection {
@@ -168,15 +164,15 @@
   }
 
   .console-sidebar-link {
-    @apply flex items-start gap-3 rounded-2xl border border-transparent px-3 py-3 text-left transition-all duration-200;
+    @apply flex items-center gap-3 rounded-md px-3 py-2 text-left text-sm transition-all duration-150;
   }
 
   .console-sidebar-link[data-active="true"] {
-    @apply border-cyan-400/20 bg-cyan-400/12 text-white shadow-[0_16px_35px_rgba(8,145,178,0.2)];
+    @apply border-l-[3px] border-l-cyan-500 bg-cyan-500/10 text-white font-medium;
   }
 
   .console-sidebar-link[data-active="false"] {
-    @apply text-slate-300/80 hover:border-white/8 hover:bg-white/5 hover:text-white;
+    @apply border-l-[3px] border-l-transparent text-gray-300 hover:bg-white/8 hover:text-white;
   }
 
   .console-badge {

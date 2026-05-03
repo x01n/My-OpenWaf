@@ -207,22 +207,30 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 	// Run detectors sequentially. Most requests won't match any, and
 	// sequential execution avoids goroutine spawn/sync overhead.
 	// General detector runs first as it covers the broadest set.
-	if catSens == nil || catSens["cve_general"] != "none" {
+	isDetectorEnabled := func(key string) bool {
+		if catSens == nil {
+			return true
+		}
+		level := strings.ToLower(strings.TrimSpace(catSens[key]))
+		return level != "none" && level != "off"
+	}
+
+	if isDetectorEnabled("cve_general") {
 		if m := d.generalDetector.Detect(req); len(m) > 0 {
 			matches = append(matches, m...)
 		}
 	}
-	if catSens == nil || catSens["cve_php"] != "none" {
+	if isDetectorEnabled("cve_php") {
 		if m := d.phpDetector.Detect(req); len(m) > 0 {
 			matches = append(matches, m...)
 		}
 	}
-	if catSens == nil || catSens["cve_java"] != "none" {
+	if isDetectorEnabled("cve_java") {
 		if m := d.javaDetector.Detect(req); len(m) > 0 {
 			matches = append(matches, m...)
 		}
 	}
-	if catSens == nil || catSens["cve_node"] != "none" {
+	if isDetectorEnabled("cve_node") {
 		if m := d.nodeDetector.Detect(req); len(m) > 0 {
 			matches = append(matches, m...)
 		}

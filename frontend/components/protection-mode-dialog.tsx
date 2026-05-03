@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Eye, Shield, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -46,12 +46,8 @@ const modes = [
 export function ProtectionModeDialog({ open, onOpenChange, currentMode, onConfirm, loading }: ProtectionModeDialogProps) {
   const [selected, setSelected] = useState<ProtectionMode>(currentMode);
 
-  useEffect(() => {
-    setSelected(currentMode);
-  }, [currentMode, open]);
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog key={`${open}-${currentMode}`} open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl rounded-[28px] p-0">
         <DialogHeader className="border-b border-white/10 bg-[linear-gradient(135deg,rgba(10,19,34,0.96),rgba(11,27,48,0.9)_55%,rgba(10,69,88,0.5))] px-6 py-6 text-left text-white">
           <DialogTitle className="text-2xl font-semibold tracking-tight">选择防护模式</DialogTitle>

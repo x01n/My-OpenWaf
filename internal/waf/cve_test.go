@@ -103,6 +103,17 @@ func TestCVEDetector_SSRF(t *testing.T) {
 	}
 }
 
+func TestCVEDetector_CategorySensitivity_OffDisablesGeneralDetector(t *testing.T) {
+	d := NewCVEDetector()
+	req := BuildCVERequest("/fetch", "url=http://169.254.169.254/latest/meta-data/", nil, nil, "")
+	matches := d.Detect(req, map[string]string{"cve_general": "off"})
+	for _, m := range matches {
+		if m.CVEID == "CVE-2019-SSRF" {
+			t.Fatalf("expected cve_general to be disabled, got %+v", matches)
+		}
+	}
+}
+
 func TestCVEDetector_PathTraversal(t *testing.T) {
 	d := NewCVEDetector()
 

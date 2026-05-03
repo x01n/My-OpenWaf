@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { AuthGuard } from "@/components/auth-guard";
-import { DashboardTopbar } from "@/components/dashboard-topbar";
-import { SidebarNav } from "@/components/sidebar-nav";
+import { Sidebar } from "@/components/layout/sidebar";
+import { Topbar } from "@/components/layout/topbar";
 import { Toaster } from "@/components/ui/sonner";
 
 export default function DashboardLayout({
@@ -16,7 +16,7 @@ export default function DashboardLayout({
 
   return (
     <AuthGuard>
-      <div className="console-app-shell flex min-h-svh bg-slate-100/80 text-slate-950">
+      <div className="flex h-svh overflow-hidden bg-gray-100 text-gray-900">
         {/* Mobile sidebar overlay */}
         {mobileOpen && (
           <div
@@ -31,20 +31,18 @@ export default function DashboardLayout({
               : "hidden lg:flex"
           }
         >
-          <SidebarNav
+          <Sidebar
             collapsed={sidebarCollapsed}
             onToggle={() => {
-              setSidebarCollapsed((value) => !value);
+              setSidebarCollapsed((v) => !v);
               if (mobileOpen) setMobileOpen(false);
             }}
           />
         </div>
         <div className="flex min-w-0 flex-1 flex-col">
-          <DashboardTopbar onMobileMenuToggle={() => setMobileOpen((v) => !v)} />
-          <main className="min-w-0 flex-1 overflow-y-auto">
-            <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 px-4 py-6 sm:px-5 md:px-7">
-              {children}
-            </div>
+          <Topbar onMobileMenuToggle={() => setMobileOpen((v) => !v)} />
+          <main className="flex-1 overflow-y-auto bg-gray-100 p-6">
+            <div className="mx-auto w-full max-w-[1600px]">{children}</div>
           </main>
         </div>
       </div>

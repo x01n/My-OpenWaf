@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Search } from "lucide-react";
+import { Search, Shield, ShieldAlert, ShieldCheck, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Pagination } from "@/components/pagination";
-import { MetricCard, MetricGrid, PageIntro, Surface, EmptyState } from "@/components/console-shell";
+import { PageIntro, Surface, EmptyState } from "@/components/console-shell";
 import { getCVERules, updateCVERule, toggleCVERule, type CVERule, type CVERuleQuery } from "@/lib/api";
 import { getCVERuleStats, batchToggleCVERules, type CVERuleStats } from "@/lib/rules-api";
 
@@ -24,6 +24,27 @@ const severityColor: Record<string, string> = {
   medium: "bg-amber-100 text-amber-700 border-amber-200",
   low: "bg-sky-100 text-sky-700 border-sky-200",
 };
+
+const severityIcon: Record<string, React.ReactNode> = {
+  critical: <ShieldAlert className="h-3.5 w-3.5" />,
+  high: <AlertTriangle className="h-3.5 w-3.5" />,
+  medium: <Shield className="h-3.5 w-3.5" />,
+  low: <ShieldCheck className="h-3.5 w-3.5" />,
+};
+
+function StatCard({ label, value, icon, color }: { label: string; value: number; icon: React.ReactNode; color: string }) {
+  return (
+    <div className={`rounded-lg border bg-white p-5 shadow-sm`}>
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">{label}</p>
+          <p className="mt-1 text-2xl font-bold text-slate-900">{value}</p>
+        </div>
+        <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${color}`}>{icon}</div>
+      </div>
+    </div>
+  );
+}
 
 export default function CVERuleManagementPage() {
   const [items, setItems] = useState<CVERule[]>([]);
@@ -67,7 +88,15 @@ export default function CVERuleManagementPage() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   function toggleSelect(id: number) {
-    setSelected((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
+    setSelected((prev) => {
+      const s = new Set(prev);
+      if (s.has(id)) {
+        s.delete(id);
+      } else {
+        s.add(id);
+      }
+      return s;
+    });
   }
 
   function selectAll() {
@@ -85,8 +114,8 @@ export default function CVERuleManagementPage() {
     } catch (e) { toast.error(String(e)); }
   }
 
-  async function handleToggle(id: number) {
-    try { await toggleCVERule(id); load(); } catch (e) { toast.error(String(e)); }
+  async function handleToggle(rule: CVERule) {
+    try { await toggleCVERule(rule.id, !rule.enabled); load(); } catch (e) { toast.error(String(e)); }
   }
 
   async function saveEdit() {
@@ -104,40 +133,37 @@ export default function CVERuleManagementPage() {
       <PageIntro eyebrow="CVE Rule Management" title="CVE 规则管理" description="筛选、搜索、批量操作和编辑 CVE 漏洞检测规则。支持按分类、严重等级和启用状态过滤。" />
 
       {stats && (
-        <MetricGrid>
-          <MetricCard label="规则总数" value={stats.total} />
-          <MetricCard label="已启用" value={stats.enabled} tone="success" />
-          <MetricCard label="已禁用" value={stats.disabled} />
-          <MetricCard label="严重 (Critical)" value={stats.by_severity?.critical ?? 0} tone="danger" />
-        </MetricGrid>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard label="规则总数" value={stats.total} icon={<Shield className="h-5 w-5 text-cyan-600" />} color="bg-cyan-50" />
+          <StatCard label="已启用" value={stats.enabled} icon={<ShieldCheck className="h-5 w-5 text-emerald-600" />} color="bg-emerald-50" />
+          <StatCard label="Critical" value={stats.by_severity?.critical ?? 0} icon={<ShieldAlert className="h-5 w-5 text-rose-600" />} color="bg-rose-50" />
+          <StatCard label="High" value={stats.by_severity?.high ?? 0} icon={<AlertTriangle className="h-5 w-5 text-orange-600" />} color="bg-orange-50" />
+        </div>
       )}
 
       <Surface title="规则列表" description="管理所有 CVE 检测规则。" action={
-        selected.size > 0 && (
-          <div className="flex gap-2">
+        selected.size > 0 ? (
+          <div className="flex items-center gap-2">
             <span className="text-sm text-slate-500">已选 {selected.size} 条</span>
-            <Button size="sm" variant="outline" className="rounded-xl" onClick={() => batchToggle(true)}>批量启用</Button>
-            <Button size="sm" variant="outline" className="rounded-xl" onClick={() => batchToggle(false)}>批量禁用</Button>
+            <Button size="sm" variant="outline" className="rounded-md" onClick={() => batchToggle(true)}>批量启用</Button>
+            <Button size="sm" variant="outline" className="rounded-md" onClick={() => batchToggle(false)}>批量禁用</Button>
           </div>
-        )
+        ) : undefined
       }>
+        {/* 筛选栏 */}
         <div className="mb-4 flex flex-wrap gap-3">
-          <div className="relative flex-1 min-w-[200px]">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <Input placeholder="搜索 CVE 编号或描述..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="rounded-xl pl-9" />
-          </div>
           <Select value={category} onValueChange={(v) => { setCategory(v); setPage(1); }}>
-            <SelectTrigger className="w-[140px] rounded-xl"><SelectValue placeholder="分类" /></SelectTrigger>
+            <SelectTrigger className="w-[140px] rounded-md"><SelectValue placeholder="分类" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部分类</SelectItem>
               <SelectItem value="general">general</SelectItem>
               <SelectItem value="java">java</SelectItem>
-              <SelectItem value="php">php</SelectItem>
               <SelectItem value="node">node</SelectItem>
+              <SelectItem value="php">php</SelectItem>
             </SelectContent>
           </Select>
           <Select value={severity} onValueChange={(v) => { setSeverity(v); setPage(1); }}>
-            <SelectTrigger className="w-[140px] rounded-xl"><SelectValue placeholder="严重等级" /></SelectTrigger>
+            <SelectTrigger className="w-[140px] rounded-md"><SelectValue placeholder="严重等级" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部等级</SelectItem>
               <SelectItem value="critical">Critical</SelectItem>
@@ -147,30 +173,35 @@ export default function CVERuleManagementPage() {
             </SelectContent>
           </Select>
           <Select value={enabled} onValueChange={(v) => { setEnabled(v); setPage(1); }}>
-            <SelectTrigger className="w-[120px] rounded-xl"><SelectValue placeholder="状态" /></SelectTrigger>
+            <SelectTrigger className="w-[120px] rounded-md"><SelectValue placeholder="状态" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部状态</SelectItem>
               <SelectItem value="true">启用</SelectItem>
               <SelectItem value="false">禁用</SelectItem>
             </SelectContent>
           </Select>
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <Input placeholder="搜索 CVE 编号或描述..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="rounded-md pl-9" />
+          </div>
         </div>
 
         {loading ? (
-          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
+          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
         ) : items.length === 0 ? (
           <EmptyState title="暂无匹配规则" description="当前筛选条件下没有 CVE 规则。" />
         ) : (
           <div className="space-y-4">
-            <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
               <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-10"><Checkbox checked={selected.size === items.length && items.length > 0} onCheckedChange={selectAll} /></TableHead>
+                    <TableHead className="w-16">ID</TableHead>
+                    <TableHead>名称</TableHead>
                     <TableHead>CVE 编号</TableHead>
-                    <TableHead>分类</TableHead>
                     <TableHead>严重等级</TableHead>
-                    <TableHead>动作</TableHead>
+                    <TableHead>分类</TableHead>
                     <TableHead>启用</TableHead>
                     <TableHead className="text-right">操作</TableHead>
                   </TableRow>
@@ -179,16 +210,23 @@ export default function CVERuleManagementPage() {
                   {items.map((rule) => (
                     <TableRow key={rule.id}>
                       <TableCell><Checkbox checked={selected.has(rule.id)} onCheckedChange={() => toggleSelect(rule.id)} /></TableCell>
+                      <TableCell className="text-xs text-slate-400 font-mono">{rule.id}</TableCell>
                       <TableCell>
-                        <div className="font-medium text-slate-900">{rule.cve_id}</div>
-                        <div className="text-xs text-slate-500 max-w-[300px] truncate">{rule.description || "无描述"}</div>
+                        <div className="font-medium text-slate-900 max-w-[220px] truncate">{rule.description || "未命名"}</div>
                       </TableCell>
-                      <TableCell><Badge variant="outline" className="rounded-lg">{rule.category}</Badge></TableCell>
-                      <TableCell><Badge className={`rounded-lg border ${severityColor[rule.severity] ?? "bg-slate-100 text-slate-600"}`}>{rule.severity}</Badge></TableCell>
-                      <TableCell className="text-sm">{rule.action}</TableCell>
-                      <TableCell><Switch checked={rule.enabled} onCheckedChange={() => handleToggle(rule.id)} /></TableCell>
+                      <TableCell>
+                        <span className="font-mono text-sm text-slate-700">{rule.cve_id}</span>
+                      </TableCell>
+                      <TableCell>
+                        <Badge className={`rounded-md border gap-1 ${severityColor[rule.severity] ?? "bg-slate-100 text-slate-600 border-slate-200"}`}>
+                          {severityIcon[rule.severity]}
+                          {rule.severity}
+                        </Badge>
+                      </TableCell>
+                      <TableCell><Badge variant="outline" className="rounded-md">{rule.category}</Badge></TableCell>
+                      <TableCell><Switch checked={rule.enabled} onCheckedChange={() => handleToggle(rule)} /></TableCell>
                       <TableCell className="text-right">
-                        <Button size="sm" variant="ghost" className="rounded-xl" onClick={() => { setEditRule(rule); setEditForm({ enabled: rule.enabled, action: rule.action, severity: rule.severity }); }}>编辑</Button>
+                        <Button size="sm" variant="ghost" className="rounded-md" onClick={() => { setEditRule(rule); setEditForm({ enabled: rule.enabled, action: rule.action, severity: rule.severity }); }}>编辑</Button>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -200,21 +238,22 @@ export default function CVERuleManagementPage() {
         )}
       </Surface>
 
+      {/* 编辑 Dialog */}
       <Dialog open={!!editRule} onOpenChange={(o) => { if (!o) setEditRule(null); }}>
-        <DialogContent className="max-w-md rounded-[28px]">
+        <DialogContent className="max-w-md rounded-lg">
           <DialogHeader>
             <DialogTitle>编辑 CVE 规则</DialogTitle>
             <DialogDescription>{editRule?.cve_id} — {editRule?.description}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
               <span className="text-sm font-medium">启用状态</span>
               <Switch checked={editForm.enabled} onCheckedChange={(v) => setEditForm({ ...editForm, enabled: v })} />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">动作</label>
               <Select value={editForm.action} onValueChange={(v) => setEditForm({ ...editForm, action: v })}>
-                <SelectTrigger className="rounded-xl"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="intercept">拦截</SelectItem>
                   <SelectItem value="observe">观察</SelectItem>
@@ -225,7 +264,7 @@ export default function CVERuleManagementPage() {
             <div className="space-y-2">
               <label className="text-sm font-medium">严重等级</label>
               <Select value={editForm.severity} onValueChange={(v) => setEditForm({ ...editForm, severity: v })}>
-                <SelectTrigger className="rounded-xl"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="critical">Critical</SelectItem>
                   <SelectItem value="high">High</SelectItem>
@@ -236,8 +275,8 @@ export default function CVERuleManagementPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setEditRule(null)}>取消</Button>
-            <Button onClick={saveEdit}>保存</Button>
+            <Button variant="outline" className="rounded-md" onClick={() => setEditRule(null)}>取消</Button>
+            <Button onClick={saveEdit} className="rounded-md bg-cyan-600 hover:bg-cyan-700">保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

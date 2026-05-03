@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"net"
 	"strings"
 	"sync"
 )
@@ -39,7 +40,7 @@ func (t *HostTrie) Insert(host string, siteID uint) {
 		host = host[2:] // remove "*."
 	}
 
-	labels := reverseLabels(host)
+	labels := hostLabels(host)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -73,7 +74,7 @@ func (t *HostTrie) Match(host string) (uint, bool) {
 		return 0, false
 	}
 
-	labels := reverseLabels(host)
+	labels := hostLabels(host)
 
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -132,7 +133,7 @@ func (t *HostTrie) Remove(host string) {
 		host = host[2:]
 	}
 
-	labels := reverseLabels(host)
+	labels := hostLabels(host)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -183,9 +184,14 @@ func normalizeHost(host string) string {
 	return host
 }
 
-// reverseLabels splits a domain by "." and reverses the order.
-// "www.example.com" → ["com", "example", "www"]
-func reverseLabels(host string) []string {
+// hostLabels returns the labels to walk in the trie for a given host.
+// IP addresses (v4/v6) are stored as a single node to avoid incorrect
+// splitting (e.g. 127.0.0.1 must NOT become ["1","0","0","127"]).
+// Domain names are split by "." and reversed as before.
+func hostLabels(host string) []string {
+	if net.ParseIP(host) != nil {
+		return []string{host}
+	}
 	parts := strings.Split(host, ".")
 	n := len(parts)
 	reversed := make([]string, n)

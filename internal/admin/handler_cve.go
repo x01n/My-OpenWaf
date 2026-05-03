@@ -37,7 +37,13 @@ func ListCVERules(repo *repository.CVERuleRepo) app.HandlerFunc {
 	}
 }
 
-func CreateCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
+func reloadCVERules(feedMgr *waf.CVEFeedManager) {
+	if feedMgr != nil {
+		feedMgr.ReloadRules()
+	}
+}
+
+func CreateCVERule(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item waf.CVERuleModel
 		if err := c.BindJSON(&item); err != nil {
@@ -53,19 +59,20 @@ func CreateCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
 			}
 		}
 
-		// Mark as custom source
 		item.Source = "custom"
+		item.Approved = true
 		item.ID = 0
 
 		if err := repo.Create(&item); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		reloadCVERules(feedMgr)
 		c.JSON(201, item)
 	}
 }
 
-func UpdateCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
+func UpdateCVERule(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -116,16 +123,18 @@ func UpdateCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
 			existing.Description = req.Description
 		}
 		existing.Enabled = req.Enabled
+		existing.Approved = true
 
 		if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		reloadCVERules(feedMgr)
 		c.JSON(200, existing)
 	}
 }
 
-func DeleteCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
+func DeleteCVERule(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -149,11 +158,12 @@ func DeleteCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		reloadCVERules(feedMgr)
 		c.JSON(200, map[string]string{"message": "deleted"})
 	}
 }
 
-func ToggleCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
+func ToggleCVERule(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -161,19 +171,37 @@ func ToggleCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
 			return
 		}
 
-		var req struct {
-			Enabled bool `json:"enabled"`
-		}
-		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": err.Error()})
+		existing, err := repo.Get(id)
+		if err != nil {
+			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
 
-		if err := repo.Toggle(id, req.Enabled); err != nil {
+		var req struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if len(c.Request.Body()) > 0 {
+			if err := c.BindJSON(&req); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+
+		enabled := !existing.Enabled
+		if req.Enabled != nil {
+			enabled = *req.Enabled
+		}
+		existing.Enabled = enabled
+		if enabled {
+			existing.Approved = true
+		}
+
+		if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		c.JSON(200, map[string]any{"id": id, "enabled": req.Enabled})
+		reloadCVERules(feedMgr)
+		c.JSON(200, map[string]any{"id": id, "enabled": existing.Enabled, "approved": existing.Approved})
 	}
 }
 

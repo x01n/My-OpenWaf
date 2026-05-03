@@ -1,4 +1,4 @@
-﻿import { api, buildQuery, type CVERule, type PaginatedResponse } from "./api";
+﻿import { api, buildQuery } from "./api";
 
 /* -- OWASP Rule Types -- */
 
@@ -62,6 +62,16 @@ export interface CVERuleStats {
   by_category: Record<string, number>;
   enabled: number;
   disabled: number;
+}
+
+interface CVERuleStatsResponse {
+  total: number;
+  by_severity?: Record<string, number>;
+  by_category?: Record<string, number>;
+  enabled?: number;
+  disabled?: number;
+  enabled_count?: number;
+  disabled_count?: number;
 }
 
 /* -- OWASP Rule API -- */
@@ -137,28 +147,19 @@ export async function previewErrorPage(html: string, statusCode?: number): Promi
 /* -- CVE Rules Stats -- */
 
 export async function getCVERuleStats(): Promise<CVERuleStats> {
-  const res = await api<PaginatedResponse<CVERule>>("/api/v1/cve-rules?page_size=9999");
-  const items = res.items ?? [];
-  const bySev: Record<string, number> = {};
-  const byCat: Record<string, number> = {};
-  let enabled = 0;
-  let disabled = 0;
-  for (const r of items) {
-    bySev[r.severity] = (bySev[r.severity] ?? 0) + 1;
-    byCat[r.category] = (byCat[r.category] ?? 0) + 1;
-    if (r.enabled) enabled++;
-    else disabled++;
-  }
-  return { total: items.length, by_severity: bySev, by_category: byCat, enabled, disabled };
+  const stats = await api<CVERuleStatsResponse>("/api/v1/cve-rules/stats");
+  return {
+    total: stats.total,
+    by_severity: stats.by_severity ?? {},
+    by_category: stats.by_category ?? {},
+    enabled: stats.enabled ?? stats.enabled_count ?? 0,
+    disabled: stats.disabled ?? stats.disabled_count ?? 0,
+  };
 }
 
-export async function batchToggleCVERules(ids: number[], enabled: boolean): Promise<void> {
-  await Promise.all(
-    ids.map((id) =>
-      api(`/api/v1/cve-rules/${id}/update`, {
-        method: "POST",
-        body: JSON.stringify({ enabled }),
-      })
-    )
-  );
+export async function batchToggleCVERules(ids: number[], enabled: boolean): Promise<{ updated: number; total: number }> {
+  return api<{ updated: number; total: number }>("/api/v1/cve-rules/batch", {
+    method: "POST",
+    body: JSON.stringify({ ids, enabled }),
+  });
 }

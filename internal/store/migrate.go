@@ -19,6 +19,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&Policy{},
 		&Rule{},
 		&Site{},
+		&SiteListener{},
 		&SystemSettings{},
 		&AdminAPIKey{},
 		&ConfigRevision{},

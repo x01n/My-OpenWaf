@@ -8,6 +8,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf"
 )
 
 type chainSession struct {
@@ -27,20 +28,58 @@ type chainConfigResponse struct {
 	ChainSteps   json.RawMessage `json:"chain_steps"`
 }
 
+type chainStepPayload struct {
+	Type      waf.ChainStepType `json:"type"`
+	Condition string            `json:"condition,omitempty"`
+	Match     string            `json:"match,omitempty"`
+}
+
 func GetChainConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		cfg := loadProtectionConfig(repo)
-		var steps json.RawMessage
-		if cfg.ChainSteps != "" {
-			steps = json.RawMessage(cfg.ChainSteps)
-		} else {
-			steps = json.RawMessage("[]")
-		}
 		c.JSON(200, chainConfigResponse{
 			ChainEnabled: cfg.ChainEnabled,
-			ChainSteps:   steps,
+			ChainSteps:   normalizedChainStepsJSON(cfg.ChainSteps),
 		})
 	}
+}
+
+func normalizedChainStepsJSON(raw string) json.RawMessage {
+	if raw == "" {
+		return json.RawMessage("[]")
+	}
+	if steps, ok := normalizeChainStepPayload(json.RawMessage(raw)); ok && steps != "" {
+		return json.RawMessage(steps)
+	}
+	return json.RawMessage("[]")
+}
+
+func normalizeChainStepPayload(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", true
+	}
+	var payload []chainStepPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", false
+	}
+	steps := make([]waf.ChainStepConfig, 0, len(payload))
+	for _, step := range payload {
+		condition := step.Condition
+		if condition == "" {
+			condition = step.Match
+		}
+		switch step.Type {
+		case waf.ChainStepEnv, waf.ChainStepPoW, waf.ChainStepCaptcha:
+			steps = append(steps, waf.ChainStepConfig{Type: step.Type, Condition: condition})
+		default:
+			return "", false
+		}
+	}
+	data, err := json.Marshal(steps)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
 }
 
 func UpdateChainConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
@@ -56,8 +95,11 @@ func UpdateChainConfig(repo *repository.SystemSettingsRepo, reload func() error)
 
 		cfg := loadProtectionConfig(repo)
 		cfg.ChainEnabled = req.ChainEnabled
-		if len(req.ChainSteps) > 0 && string(req.ChainSteps) != "null" {
-			cfg.ChainSteps = string(req.ChainSteps)
+		if steps, ok := normalizeChainStepPayload(req.ChainSteps); !ok {
+			c.JSON(400, map[string]string{"error": "chain_steps contains unsupported step type"})
+			return
+		} else if steps != "" {
+			cfg.ChainSteps = steps
 		}
 
 		if err := saveProtectionConfig(repo, cfg); err != nil {
@@ -69,15 +111,9 @@ func UpdateChainConfig(repo *repository.SystemSettingsRepo, reload func() error)
 			return
 		}
 
-		var steps json.RawMessage
-		if cfg.ChainSteps != "" {
-			steps = json.RawMessage(cfg.ChainSteps)
-		} else {
-			steps = json.RawMessage("[]")
-		}
 		c.JSON(200, chainConfigResponse{
 			ChainEnabled: cfg.ChainEnabled,
-			ChainSteps:   steps,
+			ChainSteps:   normalizedChainStepsJSON(cfg.ChainSteps),
 		})
 	}
 }

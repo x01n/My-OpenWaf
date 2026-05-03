@@ -33,9 +33,17 @@ type MatchCtx struct {
 }
 
 func ctxFromPipeline(ctx *pipeline.RequestCtx) MatchCtx {
+	headers := ctx.Headers
+	if ctx.Host != "" {
+		headers = make(map[string]string, len(ctx.Headers)+1)
+		for k, v := range ctx.Headers {
+			headers[k] = v
+		}
+		headers["Host"] = ctx.Host
+	}
 	return MatchCtx{
 		ClientIP: ctx.ClientIP, Path: ctx.Path, Query: ctx.RawQuery,
-		Headers: ctx.Headers, Method: ctx.Method, Host: ctx.Host, Body: ctx.Body,
+		Headers: headers, Method: ctx.Method, Host: ctx.Host, Body: ctx.Body,
 	}
 }
 
@@ -301,9 +309,13 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		return action.Pass(), false
 	}
 
+	categorySensitivity := p.cfg.EffectiveCategorySensitivity()
+	_, fileUploadEnabled := waf.CategoryThreshold(p.cfg.OWASPSensitivity, waf.CatFileUpload, categorySensitivity)
+	_, protoEnabled := waf.CategoryThreshold(p.cfg.OWASPSensitivity, waf.CatProtoViol, categorySensitivity)
+
 	// Check file uploads in multipart form data.
 	ct := strings.ToLower(ctx.ContentType)
-	if strings.Contains(ct, "multipart/form-data") && len(ctx.Body) > 0 {
+	if fileUploadEnabled && strings.Contains(ct, "multipart/form-data") && len(ctx.Body) > 0 {
 		filenames, contentTypes := extractMultipartFilenames(ctx.Body, ctx.ContentType)
 		for i, fname := range filenames {
 			fct := ""
@@ -342,20 +354,22 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	bodyTargets := extractBodyTargets(ctx.Body, ctx.ContentType)
 
 	// Check HTTP method for unusual/dangerous methods before full OWASP scan.
-	if methodHit, ok := waf.CheckMethodViolation(ctx.Method, ctx.Headers); ok {
-		act := action.Type(p.cfg.OWASPAction)
-		result := action.Result{
-			Type:      act,
-			RuleIDStr: methodHit.RuleID,
-			Phase:     "owasp_default",
-			MatchDesc: methodHit.Desc,
-			Matched:   true,
-			Category:  string(methodHit.Category),
+	if protoEnabled {
+		if methodHit, ok := waf.CheckMethodViolation(ctx.Method, ctx.Headers); ok {
+			act := action.Type(p.cfg.OWASPAction)
+			result := action.Result{
+				Type:      act,
+				RuleIDStr: methodHit.RuleID,
+				Phase:     "owasp_default",
+				MatchDesc: methodHit.Desc,
+				Matched:   true,
+				Category:  string(methodHit.Category),
+			}
+			return result, result.IsTerminal()
 		}
-		return result, result.IsTerminal()
 	}
 
-	hits := waf.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets)
+	hits := waf.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, categorySensitivity)
 
 	// Apply per-rule overrides and path whitelists.
 	if len(hits) > 0 && p.cfg.OWASPRulesConfig != "" && p.cfg.OWASPRulesConfig != "{}" {
@@ -399,7 +413,7 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 
 	req := waf.BuildCVERequest(ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType)
-	matches := p.detector.Detect(req)
+	matches := p.detector.Detect(req, p.cfg.EffectiveCategorySensitivity())
 	if len(matches) == 0 {
 		return action.Pass(), false
 	}
@@ -415,12 +429,16 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 	act = action.Type(cveAction)
 
-	// Auto-escalate to Drop for critical/high severity CVEs.
+	// Auto-escalate to Drop for critical/high severity CVEs when enabled.
 	switch best.Severity {
 	case "critical":
-		act = action.Drop
+		if p.cfg.CVEAutoDropCritical {
+			act = action.Drop
+		}
 	case "high":
-		act = action.Drop
+		if p.cfg.CVEAutoDropHigh {
+			act = action.Drop
+		}
 	}
 
 	result := action.Result{

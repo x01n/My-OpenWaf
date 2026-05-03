@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useEffect, useState } from "react";
-import { FileWarning, Eye } from "lucide-react";
+import { FileWarning, Eye, Save, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,17 +11,24 @@ import { PageIntro, Surface, EmptyState } from "@/components/console-shell";
 import { listSites, type Site } from "@/lib/api";
 import {
   getDefaultErrorPages, getSiteErrorPages, updateSiteErrorPages, previewErrorPage,
-  type ErrorPageConfig, type DefaultErrorPagesResponse,
+  type ErrorPageConfig,
 } from "@/lib/rules-api";
 
-const statusCodes = ["403", "404", "429", "500", "502", "503"] as const;
+const statusCodes = ["403", "429", "502", "503", "504"] as const;
 const statusLabels: Record<string, string> = {
   "403": "403 Forbidden",
-  "404": "404 Not Found",
   "429": "429 Too Many Requests",
-  "500": "500 Internal Error",
   "502": "502 Bad Gateway",
-  "503": "503 Unavailable",
+  "503": "503 Service Unavailable",
+  "504": "504 Gateway Timeout",
+};
+
+const statusColors: Record<string, string> = {
+  "403": "border-rose-200 bg-rose-50 text-rose-700",
+  "429": "border-amber-200 bg-amber-50 text-amber-700",
+  "502": "border-orange-200 bg-orange-50 text-orange-700",
+  "503": "border-purple-200 bg-purple-50 text-purple-700",
+  "504": "border-slate-200 bg-slate-50 text-slate-700",
 };
 
 export default function ErrorPagesPage() {
@@ -44,6 +51,7 @@ export default function ErrorPagesPage() {
 
   useEffect(() => {
     if (!selectedSite) return;
+    setPreviewHtml("");
     getSiteErrorPages(Number(selectedSite))
       .then((res) => setSitePages(res.error_pages ?? {}))
       .catch(() => setSitePages({}));
@@ -71,8 +79,11 @@ export default function ErrorPagesPage() {
     try {
       await updateSiteErrorPages(Number(selectedSite), sitePages);
       toast.success("错误页面已保存");
-    } catch (e) { toast.error(String(e)); }
-    finally { setSaving(false); }
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handlePreview() {
@@ -83,38 +94,78 @@ export default function ErrorPagesPage() {
       setPreviewHtml(res.rendered);
       if (res.parse_error) toast.warning("模板解析警告: " + res.parse_error);
       if (res.execute_error) toast.warning("模板执行警告: " + res.execute_error);
-    } catch (e) { toast.error(String(e)); }
+    } catch (e) {
+      toast.error(String(e));
+    }
   }
 
   return (
     <div className="space-y-6">
-      <PageIntro eyebrow="Error Pages" title="错误页面管理" description="管理默认和站点级自定义错误页面，支持 HTML 编辑和实时预览。" />
+      <PageIntro
+        eyebrow="Error Pages"
+        title="错误页面管理"
+        description="管理系统默认和站点自定义的错误页面模板，支持 Go Template 变量和实时预览。"
+      />
 
-      <Surface title="默认错误页面模板" description="系统内置的默认错误页面，当站点未自定义时使用。">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {Object.entries(defaults).map(([code, cfg]) => (
-            <div key={code} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-2 flex items-center gap-2">
-                <FileWarning className="h-4 w-4 text-amber-600" />
-                <span className="text-sm font-semibold text-slate-900">{cfg.status_code} {cfg.title}</span>
+      {/* 默认模板 */}
+      <Surface title="默认错误页面模板" description="系统内置模板，当站点未自定义时使用。">
+        {Object.keys(defaults).length === 0 ? (
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
+            {statusCodes.map((code) => (
+              <div key={code} className={`rounded-2xl border p-4 ${statusColors[code] ?? "border-slate-200 bg-slate-50"}`}>
+                <div className="mb-2 flex items-center gap-2">
+                  <FileWarning className="h-4 w-4" />
+                  <span className="text-sm font-semibold">{statusLabels[code]}</span>
+                </div>
+                <div className="text-xs opacity-60">默认模板</div>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-white p-3 text-xs font-mono text-slate-600 max-h-[120px] overflow-y-auto">{cfg.html?.slice(0, 300)}{(cfg.html?.length ?? 0) > 300 ? "..." : ""}</div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
+            {statusCodes.map((code) => {
+              const cfg = defaults[code];
+              return (
+                <div key={code} className={`rounded-2xl border p-4 ${statusColors[code] ?? "border-slate-200 bg-slate-50"}`}>
+                  <div className="mb-2 flex items-center gap-2">
+                    <FileWarning className="h-4 w-4" />
+                    <span className="text-sm font-semibold">{cfg?.title ?? statusLabels[code]}</span>
+                  </div>
+                  <div className="rounded-xl border border-white/50 bg-white/60 p-2 text-xs font-mono max-h-[100px] overflow-y-auto">
+                    {cfg?.html?.slice(0, 200) ?? "无模板"}{(cfg?.html?.length ?? 0) > 200 ? "..." : ""}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </Surface>
 
-      <Surface title="站点自定义错误页面" description="选择站点后为每个状态码编辑自定义 HTML。" action={
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={handlePreview} className="rounded-xl"><Eye className="mr-2 h-4 w-4" />预览</Button>
-          <Button onClick={handleSave} disabled={saving || !selectedSite}>{saving ? "保存中..." : "保存"}</Button>
-        </div>
-      }>
+      {/* 站点自定义编辑 */}
+      <Surface
+        title="站点自定义错误页面"
+        description="选择站点后为各状态码编辑自定义 HTML，支持 Go template 变量。"
+        action={
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handlePreview} className="rounded-xl gap-2">
+              <Eye className="h-4 w-4" />预览
+            </Button>
+            <Button onClick={handleSave} disabled={saving || !selectedSite} className="gap-2">
+              <Save className="h-4 w-4" />
+              {saving ? "保存中..." : "保存"}
+            </Button>
+          </div>
+        }
+      >
         <div className="mb-4">
           <Select value={selectedSite} onValueChange={setSelectedSite}>
-            <SelectTrigger className="w-[300px] rounded-xl"><SelectValue placeholder="选择站点..." /></SelectTrigger>
+            <SelectTrigger className="w-[300px] rounded-xl">
+              <SelectValue placeholder="选择站点..." />
+            </SelectTrigger>
             <SelectContent>
-              {sites.map((s) => <SelectItem key={s.id} value={String(s.id)}>{s.host} (ID: {s.id})</SelectItem>)}
+              {sites.map((s) => (
+                <SelectItem key={s.id} value={String(s.id)}>{s.host} (ID: {s.id})</SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -122,9 +173,11 @@ export default function ErrorPagesPage() {
         {!selectedSite ? (
           <EmptyState title="请先选择站点" description="选择一个站点以编辑其自定义错误页面。" />
         ) : (
-          <Tabs value={activeCode} onValueChange={setActiveCode}>
+          <Tabs value={activeCode} onValueChange={(v) => { setActiveCode(v); setPreviewHtml(""); }}>
             <TabsList className="mb-4">
-              {statusCodes.map((code) => <TabsTrigger key={code} value={code}>{code}</TabsTrigger>)}
+              {statusCodes.map((code) => (
+                <TabsTrigger key={code} value={code}>{code}</TabsTrigger>
+              ))}
             </TabsList>
 
             {statusCodes.map((code) => (
@@ -135,19 +188,27 @@ export default function ErrorPagesPage() {
                     <Textarea
                       value={code === activeCode ? getCurrentHtml() : ""}
                       onChange={(e) => setCurrentHtml(e.target.value)}
-                      rows={16}
+                      rows={18}
                       className="rounded-xl font-mono text-xs"
                       placeholder={`输入 ${code} 错误页面的 HTML 内容...`}
                     />
-                    <p className="text-xs text-slate-400">支持 Go template 变量：{"{{.StatusCode}}"} {"{{.Message}}"} {"{{.ClientIP}}"} {"{{.RequestID}}"}</p>
+                    <div className="flex items-start gap-2 rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs text-cyan-800">
+                      <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                      <span>支持 Go template 变量：{"{{.StatusCode}}"} {"{{.Message}}"} {"{{.ClientIP}}"} {"{{.RequestID}}"}</span>
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-slate-700">实时预览</label>
-                    <div className="rounded-xl border border-slate-200 bg-white min-h-[350px] overflow-hidden">
+                    <div className="rounded-xl border border-slate-200 bg-white min-h-[400px] overflow-hidden">
                       {previewHtml ? (
-                        <iframe srcDoc={previewHtml} className="h-[350px] w-full border-0" sandbox="allow-same-origin" title="错误页面预览" />
+                        <iframe srcDoc={previewHtml} className="h-[400px] w-full border-0" sandbox="allow-same-origin" title="错误页面预览" />
                       ) : (
-                        <div className="flex h-[350px] items-center justify-center text-sm text-slate-400">点击"预览"按钮查看渲染效果</div>
+                        <div className="flex h-[400px] items-center justify-center text-sm text-slate-400">
+                          <div className="text-center space-y-2">
+                            <Eye className="h-8 w-8 mx-auto text-slate-300" />
+                            <p>点击「预览」按钮查看渲染效果</p>
+                          </div>
+                        </div>
                       )}
                     </div>
                   </div>

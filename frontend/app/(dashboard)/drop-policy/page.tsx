@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Ban, Bot, Bug, Globe } from "lucide-react";
+import { Save, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Pagination } from "@/components/pagination";
-import { EmptyState, InlineMeta, PageIntro, Surface, statusToneClass } from "@/components/console-shell";
+import { EmptyState, InlineMeta, MetricCard, MetricGrid, PageIntro, Surface, statusToneClass } from "@/components/console-shell";
 import { getDropEvents, getDropPolicy, getDropStats, updateDropPolicy, type DropEvent, type DropPolicy, type DropStats } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 
@@ -65,28 +67,85 @@ export default function DropPolicyPage() {
       <PageIntro
         eyebrow="Connection Drop"
         title="阻断策略"
-        description="控制主动断连策略，并查看最近 24 小时的阻断来源分布与事件列表。"
-        actions={<Button onClick={save} disabled={saving}>{saving ? "保存中..." : "保存配置"}</Button>}
+        description="控制主动断连策略——当 Bot 评分或 CVE 检测触发时自动阻断恶意连接，查看最近的阻断事件。"
+        actions={
+          <Button onClick={save} disabled={saving} className="gap-2">
+            <Save className="h-4 w-4" />
+            {saving ? "保存中..." : "保存配置"}
+          </Button>
+        }
       />
 
+      {/* 统计区域 */}
+      {stats && (
+        <MetricGrid>
+          <MetricCard label="24h 总阻断" value={stats.total_24h.toLocaleString()} tone={stats.total_24h > 0 ? "danger" : "default"} />
+          <MetricCard label="Bot 阻断" value={stats.by_bot.toLocaleString()} hint="来自 Bot 检测引擎" />
+          <MetricCard label="CVE 阻断" value={stats.by_cve.toLocaleString()} hint="来自 CVE 漏洞检测" />
+          <MetricCard label="规则 + IP 信誉" value={(stats.by_rule + stats.by_ip_reputation).toLocaleString()} hint={`规则: ${stats.by_rule} / IP信誉: ${stats.by_ip_reputation}`} />
+        </MetricGrid>
+      )}
+
+      {/* 策略配置 */}
       {policy ? (
-        <div className="grid gap-6 xl:grid-cols-[1fr_1.1fr]">
-          <Surface title="策略配置" description="直接映射 /api/v1/drop-policy/update。">
-            <div className="grid gap-4">
-              <ToggleRow label="启用全局阻断策略" checked={policy.enabled} onChange={(value) => setPolicy({ ...policy, enabled: value })} />
-              <NumberRow label="Bot 自动阻断阈值" value={policy.bot_score_threshold} onChange={(value) => setPolicy({ ...policy, bot_score_threshold: value })} />
-              <ToggleRow label="Critical CVE 自动断连" checked={policy.cve_auto_drop_critical} onChange={(value) => setPolicy({ ...policy, cve_auto_drop_critical: value })} />
-              <ToggleRow label="High CVE 自动断连" checked={policy.cve_auto_drop_high} onChange={(value) => setPolicy({ ...policy, cve_auto_drop_high: value })} />
+        <div className="grid gap-6 xl:grid-cols-2">
+          <Surface title="策略配置" description="调整自动阻断策略的触发条件。">
+            <div className="grid gap-5">
+              <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-900">启用全局阻断策略</div>
+                  <div className="text-xs text-slate-500">开启后根据评分和规则自动阻断恶意连接</div>
+                </div>
+                <Switch checked={policy.enabled} onCheckedChange={(v) => setPolicy({ ...policy, enabled: v })} />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-700">Bot 自动阻断阈值</label>
+                <Input
+                  type="number"
+                  value={policy.bot_score_threshold}
+                  onChange={(e) => setPolicy({ ...policy, bot_score_threshold: Number(e.target.value) })}
+                  className="rounded-xl"
+                />
+                <p className="text-xs text-slate-400">Bot 评分 ≥ 此阈值时自动断开连接</p>
+              </div>
+
+              <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-900">Critical CVE 自动断连</div>
+                  <div className="text-xs text-slate-500">检测到 Critical 级别 CVE 攻击时自动阻断</div>
+                </div>
+                <Switch checked={policy.cve_auto_drop_critical} onCheckedChange={(v) => setPolicy({ ...policy, cve_auto_drop_critical: v })} />
+              </div>
+
+              <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-900">High CVE 自动断连</div>
+                  <div className="text-xs text-slate-500">检测到 High 级别 CVE 攻击时自动阻断</div>
+                </div>
+                <Switch checked={policy.cve_auto_drop_high} onCheckedChange={(v) => setPolicy({ ...policy, cve_auto_drop_high: v })} />
+              </div>
             </div>
           </Surface>
 
-          <Surface title="24 小时阻断汇总" description="来自 /api/v1/drop-stats。">
+          <Surface title="策略状态" description="当前阻断策略各项开关的运行状态。">
             <div className="grid gap-3 md:grid-cols-2">
-              <InlineMeta label="总阻断数" value={stats ? stats.total_24h.toLocaleString() : "--"} />
-              <InlineMeta label="Bot" value={stats ? stats.by_bot.toLocaleString() : "--"} />
-              <InlineMeta label="CVE" value={stats ? stats.by_cve.toLocaleString() : "--"} />
-              <InlineMeta label="规则" value={stats ? stats.by_rule.toLocaleString() : "--"} />
-              <InlineMeta label="IP 信誉" value={stats ? stats.by_ip_reputation.toLocaleString() : "--"} />
+              <InlineMeta label="全局策略" value={
+                <span className={policy.enabled ? "text-emerald-600" : "text-slate-400"}>
+                  {policy.enabled ? "● 已启用" : "○ 已关闭"}
+                </span>
+              } />
+              <InlineMeta label="Bot 阈值" value={String(policy.bot_score_threshold)} />
+              <InlineMeta label="Critical CVE" value={
+                <span className={policy.cve_auto_drop_critical ? "text-emerald-600" : "text-slate-400"}>
+                  {policy.cve_auto_drop_critical ? "● 自动断连" : "○ 关闭"}
+                </span>
+              } />
+              <InlineMeta label="High CVE" value={
+                <span className={policy.cve_auto_drop_high ? "text-emerald-600" : "text-slate-400"}>
+                  {policy.cve_auto_drop_high ? "● 自动断连" : "○ 关闭"}
+                </span>
+              } />
             </div>
           </Surface>
         </div>
@@ -94,17 +153,24 @@ export default function DropPolicyPage() {
         <Surface className="min-h-[280px] animate-pulse"><div className="h-full" /></Surface>
       )}
 
-      <Surface title="阻断事件" description="按客户端 IP 和来源过滤最新主动断连记录。">
-        <div className="mb-4 grid gap-3 md:grid-cols-3">
-          <Input value={ip} onChange={(event) => { setIP(event.target.value); setPage(1); }} placeholder="按客户端 IP 筛选" className="rounded-xl" />
-          <select value={source} onChange={(event) => { setSource(event.target.value); setPage(1); }} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900">
+      {/* 阻断事件表格 */}
+      <Surface title="阻断事件" description="最近的主动断连记录。">
+        <div className="mb-4 flex flex-wrap gap-3">
+          <Input value={ip} onChange={(e) => { setIP(e.target.value); setPage(1); }} placeholder="按客户端 IP 筛选" className="w-48 rounded-xl" />
+          <select
+            value={source}
+            onChange={(e) => { setSource(e.target.value); setPage(1); }}
+            className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900"
+          >
             <option value="all">全部来源</option>
             <option value="bot">Bot</option>
             <option value="cve">CVE</option>
             <option value="rule">规则</option>
             <option value="ip_reputation">IP 信誉</option>
           </select>
-          <Button variant="outline" className="rounded-xl" onClick={() => { setIP(""); setSource("all"); setPage(1); }}>重置筛选</Button>
+          <Button variant="outline" className="rounded-xl" onClick={() => { setIP(""); setSource("all"); setPage(1); }}>
+            <RotateCcw className="mr-2 h-4 w-4" />重置
+          </Button>
         </div>
 
         {loading ? (
@@ -113,48 +179,40 @@ export default function DropPolicyPage() {
           <EmptyState title="暂无阻断事件" description="没有符合筛选条件的主动断连事件。" />
         ) : (
           <div className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {events.map((item) => (
-                <div key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-sm font-medium text-slate-900">
-                      <Ban className="h-4 w-4 text-rose-700" />
-                      {item.client_ip}
-                    </div>
-                    <span className={`console-badge ${statusToneClass(item.source)}`}>{item.source}</span>
-                  </div>
-                  <div className="space-y-2 text-sm text-slate-600">
-                    <div className="flex items-center gap-2"><Globe className="h-4 w-4 text-slate-400" /> {item.host || "-"}</div>
-                    <div className="flex items-center gap-2"><Bot className="h-4 w-4 text-slate-400" /> 规则 {item.rule_id || "-"}</div>
-                    <div className="flex items-center gap-2"><Bug className="h-4 w-4 text-slate-400" /> {item.detail}</div>
-                    <div className="font-mono text-xs text-slate-500">{item.path}</div>
-                    <div className="text-xs text-slate-500">{formatDate(item.created_at)}</div>
-                  </div>
-                </div>
-              ))}
+            <div className="overflow-hidden rounded-[20px] border border-slate-200">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                    <TableHead>时间</TableHead>
+                    <TableHead>客户端 IP</TableHead>
+                    <TableHead>Host</TableHead>
+                    <TableHead>路径</TableHead>
+                    <TableHead>来源</TableHead>
+                    <TableHead>规则 ID</TableHead>
+                    <TableHead>详情</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {events.map((item) => (
+                    <TableRow key={item.id} className="hover:bg-slate-50">
+                      <TableCell className="text-xs text-slate-500 whitespace-nowrap">{formatDate(item.created_at)}</TableCell>
+                      <TableCell className="font-mono text-xs">{item.client_ip}</TableCell>
+                      <TableCell className="text-sm text-slate-600">{item.host || "-"}</TableCell>
+                      <TableCell className="max-w-[200px] truncate font-mono text-xs text-slate-500">{item.path}</TableCell>
+                      <TableCell>
+                        <span className={`console-badge ${statusToneClass(item.source)}`}>{item.source}</span>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-slate-500">{item.rule_id || "-"}</TableCell>
+                      <TableCell className="max-w-[200px] truncate text-xs text-slate-500">{item.detail || "-"}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             </div>
             <Pagination page={page} totalPages={totalPages} total={total} pageSize={PAGE_SIZE} onPageChange={setPage} />
           </div>
         )}
       </Surface>
     </div>
-  );
-}
-
-function ToggleRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
-  return (
-    <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-      <span className="text-sm font-medium text-slate-900">{label}</span>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4" />
-    </div>
-  );
-}
-
-function NumberRow({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
-  return (
-    <label className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
-      <span className="font-medium text-slate-900">{label}</span>
-      <input type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-900" />
-    </label>
   );
 }

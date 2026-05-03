@@ -84,7 +84,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	readGroup := api.Group("")
 	readGroup.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator, auth.RoleReadonly))
 	{
-		readGroup.GET("/sites", ListSites(r.Site))
+		readGroup.GET("/sites", ListSites(r.Site, r.SiteListener))
 		readGroup.GET("/sites/:id", GetSite(r.Site))
 		readGroup.GET("/sites/:id/status", GetSiteStatus(r.Site))
 		readGroup.GET("/sites/:id/listeners", ListSiteListeners(r.Site, r.SiteListener))
@@ -174,8 +174,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites", CreateSite(r.Site, reload))
 		opsGroup.POST("/sites/:id/update", UpdateSite(r.Site, reload))
 		opsGroup.POST("/sites/:id/delete", DeleteSite(r.Site, reload))
-		opsGroup.POST("/sites/:id/start", StartSite(r.Site))
-		opsGroup.POST("/sites/:id/stop", StopSite(r.Site))
+		opsGroup.POST("/sites/:id/start", StartSite(r.Site, reload))
+		opsGroup.POST("/sites/:id/stop", StopSite(r.Site, reload))
 		opsGroup.POST("/sites/:id/listeners", CreateSiteListener(r.Site, r.SiteListener, reload))
 		opsGroup.POST("/sites/:id/listeners/:lid/update", UpdateSiteListener(r.Site, r.SiteListener, reload))
 		opsGroup.POST("/sites/:id/listeners/:lid/delete", DeleteSiteListener(r.Site, r.SiteListener, reload))
@@ -212,10 +212,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		// Bot settings (operator can update)
 		opsGroup.POST("/bot-settings/update", UpdateBotSettings(r.SystemSettings, reload))
 
-		// CVE rules (operator can toggle/sync)
-		opsGroup.POST("/cve-rules/:id/toggle", ToggleCVERule(r.CVERule))
-		opsGroup.POST("/cve-rules/:id/update", UpdateSingleCVERule(r.CVERule))
-		opsGroup.POST("/cve-rules/batch", BatchUpdateCVERules(r.CVERule))
+		// CVE rules (operator can toggle/patch/sync)
+		opsGroup.POST("/cve-rules/:id/toggle", ToggleCVERule(r.CVERule, deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/:id/patch", UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/batch", BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr))
 		opsGroup.POST("/cve-rules/sync", SyncCVERules(deps.CVEFeedMgr))
 
 		// OWASP rules (operator can update)
@@ -260,9 +260,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/drop-policy/update", UpdateDropPolicy(r.SystemSettings, reload))
 
 		// CVE rules CRUD (admin only)
-		adminGroup.POST("/cve-rules", CreateCVERule(r.CVERule))
-		adminGroup.POST("/cve-rules/:id/update", UpdateCVERule(r.CVERule))
-		adminGroup.POST("/cve-rules/:id/delete", DeleteCVERule(r.CVERule))
+		adminGroup.POST("/cve-rules", CreateCVERule(r.CVERule, deps.CVEFeedMgr))
+		adminGroup.POST("/cve-rules/:id/update", UpdateCVERule(r.CVERule, deps.CVEFeedMgr))
+		adminGroup.POST("/cve-rules/:id/delete", DeleteCVERule(r.CVERule, deps.CVEFeedMgr))
 	}
 
 	// Frontend static files (SPA fallback)

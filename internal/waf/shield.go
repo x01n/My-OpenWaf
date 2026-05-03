@@ -49,6 +49,25 @@ func NewShieldManager(captcha *CaptchaManager, redis *goredis.Client, difficulty
 	return sm
 }
 
+func (sm *ShieldManager) SetDifficulty(difficulty int) {
+	if difficulty <= 0 {
+		difficulty = 4
+	}
+	sm.mu.Lock()
+	sm.difficulty = difficulty
+	sm.mu.Unlock()
+}
+
+func (sm *ShieldManager) difficultyValue() int {
+	sm.mu.RLock()
+	difficulty := sm.difficulty
+	sm.mu.RUnlock()
+	if difficulty <= 0 {
+		return 4
+	}
+	return difficulty
+}
+
 // GenerateChallenge creates a new shield challenge session.
 func (sm *ShieldManager) GenerateChallenge(originalURL string) (*ShieldSession, *CaptchaChallenge, error) {
 	captchaChallenge, err := sm.captcha.Generate(CaptchaTypeMath)
@@ -60,7 +79,7 @@ func (sm *ShieldManager) GenerateChallenge(originalURL string) (*ShieldSession, 
 	session := &ShieldSession{
 		ID:          sessionID,
 		Nonce:       nonce,
-		Difficulty:  sm.difficulty,
+		Difficulty:  sm.difficultyValue(),
 		CaptchaID:   captchaChallenge.SessionID,
 		OriginalURL: originalURL,
 		CreatedAt:   time.Now(),

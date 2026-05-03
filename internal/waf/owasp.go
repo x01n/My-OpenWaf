@@ -49,46 +49,60 @@ type OWASPHit struct {
 // CheckOWASP scans request fields for OWASP-oriented attacks.
 // bodyTargets are pre-extracted values from the request body (form values, JSON leaves).
 // The path parameter is also used for context: internal API paths get reduced scanning.
-func CheckOWASP(sensitivity string, path, query string, headers map[string]string, bodyTargets []string) []OWASPHit {
-	threshold := sensitivityThreshold(sensitivity)
+func CheckOWASP(sensitivity string, path, query string, headers map[string]string, bodyTargets []string, categorySensitivity ...map[string]string) []OWASPHit {
+	categoryThreshold := func(category OWASPCategory) (int, bool) {
+		return CategoryThreshold(sensitivity, category, categorySensitivity...)
+	}
+
+	sqliThreshold, sqliEnabled := categoryThreshold(CatSQLi)
+	xssThreshold, xssEnabled := categoryThreshold(CatXSS)
+	cmdThreshold, cmdEnabled := categoryThreshold(CatCmdInject)
+	webshellThreshold, webshellEnabled := categoryThreshold(CatWebshell)
+	revShellThreshold, revShellEnabled := categoryThreshold(CatRevShell)
+	pathTravThreshold, pathTravEnabled := categoryThreshold(CatPathTrav)
+	ssrfThreshold, ssrfEnabled := categoryThreshold(CatSSRF)
+	xxeThreshold, xxeEnabled := categoryThreshold(CatXXE)
+	ldapThreshold, ldapEnabled := categoryThreshold(CatLDAPI)
+	nosqliThreshold, nosqliEnabled := categoryThreshold(CatNoSQLi)
+	templateThreshold, templateEnabled := categoryThreshold(CatTmplInject)
+	jndiThreshold, jndiEnabled := categoryThreshold(CatJNDI)
+	crlfThreshold, crlfEnabled := categoryThreshold(CatCRLF)
+	exprLangThreshold, exprLangEnabled := categoryThreshold(CatExprLang)
+	deserialThreshold, deserialEnabled := categoryThreshold(CatDeserial)
+	graphqlThreshold, graphqlEnabled := categoryThreshold(CatGraphQLi)
+	protoThreshold, protoEnabled := categoryThreshold(CatProtoViol)
+	_, fileUploadEnabled := categoryThreshold(CatFileUpload)
+
 	var hits []OWASPHit
 
-	if strings.ContainsAny(path, "\r\n") || strings.Contains(strings.ToLower(path), "%0d") || strings.Contains(strings.ToLower(path), "%0a") {
+	lowerPath := strings.ToLower(path)
+	if crlfEnabled && (strings.ContainsAny(path, "\r\n") || strings.Contains(lowerPath, "%0d") || strings.Contains(lowerPath, "%0a")) {
 		return []OWASPHit{{Category: CatCRLF, RuleID: "owasp:crlf:005", Score: 5, Desc: "bare CR/LF in URL path"}}
 	}
-	if strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") {
+	if protoEnabled && strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") {
 		for _, raw := range bodyTargets {
 			if raw == "" {
 				continue
 			}
 			normalized := normalizeWithDecode(raw)
-			if isOpaqueEncodedAttackBody(raw, normalized, headers, threshold) {
+			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
 				return []OWASPHit{{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}}
 			}
 		}
 	}
-	if strings.Contains(strings.ToLower(path), "/translation-table") && (strings.Contains(strings.ToLower(path), "+cscot+") || strings.Contains(strings.ToLower(path), "+cscoe+")) {
+	if pathTravEnabled && strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+")) {
 		return []OWASPHit{{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5, Desc: "Cisco translation-table path traversal pattern"}}
 	}
-	if strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") {
+
+	if protoEnabled {
 		for _, raw := range bodyTargets {
 			if raw == "" {
 				continue
 			}
 			normalized := normalizeWithDecode(raw)
-			if isOpaqueEncodedAttackBody(raw, normalized, headers, threshold) {
+			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
 				return []OWASPHit{{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}}
 			}
-		}
-	}
-
-	for _, raw := range bodyTargets {
-		if raw == "" {
-			continue
-		}
-		normalized := normalizeWithDecode(raw)
-		if isOpaqueEncodedAttackBody(raw, normalized, headers, threshold) {
-			return []OWASPHit{{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}}
 		}
 	}
 
@@ -108,20 +122,20 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 			normalized = normalized[:maxTargetLen] + " " + tail
 		}
 
-		if strings.Contains(raw, "%ac%ed") || strings.Contains(raw, "%AC%ED") ||
-			strings.Contains(raw, "aced0005") || strings.Contains(raw, "ACED0005") {
+		if deserialEnabled && (strings.Contains(raw, "%ac%ed") || strings.Contains(raw, "%AC%ED") ||
+			strings.Contains(raw, "aced0005") || strings.Contains(raw, "ACED0005")) {
 			return []OWASPHit{{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java serialization magic bytes (URL-encoded)"}}
 		}
 
-		if strings.Contains(raw, "%0d") || strings.Contains(raw, "%0D") ||
+		if crlfEnabled && (strings.Contains(raw, "%0d") || strings.Contains(raw, "%0D") ||
 			strings.Contains(raw, "%0a") || strings.Contains(raw, "%0A") ||
-			strings.ContainsAny(raw, "\r\n") {
+			strings.ContainsAny(raw, "\r\n")) {
 			urlDec := raw
 			if d, err := url.PathUnescape(raw); err == nil {
 				urlDec = d
 			}
 			lower := strings.ToLower(urlDec)
-			if hit, ok := checkCRLF(lower, threshold); ok {
+			if hit, ok := checkCRLF(lower, crlfThreshold); ok {
 				if !isCRLFFalsePositive(lower, hit.RuleID) {
 					return []OWASPHit{hit}
 				}
@@ -131,69 +145,101 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		if !hasSuspiciousContent(normalized) {
 			continue
 		}
-		if hit, ok := nextSQLiHit(normalized, threshold); ok {
-			return []OWASPHit{hit}
-		}
-		if hit, ok := nextXSSHit(normalized, threshold); ok {
-			return []OWASPHit{hit}
-		}
-		if hit, ok := checkCmdInjection(normalized, threshold); ok {
-			if !isCmdInjectionFalsePositive(normalized, hit.RuleID) {
+		if sqliEnabled {
+			if hit, ok := nextSQLiHit(normalized, sqliThreshold); ok {
 				return []OWASPHit{hit}
 			}
 		}
-		if hit, ok := checkWebshell(normalized, threshold); ok {
-			if !isWebshellFalsePositive(normalized, hit.RuleID) {
+		if xssEnabled {
+			if hit, ok := nextXSSHit(normalized, xssThreshold); ok {
 				return []OWASPHit{hit}
 			}
 		}
-		if hit, ok := checkRevShell(normalized, threshold); ok {
-			return []OWASPHit{hit}
+		if cmdEnabled {
+			if hit, ok := checkCmdInjection(normalized, cmdThreshold); ok {
+				if !isCmdInjectionFalsePositive(normalized, hit.RuleID) {
+					return []OWASPHit{hit}
+				}
+			}
 		}
-		if hit, ok := checkPathTraversal(normalized, threshold); ok {
-			if threshold <= 2 || !isPathTravFalsePositive(normalized, hit.RuleID) {
+		if webshellEnabled {
+			if hit, ok := checkWebshell(normalized, webshellThreshold); ok {
+				if !isWebshellFalsePositive(normalized, hit.RuleID) {
+					return []OWASPHit{hit}
+				}
+			}
+		}
+		if revShellEnabled {
+			if hit, ok := checkRevShell(normalized, revShellThreshold); ok {
 				return []OWASPHit{hit}
 			}
 		}
-		if hit, ok := checkSSRF(normalized, threshold); ok {
-			if !isSSRFFalsePositive(normalized, hit.RuleID) {
+		if pathTravEnabled {
+			if hit, ok := checkPathTraversal(normalized, pathTravThreshold); ok {
+				if pathTravThreshold <= 2 || !isPathTravFalsePositive(normalized, hit.RuleID) {
+					return []OWASPHit{hit}
+				}
+			}
+		}
+		if ssrfEnabled {
+			if hit, ok := checkSSRF(normalized, ssrfThreshold); ok {
+				if !isSSRFFalsePositive(normalized, hit.RuleID) {
+					hits = append(hits, hit)
+				}
+			}
+		}
+		if xxeEnabled {
+			if hit, ok := checkXXE(normalized, xxeThreshold); ok {
+				return []OWASPHit{hit}
+			}
+		}
+		if ldapEnabled {
+			if hit, ok := checkLDAPInjection(normalized, ldapThreshold); ok {
 				hits = append(hits, hit)
 			}
 		}
-		if hit, ok := checkXXE(normalized, threshold); ok {
-			return []OWASPHit{hit}
-		}
-		if hit, ok := checkLDAPInjection(normalized, threshold); ok {
-			hits = append(hits, hit)
-		}
-		if hit, ok := checkNoSQLi(normalized, threshold); ok {
-			if !isNoSQLiFalsePositive(normalized, hit.RuleID) {
-				hits = append(hits, hit)
+		if nosqliEnabled {
+			if hit, ok := checkNoSQLi(normalized, nosqliThreshold); ok {
+				if !isNoSQLiFalsePositive(normalized, hit.RuleID) {
+					hits = append(hits, hit)
+				}
 			}
 		}
-		if hit, ok := checkTemplateInjection(normalized, threshold); ok {
-			return []OWASPHit{hit}
-		}
-		if hit, ok := checkJNDI(normalized, threshold); ok {
-			return []OWASPHit{hit}
-		}
-		if hit, ok := checkCRLF(normalized, threshold); ok {
-			if !isCRLFFalsePositive(normalized, hit.RuleID) {
+		if templateEnabled {
+			if hit, ok := checkTemplateInjection(normalized, templateThreshold); ok {
 				return []OWASPHit{hit}
 			}
 		}
-		if hit, ok := checkExprLang(normalized, threshold); ok {
-			if !isELFalsePositive(normalized, hit.RuleID) {
+		if jndiEnabled {
+			if hit, ok := checkJNDI(normalized, jndiThreshold); ok {
 				return []OWASPHit{hit}
 			}
 		}
-		if hit, ok := checkDeserialization(normalized, threshold); ok {
-			if !isDeserFalsePositive(normalized, hit.RuleID) {
-				return []OWASPHit{hit}
+		if crlfEnabled {
+			if hit, ok := checkCRLF(normalized, crlfThreshold); ok {
+				if !isCRLFFalsePositive(normalized, hit.RuleID) {
+					return []OWASPHit{hit}
+				}
 			}
 		}
-		if hit, ok := checkGraphQLi(normalized, threshold); ok {
-			return []OWASPHit{hit}
+		if exprLangEnabled {
+			if hit, ok := checkExprLang(normalized, exprLangThreshold); ok {
+				if !isELFalsePositive(normalized, hit.RuleID) {
+					return []OWASPHit{hit}
+				}
+			}
+		}
+		if deserialEnabled {
+			if hit, ok := checkDeserialization(normalized, deserialThreshold); ok {
+				if !isDeserFalsePositive(normalized, hit.RuleID) {
+					return []OWASPHit{hit}
+				}
+			}
+		}
+		if graphqlEnabled {
+			if hit, ok := checkGraphQLi(normalized, graphqlThreshold); ok {
+				return []OWASPHit{hit}
+			}
 		}
 		if len(hits) > 0 {
 			return hits
@@ -220,29 +266,41 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		for _, tok := range reBase64Token.FindAllString(jsDec, 20) {
 			if decoded := decodeBase64IfSuspicious(tok); decoded != "" {
 				decodedNorm := normalize(decoded)
-				if hit, ok := nextSQLiHit(decodedNorm, threshold); ok {
-					return []OWASPHit{hit}
-				}
-				if hit, ok := nextXSSHit(decodedNorm, threshold); ok {
-					return []OWASPHit{hit}
-				}
-				if hit, ok := checkCmdInjection(decodedNorm, threshold); ok {
-					if !isCmdInjectionFalsePositive(decodedNorm, hit.RuleID) {
+				if sqliEnabled {
+					if hit, ok := nextSQLiHit(decodedNorm, sqliThreshold); ok {
 						return []OWASPHit{hit}
+					}
+				}
+				if xssEnabled {
+					if hit, ok := nextXSSHit(decodedNorm, xssThreshold); ok {
+						return []OWASPHit{hit}
+					}
+				}
+				if cmdEnabled {
+					if hit, ok := checkCmdInjection(decodedNorm, cmdThreshold); ok {
+						if !isCmdInjectionFalsePositive(decodedNorm, hit.RuleID) {
+							return []OWASPHit{hit}
+						}
 					}
 				}
 			}
 		}
 	}
 
-	if hit, ok := checkProtocolViolation(headers, threshold); ok {
-		hits = append(hits, hit)
+	if protoEnabled {
+		if hit, ok := checkProtocolViolation(headers, protoThreshold); ok {
+			hits = append(hits, hit)
+		}
 	}
-	if hit, ok := checkPathFileUpload(path); ok {
-		hits = append(hits, hit)
+	if fileUploadEnabled {
+		if hit, ok := checkPathFileUpload(path); ok {
+			hits = append(hits, hit)
+		}
 	}
-	if hit, ok := checkDangerousPath(path); ok {
-		hits = append(hits, hit)
+	if pathTravEnabled {
+		if hit, ok := checkDangerousPath(path); ok {
+			hits = append(hits, hit)
+		}
 	}
 	return hits
 }
@@ -436,12 +494,51 @@ func checkDangerousPath(path string) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
+func normalizeSensitivityLevel(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "off", "none":
+		return "off"
+	case "low":
+		return "low"
+	case "mid", "medium":
+		return "mid"
+	case "high":
+		return "high"
+	case "very_high", "very-high", "veryhigh":
+		return "very_high"
+	case "strict":
+		return "strict"
+	default:
+		return ""
+	}
+}
+
+func CategoryThreshold(defaultSensitivity string, category OWASPCategory, categorySensitivity ...map[string]string) (int, bool) {
+	if len(categorySensitivity) > 0 && categorySensitivity[0] != nil {
+		if level := normalizeSensitivityLevel(categorySensitivity[0][string(category)]); level != "" {
+			if level == "off" {
+				return 0, false
+			}
+			return sensitivityThreshold(level), true
+		}
+	}
+	level := normalizeSensitivityLevel(defaultSensitivity)
+	if level == "off" {
+		return 0, false
+	}
+	return sensitivityThreshold(level), true
+}
+
 func sensitivityThreshold(s string) int {
-	switch strings.ToLower(s) {
+	switch normalizeSensitivityLevel(s) {
 	case "low":
 		return 7
 	case "high":
 		return 3 // Raised from 2 to 3 to reduce false positives
+	case "very_high":
+		return 2
+	case "strict":
+		return 1
 	default:
 		return 4
 	}

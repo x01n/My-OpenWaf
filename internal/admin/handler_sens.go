@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -13,12 +14,33 @@ type sensitivityRequest struct {
 	CategorySensitivity map[string]string `json:"category_sensitivity"`
 }
 
+func normalizeSensitivityLevel(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "off", "none":
+		return "off"
+	case "low":
+		return "low"
+	case "medium", "mid":
+		return "mid"
+	case "high":
+		return "high"
+	case "very_high", "very-high", "veryhigh":
+		return "very_high"
+	case "strict":
+		return "strict"
+	default:
+		return ""
+	}
+}
+
 func GetSensitivityConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		_, err := utils.ParseUint(c.Param("id"))
-		if err != nil {
-			c.JSON(400, map[string]string{"error": "invalid id"})
-			return
+		id := c.Param("id")
+		if id != "global" {
+			if _, err := utils.ParseUint(id); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid id"})
+				return
+			}
 		}
 		cfg := loadProtectionConfig(repo)
 		sens := cfg.GetCategorySensitivity()
@@ -31,25 +53,29 @@ func GetSensitivityConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 
 func UpdateSensitivityConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		_, err := utils.ParseUint(c.Param("id"))
-		if err != nil {
-			c.JSON(400, map[string]string{"error": "invalid id"})
-			return
+		id := c.Param("id")
+		if id != "global" {
+			if _, err := utils.ParseUint(id); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid id"})
+				return
+			}
 		}
 		var req sensitivityRequest
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		validLevels := map[string]bool{"off": true, "low": true, "medium": true, "high": true, "very_high": true}
+		normalized := make(map[string]string, len(req.CategorySensitivity))
 		for cat, level := range req.CategorySensitivity {
-			if !validLevels[level] {
+			normalizedLevel := normalizeSensitivityLevel(level)
+			if normalizedLevel == "" {
 				c.JSON(400, map[string]string{"error": "invalid sensitivity level for " + cat + ": " + level})
 				return
 			}
+			normalized[cat] = normalizedLevel
 		}
 		cfg := loadProtectionConfig(repo)
-		cfg.SetCategorySensitivity(req.CategorySensitivity)
+		cfg.SetCategorySensitivity(normalized)
 		if err := saveProtectionConfig(repo, cfg); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -58,6 +84,6 @@ func UpdateSensitivityConfig(repo *repository.SystemSettingsRepo, reload func() 
 			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
 			return
 		}
-		c.JSON(200, sensitivityRequest{CategorySensitivity: req.CategorySensitivity})
+		c.JSON(200, sensitivityRequest{CategorySensitivity: normalized})
 	}
 }

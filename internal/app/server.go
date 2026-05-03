@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -120,13 +121,20 @@ func Run() {
 	ipRep.ConfigureAutoBanAction(prot.AutoBanAction)
 
 	eng := engine.New(rt.Snapshot, reqRL, errRL, ipRep)
+	cveFeedInterval, err := time.ParseDuration(rt.Config.CVE.FeedInterval)
+	if err != nil || cveFeedInterval <= 0 {
+		cveFeedInterval = 6 * time.Hour
+	}
+	cveFeedMgr := waf.NewCVEFeedManagerWithFeed(rt.DB, eng.CVEDetector(), cveFeedInterval, rt.Config.CVE.NVDAPIKey, rt.Config.CVE.AutoApprove, rt.Config.CVE.FeedEnabled, logger.New("cve_feed"))
+	cveFeedMgr.Start()
+	defer cveFeedMgr.Stop()
 
 	// TLS fingerprinter for native JA3 capture.
 	tlsFP := waf.NewTLSFingerprinter()
 	waf.SetTLSFingerprinter(tlsFP)
 
 	// Drop executor (TCP connection close strategy).
-	dropCfg := rt.Config.Drop
+	dropCfg := loadDropPolicy(repos.SystemSettings, rt.Config.Drop)
 	dropExec := waf.NewDropExecutor(dropCfg.Enabled, logger.New("drop"))
 	eng.SetDropExecutor(dropExec)
 
@@ -163,20 +171,41 @@ func Run() {
 	antiReplayMgr := waf.NewAntiReplayManager("", rt.Redis, 5*time.Minute)
 	eng.SetAntiReplayManager(antiReplayMgr)
 
+	// ─── Auth subsystems ───
+	tokenMgr := auth.NewTokenManager(jwtSecret, rt.DB)
+	bruteForce := auth.NewBruteForceDetector(prot.LoginMaxAttempts, time.Duration(prot.LoginLockoutMinutes)*time.Minute)
+	sessionMgr := auth.NewSessionManager(rt.DB)
+
 	// Escalation (step-up response) manager.
 	escalationMgr := waf.NewEscalationManager(rt.Redis)
-	if prot.EscalationEnabled {
-		steps := prot.GetEscalationSteps()
-		wafSteps := make([]waf.EscalationStep, len(steps))
-		for i, s := range steps {
-			wafSteps[i] = waf.EscalationStep{Threshold: s.Threshold, Action: s.Action}
+	applyProtectionRuntimeConfig := func(p store.ProtectionConfig) {
+		reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
+		errRL.Reconfigure(p.ErrorRateLimitWindow, p.ErrorRateLimitMax, p.ErrorRateLimitEnabled)
+		ipRep.ConfigureAutoBan(p.AutoBanEnabled, p.AutoBanThreshold, p.AutoBanWindow, p.AutoBanDuration)
+		ipRep.ConfigureAutoBanAction(p.AutoBanAction)
+		captchaMgr.SetTimeout(time.Duration(p.CaptchaTimeout) * time.Second)
+		shieldMgr.SetDifficulty(p.ShieldDifficulty)
+		chainMgr.Reconfigure(parseChainSteps(p.ChainSteps), p.ShieldDifficulty)
+		bruteForce.Reconfigure(p.LoginMaxAttempts, time.Duration(p.LoginLockoutMinutes)*time.Minute)
+		dropPolicy := loadDropPolicy(repos.SystemSettings, rt.Config.Drop)
+		dropExec.Reconfigure(dropPolicy.Enabled)
+		eng.SetBotThreshold(dropPolicy.BotScoreThreshold)
+		if p.EscalationEnabled {
+			steps := p.GetEscalationSteps()
+			wafSteps := make([]waf.EscalationStep, len(steps))
+			for i, s := range steps {
+				wafSteps[i] = waf.EscalationStep{Threshold: s.Threshold, Action: s.Action}
+			}
+			escalationMgr.SetDefaultConfig(waf.EscalationConfig{
+				Enabled:    true,
+				WindowSecs: p.EscalationWindowSecs,
+				Steps:      wafSteps,
+			})
+		} else {
+			escalationMgr.SetDefaultConfig(waf.EscalationConfig{Enabled: false})
 		}
-		escalationMgr.SetDefaultConfig(waf.EscalationConfig{
-			Enabled:    true,
-			WindowSecs: prot.EscalationWindowSecs,
-			Steps:      wafSteps,
-		})
 	}
+	applyProtectionRuntimeConfig(prot)
 	eng.SetEscalationManager(escalationMgr)
 	defer escalationMgr.Close()
 
@@ -272,28 +301,9 @@ func Run() {
 		if err := rt.ReloadSnapshot(); err != nil {
 			return err
 		}
-		// Refresh rate limiter + IP reputation from latest protection config.
+		// Refresh runtime protection settings from latest snapshot.
 		if sn := rt.Snapshot.Load(); sn != nil {
-			p := sn.Protection
-			reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
-			errRL.Reconfigure(p.ErrorRateLimitWindow, p.ErrorRateLimitMax, p.ErrorRateLimitEnabled)
-			ipRep.ConfigureAutoBan(p.AutoBanEnabled, p.AutoBanThreshold, p.AutoBanWindow, p.AutoBanDuration)
-			ipRep.ConfigureAutoBanAction(p.AutoBanAction)
-			// Refresh escalation config.
-			if p.EscalationEnabled {
-				steps := p.GetEscalationSteps()
-				wafSteps := make([]waf.EscalationStep, len(steps))
-				for i, s := range steps {
-					wafSteps[i] = waf.EscalationStep{Threshold: s.Threshold, Action: s.Action}
-				}
-				escalationMgr.SetDefaultConfig(waf.EscalationConfig{
-					Enabled:    true,
-					WindowSecs: p.EscalationWindowSecs,
-					Steps:      wafSteps,
-				})
-			} else {
-				escalationMgr.SetDefaultConfig(waf.EscalationConfig{Enabled: false})
-			}
+			applyProtectionRuntimeConfig(sn.Protection)
 		}
 		loadIPLists(ipRep, repos.IPList)
 		// Hot-reload data-plane listeners.
@@ -312,22 +322,13 @@ func Run() {
 				return err
 			}
 			if sn := rt.Snapshot.Load(); sn != nil {
-				p := sn.Protection
-				reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
-				errRL.Reconfigure(p.ErrorRateLimitWindow, p.ErrorRateLimitMax, p.ErrorRateLimitEnabled)
-				ipRep.ConfigureAutoBan(p.AutoBanEnabled, p.AutoBanThreshold, p.AutoBanWindow, p.AutoBanDuration)
-				ipRep.ConfigureAutoBanAction(p.AutoBanAction)
+				applyProtectionRuntimeConfig(sn.Protection)
 			}
 			loadIPLists(ipRep, repos.IPList)
 			reconcileListeners()
 			return nil
 		})
 	}
-
-	// ─── Auth subsystems ───
-	tokenMgr := auth.NewTokenManager(jwtSecret, rt.DB)
-	bruteForce := auth.NewBruteForceDetector(5, 15*time.Minute)
-	sessionMgr := auth.NewSessionManager(rt.DB)
 
 	// ─── Admin control-plane server ───
 	adminSrv := server.Default(server.WithHostPorts(rt.Config.AdminBind))
@@ -345,6 +346,7 @@ func Run() {
 		TokenMgr:   tokenMgr,
 		BruteForce: bruteForce,
 		SessionMgr: sessionMgr,
+		CVEFeedMgr: cveFeedMgr,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
@@ -395,6 +397,34 @@ func loadIPLists(rep *waf.IPReputation, repo *repository.IPListRepo) {
 		}
 	}
 	rep.SetLists(blacks, whites)
+}
+
+func loadDropPolicy(repo *repository.SystemSettingsRepo, fallback core.DropConfig) core.DropConfig {
+	if repo == nil {
+		return fallback
+	}
+	val, err := repo.Get("drop_policy")
+	if err != nil || strings.TrimSpace(val) == "" {
+		return fallback
+	}
+	type dropPolicy struct {
+		Enabled             bool `json:"enabled"`
+		BotScoreThreshold   int  `json:"bot_score_threshold"`
+		CVEAutoDropCritical bool `json:"cve_auto_drop_critical"`
+		CVEAutoDropHigh     bool `json:"cve_auto_drop_high"`
+	}
+	var stored dropPolicy
+	if err := json.Unmarshal([]byte(val), &stored); err != nil {
+		return fallback
+	}
+	cfg := fallback
+	cfg.Enabled = stored.Enabled
+	if stored.BotScoreThreshold > 0 {
+		cfg.BotScoreThreshold = stored.BotScoreThreshold
+	}
+	cfg.CVEAutoDropCritical = stored.CVEAutoDropCritical
+	cfg.CVEAutoDropHigh = stored.CVEAutoDropHigh
+	return cfg
 }
 
 func resolveJWTSecret(rt *core.Runtime) []byte {
@@ -552,6 +582,17 @@ func siteListenerFingerprint(siteID uint, siteRT snapshotpkg.SiteRuntime, sn *sn
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+func parseChainSteps(raw string) []waf.ChainStepConfig {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var steps []waf.ChainStepConfig
+	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
+		return nil
+	}
+	return steps
 }
 
 func min(a, b int) int {

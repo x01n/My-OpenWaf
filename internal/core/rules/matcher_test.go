@@ -218,3 +218,32 @@ func TestUserAgentRegexCached(t *testing.T) {
 		t.Error("both rule compilations should match DirBuster")
 	}
 }
+
+func TestCCRateMatcherThresholdAndHostIsolation(t *testing.T) {
+	pattern := `{"op":"cc_rate","window":60,"threshold":3,"duration":5,"children":[{"kind":"block_path","arg":"/login"}]}`
+	rules := Compile([]store.Rule{
+		{Phase: "custom", Pattern: pattern, Action: "challenge", Priority: 1, Enabled: true},
+	})
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 compiled rule, got %d", len(rules))
+	}
+
+	mc := MatchCtx{ClientIP: net.ParseIP("1.2.3.4"), Path: "/login", Headers: map[string]string{"Host": "a.example"}}
+	if rules[0].Match(mc) {
+		t.Fatal("first matching request should stay below threshold")
+	}
+	if rules[0].Match(mc) {
+		t.Fatal("second matching request should stay below threshold")
+	}
+	if !rules[0].Match(mc) {
+		t.Fatal("third matching request should reach threshold")
+	}
+	if !rules[0].Match(mc) {
+		t.Fatal("same client should remain challenged during duration")
+	}
+
+	mc.Headers["Host"] = "b.example"
+	if rules[0].Match(mc) {
+		t.Fatal("different host should have an independent counter")
+	}
+}

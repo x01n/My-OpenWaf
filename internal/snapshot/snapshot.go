@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"crypto/tls"
+	"net"
 	"strings"
 	"sync/atomic"
 
@@ -87,27 +88,82 @@ func SNICertKey(bind string, sni string) string {
 }
 
 func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool) {
-	host := strings.ToLower(strings.TrimSpace(hostHeader))
-	if i := strings.Index(host, ":"); i >= 0 {
-		host = host[:i]
+	host := normalizeMatchHost(hostHeader)
+	if host == "" {
+		return SiteRuntime{}, false
 	}
-	key := bind + "\x00" + host
+
+	// 1. Exact match on bind+host
+	key := SiteMapKey(bind, host)
 	if rt, ok := sn.Sites[key]; ok {
 		return rt, true
 	}
-	if idx := strings.Index(host, "."); idx > 0 {
-		wild := "*." + host[idx+1:]
-		if rt, ok := sn.Sites[bind+"\x00"+wild]; ok {
+
+	// 2. Wildcard match (only for domain names, not IP addresses)
+	if !isIPAddress(host) {
+		if idx := strings.Index(host, "."); idx > 0 {
+			wild := "*." + host[idx+1:]
+			if rt, ok := sn.Sites[SiteMapKey(bind, wild)]; ok {
+				return rt, true
+			}
+		}
+	}
+
+	// 3. Fallback: match any site on this bind address whose host matches
+	for _, rt := range sn.Sites {
+		if rt.Bind == bind && normalizeMatchHost(rt.Site.Host) == host {
 			return rt, true
 		}
 	}
-	// Fallback: match any site on this bind address
+
+	// 4. Fallback: single site on this bind address can act as the default
+	prefix := bind + "\x00"
+	var fallback SiteRuntime
+	matches := 0
+	seen := make(map[uint]struct{})
 	for k, rt := range sn.Sites {
-		if strings.HasPrefix(k, bind+"\x00") {
-			return rt, true
+		if strings.HasPrefix(k, prefix) {
+			if _, ok := seen[rt.Site.ID]; ok {
+				continue
+			}
+			seen[rt.Site.ID] = struct{}{}
+			fallback = rt
+			matches++
+			if matches > 1 {
+				return SiteRuntime{}, false
+			}
 		}
 	}
+	if matches == 1 {
+		return fallback, true
+	}
+
 	return SiteRuntime{}, false
+}
+
+// normalizeMatchHost lowercases, trims, and strips the port from a host header.
+func normalizeMatchHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	// Strip port: find last colon and verify everything after is digits.
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		port := host[i+1:]
+		allDigits := len(port) > 0
+		for _, ch := range port {
+			if ch < '0' || ch > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			host = host[:i]
+		}
+	}
+	return host
+}
+
+// isIPAddress checks whether the host string is an IP address (v4 or v6).
+func isIPAddress(host string) bool {
+	return net.ParseIP(host) != nil
 }
 
 // Holder stores current snapshot atomically.

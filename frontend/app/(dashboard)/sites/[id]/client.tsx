@@ -5,66 +5,48 @@ import { useParams, usePathname, useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Bot,
-  Fingerprint,
-  ListFilter,
+  Globe,
+  Loader2,
+  Plus,
+  Save,
   ShieldAlert,
   ShieldCheck,
-  TimerReset,
-  Waypoints,
+  Trash2,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { EmptyState, InlineMeta, PageIntro, Surface, statusToneClass } from "@/components/console-shell";
-import { AttackHeatmap } from "@/components/charts/attack-heatmap";
-import { Pagination } from "@/components/pagination";
+import { SiteListenersPanel } from "@/components/site-listeners-panel";
 import {
   getSite,
-  getSiteAccessLogs,
-  getSiteDropEvents,
-  getSiteDropStats,
-  getSiteRules,
-  getSiteSecurityEvents,
-  getSiteSecurityStats,
-  getSiteSecurityTimeline,
-  type AccessLog,
-  type DropEvent,
-  type DropStats,
-  type Rule,
-  type SecurityEvent,
+  startSite,
+  stopSite,
+  updateSite,
   type Site,
-  type SiteSecurityStats,
-  type TimelineBucket,
 } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import { toast } from "sonner";
-
-const PAGE_SIZE = 10;
-const DETAIL_PAGE_SIZE = 6;
-
-function parseUpstreams(raw: string) {
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed as string[];
-  } catch {}
-  return raw ? raw.split(",").map((item) => item.trim()).filter(Boolean) : [];
-}
-
-function parseCacheRules(value: Site["cache_rules"]) {
-  if (!value) return [] as Array<{ path: string; ttl: number }>;
-  if (Array.isArray(value)) return value;
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
 
 function extractSiteId(candidate: string | undefined) {
   if (!candidate) return "";
   const last = candidate.split("/").filter(Boolean).at(-1) ?? "";
   return /^\d+$/.test(last) ? last : "";
 }
+
+function parseUpstreams(raw: string) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as string[];
+  } catch {}
+  return raw
+    ? raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+}
+
+type TabKey = "basic" | "listeners" | "upstream" | "advanced";
 
 export default function SiteDetailClient() {
   const params = useParams();
@@ -81,30 +63,27 @@ export default function SiteDetailClient() {
   }, [params.id, pathname]);
 
   const [site, setSite] = useState<Site | null>(null);
-  const [rules, setRules] = useState<Rule[]>([]);
-  const [securityStats, setSecurityStats] = useState<SiteSecurityStats | null>(null);
-  const [timeline, setTimeline] = useState<TimelineBucket[]>([]);
-  const [dropStats, setDropStats] = useState<DropStats | null>(null);
-
-  const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
-  const [securityTotal, setSecurityTotal] = useState(0);
-  const [securityPage, setSecurityPage] = useState(1);
-  const [securityAction, setSecurityAction] = useState("all");
-  const [securityPath, setSecurityPath] = useState("");
-
-  const [accessLogs, setAccessLogs] = useState<AccessLog[]>([]);
-  const [accessTotal, setAccessTotal] = useState(0);
-  const [accessPage, setAccessPage] = useState(1);
-  const [accessPath, setAccessPath] = useState("");
-  const [accessCacheState, setAccessCacheState] = useState("all");
-
-  const [dropEvents, setDropEvents] = useState<DropEvent[]>([]);
-  const [dropTotal, setDropTotal] = useState(0);
-  const [dropPage, setDropPage] = useState(1);
-  const [dropClientIP, setDropClientIP] = useState("");
-  const [dropSource, setDropSource] = useState("all");
-
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState<TabKey>("basic");
+
+  // Editable form state
+  const [host, setHost] = useState("");
+  const [bind, setBind] = useState("");
+  const [network, setNetwork] = useState("tcp");
+  const [tlsEnabled, setTlsEnabled] = useState(false);
+  const [upstreams, setUpstreams] = useState<string[]>([]);
+
+  // Advanced
+  const [blockHtml, setBlockHtml] = useState("");
+  const [blockStatus, setBlockStatus] = useState(403);
+  const [maintenanceEnabled, setMaintenanceEnabled] = useState(false);
+  const [maintenanceHtml, setMaintenanceHtml] = useState("");
+  const [maintenanceStatus, setMaintenanceStatus] = useState(503);
+  const [maxBodyBytes, setMaxBodyBytes] = useState(0);
+  const [antiReplayEnabled, setAntiReplayEnabled] = useState(false);
+  const [antiReplayTTL, setAntiReplayTTL] = useState(300);
+  const [antiReplayAction, setAntiReplayAction] = useState("shield_challenge");
 
   const load = useCallback(async () => {
     if (siteId === "_") {
@@ -112,414 +91,528 @@ export default function SiteDetailClient() {
       setLoading(false);
       return;
     }
-
     setLoading(true);
     try {
-      const [
-        siteResponse,
-        ruleResponse,
-        securityStatResponse,
-        timelineResponse,
-        dropStatResponse,
-        securityEventResponse,
-        accessLogResponse,
-        dropEventResponse,
-      ] = await Promise.all([
-        getSite(siteId),
-        getSiteRules(siteId),
-        getSiteSecurityStats(siteId, 24),
-        getSiteSecurityTimeline(siteId, 24),
-        getSiteDropStats(siteId),
-        getSiteSecurityEvents(siteId, {
-          page: securityPage,
-          page_size: DETAIL_PAGE_SIZE,
-          action: securityAction === "all" ? undefined : securityAction,
-          path: securityPath || undefined,
-        }),
-        getSiteAccessLogs(siteId, {
-          page: accessPage,
-          page_size: DETAIL_PAGE_SIZE,
-          path: accessPath || undefined,
-          cache_state: accessCacheState === "all" ? undefined : accessCacheState,
-        }),
-        getSiteDropEvents(siteId, {
-          page: dropPage,
-          page_size: DETAIL_PAGE_SIZE,
-          client_ip: dropClientIP || undefined,
-          source: dropSource === "all" ? undefined : dropSource,
-        }),
-      ]);
-
-      setSite(siteResponse);
-      setRules(ruleResponse.items ?? []);
-      setSecurityStats(securityStatResponse);
-      setTimeline(timelineResponse.buckets ?? []);
-      setDropStats(dropStatResponse);
-
-      setSecurityEvents(securityEventResponse.items ?? []);
-      setSecurityTotal(securityEventResponse.total ?? 0);
-
-      setAccessLogs(accessLogResponse.items ?? []);
-      setAccessTotal(accessLogResponse.total ?? 0);
-
-      setDropEvents(dropEventResponse.items ?? []);
-      setDropTotal(dropEventResponse.total ?? 0);
-    } catch (error) {
-      toast.error(String(error));
+      const s = await getSite(siteId);
+      setSite(s);
+      // Populate form
+      setHost(s.host);
+      setBind(s.bind);
+      setNetwork(s.network);
+      setTlsEnabled(s.tls_enabled);
+      setUpstreams(parseUpstreams(s.upstream_urls));
+      setBlockHtml(s.block_html || "");
+      setBlockStatus(s.block_status || 403);
+      setMaintenanceEnabled(s.maintenance_enabled);
+      setMaintenanceHtml(s.maintenance_html || "");
+      setMaintenanceStatus(s.maintenance_status || 503);
+      setMaxBodyBytes(s.max_body_bytes || 0);
+      setAntiReplayEnabled(Boolean(s.anti_replay_enabled));
+      setAntiReplayTTL(s.anti_replay_ttl || 300);
+      setAntiReplayAction(s.anti_replay_action || "shield_challenge");
+    } catch (err) {
+      toast.error(String(err));
       setSite(null);
     } finally {
       setLoading(false);
     }
-  }, [siteId, securityPage, securityAction, securityPath, accessPage, accessPath, accessCacheState, dropPage, dropClientIP, dropSource]);
+  }, [siteId]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const upstreams = useMemo(() => (site ? parseUpstreams(site.upstream_urls) : []), [site]);
-  const cacheRules = useMemo(() => parseCacheRules(site?.cache_rules), [site?.cache_rules]);
-  const timelineData = useMemo(
-    () => timeline.map((item) => ({ hour: item.bucket.includes(" ") ? item.bucket.split(" ").at(-1) || item.bucket : item.bucket, count: item.count })),
-    [timeline],
-  );
+  async function handleSave() {
+    if (!site) return;
+    setSaving(true);
+    try {
+      await updateSite(site.id, {
+        host,
+        bind,
+        network,
+        tls_enabled: tlsEnabled,
+        upstream_urls: JSON.stringify(upstreams.filter(Boolean)),
+        block_html: blockHtml,
+        block_status: blockStatus,
+        maintenance_enabled: maintenanceEnabled,
+        maintenance_html: maintenanceHtml,
+        maintenance_status: maintenanceStatus,
+        max_body_bytes: maxBodyBytes,
+        anti_replay_enabled: antiReplayEnabled,
+        anti_replay_ttl: antiReplayTTL,
+        anti_replay_action: antiReplayAction,
+      });
+      toast.success("站点配置已保存");
+      load();
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleToggle() {
+    if (!site) return;
+    try {
+      if (site.enabled) {
+        await stopSite(site.id);
+      } else {
+        await startSite(site.id);
+      }
+      toast.success(site.enabled ? "站点已停用" : "站点已启用");
+      load();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  }
 
   if (loading) {
     return (
-      <Surface className="min-h-[420px] animate-pulse">
-        <div className="h-full" />
-      </Surface>
+      <div className="flex min-h-[400px] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-cyan-500" />
+      </div>
     );
   }
 
   if (!site) {
     return (
-      <EmptyState
-        title="站点详情加载失败"
-        description="该站点可能不存在，或当前会话没有访问权限。请返回列表页重新选择。"
-        action={<Button onClick={() => router.push("/sites/")}>返回应用列表</Button>}
-      />
+      <div className="flex min-h-[400px] flex-col items-center justify-center rounded-lg border border-dashed border-gray-300 bg-white">
+        <Globe className="mb-4 h-12 w-12 text-gray-300" />
+        <h3 className="text-lg font-semibold text-gray-700">站点不存在</h3>
+        <p className="mt-2 text-sm text-gray-500">该站点可能已被删除或无权访问</p>
+        <Button
+          className="mt-4 rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
+          onClick={() => router.push("/sites/")}
+        >
+          返回应用列表
+        </Button>
+      </div>
     );
   }
 
-  const mode = site.maintenance_enabled ? "maintenance" : site.attack_protection_level === "observe" ? "observe" : "protect";
-  const securityTotalPages = Math.max(1, Math.ceil(securityTotal / DETAIL_PAGE_SIZE));
-  const accessTotalPages = Math.max(1, Math.ceil(accessTotal / DETAIL_PAGE_SIZE));
-  const dropTotalPages = Math.max(1, Math.ceil(dropTotal / DETAIL_PAGE_SIZE));
+  const tabs: { key: TabKey; label: string }[] = [
+    { key: "basic", label: "基本配置" },
+    { key: "listeners", label: "监听管理" },
+    { key: "upstream", label: "上游管理" },
+    { key: "advanced", label: "高级配置" },
+  ];
+
+  const quickLinks = [
+    {
+      label: "CC 防护",
+      desc: "管理 CC 防护规则与等待室",
+      icon: Zap,
+      href: "/cc-protection/",
+      color: "bg-amber-50 text-amber-600",
+    },
+    {
+      label: "Bot 防护",
+      desc: "调整 Bot 阈值与评分策略",
+      icon: Bot,
+      href: "/bot-protection/",
+      color: "bg-purple-50 text-purple-600",
+    },
+    {
+      label: "攻击防护",
+      desc: "配置 OWASP 与限流策略",
+      icon: ShieldAlert,
+      href: "/protection/",
+      color: "bg-red-50 text-red-600",
+    },
+    {
+      label: "安全策略",
+      desc: "验证码、5秒盾与防重放",
+      icon: ShieldCheck,
+      href: "/security/",
+      color: "bg-cyan-50 text-cyan-600",
+    },
+  ];
 
   return (
     <div className="space-y-6">
-      <Button variant="ghost" className="w-fit rounded-2xl text-slate-600 hover:bg-slate-100 hover:text-slate-950" onClick={() => router.push("/sites/")}>
-        <ArrowLeft className="mr-2 h-4 w-4" /> 返回应用列表
+      {/* Back */}
+      <Button
+        variant="ghost"
+        className="rounded-md text-gray-500 hover:text-gray-900"
+        onClick={() => router.push("/sites/")}
+      >
+        <ArrowLeft className="mr-2 h-4 w-4" />
+        返回应用列表
       </Button>
 
-      <PageIntro
-        eyebrow="Site Runtime"
-        title={site.host}
-        description="站点详情页对齐真实 Site、站点级规则、安全事件、访问日志、缓存状态与主动阻断情况。"
-        actions={
-          <div className="flex items-center gap-2">
-            <Button variant="outline" className="rounded-xl" onClick={load}>刷新详情</Button>
-            <div className={`console-badge ${statusToneClass(site.enabled ? "running" : "stopped")}`}>
-              {site.enabled ? "运行中" : "已停用"}
+      {/* Site Header */}
+      <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+        <div className="flex items-start justify-between">
+          <div className="flex items-start gap-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-cyan-50">
+              <Globe className="h-6 w-6 text-cyan-600" />
+            </div>
+            <div>
+              <div className="flex items-center gap-3">
+                <h1 className="text-xl font-bold text-gray-900">{site.host}</h1>
+                <span
+                  className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                    site.enabled
+                      ? "bg-emerald-50 text-emerald-700"
+                      : "bg-gray-100 text-gray-500"
+                  }`}
+                >
+                  {site.enabled ? "运行中" : "已停止"}
+                </span>
+              </div>
+              <p className="mt-1 text-sm text-gray-500">
+                {site.tls_enabled ? "HTTPS" : "HTTP"} · 监听{" "}
+                <span className="font-mono">{site.bind}</span> · 网络 {site.network} · 创建于{" "}
+                {formatDate(site.created_at)}
+              </p>
             </div>
           </div>
-        }
-      />
+          <div className="flex gap-2">
+            <Button variant="outline" className="rounded-md" onClick={handleToggle}>
+              {site.enabled ? "停用站点" : "启用站点"}
+            </Button>
+            <Button variant="outline" className="rounded-md" onClick={load}>
+              刷新
+            </Button>
+          </div>
+        </div>
+      </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1.3fr_0.9fr]">
-        <Surface title="接入与转发" description="展示站点基础信息、TLS 绑定和上游转发目标。">
-          <div className="space-y-5">
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              <InlineMeta label="监听地址" value={site.bind} />
-              <InlineMeta label="协议" value={site.tls_enabled ? "HTTPS" : "HTTP"} />
-              <InlineMeta label="网络" value={site.network} />
-              <InlineMeta label="证书 ID" value={site.cert_id ? `#${site.cert_id}` : "未绑定"} />
-              <InlineMeta label="XFF 模式" value={site.xff_mode || "默认"} />
-              <InlineMeta label="保留原始 Host" value={site.preserve_original_host ? "是" : "否"} />
+      {/* Quick Entry Cards */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {quickLinks.map((q) => (
+          <button
+            key={q.label}
+            onClick={() => router.push(q.href)}
+            className="group rounded-lg border border-gray-200 bg-white p-5 text-left shadow-sm transition-all hover:border-cyan-200 hover:shadow-md"
+          >
+            <div className={`mb-3 flex h-10 w-10 items-center justify-center rounded-lg ${q.color}`}>
+              <q.icon className="h-5 w-5" />
             </div>
-            <div className="space-y-3 rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-              <div className="flex items-center gap-2 text-sm font-medium text-slate-900">
-                <Waypoints className="h-4 w-4 text-cyan-700" />
-                上游服务器
+            <h3 className="text-sm font-semibold text-gray-900 group-hover:text-cyan-600">
+              {q.label}
+            </h3>
+            <p className="mt-1 text-xs text-gray-500">{q.desc}</p>
+          </button>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div className="rounded-lg border border-gray-200 bg-white shadow-sm">
+        <div className="flex border-b border-gray-200">
+          {tabs.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`px-6 py-3 text-sm font-medium transition-colors ${
+                tab === t.key
+                  ? "border-b-2 border-cyan-500 text-cyan-600"
+                  : "text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="p-6">
+          {/* Basic Config Tab */}
+          {tab === "basic" && (
+            <div className="space-y-5">
+              <div className="grid gap-5 md:grid-cols-2">
+                <FieldGroup label="域名 / Host">
+                  <Input
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    placeholder="example.com"
+                    className="rounded-md"
+                  />
+                </FieldGroup>
+                <FieldGroup label="监听地址">
+                  <Input
+                    value={bind}
+                    onChange={(e) => setBind(e.target.value)}
+                    placeholder=":80"
+                    className="rounded-md"
+                  />
+                </FieldGroup>
+                <FieldGroup label="网络协议">
+                  <select
+                    value={network}
+                    onChange={(e) => setNetwork(e.target.value)}
+                    className="h-10 w-full rounded-md border border-gray-200 bg-white px-3 text-sm"
+                  >
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                </FieldGroup>
+                <FieldGroup label="接入协议">
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTlsEnabled(false);
+                        setBind(":80");
+                      }}
+                      className={`flex-1 rounded-md border px-4 py-2 text-sm font-medium ${
+                        !tlsEnabled
+                          ? "border-cyan-500 bg-cyan-50 text-cyan-700"
+                          : "border-gray-200 text-gray-600"
+                      }`}
+                    >
+                      HTTP
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTlsEnabled(true);
+                        setBind(":443");
+                      }}
+                      className={`flex-1 rounded-md border px-4 py-2 text-sm font-medium ${
+                        tlsEnabled
+                          ? "border-cyan-500 bg-cyan-50 text-cyan-700"
+                          : "border-gray-200 text-gray-600"
+                      }`}
+                    >
+                      HTTPS
+                    </button>
+                  </div>
+                </FieldGroup>
               </div>
-              <div className="space-y-2">
+            </div>
+          )}
+
+          {/* Listeners Tab */}
+          {tab === "listeners" && (
+            <SiteListenersPanel siteId={site.id} onChanged={load} />
+          )}
+
+          {/* Upstream Tab */}
+          {tab === "upstream" && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">上游地址列表</h3>
+                  <p className="text-xs text-gray-500">请求将被转发到以下上游服务器</p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="rounded-md"
+                  onClick={() => setUpstreams([...upstreams, "http://127.0.0.1:8080"])}
+                >
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  添加上游
+                </Button>
+              </div>
+              <div className="space-y-3">
                 {upstreams.length === 0 ? (
-                  <div className="text-sm text-slate-500">未配置上游地址</div>
+                  <div className="rounded-md border border-dashed border-gray-300 bg-gray-50 px-4 py-8 text-center text-sm text-gray-400">
+                    暂无上游地址，请点击上方按钮添加
+                  </div>
                 ) : (
-                  upstreams.map((upstream, index) => (
-                    <div key={index} className="rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-700">
-                      {upstream}
+                  upstreams.map((u, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 p-2"
+                    >
+                      <Input
+                        value={u}
+                        onChange={(e) => {
+                          const next = [...upstreams];
+                          next[i] = e.target.value;
+                          setUpstreams(next);
+                        }}
+                        placeholder="http://127.0.0.1:8080"
+                        className="border-0 bg-transparent font-mono text-sm shadow-none focus-visible:ring-0"
+                      />
+                      {upstreams.length > 1 && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 shrink-0 rounded-md text-red-500 hover:bg-red-50 hover:text-red-600"
+                          onClick={() => setUpstreams(upstreams.filter((_, idx) => idx !== i))}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      )}
                     </div>
                   ))
                 )}
               </div>
             </div>
-          </div>
-        </Surface>
+          )}
 
-        <Surface title="保护状态" description="站点级防护配置与全局继承关系。">
-          <div className="space-y-3">
-            <StatusItem icon={ShieldCheck} label="防护模式" value={mode === "maintenance" ? "维护模式" : mode === "observe" ? "观察模式" : "防护模式"} status={mode} />
-            <StatusItem icon={Bot} label="Bot 防护" value={site.bot_protection_enabled ? `开启 · ${site.bot_protection_level || "default"}` : "关闭"} status={site.bot_protection_enabled ? "success" : "default"} />
-            <StatusItem icon={ShieldAlert} label="OWASP 覆盖" value={site.owasp_enabled == null ? "继承全局" : site.owasp_enabled ? `启用 · ${site.owasp_sensitivity || "mid"}` : "站点禁用"} status={site.owasp_enabled ? "success" : site.owasp_enabled === false ? "warning" : "default"} />
-            <StatusItem icon={TimerReset} label="速率限制" value={site.rate_limit_enabled == null ? "继承全局" : site.rate_limit_enabled ? `${site.rate_limit_max || 0}/${site.rate_limit_window || 0}s` : "站点禁用"} status={site.rate_limit_enabled ? "warning" : "default"} />
-            <StatusItem icon={Fingerprint} label="维护状态" value={site.maintenance_enabled ? `已开启 · HTTP ${site.maintenance_status || 503}` : "关闭"} status={site.maintenance_enabled ? "error" : "default"} />
-          </div>
-        </Surface>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-4">
-        <Surface title="24 小时安全统计" description="站点级事件聚合。">
-          <div className="grid gap-3">
-            <InlineMeta label="事件总数" value={securityStats?.total?.toLocaleString() ?? "0"} />
-            <InlineMeta label="终端动作" value={securityStats?.intercepts?.toLocaleString() ?? "0"} />
-            <InlineMeta label="观察命中" value={securityStats?.observes?.toLocaleString() ?? "0"} />
-            <InlineMeta label="涉及请求" value={securityStats?.requests?.toLocaleString() ?? "0"} />
-          </div>
-        </Surface>
-        <Surface title="主动阻断统计" description="drop 维度聚合。">
-          <div className="grid gap-3">
-            <InlineMeta label="24h 总数" value={dropStats?.total_24h?.toLocaleString() ?? "0"} />
-            <InlineMeta label="Bot" value={dropStats?.by_bot?.toLocaleString() ?? "0"} />
-            <InlineMeta label="CVE" value={dropStats?.by_cve?.toLocaleString() ?? "0"} />
-            <InlineMeta label="黑名单" value={dropStats?.by_ip_reputation?.toLocaleString() ?? "0"} />
-          </div>
-        </Surface>
-        <Surface title="缓存配置" description="站点目录树缓存。">
-          <div className="grid gap-3">
-            <InlineMeta label="缓存开关" value={site.cache_enabled ? "启用" : "关闭"} />
-            <InlineMeta label="默认 TTL" value={site.cache_default_ttl ? `${site.cache_default_ttl}s` : "未配置"} />
-            <InlineMeta label="规则数" value={cacheRules.length.toLocaleString()} />
-            <InlineMeta label="时间线桶" value={timeline.length.toLocaleString()} />
-          </div>
-        </Surface>
-        <Surface title="记录信息" description="站点基础审计信息。">
-          <div className="grid gap-3">
-            <InlineMeta label="站点 ID" value={`#${site.id}`} />
-            <InlineMeta label="策略 ID" value={site.policy_id ? `#${site.policy_id}` : "未绑定"} />
-            <InlineMeta label="创建时间" value={formatDate(site.created_at)} />
-            <InlineMeta label="更新时间" value={formatDate(site.updated_at)} />
-          </div>
-        </Surface>
-      </div>
-
-      <Surface title="24 小时攻击时间线" description="按小时查看站点安全事件峰值。">
-        {timelineData.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">24 小时内暂无安全事件时间线数据。</div>
-        ) : (
-          <AttackHeatmap data={timelineData} height={280} />
-        )}
-      </Surface>
-
-      <div className="grid gap-6 xl:grid-cols-2">
-        <Surface title="缓存规则" description="按路径前缀进行目录树缓存匹配。">
-          <div className="space-y-3">
-            {cacheRules.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">当前站点未配置目录树缓存规则。</div>
-            ) : (
-              cacheRules.map((rule) => (
-                <div key={`${rule.path}-${rule.ttl}`} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
-                  <span className="font-mono text-slate-700">{rule.path}</span>
-                  <span className="text-slate-950">{rule.ttl}s</span>
+          {/* Advanced Tab */}
+          {tab === "advanced" && (
+            <div className="space-y-6">
+              {/* Maintenance */}
+              <div className="rounded-md border border-gray-200 p-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900">维护模式</h3>
+                    <p className="text-xs text-gray-500">开启后将返回维护页面，所有流量不转发</p>
+                  </div>
+                  <ToggleSwitch
+                    checked={maintenanceEnabled}
+                    onChange={setMaintenanceEnabled}
+                  />
                 </div>
-              ))
-            )}
-          </div>
-        </Surface>
-
-        <Surface
-          title="站点规则"
-          description="当前站点绑定策略中的规则。"
-          action={<Button variant="outline" className="rounded-xl" onClick={() => router.push("/rules/")}>查看全局规则</Button>}
-        >
-          <div className="space-y-3">
-            {rules.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">当前站点未绑定自定义规则。</div>
-            ) : (
-              rules.slice(0, 10).map((rule) => (
-                <div key={rule.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-medium text-slate-900">{rule.name || `Rule #${rule.id}`}</div>
-                      <div className="text-xs text-slate-500">{rule.phase} · priority {rule.priority}</div>
-                    </div>
-                    <div className={`console-badge ${statusToneClass(rule.enabled ? "running" : "stopped")}`}>{rule.action}</div>
+                {maintenanceEnabled && (
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <FieldGroup label="维护状态码">
+                      <Input
+                        type="number"
+                        value={maintenanceStatus}
+                        onChange={(e) => setMaintenanceStatus(Number(e.target.value))}
+                        className="rounded-md"
+                      />
+                    </FieldGroup>
+                    <FieldGroup label="维护页面 HTML">
+                      <textarea
+                        value={maintenanceHtml}
+                        onChange={(e) => setMaintenanceHtml(e.target.value)}
+                        rows={3}
+                        placeholder="<h1>维护中</h1>"
+                        className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm"
+                      />
+                    </FieldGroup>
                   </div>
-                  <div className="mt-2 font-mono text-xs text-slate-600">{rule.pattern}</div>
+                )}
+              </div>
+
+              {/* Block settings */}
+              <div className="rounded-md border border-gray-200 p-5">
+                <h3 className="text-sm font-semibold text-gray-900">自定义拦截页面</h3>
+                <p className="mb-4 text-xs text-gray-500">
+                  当请求被 WAF 拦截时展示的页面内容
+                </p>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <FieldGroup label="拦截状态码">
+                    <Input
+                      type="number"
+                      value={blockStatus}
+                      onChange={(e) => setBlockStatus(Number(e.target.value))}
+                      className="rounded-md"
+                    />
+                  </FieldGroup>
+                  <FieldGroup label="拦截页面 HTML">
+                    <textarea
+                      value={blockHtml}
+                      onChange={(e) => setBlockHtml(e.target.value)}
+                      rows={3}
+                      placeholder="<h1>Access Denied</h1>"
+                      className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm"
+                    />
+                  </FieldGroup>
                 </div>
-              ))
-            )}
-          </div>
-        </Surface>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-3">
-        <Surface
-          title="最近安全事件"
-          description="站点级拦截与观察事件。"
-          action={<Button variant="outline" className="rounded-xl" onClick={() => router.push("/security-events/")}>查看全局事件</Button>}
-        >
-          <div className="mb-4 grid gap-3">
-            <div className="grid gap-3 md:grid-cols-[1fr_180px_auto]">
-              <Input value={securityPath} onChange={(event) => { setSecurityPath(event.target.value); setSecurityPage(1); }} placeholder="按路径筛选安全事件" className="rounded-xl" />
-              <select value={securityAction} onChange={(event) => { setSecurityAction(event.target.value); setSecurityPage(1); }} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900">
-                <option value="all">全部动作</option>
-                <option value="intercept">拦截</option>
-                <option value="observe">观察</option>
-                <option value="drop">丢弃</option>
-                <option value="challenge">挑战</option>
-                <option value="redirect">重定向</option>
-              </select>
-              <Button variant="outline" className="rounded-xl" onClick={() => { setSecurityPath(""); setSecurityAction("all"); setSecurityPage(1); }}>
-                <ListFilter className="mr-2 h-4 w-4" /> 重置
-              </Button>
-            </div>
-          </div>
-          {securityEvents.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">暂无事件。</div>
-          ) : (
-            <div className="space-y-4">
-              <div className="space-y-3">
-                {securityEvents.map((event) => (
-                  <div key={event.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs text-slate-500">{formatDate(event.created_at)}</div>
-                      <div className={`console-badge ${statusToneClass(event.action)}`}>{event.action}</div>
-                    </div>
-                    <div className="mt-2 font-mono text-xs text-slate-700">{event.path}</div>
-                    <div className="mt-2 text-xs text-slate-500">{event.rule_id_str || event.rule_id} · {event.category}</div>
-                  </div>
-                ))}
               </div>
-              <Pagination page={securityPage} totalPages={securityTotalPages} total={securityTotal} pageSize={DETAIL_PAGE_SIZE} onPageChange={setSecurityPage} />
+
+              {/* Max body */}
+              <div className="rounded-md border border-gray-200 p-5">
+                <h3 className="text-sm font-semibold text-gray-900">请求体限制</h3>
+                <p className="mb-4 text-xs text-gray-500">限制最大请求体大小（字节），0 表示不限制</p>
+                <div className="max-w-xs">
+                  <Input
+                    type="number"
+                    value={maxBodyBytes}
+                    onChange={(e) => setMaxBodyBytes(Number(e.target.value))}
+                    className="rounded-md"
+                    placeholder="0"
+                  />
+                </div>
+              </div>
+
+              {/* Anti replay */}
+              <div className="rounded-md border border-gray-200 p-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900">防重放保护</h3>
+                    <p className="text-xs text-gray-500">基于 Nonce 校验拦截重复提交请求</p>
+                  </div>
+                  <ToggleSwitch checked={antiReplayEnabled} onChange={setAntiReplayEnabled} />
+                </div>
+                {antiReplayEnabled && (
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <FieldGroup label="Nonce TTL（秒）">
+                      <Input
+                        type="number"
+                        min={10}
+                        max={86400}
+                        value={antiReplayTTL}
+                        onChange={(e) => setAntiReplayTTL(Number(e.target.value))}
+                        className="rounded-md"
+                      />
+                    </FieldGroup>
+                    <FieldGroup label="命中动作">
+                      <select
+                        value={antiReplayAction}
+                        onChange={(e) => setAntiReplayAction(e.target.value)}
+                        className="h-10 w-full rounded-md border border-gray-200 bg-white px-3 text-sm"
+                      >
+                        <option value="shield_challenge">Shield Challenge（挑战）</option>
+                        <option value="challenge">Challenge（挑战）</option>
+                        <option value="captcha_challenge">Captcha Challenge（验证码）</option>
+                        <option value="intercept">Intercept（拦截）</option>
+                        <option value="drop">Drop（丢弃连接）</option>
+                      </select>
+                    </FieldGroup>
+                  </div>
+                )}
+              </div>
             </div>
           )}
-        </Surface>
-
-        <Surface
-          title="最近访问日志"
-          description="可观察缓存命中与回源。"
-          action={<Button variant="outline" className="rounded-xl" onClick={() => router.push("/access-logs/")}>查看全局日志</Button>}
-        >
-          <div className="mb-4 grid gap-3">
-            <div className="grid gap-3 md:grid-cols-[1fr_180px_auto]">
-              <Input value={accessPath} onChange={(event) => { setAccessPath(event.target.value); setAccessPage(1); }} placeholder="按路径筛选访问日志" className="rounded-xl" />
-              <select value={accessCacheState} onChange={(event) => { setAccessCacheState(event.target.value); setAccessPage(1); }} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900">
-                <option value="all">全部缓存状态</option>
-                <option value="hit">命中</option>
-                <option value="miss">回源</option>
-                <option value="bypass">绕过</option>
-              </select>
-              <Button variant="outline" className="rounded-xl" onClick={() => { setAccessPath(""); setAccessCacheState("all"); setAccessPage(1); }}>
-                <ListFilter className="mr-2 h-4 w-4" /> 重置
-              </Button>
-            </div>
-          </div>
-          {accessLogs.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">暂无访问日志。</div>
-          ) : (
-            <div className="space-y-4">
-              <div className="space-y-3">
-                {accessLogs.map((item) => (
-                  <div key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs text-slate-500">{formatDate(item.created_at)}</div>
-                      <div className="flex items-center gap-2">
-                        <span className={`console-badge ${statusToneClass(item.waf_action)}`}>{item.waf_action}</span>
-                        <span className={`console-badge ${statusToneClass(item.cache_state)}`}>{item.cache_state}</span>
-                      </div>
-                    </div>
-                    <div className="mt-2 font-mono text-xs text-slate-700">{item.path}</div>
-                    <div className="mt-2 text-xs text-slate-500">{item.method} · {item.status_code} · {item.upstream || "-"}</div>
-                  </div>
-                ))}
-              </div>
-              <Pagination page={accessPage} totalPages={accessTotalPages} total={accessTotal} pageSize={DETAIL_PAGE_SIZE} onPageChange={setAccessPage} />
-            </div>
-          )}
-        </Surface>
-
-        <Surface
-          title="最近主动阻断"
-          description="按站点维度展示 drop 事件。"
-          action={<Button variant="outline" className="rounded-xl" onClick={() => router.push("/drop-policy/")}>查看全局阻断</Button>}
-        >
-          <div className="mb-4 grid gap-3">
-            <div className="grid gap-3 md:grid-cols-[1fr_180px_auto]">
-              <Input value={dropClientIP} onChange={(event) => { setDropClientIP(event.target.value); setDropPage(1); }} placeholder="按客户端 IP 筛选 drop" className="rounded-xl" />
-              <select value={dropSource} onChange={(event) => { setDropSource(event.target.value); setDropPage(1); }} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900">
-                <option value="all">全部来源</option>
-                <option value="bot">Bot</option>
-                <option value="cve">CVE</option>
-                <option value="rule">规则</option>
-                <option value="ip_reputation">IP 信誉</option>
-              </select>
-              <Button variant="outline" className="rounded-xl" onClick={() => { setDropClientIP(""); setDropSource("all"); setDropPage(1); }}>
-                <ListFilter className="mr-2 h-4 w-4" /> 重置
-              </Button>
-            </div>
-          </div>
-          {dropEvents.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">暂无主动阻断事件。</div>
-          ) : (
-            <div className="space-y-4">
-              <div className="space-y-3">
-                {dropEvents.map((item) => (
-                  <div key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs text-slate-500">{formatDate(item.created_at)}</div>
-                      <div className={`console-badge ${statusToneClass("drop")}`}>{item.source}</div>
-                    </div>
-                    <div className="mt-2 font-mono text-xs text-slate-700">{item.path}</div>
-                    <div className="mt-2 text-xs text-slate-500">{item.client_ip} · {item.rule_id || "-"}</div>
-                  </div>
-                ))}
-              </div>
-              <Pagination page={dropPage} totalPages={dropTotalPages} total={dropTotal} pageSize={DETAIL_PAGE_SIZE} onPageChange={setDropPage} />
-            </div>
-          )}
-        </Surface>
-      </div>
-
-      <Surface title="站点运行参数" description="对齐 Site 模型的关键容量、TLS 与维护控制字段。">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <InlineMeta label="最大 Body" value={site.max_body_bytes ? `${site.max_body_bytes} bytes` : "默认"} />
-          <InlineMeta label="TLS 最低版本" value={site.min_tls_version || "TLS12"} />
-          <InlineMeta label="TLS 最高版本" value={site.max_tls_version || "TLS13"} />
-          <InlineMeta label="上游证书校验" value={site.upstream_tls_skip_verify ? "跳过校验" : "严格校验"} />
-          <InlineMeta label="维护状态码" value={String(site.maintenance_status || 503)} />
-          <InlineMeta label="拦截状态码" value={String(site.block_status || 403)} />
-          <InlineMeta label="可信 CIDR" value={site.trusted_cidr || "未配置"} />
-          <InlineMeta label="Listener ID" value={String(site.listener_id || 0)} />
         </div>
-      </Surface>
+
+        {/* Save Button */}
+        <div className="flex justify-end border-t border-gray-200 px-6 py-4">
+          <Button
+            onClick={handleSave}
+            disabled={saving}
+            className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
+          >
+            {saving ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="mr-2 h-4 w-4" />
+            )}
+            {saving ? "保存中..." : "保存配置"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
 
-function StatusItem({
-  icon: Icon,
-  label,
-  value,
-  status,
+function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <label className="text-sm font-medium text-gray-700">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function ToggleSwitch({
+  checked,
+  onChange,
 }: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  status: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
 }) {
   return (
-    <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3">
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white">
-          <Icon className="h-4 w-4" />
-        </div>
-        <div>
-          <div className="text-sm font-medium text-slate-900">{label}</div>
-          <div className="text-xs text-slate-500">站点级当前生效配置</div>
-        </div>
-      </div>
-      <div className={`console-badge ${statusToneClass(status)}`}>{value}</div>
-    </div>
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+        checked ? "bg-cyan-500" : "bg-gray-200"
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+          checked ? "translate-x-6" : "translate-x-1"
+        }`}
+      />
+    </button>
   );
 }

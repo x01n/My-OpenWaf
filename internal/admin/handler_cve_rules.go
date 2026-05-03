@@ -92,7 +92,7 @@ func GetCVERuleStats(repo *repository.CVERuleRepo) app.HandlerFunc {
 }
 
 // BatchUpdateCVERules updates multiple CVE rules at once.
-func BatchUpdateCVERules(repo *repository.CVERuleRepo) app.HandlerFunc {
+func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
 			IDs     []uint `json:"ids"`
@@ -117,6 +117,9 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo) app.HandlerFunc {
 			}
 			if req.Enabled != nil {
 				existing.Enabled = *req.Enabled
+				if *req.Enabled {
+					existing.Approved = true
+				}
 			}
 			if req.Action != "" {
 				existing.Action = req.Action
@@ -126,12 +129,13 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo) app.HandlerFunc {
 			}
 		}
 
+		reloadCVERules(feedMgr)
 		c.JSON(200, map[string]any{"updated": updated, "total": len(req.IDs)})
 	}
 }
 
 // UpdateSingleCVERule updates a single CVE rule by ID (enable/disable/sensitivity).
-func UpdateSingleCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
+func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -157,6 +161,7 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
 
 		if req.Enabled != nil {
 			existing.Enabled = *req.Enabled
+			existing.Approved = true
 		}
 		if req.Action != "" {
 			existing.Action = req.Action
@@ -169,6 +174,7 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		reloadCVERules(feedMgr)
 		c.JSON(200, existing)
 	}
 }

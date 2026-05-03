@@ -24,19 +24,15 @@ import {
 } from "@/components/ui/select";
 import { Surface } from "@/components/console-shell";
 import {
-  api,
   createSiteListener,
   deleteSiteListener,
+  getCertificates,
   listSiteListeners,
   updateSiteListener,
+  type Certificate,
   type SiteListener,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-interface Certificate {
-  id: number;
-  name: string;
-}
 
 interface SiteListenersPanelProps {
   siteId: number;
@@ -87,7 +83,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
 
   useEffect(() => {
     if (!dialogOpen) return;
-    api<{ items: Certificate[] }>("/api/v1/certificates")
+    getCertificates()
       .then((data) => setCertificates(data.items || []))
       .catch(() => setCertificates([]));
   }, [dialogOpen]);

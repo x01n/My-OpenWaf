@@ -11,6 +11,7 @@ func ApplyOutboundForwarding(out *http.Request, clientIP net.IP, origHost string
 		out.Header.Set("X-Forwarded-For", clientIP.String())
 	}
 	if origHost != "" && preserveOriginalHost {
+		out.Host = origHost
 		out.Header.Set("X-Forwarded-Host", origHost)
 	}
 }

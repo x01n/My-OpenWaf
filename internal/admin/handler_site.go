@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -18,7 +19,14 @@ var (
 	siteStatusMutex sync.RWMutex
 )
 
-func ListSites(repo *repository.SiteRepo) app.HandlerFunc {
+type siteListItem struct {
+	store.Site
+	ListenerSummary      string `json:"listener_summary"`
+	TLSSummary           string `json:"tls_summary"`
+	ManagedListenerCount int    `json:"managed_listener_count"`
+}
+
+func ListSites(repo *repository.SiteRepo, listenerRepo *repository.SiteListenerRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
@@ -28,7 +36,56 @@ func ListSites(repo *repository.SiteRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		c.JSON(200, map[string]any{"items": items, "total": total})
+
+		listeners, err := listenerRepo.AllEnabled()
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		listenersBySite := make(map[uint][]store.SiteListener)
+		for _, listener := range listeners {
+			listenersBySite[listener.SiteID] = append(listenersBySite[listener.SiteID], listener)
+		}
+
+		respItems := make([]siteListItem, 0, len(items))
+		for _, item := range items {
+			listeners := listenersBySite[item.ID]
+			managed := make([]store.SiteListener, 0, len(listeners))
+			for _, listener := range listeners {
+				if listener.ID > 0 {
+					managed = append(managed, listener)
+				}
+			}
+
+			listenerSummary := item.Bind
+			tlsSummary := map[bool]string{true: "HTTPS", false: "HTTP"}[item.TLSEnabled]
+			managedCount := len(managed)
+			if managedCount > 0 {
+				binds := make([]string, 0, managedCount)
+				hasTLS := false
+				for _, listener := range managed {
+					binds = append(binds, listener.Bind)
+					if listener.TLSEnabled {
+						hasTLS = true
+					}
+				}
+				listenerSummary = strings.Join(binds, " / ")
+				if hasTLS {
+					tlsSummary = "多监听（含 HTTPS）"
+				} else {
+					tlsSummary = "多监听（HTTP）"
+				}
+			}
+
+			respItems = append(respItems, siteListItem{
+				Site:                 item,
+				ListenerSummary:      listenerSummary,
+				TLSSummary:           tlsSummary,
+				ManagedListenerCount: managedCount,
+			})
+		}
+
+		c.JSON(200, map[string]any{"items": respItems, "total": total})
 	}
 }
 
@@ -115,16 +172,26 @@ func DeleteSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc 
 	}
 }
 
-func StartSite(repo *repository.SiteRepo) app.HandlerFunc {
+func StartSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid id"})
 			return
 		}
-		_, err = repo.Get(id)
+		site, err := repo.Get(id)
 		if err != nil {
 			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+
+		site.Enabled = true
+		if err := repo.Update(site); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": site})
 			return
 		}
 
@@ -136,16 +203,26 @@ func StartSite(repo *repository.SiteRepo) app.HandlerFunc {
 	}
 }
 
-func StopSite(repo *repository.SiteRepo) app.HandlerFunc {
+func StopSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid id"})
 			return
 		}
-		_, err = repo.Get(id)
+		site, err := repo.Get(id)
 		if err != nil {
 			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+
+		site.Enabled = false
+		if err := repo.Update(site); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := reload(); err != nil {
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": site})
 			return
 		}
 
@@ -175,7 +252,11 @@ func GetSiteStatus(repo *repository.SiteRepo) app.HandlerFunc {
 		siteStatusMutex.RUnlock()
 
 		if !exists {
-			status = "stopped"
+			if site.Enabled {
+				status = "running"
+			} else {
+				status = "stopped"
+			}
 		}
 
 		c.JSON(200, map[string]any{

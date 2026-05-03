@@ -2,12 +2,26 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Globe, Plus, Power, ShieldAlert, Trash2 } from "lucide-react";
+import {
+  ExternalLink,
+  Globe,
+  Loader2,
+  Plus,
+  Power,
+  Shield,
+  Trash2,
+} from "lucide-react";
 import { AddSiteDialog } from "@/components/add-site-dialog";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { EmptyState, InlineMeta, PageIntro, Surface, statusToneClass } from "@/components/console-shell";
-import { deleteSite, listSites, startSite, stopSite, type Site, updateSite } from "@/lib/api";
+import { deleteSite, listSites, startSite, stopSite, type Site } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -16,13 +30,12 @@ function parseUpstreams(raw: string) {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) return parsed as string[];
   } catch {}
-  return raw ? raw.split(",").map((item) => item.trim()).filter(Boolean) : [];
-}
-
-function siteMode(site: Site) {
-  if (site.maintenance_enabled) return { key: "maintenance", label: "维护模式" };
-  if (site.attack_protection_level === "observe") return { key: "observe", label: "观察模式" };
-  return { key: "protect", label: "防护模式" };
+  return raw
+    ? raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
 }
 
 export default function SitesPage() {
@@ -37,10 +50,10 @@ export default function SitesPage() {
   async function load() {
     setLoading(true);
     try {
-      const result = await listSites();
-      setSites(result.items ?? []);
-    } catch (error) {
-      toast.error(String(error));
+      const res = await listSites();
+      setSites(res.items ?? []);
+    } catch (err) {
+      toast.error(String(err));
       setSites([]);
     } finally {
       setLoading(false);
@@ -59,11 +72,10 @@ export default function SitesPage() {
       } else {
         await startSite(site.id);
       }
-      await updateSite(site.id, { ...site, enabled: !site.enabled });
       toast.success(site.enabled ? "站点已停用" : "站点已启用");
       load();
-    } catch (error) {
-      toast.error(String(error));
+    } catch (err) {
+      toast.error(String(err));
     } finally {
       setBusyId(null);
     }
@@ -78,8 +90,8 @@ export default function SitesPage() {
       toast.success("站点已删除");
       setDeleteTarget(null);
       load();
-    } catch (error) {
-      toast.error(String(error));
+    } catch (err) {
+      toast.error(String(err));
     } finally {
       setDeleting(false);
       setBusyId(null);
@@ -88,123 +100,151 @@ export default function SitesPage() {
 
   return (
     <div className="space-y-6">
-      <PageIntro
-        eyebrow="Sites & Runtime"
-        title="防护应用"
-        description="管理当前系统中实际运行的站点入口、上游转发、TLS 接入和站点级防护状态。所有数据直接来自 /api/v1/sites。"
-        actions={
-          <Button className="rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={() => setDialogOpen(true)}>
-            <Plus className="mr-2 h-4 w-4" />
-            添加应用
-          </Button>
-        }
-      />
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">防护应用</h1>
+          <p className="mt-1 text-sm text-gray-500">管理站点接入、上游转发和防护状态</p>
+        </div>
+        <Button
+          onClick={() => setDialogOpen(true)}
+          className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
+        >
+          <Plus className="mr-2 h-4 w-4" />
+          添加站点
+        </Button>
+      </div>
 
+      {/* Loading */}
       {loading ? (
-        <div className="grid gap-4 xl:grid-cols-2">
-          {Array.from({ length: 4 }).map((_, index) => (
-            <Surface key={index} className="min-h-[220px] animate-pulse">
-              <div className="h-full" />
-            </Surface>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="h-[220px] animate-pulse rounded-lg bg-white shadow-sm" />
           ))}
         </div>
       ) : sites.length === 0 ? (
-        <EmptyState
-          title="还没有接入的防护应用"
-          description="创建站点后即可绑定 Host、监听地址与上游转发目标，并在后续页面中继续配置保护策略。"
-          action={
-            <Button onClick={() => setDialogOpen(true)} className="rounded-2xl bg-slate-950 text-white hover:bg-slate-800">
-              <Plus className="mr-2 h-4 w-4" />
-              新建站点
-            </Button>
-          }
-        />
+        <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-gray-300 bg-white">
+          <Globe className="mb-4 h-12 w-12 text-gray-300" />
+          <h3 className="text-lg font-semibold text-gray-700">还没有防护应用</h3>
+          <p className="mt-2 max-w-sm text-center text-sm text-gray-500">
+            创建站点后即可绑定域名、监听地址与上游目标
+          </p>
+          <Button
+            onClick={() => setDialogOpen(true)}
+            className="mt-5 rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            新建站点
+          </Button>
+        </div>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-2">
+        <div className="grid gap-4 lg:grid-cols-2">
           {sites.map((site) => {
             const upstreams = parseUpstreams(site.upstream_urls);
-            const mode = siteMode(site);
-            const trafficStatus = site.enabled ? "running" : "stopped";
+            const isBusy = busyId === site.id;
 
             return (
-              <Surface key={site.id} className="overflow-hidden">
-                <div className="space-y-5">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-start gap-4">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-50 text-cyan-700">
-                        <Globe className="h-5 w-5" />
-                      </div>
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h2 className="text-lg font-semibold text-slate-950">{site.host}</h2>
-                          <span className={`console-badge ${statusToneClass(trafficStatus)}`}>
-                            {site.enabled ? "运行中" : "已停用"}
-                          </span>
-                          <span className={`console-badge ${statusToneClass(mode.key)}`}>{mode.label}</span>
-                        </div>
-                        <p className="text-sm text-slate-500">
-                          {site.tls_enabled ? "HTTPS" : "HTTP"} · 监听 {site.bind} · 网络 {site.network}
-                        </p>
-                      </div>
+              <div
+                key={site.id}
+                className="rounded-lg border border-gray-200 bg-white shadow-sm transition-shadow hover:shadow-md"
+              >
+                {/* Card Header */}
+                <div className="flex items-start justify-between border-b border-gray-100 p-5">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-50">
+                      <Globe className="h-5 w-5 text-cyan-600" />
                     </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="rounded-xl"
-                        onClick={() => router.push(`/sites/${site.id}/`)}
-                      >
-                        查看详情
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="icon-sm"
-                        className="rounded-xl"
-                        disabled={busyId === site.id}
-                        onClick={() => toggleSite(site)}
-                        title={site.enabled ? "停用站点" : "启用站点"}
-                      >
-                        <Power className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="rounded-xl text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                        disabled={busyId === site.id}
-                        onClick={() => setDeleteTarget(site)}
-                        title="删除站点"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-lg font-semibold text-gray-900">{site.host}</h2>
+                        <span
+                          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                            site.enabled
+                              ? "bg-emerald-50 text-emerald-700"
+                              : "bg-gray-100 text-gray-500"
+                          }`}
+                        >
+                          {site.enabled ? "运行中" : "已停止"}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-sm text-gray-500">
+                        {site.tls_enabled ? "HTTPS" : "HTTP"} · 监听{" "}
+                        <span className="font-mono">{site.bind}</span> · 网络 {site.network}
+                      </p>
                     </div>
                   </div>
-
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                    <InlineMeta label="TLS" value={site.tls_enabled ? "已启用" : "未启用"} />
-                    <InlineMeta label="策略 ID" value={site.policy_id ? `#${site.policy_id}` : "未绑定"} />
-                    <InlineMeta label="Bot 防护" value={site.bot_protection_enabled ? "开启" : "关闭"} />
-                    <InlineMeta label="最近更新" value={formatDate(site.updated_at)} />
-                  </div>
-
-                  <div className="rounded-[22px] border border-slate-200 bg-slate-50/80 p-4">
-                    <div className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-900">
-                      <ShieldAlert className="h-4 w-4 text-cyan-700" />
-                      上游目标
-                    </div>
-                    <div className="space-y-2">
-                      {upstreams.length === 0 ? (
-                        <div className="text-sm text-slate-500">未配置上游地址</div>
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="rounded-md text-xs"
+                      onClick={() => router.push(`/sites/${site.id}/`)}
+                    >
+                      <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                      详情
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8 rounded-md"
+                      disabled={isBusy}
+                      onClick={() => toggleSite(site)}
+                      title={site.enabled ? "停用" : "启用"}
+                    >
+                      {isBusy ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
-                        upstreams.map((upstream, index) => (
-                          <div key={`${site.id}-${index}`} className="rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-700">
-                            {upstream}
-                          </div>
-                        ))
+                        <Power
+                          className={`h-4 w-4 ${site.enabled ? "text-emerald-600" : "text-gray-400"}`}
+                        />
                       )}
-                    </div>
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 rounded-md text-red-500 hover:bg-red-50 hover:text-red-600"
+                      disabled={isBusy}
+                      onClick={() => setDeleteTarget(site)}
+                      title="删除"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </div>
                 </div>
-              </Surface>
+
+                {/* Card Stats */}
+                <div className="grid grid-cols-4 divide-x divide-gray-100 border-b border-gray-100">
+                  <StatCell label="TLS" value={site.tls_enabled ? "已启用" : "关闭"} />
+                  <StatCell
+                    label="策略 ID"
+                    value={site.policy_id ? `#${site.policy_id}` : "未绑定"}
+                  />
+                  <StatCell label="Bot 防护" value={site.bot_protection_enabled ? "开启" : "关闭"} />
+                  <StatCell label="最近更新" value={formatDate(site.updated_at)} small />
+                </div>
+
+                {/* Upstreams */}
+                <div className="p-5">
+                  <div className="mb-2 flex items-center gap-2 text-xs font-medium text-gray-500">
+                    <Shield className="h-3.5 w-3.5" />
+                    上游目标
+                  </div>
+                  {upstreams.length === 0 ? (
+                    <p className="text-sm text-gray-400">未配置上游地址</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {upstreams.map((u, i) => (
+                        <span
+                          key={`${site.id}-${i}`}
+                          className="rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1 font-mono text-xs text-gray-600"
+                        >
+                          {u}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
             );
           })}
         </div>
@@ -212,23 +252,51 @@ export default function SitesPage() {
 
       <AddSiteDialog open={dialogOpen} onOpenChange={setDialogOpen} onSuccess={load} />
 
+      {/* Delete Confirmation */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <DialogContent className="max-w-md rounded-[28px]">
+        <DialogContent className="max-w-md rounded-lg">
           <DialogHeader>
             <DialogTitle>确认删除站点</DialogTitle>
-            <DialogDescription>删除后该站点入口、监听配置与关联运行时状态都会从当前环境移除。</DialogDescription>
+            <DialogDescription>
+              删除后该站点入口、监听配置与运行时状态都会移除，此操作不可撤销。
+            </DialogDescription>
           </DialogHeader>
-          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-900">
-            目标站点：{deleteTarget?.host || "-"}
+          <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            目标站点：<strong>{deleteTarget?.host || "-"}</strong>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
-            <Button className="bg-rose-600 hover:bg-rose-500" disabled={deleting} onClick={removeSite}>
-              {deleting ? "删除中..." : "删除"}
+            <Button variant="outline" className="rounded-md" onClick={() => setDeleteTarget(null)}>
+              取消
+            </Button>
+            <Button
+              className="rounded-md bg-red-600 text-white hover:bg-red-500"
+              disabled={deleting}
+              onClick={removeSite}
+            >
+              {deleting ? "删除中..." : "确认删除"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function StatCell({
+  label,
+  value,
+  small,
+}: {
+  label: string;
+  value: string;
+  small?: boolean;
+}) {
+  return (
+    <div className="px-4 py-3">
+      <div className="text-[11px] font-medium text-gray-400 uppercase">{label}</div>
+      <div className={`mt-0.5 font-medium text-gray-800 ${small ? "text-xs" : "text-sm"}`}>
+        {value}
+      </div>
     </div>
   );
 }

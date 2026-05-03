@@ -1,15 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Copy, KeyRound, Plus, Trash2 } from "lucide-react";
+import { Copy, KeyRound, Plus, Trash2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { EmptyState, InlineMeta, PageIntro, Surface } from "@/components/console-shell";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { EmptyState, PageIntro, Surface } from "@/components/console-shell";
 import { createAPIKey, getAPIKeys, removeAPIKey, type APIKey } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
+
+function maskToken(token?: string): string {
+  if (!token) return "••••••••••••••••";
+  if (token.length <= 8) return "••••" + token.slice(-4);
+  return token.slice(0, 4) + "••••••••" + token.slice(-4);
+}
 
 export default function APIKeysPage() {
   const [keys, setKeys] = useState<APIKey[]>([]);
@@ -17,7 +24,7 @@ export default function APIKeysPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [createdToken, setCreatedToken] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<number | null>(null);
+  const [creating, setCreating] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<APIKey | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -25,40 +32,40 @@ export default function APIKeysPage() {
     setLoading(true);
     getAPIKeys()
       .then((data) => setKeys(data.items || []))
-      .catch((error) => toast.error(String(error)))
+      .catch((e) => toast.error(String(e)))
       .finally(() => setLoading(false));
   }
 
-  useEffect(() => {
-    load();
-  }, []);
+  useEffect(() => { load(); }, []);
 
   async function handleCreate() {
+    if (!newKeyName.trim()) { toast.error("请输入密钥名称"); return; }
+    setCreating(true);
     try {
-      const response = await createAPIKey(newKeyName || "unnamed");
+      const response = await createAPIKey(newKeyName);
       setCreatedToken(response.token || null);
       setNewKeyName("");
       toast.success("密钥已创建，请立即复制明文 Token。");
       load();
-    } catch (error) {
-      toast.error(String(error));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setCreating(false);
     }
   }
 
   async function handleDelete() {
     if (!deleteTarget) return;
     setDeleting(true);
-    setBusyId(deleteTarget.id);
     try {
       await removeAPIKey(deleteTarget.id);
       toast.success("API 密钥已删除");
       setDeleteTarget(null);
       load();
-    } catch (error) {
-      toast.error(String(error));
+    } catch (e) {
+      toast.error(String(e));
     } finally {
       setDeleting(false);
-      setBusyId(null);
     }
   }
 
@@ -67,55 +74,63 @@ export default function APIKeysPage() {
       <PageIntro
         eyebrow="Automation Access"
         title="API 密钥"
-        description="为自动化任务、CI/CD 或运维脚本生成 Bearer Token。后端只会在创建成功时返回一次明文 Token。"
+        description="为自动化任务、CI/CD 或运维脚本生成 Bearer Token。创建后仅返回一次明文 Token。"
         actions={
-          <Button className="rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={() => { setDialogOpen(true); setCreatedToken(null); setNewKeyName(""); }}>
-            <Plus className="mr-2 h-4 w-4" /> 创建密钥
+          <Button className="gap-2 rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={() => { setDialogOpen(true); setCreatedToken(null); setNewKeyName(""); }}>
+            <Plus className="h-4 w-4" /> 创建密钥
           </Button>
         }
       />
 
-      <Surface title="密钥清单" description="当前账户下所有 API 密钥的名称、创建时间与最近使用情况。">
+      <Surface title="密钥列表" description="当前账户下所有 API 密钥。">
         {loading ? (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
         ) : keys.length === 0 ? (
           <EmptyState title="还没有 API 密钥" description="创建后可用于自动化访问管理 API。建议按用途拆分，便于审计与吊销。" />
         ) : (
-          <div className="grid gap-4 xl:grid-cols-2">
-            {keys.map((item) => (
-              <Surface key={item.id} className="overflow-hidden">
-                <div className="space-y-4">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-start gap-3">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-50 text-cyan-700">
-                        <KeyRound className="h-5 w-5" />
+          <div className="overflow-hidden rounded-[20px] border border-slate-200">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                  <TableHead className="w-16">ID</TableHead>
+                  <TableHead>名称</TableHead>
+                  <TableHead>密钥</TableHead>
+                  <TableHead>创建时间</TableHead>
+                  <TableHead>最近使用</TableHead>
+                  <TableHead className="w-28 text-right">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {keys.map((item) => (
+                  <TableRow key={item.id} className="hover:bg-slate-50">
+                    <TableCell className="font-mono text-xs text-slate-500">{item.id}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <KeyRound className="h-4 w-4 text-cyan-600" />
+                        <span className="font-medium text-slate-900">{item.name}</span>
                       </div>
-                      <div>
-                        <h2 className="text-lg font-semibold text-slate-950">{item.name}</h2>
-                        <p className="mt-1 text-sm text-slate-500">ID #{item.id}</p>
+                    </TableCell>
+                    <TableCell>
+                      <code className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-mono text-slate-500">{maskToken(item.token)}</code>
+                    </TableCell>
+                    <TableCell className="text-xs text-slate-500 whitespace-nowrap">{formatDate(item.created_at)}</TableCell>
+                    <TableCell className="text-xs text-slate-500 whitespace-nowrap">{item.last_used_at ? formatDate(item.last_used_at) : "从未使用"}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center justify-end gap-1">
+                        <Button variant="ghost" size="icon-sm" className="rounded-xl text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeleteTarget(item)}>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
                       </div>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      className="rounded-xl text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                      disabled={busyId === item.id}
-                      onClick={() => setDeleteTarget(item)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <InlineMeta label="创建时间" value={formatDate(item.created_at)} />
-                    <InlineMeta label="最近使用" value={item.last_used_at ? formatDate(item.last_used_at) : "从未使用"} />
-                  </div>
-                </div>
-              </Surface>
-            ))}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </div>
         )}
       </Surface>
 
+      {/* 创建 Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-w-lg rounded-[28px]">
           <DialogHeader>
@@ -124,17 +139,17 @@ export default function APIKeysPage() {
           </DialogHeader>
           {createdToken ? (
             <div className="space-y-4">
-              <p className="text-sm leading-6 text-slate-500">请立即复制此 Token，关闭后将无法再次查看明文。</p>
+              <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <span>请立即复制此 Token，关闭后将无法再次查看明文。</span>
+              </div>
               <div className="flex gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
                 <code className="flex-1 break-all text-xs text-slate-700">{createdToken}</code>
                 <Button
                   variant="outline"
                   size="icon-sm"
-                  className="rounded-xl"
-                  onClick={() => {
-                    navigator.clipboard.writeText(createdToken);
-                    toast.success("已复制到剪贴板");
-                  }}
+                  className="rounded-xl shrink-0"
+                  onClick={() => { navigator.clipboard.writeText(createdToken); toast.success("已复制到剪贴板"); }}
                 >
                   <Copy className="h-4 w-4" />
                 </Button>
@@ -146,9 +161,10 @@ export default function APIKeysPage() {
               <Input
                 id="api-key-name"
                 value={newKeyName}
-                onChange={(event) => setNewKeyName(event.target.value)}
+                onChange={(e) => setNewKeyName(e.target.value)}
                 placeholder="例如：CI Deploy / Terraform / Alert Sync"
                 className="rounded-xl"
+                onKeyDown={(e) => e.key === "Enter" && handleCreate()}
               />
             </div>
           )}
@@ -156,12 +172,16 @@ export default function APIKeysPage() {
             {createdToken ? (
               <Button onClick={() => setDialogOpen(false)}>完成</Button>
             ) : (
-              <Button onClick={handleCreate}>创建</Button>
+              <>
+                <Button variant="outline" onClick={() => setDialogOpen(false)}>取消</Button>
+                <Button onClick={handleCreate} disabled={creating}>{creating ? "创建中..." : "创建"}</Button>
+              </>
             )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
+      {/* 删除确认 */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <DialogContent className="max-w-md rounded-[28px]">
           <DialogHeader>

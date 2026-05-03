@@ -38,6 +38,25 @@ func NewBruteForceDetector(maxFailures int, lockoutDuration time.Duration) *Brut
 	return bf
 }
 
+func (bf *BruteForceDetector) Reconfigure(maxFailures int, lockoutDuration time.Duration) {
+	if maxFailures <= 0 {
+		maxFailures = 5
+	}
+	if lockoutDuration <= 0 {
+		lockoutDuration = 15 * time.Minute
+	}
+	bf.mu.Lock()
+	bf.maxFailures = maxFailures
+	bf.lockoutDur = lockoutDuration
+	now := time.Now()
+	for _, rec := range bf.attempts {
+		if rec.failures >= maxFailures && rec.lockedAt.IsZero() {
+			rec.lockedAt = now
+		}
+	}
+	bf.mu.Unlock()
+}
+
 func bruteforceKey(ip, username string) string {
 	return fmt.Sprintf("%s|%s", ip, username)
 }

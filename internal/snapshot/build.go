@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"My-OpenWaf/internal/store"
 
@@ -16,6 +17,19 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	var sites []store.Site
 	if err := db.Where("enabled = ?", true).Find(&sites).Error; err != nil {
 		return nil, err
+	}
+
+	var listeners []store.SiteListener
+	if err := db.Order("site_id ASC, bind ASC, id ASC").Find(&listeners).Error; err != nil {
+		return nil, err
+	}
+	enabledListenersBySite := make(map[uint][]store.SiteListener)
+	hasListenerRowsBySite := make(map[uint]bool)
+	for _, listener := range listeners {
+		hasListenerRowsBySite[listener.SiteID] = true
+		if listener.Enabled {
+			enabledListenersBySite[listener.SiteID] = append(enabledListenersBySite[listener.SiteID], listener)
+		}
 	}
 
 	var certs []store.Certificate
@@ -46,6 +60,10 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		rulesByPolicy[pid] = rs
 	}
 
+	// Load protection settings from SystemSettings.
+	protection := loadProtectionConfig(db)
+	ccRules := compileCCRules(protection)
+
 	sniCerts := make(map[string]tls.Certificate)
 	siteMap := make(map[string]SiteRuntime)
 
@@ -55,31 +73,11 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 			continue
 		}
 
-		// Build TLS config if site has certificate
-		var tlsConfig *tls.Config
-		var cert *store.Certificate
-		if s.CertID != nil {
-			if c, ok := certByID[*s.CertID]; ok {
-				cert = &c
-				if tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
-					tlsConfig = &tls.Config{
-						Certificates: []tls.Certificate{tlsCert},
-						MinVersion:   tls.VersionTLS12,
-					}
-					// Register SNI cert
-					h := strings.ToLower(strings.TrimSpace(s.Host))
-					if h != "" {
-						sniCerts[SNICertKey(s.Bind, h)] = tlsCert
-					}
-				}
-			}
-		}
-
 		policyID := uint(0)
 		if s.PolicyID != nil {
 			policyID = *s.PolicyID
 		}
-		compiled := compileRules(rulesByPolicy[policyID])
+		compiled := append(compileRules(rulesByPolicy[policyID]), ccRules...)
 
 		// Build protection configs from site fields
 		botProtection := store.BotProtectionConfig{
@@ -109,36 +107,75 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		}
 		cacheRules := parseSiteCacheRules(s.CacheRules)
 
-		rt := SiteRuntime{
-			Site:                 s,
-			PolicyID:             policyID,
-			Rules:                compiled,
-			UpstreamURLs:         urls,
-			Certificate:          cert,
-			Bind:                 s.Bind,
-			TLSConfig:            tlsConfig,
-			BotProtection:        botProtection,
-			AttackProtection:     attackProtection,
-			XFFMode:              xffMode,
-			TrustedCIDR:          s.TrustedCIDR,
-			PreserveOriginalHost: s.PreserveOriginalHost,
-			CacheEnabled:         s.CacheEnabled,
-			CacheDefaultTTL:      s.CacheDefaultTTL,
-			CacheRules:           cacheRules,
-			MaintenanceEnabled:   s.MaintenanceEnabled,
-			MaintenanceHTML:      s.MaintenanceHTML,
-			MaintenanceStatus:    s.MaintenanceStatus,
-			BlockHTML:            s.BlockHTML,
-			BlockStatus:          s.BlockStatus,
-			AntiReplayEnabled:    s.AntiReplayEnabled,
-			AntiReplayAction:     s.AntiReplayAction,
+		siteListeners := enabledListenersBySite[s.ID]
+		if len(siteListeners) == 0 && !hasListenerRowsBySite[s.ID] && s.Bind != "" {
+			siteListeners = append(siteListeners, store.SiteListener{
+				SiteID:     s.ID,
+				Bind:       s.Bind,
+				Network:    s.Network,
+				TLSEnabled: s.TLSEnabled,
+				CertID:     s.CertID,
+				Enabled:    true,
+			})
 		}
-		registerSiteKeys(siteMap, rt)
+
+		for _, listener := range siteListeners {
+			if strings.TrimSpace(listener.Bind) == "" {
+				continue
+			}
+
+			listenerSite := s
+			listenerSite.Bind = listener.Bind
+			listenerSite.Network = listener.Network
+			listenerSite.TLSEnabled = listener.TLSEnabled
+			listenerSite.CertID = listener.CertID
+
+			var tlsConfig *tls.Config
+			var cert *store.Certificate
+			if listenerSite.CertID != nil {
+				if c, ok := certByID[*listenerSite.CertID]; ok {
+					cert = &c
+					if tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
+						tlsConfig = &tls.Config{
+							Certificates: []tls.Certificate{tlsCert},
+							MinVersion:   tls.VersionTLS12,
+						}
+						h := strings.ToLower(strings.TrimSpace(listenerSite.Host))
+						if h != "" {
+							sniCerts[SNICertKey(listenerSite.Bind, h)] = tlsCert
+						}
+					}
+				}
+			}
+
+			rt := SiteRuntime{
+				Site:                 listenerSite,
+				PolicyID:             policyID,
+				Rules:                compiled,
+				UpstreamURLs:         urls,
+				Certificate:          cert,
+				Bind:                 listenerSite.Bind,
+				TLSConfig:            tlsConfig,
+				BotProtection:        botProtection,
+				AttackProtection:     attackProtection,
+				XFFMode:              xffMode,
+				TrustedCIDR:          s.TrustedCIDR,
+				PreserveOriginalHost: s.PreserveOriginalHost,
+				CacheEnabled:         s.CacheEnabled,
+				CacheDefaultTTL:      s.CacheDefaultTTL,
+				CacheRules:           cacheRules,
+				MaintenanceEnabled:   s.MaintenanceEnabled,
+				MaintenanceHTML:      s.MaintenanceHTML,
+				MaintenanceStatus:    s.MaintenanceStatus,
+				BlockHTML:            s.BlockHTML,
+				BlockStatus:          s.BlockStatus,
+				AntiReplayEnabled:    s.AntiReplayEnabled,
+				AntiReplayAction:     s.AntiReplayAction,
+			}
+			registerSiteKeys(siteMap, rt)
+		}
 		// EffectiveProtection is computed later once global protection is loaded.
 	}
-
-	// Load protection settings from SystemSettings.
-	protection := loadProtectionConfig(db)
 
 	// Compute effective per-site protection by merging site overrides onto global config.
 	for key, rt := range siteMap {
@@ -203,7 +240,9 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 }
 
 func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) {
-	h := strings.ToLower(strings.TrimSpace(rt.Site.Host))
+	// Normalize the host the same way MatchSite does: lowercase, trim, strip port.
+	// This ensures the map key matches what MatchSite will look up.
+	h := normalizeMatchHost(rt.Site.Host)
 	if h == "" {
 		return
 	}
@@ -235,6 +274,145 @@ func compileRules(rs []store.Rule) []CompiledRule {
 		})
 	}
 	return out
+}
+
+type ccRuleConfig struct {
+	Enabled    *bool             `json:"enabled"`
+	Action     string            `json:"action"`
+	Conditions []ccRuleCondition `json:"conditions"`
+	Window     int               `json:"window"`
+	Threshold  int               `json:"threshold"`
+	Duration   int               `json:"duration"`
+}
+
+type ccRuleCondition struct {
+	Target   string `json:"target"`
+	Operator string `json:"operator"`
+	Value    string `json:"value"`
+}
+
+var ccRuleIDCounter atomic.Uint64
+
+func compileCCRules(protection store.ProtectionConfig) []CompiledRule {
+	if !protection.CCUseCustom {
+		return nil
+	}
+	if strings.TrimSpace(protection.CCRules) == "" {
+		return nil
+	}
+	var configs []ccRuleConfig
+	if err := json.Unmarshal([]byte(protection.CCRules), &configs); err != nil {
+		return nil
+	}
+	out := make([]CompiledRule, 0, len(configs))
+	for _, cfg := range configs {
+		if cfg.Enabled != nil && !*cfg.Enabled {
+			continue
+		}
+		children := make([]map[string]string, 0, len(cfg.Conditions))
+		for _, cond := range cfg.Conditions {
+			kind, arg, ok := compileCCCondition(cond)
+			if !ok {
+				children = nil
+				break
+			}
+			children = append(children, map[string]string{"kind": kind, "arg": arg})
+		}
+		if len(children) == 0 {
+			continue
+		}
+		kind := children[0]["kind"]
+		arg := children[0]["arg"]
+		var compiled any = map[string]string{"kind": kind, "arg": arg}
+		if len(children) > 1 {
+			compiled = map[string]any{"op": "and", "children": children}
+		}
+		if cfg.Window > 0 && cfg.Threshold > 0 {
+			raw, err := json.Marshal(map[string]any{
+				"op":        "cc_rate",
+				"children":  []any{compiled},
+				"window":    cfg.Window,
+				"threshold": cfg.Threshold,
+				"duration":  cfg.Duration,
+			})
+			if err != nil {
+				continue
+			}
+			kind = "compound"
+			arg = string(raw)
+		} else if len(children) > 1 {
+			raw, err := json.Marshal(compiled)
+			if err != nil {
+				continue
+			}
+			kind = "compound"
+			arg = string(raw)
+		}
+		out = append(out, CompiledRule{
+			ID:       uint(ccRuleIDCounter.Add(1)),
+			Phase:    store.PhaseCustom,
+			Action:   normalizeCCAction(cfg.Action),
+			Priority: 10_000,
+			Kind:     kind,
+			Arg:      arg,
+		})
+	}
+	return out
+}
+
+func compileCCCondition(cond ccRuleCondition) (string, string, bool) {
+	value := strings.TrimSpace(cond.Value)
+	if value == "" {
+		return "", "", false
+	}
+	operator := strings.ToLower(strings.TrimSpace(cond.Operator))
+	switch strings.ToLower(strings.TrimSpace(cond.Target)) {
+	case "url_path", "path":
+		switch operator {
+		case "equals":
+			return "block_path_exact", value, true
+		case "prefix", "contains":
+			return "block_path", value, true
+		}
+	case "method":
+		if operator == "equals" {
+			return "block_method", strings.ToUpper(value), true
+		}
+	case "header":
+		name, headerValue := splitCCHeaderValue(value)
+		if name == "" || headerValue == "" {
+			return "", "", false
+		}
+		switch operator {
+		case "equals", "contains", "prefix":
+			return "block_header", name + ":" + headerValue, true
+		}
+	}
+	return "", "", false
+}
+
+func splitCCHeaderValue(value string) (string, string) {
+	for _, sep := range []string{":", "="} {
+		if name, val, ok := strings.Cut(value, sep); ok {
+			return strings.TrimSpace(name), strings.TrimSpace(val)
+		}
+	}
+	return "", ""
+}
+
+func normalizeCCAction(action string) store.RuleAction {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "captcha", "challenge":
+		return store.ActionChallenge
+	case "block", "intercept":
+		return store.ActionIntercept
+	case "drop":
+		return store.ActionDrop
+	case "observe", "log_only":
+		return store.ActionObserve
+	default:
+		return store.ActionChallenge
+	}
 }
 
 // ParsePattern extracts kind and arg from DSL string like "block_ip:1.2.3.0/24".
@@ -294,7 +472,7 @@ func loadProtectionConfig(db *gorm.DB) store.ProtectionConfig {
 	if err := db.Where("key = ?", "protection").First(&setting).Error; err != nil {
 		return store.DefaultProtectionConfig()
 	}
-	var cfg store.ProtectionConfig
+	cfg := store.DefaultProtectionConfig()
 	if err := json.Unmarshal([]byte(setting.Value), &cfg); err != nil {
 		return store.DefaultProtectionConfig()
 	}

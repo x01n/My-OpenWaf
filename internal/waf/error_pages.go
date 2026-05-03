@@ -2,17 +2,21 @@ package waf
 
 import (
 	"context"
+	"html/template"
 	"strconv"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
 // ErrorPageConfig defines the configuration for a custom error page.
 type ErrorPageConfig struct {
-	StatusCode int    `json:"status_code"`
-	Title      string `json:"title"`
-	Body       string `json:"body"`       // HTML content or plain text description
-	CustomCSS  string `json:"custom_css"` // optional custom CSS
+	StatusCode  int    `json:"status_code"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`
+	HTML        string `json:"html"`
+	CustomCSS   string `json:"custom_css"`
+	ContentType string `json:"content_type"`
 }
 
 // defaultErrorPages provides built-in error page configurations.
@@ -39,7 +43,7 @@ func GetDefaultErrorPage(statusCode int) *ErrorPageConfig {
 // RenderErrorPage renders an error page HTML for the given status code.
 // If customConfig is provided, it overrides the default.
 func RenderErrorPage(statusCode int, customConfig *ErrorPageConfig) []byte {
-	cfg := GetDefaultErrorPage(statusCode)
+	cfg := *GetDefaultErrorPage(statusCode)
 	if customConfig != nil {
 		if customConfig.Title != "" {
 			cfg.Title = customConfig.Title
@@ -49,6 +53,10 @@ func RenderErrorPage(statusCode int, customConfig *ErrorPageConfig) []byte {
 		}
 		if customConfig.CustomCSS != "" {
 			cfg.CustomCSS = customConfig.CustomCSS
+		}
+		if customConfig.HTML != "" {
+			rendered := renderErrorTemplate(customConfig.HTML, statusCode, cfg.Title)
+			return []byte(rendered)
 		}
 	}
 
@@ -75,6 +83,23 @@ func RenderErrorPage(statusCode int, customConfig *ErrorPageConfig) []byte {
 		`</div></body></html>`
 
 	return []byte(html)
+}
+
+func renderErrorTemplate(html string, statusCode int, title string) string {
+	tmpl, err := template.New("error_page").Parse(html)
+	if err != nil {
+		return html
+	}
+	var buf strings.Builder
+	vars := map[string]any{
+		"StatusCode": statusCode,
+		"Message":    title,
+		"Title":      title,
+	}
+	if err := tmpl.Execute(&buf, vars); err != nil {
+		return html
+	}
+	return buf.String()
 }
 
 // WriteErrorPage writes an error page response directly to the Hertz context.

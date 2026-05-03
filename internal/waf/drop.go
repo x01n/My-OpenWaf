@@ -56,6 +56,10 @@ func (d *DropExecutor) SetEnabled(v bool) {
 	d.enabled = v
 }
 
+func (d *DropExecutor) Reconfigure(enabled bool) {
+	d.enabled = enabled
+}
+
 // Execute closes the TCP connection immediately without writing any response.
 // It is safe to call even if conn is nil or already closed.
 func (d *DropExecutor) Execute(conn net.Conn, reason DropReason) error {

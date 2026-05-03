@@ -6,11 +6,91 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Matcher tests a single condition against request fields.
 type Matcher interface {
 	Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool
+}
+
+type ccRateMatcher struct {
+	child     Matcher
+	window    int64
+	threshold int64
+	duration  int64
+	mu        sync.Mutex
+	clients   map[string]*ccRateState
+	lastSweep int64
+}
+
+type ccRateState struct {
+	count       int64
+	windowUntil int64
+	blockedTill int64
+}
+
+func (m *ccRateMatcher) Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool {
+	if m.child == nil || !m.child.Match(ip, method, path, query, headers, body) {
+		return false
+	}
+	if m.window <= 0 || m.threshold <= 0 {
+		return true
+	}
+
+	now := time.Now().Unix()
+	key := ccRateKey(ip, headers)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.clients == nil {
+		m.clients = make(map[string]*ccRateState)
+	}
+	if now-m.lastSweep >= 60 {
+		for k, state := range m.clients {
+			if state == nil || (state.windowUntil <= now && state.blockedTill <= now) {
+				delete(m.clients, k)
+			}
+		}
+		m.lastSweep = now
+	}
+	state := m.clients[key]
+	if state != nil && state.blockedTill > now {
+		return true
+	}
+	if state == nil || state.windowUntil <= now {
+		state = &ccRateState{windowUntil: now + m.window}
+		m.clients[key] = state
+	}
+	state.count++
+	if state.count < m.threshold {
+		return false
+	}
+	if m.duration > 0 {
+		state.blockedTill = now + m.duration*60
+	}
+	return true
+}
+
+func ccRateKey(ip net.IP, headers map[string]string) string {
+	client := ""
+	if ip != nil {
+		client = ip.String()
+	}
+	return client + "|" + headerValue(headers, "host")
+}
+
+func headerValue(headers map[string]string, name string) string {
+	value, _ := lookupHeaderValue(headers, name)
+	return value
+}
+
+func lookupHeaderValue(headers map[string]string, name string) (string, bool) {
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // ── compound matchers ──
@@ -78,12 +158,8 @@ func (m *queryRegexMatcher) Match(_ net.IP, _, _, query string, _ map[string]str
 type headerContainsMatcher struct{ name, substr string }
 
 func (m *headerContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	for k, v := range headers {
-		if strings.ToLower(k) == m.name && strings.Contains(v, m.substr) {
-			return true
-		}
-	}
-	return false
+	value, ok := lookupHeaderValue(headers, m.name)
+	return ok && strings.Contains(value, m.substr)
 }
 
 type headerRegexMatcher struct {
@@ -92,12 +168,8 @@ type headerRegexMatcher struct {
 }
 
 func (m *headerRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	for k, v := range headers {
-		if strings.ToLower(k) == m.name && m.re.MatchString(v) {
-			return true
-		}
-	}
-	return false
+	value, ok := lookupHeaderValue(headers, m.name)
+	return ok && m.re.MatchString(value)
 }
 
 type exactPathMatcher struct{ path string }
@@ -290,13 +362,7 @@ func (m *queryParamMatcher) Match(_ net.IP, _, _, query string, _ map[string]str
 type hostMatcher struct{ pattern string }
 
 func (m *hostMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	host := ""
-	for k, v := range headers {
-		if strings.EqualFold(k, "Host") {
-			host = strings.ToLower(v)
-			break
-		}
-	}
+	host := strings.ToLower(headerValue(headers, "host"))
 	if host == "" {
 		return false
 	}
@@ -521,10 +587,13 @@ func cachedCompile(pattern string) (*regexp.Regexp, error) {
 // ── compound JSON condition ──
 
 type compoundCondition struct {
-	Op       string              `json:"op"`
-	Kind     string              `json:"kind"`
-	Arg      string              `json:"arg"`
-	Children []compoundCondition `json:"children"`
+	Op        string              `json:"op"`
+	Kind      string              `json:"kind"`
+	Arg       string              `json:"arg"`
+	Children  []compoundCondition `json:"children"`
+	Window    int64               `json:"window"`
+	Threshold int64               `json:"threshold"`
+	Duration  int64               `json:"duration"`
 }
 
 func parseCompoundJSON(raw string) Matcher {
@@ -554,6 +623,17 @@ func buildCompound(cond compoundCondition) Matcher {
 			return &neverMatcher{}
 		}
 		return &notMatcher{child: buildCompound(cond.Children[0])}
+	case "cc_rate":
+		if len(cond.Children) == 0 {
+			return &neverMatcher{}
+		}
+		return &ccRateMatcher{
+			child:     buildCompound(cond.Children[0]),
+			window:    cond.Window,
+			threshold: cond.Threshold,
+			duration:  cond.Duration,
+			clients:   make(map[string]*ccRateState),
+		}
 	default:
 		if cond.Kind != "" {
 			return buildMatcher(cond.Kind, cond.Arg)

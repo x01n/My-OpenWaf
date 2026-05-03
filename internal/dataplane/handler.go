@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -94,6 +95,9 @@ func Handler(opts Options) app.HandlerFunc {
 
 		host := string(c.Host())
 		bind := listenerBind(c)
+		if bind == "" {
+			bind = opts.Bind
+		}
 		rt, ok := sn.MatchSite(bind, host)
 		if !ok {
 			opts.Log.Warn("no site match",
@@ -109,6 +113,7 @@ func Handler(opts Options) app.HandlerFunc {
 		if clientIP != nil && opts.Metrics != nil {
 			opts.Metrics.RecordClientIP(clientIP.String())
 		}
+		errorRateLimitKey := rateLimitKey(clientIP, host)
 
 		if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil {
 			decision := ipRep.Check(clientIP)
@@ -123,7 +128,7 @@ func Handler(opts Options) app.HandlerFunc {
 				if ipAction == "" {
 					ipAction = "intercept"
 				}
-				useDropAction := ipAction == "block"
+				useDropAction := ipAction == "block" && dropEnabled(opts.Engine)
 
 				var actType action.Type
 				var actStr string
@@ -391,7 +396,12 @@ func Handler(opts Options) app.HandlerFunc {
 
 		defer pipeline.ReleaseCtx(reqCtx)
 
-		result := opts.Engine.Process(reqCtx)
+		var result engine.ProcessResult
+		if shouldApplyErrorRateLimit(opts.Engine, sn.Protection, errorRateLimitKey) {
+			result = engine.ProcessResult{Site: &rt, Action: errorRateLimitAction(sn.Protection.ErrorRateLimitAction)}
+		} else {
+			result = opts.Engine.Process(reqCtx)
+		}
 		ua := string(c.UserAgent())
 		for _, obs := range result.ObserveHits {
 			if opts.Metrics != nil {
@@ -443,6 +453,8 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		if result.Action.IsTerminal() {
+			incrementErrorRateLimitBlock(opts.Engine, sn.Protection, errorRateLimitKey)
+
 			actType := action.Normalize(result.Action.Type)
 			actStr := string(actType)
 
@@ -475,7 +487,7 @@ func Handler(opts Options) app.HandlerFunc {
 				}
 			}
 
-			if result.Action.IsDrop() {
+			if result.Action.IsDrop() && dropEnabled(opts.Engine) {
 				secLog.Warn("drop",
 					slog.String("request_id", reqID),
 					slog.String("rule_id", result.Action.RuleIDStr),
@@ -563,12 +575,12 @@ func Handler(opts Options) app.HandlerFunc {
 				}
 				// Route to appropriate challenge handler
 				switch {
-				case result.Action.IsCaptchaChallenge() && opts.CaptchaManager != nil:
+				case result.Action.IsCaptchaChallenge() && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil:
 					waf.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager)
-				case result.Action.IsShieldChallenge() && opts.ShieldManager != nil:
+				case result.Action.IsShieldChallenge() && sn.Protection.ShieldEnabled && opts.ShieldManager != nil:
 					origURL := string(c.Request.URI().RequestURI())
 					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL)
-				case result.Action.IsChainChallenge() && opts.ChainManager != nil:
+				case result.Action.IsChainChallenge() && sn.Protection.ChainEnabled && opts.ChainManager != nil:
 					waf.WriteChainChallengeResponse(c, reqID, opts.ChainManager)
 				default:
 					waf.WriteChallengeResponse(c, reqID, result.Site, statusCode)
@@ -690,14 +702,14 @@ func Handler(opts Options) app.HandlerFunc {
 			if isTimeoutError(upstreamErr) {
 				errCode = 504
 			}
-			waf.WriteErrorPage(ctx, c, errCode, nil)
+			waf.WriteErrorPage(ctx, c, errCode, siteErrorPage(result.Site, errCode))
 		} else if !IsWebSocketUpgrade(c) && !IsSSERequest(c) {
 			// Upstream empty body fallback: if upstream returns empty body
 			// with a non-204/304 status, render a friendly error page.
 			respStatus := c.Response.StatusCode()
 			respBodyLen := len(c.Response.Body())
 			if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
-				waf.WriteErrorPage(ctx, c, respStatus, nil)
+				waf.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
 			}
 		}
 		if c.Response.Header.Get("Server") != "" && !hasUpstreamServerHeader(c) {
@@ -709,25 +721,7 @@ func Handler(opts Options) app.HandlerFunc {
 			opts.Metrics.RecordStatus(statusCode)
 		}
 
-		errRL := opts.Engine.ErrRateLimiter()
-		if errRL != nil && errRL.Enabled() {
-			prot := sn.Protection
-			isErr := false
-			if prot.ErrorRateLimitCount4xx && statusCode >= 400 && statusCode < 500 {
-				isErr = true
-			}
-			if prot.ErrorRateLimitCount5xx && statusCode >= 500 {
-				isErr = true
-			}
-			if isErr {
-				key := ""
-				if clientIP != nil {
-					key = clientIP.String()
-				}
-				key += "|" + host
-				errRL.Increment(key)
-			}
-		}
+		incrementErrorRateLimitStatus(opts.Engine, sn.Protection, errorRateLimitKey, statusCode)
 
 		wafAction := "none"
 		if len(result.ObserveHits) > 0 {
@@ -812,8 +806,66 @@ func recordDropEvent(opts Options, siteID uint, clientIP net.IP, reason waf.Drop
 	})
 }
 
+func dropEnabled(eng *engine.Engine) bool {
+	dropExec := eng.DropExecutor()
+	return dropExec != nil && dropExec.Enabled()
+}
+
 func ShouldBlock(res action.Result) bool {
 	return res.IsTerminal()
+}
+
+func rateLimitKey(clientIP net.IP, host string) string {
+	return clientIPStr(clientIP) + "|" + host
+}
+
+func shouldApplyErrorRateLimit(eng *engine.Engine, prot store.ProtectionConfig, key string) bool {
+	if eng == nil {
+		return false
+	}
+	errRL := eng.ErrRateLimiter()
+	return errRL != nil && errRL.Enabled() && errRL.IsOverLimit(key)
+}
+
+func errorRateLimitAction(configured string) action.Result {
+	act := action.Type(configured)
+	if act == "" {
+		act = action.Intercept
+	}
+	return action.Result{
+		Type:      act,
+		Phase:     "error_rate_limit",
+		RuleIDStr: "error_rate_limit",
+		MatchDesc: "error rate limit exceeded",
+		Matched:   true,
+		Category:  "rate_limit",
+	}
+}
+
+func incrementErrorRateLimitBlock(eng *engine.Engine, prot store.ProtectionConfig, key string) {
+	if !prot.ErrorRateLimitCountBlock {
+		return
+	}
+	incrementErrorRateLimit(eng, key)
+}
+
+func incrementErrorRateLimitStatus(eng *engine.Engine, prot store.ProtectionConfig, key string, statusCode int) {
+	switch {
+	case prot.ErrorRateLimitCount4xx && statusCode >= 400 && statusCode < 500:
+		incrementErrorRateLimit(eng, key)
+	case prot.ErrorRateLimitCount5xx && statusCode >= 500:
+		incrementErrorRateLimit(eng, key)
+	}
+}
+
+func incrementErrorRateLimit(eng *engine.Engine, key string) {
+	if eng == nil {
+		return
+	}
+	errRL := eng.ErrRateLimiter()
+	if errRL != nil && errRL.Enabled() {
+		errRL.Increment(key)
+	}
 }
 
 func clientIPStr(ip net.IP) string {
@@ -840,6 +892,24 @@ func accessStatusCode(c *app.RequestContext, wafAction string) int {
 func hasUpstreamServerHeader(c *app.RequestContext) bool {
 	sv := string(c.Response.Header.Peek("Server"))
 	return sv != "" && sv != "hertz"
+}
+
+func siteErrorPage(rt *snapshot.SiteRuntime, statusCode int) *waf.ErrorPageConfig {
+	if rt == nil || strings.TrimSpace(rt.Site.CustomErrorPages) == "" || rt.Site.CustomErrorPages == "{}" {
+		return nil
+	}
+	pages := make(map[string]waf.ErrorPageConfig)
+	if err := json.Unmarshal([]byte(rt.Site.CustomErrorPages), &pages); err != nil {
+		return nil
+	}
+	cfg, ok := pages[strconv.Itoa(statusCode)]
+	if !ok {
+		return nil
+	}
+	if cfg.StatusCode == 0 {
+		cfg.StatusCode = statusCode
+	}
+	return &cfg
 }
 
 func isTimeoutError(err error) bool {
@@ -970,6 +1040,9 @@ func setChallengeCookie(c *app.RequestContext, opts Options) {
 	if sn != nil {
 		host := string(c.Host())
 		bind := listenerBind(c)
+		if bind == "" {
+			bind = opts.Bind
+		}
 		if rt, ok := sn.MatchSite(bind, host); ok {
 			tlsEnabled = rt.Site.TLSEnabled
 		}

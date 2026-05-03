@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -404,9 +405,11 @@ type ProtectionConfig struct {
 	OWASPModules string `json:"owasp_modules,omitempty"` // JSON-encoded map[string]string
 
 	// CVE detection
-	CVEEnabled     bool   `json:"cve_enabled"`
-	CVEAction      string `json:"cve_action"`       // "intercept" (default), "observe"
-	CVERulesConfig string `json:"cve_rules_config"` // JSON map[string]CVERuleOverride
+	CVEEnabled          bool   `json:"cve_enabled"`
+	CVEAction           string `json:"cve_action"`
+	CVEAutoDropCritical bool   `json:"cve_auto_drop_critical"`
+	CVEAutoDropHigh     bool   `json:"cve_auto_drop_high"`
+	CVERulesConfig      string `json:"cve_rules_config"` // JSON map[string]CVERuleOverride
 
 	// IP auto-ban action
 	AutoBanAction string `json:"auto_ban_action" gorm:"default:'intercept'"`
@@ -462,11 +465,48 @@ func DefaultProtectionConfig() ProtectionConfig {
 		LoginMinPasswordLength:  8,
 		LoginMaxAttempts:        5,
 		LoginLockoutMinutes:     30,
+		CVEAutoDropCritical:     true,
+		CVEAutoDropHigh:         true,
 		CaptchaType:             "math",
 		CaptchaTimeout:          120,
 		ShieldDifficulty:        4,
 		EscalationWindowSecs:    60,
 	}
+}
+
+func normalizeProtectionSensitivityLevel(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "off", "none":
+		return "off"
+	case "low":
+		return "low"
+	case "medium", "mid":
+		return "mid"
+	case "high":
+		return "high"
+	case "very_high", "very-high", "veryhigh":
+		return "very_high"
+	case "strict":
+		return "strict"
+	default:
+		return ""
+	}
+}
+
+func normalizeProtectionSensitivityMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for key, level := range m {
+		if normalized := normalizeProtectionSensitivityLevel(level); normalized != "" {
+			out[key] = normalized
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // GetCategorySensitivity parses the CategorySensitivity JSON field into a map.
@@ -478,11 +518,41 @@ func (p *ProtectionConfig) GetCategorySensitivity() map[string]string {
 	if err := json.Unmarshal([]byte(p.CategorySensitivity), &m); err != nil {
 		return nil
 	}
-	return m
+	return normalizeProtectionSensitivityMap(m)
+}
+
+// GetOWASPModules parses the OWASPModules JSON field into a map.
+func (p *ProtectionConfig) GetOWASPModules() map[string]string {
+	if p.OWASPModules == "" || p.OWASPModules == "{}" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(p.OWASPModules), &m); err != nil {
+		return nil
+	}
+	return normalizeProtectionSensitivityMap(m)
+}
+
+// EffectiveCategorySensitivity returns merged per-category overrides for runtime use.
+func (p *ProtectionConfig) EffectiveCategorySensitivity() map[string]string {
+	base := p.GetCategorySensitivity()
+	mods := p.GetOWASPModules()
+	if len(base) == 0 && len(mods) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(mods))
+	for key, level := range mods {
+		out[key] = level
+	}
+	for key, level := range base {
+		out[key] = level
+	}
+	return out
 }
 
 // SetCategorySensitivity serialises the map into the CategorySensitivity JSON field.
 func (p *ProtectionConfig) SetCategorySensitivity(m map[string]string) {
+	m = normalizeProtectionSensitivityMap(m)
 	if len(m) == 0 {
 		p.CategorySensitivity = "{}"
 		return

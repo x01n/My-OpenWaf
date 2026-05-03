@@ -56,6 +56,10 @@ func New(holder *snapshot.Holder, reqRL, errRL *waf.RateLimiter, ipRep *waf.IPRe
 // SetGeoResolver attaches a MaxMind GeoIP resolver for bot two-phase scoring.
 func (e *Engine) SetGeoResolver(geo *waf.MaxMindResolver, threshold int) {
 	e.geoResolver = geo
+	e.SetBotThreshold(threshold)
+}
+
+func (e *Engine) SetBotThreshold(threshold int) {
 	if threshold > 0 {
 		e.botThreshold = threshold
 	}
@@ -166,11 +170,7 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
 
 	if prot.BotDetectionEnabled {
-		if e.geoResolver != nil {
-			phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
-		} else {
-			phases = append(phases, rules.NewBotPhase(e.ipRep))
-		}
+		phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
 	}
 
 	if prot.RequestRateLimitEnabled && e.reqRateLimiter != nil {
