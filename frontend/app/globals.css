@@ -48,7 +48,7 @@
 }
 
 :root {
-  --radius: 1rem;
+  --radius: 0.75rem;
   --background: oklch(0.985 0.003 247.858);
   --foreground: oklch(0.187 0.018 264.448);
   --card: oklch(1 0 0);
@@ -137,46 +137,43 @@
 
 @layer components {
   .console-app-shell {
-    background-image:
-      radial-gradient(circle at top, rgba(14, 165, 233, 0.14), transparent 26%),
-      radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.08), transparent 20%),
-      linear-gradient(180deg, rgba(243, 247, 252, 0.98), rgba(238, 243, 249, 0.96));
+    background-color: rgb(248 250 252);
   }
 
   :is(.dark) .console-app-shell {
-    background-image:
-      radial-gradient(circle at top, rgba(14, 165, 233, 0.08), transparent 26%),
-      radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.05), transparent 20%),
-      linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.96));
+    background-color: rgb(2 6 23);
   }
 
   .console-glass {
-    @apply border border-white/10 bg-white/6 backdrop-blur-xl;
-    box-shadow: 0 22px 60px rgba(2, 6, 23, 0.16);
+    @apply border border-white/10 bg-slate-950/35 shadow-sm;
+  }
+
+  :is(.dark) .console-glass {
+    @apply bg-slate-900/80;
   }
 
   .console-panel {
-    @apply rounded-[28px] border border-slate-200/70 bg-white/92 backdrop-blur shadow-[0_22px_60px_rgba(15,23,42,0.07)];
+    @apply rounded-lg border border-slate-200 bg-white shadow-sm;
   }
 
   :is(.dark) .console-panel {
-    @apply border-white/10 bg-slate-900/90;
+    @apply border-slate-800 bg-slate-900/90;
   }
 
   .console-sidebar-link {
-    @apply flex items-center gap-3 rounded-md px-3 py-2 text-left text-sm transition-all duration-150;
+    @apply flex items-center gap-3 rounded-lg border-l-[3px] border-l-transparent px-3 py-2 text-left text-sm transition-colors duration-150;
   }
 
   .console-sidebar-link[data-active="true"] {
-    @apply border-l-[3px] border-l-cyan-500 bg-cyan-500/10 text-white font-medium;
+    @apply border-l-cyan-500 bg-cyan-50 text-slate-950 font-medium dark:bg-cyan-950/35 dark:text-white;
   }
 
   .console-sidebar-link[data-active="false"] {
-    @apply border-l-[3px] border-l-transparent text-gray-300 hover:bg-white/8 hover:text-white;
+    @apply text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white;
   }
 
   .console-badge {
-    @apply inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium tracking-wide;
+    @apply inline-flex items-center rounded-md border px-2.5 py-1 text-[11px] font-medium tracking-wide;
   }
 
   :is(.dark) .console-badge {

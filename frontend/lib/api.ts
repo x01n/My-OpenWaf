@@ -2,6 +2,7 @@ const BASE = "";
 
 let accessToken: string | null = null;
 const TOKEN_KEY = "owaf_access_token";
+let refreshPromise: Promise<boolean> | null = null;
 
 export function setAccessToken(token: string | null) {
   accessToken = token;
@@ -28,24 +29,32 @@ export function getAccessToken(): string | null {
 
 export interface AuthResponse {
   access_token: string;
-  expires_at: string;
+  expires_at: number | string;
   username: string;
   role: string;
 }
 
 export async function refreshAccess(): Promise<boolean> {
-  try {
-    const response = await fetch(`${BASE}/api/v1/auth/refresh`, {
-      method: "POST",
-      credentials: "include",
-    });
-    if (!response.ok) return false;
-    const data = (await response.json()) as AuthResponse;
-    setAccessToken(data.access_token);
-    return true;
-  } catch {
-    return false;
-  }
+  if (refreshPromise) return refreshPromise;
+
+  refreshPromise = (async () => {
+    try {
+      const response = await fetch(`${BASE}/api/v1/auth/refresh`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!response.ok) return false;
+      const data = (await response.json()) as AuthResponse;
+      setAccessToken(data.access_token);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
 }
 
 function buildHeaders(opts: RequestInit): Headers {
@@ -62,6 +71,7 @@ function buildHeaders(opts: RequestInit): Headers {
 
 export async function api<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
   const headers = buildHeaders(opts);
+  const hadAccessToken = Boolean(getAccessToken());
 
   let response = await fetch(`${BASE}${path}`, {
     ...opts,
@@ -69,7 +79,7 @@ export async function api<T = unknown>(path: string, opts: RequestInit = {}): Pr
     credentials: "include",
   });
 
-  if (response.status === 401 && getAccessToken()) {
+  if (response.status === 401 && hadAccessToken) {
     const refreshed = await refreshAccess();
     if (refreshed) {
       const retryHeaders = buildHeaders(opts);
@@ -750,6 +760,16 @@ export async function createCVERule(rule: CreateCVERuleReq): Promise<CVERule> {
 
 export async function updateCVERule(id: number, rule: Partial<CVERule | CreateCVERuleReq>): Promise<CVERule> {
   return api<CVERule>(`/api/v1/cve-rules/${id}/update`, {
+    method: "POST",
+    body: JSON.stringify(rule),
+  });
+}
+
+export async function patchCVERule(
+  id: number,
+  rule: Partial<Pick<CVERule, "enabled" | "action" | "severity">>,
+): Promise<CVERule> {
+  return api<CVERule>(`/api/v1/cve-rules/${id}/patch`, {
     method: "POST",
     body: JSON.stringify(rule),
   });

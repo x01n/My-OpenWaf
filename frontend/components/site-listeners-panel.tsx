@@ -200,21 +200,21 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
       title="监听端口"
       description="一个站点可以同时监听多个端口（如同时启用 80 与 443），保存后自动热加载。"
       action={
-        <Button className="rounded-xl bg-cyan-500 text-white hover:bg-cyan-600" onClick={openCreate}>
+        <Button className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600" onClick={openCreate}>
           <Plus className="mr-1.5 h-4 w-4" /> 新增监听端口
         </Button>
       }
     >
       {loading ? (
-        <div className="flex items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 py-10 text-sm text-slate-500">
+        <div className="flex items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 py-10 text-sm text-slate-500">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" /> 加载中...
         </div>
       ) : items.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
+        <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
           暂无监听端口，点击右上角添加。
         </div>
       ) : (
-        <div className="overflow-hidden rounded-2xl border border-slate-200">
+        <div className="overflow-hidden rounded-lg border border-slate-200">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
               <tr>
@@ -277,7 +277,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          className="rounded-xl text-slate-600 hover:bg-slate-100"
+                          className="rounded-md text-slate-600 hover:bg-slate-100"
                           onClick={() => openEdit(listener)}
                         >
                           <Pencil className="h-4 w-4" />
@@ -285,7 +285,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          className="rounded-xl text-rose-600 hover:bg-rose-50"
+                          className="rounded-md text-rose-600 hover:bg-rose-50"
                           onClick={() => remove(listener)}
                           disabled={isLegacy}
                         >
@@ -302,12 +302,12 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
       )}
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-lg overflow-y-auto rounded-[28px] p-0">
-          <DialogHeader className="border-b border-white/10 bg-[linear-gradient(135deg,rgba(10,19,34,0.96),rgba(11,27,48,0.9)_55%,rgba(10,69,88,0.5))] px-6 py-5 text-left text-white">
-            <DialogTitle className="text-xl font-semibold tracking-tight">
+        <DialogContent className="max-w-lg overflow-y-auto rounded-lg p-0">
+          <DialogHeader className="border-b border-slate-200 bg-white px-6 py-5 text-left">
+            <DialogTitle className="text-xl font-semibold tracking-tight text-slate-950">
               {editing ? "编辑监听端口" : "新增监听端口"}
             </DialogTitle>
-            <DialogDescription className="mt-1.5 text-sm text-slate-300/90">
+            <DialogDescription className="mt-1 text-sm text-slate-600">
               监听 Bind、协议与证书信息会即时下发至数据面。
             </DialogDescription>
           </DialogHeader>
@@ -319,18 +319,18 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
                 value={draft.bind}
                 onChange={(e) => setDraft({ ...draft, bind: e.target.value })}
                 placeholder=":80"
-                className="rounded-2xl border-slate-200 bg-slate-50 font-mono"
+                className="rounded-lg border-slate-200 bg-slate-50 font-mono"
               />
             </div>
 
             <div className="space-y-2">
               <Label className="text-sm font-medium text-slate-900">接入协议</Label>
-              <div className="grid grid-cols-2 gap-2 rounded-[20px] border border-slate-200 bg-slate-50 p-2">
+              <div className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
                 <button
                   type="button"
                   onClick={() => setProtocol(false)}
                   className={cn(
-                    "rounded-2xl px-4 py-2.5 text-sm font-medium",
+                    "rounded-lg px-4 py-2.5 text-sm font-medium",
                     draft.tlsEnabled
                       ? "text-slate-600"
                       : "bg-white text-slate-950 shadow-sm",
@@ -342,7 +342,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
                   type="button"
                   onClick={() => setProtocol(true)}
                   className={cn(
-                    "rounded-2xl px-4 py-2.5 text-sm font-medium",
+                    "rounded-lg px-4 py-2.5 text-sm font-medium",
                     draft.tlsEnabled
                       ? "bg-white text-slate-950 shadow-sm"
                       : "text-slate-600",
@@ -356,7 +356,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
             {draft.tlsEnabled ? (
               <div className="space-y-2">
                 <Label className="text-sm font-medium text-slate-900">TLS 证书</Label>
-                <div className="rounded-[20px] border border-slate-200 bg-slate-50 p-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                   <div className="mb-2 flex items-center gap-2 text-xs text-slate-500">
                     <Lock className="h-3.5 w-3.5" /> 启用 HTTPS 时必须绑定证书
                   </div>
@@ -366,7 +366,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
                       setDraft({ ...draft, certId: value ? Number(value) : null })
                     }
                   >
-                    <SelectTrigger className="rounded-2xl border-slate-200 bg-white">
+                    <SelectTrigger className="rounded-lg border-slate-200 bg-white">
                       <SelectValue placeholder={certificates.length ? "选择证书" : "当前没有可用证书"} />
                     </SelectTrigger>
                     <SelectContent>
@@ -387,11 +387,11 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
                 value={draft.note}
                 onChange={(e) => setDraft({ ...draft, note: e.target.value })}
                 placeholder="例如：管理后台专用端口"
-                className="rounded-2xl border-slate-200 bg-slate-50"
+                className="rounded-lg border-slate-200 bg-slate-50"
               />
             </div>
 
-            <label className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <label className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
               <div>
                 <div className="text-sm font-medium text-slate-900">启用此监听</div>
                 <div className="mt-0.5 text-xs text-slate-500">关闭后该端口将停止接收流量。</div>
@@ -404,13 +404,13 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
           </div>
 
           <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
-            <Button variant="outline" className="rounded-xl" onClick={() => setDialogOpen(false)}>
+            <Button variant="outline" className="rounded-md" onClick={() => setDialogOpen(false)}>
               取消
             </Button>
             <Button
               onClick={submit}
               disabled={saving}
-              className="rounded-xl bg-cyan-500 text-white hover:bg-cyan-600"
+              className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
             >
               {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               {saving ? "保存中..." : editing ? "保存修改" : "创建监听"}

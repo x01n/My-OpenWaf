@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api, getCertificates, type Certificate } from "@/lib/api";
+import { findInvalidSiteUpstream, serializeSiteUpstreams } from "@/lib/site-upstreams";
 
 interface AddSiteDialogProps {
   open: boolean;
@@ -66,6 +67,7 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
     const normalizedHost = host.trim();
     const normalizedBind = bind.trim() || (tlsEnabled ? ":443" : ":80");
     const normalizedUpstreams = upstreams.map((item) => item.trim()).filter(Boolean);
+    const invalidUpstream = findInvalidSiteUpstream(normalizedUpstreams);
 
     if (!normalizedHost) {
       toast.error("请输入站点 Host");
@@ -73,6 +75,10 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
     }
     if (normalizedUpstreams.length === 0) {
       toast.error("请至少填写一个上游地址");
+      return;
+    }
+    if (invalidUpstream) {
+      toast.error(`上游地址格式无效：${invalidUpstream}`);
       return;
     }
     if (tlsEnabled && !certId) {
@@ -90,7 +96,7 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
           network: "tcp",
           tls_enabled: tlsEnabled,
           cert_id: tlsEnabled ? certId : null,
-          upstream_urls: JSON.stringify(normalizedUpstreams),
+          upstream_urls: serializeSiteUpstreams(normalizedUpstreams),
           enabled: true,
           maintenance_enabled: false,
         }),
@@ -107,10 +113,10 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
 
   return (
     <Dialog open={open} onOpenChange={close}>
-      <DialogContent className="max-h-[88vh] max-w-2xl overflow-y-auto rounded-[28px] p-0">
-        <DialogHeader className="border-b border-white/10 bg-[linear-gradient(135deg,rgba(10,19,34,0.96),rgba(11,27,48,0.9)_55%,rgba(10,69,88,0.5))] px-6 py-6 text-left text-white">
-          <DialogTitle className="text-2xl font-semibold tracking-tight">新增站点</DialogTitle>
-          <DialogDescription className="mt-2 text-sm leading-6 text-slate-300/90">
+      <DialogContent className="max-h-[88vh] max-w-2xl overflow-y-auto rounded-lg p-0">
+        <DialogHeader className="border-b border-slate-200 bg-white px-6 py-5 text-left">
+          <DialogTitle className="text-xl font-semibold tracking-tight text-slate-950">新增站点</DialogTitle>
+          <DialogDescription className="mt-1 text-sm leading-6 text-slate-600">
             仅填写当前站点模型真实存在的字段：Host、监听地址、TLS 证书与上游地址。
           </DialogDescription>
         </DialogHeader>
@@ -119,7 +125,7 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
           <div className="grid gap-4 md:grid-cols-[1.2fr_0.8fr]">
             <label className="space-y-2">
               <span className="text-sm font-medium text-slate-900">Host</span>
-              <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3">
+              <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3">
                 <Globe className="h-4 w-4 text-slate-400" />
                 <Input
                   value={host}
@@ -136,7 +142,7 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
                 value={bind}
                 onChange={(event) => setBind(event.target.value)}
                 placeholder=":80"
-                className="rounded-2xl border-slate-200 bg-slate-50"
+                className="rounded-lg border-slate-200 bg-slate-50"
               />
             </label>
           </div>
@@ -144,18 +150,18 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
           <div className="grid gap-4 md:grid-cols-[0.9fr_1.1fr]">
             <div className="space-y-2">
               <span className="text-sm font-medium text-slate-900">接入协议</span>
-              <div className="grid grid-cols-2 gap-2 rounded-[20px] border border-slate-200 bg-slate-50 p-2">
+              <div className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
                 <button
                   type="button"
                   onClick={() => setProtocol(false)}
-                  className={tlsEnabled ? "rounded-2xl px-4 py-3 text-sm font-medium text-slate-600" : "rounded-2xl bg-white px-4 py-3 text-sm font-medium text-slate-950 shadow-sm"}
+                  className={tlsEnabled ? "rounded-lg px-4 py-3 text-sm font-medium text-slate-600" : "rounded-lg bg-white px-4 py-3 text-sm font-medium text-slate-950 shadow-sm"}
                 >
                   HTTP
                 </button>
                 <button
                   type="button"
                   onClick={() => setProtocol(true)}
-                  className={tlsEnabled ? "rounded-2xl bg-white px-4 py-3 text-sm font-medium text-slate-950 shadow-sm" : "rounded-2xl px-4 py-3 text-sm font-medium text-slate-600"}
+                  className={tlsEnabled ? "rounded-lg bg-white px-4 py-3 text-sm font-medium text-slate-950 shadow-sm" : "rounded-lg px-4 py-3 text-sm font-medium text-slate-600"}
                 >
                   HTTPS
                 </button>
@@ -165,12 +171,12 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
             <div className="space-y-2">
               <span className="text-sm font-medium text-slate-900">TLS 证书</span>
               {tlsEnabled ? (
-                <div className="rounded-[20px] border border-slate-200 bg-slate-50 p-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                   <div className="mb-2 flex items-center gap-2 text-xs text-slate-500">
                     <Lock className="h-3.5 w-3.5" /> 启用 HTTPS 时必须绑定证书
                   </div>
                   <Select value={certId ? String(certId) : ""} onValueChange={(value) => setCertId(value ? Number(value) : null)}>
-                    <SelectTrigger className="rounded-2xl border-slate-200 bg-white">
+                    <SelectTrigger className="rounded-lg border-slate-200 bg-white">
                       <SelectValue placeholder={certificates.length ? "选择证书" : "当前没有可用证书"} />
                     </SelectTrigger>
                     <SelectContent>
@@ -183,27 +189,27 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
                   </Select>
                 </div>
               ) : (
-                <div className="flex min-h-[82px] items-center rounded-[20px] border border-dashed border-slate-300 bg-slate-50 px-4 text-sm text-slate-500">
+                <div className="flex min-h-[82px] items-center rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 text-sm text-slate-500">
                   当前为 HTTP 接入，无需证书。
                 </div>
               )}
             </div>
           </div>
 
-          <div className="space-y-3 rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
+          <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/80 p-5">
             <div className="flex items-center justify-between gap-4">
               <div>
                 <h3 className="text-sm font-semibold text-slate-900">上游地址</h3>
                 <p className="mt-1 text-xs leading-5 text-slate-500">按 `upstream_urls` 数组写入，至少保留一个 HTTP/HTTPS 地址。</p>
               </div>
-              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => setUpstreams((current) => [...current, defaultUpstream])}>
+              <Button type="button" variant="outline" size="sm" className="rounded-md" onClick={() => setUpstreams((current) => [...current, defaultUpstream])}>
                 <Plus className="mr-1.5 h-3.5 w-3.5" /> 添加上游
               </Button>
             </div>
 
             <div className="space-y-3">
               {upstreams.map((upstream, index) => (
-                <div key={`${index}-${upstream}`} className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white p-2">
+                <div key={`${index}-${upstream}`} className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-2">
                   <Input
                     value={upstream}
                     onChange={(event) => updateUpstream(index, event.target.value)}
@@ -211,7 +217,7 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
                     className="border-0 bg-transparent font-mono text-sm shadow-none focus-visible:ring-0"
                   />
                   {upstreams.length > 1 ? (
-                    <Button type="button" variant="ghost" size="icon-sm" className="rounded-xl text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => removeUpstream(index)}>
+                    <Button type="button" variant="ghost" size="icon-sm" className="rounded-md text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => removeUpstream(index)}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   ) : null}
@@ -222,10 +228,10 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
         </div>
 
         <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
-          <Button variant="outline" className="rounded-xl" onClick={() => close(false)}>
+          <Button variant="outline" className="rounded-md" onClick={() => close(false)}>
             取消
           </Button>
-          <Button onClick={handleSubmit} disabled={saving} className="rounded-xl bg-slate-950 text-white hover:bg-slate-800">
+          <Button onClick={handleSubmit} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
             {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
             {saving ? "创建中..." : "创建站点"}
           </Button>

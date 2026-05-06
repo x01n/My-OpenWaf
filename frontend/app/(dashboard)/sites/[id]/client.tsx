@@ -24,6 +24,7 @@ import {
   updateSite,
   type Site,
 } from "@/lib/api";
+import { findInvalidSiteUpstream, parseSiteUpstreams, serializeSiteUpstreams } from "@/lib/site-upstreams";
 import { formatDate } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -31,19 +32,6 @@ function extractSiteId(candidate: string | undefined) {
   if (!candidate) return "";
   const last = candidate.split("/").filter(Boolean).at(-1) ?? "";
   return /^\d+$/.test(last) ? last : "";
-}
-
-function parseUpstreams(raw: string) {
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed as string[];
-  } catch {}
-  return raw
-    ? raw
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
 }
 
 type TabKey = "basic" | "listeners" | "upstream" | "advanced";
@@ -100,7 +88,7 @@ export default function SiteDetailClient() {
       setBind(s.bind);
       setNetwork(s.network);
       setTlsEnabled(s.tls_enabled);
-      setUpstreams(parseUpstreams(s.upstream_urls));
+      setUpstreams(parseSiteUpstreams(s.upstream_urls));
       setBlockHtml(s.block_html || "");
       setBlockStatus(s.block_status || 403);
       setMaintenanceEnabled(s.maintenance_enabled);
@@ -124,6 +112,12 @@ export default function SiteDetailClient() {
 
   async function handleSave() {
     if (!site) return;
+    const normalizedUpstreams = upstreams.map((item) => item.trim()).filter(Boolean);
+    const invalidUpstream = findInvalidSiteUpstream(normalizedUpstreams);
+    if (invalidUpstream) {
+      toast.error(`上游地址格式无效：${invalidUpstream}`);
+      return;
+    }
     setSaving(true);
     try {
       await updateSite(site.id, {
@@ -131,7 +125,7 @@ export default function SiteDetailClient() {
         bind,
         network,
         tls_enabled: tlsEnabled,
-        upstream_urls: JSON.stringify(upstreams.filter(Boolean)),
+        upstream_urls: serializeSiteUpstreams(normalizedUpstreams),
         block_html: blockHtml,
         block_status: blockStatus,
         maintenance_enabled: maintenanceEnabled,

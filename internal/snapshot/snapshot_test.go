@@ -202,3 +202,29 @@ func TestCompileCCRulesBuildsSinglePathRule(t *testing.T) {
 		t.Fatalf("action = %q, want %q", rules[0].Action, store.ActionObserve)
 	}
 }
+
+func TestParseUpstreamURLsSupportsJSONArray(t *testing.T) {
+	got := parseUpstreamURLs(`[" http://127.0.0.1:8800 ", "", "https://example.com"]`)
+	want := []string{"http://127.0.0.1:8800", "https://example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("parseUpstreamURLs() returned %d urls, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("url[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseUpstreamURLsKeepsCommaFormat(t *testing.T) {
+	got := parseUpstreamURLs(` http://127.0.0.1:8800 , https://example.com `)
+	want := []string{"http://127.0.0.1:8800", "https://example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("parseUpstreamURLs() returned %d urls, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("url[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

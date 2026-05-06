@@ -48,10 +48,10 @@ export function ProtectionModeDialog({ open, onOpenChange, currentMode, onConfir
 
   return (
     <Dialog key={`${open}-${currentMode}`} open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl rounded-[28px] p-0">
-        <DialogHeader className="border-b border-white/10 bg-[linear-gradient(135deg,rgba(10,19,34,0.96),rgba(11,27,48,0.9)_55%,rgba(10,69,88,0.5))] px-6 py-6 text-left text-white">
-          <DialogTitle className="text-2xl font-semibold tracking-tight">选择防护模式</DialogTitle>
-          <DialogDescription className="mt-2 text-sm leading-6 text-slate-300/90">该设置用于切换站点的即时处理策略，确认后会走真实更新接口并触发运行时生效。</DialogDescription>
+      <DialogContent className="max-w-2xl rounded-lg p-0">
+        <DialogHeader className="border-b border-slate-200 bg-white px-6 py-5 text-left">
+          <DialogTitle className="text-xl font-semibold tracking-tight text-slate-950">选择防护模式</DialogTitle>
+          <DialogDescription className="mt-1 text-sm leading-6 text-slate-600">该设置用于切换站点的即时处理策略，确认后会走真实更新接口并触发运行时生效。</DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-4 px-6 py-6 md:grid-cols-3">
@@ -64,11 +64,11 @@ export function ProtectionModeDialog({ open, onOpenChange, currentMode, onConfir
                 type="button"
                 onClick={() => setSelected(mode.key)}
                 className={cn(
-                  "rounded-[24px] border p-5 text-left transition-all",
-                  active ? `${mode.classes} shadow-[0_18px_40px_rgba(15,23,42,0.08)]` : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300 hover:bg-white"
+                  "rounded-lg border p-5 text-left transition-colors",
+                  active ? `${mode.classes} shadow-sm` : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300 hover:bg-white"
                 )}
               >
-                <div className={cn("flex h-11 w-11 items-center justify-center rounded-2xl", active ? mode.iconBox : "bg-white text-slate-500")}>
+                <div className={cn("flex h-11 w-11 items-center justify-center rounded-lg", active ? mode.iconBox : "bg-white text-slate-500")}>
                   <Icon className="h-5 w-5" />
                 </div>
                 <div className="mt-4 space-y-2">
@@ -86,10 +86,10 @@ export function ProtectionModeDialog({ open, onOpenChange, currentMode, onConfir
         </div>
 
         <DialogFooter className="border-t border-slate-200 bg-white px-6 py-4">
-          <Button variant="outline" className="rounded-xl" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" className="rounded-md" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button onClick={() => onConfirm(selected)} disabled={loading} className="rounded-xl bg-slate-950 text-white hover:bg-slate-800">
+          <Button onClick={() => onConfirm(selected)} disabled={loading} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
             {loading ? "保存中..." : "确认切换"}
           </Button>
         </DialogFooter>

@@ -251,6 +251,24 @@ func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) {
 }
 
 func parseUpstreamURLs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if strings.HasPrefix(raw, "[") {
+		var values []string
+		if err := json.Unmarshal([]byte(raw), &values); err == nil {
+			out := make([]string, 0, len(values))
+			for _, p := range values {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					out = append(out, p)
+				}
+			}
+			return out
+		}
+	}
+
 	var out []string
 	for _, p := range strings.Split(raw, ",") {
 		p = strings.TrimSpace(p)

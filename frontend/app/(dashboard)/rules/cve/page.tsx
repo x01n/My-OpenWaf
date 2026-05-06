@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useState } from "react";
 import { Search, Shield, ShieldAlert, ShieldCheck, AlertTriangle } from "lucide-react";
@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Pagination } from "@/components/pagination";
 import { PageIntro, Surface, EmptyState } from "@/components/console-shell";
-import { getCVERules, updateCVERule, toggleCVERule, type CVERule, type CVERuleQuery } from "@/lib/api";
+import { getCVERules, patchCVERule, type CVERule, type CVERuleQuery } from "@/lib/api";
 import { getCVERuleStats, batchToggleCVERules, type CVERuleStats } from "@/lib/rules-api";
 
 const PAGE_SIZE = 20;
@@ -34,10 +34,10 @@ const severityIcon: Record<string, React.ReactNode> = {
 
 function StatCard({ label, value, icon, color }: { label: string; value: number; icon: React.ReactNode; color: string }) {
   return (
-    <div className={`rounded-lg border bg-white p-5 shadow-sm`}>
+    <div className="rounded-lg border bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">{label}</p>
+          <p className="text-xs font-medium tracking-wider text-slate-500 uppercase">{label}</p>
           <p className="mt-1 text-2xl font-bold text-slate-900">{value}</p>
         </div>
         <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${color}`}>{icon}</div>
@@ -82,8 +82,13 @@ export default function CVERuleManagementPage() {
     }
   }, [page, category, severity, enabled, search]);
 
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => { getCVERuleStats().then(setStats).catch(() => {}); }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useEffect(() => {
+    getCVERuleStats().then(setStats).catch(() => {});
+  }, []);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -111,21 +116,30 @@ export default function CVERuleManagementPage() {
       toast.success(`已${en ? "启用" : "禁用"} ${selected.size} 条规则`);
       setSelected(new Set());
       load();
-    } catch (e) { toast.error(String(e)); }
+    } catch (e) {
+      toast.error(String(e));
+    }
   }
 
   async function handleToggle(rule: CVERule) {
-    try { await toggleCVERule(rule.id, !rule.enabled); load(); } catch (e) { toast.error(String(e)); }
+    try {
+      await patchCVERule(rule.id, { enabled: !rule.enabled });
+      load();
+    } catch (e) {
+      toast.error(String(e));
+    }
   }
 
   async function saveEdit() {
     if (!editRule) return;
     try {
-      await updateCVERule(editRule.id, editForm);
+      await patchCVERule(editRule.id, editForm);
       toast.success("规则已更新");
       setEditRule(null);
       load();
-    } catch (e) { toast.error(String(e)); }
+    } catch (e) {
+      toast.error(String(e));
+    }
   }
 
   return (
@@ -141,16 +155,23 @@ export default function CVERuleManagementPage() {
         </div>
       )}
 
-      <Surface title="规则列表" description="管理所有 CVE 检测规则。" action={
-        selected.size > 0 ? (
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-slate-500">已选 {selected.size} 条</span>
-            <Button size="sm" variant="outline" className="rounded-md" onClick={() => batchToggle(true)}>批量启用</Button>
-            <Button size="sm" variant="outline" className="rounded-md" onClick={() => batchToggle(false)}>批量禁用</Button>
-          </div>
-        ) : undefined
-      }>
-        {/* 筛选栏 */}
+      <Surface
+        title="规则列表"
+        description="管理所有 CVE 检测规则。"
+        action={
+          selected.size > 0 ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-500">已选 {selected.size} 条</span>
+              <Button size="sm" variant="outline" className="rounded-md" onClick={() => batchToggle(true)}>
+                批量启用
+              </Button>
+              <Button size="sm" variant="outline" className="rounded-md" onClick={() => batchToggle(false)}>
+                批量禁用
+              </Button>
+            </div>
+          ) : undefined
+        }
+      >
         <div className="mb-4 flex flex-wrap gap-3">
           <Select value={category} onValueChange={(v) => { setCategory(v); setPage(1); }}>
             <SelectTrigger className="w-[140px] rounded-md"><SelectValue placeholder="分类" /></SelectTrigger>
@@ -180,8 +201,8 @@ export default function CVERuleManagementPage() {
               <SelectItem value="false">禁用</SelectItem>
             </SelectContent>
           </Select>
-          <div className="relative flex-1 min-w-[200px]">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <div className="relative min-w-[200px] flex-1">
+            <Search className="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <Input placeholder="搜索 CVE 编号或描述..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="rounded-md pl-9" />
           </div>
         </div>
@@ -210,15 +231,15 @@ export default function CVERuleManagementPage() {
                   {items.map((rule) => (
                     <TableRow key={rule.id}>
                       <TableCell><Checkbox checked={selected.has(rule.id)} onCheckedChange={() => toggleSelect(rule.id)} /></TableCell>
-                      <TableCell className="text-xs text-slate-400 font-mono">{rule.id}</TableCell>
+                      <TableCell className="font-mono text-xs text-slate-400">{rule.id}</TableCell>
                       <TableCell>
-                        <div className="font-medium text-slate-900 max-w-[220px] truncate">{rule.description || "未命名"}</div>
+                        <div className="max-w-[220px] truncate font-medium text-slate-900">{rule.description || "未命名"}</div>
                       </TableCell>
                       <TableCell>
                         <span className="font-mono text-sm text-slate-700">{rule.cve_id}</span>
                       </TableCell>
                       <TableCell>
-                        <Badge className={`rounded-md border gap-1 ${severityColor[rule.severity] ?? "bg-slate-100 text-slate-600 border-slate-200"}`}>
+                        <Badge className={`gap-1 rounded-md border ${severityColor[rule.severity] ?? "border-slate-200 bg-slate-100 text-slate-600"}`}>
                           {severityIcon[rule.severity]}
                           {rule.severity}
                         </Badge>
@@ -226,7 +247,9 @@ export default function CVERuleManagementPage() {
                       <TableCell><Badge variant="outline" className="rounded-md">{rule.category}</Badge></TableCell>
                       <TableCell><Switch checked={rule.enabled} onCheckedChange={() => handleToggle(rule)} /></TableCell>
                       <TableCell className="text-right">
-                        <Button size="sm" variant="ghost" className="rounded-md" onClick={() => { setEditRule(rule); setEditForm({ enabled: rule.enabled, action: rule.action, severity: rule.severity }); }}>编辑</Button>
+                        <Button size="sm" variant="ghost" className="rounded-md" onClick={() => { setEditRule(rule); setEditForm({ enabled: rule.enabled, action: rule.action, severity: rule.severity }); }}>
+                          编辑
+                        </Button>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -238,8 +261,7 @@ export default function CVERuleManagementPage() {
         )}
       </Surface>
 
-      {/* 编辑 Dialog */}
-      <Dialog open={!!editRule} onOpenChange={(o) => { if (!o) setEditRule(null); }}>
+      <Dialog open={!!editRule} onOpenChange={(open) => { if (!open) setEditRule(null); }}>
         <DialogContent className="max-w-md rounded-lg">
           <DialogHeader>
             <DialogTitle>编辑 CVE 规则</DialogTitle>

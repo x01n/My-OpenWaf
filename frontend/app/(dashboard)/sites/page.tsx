@@ -2,15 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  ExternalLink,
-  Globe,
-  Loader2,
-  Plus,
-  Power,
-  Shield,
-  Trash2,
-} from "lucide-react";
+import { ExternalLink, Globe, Loader2, Plus, Power, Shield, Trash2 } from "lucide-react";
 import { AddSiteDialog } from "@/components/add-site-dialog";
 import {
   Dialog,
@@ -22,21 +14,9 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { deleteSite, listSites, startSite, stopSite, type Site } from "@/lib/api";
+import { parseSiteUpstreams } from "@/lib/site-upstreams";
 import { formatDate } from "@/lib/utils";
 import { toast } from "sonner";
-
-function parseUpstreams(raw: string) {
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed as string[];
-  } catch {}
-  return raw
-    ? raw
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
-}
 
 export default function SitesPage() {
   const router = useRouter();
@@ -100,39 +80,31 @@ export default function SitesPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">防护应用</h1>
-          <p className="mt-1 text-sm text-gray-500">管理站点接入、上游转发和防护状态</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">防护应用</h1>
+          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">管理站点接入、上游转发和防护状态</p>
         </div>
-        <Button
-          onClick={() => setDialogOpen(true)}
-          className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
-        >
+        <Button onClick={() => setDialogOpen(true)} className="rounded-md bg-slate-950 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-slate-200">
           <Plus className="mr-2 h-4 w-4" />
           添加站点
         </Button>
       </div>
 
-      {/* Loading */}
       {loading ? (
         <div className="grid gap-4 lg:grid-cols-2">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-[220px] animate-pulse rounded-lg bg-white shadow-sm" />
+            <div key={i} className="h-[220px] animate-pulse rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900" />
           ))}
         </div>
       ) : sites.length === 0 ? (
-        <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-gray-300 bg-white">
-          <Globe className="mb-4 h-12 w-12 text-gray-300" />
-          <h3 className="text-lg font-semibold text-gray-700">还没有防护应用</h3>
-          <p className="mt-2 max-w-sm text-center text-sm text-gray-500">
+        <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+          <Globe className="mb-4 h-12 w-12 text-slate-300" />
+          <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200">还没有防护应用</h3>
+          <p className="mt-2 max-w-sm text-center text-sm text-slate-500 dark:text-slate-400">
             创建站点后即可绑定域名、监听地址与上游目标
           </p>
-          <Button
-            onClick={() => setDialogOpen(true)}
-            className="mt-5 rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
-          >
+          <Button onClick={() => setDialogOpen(true)} className="mt-5 rounded-md bg-slate-950 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-slate-200">
             <Plus className="mr-2 h-4 w-4" />
             新建站点
           </Button>
@@ -140,36 +112,37 @@ export default function SitesPage() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {sites.map((site) => {
-            const upstreams = parseUpstreams(site.upstream_urls);
+            const upstreams = parseSiteUpstreams(site.upstream_urls);
             const isBusy = busyId === site.id;
+            const listenerSummary = site.listener_summary?.trim() || `监听 ${site.bind}`;
+            const tlsSummary = site.tls_summary?.trim() || (site.tls_enabled ? "HTTPS" : "HTTP");
+            const networkSummary = site.network?.trim() ? ` · 网络 ${site.network}` : "";
 
             return (
               <div
                 key={site.id}
-                className="rounded-lg border border-gray-200 bg-white shadow-sm transition-shadow hover:shadow-md"
+                className="rounded-lg border border-slate-200 bg-white shadow-sm transition-shadow hover:shadow-md dark:border-slate-800 dark:bg-slate-900"
               >
-                {/* Card Header */}
-                <div className="flex items-start justify-between border-b border-gray-100 p-5">
+                <div className="flex items-start justify-between border-b border-slate-200 p-5 dark:border-slate-800">
                   <div className="flex items-start gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-50">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-md border border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-950">
                       <Globe className="h-5 w-5 text-cyan-600" />
                     </div>
                     <div>
                       <div className="flex items-center gap-2">
-                        <h2 className="text-lg font-semibold text-gray-900">{site.host}</h2>
+                        <h2 className="text-lg font-semibold text-slate-950 dark:text-slate-50">{site.host}</h2>
                         <span
-                          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                          className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${
                             site.enabled
-                              ? "bg-emerald-50 text-emerald-700"
-                              : "bg-gray-100 text-gray-500"
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300"
+                              : "border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400"
                           }`}
                         >
                           {site.enabled ? "运行中" : "已停止"}
                         </span>
                       </div>
-                      <p className="mt-1 text-sm text-gray-500">
-                        {site.tls_enabled ? "HTTPS" : "HTTP"} · 监听{" "}
-                        <span className="font-mono">{site.bind}</span> · 网络 {site.network}
+                      <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                        {tlsSummary} · {listenerSummary}{networkSummary}
                       </p>
                     </div>
                   </div>
@@ -194,15 +167,13 @@ export default function SitesPage() {
                       {isBusy ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
-                        <Power
-                          className={`h-4 w-4 ${site.enabled ? "text-emerald-600" : "text-gray-400"}`}
-                        />
+                        <Power className={`h-4 w-4 ${site.enabled ? "text-emerald-600" : "text-slate-400"}`} />
                       )}
                     </Button>
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-8 w-8 rounded-md text-red-500 hover:bg-red-50 hover:text-red-600"
+                      className="h-8 w-8 rounded-md text-red-500 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"
                       disabled={isBusy}
                       onClick={() => setDeleteTarget(site)}
                       title="删除"
@@ -212,31 +183,26 @@ export default function SitesPage() {
                   </div>
                 </div>
 
-                {/* Card Stats */}
-                <div className="grid grid-cols-4 divide-x divide-gray-100 border-b border-gray-100">
+                <div className="grid grid-cols-4 divide-x divide-slate-200 border-b border-slate-200 dark:divide-slate-800 dark:border-slate-800">
                   <StatCell label="TLS" value={site.tls_enabled ? "已启用" : "关闭"} />
-                  <StatCell
-                    label="策略 ID"
-                    value={site.policy_id ? `#${site.policy_id}` : "未绑定"}
-                  />
+                  <StatCell label="策略 ID" value={site.policy_id ? `#${site.policy_id}` : "未绑定"} />
                   <StatCell label="Bot 防护" value={site.bot_protection_enabled ? "开启" : "关闭"} />
                   <StatCell label="最近更新" value={formatDate(site.updated_at)} small />
                 </div>
 
-                {/* Upstreams */}
                 <div className="p-5">
-                  <div className="mb-2 flex items-center gap-2 text-xs font-medium text-gray-500">
+                  <div className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
                     <Shield className="h-3.5 w-3.5" />
                     上游目标
                   </div>
                   {upstreams.length === 0 ? (
-                    <p className="text-sm text-gray-400">未配置上游地址</p>
+                    <p className="text-sm text-slate-400">未配置上游地址</p>
                   ) : (
                     <div className="flex flex-wrap gap-2">
                       {upstreams.map((u, i) => (
                         <span
                           key={`${site.id}-${i}`}
-                          className="rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1 font-mono text-xs text-gray-600"
+                          className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 font-mono text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300"
                         >
                           {u}
                         </span>
@@ -252,7 +218,6 @@ export default function SitesPage() {
 
       <AddSiteDialog open={dialogOpen} onOpenChange={setDialogOpen} onSuccess={load} />
 
-      {/* Delete Confirmation */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <DialogContent className="max-w-md rounded-lg">
           <DialogHeader>
@@ -261,18 +226,14 @@ export default function SitesPage() {
               删除后该站点入口、监听配置与运行时状态都会移除，此操作不可撤销。
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-200">
             目标站点：<strong>{deleteTarget?.host || "-"}</strong>
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-md" onClick={() => setDeleteTarget(null)}>
               取消
             </Button>
-            <Button
-              className="rounded-md bg-red-600 text-white hover:bg-red-500"
-              disabled={deleting}
-              onClick={removeSite}
-            >
+            <Button className="rounded-md bg-red-600 text-white hover:bg-red-500" disabled={deleting} onClick={removeSite}>
               {deleting ? "删除中..." : "确认删除"}
             </Button>
           </DialogFooter>
@@ -293,8 +254,8 @@ function StatCell({
 }) {
   return (
     <div className="px-4 py-3">
-      <div className="text-[11px] font-medium text-gray-400 uppercase">{label}</div>
-      <div className={`mt-0.5 font-medium text-gray-800 ${small ? "text-xs" : "text-sm"}`}>
+      <div className="text-[11px] font-medium uppercase text-slate-400">{label}</div>
+      <div className={`mt-0.5 font-medium text-slate-800 dark:text-slate-200 ${small ? "text-xs" : "text-sm"}`}>
         {value}
       </div>
     </div>

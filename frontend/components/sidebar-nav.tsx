@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ChevronLeft, ChevronRight, LogOut, Sparkles } from "lucide-react";
+import { ChevronLeft, ChevronRight, LogOut, Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { logout } from "@/lib/api";
 import { consoleNavItems } from "@/lib/console";
@@ -31,37 +31,36 @@ export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
   return (
     <aside
       className={cn(
-        "relative flex h-svh shrink-0 flex-col border-r border-white/8 bg-[linear-gradient(180deg,#09111f_0%,#0d182b_42%,#0b1120_100%)] text-white shadow-[30px_0_80px_rgba(2,6,23,0.35)]",
+        "relative flex h-svh shrink-0 flex-col border-r border-slate-200 bg-slate-50 text-slate-950 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-50",
         collapsed ? "w-[92px]" : "w-[316px]",
       )}
     >
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(6,182,212,0.12),transparent_32%),radial-gradient(circle_at_bottom,rgba(16,185,129,0.08),transparent_22%)]" />
       <div className="relative flex h-full flex-col">
-        <div className="px-4 pb-4 pt-5">
-          <div className="console-glass rounded-[28px] p-4">
+        <div className="border-b border-slate-200 px-4 pb-4 pt-5 dark:border-slate-800">
+          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-start justify-between gap-3">
               {!collapsed ? (
                 <div className="space-y-2">
-                  <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] tracking-[0.22em] text-white/70 uppercase">
-                    <Sparkles className="h-3.5 w-3.5" /> Security Console
+                  <div className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] tracking-[0.18em] text-slate-500 uppercase dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400">
+                    <Shield className="h-3.5 w-3.5 text-cyan-600" /> 控制台
                   </div>
                   <div>
-                    <div className="text-xl font-semibold tracking-tight text-white">My-OpenWAF</div>
-                    <p className="mt-1 text-xs leading-5 text-slate-300/70">
+                    <div className="text-xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">My-OpenWAF</div>
+                    <p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-400">
                       统一管理站点接入、检测引擎、阻断策略与运行状态。
                     </p>
                   </div>
                 </div>
               ) : (
-                <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-400/12 text-cyan-200">
-                  <Sparkles className="h-5 w-5" />
+                <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-cyan-600 dark:border-slate-800 dark:bg-slate-950 dark:text-cyan-400">
+                  <Shield className="h-5 w-5" />
                 </div>
               )}
               <Button
                 variant="ghost"
                 size="icon-sm"
                 onClick={onToggle}
-                className="shrink-0 rounded-xl text-slate-300 hover:bg-white/8 hover:text-white"
+                className="shrink-0 rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-50"
               >
                 {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
               </Button>
@@ -69,12 +68,12 @@ export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
           </div>
         </div>
 
-        <nav className="relative flex-1 overflow-y-auto px-3 pb-4">
+        <nav className="relative flex-1 overflow-y-auto px-3 pb-4 pt-3">
           <div className="space-y-5">
             {Object.entries(groups).map(([groupName, items]) => (
               <div key={groupName} className="space-y-2">
                 {!collapsed ? (
-                  <div className="px-3 text-[11px] font-medium tracking-[0.22em] text-slate-500 uppercase">
+                  <div className="px-3 text-[11px] font-medium tracking-[0.18em] text-slate-500 uppercase dark:text-slate-400">
                     {groupName}
                   </div>
                 ) : null}
@@ -93,18 +92,20 @@ export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
                         data-active={active}
                         title={collapsed ? item.label : undefined}
                       >
-                        <div className={cn(
-                          "mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border",
-                          active
-                            ? "border-cyan-300/20 bg-cyan-300/14 text-cyan-100"
-                            : "border-white/8 bg-white/5 text-slate-300",
-                        )}>
+                        <div
+                          className={cn(
+                            "mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md border",
+                            active
+                              ? "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900/60 dark:bg-cyan-950/40 dark:text-cyan-300"
+                              : "border-slate-200 bg-white text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300",
+                          )}
+                        >
                           <item.icon className="h-4.5 w-4.5" />
                         </div>
                         {!collapsed ? (
                           <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-medium text-white">{item.label}</div>
-                            <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-slate-400/80">
+                            <div className="truncate text-sm font-medium text-slate-900 dark:text-slate-50">{item.label}</div>
+                            <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-slate-500 dark:text-slate-400">
                               {item.description}
                             </div>
                           </div>
@@ -118,13 +119,13 @@ export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
           </div>
         </nav>
 
-        <div className="relative p-3 pt-0">
-          <div className="console-glass rounded-[24px] p-3">
+        <div className="relative border-t border-slate-200 p-3 pt-0 dark:border-slate-800">
+          <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
             <Button
               variant="ghost"
               onClick={handleLogout}
               className={cn(
-                "h-auto w-full justify-start rounded-2xl px-3 py-3 text-slate-300 hover:bg-white/8 hover:text-white",
+                "h-auto w-full justify-start rounded-md px-3 py-3 text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-50",
                 collapsed && "justify-center px-2",
               )}
               title={collapsed ? "退出登录" : undefined}
