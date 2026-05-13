@@ -191,7 +191,7 @@ export default function FingerprintsPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 rounded-lg px-2 text-cyan-600 hover:text-cyan-700"
+                        className="h-7 rounded-md px-2 text-slate-600 hover:text-slate-900"
                         onClick={() => setSelectedHash(item.ja3_hash)}
                       >
                         <Eye className="mr-1 h-3.5 w-3.5" /> 详情

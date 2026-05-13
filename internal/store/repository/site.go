@@ -42,3 +42,12 @@ func (r *SiteRepo) Create(item *store.Site) error { return r.db.Create(item).Err
 func (r *SiteRepo) Update(item *store.Site) error { return r.db.Save(item).Error }
 
 func (r *SiteRepo) Delete(id uint) error { return r.db.Delete(&store.Site{}, id).Error }
+
+func (r *SiteRepo) DeleteWithListeners(id uint) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("site_id = ?", id).Delete(&store.SiteListener{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&store.Site{}, id).Error
+	})
+}

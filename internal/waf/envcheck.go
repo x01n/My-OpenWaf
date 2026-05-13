@@ -200,6 +200,7 @@ try{fp.screen_width=screen.width;fp.screen_height=screen.height}catch(e){fp.scre
 try{fp.timezone_offset=new Date().getTimezoneOffset()}catch(e){fp.timezone_offset=0}
 try{fp.touch_support='ontouchstart' in window||navigator.maxTouchPoints>0}catch(e){fp.touch_support=false}
 try{fp.hardware_concurrency=navigator.hardwareConcurrency||0}catch(e){fp.hardware_concurrency=0}
+window.__owaf_env=fp;
 window.__envFingerprint=JSON.stringify(fp);
 var input=document.getElementById('__waf_env_fp');
 if(input)input.value=window.__envFingerprint;

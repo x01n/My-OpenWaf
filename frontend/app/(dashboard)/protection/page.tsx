@@ -4,7 +4,12 @@ import { useEffect, useMemo, useState } from "react";
 import { ShieldAlert, ShieldCheck, Eye, Wrench, Zap, Save } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { PageIntro, Surface } from "@/components/console-shell";
 import { getProtectionSettings, updateProtectionSettings, type ProtectionSettings } from "@/lib/api";
+import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console";
 import { cn } from "@/lib/utils";
 
 const protectionModes = [
@@ -134,23 +139,38 @@ export default function ProtectionPage() {
 
   return (
     <div className="space-y-6">
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-900">攻击防护</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            配置全局防护模式和各检测类别的敏感度级别
-          </p>
+      <PageIntro
+        eyebrow="Protection Policy"
+        title="攻击防护"
+        description="配置全局防护模式、动作状态码、黑白名单优先级、挑战策略和检测类别敏感度。"
+        actions={
+          <Button
+            onClick={save}
+            disabled={saving}
+            className="rounded-md bg-slate-950 px-6 text-white hover:bg-slate-800"
+          >
+            <Save className="mr-2 h-4 w-4" />
+            {saving ? "保存中..." : "保存配置"}
+          </Button>
+        }
+      />
+
+      <Surface title="策略执行顺序" description="数据面按优先级短路执行，规则级动作可覆盖全局默认动作。">
+        <div className="grid gap-3 md:grid-cols-4">
+          {[
+            ["01", "白名单", "最高优先级，命中后跳过后续检测", "border-emerald-200 bg-emerald-50 text-emerald-700"],
+            ["02", "黑名单", "在基础检测前拦截、限速或阻断", "border-rose-200 bg-rose-50 text-rose-700"],
+            ["03", "基础检测", "OWASP/CVE、Bot、限速、签名和自定义规则", "border-cyan-200 bg-cyan-50 text-cyan-700"],
+            ["04", "后续动作", "验证码、5s盾、链式验证或阶梯升级", "border-violet-200 bg-violet-50 text-violet-700"],
+          ].map(([idx, title, desc, tone]) => (
+            <div key={idx} className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+              <Badge className={cn("rounded-md border text-[11px]", tone)}>{idx}</Badge>
+              <div className="mt-3 text-sm font-semibold text-slate-900">{title}</div>
+              <p className="mt-1 text-xs leading-5 text-slate-500">{desc}</p>
+            </div>
+          ))}
         </div>
-        <Button
-          onClick={save}
-          disabled={saving}
-          className="rounded-md bg-cyan-600 px-6 text-white hover:bg-cyan-700"
-        >
-          <Save className="mr-2 h-4 w-4" />
-          {saving ? "保存中..." : "保存配置"}
-        </Button>
-      </div>
+      </Surface>
 
       {/* Mode Selection Cards */}
       <div>
@@ -173,7 +193,7 @@ export default function ProtectionPage() {
                 <div
                   className={cn(
                     "flex h-9 w-9 items-center justify-center rounded-lg",
-                    isActive ? "bg-cyan-100 text-cyan-600" : "bg-slate-100 text-slate-500"
+                    isActive ? "bg-slate-100 text-slate-700" : "bg-slate-100 text-slate-500"
                   )}
                 >
                   <Icon className="h-5 w-5" />
@@ -195,6 +215,93 @@ export default function ProtectionPage() {
             );
           })}
         </div>
+      </div>
+
+      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-200 px-5 py-4">
+          <h2 className="text-base font-semibold text-slate-900">全局动作策略</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            统一控制 OWASP、CVE、请求限速、错误限速和自动封禁的命中动作；规则级动作会覆盖这里的默认值。
+          </p>
+        </div>
+        <div className="grid gap-4 p-5 lg:grid-cols-2 xl:grid-cols-5">
+          {[
+            ["builtin_owasp_on_hit", "OWASP 命中"],
+            ["cve_action", "CVE 命中"],
+            ["request_ratelimit_action", "请求限速"],
+            ["error_ratelimit_action", "错误限速"],
+            ["auto_ban_action", "自动封禁"],
+          ].map(([field, label]) => {
+            const value = String((settings as unknown as Record<string, unknown>)[field] ?? (field.includes("ratelimit") ? "rate_limit" : "intercept"));
+            const meta = getWAFActionMeta(value);
+            return (
+              <div key={field} className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-600">{label}</span>
+                  <span className={cn("rounded-md border px-2 py-0.5 text-[10px] font-medium", meta.className)}>{meta.defaultStatus}</span>
+                </div>
+                <Select
+                  value={value}
+                  onValueChange={(v) => setSettings({ ...settings, [field]: v } as ProtectionSettings)}
+                >
+                  <SelectTrigger className="h-8 rounded-md bg-white text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {terminalWAFActionOptions.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="mt-2 min-h-8 text-[11px] leading-4 text-slate-500">{meta.description}</p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+        <Surface title="高危资源耗尽与 CVE 自动阻断" description="Critical/High CVE 可自动升级为 Drop；规则级动作优先于自动阻断。">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {[
+              ["cve_auto_drop_critical", "Critical 自动阻断", "命中 Critical CVE 且规则未单独配置动作时返回 RST"],
+              ["cve_auto_drop_high", "High 自动阻断", "命中 High CVE 且规则未单独配置动作时返回 RST"],
+            ].map(([field, label, desc]) => {
+              const checked = Boolean((settings as unknown as Record<string, unknown>)[field]);
+              return (
+                <div key={field} className="rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">{label}</div>
+                      <p className="mt-1 text-xs leading-5 text-slate-500">{desc}</p>
+                    </div>
+                    <Switch checked={checked} onCheckedChange={(v) => setSettings({ ...settings, [field]: v } as ProtectionSettings)} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Surface>
+
+        <Surface title="人机验证与后续动作" description="配置验证码、5s盾、混合验证和命中后的阶梯升级。">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {[
+              ["captcha_enabled", "验证码", "captcha_challenge"],
+              ["shield_enabled", "5s 盾", "shield_challenge"],
+              ["chain_enabled", "混合验证", "chain_challenge"],
+              ["escalation_enabled", "后续动作升级", "challenge → rate_limit → drop"],
+            ].map(([field, label, hint]) => {
+              const checked = Boolean((settings as unknown as Record<string, unknown>)[field]);
+              return (
+                <div key={field} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">{label}</div>
+                    <div className="text-[11px] font-mono text-slate-500">{hint}</div>
+                  </div>
+                  <Switch checked={checked} onCheckedChange={(v) => setSettings({ ...settings, [field]: v } as ProtectionSettings)} />
+                </div>
+              );
+            })}
+          </div>
+        </Surface>
       </div>
 
       {/* Sensitivity Matrix Table */}
@@ -248,7 +355,7 @@ export default function ProtectionPage() {
                             className={cn(
                               "inline-flex h-5 w-5 items-center justify-center rounded-full border-2 transition-all",
                               isSelected
-                                ? "border-cyan-500 bg-cyan-500 shadow-sm"
+                                ? "border-slate-900 bg-slate-900 shadow-sm"
                                 : "border-slate-300 bg-white hover:border-cyan-300"
                             )}
                           >
@@ -272,7 +379,7 @@ export default function ProtectionPage() {
         <Button
           onClick={save}
           disabled={saving}
-          className="rounded-md bg-cyan-600 px-8 py-2 text-white hover:bg-cyan-700"
+          className="rounded-md bg-slate-950 px-8 py-2 text-white hover:bg-slate-800"
         >
           <Save className="mr-2 h-4 w-4" />
           {saving ? "保存中..." : "保存配置"}

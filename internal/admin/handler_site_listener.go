@@ -50,7 +50,7 @@ func ListSiteListeners(siteRepo *repository.SiteRepo, repo *repository.SiteListe
 // First explicit listener migrates the legacy single-bind config: the
 // existing legacy entry is folded in by the snapshot fallback path, but
 // once an explicit row exists for the site the legacy fields are ignored.
-func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteListenerRepo, reload func() error) app.HandlerFunc {
+func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteListenerRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		siteID, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -77,8 +77,8 @@ func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 			c.JSON(400, map[string]string{"error": "bind is required"})
 			return
 		}
-		if item.TLSEnabled && (item.CertID == nil || *item.CertID == 0) {
-			c.JSON(400, map[string]string{"error": "TLS-enabled listener requires cert_id"})
+		if err := validateSiteTLSCertificate(item.TLSEnabled, item.CertID, certRepo); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -86,8 +86,9 @@ func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 		// explicitly defines a listener: persist it as a real row so the
 		// snapshot fallback path is never re-engaged afterwards.
 		existing, _ := repo.ListBySite(site.ID)
+		var legacy *store.SiteListener
 		if len(existing) == 0 && site.Bind != "" && site.Bind != item.Bind {
-			legacy := store.SiteListener{
+			legacy = &store.SiteListener{
 				SiteID:     site.ID,
 				Bind:       site.Bind,
 				Network:    site.Network,
@@ -96,13 +97,9 @@ func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 				Enabled:    true,
 				Note:       "migrated from legacy bind",
 			}
-			if err := repo.Create(&legacy); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
-			}
 		}
 
-		if err := repo.Create(&item); err != nil {
+		if err := repo.CreateWithLegacyPromotion(&item, legacy); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -114,7 +111,7 @@ func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 	}
 }
 
-func UpdateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteListenerRepo, reload func() error) app.HandlerFunc {
+func UpdateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteListenerRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		siteID, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -141,8 +138,8 @@ func UpdateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 		}
 		existing.ID = listenerID
 		existing.SiteID = siteID
-		if existing.TLSEnabled && (existing.CertID == nil || *existing.CertID == 0) {
-			c.JSON(400, map[string]string{"error": "TLS-enabled listener requires cert_id"})
+		if err := validateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
 		if err := repo.Update(existing); err != nil {

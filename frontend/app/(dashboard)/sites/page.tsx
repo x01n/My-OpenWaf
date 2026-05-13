@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ExternalLink, Globe, Loader2, Plus, Power, Shield, Trash2 } from "lucide-react";
 import { AddSiteDialog } from "@/components/add-site-dialog";
+import { Pagination } from "@/components/pagination";
 import {
   Dialog,
   DialogContent,
@@ -26,23 +27,37 @@ export default function SitesPage() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Site | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const pageSize = 20;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
-  async function load() {
+  async function load(targetPage = page) {
     setLoading(true);
     try {
-      const res = await listSites();
-      setSites(res.items ?? []);
+      const res = await listSites({ page: targetPage, page_size: pageSize });
+      const nextItems = res.items ?? [];
+      const nextTotal = res.total ?? 0;
+      if (targetPage > 1 && nextItems.length === 0 && nextTotal > 0) {
+        const previousPage = targetPage - 1;
+        setPage(previousPage);
+        await load(previousPage);
+        return;
+      }
+      setSites(nextItems);
+      setTotal(nextTotal);
     } catch (err) {
       toast.error(String(err));
       setSites([]);
+      setTotal(0);
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
-  }, []);
+    load(page);
+  }, [page]);
 
   async function toggleSite(site: Site) {
     setBusyId(site.id);
@@ -53,7 +68,7 @@ export default function SitesPage() {
         await startSite(site.id);
       }
       toast.success(site.enabled ? "站点已停用" : "站点已启用");
-      load();
+      load(page);
     } catch (err) {
       toast.error(String(err));
     } finally {
@@ -69,7 +84,7 @@ export default function SitesPage() {
       await deleteSite(deleteTarget.id);
       toast.success("站点已删除");
       setDeleteTarget(null);
-      load();
+      load(page);
     } catch (err) {
       toast.error(String(err));
     } finally {
@@ -126,7 +141,7 @@ export default function SitesPage() {
                 <div className="flex items-start justify-between border-b border-slate-200 p-5 dark:border-slate-800">
                   <div className="flex items-start gap-3">
                     <div className="flex h-10 w-10 items-center justify-center rounded-md border border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-950">
-                      <Globe className="h-5 w-5 text-cyan-600" />
+                      <Globe className="h-5 w-5 text-slate-600" />
                     </div>
                     <div>
                       <div className="flex items-center gap-2">
@@ -151,7 +166,7 @@ export default function SitesPage() {
                       variant="outline"
                       size="sm"
                       className="rounded-md text-xs"
-                      onClick={() => router.push(`/sites/${site.id}/`)}
+                      onClick={() => router.push(`/sites/_/?id=${site.id}`)}
                     >
                       <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
                       详情
@@ -216,7 +231,11 @@ export default function SitesPage() {
         </div>
       )}
 
-      <AddSiteDialog open={dialogOpen} onOpenChange={setDialogOpen} onSuccess={load} />
+      {!loading && total > 0 ? (
+        <Pagination page={page} totalPages={totalPages} total={total} pageSize={pageSize} onPageChange={setPage} />
+      ) : null}
+
+      <AddSiteDialog open={dialogOpen} onOpenChange={setDialogOpen} onSuccess={() => load(page)} />
 
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <DialogContent className="max-w-md rounded-lg">

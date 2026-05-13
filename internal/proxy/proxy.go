@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,16 @@ var (
 // SharedTransport returns a cached http.Transport for the given site runtime.
 // Transports are keyed by TLS config so connections are reused across requests.
 func SharedTransport(rt snapshot.SiteRuntime) *http.Transport {
-	isHTTPS := len(rt.UpstreamURLs) > 0 && strings.HasPrefix(rt.UpstreamURLs[0], "https://")
+	base := ""
+	if len(rt.UpstreamURLs) > 0 {
+		base = rt.UpstreamURLs[0]
+	}
+	return SharedTransportForUpstream(rt, base)
+}
+
+// SharedTransportForUpstream keys the pool by the selected upstream scheme.
+func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Transport {
+	isHTTPS := strings.HasPrefix(strings.ToLower(base), "https://")
 	key := transportKey{
 		tlsServerName: rt.Site.UpstreamTLSServerName,
 		tlsSkipVerify: rt.Site.UpstreamTLSSkipVerify,
@@ -165,7 +175,7 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 		return nil, err
 	}
 
-	tr := SharedTransport(rt)
+	tr := SharedTransportForUpstream(rt, base)
 	hc := sharedClient(tr)
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -211,13 +221,45 @@ func ShouldCacheResponse(method string, statusCode int, body []byte) bool {
 	return strings.EqualFold(method, "GET") && statusCode == 200 && len(body) > 0
 }
 
+func ShouldCacheHTTPResponse(method string, resp *HTTPResponse) bool {
+	if resp == nil || !ShouldCacheResponse(method, resp.StatusCode, resp.Body) {
+		return false
+	}
+	if resp.Header.Get("Set-Cookie") != "" {
+		return false
+	}
+	cacheControl := strings.ToLower(resp.Header.Get("Cache-Control"))
+	if strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private") {
+		return false
+	}
+	if resp.Header.Get("Vary") != "" {
+		return false
+	}
+	return true
+}
+
 func SiteCacheTTL(rt snapshot.SiteRuntime, path string) int64 {
 	if !rt.CacheEnabled {
 		return 0
 	}
 	for _, rule := range rt.CacheRules {
-		if strings.HasPrefix(path, rule.Path) {
-			return int64(rule.TTL)
+		ruleType := strings.ToLower(strings.TrimSpace(rule.Type))
+		if ruleType == "" {
+			ruleType = "prefix"
+		}
+		switch ruleType {
+		case "exact":
+			if path == rule.Value {
+				return int64(rule.TTL)
+			}
+		case "suffix":
+			if strings.HasSuffix(path, rule.Value) {
+				return int64(rule.TTL)
+			}
+		default:
+			if strings.HasPrefix(path, rule.Value) {
+				return int64(rule.TTL)
+			}
 		}
 	}
 	if rt.CacheDefaultTTL > 0 {
@@ -226,19 +268,27 @@ func SiteCacheTTL(rt snapshot.SiteRuntime, path string) int64 {
 	return 0
 }
 
-func SiteCacheKey(c *app.RequestContext) string {
-	return cache.CacheKey(string(c.Method()), string(c.Host()), requestPath(c), string(c.URI().QueryString()))
+func SiteCacheKey(rt snapshot.SiteRuntime, c *app.RequestContext) string {
+	hostKey := strings.TrimSpace(rt.Bind) + "|" + strconv.FormatUint(uint64(rt.Site.ID), 10) + "|" + string(c.Host())
+	return cache.CacheKey(string(c.Method()), hostKey, requestPath(c), string(c.URI().QueryString()))
 }
 
 func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (string, int64) {
 	if !rt.CacheEnabled || !strings.EqualFold(string(c.Method()), "GET") {
 		return "", 0
 	}
+	if c.Request.Header.Get("Authorization") != "" {
+		return "", 0
+	}
+	cacheControl := strings.ToLower(string(c.Request.Header.Peek("Cache-Control")))
+	if strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "no-cache") {
+		return "", 0
+	}
 	ttl := SiteCacheTTL(rt, requestPath(c))
 	if ttl <= 0 {
 		return "", 0
 	}
-	return SiteCacheKey(c), ttl
+	return SiteCacheKey(rt, c), ttl
 }
 
 // ForwardHTTP copies the incoming request to upstream and streams the response.
@@ -248,7 +298,7 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		return err
 	}
 
-	tr := SharedTransport(rt)
+	tr := SharedTransportForUpstream(rt, base)
 	hc := sharedClient(tr)
 	resp, err := hc.Do(req)
 	if err != nil {

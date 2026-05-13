@@ -160,11 +160,11 @@ export default function SettingsPage() {
           <div className="grid gap-5">
             <div className="space-y-2">
               <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                <Globe className="h-4 w-4 text-cyan-600" />
+                <Globe className="h-4 w-4 text-slate-600" />
                 客户端 IP 获取方式
               </label>
               <Select value={xffMode} onValueChange={setXffMode}>
-                <SelectTrigger className="rounded-xl"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="X-Forwarded-For">X-Forwarded-For</SelectItem>
                   <SelectItem value="X-Real-IP">X-Real-IP</SelectItem>
@@ -176,13 +176,13 @@ export default function SettingsPage() {
 
             <div className="space-y-2">
               <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                <Network className="h-4 w-4 text-cyan-600" />
+                <Network className="h-4 w-4 text-slate-600" />
                 信任代理 CIDR 列表
               </label>
               <Input
                 value={trustedCidr}
                 onChange={(e) => setTrustedCidr(e.target.value)}
-                className="rounded-xl"
+                className="rounded-md"
                 placeholder="例如：10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"
               />
               <p className="text-xs text-slate-400">多个 CIDR 用逗号分隔，仅从受信代理的请求中提取客户端 IP</p>
@@ -193,40 +193,40 @@ export default function SettingsPage() {
         {/* 协议支持 */}
         <Surface title="协议支持" description="控制服务端支持的网络协议和压缩特性。">
           <div className="grid gap-4">
-            <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
               <div>
                 <div className="text-sm font-medium text-slate-900 flex items-center gap-2">
-                  <Zap className="h-4 w-4 text-cyan-600" /> IPv6 支持
+                  <Zap className="h-4 w-4 text-slate-600" /> IPv6 支持
                 </div>
                 <div className="text-xs text-slate-500">允许通过 IPv6 地址访问</div>
               </div>
               <Switch checked={ipv6Enabled} onCheckedChange={setIpv6Enabled} />
             </div>
 
-            <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
               <div>
                 <div className="text-sm font-medium text-slate-900 flex items-center gap-2">
-                  <Zap className="h-4 w-4 text-cyan-600" /> HTTP/2
+                  <Zap className="h-4 w-4 text-slate-600" /> HTTP/2
                 </div>
                 <div className="text-xs text-slate-500">启用 HTTP/2 协议以提升传输效率</div>
               </div>
               <Switch checked={http2Enabled} onCheckedChange={setHttp2Enabled} />
             </div>
 
-            <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
               <div>
                 <div className="text-sm font-medium text-slate-900 flex items-center gap-2">
-                  <Lock className="h-4 w-4 text-cyan-600" /> HTTPS HSTS
+                  <Lock className="h-4 w-4 text-slate-600" /> HTTPS HSTS
                 </div>
                 <div className="text-xs text-slate-500">启用严格传输安全（Strict-Transport-Security）</div>
               </div>
               <Switch checked={hstsEnabled} onCheckedChange={setHstsEnabled} />
             </div>
 
-            <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
               <div>
                 <div className="text-sm font-medium text-slate-900 flex items-center gap-2">
-                  <Zap className="h-4 w-4 text-cyan-600" /> Brotli 压缩
+                  <Zap className="h-4 w-4 text-slate-600" /> Brotli 压缩
                 </div>
                 <div className="text-xs text-slate-500">启用 Brotli 压缩以减小传输体积</div>
               </div>
@@ -240,28 +240,28 @@ export default function SettingsPage() {
           <div className="grid gap-5">
             <div className="space-y-2">
               <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                <Shield className="h-4 w-4 text-cyan-600" />
+                <Shield className="h-4 w-4 text-slate-600" />
                 最小密码长度
               </label>
               <Input
                 type="number"
                 value={minPasswordLen}
                 onChange={(e) => setMinPasswordLen(Number(e.target.value))}
-                className="rounded-xl"
+                className="rounded-md"
                 min={6}
               />
             </div>
 
             <div className="space-y-2">
               <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                <Shield className="h-4 w-4 text-cyan-600" />
+                <Shield className="h-4 w-4 text-slate-600" />
                 最大登录失败次数
               </label>
               <Input
                 type="number"
                 value={maxAttempts}
                 onChange={(e) => setMaxAttempts(Number(e.target.value))}
-                className="rounded-xl"
+                className="rounded-md"
                 min={1}
               />
               <p className="text-xs text-slate-400">超过此次数后账户将被临时锁定</p>
@@ -269,14 +269,14 @@ export default function SettingsPage() {
 
             <div className="space-y-2">
               <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-                <Lock className="h-4 w-4 text-cyan-600" />
+                <Lock className="h-4 w-4 text-slate-600" />
                 锁定时长（分钟）
               </label>
               <Input
                 type="number"
                 value={lockoutMinutes}
                 onChange={(e) => setLockoutMinutes(Number(e.target.value))}
-                className="rounded-xl"
+                className="rounded-md"
                 min={1}
               />
               <p className="text-xs text-slate-400">账户被锁定后的自动解锁等待时间</p>
@@ -289,7 +289,7 @@ export default function SettingsPage() {
           <div className="grid gap-3 md:grid-cols-2">
             <InlineMeta label="版本号" value={
               <span className="flex items-center gap-2">
-                <Server className="h-3.5 w-3.5 text-cyan-600" />
+                <Server className="h-3.5 w-3.5 text-slate-600" />
                 {getSettingValue(settings, "version", "未知")}
               </span>
             } />

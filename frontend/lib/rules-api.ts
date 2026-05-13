@@ -8,6 +8,10 @@ export interface OWASPRule {
   name: string;
   description: string;
   enabled: boolean;
+  whitelist?: string[];
+  action?: string;
+  status_code?: number;
+  redirect_to?: string;
 }
 
 export interface OWASPRulesResponse {
@@ -85,7 +89,10 @@ export async function getOWASPRuleStats(): Promise<OWASPRuleStats> {
   return api<OWASPRuleStats>("/api/v1/owasp-rules/stats");
 }
 
-export async function updateOWASPRule(id: string, update: { enabled?: boolean; whitelist?: string[] }): Promise<void> {
+export async function updateOWASPRule(
+  id: string,
+  update: { enabled?: boolean; whitelist?: string[]; action?: string; status_code?: number; redirect_to?: string }
+): Promise<void> {
   await api(`/api/v1/owasp-rules/${id}/update`, {
     method: "POST",
     body: JSON.stringify(update),
@@ -93,7 +100,7 @@ export async function updateOWASPRule(id: string, update: { enabled?: boolean; w
 }
 
 export async function batchUpdateOWASPRules(
-  rules: Array<{ id: string; enabled?: boolean; whitelist?: string[] }>
+  rules: Array<{ id: string; enabled?: boolean; whitelist?: string[]; action?: string; status_code?: number; redirect_to?: string }>
 ): Promise<{ updated: number; total: number }> {
   return api<{ updated: number; total: number }>("/api/v1/owasp-rules/batch", {
     method: "POST",

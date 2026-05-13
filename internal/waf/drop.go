@@ -68,6 +68,9 @@ func (d *DropExecutor) Execute(conn net.Conn, reason DropReason) error {
 	}
 
 	// Close the connection immediately — no HTTP response is sent.
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetLinger(0)
+	}
 	err := conn.Close()
 
 	// Record stats regardless of close error (connection may already be closed).

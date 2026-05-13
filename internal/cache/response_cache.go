@@ -25,12 +25,12 @@ func (e *ResponseEntry) IsExpired() bool {
 // ResponseCache is an in-memory LRU-like response cache for safe (GET) requests.
 // Uses sharded mutexes to reduce lock contention on the hot path.
 type ResponseCache struct {
-	shards   [64]shard
-	maxSize  int64
-	curSize  atomic.Int64
-	enabled  atomic.Bool
+	shards     [64]shard
+	maxSize    int64
+	curSize    atomic.Int64
+	enabled    atomic.Bool
 	defaultTTL int64
-	stopCh   chan struct{}
+	stopCh     chan struct{}
 }
 
 type shard struct {
@@ -84,7 +84,16 @@ func (rc *ResponseCache) Get(key string) *ResponseEntry {
 	s.mu.RLock()
 	entry, ok := s.items[key]
 	s.mu.RUnlock()
-	if !ok || entry.IsExpired() {
+	if !ok {
+		return nil
+	}
+	if entry.IsExpired() {
+		s.mu.Lock()
+		if current, ok := s.items[key]; ok && current == entry {
+			delete(s.items, key)
+			rc.curSize.Add(-int64(len(entry.Body)))
+		}
+		s.mu.Unlock()
 		return nil
 	}
 	return entry
@@ -123,6 +132,15 @@ func (rc *ResponseCache) Set(key string, statusCode int, contentType string, bod
 
 // SetEnabled toggles the cache on/off.
 func (rc *ResponseCache) SetEnabled(v bool) { rc.enabled.Store(v) }
+
+func (rc *ResponseCache) Clear() {
+	for i := range rc.shards {
+		rc.shards[i].mu.Lock()
+		rc.shards[i].items = make(map[string]*ResponseEntry)
+		rc.shards[i].mu.Unlock()
+	}
+	rc.curSize.Store(0)
+}
 
 // Stats returns current cache statistics.
 func (rc *ResponseCache) Stats() (entries int, sizeBytes int64) {

@@ -44,7 +44,7 @@ function LoginContent() {
         <Card className="w-full border-slate-200 shadow-sm">
           <CardHeader className="space-y-3 border-b border-slate-200 pb-5">
             <div className="inline-flex items-center gap-2 text-sm font-medium text-slate-600">
-              <Shield className="h-4 w-4 text-cyan-600" /> 管理后台登录
+              <Shield className="h-4 w-4 text-slate-600" /> 管理后台登录
             </div>
             <div className="space-y-2">
               <CardTitle className="text-2xl text-slate-950">登录到 My-OpenWAF</CardTitle>

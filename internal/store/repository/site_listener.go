@@ -48,3 +48,14 @@ func (r *SiteListenerRepo) Delete(id uint) error {
 func (r *SiteListenerRepo) DeleteBySite(siteID uint) error {
 	return r.db.Where("site_id = ?", siteID).Delete(&store.SiteListener{}).Error
 }
+
+func (r *SiteListenerRepo) CreateWithLegacyPromotion(item *store.SiteListener, legacy *store.SiteListener) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if legacy != nil {
+			if err := tx.Create(legacy).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Create(item).Error
+	})
+}

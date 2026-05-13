@@ -13,7 +13,7 @@ interface PaginationProps {
 
 export function Pagination({ page, totalPages, total, pageSize, onPageChange }: PaginationProps) {
   return (
-    <div className="flex flex-col gap-3 rounded-[20px] border border-slate-200 bg-slate-50/70 px-4 py-3 text-sm text-slate-500 md:flex-row md:items-center md:justify-between">
+    <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500 md:flex-row md:items-center md:justify-between">
       <span>
         每页 {pageSize} 条，共 {total} 条
       </span>
@@ -21,7 +21,7 @@ export function Pagination({ page, totalPages, total, pageSize, onPageChange }: 
         <Button
           variant="outline"
           size="icon-sm"
-          className="rounded-xl"
+          className="rounded-md"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
         >
@@ -33,7 +33,7 @@ export function Pagination({ page, totalPages, total, pageSize, onPageChange }: 
         <Button
           variant="outline"
           size="icon-sm"
-          className="rounded-xl"
+          className="rounded-md"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
         >

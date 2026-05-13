@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"testing"
+	"time"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
@@ -10,10 +11,17 @@ import (
 	"My-OpenWaf/internal/waf"
 )
 
-func TestErrorRateLimitActionDefaultsToIntercept(t *testing.T) {
+func TestErrorRateLimitActionDefaultsToRateLimit(t *testing.T) {
 	got := errorRateLimitAction("")
-	if got.Type != action.Intercept || !got.Matched || got.Phase != "error_rate_limit" {
+	if got.Type != action.RateLimit || !got.Matched || got.Phase != "error_rate_limit" || got.StatusCode != 429 {
 		t.Fatalf("errorRateLimitAction() = %#v", got)
+	}
+}
+
+func TestErrorRateLimitActionKeepsConfiguredIntercept(t *testing.T) {
+	got := errorRateLimitAction("intercept")
+	if got.Type != action.Intercept || got.StatusCode != 0 {
+		t.Fatalf("errorRateLimitAction(intercept) = %#v", got)
 	}
 }
 
@@ -94,5 +102,18 @@ func TestSiteErrorPageFillsMissingStatusCode(t *testing.T) {
 	}
 	if cfg.StatusCode != 503 {
 		t.Fatalf("siteErrorPage().StatusCode = %d, want 503", cfg.StatusCode)
+	}
+}
+
+func TestSetChallengeCookieSignsValue(t *testing.T) {
+	value := waf.SignChallengePassValue("example.com", nil, time.Unix(100, 0), time.Hour)
+	if value == "1" {
+		t.Fatal("challenge pass value must not be a forgeable boolean")
+	}
+	if !waf.VerifyChallengePassValue(value, "example.com", nil, time.Unix(101, 0)) {
+		t.Fatal("signed challenge pass value did not verify")
+	}
+	if waf.VerifyChallengePassValue(value, "other.example", nil, time.Unix(101, 0)) {
+		t.Fatal("signed challenge pass value verified for the wrong host")
 	}
 }

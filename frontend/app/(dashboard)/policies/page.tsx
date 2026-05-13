@@ -98,7 +98,7 @@ export default function PoliciesPage() {
         title="策略管理"
         description="策略用于分组组织安全规则，通过站点的 policy_id 字段挂接到数据面运行时。"
         actions={
-          <Button className="gap-2 rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={openNew}>
+          <Button className="gap-2 rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openNew}>
             <Plus className="h-4 w-4" /> 创建策略
           </Button>
         }
@@ -106,11 +106,11 @@ export default function PoliciesPage() {
 
       <Surface title="策略列表" description="所有安全策略及其关联信息。">
         {loading ? (
-          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
+          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
         ) : policies.length === 0 ? (
           <EmptyState title="暂无策略" description="创建第一个策略后，可以在站点配置中将其关联。" />
         ) : (
-          <div className="overflow-hidden rounded-[20px] border border-slate-200">
+          <div className="overflow-hidden rounded-lg border border-slate-200">
             <Table>
               <TableHeader>
                 <TableRow className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
@@ -128,7 +128,7 @@ export default function PoliciesPage() {
                     <TableCell className="font-mono text-xs text-slate-500">{p.id}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
-                        <BookOpen className="h-4 w-4 text-cyan-600" />
+                        <BookOpen className="h-4 w-4 text-slate-600" />
                         <span className="font-medium text-slate-900">{p.name}</span>
                       </div>
                     </TableCell>
@@ -137,10 +137,10 @@ export default function PoliciesPage() {
                     <TableCell className="text-xs text-slate-500 whitespace-nowrap">{formatDate(p.updated_at)}</TableCell>
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
-                        <Button variant="ghost" size="icon-sm" className="rounded-xl" onClick={() => openEdit(p)}>
+                        <Button variant="ghost" size="icon-sm" className="rounded-md" onClick={() => openEdit(p)}>
                           <Pencil className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="icon-sm" className="rounded-xl text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeleteTarget(p)}>
+                        <Button variant="ghost" size="icon-sm" className="rounded-md text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeleteTarget(p)}>
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
@@ -153,9 +153,8 @@ export default function PoliciesPage() {
         )}
       </Surface>
 
-      {/* 创建/编辑 Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-md rounded-[28px]">
+        <DialogContent className="max-w-md rounded-lg">
           <DialogHeader>
             <DialogTitle>{isNew ? "创建策略" : "编辑策略"}</DialogTitle>
             <DialogDescription>{isNew ? "创建新的安全策略以组织规则集。" : "修改策略名称和描述。"}</DialogDescription>
@@ -163,11 +162,11 @@ export default function PoliciesPage() {
           <div className="space-y-4">
             <div className="space-y-2">
               <Label>策略名称</Label>
-              <Input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="例如：核心应用默认策略" className="rounded-xl" />
+              <Input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="例如：核心应用默认策略" className="rounded-md" />
             </div>
             <div className="space-y-2">
               <Label>描述</Label>
-              <Textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="策略用途说明（可选）" rows={3} className="rounded-xl" />
+              <Textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="策略用途说明（可选）" rows={3} className="rounded-md" />
             </div>
           </div>
           <DialogFooter>
@@ -177,14 +176,13 @@ export default function PoliciesPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 删除确认 */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <DialogContent className="max-w-md rounded-[28px]">
+        <DialogContent className="max-w-md rounded-lg">
           <DialogHeader>
             <DialogTitle>确认删除策略</DialogTitle>
             <DialogDescription>删除后关联此策略的站点将失去规则绑定。</DialogDescription>
           </DialogHeader>
-          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-900">
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-900">
             目标策略：{deleteTarget?.name || "-"}
           </div>
           <DialogFooter>

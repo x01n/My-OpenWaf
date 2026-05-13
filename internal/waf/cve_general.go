@@ -52,6 +52,319 @@ func init() {
 			return nil
 		},
 	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-vite-fs-raw-bypass",
+		Name:     "Vite @fs Raw Query File Read Bypass",
+		CVE:      "CVE-2025-30208",
+		Severity: "high",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reViteFSAccess.MatchString(uri) && reViteRawBypass.MatchString(uri) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-30208",
+					Category:    "cve_general",
+					Severity:    "high",
+					Description: "Vite dev server @fs arbitrary file read via ?raw?? or ?import&raw??",
+					MatchedPart: "url",
+					Pattern:     "vite-fs-raw-bypass",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-langflow-validate-code-rce",
+		Name:     "Langflow Validate Code Unauthenticated RCE",
+		CVE:      "CVE-2025-3248",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reLangflowValidateCode.MatchString(uri) && reLangflowCodeExec.MatchString(body) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-3248",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "Langflow validate/code request carrying Python execution primitives",
+					MatchedPart: "body",
+					Pattern:     "langflow-validate-code-rce",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-xwiki-solrsearch-groovy-rce",
+		Name:     "XWiki SolrSearch Groovy Macro RCE",
+		CVE:      "CVE-2025-24893",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reXWikiSolrSearch.MatchString(uri) && reXWikiMediaRSS.MatchString(uri) && reXWikiGroovyMacro.MatchString(uri+body) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-24893",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "XWiki SolrSearch RSS request carrying async/groovy macro payload",
+					MatchedPart: "url",
+					Pattern:     "xwiki-solrsearch-groovy-rce",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-sharepoint-toolshell-toolpane",
+		Name:     "SharePoint ToolShell ToolPane Exploit",
+		CVE:      "CVE-2025-53770",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			referer := headers["Referer"]
+			if referer == "" {
+				referer = headers["referer"]
+			}
+			if reSharePointToolPane.MatchString(uri) && reSharePointEditMode.MatchString(uri) && reSharePointSignOut.MatchString(referer) && reSharePointDWP.MatchString(body) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-53770",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "SharePoint ToolPane exploit with SignOut referer and ViewState/WebPart payload",
+					MatchedPart: "all",
+					Pattern:     "sharepoint-toolshell-toolpane",
+					Action:      "drop",
+				}
+			}
+			if reSharePointWebShell.MatchString(uri) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-53770",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "SharePoint ToolShell web shell access indicator",
+					MatchedPart: "url",
+					Pattern:     "sharepoint-toolshell-webshell",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-commvault-deploywebpackage-rce",
+		Name:     "Commvault deployWebpackage Pre-Auth RCE",
+		CVE:      "CVE-2025-34028",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reCommvaultDeploy.MatchString(uri) && reCommvaultDeployParams.MatchString(body) && reCommvaultPayload.MatchString(body) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-34028",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "Commvault deployWebpackage SSRF/path traversal pre-auth RCE payload",
+					MatchedPart: "all",
+					Pattern:     "commvault-deploywebpackage-rce",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-wingftp-null-lua-rce",
+		Name:     "Wing FTP NULL Byte Lua RCE",
+		CVE:      "CVE-2025-47812",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reWingFTPLoginOK.MatchString(uri) && reWingFTPNullLua.MatchString(body) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-47812",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "Wing FTP loginok.html username NULL byte Lua injection payload",
+					MatchedPart: "body",
+					Pattern:     "wingftp-null-lua-rce",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-magicinfo-swupdate-file-write",
+		Name:     "Samsung MagicINFO SWUpdateFileUploader File Write",
+		CVE:      "CVE-2025-4632",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reMagicINFOUploader.MatchString(uri) && reMagicINFOFileName.MatchString(uri+body) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-4632",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "Samsung MagicINFO SWUpdateFileUploader traversal filename for arbitrary file write",
+					MatchedPart: "all",
+					Pattern:     "magicinfo-swupdate-file-write",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-fortiweb-fwbcgi-cgiinfo-auth-bypass",
+		Name:     "FortiWeb fwbcgi CGIINFO Auth Bypass",
+		CVE:      "CVE-2025-64446",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			cgiInfo := headers["CGIINFO"]
+			if cgiInfo == "" {
+				cgiInfo = headers["cgiinfo"]
+			}
+			if reFortiWebFWBCGI.MatchString(uri) && reFortiWebCGIInfo.MatchString("CGIINFO: "+cgiInfo) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-64446",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "FortiWeb API traversal to fwbcgi with client-supplied CGIINFO identity",
+					MatchedPart: "all",
+					Pattern:     "fortiweb-fwbcgi-cgiinfo-auth-bypass",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-goanywhere-license-activate-bypass",
+		Name:     "GoAnywhere License Activation Auth Bypass",
+		CVE:      "CVE-2025-10035",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reGoAnywhereLicense.MatchString(uri) && reGoAnywhereActivate.MatchString(uri) && reGoAnywhereViewState.MatchString(uri) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-10035",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "GoAnywhere Unlicensed.xhtml activation request abusing ViewState error flow",
+					MatchedPart: "url",
+					Pattern:     "goanywhere-license-activate-bypass",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-spring-gateway-actuator-spel",
+		Name:     "Spring Cloud Gateway Actuator SpEL Injection",
+		CVE:      "CVE-2025-41243",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reSpringGatewayActuator.MatchString(uri) && reSpringGatewaySpEL.MatchString(body+uri) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-41243",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "Spring Cloud Gateway actuator route update carrying SpEL-capable filter expression",
+					MatchedPart: "all",
+					Pattern:     "spring-gateway-actuator-spel",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-invision-customcss-expression-rce",
+		Name:     "Invision customCss Template Expression RCE",
+		CVE:      "CVE-2025-47916",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if reInvisionThemeEditor.MatchString(uri+body) && reInvisionExpression.MatchString(uri+body) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-47916",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "Invision themeeditor customCss request carrying executable template expression",
+					MatchedPart: "all",
+					Pattern:     "invision-customcss-expression-rce",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-crushftp-s3-auth-bypass",
+		Name:     "CrushFTP S3 Authorization Auth Bypass",
+		CVE:      "CVE-2025-31161",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			authorization := headers["Authorization"]
+			if authorization == "" {
+				authorization = headers["authorization"]
+			}
+			if reCrushFTPAdminEndpoint.MatchString(uri) && reCrushFTPS3Auth.MatchString(authorization) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-31161",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "CrushFTP administrative function request with mangled AWS4-HMAC Credential",
+					MatchedPart: "all",
+					Pattern:     "crushftp-s3-auth-bypass",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-fortinet-authhash-hostcheck-rce",
+		Name:     "Fortinet AuthHash hostcheck_validate RCE",
+		CVE:      "CVE-2025-32756",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			cookie := headers["Cookie"]
+			if cookie == "" {
+				cookie = headers["cookie"]
+			}
+			if reFortinetHostcheck.MatchString(uri) && reFortinetAuthHash.MatchString(cookie) {
+				return &CVEMatch{
+					CVEID:       "CVE-2025-32756",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "Fortinet hostcheck_validate request carrying oversized AuthHash enc cookie",
+					MatchedPart: "cookie",
+					Pattern:     "fortinet-authhash-hostcheck-rce",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
 }
 
 // GeneralCVEDetector detects technology-agnostic CVE exploitation patterns.
@@ -123,8 +436,42 @@ var (
 	reStrutsUpload = regexp.MustCompile(`(?i)top\["[^"]*"\]\s*=`)
 
 	// Ivanti Connect Secure (CVE-2024-21887, CVE-2025-0282)
-	reIvantiCSAPI = regexp.MustCompile(`(?i)/api/v1/totp/user-backup-code/\.\.;/`)
-	reIvantiCSWeb = regexp.MustCompile(`(?i)/dana-na/auth/url_default/welcome\.cgi`)
+	reIvantiCSAPI           = regexp.MustCompile(`(?i)/api/v1/totp/user-backup-code/\.\.;/`)
+	reIvantiCSWeb           = regexp.MustCompile(`(?i)/dana-na/auth/url_default/welcome\.cgi`)
+	reViteFSAccess          = regexp.MustCompile(`(?i)(^|/)@fs/`)
+	reViteRawBypass         = regexp.MustCompile(`(?i)(^|[&?])(?:import&)?raw\?\?`)
+	reLangflowValidateCode  = regexp.MustCompile(`(?i)/api/v1/validate/code`)
+	reLangflowCodeExec      = regexp.MustCompile(`(?i)(__import__|\b(?:os|subprocess)\s*\.|\b(?:exec|eval|open)\s*\(|import\s+(?:os|subprocess)|child_process)`)
+	reXWikiSolrSearch       = regexp.MustCompile(`(?i)/xwiki/bin/get/Main/SolrSearch`)
+	reXWikiMediaRSS         = regexp.MustCompile(`(?i)(^|[&?])media=rss(?:&|$)`)
+	reXWikiGroovyMacro      = regexp.MustCompile(`(?i)(\{\{\s*(?:async|groovy)\b|%7b%7b\s*(?:async|groovy)\b)`)
+	reSharePointToolPane    = regexp.MustCompile(`(?i)/_?layouts/15/ToolPane\.aspx`)
+	reSharePointEditMode    = regexp.MustCompile(`(?i)(^|[&?])DisplayMode=Edit(?:&|$|.*a=/_?ToolPane\.aspx)`)
+	reSharePointSignOut     = regexp.MustCompile(`(?i)/_?layouts/SignOut\.aspx`)
+	reSharePointDWP         = regexp.MustCompile(`(?i)(MSOTlPn_DWP|CompressedDataTable|__VIEWSTATE)`)
+	reSharePointWebShell    = regexp.MustCompile(`(?i)/_?layouts/15/(?:spinstall0|info3)\.aspx`)
+	reCommvaultDeploy       = regexp.MustCompile(`(?i)/commandcenter/deployWebpackage\.do`)
+	reCommvaultDeployParams = regexp.MustCompile(`(?i)(commcellName=.*servicePack=.*version=|servicePack=.*version=.*commcellName=)`)
+	reCommvaultPayload      = regexp.MustCompile(`(?i)(\.\./|%2e%2e|https?://|/commandcenter/webpackage\.do|\.zip\b)`)
+	reMultipartFormData     = regexp.MustCompile(`(?i)multipart/form-data`)
+	reDangerousCharset      = regexp.MustCompile(`(?i)charset\s*=\s*["']?(?:utf-7|utf-16|utf-32|shift[_-]?jis|euc-jp|gb2312|gbk|iso-2022-jp|x-imap4-modified-utf7)`)
+	reWingFTPLoginOK        = regexp.MustCompile(`(?i)/loginok\.html`)
+	reWingFTPNullLua        = regexp.MustCompile(`(?i)(%00|\x00).*(?:io\.popen|os\.execute|loadstring|dofile|local\s+\w+\s*=|%5d%5d|\]\])`)
+	reMagicINFOUploader     = regexp.MustCompile(`(?i)/MagicInfo/servlet/SWUpdateFileUploader`)
+	reMagicINFOFileName     = regexp.MustCompile(`(?i)fileName\s*=.*(?:\.\./|%2e%2e|\.\.\\|%5c).*(?:\.jsp|\.jspx|\.war|\.html?)`)
+	reFortiWebFWBCGI        = regexp.MustCompile(`(?i)/api/v2\.0/(?:cmdb|cmd)/.*(?:%3f|\?).*(?:\.\./|%2e%2e).*/cgi-bin/fwbcgi`)
+	reFortiWebCGIInfo       = regexp.MustCompile(`(?i)CGIINFO\s*[:=]\s*[A-Za-z0-9+/=]{20,}`)
+	reGoAnywhereLicense     = regexp.MustCompile(`(?i)/(?:goanywhere/)?license/Unlicensed\.xhtml/[^?\s]*`)
+	reGoAnywhereActivate    = regexp.MustCompile(`(?i)(?:^|[&?])GARequestAction=activate(?:&|$)`)
+	reGoAnywhereViewState   = regexp.MustCompile(`(?i)(?:^|[&?])javax\.faces\.ViewState=`)
+	reSpringGatewayActuator = regexp.MustCompile(`(?i)/actuator/gateway/(?:routes|refresh)`)
+	reSpringGatewaySpEL     = regexp.MustCompile(`(?i)(#\{|%23%7b|T\s*\(|AddResponseHeader|SetResponseHeader|RewritePath|RequestRateLimiter)`)
+	reInvisionThemeEditor   = regexp.MustCompile(`(?i)(?:^|[&?\s/])app=core(?:&|$).*module=system.*controller=themeeditor.*do=customCss`)
+	reInvisionExpression    = regexp.MustCompile(`(?i)(?:content=)?(?:%7b|\{)expression(?:\s*=|%3d).*?(?:system|exec|shell_exec|passthru|base64_decode|eval|die)`)
+	reCrushFTPS3Auth        = regexp.MustCompile(`(?i)AWS4-HMAC-SHA256\s+Credential=[^,\s]+/`)
+	reCrushFTPAdminEndpoint = regexp.MustCompile(`(?i)/WebInterface/function/.*command=(?:getUserList|setUserItem|zip|login)`)
+	reFortinetHostcheck     = regexp.MustCompile(`(?i)/remote/hostcheck_validate`)
+	reFortinetAuthHash      = regexp.MustCompile(`(?i)AuthHash=[^;]*(?:enc=|%65%6e%63%3d)?[A-Za-z0-9+/=%]{80,}`)
 )
 
 // NewGeneralCVEDetector creates a general CVE detector with built-in rules.
@@ -218,6 +565,110 @@ func NewGeneralCVEDetector() *GeneralCVEDetector {
 			description: "Ivanti Connect Secure path traversal and command injection",
 			patterns:    []*regexp.Regexp{reIvantiCSAPI, reIvantiCSWeb},
 			target:      "url",
+		},
+		{
+			cveID: "CVE-2025-30208", severity: "high",
+			description: "Vite dev server arbitrary file read via @fs raw query bypass",
+			patterns:    []*regexp.Regexp{reViteFSAccess, reViteRawBypass},
+			target:      "url",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-3248", severity: "critical",
+			description: "Langflow unauthenticated code execution via validate/code endpoint",
+			patterns:    []*regexp.Regexp{reLangflowValidateCode, reLangflowCodeExec},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-24893", severity: "critical",
+			description: "XWiki SolrSearch unauthenticated Groovy macro RCE",
+			patterns:    []*regexp.Regexp{reXWikiSolrSearch, reXWikiMediaRSS, reXWikiGroovyMacro},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-53770", severity: "critical",
+			description: "Microsoft SharePoint ToolShell ToolPane exploit with SignOut referer and ViewState/WebPart payload",
+			patterns:    []*regexp.Regexp{reSharePointToolPane, reSharePointEditMode, reSharePointSignOut, reSharePointDWP},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-53770", severity: "critical",
+			description: "Microsoft SharePoint ToolShell web shell access indicator",
+			patterns:    []*regexp.Regexp{reSharePointWebShell},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2025-34028", severity: "critical",
+			description: "Commvault Command Center pre-auth deployWebpackage SSRF/path traversal RCE",
+			patterns:    []*regexp.Regexp{reCommvaultDeploy, reCommvaultDeployParams, reCommvaultPayload},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2026-21876", severity: "critical",
+			description: "OWASP CRS multipart charset bypass using dangerous non-final part charset",
+			patterns:    []*regexp.Regexp{reMultipartFormData, reDangerousCharset},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-47812", severity: "critical",
+			description: "Wing FTP Server NULL byte Lua session code injection via loginok.html",
+			patterns:    []*regexp.Regexp{reWingFTPLoginOK, reWingFTPNullLua},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-4632", severity: "critical",
+			description: "Samsung MagicINFO SWUpdateFileUploader path traversal arbitrary file write",
+			patterns:    []*regexp.Regexp{reMagicINFOUploader, reMagicINFOFileName},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-64446", severity: "critical",
+			description: "Fortinet FortiWeb API path traversal to fwbcgi with forged CGIINFO identity",
+			patterns:    []*regexp.Regexp{reFortiWebFWBCGI, reFortiWebCGIInfo},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-10035", severity: "critical",
+			description: "Fortra GoAnywhere MFT license activation authentication bypass precondition",
+			patterns:    []*regexp.Regexp{reGoAnywhereLicense, reGoAnywhereActivate, reGoAnywhereViewState},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-41243", severity: "critical",
+			description: "Spring Cloud Gateway WebFlux actuator SpEL route property modification",
+			patterns:    []*regexp.Regexp{reSpringGatewayActuator, reSpringGatewaySpEL},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-47916", severity: "critical",
+			description: "Invision Community themeeditor customCss template expression RCE",
+			patterns:    []*regexp.Regexp{reInvisionThemeEditor, reInvisionExpression},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-31161", severity: "critical",
+			description: "CrushFTP S3 AWS4-HMAC authentication bypass against administrative function endpoint",
+			patterns:    []*regexp.Regexp{reCrushFTPAdminEndpoint, reCrushFTPS3Auth},
+			target:      "all",
+			matchAll:    true,
+		},
+		{
+			cveID: "CVE-2025-32756", severity: "critical",
+			description: "Fortinet AuthHash enc cookie overflow via hostcheck_validate",
+			patterns:    []*regexp.Regexp{reFortinetHostcheck, reFortinetAuthHash},
+			target:      "all",
+			matchAll:    true,
 		},
 	}
 	return d

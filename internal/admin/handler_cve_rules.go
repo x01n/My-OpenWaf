@@ -122,7 +122,11 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManag
 				}
 			}
 			if req.Action != "" {
-				existing.Action = req.Action
+				if normalized, ok := validateRuleAction(req.Action); ok {
+					existing.Action = normalized
+				} else {
+					continue
+				}
 			}
 			if repo.Update(existing) == nil {
 				updated++
@@ -164,7 +168,12 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManag
 			existing.Approved = true
 		}
 		if req.Action != "" {
-			existing.Action = req.Action
+			if normalized, ok := validateRuleAction(req.Action); ok {
+				existing.Action = normalized
+			} else {
+				c.JSON(400, map[string]string{"error": "invalid action"})
+				return
+			}
 		}
 		if req.Severity != "" {
 			existing.Severity = req.Severity

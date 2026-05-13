@@ -56,14 +56,17 @@ const (
 type RuleAction string
 
 const (
-	ActionAllow     RuleAction = "allow"
-	ActionIntercept RuleAction = "intercept"
-	ActionObserve   RuleAction = "observe"
-	ActionDrop      RuleAction = "drop"       // TCP connection close, no HTTP response
-	ActionChallenge RuleAction = "challenge"  // JS challenge or CAPTCHA
-	ActionRedirect  RuleAction = "redirect"   // HTTP redirect
-	ActionRateLimit RuleAction = "rate_limit" // Per-rule rate limiting
-	ActionTag       RuleAction = "tag"        // Tag request (non-terminal)
+	ActionAllow            RuleAction = "allow"
+	ActionIntercept        RuleAction = "intercept"
+	ActionObserve          RuleAction = "observe"
+	ActionDrop             RuleAction = "drop"      // TCP connection close, no HTTP response
+	ActionChallenge        RuleAction = "challenge" // JS challenge
+	ActionCaptchaChallenge RuleAction = "captcha_challenge"
+	ActionShieldChallenge  RuleAction = "shield_challenge"
+	ActionChainChallenge   RuleAction = "chain_challenge"
+	ActionRedirect         RuleAction = "redirect"   // HTTP redirect
+	ActionRateLimit        RuleAction = "rate_limit" // Per-rule rate limiting
+	ActionTag              RuleAction = "tag"        // Tag request (non-terminal)
 
 	// Legacy values for backward compatibility with existing DB rows.
 	ActionBlock   RuleAction = "block"
@@ -92,7 +95,7 @@ type Rule struct {
 	PolicyID   uint       `gorm:"not null;index" json:"policy_id"`
 	Phase      RulePhase  `gorm:"size:32;not null;index" json:"phase"`
 	Pattern    string     `gorm:"type:text;not null" json:"pattern"`
-	Action     RuleAction `gorm:"size:16;not null" json:"action"`
+	Action     RuleAction `gorm:"size:32;not null" json:"action"`
 	Priority   int        `gorm:"default:100" json:"priority"`
 	Enabled    bool       `gorm:"default:true" json:"enabled"`
 	StatusCode int        `gorm:"default:0" json:"status_code"` // custom HTTP status code (0 = default)
@@ -138,13 +141,13 @@ type Site struct {
 	// Per-site protection overrides (empty/false = inherit from global ProtectionConfig)
 	OWASPEnabled     *bool  `gorm:"default:null" json:"owasp_enabled,omitempty"`
 	OWASPSensitivity string `gorm:"size:16" json:"owasp_sensitivity,omitempty"`
-	OWASPAction      string `gorm:"size:16" json:"owasp_action,omitempty"`
+	OWASPAction      string `gorm:"size:32" json:"owasp_action,omitempty"`
 	CVEEnabled       *bool  `gorm:"default:null" json:"cve_enabled,omitempty"`
-	CVEAction        string `gorm:"size:16" json:"cve_action,omitempty"`
+	CVEAction        string `gorm:"size:32" json:"cve_action,omitempty"`
 	RateLimitEnabled *bool  `gorm:"default:null" json:"rate_limit_enabled,omitempty"`
 	RateLimitWindow  int    `gorm:"default:0" json:"rate_limit_window,omitempty"`
 	RateLimitMax     int    `gorm:"default:0" json:"rate_limit_max,omitempty"`
-	RateLimitAction  string `gorm:"size:16" json:"rate_limit_action,omitempty"`
+	RateLimitAction  string `gorm:"size:32" json:"rate_limit_action,omitempty"`
 
 	// Forwarding configuration (merged from ForwardingProfile)
 	XFFMode              string `gorm:"size:64;default:strip_all_and_set_remote" json:"xff_mode"`
@@ -287,7 +290,7 @@ type SecurityEvent struct {
 	RuleID    uint   `json:"rule_id"`
 	RuleIDStr string `gorm:"size:64" json:"rule_id_str"`
 	Phase     string `gorm:"size:32" json:"phase"`
-	Action    string `gorm:"size:16" json:"action"`
+	Action    string `gorm:"size:32" json:"action"`
 	Category  string `gorm:"size:32;index" json:"category"`
 	MatchDesc string `gorm:"size:512" json:"match_desc"`
 
@@ -314,10 +317,12 @@ type AccessLog struct {
 	UserAgent  string    `gorm:"size:512" json:"user_agent"`
 }
 
-// SiteCacheRule defines a directory-tree cache rule stored in Site.CacheRules.
+// SiteCacheRule defines a path cache rule stored in Site.CacheRules.
 type SiteCacheRule struct {
-	Path string `json:"path"`
-	TTL  int    `json:"ttl"`
+	Type  string `json:"type"` // prefix, exact, suffix
+	Value string `json:"value"`
+	Path  string `json:"path,omitempty"` // legacy prefix field
+	TTL   int    `json:"ttl"`
 }
 
 // SiteListener represents one network endpoint of a Site.
@@ -448,10 +453,10 @@ func DefaultProtectionConfig() ProtectionConfig {
 	return ProtectionConfig{
 		RequestRateLimitWindow:  60,
 		RequestRateLimitMax:     300,
-		RequestRateLimitAction:  "intercept",
+		RequestRateLimitAction:  "rate_limit",
 		ErrorRateLimitWindow:    300,
 		ErrorRateLimitMax:       30,
-		ErrorRateLimitAction:    "intercept",
+		ErrorRateLimitAction:    "rate_limit",
 		ErrorRateLimitCount4xx:  true,
 		ErrorRateLimitCount5xx:  true,
 		OWASPSensitivity:        "mid",
@@ -733,7 +738,7 @@ type BotScoreLog struct {
 	BehaviorScore    int       `json:"behavior_score"`
 	IPRepScore       int       `json:"ip_rep_score"`
 	IsHighRisk       bool      `json:"is_high_risk"`
-	Action           string    `gorm:"size:16" json:"action"` // allow, challenge, block, drop
+	Action           string    `gorm:"size:32" json:"action"` // allow, challenge, block, drop
 	Details          string    `gorm:"type:text" json:"details"`
 	CreatedAt        time.Time `gorm:"index" json:"created_at"`
 }
@@ -763,7 +768,7 @@ type CVERuleRecord struct {
 	Pattern     string         `gorm:"type:text" json:"pattern"`
 	Target      string         `gorm:"size:32" json:"target"`
 	Severity    string         `gorm:"size:16" json:"severity"`
-	Action      string         `gorm:"size:16;default:drop" json:"action"`
+	Action      string         `gorm:"size:32;default:drop" json:"action"`
 	Enabled     bool           `gorm:"default:false" json:"enabled"`
 	Description string         `gorm:"type:text" json:"description"`
 	Source      string         `gorm:"size:32" json:"source"`

@@ -19,8 +19,11 @@ type OWASPRule struct {
 
 // OWASPRuleOverride allows per-rule configuration stored in ProtectionConfig.
 type OWASPRuleOverride struct {
-	Enabled   *bool    `json:"enabled,omitempty"`
-	Whitelist []string `json:"whitelist,omitempty"` // path whitelist — matching paths skip this rule
+	Enabled    *bool    `json:"enabled,omitempty"`
+	Whitelist  []string `json:"whitelist,omitempty"` // path whitelist — matching paths skip this rule
+	Action     string   `json:"action,omitempty"`
+	StatusCode int      `json:"status_code,omitempty"`
+	RedirectTo string   `json:"redirect_to,omitempty"`
 }
 
 // OWASPRuleRegistry is a thread-safe registry of all granular OWASP rules.
@@ -168,6 +171,14 @@ func FilterHits(hits []OWASPHit, path string, overrides map[string]OWASPRuleOver
 		filtered = append(filtered, h)
 	}
 	return filtered
+}
+
+// RuleOverride returns the effective per-rule override for a hit.
+func RuleOverride(ruleID string, overrides map[string]OWASPRuleOverride) OWASPRuleOverride {
+	if len(overrides) == 0 {
+		return OWASPRuleOverride{}
+	}
+	return overrides[ruleID]
 }
 
 // ── Rule Registration (wraps existing detection patterns) ──

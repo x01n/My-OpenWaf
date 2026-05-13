@@ -25,21 +25,21 @@ export function DashboardTopbar({ onMobileMenuToggle }: { onMobileMenuToggle?: (
   }
 
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-200/70 bg-white/78 backdrop-blur-xl">
+    <header className="sticky top-0 z-30 border-b border-slate-200 bg-white">
       <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4 px-4 py-4 sm:px-5 md:px-7">
         <div className="flex min-w-0 items-center gap-3">
           {onMobileMenuToggle && (
             <Button
               variant="ghost"
               size="icon-sm"
-              className="shrink-0 rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-900 lg:hidden"
+              className="shrink-0 rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 lg:hidden"
               onClick={onMobileMenuToggle}
             >
               <Menu className="h-5 w-5" />
             </Button>
           )}
           <div className="min-w-0 space-y-2">
-            <div className="flex items-center gap-2 text-xs font-medium tracking-[0.18em] text-slate-400 uppercase">
+            <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-400">
               <span>控制台</span>
               <ChevronRight className="h-3.5 w-3.5" />
               <span>{meta.group}</span>
@@ -52,23 +52,23 @@ export function DashboardTopbar({ onMobileMenuToggle }: { onMobileMenuToggle?: (
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="hidden rounded-xl border-slate-200 text-slate-600 md:inline-flex" onClick={() => window.location.reload()}>
+          <Button variant="outline" size="sm" className="hidden rounded-md border-slate-200 text-slate-600 md:inline-flex" onClick={() => window.location.reload()}>
             <RefreshCcw className="mr-2 h-4 w-4" />
             刷新数据
           </Button>
-          <Button variant="ghost" size="icon-sm" className="rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-900">
+          <Button variant="ghost" size="icon-sm" className="rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900">
             <Bell className="h-4 w-4" />
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" className="rounded-xl text-slate-600 hover:bg-slate-100 hover:text-slate-950">
+              <Button variant="ghost" size="icon-sm" className="rounded-md text-slate-600 hover:bg-slate-100 hover:text-slate-950">
                 <User className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56 rounded-2xl border-slate-200 bg-white/96 backdrop-blur">
+            <DropdownMenuContent align="end" className="w-56 rounded-md border-slate-200 bg-white shadow-sm">
               <DropdownMenuLabel>管理员账户</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleLogout} className="text-rose-600 cursor-pointer">
+              <DropdownMenuItem onClick={handleLogout} className="cursor-pointer text-rose-600">
                 退出登录
               </DropdownMenuItem>
             </DropdownMenuContent>

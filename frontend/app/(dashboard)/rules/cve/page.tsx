@@ -15,6 +15,7 @@ import { Pagination } from "@/components/pagination";
 import { PageIntro, Surface, EmptyState } from "@/components/console-shell";
 import { getCVERules, patchCVERule, type CVERule, type CVERuleQuery } from "@/lib/api";
 import { getCVERuleStats, batchToggleCVERules, type CVERuleStats } from "@/lib/rules-api";
+import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console";
 
 const PAGE_SIZE = 20;
 
@@ -148,7 +149,7 @@ export default function CVERuleManagementPage() {
 
       {stats && (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatCard label="规则总数" value={stats.total} icon={<Shield className="h-5 w-5 text-cyan-600" />} color="bg-cyan-50" />
+          <StatCard label="规则总数" value={stats.total} icon={<Shield className="h-5 w-5 text-slate-600" />} color="bg-slate-100" />
           <StatCard label="已启用" value={stats.enabled} icon={<ShieldCheck className="h-5 w-5 text-emerald-600" />} color="bg-emerald-50" />
           <StatCard label="Critical" value={stats.by_severity?.critical ?? 0} icon={<ShieldAlert className="h-5 w-5 text-rose-600" />} color="bg-rose-50" />
           <StatCard label="High" value={stats.by_severity?.high ?? 0} icon={<AlertTriangle className="h-5 w-5 text-orange-600" />} color="bg-orange-50" />
@@ -223,6 +224,7 @@ export default function CVERuleManagementPage() {
                     <TableHead>CVE 编号</TableHead>
                     <TableHead>严重等级</TableHead>
                     <TableHead>分类</TableHead>
+                    <TableHead>动作</TableHead>
                     <TableHead>启用</TableHead>
                     <TableHead className="text-right">操作</TableHead>
                   </TableRow>
@@ -245,6 +247,11 @@ export default function CVERuleManagementPage() {
                         </Badge>
                       </TableCell>
                       <TableCell><Badge variant="outline" className="rounded-md">{rule.category}</Badge></TableCell>
+                      <TableCell>
+                        <Badge className={`rounded-md border text-xs ${getWAFActionMeta(rule.action).className}`}>
+                          {getWAFActionMeta(rule.action).shortLabel}
+                        </Badge>
+                      </TableCell>
                       <TableCell><Switch checked={rule.enabled} onCheckedChange={() => handleToggle(rule)} /></TableCell>
                       <TableCell className="text-right">
                         <Button size="sm" variant="ghost" className="rounded-md" onClick={() => { setEditRule(rule); setEditForm({ enabled: rule.enabled, action: rule.action, severity: rule.severity }); }}>
@@ -277,9 +284,9 @@ export default function CVERuleManagementPage() {
               <Select value={editForm.action} onValueChange={(v) => setEditForm({ ...editForm, action: v })}>
                 <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="intercept">拦截</SelectItem>
-                  <SelectItem value="observe">观察</SelectItem>
-                  <SelectItem value="drop">断连</SelectItem>
+                  {terminalWAFActionOptions.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -298,7 +305,7 @@ export default function CVERuleManagementPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-md" onClick={() => setEditRule(null)}>取消</Button>
-            <Button onClick={saveEdit} className="rounded-md bg-cyan-600 hover:bg-cyan-700">保存</Button>
+            <Button onClick={saveEdit} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

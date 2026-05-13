@@ -5,6 +5,8 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  --font-sans: "Inter", "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   --font-heading: var(--font-sans);
   --font-serif: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
@@ -145,11 +147,11 @@
   }
 
   .console-glass {
-    @apply border border-white/10 bg-slate-950/35 shadow-sm;
+    @apply rounded-lg border border-slate-200 bg-white shadow-sm;
   }
 
   :is(.dark) .console-glass {
-    @apply bg-slate-900/80;
+    @apply border-slate-800 bg-slate-900/90;
   }
 
   .console-panel {
@@ -165,7 +167,7 @@
   }
 
   .console-sidebar-link[data-active="true"] {
-    @apply border-l-cyan-500 bg-cyan-50 text-slate-950 font-medium dark:bg-cyan-950/35 dark:text-white;
+    @apply border-l-slate-900 bg-slate-100 text-slate-950 font-medium dark:border-l-slate-100 dark:bg-slate-900 dark:text-white;
   }
 
   .console-sidebar-link[data-active="false"] {

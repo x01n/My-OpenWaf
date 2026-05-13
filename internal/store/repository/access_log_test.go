@@ -1,0 +1,137 @@
+package repository
+
+import (
+	"testing"
+
+	"My-OpenWaf/internal/store"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+)
+
+func newTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessLog{}, &store.Rule{}, &store.Site{}, &store.SiteListener{}); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	return db
+}
+
+func TestAccessLogRepoListStatusGroup(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewAccessLogRepo(db)
+	items := []store.AccessLog{
+		{SiteID: 1, Host: "example.com", Path: "/ok", Method: "GET", StatusCode: 200},
+		{SiteID: 1, Host: "example.com", Path: "/missing", Method: "GET", StatusCode: 404},
+		{SiteID: 1, Host: "example.com", Path: "/bad", Method: "GET", StatusCode: 502},
+	}
+	if err := repo.BatchCreate(items); err != nil {
+		t.Fatalf("create logs: %v", err)
+	}
+
+	got, total, err := repo.List(0, 20, AccessLogFilter{StatusGroup: "4xx"})
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	if total != 1 || len(got) != 1 || got[0].StatusCode != 404 {
+		t.Fatalf("4xx filter returned total=%d items=%v", total, got)
+	}
+}
+
+func TestRuleRepoBatchCreateRollsBackOnError(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRuleRepo(db)
+	err := repo.BatchCreate([]store.Rule{
+		{ID: 7, Name: "ok", PolicyID: 1, Phase: store.PhaseACL, Pattern: "block_path:/admin", Action: store.ActionIntercept},
+		{ID: 7, Name: "duplicate", PolicyID: 1, Phase: store.PhaseACL, Pattern: "block_path:/admin", Action: store.ActionIntercept},
+	})
+	if err == nil {
+		t.Fatal("expected batch create error")
+	}
+
+	items, total, err := repo.List(0, 20)
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if total != 0 || len(items) != 0 {
+		t.Fatalf("batch create should rollback all rules, total=%d items=%v", total, items)
+	}
+}
+
+func TestSiteListenerRepoDeleteBySite(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewSiteListenerRepo(db)
+	items := []store.SiteListener{
+		{SiteID: 1, Bind: ":80", Network: "tcp", Enabled: true},
+		{SiteID: 1, Bind: ":443", Network: "tcp", Enabled: true},
+		{SiteID: 2, Bind: ":8080", Network: "tcp", Enabled: true},
+	}
+	for i := range items {
+		if err := repo.Create(&items[i]); err != nil {
+			t.Fatalf("create listener: %v", err)
+		}
+	}
+
+	if err := repo.DeleteBySite(1); err != nil {
+		t.Fatalf("delete listeners by site: %v", err)
+	}
+	deleted, err := repo.ListBySite(1)
+	if err != nil {
+		t.Fatalf("list deleted site listeners: %v", err)
+	}
+	kept, err := repo.ListBySite(2)
+	if err != nil {
+		t.Fatalf("list kept site listeners: %v", err)
+	}
+	if len(deleted) != 0 || len(kept) != 1 || kept[0].Bind != ":8080" {
+		t.Fatalf("unexpected listeners after DeleteBySite, deleted=%v kept=%v", deleted, kept)
+	}
+}
+
+func TestSiteRepoDeleteWithListenersDeletesAtomically(t *testing.T) {
+	db := newTestDB(t)
+	siteRepo := NewSiteRepo(db)
+	listenerRepo := NewSiteListenerRepo(db)
+	site := store.Site{Host: "example.com", UpstreamURLs: "http://127.0.0.1:8080", Bind: ":80", Network: "tcp", Enabled: true}
+	if err := siteRepo.Create(&site); err != nil {
+		t.Fatalf("create site: %v", err)
+	}
+	if err := listenerRepo.Create(&store.SiteListener{SiteID: site.ID, Bind: ":80", Network: "tcp", Enabled: true}); err != nil {
+		t.Fatalf("create listener: %v", err)
+	}
+
+	if err := siteRepo.DeleteWithListeners(site.ID); err != nil {
+		t.Fatalf("delete site with listeners: %v", err)
+	}
+	if _, err := siteRepo.Get(site.ID); err == nil {
+		t.Fatal("site should be deleted")
+	}
+	listeners, err := listenerRepo.ListBySite(site.ID)
+	if err != nil {
+		t.Fatalf("list listeners after site delete: %v", err)
+	}
+	if len(listeners) != 0 {
+		t.Fatalf("listeners should be deleted with site, got %v", listeners)
+	}
+}
+
+func TestSiteListenerRepoCreateWithLegacyPromotion(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewSiteListenerRepo(db)
+	legacy := &store.SiteListener{SiteID: 1, Bind: ":80", Network: "tcp", Enabled: true, Note: "migrated from legacy bind"}
+	item := &store.SiteListener{SiteID: 1, Bind: ":443", Network: "tcp", Enabled: true}
+
+	if err := repo.CreateWithLegacyPromotion(item, legacy); err != nil {
+		t.Fatalf("create with legacy promotion: %v", err)
+	}
+	listeners, err := repo.ListBySite(1)
+	if err != nil {
+		t.Fatalf("list listeners: %v", err)
+	}
+	if len(listeners) != 2 || listeners[0].Bind != ":443" || listeners[1].Bind != ":80" {
+		t.Fatalf("expected promoted legacy and new listener, got %v", listeners)
+	}
+}

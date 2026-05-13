@@ -74,7 +74,7 @@ export function ProtectionModeDialog({ open, onOpenChange, currentMode, onConfir
                 <div className="mt-4 space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-sm font-semibold">{mode.label}</div>
-                    <span className={active ? "console-badge border-white/40 bg-white/70 text-slate-900" : "console-badge bg-slate-100 text-slate-500 border-slate-200"}>
+                    <span className={active ? "console-badge border-slate-200 bg-white text-slate-900" : "console-badge border-slate-200 bg-slate-100 text-slate-500"}>
                       {active ? "当前选择" : "可切换"}
                     </span>
                   </div>

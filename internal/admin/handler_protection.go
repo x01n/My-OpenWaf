@@ -6,16 +6,18 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
 
-// protectionDTO mirrors ProtectionConfig but accepts owasp_modules and cc_rules
-// as raw JSON values from the frontend (object/array), then converts them to strings.
+// protectionDTO mirrors ProtectionConfig but accepts JSON object/array fields from the frontend, then converts them to strings.
 type protectionDTO struct {
 	store.ProtectionConfig
-	OWASPModulesRaw json.RawMessage `json:"owasp_modules,omitempty"`
-	CCRulesRaw      json.RawMessage `json:"cc_rules,omitempty"`
+	OWASPModulesRaw    json.RawMessage `json:"owasp_modules,omitempty"`
+	CCRulesRaw         json.RawMessage `json:"cc_rules,omitempty"`
+	ChainStepsRaw      json.RawMessage `json:"chain_steps,omitempty"`
+	EscalationStepsRaw json.RawMessage `json:"escalation_steps,omitempty"`
 }
 
 func GetProtectionSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc {
@@ -54,6 +56,18 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 			out["cc_rules"] = rules
 		}
 	}
+	if cfg.ChainSteps != "" {
+		var steps []any
+		if json.Unmarshal([]byte(cfg.ChainSteps), &steps) == nil {
+			out["chain_steps"] = steps
+		}
+	}
+	if cfg.EscalationSteps != "" {
+		var steps []any
+		if json.Unmarshal([]byte(cfg.EscalationSteps), &steps) == nil {
+			out["escalation_steps"] = steps
+		}
+	}
 	return out
 }
 
@@ -85,6 +99,26 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		if v, ok := raw["cc_rules"]; ok && len(v) > 0 && string(v) != "null" {
 			if v[0] == '[' {
 				cfg.CCRules = string(v)
+			}
+		}
+		if v, ok := raw["chain_steps"]; ok && len(v) > 0 && string(v) != "null" {
+			if v[0] == '[' {
+				cfg.ChainSteps = string(v)
+			}
+		}
+		if v, ok := raw["escalation_steps"]; ok && len(v) > 0 && string(v) != "null" {
+			if v[0] == '[' {
+				cfg.EscalationSteps = string(v)
+			}
+		}
+
+		for _, candidate := range []string{cfg.RequestRateLimitAction, cfg.ErrorRateLimitAction, cfg.OWASPAction, cfg.CVEAction, cfg.AutoBanAction} {
+			if candidate == "" {
+				continue
+			}
+			if !action.IsValid(action.Type(candidate)) || action.Normalize(action.Type(candidate)) == action.Allow || action.Normalize(action.Type(candidate)) == action.Tag {
+				c.JSON(400, map[string]string{"error": "invalid action"})
+				return
 			}
 		}
 

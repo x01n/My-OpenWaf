@@ -63,6 +63,17 @@ func TestMatchSiteDoesNotFallbackAcrossBinds(t *testing.T) {
 	}
 }
 
+func TestRegisterSiteKeysKeepsFirstDuplicateBindHost(t *testing.T) {
+	sites := make(map[string]SiteRuntime)
+	registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com"))
+	registerSiteKeys(sites, testSiteRuntime(2, ":80", "example.com"))
+
+	got := sites[SiteMapKey(":80", "example.com")]
+	if got.Site.ID != 1 {
+		t.Fatalf("expected first site to remain registered, got %d", got.Site.ID)
+	}
+}
+
 func TestCompileCCRulesBuildsCompoundCustomRule(t *testing.T) {
 	protection := store.ProtectionConfig{
 		CCUseCustom: true,

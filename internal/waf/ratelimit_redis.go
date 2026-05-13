@@ -63,6 +63,27 @@ end
 return 0
 `)
 
+var incrementWindowScript = goredis.NewScript(`
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local min_ts = now - window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', min_ts)
+redis.call('ZADD', key, now, now .. ':' .. math.random(1, 1000000))
+redis.call('EXPIRE', key, window + 1)
+return redis.call('ZCARD', key)
+`)
+
+var countWindowScript = goredis.NewScript(`
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local min_ts = now - window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', min_ts)
+redis.call('EXPIRE', key, window + 1)
+return redis.call('ZCARD', key)
+`)
+
 // Allow returns true if the request should proceed (under limit).
 func (rl *RedisRateLimiter) Allow(key string) bool {
 	if !rl.enabled.Load() {
@@ -82,6 +103,45 @@ func (rl *RedisRateLimiter) Allow(key string) bool {
 		return true
 	}
 	return result == 1
+}
+
+// Increment adds one event to the current sliding window and returns the count.
+func (rl *RedisRateLimiter) Increment(key string) int64 {
+	if !rl.enabled.Load() {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	redisKey := fmt.Sprintf("%s:rl:%s", rl.prefix, key)
+	now := time.Now().UnixMilli()
+	windowMs := atomic.LoadInt64(&rl.windowS) * 1000
+
+	result, err := incrementWindowScript.Run(ctx, rl.client, []string{redisKey}, now, windowMs).Int64()
+	if err != nil {
+		return 0
+	}
+	return result
+}
+
+// IsOverLimit checks the current sliding window without incrementing it.
+func (rl *RedisRateLimiter) IsOverLimit(key string) bool {
+	if !rl.enabled.Load() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	redisKey := fmt.Sprintf("%s:rl:%s", rl.prefix, key)
+	now := time.Now().UnixMilli()
+	windowMs := atomic.LoadInt64(&rl.windowS) * 1000
+	maxReqs := atomic.LoadInt64(&rl.maxReqs)
+
+	count, err := countWindowScript.Run(ctx, rl.client, []string{redisKey}, now, windowMs).Int64()
+	if err != nil {
+		return false
+	}
+	return count > maxReqs
 }
 
 // Close is a no-op for the Redis limiter (connection managed externally).

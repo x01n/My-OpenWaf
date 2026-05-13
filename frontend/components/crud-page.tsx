@@ -172,7 +172,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
         title={title}
         description={description || "通过真实后端 API 管理资源，并在配置写入后触发即时生效。"}
         actions={
-          <Button className="rounded-2xl bg-white text-slate-950 hover:bg-slate-100" onClick={openNew}>
+          <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openNew}>
             <Plus className="mr-2 h-4 w-4" /> 新增{title}
           </Button>
         }
@@ -180,7 +180,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
 
       <Surface title={`${title}列表`} description="点击编辑可调整单条记录，删除操作会直接调用后端 delete 接口。">
         {loading ? (
-          <div className="overflow-hidden rounded-[24px] border border-slate-200">
+          <div className="overflow-hidden rounded-lg border border-slate-200">
             <Table>
               <TableHeader>
                 <TableRow className="bg-slate-50">
@@ -207,7 +207,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
         ) : items.length === 0 ? (
           <EmptyState title={`暂无${title}`} description="创建第一条记录后，这里会显示真实后端返回的数据列表。" />
         ) : (
-          <div className="overflow-hidden rounded-[24px] border border-slate-200">
+          <div className="overflow-hidden rounded-lg border border-slate-200">
             <Table>
               <TableHeader>
                 <TableRow className="bg-slate-50 text-xs uppercase tracking-[0.16em] text-slate-500">
@@ -237,10 +237,10 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
                     ))}
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
-                        <Button variant="ghost" size="icon-sm" className="rounded-xl" onClick={() => openEdit(item)}>
+                        <Button variant="ghost" size="icon-sm" className="rounded-lg" onClick={() => openEdit(item)}>
                           <Pencil className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="icon-sm" className="rounded-xl text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeleteTarget(item)}>
+                        <Button variant="ghost" size="icon-sm" className="rounded-lg text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeleteTarget(item)}>
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
@@ -254,7 +254,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
       </Surface>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[84vh] overflow-y-auto rounded-[28px] sm:max-w-xl">
+        <DialogContent className="max-h-[84vh] overflow-y-auto rounded-lg sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>{isNew ? `新增${title}` : `编辑${title}`}</DialogTitle>
             <DialogDescription>{isNew ? "填写真实后端字段后立即创建资源。" : "调整当前资源字段并在保存后即时生效。"}</DialogDescription>
@@ -275,10 +275,10 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
                     placeholder={field.placeholder}
                     value={String(editing?.[field.key] ?? "")}
                     onChange={(event) => setEditing((prev) => (prev ? { ...prev, [field.key]: event.target.value } : prev))}
-                    className="min-h-[120px] rounded-xl font-mono text-sm"
+                    className="min-h-[120px] rounded-lg font-mono text-sm"
                   />
                 ) : field.type === "boolean" ? (
-                  <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
                     <Switch
                       id={`field-${field.key}`}
                       checked={!!editing?.[field.key]}
@@ -294,7 +294,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
                       setEditing((prev) => (prev ? { ...prev, [field.key]: resolved } : prev));
                     }}
                   >
-                    <SelectTrigger className="rounded-xl"><SelectValue placeholder="请选择" /></SelectTrigger>
+                    <SelectTrigger className="rounded-lg"><SelectValue placeholder="请选择" /></SelectTrigger>
                     <SelectContent>
                       {(field.type === "async-select" ? asyncOpts[field.key] || [] : field.options || []).map((option) => (
                         <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
@@ -316,7 +316,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
                       }
                       setEditing((prev) => (prev ? { ...prev, [field.key]: value } : prev));
                     }}
-                    className="rounded-xl"
+                    className="rounded-lg"
                   />
                 )}
               </div>
@@ -324,7 +324,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>
-            <Button onClick={handleSave} disabled={saving} className="rounded-2xl bg-slate-950 text-white hover:bg-slate-800">
+            <Button onClick={handleSave} disabled={saving} className="rounded-lg bg-slate-950 text-white hover:bg-slate-800">
               {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               {isNew ? "创建" : "保存"}
             </Button>
@@ -333,7 +333,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
       </Dialog>
 
       <AlertDialog open={!!deleteTarget} onOpenChange={(visible) => !visible && setDeleteTarget(null)}>
-        <AlertDialogContent className="rounded-[28px]">
+        <AlertDialogContent className="rounded-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>确认删除</AlertDialogTitle>
             <AlertDialogDescription>此操作不可撤销。删除后，相关配置将立即从当前资源列表中移除。</AlertDialogDescription>

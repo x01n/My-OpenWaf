@@ -36,43 +36,14 @@ import {
   type SecurityEvent,
   type SecurityStats,
 } from "@/lib/api";
+import { getWAFActionMeta, wafActionOptions } from "@/lib/console";
 import { formatDate } from "@/lib/utils";
 
 const PAGE_SIZE = 20;
 
 function ActionBadge({ action }: { action: string }) {
-  switch (action) {
-    case "intercept":
-      return (
-        <Badge className="border-red-200 bg-red-50 text-red-700 hover:bg-red-50">
-          拦截
-        </Badge>
-      );
-    case "challenge":
-      return (
-        <Badge className="border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50">
-          质询
-        </Badge>
-      );
-    case "block":
-      return (
-        <Badge className="border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-50">
-          阻断
-        </Badge>
-      );
-    case "observe":
-      return (
-        <Badge className="border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-50">
-          观察
-        </Badge>
-      );
-    default:
-      return (
-        <Badge variant="outline" className="text-slate-500">
-          {action}
-        </Badge>
-      );
-  }
+  const meta = getWAFActionMeta(action);
+  return <Badge className={`rounded-md border text-xs ${meta.className}`}>{meta.shortLabel}</Badge>;
 }
 
 function exportCSV(events: SecurityEvent[]) {
@@ -139,7 +110,7 @@ export default function SecurityEventsPage() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   // derive stats
-  const todayIntercepts = useMemo(
+  const terminalEvents = useMemo(
     () => stats?.categories?.reduce((s, c) => s + c.count, 0) ?? 0,
     [stats]
   );
@@ -192,12 +163,12 @@ export default function SecurityEventsPage() {
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
-            <ShieldBan className="h-3.5 w-3.5 text-red-500" /> 今日拦截
+            <ShieldBan className="h-3.5 w-3.5 text-red-500" /> 终止事件
           </div>
           <div className="mt-2 text-2xl font-semibold text-slate-900">
-            {todayIntercepts.toLocaleString()}
+            {terminalEvents.toLocaleString()}
           </div>
-          <div className="mt-1 text-xs text-slate-400">intercept + block</div>
+          <div className="mt-1 text-xs text-slate-400">按类别汇总</div>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
@@ -227,10 +198,9 @@ export default function SecurityEventsPage() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部动作</SelectItem>
-            <SelectItem value="intercept">拦截</SelectItem>
-            <SelectItem value="challenge">质询</SelectItem>
-            <SelectItem value="block">阻断</SelectItem>
-            <SelectItem value="observe">观察</SelectItem>
+            {wafActionOptions.map((item) => (
+              <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <Select value={category} onValueChange={(v) => { setCategory(v); setPage(1); }}>
@@ -278,6 +248,7 @@ export default function SecurityEventsPage() {
                     <th className="px-4 py-3">时间</th>
                     <th className="px-4 py-3">动作</th>
                     <th className="px-4 py-3">类别</th>
+                    <th className="px-4 py-3">状态码</th>
                     <th className="px-4 py-3">源 IP</th>
                     <th className="px-4 py-3">请求路径</th>
                     <th className="px-4 py-3">匹配描述</th>
@@ -300,6 +271,9 @@ export default function SecurityEventsPage() {
                         {evt.category}
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-slate-700">
+                        {evt.action === "drop" || evt.status_code === 0 ? "DROP" : evt.status_code || "—"}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-slate-700">
                         {evt.client_ip}
                       </td>
                       <td className="max-w-[240px] truncate px-4 py-3 font-mono text-xs text-slate-600">
@@ -312,7 +286,7 @@ export default function SecurityEventsPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7 rounded-lg px-2 text-cyan-600 hover:text-cyan-700"
+                          className="h-7 rounded-md px-2 text-slate-600 hover:text-slate-900"
                           onClick={() => setSelected(evt)}
                         >
                           <Eye className="mr-1 h-3.5 w-3.5" /> 详情

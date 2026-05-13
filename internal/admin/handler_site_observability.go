@@ -18,8 +18,7 @@ func ListSiteAccessLogs(siteRepo *repository.SiteRepo, repo *repository.AccessLo
 			c.JSON(400, map[string]string{"error": "invalid id"})
 			return
 		}
-		site, err := siteRepo.Get(siteID)
-		if err != nil {
+		if _, err := siteRepo.Get(siteID); err != nil {
 			c.JSON(404, map[string]string{"error": "site not found"})
 			return
 		}
@@ -27,13 +26,13 @@ func ListSiteAccessLogs(siteRepo *repository.SiteRepo, repo *repository.AccessLo
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 		offset, limit := utils.Paginate(page, pageSize)
 		f := repository.AccessLogFilter{
-			SiteID:     siteID,
-			ClientIP:   string(c.Query("client_ip")),
-			Host:       site.Host,
-			Path:       string(c.Query("path")),
-			Method:     string(c.Query("method")),
-			WAFAction:  string(c.Query("waf_action")),
-			CacheState: string(c.Query("cache_state")),
+			SiteID:      siteID,
+			ClientIP:    string(c.Query("client_ip")),
+			Path:        string(c.Query("path")),
+			Method:      string(c.Query("method")),
+			WAFAction:   string(c.Query("waf_action")),
+			CacheState:  string(c.Query("cache_state")),
+			StatusGroup: string(c.Query("status_group")),
 		}
 		if since := string(c.Query("since")); since != "" {
 			if t, err := time.Parse(time.RFC3339, since); err == nil {

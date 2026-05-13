@@ -32,6 +32,7 @@ w.onmessage=function(e){
 if(e.data.found){
 w.terminate();
 window.__powResult={nonce:nonce,counter:e.data.counter,hash:e.data.hash,difficulty:difficulty};
+if(window.__owaf_pow_callback)window.__owaf_pow_callback(e.data.counter,e.data.hash,window.__powResult);
 if(window.__onPoWComplete)window.__onPoWComplete(window.__powResult);
 }};
 window.__powWorker=w;
@@ -54,6 +55,7 @@ var u=new Uint8Array(buf);var h="";
 for(var i=0;i<u.length;i++){var s=u[i].toString(16);h+=s.length===1?"0"+s:s;}
 if(h.substring(0,difficulty)===prefix){
 window.__powResult={nonce:nonce,counter:counter,hash:h,difficulty:difficulty};
+if(window.__owaf_pow_callback)window.__owaf_pow_callback(counter,h,window.__powResult);
 if(window.__onPoWComplete)window.__onPoWComplete(window.__powResult);
 return;}
 counter++;

@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"My-OpenWaf/internal/core/action"
+
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -233,17 +235,11 @@ func resolveAction(count int, steps []EscalationStep) string {
 
 // ActionSeverity returns a numeric severity for action comparison.
 // Higher = more severe.
-func ActionSeverity(action string) int {
-	switch action {
-	case "challenge":
-		return 1
-	case "intercept":
-		return 2
-	case "block", "drop":
-		return 3
-	default:
-		return 0
+func ActionSeverity(value string) int {
+	if value == "block" {
+		return action.TerminalPriority(action.Drop)
 	}
+	return action.TerminalPriority(action.Type(value))
 }
 
 // cleanupLoop periodically removes expired entries from the local cache.

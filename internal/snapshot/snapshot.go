@@ -116,28 +116,6 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 		}
 	}
 
-	// 4. Fallback: single site on this bind address can act as the default
-	prefix := bind + "\x00"
-	var fallback SiteRuntime
-	matches := 0
-	seen := make(map[uint]struct{})
-	for k, rt := range sn.Sites {
-		if strings.HasPrefix(k, prefix) {
-			if _, ok := seen[rt.Site.ID]; ok {
-				continue
-			}
-			seen[rt.Site.ID] = struct{}{}
-			fallback = rt
-			matches++
-			if matches > 1 {
-				return SiteRuntime{}, false
-			}
-		}
-	}
-	if matches == 1 {
-		return fallback, true
-	}
-
 	return SiteRuntime{}, false
 }
 

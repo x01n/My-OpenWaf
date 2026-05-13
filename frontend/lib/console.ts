@@ -111,6 +111,62 @@ export function getNavMeta(pathname: string | null | undefined) {
   } satisfies ConsoleNavItem;
 }
 
+export type WAFActionValue =
+  | "allow"
+  | "observe"
+  | "intercept"
+  | "rate_limit"
+  | "drop"
+  | "redirect"
+  | "challenge"
+  | "captcha_challenge"
+  | "shield_challenge"
+  | "chain_challenge";
+
+export interface WAFActionMeta {
+  value: WAFActionValue;
+  label: string;
+  shortLabel: string;
+  defaultStatus: string;
+  className: string;
+  description: string;
+}
+
+export const wafActionOptions: WAFActionMeta[] = [
+  { value: "observe", label: "观察", shortLabel: "观察", defaultStatus: "—", className: "border-slate-200 bg-slate-50 text-slate-600", description: "只记录事件，不阻断上游。" },
+  { value: "rate_limit", label: "限速 429", shortLabel: "限速", defaultStatus: "429", className: "border-amber-200 bg-amber-50 text-amber-700", description: "高频访问命中后返回 429。" },
+  { value: "intercept", label: "拦截 403/418", shortLabel: "拦截", defaultStatus: "403", className: "border-rose-200 bg-rose-50 text-rose-700", description: "默认 403，可用规则状态码改为 418。" },
+  { value: "challenge", label: "人机验证 422", shortLabel: "验证", defaultStatus: "422", className: "border-violet-200 bg-violet-50 text-violet-700", description: "通用 JS 人机验证。" },
+  { value: "captcha_challenge", label: "验证码 422", shortLabel: "验证码", defaultStatus: "422", className: "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700", description: "强制 CAPTCHA 验证。" },
+  { value: "shield_challenge", label: "5s 盾 422", shortLabel: "5s盾", defaultStatus: "422", className: "border-indigo-200 bg-indigo-50 text-indigo-700", description: "CAPTCHA + PoW + 环境一致性检查。" },
+  { value: "chain_challenge", label: "混合验证 422", shortLabel: "混合验证", defaultStatus: "422", className: "border-purple-200 bg-purple-50 text-purple-700", description: "按链式流程组合验证步骤。" },
+  { value: "drop", label: "阻断 Drop", shortLabel: "Drop", defaultStatus: "DROP", className: "border-slate-300 bg-slate-100 text-slate-800", description: "直接关闭连接，不返回 HTTP body。" },
+  { value: "redirect", label: "重定向 302", shortLabel: "重定向", defaultStatus: "302", className: "border-sky-200 bg-sky-50 text-sky-700", description: "命中后跳转到指定地址。" },
+  { value: "allow", label: "白名单放行", shortLabel: "放行", defaultStatus: "—", className: "border-emerald-200 bg-emerald-50 text-emerald-700", description: "ACL 白名单动作，命中后跳过后续检测。" },
+];
+
+export const terminalWAFActionOptions = wafActionOptions.filter((item) => item.value !== "allow");
+export const ruleWAFActionOptions = wafActionOptions;
+
+export function normalizeWAFAction(value: string | null | undefined): string {
+  if (!value) return "observe";
+  if (value === "block") return "drop";
+  if (value === "log_only") return "observe";
+  return value;
+}
+
+export function getWAFActionMeta(value: string | null | undefined): WAFActionMeta {
+  const normalized = normalizeWAFAction(value);
+  return wafActionOptions.find((item) => item.value === normalized) ?? {
+    value: "observe",
+    label: normalized || "未知",
+    shortLabel: normalized || "未知",
+    defaultStatus: "—",
+    className: "border-slate-200 bg-slate-50 text-slate-600",
+    description: normalized || "未知动作",
+  };
+}
+
 export const owaspModuleOptions = [
   { key: "sqli", label: "SQL 注入" },
   { key: "xss", label: "XSS" },

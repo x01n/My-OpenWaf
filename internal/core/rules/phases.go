@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
@@ -72,6 +73,29 @@ func (p *aclPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return action.Pass(), false
 }
 
+// ── ACL allow precheck phase ──
+
+type aclAllowPrecheckPhase struct{ rules []Compiled }
+
+func NewACLAllowPrecheckPhasePrecompiled(rules []Compiled) pipeline.Phase {
+	return &aclAllowPrecheckPhase{rules: rules}
+}
+
+func (p *aclAllowPrecheckPhase) Name() string { return "acl_allow_precheck" }
+
+func (p *aclAllowPrecheckPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	mc := ctxFromPipeline(ctx)
+	for i := range p.rules {
+		if action.Normalize(p.rules[i].Action) != action.Allow {
+			continue
+		}
+		if p.rules[i].Match(mc) {
+			return hit(p.rules[i]), true
+		}
+	}
+	return action.Pass(), false
+}
+
 // ── Signature phase ──
 
 type signaturePhase struct{ rules []Compiled }
@@ -127,11 +151,11 @@ func (p *customPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 // ── Request Rate Limit phase ──
 
 type reqRateLimitPhase struct {
-	limiter *waf.RateLimiter
+	limiter waf.RateLimiterBackend
 	act     action.Type
 }
 
-func NewReqRateLimitPhase(limiter *waf.RateLimiter, act action.Type) pipeline.Phase {
+func NewReqRateLimitPhase(limiter waf.RateLimiterBackend, act action.Type) pipeline.Phase {
 	return &reqRateLimitPhase{limiter: limiter, act: act}
 }
 
@@ -149,11 +173,20 @@ func (p *reqRateLimitPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 	if p.limiter.Allow(key) {
 		return action.Pass(), false
 	}
+	act := normalizeConfiguredAction(string(p.act))
+	if act == "" {
+		act = action.RateLimit
+	}
 	result := action.Result{
-		Type:      p.act,
+		Type:      act,
 		Phase:     "rate_limit",
+		RuleIDStr: "request_rate_limit",
 		MatchDesc: "request rate limit exceeded",
 		Matched:   true,
+		Category:  "rate_limit",
+	}
+	if act == action.RateLimit {
+		result.StatusCode = 429
 	}
 	return result, result.IsTerminal()
 }
@@ -226,8 +259,8 @@ func NewBotPhaseWithGeo(rep *waf.IPReputation, geo *waf.MaxMindResolver, thresho
 func (p *botPhase) Name() string { return "bot_detection" }
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	// Skip challenge for requests that already passed JS verification.
-	if cookie, ok := ctx.Headers["Cookie"]; ok && strings.Contains(cookie, "__waf_passed=1") {
+	// Skip challenge for requests that already passed a signed verification cookie.
+	if cookie, ok := ctx.Headers["Cookie"]; ok && waf.VerifyChallengePassCookie(cookie, ctx.Host, ctx.ClientIP, time.Now()) {
 		return action.Pass(), false
 	}
 
@@ -310,6 +343,7 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 
 	categorySensitivity := p.cfg.EffectiveCategorySensitivity()
+	overrides := waf.ParseOWASPRulesConfig(p.cfg.OWASPRulesConfig)
 	_, fileUploadEnabled := waf.CategoryThreshold(p.cfg.OWASPSensitivity, waf.CatFileUpload, categorySensitivity)
 	_, protoEnabled := waf.CategoryThreshold(p.cfg.OWASPSensitivity, waf.CatProtoViol, categorySensitivity)
 
@@ -323,31 +357,20 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 				fct = contentTypes[i]
 			}
 			if uploadHit, ok := waf.CheckFileUpload(fname, fct); ok {
-				act := action.Type(p.cfg.OWASPAction)
-				result := action.Result{
-					Type:      act,
-					RuleIDStr: uploadHit.RuleID,
-					Phase:     "owasp_default",
-					MatchDesc: uploadHit.Desc,
-					Matched:   true,
-					Category:  string(uploadHit.Category),
+				if waf.ShouldSkipRule(uploadHit.RuleID, ctx.Path, overrides) {
+					continue
 				}
+				result := owaspHitResult(uploadHit, p.cfg, overrides)
 				return result, result.IsTerminal()
 			}
 		}
 		// Fallback: scan raw body for filenames that Go's multipart parser
 		// may miss (path traversal stripped by filepath.Base, space-extension bypass).
 		if uploadHit, ok := waf.CheckRawMultipartFilenames(ctx.Body); ok {
-			act := action.Type(p.cfg.OWASPAction)
-			result := action.Result{
-				Type:      act,
-				RuleIDStr: uploadHit.RuleID,
-				Phase:     "owasp_default",
-				MatchDesc: uploadHit.Desc,
-				Matched:   true,
-				Category:  string(uploadHit.Category),
+			if !waf.ShouldSkipRule(uploadHit.RuleID, ctx.Path, overrides) {
+				result := owaspHitResult(uploadHit, p.cfg, overrides)
+				return result, result.IsTerminal()
 			}
-			return result, result.IsTerminal()
 		}
 	}
 
@@ -356,41 +379,44 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// Check HTTP method for unusual/dangerous methods before full OWASP scan.
 	if protoEnabled {
 		if methodHit, ok := waf.CheckMethodViolation(ctx.Method, ctx.Headers); ok {
-			act := action.Type(p.cfg.OWASPAction)
-			result := action.Result{
-				Type:      act,
-				RuleIDStr: methodHit.RuleID,
-				Phase:     "owasp_default",
-				MatchDesc: methodHit.Desc,
-				Matched:   true,
-				Category:  string(methodHit.Category),
+			if !waf.ShouldSkipRule(methodHit.RuleID, ctx.Path, overrides) {
+				result := owaspHitResult(methodHit, p.cfg, overrides)
+				return result, result.IsTerminal()
 			}
-			return result, result.IsTerminal()
 		}
 	}
 
 	hits := waf.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, categorySensitivity)
 
 	// Apply per-rule overrides and path whitelists.
-	if len(hits) > 0 && p.cfg.OWASPRulesConfig != "" && p.cfg.OWASPRulesConfig != "{}" {
-		overrides := waf.ParseOWASPRulesConfig(p.cfg.OWASPRulesConfig)
+	if len(hits) > 0 {
 		hits = waf.FilterHits(hits, ctx.Path, overrides)
 	}
 
 	if len(hits) == 0 {
 		return action.Pass(), false
 	}
-	best := hits[0]
-	act := action.Type(p.cfg.OWASPAction)
-	result := action.Result{
-		Type:      act,
-		RuleIDStr: best.RuleID,
-		Phase:     "owasp_default",
-		MatchDesc: best.Desc,
-		Matched:   true,
-		Category:  string(best.Category),
-	}
+	result := owaspHitResult(hits[0], p.cfg, overrides)
 	return result, result.IsTerminal()
+}
+
+func owaspHitResult(hit waf.OWASPHit, cfg store.ProtectionConfig, overrides map[string]waf.OWASPRuleOverride) action.Result {
+	act := normalizeConfiguredAction(cfg.OWASPAction)
+	override := waf.RuleOverride(hit.RuleID, overrides)
+	if override.Action != "" {
+		act = normalizeConfiguredAction(override.Action)
+	}
+	result := action.Result{
+		Type:       action.Normalize(act),
+		RuleIDStr:  hit.RuleID,
+		Phase:      "owasp_default",
+		MatchDesc:  hit.Desc,
+		Matched:    true,
+		Category:   string(hit.Category),
+		StatusCode: override.StatusCode,
+		RedirectTo: override.RedirectTo,
+	}
+	return result
 }
 
 // ── CVE Detection phase ──
@@ -421,33 +447,56 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// Use the first (highest-priority) match.
 	best := matches[0]
 
-	// Default: use configured CVE action.
-	act := action.Intercept
+	// Default: use configured CVE action, then rule-level action, then auto-drop.
 	cveAction := p.cfg.CVEAction
 	if cveAction == "" {
 		cveAction = "intercept"
 	}
-	act = action.Type(cveAction)
-
-	// Auto-escalate to Drop for critical/high severity CVEs when enabled.
-	switch best.Severity {
-	case "critical":
-		if p.cfg.CVEAutoDropCritical {
-			act = action.Drop
+	act := normalizeConfiguredAction(cveAction)
+	statusCode := 0
+	redirectTo := ""
+	explicitAction := false
+	if best.Action != "" {
+		act = normalizeConfiguredAction(best.Action)
+		explicitAction = true
+	}
+	if overrides := waf.ParseCVERuleOverrides(p.cfg.CVERulesConfig); len(overrides) > 0 {
+		for _, key := range []string{best.CVEID, "cve:" + best.CVEID} {
+			if ov, ok := overrides[key]; ok {
+				if ov.Action != "" {
+					act = normalizeConfiguredAction(ov.Action)
+					explicitAction = true
+				}
+				statusCode = ov.StatusCode
+				redirectTo = ov.RedirectTo
+				break
+			}
 		}
-	case "high":
-		if p.cfg.CVEAutoDropHigh {
-			act = action.Drop
+	}
+
+	// Auto-escalate to Drop for critical/high severity CVEs when enabled and the rule did not choose an action.
+	if !explicitAction {
+		switch best.Severity {
+		case "critical":
+			if p.cfg.CVEAutoDropCritical && action.TerminalPriority(action.Drop) > action.TerminalPriority(act) {
+				act = action.Drop
+			}
+		case "high":
+			if p.cfg.CVEAutoDropHigh && action.TerminalPriority(action.Drop) > action.TerminalPriority(act) {
+				act = action.Drop
+			}
 		}
 	}
 
 	result := action.Result{
-		Type:      act,
-		RuleIDStr: "cve:" + best.CVEID,
-		Phase:     "cve_detection",
-		MatchDesc: best.Description + " [" + best.Pattern + "]",
-		Matched:   true,
-		Category:  "cve_" + best.Category,
+		Type:       action.Normalize(act),
+		RuleIDStr:  "cve:" + best.CVEID,
+		Phase:      "cve_detection",
+		MatchDesc:  best.Description + " [" + best.Pattern + "]",
+		Matched:    true,
+		Category:   "cve_" + best.Category,
+		StatusCode: statusCode,
+		RedirectTo: redirectTo,
 	}
 	return result, result.IsTerminal()
 }
@@ -767,7 +816,12 @@ func (p *parallelOWASPCVEPhase) Execute(ctx *pipeline.RequestCtx) (action.Result
 
 	_ = g.Wait()
 
-	// Return the first terminal hit found.
+	if owaspStop && cveStop {
+		if action.MoreSevere(cveResult.Type, owaspResult.Type) {
+			return cveResult, true
+		}
+		return owaspResult, true
+	}
 	if owaspStop {
 		return owaspResult, true
 	}
@@ -801,13 +855,24 @@ func filterPhase(rules []Compiled, phase string) []Compiled {
 	return out
 }
 
+func normalizeConfiguredAction(value string) action.Type {
+	act := action.Normalize(action.Type(value))
+	if act == action.Type("log") {
+		return action.Observe
+	}
+	if !action.IsValid(act) {
+		return action.Intercept
+	}
+	return act
+}
+
 func hit(c Compiled) action.Result {
 	desc := c.Kind + ":" + c.Arg
 	if c.Kind == "compound" && len(c.Arg) > 60 {
 		desc = "compound:{...}"
 	}
 	return action.Result{
-		Type:       action.Normalize(c.Action),
+		Type:       normalizeConfiguredAction(string(c.Action)),
 		RuleID:     c.ID,
 		RuleIDStr:  "rule:" + c.Phase + ":" + c.Kind,
 		Phase:      c.Phase,

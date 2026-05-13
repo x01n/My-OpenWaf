@@ -15,15 +15,16 @@ func NewAccessLogRepo(db *gorm.DB) *AccessLogRepo {
 }
 
 type AccessLogFilter struct {
-	SiteID    uint
-	ClientIP  string
-	Host      string
-	Path      string
-	Method    string
-	WAFAction string
-	CacheState string
-	Since     *time.Time
-	Until     *time.Time
+	SiteID      uint
+	ClientIP    string
+	Host        string
+	Path        string
+	Method      string
+	WAFAction   string
+	CacheState  string
+	StatusGroup string
+	Since       *time.Time
+	Until       *time.Time
 }
 
 func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.AccessLog, int64, error) {
@@ -81,6 +82,16 @@ func applyAccessLogFilters(q *gorm.DB, f AccessLogFilter) *gorm.DB {
 	}
 	if f.CacheState != "" {
 		q = q.Where("cache_state = ?", f.CacheState)
+	}
+	switch f.StatusGroup {
+	case "2xx":
+		q = q.Where("status_code >= ? AND status_code < ?", 200, 300)
+	case "3xx":
+		q = q.Where("status_code >= ? AND status_code < ?", 300, 400)
+	case "4xx":
+		q = q.Where("status_code >= ? AND status_code < ?", 400, 500)
+	case "5xx":
+		q = q.Where("status_code >= ? AND status_code < ?", 500, 600)
 	}
 	if f.Since != nil {
 		q = q.Where("created_at >= ?", *f.Since)

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,10 +106,14 @@ func GetSite(repo *repository.SiteRepo) app.HandlerFunc {
 	}
 }
 
-func CreateSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
+func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item store.Site
 		if err := c.BindJSON(&item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteTLSCertificate(item.TLSEnabled, item.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
@@ -124,7 +129,7 @@ func CreateSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc 
 	}
 }
 
-func UpdateSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
+func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -141,6 +146,10 @@ func UpdateSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc 
 			return
 		}
 		existing.ID = id
+		if err := validateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -153,14 +162,30 @@ func UpdateSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc 
 	}
 }
 
-func DeleteSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
+func validateSiteTLSCertificate(tlsEnabled bool, certID *uint, certRepo *repository.CertificateRepo) error {
+	if !tlsEnabled {
+		return nil
+	}
+	if certID == nil || *certID == 0 {
+		return errors.New("TLS-enabled site requires cert_id")
+	}
+	if certRepo == nil {
+		return nil
+	}
+	if _, err := certRepo.Get(*certID); err != nil {
+		return errors.New("certificate not found")
+	}
+	return nil
+}
+
+func DeleteSite(repo *repository.SiteRepo, listenerRepo *repository.SiteListenerRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid id"})
 			return
 		}
-		if err := repo.Delete(id); err != nil {
+		if err := repo.DeleteWithListeners(id); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}

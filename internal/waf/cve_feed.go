@@ -40,7 +40,7 @@ type CVERuleModel struct {
 	Pattern     string         `gorm:"type:text" json:"pattern"`
 	Target      string         `gorm:"size:32" json:"target"` // url, body, header, cookie
 	Severity    string         `gorm:"size:16" json:"severity"`
-	Action      string         `gorm:"size:16;default:drop" json:"action"`
+	Action      string         `gorm:"size:32;default:drop" json:"action"`
 	Enabled     bool           `gorm:"default:false" json:"enabled"`
 	Description string         `gorm:"type:text" json:"description"`
 	Source      string         `gorm:"size:32" json:"source"` // auto_generated, manual, nvd, github

@@ -2,6 +2,7 @@ package waf
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/url"
 	"regexp"
 	"strings"
@@ -61,10 +62,13 @@ type CVERule struct {
 	CheckFunc   func(uri, body, ua string, headers map[string]string) *CVEMatch // 检测函数
 }
 
-// CVERuleOverride 支持 JSON 配置禁用/敏感度覆盖
+// CVERuleOverride 支持 JSON 配置禁用、敏感度和动作覆盖。
 type CVERuleOverride struct {
 	Enabled     *bool  `json:"enabled,omitempty"`
 	Sensitivity string `json:"sensitivity,omitempty"`
+	Action      string `json:"action,omitempty"`
+	StatusCode  int    `json:"status_code,omitempty"`
+	RedirectTo  string `json:"redirect_to,omitempty"`
 }
 
 // CVERuleRegistry 线程安全的规则注册表
@@ -103,6 +107,17 @@ func (r *CVERuleRegistry) ApplyOverrides(overrides map[string]CVERuleOverride) {
 			}
 		}
 	}
+}
+
+func ParseCVERuleOverrides(raw string) map[string]CVERuleOverride {
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	var overrides map[string]CVERuleOverride
+	if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+		return nil
+	}
+	return overrides
 }
 
 // DetectAll 执行注册表中所有启用的颗粒化规则
@@ -168,6 +183,9 @@ func BuildCVERequest(path, rawQuery string, headers map[string]string, body []by
 	}
 	for _, v := range headers {
 		targets = append(targets, v)
+	}
+	if contentType != "" {
+		targets = append(targets, contentType)
 	}
 	if bodyStr != "" {
 		targets = append(targets, bodyStr, decodedBody)
@@ -315,6 +333,37 @@ func hasCVESuspiciousContent(req *CVERequest) bool {
 			strings.Contains(lower, "metadatauploader") ||
 			strings.Contains(lower, "globalprotect") ||
 			strings.Contains(lower, "x-middleware") ||
+			strings.Contains(lower, "@fs/") ||
+			strings.Contains(lower, "raw??") ||
+			strings.Contains(lower, "validate/code") ||
+			strings.Contains(lower, "solrsearch") ||
+			strings.Contains(lower, "toolshell") ||
+			strings.Contains(lower, "toolpane.aspx") ||
+			strings.Contains(lower, "signout.aspx") ||
+			strings.Contains(lower, "spinstall0.aspx") ||
+			strings.Contains(lower, "deploywebpackage.do") ||
+			strings.Contains(lower, "loginok.html") ||
+			strings.Contains(lower, "swupdatefileuploader") ||
+			strings.Contains(lower, "cgi-bin/fwbcgi") ||
+			strings.Contains(lower, "cgiinfo") ||
+			strings.Contains(lower, "unlicensed.xhtml") ||
+			strings.Contains(lower, "garequestaction=activate") ||
+			strings.Contains(lower, "javax.faces.viewstate") ||
+			strings.Contains(lower, "actuator/gateway") ||
+			strings.Contains(lower, "addresponseheader") ||
+			strings.Contains(lower, "themeeditor") ||
+			strings.Contains(lower, "customcss") ||
+			strings.Contains(lower, "expression=") ||
+			strings.Contains(lower, "aws4-hmac-sha256") ||
+			strings.Contains(lower, "webinterface/function") ||
+			strings.Contains(lower, "hostcheck_validate") ||
+			strings.Contains(lower, "authhash") ||
+			strings.Contains(lower, "multipart/form-data") ||
+			strings.Contains(lower, "charset=utf-7") ||
+			strings.Contains(lower, "charset=utf-16") ||
+			strings.Contains(lower, "charset=utf-32") ||
+			strings.Contains(lower, "shift-jis") ||
+			strings.Contains(lower, "iso-2022-jp") ||
 			strings.Contains(lower, "graphql") ||
 			strings.Contains(lower, "introspection") {
 			return true

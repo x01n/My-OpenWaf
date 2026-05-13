@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// RateLimiterBackend is shared by local and Redis-backed rate limiters.
+type RateLimiterBackend interface {
+	Enabled() bool
+	Reconfigure(windowSec, maxReqs int, enabled bool)
+	Allow(key string) bool
+	Increment(key string) int64
+	IsOverLimit(key string) bool
+	Close()
+}
+
 // RateLimiter implements fixed-window rate limiting keyed by (clientIP + host).
 type RateLimiter struct {
 	mu      sync.Mutex

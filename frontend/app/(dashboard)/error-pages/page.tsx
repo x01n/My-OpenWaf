@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useState } from "react";
 import { FileWarning, Eye, Save, AlertTriangle } from "lucide-react";
@@ -112,7 +112,7 @@ export default function ErrorPagesPage() {
         {Object.keys(defaults).length === 0 ? (
           <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
             {statusCodes.map((code) => (
-              <div key={code} className={`rounded-2xl border p-4 ${statusColors[code] ?? "border-slate-200 bg-slate-50"}`}>
+              <div key={code} className={`rounded-lg border p-4 ${statusColors[code] ?? "border-slate-200 bg-slate-50"}`}>
                 <div className="mb-2 flex items-center gap-2">
                   <FileWarning className="h-4 w-4" />
                   <span className="text-sm font-semibold">{statusLabels[code]}</span>
@@ -126,12 +126,12 @@ export default function ErrorPagesPage() {
             {statusCodes.map((code) => {
               const cfg = defaults[code];
               return (
-                <div key={code} className={`rounded-2xl border p-4 ${statusColors[code] ?? "border-slate-200 bg-slate-50"}`}>
+                <div key={code} className={`rounded-lg border p-4 ${statusColors[code] ?? "border-slate-200 bg-slate-50"}`}>
                   <div className="mb-2 flex items-center gap-2">
                     <FileWarning className="h-4 w-4" />
                     <span className="text-sm font-semibold">{cfg?.title ?? statusLabels[code]}</span>
                   </div>
-                  <div className="rounded-xl border border-white/50 bg-white/60 p-2 text-xs font-mono max-h-[100px] overflow-y-auto">
+                  <div className="rounded-md border border-slate-200 bg-white p-2 text-xs font-mono max-h-[100px] overflow-y-auto">
                     {cfg?.html?.slice(0, 200) ?? "无模板"}{(cfg?.html?.length ?? 0) > 200 ? "..." : ""}
                   </div>
                 </div>
@@ -147,7 +147,7 @@ export default function ErrorPagesPage() {
         description="选择站点后为各状态码编辑自定义 HTML，支持 Go template 变量。"
         action={
           <div className="flex gap-2">
-            <Button variant="outline" onClick={handlePreview} className="rounded-xl gap-2">
+            <Button variant="outline" onClick={handlePreview} className="rounded-md gap-2">
               <Eye className="h-4 w-4" />预览
             </Button>
             <Button onClick={handleSave} disabled={saving || !selectedSite} className="gap-2">
@@ -159,7 +159,7 @@ export default function ErrorPagesPage() {
       >
         <div className="mb-4">
           <Select value={selectedSite} onValueChange={setSelectedSite}>
-            <SelectTrigger className="w-[300px] rounded-xl">
+            <SelectTrigger className="w-[300px] rounded-md">
               <SelectValue placeholder="选择站点..." />
             </SelectTrigger>
             <SelectContent>
@@ -189,17 +189,17 @@ export default function ErrorPagesPage() {
                       value={code === activeCode ? getCurrentHtml() : ""}
                       onChange={(e) => setCurrentHtml(e.target.value)}
                       rows={18}
-                      className="rounded-xl font-mono text-xs"
+                      className="rounded-md font-mono text-xs"
                       placeholder={`输入 ${code} 错误页面的 HTML 内容...`}
                     />
-                    <div className="flex items-start gap-2 rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs text-cyan-800">
+                    <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
                       <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                       <span>支持 Go template 变量：{"{{.StatusCode}}"} {"{{.Message}}"} {"{{.ClientIP}}"} {"{{.RequestID}}"}</span>
                     </div>
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-slate-700">实时预览</label>
-                    <div className="rounded-xl border border-slate-200 bg-white min-h-[400px] overflow-hidden">
+                    <div className="rounded-md border border-slate-200 bg-white min-h-[400px] overflow-hidden">
                       {previewHtml ? (
                         <iframe srcDoc={previewHtml} className="h-[400px] w-full border-0" sandbox="allow-same-origin" title="错误页面预览" />
                       ) : (

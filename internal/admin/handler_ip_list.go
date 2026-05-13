@@ -58,12 +58,10 @@ func CreateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			c.JSON(400, map[string]string{"error": "value required"})
 			return
 		}
-		// Default and validate action field
-		if body.Action == "" {
-			body.Action = "intercept"
-		}
-		if body.Action != "intercept" && body.Action != "block" {
-			c.JSON(400, map[string]string{"error": "action must be intercept or block"})
+		if normalized, ok := normalizeIPListAction(body.Action); ok {
+			body.Action = normalized
+		} else {
+			c.JSON(400, map[string]string{"error": "action must be intercept or drop"})
 			return
 		}
 		if err := repo.Create(&body); err != nil {
@@ -95,12 +93,10 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		// Default and validate action field
-		if body.Action == "" {
-			body.Action = "intercept"
-		}
-		if body.Action != "intercept" && body.Action != "block" {
-			c.JSON(400, map[string]string{"error": "action must be intercept or block"})
+		if normalized, ok := normalizeIPListAction(body.Action); ok {
+			body.Action = normalized
+		} else {
+			c.JSON(400, map[string]string{"error": "action must be intercept or drop"})
 			return
 		}
 		body.ID = existing.ID
@@ -114,6 +110,17 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			return
 		}
 		c.JSON(200, body)
+	}
+}
+
+func normalizeIPListAction(action string) (string, bool) {
+	switch action {
+	case "", "intercept":
+		return "intercept", true
+	case "drop", "block":
+		return "drop", true
+	default:
+		return "", false
 	}
 }
 

@@ -7,10 +7,22 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 	"My-OpenWaf/internal/waf"
 )
+
+func validateRuleAction(value string) (string, bool) {
+	if value == "" {
+		return "", true
+	}
+	act := action.Normalize(action.Type(value))
+	if !action.IsValid(act) || act == action.Allow || act == action.Tag {
+		return "", false
+	}
+	return string(act), true
+}
 
 func ListCVERules(repo *repository.CVERuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -57,6 +69,13 @@ func CreateCVERule(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManager) ap
 				c.JSON(400, map[string]string{"error": "invalid regex pattern: " + err.Error()})
 				return
 			}
+		}
+
+		if normalized, ok := validateRuleAction(item.Action); !ok {
+			c.JSON(400, map[string]string{"error": "invalid action"})
+			return
+		} else if normalized != "" {
+			item.Action = normalized
 		}
 
 		item.Source = "custom"
@@ -117,7 +136,12 @@ func UpdateCVERule(repo *repository.CVERuleRepo, feedMgr *waf.CVEFeedManager) ap
 			existing.Severity = req.Severity
 		}
 		if req.Action != "" {
-			existing.Action = req.Action
+			if normalized, ok := validateRuleAction(req.Action); ok {
+				existing.Action = normalized
+			} else {
+				c.JSON(400, map[string]string{"error": "invalid action"})
+				return
+			}
 		}
 		if req.Description != "" {
 			existing.Description = req.Description

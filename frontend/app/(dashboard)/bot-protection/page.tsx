@@ -130,7 +130,7 @@ export default function BotProtectionPage() {
           {/* 全局开关和阈值 */}
           <Surface title="基本配置" description="Bot 检测的全局开关和评分阈值。">
             <div className="grid gap-5">
-              <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-slate-900">启用 Bot 检测</div>
                   <div className="text-xs text-slate-500">开启后对所有请求进行 Bot 评分</div>
@@ -144,7 +144,7 @@ export default function BotProtectionPage() {
                   type="number"
                   value={settings.score_threshold}
                   onChange={(e) => setSettings({ ...settings, score_threshold: Number(e.target.value) })}
-                  className="rounded-xl"
+                  className="rounded-md"
                   placeholder="评分达到此值判定为 Bot"
                 />
                 <p className="text-xs text-slate-400">评分 ≥ 阈值的请求将被判定为 Bot</p>
@@ -155,7 +155,7 @@ export default function BotProtectionPage() {
                 <Input
                   value={settings.geoip_db_path}
                   onChange={(e) => setSettings({ ...settings, geoip_db_path: e.target.value })}
-                  className="rounded-xl"
+                  className="rounded-md"
                   placeholder="/path/to/GeoLite2-Country.mmdb"
                 />
               </div>
@@ -186,10 +186,10 @@ export default function BotProtectionPage() {
                   value={countryInput}
                   onChange={(e) => setCountryInput(e.target.value)}
                   placeholder="输入国家代码（如 CN, RU）"
-                  className="rounded-xl"
+                  className="rounded-md"
                   onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addCountry())}
                 />
-                <Button variant="outline" className="rounded-xl shrink-0" onClick={addCountry}>添加</Button>
+                <Button variant="outline" className="rounded-md shrink-0" onClick={addCountry}>添加</Button>
               </div>
               <div className="flex flex-wrap gap-2 min-h-[40px]">
                 {settings.high_risk_countries.length === 0 ? (
@@ -216,10 +216,10 @@ export default function BotProtectionPage() {
                     onChange={(e) => setDatacenterAsnInput(e.target.value)}
                     placeholder="输入 ASN 号码"
                     type="number"
-                    className="rounded-xl"
+                    className="rounded-md"
                     onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addAsn("datacenter"))}
                   />
-                  <Button variant="outline" className="rounded-xl shrink-0" onClick={() => addAsn("datacenter")}>添加</Button>
+                  <Button variant="outline" className="rounded-md shrink-0" onClick={() => addAsn("datacenter")}>添加</Button>
                 </div>
                 <div className="flex flex-wrap gap-2 min-h-[32px]">
                   {settings.datacenter_asns.map((asn) => (
@@ -238,10 +238,10 @@ export default function BotProtectionPage() {
                     onChange={(e) => setVpnAsnInput(e.target.value)}
                     placeholder="输入 ASN 号码"
                     type="number"
-                    className="rounded-xl"
+                    className="rounded-md"
                     onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addAsn("vpn"))}
                   />
-                  <Button variant="outline" className="rounded-xl shrink-0" onClick={() => addAsn("vpn")}>添加</Button>
+                  <Button variant="outline" className="rounded-md shrink-0" onClick={() => addAsn("vpn")}>添加</Button>
                 </div>
                 <div className="flex flex-wrap gap-2 min-h-[32px]">
                   {settings.vpn_proxy_asns.map((asn) => (
@@ -265,20 +265,20 @@ export default function BotProtectionPage() {
       {/* 评分日志表格 */}
       <Surface title="评分日志" description="Bot 检测引擎记录的评分事件。">
         <div className="mb-4 flex flex-wrap gap-3">
-          <Input value={ip} onChange={(e) => { setIP(e.target.value); setPage(1); }} placeholder="按 IP 筛选" className="w-48 rounded-xl" />
-          <Input value={minScore} onChange={(e) => { setMinScore(e.target.value); setPage(1); }} placeholder="最低分" type="number" className="w-32 rounded-xl" />
-          <Button variant="outline" className="rounded-xl" onClick={() => { setIP(""); setMinScore(""); setPage(1); }}>
+          <Input value={ip} onChange={(e) => { setIP(e.target.value); setPage(1); }} placeholder="按 IP 筛选" className="w-48 rounded-md" />
+          <Input value={minScore} onChange={(e) => { setMinScore(e.target.value); setPage(1); }} placeholder="最低分" type="number" className="w-32 rounded-md" />
+          <Button variant="outline" className="rounded-md" onClick={() => { setIP(""); setMinScore(""); setPage(1); }}>
             <RotateCcw className="mr-2 h-4 w-4" />重置
           </Button>
         </div>
 
         {loading ? (
-          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
+          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
         ) : logs.length === 0 ? (
           <EmptyState title="暂无 Bot 评分日志" description="当 Bot 检测引擎记录评分事件后，这里会展示客户端 IP、分数与执行动作。" />
         ) : (
           <div className="space-y-4">
-            <div className="overflow-hidden rounded-[20px] border border-slate-200">
+            <div className="overflow-hidden rounded-lg border border-slate-200">
               <Table>
                 <TableHeader>
                   <TableRow className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">

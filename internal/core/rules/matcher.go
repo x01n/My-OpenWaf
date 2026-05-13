@@ -482,10 +482,10 @@ func buildMatcher(kind, arg string) Matcher {
 		}
 		return &headerRegexMatcher{name: strings.ToLower(name), re: re}
 
-	case "body_contains":
+	case "body_contains", "block_body_contains":
 		return &bodyContainsMatcher{substr: arg}
 
-	case "body_regex":
+	case "body_regex", "block_body_regex":
 		re, err := cachedCompile(arg)
 		if err != nil {
 			return &neverMatcher{}

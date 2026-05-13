@@ -41,6 +41,7 @@ interface SiteListenersPanelProps {
 
 interface DialogDraft {
   bind: string;
+  network: string;
   tlsEnabled: boolean;
   certId: number | null;
   note: string;
@@ -49,6 +50,7 @@ interface DialogDraft {
 
 const emptyDraft: DialogDraft = {
   bind: ":80",
+  network: "tcp",
   tlsEnabled: false,
   certId: null,
   note: "",
@@ -98,6 +100,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
     setEditing(listener);
     setDraft({
       bind: listener.bind || "",
+      network: listener.network || "tcp",
       tlsEnabled: !!listener.tls_enabled,
       certId: listener.cert_id ?? null,
       note: listener.note || "",
@@ -129,18 +132,18 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
     try {
       const payload: Partial<SiteListener> = {
         bind,
-        network: "tcp",
+        network: draft.network,
         tls_enabled: draft.tlsEnabled,
         cert_id: draft.tlsEnabled ? draft.certId : null,
         enabled: draft.enabled,
         note: draft.note.trim(),
       };
-      if (editing) {
+      if (editing && editing.id !== 0) {
         await updateSiteListener(siteId, editing.id, payload);
         toast.success("监听端口已更新");
       } else {
         await createSiteListener(siteId, payload);
-        toast.success("监听端口已创建");
+        toast.success(editing ? "旧配置已保存为正式监听" : "监听端口已创建");
       }
       setDialogOpen(false);
       await refresh();
@@ -200,7 +203,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
       title="监听端口"
       description="一个站点可以同时监听多个端口（如同时启用 80 与 443），保存后自动热加载。"
       action={
-        <Button className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600" onClick={openCreate}>
+        <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openCreate}>
           <Plus className="mr-1.5 h-4 w-4" /> 新增监听端口
         </Button>
       }
@@ -220,6 +223,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
               <tr>
                 <th className="px-4 py-3">状态</th>
                 <th className="px-4 py-3">监听地址</th>
+                <th className="px-4 py-3">网络</th>
                 <th className="px-4 py-3">协议</th>
                 <th className="px-4 py-3">证书</th>
                 <th className="px-4 py-3">备注</th>
@@ -239,6 +243,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
                       />
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-700">{listener.bind}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-500">{listener.network || "tcp"}</td>
                     <td className="px-4 py-3">
                       <span
                         className={cn(
@@ -305,10 +310,12 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
         <DialogContent className="max-w-lg overflow-y-auto rounded-lg p-0">
           <DialogHeader className="border-b border-slate-200 bg-white px-6 py-5 text-left">
             <DialogTitle className="text-xl font-semibold tracking-tight text-slate-950">
-              {editing ? "编辑监听端口" : "新增监听端口"}
+              {editing?.id === 0 ? "保存旧监听为正式监听" : editing ? "编辑监听端口" : "新增监听端口"}
             </DialogTitle>
             <DialogDescription className="mt-1 text-sm text-slate-600">
-              监听 Bind、协议与证书信息会即时下发至数据面。
+              {editing?.id === 0
+                ? "旧配置会创建为正式监听，之后可独立启停和删除。"
+                : "监听 Bind、协议与证书信息会即时下发至数据面。"}
             </DialogDescription>
           </DialogHeader>
 
@@ -321,6 +328,19 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
                 placeholder=":80"
                 className="rounded-lg border-slate-200 bg-slate-50 font-mono"
               />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-sm font-medium text-slate-900">网络类型</Label>
+              <Select value={draft.network} onValueChange={(value) => setDraft({ ...draft, network: value })}>
+                <SelectTrigger className="rounded-lg border-slate-200 bg-slate-50">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="tcp">TCP</SelectItem>
+                  <SelectItem value="udp">UDP</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">
@@ -410,10 +430,10 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
             <Button
               onClick={submit}
               disabled={saving}
-              className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
+              className="rounded-md bg-slate-950 text-white hover:bg-slate-800"
             >
               {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              {saving ? "保存中..." : editing ? "保存修改" : "创建监听"}
+              {saving ? "保存中..." : editing?.id === 0 ? "创建正式监听" : editing ? "保存修改" : "创建监听"}
             </Button>
           </DialogFooter>
         </DialogContent>

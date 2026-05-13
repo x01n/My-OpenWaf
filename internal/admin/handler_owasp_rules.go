@@ -6,16 +6,21 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf"
 )
 
 type owaspRuleView struct {
-	ID          string `json:"id"`
-	Category    string `json:"category"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Enabled     bool   `json:"enabled"`
+	ID          string   `json:"id"`
+	Category    string   `json:"category"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Enabled     bool     `json:"enabled"`
+	Whitelist   []string `json:"whitelist,omitempty"`
+	Action      string   `json:"action,omitempty"`
+	StatusCode  int      `json:"status_code,omitempty"`
+	RedirectTo  string   `json:"redirect_to,omitempty"`
 }
 
 func ListOWASPRulesFromRegistry(repo *repository.SystemSettingsRepo) app.HandlerFunc {
@@ -31,24 +36,41 @@ func ListOWASPRulesFromRegistry(repo *repository.SystemSettingsRepo) app.Handler
 				continue
 			}
 			enabled := rule.Enabled
-			if overrides != nil {
-				if ov, ok := overrides[rule.ID]; ok {
-					if ovMap, ok2 := ov.(map[string]interface{}); ok2 {
-						if e, ok3 := ovMap["enabled"]; ok3 {
-							if b, ok4 := e.(bool); ok4 {
-								enabled = b
-							}
-						}
-					}
-				}
-			}
-			views = append(views, owaspRuleView{
+			view := owaspRuleView{
 				ID:          rule.ID,
 				Category:    rule.Category,
 				Name:        rule.Name,
 				Description: rule.Description,
 				Enabled:     enabled,
-			})
+			}
+			if overrides != nil {
+				if ov, ok := overrides[rule.ID]; ok {
+					if ovMap, ok2 := ov.(map[string]interface{}); ok2 {
+						if e, ok3 := ovMap["enabled"]; ok3 {
+							if b, ok4 := e.(bool); ok4 {
+								view.Enabled = b
+							}
+						}
+						if wl, ok3 := ovMap["whitelist"].([]interface{}); ok3 {
+							for _, item := range wl {
+								if s, ok4 := item.(string); ok4 {
+									view.Whitelist = append(view.Whitelist, s)
+								}
+							}
+						}
+						if s, ok3 := ovMap["action"].(string); ok3 {
+							view.Action = s
+						}
+						if n, ok3 := ovMap["status_code"].(float64); ok3 {
+							view.StatusCode = int(n)
+						}
+						if s, ok3 := ovMap["redirect_to"].(string); ok3 {
+							view.RedirectTo = s
+						}
+					}
+				}
+			}
+			views = append(views, view)
 		}
 		sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
 
@@ -72,8 +94,11 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 			return
 		}
 		var req struct {
-			Enabled   *bool    `json:"enabled,omitempty"`
-			Whitelist []string `json:"whitelist,omitempty"`
+			Enabled    *bool    `json:"enabled,omitempty"`
+			Whitelist  []string `json:"whitelist,omitempty"`
+			Action     string   `json:"action,omitempty"`
+			StatusCode int      `json:"status_code,omitempty"`
+			RedirectTo string   `json:"redirect_to,omitempty"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -96,6 +121,19 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 		if req.Whitelist != nil {
 			override["whitelist"] = req.Whitelist
 		}
+		if req.Action != "" {
+			if !action.IsValid(action.Type(req.Action)) || action.Normalize(action.Type(req.Action)) == action.Allow || action.Normalize(action.Type(req.Action)) == action.Tag {
+				c.JSON(400, map[string]string{"error": "invalid action"})
+				return
+			}
+			override["action"] = string(action.Normalize(action.Type(req.Action)))
+		}
+		if req.StatusCode > 0 {
+			override["status_code"] = req.StatusCode
+		}
+		if req.RedirectTo != "" {
+			override["redirect_to"] = req.RedirectTo
+		}
 		rulesConfig[ruleID] = override
 		cfg.SetOWASPRulesConfig(rulesConfig)
 		if err := saveProtectionConfig(repo, cfg); err != nil {
@@ -114,9 +152,12 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
 			Rules []struct {
-				ID        string   `json:"id"`
-				Enabled   *bool    `json:"enabled,omitempty"`
-				Whitelist []string `json:"whitelist,omitempty"`
+				ID         string   `json:"id"`
+				Enabled    *bool    `json:"enabled,omitempty"`
+				Whitelist  []string `json:"whitelist,omitempty"`
+				Action     string   `json:"action,omitempty"`
+				StatusCode int      `json:"status_code,omitempty"`
+				RedirectTo string   `json:"redirect_to,omitempty"`
 			} `json:"rules"`
 		}
 		if err := c.BindJSON(&req); err != nil {
@@ -148,6 +189,18 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 			}
 			if r.Whitelist != nil {
 				override["whitelist"] = r.Whitelist
+			}
+			if r.Action != "" {
+				if !action.IsValid(action.Type(r.Action)) || action.Normalize(action.Type(r.Action)) == action.Allow || action.Normalize(action.Type(r.Action)) == action.Tag {
+					continue
+				}
+				override["action"] = string(action.Normalize(action.Type(r.Action)))
+			}
+			if r.StatusCode > 0 {
+				override["status_code"] = r.StatusCode
+			}
+			if r.RedirectTo != "" {
+				override["redirect_to"] = r.RedirectTo
 			}
 			rulesConfig[r.ID] = override
 			updated++

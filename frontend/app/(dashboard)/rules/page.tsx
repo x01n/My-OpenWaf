@@ -15,6 +15,7 @@ import { Pagination } from "@/components/pagination";
 import { PageIntro, Surface, EmptyState } from "@/components/console-shell";
 import { RuleBuilder } from "@/components/rule-builder";
 import { api, type Rule, type PaginatedResponse, buildQuery } from "@/lib/api";
+import { getWAFActionMeta, ruleWAFActionOptions } from "@/lib/console";
 
 const PAGE_SIZE = 20;
 
@@ -31,13 +32,15 @@ interface RuleFormData {
   action: string;
   priority: number;
   enabled: boolean;
+  status_code: number;
+  redirect_to: string;
   policy_id?: number;
   description?: string;
 }
 
 const emptyForm: RuleFormData = {
   name: "", phase: "acl", pattern: "", action: "intercept",
-  priority: 100, enabled: true,
+  priority: 100, enabled: true, status_code: 0, redirect_to: "",
 };
 
 export default function CustomRulesPage() {
@@ -85,6 +88,8 @@ export default function CustomRulesPage() {
       action: rule.action,
       priority: rule.priority,
       enabled: rule.enabled,
+      status_code: rule.status_code ?? 0,
+      redirect_to: rule.redirect_to ?? "",
       policy_id: rule.policy_id,
     });
     setDialogOpen(true);
@@ -138,14 +143,11 @@ export default function CustomRulesPage() {
         const text = await file.text();
         const rules = JSON.parse(text) as RuleFormData[];
         if (!Array.isArray(rules)) { toast.error("无效的规则文件"); return; }
-        let count = 0;
-        for (const rule of rules) {
-          try {
-            await api("/api/v1/rules", { method: "POST", body: JSON.stringify(rule) });
-            count++;
-          } catch { /* skip invalid */ }
-        }
-        toast.success(`成功导入 ${count} 条规则`);
+        const result = await api<{ imported: number; total: number }>("/api/v1/rules/import", {
+          method: "POST",
+          body: JSON.stringify({ rules }),
+        });
+        toast.success(`成功导入 ${result.imported} / ${result.total} 条规则`);
         load();
       } catch { toast.error("文件解析失败"); }
     };
@@ -158,6 +160,17 @@ export default function CustomRulesPage() {
     return pattern;
   }
 
+  function statusSummary(rule: Rule) {
+    const meta = getWAFActionMeta(rule.action);
+    if (rule.action === "drop") return "DROP";
+    if (rule.status_code && rule.status_code > 0) return String(rule.status_code);
+    return meta.defaultStatus;
+  }
+
+  function actionHelp(action: string) {
+    return getWAFActionMeta(action).description;
+  }
+
   return (
     <div className="space-y-6">
       <PageIntro
@@ -166,13 +179,13 @@ export default function CustomRulesPage() {
         description="管理 ACL、签名与自定义匹配规则。规则按 phase、priority 参与数据面处理链路。"
         actions={
           <div className="flex gap-2">
-            <Button variant="outline" className="rounded-md border-white/20 text-white hover:bg-white/10" onClick={handleImport}>
+            <Button variant="outline" className="rounded-md border-slate-200 text-slate-700 hover:bg-slate-100" onClick={handleImport}>
               <FileUp className="mr-2 h-4 w-4" /> 导入
             </Button>
-            <Button variant="outline" className="rounded-md border-white/20 text-white hover:bg-white/10" onClick={handleExport}>
+            <Button variant="outline" className="rounded-md border-slate-200 text-slate-700 hover:bg-slate-100" onClick={handleExport}>
               <Download className="mr-2 h-4 w-4" /> 导出
             </Button>
-            <Button className="rounded-md bg-cyan-500 hover:bg-cyan-600 text-white" onClick={openCreate}>
+            <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openCreate}>
               <Plus className="mr-2 h-4 w-4" /> 创建规则
             </Button>
           </div>
@@ -191,7 +204,7 @@ export default function CustomRulesPage() {
           <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
         ) : items.length === 0 ? (
           <EmptyState title="暂无规则" description="点击「创建规则」添加第一条自定义规则。" action={
-            <Button className="rounded-md bg-cyan-600 hover:bg-cyan-700" onClick={openCreate}><Plus className="mr-2 h-4 w-4" /> 创建规则</Button>
+            <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openCreate}><Plus className="mr-2 h-4 w-4" /> 创建规则</Button>
           } />
         ) : (
           <div className="space-y-4">
@@ -202,6 +215,8 @@ export default function CustomRulesPage() {
                     <TableHead className="w-20">状态</TableHead>
                     <TableHead>名称</TableHead>
                     <TableHead>类型</TableHead>
+                    <TableHead>动作</TableHead>
+                    <TableHead className="w-24">状态码</TableHead>
                     <TableHead>匹配条件摘要</TableHead>
                     <TableHead className="w-20">命中数</TableHead>
                     <TableHead>更新时间</TableHead>
@@ -220,6 +235,12 @@ export default function CustomRulesPage() {
                       <TableCell>
                         <Badge variant="outline" className="rounded-md">{phaseLabels[rule.phase] ?? rule.phase}</Badge>
                       </TableCell>
+                      <TableCell>
+                        <Badge className={`rounded-md border text-xs ${getWAFActionMeta(rule.action).className}`}>
+                          {getWAFActionMeta(rule.action).shortLabel}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-slate-600">{statusSummary(rule)}</TableCell>
                       <TableCell>
                         <span className="font-mono text-xs text-slate-600">{patternSummary(rule.pattern)}</span>
                       </TableCell>
@@ -276,14 +297,36 @@ export default function CustomRulesPage() {
                 <Select value={form.action} onValueChange={(v) => setForm({ ...form, action: v })}>
                   <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="intercept">拦截</SelectItem>
-                    <SelectItem value="observe">观察</SelectItem>
-                    <SelectItem value="allow">放行</SelectItem>
-                    <SelectItem value="drop">断连</SelectItem>
-                    <SelectItem value="redirect">重定向</SelectItem>
-                    <SelectItem value="challenge">挑战</SelectItem>
+                    {ruleWAFActionOptions.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                {actionHelp(form.action) && <p className="text-xs text-slate-500">{actionHelp(form.action)}</p>}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>HTTP 状态码</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={form.status_code}
+                  onChange={(e) => setForm({ ...form, status_code: Number(e.target.value) })}
+                  disabled={form.action === "drop" || form.action === "allow" || form.action === "observe"}
+                  className="rounded-md"
+                />
+                <p className="text-xs text-slate-500">0 表示使用后端默认；断连/放行/观察不产生拦截响应。</p>
+              </div>
+              <div className="space-y-2">
+                <Label>重定向地址</Label>
+                <Input
+                  value={form.redirect_to}
+                  onChange={(e) => setForm({ ...form, redirect_to: e.target.value })}
+                  disabled={form.action !== "redirect"}
+                  placeholder="https://example.com/blocked"
+                  className="rounded-md"
+                />
               </div>
             </div>
             <div className="space-y-2">
@@ -304,7 +347,7 @@ export default function CustomRulesPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-md" onClick={() => setDialogOpen(false)}>取消</Button>
-            <Button onClick={handleSave} disabled={saving} className="rounded-md bg-cyan-600 hover:bg-cyan-700">
+            <Button onClick={handleSave} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
               {saving ? "保存中..." : editingId ? "更新规则" : "创建规则"}
             </Button>
           </DialogFooter>

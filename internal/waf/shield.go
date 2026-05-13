@@ -114,7 +114,8 @@ func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCou
 }
 
 // WriteShieldChallengeResponse renders the 5-second shield HTML page.
-func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, reqID, originalURL string) {
+func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, reqID, originalURL string, statusCode int) {
+	prepareChallengeResponseHeaders(c, reqID, "shield_challenge")
 	session, captchaChallenge, err := sm.GenerateChallenge(originalURL)
 	if err != nil {
 		c.String(500, "shield challenge generation failed")
@@ -124,7 +125,7 @@ func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, req
 	envJS := EnvCheckJS()
 
 	html := fmt.Sprintf(shieldPageHTML, captchaChallenge.MasterImg, captchaChallenge.Prompt, session.ID, envJS, powScript)
-	c.Data(403, "text/html; charset=utf-8", []byte(html))
+	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
 const shieldPageHTML = `<!DOCTYPE html>

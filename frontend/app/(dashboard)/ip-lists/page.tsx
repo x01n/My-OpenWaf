@@ -29,6 +29,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 interface ListResponse {
   items: IPListItem[];
@@ -49,12 +50,13 @@ export default function IPListsPage() {
   const [deleting, setDeleting] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [kindFilter, setKindFilter] = useState<"all" | "whitelist" | "blacklist">("all");
 
   // form state
   const [formKind, setFormKind] = useState<"whitelist" | "blacklist">("whitelist");
   const [formValue, setFormValue] = useState("");
   const [formNote, setFormNote] = useState("");
-  const [formAction, setFormAction] = useState<"intercept" | "block">("intercept");
+  const [formAction, setFormAction] = useState<"intercept" | "drop">("intercept");
   const [formEnabled, setFormEnabled] = useState(true);
 
   const load = useCallback(async () => {
@@ -64,6 +66,7 @@ export default function IPListsPage() {
         page: String(page),
         page_size: String(PAGE_SIZE),
       });
+      if (kindFilter !== "all") params.set("kind", kindFilter);
       const result = await api<ListResponse>(`/api/v1/ip-lists?${params.toString()}`);
       setItems(result.items ?? []);
       setTotal(result.total ?? 0);
@@ -74,7 +77,7 @@ export default function IPListsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page]);
+  }, [page, kindFilter]);
 
   useEffect(() => {
     load();
@@ -101,7 +104,7 @@ export default function IPListsPage() {
     setFormKind(item.kind as "whitelist" | "blacklist");
     setFormValue(item.value);
     setFormNote(item.note);
-    setFormAction((item.action as "intercept" | "block") || "intercept");
+    setFormAction(item.action === "block" || item.action === "drop" ? "drop" : "intercept");
     setFormEnabled(item.enabled);
     setDialogOpen(true);
   }
@@ -230,16 +233,29 @@ export default function IPListsPage() {
         </div>
         <Button
           onClick={openCreate}
-          className="gap-2 rounded-lg bg-cyan-500 hover:bg-cyan-600"
+          className="gap-2 rounded-md bg-slate-950 text-white hover:bg-slate-800"
         >
           <Plus className="h-4 w-4" /> 添加条目
         </Button>
       </div>
 
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+        <Select value={kindFilter} onValueChange={(v) => { setKindFilter(v as "all" | "whitelist" | "blacklist"); setPage(1); }}>
+          <SelectTrigger className="w-[160px] rounded-lg">
+            <SelectValue placeholder="类型筛选" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部类型</SelectItem>
+            <SelectItem value="whitelist">白名单</SelectItem>
+            <SelectItem value="blacklist">黑名单</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
       {/* Batch action bar */}
       {selected.size > 0 && (
-        <div className="flex items-center gap-3 rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-2.5">
-          <span className="text-sm text-cyan-800">
+        <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5">
+          <span className="text-sm text-slate-700">
             已选择 <strong>{selected.size}</strong> 项
           </span>
           <Button
@@ -322,7 +338,7 @@ export default function IPListsPage() {
                       </td>
                       <td className="px-4 py-3">
                         {item.kind === "blacklist" ? (
-                          item.action === "block" ? (
+                          item.action === "block" || item.action === "drop" ? (
                             <Badge variant="outline" className="gap-1 border-rose-200 bg-rose-50 text-rose-700">
                               <Zap className="h-3 w-3" /> TCP RST
                             </Badge>
@@ -349,7 +365,7 @@ export default function IPListsPage() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="h-8 w-8 rounded-lg p-0 text-slate-400 hover:text-cyan-600"
+                            className="h-8 w-8 rounded-lg p-0 text-slate-400 hover:text-slate-700"
                             onClick={() => openEdit(item)}
                           >
                             <Edit2 className="h-3.5 w-3.5" />
@@ -479,7 +495,7 @@ export default function IPListsPage() {
                     onClick={() => setFormAction("intercept")}
                     className={`rounded-lg border p-3 text-left transition-colors ${
                       formAction === "intercept"
-                        ? "border-cyan-300 bg-cyan-50"
+                        ? "border-slate-300 bg-slate-50"
                         : "border-slate-200 bg-white hover:bg-slate-50"
                     }`}
                   >
@@ -491,18 +507,17 @@ export default function IPListsPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setFormAction("block")}
+                    onClick={() => setFormAction("drop")}
                     className={`rounded-lg border p-3 text-left transition-colors ${
-                      formAction === "block"
-                        ? "border-cyan-300 bg-cyan-50"
+                      formAction === "drop" ? "border-slate-300 bg-slate-50"
                         : "border-slate-200 bg-white hover:bg-slate-50"
                     }`}
                   >
                     <div className="flex items-center gap-2 text-sm font-medium">
                       <Zap className="h-4 w-4 text-rose-600" />
-                      阻断 (TCP RST)
+                      Drop（无 HTTP 响应）
                     </div>
-                    <p className="mt-1 text-xs text-slate-500">直接断开 TCP 连接</p>
+                    <p className="mt-1 text-xs text-slate-500">关闭连接并记录 status_code=0</p>
                   </button>
                 </div>
               </div>
@@ -518,7 +533,7 @@ export default function IPListsPage() {
               取消
             </Button>
             <Button
-              className="rounded-lg bg-cyan-500 hover:bg-cyan-600"
+              className="rounded-md bg-slate-950 text-white hover:bg-slate-800"
               onClick={handleSave}
               disabled={saving}
             >

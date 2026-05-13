@@ -90,6 +90,9 @@ func Run() {
 
 	// Access log writer (async batch insert, non-blocking).
 	accessLogWriter := observability.NewAccessLogWriter(repos.AccessLog, logger.New("access_logs"))
+	if rt.Redis != nil {
+		accessLogWriter.SetRedis(rt.Redis)
+	}
 	defer accessLogWriter.Close()
 
 	// Event archiver (auto-delete security events, access logs and drop events older than 30 days).
@@ -108,8 +111,18 @@ func Run() {
 	if sn != nil {
 		prot = sn.Protection
 	}
-	reqRL := waf.NewRateLimiter(prot.RequestRateLimitWindow, prot.RequestRateLimitMax, prot.RequestRateLimitEnabled)
-	errRL := waf.NewRateLimiter(prot.ErrorRateLimitWindow, prot.ErrorRateLimitMax, prot.ErrorRateLimitEnabled)
+	var reqRL waf.RateLimiterBackend
+	var errRL waf.RateLimiterBackend
+	if rt.Redis != nil {
+		reqRL = waf.NewRedisRateLimiter(rt.Redis, "openwaf:request", prot.RequestRateLimitWindow, prot.RequestRateLimitMax, prot.RequestRateLimitEnabled)
+		errRL = waf.NewRedisRateLimiter(rt.Redis, "openwaf:error", prot.ErrorRateLimitWindow, prot.ErrorRateLimitMax, prot.ErrorRateLimitEnabled)
+	}
+	if reqRL == nil {
+		reqRL = waf.NewRateLimiter(prot.RequestRateLimitWindow, prot.RequestRateLimitMax, prot.RequestRateLimitEnabled)
+	}
+	if errRL == nil {
+		errRL = waf.NewRateLimiter(prot.ErrorRateLimitWindow, prot.ErrorRateLimitMax, prot.ErrorRateLimitEnabled)
+	}
 	defer reqRL.Close()
 	defer errRL.Close()
 
@@ -225,38 +238,26 @@ func Run() {
 	}
 
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
-	// It also detects config drift (bind address changes, TLS toggle, cert changes)
-	// and restarts affected listeners automatically.
-	//
-	// This implementation now works at the Site level: each enabled Site with valid
-	// configuration gets its own Hertz server instance, allowing per-site start/stop.
+	// It also detects bind-level listener drift and restarts affected listeners automatically.
 	reconcileListeners := func() {
 		newSn := rt.Snapshot.Load()
 		if newSn == nil {
 			return
 		}
 
-		// Build set of desired site-based listeners.
 		type desiredEntry struct {
-			siteID uint
 			siteRT snapshotpkg.SiteRuntime
 			tag    string
 		}
 		desired := make(map[string]desiredEntry)
-
-		// Iterate through all sites in the snapshot to create per-site listeners.
-		for _, siteRT := range newSn.Sites {
-			// Each site gets its own listener instance.
-			name := siteListenerName(siteRT.Site.ID, siteRT.Bind)
-			tag := siteListenerFingerprint(siteRT.Site.ID, siteRT, newSn)
+		for _, siteRT := range listenerRuntimesByBind(newSn) {
+			name := siteListenerName(siteRT.Bind)
 			desired[name] = desiredEntry{
-				siteID: siteRT.Site.ID,
 				siteRT: siteRT,
-				tag:    tag,
+				tag:    siteListenerFingerprint(siteRT.Bind, newSn),
 			}
 		}
 
-		// Remove stale or changed site listeners.
 		for _, name := range lm.Names() {
 			if !strings.HasPrefix(name, "site:") {
 				continue
@@ -277,17 +278,19 @@ func Run() {
 			}
 		}
 
-		// Add new or restarted site listeners.
 		for name, de := range desired {
 			if lm.Has(name) {
 				continue
 			}
 			srv := buildDataServer(de.siteRT, newSn, dpOpts)
+			if srv == nil {
+				log.Warn("skipping site listener without valid TLS config", slog.String("name", name), slog.String("bind", de.siteRT.Bind))
+				continue
+			}
 			lm.AddHertzWithTag(name, srv, de.tag)
 			lm.StartOne(name)
 			log.Info("hot-started site listener",
 				slog.String("name", name),
-				slog.Uint64("site_id", uint64(de.siteID)),
 				slog.String("bind", de.siteRT.Bind),
 				slog.Bool("tls", de.siteRT.Site.TLSEnabled),
 			)
@@ -305,6 +308,7 @@ func Run() {
 		if sn := rt.Snapshot.Load(); sn != nil {
 			applyProtectionRuntimeConfig(sn.Protection)
 		}
+		responseCache.Clear()
 		loadIPLists(ipRep, repos.IPList)
 		// Hot-reload data-plane listeners.
 		reconcileListeners()
@@ -351,12 +355,15 @@ func Run() {
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
 	// ─── Data-plane listener(s) ───
-	// Initialize site-based listeners from snapshot.
 	if sn != nil {
-		for _, siteRT := range sn.Sites {
-			name := siteListenerName(siteRT.Site.ID, siteRT.Bind)
-			tag := siteListenerFingerprint(siteRT.Site.ID, siteRT, sn)
+		for _, siteRT := range listenerRuntimesByBind(sn) {
+			name := siteListenerName(siteRT.Bind)
+			tag := siteListenerFingerprint(siteRT.Bind, sn)
 			srv := buildDataServer(siteRT, sn, dpOpts)
+			if srv == nil {
+				log.Warn("skipping site listener without valid TLS config", slog.String("name", name), slog.String("bind", siteRT.Bind))
+				continue
+			}
 			lm.AddHertzWithTag(name, srv, tag)
 		}
 	}
@@ -371,9 +378,26 @@ func Run() {
 	lm.WaitForSignal()
 }
 
-// siteListenerName creates a consistent name for a site-based listener.
-func siteListenerName(siteID uint, bind string) string {
-	return fmt.Sprintf("site:%d:%s", siteID, bind)
+func siteListenerName(bind string) string {
+	return fmt.Sprintf("site:%s", bind)
+}
+
+func listenerRuntimesByBind(sn *snapshotpkg.Snapshot) []snapshotpkg.SiteRuntime {
+	if sn == nil {
+		return nil
+	}
+	byBind := make(map[string]snapshotpkg.SiteRuntime)
+	for _, rt := range sn.Sites {
+		current, exists := byBind[rt.Bind]
+		if !exists || (!current.Site.TLSEnabled && rt.Site.TLSEnabled) {
+			byBind[rt.Bind] = rt
+		}
+	}
+	items := make([]snapshotpkg.SiteRuntime, 0, len(byBind))
+	for _, rt := range byBind {
+		items = append(items, rt)
+	}
+	return items
 }
 
 func loadIPLists(rep *waf.IPReputation, repo *repository.IPListRepo) {
@@ -457,12 +481,13 @@ func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, d
 
 	if site.TLSEnabled {
 		tlsCfg := buildListenerTLS(siteRT, sn)
-		if tlsCfg != nil {
-			opts = append(opts,
-				server.WithTLS(tlsCfg),
-				server.WithTransport(standard.NewTransporter),
-			)
+		if tlsCfg == nil {
+			return nil
 		}
+		opts = append(opts,
+			server.WithTLS(tlsCfg),
+			server.WithTransport(standard.NewTransporter),
+		)
 	}
 
 	srv := server.Default(opts...)
@@ -559,22 +584,28 @@ func parseTLSVersion(v string) uint16 {
 
 // ─── Config drift fingerprint ───────────────────────────────────────
 
-// siteListenerFingerprint produces a short hash that changes whenever the
-// site's listener configuration (bind, TLS, cert content) changes.
-// This is used by reconcileListeners to detect drift and restart servers.
-func siteListenerFingerprint(siteID uint, siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) string {
-	site := siteRT.Site
+// siteListenerFingerprint produces a short hash that changes whenever a bind-level listener changes.
+func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "site=%d bind=%s tls=%v min=%s max=%s alpn=%s",
-		siteID, site.Bind, site.TLSEnabled, site.MinTLSVersion, site.MaxTLSVersion, site.ALPN)
+	fmt.Fprintf(h, "bind=%s", bind)
 
-	// Include site cert raw bytes in the fingerprint.
-	if siteRT.Certificate != nil {
-		fmt.Fprintf(h, " cert=%s", siteRT.Certificate.CertPEM[:min(64, len(siteRT.Certificate.CertPEM))])
+	seenSites := make(map[uint]struct{})
+	for _, rt := range sn.Sites {
+		if rt.Bind != bind {
+			continue
+		}
+		if _, seen := seenSites[rt.Site.ID]; seen {
+			continue
+		}
+		seenSites[rt.Site.ID] = struct{}{}
+		site := rt.Site
+		fmt.Fprintf(h, " site=%d tls=%v min=%s max=%s alpn=%s", site.ID, site.TLSEnabled, site.MinTLSVersion, site.MaxTLSVersion, site.ALPN)
+		if rt.Certificate != nil {
+			fmt.Fprintf(h, " cert=%s", rt.Certificate.CertPEM[:min(64, len(rt.Certificate.CertPEM))])
+		}
 	}
 
-	// Include per-site SNI cert fingerprints for this bind address.
-	prefix := "sni:" + site.Bind + "\x00"
+	prefix := "sni:" + bind + "\x00"
 	for sniKey, cert := range sn.SiteTLSCertBySNI {
 		if strings.HasPrefix(sniKey, prefix) && len(cert.Certificate) > 0 {
 			fmt.Fprintf(h, " sni=%s:len=%d", sniKey, len(cert.Certificate[0]))

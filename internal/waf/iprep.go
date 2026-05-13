@@ -13,7 +13,7 @@ type IPListEntry struct {
 	Single   net.IP
 	Note     string
 	ExpireAt int64  // unix seconds; 0 = permanent
-	Action   string // "intercept" or "block"
+	Action   string // "intercept" or "drop" ("block" accepted as legacy alias)
 }
 
 // IPReputation manages blacklist/whitelist + auto-ban.
@@ -30,7 +30,7 @@ type IPReputation struct {
 	autoBanThreshold atomic.Int64
 	autoBanWindow    atomic.Int64 // seconds
 	autoBanDuration  atomic.Int64 // seconds
-	autoBanAction    atomic.Value // string: "intercept" or "block"
+	autoBanAction    atomic.Value // string: "intercept" or "drop"
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -83,8 +83,11 @@ func (r *IPReputation) ConfigureAutoBan(enabled bool, threshold, windowSec, dura
 
 // ConfigureAutoBanAction sets the action taken when an IP is auto-banned.
 func (r *IPReputation) ConfigureAutoBanAction(action string) {
-	if action == "intercept" || action == "block" {
-		r.autoBanAction.Store(action)
+	switch action {
+	case "drop", "block":
+		r.autoBanAction.Store("drop")
+	case "intercept", "":
+		r.autoBanAction.Store("intercept")
 	}
 }
 
@@ -94,7 +97,7 @@ type IPDecision struct {
 	Matched  bool
 	Reason   string
 	Category string
-	Action   string // "block" for TCP RST, "intercept" for HTTP 403
+	Action   string // "drop" for TCP close, "intercept" for HTTP 403
 }
 
 // Check returns the reputation decision for the given IP.
@@ -212,7 +215,12 @@ func ParseIPListEntry(s string, note string, action ...string) (IPListEntry, boo
 	}
 	act := "intercept"
 	if len(action) > 0 && action[0] != "" {
-		act = action[0]
+		switch action[0] {
+		case "drop", "block":
+			act = "drop"
+		case "intercept":
+			act = "intercept"
+		}
 	}
 	if _, cidr, err := net.ParseCIDR(s); err == nil {
 		return IPListEntry{CIDR: cidr, Note: note, Action: act}, true

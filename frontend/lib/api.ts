@@ -182,6 +182,13 @@ export async function createCertificate(payload: Pick<Certificate, "name" | "cer
   });
 }
 
+export async function updateCertificate(id: number, payload: Pick<Certificate, "name" | "cert_pem" | "key_pem">) {
+  return api<Certificate>(`/api/v1/certificates/${id}/update`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function deleteCertificate(id: number) {
   return api(`/api/v1/certificates/${id}/delete`, { method: "POST" });
 }
@@ -203,7 +210,9 @@ export interface Rule {
 }
 
 export interface SiteCacheRule {
-  path: string;
+  type?: "prefix" | "exact" | "suffix" | string;
+  value?: string;
+  path?: string;
   ttl: number;
 }
 
@@ -411,6 +420,16 @@ export interface SystemSetting {
   value: string;
 }
 
+export interface EscalationStep {
+  threshold: number;
+  action: string;
+}
+
+export interface ChainStepConfig {
+  type: "env" | "pow" | "captcha" | string;
+  condition?: string;
+}
+
 export interface ProtectionSettings {
   request_ratelimit_enabled: boolean;
   request_ratelimit_window: number;
@@ -441,6 +460,20 @@ export interface ProtectionSettings {
   owasp_modules?: Record<string, string>;
   cve_enabled: boolean;
   cve_action: string;
+  cve_auto_drop_critical?: boolean;
+  cve_auto_drop_high?: boolean;
+  cve_rules_config?: string;
+  owasp_rules_config?: string;
+  captcha_enabled?: boolean;
+  captcha_type?: string;
+  captcha_timeout?: number;
+  shield_enabled?: boolean;
+  shield_difficulty?: number;
+  chain_enabled?: boolean;
+  chain_steps?: ChainStepConfig[] | string;
+  escalation_enabled?: boolean;
+  escalation_window_secs?: number;
+  escalation_steps?: EscalationStep[] | string;
   login_min_password_length: number;
   login_max_attempts: number;
   login_lockout_minutes: number;

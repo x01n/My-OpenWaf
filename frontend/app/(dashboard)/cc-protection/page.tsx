@@ -17,6 +17,7 @@ import {
 import {
   getProtectionSettings, updateProtectionSettings, type ProtectionSettings,
 } from "@/lib/api";
+import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console";
 import { cn } from "@/lib/utils";
 
 /* ───── types ───── */
@@ -40,7 +41,7 @@ const emptyCondition: CCCondition = { target: "url_path", operator: "equals", va
 const emptyRule: CCRule = {
   name: "", enabled: true,
   conditions: [{ ...emptyCondition }],
-  window: 60, threshold: 100, action: "captcha", duration: 5, captcha: false,
+  window: 60, threshold: 100, action: "challenge", duration: 5, captcha: false,
 };
 
 const targetOptions = [
@@ -52,11 +53,6 @@ const operatorOptions = [
   { value: "equals", label: "等于" },
   { value: "contains", label: "包含" },
   { value: "prefix", label: "前缀关键字" },
-];
-const actionOptions = [
-  { value: "observe", label: "观察" },
-  { value: "captcha", label: "人机验证" },
-  { value: "block", label: "直接封禁" },
 ];
 
 /* ───── main ───── */
@@ -108,7 +104,7 @@ export default function CCProtectionPage() {
     const next = { ...settings, waiting_room_enabled: val };
     setSettings(next);
     await persist(rules, next);
-    toast.success(val ? "等待室已启用" : "等待室已关闭");
+    toast.success(val ? "等待室草案已启用" : "等待室草案已关闭");
   }
 
   async function toggleRateLimit(val: boolean) {
@@ -190,7 +186,7 @@ export default function CCProtectionPage() {
   /* ── save module config ── */
   async function saveWaitingRoom() {
     if (!settings) return;
-    try { await persist(rules); toast.success("等待室配置已保存"); setWaitingRoomOpen(false); } catch (err) { toast.error(String(err)); }
+    try { await persist(rules); toast.success("等待室草案已保存"); setWaitingRoomOpen(false); } catch (err) { toast.error(String(err)); }
   }
   async function saveRateLimit() {
     if (!settings) return;
@@ -226,15 +222,15 @@ export default function CCProtectionPage() {
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-50 text-cyan-600">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
                 <Clock className="h-4 w-4" />
               </div>
               <span className="text-sm font-semibold text-slate-900">等待室</span>
             </div>
             <Switch checked={settings.waiting_room_enabled || false} onCheckedChange={toggleWaitingRoom} />
           </div>
-          <p className="mb-4 text-xs text-slate-500">当应用同时访问人数过多时可以起到有效的削峰作用</p>
-          <Button variant="outline" size="sm" className="w-full rounded-md border-cyan-200 text-cyan-700 hover:bg-cyan-50" onClick={() => setWaitingRoomOpen(true)}>
+          <p className="mb-4 text-xs text-slate-500">当前仅保存等待室草案开关，数据面尚未接入排队削峰执行链路。</p>
+          <Button variant="outline" size="sm" className="w-full rounded-md border-slate-200 text-slate-700 hover:bg-slate-50" onClick={() => setWaitingRoomOpen(true)}>
             配置
           </Button>
         </div>
@@ -243,7 +239,7 @@ export default function CCProtectionPage() {
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-50 text-cyan-600">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
                 <Zap className="h-4 w-4" />
               </div>
               <span className="text-sm font-semibold text-slate-900">频率限制</span>
@@ -256,7 +252,7 @@ export default function CCProtectionPage() {
               : "未启用频率限制"}
           </p>
           <p className="mb-3 text-xs text-slate-400">严格限制每个 IP 的访问频率，阻止超限的 IP</p>
-          <Button variant="outline" size="sm" className="w-full rounded-md border-cyan-200 text-cyan-700 hover:bg-cyan-50" onClick={() => setRateLimitOpen(true)}>
+          <Button variant="outline" size="sm" className="w-full rounded-md border-slate-200 text-slate-700 hover:bg-slate-50" onClick={() => setRateLimitOpen(true)}>
             配置
           </Button>
         </div>
@@ -265,7 +261,7 @@ export default function CCProtectionPage() {
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-50 text-cyan-600">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
                 <Lock className="h-4 w-4" />
               </div>
               <span className="text-sm font-semibold text-slate-900">暴力防护</span>
@@ -277,7 +273,7 @@ export default function CCProtectionPage() {
               ? `阈值 ${settings.auto_ban_threshold} / ${settings.auto_ban_window}s · 封禁 ${settings.auto_ban_duration}s`
               : "未启用暴力防护"}
           </p>
-          <Button variant="outline" size="sm" className="w-full rounded-md border-cyan-200 text-cyan-700 hover:bg-cyan-50" onClick={() => setBruteForceOpen(true)}>
+          <Button variant="outline" size="sm" className="w-full rounded-md border-slate-200 text-slate-700 hover:bg-slate-50" onClick={() => setBruteForceOpen(true)}>
             配置
           </Button>
         </div>
@@ -290,7 +286,7 @@ export default function CCProtectionPage() {
             <h2 className="text-base font-semibold text-slate-900">自定义规则</h2>
             <p className="mt-0.5 text-xs text-slate-500">基于 URL、Header、Method 定义频率阈值与动作</p>
           </div>
-          <Button onClick={openAddRule} className="rounded-md bg-cyan-600 text-white hover:bg-cyan-700" size="sm">
+          <Button onClick={openAddRule} className="rounded-md bg-slate-950 text-white hover:bg-slate-800" size="sm">
             <Plus className="mr-1.5 h-3.5 w-3.5" /> 添加规则
           </Button>
         </div>
@@ -334,13 +330,8 @@ export default function CCProtectionPage() {
                       {rule.window}s / {rule.threshold}次 → {rule.duration}分钟
                     </td>
                     <td className="px-4 py-3">
-                      <span className={cn(
-                        "inline-flex rounded-full px-2 py-0.5 text-xs font-medium",
-                        rule.action === "block" ? "bg-rose-50 text-rose-700" :
-                        rule.action === "captcha" ? "bg-amber-50 text-amber-700" :
-                        "bg-slate-100 text-slate-600"
-                      )}>
-                        {actionOptions.find((a) => a.value === rule.action)?.label || rule.action}
+                      <span className={cn("inline-flex rounded-md border px-2 py-0.5 text-xs font-medium", getWAFActionMeta(rule.action).className)}>
+                        {getWAFActionMeta(rule.action).shortLabel}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right">
@@ -368,26 +359,17 @@ export default function CCProtectionPage() {
             <DialogTitle>等待室配置</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="flex items-start gap-2 rounded-md border border-cyan-200 bg-cyan-50 p-3 text-xs text-cyan-800">
+            <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              开启等待室后，当应用同时访问人数过多时可以起到有效的削峰作用。
+              当前后端仅保存 <code>waiting_room_enabled</code> 草案开关，尚未看到数据面排队/削峰执行链路消费这些参数。
             </div>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">最大等待人数</span>
-              <Input type="number" className="mt-1 rounded-md" defaultValue={100} />
-            </label>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">等待时间（秒）</span>
-              <Input type="number" className="mt-1 rounded-md" defaultValue={30} />
-            </label>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">刷新间隔（秒）</span>
-              <Input type="number" className="mt-1 rounded-md" defaultValue={5} />
-            </label>
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              等待室容量、等待时间和刷新间隔保留为后续接线方向，本轮不提供可编辑参数，避免误认为保存后已生效。
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setWaitingRoomOpen(false)}>取消</Button>
-            <Button className="bg-cyan-600 text-white hover:bg-cyan-700" onClick={saveWaitingRoom}>保存</Button>
+            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveWaitingRoom}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -423,7 +405,7 @@ export default function CCProtectionPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRateLimitOpen(false)}>取消</Button>
-            <Button className="bg-cyan-600 text-white hover:bg-cyan-700" onClick={saveRateLimit}>保存</Button>
+            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveRateLimit}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -464,7 +446,7 @@ export default function CCProtectionPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBruteForceOpen(false)}>取消</Button>
-            <Button className="bg-cyan-600 text-white hover:bg-cyan-700" onClick={saveBruteForce}>保存</Button>
+            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveBruteForce}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -519,7 +501,7 @@ export default function CCProtectionPage() {
                   )}
                 </div>
               ))}
-              <button onClick={addCondition} className="mt-1 rounded-md border border-dashed border-cyan-300 px-3 py-1.5 text-xs font-medium text-cyan-600 hover:bg-cyan-50">
+              <button onClick={addCondition} className="mt-1 rounded-md border border-dashed border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">
                 + 添加一个 AND 条件
               </button>
             </div>
@@ -547,7 +529,7 @@ export default function CCProtectionPage() {
                 <Select value={draft.action} onValueChange={(v) => setDraft({ ...draft, action: v })}>
                   <SelectTrigger className="mt-1 rounded-md"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {actionOptions.map((a) => <SelectItem key={a.value} value={a.value}>{a.label}</SelectItem>)}
+                    {terminalWAFActionOptions.map((a) => <SelectItem key={a.value} value={a.value}>{a.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </label>
@@ -563,7 +545,7 @@ export default function CCProtectionPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRuleDialogOpen(false)}>取消</Button>
-            <Button className="bg-cyan-600 text-white hover:bg-cyan-700" onClick={saveRule} disabled={saving}>
+            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveRule} disabled={saving}>
               {saving ? "保存中..." : "确定"}
             </Button>
           </DialogFooter>

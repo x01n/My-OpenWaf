@@ -171,13 +171,13 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	opsGroup.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator))
 	{
 		// Sites
-		opsGroup.POST("/sites", CreateSite(r.Site, reload))
-		opsGroup.POST("/sites/:id/update", UpdateSite(r.Site, reload))
-		opsGroup.POST("/sites/:id/delete", DeleteSite(r.Site, reload))
+		opsGroup.POST("/sites", CreateSite(r.Site, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/update", UpdateSite(r.Site, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/delete", DeleteSite(r.Site, r.SiteListener, reload))
 		opsGroup.POST("/sites/:id/start", StartSite(r.Site, reload))
 		opsGroup.POST("/sites/:id/stop", StopSite(r.Site, reload))
-		opsGroup.POST("/sites/:id/listeners", CreateSiteListener(r.Site, r.SiteListener, reload))
-		opsGroup.POST("/sites/:id/listeners/:lid/update", UpdateSiteListener(r.Site, r.SiteListener, reload))
+		opsGroup.POST("/sites/:id/listeners", CreateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/listeners/:lid/update", UpdateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
 		opsGroup.POST("/sites/:id/listeners/:lid/delete", DeleteSiteListener(r.Site, r.SiteListener, reload))
 
 		// Certificates

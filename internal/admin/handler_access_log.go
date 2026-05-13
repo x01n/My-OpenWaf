@@ -18,12 +18,13 @@ func ListAccessLogs(repo *repository.AccessLogRepo) app.HandlerFunc {
 		offset, limit := utils.Paginate(page, pageSize)
 
 		f := repository.AccessLogFilter{
-			ClientIP:   string(c.Query("client_ip")),
-			Host:       string(c.Query("host")),
-			Path:       string(c.Query("path")),
-			Method:     string(c.Query("method")),
-			WAFAction:  string(c.Query("waf_action")),
-			CacheState: string(c.Query("cache_state")),
+			ClientIP:    string(c.Query("client_ip")),
+			Host:        string(c.Query("host")),
+			Path:        string(c.Query("path")),
+			Method:      string(c.Query("method")),
+			WAFAction:   string(c.Query("waf_action")),
+			CacheState:  string(c.Query("cache_state")),
+			StatusGroup: string(c.Query("status_group")),
 		}
 		if siteID := string(c.Query("site_id")); siteID != "" {
 			if v, err := strconv.ParseUint(siteID, 10, 64); err == nil {

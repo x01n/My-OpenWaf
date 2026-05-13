@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io/fs"
+	"net"
+	"net/http"
 	"strconv"
+	"strings"
 	"text/template"
 	"time"
 
@@ -71,9 +76,11 @@ func WriteMaintenanceResponse(c *app.RequestContext, reqID string, rt *snapshot.
 	renderEmbeddedPage(c, "maintenance/index.html", statusCode, reqID, "")
 }
 
-// challengeSecret is a fixed key used to sign JS challenge tokens.
+// challengeSecret is a fixed key used to sign JS challenge tokens and pass cookies.
 // In production this should be configurable, but for now derive from a constant.
 var challengeSecret = []byte("owaf-challenge-v1-secret-key-2026")
+
+const ChallengePassCookieName = "__waf_passed"
 
 // WriteChallengeResponse renders a JS challenge page that the client must solve.
 func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, statusCode int) {
@@ -121,6 +128,80 @@ func VerifyChallengeToken(reqID, ts, token string, maxAge time.Duration) bool {
 		return false
 	}
 	return time.Since(time.Unix(tsInt, 0)) < maxAge
+}
+
+func BuildChallengePassCookie(host string, clientIP net.IP, tlsEnabled bool, now time.Time, ttl time.Duration) string {
+	value := SignChallengePassValue(host, clientIP, now, ttl)
+	cookie := &http.Cookie{
+		Name:     ChallengePassCookieName,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   int(ttl.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   tlsEnabled,
+	}
+	return cookie.String()
+}
+
+func SignChallengePassValue(host string, clientIP net.IP, now time.Time, ttl time.Duration) string {
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	expires := now.Add(ttl).Unix()
+	payload := fmt.Sprintf("%s|%s|%d", strings.ToLower(host), challengeIPString(clientIP), expires)
+	mac := hmac.New(sha256.New, challengeSecret)
+	mac.Write([]byte("pass:" + payload))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig))
+}
+
+func VerifyChallengePassCookie(cookieHeader, host string, clientIP net.IP, now time.Time) bool {
+	if cookieHeader == "" {
+		return false
+	}
+	for _, raw := range strings.Split(cookieHeader, ";") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(raw, "=")
+		if !ok || name != ChallengePassCookieName {
+			continue
+		}
+		return VerifyChallengePassValue(value, host, clientIP, now)
+	}
+	return false
+}
+
+func VerifyChallengePassValue(value, host string, clientIP net.IP, now time.Time) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(string(decoded), "|")
+	if len(parts) != 4 {
+		return false
+	}
+	expires, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || now.Unix() > expires {
+		return false
+	}
+	payload := strings.Join(parts[:3], "|")
+	mac := hmac.New(sha256.New, challengeSecret)
+	mac.Write([]byte("pass:" + payload))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(parts[3]), []byte(expected)) {
+		return false
+	}
+	return parts[0] == strings.ToLower(host) && parts[1] == challengeIPString(clientIP)
+}
+
+func challengeIPString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }
 
 func renderTemplatePage(c *app.RequestContext, html, reqID string, ruleID uint, statusCode int, maintenance bool) {

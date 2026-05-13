@@ -79,7 +79,7 @@ function CaptchaTab() {
             {testing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
             测试预览
           </Button>
-          <Button onClick={save} disabled={saving} className="rounded-md bg-cyan-600 hover:bg-cyan-700">
+          <Button onClick={save} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
             {saving ? "保存中..." : "保存配置"}
           </Button>
         </div>
@@ -126,7 +126,7 @@ function ShieldTab() {
             </SelectContent>
           </Select>
         </div>
-        <Button onClick={save} disabled={saving} className="rounded-md bg-cyan-600 hover:bg-cyan-700">
+        <Button onClick={save} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
           {saving ? "保存中..." : "保存配置"}
         </Button>
       </div>
@@ -221,15 +221,15 @@ function ChainTab() {
             <span className="font-medium text-slate-500">流程预览：</span>{" "}
             {steps.map((s, i) => (
               <span key={i}>
-                {i > 0 && <span className="mx-1 text-cyan-600">→</span>}
+                {i > 0 && <span className="mx-1 text-slate-600">→</span>}
                 <span className="font-mono text-xs bg-white rounded px-1.5 py-0.5 border border-slate-200">{s.type}</span>
               </span>
             ))}
-            <span className="mx-1 text-cyan-600">→</span>
+            <span className="mx-1 text-slate-600">→</span>
             <span className="font-mono text-xs bg-emerald-50 text-emerald-700 rounded px-1.5 py-0.5 border border-emerald-200">pass</span>
           </div>
         )}
-        <Button onClick={save} disabled={saving} className="rounded-md bg-cyan-600 hover:bg-cyan-700">
+        <Button onClick={save} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
           {saving ? "保存中..." : "保存配置"}
         </Button>
       </div>
@@ -310,7 +310,7 @@ function EscalationTab() {
   }
 
   return (
-    <Surface title="阶梯升级" description="根据违规次数自动升级响应动作。">
+    <Surface title="阶梯升级" description="在 WAF 命中后按客户端违规次数升级响应动作，不作为独立检测阶段。">
       <div className="space-y-5">
         <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 max-w-xl">
           <Label className="font-medium">启用阶梯升级</Label>
@@ -363,7 +363,7 @@ function EscalationTab() {
           <Plus className="mr-2 h-4 w-4" /> 添加步骤
         </Button>
         <div>
-          <Button onClick={save} disabled={saving} className="rounded-md bg-cyan-600 hover:bg-cyan-700">
+          <Button onClick={save} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
             {saving ? "保存中..." : "保存配置"}
           </Button>
         </div>

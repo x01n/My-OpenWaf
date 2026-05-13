@@ -29,7 +29,7 @@ func IsWebSocketUpgrade(c *app.RequestContext) bool {
 }
 
 // ForwardWebSocket forwards the WS handshake and inspects text/binary frames.
-func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base string, eng *engine.Engine) error {
+func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, eng *engine.Engine) error {
 	target := strings.TrimRight(base, "/") + string(c.Path())
 	q := c.URI().QueryString()
 	if len(q) > 0 {
@@ -57,14 +57,8 @@ func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base strin
 	}
 	defer upConn.Close()
 
-	reqLine := string(c.Method()) + " " + pathAndQuery(target) + " HTTP/1.1\r\n"
-	var hdr strings.Builder
-	hdr.WriteString(reqLine)
-	c.Request.Header.VisitAll(func(k, v []byte) {
-		hdr.WriteString(string(k) + ": " + string(v) + "\r\n")
-	})
-	hdr.WriteString("\r\n")
-	if _, err := io.WriteString(upConn, hdr.String()); err != nil {
+	hdr := buildWebSocketHandshakeHeaders(c, pathAndQuery(target), host, rt, clientIP)
+	if _, err := io.WriteString(upConn, hdr); err != nil {
 		return err
 	}
 
@@ -96,6 +90,40 @@ func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base strin
 		}
 	}
 	return nil
+}
+
+func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string, upstreamHost string, rt snapshot.SiteRuntime, clientIP net.IP) string {
+	method := string(c.Method())
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	var hdr strings.Builder
+	hdr.WriteString(method + " " + requestTarget + " HTTP/1.1\r\n")
+	c.Request.Header.VisitAll(func(k, v []byte) {
+		key := strings.ToLower(string(k))
+		switch key {
+		case "host", "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "x-forwarded-for", "x-forwarded-host":
+			return
+		}
+		hdr.WriteString(string(k) + ": " + string(v) + "\r\n")
+	})
+
+	host := upstreamHost
+	origHost := string(c.Host())
+	if rt.PreserveOriginalHost && origHost != "" {
+		host = origHost
+	}
+	hdr.WriteString("Host: " + host + "\r\n")
+	hdr.WriteString("Connection: Upgrade\r\n")
+	if clientIP != nil {
+		hdr.WriteString("X-Forwarded-For: " + clientIP.String() + "\r\n")
+	}
+	if rt.PreserveOriginalHost && origHost != "" {
+		hdr.WriteString("X-Forwarded-Host: " + origHost + "\r\n")
+	}
+	hdr.WriteString("\r\n")
+	return hdr.String()
 }
 
 func inspectWebSocketClientFrames(src net.Conn, dst net.Conn, c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, done chan<- error) {

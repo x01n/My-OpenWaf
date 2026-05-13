@@ -6,15 +6,23 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
+func prepareChallengeResponseHeaders(c *app.RequestContext, reqID string, wafAction string) {
+	c.Response.Header.Set("X-Request-ID", reqID)
+	c.Response.Header.Set("X-WAF-Action", wafAction)
+	c.Response.Header.Del("Server")
+	c.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+}
+
 // WriteCaptchaChallengeResponse renders a standalone CAPTCHA challenge page.
-func WriteCaptchaChallengeResponse(c *app.RequestContext, reqID string, cm *CaptchaManager) {
+func WriteCaptchaChallengeResponse(c *app.RequestContext, reqID string, cm *CaptchaManager, statusCode int) {
+	prepareChallengeResponseHeaders(c, reqID, "captcha_challenge")
 	challenge, err := cm.Generate(CaptchaTypeMath)
 	if err != nil {
 		c.String(500, "captcha generation failed")
 		return
 	}
 	html := fmt.Sprintf(captchaPageHTML, challenge.MasterImg, challenge.SessionID, challenge.Prompt, reqID)
-	c.Data(403, "text/html; charset=utf-8", []byte(html))
+	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
 const captchaPageHTML = `<!DOCTYPE html>
@@ -55,8 +63,9 @@ input[type=text]:focus{border-color:#4a90d9}
 </html>`
 
 // WriteChainChallengeResponse starts a chain challenge and renders the first step.
-func WriteChainChallengeResponse(c *app.RequestContext, reqID string, cm *ChainChallengeManager) {
+func WriteChainChallengeResponse(c *app.RequestContext, reqID string, cm *ChainChallengeManager, statusCode int) {
+	prepareChallengeResponseHeaders(c, reqID, "chain_challenge")
 	originalURL := string(c.Request.URI().RequestURI())
 	_, html := cm.StartChain(originalURL)
-	c.Data(403, "text/html; charset=utf-8", []byte(html))
+	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }

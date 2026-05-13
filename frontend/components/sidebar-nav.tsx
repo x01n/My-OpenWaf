@@ -42,7 +42,7 @@ export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
               {!collapsed ? (
                 <div className="space-y-2">
                   <div className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] tracking-[0.18em] text-slate-500 uppercase dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400">
-                    <Shield className="h-3.5 w-3.5 text-cyan-600" /> 控制台
+                    <Shield className="h-3.5 w-3.5 text-slate-600" /> 控制台
                   </div>
                   <div>
                     <div className="text-xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">My-OpenWAF</div>
@@ -52,7 +52,7 @@ export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
                   </div>
                 </div>
               ) : (
-                <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-cyan-600 dark:border-slate-800 dark:bg-slate-950 dark:text-cyan-400">
+                <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
                   <Shield className="h-5 w-5" />
                 </div>
               )}
@@ -96,7 +96,7 @@ export function SidebarNav({ collapsed, onToggle }: SidebarNavProps) {
                           className={cn(
                             "mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md border",
                             active
-                              ? "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900/60 dark:bg-cyan-950/40 dark:text-cyan-300"
+                              ? "border-slate-200 bg-slate-100 text-slate-950 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-50"
                               : "border-slate-200 bg-white text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300",
                           )}
                         >

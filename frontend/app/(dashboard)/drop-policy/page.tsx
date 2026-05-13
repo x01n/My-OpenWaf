@@ -91,7 +91,7 @@ export default function DropPolicyPage() {
         <div className="grid gap-6 xl:grid-cols-2">
           <Surface title="策略配置" description="调整自动阻断策略的触发条件。">
             <div className="grid gap-5">
-              <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-slate-900">启用全局阻断策略</div>
                   <div className="text-xs text-slate-500">开启后根据评分和规则自动阻断恶意连接</div>
@@ -105,12 +105,12 @@ export default function DropPolicyPage() {
                   type="number"
                   value={policy.bot_score_threshold}
                   onChange={(e) => setPolicy({ ...policy, bot_score_threshold: Number(e.target.value) })}
-                  className="rounded-xl"
+                  className="rounded-lg"
                 />
                 <p className="text-xs text-slate-400">Bot 评分 ≥ 此阈值时自动断开连接</p>
               </div>
 
-              <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-slate-900">Critical CVE 自动断连</div>
                   <div className="text-xs text-slate-500">检测到 Critical 级别 CVE 攻击时自动阻断</div>
@@ -118,7 +118,7 @@ export default function DropPolicyPage() {
                 <Switch checked={policy.cve_auto_drop_critical} onCheckedChange={(v) => setPolicy({ ...policy, cve_auto_drop_critical: v })} />
               </div>
 
-              <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-slate-900">High CVE 自动断连</div>
                   <div className="text-xs text-slate-500">检测到 High 级别 CVE 攻击时自动阻断</div>
@@ -156,11 +156,11 @@ export default function DropPolicyPage() {
       {/* 阻断事件表格 */}
       <Surface title="阻断事件" description="最近的主动断连记录。">
         <div className="mb-4 flex flex-wrap gap-3">
-          <Input value={ip} onChange={(e) => { setIP(e.target.value); setPage(1); }} placeholder="按客户端 IP 筛选" className="w-48 rounded-xl" />
+          <Input value={ip} onChange={(e) => { setIP(e.target.value); setPage(1); }} placeholder="按客户端 IP 筛选" className="w-48 rounded-lg" />
           <select
             value={source}
             onChange={(e) => { setSource(e.target.value); setPage(1); }}
-            className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900"
+            className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900"
           >
             <option value="all">全部来源</option>
             <option value="bot">Bot</option>
@@ -168,18 +168,18 @@ export default function DropPolicyPage() {
             <option value="rule">规则</option>
             <option value="ip_reputation">IP 信誉</option>
           </select>
-          <Button variant="outline" className="rounded-xl" onClick={() => { setIP(""); setSource("all"); setPage(1); }}>
+          <Button variant="outline" className="rounded-lg" onClick={() => { setIP(""); setSource("all"); setPage(1); }}>
             <RotateCcw className="mr-2 h-4 w-4" />重置
           </Button>
         </div>
 
         {loading ? (
-          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
+          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
         ) : events.length === 0 ? (
           <EmptyState title="暂无阻断事件" description="没有符合筛选条件的主动断连事件。" />
         ) : (
           <div className="space-y-4">
-            <div className="overflow-hidden rounded-[20px] border border-slate-200">
+            <div className="overflow-hidden rounded-lg border border-slate-200">
               <Table>
                 <TableHeader>
                   <TableRow className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
