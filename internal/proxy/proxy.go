@@ -17,6 +17,7 @@ import (
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
+	"My-OpenWaf/internal/store"
 )
 
 // transportKey identifies a unique upstream TLS configuration.
@@ -209,86 +210,272 @@ func ForwardBufferedResponse(c *app.RequestContext, resp *HTTPResponse) {
 	c.Response.SetBodyRaw(resp.Body)
 }
 
-func ForwardCachedResponse(c *app.RequestContext, entryStatus int, contentType string, body []byte) {
-	if contentType != "" {
-		c.SetContentType(contentType)
+// SanitizeHeadersForEdgeCache strips hop-by-hop headers and Content-Length before persisting
+// upstream metadata with the body. Keeps Content-Encoding (e.g. br) so cache hits decode correctly.
+func SanitizeHeadersForEdgeCache(src http.Header) http.Header {
+	if src == nil {
+		return nil
 	}
-	c.Status(entryStatus)
-	c.Response.SetBodyRaw(body)
+	dst := src.Clone()
+	for k := range dst {
+		if isHopByHop(k) {
+			dst.Del(k)
+		}
+	}
+	dst.Del("Content-Length")
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+// WriteCachedResponse replays a cache.ResponseEntry, including stored headers when present.
+func WriteCachedResponse(c *app.RequestContext, method string, e *cache.ResponseEntry) {
+	if e == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(method), "HEAD") {
+		if e.ContentType != "" {
+			c.SetContentType(e.ContentType)
+		}
+		c.Status(e.StatusCode)
+		if len(e.Body) > 0 {
+			c.Response.Header.Set("Content-Length", strconv.Itoa(len(e.Body)))
+		}
+		c.Response.SetBodyRaw(nil)
+		return
+	}
+	if e.Header != nil && len(e.Header) > 0 {
+		copyResponseHeaders(c, e.Header)
+	}
+	if e.ContentType != "" {
+		c.SetContentType(e.ContentType)
+	}
+	c.Status(e.StatusCode)
+	c.Response.SetBodyRaw(e.Body)
 }
 
 func ShouldCacheResponse(method string, statusCode int, body []byte) bool {
 	return strings.EqualFold(method, "GET") && statusCode == 200 && len(body) > 0
 }
 
-func ShouldCacheHTTPResponse(method string, resp *HTTPResponse) bool {
+// varyDisallowsCaching reports true when Vary implies dimensions we do not key on.
+// Many origins send only "Accept-Encoding"; Go's http.Client already decodes gzip bodies,
+// so a single buffered variant is safe for our in-process cache.
+func varyDisallowsCaching(vary string) bool {
+	vary = strings.TrimSpace(vary)
+	if vary == "" {
+		return false
+	}
+	for _, p := range strings.Split(vary, ",") {
+		t := strings.ToLower(strings.TrimSpace(p))
+		if t == "" {
+			continue
+		}
+		if t != "accept-encoding" {
+			return true
+		}
+	}
+	return false
+}
+
+// ShouldCacheHTTPResponse decides whether to store the upstream response in the edge cache.
+// When ignoreUpstreamCacheControl is true (path matched an explicit site cache rule), upstream
+// Cache-Control private/no-store is ignored so CDNs/framework defaults do not disable caching;
+// Set-Cookie and unsafe Vary are still respected.
+func ShouldCacheHTTPResponse(method string, resp *HTTPResponse, ignoreUpstreamCacheControl bool) bool {
 	if resp == nil || !ShouldCacheResponse(method, resp.StatusCode, resp.Body) {
 		return false
 	}
 	if resp.Header.Get("Set-Cookie") != "" {
 		return false
 	}
-	cacheControl := strings.ToLower(resp.Header.Get("Cache-Control"))
-	if strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private") {
-		return false
+	if !ignoreUpstreamCacheControl {
+		cacheControl := strings.ToLower(resp.Header.Get("Cache-Control"))
+		if strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private") {
+			return false
+		}
 	}
-	if resp.Header.Get("Vary") != "" {
+	if varyDisallowsCaching(resp.Header.Get("Vary")) {
 		return false
 	}
 	return true
 }
 
-func SiteCacheTTL(rt snapshot.SiteRuntime, path string) int64 {
+// SiteCacheTTL returns the configured TTL in seconds for the given rule match key (path with optional "?query").
+func SiteCacheTTL(rt snapshot.SiteRuntime, matchKey string) int64 {
+	ttl, _ := SiteCacheTTLDetails(rt, matchKey)
+	return ttl
+}
+
+// siteCacheFirstMatch returns the first matching cache rule's TTL and key-shaping flags.
+func siteCacheFirstMatch(rt snapshot.SiteRuntime, matchKey string) (ttl int64, stripQueryKey bool, lowerPathKey bool, matched bool) {
 	if !rt.CacheEnabled {
-		return 0
+		return 0, false, false, false
 	}
 	for _, rule := range rt.CacheRules {
+		pat := cacheRulePattern(rule)
+		if pat == "" {
+			continue
+		}
 		ruleType := strings.ToLower(strings.TrimSpace(rule.Type))
 		if ruleType == "" {
 			ruleType = "prefix"
 		}
+		keyFor := matchKey
+		if rule.IgnoreQuery {
+			keyFor = pathOnlyFromRuleMatchKey(matchKey)
+		}
+		var matches bool
 		switch ruleType {
-		case "exact":
-			if path == rule.Value {
-				return int64(rule.TTL)
-			}
-		case "suffix":
-			if strings.HasSuffix(path, rule.Value) {
-				return int64(rule.TTL)
+		case "regex":
+			if rule.Regex != nil {
+				matches = rule.Regex.MatchString(keyFor)
 			}
 		default:
-			if strings.HasPrefix(path, rule.Value) {
-				return int64(rule.TTL)
+			keyCmp, patCmp := keyFor, pat
+			if rule.CaseInsensitive {
+				keyCmp = strings.ToLower(keyCmp)
+				patCmp = strings.ToLower(patCmp)
+			}
+			switch ruleType {
+			case "exact":
+				matches = keyCmp == patCmp
+			case "suffix":
+				matches = cacheSuffixPatternMatch(keyCmp, patCmp)
+			case "contains":
+				matches = strings.Contains(keyCmp, patCmp)
+			default:
+				matches = strings.HasPrefix(keyCmp, patCmp)
 			}
 		}
+		if !matches {
+			continue
+		}
+		t := int64(rule.TTL)
+		if t <= 0 {
+			t = int64(rt.CacheDefaultTTL)
+		}
+		if t > 0 {
+			return t, rule.IgnoreQuery, rule.CaseInsensitive, true
+		}
 	}
-	if rt.CacheDefaultTTL > 0 {
-		return int64(rt.CacheDefaultTTL)
-	}
-	return 0
+	return 0, false, false, false
 }
 
+// SiteCacheTTLDetails returns TTL and whether a cache_rules row matched (pattern hit).
+// cache_default_ttl is applied only as the TTL for a matching rule whose own ttl is <= 0;
+// it does not enable caching for paths that do not match any rule.
+func SiteCacheTTLDetails(rt snapshot.SiteRuntime, matchKey string) (ttl int64, matchedExplicitRule bool) {
+	t, _, _, ok := siteCacheFirstMatch(rt, matchKey)
+	return t, ok
+}
+
+// RuleMatchKey is path plus optional raw query string, used to evaluate cache path rules.
+func RuleMatchKey(c *app.RequestContext) string {
+	p := requestPath(c)
+	qs := strings.TrimSpace(string(c.URI().QueryString()))
+	if qs == "" {
+		return p
+	}
+	return p + "?" + qs
+}
+
+func cacheRulePattern(r store.SiteCacheRule) string {
+	v := strings.TrimSpace(r.Value)
+	if v != "" {
+		return v
+	}
+	return strings.TrimSpace(r.Path)
+}
+
+func pathOnlyFromRuleMatchKey(matchKey string) string {
+	if i := strings.IndexByte(matchKey, '?'); i >= 0 {
+		return matchKey[:i]
+	}
+	return matchKey
+}
+
+// cacheSuffixPatternMatch matches suffix rules without mid-token false positives, e.g. pattern
+// "ig" must not match ".../config". File extensions (".js") and explicit path tails ("a/b.js")
+// keep standard suffix semantics.
+func cacheSuffixPatternMatch(matchKey, pat string) bool {
+	if pat == "" {
+		return false
+	}
+	if strings.Contains(pat, "?") {
+		return strings.HasSuffix(matchKey, pat)
+	}
+	pathOnly := pathOnlyFromRuleMatchKey(matchKey)
+	if !strings.HasSuffix(pathOnly, pat) {
+		return false
+	}
+	if strings.HasPrefix(pat, ".") || strings.Contains(pat, "/") {
+		return true
+	}
+	idx := len(pathOnly) - len(pat)
+	if idx < 0 {
+		return false
+	}
+	if idx == 0 {
+		return true
+	}
+	switch pathOnly[idx-1] {
+	case '/', '.', '_', '-':
+		return true
+	default:
+		return false
+	}
+}
+
+// BuildSiteCacheStorageKey builds the in-process cache key; stripQuery drops the query from the key,
+// lowerPath lowercases only the path segment (not the host key) when case-insensitive rules matched.
+func BuildSiteCacheStorageKey(rt snapshot.SiteRuntime, c *app.RequestContext, stripQuery, lowerPath bool) string {
+	method := string(c.Method())
+	if strings.EqualFold(method, "HEAD") {
+		method = "GET"
+	}
+	p := requestPath(c)
+	if lowerPath {
+		p = strings.ToLower(p)
+	}
+	q := string(c.URI().QueryString())
+	if stripQuery {
+		q = ""
+	}
+	hostKey := strings.TrimSpace(rt.Bind) + "|" + strconv.FormatUint(uint64(rt.Site.ID), 10) + "|" + snapshot.NormalizeMatchHost(string(c.Host()))
+	return cache.CacheKey(method, hostKey, p, q)
+}
+
+// SiteCacheKey builds the default cache key (full query, original path casing).
 func SiteCacheKey(rt snapshot.SiteRuntime, c *app.RequestContext) string {
-	hostKey := strings.TrimSpace(rt.Bind) + "|" + strconv.FormatUint(uint64(rt.Site.ID), 10) + "|" + string(c.Host())
-	return cache.CacheKey(string(c.Method()), hostKey, requestPath(c), string(c.URI().QueryString()))
+	return BuildSiteCacheStorageKey(rt, c, false, false)
 }
 
-func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (string, int64) {
-	if !rt.CacheEnabled || !strings.EqualFold(string(c.Method()), "GET") {
-		return "", 0
+// SiteCacheEligible reports whether this request may use the edge response cache.
+// The third return is true when a cache_rules row matched: upstream Cache-Control private/no-store
+// may be ignored for storing (still never caches Set-Cookie responses).
+func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (key string, ttl int64, ignoreUpstreamCacheControl bool) {
+	if !rt.CacheEnabled {
+		return "", 0, false
+	}
+	m := string(c.Method())
+	if !strings.EqualFold(m, "GET") && !strings.EqualFold(m, "HEAD") {
+		return "", 0, false
 	}
 	if c.Request.Header.Get("Authorization") != "" {
-		return "", 0
+		return "", 0, false
 	}
-	cacheControl := strings.ToLower(string(c.Request.Header.Peek("Cache-Control")))
-	if strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "no-cache") {
-		return "", 0
+	// Do not disable edge caching based on the client's Cache-Control/Pragma. Browsers and
+	// devtools often send no-cache while operators still want stale shielding when upstream
+	// is down. Storage eligibility remains governed by ShouldCacheHTTPResponse (upstream CC,
+	// Set-Cookie, Vary, etc.).
+	full := RuleMatchKey(c)
+	ttlVal, stripQ, lowerP, ok := siteCacheFirstMatch(rt, full)
+	if !ok || ttlVal <= 0 {
+		return "", 0, false
 	}
-	ttl := SiteCacheTTL(rt, requestPath(c))
-	if ttl <= 0 {
-		return "", 0
-	}
-	return SiteCacheKey(rt, c), ttl
+	return BuildSiteCacheStorageKey(rt, c, stripQ, lowerP), ttlVal, true
 }
 
 // ForwardHTTP copies the incoming request to upstream and streams the response.

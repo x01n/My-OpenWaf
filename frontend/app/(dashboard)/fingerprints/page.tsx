@@ -152,8 +152,20 @@ export default function FingerprintsPage() {
         {loading ? (
           <div className="p-16 text-center text-sm text-slate-400">加载中...</div>
         ) : topJA3.length === 0 ? (
-          <div className="p-16 text-center text-sm text-slate-400">
-            暂无 JA3 指纹数据
+          <div className="p-16 text-center">
+            <Fingerprint className="mx-auto h-10 w-10 text-slate-300" />
+            <p className="mt-3 text-sm font-medium text-slate-600">暂无 JA3 指纹数据</p>
+            <p className="mt-2 max-w-md mx-auto text-xs leading-relaxed text-slate-400">
+              指纹数据需要满足以下条件才会自动采集：
+            </p>
+            <ul className="mt-2 max-w-md mx-auto text-xs leading-relaxed text-slate-400 text-left list-disc list-inside">
+              <li>站点已启用 TLS（HTTPS），系统通过 TLS 握手捕获 JA3 指纹</li>
+              <li>已启用机器人检测功能（Bot Detection），触发指纹评分流程</li>
+              <li>有实际的客户端请求经过数据面处理</li>
+            </ul>
+            <p className="mt-2 max-w-md mx-auto text-xs leading-relaxed text-slate-400">
+              请确保至少一个站点已启用 TLS 并开启机器人检测，待有流量经过后指纹数据将自动出现。
+            </p>
           </div>
         ) : (
           <div className="overflow-x-auto">

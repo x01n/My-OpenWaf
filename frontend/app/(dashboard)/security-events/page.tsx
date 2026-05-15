@@ -36,7 +36,7 @@ import {
   type SecurityEvent,
   type SecurityStats,
 } from "@/lib/api";
-import { getWAFActionMeta, wafActionOptions } from "@/lib/console";
+import { getWAFActionMeta, wafActionOptions, phaseLabels, categoryLabels } from "@/lib/console";
 import { formatDate } from "@/lib/utils";
 
 const PAGE_SIZE = 20;
@@ -53,7 +53,8 @@ function exportCSV(events: SecurityEvent[]) {
   ];
   const rows = events.map((e) => [
     e.id, formatDate(e.created_at), e.request_id, e.client_ip,
-    e.host, e.method, e.path, e.action, e.phase, e.category,
+    e.host, e.method, e.path, getWAFActionMeta(e.action).label,
+    phaseLabels[e.phase] ?? e.phase, categoryLabels[e.category] ?? e.category,
     e.rule_id_str || e.rule_id, e.match_desc,
   ]);
   const csv = [
@@ -78,6 +79,7 @@ export default function SecurityEventsPage() {
   const [action, setAction] = useState("all");
   const [category, setCategory] = useState("all");
   const [clientIP, setClientIP] = useState("");
+  const [ruleIdStr, setRuleIdStr] = useState("");
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -90,6 +92,7 @@ export default function SecurityEventsPage() {
           action: action === "all" ? undefined : action,
           category: category === "all" ? undefined : category,
           client_ip: clientIP || undefined,
+          rule_id_str: ruleIdStr || undefined,
         }),
         getSecurityEventStats(24),
       ]);
@@ -101,7 +104,7 @@ export default function SecurityEventsPage() {
     } finally {
       setLoading(false);
     }
-  }, [action, category, clientIP, page]);
+  }, [action, category, clientIP, ruleIdStr, page]);
 
   useEffect(() => {
     load();
@@ -204,20 +207,14 @@ export default function SecurityEventsPage() {
           </SelectContent>
         </Select>
         <Select value={category} onValueChange={(v) => { setCategory(v); setPage(1); }}>
-          <SelectTrigger className="w-[140px] rounded-lg">
+          <SelectTrigger className="w-[160px] rounded-lg">
             <SelectValue placeholder="类别" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部类别</SelectItem>
-            <SelectItem value="sqli">SQL 注入</SelectItem>
-            <SelectItem value="xss">XSS</SelectItem>
-            <SelectItem value="path_traversal">路径遍历</SelectItem>
-            <SelectItem value="webshell">WebShell</SelectItem>
-            <SelectItem value="cmd_injection">命令注入</SelectItem>
-            <SelectItem value="ssrf">SSRF</SelectItem>
-            <SelectItem value="xxe">XXE</SelectItem>
-            <SelectItem value="bot_malicious">恶意 Bot</SelectItem>
-            <SelectItem value="rate_limit">速率限制</SelectItem>
+            {Object.entries(categoryLabels).map(([key, label]) => (
+              <SelectItem key={key} value={key}>{label}</SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <div className="relative">
@@ -226,6 +223,15 @@ export default function SecurityEventsPage() {
             value={clientIP}
             onChange={(e) => { setClientIP(e.target.value); setPage(1); }}
             placeholder="搜索 IP"
+            className="w-[180px] rounded-lg pl-8"
+          />
+        </div>
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+          <Input
+            value={ruleIdStr}
+            onChange={(e) => { setRuleIdStr(e.target.value); setPage(1); }}
+            placeholder="规则 ID"
             className="w-[180px] rounded-lg pl-8"
           />
         </div>
@@ -268,7 +274,7 @@ export default function SecurityEventsPage() {
                         <ActionBadge action={evt.action} />
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-700">
-                        {evt.category}
+                        {categoryLabels[evt.category] ?? evt.category}
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-slate-700">
                         {evt.action === "drop" || evt.status_code === 0 ? "DROP" : evt.status_code || "—"}
@@ -325,9 +331,9 @@ export default function SecurityEventsPage() {
                 ["客户端 IP", selected.client_ip],
                 ["Host", selected.host || "-"],
                 ["方法", selected.method],
-                ["阶段", selected.phase],
-                ["类别", selected.category],
-                ["动作", selected.action],
+                ["阶段", phaseLabels[selected.phase] ?? selected.phase],
+                ["类别", categoryLabels[selected.category] ?? selected.category],
+                ["动作", getWAFActionMeta(selected.action).label],
                 ["规则", selected.rule_id_str || String(selected.rule_id)],
                 ["状态码", String(selected.status_code)],
                 ["国家", selected.geo_country || "-"],

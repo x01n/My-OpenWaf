@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"sync"
 	"time"
 
 	"My-OpenWaf/internal/store"
@@ -87,6 +88,44 @@ type FingerprintRepo struct{ db *gorm.DB }
 func NewFingerprintRepo(db *gorm.DB) *FingerprintRepo {
 	return &FingerprintRepo{db: db}
 }
+
+// RecordFingerprint upserts a fingerprint record: increments count if exists, creates if new.
+// Uses an in-memory dedup cache to avoid excessive DB writes for the same JA3 hash.
+func (r *FingerprintRepo) RecordFingerprint(ja3Hash, browser string, isKnownGood bool) {
+	// Rate limit: only write once per JA3 hash per 60 seconds.
+	fpDedupMu.Lock()
+	if t, ok := fpDedupCache[ja3Hash]; ok && time.Since(t) < 60*time.Second {
+		fpDedupMu.Unlock()
+		return
+	}
+	fpDedupCache[ja3Hash] = time.Now()
+	fpDedupMu.Unlock()
+
+	var existing store.FingerprintRecord
+	err := r.db.Where("ja3_hash = ?", ja3Hash).First(&existing).Error
+	if err == nil {
+		// Update existing
+		r.db.Model(&existing).Updates(map[string]any{
+			"count":     existing.Count + 1,
+			"last_seen": time.Now(),
+			"browser":   browser,
+		})
+	} else {
+		// Create new
+		r.db.Create(&store.FingerprintRecord{
+			JA3Hash:     ja3Hash,
+			Browser:     browser,
+			Count:       1,
+			LastSeen:    time.Now(),
+			IsKnownGood: isKnownGood,
+		})
+	}
+}
+
+var (
+	fpDedupMu    sync.Mutex
+	fpDedupCache = make(map[string]time.Time)
+)
 
 // FingerprintStats holds aggregated fingerprint statistics.
 type FingerprintStats struct {

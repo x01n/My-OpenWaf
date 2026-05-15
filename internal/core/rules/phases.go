@@ -270,13 +270,53 @@ func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 
 	// If GeoIP resolver is available, use the two-phase flow.
 	if p.geo != nil {
-		v, _ := waf.CheckBotTwoPhase(br, p.rep, p.geo, p.threshold)
+		v, bs := waf.CheckBotTwoPhase(br, p.rep, p.geo, p.threshold)
+		p.storeBotScore(ctx, v, bs)
 		return p.verdictToResult(v, ctx)
 	}
 
 	// Fallback: legacy single-pass check.
 	v := waf.CheckBot(br)
+	p.storeBotScore(ctx, v, waf.BotScore{Total: v.Score})
 	return p.verdictToResult(v, ctx)
+}
+
+func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v waf.BotVerdict, bs waf.BotScore) {
+	if v.Category == "human" || v.Category == "good" {
+		return // Don't log benign traffic to save DB writes
+	}
+	actionStr := "allow"
+	switch v.Category {
+	case "malicious":
+		if v.Score >= p.threshold {
+			actionStr = "drop"
+		} else {
+			actionStr = "block"
+		}
+	case "suspicious":
+		suspiciousThreshold := p.threshold * 60 / 100
+		if v.Score >= suspiciousThreshold {
+			actionStr = "challenge"
+		} else {
+			actionStr = "observe"
+		}
+	}
+	detailStr := ""
+	if len(bs.Details) > 0 {
+		if data, err := json.Marshal(bs.Details); err == nil {
+			detailStr = string(data)
+		}
+	}
+	ctx.BotScoreResult = &pipeline.BotScoreInfo{
+		TotalScore:       bs.Total,
+		GeoIPScore:       bs.GeoIPScore,
+		FingerprintScore: bs.FingerprintScore,
+		BehaviorScore:    bs.BehaviorScore,
+		IPRepScore:       bs.IPRepScore,
+		IsHighRisk:       bs.IsHighRisk,
+		Action:           actionStr,
+		Details:          detailStr,
+	}
 }
 
 func (p *botPhase) verdictToResult(v waf.BotVerdict, ctx *pipeline.RequestCtx) (action.Result, bool) {
@@ -374,7 +414,11 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		}
 	}
 
-	bodyTargets := extractBodyTargets(ctx.Body, ctx.ContentType)
+	if !ctx.BodyTargetsDone {
+		ctx.BodyTargets = extractBodyTargets(ctx.Body, ctx.ContentType)
+		ctx.BodyTargetsDone = true
+	}
+	bodyTargets := ctx.BodyTargets
 
 	// Check HTTP method for unusual/dangerous methods before full OWASP scan.
 	if protoEnabled {
@@ -390,7 +434,7 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 
 	// Apply per-rule overrides and path whitelists.
 	if len(hits) > 0 {
-		hits = waf.FilterHits(hits, ctx.Path, overrides)
+		hits = waf.FilterHits(hits, ctx.Path, overrides, categorySensitivity)
 	}
 
 	if len(hits) == 0 {
@@ -501,52 +545,119 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return result, result.IsTerminal()
 }
 
+// looksLikeJSON returns true if the first non-whitespace byte is { or [.
+func looksLikeJSON(body []byte) bool {
+	for _, b := range body {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// looksLikeFormEncoded returns true if the body contains key=value&... patterns.
+func looksLikeFormEncoded(body []byte) bool {
+	if len(body) == 0 || len(body) > 65536 {
+		return false
+	}
+	hasEq := false
+	for _, b := range body {
+		if b == '=' {
+			hasEq = true
+		}
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			return false
+		}
+	}
+	return hasEq
+}
+
 // extractBodyTargets parses the request body based on content type and returns
 // individual values to scan for attack payloads.
+// When Content-Type is missing or misleading, the body is also sniffed to detect
+// the actual format and prevent evasion via header manipulation.
 func extractBodyTargets(body []byte, contentType string) []string {
 	if len(body) == 0 {
 		return nil
 	}
 	ct := strings.ToLower(contentType)
+
+	var primary []string
+	parsedOK := false
+
 	switch {
 	case strings.Contains(ct, "application/x-www-form-urlencoded"):
-		return extractFormValues(string(body))
+		primary = extractFormValues(string(body))
+		parsedOK = len(primary) > 0
 	case strings.Contains(ct, "application/json"):
-		return extractJSONValues(body)
+		primary = extractJSONValues(body)
+		parsedOK = len(primary) > 0
 	case strings.Contains(ct, "multipart/form-data"):
-		// File upload check (filename/content-type) is done in owaspPhase.Execute.
-		// Here we extract text field values for OWASP content scanning.
-		return extractMultipartFieldValues(body, contentType)
+		primary = extractMultipartFieldValues(body, contentType)
+		parsedOK = len(primary) > 0
 	case strings.Contains(ct, "text/") || strings.Contains(ct, "application/xml") || strings.Contains(ct, "application/soap"):
-		// Text-like content types: scan as a single target but with a size limit.
 		limit := 8192
 		if len(body) < limit {
 			limit = len(body)
 		}
-		return []string{string(body[:limit])}
+		primary = []string{string(body[:limit])}
+		parsedOK = true
 	default:
 		limit := 48 * 1024
 		if len(body) < limit {
 			limit = len(body)
 		}
 		if ct == "" {
-			return []string{string(body[:limit])}
-		}
-		sample := body
-		if len(sample) > 512 {
-			sample = body[:512]
-		}
-		printable := 0
-		for _, b := range sample {
-			if b >= 0x20 && b <= 0x7E || b == '\n' || b == '\r' || b == '\t' {
-				printable++
+			primary = []string{string(body[:limit])}
+			parsedOK = true
+		} else {
+			sample := body
+			if len(sample) > 512 {
+				sample = body[:512]
+			}
+			printable := 0
+			for _, b := range sample {
+				if b >= 0x20 && b <= 0x7E || b == '\n' || b == '\r' || b == '\t' {
+					printable++
+				}
+			}
+			if float64(printable)/float64(len(sample)) >= 0.9 {
+				primary = []string{string(body[:limit])}
+				parsedOK = true
 			}
 		}
-		if float64(printable)/float64(len(sample)) < 0.9 {
-			return nil
-		}
-		return []string{string(body[:limit])}
 	}
+
+	// Fallback: if the declared Content-Type parser returned nothing (e.g. body
+	// is base64-wrapped but Content-Type says application/json), always scan the
+	// raw body so normalizeWithDecode can peel the base64 layer.
+	if !parsedOK && len(body) > 0 {
+		limit := 48 * 1024
+		if len(body) < limit {
+			limit = len(body)
+		}
+		primary = []string{string(body[:limit])}
+	}
+
+	// Content-Type-independent sniffing: also try alternate parsers to prevent
+	// evasion via wrong Content-Type header.
+	if !strings.Contains(ct, "application/json") && looksLikeJSON(body) {
+		if extra := extractJSONValues(body); len(extra) > 0 {
+			primary = append(primary, extra...)
+		}
+	}
+	if !strings.Contains(ct, "form-urlencoded") && ct != "" && looksLikeFormEncoded(body) {
+		if extra := extractFormValues(string(body)); len(extra) > 0 {
+			primary = append(primary, extra...)
+		}
+	}
+
+	return primary
 }
 
 // extractFormValues splits form-urlencoded body into individual decoded values.
@@ -713,7 +824,11 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 	if ctx.ClientIP != nil {
 		clientIP = ctx.ClientIP.String()
 	}
-	valid, isReplay, _ := p.mgr.ValidateAndRotate(nonce, clientIP)
+	ttl := time.Duration(0)
+	if ctx.AntiReplayTTL > 0 {
+		ttl = time.Duration(ctx.AntiReplayTTL) * time.Second
+	}
+	valid, isReplay, _ := p.mgr.ValidateAndRotate(nonce, clientIP, ttl)
 	if !valid || isReplay {
 		result := action.Result{
 			Type:      action.Intercept,

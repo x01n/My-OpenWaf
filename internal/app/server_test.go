@@ -24,7 +24,7 @@ func TestListenerRuntimesByBindDeduplicatesBindAndPrefersTLS(t *testing.T) {
 		byBind[rt.Bind] = rt
 	}
 	if !byBind[":443"].Site.TLSEnabled || byBind[":443"].Site.ID != 2 {
-		t.Fatalf("expected TLS runtime to represent :443 listener, got %+v", byBind[":443"].Site)
+		t.Fatalf("expected TLS runtime to represent :443 listener, got %+v", byBind[":443"])
 	}
 	if byBind[":80"].Site.ID != 3 {
 		t.Fatalf("expected :80 runtime to remain available, got %+v", byBind[":80"].Site)

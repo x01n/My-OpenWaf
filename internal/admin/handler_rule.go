@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -69,25 +70,11 @@ func GetRule(repo *repository.RuleRepo) app.HandlerFunc {
 	}
 }
 
-func validatePersistedRuleAction(value store.RuleAction) (store.RuleAction, bool) {
-	act := action.Normalize(action.Type(value))
-	if !action.IsValid(act) {
-		return "", false
-	}
-	return store.RuleAction(act), true
-}
-
 func CreateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item store.Rule
 		if err := c.BindJSON(&item); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
-			return
-		}
-		if normalized, ok := validatePersistedRuleAction(item.Action); ok {
-			item.Action = normalized
-		} else {
-			c.JSON(400, map[string]string{"error": "invalid action"})
 			return
 		}
 		if err := repo.Create(&item); err != nil {
@@ -116,12 +103,6 @@ func UpdateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 		}
 		if err := c.BindJSON(existing); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
-			return
-		}
-		if normalized, ok := validatePersistedRuleAction(existing.Action); ok {
-			existing.Action = normalized
-		} else {
-			c.JSON(400, map[string]string{"error": "invalid action"})
 			return
 		}
 		existing.ID = id
@@ -158,11 +139,11 @@ func DeleteRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 
 // TestRuleRequest is the request body for the rule-test API.
 type TestRuleRequest struct {
-	Pattern  string            `json:"pattern"`
-	ClientIP string            `json:"client_ip"`
-	Path     string            `json:"path"`
-	Query    string            `json:"query"`
-	Headers  map[string]string `json:"headers"`
+	Pattern   string            `json:"pattern"`
+	ClientIP  string            `json:"client_ip"`
+	Path      string            `json:"path"`
+	Query     string            `json:"query"`
+	Headers   map[string]string `json:"headers"`
 }
 
 // TestRule lets callers dry-run a pattern against a synthetic request
@@ -210,6 +191,19 @@ func TestRule() app.HandlerFunc {
 	}
 }
 
+// validatePersistedRuleAction checks rule Action values on bulk import and returns the canonical store.RuleAction.
+func validatePersistedRuleAction(a store.RuleAction) (store.RuleAction, bool) {
+	s := strings.TrimSpace(string(a))
+	if s == "" {
+		return "", false
+	}
+	t := action.Normalize(action.Type(s))
+	if !action.IsValid(t) {
+		return "", false
+	}
+	return store.RuleAction(string(t)), true
+}
+
 // ExportRules returns all rules as a JSON array for backup/migration.
 func ExportRules(repo *repository.RuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -244,6 +238,9 @@ func ImportRules(repo *repository.RuleRepo, reload func() error) app.HandlerFunc
 				c.JSON(400, map[string]any{"error": "invalid action", "index": i})
 				return
 			}
+		}
+
+		for i := range body.Rules {
 			body.Rules[i].ID = 0
 		}
 		if err := repo.BatchCreate(body.Rules); err != nil {

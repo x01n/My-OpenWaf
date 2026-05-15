@@ -14,6 +14,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/google/uuid"
 
+	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/adminweb"
@@ -24,6 +25,7 @@ import (
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf"
 )
 
@@ -42,7 +44,10 @@ type Options struct {
 	Bind           string
 	CaptchaManager *waf.CaptchaManager
 	ShieldManager  *waf.ShieldManager
-	ChainManager   *waf.ChainChallengeManager
+	ChainManager        *waf.ChainChallengeManager
+	RecordedResourceRepo *repository.RecordedResourceRepo
+	BotScoreRepo         *repository.BotScoreRepo
+	FingerprintRepo      *repository.FingerprintRepo
 }
 
 const bindContextKey = "dataplane_bind"
@@ -71,12 +76,18 @@ func Handler(opts Options) app.HandlerFunc {
 	staticFS, _ := adminweb.ResolveFS("")
 
 	return func(ctx context.Context, c *app.RequestContext) {
-		if serveOWAFStatic(c, staticFS) {
+		// WASM PoW assets must be checked before the generic static handler
+		// because serveOWAFStatic returns true (with 404) for unknown /__owaf/ paths.
+		if handleWASMAssets(c) {
 			return
 		}
 
 		// Handle challenge verification endpoints
 		if handleChallengeVerify(c, opts) {
+			return
+		}
+
+		if serveOWAFStatic(c, staticFS) {
 			return
 		}
 
@@ -110,11 +121,10 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR)
-		errorRateLimitKey := rateLimitKey(clientIP, host)
-
 		if clientIP != nil && opts.Metrics != nil {
 			opts.Metrics.RecordClientIP(clientIP.String())
 		}
+		errorRateLimitKey := rateLimitKey(clientIP, host)
 
 		if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil {
 			decision := ipRep.Check(clientIP)
@@ -129,7 +139,7 @@ func Handler(opts Options) app.HandlerFunc {
 				if ipAction == "" {
 					ipAction = "intercept"
 				}
-				useDropAction := ipAction == "block"
+				useDropAction := ipAction == "block" && dropEnabled(opts.Engine)
 
 				var actType action.Type
 				var actStr string
@@ -200,7 +210,6 @@ func Handler(opts Options) app.HandlerFunc {
 					}
 				} else {
 					// HTTP 403 — return block page
-					recordSecurityEvent(opts, rt.Site.ID, reqID, clientIP, host, string(c.Path()), c, blockAction, "intercept", 403)
 					waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
 					logAccess(accessLog, reqID, c, "intercept")
 					recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "intercept", "bypass", "")
@@ -215,10 +224,7 @@ func Handler(opts Options) app.HandlerFunc {
 			challengeRID := string(c.FormValue("__waf_challenge_rid"))
 			if challengeTS != "" && challengeToken != "" && challengeRID != "" {
 				if waf.VerifyChallengeToken(challengeRID, challengeTS, challengeToken, 5*time.Minute) {
-					cookie := "__waf_passed=1; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600"
-					if rt.Site.TLSEnabled {
-						cookie += "; Secure"
-					}
+					cookie := waf.BuildChallengePassCookie(string(c.Host()), clientIP, rt.Site.TLSEnabled, time.Now(), time.Hour)
 					c.Response.Header.Set("Set-Cookie", cookie)
 					referer := string(c.GetHeader("Referer"))
 					if referer == "" {
@@ -254,7 +260,11 @@ func Handler(opts Options) app.HandlerFunc {
 						newNonce := ar.GenerateNonce(cipStr)
 						setNonceCookie(c, newNonce, rt.Site.TLSEnabled)
 					} else {
-						valid, isReplay, newNonce := ar.ValidateAndRotate(nonceCookie, cipStr)
+						ttl := time.Duration(0)
+						if rt.Site.AntiReplayTTL > 0 {
+							ttl = time.Duration(rt.Site.AntiReplayTTL) * time.Second
+						}
+						valid, isReplay, newNonce := ar.ValidateAndRotate(nonceCookie, cipStr, ttl)
 						switch {
 						case valid:
 							// Good nonce — rotate cookie.
@@ -344,7 +354,6 @@ func Handler(opts Options) app.HandlerFunc {
 		lowerPath := strings.ToLower(path)
 		if strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+") || strings.Contains(lowerPath, "%2bcscot%2b") || strings.Contains(lowerPath, "%2bcscoe%2b")) {
 			blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:path:015", MatchDesc: "Cisco translation-table path traversal pattern", Matched: true, Category: string(waf.CatPathTrav)}
-			recordSecurityEvent(opts, rt.Site.ID, reqID, clientIP, host, string(c.Path()), c, blockAction, "intercept", 403)
 			waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
 			logAccess(accessLog, reqID, c, "intercept")
 			recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "intercept", "bypass", "")
@@ -399,7 +408,49 @@ func Handler(opts Options) app.HandlerFunc {
 
 		defer pipeline.ReleaseCtx(reqCtx)
 
-		result := opts.Engine.Process(reqCtx)
+		var result engine.ProcessResult
+		if shouldApplyErrorRateLimit(opts.Engine, sn.Protection, errorRateLimitKey) {
+			result = engine.ProcessResult{Site: &rt, Action: errorRateLimitAction(sn.Protection.ErrorRateLimitAction)}
+		} else {
+			result = opts.Engine.Process(reqCtx)
+		}
+
+		// Async bot score logging (read from ctx before ReleaseCtx).
+		if reqCtx.BotScoreResult != nil && opts.BotScoreRepo != nil {
+			bsi := reqCtx.BotScoreResult
+			ipStr := clientIPStr(clientIP)
+			hostStr := string(c.Host())
+			pathStr := string(c.Path())
+			go func() {
+				_ = opts.BotScoreRepo.Create(&store.BotScoreLog{
+					ClientIP:         ipStr,
+					Host:             hostStr,
+					Path:             pathStr,
+					TotalScore:       bsi.TotalScore,
+					GeoIPScore:       bsi.GeoIPScore,
+					FingerprintScore: bsi.FingerprintScore,
+					BehaviorScore:    bsi.BehaviorScore,
+					IPRepScore:       bsi.IPRepScore,
+					IsHighRisk:       bsi.IsHighRisk,
+					Action:           bsi.Action,
+					Details:          bsi.Details,
+				})
+			}()
+		}
+
+		// Async TLS fingerprint recording (only for TLS connections with fingerprinter active).
+		if opts.FingerprintRepo != nil {
+			if fp := waf.GetTLSFingerprinter(); fp != nil {
+				ipStr := clientIPStr(clientIP)
+				if info := fp.Lookup(ipStr); info != nil && info.JA3Hash != "" {
+					ja3 := info.JA3Hash
+					browser := waf.BrowserFamilyFromUA(string(c.UserAgent()))
+					isGood := waf.DefaultFingerprintDB().BrowserJA3[ja3] != ""
+					go opts.FingerprintRepo.RecordFingerprint(ja3, browser, isGood)
+				}
+			}
+		}
+
 		ua := string(c.UserAgent())
 		for _, obs := range result.ObserveHits {
 			if opts.Metrics != nil {
@@ -451,7 +502,19 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		if result.Action.IsTerminal() {
+			// Challenge cookie bypass: if action is a challenge type but client has a
+			// valid signed pass cookie, downgrade to pass and skip the challenge.
+			if result.Action.IsChallenge() {
+				cookieHeader := string(c.GetHeader("Cookie"))
+				if cookieHeader != "" && waf.VerifyChallengePassCookie(cookieHeader, host, clientIP, time.Now()) {
+					result.Action = action.Pass()
+				}
+			}
+		}
+
+		if result.Action.IsTerminal() {
 			incrementErrorRateLimitBlock(opts.Engine, sn.Protection, errorRateLimitKey)
+
 			actType := action.Normalize(result.Action.Type)
 			actStr := string(actType)
 
@@ -484,7 +547,7 @@ func Handler(opts Options) app.HandlerFunc {
 				}
 			}
 
-			if result.Action.IsDrop() {
+			if result.Action.IsDrop() && dropEnabled(opts.Engine) {
 				secLog.Warn("drop",
 					slog.String("request_id", reqID),
 					slog.String("rule_id", result.Action.RuleIDStr),
@@ -515,7 +578,7 @@ func Handler(opts Options) app.HandlerFunc {
 				logAccess(accessLog, reqID, c, "drop")
 				recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "drop", "bypass", "")
 				recordDropEvent(opts, rt.Site.ID, clientIP, waf.DropReason{
-					Source:    dropEventSource(result.Action.Phase),
+					Source:    result.Action.Phase,
 					RuleID:    result.Action.RuleIDStr,
 					Detail:    result.Action.MatchDesc,
 					Host:      host,
@@ -526,7 +589,7 @@ func Handler(opts Options) app.HandlerFunc {
 				if dropExec != nil && dropExec.Enabled() {
 					conn := c.GetConn()
 					dropExec.Execute(conn, waf.DropReason{
-						Source:    dropEventSource(result.Action.Phase),
+						Source:    result.Action.Phase,
 						RuleID:    result.Action.RuleIDStr,
 						Detail:    result.Action.MatchDesc,
 						ClientIP:  clientIPStr(clientIP),
@@ -551,7 +614,7 @@ func Handler(opts Options) app.HandlerFunc {
 					slog.String("match", result.Action.MatchDesc),
 					slog.String("challenge_type", string(result.Action.Type)),
 				)
-				statusCode := result.Action.EffectiveStatusCode(403)
+				statusCode := result.Action.ResponseStatusCode()
 				if opts.EventWriter != nil {
 					opts.EventWriter.Record(store.SecurityEvent{
 						SiteID:     rt.Site.ID,
@@ -572,12 +635,12 @@ func Handler(opts Options) app.HandlerFunc {
 				}
 				// Route to appropriate challenge handler
 				switch {
-				case result.Action.IsCaptchaChallenge() && opts.CaptchaManager != nil:
+				case result.Action.IsCaptchaChallenge() && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil:
 					waf.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, statusCode)
-				case result.Action.IsShieldChallenge() && opts.ShieldManager != nil:
+				case result.Action.IsShieldChallenge() && sn.Protection.ShieldEnabled && opts.ShieldManager != nil:
 					origURL := string(c.Request.URI().RequestURI())
 					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, statusCode)
-				case result.Action.IsChainChallenge() && opts.ChainManager != nil:
+				case result.Action.IsChainChallenge() && sn.Protection.ChainEnabled && opts.ChainManager != nil:
 					waf.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
 				default:
 					waf.WriteChallengeResponse(c, reqID, result.Site, statusCode)
@@ -669,16 +732,16 @@ func Handler(opts Options) app.HandlerFunc {
 		case IsSSERequest(c):
 			upstreamErr = ForwardSSE(ctx, c, *result.Site, base, clientIP, host)
 		default:
-			cacheKey, ttl := "", int64(0)
+			cacheKey, ttl, ignoreUpstreamCC := "", int64(0), false
 			if opts.ResponseCache != nil {
-				cacheKey, ttl = proxy.SiteCacheEligible(*result.Site, c)
+				cacheKey, ttl, ignoreUpstreamCC = proxy.SiteCacheEligible(*result.Site, c)
 			}
 			if cacheKey == "" {
 				upstreamErr = proxy.ForwardHTTP(ctx, c, *result.Site, base, clientIP, host)
 				break
 			}
 			if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
-				proxy.ForwardCachedResponse(c, entry.StatusCode, entry.ContentType, entry.Body)
+				proxy.WriteCachedResponse(c, string(c.Method()), entry)
 				cacheState = "hit"
 				break
 			}
@@ -688,8 +751,8 @@ func Handler(opts Options) app.HandlerFunc {
 				upstreamErr = err
 				break
 			}
-			if proxy.ShouldCacheHTTPResponse(string(c.Method()), bufferedResp) {
-				opts.ResponseCache.Set(cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, ttl)
+			if proxy.ShouldCacheHTTPResponse(string(c.Method()), bufferedResp, ignoreUpstreamCC) {
+				opts.ResponseCache.Set(cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, ttl, proxy.SanitizeHeadersForEdgeCache(bufferedResp.Header))
 			}
 			proxy.ForwardBufferedResponse(c, bufferedResp)
 		}
@@ -726,7 +789,44 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 		logAccess(accessLog, reqID, c, wafAction)
 		recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, wafAction, cacheState, base)
+
+		// Async application route resource recording.
+		// IMPORTANT: Copy all fields from RequestContext BEFORE launching goroutine
+		// because Hertz recycles the context after handler returns.
+		if upstreamErr == nil && len(rt.AppRouteRules) > 0 && opts.RecordedResourceRepo != nil {
+			mat := &appresource.Material{
+				Method:      string(c.Method()),
+				Host:        string(c.Host()),
+				Path:        string(c.Path()),
+				ClientIP:    clientIPStr(clientIP),
+				StatusCode:  c.Response.StatusCode(),
+				ContentType: string(c.Response.Header.ContentType()),
+				UserAgent:   string(c.GetHeader("User-Agent")),
+			}
+			// Copy headers needed by rule matching before goroutine
+			headerSnapshot := make(map[string]string)
+			c.Request.Header.VisitAll(func(key, value []byte) {
+				headerSnapshot[string(key)] = string(value)
+			})
+			go recordAppRouteResourceSafe(opts.RecordedResourceRepo, rt, mat, headerSnapshot)
+		}
 	}
+}
+
+func recordAppRouteResourceSafe(repo *repository.RecordedResourceRepo, rt snapshot.SiteRuntime, m *appresource.Material, headers map[string]string) {
+	headerFn := func(key string) string { return headers[key] }
+	ids := appresource.MatchedRuleIDs(rt.AppRouteRules, m, headerFn)
+	if len(ids) == 0 {
+		return
+	}
+	rec := appresource.BuildRecordedResource(rt.Site.ID, ids, m)
+	if rec == nil {
+		return
+	}
+	rec.HitCount = 1
+	rec.FirstSeen = time.Now()
+	rec.LastSeen = rec.FirstSeen
+	_ = repo.Upsert(rec)
 }
 
 func serveOWAFStatic(c *app.RequestContext, webFS fs.FS) bool {
@@ -768,41 +868,6 @@ func logAccess(log *slog.Logger, reqID string, c *app.RequestContext, wafAction 
 	)
 }
 
-func recordSecurityEvent(opts Options, siteID uint, reqID string, clientIP net.IP, host, path string, c *app.RequestContext, res action.Result, actionName string, statusCode int) {
-	if opts.EventWriter == nil {
-		return
-	}
-	opts.EventWriter.Record(store.SecurityEvent{
-		SiteID:     siteID,
-		RequestID:  reqID,
-		ClientIP:   clientIPStr(clientIP),
-		Host:       host,
-		Path:       path,
-		Method:     string(c.Method()),
-		UserAgent:  string(c.UserAgent()),
-		RuleID:     res.RuleID,
-		RuleIDStr:  res.RuleIDStr,
-		Phase:      res.Phase,
-		Action:     actionName,
-		Category:   res.Category,
-		MatchDesc:  res.MatchDesc,
-		StatusCode: statusCode,
-	})
-}
-
-func dropEventSource(phase string) string {
-	switch {
-	case strings.Contains(phase, "bot"):
-		return "bot"
-	case strings.Contains(phase, "cve"):
-		return "cve"
-	case phase == "ip_reputation":
-		return "ip_reputation"
-	default:
-		return "rule"
-	}
-}
-
 func recordAccessLog(opts Options, siteID uint, reqID string, clientIP net.IP, c *app.RequestContext, wafAction string, cacheState string, upstream string) {
 	if opts.AccessLogWriter == nil {
 		return
@@ -838,42 +903,25 @@ func recordDropEvent(opts Options, siteID uint, clientIP net.IP, reason waf.Drop
 	})
 }
 
-func rateLimitKey(ip net.IP, host string) string {
-	key := ""
-	if ip != nil {
-		key = ip.String()
-	}
-	return key + "|" + host
-}
-
-func siteErrorPage(rt *snapshot.SiteRuntime, statusCode int) *waf.ErrorPageConfig {
-	if rt == nil || strings.TrimSpace(rt.Site.CustomErrorPages) == "" || strings.TrimSpace(rt.Site.CustomErrorPages) == "{}" {
-		return nil
-	}
-	var pages map[string]waf.ErrorPageConfig
-	if err := json.Unmarshal([]byte(rt.Site.CustomErrorPages), &pages); err != nil {
-		return nil
-	}
-	cfg, ok := pages[strconv.Itoa(statusCode)]
-	if !ok {
-		return nil
-	}
-	if cfg.StatusCode == 0 {
-		cfg.StatusCode = statusCode
-	}
-	return &cfg
+func dropEnabled(eng *engine.Engine) bool {
+	dropExec := eng.DropExecutor()
+	return dropExec != nil && dropExec.Enabled()
 }
 
 func ShouldBlock(res action.Result) bool {
 	return res.IsTerminal()
 }
 
-func shouldApplyErrorRateLimit(eng *engine.Engine, _ store.ProtectionConfig, key string) bool {
-	if eng == nil || key == "" {
+func rateLimitKey(clientIP net.IP, host string) string {
+	return clientIPStr(clientIP) + "|" + host
+}
+
+func shouldApplyErrorRateLimit(eng *engine.Engine, prot store.ProtectionConfig, key string) bool {
+	if eng == nil {
 		return false
 	}
-	rl := eng.ErrRateLimiter()
-	return rl != nil && rl.Enabled() && rl.IsOverLimit(key)
+	errRL := eng.ErrRateLimiter()
+	return errRL != nil && errRL.Enabled() && errRL.IsOverLimit(key)
 }
 
 func errorRateLimitAction(configured string) action.Result {
@@ -881,11 +929,18 @@ func errorRateLimitAction(configured string) action.Result {
 	if act == "" {
 		act = action.RateLimit
 	}
-	result := action.Result{Type: act, Phase: "error_rate_limit", RuleIDStr: "error_rate_limit", MatchDesc: "historical error rate exceeded", Matched: true}
-	if act == action.RateLimit {
-		result.StatusCode = 429
+	res := action.Result{
+		Type:      act,
+		Phase:     "error_rate_limit",
+		RuleIDStr: "error_rate_limit",
+		MatchDesc: "error rate limit exceeded",
+		Matched:   true,
+		Category:  "rate_limit",
 	}
-	return result
+	if act == action.RateLimit {
+		res.StatusCode = 429
+	}
+	return res
 }
 
 func incrementErrorRateLimitBlock(eng *engine.Engine, prot store.ProtectionConfig, key string) {
@@ -896,21 +951,21 @@ func incrementErrorRateLimitBlock(eng *engine.Engine, prot store.ProtectionConfi
 }
 
 func incrementErrorRateLimitStatus(eng *engine.Engine, prot store.ProtectionConfig, key string, statusCode int) {
-	if prot.ErrorRateLimitCount4xx && statusCode >= 400 && statusCode < 500 {
+	switch {
+	case prot.ErrorRateLimitCount4xx && statusCode >= 400 && statusCode < 500:
 		incrementErrorRateLimit(eng, key)
-		return
-	}
-	if prot.ErrorRateLimitCount5xx && statusCode >= 500 {
+	case prot.ErrorRateLimitCount5xx && statusCode >= 500:
 		incrementErrorRateLimit(eng, key)
 	}
 }
 
 func incrementErrorRateLimit(eng *engine.Engine, key string) {
-	if eng == nil || key == "" {
+	if eng == nil {
 		return
 	}
-	if rl := eng.ErrRateLimiter(); rl != nil && rl.Enabled() {
-		rl.Increment(key)
+	errRL := eng.ErrRateLimiter()
+	if errRL != nil && errRL.Enabled() {
+		errRL.Increment(key)
 	}
 }
 
@@ -940,6 +995,24 @@ func hasUpstreamServerHeader(c *app.RequestContext) bool {
 	return sv != "" && sv != "hertz"
 }
 
+func siteErrorPage(rt *snapshot.SiteRuntime, statusCode int) *waf.ErrorPageConfig {
+	if rt == nil || strings.TrimSpace(rt.Site.CustomErrorPages) == "" || rt.Site.CustomErrorPages == "{}" {
+		return nil
+	}
+	pages := make(map[string]waf.ErrorPageConfig)
+	if err := json.Unmarshal([]byte(rt.Site.CustomErrorPages), &pages); err != nil {
+		return nil
+	}
+	cfg, ok := pages[strconv.Itoa(statusCode)]
+	if !ok {
+		return nil
+	}
+	if cfg.StatusCode == 0 {
+		cfg.StatusCode = statusCode
+	}
+	return &cfg
+}
+
 func isTimeoutError(err error) bool {
 	if err == context.DeadlineExceeded {
 		return true
@@ -948,6 +1021,20 @@ func isTimeoutError(err error) bool {
 		return true
 	}
 	if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline") {
+		return true
+	}
+	return false
+}
+
+// handleWASMAssets serves the PoW WASM binary and wasm_exec.js glue.
+func handleWASMAssets(c *app.RequestContext) bool {
+	path := string(c.Path())
+	switch path {
+	case "/__owaf/pow.wasm":
+		waf.ServePoWWASM(c)
+		return true
+	case "/__owaf/wasm_exec.js":
+		waf.ServeWasmExecJS(c)
 		return true
 	}
 	return false
@@ -1065,8 +1152,8 @@ func handleChainVerify(c *app.RequestContext, opts Options) bool {
 func setChallengeCookie(c *app.RequestContext, opts Options) {
 	sn := opts.Holder.Load()
 	tlsEnabled := false
+	host := string(c.Host())
 	if sn != nil {
-		host := string(c.Host())
 		bind := listenerBind(c)
 		if bind == "" {
 			bind = opts.Bind
@@ -1075,9 +1162,7 @@ func setChallengeCookie(c *app.RequestContext, opts Options) {
 			tlsEnabled = rt.Site.TLSEnabled
 		}
 	}
-	cookie := "__waf_passed=1; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600"
-	if tlsEnabled {
-		cookie += "; Secure"
-	}
+	clientIP := security.ResolveClientIP(c, "", "")
+	cookie := waf.BuildChallengePassCookie(host, clientIP, tlsEnabled, time.Now(), time.Hour)
 	c.Response.Header.Set("Set-Cookie", cookie)
 }

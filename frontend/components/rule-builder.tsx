@@ -12,27 +12,38 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 
 const RULE_KINDS = [
-  { value: "block_ip", label: "封禁 IP/CIDR", placeholder: "192.168.1.0/24", group: "ACL" },
-  { value: "allow_ip", label: "放行 IP/CIDR", placeholder: "10.0.0.0/8", group: "ACL" },
-  { value: "block_path", label: "路径前缀", placeholder: "/admin", group: "路径" },
-  { value: "block_path_exact", label: "路径精确", placeholder: "/.env", group: "路径" },
-  { value: "block_path_regex", label: "路径正则", placeholder: "(?i)/admin.*\\.php", group: "路径" },
-  { value: "block_query_contains", label: "查询包含", placeholder: "union+select", group: "查询" },
-  { value: "block_query_regex", label: "查询正则", placeholder: "(?i)union\\s+select", group: "查询" },
-  { value: "query_param", label: "查询参数", placeholder: "id:1", group: "查询" },
+  // Source IP
+  { value: "block_ip", label: "封禁 IP/CIDR", placeholder: "192.168.1.0/24", group: "源 IP" },
+  { value: "allow_ip", label: "放行 IP/CIDR", placeholder: "10.0.0.0/8", group: "源 IP" },
+  { value: "geo_block", label: "地理位置封禁", placeholder: "CN,RU,KP", group: "源 IP" },
+  // URL Path
+  { value: "block_path", label: "路径前缀", placeholder: "/admin", group: "URL 路径" },
+  { value: "block_path_exact", label: "路径精确", placeholder: "/.env", group: "URL 路径" },
+  { value: "block_path_regex", label: "路径正则", placeholder: "(?i)/admin.*\\.php", group: "URL 路径" },
+  { value: "full_url_contains", label: "完整 URL 包含", placeholder: "/admin?debug=", group: "URL 路径" },
+  { value: "full_url_regex", label: "完整 URL 正则", placeholder: "(?i)/api/v[0-9]+/", group: "URL 路径" },
+  // Query
+  { value: "block_query_contains", label: "查询包含", placeholder: "union+select", group: "查询参数" },
+  { value: "block_query_regex", label: "查询正则", placeholder: "(?i)union\\s+select", group: "查询参数" },
+  { value: "query_param", label: "查询参数精确", placeholder: "id:1", group: "查询参数" },
+  // Request Header
   { value: "block_header", label: "请求头包含", placeholder: "User-Agent:BadBot", group: "请求头" },
   { value: "block_header_regex", label: "请求头正则", placeholder: "User-Agent:(?i)bot|crawl", group: "请求头" },
   { value: "header_regex", label: "请求头值正则", placeholder: "X-Token:(?i)^test", group: "请求头" },
   { value: "block_user_agent", label: "User-Agent 包含", placeholder: "sqlmap", group: "请求头" },
   { value: "block_user_agent_regex", label: "User-Agent 正则", placeholder: "(?i)(sqlmap|nuclei)", group: "请求头" },
-  { value: "host", label: "Host 匹配", placeholder: "admin.example.com", group: "请求头" },
+  { value: "host", label: "Host 等于", placeholder: "admin.example.com", group: "请求头" },
+  { value: "host_full", label: "Host 模糊匹配", placeholder: "*.example.com", group: "请求头" },
   { value: "cookie_contains", label: "Cookie 包含", placeholder: "debug=true", group: "请求头" },
   { value: "referer_contains", label: "Referer 包含", placeholder: "evil.example", group: "请求头" },
-  { value: "block_method", label: "HTTP 方法", placeholder: "DELETE", group: "协议" },
-  { value: "block_content_type", label: "Content-Type", placeholder: "application/xml", group: "协议" },
-  { value: "body_contains", label: "Body 包含", placeholder: "eval(", group: "Body" },
-  { value: "body_regex", label: "Body 正则", placeholder: "(?i)<script", group: "Body" },
-  { value: "block_body_json_path", label: "JSON Path", placeholder: "$.user.role:(?i)admin", group: "Body" },
+  // Request Body
+  { value: "body_contains", label: "请求 Body 包含", placeholder: "eval(", group: "请求 Body" },
+  { value: "body_regex", label: "请求 Body 正则", placeholder: "(?i)<script", group: "请求 Body" },
+  { value: "block_body_json_path", label: "JSON Path", placeholder: "$.user.role:(?i)admin", group: "请求 Body" },
+  { value: "block_multipart", label: "上传文件名匹配", placeholder: "(?i)\\.(php|jsp|exe)$", group: "请求 Body" },
+  // Protocol / Method
+  { value: "block_method", label: "HTTP 方法", placeholder: "DELETE", group: "请求方法" },
+  { value: "block_content_type", label: "Content-Type", placeholder: "application/xml", group: "请求方法" },
 ] as const;
 
 interface Condition {

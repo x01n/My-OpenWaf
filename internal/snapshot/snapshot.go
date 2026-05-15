@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
 )
 
@@ -63,6 +64,9 @@ type SiteRuntime struct {
 	// Per-site protection overrides (merged from Site fields).
 	// nil = use global ProtectionConfig.
 	EffectiveProtection *store.ProtectionConfig
+
+	// Application route rules (compiled per snapshot).
+	AppRouteRules []appresource.CompiledRule
 }
 
 // Snapshot is an immutable view for the dataplane (atomic pointer swap).
@@ -88,7 +92,7 @@ func SNICertKey(bind string, sni string) string {
 }
 
 func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool) {
-	host := normalizeMatchHost(hostHeader)
+	host := NormalizeMatchHost(hostHeader)
 	if host == "" {
 		return SiteRuntime{}, false
 	}
@@ -111,16 +115,33 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 
 	// 3. Fallback: match any site on this bind address whose host matches
 	for _, rt := range sn.Sites {
-		if rt.Bind == bind && normalizeMatchHost(rt.Site.Host) == host {
+		if rt.Bind == bind && NormalizeMatchHost(rt.Site.Host) == host {
 			return rt, true
 		}
+	}
+
+	// 4. Fallback: any site on this bind address only when it is unambiguous (single host key).
+	prefix := bind + "\x00"
+	var sole SiteRuntime
+	n := 0
+	for k, rt := range sn.Sites {
+		if strings.HasPrefix(k, prefix) {
+			sole = rt
+			n++
+			if n > 1 {
+				break
+			}
+		}
+	}
+	if n == 1 {
+		return sole, true
 	}
 
 	return SiteRuntime{}, false
 }
 
-// normalizeMatchHost lowercases, trims, and strips the port from a host header.
-func normalizeMatchHost(host string) string {
+// NormalizeMatchHost lowercases, trims, and strips the port from a host header.
+func NormalizeMatchHost(host string) string {
 	host = strings.ToLower(strings.TrimSpace(host))
 	// Strip port: find last colon and verify everything after is digits.
 	if i := strings.LastIndex(host, ":"); i >= 0 {

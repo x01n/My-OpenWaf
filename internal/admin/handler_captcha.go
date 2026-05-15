@@ -8,6 +8,7 @@ import (
 
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf"
 )
 
 // captchaConfigResponse is the API response for captcha configuration.
@@ -78,15 +79,30 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 	}
 }
 
-// TestCaptcha generates a test captcha preview (stub implementation).
-func TestCaptcha(repo *repository.SystemSettingsRepo) app.HandlerFunc {
+// TestCaptcha generates a test captcha preview.
+func TestCaptcha(repo *repository.SystemSettingsRepo, mgr *waf.CaptchaManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
+		if mgr == nil {
+			c.JSON(503, map[string]string{"error": "captcha manager not initialized"})
+			return
+		}
 		cfg := loadProtectionConfig(repo)
-		c.JSON(501, map[string]any{
-			"error":        "captcha test preview is not implemented",
-			"implemented":  false,
+		captchaType := waf.CaptchaType(cfg.CaptchaType)
+		if captchaType == "" {
+			captchaType = waf.CaptchaTypeMath
+		}
+		challenge, err := mgr.Generate(captchaType)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": "captcha generation failed: " + err.Error()})
+			return
+		}
+		c.JSON(200, map[string]any{
+			"session_id":   challenge.SessionID,
+			"type":         challenge.Type,
+			"master_img":   challenge.MasterImg,
+			"prompt":       challenge.Prompt,
 			"captcha_type": cfg.CaptchaType,
-			"difficulty":   cfg.ShieldDifficulty,
+			"timeout":      cfg.CaptchaTimeout,
 		})
 	}
 }

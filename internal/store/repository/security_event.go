@@ -16,16 +16,17 @@ func NewSecurityEventRepo(db *gorm.DB) *SecurityEventRepo {
 
 // SecurityEventFilter holds query filters for listing events.
 type SecurityEventFilter struct {
-	SiteID   uint
-	Action   string
-	Phase    string
-	Category string
-	ClientIP string
-	Host     string
-	Path     string
-	RuleID   uint
-	Since    *time.Time
-	Until    *time.Time
+	SiteID    uint
+	Action    string
+	Phase     string
+	Category  string
+	ClientIP  string
+	Host      string
+	Path      string
+	RuleID    uint
+	RuleIDStr string
+	Since     *time.Time
+	Until     *time.Time
 }
 
 func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
@@ -271,6 +272,9 @@ func applyEventFilters(q *gorm.DB, f SecurityEventFilter) *gorm.DB {
 	}
 	if f.RuleID > 0 {
 		q = q.Where("rule_id = ?", f.RuleID)
+	}
+	if f.RuleIDStr != "" {
+		q = q.Where("rule_id_str = ?", f.RuleIDStr)
 	}
 	if f.Since != nil {
 		q = q.Where("created_at >= ?", *f.Since)

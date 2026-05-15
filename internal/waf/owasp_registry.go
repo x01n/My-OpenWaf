@@ -24,6 +24,7 @@ type OWASPRuleOverride struct {
 	Action     string   `json:"action,omitempty"`
 	StatusCode int      `json:"status_code,omitempty"`
 	RedirectTo string   `json:"redirect_to,omitempty"`
+	Sensitivity string  `json:"sensitivity,omitempty"` // per-rule OWASP level (e.g. strict, high, medium)
 }
 
 // OWASPRuleRegistry is a thread-safe registry of all granular OWASP rules.
@@ -156,16 +157,37 @@ func ShouldSkipRule(ruleID, path string, overrides map[string]OWASPRuleOverride)
 	return false
 }
 
-// FilterHits filters OWASP hits based on rule overrides and path whitelists.
-// This is the main integration point: call it after CheckOWASP to remove
-// hits for disabled rules or whitelisted paths.
-func FilterHits(hits []OWASPHit, path string, overrides map[string]OWASPRuleOverride) []OWASPHit {
+// HitPassesOverrideSensitivity returns false when a per-rule sensitivity override
+// requires a higher score than the hit carries.
+func HitPassesOverrideSensitivity(hit OWASPHit, ov OWASPRuleOverride, catSens map[string]string) bool {
+	s := strings.TrimSpace(ov.Sensitivity)
+	if s == "" || catSens == nil {
+		return true
+	}
+	th, enabled := CategoryThreshold(s, hit.Category, catSens)
+	if !enabled {
+		return false
+	}
+	return hit.Score >= th
+}
+
+// FilterHits filters OWASP hits based on rule overrides, path whitelists, and optional
+// per-rule sensitivity overrides (requires category sensitivity map from ProtectionConfig).
+func FilterHits(hits []OWASPHit, path string, overrides map[string]OWASPRuleOverride, catSens ...map[string]string) []OWASPHit {
 	if len(overrides) == 0 || len(hits) == 0 {
 		return hits
+	}
+	var cs map[string]string
+	if len(catSens) > 0 {
+		cs = catSens[0]
 	}
 	filtered := make([]OWASPHit, 0, len(hits))
 	for _, h := range hits {
 		if ShouldSkipRule(h.RuleID, path, overrides) {
+			continue
+		}
+		ov := RuleOverride(h.RuleID, overrides)
+		if cs != nil && !HitPassesOverrideSensitivity(h, ov, cs) {
 			continue
 		}
 		filtered = append(filtered, h)

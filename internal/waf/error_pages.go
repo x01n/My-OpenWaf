@@ -21,11 +21,12 @@ type ErrorPageConfig struct {
 
 // defaultErrorPages provides built-in error page configurations.
 var defaultErrorPages = map[int]*ErrorPageConfig{
-	403: {StatusCode: 403, Title: "Access Denied", Body: "Your request has been blocked by the WAF."},
-	429: {StatusCode: 429, Title: "Too Many Requests", Body: "You have exceeded the rate limit. Please try again later."},
-	502: {StatusCode: 502, Title: "Bad Gateway", Body: "The server received an invalid response from the upstream."},
-	503: {StatusCode: 503, Title: "Service Unavailable", Body: "The service is temporarily unavailable."},
-	504: {StatusCode: 504, Title: "Gateway Timeout", Body: "The upstream server did not respond in time."},
+	403: {StatusCode: 403, Title: "Access Denied", Body: "Your request has been blocked by the web application firewall.\n您的请求已被Web应用防火墙拦截。"},
+	404: {StatusCode: 404, Title: "Not Found", Body: "The requested resource could not be found.\n请求的资源未找到。"},
+	429: {StatusCode: 429, Title: "Too Many Requests", Body: "You have exceeded the rate limit. Please try again later.\n您的请求过于频繁，请稍后再试。"},
+	502: {StatusCode: 502, Title: "Bad Gateway", Body: "The server received an invalid response from the upstream.\n上游服务器返回了无效的响应。"},
+	503: {StatusCode: 503, Title: "Service Unavailable", Body: "The service is temporarily unavailable.\n服务暂时不可用，请稍后再试。"},
+	504: {StatusCode: 504, Title: "Gateway Timeout", Body: "The upstream server did not respond in time.\n上游服务器未能及时响应。"},
 }
 
 // GetDefaultErrorPage returns the default error page config for a status code.
@@ -65,21 +66,57 @@ func RenderErrorPage(statusCode int, customConfig *ErrorPageConfig) []byte {
 		customStyle = cfg.CustomCSS
 	}
 
+	// Choose icon based on status code
+	icon := "&#9888;" // default warning
+	titleZh := "错误"
+	switch statusCode {
+	case 403:
+		icon = "&#128737;"
+		titleZh = "访问被拒绝"
+	case 404:
+		icon = "&#128269;"
+		titleZh = "页面未找到"
+	case 429:
+		icon = "&#9203;"
+		titleZh = "请求过于频繁"
+	case 502:
+		icon = "&#9889;"
+		titleZh = "网关错误"
+	case 503:
+		icon = "&#128736;"
+		titleZh = "服务不可用"
+	case 504:
+		icon = "&#9203;"
+		titleZh = "网关超时"
+	}
+
+	// Split body into lines for multi-line rendering
+	bodyHTML := ""
+	for _, line := range strings.Split(cfg.Body, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			bodyHTML += `<p class="body-line">` + line + `</p>`
+		}
+	}
+
 	html := `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + cfg.Title + `</title><style>` +
 		`*{margin:0;padding:0;box-sizing:border-box}` +
-		`body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%);color:#e2e8f0}` +
-		`.container{text-align:center;max-width:560px;padding:3rem 2rem}` +
-		`.status-code{font-size:7rem;font-weight:900;background:linear-gradient(135deg,#f87171,#ef4444,#dc2626);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1;margin-bottom:1rem;text-shadow:0 0 80px rgba(239,68,68,0.3)}` +
-		`.title{font-size:1.5rem;font-weight:600;color:#f1f5f9;margin-bottom:1rem}` +
-		`.body{font-size:1rem;color:#94a3b8;line-height:1.6;margin-bottom:2rem}` +
-		`.footer{font-size:0.75rem;color:#475569;border-top:1px solid #1e293b;padding-top:1.5rem;margin-top:1.5rem}` +
-		`.footer span{color:#64748b}` +
+		`body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 40%,#f1f5f9 100%);color:#1e293b}` +
+		`.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);text-align:center;max-width:500px;width:92%;padding:48px 40px}` +
+		`.icon{font-size:48px;margin-bottom:8px;line-height:1.2}` +
+		`.status-code{font-size:4rem;font-weight:800;color:#14b8a6;line-height:1;margin-bottom:4px}` +
+		`.title{font-size:1.2rem;font-weight:600;color:#334155;margin-bottom:6px}` +
+		`.divider{width:48px;height:3px;background:#14b8a6;border-radius:2px;margin:16px auto}` +
+		`.body-line{font-size:.9rem;color:#64748b;line-height:1.6;margin-bottom:4px}` +
+		`.footer{font-size:.7rem;color:#94a3b8;border-top:1px solid #f1f5f9;padding-top:16px;margin-top:24px}` +
 		customStyle +
-		`</style></head><body><div class="container">` +
+		`</style></head><body><div class="card">` +
+		`<div class="icon">` + icon + `</div>` +
 		`<div class="status-code">` + strconv.Itoa(statusCode) + `</div>` +
-		`<div class="title">` + cfg.Title + `</div>` +
-		`<div class="body">` + cfg.Body + `</div>` +
-		`<div class="footer"><span>Protected by OpenWAF</span></div>` +
+		`<div class="title">` + cfg.Title + ` / ` + titleZh + `</div>` +
+		`<div class="divider"></div>` +
+		bodyHTML +
+		`<div class="footer">Protected by My-OpenWAF</div>` +
 		`</div></body></html>`
 
 	return []byte(html)
@@ -116,26 +153,32 @@ func WriteWelcomePage(_ context.Context, c *app.RequestContext) {
 	c.Response.Header.Del("Server")
 	c.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 
-	html := `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenWAF</title><style>` +
+	html := `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My-OpenWAF</title><style>` +
 		`*{margin:0;padding:0;box-sizing:border-box}` +
-		`body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%);color:#e2e8f0}` +
-		`.container{text-align:center;max-width:560px;padding:3rem 2rem}` +
-		`.logo{font-size:3.5rem;font-weight:900;background:linear-gradient(135deg,#38bdf8,#818cf8,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:0.5rem}` +
-		`.subtitle{font-size:1.25rem;color:#94a3b8;margin-bottom:2rem}` +
-		`.status-badge{display:inline-flex;align-items:center;gap:0.5rem;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);border-radius:2rem;padding:0.5rem 1.25rem;font-size:0.875rem;color:#4ade80;margin-bottom:2rem}` +
-		`.status-dot{width:8px;height:8px;border-radius:50%;background:#4ade80;animation:pulse 2s infinite}` +
-		`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}` +
-		`.info{font-size:0.875rem;color:#64748b;line-height:1.8}` +
-		`.footer{font-size:0.75rem;color:#475569;border-top:1px solid #1e293b;padding-top:1.5rem;margin-top:2rem}` +
-		`</style></head><body><div class="container">` +
-		`<div class="logo">OpenWAF</div>` +
+		`body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 40%,#f1f5f9 100%);color:#1e293b}` +
+		`.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);text-align:center;max-width:500px;width:92%;padding:48px 40px}` +
+		`.shield{font-size:52px;margin-bottom:8px;line-height:1.2}` +
+		`.logo{font-size:2rem;font-weight:800;color:#0d9488;margin-bottom:4px}` +
+		`.subtitle{font-size:1rem;color:#64748b;margin-bottom:24px}` +
+		`.status-badge{display:inline-flex;align-items:center;gap:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:24px;padding:8px 20px;font-size:.875rem;color:#16a34a;margin-bottom:24px}` +
+		`.status-dot{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}` +
+		`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}` +
+		`.divider{width:48px;height:3px;background:#14b8a6;border-radius:2px;margin:0 auto 20px}` +
+		`.info{font-size:.875rem;color:#64748b;line-height:1.8}` +
+		`.info p{margin-bottom:4px}` +
+		`.footer{font-size:.7rem;color:#94a3b8;border-top:1px solid #f1f5f9;padding-top:16px;margin-top:24px}` +
+		`</style></head><body><div class="card">` +
+		`<div class="shield">&#128737;</div>` +
+		`<div class="logo">My-OpenWAF</div>` +
 		`<div class="subtitle">Web Application Firewall</div>` +
 		`<div class="status-badge"><span class="status-dot"></span>Running</div>` +
+		`<div class="divider"></div>` +
 		`<div class="info">` +
 		`<p>The WAF is active and protecting your applications.</p>` +
+		`<p>WAF 正在运行并保护您的应用程序。</p>` +
 		`<p>This page is displayed because no site is configured for this domain.</p>` +
 		`</div>` +
-		`<div class="footer">OpenWAF v1.0</div>` +
+		`<div class="footer">Protected by My-OpenWAF</div>` +
 		`</div></body></html>`
 
 	c.Data(200, "text/html; charset=utf-8", []byte(html))

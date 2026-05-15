@@ -20,12 +20,13 @@ func ListSecurityEvents(repo *repository.SecurityEventRepo) app.HandlerFunc {
 		offset, limit := utils.Paginate(page, pageSize)
 
 		f := repository.SecurityEventFilter{
-			Action:   string(c.Query("action")),
-			Phase:    string(c.Query("phase")),
-			Category: string(c.Query("category")),
-			ClientIP: string(c.Query("client_ip")),
-			Host:     string(c.Query("host")),
-			Path:     string(c.Query("path")),
+			Action:    string(c.Query("action")),
+			Phase:     string(c.Query("phase")),
+			Category:  string(c.Query("category")),
+			ClientIP:  string(c.Query("client_ip")),
+			Host:      string(c.Query("host")),
+			Path:      string(c.Query("path")),
+			RuleIDStr: string(c.Query("rule_id_str")),
 		}
 		if rid := string(c.Query("rule_id")); rid != "" {
 			if v, err := strconv.ParseUint(rid, 10, 64); err == nil {

@@ -8,9 +8,40 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 )
+
+// syncBotEnabledToProtection updates ProtectionConfig.BotDetectionEnabled
+// so the engine stays consistent when the bot settings page toggles the flag.
+func syncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) {
+	cfg := store.DefaultProtectionConfig()
+	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &cfg)
+	}
+	if cfg.BotDetectionEnabled == enabled {
+		return // already in sync
+	}
+	cfg.BotDetectionEnabled = enabled
+	data, _ := json.Marshal(cfg)
+	_ = settingsRepo.Set("protection", string(data))
+}
+
+// syncProtectionBotToSettings updates bot_settings.Enabled so the bot page
+// stays consistent when the protection page toggles bot_detection_enabled.
+func syncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) {
+	current := BotSettingsResponse{ScoreThreshold: 60}
+	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
+	}
+	if current.Enabled == enabled {
+		return // already in sync
+	}
+	current.Enabled = enabled
+	data, _ := json.Marshal(current)
+	_ = settingsRepo.Set("bot_settings", string(data))
+}
 
 // BotSettingsResponse represents the bot detection configuration returned by the API.
 type BotSettingsResponse struct {
@@ -93,6 +124,10 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+
+		// Sync BotDetectionEnabled into the protection config so the engine
+		// sees a consistent value regardless of which page the user toggles.
+		syncBotEnabledToProtection(settingsRepo, current.Enabled)
 
 		if reload != nil {
 			if err := reload(); err != nil {

@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 
@@ -273,15 +274,92 @@ type IPListEntry struct {
 	Action  string     `json:"action" gorm:"default:'intercept'"` // "intercept" or "block"
 }
 
+// ─── Application route rules (resource discovery / inventory) ─────
+
+// Match targets: which part of the HTTP exchange to run the operator against.
+const (
+	AppRouteTargetRequestHeader       = "request_header"
+	AppRouteTargetRequestBody         = "request_body"
+	AppRouteTargetResponseBody        = "response_body"
+	AppRouteTargetRequestHeadersFull  = "request_headers_full"
+	AppRouteTargetResponseHeadersFull = "response_headers_full"
+	AppRouteTargetFullHTTPRequest     = "full_http_request"
+	AppRouteTargetFullHTTPResponse    = "full_http_response"
+	AppRouteTargetRequestMethod       = "request_method"
+	AppRouteTargetFingerprint         = "fingerprint"
+)
+
+// Match operators.
+const (
+	AppRouteOpEq          = "eq"
+	AppRouteOpNe          = "ne"
+	AppRouteOpContains    = "contains"
+	AppRouteOpNotContains = "not_contains"
+	AppRouteOpPrefix      = "prefix"
+	AppRouteOpSuffix      = "suffix"
+	AppRouteOpRegex       = "regex"
+	AppRouteOpFuzzy       = "fuzzy" // case-insensitive substring
+)
+
+// ApplicationRouteRule defines when to record a resource for a site.
+// When any enabled rule matches the live traffic, a row in RecordedResource is upserted.
+type ApplicationRouteRule struct {
+	ID        uint           `gorm:"primaryKey" json:"id"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+
+	SiteID    uint   `gorm:"index;not null" json:"site_id"`
+	Name      string `gorm:"size:128" json:"name"`
+	Enabled   bool   `gorm:"default:true" json:"enabled"`
+	Priority  int    `gorm:"default:0" json:"priority"`
+	Target    string `gorm:"size:48;not null" json:"target"`
+	Op        string `gorm:"size:24;not null" json:"op"`
+	Pattern   string `gorm:"type:text;not null" json:"pattern"`
+	HeaderKey string `gorm:"size:128" json:"header_key,omitempty"` // for request_header
+}
+
+func (ApplicationRouteRule) TableName() string { return "application_route_rules" }
+
+// RecordedResource aggregates observed HTTP resources per site when rules match.
+type RecordedResource struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+
+	SiteID         uint   `gorm:"not null;uniqueIndex:ux_recorded_res_key" json:"site_id"`
+	Method         string `gorm:"size:16;uniqueIndex:ux_recorded_res_key" json:"method"`
+	Host           string `gorm:"size:255;uniqueIndex:ux_recorded_res_key" json:"host"`
+	Path           string `gorm:"size:2048;uniqueIndex:ux_recorded_res_key" json:"path"`
+	ClientIP       string `gorm:"size:45" json:"client_ip"`
+	StatusCode     int    `json:"status_code"`
+	ContentType    string `gorm:"size:256" json:"content_type"`
+	JA3Hash        string `gorm:"size:64" json:"ja3_hash"`
+	UserAgent      string `gorm:"size:512" json:"user_agent"`
+	MatchedRuleIDs string `gorm:"size:512" json:"matched_rule_ids"`
+	PrimaryRuleID  uint   `gorm:"index" json:"primary_rule_id"`
+
+	RequestHeadersJSON  string `gorm:"type:text" json:"request_headers_json,omitempty"`
+	ResponseHeadersJSON string `gorm:"type:text" json:"response_headers_json,omitempty"`
+	RequestBodySnippet  string `gorm:"type:text" json:"request_body_snippet,omitempty"`
+	ResponseBodySnippet string `gorm:"type:text" json:"response_body_snippet,omitempty"`
+
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `gorm:"index" json:"last_seen"`
+	HitCount  int64     `json:"hit_count"`
+}
+
+func (RecordedResource) TableName() string { return "recorded_resources" }
+
 // ─── Security Event ────────────────────────────────────────────────
 
 type SecurityEvent struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
-	CreatedAt time.Time `gorm:"index" json:"created_at"`
+	CreatedAt time.Time `gorm:"index:idx_se_created;index:idx_se_site_created" json:"created_at"`
 
-	SiteID    uint   `gorm:"index" json:"site_id"`
+	SiteID    uint   `gorm:"index:idx_se_site_created" json:"site_id"`
 	RequestID string `gorm:"size:64" json:"request_id"`
-	ClientIP  string `gorm:"size:45;index" json:"client_ip"`
+	ClientIP  string `gorm:"size:45;index:idx_se_client_ip" json:"client_ip"`
 	Host      string `gorm:"size:255" json:"host"`
 	Path      string `gorm:"size:2048" json:"path"`
 	Method    string `gorm:"size:16" json:"method"`
@@ -290,8 +368,8 @@ type SecurityEvent struct {
 	RuleID    uint   `json:"rule_id"`
 	RuleIDStr string `gorm:"size:64" json:"rule_id_str"`
 	Phase     string `gorm:"size:32" json:"phase"`
-	Action    string `gorm:"size:32" json:"action"`
-	Category  string `gorm:"size:32;index" json:"category"`
+	Action    string `gorm:"size:32;index:idx_se_action" json:"action"`
+	Category  string `gorm:"size:32;index:idx_se_category" json:"category"`
 	MatchDesc string `gorm:"size:512" json:"match_desc"`
 
 	GeoCountry string `gorm:"size:2" json:"geo_country"`
@@ -303,26 +381,30 @@ type SecurityEvent struct {
 // AccessLog records every inbound request outcome for querying and auditing.
 type AccessLog struct {
 	ID         uint      `gorm:"primaryKey" json:"id"`
-	CreatedAt  time.Time `gorm:"index" json:"created_at"`
-	SiteID     uint      `gorm:"index" json:"site_id"`
-	RequestID  string    `gorm:"size:64;index" json:"request_id"`
-	ClientIP   string    `gorm:"size:45;index" json:"client_ip"`
-	Host       string    `gorm:"size:255;index" json:"host"`
+	CreatedAt  time.Time `gorm:"index:idx_al_created;index:idx_al_site_created" json:"created_at"`
+	SiteID     uint      `gorm:"index:idx_al_site_created" json:"site_id"`
+	RequestID  string    `gorm:"size:64" json:"request_id"`
+	ClientIP   string    `gorm:"size:45;index:idx_al_client_ip" json:"client_ip"`
+	Host       string    `gorm:"size:255" json:"host"`
 	Path       string    `gorm:"size:2048" json:"path"`
 	Method     string    `gorm:"size:16" json:"method"`
-	StatusCode int       `gorm:"index" json:"status_code"`
-	WAFAction  string    `gorm:"size:32;index" json:"waf_action"`
-	CacheState string    `gorm:"size:16;index" json:"cache_state"`
+	StatusCode int       `gorm:"index:idx_al_status" json:"status_code"`
+	WAFAction  string    `gorm:"size:32;index:idx_al_waf_action" json:"waf_action"`
+	CacheState string    `gorm:"size:16" json:"cache_state"`
 	Upstream   string    `gorm:"size:512" json:"upstream"`
 	UserAgent  string    `gorm:"size:512" json:"user_agent"`
 }
 
 // SiteCacheRule defines a path cache rule stored in Site.CacheRules.
 type SiteCacheRule struct {
-	Type  string `json:"type"` // prefix, exact, suffix
-	Value string `json:"value"`
-	Path  string `json:"path,omitempty"` // legacy prefix field
-	TTL   int    `json:"ttl"`
+	Type            string `json:"type"` // prefix, exact, suffix, contains, regex
+	Value           string `json:"value"`
+	Path            string `json:"path,omitempty"` // legacy prefix field
+	TTL             int    `json:"ttl"`
+	CaseInsensitive bool   `json:"case_insensitive,omitempty"`
+	IgnoreQuery     bool   `json:"ignore_query,omitempty"`
+	// Regex is compiled at snapshot build for type "regex" only; not persisted or exposed in JSON.
+	Regex *regexp.Regexp `json:"-" gorm:"-"`
 }
 
 // SiteListener represents one network endpoint of a Site.

@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Download, FileUp, Plus, Search, Pencil, Trash2 } from "lucide-react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import { Download, FileUp, Plus, Search, Pencil, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,16 +16,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Pagination } from "@/components/pagination";
 import { PageIntro, Surface, EmptyState } from "@/components/console-shell";
 import { RuleBuilder } from "@/components/rule-builder";
-import { api, type Rule, type PaginatedResponse, buildQuery } from "@/lib/api";
-import { getWAFActionMeta, ruleWAFActionOptions } from "@/lib/console";
+import { api, type Rule, type Policy, type PaginatedResponse, buildQuery } from "@/lib/api";
+import { getWAFActionMeta, ruleWAFActionOptions, phaseLabels } from "@/lib/console";
 
 const PAGE_SIZE = 20;
-
-const phaseLabels: Record<string, string> = {
-  acl: "ACL",
-  signature: "签名匹配",
-  custom: "自定义",
-};
 
 interface RuleFormData {
   name: string;
@@ -43,21 +39,46 @@ const emptyForm: RuleFormData = {
   priority: 100, enabled: true, status_code: 0, redirect_to: "",
 };
 
-export default function CustomRulesPage() {
+function CustomRulesContent() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const urlPolicyId = searchParams.get("policy_id");
+
   const [items, setItems] = useState<Rule[]>([]);
+  const [policies, setPolicies] = useState<Policy[]>([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState("");
+  const [filterPolicyId, setFilterPolicyId] = useState<string>(urlPolicyId || "all");
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<RuleFormData>(emptyForm);
   const [saving, setSaving] = useState(false);
 
+  // Load policies list for the filter dropdown
+  useEffect(() => {
+    api<{ items: Policy[] }>("/api/v1/policies")
+      .then((data) => setPolicies(data.items || []))
+      .catch(() => {});
+  }, []);
+
+  // Sync URL param to filter state
+  useEffect(() => {
+    if (urlPolicyId) {
+      setFilterPolicyId(urlPolicyId);
+    }
+  }, [urlPolicyId]);
+
+  const activePolicyId = filterPolicyId !== "all" ? Number(filterPolicyId) : undefined;
+  const activePolicy = activePolicyId ? policies.find((p) => p.id === activePolicyId) : undefined;
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api<PaginatedResponse<Rule>>(`/api/v1/rules${buildQuery({ page, page_size: PAGE_SIZE })}`);
+      const params: Record<string, unknown> = { page, page_size: PAGE_SIZE };
+      if (activePolicyId) params.policy_id = activePolicyId;
+      const res = await api<PaginatedResponse<Rule>>(`/api/v1/rules${buildQuery(params)}`);
       let list = res.items ?? [];
       if (search) {
         const q = search.toLowerCase();
@@ -67,15 +88,29 @@ export default function CustomRulesPage() {
       setTotal(res.total ?? 0);
     } catch (e) { toast.error(String(e)); }
     finally { setLoading(false); }
-  }, [page, search]);
+  }, [page, search, activePolicyId]);
 
   useEffect(() => { load(); }, [load]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  function handlePolicyFilterChange(value: string) {
+    setFilterPolicyId(value);
+    setPage(1);
+    // Update URL without full navigation
+    if (value === "all") {
+      router.replace("/rules/");
+    } else {
+      router.replace(`/rules/?policy_id=${value}`);
+    }
+  }
+
   function openCreate() {
     setEditingId(null);
-    setForm(emptyForm);
+    setForm({
+      ...emptyForm,
+      policy_id: activePolicyId,
+    });
     setDialogOpen(true);
   }
 
@@ -171,12 +206,21 @@ export default function CustomRulesPage() {
     return getWAFActionMeta(action).description;
   }
 
+  function getPolicyName(policyId: number | undefined): string {
+    if (!policyId) return "-";
+    const p = policies.find((pol) => pol.id === policyId);
+    return p ? p.name : `#${policyId}`;
+  }
+
   return (
     <div className="space-y-6">
       <PageIntro
         eyebrow="Custom Rules"
-        title="自定义规则"
-        description="管理 ACL、签名与自定义匹配规则。规则按 phase、priority 参与数据面处理链路。"
+        title={activePolicy ? `${activePolicy.name} - 规则管理` : "自定义规则"}
+        description={activePolicy
+          ? `当前查看策略「${activePolicy.name}」下的规则。规则按 phase、priority 参与数据面处理链路。`
+          : "管理 ACL、签名与自定义匹配规则。规则按 phase、priority 参与数据面处理链路。"
+        }
         actions={
           <div className="flex gap-2">
             <Button variant="outline" className="rounded-md border-slate-200 text-slate-700 hover:bg-slate-100" onClick={handleImport}>
@@ -193,11 +237,27 @@ export default function CustomRulesPage() {
       />
 
       <Surface title="规则列表">
-        <div className="mb-4">
+        <div className="mb-4 flex flex-wrap items-center gap-3">
           <div className="relative max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <Input placeholder="搜索规则名称或条件..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="rounded-md pl-9" />
           </div>
+          <Select value={filterPolicyId} onValueChange={handlePolicyFilterChange}>
+            <SelectTrigger className="w-[180px] rounded-md">
+              <SelectValue placeholder="按策略筛选" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部策略</SelectItem>
+              {policies.map((p) => (
+                <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {activePolicyId && (
+            <Button variant="ghost" size="sm" className="gap-1 rounded-md text-xs text-slate-500" onClick={() => handlePolicyFilterChange("all")}>
+              <X className="h-3.5 w-3.5" /> 清除策略筛选
+            </Button>
+          )}
         </div>
 
         {loading ? (
@@ -217,6 +277,7 @@ export default function CustomRulesPage() {
                     <TableHead>类型</TableHead>
                     <TableHead>动作</TableHead>
                     <TableHead className="w-24">状态码</TableHead>
+                    {!activePolicyId && <TableHead>所属策略</TableHead>}
                     <TableHead>匹配条件摘要</TableHead>
                     <TableHead className="w-20">命中数</TableHead>
                     <TableHead>更新时间</TableHead>
@@ -241,6 +302,17 @@ export default function CustomRulesPage() {
                         </Badge>
                       </TableCell>
                       <TableCell className="font-mono text-xs text-slate-600">{statusSummary(rule)}</TableCell>
+                      {!activePolicyId && (
+                        <TableCell>
+                          {rule.policy_id ? (
+                            <Link href={`/rules/?policy_id=${rule.policy_id}`} className="text-xs text-blue-600 hover:underline">
+                              {getPolicyName(rule.policy_id)}
+                            </Link>
+                          ) : (
+                            <span className="text-xs text-slate-400">-</span>
+                          )}
+                        </TableCell>
+                      )}
                       <TableCell>
                         <span className="font-mono text-xs text-slate-600">{patternSummary(rule.pattern)}</span>
                       </TableCell>
@@ -282,16 +354,32 @@ export default function CustomRulesPage() {
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
+                <Label>所属策略</Label>
+                <Select value={form.policy_id ? String(form.policy_id) : "none"} onValueChange={(v) => setForm({ ...form, policy_id: v === "none" ? undefined : Number(v) })}>
+                  <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">未指定</SelectItem>
+                    {policies.map((p) => (
+                      <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
                 <Label>执行阶段</Label>
                 <Select value={form.phase} onValueChange={(v) => setForm({ ...form, phase: v })}>
                   <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="acl">ACL</SelectItem>
+                    <SelectItem value="acl">ACL 访问控制</SelectItem>
+                    <SelectItem value="rate_limit">频率限制</SelectItem>
+                    <SelectItem value="owasp_default">OWASP 检测</SelectItem>
                     <SelectItem value="signature">签名匹配</SelectItem>
-                    <SelectItem value="custom">自定义</SelectItem>
+                    <SelectItem value="custom">自定义规则</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>命中动作</Label>
                 <Select value={form.action} onValueChange={(v) => setForm({ ...form, action: v })}>
@@ -304,8 +392,6 @@ export default function CustomRulesPage() {
                 </Select>
                 {actionHelp(form.action) && <p className="text-xs text-slate-500">{actionHelp(form.action)}</p>}
               </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>HTTP 状态码</Label>
                 <Input
@@ -318,6 +404,8 @@ export default function CustomRulesPage() {
                 />
                 <p className="text-xs text-slate-500">0 表示使用后端默认；断连/放行/观察不产生拦截响应。</p>
               </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>重定向地址</Label>
                 <Input
@@ -328,21 +416,19 @@ export default function CustomRulesPage() {
                   className="rounded-md"
                 />
               </div>
-            </div>
-            <div className="space-y-2">
-              <Label>匹配条件</Label>
-              <RuleBuilder value={form.pattern} onChange={(v) => setForm({ ...form, pattern: v })} />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>优先级</Label>
                 <Input type="number" value={form.priority} onChange={(e) => setForm({ ...form, priority: Number(e.target.value) })} className="rounded-md" />
                 <p className="text-xs text-slate-500">数值越小越先执行</p>
               </div>
-              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 mt-6">
-                <Label className="font-medium">启用</Label>
-                <Switch checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
-              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>匹配条件</Label>
+              <RuleBuilder value={form.pattern} onChange={(v) => setForm({ ...form, pattern: v })} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+              <Label className="font-medium">启用</Label>
+              <Switch checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
             </div>
           </div>
           <DialogFooter>
@@ -354,5 +440,13 @@ export default function CustomRulesPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+export default function CustomRulesPage() {
+  return (
+    <Suspense>
+      <CustomRulesContent />
+    </Suspense>
   );
 }

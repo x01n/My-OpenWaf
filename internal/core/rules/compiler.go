@@ -76,7 +76,8 @@ func ParsePattern(p string) (kind, arg string) {
 		"block_method:", "block_content_type:",
 		"block_user_agent:", "block_user_agent_regex:",
 		"header_regex:", "body_contains:", "body_regex:", "block_body_contains:", "block_body_regex:", "block_body_json_path:", "query_param:",
-		"host:", "cookie_contains:", "referer_contains:",
+		"host:", "host_full:", "full_url_contains:", "full_url_regex:",
+		"cookie_contains:", "referer_contains:",
 	}
 	for _, pfx := range prefixes {
 		if arg, ok := strings.CutPrefix(p, pfx); ok {

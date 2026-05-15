@@ -1,0 +1,13 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]
+        - generic [ref=e10]
+        - generic [ref=e14]
+      - generic [ref=e36]:
+        - generic [ref=e37]
+        - generic [ref=e42]
+  - button "Open Next.js Dev Tools" [ref=e55] [cursor=pointer]:
+    - img [ref=e56]
+  - alert [ref=e59]

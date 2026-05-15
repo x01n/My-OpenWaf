@@ -1088,7 +1088,10 @@ var (
 )
 
 // decodeBase64IfSuspicious decodes a potential base64 token if it produces
-// mostly printable ASCII (≥80%). Returns empty string on failure or binary data.
+// text-like output. Uses a two-tier check: tokens ≥20 chars use a relaxed 50%
+// printability threshold (long payloads are more likely intentional), shorter
+// tokens require 70%. This prevents false negatives from binary-heavy payloads
+// like serialized objects or gzipped attack code while still rejecting random noise.
 func decodeBase64IfSuspicious(s string) string {
 	if len(s) < 8 {
 		return ""
@@ -1097,7 +1100,12 @@ func decodeBase64IfSuspicious(s string) string {
 	if err != nil {
 		decoded, err = base64.RawStdEncoding.DecodeString(s)
 		if err != nil {
-			return ""
+			// Also try URL-safe base64 (- and _ instead of + and /)
+			r := strings.NewReplacer("-", "+", "_", "/")
+			decoded, err = base64.RawStdEncoding.DecodeString(r.Replace(s))
+			if err != nil {
+				return ""
+			}
 		}
 	}
 	if len(decoded) == 0 {
@@ -1109,9 +1117,12 @@ func decodeBase64IfSuspicious(s string) string {
 			printable++
 		}
 	}
-	if float64(printable)/float64(len(decoded)) < 0.8 {
-		// Binary output might be caused by a non-base64 prefix (e.g. path '/')
-		// that happens to be valid base64 but shifts the decode alignment.
+	ratio := float64(printable) / float64(len(decoded))
+	minRatio := 0.70
+	if len(s) >= 20 {
+		minRatio = 0.50
+	}
+	if ratio < minRatio {
 		if len(s) > 8 && !isBase64AlphaNum(s[0]) {
 			return decodeBase64IfSuspicious(s[1:])
 		}

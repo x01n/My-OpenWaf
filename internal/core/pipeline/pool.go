@@ -29,7 +29,11 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.Host = ""
 	ctx.Body = nil
 	ctx.ContentType = ""
+	ctx.AntiReplayTTL = 0
 	ctx.QueryParams = nil
+	ctx.BodyTargets = nil
+	ctx.BodyTargetsDone = false
+	ctx.BotScoreResult = nil
 	ctx.HeaderKeys = ctx.HeaderKeys[:0]
 	for k := range ctx.Headers {
 		delete(ctx.Headers, k)

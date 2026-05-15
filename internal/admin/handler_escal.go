@@ -2,25 +2,13 @@ package admin
 
 import (
 	"context"
-	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
-)
-
-type escalationStatus struct {
-	IP          string `json:"ip"`
-	CurrentStep int    `json:"current_step"`
-	HitCount    int    `json:"hit_count"`
-	LastHit     string `json:"last_hit"`
-}
-
-var (
-	escalationStatusMap   = make(map[string]*escalationStatus)
-	escalationStatusMapMu sync.RWMutex
+	"My-OpenWaf/internal/waf"
 )
 
 func GetEscalationConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
@@ -99,39 +87,37 @@ func UpdateEscalationConfig(repo *repository.SystemSettingsRepo, reload func() e
 	}
 }
 
-func GetEscalationIPStatus() app.HandlerFunc {
+func GetEscalationIPStatus(mgr *waf.EscalationManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		ip := c.Param("ip")
 		if ip == "" {
 			c.JSON(400, map[string]string{"error": "ip required"})
 			return
 		}
-		escalationStatusMapMu.RLock()
-		status, exists := escalationStatusMap[ip]
-		escalationStatusMapMu.RUnlock()
-		if !exists {
+		if mgr == nil {
 			c.JSON(200, map[string]any{
 				"ip":           ip,
 				"current_step": 0,
 				"hit_count":    0,
-				"message":      "no escalation state found for this IP",
+				"message":      "escalation manager not initialized",
 			})
 			return
 		}
+		status := mgr.GetIPStatus(ip, 0)
 		c.JSON(200, status)
 	}
 }
 
-func ResetEscalationIPStatus() app.HandlerFunc {
+func ResetEscalationIPStatus(mgr *waf.EscalationManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		ip := c.Param("ip")
 		if ip == "" {
 			c.JSON(400, map[string]string{"error": "ip required"})
 			return
 		}
-		escalationStatusMapMu.Lock()
-		delete(escalationStatusMap, ip)
-		escalationStatusMapMu.Unlock()
+		if mgr != nil {
+			mgr.ResetIP(ip, 0)
+		}
 		c.JSON(200, map[string]string{"message": "escalation state reset for " + ip})
 	}
 }

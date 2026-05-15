@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useCallback } from "react";
 import {
-  Clock, Shield, Zap, Lock, Plus, Pencil, Trash2, Info,
+  Clock, Shield, Zap, AlertTriangle, Ban, Plus, Pencil, Trash2, Info, Save,
+  ChevronDown, ChevronUp,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -55,75 +56,85 @@ const operatorOptions = [
   { value: "prefix", label: "前缀关键字" },
 ];
 
+const actionLabelMap: Record<string, string> = {
+  challenge: "人机验证",
+  captcha_challenge: "验证码验证",
+  shield_challenge: "5秒盾验证",
+  chain_challenge: "混合验证",
+  intercept: "直接封禁",
+  rate_limit: "限速",
+  drop: "阻断连接",
+  block: "直接封禁",
+  observe: "仅记录",
+};
+
+function actionLabel(action: string): string {
+  return actionLabelMap[action] || getWAFActionMeta(action).shortLabel;
+}
+
 /* ───── main ───── */
 export default function CCProtectionPage() {
-  const [settings, setSettings] = useState<ProtectionSettings | null>(null);
+  const [localSettings, setLocalSettings] = useState<ProtectionSettings | null>(null);
   const [rules, setRules] = useState<CCRule[]>([]);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
 
-  // module dialogs
-  const [waitingRoomOpen, setWaitingRoomOpen] = useState(false);
-  const [rateLimitOpen, setRateLimitOpen] = useState(false);
-  const [bruteForceOpen, setBruteForceOpen] = useState(false);
+  // built-in rule edit dialogs
+  const [editRequestRateOpen, setEditRequestRateOpen] = useState(false);
+  const [editAttackRateOpen, setEditAttackRateOpen] = useState(false);
+  const [editErrorRateOpen, setEditErrorRateOpen] = useState(false);
 
-  // rule dialog
+  // custom rule dialog
   const [ruleDialogOpen, setRuleDialogOpen] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [draft, setDraft] = useState<CCRule>({ ...emptyRule });
 
+  // collapsible sections
+  const [customRulesExpanded, setCustomRulesExpanded] = useState(true);
+
   const load = useCallback(() => {
     getProtectionSettings()
       .then((data) => {
-        setSettings(data);
+        setLocalSettings({ ...data });
         setRules(Array.isArray(data.cc_rules) ? (data.cc_rules as CCRule[]) : []);
+        setDirty(false);
       })
       .catch((err) => toast.error(String(err)));
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  async function persist(nextRules?: CCRule[], nextSettings?: ProtectionSettings) {
+  function updateLocal(patch: Partial<ProtectionSettings>) {
+    setLocalSettings((prev) => prev ? { ...prev, ...patch } : prev);
+    setDirty(true);
+  }
+
+  function updateRules(nextRules: CCRule[]) {
+    setRules(nextRules);
+    setDirty(true);
+  }
+
+  async function saveAll() {
+    if (!localSettings) return;
     const payload = {
-      ...(nextSettings || settings),
-      cc_rules: nextRules ?? rules,
+      ...localSettings,
+      cc_rules: rules,
     } as ProtectionSettings;
     setSaving(true);
     try {
       const result = await updateProtectionSettings(payload);
-      setSettings(result);
+      setLocalSettings({ ...result });
       setRules(Array.isArray(result.cc_rules) ? (result.cc_rules as CCRule[]) : []);
-      return result;
+      setDirty(false);
+      toast.success("CC 防护配置已保存");
+    } catch (err) {
+      toast.error(String(err));
     } finally {
       setSaving(false);
     }
   }
 
-  /* ── module card helpers ── */
-  async function toggleWaitingRoom(val: boolean) {
-    if (!settings) return;
-    const next = { ...settings, waiting_room_enabled: val };
-    setSettings(next);
-    await persist(rules, next);
-    toast.success(val ? "等待室草案已启用" : "等待室草案已关闭");
-  }
-
-  async function toggleRateLimit(val: boolean) {
-    if (!settings) return;
-    const next = { ...settings, request_ratelimit_enabled: val };
-    setSettings(next);
-    await persist(rules, next);
-    toast.success(val ? "频率限制已启用" : "频率限制已关闭");
-  }
-
-  async function toggleBruteForce(val: boolean) {
-    if (!settings) return;
-    const next = { ...settings, auto_ban_enabled: val };
-    setSettings(next);
-    await persist(rules, next);
-    toast.success(val ? "暴力防护已启用" : "暴力防护已关闭");
-  }
-
-  /* ── rule CRUD ── */
+  /* ── custom rule CRUD ── */
   function openAddRule() {
     setEditIndex(null);
     setDraft({ ...emptyRule, conditions: [{ ...emptyCondition }] });
@@ -134,7 +145,7 @@ export default function CCProtectionPage() {
     setDraft({ ...rules[idx], conditions: rules[idx].conditions.map((c) => ({ ...c })) });
     setRuleDialogOpen(true);
   }
-  async function saveRule() {
+  function confirmRule() {
     if (!draft.name.trim()) { toast.error("请输入规则名称"); return; }
     const nextRules = [...rules];
     if (editIndex !== null) {
@@ -142,31 +153,19 @@ export default function CCProtectionPage() {
     } else {
       nextRules.push(draft);
     }
-    try {
-      await persist(nextRules);
-      toast.success(editIndex !== null ? "规则已更新" : "规则已添加");
-      setRuleDialogOpen(false);
-    } catch (err) {
-      toast.error(String(err));
-    }
+    updateRules(nextRules);
+    setRuleDialogOpen(false);
+    toast.success(editIndex !== null ? "规则已更新（请点击保存生效）" : "规则已添加（请点击保存生效）");
   }
-  async function deleteRule(idx: number) {
+  function deleteRule(idx: number) {
     const next = rules.filter((_, i) => i !== idx);
-    try {
-      await persist(next);
-      toast.success("规则已删除");
-    } catch (err) {
-      toast.error(String(err));
-    }
+    updateRules(next);
+    toast.success("规则已移除（请点击保存生效）");
   }
-  async function toggleRule(idx: number) {
+  function toggleRule(idx: number) {
     const next = [...rules];
     next[idx] = { ...next[idx], enabled: !next[idx].enabled };
-    try {
-      await persist(next);
-    } catch (err) {
-      toast.error(String(err));
-    }
+    updateRules(next);
   }
 
   /* ── condition helpers ── */
@@ -183,21 +182,7 @@ export default function CCProtectionPage() {
     setDraft((d) => ({ ...d, conditions: d.conditions.filter((_, i) => i !== ci) }));
   }
 
-  /* ── save module config ── */
-  async function saveWaitingRoom() {
-    if (!settings) return;
-    try { await persist(rules); toast.success("等待室草案已保存"); setWaitingRoomOpen(false); } catch (err) { toast.error(String(err)); }
-  }
-  async function saveRateLimit() {
-    if (!settings) return;
-    try { await persist(rules); toast.success("频率限制配置已保存"); setRateLimitOpen(false); } catch (err) { toast.error(String(err)); }
-  }
-  async function saveBruteForce() {
-    if (!settings) return;
-    try { await persist(rules); toast.success("暴力防护配置已保存"); setBruteForceOpen(false); } catch (err) { toast.error(String(err)); }
-  }
-
-  if (!settings) {
+  if (!localSettings) {
     return (
       <div className="space-y-6 p-6">
         <div className="h-24 animate-pulse rounded-lg bg-slate-100" />
@@ -206,252 +191,470 @@ export default function CCProtectionPage() {
     );
   }
 
+  const s = localSettings;
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">CC 防护</h1>
-          <p className="mt-1 text-sm text-slate-500">管理等待室、频率限制、暴力防护及自定义 CC 规则</p>
+          <p className="mt-1 text-sm text-slate-500">配置等候室、频率限制和自定义 CC 规则，防止恶意高频访问</p>
         </div>
+        <Button
+          onClick={saveAll}
+          disabled={saving || !dirty}
+          className={cn(
+            "rounded-md px-5 text-white transition-all",
+            dirty
+              ? "bg-teal-600 hover:bg-teal-700 shadow-md shadow-teal-200"
+              : "bg-slate-300 cursor-not-allowed",
+          )}
+        >
+          <Save className="mr-1.5 h-4 w-4" />
+          {saving ? "保存中..." : "保存"}
+        </Button>
       </div>
 
-      {/* 3 Module Cards */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {/* Waiting Room */}
-        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
-                <Clock className="h-4 w-4" />
-              </div>
-              <span className="text-sm font-semibold text-slate-900">等待室</span>
-            </div>
-            <Switch checked={settings.waiting_room_enabled || false} onCheckedChange={toggleWaitingRoom} />
-          </div>
-          <p className="mb-4 text-xs text-slate-500">当前仅保存等待室草案开关，数据面尚未接入排队削峰执行链路。</p>
-          <Button variant="outline" size="sm" className="w-full rounded-md border-slate-200 text-slate-700 hover:bg-slate-50" onClick={() => setWaitingRoomOpen(true)}>
-            配置
-          </Button>
-        </div>
-
-        {/* Rate Limit */}
-        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
-                <Zap className="h-4 w-4" />
-              </div>
-              <span className="text-sm font-semibold text-slate-900">频率限制</span>
-            </div>
-            <Switch checked={settings.request_ratelimit_enabled} onCheckedChange={toggleRateLimit} />
-          </div>
-          <p className="mb-1 text-xs text-slate-500">
-            {settings.request_ratelimit_enabled
-              ? `${settings.request_ratelimit_max} 次 / ${settings.request_ratelimit_window}s · 动作: ${settings.request_ratelimit_action}`
-              : "未启用频率限制"}
-          </p>
-          <p className="mb-3 text-xs text-slate-400">严格限制每个 IP 的访问频率，阻止超限的 IP</p>
-          <Button variant="outline" size="sm" className="w-full rounded-md border-slate-200 text-slate-700 hover:bg-slate-50" onClick={() => setRateLimitOpen(true)}>
-            配置
-          </Button>
-        </div>
-
-        {/* Brute Force */}
-        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
-                <Lock className="h-4 w-4" />
-              </div>
-              <span className="text-sm font-semibold text-slate-900">暴力防护</span>
-            </div>
-            <Switch checked={settings.auto_ban_enabled} onCheckedChange={toggleBruteForce} />
-          </div>
-          <p className="mb-4 text-xs text-slate-500">
-            {settings.auto_ban_enabled
-              ? `阈值 ${settings.auto_ban_threshold} / ${settings.auto_ban_window}s · 封禁 ${settings.auto_ban_duration}s`
-              : "未启用暴力防护"}
-          </p>
-          <Button variant="outline" size="sm" className="w-full rounded-md border-slate-200 text-slate-700 hover:bg-slate-50" onClick={() => setBruteForceOpen(true)}>
-            配置
-          </Button>
-        </div>
-      </div>
-
-      {/* Custom Rules Table */}
+      {/* ══════════════════════════════════════════════════════════
+         Section 1: 等候室
+         ══════════════════════════════════════════════════════════ */}
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
-          <div>
-            <h2 className="text-base font-semibold text-slate-900">自定义规则</h2>
-            <p className="mt-0.5 text-xs text-slate-500">基于 URL、Header、Method 定义频率阈值与动作</p>
+        <div className="flex items-center justify-between px-5 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-teal-50 text-teal-600">
+              <Clock className="h-4.5 w-4.5" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">等候室</h2>
+              <p className="text-xs text-slate-500">当流量超过承载能力时，将多余请求放入等候队列中排队等待</p>
+            </div>
           </div>
-          <Button onClick={openAddRule} className="rounded-md bg-slate-950 text-white hover:bg-slate-800" size="sm">
-            <Plus className="mr-1.5 h-3.5 w-3.5" /> 添加规则
-          </Button>
+          <Switch
+            checked={s.waiting_room_enabled || false}
+            onCheckedChange={(val) => updateLocal({ waiting_room_enabled: val })}
+          />
         </div>
-
-        {rules.length === 0 ? (
-          <div className="flex min-h-[200px] flex-col items-center justify-center p-8 text-center">
-            <Shield className="mb-3 h-10 w-10 text-slate-300" />
-            <p className="text-sm font-medium text-slate-600">还没有自定义规则</p>
-            <p className="mt-1 text-xs text-slate-400">点击「添加规则」创建第一条 CC 自定义规则</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-100 bg-slate-50/80">
-                  <th className="px-5 py-3 text-left text-xs font-semibold text-slate-600">状态</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">名称</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">匹配条件</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">持续时间</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">动作</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rules.map((rule, idx) => (
-                  <tr key={`${rule.name}-${idx}`} className="border-b border-slate-50 hover:bg-slate-50/50">
-                    <td className="px-5 py-3">
-                      <Switch checked={rule.enabled !== false} onCheckedChange={() => toggleRule(idx)} size="sm" />
-                    </td>
-                    <td className="px-4 py-3 font-medium text-slate-800">{rule.name || `规则 ${idx + 1}`}</td>
-                    <td className="px-4 py-3 text-slate-600">
-                      {rule.conditions.map((c, ci) => (
-                        <span key={ci} className="mr-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-xs">
-                          {targetOptions.find((t) => t.value === c.target)?.label || c.target}{" "}
-                          {operatorOptions.find((o) => o.value === c.operator)?.label || c.operator}{" "}
-                          {c.value || "…"}
-                        </span>
-                      ))}
-                    </td>
-                    <td className="px-4 py-3 text-slate-600">
-                      {rule.window}s / {rule.threshold}次 → {rule.duration}分钟
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={cn("inline-flex rounded-md border px-2 py-0.5 text-xs font-medium", getWAFActionMeta(rule.action).className)}>
-                        {getWAFActionMeta(rule.action).shortLabel}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <button onClick={() => openEditRule(idx)} className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
-                          <Pencil className="h-3.5 w-3.5" />
-                        </button>
-                        <button onClick={() => deleteRule(idx)} className="rounded p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {s.waiting_room_enabled && (
+          <div className="border-t border-slate-100 px-5 py-3">
+            <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>当前后端仅保存等候室开关状态，数据面排队削峰执行链路尚在开发中。</span>
+            </div>
           </div>
         )}
       </div>
 
-      {/* ══════ Waiting Room Dialog ══════ */}
-      <Dialog open={waitingRoomOpen} onOpenChange={setWaitingRoomOpen}>
-        <DialogContent className="max-w-md rounded-lg">
-          <DialogHeader>
-            <DialogTitle>等待室配置</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              当前后端仅保存 <code>waiting_room_enabled</code> 草案开关，尚未看到数据面排队/削峰执行链路消费这些参数。
+      {/* ══════════════════════════════════════════════════════════
+         Section 2: 频率限制配置模式
+         ══════════════════════════════════════════════════════════ */}
+      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-teal-50 text-teal-600">
+              <Zap className="h-4.5 w-4.5" />
             </div>
-            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-              等待室容量、等待时间和刷新间隔保留为后续接线方向，本轮不提供可编辑参数，避免误认为保存后已生效。
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">频率限制</h2>
+              <p className="text-xs text-slate-500">对高频访问、高频攻击和高频错误进行限制</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => updateLocal({ cc_use_custom: false })}
+              className={cn(
+                "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                !s.cc_use_custom
+                  ? "bg-teal-600 text-white shadow-sm"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200",
+              )}
+            >
+              跟随全局配置
+            </button>
+            <button
+              onClick={() => updateLocal({ cc_use_custom: true })}
+              className={cn(
+                "rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                s.cc_use_custom
+                  ? "bg-teal-600 text-white shadow-sm"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200",
+              )}
+            >
+              使用自定义配置
+            </button>
+          </div>
+        </div>
+
+        <div className="divide-y divide-slate-100">
+          {/* ── 高频访问限制 ── */}
+          <BuiltinRuleRow
+            icon={<Zap className="h-4 w-4" />}
+            iconBg="bg-cyan-50 text-cyan-600"
+            title="高频访问限制"
+            enabled={s.request_ratelimit_enabled}
+            onToggle={(val) => updateLocal({ request_ratelimit_enabled: val })}
+            onEdit={() => setEditRequestRateOpen(true)}
+            description={
+              s.request_ratelimit_enabled
+                ? `某 IP 在 ${s.request_ratelimit_window} 秒内请求达到 ${s.request_ratelimit_max} 次，触发${actionLabel(s.request_ratelimit_action)}`
+                : "未启用高频访问限制"
+            }
+          />
+
+          {/* ── 高频攻击限制 ── */}
+          <BuiltinRuleRow
+            icon={<AlertTriangle className="h-4 w-4" />}
+            iconBg="bg-amber-50 text-amber-600"
+            title="高频攻击限制"
+            enabled={s.auto_ban_enabled}
+            onToggle={(val) => updateLocal({ auto_ban_enabled: val })}
+            onEdit={() => setEditAttackRateOpen(true)}
+            description={
+              s.auto_ban_enabled
+                ? `某 IP 在 ${s.auto_ban_window} 秒内触发攻击拦截次数达到 ${s.auto_ban_threshold} 次，${Math.floor(s.auto_ban_duration / 60)} 分钟内${actionLabel(s.auto_ban_action || "intercept")}`
+                : "未启用高频攻击限制"
+            }
+          />
+
+          {/* ── 高频错误限制 ── */}
+          <BuiltinRuleRow
+            icon={<Ban className="h-4 w-4" />}
+            iconBg="bg-rose-50 text-rose-600"
+            title="高频错误限制"
+            enabled={s.error_ratelimit_enabled}
+            onToggle={(val) => updateLocal({ error_ratelimit_enabled: val })}
+            onEdit={() => setEditErrorRateOpen(true)}
+            description={
+              s.error_ratelimit_enabled
+                ? `某 IP 在 ${s.error_ratelimit_window} 秒内触发${[
+                    s.error_ratelimit_count_4xx ? "4xx" : "",
+                    s.error_ratelimit_count_5xx ? "5xx" : "",
+                    s.error_ratelimit_count_block ? "拦截" : "",
+                  ].filter(Boolean).join("/")}错误达到 ${s.error_ratelimit_max} 次，触发${actionLabel(s.error_ratelimit_action)}`
+                : "未启用高频错误限制"
+            }
+          />
+        </div>
+      </div>
+
+      {/* ══════════════════════════════════════════════════════════
+         Section 3: 自定义 CC 规则
+         ══════════════════════════════════════════════════════════ */}
+      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div
+          className="flex cursor-pointer items-center justify-between px-5 py-4"
+          onClick={() => setCustomRulesExpanded(!customRulesExpanded)}
+        >
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-50 text-violet-600">
+              <Shield className="h-4.5 w-4.5" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">自定义规则</h2>
+              <p className="text-xs text-slate-500">基于 URL、Header、Method 定义细粒度频率阈值与动作</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={(e) => { e.stopPropagation(); openAddRule(); }}
+              className="rounded-md bg-teal-600 text-white hover:bg-teal-700"
+              size="sm"
+            >
+              <Plus className="mr-1.5 h-3.5 w-3.5" /> 添加规则
+            </Button>
+            {customRulesExpanded
+              ? <ChevronUp className="h-4 w-4 text-slate-400" />
+              : <ChevronDown className="h-4 w-4 text-slate-400" />
+            }
+          </div>
+        </div>
+
+        {customRulesExpanded && (
+          <>
+            {rules.length === 0 ? (
+              <div className="flex min-h-[160px] flex-col items-center justify-center border-t border-slate-100 p-8 text-center">
+                <Shield className="mb-3 h-10 w-10 text-slate-300" />
+                <p className="text-sm font-medium text-slate-600">还没有自定义规则</p>
+                <p className="mt-1 text-xs text-slate-400">点击「添加规则」创建第一条 CC 自定义规则</p>
+              </div>
+            ) : (
+              <div className="border-t border-slate-100">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-100 bg-slate-50/80">
+                        <th className="px-5 py-3 text-left text-xs font-semibold text-slate-600">状态</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">名称</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">匹配条件</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">频率规则</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">动作</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-600">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rules.map((rule, idx) => (
+                        <tr key={`${rule.name}-${idx}`} className="border-b border-slate-50 hover:bg-slate-50/50">
+                          <td className="px-5 py-3">
+                            <Switch checked={rule.enabled !== false} onCheckedChange={() => toggleRule(idx)} />
+                          </td>
+                          <td className="px-4 py-3 font-medium text-slate-800">{rule.name || `规则 ${idx + 1}`}</td>
+                          <td className="px-4 py-3 text-slate-600">
+                            {rule.conditions.map((c, ci) => (
+                              <span key={ci} className="mr-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-xs">
+                                {targetOptions.find((t) => t.value === c.target)?.label || c.target}{" "}
+                                {operatorOptions.find((o) => o.value === c.operator)?.label || c.operator}{" "}
+                                {c.value || "..."}
+                              </span>
+                            ))}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600 text-xs">
+                            {rule.window}秒 / {rule.threshold}次 / {rule.duration}分钟
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={cn("inline-flex rounded-md border px-2 py-0.5 text-xs font-medium", getWAFActionMeta(rule.action).className)}>
+                              {getWAFActionMeta(rule.action).shortLabel}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <button onClick={() => openEditRule(idx)} className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-teal-600" title="编辑">
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                              <button onClick={() => deleteRule(idx)} className="rounded p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600" title="删除">
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* ══════ Bottom Save Bar ══════ */}
+      {dirty && (
+        <div className="sticky bottom-0 z-10 flex items-center justify-between rounded-lg border border-teal-200 bg-teal-50/90 px-5 py-3 shadow-lg backdrop-blur-sm">
+          <p className="text-sm text-teal-800">
+            <Info className="mr-1.5 inline h-4 w-4" />
+            配置已修改，请点击保存使更改生效
+          </p>
+          <Button
+            onClick={saveAll}
+            disabled={saving}
+            className="rounded-md bg-teal-600 px-6 text-white hover:bg-teal-700"
+          >
+            <Save className="mr-1.5 h-4 w-4" />
+            {saving ? "保存中..." : "保存配置"}
+          </Button>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════
+         Dialog: 编辑高频访问限制
+         ══════════════════════════════════════════════════════════ */}
+      <Dialog open={editRequestRateOpen} onOpenChange={setEditRequestRateOpen}>
+        <DialogContent className="max-w-lg rounded-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-cyan-600" />
+              编辑高频访问限制
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-5">
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
+              <p className="mb-3 text-sm text-slate-700">
+                某 IP 在
+                <InlineNumberInput
+                  value={s.request_ratelimit_window}
+                  onChange={(v) => updateLocal({ request_ratelimit_window: v })}
+                  unit="秒"
+                />
+                内请求达到
+                <InlineNumberInput
+                  value={s.request_ratelimit_max}
+                  onChange={(v) => updateLocal({ request_ratelimit_max: v })}
+                  unit="次"
+                />
+                ，触发以下动作：
+              </p>
+              <label className="block text-sm">
+                <span className="font-medium text-slate-700">限制结果</span>
+                <Select value={s.request_ratelimit_action} onValueChange={(v) => updateLocal({ request_ratelimit_action: v })}>
+                  <SelectTrigger className="mt-1 rounded-md"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="challenge">人机验证</SelectItem>
+                    <SelectItem value="captcha_challenge">验证码验证</SelectItem>
+                    <SelectItem value="shield_challenge">5秒盾验证</SelectItem>
+                    <SelectItem value="rate_limit">限速 (429)</SelectItem>
+                    <SelectItem value="intercept">直接封禁</SelectItem>
+                    <SelectItem value="drop">阻断连接</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setWaitingRoomOpen(false)}>取消</Button>
-            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveWaitingRoom}>保存</Button>
+            <Button variant="outline" onClick={() => setEditRequestRateOpen(false)}>取消</Button>
+            <Button className="bg-teal-600 text-white hover:bg-teal-700" onClick={() => { setEditRequestRateOpen(false); toast.success("已更新（请点击保存生效）"); }}>
+              确定
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* ══════ Rate Limit Dialog ══════ */}
-      <Dialog open={rateLimitOpen} onOpenChange={setRateLimitOpen}>
-        <DialogContent className="max-w-md rounded-lg">
+      {/* ══════════════════════════════════════════════════════════
+         Dialog: 编辑高频攻击限制
+         ══════════════════════════════════════════════════════════ */}
+      <Dialog open={editAttackRateOpen} onOpenChange={setEditAttackRateOpen}>
+        <DialogContent className="max-w-lg rounded-lg">
           <DialogHeader>
-            <DialogTitle>频率限制配置</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-600" />
+              编辑高频攻击限制
+            </DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">请求次数阈值</span>
-              <Input type="number" className="mt-1 rounded-md" value={settings.request_ratelimit_max}
-                onChange={(e) => setSettings({ ...settings, request_ratelimit_max: Number(e.target.value) })} />
-            </label>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">时间窗口（秒）</span>
-              <Input type="number" className="mt-1 rounded-md" value={settings.request_ratelimit_window}
-                onChange={(e) => setSettings({ ...settings, request_ratelimit_window: Number(e.target.value) })} />
-            </label>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">超限动作</span>
-              <Select value={settings.request_ratelimit_action} onValueChange={(v) => setSettings({ ...settings, request_ratelimit_action: v })}>
-                <SelectTrigger className="mt-1 rounded-md"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="captcha">人机验证 (Challenge)</SelectItem>
-                  <SelectItem value="intercept">拦截 (Intercept)</SelectItem>
-                  <SelectItem value="block">封禁 (Block)</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
+          <div className="space-y-5">
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
+              <p className="mb-3 text-sm text-slate-700">
+                某 IP 在
+                <InlineNumberInput
+                  value={s.auto_ban_window}
+                  onChange={(v) => updateLocal({ auto_ban_window: v })}
+                  unit="秒"
+                />
+                内触发攻击拦截次数达到
+                <InlineNumberInput
+                  value={s.auto_ban_threshold}
+                  onChange={(v) => updateLocal({ auto_ban_threshold: v })}
+                  unit="次"
+                />
+                ，
+                <InlineNumberInput
+                  value={Math.floor(s.auto_ban_duration / 60)}
+                  onChange={(v) => updateLocal({ auto_ban_duration: v * 60 })}
+                  unit="分钟"
+                />
+                内触发以下动作：
+              </p>
+              <label className="block text-sm">
+                <span className="font-medium text-slate-700">限制结果</span>
+                <Select value={s.auto_ban_action || "intercept"} onValueChange={(v) => updateLocal({ auto_ban_action: v })}>
+                  <SelectTrigger className="mt-1 rounded-md"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="challenge">人机验证</SelectItem>
+                    <SelectItem value="captcha_challenge">验证码验证</SelectItem>
+                    <SelectItem value="shield_challenge">5秒盾验证</SelectItem>
+                    <SelectItem value="intercept">直接封禁</SelectItem>
+                    <SelectItem value="drop">阻断连接</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+            </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRateLimitOpen(false)}>取消</Button>
-            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveRateLimit}>保存</Button>
+            <Button variant="outline" onClick={() => setEditAttackRateOpen(false)}>取消</Button>
+            <Button className="bg-teal-600 text-white hover:bg-teal-700" onClick={() => { setEditAttackRateOpen(false); toast.success("已更新（请点击保存生效）"); }}>
+              确定
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* ══════ Brute Force Dialog ══════ */}
-      <Dialog open={bruteForceOpen} onOpenChange={setBruteForceOpen}>
-        <DialogContent className="max-w-md rounded-lg">
+      {/* ══════════════════════════════════════════════════════════
+         Dialog: 编辑高频错误限制
+         ══════════════════════════════════════════════════════════ */}
+      <Dialog open={editErrorRateOpen} onOpenChange={setEditErrorRateOpen}>
+        <DialogContent className="max-w-lg rounded-lg">
           <DialogHeader>
-            <DialogTitle>暴力防护配置</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <Ban className="h-4 w-4 text-rose-600" />
+              编辑高频错误限制
+            </DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">失败次数阈值</span>
-              <Input type="number" className="mt-1 rounded-md" value={settings.auto_ban_threshold}
-                onChange={(e) => setSettings({ ...settings, auto_ban_threshold: Number(e.target.value) })} />
-            </label>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">检测窗口（秒）</span>
-              <Input type="number" className="mt-1 rounded-md" value={settings.auto_ban_window}
-                onChange={(e) => setSettings({ ...settings, auto_ban_window: Number(e.target.value) })} />
-            </label>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">封禁时长（秒）</span>
-              <Input type="number" className="mt-1 rounded-md" value={settings.auto_ban_duration}
-                onChange={(e) => setSettings({ ...settings, auto_ban_duration: Number(e.target.value) })} />
-            </label>
-            <label className="block text-sm">
-              <span className="font-medium text-slate-700">关联字段</span>
-              <Select defaultValue="ip">
-                <SelectTrigger className="mt-1 rounded-md"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ip">IP 地址</SelectItem>
-                  <SelectItem value="account">账号</SelectItem>
-                  <SelectItem value="ip_account">IP + 账号</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
+          <div className="space-y-5">
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
+              <p className="mb-3 text-sm text-slate-700">
+                某 IP 在
+                <InlineNumberInput
+                  value={s.error_ratelimit_window}
+                  onChange={(v) => updateLocal({ error_ratelimit_window: v })}
+                  unit="秒"
+                />
+                内触发错误达到
+                <InlineNumberInput
+                  value={s.error_ratelimit_max}
+                  onChange={(v) => updateLocal({ error_ratelimit_max: v })}
+                  unit="次"
+                />
+                ，触发以下动作：
+              </p>
+
+              <div className="mb-3 space-y-2">
+                <span className="text-sm font-medium text-slate-700">计入错误类型</span>
+                <div className="flex flex-wrap gap-3">
+                  <label className="flex items-center gap-2 text-sm text-slate-600">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                      checked={s.error_ratelimit_count_4xx}
+                      onChange={(e) => updateLocal({ error_ratelimit_count_4xx: e.target.checked })}
+                    />
+                    4xx 错误 (400,401,403,404,405,429)
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-600">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                      checked={s.error_ratelimit_count_5xx}
+                      onChange={(e) => updateLocal({ error_ratelimit_count_5xx: e.target.checked })}
+                    />
+                    5xx 错误
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-600">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                      checked={s.error_ratelimit_count_block}
+                      onChange={(e) => updateLocal({ error_ratelimit_count_block: e.target.checked })}
+                    />
+                    WAF 拦截
+                  </label>
+                </div>
+              </div>
+
+              <label className="block text-sm">
+                <span className="font-medium text-slate-700">限制结果</span>
+                <Select value={s.error_ratelimit_action} onValueChange={(v) => updateLocal({ error_ratelimit_action: v })}>
+                  <SelectTrigger className="mt-1 rounded-md"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="challenge">人机验证</SelectItem>
+                    <SelectItem value="captcha_challenge">验证码验证</SelectItem>
+                    <SelectItem value="shield_challenge">5秒盾验证</SelectItem>
+                    <SelectItem value="rate_limit">限速 (429)</SelectItem>
+                    <SelectItem value="intercept">直接封禁</SelectItem>
+                    <SelectItem value="drop">阻断连接</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+            </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setBruteForceOpen(false)}>取消</Button>
-            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveBruteForce}>保存</Button>
+            <Button variant="outline" onClick={() => setEditErrorRateOpen(false)}>取消</Button>
+            <Button className="bg-teal-600 text-white hover:bg-teal-700" onClick={() => { setEditErrorRateOpen(false); toast.success("已更新（请点击保存生效）"); }}>
+              确定
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* ══════ Add / Edit Rule Dialog ══════ */}
+      {/* ══════════════════════════════════════════════════════════
+         Dialog: 添加/编辑自定义规则
+         ══════════════════════════════════════════════════════════ */}
       <Dialog open={ruleDialogOpen} onOpenChange={setRuleDialogOpen}>
         <DialogContent className="max-w-2xl rounded-lg">
           <DialogHeader>
@@ -467,6 +670,7 @@ export default function CCProtectionPage() {
 
             {/* Conditions */}
             <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-4">
+              <span className="mb-2 block text-xs font-semibold text-slate-600">匹配条件</span>
               {draft.conditions.map((cond, ci) => (
                 <div key={ci} className="mb-3 flex items-start gap-2">
                   <div className="grid flex-1 grid-cols-3 gap-2">
@@ -490,7 +694,7 @@ export default function CCProtectionPage() {
                     </div>
                     <div>
                       <span className="mb-1 block text-xs font-medium text-slate-500">匹配内容 <span className="text-rose-500">*</span></span>
-                      <Input className="rounded-md bg-white" placeholder="例如: /index.html"
+                      <Input className="rounded-md bg-white" placeholder="例如: /api/login"
                         value={cond.value} onChange={(e) => updateCondition(ci, { value: e.target.value })} />
                     </div>
                   </div>
@@ -501,7 +705,7 @@ export default function CCProtectionPage() {
                   )}
                 </div>
               ))}
-              <button onClick={addCondition} className="mt-1 rounded-md border border-dashed border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">
+              <button onClick={addCondition} className="mt-1 rounded-md border border-dashed border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100">
                 + 添加一个 AND 条件
               </button>
             </div>
@@ -534,7 +738,7 @@ export default function CCProtectionPage() {
                 </Select>
               </label>
               <label className="block text-sm">
-                <span className="font-medium text-slate-700">人机验证 <span className="text-rose-500">*</span></span>
+                <span className="font-medium text-slate-700">持续时间 <span className="text-rose-500">*</span></span>
                 <div className="mt-1 flex items-center gap-1">
                   <Input type="number" className="rounded-md" value={draft.duration}
                     onChange={(e) => setDraft({ ...draft, duration: Number(e.target.value) })} />
@@ -545,12 +749,98 @@ export default function CCProtectionPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRuleDialogOpen(false)}>取消</Button>
-            <Button className="bg-slate-950 text-white hover:bg-slate-800" onClick={saveRule} disabled={saving}>
-              {saving ? "保存中..." : "确定"}
+            <Button className="bg-teal-600 text-white hover:bg-teal-700" onClick={confirmRule} disabled={saving}>
+              确定
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Sub-components
+   ═══════════════════════════════════════════════════════════════ */
+
+/** Inline built-in rule row with toggle, description, and edit button */
+function BuiltinRuleRow({
+  icon,
+  iconBg,
+  title,
+  description,
+  enabled,
+  onToggle,
+  onEdit,
+}: {
+  icon: React.ReactNode;
+  iconBg: string;
+  title: string;
+  description: string;
+  enabled: boolean;
+  onToggle: (val: boolean) => void;
+  onEdit: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between px-5 py-4">
+      <div className="flex items-center gap-3 flex-1 min-w-0">
+        <div className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg", iconBg)}>
+          {icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-slate-900">{title}</span>
+            {enabled ? (
+              <span className="inline-flex items-center rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-medium text-teal-700 ring-1 ring-teal-200">
+                已启用
+              </span>
+            ) : (
+              <span className="inline-flex items-center rounded-full bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-500 ring-1 ring-slate-200">
+                未启用
+              </span>
+            )}
+          </div>
+          <p className={cn(
+            "mt-0.5 truncate text-xs",
+            enabled ? "text-slate-600" : "text-slate-400",
+          )}>
+            {description}
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 shrink-0 ml-4">
+        <button
+          onClick={onEdit}
+          className="flex items-center gap-1 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-teal-600 transition-colors"
+        >
+          <Pencil className="h-3 w-3" />
+          编辑
+        </button>
+        <Switch checked={enabled} onCheckedChange={onToggle} />
+      </div>
+    </div>
+  );
+}
+
+/** Inline number input rendered inside a sentence */
+function InlineNumberInput({
+  value,
+  onChange,
+  unit,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  unit: string;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1 mx-1">
+      <input
+        type="number"
+        className="inline-block w-16 rounded-md border border-slate-300 bg-white px-2 py-1 text-center text-sm font-medium text-teal-700 focus:border-teal-400 focus:outline-none focus:ring-1 focus:ring-teal-400"
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <span className="text-xs text-slate-500">{unit}</span>
+    </span>
   );
 }

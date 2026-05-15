@@ -1,6 +1,10 @@
 package cache
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+	"time"
+)
 
 func TestResponseCacheBasic(t *testing.T) {
 	rc := NewResponseCache(10, 60)
@@ -15,7 +19,7 @@ func TestResponseCacheBasic(t *testing.T) {
 	}
 
 	// Set and hit
-	rc.Set(key, 200, "text/html", body, 60)
+	rc.Set(key, 200, "text/html", body, 60, nil)
 	entry := rc.Get(key)
 	if entry == nil {
 		t.Fatal("expected cache hit")
@@ -42,7 +46,7 @@ func TestResponseCacheExpiry(t *testing.T) {
 	defer rc.Close()
 
 	key := CacheKey("GET", "example.com", "/", "")
-	rc.Set(key, 200, "text/html", []byte("x"), 0) // TTL=0 → uses defaultTTL=1s
+	rc.Set(key, 200, "text/html", []byte("x"), 0, nil) // TTL=0 → uses defaultTTL=1s
 
 	entry := rc.Get(key)
 	if entry == nil {
@@ -57,10 +61,39 @@ func TestResponseCacheDisabled(t *testing.T) {
 	rc.SetEnabled(false)
 
 	key := CacheKey("GET", "example.com", "/", "")
-	rc.Set(key, 200, "text/html", []byte("x"), 60)
+	rc.Set(key, 200, "text/html", []byte("x"), 60, nil)
 
 	if entry := rc.Get(key); entry != nil {
 		t.Fatal("expected no cache hit when disabled")
+	}
+}
+
+func TestResponseCacheLookupExpired(t *testing.T) {
+	rc := NewResponseCache(10, 1)
+	defer rc.Close()
+
+	key := CacheKey("GET", "example.com", "/stale", "")
+	rc.Set(key, 200, "text/html", []byte("old"), 1, nil)
+
+	if rc.Lookup(key) == nil {
+		t.Fatal("expected lookup hit right after set")
+	}
+
+	time.Sleep(2500 * time.Millisecond)
+
+	entry := rc.Lookup(key)
+	if entry == nil {
+		t.Fatal("expected Lookup to see expired entry until Get or cleaner removes it")
+	}
+	if !entry.IsExpired() {
+		t.Fatal("expected expired entry")
+	}
+	if string(entry.Body) != "old" {
+		t.Fatalf("body %q", entry.Body)
+	}
+
+	if rc.Get(key) != nil {
+		t.Fatal("expected Get to miss after TTL")
 	}
 }
 
@@ -74,5 +107,25 @@ func TestCacheKeyDeterministic(t *testing.T) {
 	}
 	if k1 == k3 {
 		t.Error("different methods should produce different keys")
+	}
+}
+
+func TestResponseCacheRoundtripHeaders(t *testing.T) {
+	rc := NewResponseCache(10, 60)
+	defer rc.Close()
+	key := CacheKey("GET", "ex", "/a.js", "")
+	h := http.Header{}
+	h.Set("Content-Encoding", "br")
+	h.Set("Cache-Control", "public, max-age=60")
+	rc.Set(key, 200, "application/javascript", []byte{1, 2, 3}, 60, h)
+	ent := rc.Get(key)
+	if ent == nil {
+		t.Fatal("miss")
+	}
+	if ent.Header == nil || ent.Header.Get("Content-Encoding") != "br" {
+		t.Fatalf("header: %#v", ent.Header)
+	}
+	if ent.Header.Get("Content-Length") != "" {
+		t.Fatal("unexpected content-length in test header")
 	}
 }

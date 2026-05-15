@@ -11,15 +11,6 @@ import (
 	"My-OpenWaf/internal/store/repository"
 )
 
-// protectionDTO mirrors ProtectionConfig but accepts JSON object/array fields from the frontend, then converts them to strings.
-type protectionDTO struct {
-	store.ProtectionConfig
-	OWASPModulesRaw    json.RawMessage `json:"owasp_modules,omitempty"`
-	CCRulesRaw         json.RawMessage `json:"cc_rules,omitempty"`
-	ChainStepsRaw      json.RawMessage `json:"chain_steps,omitempty"`
-	EscalationStepsRaw json.RawMessage `json:"escalation_steps,omitempty"`
-}
-
 func GetProtectionSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		val, err := repo.Get("protection")
@@ -73,43 +64,47 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 
 func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		// Parse into a generic map first to capture raw owasp_modules / cc_rules
+		// Parse into a generic map first so we can peel object/array fields before unmarshaling
+		// into ProtectionConfig (several DB-backed JSON blobs are typed as string in Go).
 		var raw map[string]json.RawMessage
 		if err := c.BindJSON(&raw); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid request body"})
 			return
 		}
 
-		// Re-marshal to ProtectionConfig (string fields will be set below)
-		plainBytes, _ := json.Marshal(raw)
+		preserved := peelJSONStringBlobs(raw, protectionJSONBlobKeys())
+
+		plainBytes, err := json.Marshal(raw)
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid config"})
+			return
+		}
 		cfg := store.DefaultProtectionConfig()
 		if err := json.Unmarshal(plainBytes, &cfg); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid config"})
 			return
 		}
 
-		// If frontend sent owasp_modules as an object, stringify it
-		if v, ok := raw["owasp_modules"]; ok && len(v) > 0 && string(v) != "null" {
-			// Check if it's an object (not already a string)
-			if v[0] == '{' {
-				cfg.OWASPModules = string(v)
-			}
+		if s, ok := preserved["cc_rules"]; ok {
+			cfg.CCRules = s
 		}
-		// If frontend sent cc_rules as an array, stringify it
-		if v, ok := raw["cc_rules"]; ok && len(v) > 0 && string(v) != "null" {
-			if v[0] == '[' {
-				cfg.CCRules = string(v)
-			}
+		if s, ok := preserved["owasp_modules"]; ok {
+			cfg.OWASPModules = s
 		}
-		if v, ok := raw["chain_steps"]; ok && len(v) > 0 && string(v) != "null" {
-			if v[0] == '[' {
-				cfg.ChainSteps = string(v)
-			}
+		if s, ok := preserved["chain_steps"]; ok {
+			cfg.ChainSteps = s
 		}
-		if v, ok := raw["escalation_steps"]; ok && len(v) > 0 && string(v) != "null" {
-			if v[0] == '[' {
-				cfg.EscalationSteps = string(v)
-			}
+		if s, ok := preserved["escalation_steps"]; ok {
+			cfg.EscalationSteps = s
+		}
+		if s, ok := preserved["category_sensitivity"]; ok {
+			cfg.CategorySensitivity = s
+		}
+		if s, ok := preserved["owasp_rules_config"]; ok {
+			cfg.OWASPRulesConfig = s
+		}
+		if s, ok := preserved["cve_rules_config"]; ok {
+			cfg.CVERulesConfig = s
 		}
 
 		for _, candidate := range []string{cfg.RequestRateLimitAction, cfg.ErrorRateLimitAction, cfg.OWASPAction, cfg.CVEAction, cfg.AutoBanAction} {
@@ -131,6 +126,11 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+
+		// Sync bot_detection_enabled to bot_settings.Enabled so the bot page
+		// reflects changes made on the protection page.
+		syncProtectionBotToSettings(repo, cfg.BotDetectionEnabled)
+
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
 			return

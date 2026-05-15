@@ -8,9 +8,9 @@ export function setAccessToken(token: string | null) {
   accessToken = token;
   if (typeof window !== "undefined") {
     if (token) {
-      sessionStorage.setItem(TOKEN_KEY, token);
+      localStorage.setItem(TOKEN_KEY, token);
     } else {
-      sessionStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
     }
   }
 }
@@ -18,7 +18,7 @@ export function setAccessToken(token: string | null) {
 export function getAccessToken(): string | null {
   if (accessToken) return accessToken;
   if (typeof window !== "undefined") {
-    const stored = sessionStorage.getItem(TOKEN_KEY);
+    const stored = localStorage.getItem(TOKEN_KEY);
     if (stored) {
       accessToken = stored;
       return stored;
@@ -71,7 +71,6 @@ function buildHeaders(opts: RequestInit): Headers {
 
 export async function api<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
   const headers = buildHeaders(opts);
-  const hadAccessToken = Boolean(getAccessToken());
 
   let response = await fetch(`${BASE}${path}`, {
     ...opts,
@@ -79,7 +78,7 @@ export async function api<T = unknown>(path: string, opts: RequestInit = {}): Pr
     credentials: "include",
   });
 
-  if (response.status === 401 && hadAccessToken) {
+  if (response.status === 401) {
     const refreshed = await refreshAccess();
     if (refreshed) {
       const retryHeaders = buildHeaders(opts);
@@ -210,10 +209,15 @@ export interface Rule {
 }
 
 export interface SiteCacheRule {
-  type?: "prefix" | "exact" | "suffix" | string;
+  /** prefix | exact | suffix | contains | regex */
+  type?: "prefix" | "exact" | "suffix" | "contains" | "regex" | string;
   value?: string;
   path?: string;
   ttl: number;
+  /** When true, match and cache key use path only (strip ?query). */
+  ignore_query?: boolean;
+  /** When true, compare using lowercased path/pattern; cache key path segment is lowercased. */
+  case_insensitive?: boolean;
 }
 
 export interface Site {
@@ -710,6 +714,86 @@ export async function startSite(id: string | number) {
 
 export async function stopSite(id: string | number) {
   return api(`/api/v1/sites/${id}/stop`, { method: "POST" });
+}
+
+/** 应用路由：匹配命中后写入 recorded_resources */
+export interface ApplicationRouteRule {
+  id?: number;
+  site_id?: number;
+  name?: string;
+  enabled?: boolean;
+  priority?: number;
+  /** request_header | request_body | response_body | ... */
+  target: string;
+  /** eq | ne | contains | not_contains | prefix | suffix | regex | fuzzy */
+  op: string;
+  pattern: string;
+  /** target 为 request_header 时必填 */
+  header_key?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RecordedResource {
+  id: number;
+  site_id: number;
+  method: string;
+  host: string;
+  path: string;
+  client_ip?: string;
+  status_code: number;
+  content_type?: string;
+  ja3_hash?: string;
+  user_agent?: string;
+  matched_rule_ids?: string;
+  primary_rule_id?: number;
+  hit_count: number;
+  first_seen: string;
+  last_seen: string;
+}
+
+export async function listApplicationRouteRules(
+  siteId: string | number,
+  params: { page?: number; page_size?: number } = {},
+) {
+  return api<{ items: ApplicationRouteRule[]; total: number; page?: number }>(
+    `/api/v1/sites/${siteId}/application-route-rules${buildQuery(params as Record<string, unknown>)}`,
+  );
+}
+
+export async function createApplicationRouteRule(siteId: string | number, body: Partial<ApplicationRouteRule>) {
+  return api<ApplicationRouteRule>(`/api/v1/sites/${siteId}/application-route-rules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateApplicationRouteRule(
+  siteId: string | number,
+  ruleId: number,
+  body: Partial<ApplicationRouteRule>,
+) {
+  return api<ApplicationRouteRule>(`/api/v1/sites/${siteId}/application-route-rules/${ruleId}/update`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteApplicationRouteRule(siteId: string | number, ruleId: number) {
+  return api(`/api/v1/sites/${siteId}/application-route-rules/${ruleId}/delete`, { method: "POST" });
+}
+
+export async function listRecordedResources(
+  siteId: string | number,
+  params: { page?: number; page_size?: number } = {},
+) {
+  return api<{ items: RecordedResource[]; total: number; page?: number }>(
+    `/api/v1/sites/${siteId}/recorded-resources${buildQuery(params as Record<string, unknown>)}`,
+  );
+}
+
+export async function clearRecordedResources(siteId: string | number) {
+  return api(`/api/v1/sites/${siteId}/recorded-resources/clear`, { method: "POST" });
 }
 
 export async function getProtectionSettings() {

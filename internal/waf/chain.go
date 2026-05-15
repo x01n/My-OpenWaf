@@ -261,29 +261,38 @@ func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 
 const chainHdrHTML = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Security - Step %d/%d</title>
+<title>Security Verification - Step %d/%d</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;display:flex;justify-content:center;align-items:center;min-height:100vh}
-.ct{background:#fff;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.1);padding:40px;max-width:420px;width:90%%;text-align:center}
-h1{font-size:18px;color:#1a1a2e;margin-bottom:8px}
-.si{color:#666;font-size:13px;margin-bottom:20px}
-.ps{display:flex;justify-content:center;gap:8px;margin-bottom:24px}
-.sd{width:10px;height:10px;border-radius:50%%;background:#e0e0e0}
-.sd.active{background:#4a90d9}.sd.done{background:#27ae60}
-.st{color:#666;font-size:13px;margin-top:16px}
-.ci{width:100%%;padding:12px;border:2px solid #e0e0e0;border-radius:8px;font-size:16px;margin-top:12px;outline:none}
-.ci:focus{border-color:#4a90d9}
-.btn{width:100%%;padding:12px;background:#4a90d9;color:#fff;border:none;border-radius:8px;font-size:16px;cursor:pointer;margin-top:16px}
-.btn:disabled{background:#ccc;cursor:not-allowed}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"Helvetica Neue",sans-serif;background:linear-gradient(160deg,#f0fdfa 0%%,#f8fafc 40%%,#f1f5f9 100%%);display:flex;justify-content:center;align-items:center;min-height:100vh}
+.ct{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);padding:48px 40px;max-width:460px;width:92%%;text-align:center}
+.chain-icon{font-size:42px;margin-bottom:10px;line-height:1.2}
+h1{font-size:1.1rem;font-weight:600;color:#334155;margin-bottom:4px}
+.si{color:#64748b;font-size:.8rem;margin-bottom:16px}
+.divider{width:48px;height:3px;background:#14b8a6;border-radius:2px;margin:0 auto 20px}
+.ps{display:flex;justify-content:center;gap:6px;margin-bottom:24px}
+.sd{width:12px;height:12px;border-radius:50%%;background:#e2e8f0;transition:all .3s;border:2px solid transparent}
+.sd.active{background:#14b8a6;border-color:#0d9488;box-shadow:0 0 0 3px rgba(20,184,166,.15)}
+.sd.done{background:#22c55e;border-color:#16a34a}
+.st{color:#64748b;font-size:.8rem;margin-top:16px;min-height:1.2em}
+.ci{width:100%%;padding:14px 16px;border:2px solid #e2e8f0;border-radius:10px;font-size:1rem;margin-top:14px;outline:none;transition:border-color .2s,box-shadow .2s;background:#f8fafc}
+.ci:focus{border-color:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166,.12);background:#fff}
+.btn{width:100%%;padding:14px;background:linear-gradient(135deg,#14b8a6,#0d9488);color:#fff;border:none;border-radius:10px;font-size:1rem;font-weight:500;cursor:pointer;margin-top:16px;transition:opacity .2s,transform .1s}
+.btn:hover{opacity:.92}.btn:active{transform:scale(.98)}
+.btn:disabled{background:#cbd5e1;cursor:not-allowed;opacity:.7}
+.captcha-box{background:#f8fafc;border-radius:12px;padding:16px;border:1px solid #e2e8f0}
+.captcha-box img{max-width:100%%;border-radius:8px;display:block;margin:0 auto}
 img{max-width:100%%;border-radius:8px;margin:12px 0}
-.pb{width:100%%;height:4px;background:#e0e0e0;border-radius:2px;margin:20px 0;overflow:hidden}
-.pf{height:100%%;background:linear-gradient(90deg,#4a90d9,#7c3aed);width:10%%;transition:width .3s}
+.pb{width:100%%;height:6px;background:#e2e8f0;border-radius:3px;margin:20px 0;overflow:hidden}
+.pf{height:100%%;background:linear-gradient(90deg,#14b8a6,#0d9488);width:10%%;transition:width .4s ease;border-radius:3px}
+.footer{margin-top:24px;padding-top:14px;border-top:1px solid #f1f5f9;font-size:.7rem;color:#94a3b8}
 </style></head><body><div class="ct">`
 
-const chainEnvHTML = `<h1>Environment Check</h1>
-<p class="si">Step %d of %d</p><div class="ps">%s</div>
-<p class="st" id="st">Collecting browser info...</p>
+const chainEnvHTML = `<div class="chain-icon">&#128270;</div>
+<h1>Environment Check / 环境检测</h1>
+<p class="si">Step %d of %d</p><div class="divider"></div><div class="ps">%s</div>
+<p class="st" id="st">Collecting browser information... / 正在收集浏览器信息...</p>
+<div class="footer">Protected by My-OpenWAF</div>
 <script>
 %s
 setTimeout(function(){
@@ -294,25 +303,29 @@ for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;
 document.body.appendChild(f);f.submit()},1500);
 </script>`
 
-const chainPowHTML = `<h1>Proof of Work</h1>
-<p class="si">Step %d of %d</p><div class="ps">%s</div>
+const chainPowHTML = `<div class="chain-icon">&#9881;</div>
+<h1>Proof of Work / 工作量证明</h1>
+<p class="si">Step %d of %d</p><div class="divider"></div><div class="ps">%s</div>
 <div class="pb"><div class="pf" id="pg"></div></div>
-<p class="st" id="st">Computing...</p>
+<p class="st" id="st">Computing... / 正在计算...</p>
+<div class="footer">Protected by My-OpenWAF</div>
 <script>
 %s
 window.__owaf_pow_callback=function(c,h){
 document.getElementById('pg').style.width='100%%';
-document.getElementById('st').textContent='Done!';
+document.getElementById('st').textContent='Complete! / 完成！';
 var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
 var fl={'__waf_chain_session':'%s','__waf_chain_step':'pow','__waf_pow_counter':String(c),'__waf_pow_hash':h};
 for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
 document.body.appendChild(f);f.submit()};
 </script>`
 
-const chainCapHTML = `<h1>CAPTCHA Verification</h1>
-<p class="si">Step %d of %d</p><div class="ps">%s</div>
-%s
-<button class="btn" onclick="go()">Submit</button>
+const chainCapHTML = `<div class="chain-icon">&#128274;</div>
+<h1>CAPTCHA Verification / 验证码验证</h1>
+<p class="si">Step %d of %d</p><div class="divider"></div><div class="ps">%s</div>
+<div class="captcha-box">%s</div>
+<button class="btn" onclick="go()">Submit / 提交</button>
+<div class="footer">Protected by My-OpenWAF</div>
 <script>
 function go(){var a=document.getElementById('ans').value.trim();if(!a)return;
 var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';

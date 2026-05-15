@@ -79,6 +79,9 @@ func Run() {
 	// Resolve JWT secret from env or DB.
 	jwtSecret := resolveJWTSecret(rt)
 
+	// Derive challenge cookie secret from JWT secret for persistence across restarts.
+	waf.SetChallengeSecret(jwtSecret)
+
 	repos := repository.New(rt.DB)
 
 	// Security event writer (async batch insert, non-blocking).
@@ -95,8 +98,9 @@ func Run() {
 	}
 	defer accessLogWriter.Close()
 
-	// Event archiver (auto-delete security events, access logs and drop events older than 30 days).
+	// Event archiver (auto-delete security events, access logs and drop events based on retention config).
 	archiver := observability.NewArchiver(repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
+	archiver.SetSettingsRepo(repos.SystemSettings)
 	defer archiver.Close()
 
 	responseCache := cache.NewResponseCache(64, 60)
@@ -224,17 +228,20 @@ func Run() {
 
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
 	dpOpts := dataplane.Options{
-		Holder:          rt.Snapshot,
-		Engine:          eng,
-		Metrics:         metrics,
-		EventWriter:     eventWriter,
-		AccessLogWriter: accessLogWriter,
-		DropEventRepo:   repos.DropEvent,
-		ResponseCache:   responseCache,
-		Log:             dpLog,
-		CaptchaManager:  captchaMgr,
-		ShieldManager:   shieldMgr,
-		ChainManager:    chainMgr,
+		Holder:                rt.Snapshot,
+		Engine:                eng,
+		Metrics:               metrics,
+		EventWriter:           eventWriter,
+		AccessLogWriter:       accessLogWriter,
+		DropEventRepo:         repos.DropEvent,
+		ResponseCache:         responseCache,
+		Log:                   dpLog,
+		CaptchaManager:        captchaMgr,
+		ShieldManager:         shieldMgr,
+		ChainManager:          chainMgr,
+		RecordedResourceRepo:  repos.RecordedResource,
+		BotScoreRepo:          repos.BotScore,
+		FingerprintRepo:       repos.Fingerprint,
 	}
 
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
@@ -308,7 +315,8 @@ func Run() {
 		if sn := rt.Snapshot.Load(); sn != nil {
 			applyProtectionRuntimeConfig(sn.Protection)
 		}
-		responseCache.Clear()
+		// Do not clear the in-memory response cache on reload: GET entries remain valid
+		// across config bumps so upstream outages still hit warm cache when eligible.
 		loadIPLists(ipRep, repos.IPList)
 		// Hot-reload data-plane listeners.
 		reconcileListeners()
@@ -341,16 +349,18 @@ func Run() {
 	adminSrv.GET("/status", hc.StatusHandler())
 	adminSrv.GET("/metrics", observability.PrometheusHandler(promMetrics))
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
-		Repos:      repos,
-		Reload:     reload,
-		StaticFS:   rt.Config.AdminStaticDir,
-		JWTSecret:  jwtSecret,
-		Metrics:    metrics,
-		DB:         rt.DB,
-		TokenMgr:   tokenMgr,
-		BruteForce: bruteForce,
-		SessionMgr: sessionMgr,
-		CVEFeedMgr: cveFeedMgr,
+		Repos:         repos,
+		Reload:        reload,
+		StaticFS:      rt.Config.AdminStaticDir,
+		JWTSecret:     jwtSecret,
+		Metrics:       metrics,
+		DB:            rt.DB,
+		TokenMgr:      tokenMgr,
+		BruteForce:    bruteForce,
+		SessionMgr:    sessionMgr,
+		CVEFeedMgr:    cveFeedMgr,
+		EscalationMgr: escalationMgr,
+		CaptchaMgr:    captchaMgr,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
@@ -471,15 +481,14 @@ func resolveJWTSecret(rt *core.Runtime) []byte {
 // buildDataServer creates a Hertz server for a data-plane listener,
 // optionally configured with TLS termination when the listener has TLS enabled.
 func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, dpOpts dataplane.Options) *server.Hertz {
-	site := siteRT.Site
 	opts := []config.Option{
-		server.WithHostPorts(site.Bind),
+		server.WithHostPorts(siteRT.Bind),
 		server.WithUseRawPath(true),
 		server.WithUnescapePathValues(false),
 		server.WithDisablePreParseMultipartForm(true),
 	}
 
-	if site.TLSEnabled {
+	if siteRT.Site.TLSEnabled {
 		tlsCfg := buildListenerTLS(siteRT, sn)
 		if tlsCfg == nil {
 			return nil
@@ -492,9 +501,12 @@ func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, d
 
 	srv := server.Default(opts...)
 	o := dpOpts
-	o.Bind = site.Bind
+	o.Bind = siteRT.Bind
 	handler := dataplane.Handler(o)
-	srv.Use(handler)
+	// Register as NoRoute handler so our handler processes ALL requests.
+	// Global Use() middleware only runs when a route matches; since the data-plane
+	// has no explicit routes we must use NoRoute to catch everything.
+	srv.NoRoute(handler)
 	return srv
 }
 
@@ -506,15 +518,12 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 	}
 
 	site := siteRT.Site
+	bind := siteRT.Bind
 	var certs []tls.Certificate
 
-	// Use the site's TLS config if available
-	if siteRT.TLSConfig != nil {
-		return siteRT.TLSConfig
-	}
-
-	// Fallback: build from site certificate
-	if siteRT.Certificate != nil {
+	if siteRT.TLSConfig != nil && len(siteRT.TLSConfig.Certificates) > 0 {
+		certs = append(certs, siteRT.TLSConfig.Certificates...)
+	} else if siteRT.Certificate != nil {
 		cert, err := tls.X509KeyPair([]byte(siteRT.Certificate.CertPEM), []byte(siteRT.Certificate.KeyPEM))
 		if err == nil {
 			certs = append(certs, cert)
@@ -523,7 +532,7 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 
 	// Per-site SNI certs for this bind address
 	for sniKey, cert := range sn.SiteTLSCertBySNI {
-		prefix := "sni:" + site.Bind + "\x00"
+		prefix := "sni:" + bind + "\x00"
 		if strings.HasPrefix(sniKey, prefix) {
 			certs = append(certs, cert)
 		}
@@ -599,7 +608,7 @@ func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 		}
 		seenSites[rt.Site.ID] = struct{}{}
 		site := rt.Site
-		fmt.Fprintf(h, " site=%d tls=%v min=%s max=%s alpn=%s", site.ID, site.TLSEnabled, site.MinTLSVersion, site.MaxTLSVersion, site.ALPN)
+		fmt.Fprintf(h, " site=%d tls=%v min=%s max=%s alpn=%s", site.ID, rt.Site.TLSEnabled, site.MinTLSVersion, site.MaxTLSVersion, site.ALPN)
 		if rt.Certificate != nil {
 			fmt.Fprintf(h, " cert=%s", rt.Certificate.CertPEM[:min(64, len(rt.Certificate.CertPEM))])
 		}

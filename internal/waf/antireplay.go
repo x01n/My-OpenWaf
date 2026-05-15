@@ -16,40 +16,67 @@ import (
 
 // AntiReplayManager implements nonce-based request replay prevention.
 // Nonces are HMAC-SHA256(secret, clientIP + timestamp + random) in base64url.
-// Used nonces are tracked in Redis (primary) or a local LRU (fallback).
+// Used nonces are tracked in Redis (primary) or local maps (fallback).
+//
+// Concurrent legitimate requests sharing the same cookie nonce are deduplicated:
+// the first validation "spends" the nonce and stores the issued rotation; in-flight
+// duplicates receive the same rotated nonce instead of being classified as replay.
 type AntiReplayManager struct {
 	secret []byte
 	rdb    *goredis.Client // nil when Redis unavailable
-	ttl    time.Duration
+	ttl    time.Duration   // default max validity when caller passes 0
 
-	// Local LRU fallback when Redis is unavailable.
-	mu       sync.Mutex
-	lru      map[string]time.Time // nonce → expiry
-	lruOrder []string             // insertion order for eviction
-	lruCap   int
+	localMu sync.Mutex
+	// spentUntil records when a nonce becomes reusable (cryptographic spend window).
+	spentUntil map[string]time.Time
+	// idemRotated maps a presented nonce to the first issued rotation for a short window.
+	idemRotated map[string]idemEntry
 }
 
+type idemEntry struct {
+	newNonce string
+	expires  time.Time
+}
+
+const antiReplayIdemSeconds = 8
+
+// redisNonceLua marks a nonce as spent (first writer wins) and stores the issued
+// rotation for a short idempotency window so concurrent validations succeed once.
+const redisNonceLua = `
+local spent = redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[1])
+if spent then
+  redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[2])
+  return {1, ARGV[3]}
+end
+local idem = redis.call('GET', KEYS[2])
+if idem then
+  return {2, idem}
+end
+return {0}
+`
+
 // NewAntiReplayManager creates a new anti-replay manager.
-// rdb may be nil (local LRU only). ttl is the nonce validity window.
+// rdb may be nil (local maps only). ttl is the default nonce validity window.
 func NewAntiReplayManager(secret string, rdb *goredis.Client, ttl time.Duration) *AntiReplayManager {
 	if secret == "" {
-		// Generate a random secret if none provided.
 		b := make([]byte, 32)
 		_, _ = rand.Read(b)
 		secret = base64.RawURLEncoding.EncodeToString(b)
 	}
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
 	return &AntiReplayManager{
-		secret: []byte(secret),
-		rdb:    rdb,
-		ttl:    ttl,
-		lru:    make(map[string]time.Time, 4096),
-		lruCap: 100000, // 100k entries max
+		secret:      []byte(secret),
+		rdb:         rdb,
+		ttl:         ttl,
+		spentUntil:  make(map[string]time.Time, 4096),
+		idemRotated: make(map[string]idemEntry, 1024),
 	}
 }
 
 // GenerateNonce creates a new nonce for the given client IP.
 func (m *AntiReplayManager) GenerateNonce(clientIP string) string {
-	// payload = clientIP + timestamp(8 bytes) + random(16 bytes)
 	now := time.Now().Unix()
 	randomBytes := make([]byte, 16)
 	_, _ = rand.Read(randomBytes)
@@ -66,7 +93,6 @@ func (m *AntiReplayManager) GenerateNonce(clientIP string) string {
 	mac.Write(payload)
 	sig := mac.Sum(nil)
 
-	// nonce = base64url(timestamp[8] + random[16] + hmac[32])
 	nonce := make([]byte, 0, 8+16+32)
 	nonce = append(nonce, tsBuf[:]...)
 	nonce = append(nonce, randomBytes...)
@@ -76,11 +102,16 @@ func (m *AntiReplayManager) GenerateNonce(clientIP string) string {
 }
 
 // ValidateAndRotate checks a nonce and issues a new one if valid.
+// sessionTTL bounds cryptographic age check and backend "spent" retention; 0 uses manager default.
+//
 // Returns:
 //   - valid=true,  isReplay=false, newNonce: nonce is good, rotated
 //   - valid=false, isReplay=true,  "":       nonce was already used (replay attack)
 //   - valid=false, isReplay=false, "":       nonce is expired or tampered
-func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string) (valid bool, isReplay bool, newNonce string) {
+func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string, sessionTTL time.Duration) (valid bool, isReplay bool, newNonce string) {
+	if sessionTTL <= 0 {
+		sessionTTL = m.ttl
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(nonce)
 	if err != nil || len(raw) != 8+16+32 {
 		return false, false, ""
@@ -90,7 +121,6 @@ func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string) (va
 	randomBytes := raw[8:24]
 	sigGot := raw[24:]
 
-	// Reconstruct payload and verify HMAC.
 	payload := make([]byte, 0, len(clientIP)+8+16)
 	payload = append(payload, []byte(clientIP)...)
 	payload = append(payload, tsBuf...)
@@ -101,86 +131,104 @@ func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string) (va
 	sigExpected := mac.Sum(nil)
 
 	if !hmac.Equal(sigGot, sigExpected) {
-		// Tampered or forged.
 		return false, false, ""
 	}
 
-	// Check timestamp within TTL.
 	ts := int64(binary.BigEndian.Uint64(tsBuf))
 	age := time.Since(time.Unix(ts, 0))
-	if age > m.ttl || age < -30*time.Second {
-		// Expired or clock-skewed.
+	if age > sessionTTL || age < -30*time.Second {
 		return false, false, ""
 	}
 
-	// Replay detection: check if nonce was already used.
-	replay := m.markUsed(nonce)
-	if replay {
-		return false, true, ""
+	remaining := sessionTTL - age
+	if remaining < time.Second {
+		remaining = time.Second
+	}
+	spentTTL := int(remaining / time.Second)
+	if spentTTL < 5 {
+		spentTTL = 5
+	}
+	if spentTTL > 86400 {
+		spentTTL = 86400
 	}
 
-	// Valid — rotate to new nonce.
-	return true, false, m.GenerateNonce(clientIP)
-}
+	newNonce = m.GenerateNonce(clientIP)
 
-// markUsed attempts to mark a nonce as used. Returns true if it was already used (replay).
-func (m *AntiReplayManager) markUsed(nonce string) bool {
-	// Try Redis first.
 	if m.rdb != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 		defer cancel()
 
-		key := fmt.Sprintf("waf:nonce:%s", nonce)
-		// SETNX: returns true if key was set (not a replay).
-		set, err := m.rdb.SetNX(ctx, key, "1", m.ttl).Result()
+		spentKey := fmt.Sprintf("waf:nonce:spent:%s", nonce)
+		idemKey := fmt.Sprintf("waf:nonce:idem:%s", nonce)
+		res, err := m.rdb.Eval(ctx, redisNonceLua, []string{spentKey, idemKey},
+			spentTTL, antiReplayIdemSeconds, newNonce).Result()
 		if err == nil {
-			if !set {
-				// Key already existed → replay.
-				return true
+			switch arr := res.(type) {
+			case []any:
+				if len(arr) == 0 {
+					return false, true, ""
+				}
+				switch v := arr[0].(type) {
+				case int64:
+					if v == 1 && len(arr) >= 2 {
+						if s, ok := arr[1].(string); ok {
+							return true, false, s
+						}
+						return true, false, newNonce
+					}
+					if v == 2 && len(arr) >= 2 {
+						if s, ok := arr[1].(string); ok && s != "" {
+							return true, false, s
+						}
+					}
+					if v == 0 {
+						return false, true, ""
+					}
+				}
 			}
-			return false
 		}
-		// Redis error — fall through to LRU.
 	}
 
-	// LRU fallback.
-	return m.markUsedLRU(nonce)
+	return m.validateAndRotateLocal(nonce, newNonce, remaining)
 }
 
-func (m *AntiReplayManager) markUsedLRU(nonce string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Evict expired entries lazily (batch of up to 64 from front).
+func (m *AntiReplayManager) validateAndRotateLocal(presentedNonce, freshNonce string, spentTTL time.Duration) (valid bool, isReplay bool, newNonce string) {
 	now := time.Now()
-	evicted := 0
-	for evicted < 64 && len(m.lruOrder) > 0 {
-		oldest := m.lruOrder[0]
-		if exp, ok := m.lru[oldest]; ok && now.After(exp) {
-			delete(m.lru, oldest)
-			m.lruOrder = m.lruOrder[1:]
-			evicted++
-		} else {
-			break
+	idemTTL := time.Duration(antiReplayIdemSeconds) * time.Second
+
+	m.localMu.Lock()
+	defer m.localMu.Unlock()
+
+	if len(m.spentUntil) > 20000 {
+		for k, exp := range m.spentUntil {
+			if now.After(exp) {
+				delete(m.spentUntil, k)
+			}
+		}
+	}
+	if len(m.idemRotated) > 5000 {
+		for k, e := range m.idemRotated {
+			if now.After(e.expires) {
+				delete(m.idemRotated, k)
+			}
 		}
 	}
 
-	// Check if already used.
-	if _, exists := m.lru[nonce]; exists {
-		return true // replay
+	if e, ok := m.idemRotated[presentedNonce]; ok && now.Before(e.expires) {
+		return true, false, e.newNonce
 	}
 
-	// Evict oldest if at capacity.
-	for len(m.lru) >= m.lruCap && len(m.lruOrder) > 0 {
-		oldest := m.lruOrder[0]
-		delete(m.lru, oldest)
-		m.lruOrder = m.lruOrder[1:]
+	if exp, ok := m.spentUntil[presentedNonce]; ok {
+		if now.After(exp) {
+			delete(m.spentUntil, presentedNonce)
+		} else {
+			return false, true, ""
+		}
 	}
 
-	// Mark as used.
-	m.lru[nonce] = now.Add(m.ttl)
-	m.lruOrder = append(m.lruOrder, nonce)
-	return false
+	m.spentUntil[presentedNonce] = now.Add(spentTTL)
+	m.idemRotated[presentedNonce] = idemEntry{newNonce: freshNonce, expires: now.Add(idemTTL)}
+	return true, false, freshNonce
 }
 
 // NonceKey is the cookie name used for anti-replay nonces.

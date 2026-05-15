@@ -3,6 +3,7 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,8 +14,11 @@ type ResponseEntry struct {
 	StatusCode  int
 	ContentType string
 	Body        []byte
-	CachedAt    int64
-	TTL         int64 // seconds
+	// Header holds hop-by-hop-sanitized upstream headers (e.g. Content-Encoding: br) so
+	// cached hits match live fetches. Nil means legacy entries with Content-Type only.
+	Header   http.Header
+	CachedAt int64
+	TTL      int64 // seconds
 }
 
 // IsExpired returns true if the entry has passed its TTL.
@@ -75,6 +79,22 @@ func (rc *ResponseCache) shardFor(key string) *shard {
 	return &rc.shards[h%64]
 }
 
+// Lookup returns a cached entry when present, including entries past TTL.
+// It does not delete expired entries; use for stale fallback after upstream errors.
+func (rc *ResponseCache) Lookup(key string) *ResponseEntry {
+	if !rc.enabled.Load() {
+		return nil
+	}
+	s := rc.shardFor(key)
+	s.mu.RLock()
+	entry, ok := s.items[key]
+	s.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return entry
+}
+
 // Get retrieves a cached response. Returns nil if miss or expired.
 func (rc *ResponseCache) Get(key string) *ResponseEntry {
 	if !rc.enabled.Load() {
@@ -99,8 +119,9 @@ func (rc *ResponseCache) Get(key string) *ResponseEntry {
 	return entry
 }
 
-// Set stores a response in the cache.
-func (rc *ResponseCache) Set(key string, statusCode int, contentType string, body []byte, ttl int64) {
+// Set stores a response in the cache. header is optional hop-by-hop-sanitized upstream
+// headers (clone is stored); nil stores only Content-Type/body semantics.
+func (rc *ResponseCache) Set(key string, statusCode int, contentType string, body []byte, ttl int64, header http.Header) {
 	if !rc.enabled.Load() {
 		return
 	}
@@ -112,10 +133,16 @@ func (rc *ResponseCache) Set(key string, statusCode int, contentType string, bod
 		return // single entry too large
 	}
 
+	var hdr http.Header
+	if header != nil && len(header) > 0 {
+		hdr = header.Clone()
+	}
+
 	entry := &ResponseEntry{
 		StatusCode:  statusCode,
 		ContentType: contentType,
 		Body:        body,
+		Header:      hdr,
 		CachedAt:    time.Now().Unix(),
 		TTL:         ttl,
 	}

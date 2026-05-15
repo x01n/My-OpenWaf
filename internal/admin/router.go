@@ -20,16 +20,18 @@ import (
 
 // Dependencies holds all admin API dependencies.
 type Dependencies struct {
-	Repos      *repository.Repos
-	Reload     func() error
-	StaticFS   string
-	JWTSecret  []byte
-	Metrics    *dataplane.Metrics
-	DB         *gorm.DB
-	TokenMgr   *auth.TokenManager
-	BruteForce *auth.BruteForceDetector
-	SessionMgr *auth.SessionManager
-	CVEFeedMgr *waf.CVEFeedManager
+	Repos         *repository.Repos
+	Reload        func() error
+	StaticFS      string
+	JWTSecret     []byte
+	Metrics       *dataplane.Metrics
+	DB            *gorm.DB
+	TokenMgr      *auth.TokenManager
+	BruteForce    *auth.BruteForceDetector
+	SessionMgr    *auth.SessionManager
+	CVEFeedMgr    *waf.CVEFeedManager
+	EscalationMgr *waf.EscalationManager
+	CaptchaMgr    *waf.CaptchaManager
 }
 
 // RegisterRoutes mounts the admin REST API and frontend static files on the Hertz server.
@@ -120,6 +122,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites/:id/drop-events", ListSiteDropEvents(r.Site, r.DropEvent))
 		readGroup.GET("/sites/:id/drop-stats", SiteDropStats(r.Site, r.DropEvent))
 		readGroup.GET("/sites/:id/rules", ListSiteRules(r.Site, r.Rule))
+		readGroup.GET("/sites/:id/application-route-rules", ListApplicationRouteRules(r.Site, r.AppRouteRule))
+		readGroup.GET("/sites/:id/recorded-resources", ListRecordedResources(r.Site, r.RecordedResource))
 
 		// Dashboard
 		dashDeps := &DashboardDeps{Metrics: deps.Metrics, DB: deps.DB}
@@ -154,7 +158,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		// Escalation configuration
 		readGroup.GET("/protection/:id/escalation", GetEscalationConfig(r.SystemSettings))
-		readGroup.GET("/escalation/status/:ip", GetEscalationIPStatus())
+		readGroup.GET("/escalation/status/:ip", GetEscalationIPStatus(deps.EscalationMgr))
 
 		// Error pages
 		readGroup.GET("/sites/:id/error-pages", GetSiteErrorPages(r.Site))
@@ -224,7 +228,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		// Captcha configuration
 		opsGroup.POST("/captcha/config", UpdateCaptchaConfig(r.SystemSettings, reload))
-		opsGroup.POST("/captcha/test", TestCaptcha(r.SystemSettings))
+		opsGroup.POST("/captcha/test", TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
 
 		// Chain challenge configuration
 		opsGroup.POST("/chain/config", UpdateChainConfig(r.SystemSettings, reload))
@@ -235,7 +239,13 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		// Escalation configuration
 		opsGroup.POST("/protection/:id/escalation", UpdateEscalationConfig(r.SystemSettings, reload))
-		opsGroup.POST("/escalation/status/:ip/reset", ResetEscalationIPStatus())
+		opsGroup.POST("/escalation/status/:ip/reset", ResetEscalationIPStatus(deps.EscalationMgr))
+
+		// Application routes (resource inventory rules + recorded rows)
+		opsGroup.POST("/sites/:id/application-route-rules", CreateApplicationRouteRule(r.Site, r.AppRouteRule, reload))
+		opsGroup.POST("/sites/:id/application-route-rules/:rid/update", UpdateApplicationRouteRule(r.Site, r.AppRouteRule, reload))
+		opsGroup.POST("/sites/:id/application-route-rules/:rid/delete", DeleteApplicationRouteRule(r.Site, r.AppRouteRule, reload))
+		opsGroup.POST("/sites/:id/recorded-resources/clear", ClearRecordedResources(r.Site, r.RecordedResource))
 
 		// Error pages
 		opsGroup.POST("/sites/:id/error-pages", UpdateSiteErrorPages(r.Site, reload))
@@ -264,6 +274,14 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/cve-rules/:id/update", UpdateCVERule(r.CVERule, deps.CVEFeedMgr))
 		adminGroup.POST("/cve-rules/:id/delete", DeleteCVERule(r.CVERule, deps.CVEFeedMgr))
 	}
+
+	// WASM PoW assets (served on admin port too so shield challenges work)
+	h.GET("/__owaf/pow.wasm", func(ctx context.Context, c *app.RequestContext) {
+		waf.ServePoWWASM(c)
+	})
+	h.GET("/__owaf/wasm_exec.js", func(ctx context.Context, c *app.RequestContext) {
+		waf.ServeWasmExecJS(c)
+	})
 
 	// Frontend static files (SPA fallback)
 	mountStaticHandler(h, deps.StaticFS)

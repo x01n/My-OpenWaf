@@ -239,3 +239,76 @@ func TestParseUpstreamURLsKeepsCommaFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestParseSiteCacheRulesSuffixNoLeadingSlash(t *testing.T) {
+	raw := `[{"type":"suffix","value":"config","ttl":10}]`
+	rules := parseSiteCacheRules(raw)
+	// Bare token without ".", "/", "?" is treated as a file extension → ".config"
+	if len(rules) != 1 || rules[0].Path != ".config" {
+		t.Fatalf("got %#v", rules)
+	}
+}
+
+func TestParseSiteCacheRulesCommaSeparatedSuffixes(t *testing.T) {
+	raw := `[{"type":"suffix","value":".js,.mjs","ttl":10}]`
+	rules := parseSiteCacheRules(raw)
+	if len(rules) != 2 {
+		t.Fatalf("want 2 rules, got %d %#v", len(rules), rules)
+	}
+}
+
+func TestParseSiteCacheRulesSuffixBareExtensions(t *testing.T) {
+	raw := `[{"type":"suffix","value":"js,html,css","ttl":10}]`
+	rules := parseSiteCacheRules(raw)
+	if len(rules) != 3 {
+		t.Fatalf("want 3 rules, got %d %#v", len(rules), rules)
+	}
+	want := map[string]bool{".js": true, ".html": true, ".css": true}
+	for _, r := range rules {
+		if !want[r.Path] {
+			t.Fatalf("unexpected pattern %q in %#v", r.Path, rules)
+		}
+	}
+}
+
+func TestParseSiteCacheRulesSuffixMultiDotPreserved(t *testing.T) {
+	raw := `[{"type":"suffix","value":"min.js,tar.gz","ttl":10}]`
+	rules := parseSiteCacheRules(raw)
+	if len(rules) != 2 {
+		t.Fatalf("want 2 rules, got %d %#v", len(rules), rules)
+	}
+	got := map[string]bool{rules[0].Path: true, rules[1].Path: true}
+	if !got["min.js"] || !got["tar.gz"] {
+		t.Fatalf("want min.js and tar.gz unchanged, got %#v", rules)
+	}
+}
+
+func TestParseSiteCacheRulesContainsNoForcedSlash(t *testing.T) {
+	raw := `[{"type":"contains","value":"v=1","ttl":10}]`
+	rules := parseSiteCacheRules(raw)
+	if len(rules) != 1 || rules[0].Path != "v=1" {
+		t.Fatalf("got %#v", rules)
+	}
+}
+
+func TestParseSiteCacheRulesRegexCompiled(t *testing.T) {
+	raw := `[{"type":"regex","value":"\\.(js|css)$","ttl":10}]`
+	rules := parseSiteCacheRules(raw)
+	if len(rules) != 1 || rules[0].Regex == nil {
+		t.Fatalf("got %#v", rules)
+	}
+	if !rules[0].Regex.MatchString("/a/b.js") {
+		t.Fatal("expected regex match")
+	}
+}
+
+func TestParseSiteCacheRulesRegexCaseInsensitive(t *testing.T) {
+	raw := `[{"type":"regex","value":"\\.js$","ttl":10,"case_insensitive":true}]`
+	rules := parseSiteCacheRules(raw)
+	if len(rules) != 1 || rules[0].Regex == nil {
+		t.Fatalf("got %#v", rules)
+	}
+	if !rules[0].Regex.MatchString("/a/b.JS") {
+		t.Fatal("expected case-insensitive regex match")
+	}
+}

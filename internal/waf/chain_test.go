@@ -44,8 +44,8 @@ func TestEnvCheckJSExportsOwafEnv(t *testing.T) {
 	if !strings.Contains(script, "window.__owaf_env=fp") {
 		t.Fatalf("EnvCheckJS() did not expose __owaf_env: %s", script)
 	}
-	if !strings.Contains(script, "window.__envFingerprint") {
-		t.Fatalf("EnvCheckJS() dropped legacy fingerprint export: %s", script)
+	if !strings.Contains(script, "__owaf_env_encrypted") {
+		t.Fatalf("EnvCheckJS() dropped encrypted fingerprint export: %s", script)
 	}
 }
 

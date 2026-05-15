@@ -222,6 +222,37 @@ func (m *EscalationManager) GetCurrentLevel(ip string, siteID uint) (int, string
 	return level, act
 }
 
+// IPEscalationStatus describes the current escalation state of a single IP.
+type IPEscalationStatus struct {
+	IP       string `json:"ip"`
+	HitCount int    `json:"hit_count"`
+	Level    int    `json:"current_step"`
+	Action   string `json:"action"`
+}
+
+// GetIPStatus returns the current escalation state for a given IP.
+func (m *EscalationManager) GetIPStatus(ip string, siteID uint) IPEscalationStatus {
+	count := m.getCount(ip, siteID)
+	level, act := m.GetCurrentLevel(ip, siteID)
+	return IPEscalationStatus{
+		IP:       ip,
+		HitCount: count,
+		Level:    level,
+		Action:   act,
+	}
+}
+
+// ResetIP clears escalation state for a given IP.
+func (m *EscalationManager) ResetIP(ip string, siteID uint) {
+	key := fmt.Sprintf("esc:%s:%d", ip, siteID)
+	m.localCache.Delete(key)
+	if m.redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		m.redis.Del(ctx, "owaf:escalation:"+key)
+	}
+}
+
 // resolveAction finds the highest step whose threshold is met.
 func resolveAction(count int, steps []EscalationStep) string {
 	act := ""

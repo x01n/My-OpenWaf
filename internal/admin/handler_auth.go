@@ -300,13 +300,16 @@ func ForceLogoutSessionHandler(d *AuthDeps) app.HandlerFunc {
 // ── cookie helpers ──
 
 func setRefreshCookie(c *app.RequestContext, value string, ttl time.Duration) {
+	// Secure flag only when request came over TLS; otherwise browsers reject the cookie on HTTP.
+	isSecure := string(c.URI().Scheme()) == "https"
 	c.SetCookie("my_openwaf_rt", value, int(ttl.Seconds()), "/api/v1/auth", "",
-		protocol.CookieSameSiteLaxMode, true, true)
+		protocol.CookieSameSiteLaxMode, isSecure, true)
 }
 
 func clearRefreshCookie(c *app.RequestContext) {
+	isSecure := string(c.URI().Scheme()) == "https"
 	c.SetCookie("my_openwaf_rt", "", -1, "/api/v1/auth", "",
-		protocol.CookieSameSiteLaxMode, true, true)
+		protocol.CookieSameSiteLaxMode, isSecure, true)
 }
 
 func splitRefreshCookie(val string) (jti, raw string, ok bool) {

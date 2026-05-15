@@ -109,7 +109,7 @@ func GetSite(repo *repository.SiteRepo) app.HandlerFunc {
 func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item store.Site
-		if err := c.BindJSON(&item); err != nil {
+		if err := BindSiteFromRequestBody(c.Request.Body(), &item); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
@@ -141,7 +141,7 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
-		if err := c.BindJSON(existing); err != nil {
+		if err := BindSiteFromRequestBody(c.Request.Body(), existing); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}

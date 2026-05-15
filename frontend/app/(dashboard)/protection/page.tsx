@@ -1,12 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ShieldAlert, ShieldCheck, Eye, Wrench, Zap, Save } from "lucide-react";
+import { ShieldAlert, ShieldCheck, Eye, Wrench, Zap, Save, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { PageIntro, Surface } from "@/components/console-shell";
 import { getProtectionSettings, updateProtectionSettings, type ProtectionSettings } from "@/lib/api";
 import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console";
@@ -78,6 +84,18 @@ export default function ProtectionPage() {
     setSettings({
       ...settings,
       owasp_modules: { ...modules, [key]: value },
+    });
+  }
+
+  function batchSetSensitivity(value: string) {
+    if (!settings) return;
+    const newModules: Record<string, string> = {};
+    for (const cat of categories) {
+      newModules[cat.key] = value;
+    }
+    setSettings({
+      ...settings,
+      owasp_modules: newModules,
     });
   }
 
@@ -307,10 +325,34 @@ export default function ProtectionPage() {
       {/* Sensitivity Matrix Table */}
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 px-5 py-4">
-          <h2 className="text-base font-semibold text-slate-900">检测类别敏感度矩阵</h2>
-          <p className="mt-1 text-xs text-slate-500">
-            为每个检测类别设置敏感度级别，级别越高检测越严格但可能增加误报
-          </p>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">检测类别敏感度矩阵</h2>
+              <p className="mt-1 text-xs text-slate-500">
+                为每个检测类别设置敏感度级别，级别越高检测越严格但可能增加误报
+              </p>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="shrink-0 gap-1.5 rounded-md border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-100">
+                  批量配置为
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-[140px]">
+                {[
+                  { label: "禁用", value: "off" },
+                  { label: "仅观察", value: "low" },
+                  { label: "平衡防护", value: "mid" },
+                  { label: "高强度防护", value: "high" },
+                ].map((opt) => (
+                  <DropdownMenuItem key={opt.value} onClick={() => batchSetSensitivity(opt.value)}>
+                    {opt.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">

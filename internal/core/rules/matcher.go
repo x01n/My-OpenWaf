@@ -378,6 +378,66 @@ func (m *hostMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string,
 	return host == pat
 }
 
+func splitHostPortHeader(host string) (nameOnly, fullLower string) {
+	fullLower = strings.ToLower(strings.TrimSpace(host))
+	nameOnly = fullLower
+	if i := strings.LastIndex(fullLower, ":"); i > 0 {
+		tail := fullLower[i+1:]
+		allDigits := len(tail) > 0
+		for _, ch := range tail {
+			if ch < '0' || ch > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			nameOnly = fullLower[:i]
+		}
+	}
+	return nameOnly, fullLower
+}
+
+// hostFullMatcher matches Host including explicit port; wildcard applies to hostname only.
+type hostFullMatcher struct{ pattern string }
+
+func (m *hostFullMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
+	raw := strings.TrimSpace(headerValue(headers, "host"))
+	if raw == "" {
+		return false
+	}
+	hostName, fullLower := splitHostPortHeader(raw)
+	pat := strings.TrimSpace(m.pattern)
+	patLower := strings.ToLower(pat)
+	if strings.HasPrefix(patLower, "*.") {
+		suffix := patLower[1:]
+		return strings.HasSuffix(hostName, suffix) || hostName == strings.TrimPrefix(patLower, "*.")
+	}
+	pl := strings.ToLower(pat)
+	return fullLower == pl || hostName == pl
+}
+
+// fullURLContainsMatcher matches path + raw query (lowercased) for a substring.
+type fullURLContainsMatcher struct{ substr string }
+
+func (m *fullURLContainsMatcher) Match(_ net.IP, _, path, query string, _ map[string]string, _ []byte) bool {
+	u := path
+	if query != "" {
+		u += "?" + query
+	}
+	return strings.Contains(strings.ToLower(u), strings.ToLower(m.substr))
+}
+
+// fullURLRegexMatcher matches path + raw query against a regex.
+type fullURLRegexMatcher struct{ re *regexp.Regexp }
+
+func (m *fullURLRegexMatcher) Match(_ net.IP, _, path, query string, _ map[string]string, _ []byte) bool {
+	u := path
+	if query != "" {
+		u += "?" + query
+	}
+	return m.re.MatchString(u)
+}
+
 // cookieContainsMatcher checks if any cookie contains the given substring.
 type cookieContainsMatcher struct{ substr string }
 
@@ -495,6 +555,19 @@ func buildMatcher(kind, arg string) Matcher {
 	case "query_param":
 		param, value := splitHeaderArg(arg)
 		return &queryParamMatcher{param: param, value: value}
+
+	case "host_full":
+		return &hostFullMatcher{pattern: arg}
+
+	case "full_url_contains":
+		return &fullURLContainsMatcher{substr: arg}
+
+	case "full_url_regex":
+		re, err := cachedCompile(arg)
+		if err != nil {
+			return &neverMatcher{}
+		}
+		return &fullURLRegexMatcher{re: re}
 
 	case "host":
 		return &hostMatcher{pattern: arg}
