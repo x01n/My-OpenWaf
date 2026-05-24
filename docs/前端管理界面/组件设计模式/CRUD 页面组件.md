@@ -1,18 +1,14 @@
 # CRUD 页面组件
 
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [crud-page.tsx](file://frontend/components/crud-page.tsx)
 - [api.ts](file://frontend/lib/api.ts)
-- [dialog.tsx](file://frontend/components/ui/dialog.tsx)
-- [table.tsx](file://frontend/components/ui/table.tsx)
-- [select.tsx](file://frontend/components/ui/select.tsx)
-- [listeners/page.tsx](file://frontend/app/(dashboard)/listeners/page.tsx)
-- [rules/page.tsx](file://frontend/app/(dashboard)/rules/page.tsx)
-- [policies/page.tsx](file://frontend/app/(dashboard)/policies/page.tsx)
-- [sites/page.tsx](file://frontend/app/(dashboard)/sites/page.tsx)
-- [cve-rules/page.tsx](file://frontend/app/(dashboard)/cve-rules/page.tsx)
-- [ip-lists/page.tsx](file://frontend/app/(dashboard)/ip-lists/page.tsx)
+- [console-shell.tsx](file://frontend/components/console-shell.tsx)
+- [page.tsx](file://frontend/app/(dashboard)/certificates/page.tsx)
+- [page.tsx](file://frontend/app/(dashboard)/policies/page.tsx)
+- [page.tsx](file://frontend/app/(dashboard)/ip-lists/page.tsx)
+- [client.tsx](file://frontend/app/(dashboard)/sites/[id]/client.tsx)
 </cite>
 
 ## 目录
@@ -21,398 +17,315 @@
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
-6. [依赖关系分析](#依赖关系分析)
+6. [依赖分析](#依赖分析)
 7. [性能考虑](#性能考虑)
-8. [故障排除指南](#故障排除指南)
+8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-本文件系统性地解析通用 CRUD 页面组件的设计与实现，涵盖数据加载、表格渲染、表单对话框、删除确认等核心功能；详解字段定义接口 FieldDef 的多种类型与配置项；阐明组件的状态管理机制（数据加载、编辑、保存、删除）；深入说明异步选择框的实现原理（选项缓存与动态加载）；解释自定义输入组件的支持机制；并提供完整的使用示例与最佳实践。
+本指南围绕“基于字段定义驱动渲染”的 CRUD 页面组件进行系统化讲解，目标是帮助前端开发者快速构建可复用、可维护的资源管理界面。文档覆盖以下关键主题：
+- FieldDef 类型系统的设计理念与使用方法
+- 表单输入组件的自动适配机制（文本、数字、开关、选择、异步选择与文本域）
+- 异步选项缓存策略的实现细节与性能优化
+- 完整 CRUD 操作流程（数据加载、新增/编辑弹窗、删除确认、保存反馈）
+- 最佳实践与可复用组件的构建建议
 
 ## 项目结构
-CRUD 页面组件位于前端组件目录，配合统一的 UI 组件库与 API 封装模块共同工作：
-- 组件层：通用 CRUD 页面组件、UI 基础组件（对话框、表格、下拉选择）
-- 页面层：多个业务页面通过组合使用 CRUD 组件实现不同实体的管理界面
-- 数据层：统一的 API 封装模块负责认证、鉴权、错误处理与响应解析
+本项目前端采用 Next.js App Router 结构，CRUD 页面组件位于 frontend/components 下，通用 UI 组件与页面示例分别位于 frontend/components 与 frontend/app。
 
 ```mermaid
 graph TB
-subgraph "页面层"
-L["ListenersPage<br/>监听器页面"]
-R["RulesPage<br/>规则页面"]
-P["PoliciesPage<br/>策略页面"]
-end
 subgraph "组件层"
-CP["CrudPage<br/>通用 CRUD 组件"]
-D["Dialog<br/>对话框"]
-T["Table<br/>表格"]
-S["Select<br/>下拉选择"]
+CP["CrudPage 组件<br/>frontend/components/crud-page.tsx"]
+CS["ConsoleShell 组件<br/>frontend/components/console-shell.tsx"]
 end
-subgraph "数据层"
-API["api.ts<br/>统一 API 封装"]
+subgraph "页面层"
+CERT["证书页面示例<br/>frontend/app/(dashboard)/certificates/page.tsx"]
+POL["策略页面示例<br/>frontend/app/(dashboard)/policies/page.tsx"]
+IPL["IP 黑白名单页面示例<br/>frontend/app/(dashboard)/ip-lists/page.tsx"]
+SITE["站点详情客户端组件<br/>frontend/app/(dashboard)/sites/[id]/client.tsx"]
 end
-L --> CP
-R --> CP
-P --> CP
-CP --> D
-CP --> T
-CP --> S
+subgraph "工具层"
+API["API 封装<br/>frontend/lib/api.ts"]
+end
 CP --> API
+CERT --> API
+POL --> API
+IPL --> API
+SITE --> API
+CP --> CS
 ```
 
-**图表来源**
-- [listeners/page.tsx](file://frontend/app/(dashboard)/listeners/page.tsx#L1-L77)
-- [rules/page.tsx](file://frontend/app/(dashboard)/rules/page.tsx#L1-L76)
-- [policies/page.tsx](file://frontend/app/(dashboard)/policies/page.tsx#L1-L16)
-- [crud-page.tsx:1-358](file://frontend/components/crud-page.tsx#L1-L358)
-- [dialog.tsx:1-169](file://frontend/components/ui/dialog.tsx#L1-L169)
-- [table.tsx:1-117](file://frontend/components/ui/table.tsx#L1-L117)
-- [select.tsx:1-193](file://frontend/components/ui/select.tsx#L1-L193)
-- [api.ts:1-317](file://frontend/lib/api.ts#L1-L317)
+图表来源
+- [crud-page.tsx:1-359](file://frontend/components/crud-page.tsx#L1-L359)
+- [console-shell.tsx:1-229](file://frontend/components/console-shell.tsx#L1-L229)
+- [api.ts:1-121](file://frontend/lib/api.ts#L1-L121)
+- [page.tsx](file://frontend/app/(dashboard)/certificates/page.tsx#L1-L268)
+- [page.tsx](file://frontend/app/(dashboard)/policies/page.tsx#L1-L238)
+- [page.tsx](file://frontend/app/(dashboard)/ip-lists/page.tsx#L1-L579)
+- [client.tsx](file://frontend/app/(dashboard)/sites/[id]/client.tsx#L1-L800)
 
-**章节来源**
-- [crud-page.tsx:1-358](file://frontend/components/crud-page.tsx#L1-L358)
-- [api.ts:1-317](file://frontend/lib/api.ts#L1-L317)
+章节来源
+- [crud-page.tsx:1-359](file://frontend/components/crud-page.tsx#L1-L359)
+- [api.ts:1-121](file://frontend/lib/api.ts#L1-L121)
 
 ## 核心组件
-- 通用 CRUD 页面组件：提供统一的数据加载、表格渲染、表单对话框、删除确认流程，支持多种字段类型与自定义输入组件。
-- UI 基础组件：对话框、表格、下拉选择等，为 CRUD 组件提供基础交互能力。
-- API 封装：统一处理认证令牌、刷新、错误码映射与响应解析。
+本节聚焦 CrudPage 组件与其依赖的 API 封装与通用布局组件，解释其职责边界与协作方式。
 
-**章节来源**
-- [crud-page.tsx:60-358](file://frontend/components/crud-page.tsx#L60-L358)
-- [dialog.tsx:10-169](file://frontend/components/ui/dialog.tsx#L10-L169)
-- [table.tsx:7-117](file://frontend/components/ui/table.tsx#L7-L117)
-- [select.tsx:9-193](file://frontend/components/ui/select.tsx#L9-L193)
-- [api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
+- CrudPage 组件
+  - 负责统一的 CRUD 渲染与交互：列表展示、新增/编辑弹窗、删除确认、保存反馈、加载骨架屏等。
+  - 通过 FieldDef 字段定义驱动表单与表格渲染，支持多种输入类型与异步选项缓存。
+  - 通过 api 封装进行后端通信，内置鉴权与错误处理。
+
+- ConsoleShell 布局组件
+  - 提供 PageIntro、Surface、EmptyState 等通用布局与状态提示组件，提升页面一致性与可读性。
+
+- API 封装
+  - 统一处理鉴权头、刷新令牌、错误码映射与分页响应结构，简化页面调用。
+
+章节来源
+- [crud-page.tsx:56-349](file://frontend/components/crud-page.tsx#L56-L349)
+- [console-shell.tsx:7-96](file://frontend/components/console-shell.tsx#L7-L96)
+- [api.ts:72-121](file://frontend/lib/api.ts#L72-L121)
 
 ## 架构总览
-CRUD 组件通过 props 接收标题、描述、API 路径、字段定义与回调函数，内部维护多类状态以驱动 UI 更新。字段定义接口 FieldDef 描述每个列/表单项的渲染与输入行为，支持文本、数字、布尔值、普通选择框、异步选择框以及自定义输入组件。异步选择框具备选项缓存与空值处理，确保表格显示与表单编辑的一致性。
+下图展示了 CRUD 页面组件在系统中的位置与交互路径。
 
 ```mermaid
-classDiagram
-class FieldDef {
-+string key
-+string label
-+type
-+options
-+asyncOptions
-+hideInTable
-+defaultValue
-+nullable
-+placeholder
-+description
-+render
-+customInput
-}
-class CrudPageProps {
-+string title
-+string description
-+string apiPath
-+FieldDef[] fields
-+string idField
-+onAfterSave()
-}
-class CrudPage {
--Record[] items
--editing
--isNew
--open
--loading
--saving
--deleteTarget
--asyncOpts
-+load()
-+openNew()
-+openEdit(item)
-+handleSave()
-+handleDelete()
-}
-CrudPage --> FieldDef : "使用"
-CrudPage --> CrudPageProps : "接收"
+sequenceDiagram
+participant U as "用户"
+participant CP as "CrudPage 组件"
+participant API as "API 封装"
+participant BE as "后端服务"
+U->>CP : 打开页面/点击新增/编辑/删除
+CP->>API : 加载数据/保存/删除
+API->>BE : 发起 HTTP 请求带鉴权头
+BE-->>API : 返回 JSON 响应
+API-->>CP : 解析响应/错误处理
+CP-->>U : 更新 UI列表/弹窗/提示
 ```
 
-**图表来源**
-- [crud-page.tsx:28-74](file://frontend/components/crud-page.tsx#L28-L74)
-- [crud-page.tsx:51-58](file://frontend/components/crud-page.tsx#L51-L58)
-- [crud-page.tsx:60-358](file://frontend/components/crud-page.tsx#L60-L358)
+图表来源
+- [crud-page.tsx:96-164](file://frontend/components/crud-page.tsx#L96-L164)
+- [api.ts:72-121](file://frontend/lib/api.ts#L72-L121)
 
 ## 详细组件分析
 
-### 字段定义接口 FieldDef
-FieldDef 定义了每个字段的元信息与渲染/输入行为：
-- 类型：支持文本、数字、多行文本、布尔值、普通选择框、异步选择框。
-- 选项：普通选择框的静态选项数组。
-- 异步选项：异步选择框的配置，包含 API 路径、值键名、标签键名（字符串或函数）。
-- 表格控制：是否隐藏在表格中。
-- 默认值与空值：默认值、可空性控制。
-- 描述与占位符：增强表单项的可读性。
-- 自定义渲染：render 函数用于表格中的自定义展示。
-- 自定义输入：customInput 支持注入自定义表单控件。
+### FieldDef 类型系统与字段驱动渲染
+- 设计理念
+  - 通过字段定义（FieldDef）描述每个资源字段的元信息，包括键名、标签、类型、选项、占位符、描述、默认值、是否可空、渲染钩子与自定义输入组件等。
+  - 表格列、表单输入、单元格渲染均由字段定义自动推导，减少样板代码，提升一致性与可维护性。
 
-```mermaid
-classDiagram
-class FieldDef {
-+string key
-+string label
-+type
-+options
-+asyncOptions
-+hideInTable
-+defaultValue
-+nullable
-+placeholder
-+description
-+render()
-+customInput()
-}
-class AsyncOptions {
-+string apiPath
-+string valueKey
-+labelKey
-}
-FieldDef --> AsyncOptions : "异步选择框配置"
-```
+- 关键字段说明
+  - key：字段唯一标识，用于数据读写与表格列定位
+  - label：显示标签
+  - type：输入类型（text、number、textarea、boolean、select、async-select）
+  - options：静态选项（用于 select）
+  - asyncOptions：异步选项配置（apiPath、valueKey、labelKey）
+  - hideInTable：是否隐藏在表格中
+  - defaultValue：默认值
+  - nullable：是否允许为空（对应后端 null）
+  - placeholder/description：表单提示与说明
+  - render：自定义单元格渲染函数
+  - customInput：自定义表单输入组件
 
-**图表来源**
-- [crud-page.tsx:28-49](file://frontend/components/crud-page.tsx#L28-L49)
-- [crud-page.tsx:34-40](file://frontend/components/crud-page.tsx#L34-L40)
+- 表单与表格渲染策略
+  - 表格：过滤 hideInTable 后生成列，render 优先，否则根据 type 输出文本或布尔文案，异步选择使用缓存选项映射
+  - 表单：根据 type 自动选择 Input、Textarea、Switch、Select 或自定义组件；支持数值解析、空字符串转 null、可空下拉的占位选项
 
-**章节来源**
-- [crud-page.tsx:28-49](file://frontend/components/crud-page.tsx#L28-L49)
+章节来源
+- [crud-page.tsx:28-45](file://frontend/components/crud-page.tsx#L28-L45)
+- [crud-page.tsx:166-249](file://frontend/components/crud-page.tsx#L166-L249)
+- [crud-page.tsx:263-323](file://frontend/components/crud-page.tsx#L263-L323)
 
-### 状态管理机制
-CRUD 组件内部维护以下状态：
-- items：表格数据集合
-- editing：当前编辑/新建的表单数据快照
-- isNew：标识新建或编辑
-- open：表单对话框开关
-- loading：数据加载状态
-- saving：保存状态
-- deleteTarget：删除确认的目标项
-- asyncOpts：异步选择框的选项缓存（按字段 key 缓存）
-
-这些状态协同驱动 UI 的加载骨架、表格渲染、表单对话框与删除确认弹窗。
-
-**章节来源**
-- [crud-page.tsx:60-70](file://frontend/components/crud-page.tsx#L60-L70)
-
-### 数据加载与表格渲染
-- 首次挂载时触发数据加载，加载成功后设置 items，失败时提示错误。
-- 表格头部固定 ID 列与其他字段列；根据字段定义过滤隐藏列。
-- 表格单元格支持：
-  - 自定义渲染函数
-  - 布尔值显示为勾选/未勾选符号
-  - 异步选择框显示对应标签（基于缓存）
-- 加载中显示骨架屏，空数据时显示提示。
+### 表单输入组件自动适配机制
+- 文本与数字
+  - 文本：Input[type=text]，支持 placeholder 与受控值
+  - 数字：Input[type=number]，空值转 0，可空时空字符串转 null
+- 开关
+  - Switch + 文案切换，布尔值渲染“已启用/已禁用”
+- 选择与异步选择
+  - Select 组件，支持静态 options 与异步 asyncOptions 缓存
+  - 可空下拉增加“不选择”占位项
+- 文本域
+  - Textarea，支持最小高度与字体样式
+- 自定义输入
+  - customInput 支持复杂场景（如多主机输入、富文本）
 
 ```mermaid
 flowchart TD
-Start(["组件挂载"]) --> Load["调用 load() 发起 API 请求"]
-Load --> Resp{"响应成功?"}
-Resp --> |是| SetItems["设置 items 并结束 loading"]
-Resp --> |否| Toast["提示错误并结束 loading"]
-SetItems --> Render["渲染表格与操作按钮"]
-Toast --> Render
+Start(["进入表单渲染"]) --> CheckType{"字段类型？"}
+CheckType --> |textarea| RenderTextarea["渲染 Textarea"]
+CheckType --> |boolean| RenderSwitch["渲染 Switch + 文案"]
+CheckType --> |select| RenderSelect["渲染 Select静态选项"]
+CheckType --> |async-select| RenderAsyncSelect["渲染 Select异步选项缓存"]
+CheckType --> |其他| RenderInput["渲染 Inputtext/number"]
+RenderAsyncSelect --> LoadAsync["首次加载异步选项缓存"]
+RenderInput --> ParseValue["空字符串->null可空<br/>number 类型解析"]
+RenderSwitch --> Toggle["切换布尔值"]
+RenderTextarea --> End(["完成"])
+ParseValue --> End
+Toggle --> End
+LoadAsync --> End
 ```
 
-**图表来源**
-- [crud-page.tsx:99-111](file://frontend/components/crud-page.tsx#L99-L111)
-- [crud-page.tsx:188-235](file://frontend/components/crud-page.tsx#L188-L235)
+图表来源
+- [crud-page.tsx:263-323](file://frontend/components/crud-page.tsx#L263-L323)
+- [crud-page.tsx:74-94](file://frontend/components/crud-page.tsx#L74-L94)
 
-**章节来源**
-- [crud-page.tsx:99-111](file://frontend/components/crud-page.tsx#L99-L111)
-- [crud-page.tsx:188-235](file://frontend/components/crud-page.tsx#L188-L235)
+章节来源
+- [crud-page.tsx:263-323](file://frontend/components/crud-page.tsx#L263-L323)
+- [crud-page.tsx:351-358](file://frontend/components/crud-page.tsx#L351-L358)
 
-### 表单对话框与保存流程
-- 新建/编辑对话框：
-  - 新建：基于字段默认值初始化 editing
-  - 编辑：复制当前项作为 editing
-- 表单项渲染：
-  - 多行文本、布尔值、普通选择框、异步选择框、普通输入框
-  - 自定义输入组件通过 customInput 注入
-- 保存：
-  - 新建：POST 到 apiPath
-  - 编辑：POST 到 apiPath/{id}/update
-  - 成功后关闭对话框、重新加载数据、触发回调
+### 异步选项缓存策略与性能优化
+- 实现细节
+  - 组件挂载时扫描所有 async-select 字段，一次性并行发起请求获取选项
+  - 使用 asyncOpts 状态缓存结果，避免重复请求
+  - 可空字段在选项列表前插入“不选择”占位项，便于用户清空选择
+  - 请求失败时回退为空数组，保证 UI 稳定性
+
+- 性能优化效果
+  - 并行加载多个异步选项，减少等待时间
+  - 本地缓存避免重复网络请求
+  - 仅在字段定义变更时重新加载，降低不必要的副作用
+
+```mermaid
+sequenceDiagram
+participant CP as "CrudPage"
+participant Fields as "字段定义"
+participant API as "API 封装"
+participant Cache as "asyncOpts 缓存"
+CP->>Fields : 过滤 type=async-select 的字段
+Fields-->>CP : 返回待加载字段集合
+CP->>API : 并行请求各字段的选项接口
+API-->>CP : 返回 { items : [] }
+CP->>Cache : 写入缓存含可空占位
+CP-->>CP : 使用缓存渲染 Select
+```
+
+图表来源
+- [crud-page.tsx:71-94](file://frontend/components/crud-page.tsx#L71-L94)
+
+章节来源
+- [crud-page.tsx:67-94](file://frontend/components/crud-page.tsx#L67-L94)
+
+### CRUD 操作流程详解
+- 数据加载
+  - 组件挂载时调用 api 获取列表数据，支持加载骨架屏与空状态
+- 新增/编辑弹窗
+  - openNew/openEdit 初始化编辑态，根据字段定义生成表单
+  - handleSave 根据 isNew 决定 POST 或 PUT 请求，成功后关闭弹窗并刷新列表
+- 删除确认
+  - openDelete 设置删除目标，handleDelete 发起删除请求并刷新
+- 保存反馈
+  - 成功/失败通过 toast 提示，必要时触发 onAfterSave 回调
 
 ```mermaid
 sequenceDiagram
 participant U as "用户"
 participant CP as "CrudPage"
-participant API as "api.ts"
-participant D as "对话框"
+participant API as "API 封装"
+participant Toast as "Toast 提示"
 U->>CP : 点击“新增/编辑”
-CP->>D : 打开对话框并设置 editing
-U->>D : 修改表单项
-U->>CP : 点击“保存”
-CP->>API : POST 新建或更新
+CP->>CP : openNew/openEdit 初始化编辑态
+U->>CP : 填写表单并点击“保存”
+CP->>API : POST/PUT 保存
 API-->>CP : 返回结果
-CP->>D : 关闭对话框
-CP->>CP : 调用 load() 重新加载
-CP-->>U : 刷新表格
-```
-
-**图表来源**
-- [crud-page.tsx:113-148](file://frontend/components/crud-page.tsx#L113-L148)
-- [crud-page.tsx:244-319](file://frontend/components/crud-page.tsx#L244-L319)
-- [api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
-
-**章节来源**
-- [crud-page.tsx:113-148](file://frontend/components/crud-page.tsx#L113-L148)
-- [crud-page.tsx:244-319](file://frontend/components/crud-page.tsx#L244-L319)
-
-### 删除确认流程
-- 用户点击删除按钮，设置 deleteTarget
-- 打开删除确认对话框
-- 确认后调用 DELETE API，成功后重新加载数据并触发回调
-
-```mermaid
-sequenceDiagram
-participant U as "用户"
-participant CP as "CrudPage"
-participant API as "api.ts"
+CP->>Toast : 显示成功/失败提示
+CP->>CP : 刷新列表并关闭弹窗
 U->>CP : 点击“删除”
-CP->>CP : 设置 deleteTarget
-CP->>CP : 打开确认对话框
-U->>CP : 确认删除
 CP->>API : POST 删除
 API-->>CP : 返回结果
-CP->>CP : 重新加载数据
-CP-->>U : 刷新表格
+CP->>Toast : 显示成功/失败提示
+CP->>CP : 刷新列表
 ```
 
-**图表来源**
-- [crud-page.tsx:150-161](file://frontend/components/crud-page.tsx#L150-L161)
-- [api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
+图表来源
+- [crud-page.tsx:113-164](file://frontend/components/crud-page.tsx#L113-L164)
+- [api.ts:72-121](file://frontend/lib/api.ts#L72-L121)
 
-**章节来源**
-- [crud-page.tsx:150-161](file://frontend/components/crud-page.tsx#L150-L161)
+章节来源
+- [crud-page.tsx:96-164](file://frontend/components/crud-page.tsx#L96-L164)
 
-### 异步选择框实现原理
-- 选项缓存：组件在挂载时扫描所有异步选择框字段，预取选项并缓存到 asyncOpts 中，key 为字段 key。
-- 动态加载：当对话框打开时，异步选择框使用缓存的选项进行渲染。
-- 空值处理：若字段可空，则在缓存中插入一个“不选择”选项，表单值为特殊标记并在保存前转换为 null。
-- 标签生成：支持字符串或函数两种方式生成标签，函数形式可从任意字段派生友好标签。
+### 页面示例对比：传统手写 vs 字段驱动
+- 传统手写页面（证书、策略、IP 黑白名单）
+  - 每个页面自行管理状态、表单、对话框与 API 调用，存在大量重复逻辑
+  - 适合简单场景，但扩展与维护成本较高
+- 字段驱动页面（推荐）
+  - 通过 FieldDef 描述字段，统一渲染与交互，显著减少重复代码
+  - 更易扩展新字段类型与新资源类型
 
-```mermaid
-flowchart TD
-Init["组件挂载"] --> Scan["扫描异步选择框字段"]
-Scan --> Fetch["对每个字段发起 API 获取选项"]
-Fetch --> Build["构建选项数组含可空项"]
-Build --> Cache["写入 asyncOpts 缓存"]
-Cache --> Render["表格/对话框渲染使用缓存"]
-```
+章节来源
+- [page.tsx](file://frontend/app/(dashboard)/certificates/page.tsx#L1-L268)
+- [page.tsx](file://frontend/app/(dashboard)/policies/page.tsx#L1-L238)
+- [page.tsx](file://frontend/app/(dashboard)/ip-lists/page.tsx#L1-L579)
+- [crud-page.tsx:1-359](file://frontend/components/crud-page.tsx#L1-L359)
 
-**图表来源**
-- [crud-page.tsx:71-97](file://frontend/components/crud-page.tsx#L71-L97)
-- [crud-page.tsx:274-291](file://frontend/components/crud-page.tsx#L274-L291)
+### 站点详情客户端组件中的字段驱动实践
+- 在站点详情客户端组件中，虽然未直接使用 CrudPage，但其对字段的抽象与表单渲染思路与 CrudPage 的字段驱动理念一致，均可作为字段驱动的参考实现。
 
-**章节来源**
-- [crud-page.tsx:71-97](file://frontend/components/crud-page.tsx#L71-L97)
-- [crud-page.tsx:274-291](file://frontend/components/crud-page.tsx#L274-L291)
+章节来源
+- [client.tsx:1-800](file://frontend/app/(dashboard)/sites/[id]/client.tsx#L1-L800)
 
-### 自定义输入组件支持机制
-- customInput 接收 { value, onChange } 两个参数，返回一个 React 节点。
-- 在表单对话框中，若字段定义了 customInput，则直接渲染该组件，否则按字段类型渲染内置控件。
-- 这种机制允许在不修改通用组件的前提下扩展复杂输入场景（如规则构建器）。
-
-**章节来源**
-- [crud-page.tsx:47-48](file://frontend/components/crud-page.tsx#L47-L48)
-- [crud-page.tsx:250-255](file://frontend/components/crud-page.tsx#L250-L255)
-
-### 使用示例与最佳实践
-
-#### 示例一：监听器页面（异步选择框 + 可空 + 自定义描述）
-- 字段包含异步选择框（证书），支持可空，标签通过函数生成。
-- 隐藏部分字段（如网络协议）以简化表格视图。
-- 提供描述帮助用户理解字段含义。
-
-**章节来源**
-- [listeners/page.tsx:1-77](file://frontend/app/(dashboard)/listeners/page.tsx#L1-L77)
-
-#### 示例二：规则页面（自定义输入 + 自定义渲染）
-- 使用自定义输入组件（规则构建器）替代普通输入框。
-- 自定义渲染函数将简单模式串格式化为更友好的展示。
-
-**章节来源**
-- [rules/page.tsx:1-76](file://frontend/app/(dashboard)/rules/page.tsx#L1-L76)
-
-#### 示例三：策略页面（最简用法）
-- 仅包含一个名称字段，演示最小化配置即可快速搭建 CRUD 页面。
-
-**章节来源**
-- [policies/page.tsx:1-16](file://frontend/app/(dashboard)/policies/page.tsx#L1-L16)
-
-#### 最佳实践
-- 字段设计：优先使用可空字段处理“未选择”场景；为复杂字段提供描述。
-- 渲染优化：对长文本使用自定义渲染，避免表格拥挤。
-- 性能优化：合理使用异步选择框并利用缓存；避免在 render 中创建新对象。
-- 错误处理：统一依赖 API 封装的错误处理逻辑，保证用户体验一致。
-
-**章节来源**
-- [crud-page.tsx:28-49](file://frontend/components/crud-page.tsx#L28-L49)
-- [api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
-
-## 依赖关系分析
-CRUD 组件与 UI 组件、API 封装之间的依赖关系如下：
+## 依赖分析
+- 组件耦合
+  - CrudPage 依赖 api 封装与 UI 组件库（Button、Input、Textarea、Switch、Select、Dialog、AlertDialog、Table 等）
+  - 通过 ConsoleShell 提供一致的页面结构与状态提示
+- 外部依赖
+  - Next.js App Router 与 React Hooks（useState/useEffect/useCallback/useRef）
+  - lucide-react 图标库与 sonner 提示库
 
 ```mermaid
 graph LR
-CP["CrudPage"] --> D["Dialog"]
-CP --> T["Table"]
-CP --> S["Select"]
-CP --> API["api.ts"]
-L["ListenersPage"] --> CP
-R["RulesPage"] --> CP
-P["PoliciesPage"] --> CP
+CP["CrudPage"] --> API["api.ts"]
+CP --> UI["UI 组件库"]
+CP --> CS["ConsoleShell"]
+API --> Next["Next.js Fetch"]
 ```
 
-**图表来源**
-- [crud-page.tsx:1-358](file://frontend/components/crud-page.tsx#L1-L358)
-- [dialog.tsx:1-169](file://frontend/components/ui/dialog.tsx#L1-L169)
-- [table.tsx:1-117](file://frontend/components/ui/table.tsx#L1-L117)
-- [select.tsx:1-193](file://frontend/components/ui/select.tsx#L1-L193)
-- [listeners/page.tsx:1-77](file://frontend/app/(dashboard)/listeners/page.tsx#L1-L77)
-- [rules/page.tsx:1-76](file://frontend/app/(dashboard)/rules/page.tsx#L1-L76)
-- [policies/page.tsx:1-16](file://frontend/app/(dashboard)/policies/page.tsx#L1-L16)
+图表来源
+- [crud-page.tsx:1-27](file://frontend/components/crud-page.tsx#L1-L27)
+- [api.ts:1-121](file://frontend/lib/api.ts#L1-L121)
+- [console-shell.tsx:1-34](file://frontend/components/console-shell.tsx#L1-L34)
 
-**章节来源**
-- [crud-page.tsx:1-358](file://frontend/components/crud-page.tsx#L1-L358)
+章节来源
+- [crud-page.tsx:1-27](file://frontend/components/crud-page.tsx#L1-L27)
+- [api.ts:1-121](file://frontend/lib/api.ts#L1-L121)
+- [console-shell.tsx:1-34](file://frontend/components/console-shell.tsx#L1-L34)
 
 ## 性能考虑
-- 异步选择框缓存：在组件挂载时一次性拉取所有异步选项，减少重复请求与闪烁。
-- 表格渲染：使用骨架屏提升加载体验；对长列表采用虚拟滚动（如需）进一步优化。
-- 状态更新：避免在渲染路径中创建新的对象或函数，减少不必要的重渲染。
-- API 错误处理：统一处理 401/403/429 等错误，防止异常中断 UI 流程。
+- 异步选项缓存
+  - 首次渲染时并行加载，后续复用缓存，避免重复请求
+- 列表渲染优化
+  - 使用 Skeleton 骨架屏提升感知性能
+  - 表格列按需渲染，隐藏列不参与渲染
+- 网络与鉴权
+  - API 封装内置鉴权头与令牌刷新，减少页面侧重复逻辑
+- 受控表单
+  - 输入值解析与空值转换在组件内部完成，避免父组件状态抖动
 
-[本节为通用指导，无需特定文件引用]
+## 故障排查指南
+- 401 未授权
+  - API 封装会尝试刷新令牌并重试一次，若仍失败则跳转登录页
+- 403 禁止访问
+  - 映射为“访问被拒绝”，需检查权限与角色
+- 429 请求过于频繁
+  - 映射为“请求过多”，需降频或增加节流
+- 其他错误
+  - 统一捕获 HTTP 状态码与错误体，抛出可读错误消息
 
-## 故障排除指南
-- 加载失败：检查 API 返回状态与错误消息，确认网络连通与认证令牌有效性。
-- 401 未授权：组件会尝试刷新令牌并重试；若仍失败，跳转至登录页。
-- 403 权限不足：检查 RBAC 权限配置，确保当前账户具备相应操作权限。
-- 429 请求过快：遵循速率限制策略，适当增加请求间隔。
-- 异步选择框为空：确认异步 API 返回格式为 { items: [...] }，且 valueKey/labelKey 配置正确。
-
-**章节来源**
-- [api.ts:16-88](file://frontend/lib/api.ts#L16-L88)
-- [crud-page.tsx:71-97](file://frontend/components/crud-page.tsx#L71-L97)
+章节来源
+- [api.ts:81-114](file://frontend/lib/api.ts#L81-L114)
 
 ## 结论
-通用 CRUD 页面组件通过清晰的字段定义与状态管理，实现了高度复用的数据管理界面。其对异步选择框、自定义输入组件与表格渲染的灵活支持，使得在不同业务场景下都能快速构建一致、可靠的管理页面。结合统一的 API 封装与 UI 组件库，能够有效提升开发效率与用户体验。
-
-[本节为总结性内容，无需特定文件引用]
+通过 FieldDef 字段驱动渲染与 CrudPage 组件，可以高效地构建一致、可扩展且易于维护的 CRUD 页面。配合异步选项缓存、统一的 API 封装与布局组件，能够显著降低重复工作量并提升开发效率。建议在新资源页面优先采用字段驱动方案，并结合页面示例进行定制化扩展。
 
 ## 附录
-
-### API 封装要点
-- 认证令牌管理：在模块作用域内存储访问令牌，避免 XSS 风险。
-- 自动刷新：遇到 401 且存在旧令牌时自动刷新并重试请求。
-- 错误映射：将常见 HTTP 状态映射为用户可读的错误信息。
-- 响应解析：统一处理 204 无内容与 JSON 响应。
-
-**章节来源**
-- [api.ts:7-114](file://frontend/lib/api.ts#L7-L114)
-- [api.ts:118-317](file://frontend/lib/api.ts#L118-L317)
+- 最佳实践清单
+  - 使用 FieldDef 描述所有字段，明确 type、placeholder、description、nullable 等属性
+  - 优先使用异步选项缓存，避免重复请求
+  - 为复杂字段提供 customInput，保持表单一致性
+  - 使用 ConsoleShell 组件统一页面结构与状态提示
+  - 在 onAfterSave 中执行必要的刷新或导航逻辑
+  - 对于大型列表，考虑分页与虚拟滚动（如需）

@@ -4,16 +4,21 @@
 **本文引用的文件**
 - [frontend/lib/api.ts](file://frontend/lib/api.ts)
 - [frontend/components/auth-guard.tsx](file://frontend/components/auth-guard.tsx)
-- [internal/admin/router.go](file://internal/admin/router.go)
-- [internal/admin/middleware.go](file://internal/admin/middleware.go)
+- [frontend/app/login/page.tsx](file://frontend/app/login/page.tsx)
+- [frontend/lib/rules-api.ts](file://frontend/lib/rules-api.ts)
+- [frontend/lib/security-api.ts](file://frontend/lib/security-api.ts)
+- [frontend/lib/site-upstreams.ts](file://frontend/lib/site-upstreams.ts)
 - [internal/admin/auth/jwt.go](file://internal/admin/auth/jwt.go)
 - [internal/admin/auth/session.go](file://internal/admin/auth/session.go)
 - [internal/admin/auth/bruteforce.go](file://internal/admin/auth/bruteforce.go)
+- [internal/admin/router.go](file://internal/admin/router.go)
+- [internal/admin/middleware.go](file://internal/admin/middleware.go)
 - [internal/admin/handler_auth.go](file://internal/admin/handler_auth.go)
 - [internal/admin/handler_site.go](file://internal/admin/handler_site.go)
 - [internal/cache/response_cache.go](file://internal/cache/response_cache.go)
 - [internal/dataplane/websocket.go](file://internal/dataplane/websocket.go)
 - [internal/dataplane/sse.go](file://internal/dataplane/sse.go)
+- [docs/前端管理界面/API 集成.md](file://docs/前端管理界面/API 集成.md)
 </cite>
 
 ## 目录
@@ -46,6 +51,7 @@ graph TB
 subgraph "前端"
 FE_API["frontend/lib/api.ts<br/>统一请求封装"]
 FE_AUTH["frontend/components/auth-guard.tsx<br/>鉴权守卫"]
+FE_LOGIN["frontend/app/login/page.tsx<br/>登录页面"]
 end
 subgraph "后端"
 ROUTER["internal/admin/router.go<br/>路由注册与分组"]
@@ -58,6 +64,7 @@ SSE["internal/dataplane/sse.go<br/>SSE 代理"]
 end
 FE_API --> ROUTER
 FE_AUTH --> FE_API
+FE_LOGIN --> FE_API
 ROUTER --> MW
 MW --> AUTH_H
 ROUTER --> SITE_H
@@ -69,6 +76,7 @@ ROUTER --> SSE
 图表来源
 - [frontend/lib/api.ts:1-317](file://frontend/lib/api.ts#L1-L317)
 - [frontend/components/auth-guard.tsx:1-40](file://frontend/components/auth-guard.tsx#L1-L40)
+- [frontend/app/login/page.tsx:1-98](file://frontend/app/login/page.tsx#L1-L98)
 - [internal/admin/router.go:1-236](file://internal/admin/router.go#L1-L236)
 - [internal/admin/middleware.go:1-130](file://internal/admin/middleware.go#L1-L130)
 - [internal/admin/handler_auth.go:1-351](file://internal/admin/handler_auth.go#L1-L351)

@@ -2,16 +2,13 @@
 
 <cite>
 **本文档引用的文件**
-- [handler_security_event.go](file://internal/admin/handler_security_event.go)
+- [安全事件 API.md](file://docs/管理 API 系统/安全事件 API.md)
+- [security.go](file://internal/admin/event/security.go)
 - [security_event.go](file://internal/store/repository/security_event.go)
-- [models.go](file://internal/store/models.go)
-- [page.tsx](file://frontend/app/(dashboard)/security-events/page.tsx)
 - [router.go](file://internal/admin/router.go)
 - [eventwriter.go](file://internal/observability/eventwriter.go)
+- [page.tsx](file://frontend/app/(dashboard)/security-events/page.tsx)
 - [api.ts](file://frontend/lib/api.ts)
-- [action.go](file://internal/core/action/action.go)
-- [phases.go](file://internal/core/rules/phases.go)
-- [eval.go](file://internal/waf/eval.go)
 </cite>
 
 ## 目录
@@ -35,25 +32,24 @@
 ```mermaid
 graph TB
 FE["前端页面<br/>security-events/page.tsx"] --> API["后端路由<br/>router.go"]
-API --> Handler["事件处理器<br/>handler_security_event.go"]
-Handler --> Repo["事件仓储<br/>repository/security_event.go"]
+API --> Handler["事件处理器<br/>admin/event/security.go"]
+Handler --> Repo["事件仓储<br/>store/repository/security_event.go"]
 Repo --> Model["事件模型<br/>store/models.go"]
-Handler --> Stats["统计接口<br/>handler_security_event.go"]
+Handler --> Stats["统计接口<br/>admin/event/security.go"]
 Stats --> Repo
 DP["数据平面"] --> EW["事件写入器<br/>observability/eventwriter.go"]
 EW --> Repo
 ```
 
 图表来源
-- [router.go:110-113](file://internal/admin/router.go#L110-L113)
-- [handler_security_event.go:16-126](file://internal/admin/handler_security_event.go#L16-L126)
-- [security_event.go:11-191](file://internal/store/repository/security_event.go#L11-L191)
-- [models.go:214-236](file://internal/store/models.go#L214-L236)
-- [eventwriter.go:15-104](file://internal/observability/eventwriter.go#L15-L104)
+- [router.go:104-112](file://internal/admin/router.go#L104-L112)
+- [security.go:17-229](file://internal/admin/event/security.go#L17-L229)
+- [security_event.go:11-293](file://internal/store/repository/security_event.go#L11-L293)
+- [eventwriter.go:19-164](file://internal/observability/eventwriter.go#L19-L164)
 
 章节来源
-- [router.go:48-135](file://internal/admin/router.go#L48-L135)
-- [page.tsx:60-441](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L441)
+- [router.go:104-112](file://internal/admin/router.go#L104-L112)
+- [page.tsx:60-259](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L259)
 
 ## 核心组件
 - 路由与权限：后端路由统一挂载在 /api/v1 下，安全事件相关接口通过认证中间件保护，支持只读角色访问。
@@ -64,12 +60,11 @@ EW --> Repo
 - 前端页面：筛选器、分页、统计卡片、事件表格、详情弹窗与 CSV 导出。
 
 章节来源
-- [router.go:110-113](file://internal/admin/router.go#L110-L113)
-- [handler_security_event.go:16-126](file://internal/admin/handler_security_event.go#L16-L126)
-- [security_event.go:11-191](file://internal/store/repository/security_event.go#L11-L191)
-- [models.go:214-236](file://internal/store/models.go#L214-L236)
-- [eventwriter.go:15-104](file://internal/observability/eventwriter.go#L15-L104)
-- [page.tsx:60-441](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L441)
+- [router.go:104-112](file://internal/admin/router.go#L104-L112)
+- [security.go:17-229](file://internal/admin/event/security.go#L17-L229)
+- [security_event.go:11-293](file://internal/store/repository/security_event.go#L11-L293)
+- [eventwriter.go:19-164](file://internal/observability/eventwriter.go#L19-L164)
+- [page.tsx:60-259](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L259)
 
 ## 架构总览
 下图展示从数据平面到事件写入器、再到仓储层与 API 的整体链路，以及前端如何调用后端接口。
@@ -95,10 +90,10 @@ API-->>FE : "JSON 统计"
 ```
 
 图表来源
-- [eventwriter.go:42-104](file://internal/observability/eventwriter.go#L42-L104)
-- [security_event.go:30-60](file://internal/store/repository/security_event.go#L30-L60)
-- [handler_security_event.go:16-126](file://internal/admin/handler_security_event.go#L16-L126)
-- [page.tsx:76-107](file://frontend/app/(dashboard)/security-events/page.tsx#L76-L107)
+- [eventwriter.go:118-139](file://internal/observability/eventwriter.go#L118-L139)
+- [security_event.go:32-46](file://internal/store/repository/security_event.go#L32-L46)
+- [security.go:17-229](file://internal/admin/event/security.go#L17-L229)
+- [page.tsx:89-115](file://frontend/app/(dashboard)/security-events/page.tsx#L89-L115)
 
 ## 详细组件分析
 
@@ -149,14 +144,12 @@ SecurityEvent --> RulePhase : "phase"
 ```
 
 图表来源
-- [models.go:214-236](file://internal/store/models.go#L214-L236)
-- [models.go:54-77](file://internal/store/models.go#L54-L77)
-- [models.go:44-52](file://internal/store/models.go#L44-L52)
+- [security_event.go:11-30](file://internal/store/repository/security_event.go#L11-L30)
+- [security_event.go:96-149](file://internal/store/repository/security_event.go#L96-L149)
 
 章节来源
-- [page.tsx:236-254](file://frontend/app/(dashboard)/security-events/page.tsx#L236-L254)
-- [models.go:54-77](file://internal/store/models.go#L54-L77)
-- [models.go:44-52](file://internal/store/models.go#L44-L52)
+- [page.tsx:210-259](file://frontend/app/(dashboard)/security-events/page.tsx#L210-L259)
+- [security_event.go:11-30](file://internal/store/repository/security_event.go#L11-L30)
 
 ### 事件查询接口
 - 接口路径：GET /api/v1/security-events
@@ -186,15 +179,15 @@ API-->>FE : "{items,total,page}"
 ```
 
 图表来源
-- [handler_security_event.go:16-56](file://internal/admin/handler_security_event.go#L16-L56)
-- [security_event.go:30-44](file://internal/store/repository/security_event.go#L30-L44)
-- [page.tsx:79-98](file://frontend/app/(dashboard)/security-events/page.tsx#L79-L98)
+- [security.go:17-59](file://internal/admin/event/security.go#L17-L59)
+- [security_event.go:32-46](file://internal/store/repository/security_event.go#L32-L46)
+- [page.tsx:89-115](file://frontend/app/(dashboard)/security-events/page.tsx#L89-L115)
 
 章节来源
-- [handler_security_event.go:16-56](file://internal/admin/handler_security_event.go#L16-L56)
-- [security_event.go:17-28](file://internal/store/repository/security_event.go#L17-L28)
-- [security_event.go:162-191](file://internal/store/repository/security_event.go#L162-L191)
-- [page.tsx:76-98](file://frontend/app/(dashboard)/security-events/page.tsx#L76-L98)
+- [security.go:17-59](file://internal/admin/event/security.go#L17-L59)
+- [security_event.go:17-30](file://internal/store/repository/security_event.go#L17-L30)
+- [security_event.go:32-46](file://internal/store/repository/security_event.go#L32-L46)
+- [page.tsx:76-115](file://frontend/app/(dashboard)/security-events/page.tsx#L76-L115)
 
 ### 事件详情展示
 - 接口路径：GET /api/v1/security-events/:id
@@ -216,14 +209,14 @@ API-->>FE : "JSON 事件详情"
 ```
 
 图表来源
-- [handler_security_event.go:59-73](file://internal/admin/handler_security_event.go#L59-L73)
-- [security_event.go:46-49](file://internal/store/repository/security_event.go#L46-L49)
-- [page.tsx:361-388](file://frontend/app/(dashboard)/security-events/page.tsx#L361-L388)
+- [security.go:61-75](file://internal/admin/event/security.go#L61-L75)
+- [security_event.go:53-56](file://internal/store/repository/security_event.go#L53-L56)
+- [page.tsx:348-397](file://frontend/app/(dashboard)/security-events/page.tsx#L348-L397)
 
 章节来源
-- [handler_security_event.go:59-73](file://internal/admin/handler_security_event.go#L59-L73)
-- [security_event.go:46-49](file://internal/store/repository/security_event.go#L46-L49)
-- [page.tsx:361-388](file://frontend/app/(dashboard)/security-events/page.tsx#L361-L388)
+- [security.go:61-75](file://internal/admin/event/security.go#L61-L75)
+- [security_event.go:53-56](file://internal/store/repository/security_event.go#L53-L56)
+- [page.tsx:348-397](file://frontend/app/(dashboard)/security-events/page.tsx#L348-L397)
 
 ### 事件统计分析
 - 接口路径：GET /api/v1/security-events/stats
@@ -257,12 +250,12 @@ API-->>FE : "JSON 统计"
 ```
 
 图表来源
-- [handler_security_event.go:77-102](file://internal/admin/handler_security_event.go#L77-L102)
-- [security_event.go:75-135](file://internal/store/repository/security_event.go#L75-L135)
+- [security.go:179-205](file://internal/admin/event/security.go#L179-L205)
+- [security_event.go:101-138](file://internal/store/repository/security_event.go#L101-L138)
 
 章节来源
-- [handler_security_event.go:77-102](file://internal/admin/handler_security_event.go#L77-L102)
-- [security_event.go:75-135](file://internal/store/repository/security_event.go#L75-L135)
+- [security.go:179-205](file://internal/admin/event/security.go#L179-L205)
+- [security_event.go:96-138](file://internal/store/repository/security_event.go#L96-L138)
 - [page.tsx:100-107](file://frontend/app/(dashboard)/security-events/page.tsx#L100-L107)
 
 ### 事件趋势与时间线
@@ -285,12 +278,12 @@ API-->>FE : "JSON buckets"
 ```
 
 图表来源
-- [handler_security_event.go:105-126](file://internal/admin/handler_security_event.go#L105-L126)
-- [security_event.go:143-153](file://internal/store/repository/security_event.go#L143-L153)
+- [security.go:207-229](file://internal/admin/event/security.go#L207-L229)
+- [security_event.go:215-235](file://internal/store/repository/security_event.go#L215-L235)
 
 章节来源
-- [handler_security_event.go:105-126](file://internal/admin/handler_security_event.go#L105-L126)
-- [security_event.go:143-153](file://internal/store/repository/security_event.go#L143-L153)
+- [security.go:207-229](file://internal/admin/event/security.go#L207-L229)
+- [security_event.go:215-235](file://internal/store/repository/security_event.go#L215-L235)
 
 ### 事件写入与持久化
 - 数据平面在规则命中后生成安全事件，通过事件写入器异步缓冲与批处理写入数据库，避免阻塞数据面热路径。
@@ -311,12 +304,12 @@ Batch --> Done["完成"]
 ```
 
 图表来源
-- [eventwriter.go:42-104](file://internal/observability/eventwriter.go#L42-L104)
-- [security_event.go:55-60](file://internal/store/repository/security_event.go#L55-L60)
+- [eventwriter.go:64-139](file://internal/observability/eventwriter.go#L64-L139)
+- [security_event.go:68-75](file://internal/store/repository/security_event.go#L68-L75)
 
 章节来源
-- [eventwriter.go:15-104](file://internal/observability/eventwriter.go#L15-L104)
-- [security_event.go:51-60](file://internal/store/repository/security_event.go#L51-L60)
+- [eventwriter.go:19-164](file://internal/observability/eventwriter.go#L19-L164)
+- [security_event.go:68-75](file://internal/store/repository/security_event.go#L68-L75)
 
 ### 前端交互与导出
 - 前端页面支持：
@@ -328,8 +321,8 @@ Batch --> Done["完成"]
 - API 封装：自动携带 Authorization 头，处理 401 刷新令牌、403 权限不足、429 限流等错误。
 
 章节来源
-- [page.tsx:60-441](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L441)
-- [api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
+- [page.tsx:60-259](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L259)
+- [api.ts:72-121](file://frontend/lib/api.ts#L72-L121)
 
 ## 依赖关系分析
 - 路由层依赖仓储层；处理器依赖仓储层与工具函数；仓储层依赖 GORM；模型定义事件字段；前端通过封装的 api.ts 调用后端接口。
@@ -337,10 +330,10 @@ Batch --> Done["完成"]
 
 ```mermaid
 graph LR
-Router["router.go"] --> Handler["handler_security_event.go"]
-Handler --> Repo["repository/security_event.go"]
+Router["router.go"] --> Handler["admin/event/security.go"]
+Handler --> Repo["store/repository/security_event.go"]
 Repo --> Model["store/models.go"]
-Handler --> Stats["handler_security_event.go"]
+Handler --> Stats["admin/event/security.go"]
 Stats --> Repo
 FE["frontend/api.ts"] --> Router
 FE --> Page["frontend/security-events/page.tsx"]
@@ -349,22 +342,20 @@ EW --> Repo
 ```
 
 图表来源
-- [router.go:110-113](file://internal/admin/router.go#L110-L113)
-- [handler_security_event.go:16-126](file://internal/admin/handler_security_event.go#L16-L126)
-- [security_event.go:11-191](file://internal/store/repository/security_event.go#L11-L191)
-- [models.go:214-236](file://internal/store/models.go#L214-L236)
-- [eventwriter.go:15-104](file://internal/observability/eventwriter.go#L15-L104)
-- [api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
-- [page.tsx:60-441](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L441)
+- [router.go:104-112](file://internal/admin/router.go#L104-L112)
+- [security.go:17-229](file://internal/admin/event/security.go#L17-L229)
+- [security_event.go:11-293](file://internal/store/repository/security_event.go#L11-L293)
+- [eventwriter.go:19-164](file://internal/observability/eventwriter.go#L19-L164)
+- [api.ts:72-121](file://frontend/lib/api.ts#L72-L121)
+- [page.tsx:60-259](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L259)
 
 章节来源
-- [router.go:48-135](file://internal/admin/router.go#L48-L135)
-- [handler_security_event.go:16-126](file://internal/admin/handler_security_event.go#L16-L126)
-- [security_event.go:11-191](file://internal/store/repository/security_event.go#L11-L191)
-- [models.go:214-236](file://internal/store/models.go#L214-L236)
-- [eventwriter.go:15-104](file://internal/observability/eventwriter.go#L15-L104)
-- [api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
-- [page.tsx:60-441](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L441)
+- [router.go:104-112](file://internal/admin/router.go#L104-L112)
+- [security.go:17-229](file://internal/admin/event/security.go#L17-L229)
+- [security_event.go:11-293](file://internal/store/repository/security_event.go#L11-L293)
+- [eventwriter.go:19-164](file://internal/observability/eventwriter.go#L19-L164)
+- [api.ts:72-121](file://frontend/lib/api.ts#L72-L121)
+- [page.tsx:60-259](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L259)
 
 ## 性能考量
 - 异步写入：事件写入器使用缓冲通道与定时器，批量写入数据库，避免阻塞数据面热路径。
@@ -386,9 +377,9 @@ EW --> Repo
   - 加载失败：查看错误提示与网络面板，确认接口可达与返回体结构正确。
 
 章节来源
-- [api.ts:48-88](file://frontend/lib/api.ts#L48-L88)
-- [handler_security_event.go:47-50](file://internal/admin/handler_security_event.go#L47-L50)
-- [eventwriter.go:46-48](file://internal/observability/eventwriter.go#L46-L48)
+- [api.ts:72-121](file://frontend/lib/api.ts#L72-L121)
+- [security.go:48-50](file://internal/admin/event/security.go#L48-L50)
+- [eventwriter.go:64-72](file://internal/observability/eventwriter.go#L64-L72)
 
 ## 结论
 本安全事件 API 提供了完整的事件采集、存储、查询、统计与展示能力。通过异步写入与分页查询保障高并发下的稳定性；通过丰富的筛选与统计维度满足运营与安全部门的日常需求。建议结合实际业务场景优化索引与轮询频率，并在生产环境完善告警与审计策略。
@@ -450,8 +441,8 @@ EW --> Repo
     - 在前端点击导出按钮生成 CSV 文件
 
 章节来源
-- [handler_security_event.go:16-126](file://internal/admin/handler_security_event.go#L16-L126)
-- [page.tsx:76-107](file://frontend/app/(dashboard)/security-events/page.tsx#L76-L107)
+- [security.go:17-229](file://internal/admin/event/security.go#L17-L229)
+- [page.tsx:89-115](file://frontend/app/(dashboard)/security-events/page.tsx#L89-L115)
 
 ### 事件告警机制与通知策略
 - 当前代码未内置告警引擎或通知服务。建议在以下场景引入告警：
@@ -461,8 +452,8 @@ EW --> Repo
 - 取证分析：事件详情包含 Request ID、客户端 IP、Host、路径、User-Agent、规则 ID、匹配描述、地理信息与状态码，可用于回溯与证据留存。
 
 章节来源
-- [models.go:214-236](file://internal/store/models.go#L214-L236)
-- [handler_security_event.go:59-73](file://internal/admin/handler_security_event.go#L59-L73)
+- [security_event.go:53-56](file://internal/store/repository/security_event.go#L53-L56)
+- [security.go:61-75](file://internal/admin/event/security.go#L61-L75)
 
 ### 事件溯源与取证分析
 - 溯源要点：
@@ -474,5 +465,5 @@ EW --> Repo
   - 对高危事件（拦截类）建立专项调查流程，结合上游日志与 WAF 命中详情。
 
 章节来源
-- [page.tsx:361-388](file://frontend/app/(dashboard)/security-events/page.tsx#L361-L388)
-- [models.go:214-236](file://internal/store/models.go#L214-L236)
+- [page.tsx:348-397](file://frontend/app/(dashboard)/security-events/page.tsx#L348-L397)
+- [security_event.go:53-56](file://internal/store/repository/security_event.go#L53-L56)

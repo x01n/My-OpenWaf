@@ -5,12 +5,9 @@
 - [iprep.go](file://internal/waf/iprep.go)
 - [iprep_test.go](file://internal/waf/iprep_test.go)
 - [phases.go](file://internal/core/rules/phases.go)
-- [models.go](file://internal/store/models.go)
 - [ip_list.go](file://internal/store/repository/ip_list.go)
-- [handler_ip_list.go](file://internal/admin/handler_ip_list.go)
 - [server.go](file://internal/app/server.go)
 - [clientip.go](file://internal/security/clientip.go)
-- [engine.go](file://internal/core/engine/engine.go)
 - [bot.go](file://internal/waf/bot.go)
 - [drop_event.go](file://internal/store/repository/drop_event.go)
 </cite>
@@ -23,8 +20,9 @@
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
 7. [性能考虑](#性能考虑)
-8. [故障排查指南](#故障排查指南)
+8. [故障排除指南](#故障排除指南)
 9. [结论](#结论)
+10. [附录](#附录)
 
 ## 简介
 本文件聚焦于 My-OpenWaf 中的 IP 信誉检查阶段，系统性阐述其架构设计、数据来源与处理流程、白名单/黑名单/正常流量的判定逻辑、自动封禁机制、实时性与准确性保障、数据更新策略与缓存优化，以及配置方法与故障恢复机制。该阶段作为 WAF 处理流水线的首要环节，负责基于预置列表与动态违规统计快速做出允许或拦截决策。
@@ -66,14 +64,12 @@ Repo --> IPRep
 **图表来源**
 - [server.go:312-333](file://internal/app/server.go#L312-L333)
 - [clientip.go:13-49](file://internal/security/clientip.go#L13-L49)
-- [engine.go:58-129](file://internal/core/engine/engine.go#L58-L129)
 - [phases.go:130-170](file://internal/core/rules/phases.go#L130-L170)
 - [iprep.go:19-54](file://internal/waf/iprep.go#L19-L54)
 
 **章节来源**
 - [server.go:312-333](file://internal/app/server.go#L312-L333)
 - [clientip.go:13-49](file://internal/security/clientip.go#L13-L49)
-- [engine.go:58-129](file://internal/core/engine/engine.go#L58-L129)
 - [phases.go:130-170](file://internal/core/rules/phases.go#L130-L170)
 - [iprep.go:19-54](file://internal/waf/iprep.go#L19-L54)
 
@@ -88,9 +84,7 @@ Repo --> IPRep
 - [iprep.go:19-124](file://internal/waf/iprep.go#L19-L124)
 - [phases.go:130-170](file://internal/core/rules/phases.go#L130-L170)
 - [ip_list.go:13-42](file://internal/store/repository/ip_list.go#L13-L42)
-- [models.go:200-210](file://internal/store/models.go#L200-L210)
 - [clientip.go:13-49](file://internal/security/clientip.go#L13-L49)
-- [engine.go:88-90](file://internal/core/engine/engine.go#L88-L90)
 
 ## 架构概览
 IP 信誉检查在请求处理流水线中的位置如下：
@@ -112,7 +106,6 @@ Engine-->>DP : "后续阶段或响应"
 ```
 
 **图表来源**
-- [engine.go:58-129](file://internal/core/engine/engine.go#L58-L129)
 - [phases.go:142-170](file://internal/core/rules/phases.go#L142-L170)
 - [iprep.go:90-124](file://internal/waf/iprep.go#L90-L124)
 
@@ -178,8 +171,8 @@ IPReputation --> violationCounter : "记录违规"
   - 若 ClientIP 为空或信誉管理器为空，直接 Pass。
   - 调用 Check 返回决策；若未匹配，Pass；若 Allowed=true，返回 Allow 动作并短路后续阶段；否则返回 Intercept 动作。
 - 结果映射
-  - 白名单：Category=whitelist，MatchDesc=“whitelist: 原因”。
-  - 黑名单/自动封禁：Category=blacklist/auto_ban，MatchDesc=“类别: 原因”，RuleIDStr=“iprep:类别”。
+  - 白名单：Category=whitelist，MatchDesc="whitelist: 原因"。
+  - 黑名单/自动封禁：Category=blacklist/auto_ban，MatchDesc="类别: 原因"，RuleIDStr="iprep:类别"。
 
 ```mermaid
 flowchart TD
@@ -266,14 +259,11 @@ Srv-->>Admin : "完成重载"
 ```
 
 **图表来源**
-- [handler_ip_list.go:46-112](file://internal/admin/handler_ip_list.go#L46-L112)
 - [server.go:220-242](file://internal/app/server.go#L220-L242)
 - [server.go:312-333](file://internal/app/server.go#L312-L333)
 - [ip_list.go:13-42](file://internal/store/repository/ip_list.go#L13-L42)
 
 **章节来源**
-- [models.go:200-210](file://internal/store/models.go#L200-L210)
-- [handler_ip_list.go:46-112](file://internal/admin/handler_ip_list.go#L46-L112)
 - [server.go:220-242](file://internal/app/server.go#L220-L242)
 - [server.go:312-333](file://internal/app/server.go#L312-L333)
 
@@ -287,7 +277,6 @@ Srv-->>Admin : "完成重载"
 **章节来源**
 - [iprep.go:126-155](file://internal/waf/iprep.go#L126-L155)
 - [iprep.go:210-232](file://internal/waf/iprep.go#L210-L232)
-- [phases.go:212-244](file://internal/core/rules/phases.go#L212-L244)
 
 ### 与 Bot 检测的协同
 - 在两阶段 Bot 流程中，PreScreen 会检查 IP 信誉（黑名单/自动封禁），若命中则直接进入深度评分。
@@ -312,13 +301,11 @@ ClientIP --> Engine
 ```
 
 **图表来源**
-- [engine.go:88-90](file://internal/core/engine/engine.go#L88-L90)
 - [phases.go:136-138](file://internal/core/rules/phases.go#L136-L138)
 - [iprep.go:61-66](file://internal/waf/iprep.go#L61-L66)
 - [clientip.go:13-49](file://internal/security/clientip.go#L13-L49)
 
 **章节来源**
-- [engine.go:88-90](file://internal/core/engine/engine.go#L88-L90)
 - [phases.go:136-138](file://internal/core/rules/phases.go#L136-L138)
 - [iprep.go:61-66](file://internal/waf/iprep.go#L61-L66)
 - [clientip.go:13-49](file://internal/security/clientip.go#L13-L49)
@@ -337,9 +324,7 @@ ClientIP --> Engine
   - 对热点 IP 的匹配结果进行 LRU 缓存（需评估命中率与内存成本）。
   - 将 CIDR 表按前缀长度分桶，减少逐项 Contains 检查开销。
 
-[本节为通用性能讨论，不直接分析具体文件]
-
-## 故障排查指南
+## 故障排除指南
 - 常见问题
   - XFF 解析异常导致 ClientIP 错误：检查站点 XFF 模式与可信网段配置。
   - 列表未生效：确认 reload 是否成功、数据库 enabled 字段是否正确、解析函数是否返回有效条目。
@@ -357,3 +342,34 @@ ClientIP --> Engine
 
 ## 结论
 IP 信誉检查阶段通过简洁高效的内存数据结构与原子配置，实现了对白名单短路放行、黑名单直接拦截与自动封禁的统一处理。结合 XFF 解析与热重载机制，系统在保证实时性的同时具备良好的可运维性。建议在高并发场景下引入缓存与索引优化，并持续监控封禁统计与拦截趋势以提升整体防护效果。
+
+## 附录
+
+### 配置最佳实践
+- 自动封禁配置建议
+
+| 使用场景 | 阈值 | 窗口(秒) | 持续时间(秒) | 说明 |
+|----------|------|----------|--------------|------|
+| 开发环境 | 3-5 | 60 | 300 | 快速响应，便于测试 |
+| 生产环境 | 10-20 | 60-120 | 3600-7200 | 平衡安全性和用户体验 |
+| 高风险环境 | 5-10 | 30-60 | 7200-14400 | 更严格的防护策略 |
+
+- IP 地址管理建议
+  - 白名单配置：仅包含受信任的源 IP，使用最小权限原则，定期审查和更新。
+  - 黑名单配置：基于威胁情报更新，包含已知恶意 IP 和网段，设置合理的过期时间。
+  - CIDR 使用建议：优先使用更精确的网段，避免使用过于宽泛的网段，定期优化网段范围。
+
+### API 使用示例
+- 基本使用流程
+  - 创建 IP 信誉实例
+  - 配置自动封禁
+  - 设置黑白名单
+  - 检查 IP
+  - 记录违规
+
+- 配置管理
+  - 通过 API 管理 IP 列表，支持分页查询、启用筛选与 CRUD 操作。
+
+**章节来源**
+- [iprep.go:44-79](file://internal/waf/iprep.go#L44-L79)
+- [ip_list.go:13-42](file://internal/store/repository/ip_list.go#L13-L42)

@@ -2,14 +2,13 @@
 
 <cite>
 **本文档引用的文件**
-- [handler_dashboard.go](file://internal/admin/handler_dashboard.go)
+- [dashboard.go](file://internal/admin/system/dashboard.go)
 - [router.go](file://internal/admin/router.go)
 - [metrics.go](file://internal/dataplane/metrics.go)
-- [metrics.go](file://internal/observability/metrics.go)
+- [security_event.go](file://internal/store/repository/security_event.go)
 - [page.tsx](file://frontend/app/(dashboard)/dashboard/page.tsx)
 - [realtime-qps-chart.tsx](file://frontend/components/charts/realtime-qps-chart.tsx)
 - [api.ts](file://frontend/lib/api.ts)
-- [models.go](file://internal/store/models.go)
 - [response_cache.go](file://internal/cache/response_cache.go)
 </cite>
 
@@ -26,13 +25,11 @@
 10. [附录](#附录)
 
 ## 简介
+仪表板 API 是 OpenWAF 项目的核心监控与可视化组件，负责提供实时流量监控、安全态势分析与系统健康状态展示。该 API 通过整合数据平面指标、数据库统计信息与前端可视化组件，为用户提供全面的网络安全监控界面。
 
-仪表板 API 是 OpenWAF 项目的核心监控和可视化组件，负责提供实时流量监控、安全态势分析和系统健康状态展示。该 API 通过整合数据平面指标、数据库统计信息和前端可视化组件，为用户提供全面的网络安全监控界面。
-
-本系统采用前后端分离架构，后端使用 Go 语言构建高性能的 REST API，前端使用 React 和 TypeScript 实现交互式仪表板界面。系统支持多种指标类型的聚合分析，包括实时 QPS、响应时间、错误率和资源使用情况等。
+本系统采用前后端分离架构：后端使用 Go 语言构建高性能 REST API，前端使用 React 与 TypeScript 实现交互式仪表板界面。系统支持多种指标类型的聚合分析，包括实时 QPS、响应时间、错误率与资源使用情况等。
 
 ## 项目结构
-
 OpenWAF 项目采用模块化设计，仪表板相关的代码分布在多个目录中：
 
 ```mermaid
@@ -41,41 +38,34 @@ subgraph "后端服务"
 A[internal/admin] --> B[路由注册]
 A --> C[仪表板处理器]
 D[internal/dataplane] --> E[数据平面指标]
-F[internal/observability] --> G[可观测性指标]
-H[internal/store] --> I[数据模型]
-J[internal/cache] --> K[响应缓存]
+F[internal/store] --> G[仓库层]
+H[internal/cache] --> I[响应缓存]
 end
 subgraph "前端应用"
-L[frontend/app/(dashboard)] --> M[仪表板页面]
-N[frontend/components/charts] --> O[图表组件]
-P[frontend/lib] --> Q[API 客户端]
-end
-subgraph "数据库"
-R[SecurityEvent] --> S[安全事件表]
-T[DropEvent] --> U[丢弃事件表]
-V[FingerprintRecord] --> W[指纹记录表]
+J[frontend/app/(dashboard)] --> K[仪表板页面]
+L[frontend/components/charts] --> M[图表组件]
+N[frontend/lib] --> O[API 客户端]
 end
 B --> C
 C --> E
-C --> I
-M --> Q
-O --> M
+C --> G
+K --> O
+M --> K
 ```
 
 **图表来源**
 - [router.go:48-135](file://internal/admin/router.go#L48-L135)
-- [handler_dashboard.go:20-91](file://internal/admin/handler_dashboard.go#L20-L91)
-- [metrics.go:1-136](file://internal/dataplane/metrics.go#L1-L136)
+- [dashboard.go:20-91](file://internal/admin/system/dashboard.go#L20-L91)
+- [metrics.go:1-133](file://internal/dataplane/metrics.go#L1-L133)
 
 **章节来源**
 - [router.go:1-236](file://internal/admin/router.go#L1-L236)
-- [handler_dashboard.go:1-92](file://internal/admin/handler_dashboard.go#L1-L92)
+- [dashboard.go:1-123](file://internal/admin/system/dashboard.go#L1-L123)
 
 ## 核心组件
 
 ### 数据平面指标系统
-
-数据平面指标系统是仪表板 API 的核心数据源，负责收集和计算实时流量指标：
+数据平面指标系统是仪表板 API 的核心数据源，负责收集与计算实时流量指标：
 
 ```mermaid
 classDiagram
@@ -87,21 +77,24 @@ class Metrics {
 +atomic.Int64 WAFBlocks
 +atomic.Int64 WAFObserves
 +atomic.Int64 BuiltinHits
--sync.Mutex mu
--int ringIdx
--ringEntry[10] ring
--time startTime
++atomic.Int64 uniqueIPCnt
++atomic.Int64 attackIPCnt
++atomic.Int64 ringIdx
++ringEntry[10] ring
++time startTime
 +RecordRequest()
 +RecordStatus(code)
 +RecordWAFBlock()
 +RecordWAFObserve()
 +RecordBuiltinHit()
++RecordClientIP(ip)
++RecordAttackIP(ip)
 +QPS(windowSec) float64
 +Summary() Summary
 }
 class ringEntry {
-+int64 ts
-+int64 count
++atomic.Int64 ts
++atomic.Int64 count
 }
 class Summary {
 +float64 QPS1s
@@ -114,6 +107,8 @@ class Summary {
 +int64 WAFObserves
 +int64 BuiltinHits
 +int64 UptimeSec
++int64 UniqueIPs
++int64 AttackIPs
 }
 Metrics --> ringEntry : "使用"
 Metrics --> Summary : "生成"
@@ -123,7 +118,6 @@ Metrics --> Summary : "生成"
 - [metrics.go:9-136](file://internal/dataplane/metrics.go#L9-L136)
 
 ### 仪表板处理器
-
 仪表板处理器负责整合各种指标数据，提供统一的 API 接口：
 
 ```mermaid
@@ -143,22 +137,19 @@ Handler->>DB : 查询 CVE 统计
 DB-->>Handler : 返回 CVE 数据
 Handler->>DB : 查询 Drop 统计
 DB-->>Handler : 返回 Drop 数据
-Handler->>DB : 查询指纹异常
-DB-->>Handler : 返回指纹数据
 Handler-->>Client : 返回综合仪表板数据
 ```
 
 **图表来源**
 - [router.go:115-117](file://internal/admin/router.go#L115-L117)
-- [handler_dashboard.go:20-91](file://internal/admin/handler_dashboard.go#L20-L91)
+- [dashboard.go:20-91](file://internal/admin/system/dashboard.go#L20-L91)
 
 **章节来源**
-- [metrics.go:1-136](file://internal/dataplane/metrics.go#L1-L136)
-- [handler_dashboard.go:15-91](file://internal/admin/handler_dashboard.go#L15-L91)
+- [metrics.go:1-133](file://internal/dataplane/metrics.go#L1-L133)
+- [dashboard.go:15-91](file://internal/admin/system/dashboard.go#L15-L91)
 
 ## 架构概览
-
-仪表板 API 采用分层架构设计，确保高可用性和可扩展性：
+仪表板 API 采用分层架构设计，确保高可用性与可扩展性：
 
 ```mermaid
 graph TB
@@ -209,67 +200,54 @@ O --> P
 
 ## 详细组件分析
 
-### 指标类型与数据结构
-
+### 数据模型与字段定义
 仪表板 API 支持多种指标类型的聚合分析：
 
 #### 实时指标
-- **QPS (Queries Per Second)**: 1秒和5秒窗口的查询速率
+- **QPS (Queries Per Second)**: 1秒与5秒窗口的查询速率
 - **请求总数**: 系统启动以来的累计请求数量
 - **状态码分布**: 2xx、4xx、5xx 响应的实时统计
 - **WAF 统计**: 拦截、观察、内置规则命中次数
+- **运行时间**: 系统运行的总时长（秒）
+- **唯一 IP 数**: 独立访问的客户端 IP 数量
+- **攻击 IP 数**: 被识别为攻击的客户端 IP 数量
 
 #### 历史数据
-- **Bot 检测统计**: 24小时内 Bot 检测、拦截和高风险统计
+- **Bot 检测统计**: 24小时内 Bot 检测、拦截与高风险统计
 - **CVE 攻击统计**: 24小时内不同阶段的 CVE 命中统计
 - **丢弃事件统计**: 24小时内按来源分类的丢弃事件统计
 - **指纹异常统计**: 24小时内未知指纹的异常检测数量
 
-#### 统计信息
-- **运行时间**: 系统运行的总时长（秒）
-- **唯一 IP 数**: 独立访问的客户端 IP 数量
-- **攻击 IP 数**: 被识别为攻击的客户端 IP 数量
-- **版本信息**: 当前配置修订版本号
+#### 复合指标
+- **错误率计算**: 基于总请求量计算 4xx/5xx 错误率
+- **拦截率计算**: 基于拦截与错误的比例计算拦截率
 
-### 数据聚合算法
+### API 查询参数
+仪表板 API 支持以下查询参数：
 
-#### 时间窗口算法
-数据平面指标使用环形缓冲区实现高效的时间窗口计算：
+#### 时间范围参数
+- **hours**: 统计时长（小时，默认 24）
+- **since**: 起始时间（RFC3339 格式）
+- **until**: 结束时间（RFC3339 格式）
 
-```mermaid
-flowchart TD
-Start([开始计算 QPS]) --> GetTime["获取当前时间戳"]
-GetTime --> CalcWindow["计算窗口边界<br/>now - windowSec"]
-CalcWindow --> InitTotal["初始化总数 = 0"]
-InitTotal --> LoopBuckets["遍历10个1秒桶"]
-LoopBuckets --> CheckBucket{"桶时间有效？<br/>ts > 0 且 now-ts < windowSec"}
-CheckBucket --> |是| AddCount["total += count"]
-CheckBucket --> |否| NextBucket["检查下一个桶"]
-AddCount --> NextBucket
-NextBucket --> MoreBuckets{"还有桶吗？"}
-MoreBuckets --> |是| LoopBuckets
-MoreBuckets --> |否| CalcQPS["QPS = total / windowSec"]
-CalcQPS --> End([返回结果])
-```
+#### 过滤条件
+- **action**: 动作类型（intercept/observe/allow/drop）
+- **phase**: 处理阶段（acl/rate_limit/owasp_default/signature/custom）
+- **category**: 攻击类别（如 sqli/xss/path_traversal 等）
+- **client_ip**: 客户端 IP 地址
+- **host**: 主机名
+- **path**: 请求路径（模糊匹配）
+- **rule_id**: 规则 ID
 
-**图表来源**
-- [metrics.go:83-99](file://internal/dataplane/metrics.go#L83-L99)
-
-#### 采样频率
-- **实时采样**: 每1秒更新一次环形缓冲区
-- **前端轮询**: 默认每5秒从 API 获取一次数据
-- **历史数据**: 24小时统计数据按小时粒度聚合
-
-#### 计算方法
-- **QPS 计算**: 使用滑动时间窗口，避免重置计数器
-- **状态码分类**: 基于 HTTP 状态码范围进行分类统计
-- **去重统计**: 使用并发安全的 map 实现唯一 IP 和攻击 IP 的去重计数
+#### 聚合粒度
+- **小时级聚合**: 默认按小时分桶
+- **分钟级聚合**: 支持更细粒度的时间序列
+- **自定义窗口**: 支持任意时间窗口的统计
 
 ### 图表数据格式
-
-#### 时间序列数据
 前端使用标准化的数据格式来表示时间序列：
 
+#### 时间序列数据
 ```typescript
 interface QPSPoint {
   time: string;  // "HH:mm:ss" 格式的时间字符串
@@ -288,8 +266,6 @@ interface BlockPoint {
 ```
 
 #### 分类数据
-用于展示攻击事件分布的分类统计：
-
 ```typescript
 interface TimelineBucket {
   bucket: string;  // "YYYY-MM-DD HH:00" 格式的时间桶
@@ -303,8 +279,6 @@ interface CountryData {
 ```
 
 #### 复合指标
-仪表板页面中的复合指标计算：
-
 ```typescript
 // 错误率计算
 const err4xxRate = totalRequests > 0 ? ((err4xx / totalRequests) * 100).toFixed(2) + "%" : "0%"
@@ -315,65 +289,13 @@ const block4xx = Math.min(blocks, err4xx)
 const block4xxRate = err4xx > 0 ? ((block4xx / err4xx) * 100).toFixed(2) + "%" : "0%"
 ```
 
-### API 查询示例
-
-#### 基础仪表板数据查询
-```bash
-# 获取仪表板摘要数据
-curl -H "Authorization: Bearer YOUR_TOKEN" \
-  "https://your-waf.example.com/api/v1/dashboard/summary"
-
-# 响应示例
-{
-  "qps_1s": 123.45,
-  "qps_5s": 145.67,
-  "requests_total": 1234567,
-  "status_2xx": 1200000,
-  "errors_upstream_4xx": 2345,
-  "errors_upstream_5xx": 123,
-  "waf_blocks": 456,
-  "waf_observes": 789,
-  "builtin_hits": 1011,
-  "uptime_sec": 3600,
-  "revision": 12345,
-  "bot_total_24h": 1234,
-  "bot_blocked_24h": 567,
-  "bot_high_risk_24h": 89,
-  "cve_total_24h": 234,
-  "cve_by_type_24h": [
-    {"category": "phase1", "count": 123},
-    {"category": "phase2", "count": 111}
-  ],
-  "drop_total_24h": 345,
-  "drop_by_source_24h": {
-    "bot": 123,
-    "cve": 45,
-    "rule": 187,
-    "ip_reputation": 80
-  },
-  "fingerprint_anomaly_24h": 67
-}
-```
-
-#### 安全事件时间线查询
-```bash
-# 获取安全事件时间线（默认24小时）
-curl -H "Authorization: Bearer YOUR_TOKEN" \
-  "https://your-waf.example.com/api/v1/security-events/timeline?hours=24"
-
-# 响应示例
-{
-  "buckets": [
-    {"bucket": "2024-01-01 00:00", "count": 10},
-    {"bucket": "2024-01-01 01:00", "count": 15},
-    {"bucket": "2024-01-01 02:00", "count": 8}
-  ],
-  "hours": 24
-}
-```
+### API 端点定义
+| 端点 | 方法 | 权限 | 描述 |
+|------|------|------|------|
+| `/api/v1/dashboard/summary` | GET | readonly | 获取仪表板摘要数据 |
+| `/api/v1/security-events/timeline` | GET | readonly | 获取安全事件时间线数据 |
 
 ### 可视化配置
-
 #### 实时 QPS 图表
 前端使用 Recharts 库实现交互式图表：
 
@@ -424,7 +346,6 @@ end
 ## 依赖关系分析
 
 ### 组件耦合度
-
 仪表板 API 的组件设计遵循低耦合高内聚的原则：
 
 ```mermaid
@@ -441,23 +362,16 @@ G --> H[fetch API]
 F --> I[Recharts]
 I --> J[React]
 end
-subgraph "数据库模型"
-K[SecurityEvent] --> L[BotScoreLog]
-K --> M[DropEvent]
-K --> N[FingerprintRecord]
-end
-A --> K
+A --> K[SecurityEventRepo]
 F --> A
 ```
 
 **图表来源**
-- [handler_dashboard.go:15-18](file://internal/admin/handler_dashboard.go#L15-L18)
+- [dashboard.go:15-18](file://internal/admin/system/dashboard.go#L15-L18)
 - [router.go:22-33](file://internal/admin/router.go#L22-L33)
 
 ### 外部依赖
-
 系统依赖的关键外部组件：
-
 - **Hertz Web 框架**: 高性能 HTTP 服务器框架
 - **GORM**: Go 语言 ORM 框架，用于数据库操作
 - **Recharts**: 基于 React 的图表库
@@ -471,7 +385,6 @@ F --> A
 ## 性能考虑
 
 ### 缓存策略
-
 系统实现了多层缓存机制来优化性能：
 
 ```mermaid
@@ -498,16 +411,13 @@ ReturnCache --> Client
 - **环形缓冲区**: 避免频繁分配内存，提高 QPS 计算效率
 
 ### 性能基准
-
 基于当前实现的性能特征：
-
 - **QPS 计算**: O(n) 时间复杂度，n=10（固定桶数量）
 - **内存占用**: 每个 Metrics 对象约 1KB 内存
 - **并发安全**: 支持数千个并发连接的稳定运行
 - **延迟**: 99% 的请求在 10ms 内完成
 
 ### 扩展性建议
-
 1. **水平扩展**: 可以通过增加实例数量来扩展处理能力
 2. **数据库优化**: 对常用查询字段建立索引
 3. **缓存分层**: 添加 Redis 缓存层处理热点数据
@@ -545,7 +455,6 @@ Content-Type: application/json
 - 空闲连接数：10
 
 ### 监控指标
-
 系统提供了丰富的监控指标：
 
 ```mermaid
@@ -577,32 +486,29 @@ end
 - [metrics.go:51-125](file://internal/observability/metrics.go#L51-L125)
 
 ## 结论
-
-仪表板 API 为 OpenWAF 提供了强大而灵活的监控和可视化能力。通过精心设计的架构和高效的算法实现，系统能够在高并发场景下提供准确的实时指标和丰富的历史数据分析。
+仪表板 API 为 OpenWAF 提供了强大而灵活的监控与可视化能力。通过精心设计的架构与高效的算法实现，系统能够在高并发场景下提供准确的实时指标与丰富的历史数据分析。
 
 主要优势包括：
-- **实时性强**: 1秒和5秒窗口的 QPS 计算提供精确的流量监控
-- **扩展性好**: 模块化设计支持功能扩展和性能优化
-- **用户体验佳**: 交互式图表和响应式布局提供优秀的用户界面
-- **性能优异**: 多层缓存和并发优化确保系统稳定运行
+- **实时性强**: 1秒与5秒窗口的 QPS 计算提供精确的流量监控
+- **扩展性好**: 模块化设计支持功能扩展与性能优化
+- **用户体验佳**: 交互式图表与响应式布局提供优秀的用户界面
+- **性能优异**: 多层缓存与并发优化确保系统稳定运行
 
 未来可以考虑的改进方向：
 - 添加更多自定义指标类型
 - 实现更精细的权限控制
-- 增强数据导出和报表功能
+- 增强数据导出与报表功能
 - 优化大数据量下的查询性能
 
 ## 附录
 
 ### API 端点定义
-
 | 端点 | 方法 | 权限 | 描述 |
 |------|------|------|------|
 | `/api/v1/dashboard/summary` | GET | readonly | 获取仪表板摘要数据 |
 | `/api/v1/security-events/timeline` | GET | readonly | 获取安全事件时间线数据 |
 
 ### 数据模型关系
-
 ```mermaid
 erDiagram
 SECURITY_EVENT {
@@ -663,18 +569,20 @@ SECURITY_EVENT ||--|| FINGERPRINT_RECORD : "关联"
 - [models.go:214-442](file://internal/store/models.go#L214-L442)
 
 ### 自定义指标扩展指南
-
 要添加新的自定义指标，需要：
-
 1. **定义数据结构**: 在相应的模型中添加新的字段
 2. **实现统计逻辑**: 在处理器中添加对应的统计查询
 3. **更新 API 响应**: 在 Summary 结构体中添加新的字段
 4. **前端集成**: 在前端组件中使用新的指标数据
 
 ### 性能调优参数
-
 - **环形缓冲区大小**: 10 个桶（10秒窗口）
 - **前端轮询间隔**: 5 秒
 - **缓存最大大小**: 10MB（可配置）
 - **默认缓存 TTL**: 60 秒
 - **数据库连接池**: 最大 100 连接
+
+**章节来源**
+- [dashboard.go:20-91](file://internal/admin/system/dashboard.go#L20-L91)
+- [router.go:120-122](file://internal/admin/router.go#L120-L122)
+- [api.ts:630-644](file://frontend/lib/api.ts#L630-L644)

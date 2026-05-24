@@ -2,17 +2,19 @@
 
 <cite>
 **本文档引用的文件**
-- [handler_rule.go](file://internal/admin/handler_rule.go)
-- [handler_rule_validate.go](file://internal/admin/handler_rule_validate.go)
+- [规则管理 API.md](file://docs/管理 API 系统/规则管理 API/规则管理 API.md)
+- [规则 CRUD 操作.md](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md)
+- [规则导入导出.md](file://docs/管理 API 系统/规则管理 API/规则导入导出.md)
+- [规则验证与测试.md](file://docs/管理 API 系统/规则管理 API/规则验证与测试.md)
+- [rule.go](file://internal/admin/rule/rule.go)
+- [validate.go](file://internal/admin/rule/validate.go)
 - [router.go](file://internal/admin/router.go)
 - [rule.go](file://internal/store/repository/rule.go)
-- [models.go](file://internal/store/models.go)
 - [compiler.go](file://internal/core/rules/compiler.go)
 - [matcher.go](file://internal/core/rules/matcher.go)
 - [phases.go](file://internal/core/rules/phases.go)
 - [engine.go](file://internal/core/engine/engine.go)
 - [rule-builder.tsx](file://frontend/components/rule-builder.tsx)
-- [rule-pattern-builder.tsx](file://frontend/components/rule-pattern-builder.tsx)
 - [page.tsx](file://frontend/app/(dashboard)/rules/page.tsx)
 </cite>
 
@@ -39,14 +41,12 @@ graph TB
 subgraph "前端"
 FE_RulePage["规则页面<br/>page.tsx"]
 FE_RuleBuilder["规则构建器<br/>rule-builder.tsx"]
-FE_PatternBuilder["规则模式构建器<br/>rule-pattern-builder.tsx"]
 end
 subgraph "后端"
 Router["路由注册<br/>router.go"]
-HandlerRule["规则处理器<br/>handler_rule.go"]
-HandlerValidate["规则验证处理器<br/>handler_rule_validate.go"]
+HandlerRule["规则处理器<br/>rule.go"]
+HandlerValidate["规则验证处理器<br/>validate.go"]
 RepoRule["规则仓库<br/>repository/rule.go"]
-ModelRule["规则模型<br/>models.go"]
 end
 subgraph "核心规则引擎"
 Compiler["编译器<br/>compiler.go"]
@@ -57,13 +57,11 @@ end
 FE_RulePage --> FE_RuleBuilder
 FE_RuleBuilder --> HandlerValidate
 FE_RuleBuilder --> HandlerRule
-FE_PatternBuilder --> HandlerValidate
 Router --> HandlerRule
 Router --> HandlerValidate
 HandlerRule --> RepoRule
 HandlerValidate --> Compiler
-HandlerRule --> Compiler
-RepoRule --> ModelRule
+RepoRule --> Engine
 Compiler --> Matcher
 Compiler --> Phases
 Phases --> Engine
@@ -71,10 +69,9 @@ Phases --> Engine
 
 图表来源
 - [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
+- [rule.go:16-197](file://internal/admin/rule/rule.go#L16-L197)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 - [rule.go:9-40](file://internal/store/repository/rule.go#L9-L40)
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
 - [compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
 - [matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)
 - [phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
@@ -82,10 +79,9 @@ Phases --> Engine
 
 章节来源
 - [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
+- [rule.go:16-197](file://internal/admin/rule/rule.go#L16-L197)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 - [rule.go:9-40](file://internal/store/repository/rule.go#L9-L40)
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
 - [compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
 - [matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)
 - [phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
@@ -100,10 +96,9 @@ Phases --> Engine
 - 前端构建器：可视化构建规则、语法验证、本地测试与 DSL 预览。
 
 章节来源
-- [handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
+- [rule.go:16-197](file://internal/admin/rule/rule.go#L16-L197)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 - [rule.go:9-40](file://internal/store/repository/rule.go#L9-L40)
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
 - [compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
 - [matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)
 - [phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
@@ -112,7 +107,7 @@ Phases --> Engine
 - [page.tsx:5-76](file://frontend/app/(dashboard)/rules/page.tsx#L5-L76)
 
 ## 架构总览
-规则从“DSL 文本”到“运行时匹配”的完整链路如下：
+规则从"DSL 文本"到"运行时匹配"的完整链路如下：
 - 前端规则构建器生成 DSL（简单或复合 JSON），并通过验证接口进行语法检查。
 - 后端处理器接收请求，调用编译器将规则转换为可执行的 Compiled 结构，并按优先级排序。
 - 执行阶段根据请求上下文（客户端 IP、方法、路径、查询、头部）逐个匹配规则。
@@ -138,8 +133,8 @@ PHASE-->>ENG : 返回动作与命中信息
 ```
 
 图表来源
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
-- [handler_rule.go:115-156](file://internal/admin/handler_rule.go#L115-L156)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
+- [rule.go:115-156](file://internal/admin/rule/rule.go#L115-L156)
 - [compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
 - [matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)
 - [phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
@@ -175,11 +170,9 @@ RuleRepo --> Rule : "持久化"
 ```
 
 图表来源
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
 - [rule.go:13-39](file://internal/store/repository/rule.go#L13-L39)
 
 章节来源
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
 - [rule.go:13-39](file://internal/store/repository/rule.go#L13-L39)
 
 ### 规则语法与 DSL
@@ -190,7 +183,7 @@ RuleRepo --> Rule : "持久化"
 
 章节来源
 - [compiler.go:57-82](file://internal/core/rules/compiler.go#L57-L82)
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 
 ### 编译与匹配引擎
 - 编译器将规则转换为 Compiled 结构，构建具体匹配器（如 IP CIDR、路径前缀/正则、查询包含/正则、请求头包含/正则、精确路径、方法、内容类型、查询参数等），并按优先级排序。
@@ -293,7 +286,7 @@ Custom --> Done(["返回最终动作"])
 
 章节来源
 - [router.go:97-165](file://internal/admin/router.go#L97-L165)
-- [handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
+- [rule.go:16-197](file://internal/admin/rule/rule.go#L16-L197)
 
 ### 规则验证机制
 - 语法检查：ParsePattern 识别 kind/arg，复合规则校验 JSON 结构与运算符。
@@ -315,11 +308,11 @@ IsCompound --> |否| Ok
 ```
 
 图表来源
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 - [compiler.go:57-82](file://internal/core/rules/compiler.go#L57-L82)
 
 章节来源
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 - [compiler.go:57-82](file://internal/core/rules/compiler.go#L57-L82)
 
 ### 规则模板系统
@@ -327,7 +320,7 @@ IsCompound --> |否| Ok
 - 使用方式：前端规则页面可加载模板列表，便于快速选择与修改。
 
 章节来源
-- [handler_rule_validate.go:100-200](file://internal/admin/handler_rule_validate.go#L100-L200)
+- [validate.go:100-200](file://internal/admin/rule/validate.go#L100-L200)
 - [page.tsx:5-76](file://frontend/app/(dashboard)/rules/page.tsx#L5-L76)
 
 ### 规则导入导出
@@ -335,7 +328,7 @@ IsCompound --> |否| Ok
 - 导入：POST /api/v1/rules/import 接收规则数组，批量创建并触发重载。
 
 章节来源
-- [handler_rule.go:158-196](file://internal/admin/handler_rule.go#L158-L196)
+- [rule.go:158-196](file://internal/admin/rule/rule.go#L158-L196)
 
 ### 规则调试与测试
 - 在线验证：POST /api/v1/rules/validate 对规则进行语法与结构验证。
@@ -343,8 +336,8 @@ IsCompound --> |否| Ok
 - 前端本地测试：规则构建器内置简单测试逻辑，支持基本规则类型的即时反馈。
 
 章节来源
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
-- [handler_rule.go:115-156](file://internal/admin/handler_rule.go#L115-L156)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
+- [rule.go:115-156](file://internal/admin/rule/rule.go#L115-L156)
 - [rule-builder.tsx:208-293](file://frontend/components/rule-builder.tsx#L208-L293)
 
 ### 前端规则构建器
@@ -355,7 +348,6 @@ IsCompound --> |否| Ok
 
 章节来源
 - [rule-builder.tsx:114-556](file://frontend/components/rule-builder.tsx#L114-L556)
-- [rule-pattern-builder.tsx:109-288](file://frontend/components/rule-pattern-builder.tsx#L109-L288)
 - [page.tsx:5-76](file://frontend/app/(dashboard)/rules/page.tsx#L5-L76)
 
 ## 依赖关系分析
@@ -373,9 +365,8 @@ PHASE --> ENG["引擎"]
 
 图表来源
 - [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
+- [rule.go:16-197](file://internal/admin/rule/rule.go#L16-L197)
 - [rule.go:9-40](file://internal/store/repository/rule.go#L9-L40)
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
 - [compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
 - [matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)
 - [phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
@@ -383,9 +374,8 @@ PHASE --> ENG["引擎"]
 
 章节来源
 - [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
+- [rule.go:16-197](file://internal/admin/rule/rule.go#L16-L197)
 - [rule.go:9-40](file://internal/store/repository/rule.go#L9-L40)
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
 - [compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
 - [matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)
 - [phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
@@ -418,9 +408,9 @@ PHASE --> ENG["引擎"]
   - 排查：确认是否触发了重载；规则优先级是否过高导致被更早规则覆盖；阶段设置是否正确。
 
 章节来源
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
-- [handler_rule.go:115-156](file://internal/admin/handler_rule.go#L115-L156)
-- [handler_rule.go:171-196](file://internal/admin/handler_rule.go#L171-L196)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
+- [rule.go:115-156](file://internal/admin/rule/rule.go#L115-L156)
+- [rule.go:171-196](file://internal/admin/rule/rule.go#L171-L196)
 
 ## 结论
 规则管理 API 通过清晰的 DSL 语法、严谨的编译与匹配流程、完善的验证与测试能力，以及可视化的前端构建器，提供了高效、易用、可扩展的规则治理方案。结合阶段化执行与性能优化策略，可在保障安全的同时维持良好的系统性能。
@@ -440,3 +430,156 @@ PHASE --> ENG["引擎"]
 
 章节来源
 - [router.go:97-165](file://internal/admin/router.go#L97-L165)
+
+### 规则 CRUD 操作详细规范
+
+#### 创建规则 (Create Rule)
+- HTTP 方法：POST
+- URL 路径：/api/v1/rules
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator
+- 请求参数：完整的规则对象（name、policy_id、phase、pattern、action、priority、enabled）
+- 成功响应：201 Created，返回创建的规则对象
+- 错误响应：400 Bad Request（请求参数无效或格式不正确）、500 Internal Server Error（服务器内部错误）
+
+#### 读取规则 (Get Rule)
+- HTTP 方法：GET
+- URL 路径：/api/v1/rules/:id
+- 参数：id: 规则 ID (路径参数)
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator, readonly
+- 成功响应：200 OK，返回规则对象
+- 错误响应：400 Bad Request（invalid id）、404 Not Found（not found）
+
+#### 更新规则 (Update Rule)
+- HTTP 方法：POST
+- URL 路径：/api/v1/rules/:id/update
+- 参数：id: 规则 ID (路径参数)
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator
+- 请求参数：规则对象（可包含任意字段）
+- 成功响应：200 OK，返回更新后的规则对象
+- 错误响应：400 Bad Request（invalid id 或 JSON 绑定错误）、404 Not Found（not found）、500 Internal Server Error（服务器内部错误）
+
+#### 删除规则 (Delete Rule)
+- HTTP 方法：POST
+- URL 路径：/api/v1/rules/:id/delete
+- 参数：id: 规则 ID (路径参数)
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator
+- 成功响应：204 No Content
+- 错误响应：400 Bad Request（invalid id）、500 Internal Server Error（服务器内部错误）
+
+#### 分页查询 (List Rules)
+- HTTP 方法：GET
+- URL 路径：/api/v1/rules
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator, readonly
+- 查询参数：page（页码，默认值：1）、page_size（页面大小，默认值：20，最小值：1，最大值：200）
+- 成功响应：200 OK，返回 {items: [], total: 0}
+- 错误响应：500 Internal Server Error（服务器内部错误）
+
+#### 规则验证 (Validate Rule)
+- HTTP 方法：POST
+- URL 路径：/api/v1/rules/validate
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator
+- 请求参数：{pattern: 规则模式 DSL}
+- 成功响应：200 OK，返回 {valid: true, message: "pattern is valid", kind: "block_ip", arg: "192.168.1.100"}
+- 错误响应：400 Bad Request（pattern 无法解析）
+
+#### 规则测试 (Test Rule)
+- HTTP 方法：POST
+- URL 路径：/api/v1/rules/test
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator
+- 请求参数：{pattern: 规则模式 DSL, client_ip: 客户端 IP 地址, path: 请求路径, query: 查询参数, headers: 请求头映射}
+- 成功响应：200 OK，返回 {matched: true, kind: "block_ip", arg: "192.168.1.100"}
+- 错误响应：400 Bad Request（invalid pattern）
+
+#### 规则导入 (Import Rules)
+- HTTP 方法：POST
+- URL 路径：/api/v1/rules/import
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator
+- 请求参数：{rules: 规则数组}
+- 成功响应：200 OK，返回 {imported: 100, total: 100}
+- 错误响应：400 Bad Request（请求体解析失败或无规则提供）、500 Internal Server Error（导入失败）
+
+#### 规则导出 (Export Rules)
+- HTTP 方法：GET
+- URL 路径：/api/v1/rules/export
+- 认证要求：需要有效令牌
+- RBAC 权限：admin, operator, readonly
+- 成功响应：200 OK，返回 {rules: []}
+- 错误响应：500 Internal Server Error（服务器内部错误）
+
+章节来源
+- [rule.go:16-197](file://internal/admin/rule/rule.go#L16-L197)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
+
+### 规则模型与字段映射
+- 关键字段
+  - id、name、policy_id、phase、pattern、action、priority、enabled
+- 枚举与规范化
+  - phase：acl、rate_limit、owasp_default、signature、custom
+  - action：allow、intercept、observe、drop、legacy block/log_only 已规范化
+- 字段约束
+  - priority 默认 100，启用排序
+  - enabled 默认 true
+
+```mermaid
+erDiagram
+RULE {
+uint id PK
+string name
+uint policy_id
+enum phase
+text pattern
+enum action
+int priority
+boolean enabled
+timestamp created_at
+timestamp updated_at
+}
+```
+
+图表来源
+- [rule.go:13-39](file://internal/store/repository/rule.go#L13-L39)
+
+章节来源
+- [rule.go:13-39](file://internal/store/repository/rule.go#L13-L39)
+
+### 规则编译与匹配
+- 编译过程
+  - Compile 将启用的规则按 priority 与 id 排序，生成 Compiled 列表
+  - ParsePattern 解析 DSL 前缀或复合 JSON
+- 匹配器
+  - buildMatcher 根据 kind 创建具体匹配器（IP、路径、正则、头、方法、内容类型、UA、body、参数、复合）
+  - 复合条件支持 and/or/not 递归组合
+
+```mermaid
+classDiagram
+class Compiled {
++uint ID
++string Phase
++Action Action
++int Priority
++string Kind
++string Arg
++Match(ctx) bool
+}
+class Matcher {
+<<interface>>
++Match(ip,method,path,query,headers) bool
+}
+Compiled --> Matcher : "持有"
+```
+
+图表来源
+- [compiler.go:11-55](file://internal/core/rules/compiler.go#L11-L55)
+- [matcher.go:11-14](file://internal/core/rules/matcher.go#L11-L14)
+
+章节来源
+- [compiler.go:11-55](file://internal/core/rules/compiler.go#L11-L55)
+- [matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)

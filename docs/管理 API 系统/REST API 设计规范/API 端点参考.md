@@ -1,22 +1,17 @@
 # API 端点参考
 
 <cite>
-**本文引用的文件**
-- [cmd/main.go](file://cmd/main.go)
-- [internal/admin/router.go](file://internal/admin/router.go)
-- [internal/admin/middleware.go](file://internal/admin/middleware.go)
-- [internal/admin/handler_auth.go](file://internal/admin/handler_auth.go)
-- [internal/admin/handler_site.go](file://internal/admin/handler_site.go)
-- [internal/admin/handler_rule.go](file://internal/admin/handler_rule.go)
-- [internal/admin/handler_policy.go](file://internal/admin/handler_policy.go)
-- [internal/admin/handler_certificate.go](file://internal/admin/handler_certificate.go)
-- [internal/admin/handler_ip_list.go](file://internal/admin/handler_ip_list.go)
-- [internal/admin/handler_system.go](file://internal/admin/handler_system.go)
-- [internal/admin/handler_security_event.go](file://internal/admin/handler_security_event.go)
-- [internal/admin/handler_dashboard.go](file://internal/admin/handler_dashboard.go)
-- [internal/admin/handler_protection.go](file://internal/admin/handler_protection.go)
-- [internal/store/models.go](file://internal/store/models.go)
-- [frontend/lib/api.ts](file://frontend/lib/api.ts)
+**本文档引用的文件**
+- [路由设计规范.md](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md)
+- [请求响应格式规范.md](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md)
+- [认证授权机制.md](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md)
+- [管理 API 系统.md](file://docs/管理 API 系统/管理 API 系统.md)
+- [规则管理 API.md](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md)
+- [站点管理 API.md](file://docs/管理 API 系统/站点管理 API.md)
+- [系统设置 API.md](file://docs/管理 API 系统/系统设置 API.md)
+- [安全事件 API.md](file://docs/管理 API 系统/安全事件 API.md)
+- [证书管理 API.md](file://docs/管理 API 系统/证书管理 API.md)
+- [策略管理 API.md](file://docs/管理 API 系统/策略管理 API.md)
 </cite>
 
 ## 目录
@@ -24,733 +19,368 @@
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
-5. [详细端点说明](#详细端点说明)
+5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
-7. [性能与限流](#性能与限流)
-8. [故障排查](#故障排查)
+7. [性能考量](#性能考量)
+8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-本文件为 My-OpenWaf 后台管理 API 的完整端点参考，覆盖站点管理、规则管理、策略配置、证书管理、IP 黑白名单、系统设置、安全事件、防护设置、仪表盘统计等模块。内容包括：
-- 每个端点的 HTTP 方法、路径、认证方式、权限级别
-- 请求参数与响应格式（含分页与字段说明）
-- 使用场景与典型用例
-- 版本与兼容性说明
-- 性能特征、限流策略与使用限制
-- 常见问题排查建议
+本文件为 My-OpenWaf 管理 API 的完整端点参考，覆盖所有 REST API 的 HTTP 方法、URL 模式、请求参数、响应格式与错误码。文档基于实际代码实现，确保规范与实现一致，适用于开发者与运维人员进行集成与排错。
 
 ## 项目结构
-后端基于 Hertz Web 框架，采用“路由注册 + 中间件 + 处理器”的分层设计。前端通过统一的 fetch 封装调用 API，并自动处理刷新令牌与错误码。
+后端采用 Hertz 框架，控制面（管理 API）与数据面（业务监听）分离部署。控制面负责认证、授权、系统设置、规则管理等；数据面负责业务流量防护与转发。前端通过 Next.js 构建，采用 SPA 模式，静态资源由后端统一托管。
 
 ```mermaid
 graph TB
-subgraph "前端"
-FE_API["frontend/lib/api.ts"]
+subgraph "控制面Admin Control Plane"
+AdminServer["Hertz 管理服务器<br/>/healthz,/readyz,/status,/metrics"]
+Router["路由注册器<br/>/api/v1/*"]
+Middleware["中间件链<br/>安全头/访问日志/鉴权/角色校验"]
+Static["静态文件托管<br/>SPA 回退"]
 end
-subgraph "后端"
-MAIN["cmd/main.go"]
-ROUTER["internal/admin/router.go"]
-MW["internal/admin/middleware.go"]
-AUTH["internal/admin/handler_auth.go"]
-SITE["internal/admin/handler_site.go"]
-RULE["internal/admin/handler_rule.go"]
-POLICY["internal/admin/handler_policy.go"]
-CERT["internal/admin/handler_certificate.go"]
-IPLIST["internal/admin/handler_ip_list.go"]
-SYS["internal/admin/handler_system.go"]
-EVT["internal/admin/handler_security_event.go"]
-DASH["internal/admin/handler_dashboard.go"]
-PROT["internal/admin/handler_protection.go"]
-MODELS["internal/store/models.go"]
+subgraph "数据面Data Plane"
+DataServers["站点监听器<br/>按站点热启停"]
 end
-FE_API --> ROUTER
-MAIN --> ROUTER
-ROUTER --> MW
-ROUTER --> AUTH
-ROUTER --> SITE
-ROUTER --> RULE
-ROUTER --> POLICY
-ROUTER --> CERT
-ROUTER --> IPLIST
-ROUTER --> SYS
-ROUTER --> EVT
-ROUTER --> DASH
-ROUTER --> PROT
-AUTH --> MODELS
-SITE --> MODELS
-RULE --> MODELS
-POLICY --> MODELS
-CERT --> MODELS
-IPLIST --> MODELS
-SYS --> MODELS
-EVT --> MODELS
-DASH --> MODELS
-PROT --> MODELS
+subgraph "前端Next.js SPA"
+Frontend["前端应用<br/>/api/v1/* 调用"]
+end
+Frontend --> AdminServer
+AdminServer --> Router
+Router --> Middleware
+Router --> Static
+AdminServer --> DataServers
 ```
 
-图表来源
-- [cmd/main.go:1-10](file://cmd/main.go#L1-L10)
-- [internal/admin/router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [internal/admin/middleware.go:16-129](file://internal/admin/middleware.go#L16-L129)
-- [frontend/lib/api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
+**图表来源**
+- [路由设计规范.md:38-57](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L38-L57)
+- [路由设计规范.md:223-232](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L223-L232)
 
-章节来源
-- [cmd/main.go:1-10](file://cmd/main.go#L1-L10)
-- [internal/admin/router.go:48-210](file://internal/admin/router.go#L48-L210)
+**章节来源**
+- [路由设计规范.md:32-57](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L32-L57)
+- [管理 API 系统.md:42-53](file://docs/管理 API 系统/管理 API 系统.md#L42-L53)
 
 ## 核心组件
-- 路由注册：集中定义所有 /api/v1/* 端点，按角色划分只读、操作员、管理员三组。
-- 认证中间件：支持 Bearer JWT 与 API Key；健康检查与登录/刷新/登出免鉴权。
-- 权限中间件：基于角色的访问控制（admin、operator、readonly）。
-- 处理器：各模块 CRUD、查询、统计、测试、导入导出等逻辑。
-- 数据模型：站点、规则、策略、证书、IP 列表、系统设置、安全事件、防护配置等。
+- 版本控制：统一使用 `/api/v1` 前缀，便于未来版本演进与兼容性管理。
+- 资源命名：采用复数名词（如 `/sites`, `/rules`, `/settings`），路径参数使用 `:id` 表示单个资源。
+- 路由注册：在控制面 Hertz 实例上注册健康检查、认证、受控 API 分组、静态文件回退。
+- 中间件：全局安全头设置、访问日志、认证（支持 Bearer JWT 与 API Key）、角色权限校验。
+- 静态文件：SPA 回退逻辑，区分 API 与静态资源，避免 API 路径误返回静态内容。
 
-章节来源
-- [internal/admin/router.go:44-47](file://internal/admin/router.go#L44-L47)
-- [internal/admin/middleware.go:16-96](file://internal/admin/middleware.go#L16-L96)
-- [internal/store/models.go:14-456](file://internal/store/models.go#L14-L456)
+**章节来源**
+- [路由设计规范.md:67-77](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L67-L77)
+- [路由设计规范.md:107-114](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L107-L114)
 
 ## 架构总览
-以下序列图展示一次典型登录流程，包括防暴力破解、签发访问令牌与刷新令牌、会话记录与 Cookie 设置。
+控制面路由组织遵循"健康检查 + 认证 + 受控 API 分组 + 静态文件回退"的模式。API 分组内部按角色细分为只读、操作员、管理员三类权限组，确保最小权限原则。
 
 ```mermaid
 sequenceDiagram
-participant C as "客户端"
-participant R as "路由(/api/v1)"
-participant M as "认证中间件"
-participant H as "登录处理器"
-participant BF as "防暴力破解"
-participant RT as "刷新令牌存储"
-participant SM as "会话管理"
-C->>R : POST /api/v1/auth/login
-R->>M : 应用认证中间件
-M-->>C : 放行(免鉴权)
-R->>H : 登录处理器
-H->>BF : 检查锁定状态
-BF-->>H : 可尝试/已锁定
-H->>H : 验证凭据
-alt 凭据有效
-H->>RT : 创建刷新令牌
-H->>SM : 创建会话
-H-->>C : 返回 access_token + 刷新 Cookie
-else 凭据无效
-H->>BF : 记录失败
-H-->>C : 401 + 剩余尝试次数
+participant Client as "客户端"
+participant Admin as "管理服务器"
+participant Router as "路由注册器"
+participant MW as "中间件链"
+participant Handler as "处理器"
+Client->>Admin : 请求 /api/v1/...
+Admin->>Router : 匹配路由
+Router->>MW : 应用中间件
+MW-->>Router : 通过/拒绝
+alt 通过
+Router->>Handler : 调用处理器
+Handler-->>Client : 返回响应
+else 拒绝
+MW-->>Client : 401/403 错误
 end
 ```
 
-图表来源
-- [internal/admin/router.go:55-67](file://internal/admin/router.go#L55-L67)
-- [internal/admin/middleware.go:16-72](file://internal/admin/middleware.go#L16-L72)
-- [internal/admin/handler_auth.go:32-123](file://internal/admin/handler_auth.go#L32-L123)
-
-## 详细端点说明
-
-### 通用约定
-- 基础路径：/api/v1
-- 认证方式：
-  - Bearer JWT：Authorization: Bearer <token>
-  - API Key：Authorization: Bearer <key>（默认视为 admin 角色）
-- 全局只读端点：无需额外角色即可访问（admin/operator/readonly）
-- 操作员端点：admin/operator 可访问
-- 管理员端点：仅 admin 可访问
-- 分页参数：page/page_size（GET 查询参数），默认 page=1、page_size=20
-- 错误码：
-  - 401 未授权（缺失或无效令牌）
-  - 403 权限不足（RBAC）
-  - 429 请求过快/账户锁定
-  - 500 内部错误
-
-章节来源
-- [internal/admin/router.go:69-206](file://internal/admin/router.go#L69-L206)
-- [internal/admin/middleware.go:16-96](file://internal/admin/middleware.go#L16-L96)
-- [frontend/lib/api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
-
----
-
-### 认证与会话管理
-- 登录
-  - 方法：POST
-  - 路径：/api/v1/auth/login
-  - 认证：免鉴权
-  - 请求体：{"username":"...","password":"..."}
-  - 响应：{"access_token":"...","expires_at":整数,"username":"...","role":"..."}
-  - 附加：设置 HttpOnly 刷新 Cookie my_openwaf_rt；防暴力破解；记录登录尝试
-  - 场景：用户首次登录
-  - 示例：
-    - 成功：返回 access_token 与过期时间
-    - 失败：401 + 剩余尝试次数提示
-    - 锁定：429 + 剩余秒数
-
-- 刷新
-  - 方法：POST
-  - 路径：/api/v1/auth/refresh
-  - 认证：免鉴权（但需携带刷新 Cookie）
-  - 请求：Cookie my_openwaf_rt
-  - 响应：{"access_token":"...","expires_at":整数,"username":"...","role":"..."}
-  - 场景：access_token 过期时续签
-  - 示例：
-    - 成功：返回新 access_token
-    - 失败：401（缺失/过期/非法）
-
-- 登出
-  - 方法：POST
-  - 路径：/api/v1/auth/logout
-  - 认证：需要有效令牌或 API Key
-  - 响应：{"status":"ok"}
-  - 场景：主动退出，撤销刷新令牌与加入访问令牌黑名单
-  - 示例：成功 200
-
-- 当前用户信息
-  - 方法：GET
-  - 路径：/api/v1/auth/me
-  - 认证：任意已登录角色
-  - 响应：{"username":"...","role":"..."}
-
-- 会话列表
-  - 方法：GET
-  - 路径：/api/v1/auth/sessions
-  - 认证：任意已登录用户
-  - 参数：all=true（仅管理员可用）列出全部会话
-  - 响应：{"sessions":[...]}
-  - 场景：查看当前用户会话或管理员审计
-
-- 强制登出指定会话
-  - 方法：POST
-  - 路径：/api/v1/auth/sessions/force-logout
-  - 认证：admin
-  - 请求体：{"jti":"..."}
-  - 响应：{"status":"ok"}
-
-章节来源
-- [internal/admin/router.go:55-79](file://internal/admin/router.go#L55-L79)
-- [internal/admin/handler_auth.go:32-351](file://internal/admin/handler_auth.go#L32-L351)
-- [internal/admin/middleware.go:16-96](file://internal/admin/middleware.go#L16-L96)
-
----
-
-### 站点管理
-- 列表
-  - 方法：GET
-  - 路径：/api/v1/sites
-  - 权限：readonly
-  - 响应：{"items":[...],"total":整数}
-
-- 单个
-  - 方法：GET
-  - 路径：/api/v1/sites/:id
-  - 权限：readonly
-  - 响应：站点对象（见数据模型）
-
-- 状态
-  - 方法：GET
-  - 路径：/api/v1/sites/:id/status
-  - 权限：readonly
-  - 响应：{"id":整数,"host":"...","status":"running|stopped"}
-
-- 创建
-  - 方法：POST
-  - 路径：/api/v1/sites
-  - 权限：operator
-  - 请求体：站点对象（见数据模型）
-  - 响应：新建站点对象
-  - 行为：触发配置重载
-
-- 更新
-  - 方法：POST /api/v1/sites/:id/update
-  - 权限：operator
-  - 请求体：站点对象（可部分字段）
-  - 响应：更新后的站点对象
-  - 行为：触发配置重载
-
-- 删除
-  - 方法：POST /api/v1/sites/:id/delete
-  - 权限：operator
-  - 响应：204
-  - 行为：触发配置重载
-
-- 启动
-  - 方法：POST /api/v1/sites/:id/start
-  - 权限：operator
-  - 响应：{"status":"running","message":"site started"}
-
-- 停止
-  - 方法：POST /api/v1/sites/:id/stop
-  - 权限：operator
-  - 响应：{"status":"stopped","message":"site stopped"}
-
-章节来源
-- [internal/admin/router.go:83-147](file://internal/admin/router.go#L83-L147)
-- [internal/admin/handler_site.go:21-179](file://internal/admin/handler_site.go#L21-L179)
-- [internal/store/models.go:94-148](file://internal/store/models.go#L94-L148)
-
----
-
-### 规则管理
-- 列表
-  - 方法：GET
-  - 路径：/api/v1/rules
-  - 权限：readonly
-  - 响应：{"items":[...],"total":整数}
-
-- 单个
-  - 方法：GET
-  - 路径：/api/v1/rules/:id
-  - 权限：readonly
-  - 响应：规则对象（见数据模型）
-
-- 创建
-  - 方法：POST
-  - 路径：/api/v1/rules
-  - 权限：operator
-  - 请求体：规则对象
-  - 响应：新建规则对象
-  - 行为：触发配置重载
-
-- 更新
-  - 方法：POST /api/v1/rules/:id/update
-  - 权限：operator
-  - 请求体：规则对象
-  - 响应：更新后的规则对象
-  - 行为：触发配置重载
-
-- 删除
-  - 方法：POST /api/v1/rules/:id/delete
-  - 权限：operator
-  - 响应：204
-  - 行为：触发配置重载
-
-- 测试
-  - 方法：POST
-  - 路径：/api/v1/rules/test
-  - 权限：operator
-  - 请求体：{"pattern":"...","client_ip":"...","path":"...","query":"...","headers":{"k":"v"}}
-  - 响应：{"matched":布尔,"kind":"...","arg":"..."}
-  - 场景：在不持久化的情况下验证规则模式
-
-- 导出
-  - 方法：GET
-  - 路径：/api/v1/rules/export
-  - 权限：readonly
-  - 响应：{"rules":[...]}
-
-- 导入
-  - 方法：POST
-  - 路径：/api/v1/rules/import
-  - 权限：operator
-  - 请求体：{"rules":[规则对象...]}
-  - 响应：{"imported":整数,"total":整数}
-  - 行为：批量创建并触发配置重载
-
-- 模板
-  - 方法：GET
-  - 路径：/api/v1/rules/templates
-  - 权限：readonly
-  - 响应：模板列表（由后端提供）
-
-章节来源
-- [internal/admin/router.go:97-165](file://internal/admin/router.go#L97-L165)
-- [internal/admin/handler_rule.go:16-197](file://internal/admin/handler_rule.go#L16-L197)
-- [internal/store/models.go:79-92](file://internal/store/models.go#L79-L92)
-
----
-
-### 策略管理
-- 列表
-  - 方法：GET
-  - 路径：/api/v1/policies
-  - 权限：readonly
-  - 响应：{"items":[...],"total":整数}
-
-- 单个
-  - 方法：GET
-  - 路径：/api/v1/policies/:id
-  - 权限：readonly
-  - 响应：策略对象
-
-- 创建
-  - 方法：POST
-  - 路径：/api/v1/policies
-  - 权限：operator
-  - 请求体：策略对象
-  - 响应：新建策略对象
-  - 行为：触发配置重载
-
-- 更新
-  - 方法：POST /api/v1/policies/:id/update
-  - 权限：operator
-  - 请求体：策略对象
-  - 响应：更新后的策略对象
-  - 行为：触发配置重载
-
-- 删除
-  - 方法：POST /api/v1/policies/:id/delete
-  - 权限：operator
-  - 响应：204
-  - 行为：触发配置重载
-
-章节来源
-- [internal/admin/router.go:94-157](file://internal/admin/router.go#L94-L157)
-- [internal/admin/handler_policy.go:14-101](file://internal/admin/handler_policy.go#L14-L101)
-- [internal/store/models.go:35-42](file://internal/store/models.go#L35-L42)
-
----
-
-### 证书管理
-- 列表
-  - 方法：GET
-  - 路径：/api/v1/certificates
-  - 权限：readonly
-  - 响应：{"items":[...],"total":整数}
-
-- 单个
-  - 方法：GET
-  - 路径：/api/v1/certificates/:id
-  - 权限：readonly
-  - 响应：证书对象
-
-- 创建
-  - 方法：POST
-  - 路径：/api/v1/certificates
-  - 权限：operator
-  - 请求体：{"name":"...","cert_pem":"...","key_pem":"..."}
-  - 响应：新建证书对象
-  - 行为：校验 PEM 有效性并触发配置重载
-
-- 更新
-  - 方法：POST /api/v1/certificates/:id/update
-  - 权限：operator
-  - 请求体：证书对象
-  - 响应：更新后的证书对象
-  - 行为：校验 PEM 有效性并触发配置重载
-
-- 删除
-  - 方法：POST /api/v1/certificates/:id/delete
-  - 权限：operator
-  - 响应：204
-  - 行为：触发配置重载
-
-章节来源
-- [internal/admin/router.go:91-152](file://internal/admin/router.go#L91-L152)
-- [internal/admin/handler_certificate.go:15-110](file://internal/admin/handler_certificate.go#L15-L110)
-- [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
-
----
-
-### IP 黑白名单
-- 列表
-  - 方法：GET
-  - 路径：/api/v1/ip-lists
-  - 权限：readonly
-  - 参数：page/page_size/kind=blacklist|whitelist
-  - 响应：{"items":[...],"total":整数,"page":整数}
-
-- 单个
-  - 方法：GET
-  - 路径：/api/v1/ip-lists/:id
-  - 权限：readonly
-  - 响应：IP 条目对象
-
-- 创建
-  - 方法：POST
-  - 路径：/api/v1/ip-lists
-  - 权限：operator
-  - 请求体：IP 条目对象（kind 必须为 blacklist 或 whitelist，value 必填）
-  - 响应：新建条目对象
-  - 行为：触发配置重载
-
-- 更新
-  - 方法：POST /api/v1/ip-lists/:id/update
-  - 权限：operator
-  - 请求体：IP 条目对象
-  - 响应：更新后的条目对象
-  - 行为：触发配置重载
-
-- 删除
-  - 方法：POST /api/v1/ip-lists/:id/delete
-  - 权限：operator
-  - 响应：204
-  - 行为：触发配置重载
-
-章节来源
-- [internal/admin/router.go:107-173](file://internal/admin/router.go#L107-L173)
-- [internal/admin/handler_ip_list.go:14-113](file://internal/admin/handler_ip_list.go#L14-L113)
-- [internal/store/models.go:200-210](file://internal/store/models.go#L200-L210)
-
----
-
-### 系统设置与 API Key
-- 列表
-  - 方法：GET
-  - 路径：/api/v1/settings
-  - 权限：readonly
-  - 响应：{"items":[{"key":"...","value":"..."}...]}
-
-- 获取单个
-  - 方法：GET
-  - 路径：/api/v1/settings/:key
-  - 权限：readonly
-  - 响应：{"key":"...","value":"..."}
-
-- 创建
-  - 方法：POST
-  - 路径：/api/v1/settings
-  - 权限：admin
-  - 请求体：{"key":"...","value":"..."}
-  - 响应：{"key":"...","value":"..."}
-  - 行为：触发配置重载
-
-- 设置/更新
-  - 方法：POST /api/v1/settings/:key 或 /api/v1/settings/:key/update
-  - 权限：admin
-  - 请求体：{"value":"..."}
-  - 响应：{"key":"...","value":"..."}
-  - 行为：触发配置重载
-
-- 删除
-  - 方法：POST /api/v1/settings/:key/delete
-  - 权限：admin
-  - 响应：204
-  - 行为：触发配置重载
-
-- API Key 列表（readonly）
-  - 方法：GET
-  - 路径：/api/v1/api-keys
-  - 权限：readonly
-  - 响应：{"items":[...]}
-
-- 创建 API Key（admin）
-  - 方法：POST
-  - 路径：/api/v1/api-keys
-  - 权限：admin
-  - 请求体：{"name":"..."}
-  - 响应：{"token":"...","id":整数,"name":"..."}
-  - 说明：返回明文 token，仅在创建时可见
-
-- 删除 API Key（admin）
-  - 方法：POST /api/v1/api-keys/:id/delete
-  - 权限：admin
-  - 响应：204
-
-- 触发重载
-  - 方法：POST
-  - 路径：/api/v1/reload
-  - 权限：operator
-  - 响应：{"status":"ok"}
-
-- 健康检查
-  - 方法：GET
-  - 路径：/api/v1/health
-  - 权限：免鉴权
-  - 响应：{"status":"ok"}
-
-章节来源
-- [internal/admin/router.go:185-206](file://internal/admin/router.go#L185-L206)
-- [internal/admin/handler_system.go:12-162](file://internal/admin/handler_system.go#L12-L162)
-- [internal/store/models.go:150-189](file://internal/store/models.go#L150-L189)
-
----
-
-### 安全事件
-- 列表
-  - 方法：GET
-  - 路径：/api/v1/security-events
-  - 权限：readonly
-  - 参数：page/page_size/action/phase/category/client_ip/host/path/rule_id/since/until
-  - 响应：{"items":[...],"total":整数,"page":整数}
-
-- 统计
-  - 方法：GET
-  - 路径：/api/v1/security-events/stats
-  - 权限：readonly
-  - 参数：hours（默认 24）
-  - 响应：聚合统计（类别分布、Top IP/Path/Rule、总量等）
-
-- 时间线
-  - 方法：GET
-  - 路径：/api/v1/security-events/timeline
-  - 权限：readonly
-  - 参数：hours（默认 24）
-  - 响应：时间分桶
-
-- 单个
-  - 方法：GET
-  - 路径：/api/v1/security-events/:id
-  - 权限：readonly
-  - 响应：事件对象
-
-章节来源
-- [internal/admin/router.go:110-114](file://internal/admin/router.go#L110-L114)
-- [internal/admin/handler_security_event.go:16-127](file://internal/admin/handler_security_event.go#L16-L127)
-- [internal/store/models.go:214-236](file://internal/store/models.go#L214-L236)
-
----
-
-### 仪表盘
-- 摘要
-  - 方法：GET
-  - 路径：/api/v1/dashboard/summary
-  - 权限：readonly
-  - 响应：包含 QPS、请求总量、状态码分布、WAF 统计、运行时修订号、24 小时内 Bot/CVE/Drop 统计、指纹异常等
-
-章节来源
-- [internal/admin/router.go:117](file://internal/admin/router.go#L117)
-- [internal/admin/handler_dashboard.go:20-92](file://internal/admin/handler_dashboard.go#L20-L92)
-- [internal/store/models.go:402-442](file://internal/store/models.go#L402-L442)
-
----
-
-### 防护设置
-- 获取
-  - 方法：GET
-  - 路径：/api/v1/protection-settings
-  - 权限：readonly
-  - 响应：ProtectionConfig 对象（含字符串化字段如 owasp_modules/cc_rules 的展开）
-
-- 更新
-  - 方法：POST
-  - 路径：/api/v1/protection-settings
-  - 权限：operator
-  - 请求体：ProtectionConfig 对象（可直接传对象/数组，后端自动转为字符串）
-  - 响应：更新后的 ProtectionConfig
-  - 行为：触发配置重载
-
-章节来源
-- [internal/admin/router.go:105-167](file://internal/admin/router.go#L105-L167)
-- [internal/admin/handler_protection.go:21-107](file://internal/admin/handler_protection.go#L21-L107)
-- [internal/store/models.go:247-354](file://internal/store/models.go#L247-L354)
-
----
-
-### Bot 与 CVE
-- Bot 设置
-  - 获取：GET /api/v1/bot-settings
-  - 更新：POST /api/v1/bot-settings（operator）
-- Bot 分数日志
-  - 获取：GET /api/v1/bot-scores（支持分页与过滤）
-- 指纹统计
-  - 获取：GET /api/v1/fingerprints
-
-- CVE 规则
-  - 列表：GET /api/v1/cve-rules（支持分页与过滤）
-  - 创建：POST /api/v1/cve-rules（admin）
-  - 更新：PUT /api/v1/cve-rules/:id（admin）
-  - 删除：DELETE /api/v1/cve-rules/:id（admin）
-  - 切换启用：PUT /api/v1/cve-rules/:id/toggle（operator）
-  - 同步：POST /api/v1/cve-rules/sync（operator）
-  - 状态：GET /api/v1/cve-feed/status
-
-- Drop 策略与事件
-  - 获取策略：GET /api/v1/drop-policy
-  - 更新策略：PUT /api/v1/drop-policy（admin）
-  - 统计：GET /api/v1/drop-stats
-  - 事件：GET /api/v1/drop-events（支持分页与过滤）
-
-章节来源
-- [internal/admin/router.go:123-135](file://internal/admin/router.go#L123-L135)
-- [frontend/lib/api.ts:251-317](file://frontend/lib/api.ts#L251-L317)
-- [internal/store/models.go:402-456](file://internal/store/models.go#L402-L456)
+**图表来源**
+- [路由设计规范.md:82-99](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L82-L99)
+- [路由设计规范.md:132-144](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L132-L144)
+
+## 详细组件分析
+
+### 认证与授权机制
+- 短期访问令牌：HS256 签名，15 分钟有效期，携带用户名声明，用于后续 API 调用的 Bearer 认证。
+- 长期刷新令牌：随机生成 JTI 与原始令牌，仅存储哈希值，7 天有效期；刷新时撤销旧令牌并发放新令牌，同时更新 Cookie。
+- 登录：验证账户密码，签发访问令牌与刷新令牌（Cookie），返回短期令牌与过期时间。
+- 刷新：从 Cookie 中解析 JTI 与原始令牌，校验哈希，轮换并返回新的短期令牌。
+- 登出：撤销当前刷新令牌，清除 Cookie。
+- API 密钥：作为替代认证方式，直接通过仓库校验密钥有效性。
+
+```mermaid
+sequenceDiagram
+participant Client as "客户端"
+participant Login as "登录处理器"
+participant JWT as "JWT工具"
+participant RT as "刷新令牌仓库"
+participant Cookie as "Cookie"
+Client->>Login : "POST /api/v1/auth/login"
+Login->>Login : "校验用户名/密码"
+Login->>JWT : "签发短期访问令牌"
+Login->>RT : "创建刷新令牌(哈希存储)"
+RT-->>Login : "成功"
+Login->>Cookie : "设置刷新Cookie"
+Login-->>Client : "{access_token, expires_at, username}"
+```
+
+**图表来源**
+- [认证授权机制.md:190-204](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md#L190-L204)
+- [认证授权机制.md:245-257](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md#L245-L257)
+
+**章节来源**
+- [认证授权机制.md:182-213](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md#L182-L213)
+- [认证授权机制.md:214-249](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md#L214-L249)
+
+### 路由系统与中间件链
+- 路由注册：控制面统一在 `/api/v1` 下注册，健康检查、认证相关端点无需鉴权；其余端点统一走认证中间件。
+- 中间件链：
+  - 安全头：设置 X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Content-Security-Policy。
+  - 访问日志：记录请求 ID、方法、路径、状态码、耗时与认证方式。
+  - 认证中间件：跳过健康与认证端点；校验 Bearer 令牌优先于 API Key；通过后注入用户信息与认证方式。
+- 前端静态资源：未命中 `/api/` 的路由回退到前端静态文件，实现 SPA 支持。
+
+```mermaid
+flowchart TD
+Start(["请求进入"]) --> SecHdr["设置安全头"]
+SecHdr --> AccessLog["记录访问日志(含请求ID)"]
+AccessLog --> AuthChk{"是否为健康/认证端点?"}
+AuthChk --> |是| Route["进入对应处理器"]
+AuthChk --> |否| AuthHdr["检查Authorization头"]
+AuthHdr --> HasBearer{"是否为Bearer令牌?"}
+HasBearer --> |是| VerifyJWT["校验JWT签名与有效期"]
+VerifyJWT --> JWTOK{"有效?"}
+JWTOK --> |是| Inject["注入用户信息与认证方式"]
+JWTOK --> |否| APIKey["校验API Key"]
+HasBearer --> |否| APIKey
+APIKey --> KeyOK{"有效?"}
+KeyOK --> |是| Inject
+KeyOK --> |否| Abort["返回401并中止"]
+Inject --> Route
+Route --> End(["响应返回"])
+```
+
+**图表来源**
+- [路由设计规范.md:222-240](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L222-L240)
+- [路由设计规范.md:132-144](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L132-L144)
+
+**章节来源**
+- [路由设计规范.md:214-248](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L214-L248)
+- [路由设计规范.md:146-170](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L146-L170)
+
+### 请求响应格式与错误处理
+- 成功响应
+  - 一般返回 200，携带业务数据对象或数组
+  - 列表接口统一使用分页包装对象：{"items":[...],"total":n,...}
+  - 创建资源返回 201；删除资源返回 204（无内容）
+- 错误响应
+  - 使用标准 HTTP 状态码映射错误语义
+  - 错误响应体为 JSON 对象，包含 "error" 字段描述错误信息
+  - 特殊场景：401 未授权（含刷新失败）、403 禁止访问、429 请求过快（暴力破解锁定）
+
+```mermaid
+flowchart TD
+Start(["请求到达"]) --> Bind["绑定请求体/解析参数"]
+Bind --> Valid{"参数/请求体有效?"}
+Valid --> |否| ErrResp["返回 4xx + {error}"]
+Valid --> |是| Biz["执行业务逻辑"]
+Biz --> Result{"是否成功?"}
+Result --> |否| ErrResp
+Result --> |是| Wrap["按资源类型封装响应"]
+Wrap --> List{"是否列表?"}
+List --> |是| Page["返回 {items,total,...}"]
+List --> |否| Item["返回具体对象"]
+Page --> End(["结束"])
+Item --> End
+ErrResp --> End
+```
+
+**图表来源**
+- [请求响应格式规范.md:158-173](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L158-L173)
+- [请求响应格式规范.md:233-249](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L233-L249)
+
+**章节来源**
+- [请求响应格式规范.md:148-185](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L148-L185)
+- [请求响应格式规范.md:257-261](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L257-L261)
+
+### 站点管理 API
+- 列表/详情：支持分页查询与单条获取。
+- 创建/更新：绑定请求体，持久化后触发快照重载，使变更立即生效。
+- 删除：删除后重载。
+- 启动/停止：内存态标记站点运行状态（演示用途）。
+- 状态查询：返回站点主机与运行状态。
+
+```mermaid
+sequenceDiagram
+participant Client as "客户端"
+participant Router as "路由"
+participant Handler as "站点处理器"
+participant Repo as "站点仓库"
+participant Reload as "快照重载"
+Client->>Router : "POST /api/v1/sites/ : id/update"
+Router->>Handler : "调用更新处理器"
+Handler->>Repo : "Get/Bind/Update"
+Repo-->>Handler : "成功"
+Handler->>Reload : "触发重载"
+Handler-->>Client : "200/201/204"
+```
+
+**图表来源**
+- [站点管理 API.md:257-270](file://docs/管理 API 系统/站点管理 API.md#L257-L270)
+- [站点管理 API.md:146-159](file://docs/管理 API 系统/站点管理 API.md#L146-L159)
+
+**章节来源**
+- [站点管理 API.md:250-279](file://docs/管理 API 系统/站点管理 API.md#L250-L279)
+- [站点管理 API.md:172-207](file://docs/管理 API 系统/站点管理 API.md#L172-L207)
+
+### 规则管理 API
+- 列表/详情：分页与单条。
+- 创建/更新/删除：持久化后触发重载。
+- 测试：对自定义模式进行即时匹配测试，不落库。
+- 导入/导出：批量导入 JSON 数组，导出全量规则。
+
+```mermaid
+sequenceDiagram
+participant Client as "客户端"
+participant Router as "路由"
+participant Handler as "规则处理器"
+participant Repo as "规则仓库"
+participant Reload as "快照重载"
+Client->>Router : "POST /api/v1/rules/test"
+Router->>Handler : "TestRule"
+Handler-->>Client : "{matched, kind, arg}"
+Client->>Router : "POST /api/v1/rules/import"
+Router->>Handler : "ImportRules"
+Handler->>Repo : "批量创建"
+Handler->>Reload : "触发重载"
+Handler-->>Client : "{imported, total}"
+```
+
+**图表来源**
+- [规则管理 API.md:286-301](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md#L286-L301)
+- [规则管理 API.md:176-246](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md#L176-L246)
+
+**章节来源**
+- [规则管理 API.md:294-316](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md#L294-L316)
+- [规则管理 API.md:467-535](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md#L467-L535)
+
+### 系统设置 API
+- 系统设置：列出、按键获取、创建、设置、删除；修改后触发重载。
+- API 密钥：列出、创建（返回明文一次性令牌）、删除。
+- 快照重载：手动触发重载以应用最新配置。
+
+**章节来源**
+- [系统设置 API.md:138-155](file://docs/管理 API 系统/系统设置 API.md#L138-L155)
+- [系统设置 API.md:177-202](file://docs/管理 API 系统/系统设置 API.md#L177-L202)
+
+### 安全事件 API
+- 列表：支持按动作、阶段、类别、客户端 IP、主机、路径、规则 ID、时间范围过滤。
+- 统计：近 N 小时的分类统计、Top IP、Top 路径、Top 规则、总量。
+- 时间线：按时间桶统计事件趋势。
+- 详情：按 ID 获取事件。
+
+**章节来源**
+- [安全事件 API.md:161-197](file://docs/管理 API 系统/安全事件 API.md#L161-L197)
+- [安全事件 API.md:228-266](file://docs/管理 API 系统/安全事件 API.md#L228-L266)
+
+### 证书管理 API
+- 列表/详情：分页与单条。
+- 创建/更新：校验证书与私钥配对有效性后再持久化，失败返回错误。
+- 删除：删除后重载。
+
+**章节来源**
+- [证书管理 API.md:126-134](file://docs/管理 API 系统/证书管理 API.md#L126-L134)
+- [证书管理 API.md:169-173](file://docs/管理 API 系统/证书管理 API.md#L169-L173)
+
+### 策略管理 API
+- 列表/详情：分页与单条。
+- 创建/更新/删除：持久化后触发重载。
+
+**章节来源**
+- [策略管理 API.md:155-161](file://docs/管理 API 系统/策略管理 API.md#L155-L161)
+- [策略管理 API.md:195-200](file://docs/管理 API 系统/策略管理 API.md#L195-L200)
 
 ## 依赖关系分析
-- 路由到处理器：/api/v1/* 路由集中注册，按角色分组挂载中间件
-- 处理器到仓库：各模块处理器依赖对应仓库进行数据访问
-- 中间件链：安全头 → 访问日志 → 认证 → 角色校验
-- 数据模型：统一的领域模型定义了各资源的结构与默认值
+- 控制面启动：主程序启动后构建运行时、迁移数据库、初始化事件写入与归档、指标收集、WAF 引擎、速率限制器、IP 黑名单、配置同步与 Prometheus 指标。
+- 路由注册：在管理服务器上注册健康检查、认证、受控 API 与静态文件回退。
+- 数据面：按站点热启停，支持 TLS 终止与 SNI 证书。
 
 ```mermaid
 graph LR
-R["路由(router.go)"] --> MW["中间件(middleware.go)"]
-R --> AUTH["认证(handler_auth.go)"]
-R --> SITE["站点(handler_site.go)"]
-R --> RULE["规则(handler_rule.go)"]
-R --> POLICY["策略(handler_policy.go)"]
-R --> CERT["证书(handler_certificate.go)"]
-R --> IPLIST["IP(handler_ip_list.go)"]
-R --> SYS["系统(handler_system.go)"]
-R --> EVT["事件(handler_security_event.go)"]
-R --> DASH["仪表盘(handler_dashboard.go)"]
-R --> PROT["防护(handler_protection.go)"]
-AUTH --> MODELS["模型(models.go)"]
-SITE --> MODELS
-RULE --> MODELS
-POLICY --> MODELS
-CERT --> MODELS
-IPLIST --> MODELS
-SYS --> MODELS
-EVT --> MODELS
-DASH --> MODELS
-PROT --> MODELS
+Main["main.go 启动"] --> Runtime["运行时初始化"]
+Runtime --> DB["数据库迁移"]
+Runtime --> Engine["WAF 引擎"]
+Engine --> RL["速率限制器"]
+Engine --> IPRep["IP信誉"]
+Runtime --> Admin["管理服务器注册路由"]
+Admin --> DataPlane["数据面监听器"]
 ```
 
-图表来源
-- [internal/admin/router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [internal/admin/middleware.go:16-129](file://internal/admin/middleware.go#L16-L129)
-- [internal/store/models.go:14-456](file://internal/store/models.go#L14-L456)
+**图表来源**
+- [路由设计规范.md:233-236](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L233-L236)
+- [管理 API 系统.md:218-232](file://docs/管理 API 系统/管理 API 系统.md#L218-L232)
 
-章节来源
-- [internal/admin/router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [internal/admin/middleware.go:16-129](file://internal/admin/middleware.go#L16-L129)
-- [internal/store/models.go:14-456](file://internal/store/models.go#L14-L456)
+**章节来源**
+- [管理 API 系统.md:218-240](file://docs/管理 API 系统/管理 API 系统.md#L218-L240)
+- [路由设计规范.md:218-232](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L218-L232)
 
-## 性能与限流
-- 认证防暴力破解：登录接口对同一 IP/用户名进行失败次数与冷却时间限制，触发 429 并返回剩余秒数
-- 会话活跃更新：JWT 验证成功后更新会话最后活跃时间
-- 访问日志：统一记录请求 ID、方法、路径、状态、耗时与认证方式
-- 配置重载：写操作（创建/更新/删除/导入/同步等）通常触发配置重载，可能带来短暂延迟
-- 建议：
-  - 批量导入规则时合并为单次请求
-  - 控制并发写操作频率
-  - 使用分页参数合理设置 page_size
+## 性能考量
+- 本地缓存：响应缓存（GET 安全请求）与快照缓存（进程内），减少重复计算与 IO。
+- 速率限制：本地与 Redis 双栈滑动窗口限流，支持分布式部署。
+- 配置漂移检测：站点监听器指纹校验，变更时自动重启，保证一致性。
+- TLS 优化：按站点配置 TLS，支持 ALPN 与 SNI，降低握手开销。
+- 前端静态资源：由后端统一托管，减少跨域与额外请求。
 
-章节来源
-- [internal/admin/middleware.go:98-129](file://internal/admin/middleware.go#L98-L129)
-- [internal/admin/handler_auth.go:44-53](file://internal/admin/handler_auth.go#L44-L53)
-- [internal/admin/handler_rule.go:171-197](file://internal/admin/handler_rule.go#L171-L197)
-- [internal/admin/handler_system.go:142-150](file://internal/admin/handler_system.go#L142-L150)
+**章节来源**
+- [路由设计规范.md:241-253](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L241-L253)
+- [管理 API 系统.md:425-431](file://docs/管理 API 系统/管理 API 系统.md#L425-L431)
 
-## 故障排查
-- 401 未授权
-  - 缺失 Authorization 或格式错误（非 Bearer）
-  - JWT 无效或过期；尝试 /api/v1/auth/refresh
-  - 刷新后仍 401：会话被强制登出或令牌加入黑名单
-- 403 权限不足
-  - 当前角色无权访问该端点（RBAC）
-- 429 请求过快/账户锁定
-  - 登录失败过多导致临时锁定；等待冷却时间或联系管理员
-- 500 内部错误
-  - 数据库异常、配置解析错误、PEM 校验失败等
-- 常见问题定位
-  - 查看访问日志中的 X-Request-ID
-  - 确认刷新 Cookie 是否正确携带
-  - 检查系统设置键值是否合法
+## 故障排查指南
+- 401 未授权：检查 Authorization 头格式（Bearer）、刷新令牌 Cookie 是否存在且有效；查看前端自动刷新逻辑与错误提示。
+- 权限不足（403）：确认用户角色是否满足目标资源与动作的最低要求。
+- 速率限制（429）：检查请求频率与窗口设置，必要时调整保护配置。
+- 静态资源 404：确认请求路径是否为 API 路径，否则应由 SPA 回退处理。
+- 日志定位：启用访问日志中间件，结合 X-Request-ID 追踪请求链路。
 
-章节来源
-- [frontend/lib/api.ts:16-88](file://frontend/lib/api.ts#L16-L88)
-- [internal/admin/middleware.go:16-96](file://internal/admin/middleware.go#L16-L96)
-- [internal/admin/handler_auth.go:44-73](file://internal/admin/handler_auth.go#L44-L73)
+**章节来源**
+- [路由设计规范.md:255-265](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L255-L265)
+- [请求响应格式规范.md:383-396](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L383-L396)
 
 ## 结论
-本参考文档覆盖了 My-OpenWaf 后台管理 API 的主要端点与行为规范。通过明确的认证与权限模型、清晰的请求/响应约定以及完善的错误处理机制，可帮助开发者与运维人员高效集成与维护系统。
+本规范以实际代码为基础，明确了版本控制、资源命名、路由注册、HTTP 方法使用、安全与性能优化策略。通过严格的中间件链与角色权限控制，确保 API 的安全性与可维护性；通过静态文件回退与前端 SPA 集成，提供良好的用户体验。建议在后续版本中逐步引入更细粒度的 RBAC 与审计日志，持续提升系统的可观测性与合规性。
 
 ## 附录
 
-### 数据模型要点（节选）
-- 站点 Site：监听地址、TLS、转发、保护等级、维护模式、块页等
-- 规则 Rule：名称、所属策略、阶段、模式、动作、优先级、启用状态
-- 策略 Policy：名称
-- 证书 Certificate：名称、证书与私钥 PEM
-- IP 列表 IPListEntry：类型（黑名单/白名单）、值（IP/CIDR）、备注、启用状态
-- 系统设置 SystemSettings：键值对
-- 安全事件 SecurityEvent：请求标识、客户端 IP、主机、路径、方法、UA、命中规则、阶段、动作、分类、地理信息、状态码
-- 防护配置 ProtectionConfig：请求/错误限速、OWASP 敏感度、维护全局开关、Bot 检测、自动封禁、CC 保护、CVE 开关与动作、登录安全策略等
+### API 路由清单（节选）
+- 健康检查：GET /api/v1/health
+- 认证：POST /api/v1/auth/login, POST /api/v1/auth/refresh, POST /api/v1/auth/logout
+- 用户信息：GET /api/v1/auth/me
+- 会话管理：GET /api/v1/auth/sessions, POST /api/v1/auth/sessions/force-logout
+- 站点管理：GET/POST /api/v1/sites, GET/POST /api/v1/sites/:id/update, GET/POST /api/v1/sites/:id/delete, GET/POST /api/v1/sites/:id/start, GET/POST /api/v1/sites/:id/stop
+- 证书管理：GET/POST /api/v1/certificates, GET/POST /api/v1/certificates/:id/update, GET/POST /api/v1/certificates/:id/delete
+- 策略管理：GET/POST /api/v1/policies, GET/POST /api/v1/policies/:id/update, GET/POST /api/v1/policies/:id/delete
+- 规则管理：GET/POST /api/v1/rules, GET/POST /api/v1/rules/:id/update, GET/POST /api/v1/rules/:id/delete, POST /api/v1/rules/test, POST /api/v1/rules/validate, POST /api/v1/rules/import, GET /api/v1/rules/templates, GET /api/v1/rules/export
+- 保护设置：GET/POST /api/v1/protection-settings
+- IP 名单：GET/POST /api/v1/ip-lists, GET/POST /api/v1/ip-lists/:id/update, GET/POST /api/v1/ip-lists/:id/delete
+- 安全事件：GET /api/v1/security-events, GET /api/v1/security-events/stats, GET /api/v1/security-events/timeline, GET /api/v1/security-events/:id
+- 仪表盘：GET /api/v1/dashboard/summary
+- API Key 管理：GET /api/v1/api-keys, POST /api/v1/api-keys, POST /api/v1/api-keys/:id/delete
+- Bot 设置：GET /api/v1/bot-settings, GET /api/v1/bot-scores, GET /api/v1/fingerprints
+- CVE 规则：GET/POST /api/v1/cve-rules, GET/POST /api/v1/cve-rules/:id/update, GET/POST /api/v1/cve-rules/:id/delete, POST /api/v1/cve-rules/:id/toggle, POST /api/v1/cve-rules/sync, GET /api/v1/cve-feed/status
+- 系统设置：GET/POST /api/v1/settings, GET/POST /api/v1/settings/:key, GET/POST /api/v1/settings/:key/update, GET/POST /api/v1/settings/:key/delete
+- 重载：POST /api/v1/reload
+- 下发策略：GET/POST /api/v1/drop-policy, GET /api/v1/drop-stats, GET /api/v1/drop-events
 
-章节来源
-- [internal/store/models.go:94-148](file://internal/store/models.go#L94-L148)
-- [internal/store/models.go:79-92](file://internal/store/models.go#L79-L92)
-- [internal/store/models.go:35-42](file://internal/store/models.go#L35-L42)
-- [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
-- [internal/store/models.go:200-210](file://internal/store/models.go#L200-L210)
-- [internal/store/models.go:150-189](file://internal/store/models.go#L150-L189)
-- [internal/store/models.go:214-236](file://internal/store/models.go#L214-L236)
-- [internal/store/models.go:247-354](file://internal/store/models.go#L247-L354)
+**章节来源**
+- [路由设计规范.md:272-291](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L272-L291)
+- [管理 API 系统.md:494-586](file://docs/管理 API 系统/管理 API 系统.md#L494-L586)
+
+### 配置项参考
+- 数据库与存储：驱动、DSN、数据目录、Redis 地址与密码、Admin 绑定地址、Admin 静态目录。
+- Bot 检测：启用开关、GeoIP 数据库路径、阈值、高风险国家、数据中心与 VPN/代理 ASN 列表。
+- Drop 策略：启用开关、Bot 阈值、CVE 自动封禁策略。
+- 环境变量：MY_OPENWAF_DB_DRIVER、MY_OPENWAF_DSN/MY_OPENWAF_DB、MY_OPENWAF_DATA、MY_OPENWAF_REDIS_ADDR/PASSWORD/DB、MY_OPENWAF_ADMIN_BIND、MY_OPENWAF_ADMIN_STATIC_DIR、MY_OPENWAF_GEOIP_DB、MY_OPENWAF_BOT_THRESHOLD、MY_OPENWAF_CVE_ENABLED/FEED_ENABLED/FEED_INTERVAL/NVD_API_KEY/CVE_AUTO_APPROVE、MY_OPENWAF_DROP_ENABLED/DROP_BOT_THRESHOLD。
+
+**章节来源**
+- [路由设计规范.md:295-302](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L295-L302)
+- [系统设置 API.md:304-322](file://docs/管理 API 系统/系统设置 API.md#L304-L322)

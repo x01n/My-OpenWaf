@@ -2,16 +2,16 @@
 
 <cite>
 **本文引用的文件**
-- [internal/admin/handler_certificate.go](file://internal/admin/handler_certificate.go)
+- [internal/admin/system/certificate.go](file://internal/admin/system/certificate.go)
 - [internal/admin/router.go](file://internal/admin/router.go)
 - [internal/store/repository/certificate.go](file://internal/store/repository/certificate.go)
-- [internal/store/models.go](file://internal/store/models.go)
+- [internal/store/certificate.go](file://internal/store/certificate.go)
 - [internal/utils/utils.go](file://internal/utils/utils.go)
 - [frontend/app/(dashboard)/certificates/page.tsx](file://frontend/app/(dashboard)/certificates/page.tsx)
-- [frontend/components/crud-page.tsx](file://frontend/components/crud-page.tsx)
-- [frontend/app/(dashboard)/listeners/page.tsx](file://frontend/app/(dashboard)/listeners/page.tsx)
+- [frontend/lib/api.ts](file://frontend/lib/api.ts)
 - [internal/app/server.go](file://internal/app/server.go)
 - [internal/store/migrations/v2_single_site.go](file://internal/store/migrations/v2_single_site.go)
+- [internal/store/site.go](file://internal/store/site.go)
 - [cmd/main.go](file://cmd/main.go)
 </cite>
 
@@ -40,29 +40,28 @@
 ```mermaid
 graph TB
 FE["前端页面<br/>certificates/page.tsx"] --> API["后端路由<br/>router.go"]
-API --> Handler["证书处理器<br/>handler_certificate.go"]
+API --> Handler["证书处理器<br/>system/certificate.go"]
 Handler --> Repo["仓库层<br/>repository/certificate.go"]
-Repo --> Model["数据模型<br/>models.go"]
+Repo --> Model["数据模型<br/>store/certificate.go"]
 Handler --> Utils["工具函数<br/>utils.go"]
-API --> FrontendCRUD["通用 CRUD 组件<br/>crud-page.tsx"]
-Handler --> Reload["重载回调<br/>router.go"]
-Reload --> Runtime["运行时重载<br/>app/server.go"]
+API --> FrontendCRUD["通用 CRUD 组件<br/>api.ts"]
+Reload["重载回调<br/>router.go"] --> Runtime["运行时重载<br/>app/server.go"]
 ```
 
 **图表来源**
 - [internal/admin/router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [internal/admin/handler_certificate.go:15-110](file://internal/admin/handler_certificate.go#L15-L110)
+- [internal/admin/system/certificate.go:15-119](file://internal/admin/system/certificate.go#L15-L119)
 - [internal/store/repository/certificate.go:9-37](file://internal/store/repository/certificate.go#L9-L37)
-- [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
+- [internal/store/certificate.go:9-20](file://internal/store/certificate.go#L9-L20)
 - [internal/utils/utils.go:10-26](file://internal/utils/utils.go#L10-L26)
 - [frontend/app/(dashboard)/certificates/page.tsx:4-17](file://frontend/app/(dashboard)/certificates/page.tsx#L4-L17)
-- [frontend/components/crud-page.tsx:60-338](file://frontend/components/crud-page.tsx#L60-L338)
-- [internal/app/server.go:150-200](file://internal/app/server.go#L150-L200)
+- [frontend/lib/api.ts:173-193](file://frontend/lib/api.ts#L173-L193)
+- [internal/app/server.go:313-349](file://internal/app/server.go#L313-L349)
 
 **章节来源**
 - [internal/admin/router.go:48-210](file://internal/admin/router.go#L48-L210)
 - [frontend/app/(dashboard)/certificates/page.tsx:4-17](file://frontend/app/(dashboard)/certificates/page.tsx#L4-L17)
-- [frontend/components/crud-page.tsx:60-338](file://frontend/components/crud-page.tsx#L60-L338)
+- [frontend/lib/api.ts:173-193](file://frontend/lib/api.ts#L173-L193)
 
 ## 核心组件
 - 证书数据模型：包含证书名称、证书 PEM、私钥 PEM 字段，持久化于数据库。
@@ -73,12 +72,12 @@ Reload --> Runtime["运行时重载<br/>app/server.go"]
 - 运行时重载：证书变更后触发重载，使监听器加载新的证书集合。
 
 **章节来源**
-- [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
+- [internal/store/certificate.go:9-20](file://internal/store/certificate.go#L9-L20)
 - [internal/store/repository/certificate.go:13-36](file://internal/store/repository/certificate.go#L13-L36)
-- [internal/admin/handler_certificate.go:15-110](file://internal/admin/handler_certificate.go#L15-L110)
+- [internal/admin/system/certificate.go:15-119](file://internal/admin/system/certificate.go#L15-L119)
 - [internal/admin/router.go:91-151](file://internal/admin/router.go#L91-L151)
 - [frontend/app/(dashboard)/certificates/page.tsx:4-17](file://frontend/app/(dashboard)/certificates/page.tsx#L4-L17)
-- [internal/app/server.go:150-200](file://internal/app/server.go#L150-L200)
+- [internal/app/server.go:313-349](file://internal/app/server.go#L313-L349)
 
 ## 架构总览
 证书管理 API 的控制流围绕“前端 → 路由 → 处理器 → 仓库 → 数据库”的主干展开，同时在证书变更后通过重载回调触发运行时更新。
@@ -117,9 +116,9 @@ API-->>FE : 成功提示
 
 **图表来源**
 - [internal/admin/router.go:91-151](file://internal/admin/router.go#L91-L151)
-- [internal/admin/handler_certificate.go:45-109](file://internal/admin/handler_certificate.go#L45-L109)
+- [internal/admin/system/certificate.go:45-109](file://internal/admin/system/certificate.go#L45-L109)
 - [internal/store/repository/certificate.go:13-36](file://internal/store/repository/certificate.go#L13-L36)
-- [internal/app/server.go:150-200](file://internal/app/server.go#L150-L200)
+- [internal/app/server.go:313-349](file://internal/app/server.go#L313-L349)
 
 ## 详细组件分析
 
@@ -157,12 +156,12 @@ SITE ||--o{ CERTIFICATE : "使用证书"
 ```
 
 **图表来源**
-- [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
-- [internal/store/models.go:96-148](file://internal/store/models.go#L96-L148)
+- [internal/store/certificate.go:9-20](file://internal/store/certificate.go#L9-L20)
+- [internal/store/site.go:16-81](file://internal/store/site.go#L16-L81)
 - [internal/store/migrations/v2_single_site.go:52-82](file://internal/store/migrations/v2_single_site.go#L52-L82)
 
 **章节来源**
-- [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
+- [internal/store/certificate.go:9-20](file://internal/store/certificate.go#L9-L20)
 - [internal/store/repository/certificate.go:9-37](file://internal/store/repository/certificate.go#L9-L37)
 - [internal/store/migrations/v2_single_site.go:52-82](file://internal/store/migrations/v2_single_site.go#L52-L82)
 
@@ -183,10 +182,10 @@ Err --> Done
 ```
 
 **图表来源**
-- [internal/admin/handler_certificate.go:45-109](file://internal/admin/handler_certificate.go#L45-L109)
+- [internal/admin/system/certificate.go:45-109](file://internal/admin/system/certificate.go#L45-L109)
 
 **章节来源**
-- [internal/admin/handler_certificate.go:15-110](file://internal/admin/handler_certificate.go#L15-L110)
+- [internal/admin/system/certificate.go:15-119](file://internal/admin/system/certificate.go#L15-L119)
 - [internal/utils/utils.go:23-26](file://internal/utils/utils.go#L23-L26)
 
 ### 路由与权限控制
@@ -208,7 +207,7 @@ Err --> Done
 
 **章节来源**
 - [frontend/app/(dashboard)/certificates/page.tsx:4-17](file://frontend/app/(dashboard)/certificates/page.tsx#L4-L17)
-- [frontend/components/crud-page.tsx:129-148](file://frontend/components/crud-page.tsx#L129-L148)
+- [frontend/lib/api.ts:173-193](file://frontend/lib/api.ts#L173-L193)
 
 ### 证书链与 TLS 配置联动
 - 站点模型包含 TLS 相关字段：启用开关、证书 ID、最小/最大 TLS 版本、密码套件、ALPN 协议等。
@@ -231,12 +230,12 @@ Site-->>RT : 应用配置并启动监听器
 
 **图表来源**
 - [internal/app/server.go:401-457](file://internal/app/server.go#L401-L457)
-- [internal/store/models.go:96-148](file://internal/store/models.go#L96-L148)
+- [internal/store/site.go:16-81](file://internal/store/site.go#L16-L81)
 - [internal/store/migrations/v2_single_site.go:52-82](file://internal/store/migrations/v2_single_site.go#L52-L82)
 
 **章节来源**
 - [internal/app/server.go:401-457](file://internal/app/server.go#L401-L457)
-- [internal/store/models.go:96-148](file://internal/store/models.go#L96-L148)
+- [internal/store/site.go:16-81](file://internal/store/site.go#L16-L81)
 
 ## 依赖分析
 - 处理器依赖仓库层与工具函数，负责业务逻辑与输入校验。
@@ -255,14 +254,14 @@ Reload --> Runtime["运行时"]
 ```
 
 **图表来源**
-- [internal/admin/handler_certificate.go:15-110](file://internal/admin/handler_certificate.go#L15-L110)
+- [internal/admin/system/certificate.go:15-119](file://internal/admin/system/certificate.go#L15-L119)
 - [internal/admin/router.go:91-151](file://internal/admin/router.go#L91-L151)
-- [frontend/components/crud-page.tsx:60-338](file://frontend/components/crud-page.tsx#L60-L338)
+- [frontend/lib/api.ts:173-193](file://frontend/lib/api.ts#L173-L193)
 
 **章节来源**
-- [internal/admin/handler_certificate.go:15-110](file://internal/admin/handler_certificate.go#L15-L110)
+- [internal/admin/system/certificate.go:15-119](file://internal/admin/system/certificate.go#L15-L119)
 - [internal/admin/router.go:91-151](file://internal/admin/router.go#L91-L151)
-- [frontend/components/crud-page.tsx:60-338](file://frontend/components/crud-page.tsx#L60-L338)
+- [frontend/lib/api.ts:173-193](file://frontend/lib/api.ts#L173-L193)
 
 ## 性能考虑
 - 分页查询：处理器使用工具函数计算偏移与限制，避免一次性加载大量证书。
@@ -270,7 +269,7 @@ Reload --> Runtime["运行时"]
 - 重载触发：证书变更仅触发必要的运行时重载，避免全局重启。
 
 **章节来源**
-- [internal/admin/handler_certificate.go:17-26](file://internal/admin/handler_certificate.go#L17-L26)
+- [internal/admin/system/certificate.go:17-26](file://internal/admin/system/certificate.go#L17-L26)
 - [internal/utils/utils.go:10-21](file://internal/utils/utils.go#L10-L21)
 - [internal/store/repository/certificate.go:13-22](file://internal/store/repository/certificate.go#L13-L22)
 
@@ -297,7 +296,7 @@ Reload --> Runtime["运行时"]
   - 处理：确认路由层已注入重载回调并触发；检查运行时日志。
 
 **章节来源**
-- [internal/admin/handler_certificate.go:45-109](file://internal/admin/handler_certificate.go#L45-L109)
+- [internal/admin/system/certificate.go:45-109](file://internal/admin/system/certificate.go#L45-L109)
 - [internal/utils/utils.go:23-26](file://internal/utils/utils.go#L23-L26)
 
 ## 结论
@@ -311,7 +310,7 @@ Reload --> Runtime["运行时"]
 - 验证：处理器在创建/更新时使用标准库 TLS 包进行配对校验
 
 **章节来源**
-- [internal/admin/handler_certificate.go:52-55](file://internal/admin/handler_certificate.go#L52-L55)
+- [internal/admin/system/certificate.go:52-55](file://internal/admin/system/certificate.go#L52-L55)
 
 ### 存储机制
 - 数据模型：证书实体包含名称、证书 PEM、私钥 PEM 与时间戳字段
@@ -319,7 +318,7 @@ Reload --> Runtime["运行时"]
 - 迁移：站点模型扩展 TLS 监听相关字段，支持证书绑定
 
 **章节来源**
-- [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
+- [internal/store/certificate.go:9-20](file://internal/store/certificate.go#L9-L20)
 - [internal/store/repository/certificate.go:13-36](file://internal/store/repository/certificate.go#L13-L36)
 - [internal/store/migrations/v2_single_site.go:52-82](file://internal/store/migrations/v2_single_site.go#L52-L82)
 
@@ -332,7 +331,7 @@ Reload --> Runtime["运行时"]
 
 **章节来源**
 - [internal/admin/router.go:91-151](file://internal/admin/router.go#L91-L151)
-- [internal/admin/handler_certificate.go:15-110](file://internal/admin/handler_certificate.go#L15-L110)
+- [internal/admin/system/certificate.go:15-119](file://internal/admin/system/certificate.go#L15-L119)
 
 ### 证书验证流程
 - 输入绑定：将请求体绑定到证书对象
@@ -341,7 +340,7 @@ Reload --> Runtime["运行时"]
 - 生效：触发重载回调，运行时重新加载证书
 
 **章节来源**
-- [internal/admin/handler_certificate.go:45-109](file://internal/admin/handler_certificate.go#L45-L109)
+- [internal/admin/system/certificate.go:45-109](file://internal/admin/system/certificate.go#L45-L109)
 
 ### 证书链管理
 - 根证书与中间证书：当前模型为单一证书实体，建议在 PEM 中包含完整链路（服务器证书 + 中间证书），以便客户端验证
@@ -349,8 +348,8 @@ Reload --> Runtime["运行时"]
 - TLS 参数：站点模型支持最小/最大 TLS 版本、密码套件、ALPN 协议等配置
 
 **章节来源**
-- [internal/store/models.go:14-23](file://internal/store/models.go#L14-L23)
-- [internal/store/models.go:96-148](file://internal/store/models.go#L96-L148)
+- [internal/store/certificate.go:9-20](file://internal/store/certificate.go#L9-L20)
+- [internal/store/site.go:16-81](file://internal/store/site.go#L16-L81)
 - [internal/store/migrations/v2_single_site.go:52-82](file://internal/store/migrations/v2_single_site.go#L52-L82)
 
 ### 配置示例与部署指南
@@ -379,8 +378,8 @@ Reload --> Runtime["运行时"]
   - 监控证书到期时间并在到期前告警
 
 **章节来源**
-- [internal/admin/handler_certificate.go:45-109](file://internal/admin/handler_certificate.go#L45-L109)
-- [internal/app/server.go:150-200](file://internal/app/server.go#L150-L200)
+- [internal/admin/system/certificate.go:45-109](file://internal/admin/system/certificate.go#L45-L109)
+- [internal/app/server.go:313-349](file://internal/app/server.go#L313-L349)
 
 ### 安全最佳实践
 - 传输安全：管理员 API 通过反向代理启用 TLS，避免明文传输

@@ -6,9 +6,9 @@
 - [internal/dataplane/handler.go](file://internal/dataplane/handler.go)
 - [internal/observability/eventwriter.go](file://internal/observability/eventwriter.go)
 - [internal/store/repository/security_event.go](file://internal/store/repository/security_event.go)
-- [internal/store/models.go](file://internal/store/models.go)
 - [internal/core/redis/pubsub.go](file://internal/core/redis/pubsub.go)
-- [internal/waf/block.go](file://internal/waf/block.go)
+- [internal/proxy/proxy.go](file://internal/proxy/proxy.go)
+- [internal/security/clientip.go](file://internal/security/clientip.go)
 - [frontend/app/(dashboard)/security-events/page.tsx](file://frontend/app/(dashboard)/security-events/page.tsx)
 </cite>
 
@@ -22,6 +22,7 @@
 7. [性能考虑](#性能考虑)
 8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
+10. [附录](#附录)
 
 ## 简介
 本文件系统性阐述 OpenWAF 中 Server-Sent Events（SSE）事件推送的实现与使用方式，覆盖以下主题：
@@ -48,32 +49,32 @@ end
 subgraph "后端"
 DP["数据平面处理器<br/>handler.go"]
 SSE["SSE 转发器<br/>sse.go"]
-WAF["WAF 响应生成<br/>block.go"]
 OBS["事件写入器<br/>eventwriter.go"]
 REPO["安全事件仓库<br/>security_event.go"]
-MODEL["安全事件模型<br/>models.go"]
 REDIS["Redis 配置同步<br/>pubsub.go"]
+PROXY["代理传输层<br/>proxy.go"]
+SEC["客户端 IP 解析<br/>clientip.go"]
 end
 FE --> DP
 DP --> SSE
-DP --> WAF
 DP --> OBS
 OBS --> REPO
-REPO --> MODEL
-DP < --> REDIS
+DP --> REDIS
+DP --> PROXY
+DP --> SEC
 ```
 
 **图表来源**
-- [internal/dataplane/handler.go:38-310](file://internal/dataplane/handler.go#L38-L310)
+- [internal/dataplane/handler.go:69-78](file://internal/dataplane/handler.go#L69-L78)
 - [internal/dataplane/sse.go:18-92](file://internal/dataplane/sse.go#L18-L92)
-- [internal/observability/eventwriter.go:12-105](file://internal/observability/eventwriter.go#L12-L105)
-- [internal/store/repository/security_event.go:17-192](file://internal/store/repository/security_event.go#L17-L192)
-- [internal/store/models.go:212-236](file://internal/store/models.go#L212-L236)
-- [internal/core/redis/pubsub.go:11-77](file://internal/core/redis/pubsub.go#L11-L77)
-- [internal/waf/block.go:16-39](file://internal/waf/block.go#L16-L39)
+- [internal/observability/eventwriter.go:19-36](file://internal/observability/eventwriter.go#L19-L36)
+- [internal/store/repository/security_event.go:11-15](file://internal/store/repository/security_event.go#L11-L15)
+- [internal/core/redis/pubsub.go:13-19](file://internal/core/redis/pubsub.go#L13-L19)
+- [internal/proxy/proxy.go:35-83](file://internal/proxy/proxy.go#L35-L83)
+- [internal/security/clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
 
 **章节来源**
-- [internal/dataplane/handler.go:38-310](file://internal/dataplane/handler.go#L38-L310)
+- [internal/dataplane/handler.go:69-78](file://internal/dataplane/handler.go#L69-L78)
 - [internal/dataplane/sse.go:18-92](file://internal/dataplane/sse.go#L18-L92)
 
 ## 核心组件
@@ -86,15 +87,14 @@ DP < --> REDIS
 
 **章节来源**
 - [internal/dataplane/sse.go:18-92](file://internal/dataplane/sse.go#L18-L92)
-- [internal/dataplane/handler.go:265-272](file://internal/dataplane/handler.go#L265-L272)
-- [internal/observability/eventwriter.go:12-105](file://internal/observability/eventwriter.go#L12-L105)
-- [internal/store/repository/security_event.go:17-192](file://internal/store/repository/security_event.go#L17-L192)
-- [internal/store/models.go:212-236](file://internal/store/models.go#L212-L236)
-- [internal/core/redis/pubsub.go:11-77](file://internal/core/redis/pubsub.go#L11-L77)
-- [frontend/app/(dashboard)/security-events/page.tsx](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L117)
+- [internal/dataplane/handler.go:715-744](file://internal/dataplane/handler.go#L715-L744)
+- [internal/observability/eventwriter.go:19-36](file://internal/observability/eventwriter.go#L19-L36)
+- [internal/store/repository/security_event.go:11-15](file://internal/store/repository/security_event.go#L11-L15)
+- [internal/core/redis/pubsub.go:13-19](file://internal/core/redis/pubsub.go#L13-L19)
+- [frontend/app/(dashboard)/security-events/page.tsx:73-125](file://frontend/app/(dashboard)/security-events/page.tsx#L73-L125)
 
 ## 架构总览
-SSE 在 OpenWAF 中作为“事件流”能力被复用到多个场景：
+SSE 在 OpenWAF 中作为"事件流"能力被复用到多个场景：
 - 安全事件实时推送：WAF 引擎命中观察或拦截时，事件写入器异步落库，前端通过 SSE 订阅实时事件流
 - 配置变更通知：Redis 发布/订阅用于多节点同步配置变更，前端可订阅以接收状态更新
 - 统计与趋势：事件仓库提供聚合查询，前端定时拉取统计数据
@@ -116,9 +116,9 @@ Client-->>FE : "渲染实时事件与统计"
 ```
 
 **图表来源**
-- [internal/dataplane/handler.go:265-272](file://internal/dataplane/handler.go#L265-L272)
+- [internal/dataplane/handler.go:715-720](file://internal/dataplane/handler.go#L715-L720)
 - [internal/dataplane/sse.go:18-92](file://internal/dataplane/sse.go#L18-L92)
-- [frontend/app/(dashboard)/security-events/page.tsx](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L117)
+- [frontend/app/(dashboard)/security-events/page.tsx:73-125](file://frontend/app/(dashboard)/security-events/page.tsx#L73-L125)
 
 ## 详细组件分析
 
@@ -186,11 +186,11 @@ end
 ```
 
 **图表来源**
-- [internal/dataplane/handler.go:38-310](file://internal/dataplane/handler.go#L38-L310)
+- [internal/dataplane/handler.go:69-78](file://internal/dataplane/handler.go#L69-L78)
 - [internal/dataplane/sse.go:18-92](file://internal/dataplane/sse.go#L18-L92)
 
 **章节来源**
-- [internal/dataplane/handler.go:265-272](file://internal/dataplane/handler.go#L265-L272)
+- [internal/dataplane/handler.go:715-744](file://internal/dataplane/handler.go#L715-L744)
 
 ### 事件写入器（EventWriter）
 - 功能职责
@@ -199,9 +199,9 @@ end
   - 批量写入数据库，降低写放大
   - 关闭时清空剩余事件并等待
 - 缓冲与刷新策略
-  - 缓冲容量：4096
-  - 批量大小：64
-  - 刷新间隔：2 秒
+  - 缓冲容量：16384
+  - 批量大小：256
+  - 刷新间隔：5 秒
   - 非阻塞入队：缓冲满时丢弃并记录告警
 - 错误处理
   - 写入失败记录错误日志，不影响主流程
@@ -216,18 +216,20 @@ class EventWriter {
 -wg : WaitGroup
 -batchSize : int
 -flushInterval : time.Duration
+-redisTTL : time.Duration
 +Record(ev)
 +Close()
 -loop()
 -flush(buf)
+-pushToRedis(batch)
 }
 ```
 
 **图表来源**
-- [internal/observability/eventwriter.go:12-105](file://internal/observability/eventwriter.go#L12-L105)
+- [internal/observability/eventwriter.go:19-36](file://internal/observability/eventwriter.go#L19-L36)
 
 **章节来源**
-- [internal/observability/eventwriter.go:12-105](file://internal/observability/eventwriter.go#L12-L105)
+- [internal/observability/eventwriter.go:19-164](file://internal/observability/eventwriter.go#L19-L164)
 
 ### 安全事件仓库与模型
 - 模型（SecurityEvent）
@@ -264,11 +266,10 @@ int status_code
 ```
 
 **图表来源**
-- [internal/store/models.go:212-236](file://internal/store/models.go#L212-L236)
+- [internal/store/repository/security_event.go:11-15](file://internal/store/repository/security_event.go#L11-L15)
 
 **章节来源**
-- [internal/store/repository/security_event.go:17-192](file://internal/store/repository/security_event.go#L17-L192)
-- [internal/store/models.go:212-236](file://internal/store/models.go#L212-L236)
+- [internal/store/repository/security_event.go:17-293](file://internal/store/repository/security_event.go#L17-L293)
 
 ### Redis 配置同步（发布/订阅）
 - 功能职责
@@ -290,10 +291,10 @@ Sub->>Sub : "执行本地重载"
 ```
 
 **图表来源**
-- [internal/core/redis/pubsub.go:11-77](file://internal/core/redis/pubsub.go#L11-L77)
+- [internal/core/redis/pubsub.go:13-19](file://internal/core/redis/pubsub.go#L13-L19)
 
 **章节来源**
-- [internal/core/redis/pubsub.go:11-77](file://internal/core/redis/pubsub.go#L11-L77)
+- [internal/core/redis/pubsub.go:13-77](file://internal/core/redis/pubsub.go#L13-L77)
 
 ### 前端安全事件页面
 - 功能职责
@@ -305,7 +306,7 @@ Sub->>Sub : "执行本地重载"
   - SSE 订阅实时事件流（页面中存在订阅逻辑）
 
 **章节来源**
-- [frontend/app/(dashboard)/security-events/page.tsx](file://frontend/app/(dashboard)/security-events/page.tsx#L60-L117)
+- [frontend/app/(dashboard)/security-events/page.tsx:73-397](file://frontend/app/(dashboard)/security-events/page.tsx#L73-L397)
 
 ## 依赖分析
 - SSE 转发器依赖
@@ -315,6 +316,8 @@ Sub->>Sub : "执行本地重载"
   - WAF 引擎：判定结果决定后续动作
   - SSE 转发器：SSE 请求分支
   - 事件写入器：记录安全事件
+  - 代理传输层：共享传输实例
+  - 客户端 IP 解析：可信代理链处理
 - 事件写入器依赖
   - 安全事件仓库：批量写入
   - 日志：错误与告警
@@ -329,9 +332,10 @@ SSE["sse.go"] --> Hertz["Hertz 请求上下文"]
 SSE --> Proxy["共享传输"]
 SSE --> Sec["安全参数应用"]
 Handler["handler.go"] --> SSE
-Handler --> WAF["WAF 响应生成"]
 Handler --> Engine["WAF 引擎"]
 Handler --> EW["事件写入器"]
+Handler --> PROXY["代理传输层"]
+Handler --> SEC["客户端 IP 解析"]
 EW --> Repo["安全事件仓库"]
 Repo --> Model["安全事件模型"]
 Handler --> Redis["Redis 配置同步"]
@@ -339,23 +343,25 @@ Handler --> Redis["Redis 配置同步"]
 
 **图表来源**
 - [internal/dataplane/sse.go:18-92](file://internal/dataplane/sse.go#L18-L92)
-- [internal/dataplane/handler.go:38-310](file://internal/dataplane/handler.go#L38-L310)
-- [internal/observability/eventwriter.go:12-105](file://internal/observability/eventwriter.go#L12-L105)
-- [internal/store/repository/security_event.go:17-192](file://internal/store/repository/security_event.go#L17-L192)
-- [internal/store/models.go:212-236](file://internal/store/models.go#L212-L236)
-- [internal/core/redis/pubsub.go:11-77](file://internal/core/redis/pubsub.go#L11-L77)
+- [internal/dataplane/handler.go:69-78](file://internal/dataplane/handler.go#L69-L78)
+- [internal/observability/eventwriter.go:19-36](file://internal/observability/eventwriter.go#L19-L36)
+- [internal/store/repository/security_event.go:11-15](file://internal/store/repository/security_event.go#L11-L15)
+- [internal/core/redis/pubsub.go:13-19](file://internal/core/redis/pubsub.go#L13-L19)
+- [internal/proxy/proxy.go:35-83](file://internal/proxy/proxy.go#L35-L83)
+- [internal/security/clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
 
 **章节来源**
 - [internal/dataplane/sse.go:18-92](file://internal/dataplane/sse.go#L18-L92)
-- [internal/dataplane/handler.go:38-310](file://internal/dataplane/handler.go#L38-L310)
-- [internal/observability/eventwriter.go:12-105](file://internal/observability/eventwriter.go#L12-L105)
-- [internal/store/repository/security_event.go:17-192](file://internal/store/repository/security_event.go#L17-L192)
-- [internal/store/models.go:212-236](file://internal/store/models.go#L212-L236)
-- [internal/core/redis/pubsub.go:11-77](file://internal/core/redis/pubsub.go#L11-L77)
+- [internal/dataplane/handler.go:69-78](file://internal/dataplane/handler.go#L69-L78)
+- [internal/observability/eventwriter.go:19-36](file://internal/observability/eventwriter.go#L19-L36)
+- [internal/store/repository/security_event.go:11-15](file://internal/store/repository/security_event.go#L11-L15)
+- [internal/core/redis/pubsub.go:13-19](file://internal/core/redis/pubsub.go#L13-L19)
+- [internal/proxy/proxy.go:35-83](file://internal/proxy/proxy.go#L35-L83)
+- [internal/security/clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
 
 ## 性能考虑
 - 缓冲与批处理
-  - 事件写入器使用 4096 容量缓冲与 64 批量阈值，结合 2 秒定时刷新，平衡延迟与吞吐
+  - 事件写入器使用 16384 容量缓冲与 256 批量阈值，结合 5 秒定时刷新，平衡延迟与吞吐
   - 批量写入数据库，减少事务开销
 - 流式传输
   - SSE 转发器使用 4096 字节缓冲，边读边写并及时 Flush，降低首字节延迟
@@ -366,11 +372,10 @@ Handler --> Redis["Redis 配置同步"]
   - 定期删除过期事件，控制存储增长，提升查询性能
 
 **章节来源**
-- [internal/observability/eventwriter.go:22-35](file://internal/observability/eventwriter.go#L22-L35)
-- [internal/observability/eventwriter.go:57-93](file://internal/observability/eventwriter.go#L57-L93)
-- [internal/dataplane/sse.go:65-78](file://internal/dataplane/sse.go#L65-L78)
-- [internal/store/repository/security_event.go:62-66](file://internal/store/repository/security_event.go#L62-L66)
-- [internal/observability/archiver.go:11-72](file://internal/observability/archiver.go#L11-L72)
+- [internal/observability/eventwriter.go:38-51](file://internal/observability/eventwriter.go#L38-L51)
+- [internal/observability/eventwriter.go:80-116](file://internal/observability/eventwriter.go#L80-L116)
+- [internal/dataplane/sse.go:74-92](file://internal/dataplane/sse.go#L74-L92)
+- [internal/store/repository/security_event.go:77-80](file://internal/store/repository/security_event.go#L77-L80)
 
 ## 故障排查指南
 - SSE 连接中断
@@ -388,16 +393,50 @@ Handler --> Redis["Redis 配置同步"]
   - 检查订阅者是否正常运行且未提前退出
 
 **章节来源**
-- [internal/dataplane/sse.go:65-86](file://internal/dataplane/sse.go#L65-L86)
-- [internal/observability/eventwriter.go:42-55](file://internal/observability/eventwriter.go#L42-L55)
-- [internal/observability/eventwriter.go:95-104](file://internal/observability/eventwriter.go#L95-L104)
+- [internal/dataplane/sse.go:65-92](file://internal/dataplane/sse.go#L65-L92)
+- [internal/observability/eventwriter.go:65-72](file://internal/observability/eventwriter.go#L65-L72)
+- [internal/observability/eventwriter.go:118-139](file://internal/observability/eventwriter.go#L118-L139)
 - [internal/core/redis/pubsub.go:33-43](file://internal/core/redis/pubsub.go#L33-L43)
 - [internal/core/redis/pubsub.go:45-68](file://internal/core/redis/pubsub.go#L45-L68)
 
 ## 结论
-OpenWAF 的 SSE 实现以“轻量、可靠、可观测”为目标：
+OpenWAF 的 SSE 实现以"轻量、可靠、可观测"为目标：
 - 通过数据平面处理器与 SSE 转发器，实现对 text/event-stream 的透明透传
 - 事件写入器采用缓冲+批处理策略，有效隔离热路径与持久化写入
 - 仓库与模型提供完善的查询与统计能力，支撑前端实时展示
 - Redis 配置同步保障多节点一致性，便于扩展与运维
 - 前端安全事件页面提供直观的可视化界面，结合 SSE 实现实时更新
+
+## 附录
+
+### SSE 协议识别机制
+SSE 协议识别通过 HTTP 请求头中的 Accept 字段进行判断，当请求头包含 "text/event-stream" 时，系统将其识别为 SSE 请求并交由 SSE 转发器处理。
+
+### 长连接管理策略
+- 超时设置：SSE 转发器使用 0 秒超时，确保长连接不被中间代理断开
+- 连接头设置：显式设置 Cache-Control 和 Connection 头部，维持长连接
+- 响应头透传：除 Hop-by-Hop 头部外，其他响应头完整透传给客户端
+
+### 流式数据推送实现
+- 缓冲策略：使用 4096 字节缓冲区，边读边写，提高传输效率
+- 刷新机制：每次写入后检查 Flush 接口，确保数据及时发送
+- 错误处理：正确处理 EOF 和其他错误，保证连接稳定关闭
+
+### 事件格式处理
+- 事件来源：WAF 引擎命中观察或拦截时产生的安全事件
+- 数据持久化：事件写入器采用异步批量写入，避免阻塞热路径
+- 数据格式：JSON 格式序列化，便于前端解析和展示
+
+### 连接状态维护
+- 心跳保持：通过设置适当的响应头和超时参数维持长连接
+- 异常处理：捕获并处理各种网络异常，确保连接稳定
+- 资源清理：正确关闭上游连接和本地资源，防止内存泄漏
+
+### 客户端连接方法
+前端通过标准的 EventSource API 订阅 SSE 事件流，支持自动重连和错误处理。
+
+### 性能优化建议
+- 调整缓冲区大小以适应不同的网络环境
+- 优化批量写入参数以平衡延迟和吞吐
+- 合理设置刷新间隔，避免过度刷新影响性能
+- 实施合理的归档策略，控制存储空间增长

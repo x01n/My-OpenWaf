@@ -2,15 +2,17 @@
 
 <cite>
 **本文档引用的文件**
-- [handler_rule.go](file://internal/admin/handler_rule.go)
-- [router.go](file://internal/admin/router.go)
+- [rule.go](file://internal/admin/rule/rule.go)
+- [validate.go](file://internal/admin/rule/validate.go)
 - [rule.go](file://internal/store/repository/rule.go)
-- [models.go](file://internal/store/models.go)
-- [utils.go](file://internal/utils/utils.go)
+- [policy.go](file://internal/store/policy.go)
+- [router.go](file://internal/admin/router.go)
+- [规则 CRUD 操作.md](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md)
+- [API 端点参考.md](file://docs/管理 API 系统/REST API 设计规范/API 端点参考.md)
+- [规则管理 API.md](file://docs/管理 API 系统/规则管理 API/规则管理 API.md)
 - [page.tsx](file://frontend/app/(dashboard)/rules/page.tsx)
 - [crud-page.tsx](file://frontend/components/crud-page.tsx)
 - [api.ts](file://frontend/lib/api.ts)
-- [handler_rule_validate.go](file://internal/admin/handler_rule_validate.go)
 </cite>
 
 ## 目录
@@ -23,10 +25,11 @@
 7. [性能考虑](#性能考虑)
 8. [故障排除指南](#故障排除指南)
 9. [结论](#结论)
+10. [附录](#附录)
 
 ## 简介
 
-本文件详细介绍了 OpenWAF 项目中规则 CRUD（创建、读取、更新、删除）操作的完整实现。规则是 WAF（Web 应用防火墙）系统的核心组件，用于定义安全策略和防护逻辑。本文档涵盖了从后端 API 实现到前端用户界面的所有方面，包括 HTTP 方法、URL 路径、请求参数、响应格式、错误处理机制以及分页查询机制。
+本文档详细描述了 OpenWAF 项目中规则 CRUD（创建、读取、更新、删除）操作的完整实现。规则是 WAF（Web 应用防火墙）系统的核心组件，用于定义安全策略和防护逻辑。本文档涵盖了从后端 API 实现到前端用户界面的所有方面，包括 HTTP 方法、URL 路径、请求参数、响应格式、错误处理机制以及分页查询机制。
 
 ## 项目结构
 
@@ -57,177 +60,124 @@ Model --> DB
 ```
 
 **图表来源**
-- [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_rule.go:16-102](file://internal/admin/handler_rule.go#L16-L102)
-- [rule.go:9-40](file://internal/store/repository/rule.go#L9-L40)
+- [rule.go:18-138](file://internal/admin/rule/rule.go#L18-L138)
+- [rule.go:1-51](file://internal/store/repository/rule.go#L1-L51)
 
 **章节来源**
-- [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_rule.go:16-102](file://internal/admin/handler_rule.go#L16-L102)
+- [rule.go:18-138](file://internal/admin/rule/rule.go#L18-L138)
+- [rule.go:1-51](file://internal/store/repository/rule.go#L1-L51)
 
 ## 核心组件
 
 ### 规则数据模型
 
-规则数据模型定义了规则的基本属性和行为：
+规则模型定义了 WAF 系统中的核心数据结构：
 
 ```mermaid
 classDiagram
 class Rule {
-+uint ID
-+string Name
-+uint PolicyID
-+RulePhase Phase
-+string Pattern
-+RuleAction Action
-+int Priority
-+bool Enabled
-+time CreatedAt
-+time UpdatedAt
++uint id
++string name
++uint policy_id
++string phase
++string pattern
++string action
++uint priority
++bool enabled
++datetime created_at
++datetime updated_at
 }
-class RulePhase {
-<<enumeration>>
-PhaseACL
-PhaseRateLimit
-PhaseOWASP
-PhaseSignature
-PhaseCustom
+class RuleRepo {
++List(offset, limit) []Rule
++ListByPolicy(policyID) []Rule
++Get(id) Rule
++Create(item) error
++Update(item) error
++Delete(id) error
++BatchCreate(items) error
 }
-class RuleAction {
-<<enumeration>>
-ActionAllow
-ActionIntercept
-ActionObserve
-ActionDrop
-}
-Rule --> RulePhase : "使用"
-Rule --> RuleAction : "使用"
 ```
 
 **图表来源**
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
-- [models.go:44-65](file://internal/store/models.go#L44-L65)
+- [policy.go:61](file://internal/store/policy.go#L61)
+- [rule.go:9-51](file://internal/store/repository/rule.go#L9-L51)
 
-规则模型包含以下关键字段：
-- **ID**: 规则唯一标识符
-- **Name**: 规则名称，最大长度 128 字符
-- **PolicyID**: 所属策略的外键
-- **Phase**: 规则执行阶段（ACL、签名、自定义等）
-- **Pattern**: 匹配模式，支持多种 DSL 格式
-- **Action**: 处理动作（允许、拦截、观察、丢弃）
-- **Priority**: 优先级，数值越小优先级越高
-- **Enabled**: 启用状态，默认为 true
+### 规则处理器
 
-**章节来源**
-- [models.go:79-92](file://internal/store/models.go#L79-L92)
-- [models.go:44-65](file://internal/store/models.go#L44-L65)
+规则处理器提供了完整的 CRUD 操作接口：
 
-### 分页查询机制
-
-系统实现了标准的分页查询机制，支持自定义页面大小和偏移量：
-
-```mermaid
-flowchart TD
-Start([开始查询]) --> ParsePage["解析页码参数<br/>默认值: 1"]
-ParsePage --> ParseSize["解析页面大小<br/>默认值: 20<br/>最小值: 1<br/>最大值: 200"]
-ParseSize --> CalcOffset["计算偏移量<br/>offset = (page - 1) × pageSize"]
-CalcOffset --> QueryDB["查询数据库"]
-QueryDB --> CountTotal["统计总记录数"]
-CountTotal --> ReturnData["返回数据和总数"]
-ReturnData --> End([结束])
-```
-
-**图表来源**
-- [utils.go:10-21](file://internal/utils/utils.go#L10-L21)
-- [rule.go:13-22](file://internal/store/repository/rule.go#L13-L22)
+- **列表查询**：支持分页和排序
+- **单条查询**：按 ID 获取规则详情
+- **创建规则**：支持批量创建
+- **更新规则**：支持部分字段更新
+- **删除规则**：级联删除关联资源
 
 **章节来源**
-- [utils.go:10-21](file://internal/utils/utils.go#L10-L21)
-- [rule.go:13-22](file://internal/store/repository/rule.go#L13-L22)
+- [rule.go:18-138](file://internal/admin/rule/rule.go#L18-L138)
+- [rule.go:24-51](file://internal/store/repository/rule.go#L24-L51)
 
 ## 架构概览
 
-规则 CRUD 操作遵循 MVC（Model-View-Controller）架构模式：
-
 ```mermaid
 sequenceDiagram
-participant Client as 客户端
-participant Router as 路由器
-participant Handler as 处理器
-participant Repo as 仓库
-participant DB as 数据库
+participant Client as "客户端"
+participant Router as "路由层"
+participant Handler as "规则处理器"
+participant Repo as "仓库层"
+participant DB as "数据库"
 Client->>Router : HTTP 请求
-Router->>Handler : 调用相应处理函数
-Handler->>Repo : 执行数据库操作
-Repo->>DB : 查询/插入/更新/删除
+Router->>Handler : 调用对应处理器
+Handler->>Repo : 数据访问操作
+Repo->>DB : SQL 查询/更新
 DB-->>Repo : 返回结果
-Repo-->>Handler : 返回数据
-Handler-->>Client : HTTP 响应
-Note over Handler : 错误处理和状态码设置
-Note over Repo : GORM ORM 操作
+Repo-->>Handler : 返回实体
+Handler-->>Client : JSON 响应
 ```
 
 **图表来源**
-- [router.go:97-164](file://internal/admin/router.go#L97-L164)
-- [handler_rule.go:16-102](file://internal/admin/handler_rule.go#L16-L102)
-- [rule.go:13-40](file://internal/store/repository/rule.go#L13-L40)
+- [rule.go:18-138](file://internal/admin/rule/rule.go#L18-L138)
+- [rule.go:24-51](file://internal/store/repository/rule.go#L24-L51)
 
 ## 详细组件分析
 
-### 创建规则 (Create Rule)
+### 列表查询 API
 
 #### API 端点规范
 
 | 属性 | 值 |
 |------|-----|
-| HTTP 方法 | POST |
+| HTTP 方法 | GET |
 | URL 路径 | `/api/v1/rules` |
 | 认证要求 | 需要有效令牌 |
-| RBAC 权限 | admin, operator |
+| RBAC 权限 | readonly |
 
-#### 请求参数
-
-创建规则的请求体包含完整的规则对象：
+#### 查询参数
 
 | 字段名 | 类型 | 必填 | 描述 | 默认值 |
-|--------|------|------|------|--------|
-| name | string | 否 | 规则名称 | 空字符串 |
-| policy_id | uint | 是 | 所属策略 ID | - |
-| phase | string | 是 | 执行阶段 | "acl" |
-| pattern | string | 是 | 匹配模式 DSL | - |
-| action | string | 是 | 处理动作 | "block" |
-| priority | int | 否 | 优先级 | 100 |
-| enabled | bool | 否 | 启用状态 | true |
+|--------|------|------|------|-----|
+| page | int | 否 | 页码 | 1 |
+| page_size | int | 否 | 每页大小 | 20 |
 
 #### 响应格式
 
-**成功响应 (201 Created)**:
+**成功响应 (200 OK)**:
 ```json
 {
-  "id": 1,
-  "name": "示例规则",
-  "policy_id": 1,
-  "phase": "acl",
-  "pattern": "block_ip:192.168.1.100",
-  "action": "block",
-  "priority": 100,
-  "enabled": true,
-  "created_at": "2024-01-01T00:00:00Z",
-  "updated_at": "2024-01-01T00:00:00Z"
-}
-```
-
-**错误响应 (400 Bad Request)**:
-```json
-{
-  "error": "请求参数无效或格式不正确"
-}
-```
-
-**错误响应 (500 Internal Server Error)**:
-```json
-{
-  "error": "服务器内部错误"
+  "items": [
+    {
+      "id": 1,
+      "name": "示例规则",
+      "policy_id": 1,
+      "phase": "acl",
+      "pattern": "block_ip:192.168.1.100",
+      "action": "block",
+      "priority": 100,
+      "enabled": true,
+      "created_at": "2024-01-01T00:00:00Z",
+      "updated_at": "2024-01-01T00:00:00Z"
+    }
+  ],
+  "total": 1
 }
 ```
 
@@ -235,23 +185,22 @@ Note over Repo : GORM ORM 操作
 
 ```mermaid
 flowchart TD
-Start([接收请求]) --> BindJSON["绑定 JSON 到规则对象"]
-BindJSON --> ValidateJSON{"JSON 绑定是否成功?"}
-ValidateJSON --> |否| Return400["返回 400 错误"]
-ValidateJSON --> |是| CreateRule["调用仓库创建规则"]
-CreateRule --> CreateSuccess{"创建是否成功?"}
-CreateSuccess --> |否| Return500["返回 500 错误"]
-CreateSuccess --> |是| ReloadEngine["触发引擎重载"]
-ReloadEngine --> Return201["返回 201 成功"]
+Start([接收请求]) --> ParsePage["解析页码参数"]
+ParsePage --> ParseSize["解析页面大小"]
+ParseSize --> Paginate["计算分页偏移量"]
+Paginate --> QueryDB["执行数据库查询"]
+QueryDB --> QuerySuccess{"查询是否成功?"}
+QuerySuccess --> |否| Return500["返回 500 错误"]
+QuerySuccess --> |是| Return200["返回 200 成功"]
 ```
 
 **图表来源**
-- [handler_rule.go:46-60](file://internal/admin/handler_rule.go#L46-L60)
+- [rule.go:18-30](file://internal/admin/rule/rule.go#L18-L30)
 
 **章节来源**
-- [handler_rule.go:46-60](file://internal/admin/handler_rule.go#L46-L60)
+- [rule.go:18-30](file://internal/admin/rule/rule.go#L18-L30)
 
-### 读取规则 (Get Rule)
+### 读取规则 API
 
 #### API 端点规范
 
@@ -261,7 +210,7 @@ ReloadEngine --> Return201["返回 201 成功"]
 | URL 路径 | `/api/v1/rules/:id` |
 | 参数 | id: 规则 ID (路径参数) |
 | 认证要求 | 需要有效令牌 |
-| RBAC 权限 | admin, operator, readonly |
+| RBAC 权限 | readonly |
 
 #### 请求参数
 
@@ -283,7 +232,7 @@ ReloadEngine --> Return201["返回 201 成功"]
   "priority": 100,
   "enabled": true,
   "created_at": "2024-01-01T00:00:00Z",
-  "updated_at": "2024-01-01T00:00:00Z"
+  "updated_at": "2024-01-00T00:00:00Z"
 }
 ```
 
@@ -315,12 +264,82 @@ GetSuccess --> |是| Return200["返回 200 成功"]
 ```
 
 **图表来源**
-- [handler_rule.go:30-44](file://internal/admin/handler_rule.go#L30-L44)
+- [rule.go:57-71](file://internal/admin/rule/rule.go#L57-L71)
 
 **章节来源**
-- [handler_rule.go:30-44](file://internal/admin/handler_rule.go#L30-L44)
+- [rule.go:57-71](file://internal/admin/rule/rule.go#L57-L71)
 
-### 更新规则 (Update Rule)
+### 创建规则 API
+
+#### API 端点规范
+
+| 属性 | 值 |
+|------|-----|
+| HTTP 方法 | POST |
+| URL 路径 | `/api/v1/rules` |
+| 认证要求 | 需要有效令牌 |
+| RBAC 权限 | operator |
+| 行为 | 触发配置重载 |
+
+#### 请求参数
+
+请求体包含完整的规则对象，字段定义与响应格式相同。
+
+#### 响应格式
+
+**成功响应 (201 Created)**:
+```json
+{
+  "id": 1,
+  "name": "新创建的规则",
+  "policy_id": 1,
+  "phase": "acl",
+  "pattern": "block_ip:192.168.1.100",
+  "action": "block",
+  "priority": 100,
+  "enabled": true,
+  "created_at": "2024-01-01T00:00:00Z",
+  "updated_at": "2024-01-01T00:00:00Z"
+}
+```
+
+**错误响应 (400 Bad Request)**:
+```json
+{
+  "error": "JSON 绑定错误或验证失败"
+}
+```
+
+**错误响应 (500 Internal Server Error)**:
+```json
+{
+  "error": "保存成功但配置重载失败"
+}
+```
+
+#### 后端实现流程
+
+```mermaid
+flowchart TD
+Start([接收请求]) --> BindJSON["绑定 JSON 到规则对象"]
+BindJSON --> BindSuccess{"绑定是否成功?"}
+BindSuccess --> |否| Return400["返回 400 错误"]
+BindSuccess --> |是| CreateRule["调用仓库创建规则"]
+CreateRule --> CreateSuccess{"创建是否成功?"}
+CreateSuccess --> |否| Return500["返回 500 错误"]
+CreateSuccess --> |是| ReloadEngine["触发引擎重载"]
+ReloadEngine --> ReloadSuccess{"重载是否成功?"}
+ReloadSuccess --> |否| Return500_2["返回 500 错误"]
+ReloadSuccess --> |是| Return201["返回 201 成功"]
+```
+
+**图表来源**
+- [rule.go:73-90](file://internal/admin/rule/rule.go#L73-L90)
+
+**章节来源**
+- [rule.go:73-90](file://internal/admin/rule/rule.go#L73-L90)
+
+### 更新规则 API
 
 #### API 端点规范
 
@@ -330,7 +349,8 @@ GetSuccess --> |是| Return200["返回 200 成功"]
 | URL 路径 | `/api/v1/rules/:id/update` |
 | 参数 | id: 规则 ID (路径参数) |
 | 认证要求 | 需要有效令牌 |
-| RBAC 权限 | admin, operator |
+| RBAC 权限 | operator |
+| 行为 | 触发配置重载 |
 
 #### 请求参数
 
@@ -400,12 +420,12 @@ ReloadEngine --> Return200["返回 200 成功"]
 ```
 
 **图表来源**
-- [handler_rule.go:62-86](file://internal/admin/handler_rule.go#L62-L86)
+- [rule.go:92-119](file://internal/admin/rule/rule.go#L92-L119)
 
 **章节来源**
-- [handler_rule.go:62-86](file://internal/admin/handler_rule.go#L62-L86)
+- [rule.go:92-119](file://internal/admin/rule/rule.go#L92-L119)
 
-### 删除规则 (Delete Rule)
+### 删除规则 API
 
 #### API 端点规范
 
@@ -415,7 +435,8 @@ ReloadEngine --> Return200["返回 200 成功"]
 | URL 路径 | `/api/v1/rules/:id/delete` |
 | 参数 | id: 规则 ID (路径参数) |
 | 认证要求 | 需要有效令牌 |
-| RBAC 权限 | admin, operator |
+| RBAC 权限 | operator |
+| 行为 | 触发配置重载 |
 
 #### 请求参数
 
@@ -459,82 +480,12 @@ ReloadEngine --> Return204["返回 204 成功"]
 ```
 
 **图表来源**
-- [handler_rule.go:88-102](file://internal/admin/handler_rule.go#L88-L102)
+- [rule.go:121-138](file://internal/admin/rule/rule.go#L121-L138)
 
 **章节来源**
-- [handler_rule.go:88-102](file://internal/admin/handler_rule.go#L88-L102)
+- [rule.go:121-138](file://internal/admin/rule/rule.go#L121-L138)
 
-### 分页查询 (List Rules)
-
-#### API 端点规范
-
-| 属性 | 值 |
-|------|-----|
-| HTTP 方法 | GET |
-| URL 路径 | `/api/v1/rules` |
-| 认证要求 | 需要有效令牌 |
-| RBAC 权限 | admin, operator, readonly |
-
-#### 查询参数
-
-| 参数名 | 类型 | 必填 | 描述 | 默认值 | 最大值 |
-|--------|------|------|------|--------|--------|
-| page | int | 否 | 页码 | 1 | - |
-| page_size | int | 否 | 页面大小 | 20 | 200 |
-
-#### 响应格式
-
-**成功响应 (200 OK)**:
-```json
-{
-  "items": [
-    {
-      "id": 1,
-      "name": "规则1",
-      "policy_id": 1,
-      "phase": "acl",
-      "pattern": "block_ip:192.168.1.100",
-      "action": "block",
-      "priority": 100,
-      "enabled": true,
-      "created_at": "2024-01-01T00:00:00Z",
-      "updated_at": "2024-01-01T00:00:00Z"
-    }
-  ],
-  "total": 150
-}
-```
-
-**错误响应 (500 Internal Server Error)**:
-```json
-{
-  "error": "服务器内部错误"
-}
-```
-
-#### 后端实现流程
-
-```mermaid
-flowchart TD
-Start([接收请求]) --> ParsePage["解析页码参数"]
-ParsePage --> ParseSize["解析页面大小参数"]
-ParseSize --> Paginate["计算偏移量和限制"]
-Paginate --> QueryRules["查询规则列表"]
-QueryRules --> QuerySuccess{"查询是否成功?"}
-QuerySuccess --> |否| Return500["返回 500 错误"]
-QuerySuccess --> |是| CountTotal["统计总数"]
-CountTotal --> Return200["返回 200 成功"]
-```
-
-**图表来源**
-- [handler_rule.go:16-28](file://internal/admin/handler_rule.go#L16-L28)
-- [utils.go:10-21](file://internal/utils/utils.go#L10-L21)
-
-**章节来源**
-- [handler_rule.go:16-28](file://internal/admin/handler_rule.go#L16-L28)
-- [utils.go:10-21](file://internal/utils/utils.go#L10-L21)
-
-### 规则验证 (Validate Rule)
+### 规则验证 API
 
 #### API 端点规范
 
@@ -543,13 +494,15 @@ CountTotal --> Return200["返回 200 成功"]
 | HTTP 方法 | POST |
 | URL 路径 | `/api/v1/rules/validate` |
 | 认证要求 | 需要有效令牌 |
-| RBAC 权限 | admin, operator |
+| RBAC 权限 | operator |
 
 #### 请求参数
 
-| 字段名 | 类型 | 必填 | 描述 |
-|--------|------|------|------|
-| pattern | string | 是 | 规则模式 DSL |
+```json
+{
+  "pattern": "block_ip:192.168.1.100"
+}
+```
 
 #### 响应格式
 
@@ -567,15 +520,14 @@ CountTotal --> Return200["返回 200 成功"]
 ```json
 {
   "valid": false,
-  "message": "pattern cannot be empty",
-  "errors": []
+  "message": "pattern cannot be empty"
 }
 ```
 
 **章节来源**
-- [handler_rule_validate.go:32-98](file://internal/admin/handler_rule_validate.go#L32-L98)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 
-### 规则测试 (Test Rule)
+### 规则测试 API
 
 #### API 端点规范
 
@@ -584,17 +536,21 @@ CountTotal --> Return200["返回 200 成功"]
 | HTTP 方法 | POST |
 | URL 路径 | `/api/v1/rules/test` |
 | 认证要求 | 需要有效令牌 |
-| RBAC 权限 | admin, operator |
+| RBAC 权限 | operator |
 
 #### 请求参数
 
-| 字段名 | 类型 | 必填 | 描述 |
-|--------|------|------|------|
-| pattern | string | 是 | 规则模式 DSL |
-| client_ip | string | 否 | 客户端 IP 地址 |
-| path | string | 否 | 请求路径 |
-| query | string | 否 | 查询参数 |
-| headers | map[string]string | 否 | 请求头 |
+```json
+{
+  "pattern": "block_ip:192.168.1.100",
+  "client_ip": "10.0.0.1",
+  "path": "/test",
+  "query": "param=value",
+  "headers": {
+    "User-Agent": "test"
+  }
+}
+```
 
 #### 响应格式
 
@@ -607,203 +563,135 @@ CountTotal --> Return200["返回 200 成功"]
 }
 ```
 
-**错误响应 (400 Bad Request)**:
-```json
-{
-  "error": "invalid pattern"
-}
-```
-
 **章节来源**
-- [handler_rule.go:115-156](file://internal/admin/handler_rule.go#L115-L156)
+- [rule.go:149-192](file://internal/admin/rule/rule.go#L149-L192)
 
 ## 依赖关系分析
-
-### 后端依赖关系
 
 ```mermaid
 graph TB
 subgraph "路由层"
-Router[Router 注册]
+Router[router.go]
 end
-subgraph "处理层"
-Handler[规则处理器]
-ValidateHandler[验证处理器]
+subgraph "规则模块"
+RuleHandler[rule.go]
+ValidateHandler[validate.go]
+RuleRepo[repository/rule.go]
 end
-subgraph "仓库层"
-RuleRepo[规则仓库]
-PolicyRepo[策略仓库]
+subgraph "存储层"
+DB[(数据库)]
 end
-subgraph "模型层"
-RuleModel[规则模型]
-PolicyModel[策略模型]
-end
-subgraph "工具层"
-Utils[工具函数]
-Logger[日志记录]
-end
-Router --> Handler
-Handler --> RuleRepo
-Handler --> Utils
+Router --> RuleHandler
+Router --> ValidateHandler
+RuleHandler --> RuleRepo
 ValidateHandler --> RuleRepo
-RuleRepo --> RuleModel
-RuleRepo --> PolicyRepo
-PolicyRepo --> PolicyModel
-Handler --> Logger
+RuleRepo --> DB
 ```
 
 **图表来源**
-- [router.go:80-164](file://internal/admin/router.go#L80-L164)
-- [handler_rule.go:16-102](file://internal/admin/handler_rule.go#L16-L102)
-- [rule.go:9-40](file://internal/store/repository/rule.go#L9-L40)
-
-### 前端依赖关系
-
-```mermaid
-graph TB
-subgraph "UI 组件"
-RulesPage[规则页面]
-CRUDPage[通用 CRUD 页面]
-RuleBuilder[规则构建器]
-end
-subgraph "API 层"
-APIClient[API 客户端]
-AuthAPI[认证 API]
-end
-subgraph "服务层"
-CRUDService[CRUD 服务]
-ValidationService[验证服务]
-end
-RulesPage --> CRUDPage
-RulesPage --> RuleBuilder
-CRUDPage --> APIClient
-APIClient --> CRUDService
-APIClient --> ValidationService
-AuthAPI --> APIClient
-```
-
-**图表来源**
-- [page.tsx:5-76](file://frontend/app/(dashboard)/rules/page.tsx#L5-L76)
-- [crud-page.tsx:60-111](file://frontend/components/crud-page.tsx#L60-L111)
-- [api.ts:31-88](file://frontend/lib/api.ts#L31-L88)
+- [router.go:97-165](file://internal/admin/router.go#L97-L165)
+- [rule.go:18-138](file://internal/admin/rule/rule.go#L18-L138)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 
 **章节来源**
-- [router.go:80-164](file://internal/admin/router.go#L80-L164)
-- [page.tsx:5-76](file://frontend/app/(dashboard)/rules/page.tsx#L5-L76)
-- [crud-page.tsx:60-111](file://frontend/components/crud-page.tsx#L60-L111)
+- [router.go:97-165](file://internal/admin/router.go#L97-L165)
+- [rule.go:18-138](file://internal/admin/rule/rule.go#L18-L138)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 
 ## 性能考虑
 
-### 数据库优化
+### 分页查询优化
 
-1. **索引策略**:
-   - 规则表在 `policy_id` 和 `priority` 字段上建立索引
-   - 支持高效的分页查询和优先级排序
+- 使用数据库原生分页查询，避免一次性加载大量数据
+- 支持自定义每页大小，默认 20 条记录
+- 提供总记录数统计，便于前端分页显示
 
-2. **查询优化**:
-   - 使用 `LIMIT` 和 `OFFSET` 实现分页
-   - 按优先级和 ID 排序确保稳定的执行顺序
+### 排序策略
 
-3. **连接池管理**:
-   - GORM 自动管理数据库连接池
-   - 避免长时间持有数据库连接
+- 默认按优先级升序、ID 升序排列
+- 确保规则执行顺序的一致性
 
-### 缓存策略
+### 批量操作
 
-1. **响应缓存**:
-   - 对只读查询结果进行短期缓存
-   - 减少重复查询数据库的开销
-
-2. **配置缓存**:
-   - 缓存系统配置和规则集
-   - 在规则更新时失效相关缓存
-
-### 并发处理
-
-1. **请求并发**:
-   - 使用 goroutine 处理独立的请求
-   - 避免阻塞其他请求的处理
-
-2. **资源竞争**:
-   - 数据库操作使用事务保证一致性
-   - 避免竞态条件影响数据完整性
+- 支持批量创建规则，减少数据库连接开销
+- 使用事务确保数据一致性
 
 ## 故障排除指南
 
-### 常见错误及解决方案
+### 常见错误类型
 
-| 错误类型 | HTTP 状态码 | 可能原因 | 解决方案 |
-|----------|-------------|----------|----------|
-| 参数错误 | 400 | 无效的 ID 格式或 JSON 格式错误 | 验证输入格式，检查必需字段 |
-| 资源不存在 | 404 | 规则 ID 不存在 | 确认规则存在性，检查权限 |
-| 权限不足 | 403 | RBAC 权限不足 | 检查用户角色，申请相应权限 |
-| 会话过期 | 401 | 访问令牌过期 | 刷新访问令牌或重新登录 |
-| 服务器错误 | 500 | 数据库连接失败或业务逻辑错误 | 检查服务器日志，重试操作 |
+| 错误代码 | 可能原因 | 解决方案 |
+|----------|----------|----------|
+| 400 | 无效的 ID 参数 | 检查 URL 参数格式 |
+| 400 | JSON 绑定错误 | 验证请求体格式 |
+| 404 | 规则不存在 | 确认规则 ID 是否正确 |
+| 500 | 数据库操作失败 | 检查数据库连接状态 |
+| 500 | 配置重载失败 | 查看引擎日志 |
 
-### 调试技巧
+### 调试建议
 
-1. **日志分析**:
-   ```bash
-   # 查看后端服务日志
-   docker logs -f openwaf-backend
-   
-   # 查看前端应用日志
-   docker logs -f openwaf-frontend
-   ```
-
-2. **API 测试**:
-   ```bash
-   # 测试规则创建
-   curl -X POST http://localhost:8080/api/v1/rules \
-     -H "Content-Type: application/json" \
-     -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
-     -d '{
-       "name": "Test Rule",
-       "policy_id": 1,
-       "phase": "acl",
-       "pattern": "block_ip:192.168.1.100",
-       "action": "block",
-       "priority": 100,
-       "enabled": true
-     }'
-   ```
-
-3. **数据库检查**:
-   ```sql
-   -- 检查规则表结构
-   DESCRIBE rules;
-   
-   -- 查询最新创建的规则
-   SELECT * FROM rules ORDER BY id DESC LIMIT 10;
-   ```
-
-### 性能监控
-
-1. **响应时间监控**:
-   - 监控 CRUD 操作的平均响应时间
-   - 设置性能阈值告警
-
-2. **数据库性能**:
-   - 监控慢查询数量
-   - 分析查询执行计划
-
-3. **内存使用**:
-   - 监控应用内存使用情况
-   - 检查内存泄漏问题
+1. **前端调试**：使用浏览器开发者工具查看网络请求
+2. **后端日志**：检查服务器日志输出
+3. **数据库检查**：验证数据表结构和索引
+4. **权限验证**：确认用户具有相应操作权限
 
 **章节来源**
-- [handler_rule.go:16-102](file://internal/admin/handler_rule.go#L16-L102)
-- [router.go:48-210](file://internal/admin/router.go#L48-L210)
+- [rule.go:18-138](file://internal/admin/rule/rule.go#L18-L138)
+- [validate.go:32-98](file://internal/admin/rule/validate.go#L32-L98)
 
 ## 结论
 
-OpenWAF 的规则 CRUD 操作实现了完整的 RESTful API 设计，具有以下特点：
+OpenWAF 的规则 CRUD 操作实现了完整的生命周期管理，包括：
 
-1. **标准化接口**: 遵循 RESTful 设计原则，使用标准的 HTTP 方法和状态码
-2. **完善的错误处理**: 提供清晰的错误信息和适当的 HTTP 状态码
-3. **灵活的数据模型**: 支持多种规则类型和复杂的匹配模式
-4. **高效的数据访问**: 实现了优化的分页查询和索引策略
-5. **安全的权限控制**: 基于 RBAC 的细粒度权限管理
-6. **用户友好的前端**: 提供直观的图形化界面和实时验证功能
+- **完整的 CRUD 支持**：提供创建、读取、更新、删除的完整 API
+- **灵活的查询能力**：支持分页查询和条件过滤
+- **强大的验证机制**：内置规则模式验证和测试功能
+- **可靠的错误处理**：完善的错误响应和状态码管理
+- **高效的性能设计**：优化的数据库查询和分页机制
 
-该实现为 WAF 系统提供了强大的规则管理能力，支持复杂的安全策略配置和动态调整。通过合理的架构设计和性能优化，确保了系统的稳定性和可扩展性。
+该实现为 WAF 系统提供了稳定、可扩展的规则管理基础，支持复杂的 Web 应用安全防护需求。
+
+## 附录
+
+### API 端点完整列表
+
+- 获取规则列表：GET /api/v1/rules
+- 获取规则详情：GET /api/v1/rules/:id
+- 创建规则：POST /api/v1/rules
+- 更新规则：POST /api/v1/rules/:id/update
+- 删除规则：POST /api/v1/rules/:id/delete
+- 验证规则：POST /api/v1/rules/validate
+- 测试规则：POST /api/v1/rules/test
+- 导出规则：GET /api/v1/rules/export
+- 导入规则：POST /api/v1/rules/import
+- 获取规则模板：GET /api/v1/rules/templates
+
+### 前端集成示例
+
+前端组件通过统一的 API 客户端进行集成：
+
+```mermaid
+sequenceDiagram
+participant Page as "规则页面"
+participant CRUD as "CRUD 组件"
+participant API as "API 客户端"
+participant Backend as "后端服务"
+Page->>CRUD : 渲染 CRUD 组件
+CRUD->>API : 发起 API 请求
+API->>Backend : HTTP 请求
+Backend-->>API : JSON 响应
+API-->>CRUD : 解析响应数据
+CRUD-->>Page : 更新页面状态
+```
+
+**图表来源**
+- [page.tsx](file://frontend/app/(dashboard)/rules/page.tsx)
+- [crud-page.tsx](file://frontend/components/crud-page.tsx)
+- [api.ts](file://frontend/lib/api.ts)
+
+**章节来源**
+- [API 端点参考.md:290-358](file://docs/管理 API 系统/REST API 设计规范/API 端点参考.md#L290-L358)
+- [规则管理 API.md:430-440](file://docs/管理 API 系统/规则管理 API/规则管理 API.md#L430-L440)
+- [page.tsx](file://frontend/app/(dashboard)/rules/page.tsx)
+- [crud-page.tsx](file://frontend/components/crud-page.tsx)
+- [api.ts](file://frontend/lib/api.ts)

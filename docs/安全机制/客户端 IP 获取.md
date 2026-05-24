@@ -6,8 +6,8 @@
 - [outbound.go](file://internal/security/outbound.go)
 - [proxy.go](file://internal/proxy/proxy.go)
 - [handler.go](file://internal/dataplane/handler.go)
-- [models.go](file://internal/store/models.go)
-- [geoip.go](file://internal/waf/geoip.go)
+- [site.go](file://internal/store/site.go)
+- [geoip.go](file://internal/waf/bot/geoip.go)
 - [config.go](file://internal/core/config.go)
 - [page.tsx](file://frontend/app/(dashboard)/forwarding-profiles/page.tsx)
 </cite>
@@ -22,6 +22,7 @@
 7. [性能考量](#性能考量)
 8. [故障排除指南](#故障排除指南)
 9. [结论](#结论)
+10. [附录](#附录)
 
 ## 简介
 本文件详细说明了 My-OpenWaf 中客户端 IP 获取与代理链处理机制。内容涵盖：
@@ -52,11 +53,11 @@ OUT["出站头设置<br/>security/outbound.go"]
 PRX["代理转发<br/>proxy/proxy.go"]
 end
 subgraph "存储与配置"
-ST["站点模型<br/>store/models.go"]
+ST["站点模型<br/>store/site.go"]
 CFG["核心配置<br/>core/config.go"]
 end
 subgraph "地理信息"
-GEO["GeoIP 解析器<br/>waf/geoip.go"]
+GEO["GeoIP 解析器<br/>waf/bot/geoip.go"]
 end
 FE --> ST
 DP --> SEC
@@ -73,16 +74,16 @@ CFG --> GEO
 - [clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
 - [outbound.go:8-16](file://internal/security/outbound.go#L8-L16)
 - [proxy.go:73-135](file://internal/proxy/proxy.go#L73-L135)
-- [models.go:125-128](file://internal/store/models.go#L125-L128)
-- [geoip.go:26-151](file://internal/waf/geoip.go#L26-L151)
+- [site.go:125-128](file://internal/store/site.go#L125-L128)
+- [geoip.go:26-151](file://internal/waf/bot/geoip.go#L26-L151)
 
 **章节来源**
 - [handler.go:38-310](file://internal/dataplane/handler.go#L38-L310)
 - [clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
 - [outbound.go:8-16](file://internal/security/outbound.go#L8-L16)
 - [proxy.go:73-135](file://internal/proxy/proxy.go#L73-L135)
-- [models.go:125-128](file://internal/store/models.go#L125-L128)
-- [geoip.go:26-151](file://internal/waf/geoip.go#L26-L151)
+- [site.go:125-128](file://internal/store/site.go#L125-L128)
+- [geoip.go:26-151](file://internal/waf/bot/geoip.go#L26-L151)
 
 ## 核心组件
 - 客户端 IP 解析器：根据 XFF 模式与可信 CIDR 判断是否信任 X-Forwarded-For 头中的最左侧 IP
@@ -95,8 +96,8 @@ CFG --> GEO
 - [clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
 - [outbound.go:8-16](file://internal/security/outbound.go#L8-L16)
 - [proxy.go:73-135](file://internal/proxy/proxy.go#L73-L135)
-- [models.go:125-128](file://internal/store/models.go#L125-L128)
-- [geoip.go:26-151](file://internal/waf/geoip.go#L26-L151)
+- [site.go:125-128](file://internal/store/site.go#L125-L128)
+- [geoip.go:26-151](file://internal/waf/bot/geoip.go#L26-L151)
 
 ## 架构概览
 下图展示了从请求进入数据平面到最终转发上游的关键流程，以及 IP 获取与 GeoIP 查询的集成点。
@@ -123,7 +124,7 @@ PRX-->>Client : "上游响应"
 **图表来源**
 - [handler.go:74-272](file://internal/dataplane/handler.go#L74-L272)
 - [clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
-- [geoip.go:127-151](file://internal/waf/geoip.go#L127-L151)
+- [geoip.go:127-151](file://internal/waf/bot/geoip.go#L127-L151)
 - [outbound.go:8-16](file://internal/security/outbound.go#L8-L16)
 - [proxy.go:73-135](file://internal/proxy/proxy.go#L73-L135)
 
@@ -195,6 +196,7 @@ ReturnNil --> End
 ```mermaid
 classDiagram
 class MaxMindResolver {
+-mu sync.RWMutex
 -cityDB *maxminddb.Reader
 -asnDB *maxminddb.Reader
 -dcASNs map[uint]
@@ -217,12 +219,12 @@ MaxMindResolver --> GeoInfo : "返回"
 ```
 
 **图表来源**
-- [geoip.go:26-151](file://internal/waf/geoip.go#L26-L151)
-- [geoip.go:16-22](file://internal/waf/geoip.go#L16-L22)
+- [geoip.go:26-151](file://internal/waf/bot/geoip.go#L26-L151)
+- [geoip.go:16-22](file://internal/waf/bot/geoip.go#L16-L22)
 
 **章节来源**
-- [geoip.go:26-151](file://internal/waf/geoip.go#L26-L151)
-- [geoip.go:16-22](file://internal/waf/geoip.go#L16-L22)
+- [geoip.go:26-151](file://internal/waf/bot/geoip.go#L26-L151)
+- [geoip.go:16-22](file://internal/waf/bot/geoip.go#L16-L22)
 
 ### 出站请求头设置与上游转发
 - 出站头设置：在向上游转发时设置 X-Forwarded-For 为真实客户端 IP；可选设置 X-Forwarded-Host 以保留原始 Host
@@ -259,7 +261,7 @@ PRX-->>DP : "回写响应"
 - 前端页面：提供字段配置与说明
 
 **章节来源**
-- [models.go:125-128](file://internal/store/models.go#L125-L128)
+- [site.go:125-128](file://internal/store/site.go#L125-L128)
 - [page.tsx:10-21](file://frontend/app/(dashboard)/forwarding-profiles/page.tsx#L10-L21)
 
 ## 依赖关系分析
@@ -271,9 +273,9 @@ PRX-->>DP : "回写响应"
 ```mermaid
 graph TB
 DP["dataplane/handler.go"] --> SEC["security/clientip.go"]
-DP --> GEO["waf/geoip.go"]
+DP --> GEO["waf/bot/geoip.go"]
 DP --> PRX["proxy/proxy.go"]
-SEC --> ST["store/models.go"]
+SEC --> ST["store/site.go"]
 PRX --> OUT["security/outbound.go"]
 GEO --> CFG["core/config.go"]
 ```
@@ -281,17 +283,17 @@ GEO --> CFG["core/config.go"]
 **图表来源**
 - [handler.go:38-310](file://internal/dataplane/handler.go#L38-L310)
 - [clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
-- [geoip.go:26-151](file://internal/waf/geoip.go#L26-L151)
+- [geoip.go:26-151](file://internal/waf/bot/geoip.go#L26-L151)
 - [proxy.go:73-135](file://internal/proxy/proxy.go#L73-L135)
-- [models.go:125-128](file://internal/store/models.go#L125-L128)
+- [site.go:125-128](file://internal/store/site.go#L125-L128)
 - [config.go:10-18](file://internal/core/config.go#L10-L18)
 
 **章节来源**
 - [handler.go:38-310](file://internal/dataplane/handler.go#L38-L310)
 - [clientip.go:12-49](file://internal/security/clientip.go#L12-L49)
-- [geoip.go:26-151](file://internal/waf/geoip.go#L26-L151)
+- [geoip.go:26-151](file://internal/waf/bot/geoip.go#L26-L151)
 - [proxy.go:73-135](file://internal/proxy/proxy.go#L73-L135)
-- [models.go:125-128](file://internal/store/models.go#L125-L128)
+- [site.go:125-128](file://internal/store/site.go#L125-L128)
 - [config.go:10-18](file://internal/core/config.go#L10-L18)
 
 ## 性能考量
@@ -319,10 +321,42 @@ GEO --> CFG["core/config.go"]
 - [clientip.go:23-25](file://internal/security/clientip.go#L23-L25)
 - [clientip.go:34-37](file://internal/security/clientip.go#L34-L37)
 - [outbound.go:13-15](file://internal/security/outbound.go#L13-L15)
-- [geoip.go:66-96](file://internal/waf/geoip.go#L66-L96)
+- [geoip.go:66-96](file://internal/waf/bot/geoip.go#L66-L96)
 
 ## 结论
 本机制通过明确的 XFF 模式与可信 CIDR 控制，结合严格的 IP 解析与清理流程，在保证安全性的同时兼顾性能与可维护性。GeoIP 集成为风险评估提供了可靠依据，配合前端配置页面实现了灵活的站点级策略管理。建议在生产环境中：
 - 明确可信代理范围，避免误信不可信节点
 - 定期更新 GeoIP 数据库与风险列表
 - 对敏感操作启用更严格的安全策略与审计日志
+
+## 附录
+
+### 配置示例与最佳实践
+
+#### 基本配置示例
+- 单一反向代理环境
+  - XFF 模式：trust_outer_waf_cidr_then_take_leftmost
+  - 可信 CIDR：127.0.0.1/32 或代理服务器 IP
+- 多级代理环境
+  - XFF 模式：trust_outer_waf_cidr_then_take_leftmost
+  - 可信 CIDR：包含所有代理服务器网段
+- 直连访问环境
+  - XFF 模式：strip_all_and_set_remote
+  - 可信 CIDR：留空
+
+#### 常见网络拓扑的最佳实践
+- CDN + WAF + 应用
+  - 将 CDN 和 WAF 的出口 IP 纳入可信 CIDR
+  - 使用 trust_outer_waf_cidr_then_take_leftmost 模式
+- 多云混合部署
+  - 为每个云服务商的负载均衡器配置独立可信 CIDR
+  - 考虑使用不同的转发配置文件
+- 微服务架构
+  - 在服务网格边界启用信任模式
+  - 为内部服务网关配置细粒度 CIDR
+
+#### 隐私保护机制
+- 受信网段内优先信任代理提供的 IP
+- 对不可信来源的 XFF 头进行严格验证
+- 支持 IPv4/IPv6 双栈环境
+- 提供详细的日志记录用于审计

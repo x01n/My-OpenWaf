@@ -7,10 +7,9 @@
 - [server.go](file://internal/app/server.go)
 - [engine.go](file://internal/core/engine/engine.go)
 - [metrics.go](file://internal/dataplane/metrics.go)
-- [sse.go](file://internal/dataplane/sse.go)
 - [proxy.go](file://internal/proxy/proxy.go)
-- [drop.go](file://internal/waf/drop.go)
-- [block.go](file://internal/waf/block.go)
+- [drop.go](file://internal/waf/drop/drop.go)
+- [block.go](file://internal/waf/pages/block.go)
 - [lifecycle.go](file://internal/core/lifecycle/lifecycle.go)
 </cite>
 
@@ -24,6 +23,7 @@
 7. [性能考虑](#性能考虑)
 8. [故障排除指南](#故障排除指南)
 9. [结论](#结论)
+10. [附录](#附录)
 
 ## 简介
 
@@ -42,7 +42,7 @@ end
 subgraph "数据平面"
 Handler[handler.go]
 WS[websocket.go]
-SSE[sse.go]
+Proxy[proxy.go]
 Metrics[metrics.go]
 end
 subgraph "核心引擎"
@@ -50,31 +50,26 @@ Engine[engine.go]
 Drop[drop.go]
 Block[block.go]
 end
-subgraph "代理层"
-Proxy[proxy.go]
-end
 subgraph "生命周期管理"
 Life[lifecycle.go]
 end
 Main --> Server
 Server --> Handler
 Handler --> WS
-Handler --> SSE
+Handler --> Proxy
 Handler --> Engine
-WS --> Proxy
-Engine --> Drop
-Engine --> Block
+WS --> Drop
+WS --> Block
 Server --> Life
 ```
 
 **图表来源**
-- [main.go:1-10](file://cmd/main.go#L1-L10)
-- [server.go:35-300](file://internal/app/server.go#L35-L300)
-- [handler.go:37-310](file://internal/dataplane/handler.go#L37-L310)
+- [server.go:488-526](file://internal/app/server.go#L488-L526)
+- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
 
 **章节来源**
-- [main.go:1-10](file://cmd/main.go#L1-L10)
-- [server.go:35-300](file://internal/app/server.go#L35-L300)
+- [server.go:52-396](file://internal/app/server.go#L52-L396)
+- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
 
 ## 核心组件
 
@@ -94,7 +89,7 @@ IsWS --> End
 ```
 
 **图表来源**
-- [websocket.go:16-20](file://internal/dataplane/websocket.go#L16-L20)
+- [websocket.go:25-29](file://internal/dataplane/websocket.go#L25-L29)
 
 ### WebSocket 连接隧道转发器
 
@@ -126,10 +121,10 @@ WS-->>Handler : 连接关闭
 ```
 
 **图表来源**
-- [websocket.go:22-69](file://internal/dataplane/websocket.go#L22-L69)
+- [websocket.go:32-93](file://internal/dataplane/websocket.go#L32-L93)
 
 **章节来源**
-- [websocket.go:16-101](file://internal/dataplane/websocket.go#L16-L101)
+- [websocket.go:25-127](file://internal/dataplane/websocket.go#L25-L127)
 
 ## 架构概览
 
@@ -144,17 +139,13 @@ end
 subgraph "数据平面层"
 Handler[请求处理器]
 WSDetector[WebSocket检测器]
-SSERequest[SSE检测器]
+Proxy[HTTP代理]
 Metrics[指标收集器]
 end
 subgraph "安全引擎层"
 Engine[WAF引擎]
 DropExecutor[连接丢弃执行器]
 BlockRenderer[阻断渲染器]
-end
-subgraph "代理层"
-HTTPProxy[HTTP代理]
-TransportPool[传输连接池]
 end
 subgraph "存储层"
 Snapshot[快照管理]
@@ -163,21 +154,20 @@ end
 Hertz --> TLS
 TLS --> Handler
 Handler --> WSDetector
-Handler --> SSERequest
+Handler --> Proxy
 Handler --> Engine
 Handler --> Metrics
-WSDetector --> HTTPProxy
-SSERequest --> HTTPProxy
+WSDetector --> DropExecutor
+WSDetector --> BlockRenderer
 Engine --> DropExecutor
 Engine --> BlockRenderer
-HTTPProxy --> TransportPool
 Handler --> Snapshot
 Handler --> EventWriter
 ```
 
 **图表来源**
-- [server.go:347-376](file://internal/app/server.go#L347-L376)
-- [handler.go:37-310](file://internal/dataplane/handler.go#L37-L310)
+- [server.go:488-526](file://internal/app/server.go#L488-L526)
+- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
 
 ## 详细组件分析
 
@@ -215,7 +205,7 @@ WebSocketDetector --> UpgradeValidator : 调用
 ```
 
 **图表来源**
-- [websocket.go:16-20](file://internal/dataplane/websocket.go#L16-L20)
+- [websocket.go:25-29](file://internal/dataplane/websocket.go#L25-L29)
 
 #### 目标URL解析和转换
 
@@ -239,10 +229,10 @@ UseExistingPort --> Output
 ```
 
 **图表来源**
-- [websocket.go:23-30](file://internal/dataplane/websocket.go#L23-L30)
+- [websocket.go:32-40](file://internal/dataplane/websocket.go#L32-L40)
 
 **章节来源**
-- [websocket.go:16-95](file://internal/dataplane/websocket.go#L16-L95)
+- [websocket.go:25-95](file://internal/dataplane/websocket.go#L25-L95)
 
 ### 连接建立和握手验证
 
@@ -270,7 +260,7 @@ Dialer-->>WS : 返回TLS连接
 ```
 
 **图表来源**
-- [websocket.go:37-45](file://internal/dataplane/websocket.go#L37-L45)
+- [websocket.go:41-54](file://internal/dataplane/websocket.go#L41-L54)
 
 #### HTTP/1.1 升级请求发送
 
@@ -289,10 +279,10 @@ UpgradeFailed --> HandleError[处理错误]
 ```
 
 **图表来源**
-- [websocket.go:51-60](file://internal/dataplane/websocket.go#L51-L60)
+- [websocket.go:60-76](file://internal/dataplane/websocket.go#L60-L76)
 
 **章节来源**
-- [websocket.go:22-69](file://internal/dataplane/websocket.go#L22-L69)
+- [websocket.go:32-69](file://internal/dataplane/websocket.go#L32-L69)
 
 ### 双向数据传输机制
 
@@ -322,7 +312,7 @@ end
 ```
 
 **图表来源**
-- [websocket.go:64-68](file://internal/dataplane/websocket.go#L64-L68)
+- [websocket.go:78-85](file://internal/dataplane/websocket.go#L78-L85)
 
 #### 数据传输优化
 
@@ -333,7 +323,7 @@ end
 - **完成同步**：使用带缓冲的 channel 确保优雅关闭
 
 **章节来源**
-- [websocket.go:62-69](file://internal/dataplane/websocket.go#L62-L69)
+- [websocket.go:62-93](file://internal/dataplane/websocket.go#L62-L93)
 
 ### 连接生命周期管理
 
@@ -363,7 +353,7 @@ Error --> Closing : 触发清理
 - **状态同步**：使用完成信号确保所有传输通道正确终止
 
 **章节来源**
-- [websocket.go:64-69](file://internal/dataplane/websocket.go#L64-L69)
+- [websocket.go:78-93](file://internal/dataplane/websocket.go#L78-L93)
 
 ### 与 WAF 引擎的集成
 
@@ -391,7 +381,7 @@ Decision --> |丢弃| Drop[TCP丢弃]
 ```
 
 **图表来源**
-- [engine.go:57-129](file://internal/core/engine/engine.go#L57-L129)
+- [engine.go:161-197](file://internal/core/engine/engine.go#L161-L197)
 
 #### 实时威胁检测
 
@@ -405,7 +395,7 @@ WAF 引擎在 WebSocket 连接建立过程中执行多阶段安全检查：
 6. **自定义规则**：执行站点特定的安全策略
 
 **章节来源**
-- [engine.go:57-129](file://internal/core/engine/engine.go#L57-L129)
+- [engine.go:161-197](file://internal/core/engine/engine.go#L161-L197)
 
 ### 性能优化策略
 
@@ -433,7 +423,7 @@ TransportPool --> TransportKey : 使用
 ```
 
 **图表来源**
-- [proxy.go:20-54](file://internal/proxy/proxy.go#L20-L54)
+- [proxy.go:35-83](file://internal/proxy/proxy.go#L35-L83)
 
 #### 指标监控和统计
 
@@ -475,11 +465,11 @@ Metrics --> Summary : 生成
 ```
 
 **图表来源**
-- [metrics.go:9-135](file://internal/dataplane/metrics.go#L9-L135)
+- [metrics.go:8-133](file://internal/dataplane/metrics.go#L8-L133)
 
 **章节来源**
-- [proxy.go:32-54](file://internal/proxy/proxy.go#L32-L54)
-- [metrics.go:37-135](file://internal/dataplane/metrics.go#L37-L135)
+- [proxy.go:35-83](file://internal/proxy/proxy.go#L35-L83)
+- [metrics.go:8-133](file://internal/dataplane/metrics.go#L8-L133)
 
 ## 依赖关系分析
 
@@ -521,8 +511,8 @@ Dataplane --> HandlerInterface
 ```
 
 **图表来源**
-- [handler.go:1-25](file://internal/dataplane/handler.go#L1-L25)
-- [server.go:3-33](file://internal/app/server.go#L3-L33)
+- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
+- [server.go:488-526](file://internal/app/server.go#L488-L526)
 
 ### 关键依赖关系
 
@@ -533,8 +523,8 @@ Dataplane --> HandlerInterface
 5. **指标监控**：完整的性能指标收集和统计
 
 **章节来源**
-- [handler.go:1-25](file://internal/dataplane/handler.go#L1-L25)
-- [server.go:3-33](file://internal/app/server.go#L3-L33)
+- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
+- [server.go:488-526](file://internal/app/server.go#L488-L526)
 
 ## 性能考虑
 
@@ -627,8 +617,8 @@ ResourceCleanup --> ContextCancellation
 4. 扩展网络带宽
 
 **章节来源**
-- [websocket.go:46-48](file://internal/dataplane/websocket.go#L46-L48)
-- [drop.go:61-83](file://internal/waf/drop.go#L61-L83)
+- [websocket.go:41-54](file://internal/dataplane/websocket.go#L41-L54)
+- [drop.go:45-63](file://internal/waf/drop/drop.go#L45-L63)
 
 ## 结论
 
@@ -651,3 +641,81 @@ My-OpenWaf 的 WebSocket 连接处理系统展现了现代 Web 安全网关的�
 - **多租户支持**：每个站点独立的配置和策略
 
 该系统为构建企业级 WebSocket 应用提供了坚实的技术基础，既满足了安全需求，又保证了高性能和良好的用户体验。
+
+## 附录
+
+### WebSocket 服务配置示例
+
+#### 基本配置
+```yaml
+listeners:
+  - bind: "0.0.0.0:8080"
+    tls_enabled: false
+    upstream_urls:
+      - "http://localhost:3000"
+    preserve_original_host: true
+
+  - bind: "0.0.0.0:8443"
+    tls_enabled: true
+    tls_cert_file: "/etc/certs/server.crt"
+    tls_key_file: "/etc/certs/server.key"
+    upstream_urls:
+      - "https://localhost:3001"
+```
+
+#### 高级配置
+```yaml
+protection:
+  maintenance_global_enabled: false
+  request_rate_limit_enabled: true
+  request_rate_limit_max: 1000
+  request_rate_limit_window: 60
+  error_rate_limit_enabled: true
+  error_rate_limit_max: 100
+  error_rate_limit_window: 60
+
+waf_rules:
+  - phase: "ip_reputation"
+    enabled: true
+    action: "intercept"
+  - phase: "bot_detection"
+    enabled: true
+    action: "challenge"
+  - phase: "rate_limiting"
+    enabled: true
+    action: "intercept"
+```
+
+### 连接调试方法
+
+#### 日志分析
+1. **请求ID追踪**：使用 X-Request-ID 头部关联日志
+2. **WAF事件记录**：检查安全事件表中的 WebSocket 相关记录
+3. **连接统计**：监控指标中的 WebSocket 连接数和错误率
+
+#### 网络诊断
+1. **抓包分析**：使用 tcpdump 或 wireshark 分析 WebSocket 握手
+2. **TLS验证**：检查证书链和加密套件
+3. **上游连通性**：验证上游服务器的 WebSocket 支持
+
+#### 性能监控
+1. **QPS监控**：观察 WebSocket 连接的查询每秒指标
+2. **延迟分析**：监控握手时间和数据传输延迟
+3. **资源使用**：检查 CPU、内存和连接池使用情况
+
+### 常见问题解决方案
+
+#### 握手失败排查
+1. **检查 Upgrade 头**：确认客户端发送了正确的 Upgrade: websocket 头
+2. **验证 Connection 头**：确保包含 Connection: Upgrade
+3. **检查协议版本**：确认使用 HTTP/1.1 和标准 WebSocket 协议
+
+#### 数据传输问题
+1. **帧解析错误**：检查 WebSocket 帧的掩码和长度字段
+2. **编码问题**：验证文本和二进制帧的正确解码
+3. **缓冲区溢出**：监控 payload 限制和内存使用
+
+#### 安全策略配置
+1. **WAF规则调整**：根据业务需求调整安全规则阈值
+2. **速率限制配置**：平衡安全性和用户体验
+3. **缓存策略**：合理配置静态资源缓存以提高性能

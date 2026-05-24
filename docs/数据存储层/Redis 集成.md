@@ -3,14 +3,16 @@
 <cite>
 **本文引用的文件**
 - [internal/cache/redis_kv.go](file://internal/cache/redis_kv.go)
-- [internal/cache/response_cache.go](file://internal/cache/response_cache.go)
 - [internal/core/redis/redis.go](file://internal/core/redis/redis.go)
 - [internal/core/redis/pubsub.go](file://internal/core/redis/pubsub.go)
-- [internal/waf/ratelimit_redis.go](file://internal/waf/ratelimit_redis.go)
+- [internal/waf/ratelimit/redis.go](file://internal/waf/ratelimit/redis.go)
+- [internal/cache/response_cache.go](file://internal/cache/response_cache.go)
+- [internal/cache/query_cache.go](file://internal/cache/query_cache.go)
+- [internal/cache/layer.go](file://internal/cache/layer.go)
 - [internal/core/config.go](file://internal/core/config.go)
 - [internal/core/runtime.go](file://internal/core/runtime.go)
 - [internal/app/server.go](file://internal/app/server.go)
-- [internal/cache/response_cache_test.go](file://internal/cache/response_cache_test.go)
+- [docs/数据存储层/Redis 集成.md](file://docs/数据存储层/Redis 集成.md)
 </cite>
 
 ## 目录
@@ -52,16 +54,20 @@ APP["应用启动<br/>internal/app/server.go"]
 end
 subgraph "缓存"
 RC["响应缓存(内存)<br/>internal/cache/response_cache.go"]
+QL["查询缓存(内存)<br/>internal/cache/query_cache.go"]
+LYR["本地快照缓存<br/>internal/cache/layer.go"]
 RKV["Redis 键值缓存<br/>internal/cache/redis_kv.go"]
 end
 subgraph "Redis"
 RCLI["客户端创建/可选启用<br/>internal/core/redis/redis.go"]
 PUBSUB["发布/订阅<br/>internal/core/redis/pubsub.go"]
-RL["Redis 限流器<br/>internal/waf/ratelimit_redis.go"]
+RL["Redis 限流器<br/>internal/waf/ratelimit/redis.go"]
 end
 CFG --> RT
 RT --> RCLI
 RT --> RC
+RT --> QL
+RT --> LYR
 RT --> RKV
 APP --> PUBSUB
 APP --> RL
@@ -69,33 +75,39 @@ RC -.-> RKV
 ```
 
 图表来源
-- [internal/core/config.go:113-182](file://internal/core/config.go#L113-L182)
-- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
-- [internal/app/server.go:127-260](file://internal/app/server.go#L127-L260)
-- [internal/cache/response_cache.go:25-162](file://internal/cache/response_cache.go#L25-L162)
+- [internal/core/config.go:74-102](file://internal/core/config.go#L74-L102)
+- [internal/core/runtime.go:45-80](file://internal/core/runtime.go#L45-L80)
+- [internal/app/server.go:120-146](file://internal/app/server.go#L120-L146)
+- [internal/cache/response_cache.go:29-208](file://internal/cache/response_cache.go#L29-L208)
+- [internal/cache/query_cache.go:8-103](file://internal/cache/query_cache.go#L8-L103)
+- [internal/cache/layer.go:19-65](file://internal/cache/layer.go#L19-L65)
 - [internal/cache/redis_kv.go:13-112](file://internal/cache/redis_kv.go#L13-L112)
 - [internal/core/redis/redis.go:17-39](file://internal/core/redis/redis.go#L17-L39)
 - [internal/core/redis/pubsub.go:13-76](file://internal/core/redis/pubsub.go#L13-L76)
-- [internal/waf/ratelimit_redis.go:12-88](file://internal/waf/ratelimit_redis.go#L12-L88)
+- [internal/waf/ratelimit/redis.go:12-148](file://internal/waf/ratelimit/redis.go#L12-L148)
 
 章节来源
 - [internal/core/config.go:74-102](file://internal/core/config.go#L74-L102)
-- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
-- [internal/app/server.go:127-260](file://internal/app/server.go#L127-L260)
+- [internal/core/runtime.go:45-80](file://internal/core/runtime.go#L45-L80)
+- [internal/app/server.go:120-146](file://internal/app/server.go#L120-L146)
 
 ## 核心组件
 - Redis 客户端创建与可选启用：通过环境变量驱动，若未配置地址则返回空客户端，避免强制依赖
 - Redis 键值缓存：提供字节级读写、JSON 序列化/反序列化、原子自增与 TTL 绑定
 - 响应缓存：内存分片 LRU 式缓存，支持默认 TTL、过期清理、命中统计
+- 查询缓存：轻量级内存 TTL 缓存，适用于数据库查询结果
+- 本地快照缓存：基于 ristretto 的进程内快照缓存，避免序列化到 Redis
 - 发布/订阅：统一频道用于配置热重载广播，节点间保持一致
 - Redis 限流器：滑动窗口（有序集合 + Lua），多节点共享状态
 
 章节来源
 - [internal/core/redis/redis.go:17-39](file://internal/core/redis/redis.go#L17-L39)
 - [internal/cache/redis_kv.go:13-112](file://internal/cache/redis_kv.go#L13-L112)
-- [internal/cache/response_cache.go:25-162](file://internal/cache/response_cache.go#L25-L162)
+- [internal/cache/response_cache.go:29-208](file://internal/cache/response_cache.go#L29-L208)
+- [internal/cache/query_cache.go:8-103](file://internal/cache/query_cache.go#L8-L103)
+- [internal/cache/layer.go:19-65](file://internal/cache/layer.go#L19-L65)
 - [internal/core/redis/pubsub.go:13-76](file://internal/core/redis/pubsub.go#L13-L76)
-- [internal/waf/ratelimit_redis.go:12-88](file://internal/waf/ratelimit_redis.go#L12-L88)
+- [internal/waf/ratelimit/redis.go:12-148](file://internal/waf/ratelimit/redis.go#L12-L148)
 
 ## 架构总览
 下图展示 Redis 在系统中的角色与交互路径。
@@ -124,7 +136,7 @@ APP->>PUBSUB : 发布配置重载事件
 - [internal/core/runtime.go:49-69](file://internal/core/runtime.go#L49-L69)
 - [internal/core/redis/redis.go:17-39](file://internal/core/redis/redis.go#L17-L39)
 - [internal/core/redis/pubsub.go:21-76](file://internal/core/redis/pubsub.go#L21-L76)
-- [internal/waf/ratelimit_redis.go:22-36](file://internal/waf/ratelimit_redis.go#L22-L36)
+- [internal/waf/ratelimit/redis.go:22-36](file://internal/waf/ratelimit/redis.go#L22-L36)
 - [internal/app/server.go:127-260](file://internal/app/server.go#L127-L260)
 
 ## 详细组件分析
@@ -154,7 +166,7 @@ F -- 是 --> H["注入运行时"]
 章节来源
 - [internal/core/config.go:74-102](file://internal/core/config.go#L74-L102)
 - [internal/core/redis/redis.go:17-39](file://internal/core/redis/redis.go#L17-L39)
-- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
+- [internal/core/runtime.go:45-80](file://internal/core/runtime.go#L45-L80)
 
 ### 分布式键值缓存（RedisKV）
 - 键前缀：统一前缀避免键冲突
@@ -166,14 +178,14 @@ F -- 是 --> H["注入运行时"]
 ```mermaid
 classDiagram
 class RedisKV {
--client : Client
-+Set(key, value, ttl) error
-+Get(key) []byte,bool
-+Delete(key) void
-+SetJSON(key, v, ttl) error
-+GetJSON(key, dest) bool
-+Incr(key, ttl) int64,error
-+Exists(key) bool
+- client : Client
++ Set(key, value, ttl) error
++ Get(key) []byte,bool
++ Delete(key) void
++ SetJSON(key, v, ttl) error
++ GetJSON(key, dest) bool
++ Incr(key, ttl) int64,error
++ Exists(key) bool
 }
 ```
 
@@ -209,15 +221,31 @@ ReturnNil --> End
 ```
 
 图表来源
-- [internal/cache/response_cache.go:25-162](file://internal/cache/response_cache.go#L25-L162)
+- [internal/cache/response_cache.go:29-208](file://internal/cache/response_cache.go#L29-L208)
 
 章节来源
-- [internal/cache/response_cache.go:25-162](file://internal/cache/response_cache.go#L25-L162)
-- [internal/cache/response_cache_test.go:5-78](file://internal/cache/response_cache_test.go#L5-L78)
+- [internal/cache/response_cache.go:29-208](file://internal/cache/response_cache.go#L29-L208)
+- [internal/cache/response_cache_test.go:9-132](file://internal/cache/response_cache_test.go#L9-L132)
+
+### 查询缓存（轻量级内存 TTL）
+- 并发访问：使用 sync.Map 支持高并发
+- 清理机制：定期清理 goroutine 扫描过期条目
+- 灵活 TTL：支持默认 TTL 和自定义 TTL
+
+章节来源
+- [internal/cache/query_cache.go:8-103](file://internal/cache/query_cache.go#L8-L103)
+
+### 本地快照缓存（Ristretto）
+- 设计目标：纯进程内缓存，避免序列化到 Redis
+- 缓存策略：基于 ristretto 的 LRU 缓存
+- 键空间：按修订号组织的快照键
+
+章节来源
+- [internal/cache/layer.go:19-65](file://internal/cache/layer.go#L19-L65)
 
 ### 发布/订阅（配置热重载）
 - 频道：统一频道用于通知配置变更
-- 发布：在配置变更后向频道发送“reload”消息
+- 发布：在配置变更后向频道发送"reload"消息
 - 订阅：后台 goroutine 监听频道，收到消息后触发本地重载
 - 关闭：通过停止通道优雅关闭订阅者
 
@@ -246,7 +274,7 @@ SUB->>SUB : 触发本地重载
 ### 分布式限流（滑动窗口）
 - 窗口模型：基于有序集合记录时间戳，Lua 脚本原子清理与计数
 - 参数：窗口时长、最大请求数、启用开关
-- 失败降级：Redis 错误时采用“放行”策略（fail-open）
+- 失败降级：Redis 错误时采用"放行"策略（fail-open）
 - 多节点一致性：共享同一前缀的键空间，确保跨节点状态一致
 
 ```mermaid
@@ -261,10 +289,10 @@ E -- 否 --> G["允许"]
 ```
 
 图表来源
-- [internal/waf/ratelimit_redis.go:47-84](file://internal/waf/ratelimit_redis.go#L47-L84)
+- [internal/waf/ratelimit/redis.go:47-84](file://internal/waf/ratelimit/redis.go#L47-L84)
 
 章节来源
-- [internal/waf/ratelimit_redis.go:12-88](file://internal/waf/ratelimit_redis.go#L12-L88)
+- [internal/waf/ratelimit/redis.go:12-148](file://internal/waf/ratelimit/redis.go#L12-L148)
 
 ## 依赖分析
 - 运行时依赖 Redis 客户端：当 RedisAddr 为空时，运行时仍可正常启动，但 Redis 功能不可用
@@ -285,12 +313,12 @@ RCLI --> RL
 - [internal/core/config.go:169-175](file://internal/core/config.go#L169-L175)
 - [internal/core/runtime.go:49-69](file://internal/core/runtime.go#L49-L69)
 - [internal/app/server.go:127-131](file://internal/app/server.go#L127-L131)
-- [internal/waf/ratelimit_redis.go:22-27](file://internal/waf/ratelimit_redis.go#L22-L27)
+- [internal/waf/ratelimit/redis.go:22-27](file://internal/waf/ratelimit/redis.go#L22-L27)
 
 章节来源
-- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
+- [internal/core/runtime.go:45-80](file://internal/core/runtime.go#L45-L80)
 - [internal/app/server.go:127-131](file://internal/app/server.go#L127-L131)
-- [internal/waf/ratelimit_redis.go:22-27](file://internal/waf/ratelimit_redis.go#L22-L27)
+- [internal/waf/ratelimit/redis.go:22-27](file://internal/waf/ratelimit/redis.go#L22-L27)
 
 ## 性能考虑
 - 连接与超时
@@ -306,8 +334,6 @@ RCLI --> RL
 - 监控建议
   - 建议采集指标：命中率（内存缓存）、Redis 命中率、内存使用、连接数、命令耗时、错误率
   - 可通过 Prometheus 导出器与日志审计实现
-
-[本节为通用性能指导，不直接分析具体文件]
 
 ## 故障排查指南
 - Redis 不可用
@@ -326,7 +352,7 @@ RCLI --> RL
   - 现象：限流频繁放行或拒绝
   - 排查：检查窗口与阈值配置、Redis 可用性、Lua 脚本执行结果
   - 参考
-    - [internal/waf/ratelimit_redis.go:47-84](file://internal/waf/ratelimit_redis.go#L47-L84)
+    - [internal/waf/ratelimit/redis.go:47-84](file://internal/waf/ratelimit/redis.go#L47-L84)
 - 内存缓存命中低
   - 现象：CPU 与内存占用偏高
   - 排查：检查默认 TTL、清理周期、单条目大小限制
@@ -339,19 +365,17 @@ RCLI --> RL
 - [internal/core/runtime.go:54-59](file://internal/core/runtime.go#L54-L59)
 - [internal/core/redis/pubsub.go:21-76](file://internal/core/redis/pubsub.go#L21-L76)
 - [internal/app/server.go:244-260](file://internal/app/server.go#L244-L260)
-- [internal/waf/ratelimit_redis.go:47-84](file://internal/waf/ratelimit_redis.go#L47-L84)
+- [internal/waf/ratelimit/redis.go:47-84](file://internal/waf/ratelimit/redis.go#L47-L84)
 - [internal/cache/response_cache.go:94-122](file://internal/cache/response_cache.go#L94-L122)
 - [internal/cache/response_cache.go:142-162](file://internal/cache/response_cache.go#L142-L162)
 
 ## 结论
-本项目对 Redis 的集成采用“可选启用 + 分层缓存”的设计：
+本项目对 Redis 的集成采用"可选启用 + 分层缓存"的设计：
 - 通过环境变量灵活启用 Redis，未配置时不影响核心功能
 - 本地内存缓存优先，热点响应快速命中；RedisKV 提供跨节点共享状态
 - 发布/订阅实现配置热重载的一致性传播
 - Redis 限流器提供跨节点的滑动窗口限流能力
 建议在生产环境中配合监控体系持续评估命中率、延迟与资源消耗，并根据业务特征调优 TTL、清理策略与限流参数。
-
-[本节为总结性内容，不直接分析具体文件]
 
 ## 附录
 
@@ -382,11 +406,9 @@ RCLI --> RL
 - 未发现基于 Redis 的分布式锁实现
 - 若需要，可基于 SET key value NX EX ttl 或 Redlock 算法扩展
 
-[本节为概念性说明，不直接分析具体文件]
-
 ### 发布订阅机制
 - 频道管理：统一频道用于配置热重载
-- 消息格式：简单字符串“reload”
+- 消息格式：简单字符串"reload"
 - 事件处理：订阅者收到消息后执行本地重载流程
 
 章节来源
@@ -407,5 +429,3 @@ RCLI --> RL
 - 指标采集：命中率、内存使用、连接数、命令耗时、错误率
 - 导出方式：Prometheus 导出器或日志审计
 - 优化方向：合理设置 TTL、分片与清理周期、命令批处理、Lua 原子化
-
-[本节为通用指导，不直接分析具体文件]

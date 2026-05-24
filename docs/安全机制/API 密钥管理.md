@@ -6,16 +6,13 @@
 - [internal/app/server.go](file://internal/app/server.go)
 - [internal/admin/router.go](file://internal/admin/router.go)
 - [internal/admin/middleware.go](file://internal/admin/middleware.go)
-- [internal/admin/handler_auth.go](file://internal/admin/handler_auth.go)
-- [internal/store/repository/admin_api_key.go](file://internal/store/repository/admin_api_key.go)
-- [internal/store/repository/admin_account.go](file://internal/store/repository/admin_account.go)
-- [internal/store/repository/repository.go](file://internal/store/repository/repository.go)
-- [internal/store/models.go](file://internal/store/models.go)
+- [internal/admin/system/apikey.go](file://internal/admin/system/apikey.go)
 - [internal/admin/auth/jwt.go](file://internal/admin/auth/jwt.go)
+- [internal/store/repository/admin_api_key.go](file://internal/store/repository/admin_api_key.go)
+- [internal/store/repository/repository.go](file://internal/store/repository/repository.go)
 - [frontend/app/(dashboard)/api-keys/page.tsx](file://frontend/app/(dashboard)/api-keys/page.tsx)
 - [frontend/lib/api.ts](file://frontend/lib/api.ts)
-- [internal/store/repository/security_event.go](file://internal/store/repository/security_event.go)
-- [internal/observability/archiver.go](file://internal/observability/archiver.go)
+- [docs/安全机制/API 密钥管理.md](file://docs/安全机制/API 密钥管理.md)
 </cite>
 
 ## 目录
@@ -50,7 +47,6 @@ APP["应用启动器<br/>internal/app/server.go"]
 ROUTER["路由注册<br/>internal/admin/router.go"]
 MWARE["认证中间件<br/>internal/admin/middleware.go"]
 REPO["仓库层<br/>internal/store/repository/*"]
-MODELS["数据模型<br/>internal/store/models.go"]
 AUTH["JWT 工具<br/>internal/admin/auth/jwt.go"]
 end
 FE_API --> FE_UI
@@ -61,7 +57,6 @@ APP --> ROUTER
 ROUTER --> MWARE
 ROUTER --> REPO
 MWARE --> REPO
-REPO --> MODELS
 ROUTER --> AUTH
 ```
 
@@ -71,7 +66,6 @@ ROUTER --> AUTH
 - [internal/admin/router.go:46-179](file://internal/admin/router.go#L46-L179)
 - [internal/admin/middleware.go:16-72](file://internal/admin/middleware.go#L16-L72)
 - [internal/store/repository/admin_api_key.go:16-67](file://internal/store/repository/admin_api_key.go#L16-L67)
-- [internal/store/models.go:157-167](file://internal/store/models.go#L157-L167)
 - [internal/admin/auth/jwt.go:43-135](file://internal/admin/auth/jwt.go#L43-L135)
 
 **章节来源**
@@ -88,7 +82,6 @@ ROUTER --> AUTH
 
 **章节来源**
 - [internal/store/repository/admin_api_key.go:16-67](file://internal/store/repository/admin_api_key.go#L16-L67)
-- [internal/store/models.go:157-167](file://internal/store/models.go#L157-L167)
 - [internal/admin/middleware.go:16-72](file://internal/admin/middleware.go#L16-L72)
 - [internal/admin/router.go:117-175](file://internal/admin/router.go#L117-L175)
 - [frontend/app/(dashboard)/api-keys/page.tsx:31-171](file://frontend/app/(dashboard)/api-keys/page.tsx#L31-L171)
@@ -151,7 +144,6 @@ Return --> End(["结束"])
 
 **章节来源**
 - [internal/store/repository/admin_api_key.go:30-46](file://internal/store/repository/admin_api_key.go#L30-L46)
-- [internal/store/models.go:157-167](file://internal/store/models.go#L157-L167)
 
 ### 组件二：API 密钥验证与使用
 - 验证流程：遍历所有密钥记录，逐个进行哈希比对；匹配成功后更新最后使用时间。
@@ -214,12 +206,10 @@ RequireRole <.. RouterGroups : "绑定到路由"
 ```
 
 **图表来源**
-- [internal/store/models.go:392-396](file://internal/store/models.go#L392-L396)
 - [internal/admin/middleware.go:74-96](file://internal/admin/middleware.go#L74-L96)
 - [internal/admin/router.go:81-175](file://internal/admin/router.go#L81-L175)
 
 **章节来源**
-- [internal/store/models.go:392-396](file://internal/store/models.go#L392-L396)
 - [internal/admin/middleware.go:74-96](file://internal/admin/middleware.go#L74-L96)
 - [internal/admin/router.go:81-175](file://internal/admin/router.go#L81-L175)
 
@@ -303,13 +293,9 @@ Events --> Archive
 
 **图表来源**
 - [internal/admin/middleware.go:98-119](file://internal/admin/middleware.go#L98-L119)
-- [internal/store/repository/security_event.go:62-191](file://internal/store/repository/security_event.go#L62-L191)
-- [internal/observability/archiver.go:1-71](file://internal/observability/archiver.go#L1-71)
 
 **章节来源**
 - [internal/admin/middleware.go:98-119](file://internal/admin/middleware.go#L98-L119)
-- [internal/store/repository/security_event.go:62-191](file://internal/store/repository/security_event.go#L62-L191)
-- [internal/observability/archiver.go:1-71](file://internal/observability/archiver.go#L1-L71)
 
 ## 依赖关系分析
 - 组件耦合：认证中间件依赖仓库层进行密钥验证；路由层依赖中间件与仓库层；前端依赖后端接口。
@@ -330,22 +316,18 @@ Router --> Auth["JWT 工具"]
 - [internal/admin/router.go:46-179](file://internal/admin/router.go#L46-L179)
 - [internal/admin/middleware.go:16-72](file://internal/admin/middleware.go#L16-L72)
 - [internal/store/repository/admin_api_key.go:16-67](file://internal/store/repository/admin_api_key.go#L16-L67)
-- [internal/store/models.go:157-167](file://internal/store/models.go#L157-L167)
 - [internal/admin/auth/jwt.go:43-135](file://internal/admin/auth/jwt.go#L43-L135)
 
 **章节来源**
 - [internal/admin/router.go:46-179](file://internal/admin/router.go#L46-L179)
 - [internal/admin/middleware.go:16-72](file://internal/admin/middleware.go#L16-L72)
 - [internal/store/repository/admin_api_key.go:16-67](file://internal/store/repository/admin_api_key.go#L16-L67)
-- [internal/store/models.go:157-167](file://internal/store/models.go#L157-L167)
 - [internal/admin/auth/jwt.go:43-135](file://internal/admin/auth/jwt.go#L43-L135)
 
 ## 性能考虑
 - 验证复杂度：API 密钥验证需遍历所有记录进行哈希比对，时间复杂度 O(n)。建议限制密钥数量或引入缓存优化。
 - 存储开销：bcrypt 哈希计算成本较高，应避免频繁验证；可考虑批量验证或缓存近期活跃密钥。
 - 前端刷新：前端在 401 时自动刷新访问令牌，减少用户交互成本，但需注意网络抖动与重试策略。
-
-[本节为通用性能讨论，无需特定文件来源]
 
 ## 故障排除指南
 - 401 未授权：检查 Authorization 头是否正确设置为 Bearer <token>；确认密钥未被删除或过期。
@@ -356,12 +338,9 @@ Router --> Auth["JWT 工具"]
 **章节来源**
 - [internal/admin/middleware.go:29-71](file://internal/admin/middleware.go#L29-L71)
 - [frontend/lib/api.ts:48-88](file://frontend/lib/api.ts#L48-L88)
-- [internal/admin/handler_auth.go:43-73](file://internal/admin/handler_auth.go#L43-L73)
 
 ## 结论
 本系统提供了完整的 API 密钥管理能力：安全的密钥生成与存储、灵活的权限控制、完善的审计日志与合规支持。建议在生产环境中配合定期轮换、最小权限原则与监控告警，进一步提升安全性与可维护性。
-
-[本节为总结性内容，无需特定文件来源]
 
 ## 附录
 

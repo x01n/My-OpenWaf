@@ -2,46 +2,30 @@
 
 <cite>
 **本文档引用的文件**
-- [cmd/main.go](file://cmd/main.go)
-- [internal/app/server.go](file://internal/app/server.go)
 - [internal/core/engine/engine.go](file://internal/core/engine/engine.go)
 - [internal/core/pipeline/pipeline.go](file://internal/core/pipeline/pipeline.go)
+- [internal/core/rules/phases.go](file://internal/core/rules/phases.go)
 - [internal/core/rules/compiler.go](file://internal/core/rules/compiler.go)
 - [internal/core/rules/matcher.go](file://internal/core/rules/matcher.go)
-- [internal/core/rules/phases.go](file://internal/core/rules/phases.go)
 - [internal/core/action/action.go](file://internal/core/action/action.go)
+- [internal/core/pipeline/pool.go](file://internal/core/pipeline/pool.go)
 - [internal/waf/ratelimit.go](file://internal/waf/ratelimit.go)
-- [internal/waf/bot.go](file://internal/waf/bot.go)
 - [internal/waf/iprep.go](file://internal/waf/iprep.go)
+- [internal/waf/bot.go](file://internal/waf/bot.go)
+- [internal/waf/owasp.go](file://internal/waf/owasp.go)
 - [internal/waf/cve_detector.go](file://internal/waf/cve_detector.go)
-- [internal/waf/cve_general.go](file://internal/waf/cve_general.go)
-- [internal/waf/cve_java.go](file://internal/waf/cve_java.go)
-- [internal/waf/cve_node.go](file://internal/waf/cve_node.go)
-- [internal/waf/cve_php.go](file://internal/waf/cve_php.go)
 - [internal/waf/fingerprint.go](file://internal/waf/fingerprint.go)
-- [internal/waf/fingerprint_db.go](file://internal/waf/fingerprint_db.go)
 - [internal/waf/drop.go](file://internal/waf/drop.go)
-- [internal/waf/cve_feed.go](file://internal/waf/cve_feed.go)
-- [internal/admin/handler_cve.go](file://internal/admin/handler_cve.go)
-- [internal/store/repository/cve_rule.go](file://internal/store/repository/cve_rule.go)
-- [internal/store/models.go](file://internal/store/models.go)
+- [internal/dataplane/handler.go](file://internal/dataplane/handler.go)
+- [internal/core/sites/resolver.go](file://internal/core/sites/resolver.go)
+- [internal/snapshot/snapshot.go](file://internal/snapshot/snapshot.go)
 - [internal/core/config.go](file://internal/core/config.go)
-- [internal/core/rules/compiler_test.go](file://internal/core/rules/compiler_test.go)
-- [internal/core/rules/matcher_test.go](file://internal/core/rules/matcher_test.go)
+- [internal/core/runtime.go](file://internal/core/runtime.go)
+- [internal/core/lifecycle/lifecycle.go](file://internal/core/lifecycle/lifecycle.go)
 </cite>
 
-## 更新摘要
-**所做更改**
-- 新增 CVE 漏洞检测阶段的详细说明和实现分析
-- 新增 TLS 指纹识别功能的完整实现文档
-- 增强阻断机制章节，包含新的 Drop 执行器
-- 更新规则执行流程，添加 CVE 检测阶段
-- 新增 CVE 规则管理 API 和存储模型
-- 更新机器人检测阶段，集成 TLS 指纹深度分析
-- 新增 CVE 供应链同步机制和规则管理功能
-
 ## 目录
-1. [简介](#简介)
+1. [引言](#引言)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
@@ -50,311 +34,286 @@
 7. [性能考虑](#性能考虑)
 8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
-10. [附录](#附录)
+10. [附录：配置与最佳实践](#附录配置与最佳实践)
 
-## 简介
-本文件为 My-OpenWaf 的 WAF 引擎系统综合文档，面向开发者与运维人员，系统性阐述引擎核心架构、规则管道设计、处理阶段详解、性能优化策略、规则编译器工作原理（语法解析、AST 构建与代码生成）、规则匹配器实现机制（正则表达式优化、模式匹配算法与匹配优先级）、规则执行流程（阶段划分、执行顺序与短路机制），并提供规则示例与配置案例、扩展点与自定义规则开发方法。
-
-**更新** 本次更新重点增加了 CVE 漏洞检测阶段和 TLS 指纹识别功能，以及增强的阻断机制。新增了完整的 CVE 供应链同步机制，支持从 NVD 和 GitHub Advisory 获取最新的漏洞规则，并提供实时的规则管理 API。
+## 引言
+本文件系统性阐述 My-OpenWaf 的引擎核心架构与实现细节，重点覆盖以下方面：
+- 引擎整体设计理念与架构模式（责任链、规则编译、站点解析、生命周期管理）
+- 引擎初始化流程、依赖注入机制与运行时生命周期
+- Process 方法的执行流程（请求上下文构建、站点解析、维护模式检查、规则阶段执行）
+- 引擎与子系统的协作关系（站点解析器、速率限制器、IP 信誉系统、CVE检测器、TLS指纹识别器、阻断执行器、规则引擎、数据平面处理器）
+- 配置项与性能调优建议
+- 实际使用示例与最佳实践
 
 ## 项目结构
-系统采用分层与模块化组织方式：
-- 应用入口与生命周期管理：cmd/main.go 调用 internal/app/server.go 启动服务，负责数据库迁移、默认数据注入、监听器热重载、指标与事件收集等。
-- 核心引擎：internal/core/engine/engine.go 提供请求处理主引擎，协调站点解析、维护模式检查、规则编译与管道执行。
-- 规则子系统：rules 包含编译器（compiler.go）、匹配器（matcher.go）与阶段实现（phases.go），支持复合条件、正则缓存、优先级排序等。
-- 安全能力：waf 包提供机器人检测（bot.go）、速率限制（ratelimit.go）、IP 黑白名单与自动封禁（iprep.go）、CVE 漏洞检测（cve_detector.go）、TLS 指纹识别（fingerprint.go）和阻断执行器（drop.go）。
-- 数据模型与配置：store/models.go 定义规则、站点、保护配置、CVE 规则和阻断事件等；core/config.go 提供环境变量配置加载。
-- CVE 管理：cve_feed.go 提供 CVE 供应链同步功能，handler_cve.go 提供 CVE 规则管理 API，repository/cve_rule.go 提供 CVE 规则存储接口。
+My-OpenWaf 采用分层与模块化组织方式：
+- cmd 层负责应用入口与启动
+- internal/app 负责服务编排、生命周期管理、监听器热重载
+- internal/core 提供核心能力：引擎、规则编译与匹配、站点解析、动作定义、生命周期管理
+- internal/waf 提供速率限制、IP 信誉、OWASP 检测、CVE检测、TLS指纹识别、阻断执行等安全能力
+- internal/dataplane 提供数据面处理器，串联引擎与上游代理
+- internal/snapshot 提供不可变快照与原子切换
 
 ```mermaid
 graph TB
-A["应用入口<br/>cmd/main.go"] --> B["应用服务器<br/>internal/app/server.go"]
-B --> C["引擎核心<br/>internal/core/engine/engine.go"]
-C --> D["规则编译器<br/>internal/core/rules/compiler.go"]
-C --> E["规则阶段<br/>internal/core/rules/phases.go"]
-E --> F["匹配器集合<br/>internal/core/rules/matcher.go"]
-C --> G["动作与结果<br/>internal/core/action/action.go"]
-C --> H["速率限制<br/>internal/waf/ratelimit.go"]
-C --> I["IP信誉<br/>internal/waf/iprep.go"]
-C --> J["机器人检测<br/>internal/waf/bot.go"]
-C --> K["CVE检测器<br/>internal/waf/cve_detector.go"]
-C --> L["TLS指纹识别<br/>internal/waf/fingerprint.go"]
-C --> M["阻断执行器<br/>internal/waf/drop.go"]
-C --> N["CVE供应链管理<br/>internal/waf/cve_feed.go"]
-B --> O["数据模型与配置<br/>internal/store/models.go"]
-B --> P["核心配置加载<br/>internal/core/config.go"]
-Q["CVE规则管理API<br/>internal/admin/handler_cve.go"] --> N
-R["CVE规则存储<br/>internal/store/repository/cve_rule.go"] --> N
+A["cmd/main.go<br/>应用入口"] --> B["internal/app/server.go<br/>服务编排与生命周期"]
+B --> C["internal/core/runtime.go<br/>运行时装配"]
+B --> D["internal/core/engine/engine.go<br/>WAF 引擎"]
+D --> E["internal/core/pipeline/pipeline.go<br/>请求管线"]
+D --> F["internal/core/sites/resolver.go<br/>站点解析器"]
+D --> G["internal/core/rules/phases.go<br/>规则阶段"]
+G --> H["internal/core/rules/compiler.go<br/>规则编译"]
+H --> I["internal/core/rules/matcher.go<br/>匹配器"]
+D --> J["internal/waf/ratelimit.go<br/>请求速率限制"]
+D --> K["internal/waf/iprep.go<br/>IP 信誉"]
+D --> L["internal/waf/cve_detector.go<br/>CVE检测器"]
+D --> M["internal/waf/fingerprint.go<br/>TLS指纹识别"]
+D --> N["internal/waf/drop.go<br/>阻断执行器"]
+B --> O["internal/dataplane/handler.go<br/>数据面处理器"]
+C --> P["internal/core/config.go<br/>配置加载"]
+C --> Q["internal/snapshot/snapshot.go<br/>快照与站点运行时"]
 ```
 
 **图表来源**
-- [cmd/main.go:1-10](file://cmd/main.go#L1-L10)
-- [internal/app/server.go:33-280](file://internal/app/server.go#L33-L280)
-- [internal/core/engine/engine.go:15-146](file://internal/core/engine/engine.go#L15-L146)
-- [internal/core/rules/compiler.go:27-83](file://internal/core/rules/compiler.go#L27-L83)
-- [internal/core/rules/phases.go:32-483](file://internal/core/rules/phases.go#L32-L483)
-- [internal/core/rules/matcher.go:166-343](file://internal/core/rules/matcher.go#L166-L343)
-- [internal/core/action/action.go:28-53](file://internal/core/action/action.go#L28-L53)
-- [internal/waf/ratelimit.go:9-117](file://internal/waf/ratelimit.go#L9-L117)
-- [internal/waf/iprep.go:18-243](file://internal/waf/iprep.go#L18-L243)
-- [internal/waf/bot.go:8-254](file://internal/waf/bot.go#L8-L254)
-- [internal/waf/cve_detector.go:1-257](file://internal/waf/cve_detector.go#L1-L257)
-- [internal/waf/fingerprint.go:1-305](file://internal/waf/fingerprint.go#L1-L305)
-- [internal/waf/drop.go:1-123](file://internal/waf/drop.go#L1-L123)
-- [internal/waf/cve_feed.go:1-383](file://internal/waf/cve_feed.go#L1-L383)
-- [internal/admin/handler_cve.go:1-217](file://internal/admin/handler_cve.go#L1-L217)
-- [internal/store/repository/cve_rule.go:1-96](file://internal/store/repository/cve_rule.go#L1-L96)
-- [internal/store/models.go:44-350](file://internal/store/models.go#L44-L350)
-- [internal/core/config.go:31-67](file://internal/core/config.go#L31-L67)
+- [internal/core/engine/engine.go:23-176](file://internal/core/engine/engine.go#L23-L176)
+- [internal/core/pipeline/pipeline.go:9-66](file://internal/core/pipeline/pipeline.go#L9-L66)
+- [internal/core/sites/resolver.go:18-31](file://internal/core/sites/resolver.go#L18-L31)
+- [internal/core/rules/phases.go:34-569](file://internal/core/rules/phases.go#L34-L569)
+- [internal/core/rules/compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
+- [internal/core/rules/matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)
+- [internal/waf/ratelimit.go:24-117](file://internal/waf/ratelimit.go#L24-L117)
+- [internal/waf/iprep.go:44-243](file://internal/waf/iprep.go#L44-L243)
+- [internal/waf/cve_detector.go:1-257](file://internal/waf/cve_detector.go#L1-257)
+- [internal/waf/fingerprint.go:1-305](file://internal/waf/fingerprint.go#L1-305)
+- [internal/waf/drop.go:1-123](file://internal/waf/drop.go#L1-123)
+- [internal/dataplane/handler.go:36-257](file://internal/dataplane/handler.go#L36-L257)
+- [internal/core/config.go:56-115](file://internal/core/config.go#L56-L115)
+- [internal/snapshot/snapshot.go:52-105](file://internal/snapshot/snapshot.go#L52-L105)
 
 **章节来源**
-- [cmd/main.go:1-10](file://cmd/main.go#L1-L10)
-- [internal/app/server.go:33-280](file://internal/app/server.go#L33-L280)
+- [internal/core/engine/engine.go:15-176](file://internal/core/engine/engine.go#L15-L176)
+- [internal/core/rules/compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
+- [internal/core/sites/resolver.go:18-31](file://internal/core/sites/resolver.go#L18-L31)
+- [internal/waf/ratelimit.go:24-117](file://internal/waf/ratelimit.go#L24-L117)
+- [internal/waf/iprep.go:44-243](file://internal/waf/iprep.go#L44-L243)
+- [internal/waf/cve_detector.go:11-257](file://internal/waf/cve_detector.go#L11-L257)
+- [internal/waf/fingerprint.go:9-305](file://internal/waf/fingerprint.go#L9-L305)
+- [internal/waf/drop.go:19-123](file://internal/waf/drop.go#L19-L123)
+- [internal/dataplane/handler.go:36-257](file://internal/dataplane/handler.go#L36-L257)
+- [internal/core/lifecycle/lifecycle.go:30-178](file://internal/core/lifecycle/lifecycle.go#L30-L178)
 
 ## 核心组件
-- 引擎 Engine：负责站点解析、维护模式检查、规则编译与阶段管道执行，返回最终动作与观测命中。
-- 规则编译器：将存储层规则转换为运行时可直接匹配的 Compiled 结构，内置优先级排序与正则缓存。
-- 规则匹配器：提供多种内置匹配器（CIDR、前缀、正则、头部、方法、内容类型、查询参数等），支持复合逻辑（AND/OR/NOT）。
-- 规则阶段：按阶段顺序执行，包括 ACL、签名、自定义、请求速率限制、OWASP 默认、CVE 检测、机器人检测、IP 信誉等。
-- 动作与结果：标准化动作类型（允许/拦截/观察/丢弃），并提供短路与日志判定逻辑。
-- 安全能力：IP 信誉（黑白名单+自动封禁）、机器人检测（指纹与工具识别）、速率限制（固定窗口计数）、CVE 漏洞检测（多语言框架检测）、TLS 指纹识别（JA3/JA4 深度分析）、阻断执行器（TCP 连接直接关闭）。
-- CVE 管理：CVE 供应链同步（NVD、GitHub Advisory）、规则热重载、严重性分级、自动升级为丢弃动作。
-
-**更新** 新增 CVE 检测器和 TLS 指纹识别组件，增强阻断机制支持。新增 CVE 供应链同步功能，支持自动获取最新漏洞规则。
+- 引擎 Engine：封装站点解析、维护模式检查、规则阶段执行与结果聚合，新增CVE检测器和阻断执行器
+- 规则引擎：编译规则为可执行的 Compiled 结构，按阶段顺序执行
+- 站点解析器 Resolver：基于当前快照将 (bind, host) 映射到 SiteRuntime
+- 速率限制器 RateLimiter：固定窗口计数，支持请求与错误两类限流
+- IP 信誉系统 IPReputation：白名单/黑名单/自动封禁
+- CVE检测器 CVEDetector：多技术栈漏洞检测，支持PHP、Java、Node.js和通用漏洞规则
+- TLS指纹识别器 Fingerprint：基于JA3/JA4的TLS指纹分析与风险评分
+- 阻断执行器 DropExecutor：TCP连接直接终止，无HTTP响应
+- 数据平面处理器：在拦截后写入响应或转发至上游
+- 生命周期管理：统一启动、优雅关闭、信号处理与服务器协调
 
 **章节来源**
-- [internal/core/engine/engine.go:15-146](file://internal/core/engine/engine.go#L15-L146)
-- [internal/core/rules/compiler.go:11-83](file://internal/core/rules/compiler.go#L11-L83)
-- [internal/core/rules/matcher.go:11-343](file://internal/core/rules/matcher.go#L11-L343)
-- [internal/core/rules/phases.go:32-483](file://internal/core/rules/phases.go#L32-L483)
-- [internal/core/action/action.go:3-53](file://internal/core/action/action.go#L3-L53)
-- [internal/waf/iprep.go:18-243](file://internal/waf/iprep.go#L18-L243)
-- [internal/waf/bot.go:8-254](file://internal/waf/bot.go#L8-L254)
-- [internal/waf/ratelimit.go:9-117](file://internal/waf/ratelimit.go#L9-L117)
-- [internal/waf/cve_detector.go:1-257](file://internal/waf/cve_detector.go#L1-L257)
-- [internal/waf/fingerprint.go:1-305](file://internal/waf/fingerprint.go#L1-L305)
-- [internal/waf/drop.go:1-123](file://internal/waf/drop.go#L1-L123)
-- [internal/waf/cve_feed.go:1-383](file://internal/waf/cve_feed.go#L1-L383)
+- [internal/core/engine/engine.go:15-176](file://internal/core/engine/engine.go#L15-L176)
+- [internal/core/rules/compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
+- [internal/core/sites/resolver.go:18-31](file://internal/core/sites/resolver.go#L18-L31)
+- [internal/waf/ratelimit.go:24-117](file://internal/waf/ratelimit.go#L24-L117)
+- [internal/waf/iprep.go:44-243](file://internal/waf/iprep.go#L44-L243)
+- [internal/waf/cve_detector.go:11-257](file://internal/waf/cve_detector.go#L11-L257)
+- [internal/waf/fingerprint.go:9-305](file://internal/waf/fingerprint.go#L9-L305)
+- [internal/waf/drop.go:19-123](file://internal/waf/drop.go#L19-L123)
+- [internal/dataplane/handler.go:36-257](file://internal/dataplane/handler.go#L36-L257)
+- [internal/core/lifecycle/lifecycle.go:30-178](file://internal/core/lifecycle/lifecycle.go#L30-L178)
 
 ## 架构总览
-引擎在每次请求进入时，先进行站点解析与维护模式检查，随后将规则编译为运行时结构，按阶段顺序执行。阶段间通过短路机制实现快速决策，优先级与动作类型决定是否终止后续阶段。
-
-**更新** 新增 CVE 检测阶段，位于 OWASP 和机器人检测之间，专门用于检测已知漏洞利用模式。
+下图展示从 Hertz 监听器到引擎再到上游的完整链路，以及引擎内部的阶段执行顺序，包含新增的CVE检测和TLS指纹识别阶段。
 
 ```mermaid
 sequenceDiagram
 participant Client as "客户端"
-participant Server as "数据平面监听器"
-participant Engine as "引擎 Engine"
-participant Resolver as "站点解析器"
-participant Pipeline as "规则管道"
-participant Phases as "各阶段"
-participant Actions as "动作判定"
-Client->>Server : "HTTP 请求"
-Server->>Engine : "Process(RequestCtx)"
-Engine->>Resolver : "MatchSite(bind, host)"
-Resolver-->>Engine : "返回站点运行时"
-Engine->>Engine : "维护模式检查"
-Engine->>Engine : "convertAndCompile(规则)"
-Engine->>Pipeline : "构建阶段链"
-Pipeline->>Phases : "依次执行"
-Phases->>Actions : "匹配与动作判定"
-Actions-->>Pipeline : "返回结果/短路"
-Pipeline-->>Engine : "最终动作与观测命中"
-Engine-->>Server : "返回处理结果"
-Server-->>Client : "响应"
+participant DP as "数据平面处理器"
+participant Eng as "WAF 引擎"
+participant Res as "站点解析器"
+participant Pipe as "规则管线"
+participant IR as "IP 信誉"
+participant Bot as "机器人检测"
+participant RL as "速率限制器"
+participant OWASP as "OWASP默认"
+participant CVE as "CVE检测"
+participant Sig as "签名/自定义"
+Client->>DP : HTTP 请求
+DP->>Eng : 构建 RequestCtx 并调用 Process()
+Eng->>Res : 快照匹配站点
+Res-->>Eng : 返回 SiteRuntime
+Eng->>Eng : 维护模式检查
+alt 维护中
+Eng-->>DP : 返回拦截结果
+DP-->>Client : 维护页响应
+else 正常
+Eng->>Pipe : 构建阶段列表
+Pipe->>IR : IP信誉阶段
+IR-->>Pipe : 白名单短路/黑名单拦截
+Pipe->>Bot : 机器人检测阶段
+Bot-->>Pipe : 合法/可疑/恶意判定
+Pipe->>RL : 请求速率限制阶段
+RL-->>Pipe : 允许/拦截
+Pipe->>OWASP : OWASP默认阶段
+OWASP-->>Pipe : 通用攻击检测
+Pipe->>CVE : CVE检测阶段
+CVE-->>Pipe : 漏洞利用尝试检测
+alt 检测到CVE高危
+Pipe-->>Eng : 返回Drop动作
+else 正常
+Pipe->>Sig : 签名/自定义阶段
+Sig-->>Pipe : 规则匹配结果
+Pipe-->>Eng : 返回 Action 与观察命中
+Eng-->>DP : 返回结果
+alt 动作终止(Drop)
+DP->>DE : 调用阻断执行器
+DE-->>Client : TCP连接直接关闭
+else 动作拦截(Intercept)
+DP-->>Client : 拦截响应
+else 放行
+DP->>Up : 转发请求
+Up-->>DP : 上游响应
+DP->>RL : 错误率统计可选
+DP-->>Client : 响应返回
+end
+end
+end
 ```
 
 **图表来源**
-- [internal/core/engine/engine.go:43-122](file://internal/core/engine/engine.go#L43-L122)
-- [internal/core/pipeline/pipeline.go:46-66](file://internal/core/pipeline/pipeline.go#L46-L66)
-- [internal/core/rules/phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
-
-**章节来源**
-- [internal/core/engine/engine.go:43-122](file://internal/core/engine/engine.go#L43-L122)
-- [internal/core/pipeline/pipeline.go:37-66](file://internal/core/pipeline/pipeline.go#L37-L66)
+- [internal/dataplane/handler.go:36-257](file://internal/dataplane/handler.go#L36-L257)
+- [internal/core/engine/engine.go:57-129](file://internal/core/engine/engine.go#L57-L129)
+- [internal/core/sites/resolver.go:18-31](file://internal/core/sites/resolver.go#L18-L31)
+- [internal/core/rules/phases.go:305-358](file://internal/core/rules/phases.go#L305-L358)
+- [internal/waf/ratelimit.go:24-117](file://internal/waf/ratelimit.go#L24-L117)
+- [internal/waf/iprep.go:44-243](file://internal/waf/iprep.go#L44-L243)
+- [internal/waf/cve_detector.go:111-158](file://internal/waf/cve_detector.go#L111-L158)
+- [internal/waf/drop.go:59-83](file://internal/waf/drop.go#L59-L83)
 
 ## 详细组件分析
 
-### 引擎 Engine 组件
-- 职责：维护模式检查、站点解析、规则编译、阶段组装与执行、返回处理结果。
-- 关键流程：
-  - 维护模式：全局或站点级维护模式直接返回拦截动作。
-  - 规则编译：将存储层规则转换为 Compiled 列表，按优先级排序。
-  - 阶段组装：根据保护配置动态拼接阶段（IP信誉、ACL、机器人检测、请求速率限制、OWASP、CVE、签名、自定义）。
-  - 执行：管道顺序执行，遇到终端动作立即短路。
+### 引擎 Engine：初始化、依赖注入与生命周期
+- 初始化：通过 New 构造，注入快照持有者、请求/错误速率限制器、IP 信誉系统、CVE检测器
+- 依赖注入：Resolver 由快照持有者生成；规则阶段根据保护配置动态拼装
+- 生命周期：由 app 层创建、启动、热重载与优雅关闭；引擎自身不直接管理进程生命周期
+- 新增功能：CVE检测器和阻断执行器的注入与配置
 
 ```mermaid
 classDiagram
 class Engine {
--resolver : sites.Resolver
--reqRateLimiter : waf.RateLimiter
--errRateLimiter : waf.RateLimiter
--ipRep : waf.IPReputation
+-resolver : Resolver
+-reqRateLimiter : RateLimiter
+-errRateLimiter : RateLimiter
+-ipRep : IPReputation
+-geoResolver : MaxMindResolver
+-botThreshold : int
+-cveDetector : CVEDetector
+-dropExecutor : DropExecutor
 +Process(reqCtx) ProcessResult
 +Evaluate(clientIP, path, rawQuery, rules) action.Result
-+IPReputation() *waf.IPReputation
++Resolver() Resolver
++ErrRateLimiter() RateLimiter
++CVEDetector() CVEDetector
++DropExecutor() DropExecutor
++SetDropExecutor(d *DropExecutor) void
 }
-class ProcessResult {
-+Action : action.Result
-+Site : snapshot.SiteRuntime
-+ObserveHits : []action.Result
-+Maintenance : bool
+class Resolver {
+-holder : Holder
++Match(bind, host) SiteRuntime,bool
++Snapshot() *Snapshot
 }
-Engine --> ProcessResult : "返回"
+class RateLimiter {
++Allow(key) bool
++Increment(key) int64
++Enabled() bool
++Reconfigure(windowSec,maxReqs,enabled) void
++Close() void
+}
+class IPReputation {
++Check(ip) IPDecision
++RecordViolation(ip) bool
++ConfigureAutoBan(enabled,threshold,windowSec,durationSec) void
++SetLists(black,white) void
++Close() void
+}
+class CVEDetector {
+-phpDetector : PHPCVEDetector
+-javaDetector : JavaCVEDetector
+-nodeDetector : NodeCVEDetector
+-generalDetector : GeneralCVEDetector
+-customRules : []CustomCVERule
++Detect(req) []CVEMatch
++ReloadCustomRules(rules) void
++AddCustomRule(rule) void
++RemoveCustomRule(id) void
+}
+class DropExecutor {
+-stats : DropStats
+-enabled : bool
++Execute(conn, reason) error
++GetStats() DropStats
++SetEnabled(v bool) void
+}
+Engine --> Resolver : "使用"
+Engine --> RateLimiter : "使用"
+Engine --> IPReputation : "使用"
+Engine --> CVEDetector : "使用"
+Engine --> DropExecutor : "使用"
 ```
 
 **图表来源**
-- [internal/core/engine/engine.go:15-146](file://internal/core/engine/engine.go#L15-L146)
+- [internal/core/engine/engine.go:15-37](file://internal/core/engine/engine.go#L15-L37)
+- [internal/core/sites/resolver.go:7-16](file://internal/core/sites/resolver.go#L7-L16)
+- [internal/waf/ratelimit.go:9-34](file://internal/waf/ratelimit.go#L9-L34)
+- [internal/waf/iprep.go:18-35](file://internal/waf/iprep.go#L18-L35)
+- [internal/waf/cve_detector.go:11-21](file://internal/waf/cve_detector.go#L11-L21)
+- [internal/waf/drop.go:19-24](file://internal/waf/drop.go#L19-L24)
 
 **章节来源**
-- [internal/core/engine/engine.go:15-146](file://internal/core/engine/engine.go#L15-L146)
+- [internal/core/engine/engine.go:27-37](file://internal/core/engine/engine.go#L27-L37)
+- [internal/core/engine/engine.go:152-155](file://internal/core/engine/engine.go#L152-L155)
+- [internal/core/lifecycle/lifecycle.go:30-178](file://internal/core/lifecycle/lifecycle.go#L30-L178)
 
-### 规则编译器组件
-- 职责：解析规则模式字符串、构建运行时匹配器、排序与生成 Compiled 规则。
-- 关键点：
-  - 模式解析：支持简单前缀模式与 JSON 复合条件。
-  - 匹配器构建：根据 kind 分派到具体匹配器，正则使用缓存避免重复编译。
-  - 排序：优先级升序，ID 升序，确保稳定执行顺序。
+### Process 执行流程：请求上下文、站点解析、维护模式与规则阶段
+- 请求上下文：由数据平面处理器填充 RequestCtx（含请求 ID、绑定地址、客户端 IP、方法、路径、查询、头、体、内容类型等）
+- 站点解析：使用 Resolver 从当前快照中匹配站点，支持精确匹配与通配符
+- 维护模式：若全局或站点启用维护，则立即返回拦截结果
+- 规则阶段：按顺序执行（IP 信誉 → 机器人检测 → 请求速率限制 → OWASP → CVE → 签名/自定义），遇到终止动作即短路
+- 结果返回：包含最终动作、站点信息、观察命中列表
 
 ```mermaid
 flowchart TD
-Start(["开始编译"]) --> Load["读取存储规则"]
-Load --> Filter{"启用且模式有效?"}
-Filter --> |否| Skip["跳过规则"]
-Filter --> |是| Parse["解析模式(kind,arg)"]
-Parse --> Build["构建匹配器(buildMatcher)"]
-Build --> Sort["按优先级与ID排序"]
-Sort --> Out(["输出 Compiled 列表"])
-Skip --> Load
+Start(["进入 Process"]) --> LoadSnap["加载快照"]
+LoadSnap --> MatchSite["解析站点 (bind, host)"]
+MatchSite --> SiteOK{"是否匹配?"}
+SiteOK -- 否 --> ReturnEmpty["返回空结果"]
+SiteOK -- 是 --> MaintCheck["检查维护模式"]
+MaintCheck --> MaintOn{"维护开启?"}
+MaintOn -- 是 --> ReturnMaint["返回拦截 + 维护标记"]
+MaintOn -- 否 --> Compile["编译规则为 Compiled 列表"]
+Compile --> Phases["组装阶段列表"]
+Phases --> RunPipe["顺序执行阶段"]
+RunPipe --> Done(["返回结果"])
 ```
 
 **图表来源**
-- [internal/core/rules/compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
-- [internal/core/rules/compiler.go:57-83](file://internal/core/rules/compiler.go#L57-L83)
-- [internal/core/rules/matcher.go:166-261](file://internal/core/rules/matcher.go#L166-L261)
+- [internal/core/engine/engine.go:57-129](file://internal/core/engine/engine.go#L57-L129)
+- [internal/core/pipeline/pipeline.go:46-66](file://internal/core/pipeline/pipeline.go#L46-L66)
 
 **章节来源**
-- [internal/core/rules/compiler.go:11-83](file://internal/core/rules/compiler.go#L11-L83)
-- [internal/core/rules/matcher.go:166-261](file://internal/core/rules/matcher.go#L166-L261)
+- [internal/core/engine/engine.go:57-129](file://internal/core/engine/engine.go#L57-L129)
+- [internal/core/pipeline/pipeline.go:9-66](file://internal/core/pipeline/pipeline.go#L9-L66)
 
-### 规则匹配器组件
-- 职责：对单条规则进行匹配判断，支持复合逻辑与正则缓存。
-- 内置匹配器：
-  - CIDR/IP 前缀/精确匹配
-  - 路径前缀/正则/精确匹配
-  - 查询串包含/正则
-  - 头部包含/正则
-  - 方法/内容类型
-  - User-Agent 包含/正则
-  - 查询参数存在/值包含
-  - 复合条件（AND/OR/NOT）
-- 正则优化：使用带锁的全局缓存，避免重复编译。
-
-```mermaid
-classDiagram
-class Matcher {
-<<interface>>
-+Match(ip, method, path, query, headers) bool
-}
-class ipCIDRMatcher
-class pathPrefixMatcher
-class pathRegexMatcher
-class queryContainsMatcher
-class queryRegexMatcher
-class headerContainsMatcher
-class headerRegexMatcher
-class exactPathMatcher
-class methodMatcher
-class contentTypeMatcher
-class bodyContainsMatcher
-class queryParamMatcher
-class andMatcher
-class orMatcher
-class notMatcher
-Matcher <|.. ipCIDRMatcher
-Matcher <|.. pathPrefixMatcher
-Matcher <|.. pathRegexMatcher
-Matcher <|.. queryContainsMatcher
-Matcher <|.. queryRegexMatcher
-Matcher <|.. headerContainsMatcher
-Matcher <|.. headerRegexMatcher
-Matcher <|.. exactPathMatcher
-Matcher <|.. methodMatcher
-Matcher <|.. contentTypeMatcher
-Matcher <|.. bodyContainsMatcher
-Matcher <|.. queryParamMatcher
-andMatcher ..> Matcher : "组合"
-orMatcher ..> Matcher : "组合"
-notMatcher ..> Matcher : "组合"
-```
-
-**图表来源**
-- [internal/core/rules/matcher.go:11-141](file://internal/core/rules/matcher.go#L11-L141)
-- [internal/core/rules/matcher.go:166-343](file://internal/core/rules/matcher.go#L166-L343)
-
-**章节来源**
-- [internal/core/rules/matcher.go:11-343](file://internal/core/rules/matcher.go#L11-L343)
-
-### 规则阶段组件
-- 职责：按阶段顺序执行规则匹配，支持短路与观测日志。
-- 主要阶段：
-  - ACL：白名单短路放行，其他动作按规则动作执行。
-  - 签名/自定义：命中即按动作短路。
-  - 请求速率限制：基于客户端IP+主机名的固定窗口计数。
-  - OWASP 默认：多内容类型解析与扫描，命中按配置动作。
-  - CVE 检测：检测已知漏洞利用模式，关键/高危严重性自动提升为丢弃。
-  - 机器人检测：指纹与工具识别，恶意记录IP信誉。
-  - IP 信誉：白名单短路放行，黑名单直接拦截。
-
-**更新** 新增 CVE 检测阶段，位于 OWASP 和机器人检测之间，专门检测已知漏洞利用模式。
-
-```mermaid
-sequenceDiagram
-participant P as "Pipeline"
-participant ACL as "ACL阶段"
-participant BOT as "机器人阶段"
-participant RL as "速率限制阶段"
-participant OWASP as "OWASP阶段"
-participant CVE as "CVE检测阶段"
-participant SIG as "签名阶段"
-participant CUS as "自定义阶段"
-P->>ACL : "Execute()"
-ACL-->>P : "允许短路/继续"
-P->>BOT : "Execute()"
-BOT-->>P : "拦截/观察/继续"
-P->>RL : "Execute()"
-RL-->>P : "拦截/继续"
-P->>OWASP : "Execute()"
-OWASP-->>P : "拦截/继续"
-P->>CVE : "Execute()"
-CVE-->>P : "丢弃/拦截/继续"
-P->>SIG : "Execute()"
-SIG-->>P : "拦截/继续"
-P->>CUS : "Execute()"
-CUS-->>P : "拦截/继续"
-```
-
-**图表来源**
-- [internal/core/rules/phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
-- [internal/core/rules/phases.go:96-128](file://internal/core/rules/phases.go#L96-L128)
-- [internal/core/rules/phases.go:130-170](file://internal/core/rules/phases.go#L130-L170)
-- [internal/core/rules/phases.go:172-213](file://internal/core/rules/phases.go#L172-L213)
-- [internal/core/rules/phases.go:215-272](file://internal/core/rules/phases.go#L215-L272)
-- [internal/core/rules/phases.go:305-358](file://internal/core/rules/phases.go#L305-L358)
-
-**章节来源**
-- [internal/core/rules/phases.go:32-483](file://internal/core/rules/phases.go#L32-L483)
-
-### CVE 检测器组件
-- 职责：检测已知漏洞利用模式，支持多语言框架检测和自定义规则。
-- 关键特性：
-  - 多检测器并行：PHP、Java、Node.js、通用漏洞检测器并行运行。
-  - 自定义规则：支持用户自定义正则表达式规则，热重载。
-  - 自动升级：关键/高危严重性自动提升为丢弃动作。
-  - 请求解码：支持 URL 解码和 Base64 解码的双重解码检测。
-
-**更新** 新增完整的 CVE 检测器组件，包含多语言框架检测和自定义规则支持。
+### CVE检测器：多技术栈漏洞检测
+- 架构设计：CVEDetector 作为门面模式，协调多个技术栈专用检测器和通用检测器
+- 技术栈检测器：PHP、Java、Node.js专用检测器，针对各自生态的典型漏洞模式
+- 通用检测器：检测SSRF、XXE、路径遍历、CRLF注入、HTTP请求走私等通用漏洞
+- 自定义规则：支持从数据库热加载自定义CVE规则，正则表达式预编译缓存
+- 并行检测：多检测器并行执行，使用WaitGroup收集结果，提升检测效率
 
 ```mermaid
 classDiagram
@@ -364,15 +323,10 @@ class CVEDetector {
 -nodeDetector : NodeCVEDetector
 -generalDetector : GeneralCVEDetector
 -customRules : []CustomCVERule
--compiledCustom : []compiledCustomRule
 +Detect(req) []CVEMatch
-+ReloadCustomRules(rules)
-+AddCustomRule(rule)
-+RemoveCustomRule(id)
-}
-class GeneralCVEDetector {
--rules : []generalCVERule
-+Detect(req) []CVEMatch
++ReloadCustomRules(rules) void
++AddCustomRule(rule) void
++RemoveCustomRule(id) void
 }
 class PHPCVEDetector {
 -rules : []phpCVERule
@@ -386,49 +340,37 @@ class NodeCVEDetector {
 -rules : []nodeCVERule
 +Detect(req) []CVEMatch
 }
-CVEDetector --> GeneralCVEDetector
-CVEDetector --> PHPCVEDetector
-CVEDetector --> JavaCVEDetector
-CVEDetector --> NodeCVEDetector
+class GeneralCVEDetector {
+-rules : []generalCVERule
++Detect(req) []CVEMatch
+}
+CVEDetector --> PHPCVEDetector : "组合"
+CVEDetector --> JavaCVEDetector : "组合"
+CVEDetector --> NodeCVEDetector : "组合"
+CVEDetector --> GeneralCVEDetector : "组合"
 ```
 
 **图表来源**
 - [internal/waf/cve_detector.go:11-73](file://internal/waf/cve_detector.go#L11-L73)
-- [internal/waf/cve_general.go:8-20](file://internal/waf/cve_general.go#L8-L20)
-- [internal/waf/cve_php.go:8-19](file://internal/waf/cve_php.go#L8-L19)
-- [internal/waf/cve_java.go:7-18](file://internal/waf/cve_java.go#L7-L18)
-- [internal/waf/cve_node.go:7-18](file://internal/waf/cve_node.go#L7-L18)
+- [internal/waf/cve_php.go:8-63](file://internal/waf/cve_php.go#L8-L63)
+- [internal/waf/cve_general.go:8-53](file://internal/waf/cve_general.go#L8-L53)
 
 **章节来源**
-- [internal/waf/cve_detector.go:1-257](file://internal/waf/cve_detector.go#L1-L257)
-- [internal/waf/cve_general.go:1-203](file://internal/waf/cve_general.go#L1-L203)
-- [internal/waf/cve_php.go:1-194](file://internal/waf/cve_php.go#L1-L194)
-- [internal/waf/cve_java.go:1-130](file://internal/waf/cve_java.go#L1-L130)
-- [internal/waf/cve_node.go:1-138](file://internal/waf/cve_node.go#L1-L138)
+- [internal/waf/cve_detector.go:65-174](file://internal/waf/cve_detector.go#L65-L174)
+- [internal/waf/cve_php.go:65-119](file://internal/waf/cve_php.go#L65-L119)
+- [internal/waf/cve_general.go:55-106](file://internal/waf/cve_general.go#L55-L106)
 
-### TLS 指纹识别组件
-- 职责：深度分析 TLS 连接特征，识别恶意工具和自动化行为。
-- 关键特性：
-  - JA3/JA4 指纹：支持 JA3（TLS 客户端指纹）和 JA4（改进版指纹）识别。
-  - HTTP/2 深度分析：检测 HTTP/2 SETTINGS、窗口大小、优先级树等特征。
-  - 浏览器一致性检查：验证 Accept-Language、Accept-Encoding 等头部一致性。
-  - 工具识别：内置恶意工具指纹数据库，支持实时更新。
-
-**更新** 新增完整的 TLS 指纹识别组件，集成 JA3/JA4 指纹分析和 HTTP/2 深度检测。
+### TLS指纹识别器：JA3/JA4指纹分析
+- 指纹提取：从请求头中提取JA3/JA4哈希、TLS版本、HTTP/2设置、头部顺序等信息
+- 风险评分：基于已知恶意指纹库、浏览器一致性检查、TLS版本验证、HTTP/2设置验证等维度进行综合评分
+- 多维度验证：包括已知恶意JA3指纹匹配、浏览器声明一致性、TLS版本过旧检测、HTTP/2设置异常检测、头部顺序异常检测
+- 实时评分：支持从TLS层传递的指纹信息，或基于可用的TLS连接状态信息计算指纹
 
 ```mermaid
 classDiagram
 class FingerprintScorer {
 -knownFingerprints : FingerprintDB
 +ScoreFingerprint(info) FingerprintResult
-+h2SettingsMatch(browser, settings, windowSize) bool
-+headerOrderKnown(browser, orderHash) bool
-}
-class FingerprintDB {
--BrowserJA3 : map[string]string
--MaliciousJA3 : map[string]string
--BrowserH2Settings : map[string]H2SettingsProfile
--HeaderOrderPatterns : map[string][]string
 }
 class FingerprintInfo {
 -JA3Hash : string
@@ -436,44 +378,42 @@ class FingerprintInfo {
 -TLSVersion : uint16
 -HTTP2Settings : string
 -H2WindowSize : uint32
--H2Priorities : string
 -ClaimedBrowser : string
--AcceptLang : string
--AcceptEnc : string
--HeaderOrder : string
++ExtractFingerprint(headers, headerKeys) FingerprintInfo
 }
-FingerprintScorer --> FingerprintDB
-FingerprintScorer --> FingerprintInfo
+class FingerprintDB {
+-MaliciousJA3 : map[string]string
+-BrowserJA3 : map[string]string
+-BrowserH2Settings : map[string]H2Profile
+-HeaderOrderPatterns : map[string][]string
+}
+FingerprintScorer --> FingerprintDB : "使用"
+FingerprintScorer --> FingerprintInfo : "评分"
 ```
 
 **图表来源**
 - [internal/waf/fingerprint.go:30-40](file://internal/waf/fingerprint.go#L30-L40)
-- [internal/waf/fingerprint_db.go:3-13](file://internal/waf/fingerprint_db.go#L3-L13)
 - [internal/waf/fingerprint.go:9-21](file://internal/waf/fingerprint.go#L9-L21)
 
 **章节来源**
-- [internal/waf/fingerprint.go:1-305](file://internal/waf/fingerprint.go#L1-L305)
-- [internal/waf/fingerprint_db.go:1-233](file://internal/waf/fingerprint_db.go#L1-L233)
+- [internal/waf/fingerprint.go:35-163](file://internal/waf/fingerprint.go#L35-L163)
+- [internal/waf/bot.go:386-392](file://internal/waf/bot.go#L386-L392)
 
-### 阻断执行器组件
-- 职责：直接关闭 TCP 连接而不发送任何 HTTP 响应，实现零响应阻断。
-- 关键特性：
-  - 统计追踪：跟踪总阻断数、按源分类的阻断统计。
-  - 原子操作：使用原子计数器确保并发安全。
-  - 详细日志：记录阻断原因、客户端 IP、主机名、路径等信息。
-  - 灵活启用：支持运行时启用/禁用阻断功能。
-
-**更新** 新增阻断执行器组件，提供更严格的阻断机制。
+### 阻断执行器：TCP连接直接终止
+- 架构设计：独立的阻断执行器，支持启用/禁用状态管理
+- 统计分析：原子计数器跟踪总阻断数、按来源分类的阻断统计、最后阻断时间
+- 动作优先级：Drop动作具有最高优先级，直接终止TCP连接，不发送任何HTTP响应
+- 日志记录：详细的阻断事件日志，包含来源、规则ID、客户端IP、主机、路径等
 
 ```mermaid
 classDiagram
 class DropExecutor {
 -stats : DropStats
 -enabled : bool
--log : *slog.Logger
+-log : Logger
 +Execute(conn, reason) error
 +GetStats() DropStats
-+ResetStats()
++SetEnabled(v bool) void
 }
 class DropStats {
 -TotalDropped : atomic.Int64
@@ -485,293 +425,271 @@ class DropStats {
 class DropReason {
 -Source : string
 -RuleID : string
--Detail : string
 -ClientIP : string
 -Host : string
 -Path : string
--Timestamp : time.Time
 }
-DropExecutor --> DropStats
-DropExecutor --> DropReason
+DropExecutor --> DropStats : "统计"
+DropExecutor --> DropReason : "记录"
 ```
 
 **图表来源**
-- [internal/waf/drop.go:19-24](file://internal/waf/drop.go#L19-L24)
+- [internal/waf/drop.go:19-52](file://internal/waf/drop.go#L19-L52)
 - [internal/waf/drop.go:10-17](file://internal/waf/drop.go#L10-L17)
 - [internal/waf/drop.go:26-35](file://internal/waf/drop.go#L26-L35)
 
 **章节来源**
-- [internal/waf/drop.go:1-123](file://internal/waf/drop.go#L1-L123)
+- [internal/waf/drop.go:37-123](file://internal/waf/drop.go#L37-L123)
 
-### CVE 供应链管理组件
-- 职责：从 NVD 和 GitHub Advisory 获取最新的 CVE 规则，支持自动审批和热重载。
-- 关键特性：
-  - 多源同步：支持 NVD API 和 GitHub Advisory API。
-  - 自动审批：可配置自动批准新规则。
-  - 热重载：规则更新后自动应用到检测器。
-  - 同步日志：记录同步状态、错误信息和统计信息。
-
-**更新** 新增完整的 CVE 供应链管理功能，支持自动获取和管理 CVE 规则。
+### 规则编译与匹配：DSL解析、排序与执行
+- 编译：将存储层规则转换为 Compiled，按优先级与 ID 排序
+- DSL：支持 block_ip、block_path、block_header、block_user_agent、body_contains、query_param 等前缀，以及复合条件 JSON
+- 匹配：构建具体 Matcher（CIDR、正则、包含、键值对等），缓存正则以降低开销
+- 阶段：每个阶段封装一组规则，按顺序执行，遇到允许短路、拦截终止
 
 ```mermaid
 classDiagram
-class CVEFeedManager {
--db : *gorm.DB
--detector : *CVEDetector
--syncInterval : time.Duration
--nvdAPIKey : string
--autoApprove : bool
--syncing : bool
--lastSync : time.Time
--lastError : string
-+Start()
-+Stop()
-+SyncNow() error
-+GetSyncStatus() SyncStatus
--doSync() error
--loadRulesIntoDetector()
--fetchFromNVD() error
--fetchFromGitHubAdvisory() error
+class Compiled {
++ID : uint
++Phase : string
++Action : Type
++Priority : int
++Kind : string
++Arg : string
++Match(ctx) bool
 }
-class CVERuleModel {
--ID : uint
--CVEID : string
--Category : string
--Pattern : string
--Target : string
--Severity : string
--Action : string
--Enabled : bool
--Description : string
--Source : string
--Approved : bool
--CVSSScore : float64
--CWEType : string
+class Matcher {
+<<interface>>
++Match(ip,method,path,query,headers) bool
 }
-CVEFeedManager --> CVERuleModel
+class Compiler {
++Compile(rs) []Compiled
++ParsePattern(p) (kind,arg)
+}
+Compiled --> Matcher : "持有"
+Compiler --> Compiled : "生成"
 ```
 
 **图表来源**
-- [internal/waf/cve_feed.go:61-75](file://internal/waf/cve_feed.go#L61-L75)
-- [internal/waf/cve_feed.go:32-49](file://internal/waf/cve_feed.go#L32-L49)
+- [internal/core/rules/compiler.go:11-55](file://internal/core/rules/compiler.go#L11-L55)
+- [internal/core/rules/matcher.go:11-141](file://internal/core/rules/matcher.go#L11-L141)
 
 **章节来源**
-- [internal/waf/cve_feed.go:1-383](file://internal/waf/cve_feed.go#L1-L383)
+- [internal/core/rules/compiler.go:27-55](file://internal/core/rules/compiler.go#L27-L55)
+- [internal/core/rules/matcher.go:167-261](file://internal/core/rules/matcher.go#L167-L261)
 
-### 动作与结果组件
-- 职责：标准化动作类型（允许/拦截/观察/丢弃），并提供短路与日志判定。
-- 关键点：规范化旧动作别名，短路仅在拦截/丢弃时触发，观测命中用于日志记录。
-
-**更新** 新增丢弃动作类型，用于更严格的阻断场景。
-
-**章节来源**
-- [internal/core/action/action.go:3-53](file://internal/core/action/action.go#L3-L53)
-
-### 速率限制组件
-- 职责：固定窗口计数限流，支持并发安全与定期清理。
-- 关键点：键由客户端IP+主机名组成，窗口与阈值可动态配置。
-
-**章节来源**
-- [internal/waf/ratelimit.go:9-117](file://internal/waf/ratelimit.go#L9-L117)
-
-### IP 信誉组件
-- 职责：支持黑白名单与自动封禁，提供查询与违规计数。
-- 关键点：白名单命中短路放行，黑名单直接拦截；自动封禁基于窗口内违规次数。
-
-**章节来源**
-- [internal/waf/iprep.go:18-243](file://internal/waf/iprep.go#L18-L243)
-
-### 机器人检测组件
-- 职责：基于用户代理与请求特征的指纹评分，识别恶意工具。
-- 关键点：内置合法爬虫白名单与恶意工具列表，支持不同敏感度等级。
-- 深度分析：集成 TLS 指纹识别，包括 JA3/JA4 指纹识别和 HTTP/2 设置检测。
-
-**更新** 集成 TLS 指纹深度分析，包括 JA3/JA4 指纹识别和 HTTP/2 设置检测。
-
-**章节来源**
-- [internal/waf/bot.go:8-254](file://internal/waf/bot.go#L8-L254)
-
-## 依赖关系分析
-- 引擎依赖：站点解析器、规则编译器、动作系统、速率限制、IP 信誉、机器人检测、CVE 检测器。
-- 规则阶段依赖：匹配器集合、动作系统、速率限制实例、IP 信誉实例、机器人检测工具、CVE 检测器实例。
-- 应用层依赖：数据库连接、Redis（可选）、前端静态资源、健康检查、指标导出。
-- CVE 管理依赖：数据库存储、外部 API（NVD、GitHub Advisory）、CVE 检测器。
-
-**更新** 新增 CVE 检测器和 TLS 指纹识别组件的依赖关系，以及 CVE 供应链管理的外部依赖。
+### 站点解析器与快照：不可变快照与原子切换
+- Resolver：从快照中查找站点，支持精确匹配与通配符（*.domain）
+- Snapshot：不可变视图，包含站点映射、默认阻断页、SNI 证书、保护配置等
+- Holder：原子指针保存当前快照，用于零停机切换
 
 ```mermaid
-graph TB
-Engine["Engine"] --> Resolver["sites.Resolver"]
-Engine --> Compiler["rules.Compile"]
-Engine --> Pipeline["pipeline.New"]
-Pipeline --> Phases["各阶段"]
-Phases --> Matcher["匹配器集合"]
-Phases --> Action["动作系统"]
-Phases --> RateLimit["waf.RateLimiter"]
-Phases --> IPRep["waf.IPReputation"]
-Phases --> Bot["waf.CheckBot"]
-Phases --> CVEDetector["waf.CVEDetector"]
-Phases --> DropExecutor["waf.DropExecutor"]
-CVEDetector --> CVEFeedManager["waf.CVEFeedManager"]
-CVEFeedManager --> CVERuleModel["CVERuleModel"]
+classDiagram
+class Resolver {
+-holder : Holder
++Match(bind, host) SiteRuntime,bool
++Snapshot() *Snapshot
+}
+class Snapshot {
++Sites map[string]SiteRuntime
++Protection ProtectionConfig
++MatchSite(bind, host) SiteRuntime,bool
+}
+class Holder {
++Store(*Snapshot) void
++Load() *Snapshot
+}
+Resolver --> Holder : "读取"
+Holder --> Snapshot : "原子保存/读取"
 ```
 
 **图表来源**
-- [internal/core/engine/engine.go:69-106](file://internal/core/engine/engine.go#L69-L106)
-- [internal/core/rules/phases.go:34-272](file://internal/core/rules/phases.go#L34-L272)
+- [internal/core/sites/resolver.go:7-31](file://internal/core/sites/resolver.go#L7-L31)
+- [internal/snapshot/snapshot.go:52-96](file://internal/snapshot/snapshot.go#L52-L96)
 
 **章节来源**
-- [internal/core/engine/engine.go:69-106](file://internal/core/engine/engine.go#L69-L106)
-- [internal/core/rules/phases.go:34-272](file://internal/core/rules/phases.go#L34-L272)
+- [internal/core/sites/resolver.go:18-31](file://internal/core/sites/resolver.go#L18-L31)
+- [internal/snapshot/snapshot.go:74-96](file://internal/snapshot/snapshot.go#L74-L96)
+
+### 速率限制器与 IP 信誉：固定窗口与自动封禁
+- 速率限制：固定窗口计数，支持请求与错误两类；可运行时重配置
+- IP 信誉：白名单短路放行、黑名单直接拦截；支持自动封禁阈值、窗口与时长
+
+```mermaid
+flowchart TD
+A["Allow/Increment 调用"] --> B{"启用状态?"}
+B -- 否 --> C["总是允许/计数为0"]
+B -- 是 --> D["计算当前窗口"]
+D --> E{"窗口过期或不存在?"}
+E -- 是 --> F["创建新窗口并设置过期时间"]
+E -- 否 --> G["复用现有窗口"]
+F --> H["更新计数并比较上限"]
+G --> H
+H --> I{"超过上限?"}
+I -- 是 --> J["返回超限/增加计数"]
+I -- 否 --> K["返回未超限/增加计数"]
+```
+
+**图表来源**
+- [internal/waf/ratelimit.go:48-92](file://internal/waf/ratelimit.go#L48-L92)
+- [internal/waf/iprep.go:89-155](file://internal/waf/iprep.go#L89-L155)
+
+**章节来源**
+- [internal/waf/ratelimit.go:24-117](file://internal/waf/ratelimit.go#L24-L117)
+- [internal/waf/iprep.go:44-243](file://internal/waf/iprep.go#L44-L243)
+
+### 数据平面处理器：拦截、记录与转发
+- 维护模式：直接输出维护页
+- 拦截：记录拦截事件并写入阻断响应
+- 观察命中：记录日志与安全事件
+- 转发：HTTP/WebSocket/SSE 分支转发至上游；错误率统计在响应后进行
+- 阻断执行：对于Drop动作调用阻断执行器直接关闭TCP连接
+
+```mermaid
+sequenceDiagram
+participant DP as "数据平面处理器"
+participant Eng as "引擎"
+participant DE as "阻断执行器"
+participant Ev as "事件写入器"
+participant Up as "上游"
+DP->>Eng : Process(RequestCtx)
+Eng-->>DP : Action, ObserveHits, Site
+alt 维护模式
+DP-->>Client : 维护页
+else 拦截(Drop)
+DP->>DE : Execute(conn, reason)
+DE-->>Client : TCP连接关闭
+DE-->>Ev : 记录阻断统计
+else 拦截(Intercept)
+DP-->>Client : 阻断响应
+else 放行
+DP->>Up : 转发请求
+Up-->>DP : 上游响应
+DP->>RL : 错误率统计(可选)
+DP-->>Client : 响应
+end
+```
+
+**图表来源**
+- [internal/dataplane/handler.go:36-257](file://internal/dataplane/handler.go#L36-L257)
+- [internal/waf/drop.go:59-83](file://internal/waf/drop.go#L59-L83)
+
+**章节来源**
+- [internal/dataplane/handler.go:36-257](file://internal/dataplane/handler.go#L36-L257)
+
+## 依赖关系分析
+- 引擎依赖：Resolver、规则编译器、各规则阶段、速率限制器、IP 信誉系统、CVE检测器、阻断执行器
+- 数据平面依赖：引擎、快照持有者、指标、事件写入器、上游代理、阻断执行器
+- 运行时依赖：数据库、可选 Redis、缓存层、快照构建器
+- 生命周期依赖：Hertz 服务器适配器、信号处理、优雅关闭
+
+```mermaid
+graph LR
+DP["数据平面处理器"] --> ENG["引擎"]
+ENG --> RES["站点解析器"]
+ENG --> PIPE["规则管线"]
+PIPE --> PH1["IP信誉阶段"]
+PIPE --> PH2["机器人阶段"]
+PIPE --> PH3["请求速率限制阶段"]
+PIPE --> PH4["OWASP阶段"]
+PIPE --> PH5["CVE检测阶段"]
+PIPE --> PH6["签名/自定义阶段"]
+ENG --> RL["速率限制器"]
+ENG --> IR["IP信誉系统"]
+ENG --> CVE["CVE检测器"]
+ENG --> FP["TLS指纹识别器"]
+ENG --> DE["阻断执行器"]
+APP["应用编排"] --> DP
+APP --> ENG
+APP --> LIFE["生命周期管理"]
+RUNTIME["运行时"] --> APP
+RUNTIME --> SNAP["快照构建/缓存"]
+```
+
+**图表来源**
+- [internal/dataplane/handler.go:36-257](file://internal/dataplane/handler.go#L36-L257)
+- [internal/core/engine/engine.go:57-129](file://internal/core/engine/engine.go#L57-L129)
+- [internal/core/lifecycle/lifecycle.go:30-178](file://internal/core/lifecycle/lifecycle.go#L30-L178)
+- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
+
+**章节来源**
+- [internal/core/engine/engine.go:15-176](file://internal/core/engine/engine.go#L15-L176)
+- [internal/core/lifecycle/lifecycle.go:30-178](file://internal/core/lifecycle/lifecycle.go#L30-L178)
+- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
 
 ## 性能考虑
-- 正则优化：规则编译阶段对正则表达式进行缓存，避免重复编译，降低 CPU 开销。
-- 匹配短路：ACL 允许短路放行，IP 信誉白名单短路放行，机器人检测恶意命中直接拦截，CVE 检测关键/高危自动丢弃，减少后续阶段开销。
-- 固定窗口限流：使用原子计数与定期清理，内存占用可控，适合高 QPS 场景。
-- 内容扫描限制：OWASP 默认阶段对不同内容类型采用不同的解析与扫描策略，限制扫描范围与大小，避免正则风暴。
-- 并发安全：速率限制与 IP 信誉使用互斥锁与原子操作，保证多协程下的正确性。
-- 预排序：规则按优先级与 ID 排序，确保稳定的执行顺序，避免不必要的回溯。
-- CVE 检测并行：CVE 检测器使用 goroutine 并行运行多个检测器，提高检测效率。
-- TLS 指纹缓存：指纹数据库使用内存缓存，避免重复计算。
-- CVE 规则缓存：自定义 CVE 规则编译后缓存正则表达式，支持热重载时的原子替换。
-
-**更新** 新增 CVE 检测并行和 TLS 指纹缓存的性能优化策略，以及 CVE 规则缓存机制。
+- 规则编译与缓存：规则编译一次，按优先级排序；正则表达式缓存避免重复编译
+- 请求上下文池化：数据平面处理器使用对象池减少 GC 压力
+- 固定窗口限流：低内存占用，定时清理过期窗口；错误率统计在响应后进行，避免阻塞请求路径
+- IP 信誉：白名单短路、黑名单拦截快速路径；自动封禁定期清理过期封禁
+- CVE检测并行化：多检测器并行执行，使用WaitGroup收集结果，提升检测效率
+- TLS指纹识别：指纹数据库预加载，评分算法优化，避免重复计算
+- 阻断执行器：原子操作确保统计准确性，异步日志记录避免阻塞主请求路径
+- 内容扫描：对不同 Content-Type 采取差异化策略，限制扫描大小，避免误报与资源滥用
+- 监听器热重载：基于CVE检测配置漂移，仅重启受影响监听器，降低停机影响
 
 ## 故障排查指南
-- 规则未生效：
-  - 检查规则是否启用、模式是否正确、优先级是否覆盖预期。
-  - 参考规则编译与匹配测试用例，验证正则与复合条件行为。
-- 正则匹配异常：
-  - 确认正则表达式合法性，非法正则会被视为"从不匹配"以避免错误。
-  - 检查正则缓存是否被正确复用。
-- 速率限制误判：
-  - 核对限流键（客户端IP+主机名）是否符合预期，确认窗口与阈值配置。
-- IP 信誉问题：
-  - 核对黑白名单条目格式与有效期，检查自动封禁阈值与窗口设置。
-- 机器人检测误报：
-  - 调整敏感度等级，核对用户代理是否被误判为恶意工具。
-- CVE 检测问题：
-  - 检查 CVE 检测器是否启用，确认自定义规则正则表达式有效性。
-  - 验证 CVE 规则的严重性配置，关键/高危规则会自动提升为丢弃。
-  - 检查 CVE 供应链同步状态，确认规则是否成功加载。
-- TLS 指纹识别异常：
-  - 检查上游代理是否正确传递 JA3/JA4 指纹头信息。
-  - 验证浏览器指纹数据库是否正确加载。
-- 阻断执行器问题：
-  - 检查阻断执行器是否启用，确认连接对象有效。
-  - 验证阻断统计数据是否正确更新。
-
-**更新** 新增 CVE 检测和 TLS 指纹识别的故障排查指导，以及阻断执行器的问题诊断方法。
+- 快照未加载：数据平面处理器在快照为空时返回 503，检查运行时初始化与迁移
+- 未知虚拟主机：站点解析失败返回 404，确认监听绑定与 Host 头匹配
+- 维护模式：若返回拦截且标记为维护，检查全局或站点维护开关
+- 拦截日志：关注安全事件与访问日志中的规则 ID、阶段、分类与匹配描述
+- 速率限制：确认启用状态、窗口与上限配置；检查错误率统计是否按预期触发
+- IP 信誉：核对白/黑名单与自动封禁阈值；查看活动封禁列表
+- CVE检测：检查CVE检测器状态、自定义规则加载情况、检测器并行执行状态
+- TLS指纹：验证指纹数据库完整性、指纹提取正确性、评分阈值设置
+- 阻断执行：确认阻断执行器启用状态、统计信息准确性、日志记录完整性
+- 上游错误：转发失败返回 502，检查上游地址与网络连通性
 
 **章节来源**
-- [internal/core/rules/compiler_test.go:11-88](file://internal/core/rules/compiler_test.go#L11-L88)
-- [internal/core/rules/matcher_test.go:10-221](file://internal/core/rules/matcher_test.go#L10-L221)
-- [internal/waf/ratelimit.go:48-92](file://internal/waf/ratelimit.go#L48-L92)
-- [internal/waf/iprep.go:89-124](file://internal/waf/iprep.go#L89-L124)
-- [internal/waf/bot.go:180-249](file://internal/waf/bot.go#L180-L249)
+- [internal/dataplane/handler.go:54-71](file://internal/dataplane/handler.go#L54-L71)
+- [internal/core/engine/engine.go:69-81](file://internal/core/engine/engine.go#L69-L81)
+- [internal/waf/ratelimit.go:36-46](file://internal/waf/ratelimit.go#L36-L46)
+- [internal/waf/iprep.go:68-79](file://internal/waf/iprep.go#L68-L79)
 - [internal/waf/cve_detector.go:160-174](file://internal/waf/cve_detector.go#L160-L174)
-- [internal/waf/fingerprint.go:46-96](file://internal/waf/fingerprint.go#L46-L96)
 - [internal/waf/drop.go:49-57](file://internal/waf/drop.go#L49-L57)
 
 ## 结论
-本 WAF 引擎系统通过清晰的分层与模块化设计，实现了高性能、可扩展的规则处理能力。规则编译器与匹配器提供了灵活的模式与复合条件支持，阶段化的执行流程结合短路机制确保了低延迟与高吞吐。速率限制、IP 信誉与机器人检测等安全能力进一步增强了整体防护效果。
+My-OpenWaf 的引擎以"不可变快照 + 责任链规则管线"为核心设计，结合站点解析、速率限制、IP信誉、CVE检测、TLS指纹识别和阻断执行器，形成高可用、可热重载、可观测的全方位安全防护体系。通过清晰的依赖注入与生命周期管理，引擎在保证性能的同时提供了灵活的扩展空间，新增的CVE检测和TLS指纹识别功能进一步增强了对针对性攻击和自动化工具的检测能力。
 
-**更新** 新增的 CVE 漏洞检测阶段显著提升了对已知漏洞利用的检测能力，TLS 指纹识别功能增强了对自动化攻击和恶意工具的识别精度，阻断执行器提供了更严格的零响应阻断机制。CVE 供应链同步功能确保了规则的时效性和准确性。建议在生产环境中合理配置规则优先级、正则表达式与限流参数，充分利用 CVE 检测和 TLS 指纹识别功能，并持续监控指标与日志以优化策略。
+## 附录：配置与最佳实践
 
-## 附录
-
-### 规则执行流程详解
-- 阶段划分：ACL → 机器人检测 → 请求速率限制 → OWASP 默认 → CVE 检测 → 签名 → 自定义。
-- 执行顺序：严格按上述顺序，每个阶段可能短路后续阶段。
-- 短路机制：允许（ACL）与拦截（IP信誉/OWASP/签名/自定义）会立即终止管道，丢弃动作具有最高优先级。
-- CVE 自动升级：关键/高危严重性的 CVE 检测结果自动升级为丢弃动作。
-
-**更新** 新增 CVE 检测阶段，位于 OWASP 和签名阶段之间，专门检测已知漏洞利用模式。
+### 引擎初始化与依赖注入
+- 应用入口：通过入口函数启动运行时、构建快照、装配引擎与监听器
+- 运行时：打开数据库与可选 Redis，初始化缓存与快照持有者
+- 引擎：注入快照持有者、请求/错误速率限制器、IP 信誉系统、CVE检测器
 
 **章节来源**
-- [internal/core/engine/engine.go:69-106](file://internal/core/engine/engine.go#L69-L106)
-- [internal/core/rules/phases.go:34-94](file://internal/core/rules/phases.go#L34-L94)
+- [internal/core/engine/engine.go:15-176](file://internal/core/engine/engine.go#L15-L176)
+- [internal/core/lifecycle/lifecycle.go:30-178](file://internal/core/lifecycle/lifecycle.go#L30-L178)
+- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
+
+### 配置选项（环境变量）
+- 数据库：驱动、DSN、数据目录
+- Redis：地址、密码、DB
+- 管理端绑定：控制面监听地址
+- 静态资源：本地开发覆盖嵌入前端
+- 机器人检测：GeoIP 数据库路径、风险国家、数据中心/VPN ASN 列表、评分阈值
+- CVE检测：CVE检测启用状态、CVE动作配置、自定义CVE规则
+
+**章节来源**
+- [internal/core/config.go:56-115](file://internal/core/config.go#L56-L115)
+
+### 使用示例与最佳实践
+- 示例一：在数据平面处理器中调用引擎
+  - 路径参考：[internal/dataplane/handler.go:106](file://internal/dataplane/handler.go#L106)
+- 示例二：引擎评估已解析站点规则（测试辅助）
+  - 路径参考：[internal/core/engine/engine.go:132-145](file://internal/core/engine/engine.go#L132-L145)
+- 最佳实践
+  - 将规则按阶段拆分，利用 ACL 快速短路
+  - 启用机器人检测与 OWASP 默认规则，结合业务场景调整敏感度
+  - 合理设置速率限制窗口与上限，避免误伤正常用户
+  - 定期维护 IP 黑/白名单，启用自动封禁应对持续攻击
+  - 启用CVE检测功能，定期更新CVE规则库
+  - 配置TLS指纹识别，建立指纹数据库，提高自动化工具检测准确率
+  - 启用阻断执行器，对高危威胁实施TCP层面阻断
+  - 使用热重载功能平滑更新配置，配合 Redis 分布式通知
+
+**章节来源**
+- [internal/dataplane/handler.go:106](file://internal/dataplane/handler.go#L106)
+- [internal/core/engine/engine.go:132-145](file://internal/core/engine/engine.go#L132-L145)
 - [internal/core/rules/phases.go:305-358](file://internal/core/rules/phases.go#L305-L358)
-
-### 规则示例与配置案例
-- 示例模式：
-  - IP 白名单/黑名单：allow_ip:10.0.0.1、block_ip:192.168.1.0/24
-  - 路径匹配：block_path:/admin、block_path_regex:(?i)/admin
-  - 查询串匹配：block_query_contains:union、block_query_regex:(?i)union\s+select
-  - 头部匹配：block_header:User-Agent:sqlmap、block_header_regex:Content-Type:image/
-  - 方法与内容类型：block_method:DELETE、block_content_type:application/xml
-  - 复合条件：{"op":"and","children":[{"kind":"block_path","arg":"/admin"},{"kind":"block_method","arg":"POST"}]}
-- 配置要点：
-  - 规则优先级：数值越小优先级越高。
-  - 动作类型：allow/intercept/observe/drop（兼容 block/log_only）。
-  - OWASP 敏感度：low/mid/high，影响扫描严格程度。
-  - 速率限制：窗口秒数与最大请求数需结合业务流量评估。
-  - CVE 检测：支持自定义正则规则，关键/高危严重性自动提升为丢弃。
-  - CVE 配置：cve_enabled 控制是否启用，cve_action 控制默认动作类型。
-
-**更新** 新增 CVE 检测配置选项，包括自定义规则和严重性分级。
-
-**章节来源**
-- [internal/core/rules/compiler.go:57-83](file://internal/core/rules/compiler.go#L57-L83)
-- [internal/store/models.go:44-91](file://internal/store/models.go#L44-L91)
-- [internal/store/models.go:244-289](file://internal/store/models.go#L244-L289)
-- [internal/waf/cve_detector.go:160-174](file://internal/waf/cve_detector.go#L160-L174)
-
-### 扩展点与自定义规则开发
-- 新增匹配器：
-  - 实现 Matcher 接口并在 buildMatcher 中注册映射。
-  - 注意正则缓存与边界条件处理。
-- 新增阶段：
-  - 实现 pipeline.Phase 接口，按需短路与日志记录。
-  - 在引擎组装处将新阶段加入 Pipeline。
-- 新增动作：
-  - 在 action 包中扩展 Type 与 Normalize 行为，保持向后兼容。
-- 配置驱动：
-  - 通过 ProtectionConfig 与系统设置调整全局策略（如 OWASP、速率限制、机器人检测、CVE 检测）。
-- CVE 规则开发：
-  - 使用 CustomCVERule 结构定义自定义规则，支持正则表达式和目标选择。
-  - 通过 CVESyncLog 记录规则同步状态和错误信息。
-  - 支持热重载和运行时动态添加/删除规则。
-- TLS 指纹扩展：
-  - 扩展 FingerprintDB 添加新的指纹模式。
-  - 集成新的指纹提取方法和评分逻辑。
-
-**更新** 新增 CVE 规则开发和管理的扩展点，以及 TLS 指纹识别的扩展方法。
-
-**章节来源**
-- [internal/core/rules/matcher.go:11-261](file://internal/core/rules/matcher.go#L11-L261)
-- [internal/core/rules/phases.go:25-31](file://internal/core/rules/phases.go#L25-L31)
-- [internal/core/action/action.go:3-26](file://internal/core/action/action.go#L3-L26)
-- [internal/store/models.go:244-289](file://internal/store/models.go#L244-L289)
-- [internal/waf/cve_detector.go:160-204](file://internal/waf/cve_detector.go#L160-L204)
-- [internal/store/models.go:444-456](file://internal/store/models.go#L444-L456)
-
-### CVE 规则管理 API
-- 列表查询：支持按类别、严重性、启用状态、来源过滤。
-- 创建规则：验证正则表达式合法性，标记为自定义来源。
-- 更新规则：支持部分字段更新，重新验证正则表达式。
-- 删除规则：仅允许删除自定义规则。
-- 同步规则：从 CVE 供应链同步规则，支持手动触发和状态查询。
-- 审批管理：支持规则审批状态管理和批量操作。
-
-**更新** 新增完整的 CVE 规则管理 API 文档，包括审批管理功能。
-
-**章节来源**
-- [internal/admin/handler_cve.go:15-217](file://internal/admin/handler_cve.go#L15-L217)
-- [internal/store/repository/cve_rule.go:16-96](file://internal/store/repository/cve_rule.go#L16-L96)
-
-### CVE 供应链同步机制
-- 同步频率：支持配置同步间隔，默认每小时同步一次。
-- 数据源：支持 NVD API 和 GitHub Advisory API。
-- 自动审批：可配置自动批准新规则，支持手动审批模式。
-- 热重载：规则更新后自动应用到检测器，无需重启服务。
-- 错误处理：详细的错误日志和重试机制。
-- 统计监控：记录同步状态、成功率、失败原因等统计信息。
-
-**更新** 新增完整的 CVE 供应链同步机制文档。
-
-**章节来源**
-- [internal/waf/cve_feed.go:77-90](file://internal/waf/cve_feed.go#L77-L90)
-- [internal/waf/cve_feed.go:129-172](file://internal/waf/cve_feed.go#L129-L172)
-- [internal/waf/cve_feed.go:174-235](file://internal/waf/cve_feed.go#L174-L235)
-- [internal/waf/cve_feed.go:237-383](file://internal/waf/cve_feed.go#L237-L383)

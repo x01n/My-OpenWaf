@@ -2,20 +2,14 @@
 
 <cite>
 **本文档引用的文件**
-- [handler_system.go](file://internal/admin/handler_system.go)
+- [系统设置 API.md](file://docs/管理 API 系统/系统设置 API.md)
+- [settings.go](file://internal/admin/system/settings.go)
+- [apikey.go](file://internal/admin/system/apikey.go)
 - [router.go](file://internal/admin/router.go)
 - [system_settings.go](file://internal/store/repository/system_settings.go)
-- [models.go](file://internal/store/models.go)
-- [config.go](file://internal/core/config.go)
+- [system.go](file://internal/store/system.go)
+- [migrate.go](file://internal/store/migrate.go)
 - [config_validate.go](file://internal/core/config_validate.go)
-- [runtime.go](file://internal/core/runtime.go)
-- [server.go](file://internal/app/server.go)
-- [pubsub.go](file://internal/core/redis/pubsub.go)
-- [handler_protection.go](file://internal/admin/handler_protection.go)
-- [handler_bot.go](file://internal/admin/handler_bot.go)
-- [handler_drop.go](file://internal/admin/handler_drop.go)
-- [snapshot.go](file://internal/snapshot/snapshot.go)
-- [build.go](file://internal/snapshot/build.go)
 - [page.tsx](file://frontend/app/(dashboard)/settings/page.tsx)
 </cite>
 
@@ -40,7 +34,7 @@
 ```mermaid
 graph TB
 FE["前端设置页<br/>frontend/app/(dashboard)/settings/page.tsx"] --> API["管理 API 路由<br/>internal/admin/router.go"]
-API --> HSys["系统设置处理器<br/>internal/admin/handler_system.go"]
+API --> HSys["系统设置处理器<br/>internal/admin/system/settings.go"]
 API --> HProt["防护设置处理器<br/>internal/admin/handler_protection.go"]
 API --> HBot["Bot 设置处理器<br/>internal/admin/handler_bot.go"]
 API --> HDrop["丢弃策略处理器<br/>internal/admin/handler_drop.go"]
@@ -48,7 +42,7 @@ HSys --> Repo["系统设置仓库<br/>internal/store/repository/system_settings.
 HProt --> Repo
 HBot --> Repo
 HDrop --> Repo
-Repo --> DB["数据库模型<br/>internal/store/models.go"]
+Repo --> DB["数据库模型<br/>internal/store/system.go"]
 Repo --> Snap["快照构建<br/>internal/snapshot/build.go"]
 Snap --> Runtime["运行时重载<br/>internal/core/runtime.go"]
 Runtime --> Server["数据面监听器协调<br/>internal/app/server.go"]
@@ -56,30 +50,16 @@ Runtime --> PubSub["Redis 配置同步<br/>internal/core/redis/pubsub.go"]
 ```
 
 **图表来源**
-- [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_system.go:12-91](file://internal/admin/handler_system.go#L12-L91)
-- [handler_protection.go:21-106](file://internal/admin/handler_protection.go#L21-L106)
-- [handler_bot.go:35-102](file://internal/admin/handler_bot.go#L35-L102)
-- [handler_drop.go:41-98](file://internal/admin/handler_drop.go#L41-L98)
-- [system_settings.go:9-43](file://internal/store/repository/system_settings.go#L9-L43)
-- [models.go:150-156](file://internal/store/models.go#L150-L156)
-- [build.go:14-56](file://internal/snapshot/build.go#L14-L56)
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
-- [server.go:220-260](file://internal/app/server.go#L220-L260)
-- [pubsub.go:52-76](file://internal/core/redis/pubsub.go#L52-L76)
+- [router.go:48-270](file://internal/admin/router.go#L48-L270)
+- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
+- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
+- [system.go:3-14](file://internal/store/system.go#L3-L14)
 
 **章节来源**
-- [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_system.go:12-91](file://internal/admin/handler_system.go#L12-L91)
-- [handler_protection.go:21-106](file://internal/admin/handler_protection.go#L21-L106)
-- [handler_bot.go:35-102](file://internal/admin/handler_bot.go#L35-L102)
-- [handler_drop.go:41-98](file://internal/admin/handler_drop.go#L41-L98)
-- [system_settings.go:9-43](file://internal/store/repository/system_settings.go#L9-L43)
-- [models.go:150-156](file://internal/store/models.go#L150-L156)
-- [build.go:14-56](file://internal/snapshot/build.go#L14-L56)
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
-- [server.go:220-260](file://internal/app/server.go#L220-L260)
-- [pubsub.go:52-76](file://internal/core/redis/pubsub.go#L52-L76)
+- [router.go:48-270](file://internal/admin/router.go#L48-L270)
+- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
+- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
+- [system.go:3-14](file://internal/store/system.go#L3-L14)
 
 ## 核心组件
 - 系统设置 API：提供设置项的增删改查与批量读取，支持热重载触发。
@@ -90,13 +70,9 @@ Runtime --> PubSub["Redis 配置同步<br/>internal/core/redis/pubsub.go"]
 - 快照与热重载：通过快照构建与运行时重载，实现配置变更的原子切换与跨节点同步。
 
 **章节来源**
-- [handler_system.go:12-91](file://internal/admin/handler_system.go#L12-L91)
-- [handler_protection.go:21-106](file://internal/admin/handler_protection.go#L21-L106)
-- [handler_bot.go:35-102](file://internal/admin/handler_bot.go#L35-L102)
-- [handler_drop.go:41-98](file://internal/admin/handler_drop.go#L41-L98)
-- [system_settings.go:9-43](file://internal/store/repository/system_settings.go#L9-L43)
-- [models.go:150-156](file://internal/store/models.go#L150-L156)
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
+- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
+- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
+- [system.go:3-14](file://internal/store/system.go#L3-L14)
 
 ## 架构总览
 系统设置 API 的调用链路如下：
@@ -125,13 +101,9 @@ H-->>FE : 返回成功响应
 ```
 
 **图表来源**
-- [router.go:185-206](file://internal/admin/router.go#L185-L206)
-- [handler_system.go:28-91](file://internal/admin/handler_system.go#L28-L91)
+- [router.go:180-270](file://internal/admin/router.go#L180-L270)
+- [settings.go:27-99](file://internal/admin/system/settings.go#L27-L99)
 - [system_settings.go:23-34](file://internal/store/repository/system_settings.go#L23-L34)
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
-- [build.go:14-56](file://internal/snapshot/build.go#L14-L56)
-- [server.go:220-260](file://internal/app/server.go#L220-L260)
-- [pubsub.go:52-76](file://internal/core/redis/pubsub.go#L52-L76)
 
 ## 详细组件分析
 
@@ -170,14 +142,14 @@ H-->>FE : 201/200/204
 ```
 
 **图表来源**
-- [router.go:189-193](file://internal/admin/router.go#L189-L193)
-- [handler_system.go:28-91](file://internal/admin/handler_system.go#L28-L91)
+- [router.go:218-234](file://internal/admin/router.go#L218-L234)
+- [settings.go:27-99](file://internal/admin/system/settings.go#L27-L99)
 - [system_settings.go:23-34](file://internal/store/repository/system_settings.go#L23-L34)
 
 **章节来源**
-- [handler_system.go:12-91](file://internal/admin/handler_system.go#L12-L91)
-- [router.go:189-193](file://internal/admin/router.go#L189-L193)
-- [system_settings.go:9-43](file://internal/store/repository/system_settings.go#L9-L43)
+- [settings.go:11-99](file://internal/admin/system/settings.go#L11-L99)
+- [router.go:218-234](file://internal/admin/router.go#L218-L234)
+- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
 
 ### 防护设置 API（复杂结构）
 - 设置项分类
@@ -220,7 +192,6 @@ Reload --> Done(["返回响应"])
 
 **章节来源**
 - [handler_protection.go:21-106](file://internal/admin/handler_protection.go#L21-L106)
-- [models.go:245-318](file://internal/store/models.go#L245-L318)
 
 ### Bot 设置 API
 - 设置项
@@ -262,14 +233,14 @@ Reload --> Done(["返回响应"])
 **章节来源**
 - [config_validate.go:11-47](file://internal/core/config_validate.go#L11-L47)
 - [config.go:113-182](file://internal/core/config.go#L113-L182)
-- [handler_system.go:35-42](file://internal/admin/handler_system.go#L35-L42)
+- [settings.go:35-42](file://internal/admin/system/settings.go#L35-L42)
 - [handler_protection.go:64-75](file://internal/admin/handler_protection.go#L64-L75)
 
 ### 设置生效机制
 - 热更新
   - 所有写入操作完成后调用 reload()，增加配置修订号并重建快照
   - 将新快照原子替换旧快照，并根据新配置重新配置限流、IP 黑名单与数据面监听器
-  - 通过 Redis 配置同步通道向其他节点广播“重载”事件，确保多节点一致
+  - 通过 Redis 配置同步通道向其他节点广播"重载"事件，确保多节点一致
 - 重启要求
   - 当前实现主要通过热重载完成，无需进程重启
 - 回滚策略
@@ -313,13 +284,13 @@ PUB-->>RT : 订阅节点收到 reload 并重载
   - MY_OPENWAF_CVE_ENABLED/FEED_ENABLED/FEED_INTERVAL/NVD_API_KEY/AUTO_APPROVE：CVE 功能开关与同步间隔、密钥、自动审批
   - MY_OPENWAF_DROP_ENABLED/DROP_BOT_THRESHOLD：丢弃策略开关与阈值
 - 前端设置页
-  - 通用设置页包含“防护配置”、“控制台管理”、“系统日志”三大标签页
-  - “防护配置”支持证书管理、拦截页面与日志清理策略
-  - “控制台管理”支持 API 密钥与登录安全策略（密码长度、最大尝试次数、锁定时长）
+  - 通用设置页包含"防护配置"、"控制台管理"、"系统日志"三大标签页
+  - "防护配置"支持证书管理、拦截页面与日志清理策略
+  - "控制台管理"支持 API 密钥与登录安全策略（密码长度、最大尝试次数、锁定时长）
 
 **章节来源**
 - [config.go:113-182](file://internal/core/config.go#L113-L182)
-- [page.tsx](file://frontend/app/(dashboard)/settings/page.tsx#L650-L696)
+- [page.tsx:650-696](file://frontend/app/(dashboard)/settings/page.tsx#L650-L696)
 
 ### 配置备份与恢复
 - 备份
@@ -330,7 +301,7 @@ PUB-->>RT : 订阅节点收到 reload 并重载
   - 若需要回滚，可先写入历史版本的键值，然后触发 reload() 生效
 
 **章节来源**
-- [models.go:150-156](file://internal/store/models.go#L150-L156)
+- [system.go:3-14](file://internal/store/system.go#L3-L14)
 - [system_settings.go:15-43](file://internal/store/repository/system_settings.go#L15-L43)
 
 ### 配置变更的影响分析与最佳实践
@@ -341,7 +312,7 @@ PUB-->>RT : 订阅节点收到 reload 并重载
   - 热更新：变更即刻生效，建议在低峰期执行并观察指标
 - 最佳实践
   - 变更前先在测试环境验证
-  - 使用“保存但不立即上线”的流程，逐步放量
+  - 使用"保存但不立即上线"的流程，逐步放量
   - 结合日志与告警监控变更后的效果
   - 对关键参数（如 Bot 阈值、限流窗口/阈值）建立基线与回退预案
 
@@ -349,7 +320,7 @@ PUB-->>RT : 订阅节点收到 reload 并重载
 
 ```mermaid
 graph LR
-A["路由注册<br/>router.go"] --> B["系统设置处理器<br/>handler_system.go"]
+A["路由注册<br/>router.go"] --> B["系统设置处理器<br/>settings.go"]
 A --> C["防护设置处理器<br/>handler_protection.go"]
 A --> D["Bot 设置处理器<br/>handler_bot.go"]
 A --> E["丢弃策略处理器<br/>handler_drop.go"]
@@ -357,7 +328,7 @@ B --> F["系统设置仓库<br/>system_settings.go"]
 C --> F
 D --> F
 E --> F
-F --> G["模型定义<br/>models.go"]
+F --> G["模型定义<br/>system.go"]
 F --> H["快照构建<br/>build.go"]
 H --> I["运行时重载<br/>runtime.go"]
 I --> J["数据面协调<br/>server.go"]
@@ -365,30 +336,16 @@ I --> K["Redis 配置同步<br/>pubsub.go"]
 ```
 
 **图表来源**
-- [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_system.go:12-91](file://internal/admin/handler_system.go#L12-L91)
-- [handler_protection.go:21-106](file://internal/admin/handler_protection.go#L21-L106)
-- [handler_bot.go:35-102](file://internal/admin/handler_bot.go#L35-L102)
-- [handler_drop.go:41-98](file://internal/admin/handler_drop.go#L41-L98)
-- [system_settings.go:9-43](file://internal/store/repository/system_settings.go#L9-L43)
-- [models.go:150-156](file://internal/store/models.go#L150-L156)
-- [build.go:14-56](file://internal/snapshot/build.go#L14-L56)
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
-- [server.go:220-260](file://internal/app/server.go#L220-L260)
-- [pubsub.go:52-76](file://internal/core/redis/pubsub.go#L52-L76)
+- [router.go:48-270](file://internal/admin/router.go#L48-L270)
+- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
+- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
+- [system.go:3-14](file://internal/store/system.go#L3-L14)
 
 **章节来源**
-- [router.go:48-210](file://internal/admin/router.go#L48-L210)
-- [handler_system.go:12-91](file://internal/admin/handler_system.go#L12-L91)
-- [handler_protection.go:21-106](file://internal/admin/handler_protection.go#L21-L106)
-- [handler_bot.go:35-102](file://internal/admin/handler_bot.go#L35-L102)
-- [handler_drop.go:41-98](file://internal/admin/handler_drop.go#L41-L98)
-- [system_settings.go:9-43](file://internal/store/repository/system_settings.go#L9-L43)
-- [models.go:150-156](file://internal/store/models.go#L150-L156)
-- [build.go:14-56](file://internal/snapshot/build.go#L14-L56)
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
-- [server.go:220-260](file://internal/app/server.go#L220-L260)
-- [pubsub.go:52-76](file://internal/core/redis/pubsub.go#L52-L76)
+- [router.go:48-270](file://internal/admin/router.go#L48-L270)
+- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
+- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
+- [system.go:3-14](file://internal/store/system.go#L3-L14)
 
 ## 性能考虑
 - 快照缓存：本地进程内缓存提升快照访问性能，避免重复构建
@@ -415,13 +372,13 @@ I --> K["Redis 配置同步<br/>pubsub.go"]
   - 通过恢复历史键值或回退到上一版本配置
 
 **章节来源**
-- [handler_system.go:35-42](file://internal/admin/handler_system.go#L35-L42)
+- [settings.go:35-42](file://internal/admin/system/settings.go#L35-L42)
 - [handler_protection.go:72-75](file://internal/admin/handler_protection.go#L72-L75)
 - [handler_bot.go:60-63](file://internal/admin/handler_bot.go#L60-L63)
 - [handler_drop.go:59-63](file://internal/admin/handler_drop.go#L59-L63)
 
 ## 结论
-系统设置 API 提供了从键值型到复杂结构化的统一配置管理能力，结合热重载与跨节点同步，实现了配置的即时生效与一致性保障。建议在生产环境中遵循“小步快跑、可观测、可回滚”的原则，确保变更可控、可追踪。
+系统设置 API 提供了从键值型到复杂结构化的统一配置管理能力，结合热重载与跨节点同步，实现了配置的即时生效与一致性保障。建议在生产环境中遵循"小步快跑、可观测、可回滚"的原则，确保变更可控、可追踪。
 
 ## 附录
 - 设置项分类速览
