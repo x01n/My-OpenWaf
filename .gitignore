@@ -38,3 +38,4 @@ TestResults.xml
 # Tools (standalone scripts, not part of the main build)
 tools/
 devlog.md
+CLAUDE.md
