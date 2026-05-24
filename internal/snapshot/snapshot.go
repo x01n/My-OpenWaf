@@ -113,30 +113,7 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 		}
 	}
 
-	// 3. Fallback: match any site on this bind address whose host matches
-	for _, rt := range sn.Sites {
-		if rt.Bind == bind && NormalizeMatchHost(rt.Site.Host) == host {
-			return rt, true
-		}
-	}
-
-	// 4. Fallback: any site on this bind address only when it is unambiguous (single host key).
-	prefix := bind + "\x00"
-	var sole SiteRuntime
-	n := 0
-	for k, rt := range sn.Sites {
-		if strings.HasPrefix(k, prefix) {
-			sole = rt
-			n++
-			if n > 1 {
-				break
-			}
-		}
-	}
-	if n == 1 {
-		return sole, true
-	}
-
+	// 3. No match — return false. Caller shows "site not found".
 	return SiteRuntime{}, false
 }
 

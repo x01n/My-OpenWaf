@@ -111,7 +111,7 @@ export default function PoliciesPage() {
         title="策略管理"
         description="策略是规则的容器，一个站点绑定一个策略。在此管理策略及其规则分组。"
         actions={
-          <Button className="gap-2 rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openNew}>
+          <Button className="gap-2 rounded-md bg-teal-500 text-white hover:bg-teal-600" onClick={openNew}>
             <Plus className="h-4 w-4" /> 创建策略
           </Button>
         }

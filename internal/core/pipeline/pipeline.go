@@ -68,23 +68,23 @@ func New(phases ...Phase) *Pipeline {
 	return &Pipeline{phases: phases}
 }
 
-// Run executes each phase in order.
+// Run executes a phase slice directly without allocating a Pipeline wrapper.
+// Prefer this for hot-path callers; the Pipeline.Run method now delegates here.
+//
 // Drop/intercept results short-circuit immediately (highest priority).
 // Challenge results are deferred: pipeline continues so that subsequent phases
 // (OWASP, CVE, etc.) still run. If a higher-priority terminal action appears later,
 // it overrides the challenge. Otherwise the challenge is returned at the end.
-func (p *Pipeline) Run(ctx *RequestCtx) RunResult {
+func Run(phases []Phase, ctx *RequestCtx) RunResult {
 	var observeHits []action.Result
 	var pendingChallenge *action.Result
 
-	for _, ph := range p.phases {
+	for _, ph := range phases {
 		result, stop := ph.Execute(ctx)
 		if stop {
-			// If stop is explicitly requested AND it's not a challenge, short-circuit.
 			if !result.IsChallenge() {
 				return RunResult{Action: result, ObserveHits: observeHits}
 			}
-			// Challenge with explicit stop: record it but continue pipeline.
 			if pendingChallenge == nil || action.TerminalPriority(result.Type) > action.TerminalPriority(pendingChallenge.Type) {
 				r := result
 				pendingChallenge = &r
@@ -92,20 +92,17 @@ func (p *Pipeline) Run(ctx *RequestCtx) RunResult {
 			continue
 		}
 		if result.Matched {
-			// Drop is highest priority — immediate short-circuit.
 			if result.IsDrop() {
 				return RunResult{Action: result, ObserveHits: observeHits}
 			}
 			if result.IsTerminal() {
 				if result.IsChallenge() {
-					// Defer challenge, continue pipeline.
 					if pendingChallenge == nil || action.TerminalPriority(result.Type) > action.TerminalPriority(pendingChallenge.Type) {
 						r := result
 						pendingChallenge = &r
 					}
 					continue
 				}
-				// Non-challenge terminal (intercept, rate_limit, redirect) — short-circuit.
 				return RunResult{Action: result, ObserveHits: observeHits}
 			}
 			if result.ShouldLog() {
@@ -114,9 +111,13 @@ func (p *Pipeline) Run(ctx *RequestCtx) RunResult {
 		}
 	}
 
-	// All phases executed. Return deferred challenge if any, otherwise pass.
 	if pendingChallenge != nil {
 		return RunResult{Action: *pendingChallenge, ObserveHits: observeHits}
 	}
 	return RunResult{Action: action.Pass(), ObserveHits: observeHits}
+}
+
+// Run executes each phase in order. Kept for backward compatibility.
+func (p *Pipeline) Run(ctx *RequestCtx) RunResult {
+	return Run(p.phases, ctx)
 }

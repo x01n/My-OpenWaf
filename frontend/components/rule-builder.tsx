@@ -32,8 +32,11 @@ const RULE_KINDS = [
   { value: "header_regex", label: "请求头值正则", placeholder: "X-Token:(?i)^test", group: "请求头" },
   { value: "block_user_agent", label: "User-Agent 包含", placeholder: "sqlmap", group: "请求头" },
   { value: "block_user_agent_regex", label: "User-Agent 正则", placeholder: "(?i)(sqlmap|nuclei)", group: "请求头" },
-  { value: "host", label: "Host 等于", placeholder: "admin.example.com", group: "请求头" },
-  { value: "host_full", label: "Host 模糊匹配", placeholder: "*.example.com", group: "请求头" },
+  { value: "host", label: "Host 精确匹配", placeholder: "admin.example.com", group: "请求头" },
+  { value: "host_full", label: "Host 通配符", placeholder: "*.example.com", group: "请求头" },
+  { value: "host_regex", label: "Host 正则表达式", placeholder: "(?i)(admin|api)\\.example\\.com", group: "请求头" },
+  { value: "host_contains", label: "Host 包含", placeholder: "example.com", group: "请求头" },
+  { value: "host_not_contains", label: "Host 不包含", placeholder: "internal", group: "请求头" },
   { value: "cookie_contains", label: "Cookie 包含", placeholder: "debug=true", group: "请求头" },
   { value: "referer_contains", label: "Referer 包含", placeholder: "evil.example", group: "请求头" },
   // Request Body
@@ -311,7 +314,7 @@ export function RuleBuilder({ value, onChange }: RuleBuilderProps) {
           type="button"
           variant={advancedMode ? "default" : "outline"}
           size="sm"
-          className={advancedMode ? "rounded-md bg-slate-950 text-white hover:bg-slate-800" : "rounded-md"}
+          className={advancedMode ? "rounded-md bg-teal-500 text-white hover:bg-teal-600" : "rounded-md"}
           onClick={() => setAdvancedMode((current) => !current)}
         >
           <Code className="mr-1 h-3 w-3" />

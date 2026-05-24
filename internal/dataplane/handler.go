@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/google/uuid"
 
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/cache"
@@ -26,28 +25,26 @@ import (
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/drop"
+	wafescalation "My-OpenWaf/internal/waf/escalation"
+	"My-OpenWaf/internal/waf/owasp"
+	"My-OpenWaf/internal/waf/pages"
 )
 
 // Options configures a single data listener handler.
 type Options struct {
-	Holder          *snapshot.Holder
-	Engine          *engine.Engine
-	Metrics         *Metrics
-	EventWriter     *observability.EventWriter
-	AccessLogWriter *observability.AccessLogWriter
-	DropEventRepo   interface {
-		Create(item *store.DropEvent) error
-	}
-	ResponseCache  *cache.ResponseCache
-	Log            *slog.Logger
-	Bind           string
-	CaptchaManager *waf.CaptchaManager
-	ShieldManager  *waf.ShieldManager
-	ChainManager        *waf.ChainChallengeManager
+	Holder               *snapshot.Holder
+	Engine               *engine.Engine
+	Metrics              *Metrics
+	Writer               *observability.UnifiedWriter
+	ResponseCache        *cache.ResponseCache
+	Log                  *slog.Logger
+	Bind                 string
+	CaptchaManager       *challenge.CaptchaManager
+	ShieldManager        *challenge.ShieldManager
+	ChainManager         *challenge.ChainChallengeManager
 	RecordedResourceRepo *repository.RecordedResourceRepo
-	BotScoreRepo         *repository.BotScoreRepo
-	FingerprintRepo      *repository.FingerprintRepo
 }
 
 const bindContextKey = "dataplane_bind"
@@ -91,7 +88,7 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
-		reqID := uuid.NewString()
+		reqID := fastRequestID()
 		c.Response.Header.Set("X-Request-ID", reqID)
 		c.Response.Header.Del("Server")
 		if opts.Metrics != nil {
@@ -116,14 +113,22 @@ func Handler(opts Options) app.HandlerFunc {
 				slog.String("bind", bind),
 				slog.Int("sites", len(sn.Sites)),
 			)
-			waf.WriteWelcomePage(ctx, c)
+			pages.WriteWelcomePage(ctx, c)
 			return
 		}
 
 		clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR)
+		cipStr := clientIPStr(clientIP)
 		if clientIP != nil && opts.Metrics != nil {
-			opts.Metrics.RecordClientIP(clientIP.String())
+			opts.Metrics.RecordClientIP(cipStr)
 		}
+
+		// Cache frequently accessed []byte → string conversions once per request.
+		// These fields are referenced 5-12 times in the original main flow,
+		// each call allocating + copying. Computing them once saves ~30 small allocs.
+		method := string(c.Method())
+		ua := string(c.UserAgent())
+		pathCached := string(c.Path())
 		errorRateLimitKey := rateLimitKey(clientIP, host)
 
 		if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil {
@@ -131,7 +136,7 @@ func Handler(opts Options) app.HandlerFunc {
 			if decision.Matched && !decision.Allowed {
 				if opts.Metrics != nil {
 					opts.Metrics.RecordWAFBlock()
-					opts.Metrics.RecordAttackIP(clientIP.String())
+					opts.Metrics.RecordAttackIP(cipStr)
 				}
 
 				// Determine action: "block" → TCP RST (drop), default → HTTP 403 (intercept)
@@ -159,15 +164,15 @@ func Handler(opts Options) app.HandlerFunc {
 					Matched:   true,
 					Category:  decision.Category,
 				}
-				if opts.EventWriter != nil {
-					opts.EventWriter.Record(store.SecurityEvent{
+				if opts.Writer != nil {
+					opts.Writer.RecordEvent(store.SecurityEvent{
 						SiteID:    rt.Site.ID,
 						RequestID: reqID,
-						ClientIP:  clientIPStr(clientIP),
+						ClientIP:  cipStr,
 						Host:      host,
-						Path:      string(c.Path()),
-						Method:    string(c.Method()),
-						UserAgent: string(c.UserAgent()),
+						Path:      pathCached,
+						Method:    method,
+						UserAgent: ua,
 						RuleIDStr: blockAction.RuleIDStr,
 						Phase:     blockAction.Phase,
 						Action:    actStr,
@@ -184,25 +189,25 @@ func Handler(opts Options) app.HandlerFunc {
 
 				if useDropAction {
 					// TCP RST — close connection immediately, no HTTP response
-					logAccess(accessLog, reqID, c, "drop")
-					recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "drop", "bypass", "")
-					recordDropEvent(opts, rt.Site.ID, clientIP, waf.DropReason{
+					logAccess(accessLog, reqID, method, pathCached, host, 0, "drop")
+					recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, Method: method, UserAgent: ua, StatusCode: 0, WAFAction: "drop", CacheState: "bypass"})
+					recordDropEvent(opts, rt.Site.ID, clientIP, drop.DropReason{
 						Source:    "ip_reputation",
 						RuleID:    blockAction.RuleIDStr,
 						Detail:    blockAction.MatchDesc,
 						Host:      host,
-						Path:      string(c.Path()),
+						Path:      pathCached,
 						Timestamp: time.Now(),
 					})
 					dropExec := opts.Engine.DropExecutor()
 					if dropExec != nil && dropExec.Enabled() {
-						dropExec.Execute(c.GetConn(), waf.DropReason{
+						dropExec.Execute(c.GetConn(), drop.DropReason{
 							Source:    "ip_reputation",
 							RuleID:    blockAction.RuleIDStr,
 							Detail:    blockAction.MatchDesc,
-							ClientIP:  clientIPStr(clientIP),
+							ClientIP:  cipStr,
 							Host:      host,
-							Path:      string(c.Path()),
+							Path:      pathCached,
 							Timestamp: time.Now(),
 						})
 					} else if conn := c.GetConn(); conn != nil {
@@ -210,21 +215,21 @@ func Handler(opts Options) app.HandlerFunc {
 					}
 				} else {
 					// HTTP 403 — return block page
-					waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
-					logAccess(accessLog, reqID, c, "intercept")
-					recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "intercept", "bypass", "")
+					pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+					logAccess(accessLog, reqID, method, pathCached, host, 403, "intercept")
+					recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
 				}
 				return
 			}
 		}
 
-		if string(c.Method()) == "POST" {
+		if method == "POST" {
 			challengeTS := string(c.FormValue("__waf_challenge_ts"))
 			challengeToken := string(c.FormValue("__waf_challenge_token"))
 			challengeRID := string(c.FormValue("__waf_challenge_rid"))
 			if challengeTS != "" && challengeToken != "" && challengeRID != "" {
-				if waf.VerifyChallengeToken(challengeRID, challengeTS, challengeToken, 5*time.Minute) {
-					cookie := waf.BuildChallengePassCookie(string(c.Host()), clientIP, rt.Site.TLSEnabled, time.Now(), time.Hour)
+				if challenge.VerifyChallengeToken(challengeRID, challengeTS, challengeToken, 5*time.Minute) {
+					cookie := challenge.BuildChallengePassCookie(host, clientIP, rt.Site.TLSEnabled, time.Now(), time.Hour)
 					c.Response.Header.Set("Set-Cookie", cookie)
 					referer := string(c.GetHeader("Referer"))
 					if referer == "" {
@@ -233,15 +238,15 @@ func Handler(opts Options) app.HandlerFunc {
 					c.Redirect(302, []byte(referer))
 					accessLog.Info("challenge_passed",
 						slog.String("request_id", reqID),
-						slog.String("client_ip", clientIPStr(clientIP)),
+						slog.String("client_ip", cipStr),
 					)
-					recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "challenge_passed", "bypass", referer)
+					recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, Method: method, UserAgent: ua, StatusCode: 302, WAFAction: "challenge_passed", CacheState: "bypass", Upstream: referer})
 					return
 				}
 			}
 		}
 
-		path := string(c.Path())
+		path := pathCached
 		if rawPath := c.Request.URI().PathOriginal(); len(rawPath) > 0 {
 			path = string(rawPath)
 		}
@@ -253,8 +258,7 @@ func Handler(opts Options) app.HandlerFunc {
 			skipNonce := strings.HasPrefix(lp, "/__owaf/") || isStaticAsset(lp)
 			if !skipNonce {
 				if ar := opts.Engine.AntiReplay(); ar != nil {
-					cipStr := clientIPStr(clientIP)
-					nonceCookie := string(c.Cookie(waf.NonceKey))
+					nonceCookie := string(c.Cookie(challenge.NonceKey))
 					if nonceCookie == "" {
 						// First visit — issue nonce cookie and let through.
 						newNonce := ar.GenerateNonce(cipStr)
@@ -282,15 +286,15 @@ func Handler(opts Options) app.HandlerFunc {
 							if opts.Metrics != nil {
 								opts.Metrics.RecordWAFBlock()
 							}
-							if opts.EventWriter != nil {
-								opts.EventWriter.Record(store.SecurityEvent{
+							if opts.Writer != nil {
+								opts.Writer.RecordEvent(store.SecurityEvent{
 									SiteID:     rt.Site.ID,
 									RequestID:  reqID,
 									ClientIP:   cipStr,
 									Host:       host,
 									Path:       path,
-									Method:     string(c.Method()),
-									UserAgent:  string(c.UserAgent()),
+									Method:     method,
+									UserAgent:  ua,
 									RuleIDStr:  blockAction.RuleIDStr,
 									Phase:      blockAction.Phase,
 									Action:     "intercept",
@@ -299,9 +303,9 @@ func Handler(opts Options) app.HandlerFunc {
 									StatusCode: 403,
 								})
 							}
-							waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
-							logAccess(accessLog, reqID, c, "intercept")
-							recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "intercept", "bypass", "")
+							pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+							logAccess(accessLog, reqID, method, path, host, 403, "intercept")
+							recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
 							return
 						default:
 							// Expired or invalid nonce — trigger configured action (default: challenge).
@@ -320,15 +324,15 @@ func Handler(opts Options) app.HandlerFunc {
 							if opts.Metrics != nil {
 								opts.Metrics.RecordWAFBlock()
 							}
-							if opts.EventWriter != nil {
-								opts.EventWriter.Record(store.SecurityEvent{
+							if opts.Writer != nil {
+								opts.Writer.RecordEvent(store.SecurityEvent{
 									SiteID:     rt.Site.ID,
 									RequestID:  reqID,
 									ClientIP:   cipStr,
 									Host:       host,
 									Path:       path,
-									Method:     string(c.Method()),
-									UserAgent:  string(c.UserAgent()),
+									Method:     method,
+									UserAgent:  ua,
 									RuleIDStr:  challengeResult.RuleIDStr,
 									Phase:      challengeResult.Phase,
 									Action:     antiReplayAct,
@@ -338,12 +342,12 @@ func Handler(opts Options) app.HandlerFunc {
 								})
 							}
 							if action.Type(antiReplayAct) == action.Challenge {
-								waf.WriteChallengeResponse(c, reqID, &rt, 403)
+								pages.WriteChallengeResponse(c, reqID, &rt, 403)
 							} else {
-								waf.WriteBlockResponse(c, reqID, &rt, sn, challengeResult)
+								pages.WriteBlockResponse(c, reqID, &rt, sn, challengeResult)
 							}
-							logAccess(accessLog, reqID, c, antiReplayAct)
-							recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, antiReplayAct, "bypass", "")
+							logAccess(accessLog, reqID, method, path, host, accessStatusCode(c, antiReplayAct), antiReplayAct)
+							recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: accessStatusCode(c, antiReplayAct), WAFAction: antiReplayAct, CacheState: "bypass"})
 							return
 						}
 					}
@@ -353,10 +357,10 @@ func Handler(opts Options) app.HandlerFunc {
 
 		lowerPath := strings.ToLower(path)
 		if strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+") || strings.Contains(lowerPath, "%2bcscot%2b") || strings.Contains(lowerPath, "%2bcscoe%2b")) {
-			blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:path:015", MatchDesc: "Cisco translation-table path traversal pattern", Matched: true, Category: string(waf.CatPathTrav)}
-			waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
-			logAccess(accessLog, reqID, c, "intercept")
-			recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "intercept", "bypass", "")
+			blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:path:015", MatchDesc: "Cisco translation-table path traversal pattern", Matched: true, Category: string(owasp.CatPathTrav)}
+			pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+			logAccess(accessLog, reqID, method, path, host, 403, "intercept")
+			recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
 			return
 		}
 
@@ -371,12 +375,12 @@ func Handler(opts Options) app.HandlerFunc {
 				if len(rawBody) > 48*1024 {
 					rawBody = rawBody[:48*1024]
 				}
-				normalized := waf.NormalizeForDebug(rawBody)
-				if waf.IsOpaqueEncodedAttackBodyForDebug(rawBody, normalized, map[string]string{"Host": host}, 3) {
-					blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:proto:010", MatchDesc: "opaque encoded body without content-type", Matched: true, Category: string(waf.CatProtoViol)}
-					waf.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
-					logAccess(accessLog, reqID, c, "intercept")
-					recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "intercept", "bypass", "")
+				normalized := owasp.NormalizeForDebug(rawBody)
+				if owasp.IsOpaqueEncodedAttackBodyForDebug(rawBody, normalized, map[string]string{"Host": host}, 3) {
+					blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:proto:010", MatchDesc: "opaque encoded body without content-type", Matched: true, Category: string(owasp.CatProtoViol)}
+					pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+					logAccess(accessLog, reqID, method, path, host, 403, "intercept")
+					recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
 					return
 				}
 			}
@@ -386,7 +390,7 @@ func Handler(opts Options) app.HandlerFunc {
 		reqCtx.RequestID = reqID
 		reqCtx.Bind = bind
 		reqCtx.ClientIP = clientIP
-		reqCtx.Method = string(c.Method())
+		reqCtx.Method = method
 		reqCtx.Path = path
 		reqCtx.RawQuery = rawQ
 		reqCtx.Host = host
@@ -415,43 +419,24 @@ func Handler(opts Options) app.HandlerFunc {
 			result = opts.Engine.Process(reqCtx)
 		}
 
-		// Async bot score logging (read from ctx before ReleaseCtx).
-		if reqCtx.BotScoreResult != nil && opts.BotScoreRepo != nil {
+		// Bot score logging via buffered writer.
+		if reqCtx.BotScoreResult != nil && opts.Writer != nil {
 			bsi := reqCtx.BotScoreResult
-			ipStr := clientIPStr(clientIP)
-			hostStr := string(c.Host())
-			pathStr := string(c.Path())
-			go func() {
-				_ = opts.BotScoreRepo.Create(&store.BotScoreLog{
-					ClientIP:         ipStr,
-					Host:             hostStr,
-					Path:             pathStr,
-					TotalScore:       bsi.TotalScore,
-					GeoIPScore:       bsi.GeoIPScore,
-					FingerprintScore: bsi.FingerprintScore,
-					BehaviorScore:    bsi.BehaviorScore,
-					IPRepScore:       bsi.IPRepScore,
-					IsHighRisk:       bsi.IsHighRisk,
-					Action:           bsi.Action,
-					Details:          bsi.Details,
-				})
-			}()
+			opts.Writer.RecordBotScore(store.BotScoreLog{
+				ClientIP:         cipStr,
+				Host:             host,
+				Path:             path,
+				TotalScore:       bsi.TotalScore,
+				GeoIPScore:       bsi.GeoIPScore,
+				FingerprintScore: bsi.FingerprintScore,
+				BehaviorScore:    bsi.BehaviorScore,
+				IPRepScore:       bsi.IPRepScore,
+				IsHighRisk:       bsi.IsHighRisk,
+				Action:           bsi.Action,
+				Details:          bsi.Details,
+			})
 		}
 
-		// Async TLS fingerprint recording (only for TLS connections with fingerprinter active).
-		if opts.FingerprintRepo != nil {
-			if fp := waf.GetTLSFingerprinter(); fp != nil {
-				ipStr := clientIPStr(clientIP)
-				if info := fp.Lookup(ipStr); info != nil && info.JA3Hash != "" {
-					ja3 := info.JA3Hash
-					browser := waf.BrowserFamilyFromUA(string(c.UserAgent()))
-					isGood := waf.DefaultFingerprintDB().BrowserJA3[ja3] != ""
-					go opts.FingerprintRepo.RecordFingerprint(ja3, browser, isGood)
-				}
-			}
-		}
-
-		ua := string(c.UserAgent())
 		for _, obs := range result.ObserveHits {
 			if opts.Metrics != nil {
 				opts.Metrics.RecordWAFObserve()
@@ -468,14 +453,14 @@ func Handler(opts Options) app.HandlerFunc {
 				slog.String("match", obs.MatchDesc),
 				slog.String("category", obs.Category),
 			)
-			if opts.EventWriter != nil {
-				opts.EventWriter.Record(store.SecurityEvent{
+			if opts.Writer != nil {
+				opts.Writer.RecordEvent(store.SecurityEvent{
 					SiteID:    rt.Site.ID,
 					RequestID: reqID,
-					ClientIP:  clientIPStr(clientIP),
+					ClientIP:  cipStr,
 					Host:      host,
 					Path:      path,
-					Method:    string(c.Method()),
+					Method:    method,
 					UserAgent: ua,
 					RuleID:    obs.RuleID,
 					RuleIDStr: obs.RuleIDStr,
@@ -495,9 +480,9 @@ func Handler(opts Options) app.HandlerFunc {
 				slog.String("request_id", reqID),
 				slog.String("event", "maintenance"),
 			)
-			waf.WriteMaintenanceResponse(c, reqID, result.Site, sn)
-			logAccess(accessLog, reqID, c, "maintenance")
-			recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "maintenance", "bypass", "")
+			pages.WriteMaintenanceResponse(c, reqID, result.Site, sn)
+			logAccess(accessLog, reqID, method, path, host, accessStatusCode(c, "maintenance"), "maintenance")
+			recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: accessStatusCode(c, "maintenance"), WAFAction: "maintenance", CacheState: "bypass"})
 			return
 		}
 
@@ -506,7 +491,7 @@ func Handler(opts Options) app.HandlerFunc {
 			// valid signed pass cookie, downgrade to pass and skip the challenge.
 			if result.Action.IsChallenge() {
 				cookieHeader := string(c.GetHeader("Cookie"))
-				if cookieHeader != "" && waf.VerifyChallengePassCookie(cookieHeader, host, clientIP, time.Now()) {
+				if cookieHeader != "" && challenge.VerifyChallengePassCookie(cookieHeader, host, clientIP, time.Now()) {
 					result.Action = action.Pass()
 				}
 			}
@@ -520,9 +505,9 @@ func Handler(opts Options) app.HandlerFunc {
 
 			// ── Escalation: record hit and potentially upgrade action ──
 			if em := opts.Engine.Escalation(); em != nil && clientIP != nil {
-				em.RecordHit(clientIP.String(), rt.Site.ID, nil)
-				if upgraded := em.Evaluate(clientIP.String(), rt.Site.ID, nil); upgraded != "" {
-					if waf.ActionSeverity(upgraded) > waf.ActionSeverity(actStr) {
+				em.RecordHit(cipStr, rt.Site.ID, nil)
+				if upgraded := em.Evaluate(cipStr, rt.Site.ID, nil); upgraded != "" {
+					if wafescalation.ActionSeverity(upgraded) > wafescalation.ActionSeverity(actStr) {
 						switch upgraded {
 						case "block", "drop":
 							result.Action.Type = action.Drop
@@ -540,7 +525,7 @@ func Handler(opts Options) app.HandlerFunc {
 			if opts.Metrics != nil {
 				opts.Metrics.RecordWAFBlock()
 				if clientIP != nil {
-					opts.Metrics.RecordAttackIP(clientIP.String())
+					opts.Metrics.RecordAttackIP(cipStr)
 				}
 				if result.Action.Phase == "owasp_default" {
 					opts.Metrics.RecordBuiltinHit()
@@ -557,14 +542,14 @@ func Handler(opts Options) app.HandlerFunc {
 					slog.String("match", result.Action.MatchDesc),
 					slog.String("category", result.Action.Category),
 				)
-				if opts.EventWriter != nil {
-					opts.EventWriter.Record(store.SecurityEvent{
+				if opts.Writer != nil {
+					opts.Writer.RecordEvent(store.SecurityEvent{
 						SiteID:     rt.Site.ID,
 						RequestID:  reqID,
-						ClientIP:   clientIPStr(clientIP),
+						ClientIP:   cipStr,
 						Host:       host,
 						Path:       path,
-						Method:     string(c.Method()),
+						Method:     method,
 						UserAgent:  ua,
 						RuleID:     result.Action.RuleID,
 						RuleIDStr:  result.Action.RuleIDStr,
@@ -575,9 +560,9 @@ func Handler(opts Options) app.HandlerFunc {
 						StatusCode: 0,
 					})
 				}
-				logAccess(accessLog, reqID, c, "drop")
-				recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "drop", "bypass", "")
-				recordDropEvent(opts, rt.Site.ID, clientIP, waf.DropReason{
+				logAccess(accessLog, reqID, method, pathCached, host, 0, "drop")
+				recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 0, WAFAction: "drop", CacheState: "bypass"})
+				recordDropEvent(opts, rt.Site.ID, clientIP, drop.DropReason{
 					Source:    result.Action.Phase,
 					RuleID:    result.Action.RuleIDStr,
 					Detail:    result.Action.MatchDesc,
@@ -588,11 +573,11 @@ func Handler(opts Options) app.HandlerFunc {
 				dropExec := opts.Engine.DropExecutor()
 				if dropExec != nil && dropExec.Enabled() {
 					conn := c.GetConn()
-					dropExec.Execute(conn, waf.DropReason{
+					dropExec.Execute(conn, drop.DropReason{
 						Source:    result.Action.Phase,
 						RuleID:    result.Action.RuleIDStr,
 						Detail:    result.Action.MatchDesc,
-						ClientIP:  clientIPStr(clientIP),
+						ClientIP:  cipStr,
 						Host:      host,
 						Path:      path,
 						Timestamp: time.Now(),
@@ -615,14 +600,14 @@ func Handler(opts Options) app.HandlerFunc {
 					slog.String("challenge_type", string(result.Action.Type)),
 				)
 				statusCode := result.Action.ResponseStatusCode()
-				if opts.EventWriter != nil {
-					opts.EventWriter.Record(store.SecurityEvent{
+				if opts.Writer != nil {
+					opts.Writer.RecordEvent(store.SecurityEvent{
 						SiteID:     rt.Site.ID,
 						RequestID:  reqID,
-						ClientIP:   clientIPStr(clientIP),
+						ClientIP:   cipStr,
 						Host:       host,
 						Path:       path,
-						Method:     string(c.Method()),
+						Method:     method,
 						UserAgent:  ua,
 						RuleID:     result.Action.RuleID,
 						RuleIDStr:  result.Action.RuleIDStr,
@@ -636,17 +621,17 @@ func Handler(opts Options) app.HandlerFunc {
 				// Route to appropriate challenge handler
 				switch {
 				case result.Action.IsCaptchaChallenge() && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil:
-					waf.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, statusCode)
+					challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, statusCode)
 				case result.Action.IsShieldChallenge() && sn.Protection.ShieldEnabled && opts.ShieldManager != nil:
 					origURL := string(c.Request.URI().RequestURI())
 					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, statusCode)
 				case result.Action.IsChainChallenge() && sn.Protection.ChainEnabled && opts.ChainManager != nil:
-					waf.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
+					challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
 				default:
-					waf.WriteChallengeResponse(c, reqID, result.Site, statusCode)
+					pages.WriteChallengeResponse(c, reqID, result.Site, statusCode)
 				}
-				logAccess(accessLog, reqID, c, "challenge")
-				recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "challenge", "bypass", "")
+				logAccess(accessLog, reqID, method, path, host, statusCode, "challenge")
+				recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: "challenge", CacheState: "bypass"})
 				return
 			}
 
@@ -657,14 +642,14 @@ func Handler(opts Options) app.HandlerFunc {
 					slog.String("redirect_to", result.Action.RedirectTo),
 				)
 				statusCode := result.Action.EffectiveStatusCode(302)
-				if opts.EventWriter != nil {
-					opts.EventWriter.Record(store.SecurityEvent{
+				if opts.Writer != nil {
+					opts.Writer.RecordEvent(store.SecurityEvent{
 						SiteID:     rt.Site.ID,
 						RequestID:  reqID,
-						ClientIP:   clientIPStr(clientIP),
+						ClientIP:   cipStr,
 						Host:       host,
 						Path:       path,
-						Method:     string(c.Method()),
+						Method:     method,
 						UserAgent:  ua,
 						RuleID:     result.Action.RuleID,
 						RuleIDStr:  result.Action.RuleIDStr,
@@ -676,8 +661,8 @@ func Handler(opts Options) app.HandlerFunc {
 					})
 				}
 				c.Redirect(statusCode, []byte(result.Action.RedirectTo))
-				logAccess(accessLog, reqID, c, "redirect")
-				recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, "redirect", "bypass", result.Action.RedirectTo)
+				logAccess(accessLog, reqID, method, path, host, statusCode, "redirect")
+				recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: "redirect", CacheState: "bypass", Upstream: result.Action.RedirectTo})
 				return
 			}
 
@@ -691,8 +676,8 @@ func Handler(opts Options) app.HandlerFunc {
 				slog.String("match", result.Action.MatchDesc),
 				slog.String("category", result.Action.Category),
 			)
-			if opts.EventWriter != nil {
-				opts.EventWriter.Record(store.SecurityEvent{
+			if opts.Writer != nil {
+				opts.Writer.RecordEvent(store.SecurityEvent{
 					SiteID:     rt.Site.ID,
 					RequestID:  reqID,
 					ClientIP:   clientIPStr(clientIP),
@@ -709,9 +694,9 @@ func Handler(opts Options) app.HandlerFunc {
 					StatusCode: statusCode,
 				})
 			}
-			waf.WriteBlockResponse(c, reqID, result.Site, sn, result.Action)
-			logAccess(accessLog, reqID, c, actStr)
-			recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, actStr, "bypass", "")
+			pages.WriteBlockResponse(c, reqID, result.Site, sn, result.Action)
+			logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
+			recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass"})
 			return
 		}
 
@@ -726,6 +711,7 @@ func Handler(opts Options) app.HandlerFunc {
 
 		var upstreamErr error
 		cacheState := "bypass"
+		upstreamStart := time.Now()
 		switch {
 		case IsWebSocketUpgrade(c):
 			upstreamErr = ForwardWebSocket(c, *result.Site, base, clientIP, opts.Engine)
@@ -741,7 +727,7 @@ func Handler(opts Options) app.HandlerFunc {
 				break
 			}
 			if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
-				proxy.WriteCachedResponse(c, string(c.Method()), entry)
+				proxy.WriteCachedResponse(c, method, entry)
 				cacheState = "hit"
 				break
 			}
@@ -751,25 +737,26 @@ func Handler(opts Options) app.HandlerFunc {
 				upstreamErr = err
 				break
 			}
-			if proxy.ShouldCacheHTTPResponse(string(c.Method()), bufferedResp, ignoreUpstreamCC) {
+			if proxy.ShouldCacheHTTPResponse(method, bufferedResp, ignoreUpstreamCC) {
 				opts.ResponseCache.Set(cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, ttl, proxy.SanitizeHeadersForEdgeCache(bufferedResp.Header))
 			}
 			proxy.ForwardBufferedResponse(c, bufferedResp)
 		}
+		upstreamLatencyMs := time.Since(upstreamStart).Milliseconds()
 
 		if upstreamErr != nil {
 			errCode := 502
 			if isTimeoutError(upstreamErr) {
 				errCode = 504
 			}
-			waf.WriteErrorPage(ctx, c, errCode, siteErrorPage(result.Site, errCode))
+			pages.WriteErrorPage(ctx, c, errCode, siteErrorPage(result.Site, errCode))
 		} else if !IsWebSocketUpgrade(c) && !IsSSERequest(c) {
 			// Upstream empty body fallback: if upstream returns empty body
 			// with a non-204/304 status, render a friendly error page.
 			respStatus := c.Response.StatusCode()
 			respBodyLen := len(c.Response.Body())
 			if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
-				waf.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
+				pages.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
 			}
 		}
 		if c.Response.Header.Get("Server") != "" && !hasUpstreamServerHeader(c) {
@@ -787,21 +774,22 @@ func Handler(opts Options) app.HandlerFunc {
 		if len(result.ObserveHits) > 0 {
 			wafAction = "observe"
 		}
-		logAccess(accessLog, reqID, c, wafAction)
-		recordAccessLog(opts, rt.Site.ID, reqID, clientIP, c, wafAction, cacheState, base)
+		aPath := accessPath(c)
+		logAccess(accessLog, reqID, method, aPath, host, statusCode, wafAction)
+		recordAccessLog(opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: aPath, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: cacheState, Upstream: base, UpstreamLatencyMs: upstreamLatencyMs, ResponseSize: int64(len(c.Response.Body()))})
 
 		// Async application route resource recording.
 		// IMPORTANT: Copy all fields from RequestContext BEFORE launching goroutine
 		// because Hertz recycles the context after handler returns.
 		if upstreamErr == nil && len(rt.AppRouteRules) > 0 && opts.RecordedResourceRepo != nil {
 			mat := &appresource.Material{
-				Method:      string(c.Method()),
-				Host:        string(c.Host()),
-				Path:        string(c.Path()),
-				ClientIP:    clientIPStr(clientIP),
-				StatusCode:  c.Response.StatusCode(),
+				Method:      method,
+				Host:        host,
+				Path:        path,
+				ClientIP:    cipStr,
+				StatusCode:  statusCode,
 				ContentType: string(c.Response.Header.ContentType()),
-				UserAgent:   string(c.GetHeader("User-Agent")),
+				UserAgent:   ua,
 			}
 			// Copy headers needed by rule matching before goroutine
 			headerSnapshot := make(map[string]string)
@@ -854,44 +842,64 @@ func serveOWAFStatic(c *app.RequestContext, webFS fs.FS) bool {
 	return true
 }
 
-func logAccess(log *slog.Logger, reqID string, c *app.RequestContext, wafAction string) {
-	if !log.Enabled(context.Background(), slog.LevelInfo) {
+func logAccess(log *slog.Logger, reqID string, method string, path string, host string, statusCode int, wafAction string) {
+	if !log.Enabled(context.Background(), slog.LevelDebug) {
 		return
 	}
-	log.Info("access",
+	log.Debug("access",
 		slog.String("request_id", reqID),
-		slog.String("method", string(c.Method())),
-		slog.String("path", accessPath(c)),
-		slog.String("host", string(c.Host())),
-		slog.Int("status", accessStatusCode(c, wafAction)),
+		slog.String("method", method),
+		slog.String("path", path),
+		slog.String("host", host),
+		slog.Int("status", statusCode),
 		slog.String("waf_action", wafAction),
 	)
 }
 
-func recordAccessLog(opts Options, siteID uint, reqID string, clientIP net.IP, c *app.RequestContext, wafAction string, cacheState string, upstream string) {
-	if opts.AccessLogWriter == nil {
+type accessLogInfo struct {
+	SiteID            uint
+	RequestID         string
+	ClientIP          string
+	Host              string
+	Path              string
+	QueryString       string
+	Method            string
+	UserAgent         string
+	StatusCode        int
+	WAFAction         string
+	CacheState        string
+	Upstream          string
+	UpstreamLatencyMs int64
+	ResponseSize      int64
+}
+
+func recordAccessLog(opts Options, info accessLogInfo) {
+	if opts.Writer == nil {
 		return
 	}
-	opts.AccessLogWriter.Record(store.AccessLog{
-		SiteID:     siteID,
-		RequestID:  reqID,
-		ClientIP:   clientIPStr(clientIP),
-		Host:       string(c.Host()),
-		Path:       accessPath(c),
-		Method:     string(c.Method()),
-		StatusCode: accessStatusCode(c, wafAction),
-		WAFAction:  wafAction,
-		CacheState: cacheState,
-		Upstream:   upstream,
-		UserAgent:  string(c.UserAgent()),
+	opts.Writer.RecordAccessLog(store.AccessLog{
+		SiteID:            info.SiteID,
+		RequestID:         info.RequestID,
+		ClientIP:          info.ClientIP,
+		Host:              info.Host,
+		Path:              info.Path,
+		QueryString:       info.QueryString,
+		Method:            info.Method,
+		StatusCode:        info.StatusCode,
+		WAFAction:         info.WAFAction,
+		CacheState:        info.CacheState,
+		Upstream:          info.Upstream,
+		UserAgent:         info.UserAgent,
+		UpstreamLatencyMs: info.UpstreamLatencyMs,
+		ResponseSize:      info.ResponseSize,
 	})
 }
 
-func recordDropEvent(opts Options, siteID uint, clientIP net.IP, reason waf.DropReason) {
-	if opts.DropEventRepo == nil {
+func recordDropEvent(opts Options, siteID uint, clientIP net.IP, reason drop.DropReason) {
+	if opts.Writer == nil {
 		return
 	}
-	_ = opts.DropEventRepo.Create(&store.DropEvent{
+	opts.Writer.RecordDropEvent(store.DropEvent{
 		SiteID:    siteID,
 		ClientIP:  clientIPStr(clientIP),
 		Source:    reason.Source,
@@ -995,15 +1003,15 @@ func hasUpstreamServerHeader(c *app.RequestContext) bool {
 	return sv != "" && sv != "hertz"
 }
 
-func siteErrorPage(rt *snapshot.SiteRuntime, statusCode int) *waf.ErrorPageConfig {
+func siteErrorPage(rt *snapshot.SiteRuntime, statusCode int) *pages.ErrorPageConfig {
 	if rt == nil || strings.TrimSpace(rt.Site.CustomErrorPages) == "" || rt.Site.CustomErrorPages == "{}" {
 		return nil
 	}
-	pages := make(map[string]waf.ErrorPageConfig)
-	if err := json.Unmarshal([]byte(rt.Site.CustomErrorPages), &pages); err != nil {
+	epMap := make(map[string]pages.ErrorPageConfig)
+	if err := json.Unmarshal([]byte(rt.Site.CustomErrorPages), &epMap); err != nil {
 		return nil
 	}
-	cfg, ok := pages[strconv.Itoa(statusCode)]
+	cfg, ok := epMap[strconv.Itoa(statusCode)]
 	if !ok {
 		return nil
 	}
@@ -1031,10 +1039,10 @@ func handleWASMAssets(c *app.RequestContext) bool {
 	path := string(c.Path())
 	switch path {
 	case "/__owaf/pow.wasm":
-		waf.ServePoWWASM(c)
+		challenge.ServePoWWASM(c)
 		return true
 	case "/__owaf/wasm_exec.js":
-		waf.ServeWasmExecJS(c)
+		challenge.ServeWasmExecJS(c)
 		return true
 	}
 	return false
@@ -1163,6 +1171,6 @@ func setChallengeCookie(c *app.RequestContext, opts Options) {
 		}
 	}
 	clientIP := security.ResolveClientIP(c, "", "")
-	cookie := waf.BuildChallengePassCookie(host, clientIP, tlsEnabled, time.Now(), time.Hour)
+	cookie := challenge.BuildChallengePassCookie(host, clientIP, tlsEnabled, time.Now(), time.Hour)
 	c.Response.Header.Set("Set-Cookie", cookie)
 }

@@ -25,8 +25,8 @@ type Options struct {
 func Open(opt Options) (*gorm.DB, error) {
 	gcfg := &gorm.Config{
 		Logger:                 logger.Default.LogMode(logger.Warn),
-		SkipDefaultTransaction: true,  // avoid wrapping every single INSERT in a transaction
-		PrepareStmt:            true,  // cache prepared statements for repeated queries
+		SkipDefaultTransaction: true, // avoid wrapping every single INSERT in a transaction
+		PrepareStmt:            true, // cache prepared statements for repeated queries
 	}
 
 	var db *gorm.DB
@@ -70,12 +70,13 @@ func openSQLite(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 	}
 
 	// SQLite pragmas for performance:
-	//   journal_mode=WAL  — concurrent reads during writes
-	//   busy_timeout=5000 — wait up to 5s on lock contention instead of immediate SQLITE_BUSY
-	//   synchronous=NORMAL — balanced durability vs speed (safe with WAL)
-	//   cache_size=-64000 — 64MB page cache
-	//   foreign_keys=ON   — enforce FK constraints
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)&_pragma=foreign_keys(ON)"
+	//   journal_mode=WAL       — concurrent reads during writes
+	//   busy_timeout=10000     — wait up to 10s on lock contention instead of immediate SQLITE_BUSY
+	//   synchronous=NORMAL     — balanced durability vs speed (safe with WAL)
+	//   cache_size=-64000      — 64MB page cache
+	//   foreign_keys=ON        — enforce FK constraints
+	//   wal_autocheckpoint=1000 — checkpoint every 1000 pages to avoid long WAL stalls
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(1000)"
 
 	db, err := gorm.Open(sqlite.Open(dsn), gcfg)
 	if err != nil {

@@ -2,7 +2,7 @@ package repository
 
 import (
 	"My-OpenWaf/internal/store"
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/cve"
 
 	"gorm.io/gorm"
 )
@@ -21,8 +21,8 @@ type CVERuleFilter struct {
 	Source   string
 }
 
-func (r *CVERuleRepo) List(offset, limit int, f CVERuleFilter) ([]waf.CVERuleModel, int64, error) {
-	q := r.db.Model(&waf.CVERuleModel{})
+func (r *CVERuleRepo) List(offset, limit int, f CVERuleFilter) ([]cve.CVERuleModel, int64, error) {
+	q := r.db.Model(&cve.CVERuleModel{})
 	if f.Category != "" {
 		q = q.Where("category = ?", f.Category)
 	}
@@ -41,38 +41,38 @@ func (r *CVERuleRepo) List(offset, limit int, f CVERuleFilter) ([]waf.CVERuleMod
 		return nil, 0, err
 	}
 
-	var items []waf.CVERuleModel
+	var items []cve.CVERuleModel
 	if err := q.Offset(offset).Limit(limit).Order("id DESC").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 	return items, total, nil
 }
 
-func (r *CVERuleRepo) Get(id uint) (*waf.CVERuleModel, error) {
-	var item waf.CVERuleModel
+func (r *CVERuleRepo) Get(id uint) (*cve.CVERuleModel, error) {
+	var item cve.CVERuleModel
 	return &item, r.db.First(&item, id).Error
 }
 
-func (r *CVERuleRepo) Create(item *waf.CVERuleModel) error {
+func (r *CVERuleRepo) Create(item *cve.CVERuleModel) error {
 	return r.db.Create(item).Error
 }
 
-func (r *CVERuleRepo) Update(item *waf.CVERuleModel) error {
+func (r *CVERuleRepo) Update(item *cve.CVERuleModel) error {
 	return r.db.Save(item).Error
 }
 
 func (r *CVERuleRepo) Delete(id uint) error {
-	return r.db.Delete(&waf.CVERuleModel{}, id).Error
+	return r.db.Delete(&cve.CVERuleModel{}, id).Error
 }
 
 func (r *CVERuleRepo) Toggle(id uint, enabled bool) error {
-	return r.db.Model(&waf.CVERuleModel{}).Where("id = ?", id).Update("enabled", enabled).Error
+	return r.db.Model(&cve.CVERuleModel{}).Where("id = ?", id).Update("enabled", enabled).Error
 }
 
 // PendingApprovalCount returns the number of rules that are not yet approved.
 func (r *CVERuleRepo) PendingApprovalCount() (int64, error) {
 	var count int64
-	err := r.db.Model(&waf.CVERuleModel{}).Where("approved = ?", false).Count(&count).Error
+	err := r.db.Model(&cve.CVERuleModel{}).Where("approved = ?", false).Count(&count).Error
 	return count, err
 }
 

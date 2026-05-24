@@ -77,7 +77,7 @@ function LoginContent() {
               </div>
               {tip ? <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{tip}</div> : null}
               {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
-              <Button type="submit" disabled={loading} className="h-11 w-full rounded-lg bg-slate-950 text-white hover:bg-slate-800">
+              <Button type="submit" disabled={loading} className="h-11 w-full rounded-lg bg-teal-500 text-white hover:bg-teal-600">
                 {loading ? "登录中..." : "登录"}
               </Button>
             </form>

@@ -9,16 +9,24 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 
 	"My-OpenWaf/internal/admin/auth"
+	"My-OpenWaf/internal/admin/detect"
+	"My-OpenWaf/internal/admin/event"
+	"My-OpenWaf/internal/admin/protect"
+	"My-OpenWaf/internal/admin/rule"
+	"My-OpenWaf/internal/admin/site"
+	"My-OpenWaf/internal/admin/system"
+	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/adminweb"
 	"My-OpenWaf/internal/dataplane"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/store/repository"
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/cve"
+	"My-OpenWaf/internal/waf/escalation"
 
 	"gorm.io/gorm"
 )
 
-// Dependencies holds all admin API dependencies.
 type Dependencies struct {
 	Repos         *repository.Repos
 	Reload        func() error
@@ -29,32 +37,19 @@ type Dependencies struct {
 	TokenMgr      *auth.TokenManager
 	BruteForce    *auth.BruteForceDetector
 	SessionMgr    *auth.SessionManager
-	CVEFeedMgr    *waf.CVEFeedManager
-	EscalationMgr *waf.EscalationManager
-	CaptchaMgr    *waf.CaptchaManager
+	CVEFeedMgr    *cve.CVEFeedManager
+	EscalationMgr *escalation.EscalationManager
+	CaptchaMgr    *challenge.CaptchaManager
+	Cache         *cache.RedisKV
 }
 
-// RegisterRoutes mounts the admin REST API and frontend static files on the Hertz server.
-//
-// NOTE: The admin API only uses GET and POST methods — no PUT/DELETE.
-// This simplifies reverse-proxy / CORS setups and matches the project convention.
-// Update and delete operations are exposed as:
-//
-//	POST /resource/:id/update  – update
-//	POST /resource/:id/delete  – delete
-//
-// RBAC roles:
-//   - admin: full access to everything
-//   - operator: can manage sites, rules, policies, certificates, IP lists, protection
-//   - readonly: can only view/read data
 func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	adminLog := logger.New("admin")
 	h.Use(SecurityHeaders())
 	h.Use(AccessLog(adminLog))
 
-	h.GET("/api/v1/health", HealthCheck())
+	h.GET("/api/v1/health", system.HealthCheck())
 
-	// Auth routes (no auth middleware).
 	authDeps := &AuthDeps{
 		AccountRepo: deps.Repos.AdminAccount,
 		RTRepo:      deps.Repos.RefreshToken,
@@ -68,222 +63,183 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	h.POST("/api/v1/auth/refresh", RefreshHandler(authDeps))
 	h.POST("/api/v1/auth/logout", LogoutHandler(authDeps))
 
-	// Authenticated API group — all routes below require valid JWT or API Key.
 	api := h.Group("/api/v1")
 	api.Use(AuthMiddleware(deps.Repos.AdminAPIKey, deps.TokenMgr, deps.SessionMgr))
 
-	// ── Auth info (any authenticated role) ──
 	api.GET("/auth/me", MeHandler(authDeps))
 
-	// ── Session management (any authenticated user can view own, admin can manage all) ──
 	api.GET("/auth/sessions", ListSessionsHandler(authDeps))
 	api.POST("/auth/sessions/force-logout", RequireRole(auth.RoleAdmin), ForceLogoutSessionHandler(authDeps))
 
 	r := deps.Repos
 	reload := deps.Reload
 
-	// ── Read-only routes (all authenticated roles: admin, operator, readonly) ──
 	readGroup := api.Group("")
 	readGroup.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator, auth.RoleReadonly))
 	{
-		readGroup.GET("/sites", ListSites(r.Site, r.SiteListener))
-		readGroup.GET("/sites/:id", GetSite(r.Site))
-		readGroup.GET("/sites/:id/status", GetSiteStatus(r.Site))
-		readGroup.GET("/sites/:id/listeners", ListSiteListeners(r.Site, r.SiteListener))
+		readGroup.GET("/sites", site.ListSites(r.Site, r.SiteListener))
+		readGroup.GET("/sites/:id", site.GetSite(r.Site))
+		readGroup.GET("/sites/:id/status", site.GetSiteStatus(r.Site))
+		readGroup.GET("/sites/:id/listeners", site.ListSiteListeners(r.Site, r.SiteListener))
 
-		readGroup.GET("/certificates", ListCertificates(r.Certificate))
-		readGroup.GET("/certificates/:id", GetCertificate(r.Certificate))
+		readGroup.GET("/certificates", system.ListCertificates(r.Certificate))
+		readGroup.GET("/certificates/:id", system.GetCertificate(r.Certificate))
 
-		readGroup.GET("/policies", ListPolicies(r.Policy))
-		readGroup.GET("/policies/:id", GetPolicy(r.Policy))
+		readGroup.GET("/policies", system.ListPolicies(r.Policy))
+		readGroup.GET("/policies/:id", system.GetPolicy(r.Policy))
 
-		readGroup.GET("/rules", ListRules(r.Rule))
-		readGroup.GET("/rules/:id", GetRule(r.Rule))
-		readGroup.GET("/rules/templates", GetRuleTemplates())
-		readGroup.GET("/rules/export", ExportRules(r.Rule))
+		readGroup.GET("/rules", rule.ListRules(r.Rule))
+		readGroup.GET("/rules/:id", rule.GetRule(r.Rule))
+		readGroup.GET("/rules/templates", rule.GetRuleTemplates())
+		readGroup.GET("/rules/export", rule.ExportRules(r.Rule))
 
-		readGroup.GET("/settings", ListSettings(r.SystemSettings))
-		readGroup.GET("/settings/:key", GetSetting(r.SystemSettings))
+		readGroup.GET("/settings", system.ListSettings(r.SystemSettings))
+		readGroup.GET("/settings/:key", system.GetSetting(r.SystemSettings))
 
-		readGroup.GET("/protection-settings", GetProtectionSettings(r.SystemSettings))
+		readGroup.GET("/protection-settings", protect.GetProtectionSettings(r.SystemSettings))
 
-		readGroup.GET("/ip-lists", ListIPEntries(r.IPList))
-		readGroup.GET("/ip-lists/:id", GetIPEntry(r.IPList))
+		readGroup.GET("/ip-lists", system.ListIPEntries(r.IPList))
+		readGroup.GET("/ip-lists/:id", system.GetIPEntry(r.IPList))
 
-		readGroup.GET("/security-events", ListSecurityEvents(r.SecurityEvent))
-		readGroup.GET("/security-events/stats", SecurityEventStats(r.SecurityEvent))
-		readGroup.GET("/security-events/timeline", SecurityEventTimeline(r.SecurityEvent))
-		readGroup.GET("/security-events/:id", GetSecurityEvent(r.SecurityEvent))
-		readGroup.GET("/access-logs", ListAccessLogs(r.AccessLog))
-		readGroup.GET("/sites/:id/security-events", ListSiteSecurityEvents(r.Site, r.SecurityEvent))
-		readGroup.GET("/sites/:id/security-events/stats", SiteSecurityEventStats(r.Site, r.SecurityEvent))
-		readGroup.GET("/sites/:id/security-events/timeline", SiteSecurityEventTimeline(r.Site, r.SecurityEvent))
-		readGroup.GET("/sites/:id/access-logs", ListSiteAccessLogs(r.Site, r.AccessLog))
-		readGroup.GET("/sites/:id/drop-events", ListSiteDropEvents(r.Site, r.DropEvent))
-		readGroup.GET("/sites/:id/drop-stats", SiteDropStats(r.Site, r.DropEvent))
-		readGroup.GET("/sites/:id/rules", ListSiteRules(r.Site, r.Rule))
-		readGroup.GET("/sites/:id/application-route-rules", ListApplicationRouteRules(r.Site, r.AppRouteRule))
-		readGroup.GET("/sites/:id/recorded-resources", ListRecordedResources(r.Site, r.RecordedResource))
+		readGroup.GET("/security-events", event.ListSecurityEvents(r.SecurityEvent))
+		readGroup.GET("/security-events/stats", event.SecurityEventStats(r.SecurityEvent))
+		readGroup.GET("/security-events/timeline", event.SecurityEventTimeline(r.SecurityEvent))
+		readGroup.GET("/security-events/:id", event.GetSecurityEvent(r.SecurityEvent))
+		readGroup.GET("/access-logs", event.ListAccessLogs(r.AccessLog))
+		readGroup.GET("/request/:request_id", event.GetRequestTrace(r.AccessLog, r.SecurityEvent))
+		readGroup.GET("/sites/:id/security-events", event.ListSiteSecurityEvents(r.Site, r.SecurityEvent))
+		readGroup.GET("/sites/:id/security-events/stats", event.SiteSecurityEventStats(r.Site, r.SecurityEvent))
+		readGroup.GET("/sites/:id/security-events/timeline", event.SiteSecurityEventTimeline(r.Site, r.SecurityEvent))
+		readGroup.GET("/sites/:id/access-logs", site.ListSiteAccessLogs(r.Site, r.AccessLog))
+		readGroup.GET("/sites/:id/drop-events", site.ListSiteDropEvents(r.Site, r.DropEvent))
+		readGroup.GET("/sites/:id/drop-stats", site.SiteDropStats(r.Site, r.DropEvent))
+		readGroup.GET("/sites/:id/rules", rule.ListSiteRules(r.Site, r.Rule))
+		readGroup.GET("/sites/:id/application-route-rules", rule.ListApplicationRouteRules(r.Site, r.AppRouteRule))
+		readGroup.GET("/sites/:id/recorded-resources", rule.ListRecordedResources(r.Site, r.RecordedResource))
 
-		// Dashboard
-		dashDeps := &DashboardDeps{Metrics: deps.Metrics, DB: deps.DB}
-		readGroup.GET("/dashboard/summary", DashboardSummary(dashDeps))
+		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, DB: deps.DB, Cache: deps.Cache}
+		readGroup.GET("/dashboard/summary", system.DashboardSummary(dashDeps))
 
-		// API Keys (list only for readonly)
-		readGroup.GET("/api-keys", ListAPIKeys(r.AdminAPIKey))
+		readGroup.GET("/api-keys", system.ListAPIKeys(r.AdminAPIKey))
 
-		// Bot detection
-		readGroup.GET("/bot-settings", GetBotSettings(r.SystemSettings))
-		readGroup.GET("/bot-scores", GetBotScores(r.BotScore))
-		readGroup.GET("/fingerprints", GetFingerprints(r.Fingerprint))
+		readGroup.GET("/bot-settings", protect.GetBotSettings(r.SystemSettings))
+		readGroup.GET("/bot-scores", protect.GetBotScores(r.BotScore))
 
-		// CVE rules
-		readGroup.GET("/cve-rules", ListCVERules(r.CVERule))
-		readGroup.GET("/cve-rules/stats", GetCVERuleStats(r.CVERule))
-		readGroup.GET("/cve-feed/status", GetCVEFeedStatus(deps.CVEFeedMgr, r.CVERule))
+		readGroup.GET("/cve-rules", detect.ListCVERules(r.CVERule))
+		readGroup.GET("/cve-rules/stats", detect.GetCVERuleStats(r.CVERule))
+		readGroup.GET("/cve-feed/status", detect.GetCVEFeedStatus(deps.CVEFeedMgr, r.CVERule))
 
-		// OWASP rules (registry-based)
-		readGroup.GET("/owasp-rules", ListOWASPRulesFromRegistry(r.SystemSettings))
-		readGroup.GET("/owasp-rules/stats", GetOWASPRuleStats(r.SystemSettings))
+		readGroup.GET("/owasp-rules", detect.ListOWASPRulesFromRegistry(r.SystemSettings))
+		readGroup.GET("/owasp-rules/stats", detect.GetOWASPRuleStats(r.SystemSettings))
 
-		// Captcha configuration
-		readGroup.GET("/captcha/config", GetCaptchaConfig(r.SystemSettings))
+		readGroup.GET("/captcha/config", protect.GetCaptchaConfig(r.SystemSettings))
 
-		// Chain challenge configuration
-		readGroup.GET("/chain/config", GetChainConfig(r.SystemSettings))
-		readGroup.GET("/chain/sessions", ListChainSessions())
+		readGroup.GET("/chain/config", protect.GetChainConfig(r.SystemSettings))
+		readGroup.GET("/chain/sessions", protect.ListChainSessions())
 
-		// Sensitivity configuration
-		readGroup.GET("/protection/:id/sensitivity", GetSensitivityConfig(r.SystemSettings))
+		readGroup.GET("/protection/:id/sensitivity", protect.GetSensitivityConfig(r.SystemSettings))
 
-		// Escalation configuration
-		readGroup.GET("/protection/:id/escalation", GetEscalationConfig(r.SystemSettings))
-		readGroup.GET("/escalation/status/:ip", GetEscalationIPStatus(deps.EscalationMgr))
+		readGroup.GET("/protection/:id/escalation", protect.GetEscalationConfig(r.SystemSettings))
+		readGroup.GET("/escalation/status/:ip", protect.GetEscalationIPStatus(deps.EscalationMgr))
 
-		// Error pages
-		readGroup.GET("/sites/:id/error-pages", GetSiteErrorPages(r.Site))
-		readGroup.GET("/error-pages/defaults", GetDefaultErrorPages())
+		readGroup.GET("/sites/:id/error-pages", site.GetSiteErrorPages(r.Site))
+		readGroup.GET("/error-pages/defaults", site.GetDefaultErrorPages())
 
-		// Drop policy
-		readGroup.GET("/drop-policy", GetDropPolicy(r.SystemSettings))
-		readGroup.GET("/drop-stats", GetDropStats(r.DropEvent))
-		readGroup.GET("/drop-events", GetDropEvents(r.DropEvent))
+		readGroup.GET("/drop-policy", protect.GetDropPolicy(r.SystemSettings))
+		readGroup.GET("/drop-stats", protect.GetDropStats(r.DropEvent))
+		readGroup.GET("/drop-events", protect.GetDropEvents(r.DropEvent))
 	}
 
-	// ── Operator routes (admin + operator: manage sites, rules, policies, certs, IP lists) ──
 	opsGroup := api.Group("")
 	opsGroup.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator))
 	{
-		// Sites
-		opsGroup.POST("/sites", CreateSite(r.Site, r.Certificate, reload))
-		opsGroup.POST("/sites/:id/update", UpdateSite(r.Site, r.Certificate, reload))
-		opsGroup.POST("/sites/:id/delete", DeleteSite(r.Site, r.SiteListener, reload))
-		opsGroup.POST("/sites/:id/start", StartSite(r.Site, reload))
-		opsGroup.POST("/sites/:id/stop", StopSite(r.Site, reload))
-		opsGroup.POST("/sites/:id/listeners", CreateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
-		opsGroup.POST("/sites/:id/listeners/:lid/update", UpdateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
-		opsGroup.POST("/sites/:id/listeners/:lid/delete", DeleteSiteListener(r.Site, r.SiteListener, reload))
+		opsGroup.POST("/sites", site.CreateSite(r.Site, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/update", site.UpdateSite(r.Site, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/delete", site.DeleteSite(r.Site, r.SiteListener, reload))
+		opsGroup.POST("/sites/:id/start", site.StartSite(r.Site, reload))
+		opsGroup.POST("/sites/:id/stop", site.StopSite(r.Site, reload))
+		opsGroup.POST("/sites/:id/listeners", site.CreateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/listeners/:lid/update", site.UpdateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/listeners/:lid/delete", site.DeleteSiteListener(r.Site, r.SiteListener, reload))
 
-		// Certificates
-		opsGroup.POST("/certificates", CreateCertificate(r.Certificate, reload))
-		opsGroup.POST("/certificates/:id/update", UpdateCertificate(r.Certificate, reload))
-		opsGroup.POST("/certificates/:id/delete", DeleteCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates", system.CreateCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates/:id/update", system.UpdateCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates/:id/delete", system.DeleteCertificate(r.Certificate, reload))
 
-		// Policies
-		opsGroup.POST("/policies", CreatePolicy(r.Policy, reload))
-		opsGroup.POST("/policies/:id/update", UpdatePolicy(r.Policy, reload))
-		opsGroup.POST("/policies/:id/delete", DeletePolicy(r.Policy, reload))
+		opsGroup.POST("/policies", system.CreatePolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/update", system.UpdatePolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/delete", system.DeletePolicy(r.Policy, reload))
 
-		// Rules
-		opsGroup.POST("/rules", CreateRule(r.Rule, reload))
-		opsGroup.POST("/rules/:id/update", UpdateRule(r.Rule, reload))
-		opsGroup.POST("/rules/:id/delete", DeleteRule(r.Rule, reload))
-		opsGroup.POST("/rules/test", TestRule())
-		opsGroup.POST("/rules/validate", ValidateRule())
-		opsGroup.POST("/rules/import", ImportRules(r.Rule, reload))
+		opsGroup.POST("/rules", rule.CreateRule(r.Rule, reload))
+		opsGroup.POST("/rules/:id/update", rule.UpdateRule(r.Rule, reload))
+		opsGroup.POST("/rules/:id/delete", rule.DeleteRule(r.Rule, reload))
+		opsGroup.POST("/rules/test", rule.TestRule())
+		opsGroup.POST("/rules/validate", rule.ValidateRule())
+		opsGroup.POST("/rules/import", rule.ImportRules(r.Rule, reload))
 
-		// Protection Settings
-		opsGroup.POST("/protection-settings", PutProtectionSettings(r.SystemSettings, reload))
+		opsGroup.POST("/protection-settings", protect.PutProtectionSettings(r.SystemSettings, reload))
 
-		// IP Black/White List
-		opsGroup.POST("/ip-lists", CreateIPEntry(r.IPList, reload))
-		opsGroup.POST("/ip-lists/:id/update", UpdateIPEntry(r.IPList, reload))
-		opsGroup.POST("/ip-lists/:id/delete", DeleteIPEntry(r.IPList, reload))
+		opsGroup.POST("/ip-lists", system.CreateIPEntry(r.IPList, reload))
+		opsGroup.POST("/ip-lists/:id/update", system.UpdateIPEntry(r.IPList, reload))
+		opsGroup.POST("/ip-lists/:id/delete", system.DeleteIPEntry(r.IPList, reload))
 
-		// Snapshot reload
-		opsGroup.POST("/reload", ReloadSnapshot(reload))
+		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
 
-		// Bot settings (operator can update)
-		opsGroup.POST("/bot-settings/update", UpdateBotSettings(r.SystemSettings, reload))
+		opsGroup.POST("/bot-settings/update", protect.UpdateBotSettings(r.SystemSettings, reload))
 
-		// CVE rules (operator can toggle/patch/sync)
-		opsGroup.POST("/cve-rules/:id/toggle", ToggleCVERule(r.CVERule, deps.CVEFeedMgr))
-		opsGroup.POST("/cve-rules/:id/patch", UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr))
-		opsGroup.POST("/cve-rules/batch", BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr))
-		opsGroup.POST("/cve-rules/sync", SyncCVERules(deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/:id/toggle", detect.ToggleCVERule(r.CVERule, deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/:id/patch", detect.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/batch", detect.BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/sync", detect.SyncCVERules(deps.CVEFeedMgr))
 
-		// OWASP rules (operator can update)
-		opsGroup.POST("/owasp-rules/:id/update", UpdateSingleOWASPRule(r.SystemSettings, reload))
-		opsGroup.POST("/owasp-rules/batch", BatchUpdateOWASPRules(r.SystemSettings, reload))
+		opsGroup.POST("/owasp-rules/:id/update", detect.UpdateSingleOWASPRule(r.SystemSettings, reload))
+		opsGroup.POST("/owasp-rules/batch", detect.BatchUpdateOWASPRules(r.SystemSettings, reload))
 
-		// Captcha configuration
-		opsGroup.POST("/captcha/config", UpdateCaptchaConfig(r.SystemSettings, reload))
-		opsGroup.POST("/captcha/test", TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
+		opsGroup.POST("/captcha/config", protect.UpdateCaptchaConfig(r.SystemSettings, reload))
+		opsGroup.POST("/captcha/test", protect.TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
 
-		// Chain challenge configuration
-		opsGroup.POST("/chain/config", UpdateChainConfig(r.SystemSettings, reload))
-		opsGroup.POST("/chain/sessions/:id/delete", DeleteChainSession())
+		opsGroup.POST("/chain/config", protect.UpdateChainConfig(r.SystemSettings, reload))
+		opsGroup.POST("/chain/sessions/:id/delete", protect.DeleteChainSession())
 
-		// Sensitivity configuration
-		opsGroup.POST("/protection/:id/sensitivity", UpdateSensitivityConfig(r.SystemSettings, reload))
+		opsGroup.POST("/protection/:id/sensitivity", protect.UpdateSensitivityConfig(r.SystemSettings, reload))
 
-		// Escalation configuration
-		opsGroup.POST("/protection/:id/escalation", UpdateEscalationConfig(r.SystemSettings, reload))
-		opsGroup.POST("/escalation/status/:ip/reset", ResetEscalationIPStatus(deps.EscalationMgr))
+		opsGroup.POST("/protection/:id/escalation", protect.UpdateEscalationConfig(r.SystemSettings, reload))
+		opsGroup.POST("/escalation/status/:ip/reset", protect.ResetEscalationIPStatus(deps.EscalationMgr))
 
-		// Application routes (resource inventory rules + recorded rows)
-		opsGroup.POST("/sites/:id/application-route-rules", CreateApplicationRouteRule(r.Site, r.AppRouteRule, reload))
-		opsGroup.POST("/sites/:id/application-route-rules/:rid/update", UpdateApplicationRouteRule(r.Site, r.AppRouteRule, reload))
-		opsGroup.POST("/sites/:id/application-route-rules/:rid/delete", DeleteApplicationRouteRule(r.Site, r.AppRouteRule, reload))
-		opsGroup.POST("/sites/:id/recorded-resources/clear", ClearRecordedResources(r.Site, r.RecordedResource))
+		opsGroup.POST("/sites/:id/application-route-rules", rule.CreateApplicationRouteRule(r.Site, r.AppRouteRule, reload))
+		opsGroup.POST("/sites/:id/application-route-rules/:rid/update", rule.UpdateApplicationRouteRule(r.Site, r.AppRouteRule, reload))
+		opsGroup.POST("/sites/:id/application-route-rules/:rid/delete", rule.DeleteApplicationRouteRule(r.Site, r.AppRouteRule, reload))
+		opsGroup.POST("/sites/:id/recorded-resources/clear", rule.ClearRecordedResources(r.Site, r.RecordedResource))
 
-		// Error pages
-		opsGroup.POST("/sites/:id/error-pages", UpdateSiteErrorPages(r.Site, reload))
-		opsGroup.POST("/error-pages/preview", PreviewErrorPage())
+		opsGroup.POST("/sites/:id/error-pages", site.UpdateSiteErrorPages(r.Site, reload))
+		opsGroup.POST("/error-pages/preview", site.PreviewErrorPage())
 	}
 
-	// ── Admin-only routes (system settings, API keys management) ──
 	adminGroup := api.Group("")
 	adminGroup.Use(RequireRole(auth.RoleAdmin))
 	{
-		// System Settings (write)
-		adminGroup.POST("/settings", CreateSetting(r.SystemSettings, reload))
-		adminGroup.POST("/settings/:key", SetSetting(r.SystemSettings, reload))
-		adminGroup.POST("/settings/:key/update", SetSetting(r.SystemSettings, reload))
-		adminGroup.POST("/settings/:key/delete", DeleteSetting(r.SystemSettings, reload))
+		adminGroup.POST("/settings", system.CreateSetting(r.SystemSettings, reload))
+		adminGroup.POST("/settings/:key", system.SetSetting(r.SystemSettings, reload))
+		adminGroup.POST("/settings/:key/update", system.SetSetting(r.SystemSettings, reload))
+		adminGroup.POST("/settings/:key/delete", system.DeleteSetting(r.SystemSettings, reload))
 
-		// API Keys (create/delete)
-		adminGroup.POST("/api-keys", CreateAPIKey(r.AdminAPIKey))
-		adminGroup.POST("/api-keys/:id/delete", DeleteAPIKey(r.AdminAPIKey))
+		adminGroup.POST("/api-keys", system.CreateAPIKey(r.AdminAPIKey))
+		adminGroup.POST("/api-keys/:id/delete", system.DeleteAPIKey(r.AdminAPIKey))
 
-		// Drop policy (admin only)
-		adminGroup.POST("/drop-policy/update", UpdateDropPolicy(r.SystemSettings, reload))
+		adminGroup.POST("/drop-policy/update", protect.UpdateDropPolicy(r.SystemSettings, reload))
 
-		// CVE rules CRUD (admin only)
-		adminGroup.POST("/cve-rules", CreateCVERule(r.CVERule, deps.CVEFeedMgr))
-		adminGroup.POST("/cve-rules/:id/update", UpdateCVERule(r.CVERule, deps.CVEFeedMgr))
-		adminGroup.POST("/cve-rules/:id/delete", DeleteCVERule(r.CVERule, deps.CVEFeedMgr))
+		adminGroup.POST("/cve-rules", detect.CreateCVERule(r.CVERule, deps.CVEFeedMgr))
+		adminGroup.POST("/cve-rules/:id/update", detect.UpdateCVERule(r.CVERule, deps.CVEFeedMgr))
+		adminGroup.POST("/cve-rules/:id/delete", detect.DeleteCVERule(r.CVERule, deps.CVEFeedMgr))
 	}
 
-	// WASM PoW assets (served on admin port too so shield challenges work)
 	h.GET("/__owaf/pow.wasm", func(ctx context.Context, c *app.RequestContext) {
-		waf.ServePoWWASM(c)
+		challenge.ServePoWWASM(c)
 	})
 	h.GET("/__owaf/wasm_exec.js", func(ctx context.Context, c *app.RequestContext) {
-		waf.ServeWasmExecJS(c)
+		challenge.ServeWasmExecJS(c)
 	})
 
-	// Frontend static files (SPA fallback)
 	mountStaticHandler(h, deps.StaticFS)
 }
 

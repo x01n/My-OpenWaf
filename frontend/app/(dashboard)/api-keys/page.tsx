@@ -76,7 +76,7 @@ export default function APIKeysPage() {
         title="API 密钥"
         description="为自动化任务、CI/CD 或运维脚本生成 Bearer Token。创建后仅返回一次明文 Token。"
         actions={
-          <Button className="gap-2 rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={() => { setDialogOpen(true); setCreatedToken(null); setNewKeyName(""); }}>
+          <Button className="gap-2 rounded-md bg-teal-500 text-white hover:bg-teal-600" onClick={() => { setDialogOpen(true); setCreatedToken(null); setNewKeyName(""); }}>
             <Plus className="h-4 w-4" /> 创建密钥
           </Button>
         }

@@ -11,6 +11,7 @@ import (
 	"My-OpenWaf/internal/store/repository"
 
 	goredis "github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 const redisAccessLogListKey = "openwaf:access_logs"
@@ -18,6 +19,7 @@ const redisAccessLogListKey = "openwaf:access_logs"
 type AccessLogWriter struct {
 	repo          *repository.AccessLogRepo
 	redis         *goredis.Client
+	coord         *WriteCoordinator
 	ch            chan store.AccessLog
 	log           *slog.Logger
 	stopCh        chan struct{}
@@ -29,11 +31,11 @@ type AccessLogWriter struct {
 func NewAccessLogWriter(repo *repository.AccessLogRepo, log *slog.Logger) *AccessLogWriter {
 	w := &AccessLogWriter{
 		repo:          repo,
-		ch:            make(chan store.AccessLog, 4096),
+		ch:            make(chan store.AccessLog, 16384),
 		log:           log,
 		stopCh:        make(chan struct{}),
-		batchSize:     64,
-		flushInterval: 2 * time.Second,
+		batchSize:     256,
+		flushInterval: 5 * time.Second,
 	}
 	w.wg.Add(1)
 	go w.loop()
@@ -42,6 +44,11 @@ func NewAccessLogWriter(repo *repository.AccessLogRepo, log *slog.Logger) *Acces
 
 func (w *AccessLogWriter) SetRedis(client *goredis.Client) {
 	w.redis = client
+}
+
+// SetCoordinator enables serialized DB writes through a shared coordinator.
+func (w *AccessLogWriter) SetCoordinator(wc *WriteCoordinator) {
+	w.coord = wc
 }
 
 func (w *AccessLogWriter) Record(item store.AccessLog) {
@@ -99,7 +106,12 @@ func (w *AccessLogWriter) flush(buf []store.AccessLog) {
 	if w.redis != nil {
 		w.pushToRedis(batch)
 	}
-	if err := w.repo.BatchCreate(batch); err != nil {
+	if w.coord != nil {
+		items := batch
+		w.coord.Submit(func(tx *gorm.DB) error {
+			return tx.CreateInBatches(items, 100).Error
+		})
+	} else if err := w.repo.BatchCreate(batch); err != nil {
 		w.log.Error("failed to write access logs", slog.Any("err", err), slog.Int("count", len(batch)))
 	}
 }

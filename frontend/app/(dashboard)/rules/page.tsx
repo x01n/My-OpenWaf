@@ -229,7 +229,7 @@ function CustomRulesContent() {
             <Button variant="outline" className="rounded-md border-slate-200 text-slate-700 hover:bg-slate-100" onClick={handleExport}>
               <Download className="mr-2 h-4 w-4" /> 导出
             </Button>
-            <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openCreate}>
+            <Button className="rounded-md bg-teal-500 text-white hover:bg-teal-600" onClick={openCreate}>
               <Plus className="mr-2 h-4 w-4" /> 创建规则
             </Button>
           </div>
@@ -264,7 +264,7 @@ function CustomRulesContent() {
           <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">加载中...</div>
         ) : items.length === 0 ? (
           <EmptyState title="暂无规则" description="点击「创建规则」添加第一条自定义规则。" action={
-            <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openCreate}><Plus className="mr-2 h-4 w-4" /> 创建规则</Button>
+            <Button className="rounded-md bg-teal-500 text-white hover:bg-teal-600" onClick={openCreate}><Plus className="mr-2 h-4 w-4" /> 创建规则</Button>
           } />
         ) : (
           <div className="space-y-4">
@@ -433,7 +433,7 @@ function CustomRulesContent() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-md" onClick={() => setDialogOpen(false)}>取消</Button>
-            <Button onClick={handleSave} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
+            <Button onClick={handleSave} disabled={saving} className="rounded-md bg-teal-500 text-white hover:bg-teal-600">
               {saving ? "保存中..." : editingId ? "更新规则" : "创建规则"}
             </Button>
           </DialogFooter>

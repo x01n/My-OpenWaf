@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -31,8 +32,22 @@ import (
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/antireplay"
+	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/cve"
+	"My-OpenWaf/internal/waf/drop"
+	"My-OpenWaf/internal/waf/escalation"
+	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/ratelimit"
 )
+
+func maskCredential(s string) string {
+	if len(s) <= 6 {
+		return s[:1] + strings.Repeat("*", len(s)-1)
+	}
+	return s[:3] + strings.Repeat("*", len(s)-6) + s[len(s)-3:]
+}
 
 func Run() {
 	log := logger.New("app")
@@ -62,10 +77,10 @@ func Run() {
 		bannerLines = append(bannerLines, "")
 		if password != "" {
 			bannerLines = append(bannerLines, "  Admin Username : admin")
-			bannerLines = append(bannerLines, "  Admin Password : "+password)
+			bannerLines = append(bannerLines, "  Admin Password : "+maskCredential(password))
 		}
 		if token != "" {
-			bannerLines = append(bannerLines, "  API Token      : "+token)
+			bannerLines = append(bannerLines, "  API Token      : "+maskCredential(token))
 		}
 		bannerLines = append(bannerLines, "")
 		logger.Banner(bannerLines...)
@@ -80,23 +95,22 @@ func Run() {
 	jwtSecret := resolveJWTSecret(rt)
 
 	// Derive challenge cookie secret from JWT secret for persistence across restarts.
-	waf.SetChallengeSecret(jwtSecret)
+	challenge.SetChallengeSecret(jwtSecret)
 
 	repos := repository.New(rt.DB)
 
-	// Security event writer (async batch insert, non-blocking).
-	eventWriter := observability.NewEventWriter(repos.SecurityEvent, logger.New("events"))
-	if rt.Redis != nil {
-		eventWriter.SetRedis(rt.Redis)
-	}
-	defer eventWriter.Close()
+	// Query count cache: reduces expensive COUNT(*) on access_logs/security_events.
+	queryCache := cache.NewQueryCache(5 * time.Second)
+	defer queryCache.Close()
+	repos.AccessLog.SetCountCache(queryCache)
 
-	// Access log writer (async batch insert, non-blocking).
-	accessLogWriter := observability.NewAccessLogWriter(repos.AccessLog, logger.New("access_logs"))
+	// Unified writer: single goroutine drains all observability channels and
+	// flushes them in one DB transaction, eliminating SQLite lock contention.
+	unifiedWriter := observability.NewUnifiedWriter(rt.DB, logger.New("writer"))
 	if rt.Redis != nil {
-		accessLogWriter.SetRedis(rt.Redis)
+		unifiedWriter.SetRedis(rt.Redis)
 	}
-	defer accessLogWriter.Close()
+	defer unifiedWriter.Close()
 
 	// Event archiver (auto-delete security events, access logs and drop events based on retention config).
 	archiver := observability.NewArchiver(repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
@@ -115,23 +129,23 @@ func Run() {
 	if sn != nil {
 		prot = sn.Protection
 	}
-	var reqRL waf.RateLimiterBackend
-	var errRL waf.RateLimiterBackend
+	var reqRL ratelimit.RateLimiterBackend
+	var errRL ratelimit.RateLimiterBackend
 	if rt.Redis != nil {
-		reqRL = waf.NewRedisRateLimiter(rt.Redis, "openwaf:request", prot.RequestRateLimitWindow, prot.RequestRateLimitMax, prot.RequestRateLimitEnabled)
-		errRL = waf.NewRedisRateLimiter(rt.Redis, "openwaf:error", prot.ErrorRateLimitWindow, prot.ErrorRateLimitMax, prot.ErrorRateLimitEnabled)
+		reqRL = ratelimit.NewRedisRateLimiter(rt.Redis, "openwaf:request", prot.RequestRateLimitWindow, prot.RequestRateLimitMax, prot.RequestRateLimitEnabled)
+		errRL = ratelimit.NewRedisRateLimiter(rt.Redis, "openwaf:error", prot.ErrorRateLimitWindow, prot.ErrorRateLimitMax, prot.ErrorRateLimitEnabled)
 	}
 	if reqRL == nil {
-		reqRL = waf.NewRateLimiter(prot.RequestRateLimitWindow, prot.RequestRateLimitMax, prot.RequestRateLimitEnabled)
+		reqRL = ratelimit.NewRateLimiter(prot.RequestRateLimitWindow, prot.RequestRateLimitMax, prot.RequestRateLimitEnabled)
 	}
 	if errRL == nil {
-		errRL = waf.NewRateLimiter(prot.ErrorRateLimitWindow, prot.ErrorRateLimitMax, prot.ErrorRateLimitEnabled)
+		errRL = ratelimit.NewRateLimiter(prot.ErrorRateLimitWindow, prot.ErrorRateLimitMax, prot.ErrorRateLimitEnabled)
 	}
 	defer reqRL.Close()
 	defer errRL.Close()
 
 	// IP reputation (blacklist + whitelist + auto-ban).
-	ipRep := waf.NewIPReputation()
+	ipRep := iprep.NewIPReputation()
 	defer ipRep.Close()
 	loadIPLists(ipRep, repos.IPList)
 	ipRep.ConfigureAutoBan(prot.AutoBanEnabled, prot.AutoBanThreshold, prot.AutoBanWindow, prot.AutoBanDuration)
@@ -142,27 +156,23 @@ func Run() {
 	if err != nil || cveFeedInterval <= 0 {
 		cveFeedInterval = 6 * time.Hour
 	}
-	cveFeedMgr := waf.NewCVEFeedManagerWithFeed(rt.DB, eng.CVEDetector(), cveFeedInterval, rt.Config.CVE.NVDAPIKey, rt.Config.CVE.AutoApprove, rt.Config.CVE.FeedEnabled, logger.New("cve_feed"))
+	cveFeedMgr := cve.NewCVEFeedManagerWithFeed(rt.DB, eng.CVEDetector(), cveFeedInterval, rt.Config.CVE.NVDAPIKey, rt.Config.CVE.AutoApprove, rt.Config.CVE.FeedEnabled, logger.New("cve_feed"))
 	cveFeedMgr.Start()
 	defer cveFeedMgr.Stop()
 
-	// TLS fingerprinter for native JA3 capture.
-	tlsFP := waf.NewTLSFingerprinter()
-	waf.SetTLSFingerprinter(tlsFP)
-
 	// Drop executor (TCP connection close strategy).
 	dropCfg := loadDropPolicy(repos.SystemSettings, rt.Config.Drop)
-	dropExec := waf.NewDropExecutor(dropCfg.Enabled, logger.New("drop"))
+	dropExec := drop.NewDropExecutor(dropCfg.Enabled, logger.New("drop"))
 	eng.SetDropExecutor(dropExec)
 
 	// GeoIP resolver for bot two-phase scoring (graceful degradation if DB missing).
-	var geoResolver *waf.MaxMindResolver
+	var geoResolver *bot.MaxMindResolver
 	botCfg := rt.Config.Bot
 	if botCfg.Enabled {
-		geoResolver = waf.NewMaxMindResolver(botCfg.GeoIPDBPath, botCfg.GeoIPDBPath, botCfg)
+		geoResolver = bot.NewMaxMindResolver(botCfg.GeoIPDBPath, botCfg.GeoIPDBPath, botCfg)
 		eng.SetGeoResolver(geoResolver, botCfg.ScoreThreshold)
 		// Also set the global GeoResolver so LookupGeo works everywhere.
-		waf.SetGeoResolver(geoResolver)
+		bot.SetGeoResolver(geoResolver)
 	}
 
 	// Redis config sync (distributed reload notifications).
@@ -180,12 +190,12 @@ func Run() {
 	dpLog := logger.New("dataplane")
 
 	// Challenge managers: CAPTCHA, Shield (5-second), Chain.
-	captchaMgr := waf.NewCaptchaManager(rt.Redis, time.Duration(prot.CaptchaTimeout)*time.Second)
-	shieldMgr := waf.NewShieldManager(captchaMgr, rt.Redis, prot.ShieldDifficulty)
-	chainMgr := waf.NewChainChallengeManager(captchaMgr, rt.Redis)
+	captchaMgr := challenge.NewCaptchaManager(rt.Redis, time.Duration(prot.CaptchaTimeout)*time.Second)
+	shieldMgr := challenge.NewShieldManager(captchaMgr, rt.Redis, prot.ShieldDifficulty)
+	chainMgr := challenge.NewChainChallengeManager(captchaMgr, rt.Redis)
 
 	// Anti-replay nonce protection manager.
-	antiReplayMgr := waf.NewAntiReplayManager("", rt.Redis, 5*time.Minute)
+	antiReplayMgr := antireplay.NewAntiReplayManager("", rt.Redis, 5*time.Minute)
 	eng.SetAntiReplayManager(antiReplayMgr)
 
 	// ─── Auth subsystems ───
@@ -194,7 +204,7 @@ func Run() {
 	sessionMgr := auth.NewSessionManager(rt.DB)
 
 	// Escalation (step-up response) manager.
-	escalationMgr := waf.NewEscalationManager(rt.Redis)
+	escalationMgr := escalation.NewEscalationManager(rt.Redis)
 	applyProtectionRuntimeConfig := func(p store.ProtectionConfig) {
 		reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
 		errRL.Reconfigure(p.ErrorRateLimitWindow, p.ErrorRateLimitMax, p.ErrorRateLimitEnabled)
@@ -209,17 +219,17 @@ func Run() {
 		eng.SetBotThreshold(dropPolicy.BotScoreThreshold)
 		if p.EscalationEnabled {
 			steps := p.GetEscalationSteps()
-			wafSteps := make([]waf.EscalationStep, len(steps))
+			wafSteps := make([]escalation.EscalationStep, len(steps))
 			for i, s := range steps {
-				wafSteps[i] = waf.EscalationStep{Threshold: s.Threshold, Action: s.Action}
+				wafSteps[i] = escalation.EscalationStep{Threshold: s.Threshold, Action: s.Action}
 			}
-			escalationMgr.SetDefaultConfig(waf.EscalationConfig{
+			escalationMgr.SetDefaultConfig(escalation.EscalationConfig{
 				Enabled:    true,
 				WindowSecs: p.EscalationWindowSecs,
 				Steps:      wafSteps,
 			})
 		} else {
-			escalationMgr.SetDefaultConfig(waf.EscalationConfig{Enabled: false})
+			escalationMgr.SetDefaultConfig(escalation.EscalationConfig{Enabled: false})
 		}
 	}
 	applyProtectionRuntimeConfig(prot)
@@ -228,20 +238,16 @@ func Run() {
 
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
 	dpOpts := dataplane.Options{
-		Holder:                rt.Snapshot,
-		Engine:                eng,
-		Metrics:               metrics,
-		EventWriter:           eventWriter,
-		AccessLogWriter:       accessLogWriter,
-		DropEventRepo:         repos.DropEvent,
-		ResponseCache:         responseCache,
-		Log:                   dpLog,
-		CaptchaManager:        captchaMgr,
-		ShieldManager:         shieldMgr,
-		ChainManager:          chainMgr,
-		RecordedResourceRepo:  repos.RecordedResource,
-		BotScoreRepo:          repos.BotScore,
-		FingerprintRepo:       repos.Fingerprint,
+		Holder:               rt.Snapshot,
+		Engine:               eng,
+		Metrics:              metrics,
+		Writer:               unifiedWriter,
+		ResponseCache:        responseCache,
+		Log:                  dpLog,
+		CaptchaManager:       captchaMgr,
+		ShieldManager:        shieldMgr,
+		ChainManager:         chainMgr,
+		RecordedResourceRepo: repos.RecordedResource,
 	}
 
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
@@ -361,6 +367,7 @@ func Run() {
 		CVEFeedMgr:    cveFeedMgr,
 		EscalationMgr: escalationMgr,
 		CaptchaMgr:    captchaMgr,
+		Cache:         cache.NewRedisKV(rt.Redis),
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
@@ -410,7 +417,7 @@ func listenerRuntimesByBind(sn *snapshotpkg.Snapshot) []snapshotpkg.SiteRuntime 
 	return items
 }
 
-func loadIPLists(rep *waf.IPReputation, repo *repository.IPListRepo) {
+func loadIPLists(rep *iprep.IPReputation, repo *repository.IPListRepo) {
 	if repo == nil {
 		return
 	}
@@ -418,9 +425,9 @@ func loadIPLists(rep *waf.IPReputation, repo *repository.IPListRepo) {
 	if err != nil {
 		return
 	}
-	var blacks, whites []waf.IPListEntry
+	var blacks, whites []iprep.IPListEntry
 	for _, it := range items {
-		e, ok := waf.ParseIPListEntry(it.Value, it.Note, it.Action)
+		e, ok := iprep.ParseIPListEntry(it.Value, it.Note, it.Action)
 		if !ok {
 			continue
 		}
@@ -481,8 +488,19 @@ func resolveJWTSecret(rt *core.Runtime) []byte {
 // buildDataServer creates a Hertz server for a data-plane listener,
 // optionally configured with TLS termination when the listener has TLS enabled.
 func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, dpOpts dataplane.Options) *server.Hertz {
+	rawLn, err := net.Listen("tcp", siteRT.Bind)
+	if err != nil {
+		slog.Error("data listener bind failed",
+			slog.String("bind", siteRT.Bind),
+			slog.Any("err", err),
+		)
+		return nil
+	}
+	wrappedLn := dataplane.NewFixURIListener(rawLn)
+
 	opts := []config.Option{
-		server.WithHostPorts(siteRT.Bind),
+		server.WithListener(wrappedLn),
+		server.WithTransport(standard.NewTransporter),
 		server.WithUseRawPath(true),
 		server.WithUnescapePathValues(false),
 		server.WithDisablePreParseMultipartForm(true),
@@ -491,11 +509,11 @@ func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, d
 	if siteRT.Site.TLSEnabled {
 		tlsCfg := buildListenerTLS(siteRT, sn)
 		if tlsCfg == nil {
+			rawLn.Close()
 			return nil
 		}
 		opts = append(opts,
 			server.WithTLS(tlsCfg),
-			server.WithTransport(standard.NewTransporter),
 		)
 	}
 
@@ -503,9 +521,6 @@ func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, d
 	o := dpOpts
 	o.Bind = siteRT.Bind
 	handler := dataplane.Handler(o)
-	// Register as NoRoute handler so our handler processes ALL requests.
-	// Global Use() middleware only runs when a route matches; since the data-plane
-	// has no explicit routes we must use NoRoute to catch everything.
 	srv.NoRoute(handler)
 	return srv
 }
@@ -568,10 +583,6 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 		MaxVersion:   maxVer,
 		NextProtos:   alpn,
 	}
-	// Wrap with TLS fingerprinter to capture JA3 from ClientHello.
-	if fp := waf.GetTLSFingerprinter(); fp != nil {
-		cfg = fp.WrapTLSConfig(cfg)
-	}
 	return cfg
 }
 
@@ -624,11 +635,11 @@ func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-func parseChainSteps(raw string) []waf.ChainStepConfig {
+func parseChainSteps(raw string) []challenge.ChainStepConfig {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	var steps []waf.ChainStepConfig
+	var steps []challenge.ChainStepConfig
 	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
 		return nil
 	}

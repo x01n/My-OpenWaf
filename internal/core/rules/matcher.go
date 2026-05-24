@@ -416,6 +416,39 @@ func (m *hostFullMatcher) Match(_ net.IP, _, _, _ string, headers map[string]str
 	return fullLower == pl || hostName == pl
 }
 
+type hostRegexMatcher struct{ re *regexp.Regexp }
+
+func (m *hostRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
+	raw := strings.TrimSpace(headerValue(headers, "host"))
+	if raw == "" {
+		return false
+	}
+	hostName, _ := splitHostPortHeader(raw)
+	return m.re.MatchString(hostName)
+}
+
+type hostContainsMatcher struct{ substr string }
+
+func (m *hostContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
+	raw := strings.TrimSpace(headerValue(headers, "host"))
+	if raw == "" {
+		return false
+	}
+	hostName, _ := splitHostPortHeader(raw)
+	return strings.Contains(hostName, strings.ToLower(m.substr))
+}
+
+type hostNotContainsMatcher struct{ substr string }
+
+func (m *hostNotContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
+	raw := strings.TrimSpace(headerValue(headers, "host"))
+	if raw == "" {
+		return true
+	}
+	hostName, _ := splitHostPortHeader(raw)
+	return !strings.Contains(hostName, strings.ToLower(m.substr))
+}
+
 // fullURLContainsMatcher matches path + raw query (lowercased) for a substring.
 type fullURLContainsMatcher struct{ substr string }
 
@@ -571,6 +604,19 @@ func buildMatcher(kind, arg string) Matcher {
 
 	case "host":
 		return &hostMatcher{pattern: arg}
+
+	case "host_regex":
+		re, err := cachedCompile(arg)
+		if err != nil {
+			return &neverMatcher{}
+		}
+		return &hostRegexMatcher{re: re}
+
+	case "host_contains":
+		return &hostContainsMatcher{substr: arg}
+
+	case "host_not_contains":
+		return &hostNotContainsMatcher{substr: arg}
 
 	case "cookie_contains":
 		return &cookieContainsMatcher{substr: arg}

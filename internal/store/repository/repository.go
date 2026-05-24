@@ -19,7 +19,6 @@ type Repos struct {
 	CVERule          *CVERuleRepo
 	CVESyncLog       *CVESyncLogRepo
 	DropEvent        *DropEventRepo
-	Fingerprint      *FingerprintRepo
 	SiteListener     *SiteListenerRepo
 	AppRouteRule     *ApplicationRouteRuleRepo
 	RecordedResource *RecordedResourceRepo
@@ -42,7 +41,6 @@ func New(db *gorm.DB) *Repos {
 		CVERule:          NewCVERuleRepo(db),
 		CVESyncLog:       NewCVESyncLogRepo(db),
 		DropEvent:        NewDropEventRepo(db),
-		Fingerprint:      NewFingerprintRepo(db),
 		SiteListener:     NewSiteListenerRepo(db),
 		AppRouteRule:     NewApplicationRouteRuleRepo(db),
 		RecordedResource: NewRecordedResourceRepo(db),

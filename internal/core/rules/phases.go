@@ -17,7 +17,13 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/store"
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/antireplay"
+	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/cve"
+	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/owasp"
+	"My-OpenWaf/internal/waf/ratelimit"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -151,11 +157,11 @@ func (p *customPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 // ── Request Rate Limit phase ──
 
 type reqRateLimitPhase struct {
-	limiter waf.RateLimiterBackend
+	limiter ratelimit.RateLimiterBackend
 	act     action.Type
 }
 
-func NewReqRateLimitPhase(limiter waf.RateLimiterBackend, act action.Type) pipeline.Phase {
+func NewReqRateLimitPhase(limiter ratelimit.RateLimiterBackend, act action.Type) pipeline.Phase {
 	return &reqRateLimitPhase{limiter: limiter, act: act}
 }
 
@@ -194,10 +200,10 @@ func (p *reqRateLimitPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 // ── IP Reputation phase ──
 
 type ipReputationPhase struct {
-	rep *waf.IPReputation
+	rep *iprep.IPReputation
 }
 
-func NewIPReputationPhase(rep *waf.IPReputation) pipeline.Phase {
+func NewIPReputationPhase(rep *iprep.IPReputation) pipeline.Phase {
 	return &ipReputationPhase{rep: rep}
 }
 
@@ -236,20 +242,20 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 // ── Bot Detection phase (two-phase: PreScreen → DeepScore) ──
 
 type botPhase struct {
-	rep       *waf.IPReputation    // optional, for recording violations
-	geo       *waf.MaxMindResolver // optional, for GeoIP scoring
+	rep       *iprep.IPReputation  // optional, for recording violations
+	geo       *bot.MaxMindResolver // optional, for GeoIP scoring
 	threshold int                  // score threshold for blocking
 }
 
 // NewBotPhase creates a bot-detection pipeline phase using the legacy
 // single-pass check (no GeoIP weighting). Kept for backward compatibility.
-func NewBotPhase(rep *waf.IPReputation) pipeline.Phase {
+func NewBotPhase(rep *iprep.IPReputation) pipeline.Phase {
 	return &botPhase{rep: rep, threshold: 80}
 }
 
 // NewBotPhaseWithGeo creates a bot-detection pipeline phase that uses the
 // two-phase PreScreen → DeepScore flow with GeoIP weighting.
-func NewBotPhaseWithGeo(rep *waf.IPReputation, geo *waf.MaxMindResolver, threshold int) pipeline.Phase {
+func NewBotPhaseWithGeo(rep *iprep.IPReputation, geo *bot.MaxMindResolver, threshold int) pipeline.Phase {
 	if threshold <= 0 {
 		threshold = 80
 	}
@@ -260,28 +266,28 @@ func (p *botPhase) Name() string { return "bot_detection" }
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// Skip challenge for requests that already passed a signed verification cookie.
-	if cookie, ok := ctx.Headers["Cookie"]; ok && waf.VerifyChallengePassCookie(cookie, ctx.Host, ctx.ClientIP, time.Now()) {
+	if cookie, ok := ctx.Headers["Cookie"]; ok && challenge.VerifyChallengePassCookie(cookie, ctx.Host, ctx.ClientIP, time.Now()) {
 		return action.Pass(), false
 	}
 
-	br := waf.NewBotRequest(ctx.Method, ctx.Path, ctx.Headers)
+	br := bot.NewBotRequest(ctx.Method, ctx.Path, ctx.Headers)
 	br.ClientIP = ctx.ClientIP
 	br.HeaderKeys = ctx.HeaderKeys
 
 	// If GeoIP resolver is available, use the two-phase flow.
 	if p.geo != nil {
-		v, bs := waf.CheckBotTwoPhase(br, p.rep, p.geo, p.threshold)
+		v, bs := bot.CheckBotTwoPhase(br, p.rep, p.geo, p.threshold)
 		p.storeBotScore(ctx, v, bs)
 		return p.verdictToResult(v, ctx)
 	}
 
 	// Fallback: legacy single-pass check.
-	v := waf.CheckBot(br)
-	p.storeBotScore(ctx, v, waf.BotScore{Total: v.Score})
+	v := bot.CheckBot(br)
+	p.storeBotScore(ctx, v, bot.BotScore{Total: v.Score})
 	return p.verdictToResult(v, ctx)
 }
 
-func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v waf.BotVerdict, bs waf.BotScore) {
+func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs bot.BotScore) {
 	if v.Category == "human" || v.Category == "good" {
 		return // Don't log benign traffic to save DB writes
 	}
@@ -319,7 +325,7 @@ func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v waf.BotVerdict, bs 
 	}
 }
 
-func (p *botPhase) verdictToResult(v waf.BotVerdict, ctx *pipeline.RequestCtx) (action.Result, bool) {
+func (p *botPhase) verdictToResult(v bot.BotVerdict, ctx *pipeline.RequestCtx) (action.Result, bool) {
 	if v.Category == "malicious" {
 		if p.rep != nil && ctx.ClientIP != nil {
 			p.rep.RecordViolation(ctx.ClientIP)
@@ -368,10 +374,10 @@ func (p *botPhase) verdictToResult(v waf.BotVerdict, ctx *pipeline.RequestCtx) (
 // ── OWASP Default phase ──
 
 type owaspPhase struct {
-	cfg store.ProtectionConfig
+	cfg *store.ProtectionConfig
 }
 
-func NewOWASPPhase(cfg store.ProtectionConfig) pipeline.Phase {
+func NewOWASPPhase(cfg *store.ProtectionConfig) pipeline.Phase {
 	return &owaspPhase{cfg: cfg}
 }
 
@@ -383,9 +389,9 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 
 	categorySensitivity := p.cfg.EffectiveCategorySensitivity()
-	overrides := waf.ParseOWASPRulesConfig(p.cfg.OWASPRulesConfig)
-	_, fileUploadEnabled := waf.CategoryThreshold(p.cfg.OWASPSensitivity, waf.CatFileUpload, categorySensitivity)
-	_, protoEnabled := waf.CategoryThreshold(p.cfg.OWASPSensitivity, waf.CatProtoViol, categorySensitivity)
+	overrides := owasp.ParseOWASPRulesConfig(p.cfg.OWASPRulesConfig)
+	_, fileUploadEnabled := owasp.CategoryThreshold(p.cfg.OWASPSensitivity, owasp.CatFileUpload, categorySensitivity)
+	_, protoEnabled := owasp.CategoryThreshold(p.cfg.OWASPSensitivity, owasp.CatProtoViol, categorySensitivity)
 
 	// Check file uploads in multipart form data.
 	ct := strings.ToLower(ctx.ContentType)
@@ -396,8 +402,8 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 			if i < len(contentTypes) {
 				fct = contentTypes[i]
 			}
-			if uploadHit, ok := waf.CheckFileUpload(fname, fct); ok {
-				if waf.ShouldSkipRule(uploadHit.RuleID, ctx.Path, overrides) {
+			if uploadHit, ok := owasp.CheckFileUpload(fname, fct); ok {
+				if owasp.ShouldSkipRule(uploadHit.RuleID, ctx.Path, overrides) {
 					continue
 				}
 				result := owaspHitResult(uploadHit, p.cfg, overrides)
@@ -406,8 +412,8 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		}
 		// Fallback: scan raw body for filenames that Go's multipart parser
 		// may miss (path traversal stripped by filepath.Base, space-extension bypass).
-		if uploadHit, ok := waf.CheckRawMultipartFilenames(ctx.Body); ok {
-			if !waf.ShouldSkipRule(uploadHit.RuleID, ctx.Path, overrides) {
+		if uploadHit, ok := owasp.CheckRawMultipartFilenames(ctx.Body); ok {
+			if !owasp.ShouldSkipRule(uploadHit.RuleID, ctx.Path, overrides) {
 				result := owaspHitResult(uploadHit, p.cfg, overrides)
 				return result, result.IsTerminal()
 			}
@@ -422,19 +428,19 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 
 	// Check HTTP method for unusual/dangerous methods before full OWASP scan.
 	if protoEnabled {
-		if methodHit, ok := waf.CheckMethodViolation(ctx.Method, ctx.Headers); ok {
-			if !waf.ShouldSkipRule(methodHit.RuleID, ctx.Path, overrides) {
+		if methodHit, ok := owasp.CheckMethodViolation(ctx.Method, ctx.Headers); ok {
+			if !owasp.ShouldSkipRule(methodHit.RuleID, ctx.Path, overrides) {
 				result := owaspHitResult(methodHit, p.cfg, overrides)
 				return result, result.IsTerminal()
 			}
 		}
 	}
 
-	hits := waf.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, categorySensitivity)
+	hits := owasp.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, categorySensitivity)
 
 	// Apply per-rule overrides and path whitelists.
 	if len(hits) > 0 {
-		hits = waf.FilterHits(hits, ctx.Path, overrides, categorySensitivity)
+		hits = owasp.FilterHits(hits, ctx.Path, overrides, categorySensitivity)
 	}
 
 	if len(hits) == 0 {
@@ -444,9 +450,9 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return result, result.IsTerminal()
 }
 
-func owaspHitResult(hit waf.OWASPHit, cfg store.ProtectionConfig, overrides map[string]waf.OWASPRuleOverride) action.Result {
+func owaspHitResult(hit owasp.OWASPHit, cfg *store.ProtectionConfig, overrides map[string]owasp.OWASPRuleOverride) action.Result {
 	act := normalizeConfiguredAction(cfg.OWASPAction)
-	override := waf.RuleOverride(hit.RuleID, overrides)
+	override := owasp.RuleOverride(hit.RuleID, overrides)
 	if override.Action != "" {
 		act = normalizeConfiguredAction(override.Action)
 	}
@@ -466,12 +472,12 @@ func owaspHitResult(hit waf.OWASPHit, cfg store.ProtectionConfig, overrides map[
 // ── CVE Detection phase ──
 
 type cvePhase struct {
-	cfg      store.ProtectionConfig
-	detector *waf.CVEDetector
+	cfg      *store.ProtectionConfig
+	detector *cve.CVEDetector
 }
 
 // NewCVEPhase creates a pipeline phase that runs CVE-specific detection.
-func NewCVEPhase(cfg store.ProtectionConfig, detector *waf.CVEDetector) pipeline.Phase {
+func NewCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDetector) pipeline.Phase {
 	return &cvePhase{cfg: cfg, detector: detector}
 }
 
@@ -482,7 +488,7 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		return action.Pass(), false
 	}
 
-	req := waf.BuildCVERequest(ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType)
+	req := cve.BuildCVERequest(ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType)
 	matches := p.detector.Detect(req, p.cfg.EffectiveCategorySensitivity())
 	if len(matches) == 0 {
 		return action.Pass(), false
@@ -504,7 +510,7 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		act = normalizeConfiguredAction(best.Action)
 		explicitAction = true
 	}
-	if overrides := waf.ParseCVERuleOverrides(p.cfg.CVERulesConfig); len(overrides) > 0 {
+	if overrides := cve.ParseCVERuleOverrides(p.cfg.CVERulesConfig); len(overrides) > 0 {
 		for _, key := range []string{best.CVEID, "cve:" + best.CVEID} {
 			if ov, ok := overrides[key]; ok {
 				if ov.Action != "" {
@@ -651,7 +657,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 			primary = append(primary, extra...)
 		}
 	}
-	if !strings.Contains(ct, "form-urlencoded") && ct != "" && looksLikeFormEncoded(body) {
+	if !strings.Contains(ct, "form-urlencoded") && !strings.Contains(ct, "multipart/form-data") && ct != "" && looksLikeFormEncoded(body) {
 		if extra := extractFormValues(string(body)); len(extra) > 0 {
 			primary = append(primary, extra...)
 		}
@@ -798,10 +804,10 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 // ── Anti-Replay Nonce phase ──
 
 type antiReplayPhase struct {
-	mgr *waf.AntiReplayManager
+	mgr *antireplay.AntiReplayManager
 }
 
-func NewAntiReplayPhase(mgr *waf.AntiReplayManager) pipeline.Phase {
+func NewAntiReplayPhase(mgr *antireplay.AntiReplayManager) pipeline.Phase {
 	return &antiReplayPhase{mgr: mgr}
 }
 
@@ -846,14 +852,14 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 // ── Parallel OWASP + CVE Detection phase ──
 
 type parallelOWASPCVEPhase struct {
-	cfg      store.ProtectionConfig
-	detector *waf.CVEDetector
+	cfg      *store.ProtectionConfig
+	detector *cve.CVEDetector
 }
 
 // NewParallelOWASPCVEPhase creates a phase that runs OWASP and CVE detection
 // concurrently using errgroup. If either hits a terminal action, the other is
 // cancelled immediately.
-func NewParallelOWASPCVEPhase(cfg store.ProtectionConfig, detector *waf.CVEDetector) pipeline.Phase {
+func NewParallelOWASPCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDetector) pipeline.Phase {
 	return &parallelOWASPCVEPhase{cfg: cfg, detector: detector}
 }
 

@@ -254,7 +254,7 @@ export default function OWASPRuleManagementPage() {
 
         <TabsContent value="sensitivity">
           <Surface title="敏感度矩阵" description="为每个 OWASP 类别配置检测敏感度级别（18 类别 × 6 级别）。" action={
-            <Button onClick={saveSensitivity} disabled={savingSens} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
+            <Button onClick={saveSensitivity} disabled={savingSens} className="rounded-md bg-teal-500 text-white hover:bg-teal-600">
               {savingSens ? "保存中..." : "保存配置"}
             </Button>
           }>
@@ -331,7 +331,7 @@ export default function OWASPRuleManagementPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-md" onClick={() => setEditRule(null)}>取消</Button>
-            <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={saveRuleOverride}>保存</Button>
+            <Button className="rounded-md bg-teal-500 text-white hover:bg-teal-600" onClick={saveRuleOverride}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

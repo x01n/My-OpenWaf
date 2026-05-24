@@ -305,7 +305,7 @@ export default function CVERuleManagementPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-md" onClick={() => setEditRule(null)}>取消</Button>
-            <Button onClick={saveEdit} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">保存</Button>
+            <Button onClick={saveEdit} className="rounded-md bg-teal-500 text-white hover:bg-teal-600">保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

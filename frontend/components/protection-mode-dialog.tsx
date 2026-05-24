@@ -89,7 +89,7 @@ export function ProtectionModeDialog({ open, onOpenChange, currentMode, onConfir
           <Button variant="outline" className="rounded-md" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button onClick={() => onConfirm(selected)} disabled={loading} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
+          <Button onClick={() => onConfirm(selected)} disabled={loading} className="rounded-md bg-teal-500 text-white hover:bg-teal-600">
             {loading ? "保存中..." : "确认切换"}
           </Button>
         </DialogFooter>

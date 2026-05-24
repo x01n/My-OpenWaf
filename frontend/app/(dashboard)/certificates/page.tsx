@@ -109,7 +109,7 @@ export default function CertificatesPage() {
         title="证书管理"
         description="管理站点 HTTPS 接入所需的 TLS 证书和私钥，支持 PEM 格式上传。"
         actions={
-          <Button className="gap-2 rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openUpload}>
+          <Button className="gap-2 rounded-md bg-teal-500 text-white hover:bg-teal-600" onClick={openUpload}>
             <Plus className="h-4 w-4" /> 上传证书
           </Button>
         }

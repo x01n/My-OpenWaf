@@ -10,7 +10,13 @@ import (
 	"My-OpenWaf/internal/core/sites"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/antireplay"
+	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/cve"
+	"My-OpenWaf/internal/waf/drop"
+	"My-OpenWaf/internal/waf/escalation"
+	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/ratelimit"
 )
 
 // compiledRules holds pre-compiled, pre-partitioned rules for a site.
@@ -20,41 +26,55 @@ type compiledRules struct {
 	Custom    []rules.Compiled
 }
 
+// phasesEntry holds a pre-built phase chain along with the protection-config
+// pointer it was built from. Because ProtectionConfig is immutable per snapshot,
+// pointer equality is enough to detect when the cached chain is still valid.
+type phasesEntry struct {
+	prot   *store.ProtectionConfig
+	phases []pipeline.Phase
+}
+
 // Engine orchestrates the full WAF processing pipeline for each request.
 type Engine struct {
 	resolver       *sites.Resolver
-	reqRateLimiter waf.RateLimiterBackend
-	errRateLimiter waf.RateLimiterBackend
-	ipRep          *waf.IPReputation
-	geoResolver    *waf.MaxMindResolver   // nil when GeoIP DB is unavailable
+	reqRateLimiter ratelimit.RateLimiterBackend
+	errRateLimiter ratelimit.RateLimiterBackend
+	ipRep          *iprep.IPReputation
+	geoResolver    *bot.MaxMindResolver   // nil when GeoIP DB is unavailable
 	botThreshold   int                    // score threshold for bot blocking
-	cveDetector    *waf.CVEDetector       // CVE-specific vulnerability detection
-	dropExecutor   *waf.DropExecutor      // TCP drop executor
-	antiReplay     *waf.AntiReplayManager // nonce-based replay prevention
-	escalation     *waf.EscalationManager // step-up response escalation
+	cveDetector    *cve.CVEDetector       // CVE-specific vulnerability detection
+	dropExecutor   *drop.DropExecutor      // TCP drop executor
+	antiReplay     *antireplay.AntiReplayManager // nonce-based replay prevention
+	escalation     *escalation.EscalationManager // step-up response escalation
 
 	// Per-snapshot rule compilation cache. Key: snapshotRevision<<32 | policyID.
 	// Cleared on snapshot change via revision check.
 	compiledMu       sync.RWMutex
 	compiledRevision uint64
 	compiledCache    map[uint]*compiledRules
+
+	// Per-snapshot phase chain cache. Key: policyID. Invalidated when revision changes.
+	phasesMu       sync.RWMutex
+	phasesRevision uint64
+	phasesCache    map[uint]*phasesEntry
 }
 
 // New creates a WAF engine backed by the given snapshot holder and rate limiters.
-func New(holder *snapshot.Holder, reqRL, errRL waf.RateLimiterBackend, ipRep *waf.IPReputation) *Engine {
+func New(holder *snapshot.Holder, reqRL, errRL ratelimit.RateLimiterBackend, ipRep *iprep.IPReputation) *Engine {
 	return &Engine{
 		resolver:       sites.NewResolver(holder),
 		reqRateLimiter: reqRL,
 		errRateLimiter: errRL,
 		ipRep:          ipRep,
 		botThreshold:   80,
-		cveDetector:    waf.NewCVEDetector(),
+		cveDetector:    cve.NewCVEDetector(),
 		compiledCache:  make(map[uint]*compiledRules),
+		phasesCache:    make(map[uint]*phasesEntry),
 	}
 }
 
 // SetGeoResolver attaches a MaxMind GeoIP resolver for bot two-phase scoring.
-func (e *Engine) SetGeoResolver(geo *waf.MaxMindResolver, threshold int) {
+func (e *Engine) SetGeoResolver(geo *bot.MaxMindResolver, threshold int) {
 	e.geoResolver = geo
 	e.SetBotThreshold(threshold)
 }
@@ -66,7 +86,7 @@ func (e *Engine) SetBotThreshold(threshold int) {
 }
 
 // IPReputation returns the underlying IP reputation system.
-func (e *Engine) IPReputation() *waf.IPReputation { return e.ipRep }
+func (e *Engine) IPReputation() *iprep.IPReputation { return e.ipRep }
 
 type ProcessResult struct {
 	Action      action.Result
@@ -116,6 +136,67 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	return cr
 }
 
+// getOrBuildPhases returns a cached phase chain for the given site or builds
+// one. The chain is keyed by (snapshotRevision, policyID) and stays valid as
+// long as the snapshot pointer / effective protection do not change.
+//
+// Hot path optimisation: this avoids allocating ~10 phase structs and a slice
+// on every request. The cache hit cost is one RLock + one map lookup.
+func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, cr *compiledRules, prot *store.ProtectionConfig) []pipeline.Phase {
+	rev := sn.Revision
+	policyID := rt.PolicyID
+
+	e.phasesMu.RLock()
+	if e.phasesRevision == rev {
+		if entry, ok := e.phasesCache[policyID]; ok && entry.prot == prot {
+			e.phasesMu.RUnlock()
+			return entry.phases
+		}
+	}
+	e.phasesMu.RUnlock()
+
+	// Build a fresh chain. Pre-allocate capacity for the maximum size.
+	phases := make([]pipeline.Phase, 0, 9)
+
+	if e.ipRep != nil {
+		phases = append(phases, rules.NewIPReputationPhase(e.ipRep))
+	}
+	if e.antiReplay != nil && rt.AntiReplayEnabled {
+		phases = append(phases, rules.NewAntiReplayPhase(e.antiReplay))
+	}
+
+	phases = append(phases, rules.NewACLAllowPrecheckPhasePrecompiled(cr.ACL))
+	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
+
+	if prot.OWASPEnabled || (prot.CVEEnabled && e.cveDetector != nil) {
+		phases = append(phases, rules.NewParallelOWASPCVEPhase(prot, e.cveDetector))
+	}
+
+	if prot.BotDetectionEnabled {
+		phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
+	}
+
+	if prot.RequestRateLimitEnabled && e.reqRateLimiter != nil {
+		act := action.Type(prot.RequestRateLimitAction)
+		phases = append(phases, rules.NewReqRateLimitPhase(e.reqRateLimiter, act))
+	}
+
+	phases = append(phases,
+		rules.NewSignaturePhasePrecompiled(cr.Signature),
+		rules.NewCustomPhasePrecompiled(cr.Custom),
+	)
+
+	e.phasesMu.Lock()
+	if e.phasesRevision != rev {
+		e.phasesCache = make(map[uint]*phasesEntry)
+		e.phasesRevision = rev
+	}
+	e.phasesCache[policyID] = &phasesEntry{prot: prot, phases: phases}
+	e.phasesMu.Unlock()
+
+	return phases
+}
+
 // Process runs a request through maintenance check, site resolution, and WAF pipeline.
 func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	sn := e.resolver.Snapshot()
@@ -146,46 +227,16 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	cr := e.getCompiledRules(sn, &rt)
 
 	// Use per-site effective protection (merged global + site overrides).
-	prot := sn.Protection
+	prot := &sn.Protection
 	if rt.EffectiveProtection != nil {
-		prot = *rt.EffectiveProtection
+		prot = rt.EffectiveProtection
 	}
 
-	var phases []pipeline.Phase
+	// Pre-allocated capacity: up to ~9 phases (IPReputation, AntiReplay,
+	// ACLAllowPrecheck, ACL, ParallelOWASPCVE, Bot, RateLimit, Signature, Custom).
+	phases := e.getOrBuildPhases(sn, &rt, cr, prot)
 
-	// ── Stage 0: IP reputation → anti-replay nonce → whitelist/blacklist ──
-	if e.ipRep != nil {
-		phases = append(phases, rules.NewIPReputationPhase(e.ipRep))
-	}
-	if e.antiReplay != nil && rt.AntiReplayEnabled {
-		phases = append(phases, rules.NewAntiReplayPhase(e.antiReplay))
-	}
-
-	phases = append(phases, rules.NewACLAllowPrecheckPhasePrecompiled(cr.ACL))
-	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
-
-	// ── Stage 1: OWASP + CVE parallel detection → hit = terminate ──
-	if prot.OWASPEnabled || (prot.CVEEnabled && e.cveDetector != nil) {
-		phases = append(phases, rules.NewParallelOWASPCVEPhase(prot, e.cveDetector))
-	}
-
-	// ── Stage 2: Bot → rate limit → escalation → signature → custom ──
-	if prot.BotDetectionEnabled {
-		phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
-	}
-
-	if prot.RequestRateLimitEnabled && e.reqRateLimiter != nil {
-		act := action.Type(prot.RequestRateLimitAction)
-		phases = append(phases, rules.NewReqRateLimitPhase(e.reqRateLimiter, act))
-	}
-
-	phases = append(phases,
-		rules.NewSignaturePhasePrecompiled(cr.Signature),
-		rules.NewCustomPhasePrecompiled(cr.Custom),
-	)
-
-	pipe := pipeline.New(phases...)
-	runResult := pipe.Run(reqCtx)
+	runResult := pipeline.Run(phases, reqCtx)
 	return ProcessResult{
 		Action:      runResult.Action,
 		Site:        &rt,
@@ -210,24 +261,24 @@ func (e *Engine) Evaluate(clientIP net.IP, path, rawQuery string, siteRules []sn
 }
 
 func (e *Engine) Resolver() *sites.Resolver              { return e.resolver }
-func (e *Engine) ErrRateLimiter() waf.RateLimiterBackend { return e.errRateLimiter }
-func (e *Engine) CVEDetector() *waf.CVEDetector          { return e.cveDetector }
-func (e *Engine) DropExecutor() *waf.DropExecutor        { return e.dropExecutor }
-func (e *Engine) AntiReplay() *waf.AntiReplayManager     { return e.antiReplay }
-func (e *Engine) Escalation() *waf.EscalationManager     { return e.escalation }
+func (e *Engine) ErrRateLimiter() ratelimit.RateLimiterBackend { return e.errRateLimiter }
+func (e *Engine) CVEDetector() *cve.CVEDetector          { return e.cveDetector }
+func (e *Engine) DropExecutor() *drop.DropExecutor        { return e.dropExecutor }
+func (e *Engine) AntiReplay() *antireplay.AntiReplayManager     { return e.antiReplay }
+func (e *Engine) Escalation() *escalation.EscalationManager     { return e.escalation }
 
 // SetDropExecutor attaches a drop executor to the engine.
-func (e *Engine) SetDropExecutor(d *waf.DropExecutor) {
+func (e *Engine) SetDropExecutor(d *drop.DropExecutor) {
 	e.dropExecutor = d
 }
 
 // SetAntiReplayManager attaches an anti-replay manager to the engine.
-func (e *Engine) SetAntiReplayManager(m *waf.AntiReplayManager) {
+func (e *Engine) SetAntiReplayManager(m *antireplay.AntiReplayManager) {
 	e.antiReplay = m
 }
 
 // SetEscalationManager attaches an escalation manager to the engine.
-func (e *Engine) SetEscalationManager(m *waf.EscalationManager) {
+func (e *Engine) SetEscalationManager(m *escalation.EscalationManager) {
 	e.escalation = m
 }
 

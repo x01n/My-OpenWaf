@@ -8,6 +8,7 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
@@ -20,12 +21,13 @@ const redisEventListKey = "openwaf:security_events"
 // Redis list for real-time consumption by external consumers (SIEM, dashboards).
 // This ensures the data-plane hot path is never blocked by a DB write.
 type EventWriter struct {
-	repo    *repository.SecurityEventRepo
-	redis   *goredis.Client
-	ch      chan store.SecurityEvent
-	log     *slog.Logger
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
+	repo   *repository.SecurityEventRepo
+	redis  *goredis.Client
+	coord  *WriteCoordinator
+	ch     chan store.SecurityEvent
+	log    *slog.Logger
+	stopCh chan struct{}
+	wg     sync.WaitGroup
 
 	// Tuning knobs.
 	batchSize     int
@@ -36,11 +38,11 @@ type EventWriter struct {
 func NewEventWriter(repo *repository.SecurityEventRepo, log *slog.Logger) *EventWriter {
 	w := &EventWriter{
 		repo:          repo,
-		ch:            make(chan store.SecurityEvent, 4096),
+		ch:            make(chan store.SecurityEvent, 16384),
 		log:           log,
 		stopCh:        make(chan struct{}),
-		batchSize:     64,
-		flushInterval: 2 * time.Second,
+		batchSize:     256,
+		flushInterval: 5 * time.Second,
 		redisTTL:      7 * 24 * time.Hour, // keep Redis events for 7 days
 	}
 	w.wg.Add(1)
@@ -52,6 +54,11 @@ func NewEventWriter(repo *repository.SecurityEventRepo, log *slog.Logger) *Event
 // in addition to the database. Safe to call before or after construction.
 func (w *EventWriter) SetRedis(client *goredis.Client) {
 	w.redis = client
+}
+
+// SetCoordinator enables serialized DB writes through a shared coordinator.
+func (w *EventWriter) SetCoordinator(wc *WriteCoordinator) {
+	w.coord = wc
 }
 
 // Record enqueues an event. Non-blocking: drops if buffer full.
@@ -121,7 +128,12 @@ func (w *EventWriter) flush(buf []store.SecurityEvent) {
 	}
 
 	// Write to database (durable storage).
-	if err := w.repo.BatchCreate(batch); err != nil {
+	if w.coord != nil {
+		items := batch
+		w.coord.Submit(func(tx *gorm.DB) error {
+			return tx.CreateInBatches(items, 100).Error
+		})
+	} else if err := w.repo.BatchCreate(batch); err != nil {
 		w.log.Error("failed to write security events", slog.Any("err", err), slog.Int("count", len(batch)))
 	}
 }

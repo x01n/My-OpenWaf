@@ -203,7 +203,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
       title="监听端口"
       description="一个站点可以同时监听多个端口（如同时启用 80 与 443），保存后自动热加载。"
       action={
-        <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openCreate}>
+        <Button className="rounded-md bg-teal-500 text-white hover:bg-teal-600" onClick={openCreate}>
           <Plus className="mr-1.5 h-4 w-4" /> 新增监听端口
         </Button>
       }
@@ -430,7 +430,7 @@ export function SiteListenersPanel({ siteId, onChanged }: SiteListenersPanelProp
             <Button
               onClick={submit}
               disabled={saving}
-              className="rounded-md bg-slate-950 text-white hover:bg-slate-800"
+              className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
             >
               {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               {saving ? "保存中..." : editing?.id === 0 ? "创建正式监听" : editing ? "保存修改" : "创建监听"}

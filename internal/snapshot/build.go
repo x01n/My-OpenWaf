@@ -153,9 +153,11 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 							Certificates: []tls.Certificate{tlsCert},
 							MinVersion:   tls.VersionTLS12,
 						}
-						h := strings.ToLower(strings.TrimSpace(listenerSite.Host))
-						if h != "" {
-							sniCerts[SNICertKey(listenerSite.Bind, h)] = tlsCert
+						for _, rawHost := range splitHosts(listenerSite.Host) {
+							h := strings.ToLower(strings.TrimSpace(rawHost))
+							if h != "" {
+								sniCerts[SNICertKey(listenerSite.Bind, h)] = tlsCert
+							}
 						}
 					}
 				}
@@ -254,18 +256,31 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 }
 
 func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) {
-	// Normalize the host the same way MatchSite does: lowercase, trim, strip port.
-	// This ensures the map key matches what MatchSite will look up.
-	h := NormalizeMatchHost(rt.Site.Host)
-	if h == "" {
-		return
-	}
 	bind := rt.Bind
-	k := SiteMapKey(bind, h)
-	if _, exists := m[k]; exists {
-		return
+	for _, host := range splitHosts(rt.Site.Host) {
+		h := NormalizeMatchHost(host)
+		if h == "" {
+			continue
+		}
+		k := SiteMapKey(bind, h)
+		if _, exists := m[k]; exists {
+			continue
+		}
+		m[k] = rt
 	}
-	m[k] = rt
+}
+
+// splitHosts splits a host field by comma, supporting multi-host per site.
+func splitHosts(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func parseUpstreamURLs(raw string) []string {

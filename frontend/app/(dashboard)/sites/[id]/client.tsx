@@ -38,6 +38,7 @@ import {
 } from "@/lib/api";
 import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console";
 import { findInvalidSiteUpstream, parseSiteUpstreams, serializeSiteUpstreams } from "@/lib/site-upstreams";
+import { MultiHostInput } from "@/components/multi-host-input";
 import { formatDate } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -104,7 +105,7 @@ export default function SiteDetailClient() {
   const [tab, setTab] = useState<TabKey>("basic");
 
   // Editable form state
-  const [host, setHost] = useState("");
+  const [hosts, setHosts] = useState<string[]>([]);
   const [bind, setBind] = useState("");
   const [network, setNetwork] = useState("tcp");
   const [tlsEnabled, setTlsEnabled] = useState(false);
@@ -164,7 +165,7 @@ export default function SiteDetailClient() {
       const s = await getSite(siteId);
       setSite(s);
       // Populate form
-      setHost(s.host);
+      setHosts(s.host ? s.host.split(",").map((h: string) => h.trim()).filter(Boolean) : []);
       setBind(s.bind);
       setNetwork(s.network);
       setTlsEnabled(s.tls_enabled);
@@ -296,7 +297,7 @@ export default function SiteDetailClient() {
     setSaving(true);
     try {
       await updateSite(site.id, {
-        host,
+        host: hosts.join(", "),
         bind,
         network,
         tls_enabled: tlsEnabled,
@@ -451,7 +452,7 @@ export default function SiteDetailClient() {
         <h3 className="text-lg font-semibold text-slate-700">站点不存在</h3>
         <p className="mt-2 text-sm text-slate-500">该站点可能已被删除或无权访问</p>
         <Button
-          className="mt-4 rounded-md bg-slate-950 text-white hover:bg-slate-800"
+          className="mt-4 rounded-md bg-teal-500 text-white hover:bg-teal-600"
           onClick={() => router.push("/sites/")}
         >
           返回应用列表
@@ -522,7 +523,7 @@ export default function SiteDetailClient() {
             </div>
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-xl font-bold text-slate-900">{site.host}</h1>
+                <h1 className="text-xl font-bold text-slate-900">{site.host?.split(",").map(h => h.trim()).join(", ")}</h1>
                 <span
                   className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
                     site.enabled
@@ -593,13 +594,8 @@ export default function SiteDetailClient() {
           {tab === "basic" && (
             <div className="space-y-5">
               <div className="grid gap-5 md:grid-cols-2">
-                <FieldGroup label="域名 / Host">
-                  <Input
-                    value={host}
-                    onChange={(e) => setHost(e.target.value)}
-                    placeholder="example.com"
-                    className="rounded-md"
-                  />
+                <FieldGroup label="域名 / Host" className="md:col-span-2">
+                  <MultiHostInput hosts={hosts} onChange={setHosts} />
                 </FieldGroup>
                 <FieldGroup label="监听地址">
                   <Input
@@ -1209,7 +1205,7 @@ export default function SiteDetailClient() {
                     <Button
                       type="button"
                       size="sm"
-                      className="rounded-md bg-slate-950 text-white hover:bg-slate-800"
+                      className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
                       onClick={() => void handleAddAppRule()}
                     >
                       <Plus className="mr-1 inline h-3.5 w-3.5" />
@@ -1442,7 +1438,7 @@ export default function SiteDetailClient() {
             <Button
               onClick={handleSave}
               disabled={saving}
-              className="rounded-md bg-slate-950 text-white hover:bg-slate-800"
+              className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
             >
               {saving ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -1458,9 +1454,9 @@ export default function SiteDetailClient() {
   );
 }
 
-function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
+function FieldGroup({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
   return (
-    <div className="space-y-1.5">
+    <div className={`space-y-1.5 ${className ?? ""}`}>
       <label className="text-sm font-medium text-slate-700">{label}</label>
       {children}
     </div>

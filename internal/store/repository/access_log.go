@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"time"
 
 	"My-OpenWaf/internal/store"
@@ -8,10 +9,24 @@ import (
 	"gorm.io/gorm"
 )
 
-type AccessLogRepo struct{ db *gorm.DB }
+type AccessLogRepo struct {
+	db         *gorm.DB
+	countCache CountCache
+}
+
+// CountCache is an optional cache for expensive COUNT queries.
+type CountCache interface {
+	Get(key string) (any, bool)
+	Set(key string, value any)
+}
 
 func NewAccessLogRepo(db *gorm.DB) *AccessLogRepo {
 	return &AccessLogRepo{db: db}
+}
+
+// SetCountCache configures an optional count cache for list queries.
+func (r *AccessLogRepo) SetCountCache(c CountCache) {
+	r.countCache = c
 }
 
 type AccessLogFilter struct {
@@ -32,8 +47,19 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 	q = applyAccessLogFilters(q, f)
 
 	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		return nil, 0, err
+	cacheKey := accessLogCountCacheKey(f)
+	if r.countCache != nil {
+		if cached, ok := r.countCache.Get(cacheKey); ok {
+			total = cached.(int64)
+		}
+	}
+	if total == 0 {
+		if err := q.Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
+		if r.countCache != nil && total > 0 {
+			r.countCache.Set(cacheKey, total)
+		}
 	}
 
 	var items []store.AccessLog
@@ -41,6 +67,29 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+func accessLogCountCacheKey(f AccessLogFilter) string {
+	key := "al_count"
+	if f.SiteID > 0 {
+		key += ":s" + fmt.Sprint(f.SiteID)
+	}
+	if f.ClientIP != "" {
+		key += ":ip" + f.ClientIP
+	}
+	if f.WAFAction != "" {
+		key += ":wa" + f.WAFAction
+	}
+	if f.StatusGroup != "" {
+		key += ":sg" + f.StatusGroup
+	}
+	if f.Since != nil {
+		key += ":si" + f.Since.Format("0601021504")
+	}
+	if f.Until != nil {
+		key += ":un" + f.Until.Format("0601021504")
+	}
+	return key
 }
 
 func (r *AccessLogRepo) Create(item *store.AccessLog) error {
@@ -59,6 +108,12 @@ func (r *AccessLogRepo) BatchCreate(items []store.AccessLog) error {
 func (r *AccessLogRepo) DeleteOlderThan(before time.Time) (int64, error) {
 	tx := r.db.Where("created_at < ?", before).Delete(&store.AccessLog{})
 	return tx.RowsAffected, tx.Error
+}
+
+func (r *AccessLogRepo) FindByRequestID(requestID string) ([]store.AccessLog, error) {
+	var items []store.AccessLog
+	err := r.db.Where("request_id = ?", requestID).Order("id ASC").Find(&items).Error
+	return items, err
 }
 
 func applyAccessLogFilters(q *gorm.DB, f AccessLogFilter) *gorm.DB {

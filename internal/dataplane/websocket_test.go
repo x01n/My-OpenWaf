@@ -21,7 +21,7 @@ func TestBuildWebSocketHandshakeHeadersAppliesForwarding(t *testing.T) {
 	req.Header.Set("Sec-WebSocket-Key", "abc")
 	req.Header.Set("X-Custom", "yes")
 	ctx := app.NewContext(0)
-	ctx.Request = req
+	req.CopyTo(&ctx.Request)
 
 	rt := snapshot.SiteRuntime{Site: store.Site{PreserveOriginalHost: true}, PreserveOriginalHost: true}
 	got := buildWebSocketHandshakeHeaders(ctx, "/ws?token=1", "upstream.internal:8080", rt, net.ParseIP("203.0.113.10"))
@@ -49,7 +49,7 @@ func TestBuildWebSocketHandshakeHeadersUsesUpstreamHostByDefault(t *testing.T) {
 	req.SetMethod("GET")
 	req.SetHost("client.example")
 	ctx := app.NewContext(0)
-	ctx.Request = req
+	req.CopyTo(&ctx.Request)
 
 	rt := snapshot.SiteRuntime{Site: store.Site{PreserveOriginalHost: false}}
 	got := buildWebSocketHandshakeHeaders(ctx, "/ws", "upstream.internal:8080", rt, nil)

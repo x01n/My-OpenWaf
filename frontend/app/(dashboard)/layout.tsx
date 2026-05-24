@@ -16,8 +16,7 @@ export default function DashboardLayout({
 
   return (
     <AuthGuard>
-      <div className="flex h-svh overflow-hidden bg-slate-50 text-slate-900">
-        {/* Mobile sidebar overlay */}
+      <div className="flex h-svh overflow-hidden bg-[#f5f7fa] text-slate-900">
         {mobileOpen && (
           <div
             className="fixed inset-0 z-40 bg-slate-950/40 lg:hidden"
@@ -41,7 +40,7 @@ export default function DashboardLayout({
         </div>
         <div className="flex min-w-0 flex-1 flex-col">
           <Topbar onMobileMenuToggle={() => setMobileOpen((v) => !v)} />
-          <main className="flex-1 overflow-y-auto bg-slate-50 p-6">
+          <main className="flex-1 overflow-y-auto bg-[#f5f7fa] p-5">
             <div className="mx-auto w-full max-w-[1600px]">{children}</div>
           </main>
         </div>

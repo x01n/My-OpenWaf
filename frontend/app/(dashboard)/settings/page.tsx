@@ -1084,7 +1084,7 @@ export default function SettingsPage() {
               description="为自动化任务、CI/CD 或运维脚本生成 Bearer Token。创建后仅返回一次明文 Token。"
               action={
                 <Button
-                  className="gap-2 rounded-md bg-slate-950 text-white hover:bg-slate-800"
+                  className="gap-2 rounded-md bg-teal-500 text-white hover:bg-teal-600"
                   onClick={() => {
                     setApiKeyDialogOpen(true);
                     setCreatedToken(null);

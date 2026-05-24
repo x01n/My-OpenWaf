@@ -8,7 +8,9 @@ import (
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/pages"
+	"My-OpenWaf/internal/waf/ratelimit"
 )
 
 func TestErrorRateLimitActionDefaultsToRateLimit(t *testing.T) {
@@ -26,7 +28,7 @@ func TestErrorRateLimitActionKeepsConfiguredIntercept(t *testing.T) {
 }
 
 func TestShouldApplyErrorRateLimitUsesHistoricalErrors(t *testing.T) {
-	rl := waf.NewRateLimiter(60, 1, true)
+	rl := ratelimit.NewRateLimiter(60, 1, true)
 	defer rl.Close()
 	eng := engine.New(&snapshot.Holder{}, nil, rl, nil)
 	key := "1.2.3.4|example.com"
@@ -42,7 +44,7 @@ func TestShouldApplyErrorRateLimitUsesHistoricalErrors(t *testing.T) {
 }
 
 func TestIncrementErrorRateLimitStatusHonorsConfiguredBuckets(t *testing.T) {
-	rl := waf.NewRateLimiter(60, 1, true)
+	rl := ratelimit.NewRateLimiter(60, 1, true)
 	defer rl.Close()
 	eng := engine.New(&snapshot.Holder{}, nil, rl, nil)
 	key := "1.2.3.4|example.com"
@@ -60,7 +62,7 @@ func TestIncrementErrorRateLimitStatusHonorsConfiguredBuckets(t *testing.T) {
 }
 
 func TestIncrementErrorRateLimitBlockHonorsSwitch(t *testing.T) {
-	rl := waf.NewRateLimiter(60, 0, true)
+	rl := ratelimit.NewRateLimiter(60, 0, true)
 	defer rl.Close()
 	eng := engine.New(&snapshot.Holder{}, nil, rl, nil)
 	key := "1.2.3.4|example.com"
@@ -85,7 +87,7 @@ func TestSiteErrorPageUsesConfiguredHTMLTemplate(t *testing.T) {
 	if cfg.Title != "Custom Upstream" || cfg.StatusCode != 502 {
 		t.Fatalf("siteErrorPage() = %#v", cfg)
 	}
-	if got, want := string(waf.RenderErrorPage(502, cfg)), "<h1>502</h1><p>Custom Upstream</p>"; got != want {
+	if got, want := string(pages.RenderErrorPage(502, cfg)), "<h1>502</h1><p>Custom Upstream</p>"; got != want {
 		t.Fatalf("RenderErrorPage() = %q, want %q", got, want)
 	}
 	if cfg := siteErrorPage(&rt, 504); cfg != nil {
@@ -106,14 +108,14 @@ func TestSiteErrorPageFillsMissingStatusCode(t *testing.T) {
 }
 
 func TestSetChallengeCookieSignsValue(t *testing.T) {
-	value := waf.SignChallengePassValue("example.com", nil, time.Unix(100, 0), time.Hour)
+	value := challenge.SignChallengePassValue("example.com", nil, time.Unix(100, 0), time.Hour)
 	if value == "1" {
 		t.Fatal("challenge pass value must not be a forgeable boolean")
 	}
-	if !waf.VerifyChallengePassValue(value, "example.com", nil, time.Unix(101, 0)) {
+	if !challenge.VerifyChallengePassValue(value, "example.com", nil, time.Unix(101, 0)) {
 		t.Fatal("signed challenge pass value did not verify")
 	}
-	if waf.VerifyChallengePassValue(value, "other.example", nil, time.Unix(101, 0)) {
+	if challenge.VerifyChallengePassValue(value, "other.example", nil, time.Unix(101, 0)) {
 		t.Fatal("signed challenge pass value verified for the wrong host")
 	}
 }

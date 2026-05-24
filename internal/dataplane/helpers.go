@@ -5,7 +5,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
-	"My-OpenWaf/internal/waf"
+	"My-OpenWaf/internal/waf/challenge"
 )
 
 // isStaticAsset returns true for common static asset paths that should skip nonce validation.
@@ -27,7 +27,7 @@ func isStaticAsset(lowerPath string) bool {
 
 // setNonceCookie sets the anti-replay nonce cookie on the response.
 func setNonceCookie(c *app.RequestContext, nonce string, secure bool) {
-	cookie := waf.NonceKey + "=" + nonce + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
+	cookie := challenge.NonceKey + "=" + nonce + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
 	if secure {
 		cookie += "; Secure"
 	}

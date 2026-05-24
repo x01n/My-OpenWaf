@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Globe, Loader2, Lock, Plus, Trash2 } from "lucide-react";
+import { Loader2, Lock, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api, getCertificates, type Certificate } from "@/lib/api";
 import { findInvalidSiteUpstream, serializeSiteUpstreams } from "@/lib/site-upstreams";
+import { MultiHostInput } from "@/components/multi-host-input";
 
 interface AddSiteDialogProps {
   open: boolean;
@@ -26,7 +27,7 @@ const defaultUpstream = "http://127.0.0.1:8080";
 type AccessMode = "proxy" | "static" | "redirect";
 
 export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogProps) {
-  const [host, setHost] = useState("");
+  const [hosts, setHosts] = useState<string[]>([]);
   const [listeners, setListeners] = useState<ListenerEntry[]>([{ port: "80", tls: false }]);
   const [certId, setCertId] = useState<number | null>(null);
   const [accessMode, setAccessMode] = useState<AccessMode>("proxy");
@@ -45,7 +46,7 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
   }, [open]);
 
   function reset() {
-    setHost("");
+    setHosts([]);
     setListeners([{ port: "80", tls: false }]);
     setCertId(null);
     setAccessMode("proxy");
@@ -79,14 +80,14 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
   }
 
   async function handleSubmit() {
-    const normalizedHost = host.trim();
     const normalizedUpstreams = upstreams.map((item) => item.trim()).filter(Boolean);
     const invalidUpstream = findInvalidSiteUpstream(normalizedUpstreams);
 
-    if (!normalizedHost) {
-      toast.error("请输入域名");
+    if (hosts.length === 0) {
+      toast.error("请至少添加一个域名");
       return;
     }
+    const normalizedHost = hosts.join(", ");
     if (listeners.length === 0) {
       toast.error("请至少添加一个监听端口");
       return;
@@ -171,24 +172,14 @@ export function AddSiteDialog({ open, onOpenChange, onSuccess }: AddSiteDialogPr
         </DialogHeader>
 
         <div className="space-y-6 px-6 py-6">
-          {/* Domain */}
-          <label className="space-y-2">
+          {/* Domain(s) */}
+          <div className="space-y-2">
             <span className="text-sm font-medium text-slate-900">
               域名 <span className="text-red-500">*</span>
+              <span className="ml-2 text-xs font-normal text-slate-400">支持多域名 &amp; 泛域名</span>
             </span>
-            <div className="flex items-center gap-2 rounded-lg border border-cyan-300 bg-white px-3 focus-within:ring-2 focus-within:ring-cyan-200">
-              <Globe className="h-4 w-4 text-slate-400" />
-              <Input
-                value={host}
-                onChange={(event) => setHost(event.target.value)}
-                placeholder="example.com"
-                className="border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
-              />
-            </div>
-            {host.trim() && (
-              <div className="rounded-md bg-slate-50 px-3 py-1 text-xs text-slate-500">{host.trim()}</div>
-            )}
-          </label>
+            <MultiHostInput hosts={hosts} onChange={setHosts} />
+          </div>
 
           {/* Listeners - multi-port */}
           <div className="space-y-3">

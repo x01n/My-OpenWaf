@@ -233,7 +233,7 @@ export default function IPListsPage() {
         </div>
         <Button
           onClick={openCreate}
-          className="gap-2 rounded-md bg-slate-950 text-white hover:bg-slate-800"
+          className="gap-2 rounded-md bg-teal-500 text-white hover:bg-teal-600"
         >
           <Plus className="h-4 w-4" /> 添加条目
         </Button>
@@ -533,7 +533,7 @@ export default function IPListsPage() {
               取消
             </Button>
             <Button
-              className="rounded-md bg-slate-950 text-white hover:bg-slate-800"
+              className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
               onClick={handleSave}
               disabled={saving}
             >

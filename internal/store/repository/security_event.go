@@ -59,6 +59,12 @@ func (r *SecurityEventRepo) Create(item *store.SecurityEvent) error {
 	return r.db.Create(item).Error
 }
 
+func (r *SecurityEventRepo) FindByRequestID(requestID string) ([]store.SecurityEvent, error) {
+	var items []store.SecurityEvent
+	err := r.db.Where("request_id = ?", requestID).Order("id ASC").Find(&items).Error
+	return items, err
+}
+
 func (r *SecurityEventRepo) BatchCreate(items []store.SecurityEvent) error {
 	if len(items) == 0 {
 		return nil

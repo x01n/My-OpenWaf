@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"sync"
 	"time"
 
 	"My-OpenWaf/internal/store"
@@ -26,6 +25,14 @@ type BotScoreFilter struct {
 
 func (r *BotScoreRepo) Create(item *store.BotScoreLog) error {
 	return r.db.Create(item).Error
+}
+
+// BatchCreate inserts multiple bot score logs in a single transaction.
+func (r *BotScoreRepo) BatchCreate(items []store.BotScoreLog) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return r.db.CreateInBatches(items, 100).Error
 }
 
 func (r *BotScoreRepo) List(offset, limit int, f BotScoreFilter) ([]store.BotScoreLog, int64, error) {
@@ -79,94 +86,4 @@ func applyBotScoreFilters(q *gorm.DB, f BotScoreFilter) *gorm.DB {
 		q = q.Where("created_at <= ?", *f.EndTime)
 	}
 	return q
-}
-
-// ─── Fingerprint Repo ───────────────────────────────────────────────
-
-type FingerprintRepo struct{ db *gorm.DB }
-
-func NewFingerprintRepo(db *gorm.DB) *FingerprintRepo {
-	return &FingerprintRepo{db: db}
-}
-
-// RecordFingerprint upserts a fingerprint record: increments count if exists, creates if new.
-// Uses an in-memory dedup cache to avoid excessive DB writes for the same JA3 hash.
-func (r *FingerprintRepo) RecordFingerprint(ja3Hash, browser string, isKnownGood bool) {
-	// Rate limit: only write once per JA3 hash per 60 seconds.
-	fpDedupMu.Lock()
-	if t, ok := fpDedupCache[ja3Hash]; ok && time.Since(t) < 60*time.Second {
-		fpDedupMu.Unlock()
-		return
-	}
-	fpDedupCache[ja3Hash] = time.Now()
-	fpDedupMu.Unlock()
-
-	var existing store.FingerprintRecord
-	err := r.db.Where("ja3_hash = ?", ja3Hash).First(&existing).Error
-	if err == nil {
-		// Update existing
-		r.db.Model(&existing).Updates(map[string]any{
-			"count":     existing.Count + 1,
-			"last_seen": time.Now(),
-			"browser":   browser,
-		})
-	} else {
-		// Create new
-		r.db.Create(&store.FingerprintRecord{
-			JA3Hash:     ja3Hash,
-			Browser:     browser,
-			Count:       1,
-			LastSeen:    time.Now(),
-			IsKnownGood: isKnownGood,
-		})
-	}
-}
-
-var (
-	fpDedupMu    sync.Mutex
-	fpDedupCache = make(map[string]time.Time)
-)
-
-// FingerprintStats holds aggregated fingerprint statistics.
-type FingerprintStats struct {
-	TopJA3      []FingerprintEntry `json:"top_ja3"`
-	BrowserDist []BrowserDist      `json:"browser_distribution"`
-	TotalCount  int64              `json:"total_count"`
-}
-
-type FingerprintEntry struct {
-	JA3Hash     string `json:"ja3_hash"`
-	Count       int64  `json:"count"`
-	IsKnownGood bool   `json:"is_known_good"`
-}
-
-type BrowserDist struct {
-	Browser string `json:"browser"`
-	Count   int64  `json:"count"`
-}
-
-func (r *FingerprintRepo) GetStats() (*FingerprintStats, error) {
-	var totalCount int64
-	r.db.Model(&store.FingerprintRecord{}).Count(&totalCount)
-
-	var topJA3 []FingerprintEntry
-	r.db.Model(&store.FingerprintRecord{}).
-		Select("ja3_hash, count, is_known_good").
-		Order("count DESC").
-		Limit(10).
-		Scan(&topJA3)
-
-	var browserDist []BrowserDist
-	r.db.Model(&store.FingerprintRecord{}).
-		Select("browser, SUM(count) as count").
-		Where("browser != ''").
-		Group("browser").
-		Order("count DESC").
-		Scan(&browserDist)
-
-	return &FingerprintStats{
-		TopJA3:      topJA3,
-		BrowserDist: browserDist,
-		TotalCount:  totalCount,
-	}, nil
 }

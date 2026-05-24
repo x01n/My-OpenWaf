@@ -27,6 +27,14 @@ func (r *DropEventRepo) Create(item *store.DropEvent) error {
 	return r.db.Create(item).Error
 }
 
+// BatchCreate inserts multiple drop events in a single transaction.
+func (r *DropEventRepo) BatchCreate(items []store.DropEvent) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return r.db.CreateInBatches(items, 100).Error
+}
+
 func (r *DropEventRepo) List(offset, limit int, f DropEventFilter) ([]store.DropEvent, int64, error) {
 	q := r.db.Model(&store.DropEvent{})
 	if f.SiteID > 0 {

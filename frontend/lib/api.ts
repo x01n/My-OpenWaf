@@ -333,7 +333,6 @@ export interface DashboardSummary {
   cve_by_type_24h: Array<{ category: string; count: number }>;
   drop_total_24h: number;
   drop_by_source_24h: Record<string, number>;
-  fingerprint_anomaly_24h: number;
 }
 
 export interface SecurityEvent {
@@ -385,12 +384,15 @@ export interface AccessLog {
   client_ip: string;
   host: string;
   path: string;
+  query_string: string;
   method: string;
   status_code: number;
   waf_action: string;
   cache_state: string;
   upstream: string;
   user_agent: string;
+  upstream_latency_ms: number;
+  response_size: number;
 }
 
 export interface AccessLogQuery {
@@ -403,6 +405,7 @@ export interface AccessLogQuery {
   method?: string;
   waf_action?: string;
   cache_state?: string;
+  status_group?: string;
   since?: string;
   until?: string;
 }
@@ -525,12 +528,6 @@ export interface BotScoreQuery {
   ip?: string;
   start_time?: string;
   end_time?: string;
-}
-
-export interface FingerprintStats {
-  top_ja3: Array<{ ja3_hash: string; count: number; is_known_good: boolean }>;
-  browser_distribution: Array<{ browser: string; count: number }>;
-  total_count: number;
 }
 
 export interface DropPolicy {
@@ -858,10 +855,6 @@ export async function updateBotSettings(settings: BotSettings): Promise<BotSetti
 
 export async function getBotScores(params: BotScoreQuery): Promise<PaginatedResponse<BotScoreLog>> {
   return api<PaginatedResponse<BotScoreLog>>(`/api/v1/bot-scores${buildQuery(params as Record<string, unknown>)}`);
-}
-
-export async function getFingerprints(): Promise<FingerprintStats> {
-  return api<FingerprintStats>("/api/v1/fingerprints");
 }
 
 export async function getCVERules(params: CVERuleQuery): Promise<PaginatedResponse<CVERule>> {

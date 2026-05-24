@@ -63,6 +63,42 @@ func TestMatchSiteDoesNotFallbackAcrossBinds(t *testing.T) {
 	}
 }
 
+func TestMatchSiteNoMatchReturnsFalse(t *testing.T) {
+	sn := &Snapshot{
+		Sites: map[string]SiteRuntime{
+			SiteMapKey(":8800", "a.example.com"): testSiteRuntime(1, ":8800", "a.example.com"),
+			SiteMapKey(":8800", "b.example.com"): testSiteRuntime(2, ":8800", "b.example.com"),
+			SiteMapKey(":8800", "*.example.com"): testSiteRuntime(3, ":8800", "*.example.com"),
+		},
+	}
+
+	tests := []struct {
+		name   string
+		bind   string
+		host   string
+		wantOK bool
+		wantID uint
+	}{
+		{name: "exact match a", bind: ":8800", host: "a.example.com", wantOK: true, wantID: 1},
+		{name: "exact match b", bind: ":8800", host: "b.example.com", wantOK: true, wantID: 2},
+		{name: "wildcard match c", bind: ":8800", host: "c.example.com", wantOK: true, wantID: 3},
+		{name: "no match different domain", bind: ":8800", host: "d.other.com", wantOK: false},
+		{name: "no match different port", bind: ":9999", host: "a.example.com", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := sn.MatchSite(tt.bind, tt.host)
+			if ok != tt.wantOK {
+				t.Fatalf("MatchSite(%q, %q) ok=%v, want %v", tt.bind, tt.host, ok, tt.wantOK)
+			}
+			if ok && got.Site.ID != tt.wantID {
+				t.Fatalf("MatchSite(%q, %q) = site %d, want %d", tt.bind, tt.host, got.Site.ID, tt.wantID)
+			}
+		})
+	}
+}
+
 func TestRegisterSiteKeysKeepsFirstDuplicateBindHost(t *testing.T) {
 	sites := make(map[string]SiteRuntime)
 	registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com"))
@@ -71,6 +107,45 @@ func TestRegisterSiteKeysKeepsFirstDuplicateBindHost(t *testing.T) {
 	got := sites[SiteMapKey(":80", "example.com")]
 	if got.Site.ID != 1 {
 		t.Fatalf("expected first site to remain registered, got %d", got.Site.ID)
+	}
+}
+
+func TestRegisterSiteKeysMultiHost(t *testing.T) {
+	sites := make(map[string]SiteRuntime)
+	// Site with comma-separated hosts including a wildcard
+	registerSiteKeys(sites, testSiteRuntime(1, ":80", "a.example.com, b.example.com, *.example.com"))
+
+	if _, ok := sites[SiteMapKey(":80", "a.example.com")]; !ok {
+		t.Fatal("expected a.example.com to be registered")
+	}
+	if _, ok := sites[SiteMapKey(":80", "b.example.com")]; !ok {
+		t.Fatal("expected b.example.com to be registered")
+	}
+	if _, ok := sites[SiteMapKey(":80", "*.example.com")]; !ok {
+		t.Fatal("expected *.example.com to be registered")
+	}
+	// All three keys should point to the same site
+	if sites[SiteMapKey(":80", "a.example.com")].Site.ID != 1 {
+		t.Fatal("site ID mismatch for a.example.com")
+	}
+}
+
+func TestMatchSiteMultiHost(t *testing.T) {
+	sites := make(map[string]SiteRuntime)
+	registerSiteKeys(sites, testSiteRuntime(1, ":8800", "app.example.com, *.example.org"))
+	sn := &Snapshot{Sites: sites}
+
+	// Exact match
+	if rt, ok := sn.MatchSite(":8800", "app.example.com"); !ok || rt.Site.ID != 1 {
+		t.Fatal("expected exact match on app.example.com")
+	}
+	// Wildcard match on the second host
+	if rt, ok := sn.MatchSite(":8800", "sub.example.org"); !ok || rt.Site.ID != 1 {
+		t.Fatal("expected wildcard match on sub.example.org")
+	}
+	// No match
+	if _, ok := sn.MatchSite(":8800", "other.test.com"); ok {
+		t.Fatal("expected no match on other.test.com")
 	}
 }
 

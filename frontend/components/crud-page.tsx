@@ -172,7 +172,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
         title={title}
         description={description || "通过真实后端 API 管理资源，并在配置写入后触发即时生效。"}
         actions={
-          <Button className="rounded-md bg-slate-950 text-white hover:bg-slate-800" onClick={openNew}>
+          <Button className="rounded-md bg-teal-500 text-white hover:bg-teal-600" onClick={openNew}>
             <Plus className="mr-2 h-4 w-4" /> 新增{title}
           </Button>
         }
@@ -324,7 +324,7 @@ export function CrudPage({ title, description, apiPath, fields, idField = "id", 
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>
-            <Button onClick={handleSave} disabled={saving} className="rounded-lg bg-slate-950 text-white hover:bg-slate-800">
+            <Button onClick={handleSave} disabled={saving} className="rounded-lg bg-teal-500 text-white hover:bg-teal-600">
               {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               {isNew ? "创建" : "保存"}
             </Button>

@@ -231,7 +231,7 @@ func TestSiteCacheEligible_AllowedWithClientNoCache(t *testing.T) {
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
 	ctx := app.NewContext(0)
-	ctx.Request = req
+	req.CopyTo(&ctx.Request)
 
 	rt := snapshot.SiteRuntime{
 		CacheEnabled: true,

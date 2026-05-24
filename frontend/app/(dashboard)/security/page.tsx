@@ -79,7 +79,7 @@ function CaptchaTab() {
             {testing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
             测试预览
           </Button>
-          <Button onClick={save} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
+          <Button onClick={save} disabled={saving} className="rounded-md bg-teal-500 text-white hover:bg-teal-600">
             {saving ? "保存中..." : "保存配置"}
           </Button>
         </div>
@@ -126,7 +126,7 @@ function ShieldTab() {
             </SelectContent>
           </Select>
         </div>
-        <Button onClick={save} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
+        <Button onClick={save} disabled={saving} className="rounded-md bg-teal-500 text-white hover:bg-teal-600">
           {saving ? "保存中..." : "保存配置"}
         </Button>
       </div>
@@ -229,7 +229,7 @@ function ChainTab() {
             <span className="font-mono text-xs bg-emerald-50 text-emerald-700 rounded px-1.5 py-0.5 border border-emerald-200">pass</span>
           </div>
         )}
-        <Button onClick={save} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
+        <Button onClick={save} disabled={saving} className="rounded-md bg-teal-500 text-white hover:bg-teal-600">
           {saving ? "保存中..." : "保存配置"}
         </Button>
       </div>
@@ -363,7 +363,7 @@ function EscalationTab() {
           <Plus className="mr-2 h-4 w-4" /> 添加步骤
         </Button>
         <div>
-          <Button onClick={save} disabled={saving} className="rounded-md bg-slate-950 text-white hover:bg-slate-800">
+          <Button onClick={save} disabled={saving} className="rounded-md bg-teal-500 text-white hover:bg-teal-600">
             {saving ? "保存中..." : "保存配置"}
           </Button>
         </div>

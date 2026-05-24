@@ -33,7 +33,6 @@ func AutoMigrate(db *gorm.DB) error {
 		&ActiveSession{},
 		&DropEvent{},
 		&BotScoreLog{},
-		&FingerprintRecord{},
 		&CVERuleRecord{},
 		&CVESyncLog{},
 		&ApplicationRouteRule{},

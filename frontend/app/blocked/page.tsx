@@ -11,7 +11,7 @@ export default function BlockedPage() {
       statusCode={403}
       eyebrow="安全策略已生效"
       title="当前请求已被 WAF 阻断"
-      description="该请求命中了站点防护策略，系统已在转发到上游之前完成熔断并停止继续处理，以避免敏感流量穿透防护链路。"
+      description="该请求命中了站点防护策略，如果对该处理存在异议请携带请求id并保存请求日志询问管理员。"
       facts={[
         { label: "请求标识", value: "__WAF_REQUEST_ID__" },
         { label: "规则标识", value: "__WAF_RULE_ID__" },
