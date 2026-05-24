@@ -1,6 +1,29 @@
 package repository
 
-import "gorm.io/gorm"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// WriteQueueBackend is the interface that allows repositories to submit async writes
+// without importing the observability package (avoiding import cycles).
+type WriteQueueBackend interface {
+	Submit(fn func(tx *gorm.DB) error)
+	SubmitWait(fn func(tx *gorm.DB) error) error
+}
+
+// HotCacheBackend is the interface for Redis-backed hot data caching.
+// Defined here as an interface to avoid import cycles with the cache package.
+type HotCacheBackend interface {
+	Get(key string, dest any) bool
+	Set(key string, value any, ttl time.Duration)
+	Invalidate(key string)
+	InvalidatePattern(pattern string)
+	Available() bool
+	GetListRaw(key string) (items []byte, total int64, ok bool)
+	SetList(key string, items any, total int64, ttl time.Duration)
+}
 
 // Repos aggregates all entity repositories.
 type Repos struct {
@@ -45,4 +68,17 @@ func New(db *gorm.DB) *Repos {
 		AppRouteRule:     NewApplicationRouteRuleRepo(db),
 		RecordedResource: NewRecordedResourceRepo(db),
 	}
+}
+
+// SetHotCache wires Redis hot cache into repositories that support it.
+func (r *Repos) SetHotCache(hc HotCacheBackend) {
+	r.AccessLog.SetHotCache(hc)
+	r.SecurityEvent.SetHotCache(hc)
+}
+
+// SetWriteQueue wires the async write queue into repositories that support it.
+func (r *Repos) SetWriteQueue(wq WriteQueueBackend) {
+	r.AccessLog.SetWriteQueue(wq)
+	r.SecurityEvent.SetWriteQueue(wq)
+	r.DropEvent.SetWriteQueue(wq)
 }

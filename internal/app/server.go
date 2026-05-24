@@ -103,6 +103,17 @@ func Run() {
 	queryCache := cache.NewQueryCache(5 * time.Second)
 	defer queryCache.Close()
 	repos.AccessLog.SetCountCache(queryCache)
+	repos.SecurityEvent.SetCountCache(queryCache)
+
+	// Hot cache: Redis-backed read-through cache for hot data and large query results.
+	hotCache := cache.NewHotCache(rt.Redis, logger.New("hotcache"))
+	repos.SetHotCache(hotCache)
+
+	// Write queue: async write queue that batches all DB mutations through a single
+	// goroutine, merging high-frequency operations to reduce lock contention.
+	writeQueue := observability.NewWriteQueue(rt.DB, logger.New("writequeue"))
+	defer writeQueue.Close()
+	repos.SetWriteQueue(writeQueue)
 
 	// Unified writer: single goroutine drains all observability channels and
 	// flushes them in one DB transaction, eliminating SQLite lock contention.
@@ -113,7 +124,8 @@ func Run() {
 	defer unifiedWriter.Close()
 
 	// Event archiver (auto-delete security events, access logs and drop events based on retention config).
-	archiver := observability.NewArchiver(repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
+	// Also performs database optimization (VACUUM/OPTIMIZE) after each cleanup cycle.
+	archiver := observability.NewArchiver(rt.DB, repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
 	archiver.SetSettingsRepo(repos.SystemSettings)
 	defer archiver.Close()
 

@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"My-OpenWaf/internal/store"
@@ -8,10 +10,30 @@ import (
 	"gorm.io/gorm"
 )
 
-type SecurityEventRepo struct{ db *gorm.DB }
+type SecurityEventRepo struct {
+	db         *gorm.DB
+	countCache CountCache
+	hotCache   HotCacheBackend
+	writeQueue WriteQueueBackend
+}
 
 func NewSecurityEventRepo(db *gorm.DB) *SecurityEventRepo {
 	return &SecurityEventRepo{db: db}
+}
+
+// SetCountCache configures an optional count cache for list queries.
+func (r *SecurityEventRepo) SetCountCache(c CountCache) {
+	r.countCache = c
+}
+
+// SetHotCache configures Redis-backed hot cache for large query results.
+func (r *SecurityEventRepo) SetHotCache(hc HotCacheBackend) {
+	r.hotCache = hc
+}
+
+// SetWriteQueue configures async write queue for batch writes.
+func (r *SecurityEventRepo) SetWriteQueue(wq WriteQueueBackend) {
+	r.writeQueue = wq
 }
 
 // SecurityEventFilter holds query filters for listing events.
@@ -30,19 +52,71 @@ type SecurityEventFilter struct {
 }
 
 func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
+	// Try Redis hot cache for large query results.
+	if r.hotCache != nil && r.hotCache.Available() {
+		cacheKey := "se_list:" + secEventCountCacheKey(f) + fmt.Sprintf(":o%d:l%d", offset, limit)
+		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(cacheKey); ok {
+			var items []store.SecurityEvent
+			if json.Unmarshal(rawItems, &items) == nil {
+				return items, cachedTotal, nil
+			}
+		}
+	}
+
 	q := r.db.Model(&store.SecurityEvent{})
 	q = applyEventFilters(q, f)
 
 	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		return nil, 0, err
+	cacheKey := secEventCountCacheKey(f)
+	if r.countCache != nil {
+		if cached, ok := r.countCache.Get(cacheKey); ok {
+			total = cached.(int64)
+		}
+	}
+	if total == 0 {
+		if err := q.Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
+		if r.countCache != nil && total > 0 {
+			r.countCache.Set(cacheKey, total)
+		}
 	}
 
 	var items []store.SecurityEvent
 	if err := q.Offset(offset).Limit(limit).Order("id DESC").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
+
+	// Cache results in Redis.
+	if r.hotCache != nil && r.hotCache.Available() && len(items) > 0 {
+		hcKey := "se_list:" + cacheKey + fmt.Sprintf(":o%d:l%d", offset, limit)
+		r.hotCache.SetList(hcKey, items, total, 5*time.Second)
+	}
+
 	return items, total, nil
+}
+
+func secEventCountCacheKey(f SecurityEventFilter) string {
+	key := "se_count"
+	if f.SiteID > 0 {
+		key += ":s" + fmt.Sprint(f.SiteID)
+	}
+	if f.Action != "" {
+		key += ":a" + f.Action
+	}
+	if f.Category != "" {
+		key += ":c" + f.Category
+	}
+	if f.ClientIP != "" {
+		key += ":ip" + f.ClientIP
+	}
+	if f.Since != nil {
+		key += ":si" + f.Since.Format("0601021504")
+	}
+	if f.Until != nil {
+		key += ":un" + f.Until.Format("0601021504")
+	}
+	return key
 }
 
 func (r *SecurityEventRepo) ListBySite(siteID uint, offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
@@ -56,6 +130,12 @@ func (r *SecurityEventRepo) Get(id uint) (*store.SecurityEvent, error) {
 }
 
 func (r *SecurityEventRepo) Create(item *store.SecurityEvent) error {
+	if r.writeQueue != nil {
+		r.writeQueue.Submit(func(tx *gorm.DB) error {
+			return tx.Create(item).Error
+		})
+		return nil
+	}
 	return r.db.Create(item).Error
 }
 
@@ -69,14 +149,37 @@ func (r *SecurityEventRepo) BatchCreate(items []store.SecurityEvent) error {
 	if len(items) == 0 {
 		return nil
 	}
+	if r.writeQueue != nil {
+		batch := make([]store.SecurityEvent, len(items))
+		copy(batch, items)
+		r.writeQueue.Submit(func(tx *gorm.DB) error {
+			return tx.CreateInBatches(batch, 100).Error
+		})
+		return nil
+	}
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		return tx.CreateInBatches(items, 100).Error
 	})
 }
 
 func (r *SecurityEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
-	tx := r.db.Where("created_at < ?", before).Delete(&store.SecurityEvent{})
-	return tx.RowsAffected, tx.Error
+	var totalDeleted int64
+	const batchSize = 5000
+
+	for {
+		tx := r.db.Where("id IN (?)",
+			r.db.Model(&store.SecurityEvent{}).Select("id").Where("created_at < ?", before).Limit(batchSize),
+		).Delete(&store.SecurityEvent{})
+		if tx.Error != nil {
+			return totalDeleted, tx.Error
+		}
+		totalDeleted += tx.RowsAffected
+		if tx.RowsAffected < batchSize {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return totalDeleted, nil
 }
 
 func (r *SecurityEventRepo) Count(f SecurityEventFilter) (int64, error) {

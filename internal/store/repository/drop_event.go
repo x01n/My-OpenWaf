@@ -8,10 +8,18 @@ import (
 	"gorm.io/gorm"
 )
 
-type DropEventRepo struct{ db *gorm.DB }
+type DropEventRepo struct {
+	db         *gorm.DB
+	writeQueue WriteQueueBackend
+}
 
 func NewDropEventRepo(db *gorm.DB) *DropEventRepo {
 	return &DropEventRepo{db: db}
+}
+
+// SetWriteQueue configures async write queue for batch writes.
+func (r *DropEventRepo) SetWriteQueue(wq WriteQueueBackend) {
+	r.writeQueue = wq
 }
 
 // DropEventFilter holds query filters for listing drop events.
@@ -24,12 +32,26 @@ type DropEventFilter struct {
 }
 
 func (r *DropEventRepo) Create(item *store.DropEvent) error {
+	if r.writeQueue != nil {
+		r.writeQueue.Submit(func(tx *gorm.DB) error {
+			return tx.Create(item).Error
+		})
+		return nil
+	}
 	return r.db.Create(item).Error
 }
 
 // BatchCreate inserts multiple drop events in a single transaction.
 func (r *DropEventRepo) BatchCreate(items []store.DropEvent) error {
 	if len(items) == 0 {
+		return nil
+	}
+	if r.writeQueue != nil {
+		batch := make([]store.DropEvent, len(items))
+		copy(batch, items)
+		r.writeQueue.Submit(func(tx *gorm.DB) error {
+			return tx.CreateInBatches(batch, 100).Error
+		})
 		return nil
 	}
 	return r.db.CreateInBatches(items, 100).Error
@@ -75,9 +97,25 @@ type DropStatsSummary struct {
 }
 
 // DeleteOlderThan removes drop events older than the given time. Returns deleted count.
+// Uses batched deletion to reduce lock contention on large tables.
 func (r *DropEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
-	tx := r.db.Where("created_at < ?", before).Delete(&store.DropEvent{})
-	return tx.RowsAffected, tx.Error
+	var totalDeleted int64
+	const batchSize = 5000
+
+	for {
+		tx := r.db.Where("id IN (?)",
+			r.db.Model(&store.DropEvent{}).Select("id").Where("created_at < ?", before).Limit(batchSize),
+		).Delete(&store.DropEvent{})
+		if tx.Error != nil {
+			return totalDeleted, tx.Error
+		}
+		totalDeleted += tx.RowsAffected
+		if tx.RowsAffected < batchSize {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return totalDeleted, nil
 }
 
 func (r *DropEventRepo) Stats24h() (*DropStatsSummary, error) {

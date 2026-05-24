@@ -11,16 +11,17 @@ import (
 )
 
 // setRefreshCookie writes the rotating refresh-token cookie.
+// Path is "/" to ensure the cookie is sent on all requests including refresh.
 // Secure flag only when request came over TLS; otherwise browsers reject the cookie on HTTP.
 func setRefreshCookie(c *app.RequestContext, value string, ttl time.Duration) {
 	isSecure := string(c.URI().Scheme()) == "https"
-	c.SetCookie("my_openwaf_rt", value, int(ttl.Seconds()), "/api/v1/auth", "",
+	c.SetCookie("my_openwaf_rt", value, int(ttl.Seconds()), "/", "",
 		protocol.CookieSameSiteLaxMode, isSecure, true)
 }
 
 func clearRefreshCookie(c *app.RequestContext) {
 	isSecure := string(c.URI().Scheme()) == "https"
-	c.SetCookie("my_openwaf_rt", "", -1, "/api/v1/auth", "",
+	c.SetCookie("my_openwaf_rt", "", -1, "/", "",
 		protocol.CookieSameSiteLaxMode, isSecure, true)
 }
 

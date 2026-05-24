@@ -38,23 +38,41 @@ export async function refreshAccess(): Promise<boolean> {
   if (refreshPromise) return refreshPromise;
 
   refreshPromise = (async () => {
-    try {
-      const response = await fetch(`${BASE}/api/v1/auth/refresh`, {
-        method: "POST",
-        credentials: "include",
-      });
-      if (!response.ok) return false;
-      const data = (await response.json()) as AuthResponse;
-      setAccessToken(data.access_token);
-      return true;
-    } catch {
-      return false;
-    } finally {
-      refreshPromise = null;
+    // Retry up to 2 times in case of transient network errors (e.g., server just restarted).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await fetch(`${BASE}/api/v1/auth/refresh`, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (response.ok) {
+          const data = (await response.json()) as AuthResponse;
+          setAccessToken(data.access_token);
+          return true;
+        }
+        // 401/403 means refresh token is genuinely invalid — don't retry.
+        if (response.status === 401 || response.status === 403) {
+          return false;
+        }
+        // 5xx or network issue — wait briefly then retry.
+        if (attempt < 1) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      } catch {
+        // Network error — wait and retry.
+        if (attempt < 1) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
     }
+    return false;
   })();
 
-  return refreshPromise;
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
 }
 
 function buildHeaders(opts: RequestInit): Headers {

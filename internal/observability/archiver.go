@@ -2,12 +2,17 @@ package observability
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"My-OpenWaf/internal/store/repository"
+
+	"gorm.io/gorm"
 )
 
 // RetentionConfig holds per-data-type retention periods in days.
@@ -29,19 +34,21 @@ func DefaultRetentionConfig() RetentionConfig {
 }
 
 // Archiver periodically deletes security events, access logs and drop events older than the retention period.
+// After cleanup it optimizes the database (VACUUM for SQLite, OPTIMIZE TABLE for MySQL, VACUUM ANALYZE for PostgreSQL).
 type Archiver struct {
 	repo         *repository.SecurityEventRepo
 	accessRepo   *repository.AccessLogRepo
 	dropRepo     *repository.DropEventRepo
 	settingsRepo *repository.SystemSettingsRepo
+	db           *gorm.DB
 	log          *slog.Logger
 	retention    atomic.Value // RetentionConfig
-	interval     time.Duration
+	interval     atomic.Int64 // cleanup interval in seconds
 	stopCh       chan struct{}
 	wg           sync.WaitGroup
 }
 
-func NewArchiver(repo *repository.SecurityEventRepo, accessRepo *repository.AccessLogRepo, dropRepo *repository.DropEventRepo, log *slog.Logger, retentionDays int) *Archiver {
+func NewArchiver(db *gorm.DB, repo *repository.SecurityEventRepo, accessRepo *repository.AccessLogRepo, dropRepo *repository.DropEventRepo, log *slog.Logger, retentionDays int) *Archiver {
 	if retentionDays <= 0 {
 		retentionDays = 30
 	}
@@ -52,14 +59,15 @@ func NewArchiver(repo *repository.SecurityEventRepo, accessRepo *repository.Acce
 		StatsDays:         7,
 	}
 	a := &Archiver{
+		db:         db,
 		repo:       repo,
 		accessRepo: accessRepo,
 		dropRepo:   dropRepo,
 		log:        log,
-		interval:   1 * time.Hour,
 		stopCh:     make(chan struct{}),
 	}
 	a.retention.Store(cfg)
+	a.interval.Store(int64(24 * time.Hour / time.Second)) // default: 24 hours
 	a.wg.Add(1)
 	go a.loop()
 	return a
@@ -84,15 +92,18 @@ func (a *Archiver) loop() {
 	defer a.wg.Done()
 	a.refreshRetentionFromDB()
 	a.cleanup()
+	a.optimizeDB()
 
-	ticker := time.NewTicker(a.interval)
-	defer ticker.Stop()
 	for {
+		intervalSec := a.interval.Load()
+		timer := time.NewTimer(time.Duration(intervalSec) * time.Second)
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			a.refreshRetentionFromDB()
 			a.cleanup()
+			a.optimizeDB()
 		case <-a.stopCh:
+			timer.Stop()
 			return
 		}
 	}
@@ -102,13 +113,36 @@ func (a *Archiver) refreshRetentionFromDB() {
 	if a.settingsRepo == nil {
 		return
 	}
+	// Refresh retention config.
 	val, err := a.settingsRepo.Get("retention_config")
-	if err != nil || val == "" {
-		return
+	if err == nil && val != "" {
+		var cfg RetentionConfig
+		if json.Unmarshal([]byte(val), &cfg) == nil {
+			a.retention.Store(cfg)
+		}
 	}
-	var cfg RetentionConfig
-	if json.Unmarshal([]byte(val), &cfg) == nil {
-		a.retention.Store(cfg)
+
+	// Also read individual settings keys for retention days.
+	if v, e := a.settingsRepo.Get("security_event_retention_days"); e == nil && v != "" {
+		if days, pe := strconv.Atoi(v); pe == nil {
+			cfg := a.retention.Load().(RetentionConfig)
+			cfg.SecurityEventDays = days
+			a.retention.Store(cfg)
+		}
+	}
+	if v, e := a.settingsRepo.Get("access_log_retention_days"); e == nil && v != "" {
+		if days, pe := strconv.Atoi(v); pe == nil {
+			cfg := a.retention.Load().(RetentionConfig)
+			cfg.AccessLogDays = days
+			a.retention.Store(cfg)
+		}
+	}
+
+	// Refresh cleanup interval from DB setting (in hours).
+	if iv, e := a.settingsRepo.Get("db_optimize_interval_hours"); e == nil && iv != "" {
+		if hours, pe := strconv.Atoi(iv); pe == nil && hours > 0 {
+			a.interval.Store(int64(hours) * 3600)
+		}
 	}
 }
 
@@ -149,5 +183,95 @@ func (a *Archiver) cleanup() {
 				slog.Int64("deleted", dropDeleted),
 				slog.String("older_than", cutoff.Format(time.RFC3339)))
 		}
+	}
+}
+
+// optimizeDB reclaims space and updates statistics for the database after cleanup.
+// Supports SQLite (VACUUM + PRAGMA optimize), MySQL (OPTIMIZE TABLE), and PostgreSQL (VACUUM ANALYZE).
+func (a *Archiver) optimizeDB() {
+	if a.db == nil {
+		return
+	}
+
+	start := time.Now()
+	driver := detectDriver(a.db)
+
+	var err error
+	switch driver {
+	case "sqlite":
+		err = a.optimizeSQLite()
+	case "mysql":
+		err = a.optimizeMySQL()
+	case "postgres":
+		err = a.optimizePostgres()
+	default:
+		a.log.Warn("archiver: unknown DB driver, skip optimization", slog.String("driver", driver))
+		return
+	}
+
+	if err != nil {
+		a.log.Error("archiver: database optimization failed", slog.Any("err", err), slog.String("driver", driver))
+	} else {
+		a.log.Info("archiver: database optimized",
+			slog.String("driver", driver),
+			slog.Duration("elapsed", time.Since(start)))
+	}
+}
+
+func (a *Archiver) optimizeSQLite() error {
+	// Run PRAGMA optimize to update query planner statistics.
+	if err := a.db.Exec("PRAGMA optimize").Error; err != nil {
+		a.log.Warn("archiver: PRAGMA optimize failed", slog.Any("err", err))
+	}
+	// Run incremental_vacuum first (lighter operation for WAL mode).
+	if err := a.db.Exec("PRAGMA incremental_vacuum(1000)").Error; err != nil {
+		a.log.Warn("archiver: incremental_vacuum failed", slog.Any("err", err))
+	}
+	// Run WAL checkpoint to keep WAL file size reasonable.
+	if err := a.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
+		a.log.Warn("archiver: wal_checkpoint failed", slog.Any("err", err))
+	}
+	// VACUUM to fully reclaim space (only if large amount was deleted).
+	return a.db.Exec("VACUUM").Error
+}
+
+func (a *Archiver) optimizeMySQL() error {
+	tables := []string{"security_events", "access_logs", "drop_events", "bot_score_logs"}
+	for _, t := range tables {
+		if err := a.db.Exec(fmt.Sprintf("OPTIMIZE TABLE `%s`", t)).Error; err != nil {
+			a.log.Warn("archiver: OPTIMIZE TABLE failed", slog.String("table", t), slog.Any("err", err))
+		}
+	}
+	// Update table statistics for better query planning.
+	for _, t := range tables {
+		if err := a.db.Exec(fmt.Sprintf("ANALYZE TABLE `%s`", t)).Error; err != nil {
+			a.log.Warn("archiver: ANALYZE TABLE failed", slog.String("table", t), slog.Any("err", err))
+		}
+	}
+	return nil
+}
+
+func (a *Archiver) optimizePostgres() error {
+	tables := []string{"security_events", "access_logs", "drop_events", "bot_score_logs"}
+	for _, t := range tables {
+		if err := a.db.Exec(fmt.Sprintf("VACUUM ANALYZE %s", t)).Error; err != nil {
+			a.log.Warn("archiver: VACUUM ANALYZE failed", slog.String("table", t), slog.Any("err", err))
+		}
+	}
+	return nil
+}
+
+// detectDriver determines the database driver type from the GORM dialector name.
+func detectDriver(db *gorm.DB) string {
+	name := db.Dialector.Name()
+	switch {
+	case strings.Contains(name, "sqlite"):
+		return "sqlite"
+	case strings.Contains(name, "mysql"):
+		return "mysql"
+	case strings.Contains(name, "postgres"):
+		return "postgres"
+	default:
+		return name
 	}
 }

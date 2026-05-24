@@ -113,6 +113,15 @@ const RETENTION_OPTIONS = [
   { value: "30", label: "30 天" },
 ] as const;
 
+const OPTIMIZE_INTERVAL_OPTIONS = [
+  { value: "1", label: "1 小时" },
+  { value: "6", label: "6 小时" },
+  { value: "12", label: "12 小时" },
+  { value: "24", label: "24 小时" },
+  { value: "48", label: "48 小时" },
+  { value: "72", label: "72 小时" },
+] as const;
+
 const CUSTOM_HTML_CODES = [
   { code: "403", label: "403 Forbidden", color: "border-rose-200 bg-rose-50 text-rose-700" },
   { code: "429", label: "429 Too Many Requests", color: "border-amber-200 bg-amber-50 text-amber-700" },
@@ -143,6 +152,7 @@ export default function SettingsPage() {
   const [secEventRetention, setSecEventRetention] = useState("30");
   const [accessLogRetention, setAccessLogRetention] = useState("30");
   const [statsRetention, setStatsRetention] = useState("0");
+  const [dbOptimizeInterval, setDbOptimizeInterval] = useState("24");
 
   // Block page customization
   const [blockPageType, setBlockPageType] = useState("default");
@@ -220,6 +230,9 @@ export default function SettingsPage() {
       );
       setStatsRetention(
         getSettingValue(systemSettings, "stats_retention_days", "0"),
+      );
+      setDbOptimizeInterval(
+        getSettingValue(systemSettings, "db_optimize_interval_hours", "24"),
       );
       setBlockPageType(
         getSettingValue(systemSettings, "block_page_type", "default"),
@@ -352,6 +365,7 @@ export default function SettingsPage() {
         ["security_event_retention_days", secEventRetention],
         ["access_log_retention_days", accessLogRetention],
         ["stats_retention_days", statsRetention],
+        ["db_optimize_interval_hours", dbOptimizeInterval],
         ["block_page_type", blockPageType],
         ["block_page_text", blockPageText],
         ["engine_mode", engineMode],
@@ -673,6 +687,41 @@ export default function SettingsPage() {
                     ))}
                   </RadioGroup>
                 </div>
+              </div>
+            </Surface>
+
+            {/* Database Optimization */}
+            <Surface
+              title="数据库优化"
+              description="配置自动数据库优化的执行间隔。清理过期数据后系统将自动执行数据库优化操作（VACUUM/OPTIMIZE）以回收空间并提升查询性能。"
+            >
+              <div className="space-y-3">
+                <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                  <RefreshCcw className="h-4 w-4 text-teal-600" />
+                  优化执行间隔
+                </label>
+                <RadioGroup
+                  value={dbOptimizeInterval}
+                  onValueChange={setDbOptimizeInterval}
+                  className="flex flex-wrap gap-2"
+                >
+                  {OPTIMIZE_INTERVAL_OPTIONS.map((opt) => (
+                    <label
+                      key={opt.value}
+                      className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                        dbOptimizeInterval === opt.value
+                          ? "border-teal-300 bg-teal-50 text-teal-700"
+                          : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                      }`}
+                    >
+                      <RadioGroupItem value={opt.value} className="sr-only" />
+                      {opt.label}
+                    </label>
+                  ))}
+                </RadioGroup>
+                <p className="text-xs text-slate-500">
+                  设置较短的间隔可保持数据库紧凑，但会增加 I/O 开销。建议日志量大时设为 12-24 小时。
+                </p>
               </div>
             </Surface>
 
