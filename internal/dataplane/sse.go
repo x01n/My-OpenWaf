@@ -41,14 +41,14 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := strings.ToLower(string(k))
 		switch key {
-		case "connection", "keep-alive", "transfer-encoding":
+		case "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade":
 			return
 		}
 		req.Header.Add(string(k), string(v))
 	})
-	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.PreserveOriginalHost)
+	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.PreserveOriginalHost, inboundProto(c, rt.Site.TLSEnabled))
 
-	hc := &http.Client{Transport: proxy.SharedTransport(rt), Timeout: 0}
+	hc := &http.Client{Transport: proxy.SharedTransportForUpstream(rt, base), Timeout: 0}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return err
@@ -69,27 +69,20 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	c.SetStatusCode(resp.StatusCode)
 
 	c.Response.Header.Set("Cache-Control", "no-cache")
-	c.Response.Header.Set("Connection", "keep-alive")
+	c.Response.Header.Del("Connection")
+	c.Response.Header.Del("Content-Length")
+	c.Response.SetBodyStream(resp.Body, -1)
+	return nil
+}
 
-	writer := c.Response.BodyWriter()
-	buf := make([]byte, 4096)
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, wErr := writer.Write(buf[:n]); wErr != nil {
-				return wErr
-			}
-			if f, ok := writer.(http.Flusher); ok {
-				f.Flush()
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF {
-				return nil
-			}
-			return readErr
-		}
+func inboundProto(c *app.RequestContext, tlsEnabled bool) string {
+	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
+		return strings.ToLower(v)
 	}
+	if tlsEnabled {
+		return "https"
+	}
+	return "http"
 }
 
 // IsSSERequest checks if the client expects a text/event-stream response.

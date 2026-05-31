@@ -84,13 +84,25 @@ func VerifyChallengeToken(reqID, ts, token string, maxAge time.Duration) bool {
 	return time.Since(time.Unix(tsInt, 0)) < maxAge
 }
 
+type ChallengePassClaims struct {
+	Host      string
+	ClientIP  net.IP
+	UserAgent string
+	SiteID    uint
+	Bind      string
+}
+
 func BuildChallengePassCookie(host string, clientIP net.IP, tlsEnabled bool, now time.Time, ttl time.Duration) string {
-	value := SignChallengePassValue(host, clientIP, now, ttl)
+	return BuildChallengePassCookieWithClaims(ChallengePassClaims{Host: host, ClientIP: clientIP}, tlsEnabled, now, ttl)
+}
+
+func BuildChallengePassCookieWithClaims(claims ChallengePassClaims, tlsEnabled bool, now time.Time, ttl time.Duration) string {
+	value := SignChallengePassValueWithClaims(claims, now, ttl)
 	cookie := &http.Cookie{
 		Name:     ChallengePassCookieName,
 		Value:    value,
 		Path:     "/",
-		MaxAge:   int(ttl.Seconds()),
+		MaxAge:   int(normalizeChallengePassTTL(ttl).Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 		Secure:   tlsEnabled,
@@ -99,19 +111,22 @@ func BuildChallengePassCookie(host string, clientIP net.IP, tlsEnabled bool, now
 }
 
 func SignChallengePassValue(host string, clientIP net.IP, now time.Time, ttl time.Duration) string {
-	if ttl <= 0 {
-		ttl = time.Hour
-	}
+	return SignChallengePassValueWithClaims(ChallengePassClaims{Host: host, ClientIP: clientIP}, now, ttl)
+}
+
+func SignChallengePassValueWithClaims(claims ChallengePassClaims, now time.Time, ttl time.Duration) string {
+	ttl = normalizeChallengePassTTL(ttl)
 	expires := now.Add(ttl).Unix()
-	// Random nonce per cookie to prevent replay and make each cookie unique.
 	sessionNonce := make([]byte, 8)
 	_, _ = rand.Read(sessionNonce)
-	// Versioned format: v2|host|ip|expiry|nonce_hex|challenge_type
-	payload := fmt.Sprintf("v2|%s|%s|%d|%x|shield",
-		strings.ToLower(host),
-		challengeIPString(clientIP),
+	payload := fmt.Sprintf("v3|%s|%s|%d|%x|shield|%s|%d|%s",
+		strings.ToLower(claims.Host),
+		challengeIPString(claims.ClientIP),
 		expires,
 		sessionNonce,
+		challengeUserAgentHash(claims.UserAgent),
+		claims.SiteID,
+		claims.Bind,
 	)
 	encrypted, err := challengeEncrypt([]byte(payload))
 	if err != nil {
@@ -120,7 +135,18 @@ func SignChallengePassValue(host string, clientIP net.IP, now time.Time, ttl tim
 	return base64.RawURLEncoding.EncodeToString(encrypted)
 }
 
+func normalizeChallengePassTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return time.Hour
+	}
+	return ttl
+}
+
 func VerifyChallengePassCookie(cookieHeader, host string, clientIP net.IP, now time.Time) bool {
+	return VerifyChallengePassCookieWithClaims(cookieHeader, ChallengePassClaims{Host: host, ClientIP: clientIP}, now)
+}
+
+func VerifyChallengePassCookieWithClaims(cookieHeader string, claims ChallengePassClaims, now time.Time) bool {
 	if cookieHeader == "" {
 		return false
 	}
@@ -133,12 +159,16 @@ func VerifyChallengePassCookie(cookieHeader, host string, clientIP net.IP, now t
 		if !ok || name != ChallengePassCookieName {
 			continue
 		}
-		return VerifyChallengePassValue(value, host, clientIP, now)
+		return VerifyChallengePassValueWithClaims(value, claims, now)
 	}
 	return false
 }
 
 func VerifyChallengePassValue(value, host string, clientIP net.IP, now time.Time) bool {
+	return VerifyChallengePassValueWithClaims(value, ChallengePassClaims{Host: host, ClientIP: clientIP}, now)
+}
+
+func VerifyChallengePassValueWithClaims(value string, claims ChallengePassClaims, now time.Time) bool {
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil || len(raw) == 0 {
 		return false
@@ -148,23 +178,27 @@ func VerifyChallengePassValue(value, host string, clientIP net.IP, now time.Time
 		return false
 	}
 	parts := strings.Split(string(plaintext), "|")
-	// v2 format: v2|host|ip|expiry|nonce|type (6 parts)
-	if len(parts) >= 6 && parts[0] == "v2" {
+	if len(parts) >= 9 && parts[0] == "v3" {
 		expires, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil || now.Unix() > expires {
 			return false
 		}
-		return parts[1] == strings.ToLower(host) && parts[2] == challengeIPString(clientIP)
-	}
-	// v1 legacy format: host|ip|expiry (3 parts)
-	if len(parts) == 3 {
-		expires, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil || now.Unix() > expires {
+		siteID, err := strconv.ParseUint(parts[7], 10, 64)
+		if err != nil {
 			return false
 		}
-		return parts[0] == strings.ToLower(host) && parts[1] == challengeIPString(clientIP)
+		return parts[1] == strings.ToLower(claims.Host) &&
+			parts[2] == challengeIPString(claims.ClientIP) &&
+			parts[6] == challengeUserAgentHash(claims.UserAgent) &&
+			uint(siteID) == claims.SiteID &&
+			parts[8] == claims.Bind
 	}
 	return false
+}
+
+func challengeUserAgentHash(userAgent string) string {
+	sum := sha256.Sum256([]byte(userAgent))
+	return hex.EncodeToString(sum[:16])
 }
 
 func challengeEncrypt(plaintext []byte) ([]byte, error) {

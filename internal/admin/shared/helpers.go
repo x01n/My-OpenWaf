@@ -79,32 +79,32 @@ func ReloadCVERules(feedMgr *cve.CVEFeedManager) {
 
 // SyncBotEnabledToProtection updates ProtectionConfig.BotDetectionEnabled
 // so the engine stays consistent when the bot settings page toggles the flag.
-func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) {
+func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	cfg := store.DefaultProtectionConfig()
 	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
 		_ = json.Unmarshal([]byte(val), &cfg)
 	}
 	if cfg.BotDetectionEnabled == enabled {
-		return
+		return nil
 	}
 	cfg.BotDetectionEnabled = enabled
 	data, _ := json.Marshal(cfg)
-	_ = settingsRepo.Set("protection", string(data))
+	return settingsRepo.Set("protection", string(data))
 }
 
 // SyncProtectionBotToSettings updates bot_settings.Enabled so the bot page
 // stays consistent when the protection page toggles bot_detection_enabled.
-func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) {
+func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	current := BotSettingsResponse{ScoreThreshold: 60}
 	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
 		_ = json.Unmarshal([]byte(val), &current)
 	}
 	if current.Enabled == enabled {
-		return
+		return nil
 	}
 	current.Enabled = enabled
 	data, _ := json.Marshal(current)
-	_ = settingsRepo.Set("bot_settings", string(data))
+	return settingsRepo.Set("bot_settings", string(data))
 }
 
 // BotSettingsResponse represents the bot detection configuration returned by the API.

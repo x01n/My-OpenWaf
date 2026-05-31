@@ -1,6 +1,6 @@
-"use client";
+"use client"
 
-import { useMemo } from "react";
+import { useMemo } from "react"
 import {
   PieChart,
   Pie,
@@ -8,16 +8,16 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
-} from "recharts";
+} from "recharts"
 
 interface CategoryData {
-  name: string;
-  value: number;
+  name: string
+  value: number
 }
 
 interface CategoryPieChartProps {
-  data: CategoryData[];
-  height?: number;
+  data: CategoryData[]
+  height?: number
 }
 
 const ENHANCED_COLORS = [
@@ -37,12 +37,15 @@ const ENHANCED_COLORS = [
   "#a855f7", // purple-500
   "#d946ef", // fuchsia-500
   "#ec4899", // pink-500
-];
+]
 
-export function CategoryPieChart({ data, height = 300 }: CategoryPieChartProps) {
+export function CategoryPieChart({
+  data,
+  height = 300,
+}: CategoryPieChartProps) {
   const total = useMemo(() => {
-    return data.reduce((sum, item) => sum + item.value, 0);
-  }, [data]);
+    return data.reduce((sum, item) => sum + item.value, 0)
+  }, [data])
 
   const renderCustomLabel = ({
     cx,
@@ -52,18 +55,27 @@ export function CategoryPieChart({ data, height = 300 }: CategoryPieChartProps) 
     outerRadius,
     percent,
   }: {
-    cx?: number;
-    cy?: number;
-    midAngle?: number;
-    innerRadius?: number;
-    outerRadius?: number;
-    percent?: number;
+    cx?: number
+    cy?: number
+    midAngle?: number
+    innerRadius?: number
+    outerRadius?: number
+    percent?: number
   }) => {
-    if (!percent || percent < 0.05 || !cx || !cy || !midAngle || !innerRadius || !outerRadius) return null;
-    const RADIAN = Math.PI / 180;
-    const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
-    const x = cx + radius * Math.cos(-midAngle * RADIAN);
-    const y = cy + radius * Math.sin(-midAngle * RADIAN);
+    if (
+      !percent ||
+      percent < 0.05 ||
+      !cx ||
+      !cy ||
+      !midAngle ||
+      !innerRadius ||
+      !outerRadius
+    )
+      return null
+    const RADIAN = Math.PI / 180
+    const radius = innerRadius + (outerRadius - innerRadius) * 0.5
+    const x = cx + radius * Math.cos(-midAngle * RADIAN)
+    const y = cy + radius * Math.sin(-midAngle * RADIAN)
 
     return (
       <text
@@ -77,8 +89,8 @@ export function CategoryPieChart({ data, height = 300 }: CategoryPieChartProps) 
       >
         {`${(percent * 100).toFixed(0)}%`}
       </text>
-    );
-  };
+    )
+  }
 
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -122,5 +134,5 @@ export function CategoryPieChart({ data, height = 300 }: CategoryPieChartProps) 
         />
       </PieChart>
     </ResponsiveContainer>
-  );
+  )
 }

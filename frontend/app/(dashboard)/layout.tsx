@@ -1,18 +1,18 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { AuthGuard } from "@/components/auth-guard";
-import { Sidebar } from "@/components/layout/sidebar";
-import { Topbar } from "@/components/layout/topbar";
-import { Toaster } from "@/components/ui/sonner";
+import { useState } from "react"
+import { AuthGuard } from "@/components/auth-guard"
+import { Sidebar } from "@/components/layout/sidebar"
+import { Topbar } from "@/components/layout/topbar"
+import { Toaster } from "@/components/ui/sonner"
 
 export default function DashboardLayout({
   children,
 }: {
-  children: React.ReactNode;
+  children: React.ReactNode
 }) {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [mobileOpen, setMobileOpen] = useState(false)
 
   return (
     <AuthGuard>
@@ -33,8 +33,8 @@ export default function DashboardLayout({
           <Sidebar
             collapsed={sidebarCollapsed}
             onToggle={() => {
-              setSidebarCollapsed((v) => !v);
-              if (mobileOpen) setMobileOpen(false);
+              setSidebarCollapsed((v) => !v)
+              if (mobileOpen) setMobileOpen(false)
             }}
           />
         </div>
@@ -47,5 +47,5 @@ export default function DashboardLayout({
       </div>
       <Toaster richColors />
     </AuthGuard>
-  );
+  )
 }

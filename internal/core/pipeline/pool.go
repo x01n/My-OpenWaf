@@ -1,6 +1,10 @@
 package pipeline
 
-import "sync"
+import (
+	"sync"
+
+	"My-OpenWaf/internal/waf/bot"
+)
 
 // ctxPool reuses RequestCtx allocations to reduce GC pressure on the hot path.
 var ctxPool = sync.Pool{
@@ -27,8 +31,11 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.Path = ""
 	ctx.RawQuery = ""
 	ctx.Host = ""
+	ctx.UserAgent = ""
+	ctx.SiteID = 0
 	ctx.Body = nil
 	ctx.ContentType = ""
+	ctx.TLS = bot.TLSClientFingerprint{}
 	ctx.AntiReplayTTL = 0
 	ctx.QueryParams = nil
 	ctx.BodyTargets = nil

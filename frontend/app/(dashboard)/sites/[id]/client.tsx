@@ -1,10 +1,17 @@
-"use client";
+"use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import {
+  useParams,
+  usePathname,
+  useRouter,
+  useSearchParams,
+} from "next/navigation"
 import {
   ArrowLeft,
   Bot,
+  FileText,
   Globe,
   Loader2,
   Plus,
@@ -14,17 +21,24 @@ import {
   ShieldCheck,
   Trash2,
   Zap,
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { SiteListenersPanel } from "@/components/site-listeners-panel";
+} from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { SiteListenersPanel } from "@/components/site-listeners-panel"
 import {
   clearRecordedResources,
   createApplicationRouteRule,
   deleteApplicationRouteRule,
   getCertificates,
   getSite,
+  getSiteAccessLogStats,
   listApplicationRouteRules,
   listRecordedResources,
   startSite,
@@ -35,12 +49,17 @@ import {
   type Certificate,
   type RecordedResource,
   type Site,
-} from "@/lib/api";
-import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console";
-import { findInvalidSiteUpstream, parseSiteUpstreams, serializeSiteUpstreams } from "@/lib/site-upstreams";
-import { MultiHostInput } from "@/components/multi-host-input";
-import { formatDate } from "@/lib/utils";
-import { toast } from "sonner";
+  type SiteAccessLogStats,
+} from "@/lib/api"
+import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console"
+import {
+  findInvalidSiteUpstream,
+  parseSiteUpstreams,
+  serializeSiteUpstreams,
+} from "@/lib/site-upstreams"
+import { MultiHostInput } from "@/components/multi-host-input"
+import { formatDate } from "@/lib/utils"
+import { toast } from "sonner"
 
 const sensitivityLevels = [
   { value: "off", label: "禁用" },
@@ -49,7 +68,7 @@ const sensitivityLevels = [
   { value: "high", label: "高" },
   { value: "very_high", label: "极高" },
   { value: "strict", label: "严格" },
-];
+]
 
 const APP_ROUTE_TARGETS: { value: string; label: string }[] = [
   { value: "request_method", label: "请求方法" },
@@ -61,7 +80,7 @@ const APP_ROUTE_TARGETS: { value: string; label: string }[] = [
   { value: "full_http_request", label: "完整 HTTP 请求（摘要）" },
   { value: "full_http_response", label: "完整 HTTP 响应（摘要）" },
   { value: "fingerprint", label: "指纹特征（JA3+UA）" },
-];
+]
 
 const APP_ROUTE_OPS: { value: string; label: string }[] = [
   { value: "eq", label: "等于" },
@@ -72,112 +91,142 @@ const APP_ROUTE_OPS: { value: string; label: string }[] = [
   { value: "suffix", label: "后缀" },
   { value: "regex", label: "正则" },
   { value: "fuzzy", label: "模糊（忽略大小写包含）" },
-];
+]
 
 function extractSiteId(candidate: string | undefined) {
-  if (!candidate) return "";
-  const last = candidate.split("/").filter(Boolean).at(-1) ?? "";
-  return /^\d+$/.test(last) ? last : "";
+  if (!candidate) return ""
+  const last = candidate.split("/").filter(Boolean).at(-1) ?? ""
+  return /^\d+$/.test(last) ? last : ""
 }
 
-type TabKey = "basic" | "listeners" | "upstream" | "advanced" | "inventory";
+type TabKey = "basic" | "listeners" | "upstream" | "advanced" | "inventory"
 
 export default function SiteDetailClient() {
-  const params = useParams();
-  const pathname = usePathname();
-  const router = useRouter();
-  const searchParams = useSearchParams();
+  const params = useParams()
+  const pathname = usePathname()
+  const router = useRouter()
+  const searchParams = useSearchParams()
   const siteId = useMemo(() => {
-    const rawId = params.id as string | undefined;
-    const queryId = searchParams.get("id") || undefined;
+    const rawId = params.id as string | undefined
+    const queryId = searchParams.get("id") || undefined
     return (
       extractSiteId(queryId) ||
       extractSiteId(rawId) ||
       extractSiteId(pathname) ||
-      (typeof window !== "undefined" ? extractSiteId(window.location.pathname) : "") ||
+      (typeof window !== "undefined"
+        ? extractSiteId(window.location.pathname)
+        : "") ||
       "_"
-    );
-  }, [params.id, pathname, searchParams]);
+    )
+  }, [params.id, pathname, searchParams])
 
-  const [site, setSite] = useState<Site | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [tab, setTab] = useState<TabKey>("basic");
+  const [site, setSite] = useState<Site | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [tab, setTab] = useState<TabKey>("basic")
+  const [accessStats, setAccessStats] = useState<SiteAccessLogStats | null>(
+    null
+  )
 
   // Editable form state
-  const [hosts, setHosts] = useState<string[]>([]);
-  const [bind, setBind] = useState("");
-  const [network, setNetwork] = useState("tcp");
-  const [tlsEnabled, setTlsEnabled] = useState(false);
-  const [certId, setCertId] = useState<number | null>(null);
-  const [certificates, setCertificates] = useState<Certificate[]>([]);
-  const [upstreams, setUpstreams] = useState<string[]>([]);
-  const [xffMode, setXFFMode] = useState("strip_all_and_set_remote");
-  const [trustedCIDR, setTrustedCIDR] = useState("");
-  const [preserveOriginalHost, setPreserveOriginalHost] = useState(false);
-  const [upstreamTLSSkipVerify, setUpstreamTLSSkipVerify] = useState(false);
-  const [upstreamTLSServerName, setUpstreamTLSServerName] = useState("");
-  const [cacheEnabled, setCacheEnabled] = useState(false);
-  const [cacheDefaultTTL, setCacheDefaultTTL] = useState(0);
+  const [hosts, setHosts] = useState<string[]>([])
+  const [bind, setBind] = useState("")
+  const [network, setNetwork] = useState("tcp")
+  const [tlsEnabled, setTlsEnabled] = useState(false)
+  const [certId, setCertId] = useState<number | null>(null)
+  const [certificates, setCertificates] = useState<Certificate[]>([])
+  const [minTlsVersion, setMinTlsVersion] = useState("TLS12")
+  const [maxTlsVersion, setMaxTlsVersion] = useState("TLS13")
+  const [cipherSuites, setCipherSuites] = useState("")
+  const [alpn, setAlpn] = useState("h2,http/1.1")
+  const [upstreams, setUpstreams] = useState<string[]>([])
+  const [xffMode, setXFFMode] = useState("strip_all_and_set_remote")
+  const [trustedCIDR, setTrustedCIDR] = useState("")
+  const [preserveOriginalHost, setPreserveOriginalHost] = useState(false)
+  const [upstreamTLSSkipVerify, setUpstreamTLSSkipVerify] = useState(false)
+  const [upstreamTLSServerName, setUpstreamTLSServerName] = useState("")
+  const [cacheEnabled, setCacheEnabled] = useState(false)
+  const [cacheDefaultTTL, setCacheDefaultTTL] = useState(0)
   const [cacheRules, setCacheRules] = useState<
-    Array<{ type: string; value: string; ttl: number; case_insensitive: boolean; ignore_query: boolean }>
-  >([]);
-  const [owaspAction, setOwaspAction] = useState("intercept");
-  const [cveAction, setCveAction] = useState("intercept");
-  const [rateLimitAction, setRateLimitAction] = useState("rate_limit");
+    Array<{
+      type: string
+      value: string
+      ttl: number
+      case_insensitive: boolean
+      ignore_query: boolean
+    }>
+  >([])
+  const [owaspAction, setOwaspAction] = useState("intercept")
+  const [cveAction, setCveAction] = useState("intercept")
+  const [rateLimitAction, setRateLimitAction] = useState("rate_limit")
 
   // Advanced
-  const [blockHtml, setBlockHtml] = useState("");
-  const [blockStatus, setBlockStatus] = useState(403);
-  const [maintenanceEnabled, setMaintenanceEnabled] = useState(false);
-  const [maintenanceHtml, setMaintenanceHtml] = useState("");
-  const [maintenanceStatus, setMaintenanceStatus] = useState(503);
-  const [maxBodyBytes, setMaxBodyBytes] = useState(0);
-  const [antiReplayEnabled, setAntiReplayEnabled] = useState(false);
-  const [antiReplayTTL, setAntiReplayTTL] = useState(300);
-  const [antiReplayAction, setAntiReplayAction] = useState("shield_challenge");
+  const [blockHtml, setBlockHtml] = useState("")
+  const [blockStatus, setBlockStatus] = useState(403)
+  const [maintenanceEnabled, setMaintenanceEnabled] = useState(false)
+  const [maintenanceHtml, setMaintenanceHtml] = useState("")
+  const [maintenanceStatus, setMaintenanceStatus] = useState(503)
+  const [maxBodyBytes, setMaxBodyBytes] = useState(0)
+  const [antiReplayEnabled, setAntiReplayEnabled] = useState(false)
+  const [antiReplayTTL, setAntiReplayTTL] = useState(300)
+  const [antiReplayAction, setAntiReplayAction] = useState("shield_challenge")
 
   // Per-site protection overrides
-  const [owaspEnabled, setOwaspEnabled] = useState<boolean | null>(null);
-  const [owaspSensitivity, setOwaspSensitivity] = useState("");
-  const [cveEnabled, setCveEnabled] = useState<boolean | null>(null);
-  const [rateLimitEnabled, setRateLimitEnabled] = useState<boolean | null>(null);
-  const [rateLimitWindow, setRateLimitWindow] = useState(0);
-  const [rateLimitMax, setRateLimitMax] = useState(0);
-  const [botProtectionEnabled, setBotProtectionEnabled] = useState(false);
-  const [botProtectionLevel, setBotProtectionLevel] = useState("medium");
+  const [owaspEnabled, setOwaspEnabled] = useState<boolean | null>(null)
+  const [owaspSensitivity, setOwaspSensitivity] = useState("")
+  const [cveEnabled, setCveEnabled] = useState<boolean | null>(null)
+  const [rateLimitEnabled, setRateLimitEnabled] = useState<boolean | null>(null)
+  const [rateLimitWindow, setRateLimitWindow] = useState(0)
+  const [rateLimitMax, setRateLimitMax] = useState(0)
+  const [botProtectionEnabled, setBotProtectionEnabled] = useState(false)
+  const [botProtectionLevel, setBotProtectionLevel] = useState("medium")
 
-  const [appRules, setAppRules] = useState<ApplicationRouteRule[]>([]);
-  const [recItems, setRecItems] = useState<RecordedResource[]>([]);
-  const [recTotal, setRecTotal] = useState(0);
-  const [recPage, setRecPage] = useState(1);
-  const [invLoading, setInvLoading] = useState(false);
-  const recPageSize = 20;
+  const [appRules, setAppRules] = useState<ApplicationRouteRule[]>([])
+  const [recItems, setRecItems] = useState<RecordedResource[]>([])
+  const [recTotal, setRecTotal] = useState(0)
+  const [recPage, setRecPage] = useState(1)
+  const [invLoading, setInvLoading] = useState(false)
+  const recPageSize = 20
 
   const load = useCallback(async () => {
     if (siteId === "_") {
-      setSite(null);
-      setLoading(false);
-      return;
+      setSite(null)
+      setLoading(false)
+      return
     }
-    setLoading(true);
+    setLoading(true)
     try {
-      const s = await getSite(siteId);
-      setSite(s);
+      const [s, stats] = await Promise.all([
+        getSite(siteId),
+        getSiteAccessLogStats(siteId).catch(() => null),
+      ])
+      setSite(s)
+      setAccessStats(stats)
       // Populate form
-      setHosts(s.host ? s.host.split(",").map((h: string) => h.trim()).filter(Boolean) : []);
-      setBind(s.bind);
-      setNetwork(s.network);
-      setTlsEnabled(s.tls_enabled);
-      setCertId(s.cert_id ?? null);
-      setUpstreams(parseSiteUpstreams(s.upstream_urls));
-      setXFFMode(s.xff_mode || "strip_all_and_set_remote");
-      setTrustedCIDR(s.trusted_cidr || "");
-      setPreserveOriginalHost(Boolean(s.preserve_original_host));
-      setUpstreamTLSSkipVerify(Boolean(s.upstream_tls_skip_verify));
-      setUpstreamTLSServerName(s.upstream_tls_server_name || "");
-      setCacheEnabled(Boolean(s.cache_enabled));
-      setCacheDefaultTTL(s.cache_default_ttl || 0);
+      setHosts(
+        s.host
+          ? s.host
+              .split(",")
+              .map((h: string) => h.trim())
+              .filter(Boolean)
+          : []
+      )
+      setBind(s.bind)
+      setNetwork(s.network)
+      setTlsEnabled(s.tls_enabled)
+      setCertId(s.cert_id ?? null)
+      setMinTlsVersion(s.min_tls_version || "TLS12")
+      setMaxTlsVersion(s.max_tls_version || "TLS13")
+      setCipherSuites(s.cipher_suites || "")
+      setAlpn(s.alpn || "h2,http/1.1")
+      setUpstreams(parseSiteUpstreams(s.upstream_urls))
+      setXFFMode(s.xff_mode || "strip_all_and_set_remote")
+      setTrustedCIDR(s.trusted_cidr || "")
+      setPreserveOriginalHost(Boolean(s.preserve_original_host))
+      setUpstreamTLSSkipVerify(Boolean(s.upstream_tls_skip_verify))
+      setUpstreamTLSServerName(s.upstream_tls_server_name || "")
+      setCacheEnabled(Boolean(s.cache_enabled))
+      setCacheDefaultTTL(s.cache_default_ttl || 0)
       if (Array.isArray(s.cache_rules)) {
         setCacheRules(
           s.cache_rules.map((rule) => ({
@@ -186,18 +235,18 @@ export default function SiteDetailClient() {
             ttl: rule.ttl || 0,
             case_insensitive: Boolean(rule.case_insensitive),
             ignore_query: Boolean(rule.ignore_query),
-          })),
-        );
+          }))
+        )
       } else if (typeof s.cache_rules === "string" && s.cache_rules.trim()) {
         try {
           const parsed = JSON.parse(s.cache_rules) as Array<{
-            type?: string;
-            value?: string;
-            path?: string;
-            ttl?: number;
-            case_insensitive?: boolean;
-            ignore_query?: boolean;
-          }>;
+            type?: string
+            value?: string
+            path?: string
+            ttl?: number
+            case_insensitive?: boolean
+            ignore_query?: boolean
+          }>
           setCacheRules(
             parsed.map((rule) => ({
               type: rule.type || "prefix",
@@ -205,96 +254,100 @@ export default function SiteDetailClient() {
               ttl: rule.ttl || 0,
               case_insensitive: Boolean(rule.case_insensitive),
               ignore_query: Boolean(rule.ignore_query),
-            })),
-          );
-        } catch { setCacheRules([]); }
+            }))
+          )
+        } catch {
+          setCacheRules([])
+        }
       } else {
-        setCacheRules([]);
+        setCacheRules([])
       }
-      setOwaspAction(s.owasp_action || "intercept");
-      setCveAction(s.cve_action || "intercept");
-      setRateLimitAction(s.rate_limit_action || "rate_limit");
-      setOwaspEnabled(s.owasp_enabled ?? null);
-      setOwaspSensitivity(s.owasp_sensitivity || "");
-      setCveEnabled(s.cve_enabled ?? null);
-      setRateLimitEnabled(s.rate_limit_enabled ?? null);
-      setRateLimitWindow(s.rate_limit_window || 0);
-      setRateLimitMax(s.rate_limit_max || 0);
-      setBotProtectionEnabled(Boolean(s.bot_protection_enabled));
-      setBotProtectionLevel(s.bot_protection_level || "medium");
-      setBlockHtml(s.block_html || "");
-      setBlockStatus(s.block_status || 403);
-      setMaintenanceEnabled(s.maintenance_enabled);
-      setMaintenanceHtml(s.maintenance_html || "");
-      setMaintenanceStatus(s.maintenance_status || 503);
-      setMaxBodyBytes(s.max_body_bytes || 0);
-      setAntiReplayEnabled(Boolean(s.anti_replay_enabled));
-      setAntiReplayTTL(s.anti_replay_ttl || 300);
-      setAntiReplayAction(s.anti_replay_action || "shield_challenge");
+      setOwaspAction(s.owasp_action || "intercept")
+      setCveAction(s.cve_action || "intercept")
+      setRateLimitAction(s.rate_limit_action || "rate_limit")
+      setOwaspEnabled(s.owasp_enabled ?? null)
+      setOwaspSensitivity(s.owasp_sensitivity || "")
+      setCveEnabled(s.cve_enabled ?? null)
+      setRateLimitEnabled(s.rate_limit_enabled ?? null)
+      setRateLimitWindow(s.rate_limit_window || 0)
+      setRateLimitMax(s.rate_limit_max || 0)
+      setBotProtectionEnabled(Boolean(s.bot_protection_enabled))
+      setBotProtectionLevel(s.bot_protection_level || "medium")
+      setBlockHtml(s.block_html || "")
+      setBlockStatus(s.block_status || 403)
+      setMaintenanceEnabled(s.maintenance_enabled)
+      setMaintenanceHtml(s.maintenance_html || "")
+      setMaintenanceStatus(s.maintenance_status || 503)
+      setMaxBodyBytes(s.max_body_bytes || 0)
+      setAntiReplayEnabled(Boolean(s.anti_replay_enabled))
+      setAntiReplayTTL(s.anti_replay_ttl || 300)
+      setAntiReplayAction(s.anti_replay_action || "shield_challenge")
     } catch (err) {
-      toast.error(String(err));
-      setSite(null);
+      toast.error(String(err))
+      setSite(null)
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  }, [siteId]);
+  }, [siteId])
 
   useEffect(() => {
-    load();
-  }, [load]);
+    load()
+  }, [load])
 
   useEffect(() => {
     getCertificates()
       .then((data) => setCertificates(data.items || []))
-      .catch(() => setCertificates([]));
-  }, []);
+      .catch(() => setCertificates([]))
+  }, [])
 
   const refreshInventory = useCallback(
     async (recordedPageOverride?: number) => {
-      if (siteId === "_" || siteId === "") return;
-      const sid = Number(siteId);
-      if (Number.isNaN(sid)) return;
-      const page = recordedPageOverride ?? recPage;
-      setInvLoading(true);
+      if (siteId === "_" || siteId === "") return
+      const sid = Number(siteId)
+      if (Number.isNaN(sid)) return
+      const page = recordedPageOverride ?? recPage
+      setInvLoading(true)
       try {
         const [rRules, rRec] = await Promise.all([
           listApplicationRouteRules(sid, { page: 1, page_size: 200 }),
           listRecordedResources(sid, { page, page_size: recPageSize }),
-        ]);
-        setAppRules(rRules.items || []);
-        setRecItems(rRec.items || []);
-        setRecTotal(Number(rRec.total) || 0);
+        ])
+        setAppRules(rRules.items || [])
+        setRecItems(rRec.items || [])
+        setRecTotal(Number(rRec.total) || 0)
       } catch (e) {
-        toast.error(String(e));
+        toast.error(String(e))
       } finally {
-        setInvLoading(false);
+        setInvLoading(false)
       }
     },
-    [siteId, recPage, recPageSize],
-  );
+    [siteId, recPage, recPageSize]
+  )
 
   useEffect(() => {
-    if (tab !== "inventory" || siteId === "_") return;
-    void refreshInventory();
-  }, [tab, siteId, recPage, recPageSize, refreshInventory]);
+    if (tab !== "inventory" || siteId === "_") return
+    void refreshInventory()
+  }, [tab, siteId, recPage, recPageSize, refreshInventory])
 
   async function handleSave() {
-    if (!site) return;
-    const normalizedUpstreams = upstreams.map((item) => item.trim()).filter(Boolean);
+    if (!site) return
+    const normalizedUpstreams = upstreams
+      .map((item) => item.trim())
+      .filter(Boolean)
     if (normalizedUpstreams.length === 0) {
-      toast.error("至少需要配置一个上游地址");
-      return;
+      toast.error("至少需要配置一个上游地址")
+      return
     }
-    const invalidUpstream = findInvalidSiteUpstream(normalizedUpstreams);
+    const invalidUpstream = findInvalidSiteUpstream(normalizedUpstreams)
     if (invalidUpstream) {
-      toast.error(`上游地址格式无效：${invalidUpstream}`);
-      return;
+      toast.error(`上游地址格式无效：${invalidUpstream}`)
+      return
     }
     if (tlsEnabled && !certId) {
-      toast.error("启用 HTTPS 时请选择证书");
-      return;
+      toast.error("启用 HTTPS 时请选择证书")
+      return
     }
-    setSaving(true);
+    setSaving(true)
     try {
       await updateSite(site.id, {
         host: hosts.join(", "),
@@ -302,6 +355,10 @@ export default function SiteDetailClient() {
         network,
         tls_enabled: tlsEnabled,
         cert_id: tlsEnabled ? certId : null,
+        min_tls_version: tlsEnabled ? minTlsVersion : undefined,
+        max_tls_version: tlsEnabled ? maxTlsVersion : undefined,
+        cipher_suites: tlsEnabled ? cipherSuites : undefined,
+        alpn: tlsEnabled ? alpn : undefined,
         upstream_urls: serializeSiteUpstreams(normalizedUpstreams),
         xff_mode: xffMode,
         trusted_cidr: trustedCIDR,
@@ -315,7 +372,7 @@ export default function SiteDetailClient() {
             .filter(
               (rule) =>
                 rule.value.trim() &&
-                (rule.ttl > 0 || (rule.ttl === 0 && cacheDefaultTTL > 0)),
+                (rule.ttl > 0 || (rule.ttl === 0 && cacheDefaultTTL > 0))
             )
             .map((rule) => ({
               type: rule.type,
@@ -323,7 +380,7 @@ export default function SiteDetailClient() {
               ttl: rule.ttl,
               case_insensitive: rule.case_insensitive,
               ignore_query: rule.ignore_query,
-            })),
+            }))
         ),
         owasp_action: owaspAction,
         cve_action: cveAction,
@@ -345,37 +402,39 @@ export default function SiteDetailClient() {
         anti_replay_enabled: antiReplayEnabled,
         anti_replay_ttl: antiReplayTTL,
         anti_replay_action: antiReplayAction,
-      });
-      toast.success("站点配置已保存");
-      load();
+      })
+      toast.success("站点配置已保存")
+      load()
     } catch (err) {
-      toast.error(String(err));
+      toast.error(String(err))
     } finally {
-      setSaving(false);
+      setSaving(false)
     }
   }
 
   async function handleToggle() {
-    if (!site) return;
+    if (!site) return
     try {
       if (site.enabled) {
-        await stopSite(site.id);
+        await stopSite(site.id)
       } else {
-        await startSite(site.id);
+        await startSite(site.id)
       }
-      toast.success(site.enabled ? "站点已停用" : "站点已启用");
-      load();
+      toast.success(site.enabled ? "站点已停用" : "站点已启用")
+      load()
     } catch (err) {
-      toast.error(String(err));
+      toast.error(String(err))
     }
   }
 
   function patchAppRule(ruleId: number, patch: Partial<ApplicationRouteRule>) {
-    setAppRules((prev) => prev.map((r) => (r.id === ruleId ? { ...r, ...patch } : r)));
+    setAppRules((prev) =>
+      prev.map((r) => (r.id === ruleId ? { ...r, ...patch } : r))
+    )
   }
 
   async function handleAddAppRule() {
-    if (!site) return;
+    if (!site) return
     try {
       await createApplicationRouteRule(site.id, {
         name: `资源规则 ${appRules.length + 1}`,
@@ -385,16 +444,16 @@ export default function SiteDetailClient() {
         op: "eq",
         pattern: "GET",
         header_key: "",
-      });
-      toast.success("已创建规则");
-      await refreshInventory();
+      })
+      toast.success("已创建规则")
+      await refreshInventory()
     } catch (err) {
-      toast.error(String(err));
+      toast.error(String(err))
     }
   }
 
   async function handleSaveAppRule(rule: ApplicationRouteRule) {
-    if (!site || rule.id == null) return;
+    if (!site || rule.id == null) return
     try {
       await updateApplicationRouteRule(site.id, rule.id, {
         name: rule.name ?? "",
@@ -404,36 +463,36 @@ export default function SiteDetailClient() {
         op: rule.op,
         pattern: rule.pattern,
         header_key: rule.header_key ?? "",
-      });
-      toast.success("规则已保存");
-      await refreshInventory();
+      })
+      toast.success("规则已保存")
+      await refreshInventory()
     } catch (err) {
-      toast.error(String(err));
+      toast.error(String(err))
     }
   }
 
   async function handleDeleteAppRule(ruleId: number) {
-    if (!site) return;
-    if (!window.confirm("确定删除该规则？")) return;
+    if (!site) return
+    if (!window.confirm("确定删除该规则？")) return
     try {
-      await deleteApplicationRouteRule(site.id, ruleId);
-      toast.success("已删除");
-      await refreshInventory();
+      await deleteApplicationRouteRule(site.id, ruleId)
+      toast.success("已删除")
+      await refreshInventory()
     } catch (err) {
-      toast.error(String(err));
+      toast.error(String(err))
     }
   }
 
   async function handleClearRecorded() {
-    if (!site) return;
-    if (!window.confirm("确定清空本站点已记录的资源数据？不可恢复。")) return;
+    if (!site) return
+    if (!window.confirm("确定清空本站点已记录的资源数据？不可恢复。")) return
     try {
-      await clearRecordedResources(site.id);
-      toast.success("已清空");
-      setRecPage(1);
-      await refreshInventory(1);
+      await clearRecordedResources(site.id)
+      toast.success("已清空")
+      setRecPage(1)
+      await refreshInventory(1)
     } catch (err) {
-      toast.error(String(err));
+      toast.error(String(err))
     }
   }
 
@@ -442,7 +501,7 @@ export default function SiteDetailClient() {
       <div className="flex min-h-[400px] items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-slate-500" />
       </div>
-    );
+    )
   }
 
   if (!site) {
@@ -450,15 +509,17 @@ export default function SiteDetailClient() {
       <div className="flex min-h-[400px] flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white">
         <Globe className="mb-4 h-12 w-12 text-slate-300" />
         <h3 className="text-lg font-semibold text-slate-700">站点不存在</h3>
-        <p className="mt-2 text-sm text-slate-500">该站点可能已被删除或无权访问</p>
+        <p className="mt-2 text-sm text-slate-500">
+          该站点可能已被删除或无权访问
+        </p>
         <Button
+          asChild
           className="mt-4 rounded-md bg-teal-500 text-white hover:bg-teal-600"
-          onClick={() => router.push("/sites/")}
         >
-          返回应用列表
+          <Link href="/sites/">返回应用列表</Link>
         </Button>
       </div>
-    );
+    )
   }
 
   const tabs: { key: TabKey; label: string }[] = [
@@ -467,9 +528,9 @@ export default function SiteDetailClient() {
     { key: "upstream", label: "上游管理" },
     { key: "advanced", label: "高级配置" },
     { key: "inventory", label: "应用路由" },
-  ];
+  ]
 
-  const recTotalPages = Math.max(1, Math.ceil(recTotal / recPageSize));
+  const recTotalPages = Math.max(1, Math.ceil(recTotal / recPageSize))
 
   const quickLinks = [
     {
@@ -500,18 +561,34 @@ export default function SiteDetailClient() {
       href: "/security/",
       color: "bg-slate-100 text-slate-600",
     },
-  ];
+    {
+      label: "请求日志",
+      desc: "按当前站点 Host 检索请求明细",
+      icon: FileText,
+      href: `/access-logs/?host=${encodeURIComponent(site.host.split(",")[0]?.trim() || site.host)}`,
+      color: "bg-cyan-50 text-cyan-600",
+    },
+    {
+      label: "拦截日志",
+      desc: "按当前站点 Host 查看拦截事件",
+      icon: ShieldAlert,
+      href: `/security-events/?host=${encodeURIComponent(site.host.split(",")[0]?.trim() || site.host)}`,
+      color: "bg-rose-50 text-rose-600",
+    },
+  ]
 
   return (
     <div className="space-y-6">
       {/* Back */}
       <Button
+        asChild
         variant="ghost"
         className="rounded-md text-slate-500 hover:text-slate-900"
-        onClick={() => router.push("/sites/")}
       >
-        <ArrowLeft className="mr-2 h-4 w-4" />
-        返回应用列表
+        <Link href="/sites/">
+          <ArrowLeft className="mr-2 h-4 w-4" />
+          返回应用列表
+        </Link>
       </Button>
 
       {/* Site Header */}
@@ -523,7 +600,12 @@ export default function SiteDetailClient() {
             </div>
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-xl font-bold text-slate-900">{site.host?.split(",").map(h => h.trim()).join(", ")}</h1>
+                <h1 className="text-xl font-bold text-slate-900">
+                  {site.host
+                    ?.split(",")
+                    .map((h) => h.trim())
+                    .join(", ")}
+                </h1>
                 <span
                   className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
                     site.enabled
@@ -536,13 +618,17 @@ export default function SiteDetailClient() {
               </div>
               <p className="mt-1 text-sm text-slate-500">
                 {site.tls_enabled ? "HTTPS" : "HTTP"} · 监听{" "}
-                <span className="font-mono">{site.bind}</span> · 网络 {site.network} · 创建于{" "}
-                {formatDate(site.created_at)}
+                <span className="font-mono">{site.bind}</span> · 网络{" "}
+                {site.network} · 创建于 {formatDate(site.created_at)}
               </p>
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" className="rounded-md" onClick={handleToggle}>
+            <Button
+              variant="outline"
+              className="rounded-md"
+              onClick={handleToggle}
+            >
               {site.enabled ? "停用站点" : "启用站点"}
             </Button>
             <Button variant="outline" className="rounded-md" onClick={load}>
@@ -552,41 +638,63 @@ export default function SiteDetailClient() {
         </div>
       </div>
 
+      <div className="grid gap-4 md:grid-cols-3">
+        <MetricCard label="24h 请求" value={accessStats?.requests ?? 0} />
+        <MetricCard
+          label="24h 拦截"
+          value={accessStats?.intercepts ?? 0}
+          tone="rose"
+        />
+        <MetricCard
+          label="24h 观察"
+          value={accessStats?.observes ?? 0}
+          tone="amber"
+        />
+      </div>
+
       {/* Quick Entry Cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {quickLinks.map((q) => (
-          <button
+          <Link
             key={q.label}
-            onClick={() => router.push(q.href)}
-            className="group rounded-lg border border-slate-200 bg-white p-5 text-left shadow-sm transition-all hover:border-slate-300 hover:shadow-md"
+            href={q.href}
+            className="group flex min-w-0 items-start gap-3 rounded-lg border border-slate-200 bg-white p-4 text-left shadow-sm transition-all hover:border-slate-300 hover:shadow-md"
           >
-            <div className={`mb-3 flex h-10 w-10 items-center justify-center rounded-lg ${q.color}`}>
+            <div
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${q.color}`}
+            >
               <q.icon className="h-5 w-5" />
             </div>
-            <h3 className="text-sm font-semibold text-slate-900 group-hover:text-slate-600">
-              {q.label}
-            </h3>
-            <p className="mt-1 text-xs text-slate-500">{q.desc}</p>
-          </button>
+            <div className="min-w-0">
+              <h3 className="truncate text-sm font-semibold text-slate-900 group-hover:text-slate-600">
+                {q.label}
+              </h3>
+              <p className="mt-1 line-clamp-2 text-xs text-slate-500">
+                {q.desc}
+              </p>
+            </div>
+          </Link>
         ))}
       </div>
 
       {/* Tabs */}
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="flex border-b border-slate-200">
-          {tabs.map((t) => (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              className={`px-6 py-3 text-sm font-medium transition-colors ${
-                tab === t.key
-                  ? "border-b-2 border-slate-950 text-slate-950"
-                  : "text-slate-500 hover:text-slate-700"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="overflow-x-auto overscroll-x-contain border-b border-slate-200">
+          <div className="flex min-w-max">
+            {tabs.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                className={`px-6 py-3 text-sm font-medium transition-colors ${
+                  tab === t.key
+                    ? "border-b-2 border-slate-950 text-slate-950"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="p-6">
@@ -620,9 +728,9 @@ export default function SiteDetailClient() {
                     <button
                       type="button"
                       onClick={() => {
-                        setTlsEnabled(false);
-                        setCertId(null);
-                        setBind(":80");
+                        setTlsEnabled(false)
+                        setCertId(null)
+                        setBind(":80")
                       }}
                       className={`flex-1 rounded-md border px-4 py-2 text-sm font-medium ${
                         !tlsEnabled
@@ -635,8 +743,8 @@ export default function SiteDetailClient() {
                     <button
                       type="button"
                       onClick={() => {
-                        setTlsEnabled(true);
-                        setBind(":443");
+                        setTlsEnabled(true)
+                        setBind(":443")
                       }}
                       className={`flex-1 rounded-md border px-4 py-2 text-sm font-medium ${
                         tlsEnabled
@@ -649,25 +757,108 @@ export default function SiteDetailClient() {
                   </div>
                 </FieldGroup>
                 {tlsEnabled && (
-                  <FieldGroup label="TLS 证书">
-                    <Select value={certId ? String(certId) : ""} onValueChange={(value) => setCertId(value ? Number(value) : null)}>
-                      <SelectTrigger className="rounded-md">
-                        <SelectValue placeholder={certificates.length ? "选择证书" : "当前没有可用证书"} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {certificates.map((cert) => (
-                          <SelectItem key={cert.id} value={String(cert.id)}>{cert.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </FieldGroup>
+                  <>
+                    <FieldGroup label="TLS 证书">
+                      <Select
+                        value={certId ? String(certId) : "none"}
+                        onValueChange={(value) =>
+                          setCertId(value === "none" ? null : Number(value))
+                        }
+                      >
+                        <SelectTrigger className="rounded-md">
+                          <SelectValue
+                            placeholder={
+                              certificates.length
+                                ? "选择证书"
+                                : "当前没有可用证书"
+                            }
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">不绑定证书</SelectItem>
+                          {certificates.map((cert) => (
+                            <SelectItem key={cert.id} value={String(cert.id)}>
+                              {cert.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FieldGroup>
+                    <FieldGroup label="最低 TLS 版本">
+                      <Select
+                        value={minTlsVersion}
+                        onValueChange={setMinTlsVersion}
+                      >
+                        <SelectTrigger className="rounded-md">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="TLS10">
+                            TLS 1.0（不推荐）
+                          </SelectItem>
+                          <SelectItem value="TLS11">
+                            TLS 1.1（不推荐）
+                          </SelectItem>
+                          <SelectItem value="TLS12">TLS 1.2（推荐）</SelectItem>
+                          <SelectItem value="TLS13">TLS 1.3</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </FieldGroup>
+                    <FieldGroup label="最高 TLS 版本">
+                      <Select
+                        value={maxTlsVersion}
+                        onValueChange={setMaxTlsVersion}
+                      >
+                        <SelectTrigger className="rounded-md">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="TLS10">TLS 1.0</SelectItem>
+                          <SelectItem value="TLS11">TLS 1.1</SelectItem>
+                          <SelectItem value="TLS12">TLS 1.2</SelectItem>
+                          <SelectItem value="TLS13">TLS 1.3（推荐）</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </FieldGroup>
+                    <FieldGroup label="ALPN 协议（逗号分隔）">
+                      <Input
+                        value={alpn}
+                        onChange={(e) => setAlpn(e.target.value)}
+                        placeholder="h2,http/1.1"
+                        className="rounded-md font-mono"
+                      />
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        常用值：h2（HTTP/2）、http/1.1（HTTP/1.1）、h3（HTTP/3）
+                      </p>
+                    </FieldGroup>
+                    <div className="md:col-span-2">
+                      <FieldGroup label="密码套件（逗号分隔，留空使用默认）">
+                        <Input
+                          value={cipherSuites}
+                          onChange={(e) => setCipherSuites(e.target.value)}
+                          placeholder="TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384,..."
+                          className="rounded-md font-mono text-xs"
+                        />
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          TLS 1.3 的密码套件由 Go 自动管理，此处主要影响 TLS 1.2
+                          及以下版本。留空使用安全默认值。
+                        </p>
+                      </FieldGroup>
+                    </div>
+                  </>
                 )}
                 <FieldGroup label="客户端 IP 解析">
                   <Select value={xffMode} onValueChange={setXFFMode}>
-                    <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="rounded-md">
+                      <SelectValue />
+                    </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="strip_all_and_set_remote">忽略 X-Forwarded-For，使用直连 IP</SelectItem>
-                      <SelectItem value="trust_outer_waf_cidr_then_take_leftmost">信任外层 WAF CIDR 后取最左 IP</SelectItem>
+                      <SelectItem value="strip_all_and_set_remote">
+                        忽略 X-Forwarded-For，使用直连 IP
+                      </SelectItem>
+                      <SelectItem value="trust_outer_waf_cidr_then_take_leftmost">
+                        信任外层 WAF CIDR 后取最左 IP
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                 </FieldGroup>
@@ -681,10 +872,17 @@ export default function SiteDetailClient() {
                 </FieldGroup>
                 <label className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-4 py-3 md:col-span-2">
                   <div>
-                    <div className="text-sm font-medium text-slate-900">保留原始 Host</div>
-                    <div className="mt-0.5 text-xs text-slate-500">转发到上游时使用客户端请求 Host，并写入 X-Forwarded-Host。</div>
+                    <div className="text-sm font-medium text-slate-900">
+                      保留原始 Host
+                    </div>
+                    <div className="mt-0.5 text-xs text-slate-500">
+                      转发到上游时使用客户端请求 Host，并写入 X-Forwarded-Host。
+                    </div>
                   </div>
-                  <ToggleSwitch checked={preserveOriginalHost} onChange={setPreserveOriginalHost} />
+                  <ToggleSwitch
+                    checked={preserveOriginalHost}
+                    onChange={setPreserveOriginalHost}
+                  />
                 </label>
               </div>
             </div>
@@ -700,29 +898,43 @@ export default function SiteDetailClient() {
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-semibold text-slate-900">上游地址列表</h3>
-                  <p className="text-xs text-slate-500">请求将被转发到以下上游服务器</p>
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    上游地址列表
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    请求将被转发到以下上游服务器
+                  </p>
                 </div>
                 <Button
                   variant="outline"
                   size="sm"
                   className="rounded-md"
-                  onClick={() => setUpstreams([...upstreams, "http://127.0.0.1:8080"])}
+                  onClick={() =>
+                    setUpstreams([...upstreams, "http://127.0.0.1:8080"])
+                  }
                 >
                   <Plus className="mr-1.5 h-3.5 w-3.5" />
                   添加上游
                 </Button>
               </div>
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                多上游按轮询转发；安全请求在连接失败时会尝试下一个 upstream，避免重复提交非幂等请求。
+                多上游按轮询转发；安全请求在连接失败时会尝试下一个
+                upstream，避免重复提交非幂等请求。
               </div>
               <div className="grid gap-4 rounded-md border border-slate-200 bg-slate-50 p-4 md:grid-cols-2">
                 <label className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-4 py-3">
                   <div>
-                    <div className="text-sm font-medium text-slate-900">跳过上游 TLS 校验</div>
-                    <div className="mt-0.5 text-xs text-slate-500">仅用于自签名或测试上游。</div>
+                    <div className="text-sm font-medium text-slate-900">
+                      跳过上游 TLS 校验
+                    </div>
+                    <div className="mt-0.5 text-xs text-slate-500">
+                      仅用于自签名或测试上游。
+                    </div>
                   </div>
-                  <ToggleSwitch checked={upstreamTLSSkipVerify} onChange={setUpstreamTLSSkipVerify} />
+                  <ToggleSwitch
+                    checked={upstreamTLSSkipVerify}
+                    onChange={setUpstreamTLSSkipVerify}
+                  />
                 </label>
                 <FieldGroup label="上游 TLS Server Name">
                   <Input
@@ -747,9 +959,9 @@ export default function SiteDetailClient() {
                       <Input
                         value={u}
                         onChange={(e) => {
-                          const next = [...upstreams];
-                          next[i] = e.target.value;
-                          setUpstreams(next);
+                          const next = [...upstreams]
+                          next[i] = e.target.value
+                          setUpstreams(next)
                         }}
                         placeholder="http://127.0.0.1:8080"
                         className="border-0 bg-transparent font-mono text-sm shadow-none focus-visible:ring-0"
@@ -759,7 +971,11 @@ export default function SiteDetailClient() {
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8 shrink-0 rounded-md text-red-500 hover:bg-red-50 hover:text-red-600"
-                          onClick={() => setUpstreams(upstreams.filter((_, idx) => idx !== i))}
+                          onClick={() =>
+                            setUpstreams(
+                              upstreams.filter((_, idx) => idx !== i)
+                            )
+                          }
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -776,24 +992,31 @@ export default function SiteDetailClient() {
             <div className="space-y-6">
               {/* Per-site Protection Configuration */}
               <div className="rounded-md border border-slate-200 p-5">
-                <h3 className="mb-1 text-sm font-semibold text-slate-900">站点防护配置</h3>
-                <p className="mb-5 text-xs text-slate-500">为本站点单独配置防护策略，或跟随全局配置。规则级 action 优先级更高。</p>
+                <h3 className="mb-1 text-sm font-semibold text-slate-900">
+                  站点防护配置
+                </h3>
+                <p className="mb-5 text-xs text-slate-500">
+                  为本站点单独配置防护策略，或跟随全局配置。规则级 action
+                  优先级更高。
+                </p>
 
                 <div className="space-y-5">
                   {/* OWASP Section */}
                   <div className="rounded-md border border-slate-100 bg-slate-50/60 p-4">
                     <div className="mb-3 flex items-center gap-2">
                       <ShieldAlert className="h-4 w-4 text-red-500" />
-                      <span className="text-sm font-semibold text-slate-900">攻击防护 (OWASP)</span>
+                      <span className="text-sm font-semibold text-slate-900">
+                        攻击防护 (OWASP)
+                      </span>
                     </div>
                     <InheritToggle
                       inherit={owaspEnabled === null}
                       onToggle={(inherit) => {
                         if (inherit) {
-                          setOwaspEnabled(null);
-                          setOwaspSensitivity("");
+                          setOwaspEnabled(null)
+                          setOwaspSensitivity("")
                         } else {
-                          setOwaspEnabled(true);
+                          setOwaspEnabled(true)
                         }
                       }}
                     />
@@ -801,28 +1024,55 @@ export default function SiteDetailClient() {
                       <div className="mt-4 space-y-3">
                         <label className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-4 py-3">
                           <div>
-                            <div className="text-sm font-medium text-slate-900">启用 OWASP 检测</div>
-                            <div className="mt-0.5 text-xs text-slate-500">关闭后将跳过 OWASP 攻击检测</div>
+                            <div className="text-sm font-medium text-slate-900">
+                              启用 OWASP 检测
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-500">
+                              关闭后将跳过 OWASP 攻击检测
+                            </div>
                           </div>
-                          <ToggleSwitch checked={owaspEnabled === true} onChange={(v) => setOwaspEnabled(v)} />
+                          <ToggleSwitch
+                            checked={owaspEnabled === true}
+                            onChange={(v) => setOwaspEnabled(v)}
+                          />
                         </label>
                         <div className="grid gap-4 md:grid-cols-2">
                           <FieldGroup label="检测灵敏度">
-                            <Select value={owaspSensitivity || "mid"} onValueChange={setOwaspSensitivity}>
-                              <SelectTrigger className="rounded-md bg-white"><SelectValue /></SelectTrigger>
+                            <Select
+                              value={owaspSensitivity || "mid"}
+                              onValueChange={setOwaspSensitivity}
+                            >
+                              <SelectTrigger className="rounded-md bg-white">
+                                <SelectValue />
+                              </SelectTrigger>
                               <SelectContent>
                                 {sensitivityLevels.map((item) => (
-                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                                  <SelectItem
+                                    key={item.value}
+                                    value={item.value}
+                                  >
+                                    {item.label}
+                                  </SelectItem>
                                 ))}
                               </SelectContent>
                             </Select>
                           </FieldGroup>
                           <FieldGroup label="命中动作">
-                            <Select value={owaspAction} onValueChange={setOwaspAction}>
-                              <SelectTrigger className="rounded-md bg-white"><SelectValue /></SelectTrigger>
+                            <Select
+                              value={owaspAction}
+                              onValueChange={setOwaspAction}
+                            >
+                              <SelectTrigger className="rounded-md bg-white">
+                                <SelectValue />
+                              </SelectTrigger>
                               <SelectContent>
                                 {terminalWAFActionOptions.map((item) => (
-                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                                  <SelectItem
+                                    key={item.value}
+                                    value={item.value}
+                                  >
+                                    {item.label}
+                                  </SelectItem>
                                 ))}
                               </SelectContent>
                             </Select>
@@ -836,15 +1086,17 @@ export default function SiteDetailClient() {
                   <div className="rounded-md border border-slate-100 bg-slate-50/60 p-4">
                     <div className="mb-3 flex items-center gap-2">
                       <ShieldCheck className="h-4 w-4 text-orange-500" />
-                      <span className="text-sm font-semibold text-slate-900">CVE 检测</span>
+                      <span className="text-sm font-semibold text-slate-900">
+                        CVE 检测
+                      </span>
                     </div>
                     <InheritToggle
                       inherit={cveEnabled === null}
                       onToggle={(inherit) => {
                         if (inherit) {
-                          setCveEnabled(null);
+                          setCveEnabled(null)
                         } else {
-                          setCveEnabled(true);
+                          setCveEnabled(true)
                         }
                       }}
                     />
@@ -852,18 +1104,35 @@ export default function SiteDetailClient() {
                       <div className="mt-4 space-y-3">
                         <label className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-4 py-3">
                           <div>
-                            <div className="text-sm font-medium text-slate-900">启用 CVE 检测</div>
-                            <div className="mt-0.5 text-xs text-slate-500">关闭后将跳过 CVE 漏洞检测</div>
+                            <div className="text-sm font-medium text-slate-900">
+                              启用 CVE 检测
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-500">
+                              关闭后将跳过 CVE 漏洞检测
+                            </div>
                           </div>
-                          <ToggleSwitch checked={cveEnabled === true} onChange={(v) => setCveEnabled(v)} />
+                          <ToggleSwitch
+                            checked={cveEnabled === true}
+                            onChange={(v) => setCveEnabled(v)}
+                          />
                         </label>
                         <div className="max-w-sm">
                           <FieldGroup label="命中动作">
-                            <Select value={cveAction} onValueChange={setCveAction}>
-                              <SelectTrigger className="rounded-md bg-white"><SelectValue /></SelectTrigger>
+                            <Select
+                              value={cveAction}
+                              onValueChange={setCveAction}
+                            >
+                              <SelectTrigger className="rounded-md bg-white">
+                                <SelectValue />
+                              </SelectTrigger>
                               <SelectContent>
                                 {terminalWAFActionOptions.map((item) => (
-                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                                  <SelectItem
+                                    key={item.value}
+                                    value={item.value}
+                                  >
+                                    {item.label}
+                                  </SelectItem>
                                 ))}
                               </SelectContent>
                             </Select>
@@ -877,17 +1146,19 @@ export default function SiteDetailClient() {
                   <div className="rounded-md border border-slate-100 bg-slate-50/60 p-4">
                     <div className="mb-3 flex items-center gap-2">
                       <Zap className="h-4 w-4 text-amber-500" />
-                      <span className="text-sm font-semibold text-slate-900">频率限制</span>
+                      <span className="text-sm font-semibold text-slate-900">
+                        频率限制
+                      </span>
                     </div>
                     <InheritToggle
                       inherit={rateLimitEnabled === null}
                       onToggle={(inherit) => {
                         if (inherit) {
-                          setRateLimitEnabled(null);
-                          setRateLimitWindow(0);
-                          setRateLimitMax(0);
+                          setRateLimitEnabled(null)
+                          setRateLimitWindow(0)
+                          setRateLimitMax(0)
                         } else {
-                          setRateLimitEnabled(true);
+                          setRateLimitEnabled(true)
                         }
                       }}
                     />
@@ -895,10 +1166,17 @@ export default function SiteDetailClient() {
                       <div className="mt-4 space-y-3">
                         <label className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-4 py-3">
                           <div>
-                            <div className="text-sm font-medium text-slate-900">启用频率限制</div>
-                            <div className="mt-0.5 text-xs text-slate-500">关闭后将跳过请求频率限制检查</div>
+                            <div className="text-sm font-medium text-slate-900">
+                              启用频率限制
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-500">
+                              关闭后将跳过请求频率限制检查
+                            </div>
                           </div>
-                          <ToggleSwitch checked={rateLimitEnabled === true} onChange={(v) => setRateLimitEnabled(v)} />
+                          <ToggleSwitch
+                            checked={rateLimitEnabled === true}
+                            onChange={(v) => setRateLimitEnabled(v)}
+                          />
                         </label>
                         <div className="grid gap-4 md:grid-cols-3">
                           <FieldGroup label="时间窗口（秒）">
@@ -906,7 +1184,9 @@ export default function SiteDetailClient() {
                               type="number"
                               min={1}
                               value={rateLimitWindow}
-                              onChange={(e) => setRateLimitWindow(Number(e.target.value))}
+                              onChange={(e) =>
+                                setRateLimitWindow(Number(e.target.value))
+                              }
                               className="rounded-md bg-white"
                               placeholder="60"
                             />
@@ -916,17 +1196,29 @@ export default function SiteDetailClient() {
                               type="number"
                               min={1}
                               value={rateLimitMax}
-                              onChange={(e) => setRateLimitMax(Number(e.target.value))}
+                              onChange={(e) =>
+                                setRateLimitMax(Number(e.target.value))
+                              }
                               className="rounded-md bg-white"
                               placeholder="100"
                             />
                           </FieldGroup>
                           <FieldGroup label="命中动作">
-                            <Select value={rateLimitAction} onValueChange={setRateLimitAction}>
-                              <SelectTrigger className="rounded-md bg-white"><SelectValue /></SelectTrigger>
+                            <Select
+                              value={rateLimitAction}
+                              onValueChange={setRateLimitAction}
+                            >
+                              <SelectTrigger className="rounded-md bg-white">
+                                <SelectValue />
+                              </SelectTrigger>
                               <SelectContent>
                                 {terminalWAFActionOptions.map((item) => (
-                                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                                  <SelectItem
+                                    key={item.value}
+                                    value={item.value}
+                                  >
+                                    {item.label}
+                                  </SelectItem>
                                 ))}
                               </SelectContent>
                             </Select>
@@ -940,24 +1232,44 @@ export default function SiteDetailClient() {
                   <div className="rounded-md border border-slate-100 bg-slate-50/60 p-4">
                     <div className="mb-3 flex items-center gap-2">
                       <Bot className="h-4 w-4 text-purple-500" />
-                      <span className="text-sm font-semibold text-slate-900">Bot 防护</span>
+                      <span className="text-sm font-semibold text-slate-900">
+                        Bot 防护
+                      </span>
                     </div>
                     <label className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-4 py-3">
                       <div>
-                        <div className="text-sm font-medium text-slate-900">启用 Bot 防护</div>
-                        <div className="mt-0.5 text-xs text-slate-500">开启后将基于评分模型检测自动化访问</div>
+                        <div className="text-sm font-medium text-slate-900">
+                          启用 Bot 防护
+                        </div>
+                        <div className="mt-0.5 text-xs text-slate-500">
+                          开启后将基于评分模型检测自动化访问
+                        </div>
                       </div>
-                      <ToggleSwitch checked={botProtectionEnabled} onChange={setBotProtectionEnabled} />
+                      <ToggleSwitch
+                        checked={botProtectionEnabled}
+                        onChange={setBotProtectionEnabled}
+                      />
                     </label>
                     {botProtectionEnabled && (
                       <div className="mt-3 max-w-sm">
                         <FieldGroup label="防护等级">
-                          <Select value={botProtectionLevel} onValueChange={setBotProtectionLevel}>
-                            <SelectTrigger className="rounded-md bg-white"><SelectValue /></SelectTrigger>
+                          <Select
+                            value={botProtectionLevel}
+                            onValueChange={setBotProtectionLevel}
+                          >
+                            <SelectTrigger className="rounded-md bg-white">
+                              <SelectValue />
+                            </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="low">低 - 仅拦截高置信度 Bot</SelectItem>
-                              <SelectItem value="medium">中 - 均衡策略</SelectItem>
-                              <SelectItem value="high">高 - 严格检测</SelectItem>
+                              <SelectItem value="low">
+                                低 - 仅拦截高置信度 Bot
+                              </SelectItem>
+                              <SelectItem value="medium">
+                                中 - 均衡策略
+                              </SelectItem>
+                              <SelectItem value="high">
+                                高 - 严格检测
+                              </SelectItem>
                             </SelectContent>
                           </Select>
                         </FieldGroup>
@@ -970,39 +1282,79 @@ export default function SiteDetailClient() {
               <div className="rounded-md border border-slate-200 p-5">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-sm font-semibold text-slate-900">资源缓存规则</h3>
-                    <p className="text-xs text-slate-500">仅缓存 GET 200、无 Set-Cookie、响应体非空的安全响应。</p>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      资源缓存规则
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      仅缓存 GET 200、无 Set-Cookie、响应体非空的安全响应。
+                    </p>
                   </div>
-                  <ToggleSwitch checked={cacheEnabled} onChange={setCacheEnabled} />
+                  <ToggleSwitch
+                    checked={cacheEnabled}
+                    onChange={setCacheEnabled}
+                  />
                 </div>
                 {cacheEnabled && (
                   <div className="mt-4 space-y-3">
                     <div className="max-w-xs">
                       <FieldGroup label="默认 TTL（秒）">
-                        <Input type="number" min={0} value={cacheDefaultTTL} onChange={(e) => setCacheDefaultTTL(Number(e.target.value))} className="rounded-md" />
+                        <Input
+                          type="number"
+                          min={0}
+                          value={cacheDefaultTTL}
+                          onChange={(e) =>
+                            setCacheDefaultTTL(Number(e.target.value))
+                          }
+                          className="rounded-md"
+                        />
                       </FieldGroup>
                     </div>
                     <p className="text-xs text-slate-500">
                       后缀、前缀、精确、子串规则可用英文逗号写多个模式；后缀可直接写扩展名（如{" "}
-                      <span className="font-mono">js,css,html</span>，会自动按 <span className="font-mono">.js</span> 匹配）。
-                      「正则」类型<strong>不</strong>按逗号拆分（逗号是正则语法的一部分）；匹配默认针对路径+原始查询串，需要时用「忽略查询串」。
+                      <span className="font-mono">js,css,html</span>，会自动按{" "}
+                      <span className="font-mono">.js</span> 匹配）。
+                      「正则」类型<strong>不</strong>
+                      按逗号拆分（逗号是正则语法的一部分）；匹配默认针对路径+原始查询串，需要时用「忽略查询串」。
                       可选「忽略查询串」「忽略大小写」控制匹配与缓存键。
                     </p>
                     {cacheRules.some(
                       (r) =>
-                        r.type === "prefix" && r.value.trim().startsWith(".") && r.value.trim().length > 0,
+                        r.type === "prefix" &&
+                        r.value.trim().startsWith(".") &&
+                        r.value.trim().length > 0
                     ) && (
                       <p className="text-xs text-amber-800">
-                        提示：以「.」开头的是<strong>扩展名</strong>，应选「后缀」才能匹配如{" "}
-                        <code className="rounded bg-amber-100 px-1 font-mono">/app/main.js</code>；「前缀」表示路径从首字符起匹配（例如{" "}
-                        <code className="rounded bg-amber-100 px-1 font-mono">/_next/static</code>）。
+                        提示：以「.」开头的是<strong>扩展名</strong>
+                        ，应选「后缀」才能匹配如{" "}
+                        <code className="rounded bg-amber-100 px-1 font-mono">
+                          /app/main.js
+                        </code>
+                        ；「前缀」表示路径从首字符起匹配（例如{" "}
+                        <code className="rounded bg-amber-100 px-1 font-mono">
+                          /_next/static
+                        </code>
+                        ）。
                       </p>
                     )}
                     {cacheRules.map((rule, idx) => (
-                      <div key={idx} className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+                      <div
+                        key={idx}
+                        className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3"
+                      >
                         <div className="grid gap-2 md:grid-cols-[140px_1fr_120px_40px]">
-                          <Select value={rule.type} onValueChange={(v) => setCacheRules(cacheRules.map((item, i) => (i === idx ? { ...item, type: v } : item)))}>
-                            <SelectTrigger className="rounded-md bg-white"><SelectValue /></SelectTrigger>
+                          <Select
+                            value={rule.type}
+                            onValueChange={(v) =>
+                              setCacheRules(
+                                cacheRules.map((item, i) =>
+                                  i === idx ? { ...item, type: v } : item
+                                )
+                              )
+                            }
+                          >
+                            <SelectTrigger className="rounded-md bg-white">
+                              <SelectValue />
+                            </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="suffix">后缀</SelectItem>
                               <SelectItem value="prefix">前缀</SelectItem>
@@ -1013,7 +1365,15 @@ export default function SiteDetailClient() {
                           </Select>
                           <Input
                             value={rule.value}
-                            onChange={(e) => setCacheRules(cacheRules.map((item, i) => (i === idx ? { ...item, value: e.target.value } : item)))}
+                            onChange={(e) =>
+                              setCacheRules(
+                                cacheRules.map((item, i) =>
+                                  i === idx
+                                    ? { ...item, value: e.target.value }
+                                    : item
+                                )
+                              )
+                            }
                             placeholder={
                               rule.type === "suffix"
                                 ? "js,css,html 或 .mjs,__PAGE__.txt"
@@ -1027,8 +1387,33 @@ export default function SiteDetailClient() {
                             }
                             className="rounded-md bg-white font-mono text-xs"
                           />
-                          <Input type="number" min={1} value={rule.ttl} onChange={(e) => setCacheRules(cacheRules.map((item, i) => (i === idx ? { ...item, ttl: Number(e.target.value) } : item)))} className="rounded-md bg-white" />
-                          <Button variant="ghost" size="icon" className="h-9 w-9 text-rose-500" onClick={() => setCacheRules(cacheRules.filter((_, i) => i !== idx))}><Trash2 className="h-4 w-4" /></Button>
+                          <Input
+                            type="number"
+                            min={1}
+                            value={rule.ttl}
+                            onChange={(e) =>
+                              setCacheRules(
+                                cacheRules.map((item, i) =>
+                                  i === idx
+                                    ? { ...item, ttl: Number(e.target.value) }
+                                    : item
+                                )
+                              )
+                            }
+                            className="rounded-md bg-white"
+                          />
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-9 w-9 text-rose-500"
+                            onClick={() =>
+                              setCacheRules(
+                                cacheRules.filter((_, i) => i !== idx)
+                              )
+                            }
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
                         </div>
                         <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-700 md:pl-1">
                           <label className="flex cursor-pointer items-center gap-2">
@@ -1037,7 +1422,16 @@ export default function SiteDetailClient() {
                               className="rounded border-slate-300"
                               checked={rule.ignore_query}
                               onChange={(e) =>
-                                setCacheRules(cacheRules.map((item, i) => (i === idx ? { ...item, ignore_query: e.target.checked } : item)))
+                                setCacheRules(
+                                  cacheRules.map((item, i) =>
+                                    i === idx
+                                      ? {
+                                          ...item,
+                                          ignore_query: e.target.checked,
+                                        }
+                                      : item
+                                  )
+                                )
                               }
                             />
                             忽略查询串（匹配与缓存键不含 ? 后参数）
@@ -1048,7 +1442,16 @@ export default function SiteDetailClient() {
                               className="rounded border-slate-300"
                               checked={rule.case_insensitive}
                               onChange={(e) =>
-                                setCacheRules(cacheRules.map((item, i) => (i === idx ? { ...item, case_insensitive: e.target.checked } : item)))
+                                setCacheRules(
+                                  cacheRules.map((item, i) =>
+                                    i === idx
+                                      ? {
+                                          ...item,
+                                          case_insensitive: e.target.checked,
+                                        }
+                                      : item
+                                  )
+                                )
                               }
                             />
                             忽略大小写（路径与缓存键路径用小写）
@@ -1061,7 +1464,16 @@ export default function SiteDetailClient() {
                       size="sm"
                       className="rounded-md"
                       onClick={() =>
-                        setCacheRules([...cacheRules, { type: "suffix", value: "js,css", ttl: 3600, case_insensitive: false, ignore_query: false }])
+                        setCacheRules([
+                          ...cacheRules,
+                          {
+                            type: "suffix",
+                            value: "js,css",
+                            ttl: 3600,
+                            case_insensitive: false,
+                            ignore_query: false,
+                          },
+                        ])
                       }
                     >
                       添加缓存规则
@@ -1074,8 +1486,12 @@ export default function SiteDetailClient() {
               <div className="rounded-md border border-slate-200 p-5">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-sm font-semibold text-slate-900">维护模式</h3>
-                    <p className="text-xs text-slate-500">开启后将返回维护页面，所有流量不转发</p>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      维护模式
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      开启后将返回维护页面，所有流量不转发
+                    </p>
                   </div>
                   <ToggleSwitch
                     checked={maintenanceEnabled}
@@ -1088,7 +1504,9 @@ export default function SiteDetailClient() {
                       <Input
                         type="number"
                         value={maintenanceStatus}
-                        onChange={(e) => setMaintenanceStatus(Number(e.target.value))}
+                        onChange={(e) =>
+                          setMaintenanceStatus(Number(e.target.value))
+                        }
                         className="rounded-md"
                       />
                     </FieldGroup>
@@ -1107,7 +1525,9 @@ export default function SiteDetailClient() {
 
               {/* Block settings */}
               <div className="rounded-md border border-slate-200 p-5">
-                <h3 className="text-sm font-semibold text-slate-900">自定义拦截页面</h3>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  自定义拦截页面
+                </h3>
                 <p className="mb-4 text-xs text-slate-500">
                   当请求被 WAF 拦截时展示的页面内容
                 </p>
@@ -1134,8 +1554,12 @@ export default function SiteDetailClient() {
 
               {/* Max body */}
               <div className="rounded-md border border-slate-200 p-5">
-                <h3 className="text-sm font-semibold text-slate-900">请求体限制</h3>
-                <p className="mb-4 text-xs text-slate-500">限制最大请求体大小（字节），0 表示不限制</p>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  请求体限制
+                </h3>
+                <p className="mb-4 text-xs text-slate-500">
+                  限制最大请求体大小（字节），0 表示不限制
+                </p>
                 <div className="max-w-xs">
                   <Input
                     type="number"
@@ -1151,10 +1575,17 @@ export default function SiteDetailClient() {
               <div className="rounded-md border border-slate-200 p-5">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-sm font-semibold text-slate-900">防重放保护</h3>
-                    <p className="text-xs text-slate-500">基于 Nonce 校验拦截重复提交请求</p>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      防重放保护
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      基于 Nonce 校验拦截重复提交请求
+                    </p>
                   </div>
-                  <ToggleSwitch checked={antiReplayEnabled} onChange={setAntiReplayEnabled} />
+                  <ToggleSwitch
+                    checked={antiReplayEnabled}
+                    onChange={setAntiReplayEnabled}
+                  />
                 </div>
                 {antiReplayEnabled && (
                   <div className="mt-4 grid gap-4 md:grid-cols-2">
@@ -1164,16 +1595,25 @@ export default function SiteDetailClient() {
                         min={10}
                         max={86400}
                         value={antiReplayTTL}
-                        onChange={(e) => setAntiReplayTTL(Number(e.target.value))}
+                        onChange={(e) =>
+                          setAntiReplayTTL(Number(e.target.value))
+                        }
                         className="rounded-md"
                       />
                     </FieldGroup>
                     <FieldGroup label="命中动作">
-                      <Select value={antiReplayAction} onValueChange={setAntiReplayAction}>
-                        <SelectTrigger className="rounded-md"><SelectValue /></SelectTrigger>
+                      <Select
+                        value={antiReplayAction}
+                        onValueChange={setAntiReplayAction}
+                      >
+                        <SelectTrigger className="rounded-md">
+                          <SelectValue />
+                        </SelectTrigger>
                         <SelectContent>
                           {terminalWAFActionOptions.map((item) => (
-                            <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
@@ -1188,18 +1628,30 @@ export default function SiteDetailClient() {
             <div className="space-y-8">
               <div className="rounded-md border border-amber-100 bg-amber-50/80 px-4 py-3 text-xs text-amber-900">
                 <strong className="font-medium">说明：</strong>
-                匹配规则在「保存」后立即写入数据库并触发快照重载；命中规则后，数据面会将资源摘要写入下方列表（普通 HTTP 成功响应路径）。Header 类目标为「请求 Header（单项）」时须填写 Header 名称。
+                匹配规则在「保存」后立即写入数据库并触发快照重载；命中规则后，数据面会将资源摘要写入下方列表（普通
+                HTTP 成功响应路径）。Header 类目标为「请求
+                Header（单项）」时须填写 Header 名称。
               </div>
 
               <div className="rounded-md border border-slate-200 p-5">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <Route className="h-4 w-4 text-slate-500" />
-                    <h3 className="text-sm font-semibold text-slate-900">匹配规则</h3>
-                    {invLoading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      匹配规则
+                    </h3>
+                    {invLoading && (
+                      <Loader2 className="h-4 w-4 animate-spin text-slate-400" />
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="outline" size="sm" className="rounded-md" onClick={() => void refreshInventory()}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="rounded-md"
+                      onClick={() => void refreshInventory()}
+                    >
                       刷新
                     </Button>
                     <Button
@@ -1215,12 +1667,15 @@ export default function SiteDetailClient() {
                 </div>
 
                 {appRules.length === 0 ? (
-                  <p className="text-sm text-slate-500">暂无规则，点击「添加规则」创建一条默认规则后再按需修改。</p>
+                  <p className="text-sm text-slate-500">
+                    暂无规则，点击「添加规则」创建一条默认规则后再按需修改。
+                  </p>
                 ) : (
                   <div className="space-y-4">
                     {appRules.map((rule) => {
-                      const rid = rule.id ?? 0;
-                      const showHeaderKey = (rule.target || "") === "request_header";
+                      const rid = rule.id ?? 0
+                      const showHeaderKey =
+                        (rule.target || "") === "request_header"
                       return (
                         <div
                           key={rid || rule.name}
@@ -1230,7 +1685,9 @@ export default function SiteDetailClient() {
                             <FieldGroup label="名称">
                               <Input
                                 value={rule.name ?? ""}
-                                onChange={(e) => patchAppRule(rid, { name: e.target.value })}
+                                onChange={(e) =>
+                                  patchAppRule(rid, { name: e.target.value })
+                                }
                                 className="rounded-md bg-white"
                               />
                             </FieldGroup>
@@ -1238,7 +1695,11 @@ export default function SiteDetailClient() {
                               <Input
                                 type="number"
                                 value={rule.priority ?? 0}
-                                onChange={(e) => patchAppRule(rid, { priority: Number(e.target.value) })}
+                                onChange={(e) =>
+                                  patchAppRule(rid, {
+                                    priority: Number(e.target.value),
+                                  })
+                                }
                                 className="rounded-md bg-white"
                               />
                             </FieldGroup>
@@ -1246,7 +1707,9 @@ export default function SiteDetailClient() {
                               <div className="flex h-9 items-center">
                                 <ToggleSwitch
                                   checked={rule.enabled !== false}
-                                  onChange={(v) => patchAppRule(rid, { enabled: v })}
+                                  onChange={(v) =>
+                                    patchAppRule(rid, { enabled: v })
+                                  }
                                 />
                               </div>
                             </FieldGroup>
@@ -1257,7 +1720,9 @@ export default function SiteDetailClient() {
                                 variant="outline"
                                 className="rounded-md"
                                 disabled={!rid}
-                                onClick={() => void handleSaveAppRule({ ...rule, id: rid })}
+                                onClick={() =>
+                                  void handleSaveAppRule({ ...rule, id: rid })
+                                }
                               >
                                 保存
                               </Button>
@@ -1277,7 +1742,9 @@ export default function SiteDetailClient() {
                             <FieldGroup label="匹配目标">
                               <Select
                                 value={rule.target || "request_method"}
-                                onValueChange={(v) => patchAppRule(rid, { target: v })}
+                                onValueChange={(v) =>
+                                  patchAppRule(rid, { target: v })
+                                }
                               >
                                 <SelectTrigger className="rounded-md bg-white">
                                   <SelectValue />
@@ -1292,7 +1759,12 @@ export default function SiteDetailClient() {
                               </Select>
                             </FieldGroup>
                             <FieldGroup label="匹配方式">
-                              <Select value={rule.op || "eq"} onValueChange={(v) => patchAppRule(rid, { op: v })}>
+                              <Select
+                                value={rule.op || "eq"}
+                                onValueChange={(v) =>
+                                  patchAppRule(rid, { op: v })
+                                }
+                              >
                                 <SelectTrigger className="rounded-md bg-white">
                                   <SelectValue />
                                 </SelectTrigger>
@@ -1308,7 +1780,9 @@ export default function SiteDetailClient() {
                             <FieldGroup label="匹配值 / 模式">
                               <Input
                                 value={rule.pattern ?? ""}
-                                onChange={(e) => patchAppRule(rid, { pattern: e.target.value })}
+                                onChange={(e) =>
+                                  patchAppRule(rid, { pattern: e.target.value })
+                                }
                                 className="rounded-md bg-white font-mono text-xs"
                                 placeholder="如 GET 或正则"
                               />
@@ -1318,14 +1792,18 @@ export default function SiteDetailClient() {
                             <FieldGroup label="Header 名称（仅 request_header）">
                               <Input
                                 value={rule.header_key ?? ""}
-                                onChange={(e) => patchAppRule(rid, { header_key: e.target.value })}
+                                onChange={(e) =>
+                                  patchAppRule(rid, {
+                                    header_key: e.target.value,
+                                  })
+                                }
                                 className="max-w-md rounded-md bg-white font-mono text-xs"
                                 placeholder="User-Agent"
                               />
                             </FieldGroup>
                           )}
                         </div>
-                      );
+                      )
                     })}
                   </div>
                 )}
@@ -1333,9 +1811,17 @@ export default function SiteDetailClient() {
 
               <div className="rounded-md border border-slate-200 p-5">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-slate-900">已记录资源</h3>
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    已记录资源
+                  </h3>
                   <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="outline" size="sm" className="rounded-md" onClick={() => void refreshInventory()}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="rounded-md"
+                      onClick={() => void refreshInventory()}
+                    >
                       刷新列表
                     </Button>
                     <Button
@@ -1368,33 +1854,63 @@ export default function SiteDetailClient() {
                     <tbody>
                       {recItems.length === 0 ? (
                         <tr>
-                          <td colSpan={10} className="px-3 py-8 text-center text-slate-500">
+                          <td
+                            colSpan={10}
+                            className="px-3 py-8 text-center text-slate-500"
+                          >
                             暂无记录；配置规则并产生匹配流量后将在此聚合展示。
                           </td>
                         </tr>
                       ) : (
                         recItems.map((row) => (
-                          <tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50/80">
-                            <td className="px-2 py-2 font-mono">{row.method}</td>
-                            <td className="max-w-[140px] truncate px-2 py-2 font-mono" title={row.host}>
+                          <tr
+                            key={row.id}
+                            className="border-b border-slate-100 hover:bg-slate-50/80"
+                          >
+                            <td className="px-2 py-2 font-mono">
+                              {row.method}
+                            </td>
+                            <td
+                              className="max-w-[140px] truncate px-2 py-2 font-mono"
+                              title={row.host}
+                            >
                               {row.host}
                             </td>
-                            <td className="max-w-[220px] truncate px-2 py-2 font-mono" title={row.path}>
+                            <td
+                              className="max-w-[220px] truncate px-2 py-2 font-mono"
+                              title={row.path}
+                            >
                               {row.path}
                             </td>
                             <td className="px-2 py-2">{row.status_code}</td>
-                            <td className="max-w-[160px] truncate px-2 py-2" title={row.content_type || ""}>
+                            <td
+                              className="max-w-[160px] truncate px-2 py-2"
+                              title={row.content_type || ""}
+                            >
                               {row.content_type || "—"}
                             </td>
-                            <td className="max-w-[120px] truncate px-2 py-2 font-mono" title={row.client_ip || ""}>
+                            <td
+                              className="max-w-[120px] truncate px-2 py-2 font-mono"
+                              title={row.client_ip || ""}
+                            >
                               {row.client_ip || "—"}
                             </td>
-                            <td className="max-w-[100px] truncate px-2 py-2 font-mono" title={row.matched_rule_ids || ""}>
-                              {row.matched_rule_ids || (row.primary_rule_id != null ? String(row.primary_rule_id) : "—")}
+                            <td
+                              className="max-w-[100px] truncate px-2 py-2 font-mono"
+                              title={row.matched_rule_ids || ""}
+                            >
+                              {row.matched_rule_ids ||
+                                (row.primary_rule_id != null
+                                  ? String(row.primary_rule_id)
+                                  : "—")}
                             </td>
                             <td className="px-2 py-2">{row.hit_count}</td>
-                            <td className="whitespace-nowrap px-2 py-2 text-slate-500">{formatDate(row.first_seen)}</td>
-                            <td className="whitespace-nowrap px-2 py-2 text-slate-500">{formatDate(row.last_seen)}</td>
+                            <td className="px-2 py-2 whitespace-nowrap text-slate-500">
+                              {formatDate(row.first_seen)}
+                            </td>
+                            <td className="px-2 py-2 whitespace-nowrap text-slate-500">
+                              {formatDate(row.last_seen)}
+                            </td>
                           </tr>
                         ))
                       )}
@@ -1451,24 +1967,58 @@ export default function SiteDetailClient() {
         )}
       </div>
     </div>
-  );
+  )
 }
 
-function FieldGroup({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
+function MetricCard({
+  label,
+  value,
+  tone = "slate",
+}: {
+  label: string
+  value: number
+  tone?: "slate" | "rose" | "amber"
+}) {
+  const toneClass = {
+    slate: "bg-slate-50 text-slate-700",
+    rose: "bg-rose-50 text-rose-700",
+    amber: "bg-amber-50 text-amber-700",
+  }[tone]
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="text-xs font-medium text-slate-500">{label}</div>
+      <div
+        className={`mt-2 inline-flex rounded-md px-2 py-1 text-lg font-semibold ${toneClass}`}
+      >
+        {value.toLocaleString()}
+      </div>
+    </div>
+  )
+}
+
+function FieldGroup({
+  label,
+  children,
+  className,
+}: {
+  label: string
+  children: React.ReactNode
+  className?: string
+}) {
   return (
     <div className={`space-y-1.5 ${className ?? ""}`}>
       <label className="text-sm font-medium text-slate-700">{label}</label>
       {children}
     </div>
-  );
+  )
 }
 
 function ToggleSwitch({
   checked,
   onChange,
 }: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
+  checked: boolean
+  onChange: (v: boolean) => void
 }) {
   return (
     <button
@@ -1484,15 +2034,15 @@ function ToggleSwitch({
         }`}
       />
     </button>
-  );
+  )
 }
 
 function InheritToggle({
   inherit,
   onToggle,
 }: {
-  inherit: boolean;
-  onToggle: (inherit: boolean) => void;
+  inherit: boolean
+  onToggle: (inherit: boolean) => void
 }) {
   return (
     <div className="inline-flex overflow-hidden rounded-md border border-slate-200">
@@ -1519,5 +2069,5 @@ function InheritToggle({
         使用自定义配置
       </button>
     </div>
-  );
+  )
 }

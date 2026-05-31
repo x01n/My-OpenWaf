@@ -78,6 +78,9 @@ type Config struct {
 	// DBDSN: sqlite file path, or full DSN for mysql/postgres.
 	// If empty with sqlite, falls back to DataDir/waf.db.
 	DBDSN string
+	// LogDBDSN stores high-volume access/security/drop/bot logs separately.
+	// If empty with sqlite, falls back to DataDir/waf_logs.db.
+	LogDBDSN string
 	// DataDir used when sqlite DSN has no directory part.
 	DataDir string
 
@@ -121,6 +124,14 @@ func LoadConfigFromEnv() Config {
 	}
 	if dsn == "" {
 		dsn = filepath.Join(dir, "waf.db")
+	}
+
+	logDSN := strings.TrimSpace(os.Getenv("MY_OPENWAF_LOG_DSN"))
+	if logDSN == "" {
+		logDSN = strings.TrimSpace(os.Getenv("MY_OPENWAF_LOG_DB"))
+	}
+	if logDSN == "" {
+		logDSN = filepath.Join(dir, "waf_logs.db")
 	}
 
 	driver := strings.ToLower(strings.TrimSpace(os.Getenv("MY_OPENWAF_DB_DRIVER")))
@@ -169,6 +180,7 @@ func LoadConfigFromEnv() Config {
 	return Config{
 		DBDriver:       driver,
 		DBDSN:          dsn,
+		LogDBDSN:       logDSN,
 		DataDir:        dir,
 		RedisAddr:      strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_ADDR")),
 		RedisPassword:  strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_PASSWORD")),

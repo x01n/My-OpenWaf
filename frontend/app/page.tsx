@@ -1,19 +1,26 @@
-"use client";
+"use client"
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { getAccessToken } from "@/lib/api";
+import { useEffect } from "react"
+import { useRouter } from "next/navigation"
+import { getAccessToken, refreshAccess } from "@/lib/api"
 
 export default function RootPage() {
-  const router = useRouter();
+  const router = useRouter()
 
   useEffect(() => {
-    if (getAccessToken()) {
-      router.replace("/dashboard/");
-    } else {
-      router.replace("/login/");
+    let cancelled = false
+    async function routeBySession() {
+      if (getAccessToken() || (await refreshAccess())) {
+        if (!cancelled) router.replace("/dashboard/")
+        return
+      }
+      if (!cancelled) router.replace("/login/")
     }
-  }, [router]);
+    routeBySession()
+    return () => {
+      cancelled = true
+    }
+  }, [router])
 
-  return null;
+  return null
 }

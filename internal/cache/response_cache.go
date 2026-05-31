@@ -130,7 +130,7 @@ func (rc *ResponseCache) Set(key string, statusCode int, contentType string, bod
 	}
 	bodySize := int64(len(body))
 	if bodySize > rc.maxSize/10 {
-		return // single entry too large
+		return
 	}
 
 	var hdr http.Header
@@ -155,6 +155,36 @@ func (rc *ResponseCache) Set(key string, statusCode int, contentType string, bod
 	s.items[key] = entry
 	s.mu.Unlock()
 	rc.curSize.Add(bodySize)
+	rc.evictToMaxSize()
+}
+
+func (rc *ResponseCache) evictToMaxSize() {
+	if rc.maxSize <= 0 || rc.curSize.Load() <= rc.maxSize {
+		return
+	}
+	now := time.Now().Unix()
+	for rc.curSize.Load() > rc.maxSize {
+		evicted := false
+		for i := range rc.shards {
+			if rc.curSize.Load() <= rc.maxSize {
+				return
+			}
+			s := &rc.shards[i]
+			s.mu.Lock()
+			for k, v := range s.items {
+				delete(s.items, k)
+				rc.curSize.Add(-int64(len(v.Body)))
+				evicted = true
+				if now > v.CachedAt+v.TTL || rc.curSize.Load() <= rc.maxSize {
+					break
+				}
+			}
+			s.mu.Unlock()
+		}
+		if !evicted {
+			return
+		}
+	}
 }
 
 // SetEnabled toggles the cache on/off.

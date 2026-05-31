@@ -7,6 +7,57 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
+func TestLoadDefaultsFallbackOnInvalidJSON(t *testing.T) {
+	network := LoadNetworkDefaults(`{"default_network":"tcp6","default_alpn":`)
+	if network.DefaultNetwork != DefaultNetworkDefaults().DefaultNetwork || network.DefaultALPN != DefaultNetworkDefaults().DefaultALPN {
+		t.Fatalf("invalid network config should use defaults, got %+v", network)
+	}
+
+	tlsDefaults := LoadTLSDefaults(`{"min_version":"TLS13","default_alpn":`)
+	if tlsDefaults.MinVersion != DefaultTLSDefaults().MinVersion || tlsDefaults.DefaultALPN != DefaultTLSDefaults().DefaultALPN {
+		t.Fatalf("invalid TLS config should use defaults, got %+v", tlsDefaults)
+	}
+}
+
+func TestLoadDefaultsPreserveMissingCriticalFields(t *testing.T) {
+	network := LoadNetworkDefaults(`{"http3_enabled":true}`)
+	if !network.HTTP3Enabled || network.DefaultNetwork != "tcp" || network.DefaultALPN != "h2,h3,http/1.1" {
+		t.Fatalf("partial network config should preserve defaults, got %+v", network)
+	}
+
+	tlsDefaults := LoadTLSDefaults(`{"cipher_suites":"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"}`)
+	if tlsDefaults.MinVersion != "TLS10" || tlsDefaults.MaxVersion != "TLS13" || tlsDefaults.DefaultALPN != "h2,h3,http/1.1" {
+		t.Fatalf("partial TLS config should preserve defaults, got %+v", tlsDefaults)
+	}
+}
+
+func TestParseTLSCipherSuitesRecognizesNamesAndDeduplicates(t *testing.T) {
+	got := parseTLSCipherSuites("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,ECDHE_RSA_WITH_AES_128_GCM_SHA256,tls_ecdhe_rsa_with_aes_128_gcm_sha256")
+	if len(got) != 1 || got[0] == 0 {
+		t.Fatalf("unexpected cipher suites: %#v", got)
+	}
+}
+
+func TestParseALPNProtocolsDeduplicates(t *testing.T) {
+	got := parseALPNProtocols(" h2 , http/1.1 , h2 ")
+	want := []string{"h2", "http/1.1"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected ALPN list: %#v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected ALPN list: got=%#v want=%#v", got, want)
+		}
+	}
+}
+
+func TestParseCurvePreferencesAliasesAndDeduplicates(t *testing.T) {
+	got := ParseCurvePreferences("X25519,P-256,CurveP256,p384")
+	if len(got) != 3 {
+		t.Fatalf("unexpected curves: %#v", got)
+	}
+}
+
 func testSiteRuntime(id uint, bind, host string) SiteRuntime {
 	return SiteRuntime{
 		Site: store.Site{

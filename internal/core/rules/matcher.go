@@ -3,6 +3,7 @@ package rules
 import (
 	"encoding/json"
 	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -201,6 +202,22 @@ func (m *alwaysMatcher) Match(net.IP, string, string, string, map[string]string,
 	return true
 }
 
+type ifElseMatcher struct {
+	condition Matcher
+	thenMatch Matcher
+	elseMatch Matcher
+}
+
+func (m *ifElseMatcher) Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool {
+	if m.condition == nil {
+		return false
+	}
+	if m.condition.Match(ip, method, path, query, headers, body) {
+		return m.thenMatch != nil && m.thenMatch.Match(ip, method, path, query, headers, body)
+	}
+	return m.elseMatch != nil && m.elseMatch.Match(ip, method, path, query, headers, body)
+}
+
 type neverMatcher struct{}
 
 func (m *neverMatcher) Match(net.IP, string, string, string, map[string]string, []byte) bool {
@@ -341,39 +358,78 @@ type queryParamMatcher struct {
 	value string
 }
 
+type queryParamRegexMatcher struct {
+	param string
+	re    *regexp.Regexp
+}
+
+type pathContainsMatcher struct{ substr string }
+
+type pathNotContainsMatcher struct{ substr string }
+
 func (m *queryParamMatcher) Match(_ net.IP, _, _, query string, _ map[string]string, _ []byte) bool {
 	if query == "" {
 		return false
 	}
-	for _, pair := range strings.Split(query, "&") {
-		if kv := strings.SplitN(pair, "=", 2); len(kv) == 2 {
-			if kv[0] == m.param {
-				if m.value == "" {
-					return true
-				}
-				return strings.Contains(kv[1], m.value)
-			}
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		return false
+	}
+	items, ok := values[m.param]
+	if !ok {
+		return false
+	}
+	if m.value == "" {
+		return true
+	}
+	for _, item := range items {
+		if strings.Contains(item, m.value) {
+			return true
 		}
 	}
 	return false
+}
+
+func (m *queryParamRegexMatcher) Match(_ net.IP, _, _, query string, _ map[string]string, _ []byte) bool {
+	if query == "" {
+		return false
+	}
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		return false
+	}
+	items, ok := values[m.param]
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if m.re.MatchString(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *pathContainsMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string, _ []byte) bool {
+	return strings.Contains(path, m.substr)
+}
+
+func (m *pathNotContainsMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string, _ []byte) bool {
+	return !strings.Contains(path, m.substr)
 }
 
 // hostMatcher matches the Host header exactly or with wildcard prefix.
 type hostMatcher struct{ pattern string }
 
 func (m *hostMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	host := strings.ToLower(headerValue(headers, "host"))
+	host, _ := splitHostPortHeader(headerValue(headers, "host"))
 	if host == "" {
 		return false
 	}
-	// Strip port if present.
-	if i := strings.Index(host, ":"); i > 0 {
-		host = host[:i]
-	}
-	pat := strings.ToLower(m.pattern)
+	pat, _ := splitHostPortHeader(m.pattern)
 	if strings.HasPrefix(pat, "*.") {
-		suffix := pat[1:] // ".example.com"
-		return strings.HasSuffix(host, suffix) || host == pat[2:]
+		suffix := pat[1:]
+		return strings.HasSuffix(host, suffix) || host == strings.TrimPrefix(pat, "*.")
 	}
 	return host == pat
 }
@@ -589,6 +645,23 @@ func buildMatcher(kind, arg string) Matcher {
 		param, value := splitHeaderArg(arg)
 		return &queryParamMatcher{param: param, value: value}
 
+	case "query_param_regex":
+		param, pattern, ok := strings.Cut(arg, ":")
+		if !ok {
+			return &neverMatcher{}
+		}
+		re, err := cachedCompile(pattern)
+		if err != nil {
+			return &neverMatcher{}
+		}
+		return &queryParamRegexMatcher{param: param, re: re}
+
+	case "path_contains":
+		return &pathContainsMatcher{substr: arg}
+
+	case "path_not_contains":
+		return &pathNotContainsMatcher{substr: arg}
+
 	case "host_full":
 		return &hostFullMatcher{pattern: arg}
 
@@ -710,6 +783,9 @@ type compoundCondition struct {
 	Kind      string              `json:"kind"`
 	Arg       string              `json:"arg"`
 	Children  []compoundCondition `json:"children"`
+	If        *compoundCondition  `json:"if"`
+	Then      *compoundCondition  `json:"then"`
+	Else      *compoundCondition  `json:"else"`
 	Window    int64               `json:"window"`
 	Threshold int64               `json:"threshold"`
 	Duration  int64               `json:"duration"`
@@ -724,7 +800,8 @@ func parseCompoundJSON(raw string) Matcher {
 }
 
 func buildCompound(cond compoundCondition) Matcher {
-	switch cond.Op {
+	op := strings.ToLower(strings.TrimSpace(cond.Op))
+	switch op {
 	case "and":
 		children := make([]Matcher, 0, len(cond.Children))
 		for _, ch := range cond.Children {
@@ -742,6 +819,15 @@ func buildCompound(cond compoundCondition) Matcher {
 			return &neverMatcher{}
 		}
 		return &notMatcher{child: buildCompound(cond.Children[0])}
+	case "if", "if_else", "ifelse":
+		if cond.If == nil || cond.Then == nil {
+			return &neverMatcher{}
+		}
+		var elseMatch Matcher
+		if cond.Else != nil {
+			elseMatch = buildCompound(*cond.Else)
+		}
+		return &ifElseMatcher{condition: buildCompound(*cond.If), thenMatch: buildCompound(*cond.Then), elseMatch: elseMatch}
 	case "cc_rate":
 		if len(cond.Children) == 0 {
 			return &neverMatcher{}
@@ -754,6 +840,13 @@ func buildCompound(cond compoundCondition) Matcher {
 			clients:   make(map[string]*ccRateState),
 		}
 	default:
+		if cond.If != nil && cond.Then != nil {
+			var elseMatch Matcher
+			if cond.Else != nil {
+				elseMatch = buildCompound(*cond.Else)
+			}
+			return &ifElseMatcher{condition: buildCompound(*cond.If), thenMatch: buildCompound(*cond.Then), elseMatch: elseMatch}
+		}
 		if cond.Kind != "" {
 			return buildMatcher(cond.Kind, cond.Arg)
 		}

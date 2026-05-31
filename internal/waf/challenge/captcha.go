@@ -53,6 +53,11 @@ type CaptchaManager struct {
 	redis   *goredis.Client
 	prefix  string
 	timeout time.Duration
+	done    chan struct{}
+	once    sync.Once
+
+	// go-captcha 高级验证码提供器
+	goCaptcha *GoCaptchaProvider
 
 	// Fallback in-memory store when Redis is unavailable
 	mu       sync.RWMutex
@@ -69,11 +74,23 @@ func NewCaptchaManager(redis *goredis.Client, timeout time.Duration) *CaptchaMan
 		redis:    redis,
 		prefix:   "owaf:captcha:",
 		timeout:  timeout,
+		done:     make(chan struct{}),
 		sessions: make(map[string]*CaptchaSession),
 	}
 	// Start cleanup goroutine for in-memory sessions
 	go cm.cleanupLoop()
 	return cm
+}
+
+func (cm *CaptchaManager) Close() {
+	cm.once.Do(func() { close(cm.done) })
+}
+
+// SetGoCaptchaProvider 设置 go-captcha 高级验证码提供器。
+func (cm *CaptchaManager) SetGoCaptchaProvider(p *GoCaptchaProvider) {
+	cm.mu.Lock()
+	cm.goCaptcha = p
+	cm.mu.Unlock()
 }
 
 func (cm *CaptchaManager) SetTimeout(timeout time.Duration) {
@@ -101,9 +118,12 @@ func (cm *CaptchaManager) Generate(captchaType CaptchaType) (*CaptchaChallenge, 
 	switch captchaType {
 	case CaptchaTypeMath:
 		return cm.generateMath()
-	case CaptchaTypeClick, CaptchaTypeSlide, CaptchaTypeRotate:
-		// For image-based captcha types, fall back to math if no resources configured
-		return cm.generateMath()
+	case CaptchaTypeClick:
+		return cm.generateClick()
+	case CaptchaTypeSlide:
+		return cm.generateSlide()
+	case CaptchaTypeRotate:
+		return cm.generateRotate()
 	default:
 		return cm.generateMath()
 	}
@@ -292,15 +312,20 @@ func (cm *CaptchaManager) deleteSession(sessionID string) {
 func (cm *CaptchaManager) cleanupLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		cm.mu.Lock()
-		for id, s := range cm.sessions {
-			if now.After(s.ExpiresAt) {
-				delete(cm.sessions, id)
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			cm.mu.Lock()
+			for id, s := range cm.sessions {
+				if now.After(s.ExpiresAt) {
+					delete(cm.sessions, id)
+				}
 			}
+			cm.mu.Unlock()
+		case <-cm.done:
+			return
 		}
-		cm.mu.Unlock()
 	}
 }
 

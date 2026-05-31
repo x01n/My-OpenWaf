@@ -4,31 +4,29 @@ import (
 	"context"
 	"fmt"
 
-	goredis "github.com/redis/go-redis/v9"
-	"gorm.io/gorm"
-
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/database"
-	redisx "My-OpenWaf/internal/core/redis"
+	"My-OpenWaf/internal/core/redis"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/snapshot"
+
+	goredis "github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
-// Runtime wires SQL + optional Redis + cache + snapshot for the rest of the app.
 type Runtime struct {
 	Config   Config
 	DB       *gorm.DB
+	LogDB    *gorm.DB
 	Redis    *goredis.Client
 	RedisKV  *cache.RedisKV
 	Snapshot *snapshot.Holder
 	Cache    *cache.Layer
 }
 
-// NewRuntime opens DB (and optional Redis) from env-based Config.
 func NewRuntime(ctx context.Context) (*Runtime, error) {
 	cfg := LoadConfigFromEnv()
 
-	// Validate configuration before proceeding.
 	log := logger.New("config")
 	warnings, err := cfg.Validate()
 	if err != nil {
@@ -46,24 +44,40 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("database: %w", err)
 	}
-	rcli := redisx.OptionalClient(redisx.RedisOptions{
+	logDB, err := database.Open(database.Options{
+		Driver:  cfg.DBDriver,
+		DSN:     cfg.LogDBDSN,
+		DataDir: cfg.DataDir,
+	})
+	if err != nil {
+		closeRuntimeDB(db)
+		return nil, fmt.Errorf("log database: %w", err)
+	}
+
+	rcli := redis.OptionalClient(redis.RedisOptions{
 		Addr:     cfg.RedisAddr,
 		Password: cfg.RedisPassword,
 		DB:       cfg.RedisDB,
 	})
-	if err := redisx.Ping(ctx, rcli); err != nil {
+	if err := redis.Ping(ctx, rcli); err != nil {
 		if rcli != nil {
 			_ = rcli.Close()
 		}
+		closeRuntimeDB(db)
+		closeRuntimeDB(logDB)
 		return nil, fmt.Errorf("redis: %w", err)
 	}
 
 	cl, err := cache.NewLayer()
 	if err != nil {
+		if rcli != nil {
+			_ = rcli.Close()
+		}
+		closeRuntimeDB(db)
+		closeRuntimeDB(logDB)
 		return nil, fmt.Errorf("cache: %w", err)
 	}
 
-	// Create Redis KV cache for distributed shared state.
 	redisKV := cache.NewRedisKV(rcli)
 	if redisKV != nil {
 		log.Info("redis distributed cache enabled")
@@ -72,6 +86,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	return &Runtime{
 		Config:   cfg,
 		DB:       db,
+		LogDB:    logDB,
 		Redis:    rcli,
 		RedisKV:  redisKV,
 		Snapshot: &snapshot.Holder{},
@@ -79,7 +94,6 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	}, nil
 }
 
-// ReloadSnapshot builds a new snapshot from DB and stores it atomically.
 func (r *Runtime) ReloadSnapshot() error {
 	rev, err := currentRevision(r.DB)
 	if err != nil {
@@ -98,19 +112,21 @@ func (r *Runtime) ReloadSnapshot() error {
 	return nil
 }
 
+type runtimeConfigRevision struct {
+	ID       uint   `gorm:"primaryKey"`
+	Revision uint64 `gorm:"not null"`
+}
+
+func (runtimeConfigRevision) TableName() string { return "config_revisions" }
+
 func currentRevision(db *gorm.DB) (uint64, error) {
-	type rev struct {
-		ID       uint   `gorm:"primaryKey"`
-		Revision uint64 `gorm:"not null"`
-	}
-	var r rev
-	if err := db.Table("config_revisions").FirstOrCreate(&r, rev{ID: 1}).Error; err != nil {
+	var r runtimeConfigRevision
+	if err := db.FirstOrCreate(&r, runtimeConfigRevision{ID: 1}).Error; err != nil {
 		return 0, err
 	}
 	return r.Revision, nil
 }
 
-// Close releases Redis; GORM/sql.DB is closed via underlying sql.DB if needed.
 func (r *Runtime) Close() error {
 	if r == nil {
 		return nil
@@ -118,9 +134,19 @@ func (r *Runtime) Close() error {
 	if r.Redis != nil {
 		_ = r.Redis.Close()
 	}
-	sqlDB, err := r.DB.DB()
+	closeRuntimeDB(r.DB)
+	if r.LogDB != r.DB {
+		closeRuntimeDB(r.LogDB)
+	}
+	return nil
+}
+
+func closeRuntimeDB(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+	sqlDB, err := db.DB()
 	if err == nil {
 		_ = sqlDB.Close()
 	}
-	return nil
 }

@@ -47,7 +47,9 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	if err := db.Where("enabled = ?", true).Find(&rules).Error; err != nil {
 		return nil, err
 	}
-	// Load protection settings from SystemSettings (used for CC rules and mergeProtection).
+	// Load settings from SystemSettings (used for listener defaults, CC rules and mergeProtection).
+	networkDefaults := loadNetworkDefaults(db)
+	tlsDefaults := loadTLSDefaults(db)
 	protection := loadProtectionConfig(db)
 	ccRules := compileCCRules(protection)
 	rulesByPolicy := make(map[uint][]store.Rule)
@@ -142,6 +144,8 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 			listenerSite.Network = listener.Network
 			listenerSite.TLSEnabled = listener.TLSEnabled
 			listenerSite.CertID = listener.CertID
+			listenerSite.Network, listenerSite.ALPN = EffectiveSiteNetwork(listenerSite.ALPN, listenerSite.Network, networkDefaults, tlsDefaults)
+			listenerSite.MinTLSVersion, listenerSite.MaxTLSVersion, listenerSite.CipherSuites = EffectiveSiteTLS(listenerSite.MinTLSVersion, listenerSite.MaxTLSVersion, listenerSite.CipherSuites, tlsDefaults)
 
 			var tlsConfig *tls.Config
 			var cert *store.Certificate
@@ -149,9 +153,27 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				if c, ok := certByID[*listenerSite.CertID]; ok {
 					cert = &c
 					if tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
+						minVer := ParseTLSVersion(listenerSite.MinTLSVersion)
+						if minVer == 0 {
+							minVer = tls.VersionTLS12
+						}
+						maxVer := ParseTLSVersion(listenerSite.MaxTLSVersion)
+						if maxVer == 0 {
+							maxVer = tls.VersionTLS13
+						}
+						cipherSuites := parseTLSCipherSuites(listenerSite.CipherSuites)
+						curves := ParseCurvePreferences(tlsDefaults.CurvePreferences)
+						if len(curves) == 0 {
+							curves = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}
+						}
 						tlsConfig = &tls.Config{
-							Certificates: []tls.Certificate{tlsCert},
-							MinVersion:   tls.VersionTLS12,
+							Certificates:             []tls.Certificate{tlsCert},
+							MinVersion:               minVer,
+							MaxVersion:               maxVer,
+							NextProtos:               parseALPNProtocols(listenerSite.ALPN),
+							CipherSuites:             cipherSuites,
+							CurvePreferences:         curves,
+							PreferServerCipherSuites: tlsDefaults.PreferServerCipherSuites,
 						}
 						for _, rawHost := range splitHosts(listenerSite.Host) {
 							h := strings.ToLower(strings.TrimSpace(rawHost))
@@ -169,6 +191,8 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				Rules:                compiled,
 				UpstreamURLs:         urls,
 				Certificate:          cert,
+				NetworkDefaults:      networkDefaults,
+				TLSDefaults:          tlsDefaults,
 				Bind:                 listenerSite.Bind,
 				TLSConfig:            tlsConfig,
 				BotProtection:        botProtection,
@@ -203,6 +227,8 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	return &Snapshot{
 		Revision:         rev,
 		Sites:            siteMap,
+		NetworkDefaults:  networkDefaults,
+		TLSDefaults:      tlsDefaults,
 		DefaultBlockHTML: "",
 		SiteTLSCertBySNI: sniCerts,
 		Protection:       protection,
@@ -310,6 +336,71 @@ func parseUpstreamURLs(raw string) []string {
 		}
 	}
 	return out
+}
+
+func parseALPNProtocols(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return strings.Split(DefaultTLSDefaults().DefaultALPN, ",")
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 3)
+	for _, item := range strings.Split(raw, ",") {
+		proto := strings.TrimSpace(item)
+		if proto == "" {
+			continue
+		}
+		if _, ok := seen[proto]; ok {
+			continue
+		}
+		seen[proto] = struct{}{}
+		out = append(out, proto)
+	}
+	if len(out) == 0 {
+		return strings.Split(DefaultTLSDefaults().DefaultALPN, ",")
+	}
+	return out
+}
+
+func parseTLSCipherSuites(raw string) []uint16 {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	nameToID := make(map[string]uint16)
+	for _, suite := range tls.CipherSuites() {
+		nameToID[suite.Name] = suite.ID
+		nameToID[strings.ToUpper(suite.Name)] = suite.ID
+		short := strings.TrimPrefix(suite.Name, "TLS_")
+		nameToID[short] = suite.ID
+		nameToID[strings.ToUpper(short)] = suite.ID
+	}
+	for _, suite := range tls.InsecureCipherSuites() {
+		nameToID[suite.Name] = suite.ID
+		nameToID[strings.ToUpper(suite.Name)] = suite.ID
+		short := strings.TrimPrefix(suite.Name, "TLS_")
+		nameToID[short] = suite.ID
+		nameToID[strings.ToUpper(short)] = suite.ID
+	}
+	seen := make(map[uint16]struct{})
+	var suites []uint16
+	for _, item := range strings.Split(raw, ",") {
+		key := strings.TrimSpace(item)
+		if key == "" {
+			continue
+		}
+		id, ok := nameToID[key]
+		if !ok {
+			id, ok = nameToID[strings.ToUpper(key)]
+		}
+		if !ok {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		suites = append(suites, id)
+	}
+	return suites
 }
 
 func compileRules(rs []store.Rule) []CompiledRule {
@@ -589,6 +680,22 @@ func parseSiteCacheRules(raw string) []store.SiteCacheRule {
 		return li > lj
 	})
 	return filtered
+}
+
+func loadNetworkDefaults(db *gorm.DB) NetworkDefaults {
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", "network_config").First(&setting).Error; err != nil {
+		return DefaultNetworkDefaults()
+	}
+	return LoadNetworkDefaults(setting.Value)
+}
+
+func loadTLSDefaults(db *gorm.DB) TLSDefaults {
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", "tls_default_config").First(&setting).Error; err != nil {
+		return DefaultTLSDefaults()
+	}
+	return LoadTLSDefaults(setting.Value)
 }
 
 func loadProtectionConfig(db *gorm.DB) store.ProtectionConfig {

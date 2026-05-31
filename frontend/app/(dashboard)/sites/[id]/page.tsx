@@ -1,11 +1,11 @@
-import SiteDetailClient from "./client";
+import SiteDetailClient from "./client"
 
-export const dynamicParams = false;
+export const dynamicParams = false
 
 export function generateStaticParams() {
-  return [{ id: "_" }];
+  return [{ id: "_" }]
 }
 
 export default function SiteDetailPage() {
-  return <SiteDetailClient />;
+  return <SiteDetailClient />
 }

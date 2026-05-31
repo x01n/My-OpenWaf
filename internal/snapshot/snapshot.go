@@ -30,6 +30,9 @@ type SiteRuntime struct {
 	UpstreamURLs []string
 	Certificate  *store.Certificate
 
+	NetworkDefaults NetworkDefaults
+	TLSDefaults     TLSDefaults
+
 	// Listener configuration (now embedded in Site)
 	Bind      string
 	TLSConfig *tls.Config
@@ -74,6 +77,9 @@ type Snapshot struct {
 	Revision uint64
 
 	Sites map[string]SiteRuntime
+
+	NetworkDefaults NetworkDefaults
+	TLSDefaults     TLSDefaults
 
 	DefaultBlockHTML string
 

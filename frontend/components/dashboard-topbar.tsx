@@ -1,9 +1,9 @@
-"use client";
+"use client"
 
-import { Bell, ChevronRight, Menu, RefreshCcw, User } from "lucide-react";
-import { usePathname, useRouter } from "next/navigation";
-import { logout } from "@/lib/api";
-import { Button } from "@/components/ui/button";
+import { Bell, ChevronRight, Menu, RefreshCcw, User } from "lucide-react"
+import { usePathname, useRouter } from "next/navigation"
+import { logout } from "@/lib/api"
+import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -11,17 +11,21 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { getNavMeta } from "@/lib/console";
+} from "@/components/ui/dropdown-menu"
+import { getNavMeta } from "@/lib/console"
 
-export function DashboardTopbar({ onMobileMenuToggle }: { onMobileMenuToggle?: () => void }) {
-  const pathname = usePathname();
-  const router = useRouter();
-  const meta = getNavMeta(pathname);
+export function DashboardTopbar({
+  onMobileMenuToggle,
+}: {
+  onMobileMenuToggle?: () => void
+}) {
+  const pathname = usePathname()
+  const router = useRouter()
+  const meta = getNavMeta(pathname)
 
   async function handleLogout() {
-    await logout();
-    router.push("/login/");
+    await logout()
+    router.push("/login/")
   }
 
   return (
@@ -39,36 +43,59 @@ export function DashboardTopbar({ onMobileMenuToggle }: { onMobileMenuToggle?: (
             </Button>
           )}
           <div className="min-w-0 space-y-2">
-            <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-400">
+            <div className="flex items-center gap-2 text-xs font-medium tracking-[0.18em] text-slate-400 uppercase">
               <span>控制台</span>
               <ChevronRight className="h-3.5 w-3.5" />
               <span>{meta.group}</span>
             </div>
             <div>
-              <h2 className="truncate text-xl font-semibold tracking-tight text-slate-950">{meta.label}</h2>
-              <p className="mt-1 hidden truncate text-sm text-slate-500 sm:block">{meta.description}</p>
+              <h2 className="truncate text-xl font-semibold tracking-tight text-slate-950">
+                {meta.label}
+              </h2>
+              <p className="mt-1 hidden truncate text-sm text-slate-500 sm:block">
+                {meta.description}
+              </p>
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="hidden rounded-md border-slate-200 text-slate-600 md:inline-flex" onClick={() => window.location.reload()}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="hidden rounded-md border-slate-200 text-slate-600 md:inline-flex"
+            onClick={() => window.location.reload()}
+          >
             <RefreshCcw className="mr-2 h-4 w-4" />
             刷新数据
           </Button>
-          <Button variant="ghost" size="icon-sm" className="rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+          >
             <Bell className="h-4 w-4" />
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" className="rounded-md text-slate-600 hover:bg-slate-100 hover:text-slate-950">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="rounded-md text-slate-600 hover:bg-slate-100 hover:text-slate-950"
+              >
                 <User className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56 rounded-md border-slate-200 bg-white shadow-sm">
+            <DropdownMenuContent
+              align="end"
+              className="w-56 rounded-md border-slate-200 bg-white shadow-sm"
+            >
               <DropdownMenuLabel>管理员账户</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleLogout} className="cursor-pointer text-rose-600">
+              <DropdownMenuItem
+                onClick={handleLogout}
+                className="cursor-pointer text-rose-600"
+              >
                 退出登录
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -76,5 +103,5 @@ export function DashboardTopbar({ onMobileMenuToggle }: { onMobileMenuToggle?: (
         </div>
       </div>
     </header>
-  );
+  )
 }

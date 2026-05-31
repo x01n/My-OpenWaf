@@ -87,7 +87,10 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 
 		// Sync BotDetectionEnabled into the protection config so the engine
 		// sees a consistent value regardless of which page the user toggles.
-		shared.SyncBotEnabledToProtection(settingsRepo, current.Enabled)
+		if err := shared.SyncBotEnabledToProtection(settingsRepo, current.Enabled); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
 
 		if reload != nil {
 			if err := reload(); err != nil {

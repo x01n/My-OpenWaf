@@ -110,6 +110,8 @@ func buildDashboardResponse(s dataplane.Summary, rev uint64, ds dashboardDBStats
 		"waf_observes":        s.WAFObserves,
 		"builtin_hits":        s.BuiltinHits,
 		"uptime_sec":          s.UptimeSec,
+		"unique_ips":          s.UniqueIPs,
+		"attack_ips":          s.AttackIPs,
 		"revision":            rev,
 		"bot_total_24h":       ds.BotTotal24h,
 		"bot_blocked_24h":     ds.BotBlocked24h,

@@ -267,6 +267,77 @@ func TestCheckOWASP_BlazeFalsePositive_CodePenInlineScript(t *testing.T) {
 	}
 }
 
+func TestCheckOWASP_BlazeFalsePositive_AnalyticsJavascriptVoid0(t *testing.T) {
+	body := []string{"{\"attributes\":\"{\\\"href\\\":\\\"javascript: void(0);\\\"}\"}"}
+	hits := CheckOWASP("high", "/analytics/v2_upload", "appkey=0WEB0OEX9Y4SQ244", map[string]string{"Content-Type": "application/json"}, body)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("analytics beacon javascript:void(0) should not trigger XSS, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_BingCSPJavascriptVoid0(t *testing.T) {
+	body := []string{"[{\"body\":{\"sample\":\"javascript:void(0);\"}}]"}
+	hits := CheckOWASP("high", "/api/report", "cat=bingcsp", map[string]string{"Content-Type": "application/reports+json"}, body)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("bing csp report javascript:void(0) should not trigger XSS, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_BingGLinkPingPostJavascriptVoid0(t *testing.T) {
+	hits := CheckOWASP("high", "/fd/ls/GLinkPingPost.aspx", "IG=BD260740AF264E0F93C3C3F2866590BC&ID=SERP,5036.1&url=javascript%3Avoid(0)%3B", map[string]string{"Content-Type": "text/plain;charset=UTF-8"}, nil)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("bing GLinkPingPost javascript:void(0) should not trigger XSS, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_LogstoreWindowLocation(t *testing.T) {
+	body := []string{"{\"value\":\"function(e){var n=new URL(window.location.href);Array.from(document.querySelectorAll('.x'))}\"}"}
+	hits := CheckOWASP("high", "/logstores/prod/track", "", map[string]string{"Content-Type": "application/json"}, body)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("logstore frontend code should not trigger XSS, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_LogstoreEmbeddedSVG(t *testing.T) {
+	body := []string{"{\"value\":\"<svg t=\\\"1682594285904\\\" class=\\\"icon\\\" viewBox=\\\"0 0 1024 1024\\\" xmlns=\\\"http://www.w3.org/2000/svg\\\"></svg> function(t){e(t)} document.querySelectorAll('.x')\"}"}
+	hits := CheckOWASP("high", "/logstores/prod/track", "", map[string]string{"Content-Type": "application/json"}, body)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("logstore embedded svg/ui code should not trigger XSS, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_POCRelativePathYAML(t *testing.T) {
+	body := []string{"{\"code\":\"name: poc-yaml\\ntransport: http\\npath: /IND780/excalweb.dll?webpage=../../AutoCE.ini\"}"}
+	hits := CheckOWASP("high", "/api/v2/xray/poc/create/", "", map[string]string{"Content-Type": "application/json"}, body)
+	if hasCategory(hits, CatPathTrav) {
+		t.Fatalf("poc editor relative path should not trigger path traversal, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_SpeedTelemetryURLQuery(t *testing.T) {
+	body := []string{"payload=https://localhost.sec.qq.com:9410/?cmd=101&service=1&id=abc&from=https%3A%2F%2Fqzone.qq.com%2F"}
+	hits := CheckOWASP("high", "/speed", "id=RiaWqsnT3403yXTgVY", map[string]string{"Content-Type": "multipart/form-data"}, body)
+	if hasCategory(hits, CatPathTrav) {
+		t.Fatalf("speed telemetry urlquery should not trigger path traversal, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_RunReactCode(t *testing.T) {
+	body := []string{"createRoot(document.getElementById('container')).render(<Demo />); <a onClick={(e) => e.preventDefault()}>"}
+	hits := CheckOWASP("high", "/run", "file=demo.tsx", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, body)
+	if hasCategory(hits, CatXSS) || hasCategory(hits, CatCmdInject) {
+		t.Fatalf("stackblitz react code should not trigger xss/cmd, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_BlazeFalsePositive_NewsTelemetryAdScript(t *testing.T) {
+	body := []string{"<div class=\"row_ad\"><script type=\"text/javascript\">var winWidth = window.innerWidth || document.documentElement.clientWidth; document.querySelector('#box').style.display='block';</script><script src=\"https://cpro.baidustatic.com/cpro/ui/cm.js\"></script><iframe src=\"https://pos.baidu.com/nclm\"></iframe>"}
+	hits := CheckOWASP("high", "/news/g", "", map[string]string{"Content-Type": "application/json"}, body)
+	if hasCategory(hits, CatXSS) {
+		t.Fatalf("news telemetry ad script should not trigger XSS, got %+v", hits)
+	}
+}
+
 func TestCheckOWASP_BlazeFalsePositive_CTripJavaDeserializeMessage(t *testing.T) {
 	body := []string{"Cannot deserialize instance of java.util.ArrayList<java.lang.Integer> out of VALUE_STRING token; resource.c-ctrip.com load success"}
 	hits := CheckOWASP("high", "/bee/collect", "", map[string]string{"Content-Type": "application/json"}, body)
@@ -282,6 +353,12 @@ func TestCheckOWASP_BlazeFalseNegative_QueryValueBase64UnionSelect(t *testing.T)
 	}
 }
 
+func TestCheckOWASP_StrutsOGNLRelativeRequestTarget(t *testing.T) {
+	hits := CheckOWASP("high", "index.action", `redirect:${#a=#context.get('com.opensymphony.xwork2.dispatcher.HttpServletRequest'),#b=#a.getRealPath("/"),#matt=#context.get('com.opensymphony.xwork2.dispatcher.HttpServletResponse'),#matt.getWriter().println(#b)}`, nil, nil)
+	if !hasCategory(hits, CatExprLang) {
+		t.Fatalf("relative Struts OGNL request target should trigger expression-language detection, got %+v", hits)
+	}
+}
 
 func TestNormalize_HTMLEntity(t *testing.T) {
 	input := "&#60;script&#62;alert(1)&#60;/script&#62;"

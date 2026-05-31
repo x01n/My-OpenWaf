@@ -1,6 +1,6 @@
-"use client";
+"use client"
 
-import { useMemo } from "react";
+import { useMemo } from "react"
 import {
   AreaChart,
   Area,
@@ -9,24 +9,27 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-} from "recharts";
+} from "recharts"
 
 interface QPSPoint {
-  time: string;
-  qps: number;
+  time: string
+  qps: number
 }
 
 interface RealtimeQPSChartProps {
-  data: QPSPoint[];
-  height?: number;
+  data: QPSPoint[]
+  height?: number
 }
 
-export function RealtimeQPSChart({ data, height = 280 }: RealtimeQPSChartProps) {
+export function RealtimeQPSChart({
+  data,
+  height = 280,
+}: RealtimeQPSChartProps) {
   const maxQPS = useMemo(() => {
-    if (data.length === 0) return 100;
-    const max = Math.max(...data.map((d) => d.qps));
-    return Math.ceil(max * 1.2);
-  }, [data]);
+    if (data.length === 0) return 100
+    const max = Math.max(...data.map((d) => d.qps))
+    return Math.ceil(max * 1.2)
+  }, [data])
 
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -76,5 +79,5 @@ export function RealtimeQPSChart({ data, height = 280 }: RealtimeQPSChartProps) 
         />
       </AreaChart>
     </ResponsiveContainer>
-  );
+  )
 }

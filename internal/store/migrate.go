@@ -25,18 +25,25 @@ func AutoMigrate(db *gorm.DB) error {
 		&ConfigRevision{},
 		&AdminAccount{},
 		&RefreshToken{},
-		&SecurityEvent{},
-		&AccessLog{},
+
 		&IPListEntry{},
 		&TokenBlacklist{},
 		&LoginAttempt{},
 		&ActiveSession{},
-		&DropEvent{},
-		&BotScoreLog{},
+
 		&CVERuleRecord{},
 		&CVESyncLog{},
 		&ApplicationRouteRule{},
 		&RecordedResource{},
+	)
+}
+
+func AutoMigrateLogs(db *gorm.DB) error {
+	return db.AutoMigrate(
+		&SecurityEvent{},
+		&AccessLog{},
+		&DropEvent{},
+		&BotScoreLog{},
 	)
 }
 

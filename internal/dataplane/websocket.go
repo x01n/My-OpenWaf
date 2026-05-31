@@ -18,6 +18,7 @@ import (
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/snapshot"
+	"My-OpenWaf/internal/waf/bot"
 )
 
 const wsInspectFrameLimit = 4096
@@ -43,7 +44,7 @@ func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base strin
 	var upConn net.Conn
 	var err error
 
-	if strings.HasPrefix(target, "wss://") {
+	if strings.HasPrefix(strings.ToLower(target), "wss://") {
 		upConn, err = tls.DialWithDialer(&dialer, "tcp", host, &tls.Config{
 			ServerName:         rt.Site.UpstreamTLSServerName,
 			InsecureSkipVerify: rt.Site.UpstreamTLSSkipVerify,
@@ -57,7 +58,7 @@ func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base strin
 	}
 	defer upConn.Close()
 
-	hdr := buildWebSocketHandshakeHeaders(c, pathAndQuery(target), host, rt, clientIP)
+	hdr := buildWebSocketHandshakeHeaders(c, pathAndQuery(target), host, strings.ToLower(strings.SplitN(target, "://", 2)[0]), rt, clientIP)
 	if _, err := io.WriteString(upConn, hdr); err != nil {
 		return err
 	}
@@ -92,7 +93,7 @@ func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base strin
 	return nil
 }
 
-func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string, upstreamHost string, rt snapshot.SiteRuntime, clientIP net.IP) string {
+func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string, upstreamHost string, upstreamProto string, rt snapshot.SiteRuntime, clientIP net.IP) string {
 	method := string(c.Method())
 	if method == "" {
 		method = http.MethodGet
@@ -103,7 +104,7 @@ func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string,
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := strings.ToLower(string(k))
 		switch key {
-		case "host", "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "x-forwarded-for", "x-forwarded-host":
+		case "host", "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto":
 			return
 		}
 		hdr.WriteString(string(k) + ": " + string(v) + "\r\n")
@@ -121,6 +122,13 @@ func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string,
 	}
 	if rt.PreserveOriginalHost && origHost != "" {
 		hdr.WriteString("X-Forwarded-Host: " + origHost + "\r\n")
+	}
+	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
+		hdr.WriteString("X-Forwarded-Proto: " + strings.ToLower(v) + "\r\n")
+	} else if upstreamProto == "wss" {
+		hdr.WriteString("X-Forwarded-Proto: https\r\n")
+	} else {
+		hdr.WriteString("X-Forwarded-Proto: http\r\n")
 	}
 	hdr.WriteString("\r\n")
 	return hdr.String()
@@ -162,6 +170,9 @@ func inspectWebSocketPayload(c *app.RequestContext, rt snapshot.SiteRuntime, eng
 		Body:        payload,
 		ContentType: "application/octet-stream",
 	}
+	if fp, ok := bot.TLSFingerprintFromConn(c.GetConn()); ok {
+		reqCtx.TLS = fp
+	}
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := string(k)
 		reqCtx.Headers[key] = string(v)
@@ -185,7 +196,7 @@ func readWSFrame(r io.Reader, payloadLimit int) (wsFrame, error) {
 	maskLen := header[1]
 	opcode := finOpcode & 0x0F
 	masked := maskLen&0x80 != 0
-	payloadLen := int(maskLen & 0x7F)
+	payloadLen := uint64(maskLen & 0x7F)
 
 	raw := append([]byte{}, header[:]...)
 	switch payloadLen {
@@ -195,19 +206,14 @@ func readWSFrame(r io.Reader, payloadLimit int) (wsFrame, error) {
 			return wsFrame{}, err
 		}
 		raw = append(raw, ext[:]...)
-		payloadLen = int(binary.BigEndian.Uint16(ext[:]))
+		payloadLen = uint64(binary.BigEndian.Uint16(ext[:]))
 	case 127:
 		var ext [8]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
 			return wsFrame{}, err
 		}
 		raw = append(raw, ext[:]...)
-		n := binary.BigEndian.Uint64(ext[:])
-		if n > uint64(payloadLimit) {
-			payloadLen = payloadLimit + 1
-		} else {
-			payloadLen = int(n)
-		}
+		payloadLen = binary.BigEndian.Uint64(ext[:])
 	}
 
 	var maskKey [4]byte
@@ -218,22 +224,33 @@ func readWSFrame(r io.Reader, payloadLimit int) (wsFrame, error) {
 		raw = append(raw, maskKey[:]...)
 	}
 
-	payload := make([]byte, payloadLen)
-	if _, err := io.ReadFull(r, payload); err != nil {
+	payload, decoded, err := readWSPayload(r, payloadLen, payloadLimit, maskKey, masked)
+	if err != nil {
 		return wsFrame{}, err
 	}
 	raw = append(raw, payload...)
+	return wsFrame{Raw: raw, Opcode: opcode, Payload: decoded}, nil
+}
 
-	decoded := append([]byte(nil), payload...)
+func readWSPayload(r io.Reader, payloadLen uint64, payloadLimit int, maskKey [4]byte, masked bool) ([]byte, []byte, error) {
+	if payloadLen > uint64(int(^uint(0)>>1)) {
+		return nil, nil, errors.New("websocket frame too large")
+	}
+	payload := make([]byte, int(payloadLen))
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, nil, err
+	}
+	decodedLen := len(payload)
+	if decodedLen > payloadLimit {
+		decodedLen = payloadLimit
+	}
+	decoded := append([]byte(nil), payload[:decodedLen]...)
 	if masked {
 		for i := range decoded {
 			decoded[i] ^= maskKey[i%4]
 		}
 	}
-	if len(decoded) > payloadLimit {
-		decoded = decoded[:payloadLimit]
-	}
-	return wsFrame{Raw: raw, Opcode: opcode, Payload: decoded}, nil
+	return payload, decoded, nil
 }
 
 func readHTTPResponseHead(r *bufio.Reader) (string, string, error) {

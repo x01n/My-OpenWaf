@@ -29,13 +29,34 @@ const (
 // ── global singleton ──
 
 var (
-	initOnce  sync.Once
+	initOnce      sync.Once
 	globalHandler slog.Handler
+	globalLevel   *levelVar
+	logFile       *os.File
 )
+
+type levelVar struct {
+	mu    sync.RWMutex
+	level slog.Level
+}
+
+func (l *levelVar) Level() slog.Level {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.level
+}
+
+func (l *levelVar) Set(level slog.Level) {
+	l.mu.Lock()
+	l.level = level
+	l.mu.Unlock()
+}
 
 func init() {
 	initOnce.Do(func() {
-		globalHandler = newPrettyHandler(os.Stdout, parseLevel(), useColor())
+		globalLevel = &levelVar{level: parseLevel()}
+		w := buildOutput()
+		globalHandler = newPrettyHandler(w, globalLevel.Level(), useColor())
 	})
 }
 
@@ -47,7 +68,94 @@ func New(section string) *slog.Logger {
 
 // SetOutput replaces the global output writer (useful for testing).
 func SetOutput(w io.Writer) {
-	globalHandler = newPrettyHandler(w, parseLevel(), false)
+	globalHandler = newPrettyHandler(w, globalLevel.Level(), false)
+}
+
+// SetLevel 动态设置全局日志级别。
+func SetLevel(level string) {
+	Configure(Config{
+		Level:      level,
+		FilePath:   os.Getenv("MY_OPENWAF_LOG_FILE"),
+		AlsoStdout: os.Getenv("MY_OPENWAF_LOG_ALSO_STDOUT") == "1",
+	})
+}
+
+type Config struct {
+	Level      string
+	FilePath   string
+	AlsoStdout bool
+}
+
+func Configure(cfg Config) {
+	var l slog.Level
+	switch strings.ToUpper(strings.TrimSpace(cfg.Level)) {
+	case "DEBUG":
+		l = slog.LevelDebug
+	case "WARN", "WARNING":
+		l = slog.LevelWarn
+	case "ERROR":
+		l = slog.LevelError
+	default:
+		l = slog.LevelInfo
+	}
+	globalLevel.Set(l)
+	w := buildConfiguredOutput(cfg.FilePath, cfg.AlsoStdout)
+	globalHandler = newPrettyHandler(w, l, useColor())
+}
+
+func GetLevel() string {
+	switch globalLevel.Level() {
+	case slog.LevelDebug:
+		return "DEBUG"
+	case slog.LevelWarn:
+		return "WARN"
+	case slog.LevelError:
+		return "ERROR"
+	default:
+		return "INFO"
+	}
+}
+
+func Close() {
+	if logFile != nil {
+		logFile.Close()
+	}
+}
+
+func buildOutput() io.Writer {
+	filePath := os.Getenv("MY_OPENWAF_LOG_FILE")
+	alsoStdout := os.Getenv("MY_OPENWAF_LOG_ALSO_STDOUT") == "1"
+	return buildConfiguredOutput(filePath, alsoStdout)
+}
+
+func buildConfiguredOutput(filePath string, alsoStdout bool) io.Writer {
+	if filePath == "" {
+		return os.Stdout
+	}
+
+	// 创建日志目录
+	dir := filePath[:max(strings.LastIndex(filePath, "/"), strings.LastIndex(filePath, "\\"))]
+	if dir != "" {
+		os.MkdirAll(dir, 0755)
+	}
+
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "logger: failed to open log file %s: %v\n", filePath, err)
+		return os.Stdout
+	}
+
+	// 关闭旧文件
+	if logFile != nil {
+		logFile.Close()
+	}
+	logFile = f
+
+	// 如果设置了同时输出到控制台
+	if alsoStdout {
+		return io.MultiWriter(os.Stdout, f)
+	}
+	return f
 }
 
 func parseLevel() slog.Level {

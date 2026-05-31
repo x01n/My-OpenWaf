@@ -1,25 +1,25 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Ban, TrendingUp } from "lucide-react";
-import { toast } from "sonner";
+import { useState } from "react"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Ban, TrendingUp } from "lucide-react"
+import { toast } from "sonner"
 
 interface TopItem {
-  label: string;
-  value: string | number;
-  count: number;
-  actionable?: boolean;
+  label: string
+  value: string | number
+  count: number
+  actionable?: boolean
 }
 
 interface TopListCardProps {
-  title: string;
-  icon?: React.ReactNode;
-  items: TopItem[];
-  emptyText?: string;
-  onAddToBlacklist?: (value: string) => Promise<void>;
+  title: string
+  icon?: React.ReactNode
+  items: TopItem[]
+  emptyText?: string
+  onAddToBlacklist?: (value: string) => Promise<void>
 }
 
 export function TopListCard({
@@ -29,21 +29,23 @@ export function TopListCard({
   emptyText = "暂无数据",
   onAddToBlacklist,
 }: TopListCardProps) {
-  const [loading, setLoading] = useState<string | null>(null);
+  const [loading, setLoading] = useState<string | null>(null)
 
   const handleAddToBlacklist = async (value: string) => {
-    if (!onAddToBlacklist) return;
+    if (!onAddToBlacklist) return
 
-    setLoading(value);
+    setLoading(value)
     try {
-      await onAddToBlacklist(value);
-      toast.success(`已将 ${value} 加入黑名单`);
+      await onAddToBlacklist(value)
+      toast.success(`已将 ${value} 加入黑名单`)
     } catch (error) {
-      toast.error(`加入黑名单失败: ${error instanceof Error ? error.message : "未知错误"}`);
+      toast.error(
+        `加入黑名单失败: ${error instanceof Error ? error.message : "未知错误"}`
+      )
     } finally {
-      setLoading(null);
+      setLoading(null)
     }
-  };
+  }
 
   return (
     <Card>
@@ -55,7 +57,7 @@ export function TopListCard({
       </CardHeader>
       <CardContent>
         {items.length === 0 ? (
-          <p className="text-sm text-muted-foreground text-center py-4">
+          <p className="py-4 text-center text-sm text-muted-foreground">
             {emptyText}
           </p>
         ) : (
@@ -63,14 +65,17 @@ export function TopListCard({
             {items.map((item, index) => (
               <div
                 key={index}
-                className="flex items-center justify-between p-2 rounded-lg hover:bg-muted/50 transition-colors"
+                className="flex items-center justify-between rounded-lg p-2 transition-colors hover:bg-muted/50"
               >
-                <div className="flex items-center gap-3 flex-1 min-w-0">
+                <div className="flex min-w-0 flex-1 items-center gap-3">
                   <Badge variant="outline" className="shrink-0">
                     #{index + 1}
                   </Badge>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate" title={String(item.value)}>
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className="truncate text-sm font-medium"
+                      title={String(item.value)}
+                    >
                       {item.label}
                     </p>
                     <p className="text-xs text-muted-foreground">
@@ -78,9 +83,9 @@ export function TopListCard({
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex shrink-0 items-center gap-2">
                   <Badge variant="secondary" className="font-mono">
-                    <TrendingUp className="h-3 w-3 mr-1" />
+                    <TrendingUp className="mr-1 h-3 w-3" />
                     {item.count}
                   </Badge>
                   {item.actionable && onAddToBlacklist && (
@@ -101,5 +106,5 @@ export function TopListCard({
         )}
       </CardContent>
     </Card>
-  );
+  )
 }

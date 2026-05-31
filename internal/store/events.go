@@ -45,6 +45,15 @@ type AccessLog struct {
 	Upstream    string    `gorm:"size:512" json:"upstream"`
 	UserAgent   string    `gorm:"size:512" json:"user_agent"`
 
+	HTTPProtocol string `gorm:"size:32" json:"http_protocol"`
+	TLSVersion   string `gorm:"size:16" json:"tls_version"`
+	TLSSNI       string `gorm:"size:255" json:"tls_sni"`
+	TLSALPN      string `gorm:"size:128" json:"tls_alpn"`
+	TLSJA3       string `gorm:"size:1024" json:"tls_ja3"`
+	TLSJA3Hash   string `gorm:"size:32;index:idx_al_tls_ja3_hash" json:"tls_ja3_hash"`
+	TLSJA4       string `gorm:"size:255;index:idx_al_tls_ja4" json:"tls_ja4"`
+	HeaderOrder  string `gorm:"size:1024" json:"header_order"`
+
 	UpstreamLatencyMs int64 `gorm:"default:0" json:"upstream_latency_ms"`
 	ResponseSize      int64 `gorm:"default:0" json:"response_size"`
 }

@@ -1,7 +1,9 @@
-"use client";
+"use client"
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
+  ArrowRight,
   AlertTriangle,
   Clock,
   Copy,
@@ -20,22 +22,22 @@ import {
   ShieldCheck,
   Trash2,
   Zap,
-} from "lucide-react";
-import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
+} from "lucide-react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+} from "@/components/ui/select"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Table,
   TableBody,
@@ -43,7 +45,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table";
+} from "@/components/ui/table"
 import {
   Dialog,
   DialogContent,
@@ -51,30 +53,46 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Badge } from "@/components/ui/badge";
-import { InlineMeta, PageIntro, Surface } from "@/components/console-shell";
-import { Pagination } from "@/components/pagination";
+} from "@/components/ui/dialog"
+import { Badge } from "@/components/ui/badge"
+import { InlineMeta, PageIntro, Surface } from "@/components/console-shell"
+import { Pagination } from "@/components/pagination"
 import {
   createAPIKey,
   createSystemSetting,
   getAPIKeys,
   getAccessLogs,
   getDashboardSummary,
+  getNetworkConfig,
   getProtectionSettings,
   getSecurityEvents,
   getSystemSettings,
+  getTLSCipherSuites,
+  getTLSDefaultConfig,
   removeAPIKey,
+  updateNetworkConfig,
   updateProtectionSettings,
   updateSystemSetting,
+  updateTLSDefaultConfig,
   type APIKey,
   type AccessLog,
   type DashboardSummary,
   type ProtectionSettings,
   type SecurityEvent,
   type SystemSetting,
-} from "@/lib/api";
-import { formatDate } from "@/lib/utils";
+} from "@/lib/api"
+import { CAPTCHA_TYPE_OPTIONS } from "@/lib/security-api"
+import { formatDate } from "@/lib/utils"
+
+type TLSCipherSuiteOption = {
+  id: number
+  name: string
+}
+
+type TLSCurveOption = {
+  id: number
+  name: string
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -83,25 +101,24 @@ import { formatDate } from "@/lib/utils";
 function getSettingValue(
   settings: SystemSetting[],
   key: string,
-  fallback = "",
+  fallback = ""
 ): string {
-  return settings.find((s) => s.key === key)?.value ?? fallback;
+  return settings.find((s) => s.key === key)?.value ?? fallback
 }
 
 function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  if (days > 0) return `${days} 天 ${hours} 小时 ${mins} 分`;
-  if (hours > 0) return `${hours} 小时 ${mins} 分`;
-  return `${mins} 分钟`;
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  if (days > 0) return `${days} 天 ${hours} 小时 ${mins} 分`
+  if (hours > 0) return `${hours} 小时 ${mins} 分`
+  return `${mins} 分钟`
 }
 
 function maskToken(token?: string): string {
-  if (!token) return "••••••••••••••••";
-  if (token.length <= 8)
-    return "••••" + token.slice(-4);
-  return token.slice(0, 4) + "••••••••" + token.slice(-4);
+  if (!token) return "••••••••••••••••"
+  if (token.length <= 8) return "••••" + token.slice(-4)
+  return token.slice(0, 4) + "••••••••" + token.slice(-4)
 }
 
 const RETENTION_OPTIONS = [
@@ -111,7 +128,7 @@ const RETENTION_OPTIONS = [
   { value: "7", label: "7 天" },
   { value: "15", label: "15 天" },
   { value: "30", label: "30 天" },
-] as const;
+] as const
 
 const OPTIMIZE_INTERVAL_OPTIONS = [
   { value: "1", label: "1 小时" },
@@ -120,245 +137,319 @@ const OPTIMIZE_INTERVAL_OPTIONS = [
   { value: "24", label: "24 小时" },
   { value: "48", label: "48 小时" },
   { value: "72", label: "72 小时" },
-] as const;
+] as const
 
 const CUSTOM_HTML_CODES = [
-  { code: "403", label: "403 Forbidden", color: "border-rose-200 bg-rose-50 text-rose-700" },
-  { code: "429", label: "429 Too Many Requests", color: "border-amber-200 bg-amber-50 text-amber-700" },
-  { code: "404", label: "404 Not Found", color: "border-orange-200 bg-orange-50 text-orange-700" },
-  { code: "502", label: "502 Bad Gateway", color: "border-purple-200 bg-purple-50 text-purple-700" },
-  { code: "504", label: "504 Gateway Timeout", color: "border-slate-200 bg-slate-100 text-slate-700" },
-] as const;
+  {
+    code: "403",
+    label: "403 Forbidden",
+    color: "border-rose-200 bg-rose-50 text-rose-700",
+  },
+  {
+    code: "429",
+    label: "429 Too Many Requests",
+    color: "border-amber-200 bg-amber-50 text-amber-700",
+  },
+  {
+    code: "404",
+    label: "404 Not Found",
+    color: "border-orange-200 bg-orange-50 text-orange-700",
+  },
+  {
+    code: "502",
+    label: "502 Bad Gateway",
+    color: "border-purple-200 bg-purple-50 text-purple-700",
+  },
+  {
+    code: "504",
+    label: "504 Gateway Timeout",
+    color: "border-slate-200 bg-slate-100 text-slate-700",
+  },
+] as const
 
-const LOG_PAGE_SIZE = 15;
+const LOG_PAGE_SIZE = 15
 
 /* ------------------------------------------------------------------ */
 /*  Main Component                                                     */
 /* ------------------------------------------------------------------ */
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState("protection");
+  const [activeTab, setActiveTab] = useState("protection")
 
   /* Shared data */
-  const [settings, setSettings] = useState<SystemSetting[]>([]);
-  const [protection, setProtection] = useState<ProtectionSettings | null>(null);
-  const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [settings, setSettings] = useState<SystemSetting[]>([])
+  const [protection, setProtection] = useState<ProtectionSettings | null>(null)
+  const [summary, setSummary] = useState<DashboardSummary | null>(null)
+  const [loading, setLoading] = useState(true)
 
   /* ---- Protection Config tab state ---- */
-  const [savingProtection, setSavingProtection] = useState(false);
+  const [savingProtection, setSavingProtection] = useState(false)
 
   // Data cleanup retention
-  const [secEventRetention, setSecEventRetention] = useState("30");
-  const [accessLogRetention, setAccessLogRetention] = useState("30");
-  const [statsRetention, setStatsRetention] = useState("0");
-  const [dbOptimizeInterval, setDbOptimizeInterval] = useState("24");
+  const [secEventRetention, setSecEventRetention] = useState("30")
+  const [accessLogRetention, setAccessLogRetention] = useState("30")
+  const [statsRetention, setStatsRetention] = useState("0")
+  const [dbOptimizeInterval, setDbOptimizeInterval] = useState("24")
 
   // Block page customization
-  const [blockPageType, setBlockPageType] = useState("default");
-  const [blockPageText, setBlockPageText] = useState("");
-  const [activeCustomCode, setActiveCustomCode] = useState("403");
-  const [customHtmlMap, setCustomHtmlMap] = useState<Record<string, string>>({});
+  const [blockPageType, setBlockPageType] = useState("default")
+  const [blockPageText, setBlockPageText] = useState("")
+  const [activeCustomCode, setActiveCustomCode] = useState("403")
+  const [customHtmlMap, setCustomHtmlMap] = useState<Record<string, string>>({})
 
   // Detection engine mode
-  const [engineMode, setEngineMode] = useState("multi");
+  const [engineMode, setEngineMode] = useState("multi")
 
   // Network config
-  const [xffMode, setXffMode] = useState("X-Forwarded-For");
-  const [trustedCidr, setTrustedCidr] = useState("");
+  const [xffMode, setXffMode] = useState("X-Forwarded-For")
+  const [trustedCidr, setTrustedCidr] = useState("")
 
   // Protocol state
-  const [ipv6Enabled, setIpv6Enabled] = useState(false);
-  const [http2Enabled, setHttp2Enabled] = useState(false);
-  const [hstsEnabled, setHstsEnabled] = useState(false);
-  const [brotliEnabled, setBrotliEnabled] = useState(false);
+  const [ipv6Enabled, setIpv6Enabled] = useState(false)
+  const [http2Enabled, setHttp2Enabled] = useState(false)
+  const [http3Enabled, setHttp3Enabled] = useState(false)
+  const [hstsEnabled, setHstsEnabled] = useState(false)
+  const [brotliEnabled, setBrotliEnabled] = useState(false)
+
+  // TLS 配置
+  const [tlsMinVersion, setTlsMinVersion] = useState("TLS12")
+  const [tlsMaxVersion, setTlsMaxVersion] = useState("TLS13")
+  const [cipherSuites, setCipherSuites] = useState("")
+  const [curvePreferences, setCurvePreferences] = useState(
+    "X25519,CurveP256,CurveP384"
+  )
+  const [preferServerCipherSuites, setPreferServerCipherSuites] = useState(true)
+  const [secureCipherSuiteOptions, setSecureCipherSuiteOptions] = useState<
+    TLSCipherSuiteOption[]
+  >([])
+  const [insecureCipherSuiteOptions, setInsecureCipherSuiteOptions] = useState<
+    TLSCipherSuiteOption[]
+  >([])
+  const [curveOptions, setCurveOptions] = useState<TLSCurveOption[]>([])
+
+  // 验证码策略
+  const [captchaType, setCaptchaType] = useState("math")
 
   /* ---- Console Management tab state ---- */
-  const [savingConsole, setSavingConsole] = useState(false);
+  const [savingConsole, setSavingConsole] = useState(false)
 
   // Login security (from protection settings)
-  const [maxAttempts, setMaxAttempts] = useState(5);
-  const [lockoutMinutes, setLockoutMinutes] = useState(15);
-  const [minPasswordLen, setMinPasswordLen] = useState(8);
-  const [sessionTimeout, setSessionTimeout] = useState(60);
-  const [accessIpWhitelist, setAccessIpWhitelist] = useState("");
+  const [maxAttempts, setMaxAttempts] = useState(5)
+  const [lockoutMinutes, setLockoutMinutes] = useState(15)
+  const [minPasswordLen, setMinPasswordLen] = useState(8)
+  const [sessionTimeout, setSessionTimeout] = useState(60)
+  const [accessIpWhitelist, setAccessIpWhitelist] = useState("")
 
   // API keys
-  const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
-  const [apiKeysLoading, setApiKeysLoading] = useState(false);
-  const [apiKeyDialogOpen, setApiKeyDialogOpen] = useState(false);
-  const [newKeyName, setNewKeyName] = useState("");
-  const [createdToken, setCreatedToken] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<APIKey | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [apiKeys, setApiKeys] = useState<APIKey[]>([])
+  const [apiKeysLoading, setApiKeysLoading] = useState(false)
+  const [apiKeyDialogOpen, setApiKeyDialogOpen] = useState(false)
+  const [newKeyName, setNewKeyName] = useState("")
+  const [createdToken, setCreatedToken] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<APIKey | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   // Admin console certificate
-  const [adminCertMode, setAdminCertMode] = useState("self_signed");
+  const [adminCertMode, setAdminCertMode] = useState("self_signed")
 
   /* ---- System Logs tab state ---- */
-  const [logType, setLogType] = useState<"security" | "access">("security");
-  const [secEvents, setSecEvents] = useState<SecurityEvent[]>([]);
-  const [accessLogs, setAccessLogs] = useState<AccessLog[]>([]);
-  const [logPage, setLogPage] = useState(1);
-  const [logTotal, setLogTotal] = useState(0);
-  const [logLoading, setLogLoading] = useState(false);
-  const [logSearch, setLogSearch] = useState("");
+  const [logType, setLogType] = useState<"security" | "access">("security")
+  const [secEvents, setSecEvents] = useState<SecurityEvent[]>([])
+  const [accessLogs, setAccessLogs] = useState<AccessLog[]>([])
+  const [logPage, setLogPage] = useState(1)
+  const [logTotal, setLogTotal] = useState(0)
+  const [logLoading, setLogLoading] = useState(false)
+  const [logSearch, setLogSearch] = useState("")
+
+  const selectedCipherSuiteNames = useMemo(
+    () =>
+      cipherSuites
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    [cipherSuites]
+  )
+  const selectedCurveNames = useMemo(
+    () =>
+      curvePreferences
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    [curvePreferences]
+  )
 
   /* ---------------------------------------------------------------- */
   /*  Data loading                                                     */
   /* ---------------------------------------------------------------- */
 
   async function loadSettings() {
-    setLoading(true);
+    setLoading(true)
     try {
-      const [systemSettings, protectionSettings, dash] = await Promise.all([
+      const [
+        systemSettings,
+        protectionSettings,
+        dash,
+        networkConfig,
+        tlsConfig,
+        cipherSuiteConfig,
+      ] = await Promise.all([
         getSystemSettings(),
         getProtectionSettings(),
         getDashboardSummary().catch(() => null),
-      ]);
-      setSettings(systemSettings);
-      setProtection(protectionSettings);
-      setSummary(dash);
+        getNetworkConfig().catch(() => null),
+        getTLSDefaultConfig().catch(() => null),
+        getTLSCipherSuites().catch(() => ({
+          secure: [],
+          insecure: [],
+          curves: [],
+        })),
+      ])
+      setSettings(systemSettings)
+      setProtection(protectionSettings)
+      setSummary(dash)
+      setSecureCipherSuiteOptions(cipherSuiteConfig.secure ?? [])
+      setInsecureCipherSuiteOptions(cipherSuiteConfig.insecure ?? [])
+      setCurveOptions(cipherSuiteConfig.curves ?? [])
 
       // Populate protection config
       setSecEventRetention(
-        getSettingValue(systemSettings, "security_event_retention_days", "30"),
-      );
+        getSettingValue(systemSettings, "security_event_retention_days", "30")
+      )
       setAccessLogRetention(
-        getSettingValue(systemSettings, "access_log_retention_days", "30"),
-      );
+        getSettingValue(systemSettings, "access_log_retention_days", "30")
+      )
       setStatsRetention(
-        getSettingValue(systemSettings, "stats_retention_days", "0"),
-      );
+        getSettingValue(systemSettings, "stats_retention_days", "0")
+      )
       setDbOptimizeInterval(
-        getSettingValue(systemSettings, "db_optimize_interval_hours", "24"),
-      );
+        getSettingValue(systemSettings, "db_optimize_interval_hours", "24")
+      )
       setBlockPageType(
-        getSettingValue(systemSettings, "block_page_type", "default"),
-      );
-      setBlockPageText(
-        getSettingValue(systemSettings, "block_page_text", ""),
-      );
-      setEngineMode(
-        getSettingValue(systemSettings, "engine_mode", "multi"),
-      );
+        getSettingValue(systemSettings, "block_page_type", "default")
+      )
+      setBlockPageText(getSettingValue(systemSettings, "block_page_text", ""))
+      setEngineMode(getSettingValue(systemSettings, "engine_mode", "multi"))
 
       // Load custom HTML per code
-      const htmlMap: Record<string, string> = {};
+      const htmlMap: Record<string, string> = {}
       for (const item of CUSTOM_HTML_CODES) {
         htmlMap[item.code] = getSettingValue(
           systemSettings,
           `custom_html_${item.code}`,
-          "",
-        );
+          ""
+        )
       }
-      setCustomHtmlMap(htmlMap);
+      setCustomHtmlMap(htmlMap)
 
       // Network config
-      setXffMode(
-        getSettingValue(systemSettings, "xff_mode", "X-Forwarded-For"),
-      );
-      setTrustedCidr(getSettingValue(systemSettings, "trusted_cidr", ""));
+      setXffMode(getSettingValue(systemSettings, "xff_mode", "X-Forwarded-For"))
+      setTrustedCidr(getSettingValue(systemSettings, "trusted_cidr", ""))
 
       // Protocol
-      setIpv6Enabled(
-        getSettingValue(systemSettings, "ipv6_enabled") === "true",
-      );
-      setHttp2Enabled(
-        getSettingValue(systemSettings, "http2_enabled") === "true",
-      );
-      setHstsEnabled(
-        getSettingValue(systemSettings, "hsts_enabled") === "true",
-      );
+      setIpv6Enabled(networkConfig?.ipv6_enabled ?? false)
+      setHttp2Enabled(networkConfig?.http2_enabled ?? true)
+      setHttp3Enabled(networkConfig?.http3_enabled ?? false)
+      setTlsMinVersion(tlsConfig?.min_version ?? "TLS12")
+      setTlsMaxVersion(tlsConfig?.max_version ?? "TLS13")
+      setCipherSuites(tlsConfig?.cipher_suites ?? "")
+      setCurvePreferences(
+        tlsConfig?.curve_preferences ?? "X25519,CurveP256,CurveP384"
+      )
+      setPreferServerCipherSuites(
+        tlsConfig?.prefer_server_cipher_suites ?? true
+      )
+      setCaptchaType(
+        protectionSettings?.captcha_type ??
+          getSettingValue(systemSettings, "captcha_type", "math")
+      )
+      setHstsEnabled(getSettingValue(systemSettings, "hsts_enabled") === "true")
       setBrotliEnabled(
-        getSettingValue(systemSettings, "brotli_enabled") === "true",
-      );
+        getSettingValue(systemSettings, "brotli_enabled") === "true"
+      )
 
       // Login security
-      setMaxAttempts(protectionSettings.login_max_attempts ?? 5);
-      setLockoutMinutes(protectionSettings.login_lockout_minutes ?? 15);
-      setMinPasswordLen(protectionSettings.login_min_password_length ?? 8);
+      setMaxAttempts(protectionSettings.login_max_attempts ?? 5)
+      setLockoutMinutes(protectionSettings.login_lockout_minutes ?? 15)
+      setMinPasswordLen(protectionSettings.login_min_password_length ?? 8)
       setSessionTimeout(
-        Number(
-          getSettingValue(systemSettings, "session_timeout_minutes", "60"),
-        ),
-      );
+        Number(getSettingValue(systemSettings, "session_timeout_minutes", "60"))
+      )
       setAccessIpWhitelist(
-        getSettingValue(systemSettings, "access_ip_whitelist", ""),
-      );
+        getSettingValue(systemSettings, "access_ip_whitelist", "")
+      )
 
       // Admin cert
       setAdminCertMode(
-        getSettingValue(systemSettings, "admin_cert_mode", "self_signed"),
-      );
+        getSettingValue(systemSettings, "admin_cert_mode", "self_signed")
+      )
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
   }
 
   function loadApiKeys() {
-    setApiKeysLoading(true);
+    setApiKeysLoading(true)
     getAPIKeys()
       .then((data) => setApiKeys(data.items || []))
       .catch((e) => toast.error(String(e)))
-      .finally(() => setApiKeysLoading(false));
+      .finally(() => setApiKeysLoading(false))
   }
 
   const loadLogs = useCallback(async () => {
-    setLogLoading(true);
+    setLogLoading(true)
     try {
       if (logType === "security") {
         const res = await getSecurityEvents({
           page: logPage,
           page_size: LOG_PAGE_SIZE,
           client_ip: logSearch || undefined,
-        });
-        setSecEvents(res.items ?? []);
-        setLogTotal(res.total ?? 0);
+        })
+        setSecEvents(res.items ?? [])
+        setLogTotal(res.total ?? 0)
       } else {
         const res = await getAccessLogs({
           page: logPage,
           page_size: LOG_PAGE_SIZE,
           client_ip: logSearch || undefined,
-        });
-        setAccessLogs(res.items ?? []);
-        setLogTotal(res.total ?? 0);
+        })
+        setAccessLogs(res.items ?? [])
+        setLogTotal(res.total ?? 0)
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载日志失败");
+      toast.error(error instanceof Error ? error.message : "加载日志失败")
     } finally {
-      setLogLoading(false);
+      setLogLoading(false)
     }
-  }, [logType, logPage, logSearch]);
+  }, [logType, logPage, logSearch])
 
   useEffect(() => {
-    loadSettings();
-  }, []);
+    loadSettings()
+  }, [])
 
   useEffect(() => {
-    if (activeTab === "console") loadApiKeys();
-  }, [activeTab]);
+    if (activeTab === "console") loadApiKeys()
+  }, [activeTab])
 
   useEffect(() => {
-    if (activeTab === "logs") loadLogs();
-  }, [activeTab, loadLogs]);
+    if (activeTab === "logs") loadLogs()
+  }, [activeTab, loadLogs])
 
   /* ---------------------------------------------------------------- */
   /*  Save handlers                                                    */
   /* ---------------------------------------------------------------- */
 
   async function saveSetting(key: string, value: string) {
-    const exists = settings.find((s) => s.key === key);
+    const exists = settings.find((s) => s.key === key)
     if (exists) {
-      await updateSystemSetting(key, value);
+      await updateSystemSetting(key, value)
     } else {
-      await createSystemSetting({ key, value });
+      await createSystemSetting({ key, value })
     }
   }
 
   async function handleSaveProtection() {
-    setSavingProtection(true);
+    setSavingProtection(true)
     try {
       // System settings
       const pairs: [string, string][] = [
@@ -371,35 +462,74 @@ export default function SettingsPage() {
         ["engine_mode", engineMode],
         ["xff_mode", xffMode],
         ["trusted_cidr", trustedCidr],
-        ["ipv6_enabled", String(ipv6Enabled)],
-        ["http2_enabled", String(http2Enabled)],
         ["hsts_enabled", String(hstsEnabled)],
         ["brotli_enabled", String(brotliEnabled)],
-      ];
+      ]
 
-      // Custom HTML per status code
+      await Promise.all([
+        updateNetworkConfig({
+          ipv6_enabled: ipv6Enabled,
+          http2_enabled: http2Enabled,
+          http3_enabled: http3Enabled,
+          default_alpn: [
+            http3Enabled ? "h3" : null,
+            http2Enabled ? "h2" : null,
+            "http/1.1",
+          ]
+            .filter(Boolean)
+            .join(","),
+          default_network: ipv6Enabled ? "tcp6" : "tcp",
+        }),
+        updateTLSDefaultConfig({
+          min_version: tlsMinVersion,
+          max_version: tlsMaxVersion,
+          cipher_suites: cipherSuites,
+          default_alpn: [
+            http3Enabled ? "h3" : null,
+            http2Enabled ? "h2" : null,
+            "http/1.1",
+          ]
+            .filter(Boolean)
+            .join(","),
+          curve_preferences: curvePreferences,
+          prefer_server_cipher_suites: preferServerCipherSuites,
+          self_signed_on_ip: true,
+        }),
+      ])
+
       for (const item of CUSTOM_HTML_CODES) {
-        pairs.push([
-          `custom_html_${item.code}`,
-          customHtmlMap[item.code] ?? "",
-        ]);
+        pairs.push([`custom_html_${item.code}`, customHtmlMap[item.code] ?? ""])
       }
 
       for (const [key, value] of pairs) {
-        await saveSetting(key, value);
+        await saveSetting(key, value)
       }
 
-      toast.success("防护配置已保存");
-      await loadSettings();
+      toast.success("防护配置已保存")
+      await loadSettings()
     } catch (error) {
-      toast.error(String(error));
+      toast.error(String(error))
     } finally {
-      setSavingProtection(false);
+      setSavingProtection(false)
     }
   }
 
+  function toggleCipherSuite(name: string) {
+    const next = selectedCipherSuiteNames.includes(name)
+      ? selectedCipherSuiteNames.filter((item) => item !== name)
+      : [...selectedCipherSuiteNames, name]
+    setCipherSuites(next.join(","))
+  }
+
+  function toggleCurvePreference(name: string) {
+    const next = selectedCurveNames.includes(name)
+      ? selectedCurveNames.filter((item) => item !== name)
+      : [...selectedCurveNames, name]
+    setCurvePreferences(next.join(","))
+  }
+
   async function handleSaveConsole() {
-    setSavingConsole(true);
+    setSavingConsole(true)
     try {
       // Save login security to protection settings
       if (protection) {
@@ -408,7 +538,7 @@ export default function SettingsPage() {
           login_max_attempts: maxAttempts,
           login_lockout_minutes: lockoutMinutes,
           login_min_password_length: minPasswordLen,
-        });
+        })
       }
 
       // Save other console settings
@@ -416,18 +546,18 @@ export default function SettingsPage() {
         ["session_timeout_minutes", String(sessionTimeout)],
         ["access_ip_whitelist", accessIpWhitelist],
         ["admin_cert_mode", adminCertMode],
-      ];
+      ]
 
       for (const [key, value] of pairs) {
-        await saveSetting(key, value);
+        await saveSetting(key, value)
       }
 
-      toast.success("控制台设置已保存");
-      await loadSettings();
+      toast.success("控制台设置已保存")
+      await loadSettings()
     } catch (error) {
-      toast.error(String(error));
+      toast.error(String(error))
     } finally {
-      setSavingConsole(false);
+      setSavingConsole(false)
     }
   }
 
@@ -437,35 +567,35 @@ export default function SettingsPage() {
 
   async function handleCreateKey() {
     if (!newKeyName.trim()) {
-      toast.error("请输入密钥名称");
-      return;
+      toast.error("请输入密钥名称")
+      return
     }
-    setCreating(true);
+    setCreating(true)
     try {
-      const response = await createAPIKey(newKeyName);
-      setCreatedToken(response.token || null);
-      setNewKeyName("");
-      toast.success("密钥已创建，请立即复制明文 Token。");
-      loadApiKeys();
+      const response = await createAPIKey(newKeyName)
+      setCreatedToken(response.token || null)
+      setNewKeyName("")
+      toast.success("密钥已创建，请立即复制明文 Token。")
+      loadApiKeys()
     } catch (e) {
-      toast.error(String(e));
+      toast.error(String(e))
     } finally {
-      setCreating(false);
+      setCreating(false)
     }
   }
 
   async function handleDeleteKey() {
-    if (!deleteTarget) return;
-    setDeleting(true);
+    if (!deleteTarget) return
+    setDeleting(true)
     try {
-      await removeAPIKey(deleteTarget.id);
-      toast.success("API 密钥已删除");
-      setDeleteTarget(null);
-      loadApiKeys();
+      await removeAPIKey(deleteTarget.id)
+      toast.success("API 密钥已删除")
+      setDeleteTarget(null)
+      loadApiKeys()
     } catch (e) {
-      toast.error(String(e));
+      toast.error(String(e))
     } finally {
-      setDeleting(false);
+      setDeleting(false)
     }
   }
 
@@ -485,7 +615,7 @@ export default function SettingsPage() {
         "动作",
         "类别",
         "匹配说明",
-      ];
+      ]
       const rows = secEvents.map((e) => [
         e.id,
         formatDate(e.created_at),
@@ -496,14 +626,14 @@ export default function SettingsPage() {
         e.action,
         e.category,
         e.match_desc,
-      ]);
+      ])
       const csv = [
         headers.join(","),
         ...rows.map((r) =>
-          r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","),
+          r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")
         ),
-      ].join("\n");
-      downloadCSV(csv, "security-events");
+      ].join("\n")
+      downloadCSV(csv, "security-events")
     } else {
       const headers = [
         "ID",
@@ -513,8 +643,16 @@ export default function SettingsPage() {
         "路径",
         "状态码",
         "WAF",
+        "HTTP协议",
+        "TLS版本",
+        "TLS SNI",
+        "TLS ALPN",
+        "JA3",
+        "JA3 Hash",
+        "JA4",
+        "Header Order",
         "上游",
-      ];
+      ]
       const rows = accessLogs.map((i) => [
         i.id,
         formatDate(i.created_at),
@@ -523,28 +661,36 @@ export default function SettingsPage() {
         i.path,
         i.status_code,
         i.waf_action,
+        i.http_protocol,
+        i.tls_version,
+        i.tls_sni,
+        i.tls_alpn,
+        i.tls_ja3,
+        i.tls_ja3_hash,
+        i.tls_ja4,
+        i.header_order,
         i.upstream,
-      ]);
+      ])
       const csv = [
         headers.join(","),
         ...rows.map((r) =>
-          r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","),
+          r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")
         ),
-      ].join("\n");
-      downloadCSV(csv, "access-logs");
+      ].join("\n")
+      downloadCSV(csv, "access-logs")
     }
   }
 
   function downloadCSV(csv: string, name: string) {
     const blob = new Blob(["﻿" + csv], {
       type: "text/csv;charset=utf-8;",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${name}-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `${name}-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   /* ---------------------------------------------------------------- */
@@ -563,10 +709,10 @@ export default function SettingsPage() {
           <div className="h-full" />
         </Surface>
       </div>
-    );
+    )
   }
 
-  const logTotalPages = Math.max(1, Math.ceil(logTotal / LOG_PAGE_SIZE));
+  const logTotalPages = Math.max(1, Math.ceil(logTotal / LOG_PAGE_SIZE))
 
   /* ---------------------------------------------------------------- */
   /*  Render                                                           */
@@ -574,14 +720,49 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <PageIntro
-        eyebrow="Platform Settings"
-        title="通用设置"
-        description="配置防护策略、控制台管理和日志查看，所有修改保存后立即生效。"
-      />
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <PageIntro
+          eyebrow="Platform Settings"
+          title="通用设置"
+          description="按使用场景拆成防护运行时、控制台安全、日志运维三组；验证码跳过凭据现在绑定 IP、User-Agent、站点与监听器，并使用短期有效期。"
+        />
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          {[
+            {
+              title: "防护运行时",
+              desc: "网络、TLS、拦截页、数据清理",
+              icon: Shield,
+            },
+            {
+              title: "控制台安全",
+              desc: "登录限制、会话、API Key",
+              icon: Lock,
+            },
+            {
+              title: "日志运维",
+              desc: "安全事件与访问日志检索",
+              icon: Database,
+            },
+          ].map((item) => (
+            <div
+              key={item.title}
+              className="rounded-xl border border-slate-100 bg-slate-50/80 p-4"
+            >
+              <item.icon className="h-5 w-5 text-teal-600" />
+              <div className="mt-3 text-sm font-semibold text-slate-900">
+                {item.title}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">{item.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList variant="line" className="mb-2 border-b border-slate-200 pb-px">
+        <TabsList
+          variant="line"
+          className="mb-2 border-b border-slate-200 pb-px"
+        >
           <TabsTrigger value="protection" className="gap-1.5 px-4 py-2 text-sm">
             <Shield className="h-4 w-4" />
             防护配置
@@ -609,7 +790,7 @@ export default function SettingsPage() {
               <div className="grid gap-6 lg:grid-cols-3">
                 {/* Security events retention */}
                 <div className="space-y-3">
-                  <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                     <ShieldCheck className="h-4 w-4 text-teal-600" />
                     安全事件保留
                   </label>
@@ -636,7 +817,7 @@ export default function SettingsPage() {
 
                 {/* Access log retention */}
                 <div className="space-y-3">
-                  <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                     <Clock className="h-4 w-4 text-teal-600" />
                     访问日志保留
                   </label>
@@ -663,7 +844,7 @@ export default function SettingsPage() {
 
                 {/* Stats retention */}
                 <div className="space-y-3">
-                  <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                  <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                     <Database className="h-4 w-4 text-teal-600" />
                     统计报表保留
                   </label>
@@ -696,7 +877,7 @@ export default function SettingsPage() {
               description="配置自动数据库优化的执行间隔。清理过期数据后系统将自动执行数据库优化操作（VACUUM/OPTIMIZE）以回收空间并提升查询性能。"
             >
               <div className="space-y-3">
-                <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                   <RefreshCcw className="h-4 w-4 text-teal-600" />
                   优化执行间隔
                 </label>
@@ -720,7 +901,8 @@ export default function SettingsPage() {
                   ))}
                 </RadioGroup>
                 <p className="text-xs text-slate-500">
-                  设置较短的间隔可保持数据库紧凑，但会增加 I/O 开销。建议日志量大时设为 12-24 小时。
+                  设置较短的间隔可保持数据库紧凑，但会增加 I/O
+                  开销。建议日志量大时设为 12-24 小时。
                 </p>
               </div>
             </Surface>
@@ -735,7 +917,10 @@ export default function SettingsPage() {
                   <label className="text-sm font-medium text-slate-700">
                     页面类型
                   </label>
-                  <Select value={blockPageType} onValueChange={setBlockPageType}>
+                  <Select
+                    value={blockPageType}
+                    onValueChange={setBlockPageType}
+                  >
                     <SelectTrigger className="w-[260px] rounded-md">
                       <SelectValue />
                     </SelectTrigger>
@@ -798,8 +983,12 @@ export default function SettingsPage() {
                     <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
                       <span>
-                        支持 Go template 变量：{"{{.StatusCode}}"}{"  "}
-                        {"{{.Message}}"}{"  "}{"{{.ClientIP}}"}{"  "}
+                        支持 Go template 变量：{"{{.StatusCode}}"}
+                        {"  "}
+                        {"{{.Message}}"}
+                        {"  "}
+                        {"{{.ClientIP}}"}
+                        {"  "}
                         {"{{.RequestID}}"}
                       </span>
                     </div>
@@ -865,7 +1054,7 @@ export default function SettingsPage() {
               >
                 <div className="grid gap-5">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                       <Globe className="h-4 w-4 text-slate-600" />
                       客户端 IP 获取方式
                     </label>
@@ -888,7 +1077,7 @@ export default function SettingsPage() {
                     </p>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                       <Network className="h-4 w-4 text-slate-600" />
                       信任代理 CIDR 列表
                     </label>
@@ -926,6 +1115,13 @@ export default function SettingsPage() {
                       onChange: setHttp2Enabled,
                     },
                     {
+                      label: "HTTP/3 (QUIC)",
+                      desc: "启用基于 QUIC 协议的 HTTP/3 支持",
+                      icon: Zap,
+                      checked: http3Enabled,
+                      onChange: setHttp3Enabled,
+                    },
+                    {
                       label: "HTTPS HSTS",
                       desc: "启用严格传输安全（Strict-Transport-Security）",
                       icon: Lock,
@@ -945,11 +1141,13 @@ export default function SettingsPage() {
                       className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"
                     >
                       <div>
-                        <div className="text-sm font-medium text-slate-900 flex items-center gap-2">
+                        <div className="flex items-center gap-2 text-sm font-medium text-slate-900">
                           <item.icon className="h-4 w-4 text-slate-600" />{" "}
                           {item.label}
                         </div>
-                        <div className="text-xs text-slate-500">{item.desc}</div>
+                        <div className="text-xs text-slate-500">
+                          {item.desc}
+                        </div>
                       </div>
                       <Switch
                         checked={item.checked}
@@ -961,11 +1159,237 @@ export default function SettingsPage() {
               </Surface>
             </div>
 
+            {/* TLS & Captcha Configuration */}
+            <div className="grid gap-6 xl:grid-cols-2">
+              <Surface
+                title="TLS 安全配置"
+                description="配置 TLS 版本范围和密码套件。"
+              >
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <Label>最低 TLS 版本</Label>
+                      <Select
+                        value={tlsMinVersion}
+                        onValueChange={setTlsMinVersion}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="TLS10">TLS 1.0</SelectItem>
+                          <SelectItem value="TLS11">TLS 1.1</SelectItem>
+                          <SelectItem value="TLS12">TLS 1.2</SelectItem>
+                          <SelectItem value="TLS13">TLS 1.3</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label>最高 TLS 版本</Label>
+                      <Select
+                        value={tlsMaxVersion}
+                        onValueChange={setTlsMaxVersion}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="TLS10">TLS 1.0</SelectItem>
+                          <SelectItem value="TLS11">TLS 1.1</SelectItem>
+                          <SelectItem value="TLS12">TLS 1.2</SelectItem>
+                          <SelectItem value="TLS13">TLS 1.3</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div>
+                    <Label>密码套件（逗号分隔，留空使用默认值）</Label>
+                    <Textarea
+                      value={cipherSuites}
+                      onChange={(e) => setCipherSuites(e.target.value)}
+                      placeholder="TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+                      rows={3}
+                    />
+                    <p className="mt-1 text-xs text-slate-500">
+                      Go 仅允许配置 TLS 1.0-1.2 密码套件；TLS 1.3
+                      套件由运行时固定启用。
+                    </p>
+                    {(secureCipherSuiteOptions.length > 0 ||
+                      insecureCipherSuiteOptions.length > 0) && (
+                      <div className="mt-3 space-y-3">
+                        <div>
+                          <div className="mb-2 text-xs font-medium text-slate-600">
+                            推荐套件
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {secureCipherSuiteOptions.map((suite) => {
+                              const selected =
+                                selectedCipherSuiteNames.includes(suite.name)
+                              return (
+                                <button
+                                  key={suite.id}
+                                  type="button"
+                                  onClick={() => toggleCipherSuite(suite.name)}
+                                  className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                                    selected
+                                      ? "border-teal-300 bg-teal-50 text-teal-700"
+                                      : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                                  }`}
+                                >
+                                  {suite.name}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                        {insecureCipherSuiteOptions.length > 0 && (
+                          <div>
+                            <div className="mb-2 text-xs font-medium text-amber-700">
+                              不推荐套件
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {insecureCipherSuiteOptions.map((suite) => {
+                                const selected =
+                                  selectedCipherSuiteNames.includes(suite.name)
+                                return (
+                                  <button
+                                    key={suite.id}
+                                    type="button"
+                                    onClick={() =>
+                                      toggleCipherSuite(suite.name)
+                                    }
+                                    className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                                      selected
+                                        ? "border-amber-300 bg-amber-50 text-amber-800"
+                                        : "border-amber-200 bg-white text-amber-700 hover:border-amber-300"
+                                    }`}
+                                  >
+                                    {suite.name}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <Label>椭圆曲线优先级（逗号分隔）</Label>
+                    <Textarea
+                      value={curvePreferences}
+                      onChange={(e) => setCurvePreferences(e.target.value)}
+                      placeholder="X25519,CurveP256,CurveP384"
+                      rows={2}
+                    />
+                    {curveOptions.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {curveOptions.map((curve) => {
+                          const selected = selectedCurveNames.includes(
+                            curve.name
+                          )
+                          return (
+                            <button
+                              key={curve.id}
+                              type="button"
+                              onClick={() => toggleCurvePreference(curve.name)}
+                              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                                selected
+                                  ? "border-teal-300 bg-teal-50 text-teal-700"
+                                  : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                              }`}
+                            >
+                              {curve.name}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div>
+                      <div className="text-sm font-medium text-slate-900">
+                        服务端密码套件优先
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        TLS 1.2 及以下连接按服务端配置顺序选择密码套件。
+                      </div>
+                    </div>
+                    <Switch
+                      checked={preferServerCipherSuites}
+                      onCheckedChange={setPreferServerCipherSuites}
+                    />
+                  </div>
+                </div>
+              </Surface>
+
+              <Surface
+                title="验证码跳过凭据"
+                description="通过验证码后只发放短期 pass cookie；后端会绑定 Host、客户端 IP、User-Agent、站点 ID 与监听器，迁移 IP 或换浏览器都需要重新验证。"
+              >
+                <div className="space-y-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                      <div className="text-sm font-medium text-slate-900">
+                        当前验证码类型
+                      </div>
+                      <div className="mt-1 text-sm text-slate-600">
+                        {CAPTCHA_TYPE_OPTIONS.find(
+                          (option) => option.value === captchaType
+                        )?.label ?? captchaType}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {CAPTCHA_TYPE_OPTIONS.find(
+                          (option) => option.value === captchaType
+                        )?.description ?? "请前往安全策略页面调整。"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-teal-200 bg-teal-50 px-4 py-3">
+                      <div className="text-sm font-medium text-teal-900">
+                        跳过有效期
+                      </div>
+                      <div className="mt-1 text-sm text-teal-700">
+                        {protection?.captcha_pass_ttl ??
+                          protection?.captcha_timeout ??
+                          120}{" "}
+                        秒
+                      </div>
+                      <div className="mt-1 text-xs text-teal-700/80">
+                        不再默认保留 1 小时，避免长时间绕过。
+                      </div>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs leading-6 text-slate-600">
+                    已绑定：Host、IP、User-Agent、SiteID、Bind；旧版未绑定
+                    UA/Site 的 pass cookie 不再接受。
+                  </div>
+                  <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3">
+                    <div>
+                      <div className="text-sm font-medium text-slate-900">
+                        统一管理入口
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        验证码启用、类型切换、5
+                        秒盾与连锁策略都在安全策略页维护，避免与系统设置重复保存。
+                      </div>
+                    </div>
+                    <Button
+                      asChild
+                      variant="outline"
+                      className="gap-2 rounded-md"
+                    >
+                      <Link href="/security/">
+                        前往安全策略
+                        <ArrowRight className="h-4 w-4" />
+                      </Link>
+                    </Button>
+                  </div>
+                </div>
+              </Surface>
+            </div>
+
             {/* System info (readonly) */}
-            <Surface
-              title="系统信息"
-              description="当前运行实例的只读信息。"
-            >
+            <Surface title="系统信息" description="当前运行实例的只读信息。">
               <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
                 <InlineMeta
                   label="版本号"
@@ -978,9 +1402,7 @@ export default function SettingsPage() {
                 />
                 <InlineMeta
                   label="运行时间"
-                  value={
-                    summary ? formatUptime(summary.uptime_sec) : "未知"
-                  }
+                  value={summary ? formatUptime(summary.uptime_sec) : "未知"}
                 />
                 <InlineMeta
                   label="系统设置数"
@@ -1024,7 +1446,7 @@ export default function SettingsPage() {
               <div className="grid gap-6 lg:grid-cols-2">
                 <div className="space-y-5">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                       <Shield className="h-4 w-4 text-teal-600" />
                       最小密码长度
                     </label>
@@ -1044,16 +1466,14 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                       <Shield className="h-4 w-4 text-teal-600" />
                       最大登录失败次数
                     </label>
                     <Input
                       type="number"
                       value={maxAttempts}
-                      onChange={(e) =>
-                        setMaxAttempts(Number(e.target.value))
-                      }
+                      onChange={(e) => setMaxAttempts(Number(e.target.value))}
                       className="rounded-md"
                       min={1}
                       max={100}
@@ -1064,7 +1484,7 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                       <Lock className="h-4 w-4 text-teal-600" />
                       锁定时长（分钟）
                     </label>
@@ -1086,7 +1506,7 @@ export default function SettingsPage() {
 
                 <div className="space-y-5">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                       <Clock className="h-4 w-4 text-teal-600" />
                       会话超时时间（分钟）
                     </label>
@@ -1106,15 +1526,13 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
                       <Network className="h-4 w-4 text-teal-600" />
                       控制台访问 IP 白名单
                     </label>
                     <Textarea
                       value={accessIpWhitelist}
-                      onChange={(e) =>
-                        setAccessIpWhitelist(e.target.value)
-                      }
+                      onChange={(e) => setAccessIpWhitelist(e.target.value)}
                       rows={3}
                       className="rounded-md"
                       placeholder="每行一个 IP 或 CIDR，留空表示不限制"
@@ -1135,9 +1553,9 @@ export default function SettingsPage() {
                 <Button
                   className="gap-2 rounded-md bg-teal-500 text-white hover:bg-teal-600"
                   onClick={() => {
-                    setApiKeyDialogOpen(true);
-                    setCreatedToken(null);
-                    setNewKeyName("");
+                    setApiKeyDialogOpen(true)
+                    setCreatedToken(null)
+                    setNewKeyName("")
                   }}
                 >
                   <Plus className="h-4 w-4" /> 创建密钥
@@ -1156,15 +1574,13 @@ export default function SettingsPage() {
                 <div className="overflow-hidden rounded-lg border border-slate-200">
                   <Table>
                     <TableHeader>
-                      <TableRow className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                      <TableRow className="bg-slate-50 text-xs tracking-wider text-slate-500 uppercase">
                         <TableHead className="w-16">ID</TableHead>
                         <TableHead>名称</TableHead>
                         <TableHead>密钥</TableHead>
                         <TableHead>创建时间</TableHead>
                         <TableHead>最近使用</TableHead>
-                        <TableHead className="w-20 text-right">
-                          操作
-                        </TableHead>
+                        <TableHead className="w-20 text-right">操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1182,14 +1598,14 @@ export default function SettingsPage() {
                             </div>
                           </TableCell>
                           <TableCell>
-                            <code className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-mono text-slate-500">
+                            <code className="rounded-lg bg-slate-100 px-2 py-1 font-mono text-xs text-slate-500">
                               {maskToken(item.token)}
                             </code>
                           </TableCell>
-                          <TableCell className="text-xs text-slate-500 whitespace-nowrap">
+                          <TableCell className="text-xs whitespace-nowrap text-slate-500">
                             {formatDate(item.created_at)}
                           </TableCell>
-                          <TableCell className="text-xs text-slate-500 whitespace-nowrap">
+                          <TableCell className="text-xs whitespace-nowrap text-slate-500">
                             {item.last_used_at
                               ? formatDate(item.last_used_at)
                               : "从未使用"}
@@ -1280,12 +1696,12 @@ export default function SettingsPage() {
                 <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
                 <span>
                   管理和上传 TLS 证书请前往{" "}
-                  <a
+                  <Link
                     href="/certificates/"
                     className="font-medium text-teal-600 underline underline-offset-2 hover:text-teal-700"
                   >
                     证书管理
-                  </a>{" "}
+                  </Link>{" "}
                   页面。
                 </span>
               </div>
@@ -1315,8 +1731,8 @@ export default function SettingsPage() {
               <Select
                 value={logType}
                 onValueChange={(v) => {
-                  setLogType(v as "security" | "access");
-                  setLogPage(1);
+                  setLogType(v as "security" | "access")
+                  setLogPage(1)
                 }}
               >
                 <SelectTrigger className="w-[160px] rounded-lg">
@@ -1328,12 +1744,12 @@ export default function SettingsPage() {
                 </SelectContent>
               </Select>
               <div className="relative">
-                <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                <Search className="absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
                 <Input
                   value={logSearch}
                   onChange={(e) => {
-                    setLogSearch(e.target.value);
-                    setLogPage(1);
+                    setLogSearch(e.target.value)
+                    setLogPage(1)
                   }}
                   placeholder="搜索 IP"
                   className="w-[180px] rounded-lg pl-8"
@@ -1395,13 +1811,14 @@ export default function SettingsPage() {
                               key={evt.id}
                               className="transition-colors hover:bg-slate-50/50"
                             >
-                              <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">
+                              <td className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
                                 {formatDate(evt.created_at)}
                               </td>
                               <td className="px-4 py-3">
                                 <Badge
                                   className={`rounded-md border text-xs ${
-                                    evt.action === "intercept" || evt.action === "block"
+                                    evt.action === "intercept" ||
+                                    evt.action === "block"
                                       ? "border-rose-200 bg-rose-50 text-rose-700"
                                       : evt.action === "drop"
                                         ? "border-slate-300 bg-slate-100 text-slate-800"
@@ -1460,6 +1877,7 @@ export default function SettingsPage() {
                           <th className="px-4 py-3">状态码</th>
                           <th className="px-4 py-3">源 IP</th>
                           <th className="px-4 py-3">WAF</th>
+                          <th className="px-4 py-3">指纹</th>
                           <th className="px-4 py-3">上游</th>
                         </tr>
                       </thead>
@@ -1469,7 +1887,7 @@ export default function SettingsPage() {
                             key={item.id}
                             className="transition-colors hover:bg-slate-50/50"
                           >
-                            <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">
+                            <td className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
                               {formatDate(item.created_at)}
                             </td>
                             <td className="px-4 py-3">
@@ -1509,6 +1927,25 @@ export default function SettingsPage() {
                             </td>
                             <td className="px-4 py-3 text-xs text-slate-500">
                               {item.waf_action || "-"}
+                            </td>
+                            <td
+                              className="max-w-[180px] truncate px-4 py-3 font-mono text-[11px] text-slate-500"
+                              title={[
+                                item.http_protocol,
+                                item.tls_version,
+                                item.tls_ja3_hash,
+                                item.tls_ja4,
+                              ]
+                                .filter(Boolean)
+                                .join(" / ")}
+                            >
+                              {[
+                                item.http_protocol,
+                                item.tls_version,
+                                item.tls_ja3_hash || item.tls_ja4,
+                              ]
+                                .filter(Boolean)
+                                .join(" / ") || "-"}
                             </td>
                             <td className="max-w-[160px] truncate px-4 py-3 font-mono text-xs text-slate-400">
                               {item.upstream || "-"}
@@ -1555,12 +1992,10 @@ export default function SettingsPage() {
             <div className="space-y-4">
               <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>
-                  请立即复制此 Token，关闭后将无法再次查看明文。
-                </span>
+                <span>请立即复制此 Token，关闭后将无法再次查看明文。</span>
               </div>
               <div className="flex gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <code className="flex-1 break-all text-xs text-slate-700">
+                <code className="flex-1 text-xs break-all text-slate-700">
                   {createdToken}
                 </code>
                 <Button
@@ -1568,8 +2003,8 @@ export default function SettingsPage() {
                   size="icon-sm"
                   className="shrink-0 rounded-lg"
                   onClick={() => {
-                    navigator.clipboard.writeText(createdToken);
-                    toast.success("已复制到剪贴板");
+                    navigator.clipboard.writeText(createdToken)
+                    toast.success("已复制到剪贴板")
                   }}
                 >
                   <Copy className="h-4 w-4" />
@@ -1591,9 +2026,7 @@ export default function SettingsPage() {
           )}
           <DialogFooter>
             {createdToken ? (
-              <Button onClick={() => setApiKeyDialogOpen(false)}>
-                完成
-              </Button>
+              <Button onClick={() => setApiKeyDialogOpen(false)}>完成</Button>
             ) : (
               <>
                 <Button
@@ -1641,5 +2074,5 @@ export default function SettingsPage() {
         </DialogContent>
       </Dialog>
     </div>
-  );
+  )
 }

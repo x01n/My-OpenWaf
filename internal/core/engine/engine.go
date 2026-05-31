@@ -40,10 +40,10 @@ type Engine struct {
 	reqRateLimiter ratelimit.RateLimiterBackend
 	errRateLimiter ratelimit.RateLimiterBackend
 	ipRep          *iprep.IPReputation
-	geoResolver    *bot.MaxMindResolver   // nil when GeoIP DB is unavailable
-	botThreshold   int                    // score threshold for bot blocking
-	cveDetector    *cve.CVEDetector       // CVE-specific vulnerability detection
-	dropExecutor   *drop.DropExecutor      // TCP drop executor
+	geoResolver    *bot.MaxMindResolver          // nil when GeoIP DB is unavailable
+	botThreshold   int                           // score threshold for bot blocking
+	cveDetector    *cve.CVEDetector              // CVE-specific vulnerability detection
+	dropExecutor   *drop.DropExecutor            // TCP drop executor
 	antiReplay     *antireplay.AntiReplayManager // nonce-based replay prevention
 	escalation     *escalation.EscalationManager // step-up response escalation
 
@@ -168,8 +168,11 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	phases = append(phases, rules.NewACLAllowPrecheckPhasePrecompiled(cr.ACL))
 	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
 
-	if prot.OWASPEnabled || (prot.CVEEnabled && e.cveDetector != nil) {
-		phases = append(phases, rules.NewParallelOWASPCVEPhase(prot, e.cveDetector))
+	if prot.OWASPEnabled {
+		phases = append(phases, rules.NewOWASPPhase(prot))
+	}
+	if prot.CVEEnabled && e.cveDetector != nil {
+		phases = append(phases, rules.NewCVEPhase(prot, e.cveDetector))
 	}
 
 	if prot.BotDetectionEnabled {
@@ -260,12 +263,12 @@ func (e *Engine) Evaluate(clientIP net.IP, path, rawQuery string, siteRules []sn
 	return pipe.Run(ctx).Action
 }
 
-func (e *Engine) Resolver() *sites.Resolver              { return e.resolver }
+func (e *Engine) Resolver() *sites.Resolver                    { return e.resolver }
 func (e *Engine) ErrRateLimiter() ratelimit.RateLimiterBackend { return e.errRateLimiter }
-func (e *Engine) CVEDetector() *cve.CVEDetector          { return e.cveDetector }
-func (e *Engine) DropExecutor() *drop.DropExecutor        { return e.dropExecutor }
-func (e *Engine) AntiReplay() *antireplay.AntiReplayManager     { return e.antiReplay }
-func (e *Engine) Escalation() *escalation.EscalationManager     { return e.escalation }
+func (e *Engine) CVEDetector() *cve.CVEDetector                { return e.cveDetector }
+func (e *Engine) DropExecutor() *drop.DropExecutor             { return e.dropExecutor }
+func (e *Engine) AntiReplay() *antireplay.AntiReplayManager    { return e.antiReplay }
+func (e *Engine) Escalation() *escalation.EscalationManager    { return e.escalation }
 
 // SetDropExecutor attaches a drop executor to the engine.
 func (e *Engine) SetDropExecutor(d *drop.DropExecutor) {

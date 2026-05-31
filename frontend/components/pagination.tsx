@@ -1,17 +1,23 @@
-"use client";
+"use client"
 
-import { ChevronLeft, ChevronRight } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ChevronLeft, ChevronRight } from "lucide-react"
+import { Button } from "@/components/ui/button"
 
 interface PaginationProps {
-  page: number;
-  totalPages: number;
-  total: number;
-  pageSize: number;
-  onPageChange: (page: number) => void;
+  page: number
+  totalPages: number
+  total: number
+  pageSize: number
+  onPageChange: (page: number) => void
 }
 
-export function Pagination({ page, totalPages, total, pageSize, onPageChange }: PaginationProps) {
+export function Pagination({
+  page,
+  totalPages,
+  total,
+  pageSize,
+  onPageChange,
+}: PaginationProps) {
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500 md:flex-row md:items-center md:justify-between">
       <span>
@@ -41,5 +47,5 @@ export function Pagination({ page, totalPages, total, pageSize, onPageChange }: 
         </Button>
       </div>
     </div>
-  );
+  )
 }

@@ -29,10 +29,10 @@ type Site struct {
 
 	TLSEnabled    bool   `gorm:"default:false" json:"tls_enabled"`
 	CertID        *uint  `json:"cert_id,omitempty"`
-	MinTLSVersion string `gorm:"size:32;default:TLS12" json:"min_tls_version"`
+	MinTLSVersion string `gorm:"size:32" json:"min_tls_version"`
 	MaxTLSVersion string `gorm:"size:32;default:TLS13" json:"max_tls_version"`
 	CipherSuites  string `gorm:"type:text" json:"cipher_suites"`
-	ALPN          string `gorm:"size:255;default:h2,http/1.1" json:"alpn"`
+	ALPN          string `gorm:"size:255" json:"alpn"`
 
 	PolicyID              *uint  `json:"policy_id,omitempty"`
 	BotProtectionEnabled  bool   `gorm:"default:false" json:"bot_protection_enabled"`

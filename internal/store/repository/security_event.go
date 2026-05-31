@@ -38,7 +38,9 @@ func (r *SecurityEventRepo) SetWriteQueue(wq WriteQueueBackend) {
 
 // SecurityEventFilter holds query filters for listing events.
 type SecurityEventFilter struct {
+	ID        uint
 	SiteID    uint
+	RequestID string
 	Action    string
 	Phase     string
 	Category  string
@@ -68,16 +70,18 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 
 	var total int64
 	cacheKey := secEventCountCacheKey(f)
+	cached := false
 	if r.countCache != nil {
-		if cached, ok := r.countCache.Get(cacheKey); ok {
-			total = cached.(int64)
+		if value, ok := r.countCache.Get(cacheKey); ok {
+			total = value.(int64)
+			cached = true
 		}
 	}
-	if total == 0 {
+	if !cached {
 		if err := q.Count(&total).Error; err != nil {
 			return nil, 0, err
 		}
-		if r.countCache != nil && total > 0 {
+		if r.countCache != nil {
 			r.countCache.Set(cacheKey, total)
 		}
 	}
@@ -98,17 +102,38 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 
 func secEventCountCacheKey(f SecurityEventFilter) string {
 	key := "se_count"
+	if f.ID > 0 {
+		key += ":id" + fmt.Sprint(f.ID)
+	}
 	if f.SiteID > 0 {
 		key += ":s" + fmt.Sprint(f.SiteID)
 	}
+	if f.RequestID != "" {
+		key += ":rid" + f.RequestID
+	}
 	if f.Action != "" {
 		key += ":a" + f.Action
+	}
+	if f.Phase != "" {
+		key += ":ph" + f.Phase
 	}
 	if f.Category != "" {
 		key += ":c" + f.Category
 	}
 	if f.ClientIP != "" {
 		key += ":ip" + f.ClientIP
+	}
+	if f.Host != "" {
+		key += ":h" + f.Host
+	}
+	if f.Path != "" {
+		key += ":p" + f.Path
+	}
+	if f.RuleID > 0 {
+		key += ":r" + fmt.Sprint(f.RuleID)
+	}
+	if f.RuleIDStr != "" {
+		key += ":rs" + f.RuleIDStr
 	}
 	if f.Since != nil {
 		key += ":si" + f.Since.Format("0601021504")
@@ -358,6 +383,9 @@ func (r *SecurityEventRepo) CountObserveBySite(siteID uint, since time.Time) (in
 }
 
 func applyEventFilters(q *gorm.DB, f SecurityEventFilter) *gorm.DB {
+	if f.ID > 0 {
+		q = q.Where("id = ?", f.ID)
+	}
 	if f.SiteID > 0 {
 		q = q.Where("site_id = ?", f.SiteID)
 	}
@@ -370,11 +398,14 @@ func applyEventFilters(q *gorm.DB, f SecurityEventFilter) *gorm.DB {
 	if f.Category != "" {
 		q = q.Where("category = ?", f.Category)
 	}
+	if f.RequestID != "" {
+		q = q.Where("request_id = ?", f.RequestID)
+	}
 	if f.ClientIP != "" {
 		q = q.Where("client_ip = ?", f.ClientIP)
 	}
 	if f.Host != "" {
-		q = q.Where("host = ?", f.Host)
+		q = q.Where("host LIKE ?", "%"+f.Host+"%")
 	}
 	if f.Path != "" {
 		q = q.Where("path LIKE ?", "%"+f.Path+"%")

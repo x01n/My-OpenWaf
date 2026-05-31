@@ -60,9 +60,21 @@ type ProtectionConfig struct {
 	CaptchaEnabled bool   `json:"captcha_enabled"`
 	CaptchaType    string `json:"captcha_type"`
 	CaptchaTimeout int    `json:"captcha_timeout"`
+	CaptchaPassTTL int    `json:"captcha_pass_ttl"`
 
-	ShieldEnabled    bool `json:"shield_enabled"`
-	ShieldDifficulty int  `json:"shield_difficulty"`
+	ShieldEnabled           bool `json:"shield_enabled"`
+	ShieldDifficulty        int  `json:"shield_difficulty"`
+	ShieldTimeoutSecs       int  `json:"shield_timeout_secs"`        // 验证超时（秒）
+	ShieldAutoStartDelay    int  `json:"shield_auto_start_delay"`    // 自动启动延迟（ms）
+	ShieldMaxRetries        int  `json:"shield_max_retries"`         // 最大重试次数
+	ShieldEnvStrictness     int  `json:"shield_env_strictness"`      // 环境检测严格度 (0/1/2)
+	ShieldRequireHTTP2      bool `json:"shield_require_http2"`       // 要求 HTTP/2
+	ShieldRequireHTTP3      bool `json:"shield_require_http3"`       // 要求 HTTP/3
+	ShieldAllowHTTP1        bool `json:"shield_allow_http1"`         // 允许 HTTP/1.x
+	ShieldEnableWASM        bool `json:"shield_enable_wasm"`         // 启用 WASM PoW
+	ShieldEnableJSChallenge bool `json:"shield_enable_js_challenge"` // 启用 JS 挑战
+	ShieldEnableEnvCheck    bool `json:"shield_enable_env_check"`    // 启用环境指纹
+	ShieldEnableDevTools    bool `json:"shield_enable_devtools"`     // 启用 DevTools 检测
 
 	ChainEnabled bool   `json:"chain_enabled"`
 	ChainSteps   string `json:"chain_steps,omitempty"`
@@ -97,7 +109,17 @@ func DefaultProtectionConfig() ProtectionConfig {
 		CVEAutoDropHigh:         true,
 		CaptchaType:             "math",
 		CaptchaTimeout:          120,
+		CaptchaPassTTL:          120,
 		ShieldDifficulty:        4,
+		ShieldTimeoutSecs:       30,
+		ShieldAutoStartDelay:    800,
+		ShieldMaxRetries:        3,
+		ShieldEnvStrictness:     1,
+		ShieldAllowHTTP1:        true,
+		ShieldEnableWASM:        true,
+		ShieldEnableJSChallenge: true,
+		ShieldEnableEnvCheck:    true,
+		ShieldEnableDevTools:    true,
 		EscalationWindowSecs:    60,
 	}
 }

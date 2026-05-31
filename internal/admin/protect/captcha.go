@@ -6,30 +6,59 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
+	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/challenge"
 )
 
 // captchaConfigResponse is the API response for captcha configuration.
 type captchaConfigResponse struct {
-	CaptchaEnabled   bool   `json:"captcha_enabled"`
-	CaptchaType      string `json:"captcha_type"`
-	CaptchaTimeout   int    `json:"captcha_timeout"`
-	ShieldEnabled    bool   `json:"shield_enabled"`
-	ShieldDifficulty int    `json:"shield_difficulty"`
+	CaptchaEnabled          bool   `json:"captcha_enabled"`
+	CaptchaType             string `json:"captcha_type"`
+	CaptchaTimeout          int    `json:"captcha_timeout"`
+	CaptchaPassTTL          int    `json:"captcha_pass_ttl"`
+	ShieldEnabled           bool   `json:"shield_enabled"`
+	ShieldDifficulty        int    `json:"shield_difficulty"`
+	ShieldTimeoutSecs       int    `json:"shield_timeout_secs"`
+	ShieldAutoStartDelay    int    `json:"shield_auto_start_delay"`
+	ShieldMaxRetries        int    `json:"shield_max_retries"`
+	ShieldEnvStrictness     int    `json:"shield_env_strictness"`
+	ShieldRequireHTTP2      bool   `json:"shield_require_http2"`
+	ShieldRequireHTTP3      bool   `json:"shield_require_http3"`
+	ShieldAllowHTTP1        bool   `json:"shield_allow_http1"`
+	ShieldEnableWASM        bool   `json:"shield_enable_wasm"`
+	ShieldEnableJSChallenge bool   `json:"shield_enable_js_challenge"`
+	ShieldEnableEnvCheck    bool   `json:"shield_enable_env_check"`
+	ShieldEnableDevTools    bool   `json:"shield_enable_devtools"`
 }
 
 // GetCaptchaConfig returns the current captcha/shield challenge configuration.
 func GetCaptchaConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		cfg := shared.LoadProtectionConfig(repo)
-		c.JSON(200, captchaConfigResponse{
-			CaptchaEnabled:   cfg.CaptchaEnabled,
-			CaptchaType:      cfg.CaptchaType,
-			CaptchaTimeout:   cfg.CaptchaTimeout,
-			ShieldEnabled:    cfg.ShieldEnabled,
-			ShieldDifficulty: cfg.ShieldDifficulty,
-		})
+		c.JSON(200, buildCaptchaConfigResponse(cfg))
+	}
+}
+
+func buildCaptchaConfigResponse(cfg store.ProtectionConfig) captchaConfigResponse {
+	return captchaConfigResponse{
+		CaptchaEnabled:          cfg.CaptchaEnabled,
+		CaptchaType:             cfg.CaptchaType,
+		CaptchaTimeout:          cfg.CaptchaTimeout,
+		CaptchaPassTTL:          cfg.CaptchaPassTTL,
+		ShieldEnabled:           cfg.ShieldEnabled,
+		ShieldDifficulty:        cfg.ShieldDifficulty,
+		ShieldTimeoutSecs:       cfg.ShieldTimeoutSecs,
+		ShieldAutoStartDelay:    cfg.ShieldAutoStartDelay,
+		ShieldMaxRetries:        cfg.ShieldMaxRetries,
+		ShieldEnvStrictness:     cfg.ShieldEnvStrictness,
+		ShieldRequireHTTP2:      cfg.ShieldRequireHTTP2,
+		ShieldRequireHTTP3:      cfg.ShieldRequireHTTP3,
+		ShieldAllowHTTP1:        cfg.ShieldAllowHTTP1,
+		ShieldEnableWASM:        cfg.ShieldEnableWASM,
+		ShieldEnableJSChallenge: cfg.ShieldEnableJSChallenge,
+		ShieldEnableEnvCheck:    cfg.ShieldEnableEnvCheck,
+		ShieldEnableDevTools:    cfg.ShieldEnableDevTools,
 	}
 }
 
@@ -42,8 +71,9 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 			return
 		}
 
-		if req.CaptchaType != "" && req.CaptchaType != "math" {
-			c.JSON(400, map[string]string{"error": "captcha_type must be math"})
+		validTypes := map[string]bool{"math": true, "click": true, "slide": true, "rotate": true}
+		if req.CaptchaType != "" && !validTypes[req.CaptchaType] {
+			c.JSON(400, map[string]string{"error": "captcha_type must be one of: math, click, slide, rotate"})
 			return
 		}
 
@@ -55,10 +85,32 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 		if req.CaptchaTimeout > 0 {
 			cfg.CaptchaTimeout = req.CaptchaTimeout
 		}
+		if req.CaptchaPassTTL > 0 {
+			cfg.CaptchaPassTTL = req.CaptchaPassTTL
+		}
 		cfg.ShieldEnabled = req.ShieldEnabled
 		if req.ShieldDifficulty > 0 {
 			cfg.ShieldDifficulty = req.ShieldDifficulty
 		}
+		if req.ShieldTimeoutSecs > 0 {
+			cfg.ShieldTimeoutSecs = req.ShieldTimeoutSecs
+		}
+		if req.ShieldAutoStartDelay >= 0 {
+			cfg.ShieldAutoStartDelay = req.ShieldAutoStartDelay
+		}
+		if req.ShieldMaxRetries > 0 {
+			cfg.ShieldMaxRetries = req.ShieldMaxRetries
+		}
+		if req.ShieldEnvStrictness >= 0 {
+			cfg.ShieldEnvStrictness = req.ShieldEnvStrictness
+		}
+		cfg.ShieldRequireHTTP2 = req.ShieldRequireHTTP2
+		cfg.ShieldRequireHTTP3 = req.ShieldRequireHTTP3
+		cfg.ShieldAllowHTTP1 = req.ShieldAllowHTTP1
+		cfg.ShieldEnableWASM = req.ShieldEnableWASM
+		cfg.ShieldEnableJSChallenge = req.ShieldEnableJSChallenge
+		cfg.ShieldEnableEnvCheck = req.ShieldEnableEnvCheck
+		cfg.ShieldEnableDevTools = req.ShieldEnableDevTools
 
 		if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
@@ -68,13 +120,7 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
 			return
 		}
-		c.JSON(200, captchaConfigResponse{
-			CaptchaEnabled:   cfg.CaptchaEnabled,
-			CaptchaType:      cfg.CaptchaType,
-			CaptchaTimeout:   cfg.CaptchaTimeout,
-			ShieldEnabled:    cfg.ShieldEnabled,
-			ShieldDifficulty: cfg.ShieldDifficulty,
-		})
+		c.JSON(200, buildCaptchaConfigResponse(cfg))
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 
+	acmepkg "My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/admin/detect"
 	"My-OpenWaf/internal/admin/event"
@@ -20,6 +21,7 @@ import (
 	"My-OpenWaf/internal/dataplane"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/escalation"
@@ -34,13 +36,16 @@ type Dependencies struct {
 	JWTSecret     []byte
 	Metrics       *dataplane.Metrics
 	DB            *gorm.DB
+	LogDB         *gorm.DB
 	TokenMgr      *auth.TokenManager
 	BruteForce    *auth.BruteForceDetector
 	SessionMgr    *auth.SessionManager
 	CVEFeedMgr    *cve.CVEFeedManager
 	EscalationMgr *escalation.EscalationManager
 	CaptchaMgr    *challenge.CaptchaManager
+	ACMEMgr       *acmepkg.Manager
 	Cache         *cache.RedisKV
+	Upstreams     *upstream.Pool
 }
 
 func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
@@ -106,18 +111,20 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/security-events/timeline", event.SecurityEventTimeline(r.SecurityEvent))
 		readGroup.GET("/security-events/:id", event.GetSecurityEvent(r.SecurityEvent))
 		readGroup.GET("/access-logs", event.ListAccessLogs(r.AccessLog))
+		readGroup.GET("/fingerprints", event.ListTLSFingerprints(r.AccessLog))
 		readGroup.GET("/request/:request_id", event.GetRequestTrace(r.AccessLog, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events", event.ListSiteSecurityEvents(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events/stats", event.SiteSecurityEventStats(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events/timeline", event.SiteSecurityEventTimeline(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/access-logs", site.ListSiteAccessLogs(r.Site, r.AccessLog))
+		readGroup.GET("/sites/:id/access-logs/stats", site.SiteAccessLogStats(r.Site, r.AccessLog))
 		readGroup.GET("/sites/:id/drop-events", site.ListSiteDropEvents(r.Site, r.DropEvent))
 		readGroup.GET("/sites/:id/drop-stats", site.SiteDropStats(r.Site, r.DropEvent))
 		readGroup.GET("/sites/:id/rules", rule.ListSiteRules(r.Site, r.Rule))
 		readGroup.GET("/sites/:id/application-route-rules", rule.ListApplicationRouteRules(r.Site, r.AppRouteRule))
 		readGroup.GET("/sites/:id/recorded-resources", rule.ListRecordedResources(r.Site, r.RecordedResource))
 
-		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, DB: deps.DB, Cache: deps.Cache}
+		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, DB: deps.LogDB, Cache: deps.Cache}
 		readGroup.GET("/dashboard/summary", system.DashboardSummary(dashDeps))
 
 		readGroup.GET("/api-keys", system.ListAPIKeys(r.AdminAPIKey))
@@ -148,6 +155,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/drop-policy", protect.GetDropPolicy(r.SystemSettings))
 		readGroup.GET("/drop-stats", protect.GetDropStats(r.DropEvent))
 		readGroup.GET("/drop-events", protect.GetDropEvents(r.DropEvent))
+		readGroup.GET("/upstreams/status", system.UpstreamStatus(deps.Upstreams))
 	}
 
 	opsGroup := api.Group("")
@@ -165,6 +173,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/certificates", system.CreateCertificate(r.Certificate, reload))
 		opsGroup.POST("/certificates/:id/update", system.UpdateCertificate(r.Certificate, reload))
 		opsGroup.POST("/certificates/:id/delete", system.DeleteCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates/acme/apply", system.ACMEApply(deps.Repos, reload, deps.ACMEMgr))
+		opsGroup.POST("/certificates/acme/:id/renew", system.ACMERenew(deps.Repos, reload, deps.ACMEMgr))
 
 		opsGroup.POST("/policies", system.CreatePolicy(r.Policy, reload))
 		opsGroup.POST("/policies/:id/update", system.UpdatePolicy(r.Policy, reload))
@@ -223,6 +233,15 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/settings/:key/update", system.SetSetting(r.SystemSettings, reload))
 		adminGroup.POST("/settings/:key/delete", system.DeleteSetting(r.SystemSettings, reload))
 
+		adminGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
+		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
+		adminGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
+		adminGroup.POST("/log-config", system.UpdateLogConfig(r.SystemSettings))
+		adminGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))
+		adminGroup.POST("/tls-config", system.UpdateTLSDefaultConfig(r.SystemSettings, reload))
+		adminGroup.GET("/tls-cipher-suites", system.ListCipherSuites())
+		adminGroup.GET("/certificates/acme/status", system.ACMEStatus(deps.Repos))
+
 		adminGroup.POST("/api-keys", system.CreateAPIKey(r.AdminAPIKey))
 		adminGroup.POST("/api-keys/:id/delete", system.DeleteAPIKey(r.AdminAPIKey))
 
@@ -239,6 +258,21 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	h.GET("/__owaf/wasm_exec.js", func(ctx context.Context, c *app.RequestContext) {
 		challenge.ServeWasmExecJS(c)
 	})
+	if deps.ACMEMgr != nil {
+		h.GET("/.well-known/acme-challenge/:token", func(ctx context.Context, c *app.RequestContext) {
+			token := strings.TrimSpace(c.Param("token"))
+			if token == "" {
+				c.Status(404)
+				return
+			}
+			if resp, ok := deps.ACMEMgr.GetChallengeResponse(token); ok {
+				c.Response.Header.Set("Content-Type", "text/plain")
+				c.String(200, resp)
+				return
+			}
+			c.Status(404)
+		})
+	}
 
 	mountStaticHandler(h, deps.StaticFS)
 }

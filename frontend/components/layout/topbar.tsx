@@ -1,9 +1,9 @@
-"use client";
+"use client"
 
-import { ChevronRight, Menu, RefreshCw, User } from "lucide-react";
-import { usePathname, useRouter } from "next/navigation";
-import { logout } from "@/lib/api";
-import { Button } from "@/components/ui/button";
+import { ChevronRight, Menu, RefreshCw, User } from "lucide-react"
+import { usePathname, useRouter } from "next/navigation"
+import { logout } from "@/lib/api"
+import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -11,21 +11,21 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { getNavMeta } from "@/lib/console";
+} from "@/components/ui/dropdown-menu"
+import { getNavMeta } from "@/lib/console"
 
 export function Topbar({
   onMobileMenuToggle,
 }: {
-  onMobileMenuToggle?: () => void;
+  onMobileMenuToggle?: () => void
 }) {
-  const pathname = usePathname();
-  const router = useRouter();
-  const meta = getNavMeta(pathname);
+  const pathname = usePathname()
+  const router = useRouter()
+  const meta = getNavMeta(pathname)
 
   async function handleLogout() {
-    await logout();
-    router.push("/login/");
+    await logout()
+    router.push("/login/")
   }
 
   return (
@@ -85,5 +85,5 @@ export function Topbar({
         </DropdownMenu>
       </div>
     </header>
-  );
+  )
 }

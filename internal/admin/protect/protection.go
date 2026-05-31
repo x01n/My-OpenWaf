@@ -130,7 +130,10 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 
 		// Sync bot_detection_enabled to bot_settings.Enabled so the bot page
 		// reflects changes made on the protection page.
-		shared.SyncProtectionBotToSettings(repo, cfg.BotDetectionEnabled)
+		if err := shared.SyncProtectionBotToSettings(repo, cfg.BotDetectionEnabled); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
 
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})

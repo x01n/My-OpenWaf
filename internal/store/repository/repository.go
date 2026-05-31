@@ -48,6 +48,13 @@ type Repos struct {
 }
 
 func New(db *gorm.DB) *Repos {
+	return NewWithLogDB(db, db)
+}
+
+func NewWithLogDB(db *gorm.DB, logDB *gorm.DB) *Repos {
+	if logDB == nil {
+		logDB = db
+	}
 	return &Repos{
 		Site:             NewSiteRepo(db),
 		Certificate:      NewCertificateRepo(db),
@@ -57,13 +64,13 @@ func New(db *gorm.DB) *Repos {
 		AdminAPIKey:      NewAdminAPIKeyRepo(db),
 		AdminAccount:     NewAdminAccountRepo(db),
 		RefreshToken:     NewRefreshTokenRepo(db),
-		SecurityEvent:    NewSecurityEventRepo(db),
-		AccessLog:        NewAccessLogRepo(db),
+		SecurityEvent:    NewSecurityEventRepo(logDB),
+		AccessLog:        NewAccessLogRepo(logDB),
 		IPList:           NewIPListRepo(db),
-		BotScore:         NewBotScoreRepo(db),
+		BotScore:         NewBotScoreRepo(logDB),
 		CVERule:          NewCVERuleRepo(db),
 		CVESyncLog:       NewCVESyncLogRepo(db),
-		DropEvent:        NewDropEventRepo(db),
+		DropEvent:        NewDropEventRepo(logDB),
 		SiteListener:     NewSiteListenerRepo(db),
 		AppRouteRule:     NewApplicationRouteRuleRepo(db),
 		RecordedResource: NewRecordedResourceRepo(db),

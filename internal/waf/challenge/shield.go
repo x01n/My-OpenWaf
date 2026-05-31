@@ -13,6 +13,40 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+// ShieldConfig 定义 5s 盾的高级配置。
+type ShieldConfig struct {
+	Difficulty           int  `json:"difficulty"`             // PoW 难度（前导零数量）
+	TimeoutSecs          int  `json:"timeout_secs"`           // 验证超时时间（秒）
+	AutoStartDelay       int  `json:"auto_start_delay"`       // 自动启动延迟（毫秒）
+	MaxRetries           int  `json:"max_retries"`            // 最大重试次数
+	EnvStrictness        int  `json:"env_strictness"`         // 环境检测严格度 (0=宽松, 1=标准, 2=严格)
+	RequireHTTP2         bool `json:"require_http2"`          // 要求客户端支持 HTTP/2
+	RequireHTTP3         bool `json:"require_http3"`          // 要求客户端支持 HTTP/3 (QUIC)
+	AllowHTTP1           bool `json:"allow_http1"`            // 是否允许 HTTP/1.x
+	EnableJSChallenge    bool `json:"enable_js_challenge"`    // 启用 JS 挑战验证
+	EnableWASM           bool `json:"enable_wasm"`            // 启用 WASM PoW（否则使用纯 JS）
+	EnableEnvCheck       bool `json:"enable_env_check"`       // 启用环境指纹检测
+	EnableDevToolsDetect bool `json:"enable_devtools_detect"` // 启用开发者工具检测
+}
+
+// DefaultShieldConfig 返回默认的 Shield 配置。
+func DefaultShieldConfig() ShieldConfig {
+	return ShieldConfig{
+		Difficulty:           4,
+		TimeoutSecs:          30,
+		AutoStartDelay:       800,
+		MaxRetries:           3,
+		EnvStrictness:        1,
+		RequireHTTP2:         false,
+		RequireHTTP3:         false,
+		AllowHTTP1:           true,
+		EnableJSChallenge:    true,
+		EnableWASM:           true,
+		EnableEnvCheck:       true,
+		EnableDevToolsDetect: true,
+	}
+}
+
 // ShieldSession stores the server-side state for a pending shield challenge.
 type ShieldSession struct {
 	ID          string    `json:"id"`
@@ -26,28 +60,55 @@ type ShieldSession struct {
 // ShieldManager orchestrates 5-second shield challenges (PoW + env fingerprint).
 // Cloudflare-style: user clicks verify -> PoW runs in background -> auto-submit on success.
 type ShieldManager struct {
-	captcha    *CaptchaManager
-	redis      *goredis.Client
-	difficulty int
-	prefix     string
-	mu         sync.RWMutex
-	sessions   map[string]*ShieldSession
+	captcha  *CaptchaManager
+	redis    *goredis.Client
+	config   ShieldConfig
+	prefix   string
+	done     chan struct{}
+	once     sync.Once
+	mu       sync.RWMutex
+	sessions map[string]*ShieldSession
 }
 
 // NewShieldManager creates a new ShieldManager.
 func NewShieldManager(captcha *CaptchaManager, redis *goredis.Client, difficulty int) *ShieldManager {
-	if difficulty <= 0 {
-		difficulty = 4
+	cfg := DefaultShieldConfig()
+	if difficulty > 0 {
+		cfg.Difficulty = difficulty
 	}
 	sm := &ShieldManager{
-		captcha:    captcha,
-		redis:      redis,
-		difficulty: difficulty,
-		prefix:     "owaf:shield:",
-		sessions:   make(map[string]*ShieldSession),
+		captcha:  captcha,
+		redis:    redis,
+		config:   cfg,
+		prefix:   "owaf:shield:",
+		done:     make(chan struct{}),
+		sessions: make(map[string]*ShieldSession),
 	}
 	go sm.cleanupLoop()
 	return sm
+}
+
+func (sm *ShieldManager) Close() {
+	sm.once.Do(func() { close(sm.done) })
+}
+
+// SetConfig 更新 Shield 配置。
+func (sm *ShieldManager) SetConfig(cfg ShieldConfig) {
+	if cfg.Difficulty <= 0 {
+		cfg.Difficulty = 4
+	}
+	if cfg.TimeoutSecs <= 0 {
+		cfg.TimeoutSecs = 30
+	}
+	if cfg.AutoStartDelay <= 0 {
+		cfg.AutoStartDelay = 800
+	}
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = 3
+	}
+	sm.mu.Lock()
+	sm.config = cfg
+	sm.mu.Unlock()
 }
 
 func (sm *ShieldManager) SetDifficulty(difficulty int) {
@@ -55,18 +116,26 @@ func (sm *ShieldManager) SetDifficulty(difficulty int) {
 		difficulty = 4
 	}
 	sm.mu.Lock()
-	sm.difficulty = difficulty
+	sm.config.Difficulty = difficulty
 	sm.mu.Unlock()
 }
 
 func (sm *ShieldManager) difficultyValue() int {
 	sm.mu.RLock()
-	difficulty := sm.difficulty
+	difficulty := sm.config.Difficulty
 	sm.mu.RUnlock()
 	if difficulty <= 0 {
 		return 4
 	}
 	return difficulty
+}
+
+// Config 返回当前配置的副本。
+func (sm *ShieldManager) Config() ShieldConfig {
+	sm.mu.RLock()
+	cfg := sm.config
+	sm.mu.RUnlock()
+	return cfg
 }
 
 // GenerateChallenge creates a new shield challenge session (no captcha needed).
@@ -349,15 +418,20 @@ func (sm *ShieldManager) deleteShieldSession(id string) {
 func (sm *ShieldManager) cleanupLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		sm.mu.Lock()
-		now := time.Now()
-		for id, s := range sm.sessions {
-			if now.Sub(s.CreatedAt) > 5*time.Minute {
-				delete(sm.sessions, id)
+	for {
+		select {
+		case <-ticker.C:
+			sm.mu.Lock()
+			now := time.Now()
+			for id, s := range sm.sessions {
+				if now.Sub(s.CreatedAt) > 5*time.Minute {
+					delete(sm.sessions, id)
+				}
 			}
+			sm.mu.Unlock()
+		case <-sm.done:
+			return
 		}
-		sm.mu.Unlock()
 	}
 }
 

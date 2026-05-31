@@ -43,7 +43,9 @@ func (r *AccessLogRepo) SetWriteQueue(wq WriteQueueBackend) {
 }
 
 type AccessLogFilter struct {
+	ID          uint
 	SiteID      uint
+	RequestID   string
 	ClientIP    string
 	Host        string
 	Path        string
@@ -53,6 +55,22 @@ type AccessLogFilter struct {
 	StatusGroup string
 	Since       *time.Time
 	Until       *time.Time
+}
+
+type SiteAccessLogStats struct {
+	Requests   int64 `json:"requests"`
+	Intercepts int64 `json:"intercepts"`
+	Observes   int64 `json:"observes"`
+}
+
+type FingerprintSummary struct {
+	TLSJA3Hash string    `json:"tls_ja3_hash"`
+	TLSJA4     string    `json:"tls_ja4"`
+	TLSVersion string    `json:"tls_version"`
+	TLSALPN    string    `json:"tls_alpn"`
+	TLSSNI     string    `json:"tls_sni"`
+	Count      int64     `json:"count"`
+	LastSeen   time.Time `json:"last_seen"`
 }
 
 func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.AccessLog, int64, error) {
@@ -72,16 +90,18 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 
 	var total int64
 	cacheKey := accessLogCountCacheKey(f)
+	cached := false
 	if r.countCache != nil {
-		if cached, ok := r.countCache.Get(cacheKey); ok {
-			total = cached.(int64)
+		if value, ok := r.countCache.Get(cacheKey); ok {
+			total = value.(int64)
+			cached = true
 		}
 	}
-	if total == 0 {
+	if !cached {
 		if err := q.Count(&total).Error; err != nil {
 			return nil, 0, err
 		}
-		if r.countCache != nil && total > 0 {
+		if r.countCache != nil {
 			r.countCache.Set(cacheKey, total)
 		}
 	}
@@ -100,16 +120,98 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 	return items, total, nil
 }
 
+func (r *AccessLogRepo) StatsBySite(siteID uint, since time.Time) (SiteAccessLogStats, error) {
+	var stats SiteAccessLogStats
+	base := r.db.Model(&store.AccessLog{}).Where("site_id = ? AND created_at >= ?", siteID, since)
+	if err := base.Count(&stats.Requests).Error; err != nil {
+		return stats, err
+	}
+	if err := r.db.Model(&store.AccessLog{}).Where("site_id = ? AND created_at >= ?", siteID, since).Where("waf_action IN ?", []string{"intercept", "block", "drop", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "rate_limit"}).Count(&stats.Intercepts).Error; err != nil {
+		return stats, err
+	}
+	if err := r.db.Model(&store.AccessLog{}).Where("site_id = ? AND created_at >= ?", siteID, since).Where("waf_action = ?", "observe").Count(&stats.Observes).Error; err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func (r *AccessLogRepo) ListFingerprints(offset, limit int) ([]FingerprintSummary, int64, error) {
+	base := r.db.Model(&store.AccessLog{}).Where("tls_ja3_hash <> ? OR tls_ja4 <> ?", "", "")
+	var total int64
+	countQ := r.db.Table("(?) as fp", base.Select("tls_ja3_hash, tls_ja4, tls_version, tls_alpn, tls_sni").Group("tls_ja3_hash, tls_ja4, tls_version, tls_alpn, tls_sni"))
+	if err := countQ.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	type fingerprintRow struct {
+		TLSJA3Hash string `json:"tls_ja3_hash"`
+		TLSJA4     string `json:"tls_ja4"`
+		TLSVersion string `json:"tls_version"`
+		TLSALPN    string `json:"tls_alpn"`
+		TLSSNI     string `json:"tls_sni"`
+		Count      int64  `json:"count"`
+	}
+	var rows []fingerprintRow
+	err := base.Select("tls_ja3_hash, tls_ja4, tls_version, tls_alpn, tls_sni, COUNT(*) as count").
+		Group("tls_ja3_hash, tls_ja4, tls_version, tls_alpn, tls_sni").
+		Order("MAX(created_at) DESC").
+		Offset(offset).Limit(limit).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, 0, err
+	}
+
+	items := make([]FingerprintSummary, 0, len(rows))
+	for _, row := range rows {
+		var lastSeen time.Time
+		if err := r.db.Model(&store.AccessLog{}).
+			Where("tls_ja3_hash = ? AND tls_ja4 = ? AND tls_version = ? AND tls_alpn = ? AND tls_sni = ?", row.TLSJA3Hash, row.TLSJA4, row.TLSVersion, row.TLSALPN, row.TLSSNI).
+			Order("created_at DESC").
+			Limit(1).
+			Pluck("created_at", &lastSeen).Error; err != nil {
+			return nil, 0, err
+		}
+		items = append(items, FingerprintSummary{
+			TLSJA3Hash: row.TLSJA3Hash,
+			TLSJA4:     row.TLSJA4,
+			TLSVersion: row.TLSVersion,
+			TLSALPN:    row.TLSALPN,
+			TLSSNI:     row.TLSSNI,
+			Count:      row.Count,
+			LastSeen:   lastSeen,
+		})
+	}
+	return items, total, nil
+}
+
 func accessLogCountCacheKey(f AccessLogFilter) string {
 	key := "al_count"
+	if f.ID > 0 {
+		key += ":id" + fmt.Sprint(f.ID)
+	}
 	if f.SiteID > 0 {
 		key += ":s" + fmt.Sprint(f.SiteID)
+	}
+	if f.RequestID != "" {
+		key += ":rid" + f.RequestID
 	}
 	if f.ClientIP != "" {
 		key += ":ip" + f.ClientIP
 	}
+	if f.Host != "" {
+		key += ":h" + f.Host
+	}
+	if f.Path != "" {
+		key += ":p" + f.Path
+	}
+	if f.Method != "" {
+		key += ":m" + f.Method
+	}
 	if f.WAFAction != "" {
 		key += ":wa" + f.WAFAction
+	}
+	if f.CacheState != "" {
+		key += ":cs" + f.CacheState
 	}
 	if f.StatusGroup != "" {
 		key += ":sg" + f.StatusGroup
@@ -177,14 +279,20 @@ func (r *AccessLogRepo) FindByRequestID(requestID string) ([]store.AccessLog, er
 }
 
 func applyAccessLogFilters(q *gorm.DB, f AccessLogFilter) *gorm.DB {
+	if f.ID > 0 {
+		q = q.Where("id = ?", f.ID)
+	}
 	if f.SiteID > 0 {
 		q = q.Where("site_id = ?", f.SiteID)
+	}
+	if f.RequestID != "" {
+		q = q.Where("request_id = ?", f.RequestID)
 	}
 	if f.ClientIP != "" {
 		q = q.Where("client_ip = ?", f.ClientIP)
 	}
 	if f.Host != "" {
-		q = q.Where("host = ?", f.Host)
+		q = q.Where("host LIKE ?", "%"+f.Host+"%")
 	}
 	if f.Path != "" {
 		q = q.Where("path LIKE ?", "%"+f.Path+"%")

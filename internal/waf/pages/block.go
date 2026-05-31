@@ -19,7 +19,7 @@ func WriteBlockResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRu
 	c.Response.Header.Set("X-Request-ID", reqID)
 	c.Response.Header.Del("Server")
 
-	statusCode := res.EffectiveStatusCode(403)
+	statusCode := res.ResponseStatusCode()
 	html := sn.DefaultBlockHTML
 
 	if rt != nil {
@@ -36,9 +36,8 @@ func WriteBlockResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRu
 		return
 	}
 
-	renderEmbeddedPage(c, "blocked/index.html", statusCode, reqID, strconv.FormatUint(uint64(res.RuleID), 10))
+	c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, strconv.FormatUint(uint64(res.RuleID), 10), false, res.Type)))
 }
-
 
 // WriteMaintenanceResponse renders the maintenance page.
 func WriteMaintenanceResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) {
@@ -100,7 +99,7 @@ func WriteUpstreamErrorResponse(c *app.RequestContext, reqID string, statusCode 
 func renderTemplatePage(c *app.RequestContext, html, reqID string, ruleID uint, statusCode int, maintenance bool) {
 	tpl, err := template.New("page").Parse(html)
 	if err != nil {
-		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, strconv.FormatUint(uint64(ruleID), 10), maintenance)))
+		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, strconv.FormatUint(uint64(ruleID), 10), maintenance, action.Intercept)))
 		return
 	}
 	var buf bytes.Buffer
@@ -115,7 +114,7 @@ func renderTemplatePage(c *app.RequestContext, html, reqID string, ruleID uint, 
 func renderEmbeddedPage(c *app.RequestContext, assetPath string, statusCode int, reqID, ruleID string) {
 	page, err := loadEmbeddedPage(assetPath)
 	if err != nil {
-		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, ruleID, assetPath == "maintenance/index.html")))
+		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, ruleID, assetPath == "maintenance/index.html", action.Intercept)))
 		return
 	}
 
@@ -134,12 +133,20 @@ func loadEmbeddedPage(assetPath string) ([]byte, error) {
 	return fs.ReadFile(webFS, assetPath)
 }
 
-func defaultFallbackHTML(reqID, ruleID string, maintenance bool) string {
-	baseStyle := `*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 40%,#f1f5f9 100%);color:#1e293b}.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08);max-width:480px;width:92%;padding:48px 40px;text-align:center}.icon{font-size:48px;margin-bottom:12px}h1{font-size:1.2rem;font-weight:600;color:#334155;margin-bottom:12px}.msg{font-size:.85rem;color:#64748b;line-height:1.5}.meta{font-size:.7rem;color:#94a3b8;margin-top:16px}.footer{margin-top:20px;padding-top:14px;border-top:1px solid #f1f5f9;font-size:.7rem;color:#94a3b8}`
+func defaultFallbackHTML(reqID, ruleID string, maintenance bool, actionType action.Type) string {
+	baseStyle := `*{margin:0;padding:0;box-sizing:border-box}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at top left,#ecfeff 0,#f8fafc 32%,#eef2ff 100%);color:#0f172a}.shell{width:min(720px,92vw);padding:22px}.card{position:relative;overflow:hidden;background:rgba(255,255,255,.94);border:1px solid rgba(148,163,184,.25);border-radius:28px;box-shadow:0 24px 80px rgba(15,23,42,.14);padding:42px}.card:before{content:"";position:absolute;inset:0 0 auto 0;height:6px;background:linear-gradient(90deg,#06b6d4,#6366f1,#f43f5e)}.top{display:flex;gap:18px;align-items:center}.icon{width:64px;height:64px;border-radius:22px;display:grid;place-items:center;font-size:34px;background:linear-gradient(135deg,#e0f2fe,#ede9fe);box-shadow:inset 0 1px 0 rgba(255,255,255,.8)}.kicker{font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#64748b}.title{margin-top:6px;font-size:28px;font-weight:800;letter-spacing:-.03em}.msg{margin-top:18px;color:#475569;line-height:1.8;font-size:15px}.meta{display:grid;gap:10px;margin-top:28px;padding:16px;border-radius:18px;background:#f8fafc;border:1px solid #e2e8f0}.row{display:flex;justify-content:space-between;gap:18px;font-size:12px;color:#64748b}.row code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#0f172a;word-break:break-all}.footer{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:24px;color:#94a3b8;font-size:12px}.pill{border-radius:999px;border:1px solid #e2e8f0;background:#fff;padding:6px 10px;color:#64748b}`
 	if maintenance {
-		return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maintenance</title><style>` + baseStyle + `</style></head><body><div class="card"><div class="icon">&#128736;</div><h1>Service Under Maintenance / 服务维护中</h1><p class="msg">We are currently performing scheduled maintenance. Please try again later.</p><p class="msg">我们正在进行计划维护，请稍后再试。</p><p class="meta">Request ID: ` + reqID + `</p><div class="footer">Protected by My-OpenWAF</div></div></body></html>`
+		return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service Maintenance</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128736;</div><div><div class="kicker">Maintenance</div><h1 class="title">服务维护中</h1></div></div><p class="msg">服务正在进行维护，请稍后再试。The service is under maintenance, please try again later.</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div></div><div class="footer"><span>Protected by My-OpenWaf</span><span class="pill">503 Service Unavailable</span></div></section></main></body></html>`
 	}
-	return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Blocked</title><style>` + baseStyle + `</style></head><body><div class="card"><div class="icon">&#128737;</div><h1>Access Denied / 访问被拒绝</h1><p class="msg">Your request has been blocked by the web application firewall.</p><p class="msg">您的请求已被Web应用防火墙拦截。</p><p class="meta">Request ID: ` + reqID + ` | Rule: ` + ruleID + `</p><div class="footer">Protected by My-OpenWAF</div></div></body></html>`
+	title := "访问被拒绝"
+	label := "403 Intercept"
+	message := "您的请求已被 Web 应用防火墙拦截。Your request was blocked by the web application firewall."
+	if action.Normalize(actionType) == action.RateLimit {
+		title = "请求过于频繁"
+		label = "429 Rate Limit"
+		message = "当前访问频率过高，请稍后重试。Too many requests, please retry later."
+	}
+	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128737;</div><div><div class="kicker">Security Event</div><h1 class="title">` + title + `</h1></div></div><p class="msg">` + message + `</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div><div class="row"><span>Rule</span><code>` + ruleID + `</code></div></div><div class="footer"><span>Protected by My-OpenWaf</span><span class="pill">` + label + `</span></div></section></main></body></html>`
 }
 
 func buildErrorFallbackHTML(reqID string, statusCode int) string {

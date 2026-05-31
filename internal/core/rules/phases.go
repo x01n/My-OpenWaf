@@ -2,16 +2,13 @@ package rules
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"My-OpenWaf/internal/core/action"
@@ -24,8 +21,6 @@ import (
 	"My-OpenWaf/internal/waf/iprep"
 	"My-OpenWaf/internal/waf/owasp"
 	"My-OpenWaf/internal/waf/ratelimit"
-
-	"golang.org/x/sync/errgroup"
 )
 
 // MatchCtx is the subset of request data matchers need.
@@ -266,13 +261,14 @@ func (p *botPhase) Name() string { return "bot_detection" }
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// Skip challenge for requests that already passed a signed verification cookie.
-	if cookie, ok := ctx.Headers["Cookie"]; ok && challenge.VerifyChallengePassCookie(cookie, ctx.Host, ctx.ClientIP, time.Now()) {
+	if cookie, ok := ctx.Headers["Cookie"]; ok && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: ctx.UserAgent, SiteID: ctx.SiteID, Bind: ctx.Bind}, time.Now()) {
 		return action.Pass(), false
 	}
 
 	br := bot.NewBotRequest(ctx.Method, ctx.Path, ctx.Headers)
 	br.ClientIP = ctx.ClientIP
 	br.HeaderKeys = ctx.HeaderKeys
+	br.TLS = ctx.TLS
 
 	// If GeoIP resolver is available, use the two-phase flow.
 	if p.geo != nil {
@@ -374,11 +370,22 @@ func (p *botPhase) verdictToResult(v bot.BotVerdict, ctx *pipeline.RequestCtx) (
 // ── OWASP Default phase ──
 
 type owaspPhase struct {
-	cfg *store.ProtectionConfig
+	cfg                 *store.ProtectionConfig
+	categorySensitivity map[string]string
+	overrides           map[string]owasp.OWASPRuleOverride
+	fileUploadEnabled   bool
+	protoEnabled        bool
 }
 
 func NewOWASPPhase(cfg *store.ProtectionConfig) pipeline.Phase {
-	return &owaspPhase{cfg: cfg}
+	phase := &owaspPhase{cfg: cfg}
+	if cfg != nil {
+		phase.categorySensitivity = cfg.EffectiveCategorySensitivity()
+		phase.overrides = owasp.ParseOWASPRulesConfig(cfg.OWASPRulesConfig)
+		_, phase.fileUploadEnabled = owasp.CategoryThreshold(cfg.OWASPSensitivity, owasp.CatFileUpload, phase.categorySensitivity)
+		_, phase.protoEnabled = owasp.CategoryThreshold(cfg.OWASPSensitivity, owasp.CatProtoViol, phase.categorySensitivity)
+	}
+	return phase
 }
 
 func (p *owaspPhase) Name() string { return "owasp_default" }
@@ -388,10 +395,10 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		return action.Pass(), false
 	}
 
-	categorySensitivity := p.cfg.EffectiveCategorySensitivity()
-	overrides := owasp.ParseOWASPRulesConfig(p.cfg.OWASPRulesConfig)
-	_, fileUploadEnabled := owasp.CategoryThreshold(p.cfg.OWASPSensitivity, owasp.CatFileUpload, categorySensitivity)
-	_, protoEnabled := owasp.CategoryThreshold(p.cfg.OWASPSensitivity, owasp.CatProtoViol, categorySensitivity)
+	categorySensitivity := p.categorySensitivity
+	overrides := p.overrides
+	fileUploadEnabled := p.fileUploadEnabled
+	protoEnabled := p.protoEnabled
 
 	// Check file uploads in multipart form data.
 	ct := strings.ToLower(ctx.ContentType)
@@ -854,13 +861,18 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 type parallelOWASPCVEPhase struct {
 	cfg      *store.ProtectionConfig
 	detector *cve.CVEDetector
+	owasp    *owaspPhase
+	cve      *cvePhase
 }
 
 // NewParallelOWASPCVEPhase creates a phase that runs OWASP and CVE detection
-// concurrently using errgroup. If either hits a terminal action, the other is
-// cancelled immediately.
 func NewParallelOWASPCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDetector) pipeline.Phase {
-	return &parallelOWASPCVEPhase{cfg: cfg, detector: detector}
+	phase := &parallelOWASPCVEPhase{cfg: cfg, detector: detector}
+	if cfg != nil {
+		phase.owasp = NewOWASPPhase(cfg).(*owaspPhase)
+		phase.cve = &cvePhase{cfg: cfg, detector: detector}
+	}
+	return phase
 }
 
 func (p *parallelOWASPCVEPhase) Name() string { return "owasp_cve_parallel" }
@@ -872,71 +884,16 @@ func (p *parallelOWASPCVEPhase) Execute(ctx *pipeline.RequestCtx) (action.Result
 	if !owaspEnabled && !cveEnabled {
 		return action.Pass(), false
 	}
-
-	// If only one is enabled, run it directly without goroutine overhead.
-	if owaspEnabled && !cveEnabled {
-		return p.checkOWASP(ctx)
-	}
-	if !owaspEnabled && cveEnabled {
+	if !owaspEnabled {
 		return p.checkCVE(ctx)
 	}
 
-	// Both enabled — run in parallel with errgroup.
-	gctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	owaspResult, owaspStop := p.checkOWASP(ctx)
+	if !cveEnabled {
+		return owaspResult, owaspStop
+	}
 
-	g, gctx := errgroup.WithContext(gctx)
-
-	var (
-		owaspResult action.Result
-		owaspStop   bool
-		cveResult   action.Result
-		cveStop     bool
-		mu          sync.Mutex
-	)
-
-	g.Go(func() error {
-		select {
-		case <-gctx.Done():
-			return gctx.Err()
-		default:
-			result, stop := p.checkOWASP(ctx)
-			if stop {
-				mu.Lock()
-				owaspResult = result
-				owaspStop = true
-				mu.Unlock()
-				return fmt.Errorf("owasp hit")
-			}
-			mu.Lock()
-			owaspResult = result
-			mu.Unlock()
-			return nil
-		}
-	})
-
-	g.Go(func() error {
-		select {
-		case <-gctx.Done():
-			return gctx.Err()
-		default:
-			result, stop := p.checkCVE(ctx)
-			if stop {
-				mu.Lock()
-				cveResult = result
-				cveStop = true
-				mu.Unlock()
-				return fmt.Errorf("cve hit")
-			}
-			mu.Lock()
-			cveResult = result
-			mu.Unlock()
-			return nil
-		}
-	})
-
-	_ = g.Wait()
-
+	cveResult, cveStop := p.checkCVE(ctx)
 	if owaspStop && cveStop {
 		if action.MoreSevere(cveResult.Type, owaspResult.Type) {
 			return cveResult, true
@@ -951,17 +908,18 @@ func (p *parallelOWASPCVEPhase) Execute(ctx *pipeline.RequestCtx) (action.Result
 	}
 	return action.Pass(), false
 }
-
-// checkOWASP runs the OWASP detection logic (same as owaspPhase.Execute).
 func (p *parallelOWASPCVEPhase) checkOWASP(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	ph := &owaspPhase{cfg: p.cfg}
-	return ph.Execute(ctx)
+	if p.owasp == nil {
+		return action.Pass(), false
+	}
+	return p.owasp.Execute(ctx)
 }
 
-// checkCVE runs the CVE detection logic (same as cvePhase.Execute).
 func (p *parallelOWASPCVEPhase) checkCVE(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	ph := &cvePhase{cfg: p.cfg, detector: p.detector}
-	return ph.Execute(ctx)
+	if p.cve == nil {
+		return action.Pass(), false
+	}
+	return p.cve.Execute(ctx)
 }
 
 // ── helpers ──

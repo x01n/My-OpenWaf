@@ -129,3 +129,16 @@ func TestResponseCacheRoundtripHeaders(t *testing.T) {
 		t.Fatal("unexpected content-length in test header")
 	}
 }
+
+func TestResponseCacheEvictsToMaxSize(t *testing.T) {
+	rc := NewResponseCache(1, 60)
+	defer rc.Close()
+	body := make([]byte, 80*1024)
+	for i := 0; i < 40; i++ {
+		rc.Set(CacheKey("GET", "example.com", "/asset", string(rune(i))), 200, "text/plain", body, 60, nil)
+	}
+	_, size := rc.Stats()
+	if size > 1024*1024 {
+		t.Fatalf("cache exceeded max size: %d", size)
+	}
+}

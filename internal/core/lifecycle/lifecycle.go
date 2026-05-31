@@ -70,6 +70,13 @@ func (m *Manager) Add(name string, srv Server) {
 	m.entries[name] = entry{name: name, srv: srv}
 }
 
+// AddWithTag registers a generic server with a configuration tag for drift detection.
+func (m *Manager) AddWithTag(name string, srv Server, tag string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[name] = entry{name: name, srv: srv, tag: tag}
+}
+
 // Tag returns the configuration tag for the named server, or empty string.
 func (m *Manager) Tag(name string) string {
 	m.mu.Lock()

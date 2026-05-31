@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -126,6 +127,22 @@ func requestPath(c *app.RequestContext) string {
 	return path
 }
 
+func inboundProto(c *app.RequestContext) string {
+	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
+		return strings.ToLower(v)
+	}
+	if bytes.EqualFold(c.Request.Header.Peek("Upgrade"), []byte("websocket")) {
+		if bytes.HasPrefix(bytes.ToLower(c.Request.Header.Peek("Origin")), []byte("https://")) {
+			return "https"
+		}
+		return "http"
+	}
+	if string(c.Request.Scheme()) == "https" {
+		return "https"
+	}
+	return "http"
+}
+
 func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base string, clientIP net.IP, origHost string, preserveOriginalHost bool) (*http.Request, error) {
 	full := strings.TrimRight(base, "/") + requestPath(c)
 	if q := c.URI().QueryString(); len(q) > 0 {
@@ -151,13 +168,18 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 		req.Header.Add(string(k), string(v))
 	})
 
-	security.ApplyOutboundForwarding(req, clientIP, origHost, preserveOriginalHost)
+	security.ApplyOutboundForwarding(req, clientIP, origHost, preserveOriginalHost, inboundProto(c))
 	return req, nil
 }
 
 func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
+	debugEnabled := slog.Default().Enabled(context.Background(), slog.LevelDebug)
+	var removed []string
 	for k, vv := range src {
 		if isHopByHop(k) {
+			if debugEnabled {
+				removed = append(removed, k)
+			}
 			continue
 		}
 		for _, v := range vv {
@@ -166,6 +188,9 @@ func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
 	}
 	if src.Get("Server") == "" {
 		dst.Response.Header.Del("Server")
+	}
+	if len(removed) > 0 {
+		slog.Debug("upstream hop-by-hop response headers stripped", slog.Any("headers", removed))
 	}
 }
 
@@ -178,11 +203,26 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 
 	tr := SharedTransportForUpstream(rt, base)
 	hc := sharedClient(tr)
+	start := time.Now()
 	resp, err := hc.Do(req)
 	if err != nil {
+		slog.Warn("upstream buffered request failed",
+			slog.String("method", req.Method),
+			slog.String("url", req.URL.String()),
+			slog.String("host", origHost),
+			slog.Any("err", err),
+		)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	slog.Debug("upstream buffered response received",
+		slog.String("method", req.Method),
+		slog.String("url", req.URL.String()),
+		slog.String("host", origHost),
+		slog.Int("status", resp.StatusCode),
+		slog.String("proto", resp.Proto),
+		slog.Duration("latency", time.Since(start)),
+	)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -487,11 +527,26 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 
 	tr := SharedTransportForUpstream(rt, base)
 	hc := sharedClient(tr)
+	start := time.Now()
 	resp, err := hc.Do(req)
 	if err != nil {
+		slog.Warn("upstream streaming request failed",
+			slog.String("method", req.Method),
+			slog.String("url", req.URL.String()),
+			slog.String("host", origHost),
+			slog.Any("err", err),
+		)
 		return err
 	}
 	defer resp.Body.Close()
+	slog.Debug("upstream streaming response received",
+		slog.String("method", req.Method),
+		slog.String("url", req.URL.String()),
+		slog.String("host", origHost),
+		slog.Int("status", resp.StatusCode),
+		slog.String("proto", resp.Proto),
+		slog.Duration("latency", time.Since(start)),
+	)
 
 	copyResponseHeaders(c, resp.Header)
 	c.Status(resp.StatusCode)

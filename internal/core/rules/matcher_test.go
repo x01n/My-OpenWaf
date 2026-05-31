@@ -109,6 +109,54 @@ func TestCompoundNOT(t *testing.T) {
 	}
 }
 
+func TestCompoundIfElse(t *testing.T) {
+	pattern := `{"op":"if","if":{"kind":"host","arg":"admin.example.com"},"then":{"kind":"block_path","arg":"/admin"},"else":{"kind":"block_path_exact","arg":"/.env"}}`
+	rules := Compile([]store.Rule{{Phase: "custom", Pattern: pattern, Action: "intercept", Priority: 1, Enabled: true}})
+	if len(rules) != 1 {
+		t.Fatal("expected 1 compiled rule")
+	}
+	if !rules[0].Match(MatchCtx{Path: "/admin/users", Headers: map[string]string{"Host": "admin.example.com:443"}}) {
+		t.Fatal("expected then branch to match admin host")
+	}
+	if rules[0].Match(MatchCtx{Path: "/public", Headers: map[string]string{"Host": "admin.example.com"}}) {
+		t.Fatal("expected then branch to reject non-admin path")
+	}
+	if !rules[0].Match(MatchCtx{Path: "/.env", Headers: map[string]string{"Host": "www.example.com"}}) {
+		t.Fatal("expected else branch to match non-admin host")
+	}
+}
+
+func TestQueryParamMatcherDecodesValues(t *testing.T) {
+	rules := Compile([]store.Rule{{Phase: "custom", Pattern: "query_param:q:union select", Action: "intercept", Priority: 1, Enabled: true}})
+	if len(rules) != 1 {
+		t.Fatal("expected 1 compiled rule")
+	}
+	if !rules[0].Match(MatchCtx{Query: "q=union+select"}) {
+		t.Fatal("expected decoded query parameter value to match")
+	}
+}
+
+func TestQueryParamRegexMatcher(t *testing.T) {
+	rules := Compile([]store.Rule{{Phase: "custom", Pattern: `query_param_regex:q:(?i)union\s+select`, Action: "intercept", Priority: 1, Enabled: true}})
+	if len(rules) != 1 {
+		t.Fatal("expected 1 compiled rule")
+	}
+	if !rules[0].Match(MatchCtx{Query: "q=UNION+SELECT"}) {
+		t.Fatal("expected decoded query parameter regex to match")
+	}
+}
+
+func TestPathContainsMatchers(t *testing.T) {
+	contains := Compile([]store.Rule{{Phase: "custom", Pattern: "path_contains:/api/", Action: "intercept", Priority: 1, Enabled: true}})
+	if !contains[0].Match(MatchCtx{Path: "/v1/api/users"}) {
+		t.Fatal("expected path_contains to match")
+	}
+	notContains := Compile([]store.Rule{{Phase: "custom", Pattern: "path_not_contains:/health", Action: "intercept", Priority: 1, Enabled: true}})
+	if !notContains[0].Match(MatchCtx{Path: "/v1/api/users"}) || notContains[0].Match(MatchCtx{Path: "/health"}) {
+		t.Fatal("unexpected path_not_contains result")
+	}
+}
+
 func TestExactPathMatcher(t *testing.T) {
 	rules := Compile([]store.Rule{
 		{Phase: "custom", Pattern: "block_path_exact:/.env", Action: "intercept", Priority: 1, Enabled: true},

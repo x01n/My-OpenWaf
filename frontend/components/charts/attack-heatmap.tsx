@@ -1,6 +1,6 @@
-"use client";
+"use client"
 
-import { useMemo } from "react";
+import { useMemo } from "react"
 import {
   BarChart,
   Bar,
@@ -10,39 +10,36 @@ import {
   Tooltip,
   ResponsiveContainer,
   Cell,
-} from "recharts";
+} from "recharts"
 
 interface TimelinePoint {
-  hour: string;
-  count: number;
+  hour: string
+  count: number
 }
 
 interface AttackHeatmapProps {
-  data: TimelinePoint[];
-  height?: number;
+  data: TimelinePoint[]
+  height?: number
 }
 
 export function AttackHeatmap({ data, height = 280 }: AttackHeatmapProps) {
   const { maxCount, colorScale } = useMemo(() => {
-    if (data.length === 0) return { maxCount: 100, colorScale: [] };
-    const max = Math.max(...data.map((d) => d.count));
+    if (data.length === 0) return { maxCount: 100, colorScale: [] }
+    const max = Math.max(...data.map((d) => d.count))
     const scale = data.map((d) => {
-      const intensity = max > 0 ? d.count / max : 0;
-      if (intensity > 0.8) return "#dc2626"; // red-600
-      if (intensity > 0.6) return "#ea580c"; // orange-600
-      if (intensity > 0.4) return "#f59e0b"; // amber-500
-      if (intensity > 0.2) return "#eab308"; // yellow-500
-      return "#22c55e"; // green-500
-    });
-    return { maxCount: max, colorScale: scale };
-  }, [data]);
+      const intensity = max > 0 ? d.count / max : 0
+      if (intensity > 0.8) return "#dc2626" // red-600
+      if (intensity > 0.6) return "#ea580c" // orange-600
+      if (intensity > 0.4) return "#f59e0b" // amber-500
+      if (intensity > 0.2) return "#eab308" // yellow-500
+      return "#22c55e" // green-500
+    })
+    return { maxCount: max, colorScale: scale }
+  }, [data])
 
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart
-        data={data}
-        margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
-      >
+      <BarChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" opacity={0.5} />
         <XAxis
           dataKey="hour"
@@ -74,5 +71,5 @@ export function AttackHeatmap({ data, height = 280 }: AttackHeatmapProps) {
         </Bar>
       </BarChart>
     </ResponsiveContainer>
-  );
+  )
 }

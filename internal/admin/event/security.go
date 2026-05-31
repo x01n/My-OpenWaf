@@ -21,6 +21,7 @@ func ListSecurityEvents(repo *repository.SecurityEventRepo) app.HandlerFunc {
 		offset, limit := utils.Paginate(page, pageSize)
 
 		f := repository.SecurityEventFilter{
+			RequestID: string(c.Query("request_id")),
 			Action:    string(c.Query("action")),
 			Phase:     string(c.Query("phase")),
 			Category:  string(c.Query("category")),
@@ -28,6 +29,11 @@ func ListSecurityEvents(repo *repository.SecurityEventRepo) app.HandlerFunc {
 			Host:      string(c.Query("host")),
 			Path:      string(c.Query("path")),
 			RuleIDStr: string(c.Query("rule_id_str")),
+		}
+		if id := string(c.Query("id")); id != "" {
+			if v, err := strconv.ParseUint(id, 10, 64); err == nil {
+				f.ID = uint(v)
+			}
 		}
 		if rid := string(c.Query("rule_id")); rid != "" {
 			if v, err := strconv.ParseUint(rid, 10, 64); err == nil {
@@ -90,12 +96,13 @@ func ListSiteSecurityEvents(siteRepo *repository.SiteRepo, repo *repository.Secu
 		pageSize, _ := strconv.Atoi(string(c.Query("page_size")))
 		offset, limit := utils.Paginate(page, pageSize)
 		f := repository.SecurityEventFilter{
-			Action:   string(c.Query("action")),
-			Phase:    string(c.Query("phase")),
-			Category: string(c.Query("category")),
-			ClientIP: string(c.Query("client_ip")),
-			Path:     string(c.Query("path")),
-			Host:     site.Host,
+			RequestID: string(c.Query("request_id")),
+			Action:    string(c.Query("action")),
+			Phase:     string(c.Query("phase")),
+			Category:  string(c.Query("category")),
+			ClientIP:  string(c.Query("client_ip")),
+			Path:      string(c.Query("path")),
+			Host:      site.Host,
 		}
 		items, total, err := repo.ListBySite(siteID, offset, limit, f)
 		if err != nil {

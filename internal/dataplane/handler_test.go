@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
+
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/snapshot"
@@ -24,6 +26,28 @@ func TestErrorRateLimitActionKeepsConfiguredIntercept(t *testing.T) {
 	got := errorRateLimitAction("intercept")
 	if got.Type != action.Intercept || got.StatusCode != 0 {
 		t.Fatalf("errorRateLimitAction(intercept) = %#v", got)
+	}
+}
+
+func TestRateLimitActionUsesDefault429Status(t *testing.T) {
+	res := action.Result{Type: action.RateLimit, Matched: true}
+	if got := res.ResponseStatusCode(); got != 429 {
+		t.Fatalf("rate limit response status = %d, want 429", got)
+	}
+}
+
+func TestScrubResponseHopByHopHeaders(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Response.Header.Set("Connection", "keep-alive")
+	ctx.Response.Header.Set("Transfer-Encoding", "chunked")
+	ctx.Response.Header.Set("Upgrade", "websocket")
+
+	scrubResponseHopByHopHeaders(ctx)
+
+	for _, key := range []string{"Connection", "Transfer-Encoding", "Upgrade"} {
+		if got := string(ctx.Response.Header.Peek(key)); got != "" {
+			t.Fatalf("%s header was not scrubbed: %q", key, got)
+		}
 	}
 }
 

@@ -14,10 +14,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/common/config"
+	"github.com/cloudwego/hertz/pkg/common/hlog"
+	hertznet "github.com/cloudwego/hertz/pkg/network"
 	"github.com/cloudwego/hertz/pkg/network/standard"
+	shconfig "github.com/hertz-contrib/http2/config"
+	shfactory "github.com/hertz-contrib/http2/factory"
 
+	acmepkg "My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/admin"
 	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/cache"
@@ -32,6 +38,7 @@ import (
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/waf/antireplay"
 	"My-OpenWaf/internal/waf/bot"
 	"My-OpenWaf/internal/waf/challenge"
@@ -42,6 +49,10 @@ import (
 	"My-OpenWaf/internal/waf/ratelimit"
 )
 
+// selfSignedCache 全局自签证书缓存，当 TLS 已启用但无证书时使用。
+
+var selfSignedCache = acmepkg.NewSelfSignedCache()
+
 func maskCredential(s string) string {
 	if len(s) <= 6 {
 		return s[:1] + strings.Repeat("*", len(s)-1)
@@ -49,9 +60,31 @@ func maskCredential(s string) string {
 	return s[:3] + strings.Repeat("*", len(s)-6) + s[len(s)-3:]
 }
 
+func applyLogConfig(repo *repository.SystemSettingsRepo) {
+	if repo == nil {
+		return
+	}
+	raw, err := repo.Get("log_config")
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return
+	}
+	var cfg struct {
+		Level      string `json:"level"`
+		FilePath   string `json:"file_path"`
+		AlsoStdout bool   `json:"also_stdout"`
+	}
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return
+	}
+	logger.Configure(logger.Config{Level: cfg.Level, FilePath: cfg.FilePath, AlsoStdout: cfg.AlsoStdout})
+}
+
 func Run() {
+	hlog.SetLevel(hlog.LevelFatal)
 	log := logger.New("app")
 	ctx := context.Background()
+	acmeCtx, cancelACME := context.WithCancel(ctx)
+	defer cancelACME()
 
 	rt, err := core.NewRuntime(ctx)
 	if err != nil {
@@ -62,6 +95,10 @@ func Run() {
 
 	if err := store.AutoMigrate(rt.DB); err != nil {
 		log.Error("auto migrate failed", slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := store.AutoMigrateLogs(rt.LogDB); err != nil {
+		log.Error("log auto migrate failed", slog.Any("err", err))
 		os.Exit(1)
 	}
 
@@ -97,7 +134,8 @@ func Run() {
 	// Derive challenge cookie secret from JWT secret for persistence across restarts.
 	challenge.SetChallengeSecret(jwtSecret)
 
-	repos := repository.New(rt.DB)
+	repos := repository.NewWithLogDB(rt.DB, rt.LogDB)
+	applyLogConfig(repos.SystemSettings)
 
 	// Query count cache: reduces expensive COUNT(*) on access_logs/security_events.
 	queryCache := cache.NewQueryCache(5 * time.Second)
@@ -111,13 +149,13 @@ func Run() {
 
 	// Write queue: async write queue that batches all DB mutations through a single
 	// goroutine, merging high-frequency operations to reduce lock contention.
-	writeQueue := observability.NewWriteQueue(rt.DB, logger.New("writequeue"))
+	writeQueue := observability.NewWriteQueue(rt.LogDB, logger.New("writequeue"))
 	defer writeQueue.Close()
 	repos.SetWriteQueue(writeQueue)
 
 	// Unified writer: single goroutine drains all observability channels and
 	// flushes them in one DB transaction, eliminating SQLite lock contention.
-	unifiedWriter := observability.NewUnifiedWriter(rt.DB, logger.New("writer"))
+	unifiedWriter := observability.NewUnifiedWriter(rt.LogDB, logger.New("writer"))
 	if rt.Redis != nil {
 		unifiedWriter.SetRedis(rt.Redis)
 	}
@@ -125,7 +163,7 @@ func Run() {
 
 	// Event archiver (auto-delete security events, access logs and drop events based on retention config).
 	// Also performs database optimization (VACUUM/OPTIMIZE) after each cleanup cycle.
-	archiver := observability.NewArchiver(rt.DB, repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
+	archiver := observability.NewArchiver(rt.LogDB, repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
 	archiver.SetSettingsRepo(repos.SystemSettings)
 	defer archiver.Close()
 
@@ -134,6 +172,13 @@ func Run() {
 
 	// Data-plane metrics (shared across all data listeners).
 	metrics := dataplane.NewMetrics()
+	upstreamPool := upstream.NewPool()
+	upstreamPool.Start(ctx, func() []string {
+		if sn := rt.Snapshot.Load(); sn != nil {
+			return snapshotUpstreams(sn)
+		}
+		return nil
+	}, 10*time.Second, upstream.HTTPProbe(2*time.Second))
 
 	// Rate limiters — configured from snapshot protection settings.
 	sn := rt.Snapshot.Load()
@@ -203,6 +248,15 @@ func Run() {
 
 	// Challenge managers: CAPTCHA, Shield (5-second), Chain.
 	captchaMgr := challenge.NewCaptchaManager(rt.Redis, time.Duration(prot.CaptchaTimeout)*time.Second)
+
+	// 初始化 go-captcha 高级验证码（点击/滑动/旋转）
+	goCaptchaCfg := challenge.DefaultGoCaptchaConfig()
+	if dir := os.Getenv("MY_OPENWAF_CAPTCHA_DIR"); dir != "" {
+		goCaptchaCfg.ResourceDir = dir
+	}
+	goCaptchaProvider := challenge.NewGoCaptchaProvider(goCaptchaCfg, logger.New("gocaptcha"))
+	captchaMgr.SetGoCaptchaProvider(goCaptchaProvider)
+
 	shieldMgr := challenge.NewShieldManager(captchaMgr, rt.Redis, prot.ShieldDifficulty)
 	chainMgr := challenge.NewChainChallengeManager(captchaMgr, rt.Redis)
 
@@ -223,7 +277,20 @@ func Run() {
 		ipRep.ConfigureAutoBan(p.AutoBanEnabled, p.AutoBanThreshold, p.AutoBanWindow, p.AutoBanDuration)
 		ipRep.ConfigureAutoBanAction(p.AutoBanAction)
 		captchaMgr.SetTimeout(time.Duration(p.CaptchaTimeout) * time.Second)
-		shieldMgr.SetDifficulty(p.ShieldDifficulty)
+		shieldMgr.SetConfig(challenge.ShieldConfig{
+			Difficulty:           p.ShieldDifficulty,
+			TimeoutSecs:          p.ShieldTimeoutSecs,
+			AutoStartDelay:       p.ShieldAutoStartDelay,
+			MaxRetries:           p.ShieldMaxRetries,
+			EnvStrictness:        p.ShieldEnvStrictness,
+			RequireHTTP2:         p.ShieldRequireHTTP2,
+			RequireHTTP3:         p.ShieldRequireHTTP3,
+			AllowHTTP1:           p.ShieldAllowHTTP1,
+			EnableJSChallenge:    p.ShieldEnableJSChallenge,
+			EnableWASM:           p.ShieldEnableWASM,
+			EnableEnvCheck:       p.ShieldEnableEnvCheck,
+			EnableDevToolsDetect: p.ShieldEnableDevTools,
+		})
 		chainMgr.Reconfigure(parseChainSteps(p.ChainSteps), p.ShieldDifficulty)
 		bruteForce.Reconfigure(p.LoginMaxAttempts, time.Duration(p.LoginLockoutMinutes)*time.Minute)
 		dropPolicy := loadDropPolicy(repos.SystemSettings, rt.Config.Drop)
@@ -250,16 +317,18 @@ func Run() {
 
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
 	dpOpts := dataplane.Options{
-		Holder:               rt.Snapshot,
-		Engine:               eng,
-		Metrics:              metrics,
-		Writer:               unifiedWriter,
-		ResponseCache:        responseCache,
-		Log:                  dpLog,
-		CaptchaManager:       captchaMgr,
-		ShieldManager:        shieldMgr,
-		ChainManager:         chainMgr,
-		RecordedResourceRepo: repos.RecordedResource,
+		Holder:                rt.Snapshot,
+		Engine:                eng,
+		Metrics:               metrics,
+		Writer:                unifiedWriter,
+		ResponseCache:         responseCache,
+		AccessLogSamplingRate: 10,
+		Log:                   dpLog,
+		CaptchaManager:        captchaMgr,
+		ShieldManager:         shieldMgr,
+		ChainManager:          chainMgr,
+		RecordedResourceRepo:  repos.RecordedResource,
+		Upstreams:             upstreamPool,
 	}
 
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
@@ -319,6 +388,45 @@ func Run() {
 				slog.String("bind", de.siteRT.Bind),
 				slog.Bool("tls", de.siteRT.Site.TLSEnabled),
 			)
+
+			// HTTP/3 QUIC 监听器（与 TCP 并行，仅当 ALPN 包含 h3）
+			h3Name := "h3:" + de.siteRT.Bind
+			if de.siteRT.Site.TLSEnabled && shouldEnableHTTP3(de.siteRT.Site.ALPN, de.siteRT.NetworkDefaults) && !lm.Has(h3Name) {
+				tlsCfg := buildListenerTLS(de.siteRT, newSn)
+				if tlsCfg != nil {
+					h3Srv := NewHTTP3Server(HTTP3ServerConfig{
+						Bind:      de.siteRT.Bind,
+						TCPBind:   de.siteRT.Bind,
+						TLSConfig: tlsCfg,
+						Log:       log.With(slog.String("proto", "h3")),
+					})
+					lm.Add(h3Name, h3Srv)
+					lm.StartOne(h3Name)
+					log.Info("hot-started HTTP/3 QUIC listener",
+						slog.String("bind", de.siteRT.Bind),
+					)
+				}
+			}
+		}
+
+		// 清理不再需要的 HTTP/3 监听器
+		for _, name := range lm.Names() {
+			if !strings.HasPrefix(name, "h3:") {
+				continue
+			}
+			bind := strings.TrimPrefix(name, "h3:")
+			tcpName := "site:" + bind
+			// 对应 TCP 监听器不存在 → 清除
+			if !lm.Has(tcpName) {
+				log.Info("removing stale HTTP/3 listener (TCP gone)", slog.String("name", name))
+				lm.Remove(name)
+				continue
+			}
+			// TCP 存在但该站点 ALPN 不再包含 h3 → 清除
+			if de, ok := desired[tcpName]; ok && !shouldEnableHTTP3(de.siteRT.Site.ALPN, de.siteRT.NetworkDefaults) {
+				log.Info("removing HTTP/3 listener (h3 removed from ALPN)", slog.String("name", name))
+				lm.Remove(name)
+			}
 		}
 	}
 
@@ -366,6 +474,56 @@ func Run() {
 	adminSrv.GET("/readyz", hc.ReadinessHandler())
 	adminSrv.GET("/status", hc.StatusHandler())
 	adminSrv.GET("/metrics", observability.PrometheusHandler(promMetrics))
+	// 初始化 ACME 管理器（可选，依赖 golang.org/x/crypto/acme）
+	var acmeMgr *acmepkg.Manager
+	acmeEmail := os.Getenv("MY_OPENWAF_ACME_EMAIL")
+	if acmeEmail != "" {
+		var err error
+		acmeMgr, err = acmepkg.NewManager(acmepkg.Config{
+			Email: acmeEmail,
+			Log:   logger.New("acme"),
+			OnRenew: func(domain, certPEM, keyPEM string, expiry time.Time, renewErr error) error {
+				cert, err := repos.Certificate.GetByDomain(domain)
+				if err != nil {
+					return fmt.Errorf("load certificate by domain %s: %w", domain, err)
+				}
+				now := time.Now()
+				if renewErr != nil {
+					return repos.Certificate.UpdateRenewStatus(cert.ID, renewErr.Error(), &now)
+				}
+				if err := repos.Certificate.UpdateCert(cert.ID, certPEM, keyPEM, &expiry, &now); err != nil {
+					return fmt.Errorf("update renewed certificate %s: %w", domain, err)
+				}
+				if err := reload(); err != nil {
+					return fmt.Errorf("reload after renewing %s: %w", domain, err)
+				}
+				return nil
+			},
+		})
+		if err != nil {
+			log.Warn("ACME manager 初始化失败", slog.Any("err", err))
+		} else {
+			log.Info("ACME manager 已就绪", slog.String("email", acmeEmail))
+			go acmeMgr.RenewLoopFunc(acmeCtx, 12*time.Hour, func(context.Context) ([]string, error) {
+				items, err := repos.Certificate.ListAutoRenew()
+				if err != nil {
+					return nil, err
+				}
+				domains := make([]string, 0, len(items))
+				for _, item := range items {
+					if item.Domain == "" || item.ExpiresAt == nil {
+						continue
+					}
+					if time.Until(*item.ExpiresAt) > 30*24*time.Hour {
+						continue
+					}
+					domains = append(domains, item.Domain)
+				}
+				return domains, nil
+			})
+		}
+	}
+
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
 		Repos:         repos,
 		Reload:        reload,
@@ -373,13 +531,16 @@ func Run() {
 		JWTSecret:     jwtSecret,
 		Metrics:       metrics,
 		DB:            rt.DB,
+		LogDB:         rt.LogDB,
 		TokenMgr:      tokenMgr,
 		BruteForce:    bruteForce,
 		SessionMgr:    sessionMgr,
 		CVEFeedMgr:    cveFeedMgr,
 		EscalationMgr: escalationMgr,
 		CaptchaMgr:    captchaMgr,
+		ACMEMgr:       acmeMgr,
 		Cache:         cache.NewRedisKV(rt.Redis),
+		Upstreams:     upstreamPool,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
@@ -394,6 +555,22 @@ func Run() {
 				continue
 			}
 			lm.AddHertzWithTag(name, srv, tag)
+
+			// 初始化时也创建 HTTP/3 QUIC 监听器
+			if siteRT.Site.TLSEnabled && shouldEnableHTTP3(siteRT.Site.ALPN, siteRT.NetworkDefaults) {
+				tlsCfg := buildListenerTLS(siteRT, sn)
+				if tlsCfg != nil {
+					h3Name := "h3:" + siteRT.Bind
+					h3Srv := NewHTTP3Server(HTTP3ServerConfig{
+						Bind:      siteRT.Bind,
+						TCPBind:   siteRT.Bind,
+						TLSConfig: tlsCfg,
+						Log:       log.With(slog.String("proto", "h3")),
+					})
+					lm.Add(h3Name, h3Srv)
+					log.Info("HTTP/3 QUIC listener registered", slog.String("bind", siteRT.Bind))
+				}
+			}
 		}
 	}
 
@@ -409,6 +586,27 @@ func Run() {
 
 func siteListenerName(bind string) string {
 	return fmt.Sprintf("site:%s", bind)
+}
+
+func snapshotUpstreams(sn *snapshotpkg.Snapshot) []string {
+	if sn == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var urls []string
+	for _, rt := range sn.Sites {
+		for _, raw := range rt.UpstreamURLs {
+			if raw == "" {
+				continue
+			}
+			if _, ok := seen[raw]; ok {
+				continue
+			}
+			seen[raw] = struct{}{}
+			urls = append(urls, raw)
+		}
+	}
+	return urls
 }
 
 func listenerRuntimesByBind(sn *snapshotpkg.Snapshot) []snapshotpkg.SiteRuntime {
@@ -499,46 +697,129 @@ func resolveJWTSecret(rt *core.Runtime) []byte {
 
 // buildDataServer creates a Hertz server for a data-plane listener,
 // optionally configured with TLS termination when the listener has TLS enabled.
+// 支持 IPv4 和 IPv6 绑定地址。
 func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, dpOpts dataplane.Options) *server.Hertz {
-	rawLn, err := net.Listen("tcp", siteRT.Bind)
+	network, _ := snapshotpkg.EffectiveSiteNetwork(siteRT.Site.ALPN, siteRT.Site.Network, siteRT.NetworkDefaults, siteRT.TLSDefaults)
+	// 自动检测 IPv6 地址格式（如 [::]:8080）
+	if strings.HasPrefix(siteRT.Bind, "[") {
+		network = "tcp6"
+	}
+
+	rawLn, err := net.Listen(network, siteRT.Bind)
 	if err != nil {
 		slog.Error("data listener bind failed",
 			slog.String("bind", siteRT.Bind),
+			slog.String("network", network),
 			slog.Any("err", err),
 		)
 		return nil
 	}
-	wrappedLn := dataplane.NewFixURIListener(rawLn)
 
-	opts := []config.Option{
-		server.WithListener(wrappedLn),
-		server.WithTransport(standard.NewTransporter),
-		server.WithUseRawPath(true),
-		server.WithUnescapePathValues(false),
-		server.WithDisablePreParseMultipartForm(true),
-	}
-
+	// TLS 由 Hertz standard transporter 处理，避免手动 tls.NewListener 后 ALPN 分派失效。
+	// TLS 站点只 peek ClientHello；FixURIListener 只能用于明文 HTTP，不能读取 TLS ClientHello。
+	var ln net.Listener = rawLn
+	var tlsCfg *tls.Config
 	if siteRT.Site.TLSEnabled {
-		tlsCfg := buildListenerTLS(siteRT, sn)
+		tlsCfg = buildListenerTLS(siteRT, sn)
 		if tlsCfg == nil {
 			rawLn.Close()
 			return nil
 		}
-		opts = append(opts,
-			server.WithTLS(tlsCfg),
+		ln = dataplane.NewTLSFingerprintListener(rawLn)
+		effectiveHTTP2 := alpnSliceIncludes(tlsCfg.NextProtos, "h2")
+		slog.Info("TLS listener configured",
+			slog.String("bind", siteRT.Bind),
+			slog.String("network", network),
+			slog.Bool("http2_enabled", effectiveHTTP2),
+			slog.Bool("http3_enabled", shouldEnableHTTP3(siteRT.Site.ALPN, siteRT.NetworkDefaults)),
+			slog.String("min_tls", tlsVersionName(tlsCfg.MinVersion)),
+			slog.String("max_tls", tlsVersionName(tlsCfg.MaxVersion)),
+			slog.Any("next_protos", tlsCfg.NextProtos),
+			slog.Int("cipher_suite_count", len(tlsCfg.CipherSuites)),
+			slog.Int("curve_count", len(tlsCfg.CurvePreferences)),
 		)
 	}
+	if !siteRT.Site.TLSEnabled {
+		ln = dataplane.NewFixURIListener(ln)
+	}
 
+	transporter := standard.NewTransporter
+	if siteRT.Site.TLSEnabled {
+		transporter = dataplane.NewFixURITLSTransporter
+	}
+
+	opts := []config.Option{
+		server.WithListener(ln),
+		server.WithTransport(transporter),
+		server.WithUseRawPath(true),
+		server.WithUnescapePathValues(false),
+		server.WithDisablePreParseMultipartForm(true),
+		server.WithMaxRequestBodySize(32 << 20),
+		server.WithMaxKeepBodySize(64 << 10),
+	}
+	if siteRT.Site.TLSEnabled {
+		opts = append(opts,
+			server.WithTLS(tlsCfg),
+			server.WithOnAccept(func(conn net.Conn) context.Context {
+				ctx := context.Background()
+				if fp, ok := bot.TLSFingerprintFromConn(conn); ok {
+					dataplane.RememberTLSFingerprintConn(conn, fp)
+					ctx = dataplane.ContextWithTLSFingerprint(ctx, fp)
+				}
+				return ctx
+			}),
+			server.WithOnConnect(func(ctx context.Context, conn hertznet.Conn) context.Context {
+				if tlsConn, ok := conn.(interface{ ConnectionState() tls.ConnectionState }); ok {
+					state := tlsConn.ConnectionState()
+					setTLSHandshakeInfo(conn, state)
+					fp := bot.TLSClientFingerprint{TLSVersion: tlsVersionName(state.Version), SNI: state.ServerName}
+					if state.NegotiatedProtocol != "" {
+						fp.ALPN = []string{state.NegotiatedProtocol}
+					}
+					ctx = dataplane.ContextWithTLSFingerprint(ctx, fp)
+				}
+				return ctx
+			}),
+		)
+	}
+	if siteRT.Site.TLSEnabled && alpnIncludes(siteRT.Site.ALPN, "h2") {
+		opts = append(opts, server.WithALPN(true))
+	}
 	srv := server.Default(opts...)
+	if siteRT.Site.TLSEnabled && alpnIncludes(siteRT.Site.ALPN, "h2") {
+		srv.AddProtocol("h2", shfactory.NewServerFactory(
+			shconfig.WithReadTimeout(time.Minute),
+			shconfig.WithDisableKeepAlive(false),
+			shconfig.WithPermitProhibitedCipherSuites(true),
+		))
+		slog.Info("HTTP/2 protocol factory registered", slog.String("bind", siteRT.Bind))
+	}
 	o := dpOpts
 	o.Bind = siteRT.Bind
 	handler := dataplane.Handler(o)
-	srv.NoRoute(handler)
+
+	// 如果 ALPN 包含 h3，向 HTTP/1.1 和 HTTP/2 响应注入 Alt-Svc 头
+	if shouldEnableHTTP3(siteRT.Site.ALPN, siteRT.NetworkDefaults) {
+		port := extractPort(siteRT.Bind)
+		altSvcValue := fmt.Sprintf(`h3=":%s"; ma=86400`, port)
+		slog.Info("HTTP/3 Alt-Svc enabled", slog.String("bind", siteRT.Bind), slog.String("alt_svc", altSvcValue))
+		origHandler := handler
+		handler = func(ctx context.Context, c *app.RequestContext) {
+			c.Response.Header.Set("Alt-Svc", altSvcValue)
+			origHandler(ctx, c)
+		}
+	}
+
+	srv.NoRoute(dataplane.HandlerForBind(siteRT.Bind, handler))
 	return srv
 }
 
 // buildListenerTLS constructs a *tls.Config for a data listener.
-// It uses the site's certificate and TLS configuration.
+// 使用 GetCertificate 回调实现动态证书选择：
+//   - SNI 匹配到已知站点 → 返回该站点的真实证书
+//   - SNI 为空（IP 直接访问）或不匹配任何站点 → 返回自签证书
+//
+// 这样可以防止通过 IP 扫描泄露后端真实站点的域名信息。
 func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) *tls.Config {
 	if sn == nil {
 		return nil
@@ -546,72 +827,300 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 
 	site := siteRT.Site
 	bind := siteRT.Bind
-	var certs []tls.Certificate
 
-	if siteRT.TLSConfig != nil && len(siteRT.TLSConfig.Certificates) > 0 {
-		certs = append(certs, siteRT.TLSConfig.Certificates...)
-	} else if siteRT.Certificate != nil {
-		cert, err := tls.X509KeyPair([]byte(siteRT.Certificate.CertPEM), []byte(siteRT.Certificate.KeyPEM))
-		if err == nil {
-			certs = append(certs, cert)
-		}
-	}
-
-	// Per-site SNI certs for this bind address
+	// 构建 SNI → 证书 的映射（仅本 bind 地址）
+	sniCertMap := make(map[string]*tls.Certificate)
 	for sniKey, cert := range sn.SiteTLSCertBySNI {
 		prefix := "sni:" + bind + "\x00"
 		if strings.HasPrefix(sniKey, prefix) {
-			certs = append(certs, cert)
+			sni := strings.TrimPrefix(sniKey, prefix)
+			c := cert // 避免闭包引用循环变量
+			sniCertMap[sni] = &c
 		}
 	}
 
-	if len(certs) == 0 {
-		return nil
+	// 站点自身证书
+	var defaultSiteCert *tls.Certificate
+	if siteRT.TLSConfig != nil && len(siteRT.TLSConfig.Certificates) > 0 {
+		defaultSiteCert = &siteRT.TLSConfig.Certificates[0]
+	} else if siteRT.Certificate != nil {
+		cert, err := tls.X509KeyPair([]byte(siteRT.Certificate.CertPEM), []byte(siteRT.Certificate.KeyPEM))
+		if err == nil {
+			defaultSiteCert = &cert
+		}
 	}
 
+	// 如果没有任何证书且 SNI 映射也为空，生成一个自签证书兜底
+	if defaultSiteCert == nil && len(sniCertMap) == 0 {
+		selfSigned, err := selfSignedCache.GetOrCreate(bind)
+		if err != nil {
+			slog.Warn("自签证书生成失败", slog.String("bind", bind), slog.Any("err", err))
+			return nil
+		}
+		defaultSiteCert = &selfSigned
+		slog.Info("无站点证书，仅使用自签证书", slog.String("bind", bind))
+	}
+
+	minTLSVersion, maxTLSVersion, cipherSuiteNames := snapshotpkg.EffectiveSiteTLS(site.MinTLSVersion, site.MaxTLSVersion, site.CipherSuites, siteRT.TLSDefaults)
+	_, effectiveALPN := snapshotpkg.EffectiveSiteNetwork(site.ALPN, site.Network, siteRT.NetworkDefaults, siteRT.TLSDefaults)
+
 	// Parse TLS version bounds.
-	minVer := parseTLSVersion(site.MinTLSVersion)
-	maxVer := parseTLSVersion(site.MaxTLSVersion)
+	minVer := snapshotpkg.ParseTLSVersion(minTLSVersion)
+	maxVer := snapshotpkg.ParseTLSVersion(maxTLSVersion)
 	if minVer == 0 {
-		minVer = tls.VersionTLS12
+		minVer = tls.VersionTLS10
 	}
 	if maxVer == 0 {
 		maxVer = tls.VersionTLS13
 	}
 
 	// Parse ALPN protocols.
-	var alpn []string
-	if site.ALPN != "" {
-		for _, p := range strings.Split(site.ALPN, ",") {
-			if s := strings.TrimSpace(p); s != "" {
-				alpn = append(alpn, s)
-			}
-		}
+	alpn := tcpTLSALPNProtocols(effectiveALPN)
+
+	// 解析 TLS 密码套件
+	var cipherSuites []uint16
+	if cipherSuiteNames != "" {
+		cipherSuites = parseCipherSuites(cipherSuiteNames)
+	}
+	curves := snapshotpkg.ParseCurvePreferences(siteRT.TLSDefaults.CurvePreferences)
+	if len(curves) == 0 {
+		curves = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}
 	}
 
 	cfg := &tls.Config{
-		Certificates: certs,
-		MinVersion:   minVer,
-		MaxVersion:   maxVer,
-		NextProtos:   alpn,
+		MinVersion:               minVer,
+		MaxVersion:               maxVer,
+		NextProtos:               alpn,
+		CipherSuites:             cipherSuites,
+		CurvePreferences:         curves,
+		PreferServerCipherSuites: siteRT.TLSDefaults.PreferServerCipherSuites,
+		// GetCertificate 在 TLS 握手时被调用，根据 ClientHello 中的 SNI 动态选择证书。
+		// 核心安全逻辑：只有当 SNI 匹配到已知站点时才返回真实证书，
+		// 否则（IP 直接访问或未知域名）返回自签证书，防止域名信息泄露。
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			if hello.Conn != nil {
+				var version uint16
+				if len(hello.SupportedVersions) > 0 {
+					version = hello.SupportedVersions[0]
+				}
+				setTLSHandshakeInfo(hello.Conn, tls.ConnectionState{Version: version, NegotiatedProtocol: firstALPN(hello.SupportedProtos)})
+			}
+			return nil, nil
+		},
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			sni := strings.ToLower(strings.TrimSpace(hello.ServerName))
+
+			clientTLSMin := uint16(0)
+			if len(hello.SupportedVersions) > 0 {
+				clientTLSMin = hello.SupportedVersions[0]
+			}
+			slog.Debug("TLS ClientHello received",
+				slog.String("bind", bind),
+				slog.String("sni", sni),
+				slog.Any("client_alpn", hello.SupportedProtos),
+				slog.Int("client_tls_first", int(clientTLSMin)),
+			)
+
+			// 情况 1：SNI 为空 → IP 直接访问
+			if sni == "" {
+				if siteRT.TLSDefaults.SelfSignedOnIP {
+					return selfSignedForBind(bind), nil
+				}
+				if defaultSiteCert != nil {
+					return defaultSiteCert, nil
+				}
+				return selfSignedForBind(bind), nil
+			}
+
+			// 情况 2：SNI 精确匹配已知证书
+			if cert, ok := sniCertMap[sni]; ok {
+				return cert, nil
+			}
+
+			// 情况 3：尝试通配符匹配（*.example.com）
+			if idx := strings.Index(sni, "."); idx > 0 {
+				wild := "*." + sni[idx+1:]
+				if cert, ok := sniCertMap[wild]; ok {
+					return cert, nil
+				}
+			}
+
+			// 情况 4：SNI 不匹配任何已知站点 → 检查 snapshot 是否有此站点
+			if _, found := sn.MatchSite(bind, sni); !found {
+				// 站点不存在：返回自签证书，防止证书泄露真实域名
+				slog.Debug("未知 SNI，返回自签证书",
+					slog.String("sni", sni),
+					slog.String("bind", bind),
+				)
+				return selfSignedForBind(bind), nil
+			}
+
+			// 情况 5：站点存在但没有专用证书，使用默认站点证书
+			if defaultSiteCert != nil {
+				return defaultSiteCert, nil
+			}
+
+			// 兜底：自签证书
+			return selfSignedForBind(bind), nil
+		},
 	}
 	return cfg
 }
 
-// parseTLSVersion converts a string like "TLS12" to a tls version constant.
-func parseTLSVersion(v string) uint16 {
-	switch strings.ToUpper(strings.TrimSpace(v)) {
-	case "TLS10", "1.0":
-		return tls.VersionTLS10
-	case "TLS11", "1.1":
-		return tls.VersionTLS11
-	case "TLS12", "1.2":
-		return tls.VersionTLS12
-	case "TLS13", "1.3":
-		return tls.VersionTLS13
-	default:
-		return 0
+// selfSignedForBind 获取或生成指定 bind 地址的自签证书。
+func selfSignedForBind(bind string) *tls.Certificate {
+	cert, err := selfSignedCache.GetOrCreate(bind)
+	if err != nil {
+		slog.Warn("自签证书生成失败", slog.String("bind", bind), slog.Any("err", err))
+		return nil
 	}
+	return &cert
+}
+
+// parseCipherSuites 将逗号分隔的密码套件名称转换为 TLS 密码套件 ID 列表。
+func parseALPNProtocols(raw string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(proto string) {
+		proto = strings.TrimSpace(proto)
+		if proto == "" {
+			return
+		}
+		if _, ok := seen[proto]; ok {
+			return
+		}
+		seen[proto] = struct{}{}
+		out = append(out, proto)
+	}
+	if raw != "" {
+		for _, proto := range strings.Split(raw, ",") {
+			add(proto)
+		}
+	} else {
+		add("h2")
+		add("http/1.1")
+	}
+	if len(out) == 0 {
+		out = []string{"h2", "http/1.1"}
+	}
+	return out
+}
+
+func tcpTLSALPNProtocols(raw string) []string {
+	protos := parseALPNProtocols(raw)
+	out := make([]string, 0, len(protos))
+	for _, proto := range protos {
+		if proto == "h3" {
+			continue
+		}
+		out = append(out, proto)
+	}
+	if len(out) == 0 {
+		out = []string{"h2", "http/1.1"}
+	}
+	return out
+}
+
+type tlsHandshakeInfoSetter interface {
+	SetTLSHandshakeInfo(version string, alpn string)
+}
+
+func setTLSHandshakeInfo(conn net.Conn, state tls.ConnectionState) {
+	for conn != nil {
+		if setter, ok := conn.(tlsHandshakeInfoSetter); ok {
+			setter.SetTLSHandshakeInfo(tlsVersionName(state.Version), state.NegotiatedProtocol)
+			return
+		}
+		if unwrapper, ok := conn.(interface{ NetConn() net.Conn }); ok {
+			conn = unwrapper.NetConn()
+			continue
+		}
+		break
+	}
+}
+
+func firstALPN(protos []string) string {
+	if len(protos) == 0 {
+		return ""
+	}
+	return protos[0]
+}
+
+func tlsVersionName(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS10"
+	case tls.VersionTLS11:
+		return "TLS11"
+	case tls.VersionTLS12:
+		return "TLS12"
+	case tls.VersionTLS13:
+		return "TLS13"
+	default:
+		return ""
+	}
+}
+
+func alpnIncludes(raw, proto string) bool {
+	for _, p := range parseALPNProtocols(raw) {
+		if p == proto {
+			return true
+		}
+	}
+	return false
+}
+
+func alpnSliceIncludes(values []string, proto string) bool {
+	for _, value := range values {
+		if value == proto {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCipherSuites(raw string) []uint16 {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	nameToID := make(map[string]uint16)
+	for _, suite := range tls.CipherSuites() {
+		nameToID[suite.Name] = suite.ID
+		nameToID[strings.ToUpper(suite.Name)] = suite.ID
+		short := strings.TrimPrefix(suite.Name, "TLS_")
+		nameToID[short] = suite.ID
+		nameToID[strings.ToUpper(short)] = suite.ID
+	}
+	for _, suite := range tls.InsecureCipherSuites() {
+		nameToID[suite.Name] = suite.ID
+		nameToID[strings.ToUpper(suite.Name)] = suite.ID
+		short := strings.TrimPrefix(suite.Name, "TLS_")
+		nameToID[short] = suite.ID
+		nameToID[strings.ToUpper(short)] = suite.ID
+	}
+
+	seen := make(map[uint16]struct{})
+	var suites []uint16
+	for _, name := range strings.Split(raw, ",") {
+		key := strings.TrimSpace(name)
+		if key == "" {
+			continue
+		}
+		id, ok := nameToID[key]
+		if !ok {
+			id, ok = nameToID[strings.ToUpper(key)]
+		}
+		if !ok {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		suites = append(suites, id)
+	}
+	return suites
 }
 
 // ─── Config drift fingerprint ───────────────────────────────────────
@@ -631,7 +1140,10 @@ func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 		}
 		seenSites[rt.Site.ID] = struct{}{}
 		site := rt.Site
-		fmt.Fprintf(h, " site=%d tls=%v min=%s max=%s alpn=%s", site.ID, rt.Site.TLSEnabled, site.MinTLSVersion, site.MaxTLSVersion, site.ALPN)
+		effectiveNetwork, effectiveALPN := snapshotpkg.EffectiveSiteNetwork(site.ALPN, site.Network, rt.NetworkDefaults, rt.TLSDefaults)
+		effectiveMinTLS, effectiveMaxTLS, effectiveCiphers := snapshotpkg.EffectiveSiteTLS(site.MinTLSVersion, site.MaxTLSVersion, site.CipherSuites, rt.TLSDefaults)
+		fmt.Fprintf(h, " site=%d tls=%v network=%s min=%s max=%s alpn=%s", site.ID, rt.Site.TLSEnabled, effectiveNetwork, effectiveMinTLS, effectiveMaxTLS, effectiveALPN)
+		fmt.Fprintf(h, " ciphers=%s self_signed_on_ip=%v", effectiveCiphers, rt.TLSDefaults.SelfSignedOnIP)
 		if rt.Certificate != nil {
 			fmt.Fprintf(h, " cert=%s", rt.Certificate.CertPEM[:min(64, len(rt.Certificate.CertPEM))])
 		}

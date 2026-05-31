@@ -42,6 +42,7 @@ type BotRequest struct {
 	Connection     string
 	HasCookie      bool
 	ClientIP       net.IP
+	TLS            TLSClientFingerprint
 }
 
 func NewBotRequest(method, path string, headers map[string]string) BotRequest {
@@ -194,7 +195,7 @@ func PreScreen(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver)
 }
 
 func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver) BotScore {
-	bs := BotScore{IsHighRisk: true, Details: make(map[string]string)}
+	bs := BotScore{Details: make(map[string]string)}
 	if geo != nil && r.ClientIP != nil {
 		bs.GeoIPScore = geo.ScoreIP(r.ClientIP)
 		if bs.GeoIPScore > 0 {
@@ -229,7 +230,14 @@ func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver)
 			bs.Details["iprep"] = dec.Category + ": " + dec.Reason
 		}
 	}
+	if r.TLS.JA4 != "" {
+		bs.Details["tls_ja4"] = r.TLS.JA4
+	}
+	if r.TLS.JA3Hash != "" {
+		bs.Details["tls_ja3"] = r.TLS.JA3Hash
+	}
 	bs.Total = bs.GeoIPScore + bs.FingerprintScore + bs.BehaviorScore + bs.IPRepScore
+	bs.IsHighRisk = bs.Total >= 80 || bs.GeoIPScore >= 40 || bs.IPRepScore >= 25
 	return bs
 }
 
