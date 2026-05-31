@@ -50,15 +50,24 @@ jobs:
             exit 1
           fi
 
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Copy frontend export for embed
+        run: |
+          rm -rf internal/core/adminweb/dist
+          cp -r frontend/out internal/core/adminweb/dist
+
       - name: Run go vet
         run: go vet ./...
 
       - name: Run Go tests
         run: go test -v ./...
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
 
       - name: Typecheck frontend
         working-directory: frontend
@@ -69,7 +78,9 @@ jobs:
         run: npm run lint
 
       - name: Build application
-        run: ./scripts/build.sh
+        run: |
+          go mod tidy
+          go build -o bin/my-openwaf ./cmd/...
 
   release-pr:
     name: Create or update release PR
