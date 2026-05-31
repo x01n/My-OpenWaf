@@ -105,9 +105,9 @@ func migrateListenerData(tx *gorm.DB) error {
 	// Update each site with listener configuration
 	for rows.Next() {
 		var (
-			siteID                                                uint
-			bind, network, minTLS, maxTLS, alpn                   string
-			enabled, tlsEnabled                                   bool
+			siteID                              uint
+			bind, network, minTLS, maxTLS, alpn string
+			enabled, tlsEnabled                 bool
 		)
 		if err := rows.Scan(&siteID, &bind, &network, &enabled, &tlsEnabled, &minTLS, &maxTLS, &alpn); err != nil {
 			return err
@@ -145,9 +145,9 @@ func migrateForwardingProfileData(tx *gorm.DB) error {
 	// Update each site with forwarding configuration
 	for rows.Next() {
 		var (
-			siteID                                uint
-			xffMode, trustedCIDR                  string
-			preserveOriginalHost                  bool
+			siteID               uint
+			xffMode, trustedCIDR string
+			preserveOriginalHost bool
 		)
 		if err := rows.Scan(&siteID, &xffMode, &trustedCIDR, &preserveOriginalHost); err != nil {
 			return err

@@ -431,6 +431,11 @@ export interface SecurityEvent {
   geo_country: string
   geo_city: string
   status_code: number
+  query_string?: string
+  request_headers?: string
+  request_body_preview?: string
+  request_body_truncated?: boolean
+  request_size?: number
 }
 
 export interface SecurityStats {
@@ -478,6 +483,11 @@ export interface AccessLog {
   header_order: string
   upstream_latency_ms: number
   response_size: number
+  request_headers?: string
+  request_body_preview?: string
+  request_body_truncated?: boolean
+  request_size?: number
+  response_headers?: string
 }
 
 export interface FingerprintSummary {
@@ -615,9 +625,17 @@ export interface BotSettings {
 
 export interface BotScoreLog {
   id: number
+  site_id?: number
+  request_id?: string
   client_ip: string
   host: string
   path: string
+  user_agent?: string
+  tls_ja3_hash?: string
+  tls_ja4?: string
+  tls_version?: string
+  tls_alpn?: string
+  header_order?: string
   total_score: number
   geoip_score: number
   fingerprint_score: number
@@ -1006,6 +1024,30 @@ export interface LogConfig {
   level: string
   file_path: string
   also_stdout: boolean
+}
+
+export interface RuntimeConfig {
+  db_driver: string
+  db_dsn: string
+  log_db_dsn: string
+  data_dir: string
+  redis_addr: string
+  redis_enabled: boolean
+  redis_db: number
+  admin_bind: string
+  admin_static_dir: string
+  geoip_db_path: string
+  cve_enabled: boolean
+  cve_feed_enabled: boolean
+  cve_feed_interval: string
+  drop_enabled: boolean
+  source: string
+  editable: boolean
+  restart_required: boolean
+}
+
+export async function getRuntimeConfig() {
+  return api<RuntimeConfig>("/api/v1/runtime-config")
 }
 
 export async function getNetworkConfig() {

@@ -69,3 +69,37 @@ func TestReadRouteFileResolvesDynamicExportPlaceholder(t *testing.T) {
 		t.Fatalf("expected site-detail-data, got %q", string(data))
 	}
 }
+
+func TestReadRouteFileResolvesNextRSCPageData(t *testing.T) {
+	webFS := fstest.MapFS{
+		"security/__next.!KGRhc2hib2FyZCk/security/__PAGE__.txt": &fstest.MapFile{Data: []byte("security-rsc")},
+	}
+
+	data, resolved, err := ReadRouteFile(webFS, "/security/__next.!KGRhc2hib2FyZCk.security.__PAGE__.txt")
+	if err != nil {
+		t.Fatalf("ReadRouteFile returned error for RSC page data: %v", err)
+	}
+	if resolved != "security/__next.!KGRhc2hib2FyZCk/security/__PAGE__.txt" {
+		t.Fatalf("expected security RSC page data path, got %s", resolved)
+	}
+	if string(data) != "security-rsc" {
+		t.Fatalf("expected security-rsc, got %q", string(data))
+	}
+}
+
+func TestReadRouteFileResolvesNextRSCSegmentData(t *testing.T) {
+	webFS := fstest.MapFS{
+		"ip-lists/__next.!KGRhc2hib2FyZCk/ip-lists.txt": &fstest.MapFile{Data: []byte("ip-lists-rsc")},
+	}
+
+	data, resolved, err := ReadRouteFile(webFS, "/ip-lists/__next.!KGRhc2hib2FyZCk.ip-lists.txt")
+	if err != nil {
+		t.Fatalf("ReadRouteFile returned error for RSC segment data: %v", err)
+	}
+	if resolved != "ip-lists/__next.!KGRhc2hib2FyZCk/ip-lists.txt" {
+		t.Fatalf("expected ip-lists RSC segment data path, got %s", resolved)
+	}
+	if string(data) != "ip-lists-rsc" {
+		t.Fatalf("expected ip-lists-rsc, got %q", string(data))
+	}
+}

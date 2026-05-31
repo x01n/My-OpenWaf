@@ -136,18 +136,23 @@ func TestCaptcha(repo *repository.SystemSettingsRepo, mgr *challenge.CaptchaMana
 		if captchaType == "" {
 			captchaType = challenge.CaptchaTypeMath
 		}
-		challenge, err := mgr.Generate(captchaType)
+		captchaChallenge, err := mgr.Generate(captchaType)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": "captcha generation failed: " + err.Error()})
 			return
 		}
 		c.JSON(200, map[string]any{
-			"session_id":   challenge.SessionID,
-			"type":         challenge.Type,
-			"master_img":   challenge.MasterImg,
-			"prompt":       challenge.Prompt,
+			"session_id":   captchaChallenge.SessionID,
 			"captcha_type": cfg.CaptchaType,
+			"type":         captchaChallenge.Type,
+			"master_img":   captchaChallenge.MasterImg,
+			"thumb_img":    captchaChallenge.ThumbImg,
+			"prompt":       captchaChallenge.Prompt,
+			"width":        captchaChallenge.Width,
+			"height":       captchaChallenge.Height,
 			"timeout":      cfg.CaptchaTimeout,
+			"pass_ttl":     cfg.CaptchaPassTTL,
+			"fallback":     captchaChallenge.Fallback,
 		})
 	}
 }

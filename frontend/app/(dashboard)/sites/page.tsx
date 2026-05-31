@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import {
   ExternalLink,
@@ -55,16 +55,14 @@ export default function SitesPage() {
   const pageSize = 20
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
-  async function load(targetPage = page) {
+  const load = useCallback(async (targetPage: number) => {
     setLoading(true)
     try {
       const res = await listSites({ page: targetPage, page_size: pageSize })
       const nextItems = res.items ?? []
       const nextTotal = res.total ?? 0
       if (targetPage > 1 && nextItems.length === 0 && nextTotal > 0) {
-        const previousPage = targetPage - 1
-        setPage(previousPage)
-        await load(previousPage)
+        setPage(targetPage - 1)
         return
       }
       setSites(nextItems)
@@ -76,11 +74,11 @@ export default function SitesPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     load(page)
-  }, [page])
+  }, [load, page])
 
   async function toggleSite(site: Site) {
     setBusyId(site.id)

@@ -1,6 +1,6 @@
 "use client"
 
-import { ChevronRight, Menu, RefreshCw, User } from "lucide-react"
+import { ChevronRight, Menu, User } from "lucide-react"
 import { usePathname, useRouter } from "next/navigation"
 import { logout } from "@/lib/api"
 import { Button } from "@/components/ui/button"

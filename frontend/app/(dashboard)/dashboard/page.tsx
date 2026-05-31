@@ -8,8 +8,10 @@ import {
   RefreshCcw,
   Shield,
   ShieldAlert,
+  TriangleAlert,
   Users,
   Wifi,
+  Zap,
 } from "lucide-react"
 import {
   Area,
@@ -347,7 +349,85 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      {/* Stats row 2: error metrics */}
+      {/* Stats row 2: threat posture */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+        {[
+          {
+            label: "观察事件",
+            value: summary ? fmt(summary.waf_observes) : "—",
+            icon: Shield,
+            color: "text-slate-500",
+            iconBg: "bg-slate-50",
+          },
+          {
+            label: "内置规则命中",
+            value: summary ? fmt(summary.builtin_hits) : "—",
+            icon: Zap,
+            color: "text-amber-500",
+            iconBg: "bg-amber-50",
+          },
+          {
+            label: "Bot 评分 24h",
+            value: summary ? fmt(summary.bot_total_24h) : "—",
+            icon: MonitorSmartphone,
+            color: "text-violet-500",
+            iconBg: "bg-violet-50",
+          },
+          {
+            label: "高风险 Bot 24h",
+            value: summary ? fmt(summary.bot_high_risk_24h) : "—",
+            icon: ShieldAlert,
+            color: "text-rose-500",
+            iconBg: "bg-rose-50",
+            warning: true,
+          },
+          {
+            label: "CVE 命中 24h",
+            value: summary ? fmt(summary.cve_total_24h) : "—",
+            icon: TriangleAlert,
+            color: "text-orange-500",
+            iconBg: "bg-orange-50",
+            warning: true,
+          },
+          {
+            label: "Drop 事件 24h",
+            value: summary ? fmt(summary.drop_total_24h) : "—",
+            icon: ShieldAlert,
+            color: "text-slate-700",
+            iconBg: "bg-slate-100",
+            warning: true,
+          },
+        ].map((card) => (
+          <div
+            key={card.label}
+            className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm"
+          >
+            <div className="flex items-center gap-2 text-[12px] text-slate-500">
+              <span>{card.label}</span>
+              <div
+                className={cn(
+                  "flex h-4.5 w-4.5 items-center justify-center rounded",
+                  card.iconBg
+                )}
+              >
+                <card.icon className={cn("h-3 w-3", card.color)} />
+              </div>
+            </div>
+            <div
+              className={cn(
+                "mt-2 text-2xl font-bold",
+                card.warning && card.value !== "0" && card.value !== "—"
+                  ? "text-orange-600"
+                  : "text-slate-900"
+              )}
+            >
+              {card.value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Stats row 3: error metrics */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
         {[
           {
@@ -410,6 +490,56 @@ export default function DashboardPage() {
             </div>
           </div>
         ))}
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-3">
+        <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
+          <h3 className="text-[15px] font-semibold text-slate-800">CVE 命中分布</h3>
+          <div className="mt-3 space-y-2">
+            {(summary?.cve_by_type_24h ?? []).length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">24 小时内暂无 CVE 命中</div>
+            ) : (
+              (summary?.cve_by_type_24h ?? []).slice(0, 5).map((item) => (
+                <div key={item.category} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
+                  <span className="font-medium text-slate-600">{item.category || "未分类"}</span>
+                  <span className="font-mono text-slate-900">{fmt(item.count)}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
+          <h3 className="text-[15px] font-semibold text-slate-800">Drop 来源</h3>
+          <div className="mt-3 space-y-2">
+            {Object.entries(summary?.drop_by_source_24h ?? {}).filter(([, value]) => value > 0).length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">24 小时内暂无主动断连</div>
+            ) : (
+              Object.entries(summary?.drop_by_source_24h ?? {}).filter(([, value]) => value > 0).map(([source, value]) => (
+                <div key={source} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
+                  <span className="font-medium text-slate-600">{source}</span>
+                  <span className="font-mono text-slate-900">{fmt(value)}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
+          <h3 className="text-[15px] font-semibold text-slate-800">Bot 风险概览</h3>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-lg bg-violet-50 p-3">
+              <div className="text-xs text-violet-600">评分</div>
+              <div className="mt-1 font-mono text-lg font-bold text-violet-800">{fmt(summary?.bot_total_24h ?? 0)}</div>
+            </div>
+            <div className="rounded-lg bg-rose-50 p-3">
+              <div className="text-xs text-rose-600">高风险</div>
+              <div className="mt-1 font-mono text-lg font-bold text-rose-800">{fmt(summary?.bot_high_risk_24h ?? 0)}</div>
+            </div>
+            <div className="rounded-lg bg-slate-100 p-3">
+              <div className="text-xs text-slate-600">阻断</div>
+              <div className="mt-1 font-mono text-lg font-bold text-slate-900">{fmt(summary?.bot_blocked_24h ?? 0)}</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">

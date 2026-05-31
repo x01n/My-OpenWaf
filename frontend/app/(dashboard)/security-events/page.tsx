@@ -57,6 +57,13 @@ function ActionBadge({ action }: { action: string }) {
   )
 }
 
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes === 0) return "-"
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+}
+
 function exportCSV(events: SecurityEvent[]) {
   const headers = [
     "ID",
@@ -197,11 +204,15 @@ export default function SecurityEventsPage() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   // derive stats
-  const terminalEvents = useMemo(
-    () => stats?.categories?.reduce((s, c) => s + c.count, 0) ?? 0,
-    [stats]
+  const terminalEvents = useMemo(() => events.filter((evt) => getWAFActionMeta(evt.action).defaultStatus !== "—").length, [events])
+  const challengeEvents = useMemo(
+    () => events.filter((evt) => evt.action.includes("challenge")).length,
+    [events]
   )
-  const uniqueIPs = useMemo(() => stats?.top_ips?.length ?? 0, [stats])
+  const uniqueIPs = useMemo(
+    () => new Set(events.map((evt) => evt.client_ip).filter(Boolean)).size,
+    [events]
+  )
 
   return (
     <div className="space-y-6">
@@ -252,17 +263,16 @@ export default function SecurityEventsPage() {
           <div className="mt-2 text-2xl font-semibold text-slate-900">
             {terminalEvents.toLocaleString()}
           </div>
-          <div className="mt-1 text-xs text-slate-400">按类别汇总</div>
+          <div className="mt-1 text-xs text-slate-400">当前页统计</div>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
-            <AlertTriangle className="h-3.5 w-3.5 text-amber-500" /> 今日质询
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-500" /> 验证事件
           </div>
           <div className="mt-2 text-2xl font-semibold text-slate-900">
-            {stats?.categories?.find((c) => c.category === "challenge")
-              ?.count ?? 0}
+            {challengeEvents.toLocaleString()}
           </div>
-          <div className="mt-1 text-xs text-slate-400">challenge events</div>
+          <div className="mt-1 text-xs text-slate-400">当前页 challenge 动作</div>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
@@ -271,7 +281,7 @@ export default function SecurityEventsPage() {
           <div className="mt-2 text-2xl font-semibold text-slate-900">
             {uniqueIPs}
           </div>
-          <div className="mt-1 text-xs text-slate-400">去重统计</div>
+          <div className="mt-1 text-xs text-slate-400">当前页去重</div>
         </div>
       </div>
 
@@ -518,7 +528,7 @@ export default function SecurityEventsPage() {
 
       {/* Detail Dialog */}
       <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
-        <DialogContent className="max-w-2xl rounded-xl">
+        <DialogContent className="max-h-[86vh] max-w-3xl overflow-y-auto rounded-xl">
           <DialogHeader>
             <DialogTitle>事件详情</DialogTitle>
             <DialogDescription>完整的拦截日志信息</DialogDescription>
@@ -544,6 +554,7 @@ export default function SecurityEventsPage() {
                   true,
                 ],
                 ["状态码", String(selected.status_code), true],
+                ["请求大小", formatBytes(selected.request_size ?? 0), true],
                 ["国家", selected.geo_country || "-", false],
                 ["城市", selected.geo_city || "-", false],
               ].map(([label, value, mono]) => (
@@ -569,6 +580,35 @@ export default function SecurityEventsPage() {
                 <div className="mt-1 text-sm text-slate-700">
                   {selected.match_desc || "-"}
                 </div>
+              </div>
+              {selected.query_string && (
+                <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
+                  <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
+                    查询参数
+                  </div>
+                  <code className="mt-1 block text-xs break-all text-slate-700">
+                    {selected.query_string}
+                  </code>
+                </div>
+              )}
+              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
+                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
+                  Request Headers
+                </div>
+                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700">
+                  {selected.request_headers || "-"}
+                </pre>
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
+                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
+                  Request Body Preview
+                </div>
+                <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700">
+                  {selected.request_body_preview || "-"}
+                </pre>
+                {selected.request_body_truncated && (
+                  <div className="mt-2 text-xs text-amber-600">请求体已截断显示</div>
+                )}
               </div>
               <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
                 <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">

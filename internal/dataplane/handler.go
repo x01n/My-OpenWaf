@@ -237,7 +237,7 @@ func Handler(opts Options) app.HandlerFunc {
 					Category:  decision.Category,
 				}
 				if opts.Writer != nil {
-					opts.Writer.RecordEvent(store.SecurityEvent{
+					recordSecurityEvent(c, opts, store.SecurityEvent{
 						SiteID:    rt.Site.ID,
 						RequestID: reqID,
 						ClientIP:  cipStr,
@@ -359,7 +359,7 @@ func Handler(opts Options) app.HandlerFunc {
 								opts.Metrics.RecordWAFBlock()
 							}
 							if opts.Writer != nil {
-								opts.Writer.RecordEvent(store.SecurityEvent{
+								recordSecurityEvent(c, opts, store.SecurityEvent{
 									SiteID:     rt.Site.ID,
 									RequestID:  reqID,
 									ClientIP:   cipStr,
@@ -397,7 +397,7 @@ func Handler(opts Options) app.HandlerFunc {
 								opts.Metrics.RecordWAFBlock()
 							}
 							if opts.Writer != nil {
-								opts.Writer.RecordEvent(store.SecurityEvent{
+								recordSecurityEvent(c, opts, store.SecurityEvent{
 									SiteID:     rt.Site.ID,
 									RequestID:  reqID,
 									ClientIP:   cipStr,
@@ -514,9 +514,17 @@ func Handler(opts Options) app.HandlerFunc {
 				}
 			}
 			opts.Writer.RecordBotScore(store.BotScoreLog{
+				SiteID:           rt.Site.ID,
+				RequestID:        reqID,
 				ClientIP:         cipStr,
 				Host:             host,
 				Path:             path,
+				UserAgent:        ua,
+				TLSJA3Hash:       reqCtx.TLS.JA3Hash,
+				TLSJA4:           reqCtx.TLS.JA4,
+				TLSVersion:       reqCtx.TLS.TLSVersion,
+				TLSALPN:          strings.Join(reqCtx.TLS.ALPN, ","),
+				HeaderOrder:      strings.Join(reqCtx.HeaderKeys, ","),
 				TotalScore:       bsi.TotalScore,
 				GeoIPScore:       bsi.GeoIPScore,
 				FingerprintScore: bsi.FingerprintScore,
@@ -547,7 +555,7 @@ func Handler(opts Options) app.HandlerFunc {
 				)
 			}
 			if opts.Writer != nil {
-				opts.Writer.RecordEvent(store.SecurityEvent{
+				recordSecurityEvent(c, opts, store.SecurityEvent{
 					SiteID:    rt.Site.ID,
 					RequestID: reqID,
 					ClientIP:  cipStr,
@@ -645,7 +653,7 @@ func Handler(opts Options) app.HandlerFunc {
 					slog.String("category", result.Action.Category),
 				)
 				if opts.Writer != nil {
-					opts.Writer.RecordEvent(store.SecurityEvent{
+					recordSecurityEvent(c, opts, store.SecurityEvent{
 						SiteID:     rt.Site.ID,
 						RequestID:  reqID,
 						ClientIP:   cipStr,
@@ -703,7 +711,7 @@ func Handler(opts Options) app.HandlerFunc {
 				)
 				statusCode := result.Action.ResponseStatusCode()
 				if opts.Writer != nil {
-					opts.Writer.RecordEvent(store.SecurityEvent{
+					recordSecurityEvent(c, opts, store.SecurityEvent{
 						SiteID:     rt.Site.ID,
 						RequestID:  reqID,
 						ClientIP:   cipStr,
@@ -723,7 +731,8 @@ func Handler(opts Options) app.HandlerFunc {
 				// Route to appropriate challenge handler
 				switch {
 				case result.Action.IsCaptchaChallenge() && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil:
-					challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, statusCode)
+					captchaType := challenge.CaptchaType(sn.Protection.CaptchaType)
+					challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, statusCode)
 				case result.Action.IsShieldChallenge() && sn.Protection.ShieldEnabled && opts.ShieldManager != nil:
 					origURL := string(c.Request.URI().RequestURI())
 					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, statusCode)
@@ -746,7 +755,7 @@ func Handler(opts Options) app.HandlerFunc {
 				)
 				statusCode := result.Action.EffectiveStatusCode(302)
 				if opts.Writer != nil {
-					opts.Writer.RecordEvent(store.SecurityEvent{
+					recordSecurityEvent(c, opts, store.SecurityEvent{
 						SiteID:     rt.Site.ID,
 						RequestID:  reqID,
 						ClientIP:   cipStr,
@@ -783,7 +792,7 @@ func Handler(opts Options) app.HandlerFunc {
 				)
 			}
 			if opts.Writer != nil {
-				opts.Writer.RecordEvent(store.SecurityEvent{
+				recordSecurityEvent(c, opts, store.SecurityEvent{
 					SiteID:     rt.Site.ID,
 					RequestID:  reqID,
 					ClientIP:   clientIPStr(clientIP),
@@ -985,23 +994,43 @@ func logAccess(log *slog.Logger, reqID string, method string, path string, host 
 var accessLogSampleCounter atomic.Uint32
 
 type accessLogInfo struct {
-	SiteID            uint
-	RequestID         string
-	ClientIP          string
-	Host              string
-	Path              string
-	QueryString       string
-	Method            string
-	UserAgent         string
-	StatusCode        int
-	WAFAction         string
-	CacheState        string
-	Upstream          string
-	HTTPProtocol      string
-	TLSFingerprint    bot.TLSClientFingerprint
-	HeaderOrder       []string
-	UpstreamLatencyMs int64
-	ResponseSize      int64
+	SiteID               uint
+	RequestID            string
+	ClientIP             string
+	Host                 string
+	Path                 string
+	QueryString          string
+	Method               string
+	UserAgent            string
+	StatusCode           int
+	WAFAction            string
+	CacheState           string
+	Upstream             string
+	HTTPProtocol         string
+	TLSFingerprint       bot.TLSClientFingerprint
+	HeaderOrder          []string
+	UpstreamLatencyMs    int64
+	ResponseSize         int64
+	RequestHeaders       string
+	RequestBodyPreview   string
+	RequestBodyTruncated bool
+	RequestSize          int64
+	ResponseHeaders      string
+}
+
+func recordSecurityEvent(c *app.RequestContext, opts Options, ev store.SecurityEvent) {
+	if opts.Writer == nil {
+		return
+	}
+	if ev.QueryString == "" {
+		ev.QueryString = string(c.URI().QueryString())
+	}
+	reqBody, truncated, size := requestBodyPreview(c)
+	ev.RequestHeaders = valueOrFallback(ev.RequestHeaders, requestHeadersJSON(c))
+	ev.RequestBodyPreview = valueOrFallback(ev.RequestBodyPreview, reqBody)
+	ev.RequestBodyTruncated = ev.RequestBodyTruncated || truncated
+	ev.RequestSize = firstPositive(ev.RequestSize, size)
+	opts.Writer.RecordEvent(ev)
 }
 
 type accessLogRecorder interface {
@@ -1018,31 +1047,85 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	if len(info.HeaderOrder) == 0 {
 		info.HeaderOrder = requestHeaderOrder(c)
 	}
+	requestBody, requestBodyTruncated, requestSize := requestBodyPreview(c)
 	return store.AccessLog{
-		SiteID:            info.SiteID,
-		RequestID:         info.RequestID,
-		ClientIP:          info.ClientIP,
-		Host:              info.Host,
-		Path:              info.Path,
-		QueryString:       info.QueryString,
-		Method:            info.Method,
-		StatusCode:        info.StatusCode,
-		WAFAction:         info.WAFAction,
-		CacheState:        info.CacheState,
-		Upstream:          info.Upstream,
-		UserAgent:         info.UserAgent,
-		HTTPProtocol:      info.HTTPProtocol,
-		TLSVersion:        info.TLSFingerprint.TLSVersion,
-		TLSSNI:            info.TLSFingerprint.SNI,
-		TLSALPN:           strings.Join(info.TLSFingerprint.ALPN, ","),
-		TLSJA3:            info.TLSFingerprint.JA3,
-		TLSJA3Hash:        info.TLSFingerprint.JA3Hash,
-		TLSJA4:            info.TLSFingerprint.JA4,
-		HeaderOrder:       strings.Join(info.HeaderOrder, ","),
-		UpstreamLatencyMs: info.UpstreamLatencyMs,
-		ResponseSize:      info.ResponseSize,
+		SiteID:               info.SiteID,
+		RequestID:            info.RequestID,
+		ClientIP:             info.ClientIP,
+		Host:                 info.Host,
+		Path:                 info.Path,
+		QueryString:          info.QueryString,
+		Method:               info.Method,
+		StatusCode:           info.StatusCode,
+		WAFAction:            info.WAFAction,
+		CacheState:           info.CacheState,
+		Upstream:             info.Upstream,
+		UserAgent:            info.UserAgent,
+		RequestHeaders:       valueOrFallback(info.RequestHeaders, requestHeadersJSON(c)),
+		RequestBodyPreview:   valueOrFallback(info.RequestBodyPreview, requestBody),
+		RequestBodyTruncated: info.RequestBodyTruncated || requestBodyTruncated,
+		RequestSize:          firstPositive(info.RequestSize, requestSize),
+		ResponseHeaders:      info.ResponseHeaders,
+		HTTPProtocol:         info.HTTPProtocol,
+		TLSVersion:           info.TLSFingerprint.TLSVersion,
+		TLSSNI:               info.TLSFingerprint.SNI,
+		TLSALPN:              strings.Join(info.TLSFingerprint.ALPN, ","),
+		TLSJA3:               info.TLSFingerprint.JA3,
+		TLSJA3Hash:           info.TLSFingerprint.JA3Hash,
+		TLSJA4:               info.TLSFingerprint.JA4,
+		HeaderOrder:          strings.Join(info.HeaderOrder, ","),
+		UpstreamLatencyMs:    info.UpstreamLatencyMs,
+		ResponseSize:         info.ResponseSize,
 	}
 }
+
+const logBodyPreviewLimit = 8192
+
+func requestHeadersJSON(c *app.RequestContext) string {
+	headers := make(map[string][]string)
+	c.Request.Header.VisitAll(func(k, v []byte) {
+		key := string(k)
+		lower := strings.ToLower(key)
+		if lower == "authorization" || lower == "cookie" || lower == "x-api-key" || lower == "x-auth-token" {
+			headers[key] = []string{"[redacted]"}
+			return
+		}
+		headers[key] = append(headers[key], string(v))
+	})
+	data, err := json.Marshal(headers)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func requestBodyPreview(c *app.RequestContext) (string, bool, int64) {
+	body := c.Request.Body()
+	size := int64(len(body))
+	if len(body) == 0 {
+		return "", false, size
+	}
+	truncated := len(body) > logBodyPreviewLimit
+	if truncated {
+		body = body[:logBodyPreviewLimit]
+	}
+	return string(body), truncated, size
+}
+
+func valueOrFallback(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func firstPositive(value, fallback int64) int64 {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
 func tlsFingerprintFromRequestContext(c *app.RequestContext) (bot.TLSClientFingerprint, bool) {
 	if value, ok := c.Get(tlsFingerprintContextKey); ok {
 		if fp, ok := value.(bot.TLSClientFingerprint); ok && fp.HasValue() {
@@ -1294,7 +1377,7 @@ func handleCaptchaVerify(c *app.RequestContext, opts Options) bool {
 		return true
 	}
 
-	if opts.CaptchaManager.Verify(sessionID, answer) {
+	if opts.CaptchaManager.VerifyAdvanced(sessionID, answer) {
 		setChallengeCookie(c, opts)
 		referer := string(c.GetHeader("Referer"))
 		if referer == "" {

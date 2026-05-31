@@ -19,12 +19,12 @@ type OWASPRule struct {
 
 // OWASPRuleOverride allows per-rule configuration stored in ProtectionConfig.
 type OWASPRuleOverride struct {
-	Enabled    *bool    `json:"enabled,omitempty"`
-	Whitelist  []string `json:"whitelist,omitempty"` // path whitelist — matching paths skip this rule
-	Action     string   `json:"action,omitempty"`
-	StatusCode int      `json:"status_code,omitempty"`
-	RedirectTo string   `json:"redirect_to,omitempty"`
-	Sensitivity string  `json:"sensitivity,omitempty"` // per-rule OWASP level (e.g. strict, high, medium)
+	Enabled     *bool    `json:"enabled,omitempty"`
+	Whitelist   []string `json:"whitelist,omitempty"` // path whitelist — matching paths skip this rule
+	Action      string   `json:"action,omitempty"`
+	StatusCode  int      `json:"status_code,omitempty"`
+	RedirectTo  string   `json:"redirect_to,omitempty"`
+	Sensitivity string   `json:"sensitivity,omitempty"` // per-rule OWASP level (e.g. strict, high, medium)
 }
 
 // OWASPRuleRegistry is a thread-safe registry of all granular OWASP rules.

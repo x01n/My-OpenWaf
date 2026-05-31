@@ -63,6 +63,7 @@ func routeCandidates(requestPath string) []string {
 	}
 
 	variants := []string{clean}
+	variants = append(variants, nextRSCVariants(clean)...)
 	variants = append(variants, dynamicRouteVariants(clean)...)
 
 	var candidates []string
@@ -80,6 +81,24 @@ func routeCandidates(requestPath string) []string {
 	}
 
 	return uniqueStrings(candidates)
+}
+
+func nextRSCVariants(clean string) []string {
+	dir, file := path.Split(clean)
+	if !strings.HasPrefix(file, "__next.") || !strings.HasSuffix(file, ".txt") {
+		return nil
+	}
+
+	base := strings.TrimSuffix(file, ".txt")
+	parts := strings.Split(base, ".")
+	out := []string{path.Join(strings.TrimSuffix(dir, "/"), strings.Join(parts[:2], "."), strings.Join(parts[2:], ".")+".txt")}
+	if strings.HasSuffix(base, ".__PAGE__") {
+		parts := strings.Split(strings.TrimSuffix(base, ".__PAGE__"), ".")
+		if len(parts) >= 3 && parts[0] == "__next" {
+			out = append(out, path.Join(strings.TrimSuffix(dir, "/"), parts[0]+"."+parts[1], path.Join(parts[2:]...), "__PAGE__.txt"))
+		}
+	}
+	return out
 }
 
 func dynamicRouteVariants(clean string) []string {

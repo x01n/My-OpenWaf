@@ -44,10 +44,14 @@ import {
   testCaptcha,
   getChainConfig,
   updateChainConfig,
+  listChainSessions,
+  deleteChainSession,
   getEscalationConfig,
   updateEscalationConfig,
   CAPTCHA_TYPE_OPTIONS,
   type CaptchaConfig,
+  type CaptchaTestResponse,
+  type ChainSession,
   type ChainStep,
   type EscalationStep,
   type EscalationConfig,
@@ -59,9 +63,11 @@ function CaptchaTab() {
     captcha_enabled: false,
     captcha_type: "math",
     captcha_timeout: 120,
+    captcha_pass_ttl: 120,
     shield_enabled: false,
     shield_difficulty: 4,
   })
+  const [preview, setPreview] = useState<CaptchaTestResponse | null>(null)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
 
@@ -87,11 +93,12 @@ function CaptchaTab() {
     setTesting(true)
     try {
       const r = await testCaptcha()
-      if (r.implemented === false || r.supported === false) {
-        toast.warning(r.message || "验证码测试预览暂未接入真实后端能力")
+      setPreview(r)
+      if (r.fallback) {
+        toast.warning("当前验证码类型已回退到内置算术验证码")
         return
       }
-      toast.success(r.message || "测试成功")
+      toast.success("验证码预览已生成")
     } catch (e) {
       toast.error(String(e))
     } finally {
@@ -100,76 +107,162 @@ function CaptchaTab() {
   }
 
   return (
-    <Surface title="验证码配置" description="配置人机验证码类型和难度。">
-      <div className="max-w-xl space-y-5">
-        <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-          <Label className="font-medium">启用验证码</Label>
-          <Switch
-            checked={cfg.captcha_enabled}
-            onCheckedChange={(v) => setCfg({ ...cfg, captcha_enabled: v })}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label>验证码类型</Label>
-          <Select
-            value={cfg.captcha_type}
-            onValueChange={(v: CaptchaConfig["captcha_type"]) =>
-              setCfg({ ...cfg, captcha_type: v })
-            }
-          >
-            <SelectTrigger className="rounded-md">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CAPTCHA_TYPE_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <div className="text-xs text-slate-500">
-            {
-              CAPTCHA_TYPE_OPTIONS.find(
-                (option) => option.value === cfg.captcha_type
-              )?.description
-            }
+    <Surface
+      title="验证码类型配置"
+      description="仅在规则动作触发 captcha_challenge，或连锁验证执行 captcha 步骤时生效。"
+    >
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,560px)_minmax(320px,1fr)]">
+        <div className="space-y-5">
+          <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div>
+              <Label className="font-medium">启用 captcha_challenge</Label>
+              <p className="mt-1 text-xs text-slate-500">
+                关闭后命中验证码动作会退回通用挑战页，不会生成具体验证码。
+              </p>
+            </div>
+            <Switch
+              checked={cfg.captcha_enabled}
+              onCheckedChange={(v) => setCfg({ ...cfg, captcha_enabled: v })}
+            />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label>验证超时时间（秒）</Label>
+              <Input
+                type="number"
+                min={10}
+                max={600}
+                value={cfg.captcha_timeout}
+                onChange={(e) =>
+                  setCfg({ ...cfg, captcha_timeout: Number(e.target.value) })
+                }
+                className="rounded-md"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>通过有效期（秒）</Label>
+              <Input
+                type="number"
+                min={10}
+                max={3600}
+                value={cfg.captcha_pass_ttl}
+                onChange={(e) =>
+                  setCfg({ ...cfg, captcha_pass_ttl: Number(e.target.value) })
+                }
+                className="rounded-md"
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label>验证码类型</Label>
+            <Select
+              value={cfg.captcha_type}
+              onValueChange={(v: CaptchaConfig["captcha_type"]) =>
+                setCfg({ ...cfg, captcha_type: v })
+              }
+            >
+              <SelectTrigger className="rounded-md">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CAPTCHA_TYPE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="text-xs text-slate-500">
+              {
+                CAPTCHA_TYPE_OPTIONS.find(
+                  (option) => option.value === cfg.captcha_type
+                )?.description
+              }
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600">
+            <div className="font-medium text-slate-900">触发关系</div>
+            <p className="mt-1">
+              验证码类型不会由 HTTP 状态码决定，而是由 WAF 动作决定：规则动作为
+              <code className="mx-1 rounded bg-slate-100 px-1 py-0.5">captcha_challenge</code>
+              时使用本配置；5 秒盾和连锁验证有独立流程。
+            </p>
+          </div>
+          <div className="flex gap-3 pt-2">
+            <Button
+              onClick={doTest}
+              variant="outline"
+              className="rounded-md"
+              disabled={testing}
+            >
+              {testing ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Play className="mr-2 h-4 w-4" />
+              )}
+              生成预览
+            </Button>
+            <Button
+              onClick={save}
+              disabled={saving}
+              className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
+            >
+              {saving ? "保存中..." : "保存配置"}
+            </Button>
           </div>
         </div>
-        <div className="space-y-2">
-          <Label>超时时间（秒）</Label>
-          <Input
-            type="number"
-            min={10}
-            max={600}
-            value={cfg.captcha_timeout}
-            onChange={(e) =>
-              setCfg({ ...cfg, captcha_timeout: Number(e.target.value) })
-            }
-            className="rounded-md"
-          />
-        </div>
-        <div className="flex gap-3 pt-2">
-          <Button
-            onClick={doTest}
-            variant="outline"
-            className="rounded-md"
-            disabled={testing}
-          >
-            {testing ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <Play className="mr-2 h-4 w-4" />
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">
+                当前预览
+              </div>
+              <div className="text-xs text-slate-500">
+                预览会创建一次性 session，不包含答案。
+              </div>
+            </div>
+            {preview && (
+              <span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-xs text-slate-500">
+                {preview.type}
+              </span>
             )}
-            测试预览
-          </Button>
-          <Button
-            onClick={save}
-            disabled={saving}
-            className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
-          >
-            {saving ? "保存中..." : "保存配置"}
-          </Button>
+          </div>
+          {preview ? (
+            <div className="space-y-3">
+              <div className="overflow-hidden rounded-lg border border-slate-200 bg-white p-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={preview.master_img}
+                  alt="captcha preview"
+                  className="mx-auto max-h-64 max-w-full rounded-md object-contain"
+                />
+                {preview.thumb_img && (
+                  <>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={preview.thumb_img}
+                      alt="captcha target preview"
+                      className="mx-auto mt-3 max-h-24 max-w-full rounded-md object-contain"
+                    />
+                  </>
+                )}
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-600">
+                <div className="font-medium text-slate-900">{preview.prompt}</div>
+                <div className="mt-1 break-all">Session: {preview.session_id}</div>
+                <div>Timeout: {preview.timeout}s · Pass TTL: {preview.pass_ttl ?? cfg.captcha_pass_ttl}s</div>
+                {preview.fallback && (
+                  <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-700">
+                    go-captcha 资源不可用，已回退到内置 math。
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex min-h-64 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white text-sm text-slate-400">
+              点击“生成预览”查看后端真实验证码资源
+            </div>
+          )}
         </div>
       </div>
     </Surface>
@@ -182,6 +275,7 @@ function ShieldTab() {
     captcha_enabled: false,
     captcha_type: "math",
     captcha_timeout: 120,
+    captcha_pass_ttl: 120,
     shield_enabled: false,
     shield_difficulty: 4,
     shield_timeout_secs: 30,
@@ -220,7 +314,7 @@ function ShieldTab() {
     <div className="space-y-6">
       <Surface
         title="5秒盾基础配置"
-        description="基于 PoW + 验证码的浏览器环境挑战，类似 Cloudflare 5s Shield。"
+        description="基于 PoW、JavaScript/WASM、环境指纹和协议约束的浏览器挑战。"
       >
         <div className="max-w-xl space-y-5">
           <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
@@ -288,33 +382,6 @@ function ShieldTab() {
                 }
                 className="rounded-md"
               />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label>验证码类型</Label>
-            <Select
-              value={cfg.captcha_type}
-              onValueChange={(v: CaptchaConfig["captcha_type"]) =>
-                setCfg({ ...cfg, captcha_type: v })
-              }
-            >
-              <SelectTrigger className="rounded-md">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CAPTCHA_TYPE_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <div className="text-xs text-slate-500">
-              {
-                CAPTCHA_TYPE_OPTIONS.find(
-                  (option) => option.value === cfg.captcha_type
-                )?.description
-              }
             </div>
           </div>
           <div className="space-y-2">
@@ -514,7 +581,7 @@ function ChainTab() {
                 <SelectContent>
                   <SelectItem value="env">环境检测</SelectItem>
                   <SelectItem value="pow">PoW 验证</SelectItem>
-                  <SelectItem value="captcha">算术验证码</SelectItem>
+                  <SelectItem value="captcha">验证码（继承全局类型）</SelectItem>
                 </SelectContent>
               </Select>
               <Select
@@ -596,6 +663,92 @@ function ChainTab() {
   )
 }
 
+function ChainSessionsPanel() {
+  const [sessions, setSessions] = useState<ChainSession[]>([])
+  const [loading, setLoading] = useState(false)
+
+  async function load() {
+    setLoading(true)
+    try {
+      const res = await listChainSessions()
+      setSessions(res.items ?? [])
+    } catch (e) {
+      toast.error(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  async function remove(id: string) {
+    try {
+      await deleteChainSession(id)
+      toast.success("连锁验证会话已清理")
+      setSessions(sessions.filter((session) => session.id !== id))
+    } catch (e) {
+      toast.error(String(e))
+    }
+  }
+
+  return (
+    <Surface
+      title="连锁验证会话"
+      description="查看正在进行的 chain_challenge 会话，并清理异常卡住的验证状态。"
+    >
+      <div className="overflow-x-auto rounded-lg border border-slate-200">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Session</TableHead>
+              <TableHead>客户端 IP</TableHead>
+              <TableHead>步骤</TableHead>
+              <TableHead>开始时间</TableHead>
+              <TableHead className="w-20 text-right">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sessions.map((session) => (
+              <TableRow key={session.id}>
+                <TableCell className="max-w-[220px] truncate font-mono text-xs">
+                  {session.id}
+                </TableCell>
+                <TableCell>{session.client_ip || "—"}</TableCell>
+                <TableCell>{session.current_step}</TableCell>
+                <TableCell className="whitespace-nowrap text-xs text-slate-500">
+                  {session.started_at || "—"}
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 text-rose-500 hover:text-rose-700"
+                    onClick={() => remove(session.id)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+            {!sessions.length && (
+              <TableRow>
+                <TableCell colSpan={5} className="py-8 text-center text-sm text-slate-500">
+                  {loading ? "加载中..." : "暂无连锁验证会话"}
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </div>
+      <Button variant="outline" className="mt-4 rounded-md" onClick={load}>
+        刷新会话
+      </Button>
+    </Surface>
+  )
+}
+
 /* ───────── 防重放 Tab ───────── */
 function AntiReplayTab() {
   return (
@@ -643,7 +796,7 @@ function EscalationTab() {
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    getEscalationConfig(1)
+    getEscalationConfig("global")
       .then(setCfg)
       .catch(() => {})
   }, [])
@@ -672,7 +825,7 @@ function EscalationTab() {
   async function save() {
     setSaving(true)
     try {
-      await updateEscalationConfig(1, cfg)
+      await updateEscalationConfig("global", cfg)
       toast.success("阶梯升级配置已保存")
     } catch (e) {
       toast.error(String(e))
@@ -803,6 +956,9 @@ export default function SecurityPolicyPage() {
             <TabsTrigger value="chain" className="gap-1.5">
               <Link2 className="h-4 w-4" /> 连锁策略
             </TabsTrigger>
+            <TabsTrigger value="sessions" className="gap-1.5">
+              <ShieldCheck className="h-4 w-4" /> 会话管理
+            </TabsTrigger>
             <TabsTrigger value="antireplay" className="gap-1.5">
               <RotateCcw className="h-4 w-4" /> 防重放
             </TabsTrigger>
@@ -820,6 +976,9 @@ export default function SecurityPolicyPage() {
         </TabsContent>
         <TabsContent value="chain">
           <ChainTab />
+        </TabsContent>
+        <TabsContent value="sessions">
+          <ChainSessionsPanel />
         </TabsContent>
         <TabsContent value="antireplay">
           <AntiReplayTab />

@@ -12,14 +12,14 @@ import (
 
 // Metrics collects WAF runtime metrics for the /metrics (Prometheus) endpoint.
 type Metrics struct {
-	RequestsTotal   atomic.Int64
-	BlocksTotal     atomic.Int64
-	ObservesTotal   atomic.Int64
-	BuiltinHits     atomic.Int64
-	CacheHits       atomic.Int64
-	CacheMisses     atomic.Int64
-	UpstreamErrors  atomic.Int64
-	Uptime          time.Time
+	RequestsTotal  atomic.Int64
+	BlocksTotal    atomic.Int64
+	ObservesTotal  atomic.Int64
+	BuiltinHits    atomic.Int64
+	CacheHits      atomic.Int64
+	CacheMisses    atomic.Int64
+	UpstreamErrors atomic.Int64
+	Uptime         time.Time
 }
 
 // NewMetrics creates a new metrics collector.
@@ -28,16 +28,16 @@ func NewMetrics() *Metrics {
 }
 
 // RecordRequest increments the total request counter.
-func (m *Metrics) RecordRequest()  { m.RequestsTotal.Add(1) }
+func (m *Metrics) RecordRequest() { m.RequestsTotal.Add(1) }
 
 // RecordBlock increments the block counter.
-func (m *Metrics) RecordBlock()    { m.BlocksTotal.Add(1) }
+func (m *Metrics) RecordBlock() { m.BlocksTotal.Add(1) }
 
 // RecordObserve increments the observe counter.
-func (m *Metrics) RecordObserve()  { m.ObservesTotal.Add(1) }
+func (m *Metrics) RecordObserve() { m.ObservesTotal.Add(1) }
 
 // RecordBuiltin increments the builtin hit counter.
-func (m *Metrics) RecordBuiltin()  { m.BuiltinHits.Add(1) }
+func (m *Metrics) RecordBuiltin() { m.BuiltinHits.Add(1) }
 
 // RecordCacheHit increments cache hit counter.
 func (m *Metrics) RecordCacheHit() { m.CacheHits.Add(1) }

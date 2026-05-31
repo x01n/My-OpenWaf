@@ -29,16 +29,16 @@ type CertificateResult struct {
 
 // Manager 管理 ACME 证书的申请和续期。
 type Manager struct {
-	mu          sync.Mutex
-	client      *acme.Client
-	accountKey  crypto.Signer
-	email       string
+	mu           sync.Mutex
+	client       *acme.Client
+	accountKey   crypto.Signer
+	email        string
 	directoryURL string
-	log         *slog.Logger
+	log          *slog.Logger
 
 	// HTTP-01 质询令牌存储
-	challenges   map[string]string
-	challengeMu  sync.RWMutex
+	challenges  map[string]string
+	challengeMu sync.RWMutex
 
 	// 证书续期回调
 	onRenew func(domain, certPEM, keyPEM string, expiry time.Time, renewErr error) error

@@ -5,7 +5,6 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   useParams,
   usePathname,
-  useRouter,
   useSearchParams,
 } from "next/navigation"
 import {
@@ -51,7 +50,7 @@ import {
   type Site,
   type SiteAccessLogStats,
 } from "@/lib/api"
-import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console"
+import { terminalWAFActionOptions } from "@/lib/console"
 import {
   findInvalidSiteUpstream,
   parseSiteUpstreams,
@@ -104,7 +103,6 @@ type TabKey = "basic" | "listeners" | "upstream" | "advanced" | "inventory"
 export default function SiteDetailClient() {
   const params = useParams()
   const pathname = usePathname()
-  const router = useRouter()
   const searchParams = useSearchParams()
   const siteId = useMemo(() => {
     const rawId = params.id as string | undefined

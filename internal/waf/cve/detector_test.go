@@ -103,6 +103,17 @@ func TestCVEDetector_SSRF(t *testing.T) {
 	}
 }
 
+func TestCVEDetector_SSRFDoesNotScanHeaderValues(t *testing.T) {
+	d := NewCVEDetector()
+	req := BuildCVERequest("/_next/static/chunks/app.js", "", map[string]string{"Referer": "http://127.0.0.1:9443/security"}, nil, "")
+	matches := d.Detect(req)
+	for _, m := range matches {
+		if m.CVEID == "CVE-2019-SSRF" {
+			t.Fatalf("expected localhost Referer to be ignored for SSRF, got %+v", matches)
+		}
+	}
+}
+
 func TestCVEDetector_CategorySensitivity_OffDisablesGeneralDetector(t *testing.T) {
 	d := NewCVEDetector()
 	req := BuildCVERequest("/fetch", "url=http://169.254.169.254/latest/meta-data/", nil, nil, "")
@@ -292,6 +303,9 @@ func TestCVEDetector_NoFalsePositive(t *testing.T) {
 		{"simple GET", "/api/users", "page=1&limit=10", ""},
 		{"json POST", "/api/login", "", `{"username":"admin","password":"test123"}`},
 		{"static file", "/assets/main.css", "", ""},
+		{"cdn package manifest", "/npm/@emotion/react@11.11.1/package.json", "", ""},
+		{"vscode extension package manifest", "/public/vscode-extensions/v21/extensions/json-language-features/server/package.json", "", ""},
+		{"schema package manifest", "/SchemaStore/schemastore/master/src/schemas/json/package.json", "", ""},
 	}
 
 	for _, tt := range normalRequests {
@@ -300,7 +314,16 @@ func TestCVEDetector_NoFalsePositive(t *testing.T) {
 			if tt.body != "" {
 				bodyBytes = []byte(tt.body)
 			}
-			req := BuildCVERequest(tt.path, tt.query, nil, bodyBytes, "application/json")
+			headers := map[string]string{"Host": "example.com"}
+			switch tt.name {
+			case "cdn package manifest":
+				headers["Host"] = "cdn.jsdelivr.net"
+			case "vscode extension package manifest":
+				headers["Host"] = "codesandbox.io"
+			case "schema package manifest":
+				headers["Host"] = "raw.githubusercontent.com"
+			}
+			req := BuildCVERequest(tt.path, tt.query, headers, bodyBytes, "application/json")
 			matches := d.Detect(req)
 			if len(matches) > 0 {
 				t.Errorf("false positive on normal request %q: got %d matches: %v", tt.name, len(matches), matches[0].CVEID)

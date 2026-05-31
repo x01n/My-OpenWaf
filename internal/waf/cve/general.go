@@ -685,6 +685,9 @@ func init() {
 		Category: "cve_general",
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if isPackageManifestRequest(uri, headers) {
+				return nil
+			}
 			if reSensitiveFile.MatchString(uri) {
 				return &CVEMatch{
 					CVEID:       "CVE-2024-SENSFILE",
@@ -893,7 +896,7 @@ func NewGeneralCVEDetector() *GeneralCVEDetector {
 				reSSRF_10, reSSRF_172, reSSRF_192, reSSRF_127, reSSRF_local,
 				reSSRF_meta, reSSRF_gcloud, reSSRF_file, reSSRF_ipv6, reSSRF_0000,
 			},
-			target: "all",
+			target: "url_body",
 		},
 		{
 			cveID: "CVE-2018-XXE", severity: "high",
@@ -1100,6 +1103,9 @@ func (d *GeneralCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	}
 
 	for _, rule := range d.rules {
+		if rule.cveID == "CVE-2024-SENSFILE" && isPackageManifestRequest(req.Path, req.Headers) {
+			continue
+		}
 		if rule.cveID == "CVE-2023-SMUGGLE" {
 			continue // handled above
 		}
@@ -1176,4 +1182,32 @@ func matchAllPatterns(req *CVERequest, rule generalCVERule) bool {
 		}
 	}
 	return true
+}
+
+func isPackageManifestRequest(uri string, headers map[string]string) bool {
+	pathOnly := uri
+	if i := strings.IndexByte(pathOnly, '?'); i >= 0 {
+		pathOnly = pathOnly[:i]
+	}
+	if !strings.HasSuffix(strings.ToLower(pathOnly), "/package.json") {
+		return false
+	}
+	host := strings.ToLower(headers["Host"])
+	if host == "" {
+		host = strings.ToLower(headers["host"])
+	}
+	if host == "cdn.jsdelivr.net" || host == "codesandbox.io" || host == "raw.githubusercontent.com" {
+		return true
+	}
+	referer := strings.ToLower(headers["Referer"])
+	if referer == "" {
+		referer = strings.ToLower(headers["referer"])
+	}
+	origin := strings.ToLower(headers["Origin"])
+	if origin == "" {
+		origin = strings.ToLower(headers["origin"])
+	}
+	return strings.HasPrefix(pathOnly, "/npm/") ||
+		(strings.HasPrefix(pathOnly, "/public/vscode-extensions/") && strings.Contains(referer, "codesandbox.io/")) ||
+		(strings.HasPrefix(pathOnly, "/SchemaStore/") && (strings.Contains(referer, "codesandbox.io/") || strings.Contains(origin, "codesandbox.io")))
 }

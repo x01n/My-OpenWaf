@@ -65,6 +65,7 @@ import {
   getDashboardSummary,
   getNetworkConfig,
   getProtectionSettings,
+  getRuntimeConfig,
   getSecurityEvents,
   getSystemSettings,
   getTLSCipherSuites,
@@ -78,6 +79,7 @@ import {
   type AccessLog,
   type DashboardSummary,
   type ProtectionSettings,
+  type RuntimeConfig,
   type SecurityEvent,
   type SystemSetting,
 } from "@/lib/api"
@@ -253,6 +255,9 @@ export default function SettingsPage() {
   // Admin console certificate
   const [adminCertMode, setAdminCertMode] = useState("self_signed")
 
+  /* ---- Runtime Config tab state ---- */
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null)
+
   /* ---- System Logs tab state ---- */
   const [logType, setLogType] = useState<"security" | "access">("security")
   const [secEvents, setSecEvents] = useState<SecurityEvent[]>([])
@@ -293,6 +298,7 @@ export default function SettingsPage() {
         networkConfig,
         tlsConfig,
         cipherSuiteConfig,
+        runtime,
       ] = await Promise.all([
         getSystemSettings(),
         getProtectionSettings(),
@@ -304,10 +310,12 @@ export default function SettingsPage() {
           insecure: [],
           curves: [],
         })),
+        getRuntimeConfig().catch(() => null),
       ])
       setSettings(systemSettings)
       setProtection(protectionSettings)
       setSummary(dash)
+      setRuntimeConfig(runtime)
       setSecureCipherSuiteOptions(cipherSuiteConfig.secure ?? [])
       setInsecureCipherSuiteOptions(cipherSuiteConfig.insecure ?? [])
       setCurveOptions(cipherSuiteConfig.curves ?? [])
@@ -726,7 +734,7 @@ export default function SettingsPage() {
           title="通用设置"
           description="按使用场景拆成防护运行时、控制台安全、日志运维三组；验证码跳过凭据现在绑定 IP、User-Agent、站点与监听器，并使用短期有效期。"
         />
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <div className="mt-4 grid gap-3 md:grid-cols-4">
           {[
             {
               title: "防护运行时",
@@ -742,6 +750,11 @@ export default function SettingsPage() {
               title: "日志运维",
               desc: "安全事件与访问日志检索",
               icon: Database,
+            },
+            {
+              title: "运行配置",
+              desc: "Redis、数据库、监听与启动参数",
+              icon: Network,
             },
           ].map((item) => (
             <div
@@ -774,6 +787,10 @@ export default function SettingsPage() {
           <TabsTrigger value="logs" className="gap-1.5 px-4 py-2 text-sm">
             <Database className="h-4 w-4" />
             系统日志
+          </TabsTrigger>
+          <TabsTrigger value="runtime" className="gap-1.5 px-4 py-2 text-sm">
+            <Network className="h-4 w-4" />
+            运行配置
           </TabsTrigger>
         </TabsList>
 
@@ -1967,6 +1984,60 @@ export default function SettingsPage() {
                 </>
               )}
             </div>
+          </div>
+        </TabsContent>
+
+        {/* ============================================================ */}
+        {/*  TAB 4: 运行配置                                              */}
+        {/* ============================================================ */}
+        <TabsContent value="runtime">
+          <div className="space-y-6">
+            <Surface
+              title="启动与存储配置"
+              description="展示当前进程启动时读取的 MY_OPENWAF_* 配置；数据库、Redis、监听地址等变更需要修改部署环境并重启后生效。"
+            >
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {[
+                  ["配置来源", runtimeConfig?.source || "environment"],
+                  ["可在线编辑", runtimeConfig?.editable ? "是" : "否"],
+                  ["需要重启", runtimeConfig?.restart_required ? "是" : "否"],
+                  ["数据库驱动", runtimeConfig?.db_driver || "-"],
+                  ["数据目录", runtimeConfig?.data_dir || "-"],
+                  ["Admin 监听", runtimeConfig?.admin_bind || "-"],
+                  ["Redis 状态", runtimeConfig?.redis_enabled ? "已启用" : "未启用"],
+                  ["Redis DB", String(runtimeConfig?.redis_db ?? 0)],
+                  ["CVE Feed", runtimeConfig?.cve_feed_enabled ? "启用" : "关闭"],
+                  ["Drop 策略", runtimeConfig?.drop_enabled ? "启用" : "关闭"],
+                ].map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="rounded-lg border border-slate-100 bg-slate-50 p-3"
+                  >
+                    <div className="text-xs text-slate-500">{label}</div>
+                    <div className="mt-1 break-all font-mono text-sm text-slate-900">
+                      {value}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Surface>
+
+            <Surface
+              title="连接字符串与路径"
+              description="敏感配置只展示当前值；Redis 密码等密钥不从接口返回。生产环境建议通过环境变量、systemd、Docker Compose 或 Kubernetes Secret 管理。"
+            >
+              <div className="space-y-3">
+                <InlineMeta label="MY_OPENWAF_DSN / MY_OPENWAF_DB" value={<span className="break-all font-mono">{runtimeConfig?.db_dsn || "-"}</span>} />
+                <InlineMeta label="MY_OPENWAF_LOG_DSN / MY_OPENWAF_LOG_DB" value={<span className="break-all font-mono">{runtimeConfig?.log_db_dsn || "-"}</span>} />
+                <InlineMeta label="MY_OPENWAF_REDIS_ADDR" value={<span className="break-all font-mono">{runtimeConfig?.redis_addr || "未配置"}</span>} />
+                <InlineMeta label="MY_OPENWAF_ADMIN_STATIC_DIR" value={<span className="break-all font-mono">{runtimeConfig?.admin_static_dir || "embedded"}</span>} />
+                <InlineMeta label="MY_OPENWAF_GEOIP_DB" value={<span className="break-all font-mono">{runtimeConfig?.geoip_db_path || "未配置"}</span>} />
+                <InlineMeta label="MY_OPENWAF_CVE_FEED_INTERVAL" value={<span className="break-all font-mono">{runtimeConfig?.cve_feed_interval || "-"}</span>} />
+              </div>
+              <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
+                这些是进程级配置，不适合直接写入业务数据库后热更新。后续如果要支持配置文件写回，应单独引入受控的 YAML 配置、权限校验、重启提示和回滚机制。
+              </div>
+            </Surface>
           </div>
         </TabsContent>
       </Tabs>

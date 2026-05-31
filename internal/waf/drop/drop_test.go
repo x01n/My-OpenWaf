@@ -8,6 +8,7 @@ import (
 )
 
 type mockConn struct{ closed bool }
+
 func (m *mockConn) Read(b []byte) (n int, err error)   { return 0, nil }
 func (m *mockConn) Write(b []byte) (n int, err error)  { return len(b), nil }
 func (m *mockConn) Close() error                       { m.closed = true; return nil }
@@ -22,27 +23,44 @@ func TestDropExecutor_Execute(t *testing.T) {
 	conn := &mockConn{}
 	reason := DropReason{Source: "bot", RuleID: "test-rule-1", Detail: "bot detected", ClientIP: "1.2.3.4", Host: "example.com", Path: "/api/data", Timestamp: time.Now()}
 	err := executor.Execute(conn, reason)
-	if err != nil { t.Fatalf("Execute returned error: %v", err) }
-	if !conn.closed { t.Error("connection should be closed after Execute") }
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !conn.closed {
+		t.Error("connection should be closed after Execute")
+	}
 }
 
 func TestDropExecutor_ExecuteNilConn(t *testing.T) {
 	executor := NewDropExecutor(true, slog.Default())
 	reason := DropReason{Source: "cve", Timestamp: time.Now()}
 	err := executor.Execute(nil, reason)
-	if err != nil { t.Fatalf("Execute(nil) returned error: %v", err) }
+	if err != nil {
+		t.Fatalf("Execute(nil) returned error: %v", err)
+	}
 }
 
 func TestDropExecutor_Stats(t *testing.T) {
 	executor := NewDropExecutor(true, slog.Default())
 	now := time.Now()
 	reasons := []DropReason{{Source: "bot", Timestamp: now}, {Source: "bot", Timestamp: now}, {Source: "cve", Timestamp: now}, {Source: "rule", Timestamp: now}, {Source: "ip_reputation", Timestamp: now}}
-	for _, r := range reasons { conn := &mockConn{}; executor.Execute(conn, r) }
+	for _, r := range reasons {
+		conn := &mockConn{}
+		executor.Execute(conn, r)
+	}
 	stats := executor.GetStats()
-	if stats.TotalDropped.Load() != 5 { t.Errorf("TotalDropped = %d, want 5", stats.TotalDropped.Load()) }
-	if stats.DroppedByBot.Load() != 2 { t.Errorf("DroppedByBot = %d, want 2", stats.DroppedByBot.Load()) }
-	if stats.DroppedByCVE.Load() != 1 { t.Errorf("DroppedByCVE = %d, want 1", stats.DroppedByCVE.Load()) }
-	if stats.DroppedByRule.Load() != 2 { t.Errorf("DroppedByRule = %d, want 2", stats.DroppedByRule.Load()) }
+	if stats.TotalDropped.Load() != 5 {
+		t.Errorf("TotalDropped = %d, want 5", stats.TotalDropped.Load())
+	}
+	if stats.DroppedByBot.Load() != 2 {
+		t.Errorf("DroppedByBot = %d, want 2", stats.DroppedByBot.Load())
+	}
+	if stats.DroppedByCVE.Load() != 1 {
+		t.Errorf("DroppedByCVE = %d, want 1", stats.DroppedByCVE.Load())
+	}
+	if stats.DroppedByRule.Load() != 2 {
+		t.Errorf("DroppedByRule = %d, want 2", stats.DroppedByRule.Load())
+	}
 }
 
 func TestDropExecutor_ResetStats(t *testing.T) {
@@ -50,15 +68,23 @@ func TestDropExecutor_ResetStats(t *testing.T) {
 	conn := &mockConn{}
 	executor.Execute(conn, DropReason{Source: "bot", Timestamp: time.Now()})
 	stats := executor.GetStats()
-	if stats.TotalDropped.Load() != 1 { t.Fatalf("expected 1 drop before reset") }
+	if stats.TotalDropped.Load() != 1 {
+		t.Fatalf("expected 1 drop before reset")
+	}
 	executor.ResetStats()
 	stats = executor.GetStats()
-	if stats.TotalDropped.Load() != 0 { t.Errorf("TotalDropped after reset = %d, want 0", stats.TotalDropped.Load()) }
+	if stats.TotalDropped.Load() != 0 {
+		t.Errorf("TotalDropped after reset = %d, want 0", stats.TotalDropped.Load())
+	}
 }
 
 func TestDropExecutor_Enabled(t *testing.T) {
 	executor := NewDropExecutor(false, slog.Default())
-	if executor.Enabled() { t.Error("expected disabled") }
+	if executor.Enabled() {
+		t.Error("expected disabled")
+	}
 	executor.SetEnabled(true)
-	if !executor.Enabled() { t.Error("expected enabled after SetEnabled(true)") }
+	if !executor.Enabled() {
+		t.Error("expected enabled after SetEnabled(true)")
+	}
 }

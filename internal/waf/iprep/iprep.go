@@ -18,17 +18,17 @@ type IPListEntry struct {
 
 // IPReputation manages blacklist/whitelist + auto-ban.
 type IPReputation struct {
-	mu        sync.RWMutex
-	blacklist []IPListEntry
-	whitelist []IPListEntry
-	violations sync.Map
+	mu               sync.RWMutex
+	blacklist        []IPListEntry
+	whitelist        []IPListEntry
+	violations       sync.Map
 	autoBanEnabled   atomic.Bool
 	autoBanThreshold atomic.Int64
 	autoBanWindow    atomic.Int64
 	autoBanDuration  atomic.Int64
 	autoBanAction    atomic.Value
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh           chan struct{}
+	wg               sync.WaitGroup
 }
 
 type violationCounter struct {

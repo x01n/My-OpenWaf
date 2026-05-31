@@ -113,4 +113,3 @@ func HealthCheck() app.HandlerFunc {
 		c.JSON(200, map[string]string{"status": "ok"})
 	}
 }
-

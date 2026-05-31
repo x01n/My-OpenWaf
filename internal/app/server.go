@@ -79,6 +79,42 @@ func applyLogConfig(repo *repository.SystemSettingsRepo) {
 	logger.Configure(logger.Config{Level: cfg.Level, FilePath: cfg.FilePath, AlsoStdout: cfg.AlsoStdout})
 }
 
+func ResetAdminPassword(args []string) error {
+	username := "admin"
+	passwordArgs := args
+	if len(args) == 2 {
+		username = args[0]
+		passwordArgs = args[1:]
+	}
+	if len(passwordArgs) != 1 || strings.TrimSpace(passwordArgs[0]) == "" {
+		return fmt.Errorf("usage: reset-admin-password [username] <new-password>")
+	}
+
+	rt, err := core.NewRuntime(context.Background())
+	if err != nil {
+		return fmt.Errorf("core init failed: %w", err)
+	}
+	defer func() { _ = rt.Close() }()
+
+	if err := store.AutoMigrate(rt.DB); err != nil {
+		return fmt.Errorf("auto migrate failed: %w", err)
+	}
+
+	repo := repository.NewAdminAccountRepo(rt.DB)
+	account, err := repo.GetByUsername(username)
+	if err != nil {
+		return fmt.Errorf("load admin account %q: %w", username, err)
+	}
+	if account == nil {
+		return fmt.Errorf("admin account %q does not exist", username)
+	}
+	if err := repo.UpdatePassword(username, passwordArgs[0]); err != nil {
+		return fmt.Errorf("reset admin password failed: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Admin password reset successfully for %s\n", username)
+	return nil
+}
+
 func Run() {
 	hlog.SetLevel(hlog.LevelFatal)
 	log := logger.New("app")
@@ -114,10 +150,10 @@ func Run() {
 		bannerLines = append(bannerLines, "")
 		if password != "" {
 			bannerLines = append(bannerLines, "  Admin Username : admin")
-			bannerLines = append(bannerLines, "  Admin Password : "+maskCredential(password))
+			bannerLines = append(bannerLines, "  Admin Password : "+password)
 		}
 		if token != "" {
-			bannerLines = append(bannerLines, "  API Token      : "+maskCredential(token))
+			bannerLines = append(bannerLines, "  API Token      : "+token)
 		}
 		bannerLines = append(bannerLines, "")
 		logger.Banner(bannerLines...)

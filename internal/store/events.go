@@ -7,13 +7,14 @@ type SecurityEvent struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time `gorm:"index:idx_se_created;index:idx_se_site_created" json:"created_at"`
 
-	SiteID    uint   `gorm:"index:idx_se_site_created" json:"site_id"`
-	RequestID string `gorm:"size:64" json:"request_id"`
-	ClientIP  string `gorm:"size:45;index:idx_se_client_ip" json:"client_ip"`
-	Host      string `gorm:"size:255" json:"host"`
-	Path      string `gorm:"size:2048" json:"path"`
-	Method    string `gorm:"size:16" json:"method"`
-	UserAgent string `gorm:"size:512" json:"user_agent"`
+	SiteID      uint   `gorm:"index:idx_se_site_created" json:"site_id"`
+	RequestID   string `gorm:"size:64" json:"request_id"`
+	ClientIP    string `gorm:"size:45;index:idx_se_client_ip" json:"client_ip"`
+	Host        string `gorm:"size:255" json:"host"`
+	Path        string `gorm:"size:2048" json:"path"`
+	QueryString string `gorm:"size:2048" json:"query_string"`
+	Method      string `gorm:"size:16" json:"method"`
+	UserAgent   string `gorm:"size:512" json:"user_agent"`
 
 	RuleID    uint   `json:"rule_id"`
 	RuleIDStr string `gorm:"size:64" json:"rule_id_str"`
@@ -21,6 +22,11 @@ type SecurityEvent struct {
 	Action    string `gorm:"size:32;index:idx_se_action" json:"action"`
 	Category  string `gorm:"size:32;index:idx_se_category" json:"category"`
 	MatchDesc string `gorm:"size:512" json:"match_desc"`
+
+	RequestHeaders       string `gorm:"type:text" json:"request_headers"`
+	RequestBodyPreview   string `gorm:"type:text" json:"request_body_preview"`
+	RequestBodyTruncated bool   `gorm:"default:false" json:"request_body_truncated"`
+	RequestSize          int64  `gorm:"default:0" json:"request_size"`
 
 	GeoCountry string `gorm:"size:2" json:"geo_country"`
 	GeoCity    string `gorm:"size:128" json:"geo_city"`
@@ -44,6 +50,12 @@ type AccessLog struct {
 	CacheState  string    `gorm:"size:16" json:"cache_state"`
 	Upstream    string    `gorm:"size:512" json:"upstream"`
 	UserAgent   string    `gorm:"size:512" json:"user_agent"`
+
+	RequestHeaders       string `gorm:"type:text" json:"request_headers"`
+	RequestBodyPreview   string `gorm:"type:text" json:"request_body_preview"`
+	RequestBodyTruncated bool   `gorm:"default:false" json:"request_body_truncated"`
+	RequestSize          int64  `gorm:"default:0" json:"request_size"`
+	ResponseHeaders      string `gorm:"type:text" json:"response_headers"`
 
 	HTTPProtocol string `gorm:"size:32" json:"http_protocol"`
 	TLSVersion   string `gorm:"size:16" json:"tls_version"`
@@ -74,9 +86,17 @@ type DropEvent struct {
 // BotScoreLog records the result of a bot scoring evaluation.
 type BotScoreLog struct {
 	ID               uint      `gorm:"primarykey" json:"id"`
+	SiteID           uint      `gorm:"index" json:"site_id"`
+	RequestID        string    `gorm:"size:64;index" json:"request_id"`
 	ClientIP         string    `gorm:"index;size:45" json:"client_ip"`
 	Host             string    `gorm:"size:256" json:"host"`
 	Path             string    `gorm:"size:512" json:"path"`
+	UserAgent        string    `gorm:"size:512" json:"user_agent"`
+	TLSJA3Hash       string    `gorm:"size:32;index" json:"tls_ja3_hash"`
+	TLSJA4           string    `gorm:"size:255;index" json:"tls_ja4"`
+	TLSVersion       string    `gorm:"size:16" json:"tls_version"`
+	TLSALPN          string    `gorm:"size:128" json:"tls_alpn"`
+	HeaderOrder      string    `gorm:"size:1024" json:"header_order"`
 	TotalScore       int       `gorm:"index" json:"total_score"`
 	GeoIPScore       int       `json:"geoip_score"`
 	FingerprintScore int       `json:"fingerprint_score"`

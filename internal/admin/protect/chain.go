@@ -31,8 +31,8 @@ type chainConfigResponse struct {
 
 type chainStepPayload struct {
 	Type      challenge.ChainStepType `json:"type"`
-	Condition string            `json:"condition,omitempty"`
-	Match     string            `json:"match,omitempty"`
+	Condition string                  `json:"condition,omitempty"`
+	Match     string                  `json:"match,omitempty"`
 }
 
 func GetChainConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {

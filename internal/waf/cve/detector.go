@@ -149,9 +149,9 @@ type CVERequest struct {
 	Body        string
 	ContentType string
 	// Decoded variants for multi-pass detection.
-	DecodedPath  string
-	DecodedQuery string
-	DecodedBody  string
+	DecodedPath     string
+	DecodedQuery    string
+	DecodedBody     string
 	AllTargets      []string // aggregated targets (path+query+header values+body)
 	AllTargetsLower []string // pre-lowercased AllTargets for hasCVESuspiciousContent
 }

@@ -1,8 +1,15 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { Save, RotateCcw } from "lucide-react"
+import { Eye, Save, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -52,6 +59,7 @@ export default function BotProtectionPage() {
   const [ip, setIP] = useState("")
   const [minScore, setMinScore] = useState("")
   const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState<BotScoreLog | null>(null)
   const [saving, setSaving] = useState(false)
 
   // country tag input
@@ -456,6 +464,7 @@ export default function BotProtectionPage() {
                     <TableHead className="text-center">行为</TableHead>
                     <TableHead>动作</TableHead>
                     <TableHead>时间</TableHead>
+                    <TableHead className="w-16 text-right">详情</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -501,6 +510,16 @@ export default function BotProtectionPage() {
                       <TableCell className="text-xs whitespace-nowrap text-slate-500">
                         {formatDate(item.created_at)}
                       </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8"
+                          onClick={() => setSelected(item)}
+                        >
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -516,6 +535,76 @@ export default function BotProtectionPage() {
           </div>
         )}
       </Surface>
+
+      <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
+        <DialogContent className="max-h-[86vh] max-w-3xl overflow-y-auto rounded-xl">
+          <DialogHeader>
+            <DialogTitle>Bot 评分详情</DialogTitle>
+            <DialogDescription>
+              查看本次评分的请求、指纹、分项分数和后端分析详情。
+            </DialogDescription>
+          </DialogHeader>
+          {selected && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[
+                ["Request ID", selected.request_id || "-"],
+                ["站点 ID", selected.site_id ? String(selected.site_id) : "-"],
+                ["客户端 IP", selected.client_ip],
+                ["Host", selected.host || "-"],
+                ["总分", String(selected.total_score)],
+                ["GeoIP 分", String(selected.geoip_score)],
+                ["指纹分", String(selected.fingerprint_score)],
+                ["行为分", String(selected.behavior_score)],
+                ["IP 信誉分", String(selected.ip_rep_score)],
+                ["高风险", selected.is_high_risk ? "是" : "否"],
+                ["动作", selected.action || "-"],
+                ["时间", formatDate(selected.created_at)],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-lg border border-slate-100 bg-slate-50 p-3"
+                >
+                  <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
+                    {label}
+                  </div>
+                  <div className="mt-1 break-all text-sm text-slate-700">
+                    {value}
+                  </div>
+                </div>
+              ))}
+              {[
+                ["路径", selected.path || "-"],
+                ["User-Agent", selected.user_agent || "-"],
+                ["JA3 Hash", selected.tls_ja3_hash || "-"],
+                ["JA4", selected.tls_ja4 || "-"],
+                ["TLS 版本", selected.tls_version || "-"],
+                ["ALPN", selected.tls_alpn || "-"],
+                ["Header Order", selected.header_order || "-"],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2"
+                >
+                  <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
+                    {label}
+                  </div>
+                  <code className="mt-1 block break-all text-xs text-slate-700">
+                    {value}
+                  </code>
+                </div>
+              ))}
+              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
+                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
+                  Details
+                </div>
+                <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700">
+                  {selected.details || "-"}
+                </pre>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

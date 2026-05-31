@@ -553,7 +553,7 @@ export default function AccessLogsPage() {
 
       {/* Detail Dialog */}
       <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
-        <DialogContent className="max-w-2xl rounded-xl">
+        <DialogContent className="max-h-[86vh] max-w-3xl overflow-y-auto rounded-xl">
           <DialogHeader>
             <DialogTitle>请求详情</DialogTitle>
             <DialogDescription>完整的请求日志信息</DialogDescription>
@@ -583,6 +583,7 @@ export default function AccessLogsPage() {
                     true,
                   ],
                   ["响应大小", formatBytes(selected.response_size), true],
+                  ["请求大小", formatBytes(selected.request_size ?? 0), true],
                   ["HTTP 协议", selected.http_protocol || "-", true],
                   ["TLS 版本", selected.tls_version || "-", true],
                   ["TLS SNI", selected.tls_sni || "-", true],
@@ -624,6 +625,25 @@ export default function AccessLogsPage() {
                 <code className="mt-1 block text-xs break-all text-slate-700">
                   {selected.tls_ja3 || "-"}
                 </code>
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
+                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
+                  Request Headers
+                </div>
+                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700">
+                  {selected.request_headers || "-"}
+                </pre>
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
+                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
+                  Request Body Preview
+                </div>
+                <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700">
+                  {selected.request_body_preview || "-"}
+                </pre>
+                {selected.request_body_truncated && (
+                  <div className="mt-2 text-xs text-amber-600">请求体已截断显示</div>
+                )}
               </div>
               <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
                 <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">

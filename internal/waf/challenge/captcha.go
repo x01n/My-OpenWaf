@@ -46,6 +46,14 @@ type CaptchaChallenge struct {
 	Prompt    string `json:"prompt"`     // e.g. "Click the characters in order" or "Solve: 3+7=?"
 	Width     int    `json:"width"`
 	Height    int    `json:"height"`
+	Fallback  bool   `json:"fallback"`
+}
+
+func (ch *CaptchaChallenge) MarkFallback(requested CaptchaType) *CaptchaChallenge {
+	if ch != nil && requested != "" && ch.Type != string(requested) {
+		ch.Fallback = true
+	}
+	return ch
 }
 
 // CaptchaManager handles CAPTCHA generation and verification with Redis session storage.
@@ -115,18 +123,26 @@ func (cm *CaptchaManager) timeoutValue() time.Duration {
 // Generate creates a new CAPTCHA challenge of the specified type.
 // Returns the challenge data to render to the client.
 func (cm *CaptchaManager) Generate(captchaType CaptchaType) (*CaptchaChallenge, error) {
+	var (
+		challenge *CaptchaChallenge
+		err       error
+	)
 	switch captchaType {
 	case CaptchaTypeMath:
 		return cm.generateMath()
 	case CaptchaTypeClick:
-		return cm.generateClick()
+		challenge, err = cm.generateClick()
 	case CaptchaTypeSlide:
-		return cm.generateSlide()
+		challenge, err = cm.generateSlide()
 	case CaptchaTypeRotate:
-		return cm.generateRotate()
+		challenge, err = cm.generateRotate()
 	default:
 		return cm.generateMath()
 	}
+	if err != nil {
+		return nil, err
+	}
+	return challenge.MarkFallback(captchaType), nil
 }
 
 // Verify checks a client's CAPTCHA answer against the stored session.

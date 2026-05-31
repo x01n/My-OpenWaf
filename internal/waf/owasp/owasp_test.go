@@ -173,7 +173,6 @@ func TestCheckOWASP_Clean_FilenamePath(t *testing.T) {
 	}
 }
 
-
 func TestCheckOWASP_StrutsOGNLRedirect(t *testing.T) {
 	hits := CheckOWASP("high", "index.action", `redirect:${#a=#context.get('com.opensymphony.xwork2.dispatcher.HttpServletRequest'),#b=#a.getRealPath("/"),#matt=#context.get('com.opensymphony.xwork2.dispatcher.HttpServletResponse'),#matt.getWriter().println(#b),#matt.getWriter().flush(),#matt.getWriter().close()}`, nil, nil)
 	if len(hits) == 0 {

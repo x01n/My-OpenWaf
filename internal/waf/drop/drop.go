@@ -38,8 +38,8 @@ func NewDropExecutor(enabled bool, log *slog.Logger) *DropExecutor {
 	return &DropExecutor{stats: &DropStats{}, enabled: enabled, log: log}
 }
 
-func (d *DropExecutor) Enabled() bool { return d.enabled }
-func (d *DropExecutor) SetEnabled(v bool) { d.enabled = v }
+func (d *DropExecutor) Enabled() bool            { return d.enabled }
+func (d *DropExecutor) SetEnabled(v bool)        { d.enabled = v }
 func (d *DropExecutor) Reconfigure(enabled bool) { d.enabled = enabled }
 
 func (d *DropExecutor) Execute(conn net.Conn, reason DropReason) error {

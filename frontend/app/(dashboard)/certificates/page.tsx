@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import {
   FileKey2,
   Globe,
@@ -78,7 +78,7 @@ export default function CertificatesPage() {
     >
   >({})
 
-  async function loadACMEStatus() {
+  const loadACMEStatus = useCallback(async () => {
     try {
       const data = await getACMECertStatus()
       const next: Record<
@@ -96,22 +96,22 @@ export default function CertificatesPage() {
       }
       setAcmeStatus(next)
     } catch {
-      // ignore ACME status load failures so certificate list still works
+      setAcmeStatus({})
     }
-  }
+  }, [])
 
-  function load() {
+  const load = useCallback(() => {
     setLoading(true)
     api<{ items: Certificate[] }>("/api/v1/certificates")
       .then((data) => setCerts(data.items || []))
       .catch((e) => toast.error(String(e)))
       .finally(() => setLoading(false))
     void loadACMEStatus()
-  }
+  }, [loadACMEStatus])
 
   useEffect(() => {
     load()
-  }, [])
+  }, [load])
 
   async function handleUpload() {
     if (!formName.trim()) {
@@ -169,6 +169,7 @@ export default function CertificatesPage() {
         body: JSON.stringify({
           domain: acmeDomain,
           name: acmeName || acmeDomain,
+          email: acmeEmail || undefined,
         }),
       })
       toast.success(`证书申请成功：${acmeDomain}`)

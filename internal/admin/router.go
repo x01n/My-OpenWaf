@@ -17,6 +17,7 @@ import (
 	"My-OpenWaf/internal/admin/site"
 	"My-OpenWaf/internal/admin/system"
 	"My-OpenWaf/internal/cache"
+	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/core/adminweb"
 	"My-OpenWaf/internal/dataplane"
 	"My-OpenWaf/internal/pkg/logger"
@@ -156,6 +157,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/drop-stats", protect.GetDropStats(r.DropEvent))
 		readGroup.GET("/drop-events", protect.GetDropEvents(r.DropEvent))
 		readGroup.GET("/upstreams/status", system.UpstreamStatus(deps.Upstreams))
+		readGroup.GET("/runtime-config", system.GetRuntimeConfig(core.LoadConfigFromEnv()))
 	}
 
 	opsGroup := api.Group("")

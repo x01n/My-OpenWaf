@@ -36,6 +36,7 @@ export interface CaptchaConfig {
   captcha_enabled: boolean
   captcha_type: CaptchaType
   captcha_timeout: number
+  captcha_pass_ttl: number
   shield_enabled: boolean
   shield_difficulty: number
   shield_timeout_secs?: number
@@ -65,11 +66,17 @@ export async function updateCaptchaConfig(
 }
 
 export interface CaptchaTestResponse {
-  captcha_type?: string
-  difficulty?: number
-  message?: string
-  implemented?: boolean
-  supported?: boolean
+  session_id: string
+  captcha_type: CaptchaType
+  type: CaptchaType
+  master_img: string
+  thumb_img?: string
+  prompt: string
+  width?: number
+  height?: number
+  timeout: number
+  pass_ttl?: number
+  fallback?: boolean
 }
 
 export async function testCaptcha(): Promise<CaptchaTestResponse> {
@@ -83,6 +90,8 @@ export type ChainStepType = "env" | "pow" | "captcha"
 export interface ChainStep {
   type: ChainStepType
   condition: string
+  match?: string
+  captcha_type?: CaptchaType | "inherit"
 }
 
 export interface ChainConfig {
@@ -103,7 +112,30 @@ export async function updateChainConfig(
   })
 }
 
-/* ── Escalation Config ── */
+export interface ChainSession {
+  id: string
+  client_ip: string
+  current_step: number
+  started_at: string
+}
+
+export interface ChainSessionListResponse {
+  items: ChainSession[]
+  total: number
+}
+
+export async function listChainSessions(): Promise<ChainSessionListResponse> {
+  return api<ChainSessionListResponse>("/api/v1/chain/sessions")
+}
+
+export async function deleteChainSession(id: string): Promise<{ message?: string }> {
+  return api<{ message?: string }>(
+    `/api/v1/chain/sessions/${encodeURIComponent(id)}/delete`,
+    { method: "POST" }
+  )
+}
+
+
 
 export interface EscalationStep {
   threshold: number
@@ -117,7 +149,7 @@ export interface EscalationConfig {
 }
 
 export async function getEscalationConfig(
-  protectionId: number | string = 1
+  protectionId: number | string = "global"
 ): Promise<EscalationConfig> {
   return api<EscalationConfig>(`/api/v1/protection/${protectionId}/escalation`)
 }
