@@ -116,10 +116,13 @@ func GetLevel() string {
 	}
 }
 
-func Close() {
-	if logFile != nil {
-		logFile.Close()
+func Close() error {
+	if logFile == nil {
+		return nil
 	}
+	err := logFile.Close()
+	logFile = nil
+	return err
 }
 
 func buildOutput() io.Writer {
@@ -145,9 +148,8 @@ func buildConfiguredOutput(filePath string, alsoStdout bool) io.Writer {
 		return os.Stdout
 	}
 
-	// 关闭旧文件
-	if logFile != nil {
-		logFile.Close()
+	if err := Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "logger: failed to close previous log file: %v\n", err)
 	}
 	logFile = f
 
