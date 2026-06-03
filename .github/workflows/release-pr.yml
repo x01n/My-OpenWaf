@@ -157,8 +157,13 @@ jobs:
           body=$(printf '%s\n\n%s' \
             "自动发布 PR。合并后将创建 tag ${{ steps.version.outputs.tag }}，并上传 GitHub Release 多平台构建产物。" \
             "源提交：${{ github.sha }}")
-          if gh pr view release/${{ steps.version.outputs.tag }} --base main --json number >/tmp/pr.json 2>/dev/null; then
-            number="$(jq -r .number /tmp/pr.json)"
+          number="$(gh pr list \
+            --base main \
+            --head release/${{ steps.version.outputs.tag }} \
+            --state open \
+            --json number \
+            --jq '.[0].number')"
+          if [ -n "$number" ] && [ "$number" != "null" ]; then
             gh pr edit "$number" --title "$title" --body "$body"
           else
             gh pr create --base main --head release/${{ steps.version.outputs.tag }} --title "$title" --body "$body"
