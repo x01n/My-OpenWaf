@@ -26,10 +26,10 @@ type HTTP3Server struct {
 }
 
 type HTTP3ServerConfig struct {
-	Bind string
-	TCPBind string
+	Bind      string
+	TCPBind   string
 	TLSConfig *tls.Config
-	Log *slog.Logger
+	Log       *slog.Logger
 }
 
 func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {

@@ -38,7 +38,6 @@ const (
 	Audience = "my-openwaf-admin"
 )
 
-
 // TokenManager handles JWT signing, verification, key rotation, and token blacklisting.
 type TokenManager struct {
 	mu        sync.RWMutex
@@ -77,7 +76,6 @@ func (tm *TokenManager) PrimarySecret() []byte {
 	defer tm.mu.RUnlock()
 	return tm.primary
 }
-
 
 // SignAccessToken produces a signed JWT for the given user.
 func (tm *TokenManager) SignAccessToken(username, role, clientIP, userAgent string) (tokenStr string, jti string, exp time.Time, err error) {
@@ -151,7 +149,6 @@ func verifyWithKey(tokenStr string, secret []byte) (*Claims, error) {
 	return nil, jwt.ErrSignatureInvalid
 }
 
-
 // SignAccessToken is the backward-compatible package-level function.
 func SignAccessToken(username string, secret []byte) (string, time.Time, error) {
 	jti := generateJTI()
@@ -189,7 +186,6 @@ func VerifyAccessToken(tokenStr string, secret []byte) (*Claims, error) {
 	}
 	return nil, jwt.ErrSignatureInvalid
 }
-
 
 // BlacklistToken adds a JTI to the blacklist with the given expiry and reason.
 func (tm *TokenManager) BlacklistToken(jti string, expiresAt time.Time, reason string) {
@@ -248,7 +244,6 @@ func (tm *TokenManager) cleanupLoop() {
 	}
 }
 
-
 // GenerateRefreshToken returns a new JTI, the raw token string, and its SHA-256 hash.
 func GenerateRefreshToken() (jti, raw, hash string, err error) {
 	jtiBytes := make([]byte, 16)
@@ -271,7 +266,6 @@ func HashToken(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
 }
-
 
 func generateJTI() string {
 	b := make([]byte, 16)
