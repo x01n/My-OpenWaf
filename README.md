@@ -1,184 +1,155 @@
 # My-OpenWaf
 
-**自托管的高性能 Web 应用防火墙（WAF）/ 反向代理，保护你的 Web 应用免受攻击与漏洞利用。**
+> 自托管的高性能 Web 应用防火墙（WAF）/ 反向代理，保护你的 Web 应用免受攻击与漏洞利用。
 
----
+**My-OpenWaf 是什么？**  
+一款部署在 Web 应用前方的反向代理型 WAF，统一完成攻击检测、访问控制、速率限制、人机验证与观测审计。
 
-## 👋 简介
+| 维度 | 说明 |
+| --- | --- |
+| 部署形态 | 自托管、反向代理 |
+| 双平面 | 控制面（管理 API + 管理面板）/ 数据面（流量处理） |
+| 默认管理端口 | `:9443` |
+| 默认存储 | SQLite（可切换 MySQL / PostgreSQL） |
 
-My-OpenWaf 是一款自托管的 WAF（Web Application Firewall），通过反向代理架构在 Web 应用前端建立安全屏障，过滤、监控并拦截恶意 HTTP/S 流量，同时保障合法请求正常通行。
+## 目录
+- [亮点速览](#亮点速览)
+- [架构速览](#架构速览)
+- [请求处理流程](#请求处理流程)
+- [核心能力](#核心能力)
+- [策略动作体系](#策略动作体系)
+- [效果评估](#效果评估)
+- [快速开始](#快速开始)
+- [配置说明](#配置说明)
+- [项目结构](#项目结构)
+- [技术栈](#技术栈)
+- [文档导航](#文档导航)
+- [开发与测试](#开发与测试)
+- [贡献与许可证](#贡献与许可证)
 
-WAF 部署在 Web 应用前方，充当反向代理角色 —— 所有客户端请求必须先经过 WAF 才能到达后端服务器。它通过一组策略规则判断流量是否恶意，过滤并阻断攻击请求，同时防止应用敏感数据外泄。
+## 亮点速览
+- ✅ 覆盖 OWASP Top 10 关键攻击面  
+- ✅ ACL + 速率限制 + Bot 防护一体化  
+- ✅ 多站点、TLS、WebSocket、SSE 全支持  
+- ✅ 规则管道可扩展、策略动作可配置  
+- ✅ 管理 API + 管理面板一体化
 
-核心防护能力涵盖：
+> **提示**：My-OpenWaf 以“可控、可观测、可扩展”为设计原则，适合中小规模与企业场景的自托管安全防护。
 
-- **OWASP Top 10 攻击防御** — SQL 注入、XSS、命令注入、路径遍历、XXE、SSRF 等
-- **ACL 访问控制** — 基于 IP / 地理位置 / 自定义规则的精细化访问控制
-- **速率限制（CC 防护）** — 防御暴力破解、DoS 攻击与流量滥用
-- **机器人检测与人机验证** — 验证码挑战 + WASM 动态 5s 盾
-- **IP 信誉系统** — 基于行为分析的 IP 信誉评分与自动封禁
-- **多上游负载均衡** — 支持多后端节点负载均衡与健康检查
-- **响应缓存** — 可配置的资源缓存策略，提升访问速度
+## 架构速览
+```mermaid
+flowchart LR
+  Client[客户端] -->|HTTP/S| WAF[My-OpenWaf<br/>WAF 引擎]
+  WAF -->|代理转发| Upstream[上游应用集群]
 
----
-
-## 💡 工作原理
-
+  Admin[控制面 :9443<br/>管理 API + 管理面板] -->|配置/监控| WAF
+  Admin --> DB[(SQLite / MySQL / PostgreSQL)]
+  WAF <--> Redis[(Redis 可选)]
 ```
-                          ┌─────────────────────────┐
-                          │      My-OpenWaf WAF      │
-   Internet ─────────────►│                          │──────►  Upstream Servers
-  (HTTP/S Traffic)        │  ┌────────────────────┐  │         (Web Apps)
-                          │  │  白名单 / 黑名单    │  │
-                          │  │  OWASP 规则引擎     │  │
-                          │  │  ACL 访问控制       │  │
-                          │  │  速率限制 (CC)      │  │
-                          │  │  Bot 检测 & 人机验证│  │
-                          │  │  IP 信誉系统        │  │
-                          │  └────────────────────┘  │
-                          │                          │
-                          │  ┌────────────────────┐  │
-                          │  │  管理 API (9443)    │  │
-                          │  │  前端管理面板        │  │
-                          │  └────────────────────┘  │
-                          └─────────────────────────┘
+
+## 请求处理流程
+```mermaid
+sequenceDiagram
+  participant C as 客户端
+  participant W as WAF 引擎
+  participant U as 上游服务
+
+  C->>W: 发送请求
+  W->>W: 站点匹配 + 客户端 IP 解析
+  W->>W: 规则管道检测（OWASP/ACL/速率限制/Bot）
+  alt 触发终止动作
+    W-->>C: 拦截 / 挑战 / 限速 / 阻断
+  else 放行
+    W->>U: 反向代理转发
+    U-->>W: 返回响应
+    W-->>C: 响应回传
+  end
 ```
 
-所有入站流量首先经过 WAF 引擎的多阶段规则管道处理：
+<details>
+<summary>查看规则管道阶段顺序</summary>
 
-1. **白名单检查** — 最高优先级，匹配即放行，跳过后续所有规则
-2. **黑名单检查** — 次优先级，匹配即执行对应处置动作
-3. **规则策略匹配** — OWASP 检测、ACL、速率限制、Bot 检测等基础规则按序执行
-4. **处置执行** — 根据匹配结果执行对应动作（放行 / 限速 / 拦截 / 阻断 / 人机验证）
+```mermaid
+flowchart TB
+  IP[IP 信誉检查] --> AR[防重放]
+  AR --> P{并行检测}
+  P --> OWASP[OWASP 检测]
+  P --> CVE[CVE 检测]
+  OWASP --> ACL[ACL 访问控制]
+  CVE --> ACL
+  ACL --> Bot[Bot 检测]
+  Bot --> Rate[请求速率限制]
+  Rate --> Sig[签名检测]
+  Sig --> Custom[自定义规则]
+```
+</details>
 
----
+- **请求体检查上限**：默认仅检查前 `48 KiB`，以保证性能与延迟。
 
-## 🔥 核心功能
+## 核心能力
+### 🛡️ 攻击防御
+- SQL 注入、XSS、命令注入、路径遍历、XXE、SSRF、LDAP/XPath 注入等
+- OWASP 规则引擎 + CVE 漏洞规则库
 
-### 🛡️ Web 攻击防御
-
-防御 OWASP Top 10 全品类 Web 攻击，包括 SQL 注入、XSS、代码注入、OS 命令注入、CRLF 注入、LDAP 注入、XPath 注入、XXE、SSRF、路径遍历、后门利用等。
-
-- 内置规则引擎，支持自定义规则编写与编译
-- 按规则粒度配置处置动作（限速 / 拦截 / 阻断）
-- CVE 漏洞规则库，持续更新
+### 🔒 访问控制
+- IP 黑/白名单
+- 地理位置阻断（GeoIP）
+- 自定义 ACL 规则
 
 ### ⚡ 速率限制（CC 防护）
+- 固定窗口与滑动窗口
+- 支持 IP / 路径 / 自定义维度
 
-抵御 DoS 攻击、暴力破解、流量激增等滥用行为：
+### 🤖 Bot 防护
+- 验证码挑战
+- 5s 盾（WASM 动态验证）
+- 多步骤组合策略
 
-- 基于 IP / 路径 / 自定义维度的请求速率限制
-- 超限请求返回 HTTP 429 状态码
-- 支持突发流量窗口与滑动窗口算法
-
-### 🤖 人机验证（Anti-Bot）
-
-多种验证机制保护网站免受 Bot 攻击，合法用户正常通行，爬虫与自动化程序被拦截：
-
-- **验证码挑战** — 交互式验证，区分人类与自动化程序
-- **5s 盾（WASM 动态验证）** — 使用 Go/C++ 编译的动态 WASM 模块：
-  - 内嵌 VMP 与自定义高效 VM，在浏览器环境中执行验证
-  - 检测无头浏览器 / 自动化框架（Puppeteer、Selenium 等）
-  - 检测 DevTools 调试窗口打开状态
-  - 所有验证逻辑在 VMP 内的 VM 执行，防止逆向破解
-- **混合策略** — 支持验证码 + 验证码混合、验证码后限速等组合策略
-- **自定义匹配策略** — 按路径 / 请求特征触发不同验证方式
-
-### 🔒 访问控制（ACL）
-
-- **白名单** — 最高优先级，匹配即放行
-- **黑名单** — 次优先级，匹配即执行处置动作
-- **IP 列表管理** — 支持批量导入 / 导出 IP 黑白名单
-- **地理位置阻断** — 基于 MaxMind GeoIP 数据库的国家 / 地区级别访问控制
-- **规则策略** — 灵活的规则引擎，支持多维度条件组合
-
-### 🌐 反向代理与负载均衡
-
-- 多站点管理，支持多域名绑定
-- 多上游节点负载均衡
-- TLS 终止与证书管理（支持自动 HTTPS）
-- WebSocket 连接透传
-- SSE（Server-Sent Events）事件推送
-- 转发配置文件管理
+### 🌐 反向代理能力
+- 多上游负载均衡
+- TLS 终止与证书管理
+- WebSocket / SSE 透传
 
 ### 📊 可观测性
+- 安全事件与访问日志
+- 统计指标与健康检查
+- 管理面板可视化
 
-- **安全事件** — 实时记录所有安全事件，支持筛选与归档
-- **访问日志** — 请求日志写入 Redis 缓存，支持高频读写
-- **健康检查** — 上游节点健康检查与自动故障转移
-- **性能指标** — 请求延迟、吞吐量、拦截率等实时指标收集
-- **管理仪表板** — 可视化数据面板，一目了然掌握安全态势
+## 策略动作体系
+| 动作 | 是否终止 | 默认状态码 | 说明 |
+| --- | --- | --- | --- |
+| `drop` | ✅ | — | 直接 TCP 断开 |
+| `intercept` | ✅ | `403` | 拦截并返回阻断页 |
+| `rate_limit` | ✅ | `429` | 触发限速响应 |
+| `challenge` | ✅ | `422` | JS 挑战 |
+| `captcha_challenge` | ✅ | `422` | 验证码挑战 |
+| `shield_challenge` | ✅ | `422` | 5s 盾挑战 |
+| `chain_challenge` | ✅ | `422` | 链式挑战 |
+| `redirect` | ✅ | `302` | 重定向 |
+| `observe` | ❌ | — | 仅记录日志 |
+| `tag` | ❌ | — | 标签标记 |
 
-### 🎨 管理面板功能
+> **优先级说明**：`drop` > `intercept` > `rate_limit` > `challenge` > `redirect` > `observe`
 
-| 模块 | 功能 |
-| --- | --- |
-| 仪表板 | 安全态势总览、流量统计、攻击趋势 |
-| 站点管理 | 多站点配置、域名绑定、上游设置 |
-| 规则管理 | 自定义规则编辑、编译、启停 |
-| CC 防护 | 速率限制策略配置 |
-| Bot 防护 | 人机验证、5s 盾策略配置 |
-| IP 列表 | 黑白名单批量管理 |
-| 证书管理 | TLS 证书上传与管理 |
-| 安全事件 | 事件查询、日志归档 |
-| 访问日志 | 请求日志查询与分析 |
-| API 密钥 | 管理 API 密钥生成与权限控制 |
-| 错误页面 | 自定义拦截 / 阻断响应页面 |
-| 系统设置 | 全局参数配置 |
+## 效果评估
+使用 [blazehttp](https://github.com/chaitin/blazehttp) 基准测试工具进行评估：
 
----
+**测试环境**
+- 目标地址：`http://127.0.0.1`
+- 测试样本：33,877（恶意样本 658 + 正常样本 33,219）
 
-## 🎯 策略动作体系
-
-| 策略 | 状态码 | 说明 |
-| --- | --- | --- |
-| **放行** | `200` | 请求合法，正常转发至上游 |
-| **限速** | `429` | 阻止高频访问资源或异常高频请求 |
-| **拦截** | `403 / 418` | 响应拦截或触发验证码动作 |
-| **阻断** | — | 直接返回 RST 并静默丢弃后续连接 |
-| **人机验证** | `422` | 执行人机验证策略（验证码 / 5s 盾） |
-
-**匹配优先级：** 白名单 > 黑名单 > 规则策略
-
----
-
-## 📋 效果评估
-
-使用 [blazehttp](https://github.com/chaitin/blazehttp) 基准测试工具进行评估，测试结果如下：
-
-### 测试环境
-
-- **测试工具：** blazehttp
-- **目标地址：** `http://127.0.0.1`
-- **测试样本：** 33,877 条（恶意样本 658 条 + 正常样本 33,219 条）
-
-### 测试结果
-
+**测试结果**
 | 指标 | 数值 |
 | --- | --- |
-| 总样本数 | 33,877 |
-| 检出率（Detection Rate） | **100.00%**（658 / 658 恶意样本正确拦截） |
-| 误报率（False Positive Rate） | **0.00%**（0 / 33,219 正常样本误报） |
+| 检出率（Detection Rate） | **100.00%**（658 / 658） |
+| 误报率（False Positive Rate） | **0.00%**（0 / 33,219） |
 | 准确率（Accuracy） | **100.00%** |
 | 平均响应耗时 | **31.96 ms** |
 
-### 与同类产品对比
+> 注：对比数据来源 [SafeLine Effect Evaluation](https://github.com/chaitin/SafeLine#effect-evaluation)
 
-| 指标 | ModSecurity (Level 1) | CloudFlare (Free) | SafeLine (Balance) | SafeLine (Strict) | **My-OpenWaf** |
-| --- | --- | --- | --- | --- | --- |
-| 总样本数 | 33,669 | 33,669 | 33,669 | 33,669 | 33,877 |
-| 检出率 | 69.74% | 10.70% | 71.65% | 76.17% | **100.00%** |
-| 误报率 | 17.58% | 0.07% | 0.07% | 0.22% | **0.00%** |
-| 准确率 | 82.20% | 98.40% | 99.45% | 99.38% | **100.00%** |
-
-> 注：对比数据来源 [SafeLine Effect Evaluation](https://github.com/chaitin/SafeLine#effect-evaluation)，各产品测试样本集略有差异。
-
----
-
-## 🚀 快速开始
-
+## 快速开始
 ### 📦 Docker 部署（推荐）
-
 ```bash
 docker run -d \
   --name my-openwaf \
@@ -187,12 +158,10 @@ docker run -d \
   -v ./data:/app/data \
   my-openwaf:latest
 ```
-
 启动后访问 `https://localhost:9443` 进入管理面板。
 
 ### 🔨 从源码构建
-
-**前置要求：** Go 1.25+、Node.js 22+、GCC
+**前置要求**：Go 1.25+、Node.js 22+、GCC
 
 ```bash
 # 1. 构建前端
@@ -206,82 +175,104 @@ cd .. && CGO_ENABLED=1 go build -ldflags="-s -w" -o bin/my-openwaf ./cmd/...
 ```
 
 ### 🐳 Docker 多阶段构建
-
 ```bash
 docker build -t my-openwaf:latest .
 ```
 
-项目内置三阶段 Dockerfile：前端构建 → 后端编译 → 精简 Alpine 运行时镜像。
+### ✅ 部署核对清单
+- [ ] 管理面板能正常访问（`:9443`）
+- [ ] 已添加站点并绑定域名
+- [ ] 已配置上游并通过健康检查
+- [ ] 已启用 OWASP/ACL/速率限制/Bot 防护
+- [ ] 已查看安全事件/访问日志是否产出
 
-### ⚙️ 配置说明
+## 配置说明
+### 基本环境变量
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `MY_OPENWAF_DB_DRIVER` | `sqlite` | 数据库驱动（`sqlite`/`mysql`/`postgres`） |
+| `MY_OPENWAF_DSN` | `/app/data/waf.db` | 数据库连接串（优先级高于 `MY_OPENWAF_DB`） |
+| `MY_OPENWAF_DATA` | `/app/data` | 数据目录 |
+| `MY_OPENWAF_ADMIN_BIND` | `:9443` | 管理 API 监听地址 |
 
-通过环境变量配置运行参数：
+<details>
+<summary>更多可选配置</summary>
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `MY_OPENWAF_DB_DRIVER` | `sqlite` | 数据库驱动（`sqlite` / `mysql` / `postgres`） |
-| `MY_OPENWAF_DSN` | `/app/data/waf.db` | 数据库连接字符串 |
-| `MY_OPENWAF_DATA` | `/app/data` | 数据目录路径 |
-| `MY_OPENWAF_ADMIN_BIND` | `:9443` | 管理面板监听地址 |
+| `MY_OPENWAF_ADMIN_STATIC_DIR` | 内嵌前端 | 使用磁盘前端资源 |
+| `MY_OPENWAF_DB` | 空 | 兼容旧配置（被 `MY_OPENWAF_DSN` 覆盖） |
+| `MY_OPENWAF_REDIS_ADDR` | 空 | Redis 地址（可选） |
+| `MY_OPENWAF_REDIS_PASSWORD` | 空 | Redis 密码 |
+| `MY_OPENWAF_REDIS_DB` | `0` | Redis DB |
+| `MY_OPENWAF_JWT_SECRET` | 自动生成 | JWT 签名密钥 |
+| `MY_OPENWAF_GEOIP_DB` | 空 | GeoIP 数据库路径 |
+| `MY_OPENWAF_BOT_THRESHOLD` | `80` | Bot 分数阈值 |
+| `MY_OPENWAF_DROP_ENABLED` | `true` | 是否启用 TCP Drop |
+| `MY_OPENWAF_DROP_BOT_THRESHOLD` | `80` | Drop 相关 Bot 阈值 |
+| `MY_OPENWAF_LOG_LEVEL` | `info` | 日志级别 |
+| `MY_OPENWAF_LOG_COLOR` | `auto` | 日志颜色 |
+</details>
 
-### 🔧 保护 Web 应用
+## 项目结构
+```text
+cmd/                入口程序
+frontend/           管理面板（Next.js + React）
+internal/           核心实现（WAF/控制面/数据面）
+docs/               项目文档
+scripts/            构建脚本
+```
 
-启动后在管理面板中：
-
-1. **添加站点** — 配置域名与上游服务器地址
-2. **配置规则** — 启用 OWASP 检测、设置 ACL 规则
-3. **开启防护** — 启用 CC 防护、Bot 防护、IP 信誉等模块
-4. **配置证书** — 上传 TLS 证书或启用自动 HTTPS
-
----
-
-## 🧩 技术栈
-
+## 技术栈
 | 层级 | 技术 |
 | --- | --- |
-| **后端语言** | Go 1.25 |
-| **Web 框架** | [Hertz](https://github.com/cloudwego/hertz) v0.10.4（字节跳动高性能 HTTP 框架） |
-| **前端** | Next.js + React (Node.js 22) |
-| **数据库** | SQLite（默认）/ MySQL / PostgreSQL（GORM ORM） |
-| **本地缓存** | [Ristretto](https://github.com/dgraph-io/ristretto) v0.2.0（高性能 LFU 缓存） |
-| **分布式缓存** | [go-redis](https://github.com/redis/go-redis) v9.19.0 |
-| **认证** | JWT ([golang-jwt](https://github.com/golang-jwt/jwt) v5) |
-| **GeoIP** | MaxMind GeoLite2 ([maxminddb-golang](https://github.com/oschwald/maxminddb-golang)) |
-| **人机验证** | 动态 WASM + VMP 虚拟机（Go/C++ 编译） |
-| **运行时** | Alpine 3.21（精简容器镜像） |
+| 后端语言 | Go 1.25 |
+| Web 框架 | [Hertz](https://github.com/cloudwego/hertz) v0.10.4 |
+| 前端 | Next.js + React（Node.js 22） |
+| 数据库 | SQLite / MySQL / PostgreSQL（GORM） |
+| 本地缓存 | [Ristretto](https://github.com/dgraph-io/ristretto) |
+| 分布式缓存 | [go-redis](https://github.com/redis/go-redis) |
+| 认证 | JWT（[golang-jwt](https://github.com/golang-jwt/jwt)） |
+| GeoIP | [maxminddb-golang](https://github.com/oschwald/maxminddb-golang) |
+| 人机验证 | 动态 WASM + VMP |
 
----
+## 文档导航
+- 项目概述：[docs/项目概述/项目介绍.md](docs/项目概述/项目介绍.md)
+- 快速开始：[docs/项目概述/快速开始.md](docs/项目概述/快速开始.md)
+- 控制面设计：[docs/系统架构设计/控制面设计.md](docs/系统架构设计/控制面设计.md)
+- 数据面处理：[docs/数据平面处理/请求处理流程.md](docs/数据平面处理/请求处理流程.md)
+- WAF 引擎系统：[docs/WAF 引擎系统/WAF 引擎系统.md](docs/WAF%20引擎系统/WAF%20引擎系统.md)
+- 规则管理 API：[docs/管理 API 系统/规则管理 API/规则管理 API.md](docs/管理%20API%20系统/规则管理%20API/规则管理%20API.md)
 
-## 📐 架构概览
+## 开发与测试
+```bash
+# 全量构建（含前端）
+./scripts/build.sh
 
+# Windows
+./scripts/build.ps1
+
+# Go 测试
+go test -v ./...
+
+# 前端
+cd frontend
+npm run dev
+npm run lint
+npm run typecheck
 ```
-┌──────────────────────────────────────────────────────┐
-│                    My-OpenWaf                        │
-│                                                      │
-│  ┌────────────┐  ┌────────────┐  ┌──────────────┐  │
-│  │  数据平面   │  │  控制平面   │  │  可观测性     │  │
-│  │            │  │            │  │              │  │
-│  │ 请求处理    │  │ 管理 API   │  │ 安全事件记录  │  │
-│  │ 规则管道    │  │ REST 接口  │  │ 访问日志归档  │  │
-│  │ TLS 终止   │  │ 前端面板   │  │ 健康检查监控  │  │
-│  │ 上游代理    │  │ 配置管理   │  │ 性能指标收集  │  │
-│  │ 缓存加速    │  │ 证书管理   │  │ SSE 实时推送  │  │
-│  └────────────┘  └────────────┘  └──────────────┘  │
-│                                                      │
-│  ┌────────────────────────────────────────────────┐  │
-│  │                  存储层                         │  │
-│  │  SQLite / MySQL / PostgreSQL  │  Ristretto + Redis │  │
-│  └────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────┘
-```
 
-项目采用**双平面架构**：
+<details>
+<summary>检测引擎改动后的强制验收</summary>
 
-- **数据平面** — 处理所有入站 HTTP/S 流量，执行规则管道、TLS 终止、上游代理转发
-- **控制平面** — 管理 API（端口 9443）+ 前端管理面板，提供规则配置、站点管理、证书管理等功能
+1. 启动服务：`./bin/my-openwaf`（确保数据面监听在 `:80`）
+2. 执行压测：`./blazehttp.exe -t http://127.0.0.1:80 -c 40`
+3. 检查无异常崩溃、无明显性能下降、无非预期 block/pass
 
----
+</details>
 
-## 📝 License
+## 贡献与许可证
+- 欢迎提交 Issue / PR，建议附上复现步骤与日志
+- 请遵循项目现有代码风格与目录结构
 
 本项目基于 [Apache License 2.0](LICENSE) 开源许可证发布。

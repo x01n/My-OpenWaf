@@ -92,6 +92,76 @@ func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, ena
 	return settingsRepo.Set("protection", string(data))
 }
 
+// SyncBotThresholdToDropPolicy keeps the runtime bot threshold aligned with the bot settings page.
+func SyncBotThresholdToDropPolicy(settingsRepo *repository.SystemSettingsRepo, threshold int) error {
+	if threshold <= 0 {
+		return nil
+	}
+	current := struct {
+		Enabled             bool `json:"enabled"`
+		BotScoreThreshold   int  `json:"bot_score_threshold"`
+		CVEAutoDropCritical bool `json:"cve_auto_drop_critical"`
+		CVEAutoDropHigh     bool `json:"cve_auto_drop_high"`
+	}{
+		Enabled:             true,
+		BotScoreThreshold:   80,
+		CVEAutoDropCritical: true,
+		CVEAutoDropHigh:     true,
+	}
+	if val, err := settingsRepo.Get("drop_policy"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
+	}
+	if current.BotScoreThreshold == threshold {
+		return nil
+	}
+	current.BotScoreThreshold = threshold
+	data, _ := json.Marshal(current)
+	return settingsRepo.Set("drop_policy", string(data))
+}
+
+// SyncCVEAutoDropToDropPolicy keeps CVE auto-drop runtime policy aligned with protection settings.
+// SyncDropThresholdToBotSettings updates bot_settings.ScoreThreshold so the bot page
+// stays consistent when the drop policy page changes the shared bot threshold.
+func SyncDropThresholdToBotSettings(settingsRepo *repository.SystemSettingsRepo, threshold int) error {
+	if threshold <= 0 {
+		return nil
+	}
+	current := BotSettingsResponse{ScoreThreshold: 60}
+	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
+	}
+	if current.ScoreThreshold == threshold {
+		return nil
+	}
+	current.ScoreThreshold = threshold
+	data, _ := json.Marshal(current)
+	return settingsRepo.Set("bot_settings", string(data))
+}
+
+func SyncCVEAutoDropToDropPolicy(settingsRepo *repository.SystemSettingsRepo, critical, high bool) error {
+	current := struct {
+		Enabled             bool `json:"enabled"`
+		BotScoreThreshold   int  `json:"bot_score_threshold"`
+		CVEAutoDropCritical bool `json:"cve_auto_drop_critical"`
+		CVEAutoDropHigh     bool `json:"cve_auto_drop_high"`
+	}{
+		Enabled:             true,
+		BotScoreThreshold:   80,
+		CVEAutoDropCritical: true,
+		CVEAutoDropHigh:     true,
+	}
+	if val, err := settingsRepo.Get("drop_policy"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
+	}
+	if current.CVEAutoDropCritical == critical && current.CVEAutoDropHigh == high {
+		return nil
+	}
+	current.CVEAutoDropCritical = critical
+	current.CVEAutoDropHigh = high
+	data, _ := json.Marshal(current)
+	return settingsRepo.Set("drop_policy", string(data))
+}
+
 // SyncProtectionBotToSettings updates bot_settings.Enabled so the bot page
 // stays consistent when the protection page toggles bot_detection_enabled.
 func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {

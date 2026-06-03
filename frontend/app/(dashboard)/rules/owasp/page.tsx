@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
   SelectContent,
@@ -33,7 +34,13 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { PageIntro, Surface, EmptyState } from "@/components/console-shell"
+import {
+  MetricCard,
+  MetricGrid,
+  PageIntro,
+  Surface,
+  EmptyState,
+} from "@/components/console-shell"
 import {
   getWAFActionMeta,
   owaspModuleOptions,
@@ -66,25 +73,6 @@ const levelLabel: Record<string, string> = {
   high: "高",
   very_high: "极高",
   strict: "严格",
-}
-
-function StatCard({
-  label,
-  value,
-  color,
-}: {
-  label: string
-  value: number
-  color: string
-}) {
-  return (
-    <div className="rounded-lg border bg-white p-5 shadow-sm">
-      <p className="text-xs font-medium tracking-wider text-slate-500 uppercase">
-        {label}
-      </p>
-      <p className={`mt-1 text-2xl font-bold ${color}`}>{value}</p>
-    </div>
-  )
 }
 
 export default function OWASPRuleManagementPage() {
@@ -131,9 +119,11 @@ export default function OWASPRuleManagementPage() {
     load()
   }, [load])
   useEffect(() => {
-    getSensitivityConfig(1)
+    getSensitivityConfig("global")
       .then((c) => setSensitivity(c.category_sensitivity ?? {}))
-      .catch(() => {})
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载 OWASP 敏感度失败")
+      )
   }, [])
 
   async function handleToggle(id: string, enabled: boolean) {
@@ -174,7 +164,9 @@ export default function OWASPRuleManagementPage() {
   async function saveSensitivity() {
     setSavingSens(true)
     try {
-      await updateSensitivityConfig(1, { category_sensitivity: sensitivity })
+      await updateSensitivityConfig("global", {
+        category_sensitivity: sensitivity,
+      })
       toast.success("敏感度配置已保存")
     } catch (e) {
       toast.error(String(e))
@@ -197,9 +189,9 @@ export default function OWASPRuleManagementPage() {
     if (!editRule) return
     try {
       await updateOWASPRule(editRule.id, {
-        action: editForm.action || undefined,
-        status_code: editForm.status_code || 0,
-        redirect_to: editForm.redirect_to || undefined,
+        action: editForm.action,
+        status_code: editForm.status_code,
+        redirect_to: editForm.redirect_to,
         whitelist: editForm.whitelist
           .split(/\r?\n/)
           .map((item) => item.trim())
@@ -242,41 +234,44 @@ export default function OWASPRuleManagementPage() {
       />
 
       {stats && (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatCard
+        <MetricGrid>
+          <MetricCard
             label="规则总数"
             value={stats.total}
-            color="text-slate-900"
+            hint="OWASP 规则总量"
           />
-          <StatCard
+          <MetricCard
             label="已启用"
             value={stats.enabled_count}
-            color="text-emerald-600"
+            tone="success"
+            hint="当前启用规则"
           />
-          <StatCard
+          <MetricCard
             label="已禁用"
             value={stats.disabled_count}
-            color="text-slate-500"
+            hint="当前禁用规则"
           />
-          <StatCard
+          <MetricCard
             label="类别数"
             value={Object.keys(stats.by_category ?? {}).length}
-            color="text-slate-600"
+            hint="按规则类别聚合"
           />
-        </div>
+        </MetricGrid>
       )}
 
       <Tabs defaultValue="rules" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="rules">规则列表</TabsTrigger>
-          <TabsTrigger value="sensitivity">敏感度矩阵</TabsTrigger>
-        </TabsList>
+        <div className="overflow-x-auto overscroll-x-contain rounded-2xl border border-slate-200/80 bg-white/90 p-1 shadow-sm backdrop-blur">
+          <TabsList className="bg-transparent">
+            <TabsTrigger value="rules">规则列表</TabsTrigger>
+            <TabsTrigger value="sensitivity">敏感度矩阵</TabsTrigger>
+          </TabsList>
+        </div>
 
         <TabsContent value="rules" className="space-y-4">
           {selected.size > 0 && (
-            <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2">
+            <div className="flex items-center gap-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-2">
               <span className="text-sm text-slate-600">
-                已选 {selected.size} 条
+                当前视图已选 {selected.size} 条
               </span>
               <Button
                 size="sm"
@@ -299,9 +294,10 @@ export default function OWASPRuleManagementPage() {
 
           {loading ? (
             <Surface>
-              <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-                加载中...
-              </div>
+              <EmptyState
+                title="OWASP 规则加载中"
+                description="正在读取规则列表、类别分组和全量统计。"
+              />
             </Surface>
           ) : categories.length === 0 ? (
             <Surface>
@@ -316,7 +312,7 @@ export default function OWASPRuleManagementPage() {
               return (
                 <div
                   key={cat}
-                  className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
+                  className="console-panel overflow-hidden shadow-sm"
                 >
                   <div
                     className="flex cursor-pointer items-center justify-between px-5 py-3 transition-colors hover:bg-slate-50"
@@ -459,7 +455,7 @@ export default function OWASPRuleManagementPage() {
         <TabsContent value="sensitivity">
           <Surface
             title="敏感度矩阵"
-            description="为每个 OWASP 类别配置检测敏感度级别（18 类别 × 6 级别）。"
+            description="保存到全局 protection 配置；站点级 OWASP 开关仍按站点详情页的继承/覆盖设置生效。"
             action={
               <Button
                 onClick={saveSensitivity}
@@ -470,7 +466,7 @@ export default function OWASPRuleManagementPage() {
               </Button>
             }
           >
-            <div className="overflow-x-auto rounded-lg border border-slate-200">
+            <div className="overflow-x-auto rounded-xl border border-slate-200/80">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -591,13 +587,13 @@ export default function OWASPRuleManagementPage() {
             </div>
             <div className="space-y-2">
               <Label>白名单路径</Label>
-              <Input
+              <Textarea
                 value={editForm.whitelist}
                 onChange={(e) =>
                   setEditForm({ ...editForm, whitelist: e.target.value })
                 }
-                className="rounded-md"
-                placeholder="/api/health；多条可换行"
+                className="min-h-24 rounded-md"
+                placeholder={"/api/health\n/status"}
               />
             </div>
           </div>

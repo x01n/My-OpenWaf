@@ -4,7 +4,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
 )
 
 func TestLoadDefaultsFallbackOnInvalidJSON(t *testing.T) {
@@ -197,6 +201,202 @@ func TestMatchSiteMultiHost(t *testing.T) {
 	// No match
 	if _, ok := sn.MatchSite(":8800", "other.test.com"); ok {
 		t.Fatal("expected no match on other.test.com")
+	}
+}
+
+func TestMergeProtectionBotNullableOverride(t *testing.T) {
+	global := store.DefaultProtectionConfig()
+	global.BotDetectionEnabled = true
+
+	inherited := mergeProtection(global, store.Site{})
+	if !inherited.BotDetectionEnabled {
+		t.Fatal("nil bot override should inherit global enabled value")
+	}
+
+	disabled := false
+	off := mergeProtection(global, store.Site{BotProtectionEnabled: &disabled})
+	if off.BotDetectionEnabled {
+		t.Fatal("false bot override should disable site bot detection")
+	}
+
+	global.BotDetectionEnabled = false
+	enabled := true
+	on := mergeProtection(global, store.Site{BotProtectionEnabled: &enabled})
+	if !on.BotDetectionEnabled {
+		t.Fatal("true bot override should enable site bot detection")
+	}
+}
+
+func TestMergeProtectionIgnoresSiteFieldsWhenNullableOverrideInherits(t *testing.T) {
+	global := store.DefaultProtectionConfig()
+	global.OWASPEnabled = true
+	global.OWASPSensitivity = "mid"
+	global.OWASPAction = "intercept"
+	global.CVEEnabled = true
+	global.CVEAction = "intercept"
+	global.RequestRateLimitEnabled = true
+	global.RequestRateLimitWindow = 60
+	global.RequestRateLimitMax = 300
+	global.RequestRateLimitAction = "rate_limit"
+
+	merged := mergeProtection(global, store.Site{
+		OWASPSensitivity: "strict",
+		OWASPAction:      "drop",
+		CVEAction:        "drop",
+		RateLimitWindow:  1,
+		RateLimitMax:     1,
+		RateLimitAction:  "drop",
+	})
+
+	if merged.OWASPEnabled != global.OWASPEnabled ||
+		merged.OWASPSensitivity != global.OWASPSensitivity ||
+		merged.OWASPAction != global.OWASPAction {
+		t.Fatalf("OWASP inherit should keep global values, got %+v", merged)
+	}
+	if merged.CVEEnabled != global.CVEEnabled || merged.CVEAction != global.CVEAction {
+		t.Fatalf("CVE inherit should keep global values, got %+v", merged)
+	}
+	if merged.RequestRateLimitEnabled != global.RequestRateLimitEnabled ||
+		merged.RequestRateLimitWindow != global.RequestRateLimitWindow ||
+		merged.RequestRateLimitMax != global.RequestRateLimitMax ||
+		merged.RequestRateLimitAction != global.RequestRateLimitAction {
+		t.Fatalf("rate limit inherit should keep global values, got %+v", merged)
+	}
+}
+
+func TestMergeProtectionAppliesSiteFieldsWhenNullableOverrideIsSet(t *testing.T) {
+	global := store.DefaultProtectionConfig()
+	global.OWASPEnabled = false
+	global.OWASPSensitivity = "mid"
+	global.OWASPAction = "intercept"
+	global.CVEEnabled = false
+	global.CVEAction = "intercept"
+	global.RequestRateLimitEnabled = false
+	global.RequestRateLimitWindow = 60
+	global.RequestRateLimitMax = 300
+	global.RequestRateLimitAction = "rate_limit"
+
+	enabled := true
+	merged := mergeProtection(global, store.Site{
+		OWASPEnabled:     &enabled,
+		OWASPSensitivity: "strict",
+		OWASPAction:      "drop",
+		CVEEnabled:       &enabled,
+		CVEAction:        "drop",
+		RateLimitEnabled: &enabled,
+		RateLimitWindow:  1,
+		RateLimitMax:     1,
+		RateLimitAction:  "drop",
+	})
+
+	if !merged.OWASPEnabled || merged.OWASPSensitivity != "strict" || merged.OWASPAction != "drop" {
+		t.Fatalf("OWASP site override should apply, got %+v", merged)
+	}
+	if !merged.CVEEnabled || merged.CVEAction != "drop" {
+		t.Fatalf("CVE site override should apply, got %+v", merged)
+	}
+	if !merged.RequestRateLimitEnabled ||
+		merged.RequestRateLimitWindow != 1 ||
+		merged.RequestRateLimitMax != 1 ||
+		merged.RequestRateLimitAction != "drop" {
+		t.Fatalf("rate limit site override should apply, got %+v", merged)
+	}
+}
+
+func TestMergeProtectionDisablesCVEAutoDropForSiteObserveAction(t *testing.T) {
+	global := store.DefaultProtectionConfig()
+	global.CVEEnabled = true
+	global.CVEAction = string(store.ActionIntercept)
+	global.CVEAutoDropCritical = true
+	global.CVEAutoDropHigh = true
+
+	enabled := true
+	merged := mergeProtection(global, store.Site{
+		CVEEnabled: &enabled,
+		CVEAction:  string(store.ActionObserve),
+	})
+
+	if !merged.CVEEnabled || merged.CVEAction != string(store.ActionObserve) {
+		t.Fatalf("CVE observe override should apply, got %+v", merged)
+	}
+	if merged.CVEAutoDropCritical || merged.CVEAutoDropHigh {
+		t.Fatalf("CVE observe override should disable auto drop, got %+v", merged)
+	}
+}
+
+func newSnapshotBuildDBForTest(t *testing.T) (*gorm.DB, *repository.ApplicationRouteRuleRepo) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&store.Site{},
+		&store.SiteListener{},
+		&store.Certificate{},
+		&store.Rule{},
+		&store.ApplicationRouteRule{},
+		&store.SystemSettings{},
+	); err != nil {
+		t.Fatalf("migrate snapshot build tables: %v", err)
+	}
+	return db, repository.NewApplicationRouteRuleRepo(db)
+}
+
+func TestBuildExcludesDisabledApplicationRouteRules(t *testing.T) {
+	db, appRouteRepo := newSnapshotBuildDBForTest(t)
+	site := store.Site{
+		Host:         "app.example.test",
+		Bind:         ":80",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Enabled:      true,
+	}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	enabledRule := &store.ApplicationRouteRule{
+		SiteID:   site.ID,
+		Name:     "enabled get",
+		Enabled:  true,
+		Priority: 10,
+		Target:   store.AppRouteTargetRequestMethod,
+		Op:       store.AppRouteOpEq,
+		Pattern:  "GET",
+	}
+	if err := appRouteRepo.Create(enabledRule); err != nil {
+		t.Fatalf("seed enabled rule: %v", err)
+	}
+	disabledRule := &store.ApplicationRouteRule{
+		SiteID:   site.ID,
+		Name:     "disabled post",
+		Enabled:  false,
+		Priority: 20,
+		Target:   store.AppRouteTargetRequestMethod,
+		Op:       store.AppRouteOpEq,
+		Pattern:  "POST",
+	}
+	if err := appRouteRepo.Create(disabledRule); err != nil {
+		t.Fatalf("seed disabled rule: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	rt, ok := sn.Sites[SiteMapKey(":80", "app.example.test")]
+	if !ok {
+		t.Fatalf("site runtime missing, keys=%v", sn.Sites)
+	}
+	if len(rt.AppRouteRules) != 1 {
+		t.Fatalf("expected one enabled app route rule, got %#v", rt.AppRouteRules)
+	}
+	if rt.AppRouteRules[0].ID != enabledRule.ID {
+		t.Fatalf("expected enabled rule %d, got %#v", enabledRule.ID, rt.AppRouteRules[0])
+	}
+	if rt.AppRouteRules[0].ID == disabledRule.ID {
+		t.Fatalf("disabled rule %d was compiled into snapshot", disabledRule.ID)
 	}
 }
 

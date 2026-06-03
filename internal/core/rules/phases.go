@@ -36,12 +36,41 @@ type MatchCtx struct {
 
 func ctxFromPipeline(ctx *pipeline.RequestCtx) MatchCtx {
 	headers := ctx.Headers
-	if ctx.Host != "" {
-		headers = make(map[string]string, len(ctx.Headers)+1)
+	if ctx.Host != "" || ctx.TLS.JA3 != "" || ctx.TLS.JA3Hash != "" || ctx.TLS.JA4 != "" || ctx.TLS.TLSVersion != "" || len(ctx.TLS.ALPN) > 0 || len(ctx.HeaderKeys) > 0 {
+		headers = make(map[string]string, len(ctx.Headers)+7)
 		for k, v := range ctx.Headers {
 			headers[k] = v
 		}
-		headers["Host"] = ctx.Host
+		if ctx.Host != "" {
+			headers["Host"] = ctx.Host
+			headers["host"] = ctx.Host
+		}
+		if ctx.TLS.JA3 != "" {
+			headers["X-OWAF-TLS-JA3"] = ctx.TLS.JA3
+			headers["x-owaf-tls-ja3"] = ctx.TLS.JA3
+		}
+		if ctx.TLS.JA3Hash != "" {
+			headers["X-OWAF-TLS-JA3-Hash"] = ctx.TLS.JA3Hash
+			headers["x-owaf-tls-ja3-hash"] = ctx.TLS.JA3Hash
+		}
+		if ctx.TLS.JA4 != "" {
+			headers["X-OWAF-TLS-JA4"] = ctx.TLS.JA4
+			headers["x-owaf-tls-ja4"] = ctx.TLS.JA4
+		}
+		if ctx.TLS.TLSVersion != "" {
+			headers["X-OWAF-TLS-Version"] = ctx.TLS.TLSVersion
+			headers["x-owaf-tls-version"] = ctx.TLS.TLSVersion
+		}
+		if len(ctx.TLS.ALPN) > 0 {
+			alpn := strings.Join(ctx.TLS.ALPN, ",")
+			headers["X-OWAF-TLS-ALPN"] = alpn
+			headers["x-owaf-tls-alpn"] = alpn
+		}
+		if len(ctx.HeaderKeys) > 0 {
+			order := strings.Join(ctx.HeaderKeys, ",")
+			headers["X-OWAF-Header-Order"] = order
+			headers["x-owaf-header-order"] = order
+		}
 	}
 	return MatchCtx{
 		ClientIP: ctx.ClientIP, Path: ctx.Path, Query: ctx.RawQuery,
@@ -304,7 +333,7 @@ func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs 
 		}
 	}
 	detailStr := ""
-	if len(bs.Details) > 0 {
+	if bs.IsHighRisk && len(bs.Details) > 0 {
 		if data, err := json.Marshal(bs.Details); err == nil {
 			detailStr = string(data)
 		}

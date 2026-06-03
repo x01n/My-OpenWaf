@@ -17,6 +17,13 @@ func NewBotScoreRepo(db *gorm.DB) *BotScoreRepo {
 // BotScoreFilter holds query filters for listing bot score logs.
 type BotScoreFilter struct {
 	ClientIP  string
+	Host      string
+	Path      string
+	UserAgent string
+	RequestID string
+	JA3Hash   string
+	JA4       string
+	HighRisk  *bool
 	MinScore  *int
 	MaxScore  *int
 	StartTime *time.Time
@@ -72,6 +79,27 @@ func (r *BotScoreRepo) Stats24h() (*BotScoreStats, error) {
 func applyBotScoreFilters(q *gorm.DB, f BotScoreFilter) *gorm.DB {
 	if f.ClientIP != "" {
 		q = q.Where("client_ip = ?", f.ClientIP)
+	}
+	if f.Host != "" {
+		q = q.Where("host LIKE ?", "%"+f.Host+"%")
+	}
+	if f.Path != "" {
+		q = q.Where("path LIKE ?", "%"+f.Path+"%")
+	}
+	if f.UserAgent != "" {
+		q = q.Where("user_agent LIKE ?", "%"+f.UserAgent+"%")
+	}
+	if f.RequestID != "" {
+		q = q.Where("request_id = ?", f.RequestID)
+	}
+	if f.JA3Hash != "" {
+		q = q.Where("tls_ja3_hash = ?", f.JA3Hash)
+	}
+	if f.JA4 != "" {
+		q = q.Where("tls_ja4 = ?", f.JA4)
+	}
+	if f.HighRisk != nil {
+		q = q.Where("is_high_risk = ?", *f.HighRisk)
 	}
 	if f.MinScore != nil {
 		q = q.Where("total_score >= ?", *f.MinScore)

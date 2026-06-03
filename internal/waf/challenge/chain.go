@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,11 +24,20 @@ const (
 
 // ChainStepConfig defines one step in the chain challenge pipeline.
 type ChainStepConfig struct {
-	Type      ChainStepType `json:"type"`
-	Condition string        `json:"condition,omitempty"`
+	Type        ChainStepType `json:"type"`
+	Condition   string        `json:"condition,omitempty"`
+	CaptchaType CaptchaType   `json:"captcha_type,omitempty"`
 }
 
 // ChainState is the server-side state for an ongoing chain challenge.
+type ChainSessionInfo struct {
+	ID          string `json:"id"`
+	CurrentStep int    `json:"current_step"`
+	StepCount   int    `json:"step_count"`
+	OriginalURL string `json:"original_url"`
+	CreatedAt   string `json:"started_at"`
+}
+
 type ChainState struct {
 	SessionID   string            `json:"session_id"`
 	CurrentStep int               `json:"current_step"`
@@ -75,7 +85,11 @@ func normalizeChainSteps(steps []ChainStepConfig) []ChainStepConfig {
 	out := make([]ChainStepConfig, 0, len(steps))
 	for _, step := range steps {
 		switch step.Type {
-		case ChainStepEnv, ChainStepPoW, ChainStepCaptcha:
+		case ChainStepEnv, ChainStepPoW:
+			step.CaptchaType = ""
+			out = append(out, step)
+		case ChainStepCaptcha:
+			step.CaptchaType = normalizeChainCaptchaType(step.CaptchaType)
 			out = append(out, step)
 		}
 	}
@@ -83,6 +97,15 @@ func normalizeChainSteps(steps []ChainStepConfig) []ChainStepConfig {
 		return defaultChainSteps()
 	}
 	return out
+}
+
+func normalizeChainCaptchaType(t CaptchaType) CaptchaType {
+	switch t {
+	case CaptchaTypeMath, CaptchaTypeClick, CaptchaTypeSlide, CaptchaTypeRotate:
+		return t
+	default:
+		return CaptchaTypeMath
+	}
 }
 
 func (cm *ChainChallengeManager) Reconfigure(steps []ChainStepConfig, difficulty int) {
@@ -163,8 +186,8 @@ func (cm *ChainChallengeManager) ProcessStep(sessionID string, formData map[stri
 		state.Scores["pow"] = 0
 	case ChainStepCaptcha:
 		answer := formData["captcha_answer"]
-		if state.CaptchaID == "" || !cm.captcha.Verify(state.CaptchaID, answer) {
-			ch, _ := cm.captcha.Generate(CaptchaTypeMath)
+		if state.CaptchaID == "" || !cm.captcha.VerifyAdvanced(state.CaptchaID, answer) {
+			ch, _ := cm.captcha.Generate(normalizeChainCaptchaType(step.CaptchaType))
 			if ch != nil {
 				state.CaptchaID = ch.SessionID
 			}
@@ -189,7 +212,7 @@ func (cm *ChainChallengeManager) ProcessStep(sessionID string, formData map[stri
 	if ns.Type == ChainStepPoW {
 		state.Nonce = GeneratePoWNonce()
 	} else if ns.Type == ChainStepCaptcha {
-		ch, _ := cm.captcha.Generate(CaptchaTypeMath)
+		ch, _ := cm.captcha.Generate(normalizeChainCaptchaType(ns.CaptchaType))
 		if ch != nil {
 			state.CaptchaID = ch.SessionID
 		}
@@ -248,15 +271,31 @@ func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 		body = fmt.Sprintf(chainPowHTML, stepNum, total, dots, GeneratePoWScript(cm.difficultyValue(), state.Nonce), state.SessionID)
 	case ChainStepCaptcha:
 		captchaBlock := ""
-		ch, _ := cm.captcha.Generate(CaptchaTypeMath)
+		ch, _ := cm.captcha.Generate(normalizeChainCaptchaType(step.CaptchaType))
 		if ch != nil {
 			state.CaptchaID = ch.SessionID
 			cm.saveChainState(state)
-			captchaBlock = fmt.Sprintf(`<img src="%s" alt="CAPTCHA"><input type="text" class="ci" id="ans" placeholder="%s" autocomplete="off">`, ch.MasterImg, ch.Prompt)
+			captchaBlock = renderChainCaptchaHTML(ch)
 		}
 		body = fmt.Sprintf(chainCapHTML, stepNum, total, dots, captchaBlock, state.SessionID)
 	}
 	return header + body + "</div></body></html>"
+}
+
+func renderChainCaptchaHTML(ch *CaptchaChallenge) string {
+	if ch == nil {
+		return `<input type="text" class="ci" id="ans" autocomplete="off">`
+	}
+	switch CaptchaType(ch.Type) {
+	case CaptchaTypeClick:
+		return fmt.Sprintf(`<input type="hidden" id="cap-type" value="%s"><div class="img-wrap"><img id="cap-img" src="%s" alt="CAPTCHA"></div><img class="thumb" src="%s" alt="target"><input type="hidden" class="ci" id="ans"><button type="button" class="mini" id="clear-clicks">Clear clicks / 清空点击</button>`, ch.Type, ch.MasterImg, ch.ThumbImg)
+	case CaptchaTypeSlide:
+		return fmt.Sprintf(`<input type="hidden" id="cap-type" value="%s"><img src="%s" alt="CAPTCHA"><img id="slide-thumb" class="thumb slide-thumb" src="%s" alt="slider"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="%d" value="0" id="slide-range">`, ch.Type, ch.MasterImg, ch.ThumbImg, firstPositiveInt(ch.Width, 360))
+	case CaptchaTypeRotate:
+		return fmt.Sprintf(`<input type="hidden" id="cap-type" value="%s"><img id="cap-img" src="%s" alt="CAPTCHA"><img class="thumb" src="%s" alt="target"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="360" value="0" id="rotate-range">`, ch.Type, ch.MasterImg, ch.ThumbImg)
+	default:
+		return fmt.Sprintf(`<input type="hidden" id="cap-type" value="%s"><img src="%s" alt="CAPTCHA"><input type="text" class="ci" id="ans" placeholder="%s" autocomplete="off">`, ch.Type, ch.MasterImg, ch.Prompt)
+	}
 }
 
 const chainHdrHTML = `<!DOCTYPE html>
@@ -282,6 +321,7 @@ h1{font-size:1.1rem;font-weight:600;color:#334155;margin-bottom:4px}
 .btn:disabled{background:#cbd5e1;cursor:not-allowed;opacity:.7}
 .captcha-box{background:#f8fafc;border-radius:12px;padding:16px;border:1px solid #e2e8f0}
 .captcha-box img{max-width:100%%;border-radius:8px;display:block;margin:0 auto}
+.img-wrap{position:relative;width:fit-content;margin:0 auto}.dot{position:absolute;transform:translate(-50%%,-50%%);border-radius:999px;background:#14b8a6;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;box-shadow:0 2px 8px rgba(15,118,110,.35)}.mini{border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:7px 10px;color:#64748b;cursor:pointer}.thumb{max-height:84px;object-fit:contain}.slide-thumb{background:#e2e8f0;padding:6px;transition:transform .12s}input[type=range]{width:100%%;accent-color:#14b8a6}
 img{max-width:100%%;border-radius:8px;margin:12px 0}
 .pb{width:100%%;height:6px;background:#e2e8f0;border-radius:3px;margin:20px 0;overflow:hidden}
 .pf{height:100%%;background:linear-gradient(90deg,#14b8a6,#0d9488);width:10%%;transition:width .4s ease;border-radius:3px}
@@ -327,6 +367,20 @@ const chainCapHTML = `<div class="chain-icon">&#128274;</div>
 <button class="btn" onclick="go()">Submit / 提交</button>
 <div class="footer">Protected by My-OpenWAF</div>
 <script>
+(function(){
+var type=(document.getElementById('cap-type')||{}).value||'math';
+var answer=document.getElementById('ans');
+var img=document.getElementById('cap-img');
+if(type==='click'&&img){
+  var points=[];
+  img.addEventListener('click',function(e){var r=img.getBoundingClientRect();var x=Math.round(((e.clientX-r.left)/r.width)*(img.naturalWidth||r.width));var y=Math.round(((e.clientY-r.top)/r.height)*(img.naturalHeight||r.height));points.push({x:x,y:y});answer.value=JSON.stringify(points);var d=document.createElement('span');d.className='dot';d.textContent=String(points.length);d.style.left=((x/(img.naturalWidth||r.width))*100)+'%%';d.style.top=((y/(img.naturalHeight||r.height))*100)+'%%';img.parentNode.appendChild(d);});
+  var clear=document.getElementById('clear-clicks');if(clear){clear.addEventListener('click',function(){points=[];answer.value='';document.querySelectorAll('.dot').forEach(function(n){n.remove();});});}
+}
+var slide=document.getElementById('slide-range');var thumb=document.getElementById('slide-thumb');
+if(type==='slide'&&slide){slide.addEventListener('input',function(){answer.value=JSON.stringify({x:Number(slide.value)});if(thumb){thumb.style.transform='translateX('+slide.value+'px)';}});}
+var rotate=document.getElementById('rotate-range');
+if(type==='rotate'&&rotate&&img){rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});img.style.transform='rotate('+rotate.value+'deg)';});}
+})();
 function go(){var a=document.getElementById('ans').value.trim();if(!a)return;
 var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
 var fl={'__waf_chain_session':'%s','__waf_chain_step':'captcha','__waf_captcha_answer':a};
@@ -339,6 +393,65 @@ func chainGenID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func (cm *ChainChallengeManager) ListSessions() []ChainSessionInfo {
+	if cm == nil {
+		return nil
+	}
+	if cm.redis != nil {
+		return cm.listRedisSessions()
+	}
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	sessions := make([]ChainSessionInfo, 0, len(cm.states))
+	for _, state := range cm.states {
+		sessions = append(sessions, chainSessionInfoFromState(state))
+	}
+	return sessions
+}
+
+func (cm *ChainChallengeManager) DeleteSession(id string) bool {
+	if cm == nil || strings.TrimSpace(id) == "" {
+		return false
+	}
+	if cm.loadChainState(id) == nil {
+		return false
+	}
+	cm.deleteChainState(id)
+	return true
+}
+
+func (cm *ChainChallengeManager) listRedisSessions() []ChainSessionInfo {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	iter := cm.redis.Scan(ctx, 0, cm.prefix+"*", 100).Iterator()
+	sessions := make([]ChainSessionInfo, 0)
+	for iter.Next(ctx) {
+		data, err := cm.redis.Get(ctx, iter.Val()).Bytes()
+		if err != nil {
+			continue
+		}
+		var state ChainState
+		if json.Unmarshal(data, &state) != nil {
+			continue
+		}
+		sessions = append(sessions, chainSessionInfoFromState(&state))
+	}
+	return sessions
+}
+
+func chainSessionInfoFromState(state *ChainState) ChainSessionInfo {
+	if state == nil {
+		return ChainSessionInfo{}
+	}
+	return ChainSessionInfo{
+		ID:          state.SessionID,
+		CurrentStep: state.CurrentStep,
+		StepCount:   len(state.Steps),
+		OriginalURL: state.OriginalURL,
+		CreatedAt:   state.CreatedAt.Format(time.RFC3339),
+	}
 }
 
 func (cm *ChainChallengeManager) saveChainState(state *ChainState) {

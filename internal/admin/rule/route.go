@@ -68,6 +68,33 @@ func validateApplicationRouteRule(r *store.ApplicationRouteRule) error {
 	return nil
 }
 
+type applicationRouteRuleRequest struct {
+	Name      string `json:"name"`
+	Enabled   *bool  `json:"enabled"`
+	Priority  int    `json:"priority"`
+	Target    string `json:"target"`
+	Op        string `json:"op"`
+	Pattern   string `json:"pattern"`
+	HeaderKey string `json:"header_key"`
+}
+
+func (req applicationRouteRuleRequest) toStore(siteID uint, defaultEnabled bool) store.ApplicationRouteRule {
+	enabled := defaultEnabled
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	return store.ApplicationRouteRule{
+		SiteID:    siteID,
+		Name:      req.Name,
+		Enabled:   enabled,
+		Priority:  req.Priority,
+		Target:    req.Target,
+		Op:        req.Op,
+		Pattern:   req.Pattern,
+		HeaderKey: req.HeaderKey,
+	}
+}
+
 func ListApplicationRouteRules(siteRepo *repository.SiteRepo, repo *repository.ApplicationRouteRuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		siteID, err := shared.ParseUintParam(c, "id")
@@ -102,12 +129,12 @@ func CreateApplicationRouteRule(siteRepo *repository.SiteRepo, repo *repository.
 			c.JSON(404, map[string]string{"error": "site not found"})
 			return
 		}
-		var body store.ApplicationRouteRule
-		if err := c.BindJSON(&body); err != nil {
+		var req applicationRouteRuleRequest
+		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		body.SiteID = siteID
+		body := req.toStore(siteID, true)
 		body.ID = 0
 		if err := validateApplicationRouteRule(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -118,7 +145,7 @@ func CreateApplicationRouteRule(siteRepo *repository.SiteRepo, repo *repository.
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]any{"error": "saved but reload failed: " + err.Error(), "item": body})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": body})
 			return
 		}
 		c.JSON(201, body)
@@ -146,13 +173,13 @@ func UpdateApplicationRouteRule(siteRepo *repository.SiteRepo, repo *repository.
 			c.JSON(404, map[string]string{"error": "rule not found"})
 			return
 		}
-		var body store.ApplicationRouteRule
-		if err := c.BindJSON(&body); err != nil {
+		var req applicationRouteRuleRequest
+		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		body := req.toStore(siteID, existing.Enabled)
 		body.ID = ruleID
-		body.SiteID = siteID
 		body.CreatedAt = existing.CreatedAt
 		if err := validateApplicationRouteRule(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -163,7 +190,7 @@ func UpdateApplicationRouteRule(siteRepo *repository.SiteRepo, repo *repository.
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]any{"error": "saved but reload failed: " + err.Error(), "item": body})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": body})
 			return
 		}
 		c.JSON(200, body)
@@ -196,7 +223,7 @@ func DeleteApplicationRouteRule(siteRepo *repository.SiteRepo, repo *repository.
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "deleted but reload failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
 		}
 		c.JSON(200, map[string]string{"status": "ok"})

@@ -44,48 +44,66 @@ func UpdateEscalationConfig(repo *repository.SystemSettingsRepo, reload func() e
 			}
 		}
 		var req struct {
-			EscalationEnabled    bool                      `json:"escalation_enabled"`
-			EscalationWindowSecs int                       `json:"escalation_window_secs"`
-			EscalationSteps      []store.EscalationStepDef `json:"escalation_steps"`
+			EscalationEnabled    *bool                      `json:"escalation_enabled"`
+			EscalationWindowSecs *int                       `json:"escalation_window_secs"`
+			EscalationSteps      *[]store.EscalationStepDef `json:"escalation_steps"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		for i, step := range req.EscalationSteps {
-			if step.Threshold <= 0 {
-				c.JSON(400, map[string]string{"error": "step threshold must be positive"})
-				return
-			}
-			if step.Action == "" {
-				c.JSON(400, map[string]string{"error": "step action required"})
-				return
-			}
-			if i > 0 && step.Threshold <= req.EscalationSteps[i-1].Threshold {
-				c.JSON(400, map[string]string{"error": "steps must have increasing thresholds"})
-				return
+		if req.EscalationWindowSecs != nil && *req.EscalationWindowSecs <= 0 {
+			c.JSON(400, map[string]string{"error": "escalation_window_secs must be positive"})
+			return
+		}
+		if req.EscalationSteps != nil {
+			for i, step := range *req.EscalationSteps {
+				if step.Threshold <= 0 {
+					c.JSON(400, map[string]string{"error": "step threshold must be positive"})
+					return
+				}
+				if step.Action == "" {
+					c.JSON(400, map[string]string{"error": "step action required"})
+					return
+				}
+				if i > 0 && step.Threshold <= (*req.EscalationSteps)[i-1].Threshold {
+					c.JSON(400, map[string]string{"error": "steps must have increasing thresholds"})
+					return
+				}
 			}
 		}
 		cfg := shared.LoadProtectionConfig(repo)
-		cfg.EscalationEnabled = req.EscalationEnabled
-		if req.EscalationWindowSecs > 0 {
-			cfg.EscalationWindowSecs = req.EscalationWindowSecs
+		if req.EscalationEnabled != nil {
+			cfg.EscalationEnabled = *req.EscalationEnabled
 		}
-		cfg.SetEscalationSteps(req.EscalationSteps)
+		if req.EscalationWindowSecs != nil {
+			cfg.EscalationWindowSecs = *req.EscalationWindowSecs
+		}
+		if req.EscalationSteps != nil {
+			cfg.SetEscalationSteps(*req.EscalationSteps)
+		}
 		if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
 		}
 		c.JSON(200, map[string]any{
 			"escalation_enabled":     cfg.EscalationEnabled,
 			"escalation_window_secs": cfg.EscalationWindowSecs,
-			"escalation_steps":       req.EscalationSteps,
+			"escalation_steps":       escalationStepsResponse(cfg),
 		})
 	}
+}
+
+func escalationStepsResponse(cfg store.ProtectionConfig) []store.EscalationStepDef {
+	steps := cfg.GetEscalationSteps()
+	if steps == nil {
+		return []store.EscalationStepDef{}
+	}
+	return steps
 }
 
 func GetEscalationIPStatus(mgr *wafescalation.EscalationManager) app.HandlerFunc {

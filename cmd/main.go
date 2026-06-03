@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 
 	"My-OpenWaf/internal/app"
@@ -22,6 +25,14 @@ func main() {
 			fmt.Fprintln(os.Stdout, "  my-openwaf reset-admin-password [username] <new-password>")
 			return
 		}
+	}
+	if bind := os.Getenv("MY_OPENWAF_PPROF_BIND"); bind != "" {
+		go func() {
+			log.Printf("pprof listening on %s", bind)
+			if err := http.ListenAndServe(bind, nil); err != nil {
+				log.Printf("pprof server stopped: %v", err)
+			}
+		}()
 	}
 	app.Run()
 }

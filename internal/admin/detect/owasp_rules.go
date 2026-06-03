@@ -97,9 +97,9 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 		var req struct {
 			Enabled    *bool    `json:"enabled,omitempty"`
 			Whitelist  []string `json:"whitelist,omitempty"`
-			Action     string   `json:"action,omitempty"`
-			StatusCode int      `json:"status_code,omitempty"`
-			RedirectTo string   `json:"redirect_to,omitempty"`
+			Action     *string  `json:"action,omitempty"`
+			StatusCode *int     `json:"status_code,omitempty"`
+			RedirectTo *string  `json:"redirect_to,omitempty"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -122,18 +122,30 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 		if req.Whitelist != nil {
 			override["whitelist"] = req.Whitelist
 		}
-		if req.Action != "" {
-			if !action.IsValid(action.Type(req.Action)) || action.Normalize(action.Type(req.Action)) == action.Allow || action.Normalize(action.Type(req.Action)) == action.Tag {
-				c.JSON(400, map[string]string{"error": "invalid action"})
-				return
+		if req.Action != nil {
+			if *req.Action == "" {
+				delete(override, "action")
+			} else {
+				if !action.IsValid(action.Type(*req.Action)) || action.Normalize(action.Type(*req.Action)) == action.Allow || action.Normalize(action.Type(*req.Action)) == action.Tag {
+					c.JSON(400, map[string]string{"error": "invalid action"})
+					return
+				}
+				override["action"] = string(action.Normalize(action.Type(*req.Action)))
 			}
-			override["action"] = string(action.Normalize(action.Type(req.Action)))
 		}
-		if req.StatusCode > 0 {
-			override["status_code"] = req.StatusCode
+		if req.StatusCode != nil {
+			if *req.StatusCode <= 0 {
+				delete(override, "status_code")
+			} else {
+				override["status_code"] = *req.StatusCode
+			}
 		}
-		if req.RedirectTo != "" {
-			override["redirect_to"] = req.RedirectTo
+		if req.RedirectTo != nil {
+			if *req.RedirectTo == "" {
+				delete(override, "redirect_to")
+			} else {
+				override["redirect_to"] = *req.RedirectTo
+			}
 		}
 		rulesConfig[ruleID] = override
 		cfg.SetOWASPRulesConfig(rulesConfig)
@@ -142,7 +154,7 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
 		}
 		c.JSON(200, map[string]any{"rule_id": ruleID, "override": override})
@@ -156,9 +168,9 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 				ID         string   `json:"id"`
 				Enabled    *bool    `json:"enabled,omitempty"`
 				Whitelist  []string `json:"whitelist,omitempty"`
-				Action     string   `json:"action,omitempty"`
-				StatusCode int      `json:"status_code,omitempty"`
-				RedirectTo string   `json:"redirect_to,omitempty"`
+				Action     *string  `json:"action,omitempty"`
+				StatusCode *int     `json:"status_code,omitempty"`
+				RedirectTo *string  `json:"redirect_to,omitempty"`
 			} `json:"rules"`
 		}
 		if err := c.BindJSON(&req); err != nil {
@@ -191,17 +203,29 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 			if r.Whitelist != nil {
 				override["whitelist"] = r.Whitelist
 			}
-			if r.Action != "" {
-				if !action.IsValid(action.Type(r.Action)) || action.Normalize(action.Type(r.Action)) == action.Allow || action.Normalize(action.Type(r.Action)) == action.Tag {
-					continue
+			if r.Action != nil {
+				if *r.Action == "" {
+					delete(override, "action")
+				} else {
+					if !action.IsValid(action.Type(*r.Action)) || action.Normalize(action.Type(*r.Action)) == action.Allow || action.Normalize(action.Type(*r.Action)) == action.Tag {
+						continue
+					}
+					override["action"] = string(action.Normalize(action.Type(*r.Action)))
 				}
-				override["action"] = string(action.Normalize(action.Type(r.Action)))
 			}
-			if r.StatusCode > 0 {
-				override["status_code"] = r.StatusCode
+			if r.StatusCode != nil {
+				if *r.StatusCode <= 0 {
+					delete(override, "status_code")
+				} else {
+					override["status_code"] = *r.StatusCode
+				}
 			}
-			if r.RedirectTo != "" {
-				override["redirect_to"] = r.RedirectTo
+			if r.RedirectTo != nil {
+				if *r.RedirectTo == "" {
+					delete(override, "redirect_to")
+				} else {
+					override["redirect_to"] = *r.RedirectTo
+				}
 			}
 			rulesConfig[r.ID] = override
 			updated++
@@ -212,7 +236,7 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
 		}
 		c.JSON(200, map[string]any{"updated": updated, "total": len(req.Rules)})

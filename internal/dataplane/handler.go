@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -381,10 +384,7 @@ func Handler(opts Options) app.HandlerFunc {
 							return
 						default:
 							// Expired or invalid nonce — trigger configured action (default: challenge).
-							antiReplayAct := rt.AntiReplayAction
-							if antiReplayAct == "" || antiReplayAct == "shield_challenge" {
-								antiReplayAct = "challenge"
-							}
+							antiReplayAct := normalizeAntiReplayAction(rt.AntiReplayAction)
 							challengeResult := action.Result{
 								Type:      action.Type(antiReplayAct),
 								Phase:     "anti_replay",
@@ -413,11 +413,7 @@ func Handler(opts Options) app.HandlerFunc {
 									StatusCode: 403,
 								})
 							}
-							if action.Type(antiReplayAct) == action.Challenge {
-								pages.WriteChallengeResponse(c, reqID, &rt, 403)
-							} else {
-								pages.WriteBlockResponse(c, reqID, &rt, sn, challengeResult)
-							}
+							writeAntiReplayActionResponse(c, opts, sn, &rt, reqID, antiReplayAct, challengeResult, 403)
 							logAccess(accessLog, reqID, method, path, host, accessStatusCode(c, antiReplayAct), antiReplayAct)
 							recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: accessStatusCode(c, antiReplayAct), WAFAction: antiReplayAct, CacheState: "bypass"})
 							return
@@ -472,7 +468,11 @@ func Handler(opts Options) app.HandlerFunc {
 		reqCtx.TLS = tlsFingerprint
 		c.Request.Header.VisitAll(func(k, v []byte) {
 			key := string(k)
-			reqCtx.Headers[key] = string(v)
+			value := string(v)
+			reqCtx.Headers[key] = value
+			if lower := strings.ToLower(key); lower != key {
+				reqCtx.Headers[lower] = value
+			}
 			reqCtx.HeaderKeys = append(reqCtx.HeaderKeys, key)
 		})
 
@@ -904,8 +904,8 @@ func Handler(opts Options) app.HandlerFunc {
 		recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: aPath, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: cacheState, Upstream: base, UpstreamLatencyMs: upstreamLatencyMs, ResponseSize: int64(len(c.Response.Body()))})
 
 		// Async application route resource recording.
-		// IMPORTANT: Copy all fields from RequestContext BEFORE launching goroutine
-		// because Hertz recycles the context after handler returns.
+		// Match rules before launching the goroutine so unmatched requests avoid
+		// map copies and background DB work on the hot path.
 		if upstreamErr == nil && len(rt.AppRouteRules) > 0 && opts.RecordedResourceRepo != nil {
 			mat := &appresource.Material{
 				Method:      method,
@@ -916,12 +916,11 @@ func Handler(opts Options) app.HandlerFunc {
 				ContentType: string(c.Response.Header.ContentType()),
 				UserAgent:   ua,
 			}
-			// Copy headers needed by rule matching before goroutine
-			headerSnapshot := make(map[string]string)
-			c.Request.Header.VisitAll(func(key, value []byte) {
-				headerSnapshot[string(key)] = string(value)
-			})
-			go recordAppRouteResourceSafe(opts.RecordedResourceRepo, rt, mat, headerSnapshot)
+			headerFn := func(key string) string { return reqCtx.Headers[key] }
+			ids := appresource.MatchedRuleIDs(rt.AppRouteRules, mat, headerFn)
+			if len(ids) > 0 {
+				go recordAppRouteResourceSafe(opts.RecordedResourceRepo, rt.Site.ID, mat, ids)
+			}
 		}
 	}
 }
@@ -936,13 +935,8 @@ func pickUpstream(urls []string, pool *upstream.Pool, next func(uint32) uint32) 
 	return pool.Pick(urls, next)
 }
 
-func recordAppRouteResourceSafe(repo *repository.RecordedResourceRepo, rt snapshot.SiteRuntime, m *appresource.Material, headers map[string]string) {
-	headerFn := func(key string) string { return headers[key] }
-	ids := appresource.MatchedRuleIDs(rt.AppRouteRules, m, headerFn)
-	if len(ids) == 0 {
-		return
-	}
-	rec := appresource.BuildRecordedResource(rt.Site.ID, ids, m)
+func recordAppRouteResourceSafe(repo *repository.RecordedResourceRepo, siteID uint, m *appresource.Material, ids []uint) {
+	rec := appresource.BuildRecordedResource(siteID, ids, m)
 	if rec == nil {
 		return
 	}
@@ -1016,6 +1010,16 @@ type accessLogInfo struct {
 	RequestBodyTruncated bool
 	RequestSize          int64
 	ResponseHeaders      string
+	Detailed             bool
+}
+
+func shouldRecordDetailedSecurityEvent(ev store.SecurityEvent) bool {
+	switch action.Normalize(action.Type(ev.Action)) {
+	case action.Drop, action.Intercept, action.RateLimit, action.Challenge, action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge, action.Redirect:
+		return true
+	default:
+		return ev.StatusCode >= 400
+	}
 }
 
 func recordSecurityEvent(c *app.RequestContext, opts Options, ev store.SecurityEvent) {
@@ -1025,11 +1029,14 @@ func recordSecurityEvent(c *app.RequestContext, opts Options, ev store.SecurityE
 	if ev.QueryString == "" {
 		ev.QueryString = string(c.URI().QueryString())
 	}
-	reqBody, truncated, size := requestBodyPreview(c)
-	ev.RequestHeaders = valueOrFallback(ev.RequestHeaders, requestHeadersJSON(c))
-	ev.RequestBodyPreview = valueOrFallback(ev.RequestBodyPreview, reqBody)
-	ev.RequestBodyTruncated = ev.RequestBodyTruncated || truncated
-	ev.RequestSize = firstPositive(ev.RequestSize, size)
+	ev.QueryString = sanitizeQueryString(ev.QueryString)
+	if shouldRecordDetailedSecurityEvent(ev) {
+		reqBody, truncated, size := requestBodyPreview(c)
+		ev.RequestHeaders = valueOrFallback(ev.RequestHeaders, requestHeadersJSON(c))
+		ev.RequestBodyPreview = valueOrFallback(ev.RequestBodyPreview, reqBody)
+		ev.RequestBodyTruncated = ev.RequestBodyTruncated || truncated
+		ev.RequestSize = firstPositive(ev.RequestSize, size)
+	}
 	opts.Writer.RecordEvent(ev)
 }
 
@@ -1047,25 +1054,38 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	if len(info.HeaderOrder) == 0 {
 		info.HeaderOrder = requestHeaderOrder(c)
 	}
-	requestBody, requestBodyTruncated, requestSize := requestBodyPreview(c)
+	requestBody := info.RequestBodyPreview
+	requestBodyTruncated := info.RequestBodyTruncated
+	requestSize := info.RequestSize
+	requestHeaders := info.RequestHeaders
+	responseHeaders := info.ResponseHeaders
+	if info.Detailed {
+		if requestBody == "" || requestSize == 0 {
+			var bodyTruncated bool
+			requestBody, bodyTruncated, requestSize = requestBodyPreview(c)
+			requestBodyTruncated = requestBodyTruncated || bodyTruncated
+		}
+		requestHeaders = valueOrFallback(requestHeaders, requestHeadersJSON(c))
+		responseHeaders = valueOrFallback(responseHeaders, responseHeadersJSON(c))
+	}
 	return store.AccessLog{
 		SiteID:               info.SiteID,
 		RequestID:            info.RequestID,
 		ClientIP:             info.ClientIP,
 		Host:                 info.Host,
 		Path:                 info.Path,
-		QueryString:          info.QueryString,
+		QueryString:          sanitizeQueryString(info.QueryString),
 		Method:               info.Method,
 		StatusCode:           info.StatusCode,
 		WAFAction:            info.WAFAction,
 		CacheState:           info.CacheState,
 		Upstream:             info.Upstream,
 		UserAgent:            info.UserAgent,
-		RequestHeaders:       valueOrFallback(info.RequestHeaders, requestHeadersJSON(c)),
-		RequestBodyPreview:   valueOrFallback(info.RequestBodyPreview, requestBody),
-		RequestBodyTruncated: info.RequestBodyTruncated || requestBodyTruncated,
-		RequestSize:          firstPositive(info.RequestSize, requestSize),
-		ResponseHeaders:      info.ResponseHeaders,
+		RequestHeaders:       requestHeaders,
+		RequestBodyPreview:   requestBody,
+		RequestBodyTruncated: requestBodyTruncated,
+		RequestSize:          requestSize,
+		ResponseHeaders:      responseHeaders,
 		HTTPProtocol:         info.HTTPProtocol,
 		TLSVersion:           info.TLSFingerprint.TLSVersion,
 		TLSSNI:               info.TLSFingerprint.SNI,
@@ -1079,18 +1099,50 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	}
 }
 
-const logBodyPreviewLimit = 8192
+const (
+	logBodyPreviewLimit  = 8192
+	logHeaderValueLimit  = 2048
+	logHeaderValuesLimit = 32
+)
+
+var sensitiveLogValuePattern = regexp.MustCompile(`(?i)(password|passwd|pwd|token|secret|session|api[_-]?key|auth[_-]?token|csrf|code)(["'\s:=]+)([^&\s,"'}]+)`)
 
 func requestHeadersJSON(c *app.RequestContext) string {
 	headers := make(map[string][]string)
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := string(k)
 		lower := strings.ToLower(key)
-		if lower == "authorization" || lower == "cookie" || lower == "x-api-key" || lower == "x-auth-token" {
+		if isSensitiveLogKey(lower) {
 			headers[key] = []string{"[redacted]"}
 			return
 		}
-		headers[key] = append(headers[key], string(v))
+		values := headers[key]
+		if len(values) >= logHeaderValuesLimit {
+			return
+		}
+		headers[key] = append(values, truncateLogValue(sanitizeLogText(string(v)), logHeaderValueLimit))
+	})
+	data, err := json.Marshal(headers)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func responseHeadersJSON(c *app.RequestContext) string {
+	headers := make(map[string][]string)
+	c.Response.Header.VisitAll(func(k, v []byte) {
+		key := string(k)
+		lower := strings.ToLower(key)
+		if isSensitiveLogKey(lower) {
+			headers[key] = []string{"[redacted]"}
+			return
+		}
+		values := headers[key]
+		if len(values) >= logHeaderValuesLimit {
+			return
+		}
+		headers[key] = append(values, truncateLogValue(sanitizeLogText(string(v)), logHeaderValueLimit))
 	})
 	data, err := json.Marshal(headers)
 	if err != nil {
@@ -1109,9 +1161,100 @@ func requestBodyPreview(c *app.RequestContext) (string, bool, int64) {
 	if truncated {
 		body = body[:logBodyPreviewLimit]
 	}
-	return string(body), truncated, size
+	contentType := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
+	return sanitizeBodyPreview(string(body), contentType), truncated, size
 }
 
+func sanitizeQueryString(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return sanitizeLogText(raw)
+	}
+	for key := range values {
+		if isSensitiveLogKey(key) {
+			values[key] = []string{"[redacted]"}
+		} else {
+			for i, value := range values[key] {
+				values[key][i] = sanitizeLogText(value)
+			}
+		}
+	}
+	return values.Encode()
+}
+
+func sanitizeBodyPreview(body, contentType string) string {
+	if body == "" {
+		return ""
+	}
+	mediaType, _, _ := mime.ParseMediaType(contentType)
+	switch mediaType {
+	case "application/x-www-form-urlencoded":
+		return sanitizeQueryString(body)
+	case "application/json":
+		var value any
+		if json.Unmarshal([]byte(body), &value) == nil {
+			return marshalSanitizedJSON(value)
+		}
+	}
+	return sanitizeLogText(body)
+}
+
+func marshalSanitizedJSON(value any) string {
+	data, err := json.Marshal(sanitizeJSONValue(value))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func sanitizeJSONValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			if isSensitiveLogKey(key) {
+				out[key] = "[redacted]"
+			} else {
+				out[key] = sanitizeJSONValue(item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = sanitizeJSONValue(item)
+		}
+		return out
+	case string:
+		return sanitizeLogText(v)
+	default:
+		return value
+	}
+}
+
+func sanitizeLogText(value string) string {
+	return sensitiveLogValuePattern.ReplaceAllString(value, `${1}${2}[redacted]`)
+}
+
+func truncateLogValue(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "...[truncated]"
+}
+
+func isSensitiveLogKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, part := range []string{"authorization", "cookie", "token", "secret", "password", "passwd", "pwd", "session", "api-key", "apikey", "csrf", "credential", "key"} {
+		if strings.Contains(lower, part) {
+			return true
+		}
+	}
+	return false
+}
 func valueOrFallback(value, fallback string) string {
 	if value != "" {
 		return value
@@ -1147,11 +1290,22 @@ func recordAccessLog(c *app.RequestContext, opts Options, info accessLogInfo) {
 	if opts.Writer == nil || !shouldRecordAccessLog(info, opts.AccessLogSamplingRate) {
 		return
 	}
+	info.Detailed = shouldRecordDetailedAccessLog(info)
 	enqueueAccessLog(opts.Writer, buildAccessLogEntry(c, info))
 }
 
+func shouldRecordDetailedAccessLog(info accessLogInfo) bool {
+	return info.WAFAction != "none" || info.StatusCode >= 400
+}
+
 func shouldRecordAccessLog(info accessLogInfo, rate uint32) bool {
-	if info.WAFAction != "none" || info.StatusCode >= 400 || rate <= 1 {
+	if info.WAFAction != "none" || info.StatusCode >= 400 {
+		return true
+	}
+	if rate == 0 {
+		return false
+	}
+	if rate <= 1 {
 		return true
 	}
 	return accessLogSampleCounter.Add(1)%rate == 0
@@ -1292,6 +1446,49 @@ func accessStatusCode(c *app.RequestContext, wafAction string) int {
 		return 0
 	}
 	return c.Response.StatusCode()
+}
+
+func normalizeAntiReplayAction(raw string) string {
+	switch action.Normalize(action.Type(raw)) {
+	case action.CaptchaChallenge:
+		return string(action.CaptchaChallenge)
+	case action.ShieldChallenge:
+		return string(action.ShieldChallenge)
+	case action.ChainChallenge:
+		return string(action.ChainChallenge)
+	case action.Intercept:
+		return string(action.Intercept)
+	case action.Challenge:
+		return string(action.Challenge)
+	default:
+		return string(action.Challenge)
+	}
+}
+
+func writeAntiReplayActionResponse(c *app.RequestContext, opts Options, sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, reqID, antiReplayAct string, result action.Result, statusCode int) {
+	switch action.Type(antiReplayAct) {
+	case action.CaptchaChallenge:
+		if sn != nil && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil {
+			captchaType := challenge.CaptchaType(sn.Protection.CaptchaType)
+			challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, statusCode)
+			return
+		}
+	case action.ShieldChallenge:
+		if sn != nil && sn.Protection.ShieldEnabled && opts.ShieldManager != nil {
+			origURL := string(c.Request.URI().RequestURI())
+			opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, statusCode)
+			return
+		}
+	case action.ChainChallenge:
+		if sn != nil && sn.Protection.ChainEnabled && opts.ChainManager != nil {
+			challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
+			return
+		}
+	case action.Challenge:
+		pages.WriteChallengeResponse(c, reqID, rt, statusCode)
+		return
+	}
+	pages.WriteBlockResponse(c, reqID, rt, sn, result)
 }
 
 func hasUpstreamServerHeader(c *app.RequestContext) bool {

@@ -93,12 +93,15 @@ function CustomRulesContent() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState<RuleFormData>(emptyForm)
   const [saving, setSaving] = useState(false)
+  const [importing, setImporting] = useState(false)
 
   // Load policies list for the filter dropdown
   useEffect(() => {
     api<{ items: Policy[] }>("/api/v1/policies")
       .then((data) => setPolicies(data.items || []))
-      .catch(() => {})
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载策略列表失败")
+      )
   }, [])
 
   // Sync URL param to filter state
@@ -119,22 +122,16 @@ function CustomRulesContent() {
     try {
       const params: Record<string, unknown> = { page, page_size: PAGE_SIZE }
       if (activePolicyId) params.policy_id = activePolicyId
+      if (search.trim()) params.q = search.trim()
       const res = await api<PaginatedResponse<Rule>>(
         `/api/v1/rules${buildQuery(params)}`
       )
-      let list = res.items ?? []
-      if (search) {
-        const q = search.toLowerCase()
-        list = list.filter(
-          (r) =>
-            r.name.toLowerCase().includes(q) ||
-            r.pattern.toLowerCase().includes(q)
-        )
-      }
-      setItems(list)
+      setItems(res.items ?? [])
       setTotal(res.total ?? 0)
     } catch (e) {
       toast.error(String(e))
+      setItems([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
@@ -211,9 +208,13 @@ function CustomRulesContent() {
     }
   }
 
-  async function handleDelete(id: number) {
+  async function handleDelete(rule: Rule) {
+    const confirmed = window.confirm(
+      `确认删除规则「${rule.name || rule.id}」？删除后会立即从所属策略中移除并重新加载运行时配置。`
+    )
+    if (!confirmed) return
     try {
-      await api(`/api/v1/rules/${id}/delete`, { method: "POST" })
+      await api(`/api/v1/rules/${rule.id}/delete`, { method: "POST" })
       toast.success("规则已删除")
       load()
     } catch (e) {
@@ -230,7 +231,7 @@ function CustomRulesContent() {
     a.download = `rules-export-${new Date().toISOString().slice(0, 10)}.json`
     a.click()
     URL.revokeObjectURL(url)
-    toast.success("规则已导出")
+    toast.success("当前页规则已导出")
   }
 
   function handleImport() {
@@ -247,6 +248,11 @@ function CustomRulesContent() {
           toast.error("无效的规则文件")
           return
         }
+        const confirmed = window.confirm(
+          `将导入 ${rules.length} 条规则；导入使用事务，任一规则无效将全部失败。是否继续？`
+        )
+        if (!confirmed) return
+        setImporting(true)
         const result = await api<{ imported: number; total: number }>(
           "/api/v1/rules/import",
           {
@@ -256,8 +262,10 @@ function CustomRulesContent() {
         )
         toast.success(`成功导入 ${result.imported} / ${result.total} 条规则`)
         load()
-      } catch {
-        toast.error("文件解析失败")
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "文件解析或导入失败")
+      } finally {
+        setImporting(false)
       }
     }
     input.click()
@@ -303,15 +311,17 @@ function CustomRulesContent() {
               variant="outline"
               className="rounded-md border-slate-200 text-slate-700 hover:bg-slate-100"
               onClick={handleImport}
+              disabled={importing}
             >
-              <FileUp className="mr-2 h-4 w-4" /> 导入
+              <FileUp className="mr-2 h-4 w-4" />{" "}
+              {importing ? "导入中..." : "导入"}
             </Button>
             <Button
               variant="outline"
               className="rounded-md border-slate-200 text-slate-700 hover:bg-slate-100"
               onClick={handleExport}
             >
-              <Download className="mr-2 h-4 w-4" /> 导出
+              <Download className="mr-2 h-4 w-4" /> 导出当前页 JSON
             </Button>
             <Button
               className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
@@ -363,12 +373,18 @@ function CustomRulesContent() {
               <X className="h-3.5 w-3.5" /> 清除策略筛选
             </Button>
           )}
+          {search && (
+            <span className="text-xs text-slate-400">
+              搜索会参与后端分页总数；策略筛选与搜索条件同时生效。
+            </span>
+          )}
         </div>
 
         {loading ? (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-            加载中...
-          </div>
+          <EmptyState
+            title="规则列表加载中"
+            description="正在读取自定义规则、策略筛选和分页统计。"
+          />
         ) : items.length === 0 ? (
           <EmptyState
             title="暂无规则"
@@ -384,7 +400,7 @@ function CustomRulesContent() {
           />
         ) : (
           <div className="space-y-4">
-            <div className="overflow-x-auto rounded-lg border border-slate-200">
+            <div className="overflow-x-auto rounded-xl border border-slate-200/80">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -469,7 +485,7 @@ function CustomRulesContent() {
                             size="icon"
                             variant="ghost"
                             className="h-8 w-8 rounded-md text-rose-500 hover:text-rose-700"
-                            onClick={() => handleDelete(rule.id)}
+                            onClick={() => handleDelete(rule)}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -634,7 +650,7 @@ function CustomRulesContent() {
                 onChange={(v) => setForm({ ...form, pattern: v })}
               />
             </div>
-            <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
               <Label className="font-medium">启用</Label>
               <Switch
                 checked={form.enabled}

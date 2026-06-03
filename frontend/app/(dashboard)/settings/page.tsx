@@ -55,7 +55,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Badge } from "@/components/ui/badge"
-import { InlineMeta, PageIntro, Surface } from "@/components/console-shell"
+import {
+  ConsoleTableShell,
+  InlineMeta,
+  PageIntro,
+  Surface,
+} from "@/components/console-shell"
 import { Pagination } from "@/components/pagination"
 import {
   createAPIKey,
@@ -302,15 +307,26 @@ export default function SettingsPage() {
       ] = await Promise.all([
         getSystemSettings(),
         getProtectionSettings(),
-        getDashboardSummary().catch(() => null),
-        getNetworkConfig().catch(() => null),
-        getTLSDefaultConfig().catch(() => null),
-        getTLSCipherSuites().catch(() => ({
-          secure: [],
-          insecure: [],
-          curves: [],
-        })),
-        getRuntimeConfig().catch(() => null),
+        getDashboardSummary().catch((e) => {
+          toast.error(e instanceof Error ? e.message : "加载运行摘要失败")
+          return null
+        }),
+        getNetworkConfig().catch((e) => {
+          toast.error(e instanceof Error ? e.message : "加载网络配置失败")
+          return null
+        }),
+        getTLSDefaultConfig().catch((e) => {
+          toast.error(e instanceof Error ? e.message : "加载 TLS 默认配置失败")
+          return null
+        }),
+        getTLSCipherSuites().catch((e) => {
+          toast.error(e instanceof Error ? e.message : "加载 TLS 可选套件失败")
+          return { secure: [], insecure: [], curves: [] }
+        }),
+        getRuntimeConfig().catch((e) => {
+          toast.error(e instanceof Error ? e.message : "加载运行配置失败")
+          return null
+        }),
       ])
       setSettings(systemSettings)
       setProtection(protectionSettings)
@@ -357,7 +373,7 @@ export default function SettingsPage() {
       // Protocol
       setIpv6Enabled(networkConfig?.ipv6_enabled ?? false)
       setHttp2Enabled(networkConfig?.http2_enabled ?? true)
-      setHttp3Enabled(networkConfig?.http3_enabled ?? false)
+      setHttp3Enabled(networkConfig?.http3_enabled ?? true)
       setTlsMinVersion(tlsConfig?.min_version ?? "TLS12")
       setTlsMaxVersion(tlsConfig?.max_version ?? "TLS13")
       setCipherSuites(tlsConfig?.cipher_suites ?? "")
@@ -426,6 +442,12 @@ export default function SettingsPage() {
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载日志失败")
+      if (logType === "security") {
+        setSecEvents([])
+      } else {
+        setAccessLogs([])
+      }
+      setLogTotal(0)
     } finally {
       setLogLoading(false)
     }
@@ -474,34 +496,35 @@ export default function SettingsPage() {
         ["brotli_enabled", String(brotliEnabled)],
       ]
 
+      const [latestNetworkConfig, latestTLSConfig] = await Promise.all([
+        getNetworkConfig(),
+        getTLSDefaultConfig(),
+      ])
+      const defaultALPN = [
+        http3Enabled ? "h3" : null,
+        http2Enabled ? "h2" : null,
+        "http/1.1",
+      ]
+        .filter(Boolean)
+        .join(",")
+
       await Promise.all([
         updateNetworkConfig({
           ipv6_enabled: ipv6Enabled,
           http2_enabled: http2Enabled,
           http3_enabled: http3Enabled,
-          default_alpn: [
-            http3Enabled ? "h3" : null,
-            http2Enabled ? "h2" : null,
-            "http/1.1",
-          ]
-            .filter(Boolean)
-            .join(","),
+          http3_bind: latestNetworkConfig.http3_bind,
+          default_alpn: defaultALPN,
           default_network: ipv6Enabled ? "tcp6" : "tcp",
         }),
         updateTLSDefaultConfig({
           min_version: tlsMinVersion,
           max_version: tlsMaxVersion,
           cipher_suites: cipherSuites,
-          default_alpn: [
-            http3Enabled ? "h3" : null,
-            http2Enabled ? "h2" : null,
-            "http/1.1",
-          ]
-            .filter(Boolean)
-            .join(","),
+          default_alpn: defaultALPN,
           curve_preferences: curvePreferences,
           prefer_server_cipher_suites: preferServerCipherSuites,
-          self_signed_on_ip: true,
+          self_signed_on_ip: latestTLSConfig.self_signed_on_ip,
         }),
       ])
 
@@ -539,15 +562,11 @@ export default function SettingsPage() {
   async function handleSaveConsole() {
     setSavingConsole(true)
     try {
-      // Save login security to protection settings
-      if (protection) {
-        await updateProtectionSettings({
-          ...protection,
-          login_max_attempts: maxAttempts,
-          login_lockout_minutes: lockoutMinutes,
-          login_min_password_length: minPasswordLen,
-        })
-      }
+      await updateProtectionSettings({
+        login_max_attempts: maxAttempts,
+        login_lockout_minutes: lockoutMinutes,
+        login_min_password_length: minPasswordLen,
+      })
 
       // Save other console settings
       const pairs: [string, string][] = [
@@ -616,7 +635,7 @@ export default function SettingsPage() {
       const headers = [
         "ID",
         "时间",
-        "IP",
+        "源 IP",
         "Host",
         "方法",
         "路径",
@@ -646,11 +665,11 @@ export default function SettingsPage() {
       const headers = [
         "ID",
         "时间",
-        "IP",
+        "源 IP",
         "方法",
         "路径",
         "状态码",
-        "WAF",
+        "当时 WAF 动作",
         "HTTP协议",
         "TLS版本",
         "TLS SNI",
@@ -728,75 +747,75 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <PageIntro
-          eyebrow="Platform Settings"
-          title="通用设置"
-          description="按使用场景拆成防护运行时、控制台安全、日志运维三组；验证码跳过凭据现在绑定 IP、User-Agent、站点与监听器，并使用短期有效期。"
-        />
-        <div className="mt-4 grid gap-3 md:grid-cols-4">
-          {[
-            {
-              title: "防护运行时",
-              desc: "网络、TLS、拦截页、数据清理",
-              icon: Shield,
-            },
-            {
-              title: "控制台安全",
-              desc: "登录限制、会话、API Key",
-              icon: Lock,
-            },
-            {
-              title: "日志运维",
-              desc: "安全事件与访问日志检索",
-              icon: Database,
-            },
-            {
-              title: "运行配置",
-              desc: "Redis、数据库、监听与启动参数",
-              icon: Network,
-            },
-          ].map((item) => (
-            <div
-              key={item.title}
-              className="rounded-xl border border-slate-100 bg-slate-50/80 p-4"
-            >
-              <item.icon className="h-5 w-5 text-teal-600" />
-              <div className="mt-3 text-sm font-semibold text-slate-900">
-                {item.title}
-              </div>
-              <div className="mt-1 text-xs text-slate-500">{item.desc}</div>
+      <PageIntro
+        eyebrow="Platform Settings"
+        title="通用设置"
+        description="按使用场景拆成防护运行时、控制台安全、日志运维三组；验证码跳过凭据现在绑定 IP、User-Agent、站点与监听器，并使用短期有效期。"
+      />
+      <div className="console-data-grid">
+        {[
+          {
+            title: "防护运行时",
+            desc: "网络、TLS、拦截页、数据清理",
+            icon: Shield,
+          },
+          {
+            title: "控制台安全",
+            desc: "登录限制、会话、API Key",
+            icon: Lock,
+          },
+          {
+            title: "日志运维",
+            desc: "安全事件与访问日志检索",
+            icon: Database,
+          },
+          {
+            title: "运行配置",
+            desc: "Redis、数据库、监听与启动参数",
+            icon: Network,
+          },
+        ].map((item) => (
+          <div key={item.title} className="console-panel p-4">
+            <item.icon className="h-5 w-5 text-teal-600" />
+            <div className="mt-3 text-sm font-semibold text-slate-900">
+              {item.title}
             </div>
-          ))}
-        </div>
+            <div className="mt-1 text-xs text-slate-500">{item.desc}</div>
+          </div>
+        ))}
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList
-          variant="line"
-          className="mb-2 border-b border-slate-200 pb-px"
-        >
-          <TabsTrigger value="protection" className="gap-1.5 px-4 py-2 text-sm">
-            <Shield className="h-4 w-4" />
-            防护配置
-          </TabsTrigger>
-          <TabsTrigger value="console" className="gap-1.5 px-4 py-2 text-sm">
-            <Server className="h-4 w-4" />
-            控制台管理
-          </TabsTrigger>
-          <TabsTrigger value="logs" className="gap-1.5 px-4 py-2 text-sm">
-            <Database className="h-4 w-4" />
-            系统日志
-          </TabsTrigger>
-          <TabsTrigger value="runtime" className="gap-1.5 px-4 py-2 text-sm">
-            <Network className="h-4 w-4" />
-            运行配置
-          </TabsTrigger>
-        </TabsList>
+        <div className="overflow-x-auto overscroll-x-contain rounded-2xl border border-slate-200/80 bg-white/90 p-1 shadow-sm backdrop-blur">
+          <TabsList
+            variant="line"
+            className="mb-0 min-w-max border-b-0 bg-transparent pb-0"
+          >
+            <TabsTrigger
+              value="protection"
+              className="gap-1.5 px-4 py-2 text-sm"
+            >
+              <Shield className="h-4 w-4" />
+              防护配置
+            </TabsTrigger>
+            <TabsTrigger value="console" className="gap-1.5 px-4 py-2 text-sm">
+              <Server className="h-4 w-4" />
+              控制台管理
+            </TabsTrigger>
+            <TabsTrigger value="logs" className="gap-1.5 px-4 py-2 text-sm">
+              <Database className="h-4 w-4" />
+              系统日志
+            </TabsTrigger>
+            <TabsTrigger value="runtime" className="gap-1.5 px-4 py-2 text-sm">
+              <Network className="h-4 w-4" />
+              运行配置
+            </TabsTrigger>
+          </TabsList>
+        </div>
 
-        {/* ============================================================ */}
-        {/*  TAB 1: 防护配置                                              */}
-        {/* ============================================================ */}
+        {}
+        {}
+        {}
         <TabsContent value="protection">
           <div className="space-y-6">
             {/* Data Cleanup */}
@@ -1450,9 +1469,6 @@ export default function SettingsPage() {
           </div>
         </TabsContent>
 
-        {/* ============================================================ */}
-        {/*  TAB 2: 控制台管理                                            */}
-        {/* ============================================================ */}
         <TabsContent value="console">
           <div className="space-y-6">
             {/* Login Security */}
@@ -1563,89 +1579,93 @@ export default function SettingsPage() {
             </Surface>
 
             {/* API Keys */}
-            <Surface
+            <ConsoleTableShell
               title="API 令牌"
               description="为自动化任务、CI/CD 或运维脚本生成 Bearer Token。创建后仅返回一次明文 Token。"
-              action={
-                <Button
-                  className="gap-2 rounded-md bg-teal-500 text-white hover:bg-teal-600"
-                  onClick={() => {
-                    setApiKeyDialogOpen(true)
-                    setCreatedToken(null)
-                    setNewKeyName("")
-                  }}
-                >
-                  <Plus className="h-4 w-4" /> 创建密钥
-                </Button>
+              toolbar={
+                <div className="flex justify-end">
+                  <Button
+                    className="gap-2 rounded-md bg-teal-500 text-white hover:bg-teal-600"
+                    onClick={() => {
+                      setApiKeyDialogOpen(true)
+                      setCreatedToken(null)
+                      setNewKeyName("")
+                    }}
+                  >
+                    <Plus className="h-4 w-4" /> 创建密钥
+                  </Button>
+                </div>
+              }
+              state={
+                apiKeysLoading ? (
+                  <div className="p-16 text-center text-sm text-slate-400">
+                    加载中...
+                  </div>
+                ) : apiKeys.length === 0 ? (
+                  <div className="p-16 text-center text-sm text-slate-400">
+                    还没有 API 密钥。创建后可用于自动化访问管理 API。
+                  </div>
+                ) : undefined
               }
             >
-              {apiKeysLoading ? (
-                <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-                  加载中...
-                </div>
-              ) : apiKeys.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-                  还没有 API 密钥。创建后可用于自动化访问管理 API。
-                </div>
-              ) : (
-                <div className="overflow-hidden rounded-lg border border-slate-200">
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="bg-slate-50 text-xs tracking-wider text-slate-500 uppercase">
-                        <TableHead className="w-16">ID</TableHead>
-                        <TableHead>名称</TableHead>
-                        <TableHead>密钥</TableHead>
-                        <TableHead>创建时间</TableHead>
-                        <TableHead>最近使用</TableHead>
-                        <TableHead className="w-20 text-right">操作</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {apiKeys.map((item) => (
-                        <TableRow key={item.id} className="hover:bg-slate-50">
-                          <TableCell className="font-mono text-xs text-slate-500">
-                            {item.id}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-2">
-                              <KeyRound className="h-4 w-4 text-slate-600" />
-                              <span className="font-medium text-slate-900">
-                                {item.name}
-                              </span>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <code className="rounded-lg bg-slate-100 px-2 py-1 font-mono text-xs text-slate-500">
-                              {maskToken(item.token)}
-                            </code>
-                          </TableCell>
-                          <TableCell className="text-xs whitespace-nowrap text-slate-500">
-                            {formatDate(item.created_at)}
-                          </TableCell>
-                          <TableCell className="text-xs whitespace-nowrap text-slate-500">
-                            {item.last_used_at
-                              ? formatDate(item.last_used_at)
-                              : "从未使用"}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center justify-end">
-                              <Button
-                                variant="ghost"
-                                size="icon-sm"
-                                className="rounded-lg text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                                onClick={() => setDeleteTarget(item)}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
-            </Surface>
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/45 text-xs font-medium text-muted-foreground">
+                    <TableHead className="w-16 px-4 py-3">ID</TableHead>
+                    <TableHead className="px-4 py-3">名称</TableHead>
+                    <TableHead className="px-4 py-3">密钥</TableHead>
+                    <TableHead className="px-4 py-3">创建时间</TableHead>
+                    <TableHead className="px-4 py-3">最近使用</TableHead>
+                    <TableHead className="w-20 px-4 py-3 text-right">
+                      操作
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {apiKeys.map((item) => (
+                    <TableRow key={item.id} className="hover:bg-slate-50">
+                      <TableCell className="px-4 py-3 font-mono text-xs text-slate-500">
+                        {item.id}
+                      </TableCell>
+                      <TableCell className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <KeyRound className="h-4 w-4 text-slate-600" />
+                          <span className="font-medium text-slate-900">
+                            {item.name}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="px-4 py-3">
+                        <code className="rounded-lg bg-slate-100 px-2 py-1 font-mono text-xs text-slate-500">
+                          {maskToken(item.token)}
+                        </code>
+                      </TableCell>
+                      <TableCell className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
+                        {formatDate(item.created_at)}
+                      </TableCell>
+                      <TableCell className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
+                        {item.last_used_at
+                          ? formatDate(item.last_used_at)
+                          : "从未使用"}
+                      </TableCell>
+                      <TableCell className="px-4 py-3">
+                        <div className="flex items-center justify-end">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-destructive"
+                            onClick={() => setDeleteTarget(item)}
+                            aria-label="删除 API 密钥"
+                          >
+                            <Trash2 />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ConsoleTableShell>
 
             {/* Admin Certificate Mode */}
             <Surface
@@ -1738,258 +1758,232 @@ export default function SettingsPage() {
           </div>
         </TabsContent>
 
-        {/* ============================================================ */}
-        {/*  TAB 3: 系统日志                                              */}
-        {/* ============================================================ */}
         <TabsContent value="logs">
-          <div className="space-y-4">
-            {/* Controls */}
-            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-              <Select
-                value={logType}
-                onValueChange={(v) => {
-                  setLogType(v as "security" | "access")
-                  setLogPage(1)
-                }}
-              >
-                <SelectTrigger className="w-[160px] rounded-lg">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="security">安全事件</SelectItem>
-                  <SelectItem value="access">访问日志</SelectItem>
-                </SelectContent>
-              </Select>
-              <div className="relative">
-                <Search className="absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-                <Input
-                  value={logSearch}
-                  onChange={(e) => {
-                    setLogSearch(e.target.value)
+          <ConsoleTableShell
+            title={logType === "security" ? "安全事件日志" : "访问日志"}
+            description={`当前筛选命中 ${logTotal} 条，导出仅包含当前页已加载数据。`}
+            toolbar={
+              <div className="flex flex-wrap items-center gap-3">
+                <Select
+                  value={logType}
+                  onValueChange={(v) => {
+                    setLogType(v as "security" | "access")
                     setLogPage(1)
                   }}
-                  placeholder="搜索 IP"
-                  className="w-[180px] rounded-lg pl-8"
-                />
-              </div>
-              <div className="ml-auto flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5 rounded-lg"
-                  onClick={loadLogs}
                 >
-                  <RefreshCcw className="h-3.5 w-3.5" /> 刷新
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5 rounded-lg"
-                  onClick={exportLogCSV}
-                  disabled={
-                    (logType === "security" && secEvents.length === 0) ||
-                    (logType === "access" && accessLogs.length === 0)
-                  }
-                >
-                  <Download className="h-3.5 w-3.5" /> 导出 CSV
-                </Button>
+                  <SelectTrigger className="w-[160px] rounded-lg">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="security">安全事件</SelectItem>
+                    <SelectItem value="access">访问日志</SelectItem>
+                  </SelectContent>
+                </Select>
+                <div className="relative">
+                  <Search className="absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                  <Input
+                    value={logSearch}
+                    onChange={(e) => {
+                      setLogSearch(e.target.value)
+                      setLogPage(1)
+                    }}
+                    placeholder="搜索 IP"
+                    className="w-[180px] rounded-lg pl-8"
+                  />
+                </div>
+                <div className="ml-auto flex items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={loadLogs}>
+                    <RefreshCcw data-icon="inline-start" /> 刷新
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={exportLogCSV}
+                    disabled={
+                      (logType === "security" && secEvents.length === 0) ||
+                      (logType === "access" && accessLogs.length === 0)
+                    }
+                  >
+                    <Download data-icon="inline-start" /> 导出当前页 CSV
+                  </Button>
+                </div>
               </div>
-            </div>
-
-            {/* Log table */}
-            <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-              {logLoading ? (
+            }
+            state={
+              logLoading ? (
                 <div className="p-16 text-center text-sm text-slate-400">
                   加载中...
                 </div>
-              ) : logType === "security" ? (
-                secEvents.length === 0 ? (
-                  <div className="p-16 text-center text-sm text-slate-400">
-                    暂无安全事件日志
-                  </div>
-                ) : (
-                  <>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-xs font-medium text-slate-500">
-                            <th className="px-4 py-3">时间</th>
-                            <th className="px-4 py-3">动作</th>
-                            <th className="px-4 py-3">类别</th>
-                            <th className="px-4 py-3">源 IP</th>
-                            <th className="px-4 py-3">Host</th>
-                            <th className="px-4 py-3">路径</th>
-                            <th className="px-4 py-3">匹配描述</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-50">
-                          {secEvents.map((evt) => (
-                            <tr
-                              key={evt.id}
-                              className="transition-colors hover:bg-slate-50/50"
-                            >
-                              <td className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
-                                {formatDate(evt.created_at)}
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  className={`rounded-md border text-xs ${
-                                    evt.action === "intercept" ||
-                                    evt.action === "block"
-                                      ? "border-rose-200 bg-rose-50 text-rose-700"
-                                      : evt.action === "drop"
-                                        ? "border-slate-300 bg-slate-100 text-slate-800"
-                                        : evt.action === "observe"
-                                          ? "border-slate-200 bg-slate-50 text-slate-600"
-                                          : "border-amber-200 bg-amber-50 text-amber-700"
-                                  }`}
-                                >
-                                  {evt.action}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3 text-xs text-slate-700">
-                                {evt.category}
-                              </td>
-                              <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                                {evt.client_ip}
-                              </td>
-                              <td className="px-4 py-3 text-xs text-slate-600">
-                                {evt.host || "-"}
-                              </td>
-                              <td className="max-w-[200px] truncate px-4 py-3 font-mono text-xs text-slate-600">
-                                {evt.path}
-                              </td>
-                              <td className="max-w-[180px] truncate px-4 py-3 text-xs text-slate-500">
-                                {evt.match_desc || "-"}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <div className="border-t border-slate-100 p-3">
-                      <Pagination
-                        page={logPage}
-                        totalPages={logTotalPages}
-                        total={logTotal}
-                        pageSize={LOG_PAGE_SIZE}
-                        onPageChange={setLogPage}
-                      />
-                    </div>
-                  </>
-                )
-              ) : accessLogs.length === 0 ? (
+              ) : logType === "security" && secEvents.length === 0 ? (
+                <div className="p-16 text-center text-sm text-slate-400">
+                  暂无安全事件日志
+                </div>
+              ) : logType === "access" && accessLogs.length === 0 ? (
                 <div className="p-16 text-center text-sm text-slate-400">
                   暂无访问日志
                 </div>
-              ) : (
-                <>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-xs font-medium text-slate-500">
-                          <th className="px-4 py-3">时间</th>
-                          <th className="px-4 py-3">方法</th>
-                          <th className="px-4 py-3">路径</th>
-                          <th className="px-4 py-3">状态码</th>
-                          <th className="px-4 py-3">源 IP</th>
-                          <th className="px-4 py-3">WAF</th>
-                          <th className="px-4 py-3">指纹</th>
-                          <th className="px-4 py-3">上游</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-50">
-                        {accessLogs.map((item) => (
-                          <tr
-                            key={item.id}
-                            className="transition-colors hover:bg-slate-50/50"
-                          >
-                            <td className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
-                              {formatDate(item.created_at)}
-                            </td>
-                            <td className="px-4 py-3">
-                              <Badge
-                                className={`rounded-md border font-mono text-[11px] ${
-                                  item.method === "GET"
-                                    ? "border-cyan-200 bg-cyan-50 text-cyan-700"
-                                    : item.method === "POST"
-                                      ? "border-indigo-200 bg-indigo-50 text-indigo-700"
-                                      : "border-slate-200 bg-slate-50 text-slate-600"
-                                }`}
-                              >
-                                {item.method}
-                              </Badge>
-                            </td>
-                            <td className="max-w-[240px] truncate px-4 py-3 font-mono text-xs text-slate-600">
-                              {item.path}
-                            </td>
-                            <td className="px-4 py-3">
-                              <Badge
-                                className={`rounded-md border font-mono text-xs ${
-                                  item.status_code >= 500
-                                    ? "border-red-200 bg-red-50 text-red-700"
-                                    : item.status_code >= 400
-                                      ? "border-amber-200 bg-amber-50 text-amber-700"
-                                      : item.status_code >= 200 &&
-                                          item.status_code < 300
-                                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                                        : "border-slate-200 bg-slate-50 text-slate-600"
-                                }`}
-                              >
-                                {item.status_code}
-                              </Badge>
-                            </td>
-                            <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                              {item.client_ip}
-                            </td>
-                            <td className="px-4 py-3 text-xs text-slate-500">
-                              {item.waf_action || "-"}
-                            </td>
-                            <td
-                              className="max-w-[180px] truncate px-4 py-3 font-mono text-[11px] text-slate-500"
-                              title={[
-                                item.http_protocol,
-                                item.tls_version,
-                                item.tls_ja3_hash,
-                                item.tls_ja4,
-                              ]
-                                .filter(Boolean)
-                                .join(" / ")}
-                            >
-                              {[
-                                item.http_protocol,
-                                item.tls_version,
-                                item.tls_ja3_hash || item.tls_ja4,
-                              ]
-                                .filter(Boolean)
-                                .join(" / ") || "-"}
-                            </td>
-                            <td className="max-w-[160px] truncate px-4 py-3 font-mono text-xs text-slate-400">
-                              {item.upstream || "-"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="border-t border-slate-100 p-3">
-                    <Pagination
-                      page={logPage}
-                      totalPages={logTotalPages}
-                      total={logTotal}
-                      pageSize={LOG_PAGE_SIZE}
-                      onPageChange={setLogPage}
-                    />
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
+              ) : undefined
+            }
+            footer={
+              !logLoading &&
+              ((logType === "security" && secEvents.length > 0) ||
+                (logType === "access" && accessLogs.length > 0)) ? (
+                <Pagination
+                  page={logPage}
+                  totalPages={logTotalPages}
+                  total={logTotal}
+                  pageSize={LOG_PAGE_SIZE}
+                  onPageChange={setLogPage}
+                />
+              ) : null
+            }
+          >
+            {logType === "security" ? (
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/45 text-xs font-medium text-muted-foreground">
+                    <TableHead className="px-4 py-3">时间</TableHead>
+                    <TableHead className="px-4 py-3">动作</TableHead>
+                    <TableHead className="px-4 py-3">类别</TableHead>
+                    <TableHead className="px-4 py-3">源 IP</TableHead>
+                    <TableHead className="px-4 py-3">Host</TableHead>
+                    <TableHead className="px-4 py-3">路径</TableHead>
+                    <TableHead className="px-4 py-3">匹配描述</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {secEvents.map((evt) => (
+                    <TableRow
+                      key={evt.id}
+                      className="transition-colors hover:bg-slate-50/50"
+                    >
+                      <TableCell className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
+                        {formatDate(evt.created_at)}
+                      </TableCell>
+                      <TableCell className="px-4 py-3">
+                        <Badge
+                          className={`rounded-md border text-xs ${
+                            evt.action === "intercept" || evt.action === "block"
+                              ? "border-rose-200 bg-rose-50 text-rose-700"
+                              : evt.action === "drop"
+                                ? "border-slate-300 bg-slate-100 text-slate-800"
+                                : evt.action === "observe"
+                                  ? "border-slate-200 bg-slate-50 text-slate-600"
+                                  : "border-amber-200 bg-amber-50 text-amber-700"
+                          }`}
+                        >
+                          {evt.action}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="px-4 py-3 text-xs text-slate-700">
+                        {evt.category}
+                      </TableCell>
+                      <TableCell className="px-4 py-3 font-mono text-xs text-slate-700">
+                        {evt.client_ip}
+                      </TableCell>
+                      <TableCell className="px-4 py-3 text-xs text-slate-600">
+                        {evt.host || "-"}
+                      </TableCell>
+                      <TableCell className="max-w-[200px] truncate px-4 py-3 font-mono text-xs text-slate-600">
+                        {evt.path}
+                      </TableCell>
+                      <TableCell className="max-w-[180px] truncate px-4 py-3 text-xs text-slate-500">
+                        {evt.match_desc || "-"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/45 text-xs font-medium text-muted-foreground">
+                    <TableHead className="px-4 py-3">时间</TableHead>
+                    <TableHead className="px-4 py-3">方法</TableHead>
+                    <TableHead className="px-4 py-3">路径</TableHead>
+                    <TableHead className="px-4 py-3">状态码</TableHead>
+                    <TableHead className="px-4 py-3">源 IP</TableHead>
+                    <TableHead className="px-4 py-3">当时 WAF</TableHead>
+                    <TableHead className="px-4 py-3">指纹</TableHead>
+                    <TableHead className="px-4 py-3">上游</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {accessLogs.map((item) => (
+                    <TableRow
+                      key={item.id}
+                      className="transition-colors hover:bg-slate-50/50"
+                    >
+                      <TableCell className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
+                        {formatDate(item.created_at)}
+                      </TableCell>
+                      <TableCell className="px-4 py-3">
+                        <Badge
+                          className={`rounded-md border font-mono text-[11px] ${
+                            item.method === "GET"
+                              ? "border-cyan-200 bg-cyan-50 text-cyan-700"
+                              : item.method === "POST"
+                                ? "border-indigo-200 bg-indigo-50 text-indigo-700"
+                                : "border-slate-200 bg-slate-50 text-slate-600"
+                          }`}
+                        >
+                          {item.method}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="max-w-[240px] truncate px-4 py-3 font-mono text-xs text-slate-600">
+                        {item.path}
+                      </TableCell>
+                      <TableCell className="px-4 py-3">
+                        <Badge
+                          className={`rounded-md border font-mono text-xs ${
+                            item.status_code >= 500
+                              ? "border-red-200 bg-red-50 text-red-700"
+                              : item.status_code >= 400
+                                ? "border-amber-200 bg-amber-50 text-amber-700"
+                                : item.status_code >= 200 &&
+                                    item.status_code < 300
+                                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                  : "border-slate-200 bg-slate-50 text-slate-600"
+                          }`}
+                        >
+                          {item.status_code}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="px-4 py-3 font-mono text-xs text-slate-700">
+                        {item.client_ip}
+                      </TableCell>
+                      <TableCell className="px-4 py-3 text-xs text-slate-500">
+                        {item.waf_action || "-"}
+                      </TableCell>
+                      <TableCell
+                        className="max-w-[180px] truncate px-4 py-3 font-mono text-[11px] text-slate-500"
+                        title={[
+                          item.http_protocol,
+                          item.tls_version,
+                          item.tls_ja3_hash,
+                          item.tls_ja4,
+                        ]
+                          .filter(Boolean)
+                          .join(" / ")}
+                      >
+                        {[
+                          item.http_protocol,
+                          item.tls_version,
+                          item.tls_ja3_hash || item.tls_ja4,
+                        ]
+                          .filter(Boolean)
+                          .join(" / ") || "-"}
+                      </TableCell>
+                      <TableCell className="max-w-[160px] truncate px-4 py-3 font-mono text-xs text-slate-400">
+                        {item.upstream || "-"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </ConsoleTableShell>
         </TabsContent>
-
-        {/* ============================================================ */}
-        {/*  TAB 4: 运行配置                                              */}
-        {/* ============================================================ */}
         <TabsContent value="runtime">
           <div className="space-y-6">
             <Surface
@@ -2004,9 +1998,15 @@ export default function SettingsPage() {
                   ["数据库驱动", runtimeConfig?.db_driver || "-"],
                   ["数据目录", runtimeConfig?.data_dir || "-"],
                   ["Admin 监听", runtimeConfig?.admin_bind || "-"],
-                  ["Redis 状态", runtimeConfig?.redis_enabled ? "已启用" : "未启用"],
+                  [
+                    "Redis 状态",
+                    runtimeConfig?.redis_enabled ? "已启用" : "未启用",
+                  ],
                   ["Redis DB", String(runtimeConfig?.redis_db ?? 0)],
-                  ["CVE Feed", runtimeConfig?.cve_feed_enabled ? "启用" : "关闭"],
+                  [
+                    "CVE Feed",
+                    runtimeConfig?.cve_feed_enabled ? "启用" : "关闭",
+                  ],
                   ["Drop 策略", runtimeConfig?.drop_enabled ? "启用" : "关闭"],
                 ].map(([label, value]) => (
                   <div
@@ -2014,7 +2014,7 @@ export default function SettingsPage() {
                     className="rounded-lg border border-slate-100 bg-slate-50 p-3"
                   >
                     <div className="text-xs text-slate-500">{label}</div>
-                    <div className="mt-1 break-all font-mono text-sm text-slate-900">
+                    <div className="mt-1 font-mono text-sm break-all text-slate-900">
                       {value}
                     </div>
                   </div>
@@ -2024,27 +2024,66 @@ export default function SettingsPage() {
 
             <Surface
               title="连接字符串与路径"
-              description="敏感配置只展示当前值；Redis 密码等密钥不从接口返回。生产环境建议通过环境变量、systemd、Docker Compose 或 Kubernetes Secret 管理。"
+              description="DSN 会由后端脱敏后展示；Redis 密码等密钥不从接口返回。生产环境建议通过环境变量、systemd、Docker Compose 或 Kubernetes Secret 管理。"
             >
               <div className="space-y-3">
-                <InlineMeta label="MY_OPENWAF_DSN / MY_OPENWAF_DB" value={<span className="break-all font-mono">{runtimeConfig?.db_dsn || "-"}</span>} />
-                <InlineMeta label="MY_OPENWAF_LOG_DSN / MY_OPENWAF_LOG_DB" value={<span className="break-all font-mono">{runtimeConfig?.log_db_dsn || "-"}</span>} />
-                <InlineMeta label="MY_OPENWAF_REDIS_ADDR" value={<span className="break-all font-mono">{runtimeConfig?.redis_addr || "未配置"}</span>} />
-                <InlineMeta label="MY_OPENWAF_ADMIN_STATIC_DIR" value={<span className="break-all font-mono">{runtimeConfig?.admin_static_dir || "embedded"}</span>} />
-                <InlineMeta label="MY_OPENWAF_GEOIP_DB" value={<span className="break-all font-mono">{runtimeConfig?.geoip_db_path || "未配置"}</span>} />
-                <InlineMeta label="MY_OPENWAF_CVE_FEED_INTERVAL" value={<span className="break-all font-mono">{runtimeConfig?.cve_feed_interval || "-"}</span>} />
+                <InlineMeta
+                  label="MY_OPENWAF_DSN / MY_OPENWAF_DB"
+                  value={
+                    <span className="font-mono break-all">
+                      {runtimeConfig?.db_dsn || "-"}
+                    </span>
+                  }
+                />
+                <InlineMeta
+                  label="MY_OPENWAF_LOG_DSN / MY_OPENWAF_LOG_DB"
+                  value={
+                    <span className="font-mono break-all">
+                      {runtimeConfig?.log_db_dsn || "-"}
+                    </span>
+                  }
+                />
+                <InlineMeta
+                  label="MY_OPENWAF_REDIS_ADDR"
+                  value={
+                    <span className="font-mono break-all">
+                      {runtimeConfig?.redis_addr || "未配置"}
+                    </span>
+                  }
+                />
+                <InlineMeta
+                  label="MY_OPENWAF_ADMIN_STATIC_DIR"
+                  value={
+                    <span className="font-mono break-all">
+                      {runtimeConfig?.admin_static_dir || "embedded"}
+                    </span>
+                  }
+                />
+                <InlineMeta
+                  label="MY_OPENWAF_GEOIP_DB"
+                  value={
+                    <span className="font-mono break-all">
+                      {runtimeConfig?.geoip_db_path || "未配置"}
+                    </span>
+                  }
+                />
+                <InlineMeta
+                  label="MY_OPENWAF_CVE_FEED_INTERVAL"
+                  value={
+                    <span className="font-mono break-all">
+                      {runtimeConfig?.cve_feed_interval || "-"}
+                    </span>
+                  }
+                />
               </div>
               <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
-                这些是进程级配置，不适合直接写入业务数据库后热更新。后续如果要支持配置文件写回，应单独引入受控的 YAML 配置、权限校验、重启提示和回滚机制。
+                这些是进程级配置，不适合直接写入业务数据库后热更新。后续如果要支持配置文件写回，应单独引入受控的
+                YAML 配置、权限校验、重启提示和回滚机制。
               </div>
             </Surface>
           </div>
         </TabsContent>
       </Tabs>
-
-      {/* ============================================================ */}
-      {/*  Dialogs                                                      */}
-      {/* ============================================================ */}
 
       {/* Create API Key Dialog */}
       <Dialog open={apiKeyDialogOpen} onOpenChange={setApiKeyDialogOpen}>

@@ -13,15 +13,16 @@ const MaxRegexPattern = 512
 
 // CompiledRule is a snapshot-time compiled application route rule.
 type CompiledRule struct {
-	ID            uint
-	SiteID        uint
-	Target        string
-	Op            string
-	Pattern       string
-	HeaderKey     string
-	Priority      int
-	Regex         *regexp.Regexp
-	NeedsResponse bool
+	ID             uint
+	SiteID         uint
+	Target         string
+	Op             string
+	Pattern        string
+	HeaderKey      string
+	HeaderKeyLower string
+	Priority       int
+	Regex          *regexp.Regexp
+	NeedsResponse  bool
 }
 
 // TargetNeedsResponse is true when the subject is only known after upstream responds.
@@ -50,14 +51,15 @@ func CompileRules(rules []store.ApplicationRouteRule) []CompiledRule {
 			continue
 		}
 		cr := CompiledRule{
-			ID:            r.ID,
-			SiteID:        r.SiteID,
-			Target:        t,
-			Op:            op,
-			Pattern:       r.Pattern,
-			HeaderKey:     strings.TrimSpace(r.HeaderKey),
-			Priority:      r.Priority,
-			NeedsResponse: TargetNeedsResponse(t),
+			ID:             r.ID,
+			SiteID:         r.SiteID,
+			Target:         t,
+			Op:             op,
+			Pattern:        r.Pattern,
+			HeaderKey:      strings.TrimSpace(r.HeaderKey),
+			HeaderKeyLower: strings.ToLower(strings.TrimSpace(r.HeaderKey)),
+			Priority:       r.Priority,
+			NeedsResponse:  TargetNeedsResponse(t),
 		}
 		if op == store.AppRouteOpRegex {
 			if len(r.Pattern) > MaxRegexPattern {

@@ -41,6 +41,9 @@ func applyOp(op, pattern, value string, re interface{ MatchString(string) bool }
 func Subject(cr CompiledRule, m *Material, reqHeader func(string) string) string {
 	switch cr.Target {
 	case store.AppRouteTargetRequestHeader:
+		if cr.HeaderKeyLower != "" {
+			return reqHeader(cr.HeaderKeyLower)
+		}
 		if cr.HeaderKey != "" {
 			return reqHeader(cr.HeaderKey)
 		}

@@ -22,18 +22,18 @@ export function PageIntro({
   actions?: React.ReactNode
 }) {
   return (
-    <div className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white px-6 py-5 shadow-sm md:flex-row md:items-end md:justify-between">
-      <div className="space-y-3">
+    <div className="flex flex-col gap-4 rounded-lg border border-border bg-card px-5 py-4 shadow-sm md:flex-row md:items-end md:justify-between">
+      <div className="flex flex-col gap-3">
         {eyebrow ? (
-          <div className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] font-medium tracking-[0.22em] text-slate-500 uppercase">
+          <div className="inline-flex w-fit items-center rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1 text-[11px] font-semibold tracking-[0.18em] text-primary uppercase">
             {eyebrow}
           </div>
         ) : null}
-        <div className="space-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-950 md:text-3xl">
+        <div className="flex flex-col gap-1.5">
+          <h1 className="text-xl font-semibold tracking-tight text-foreground md:text-2xl">
             {title}
           </h1>
-          <p className="max-w-3xl text-sm leading-6 text-slate-600">
+          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
             {description}
           </p>
         </div>
@@ -46,9 +46,7 @@ export function PageIntro({
 }
 
 export function MetricGrid({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{children}</div>
-  )
+  return <div className="console-data-grid">{children}</div>
 }
 
 export function MetricCard({
@@ -69,14 +67,22 @@ export function MetricCard({
     success: "text-emerald-600",
   }[tone]
 
+  const accentClass = {
+    default: "bg-muted",
+    danger: "bg-rose-500",
+    warning: "bg-amber-500",
+    success: "bg-emerald-500",
+  }[tone]
+
   return (
-    <Card className="overflow-hidden border-slate-200 bg-white shadow-sm">
-      <CardHeader className="space-y-2 pb-3">
-        <CardDescription className="text-xs font-medium tracking-[0.18em] text-slate-500 uppercase">
+    <Card className="relative overflow-hidden rounded-lg border-border bg-card shadow-sm">
+      <div className={cn("absolute inset-y-0 left-0 w-1", accentClass)} />
+      <CardHeader className="flex flex-col gap-2 pt-4 pb-3">
+        <CardDescription className="text-xs font-semibold tracking-[0.18em] text-slate-500 uppercase">
           {label}
         </CardDescription>
         <CardTitle
-          className={cn("text-3xl font-semibold tracking-tight", toneClass)}
+          className={cn("text-2xl font-semibold tracking-tight", toneClass)}
         >
           {value}
         </CardTitle>
@@ -104,15 +110,17 @@ export function Surface({
   className?: string
 }) {
   return (
-    <Card className={cn("border-slate-200 bg-white shadow-sm", className)}>
+    <Card className={cn("console-panel overflow-hidden", className)}>
       {title || description || action ? (
-        <CardHeader className="flex flex-col gap-3 border-b border-slate-200 pb-4 md:flex-row md:items-end md:justify-between">
-          <div className="space-y-1">
+        <CardHeader className="flex flex-col gap-3 border-b border-border bg-muted/35 px-4 py-3 md:flex-row md:items-end md:justify-between">
+          <div className="flex flex-col gap-1">
             {title ? (
-              <CardTitle className="text-lg text-slate-950">{title}</CardTitle>
+              <CardTitle className="text-base text-foreground">
+                {title}
+              </CardTitle>
             ) : null}
             {description ? (
-              <CardDescription className="text-sm leading-6 text-slate-600">
+              <CardDescription className="text-sm leading-6 text-muted-foreground">
                 {description}
               </CardDescription>
             ) : null}
@@ -122,8 +130,61 @@ export function Surface({
           ) : null}
         </CardHeader>
       ) : null}
-      <CardContent className="p-5">{children}</CardContent>
+      <CardContent className="p-4">{children}</CardContent>
     </Card>
+  )
+}
+
+export function ConsoleTableShell({
+  title,
+  description,
+  toolbar,
+  state,
+  footer,
+  children,
+  className,
+}: {
+  title?: string
+  description?: string
+  toolbar?: React.ReactNode
+  state?: React.ReactNode
+  footer?: React.ReactNode
+  children?: React.ReactNode
+  className?: string
+}) {
+  return (
+    <section
+      className={cn(
+        "overflow-hidden rounded-lg border border-border bg-card shadow-sm",
+        className
+      )}
+    >
+      {title || description || toolbar ? (
+        <div className="flex flex-col gap-3 border-b border-border bg-card px-4 py-3">
+          {title || description ? (
+            <div className="flex flex-col gap-1">
+              {title ? (
+                <h2 className="text-base font-semibold text-foreground">
+                  {title}
+                </h2>
+              ) : null}
+              {description ? (
+                <p className="text-sm leading-6 text-muted-foreground">
+                  {description}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          {toolbar ? (
+            <div className="flex flex-col gap-3">{toolbar}</div>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="bg-card">{state ?? children}</div>
+      {footer ? (
+        <div className="border-t border-border bg-card px-4 py-3">{footer}</div>
+      ) : null}
+    </section>
   )
 }
 
@@ -137,10 +198,10 @@ export function EmptyState({
   action?: React.ReactNode
 }) {
   return (
-    <div className="flex min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 px-6 text-center">
-      <div className="max-w-md space-y-3">
-        <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
-        <p className="text-sm leading-6 text-slate-500">{description}</p>
+    <div className="flex min-h-[220px] flex-col items-center justify-center rounded-lg border border-dashed border-border bg-muted/45 px-6 text-center">
+      <div className="flex max-w-md flex-col items-center gap-3">
+        <h3 className="text-base font-semibold text-foreground">{title}</h3>
+        <p className="text-sm leading-6 text-muted-foreground">{description}</p>
         {action ? <div className="pt-2">{action}</div> : null}
       </div>
     </div>
@@ -155,8 +216,8 @@ export function InlineMeta({
   value: React.ReactNode
 }) {
   return (
-    <div className="space-y-1 rounded-lg border border-slate-200 bg-slate-50 p-4">
-      <div className="text-[11px] font-medium tracking-[0.16em] text-slate-400 uppercase">
+    <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/45 p-3">
+      <div className="text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
         {label}
       </div>
       <div className="text-sm font-medium text-slate-900">{value}</div>
@@ -196,7 +257,10 @@ export function Notice({
       )}
     >
       <div
-        className={cn("space-y-1", size === "sm" ? "leading-5" : "leading-6")}
+        className={cn(
+          "flex flex-col gap-1",
+          size === "sm" ? "leading-5" : "leading-6"
+        )}
       >
         {title ? <div className="font-medium">{title}</div> : null}
         <div>{children}</div>

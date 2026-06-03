@@ -22,7 +22,12 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Pagination } from "@/components/pagination"
-import { DetailField, TruncatedCell } from "@/components/log-presentation"
+import { EmptyState, PageIntro, Surface } from "@/components/console-shell"
+import {
+  CopyableBlock,
+  DetailField,
+  TruncatedCell,
+} from "@/components/log-presentation"
 import { getAccessLogs, type AccessLog } from "@/lib/api"
 import { getWAFActionMeta, wafActionOptions } from "@/lib/console"
 import { formatDate } from "@/lib/utils"
@@ -97,12 +102,12 @@ function exportCSV(items: AccessLog[]) {
     "时间",
     "Request ID",
     "Host",
-    "IP",
+    "源 IP",
     "方法",
     "路径",
     "查询参数",
     "状态码",
-    "WAF动作",
+    "当时 WAF 动作",
     "缓存状态",
     "上游",
     "HTTP协议",
@@ -219,6 +224,8 @@ export default function AccessLogsPage() {
       setTotal(res.total ?? 0)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载失败")
+      setItems([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
@@ -260,38 +267,38 @@ export default function AccessLogsPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-900">请求日志</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            查看请求结果、状态码、上游响应耗时与 WAF 动作，用于排障与审计
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5 rounded-lg"
-            onClick={load}
-          >
-            <RefreshCcw className="h-3.5 w-3.5" /> 刷新
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5 rounded-lg"
-            onClick={() => exportCSV(items)}
-            disabled={items.length === 0}
-          >
-            <Download className="h-3.5 w-3.5" /> 导出 CSV
-          </Button>
-        </div>
-      </div>
+      <PageIntro
+        eyebrow="Access Logs"
+        title="请求日志"
+        description="查看请求结果、状态码、上游响应耗时与当时 WAF 动作，用于排障与审计。"
+        actions={
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 rounded-lg"
+              onClick={load}
+            >
+              <RefreshCcw className="h-3.5 w-3.5" /> 刷新
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 rounded-lg"
+              onClick={() => exportCSV(items)}
+              disabled={items.length === 0}
+            >
+              <Download className="h-3.5 w-3.5" /> 导出当前页 CSV
+            </Button>
+          </>
+        }
+      />
 
-      {/* Filter bar */}
-      <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap items-center gap-3">
+      <Surface
+        title="筛选条件"
+        description="所有条件参与后端分页查询，导出仅包含当前页结果。"
+      >
+        <div className="space-y-3">
           <div className="relative">
             <Search className="absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <Input
@@ -336,7 +343,7 @@ export default function AccessLogsPage() {
                 setHostSearch(e.target.value)
                 setPage(1)
               }}
-              placeholder="搜索 Host"
+              placeholder="搜索 Host（支持站点首个 Host 跳转）"
               className="w-[160px] rounded-lg pl-8"
             />
           </div>
@@ -460,18 +467,22 @@ export default function AccessLogsPage() {
             重置筛选
           </Button>
         </div>
-      </div>
+      </Surface>
 
       {/* Table */}
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+      <Surface
+        title="请求日志列表"
+        description={`当前筛选命中 ${total} 条，请求体和请求头详情按脱敏与截断策略展示。`}
+      >
         {loading ? (
           <div className="p-16 text-center text-sm text-slate-400">
             加载中...
           </div>
         ) : items.length === 0 ? (
-          <div className="p-16 text-center text-sm text-slate-400">
-            当前筛选条件下暂无请求日志
-          </div>
+          <EmptyState
+            title="当前筛选条件下本页暂无请求日志"
+            description="调整时间范围、Host、路径、源 IP、状态码或 WAF 动作后重新查看。"
+          />
         ) : (
           <>
             <div className="overflow-x-auto overscroll-x-contain">
@@ -484,7 +495,7 @@ export default function AccessLogsPage() {
                     <th className="w-[280px] px-4 py-3">路径</th>
                     <th className="w-[90px] px-4 py-3">状态码</th>
                     <th className="w-[150px] px-4 py-3">源 IP</th>
-                    <th className="w-[90px] px-4 py-3">WAF</th>
+                    <th className="w-[104px] px-4 py-3">当时 WAF</th>
                     <th className="w-[110px] px-4 py-3">上游耗时</th>
                     <th className="w-[110px] px-4 py-3">响应大小</th>
                     <th className="w-[84px] px-4 py-3 text-right">详情</th>
@@ -549,7 +560,7 @@ export default function AccessLogsPage() {
             </div>
           </>
         )}
-      </div>
+      </Surface>
 
       {/* Detail Dialog */}
       <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
@@ -562,105 +573,123 @@ export default function AccessLogsPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               {(
                 [
-                  ["Request ID", selected.request_id || "-", true],
-                  ["时间", formatDate(selected.created_at), false],
-                  ["客户端 IP", selected.client_ip, true],
-                  ["Host", selected.host || "-", true],
-                  ["方法", selected.method, true],
-                  ["状态码", String(selected.status_code), true],
+                  ["Request ID", selected.request_id || "-", true, true],
+                  ["时间", formatDate(selected.created_at), false, false],
+                  ["客户端 IP", selected.client_ip, true, true],
+                  ["Host", selected.host || "-", true, true],
+                  ["方法", selected.method, true, true],
+                  ["状态码", String(selected.status_code), true, true],
                   [
-                    "WAF 动作",
+                    "当时 WAF 动作",
                     selected.waf_action
                       ? getWAFActionMeta(selected.waf_action).label
                       : "-",
                     false,
+                    false,
                   ],
-                  ["缓存状态", selected.cache_state || "-", true],
-                  ["上游服务器", selected.upstream || "-", true],
+                  ["缓存状态", selected.cache_state || "-", true, true],
+                  ["上游服务器", selected.upstream || "-", true, true],
                   [
                     "上游耗时",
                     formatLatency(selected.upstream_latency_ms),
                     true,
+                    false,
                   ],
-                  ["响应大小", formatBytes(selected.response_size), true],
-                  ["请求大小", formatBytes(selected.request_size ?? 0), true],
-                  ["HTTP 协议", selected.http_protocol || "-", true],
-                  ["TLS 版本", selected.tls_version || "-", true],
-                  ["TLS SNI", selected.tls_sni || "-", true],
-                  ["TLS ALPN", selected.tls_alpn || "-", true],
-                  ["JA3 Hash", selected.tls_ja3_hash || "-", true],
-                  ["JA4", selected.tls_ja4 || "-", true],
-                  ["站点 ID", String(selected.site_id), true],
-                ] as [string, string, boolean][]
-              ).map(([label, value, mono]) => (
+                  [
+                    "响应大小",
+                    formatBytes(selected.response_size),
+                    true,
+                    false,
+                  ],
+                  [
+                    "请求大小",
+                    formatBytes(selected.request_size ?? 0),
+                    true,
+                    false,
+                  ],
+                  ["HTTP 协议", selected.http_protocol || "-", true, true],
+                  ["TLS 版本", selected.tls_version || "-", true, true],
+                  ["TLS SNI", selected.tls_sni || "-", true, true],
+                  ["TLS ALPN", selected.tls_alpn || "-", true, true],
+                  ["JA3 Hash", selected.tls_ja3_hash || "-", true, true],
+                  ["JA4", selected.tls_ja4 || "-", true, true],
+                  ["站点 ID", String(selected.site_id), true, true],
+                ] as [string, string, boolean, boolean][]
+              ).map(([label, value, mono, copyable]) => (
                 <DetailField
                   key={label}
                   label={label}
                   value={value}
                   mono={mono}
+                  copyText={copyable ? value : undefined}
                 />
               ))}
-              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
-                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
-                  路径
-                </div>
-                <code className="mt-1 block text-xs break-all text-slate-700">
-                  {selected.path}
-                </code>
-              </div>
+              <CopyableBlock
+                label="路径"
+                value={selected.path}
+                as="code"
+                className="sm:col-span-2"
+                contentClassName="max-h-32 overflow-auto text-xs break-all text-slate-700"
+              />
               {selected.query_string && (
-                <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
-                  <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
-                    查询参数
-                  </div>
-                  <code className="mt-1 block text-xs break-all text-slate-700">
-                    {selected.query_string}
-                  </code>
-                </div>
+                <CopyableBlock
+                  label="查询参数"
+                  value={selected.query_string}
+                  as="code"
+                  className="sm:col-span-2"
+                  contentClassName="max-h-32 overflow-auto text-xs break-all text-slate-700"
+                />
               )}
+              <CopyableBlock
+                label="JA3"
+                value={selected.tls_ja3 || "-"}
+                as="code"
+                className="sm:col-span-2"
+                contentClassName="text-xs break-all text-slate-700"
+              />
+              <CopyableBlock
+                label="Request Headers"
+                value={selected.request_headers || "-"}
+                className="sm:col-span-2"
+                redact
+                defaultOpen={false}
+              />
+              <CopyableBlock
+                label="Response Headers"
+                value={selected.response_headers || "-"}
+                className="sm:col-span-2"
+                redact
+                defaultOpen={false}
+              />
               <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
-                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
-                  JA3
-                </div>
-                <code className="mt-1 block text-xs break-all text-slate-700">
-                  {selected.tls_ja3 || "-"}
-                </code>
-              </div>
-              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
-                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
-                  Request Headers
-                </div>
-                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700">
-                  {selected.request_headers || "-"}
-                </pre>
-              </div>
-              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
-                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
-                  Request Body Preview
-                </div>
-                <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700">
-                  {selected.request_body_preview || "-"}
-                </pre>
+                <CopyableBlock
+                  label="Request Body Preview"
+                  value={selected.request_body_preview || "-"}
+                  className="border-0 bg-transparent p-0"
+                  contentClassName="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700"
+                  redact
+                  defaultOpen={false}
+                />
                 {selected.request_body_truncated && (
-                  <div className="mt-2 text-xs text-amber-600">请求体已截断显示</div>
+                  <div className="mt-2 text-xs text-amber-600">
+                    请求体已截断显示
+                  </div>
                 )}
               </div>
-              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
-                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
-                  Header Order
-                </div>
-                <code className="mt-1 block text-xs break-all text-slate-700">
-                  {selected.header_order || "-"}
-                </code>
-              </div>
-              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 sm:col-span-2">
-                <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
-                  User-Agent
-                </div>
-                <div className="mt-1 text-xs break-all text-slate-600">
-                  {selected.user_agent || "-"}
-                </div>
-              </div>
+              <CopyableBlock
+                label="Header Order"
+                value={selected.header_order || "-"}
+                as="code"
+                className="sm:col-span-2"
+                contentClassName="text-xs break-all text-slate-700"
+              />
+              <CopyableBlock
+                label="User-Agent"
+                value={selected.user_agent || "-"}
+                as="div"
+                className="sm:col-span-2"
+                contentClassName="text-xs break-all text-slate-600"
+              />
             </div>
           )}
         </DialogContent>

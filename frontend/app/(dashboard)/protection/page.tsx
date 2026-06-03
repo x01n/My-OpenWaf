@@ -30,10 +30,12 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { PageIntro, Surface } from "@/components/console-shell"
 import {
+  getDropPolicy,
   getProtectionSettings,
   updateProtectionSettings,
   type ProtectionSettings,
 } from "@/lib/api"
+import { getSensitivityConfig } from "@/lib/rules-api"
 import { CAPTCHA_TYPE_OPTIONS, type CaptchaType } from "@/lib/security-api"
 import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console"
 import { cn } from "@/lib/utils"
@@ -97,6 +99,64 @@ const categories = [
   { key: "path_traversal", label: "路径遍历" },
 ] as const
 
+const DEFAULT_CVE_AUTO_DROP = true
+type CVEAutoDropField = "cve_auto_drop_critical" | "cve_auto_drop_high"
+
+const protectionPageFields: Array<keyof ProtectionSettings> = [
+  "builtin_owasp_enabled",
+  "builtin_owasp_sensitivity",
+  "builtin_owasp_on_hit",
+  "maintenance_global_enabled",
+  "cve_action",
+  "request_ratelimit_action",
+  "error_ratelimit_action",
+  "auto_ban_action",
+  "cve_auto_drop_critical",
+  "cve_auto_drop_high",
+  "captcha_enabled",
+  "shield_enabled",
+  "chain_enabled",
+  "escalation_enabled",
+  "captcha_type",
+]
+
+function sameStringRecord(
+  a: Record<string, string> = {},
+  b: Record<string, string> = {}
+) {
+  const aKeys = Object.keys(a)
+  const bKeys = Object.keys(b)
+  return (
+    aKeys.length === bKeys.length && aKeys.every((key) => a[key] === b[key])
+  )
+}
+
+function buildProtectionPagePatch(
+  current: ProtectionSettings,
+  baseline: ProtectionSettings,
+  currentSensitivity: Record<string, string>,
+  baselineSensitivity: Record<string, string>
+): Partial<ProtectionSettings> {
+  const patch: Partial<ProtectionSettings> = {}
+  const patchRecord = patch as Record<string, unknown>
+  for (const field of protectionPageFields) {
+    if (current[field] !== baseline[field]) {
+      patchRecord[field] = current[field]
+    }
+  }
+  if (!sameStringRecord(currentSensitivity, baselineSensitivity)) {
+    patch.category_sensitivity = currentSensitivity
+  }
+  return patch
+}
+
+function resolveCVEAutoDrop(
+  value: boolean | null | undefined,
+  fallback = DEFAULT_CVE_AUTO_DROP
+) {
+  return value ?? fallback
+}
+
 function deriveMode(settings: ProtectionSettings): string {
   if (settings.maintenance_global_enabled) return "maintenance"
   if (settings.builtin_owasp_on_hit === "observe") return "observe"
@@ -110,41 +170,60 @@ function deriveMode(settings: ProtectionSettings): string {
 
 export default function ProtectionPage() {
   const [settings, setSettings] = useState<ProtectionSettings | null>(null)
+  const [baselineSettings, setBaselineSettings] =
+    useState<ProtectionSettings | null>(null)
+  const [sensitivity, setSensitivity] = useState<Record<string, string>>({})
+  const [baselineSensitivity, setBaselineSensitivity] = useState<
+    Record<string, string>
+  >({})
   const [saving, setSaving] = useState(false)
   const [activeMode, setActiveMode] = useState("protection")
 
   useEffect(() => {
-    getProtectionSettings()
-      .then((data) => {
-        setSettings(data)
-        setActiveMode(deriveMode(data))
+    Promise.all([
+      getProtectionSettings(),
+      getDropPolicy(),
+      getSensitivityConfig("global"),
+    ])
+      .then(([data, dropPolicy, sensitivityConfig]) => {
+        const merged = {
+          ...data,
+          cve_auto_drop_critical: resolveCVEAutoDrop(
+            data.cve_auto_drop_critical,
+            dropPolicy.cve_auto_drop_critical
+          ),
+          cve_auto_drop_high: resolveCVEAutoDrop(
+            data.cve_auto_drop_high,
+            dropPolicy.cve_auto_drop_high
+          ),
+        }
+        setSettings(merged)
+        setBaselineSettings(merged)
+        const loadedSensitivity =
+          sensitivityConfig.category_sensitivity ??
+          merged.category_sensitivity ??
+          {}
+        setSensitivity(loadedSensitivity)
+        setBaselineSensitivity(loadedSensitivity)
+        setActiveMode(deriveMode(merged))
       })
       .catch((err) => toast.error(String(err)))
   }, [])
 
   const modules = useMemo(() => {
-    if (!settings?.owasp_modules) return {} as Record<string, string>
-    return settings.owasp_modules
-  }, [settings])
+    return sensitivity
+  }, [sensitivity])
 
   function setModuleSensitivity(key: string, value: string) {
-    if (!settings) return
-    setSettings({
-      ...settings,
-      owasp_modules: { ...modules, [key]: value },
-    })
+    setSensitivity({ ...modules, [key]: value })
   }
 
   function batchSetSensitivity(value: string) {
-    if (!settings) return
     const newModules: Record<string, string> = {}
     for (const cat of categories) {
       newModules[cat.key] = value
     }
-    setSettings({
-      ...settings,
-      owasp_modules: newModules,
-    })
+    setSensitivity(newModules)
   }
 
   function applyMode(modeId: string) {
@@ -184,8 +263,41 @@ export default function ProtectionPage() {
     if (!settings) return
     setSaving(true)
     try {
-      const result = await updateProtectionSettings(settings)
-      setSettings(result)
+      const latest = await getProtectionSettings()
+      const patch = buildProtectionPagePatch(
+        settings,
+        baselineSettings ?? latest,
+        sensitivity,
+        baselineSensitivity
+      )
+      if (Object.keys(patch).length === 0) {
+        setSettings(latest)
+        setBaselineSettings(latest)
+        setSensitivity(latest.category_sensitivity ?? sensitivity)
+        setBaselineSensitivity(latest.category_sensitivity ?? sensitivity)
+        toast.success("防护配置已是最新")
+        return
+      }
+      const payload = { ...patch }
+      delete payload.owasp_modules
+      const result = await updateProtectionSettings(payload)
+      const dropPolicy = await getDropPolicy()
+      const savedSettings = {
+        ...result,
+        cve_auto_drop_critical: resolveCVEAutoDrop(
+          result.cve_auto_drop_critical,
+          dropPolicy.cve_auto_drop_critical
+        ),
+        cve_auto_drop_high: resolveCVEAutoDrop(
+          result.cve_auto_drop_high,
+          dropPolicy.cve_auto_drop_high
+        ),
+      }
+      const savedSensitivity = result.category_sensitivity ?? sensitivity
+      setSettings(savedSettings)
+      setBaselineSettings(savedSettings)
+      setSensitivity(savedSensitivity)
+      setBaselineSensitivity(savedSensitivity)
       toast.success("防护配置已保存")
     } catch (err) {
       toast.error(String(err))
@@ -254,7 +366,7 @@ export default function ProtectionPage() {
           ].map(([idx, title, desc, tone]) => (
             <div
               key={idx}
-              className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
+              className="rounded-xl border border-slate-200/80 bg-white/95 p-4 shadow-sm"
             >
               <Badge className={cn("rounded-md border text-[11px]", tone)}>
                 {idx}
@@ -268,9 +380,10 @@ export default function ProtectionPage() {
         </div>
       </Surface>
 
-      {/* Mode Selection Cards */}
-      <div>
-        <h2 className="mb-3 text-sm font-medium text-slate-700">防护模式</h2>
+      <Surface
+        title="防护模式"
+        description="快速切换全局防护姿态，保存后写入当前 protection 配置。"
+      >
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {protectionModes.map((mode) => {
             const Icon = mode.icon
@@ -280,7 +393,7 @@ export default function ProtectionPage() {
                 key={mode.id}
                 onClick={() => applyMode(mode.id)}
                 className={cn(
-                  "flex flex-col items-start gap-2 rounded-lg border-2 bg-white p-4 text-left shadow-sm transition-all hover:shadow-md",
+                  "flex flex-col items-start gap-2 rounded-xl border-2 bg-white/95 p-4 text-left shadow-sm transition-all hover:shadow-md",
                   isActive
                     ? "border-cyan-500 bg-cyan-50/30 ring-1 ring-cyan-500/20"
                     : "border-slate-200 hover:border-slate-300"
@@ -320,19 +433,13 @@ export default function ProtectionPage() {
             )
           })}
         </div>
-      </div>
+      </Surface>
 
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="border-b border-slate-200 px-5 py-4">
-          <h2 className="text-base font-semibold text-slate-900">
-            全局动作策略
-          </h2>
-          <p className="mt-1 text-xs text-slate-500">
-            统一控制
-            OWASP、CVE、请求限速、错误限速和自动封禁的命中动作；规则级动作会覆盖这里的默认值。
-          </p>
-        </div>
-        <div className="grid gap-4 p-5 lg:grid-cols-2 xl:grid-cols-5">
+      <Surface
+        title="全局动作策略"
+        description="统一控制 OWASP、CVE、请求限速、错误限速和自动封禁的命中动作；规则级动作会覆盖这里的默认值。"
+      >
+        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-5">
           {[
             ["builtin_owasp_on_hit", "OWASP 命中"],
             ["cve_action", "CVE 命中"],
@@ -348,7 +455,7 @@ export default function ProtectionPage() {
             return (
               <div
                 key={field}
-                className="rounded-lg border border-slate-200 bg-slate-50/60 p-3"
+                className="rounded-xl border border-slate-200/80 bg-slate-50/80 p-3"
               >
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <span className="text-xs font-semibold text-slate-600">
@@ -390,7 +497,7 @@ export default function ProtectionPage() {
             )
           })}
         </div>
-      </div>
+      </Surface>
 
       <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
         <Surface
@@ -410,13 +517,12 @@ export default function ProtectionPage() {
                 "命中 High CVE 且规则未单独配置动作时返回 RST",
               ],
             ].map(([field, label, desc]) => {
-              const checked = Boolean(
-                (settings as unknown as Record<string, unknown>)[field]
-              )
+              const key = field as CVEAutoDropField
+              const checked = resolveCVEAutoDrop(settings[key])
               return (
                 <div
                   key={field}
-                  className="rounded-lg border border-slate-200 bg-slate-50/60 p-4"
+                  className="rounded-xl border border-slate-200/80 bg-slate-50/80 p-4"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div>
@@ -432,7 +538,7 @@ export default function ProtectionPage() {
                       onCheckedChange={(v) =>
                         setSettings({
                           ...settings,
-                          [field]: v,
+                          [key]: v,
                         } as ProtectionSettings)
                       }
                     />
@@ -464,7 +570,7 @@ export default function ProtectionPage() {
               return (
                 <div
                   key={field}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 px-4 py-3"
+                  className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3"
                 >
                   <div>
                     <div className="text-sm font-semibold text-slate-900">
@@ -488,7 +594,7 @@ export default function ProtectionPage() {
             })}
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-4">
+            <div className="space-y-2 rounded-xl border border-slate-200/80 bg-white/95 p-4">
               <Label className="text-sm font-semibold text-slate-900">
                 验证码类型
               </Label>
@@ -515,7 +621,7 @@ export default function ProtectionPage() {
                 )?.description || "选择 CAPTCHA 验证方式。"}
               </p>
             </div>
-            <div className="rounded-lg border border-slate-200 bg-white p-4 text-xs leading-5 text-slate-500">
+            <div className="rounded-xl border border-slate-200/80 bg-white/95 p-4 text-xs leading-5 text-slate-500">
               <div className="mb-1 text-sm font-semibold text-slate-900">
                 动作说明
               </div>
@@ -527,46 +633,38 @@ export default function ProtectionPage() {
         </Surface>
       </div>
 
-      {/* Sensitivity Matrix Table */}
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="border-b border-slate-200 px-5 py-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-base font-semibold text-slate-900">
-                检测类别敏感度矩阵
-              </h2>
-              <p className="mt-1 text-xs text-slate-500">
-                为每个检测类别设置敏感度级别，级别越高检测越严格但可能增加误报
-              </p>
-            </div>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  className="shrink-0 gap-1.5 rounded-md border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-100"
+      <Surface
+        title="检测类别敏感度矩阵"
+        description="为每个检测类别设置敏感度级别，级别越高检测越严格但可能增加误报。"
+        action={
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                className="shrink-0 gap-1.5 rounded-md border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-100"
+              >
+                批量配置为
+                <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-[140px]">
+              {[
+                { label: "禁用", value: "off" },
+                { label: "仅观察", value: "low" },
+                { label: "平衡防护", value: "mid" },
+                { label: "高强度防护", value: "high" },
+              ].map((opt) => (
+                <DropdownMenuItem
+                  key={opt.value}
+                  onClick={() => batchSetSensitivity(opt.value)}
                 >
-                  批量配置为
-                  <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-[140px]">
-                {[
-                  { label: "禁用", value: "off" },
-                  { label: "仅观察", value: "low" },
-                  { label: "平衡防护", value: "mid" },
-                  { label: "高强度防护", value: "high" },
-                ].map((opt) => (
-                  <DropdownMenuItem
-                    key={opt.value}
-                    onClick={() => batchSetSensitivity(opt.value)}
-                  >
-                    {opt.label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
+                  {opt.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        }
+      >
         <div className="overflow-x-auto overscroll-x-contain">
           <table className="min-w-[760px] text-sm">
             <thead>
@@ -631,7 +729,7 @@ export default function ProtectionPage() {
             </tbody>
           </table>
         </div>
-      </div>
+      </Surface>
 
       {/* Bottom Save */}
       <div className="flex justify-end pb-4">

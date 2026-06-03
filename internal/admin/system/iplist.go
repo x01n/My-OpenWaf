@@ -89,28 +89,54 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
-		var body store.IPListEntry
+		var body struct {
+			Kind    *store.IPListKind `json:"kind"`
+			Value   *string           `json:"value"`
+			Note    *string           `json:"note"`
+			Enabled *bool             `json:"enabled"`
+			Action  *string           `json:"action"`
+		}
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		if normalized, ok := normalizeIPListAction(body.Action); ok {
-			body.Action = normalized
-		} else {
-			c.JSON(400, map[string]string{"error": "action must be intercept or drop"})
+		if body.Kind != nil {
+			existing.Kind = *body.Kind
+		}
+		if existing.Kind != store.IPListBlack && existing.Kind != store.IPListWhite {
+			c.JSON(400, map[string]string{"error": "kind must be blacklist or whitelist"})
 			return
 		}
-		body.ID = existing.ID
-		body.CreatedAt = existing.CreatedAt
-		if err := repo.Update(&body); err != nil {
+		if body.Value != nil {
+			existing.Value = *body.Value
+		}
+		if existing.Value == "" {
+			c.JSON(400, map[string]string{"error": "value required"})
+			return
+		}
+		if body.Note != nil {
+			existing.Note = *body.Note
+		}
+		if body.Enabled != nil {
+			existing.Enabled = *body.Enabled
+		}
+		if body.Action != nil {
+			if normalized, ok := normalizeIPListAction(*body.Action); ok {
+				existing.Action = normalized
+			} else {
+				c.JSON(400, map[string]string{"error": "action must be intercept or drop"})
+				return
+			}
+		}
+		if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": body})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": existing})
 			return
 		}
-		c.JSON(200, body)
+		c.JSON(200, existing)
 	}
 }
 

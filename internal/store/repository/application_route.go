@@ -1,12 +1,12 @@
 package repository
 
 import (
-	"errors"
 	"time"
 
 	"My-OpenWaf/internal/store"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type ApplicationRouteRuleRepo struct{ db *gorm.DB }
@@ -42,7 +42,17 @@ func (r *ApplicationRouteRuleRepo) Get(id uint) (*store.ApplicationRouteRule, er
 }
 
 func (r *ApplicationRouteRuleRepo) Create(item *store.ApplicationRouteRule) error {
-	return r.db.Create(item).Error
+	enabled := item.Enabled
+	if err := r.db.Create(item).Error; err != nil {
+		return err
+	}
+	if !enabled {
+		if err := r.db.Model(item).UpdateColumn("enabled", false).Error; err != nil {
+			return err
+		}
+		item.Enabled = false
+	}
+	return nil
 }
 
 func (r *ApplicationRouteRuleRepo) Update(item *store.ApplicationRouteRule) error {
@@ -87,30 +97,31 @@ func (r *RecordedResourceRepo) Upsert(rec *store.RecordedResource) error {
 		rec.FirstSeen = now
 	}
 	rec.LastSeen = now
-
-	var existing store.RecordedResource
-	err := r.db.Where("site_id = ? AND method = ? AND host = ? AND path = ?",
-		rec.SiteID, rec.Method, rec.Host, rec.Path).First(&existing).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if rec.HitCount <= 0 {
 		rec.HitCount = 1
-		return r.db.Create(rec).Error
 	}
-	if err != nil {
-		return err
-	}
-	return r.db.Model(&existing).Updates(map[string]interface{}{
-		"last_seen":             rec.LastSeen,
-		"hit_count":             existing.HitCount + 1,
-		"status_code":           rec.StatusCode,
-		"content_type":          rec.ContentType,
-		"client_ip":             rec.ClientIP,
-		"ja3_hash":              rec.JA3Hash,
-		"user_agent":            rec.UserAgent,
-		"matched_rule_ids":      rec.MatchedRuleIDs,
-		"primary_rule_id":       rec.PrimaryRuleID,
-		"request_headers_json":  rec.RequestHeadersJSON,
-		"response_headers_json": rec.ResponseHeadersJSON,
-		"request_body_snippet":  rec.RequestBodySnippet,
-		"response_body_snippet": rec.ResponseBodySnippet,
-	}).Error
+
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "site_id"},
+			{Name: "method"},
+			{Name: "host"},
+			{Name: "path"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"last_seen":             rec.LastSeen,
+			"hit_count":             gorm.Expr("hit_count + ?", rec.HitCount),
+			"status_code":           rec.StatusCode,
+			"content_type":          rec.ContentType,
+			"client_ip":             rec.ClientIP,
+			"ja3_hash":              rec.JA3Hash,
+			"user_agent":            rec.UserAgent,
+			"matched_rule_ids":      rec.MatchedRuleIDs,
+			"primary_rule_id":       rec.PrimaryRuleID,
+			"request_headers_json":  rec.RequestHeadersJSON,
+			"response_headers_json": rec.ResponseHeadersJSON,
+			"request_body_snippet":  rec.RequestBodySnippet,
+			"response_body_snippet": rec.ResponseBodySnippet,
+		}),
+	}).Create(rec).Error
 }

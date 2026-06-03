@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { toast } from "sonner"
 import {
@@ -37,7 +37,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { PageIntro, Surface } from "@/components/console-shell"
+import {
+  EmptyState,
+  Notice,
+  PageIntro,
+  Surface,
+} from "@/components/console-shell"
 import {
   getCaptchaConfig,
   updateCaptchaConfig,
@@ -49,6 +54,7 @@ import {
   getEscalationConfig,
   updateEscalationConfig,
   CAPTCHA_TYPE_OPTIONS,
+  defaultCaptchaConfig,
   type CaptchaConfig,
   type CaptchaTestResponse,
   type ChainSession,
@@ -59,28 +65,38 @@ import {
 
 /* ───────── 验证码 Tab ───────── */
 function CaptchaTab() {
-  const [cfg, setCfg] = useState<CaptchaConfig>({
-    captcha_enabled: false,
-    captcha_type: "math",
-    captcha_timeout: 120,
-    captcha_pass_ttl: 120,
-    shield_enabled: false,
-    shield_difficulty: 4,
-  })
+  const [cfg, setCfg] = useState<CaptchaConfig>({ ...defaultCaptchaConfig })
   const [preview, setPreview] = useState<CaptchaTestResponse | null>(null)
+  const [captchaAnswer, setCaptchaAnswer] = useState("")
+  const [clickPoints, setClickPoints] = useState<
+    Array<{ x: number; y: number }>
+  >([])
+  const [slideX, setSlideX] = useState(0)
+  const [rotateAngle, setRotateAngle] = useState(0)
+  const captchaImgRef = useRef<HTMLImageElement | null>(null)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
 
   useEffect(() => {
     getCaptchaConfig()
       .then(setCfg)
-      .catch(() => {})
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载验证码配置失败")
+      )
   }, [])
 
   async function save() {
     setSaving(true)
     try {
-      await updateCaptchaConfig(cfg)
+      const latest = await getCaptchaConfig()
+      const saved = await updateCaptchaConfig({
+        ...latest,
+        captcha_enabled: cfg.captcha_enabled,
+        captcha_type: cfg.captcha_type,
+        captcha_timeout: cfg.captcha_timeout,
+        captcha_pass_ttl: cfg.captcha_pass_ttl,
+      })
+      setCfg(saved)
       toast.success("验证码配置已保存")
     } catch (e) {
       toast.error(String(e))
@@ -94,6 +110,10 @@ function CaptchaTab() {
     try {
       const r = await testCaptcha()
       setPreview(r)
+      setCaptchaAnswer("")
+      setClickPoints([])
+      setSlideX(0)
+      setRotateAngle(0)
       if (r.fallback) {
         toast.warning("当前验证码类型已回退到内置算术验证码")
         return
@@ -106,6 +126,44 @@ function CaptchaTab() {
     }
   }
 
+  function handleCaptchaClick(event: React.MouseEvent<HTMLImageElement>) {
+    if (!preview || preview.type !== "click") return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const naturalWidth = event.currentTarget.naturalWidth || rect.width
+    const naturalHeight = event.currentTarget.naturalHeight || rect.height
+    const x = Math.round(
+      ((event.clientX - rect.left) / rect.width) * naturalWidth
+    )
+    const y = Math.round(
+      ((event.clientY - rect.top) / rect.height) * naturalHeight
+    )
+    const next = [...clickPoints, { x, y }]
+    setClickPoints(next)
+    setCaptchaAnswer(JSON.stringify(next))
+  }
+
+  function updateSlideAnswer(value: number) {
+    setSlideX(value)
+    setCaptchaAnswer(JSON.stringify({ x: value }))
+  }
+
+  function updateRotateAnswer(value: number) {
+    setRotateAngle(value)
+    setCaptchaAnswer(JSON.stringify({ angle: value }))
+  }
+
+  function currentAnswerHint() {
+    if (!preview) return ""
+    if (preview.type === "click") {
+      return clickPoints.length
+        ? JSON.stringify(clickPoints)
+        : "请在主图中按顺序点击目标"
+    }
+    if (preview.type === "slide") return JSON.stringify({ x: slideX })
+    if (preview.type === "rotate") return JSON.stringify({ angle: rotateAngle })
+    return captchaAnswer || "请输入算术结果"
+  }
+
   return (
     <Surface
       title="验证码类型配置"
@@ -113,7 +171,7 @@ function CaptchaTab() {
     >
       <div className="grid gap-5 xl:grid-cols-[minmax(0,560px)_minmax(320px,1fr)]">
         <div className="space-y-5">
-          <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
             <div>
               <Label className="font-medium">启用 captcha_challenge</Label>
               <p className="mt-1 text-xs text-slate-500">
@@ -180,11 +238,13 @@ function CaptchaTab() {
               }
             </div>
           </div>
-          <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600">
+          <div className="rounded-xl border border-slate-200/80 bg-white/95 px-4 py-3 text-sm leading-6 text-slate-600">
             <div className="font-medium text-slate-900">触发关系</div>
             <p className="mt-1">
               验证码类型不会由 HTTP 状态码决定，而是由 WAF 动作决定：规则动作为
-              <code className="mx-1 rounded bg-slate-100 px-1 py-0.5">captcha_challenge</code>
+              <code className="mx-1 rounded bg-slate-100 px-1 py-0.5">
+                captcha_challenge
+              </code>
               时使用本配置；5 秒盾和连锁验证有独立流程。
             </p>
           </div>
@@ -211,7 +271,7 @@ function CaptchaTab() {
             </Button>
           </div>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+        <div className="console-panel p-4">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-slate-900">
@@ -229,28 +289,128 @@ function CaptchaTab() {
           </div>
           {preview ? (
             <div className="space-y-3">
-              <div className="overflow-hidden rounded-lg border border-slate-200 bg-white p-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={preview.master_img}
-                  alt="captcha preview"
-                  className="mx-auto max-h-64 max-w-full rounded-md object-contain"
-                />
+              <div className="overflow-hidden rounded-xl border border-slate-200/80 bg-white/95 p-3">
+                <div className="relative mx-auto w-fit">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    ref={captchaImgRef}
+                    src={preview.master_img}
+                    alt="captcha preview"
+                    className={
+                      preview.type === "click"
+                        ? "mx-auto max-h-64 max-w-full cursor-crosshair rounded-md object-contain"
+                        : "mx-auto max-h-64 max-w-full rounded-md object-contain"
+                    }
+                    style={
+                      preview.type === "rotate"
+                        ? { transform: `rotate(${rotateAngle}deg)` }
+                        : undefined
+                    }
+                    onClick={handleCaptchaClick}
+                  />
+                  {preview.type === "click" &&
+                    clickPoints.map((point, idx) => {
+                      const img = captchaImgRef.current
+                      const naturalWidth =
+                        img?.naturalWidth || preview.width || 1
+                      const naturalHeight =
+                        img?.naturalHeight || preview.height || 1
+                      const left = `${(point.x / naturalWidth) * 100}%`
+                      const top = `${(point.y / naturalHeight) * 100}%`
+                      return (
+                        <span
+                          key={`${point.x}-${point.y}-${idx}`}
+                          className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-teal-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow"
+                          style={{ left, top }}
+                        >
+                          {idx + 1}
+                        </span>
+                      )
+                    })}
+                </div>
                 {preview.thumb_img && (
                   <>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={preview.thumb_img}
                       alt="captcha target preview"
-                      className="mx-auto mt-3 max-h-24 max-w-full rounded-md object-contain"
+                      className={
+                        preview.type === "slide"
+                          ? "mt-3 max-h-24 max-w-full rounded-md object-contain"
+                          : "mx-auto mt-3 max-h-24 max-w-full rounded-md object-contain"
+                      }
+                      style={
+                        preview.type === "slide"
+                          ? { transform: `translateX(${slideX}px)` }
+                          : undefined
+                      }
                     />
                   </>
                 )}
               </div>
-              <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-600">
-                <div className="font-medium text-slate-900">{preview.prompt}</div>
-                <div className="mt-1 break-all">Session: {preview.session_id}</div>
-                <div>Timeout: {preview.timeout}s · Pass TTL: {preview.pass_ttl ?? cfg.captcha_pass_ttl}s</div>
+              <div className="rounded-xl border border-slate-200/80 bg-white/95 p-3 text-xs leading-5 text-slate-600">
+                <div className="font-medium text-slate-900">
+                  {preview.prompt}
+                </div>
+                <div className="mt-3 space-y-2">
+                  {preview.type === "math" && (
+                    <Input
+                      value={captchaAnswer}
+                      onChange={(event) => setCaptchaAnswer(event.target.value)}
+                      placeholder="输入算术结果"
+                      className="rounded-md"
+                    />
+                  )}
+                  {preview.type === "click" && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="rounded-md"
+                        onClick={() => {
+                          setClickPoints([])
+                          setCaptchaAnswer("")
+                        }}
+                      >
+                        清空点击点
+                      </Button>
+                      <span>已选择 {clickPoints.length} 个点击点</span>
+                    </div>
+                  )}
+                  {preview.type === "slide" && (
+                    <Input
+                      type="range"
+                      min={0}
+                      max={preview.width || 360}
+                      value={slideX}
+                      onChange={(event) =>
+                        updateSlideAnswer(Number(event.target.value))
+                      }
+                    />
+                  )}
+                  {preview.type === "rotate" && (
+                    <Input
+                      type="range"
+                      min={0}
+                      max={360}
+                      value={rotateAngle}
+                      onChange={(event) =>
+                        updateRotateAnswer(Number(event.target.value))
+                      }
+                    />
+                  )}
+                  <div className="rounded bg-slate-50 px-2 py-1 font-mono text-[11px] break-all text-slate-500">
+                    验证提交值预览：{currentAnswerHint()}
+                  </div>
+                </div>
+                <div className="mt-1 break-all">
+                  Session: {preview.session_id}
+                </div>
+                <div>
+                  Timeout: {preview.timeout}s · Pass TTL:{" "}
+                  {preview.pass_ttl ?? cfg.captcha_pass_ttl}s
+                </div>
                 {preview.fallback && (
                   <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-700">
                     go-captcha 资源不可用，已回退到内置 math。
@@ -259,9 +419,10 @@ function CaptchaTab() {
               </div>
             </div>
           ) : (
-            <div className="flex min-h-64 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white text-sm text-slate-400">
-              点击“生成预览”查看后端真实验证码资源
-            </div>
+            <EmptyState
+              title="尚未生成验证码预览"
+              description="点击“生成预览”查看后端真实验证码资源。"
+            />
           )}
         </div>
       </div>
@@ -271,37 +432,38 @@ function CaptchaTab() {
 
 /* ───────── 5秒盾 Tab ───────── */
 function ShieldTab() {
-  const [cfg, setCfg] = useState<CaptchaConfig>({
-    captcha_enabled: false,
-    captcha_type: "math",
-    captcha_timeout: 120,
-    captcha_pass_ttl: 120,
-    shield_enabled: false,
-    shield_difficulty: 4,
-    shield_timeout_secs: 30,
-    shield_auto_start_delay: 800,
-    shield_max_retries: 3,
-    shield_env_strictness: 1,
-    shield_require_http2: false,
-    shield_require_http3: false,
-    shield_allow_http1: true,
-    shield_enable_wasm: true,
-    shield_enable_js_challenge: true,
-    shield_enable_env_check: true,
-    shield_enable_devtools: true,
-  })
+  const [cfg, setCfg] = useState<CaptchaConfig>({ ...defaultCaptchaConfig })
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     getCaptchaConfig()
       .then(setCfg)
-      .catch(() => {})
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载验证码配置失败")
+      )
   }, [])
 
   async function save() {
     setSaving(true)
     try {
-      await updateCaptchaConfig(cfg)
+      const latest = await getCaptchaConfig()
+      const saved = await updateCaptchaConfig({
+        ...latest,
+        shield_enabled: cfg.shield_enabled,
+        shield_difficulty: cfg.shield_difficulty,
+        shield_timeout_secs: cfg.shield_timeout_secs,
+        shield_auto_start_delay: cfg.shield_auto_start_delay,
+        shield_max_retries: cfg.shield_max_retries,
+        shield_env_strictness: cfg.shield_env_strictness,
+        shield_require_http2: cfg.shield_require_http2,
+        shield_require_http3: cfg.shield_require_http3,
+        shield_allow_http1: cfg.shield_allow_http1,
+        shield_enable_wasm: cfg.shield_enable_wasm,
+        shield_enable_js_challenge: cfg.shield_enable_js_challenge,
+        shield_enable_env_check: cfg.shield_enable_env_check,
+        shield_enable_devtools: cfg.shield_enable_devtools,
+      })
+      setCfg(saved)
       toast.success("5秒盾配置已保存")
     } catch (e) {
       toast.error(String(e))
@@ -317,7 +479,7 @@ function ShieldTab() {
         description="基于 PoW、JavaScript/WASM、环境指纹和协议约束的浏览器挑战。"
       >
         <div className="max-w-xl space-y-5">
-          <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
             <Label className="font-medium">启用5秒盾</Label>
             <Switch
               checked={cfg.shield_enabled}
@@ -431,7 +593,7 @@ function ShieldTab() {
           ].map(({ key, label, desc }) => (
             <div
               key={key}
-              className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 px-4 py-3"
+              className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3"
             >
               <div>
                 <div className="text-sm font-semibold text-slate-900">
@@ -472,7 +634,7 @@ function ShieldTab() {
           ].map(({ key, label, desc }) => (
             <div
               key={key}
-              className="rounded-lg border border-slate-200 bg-slate-50/60 px-4 py-3"
+              className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3"
             >
               <div className="flex items-center justify-between gap-2">
                 <div className="text-sm font-semibold text-slate-900">
@@ -487,7 +649,7 @@ function ShieldTab() {
             </div>
           ))}
         </div>
-        <div className="mt-3 max-w-xl rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        <div className="mt-3 max-w-xl rounded-xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-sm text-amber-800">
           注意：同时要求 HTTP/2 和 HTTP/3 时，客户端需支持其中任一即可通过。禁用
           HTTP/1.1 可能会阻止部分旧版浏览器和 CLI 工具。
         </div>
@@ -510,6 +672,7 @@ function ShieldTab() {
 function ChainTab() {
   const [enabled, setEnabled] = useState(false)
   const [steps, setSteps] = useState<ChainStep[]>([])
+  const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -517,8 +680,11 @@ function ChainTab() {
       .then((c) => {
         setEnabled(c.chain_enabled)
         setSteps(Array.isArray(c.chain_steps) ? c.chain_steps : [])
+        setLoaded(true)
       })
-      .catch(() => {})
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载连锁策略失败")
+      )
   }, [])
 
   function addStep() {
@@ -535,10 +701,26 @@ function ChainTab() {
     setSteps(arr)
   }
   function updateStep(i: number, patch: Partial<ChainStep>) {
-    setSteps(steps.map((s, idx) => (idx === i ? { ...s, ...patch } : s)))
+    setSteps(
+      steps.map((s, idx) => {
+        if (idx !== i) return s
+        const next = { ...s, ...patch }
+        if (patch.type && patch.type !== "captcha") {
+          delete next.captcha_type
+        }
+        if (patch.type === "captcha" && !next.captcha_type) {
+          next.captcha_type = "math"
+        }
+        return next
+      })
+    )
   }
 
   async function save() {
+    if (!loaded) {
+      toast.error("连锁策略加载完成后再保存")
+      return
+    }
     setSaving(true)
     try {
       await updateChainConfig({ chain_enabled: enabled, chain_steps: steps })
@@ -556,7 +738,7 @@ function ChainTab() {
       description="多步骤逐级验证链路，按顺序执行每个挑战步骤。"
     >
       <div className="space-y-5">
-        <div className="flex max-w-xl items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+        <div className="flex max-w-xl items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
           <Label className="font-medium">启用连锁策略</Label>
           <Switch checked={enabled} onCheckedChange={setEnabled} />
         </div>
@@ -564,7 +746,7 @@ function ChainTab() {
           {steps.map((step, i) => (
             <div
               key={i}
-              className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white p-4"
+              className="flex items-center gap-3 rounded-xl border border-slate-200/80 bg-white/95 p-4"
             >
               <span className="w-8 text-xs font-bold text-slate-400">
                 #{i + 1}
@@ -581,7 +763,7 @@ function ChainTab() {
                 <SelectContent>
                   <SelectItem value="env">环境检测</SelectItem>
                   <SelectItem value="pow">PoW 验证</SelectItem>
-                  <SelectItem value="captcha">验证码（继承全局类型）</SelectItem>
+                  <SelectItem value="captcha">验证码</SelectItem>
                 </SelectContent>
               </Select>
               <Select
@@ -593,13 +775,37 @@ function ChainTab() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">全部（all）</SelectItem>
-                  <SelectItem value="score>50">score &gt; 50</SelectItem>
-                  <SelectItem value="score>80">score &gt; 80</SelectItem>
+                  <SelectItem value="env_score>30">
+                    env_score &gt; 30
+                  </SelectItem>
                   <SelectItem value="env_score<30">
                     env_score &lt; 30
                   </SelectItem>
+                  <SelectItem value="score>50">score &gt; 50</SelectItem>
+                  <SelectItem value="score>80">score &gt; 80</SelectItem>
                 </SelectContent>
               </Select>
+              {step.type === "captcha" && (
+                <Select
+                  value={step.captcha_type || "math"}
+                  onValueChange={(v) =>
+                    updateStep(i, {
+                      captcha_type: v as ChainStep["captcha_type"],
+                    })
+                  }
+                >
+                  <SelectTrigger className="w-[190px] rounded-md">
+                    <SelectValue placeholder="验证码类型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CAPTCHA_TYPE_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
               <div className="ml-auto flex gap-1">
                 <Button
                   size="icon"
@@ -635,13 +841,15 @@ function ChainTab() {
           <Plus className="mr-2 h-4 w-4" /> 添加步骤
         </Button>
         {steps.length > 0 && (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          <div className="rounded-xl border border-dashed border-slate-300/90 bg-slate-50/80 px-4 py-3 text-sm text-slate-600">
             <span className="font-medium text-slate-500">流程预览：</span>{" "}
             {steps.map((s, i) => (
               <span key={i}>
                 {i > 0 && <span className="mx-1 text-slate-600">→</span>}
                 <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-xs">
-                  {s.type}
+                  {s.type === "captcha"
+                    ? `captcha:${s.captcha_type || "math"}`
+                    : s.type}
                 </span>
               </span>
             ))}
@@ -653,10 +861,10 @@ function ChainTab() {
         )}
         <Button
           onClick={save}
-          disabled={saving}
+          disabled={saving || !loaded}
           className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
         >
-          {saving ? "保存中..." : "保存配置"}
+          {!loaded ? "加载中..." : saving ? "保存中..." : "保存配置"}
         </Button>
       </div>
     </Surface>
@@ -684,6 +892,10 @@ function ChainSessionsPanel() {
   }, [])
 
   async function remove(id: string) {
+    const confirmed = window.confirm(
+      `确认清理连锁验证会话 ${id}？正在验证的客户端需要重新开始 chain_challenge。`
+    )
+    if (!confirmed) return
     try {
       await deleteChainSession(id)
       toast.success("连锁验证会话已清理")
@@ -698,12 +910,12 @@ function ChainSessionsPanel() {
       title="连锁验证会话"
       description="查看正在进行的 chain_challenge 会话，并清理异常卡住的验证状态。"
     >
-      <div className="overflow-x-auto rounded-lg border border-slate-200">
+      <div className="overflow-x-auto rounded-xl border border-slate-200/80">
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Session</TableHead>
-              <TableHead>客户端 IP</TableHead>
+              <TableHead>原始地址</TableHead>
               <TableHead>步骤</TableHead>
               <TableHead>开始时间</TableHead>
               <TableHead className="w-20 text-right">操作</TableHead>
@@ -715,9 +927,13 @@ function ChainSessionsPanel() {
                 <TableCell className="max-w-[220px] truncate font-mono text-xs">
                   {session.id}
                 </TableCell>
-                <TableCell>{session.client_ip || "—"}</TableCell>
-                <TableCell>{session.current_step}</TableCell>
-                <TableCell className="whitespace-nowrap text-xs text-slate-500">
+                <TableCell className="max-w-[260px] truncate text-xs text-slate-600">
+                  {session.original_url || "—"}
+                </TableCell>
+                <TableCell>
+                  {session.current_step}/{session.step_count}
+                </TableCell>
+                <TableCell className="text-xs whitespace-nowrap text-slate-500">
                   {session.started_at || "—"}
                 </TableCell>
                 <TableCell className="text-right">
@@ -734,8 +950,17 @@ function ChainSessionsPanel() {
             ))}
             {!sessions.length && (
               <TableRow>
-                <TableCell colSpan={5} className="py-8 text-center text-sm text-slate-500">
-                  {loading ? "加载中..." : "暂无连锁验证会话"}
+                <TableCell colSpan={5} className="py-8">
+                  <EmptyState
+                    title={
+                      loading ? "正在加载连锁验证会话" : "暂无连锁验证会话"
+                    }
+                    description={
+                      loading
+                        ? "正在读取后端会话列表。"
+                        : "当前没有正在进行的 chain_challenge 会话。"
+                    }
+                  />
                 </TableCell>
               </TableRow>
             )}
@@ -754,30 +979,54 @@ function AntiReplayTab() {
   return (
     <Surface
       title="防重放配置"
-      description="基于 Nonce 的请求重放防护，当前按站点独立配置。"
+      description="Nonce、TTL 和挑战动作按站点保存，避免全局策略覆盖不同应用的请求语义。"
+      action={
+        <Button asChild variant="outline" size="sm">
+          <Link href="/sites/">
+            站点管理
+            <ExternalLink data-icon="inline-end" />
+          </Link>
+        </Button>
+      }
     >
-      <div className="grid gap-4 lg:grid-cols-[1fr_280px]">
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm leading-6 text-amber-900">
-          <div className="font-semibold text-amber-950">
-            此处不再展示不可保存的假表单
-          </div>
-          <p className="mt-2">
-            防重放依赖站点级 Cookie、Nonce
-            TTL、动作策略和上游行为，必须在具体站点上下文中启用。全局安全策略页仅作为能力说明，避免误以为这里可以保存全局配置。
-          </p>
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="overflow-hidden rounded-lg border border-slate-200/80">
+          <Table>
+            <TableBody>
+              {[
+                ["配置范围", "站点级覆盖"],
+                [
+                  "保存字段",
+                  "anti_replay_enabled / anti_replay_ttl / anti_replay_action",
+                ],
+                ["默认动作", "shield_challenge"],
+                ["继承关系", "不写入全局 protection 配置"],
+              ].map(([label, value]) => (
+                <TableRow key={label}>
+                  <TableCell className="w-32 bg-slate-50/80 text-xs font-semibold text-slate-500">
+                    {label}
+                  </TableCell>
+                  <TableCell className="font-mono text-sm text-slate-900">
+                    {value}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-          <div className="text-sm font-semibold text-slate-950">下一步</div>
-          <p className="mt-2 text-xs leading-5 text-slate-500">
-            进入站点详情，在“高级保护/安全覆盖”中配置站点级防重放。
-          </p>
-          <Button
-            asChild
-            className="mt-4 w-full rounded-md bg-slate-950 text-white hover:bg-slate-800"
-          >
+        <Notice tone="sky" title="站点详情负责保存">
+          防重放策略依赖站点
+          Cookie、上游路径和放行动作，当前页只保留边界说明与入口，防止把站点级
+          nullable 字段误写为全局布尔值。
+        </Notice>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-teal-200 bg-teal-50/80 px-4 py-3 lg:col-span-2">
+          <div className="text-sm font-medium text-teal-950">
+            修改站点防重放时，进入具体站点详情的高级保护区域。
+          </div>
+          <Button asChild size="sm">
             <Link href="/sites/">
-              前往站点管理
-              <ExternalLink className="ml-2 h-3.5 w-3.5" />
+              打开站点列表
+              <ExternalLink data-icon="inline-end" />
             </Link>
           </Button>
         </div>
@@ -793,12 +1042,18 @@ function EscalationTab() {
     escalation_window_secs: 60,
     escalation_steps: [],
   })
+  const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     getEscalationConfig("global")
-      .then(setCfg)
-      .catch(() => {})
+      .then((config) => {
+        setCfg(config)
+        setLoaded(true)
+      })
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载阶梯升级配置失败")
+      )
   }, [])
 
   function addStep() {
@@ -823,6 +1078,10 @@ function EscalationTab() {
   }
 
   async function save() {
+    if (!loaded) {
+      toast.error("阶梯升级配置加载完成后再保存")
+      return
+    }
     setSaving(true)
     try {
       await updateEscalationConfig("global", cfg)
@@ -840,7 +1099,7 @@ function EscalationTab() {
       description="在 WAF 命中后按客户端违规次数升级响应动作，不作为独立检测阶段。"
     >
       <div className="space-y-5">
-        <div className="flex max-w-xl items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+        <div className="flex max-w-xl items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
           <Label className="font-medium">启用阶梯升级</Label>
           <Switch
             checked={cfg.escalation_enabled}
@@ -860,7 +1119,7 @@ function EscalationTab() {
           />
         </div>
         {cfg.escalation_steps.length > 0 && (
-          <div className="overflow-x-auto rounded-lg border border-slate-200">
+          <div className="overflow-x-auto rounded-xl border border-slate-200/80">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -924,10 +1183,10 @@ function EscalationTab() {
         <div>
           <Button
             onClick={save}
-            disabled={saving}
+            disabled={saving || !loaded}
             className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
           >
-            {saving ? "保存中..." : "保存配置"}
+            {!loaded ? "加载中..." : saving ? "保存中..." : "保存配置"}
           </Button>
         </div>
       </div>
@@ -945,8 +1204,8 @@ export default function SecurityPolicyPage() {
         description="验证码、5秒盾、连锁策略、防重放与阶梯升级，构建多层次安全防护体系。"
       />
       <Tabs defaultValue="captcha" className="space-y-4">
-        <div className="overflow-x-auto overscroll-x-contain pb-1">
-          <TabsList className="min-w-max">
+        <div className="overflow-x-auto overscroll-x-contain rounded-2xl border border-slate-200/80 bg-white/90 p-1 shadow-sm backdrop-blur">
+          <TabsList className="min-w-max bg-transparent">
             <TabsTrigger value="captcha" className="gap-1.5">
               <ShieldCheck className="h-4 w-4" /> 验证码
             </TabsTrigger>

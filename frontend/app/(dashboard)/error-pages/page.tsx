@@ -54,14 +54,18 @@ export default function ErrorPagesPage() {
   useEffect(() => {
     getDefaultErrorPages()
       .then((res) => setDefaults(res.defaults ?? {}))
-      .catch(() => {})
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载默认错误页失败")
+      )
     listSites()
       .then((res) => {
         const list = res.items ?? []
         setSites(list)
         if (list.length > 0) setSelectedSite(String(list[0].id))
       })
-      .catch(() => {})
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载站点列表失败")
+      )
   }, [])
 
   useEffect(() => {
@@ -69,7 +73,10 @@ export default function ErrorPagesPage() {
     setPreviewHtml("")
     getSiteErrorPages(Number(selectedSite))
       .then((res) => setSitePages(res.error_pages ?? {}))
-      .catch(() => setSitePages({}))
+      .catch((e) => {
+        toast.error(e instanceof Error ? e.message : "加载站点错误页失败")
+        setSitePages({})
+      })
   }, [selectedSite])
 
   function getCurrentHtml(): string {
@@ -154,7 +161,7 @@ export default function ErrorPagesPage() {
               return (
                 <div
                   key={code}
-                  className={`rounded-lg border p-4 ${statusColors[code] ?? "border-slate-200 bg-slate-50"}`}
+                  className={`rounded-xl border p-4 ${statusColors[code] ?? "border-slate-200 bg-slate-50"}`}
                 >
                   <div className="mb-2 flex items-center gap-2">
                     <FileWarning className="h-4 w-4" />
@@ -226,7 +233,7 @@ export default function ErrorPagesPage() {
               setPreviewHtml("")
             }}
           >
-            <TabsList className="mb-4">
+            <TabsList className="mb-4 rounded-xl border border-slate-200/80 bg-white/90 p-1 shadow-sm backdrop-blur">
               {statusCodes.map((code) => (
                 <TabsTrigger key={code} value={code}>
                   {code}
@@ -248,7 +255,7 @@ export default function ErrorPagesPage() {
                       className="rounded-md font-mono text-xs"
                       placeholder={`输入 ${code} 错误页面的 HTML 内容...`}
                     />
-                    <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                    <div className="flex items-start gap-2 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2 text-xs text-slate-700">
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                       <span>
                         支持 Go template 变量：{"{{.StatusCode}}"}{" "}
@@ -260,7 +267,7 @@ export default function ErrorPagesPage() {
                     <label className="text-sm font-medium text-slate-700">
                       实时预览
                     </label>
-                    <div className="min-h-[400px] overflow-hidden rounded-md border border-slate-200 bg-white">
+                    <div className="min-h-[400px] overflow-hidden rounded-xl border border-slate-200/80 bg-white/95">
                       {previewHtml ? (
                         <iframe
                           srcDoc={previewHtml}

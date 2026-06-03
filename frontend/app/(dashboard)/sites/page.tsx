@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react"
 import { AddSiteDialog } from "@/components/add-site-dialog"
+import { EmptyState, PageIntro } from "@/components/console-shell"
 import { Pagination } from "@/components/pagination"
 import {
   Dialog,
@@ -122,6 +123,13 @@ export default function SitesPage() {
       await updateSite(modeTarget.id, {
         attack_protection_level: mode === "observe" ? "observe" : "protect",
         maintenance_enabled: mode === "maintenance",
+        bot_protection_enabled: mode !== "observe",
+        owasp_enabled: true,
+        owasp_action: mode === "observe" ? "observe" : "intercept",
+        cve_enabled: true,
+        cve_action: mode === "observe" ? "observe" : "intercept",
+        rate_limit_enabled: true,
+        rate_limit_action: mode === "observe" ? "observe" : "rate_limit",
       })
       toast.success("防护模式已更新")
       setModeTarget(null)
@@ -136,27 +144,20 @@ export default function SitesPage() {
 
   return (
     <div className="space-y-5">
-      {/* Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div className="text-xs font-semibold tracking-[0.22em] text-teal-600 uppercase">
-            Applications
-          </div>
-          <h1 className="mt-1 text-2xl font-semibold text-slate-950">
-            站点管理
-          </h1>
-          <p className="mt-1 text-sm text-slate-500">
-            共 {total} 个防护应用，统一管理域名、监听地址、上游与防护模式。
-          </p>
-        </div>
-        <Button
-          onClick={() => setDialogOpen(true)}
-          className="w-full rounded-lg bg-teal-500 text-white shadow-sm hover:bg-teal-600 sm:w-auto"
-        >
-          <Plus className="mr-1.5 h-4 w-4" />
-          添加应用
-        </Button>
-      </div>
+      <PageIntro
+        eyebrow="Applications"
+        title="站点管理"
+        description={`共 ${total} 个防护应用，统一管理域名、监听地址、上游与防护模式。`}
+        actions={
+          <Button
+            onClick={() => setDialogOpen(true)}
+            className="w-full rounded-lg bg-teal-500 text-white shadow-sm hover:bg-teal-600 sm:w-auto"
+          >
+            <Plus className="mr-1.5 h-4 w-4" />
+            添加应用
+          </Button>
+        }
+      />
 
       {/* Site cards */}
       {loading ? (
@@ -164,27 +165,24 @@ export default function SitesPage() {
           {Array.from({ length: 3 }).map((_, i) => (
             <div
               key={i}
-              className="h-[140px] animate-pulse rounded-xl border border-slate-200/80 bg-white shadow-sm"
+              className="h-[140px] animate-pulse rounded-2xl border border-slate-200/80 bg-white/95 shadow-sm"
             />
           ))}
         </div>
       ) : sites.length === 0 ? (
-        <div className="flex min-h-[320px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white">
-          <Globe className="mb-4 h-12 w-12 text-slate-300" />
-          <h3 className="text-lg font-semibold text-slate-600">
-            还没有防护应用
-          </h3>
-          <p className="mt-2 max-w-sm text-center text-sm text-slate-400">
-            创建站点后即可绑定域名、监听地址与上游目标
-          </p>
-          <Button
-            onClick={() => setDialogOpen(true)}
-            className="mt-5 rounded-lg bg-teal-500 text-white hover:bg-teal-600"
-          >
-            <Plus className="mr-1.5 h-4 w-4" />
-            新建站点
-          </Button>
-        </div>
+        <EmptyState
+          title="还没有防护应用"
+          description="创建站点后即可绑定域名、监听地址与上游目标。"
+          action={
+            <Button
+              onClick={() => setDialogOpen(true)}
+              className="rounded-lg bg-teal-500 text-white hover:bg-teal-600"
+            >
+              <Plus className="mr-1.5 h-4 w-4" />
+              新建站点
+            </Button>
+          }
+        />
       ) : (
         <div className="space-y-3">
           {sites.map((site) => {
@@ -204,7 +202,7 @@ export default function SitesPage() {
             return (
               <div
                 key={site.id}
-                className="rounded-xl border border-slate-200/80 bg-white shadow-sm transition-shadow hover:shadow-md"
+                className="console-panel overflow-hidden transition-shadow hover:shadow-md"
               >
                 <div className="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center">
                   {/* Icon */}

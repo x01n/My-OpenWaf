@@ -23,22 +23,32 @@ type BotSettingsUpdate struct {
 	GeoIPDBPath       *string  `json:"geoip_db_path"`
 }
 
+func defaultBotSettingsResponse(settingsRepo *repository.SystemSettingsRepo) shared.BotSettingsResponse {
+	resp := shared.BotSettingsResponse{
+		Enabled:        shared.LoadProtectionConfig(settingsRepo).BotDetectionEnabled,
+		ScoreThreshold: 60,
+	}
+	if val, err := settingsRepo.Get("drop_policy"); err == nil && val != "" {
+		var dropPolicy struct {
+			BotScoreThreshold int `json:"bot_score_threshold"`
+		}
+		if json.Unmarshal([]byte(val), &dropPolicy) == nil && dropPolicy.BotScoreThreshold > 0 {
+			resp.ScoreThreshold = dropPolicy.BotScoreThreshold
+		}
+	}
+	return resp
+}
+
 func GetBotSettings(settingsRepo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		val, err := settingsRepo.Get("bot_settings")
 		if err != nil || val == "" {
-			c.JSON(200, shared.BotSettingsResponse{
-				Enabled:        false,
-				ScoreThreshold: 60,
-			})
+			c.JSON(200, defaultBotSettingsResponse(settingsRepo))
 			return
 		}
-		var resp shared.BotSettingsResponse
+		resp := defaultBotSettingsResponse(settingsRepo)
 		if err := json.Unmarshal([]byte(val), &resp); err != nil {
-			c.JSON(200, shared.BotSettingsResponse{
-				Enabled:        false,
-				ScoreThreshold: 60,
-			})
+			c.JSON(200, defaultBotSettingsResponse(settingsRepo))
 			return
 		}
 		c.JSON(200, resp)
@@ -54,7 +64,7 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		}
 
 		// Load current settings
-		current := shared.BotSettingsResponse{ScoreThreshold: 60}
+		current := defaultBotSettingsResponse(settingsRepo)
 		if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
 			_ = json.Unmarshal([]byte(val), &current)
 		}
@@ -85,11 +95,19 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			return
 		}
 
-		// Sync BotDetectionEnabled into the protection config so the engine
-		// sees a consistent value regardless of which page the user toggles.
-		if err := shared.SyncBotEnabledToProtection(settingsRepo, current.Enabled); err != nil {
-			c.JSON(500, map[string]string{"error": err.Error()})
-			return
+		if req.Enabled != nil {
+			// Sync BotDetectionEnabled into the protection config so the engine
+			// sees a consistent value regardless of which page the user toggles.
+			if err := shared.SyncBotEnabledToProtection(settingsRepo, current.Enabled); err != nil {
+				c.JSON(500, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if req.ScoreThreshold != nil {
+			if err := shared.SyncBotThresholdToDropPolicy(settingsRepo, current.ScoreThreshold); err != nil {
+				c.JSON(500, map[string]string{"error": err.Error()})
+				return
+			}
 		}
 
 		if reload != nil {
@@ -109,9 +127,19 @@ func GetBotScores(repo *repository.BotScoreRepo) app.HandlerFunc {
 		offset, limit := utils.Paginate(page, size)
 
 		f := repository.BotScoreFilter{
-			ClientIP: c.DefaultQuery("ip", ""),
+			ClientIP:  c.DefaultQuery("ip", ""),
+			Host:      c.DefaultQuery("host", ""),
+			Path:      c.DefaultQuery("path", ""),
+			UserAgent: c.DefaultQuery("user_agent", ""),
+			RequestID: c.DefaultQuery("request_id", ""),
+			JA3Hash:   c.DefaultQuery("ja3_hash", ""),
+			JA4:       c.DefaultQuery("ja4", ""),
 		}
-
+		if v := c.DefaultQuery("high_risk", ""); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				f.HighRisk = &b
+			}
+		}
 		if v := c.DefaultQuery("min_score", ""); v != "" {
 			if n, err := strconv.Atoi(v); err == nil {
 				f.MinScore = &n

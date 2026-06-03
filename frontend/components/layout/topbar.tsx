@@ -29,49 +29,43 @@ export function Topbar({
   }
 
   return (
-    <header className="sticky top-0 z-30 flex h-12 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 sm:px-5">
+    <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-4 sm:px-5">
       <div className="flex min-w-0 items-center gap-3">
         {onMobileMenuToggle && (
           <Button
             variant="ghost"
             size="icon"
-            className="shrink-0 rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 lg:hidden"
+            className="shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground lg:hidden"
             onClick={onMobileMenuToggle}
           >
-            <Menu className="h-5 w-5" />
+            <Menu data-icon="inline" />
           </Button>
         )}
-        <nav className="flex items-center gap-1.5 text-[13px] text-slate-500">
-          <span className="text-slate-400">My-OpenWAF</span>
-          <ChevronRight className="h-3 w-3 text-slate-300" />
-          <span className="font-medium text-slate-700">{meta.label}</span>
+        <nav className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
+          <span>My-OpenWAF</span>
+          <ChevronRight className="size-3 text-muted-foreground/55" />
+          <span>{meta.group}</span>
+          <ChevronRight className="size-3 text-muted-foreground/55" />
+          <span className="font-medium text-foreground">{meta.label}</span>
         </nav>
       </div>
 
       <div className="flex items-center gap-2">
-        <select className="h-8 rounded-md border border-slate-200 bg-white px-2.5 text-xs text-slate-600 outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400/30">
-          <option>全部应用</option>
-        </select>
-        <select className="h-8 rounded-md border border-slate-200 bg-white px-2.5 text-xs text-slate-600 outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400/30">
-          <option>近 24 小时</option>
-          <option>近 7 天</option>
-          <option>近 30 天</option>
-        </select>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+              className="size-8 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             >
-              <User className="h-4 w-4" />
+              <User data-icon="inline" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="end"
-            className="w-48 rounded-lg border-slate-200 bg-white shadow-lg"
+            className="w-48 rounded-lg border-border bg-popover shadow-lg"
           >
-            <DropdownMenuLabel className="text-slate-700">
+            <DropdownMenuLabel className="text-popover-foreground">
               管理员账户
             </DropdownMenuLabel>
             <DropdownMenuSeparator />

@@ -56,6 +56,11 @@ export default function PoliciesPage() {
       .then(([policyData, siteData]) => {
         setPolicies(policyData.items || [])
         setSites(siteData.items || [])
+        if ((siteData.total || 0) > (siteData.items?.length || 0)) {
+          toast.warning(
+            "策略绑定站点仅统计当前返回范围，站点数量超过当前读取上限"
+          )
+        }
       })
       .catch((e) => toast.error(String(e)))
       .finally(() => setLoading(false))
@@ -114,6 +119,10 @@ export default function PoliciesPage() {
     }
   }
 
+  function deleteTargetSites() {
+    return deleteTarget ? sitesForPolicy(deleteTarget.id) : []
+  }
+
   async function handleDelete() {
     if (!deleteTarget) return
     setDeleting(true)
@@ -152,16 +161,17 @@ export default function PoliciesPage() {
         description="所有安全策略、关联规则数量和绑定站点。"
       >
         {loading ? (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-            加载中...
-          </div>
+          <EmptyState
+            title="策略列表加载中"
+            description="正在读取策略、规则数量和关联站点。"
+          />
         ) : policies.length === 0 ? (
           <EmptyState
             title="暂无策略"
             description="创建第一个策略后，可以在站点配置中将其关联。"
           />
         ) : (
-          <div className="overflow-hidden rounded-lg border border-slate-200">
+          <div className="overflow-hidden rounded-xl border border-slate-200/80">
             <Table>
               <TableHeader>
                 <TableRow className="bg-slate-50 text-xs tracking-wider text-slate-500 uppercase">
@@ -313,8 +323,19 @@ export default function PoliciesPage() {
               删除后关联此策略的站点将失去规则绑定。
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-900">
-            目标策略：{deleteTarget?.name || "-"}
+          <div className="rounded-xl border border-rose-200 bg-rose-50/90 px-4 py-4 text-sm leading-6 text-rose-900">
+            <div>目标策略：{deleteTarget?.name || "-"}</div>
+            <div>当前可见绑定站点：{deleteTargetSites().length} 个</div>
+            {deleteTargetSites().length > 0 && (
+              <div className="mt-1 break-all">
+                {deleteTargetSites()
+                  .map((site) => site.host || `站点 #${site.id}`)
+                  .join("，")}
+              </div>
+            )}
+            <div className="mt-2 text-xs text-rose-700">
+              若站点总数超过当前读取上限，实际影响范围可能更大；删除前请确认所有绑定站点已迁移。
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>

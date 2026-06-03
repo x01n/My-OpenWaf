@@ -1,10 +1,17 @@
 package repository
 
 import (
+	"strings"
+
 	"My-OpenWaf/internal/store"
 
 	"gorm.io/gorm"
 )
+
+type RuleFilter struct {
+	PolicyID *uint
+	Query    string
+}
 
 type RuleRepo struct{ db *gorm.DB }
 
@@ -22,12 +29,24 @@ func (r *RuleRepo) BatchCreate(items []store.Rule) error {
 }
 
 func (r *RuleRepo) List(offset, limit int) ([]store.Rule, int64, error) {
+	return r.ListFiltered(offset, limit, RuleFilter{})
+}
+
+func (r *RuleRepo) ListFiltered(offset, limit int, f RuleFilter) ([]store.Rule, int64, error) {
 	var items []store.Rule
 	var total int64
-	if err := r.db.Model(&store.Rule{}).Count(&total).Error; err != nil {
+	q := r.db.Model(&store.Rule{})
+	if f.PolicyID != nil {
+		q = q.Where("policy_id = ?", *f.PolicyID)
+	}
+	if strings.TrimSpace(f.Query) != "" {
+		like := "%" + strings.TrimSpace(f.Query) + "%"
+		q = q.Where("name LIKE ? OR pattern LIKE ?", like, like)
+	}
+	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	if err := r.db.Offset(offset).Limit(limit).Order("priority ASC, id ASC").Find(&items).Error; err != nil {
+	if err := q.Offset(offset).Limit(limit).Order("priority ASC, id ASC").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 	return items, total, nil

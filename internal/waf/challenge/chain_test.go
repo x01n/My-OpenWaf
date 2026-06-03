@@ -6,6 +6,25 @@ import (
 	"time"
 )
 
+func TestChainSessionManagementUsesRealState(t *testing.T) {
+	mgr := NewChainChallengeManager(NewCaptchaManager(nil, 0), nil)
+	sessionID, _ := mgr.StartChain("/admin")
+
+	sessions := mgr.ListSessions()
+	if len(sessions) != 1 || sessions[0].ID != sessionID || sessions[0].OriginalURL != "/admin" || sessions[0].StepCount == 0 {
+		t.Fatalf("unexpected sessions: %+v", sessions)
+	}
+	if !mgr.DeleteSession(sessionID) {
+		t.Fatalf("expected existing session to be deleted")
+	}
+	if mgr.DeleteSession(sessionID) {
+		t.Fatalf("expected deleted session to be absent")
+	}
+	if got := mgr.ListSessions(); len(got) != 0 {
+		t.Fatalf("expected no sessions after delete, got %+v", got)
+	}
+}
+
 func TestChainReconfigureUpdatesSteps(t *testing.T) {
 	mgr := NewChainChallengeManager(NewCaptchaManager(nil, 0), nil)
 	mgr.Reconfigure([]ChainStepConfig{{Type: ChainStepCaptcha, Condition: "all"}}, 2)
@@ -26,6 +45,76 @@ func TestChainReconfigureFallbacksToDefaults(t *testing.T) {
 	_, html := mgr.StartChain("/")
 	if !strings.Contains(html, "Environment Check") {
 		t.Fatalf("StartChain() did not fall back to default environment step: %s", html)
+	}
+}
+
+func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
+	captchaManager := NewCaptchaManager(nil, 0)
+	sessionID := "click-session"
+	captchaManager.sessions[sessionID] = &CaptchaSession{
+		ID:        sessionID,
+		Type:      CaptchaTypeClick,
+		Answer:    `{"target":{"x":10,"y":20}}`,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(time.Minute),
+	}
+
+	mgr := NewChainChallengeManager(captchaManager, nil)
+	chainSession := "chain-session"
+	mgr.states[chainSession] = &ChainState{
+		SessionID:   chainSession,
+		CurrentStep: 0,
+		Steps:       []ChainStepConfig{{Type: ChainStepCaptcha, Condition: "all", CaptchaType: CaptchaTypeClick}},
+		Scores:      map[string]int{},
+		OriginalURL: "/protected",
+		CaptchaID:   sessionID,
+		CreatedAt:   time.Now(),
+	}
+
+	ok, redirect, nextHTML := mgr.ProcessStep(chainSession, map[string]string{"captcha_answer": `[{"x":12,"y":19}]`})
+	if !ok || redirect != "/protected" || nextHTML != "" {
+		t.Fatalf("advanced chain captcha answer was not verified: ok=%v redirect=%q html=%q", ok, redirect, nextHTML)
+	}
+}
+
+func TestShieldPageUsesRuntimeConfig(t *testing.T) {
+	mgr := NewShieldManager(NewCaptchaManager(nil, 0), nil, 4)
+	mgr.SetConfig(ShieldConfig{
+		Difficulty:           2,
+		TimeoutSecs:          7,
+		AutoStartDelay:       1234,
+		MaxRetries:           5,
+		EnvStrictness:        1,
+		RequireHTTP2:         true,
+		RequireHTTP3:         false,
+		AllowHTTP1:           false,
+		EnableWASM:           false,
+		EnableEnvCheck:       false,
+		EnableDevToolsDetect: false,
+	})
+
+	session, err := mgr.GenerateChallenge("/shield")
+	if err != nil {
+		t.Fatal(err)
+	}
+	powScript := GeneratePoWScript(session.Difficulty, session.Nonce)
+	cfg := mgr.Config()
+	html := shieldPageHTMLWithConfig(session.ID, cfg, "", powScript)
+
+	checks := []string{
+		`autoDelay=1234`,
+		`timeoutMs=7000`,
+		`maxRetries=5`,
+		`enableEnv=false`,
+		`detectDev=false`,
+		`requireH2=true`,
+		`allowH1=false`,
+		`window.__powWorker=w`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(html, want) {
+			t.Fatalf("shield page did not include %q: %s", want, html)
+		}
 	}
 }
 

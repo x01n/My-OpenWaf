@@ -40,6 +40,7 @@ import {
 } from "@/lib/api"
 import { getWAFActionMeta, terminalWAFActionOptions } from "@/lib/console"
 import { cn } from "@/lib/utils"
+import { PageIntro, Surface } from "@/components/console-shell"
 
 /* ───── types ───── */
 interface CCCondition {
@@ -101,12 +102,59 @@ function actionLabel(action: string): string {
   return actionLabelMap[action] || getWAFActionMeta(action).shortLabel
 }
 
+const ccProtectionFields: Array<keyof ProtectionSettings> = [
+  "waiting_room_enabled",
+  "cc_use_custom",
+  "request_ratelimit_enabled",
+  "request_ratelimit_window",
+  "request_ratelimit_max",
+  "request_ratelimit_action",
+  "auto_ban_enabled",
+  "auto_ban_threshold",
+  "auto_ban_window",
+  "auto_ban_duration",
+  "auto_ban_action",
+  "error_ratelimit_enabled",
+  "error_ratelimit_window",
+  "error_ratelimit_max",
+  "error_ratelimit_count_4xx",
+  "error_ratelimit_count_5xx",
+  "error_ratelimit_count_block",
+  "error_ratelimit_action",
+]
+
+function sameCCRules(left: CCRule[], right: CCRule[]) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function buildCCProtectionPatch(
+  current: ProtectionSettings,
+  baseline: ProtectionSettings,
+  currentRules: CCRule[],
+  baselineRules: CCRule[]
+): Partial<ProtectionSettings> {
+  const patch: Partial<ProtectionSettings> = {}
+  const patchRecord = patch as Record<string, unknown>
+  for (const field of ccProtectionFields) {
+    if (current[field] !== baseline[field]) {
+      patchRecord[field] = current[field]
+    }
+  }
+  if (!sameCCRules(currentRules, baselineRules)) {
+    patch.cc_rules = currentRules
+  }
+  return patch
+}
+
 /* ───── main ───── */
 export default function CCProtectionPage() {
   const [localSettings, setLocalSettings] = useState<ProtectionSettings | null>(
     null
   )
+  const [baselineSettings, setBaselineSettings] =
+    useState<ProtectionSettings | null>(null)
   const [rules, setRules] = useState<CCRule[]>([])
+  const [baselineRules, setBaselineRules] = useState<CCRule[]>([])
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
 
@@ -127,9 +175,12 @@ export default function CCProtectionPage() {
     getProtectionSettings()
       .then((data) => {
         setLocalSettings({ ...data })
-        setRules(
-          Array.isArray(data.cc_rules) ? (data.cc_rules as CCRule[]) : []
-        )
+        setBaselineSettings({ ...data })
+        const loadedRules = Array.isArray(data.cc_rules)
+          ? (data.cc_rules as CCRule[])
+          : []
+        setRules(loadedRules)
+        setBaselineRules(loadedRules)
         setDirty(false)
       })
       .catch((err) => toast.error(String(err)))
@@ -151,17 +202,35 @@ export default function CCProtectionPage() {
 
   async function saveAll() {
     if (!localSettings) return
-    const payload = {
-      ...localSettings,
-      cc_rules: rules,
-    } as ProtectionSettings
     setSaving(true)
     try {
-      const result = await updateProtectionSettings(payload)
-      setLocalSettings({ ...result })
-      setRules(
-        Array.isArray(result.cc_rules) ? (result.cc_rules as CCRule[]) : []
+      const latest = await getProtectionSettings()
+      const patch = buildCCProtectionPatch(
+        localSettings,
+        baselineSettings ?? latest,
+        rules,
+        baselineRules
       )
+      if (Object.keys(patch).length === 0) {
+        setLocalSettings({ ...latest })
+        setBaselineSettings({ ...latest })
+        const latestRules = Array.isArray(latest.cc_rules)
+          ? (latest.cc_rules as CCRule[])
+          : []
+        setRules(latestRules)
+        setBaselineRules(latestRules)
+        setDirty(false)
+        toast.success("CC 防护配置已是最新")
+        return
+      }
+      const result = await updateProtectionSettings(patch)
+      setLocalSettings({ ...result })
+      setBaselineSettings({ ...result })
+      const savedRules = Array.isArray(result.cc_rules)
+        ? (result.cc_rules as CCRule[])
+        : []
+      setRules(savedRules)
+      setBaselineRules(savedRules)
       setDirty(false)
       toast.success("CC 防护配置已保存")
     } catch (err) {
@@ -258,34 +327,32 @@ export default function CCProtectionPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-900">CC 防护</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            配置等候室、频率限制和自定义 CC 规则，防止恶意高频访问
-          </p>
-        </div>
-        <Button
-          onClick={saveAll}
-          disabled={saving || !dirty}
-          className={cn(
-            "rounded-md px-5 text-white transition-all",
-            dirty
-              ? "bg-teal-600 shadow-md shadow-teal-200 hover:bg-teal-700"
-              : "cursor-not-allowed bg-slate-300"
-          )}
-        >
-          <Save className="mr-1.5 h-4 w-4" />
-          {saving ? "保存中..." : "保存"}
-        </Button>
-      </div>
+      <PageIntro
+        eyebrow="CC Protection"
+        title="CC 防护"
+        description="配置等候室、频率限制和自定义 CC 规则，防止恶意高频访问。"
+        actions={
+          <Button
+            onClick={saveAll}
+            disabled={saving || !dirty}
+            className={cn(
+              "rounded-md px-5 text-white transition-all",
+              dirty
+                ? "bg-teal-600 shadow-md shadow-teal-200 hover:bg-teal-700"
+                : "cursor-not-allowed bg-slate-300"
+            )}
+          >
+            <Save className="mr-1.5 h-4 w-4" />
+            {saving ? "保存中..." : "保存"}
+          </Button>
+        }
+      />
 
       {/* ══════════════════════════════════════════════════════════
          Section 1: 等候室
          ══════════════════════════════════════════════════════════ */}
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between px-5 py-4">
+      <Surface>
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-teal-50 text-teal-600">
               <Clock className="h-4.5 w-4.5" />
@@ -305,8 +372,8 @@ export default function CCProtectionPage() {
           />
         </div>
         {s.waiting_room_enabled && (
-          <div className="border-t border-slate-100 px-5 py-3">
-            <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+          <div className="mt-4 border-t border-slate-100 pt-4">
+            <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50/90 p-3 text-xs text-amber-800">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
                 当前后端仅保存等候室开关状态，数据面排队削峰执行链路尚在开发中。
@@ -314,12 +381,12 @@ export default function CCProtectionPage() {
             </div>
           </div>
         )}
-      </div>
+      </Surface>
 
       {/* ══════════════════════════════════════════════════════════
          Section 2: 频率限制配置模式
          ══════════════════════════════════════════════════════════ */}
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="console-panel overflow-hidden shadow-sm">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-teal-50 text-teal-600">
@@ -417,7 +484,7 @@ export default function CCProtectionPage() {
       {/* ══════════════════════════════════════════════════════════
          Section 3: 自定义 CC 规则
          ══════════════════════════════════════════════════════════ */}
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="console-panel overflow-hidden shadow-sm">
         <div
           className="flex cursor-pointer items-center justify-between px-5 py-4"
           onClick={() => setCustomRulesExpanded(!customRulesExpanded)}

@@ -14,11 +14,12 @@ import {
 import { cn } from "@/lib/utils"
 
 export type ProtectionMode = "protect" | "observe" | "maintenance"
+export type ProtectionModeDisplay = ProtectionMode | "custom"
 
 interface ProtectionModeDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  currentMode: ProtectionMode
+  currentMode: ProtectionModeDisplay
   onConfirm: (mode: ProtectionMode) => void
   loading?: boolean
 }
@@ -57,7 +58,9 @@ export function ProtectionModeDialog({
   onConfirm,
   loading,
 }: ProtectionModeDialogProps) {
-  const [selected, setSelected] = useState<ProtectionMode>(currentMode)
+  const [selected, setSelected] = useState<ProtectionMode>(
+    selectableProtectionMode(currentMode)
+  )
 
   return (
     <Dialog
@@ -150,13 +153,48 @@ export function ProtectionModeDialog({
 
 export function getProtectionMode(site: {
   maintenance_enabled?: boolean
-  attack_protection_level?: string
-}): ProtectionMode {
+  bot_protection_enabled?: boolean | null
+  owasp_enabled?: boolean | null
+  owasp_action?: string
+  cve_enabled?: boolean | null
+  cve_action?: string
+  rate_limit_enabled?: boolean | null
+  rate_limit_action?: string
+}): ProtectionModeDisplay {
   if (site.maintenance_enabled) return "maintenance"
-  if (site.attack_protection_level === "observe") return "observe"
-  return "protect"
+  if (
+    site.bot_protection_enabled === false &&
+    site.owasp_enabled === true &&
+    site.owasp_action === "observe" &&
+    site.cve_enabled === true &&
+    site.cve_action === "observe" &&
+    site.rate_limit_enabled === true &&
+    site.rate_limit_action === "observe"
+  ) {
+    return "observe"
+  }
+  if (
+    site.bot_protection_enabled === true &&
+    site.owasp_enabled === true &&
+    site.owasp_action === "intercept" &&
+    site.cve_enabled === true &&
+    site.cve_action === "intercept" &&
+    site.rate_limit_enabled === true &&
+    site.rate_limit_action === "rate_limit"
+  ) {
+    return "protect"
+  }
+  return "custom"
 }
 
-export function protectionModeLabel(mode: ProtectionMode): string {
+export function protectionModeLabel(mode: ProtectionModeDisplay): string {
+  if (mode === "custom") return "自定义配置"
   return modes.find((item) => item.key === mode)?.label ?? "防护模式"
+}
+
+export function selectableProtectionMode(
+  mode: ProtectionModeDisplay
+): ProtectionMode {
+  if (mode === "custom") return "protect"
+  return mode
 }

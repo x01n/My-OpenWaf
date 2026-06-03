@@ -58,10 +58,36 @@ func GetNetworkConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 // UpdateNetworkConfig 更新网络协议配置。
 func UpdateNetworkConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		var cfg NetworkConfig
-		if err := c.BindJSON(&cfg); err != nil {
+		var req struct {
+			IPv6Enabled    *bool   `json:"ipv6_enabled"`
+			HTTP2Enabled   *bool   `json:"http2_enabled"`
+			HTTP3Enabled   *bool   `json:"http3_enabled"`
+			HTTP3Bind      *string `json:"http3_bind"`
+			DefaultALPN    *string `json:"default_alpn"`
+			DefaultNetwork *string `json:"default_network"`
+		}
+		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid request body"})
 			return
+		}
+		cfg := loadNetworkConfig(repo)
+		if req.IPv6Enabled != nil {
+			cfg.IPv6Enabled = *req.IPv6Enabled
+		}
+		if req.HTTP2Enabled != nil {
+			cfg.HTTP2Enabled = *req.HTTP2Enabled
+		}
+		if req.HTTP3Enabled != nil {
+			cfg.HTTP3Enabled = *req.HTTP3Enabled
+		}
+		if req.HTTP3Bind != nil {
+			cfg.HTTP3Bind = *req.HTTP3Bind
+		}
+		if req.DefaultALPN != nil {
+			cfg.DefaultALPN = *req.DefaultALPN
+		}
+		if req.DefaultNetwork != nil {
+			cfg.DefaultNetwork = *req.DefaultNetwork
 		}
 		data, _ := json.Marshal(cfg)
 		if err := repo.Set(settingKeyNetwork, string(data)); err != nil {
@@ -88,20 +114,33 @@ func GetLogConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 // UpdateLogConfig 更新日志配置并立即生效。
 func UpdateLogConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		var cfg LogConfig
-		if err := c.BindJSON(&cfg); err != nil {
+		var req struct {
+			Level      *string `json:"level"`
+			FilePath   *string `json:"file_path"`
+			AlsoStdout *bool   `json:"also_stdout"`
+		}
+		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid request body"})
 			return
 		}
+		cfg := loadLogConfig(repo)
+		if req.Level != nil {
+			cfg.Level = *req.Level
+		}
+		if req.FilePath != nil {
+			cfg.FilePath = *req.FilePath
+		}
+		if req.AlsoStdout != nil {
+			cfg.AlsoStdout = *req.AlsoStdout
+		}
 		logger.Configure(logger.Config{Level: cfg.Level, FilePath: cfg.FilePath, AlsoStdout: cfg.AlsoStdout})
+		cfg.Level = logger.GetLevel()
 		data, _ := json.Marshal(cfg)
 		if err := repo.Set(settingKeyLog, string(data)); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		c.JSON(200, map[string]string{
-			"level": logger.GetLevel(),
-		})
+		c.JSON(200, cfg)
 	}
 }
 
@@ -116,10 +155,40 @@ func GetTLSDefaultConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 // UpdateTLSDefaultConfig 更新 TLS 全局默认配置。
 func UpdateTLSDefaultConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		var cfg TLSDefaultConfig
-		if err := c.BindJSON(&cfg); err != nil {
+		var req struct {
+			MinVersion               *string `json:"min_version"`
+			MaxVersion               *string `json:"max_version"`
+			CipherSuites             *string `json:"cipher_suites"`
+			DefaultALPN              *string `json:"default_alpn"`
+			CurvePreferences         *string `json:"curve_preferences"`
+			PreferServerCipherSuites *bool   `json:"prefer_server_cipher_suites"`
+			SelfSignedOnIP           *bool   `json:"self_signed_on_ip"`
+		}
+		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid request body"})
 			return
+		}
+		cfg := loadTLSDefaultConfig(repo)
+		if req.MinVersion != nil {
+			cfg.MinVersion = *req.MinVersion
+		}
+		if req.MaxVersion != nil {
+			cfg.MaxVersion = *req.MaxVersion
+		}
+		if req.CipherSuites != nil {
+			cfg.CipherSuites = *req.CipherSuites
+		}
+		if req.DefaultALPN != nil {
+			cfg.DefaultALPN = *req.DefaultALPN
+		}
+		if req.CurvePreferences != nil {
+			cfg.CurvePreferences = *req.CurvePreferences
+		}
+		if req.PreferServerCipherSuites != nil {
+			cfg.PreferServerCipherSuites = *req.PreferServerCipherSuites
+		}
+		if req.SelfSignedOnIP != nil {
+			cfg.SelfSignedOnIP = *req.SelfSignedOnIP
 		}
 		data, _ := json.Marshal(cfg)
 		if err := repo.Set(settingKeyTLSDefault, string(data)); err != nil {

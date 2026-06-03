@@ -90,7 +90,7 @@ func ACMEApply(repos *repository.Repos, reload func() error, acmeMgr *acmepkg.Ma
 		}
 
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "certificate saved but reload failed: " + err.Error()})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": cert})
 			return
 		}
 		c.JSON(200, cert)
@@ -153,7 +153,7 @@ func ACMERenew(repos *repository.Repos, reload func() error, acmeMgr *acmepkg.Ma
 		}
 
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "certificate renewed but reload failed: " + err.Error()})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": cert})
 			return
 		}
 		c.JSON(200, map[string]interface{}{

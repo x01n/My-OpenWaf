@@ -64,13 +64,18 @@ type SiteAccessLogStats struct {
 }
 
 type FingerprintSummary struct {
-	TLSJA3Hash string    `json:"tls_ja3_hash"`
-	TLSJA4     string    `json:"tls_ja4"`
-	TLSVersion string    `json:"tls_version"`
-	TLSALPN    string    `json:"tls_alpn"`
-	TLSSNI     string    `json:"tls_sni"`
-	Count      int64     `json:"count"`
-	LastSeen   time.Time `json:"last_seen"`
+	TLSJA3Hash      string    `json:"tls_ja3_hash"`
+	TLSJA4          string    `json:"tls_ja4"`
+	TLSVersion      string    `json:"tls_version"`
+	TLSALPN         string    `json:"tls_alpn"`
+	TLSSNI          string    `json:"tls_sni"`
+	Count           int64     `json:"count"`
+	HighRiskCount   int64     `json:"high_risk_count"`
+	AvgBotScore     float64   `json:"avg_bot_score"`
+	LastSeen        time.Time `json:"last_seen"`
+	LastUserAgent   string    `json:"last_user_agent"`
+	LastClientIP    string    `json:"last_client_ip"`
+	LastHeaderOrder string    `json:"last_header_order"`
 }
 
 func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.AccessLog, int64, error) {
@@ -122,17 +127,12 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 
 func (r *AccessLogRepo) StatsBySite(siteID uint, since time.Time) (SiteAccessLogStats, error) {
 	var stats SiteAccessLogStats
-	base := r.db.Model(&store.AccessLog{}).Where("site_id = ? AND created_at >= ?", siteID, since)
-	if err := base.Count(&stats.Requests).Error; err != nil {
-		return stats, err
-	}
-	if err := r.db.Model(&store.AccessLog{}).Where("site_id = ? AND created_at >= ?", siteID, since).Where("waf_action IN ?", []string{"intercept", "block", "drop", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "rate_limit"}).Count(&stats.Intercepts).Error; err != nil {
-		return stats, err
-	}
-	if err := r.db.Model(&store.AccessLog{}).Where("site_id = ? AND created_at >= ?", siteID, since).Where("waf_action = ?", "observe").Count(&stats.Observes).Error; err != nil {
-		return stats, err
-	}
-	return stats, nil
+	terminalActions := []string{"intercept", "block", "drop", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "rate_limit"}
+	err := r.db.Model(&store.AccessLog{}).
+		Select("COUNT(*) AS requests, SUM(CASE WHEN waf_action IN ? THEN 1 ELSE 0 END) AS intercepts, SUM(CASE WHEN waf_action = ? THEN 1 ELSE 0 END) AS observes", terminalActions, "observe").
+		Where("site_id = ? AND created_at >= ?", siteID, since).
+		Scan(&stats).Error
+	return stats, err
 }
 
 func (r *AccessLogRepo) ListFingerprints(offset, limit int) ([]FingerprintSummary, int64, error) {
@@ -163,22 +163,35 @@ func (r *AccessLogRepo) ListFingerprints(offset, limit int) ([]FingerprintSummar
 
 	items := make([]FingerprintSummary, 0, len(rows))
 	for _, row := range rows {
-		var lastSeen time.Time
+		var last store.AccessLog
 		if err := r.db.Model(&store.AccessLog{}).
 			Where("tls_ja3_hash = ? AND tls_ja4 = ? AND tls_version = ? AND tls_alpn = ? AND tls_sni = ?", row.TLSJA3Hash, row.TLSJA4, row.TLSVersion, row.TLSALPN, row.TLSSNI).
 			Order("created_at DESC").
 			Limit(1).
-			Pluck("created_at", &lastSeen).Error; err != nil {
+			Take(&last).Error; err != nil {
 			return nil, 0, err
 		}
+		var highRiskCount int64
+		var avgBotScore float64
+		if r.db.Migrator().HasTable(&store.BotScoreLog{}) {
+			botQuery := r.db.Model(&store.BotScoreLog{}).
+				Where("tls_ja3_hash = ? AND tls_ja4 = ? AND tls_version = ? AND tls_alpn = ?", row.TLSJA3Hash, row.TLSJA4, row.TLSVersion, row.TLSALPN)
+			botQuery.Where("is_high_risk = ?", true).Count(&highRiskCount)
+			botQuery.Select("COALESCE(AVG(total_score), 0)").Scan(&avgBotScore)
+		}
 		items = append(items, FingerprintSummary{
-			TLSJA3Hash: row.TLSJA3Hash,
-			TLSJA4:     row.TLSJA4,
-			TLSVersion: row.TLSVersion,
-			TLSALPN:    row.TLSALPN,
-			TLSSNI:     row.TLSSNI,
-			Count:      row.Count,
-			LastSeen:   lastSeen,
+			TLSJA3Hash:      row.TLSJA3Hash,
+			TLSJA4:          row.TLSJA4,
+			TLSVersion:      row.TLSVersion,
+			TLSALPN:         row.TLSALPN,
+			TLSSNI:          row.TLSSNI,
+			Count:           row.Count,
+			HighRiskCount:   highRiskCount,
+			AvgBotScore:     avgBotScore,
+			LastSeen:        last.CreatedAt,
+			LastUserAgent:   last.UserAgent,
+			LastClientIP:    last.ClientIP,
+			LastHeaderOrder: last.HeaderOrder,
 		})
 	}
 	return items, total, nil
@@ -270,6 +283,11 @@ func (r *AccessLogRepo) DeleteOlderThan(before time.Time) (int64, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return totalDeleted, nil
+}
+
+func (r *AccessLogRepo) Get(id uint) (*store.AccessLog, error) {
+	var item store.AccessLog
+	return &item, r.db.First(&item, id).Error
 }
 
 func (r *AccessLogRepo) FindByRequestID(requestID string) ([]store.AccessLog, error) {

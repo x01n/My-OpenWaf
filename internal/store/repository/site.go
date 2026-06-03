@@ -43,6 +43,18 @@ func (r *SiteRepo) Update(item *store.Site) error { return r.db.Save(item).Error
 
 func (r *SiteRepo) Delete(id uint) error { return r.db.Delete(&store.Site{}, id).Error }
 
+func (r *SiteRepo) CountByCertID(certID uint) (int64, error) {
+	var count int64
+	err := r.db.Model(&store.Site{}).Where("cert_id = ?", certID).Count(&count).Error
+	return count, err
+}
+
+func (r *SiteRepo) CountByPolicyID(policyID uint) (int64, error) {
+	var count int64
+	err := r.db.Model(&store.Site{}).Where("policy_id = ?", policyID).Count(&count).Error
+	return count, err
+}
+
 func (r *SiteRepo) DeleteWithListeners(id uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("site_id = ?", id).Delete(&store.SiteListener{}).Error; err != nil {

@@ -2,8 +2,9 @@ package rule
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
+
+	"My-OpenWaf/internal/store"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -56,36 +57,13 @@ func ValidateRule() app.HandlerFunc {
 			return
 		}
 
-		// Additional validation for compound JSON rules
-		if kind == "compound" {
-			var compoundRule map[string]interface{}
-			if err := json.Unmarshal([]byte(arg), &compoundRule); err != nil {
-				c.JSON(200, ValidateRuleResponse{
-					Valid:   false,
-					Message: "invalid JSON compound rule",
-					Errors:  []string{err.Error()},
-				})
-				return
-			}
-
-			// Validate compound rule structure
-			if op, ok := compoundRule["op"].(string); !ok || (op != "and" && op != "or" && op != "not") {
-				c.JSON(200, ValidateRuleResponse{
-					Valid:   false,
-					Message: "invalid compound rule operator",
-					Errors:  []string{"op must be 'and', 'or', or 'not'"},
-				})
-				return
-			}
-
-			if _, ok := compoundRule["children"]; !ok {
-				c.JSON(200, ValidateRuleResponse{
-					Valid:   false,
-					Message: "invalid compound rule structure",
-					Errors:  []string{"compound rule must have 'children' array"},
-				})
-				return
-			}
+		if len(rules.Compile([]store.Rule{{Pattern: pattern, Phase: store.PhaseCustom, Action: store.ActionObserve, Enabled: true}})) == 0 {
+			c.JSON(200, ValidateRuleResponse{
+				Valid:   false,
+				Message: "pattern cannot be compiled",
+				Errors:  []string{"pattern uses an unsupported matcher or invalid regular expression"},
+			})
+			return
 		}
 
 		c.JSON(200, ValidateRuleResponse{
@@ -178,15 +156,33 @@ func GetRuleTemplates() app.HandlerFunc {
 			Category:    "User-Agent Filtering",
 		},
 		{
+			Name:        "TLS JA3 Hash",
+			Description: "Match requests by TLS JA3 hash fingerprint",
+			Pattern:     "tls_ja3_hash:27a5061c22108817120d1d3870cba0e0",
+			Category:    "Fingerprint Filtering",
+		},
+		{
+			Name:        "TLS JA4",
+			Description: "Match requests by TLS JA4 fingerprint",
+			Pattern:     "tls_ja4:t13d1516h2_8daaf6152771_e5627efa2ab1",
+			Category:    "Fingerprint Filtering",
+		},
+		{
+			Name:        "Header Order",
+			Description: "Match abnormal HTTP header ordering",
+			Pattern:     "header_order_contains:user-agent,accept",
+			Category:    "Fingerprint Filtering",
+		},
+		{
 			Name:        "Compound Rule (AND)",
 			Description: "Block requests matching all conditions",
-			Pattern:     `{"op":"and","children":[{"pattern":"block_path:/api"},{"pattern":"block_method:DELETE"}]}`,
+			Pattern:     `{"op":"and","children":[{"kind":"block_path","arg":"/api"},{"kind":"block_method","arg":"DELETE"}]}`,
 			Category:    "Compound Rules",
 		},
 		{
 			Name:        "Compound Rule (OR)",
 			Description: "Block requests matching any condition",
-			Pattern:     `{"op":"or","children":[{"pattern":"block_ip:1.2.3.4"},{"pattern":"block_user_agent:scanner"}]}`,
+			Pattern:     `{"op":"or","children":[{"kind":"block_ip","arg":"1.2.3.4"},{"kind":"block_user_agent","arg":"scanner"}]}`,
 			Category:    "Compound Rules",
 		},
 	}

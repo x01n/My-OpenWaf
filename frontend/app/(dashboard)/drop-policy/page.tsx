@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { Save, RotateCcw } from "lucide-react"
+import { Save, RotateCcw, Eye } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -14,7 +14,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Pagination } from "@/components/pagination"
+import { CopyableBlock, DetailField } from "@/components/log-presentation"
 import {
   EmptyState,
   InlineMeta,
@@ -37,8 +45,29 @@ import { formatDate } from "@/lib/utils"
 
 const PAGE_SIZE = 20
 
+function buildDropPolicyPatch(
+  current: DropPolicy,
+  baseline: DropPolicy
+): Partial<DropPolicy> {
+  const patch: Partial<DropPolicy> = {}
+  if (current.enabled !== baseline.enabled) {
+    patch.enabled = current.enabled
+  }
+  if (current.bot_score_threshold !== baseline.bot_score_threshold) {
+    patch.bot_score_threshold = current.bot_score_threshold
+  }
+  if (current.cve_auto_drop_critical !== baseline.cve_auto_drop_critical) {
+    patch.cve_auto_drop_critical = current.cve_auto_drop_critical
+  }
+  if (current.cve_auto_drop_high !== baseline.cve_auto_drop_high) {
+    patch.cve_auto_drop_high = current.cve_auto_drop_high
+  }
+  return patch
+}
+
 export default function DropPolicyPage() {
   const [policy, setPolicy] = useState<DropPolicy | null>(null)
+  const [baselinePolicy, setBaselinePolicy] = useState<DropPolicy | null>(null)
   const [stats, setStats] = useState<DropStats | null>(null)
   const [events, setEvents] = useState<DropEvent[]>([])
   const [page, setPage] = useState(1)
@@ -47,6 +76,7 @@ export default function DropPolicyPage() {
   const [source, setSource] = useState("all")
   const [saving, setSaving] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState<DropEvent | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -62,9 +92,14 @@ export default function DropPolicyPage() {
         }),
       ])
       setPolicy(dropPolicy)
+      setBaselinePolicy(dropPolicy)
       setStats(dropStats)
       setEvents(dropEvents.items ?? [])
       setTotal(dropEvents.total ?? 0)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载阻断策略失败")
+      setEvents([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
@@ -78,8 +113,17 @@ export default function DropPolicyPage() {
     if (!policy) return
     setSaving(true)
     try {
-      const response = await updateDropPolicy(policy)
+      const latest = await getDropPolicy()
+      const patch = buildDropPolicyPatch(policy, baselinePolicy ?? latest)
+      if (Object.keys(patch).length === 0) {
+        setPolicy(latest)
+        setBaselinePolicy(latest)
+        toast.success("阻断策略已是最新")
+        return
+      }
+      const response = await updateDropPolicy(patch)
       setPolicy(response)
+      setBaselinePolicy(response)
       toast.success("阻断策略已保存")
     } catch (error) {
       toast.error(String(error))
@@ -123,7 +167,7 @@ export default function DropPolicyPage() {
             hint="来自 CVE 漏洞检测"
           />
           <MetricCard
-            label="规则 + IP 信誉"
+            label="24h 规则 + IP 信誉"
             value={(stats.by_rule + stats.by_ip_reputation).toLocaleString()}
             hint={`规则: ${stats.by_rule} / IP信誉: ${stats.by_ip_reputation}`}
           />
@@ -135,7 +179,7 @@ export default function DropPolicyPage() {
         <div className="grid gap-6 xl:grid-cols-2">
           <Surface title="策略配置" description="调整自动阻断策略的触发条件。">
             <div className="grid gap-5">
-              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-slate-900">
                     启用全局阻断策略
@@ -166,17 +210,18 @@ export default function DropPolicyPage() {
                   className="rounded-lg"
                 />
                 <p className="text-xs text-slate-400">
-                  Bot 评分 ≥ 此阈值时自动断开连接
+                  Bot 页保存分数阈值时会同步到这里；该值是运行时自动断连阈值。
                 </p>
               </div>
 
-              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-slate-900">
                     Critical CVE 自动断连
                   </div>
                   <div className="text-xs text-slate-500">
-                    检测到 Critical 级别 CVE 攻击时自动阻断
+                    与全局防护页保持同步；检测到 Critical 级别 CVE
+                    攻击时自动阻断
                   </div>
                 </div>
                 <Switch
@@ -187,13 +232,13 @@ export default function DropPolicyPage() {
                 />
               </div>
 
-              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-slate-900">
                     High CVE 自动断连
                   </div>
                   <div className="text-xs text-slate-500">
-                    检测到 High 级别 CVE 攻击时自动阻断
+                    与全局防护页保持同步；检测到 High 级别 CVE 攻击时自动阻断
                   </div>
                 </div>
                 <Switch
@@ -265,7 +310,10 @@ export default function DropPolicyPage() {
       )}
 
       {/* 阻断事件表格 */}
-      <Surface title="阻断事件" description="最近的主动断连记录。">
+      <Surface
+        title="阻断事件"
+        description="最近的主动断连记录；筛选条件只影响当前列表页。"
+      >
         <div className="mb-4 flex flex-wrap gap-3">
           <Input
             value={ip}
@@ -305,17 +353,18 @@ export default function DropPolicyPage() {
         </div>
 
         {loading ? (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-            加载中...
-          </div>
+          <EmptyState
+            title="阻断事件加载中"
+            description="正在读取主动断连记录和筛选结果。"
+          />
         ) : events.length === 0 ? (
           <EmptyState
             title="暂无阻断事件"
-            description="没有符合筛选条件的主动断连事件。"
+            description="当前筛选条件下本页没有主动断连事件。"
           />
         ) : (
           <div className="space-y-4">
-            <div className="overflow-hidden rounded-lg border border-slate-200">
+            <div className="overflow-hidden rounded-xl border border-slate-200/80">
               <Table>
                 <TableHeader>
                   <TableRow className="bg-slate-50 text-xs tracking-wider text-slate-500 uppercase">
@@ -324,8 +373,9 @@ export default function DropPolicyPage() {
                     <TableHead>Host</TableHead>
                     <TableHead>路径</TableHead>
                     <TableHead>来源</TableHead>
-                    <TableHead>规则 ID</TableHead>
+                    <TableHead>历史规则 ID</TableHead>
                     <TableHead>详情</TableHead>
+                    <TableHead className="w-16 text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -356,6 +406,16 @@ export default function DropPolicyPage() {
                       <TableCell className="max-w-[200px] truncate text-xs text-slate-500">
                         {item.detail || "-"}
                       </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => setSelected(item)}
+                        >
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -371,6 +431,52 @@ export default function DropPolicyPage() {
           </div>
         )}
       </Surface>
+
+      <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
+        <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto rounded-xl">
+          <DialogHeader>
+            <DialogTitle>阻断事件详情</DialogTitle>
+            <DialogDescription>
+              来自后端 drop_events 的原始字段。
+            </DialogDescription>
+          </DialogHeader>
+          {selected && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[
+                ["时间", formatDate(selected.created_at), false],
+                [
+                  "站点 ID",
+                  selected.site_id ? String(selected.site_id) : "-",
+                  true,
+                ],
+                ["客户端 IP", selected.client_ip || "-", true],
+                ["来源", selected.source || "-", true],
+                ["历史规则 ID", selected.rule_id || "-", true],
+                ["Host", selected.host || "-", true],
+              ].map(([label, value, copyable]) => (
+                <DetailField
+                  key={String(label)}
+                  label={String(label)}
+                  value={String(value)}
+                  copyText={copyable ? String(value) : undefined}
+                />
+              ))}
+              <CopyableBlock
+                label="路径"
+                value={selected.path || "-"}
+                as="code"
+                className="sm:col-span-2"
+                contentClassName="max-h-32 overflow-auto text-xs break-all text-slate-700"
+              />
+              <CopyableBlock
+                label="详情"
+                value={selected.detail || "-"}
+                className="sm:col-span-2"
+              />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

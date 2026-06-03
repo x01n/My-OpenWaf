@@ -29,26 +29,38 @@ type DropPolicyUpdate struct {
 	CVEAutoDropHigh     *bool `json:"cve_auto_drop_high"`
 }
 
+func defaultDropPolicyResponse(settingsRepo *repository.SystemSettingsRepo) DropPolicyResponse {
+	resp := DropPolicyResponse{
+		Enabled:             true,
+		BotScoreThreshold:   80,
+		CVEAutoDropCritical: true,
+		CVEAutoDropHigh:     true,
+	}
+	if settingsRepo == nil {
+		return resp
+	}
+	protection := shared.LoadProtectionConfig(settingsRepo)
+	resp.CVEAutoDropCritical = protection.CVEAutoDropCritical
+	resp.CVEAutoDropHigh = protection.CVEAutoDropHigh
+	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
+		var bot shared.BotSettingsResponse
+		if json.Unmarshal([]byte(val), &bot) == nil && bot.ScoreThreshold > 0 {
+			resp.BotScoreThreshold = bot.ScoreThreshold
+		}
+	}
+	return resp
+}
+
 func GetDropPolicy(settingsRepo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
+		resp := defaultDropPolicyResponse(settingsRepo)
 		val, err := settingsRepo.Get("drop_policy")
 		if err != nil || val == "" {
-			c.JSON(200, DropPolicyResponse{
-				Enabled:             true,
-				BotScoreThreshold:   80,
-				CVEAutoDropCritical: true,
-				CVEAutoDropHigh:     true,
-			})
+			c.JSON(200, resp)
 			return
 		}
-		var resp DropPolicyResponse
 		if err := json.Unmarshal([]byte(val), &resp); err != nil {
-			c.JSON(200, DropPolicyResponse{
-				Enabled:             true,
-				BotScoreThreshold:   80,
-				CVEAutoDropCritical: true,
-				CVEAutoDropHigh:     true,
-			})
+			c.JSON(200, defaultDropPolicyResponse(settingsRepo))
 			return
 		}
 		c.JSON(200, resp)
@@ -63,12 +75,7 @@ func UpdateDropPolicy(settingsRepo *repository.SystemSettingsRepo, reload func()
 			return
 		}
 
-		current := DropPolicyResponse{
-			Enabled:             true,
-			BotScoreThreshold:   80,
-			CVEAutoDropCritical: true,
-			CVEAutoDropHigh:     true,
-		}
+		current := defaultDropPolicyResponse(settingsRepo)
 		if val, err := settingsRepo.Get("drop_policy"); err == nil && val != "" {
 			_ = json.Unmarshal([]byte(val), &current)
 		}
@@ -92,8 +99,18 @@ func UpdateDropPolicy(settingsRepo *repository.SystemSettingsRepo, reload func()
 			return
 		}
 		protection := shared.LoadProtectionConfig(settingsRepo)
-		protection.CVEAutoDropCritical = current.CVEAutoDropCritical
-		protection.CVEAutoDropHigh = current.CVEAutoDropHigh
+		if req.CVEAutoDropCritical != nil {
+			protection.CVEAutoDropCritical = current.CVEAutoDropCritical
+		}
+		if req.CVEAutoDropHigh != nil {
+			protection.CVEAutoDropHigh = current.CVEAutoDropHigh
+		}
+		if req.BotScoreThreshold != nil {
+			if err := shared.SyncDropThresholdToBotSettings(settingsRepo, current.BotScoreThreshold); err != nil {
+				c.JSON(500, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 		if err := shared.SaveProtectionConfig(settingsRepo, protection); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return

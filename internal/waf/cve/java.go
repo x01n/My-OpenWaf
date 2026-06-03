@@ -2,6 +2,7 @@ package cve
 
 import (
 	"regexp"
+	"strings"
 )
 
 func init() {
@@ -196,9 +197,50 @@ func NewJavaCVEDetector() *JavaCVEDetector {
 	return d
 }
 
+func javaRequestContainsAny(req *CVERequest, needles ...string) bool {
+	for _, lower := range req.AllTargetsLower {
+		for _, needle := range needles {
+			if strings.Contains(lower, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shouldScanJavaRule(req *CVERequest, rule javaCVERule) bool {
+	switch rule.cveID {
+	case "CVE-2021-44228":
+		return javaRequestContainsAny(req, "${", "jndi:", "ldap://", "rmi://", "ldaps://")
+	case "CVE-2022-22965":
+		return javaRequestContainsAny(req, "class.module", "classloader", "class.classloader", "spring")
+	case "CVE-2022-22963":
+		return javaRequestContainsAny(req, "functionrouter", "spring.cloud.function", "spel", "#{")
+	case "CVE-2017-18349":
+		return javaRequestContainsAny(req, "@type", "autotype", "fastjson", "com.sun.", "java.lang.runtime", "java.net.", "javax.naming", "org.apache.xbean", "com.mchange.v2.c3p0")
+	case "CVE-2017-5638":
+		return javaRequestContainsAny(req, "ognl", "#_member", "valuestack", "actioncontext", "struts")
+	case "CVE-2016-4437":
+		return javaRequestContainsAny(req, "rememberme=")
+	case "CVE-2017-7525":
+		return javaRequestContainsAny(req, "jackson", "@class", "polymorphic", "objectmapper", "[\"org.apache.commons.", "com.sun.org.apache.xalan")
+	case "CVE-2023-49070":
+		return javaRequestContainsAny(req, "webtools/control", "ofbiz", "programexport")
+	case "CVE-2023-46604":
+		return javaRequestContainsAny(req, "activemq", "exceptionresponse", "classpathxml", "classpathxmlapplicationcontext", "classinfo", "org.springframework", "spring-beans")
+	case "CVE-2022-26134":
+		return javaRequestContainsAny(req, "confluence", "ognl", "${")
+	default:
+		return true
+	}
+}
+
 func (d *JavaCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	var matches []CVEMatch
 	for _, rule := range d.rules {
+		if !shouldScanJavaRule(req, rule) {
+			continue
+		}
 		targets := resolveTargets(req, rule.target)
 		for _, t := range targets {
 			for _, pat := range rule.patterns {

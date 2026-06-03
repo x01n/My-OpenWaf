@@ -1,18 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import {
-  Activity,
-  Globe,
-  MonitorSmartphone,
-  RefreshCcw,
-  Shield,
-  ShieldAlert,
-  TriangleAlert,
-  Users,
-  Wifi,
-  Zap,
-} from "lucide-react"
+import { RefreshCcw, Shield, Wifi } from "lucide-react"
 import {
   Area,
   AreaChart,
@@ -27,15 +16,19 @@ import {
 } from "recharts"
 import { Button } from "@/components/ui/button"
 import {
+  MetricCard,
+  MetricGrid,
+  PageIntro,
+  Surface,
+} from "@/components/console-shell"
+import {
   getDashboardSummary,
   getSecurityEvents,
   getSecurityEventStats,
-  getSecurityTimeline,
   getUpstreamStatus,
   type DashboardSummary,
   type SecurityEvent,
   type SecurityStats,
-  type TimelineBucket,
   type UpstreamStatusItem,
 } from "@/lib/api"
 import { formatDate } from "@/lib/utils"
@@ -68,7 +61,6 @@ type TabKey = "traffic" | "overview" | "threats"
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("traffic")
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
-  const [timeline, setTimeline] = useState<TimelineBucket[]>([])
   const [stats, setStats] = useState<SecurityStats | null>(null)
   const [events, setEvents] = useState<SecurityEvent[]>([])
   const [upstreams, setUpstreams] = useState<UpstreamStatusItem[]>([])
@@ -82,16 +74,18 @@ export default function DashboardPage() {
     if (initial) setLoading(true)
     setRefreshing(true)
     try {
-      const [dashRes, tlRes, statsRes, eventsRes, upstreamRes] =
-        await Promise.all([
-          getDashboardSummary(),
-          getSecurityTimeline(24),
-          getSecurityEventStats(24),
-          getSecurityEvents({ limit: 5, page_size: 5 }),
-          getUpstreamStatus().catch(() => ({ items: [], total: 0 })),
-        ])
+      const [dashRes, statsRes, eventsRes, upstreamRes] = await Promise.all([
+        getDashboardSummary(),
+        getSecurityEventStats(24),
+        getSecurityEvents({ limit: 5, page_size: 5 }),
+        getUpstreamStatus().catch((error) => {
+          toast.error(
+            error instanceof Error ? error.message : "加载上游状态失败"
+          )
+          return { items: [], total: 0 }
+        }),
+      ])
       setSummary(dashRes)
-      setTimeline(tlRes.buckets ?? [])
       setStats(statsRes)
       setEvents(eventsRes.items ?? [])
       setUpstreams(upstreamRes.items ?? [])
@@ -125,15 +119,6 @@ export default function DashboardPage() {
     return () => clearInterval(timer)
   }, [])
 
-  const timelineData = useMemo(
-    () =>
-      timeline.map((b) => ({
-        time: b.bucket.includes(" ") ? b.bucket.split(" ").pop() : b.bucket,
-        count: b.count,
-      })),
-    [timeline]
-  )
-
   const liveTrendData = useMemo(() => {
     if (livePoints.length > 0) {
       let prevRequests = livePoints[0]?.requests ?? 0
@@ -147,24 +132,14 @@ export default function DashboardPage() {
         return { ...point, requests, blocks }
       })
     }
-    return timelineData.map((point) => ({
-      time: point.time,
-      requests: point.count,
-      qps: point.count / 300,
-      blocks: 0,
-    }))
-  }, [livePoints, timelineData])
+    return []
+  }, [livePoints])
 
   const blockTrendData = useMemo(() => {
     const liveBlocks = liveTrendData.filter((point) => point.blocks > 0)
     if (liveBlocks.length > 0) return liveTrendData
-    return timelineData.map((point) => ({
-      time: point.time,
-      requests: 0,
-      qps: 0,
-      blocks: point.count,
-    }))
-  }, [liveTrendData, timelineData])
+    return []
+  }, [liveTrendData])
 
   const categoryData = useMemo(
     () => (stats?.categories ?? []).filter((c) => c.count > 0),
@@ -214,20 +189,11 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border border-teal-200/80 bg-gradient-to-br from-white via-slate-50 to-teal-50/60 p-5 shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="inline-flex items-center gap-2 rounded-full bg-teal-500/10 px-3 py-1 text-xs font-medium text-teal-700">
-              <Shield className="h-3.5 w-3.5" /> 防护控制台
-            </div>
-            <h1 className="mt-4 text-2xl font-semibold tracking-[-0.02em] text-slate-950">
-              实时流量与威胁报告
-            </h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              按截图中的轻量卡片风格重新组织指标、上游健康、实时 QPS
-              与安全事件，优先呈现可行动异常。
-            </p>
-          </div>
+      <PageIntro
+        eyebrow="防护控制台"
+        title="实时流量与威胁报告"
+        description="按控制台运营视角组织指标、上游健康、实时 QPS 与安全事件，优先呈现可行动异常。"
+        actions={
           <Button
             onClick={() => load()}
             disabled={refreshing}
@@ -235,11 +201,11 @@ export default function DashboardPage() {
           >
             <RefreshCcw
               className={cn("h-4 w-4", refreshing && "animate-spin")}
-            />{" "}
+            />
             刷新数据
           </Button>
-        </div>
-      </div>
+        }
+      />
 
       {/* Tab bar */}
       <div className="flex items-center gap-1 rounded-lg border border-slate-200/80 bg-white p-1 shadow-sm">
@@ -272,168 +238,129 @@ export default function DashboardPage() {
         </Button>
       </div>
 
-      {/* Stats row 1: main metrics */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <MetricGrid>
         {[
           {
-            label: "请求次数",
+            label: "总请求数",
             value: summary ? fmt(summary.requests_total) : "—",
-            icon: Activity,
-            color: "text-teal-500",
-            iconBg: "bg-teal-50",
+            tone: "default" as const,
+            hint: "累计访问请求",
           },
           {
-            label: "访问次数 (PV)",
+            label: "2xx 响应数",
             value: summary ? fmt(summary.status_2xx) : "—",
-            icon: Globe,
-            color: "text-blue-500",
-            iconBg: "bg-blue-50",
+            tone: "success" as const,
+            hint: "上游成功响应",
           },
           {
             label: "独立访客 (UV)",
             value: summary ? fmt(summary.unique_ips) : "—",
-            icon: Users,
-            color: "text-teal-500",
-            iconBg: "bg-teal-50",
+            tone: "default" as const,
+            hint: "按客户端 IP 聚合",
           },
           {
             label: "QPS (5s)",
             value: summary ? summary.qps_5s.toFixed(1) : "—",
-            icon: MonitorSmartphone,
-            color: "text-violet-500",
-            iconBg: "bg-violet-50",
+            tone: "default" as const,
+            hint: "最近 5 秒速率",
           },
           {
             label: "拦截次数",
             value: summary ? fmt(summary.waf_blocks) : "—",
-            icon: ShieldAlert,
-            color: "text-orange-500",
-            iconBg: "bg-orange-50",
-            warning: true,
+            tone:
+              summary && summary.waf_blocks > 0
+                ? ("warning" as const)
+                : ("default" as const),
+            hint: "终止类 WAF 动作",
           },
           {
             label: "攻击 IP",
             value: summary ? fmt(summary.attack_ips) : "—",
-            icon: Shield,
-            color: "text-red-500",
-            iconBg: "bg-red-50",
-            warning: true,
+            tone:
+              summary && summary.attack_ips > 0
+                ? ("danger" as const)
+                : ("default" as const),
+            hint: "命中攻击特征的 IP",
           },
         ].map((card) => (
-          <div
+          <MetricCard
             key={card.label}
-            className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm"
-          >
-            <div className="flex items-center gap-2 text-[12px] text-slate-500">
-              <span>{card.label}</span>
-              <div
-                className={cn(
-                  "flex h-4.5 w-4.5 items-center justify-center rounded",
-                  card.iconBg
-                )}
-              >
-                <card.icon className={cn("h-3 w-3", card.color)} />
-              </div>
-            </div>
-            <div
-              className={cn(
-                "mt-2 text-2xl font-bold",
-                card.warning && card.value !== "0" && card.value !== "—"
-                  ? "text-orange-600"
-                  : "text-slate-900"
-              )}
-            >
-              {card.value}
-            </div>
-          </div>
+            label={card.label}
+            value={card.value}
+            tone={card.tone}
+            hint={card.hint}
+          />
         ))}
-      </div>
+      </MetricGrid>
 
-      {/* Stats row 2: threat posture */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <MetricGrid>
         {[
           {
             label: "观察事件",
             value: summary ? fmt(summary.waf_observes) : "—",
-            icon: Shield,
-            color: "text-slate-500",
-            iconBg: "bg-slate-50",
+            tone: "default" as const,
+            hint: "非终止记录动作",
           },
           {
             label: "内置规则命中",
             value: summary ? fmt(summary.builtin_hits) : "—",
-            icon: Zap,
-            color: "text-amber-500",
-            iconBg: "bg-amber-50",
+            tone: "warning" as const,
+            hint: "内置规则触发次数",
           },
           {
             label: "Bot 评分 24h",
             value: summary ? fmt(summary.bot_total_24h) : "—",
-            icon: MonitorSmartphone,
-            color: "text-violet-500",
-            iconBg: "bg-violet-50",
+            tone: "default" as const,
+            hint: "最近 24 小时 Bot 评分",
           },
           {
             label: "高风险 Bot 24h",
             value: summary ? fmt(summary.bot_high_risk_24h) : "—",
-            icon: ShieldAlert,
-            color: "text-rose-500",
-            iconBg: "bg-rose-50",
-            warning: true,
+            tone:
+              summary && summary.bot_high_risk_24h > 0
+                ? ("danger" as const)
+                : ("default" as const),
+            hint: "达到高风险阈值",
           },
           {
             label: "CVE 命中 24h",
             value: summary ? fmt(summary.cve_total_24h) : "—",
-            icon: TriangleAlert,
-            color: "text-orange-500",
-            iconBg: "bg-orange-50",
-            warning: true,
+            tone:
+              summary && summary.cve_total_24h > 0
+                ? ("warning" as const)
+                : ("default" as const),
+            hint: "CVE 检测命中",
           },
           {
             label: "Drop 事件 24h",
             value: summary ? fmt(summary.drop_total_24h) : "—",
-            icon: ShieldAlert,
-            color: "text-slate-700",
-            iconBg: "bg-slate-100",
-            warning: true,
+            tone:
+              summary && summary.drop_total_24h > 0
+                ? ("danger" as const)
+                : ("default" as const),
+            hint: "主动断连事件",
           },
         ].map((card) => (
-          <div
+          <MetricCard
             key={card.label}
-            className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm"
-          >
-            <div className="flex items-center gap-2 text-[12px] text-slate-500">
-              <span>{card.label}</span>
-              <div
-                className={cn(
-                  "flex h-4.5 w-4.5 items-center justify-center rounded",
-                  card.iconBg
-                )}
-              >
-                <card.icon className={cn("h-3 w-3", card.color)} />
-              </div>
-            </div>
-            <div
-              className={cn(
-                "mt-2 text-2xl font-bold",
-                card.warning && card.value !== "0" && card.value !== "—"
-                  ? "text-orange-600"
-                  : "text-slate-900"
-              )}
-            >
-              {card.value}
-            </div>
-          </div>
+            label={card.label}
+            value={card.value}
+            tone={card.tone}
+            hint={card.hint}
+          />
         ))}
-      </div>
+      </MetricGrid>
 
-      {/* Stats row 3: error metrics */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <MetricGrid>
         {[
           {
             label: "4xx 错误数",
             value: summary ? fmt(summary.errors_upstream_4xx) : "—",
-            warning: true,
+            tone:
+              summary && summary.errors_upstream_4xx > 0
+                ? ("warning" as const)
+                : ("default" as const),
+            hint: "上游 4xx 响应",
           },
           {
             label: "4xx 错误率",
@@ -441,25 +368,35 @@ export default function DashboardPage() {
               summary && summary.requests_total > 0
                 ? `${((summary.errors_upstream_4xx / summary.requests_total) * 100).toFixed(2)}%`
                 : "0%",
-            warning: false,
+            tone: "default" as const,
+            hint: "基于当前摘要统计",
           },
           {
-            label: "4xx 拦截数",
+            label: "总拦截数",
             value: summary ? fmt(summary.waf_blocks) : "—",
-            warning: true,
+            tone:
+              summary && summary.waf_blocks > 0
+                ? ("danger" as const)
+                : ("default" as const),
+            hint: "终止类 WAF 动作",
           },
           {
-            label: "4xx 拦截率",
+            label: "总拦截率",
             value:
               summary && summary.requests_total > 0
                 ? `${((summary.waf_blocks / summary.requests_total) * 100).toFixed(2)}%`
                 : "0%",
-            warning: false,
+            tone: "default" as const,
+            hint: "基于总请求计算",
           },
           {
             label: "5xx 错误数",
             value: summary ? fmt(summary.errors_upstream_5xx) : "—",
-            warning: true,
+            tone:
+              summary && summary.errors_upstream_5xx > 0
+                ? ("danger" as const)
+                : ("default" as const),
+            hint: "上游 5xx 响应",
           },
           {
             label: "5xx 错误率",
@@ -467,91 +404,97 @@ export default function DashboardPage() {
               summary && summary.requests_total > 0
                 ? `${((summary.errors_upstream_5xx / summary.requests_total) * 100).toFixed(2)}%`
                 : "0%",
-            warning: false,
+            tone: "default" as const,
+            hint: "基于当前摘要统计",
           },
         ].map((card) => (
-          <div
+          <MetricCard
             key={card.label}
-            className="rounded-xl border border-slate-200/80 bg-white px-4 py-3 shadow-sm"
-          >
-            <div className="flex items-center gap-1.5 text-[12px] text-slate-500">
-              <span>{card.label}</span>
-              {card.warning && <span className="text-red-400">▲</span>}
-            </div>
-            <div
-              className={cn(
-                "mt-1.5 text-xl font-bold",
-                card.warning && card.value !== "0" && card.value !== "—"
-                  ? "text-red-600"
-                  : "text-slate-900"
-              )}
-            >
-              {card.value}
-            </div>
-          </div>
+            label={card.label}
+            value={card.value}
+            tone={card.tone}
+            hint={card.hint}
+          />
         ))}
-      </div>
+      </MetricGrid>
 
       <div className="grid gap-4 xl:grid-cols-3">
-        <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
-          <h3 className="text-[15px] font-semibold text-slate-800">CVE 命中分布</h3>
-          <div className="mt-3 space-y-2">
+        <Surface title="CVE 命中分布">
+          <div className="space-y-2">
             {(summary?.cve_by_type_24h ?? []).length === 0 ? (
-              <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">24 小时内暂无 CVE 命中</div>
+              <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">
+                24 小时内暂无 CVE 命中
+              </div>
             ) : (
               (summary?.cve_by_type_24h ?? []).slice(0, 5).map((item) => (
-                <div key={item.category} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
-                  <span className="font-medium text-slate-600">{item.category || "未分类"}</span>
-                  <span className="font-mono text-slate-900">{fmt(item.count)}</span>
+                <div
+                  key={item.category}
+                  className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs"
+                >
+                  <span className="font-medium text-slate-600">
+                    {item.category || "未分类"}
+                  </span>
+                  <span className="font-mono text-slate-900">
+                    {fmt(item.count)}
+                  </span>
                 </div>
               ))
             )}
           </div>
-        </div>
-        <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
-          <h3 className="text-[15px] font-semibold text-slate-800">Drop 来源</h3>
-          <div className="mt-3 space-y-2">
-            {Object.entries(summary?.drop_by_source_24h ?? {}).filter(([, value]) => value > 0).length === 0 ? (
-              <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">24 小时内暂无主动断连</div>
+        </Surface>
+        <Surface title="Drop 来源">
+          <div className="space-y-2">
+            {Object.entries(summary?.drop_by_source_24h ?? {}).filter(
+              ([, value]) => value > 0
+            ).length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">
+                24 小时内暂无主动断连
+              </div>
             ) : (
-              Object.entries(summary?.drop_by_source_24h ?? {}).filter(([, value]) => value > 0).map(([source, value]) => (
-                <div key={source} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
-                  <span className="font-medium text-slate-600">{source}</span>
-                  <span className="font-mono text-slate-900">{fmt(value)}</span>
-                </div>
-              ))
+              Object.entries(summary?.drop_by_source_24h ?? {})
+                .filter(([, value]) => value > 0)
+                .map(([source, value]) => (
+                  <div
+                    key={source}
+                    className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs"
+                  >
+                    <span className="font-medium text-slate-600">{source}</span>
+                    <span className="font-mono text-slate-900">
+                      {fmt(value)}
+                    </span>
+                  </div>
+                ))
             )}
           </div>
-        </div>
-        <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
-          <h3 className="text-[15px] font-semibold text-slate-800">Bot 风险概览</h3>
-          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+        </Surface>
+        <Surface title="Bot 风险概览">
+          <div className="grid grid-cols-3 gap-2 text-center">
             <div className="rounded-lg bg-violet-50 p-3">
               <div className="text-xs text-violet-600">评分</div>
-              <div className="mt-1 font-mono text-lg font-bold text-violet-800">{fmt(summary?.bot_total_24h ?? 0)}</div>
+              <div className="mt-1 font-mono text-lg font-bold text-violet-800">
+                {fmt(summary?.bot_total_24h ?? 0)}
+              </div>
             </div>
             <div className="rounded-lg bg-rose-50 p-3">
               <div className="text-xs text-rose-600">高风险</div>
-              <div className="mt-1 font-mono text-lg font-bold text-rose-800">{fmt(summary?.bot_high_risk_24h ?? 0)}</div>
+              <div className="mt-1 font-mono text-lg font-bold text-rose-800">
+                {fmt(summary?.bot_high_risk_24h ?? 0)}
+              </div>
             </div>
             <div className="rounded-lg bg-slate-100 p-3">
               <div className="text-xs text-slate-600">阻断</div>
-              <div className="mt-1 font-mono text-lg font-bold text-slate-900">{fmt(summary?.bot_blocked_24h ?? 0)}</div>
+              <div className="mt-1 font-mono text-lg font-bold text-slate-900">
+                {fmt(summary?.bot_blocked_24h ?? 0)}
+              </div>
             </div>
           </div>
-        </div>
+        </Surface>
       </div>
 
-      <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-[15px] font-semibold text-slate-800">
-              上游健康状态
-            </h3>
-            <p className="mt-1 text-xs text-slate-500">
-              主动探测与请求失败会共同更新状态，异常上游会被负载均衡跳过。
-            </p>
-          </div>
+      <Surface
+        title="上游健康状态"
+        description="主动探测与请求失败会共同更新状态，异常上游会被负载均衡跳过。"
+        action={
           <div
             className={cn(
               "rounded-full px-3 py-1 text-xs font-medium",
@@ -564,9 +507,10 @@ export default function DashboardPage() {
               ? `${upstreams.length - unhealthyUpstreams.length}/${upstreams.length} 健康`
               : "暂无探测数据"}
           </div>
-        </div>
+        }
+      >
         {upstreams.length > 0 && (
-          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
             {upstreams.slice(0, 6).map((item) => (
               <div
                 key={item.url}
@@ -595,23 +539,22 @@ export default function DashboardPage() {
             ))}
           </div>
         )}
-      </div>
+      </Surface>
 
       {/* Charts area */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
         {/* QPS & Timeline */}
         <div className="col-span-1 space-y-4 xl:col-span-3">
           {/* Real-time QPS */}
-          <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-sm">
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-[15px] font-semibold text-slate-800">
-                实时 QPS
-              </h3>
+          <Surface
+            title="实时 QPS"
+            action={
               <div className="flex items-center gap-1.5 text-xs text-slate-400">
                 <Wifi className="h-3.5 w-3.5 text-teal-400" />
                 <span>{liveTrendData.length} 个采样点 · 5 秒刷新</span>
               </div>
-            </div>
+            }
+          >
             <div className="h-[180px]">
               {liveTrendData.length === 0 ? (
                 <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-slate-200 text-sm text-slate-400">
@@ -682,16 +625,14 @@ export default function DashboardPage() {
                 </ResponsiveContainer>
               )}
             </div>
-          </div>
+          </Surface>
 
           {/* Security events table */}
-          <div className="rounded-xl border border-slate-200/80 bg-white shadow-sm">
-            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
-              <h3 className="text-[15px] font-semibold text-slate-800">
-                最近安全事件
-              </h3>
-              <Shield className="h-4 w-4 text-teal-400" />
-            </div>
+          <Surface
+            title="最近安全事件"
+            action={<Shield className="h-4 w-4 text-teal-400" />}
+            className="p-0"
+          >
             <div className="overflow-x-auto">
               <table className="w-full text-left text-[13px]">
                 <thead>
@@ -762,7 +703,7 @@ export default function DashboardPage() {
                 </tbody>
               </table>
             </div>
-          </div>
+          </Surface>
         </div>
 
         {/* Right sidebar charts */}

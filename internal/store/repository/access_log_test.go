@@ -122,6 +122,30 @@ func TestRuleRepoBatchCreateRollsBackOnError(t *testing.T) {
 	}
 }
 
+func TestRuleRepoListFilteredPolicyAndQuery(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRuleRepo(db)
+	items := []store.Rule{
+		{Name: "admin block", PolicyID: 1, Phase: store.PhaseACL, Pattern: "block_path:/admin", Action: store.ActionIntercept, Priority: 20},
+		{Name: "api observe", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "block_path:/api", Action: store.ActionObserve, Priority: 30},
+		{Name: "admin other policy", PolicyID: 2, Phase: store.PhaseACL, Pattern: "block_path:/admin", Action: store.ActionIntercept, Priority: 10},
+	}
+	for i := range items {
+		if err := repo.Create(&items[i]); err != nil {
+			t.Fatalf("create rule: %v", err)
+		}
+	}
+
+	policyID := uint(1)
+	got, total, err := repo.ListFiltered(0, 20, RuleFilter{PolicyID: &policyID, Query: "admin"})
+	if err != nil {
+		t.Fatalf("list filtered rules: %v", err)
+	}
+	if total != 1 || len(got) != 1 || got[0].PolicyID != policyID || got[0].Name != "admin block" {
+		t.Fatalf("unexpected filtered rules total=%d items=%+v", total, got)
+	}
+}
+
 func TestSiteListenerRepoDeleteBySite(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewSiteListenerRepo(db)
@@ -149,6 +173,81 @@ func TestSiteListenerRepoDeleteBySite(t *testing.T) {
 	}
 	if len(deleted) != 0 || len(kept) != 1 || kept[0].Bind != ":8080" {
 		t.Fatalf("unexpected listeners after DeleteBySite, deleted=%v kept=%v", deleted, kept)
+	}
+}
+
+func TestSiteRepoCountByCertID(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewSiteRepo(db)
+	certID := uint(7)
+	otherCertID := uint(8)
+	sites := []store.Site{
+		{Host: "a.example", UpstreamURLs: "http://127.0.0.1:8080", Bind: ":443", Network: "tcp", Enabled: true, CertID: &certID},
+		{Host: "b.example", UpstreamURLs: "http://127.0.0.1:8081", Bind: ":8443", Network: "tcp", Enabled: true, CertID: &certID},
+		{Host: "c.example", UpstreamURLs: "http://127.0.0.1:8082", Bind: ":9443", Network: "tcp", Enabled: true, CertID: &otherCertID},
+	}
+	for i := range sites {
+		if err := repo.Create(&sites[i]); err != nil {
+			t.Fatalf("create site: %v", err)
+		}
+	}
+
+	count, err := repo.CountByCertID(certID)
+	if err != nil {
+		t.Fatalf("count sites by cert: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 site refs, got %d", count)
+	}
+}
+
+func TestSiteRepoCountByPolicyID(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewSiteRepo(db)
+	policyID := uint(3)
+	otherPolicyID := uint(4)
+	sites := []store.Site{
+		{Host: "a.example", UpstreamURLs: "http://127.0.0.1:8080", Bind: ":80", Network: "tcp", Enabled: true, PolicyID: &policyID},
+		{Host: "b.example", UpstreamURLs: "http://127.0.0.1:8081", Bind: ":81", Network: "tcp", Enabled: true, PolicyID: &policyID},
+		{Host: "c.example", UpstreamURLs: "http://127.0.0.1:8082", Bind: ":82", Network: "tcp", Enabled: true, PolicyID: &otherPolicyID},
+	}
+	for i := range sites {
+		if err := repo.Create(&sites[i]); err != nil {
+			t.Fatalf("create site: %v", err)
+		}
+	}
+
+	count, err := repo.CountByPolicyID(policyID)
+	if err != nil {
+		t.Fatalf("count sites by policy: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 policy refs, got %d", count)
+	}
+}
+
+func TestSiteListenerRepoCountByCertID(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewSiteListenerRepo(db)
+	certID := uint(7)
+	otherCertID := uint(8)
+	items := []store.SiteListener{
+		{SiteID: 1, Bind: ":443", Network: "tcp", Enabled: true, CertID: &certID},
+		{SiteID: 2, Bind: ":8443", Network: "tcp", Enabled: true, CertID: &certID},
+		{SiteID: 3, Bind: ":9443", Network: "tcp", Enabled: true, CertID: &otherCertID},
+	}
+	for i := range items {
+		if err := repo.Create(&items[i]); err != nil {
+			t.Fatalf("create listener: %v", err)
+		}
+	}
+
+	count, err := repo.CountByCertID(certID)
+	if err != nil {
+		t.Fatalf("count listeners by cert: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 listener refs, got %d", count)
 	}
 }
 

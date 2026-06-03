@@ -5,6 +5,43 @@ import (
 	"testing"
 )
 
+func TestCollectTargetsSkipsMirroredLowercaseHeaders(t *testing.T) {
+	headers := map[string]string{
+		"User-Agent": "Mozilla/5.0",
+		"user-agent": "Mozilla/5.0",
+		"X-Trace":    "trace-1",
+		"x-trace":    "trace-1",
+	}
+	targets := collectTargets("/home", "", headers)
+	seenUA := 0
+	seenTrace := 0
+	for _, target := range targets {
+		switch target {
+		case "Mozilla/5.0":
+			seenUA++
+		case "trace-1":
+			seenTrace++
+		}
+	}
+	if seenUA != 1 || seenTrace != 1 {
+		t.Fatalf("expected mirrored headers once each, got ua=%d trace=%d targets=%v", seenUA, seenTrace, targets)
+	}
+}
+
+func TestCollectTargetsPreallocatesHeaderCapacity(t *testing.T) {
+	headers := map[string]string{
+		"User-Agent": "Mozilla/5.0",
+		"X-Test":     "ok",
+	}
+	targets := collectTargets("/home", "q=hello", headers)
+	if len(targets) < 4 {
+		t.Fatalf("expected path, query and header targets, got %d", len(targets))
+	}
+	if cap(targets) < 2+len(headers) {
+		t.Fatalf("targets capacity = %d, want at least %d", cap(targets), 2+len(headers))
+	}
+}
+
 func TestCheckOWASP_SQLi(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=1' UNION SELECT * FROM users--", nil, nil)
 	if len(hits) == 0 {

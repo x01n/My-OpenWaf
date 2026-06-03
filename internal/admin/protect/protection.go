@@ -14,16 +14,7 @@ import (
 
 func GetProtectionSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		val, err := repo.Get("protection")
-		if err != nil {
-			c.JSON(200, buildProtectionResponse(store.DefaultProtectionConfig()))
-			return
-		}
-		var cfg store.ProtectionConfig
-		if json.Unmarshal([]byte(val), &cfg) != nil {
-			c.JSON(200, buildProtectionResponse(store.DefaultProtectionConfig()))
-			return
-		}
+		cfg := shared.LoadProtectionConfig(repo)
 		c.JSON(200, buildProtectionResponse(cfg))
 	}
 }
@@ -34,13 +25,18 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 	raw, _ := json.Marshal(cfg)
 	_ = json.Unmarshal(raw, &out)
 
-	// Expand owasp_modules string → object
+	// Expand legacy owasp_modules string and expose category_sensitivity as the UI source.
 	if cfg.OWASPModules != "" {
 		var modules map[string]string
 		if json.Unmarshal([]byte(cfg.OWASPModules), &modules) == nil {
 			out["owasp_modules"] = modules
 		}
 	}
+	categorySensitivity := cfg.EffectiveCategorySensitivity()
+	if categorySensitivity == nil {
+		categorySensitivity = map[string]string{}
+	}
+	out["category_sensitivity"] = categorySensitivity
 	// Expand cc_rules string → array
 	if cfg.CCRules != "" {
 		var rules []any
@@ -73,6 +69,10 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			return
 		}
 
+		present := make(map[string]bool, len(raw))
+		for key := range raw {
+			present[key] = true
+		}
 		preserved := shared.PeelJSONStringBlobs(raw, shared.ProtectionJSONBlobKeys())
 
 		plainBytes, err := json.Marshal(raw)
@@ -80,7 +80,7 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(400, map[string]string{"error": "invalid config"})
 			return
 		}
-		cfg := store.DefaultProtectionConfig()
+		cfg := shared.LoadProtectionConfig(repo)
 		if err := json.Unmarshal(plainBytes, &cfg); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid config"})
 			return
@@ -130,13 +130,21 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 
 		// Sync bot_detection_enabled to bot_settings.Enabled so the bot page
 		// reflects changes made on the protection page.
-		if err := shared.SyncProtectionBotToSettings(repo, cfg.BotDetectionEnabled); err != nil {
-			c.JSON(500, map[string]string{"error": err.Error()})
-			return
+		if present["bot_detection_enabled"] {
+			if err := shared.SyncProtectionBotToSettings(repo, cfg.BotDetectionEnabled); err != nil {
+				c.JSON(500, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if present["cve_auto_drop_critical"] || present["cve_auto_drop_high"] {
+			if err := shared.SyncCVEAutoDropToDropPolicy(repo, cfg.CVEAutoDropCritical, cfg.CVEAutoDropHigh); err != nil {
+				c.JSON(500, map[string]string{"error": err.Error()})
+				return
+			}
 		}
 
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
 		}
 		c.JSON(200, buildProtectionResponse(cfg))

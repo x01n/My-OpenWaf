@@ -2,6 +2,7 @@ package site
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,10 +110,15 @@ func GetSite(repo *repository.SiteRepo) app.HandlerFunc {
 func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item store.Site
-		if err := shared.BindSiteFromRequestBody(c.Request.Body(), &item); err != nil {
+		body := c.Request.Body()
+		if err := shared.BindSiteFromRequestBody(body, &item); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if siteRequestHasField(body, "attack_protection_level") {
+			item.ApplyProtectionModeOverrides()
+		}
+		clearInheritedProtectionOverrides(&item)
 		if err := shared.ValidateSiteTLSCertificate(item.TLSEnabled, item.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -141,11 +147,16 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
-		if err := shared.BindSiteFromRequestBody(c.Request.Body(), existing); err != nil {
+		body := c.Request.Body()
+		if err := shared.BindSiteFromRequestBody(body, existing); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
 		existing.ID = id
+		if siteRequestHasField(body, "attack_protection_level") {
+			existing.ApplyProtectionModeOverrides()
+		}
+		clearInheritedProtectionOverrides(existing)
 		if err := shared.ValidateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -159,6 +170,30 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			return
 		}
 		c.JSON(200, existing)
+	}
+}
+
+func siteRequestHasField(body []byte, field string) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return false
+	}
+	_, ok := raw[field]
+	return ok
+}
+
+func clearInheritedProtectionOverrides(item *store.Site) {
+	if item.OWASPEnabled == nil {
+		item.OWASPSensitivity = ""
+		item.OWASPAction = ""
+	}
+	if item.CVEEnabled == nil {
+		item.CVEAction = ""
+	}
+	if item.RateLimitEnabled == nil {
+		item.RateLimitWindow = 0
+		item.RateLimitMax = 0
+		item.RateLimitAction = ""
 	}
 }
 

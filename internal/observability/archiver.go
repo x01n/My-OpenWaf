@@ -90,9 +90,6 @@ func (a *Archiver) Close() {
 
 func (a *Archiver) loop() {
 	defer a.wg.Done()
-	a.refreshRetentionFromDB()
-	a.cleanup()
-	a.optimizeDB()
 
 	for {
 		intervalSec := a.interval.Load()

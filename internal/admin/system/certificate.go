@@ -98,11 +98,25 @@ func UpdateCertificate(repo *repository.CertificateRepo, reload func() error) ap
 	}
 }
 
-func DeleteCertificate(repo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
+func DeleteCertificate(repo *repository.CertificateRepo, siteRepo *repository.SiteRepo, listenerRepo *repository.SiteListenerRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		siteRefs, err := siteRepo.CountByCertID(id)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		listenerRefs, err := listenerRepo.CountByCertID(id)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		if siteRefs+listenerRefs > 0 {
+			c.JSON(400, map[string]any{"error": "certificate is still referenced", "site_refs": siteRefs, "listener_refs": listenerRefs})
 			return
 		}
 		if err := repo.Delete(id); err != nil {

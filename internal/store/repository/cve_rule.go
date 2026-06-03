@@ -76,7 +76,6 @@ func (r *CVERuleRepo) PendingApprovalCount() (int64, error) {
 	return count, err
 }
 
-// ─── CVE Sync Log ───────────────────────────────────────────────────
 
 type CVESyncLogRepo struct{ db *gorm.DB }
 

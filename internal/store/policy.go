@@ -13,7 +13,8 @@ type Policy struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
-	Name string `gorm:"size:128;not null" json:"name"`
+	Name        string `gorm:"size:128;not null" json:"name"`
+	Description string `gorm:"type:text" json:"description"`
 }
 
 type RulePhase string

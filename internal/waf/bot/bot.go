@@ -236,6 +236,15 @@ func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver)
 	if r.TLS.JA3Hash != "" {
 		bs.Details["tls_ja3"] = r.TLS.JA3Hash
 	}
+	if r.TLS.TLSVersion != "" {
+		bs.Details["tls_version"] = r.TLS.TLSVersion
+	}
+	if len(r.TLS.ALPN) > 0 {
+		bs.Details["tls_alpn"] = strings.Join(r.TLS.ALPN, ",")
+	}
+	if len(r.HeaderKeys) > 0 {
+		bs.Details["header_order"] = strings.Join(r.HeaderKeys, ",")
+	}
 	bs.Total = bs.GeoIPScore + bs.FingerprintScore + bs.BehaviorScore + bs.IPRepScore
 	bs.IsHighRisk = bs.Total >= 80 || bs.GeoIPScore >= 40 || bs.IPRepScore >= 25
 	return bs
@@ -293,6 +302,20 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
 	if strings.Contains(uaLower, "chrome") && !strings.Contains(uaLower, "safari") {
 		score += 15
 		reasons = append(reasons, "chrome_without_safari")
+	}
+	if r.TLS.TLSVersion == "TLS10" || r.TLS.TLSVersion == "TLS11" {
+		score += 12
+		reasons = append(reasons, "legacy_tls_version")
+	}
+	if r.TLS.JA4 != "" && ua != "" {
+		if strings.Contains(uaLower, "chrome/") && !strings.Contains(r.TLS.JA4, "h2") && !strings.Contains(r.AcceptEncoding, "br") {
+			score += 10
+			reasons = append(reasons, "chrome_tls_http_mismatch")
+		}
+		if strings.Contains(uaLower, "firefox/") && strings.Contains(r.TLS.JA4, "h2") && !strings.Contains(strings.ToLower(r.AcceptEncoding), "br") {
+			score += 8
+			reasons = append(reasons, "firefox_encoding_mismatch")
+		}
 	}
 	return score, reasons
 }

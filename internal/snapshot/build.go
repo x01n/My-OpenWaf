@@ -96,7 +96,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 
 		// Build protection configs from site fields
 		botProtection := store.BotProtectionConfig{
-			Enabled: s.BotProtectionEnabled,
+			Enabled: s.BotProtectionEnabled != nil && *s.BotProtectionEnabled,
 			Level:   s.BotProtectionLevel,
 			Action:  "intercept",
 		}
@@ -236,46 +236,50 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 }
 
 // mergeProtection creates a ProtectionConfig for a site by overlaying
-// per-site overrides onto the global config. nil/*false = inherit global.
+// per-site overrides onto the global config. nil = inherit global.
 func mergeProtection(global store.ProtectionConfig, site store.Site) store.ProtectionConfig {
 	p := global // shallow copy
 
 	// Bot detection: per-site override
-	if site.BotProtectionEnabled {
-		p.BotDetectionEnabled = true
+	if site.BotProtectionEnabled != nil {
+		p.BotDetectionEnabled = *site.BotProtectionEnabled
 	}
 
 	// OWASP override
 	if site.OWASPEnabled != nil {
 		p.OWASPEnabled = *site.OWASPEnabled
-	}
-	if site.OWASPSensitivity != "" {
-		p.OWASPSensitivity = site.OWASPSensitivity
-	}
-	if site.OWASPAction != "" {
-		p.OWASPAction = site.OWASPAction
+		if site.OWASPSensitivity != "" {
+			p.OWASPSensitivity = site.OWASPSensitivity
+		}
+		if site.OWASPAction != "" {
+			p.OWASPAction = site.OWASPAction
+		}
 	}
 
 	// CVE override
 	if site.CVEEnabled != nil {
 		p.CVEEnabled = *site.CVEEnabled
-	}
-	if site.CVEAction != "" {
-		p.CVEAction = site.CVEAction
+		if site.CVEAction != "" {
+			p.CVEAction = site.CVEAction
+		}
+		if site.CVEAction == string(store.ActionObserve) {
+			p.CVEAutoDropCritical = false
+			p.CVEAutoDropHigh = false
+		}
 	}
 
 	// Rate limit override
 	if site.RateLimitEnabled != nil {
 		p.RequestRateLimitEnabled = *site.RateLimitEnabled
-	}
-	if site.RateLimitWindow > 0 {
-		p.RequestRateLimitWindow = site.RateLimitWindow
-	}
-	if site.RateLimitMax > 0 {
-		p.RequestRateLimitMax = site.RateLimitMax
-	}
-	if site.RateLimitAction != "" {
-		p.RequestRateLimitAction = site.RateLimitAction
+		if site.RateLimitWindow > 0 {
+			p.RequestRateLimitWindow = site.RateLimitWindow
+		}
+		if site.RateLimitMax > 0 {
+			p.RequestRateLimitMax = site.RateLimitMax
+		}
+		if site.RateLimitAction != "" {
+			p.RequestRateLimitAction = site.RateLimitAction
+		}
 	}
 
 	return p

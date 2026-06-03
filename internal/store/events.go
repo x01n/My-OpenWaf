@@ -8,16 +8,16 @@ type SecurityEvent struct {
 	CreatedAt time.Time `gorm:"index:idx_se_created;index:idx_se_site_created" json:"created_at"`
 
 	SiteID      uint   `gorm:"index:idx_se_site_created" json:"site_id"`
-	RequestID   string `gorm:"size:64" json:"request_id"`
+	RequestID   string `gorm:"size:64;index:idx_se_request_id" json:"request_id"`
 	ClientIP    string `gorm:"size:45;index:idx_se_client_ip" json:"client_ip"`
-	Host        string `gorm:"size:255" json:"host"`
+	Host        string `gorm:"size:255;index:idx_se_host" json:"host"`
 	Path        string `gorm:"size:2048" json:"path"`
 	QueryString string `gorm:"size:2048" json:"query_string"`
 	Method      string `gorm:"size:16" json:"method"`
 	UserAgent   string `gorm:"size:512" json:"user_agent"`
 
 	RuleID    uint   `json:"rule_id"`
-	RuleIDStr string `gorm:"size:64" json:"rule_id_str"`
+	RuleIDStr string `gorm:"size:64;index:idx_se_rule_id_str" json:"rule_id_str"`
 	Phase     string `gorm:"size:32" json:"phase"`
 	Action    string `gorm:"size:32;index:idx_se_action" json:"action"`
 	Category  string `gorm:"size:32;index:idx_se_category" json:"category"`
@@ -41,7 +41,7 @@ type AccessLog struct {
 	SiteID      uint      `gorm:"index:idx_al_site_created" json:"site_id"`
 	RequestID   string    `gorm:"size:64;index:idx_al_request_id" json:"request_id"`
 	ClientIP    string    `gorm:"size:45;index:idx_al_client_ip" json:"client_ip"`
-	Host        string    `gorm:"size:255" json:"host"`
+	Host        string    `gorm:"size:255;index:idx_al_host" json:"host"`
 	Path        string    `gorm:"size:2048" json:"path"`
 	QueryString string    `gorm:"size:2048" json:"query_string"`
 	Method      string    `gorm:"size:16" json:"method"`
@@ -75,12 +75,12 @@ type DropEvent struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
 	SiteID    uint      `gorm:"index" json:"site_id"`
 	ClientIP  string    `gorm:"index;size:45" json:"client_ip"`
-	Source    string    `gorm:"size:32" json:"source"`
+	Source    string    `gorm:"size:32;index:idx_drop_source_created" json:"source"`
 	RuleID    string    `gorm:"size:64" json:"rule_id"`
 	Detail    string    `gorm:"size:512" json:"detail"`
 	Host      string    `gorm:"size:256" json:"host"`
 	Path      string    `gorm:"size:512" json:"path"`
-	CreatedAt time.Time `gorm:"index" json:"created_at"`
+	CreatedAt time.Time `gorm:"index;index:idx_drop_source_created" json:"created_at"`
 }
 
 // BotScoreLog records the result of a bot scoring evaluation.

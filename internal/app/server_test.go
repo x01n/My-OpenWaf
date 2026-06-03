@@ -4,8 +4,13 @@ import (
 	"crypto/tls"
 	"testing"
 
+	"My-OpenWaf/internal/core"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestSnapshotUpstreamsDeduplicates(t *testing.T) {
@@ -89,6 +94,31 @@ func TestShouldEnableHTTP3(t *testing.T) {
 	}
 	if !shouldEnableHTTP3("h3", snapshotpkg.NetworkDefaults{HTTP3Enabled: true}) {
 		t.Fatal("network_config.http3_enabled=true should allow HTTP/3")
+	}
+}
+
+func TestLoadDropPolicyPreservesFallbackForMissingBoolFields(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.SystemSettings{}); err != nil {
+		t.Fatalf("migrate settings: %v", err)
+	}
+	repo := repository.NewSystemSettingsRepo(db)
+	if err := repo.Set("drop_policy", `{"enabled":false,"bot_score_threshold":90}`); err != nil {
+		t.Fatalf("seed drop policy: %v", err)
+	}
+
+	got := loadDropPolicy(repo, core.DefaultDropConfig())
+	if got.Enabled {
+		t.Fatalf("expected explicit enabled=false to be preserved, got %#v", got)
+	}
+	if got.BotScoreThreshold != 90 {
+		t.Fatalf("expected bot threshold to be loaded, got %#v", got)
+	}
+	if !got.CVEAutoDropCritical || !got.CVEAutoDropHigh {
+		t.Fatalf("expected missing CVE auto-drop fields to keep fallback true, got %#v", got)
 	}
 }
 

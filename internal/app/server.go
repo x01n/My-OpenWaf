@@ -49,8 +49,6 @@ import (
 	"My-OpenWaf/internal/waf/ratelimit"
 )
 
-// selfSignedCache 全局自签证书缓存，当 TLS 已启用但无证书时使用。
-
 var selfSignedCache = acmepkg.NewSelfSignedCache()
 
 func maskCredential(s string) string {
@@ -358,7 +356,7 @@ func Run() {
 		Metrics:               metrics,
 		Writer:                unifiedWriter,
 		ResponseCache:         responseCache,
-		AccessLogSamplingRate: 10,
+		AccessLogSamplingRate: 0,
 		Log:                   dpLog,
 		CaptchaManager:        captchaMgr,
 		ShieldManager:         shieldMgr,
@@ -574,6 +572,7 @@ func Run() {
 		CVEFeedMgr:    cveFeedMgr,
 		EscalationMgr: escalationMgr,
 		CaptchaMgr:    captchaMgr,
+		ChainMgr:      chainMgr,
 		ACMEMgr:       acmeMgr,
 		Cache:         cache.NewRedisKV(rt.Redis),
 		Upstreams:     upstreamPool,
@@ -695,22 +694,28 @@ func loadDropPolicy(repo *repository.SystemSettingsRepo, fallback core.DropConfi
 		return fallback
 	}
 	type dropPolicy struct {
-		Enabled             bool `json:"enabled"`
-		BotScoreThreshold   int  `json:"bot_score_threshold"`
-		CVEAutoDropCritical bool `json:"cve_auto_drop_critical"`
-		CVEAutoDropHigh     bool `json:"cve_auto_drop_high"`
+		Enabled             *bool `json:"enabled"`
+		BotScoreThreshold   *int  `json:"bot_score_threshold"`
+		CVEAutoDropCritical *bool `json:"cve_auto_drop_critical"`
+		CVEAutoDropHigh     *bool `json:"cve_auto_drop_high"`
 	}
 	var stored dropPolicy
 	if err := json.Unmarshal([]byte(val), &stored); err != nil {
 		return fallback
 	}
 	cfg := fallback
-	cfg.Enabled = stored.Enabled
-	if stored.BotScoreThreshold > 0 {
-		cfg.BotScoreThreshold = stored.BotScoreThreshold
+	if stored.Enabled != nil {
+		cfg.Enabled = *stored.Enabled
 	}
-	cfg.CVEAutoDropCritical = stored.CVEAutoDropCritical
-	cfg.CVEAutoDropHigh = stored.CVEAutoDropHigh
+	if stored.BotScoreThreshold != nil && *stored.BotScoreThreshold > 0 {
+		cfg.BotScoreThreshold = *stored.BotScoreThreshold
+	}
+	if stored.CVEAutoDropCritical != nil {
+		cfg.CVEAutoDropCritical = *stored.CVEAutoDropCritical
+	}
+	if stored.CVEAutoDropHigh != nil {
+		cfg.CVEAutoDropHigh = *stored.CVEAutoDropHigh
+	}
 	return cfg
 }
 
@@ -728,8 +733,6 @@ func resolveJWTSecret(rt *core.Runtime) []byte {
 	rt.DB.Create(&store.SystemSettings{Key: "jwt_secret", Value: secret})
 	return []byte(secret)
 }
-
-// ─── Data listener builder ──────────────────────────────────────────
 
 // buildDataServer creates a Hertz server for a data-plane listener,
 // optionally configured with TLS termination when the listener has TLS enabled.
@@ -1158,8 +1161,6 @@ func parseCipherSuites(raw string) []uint16 {
 	}
 	return suites
 }
-
-// ─── Config drift fingerprint ───────────────────────────────────────
 
 // siteListenerFingerprint produces a short hash that changes whenever a bind-level listener changes.
 func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {

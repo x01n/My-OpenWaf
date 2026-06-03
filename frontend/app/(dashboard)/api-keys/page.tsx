@@ -22,7 +22,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { EmptyState, PageIntro, Surface } from "@/components/console-shell"
+import {
+  ConsoleTableShell,
+  EmptyState,
+  PageIntro,
+} from "@/components/console-shell"
 import { createAPIKey, getAPIKeys, removeAPIKey, type APIKey } from "@/lib/api"
 import { formatDate } from "@/lib/utils"
 
@@ -108,75 +112,79 @@ export default function APIKeysPage() {
         }
       />
 
-      <Surface title="密钥列表" description="当前账户下所有 API 密钥。">
-        {loading ? (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-            加载中...
-          </div>
-        ) : keys.length === 0 ? (
-          <EmptyState
-            title="还没有 API 密钥"
-            description="创建后可用于自动化访问管理 API。建议按用途拆分，便于审计与吊销。"
-          />
-        ) : (
-          <div className="overflow-hidden rounded-lg border border-slate-200">
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-slate-50 text-xs tracking-wider text-slate-500 uppercase">
-                  <TableHead className="w-16">ID</TableHead>
-                  <TableHead>名称</TableHead>
-                  <TableHead>密钥</TableHead>
-                  <TableHead>创建时间</TableHead>
-                  <TableHead>最近使用</TableHead>
-                  <TableHead className="w-28 text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {keys.map((item) => (
-                  <TableRow key={item.id} className="hover:bg-slate-50">
-                    <TableCell className="font-mono text-xs text-slate-500">
-                      {item.id}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <KeyRound className="h-4 w-4 text-slate-600" />
-                        <span className="font-medium text-slate-900">
-                          {item.name}
-                        </span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <code className="rounded-lg bg-slate-100 px-2 py-1 font-mono text-xs text-slate-500">
-                        {maskToken(item.token)}
-                      </code>
-                    </TableCell>
-                    <TableCell className="text-xs whitespace-nowrap text-slate-500">
-                      {formatDate(item.created_at)}
-                    </TableCell>
-                    <TableCell className="text-xs whitespace-nowrap text-slate-500">
-                      {item.last_used_at
-                        ? formatDate(item.last_used_at)
-                        : "从未使用"}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="rounded-lg text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                          onClick={() => setDeleteTarget(item)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </Surface>
+      <ConsoleTableShell
+        title="密钥列表"
+        description="当前账户下所有 API 密钥。"
+        state={
+          loading ? (
+            <EmptyState
+              title="API 密钥加载中"
+              description="正在读取当前账户下的 API 密钥。"
+            />
+          ) : keys.length === 0 ? (
+            <EmptyState
+              title="还没有 API 密钥"
+              description="创建后可用于自动化访问管理 API。建议按用途拆分，便于审计与吊销。"
+            />
+          ) : undefined
+        }
+      >
+        <Table>
+          <TableHeader>
+            <TableRow className="bg-muted/45 text-xs font-medium text-muted-foreground">
+              <TableHead className="w-16 px-4 py-3">ID</TableHead>
+              <TableHead className="px-4 py-3">名称</TableHead>
+              <TableHead className="px-4 py-3">密钥</TableHead>
+              <TableHead className="px-4 py-3">创建时间</TableHead>
+              <TableHead className="px-4 py-3">最近使用</TableHead>
+              <TableHead className="w-28 px-4 py-3 text-right">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {keys.map((item) => (
+              <TableRow key={item.id} className="hover:bg-slate-50">
+                <TableCell className="px-4 py-3 font-mono text-xs text-slate-500">
+                  {item.id}
+                </TableCell>
+                <TableCell className="px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4 text-slate-600" />
+                    <span className="font-medium text-slate-900">
+                      {item.name}
+                    </span>
+                  </div>
+                </TableCell>
+                <TableCell className="px-4 py-3">
+                  <code className="rounded-lg bg-slate-100 px-2 py-1 font-mono text-xs text-slate-500">
+                    {maskToken(item.token)}
+                  </code>
+                </TableCell>
+                <TableCell className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
+                  {formatDate(item.created_at)}
+                </TableCell>
+                <TableCell className="px-4 py-3 text-xs whitespace-nowrap text-slate-500">
+                  {item.last_used_at
+                    ? formatDate(item.last_used_at)
+                    : "从未使用"}
+                </TableCell>
+                <TableCell className="px-4 py-3">
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-destructive"
+                      onClick={() => setDeleteTarget(item)}
+                      aria-label="删除 API 密钥"
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </ConsoleTableShell>
 
       {/* 创建 Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -193,11 +201,11 @@ export default function APIKeysPage() {
           </DialogHeader>
           {createdToken ? (
             <div className="space-y-4">
-              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-xs text-amber-800">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 <span>请立即复制此 Token，关闭后将无法再次查看明文。</span>
               </div>
-              <div className="flex gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="flex gap-2 rounded-xl border border-slate-200/80 bg-slate-50/80 p-3">
                 <code className="flex-1 text-xs break-all text-slate-700">
                   {createdToken}
                 </code>
@@ -256,7 +264,7 @@ export default function APIKeysPage() {
               删除后该密钥将立即失效，相关自动化任务需要改用新的 Token。
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-900">
+          <div className="rounded-xl border border-rose-200 bg-rose-50/90 px-4 py-4 text-sm leading-6 text-rose-900">
             目标密钥：{deleteTarget?.name || "-"}
           </div>
           <DialogFooter>

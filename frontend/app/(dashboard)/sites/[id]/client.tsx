@@ -2,16 +2,11 @@
 
 import Link from "next/link"
 import { useCallback, useEffect, useMemo, useState } from "react"
-import {
-  useParams,
-  usePathname,
-  useSearchParams,
-} from "next/navigation"
+import { useParams, usePathname, useSearchParams } from "next/navigation"
 import {
   ArrowLeft,
   Bot,
   FileText,
-  Globe,
   Loader2,
   Plus,
   Route,
@@ -21,6 +16,8 @@ import {
   Trash2,
   Zap,
 } from "lucide-react"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -30,6 +27,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Switch } from "@/components/ui/switch"
 import { SiteListenersPanel } from "@/components/site-listeners-panel"
 import {
   clearRecordedResources,
@@ -50,6 +57,7 @@ import {
   type Site,
   type SiteAccessLogStats,
 } from "@/lib/api"
+import { EmptyState, PageIntro } from "@/components/console-shell"
 import { terminalWAFActionOptions } from "@/lib/console"
 import {
   findInvalidSiteUpstream,
@@ -176,7 +184,9 @@ export default function SiteDetailClient() {
   const [rateLimitEnabled, setRateLimitEnabled] = useState<boolean | null>(null)
   const [rateLimitWindow, setRateLimitWindow] = useState(0)
   const [rateLimitMax, setRateLimitMax] = useState(0)
-  const [botProtectionEnabled, setBotProtectionEnabled] = useState(false)
+  const [botProtectionEnabled, setBotProtectionEnabled] = useState<
+    boolean | null
+  >(null)
   const [botProtectionLevel, setBotProtectionLevel] = useState("medium")
 
   const [appRules, setAppRules] = useState<ApplicationRouteRule[]>([])
@@ -196,7 +206,12 @@ export default function SiteDetailClient() {
     try {
       const [s, stats] = await Promise.all([
         getSite(siteId),
-        getSiteAccessLogStats(siteId).catch(() => null),
+        getSiteAccessLogStats(siteId).catch((error) => {
+          toast.error(
+            error instanceof Error ? error.message : "加载站点统计失败"
+          )
+          return null
+        }),
       ])
       setSite(s)
       setAccessStats(stats)
@@ -269,7 +284,7 @@ export default function SiteDetailClient() {
       setRateLimitEnabled(s.rate_limit_enabled ?? null)
       setRateLimitWindow(s.rate_limit_window || 0)
       setRateLimitMax(s.rate_limit_max || 0)
-      setBotProtectionEnabled(Boolean(s.bot_protection_enabled))
+      setBotProtectionEnabled(s.bot_protection_enabled ?? null)
       setBotProtectionLevel(s.bot_protection_level || "medium")
       setBlockHtml(s.block_html || "")
       setBlockStatus(s.block_status || 403)
@@ -295,7 +310,10 @@ export default function SiteDetailClient() {
   useEffect(() => {
     getCertificates()
       .then((data) => setCertificates(data.items || []))
-      .catch(() => setCertificates([]))
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "加载证书列表失败")
+        setCertificates([])
+      })
   }, [])
 
   const refreshInventory = useCallback(
@@ -345,62 +363,100 @@ export default function SiteDetailClient() {
       toast.error("启用 HTTPS 时请选择证书")
       return
     }
+    if (
+      tlsEnabled &&
+      certId &&
+      !certificates.some((cert) => cert.id === certId)
+    ) {
+      toast.error("当前绑定的证书不在可用证书列表中，请重新选择证书")
+      return
+    }
+
+    let payload: Partial<Site>
+    switch (tab) {
+      case "basic":
+        payload = {
+          host: hosts.join(", "),
+          bind,
+          network,
+          tls_enabled: tlsEnabled,
+          cert_id: tlsEnabled ? certId : null,
+          min_tls_version: tlsEnabled ? minTlsVersion : undefined,
+          max_tls_version: tlsEnabled ? maxTlsVersion : undefined,
+          cipher_suites: tlsEnabled ? cipherSuites : undefined,
+          alpn: tlsEnabled ? alpn : undefined,
+          xff_mode: xffMode,
+          trusted_cidr: trustedCIDR,
+          preserve_original_host: preserveOriginalHost,
+        }
+        break
+      case "upstream":
+        payload = {
+          upstream_urls: serializeSiteUpstreams(normalizedUpstreams),
+          upstream_tls_skip_verify: upstreamTLSSkipVerify,
+          upstream_tls_server_name: upstreamTLSServerName,
+        }
+        break
+      case "advanced":
+        payload = {
+          cache_enabled: cacheEnabled,
+          cache_default_ttl: cacheDefaultTTL,
+          cache_rules: JSON.stringify(
+            cacheRules
+              .filter(
+                (rule) =>
+                  rule.value.trim() &&
+                  (rule.ttl > 0 || (rule.ttl === 0 && cacheDefaultTTL > 0))
+              )
+              .map((rule) => ({
+                type: rule.type,
+                value: rule.value.trim(),
+                ttl: rule.ttl,
+                case_insensitive: rule.case_insensitive,
+                ignore_query: rule.ignore_query,
+              }))
+          ),
+          owasp_action: owaspAction,
+          cve_action: cveAction,
+          rate_limit_action: rateLimitAction,
+          owasp_enabled: owaspEnabled,
+          owasp_sensitivity: owaspSensitivity || undefined,
+          cve_enabled: cveEnabled,
+          rate_limit_enabled: rateLimitEnabled,
+          rate_limit_window: rateLimitWindow || undefined,
+          rate_limit_max: rateLimitMax || undefined,
+          bot_protection_enabled: botProtectionEnabled,
+          bot_protection_level: botProtectionLevel || undefined,
+          block_html: blockHtml,
+          block_status: blockStatus,
+          maintenance_enabled: maintenanceEnabled,
+          maintenance_html: maintenanceHtml,
+          maintenance_status: maintenanceStatus,
+          max_body_bytes: maxBodyBytes,
+          anti_replay_enabled: antiReplayEnabled,
+          anti_replay_ttl: antiReplayTTL,
+          anti_replay_action: antiReplayAction,
+        }
+        if (owaspEnabled === null) {
+          payload.owasp_action = ""
+          payload.owasp_sensitivity = ""
+        }
+        if (cveEnabled === null) {
+          payload.cve_action = ""
+        }
+        if (rateLimitEnabled === null) {
+          payload.rate_limit_action = ""
+          payload.rate_limit_window = 0
+          payload.rate_limit_max = 0
+        }
+        break
+      default:
+        return
+    }
+
     setSaving(true)
     try {
-      await updateSite(site.id, {
-        host: hosts.join(", "),
-        bind,
-        network,
-        tls_enabled: tlsEnabled,
-        cert_id: tlsEnabled ? certId : null,
-        min_tls_version: tlsEnabled ? minTlsVersion : undefined,
-        max_tls_version: tlsEnabled ? maxTlsVersion : undefined,
-        cipher_suites: tlsEnabled ? cipherSuites : undefined,
-        alpn: tlsEnabled ? alpn : undefined,
-        upstream_urls: serializeSiteUpstreams(normalizedUpstreams),
-        xff_mode: xffMode,
-        trusted_cidr: trustedCIDR,
-        preserve_original_host: preserveOriginalHost,
-        upstream_tls_skip_verify: upstreamTLSSkipVerify,
-        upstream_tls_server_name: upstreamTLSServerName,
-        cache_enabled: cacheEnabled,
-        cache_default_ttl: cacheDefaultTTL,
-        cache_rules: JSON.stringify(
-          cacheRules
-            .filter(
-              (rule) =>
-                rule.value.trim() &&
-                (rule.ttl > 0 || (rule.ttl === 0 && cacheDefaultTTL > 0))
-            )
-            .map((rule) => ({
-              type: rule.type,
-              value: rule.value.trim(),
-              ttl: rule.ttl,
-              case_insensitive: rule.case_insensitive,
-              ignore_query: rule.ignore_query,
-            }))
-        ),
-        owasp_action: owaspAction,
-        cve_action: cveAction,
-        rate_limit_action: rateLimitAction,
-        owasp_enabled: owaspEnabled,
-        owasp_sensitivity: owaspSensitivity || undefined,
-        cve_enabled: cveEnabled,
-        rate_limit_enabled: rateLimitEnabled,
-        rate_limit_window: rateLimitWindow || undefined,
-        rate_limit_max: rateLimitMax || undefined,
-        bot_protection_enabled: botProtectionEnabled,
-        bot_protection_level: botProtectionLevel || undefined,
-        block_html: blockHtml,
-        block_status: blockStatus,
-        maintenance_enabled: maintenanceEnabled,
-        maintenance_html: maintenanceHtml,
-        maintenance_status: maintenanceStatus,
-        max_body_bytes: maxBodyBytes,
-        anti_replay_enabled: antiReplayEnabled,
-        anti_replay_ttl: antiReplayTTL,
-        anti_replay_action: antiReplayAction,
-      })
+      await updateSite(site.id, payload)
       toast.success("站点配置已保存")
       load()
     } catch (err) {
@@ -431,6 +487,10 @@ export default function SiteDetailClient() {
     )
   }
 
+  function isAppRouteRuleEnabled(rule: Pick<ApplicationRouteRule, "enabled">) {
+    return rule.enabled !== false
+  }
+
   async function handleAddAppRule() {
     if (!site) return
     try {
@@ -455,7 +515,7 @@ export default function SiteDetailClient() {
     try {
       await updateApplicationRouteRule(site.id, rule.id, {
         name: rule.name ?? "",
-        enabled: Boolean(rule.enabled),
+        enabled: isAppRouteRuleEnabled(rule),
         priority: rule.priority ?? 0,
         target: rule.target,
         op: rule.op,
@@ -471,7 +531,13 @@ export default function SiteDetailClient() {
 
   async function handleDeleteAppRule(ruleId: number) {
     if (!site) return
-    if (!window.confirm("确定删除该规则？")) return
+    const rule = appRules.find((item) => item.id === ruleId)
+    if (
+      !window.confirm(
+        `确定删除应用路由规则「${rule?.name || ruleId}」？删除后本站点将停止按该规则记录资源。`
+      )
+    )
+      return
     try {
       await deleteApplicationRouteRule(site.id, ruleId)
       toast.success("已删除")
@@ -483,7 +549,12 @@ export default function SiteDetailClient() {
 
   async function handleClearRecorded() {
     if (!site) return
-    if (!window.confirm("确定清空本站点已记录的资源数据？不可恢复。")) return
+    if (
+      !window.confirm(
+        `确定清空站点「${site.host || site.id}」的已记录资源数据？此操作只影响当前站点的资源聚合记录，不会删除访问日志或规则，且不可恢复。`
+      )
+    )
+      return
     try {
       await clearRecordedResources(site.id)
       toast.success("已清空")
@@ -496,27 +567,25 @@ export default function SiteDetailClient() {
 
   if (loading) {
     return (
-      <div className="flex min-h-[400px] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-slate-500" />
-      </div>
+      <EmptyState
+        title="正在加载站点配置"
+        description="正在读取站点基础信息、监听器、证书和最近 24 小时访问统计。"
+        action={<Loader2 className="h-5 w-5 animate-spin text-slate-400" />}
+      />
     )
   }
 
   if (!site) {
     return (
-      <div className="flex min-h-[400px] flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white">
-        <Globe className="mb-4 h-12 w-12 text-slate-300" />
-        <h3 className="text-lg font-semibold text-slate-700">站点不存在</h3>
-        <p className="mt-2 text-sm text-slate-500">
-          该站点可能已被删除或无权访问
-        </p>
-        <Button
-          asChild
-          className="mt-4 rounded-md bg-teal-500 text-white hover:bg-teal-600"
-        >
-          <Link href="/sites/">返回应用列表</Link>
-        </Button>
-      </div>
+      <EmptyState
+        title="站点不存在"
+        description="该站点可能已被删除，或当前账户没有访问权限。"
+        action={
+          <Button asChild>
+            <Link href="/sites/">返回应用列表</Link>
+          </Button>
+        }
+      />
     )
   }
 
@@ -561,14 +630,14 @@ export default function SiteDetailClient() {
     },
     {
       label: "请求日志",
-      desc: "按当前站点 Host 检索请求明细",
+      desc: "按首个 Host 检索请求明细",
       icon: FileText,
       href: `/access-logs/?host=${encodeURIComponent(site.host.split(",")[0]?.trim() || site.host)}`,
       color: "bg-cyan-50 text-cyan-600",
     },
     {
       label: "拦截日志",
-      desc: "按当前站点 Host 查看拦截事件",
+      desc: "按首个 Host 查看拦截事件",
       icon: ShieldAlert,
       href: `/security-events/?host=${encodeURIComponent(site.host.split(",")[0]?.trim() || site.host)}`,
       color: "bg-rose-50 text-rose-600",
@@ -577,51 +646,37 @@ export default function SiteDetailClient() {
 
   return (
     <div className="space-y-6">
-      {/* Back */}
       <Button
         asChild
         variant="ghost"
         className="rounded-md text-slate-500 hover:text-slate-900"
       >
         <Link href="/sites/">
-          <ArrowLeft className="mr-2 h-4 w-4" />
+          <ArrowLeft data-icon="inline-start" />
           返回应用列表
         </Link>
       </Button>
 
-      {/* Site Header */}
-      <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="flex items-start justify-between">
-          <div className="flex items-start gap-4">
-            <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100">
-              <Globe className="h-6 w-6 text-slate-600" />
-            </div>
-            <div>
-              <div className="flex items-center gap-3">
-                <h1 className="text-xl font-bold text-slate-900">
-                  {site.host
-                    ?.split(",")
-                    .map((h) => h.trim())
-                    .join(", ")}
-                </h1>
-                <span
-                  className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                    site.enabled
-                      ? "bg-emerald-50 text-emerald-700"
-                      : "bg-slate-100 text-slate-500"
-                  }`}
-                >
-                  {site.enabled ? "运行中" : "已停止"}
-                </span>
-              </div>
-              <p className="mt-1 text-sm text-slate-500">
-                {site.tls_enabled ? "HTTPS" : "HTTP"} · 监听{" "}
-                <span className="font-mono">{site.bind}</span> · 网络{" "}
-                {site.network} · 创建于 {formatDate(site.created_at)}
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-2">
+      <PageIntro
+        eyebrow="Site Detail"
+        title={
+          site.host
+            ?.split(",")
+            .map((h) => h.trim())
+            .join(", ") || "未命名站点"
+        }
+        description={`${site.tls_enabled ? "HTTPS" : "HTTP"} · 监听 ${site.bind} · 网络 ${site.network} · 创建于 ${formatDate(site.created_at)}`}
+        actions={
+          <>
+            <span
+              className={`inline-flex h-8 items-center rounded-lg border px-2.5 text-xs font-medium ${
+                site.enabled
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-slate-200 bg-slate-50 text-slate-500"
+              }`}
+            >
+              {site.enabled ? "运行中" : "已停止"}
+            </span>
             <Button
               variant="outline"
               className="rounded-md"
@@ -632,9 +687,9 @@ export default function SiteDetailClient() {
             <Button variant="outline" className="rounded-md" onClick={load}>
               刷新
             </Button>
-          </div>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard label="24h 请求" value={accessStats?.requests ?? 0} />
@@ -656,10 +711,10 @@ export default function SiteDetailClient() {
           <Link
             key={q.label}
             href={q.href}
-            className="group flex min-w-0 items-start gap-3 rounded-lg border border-slate-200 bg-white p-4 text-left shadow-sm transition-all hover:border-slate-300 hover:shadow-md"
+            className="group console-panel flex min-w-0 items-start gap-3 p-4 text-left transition-all hover:border-slate-300 hover:shadow-md"
           >
             <div
-              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${q.color}`}
+              className={`flex size-10 shrink-0 items-center justify-center rounded-lg ${q.color}`}
             >
               <q.icon className="h-5 w-5" />
             </div>
@@ -675,24 +730,19 @@ export default function SiteDetailClient() {
         ))}
       </div>
 
-      {/* Tabs */}
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="overflow-x-auto overscroll-x-contain border-b border-slate-200">
-          <div className="flex min-w-max">
+      <Tabs
+        value={tab}
+        onValueChange={(value) => setTab(value as TabKey)}
+        className="rounded-lg border border-slate-200 bg-white shadow-sm"
+      >
+        <div className="overflow-x-auto overscroll-x-contain border-b border-slate-200 p-1">
+          <TabsList variant="line" className="min-w-max bg-transparent">
             {tabs.map((t) => (
-              <button
-                key={t.key}
-                onClick={() => setTab(t.key)}
-                className={`px-6 py-3 text-sm font-medium transition-colors ${
-                  tab === t.key
-                    ? "border-b-2 border-slate-950 text-slate-950"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-              >
+              <TabsTrigger key={t.key} value={t.key} className="px-5 py-2">
                 {t.label}
-              </button>
+              </TabsTrigger>
             ))}
-          </div>
+          </TabsList>
         </div>
 
         <div className="p-6">
@@ -774,6 +824,14 @@ export default function SiteDetailClient() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="none">不绑定证书</SelectItem>
+                          {certId &&
+                            !certificates.some(
+                              (cert) => cert.id === certId
+                            ) && (
+                              <SelectItem value={String(certId)}>
+                                已失效证书 #{certId}
+                              </SelectItem>
+                            )}
                           {certificates.map((cert) => (
                             <SelectItem key={cert.id} value={String(cert.id)}>
                               {cert.name}
@@ -877,9 +935,10 @@ export default function SiteDetailClient() {
                       转发到上游时使用客户端请求 Host，并写入 X-Forwarded-Host。
                     </div>
                   </div>
-                  <ToggleSwitch
+                  <Switch
                     checked={preserveOriginalHost}
-                    onChange={setPreserveOriginalHost}
+                    onCheckedChange={setPreserveOriginalHost}
+                    aria-label="保留原始 Host"
                   />
                 </label>
               </div>
@@ -929,9 +988,10 @@ export default function SiteDetailClient() {
                       仅用于自签名或测试上游。
                     </div>
                   </div>
-                  <ToggleSwitch
+                  <Switch
                     checked={upstreamTLSSkipVerify}
-                    onChange={setUpstreamTLSSkipVerify}
+                    onCheckedChange={setUpstreamTLSSkipVerify}
+                    aria-label="跳过上游 TLS 校验"
                   />
                 </label>
                 <FieldGroup label="上游 TLS Server Name">
@@ -993,10 +1053,14 @@ export default function SiteDetailClient() {
                 <h3 className="mb-1 text-sm font-semibold text-slate-900">
                   站点防护配置
                 </h3>
-                <p className="mb-5 text-xs text-slate-500">
+                <p className="mb-3 text-xs text-slate-500">
                   为本站点单独配置防护策略，或跟随全局配置。规则级 action
                   优先级更高。
                 </p>
+                <div className="mb-5 rounded-xl border border-cyan-100 bg-cyan-50/80 px-3 py-2 text-xs leading-5 text-cyan-800">
+                  只有 OWASP、CVE、频率限制、Bot 使用“继承全局 / 覆盖启用 /
+                  覆盖关闭”三态；缓存、防重放、维护模式是站点本地开关。
+                </div>
 
                 <div className="space-y-5">
                   {/* OWASP Section */}
@@ -1008,13 +1072,11 @@ export default function SiteDetailClient() {
                       </span>
                     </div>
                     <InheritToggle
-                      inherit={owaspEnabled === null}
-                      onToggle={(inherit) => {
-                        if (inherit) {
-                          setOwaspEnabled(null)
+                      value={owaspEnabled}
+                      onChange={(value) => {
+                        setOwaspEnabled(value)
+                        if (value === null) {
                           setOwaspSensitivity("")
-                        } else {
-                          setOwaspEnabled(true)
                         }
                       }}
                     />
@@ -1029,9 +1091,10 @@ export default function SiteDetailClient() {
                               关闭后将跳过 OWASP 攻击检测
                             </div>
                           </div>
-                          <ToggleSwitch
+                          <Switch
                             checked={owaspEnabled === true}
-                            onChange={(v) => setOwaspEnabled(v)}
+                            onCheckedChange={(v) => setOwaspEnabled(v)}
+                            aria-label="启用 OWASP 检测"
                           />
                         </label>
                         <div className="grid gap-4 md:grid-cols-2">
@@ -1089,14 +1152,8 @@ export default function SiteDetailClient() {
                       </span>
                     </div>
                     <InheritToggle
-                      inherit={cveEnabled === null}
-                      onToggle={(inherit) => {
-                        if (inherit) {
-                          setCveEnabled(null)
-                        } else {
-                          setCveEnabled(true)
-                        }
-                      }}
+                      value={cveEnabled}
+                      onChange={setCveEnabled}
                     />
                     {cveEnabled !== null && (
                       <div className="mt-4 space-y-3">
@@ -1109,9 +1166,10 @@ export default function SiteDetailClient() {
                               关闭后将跳过 CVE 漏洞检测
                             </div>
                           </div>
-                          <ToggleSwitch
+                          <Switch
                             checked={cveEnabled === true}
-                            onChange={(v) => setCveEnabled(v)}
+                            onCheckedChange={(v) => setCveEnabled(v)}
+                            aria-label="启用 CVE 检测"
                           />
                         </label>
                         <div className="max-w-sm">
@@ -1149,14 +1207,12 @@ export default function SiteDetailClient() {
                       </span>
                     </div>
                     <InheritToggle
-                      inherit={rateLimitEnabled === null}
-                      onToggle={(inherit) => {
-                        if (inherit) {
-                          setRateLimitEnabled(null)
+                      value={rateLimitEnabled}
+                      onChange={(value) => {
+                        setRateLimitEnabled(value)
+                        if (value === null) {
                           setRateLimitWindow(0)
                           setRateLimitMax(0)
-                        } else {
-                          setRateLimitEnabled(true)
                         }
                       }}
                     />
@@ -1171,9 +1227,10 @@ export default function SiteDetailClient() {
                               关闭后将跳过请求频率限制检查
                             </div>
                           </div>
-                          <ToggleSwitch
+                          <Switch
                             checked={rateLimitEnabled === true}
-                            onChange={(v) => setRateLimitEnabled(v)}
+                            onCheckedChange={(v) => setRateLimitEnabled(v)}
+                            aria-label="启用频率限制"
                           />
                         </label>
                         <div className="grid gap-4 md:grid-cols-3">
@@ -1240,15 +1297,15 @@ export default function SiteDetailClient() {
                           启用 Bot 防护
                         </div>
                         <div className="mt-0.5 text-xs text-slate-500">
-                          开启后将基于评分模型检测自动化访问
+                          按站点覆盖 Bot 检测开关；继承时使用全局配置
                         </div>
                       </div>
-                      <ToggleSwitch
-                        checked={botProtectionEnabled}
+                      <InheritToggle
+                        value={botProtectionEnabled}
                         onChange={setBotProtectionEnabled}
                       />
                     </label>
-                    {botProtectionEnabled && (
+                    {botProtectionEnabled !== null && (
                       <div className="mt-3 max-w-sm">
                         <FieldGroup label="防护等级">
                           <Select
@@ -1287,9 +1344,10 @@ export default function SiteDetailClient() {
                       仅缓存 GET 200、无 Set-Cookie、响应体非空的安全响应。
                     </p>
                   </div>
-                  <ToggleSwitch
+                  <Switch
                     checked={cacheEnabled}
-                    onChange={setCacheEnabled}
+                    onCheckedChange={setCacheEnabled}
+                    aria-label="启用资源缓存规则"
                   />
                 </div>
                 {cacheEnabled && (
@@ -1491,9 +1549,10 @@ export default function SiteDetailClient() {
                       开启后将返回维护页面，所有流量不转发
                     </p>
                   </div>
-                  <ToggleSwitch
+                  <Switch
                     checked={maintenanceEnabled}
-                    onChange={setMaintenanceEnabled}
+                    onCheckedChange={setMaintenanceEnabled}
+                    aria-label="启用维护模式"
                   />
                 </div>
                 {maintenanceEnabled && (
@@ -1580,9 +1639,10 @@ export default function SiteDetailClient() {
                       基于 Nonce 校验拦截重复提交请求
                     </p>
                   </div>
-                  <ToggleSwitch
+                  <Switch
                     checked={antiReplayEnabled}
-                    onChange={setAntiReplayEnabled}
+                    onCheckedChange={setAntiReplayEnabled}
+                    aria-label="启用防重放保护"
                   />
                 </div>
                 {antiReplayEnabled && (
@@ -1624,12 +1684,16 @@ export default function SiteDetailClient() {
 
           {tab === "inventory" && (
             <div className="space-y-8">
-              <div className="rounded-md border border-amber-100 bg-amber-50/80 px-4 py-3 text-xs text-amber-900">
-                <strong className="font-medium">说明：</strong>
-                匹配规则在「保存」后立即写入数据库并触发快照重载；命中规则后，数据面会将资源摘要写入下方列表（普通
-                HTTP 成功响应路径）。Header 类目标为「请求
-                Header（单项）」时须填写 Header 名称。
-              </div>
+              <Alert>
+                <AlertDescription className="text-xs leading-5">
+                  <strong className="font-medium text-foreground">
+                    说明：
+                  </strong>
+                  匹配规则在「保存」后立即写入数据库并触发快照重载；命中规则后，数据面会将资源摘要写入下方列表。下方“已记录资源”是按应用路由规则聚合的资源摘要，不是完整访问日志；完整请求请到访问日志按
+                  Host、路径或 Request ID 检索。Header 类目标为「请求
+                  Header（单项）」时须填写 Header 名称。
+                </AlertDescription>
+              </Alert>
 
               <div className="rounded-md border border-slate-200 p-5">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -1658,7 +1722,7 @@ export default function SiteDetailClient() {
                       className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
                       onClick={() => void handleAddAppRule()}
                     >
-                      <Plus className="mr-1 inline h-3.5 w-3.5" />
+                      <Plus data-icon="inline-start" />
                       添加规则
                     </Button>
                   </div>
@@ -1703,11 +1767,12 @@ export default function SiteDetailClient() {
                             </FieldGroup>
                             <FieldGroup label="启用">
                               <div className="flex h-9 items-center">
-                                <ToggleSwitch
-                                  checked={rule.enabled !== false}
-                                  onChange={(v) =>
+                                <Switch
+                                  checked={isAppRouteRuleEnabled(rule)}
+                                  onCheckedChange={(v) =>
                                     patchAppRule(rid, { enabled: v })
                                   }
+                                  aria-label="启用应用路由规则"
                                 />
                               </div>
                             </FieldGroup>
@@ -1732,7 +1797,7 @@ export default function SiteDetailClient() {
                                 disabled={!rid}
                                 onClick={() => void handleDeleteAppRule(rid)}
                               >
-                                <Trash2 className="h-4 w-4" />
+                                <Trash2 />
                               </Button>
                             </div>
                           </div>
@@ -1809,9 +1874,14 @@ export default function SiteDetailClient() {
 
               <div className="rounded-md border border-slate-200 p-5">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-slate-900">
-                    已记录资源
-                  </h3>
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      已记录资源摘要
+                    </h3>
+                    <p className="mt-1 text-xs text-slate-500">
+                      当前站点内由应用路由规则命中的聚合记录，不等同于完整访问日志。
+                    </p>
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     <Button
                       type="button"
@@ -1829,71 +1899,76 @@ export default function SiteDetailClient() {
                       className="rounded-md text-red-600 hover:bg-red-50"
                       onClick={() => void handleClearRecorded()}
                     >
-                      清空记录
+                      清空当前站点记录
                     </Button>
                   </div>
                 </div>
-                <div className="overflow-x-auto rounded-md border border-slate-100">
-                  <table className="w-full min-w-[960px] border-collapse text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                        <th className="px-2 py-2 font-medium">方法</th>
-                        <th className="px-2 py-2 font-medium">Host</th>
-                        <th className="px-2 py-2 font-medium">路径</th>
-                        <th className="px-2 py-2 font-medium">状态</th>
-                        <th className="px-2 py-2 font-medium">类型</th>
-                        <th className="px-2 py-2 font-medium">客户端</th>
-                        <th className="px-2 py-2 font-medium">规则 ID</th>
-                        <th className="px-2 py-2 font-medium">命中</th>
-                        <th className="px-2 py-2 font-medium">首次</th>
-                        <th className="px-2 py-2 font-medium">最近</th>
-                      </tr>
-                    </thead>
-                    <tbody>
+                <div className="rounded-md border border-slate-100">
+                  <Table className="min-w-[960px] text-xs">
+                    <TableHeader className="bg-slate-50 text-slate-600">
+                      <TableRow>
+                        <TableHead className="px-2 py-2">方法</TableHead>
+                        <TableHead className="px-2 py-2">Host</TableHead>
+                        <TableHead className="px-2 py-2">路径</TableHead>
+                        <TableHead className="px-2 py-2">状态</TableHead>
+                        <TableHead className="px-2 py-2">类型</TableHead>
+                        <TableHead className="px-2 py-2">客户端</TableHead>
+                        <TableHead className="px-2 py-2">
+                          历史命中规则 ID
+                        </TableHead>
+                        <TableHead className="px-2 py-2">命中</TableHead>
+                        <TableHead className="px-2 py-2">首次</TableHead>
+                        <TableHead className="px-2 py-2">最近</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
                       {recItems.length === 0 ? (
-                        <tr>
-                          <td
+                        <TableRow>
+                          <TableCell
                             colSpan={10}
                             className="px-3 py-8 text-center text-slate-500"
                           >
                             暂无记录；配置规则并产生匹配流量后将在此聚合展示。
-                          </td>
-                        </tr>
+                          </TableCell>
+                        </TableRow>
                       ) : (
                         recItems.map((row) => (
-                          <tr
-                            key={row.id}
-                            className="border-b border-slate-100 hover:bg-slate-50/80"
-                          >
-                            <td className="px-2 py-2 font-mono">
-                              {row.method}
-                            </td>
-                            <td
+                          <TableRow key={row.id}>
+                            <TableCell className="px-2 py-2 font-mono">
+                              <Badge variant="secondary" className="font-mono">
+                                {row.method}
+                              </Badge>
+                            </TableCell>
+                            <TableCell
                               className="max-w-[140px] truncate px-2 py-2 font-mono"
                               title={row.host}
                             >
                               {row.host}
-                            </td>
-                            <td
+                            </TableCell>
+                            <TableCell
                               className="max-w-[220px] truncate px-2 py-2 font-mono"
                               title={row.path}
                             >
                               {row.path}
-                            </td>
-                            <td className="px-2 py-2">{row.status_code}</td>
-                            <td
+                            </TableCell>
+                            <TableCell className="px-2 py-2">
+                              <Badge variant="outline" className="font-mono">
+                                {row.status_code}
+                              </Badge>
+                            </TableCell>
+                            <TableCell
                               className="max-w-[160px] truncate px-2 py-2"
                               title={row.content_type || ""}
                             >
                               {row.content_type || "—"}
-                            </td>
-                            <td
+                            </TableCell>
+                            <TableCell
                               className="max-w-[120px] truncate px-2 py-2 font-mono"
                               title={row.client_ip || ""}
                             >
                               {row.client_ip || "—"}
-                            </td>
-                            <td
+                            </TableCell>
+                            <TableCell
                               className="max-w-[100px] truncate px-2 py-2 font-mono"
                               title={row.matched_rule_ids || ""}
                             >
@@ -1901,23 +1976,26 @@ export default function SiteDetailClient() {
                                 (row.primary_rule_id != null
                                   ? String(row.primary_rule_id)
                                   : "—")}
-                            </td>
-                            <td className="px-2 py-2">{row.hit_count}</td>
-                            <td className="px-2 py-2 whitespace-nowrap text-slate-500">
+                            </TableCell>
+                            <TableCell className="px-2 py-2 font-mono">
+                              {row.hit_count}
+                            </TableCell>
+                            <TableCell className="px-2 py-2 whitespace-nowrap text-slate-500">
                               {formatDate(row.first_seen)}
-                            </td>
-                            <td className="px-2 py-2 whitespace-nowrap text-slate-500">
+                            </TableCell>
+                            <TableCell className="px-2 py-2 whitespace-nowrap text-slate-500">
                               {formatDate(row.last_seen)}
-                            </td>
-                          </tr>
+                            </TableCell>
+                          </TableRow>
                         ))
                       )}
-                    </tbody>
-                  </table>
+                    </TableBody>
+                  </Table>
                 </div>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
                   <span>
-                    共 {recTotal} 条 · 第 {recPage} / {recTotalPages} 页
+                    共 {recTotal} 条 · 第 {recPage} / {recTotalPages} 页 · 规则
+                    ID 为记录产生时的历史命中值
                   </span>
                   <div className="flex gap-2">
                     <Button
@@ -1963,7 +2041,7 @@ export default function SiteDetailClient() {
             </Button>
           </div>
         )}
-      </div>
+      </Tabs>
     </div>
   )
 }
@@ -2011,61 +2089,44 @@ function FieldGroup({
   )
 }
 
-function ToggleSwitch({
-  checked,
+function InheritToggle({
+  value,
   onChange,
 }: {
-  checked: boolean
-  onChange: (v: boolean) => void
+  value: boolean | null
+  onChange: (value: boolean | null) => void
 }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-        checked ? "bg-slate-950" : "bg-slate-200"
-      }`}
-    >
-      <span
-        className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-          checked ? "translate-x-6" : "translate-x-1"
-        }`}
-      />
-    </button>
-  )
-}
+  const items: Array<{ value: "inherit" | "on" | "off"; label: string }> = [
+    { value: "inherit", label: "继承全局" },
+    { value: "on", label: "覆盖启用" },
+    { value: "off", label: "覆盖关闭" },
+  ]
+  const current = value === null ? "inherit" : value ? "on" : "off"
 
-function InheritToggle({
-  inherit,
-  onToggle,
-}: {
-  inherit: boolean
-  onToggle: (inherit: boolean) => void
-}) {
   return (
     <div className="inline-flex overflow-hidden rounded-md border border-slate-200">
-      <button
-        type="button"
-        onClick={() => onToggle(true)}
-        className={`px-3.5 py-1.5 text-xs font-medium transition-colors ${
-          inherit
-            ? "bg-teal-600 text-white"
-            : "bg-white text-slate-500 hover:bg-slate-50"
-        }`}
-      >
-        跟随全局配置
-      </button>
-      <button
-        type="button"
-        onClick={() => onToggle(false)}
-        className={`px-3.5 py-1.5 text-xs font-medium transition-colors ${
-          !inherit
-            ? "bg-teal-600 text-white"
-            : "bg-white text-slate-500 hover:bg-slate-50"
-        }`}
-      >
-        使用自定义配置
-      </button>
+      {items.map((item) => (
+        <button
+          key={item.value}
+          type="button"
+          onClick={() =>
+            onChange(
+              item.value === "inherit"
+                ? null
+                : item.value === "on"
+                  ? true
+                  : false
+            )
+          }
+          className={`px-3.5 py-1.5 text-xs font-medium transition-colors ${
+            current === item.value
+              ? "bg-teal-600 text-white"
+              : "bg-white text-slate-500 hover:bg-slate-50"
+          }`}
+        >
+          {item.label}
+        </button>
+      ))}
     </div>
   )
 }

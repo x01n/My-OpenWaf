@@ -11,6 +11,9 @@ import (
 const (
 	XFFModeStrip      = "strip_all_and_set_remote"
 	XFFModeTrustOuter = "trust_outer_waf_cidr_then_take_leftmost"
+
+	SiteProtectionModeProtect = "protect"
+	SiteProtectionModeObserve = "observe"
 )
 
 // Site holds a virtual host configuration: listener, TLS, protection, forwarding.
@@ -35,7 +38,7 @@ type Site struct {
 	ALPN          string `gorm:"size:255" json:"alpn"`
 
 	PolicyID              *uint  `json:"policy_id,omitempty"`
-	BotProtectionEnabled  bool   `gorm:"default:false" json:"bot_protection_enabled"`
+	BotProtectionEnabled  *bool  `gorm:"default:null" json:"bot_protection_enabled,omitempty"`
 	BotProtectionLevel    string `gorm:"size:16;default:medium" json:"bot_protection_level"`
 	AttackProtectionLevel string `gorm:"size:16;default:medium" json:"attack_protection_level"`
 
@@ -78,6 +81,37 @@ type Site struct {
 	ListenerID          uint  `gorm:"index" json:"listener_id,omitempty"`
 	ForwardingProfileID *uint `json:"forwarding_profile_id,omitempty"`
 	InheritListenerCert bool  `gorm:"default:false" json:"inherit_listener_cert,omitempty"`
+}
+
+// ApplyProtectionModeOverrides syncs the compact site mode into runtime protection fields.
+func (s *Site) ApplyProtectionModeOverrides() {
+	switch s.AttackProtectionLevel {
+	case SiteProtectionModeObserve:
+		enabled := true
+		disabled := false
+		s.BotProtectionEnabled = &disabled
+		s.OWASPEnabled = &enabled
+		if s.OWASPSensitivity == "" {
+			s.OWASPSensitivity = "mid"
+		}
+		s.OWASPAction = string(ActionObserve)
+		s.CVEEnabled = &enabled
+		s.CVEAction = string(ActionObserve)
+		s.RateLimitEnabled = &enabled
+		s.RateLimitAction = string(ActionObserve)
+	case SiteProtectionModeProtect:
+		enabled := true
+		s.BotProtectionEnabled = &enabled
+		s.OWASPEnabled = &enabled
+		if s.OWASPSensitivity == "" {
+			s.OWASPSensitivity = "mid"
+		}
+		s.OWASPAction = string(ActionIntercept)
+		s.CVEEnabled = &enabled
+		s.CVEAction = string(ActionIntercept)
+		s.RateLimitEnabled = &enabled
+		s.RateLimitAction = string(ActionRateLimit)
+	}
 }
 
 // GetCustomErrorPages parses the CustomErrorPages JSON field.

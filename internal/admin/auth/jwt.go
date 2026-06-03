@@ -38,7 +38,6 @@ const (
 	Audience = "my-openwaf-admin"
 )
 
-// ─── Token Manager ─────────────────────────────────────────────────
 
 // TokenManager handles JWT signing, verification, key rotation, and token blacklisting.
 type TokenManager struct {
@@ -79,7 +78,6 @@ func (tm *TokenManager) PrimarySecret() []byte {
 	return tm.primary
 }
 
-// ─── Sign / Verify ─────────────────────────────────────────────────
 
 // SignAccessToken produces a signed JWT for the given user.
 func (tm *TokenManager) SignAccessToken(username, role, clientIP, userAgent string) (tokenStr string, jti string, exp time.Time, err error) {
@@ -153,7 +151,6 @@ func verifyWithKey(tokenStr string, secret []byte) (*Claims, error) {
 	return nil, jwt.ErrSignatureInvalid
 }
 
-// ─── Backward-compatible wrappers ──────────────────────────────────
 
 // SignAccessToken is the backward-compatible package-level function.
 func SignAccessToken(username string, secret []byte) (string, time.Time, error) {
@@ -193,7 +190,6 @@ func VerifyAccessToken(tokenStr string, secret []byte) (*Claims, error) {
 	return nil, jwt.ErrSignatureInvalid
 }
 
-// ─── Token Blacklist ───────────────────────────────────────────────
 
 // BlacklistToken adds a JTI to the blacklist with the given expiry and reason.
 func (tm *TokenManager) BlacklistToken(jti string, expiresAt time.Time, reason string) {
@@ -252,7 +248,6 @@ func (tm *TokenManager) cleanupLoop() {
 	}
 }
 
-// ─── Refresh Token helpers (unchanged) ─────────────────────────────
 
 // GenerateRefreshToken returns a new JTI, the raw token string, and its SHA-256 hash.
 func GenerateRefreshToken() (jti, raw, hash string, err error) {
@@ -277,7 +272,6 @@ func HashToken(raw string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// ─── Utility ───────────────────────────────────────────────────────
 
 func generateJTI() string {
 	b := make([]byte, 16)

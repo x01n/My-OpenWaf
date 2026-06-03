@@ -219,8 +219,6 @@ func (r *SecurityEventRepo) CountBySite(siteID uint, f SecurityEventFilter) (int
 	return r.Count(f)
 }
 
-// ─── Aggregation queries for dashboard ────────────────────────────
-
 type CategoryStat struct {
 	Category string `json:"category"`
 	Count    int64  `json:"count"`
@@ -367,6 +365,31 @@ func (r *SecurityEventRepo) DistinctRequestCountBySite(siteID uint, since time.T
 	return total, r.db.Model(&store.SecurityEvent{}).Distinct("request_id").Where("site_id = ? AND created_at >= ?", siteID, since).Count(&total).Error
 }
 
+func (r *SecurityEventRepo) DistinctRequestCount(since time.Time) (int64, error) {
+	var total int64
+	return total, r.db.Model(&store.SecurityEvent{}).Distinct("request_id").Where("created_at >= ?", since).Count(&total).Error
+}
+
+func (r *SecurityEventRepo) CountTerminal(since time.Time) (int64, error) {
+	var total int64
+	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}).Count(&total).Error
+}
+
+func (r *SecurityEventRepo) CountObserve(since time.Time) (int64, error) {
+	var total int64
+	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action = ?", since, "observe").Count(&total).Error
+}
+
+func (r *SecurityEventRepo) CountChallenge(since time.Time) (int64, error) {
+	var total int64
+	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"}).Count(&total).Error
+}
+
+func (r *SecurityEventRepo) CountChallengeBySite(siteID uint, since time.Time) (int64, error) {
+	var total int64
+	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"}).Count(&total).Error
+}
+
 func (r *SecurityEventRepo) GetLatestBySite(siteID uint, limit int) ([]store.SecurityEvent, error) {
 	var items []store.SecurityEvent
 	return items, r.db.Where("site_id = ?", siteID).Order("id DESC").Limit(limit).Find(&items).Error
@@ -374,7 +397,7 @@ func (r *SecurityEventRepo) GetLatestBySite(siteID uint, limit int) ([]store.Sec
 
 func (r *SecurityEventRepo) CountTerminalBySite(siteID uint, since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, []string{"intercept", "drop", "challenge", "redirect"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) CountObserveBySite(siteID uint, since time.Time) (int64, error) {

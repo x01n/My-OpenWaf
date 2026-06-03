@@ -10,7 +10,7 @@ import (
 var ctxPool = sync.Pool{
 	New: func() any {
 		return &RequestCtx{
-			Headers:    make(map[string]string, 16),
+			Headers:    make(map[string]string, 32),
 			HeaderKeys: make([]string, 0, 16),
 		}
 	},

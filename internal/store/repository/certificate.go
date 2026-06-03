@@ -18,7 +18,11 @@ func (r *CertificateRepo) List(offset, limit int) ([]store.Certificate, int64, e
 	if err := r.db.Model(&store.Certificate{}).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	if err := r.db.Offset(offset).Limit(limit).Order("id ASC").Find(&items).Error; err != nil {
+	q := r.db.Order("id ASC")
+	if limit > 0 {
+		q = q.Offset(offset).Limit(limit)
+	}
+	if err := q.Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 	return items, total, nil

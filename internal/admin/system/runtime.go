@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"net/url"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -33,8 +34,8 @@ func GetRuntimeConfig(cfg core.Config) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		c.JSON(200, RuntimeConfigResponse{
 			DBDriver:        cfg.DBDriver,
-			DBDSN:           cfg.DBDSN,
-			LogDBDSN:        cfg.LogDBDSN,
+			DBDSN:           maskDSN(cfg.DBDSN),
+			LogDBDSN:        maskDSN(cfg.LogDBDSN),
 			DataDir:         cfg.DataDir,
 			RedisAddr:       cfg.RedisAddr,
 			RedisEnabled:    strings.TrimSpace(cfg.RedisAddr) != "",
@@ -51,4 +52,33 @@ func GetRuntimeConfig(cfg core.Config) app.HandlerFunc {
 			RestartRequired: true,
 		})
 	}
+}
+
+func maskDSN(dsn string) string {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
+		return ""
+	}
+	u, err := url.Parse(trimmed)
+	if err == nil && u.User != nil {
+		if username := u.User.Username(); username != "" {
+			u.User = url.UserPassword(username, "******")
+		} else {
+			u.User = url.UserPassword("******", "******")
+		}
+		return u.String()
+	}
+	if strings.Contains(trimmed, "password=") || strings.Contains(trimmed, "passwd=") || strings.Contains(trimmed, "pwd=") {
+		parts := strings.Fields(trimmed)
+		for i, part := range parts {
+			lower := strings.ToLower(part)
+			for _, key := range []string{"password=", "passwd=", "pwd="} {
+				if strings.HasPrefix(lower, key) {
+					parts[i] = part[:len(key)] + "******"
+				}
+			}
+		}
+		return strings.Join(parts, " ")
+	}
+	return trimmed
 }

@@ -44,7 +44,7 @@ func GetSensitivityConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 			}
 		}
 		cfg := shared.LoadProtectionConfig(repo)
-		sens := cfg.GetCategorySensitivity()
+		sens := cfg.EffectiveCategorySensitivity()
 		if sens == nil {
 			sens = make(map[string]string)
 		}
@@ -77,12 +77,14 @@ func UpdateSensitivityConfig(repo *repository.SystemSettingsRepo, reload func() 
 		}
 		cfg := shared.LoadProtectionConfig(repo)
 		cfg.SetCategorySensitivity(normalized)
+		// category_sensitivity is the canonical UI source; clear legacy module overrides.
+		cfg.OWASPModules = "{}"
 		if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
 		}
 		c.JSON(200, sensitivityRequest{CategorySensitivity: normalized})

@@ -74,6 +74,36 @@ var ssrfPatterns = []owaspPattern{
 	{regexp.MustCompile(`https?://\d{9,10}\b`), 4, "owasp:ssrf:023", ""},
 }
 
+func shouldScanSSRFPattern(s string, p owaspPattern) bool {
+	if p.hint != "" && !strings.Contains(s, p.hint) {
+		return false
+	}
+	switch p.id {
+	case "owasp:ssrf:004":
+		return strings.Contains(s, "10.")
+	case "owasp:ssrf:005":
+		return strings.Contains(s, "172.")
+	case "owasp:ssrf:006":
+		return strings.Contains(s, "192.168.")
+	case "owasp:ssrf:007":
+		return strings.Contains(s, "127.") || strings.Contains(s, "localhost")
+	case "owasp:ssrf:008":
+		return strings.Contains(s, "::1") || strings.Contains(s, "[::") || strings.Contains(s, "0.0.0.0")
+	case "owasp:ssrf:009":
+		return strings.Contains(s, "0x")
+	case "owasp:ssrf:010":
+		return strings.Contains(s, "file://") || strings.Contains(s, "gopher://") || strings.Contains(s, "dict://") || strings.Contains(s, "ldap://") || strings.Contains(s, "sftp://") || strings.Contains(s, "tftp://") || strings.Contains(s, "php://") || strings.Contains(s, "expect://") || strings.Contains(s, "phar://")
+	case "owasp:ssrf:011", "owasp:ssrf:023":
+		return strings.Contains(s, "http://") || strings.Contains(s, "https://")
+	case "owasp:ssrf:020":
+		return strings.Contains(s, "0177.") || strings.Contains(s, "http://0") || strings.Contains(s, "https://0")
+	case "owasp:ssrf:021":
+		return strings.Contains(s, ".nip.io") || strings.Contains(s, ".xip.io") || strings.Contains(s, ".sslip.io")
+	default:
+		return true
+	}
+}
+
 func checkSSRF(s string, threshold int) (OWASPHit, bool) {
 	if !hasSSRFIndicator(s) {
 		return OWASPHit{}, false
@@ -81,7 +111,7 @@ func checkSSRF(s string, threshold int) (OWASPHit, bool) {
 	total := 0
 	best := ""
 	for _, p := range ssrfPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !shouldScanSSRFPattern(s, p) {
 			continue
 		}
 		if p.re.MatchString(s) {
@@ -106,9 +136,6 @@ var cmdInjectPatterns = []owaspPattern{
 	// "host=x;id" at end of string → matches via $.
 	{regexp.MustCompile("[;|&]\\s*(ls|cat|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|echo|rm|chmod|chown|ping|touch|kill|python|perl|ruby|php|node|java|nslookup|dig)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:001", ""},
 	// Backtick command substitution — require a known shell command inside (avoids Markdown FP)
-	{regexp.MustCompile("`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`"), 3, "owasp:cmd:002", ""},
-	// Backtick command substitution — require suspicious delimiters or command arguments inside.
-	// This avoids false positives on benign version strings like `UP_CAS_6.11.0.100_live` containing "cas".
 	{regexp.MustCompile("`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`"), 3, "owasp:cmd:002", ""},
 	// $() with shell commands inside (excludes jQuery selectors)
 	{regexp.MustCompile(`\$\([^)]*\b(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|dd|nslookup|dig|ping|sleep|kill|find|grep|awk|sed|head|tail|wc|sort|xxd|od)\b`), 4, "owasp:cmd:003", ""},
@@ -156,6 +183,50 @@ var cmdInjectPatterns = []owaspPattern{
 	{regexp.MustCompile("`\\s*(ping|curl|wget|whoami|id|cat|ls|touch|rm|chmod|nc|nslookup|dig|python|perl|ruby|php|bash|sh|uname)\\b"), 5, "owasp:cmd:024", ""},
 }
 
+func shouldScanCmdPattern(s string, p owaspPattern) bool {
+	if p.hint != "" && !strings.Contains(s, p.hint) {
+		return false
+	}
+	switch p.id {
+	case "owasp:cmd:001":
+		return strings.ContainsAny(s, ";|&")
+	case "owasp:cmd:002", "owasp:cmd:024":
+		return strings.Contains(s, "`")
+	case "owasp:cmd:003", "owasp:cmd:022":
+		return strings.Contains(s, "$(")
+	case "owasp:cmd:004":
+		return strings.Contains(s, ">") && strings.Contains(s, "/")
+	case "owasp:cmd:005":
+		return strings.Contains(s, "wget") || strings.Contains(s, "curl")
+	case "owasp:cmd:006":
+		return strings.Contains(s, "%00") || strings.Contains(s, "\x00") || strings.Contains(s, "%0a") || strings.Contains(s, "%0d") || strings.Contains(s, "\x0a") || strings.Contains(s, "\x0d")
+	case "owasp:cmd:007":
+		return strings.Contains(s, ";")
+	case "owasp:cmd:008", "owasp:cmd:015":
+		return strings.Contains(s, "|")
+	case "owasp:cmd:010":
+		return strings.Contains(s, "=")
+	case "owasp:cmd:011":
+		return strings.Contains(s, "&&") || strings.Contains(s, "||")
+	case "owasp:cmd:013":
+		return strings.Contains(s, "<<<")
+	case "owasp:cmd:014":
+		return strings.Contains(s, "$'")
+	case "owasp:cmd:016":
+		return strings.ContainsAny(s, "\r\n")
+	case "owasp:cmd:018", "owasp:cmd:023":
+		return strings.Contains(s, "``")
+	case "owasp:cmd:019":
+		return strings.Contains(s, "touch") || strings.Contains(s, "rm")
+	case "owasp:cmd:020":
+		return strings.Contains(s, "--")
+	case "owasp:cmd:021":
+		return strings.Contains(s, "${ifs}")
+	default:
+		return true
+	}
+}
+
 func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
 	if !hasCmdIndicator(s) {
 		return OWASPHit{}, false
@@ -163,7 +234,7 @@ func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
 	total := 0
 	best := ""
 	for _, p := range cmdInjectPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !shouldScanCmdPattern(s, p) {
 			continue
 		}
 		if p.re.MatchString(s) {
@@ -179,14 +250,16 @@ func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
-// ── XXE (XML External Entity) ──
-
-// hasXXEIndicator returns true when the string contains XML markup that
-// could carry an XXE payload.
 func hasXXEIndicator(s string) bool {
-	return strings.Contains(s, "<!") ||
+	return strings.Contains(s, "<!doctype") ||
+		strings.Contains(s, "<!entity") ||
+		strings.Contains(s, "!entity") ||
+		strings.Contains(s, " system ") ||
+		strings.Contains(s, " public ") ||
 		strings.Contains(s, "xi:include") ||
-		strings.Contains(s, "system ") // SYSTEM keyword in DTD declarations
+		strings.Contains(s, "file://") ||
+		strings.Contains(s, "expect://") ||
+		strings.Contains(s, "php://")
 }
 
 var xxePatterns = []owaspPattern{
@@ -314,7 +387,34 @@ var nosqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`\$where\s*:\s*['"][^'"]{0,120}(?:sleep|function|return|this\.)`), 5, "owasp:nosql:017", ""},
 }
 
+func hasNoSQLiIndicator(s string) bool {
+	return strings.Contains(s, "$where") ||
+		strings.Contains(s, "$ne") ||
+		strings.Contains(s, "$gt") ||
+		strings.Contains(s, "$lt") ||
+		strings.Contains(s, "$gte") ||
+		strings.Contains(s, "$lte") ||
+		strings.Contains(s, "$regex") ||
+		strings.Contains(s, "$or") ||
+		strings.Contains(s, "$and") ||
+		strings.Contains(s, "$exists") ||
+		strings.Contains(s, "$lookup") ||
+		strings.Contains(s, "$function") ||
+		strings.Contains(s, "$accumulator") ||
+		strings.Contains(s, "$match") ||
+		strings.Contains(s, "/_all_docs") ||
+		strings.Contains(s, "/_find") ||
+		strings.Contains(s, "/_view/") ||
+		strings.Contains(s, "allow filtering") ||
+		strings.Contains(s, "evalsha") ||
+		strings.Contains(s, "eval ") ||
+		strings.Contains(s, "this.")
+}
+
 func checkNoSQLi(s string, threshold int) (OWASPHit, bool) {
+	if !hasNoSQLiIndicator(s) {
+		return OWASPHit{}, false
+	}
 	total := 0
 	best := ""
 	for _, p := range nosqliPatterns {
@@ -586,7 +686,43 @@ var crlfPatterns = []owaspPattern{
 	{regexp.MustCompile(`\r\n\r\n`), 4, "owasp:crlf:004", ""},
 }
 
+func hasCRLFIndicator(s string) bool {
+	return strings.Contains(s, "%0d") ||
+		strings.Contains(s, "%0a") ||
+		strings.Contains(s, "\r") ||
+		strings.Contains(s, "\n") ||
+		strings.Contains(s, "set-cookie:") ||
+		strings.Contains(s, "location:") ||
+		strings.Contains(s, "content-type:")
+}
+
+func hasDeserializationIndicator(s string) bool {
+	return strings.Contains(s, "\xac\xed\x00\x05") ||
+		strings.Contains(s, "aced0005") ||
+		strings.Contains(s, "ro0ab") ||
+		strings.Contains(s, "o:") ||
+		strings.Contains(s, "s:") ||
+		strings.Contains(s, "ysoserial") ||
+		strings.Contains(s, "aaeaaad//") ||
+		strings.Contains(s, "nd_func") ||
+		strings.Contains(s, "objectinputstream") ||
+		strings.Contains(s, "xstream") ||
+		strings.Contains(s, "<sorted-set") ||
+		strings.Contains(s, "<tree-map") ||
+		strings.Contains(s, "<dynamic-proxy") ||
+		strings.Contains(s, "java.util") ||
+		strings.Contains(s, "javax.") ||
+		strings.Contains(s, "jdk.") ||
+		strings.Contains(s, "com.sun.org.apache.xalan") ||
+		strings.Contains(s, "org.apache.commons.collections") ||
+		strings.Contains(s, "readobject") ||
+		strings.Contains(s, "deserializ")
+}
+
 func checkCRLF(s string, threshold int) (OWASPHit, bool) {
+	if !hasCRLFIndicator(s) {
+		return OWASPHit{}, false
+	}
 	total := 0
 	best := ""
 	for _, p := range crlfPatterns {
@@ -719,6 +855,9 @@ func checkDeserialization(s string, threshold int) (OWASPHit, bool) {
 	// Direct binary Java serialization magic byte check
 	if strings.Contains(s, "\xac\xed\x00\x05") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:001", Score: 5, Desc: "Java serialization magic bytes"}, true
+	}
+	if !hasDeserializationIndicator(s) {
+		return OWASPHit{}, false
 	}
 	total := 0
 	best := ""

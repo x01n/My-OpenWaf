@@ -40,8 +40,6 @@ interface ListenerEntry {
 
 const defaultUpstream = "http://127.0.0.1:8080"
 
-type AccessMode = "proxy" | "static" | "redirect"
-
 export function AddSiteDialog({
   open,
   onOpenChange,
@@ -52,7 +50,6 @@ export function AddSiteDialog({
     { port: "80", tls: false },
   ])
   const [certId, setCertId] = useState<number | null>(null)
-  const [accessMode, setAccessMode] = useState<AccessMode>("proxy")
   const [upstreams, setUpstreams] = useState<string[]>([defaultUpstream])
   const [appName, setAppName] = useState("")
   const [saving, setSaving] = useState(false)
@@ -64,14 +61,16 @@ export function AddSiteDialog({
     if (!open) return
     getCertificates()
       .then((data) => setCertificates(data.items || []))
-      .catch(() => setCertificates([]))
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "加载证书列表失败")
+        setCertificates([])
+      })
   }, [open])
 
   function reset() {
     setHosts([])
     setListeners([{ port: "80", tls: false }])
     setCertId(null)
-    setAccessMode("proxy")
     setUpstreams([defaultUpstream])
     setAppName("")
   }
@@ -134,15 +133,13 @@ export function AddSiteDialog({
         return
       }
     }
-    if (accessMode === "proxy") {
-      if (normalizedUpstreams.length === 0) {
-        toast.error("请至少填写一个上游地址")
-        return
-      }
-      if (invalidUpstream) {
-        toast.error(`上游地址格式无效：${invalidUpstream}`)
-        return
-      }
+    if (normalizedUpstreams.length === 0) {
+      toast.error("请至少填写一个上游地址")
+      return
+    }
+    if (invalidUpstream) {
+      toast.error(`上游地址格式无效：${invalidUpstream}`)
+      return
     }
     if (hasAnyTLS && !certId) {
       toast.error("存在 HTTPS 端口时请选择证书")
@@ -204,7 +201,7 @@ export function AddSiteDialog({
             添加应用
           </DialogTitle>
           <DialogDescription className="mt-1 text-sm leading-6 text-slate-600">
-            配置域名、监听端口、接入方式与上游服务器。支持同一站点监听多个端口。
+            配置域名、监听端口与上游服务器。支持同一站点监听多个端口。
           </DialogDescription>
         </DialogHeader>
 
@@ -282,14 +279,15 @@ export function AddSiteDialog({
                 </div>
               ))}
             </div>
-            <button
+            <Button
               type="button"
+              variant="outline"
+              className="w-full rounded-lg border-dashed"
               onClick={addListener}
-              className="w-full rounded-lg border-2 border-dashed border-cyan-300 bg-cyan-50/30 py-2.5 text-sm font-medium text-cyan-600 transition-colors hover:bg-cyan-50"
             >
-              <Plus className="mr-1.5 inline h-4 w-4" />
+              <Plus data-icon="inline-start" />
               添加一个监听端口
-            </button>
+            </Button>
           </div>
 
           {/* Certificate */}
@@ -328,99 +326,70 @@ export function AddSiteDialog({
             </div>
           )}
 
-          {/* Access Mode */}
-          <div className="space-y-2">
-            <span className="text-sm font-medium text-slate-900">接入方式</span>
-            <div className="grid grid-cols-3 gap-2">
-              {(
-                [
-                  { key: "proxy", label: "代理到已有应用" },
-                  { key: "static", label: "使用静态文件搭建" },
-                  { key: "redirect", label: "重定向" },
-                ] as const
-              ).map((m) => (
-                <button
-                  key={m.key}
-                  type="button"
-                  onClick={() => setAccessMode(m.key)}
-                  className={`rounded-lg border-2 px-3 py-2.5 text-sm font-medium transition-colors ${
-                    accessMode === m.key
-                      ? "border-cyan-500 bg-cyan-50/50 text-cyan-700"
-                      : "border-slate-200 text-slate-600 hover:border-slate-300"
-                  }`}
-                >
-                  {accessMode === m.key && <span className="mr-1">●</span>}
-                  {m.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
           {/* Upstream */}
-          {accessMode === "proxy" && (
-            <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/80 p-5">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-900">
-                    上游服务器 <span className="text-red-500">*</span>
-                  </h3>
-                  <p className="mt-1 text-xs leading-5 text-slate-500">
-                    请求将转发到以下上游地址，多个地址按轮询负载均衡。
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="rounded-md"
-                  onClick={() =>
-                    setUpstreams((current) => [...current, defaultUpstream])
-                  }
-                >
-                  <Plus className="mr-1.5 h-3.5 w-3.5" /> 添加上游
-                </Button>
+          <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/80 p-5">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  上游服务器 <span className="text-red-500">*</span>
+                </h3>
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  请求将转发到以下上游地址，多个地址按轮询负载均衡。
+                </p>
               </div>
-
-              <div className="space-y-3">
-                {upstreams.map((upstream, index) => (
-                  <div
-                    key={`${index}-${upstream}`}
-                    className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-2"
-                  >
-                    <Input
-                      value={upstream}
-                      onChange={(event) =>
-                        updateUpstream(index, event.target.value)
-                      }
-                      placeholder="http://192.168.1.10:8080，不支持路径"
-                      className="border-0 bg-transparent font-mono text-sm shadow-none focus-visible:ring-0"
-                    />
-                    {upstreams.length > 1 ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className="rounded-md text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                        onClick={() => removeUpstream(index)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-              <button
+              <Button
                 type="button"
+                variant="outline"
+                size="sm"
+                className="rounded-md"
                 onClick={() =>
                   setUpstreams((current) => [...current, defaultUpstream])
                 }
-                className="w-full rounded-lg border-2 border-dashed border-cyan-300 bg-cyan-50/30 py-2 text-sm font-medium text-cyan-600 transition-colors hover:bg-cyan-50"
               >
-                <Plus className="mr-1 inline h-4 w-4" />
-                添加上游服务
-              </button>
+                <Plus data-icon="inline-start" /> 添加上游
+              </Button>
             </div>
-          )}
+
+            <div className="space-y-3">
+              {upstreams.map((upstream, index) => (
+                <div
+                  key={`${index}-${upstream}`}
+                  className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-2"
+                >
+                  <Input
+                    value={upstream}
+                    onChange={(event) =>
+                      updateUpstream(index, event.target.value)
+                    }
+                    placeholder="http://192.168.1.10:8080，不支持路径"
+                    className="border-0 bg-transparent font-mono text-sm shadow-none focus-visible:ring-0"
+                  />
+                  {upstreams.length > 1 ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="rounded-md text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                      onClick={() => removeUpstream(index)}
+                    >
+                      <Trash2 />
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full rounded-lg border-dashed"
+              onClick={() =>
+                setUpstreams((current) => [...current, defaultUpstream])
+              }
+            >
+              <Plus data-icon="inline-start" />
+              添加上游服务
+            </Button>
+          </div>
 
           {/* App Name */}
           <label className="space-y-2">
@@ -447,7 +416,9 @@ export function AddSiteDialog({
             disabled={saving}
             className="rounded-md bg-cyan-500 text-white hover:bg-cyan-600"
           >
-            {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            {saving ? (
+              <Loader2 data-icon="inline-start" className="animate-spin" />
+            ) : null}
             {saving ? "创建中..." : "提交"}
           </Button>
         </DialogFooter>

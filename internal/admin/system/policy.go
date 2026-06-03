@@ -89,11 +89,20 @@ func UpdatePolicy(repo *repository.PolicyRepo, reload func() error) app.HandlerF
 	}
 }
 
-func DeletePolicy(repo *repository.PolicyRepo, reload func() error) app.HandlerFunc {
+func DeletePolicy(repo *repository.PolicyRepo, siteRepo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		siteRefs, err := siteRepo.CountByPolicyID(id)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		if siteRefs > 0 {
+			c.JSON(400, map[string]any{"error": "policy is still referenced", "site_refs": siteRefs})
 			return
 		}
 		if err := repo.Delete(id); err != nil {

@@ -20,7 +20,17 @@ func ListRules(repo *repository.RuleRepo) app.HandlerFunc {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 		offset, limit := utils.Paginate(page, size)
-		items, total, err := repo.List(offset, limit)
+		filter := repository.RuleFilter{Query: strings.TrimSpace(c.DefaultQuery("q", ""))}
+		if policyID := strings.TrimSpace(c.DefaultQuery("policy_id", "")); policyID != "" {
+			id, err := strconv.ParseUint(policyID, 10, 64)
+			if err != nil {
+				c.JSON(400, map[string]string{"error": "invalid policy_id"})
+				return
+			}
+			pid := uint(id)
+			filter.PolicyID = &pid
+		}
+		items, total, err := repo.ListFiltered(offset, limit, filter)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -144,6 +154,8 @@ type TestRuleRequest struct {
 	Path     string            `json:"path"`
 	Query    string            `json:"query"`
 	Headers  map[string]string `json:"headers"`
+	Method   string            `json:"method"`
+	Body     string            `json:"body"`
 }
 
 // TestRule lets callers dry-run a pattern against a synthetic request
@@ -177,9 +189,11 @@ func TestRule() app.HandlerFunc {
 
 		mc := rules.MatchCtx{
 			ClientIP: clientIP,
+			Method:   req.Method,
 			Path:     req.Path,
 			Query:    req.Query,
 			Headers:  req.Headers,
+			Body:     []byte(req.Body),
 		}
 		matched := compiled[0].Match(mc)
 

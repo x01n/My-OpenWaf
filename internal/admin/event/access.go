@@ -7,6 +7,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 )
@@ -54,6 +55,22 @@ func ListAccessLogs(repo *repository.AccessLogRepo) app.HandlerFunc {
 			return
 		}
 		c.JSON(200, map[string]any{"items": items, "total": total, "page": page})
+	}
+}
+
+func GetAccessLog(repo *repository.AccessLogRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		id, err := shared.ParseUintParam(c, "id")
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		item, err := repo.Get(id)
+		if err != nil {
+			c.JSON(404, map[string]string{"error": "access log not found"})
+			return
+		}
+		c.JSON(200, item)
 	}
 }
 

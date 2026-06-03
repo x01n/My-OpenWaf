@@ -15,6 +15,15 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { Badge } from "@/components/ui/badge"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
 import {
   Select,
   SelectContent,
@@ -32,7 +41,6 @@ import {
   type Certificate,
   type SiteListener,
 } from "@/lib/api"
-import { cn } from "@/lib/utils"
 
 interface SiteListenersPanelProps {
   siteId: number
@@ -55,6 +63,10 @@ const emptyDraft: DialogDraft = {
   certId: null,
   note: "",
   enabled: true,
+}
+
+function isListenerEnabled(listener: Pick<SiteListener, "enabled">) {
+  return listener.enabled !== false
 }
 
 export function SiteListenersPanel({
@@ -90,7 +102,10 @@ export function SiteListenersPanel({
     if (!dialogOpen) return
     getCertificates()
       .then((data) => setCertificates(data.items || []))
-      .catch(() => setCertificates([]))
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "加载证书列表失败")
+        setCertificates([])
+      })
   }, [dialogOpen])
 
   function openCreate() {
@@ -107,7 +122,7 @@ export function SiteListenersPanel({
       tlsEnabled: !!listener.tls_enabled,
       certId: listener.cert_id ?? null,
       note: listener.note || "",
-      enabled: !!listener.enabled,
+      enabled: isListenerEnabled(listener),
     })
     setDialogOpen(true)
   }
@@ -134,6 +149,14 @@ export function SiteListenersPanel({
     }
     if (draft.tlsEnabled && !draft.certId) {
       toast.error("启用 HTTPS 时请选择证书")
+      return
+    }
+    if (
+      draft.tlsEnabled &&
+      draft.certId &&
+      !certificates.some((cert) => cert.id === draft.certId)
+    ) {
+      toast.error("当前绑定的证书不在可用证书列表中，请重新选择证书")
       return
     }
     setSaving(true)
@@ -215,7 +238,7 @@ export function SiteListenersPanel({
           className="rounded-md bg-teal-500 text-white hover:bg-teal-600"
           onClick={openCreate}
         >
-          <Plus className="mr-1.5 h-4 w-4" /> 新增监听端口
+          <Plus data-icon="inline-start" /> 新增监听端口
         </Button>
       }
     >
@@ -229,52 +252,45 @@ export function SiteListenersPanel({
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-slate-200">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-left text-xs tracking-wide text-slate-500 uppercase">
-              <tr>
-                <th className="px-4 py-3">状态</th>
-                <th className="px-4 py-3">监听地址</th>
-                <th className="px-4 py-3">网络</th>
-                <th className="px-4 py-3">协议</th>
-                <th className="px-4 py-3">证书</th>
-                <th className="px-4 py-3">备注</th>
-                <th className="px-4 py-3 text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader className="bg-slate-50 text-xs tracking-wide text-slate-500 uppercase">
+              <TableRow>
+                <TableHead className="px-4 py-3">状态</TableHead>
+                <TableHead className="px-4 py-3">监听地址</TableHead>
+                <TableHead className="px-4 py-3">网络</TableHead>
+                <TableHead className="px-4 py-3">协议</TableHead>
+                <TableHead className="px-4 py-3">证书</TableHead>
+                <TableHead className="px-4 py-3">备注</TableHead>
+                <TableHead className="px-4 py-3 text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {items.map((listener, index) => {
                 const isLegacy = listener.note === "legacy" || listener.id === 0
                 return (
-                  <tr
-                    key={listener.id || `legacy-${index}`}
-                    className="border-t border-slate-100"
-                  >
-                    <td className="px-4 py-3">
+                  <TableRow key={listener.id || `legacy-${index}`}>
+                    <TableCell className="px-4 py-3">
                       <Switch
-                        checked={!!listener.enabled}
+                        checked={isListenerEnabled(listener)}
                         onCheckedChange={(v) => toggleEnabled(listener, v)}
                         disabled={isLegacy}
                       />
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-700">
+                    </TableCell>
+                    <TableCell className="px-4 py-3 font-mono text-xs text-slate-700">
                       {listener.bind}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-500">
+                    </TableCell>
+                    <TableCell className="px-4 py-3 font-mono text-xs text-slate-500">
                       {listener.network || "tcp"}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-full px-2.5 py-1 font-mono text-xs",
-                          listener.tls_enabled
-                            ? "bg-emerald-50 text-emerald-700"
-                            : "bg-slate-100 text-slate-600"
-                        )}
+                    </TableCell>
+                    <TableCell className="px-4 py-3">
+                      <Badge
+                        variant={listener.tls_enabled ? "default" : "secondary"}
+                        className="font-mono"
                       >
                         {listener.tls_enabled ? "HTTPS" : "HTTP"}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-slate-700">
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="px-4 py-3 text-slate-700">
                       {listener.tls_enabled ? (
                         <span className="inline-flex items-center gap-1.5">
                           <Lock className="h-3.5 w-3.5 text-slate-400" />
@@ -285,19 +301,17 @@ export function SiteListenersPanel({
                       ) : (
                         <span className="text-slate-400">-</span>
                       )}
-                    </td>
-                    <td className="px-4 py-3 text-slate-600">
+                    </TableCell>
+                    <TableCell className="px-4 py-3 text-slate-600">
                       {isLegacy ? (
-                        <span className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
-                          旧配置
-                        </span>
+                        <Badge variant="outline">旧配置</Badge>
                       ) : (
                         listener.note || (
                           <span className="text-slate-400">-</span>
                         )
                       )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
+                    </TableCell>
+                    <TableCell className="px-4 py-3 text-right">
                       <div className="inline-flex items-center gap-1">
                         <Button
                           variant="ghost"
@@ -305,7 +319,7 @@ export function SiteListenersPanel({
                           className="rounded-md text-slate-600 hover:bg-slate-100"
                           onClick={() => openEdit(listener)}
                         >
-                          <Pencil className="h-4 w-4" />
+                          <Pencil />
                         </Button>
                         <Button
                           variant="ghost"
@@ -314,15 +328,15 @@ export function SiteListenersPanel({
                           onClick={() => remove(listener)}
                           disabled={isLegacy}
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 />
                         </Button>
                       </div>
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 )
               })}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       )}
 
@@ -381,30 +395,24 @@ export function SiteListenersPanel({
                 接入协议
               </Label>
               <div className="grid grid-cols-2 gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
-                <button
+                <Button
                   type="button"
+                  variant={draft.tlsEnabled ? "ghost" : "secondary"}
+                  aria-pressed={!draft.tlsEnabled}
+                  className="rounded-md"
                   onClick={() => setProtocol(false)}
-                  className={cn(
-                    "rounded-lg px-4 py-2.5 text-sm font-medium",
-                    draft.tlsEnabled
-                      ? "text-slate-600"
-                      : "bg-white text-slate-950 shadow-sm"
-                  )}
                 >
                   HTTP
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
+                  variant={draft.tlsEnabled ? "secondary" : "ghost"}
+                  aria-pressed={draft.tlsEnabled}
+                  className="rounded-md"
                   onClick={() => setProtocol(true)}
-                  className={cn(
-                    "rounded-lg px-4 py-2.5 text-sm font-medium",
-                    draft.tlsEnabled
-                      ? "bg-white text-slate-950 shadow-sm"
-                      : "text-slate-600"
-                  )}
                 >
                   HTTPS
-                </button>
+                </Button>
               </div>
             </div>
 
@@ -434,6 +442,14 @@ export function SiteListenersPanel({
                       />
                     </SelectTrigger>
                     <SelectContent>
+                      {draft.certId &&
+                        !certificates.some(
+                          (cert) => cert.id === draft.certId
+                        ) && (
+                          <SelectItem value={String(draft.certId)}>
+                            已失效证书 #{draft.certId}
+                          </SelectItem>
+                        )}
                       {certificates.map((cert) => (
                         <SelectItem key={cert.id} value={String(cert.id)}>
                           {cert.name}

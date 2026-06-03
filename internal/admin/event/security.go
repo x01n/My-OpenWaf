@@ -12,8 +12,6 @@ import (
 	"My-OpenWaf/internal/utils"
 )
 
-// ─── Security Events API ──────────────────────────────────────────
-
 func ListSecurityEvents(repo *repository.SecurityEventRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		page, _ := strconv.Atoi(string(c.Query("page")))
@@ -113,8 +111,6 @@ func ListSiteSecurityEvents(siteRepo *repository.SiteRepo, repo *repository.Secu
 	}
 }
 
-// ─── Security Events Statistics ───────────────────────────────────
-
 func SiteSecurityEventStats(siteRepo *repository.SiteRepo, repo *repository.SecurityEventRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		siteID, err := shared.ParseUintParam(c, "id")
@@ -141,6 +137,7 @@ func SiteSecurityEventStats(siteRepo *repository.SiteRepo, repo *repository.Secu
 		intercepts, _ := repo.CountTerminalBySite(siteID, since)
 		observes, _ := repo.CountObserveBySite(siteID, since)
 		requestCount, _ := repo.DistinctRequestCountBySite(siteID, since)
+		challenges, _ := repo.CountChallengeBySite(siteID, since)
 		c.JSON(200, map[string]any{
 			"total":      total,
 			"hours":      hours,
@@ -151,6 +148,7 @@ func SiteSecurityEventStats(siteRepo *repository.SiteRepo, repo *repository.Secu
 			"intercepts": intercepts,
 			"observes":   observes,
 			"requests":   requestCount,
+			"challenges": challenges,
 		})
 	}
 }
@@ -199,6 +197,10 @@ func SecurityEventStats(repo *repository.SecurityEventRepo) app.HandlerFunc {
 		topRules, _ := repo.TopRules(since, 10)
 
 		total, _ := repo.Count(repository.SecurityEventFilter{Since: &since})
+		intercepts, _ := repo.CountTerminal(since)
+		observes, _ := repo.CountObserve(since)
+		requestCount, _ := repo.DistinctRequestCount(since)
+		challenges, _ := repo.CountChallenge(since)
 
 		c.JSON(200, map[string]any{
 			"total":      total,
@@ -207,6 +209,10 @@ func SecurityEventStats(repo *repository.SecurityEventRepo) app.HandlerFunc {
 			"top_ips":    topIPs,
 			"top_paths":  topPaths,
 			"top_rules":  topRules,
+			"intercepts": intercepts,
+			"observes":   observes,
+			"requests":   requestCount,
+			"challenges": challenges,
 		})
 	}
 }

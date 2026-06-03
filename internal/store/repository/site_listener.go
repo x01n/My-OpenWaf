@@ -49,6 +49,12 @@ func (r *SiteListenerRepo) DeleteBySite(siteID uint) error {
 	return r.db.Where("site_id = ?", siteID).Delete(&store.SiteListener{}).Error
 }
 
+func (r *SiteListenerRepo) CountByCertID(certID uint) (int64, error) {
+	var count int64
+	err := r.db.Model(&store.SiteListener{}).Where("cert_id = ?", certID).Count(&count).Error
+	return count, err
+}
+
 func (r *SiteListenerRepo) CreateWithLegacyPromotion(item *store.SiteListener, legacy *store.SiteListener) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if legacy != nil {

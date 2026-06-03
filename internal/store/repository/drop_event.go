@@ -89,11 +89,11 @@ func (r *DropEventRepo) List(offset, limit int, f DropEventFilter) ([]store.Drop
 
 // DropStatsSummary holds aggregated drop statistics.
 type DropStatsSummary struct {
-	Total24h       int64 `json:"total_24h"`
-	ByBot          int64 `json:"by_bot"`
-	ByCVE          int64 `json:"by_cve"`
-	ByRule         int64 `json:"by_rule"`
-	ByIPReputation int64 `json:"by_ip_reputation"`
+	Total24h       int64 `gorm:"column:total_24h" json:"total_24h"`
+	ByBot          int64 `gorm:"column:by_bot" json:"by_bot"`
+	ByCVE          int64 `gorm:"column:by_cve" json:"by_cve"`
+	ByRule         int64 `gorm:"column:by_rule" json:"by_rule"`
+	ByIPReputation int64 `gorm:"column:by_ip_reputation" json:"by_ip_reputation"`
 }
 
 // DeleteOlderThan removes drop events older than the given time. Returns deleted count.
@@ -125,16 +125,15 @@ func (r *DropEventRepo) Stats24h() (*DropStatsSummary, error) {
 func (r *DropEventRepo) Stats24hBySite(siteID uint) (*DropStatsSummary, error) {
 	since := time.Now().Add(-24 * time.Hour)
 	var stats DropStatsSummary
-	q := r.db.Model(&store.DropEvent{}).Where("created_at >= ?", since)
+	q := r.db.Model(&store.DropEvent{}).
+		Select("COUNT(*) AS total24h, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_bot, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_cve, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_rule, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_ip_reputation", "bot", "cve", "rule", "ip_reputation").
+		Where("created_at >= ?", since)
 	if siteID > 0 {
 		q = q.Where("site_id = ?", siteID)
 	}
-
-	q.Count(&stats.Total24h)
-	q.Where("source = 'bot'").Count(&stats.ByBot)
-	q.Where("source = 'cve'").Count(&stats.ByCVE)
-	q.Where("source = 'rule'").Count(&stats.ByRule)
-	q.Where("source = 'ip_reputation'").Count(&stats.ByIPReputation)
+	if err := q.Scan(&stats).Error; err != nil {
+		return nil, err
+	}
 
 	return &stats, nil
 }

@@ -20,7 +20,10 @@ func WriteBlockResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRu
 	c.Response.Header.Del("Server")
 
 	statusCode := res.ResponseStatusCode()
-	html := sn.DefaultBlockHTML
+	html := ""
+	if sn != nil {
+		html = sn.DefaultBlockHTML
+	}
 
 	if rt != nil {
 		if rt.BlockHTML != "" {
@@ -32,11 +35,11 @@ func WriteBlockResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRu
 	}
 
 	if html != "" {
-		renderTemplatePage(c, html, reqID, res.RuleID, statusCode, false)
+		renderTemplatePage(c, html, reqID, res, statusCode, false)
 		return
 	}
 
-	c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, strconv.FormatUint(uint64(res.RuleID), 10), false, res.Type)))
+	c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, res, false, res.Type)))
 }
 
 // WriteMaintenanceResponse renders the maintenance page.
@@ -60,7 +63,7 @@ func WriteMaintenanceResponse(c *app.RequestContext, reqID string, rt *snapshot.
 	}
 
 	if html != "" {
-		renderTemplatePage(c, html, reqID, 0, statusCode, true)
+		renderTemplatePage(c, html, reqID, action.Result{}, statusCode, true)
 		return
 	}
 
@@ -96,25 +99,39 @@ func WriteUpstreamErrorResponse(c *app.RequestContext, reqID string, statusCode 
 	c.Data(statusCode, "text/html; charset=utf-8", page)
 }
 
-func renderTemplatePage(c *app.RequestContext, html, reqID string, ruleID uint, statusCode int, maintenance bool) {
+func renderTemplatePage(c *app.RequestContext, html, reqID string, res action.Result, statusCode int, maintenance bool) {
 	tpl, err := template.New("page").Parse(html)
 	if err != nil {
-		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, strconv.FormatUint(uint64(ruleID), 10), maintenance, action.Intercept)))
+		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, res, maintenance, action.Intercept)))
 		return
 	}
 	var buf bytes.Buffer
 	_ = tpl.Execute(&buf, struct {
 		RequestID  string
 		RuleID     string
+		RuleIDStr  string
+		Phase      string
+		Action     string
+		Category   string
+		MatchDesc  string
 		StatusCode int
-	}{RequestID: reqID, RuleID: strconv.FormatUint(uint64(ruleID), 10), StatusCode: statusCode})
+	}{
+		RequestID:  reqID,
+		RuleID:     strconv.FormatUint(uint64(res.RuleID), 10),
+		RuleIDStr:  valueOrFallback(res.RuleIDStr, strconv.FormatUint(uint64(res.RuleID), 10)),
+		Phase:      res.Phase,
+		Action:     string(action.Normalize(res.Type)),
+		Category:   res.Category,
+		MatchDesc:  res.MatchDesc,
+		StatusCode: statusCode,
+	})
 	c.Data(statusCode, "text/html; charset=utf-8", buf.Bytes())
 }
 
 func renderEmbeddedPage(c *app.RequestContext, assetPath string, statusCode int, reqID, ruleID string) {
 	page, err := loadEmbeddedPage(assetPath)
 	if err != nil {
-		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, ruleID, assetPath == "maintenance/index.html", action.Intercept)))
+		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, action.Result{RuleIDStr: ruleID}, assetPath == "maintenance/index.html", action.Intercept)))
 		return
 	}
 
@@ -133,7 +150,7 @@ func loadEmbeddedPage(assetPath string) ([]byte, error) {
 	return fs.ReadFile(webFS, assetPath)
 }
 
-func defaultFallbackHTML(reqID, ruleID string, maintenance bool, actionType action.Type) string {
+func defaultFallbackHTML(reqID string, res action.Result, maintenance bool, actionType action.Type) string {
 	baseStyle := `*{margin:0;padding:0;box-sizing:border-box}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at top left,#ecfeff 0,#f8fafc 32%,#eef2ff 100%);color:#0f172a}.shell{width:min(720px,92vw);padding:22px}.card{position:relative;overflow:hidden;background:rgba(255,255,255,.94);border:1px solid rgba(148,163,184,.25);border-radius:28px;box-shadow:0 24px 80px rgba(15,23,42,.14);padding:42px}.card:before{content:"";position:absolute;inset:0 0 auto 0;height:6px;background:linear-gradient(90deg,#06b6d4,#6366f1,#f43f5e)}.top{display:flex;gap:18px;align-items:center}.icon{width:64px;height:64px;border-radius:22px;display:grid;place-items:center;font-size:34px;background:linear-gradient(135deg,#e0f2fe,#ede9fe);box-shadow:inset 0 1px 0 rgba(255,255,255,.8)}.kicker{font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#64748b}.title{margin-top:6px;font-size:28px;font-weight:800;letter-spacing:-.03em}.msg{margin-top:18px;color:#475569;line-height:1.8;font-size:15px}.meta{display:grid;gap:10px;margin-top:28px;padding:16px;border-radius:18px;background:#f8fafc;border:1px solid #e2e8f0}.row{display:flex;justify-content:space-between;gap:18px;font-size:12px;color:#64748b}.row code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#0f172a;word-break:break-all}.footer{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:24px;color:#94a3b8;font-size:12px}.pill{border-radius:999px;border:1px solid #e2e8f0;background:#fff;padding:6px 10px;color:#64748b}`
 	if maintenance {
 		return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service Maintenance</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128736;</div><div><div class="kicker">Maintenance</div><h1 class="title">服务维护中</h1></div></div><p class="msg">服务正在进行维护，请稍后再试。The service is under maintenance, please try again later.</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div></div><div class="footer"><span>Protected by My-OpenWaf</span><span class="pill">503 Service Unavailable</span></div></section></main></body></html>`
@@ -146,7 +163,18 @@ func defaultFallbackHTML(reqID, ruleID string, maintenance bool, actionType acti
 		label = "429 Rate Limit"
 		message = "当前访问频率过高，请稍后重试。Too many requests, please retry later."
 	}
-	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128737;</div><div><div class="kicker">Security Event</div><h1 class="title">` + title + `</h1></div></div><p class="msg">` + message + `</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div><div class="row"><span>Rule</span><code>` + ruleID + `</code></div></div><div class="footer"><span>Protected by My-OpenWaf</span><span class="pill">` + label + `</span></div></section></main></body></html>`
+	ruleID := valueOrFallback(res.RuleIDStr, strconv.FormatUint(uint64(res.RuleID), 10))
+	phase := valueOrFallback(res.Phase, "-")
+	category := valueOrFallback(res.Category, "-")
+	matchDesc := valueOrFallback(res.MatchDesc, "-")
+	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128737;</div><div><div class="kicker">Security Event</div><h1 class="title">` + title + `</h1></div></div><p class="msg">` + message + `</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div><div class="row"><span>Action</span><code>` + string(action.Normalize(actionType)) + `</code></div><div class="row"><span>Rule</span><code>` + ruleID + `</code></div><div class="row"><span>Phase</span><code>` + phase + `</code></div><div class="row"><span>Category</span><code>` + category + `</code></div><div class="row"><span>Reason</span><code>` + matchDesc + `</code></div></div><div class="footer"><span>Protected by My-OpenWAF</span><span class="pill">` + label + `</span></div></section></main></body></html>`
+}
+
+func valueOrFallback(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func buildErrorFallbackHTML(reqID string, statusCode int) string {

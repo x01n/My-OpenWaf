@@ -306,9 +306,3 @@ func pathAndQuery(u string) string {
 	}
 	return u[i:]
 }
-
-var _ http.Handler = (*wsPlaceholder)(nil)
-
-type wsPlaceholder struct{}
-
-func (w *wsPlaceholder) ServeHTTP(http.ResponseWriter, *http.Request) {}

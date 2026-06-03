@@ -2,11 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
-import { Eye, Fingerprint, RefreshCcw, Search, ShieldCheck } from "lucide-react"
+import { Eye, RefreshCcw, Search } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Badge } from "@/components/ui/badge"
 import {
   Dialog,
   DialogContent,
@@ -14,7 +13,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { EmptyState, PageIntro, Surface } from "@/components/console-shell"
+import {
+  EmptyState,
+  MetricCard,
+  MetricGrid,
+  PageIntro,
+  Surface,
+} from "@/components/console-shell"
 import { DetailField, TruncatedCell } from "@/components/log-presentation"
 import { getFingerprints, type FingerprintSummary } from "@/lib/api"
 import { formatDate } from "@/lib/utils"
@@ -41,6 +46,8 @@ export default function FingerprintsPage() {
       setTotal(res.total ?? 0)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载指纹失败")
+      setItems([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
@@ -65,11 +72,15 @@ export default function FingerprintsPage() {
   }, [items, query])
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
-  const uniqueSNI = new Set(items.map((item) => item.tls_sni).filter(Boolean))
-    .size
-  const h2Count = items.filter((item) =>
-    (item.tls_alpn || "").includes("h2")
+  const highRiskFingerprints = items.filter(
+    (item) => (item.high_risk_count ?? 0) > 0
   ).length
+  const avgBotScore = items.length
+    ? Math.round(
+        items.reduce((sum, item) => sum + (item.avg_bot_score ?? 0), 0) /
+          items.length
+      )
+    : 0
 
   return (
     <div className="space-y-6">
@@ -89,34 +100,31 @@ export default function FingerprintsPage() {
         }
       />
 
-      <div className="grid gap-4 md:grid-cols-3">
-        <Surface title="聚合指纹" description="当前页统计">
-          <div className="flex items-end justify-between">
-            <div className="text-3xl font-semibold text-slate-950">
-              {total.toLocaleString()}
-            </div>
-            <Fingerprint className="h-7 w-7 text-cyan-500" />
-          </div>
-        </Surface>
-        <Surface title="SNI 覆盖" description="当前页去重域名">
-          <div className="flex items-end justify-between">
-            <div className="text-3xl font-semibold text-slate-950">
-              {uniqueSNI}
-            </div>
-            <ShieldCheck className="h-7 w-7 text-emerald-500" />
-          </div>
-        </Surface>
-        <Surface title="HTTP/2 指纹" description="ALPN 包含 h2">
-          <div className="flex items-end justify-between">
-            <div className="text-3xl font-semibold text-slate-950">
-              {h2Count}
-            </div>
-            <Badge className="border-cyan-200 bg-cyan-50 text-cyan-700">
-              h2
-            </Badge>
-          </div>
-        </Surface>
-      </div>
+      <MetricGrid>
+        <MetricCard
+          label="聚合指纹"
+          value={total.toLocaleString()}
+          hint="后端返回的聚合总数"
+        />
+        <MetricCard
+          label="当前页高风险"
+          value={highRiskFingerprints.toLocaleString()}
+          hint="当前页有高风险 Bot 样本"
+          tone={highRiskFingerprints > 0 ? "danger" : "default"}
+        />
+        <MetricCard
+          label="当前页平均 Bot 分"
+          value={avgBotScore.toLocaleString()}
+          hint="当前页指纹关联评分均值"
+          tone={
+            avgBotScore >= 80
+              ? "danger"
+              : avgBotScore >= 50
+                ? "warning"
+                : "success"
+          }
+        />
+      </MetricGrid>
 
       <Surface
         title="TLS 指纹聚合"
@@ -138,9 +146,10 @@ export default function FingerprintsPage() {
         </div>
 
         {loading ? (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-            加载中...
-          </div>
+          <EmptyState
+            title="指纹数据加载中"
+            description="正在读取最近访问日志聚合出的 TLS 指纹。"
+          />
         ) : filteredItems.length === 0 ? (
           <EmptyState
             title="暂无匹配指纹"
@@ -148,15 +157,16 @@ export default function FingerprintsPage() {
           />
         ) : (
           <div className="space-y-4">
-            <div className="overflow-x-auto overscroll-x-contain rounded-lg border border-slate-200">
+            <div className="overflow-x-auto overscroll-x-contain rounded-xl border border-slate-200/80">
               <table className="min-w-[1040px] table-fixed text-sm">
                 <thead>
-                  <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-xs font-medium text-slate-500">
+                  <tr className="border-b border-slate-100 bg-slate-50 text-left text-xs font-medium tracking-wider text-slate-500 uppercase">
                     <th className="w-[230px] px-4 py-3">JA3 Hash</th>
                     <th className="w-[260px] px-4 py-3">JA4</th>
                     <th className="w-[90px] px-4 py-3">TLS</th>
                     <th className="w-[220px] px-4 py-3">SNI</th>
-                    <th className="w-[120px] px-4 py-3">ALPN</th>
+                    <th className="w-[100px] px-4 py-3 text-right">Bot 均分</th>
+                    <th className="w-[100px] px-4 py-3 text-right">高风险</th>
                     <th className="w-[90px] px-4 py-3 text-right">次数</th>
                     <th className="w-[160px] px-4 py-3">最后出现</th>
                     <th className="w-[90px] px-4 py-3 text-right">详情</th>
@@ -180,8 +190,11 @@ export default function FingerprintsPage() {
                       <td className="min-w-0 px-4 py-3 text-xs">
                         <TruncatedCell value={item.tls_sni} />
                       </td>
-                      <td className="min-w-0 px-4 py-3 text-xs">
-                        <TruncatedCell value={item.tls_alpn} mono />
+                      <td className="px-4 py-3 text-right font-mono text-xs">
+                        {Math.round(item.avg_bot_score ?? 0)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-xs">
+                        {item.high_risk_count ?? 0}
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-xs">
                         {item.count}
@@ -235,7 +248,7 @@ export default function FingerprintsPage() {
       </Surface>
 
       <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
-        <DialogContent className="max-w-2xl rounded-xl">
+        <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto rounded-xl">
           <DialogHeader>
             <DialogTitle>指纹详情</DialogTitle>
             <DialogDescription>
@@ -258,18 +271,44 @@ export default function FingerprintsPage() {
               <DetailField label="ALPN" value={selected.tls_alpn || "-"} mono />
               <DetailField label="SNI" value={selected.tls_sni || "-"} mono />
               <DetailField
+                label="平均 Bot 分"
+                value={Math.round(selected.avg_bot_score ?? 0).toLocaleString()}
+                mono
+              />
+              <DetailField
+                label="高风险样本"
+                value={(selected.high_risk_count ?? 0).toLocaleString()}
+                mono
+              />
+              <DetailField
                 label="出现次数"
                 value={selected.count.toLocaleString()}
                 mono
               />
               <DetailField
-                className="sm:col-span-2"
                 label="最后出现"
                 value={formatDate(selected.last_seen)}
               />
+              <DetailField
+                label="最近客户端 IP"
+                value={selected.last_client_ip || "-"}
+                mono
+              />
+              <DetailField
+                className="sm:col-span-2"
+                label="最近 User-Agent"
+                value={selected.last_user_agent || "-"}
+                mono
+              />
+              <DetailField
+                className="sm:col-span-2"
+                label="最近 Header Order"
+                value={selected.last_header_order || "-"}
+                mono
+              />
               <div className="rounded-lg border border-cyan-100 bg-cyan-50 p-3 text-xs leading-5 text-cyan-800 sm:col-span-2">
-                可以到请求日志按 Host、时间范围或 Request ID
-                继续追踪样本；如果需要按 JA3/JA4 直接筛选，请补充后端查询参数。
+                指纹聚合来自访问日志；如需追踪样本，可复制 JA3 Hash 或 JA4 到
+                Bot 分析页筛选，或到请求日志按 Host、时间范围、Request ID 检索。
               </div>
             </div>
           )}

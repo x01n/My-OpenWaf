@@ -206,6 +206,42 @@ const RULE_KINDS = [
     placeholder: "application/xml",
     group: "请求方法",
   },
+  {
+    value: "tls_ja3_hash",
+    label: "TLS JA3 Hash",
+    placeholder: "27a5061c22108817120d1d3870cba0e0",
+    group: "指纹匹配",
+  },
+  {
+    value: "tls_ja4",
+    label: "TLS JA4",
+    placeholder: "t13d1516h2_8daaf6152771_e5627efa2ab1",
+    group: "指纹匹配",
+  },
+  {
+    value: "tls_version",
+    label: "TLS 版本",
+    placeholder: "TLS13",
+    group: "指纹匹配",
+  },
+  {
+    value: "tls_alpn",
+    label: "TLS ALPN",
+    placeholder: "h2",
+    group: "指纹匹配",
+  },
+  {
+    value: "header_order_contains",
+    label: "Header 顺序包含",
+    placeholder: "host,user-agent,accept",
+    group: "指纹匹配",
+  },
+  {
+    value: "header_order_regex",
+    label: "Header 顺序正则",
+    placeholder: "(?i)user-agent.*accept",
+    group: "指纹匹配",
+  },
 ] as const
 
 interface Condition {
@@ -348,7 +384,8 @@ export function RuleBuilder({ value, onChange }: RuleBuilderProps) {
     path: "/admin",
     method: "GET",
     ip: "192.168.1.100",
-    headers: "User-Agent: Mozilla/5.0",
+    headers:
+      "User-Agent: Mozilla/5.0\nX-OWAF-TLS-JA3-Hash: 27a5061c22108817120d1d3870cba0e0\nX-OWAF-TLS-JA4: t13d1516h2_8daaf6152771_e5627efa2ab1\nX-OWAF-TLS-Version: TLS13\nX-OWAF-TLS-ALPN: h2\nX-OWAF-Header-Order: host,user-agent,accept",
     query: "",
     body: "",
   })
@@ -448,6 +485,20 @@ export function RuleBuilder({ value, onChange }: RuleBuilderProps) {
     emit("compound", condition, next)
   }
 
+  function parseHeadersInput() {
+    return Object.fromEntries(
+      testInput.headers
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const [key, ...rest] = line.split(":")
+          return [key.trim(), rest.join(":").trim()]
+        })
+        .filter(([key]) => key)
+    )
+  }
+
   async function validateRule() {
     if (!rawDSL.trim()) {
       toast.error("规则不能为空")
@@ -467,7 +518,7 @@ export function RuleBuilder({ value, onChange }: RuleBuilderProps) {
     }
   }
 
-  function testRule() {
+  async function testRule() {
     const dsl = rawDSL.trim()
     if (!dsl) {
       setTestResult({ match: false, message: "规则为空" })
@@ -475,57 +526,27 @@ export function RuleBuilder({ value, onChange }: RuleBuilderProps) {
     }
 
     try {
-      if (dsl.startsWith("{")) {
-        setTestResult({
-          match: false,
-          message: "复合规则的精确测试依赖后端验证接口。",
-        })
-        return
-      }
-
-      const [kind, arg] = dsl.split(":", 2)
-      let match = false
-      let message = "无效规则"
-
-      if (kind.includes("_ip")) {
-        match = testInput.ip.includes(arg) || arg.includes(testInput.ip)
-        message = match
-          ? `IP ${testInput.ip} 匹配规则`
-          : `IP ${testInput.ip} 不匹配`
-      } else if (kind.includes("_path")) {
-        if (kind.includes("_exact")) {
-          match = testInput.path === arg
-        } else if (kind.includes("_regex")) {
-          match = new RegExp(arg).test(testInput.path)
-        } else {
-          match = testInput.path.startsWith(arg)
+      const data = await api<{ matched: boolean; kind: string; arg: string }>(
+        "/api/v1/rules/test",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            pattern: dsl,
+            client_ip: testInput.ip,
+            method: testInput.method,
+            path: testInput.path,
+            query: testInput.query,
+            headers: parseHeadersInput(),
+            body: testInput.body,
+          }),
         }
-        message = match
-          ? `路径 ${testInput.path} 匹配规则`
-          : `路径 ${testInput.path} 不匹配`
-      } else if (kind.includes("_method")) {
-        match = testInput.method.toUpperCase() === arg.toUpperCase()
-        message = match
-          ? `方法 ${testInput.method} 匹配规则`
-          : `方法 ${testInput.method} 不匹配`
-      } else if (kind.includes("_header")) {
-        match = kind.includes("_regex")
-          ? new RegExp(arg.split(":")[1] || arg).test(testInput.headers)
-          : testInput.headers.toLowerCase().includes(arg.toLowerCase())
-        message = match ? "请求头匹配规则" : "请求头不匹配"
-      } else if (kind.includes("_query")) {
-        match = kind.includes("_regex")
-          ? new RegExp(arg).test(testInput.query)
-          : testInput.query.includes(arg)
-        message = match ? "查询参数匹配规则" : "查询参数不匹配"
-      } else if (kind.includes("_body")) {
-        match = kind.includes("_regex")
-          ? new RegExp(arg).test(testInput.body)
-          : testInput.body.includes(arg)
-        message = match ? "Body 匹配规则" : "Body 不匹配"
-      }
-
-      setTestResult({ match, message })
+      )
+      setTestResult({
+        match: data.matched,
+        message: data.matched
+          ? `后端真实匹配命中（${data.kind}）`
+          : `后端真实匹配未命中（${data.kind}）`,
+      })
     } catch (error) {
       setTestResult({
         match: false,
@@ -838,7 +859,7 @@ export function RuleBuilder({ value, onChange }: RuleBuilderProps) {
                   placeholder="查询，例如 id=1"
                   className="rounded-md border-slate-200 bg-slate-50"
                 />
-                <Input
+                <Textarea
                   value={testInput.headers}
                   onChange={(event) =>
                     setTestInput((current) => ({
@@ -846,8 +867,8 @@ export function RuleBuilder({ value, onChange }: RuleBuilderProps) {
                       headers: event.target.value,
                     }))
                   }
-                  placeholder="请求头，例如 User-Agent: Mozilla/5.0"
-                  className="rounded-md border-slate-200 bg-slate-50 md:col-span-2"
+                  placeholder="每行一个请求头，例如 User-Agent: Mozilla/5.0"
+                  className="min-h-[96px] rounded-md border-slate-200 bg-slate-50 font-mono text-xs md:col-span-2"
                 />
                 <Textarea
                   value={testInput.body}

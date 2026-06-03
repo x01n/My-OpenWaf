@@ -1,3 +1,5 @@
+import type { CaptchaType } from "./security-api"
+
 const BASE = ""
 
 let accessToken: string | null = null
@@ -138,8 +140,30 @@ export async function api<T = unknown>(
   }
 
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { error?: string }
-    throw new Error(body.error || `HTTP ${response.status}`)
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: string
+      item?: unknown
+      imported?: number
+      total?: number
+      site_refs?: number
+      listener_refs?: number
+    }
+    let message = body.error || `HTTP ${response.status}`
+    if (body.error === "certificate is still referenced") {
+      message = `证书仍被引用，无法删除（站点 ${body.site_refs ?? 0} 个，监听端口 ${body.listener_refs ?? 0} 个）`
+    }
+    if (body.error === "policy is still referenced") {
+      message = `策略仍被 ${body.site_refs ?? 0} 个站点引用，无法删除`
+    }
+    if (body.error?.startsWith("config applied but reload failed")) {
+      throw new Error(
+        `配置已保存，但运行时重新加载失败：${body.error.replace("config applied but reload failed: ", "")}`
+      )
+    }
+    if (typeof body.imported === "number" && typeof body.total === "number") {
+      throw new Error(`${message}（已导入 ${body.imported}/${body.total}）`)
+    }
+    throw new Error(message)
   }
 
   if (response.status === 204) {
@@ -274,7 +298,7 @@ export interface Site {
   cipher_suites?: string
   alpn?: string
   policy_id?: number | null
-  bot_protection_enabled: boolean
+  bot_protection_enabled?: boolean | null
   bot_protection_level?: string
   attack_protection_level?: string
   owasp_enabled?: boolean | null
@@ -445,13 +469,13 @@ export interface SecurityStats {
   top_ips: Array<{ client_ip: string; count: number }>
   top_paths: Array<{ path: string; count: number }>
   top_rules: Array<{ rule_id_str: string; count: number }>
-}
-
-export interface SiteSecurityStats extends SecurityStats {
   intercepts: number
   observes: number
   requests: number
+  challenges: number
 }
+
+export type SiteSecurityStats = SecurityStats
 
 export interface TimelineBucket {
   bucket: string
@@ -497,7 +521,12 @@ export interface FingerprintSummary {
   tls_alpn: string
   tls_sni: string
   count: number
+  high_risk_count?: number
+  avg_bot_score?: number
   last_seen: string
+  last_user_agent?: string
+  last_client_ip?: string
+  last_header_order?: string
 }
 
 export interface AccessLogQuery {
@@ -540,8 +569,10 @@ export interface EscalationStep {
 }
 
 export interface ChainStepConfig {
-  type: "env" | "pow" | "captcha" | string
+  type: "env" | "pow" | "captcha"
   condition?: string
+  match?: string
+  captcha_type?: CaptchaType
 }
 
 export interface ProtectionSettings {
@@ -572,14 +603,15 @@ export interface ProtectionSettings {
   cc_use_custom?: boolean
   cc_rules?: unknown[]
   owasp_modules?: Record<string, string>
+  category_sensitivity?: Record<string, string>
   cve_enabled: boolean
   cve_action: string
-  cve_auto_drop_critical?: boolean
-  cve_auto_drop_high?: boolean
+  cve_auto_drop_critical: boolean
+  cve_auto_drop_high: boolean
   cve_rules_config?: string
   owasp_rules_config?: string
   captcha_enabled?: boolean
-  captcha_type?: string
+  captcha_type?: CaptchaType
   captcha_timeout?: number
   captcha_pass_ttl?: number
   shield_enabled?: boolean
@@ -623,6 +655,31 @@ export interface BotSettings {
   geoip_db_path: string
 }
 
+export const defaultBotSettings: BotSettings = {
+  enabled: false,
+  score_threshold: 60,
+  high_risk_countries: [],
+  datacenter_asns: [],
+  vpn_proxy_asns: [],
+  geoip_db_path: "",
+}
+
+export function normalizeBotSettings(
+  input?: Partial<BotSettings> | null
+): BotSettings {
+  return {
+    enabled: input?.enabled ?? defaultBotSettings.enabled,
+    score_threshold:
+      input?.score_threshold ?? defaultBotSettings.score_threshold,
+    high_risk_countries:
+      input?.high_risk_countries ?? defaultBotSettings.high_risk_countries,
+    datacenter_asns:
+      input?.datacenter_asns ?? defaultBotSettings.datacenter_asns,
+    vpn_proxy_asns: input?.vpn_proxy_asns ?? defaultBotSettings.vpn_proxy_asns,
+    geoip_db_path: input?.geoip_db_path ?? defaultBotSettings.geoip_db_path,
+  }
+}
+
 export interface BotScoreLog {
   id: number
   site_id?: number
@@ -653,6 +710,13 @@ export interface BotScoreQuery {
   min_score?: number
   max_score?: number
   ip?: string
+  host?: string
+  path?: string
+  user_agent?: string
+  request_id?: string
+  ja3_hash?: string
+  ja4?: string
+  high_risk?: boolean
   start_time?: string
   end_time?: string
 }
@@ -662,6 +726,27 @@ export interface DropPolicy {
   bot_score_threshold: number
   cve_auto_drop_critical: boolean
   cve_auto_drop_high: boolean
+}
+
+export const defaultDropPolicy: DropPolicy = {
+  enabled: true,
+  bot_score_threshold: 80,
+  cve_auto_drop_critical: true,
+  cve_auto_drop_high: true,
+}
+
+export function normalizeDropPolicy(
+  input?: Partial<DropPolicy> | null
+): DropPolicy {
+  return {
+    enabled: input?.enabled ?? defaultDropPolicy.enabled,
+    bot_score_threshold:
+      input?.bot_score_threshold ?? defaultDropPolicy.bot_score_threshold,
+    cve_auto_drop_critical:
+      input?.cve_auto_drop_critical ?? defaultDropPolicy.cve_auto_drop_critical,
+    cve_auto_drop_high:
+      input?.cve_auto_drop_high ?? defaultDropPolicy.cve_auto_drop_high,
+  }
 }
 
 export interface DropStats {
@@ -899,7 +984,7 @@ export interface ApplicationRouteRule {
   id?: number
   site_id?: number
   name?: string
-  enabled?: boolean
+  enabled: boolean
   priority?: number
   /** request_header | request_body | response_body | ... */
   target: string
@@ -995,7 +1080,9 @@ export async function getProtectionSettings() {
   return api<ProtectionSettings>("/api/v1/protection-settings")
 }
 
-export async function updateProtectionSettings(payload: ProtectionSettings) {
+export async function updateProtectionSettings(
+  payload: Partial<ProtectionSettings>
+) {
   return api<ProtectionSettings>("/api/v1/protection-settings", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -1006,6 +1093,7 @@ export interface NetworkConfig {
   ipv6_enabled: boolean
   http2_enabled: boolean
   http3_enabled: boolean
+  http3_bind: string
   default_alpn: string
   default_network: string
 }
@@ -1054,7 +1142,7 @@ export async function getNetworkConfig() {
   return api<NetworkConfig>("/api/v1/network-config")
 }
 
-export async function updateNetworkConfig(payload: NetworkConfig) {
+export async function updateNetworkConfig(payload: Partial<NetworkConfig>) {
   return api<NetworkConfig>("/api/v1/network-config", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -1065,7 +1153,9 @@ export async function getTLSDefaultConfig() {
   return api<TLSDefaultConfig>("/api/v1/tls-config")
 }
 
-export async function updateTLSDefaultConfig(payload: TLSDefaultConfig) {
+export async function updateTLSDefaultConfig(
+  payload: Partial<TLSDefaultConfig>
+) {
   return api<TLSDefaultConfig>("/api/v1/tls-config", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -1076,7 +1166,7 @@ export async function getLogConfig() {
   return api<LogConfig>("/api/v1/log-config")
 }
 
-export async function updateLogConfig(payload: LogConfig) {
+export async function updateLogConfig(payload: Partial<LogConfig>) {
   return api<LogConfig>("/api/v1/log-config", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -1149,16 +1239,20 @@ export async function removeAPIKey(id: number) {
 }
 
 export async function getBotSettings(): Promise<BotSettings> {
-  return api<BotSettings>("/api/v1/bot-settings")
+  return normalizeBotSettings(
+    await api<Partial<BotSettings>>("/api/v1/bot-settings")
+  )
 }
 
 export async function updateBotSettings(
-  settings: BotSettings
+  settings: Partial<BotSettings>
 ): Promise<BotSettings> {
-  return api<BotSettings>("/api/v1/bot-settings/update", {
-    method: "POST",
-    body: JSON.stringify(settings),
-  })
+  return normalizeBotSettings(
+    await api<Partial<BotSettings>>("/api/v1/bot-settings/update", {
+      method: "POST",
+      body: JSON.stringify(settings),
+    })
+  )
 }
 
 export async function getBotScores(
@@ -1227,16 +1321,20 @@ export async function getCVEFeedStatus(): Promise<CVEFeedStatus> {
 }
 
 export async function getDropPolicy(): Promise<DropPolicy> {
-  return api<DropPolicy>("/api/v1/drop-policy")
+  return normalizeDropPolicy(
+    await api<Partial<DropPolicy>>("/api/v1/drop-policy")
+  )
 }
 
 export async function updateDropPolicy(
-  policy: DropPolicy
+  policy: Partial<DropPolicy>
 ): Promise<DropPolicy> {
-  return api<DropPolicy>("/api/v1/drop-policy/update", {
-    method: "POST",
-    body: JSON.stringify(policy),
-  })
+  return normalizeDropPolicy(
+    await api<Partial<DropPolicy>>("/api/v1/drop-policy/update", {
+      method: "POST",
+      body: JSON.stringify(policy),
+    })
+  )
 }
 
 export async function getDropStats(): Promise<DropStats> {

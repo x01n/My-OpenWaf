@@ -105,7 +105,7 @@ func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]any{"error": "saved but reload failed: " + err.Error(), "item": item})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": item})
 			return
 		}
 		c.JSON(201, item)
@@ -148,7 +148,7 @@ func UpdateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]any{"error": "saved but reload failed: " + err.Error(), "item": existing})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": existing})
 			return
 		}
 		c.JSON(200, existing)
@@ -177,7 +177,7 @@ func DeleteSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "deleted but reload failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
 		}
 		c.JSON(204, nil)

@@ -44,6 +44,7 @@ type Dependencies struct {
 	CVEFeedMgr    *cve.CVEFeedManager
 	EscalationMgr *escalation.EscalationManager
 	CaptchaMgr    *challenge.CaptchaManager
+	ChainMgr      *challenge.ChainChallengeManager
 	ACMEMgr       *acmepkg.Manager
 	Cache         *cache.RedisKV
 	Upstreams     *upstream.Pool
@@ -112,6 +113,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/security-events/timeline", event.SecurityEventTimeline(r.SecurityEvent))
 		readGroup.GET("/security-events/:id", event.GetSecurityEvent(r.SecurityEvent))
 		readGroup.GET("/access-logs", event.ListAccessLogs(r.AccessLog))
+		readGroup.GET("/access-logs/:id", event.GetAccessLog(r.AccessLog))
 		readGroup.GET("/fingerprints", event.ListTLSFingerprints(r.AccessLog))
 		readGroup.GET("/request/:request_id", event.GetRequestTrace(r.AccessLog, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events", event.ListSiteSecurityEvents(r.Site, r.SecurityEvent))
@@ -143,7 +145,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/captcha/config", protect.GetCaptchaConfig(r.SystemSettings))
 
 		readGroup.GET("/chain/config", protect.GetChainConfig(r.SystemSettings))
-		readGroup.GET("/chain/sessions", protect.ListChainSessions())
+		readGroup.GET("/chain/sessions", protect.ListChainSessions(deps.ChainMgr))
 
 		readGroup.GET("/protection/:id/sensitivity", protect.GetSensitivityConfig(r.SystemSettings))
 
@@ -174,13 +176,13 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		opsGroup.POST("/certificates", system.CreateCertificate(r.Certificate, reload))
 		opsGroup.POST("/certificates/:id/update", system.UpdateCertificate(r.Certificate, reload))
-		opsGroup.POST("/certificates/:id/delete", system.DeleteCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates/:id/delete", system.DeleteCertificate(r.Certificate, r.Site, r.SiteListener, reload))
 		opsGroup.POST("/certificates/acme/apply", system.ACMEApply(deps.Repos, reload, deps.ACMEMgr))
 		opsGroup.POST("/certificates/acme/:id/renew", system.ACMERenew(deps.Repos, reload, deps.ACMEMgr))
 
 		opsGroup.POST("/policies", system.CreatePolicy(r.Policy, reload))
 		opsGroup.POST("/policies/:id/update", system.UpdatePolicy(r.Policy, reload))
-		opsGroup.POST("/policies/:id/delete", system.DeletePolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/delete", system.DeletePolicy(r.Policy, r.Site, reload))
 
 		opsGroup.POST("/rules", rule.CreateRule(r.Rule, reload))
 		opsGroup.POST("/rules/:id/update", rule.UpdateRule(r.Rule, reload))
@@ -211,7 +213,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/captcha/test", protect.TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
 
 		opsGroup.POST("/chain/config", protect.UpdateChainConfig(r.SystemSettings, reload))
-		opsGroup.POST("/chain/sessions/:id/delete", protect.DeleteChainSession())
+		opsGroup.POST("/chain/sessions/:id/delete", protect.DeleteChainSession(deps.ChainMgr))
 
 		opsGroup.POST("/protection/:id/sensitivity", protect.UpdateSensitivityConfig(r.SystemSettings, reload))
 

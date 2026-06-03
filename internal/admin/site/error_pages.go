@@ -64,13 +64,17 @@ func UpdateSiteErrorPages(repo *repository.SiteRepo, reload func() error) app.Ha
 			return
 		}
 		var req struct {
-			ErrorPages map[string]errorPageConfig `json:"error_pages"`
+			ErrorPages *map[string]errorPageConfig `json:"error_pages"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		data, err := json.Marshal(req.ErrorPages)
+		if req.ErrorPages == nil {
+			c.JSON(400, map[string]string{"error": "error_pages is required"})
+			return
+		}
+		data, err := json.Marshal(*req.ErrorPages)
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "failed to encode error pages"})
 			return
@@ -81,10 +85,10 @@ func UpdateSiteErrorPages(repo *repository.SiteRepo, reload func() error) app.Ha
 			return
 		}
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "saved but reload failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
 		}
-		c.JSON(200, map[string]any{"site_id": id, "error_pages": req.ErrorPages})
+		c.JSON(200, map[string]any{"site_id": id, "error_pages": *req.ErrorPages})
 	}
 }
 

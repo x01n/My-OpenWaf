@@ -295,3 +295,24 @@ func TestCCRateMatcherThresholdAndHostIsolation(t *testing.T) {
 		t.Fatal("different host should have an independent counter")
 	}
 }
+
+func TestTLSFingerprintMatchers(t *testing.T) {
+	rules := Compile([]store.Rule{
+		{ID: 1, Name: "ja4", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "tls_ja4:t13d1516h2", Action: store.ActionIntercept, Enabled: true},
+		{ID: 2, Name: "ja3-hash", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "tls_ja3_hash:27a5061c22108817120d1d3870cba0e0", Action: store.ActionIntercept, Enabled: true},
+		{ID: 3, Name: "header-order", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "header_order_contains:user-agent,accept", Action: store.ActionIntercept, Enabled: true},
+	})
+	if len(rules) != 3 {
+		t.Fatalf("expected 3 compiled fingerprint rules, got %d", len(rules))
+	}
+	mc := MatchCtx{Headers: map[string]string{
+		"X-OWAF-TLS-JA4":      "t13d1516h2",
+		"X-OWAF-TLS-JA3":      "771,4865-4866,0-23,29,0",
+		"X-OWAF-Header-Order": "host,user-agent,accept",
+	}}
+	for _, rule := range rules {
+		if !rule.Match(mc) {
+			t.Fatalf("expected fingerprint rule %s to match", rule.Kind)
+		}
+	}
+}

@@ -192,9 +192,50 @@ func NewPHPCVEDetector() *PHPCVEDetector {
 }
 
 // Detect scans the request for PHP CVE exploitation attempts.
+func phpRequestContainsAny(req *CVERequest, needles ...string) bool {
+	for _, lower := range req.AllTargetsLower {
+		for _, needle := range needles {
+			if strings.Contains(lower, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shouldScanPHPRule(req *CVERequest, rule phpCVERule) bool {
+	switch rule.cveID {
+	case "CVE-2015-6835":
+		return phpRequestContainsAny(req, "unserialize", "o:", "a:")
+	case "CVE-2018-14884":
+		return phpRequestContainsAny(req, "php://", "data://", "expect://", "phar://")
+	case "CVE-2018-20062":
+		return phpRequestContainsAny(req, "invokefunction", "thinkphp", "think\\app", "filter[]=", "filter%5b%5d=", "call_user_func", "_method=__construct", "c=runtime", "a=getcontent")
+	case "CVE-2021-3129":
+		return phpRequestContainsAny(req, "_ignition/execute-solution", "_ignition/health-check", "laravel", "facade/ignition", "illuminate\\")
+	case "CVE-2016-WEBSHELL":
+		return phpRequestContainsAny(req, "<?php", "eval(", "system(", "exec(", "passthru(", "shell_exec")
+	case "CVE-2016-WEBSHELL-EXT":
+		return phpRequestContainsAny(req, ".php", ".phtml", ".phar", "filename=")
+	case "CVE-2018-7600":
+		return phpRequestContainsAny(req, "drupal", "form_id=", "#post_render", "#markup", "#type")
+	case "CVE-2017-9841":
+		return phpRequestContainsAny(req, "eval-stdin", "phpunit")
+	case "CVE-2024-4577":
+		return phpRequestContainsAny(req, "%ad", "auto_prepend_file", "allow_url_include", "cgi.force_redirect")
+	case "CVE-2023-41892":
+		return phpRequestContainsAny(req, "conditions/render", "actions/conditions", "configobject", "craftcms", "craft cms")
+	default:
+		return true
+	}
+}
+
 func (d *PHPCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	var matches []CVEMatch
 	for _, rule := range d.rules {
+		if !shouldScanPHPRule(req, rule) {
+			continue
+		}
 		targets := resolveTargets(req, rule.target)
 		for _, t := range targets {
 			for _, pat := range rule.patterns {

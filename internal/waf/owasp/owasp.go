@@ -639,7 +639,8 @@ var skipHeaders = map[string]bool{
 }
 
 func collectTargets(path, query string, headers map[string]string) []string {
-	out := []string{path, query}
+	out := make([]string, 0, 2+len(headers))
+	out = append(out, path, query)
 	if path != "" && !strings.HasPrefix(path, "/") {
 		out = append(out, "/"+path)
 	}
@@ -648,6 +649,11 @@ func collectTargets(path, query string, headers map[string]string) []string {
 	}
 	for k, v := range headers {
 		lk := strings.ToLower(k)
+		if lk != k {
+			if lowerValue, ok := headers[lk]; ok && lowerValue == v {
+				continue
+			}
+		}
 		if lk == "cookie" {
 			out = append(out, extractCookieValues(v)...)
 			continue
@@ -805,7 +811,7 @@ func normalize(s string) string {
 		s = decodeJSEscapes(s)
 	}
 	// Post-JS-escape URL decode: JS escapes may produce percent-encoded chars
-	// (e.g. \u0025\u0032\u0038 → %28 → '('). Multi-pass to handle double/triple encoding.
+	// (e.g. %28 → %28 → '('). Multi-pass to handle double/triple encoding.
 	for range 3 {
 		if !strings.Contains(s, "%") {
 			break
@@ -2811,6 +2817,74 @@ func checkXSS(s string, threshold int) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
+func shouldScanSQLiPattern(normalized string, p owaspPattern) bool {
+	if p.hint != "" && !strings.Contains(normalized, p.hint) {
+		return false
+	}
+	switch p.id {
+	case "owasp:sqli:002", "owasp:sqli:010", "owasp:sqli:011", "owasp:sqli:036", "owasp:sqli:039":
+		return strings.Contains(normalized, "or") || strings.Contains(normalized, "and")
+	case "owasp:sqli:003":
+		return strings.Contains(normalized, "sleep") || strings.Contains(normalized, "benchmark") || strings.Contains(normalized, "waitfor") || strings.Contains(normalized, "pg_sleep")
+	case "owasp:sqli:004", "owasp:sqli:006", "owasp:sqli:012", "owasp:sqli:034":
+		return strings.Contains(normalized, ";")
+	case "owasp:sqli:005", "owasp:sqli:050", "owasp:sqli:051", "owasp:sqli:052":
+		return strings.Contains(normalized, "--") || strings.Contains(normalized, "/*") || strings.Contains(normalized, "/*!")
+	case "owasp:sqli:007":
+		return strings.Contains(normalized, "chr") || strings.Contains(normalized, "unhex") || strings.Contains(normalized, "conv")
+	case "owasp:sqli:009":
+		return strings.Contains(normalized, "information_schema") || strings.Contains(normalized, "sysobjects") || strings.Contains(normalized, "sys.")
+	case "owasp:sqli:013", "owasp:sqli:017":
+		return strings.Contains(normalized, "outfile") || strings.Contains(normalized, "dumpfile") || strings.Contains(normalized, "load_file") || strings.Contains(normalized, "into")
+	case "owasp:sqli:014":
+		return strings.Contains(normalized, "@@")
+	case "owasp:sqli:015":
+		return strings.Contains(normalized, "extractvalue") || strings.Contains(normalized, "updatexml")
+	case "owasp:sqli:018", "owasp:sqli:040":
+		return strings.Contains(normalized, "case") && strings.Contains(normalized, "when")
+	case "owasp:sqli:019":
+		return strings.Contains(normalized, "order")
+	case "owasp:sqli:021":
+		return strings.Contains(normalized, "substr") || strings.Contains(normalized, "substring") || strings.Contains(normalized, "mid")
+	case "owasp:sqli:022":
+		return strings.Contains(normalized, "if") || strings.Contains(normalized, "select") || strings.Contains(normalized, "ord") || strings.Contains(normalized, "ascii") || strings.Contains(normalized, "length") || strings.Contains(normalized, "count") || strings.Contains(normalized, "version")
+	case "owasp:sqli:023":
+		return strings.ContainsAny(normalized, "^&<>")
+	case "owasp:sqli:024", "owasp:sqli:045":
+		return strings.Contains(normalized, "xp_")
+	case "owasp:sqli:025":
+		return strings.Contains(normalized, "procedure")
+	case "owasp:sqli:026":
+		return strings.Contains(normalized, "utl_") || strings.Contains(normalized, "dbms_")
+	case "owasp:sqli:027":
+		return strings.Contains(normalized, "having")
+	case "owasp:sqli:028", "owasp:sqli:031", "owasp:sqli:038", "owasp:sqli:041", "owasp:sqli:046", "owasp:sqli:047":
+		return strings.Contains(normalized, "select")
+	case "owasp:sqli:029":
+		return strings.Contains(normalized, "like")
+	case "owasp:sqli:030", "owasp:sqli:033":
+		return strings.Contains(normalized, "limit") || strings.Contains(normalized, "offset")
+	case "owasp:sqli:032":
+		return strings.Contains(normalized, "group")
+	case "owasp:sqli:035":
+		return strings.Contains(normalized, "waitfor")
+	case "owasp:sqli:037":
+		return strings.Contains(normalized, "copy") || strings.Contains(normalized, "program")
+	case "owasp:sqli:043":
+		return strings.Contains(normalized, "chr")
+	case "owasp:sqli:044":
+		return strings.Contains(normalized, "utl_inaddr")
+	case "owasp:sqli:048":
+		return strings.Contains(normalized, "master")
+	case "owasp:sqli:049", "owasp:sqli:053":
+		return strings.ContainsAny(normalized, "ｓＳ")
+	case "owasp:sqli:054":
+		return strings.Contains(normalized, "%25")
+	default:
+		return true
+	}
+}
+
 func nextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
 	if strings.Contains(normalized, "unionselect") {
 		return OWASPHit{Category: CatSQLi, RuleID: "owasp:sqli:001", Score: 5, Desc: "SQL injection signals"}, true
@@ -2821,9 +2895,28 @@ func nextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
 	if !hasSQLiIndicator(normalized) {
 		return OWASPHit{}, false
 	}
+	containsSelect := strings.Contains(normalized, "select")
+	containsSemicolon := strings.Contains(normalized, ";")
+	containsComment := strings.Contains(normalized, "--") || strings.Contains(normalized, "/*") || strings.Contains(normalized, "/*!")
 	total := 0
 	for _, p := range sqliPatterns {
-		if p.hint != "" && !strings.Contains(normalized, p.hint) {
+		if threshold > 3 {
+			switch p.id {
+			case "owasp:sqli:028", "owasp:sqli:031", "owasp:sqli:038", "owasp:sqli:041", "owasp:sqli:046", "owasp:sqli:047":
+				if !containsSelect {
+					continue
+				}
+			case "owasp:sqli:004", "owasp:sqli:006", "owasp:sqli:012", "owasp:sqli:034":
+				if !containsSemicolon {
+					continue
+				}
+			case "owasp:sqli:005", "owasp:sqli:050", "owasp:sqli:051", "owasp:sqli:052":
+				if !containsComment {
+					continue
+				}
+			}
+		}
+		if !shouldScanSQLiPattern(normalized, p) {
 			continue
 		}
 		if !p.re.MatchString(normalized) {

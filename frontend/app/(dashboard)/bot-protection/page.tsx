@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { Eye, Save, RotateCcw } from "lucide-react"
+import { Eye, Save, RotateCcw, ShieldAlert } from "lucide-react"
 import { toast } from "sonner"
 import {
   Dialog,
@@ -41,23 +41,54 @@ import { formatDate } from "@/lib/utils"
 
 const PAGE_SIZE = 20
 
-function normalizeSettings(settings: BotSettings): BotSettings {
-  return {
-    ...settings,
-    high_risk_countries: settings.high_risk_countries ?? [],
-    datacenter_asns: settings.datacenter_asns ?? [],
-    vpn_proxy_asns: settings.vpn_proxy_asns ?? [],
-    geoip_db_path: settings.geoip_db_path ?? "",
+function sameList<T>(left: T[], right: T[]) {
+  return (
+    left.length === right.length &&
+    left.every((item, index) => item === right[index])
+  )
+}
+
+function buildBotSettingsPatch(
+  current: BotSettings,
+  baseline: BotSettings
+): Partial<BotSettings> {
+  const patch: Partial<BotSettings> = {}
+  if (current.enabled !== baseline.enabled) {
+    patch.enabled = current.enabled
   }
+  if (current.score_threshold !== baseline.score_threshold) {
+    patch.score_threshold = current.score_threshold
+  }
+  if (!sameList(current.high_risk_countries, baseline.high_risk_countries)) {
+    patch.high_risk_countries = current.high_risk_countries
+  }
+  if (!sameList(current.datacenter_asns, baseline.datacenter_asns)) {
+    patch.datacenter_asns = current.datacenter_asns
+  }
+  if (!sameList(current.vpn_proxy_asns, baseline.vpn_proxy_asns)) {
+    patch.vpn_proxy_asns = current.vpn_proxy_asns
+  }
+  if (current.geoip_db_path !== baseline.geoip_db_path) {
+    patch.geoip_db_path = current.geoip_db_path
+  }
+  return patch
 }
 
 export default function BotProtectionPage() {
   const [settings, setSettings] = useState<BotSettings | null>(null)
+  const [baselineSettings, setBaselineSettings] = useState<BotSettings | null>(
+    null
+  )
   const [logs, setLogs] = useState<BotScoreLog[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [ip, setIP] = useState("")
   const [minScore, setMinScore] = useState("")
+  const [hostFilter, setHostFilter] = useState("")
+  const [pathFilter, setPathFilter] = useState("")
+  const [requestIDFilter, setRequestIDFilter] = useState("")
+  const [fingerprintQuery, setFingerprintQuery] = useState("")
+  const [highRiskOnly, setHighRiskOnly] = useState(false)
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<BotScoreLog | null>(null)
   const [saving, setSaving] = useState(false)
@@ -78,15 +109,35 @@ export default function BotProtectionPage() {
           page_size: PAGE_SIZE,
           ip: ip || undefined,
           min_score: minScore ? Number(minScore) : undefined,
+          host: hostFilter || undefined,
+          path: pathFilter || undefined,
+          request_id: requestIDFilter || undefined,
+          ja3_hash: fingerprintQuery || undefined,
+          ja4: fingerprintQuery || undefined,
+          high_risk: highRiskOnly || undefined,
         }),
       ])
-      setSettings(normalizeSettings(botSettings))
+      setSettings(botSettings)
+      setBaselineSettings(botSettings)
       setLogs(scoreLogs.items ?? [])
       setTotal(scoreLogs.total ?? 0)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载 Bot 数据失败")
+      setLogs([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
-  }, [ip, minScore, page])
+  }, [
+    ip,
+    minScore,
+    hostFilter,
+    pathFilter,
+    requestIDFilter,
+    fingerprintQuery,
+    highRiskOnly,
+    page,
+  ])
 
   useEffect(() => {
     load()
@@ -96,8 +147,17 @@ export default function BotProtectionPage() {
     if (!settings) return
     setSaving(true)
     try {
-      const response = await updateBotSettings(settings)
-      setSettings(normalizeSettings(response))
+      const latest = await getBotSettings()
+      const patch = buildBotSettingsPatch(settings, baselineSettings ?? latest)
+      if (Object.keys(patch).length === 0) {
+        setSettings(latest)
+        setBaselineSettings(latest)
+        toast.success("Bot 配置已是最新")
+        return
+      }
+      const response = await updateBotSettings(patch)
+      setSettings(response)
+      setBaselineSettings(response)
       toast.success("Bot 配置已保存")
     } catch (error) {
       toast.error(String(error))
@@ -176,7 +236,7 @@ export default function BotProtectionPage() {
             description="Bot 检测的全局开关和评分阈值。"
           >
             <div className="grid gap-5">
-              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-slate-900">
                     启用 Bot 检测
@@ -210,7 +270,8 @@ export default function BotProtectionPage() {
                   placeholder="评分达到此值判定为 Bot"
                 />
                 <p className="text-xs text-slate-400">
-                  评分 ≥ 阈值的请求将被判定为 Bot
+                  评分 ≥ 阈值的请求将被判定为 Bot，并同步为 Drop
+                  页的自动断连阈值
                 </p>
               </div>
 
@@ -426,12 +487,65 @@ export default function BotProtectionPage() {
             type="number"
             className="w-32 rounded-md"
           />
+          <Input
+            value={fingerprintQuery}
+            onChange={(e) => {
+              setFingerprintQuery(e.target.value)
+              setPage(1)
+            }}
+            placeholder="JA3 Hash 或 JA4"
+            className="w-64 rounded-md"
+          />
+          <Input
+            value={hostFilter}
+            onChange={(e) => {
+              setHostFilter(e.target.value)
+              setPage(1)
+            }}
+            placeholder="按 Host 筛选"
+            className="w-48 rounded-md"
+          />
+          <Input
+            value={pathFilter}
+            onChange={(e) => {
+              setPathFilter(e.target.value)
+              setPage(1)
+            }}
+            placeholder="按路径筛选"
+            className="w-48 rounded-md"
+          />
+          <Input
+            value={requestIDFilter}
+            onChange={(e) => {
+              setRequestIDFilter(e.target.value)
+              setPage(1)
+            }}
+            placeholder="Request ID"
+            className="w-56 rounded-md"
+          />
+          <Button
+            type="button"
+            variant={highRiskOnly ? "default" : "outline"}
+            className="rounded-md"
+            onClick={() => {
+              setHighRiskOnly((value) => !value)
+              setPage(1)
+            }}
+          >
+            <ShieldAlert className="mr-2 h-4 w-4" />
+            仅高风险
+          </Button>
           <Button
             variant="outline"
             className="rounded-md"
             onClick={() => {
               setIP("")
               setMinScore("")
+              setFingerprintQuery("")
+              setHostFilter("")
+              setPathFilter("")
+              setRequestIDFilter("")
+              setHighRiskOnly(false)
               setPage(1)
             }}
           >
@@ -441,9 +555,10 @@ export default function BotProtectionPage() {
         </div>
 
         {loading ? (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-            加载中...
-          </div>
+          <EmptyState
+            title="Bot 评分日志加载中"
+            description="正在读取 Bot 评分事件和筛选结果。"
+          />
         ) : logs.length === 0 ? (
           <EmptyState
             title="暂无 Bot 评分日志"
@@ -451,7 +566,7 @@ export default function BotProtectionPage() {
           />
         ) : (
           <div className="space-y-4">
-            <div className="overflow-hidden rounded-lg border border-slate-200">
+            <div className="overflow-hidden rounded-xl border border-slate-200/80">
               <Table>
                 <TableHeader>
                   <TableRow className="bg-slate-50 text-xs tracking-wider text-slate-500 uppercase">
@@ -567,7 +682,7 @@ export default function BotProtectionPage() {
                   <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
                     {label}
                   </div>
-                  <div className="mt-1 break-all text-sm text-slate-700">
+                  <div className="mt-1 text-sm break-all text-slate-700">
                     {value}
                   </div>
                 </div>
@@ -588,7 +703,7 @@ export default function BotProtectionPage() {
                   <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
                     {label}
                   </div>
-                  <code className="mt-1 block break-all text-xs text-slate-700">
+                  <code className="mt-1 block text-xs break-all text-slate-700">
                     {value}
                   </code>
                 </div>
@@ -597,7 +712,7 @@ export default function BotProtectionPage() {
                 <div className="text-[11px] font-medium tracking-wider text-slate-400 uppercase">
                   Details
                 </div>
-                <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-white p-2 text-xs text-slate-700">
+                <pre className="mt-1 max-h-64 overflow-auto rounded bg-white p-2 text-xs break-all whitespace-pre-wrap text-slate-700">
                   {selected.details || "-"}
                 </pre>
               </div>

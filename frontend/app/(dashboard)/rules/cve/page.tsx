@@ -38,7 +38,13 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Pagination } from "@/components/pagination"
-import { PageIntro, Surface, EmptyState } from "@/components/console-shell"
+import {
+  MetricCard,
+  MetricGrid,
+  PageIntro,
+  Surface,
+  EmptyState,
+} from "@/components/console-shell"
 import {
   getCVERules,
   patchCVERule,
@@ -66,36 +72,6 @@ const severityIcon: Record<string, React.ReactNode> = {
   high: <AlertTriangle className="h-3.5 w-3.5" />,
   medium: <Shield className="h-3.5 w-3.5" />,
   low: <ShieldCheck className="h-3.5 w-3.5" />,
-}
-
-function StatCard({
-  label,
-  value,
-  icon,
-  color,
-}: {
-  label: string
-  value: number
-  icon: React.ReactNode
-  color: string
-}) {
-  return (
-    <div className="rounded-lg border bg-white p-5 shadow-sm">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-xs font-medium tracking-wider text-slate-500 uppercase">
-            {label}
-          </p>
-          <p className="mt-1 text-2xl font-bold text-slate-900">{value}</p>
-        </div>
-        <div
-          className={`flex h-10 w-10 items-center justify-center rounded-lg ${color}`}
-        >
-          {icon}
-        </div>
-      </div>
-    </div>
-  )
 }
 
 export default function CVERuleManagementPage() {
@@ -137,6 +113,8 @@ export default function CVERuleManagementPage() {
       setTotal(res.total ?? 0)
     } catch (e) {
       toast.error(String(e))
+      setItems([])
+      setTotal(0)
     } finally {
       setLoading(false)
     }
@@ -147,9 +125,15 @@ export default function CVERuleManagementPage() {
   }, [load])
 
   useEffect(() => {
+    setSelected(new Set())
+  }, [page, category, severity, enabled, search])
+
+  useEffect(() => {
     getCVERuleStats()
       .then(setStats)
-      .catch(() => {})
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "加载 CVE 统计失败")
+      )
   }, [])
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -209,46 +193,45 @@ export default function CVERuleManagementPage() {
       <PageIntro
         eyebrow="CVE Rule Management"
         title="CVE 规则管理"
-        description="筛选、搜索、批量操作和编辑 CVE 漏洞检测规则。支持按分类、严重等级和启用状态过滤。"
+        description="筛选、搜索、批量操作和编辑 CVE 漏洞检测规则；顶部统计为全量规则，搜索仅过滤当前页。"
       />
 
       {stats && (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatCard
-            label="规则总数"
+        <MetricGrid>
+          <MetricCard
+            label="全量规则总数"
             value={stats.total}
-            icon={<Shield className="h-5 w-5 text-slate-600" />}
-            color="bg-slate-100"
+            hint="后端 CVE 规则总量"
           />
-          <StatCard
-            label="已启用"
+          <MetricCard
+            label="全量已启用"
             value={stats.enabled}
-            icon={<ShieldCheck className="h-5 w-5 text-emerald-600" />}
-            color="bg-emerald-50"
+            tone="success"
+            hint="当前启用规则"
           />
-          <StatCard
+          <MetricCard
             label="Critical"
             value={stats.by_severity?.critical ?? 0}
-            icon={<ShieldAlert className="h-5 w-5 text-rose-600" />}
-            color="bg-rose-50"
+            tone="danger"
+            hint="严重等级 Critical"
           />
-          <StatCard
+          <MetricCard
             label="High"
             value={stats.by_severity?.high ?? 0}
-            icon={<AlertTriangle className="h-5 w-5 text-orange-600" />}
-            color="bg-orange-50"
+            tone="warning"
+            hint="严重等级 High"
           />
-        </div>
+        </MetricGrid>
       )}
 
       <Surface
         title="规则列表"
-        description="管理所有 CVE 检测规则。"
+        description="按后端筛选条件分页管理 CVE 检测规则；全选与批量操作仅作用于当前页已选规则。"
         action={
           selected.size > 0 ? (
             <div className="flex items-center gap-2">
               <span className="text-sm text-slate-500">
-                已选 {selected.size} 条
+                当前页已选 {selected.size} 条
               </span>
               <Button
                 size="sm"
@@ -326,7 +309,7 @@ export default function CVERuleManagementPage() {
           <div className="relative min-w-[200px] flex-1">
             <Search className="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <Input
-              placeholder="搜索 CVE 编号或描述..."
+              placeholder="当前页搜索 CVE 编号或描述..."
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value)
@@ -335,12 +318,18 @@ export default function CVERuleManagementPage() {
               className="rounded-md pl-9"
             />
           </div>
+          {search && (
+            <span className="text-xs text-slate-400">
+              搜索仅过滤当前页结果；分类、等级和状态筛选会影响后端分页总数。
+            </span>
+          )}
         </div>
 
         {loading ? (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500">
-            加载中...
-          </div>
+          <EmptyState
+            title="CVE 规则加载中"
+            description="正在读取规则列表、分页统计和筛选条件。"
+          />
         ) : items.length === 0 ? (
           <EmptyState
             title="暂无匹配规则"
@@ -348,7 +337,7 @@ export default function CVERuleManagementPage() {
           />
         ) : (
           <div className="space-y-4">
-            <div className="overflow-x-auto rounded-lg border border-slate-200">
+            <div className="overflow-x-auto rounded-xl border border-slate-200/80">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -465,7 +454,7 @@ export default function CVERuleManagementPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3">
               <span className="text-sm font-medium">启用状态</span>
               <Switch
                 checked={editForm.enabled}

@@ -1,6 +1,8 @@
 package rules
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"net/url"
@@ -86,6 +88,14 @@ func headerValue(headers map[string]string, name string) string {
 }
 
 func lookupHeaderValue(headers map[string]string, name string) (string, bool) {
+	if value, ok := headers[name]; ok {
+		return value, true
+	}
+	if lower := strings.ToLower(name); lower != name {
+		if value, ok := headers[lower]; ok {
+			return value, true
+		}
+	}
 	for k, v := range headers {
 		if strings.EqualFold(k, name) {
 			return v, true
@@ -166,6 +176,39 @@ func (m *headerContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[stri
 type headerRegexMatcher struct {
 	name string
 	re   *regexp.Regexp
+}
+
+type headerOrderContainsMatcher struct{ substr string }
+
+func (m *headerOrderContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
+	return strings.Contains(headerValue(headers, "x-owaf-header-order"), m.substr)
+}
+
+type headerOrderRegexMatcher struct{ re *regexp.Regexp }
+
+type tlsFingerprintMatcher struct {
+	name  string
+	value string
+}
+
+func (m *tlsFingerprintMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
+	value := headerValue(headers, m.name)
+	if strings.EqualFold(value, m.value) {
+		return true
+	}
+	if m.name == "x-owaf-tls-ja3-hash" && value == "" {
+		ja3 := headerValue(headers, "x-owaf-tls-ja3")
+		if ja3 == "" {
+			return false
+		}
+		sum := md5.Sum([]byte(ja3))
+		return strings.EqualFold(hex.EncodeToString(sum[:]), m.value)
+	}
+	return false
+}
+
+func (m *headerOrderRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
+	return m.re.MatchString(headerValue(headers, "x-owaf-header-order"))
 }
 
 func (m *headerRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
@@ -367,8 +410,37 @@ type pathContainsMatcher struct{ substr string }
 
 type pathNotContainsMatcher struct{ substr string }
 
+func rawQueryMayContainParam(query, param string) bool {
+	if query == "" || param == "" {
+		return false
+	}
+	if rawQueryContainsParamName(query, param) {
+		return true
+	}
+	escaped := url.QueryEscape(param)
+	return escaped != param && rawQueryContainsParamName(query, escaped)
+}
+
+func rawQueryContainsParamName(query, name string) bool {
+	start := 0
+	for {
+		idx := strings.Index(query[start:], name)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		end := pos + len(name)
+		beforeOK := pos == 0 || query[pos-1] == '&'
+		afterOK := end == len(query) || query[end] == '=' || query[end] == '&'
+		if beforeOK && afterOK {
+			return true
+		}
+		start = end
+	}
+}
+
 func (m *queryParamMatcher) Match(_ net.IP, _, _, query string, _ map[string]string, _ []byte) bool {
-	if query == "" {
+	if query == "" || !rawQueryMayContainParam(query, m.param) {
 		return false
 	}
 	values, err := url.ParseQuery(query)
@@ -391,7 +463,7 @@ func (m *queryParamMatcher) Match(_ net.IP, _, _, query string, _ map[string]str
 }
 
 func (m *queryParamRegexMatcher) Match(_ net.IP, _, _, query string, _ map[string]string, _ []byte) bool {
-	if query == "" {
+	if query == "" || !rawQueryMayContainParam(query, m.param) {
 		return false
 	}
 	values, err := url.ParseQuery(query)
@@ -622,6 +694,31 @@ func buildMatcher(kind, arg string) Matcher {
 			return &neverMatcher{}
 		}
 		return &headerRegexMatcher{name: "user-agent", re: re}
+
+	case "tls_ja3":
+		return &tlsFingerprintMatcher{name: "x-owaf-tls-ja3", value: arg}
+
+	case "tls_ja3_hash":
+		return &tlsFingerprintMatcher{name: "x-owaf-tls-ja3-hash", value: arg}
+
+	case "tls_ja4":
+		return &tlsFingerprintMatcher{name: "x-owaf-tls-ja4", value: arg}
+
+	case "tls_version":
+		return &tlsFingerprintMatcher{name: "x-owaf-tls-version", value: arg}
+
+	case "tls_alpn":
+		return &tlsFingerprintMatcher{name: "x-owaf-tls-alpn", value: arg}
+
+	case "header_order_contains":
+		return &headerOrderContainsMatcher{substr: arg}
+
+	case "header_order_regex":
+		re, err := cachedCompile(arg)
+		if err != nil {
+			return &neverMatcher{}
+		}
+		return &headerOrderRegexMatcher{re: re}
 
 	case "header_regex":
 		name, pattern := splitHeaderArg(arg)

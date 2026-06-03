@@ -125,8 +125,12 @@ func (r *CVERuleRegistry) DetectAll(uri, body, ua string, headers map[string]str
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var matches []CVEMatch
+	combinedLower := registryCombinedLower(uri, body, ua, headers)
 	for _, rule := range r.rules {
 		if !rule.Enabled {
+			continue
+		}
+		if !shouldScanRegisteredCVERule(rule, combinedLower) {
 			continue
 		}
 		if m := rule.CheckFunc(uri, body, ua, headers); m != nil {
@@ -134,6 +138,93 @@ func (r *CVERuleRegistry) DetectAll(uri, body, ua string, headers map[string]str
 		}
 	}
 	return matches
+}
+
+func registryCombinedLower(uri, body, ua string, headers map[string]string) string {
+	var b strings.Builder
+	b.Grow(len(uri) + len(body) + len(ua) + len(headers)*32)
+	b.WriteString(uri)
+	b.WriteByte('\n')
+	b.WriteString(body)
+	b.WriteByte('\n')
+	b.WriteString(ua)
+	for k, v := range headers {
+		b.WriteByte('\n')
+		b.WriteString(k)
+		b.WriteByte(':')
+		b.WriteString(v)
+	}
+	return strings.ToLower(b.String())
+}
+
+func registeredCVERuleContainsAny(combinedLower string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(combinedLower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldScanRegisteredCVERule(rule *CVERule, combinedLower string) bool {
+	switch rule.CVE {
+	case "CVE-2023-GRAPHQL":
+		return registeredCVERuleContainsAny(combinedLower, "__schema", "__type", "introspectionquery")
+	case "CVE-2014-6271":
+		return registeredCVERuleContainsAny(combinedLower, "() {")
+	case "CVE-2025-30208":
+		return registeredCVERuleContainsAny(combinedLower, "@fs/", "raw??", "html-proxy", "htmlproxy", "inline", "?url", "&url", ".html")
+	case "CVE-2025-3248":
+		return registeredCVERuleContainsAny(combinedLower, "validate/code", "__import__", "exec(", "eval(", "subprocess", "child_process")
+	case "CVE-2025-24893":
+		return registeredCVERuleContainsAny(combinedLower, "solrsearch", "media=rss", "groovy", "{{async", "{{ async")
+	case "CVE-2025-53770":
+		return registeredCVERuleContainsAny(combinedLower, "toolpane.aspx", "signout.aspx", "spinstall0.aspx", "msotlpn_dwp", "compresseddatatable", "__viewstate")
+	case "CVE-2025-34028":
+		return registeredCVERuleContainsAny(combinedLower, "deploywebpackage.do", "commcellname", "servicepack", "../", "http://", "https://")
+	case "CVE-2025-47812":
+		return registeredCVERuleContainsAny(combinedLower, "loginok.html", "%00", "io.popen", "lua")
+	case "CVE-2025-4632":
+		return registeredCVERuleContainsAny(combinedLower, "swupdatefileuploader", "filename=", "magicinfo", "../")
+	case "CVE-2025-64446":
+		return registeredCVERuleContainsAny(combinedLower, "fwbcgi", "cgiinfo")
+	case "CVE-2025-10035":
+		return registeredCVERuleContainsAny(combinedLower, "unlicensed.xhtml", "garequestaction=activate", "javax.faces.viewstate")
+	case "CVE-2025-41243":
+		return registeredCVERuleContainsAny(combinedLower, "actuator/gateway", "addresponseheader", "#{", "spel")
+	case "CVE-2025-47916":
+		return registeredCVERuleContainsAny(combinedLower, "themeeditor", "customcss", "expression=")
+	case "CVE-2025-31161":
+		return registeredCVERuleContainsAny(combinedLower, "webinterface/function", "aws4-hmac-sha256", "crushftp")
+	case "CVE-2025-32756":
+		return registeredCVERuleContainsAny(combinedLower, "hostcheck_validate", "authhash")
+	case "CVE-2017-8046":
+		return registeredCVERuleContainsAny(combinedLower, "json-patch", "application/patch+json", "spel", "#{", "t(")
+	case "CVE-2023-1454":
+		return registeredCVERuleContainsAny(combinedLower, "jeecg", "sys/", "select", "union", "updatexml", "extractvalue", "sleep(")
+	case "CVE-2021-21351":
+		return registeredCVERuleContainsAny(combinedLower, "<java", "<sorted-set", "<dynamic-proxy", "xstream", "processbuilder", "runtime")
+	case "CVE-2019-3929":
+		return registeredCVERuleContainsAny(combinedLower, "/cgi-bin/", "cgi", ";", "|", "`", "$(", "wget", "curl", "busybox")
+	case "CVE-2024-JAVAINJ":
+		return registeredCVERuleContainsAny(combinedLower, "ognl", "spel", "#{", "${", "runtime", "processbuilder", "class.forname", "javax.script")
+	case "CVE-2024-REMOTECALL":
+		return registeredCVERuleContainsAny(combinedLower, "jndi:", "ldap://", "rmi://", "iiop://", "jdbc:", "dns://")
+	case "CVE-2024-DEEPPATH":
+		return registeredCVERuleContainsAny(combinedLower, "../", "..\\", "%2e", "%252e", "%5c", "%00", "/etc/passwd", "web.config")
+	case "CVE-2024-XXEUTF7":
+		return registeredCVERuleContainsAny(combinedLower, "utf-7", "+adw-", "+adi-", "+afw-")
+	case "CVE-2024-LDAPI":
+		return registeredCVERuleContainsAny(combinedLower, "objectclass=", ")(|", ")(uid=", "*)(", "ldap")
+	case "CVE-2024-NOSQLI":
+		return registeredCVERuleContainsAny(combinedLower, "$gt", "$ne", "$regex", "$where", "$or", "$and", "constructor", "__proto__")
+	case "CVE-2024-SENSFILE":
+		return registeredCVERuleContainsAny(combinedLower, "/.env", "/.git/config", "/.htaccess", "/wp-config.php", "/web.config", "/etc/passwd")
+	case "CVE-2024-LOWCMD":
+		return registeredCVERuleContainsAny(combinedLower, ";", "|", "`", "$(", "whoami", "uname", "ifconfig", "ipconfig")
+	default:
+		return true
+	}
 }
 
 // GetGlobalCVERuleRegistry 返回全局颗粒化规则注册表
@@ -152,6 +243,10 @@ type CVERequest struct {
 	DecodedPath     string
 	DecodedQuery    string
 	DecodedBody     string
+	URLTargets      []string
+	BodyTargets     []string
+	URLBodyTargets  []string
+	HeaderTargets   []string
 	AllTargets      []string // aggregated targets (path+query+header values+body)
 	AllTargetsLower []string // pre-lowercased AllTargets for hasCVESuspiciousContent
 }
@@ -177,20 +272,32 @@ func BuildCVERequest(path, rawQuery string, headers map[string]string, body []by
 	decodedQuery := multiDecode(rawQuery)
 	decodedBody := multiDecode(bodyStr)
 
-	var targets []string
-	targets = append(targets, path, decodedPath)
+	urlTargets := []string{path, decodedPath}
 	if rawQuery != "" {
-		targets = append(targets, rawQuery, decodedQuery)
+		urlTargets = append(urlTargets, rawQuery, decodedQuery)
 	}
+
+	var bodyTargets []string
+	if bodyStr != "" {
+		bodyTargets = []string{bodyStr, decodedBody}
+	}
+
+	headerTargets := make([]string, 0, len(headers))
 	for _, v := range headers {
-		targets = append(targets, v)
+		headerTargets = append(headerTargets, v)
 	}
+
+	urlBodyTargets := make([]string, 0, len(urlTargets)+len(bodyTargets))
+	urlBodyTargets = append(urlBodyTargets, urlTargets...)
+	urlBodyTargets = append(urlBodyTargets, bodyTargets...)
+
+	var targets []string
+	targets = append(targets, urlTargets...)
+	targets = append(targets, headerTargets...)
 	if contentType != "" {
 		targets = append(targets, contentType)
 	}
-	if bodyStr != "" {
-		targets = append(targets, bodyStr, decodedBody)
-	}
+	targets = append(targets, bodyTargets...)
 
 	targetsLower := make([]string, len(targets))
 	for i, t := range targets {
@@ -206,6 +313,10 @@ func BuildCVERequest(path, rawQuery string, headers map[string]string, body []by
 		DecodedPath:     decodedPath,
 		DecodedQuery:    decodedQuery,
 		DecodedBody:     decodedBody,
+		URLTargets:      urlTargets,
+		BodyTargets:     bodyTargets,
+		URLBodyTargets:  urlBodyTargets,
+		HeaderTargets:   headerTargets,
 		AllTargets:      targets,
 		AllTargetsLower: targetsLower,
 	}
@@ -298,15 +409,40 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 
 // hasCVESuspiciousContent performs a cheap pre-filter to skip CVE scanning
 // for requests that are clearly clean. Checks for common exploit indicators.
+func hasCVEHighRiskPunctuation(raw, lower string) bool {
+	if strings.ContainsAny(raw, "\\|`") {
+		return true
+	}
+	if strings.Contains(raw, "$") {
+		return strings.Contains(lower, "${") || strings.Contains(lower, "$gt") || strings.Contains(lower, "$ne") || strings.Contains(lower, "$regex") || strings.Contains(lower, "$where") || strings.Contains(lower, "$or") || strings.Contains(lower, "$and")
+	}
+	if strings.Contains(raw, "{") || strings.Contains(raw, "}") {
+		return strings.Contains(lower, "${") || strings.Contains(lower, "#{") || strings.Contains(lower, "{{") || strings.Contains(lower, "expression=") || strings.Contains(lower, "groovy") || strings.Contains(lower, "async=false") || strings.Contains(lower, "addresponseheader") || strings.Contains(lower, "unserialize") || strings.Contains(lower, "o:") || strings.Contains(lower, "a:")
+	}
+	if strings.Contains(raw, ";") {
+		return strings.Contains(lower, "select") || strings.Contains(lower, "union") || strings.Contains(lower, "drop") || strings.Contains(lower, "insert") || strings.Contains(lower, "update") || strings.Contains(lower, "delete") || strings.Contains(lower, "exec") || strings.Contains(lower, "system") || strings.Contains(lower, "whoami") || strings.Contains(lower, "uname") || strings.Contains(lower, "ifconfig") || strings.Contains(lower, "ipconfig")
+	}
+	if strings.Contains(raw, "<") || strings.Contains(raw, ">") {
+		return strings.Contains(lower, "<!") || strings.Contains(lower, "<script") || strings.Contains(lower, "<sorted-set") || strings.Contains(lower, "<dynamic-proxy") || strings.Contains(lower, "</")
+	}
+	if strings.Contains(raw, "(") || strings.Contains(raw, ")") {
+		return strings.Contains(lower, "${") || strings.Contains(lower, "jndi:") || strings.Contains(lower, "runtime") || strings.Contains(lower, "exec") || strings.Contains(lower, "processbuilder") || strings.Contains(lower, "class.forname") || strings.Contains(lower, "objectclass=") || strings.Contains(lower, ")(|") || strings.Contains(lower, ")(uid=")
+	}
+	if strings.Contains(raw, "[") || strings.Contains(raw, "]") {
+		return strings.Contains(lower, "this[") || strings.Contains(lower, "window[") || strings.Contains(lower, "globalthis") || strings.Contains(lower, "constructor") || strings.Contains(lower, "__proto__")
+	}
+	return false
+}
+
 func hasCVESuspiciousContent(req *CVERequest) bool {
 	for i, t := range req.AllTargets {
 		if len(t) < 3 {
 			continue
 		}
-		if strings.ContainsAny(t, "${}()[]<>\\|;`") {
+		lower := req.AllTargetsLower[i]
+		if hasCVEHighRiskPunctuation(t, lower) {
 			return true
 		}
-		lower := req.AllTargetsLower[i]
 		if strings.Contains(lower, "http://") ||
 			strings.Contains(lower, "https://") ||
 			strings.Contains(lower, "file://") ||

@@ -15,6 +15,22 @@ import (
 	"My-OpenWaf/internal/waf/ratelimit"
 )
 
+func TestNormalizeAntiReplayActionKeepsChallengeActions(t *testing.T) {
+	cases := map[string]string{
+		"":                  "challenge",
+		"shield_challenge":  "shield_challenge",
+		"captcha_challenge": "captcha_challenge",
+		"chain_challenge":   "chain_challenge",
+		"block":             "intercept",
+		"drop":              "challenge",
+	}
+	for input, want := range cases {
+		if got := normalizeAntiReplayAction(input); got != want {
+			t.Fatalf("normalizeAntiReplayAction(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestErrorRateLimitActionDefaultsToRateLimit(t *testing.T) {
 	got := errorRateLimitAction("")
 	if got.Type != action.RateLimit || !got.Matched || got.Phase != "error_rate_limit" || got.StatusCode != 429 {
