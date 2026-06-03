@@ -46,18 +46,16 @@ func invokeOWASPUpdate(t *testing.T, handler app.HandlerFunc, ruleID string, pay
 		t.Fatalf("marshal payload: %v", err)
 	}
 	var req protocol.Request
-	var resp protocol.Response
 	req.SetMethod("POST")
 	req.SetRequestURI("/api/v1/owasp-rules/" + ruleID + "/update")
 	req.Header.Set("Content-Type", "application/json")
 	req.SetBody(body)
 	ctx := app.NewContext(0)
 	req.CopyTo(&ctx.Request)
-	ctx.Response = resp
 	ctx.Params = param.Params{{Key: "id", Value: ruleID}}
 	handler(context.Background(), ctx)
-	if resp.StatusCode() != 200 {
-		t.Fatalf("unexpected status %d: %s", resp.StatusCode(), bytes.TrimSpace(resp.Body()))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 }
 
