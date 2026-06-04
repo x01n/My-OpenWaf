@@ -1,22 +1,15 @@
-import type { Metadata } from "next"
+import { Geist_Mono, Inter } from "next/font/google"
 
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
+import { cn } from "@/lib/utils"
 
-export const metadata: Metadata = {
-  title: {
-    default: "My-OpenWAF 控制台",
-    template: "%s · My-OpenWAF",
-  },
-  description: "面向站点接入、规则治理、日志审计与防护策略编排的 My-OpenWAF 管理控制台。",
-  applicationName: "My-OpenWAF",
-  keywords: ["WAF", "Web Application Firewall", "安全防护", "My-OpenWAF"],
-  authors: [{ name: "My-OpenWAF" }],
-  creator: "My-OpenWAF",
-  icons: {
-    icon: "/favicon.ico",
-  },
-}
+const inter = Inter({ subsets: ["latin"], variable: "--font-sans" })
+
+const fontMono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+})
 
 export default function RootLayout({
   children,
@@ -25,9 +18,14 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      lang="zh-CN"
+      lang="en"
       suppressHydrationWarning
-      className="font-sans antialiased"
+      className={cn(
+        "antialiased",
+        fontMono.variable,
+        "font-sans",
+        inter.variable
+      )}
     >
       <body>
         <ThemeProvider>{children}</ThemeProvider>
