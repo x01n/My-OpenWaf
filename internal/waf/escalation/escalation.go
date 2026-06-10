@@ -171,12 +171,11 @@ func (m *EscalationManager) GetIPStatus(ip string, siteID uint) IPEscalationStat
 	return IPEscalationStatus{IP: ip, HitCount: count, Level: level, Action: act}
 }
 func (m *EscalationManager) ResetIP(ip string, siteID uint) {
-	key := fmt.Sprintf("esc:%s:%d", ip, siteID)
-	m.localCache.Delete(key)
+	m.localCache.Delete(localEscalationKey(ip, siteID))
 	if m.redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		m.redis.Del(ctx, "owaf:escalation:"+key)
+		m.redis.Del(ctx, redisEscalationKey(ip, siteID))
 	}
 }
 func resolveAction(count int, steps []EscalationStep) string {

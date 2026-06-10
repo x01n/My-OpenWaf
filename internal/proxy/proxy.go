@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -20,6 +23,24 @@ import (
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 )
+
+type byteSliceReadCloser struct {
+	data []byte
+	pos  int
+}
+
+func (r *byteSliceReadCloser) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+func (r *byteSliceReadCloser) Close() error {
+	return nil
+}
 
 // transportKey identifies a unique upstream TLS configuration.
 type transportKey struct {
@@ -45,7 +66,7 @@ func SharedTransport(rt snapshot.SiteRuntime) *http.Transport {
 
 // SharedTransportForUpstream keys the pool by the selected upstream scheme.
 func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Transport {
-	isHTTPS := strings.HasPrefix(strings.ToLower(base), "https://")
+	isHTTPS := isHTTPSUpstreamBase(base)
 	key := transportKey{
 		tlsServerName: rt.Site.UpstreamTLSServerName,
 		tlsSkipVerify: rt.Site.UpstreamTLSSkipVerify,
@@ -60,10 +81,11 @@ func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Tran
 	transportMu.RUnlock()
 
 	tr := &http.Transport{
-		MaxIdleConns:        128,
-		MaxIdleConnsPerHost: 32,
+		MaxIdleConns:        512,
+		MaxIdleConnsPerHost: 128,
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
+		DisableCompression:  true,
 	}
 	if isHTTPS {
 		tr.TLSClientConfig = &tls.Config{
@@ -81,6 +103,23 @@ func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Tran
 	transportPool[key] = tr
 	transportMu.Unlock()
 	return tr
+}
+
+func isHTTPSUpstreamBase(base string) bool {
+	const scheme = "https://"
+	if len(base) < len(scheme) {
+		return false
+	}
+	for i := 0; i < len(scheme); i++ {
+		b := base[i]
+		if 'A' <= b && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != scheme[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // clientPool caches http.Client instances keyed by transport to avoid repeated allocation.
@@ -116,6 +155,73 @@ type HTTPResponse struct {
 	Header      http.Header
 }
 
+var upstreamErrorLogCounter atomic.Uint64
+
+// shouldLogUpstreamErrorCount keeps initial evidence and samples repeated failures.
+func shouldLogUpstreamErrorCount(count uint64) bool {
+	return count <= 16 || count%1024 == 0
+}
+
+func upstreamErrorReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err.Error()
+	}
+	return err.Error()
+}
+
+func upstreamLogPath(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	path := req.URL.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	const limit = 160
+	if len(path) <= limit {
+		return path
+	}
+	return path[:limit] + "..."
+}
+
+func logUpstreamRequestError(ctx context.Context, mode string, req *http.Request, origHost string, err error) {
+	logger := slog.Default()
+	if !logger.Enabled(ctx, slog.LevelWarn) {
+		return
+	}
+	count := upstreamErrorLogCounter.Add(1)
+	if !shouldLogUpstreamErrorCount(count) {
+		return
+	}
+
+	method := ""
+	scheme := ""
+	upstreamHost := ""
+	queryLen := 0
+	if req != nil {
+		method = req.Method
+		if req.URL != nil {
+			scheme = req.URL.Scheme
+			upstreamHost = req.URL.Host
+			queryLen = len(req.URL.RawQuery)
+		}
+	}
+	logger.LogAttrs(ctx, slog.LevelWarn, "upstream "+mode+" request failed",
+		slog.String("method", method),
+		slog.String("scheme", scheme),
+		slog.String("upstream_host", upstreamHost),
+		slog.String("path", upstreamLogPath(req)),
+		slog.Int("query_len", queryLen),
+		slog.String("host", origHost),
+		slog.Uint64("failure_count", count),
+		slog.String("err", upstreamErrorReason(err)),
+	)
+}
+
 func requestPath(c *app.RequestContext) string {
 	if rawPath := c.Request.URI().PathOriginal(); len(rawPath) > 0 {
 		return string(rawPath)
@@ -127,9 +233,85 @@ func requestPath(c *app.RequestContext) string {
 	return path
 }
 
+func upstreamRequestURL(c *app.RequestContext, base string) string {
+	path := c.Request.URI().PathOriginal()
+	if len(path) == 0 {
+		path = c.Path()
+	}
+	pathLen := len(path)
+	if pathLen == 0 {
+		pathLen = 1
+	}
+	q := c.URI().QueryString()
+	baseLen := len(base)
+	for baseLen > 0 && base[baseLen-1] == '/' {
+		baseLen--
+	}
+
+	var b strings.Builder
+	b.Grow(baseLen + pathLen + querySuffixLen(q))
+	b.WriteString(base[:baseLen])
+	if len(path) > 0 {
+		b.Write(path)
+	} else {
+		b.WriteByte('/')
+	}
+	if len(q) > 0 {
+		b.WriteByte('?')
+		b.Write(q)
+	}
+	return b.String()
+}
+
+func querySuffixLen(q []byte) int {
+	if len(q) == 0 {
+		return 0
+	}
+	return 1 + len(q)
+}
+
+func requestMethod(c *app.RequestContext) string {
+	method := c.Method()
+	switch len(method) {
+	case len("GET"):
+		if bytes.Equal(method, []byte("GET")) {
+			return "GET"
+		}
+		if bytes.Equal(method, []byte("PUT")) {
+			return "PUT"
+		}
+	case len("POST"):
+		if bytes.Equal(method, []byte("POST")) {
+			return "POST"
+		}
+		if bytes.Equal(method, []byte("HEAD")) {
+			return "HEAD"
+		}
+	case len("PATCH"):
+		if bytes.Equal(method, []byte("PATCH")) {
+			return "PATCH"
+		}
+		if bytes.Equal(method, []byte("TRACE")) {
+			return "TRACE"
+		}
+	case len("DELETE"):
+		if bytes.Equal(method, []byte("DELETE")) {
+			return "DELETE"
+		}
+	case len("OPTIONS"):
+		if bytes.Equal(method, []byte("OPTIONS")) {
+			return "OPTIONS"
+		}
+		if bytes.Equal(method, []byte("CONNECT")) {
+			return "CONNECT"
+		}
+	}
+	return string(method)
+}
+
 func inboundProto(c *app.RequestContext) string {
-	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
-		return strings.ToLower(v)
+	if v := forwardedProtoFromHeader(c.GetHeader("X-Forwarded-Proto")); v != "" {
+		return v
 	}
 	if bytes.EqualFold(c.Request.Header.Peek("Upgrade"), []byte("websocket")) {
 		if bytes.HasPrefix(bytes.ToLower(c.Request.Header.Peek("Origin")), []byte("https://")) {
@@ -144,32 +326,140 @@ func inboundProto(c *app.RequestContext) string {
 }
 
 func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base string, clientIP net.IP, origHost string, preserveOriginalHost bool) (*http.Request, error) {
-	full := strings.TrimRight(base, "/") + requestPath(c)
-	if q := c.URI().QueryString(); len(q) > 0 {
-		full += "?" + string(q)
-	}
+	full := upstreamRequestURL(c, base)
 
 	body := c.Request.Body()
 	var rdr io.Reader
 	if len(body) > 0 {
-		rdr = bytes.NewReader(body)
+		rdr = &byteSliceReadCloser{data: body}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, string(c.Method()), full, rdr)
+	req, err := http.NewRequestWithContext(ctx, requestMethod(c), full, rdr)
 	if err != nil {
 		return nil, err
 	}
+	if len(body) > 0 {
+		req.ContentLength = int64(len(body))
+		req.GetBody = func() (io.ReadCloser, error) {
+			return &byteSliceReadCloser{data: body}, nil
+		}
+	}
 
 	c.Request.Header.VisitAll(func(k, v []byte) {
-		key := strings.ToLower(string(k))
-		if _, skip := hopByHopHeaders[key]; skip {
+		if isHopByHopBytes(k) {
 			return
 		}
-		req.Header.Add(string(k), string(v))
+		addUpstreamHeader(req.Header, k, v)
 	})
 
 	security.ApplyOutboundForwarding(req, clientIP, origHost, preserveOriginalHost, inboundProto(c))
 	return req, nil
+}
+
+func addUpstreamHeader(header http.Header, key, value []byte) {
+	switch len(key) {
+	case len("Accept"):
+		if bytes.Equal(key, []byte("Accept")) {
+			header["Accept"] = append(header["Accept"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("Origin")) {
+			header["Origin"] = append(header["Origin"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("Pragma")) {
+			header["Pragma"] = append(header["Pragma"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("Cookie")) {
+			header["Cookie"] = append(header["Cookie"], string(value))
+			return
+		}
+	case len("Referer"):
+		if bytes.Equal(key, []byte("Referer")) {
+			header["Referer"] = append(header["Referer"], string(value))
+			return
+		}
+	case len("Sec-Ch-Ua"):
+		if bytes.Equal(key, []byte("Sec-Ch-Ua")) {
+			header["Sec-Ch-Ua"] = append(header["Sec-Ch-Ua"], string(value))
+			return
+		}
+	case len("User-Agent"):
+		if bytes.Equal(key, []byte("User-Agent")) {
+			header["User-Agent"] = append(header["User-Agent"], string(value))
+			return
+		}
+	case len("Content-Type"):
+		if bytes.Equal(key, []byte("Content-Type")) {
+			header["Content-Type"] = append(header["Content-Type"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("X-Tingyun-Id")) {
+			header["X-Tingyun-Id"] = append(header["X-Tingyun-Id"], string(value))
+			return
+		}
+	case len("Cache-Control"):
+		if bytes.Equal(key, []byte("Cache-Control")) {
+			header["Cache-Control"] = append(header["Cache-Control"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("X-Client-Data")) {
+			header["X-Client-Data"] = append(header["X-Client-Data"], string(value))
+			return
+		}
+	case len("Content-Length"):
+		if bytes.Equal(key, []byte("Content-Length")) {
+			header["Content-Length"] = append(header["Content-Length"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("Sec-Fetch-Site")) {
+			header["Sec-Fetch-Site"] = append(header["Sec-Fetch-Site"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("Sec-Fetch-Mode")) {
+			header["Sec-Fetch-Mode"] = append(header["Sec-Fetch-Mode"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("Sec-Fetch-Dest")) {
+			header["Sec-Fetch-Dest"] = append(header["Sec-Fetch-Dest"], string(value))
+			return
+		}
+	case len("Accept-Encoding"):
+		if bytes.Equal(key, []byte("Accept-Encoding")) {
+			header["Accept-Encoding"] = append(header["Accept-Encoding"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("Accept-Language")) {
+			header["Accept-Language"] = append(header["Accept-Language"], string(value))
+			return
+		}
+	case len("Sec-Ch-Ua-Mobile"):
+		if bytes.Equal(key, []byte("Sec-Ch-Ua-Mobile")) {
+			header["Sec-Ch-Ua-Mobile"] = append(header["Sec-Ch-Ua-Mobile"], string(value))
+			return
+		}
+		if bytes.Equal(key, []byte("X-Requested-With")) {
+			header["X-Requested-With"] = append(header["X-Requested-With"], string(value))
+			return
+		}
+	case len("If-Modified-Since"):
+		if bytes.Equal(key, []byte("If-Modified-Since")) {
+			header["If-Modified-Since"] = append(header["If-Modified-Since"], string(value))
+			return
+		}
+	case len("Sec-Ch-Ua-Platform"):
+		if bytes.Equal(key, []byte("Sec-Ch-Ua-Platform")) {
+			header["Sec-Ch-Ua-Platform"] = append(header["Sec-Ch-Ua-Platform"], string(value))
+			return
+		}
+	case len("Upgrade-Insecure-Requests"):
+		if bytes.Equal(key, []byte("Upgrade-Insecure-Requests")) {
+			header["Upgrade-Insecure-Requests"] = append(header["Upgrade-Insecure-Requests"], string(value))
+			return
+		}
+	}
+	header.Add(string(key), string(value))
 }
 
 func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
@@ -203,26 +493,27 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 
 	tr := SharedTransportForUpstream(rt, base)
 	hc := sharedClient(tr)
-	start := time.Now()
+	debugEnabled := slog.Default().Enabled(ctx, slog.LevelDebug)
+	var start time.Time
+	if debugEnabled {
+		start = time.Now()
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		slog.Warn("upstream buffered request failed",
-			slog.String("method", req.Method),
-			slog.String("url", req.URL.String()),
-			slog.String("host", origHost),
-			slog.Any("err", err),
-		)
+		logUpstreamRequestError(ctx, "buffered", req, origHost, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
-	slog.Debug("upstream buffered response received",
-		slog.String("method", req.Method),
-		slog.String("url", req.URL.String()),
-		slog.String("host", origHost),
-		slog.Int("status", resp.StatusCode),
-		slog.String("proto", resp.Proto),
-		slog.Duration("latency", time.Since(start)),
-	)
+	if debugEnabled {
+		slog.Debug("upstream buffered response received",
+			slog.String("method", req.Method),
+			slog.String("url", req.URL.String()),
+			slog.String("host", origHost),
+			slog.Int("status", resp.StatusCode),
+			slog.String("proto", resp.Proto),
+			slog.Duration("latency", time.Since(start)),
+		)
+	}
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -413,12 +704,15 @@ func SiteCacheTTLDetails(rt snapshot.SiteRuntime, matchKey string) (ttl int64, m
 
 // RuleMatchKey is path plus optional raw query string, used to evaluate cache path rules.
 func RuleMatchKey(c *app.RequestContext) string {
-	p := requestPath(c)
-	qs := strings.TrimSpace(string(c.URI().QueryString()))
+	return ruleMatchKeyFromPathQuery(requestPath(c), c.URI().QueryString())
+}
+
+func ruleMatchKeyFromPathQuery(path string, query []byte) string {
+	qs := strings.TrimSpace(string(query))
 	if qs == "" {
-		return p
+		return path
 	}
-	return p + "?" + qs
+	return path + "?" + qs
 }
 
 func cacheRulePattern(r store.SiteCacheRule) string {
@@ -471,15 +765,19 @@ func cacheSuffixPatternMatch(matchKey, pat string) bool {
 // BuildSiteCacheStorageKey builds the in-process cache key; stripQuery drops the query from the key,
 // lowerPath lowercases only the path segment (not the host key) when case-insensitive rules matched.
 func BuildSiteCacheStorageKey(rt snapshot.SiteRuntime, c *app.RequestContext, stripQuery, lowerPath bool) string {
+	return buildSiteCacheStorageKeyFromParts(rt, c, requestPath(c), c.URI().QueryString(), stripQuery, lowerPath)
+}
+
+func buildSiteCacheStorageKeyFromParts(rt snapshot.SiteRuntime, c *app.RequestContext, path string, query []byte, stripQuery, lowerPath bool) string {
 	method := string(c.Method())
 	if strings.EqualFold(method, "HEAD") {
 		method = "GET"
 	}
-	p := requestPath(c)
+	p := path
 	if lowerPath {
 		p = strings.ToLower(p)
 	}
-	q := string(c.URI().QueryString())
+	q := string(query)
 	if stripQuery {
 		q = ""
 	}
@@ -499,8 +797,7 @@ func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (key stri
 	if !rt.CacheEnabled {
 		return "", 0, false
 	}
-	m := string(c.Method())
-	if !strings.EqualFold(m, "GET") && !strings.EqualFold(m, "HEAD") {
+	if !isCacheableRequestMethod(c.Method()) {
 		return "", 0, false
 	}
 	if c.Request.Header.Get("Authorization") != "" {
@@ -510,12 +807,24 @@ func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (key stri
 	// devtools often send no-cache while operators still want stale shielding when upstream
 	// is down. Storage eligibility remains governed by ShouldCacheHTTPResponse (upstream CC,
 	// Set-Cookie, Vary, etc.).
-	full := RuleMatchKey(c)
+	path := requestPath(c)
+	query := c.URI().QueryString()
+	full := ruleMatchKeyFromPathQuery(path, query)
 	ttlVal, stripQ, lowerP, ok := siteCacheFirstMatch(rt, full)
 	if !ok || ttlVal <= 0 {
 		return "", 0, false
 	}
-	return BuildSiteCacheStorageKey(rt, c, stripQ, lowerP), ttlVal, true
+	return buildSiteCacheStorageKeyFromParts(rt, c, path, query, stripQ, lowerP), ttlVal, true
+}
+
+func isCacheableRequestMethod(method []byte) bool {
+	switch len(method) {
+	case len("GET"):
+		return asciiEqualFoldBytes(method, "get")
+	case len("HEAD"):
+		return asciiEqualFoldBytes(method, "head")
+	}
+	return false
 }
 
 // ForwardHTTP copies the incoming request to upstream and streams the response.
@@ -527,26 +836,27 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 
 	tr := SharedTransportForUpstream(rt, base)
 	hc := sharedClient(tr)
-	start := time.Now()
+	debugEnabled := slog.Default().Enabled(ctx, slog.LevelDebug)
+	var start time.Time
+	if debugEnabled {
+		start = time.Now()
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		slog.Warn("upstream streaming request failed",
-			slog.String("method", req.Method),
-			slog.String("url", req.URL.String()),
-			slog.String("host", origHost),
-			slog.Any("err", err),
-		)
+		logUpstreamRequestError(ctx, "streaming", req, origHost, err)
 		return err
 	}
 	defer resp.Body.Close()
-	slog.Debug("upstream streaming response received",
-		slog.String("method", req.Method),
-		slog.String("url", req.URL.String()),
-		slog.String("host", origHost),
-		slog.Int("status", resp.StatusCode),
-		slog.String("proto", resp.Proto),
-		slog.Duration("latency", time.Since(start)),
-	)
+	if debugEnabled {
+		slog.Debug("upstream streaming response received",
+			slog.String("method", req.Method),
+			slog.String("url", req.URL.String()),
+			slog.String("host", origHost),
+			slog.Int("status", resp.StatusCode),
+			slog.String("proto", resp.Proto),
+			slog.Duration("latency", time.Since(start)),
+		)
+	}
 
 	copyResponseHeaders(c, resp.Header)
 	c.Status(resp.StatusCode)
@@ -564,6 +874,75 @@ var hopByHopHeaders = map[string]struct{}{
 	"trailer":             {},
 	"transfer-encoding":   {},
 	"upgrade":             {},
+}
+
+func forwardedProtoFromHeader(raw []byte) string {
+	start := 0
+	end := len(raw)
+	for start < end && isASCIISpace(raw[start]) {
+		start++
+	}
+	for end > start && isASCIISpace(raw[end-1]) {
+		end--
+	}
+	if start == end {
+		return ""
+	}
+	trimmed := raw[start:end]
+	switch len(trimmed) {
+	case len("h3"):
+		if asciiEqualFoldBytes(trimmed, "h3") {
+			return "h3"
+		}
+	case len("http"):
+		if asciiEqualFoldBytes(trimmed, "http") {
+			return "http"
+		}
+	case len("https"):
+		if asciiEqualFoldBytes(trimmed, "https") {
+			return "https"
+		}
+	}
+	return strings.ToLower(string(trimmed))
+}
+
+func isASCIISpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f'
+}
+
+func isHopByHopBytes(name []byte) bool {
+	switch len(name) {
+	case len("te"):
+		return asciiEqualFoldBytes(name, "te")
+	case len("trailer"):
+		return asciiEqualFoldBytes(name, "trailer") || asciiEqualFoldBytes(name, "upgrade")
+	case len("connection"):
+		return asciiEqualFoldBytes(name, "connection") || asciiEqualFoldBytes(name, "keep-alive")
+	case len("proxy-connection"):
+		return asciiEqualFoldBytes(name, "proxy-connection")
+	case len("transfer-encoding"):
+		return asciiEqualFoldBytes(name, "transfer-encoding")
+	case len("proxy-authenticate"):
+		return asciiEqualFoldBytes(name, "proxy-authenticate")
+	case len("proxy-authorization"):
+		return asciiEqualFoldBytes(name, "proxy-authorization")
+	}
+	return false
+}
+
+func asciiEqualFoldBytes(got []byte, want string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i, b := range got {
+		if 'A' <= b && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func isHopByHop(name string) bool {

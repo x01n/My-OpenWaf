@@ -19,12 +19,7 @@ func NewRuleRepo(db *gorm.DB) *RuleRepo { return &RuleRepo{db: db} }
 
 func (r *RuleRepo) BatchCreate(items []store.Rule) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		for i := range items {
-			if err := tx.Create(&items[i]).Error; err != nil {
-				return err
-			}
-		}
-		return nil
+		return tx.Create(&items).Error
 	})
 }
 

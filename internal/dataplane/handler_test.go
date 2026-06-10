@@ -1,15 +1,21 @@
 package dataplane
 
 import (
+	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
+	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/bot"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/pages"
 	"My-OpenWaf/internal/waf/ratelimit"
@@ -49,6 +55,80 @@ func TestRateLimitActionUsesDefault429Status(t *testing.T) {
 	res := action.Result{Type: action.RateLimit, Matched: true}
 	if got := res.ResponseStatusCode(); got != 429 {
 		t.Fatalf("rate limit response status = %d, want 429", got)
+	}
+}
+
+func TestAccessLogKeepsSpecificChallengeActions(t *testing.T) {
+	for _, actionName := range []string{
+		"challenge",
+		"captcha_challenge",
+		"shield_challenge",
+		"chain_challenge",
+	} {
+		ctx := app.NewContext(0)
+		entry := buildAccessLogEntry(ctx, accessLogInfo{WAFAction: actionName, StatusCode: 422})
+		if entry.WAFAction != actionName {
+			t.Fatalf("access log WAFAction = %q, want %q", entry.WAFAction, actionName)
+		}
+	}
+}
+
+func TestRecordSecurityEventAddsTLSMetadata(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate log db: %v", err)
+	}
+	writer := observability.NewUnifiedWriter(db, slog.Default())
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/tls-security-event?q=1")
+	ctx.Request.Header.Set("Host", "127.0.0.1")
+	ctx.Request.Header.Set("User-Agent", "tls-security-event-test")
+	reqCtx := ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+		JA3:        "771,4865-4866,0-11,29,0",
+		JA3Hash:    "0123456789abcdef0123456789abcdef",
+		JA4:        "t13d1516h2_aaaaaaaaaaaa_bbbbbbbbbbbb",
+		TLSVersion: "TLS13",
+		SNI:        "security-event.example",
+		ALPN:       []string{"h2", "http/1.1"},
+	})
+	if fp, ok := tlsFingerprintFromContext(reqCtx); ok {
+		ctx.Set(tlsFingerprintContextKey, fp)
+	}
+
+	recordSecurityEvent(ctx, Options{Writer: writer}, store.SecurityEvent{
+		SiteID:     1,
+		RequestID:  "req-tls-security",
+		ClientIP:   "127.0.0.1",
+		Host:       "127.0.0.1",
+		Path:       "/tls-security-event",
+		Method:     "GET",
+		UserAgent:  "tls-security-event-test",
+		RuleIDStr:  "owasp:sqli:001",
+		Phase:      "owasp_default",
+		Action:     "intercept",
+		Category:   "sqli",
+		MatchDesc:  "SQL injection signals",
+		StatusCode: 403,
+	})
+	writer.Close()
+
+	var got store.SecurityEvent
+	if err := db.Where("request_id = ?", "req-tls-security").First(&got).Error; err != nil {
+		t.Fatalf("read security event: %v", err)
+	}
+	if got.TLSSNI != "security-event.example" || got.TLSVersion != "TLS13" || got.TLSALPN != "h2,http/1.1" {
+		t.Fatalf("security event missed TLS metadata: %#v", got)
+	}
+	if got.TLSJA3Hash != "0123456789abcdef0123456789abcdef" || got.TLSJA4 == "" || got.TLSJA3 == "" {
+		t.Fatalf("security event missed TLS fingerprint: %#v", got)
+	}
+	if got.HeaderOrder == "" {
+		t.Fatalf("security event missed header order: %#v", got)
 	}
 }
 
@@ -157,5 +237,39 @@ func TestSetChallengeCookieSignsValue(t *testing.T) {
 	}
 	if challenge.VerifyChallengePassValue(value, "other.example", nil, time.Unix(101, 0)) {
 		t.Fatal("signed challenge pass value verified for the wrong host")
+	}
+}
+
+func TestShouldLogDropConsoleCount(t *testing.T) {
+	cases := map[uint64]bool{
+		1:    true,
+		16:   true,
+		17:   false,
+		1023: false,
+		1024: true,
+		1025: false,
+		2048: true,
+	}
+	for count, want := range cases {
+		if got := shouldLogDropConsoleCount(count); got != want {
+			t.Fatalf("shouldLogDropConsoleCount(%d) = %v, want %v", count, got, want)
+		}
+	}
+}
+
+func TestShouldLogNoSiteMatchConsoleCount(t *testing.T) {
+	cases := map[uint64]bool{
+		1:    true,
+		16:   true,
+		17:   false,
+		1023: false,
+		1024: true,
+		1025: false,
+		2048: true,
+	}
+	for count, want := range cases {
+		if got := shouldLogNoSiteMatchConsoleCount(count); got != want {
+			t.Fatalf("shouldLogNoSiteMatchConsoleCount(%d) = %v, want %v", count, got, want)
+		}
 	}
 }

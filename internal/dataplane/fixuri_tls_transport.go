@@ -116,18 +116,24 @@ func (t *fixURITLSTransport) serve() error {
 			ctx = t.OnAccept(conn)
 		}
 
-		var c network.Conn
-		if t.tls != nil {
-			c = newFixURIHertzConn(NewFixURIConn(tls.Server(conn, t.tls)))
-		} else {
-			c = newFixURIHertzConn(conn)
-		}
-		if t.OnConnect != nil {
-			ctx = t.OnConnect(ctx, c)
-		}
-		go func(ctx context.Context, conn network.Conn) {
-			t.handler(ctx, conn)
-			atomic.AddInt32(&t.active, -1)
-		}(ctx, c)
+		go func(ctx context.Context, conn net.Conn) {
+			defer atomic.AddInt32(&t.active, -1)
+
+			var c network.Conn
+			if t.tls != nil {
+				tlsConn := tls.Server(conn, t.tls)
+				c = newFixURIHertzConn(NewFixURIConn(tlsConn))
+				if err := tlsConn.Handshake(); err != nil {
+					_ = conn.Close()
+					return
+				}
+			} else {
+				c = newFixURIHertzConn(conn)
+			}
+			if t.OnConnect != nil {
+				ctx = t.OnConnect(ctx, c)
+			}
+			t.handler(ctx, c)
+		}(ctx, conn)
 	}
 }

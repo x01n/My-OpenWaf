@@ -7,6 +7,11 @@ type SystemSettings struct {
 	Value string `gorm:"type:text" json:"value"`
 }
 
+const (
+	SettingKeyACMEConfig  = "acme_config"
+	SettingKeyRedisConfig = "redis_config"
+)
+
 // ConfigRevision is a monotonically increasing snapshot revision number.
 type ConfigRevision struct {
 	ID       uint   `gorm:"primaryKey"`

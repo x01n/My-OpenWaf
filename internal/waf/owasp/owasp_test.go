@@ -5,19 +5,205 @@ import (
 	"testing"
 )
 
+var benchmarkOWASPHitsSink []OWASPHit
+var benchmarkOWASPHitSink OWASPHit
+var benchmarkOWASPBoolSink bool
+
+func BenchmarkCheckOWASPCleanTraffic(b *testing.B) {
+	headers := map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Host":            "example.com",
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+	}
+	bodyTargets := []string{"username", "admin", "password", "test123"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPHitsSink = CheckOWASP("mid", "/api/login", "page=1&sort=name", headers, bodyTargets)
+	}
+}
+
+func BenchmarkCheckOWASPSQLiTraffic(b *testing.B) {
+	headers := map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Host":            "example.com",
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+	}
+
+	hits := CheckOWASP("mid", "/search", "q=1%20union%20select%20username,password%20from%20users--", headers, nil)
+	if len(hits) == 0 {
+		b.Fatal("expected SQLi hit")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPHitsSink = CheckOWASP("mid", "/search", "q=1%20union%20select%20username,password%20from%20users--", headers, nil)
+	}
+}
+
+func BenchmarkCheckOWASPXSSBareEventHandlerTraffic(b *testing.B) {
+	hits := CheckOWASP("mid", "/", `name=" onmouseover="alert(1)`, nil, nil)
+	if len(hits) == 0 {
+		b.Fatal("expected XSS hit")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPHitsSink = CheckOWASP("mid", "/", `name=" onmouseover="alert(1)`, nil, nil)
+	}
+}
+
+func BenchmarkCheckOWASPCmdInjectionTraffic(b *testing.B) {
+	hits := CheckOWASP("mid", "/ping", "host=8.8.8.8;cat /etc/passwd", nil, nil)
+	if len(hits) == 0 {
+		b.Fatal("expected command injection hit")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPHitsSink = CheckOWASP("mid", "/ping", "host=8.8.8.8;cat /etc/passwd", nil, nil)
+	}
+}
+
+func BenchmarkNextSQLiHitUnionSelect(b *testing.B) {
+	normalized := "q=1 union select username,password from users--"
+	hit, ok := nextSQLiHit(normalized, 4)
+	if !ok || hit.RuleID == "" {
+		b.Fatal("expected SQLi hit")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPHitSink, benchmarkOWASPBoolSink = nextSQLiHit(normalized, 4)
+	}
+}
+
+func TestForEachBase64TokenIndexMatchesRegexp(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		limit int
+	}{
+		{name: "short tokens skipped", input: "abc ABCDEFG normal", limit: 20},
+		{name: "padding kept", input: `retain=e3sgMzMzMSozMzMwIH19==&x=TlM4cUlH`, limit: 20},
+		{name: "token boundaries", input: `a"e3sgMzMzMSozMzMwIH19"+plain/ABCDEF12==!`, limit: 20},
+		{name: "limit applied", input: "AAAAAAAA BBBBBBBB CCCCCCCC DDDDDDDD", limit: 2},
+		{name: "zero limit", input: "AAAAAAAA BBBBBBBB", limit: 0},
+	}
+
+	for _, tt := range tests {
+		want := reBase64Token.FindAllString(tt.input, tt.limit)
+		var got []string
+		forEachBase64TokenIndex(tt.input, tt.limit, func(start, end int) bool {
+			got = append(got, tt.input[start:end])
+			return true
+		})
+		if len(got) != len(want) {
+			t.Fatalf("%s: got %v, want %v", tt.name, got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("%s: token %d got %q, want %q; all got %v want %v", tt.name, i, got[i], want[i], got, want)
+			}
+		}
+	}
+}
+
+func TestDecodeBase64IfSuspiciousKeepsCurrentSemantics(t *testing.T) {
+	decoded := decodeBase64IfSuspicious("e3sgMzMzMSozMzMwIH19")
+	if !strings.Contains(decoded, "3331*3330") {
+		t.Fatalf("expected template payload to decode, got %q", decoded)
+	}
+	for _, input := range []string{"username", "password", "application", "AppleWebKit"} {
+		if got := decodeBase64IfSuspicious(input); got != "" {
+			t.Fatalf("plain token %q should not decode as suspicious content, got %q", input, got)
+		}
+	}
+}
+
+func TestNormalizeWithDecodeDecodesExtractedQueryPlusSeparatedBase64(t *testing.T) {
+	values := extractQueryValues("q=prefix+e3sgMzMzMSozMzMwIH19+suffix")
+	if len(values) != 1 {
+		t.Fatalf("expected one decoded query value, got %v", values)
+	}
+	if values[0] != "prefix e3sgMzMzMSozMzMwIH19 suffix" {
+		t.Fatalf("decoded query value = %q", values[0])
+	}
+	result := normalizeWithDecode(values[0])
+	if !strings.Contains(result, "3331*3330") {
+		t.Fatalf("expected extracted plus-separated base64 payload to decode, got %q", result)
+	}
+}
+
+func TestLowerHeaderNameMatchesStringsToLower(t *testing.T) {
+	inputs := []string{
+		"Accept",
+		"Accept-Encoding",
+		"Accept-Language",
+		"Authorization",
+		"Cache-Control",
+		"Connection",
+		"Content-Length",
+		"Content-Type",
+		"Cookie",
+		"DNT",
+		"Host",
+		"If-Modified-Since",
+		"If-None-Match",
+		"Origin",
+		"Pragma",
+		"Referer",
+		"Sec-Ch-Ua",
+		"Sec-Ch-Ua-Arch",
+		"Sec-Ch-Ua-Bitness",
+		"Sec-Ch-Ua-Full-Version",
+		"Sec-Ch-Ua-Full-Version-List",
+		"Sec-Ch-Ua-Mobile",
+		"Sec-Ch-Ua-Model",
+		"Sec-Ch-Ua-Platform",
+		"Sec-Ch-Ua-Platform-Version",
+		"Sec-Fetch-Dest",
+		"Sec-Fetch-Mode",
+		"Sec-Fetch-Site",
+		"Sec-Fetch-User",
+		"TE",
+		"Upgrade",
+		"Upgrade-Insecure-Requests",
+		"User-Agent",
+		"X-Client-Data",
+		"user-agent",
+		"x-trace",
+		"X-Test",
+	}
+	for _, input := range inputs {
+		got := lowerHeaderName(input)
+		want := strings.ToLower(input)
+		if got != want {
+			t.Fatalf("lowerHeaderName(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestCollectTargetsSkipsMirroredLowercaseHeaders(t *testing.T) {
 	headers := map[string]string{
-		"User-Agent": "Mozilla/5.0",
-		"user-agent": "Mozilla/5.0",
+		"User-Agent": "Mozilla/5.0;id",
+		"user-agent": "Mozilla/5.0;id",
 		"X-Trace":    "trace-1",
 		"x-trace":    "trace-1",
 	}
-	targets := collectTargets("/home", "", headers)
+	targets := collectTargets("/home", "", headers, 0)
 	seenUA := 0
 	seenTrace := 0
 	for _, target := range targets {
 		switch target {
-		case "Mozilla/5.0":
+		case "Mozilla/5.0;id":
 			seenUA++
 		case "trace-1":
 			seenTrace++
@@ -30,15 +216,322 @@ func TestCollectTargetsSkipsMirroredLowercaseHeaders(t *testing.T) {
 
 func TestCollectTargetsPreallocatesHeaderCapacity(t *testing.T) {
 	headers := map[string]string{
-		"User-Agent": "Mozilla/5.0",
+		"User-Agent": "Mozilla/5.0;id",
 		"X-Test":     "ok",
 	}
-	targets := collectTargets("/home", "q=hello", headers)
+	targets := collectTargets("/home", "q=hello", headers, 0)
 	if len(targets) < 4 {
 		t.Fatalf("expected path, query and header targets, got %d", len(targets))
 	}
 	if cap(targets) < 2+len(headers) {
 		t.Fatalf("targets capacity = %d, want at least %d", cap(targets), 2+len(headers))
+	}
+}
+
+func TestCollectTargetsSkipsCleanBrowserUserAgent(t *testing.T) {
+	headers := map[string]string{
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"X-Test":     "ok",
+	}
+	targets := collectTargets("/home", "", headers, 0)
+	for _, target := range targets {
+		if target == headers["User-Agent"] {
+			t.Fatalf("clean browser User-Agent should be skipped, targets=%v", targets)
+		}
+	}
+}
+
+func TestCollectTargetsSkipsCleanAcceptHeader(t *testing.T) {
+	headers := map[string]string{
+		"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"X-Test": "ok",
+	}
+	targets := collectTargets("/home", "", headers, 0)
+	for _, target := range targets {
+		if target == headers["Accept"] {
+			t.Fatalf("clean Accept header should be skipped, targets=%v", targets)
+		}
+	}
+}
+
+func TestCollectTargetsPreallocatesBodyCapacity(t *testing.T) {
+	headers := map[string]string{
+		"User-Agent": "Mozilla/5.0",
+		"Accept":     "text/html",
+	}
+	bodyTargets := []string{"username", "admin", "password", "test123"}
+	targets := collectTargets("/home", "q=hello", headers, len(bodyTargets))
+	beforeCap := cap(targets)
+	targets = append(targets, bodyTargets...)
+	if cap(targets) != beforeCap {
+		t.Fatalf("appending body targets changed capacity from %d to %d", beforeCap, cap(targets))
+	}
+}
+
+func TestForEachOWASPTargetMatchesCollectTargetsAndMarksBody(t *testing.T) {
+	bodyTargets := []string{"body-one", "body-two"}
+	query := "q=e3sgMzMzMSozMzMwIH19"
+
+	want := collectTargets("api/login", query, nil, len(bodyTargets))
+	want = append(want, bodyTargets...)
+
+	var got []string
+	var bodyFlags []bool
+	var queryPlusFlags []bool
+	forEachOWASPTarget("api/login", query, nil, bodyTargets, func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool {
+		got = append(got, raw)
+		bodyFlags = append(bodyFlags, isBodyTarget)
+		queryPlusFlags = append(queryPlusFlags, queryPlusAsSpace)
+		return true
+	})
+
+	if len(got) != len(want) {
+		t.Fatalf("target count = %d, want %d; got %v want %v", len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("target %d = %q, want %q; got %v want %v", i, got[i], want[i], got, want)
+		}
+		wantBody := i >= len(want)-len(bodyTargets)
+		if bodyFlags[i] != wantBody {
+			t.Fatalf("body flag %d = %v, want %v; flags=%v", i, bodyFlags[i], wantBody, bodyFlags)
+		}
+	}
+	wantQueryPlusFlags := []bool{true, true, true, false, true, true}
+	if len(queryPlusFlags) != len(wantQueryPlusFlags) {
+		t.Fatalf("query plus flag count = %d, want %d; flags=%v", len(queryPlusFlags), len(wantQueryPlusFlags), queryPlusFlags)
+	}
+	for i := range wantQueryPlusFlags {
+		if queryPlusFlags[i] != wantQueryPlusFlags[i] {
+			t.Fatalf("query plus flag %d = %v, want %v; flags=%v targets=%v", i, queryPlusFlags[i], wantQueryPlusFlags[i], queryPlusFlags, got)
+		}
+	}
+}
+
+func TestNormalizeTargetPlusSemantics(t *testing.T) {
+	if got := normalizeTarget("q=union+select", true); got != "q=union select" {
+		t.Fatalf("query plus should decode to space, got %q", got)
+	}
+	if got := normalizeTarget("application/xhtml+xml", false); got != "application/xhtml+xml" {
+		t.Fatalf("header plus should remain literal, got %q", got)
+	}
+	if got := normalizeTarget("%2Bfoo", false); got != "+foo" {
+		t.Fatalf("path-style percent encoded plus should remain plus after decode, got %q", got)
+	}
+}
+
+func TestShouldSkipHeaderTargetUserAgentBoundaries(t *testing.T) {
+	if !shouldSkipHeaderTarget("user-agent", commonCleanBrowserUserAgent) {
+		t.Fatal("clean browser User-Agent should use the header fast path")
+	}
+	inputs := []string{
+		"Mozilla/5.0 <script>alert(1)</script>",
+		"Mozilla/5.0 ${jndi:ldap://example.test/a}",
+		"Mozilla/5.0' OR 1=1--",
+		"Mozilla/5.0;id",
+		"Mozilla/5.0 http://127.0.0.1/admin",
+		commonCleanBrowserUserAgent + " <script>alert(1)</script>",
+		commonCleanBrowserUserAgent + "' OR 1=1--",
+	}
+	for _, input := range inputs {
+		if shouldSkipHeaderTarget("user-agent", input) {
+			t.Fatalf("User-Agent payload %q must not use the header fast path", input)
+		}
+	}
+}
+
+func TestShouldSkipHeaderTargetUserAgentRejectsDangerousFragments(t *testing.T) {
+	fragments := []string{
+		"union",
+		"insert",
+		"update",
+		"delete",
+		"drop",
+		"alter",
+		"truncate",
+		"select",
+		"sleep",
+		"benchmark",
+		"waitfor",
+		"information_schema",
+		"outfile",
+		"dumpfile",
+		"extractvalue",
+		"updatexml",
+		"group_concat",
+		"group by",
+		"order by",
+		"substr(",
+		"substring(",
+		"concat(",
+		"char(",
+		"chr(",
+		"jndi:",
+		"javascript:",
+		"vbscript:",
+		"data:text/html",
+		"document.",
+		"window.",
+		"fetch(",
+		"innerhtml",
+		"fromcharcode",
+		"constructor.constructor",
+		"onload",
+		"onerror",
+		"onclick",
+		"alert(",
+		"prompt(",
+		"confirm(",
+		"eval(",
+		"assert(",
+		"system(",
+		"exec(",
+		"shell_exec",
+		"<?php",
+		"runtime.getruntime",
+		"cmd.exe",
+		"powershell.exe",
+		"/bin/",
+		"whoami",
+		"wget ",
+		"curl ",
+		"../",
+		"..\\",
+		"etc/",
+		"/proc/",
+		"win.ini",
+		"boot.ini",
+		"web-inf",
+		"meta-inf",
+		"://",
+		"169.254.169.254",
+		"metadata.google",
+		"100.100.100.200",
+		"127.0.",
+		"localhost",
+		"::ffff:",
+		"::1",
+		"0x7f",
+		"unix:",
+		".nip.io",
+		".xip.io",
+		".sslip.io",
+		"objectclass",
+		")(",
+		"getclass",
+		"getruntime",
+		"@java.",
+		"new java.",
+		"aced0005",
+		"ro0ab",
+		"ysoserial",
+		"objectinputstream",
+		"__schema",
+		"__type",
+	}
+	for _, fragment := range fragments {
+		input := "Mozilla/5.0 " + strings.ToUpper(fragment) + " tail"
+		if shouldSkipHeaderTarget("user-agent", input) {
+			t.Fatalf("User-Agent fragment %q must not use the header fast path", fragment)
+		}
+	}
+}
+
+func TestShouldSkipHeaderTargetAcceptBoundaries(t *testing.T) {
+	cleanInputs := []string{
+		"text/html",
+		"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"application/json",
+		"application/vnd.api+json;q=0.8,application/ld+json",
+	}
+	for _, input := range cleanInputs {
+		if !shouldSkipHeaderTarget("accept", input) {
+			t.Fatalf("clean Accept header %q should use the header fast path", input)
+		}
+	}
+
+	payloadInputs := []string{
+		"text/html,<script>alert(1)</script>",
+		"text/html; q=0.9; x=UNION",
+		"text/html; q=0.9; x=select",
+		"text/html; q=0.9; x=or1=1",
+		"text/html, http://127.0.0.1/admin",
+		"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,<script>alert(1)</script>",
+		"application/json, http://127.0.0.1/admin",
+		`text/html; q="0.9"`,
+	}
+	for _, input := range payloadInputs {
+		if shouldSkipHeaderTarget("accept", input) {
+			t.Fatalf("Accept payload %q must not use the header fast path", input)
+		}
+	}
+}
+
+func TestCheckOWASP_UserAgentPayloadsStillDetected(t *testing.T) {
+	tests := []struct {
+		name     string
+		ua       string
+		category OWASPCategory
+	}{
+		{name: "xss", ua: "Mozilla/5.0 <script>alert(1)</script>", category: CatXSS},
+		{name: "jndi", ua: "Mozilla/5.0 ${jndi:ldap://example.test/a}", category: CatJNDI},
+		{name: "sqli", ua: "Mozilla/5.0' OR 1=1--", category: CatSQLi},
+		{name: "ssrf", ua: "Mozilla/5.0 http://127.0.0.1/admin", category: CatSSRF},
+	}
+	for _, tt := range tests {
+		hits := CheckOWASP("mid", "/", "", map[string]string{"User-Agent": tt.ua}, nil)
+		if !hasCategory(hits, tt.category) {
+			t.Fatalf("%s User-Agent payload should trigger %s, got %+v", tt.name, tt.category, hits)
+		}
+	}
+}
+
+func TestCheckOWASP_AcceptPayloadsStillDetected(t *testing.T) {
+	tests := []struct {
+		name     string
+		accept   string
+		category OWASPCategory
+	}{
+		{name: "xss", accept: "text/html,<script>alert(1)</script>", category: CatXSS},
+		{name: "sqli", accept: "text/html; q=0.9; x=' OR 1=1--", category: CatSQLi},
+		{name: "ssrf", accept: "text/html, http://127.0.0.1/admin", category: CatSSRF},
+	}
+	for _, tt := range tests {
+		hits := CheckOWASP("mid", "/", "", map[string]string{"Accept": tt.accept}, nil)
+		if !hasCategory(hits, tt.category) {
+			t.Fatalf("%s Accept payload should trigger %s, got %+v", tt.name, tt.category, hits)
+		}
+	}
+}
+
+func TestShouldScanUnicodeBase64Target(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{
+			name:  "plain plus text",
+			input: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			want:  false,
+		},
+		{
+			name:  "literal unicode escapes",
+			input: `prefix=\u0054\u004d\u0034\u0063\u0055payload`,
+			want:  true,
+		},
+		{
+			name:  "url encoded unicode escapes",
+			input: `prefix=%5Cu0054%5Cu004d%5Cu0034%5Cu0063%5Cu0055payload`,
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		got := shouldScanUnicodeBase64Target(tt.input)
+		if got != tt.want {
+			t.Fatalf("%s: shouldScanUnicodeBase64Target(%q) = %v, want %v", tt.name, tt.input, got, tt.want)
+		}
 	}
 }
 
@@ -142,6 +635,90 @@ func TestNormalize_OverlongUTF8(t *testing.T) {
 	}
 }
 
+func TestShouldDecodeHTMLEntities(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{
+			name:  "plain query ampersand",
+			input: "page=1&sort=name",
+			want:  false,
+		},
+		{
+			name:  "plain pagination ampersands",
+			input: "page=2&limit=50&sort=name&order=desc",
+			want:  false,
+		},
+		{
+			name:  "numeric entity",
+			input: "q=&#60;script&#62;",
+			want:  true,
+		},
+		{
+			name:  "hex numeric entity",
+			input: "q=&#x3c;script&#x3e;",
+			want:  true,
+		},
+		{
+			name:  "semicolon entity",
+			input: "q=&lt;script&gt;",
+			want:  true,
+		},
+		{
+			name:  "semicolonless lt entity",
+			input: "q=&lt",
+			want:  true,
+		},
+		{
+			name:  "semicolonless entity prefix",
+			input: "q=&copycat",
+			want:  true,
+		},
+		{
+			name:  "apos requires semicolon",
+			input: "q=&apos",
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		got := shouldDecodeHTMLEntities(tt.input)
+		if got != tt.want {
+			t.Fatalf("%s: shouldDecodeHTMLEntities(%q) = %v, want %v", tt.name, tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestStripSQLCommentsSkipsNonStrippableMarkers(t *testing.T) {
+	inputs := []string{
+		"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"source=arn:aws:s3:::sample-loaddata01/*&format=json",
+		"id=queryvalue1/*",
+		"id=1 /*!50000union*/ select * from users",
+	}
+	for _, input := range inputs {
+		if got := stripSQLComments(input); got != input {
+			t.Fatalf("stripSQLComments(%q) = %q, want unchanged", input, got)
+		}
+	}
+}
+
+func TestStripSQLCommentsRemovesStrippableComments(t *testing.T) {
+	tests := map[string]string{
+		"sel/**/ect":           "select",
+		"id=1-- \nunion":       "id=1\nunion",
+		"id=1 # \nunion":       "id=1 \nunion",
+		"un/**/ion sel/**/ect": "union select",
+	}
+	for input, want := range tests {
+		if got := stripSQLComments(input); got != want {
+			t.Fatalf("stripSQLComments(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 // ── False Positive Tests: clean requests that must NOT trigger ──
 
 func TestCheckOWASP_Clean_URLFragment(t *testing.T) {
@@ -183,6 +760,68 @@ func TestCheckOWASP_Clean_NormalPagination(t *testing.T) {
 	hits := CheckOWASP("mid", "/api/v1/items", "page=2&limit=50&sort=name&order=desc", nil, nil)
 	if len(hits) > 0 {
 		t.Fatalf("normal pagination params should not trigger, got %+v", hits)
+	}
+}
+
+func TestCleanPathAndQueryFastPathBoundaries(t *testing.T) {
+	cleanPaths := []string{
+		"/api/login",
+		"/assets/app.v1/main-js",
+		"/v1/users_2026/profile",
+	}
+	for _, path := range cleanPaths {
+		if !isCleanPathTarget(path) {
+			t.Fatalf("clean path %q should use fast path", path)
+		}
+	}
+
+	blockedPaths := []string{
+		"/api/../etc/passwd",
+		"/admin;whoami",
+		"/search?q=<script>",
+		"/callback:http://127.0.0.1",
+		"/image%2e%2e%2fetc/passwd",
+	}
+	for _, path := range blockedPaths {
+		if isCleanPathTarget(path) {
+			t.Fatalf("suspicious path %q should not use fast path", path)
+		}
+	}
+
+	cleanQueries := []string{
+		"page=1&sort=name",
+		"page=2&limit=50&sort=name&order=desc",
+		"id=12345&tab=overview",
+	}
+	for _, query := range cleanQueries {
+		if !isCleanPlainQueryTarget(query) {
+			t.Fatalf("clean query %q should use fast path", query)
+		}
+	}
+
+	blockedQueries := []string{
+		"q=unionselect",
+		"file=../../etc/passwd",
+		"next=http://127.0.0.1/admin",
+		"q=%3cscript%3ealert(1)%3c/script%3e",
+		"cmd=id;whoami",
+		"q=or1=1",
+	}
+	for _, query := range blockedQueries {
+		if isCleanPlainQueryTarget(query) {
+			t.Fatalf("suspicious query %q should not use fast path", query)
+		}
+	}
+}
+
+func TestCheckOWASP_BlazeBase64PathXSSStillDetected(t *testing.T) {
+	path := "/YWxlcnQuY2FsbCglMjAsICJYU1MiKTs"
+	if isCleanPathTarget(path) {
+		t.Fatalf("base64 path payload %q should not use clean fast path", path)
+	}
+	hits := CheckOWASP("high", path, "", nil, nil)
+	if !hasCategory(hits, CatXSS) {
+		t.Fatalf("expected base64 path XSS payload to be detected, got %+v", hits)
 	}
 }
 
@@ -271,6 +910,114 @@ func TestCheckOWASP_SQLi_BlindFalseCondition(t *testing.T) {
 	if !hasCategory(hits, CatSQLi) {
 		t.Fatal("expected SQLi hit for blind false condition (AND 1=2)")
 	}
+}
+
+func TestShouldScanSQLiBooleanPrefilterKeepsAttackShapes(t *testing.T) {
+	signals := collectSQLiPatternSignals("id=1 and 1=2")
+	if !shouldScanSQLiPatternWithSignals("id=1 and 1=2", findSQLiPatternForTest("owasp:sqli:010"), signals) {
+		t.Fatal("numeric boolean SQLi shape should enter sqli:010 regex")
+	}
+	signals = collectSQLiPatternSignals(`name=admin" or "a"="a"`)
+	if !shouldScanSQLiPatternWithSignals(`name=admin" or "a"="a"`, findSQLiPatternForTest("owasp:sqli:011"), signals) {
+		t.Fatal("quoted boolean SQLi shape should enter sqli:011 regex")
+	}
+	signals = collectSQLiPatternSignals(`id=1' or ''='`)
+	if !shouldScanSQLiPatternWithSignals(`id=1' or ''='`, findSQLiPatternForTest("owasp:sqli:036"), signals) {
+		t.Fatal("empty quoted boolean SQLi shape should enter sqli:036 regex")
+	}
+}
+
+func TestShouldScanSQLiBooleanPrefilterSkipsPlainText(t *testing.T) {
+	tests := []struct {
+		id    string
+		input string
+	}{
+		{id: "owasp:sqli:010", input: "cmd=describesitemsgsummary&secure=1&version=3&dictid=2363"},
+		{id: "owasp:sqli:011", input: `roll off="yes" and title="report"`},
+		{id: "owasp:sqli:036", input: `text says or "" but has no comparison`},
+	}
+	for _, tt := range tests {
+		signals := collectSQLiPatternSignals(tt.input)
+		if shouldScanSQLiPatternWithSignals(tt.input, findSQLiPatternForTest(tt.id), signals) {
+			t.Fatalf("%s should skip plain text input %q", tt.id, tt.input)
+		}
+	}
+}
+
+func TestShouldScanSQLiFunctionAndHexPrefilter(t *testing.T) {
+	sqli007 := findSQLiPatternForTest("owasp:sqli:007")
+	for _, input := range []string{
+		"id=chr(65)",
+		"id=unhex (414243)",
+		"id=conv (10,10,16)",
+	} {
+		signals := collectSQLiPatternSignals(input)
+		if !shouldScanSQLiPatternWithSignals(input, sqli007, signals) {
+			t.Fatalf("sqli:007 should enter regex for %q", input)
+		}
+	}
+	for _, input := range []string{
+		"description=chromium browser setting",
+		"name=unhexagonal layout",
+		"topic=conversation notes",
+	} {
+		signals := collectSQLiPatternSignals(input)
+		if shouldScanSQLiPatternWithSignals(input, sqli007, signals) {
+			t.Fatalf("sqli:007 should skip plain text input %q", input)
+		}
+	}
+
+	sqli008 := findSQLiPatternForTest("owasp:sqli:008")
+	for _, input := range []string{
+		"id=(0x41414141)",
+		"id=0xdeadbeef",
+		"items, 0xabcdef",
+	} {
+		signals := collectSQLiPatternSignals(input)
+		if !shouldScanSQLiPatternWithSignals(input, sqli008, signals) {
+			t.Fatalf("sqli:008 should enter regex for %q", input)
+		}
+	}
+	for _, input := range []string{
+		"color=0xff",
+		"token 0x41414141",
+		"value=(0xzzzz)",
+	} {
+		signals := collectSQLiPatternSignals(input)
+		if shouldScanSQLiPatternWithSignals(input, sqli008, signals) {
+			t.Fatalf("sqli:008 should skip plain text input %q", input)
+		}
+	}
+
+	sqli022 := findSQLiPatternForTest("owasp:sqli:022")
+	for _, input := range []string{
+		"id=if(ascii(substr(user(),1,1))=115,1,0)",
+		"id=if ( length(password)>5,1,0)",
+		"id=if(select 1,1,0)",
+	} {
+		signals := collectSQLiPatternSignals(input)
+		if !shouldScanSQLiPatternWithSignals(input, sqli022, signals) {
+			t.Fatalf("sqli:022 should enter regex for %q", input)
+		}
+	}
+	for _, input := range []string{
+		"notification count(version) text",
+		"specific(ascii) label",
+	} {
+		signals := collectSQLiPatternSignals(input)
+		if shouldScanSQLiPatternWithSignals(input, sqli022, signals) {
+			t.Fatalf("sqli:022 should skip plain text input %q", input)
+		}
+	}
+}
+
+func findSQLiPatternForTest(id string) owaspPattern {
+	for _, p := range sqliPatterns {
+		if p.id == id {
+			return p
+		}
+	}
+	panic("missing SQLi pattern " + id)
 }
 
 // SSRF localhost 在 mid 敏感度下必须触发 — 之前 score=3 在 mid 下不触发

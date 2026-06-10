@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
 	"os"
 
 	"My-OpenWaf/internal/app"
@@ -28,8 +28,14 @@ func main() {
 	}
 	if bind := os.Getenv("MY_OPENWAF_PPROF_BIND"); bind != "" {
 		go func() {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 			log.Printf("pprof listening on %s", bind)
-			if err := http.ListenAndServe(bind, nil); err != nil {
+			if err := http.ListenAndServe(bind, mux); err != nil {
 				log.Printf("pprof server stopped: %v", err)
 			}
 		}()

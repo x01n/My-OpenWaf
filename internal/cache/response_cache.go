@@ -67,7 +67,11 @@ func CacheKey(method, host, path, query string) string {
 	h.Write([]byte(path))
 	h.Write([]byte{0})
 	h.Write([]byte(query))
-	return hex.EncodeToString(h.Sum(nil))
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
+	var encoded [sha256.Size * 2]byte
+	hex.Encode(encoded[:], sum[:])
+	return string(encoded[:])
 }
 
 func (rc *ResponseCache) shardFor(key string) *shard {

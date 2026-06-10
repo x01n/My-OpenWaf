@@ -8,7 +8,6 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 
-	acmepkg "My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/admin/detect"
 	"My-OpenWaf/internal/admin/event"
@@ -45,7 +44,8 @@ type Dependencies struct {
 	EscalationMgr *escalation.EscalationManager
 	CaptchaMgr    *challenge.CaptchaManager
 	ChainMgr      *challenge.ChainChallengeManager
-	ACMEMgr       *acmepkg.Manager
+	ACMEStore     *system.ACMEManagerStore
+	Realtime      *system.RealtimeHub
 	Cache         *cache.RedisKV
 	Upstreams     *upstream.Pool
 }
@@ -91,6 +91,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		readGroup.GET("/certificates", system.ListCertificates(r.Certificate))
 		readGroup.GET("/certificates/:id", system.GetCertificate(r.Certificate))
+		readGroup.GET("/certificates/acme/config", system.GetACMEConfig(r.SystemSettings))
 
 		readGroup.GET("/policies", system.ListPolicies(r.Policy))
 		readGroup.GET("/policies/:id", system.GetPolicy(r.Policy))
@@ -127,12 +128,13 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites/:id/application-route-rules", rule.ListApplicationRouteRules(r.Site, r.AppRouteRule))
 		readGroup.GET("/sites/:id/recorded-resources", rule.ListRecordedResources(r.Site, r.RecordedResource))
 
-		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, DB: deps.LogDB, Cache: deps.Cache}
+		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, ConfigDB: deps.DB, LogDB: deps.LogDB, Cache: deps.Cache}
 		readGroup.GET("/dashboard/summary", system.DashboardSummary(dashDeps))
 
 		readGroup.GET("/api-keys", system.ListAPIKeys(r.AdminAPIKey))
 
 		readGroup.GET("/bot-settings", protect.GetBotSettings(r.SystemSettings))
+		readGroup.GET("/bot-stats", protect.GetBotStats(r.BotScore))
 		readGroup.GET("/bot-scores", protect.GetBotScores(r.BotScore))
 
 		readGroup.GET("/cve-rules", detect.ListCVERules(r.CVERule))
@@ -160,6 +162,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/drop-events", protect.GetDropEvents(r.DropEvent))
 		readGroup.GET("/upstreams/status", system.UpstreamStatus(deps.Upstreams))
 		readGroup.GET("/runtime-config", system.GetRuntimeConfig(core.LoadConfigFromEnv()))
+		readGroup.GET("/realtime/ticket", deps.Realtime.TicketHandler())
 	}
 
 	opsGroup := api.Group("")
@@ -175,10 +178,12 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites/:id/listeners/:lid/delete", site.DeleteSiteListener(r.Site, r.SiteListener, reload))
 
 		opsGroup.POST("/certificates", system.CreateCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates/parse", system.ParseCertificate(r.Site))
 		opsGroup.POST("/certificates/:id/update", system.UpdateCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates/:id/apply-to-sites", system.ApplyCertificateToSites(r.Certificate, r.Site, r.SiteListener, reload))
 		opsGroup.POST("/certificates/:id/delete", system.DeleteCertificate(r.Certificate, r.Site, r.SiteListener, reload))
-		opsGroup.POST("/certificates/acme/apply", system.ACMEApply(deps.Repos, reload, deps.ACMEMgr))
-		opsGroup.POST("/certificates/acme/:id/renew", system.ACMERenew(deps.Repos, reload, deps.ACMEMgr))
+		opsGroup.POST("/certificates/acme/apply", system.ACMEApply(deps.Repos, reload, deps.ACMEStore))
+		opsGroup.POST("/certificates/acme/:id/renew", system.ACMERenew(deps.Repos, reload, deps.ACMEStore))
 
 		opsGroup.POST("/policies", system.CreatePolicy(r.Policy, reload))
 		opsGroup.POST("/policies/:id/update", system.UpdatePolicy(r.Policy, reload))
@@ -239,11 +244,14 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		adminGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
 		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
+		adminGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings))
+		adminGroup.POST("/redis-config", system.UpdateRedisConfig(r.SystemSettings))
 		adminGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
 		adminGroup.POST("/log-config", system.UpdateLogConfig(r.SystemSettings))
 		adminGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))
 		adminGroup.POST("/tls-config", system.UpdateTLSDefaultConfig(r.SystemSettings, reload))
 		adminGroup.GET("/tls-cipher-suites", system.ListCipherSuites())
+		adminGroup.POST("/certificates/acme/config", system.UpdateACMEConfig(r.SystemSettings))
 		adminGroup.GET("/certificates/acme/status", system.ACMEStatus(deps.Repos))
 
 		adminGroup.POST("/api-keys", system.CreateAPIKey(r.AdminAPIKey))
@@ -262,21 +270,20 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	h.GET("/__owaf/wasm_exec.js", func(ctx context.Context, c *app.RequestContext) {
 		challenge.ServeWasmExecJS(c)
 	})
-	if deps.ACMEMgr != nil {
-		h.GET("/.well-known/acme-challenge/:token", func(ctx context.Context, c *app.RequestContext) {
-			token := strings.TrimSpace(c.Param("token"))
-			if token == "" {
-				c.Status(404)
-				return
-			}
-			if resp, ok := deps.ACMEMgr.GetChallengeResponse(token); ok {
-				c.Response.Header.Set("Content-Type", "text/plain")
-				c.String(200, resp)
-				return
-			}
+	h.GET("/api/v1/realtime/ws", deps.Realtime.WebSocketHandler())
+	h.GET("/.well-known/acme-challenge/:token", func(ctx context.Context, c *app.RequestContext) {
+		token := strings.TrimSpace(c.Param("token"))
+		if token == "" {
 			c.Status(404)
-		})
-	}
+			return
+		}
+		if resp, ok := deps.ACMEStore.GetChallengeResponse(token); ok {
+			c.Response.Header.Set("Content-Type", "text/plain")
+			c.String(200, resp)
+			return
+		}
+		c.Status(404)
+	})
 
 	mountStaticHandler(h, deps.StaticFS)
 }

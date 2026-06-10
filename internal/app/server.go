@@ -26,6 +26,7 @@ import (
 	acmepkg "My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/admin"
 	"My-OpenWaf/internal/admin/auth"
+	adminsystem "My-OpenWaf/internal/admin/system"
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/core/engine"
@@ -77,6 +78,19 @@ func applyLogConfig(repo *repository.SystemSettingsRepo) {
 	logger.Configure(logger.Config{Level: cfg.Level, FilePath: cfg.FilePath, AlsoStdout: cfg.AlsoStdout})
 }
 
+func adminPasswordMinLength(repo *repository.SystemSettingsRepo) int {
+	cfg := store.DefaultProtectionConfig()
+	if repo != nil {
+		if raw, err := repo.Get("protection"); err == nil && strings.TrimSpace(raw) != "" {
+			_ = json.Unmarshal([]byte(raw), &cfg)
+		}
+	}
+	if cfg.LoginMinPasswordLength <= 0 {
+		return store.DefaultProtectionConfig().LoginMinPasswordLength
+	}
+	return cfg.LoginMinPasswordLength
+}
+
 func ResetAdminPassword(args []string) error {
 	username := "admin"
 	passwordArgs := args
@@ -105,6 +119,11 @@ func ResetAdminPassword(args []string) error {
 	}
 	if account == nil {
 		return fmt.Errorf("admin account %q does not exist", username)
+	}
+	settingsRepo := repository.NewSystemSettingsRepo(rt.DB)
+	minLength := adminPasswordMinLength(settingsRepo)
+	if len([]rune(passwordArgs[0])) < minLength {
+		return fmt.Errorf("new password is shorter than login_min_password_length %d", minLength)
 	}
 	if err := repo.UpdatePassword(username, passwordArgs[0]); err != nil {
 		return fmt.Errorf("reset admin password failed: %w", err)
@@ -504,59 +523,17 @@ func Run() {
 
 	// ─── Admin control-plane server ───
 	adminSrv := server.Default(server.WithHostPorts(rt.Config.AdminBind))
+	adminSrv.NoHijackConnPool = true
 	adminSrv.GET("/healthz", hc.LivenessHandler())
 	adminSrv.GET("/readyz", hc.ReadinessHandler())
 	adminSrv.GET("/status", hc.StatusHandler())
 	adminSrv.GET("/metrics", observability.PrometheusHandler(promMetrics))
-	// 初始化 ACME 管理器（可选，依赖 golang.org/x/crypto/acme）
-	var acmeMgr *acmepkg.Manager
-	acmeEmail := os.Getenv("MY_OPENWAF_ACME_EMAIL")
-	if acmeEmail != "" {
-		var err error
-		acmeMgr, err = acmepkg.NewManager(acmepkg.Config{
-			Email: acmeEmail,
-			Log:   logger.New("acme"),
-			OnRenew: func(domain, certPEM, keyPEM string, expiry time.Time, renewErr error) error {
-				cert, err := repos.Certificate.GetByDomain(domain)
-				if err != nil {
-					return fmt.Errorf("load certificate by domain %s: %w", domain, err)
-				}
-				now := time.Now()
-				if renewErr != nil {
-					return repos.Certificate.UpdateRenewStatus(cert.ID, renewErr.Error(), &now)
-				}
-				if err := repos.Certificate.UpdateCert(cert.ID, certPEM, keyPEM, &expiry, &now); err != nil {
-					return fmt.Errorf("update renewed certificate %s: %w", domain, err)
-				}
-				if err := reload(); err != nil {
-					return fmt.Errorf("reload after renewing %s: %w", domain, err)
-				}
-				return nil
-			},
-		})
-		if err != nil {
-			log.Warn("ACME manager 初始化失败", slog.Any("err", err))
-		} else {
-			log.Info("ACME manager 已就绪", slog.String("email", acmeEmail))
-			go acmeMgr.RenewLoopFunc(acmeCtx, 12*time.Hour, func(context.Context) ([]string, error) {
-				items, err := repos.Certificate.ListAutoRenew()
-				if err != nil {
-					return nil, err
-				}
-				domains := make([]string, 0, len(items))
-				for _, item := range items {
-					if item.Domain == "" || item.ExpiresAt == nil {
-						continue
-					}
-					if time.Until(*item.ExpiresAt) > 30*24*time.Hour {
-						continue
-					}
-					domains = append(domains, item.Domain)
-				}
-				return domains, nil
-			})
-		}
-	}
+	acmeStore := adminsystem.NewACMEManagerStore(repos.SystemSettings, repos.Certificate, reload, logger.New("acme"))
+	dpOpts.ACMEChallengeResponse = acmeStore.GetChallengeResponse
+	go acmeStore.RenewLoop(acmeCtx, 12*time.Hour)
+	redisKV := cache.NewRedisKV(rt.Redis)
+	realtimeHub := adminsystem.NewRealtimeHub(&adminsystem.DashboardDeps{Metrics: metrics, ConfigDB: rt.DB, LogDB: rt.LogDB, Cache: redisKV}, upstreamPool, hc, repos.AccessLog, repos.SecurityEvent)
+	realtimeHub.Start(ctx)
 
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
 		Repos:         repos,
@@ -573,8 +550,9 @@ func Run() {
 		EscalationMgr: escalationMgr,
 		CaptchaMgr:    captchaMgr,
 		ChainMgr:      chainMgr,
-		ACMEMgr:       acmeMgr,
-		Cache:         cache.NewRedisKV(rt.Redis),
+		ACMEStore:     acmeStore,
+		Realtime:      realtimeHub,
+		Cache:         redisKV,
 		Upstreams:     upstreamPool,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
@@ -802,7 +780,6 @@ func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, d
 			server.WithOnAccept(func(conn net.Conn) context.Context {
 				ctx := context.Background()
 				if fp, ok := bot.TLSFingerprintFromConn(conn); ok {
-					dataplane.RememberTLSFingerprintConn(conn, fp)
 					ctx = dataplane.ContextWithTLSFingerprint(ctx, fp)
 				}
 				return ctx
@@ -811,11 +788,10 @@ func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, d
 				if tlsConn, ok := conn.(interface{ ConnectionState() tls.ConnectionState }); ok {
 					state := tlsConn.ConnectionState()
 					setTLSHandshakeInfo(conn, state)
-					fp := bot.TLSClientFingerprint{TLSVersion: tlsVersionName(state.Version), SNI: state.ServerName}
-					if state.NegotiatedProtocol != "" {
-						fp.ALPN = []string{state.NegotiatedProtocol}
+					if fp, ok := bot.TLSFingerprintFromConn(conn); ok {
+						ctx = dataplane.ContextWithTLSFingerprint(ctx, fp)
 					}
-					ctx = dataplane.ContextWithTLSFingerprint(ctx, fp)
+					ctx = dataplane.ContextWithTLSHandshakeInfo(ctx, tlsVersionName(state.Version), state.ServerName, state.NegotiatedProtocol)
 				}
 				return ctx
 			}),
@@ -891,12 +867,12 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 
 	// 如果没有任何证书且 SNI 映射也为空，生成一个自签证书兜底
 	if defaultSiteCert == nil && len(sniCertMap) == 0 {
-		selfSigned, err := selfSignedCache.GetOrCreate(bind)
+		selfSigned, err := selfSignedCache.GetOrCreatePtr(bind)
 		if err != nil {
 			slog.Warn("自签证书生成失败", slog.String("bind", bind), slog.Any("err", err))
 			return nil
 		}
-		defaultSiteCert = &selfSigned
+		defaultSiteCert = selfSigned
 		slog.Info("无站点证书，仅使用自签证书", slog.String("bind", bind))
 	}
 
@@ -938,11 +914,7 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 		// 否则（IP 直接访问或未知域名）返回自签证书，防止域名信息泄露。
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			if hello.Conn != nil {
-				var version uint16
-				if len(hello.SupportedVersions) > 0 {
-					version = hello.SupportedVersions[0]
-				}
-				setTLSHandshakeInfo(hello.Conn, tls.ConnectionState{Version: version, NegotiatedProtocol: firstALPN(hello.SupportedProtos)})
+				setTLSHandshakeInfo(hello.Conn, tls.ConnectionState{ServerName: hello.ServerName})
 			}
 			return nil, nil
 		},
@@ -1008,12 +980,12 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 
 // selfSignedForBind 获取或生成指定 bind 地址的自签证书。
 func selfSignedForBind(bind string) *tls.Certificate {
-	cert, err := selfSignedCache.GetOrCreate(bind)
+	cert, err := selfSignedCache.GetOrCreatePtr(bind)
 	if err != nil {
 		slog.Warn("自签证书生成失败", slog.String("bind", bind), slog.Any("err", err))
 		return nil
 	}
-	return &cert
+	return cert
 }
 
 // parseCipherSuites 将逗号分隔的密码套件名称转换为 TLS 密码套件 ID 列表。
@@ -1061,13 +1033,13 @@ func tcpTLSALPNProtocols(raw string) []string {
 }
 
 type tlsHandshakeInfoSetter interface {
-	SetTLSHandshakeInfo(version string, alpn string)
+	SetTLSHandshakeInfo(version string, sni string, alpn string)
 }
 
 func setTLSHandshakeInfo(conn net.Conn, state tls.ConnectionState) {
 	for conn != nil {
 		if setter, ok := conn.(tlsHandshakeInfoSetter); ok {
-			setter.SetTLSHandshakeInfo(tlsVersionName(state.Version), state.NegotiatedProtocol)
+			setter.SetTLSHandshakeInfo(tlsVersionName(state.Version), state.ServerName, state.NegotiatedProtocol)
 			return
 		}
 		if unwrapper, ok := conn.(interface{ NetConn() net.Conn }); ok {

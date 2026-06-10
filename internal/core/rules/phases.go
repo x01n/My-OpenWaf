@@ -36,8 +36,8 @@ type MatchCtx struct {
 
 func ctxFromPipeline(ctx *pipeline.RequestCtx) MatchCtx {
 	headers := ctx.Headers
-	if ctx.Host != "" || ctx.TLS.JA3 != "" || ctx.TLS.JA3Hash != "" || ctx.TLS.JA4 != "" || ctx.TLS.TLSVersion != "" || len(ctx.TLS.ALPN) > 0 || len(ctx.HeaderKeys) > 0 {
-		headers = make(map[string]string, len(ctx.Headers)+7)
+	if ctx.Host != "" || ctx.TLS.JA3 != "" || ctx.TLS.JA3Hash != "" || ctx.TLS.JA4 != "" || ctx.TLS.TLSVersion != "" || ctx.TLS.SNI != "" || len(ctx.TLS.ALPN) > 0 || len(ctx.HeaderKeys) > 0 {
+		headers = make(map[string]string, len(ctx.Headers)+9)
 		for k, v := range ctx.Headers {
 			headers[k] = v
 		}
@@ -60,6 +60,10 @@ func ctxFromPipeline(ctx *pipeline.RequestCtx) MatchCtx {
 		if ctx.TLS.TLSVersion != "" {
 			headers["X-OWAF-TLS-Version"] = ctx.TLS.TLSVersion
 			headers["x-owaf-tls-version"] = ctx.TLS.TLSVersion
+		}
+		if ctx.TLS.SNI != "" {
+			headers["X-OWAF-TLS-SNI"] = ctx.TLS.SNI
+			headers["x-owaf-tls-sni"] = ctx.TLS.SNI
 		}
 		if len(ctx.TLS.ALPN) > 0 {
 			alpn := strings.Join(ctx.TLS.ALPN, ",")
@@ -508,13 +512,25 @@ func owaspHitResult(hit owasp.OWASPHit, cfg *store.ProtectionConfig, overrides m
 // ── CVE Detection phase ──
 
 type cvePhase struct {
-	cfg      *store.ProtectionConfig
-	detector *cve.CVEDetector
+	cfg                 *store.ProtectionConfig
+	detector            *cve.CVEDetector
+	categorySensitivity map[string]string
+	ruleOverrides       map[string]cve.CVERuleOverride
+	cachedConfig        bool
+}
+
+func newCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDetector) *cvePhase {
+	phase := &cvePhase{cfg: cfg, detector: detector, cachedConfig: true}
+	if cfg != nil {
+		phase.categorySensitivity = cfg.EffectiveCategorySensitivity()
+		phase.ruleOverrides = cve.ParseCVERuleOverrides(cfg.CVERulesConfig)
+	}
+	return phase
 }
 
 // NewCVEPhase creates a pipeline phase that runs CVE-specific detection.
 func NewCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDetector) pipeline.Phase {
-	return &cvePhase{cfg: cfg, detector: detector}
+	return newCVEPhase(cfg, detector)
 }
 
 func (p *cvePhase) Name() string { return "cve_detection" }
@@ -524,14 +540,21 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		return action.Pass(), false
 	}
 
-	req := cve.BuildCVERequest(ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType)
-	matches := p.detector.Detect(req, p.cfg.EffectiveCategorySensitivity())
-	if len(matches) == 0 {
+	categorySensitivity := p.categorySensitivity
+	if !p.cachedConfig {
+		categorySensitivity = p.cfg.EffectiveCategorySensitivity()
+	}
+
+	if !cve.HasRawCVESuspiciousContent(ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType) {
 		return action.Pass(), false
 	}
 
-	// Use the first (highest-priority) match.
-	best := matches[0]
+	var req cve.CVERequest
+	cve.BuildCVERequestInto(&req, ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType)
+	best, ok := p.detector.DetectFirst(&req, categorySensitivity)
+	if !ok {
+		return action.Pass(), false
+	}
 
 	// Default: use configured CVE action, then rule-level action, then auto-drop.
 	cveAction := p.cfg.CVEAction
@@ -546,7 +569,11 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		act = normalizeConfiguredAction(best.Action)
 		explicitAction = true
 	}
-	if overrides := cve.ParseCVERuleOverrides(p.cfg.CVERulesConfig); len(overrides) > 0 {
+	overrides := p.ruleOverrides
+	if !p.cachedConfig {
+		overrides = cve.ParseCVERuleOverrides(p.cfg.CVERulesConfig)
+	}
+	if len(overrides) > 0 {
 		for _, key := range []string{best.CVEID, "cve:" + best.CVEID} {
 			if ov, ok := overrides[key]; ok {
 				if ov.Action != "" {
@@ -619,6 +646,45 @@ func looksLikeFormEncoded(body []byte) bool {
 	return hasEq
 }
 
+func shouldScanOpaqueBodyTarget(body []byte) bool {
+	for _, b := range body {
+		switch b {
+		case '<', '>', '`', ';', '|', '\\', '{', '}', '[', ']':
+			return true
+		}
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "%0d") ||
+		strings.Contains(lower, "%0a") ||
+		strings.Contains(lower, "%3c") ||
+		strings.Contains(lower, "%3e") ||
+		strings.Contains(lower, "%27") ||
+		strings.Contains(lower, "%22") ||
+		strings.Contains(lower, "javascript:") ||
+		strings.Contains(lower, "vbscript:") ||
+		strings.Contains(lower, "document.") ||
+		strings.Contains(lower, "onerror") ||
+		strings.Contains(lower, "onload") ||
+		strings.Contains(lower, "onmouse") ||
+		strings.Contains(lower, "onfocus") ||
+		strings.Contains(lower, "alert(") ||
+		strings.Contains(lower, " union ") ||
+		strings.Contains(lower, " select ") ||
+		strings.Contains(lower, " or ") ||
+		strings.Contains(lower, " and ") ||
+		strings.Contains(lower, "sleep(") ||
+		strings.Contains(lower, "benchmark(") ||
+		strings.Contains(lower, "../") ||
+		strings.Contains(lower, "127.0.") ||
+		strings.Contains(lower, "localhost") ||
+		strings.Contains(lower, "169.254.169.254") ||
+		strings.Contains(lower, "metadata.google") ||
+		strings.Contains(lower, "aced0005") ||
+		strings.Contains(lower, "ro0ab") ||
+		strings.Contains(lower, "objectinputstream") ||
+		strings.Contains(lower, "deserializ")
+}
+
 // extractBodyTargets parses the request body based on content type and returns
 // individual values to scan for attack payloads.
 // When Content-Type is missing or misleading, the body is also sniffed to detect
@@ -631,6 +697,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 
 	var primary []string
 	parsedOK := false
+	skipRawFallback := false
 
 	switch {
 	case strings.Contains(ct, "application/x-www-form-urlencoded"):
@@ -668,9 +735,11 @@ func extractBodyTargets(body []byte, contentType string) []string {
 					printable++
 				}
 			}
-			if float64(printable)/float64(len(sample)) >= 0.9 {
+			if float64(printable)/float64(len(sample)) >= 0.9 && shouldScanOpaqueBodyTarget(body[:limit]) {
 				primary = []string{string(body[:limit])}
 				parsedOK = true
+			} else {
+				skipRawFallback = true
 			}
 		}
 	}
@@ -678,7 +747,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 	// Fallback: if the declared Content-Type parser returned nothing (e.g. body
 	// is base64-wrapped but Content-Type says application/json), always scan the
 	// raw body so normalizeWithDecode can peel the base64 layer.
-	if !parsedOK && len(body) > 0 {
+	if !parsedOK && !skipRawFallback && len(body) > 0 {
 		limit := 48 * 1024
 		if len(body) < limit {
 			limit = len(body)
@@ -699,7 +768,37 @@ func extractBodyTargets(body []byte, contentType string) []string {
 		}
 	}
 
-	return primary
+	return dedupeBodyTargets(primary)
+}
+
+func dedupeBodyTargets(targets []string) []string {
+	if len(targets) < 2 {
+		return targets
+	}
+
+	duplicate := false
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if _, ok := seen[target]; ok {
+			duplicate = true
+			break
+		}
+		seen[target] = struct{}{}
+	}
+	if !duplicate {
+		return targets
+	}
+
+	seen = make(map[string]struct{}, len(targets))
+	out := targets[:0]
+	for _, target := range targets {
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		out = append(out, target)
+	}
+	return out
 }
 
 // extractFormValues splits form-urlencoded body into individual decoded values.
@@ -899,7 +998,7 @@ func NewParallelOWASPCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDete
 	phase := &parallelOWASPCVEPhase{cfg: cfg, detector: detector}
 	if cfg != nil {
 		phase.owasp = NewOWASPPhase(cfg).(*owaspPhase)
-		phase.cve = &cvePhase{cfg: cfg, detector: detector}
+		phase.cve = newCVEPhase(cfg, detector)
 	}
 	return phase
 }

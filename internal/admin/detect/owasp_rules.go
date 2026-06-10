@@ -3,6 +3,7 @@ package detect
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -22,6 +23,7 @@ type owaspRuleView struct {
 	Action      string   `json:"action,omitempty"`
 	StatusCode  int      `json:"status_code,omitempty"`
 	RedirectTo  string   `json:"redirect_to,omitempty"`
+	Sensitivity string   `json:"sensitivity,omitempty"`
 }
 
 func ListOWASPRulesFromRegistry(repo *repository.SystemSettingsRepo) app.HandlerFunc {
@@ -68,6 +70,9 @@ func ListOWASPRulesFromRegistry(repo *repository.SystemSettingsRepo) app.Handler
 						if s, ok3 := ovMap["redirect_to"].(string); ok3 {
 							view.RedirectTo = s
 						}
+						if s, ok3 := ovMap["sensitivity"].(string); ok3 {
+							view.Sensitivity = s
+						}
 					}
 				}
 			}
@@ -95,11 +100,12 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 			return
 		}
 		var req struct {
-			Enabled    *bool    `json:"enabled,omitempty"`
-			Whitelist  []string `json:"whitelist,omitempty"`
-			Action     *string  `json:"action,omitempty"`
-			StatusCode *int     `json:"status_code,omitempty"`
-			RedirectTo *string  `json:"redirect_to,omitempty"`
+			Enabled     *bool    `json:"enabled,omitempty"`
+			Whitelist   []string `json:"whitelist,omitempty"`
+			Action      *string  `json:"action,omitempty"`
+			StatusCode  *int     `json:"status_code,omitempty"`
+			RedirectTo  *string  `json:"redirect_to,omitempty"`
+			Sensitivity *string  `json:"sensitivity,omitempty"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -147,6 +153,17 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 				override["redirect_to"] = *req.RedirectTo
 			}
 		}
+		if req.Sensitivity != nil {
+			if *req.Sensitivity == "" {
+				delete(override, "sensitivity")
+			} else {
+				override["sensitivity"] = *req.Sensitivity
+			}
+		}
+		if overrideHasRedirectActionWithoutTarget(override) {
+			c.JSON(400, map[string]string{"error": "redirect_to required"})
+			return
+		}
 		rulesConfig[ruleID] = override
 		cfg.SetOWASPRulesConfig(rulesConfig)
 		if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
@@ -165,12 +182,13 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
 			Rules []struct {
-				ID         string   `json:"id"`
-				Enabled    *bool    `json:"enabled,omitempty"`
-				Whitelist  []string `json:"whitelist,omitempty"`
-				Action     *string  `json:"action,omitempty"`
-				StatusCode *int     `json:"status_code,omitempty"`
-				RedirectTo *string  `json:"redirect_to,omitempty"`
+				ID          string   `json:"id"`
+				Enabled     *bool    `json:"enabled,omitempty"`
+				Whitelist   []string `json:"whitelist,omitempty"`
+				Action      *string  `json:"action,omitempty"`
+				StatusCode  *int     `json:"status_code,omitempty"`
+				RedirectTo  *string  `json:"redirect_to,omitempty"`
+				Sensitivity *string  `json:"sensitivity,omitempty"`
 			} `json:"rules"`
 		}
 		if err := c.BindJSON(&req); err != nil {
@@ -227,6 +245,16 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 					override["redirect_to"] = *r.RedirectTo
 				}
 			}
+			if r.Sensitivity != nil {
+				if *r.Sensitivity == "" {
+					delete(override, "sensitivity")
+				} else {
+					override["sensitivity"] = *r.Sensitivity
+				}
+			}
+			if overrideHasRedirectActionWithoutTarget(override) {
+				continue
+			}
 			rulesConfig[r.ID] = override
 			updated++
 		}
@@ -241,6 +269,18 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 		}
 		c.JSON(200, map[string]any{"updated": updated, "total": len(req.Rules)})
 	}
+}
+
+func overrideHasRedirectActionWithoutTarget(override map[string]interface{}) bool {
+	if enabled, ok := override["enabled"].(bool); ok && !enabled {
+		return false
+	}
+	actionValue, ok := override["action"].(string)
+	if !ok || action.Normalize(action.Type(actionValue)) != action.Redirect {
+		return false
+	}
+	redirectTo, _ := override["redirect_to"].(string)
+	return strings.TrimSpace(redirectTo) == ""
 }
 
 func GetOWASPRuleStats(repo *repository.SystemSettingsRepo) app.HandlerFunc {

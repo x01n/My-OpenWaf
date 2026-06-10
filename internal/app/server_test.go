@@ -2,6 +2,8 @@ package app
 
 import (
 	"crypto/tls"
+	"encoding/json"
+	"net"
 	"testing"
 
 	"My-OpenWaf/internal/core"
@@ -122,6 +124,46 @@ func TestLoadDropPolicyPreservesFallbackForMissingBoolFields(t *testing.T) {
 	}
 }
 
+func TestAdminPasswordMinLengthUsesProtectionConfig(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.SystemSettings{}); err != nil {
+		t.Fatalf("migrate settings: %v", err)
+	}
+	repo := repository.NewSystemSettingsRepo(db)
+
+	if got, want := adminPasswordMinLength(repo), store.DefaultProtectionConfig().LoginMinPasswordLength; got != want {
+		t.Fatalf("default min password length = %d, want %d", got, want)
+	}
+
+	cfg := store.DefaultProtectionConfig()
+	cfg.LoginMinPasswordLength = 14
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal protection: %v", err)
+	}
+	if err := repo.Set("protection", string(data)); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	if got := adminPasswordMinLength(repo); got != 14 {
+		t.Fatalf("configured min password length = %d, want 14", got)
+	}
+
+	cfg.LoginMinPasswordLength = 0
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal protection fallback: %v", err)
+	}
+	if err := repo.Set("protection", string(data)); err != nil {
+		t.Fatalf("seed fallback protection: %v", err)
+	}
+	if got, want := adminPasswordMinLength(repo), store.DefaultProtectionConfig().LoginMinPasswordLength; got != want {
+		t.Fatalf("fallback min password length = %d, want %d", got, want)
+	}
+}
+
 func TestParseCipherSuitesRecognizesNames(t *testing.T) {
 	got := parseCipherSuites("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,ECDHE_RSA_WITH_AES_256_GCM_SHA384")
 	if len(got) != 2 {
@@ -166,4 +208,48 @@ func TestBuildListenerTLSAppliesALPNAndBounds(t *testing.T) {
 	if cfg.GetCertificate == nil {
 		t.Fatal("expected dynamic certificate selector")
 	}
+}
+
+func TestBuildListenerTLSClientHelloOnlySeedsSNI(t *testing.T) {
+	sn := &snapshotpkg.Snapshot{}
+	rt := snapshotpkg.SiteRuntime{
+		Bind: ":443",
+		Site: store.Site{
+			TLSEnabled: true,
+			ALPN:       "h2,http/1.1",
+		},
+	}
+
+	cfg := buildListenerTLS(rt, sn)
+	if cfg == nil || cfg.GetConfigForClient == nil {
+		t.Fatal("expected TLS config with ClientHello hook")
+	}
+	rec := &testTLSHandshakeInfoConn{}
+	if _, err := cfg.GetConfigForClient(&tls.ClientHelloInfo{
+		Conn:              rec,
+		ServerName:        "client.example",
+		SupportedVersions: []uint16{tls.VersionTLS13, tls.VersionTLS12},
+		SupportedProtos:   []string{"h2", "http/1.1"},
+	}); err != nil {
+		t.Fatalf("GetConfigForClient returned error: %v", err)
+	}
+	if rec.sni != "client.example" {
+		t.Fatalf("SNI = %q, want %q", rec.sni, "client.example")
+	}
+	if rec.version != "" || rec.alpn != "" {
+		t.Fatalf("ClientHello hook should not record unnegotiated version/alpn, got version=%q alpn=%q", rec.version, rec.alpn)
+	}
+}
+
+type testTLSHandshakeInfoConn struct {
+	net.Conn
+	version string
+	sni     string
+	alpn    string
+}
+
+func (c *testTLSHandshakeInfoConn) SetTLSHandshakeInfo(version string, sni string, alpn string) {
+	c.version = version
+	c.sni = sni
+	c.alpn = alpn
 }

@@ -89,31 +89,34 @@ var goodBotUA = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)semrushbot|ahrefs|mj12bot|dotbot`),
 }
 
-var maliciousToolUA = []struct {
-	re     *regexp.Regexp
-	name   string
-	ruleID string
-}{
-	{regexp.MustCompile(`(?i)sqlmap`), "sqlmap", "bot:mal:001"},
-	{regexp.MustCompile(`(?i)nikto`), "nikto", "bot:mal:002"},
-	{regexp.MustCompile(`(?i)nmap|masscan|zmap`), "port_scanner", "bot:mal:003"},
-	{regexp.MustCompile(`(?i)acunetix|netsparker|burpsuite|burp suite`), "web_scanner", "bot:mal:004"},
-	{regexp.MustCompile(`(?i)dirbuster|gobuster|wfuzz|ffuf|feroxbuster`), "dir_bruteforcer", "bot:mal:005"},
-	{regexp.MustCompile(`(?i)nessus|openvas|qualys`), "vuln_scanner", "bot:mal:006"},
-	{regexp.MustCompile(`(?i)havij|pangolin`), "sqli_tool", "bot:mal:007"},
-	{regexp.MustCompile(`(?i)metasploit\b|\bmsf\b`), "metasploit", "bot:mal:008"},
-	{regexp.MustCompile(`(?i)hydra|medusa|patator|thc-hydra`), "password_cracker", "bot:mal:009"},
-	{regexp.MustCompile(`(?i)nuclei`), "nuclei", "bot:mal:010"},
-	{regexp.MustCompile(`(?i)zgrab`), "zgrab", "bot:mal:011"},
-	{regexp.MustCompile(`(?i)xspider|crawler4j`), "malicious_crawler", "bot:mal:012"},
-	{regexp.MustCompile(`(?i)commix|xsser|beef`), "exploit_tool", "bot:mal:013"},
-	{regexp.MustCompile(`(?i)w3af|skipfish|arachni`), "web_app_scanner", "bot:mal:014"},
-	{regexp.MustCompile(`(?i)joomscan|wpscan|droopescan`), "cms_scanner", "bot:mal:015"},
-	{regexp.MustCompile(`(?i)shodan|censys|zoomeye`), "recon_bot", "bot:mal:016"},
-	{regexp.MustCompile(`(?i)scrapy|beautifulsoup|selenium`), "scraper_lib", "bot:mal:017"},
-	{regexp.MustCompile(`(?i)python-requests|python-urllib|go-http-client`), "http_lib", "bot:mal:018"},
-	{regexp.MustCompile(`(?i)curl|wget|libwww-perl|lwp-`), "cli_tool", "bot:mal:019"},
-	{regexp.MustCompile(`(?i)postman|insomnia|httpie`), "api_client", "bot:mal:020"},
+type maliciousToolUAPattern struct {
+	re      *regexp.Regexp
+	needles []string
+	name    string
+	ruleID  string
+}
+
+var maliciousToolUA = []maliciousToolUAPattern{
+	{regexp.MustCompile(`(?i)sqlmap`), []string{"sqlmap"}, "sqlmap", "bot:mal:001"},
+	{regexp.MustCompile(`(?i)nikto`), []string{"nikto"}, "nikto", "bot:mal:002"},
+	{regexp.MustCompile(`(?i)nmap|masscan|zmap`), []string{"nmap", "masscan", "zmap"}, "port_scanner", "bot:mal:003"},
+	{regexp.MustCompile(`(?i)acunetix|netsparker|burpsuite|burp suite`), []string{"acunetix", "netsparker", "burpsuite", "burp suite"}, "web_scanner", "bot:mal:004"},
+	{regexp.MustCompile(`(?i)dirbuster|gobuster|wfuzz|ffuf|feroxbuster`), []string{"dirbuster", "gobuster", "wfuzz", "ffuf", "feroxbuster"}, "dir_bruteforcer", "bot:mal:005"},
+	{regexp.MustCompile(`(?i)nessus|openvas|qualys`), []string{"nessus", "openvas", "qualys"}, "vuln_scanner", "bot:mal:006"},
+	{regexp.MustCompile(`(?i)havij|pangolin`), []string{"havij", "pangolin"}, "sqli_tool", "bot:mal:007"},
+	{regexp.MustCompile(`(?i)metasploit\b|\bmsf\b`), []string{"metasploit", "msf"}, "metasploit", "bot:mal:008"},
+	{regexp.MustCompile(`(?i)hydra|medusa|patator|thc-hydra`), []string{"hydra", "medusa", "patator", "thc-hydra"}, "password_cracker", "bot:mal:009"},
+	{regexp.MustCompile(`(?i)nuclei`), []string{"nuclei"}, "nuclei", "bot:mal:010"},
+	{regexp.MustCompile(`(?i)zgrab`), []string{"zgrab"}, "zgrab", "bot:mal:011"},
+	{regexp.MustCompile(`(?i)xspider|crawler4j`), []string{"xspider", "crawler4j"}, "malicious_crawler", "bot:mal:012"},
+	{regexp.MustCompile(`(?i)commix|xsser|beef`), []string{"commix", "xsser", "beef"}, "exploit_tool", "bot:mal:013"},
+	{regexp.MustCompile(`(?i)w3af|skipfish|arachni`), []string{"w3af", "skipfish", "arachni"}, "web_app_scanner", "bot:mal:014"},
+	{regexp.MustCompile(`(?i)joomscan|wpscan|droopescan`), []string{"joomscan", "wpscan", "droopescan"}, "cms_scanner", "bot:mal:015"},
+	{regexp.MustCompile(`(?i)shodan|censys|zoomeye`), []string{"shodan", "censys", "zoomeye"}, "recon_bot", "bot:mal:016"},
+	{regexp.MustCompile(`(?i)scrapy|beautifulsoup|selenium`), []string{"scrapy", "beautifulsoup", "selenium"}, "scraper_lib", "bot:mal:017"},
+	{regexp.MustCompile(`(?i)python-requests|python-urllib|go-http-client`), []string{"python-requests", "python-urllib", "go-http-client"}, "http_lib", "bot:mal:018"},
+	{regexp.MustCompile(`(?i)curl|wget|libwww-perl|lwp-`), []string{"curl", "wget", "libwww-perl", "lwp-"}, "cli_tool", "bot:mal:019"},
+	{regexp.MustCompile(`(?i)postman|insomnia|httpie`), []string{"postman", "insomnia", "httpie"}, "api_client", "bot:mal:020"},
 }
 
 var goodBotDNSCache sync.Map
@@ -175,10 +178,8 @@ func verifyGoodBotDNS(ip net.IP, patternIdx int) bool {
 
 func PreScreen(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver) bool {
 	ua := strings.TrimSpace(r.UserAgent)
-	for _, p := range maliciousToolUA {
-		if p.re.MatchString(ua) {
-			return true
-		}
+	if _, _, ok := matchMaliciousToolUA(ua); ok {
+		return true
 	}
 	if ipRepSvc != nil && r.ClientIP != nil {
 		dec := ipRepSvc.Check(r.ClientIP)
@@ -192,6 +193,198 @@ func PreScreen(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver)
 		}
 	}
 	return false
+}
+
+func matchMaliciousToolUA(ua string) (string, string, bool) {
+	if ua == "" {
+		return "", "", false
+	}
+	if !containsKnownMaliciousToolUANeedle(ua) {
+		return "", "", false
+	}
+	for _, p := range maliciousToolUA {
+		if !maliciousToolUAContainsAny(ua, p.needles) {
+			continue
+		}
+		if p.re.MatchString(ua) {
+			return p.name, p.ruleID, true
+		}
+	}
+	return "", "", false
+}
+
+func maliciousToolUAContainsAny(ua string, needles []string) bool {
+	for _, needle := range needles {
+		if containsASCIIFold(ua, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsKnownMaliciousToolUANeedle(ua string) bool {
+	for i := 0; i < len(ua); i++ {
+		switch toASCIILower(ua[i]) {
+		case 'a':
+			if hasASCIIFoldPrefixAt(ua, i, "acunetix") ||
+				hasASCIIFoldPrefixAt(ua, i, "arachni") {
+				return true
+			}
+		case 'b':
+			if hasASCIIFoldPrefixAt(ua, i, "burpsuite") ||
+				hasASCIIFoldPrefixAt(ua, i, "burp suite") ||
+				hasASCIIFoldPrefixAt(ua, i, "beautifulsoup") ||
+				hasASCIIFoldPrefixAt(ua, i, "beef") {
+				return true
+			}
+		case 'c':
+			if hasASCIIFoldPrefixAt(ua, i, "crawler4j") ||
+				hasASCIIFoldPrefixAt(ua, i, "commix") ||
+				hasASCIIFoldPrefixAt(ua, i, "curl") ||
+				hasASCIIFoldPrefixAt(ua, i, "censys") {
+				return true
+			}
+		case 'd':
+			if hasASCIIFoldPrefixAt(ua, i, "dirbuster") ||
+				hasASCIIFoldPrefixAt(ua, i, "droopescan") {
+				return true
+			}
+		case 'f':
+			if hasASCIIFoldPrefixAt(ua, i, "ffuf") ||
+				hasASCIIFoldPrefixAt(ua, i, "feroxbuster") {
+				return true
+			}
+		case 'g':
+			if hasASCIIFoldPrefixAt(ua, i, "gobuster") ||
+				hasASCIIFoldPrefixAt(ua, i, "go-http-client") {
+				return true
+			}
+		case 'h':
+			if hasASCIIFoldPrefixAt(ua, i, "havij") ||
+				hasASCIIFoldPrefixAt(ua, i, "hydra") ||
+				hasASCIIFoldPrefixAt(ua, i, "httpie") {
+				return true
+			}
+		case 'i':
+			if hasASCIIFoldPrefixAt(ua, i, "insomnia") {
+				return true
+			}
+		case 'j':
+			if hasASCIIFoldPrefixAt(ua, i, "joomscan") {
+				return true
+			}
+		case 'l':
+			if hasASCIIFoldPrefixAt(ua, i, "libwww-perl") ||
+				hasASCIIFoldPrefixAt(ua, i, "lwp-") {
+				return true
+			}
+		case 'm':
+			if hasASCIIFoldPrefixAt(ua, i, "masscan") ||
+				hasASCIIFoldPrefixAt(ua, i, "metasploit") ||
+				hasASCIIFoldPrefixAt(ua, i, "medusa") ||
+				hasASCIIFoldPrefixAt(ua, i, "msf") {
+				return true
+			}
+		case 'n':
+			if hasASCIIFoldPrefixAt(ua, i, "nikto") ||
+				hasASCIIFoldPrefixAt(ua, i, "nmap") ||
+				hasASCIIFoldPrefixAt(ua, i, "nessus") ||
+				hasASCIIFoldPrefixAt(ua, i, "nuclei") ||
+				hasASCIIFoldPrefixAt(ua, i, "netsparker") {
+				return true
+			}
+		case 'o':
+			if hasASCIIFoldPrefixAt(ua, i, "openvas") {
+				return true
+			}
+		case 'p':
+			if hasASCIIFoldPrefixAt(ua, i, "pangolin") ||
+				hasASCIIFoldPrefixAt(ua, i, "patator") ||
+				hasASCIIFoldPrefixAt(ua, i, "python-requests") ||
+				hasASCIIFoldPrefixAt(ua, i, "python-urllib") ||
+				hasASCIIFoldPrefixAt(ua, i, "postman") {
+				return true
+			}
+		case 'q':
+			if hasASCIIFoldPrefixAt(ua, i, "qualys") {
+				return true
+			}
+		case 's':
+			if hasASCIIFoldPrefixAt(ua, i, "sqlmap") ||
+				hasASCIIFoldPrefixAt(ua, i, "shodan") ||
+				hasASCIIFoldPrefixAt(ua, i, "scrapy") ||
+				hasASCIIFoldPrefixAt(ua, i, "selenium") ||
+				hasASCIIFoldPrefixAt(ua, i, "skipfish") {
+				return true
+			}
+		case 't':
+			if hasASCIIFoldPrefixAt(ua, i, "thc-hydra") {
+				return true
+			}
+		case 'w':
+			if hasASCIIFoldPrefixAt(ua, i, "wfuzz") ||
+				hasASCIIFoldPrefixAt(ua, i, "w3af") ||
+				hasASCIIFoldPrefixAt(ua, i, "wpscan") ||
+				hasASCIIFoldPrefixAt(ua, i, "wget") {
+				return true
+			}
+		case 'x':
+			if hasASCIIFoldPrefixAt(ua, i, "xspider") ||
+				hasASCIIFoldPrefixAt(ua, i, "xsser") {
+				return true
+			}
+		case 'z':
+			if hasASCIIFoldPrefixAt(ua, i, "zmap") ||
+				hasASCIIFoldPrefixAt(ua, i, "zgrab") ||
+				hasASCIIFoldPrefixAt(ua, i, "zoomeye") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsASCIIFold(value, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(value) < len(needle) {
+		return false
+	}
+	first := toASCIILower(needle[0])
+	limit := len(value) - len(needle)
+	for i := 0; i <= limit; i++ {
+		if toASCIILower(value[i]) != first {
+			continue
+		}
+		if hasASCIIFoldAt(value, needle, i) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasASCIIFoldPrefixAt(value string, offset int, needle string) bool {
+	if len(value)-offset < len(needle) {
+		return false
+	}
+	return hasASCIIFoldAt(value, needle, offset)
+}
+
+func hasASCIIFoldAt(value, needle string, offset int) bool {
+	for i := 0; i < len(needle); i++ {
+		if toASCIILower(value[offset+i]) != toASCIILower(needle[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func toASCIILower(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
 }
 
 func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver) BotScore {
@@ -238,6 +431,9 @@ func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver)
 	}
 	if r.TLS.TLSVersion != "" {
 		bs.Details["tls_version"] = r.TLS.TLSVersion
+	}
+	if r.TLS.SNI != "" {
+		bs.Details["tls_sni"] = r.TLS.SNI
 	}
 	if len(r.TLS.ALPN) > 0 {
 		bs.Details["tls_alpn"] = strings.Join(r.TLS.ALPN, ",")
@@ -332,10 +528,8 @@ func CheckBotWithLevel(r BotRequest, level string) BotVerdict {
 			return BotVerdict{IsBot: true, Score: 0, Category: "good", Reason: "known good bot", RuleID: "bot:good"}
 		}
 	}
-	for _, p := range maliciousToolUA {
-		if p.re.MatchString(ua) {
-			return BotVerdict{IsBot: true, Score: 95, Category: "malicious", Reason: p.name, RuleID: p.ruleID}
-		}
+	if name, ruleID, ok := matchMaliciousToolUA(ua); ok {
+		return BotVerdict{IsBot: true, Score: 95, Category: "malicious", Reason: name, RuleID: ruleID}
 	}
 	score, reasons := fingerprintScore(r)
 	category := "human"

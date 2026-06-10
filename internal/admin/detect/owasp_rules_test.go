@@ -92,3 +92,69 @@ func TestUpdateSingleOWASPRuleClearsActionOverride(t *testing.T) {
 		t.Fatalf("expected redirect_to override to be cleared, got %#v", override)
 	}
 }
+
+func TestUpdateSingleOWASPRuleSavesSensitivityOverride(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	ruleID := firstOWASPRuleID(t)
+	handler := UpdateSingleOWASPRule(repo, func() error { return nil })
+
+	invokeOWASPUpdate(t, handler, ruleID, map[string]any{
+		"sensitivity": "strict",
+	})
+
+	cfg := shared.LoadProtectionConfig(repo)
+	override := cfg.GetOWASPRulesConfig()[ruleID].(map[string]interface{})
+	if override["sensitivity"] != "strict" {
+		t.Fatalf("expected sensitivity override to be set, got %#v", override)
+	}
+
+	var req protocol.Request
+	req.SetMethod("GET")
+	req.SetRequestURI("/api/v1/owasp-rules")
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ListOWASPRulesFromRegistry(repo)(context.Background(), ctx)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var resp struct {
+		Items []owaspRuleView `json:"items"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	for _, item := range resp.Items {
+		if item.ID == ruleID {
+			if item.Sensitivity != "strict" {
+				t.Fatalf("response sensitivity = %q want strict", item.Sensitivity)
+			}
+			return
+		}
+	}
+	t.Fatalf("rule %s not found in response", ruleID)
+}
+
+func TestUpdateSingleOWASPRuleRejectsEnabledRedirectWithoutTarget(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	ruleID := firstOWASPRuleID(t)
+	handler := UpdateSingleOWASPRule(repo, func() error { return nil })
+
+	var req protocol.Request
+	req.SetMethod("POST")
+	req.SetRequestURI("/api/v1/owasp-rules/" + ruleID + "/update")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBody([]byte(`{"action":"redirect"}`))
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "id", Value: ruleID}}
+	handler(context.Background(), ctx)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	invokeOWASPUpdate(t, handler, ruleID, map[string]any{
+		"enabled":     false,
+		"action":      "redirect",
+		"redirect_to": "",
+	})
+}

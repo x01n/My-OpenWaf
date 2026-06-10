@@ -110,6 +110,14 @@ func TestCacheKeyDeterministic(t *testing.T) {
 	}
 }
 
+func BenchmarkCacheKey(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if CacheKey("GET", ":80|1|127.0.0.1", "/favicon.ico", "") == "" {
+			b.Fatal("empty key")
+		}
+	}
+}
+
 func TestResponseCacheRoundtripHeaders(t *testing.T) {
 	rc := NewResponseCache(10, 60)
 	defer rc.Close()

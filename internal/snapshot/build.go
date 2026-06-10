@@ -3,6 +3,8 @@ package snapshot
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -50,7 +52,10 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	// Load settings from SystemSettings (used for listener defaults, CC rules and mergeProtection).
 	networkDefaults := loadNetworkDefaults(db)
 	tlsDefaults := loadTLSDefaults(db)
-	protection := loadProtectionConfig(db)
+	protection, err := loadProtectionConfig(db)
+	if err != nil {
+		return nil, err
+	}
 	ccRules := compileCCRules(protection)
 	rulesByPolicy := make(map[uint][]store.Rule)
 	for _, r := range rules {
@@ -550,10 +555,18 @@ func normalizeCCAction(action string) store.RuleAction {
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "captcha", "challenge":
 		return store.ActionChallenge
+	case "captcha_challenge":
+		return store.ActionCaptchaChallenge
+	case "shield_challenge":
+		return store.ActionShieldChallenge
+	case "chain_challenge":
+		return store.ActionChainChallenge
 	case "block", "intercept":
 		return store.ActionIntercept
 	case "drop":
 		return store.ActionDrop
+	case "rate_limit":
+		return store.ActionRateLimit
 	case "observe", "log_only":
 		return store.ActionObserve
 	default:
@@ -702,14 +715,17 @@ func loadTLSDefaults(db *gorm.DB) TLSDefaults {
 	return LoadTLSDefaults(setting.Value)
 }
 
-func loadProtectionConfig(db *gorm.DB) store.ProtectionConfig {
+func loadProtectionConfig(db *gorm.DB) (store.ProtectionConfig, error) {
 	var setting store.SystemSettings
 	if err := db.Where("key = ?", "protection").First(&setting).Error; err != nil {
-		return store.DefaultProtectionConfig()
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return store.DefaultProtectionConfig(), nil
+		}
+		return store.ProtectionConfig{}, fmt.Errorf("load protection config: %w", err)
 	}
 	cfg := store.DefaultProtectionConfig()
 	if err := json.Unmarshal([]byte(setting.Value), &cfg); err != nil {
-		return store.DefaultProtectionConfig()
+		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
 	}
-	return cfg
+	return cfg, nil
 }

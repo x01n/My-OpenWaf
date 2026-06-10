@@ -39,27 +39,28 @@ func TestUpdateSiteClearsProtectionFieldsWhenNullableOverrideInherits(t *testing
 	repo := newSiteRepoForTest(t)
 	enabled := true
 	item := store.Site{
-		Host:               "inherit.example",
-		UpstreamURLs:       "http://127.0.0.1:8080",
-		Bind:               ":8080",
-		Network:            "tcp",
-		Enabled:            true,
-		OWASPEnabled:       &enabled,
-		OWASPSensitivity:   "strict",
-		OWASPAction:        "drop",
-		CVEEnabled:         &enabled,
-		CVEAction:          "drop",
-		RateLimitEnabled:   &enabled,
-		RateLimitWindow:    1,
-		RateLimitMax:       2,
-		RateLimitAction:    "drop",
-		BotProtectionLevel: "medium",
+		Host:                 "inherit.example",
+		UpstreamURLs:         "http://127.0.0.1:8080",
+		Bind:                 ":8080",
+		Network:              "tcp",
+		Enabled:              true,
+		BotProtectionEnabled: &enabled,
+		OWASPEnabled:         &enabled,
+		OWASPSensitivity:     "strict",
+		OWASPAction:          "drop",
+		CVEEnabled:           &enabled,
+		CVEAction:            "drop",
+		RateLimitEnabled:     &enabled,
+		RateLimitWindow:      1,
+		RateLimitMax:         2,
+		RateLimitAction:      "drop",
+		BotProtectionLevel:   "medium",
 	}
 	if err := repo.Create(&item); err != nil {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	body := []byte(`{"owasp_enabled":null,"cve_enabled":null,"rate_limit_enabled":null}`)
+	body := []byte(`{"bot_protection_enabled":null,"owasp_enabled":null,"cve_enabled":null,"rate_limit_enabled":null}`)
 	ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), item.ID, body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
@@ -77,6 +78,82 @@ func TestUpdateSiteClearsProtectionFieldsWhenNullableOverrideInherits(t *testing
 	}
 	if loaded.RateLimitEnabled != nil || loaded.RateLimitWindow != 0 || loaded.RateLimitMax != 0 || loaded.RateLimitAction != "" {
 		t.Fatalf("rate limit inherit should clear site fields, got %#v", loaded)
+	}
+	if loaded.BotProtectionEnabled != nil || loaded.BotProtectionLevel != "" {
+		t.Fatalf("bot inherit should clear site fields, got %#v", loaded)
+	}
+}
+
+func TestUpdateSiteSavesOWASPCVEOverrideActions(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	item := store.Site{
+		Host:         "override.example",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Bind:         ":8080",
+		Network:      "tcp",
+		Enabled:      true,
+	}
+	if err := repo.Create(&item); err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	body := []byte(`{"owasp_enabled":true,"owasp_sensitivity":"strict","owasp_action":"drop","cve_enabled":true,"cve_action":"captcha_challenge"}`)
+	ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), item.ID, body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	loaded, err := repo.Get(item.ID)
+	if err != nil {
+		t.Fatalf("load site: %v", err)
+	}
+	requireBoolPtr(t, "OWASPEnabled", loaded.OWASPEnabled, true)
+	if loaded.OWASPSensitivity != "strict" || loaded.OWASPAction != "drop" {
+		t.Fatalf("OWASP override mismatch, got %#v", loaded)
+	}
+	requireBoolPtr(t, "CVEEnabled", loaded.CVEEnabled, true)
+	if loaded.CVEAction != "captcha_challenge" {
+		t.Fatalf("CVE action = %q, want %q", loaded.CVEAction, "captcha_challenge")
+	}
+}
+
+func TestUpdateSiteRejectsRedirectWithoutTargetField(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	item := store.Site{
+		Host:         "redirect.example",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Bind:         ":8080",
+		Network:      "tcp",
+		Enabled:      true,
+	}
+	if err := repo.Create(&item); err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	body := []byte(`{"owasp_enabled":true,"owasp_action":"redirect"}`)
+	ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), item.ID, body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+}
+
+func TestUpdateSiteRejectsUnsupportedAntiReplayAction(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	item := store.Site{
+		Host:         "anti-replay.example",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Bind:         ":8080",
+		Network:      "tcp",
+		Enabled:      true,
+	}
+	if err := repo.Create(&item); err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	body := []byte(`{"anti_replay_action":"rate_limit"}`)
+	ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), item.ID, body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 }
 

@@ -60,8 +60,26 @@ type OWASPHit struct {
 // bodyTargets are pre-extracted values from the request body (form values, JSON leaves).
 // The path parameter is also used for context: internal API paths get reduced scanning.
 func CheckOWASP(sensitivity string, path, query string, headers map[string]string, bodyTargets []string, categorySensitivity ...map[string]string) []OWASPHit {
+	defaultLevel := normalizeSensitivityLevel(sensitivity)
+	defaultThreshold := sensitivityThresholdForNormalizedLevel(defaultLevel)
+	defaultEnabled := defaultLevel != "off"
+	var categorySensitivityMap map[string]string
+	if len(categorySensitivity) > 0 {
+		categorySensitivityMap = categorySensitivity[0]
+	}
 	categoryThreshold := func(category OWASPCategory) (int, bool) {
-		return CategoryThreshold(sensitivity, category, categorySensitivity...)
+		if categorySensitivityMap != nil {
+			if level := normalizeSensitivityLevel(categorySensitivityMap[string(category)]); level != "" {
+				if level == "off" {
+					return 0, false
+				}
+				return sensitivityThresholdForNormalizedLevel(level), true
+			}
+		}
+		if !defaultEnabled {
+			return 0, false
+		}
+		return defaultThreshold, true
 	}
 
 	sqliThreshold, sqliEnabled := categoryThreshold(CatSQLi)
@@ -133,19 +151,32 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 	// (after normalizeWithDecode is computed once per target) to avoid
 	// running it twice per request.
 
-	targets := collectTargets(path, query, headers)
-	bodyStartIdx := len(targets)
-	targets = append(targets, bodyTargets...)
-	for idx, raw := range targets {
+	var stopHits []OWASPHit
+	type unicodeBase64Target struct {
+		raw              string
+		queryPlusAsSpace bool
+	}
+	var unicodeBase64Targets []unicodeBase64Target
+	forEachOWASPTarget(path, query, headers, bodyTargets, func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool {
 		if raw == "" {
-			continue
+			return true
+		}
+		if !isBodyTarget {
+			if raw == path && isCleanPathTarget(lowerPath) {
+				return true
+			}
+			if raw == query && isCleanPlainQueryTarget(raw) {
+				return true
+			}
+		}
+		if len(raw) >= 30 && shouldScanUnicodeBase64Target(raw) {
+			unicodeBase64Targets = append(unicodeBase64Targets, unicodeBase64Target{raw: raw, queryPlusAsSpace: queryPlusAsSpace})
 		}
 		if isCleanTarget(raw) {
-			continue
+			return true
 		}
-		isBodyTarget := idx >= bodyStartIdx
 
-		normalized := normalizeWithDecode(raw)
+		normalized := normalizeWithDecodeTarget(raw, queryPlusAsSpace)
 		if len(normalized) > maxTargetLen {
 			tail := normalized[len(normalized)-maxTargetLen:]
 			normalized = normalized[:maxTargetLen] + " " + tail
@@ -155,13 +186,15 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		// Folded into the main loop so we don't recompute normalizeWithDecode.
 		if protoEnabled && isBodyTarget {
 			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
-				return []OWASPHit{{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}}
+				stopHits = []OWASPHit{{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}}
+				return false
 			}
 		}
 
 		if deserialEnabled && (strings.Contains(raw, "%ac%ed") || strings.Contains(raw, "%AC%ED") ||
 			strings.Contains(raw, "aced0005") || strings.Contains(raw, "ACED0005")) {
-			return []OWASPHit{{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java serialization magic bytes (URL-encoded)"}}
+			stopHits = []OWASPHit{{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java serialization magic bytes (URL-encoded)"}}
+			return false
 		}
 
 		if crlfEnabled && (strings.Contains(raw, "%0d") || strings.Contains(raw, "%0D") ||
@@ -174,55 +207,62 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 			lower := strings.ToLower(urlDec)
 			if hit, ok := checkCRLF(lower, crlfThreshold); ok {
 				if !isCRLFFalsePositive(lower, hit.RuleID) {
-					return []OWASPHit{hit}
+					stopHits = []OWASPHit{hit}
+					return false
 				}
 			}
 		}
 
 		if !hasSuspiciousContent(normalized) {
-			continue
+			return true
 		}
 		if sqliEnabled && !(isBodyTarget && skipBodySQLi) {
 			if hit, ok := nextSQLiHit(normalized, sqliThreshold); ok {
-				return []OWASPHit{hit}
+				stopHits = []OWASPHit{hit}
+				return false
 			}
 		}
 		if xssEnabled {
 			if hit, ok := nextXSSHit(normalized, xssThreshold); ok {
 				if !isKnownTelemetryXSSFalsePositive(path, normalized, hit.RuleID, isBodyTarget) {
-					return []OWASPHit{hit}
+					stopHits = []OWASPHit{hit}
+					return false
 				}
 			}
 		}
 		if cmdEnabled && !(isBodyTarget && skipBodyCmd) {
 			if hit, ok := checkCmdInjection(normalized, cmdThreshold); ok {
 				if isKnownTelemetryCmdFalsePositive(path, normalized, hit.RuleID, isBodyTarget) {
-					continue
+					return true
 				}
 				if !isCmdInjectionFalsePositive(normalized, hit.RuleID) {
-					return []OWASPHit{hit}
+					stopHits = []OWASPHit{hit}
+					return false
 				}
 			}
 		}
 		if webshellEnabled && !(isBodyTarget && skipBodyWebshell) {
 			if hit, ok := checkWebshell(normalized, webshellThreshold); ok {
 				if !isWebshellFalsePositive(normalized, hit.RuleID) {
-					return []OWASPHit{hit}
+					stopHits = []OWASPHit{hit}
+					return false
 				}
 			}
 		}
 		if revShellEnabled {
 			if hit, ok := checkRevShell(normalized, revShellThreshold); ok {
-				return []OWASPHit{hit}
+				stopHits = []OWASPHit{hit}
+				return false
 			}
 		}
 		if pathTravEnabled {
 			if hit, ok := checkPathTraversal(normalized, pathTravThreshold); ok {
 				if isKnownTelemetryPathTravFalsePositive(path, normalized, hit.RuleID, isBodyTarget) {
-					continue
+					return true
 				}
 				if pathTravThreshold <= 2 || !isPathTravFalsePositive(normalized, hit.RuleID) {
-					return []OWASPHit{hit}
+					stopHits = []OWASPHit{hit}
+					return false
 				}
 			}
 		}
@@ -235,7 +275,8 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		}
 		if xxeEnabled {
 			if hit, ok := checkXXE(normalized, xxeThreshold); ok {
-				return []OWASPHit{hit}
+				stopHits = []OWASPHit{hit}
+				return false
 			}
 		}
 		if ldapEnabled {
@@ -252,56 +293,67 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		}
 		if templateEnabled {
 			if hit, ok := checkTemplateInjection(normalized, templateThreshold); ok {
-				return []OWASPHit{hit}
+				stopHits = []OWASPHit{hit}
+				return false
 			}
 		}
 		if jndiEnabled {
 			if hit, ok := checkJNDI(normalized, jndiThreshold); ok {
-				return []OWASPHit{hit}
+				stopHits = []OWASPHit{hit}
+				return false
 			}
 		}
 		if crlfEnabled {
 			if hit, ok := checkCRLF(normalized, crlfThreshold); ok {
 				if !isCRLFFalsePositive(normalized, hit.RuleID) {
-					return []OWASPHit{hit}
+					stopHits = []OWASPHit{hit}
+					return false
 				}
 			}
 		}
 		if exprLangEnabled {
 			if hit, ok := checkExprLang(normalized, exprLangThreshold); ok {
 				if !isELFalsePositive(normalized, hit.RuleID) {
-					return []OWASPHit{hit}
+					stopHits = []OWASPHit{hit}
+					return false
 				}
 			}
 		}
 		if deserialEnabled {
 			if hit, ok := checkDeserialization(normalized, deserialThreshold); ok {
 				if !isDeserFalsePositive(normalized, hit.RuleID) {
-					return []OWASPHit{hit}
+					stopHits = []OWASPHit{hit}
+					return false
 				}
 			}
 		}
 		if graphqlEnabled {
 			if hit, ok := checkGraphQLi(normalized, graphqlThreshold); ok {
-				return []OWASPHit{hit}
+				stopHits = []OWASPHit{hit}
+				return false
 			}
 		}
 		if len(hits) > 0 {
-			return hits
+			stopHits = hits
+			return false
 		}
+		return true
+	})
+	if stopHits != nil {
+		return stopHits
 	}
 
-	// Second pass: deep base64-in-unicode-escape scan reuses the targets slice
-	// from the first pass — the input (path, query, headers, bodyTargets) is
-	// identical, so calling collectTargets again would be wasted work.
-	allTargets := targets
-	for _, raw := range allTargets {
-		if len(raw) < 30 {
-			continue
-		}
+	// Second pass: deep base64-in-unicode-escape scan only materializes the
+	// subset that can reach this path, keeping the clean request path allocation-free.
+	var deepHit *OWASPHit
+	for _, target := range unicodeBase64Targets {
+		raw := target.raw
 		urlDec := raw
-		if d, err := url.QueryUnescape(raw); err == nil {
-			urlDec = d
+		if strings.Contains(raw, "%") || (target.queryPlusAsSpace && strings.Contains(raw, "+")) {
+			d, err := unescapeURLComponent(raw, target.queryPlusAsSpace)
+			if err == nil {
+				urlDec = d
+			}
 		}
 		if strings.Count(urlDec, "\\u00") < 5 {
 			continue
@@ -310,33 +362,44 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		if jsDec == urlDec {
 			continue
 		}
-		for _, tok := range reBase64Token.FindAllString(jsDec, 20) {
+		forEachBase64TokenIndex(jsDec, 20, func(start, end int) bool {
+			tok := jsDec[start:end]
 			if decoded := decodeBase64IfSuspicious(tok); decoded != "" {
 				decodedNorm := normalize(decoded)
 				if sqliEnabled {
 					if hit, ok := nextSQLiHit(decodedNorm, sqliThreshold); ok {
-						return []OWASPHit{hit}
+						deepHit = &hit
+						return false
 					}
 				}
 				if xssEnabled {
 					if hit, ok := nextXSSHit(decodedNorm, xssThreshold); ok {
 						if !isKnownTelemetryXSSFalsePositive(path, decodedNorm, hit.RuleID, true) {
-							return []OWASPHit{hit}
+							deepHit = &hit
+							return false
 						}
 					}
 				}
 				if cmdEnabled {
 					if hit, ok := checkCmdInjection(decodedNorm, cmdThreshold); ok {
 						if isKnownTelemetryCmdFalsePositive(path, decodedNorm, hit.RuleID, true) {
-							continue
+							return true
 						}
 						if !isCmdInjectionFalsePositive(decodedNorm, hit.RuleID) {
-							return []OWASPHit{hit}
+							deepHit = &hit
+							return false
 						}
 					}
 				}
 			}
+			return true
+		})
+		if deepHit != nil {
+			break
 		}
+	}
+	if deepHit != nil {
+		return []OWASPHit{*deepHit}
 	}
 
 	if protoEnabled {
@@ -355,6 +418,25 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		}
 	}
 	return hits
+}
+
+func shouldScanUnicodeBase64Target(raw string) bool {
+	unicodeEscapes := 0
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '%':
+			return true
+		case '\\':
+			if i+3 < len(raw) && raw[i+1] == 'u' && raw[i+2] == '0' && raw[i+3] == '0' {
+				unicodeEscapes++
+				if unicodeEscapes >= 5 {
+					return true
+				}
+				i += 3
+			}
+		}
+	}
+	return false
 }
 
 // CheckFileUpload inspects filename/content-type for dangerous uploads.
@@ -584,7 +666,11 @@ func CategoryThreshold(defaultSensitivity string, category OWASPCategory, catego
 }
 
 func sensitivityThreshold(s string) int {
-	switch normalizeSensitivityLevel(s) {
+	return sensitivityThresholdForNormalizedLevel(normalizeSensitivityLevel(s))
+}
+
+func sensitivityThresholdForNormalizedLevel(level string) int {
+	switch level {
 	case "low":
 		return 7
 	case "high":
@@ -638,8 +724,8 @@ var skipHeaders = map[string]bool{
 	"x-client-data": true,
 }
 
-func collectTargets(path, query string, headers map[string]string) []string {
-	out := make([]string, 0, 2+len(headers))
+func collectTargets(path, query string, headers map[string]string, extraCapacity int) []string {
+	out := make([]string, 0, 2+len(headers)+extraCapacity)
 	out = append(out, path, query)
 	if path != "" && !strings.HasPrefix(path, "/") {
 		out = append(out, "/"+path)
@@ -648,7 +734,7 @@ func collectTargets(path, query string, headers map[string]string) []string {
 		out = append(out, extractQueryValues(query)...)
 	}
 	for k, v := range headers {
-		lk := strings.ToLower(k)
+		lk := lowerHeaderName(k)
 		if lk != k {
 			if lowerValue, ok := headers[lk]; ok && lowerValue == v {
 				continue
@@ -667,13 +753,574 @@ func collectTargets(path, query string, headers map[string]string) []string {
 		if skipHeaders[lk] {
 			continue
 		}
+		if shouldSkipHeaderTarget(lk, v) {
+			continue
+		}
 		out = append(out, v)
 	}
 	return out
 }
 
+func forEachOWASPTarget(path, query string, headers map[string]string, bodyTargets []string, fn func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool) bool {
+	if !fn(path, false, true) || !fn(query, false, true) {
+		return false
+	}
+	if path != "" && !strings.HasPrefix(path, "/") {
+		if !fn("/"+path, false, true) {
+			return false
+		}
+	}
+	if query != "" && !forEachDecodedQueryValue(query, func(value string) bool {
+		return fn(value, false, false)
+	}) {
+		return false
+	}
+	for k, v := range headers {
+		lk := lowerHeaderName(k)
+		if lk != k {
+			if lowerValue, ok := headers[lk]; ok && lowerValue == v {
+				continue
+			}
+		}
+		if lk == "cookie" {
+			if !forEachCookieValue(v, func(value string) bool {
+				return fn(value, false, true)
+			}) {
+				return false
+			}
+			continue
+		}
+		if lk == "referer" {
+			if !forEachRefererTarget(v, func(value string, queryPlusAsSpace bool) bool {
+				return fn(value, false, queryPlusAsSpace)
+			}) {
+				return false
+			}
+			continue
+		}
+		if skipHeaders[lk] {
+			continue
+		}
+		if shouldSkipHeaderTarget(lk, v) {
+			continue
+		}
+		if !fn(v, false, false) {
+			return false
+		}
+	}
+	for _, raw := range bodyTargets {
+		if !fn(raw, true, true) {
+			return false
+		}
+	}
+	return true
+}
+
+const commonCleanBrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+func shouldSkipHeaderTarget(name, value string) bool {
+	switch name {
+	case "user-agent":
+		if value == commonCleanBrowserUserAgent {
+			return true
+		}
+		return isCleanBrowserUserAgent(value)
+	case "accept":
+		if isCommonCleanAcceptHeader(value) {
+			return true
+		}
+		return isCleanAcceptHeader(value)
+	default:
+		return false
+	}
+}
+
+func isCommonCleanAcceptHeader(value string) bool {
+	switch value {
+	case "text/html",
+		"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"application/json",
+		"application/vnd.api+json;q=0.8,application/ld+json":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCleanBrowserUserAgent(value string) bool {
+	if len(value) == 0 || len(value) > 512 {
+		return false
+	}
+	hasBrowserToken := false
+	wordStart := -1
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if b >= 0x80 {
+			return false
+		}
+		switch b {
+		case '\r', '\n', '\x00', '%', '\\', '<', '>', '\'', '"', '`', '|', '$', '{', '}', '[', ']', '&', '#', '+', '=':
+			return false
+		}
+		if isASCIILetterOrDigit(b) {
+			if wordStart < 0 {
+				wordStart = i
+			}
+		} else if wordStart >= 0 {
+			if isShellCommandWordASCIIFold(value[wordStart:i]) {
+				return false
+			}
+			wordStart = -1
+		}
+		lb := lowerASCIIByte(b)
+		if !hasBrowserToken && hasCleanBrowserTokenAt(value, i, lb) {
+			hasBrowserToken = true
+		}
+		if hasCleanHeaderDangerousNeedleAt(value, i, lb) {
+			return false
+		}
+	}
+	if wordStart >= 0 && isShellCommandWordASCIIFold(value[wordStart:]) {
+		return false
+	}
+	return hasBrowserToken
+}
+
+func isCleanAcceptHeader(value string) bool {
+	if len(value) == 0 || len(value) > 512 {
+		return false
+	}
+	wordStart := -1
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if b >= 0x80 {
+			return false
+		}
+		switch b {
+		case '\r', '\n', '\x00', '%', '\\', '<', '>', '\'', '"', '`', '|', '$', '{', '}', '[', ']', '&', '#', ':', '(', ')':
+			return false
+		}
+		if isASCIILetterOrDigit(b) {
+			if wordStart < 0 {
+				wordStart = i
+			}
+		} else if wordStart >= 0 {
+			if isShellCommandWordASCIIFold(value[wordStart:i]) {
+				return false
+			}
+			wordStart = -1
+		}
+		if hasCleanHeaderDangerousNeedleAt(value, i, lowerASCIIByte(b)) {
+			return false
+		}
+	}
+	if wordStart >= 0 && isShellCommandWordASCIIFold(value[wordStart:]) {
+		return false
+	}
+	return isAcceptMediaList(value)
+}
+
+func hasCleanBrowserTokenAt(s string, i int, first byte) bool {
+	switch first {
+	case 'a':
+		return hasASCIIFoldAt(s, i, "applewebkit/")
+	case 'c':
+		return hasASCIIFoldAt(s, i, "chrome/")
+	case 'e':
+		return hasASCIIFoldAt(s, i, "edge/") || hasASCIIFoldAt(s, i, "edg/")
+	case 'f':
+		return hasASCIIFoldAt(s, i, "firefox/")
+	case 'm':
+		return hasASCIIFoldAt(s, i, "mozilla/") || hasASCIIFoldAt(s, i, "msie ")
+	case 's':
+		return hasASCIIFoldAt(s, i, "safari/")
+	case 't':
+		return hasASCIIFoldAt(s, i, "trident/")
+	default:
+		return false
+	}
+}
+
+func hasCleanHeaderDangerousNeedleAt(s string, i int, first byte) bool {
+	switch first {
+	case '.':
+		return hasASCIIFoldAt(s, i, "../") ||
+			hasASCIIFoldAt(s, i, "..\\") ||
+			hasASCIIFoldAt(s, i, ".nip.io") ||
+			hasASCIIFoldAt(s, i, ".xip.io") ||
+			hasASCIIFoldAt(s, i, ".sslip.io")
+	case '/':
+		return hasASCIIFoldAt(s, i, "/bin/") || hasASCIIFoldAt(s, i, "/proc/")
+	case ':':
+		return hasASCIIFoldAt(s, i, "://") ||
+			hasASCIIFoldAt(s, i, "::ffff:") ||
+			hasASCIIFoldAt(s, i, "::1")
+	case ')':
+		return hasASCIIFoldAt(s, i, ")(")
+	case '@':
+		return hasASCIIFoldAt(s, i, "@java.")
+	case '_':
+		return hasASCIIFoldAt(s, i, "__schema") || hasASCIIFoldAt(s, i, "__type")
+	case '0':
+		return hasASCIIFoldAt(s, i, "0x7f")
+	case '1':
+		return hasASCIIFoldAt(s, i, "169.254.169.254") ||
+			hasASCIIFoldAt(s, i, "100.100.100.200") ||
+			hasASCIIFoldAt(s, i, "127.0.")
+	case 'a':
+		return hasASCIIFoldAt(s, i, "alter") ||
+			hasASCIIFoldAt(s, i, "and1=1") ||
+			hasASCIIFoldAt(s, i, "alert(") ||
+			hasASCIIFoldAt(s, i, "assert(") ||
+			hasASCIIFoldAt(s, i, "aced0005")
+	case 'b':
+		return hasASCIIFoldAt(s, i, "benchmark") || hasASCIIFoldAt(s, i, "boot.ini")
+	case 'c':
+		return hasASCIIFoldAt(s, i, "concat(") ||
+			hasASCIIFoldAt(s, i, "char(") ||
+			hasASCIIFoldAt(s, i, "chr(") ||
+			hasASCIIFoldAt(s, i, "constructor.constructor") ||
+			hasASCIIFoldAt(s, i, "confirm(") ||
+			hasASCIIFoldAt(s, i, "cmd.exe") ||
+			hasASCIIFoldAt(s, i, "curl ")
+	case 'd':
+		return hasASCIIFoldAt(s, i, "delete") ||
+			hasASCIIFoldAt(s, i, "drop") ||
+			hasASCIIFoldAt(s, i, "dumpfile") ||
+			hasASCIIFoldAt(s, i, "data:text/html") ||
+			hasASCIIFoldAt(s, i, "document.")
+	case 'e':
+		return hasASCIIFoldAt(s, i, "extractvalue") ||
+			hasASCIIFoldAt(s, i, "eval(") ||
+			hasASCIIFoldAt(s, i, "exec(") ||
+			hasASCIIFoldAt(s, i, "etc/")
+	case 'f':
+		return hasASCIIFoldAt(s, i, "fetch(") || hasASCIIFoldAt(s, i, "fromcharcode")
+	case 'g':
+		return hasASCIIFoldAt(s, i, "group_concat") ||
+			hasASCIIFoldAt(s, i, "group by") ||
+			hasASCIIFoldAt(s, i, "getclass") ||
+			hasASCIIFoldAt(s, i, "getruntime")
+	case 'i':
+		return hasASCIIFoldAt(s, i, "insert") ||
+			hasASCIIFoldAt(s, i, "information_schema") ||
+			hasASCIIFoldAt(s, i, "innerhtml")
+	case 'j':
+		return hasASCIIFoldAt(s, i, "jndi:") || hasASCIIFoldAt(s, i, "javascript:")
+	case 'l':
+		return hasASCIIFoldAt(s, i, "localhost")
+	case 'm':
+		return hasASCIIFoldAt(s, i, "metadata.google") || hasASCIIFoldAt(s, i, "meta-inf")
+	case 'n':
+		return hasASCIIFoldAt(s, i, "new java.")
+	case 'o':
+		return hasASCIIFoldAt(s, i, "outfile") ||
+			hasASCIIFoldAt(s, i, "or1=1") ||
+			hasASCIIFoldAt(s, i, "order by") ||
+			hasASCIIFoldAt(s, i, "onload") ||
+			hasASCIIFoldAt(s, i, "onerror") ||
+			hasASCIIFoldAt(s, i, "onclick") ||
+			hasASCIIFoldAt(s, i, "objectclass") ||
+			hasASCIIFoldAt(s, i, "objectinputstream")
+	case 'p':
+		return hasASCIIFoldAt(s, i, "prompt(") || hasASCIIFoldAt(s, i, "powershell.exe")
+	case 'r':
+		return hasASCIIFoldAt(s, i, "runtime.getruntime") || hasASCIIFoldAt(s, i, "ro0ab")
+	case 's':
+		return hasASCIIFoldAt(s, i, "select") ||
+			hasASCIIFoldAt(s, i, "sleep") ||
+			hasASCIIFoldAt(s, i, "substr(") ||
+			hasASCIIFoldAt(s, i, "substring(") ||
+			hasASCIIFoldAt(s, i, "system(") ||
+			hasASCIIFoldAt(s, i, "shell_exec")
+	case 't':
+		return hasASCIIFoldAt(s, i, "truncate")
+	case 'u':
+		return hasASCIIFoldAt(s, i, "union") ||
+			hasASCIIFoldAt(s, i, "update") ||
+			hasASCIIFoldAt(s, i, "updatexml") ||
+			hasASCIIFoldAt(s, i, "unix:")
+	case 'v':
+		return hasASCIIFoldAt(s, i, "vbscript:")
+	case 'w':
+		return hasASCIIFoldAt(s, i, "waitfor") ||
+			hasASCIIFoldAt(s, i, "window.") ||
+			hasASCIIFoldAt(s, i, "whoami") ||
+			hasASCIIFoldAt(s, i, "wget ") ||
+			hasASCIIFoldAt(s, i, "web-inf") ||
+			hasASCIIFoldAt(s, i, "win.ini")
+	case 'y':
+		return hasASCIIFoldAt(s, i, "ysoserial")
+	default:
+		return false
+	}
+}
+
+func isAcceptMediaList(s string) bool {
+	i := 0
+	for {
+		i = skipASCIISpaces(s, i)
+		if i >= len(s) {
+			return false
+		}
+		next, ok := consumeAcceptMediaRange(s, i)
+		if !ok {
+			return false
+		}
+		i = skipASCIISpaces(s, next)
+		for i < len(s) && s[i] == ';' {
+			i++
+			i = skipASCIISpaces(s, i)
+			next, ok = consumeAcceptParam(s, i)
+			if !ok {
+				return false
+			}
+			i = skipASCIISpaces(s, next)
+		}
+		if i >= len(s) {
+			return true
+		}
+		if s[i] != ',' {
+			return false
+		}
+		i++
+	}
+}
+
+func consumeAcceptMediaRange(s string, i int) (int, bool) {
+	next, ok := consumeAcceptTypePart(s, i)
+	if !ok || next >= len(s) || s[next] != '/' {
+		return i, false
+	}
+	next++
+	return consumeAcceptTypePart(s, next)
+}
+
+func consumeAcceptParam(s string, i int) (int, bool) {
+	next, ok := consumeAcceptToken(s, i)
+	if !ok {
+		return i, false
+	}
+	next = skipASCIISpaces(s, next)
+	if next >= len(s) || s[next] != '=' {
+		return i, false
+	}
+	next++
+	next = skipASCIISpaces(s, next)
+	return consumeAcceptToken(s, next)
+}
+
+func consumeAcceptTypePart(s string, i int) (int, bool) {
+	if i >= len(s) {
+		return i, false
+	}
+	if s[i] == '*' {
+		return i + 1, true
+	}
+	return consumeAcceptToken(s, i)
+}
+
+func consumeAcceptToken(s string, i int) (int, bool) {
+	start := i
+	for i < len(s) && isAcceptTokenByte(s[i]) {
+		i++
+	}
+	return i, i > start
+}
+
+func skipASCIISpaces(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
+}
+
+func isAcceptTokenByte(b byte) bool {
+	return isASCIILetterOrDigit(b) || b == '-' || b == '_' || b == '.' || b == '+'
+}
+
+func isASCIILetterOrDigit(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+func isShellCommandWordASCIIFold(s string) bool {
+	switch len(s) {
+	case 2:
+		return equalASCIIFold(s, "id") ||
+			equalASCIIFold(s, "ls") ||
+			equalASCIIFold(s, "ps") ||
+			equalASCIIFold(s, "nc") ||
+			equalASCIIFold(s, "sh") ||
+			equalASCIIFold(s, "rm")
+	case 3:
+		return equalASCIIFold(s, "cat") ||
+			equalASCIIFold(s, "pwd") ||
+			equalASCIIFold(s, "php") ||
+			equalASCIIFold(s, "awk") ||
+			equalASCIIFold(s, "sed")
+	case 4:
+		return equalASCIIFold(s, "wget") ||
+			equalASCIIFold(s, "curl") ||
+			equalASCIIFold(s, "bash") ||
+			equalASCIIFold(s, "echo") ||
+			equalASCIIFold(s, "ping") ||
+			equalASCIIFold(s, "perl") ||
+			equalASCIIFold(s, "ruby") ||
+			equalASCIIFold(s, "node") ||
+			equalASCIIFold(s, "java") ||
+			equalASCIIFold(s, "find") ||
+			equalASCIIFold(s, "grep")
+	case 5:
+		return equalASCIIFold(s, "uname") ||
+			equalASCIIFold(s, "touch") ||
+			equalASCIIFold(s, "chmod") ||
+			equalASCIIFold(s, "chown") ||
+			equalASCIIFold(s, "mkdir") ||
+			equalASCIIFold(s, "sleep")
+	case 6:
+		return equalASCIIFold(s, "whoami") ||
+			equalASCIIFold(s, "python") ||
+			equalASCIIFold(s, "base64")
+	case 8:
+		return equalASCIIFold(s, "nslookup") ||
+			equalASCIIFold(s, "hostname") ||
+			equalASCIIFold(s, "ifconfig") ||
+			equalASCIIFold(s, "ipconfig")
+	}
+	return false
+}
+
+func equalASCIIFold(s, lower string) bool {
+	if len(s) != len(lower) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if lowerASCIIByte(s[i]) != lower[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func hasASCIIFoldAt(s string, start int, lower string) bool {
+	if start+len(lower) > len(s) {
+		return false
+	}
+	for i := 0; i < len(lower); i++ {
+		if lowerASCIIByte(s[start+i]) != lower[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func lowerASCIIByte(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+func lowerHeaderName(name string) string {
+	switch name {
+	case "Accept":
+		return "accept"
+	case "Accept-Encoding":
+		return "accept-encoding"
+	case "Accept-Language":
+		return "accept-language"
+	case "Authorization":
+		return "authorization"
+	case "Cache-Control":
+		return "cache-control"
+	case "Connection":
+		return "connection"
+	case "Content-Length":
+		return "content-length"
+	case "Content-Type":
+		return "content-type"
+	case "Cookie":
+		return "cookie"
+	case "DNT":
+		return "dnt"
+	case "Host":
+		return "host"
+	case "If-Modified-Since":
+		return "if-modified-since"
+	case "If-None-Match":
+		return "if-none-match"
+	case "Origin":
+		return "origin"
+	case "Pragma":
+		return "pragma"
+	case "Referer":
+		return "referer"
+	case "Sec-Ch-Ua":
+		return "sec-ch-ua"
+	case "Sec-Ch-Ua-Arch":
+		return "sec-ch-ua-arch"
+	case "Sec-Ch-Ua-Bitness":
+		return "sec-ch-ua-bitness"
+	case "Sec-Ch-Ua-Full-Version":
+		return "sec-ch-ua-full-version"
+	case "Sec-Ch-Ua-Full-Version-List":
+		return "sec-ch-ua-full-version-list"
+	case "Sec-Ch-Ua-Mobile":
+		return "sec-ch-ua-mobile"
+	case "Sec-Ch-Ua-Model":
+		return "sec-ch-ua-model"
+	case "Sec-Ch-Ua-Platform":
+		return "sec-ch-ua-platform"
+	case "Sec-Ch-Ua-Platform-Version":
+		return "sec-ch-ua-platform-version"
+	case "Sec-Fetch-Dest":
+		return "sec-fetch-dest"
+	case "Sec-Fetch-Mode":
+		return "sec-fetch-mode"
+	case "Sec-Fetch-Site":
+		return "sec-fetch-site"
+	case "Sec-Fetch-User":
+		return "sec-fetch-user"
+	case "TE":
+		return "te"
+	case "Upgrade":
+		return "upgrade"
+	case "Upgrade-Insecure-Requests":
+		return "upgrade-insecure-requests"
+	case "User-Agent":
+		return "user-agent"
+	case "X-Client-Data":
+		return "x-client-data"
+	}
+	if isLowerASCIIHeaderName(name) {
+		return name
+	}
+	return strings.ToLower(name)
+}
+
+func isLowerASCIIHeaderName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		b := name[i]
+		if b >= 'A' && b <= 'Z' {
+			return false
+		}
+		if b >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func extractQueryValues(rawQuery string) []string {
 	var values []string
+	forEachDecodedQueryValue(rawQuery, func(value string) bool {
+		values = append(values, value)
+		return true
+	})
+	return values
+}
+
+func forEachDecodedQueryValue(rawQuery string, fn func(value string) bool) bool {
 	for rawQuery != "" {
 		pair := rawQuery
 		if i := strings.IndexByte(pair, '&'); i >= 0 {
@@ -693,10 +1340,12 @@ func extractQueryValues(rawQuery string) []string {
 			decoded = value
 		}
 		if shouldScanDecodedQueryValue(value, decoded) {
-			values = append(values, decoded)
+			if !fn(decoded) {
+				return false
+			}
 		}
 	}
-	return values
+	return true
 }
 
 func shouldScanDecodedQueryValue(raw, decoded string) bool {
@@ -719,24 +1368,44 @@ func shouldScanDecodedQueryValue(raw, decoded string) bool {
 // Returns the raw query string and the path (for path traversal detection),
 // but NOT the scheme+host to avoid SSRF false positives.
 func extractRefererTargets(referer string) []string {
+	var targets []string
+	forEachRefererTarget(referer, func(value string, _ bool) bool {
+		targets = append(targets, value)
+		return true
+	})
+	return targets
+}
+
+func forEachRefererTarget(referer string, fn func(value string, queryPlusAsSpace bool) bool) bool {
 	u, err := url.Parse(referer)
 	if err != nil {
-		return nil
+		return true
 	}
-	var targets []string
 	if u.RawQuery != "" {
-		targets = append(targets, u.RawQuery)
+		if !fn(u.RawQuery, true) {
+			return false
+		}
 	}
 	if u.Fragment != "" {
-		targets = append(targets, u.Fragment)
+		if !fn(u.Fragment, false) {
+			return false
+		}
 	}
-	return targets
+	return true
 }
 
 // extractCookieValues splits a Cookie header and returns individual values,
 // filtering out likely session identifiers to avoid false positives.
 func extractCookieValues(raw string) []string {
 	var values []string
+	forEachCookieValue(raw, func(value string) bool {
+		values = append(values, value)
+		return true
+	})
+	return values
+}
+
+func forEachCookieValue(raw string, fn func(value string) bool) bool {
 	for pair := range strings.SplitSeq(raw, ";") {
 		pair = strings.TrimSpace(pair)
 		_, val, found := strings.Cut(pair, "=")
@@ -747,9 +1416,11 @@ func extractCookieValues(raw string) []string {
 		if val == "" || isLikelySessionID(val) {
 			continue
 		}
-		values = append(values, val)
+		if !fn(val) {
+			return false
+		}
 	}
-	return values
+	return true
 }
 
 // isLikelySessionID returns true for hex-only strings ≥16 chars (session tokens).
@@ -765,8 +1436,19 @@ func isLikelySessionID(val string) bool {
 	return true
 }
 
+func unescapeURLComponent(s string, queryPlusAsSpace bool) (string, error) {
+	if queryPlusAsSpace {
+		return url.QueryUnescape(s)
+	}
+	return url.PathUnescape(s)
+}
+
 // normalize does URL-decode (multi-pass), HTML entity decode, JS escape decode, lowercase, whitespace collapse.
 func normalize(s string) string {
+	return normalizeTarget(s, true)
+}
+
+func normalizeTarget(s string, queryPlusAsSpace bool) string {
 	// Overlong UTF-8 percent-encoded sequences → real characters (evasion technique).
 	if strings.Contains(s, "%") {
 		s = reOverlongDot.ReplaceAllString(s, ".")
@@ -779,7 +1461,7 @@ func normalize(s string) string {
 		s = reOverlongGT.ReplaceAllString(s, ">")
 	}
 	// Multi-pass URL decode.
-	// Pass 1 uses QueryUnescape (decodes both %XX and + → space).
+	// Pass 1 decodes %XX and only applies + → space for query/form sources.
 	// Passes 2+ use PathUnescape (only decodes %XX) to avoid mangling
 	// literal '+' characters that were produced by pass 1 (e.g. %2B → +).
 	// Without this, JSFuck payloads like (+{}+[]) lose their '+' on pass 2,
@@ -788,7 +1470,7 @@ func normalize(s string) string {
 		var decoded string
 		var err error
 		if i == 0 {
-			decoded, err = url.QueryUnescape(s)
+			decoded, err = unescapeURLComponent(s, queryPlusAsSpace)
 		} else {
 			decoded, err = url.PathUnescape(s)
 		}
@@ -797,13 +1479,15 @@ func normalize(s string) string {
 		}
 		s = decoded
 	}
-	// Multi-pass HTML entity decode.
-	for range 2 {
-		decoded := html.UnescapeString(s)
-		if decoded == s {
-			break
+	if shouldDecodeHTMLEntities(s) {
+		// Multi-pass HTML entity decode.
+		for range 2 {
+			decoded := html.UnescapeString(s)
+			if decoded == s {
+				break
+			}
+			s = decoded
 		}
-		s = decoded
 	}
 	// JavaScript escape sequence decode: \xNN, \uXXXX, \u{XXXX}, \NNN (octal).
 	// This defeats obfuscation like window['\x61\x6c\x65\x72\x74'] → window['alert'].
@@ -833,6 +1517,154 @@ func normalize(s string) string {
 	s = stripSQLComments(s)
 	s = collapseWhitespace(s)
 	return s
+}
+
+func shouldDecodeHTMLEntities(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '&' {
+			continue
+		}
+		if i+1 >= len(s) {
+			return false
+		}
+		next := s[i+1]
+		if next == '#' {
+			return true
+		}
+		if !isHTMLEntityNameByte(next) {
+			continue
+		}
+		start := i + 1
+		end := start + 1
+		for end < len(s) && isHTMLEntityNameByte(s[end]) {
+			end++
+		}
+		if end < len(s) && s[end] == ';' {
+			return true
+		}
+		if hasSemicolonlessHTMLEntityPrefix(s[start:end]) {
+			return true
+		}
+		i = end - 1
+	}
+	return false
+}
+
+func isHTMLEntityNameByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+func hasSemicolonlessHTMLEntityPrefix(name string) bool {
+	switch {
+	case strings.HasPrefix(name, "aacute"),
+		strings.HasPrefix(name, "Aacute"),
+		strings.HasPrefix(name, "Acirc"),
+		strings.HasPrefix(name, "acirc"),
+		strings.HasPrefix(name, "acute"),
+		strings.HasPrefix(name, "aelig"),
+		strings.HasPrefix(name, "AElig"),
+		strings.HasPrefix(name, "Agrave"),
+		strings.HasPrefix(name, "agrave"),
+		strings.HasPrefix(name, "AMP"),
+		strings.HasPrefix(name, "amp"),
+		strings.HasPrefix(name, "Aring"),
+		strings.HasPrefix(name, "aring"),
+		strings.HasPrefix(name, "atilde"),
+		strings.HasPrefix(name, "Atilde"),
+		strings.HasPrefix(name, "Auml"),
+		strings.HasPrefix(name, "auml"),
+		strings.HasPrefix(name, "brvbar"),
+		strings.HasPrefix(name, "Ccedil"),
+		strings.HasPrefix(name, "ccedil"),
+		strings.HasPrefix(name, "cedil"),
+		strings.HasPrefix(name, "cent"),
+		strings.HasPrefix(name, "COPY"),
+		strings.HasPrefix(name, "copy"),
+		strings.HasPrefix(name, "curren"),
+		strings.HasPrefix(name, "deg"),
+		strings.HasPrefix(name, "divide"),
+		strings.HasPrefix(name, "Eacute"),
+		strings.HasPrefix(name, "eacute"),
+		strings.HasPrefix(name, "Ecirc"),
+		strings.HasPrefix(name, "ecirc"),
+		strings.HasPrefix(name, "egrave"),
+		strings.HasPrefix(name, "Egrave"),
+		strings.HasPrefix(name, "ETH"),
+		strings.HasPrefix(name, "eth"),
+		strings.HasPrefix(name, "euml"),
+		strings.HasPrefix(name, "Euml"),
+		strings.HasPrefix(name, "frac12"),
+		strings.HasPrefix(name, "frac14"),
+		strings.HasPrefix(name, "frac34"),
+		strings.HasPrefix(name, "GT"),
+		strings.HasPrefix(name, "gt"),
+		strings.HasPrefix(name, "iacute"),
+		strings.HasPrefix(name, "Iacute"),
+		strings.HasPrefix(name, "icirc"),
+		strings.HasPrefix(name, "Icirc"),
+		strings.HasPrefix(name, "iexcl"),
+		strings.HasPrefix(name, "igrave"),
+		strings.HasPrefix(name, "Igrave"),
+		strings.HasPrefix(name, "iquest"),
+		strings.HasPrefix(name, "iuml"),
+		strings.HasPrefix(name, "Iuml"),
+		strings.HasPrefix(name, "laquo"),
+		strings.HasPrefix(name, "LT"),
+		strings.HasPrefix(name, "lt"),
+		strings.HasPrefix(name, "macr"),
+		strings.HasPrefix(name, "micro"),
+		strings.HasPrefix(name, "middot"),
+		strings.HasPrefix(name, "nbsp"),
+		strings.HasPrefix(name, "not"),
+		strings.HasPrefix(name, "Ntilde"),
+		strings.HasPrefix(name, "ntilde"),
+		strings.HasPrefix(name, "oacute"),
+		strings.HasPrefix(name, "Oacute"),
+		strings.HasPrefix(name, "Ocirc"),
+		strings.HasPrefix(name, "ocirc"),
+		strings.HasPrefix(name, "ograve"),
+		strings.HasPrefix(name, "Ograve"),
+		strings.HasPrefix(name, "ordf"),
+		strings.HasPrefix(name, "ordm"),
+		strings.HasPrefix(name, "oslash"),
+		strings.HasPrefix(name, "Oslash"),
+		strings.HasPrefix(name, "otilde"),
+		strings.HasPrefix(name, "Otilde"),
+		strings.HasPrefix(name, "ouml"),
+		strings.HasPrefix(name, "Ouml"),
+		strings.HasPrefix(name, "para"),
+		strings.HasPrefix(name, "plusmn"),
+		strings.HasPrefix(name, "pound"),
+		strings.HasPrefix(name, "quot"),
+		strings.HasPrefix(name, "QUOT"),
+		strings.HasPrefix(name, "raquo"),
+		strings.HasPrefix(name, "reg"),
+		strings.HasPrefix(name, "REG"),
+		strings.HasPrefix(name, "sect"),
+		strings.HasPrefix(name, "shy"),
+		strings.HasPrefix(name, "sup1"),
+		strings.HasPrefix(name, "sup2"),
+		strings.HasPrefix(name, "sup3"),
+		strings.HasPrefix(name, "szlig"),
+		strings.HasPrefix(name, "thorn"),
+		strings.HasPrefix(name, "THORN"),
+		strings.HasPrefix(name, "times"),
+		strings.HasPrefix(name, "uacute"),
+		strings.HasPrefix(name, "Uacute"),
+		strings.HasPrefix(name, "Ucirc"),
+		strings.HasPrefix(name, "ucirc"),
+		strings.HasPrefix(name, "Ugrave"),
+		strings.HasPrefix(name, "ugrave"),
+		strings.HasPrefix(name, "uml"),
+		strings.HasPrefix(name, "Uuml"),
+		strings.HasPrefix(name, "uuml"),
+		strings.HasPrefix(name, "yacute"),
+		strings.HasPrefix(name, "Yacute"),
+		strings.HasPrefix(name, "yen"),
+		strings.HasPrefix(name, "yuml"):
+		return true
+	}
+	return false
 }
 
 // collapseWhitespace replaces runs of whitespace with a single space.
@@ -997,6 +1829,10 @@ func decodeHexEscapes(s string) string {
 // Recursion is capped at 3 levels with max 5 tokens per level and a 32KB total
 // decoded byte budget to bound CPU cost.
 func normalizeWithDecode(raw string) string {
+	return normalizeWithDecodeTarget(raw, true)
+}
+
+func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 	if needsDecoding(raw) {
 		if strings.Contains(raw, "\\x") {
 			hexDecoded := decodeHexEscapes(raw)
@@ -1006,7 +1842,7 @@ func normalizeWithDecode(raw string) string {
 		}
 	}
 
-	s := normalize(raw)
+	s := normalizeTarget(raw, queryPlusAsSpace)
 	// Fast path: if normalized string has no base64-length tokens, skip expensive scanning.
 	if len(s) < 8 || !hasBase64Candidate(s) && !hasBase64Candidate(raw) {
 		return s
@@ -1015,29 +1851,28 @@ func normalizeWithDecode(raw string) string {
 	// normalize() lowercases which destroys base64 case sensitivity,
 	// and raw may have %XX wrapping base64 boundaries (e.g. %22TOKEN%22).
 	urlDecoded := raw
-	for i := range 3 {
-		var d string
-		var err error
-		if i == 0 {
-			d, err = url.QueryUnescape(urlDecoded)
-		} else {
-			d, err = url.PathUnescape(urlDecoded)
+	if strings.Contains(raw, "%") {
+		for i := range 3 {
+			var d string
+			var err error
+			if i == 0 {
+				d, err = unescapeURLComponent(urlDecoded, queryPlusAsSpace)
+			} else {
+				d, err = url.PathUnescape(urlDecoded)
+			}
+			if err != nil || d == urlDecoded {
+				break
+			}
+			urlDecoded = d
 		}
-		if err != nil || d == urlDecoded {
-			break
-		}
-		urlDecoded = d
 	}
-	sources := []string{raw, s}
-	if urlDecoded != raw {
-		sources = append(sources, urlDecoded)
-	}
+	jsDecoded := ""
 	// Build a case-preserving JS-escape-decoded version for base64 extraction.
 	// \u00XX escapes may encode base64 characters that are case-sensitive.
 	if strings.Contains(urlDecoded, "\\") {
-		jsDecoded := decodeJSEscapes(urlDecoded)
-		if jsDecoded != urlDecoded {
-			sources = append(sources, jsDecoded)
+		jsDecoded = decodeJSEscapes(urlDecoded)
+		if jsDecoded == urlDecoded || jsDecoded == raw || jsDecoded == s {
+			jsDecoded = ""
 		}
 	}
 
@@ -1050,57 +1885,78 @@ func normalizeWithDecode(raw string) string {
 	found := false
 	totalBytes := 0
 
-	// decodeTokens processes base64 tokens from sources at the given depth.
-	var decodeTokens func(srcs []string, depth int)
-	decodeTokens = func(srcs []string, depth int) {
+	// decodeSource processes base64 tokens from one source at the given depth.
+	var decodeSource func(src string, depth int) bool
+	decodeSource = func(src string, depth int) bool {
 		if depth > maxDepth || totalBytes >= maxTotalBytes {
-			return
+			return false
 		}
-		for _, src := range srcs {
-			matches := reBase64Token.FindAllStringIndex(src, maxTokensPerLevel)
-			for _, loc := range matches {
-				tok := src[loc[0]:loc[1]]
-				if seen[tok] {
-					continue
-				}
-				seen[tok] = true
-				decoded := decodeBase64IfSuspicious(tok)
-				if decoded == "" && loc[0] > 0 {
-					decoded = decodeBase64IfSuspicious(src[loc[0]-1 : loc[1]])
-				}
-				if decoded == "" {
-					continue
-				}
-				totalBytes += len(decoded)
-				if totalBytes > maxTotalBytes {
-					return
-				}
-				if !found {
-					b.Grow(len(s) + 256)
-					b.WriteString(s)
-					found = true
-				}
-				normalizedDecoded := normalize(decoded)
-				b.WriteByte(' ')
-				b.WriteString(normalizedDecoded)
-
-				nextSrcs := []string{decoded}
-				if strings.Contains(decoded, "\\") {
-					jsDec := decodeJSEscapes(decoded)
-					if jsDec != decoded {
-						nextSrcs = append(nextSrcs, jsDec)
-						normalizedJS := normalize(jsDec)
-						b.WriteByte(' ')
-						b.WriteString(normalizedJS)
-						nextSrcs = append(nextSrcs, normalizedJS)
-					}
-				}
-				decodeTokens(nextSrcs, depth+1)
+		stop := false
+		forEachBase64TokenIndex(src, maxTokensPerLevel, func(start, end int) bool {
+			tok := src[start:end]
+			if seen[tok] {
+				return true
 			}
-		}
+			seen[tok] = true
+			decoded := decodeBase64IfSuspicious(tok)
+			if decoded == "" && start > 0 {
+				decoded = decodeBase64IfSuspicious(src[start-1 : end])
+			}
+			if decoded == "" {
+				return true
+			}
+			totalBytes += len(decoded)
+			if totalBytes > maxTotalBytes {
+				stop = true
+				return false
+			}
+			if !found {
+				b.Grow(len(s) + 256)
+				b.WriteString(s)
+				found = true
+			}
+			normalizedDecoded := normalize(decoded)
+			b.WriteByte(' ')
+			b.WriteString(normalizedDecoded)
+
+			nextJS := ""
+			nextNormalizedJS := ""
+			if strings.Contains(decoded, "\\") {
+				nextJS = decodeJSEscapes(decoded)
+				if nextJS != decoded {
+					nextNormalizedJS = normalize(nextJS)
+					b.WriteByte(' ')
+					b.WriteString(nextNormalizedJS)
+				} else {
+					nextJS = ""
+				}
+			}
+			stop = decodeSource(decoded, depth+1)
+			if !stop && nextJS != "" {
+				stop = decodeSource(nextJS, depth+1)
+			}
+			if !stop && nextNormalizedJS != "" {
+				stop = decodeSource(nextNormalizedJS, depth+1)
+			}
+			if stop || totalBytes >= maxTotalBytes {
+				stop = true
+				return false
+			}
+			return true
+		})
+		return stop
 	}
 
-	decodeTokens(sources, 1)
+	stopped := decodeSource(raw, 1)
+	if !stopped && s != raw {
+		stopped = decodeSource(s, 1)
+	}
+	if !stopped && urlDecoded != raw && urlDecoded != s {
+		stopped = decodeSource(urlDecoded, 1)
+	}
+	if !stopped && jsDecoded != "" {
+		decodeSource(jsDecoded, 1)
+	}
 
 	if found {
 		return b.String()
@@ -1128,6 +1984,41 @@ func hasBase64Candidate(s string) bool {
 
 var reBase64Token = regexp.MustCompile(`[A-Za-z0-9+/]{8,}={0,2}`)
 
+func forEachBase64TokenIndex(src string, limit int, fn func(start, end int) bool) {
+	if limit == 0 {
+		return
+	}
+	count := 0
+	for i := 0; i < len(src); {
+		for i < len(src) && !isBase64TokenByte(src[i]) {
+			i++
+		}
+		start := i
+		for i < len(src) && isBase64TokenByte(src[i]) {
+			i++
+		}
+		if i-start < 8 {
+			continue
+		}
+		end := i
+		for end < len(src) && end-i < 2 && src[end] == '=' {
+			end++
+		}
+		count++
+		if !fn(start, end) {
+			return
+		}
+		if count >= limit && limit > 0 {
+			return
+		}
+		i = end
+	}
+}
+
+func isBase64TokenByte(b byte) bool {
+	return isBase64AlphaNum(b) || b == '+' || b == '/'
+}
+
 // stripSQLComments removes /* ... */ style inline comments from s to defeat
 // comment-splitting evasion (e.g. sel/**/ect → select). MySQL version-specific
 // comments /*!50000...*/  are intentionally preserved because they contain
@@ -1136,6 +2027,9 @@ func stripSQLComments(s string) string {
 	hasBlock := strings.Contains(s, "/*")
 	hasLine := strings.Contains(s, "#") || strings.Contains(s, "--")
 	if !hasBlock && !hasLine {
+		return s
+	}
+	if !hasStrippableSQLComment(s, hasBlock, hasLine) {
 		return s
 	}
 	var buf strings.Builder
@@ -1155,7 +2049,7 @@ func stripSQLComments(s string) string {
 				continue
 			}
 			i = i + 2 + end + 2
-		} else if (s[i] == '#' && (i == 0 || (s[i-1] != '=' && s[i-1] != '/' && s[i-1] != '?' && s[i-1] != '&' && s[i-1] != '"' && s[i-1] != '\'')) && (i+1 >= len(s) || s[i+1] == ' ' || s[i+1] == '\t' || s[i+1] == '\n' || s[i+1] == '\r')) || (i+1 < len(s) && s[i] == '-' && s[i+1] == '-' && (i+2 >= len(s) || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\n' || s[i+2] == '\r')) {
+		} else if isSQLLineCommentStart(s, i) {
 			end := strings.IndexAny(s[i:], "\r\n")
 			if end < 0 {
 				break
@@ -1167,6 +2061,38 @@ func stripSQLComments(s string) string {
 		}
 	}
 	return buf.String()
+}
+
+func hasStrippableSQLComment(s string, hasBlock, hasLine bool) bool {
+	if hasBlock {
+		for i := 0; i+1 < len(s); i++ {
+			if s[i] != '/' || s[i+1] != '*' {
+				continue
+			}
+			if i+2 < len(s) && s[i+2] == '!' {
+				continue
+			}
+			if strings.Contains(s[i+2:], "*/") {
+				return true
+			}
+		}
+	}
+	if hasLine {
+		for i := 0; i < len(s); i++ {
+			if isSQLLineCommentStart(s, i) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSQLLineCommentStart(s string, i int) bool {
+	return (s[i] == '#' &&
+		(i == 0 || (s[i-1] != '=' && s[i-1] != '/' && s[i-1] != '?' && s[i-1] != '&' && s[i-1] != '"' && s[i-1] != '\'')) &&
+		(i+1 >= len(s) || s[i+1] == ' ' || s[i+1] == '\t' || s[i+1] == '\n' || s[i+1] == '\r')) ||
+		(i+1 < len(s) && s[i] == '-' && s[i+1] == '-' &&
+			(i+2 >= len(s) || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\n' || s[i+2] == '\r'))
 }
 
 var (
@@ -1189,17 +2115,16 @@ func decodeBase64IfSuspicious(s string) string {
 	if len(s) < 8 {
 		return ""
 	}
-	decoded, err := base64.StdEncoding.DecodeString(s)
+	var decoded []byte
+	var err error
+	if len(s) <= 256 {
+		var buf [192]byte
+		decoded, err = decodeBase64WithBuffer(s, buf[:])
+	} else {
+		decoded, err = decodeBase64String(s)
+	}
 	if err != nil {
-		decoded, err = base64.RawStdEncoding.DecodeString(s)
-		if err != nil {
-			// Also try URL-safe base64 (- and _ instead of + and /)
-			r := strings.NewReplacer("-", "+", "_", "/")
-			decoded, err = base64.RawStdEncoding.DecodeString(r.Replace(s))
-			if err != nil {
-				return ""
-			}
-		}
+		return ""
 	}
 	if len(decoded) == 0 {
 		return ""
@@ -1222,6 +2147,40 @@ func decodeBase64IfSuspicious(s string) string {
 		return ""
 	}
 	return string(decoded)
+}
+
+func decodeBase64WithBuffer(s string, dst []byte) ([]byte, error) {
+	n, err := base64.StdEncoding.Decode(dst, []byte(s))
+	if err != nil {
+		n, err = base64.RawStdEncoding.Decode(dst, []byte(s))
+		if err != nil {
+			if !strings.ContainsAny(s, "-_") {
+				return nil, err
+			}
+			n, err = base64.RawURLEncoding.Decode(dst, []byte(s))
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return dst[:n], nil
+}
+
+func decodeBase64String(s string) ([]byte, error) {
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(s)
+		if err != nil {
+			if !strings.ContainsAny(s, "-_") {
+				return nil, err
+			}
+			decoded, err = base64.RawURLEncoding.DecodeString(s)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return decoded, nil
 }
 
 func isBase64AlphaNum(b byte) bool {
@@ -1271,6 +2230,102 @@ func isCleanTarget(s string) bool {
 		}
 	}
 	return true
+}
+
+func isCleanPathTarget(s string) bool {
+	if len(s) == 0 || len(s) > 256 || hasSuspiciousBase64PathSegment(s) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9':
+		case c == '/' || c == '-' || c == '_' || c == '.':
+		default:
+			return false
+		}
+	}
+	return !hasPlainTargetAttackKeyword(s)
+}
+
+func isCleanPlainQueryTarget(s string) bool {
+	if len(s) == 0 || len(s) > 512 || !strings.Contains(s, "=") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.' || c == '=' || c == '&':
+		default:
+			return false
+		}
+	}
+	return !hasPlainTargetAttackKeyword(s)
+}
+
+func hasSuspiciousBase64PathSegment(s string) bool {
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) && s[i] != '/' {
+			continue
+		}
+		if isSuspiciousBase64PathSegment(s[start:i]) {
+			return true
+		}
+		start = i + 1
+	}
+	return false
+}
+
+func isSuspiciousBase64PathSegment(segment string) bool {
+	if len(segment) < 16 || len(segment) > 256 || strings.Contains(segment, ".") {
+		return false
+	}
+	for i := 0; i < len(segment); i++ {
+		if !isBase64TokenByte(segment[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasPlainTargetAttackKeyword(s string) bool {
+	return strings.Contains(s, "..") ||
+		strings.Contains(s, "union") ||
+		strings.Contains(s, "select") ||
+		strings.Contains(s, "insert") ||
+		strings.Contains(s, "update") ||
+		strings.Contains(s, "delete") ||
+		strings.Contains(s, "drop") ||
+		strings.Contains(s, "alter") ||
+		strings.Contains(s, "truncate") ||
+		strings.Contains(s, "sleep") ||
+		strings.Contains(s, "benchmark") ||
+		strings.Contains(s, "waitfor") ||
+		strings.Contains(s, "script") ||
+		strings.Contains(s, "onload") ||
+		strings.Contains(s, "onerror") ||
+		strings.Contains(s, "onclick") ||
+		strings.Contains(s, "javascript") ||
+		strings.Contains(s, "etc/") ||
+		strings.Contains(s, "passwd") ||
+		strings.Contains(s, "win.ini") ||
+		strings.Contains(s, "boot.ini") ||
+		strings.Contains(s, "web-inf") ||
+		strings.Contains(s, "meta-inf") ||
+		strings.Contains(s, ".git") ||
+		strings.Contains(s, "127.0.") ||
+		strings.Contains(s, "localhost") ||
+		strings.Contains(s, "169.254") ||
+		strings.Contains(s, "whoami") ||
+		strings.Contains(s, "wget") ||
+		strings.Contains(s, "curl") ||
+		strings.Contains(s, "jndi") ||
+		strings.Contains(s, "ldap") ||
+		strings.Contains(s, "__") ||
+		strings.Contains(s, "or1=1") ||
+		strings.Contains(s, "and1=1")
 }
 
 var suspiciousCharSet [256]bool
@@ -1360,6 +2415,13 @@ func hasSQLiIndicator(s string) bool {
 		strings.Contains(s, "order by") ||
 		strings.Contains(s, "substr(") ||
 		strings.Contains(s, "substring(") ||
+		strings.Contains(s, "ascii(") ||
+		strings.Contains(s, "ord(") ||
+		strings.Contains(s, "length(") ||
+		strings.Contains(s, "count(") ||
+		strings.Contains(s, "version(") ||
+		strings.Contains(s, "if(") ||
+		strings.Contains(s, "if (") ||
 		strings.Contains(s, "concat(") ||
 		strings.Contains(s, "char(") ||
 		strings.Contains(s, "chr(") ||
@@ -1464,8 +2526,7 @@ func hasXSSIndicator(s string) bool {
 
 // hasCmdIndicator returns false when the string has no command injection indicator.
 func hasCmdIndicator(s string) bool {
-	return strings.ContainsAny(s, "|;`") ||
-		strings.Contains(s, "$(") ||
+	if strings.Contains(s, "$(") ||
 		strings.Contains(s, "${") ||
 		strings.Contains(s, "&&") ||
 		strings.Contains(s, ">>") ||
@@ -1475,7 +2536,72 @@ func hasCmdIndicator(s string) bool {
 		strings.Contains(s, "\r") ||
 		strings.Contains(s, "wget ") ||
 		strings.Contains(s, "curl ") ||
-		strings.Contains(s, "<!--#")
+		strings.Contains(s, "<!--#") {
+		return true
+	}
+	if strings.Contains(s, "`") {
+		return true
+	}
+	if strings.ContainsAny(s, "|;`") {
+		return hasCmdCommandWord(s)
+	}
+	return false
+}
+
+func hasCmdCommandWord(s string) bool {
+	for i := 0; i < len(s); {
+		for i < len(s) && !isCmdWordByte(s[i]) {
+			i++
+		}
+		start := i
+		for i < len(s) && isCmdWordByte(s[i]) {
+			i++
+		}
+		if start < i && isShellCommandWord(s[start:i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCmdWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
+}
+
+func isShellCommandWord(s string) bool {
+	switch len(s) {
+	case 2:
+		switch s {
+		case "id", "ls", "ps", "nc", "sh", "rm", "dd", "cp", "mv", "od", "wc":
+			return true
+		}
+	case 3:
+		switch s {
+		case "cat", "pwd", "php", "dig", "awk", "sed", "xxd", "tee":
+			return true
+		}
+	case 4:
+		switch s {
+		case "wget", "curl", "bash", "echo", "ping", "kill", "perl", "ruby", "node", "java", "find", "grep", "head", "tail", "more", "less", "sort":
+			return true
+		}
+	case 5:
+		switch s {
+		case "uname", "touch", "chmod", "chown", "mkdir", "sleep":
+			return true
+		}
+	case 6:
+		switch s {
+		case "whoami", "python", "base64":
+			return true
+		}
+	case 8:
+		switch s {
+		case "nslookup", "hostname", "ifconfig", "ipconfig":
+			return true
+		}
+	}
+	return false
 }
 
 // hasWebshellIndicator returns true when the string contains a term
@@ -1745,7 +2871,7 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		// No SQL function call or clause found: likely a JavaScript variable/property.
 		return true
 	case "owasp:sqli:001": // union (all) select
-		if !reUnionSelectAttackCtx.MatchString(lower) {
+		if !hasUnionSelectAttackContext(lower) {
 			return true
 		}
 		if len(lower) > 40 && strings.Contains(lower, " the ") || strings.Contains(lower, " a ") || strings.Contains(lower, " each ") {
@@ -2220,6 +3346,271 @@ var reUnionSelectAttackCtx = regexp.MustCompile(`(` +
 	`|\bwhere\s+\d+\s*=\s*\d+` + // WHERE 1=1 tautology
 	`|\border\s+by\s+\d` + // ORDER BY n probing
 	`)`)
+
+func hasUnionSelectAttackContext(s string) bool {
+	return hasSQLWord(s, "null") ||
+		hasDigitCommaDigit(s) ||
+		hasFromTableReference(s) ||
+		hasDoubleAtWord(s) ||
+		hasSQLWord(s, "information_schema") ||
+		hasUnionSQLFunctionCall(s) ||
+		hasOpenParenSelect(s) ||
+		strings.Contains(s, "--") ||
+		strings.Contains(s, "/*") ||
+		hasQuotedSQLOperator(s) ||
+		hasUnionSelectColumnValue(s) ||
+		hasWhereNumericEquality(s) ||
+		hasOrderByNumber(s)
+}
+
+func hasSQLWord(s, word string) bool {
+	for start := 0; ; {
+		idx := strings.Index(s[start:], word)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		end := idx + len(word)
+		if (idx == 0 || !isSQLWordByte(s[idx-1])) && (end == len(s) || !isSQLWordByte(s[end])) {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func hasSQLWordAt(s string, idx int, word string) bool {
+	end := idx + len(word)
+	if idx < 0 || end > len(s) || s[idx:end] != word {
+		return false
+	}
+	return (idx == 0 || !isSQLWordByte(s[idx-1])) && (end == len(s) || !isSQLWordByte(s[end]))
+}
+
+func isSQLWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+func skipSQLSpaces(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r', '\f':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func hasDigitCommaDigit(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			continue
+		}
+		j := i + 1
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		j = skipSQLSpaces(s, j)
+		if j >= len(s) || s[j] != ',' {
+			continue
+		}
+		j = skipSQLSpaces(s, j+1)
+		if j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFromTableReference(s string) bool {
+	for start := 0; ; {
+		idx := strings.Index(s[start:], "from")
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		if !hasSQLWordAt(s, idx, "from") {
+			start = idx + 1
+			continue
+		}
+		j := skipSQLSpaces(s, idx+len("from"))
+		if j > idx+len("from") && j < len(s) && (isSQLWordByte(s[j]) || s[j] == '`' || s[j] == '\'' || s[j] == '"') {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func hasDoubleAtWord(s string) bool {
+	for start := 0; ; {
+		idx := strings.Index(s[start:], "@@")
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		if idx+2 < len(s) && isSQLWordByte(s[idx+2]) {
+			return true
+		}
+		start = idx + 2
+	}
+}
+
+func hasUnionSQLFunctionCall(s string) bool {
+	for _, name := range [...]string{
+		"user", "database", "version", "schema", "sleep", "benchmark",
+		"group_concat", "extractvalue", "updatexml", "load_file", "char", "unhex",
+	} {
+		if hasSQLFunctionCall(s, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSQLFunctionCall(s, name string) bool {
+	for start := 0; ; {
+		idx := strings.Index(s[start:], name)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		if hasSQLWordAt(s, idx, name) {
+			j := skipSQLSpaces(s, idx+len(name))
+			if j < len(s) && s[j] == '(' {
+				return true
+			}
+		}
+		start = idx + 1
+	}
+}
+
+func hasOpenParenSelect(s string) bool {
+	for start := 0; ; {
+		idx := strings.IndexByte(s[start:], '(')
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		j := skipSQLSpaces(s, idx+1)
+		if hasSQLWordAt(s, j, "select") {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func hasQuotedSQLOperator(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\'' && s[i] != '"' {
+			continue
+		}
+		j := skipSQLSpaces(s, i+1)
+		for _, op := range [...]string{"and", "or", "where", "having", "group", "order", "union"} {
+			if j+len(op) <= len(s) && s[j:j+len(op)] == op && (j+len(op) == len(s) || !isSQLWordByte(s[j+len(op)])) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasUnionSelectColumnValue(s string) bool {
+	for start := 0; ; {
+		idx := strings.Index(s[start:], "union")
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		if !hasSQLWordAt(s, idx, "union") {
+			start = idx + 1
+			continue
+		}
+		j := skipSQLSpaces(s, idx+len("union"))
+		if j == idx+len("union") {
+			start = idx + 1
+			continue
+		}
+		if hasSQLWordAt(s, j, "all") {
+			next := skipSQLSpaces(s, j+len("all"))
+			if next == j+len("all") {
+				start = idx + 1
+				continue
+			}
+			j = next
+		}
+		if !hasSQLWordAt(s, j, "select") {
+			start = idx + 1
+			continue
+		}
+		next := skipSQLSpaces(s, j+len("select"))
+		if next == j+len("select") || next >= len(s) {
+			start = idx + 1
+			continue
+		}
+		ch := s[next]
+		if ch == '\'' || ch == '"' || ch == '(' || ch == '@' || (ch >= '0' && ch <= '9') {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func hasWhereNumericEquality(s string) bool {
+	for start := 0; ; {
+		idx := strings.Index(s[start:], "where")
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		if !hasSQLWordAt(s, idx, "where") {
+			start = idx + 1
+			continue
+		}
+		j := skipSQLSpaces(s, idx+len("where"))
+		if j >= len(s) || s[j] < '0' || s[j] > '9' {
+			start = idx + 1
+			continue
+		}
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		j = skipSQLSpaces(s, j)
+		if j >= len(s) || s[j] != '=' {
+			start = idx + 1
+			continue
+		}
+		j = skipSQLSpaces(s, j+1)
+		if j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func hasOrderByNumber(s string) bool {
+	for start := 0; ; {
+		idx := strings.Index(s[start:], "order")
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		if !hasSQLWordAt(s, idx, "order") {
+			start = idx + 1
+			continue
+		}
+		j := skipSQLSpaces(s, idx+len("order"))
+		if !hasSQLWordAt(s, j, "by") {
+			start = idx + 1
+			continue
+		}
+		j = skipSQLSpaces(s, j+len("by"))
+		if j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			return true
+		}
+		start = idx + 1
+	}
+}
 
 // reIntoOutfileWithPath confirms that an INTO OUTFILE/DUMPFILE hit (sqli:017) carries a
 // quoted file path (required by MySQL syntax). Documentation text such as "SELECT INTO OUTFILE S3"
@@ -2717,7 +4108,7 @@ func checkRevShell(s string, threshold int) (OWASPHit, bool) {
 
 var xssPatterns = []owaspPattern{
 	{regexp.MustCompile(`<script[\s>]`), 5, "owasp:xss:001", "<script"},
-	{regexp.MustCompile(`\bon(error|load|click|dblclick|mouse(over|out|down|up|enter|leave|move|wheel)|focus(in)?|blur|change|submit|toggle|input|key(down|up|press)|drag(start|end|over|enter|leave)?|drop|copy|cut|paste|pointer(over|down|up|cancel|move|enter|leave)|animation(start|end|iteration)|transition(end|start|run|cancel)|scroll|wheel|resize|contextmenu|message|hashchange|popstate|beforeunload|unload|invalid|select|fullscreenchange|touchstart|touchend|touchmove|touchcancel|beforeinput|show)\s*=`), 5, "owasp:xss:002", ""},
+	{regexp.MustCompile(`\bon(error|load|click|dblclick|mouse(over|out|down|up|enter|leave|move|wheel)|focus(in)?|blur|change|submit|toggle|input|key(down|up|press)|drag(start|end|over|enter|leave)?|drop|copy|cut|paste|pointer(over|down|up|cancel|move|enter|leave)|animation(start|end|iteration)|transition(end|start|run|cancel)|scroll|wheel|resize|contextmenu|message|hashchange|popstate|beforeunload|unload|invalid|select|fullscreenchange|touchstart|touchend|touchmove|touchcancel|beforeinput|show)\s*=`), 5, "owasp:xss:002", "on"},
 	{regexp.MustCompile(`javascript\s*:`), 5, "owasp:xss:003", "javascript"},
 	{regexp.MustCompile(`<img\s+[^>]*src\s*=\s*['"]\s*x\s+onerror`), 5, "owasp:xss:004", "<img"},
 	{regexp.MustCompile(`<iframe[\s>]`), 3, "owasp:xss:005", "<iframe"},
@@ -2726,16 +4117,16 @@ var xssPatterns = []owaspPattern{
 	{regexp.MustCompile(`<math[\s>]`), 2, "owasp:xss:008", "<math"},
 	{regexp.MustCompile(`data:text/html`), 5, "owasp:xss:009", "data:text/html"},
 	{regexp.MustCompile(`window\.(location|name|open)`), 4, "owasp:xss:010", "window."},
-	{regexp.MustCompile(`\b(eval|settimeout|setinterval)\s*\(\s*['"]`), 5, "owasp:xss:011", ""},
+	{regexp.MustCompile(`\b(eval|settimeout|setinterval)\s*\(\s*['"]`), 5, "owasp:xss:011", "("},
 	{regexp.MustCompile(`innerhtml\s*=`), 5, "owasp:xss:012", "innerhtml"},
-	{regexp.MustCompile(`&#x?0*3c;?\s*script`), 5, "owasp:xss:013", ""},
-	{regexp.MustCompile(`<\w+\b[^>]+\bon\w+\s*=`), 5, "owasp:xss:014", ""},
-	{regexp.MustCompile(`<(embed|object)\b[^>]*(data|src)\s*=`), 3, "owasp:xss:015", ""},
+	{regexp.MustCompile(`&#x?0*3c;?\s*script`), 5, "owasp:xss:013", "script"},
+	{regexp.MustCompile(`<\w+\b[^>]+\bon\w+\s*=`), 5, "owasp:xss:014", "on"},
+	{regexp.MustCompile(`<(embed|object)\b[^>]*(data|src)\s*=`), 3, "owasp:xss:015", "<"},
 	{regexp.MustCompile(`<form\b[^>]*action\s*=\s*['"]?\s*javascript:`), 5, "owasp:xss:016", "<form"},
 	{regexp.MustCompile(`string\s*\.\s*fromcharcode\s*\(`), 5, "owasp:xss:017", "fromcharcode"},
 	{regexp.MustCompile(`<base\b[^>]+href\s*=\s*['"]?\s*javascript\s*:`), 5, "owasp:xss:018", "<base"},
 	{regexp.MustCompile(`<base\b[^>]+href\s*=`), 3, "owasp:xss:054", "<base"},
-	{regexp.MustCompile(`(fetch|xmlhttprequest)\s*\(\s*['"]https?://`), 4, "owasp:xss:019", ""},
+	{regexp.MustCompile(`(fetch|xmlhttprequest)\s*\(\s*['"]https?://`), 4, "owasp:xss:019", "http"},
 	{regexp.MustCompile(`vbscript\s*:`), 5, "owasp:xss:020", "vbscript"},
 	{regexp.MustCompile(`\bexpression\s*\(\s*(document|window|eval|this|alert)`), 3, "owasp:xss:021", "expression"},
 	{regexp.MustCompile(`\bsrcdoc\s*=`), 4, "owasp:xss:022", "srcdoc"},
@@ -2746,9 +4137,9 @@ var xssPatterns = []owaspPattern{
 	{regexp.MustCompile(`<input\b[^>]*\bautofocus\b[^>]*\bonfocus\s*=`), 5, "owasp:xss:027", "<input"},
 	{regexp.MustCompile(`<link\b[^>]*\brel\s*=\s*['"]?\s*import\b`), 4, "owasp:xss:028", "<link"},
 	{regexp.MustCompile(`<img\b[^>]*\bname\s*=\s*['"]?\s*(documentelement|body|head|domain)\b`), 4, "owasp:xss:029", "<img"},
-	{regexp.MustCompile(`\b(window|self|top|parent|frames|globalthis|this)\s*\[\s*['"\x60]`), 4, "owasp:xss:030", ""},
-	{regexp.MustCompile(`\[\s*['"\x60]\s*(alert|eval|prompt|confirm|settimeout|setinterval|atob|btoa|fetch|open|execscript)\s*['"\x60]\s*\]`), 5, "owasp:xss:031", ""},
-	{regexp.MustCompile(`/\w+/\s*\.\s*source`), 4, "owasp:xss:032", ""},
+	{regexp.MustCompile(`\b(window|self|top|parent|frames|globalthis|this)\s*\[\s*['"\x60]`), 4, "owasp:xss:030", "["},
+	{regexp.MustCompile(`\[\s*['"\x60]\s*(alert|eval|prompt|confirm|settimeout|setinterval|atob|btoa|fetch|open|execscript)\s*['"\x60]\s*\]`), 5, "owasp:xss:031", "["},
+	{regexp.MustCompile(`/\w+/\s*\.\s*source`), 4, "owasp:xss:032", ".source"},
 	{regexp.MustCompile(`\(!(\[\]|!\[\])\)|(\+\{\}|\+\[\])`), 4, "owasp:xss:033", ""},
 	{regexp.MustCompile(`\+A[A-Za-z0-9]{1,3}[-+]`), 3, "owasp:xss:034", ""},
 	{regexp.MustCompile(`\bconstructor\s*\.\s*prototype\s*\[`), 4, "owasp:xss:035", "constructor"},
@@ -2758,38 +4149,38 @@ var xssPatterns = []owaspPattern{
 	{regexp.MustCompile(`<meta\b[^>]*\bhttp-equiv\s*=\s*['"]?(refresh|content-type|set-cookie)\b`), 4, "owasp:xss:039", "<meta"},
 	{regexp.MustCompile(`<embed\b[^>]*\bcode\s*=`), 4, "owasp:xss:040", "<embed"},
 	{regexp.MustCompile(`<use\b[^>]*(href|xlink:href)\s*=`), 4, "owasp:xss:041", "<use"},
-	{regexp.MustCompile(`<(animate|set|animatetransform)\b[^>]*(xlink:href|href)\s*=`), 3, "owasp:xss:042", ""},
+	{regexp.MustCompile(`<(animate|set|animatetransform)\b[^>]*(xlink:href|href)\s*=`), 3, "owasp:xss:042", "href"},
 	{regexp.MustCompile(`\bonafterscriptexecute\s*=`), 4, "owasp:xss:043", "onafterscriptexecute"},
 	{regexp.MustCompile(`document\s*\[\s*['"\x60]\s*(cookie|location|domain|write|body|title|url)\b`), 4, "owasp:xss:044", "document"},
-	{regexp.MustCompile(`\b(alert|confirm|prompt)\s*\(\s*[\d'"` + "`" + `]`), 5, "owasp:xss:045", ""},
+	{regexp.MustCompile(`\b(alert|confirm|prompt)\s*\(\s*[\d'"` + "`" + `]`), 5, "owasp:xss:045", "("},
 	{regexp.MustCompile(`\bconstructor\s*\.\s*constructor\s*\(`), 5, "owasp:xss:046", "constructor"},
-	{regexp.MustCompile(`<a\b[^>]*\bdownload\s*=`), 3, "owasp:xss:047", ""},
-	{regexp.MustCompile(`\[\s*/\w+/\s*\.\s*source\s*\+\s*/\w+/\s*\.\s*source\s*\]`), 5, "owasp:xss:048", ""},
+	{regexp.MustCompile(`<a\b[^>]*\bdownload\s*=`), 3, "owasp:xss:047", "download"},
+	{regexp.MustCompile(`\[\s*/\w+/\s*\.\s*source\s*\+\s*/\w+/\s*\.\s*source\s*\]`), 5, "owasp:xss:048", ".source"},
 	{regexp.MustCompile(`\b(eval|function)\s*\(\s*atob\s*\(`), 5, "owasp:xss:049", "atob"},
-	{regexp.MustCompile(`<\w+:\s*script\b`), 5, "owasp:xss:050", ""},
+	{regexp.MustCompile(`<\w+:\s*script\b`), 5, "owasp:xss:050", "script"},
 	{regexp.MustCompile(`data\s*:\s*image/svg\+xml`), 4, "owasp:xss:051", "image/svg"},
-	{regexp.MustCompile(`\b(window|self|top|parent|frames|globalthis|this)\s*\[\s*[\(/!+\[]`), 4, "owasp:xss:052", ""},
+	{regexp.MustCompile(`\b(window|self|top|parent|frames|globalthis|this)\s*\[\s*[\(/!+\[]`), 4, "owasp:xss:052", "["},
 	{regexp.MustCompile(`\.constructor\s*\.\s*prototype\s*\.\s*\w+\s*=`), 5, "owasp:xss:053", ".constructor"},
 	{regexp.MustCompile(`\b(alert|prompt|confirm)\s*\.\s*(call|apply)\s*\(`), 5, "owasp:xss:067", ""},
-	{regexp.MustCompile(`<a\b[^>]*\bdownload\s*=\s*['"]?\s*\w+\.\w{2,5}\b`), 4, "owasp:xss:055", ""},
+	{regexp.MustCompile(`<a\b[^>]*\bdownload\s*=\s*['"]?\s*\w+\.\w{2,5}\b`), 4, "owasp:xss:055", "download"},
 	{regexp.MustCompile(`j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:`), 5, "owasp:xss:056", ""},
 	{regexp.MustCompile(`<(body|table|thead|td|th|tr)\b[^>]*\bbackground\s*=\s*['"]?\s*(//|https?:)`), 4, "owasp:xss:057", "background"},
 	// DOM Clobbering: overwriting DOM properties via name/id attributes
-	{regexp.MustCompile(`<(form|input|img|a|embed|object)\b[^>]*\b(name|id)\s*=\s*['"]?(document|window|location|navigator|top|self|frames)\b`), 5, "owasp:xss:058", ""},
+	{regexp.MustCompile(`<(form|input|img|a|embed|object)\b[^>]*\b(name|id)\s*=\s*['"]?(document|window|location|navigator|top|self|frames)\b`), 5, "owasp:xss:058", "<"},
 	// DOM Clobbering via named access on document
 	{regexp.MustCompile(`<(a|area)\b[^>]*\bname\s*=\s*['"]?__proto__`), 5, "owasp:xss:059", "__proto__"},
 	// mXSS mutation: noscript/noembed/noframes content reinterpretation
-	{regexp.MustCompile(`<(noscript|noembed|noframes)\b[^>]*>.*?<(script|img|svg|iframe)\b`), 5, "owasp:xss:060", ""},
+	{regexp.MustCompile(`<(noscript|noembed|noframes)\b[^>]*>.*?<(script|img|svg|iframe)\b`), 5, "owasp:xss:060", "<no"},
 	// mXSS via namespace confusion in math/svg
-	{regexp.MustCompile(`<(math|svg)\b[^>]*>.*?<(style|mglyph|malignmark)\b`), 5, "owasp:xss:061", ""},
+	{regexp.MustCompile(`<(math|svg)\b[^>]*>.*?<(style|mglyph|malignmark)\b`), 5, "owasp:xss:061", "<"},
 	// SVG foreignObject: embedding HTML in SVG context
 	{regexp.MustCompile(`<svg\b[^>]*>.*?<foreignobject\b`), 5, "owasp:xss:062", "foreignobject"},
 	// SVG animation event handlers
-	{regexp.MustCompile(`<(animate|animatetransform|set)\b[^>]*\bon(begin|end|repeat)\s*=`), 5, "owasp:xss:063", ""},
+	{regexp.MustCompile(`<(animate|animatetransform|set)\b[^>]*\bon(begin|end|repeat)\s*=`), 5, "owasp:xss:063", "on"},
 	// Namespace confusion: using xlink:href in SVG to execute JS
 	{regexp.MustCompile(`xlink:href\s*=\s*['"]?\s*javascript:`), 5, "owasp:xss:064", "xlink:href"},
 	// DOMPurify bypass via clobbered properties
-	{regexp.MustCompile(`<[^>]+(sanitize|purify|dompurify)[^>]*>`), 3, "owasp:xss:065", ""},
+	{regexp.MustCompile(`<[^>]+(sanitize|purify|dompurify)[^>]*>`), 3, "owasp:xss:065", "<"},
 	// Template literal XSS: ${...} inside backtick strings
 	{regexp.MustCompile("`[^`]*\\$\\{[^}]*(document|window|location|cookie|alert|fetch|eval)[^}]*\\}[^`]*`"), 5, "owasp:xss:066", "${"},
 }
@@ -2817,72 +4208,378 @@ func checkXSS(s string, threshold int) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
+type sqliPatternSignals struct {
+	containsSelect          bool
+	containsSemicolon       bool
+	containsComment         bool
+	containsOr              bool
+	containsAnd             bool
+	containsSleep           bool
+	containsBenchmark       bool
+	containsWaitfor         bool
+	containsPGSleep         bool
+	containsChr             bool
+	containsInformation     bool
+	containsSysobjects      bool
+	containsSysDot          bool
+	containsOutfile         bool
+	containsDumpfile        bool
+	containsLoadFile        bool
+	containsInto            bool
+	containsAtAt            bool
+	containsExtractvalue    bool
+	containsUpdatexml       bool
+	containsCase            bool
+	containsWhen            bool
+	containsOrder           bool
+	containsSubstr          bool
+	containsSubstring       bool
+	containsMid             bool
+	containsXP              bool
+	containsProcedure       bool
+	containsUTL             bool
+	containsDBMS            bool
+	containsHaving          bool
+	containsLike            bool
+	containsLimit           bool
+	containsOffset          bool
+	containsGroup           bool
+	containsCopy            bool
+	containsProgram         bool
+	containsUTLInaddr       bool
+	containsMaster          bool
+	containsFullwidthS      bool
+	containsDoubleURLEncode bool
+}
+
+func collectSQLiPatternSignals(normalized string) sqliPatternSignals {
+	return sqliPatternSignals{
+		containsSelect:          strings.Contains(normalized, "select"),
+		containsSemicolon:       strings.Contains(normalized, ";"),
+		containsComment:         strings.Contains(normalized, "--") || strings.Contains(normalized, "/*") || strings.Contains(normalized, "/*!"),
+		containsOr:              strings.Contains(normalized, "or"),
+		containsAnd:             strings.Contains(normalized, "and"),
+		containsSleep:           strings.Contains(normalized, "sleep"),
+		containsBenchmark:       strings.Contains(normalized, "benchmark"),
+		containsWaitfor:         strings.Contains(normalized, "waitfor"),
+		containsPGSleep:         strings.Contains(normalized, "pg_sleep"),
+		containsChr:             strings.Contains(normalized, "chr"),
+		containsInformation:     strings.Contains(normalized, "information_schema"),
+		containsSysobjects:      strings.Contains(normalized, "sysobjects"),
+		containsSysDot:          strings.Contains(normalized, "sys."),
+		containsOutfile:         strings.Contains(normalized, "outfile"),
+		containsDumpfile:        strings.Contains(normalized, "dumpfile"),
+		containsLoadFile:        strings.Contains(normalized, "load_file"),
+		containsInto:            strings.Contains(normalized, "into"),
+		containsAtAt:            strings.Contains(normalized, "@@"),
+		containsExtractvalue:    strings.Contains(normalized, "extractvalue"),
+		containsUpdatexml:       strings.Contains(normalized, "updatexml"),
+		containsCase:            strings.Contains(normalized, "case"),
+		containsWhen:            strings.Contains(normalized, "when"),
+		containsOrder:           strings.Contains(normalized, "order"),
+		containsSubstr:          strings.Contains(normalized, "substr"),
+		containsSubstring:       strings.Contains(normalized, "substring"),
+		containsMid:             strings.Contains(normalized, "mid"),
+		containsXP:              strings.Contains(normalized, "xp_"),
+		containsProcedure:       strings.Contains(normalized, "procedure"),
+		containsUTL:             strings.Contains(normalized, "utl_"),
+		containsDBMS:            strings.Contains(normalized, "dbms_"),
+		containsHaving:          strings.Contains(normalized, "having"),
+		containsLike:            strings.Contains(normalized, "like"),
+		containsLimit:           strings.Contains(normalized, "limit"),
+		containsOffset:          strings.Contains(normalized, "offset"),
+		containsGroup:           strings.Contains(normalized, "group"),
+		containsCopy:            strings.Contains(normalized, "copy"),
+		containsProgram:         strings.Contains(normalized, "program"),
+		containsUTLInaddr:       strings.Contains(normalized, "utl_inaddr"),
+		containsMaster:          strings.Contains(normalized, "master"),
+		containsFullwidthS:      strings.Contains(normalized, "\xef\xbd\x93") || strings.Contains(normalized, "\xef\xbc\xb3"),
+		containsDoubleURLEncode: strings.Contains(normalized, "%25"),
+	}
+}
+
 func shouldScanSQLiPattern(normalized string, p owaspPattern) bool {
+	return shouldScanSQLiPatternWithSignals(normalized, p, collectSQLiPatternSignals(normalized))
+}
+
+func shouldScanSQLiPatternWithSignals(normalized string, p owaspPattern, signals sqliPatternSignals) bool {
 	if p.hint != "" && !strings.Contains(normalized, p.hint) {
 		return false
 	}
 	switch p.id {
-	case "owasp:sqli:002", "owasp:sqli:010", "owasp:sqli:011", "owasp:sqli:036", "owasp:sqli:039":
-		return strings.Contains(normalized, "or") || strings.Contains(normalized, "and")
+	case "owasp:sqli:002":
+		return (signals.containsOr || signals.containsAnd) && strings.Contains(normalized, "'")
 	case "owasp:sqli:003":
-		return strings.Contains(normalized, "sleep") || strings.Contains(normalized, "benchmark") || strings.Contains(normalized, "waitfor") || strings.Contains(normalized, "pg_sleep")
-	case "owasp:sqli:004", "owasp:sqli:006", "owasp:sqli:012", "owasp:sqli:034":
-		return strings.Contains(normalized, ";")
-	case "owasp:sqli:005", "owasp:sqli:050", "owasp:sqli:051", "owasp:sqli:052":
-		return strings.Contains(normalized, "--") || strings.Contains(normalized, "/*") || strings.Contains(normalized, "/*!")
+		return (signals.containsSleep || signals.containsBenchmark || signals.containsWaitfor || signals.containsPGSleep) && strings.Contains(normalized, "(")
+	case "owasp:sqli:004":
+		return signals.containsSemicolon && (strings.Contains(normalized, "select") || strings.Contains(normalized, "drop") || strings.Contains(normalized, "alter") || strings.Contains(normalized, "create") || strings.Contains(normalized, "truncate") || strings.Contains(normalized, "delete") || strings.Contains(normalized, "update") || strings.Contains(normalized, "insert"))
+	case "owasp:sqli:005":
+		return signals.containsComment && strings.ContainsAny(normalized, "'\"0123456789")
+	case "owasp:sqli:006":
+		return signals.containsSemicolon && strings.Contains(normalized, "'")
 	case "owasp:sqli:007":
-		return strings.Contains(normalized, "chr") || strings.Contains(normalized, "unhex") || strings.Contains(normalized, "conv")
+		return hasSQLiFunctionCallPattern(normalized, "chr") ||
+			hasSQLiFunctionCallPattern(normalized, "unhex") ||
+			hasSQLiFunctionCallPattern(normalized, "conv")
+	case "owasp:sqli:008":
+		return hasSQLiHexLiteralPattern(normalized)
 	case "owasp:sqli:009":
-		return strings.Contains(normalized, "information_schema") || strings.Contains(normalized, "sysobjects") || strings.Contains(normalized, "sys.")
+		return signals.containsInformation || signals.containsSysobjects || signals.containsSysDot
+	case "owasp:sqli:010":
+		return hasSQLBooleanNumericComparison(normalized)
+	case "owasp:sqli:011":
+		return hasSQLBooleanQuotedComparison(normalized)
+	case "owasp:sqli:036":
+		return hasSQLBooleanEmptyQuotedComparison(normalized)
+	case "owasp:sqli:039":
+		return (signals.containsOr || signals.containsAnd) && signals.containsSelect && strings.Contains(normalized, "(")
+	case "owasp:sqli:012":
+		return signals.containsSemicolon && strings.Contains(normalized, "--")
 	case "owasp:sqli:013", "owasp:sqli:017":
-		return strings.Contains(normalized, "outfile") || strings.Contains(normalized, "dumpfile") || strings.Contains(normalized, "load_file") || strings.Contains(normalized, "into")
+		return signals.containsOutfile || signals.containsDumpfile || signals.containsLoadFile || signals.containsInto
 	case "owasp:sqli:014":
-		return strings.Contains(normalized, "@@")
+		return signals.containsAtAt
 	case "owasp:sqli:015":
-		return strings.Contains(normalized, "extractvalue") || strings.Contains(normalized, "updatexml")
+		return (signals.containsExtractvalue || signals.containsUpdatexml) && strings.Contains(normalized, "(")
 	case "owasp:sqli:018", "owasp:sqli:040":
-		return strings.Contains(normalized, "case") && strings.Contains(normalized, "when")
+		return signals.containsCase && signals.containsWhen
 	case "owasp:sqli:019":
-		return strings.Contains(normalized, "order")
+		return signals.containsOrder
 	case "owasp:sqli:021":
-		return strings.Contains(normalized, "substr") || strings.Contains(normalized, "substring") || strings.Contains(normalized, "mid")
+		return (signals.containsSubstr || signals.containsSubstring || signals.containsMid) && strings.Contains(normalized, "(")
 	case "owasp:sqli:022":
-		return strings.Contains(normalized, "if") || strings.Contains(normalized, "select") || strings.Contains(normalized, "ord") || strings.Contains(normalized, "ascii") || strings.Contains(normalized, "length") || strings.Contains(normalized, "count") || strings.Contains(normalized, "version")
+		return hasSQLiIfFunctionPattern(normalized)
 	case "owasp:sqli:023":
-		return strings.ContainsAny(normalized, "^&<>")
+		return strings.Contains(normalized, "'") && (strings.ContainsAny(normalized, "^&") || strings.Contains(normalized, "<<") || strings.Contains(normalized, ">>"))
 	case "owasp:sqli:024", "owasp:sqli:045":
-		return strings.Contains(normalized, "xp_")
+		return signals.containsXP
 	case "owasp:sqli:025":
-		return strings.Contains(normalized, "procedure")
+		return signals.containsProcedure
 	case "owasp:sqli:026":
-		return strings.Contains(normalized, "utl_") || strings.Contains(normalized, "dbms_")
+		return signals.containsUTL || signals.containsDBMS
 	case "owasp:sqli:027":
-		return strings.Contains(normalized, "having")
+		return signals.containsHaving
 	case "owasp:sqli:028", "owasp:sqli:031", "owasp:sqli:038", "owasp:sqli:041", "owasp:sqli:046", "owasp:sqli:047":
-		return strings.Contains(normalized, "select")
+		return signals.containsSelect
 	case "owasp:sqli:029":
-		return strings.Contains(normalized, "like")
+		return signals.containsLike && strings.Contains(normalized, "'")
 	case "owasp:sqli:030", "owasp:sqli:033":
-		return strings.Contains(normalized, "limit") || strings.Contains(normalized, "offset")
+		return signals.containsLimit || signals.containsOffset
 	case "owasp:sqli:032":
-		return strings.Contains(normalized, "group")
+		return signals.containsGroup && strings.Contains(normalized, "by")
+	case "owasp:sqli:034":
+		return signals.containsSemicolon && strings.Contains(normalized, "exec")
 	case "owasp:sqli:035":
-		return strings.Contains(normalized, "waitfor")
+		return signals.containsWaitfor
 	case "owasp:sqli:037":
-		return strings.Contains(normalized, "copy") || strings.Contains(normalized, "program")
+		return signals.containsCopy || signals.containsProgram
 	case "owasp:sqli:043":
-		return strings.Contains(normalized, "chr")
+		return signals.containsChr && strings.Count(normalized, "chr") >= 2 && (strings.Contains(normalized, "+") || strings.Contains(normalized, "||"))
 	case "owasp:sqli:044":
-		return strings.Contains(normalized, "utl_inaddr")
+		return signals.containsUTLInaddr
 	case "owasp:sqli:048":
-		return strings.Contains(normalized, "master")
+		return signals.containsMaster
 	case "owasp:sqli:049", "owasp:sqli:053":
-		return strings.ContainsAny(normalized, "ｓＳ")
+		return signals.containsFullwidthS
+	case "owasp:sqli:050", "owasp:sqli:051", "owasp:sqli:052":
+		return signals.containsComment
 	case "owasp:sqli:054":
-		return strings.Contains(normalized, "%25")
+		return signals.containsDoubleURLEncode
 	default:
 		return true
 	}
+}
+
+func hasSQLiIfFunctionPattern(normalized string) bool {
+	search := 0
+	for search < len(normalized) {
+		idx := strings.Index(normalized[search:], "if")
+		if idx < 0 {
+			return false
+		}
+		start := search + idx
+		if !hasSQLWordAt(normalized, start, "if") {
+			search = start + 1
+			continue
+		}
+		pos := skipSQLSpaces(normalized, start+len("if"))
+		if pos >= len(normalized) || normalized[pos] != '(' {
+			search = start + 1
+			continue
+		}
+		pos = skipSQLSpaces(normalized, pos+1)
+		if hasSQLWordAt(normalized, pos, "select") ||
+			hasSQLWordAt(normalized, pos, "ord") ||
+			hasSQLWordAt(normalized, pos, "ascii") ||
+			hasSQLWordAt(normalized, pos, "substr") ||
+			hasSQLWordAt(normalized, pos, "length") ||
+			hasSQLWordAt(normalized, pos, "count") ||
+			hasSQLWordAt(normalized, pos, "version") {
+			return true
+		}
+		search = start + 1
+	}
+	return false
+}
+
+func hasSQLiFunctionCallPattern(normalized, name string) bool {
+	search := 0
+	for search < len(normalized) {
+		idx := strings.Index(normalized[search:], name)
+		if idx < 0 {
+			return false
+		}
+		pos := search + idx + len(name)
+		for pos < len(normalized) && isSQLiRegexpSpaceByte(normalized[pos]) {
+			pos++
+		}
+		if pos < len(normalized) && normalized[pos] == '(' {
+			return true
+		}
+		search += idx + 1
+	}
+	return false
+}
+
+func hasSQLiHexLiteralPattern(normalized string) bool {
+	for i := 0; i < len(normalized); i++ {
+		switch normalized[i] {
+		case ',', '=', '(':
+			pos := i + 1
+			for pos < len(normalized) && isSQLiRegexpSpaceByte(normalized[pos]) {
+				pos++
+			}
+			if pos+6 > len(normalized) || normalized[pos] != '0' || normalized[pos+1] != 'x' {
+				continue
+			}
+			hexStart := pos + 2
+			hexEnd := hexStart
+			for hexEnd < len(normalized) && isLowerSQLHexByte(normalized[hexEnd]) {
+				hexEnd++
+			}
+			if hexEnd-hexStart >= 4 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSQLiRegexpSpaceByte(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\f' || b == '\r'
+}
+
+func isLowerSQLHexByte(b byte) bool {
+	return isASCIIDigitByte(b) || (b >= 'a' && b <= 'f')
+}
+
+func hasSQLBooleanNumericComparison(s string) bool {
+	for i := 0; i < len(s); i++ {
+		end, ok := sqlBooleanOperatorEndAt(s, i)
+		if !ok {
+			continue
+		}
+		j := skipSQLSpaces(s, end)
+		if j >= len(s) || !isASCIIDigitByte(s[j]) {
+			continue
+		}
+		for j < len(s) && isASCIIDigitByte(s[j]) {
+			j++
+		}
+		j = skipSQLSpaces(s, j)
+		if j >= len(s) || s[j] != '=' {
+			continue
+		}
+		j = skipSQLSpaces(s, j+1)
+		if j < len(s) && isASCIIDigitByte(s[j]) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSQLBooleanQuotedComparison(s string) bool {
+	for i := 0; i < len(s); i++ {
+		end, ok := sqlBooleanOperatorEndAt(s, i)
+		if !ok || end >= len(s) {
+			continue
+		}
+		j := skipSQLSpaces(s, end)
+		if j == end {
+			continue
+		}
+		next, ok := scanSQLQuotedWord(s, j)
+		if !ok {
+			continue
+		}
+		j = skipSQLSpaces(s, next)
+		if j >= len(s) || s[j] != '=' {
+			continue
+		}
+		j = skipSQLSpaces(s, j+1)
+		if _, ok := scanSQLQuotedWord(s, j); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSQLBooleanEmptyQuotedComparison(s string) bool {
+	for i := 0; i < len(s); i++ {
+		end, ok := sqlBooleanOperatorEndAt(s, i)
+		if !ok || end >= len(s) {
+			continue
+		}
+		j := skipSQLSpaces(s, end)
+		if j == end || j+1 >= len(s) || !isSQLQuoteByte(s[j]) || !isSQLQuoteByte(s[j+1]) {
+			continue
+		}
+		j = skipSQLSpaces(s, j+2)
+		if j >= len(s) || s[j] != '=' {
+			continue
+		}
+		j = skipSQLSpaces(s, j+1)
+		if j < len(s) && isSQLQuoteByte(s[j]) {
+			return true
+		}
+	}
+	return false
+}
+
+func sqlBooleanOperatorEndAt(s string, i int) (int, bool) {
+	if i > 0 && isSQLWordByte(s[i-1]) {
+		return 0, false
+	}
+	switch {
+	case i+2 <= len(s) && s[i:i+2] == "or":
+		return i + 2, true
+	case i+3 <= len(s) && s[i:i+3] == "and":
+		return i + 3, true
+	default:
+		return 0, false
+	}
+}
+
+func scanSQLQuotedWord(s string, i int) (int, bool) {
+	if i >= len(s) || !isSQLQuoteByte(s[i]) {
+		return 0, false
+	}
+	i++
+	for i < len(s) && isSQLWordByte(s[i]) {
+		i++
+	}
+	if i >= len(s) || !isSQLQuoteByte(s[i]) {
+		return 0, false
+	}
+	return i + 1, true
+}
+
+func isSQLQuoteByte(b byte) bool {
+	return b == '\'' || b == '"'
+}
+
+func isASCIIDigitByte(b byte) bool {
+	return b >= '0' && b <= '9'
 }
 
 func nextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
@@ -2895,28 +4592,26 @@ func nextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
 	if !hasSQLiIndicator(normalized) {
 		return OWASPHit{}, false
 	}
-	containsSelect := strings.Contains(normalized, "select")
-	containsSemicolon := strings.Contains(normalized, ";")
-	containsComment := strings.Contains(normalized, "--") || strings.Contains(normalized, "/*") || strings.Contains(normalized, "/*!")
+	signals := collectSQLiPatternSignals(normalized)
 	total := 0
 	for _, p := range sqliPatterns {
 		if threshold > 3 {
 			switch p.id {
 			case "owasp:sqli:028", "owasp:sqli:031", "owasp:sqli:038", "owasp:sqli:041", "owasp:sqli:046", "owasp:sqli:047":
-				if !containsSelect {
+				if !signals.containsSelect {
 					continue
 				}
 			case "owasp:sqli:004", "owasp:sqli:006", "owasp:sqli:012", "owasp:sqli:034":
-				if !containsSemicolon {
+				if !signals.containsSemicolon {
 					continue
 				}
 			case "owasp:sqli:005", "owasp:sqli:050", "owasp:sqli:051", "owasp:sqli:052":
-				if !containsComment {
+				if !signals.containsComment {
 					continue
 				}
 			}
 		}
-		if !shouldScanSQLiPattern(normalized, p) {
+		if !shouldScanSQLiPatternWithSignals(normalized, p, signals) {
 			continue
 		}
 		if !p.re.MatchString(normalized) {
@@ -2935,13 +4630,61 @@ func nextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
+func shouldScanXSSPattern(normalized string, p owaspPattern) bool {
+	if p.hint != "" && !strings.Contains(normalized, p.hint) {
+		return false
+	}
+	switch p.id {
+	case "owasp:xss:002":
+		return strings.Contains(normalized, "=")
+	case "owasp:xss:011":
+		return strings.Contains(normalized, "(") && strings.ContainsAny(normalized, "'\"") && (strings.Contains(normalized, "eval") || strings.Contains(normalized, "settimeout") || strings.Contains(normalized, "setinterval"))
+	case "owasp:xss:013":
+		return strings.Contains(normalized, "&#") && strings.Contains(normalized, "script")
+	case "owasp:xss:014":
+		return strings.Contains(normalized, "<") && strings.Contains(normalized, "on") && strings.Contains(normalized, "=")
+	case "owasp:xss:015":
+		return (strings.Contains(normalized, "<embed") || strings.Contains(normalized, "<object")) && (strings.Contains(normalized, "data") || strings.Contains(normalized, "src")) && strings.Contains(normalized, "=")
+	case "owasp:xss:019":
+		return (strings.Contains(normalized, "fetch") || strings.Contains(normalized, "xmlhttprequest")) && strings.Contains(normalized, "(") && strings.Contains(normalized, "http")
+	case "owasp:xss:030":
+		return strings.Contains(normalized, "[") && strings.ContainsAny(normalized, "'\"`") && (strings.Contains(normalized, "window") || strings.Contains(normalized, "self") || strings.Contains(normalized, "top") || strings.Contains(normalized, "parent") || strings.Contains(normalized, "frames") || strings.Contains(normalized, "globalthis") || strings.Contains(normalized, "this"))
+	case "owasp:xss:031":
+		return strings.Contains(normalized, "[") && strings.Contains(normalized, "]") && strings.ContainsAny(normalized, "'\"`") && (strings.Contains(normalized, "alert") || strings.Contains(normalized, "eval") || strings.Contains(normalized, "prompt") || strings.Contains(normalized, "confirm") || strings.Contains(normalized, "settimeout") || strings.Contains(normalized, "setinterval") || strings.Contains(normalized, "atob") || strings.Contains(normalized, "btoa") || strings.Contains(normalized, "fetch") || strings.Contains(normalized, "open") || strings.Contains(normalized, "execscript"))
+	case "owasp:xss:033":
+		return strings.Contains(normalized, "(![]") || strings.Contains(normalized, "(!![]") || strings.Contains(normalized, "+{}") || strings.Contains(normalized, "+[]")
+	case "owasp:xss:034":
+		return strings.Contains(normalized, "+A")
+	case "owasp:xss:042":
+		return strings.Contains(normalized, "href") && (strings.Contains(normalized, "<animate") || strings.Contains(normalized, "<set") || strings.Contains(normalized, "<animatetransform"))
+	case "owasp:xss:045":
+		return strings.Contains(normalized, "(") && (strings.Contains(normalized, "alert") || strings.Contains(normalized, "confirm") || strings.Contains(normalized, "prompt"))
+	case "owasp:xss:052":
+		return strings.Contains(normalized, "[") && (strings.ContainsAny(normalized, "(/!+") || strings.Count(normalized, "[") >= 2) && (strings.Contains(normalized, "window") || strings.Contains(normalized, "self") || strings.Contains(normalized, "top") || strings.Contains(normalized, "parent") || strings.Contains(normalized, "frames") || strings.Contains(normalized, "globalthis") || strings.Contains(normalized, "this"))
+	case "owasp:xss:056":
+		return strings.Contains(normalized, ":") && strings.Contains(normalized, "j") && strings.Contains(normalized, "p") && strings.Contains(normalized, "t")
+	case "owasp:xss:058":
+		return (strings.Contains(normalized, "name") || strings.Contains(normalized, "id")) && (strings.Contains(normalized, "document") || strings.Contains(normalized, "window") || strings.Contains(normalized, "location") || strings.Contains(normalized, "navigator") || strings.Contains(normalized, "top") || strings.Contains(normalized, "self") || strings.Contains(normalized, "frames")) && (strings.Contains(normalized, "<form") || strings.Contains(normalized, "<input") || strings.Contains(normalized, "<img") || strings.Contains(normalized, "<a") || strings.Contains(normalized, "<embed") || strings.Contains(normalized, "<object"))
+	case "owasp:xss:061":
+		return (strings.Contains(normalized, "<math") || strings.Contains(normalized, "<svg")) && (strings.Contains(normalized, "<style") || strings.Contains(normalized, "<mglyph") || strings.Contains(normalized, "<malignmark"))
+	case "owasp:xss:063":
+		return strings.Contains(normalized, "on") && strings.Contains(normalized, "=") && (strings.Contains(normalized, "<animate") || strings.Contains(normalized, "<animatetransform") || strings.Contains(normalized, "<set"))
+	case "owasp:xss:065":
+		return strings.Contains(normalized, "<") && strings.Contains(normalized, ">") && (strings.Contains(normalized, "sanitize") || strings.Contains(normalized, "purify") || strings.Contains(normalized, "dompurify"))
+	case "owasp:xss:067":
+		return strings.Contains(normalized, ".") && strings.Contains(normalized, "(") && (strings.Contains(normalized, "alert") || strings.Contains(normalized, "prompt") || strings.Contains(normalized, "confirm"))
+	default:
+		return true
+	}
+}
+
 func nextXSSHit(normalized string, threshold int) (OWASPHit, bool) {
 	if !hasXSSIndicator(normalized) {
 		return OWASPHit{}, false
 	}
 	total := 0
 	for _, p := range xssPatterns {
-		if p.hint != "" && !strings.Contains(normalized, p.hint) {
+		if !shouldScanXSSPattern(normalized, p) {
 			continue
 		}
 		if !p.re.MatchString(normalized) {

@@ -15,8 +15,7 @@ func init() {
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
 			combined := strings.ToLower(uri + body)
-			if strings.Contains(combined, "__schema") || strings.Contains(combined, "__type") ||
-				strings.Contains(combined, "introspectionquery") {
+			if hasGraphQLIntrospectionSignalLower(combined) {
 				return &CVEMatch{
 					CVEID:       "CVE-2023-GRAPHQL",
 					Category:    "cve_general",
@@ -1100,84 +1099,112 @@ func generalRequestContainsAny(req *CVERequest, needles ...string) bool {
 func shouldScanGeneralRule(req *CVERequest, rule generalCVERule) bool {
 	switch rule.cveID {
 	case "CVE-2019-SSRF":
-		return generalRequestContainsAny(req, "http://", "https://", "file://", "169.254.169.254", "metadata.google", "localhost", "127.0.0.1", "10.", "172.16.", "192.168.")
+		return requestTargetContainsSSRF(req, rule.target)
 	case "CVE-2018-XXE":
-		return generalRequestContainsAny(req, "<!doctype", "<!entity", " system ", " public ")
+		return requestTargetContainsAny(req, rule.target, "<!doctype", "<!entity", " system ", " public ")
 	case "CVE-2019-PATHTRA":
-		return generalRequestContainsAny(req, "../", "..\\", "%2e", "%5c", "%00", "....//")
-	case "CVE-2019-CRLF", "CVE-2019-HEADER-INJECT":
-		return generalRequestContainsAny(req, "%0d", "%0a", "\r", "\n", "set-cookie:", "location:")
+		return requestTargetContainsAny(req, rule.target, "../", "..\\", "%2e", "%5c", "%00", "....//")
+	case "CVE-2019-CRLF":
+		return requestTargetContainsCRLF(req, rule.target)
+	case "CVE-2019-HEADER-INJECT":
+		return requestTargetContainsHeaderInject(req, rule.target)
 	case "CVE-2014-6271":
-		return generalRequestContainsAny(req, "() {", "};")
+		return requestTargetContainsAny(req, rule.target, "() {", "};")
 	case "CVE-2025-31324":
-		return generalRequestContainsAny(req, "metadatauploader", "irj/servlet")
+		return requestTargetContainsAny(req, rule.target, "metadatauploader", "irj/servlet")
 	case "CVE-2024-4577":
-		return generalRequestContainsAny(req, "%ad", "auto_prepend_file", "allow_url_include")
+		return requestTargetContainsPHPCGIArgInject(req, rule.target)
 	case "CVE-2024-3400":
-		return generalRequestContainsAny(req, "globalprotect", "sessid=", "../")
+		return requestTargetContainsPANOSGlobalProtect(req, rule.target)
 	case "CVE-2023-22527":
-		return generalRequestContainsAny(req, "confluence", "ognl", "template")
+		return requestTargetContainsAny(req, rule.target, "confluence", "ognl", "template")
 	case "CVE-2023-4966":
-		return generalRequestContainsAny(req, "vpn/index", "citrix", "../")
+		return requestTargetContainsAny(req, rule.target, "vpn/index", "citrix", "../")
 	case "CVE-2024-53677":
-		return generalRequestContainsAny(req, "struts", "../", "filename=", "upload")
+		return requestTargetContainsAny(req, rule.target, "top[\"")
 	case "CVE-2024-21887":
-		return generalRequestContainsAny(req, "api/v1/totp", "dana", "../", "ivanti")
+		return requestTargetContainsAny(req, rule.target, "api/v1/totp", "dana", "../", "ivanti")
 	case "CVE-2025-30208":
-		return generalRequestContainsAny(req, "@fs/", "raw??")
+		return requestTargetContainsAny(req, rule.target, "@fs/", "raw??")
 	case "CVE-2025-3248":
-		return generalRequestContainsAny(req, "validate/code", "__import__", "exec(", "system(")
+		return requestTargetContainsAny(req, rule.target, "validate/code", "__import__", "exec(", "system(")
 	case "CVE-2025-24893":
-		return generalRequestContainsAny(req, "solrsearch", "groovy", "media=rss")
+		return requestTargetContainsAny(req, rule.target, "solrsearch", "groovy", "media=rss")
 	case "CVE-2025-53770":
-		return generalRequestContainsAny(req, "toolpane.aspx", "signout.aspx", "spinstall0.aspx", "msotlpn_dwp", "__viewstate")
+		return requestTargetContainsAny(req, rule.target, "toolpane.aspx", "signout.aspx", "spinstall0.aspx", "msotlpn_dwp", "__viewstate")
 	case "CVE-2025-34028":
-		return generalRequestContainsAny(req, "deploywebpackage.do", "commcellname", "servicepack")
+		return requestHasCommvaultDeploySignal(req)
 	case "CVE-2026-21876":
-		return generalRequestContainsAny(req, "multipart/form-data", "charset=utf-7", "charset=utf-16", "charset=utf-32", "shift-jis", "iso-2022-jp")
+		return requestTargetContainsAny(req, rule.target, "multipart/form-data", "charset=utf-7", "charset=utf-16", "charset=utf-32", "shift-jis", "iso-2022-jp")
 	case "CVE-2025-47812":
-		return generalRequestContainsAny(req, "loginok.html", "%00", "io.popen", "lua")
+		return requestTargetContainsAny(req, rule.target, "loginok.html", "%00", "io.popen", "lua")
 	case "CVE-2025-4632":
-		return generalRequestContainsAny(req, "swupdatefileuploader", "filename=", "magicinfo")
+		return requestTargetContainsAny(req, rule.target, "swupdatefileuploader", "filename=", "magicinfo")
 	case "CVE-2025-64446":
-		return generalRequestContainsAny(req, "cgi-bin/fwbcgi", "cgiinfo", "fwbcgi")
+		return requestTargetContainsAny(req, rule.target, "cgi-bin/fwbcgi", "cgiinfo", "fwbcgi")
 	case "CVE-2025-10035":
-		return generalRequestContainsAny(req, "unlicensed.xhtml", "garequestaction=activate", "javax.faces.viewstate")
+		return requestTargetContainsAny(req, rule.target, "unlicensed.xhtml", "garequestaction=activate", "javax.faces.viewstate")
 	case "CVE-2025-41243":
-		return generalRequestContainsAny(req, "actuator/gateway", "addresponseheader", "#{", "spel")
+		return requestTargetContainsAny(req, rule.target, "actuator/gateway", "addresponseheader", "#{", "spel")
 	case "CVE-2025-47916":
-		return generalRequestContainsAny(req, "themeeditor", "customcss", "expression=")
+		return requestTargetContainsAny(req, rule.target, "themeeditor", "customcss", "expression=")
 	case "CVE-2025-31161":
-		return generalRequestContainsAny(req, "webinterface/function", "aws4-hmac-sha256", "crushftp")
+		return requestTargetContainsAny(req, rule.target, "webinterface/function", "aws4-hmac-sha256", "crushftp")
 	case "CVE-2025-32756":
-		return generalRequestContainsAny(req, "hostcheck_validate", "authhash")
+		return requestTargetContainsAny(req, rule.target, "hostcheck_validate", "authhash")
 	case "CVE-2024-SENSFILE":
-		return generalRequestContainsAny(req, "/.env", "/.git/config", "/.htaccess", "/wp-config.php", "/web.config", "/etc/passwd")
+		return requestTargetContainsAny(req, rule.target, "/.env", "/.git/config", "/.htaccess", "/wp-config.php", "/web.config", "/etc/passwd")
 	case "CVE-2017-8046":
-		return generalRequestContainsAny(req, "json-patch", "application/patch+json", "spel", "#{", "t(")
+		return requestTargetContainsAny(req, rule.target, "json-patch", "application/patch+json", "spel", "#{", "t(")
 	case "CVE-2023-1454":
-		return generalRequestContainsAny(req, "jeecg", "sys/", "select", "union", "updatexml", "extractvalue", "sleep(")
+		return requestTargetContainsAny(req, rule.target, "jeecg", "sys/", "select", "union", "updatexml", "extractvalue", "sleep(")
 	case "CVE-2021-21351":
-		return generalRequestContainsAny(req, "<java", "<sorted-set", "<dynamic-proxy", "xstream", "processbuilder", "runtime")
+		return requestTargetContainsAny(req, rule.target, "<java", "<sorted-set", "<dynamic-proxy", "xstream", "processbuilder", "runtime")
 	case "CVE-2019-3929":
-		return generalRequestContainsAny(req, "/cgi-bin/", "cgi", ";", "|", "`", "$(", "wget", "curl", "busybox")
+		return requestTargetContainsAny(req, rule.target, "/cgi-bin/", "cgi", ";", "|", "`", "$(", "wget", "curl", "busybox")
 	case "CVE-2024-JAVAINJ":
-		return generalRequestContainsAny(req, "ognl", "spel", "#{", "${", "runtime", "processbuilder", "class.forname", "javax.script")
+		return lowerTargetsHaveJavaInjectSignal(req.AllTargetsLower)
 	case "CVE-2024-REMOTECALL":
-		return generalRequestContainsAny(req, "jndi:", "ldap://", "rmi://", "iiop://", "jdbc:", "dns://")
+		return requestTargetContainsAny(req, rule.target, "jndi:", "ldap://", "rmi://", "iiop://", "jdbc:", "dns://")
 	case "CVE-2024-DEEPPATH":
-		return generalRequestContainsAny(req, "../", "..\\", "%2e", "%252e", "%5c", "%00", "/etc/passwd", "web.config")
+		return lowerTargetsHaveDeepPathTraversalSignal(req.AllTargetsLower)
 	case "CVE-2024-XXEUTF7":
-		return generalRequestContainsAny(req, "utf-7", "+adw-", "+adi-", "+afw-")
+		return requestTargetContainsAny(req, rule.target, "utf-7", "+adw-", "+adi-", "+afw-")
 	case "CVE-2024-LDAPI":
-		return generalRequestContainsAny(req, "objectclass=", ")(|", ")(uid=", "*)(", "ldap")
+		return requestTargetContainsAny(req, rule.target, "objectclass=", ")(|", ")(uid=", "*)(", "ldap")
 	case "CVE-2024-NOSQLI":
-		return generalRequestContainsAny(req, "$gt", "$ne", "$regex", "$where", "$or", "$and", "constructor", "__proto__")
+		return lowerTargetsHaveNoSQLInjectSignal(req.AllTargetsLower)
 	case "CVE-2024-LOWCMD":
-		return generalRequestContainsAny(req, ";", "|", "`", "$(", "whoami", "uname", "ifconfig", "ipconfig")
+		return requestTargetContainsAny(req, rule.target, ";", "|", "`", "$(", "whoami", "uname", "ifconfig", "ipconfig")
 	default:
 		return true
 	}
+}
+
+func requestTargetContainsSSRF(req *CVERequest, target string) bool {
+	return requestTargetContainsAny(req, target,
+		"://10.", "://172.16.", "://172.17.", "://172.18.", "://172.19.", "://172.2", "://172.30.", "://172.31.",
+		"://192.168.", "://127.0.0.", "://localhost", "169.254.169.254", "metadata.google.internal",
+		"file://", "://0.0.0.0", "://[::1", "://::1")
+}
+
+func requestTargetContainsCRLF(req *CVERequest, target string) bool {
+	return requestTargetContainsAny(req, target, "%0d%0a", "\r\n")
+}
+
+func requestTargetContainsHeaderInject(req *CVERequest, target string) bool {
+	return requestTargetContainsAny(req, target, "%0d%0a") &&
+		requestTargetContainsAny(req, target, "http/", "content-", "location:", "set-cookie")
+}
+
+func requestTargetContainsPHPCGIArgInject(req *CVERequest, target string) bool {
+	return requestTargetContainsAny(req, target, "allow_url_include", "auto_prepend_file") &&
+		requestTargetContainsAny(req, target, "%ad", "ad", "php://input")
+}
+
+func requestTargetContainsPANOSGlobalProtect(req *CVERequest, target string) bool {
+	return requestTargetContainsAny(req, target, "/ssl-vpn/hipreport.esp") ||
+		(requestTargetContainsAny(req, target, "sessid=") && requestTargetContainsAny(req, target, ".."))
 }
 
 func (d *GeneralCVEDetector) Detect(req *CVERequest) []CVEMatch {
@@ -1284,23 +1311,120 @@ func (d *GeneralCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	return matches
 }
 
+func (d *GeneralCVEDetector) DetectFirst(req *CVERequest) (CVEMatch, bool) {
+	if checkHTTPSmuggling(req) {
+		return CVEMatch{
+			CVEID:       "CVE-2023-SMUGGLE",
+			Category:    "general",
+			Severity:    "high",
+			Description: "HTTP request smuggling: Content-Length and Transfer-Encoding both present",
+			MatchedPart: "header",
+			Pattern:     "CL+TE simultaneous",
+			Action:      "drop",
+		}, true
+	}
+
+	allTargets := req.AllTargets
+	urlTargets := req.URLTargets
+	bodyTargets := req.BodyTargets
+	urlBodyTargets := req.URLBodyTargets
+	headerTargets := req.HeaderTargets
+
+	for _, rule := range d.rules {
+		if rule.cveID == "CVE-2024-SENSFILE" && isPackageManifestRequest(req.Path, req.Headers) {
+			continue
+		}
+		if rule.cveID == "CVE-2023-SMUGGLE" {
+			continue
+		}
+		if !shouldScanGeneralRule(req, rule) {
+			continue
+		}
+
+		var targets []string
+		switch rule.target {
+		case "url":
+			targets = urlTargets
+		case "body":
+			targets = bodyTargets
+		case "url_body":
+			targets = urlBodyTargets
+		case "header":
+			targets = headerTargets
+		default:
+			targets = allTargets
+		}
+		if len(targets) == 0 {
+			continue
+		}
+
+		if rule.matchAll {
+			matchedAll := true
+			for _, pat := range rule.patterns {
+				matched := false
+				for _, target := range targets {
+					if pat.MatchString(target) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					matchedAll = false
+					break
+				}
+			}
+			if matchedAll {
+				return CVEMatch{
+					CVEID:       rule.cveID,
+					Category:    "general",
+					Severity:    rule.severity,
+					Description: rule.description,
+					MatchedPart: rule.target,
+					Pattern:     "conjunction match",
+					Action:      "drop",
+				}, true
+			}
+			continue
+		}
+
+		for _, t := range targets {
+			for _, pat := range rule.patterns {
+				if pat.MatchString(t) {
+					part := rule.target
+					if part == "all" {
+						part = guessMatchedPart(req, t)
+					}
+					return CVEMatch{
+						CVEID:       rule.cveID,
+						Category:    "general",
+						Severity:    rule.severity,
+						Description: rule.description,
+						MatchedPart: part,
+						Pattern:     pat.String(),
+						Action:      "drop",
+					}, true
+				}
+			}
+		}
+	}
+	return CVEMatch{}, false
+}
+
 // checkHTTPSmuggling detects when both Content-Length and Transfer-Encoding headers
 // are present simultaneously, or TE contains malformed values.
 func checkHTTPSmuggling(req *CVERequest) bool {
 	hasCL := false
 	hasTE := false
 	for k, v := range req.Headers {
-		kl := strings.ToLower(k)
-		if kl == "content-length" {
+		switch {
+		case strings.EqualFold(k, "content-length"):
 			hasCL = true
-		}
-		if kl == "transfer-encoding" {
+		case strings.EqualFold(k, "transfer-encoding"):
 			hasTE = true
-			// Check for obfuscated chunked value.
 			vl := strings.ToLower(v)
 			if strings.Contains(vl, " chunked") || strings.Contains(vl, "\tchunked") ||
 				strings.Contains(vl, "chunked ") || strings.Contains(vl, ",chunked") {
-				return true // obfuscated TE
+				return true
 			}
 		}
 	}

@@ -70,6 +70,38 @@ func ValidateRuleAction(value string) (string, bool) {
 	return string(act), true
 }
 
+// ValidateActionWithoutRedirectTarget validates actions for config fields that
+// do not carry a redirect_to target.
+func ValidateActionWithoutRedirectTarget(value string) (string, bool) {
+	normalized, ok := ValidateRuleAction(value)
+	if !ok {
+		return "", false
+	}
+	if action.Normalize(action.Type(normalized)) == action.Redirect {
+		return "", false
+	}
+	return normalized, true
+}
+
+// ValidateAntiReplayAction validates the actions preserved by the anti-replay dataplane path.
+func ValidateAntiReplayAction(value string) (string, bool) {
+	if value == "" {
+		return "", true
+	}
+	act := action.Normalize(action.Type(value))
+	switch act {
+	case action.Challenge, action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge, action.Intercept:
+		return string(act), true
+	default:
+		return "", false
+	}
+}
+
+// ValidateBotScoreThreshold checks the shared bot/drop threshold range.
+func ValidateBotScoreThreshold(value int) bool {
+	return value >= 1 && value <= 100
+}
+
 // ReloadCVERules triggers a CVE rule reload on the feed manager if it is not nil.
 func ReloadCVERules(feedMgr *cve.CVEFeedManager) {
 	if feedMgr != nil {

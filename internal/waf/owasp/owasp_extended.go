@@ -189,7 +189,7 @@ func shouldScanCmdPattern(s string, p owaspPattern) bool {
 	}
 	switch p.id {
 	case "owasp:cmd:001":
-		return strings.ContainsAny(s, ";|&")
+		return hasShellCommandAfterCmdSeparator(s)
 	case "owasp:cmd:002", "owasp:cmd:024":
 		return strings.Contains(s, "`")
 	case "owasp:cmd:003", "owasp:cmd:022":
@@ -201,13 +201,15 @@ func shouldScanCmdPattern(s string, p owaspPattern) bool {
 	case "owasp:cmd:006":
 		return strings.Contains(s, "%00") || strings.Contains(s, "\x00") || strings.Contains(s, "%0a") || strings.Contains(s, "%0d") || strings.Contains(s, "\x0a") || strings.Contains(s, "\x0d")
 	case "owasp:cmd:007":
-		return strings.Contains(s, ";")
-	case "owasp:cmd:008", "owasp:cmd:015":
-		return strings.Contains(s, "|")
+		return hasDiscoveryCommandBeforeSemicolon(s)
+	case "owasp:cmd:008":
+		return hasShellCommandAfterPipe(s)
+	case "owasp:cmd:015":
+		return hasPipeAfterCmdOutputTransform(s)
 	case "owasp:cmd:010":
-		return strings.Contains(s, "=")
+		return hasEnvAssignmentBeforeCommand(s)
 	case "owasp:cmd:011":
-		return strings.Contains(s, "&&") || strings.Contains(s, "||")
+		return hasShellCommandAfterLogicalSeparator(s)
 	case "owasp:cmd:013":
 		return strings.Contains(s, "<<<")
 	case "owasp:cmd:014":
@@ -225,6 +227,164 @@ func shouldScanCmdPattern(s string, p owaspPattern) bool {
 	default:
 		return true
 	}
+}
+
+func hasDiscoveryCommandBeforeSemicolon(s string) bool {
+	for semi := strings.IndexByte(s, ';'); semi >= 0; {
+		start := semi - 1
+		for start >= 0 && (s[start] == ' ' || s[start] == '\t') {
+			start--
+		}
+		end := start + 1
+		for start >= 0 && isCmdWordByte(s[start]) {
+			start--
+		}
+		word := s[start+1 : end]
+		switch word {
+		case "id", "uname", "whoami", "hostname", "ifconfig", "ipconfig":
+			return true
+		}
+		next := semi + 1
+		if next >= len(s) {
+			return false
+		}
+		rest := s[next:]
+		nextSemi := strings.IndexByte(rest, ';')
+		if nextSemi < 0 {
+			return false
+		}
+		semi = next + nextSemi
+	}
+	return false
+}
+
+func hasEnvAssignmentBeforeCommand(s string) bool {
+	for eq := strings.IndexByte(s, '='); eq >= 0; {
+		if hasEnvAssignmentCommandAfter(s, eq+1) {
+			return true
+		}
+		next := eq + 1
+		if next >= len(s) {
+			return false
+		}
+		rest := s[next:]
+		nextEq := strings.IndexByte(rest, '=')
+		if nextEq < 0 {
+			return false
+		}
+		eq = next + nextEq
+	}
+	return false
+}
+
+func hasEnvAssignmentCommandAfter(s string, offset int) bool {
+	i := offset
+	for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n' && s[i] != '&' && s[i] != ';' && s[i] != '|' {
+		i++
+	}
+	if i == offset || i >= len(s) {
+		return false
+	}
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	start := i
+	for i < len(s) && isCmdWordByte(s[i]) {
+		i++
+	}
+	if start == i {
+		return false
+	}
+	switch s[start:i] {
+	case "cat", "id", "whoami", "curl", "wget", "bash", "sh", "python", "perl", "ruby", "php":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasPipeAfterCmdOutputTransform(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 'b':
+			if hasWordSpaceThenPrefixBeforePipe(s, i, "base64", "-d") {
+				return true
+			}
+		case 'd':
+			if hasWordSpaceThenPrefixBeforePipe(s, i, "dd", "if=") {
+				return true
+			}
+		case 't':
+			if hasWordSpaceThenPrefixBeforePipe(s, i, "tee", "/tmp") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasWordSpaceThenPrefixBeforePipe(s string, offset int, word, next string) bool {
+	if offset > 0 && isCmdWordByte(s[offset-1]) {
+		return false
+	}
+	if len(s)-offset < len(word) || s[offset:offset+len(word)] != word {
+		return false
+	}
+	i := offset + len(word)
+	if i >= len(s) || (s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n') {
+		return false
+	}
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') {
+		i++
+	}
+	if len(s)-i < len(next) || s[i:i+len(next)] != next {
+		return false
+	}
+	return strings.Contains(s[i+len(next):], "|")
+}
+
+func hasShellCommandAfterCmdSeparator(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ';', '|', '&':
+			if hasShellCommandAtCmdOffset(s, i+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasShellCommandAfterPipe(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '|' && hasShellCommandAtCmdOffset(s, i+1) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasShellCommandAfterLogicalSeparator(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if ((s[i] == '&' && s[i+1] == '&') || (s[i] == '|' && s[i+1] == '|')) && hasShellCommandAtCmdOffset(s, i+2) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasShellCommandAtCmdOffset(s string, i int) bool {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	start := i
+	for i < len(s) && isCmdWordByte(s[i]) {
+		i++
+	}
+	if start == i || !isShellCommandWord(s[start:i]) {
+		return false
+	}
+	return i == len(s) || s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n' || s[i] == ';' || s[i] == '|' || s[i] == '&' || s[i] == '`'
 }
 
 func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
@@ -700,8 +860,8 @@ func hasDeserializationIndicator(s string) bool {
 	return strings.Contains(s, "\xac\xed\x00\x05") ||
 		strings.Contains(s, "aced0005") ||
 		strings.Contains(s, "ro0ab") ||
-		strings.Contains(s, "o:") ||
-		strings.Contains(s, "s:") ||
+		hasPHPSerializedObjectIndicator(s) ||
+		hasPHPSerializedStringPairIndicator(s) ||
 		strings.Contains(s, "ysoserial") ||
 		strings.Contains(s, "aaeaaad//") ||
 		strings.Contains(s, "nd_func") ||
@@ -717,6 +877,65 @@ func hasDeserializationIndicator(s string) bool {
 		strings.Contains(s, "org.apache.commons.collections") ||
 		strings.Contains(s, "readobject") ||
 		strings.Contains(s, "deserializ")
+}
+
+func hasPHPSerializedObjectIndicator(s string) bool {
+	for i := 0; i+3 < len(s); i++ {
+		if s[i] != 'o' || s[i+1] != ':' {
+			continue
+		}
+		j := i + 2
+		if j >= len(s) || !isASCIIDigitByte(s[j]) {
+			continue
+		}
+		for j < len(s) && isASCIIDigitByte(s[j]) {
+			j++
+		}
+		if j+1 < len(s) && s[j] == ':' && s[j+1] == '"' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPHPSerializedStringPairIndicator(s string) bool {
+	for i := 0; i+5 < len(s); i++ {
+		if s[i] != 's' || s[i+1] != ':' {
+			continue
+		}
+		j := i + 2
+		if j >= len(s) || !isASCIIDigitByte(s[j]) {
+			continue
+		}
+		for j < len(s) && isASCIIDigitByte(s[j]) {
+			j++
+		}
+		if j+1 >= len(s) || s[j] != ':' || s[j+1] != '"' {
+			continue
+		}
+		contentStart := j + 2
+		for endQuote := contentStart; endQuote < len(s); endQuote++ {
+			if s[endQuote] != '"' {
+				continue
+			}
+			next := endQuote + 1
+			if next+3 >= len(s) || s[next] != ';' || s[next+1] != 's' || s[next+2] != ':' {
+				break
+			}
+			k := next + 3
+			if k >= len(s) || !isASCIIDigitByte(s[k]) {
+				break
+			}
+			for k < len(s) && isASCIIDigitByte(s[k]) {
+				k++
+			}
+			if k < len(s) && s[k] == ':' {
+				return true
+			}
+			break
+		}
+	}
+	return false
 }
 
 func checkCRLF(s string, threshold int) (OWASPHit, bool) {

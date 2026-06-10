@@ -49,6 +49,16 @@ func (r *SiteRepo) CountByCertID(certID uint) (int64, error) {
 	return count, err
 }
 
+func (r *SiteRepo) ApplyCertificate(siteIDs []uint, certID uint) (int64, error) {
+	if len(siteIDs) == 0 {
+		return 0, nil
+	}
+	tx := r.db.Model(&store.Site{}).
+		Where("id IN ?", siteIDs).
+		Updates(map[string]any{"tls_enabled": true, "cert_id": certID})
+	return tx.RowsAffected, tx.Error
+}
+
 func (r *SiteRepo) CountByPolicyID(policyID uint) (int64, error) {
 	var count int64
 	err := r.db.Model(&store.Site{}).Where("policy_id = ?", policyID).Count(&count).Error

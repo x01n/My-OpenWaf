@@ -88,3 +88,20 @@ func TestDropExecutor_Enabled(t *testing.T) {
 		t.Error("expected enabled after SetEnabled(true)")
 	}
 }
+
+func TestShouldLogConnectionDropCount(t *testing.T) {
+	cases := map[uint64]bool{
+		1:    true,
+		16:   true,
+		17:   false,
+		1023: false,
+		1024: true,
+		1025: false,
+		2048: true,
+	}
+	for count, want := range cases {
+		if got := shouldLogConnectionDropCount(count); got != want {
+			t.Fatalf("shouldLogConnectionDropCount(%d) = %v, want %v", count, got, want)
+		}
+	}
+}

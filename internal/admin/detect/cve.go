@@ -54,7 +54,7 @@ func CreateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) ap
 			}
 		}
 
-		if normalized, ok := shared.ValidateRuleAction(item.Action); !ok {
+		if normalized, ok := shared.ValidateActionWithoutRedirectTarget(item.Action); !ok {
 			c.JSON(400, map[string]string{"error": "invalid action"})
 			return
 		} else if normalized != "" {
@@ -119,7 +119,7 @@ func UpdateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) ap
 			existing.Severity = req.Severity
 		}
 		if req.Action != "" {
-			if normalized, ok := shared.ValidateRuleAction(req.Action); ok {
+			if normalized, ok := shared.ValidateActionWithoutRedirectTarget(req.Action); ok {
 				existing.Action = normalized
 			} else {
 				c.JSON(400, map[string]string{"error": "invalid action"})

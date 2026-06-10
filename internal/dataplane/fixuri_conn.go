@@ -37,18 +37,11 @@ func (c *FixURIConn) ConnectionState() tls.ConnectionState {
 }
 
 func (c *FixURIConn) TLSFingerprint() (bot.TLSClientFingerprint, bool) {
-	if carrier, ok := c.Conn.(interface {
-		TLSFingerprint() (bot.TLSClientFingerprint, bool)
-	}); ok {
-		return carrier.TLSFingerprint()
-	}
-	return bot.TLSClientFingerprint{}, false
+	return bot.TLSFingerprintFromConn(c.Conn)
 }
 
-func (c *FixURIConn) SetTLSHandshakeInfo(version string, alpn string) {
-	if setter, ok := c.Conn.(interface{ SetTLSHandshakeInfo(string, string) }); ok {
-		setter.SetTLSHandshakeInfo(version, alpn)
-	}
+func (c *FixURIConn) SetTLSHandshakeInfo(version string, sni string, alpn string) {
+	setTLSHandshakeInfoOnConn(c.Conn, version, sni, alpn)
 }
 
 func (c *FixURIConn) Read(b []byte) (int, error) {

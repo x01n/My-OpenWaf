@@ -104,6 +104,55 @@ func TestMatchSiteMatchesWithinCurrentBind(t *testing.T) {
 	}
 }
 
+func TestMatchSiteIPDetectionAvoidsWildcardForAddresses(t *testing.T) {
+	sn := &Snapshot{
+		Sites: map[string]SiteRuntime{
+			SiteMapKey(":443", "*.0.0.1"):       testSiteRuntime(1, ":443", "*.0.0.1"),
+			SiteMapKey(":443", "*.example.com"): testSiteRuntime(2, ":443", "*.example.com"),
+		},
+	}
+
+	tests := []struct {
+		name   string
+		host   string
+		wantOK bool
+		wantID uint
+	}{
+		{name: "domain still uses wildcard", host: "api.example.com", wantOK: true, wantID: 2},
+		{name: "ipv4 does not use wildcard", host: "127.0.0.1", wantOK: false},
+		{name: "normalized ipv4 with port does not use wildcard", host: "127.0.0.1:443", wantOK: false},
+		{name: "invalid dotted numeric host can use wildcard", host: "300.0.0.1", wantOK: true, wantID: 1},
+		{name: "domain with non ip letters bypasses ip parsing", host: "feed.example.com", wantOK: true, wantID: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := sn.MatchSite(":443", tt.host)
+			if ok != tt.wantOK {
+				t.Fatalf("MatchSite(%q, %q) ok=%v, want %v", ":443", tt.host, ok, tt.wantOK)
+			}
+			if ok && got.Site.ID != tt.wantID {
+				t.Fatalf("MatchSite(%q, %q) = site %d, want %d", ":443", tt.host, got.Site.ID, tt.wantID)
+			}
+		})
+	}
+}
+
+func BenchmarkMatchSiteNoMatchDomainHost(b *testing.B) {
+	sn := &Snapshot{
+		Sites: map[string]SiteRuntime{
+			SiteMapKey(":443", "app.example.com"): testSiteRuntime(1, ":443", "app.example.com"),
+		},
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, ok := sn.MatchSite(":443", "missing.example.com"); ok {
+			b.Fatal("unexpected site match")
+		}
+	}
+}
+
 func TestMatchSiteDoesNotFallbackAcrossBinds(t *testing.T) {
 	sn := &Snapshot{
 		Sites: map[string]SiteRuntime{
@@ -400,6 +449,17 @@ func TestBuildExcludesDisabledApplicationRouteRules(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsInvalidProtectionJSON(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{Key: "protection", Value: `{"cve_enabled":`}).Error; err != nil {
+		t.Fatalf("seed invalid protection config: %v", err)
+	}
+
+	if _, err := Build(db, 1); err == nil || !strings.Contains(err.Error(), "invalid protection config JSON") {
+		t.Fatalf("Build should reject invalid protection JSON, got %v", err)
+	}
+}
+
 func TestCompileCCRulesBuildsCompoundCustomRule(t *testing.T) {
 	protection := store.ProtectionConfig{
 		CCUseCustom: true,
@@ -537,6 +597,39 @@ func TestCompileCCRulesBuildsSinglePathRule(t *testing.T) {
 	}
 	if rules[0].Action != store.ActionObserve {
 		t.Fatalf("action = %q, want %q", rules[0].Action, store.ActionObserve)
+	}
+}
+
+func TestCompileCCRulesKeepsSpecificChallengeAndRateLimitActions(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want store.RuleAction
+	}{
+		{name: "captcha challenge", raw: "captcha_challenge", want: store.ActionCaptchaChallenge},
+		{name: "shield challenge", raw: "shield_challenge", want: store.ActionShieldChallenge},
+		{name: "chain challenge", raw: "chain_challenge", want: store.ActionChainChallenge},
+		{name: "rate limit", raw: "rate_limit", want: store.ActionRateLimit},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			protection := store.ProtectionConfig{
+				CCUseCustom: true,
+				CCRules: `[{
+					"action":"` + tt.raw + `",
+					"conditions":[{"target":"url_path","operator":"equals","value":"/login"}]
+				}]`,
+			}
+
+			rules := compileCCRules(protection)
+			if len(rules) != 1 {
+				t.Fatalf("compileCCRules() returned %d rules, want 1", len(rules))
+			}
+			if rules[0].Action != tt.want {
+				t.Fatalf("action = %q, want %q", rules[0].Action, tt.want)
+			}
+		})
 	}
 }
 

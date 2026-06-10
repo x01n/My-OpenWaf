@@ -55,6 +55,16 @@ func (r *SiteListenerRepo) CountByCertID(certID uint) (int64, error) {
 	return count, err
 }
 
+func (r *SiteListenerRepo) ApplyCertificateToTLSListeners(siteIDs []uint, certID uint) (int64, error) {
+	if len(siteIDs) == 0 {
+		return 0, nil
+	}
+	tx := r.db.Model(&store.SiteListener{}).
+		Where("site_id IN ? AND tls_enabled = ?", siteIDs, true).
+		Updates(map[string]any{"cert_id": certID})
+	return tx.RowsAffected, tx.Error
+}
+
 func (r *SiteListenerRepo) CreateWithLegacyPromotion(item *store.SiteListener, legacy *store.SiteListener) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if legacy != nil {

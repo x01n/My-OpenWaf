@@ -62,6 +62,10 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if req.ScoreThreshold != nil && !shared.ValidateBotScoreThreshold(*req.ScoreThreshold) {
+			c.JSON(400, map[string]string{"error": "score_threshold must be between 1 and 100"})
+			return
+		}
 
 		// Load current settings
 		current := defaultBotSettingsResponse(settingsRepo)
@@ -120,6 +124,17 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 	}
 }
 
+func GetBotStats(repo *repository.BotScoreRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		stats, err := repo.Stats24h()
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		c.JSON(200, stats)
+	}
+}
+
 func GetBotScores(repo *repository.BotScoreRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -134,6 +149,7 @@ func GetBotScores(repo *repository.BotScoreRepo) app.HandlerFunc {
 			RequestID: c.DefaultQuery("request_id", ""),
 			JA3Hash:   c.DefaultQuery("ja3_hash", ""),
 			JA4:       c.DefaultQuery("ja4", ""),
+			TLSSNI:    c.DefaultQuery("tls_sni", ""),
 		}
 		if v := c.DefaultQuery("high_risk", ""); v != "" {
 			if b, err := strconv.ParseBool(v); err == nil {

@@ -17,6 +17,10 @@ func newFixURIHertzConn(conn net.Conn) *fixURIHertzConn {
 	return &fixURIHertzConn{Conn: conn}
 }
 
+func (c *fixURIHertzConn) NetConn() net.Conn {
+	return c.Conn
+}
+
 func (c *fixURIHertzConn) Read(b []byte) (int, error) {
 	if len(c.readBuf) > 0 {
 		n := copy(b, c.readBuf)
@@ -138,4 +142,8 @@ func (c *fixURIHertzConn) ConnectionState() tls.ConnectionState {
 		return tlsConn.ConnectionState()
 	}
 	return tls.ConnectionState{}
+}
+
+func (c *fixURIHertzConn) SetTLSHandshakeInfo(version string, sni string, alpn string) {
+	setTLSHandshakeInfoOnConn(c.Conn, version, sni, alpn)
 }

@@ -145,6 +145,12 @@ func NormalizeMatchHost(host string) string {
 
 // isIPAddress checks whether the host string is an IP address (v4 or v6).
 func isIPAddress(host string) bool {
+	for _, ch := range host {
+		if ch == '.' || ch == ':' || (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') {
+			continue
+		}
+		return false
+	}
 	return net.ParseIP(host) != nil
 }
 

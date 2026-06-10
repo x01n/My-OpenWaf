@@ -14,9 +14,10 @@ import (
 )
 
 type DashboardDeps struct {
-	Metrics *dataplane.Metrics
-	DB      *gorm.DB
-	Cache   *cache.RedisKV
+	Metrics  *dataplane.Metrics
+	ConfigDB *gorm.DB
+	LogDB    *gorm.DB
+	Cache    *cache.RedisKV
 }
 
 const dashboardCacheKey = "dashboard:summary"
@@ -24,62 +25,7 @@ const dashboardCacheTTL = 10 * time.Second
 
 func DashboardSummary(d *DashboardDeps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		// Real-time metrics (always fresh, no cache).
-		s := d.Metrics.Summary()
-		rev, _ := store.CurrentRevision(d.DB)
-
-		// Try Redis cache for expensive DB aggregation stats.
-		var cached dashboardDBStats
-		if d.Cache != nil && d.Cache.GetJSON(dashboardCacheKey, &cached) {
-			c.JSON(200, buildDashboardResponse(s, rev, cached))
-			return
-		}
-
-		// Cache miss: query DB.
-		since24h := time.Now().Add(-24 * time.Hour)
-		var botTotal24h, botBlocked24h, botHighRisk24h int64
-		d.DB.Model(&store.BotScoreLog{}).Where("created_at >= ?", since24h).Count(&botTotal24h)
-		d.DB.Model(&store.BotScoreLog{}).Where("created_at >= ? AND action IN ('block','drop')", since24h).Count(&botBlocked24h)
-		d.DB.Model(&store.BotScoreLog{}).Where("created_at >= ? AND is_high_risk = ?", since24h, true).Count(&botHighRisk24h)
-
-		var cveTotal24h int64
-		d.DB.Model(&store.SecurityEvent{}).Where("created_at >= ? AND category = 'cve'", since24h).Count(&cveTotal24h)
-
-		var cveByType []cveCatStat
-		d.DB.Model(&store.SecurityEvent{}).
-			Select("phase as category, COUNT(*) as count").
-			Where("created_at >= ? AND category = 'cve'", since24h).
-			Group("phase").
-			Scan(&cveByType)
-
-		var dropTotal24h, dropByBot, dropByCVE, dropByRule, dropByIPRep int64
-		d.DB.Model(&store.DropEvent{}).Where("created_at >= ?", since24h).Count(&dropTotal24h)
-		d.DB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'bot'", since24h).Count(&dropByBot)
-		d.DB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'cve'", since24h).Count(&dropByCVE)
-		d.DB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'rule'", since24h).Count(&dropByRule)
-		d.DB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'ip_reputation'", since24h).Count(&dropByIPRep)
-
-		stats := dashboardDBStats{
-			BotTotal24h:    botTotal24h,
-			BotBlocked24h:  botBlocked24h,
-			BotHighRisk24h: botHighRisk24h,
-			CVETotal24h:    cveTotal24h,
-			CVEByType:      cveByType,
-			DropTotal24h:   dropTotal24h,
-			DropBySource: map[string]int64{
-				"bot":           dropByBot,
-				"cve":           dropByCVE,
-				"rule":          dropByRule,
-				"ip_reputation": dropByIPRep,
-			},
-		}
-
-		// Store in Redis cache.
-		if d.Cache != nil {
-			_ = d.Cache.SetJSON(dashboardCacheKey, stats, dashboardCacheTTL)
-		}
-
-		c.JSON(200, buildDashboardResponse(s, rev, stats))
+		c.JSON(200, BuildDashboardSnapshot(d))
 	}
 }
 
@@ -121,4 +67,57 @@ func buildDashboardResponse(s dataplane.Summary, rev uint64, ds dashboardDBStats
 		"drop_total_24h":      ds.DropTotal24h,
 		"drop_by_source_24h":  ds.DropBySource,
 	}
+}
+
+func BuildDashboardSnapshot(d *DashboardDeps) map[string]any {
+	s := d.Metrics.Summary()
+	rev, _ := store.CurrentRevision(d.ConfigDB)
+
+	var cached dashboardDBStats
+	if d.Cache != nil && d.Cache.GetJSON(dashboardCacheKey, &cached) {
+		return buildDashboardResponse(s, rev, cached)
+	}
+
+	since24h := time.Now().Add(-24 * time.Hour)
+	var botTotal24h, botBlocked24h, botHighRisk24h int64
+	d.LogDB.Model(&store.BotScoreLog{}).Where("created_at >= ?", since24h).Count(&botTotal24h)
+	d.LogDB.Model(&store.BotScoreLog{}).Where("created_at >= ? AND action IN ('block','drop')", since24h).Count(&botBlocked24h)
+	d.LogDB.Model(&store.BotScoreLog{}).Where("created_at >= ? AND is_high_risk = ?", since24h, true).Count(&botHighRisk24h)
+
+	var cveTotal24h int64
+	d.LogDB.Model(&store.SecurityEvent{}).Where("created_at >= ? AND category = 'cve'", since24h).Count(&cveTotal24h)
+
+	var cveByType []cveCatStat
+	d.LogDB.Model(&store.SecurityEvent{}).
+		Select("phase as category, COUNT(*) as count").
+		Where("created_at >= ? AND category = 'cve'", since24h).
+		Group("phase").
+		Scan(&cveByType)
+
+	var dropTotal24h, dropByBot, dropByCVE, dropByRule, dropByIPRep int64
+	d.LogDB.Model(&store.DropEvent{}).Where("created_at >= ?", since24h).Count(&dropTotal24h)
+	d.LogDB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'bot'", since24h).Count(&dropByBot)
+	d.LogDB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'cve'", since24h).Count(&dropByCVE)
+	d.LogDB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'rule'", since24h).Count(&dropByRule)
+	d.LogDB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'ip_reputation'", since24h).Count(&dropByIPRep)
+
+	stats := dashboardDBStats{
+		BotTotal24h:    botTotal24h,
+		BotBlocked24h:  botBlocked24h,
+		BotHighRisk24h: botHighRisk24h,
+		CVETotal24h:    cveTotal24h,
+		CVEByType:      cveByType,
+		DropTotal24h:   dropTotal24h,
+		DropBySource: map[string]int64{
+			"bot":           dropByBot,
+			"cve":           dropByCVE,
+			"rule":          dropByRule,
+			"ip_reputation": dropByIPRep,
+		},
+	}
+
+	if d.Cache != nil {
+		_ = d.Cache.SetJSON(dashboardCacheKey, stats, dashboardCacheTTL)
+	}
+	return buildDashboardResponse(s, rev, stats)
 }

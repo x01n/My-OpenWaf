@@ -27,6 +27,11 @@ func ListAccessLogs(repo *repository.AccessLogRepo) app.HandlerFunc {
 			WAFAction:   string(c.Query("waf_action")),
 			CacheState:  string(c.Query("cache_state")),
 			StatusGroup: string(c.Query("status_group")),
+			TLSVersion:  string(c.Query("tls_version")),
+			TLSSNI:      string(c.Query("tls_sni")),
+			TLSALPN:     string(c.Query("tls_alpn")),
+			TLSJA3Hash:  string(c.Query("tls_ja3_hash")),
+			TLSJA4:      string(c.Query("tls_ja4")),
 		}
 		if id := string(c.Query("id")); id != "" {
 			if v, err := strconv.ParseUint(id, 10, 64); err == nil {

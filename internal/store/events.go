@@ -28,6 +28,14 @@ type SecurityEvent struct {
 	RequestBodyTruncated bool   `gorm:"default:false" json:"request_body_truncated"`
 	RequestSize          int64  `gorm:"default:0" json:"request_size"`
 
+	TLSVersion  string `gorm:"size:16" json:"tls_version"`
+	TLSSNI      string `gorm:"size:255" json:"tls_sni"`
+	TLSALPN     string `gorm:"size:128" json:"tls_alpn"`
+	TLSJA3      string `gorm:"size:1024" json:"tls_ja3"`
+	TLSJA3Hash  string `gorm:"size:32" json:"tls_ja3_hash"`
+	TLSJA4      string `gorm:"size:255" json:"tls_ja4"`
+	HeaderOrder string `gorm:"size:1024" json:"header_order"`
+
 	GeoCountry string `gorm:"size:2" json:"geo_country"`
 	GeoCity    string `gorm:"size:128" json:"geo_city"`
 
@@ -95,6 +103,7 @@ type BotScoreLog struct {
 	TLSJA3Hash       string    `gorm:"size:32;index" json:"tls_ja3_hash"`
 	TLSJA4           string    `gorm:"size:255;index" json:"tls_ja4"`
 	TLSVersion       string    `gorm:"size:16" json:"tls_version"`
+	TLSSNI           string    `gorm:"size:255" json:"tls_sni"`
 	TLSALPN          string    `gorm:"size:128" json:"tls_alpn"`
 	HeaderOrder      string    `gorm:"size:1024" json:"header_order"`
 	TotalScore       int       `gorm:"index" json:"total_score"`

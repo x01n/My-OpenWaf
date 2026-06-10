@@ -34,6 +34,11 @@ type UnifiedWriter struct {
 	flushInterval time.Duration
 }
 
+const (
+	unifiedWriterBatchSize  = 512
+	unifiedWriterDrainLimit = 2048
+)
+
 // NewUnifiedWriter creates a unified writer with large channel buffers.
 func NewUnifiedWriter(db *gorm.DB, log *slog.Logger) *UnifiedWriter {
 	w := &UnifiedWriter{
@@ -128,22 +133,22 @@ func (w *UnifiedWriter) drainAndFlush() {
 	// Single DB transaction for all types.
 	err := w.db.Transaction(func(tx *gorm.DB) error {
 		if len(events) > 0 {
-			if e := tx.CreateInBatches(events, 256).Error; e != nil {
+			if e := tx.CreateInBatches(events, unifiedWriterBatchSize).Error; e != nil {
 				w.log.Error("flush security events failed", slog.Any("err", e), slog.Int("n", len(events)))
 			}
 		}
 		if len(accessLogs) > 0 {
-			if e := tx.CreateInBatches(accessLogs, 256).Error; e != nil {
+			if e := tx.CreateInBatches(accessLogs, unifiedWriterBatchSize).Error; e != nil {
 				w.log.Error("flush access logs failed", slog.Any("err", e), slog.Int("n", len(accessLogs)))
 			}
 		}
 		if len(dropEvents) > 0 {
-			if e := tx.CreateInBatches(dropEvents, 256).Error; e != nil {
+			if e := tx.CreateInBatches(dropEvents, unifiedWriterBatchSize).Error; e != nil {
 				w.log.Error("flush drop events failed", slog.Any("err", e), slog.Int("n", len(dropEvents)))
 			}
 		}
 		if len(botScores) > 0 {
-			if e := tx.CreateInBatches(botScores, 256).Error; e != nil {
+			if e := tx.CreateInBatches(botScores, unifiedWriterBatchSize).Error; e != nil {
 				w.log.Error("flush bot scores failed", slog.Any("err", e), slog.Int("n", len(botScores)))
 			}
 		}
@@ -217,6 +222,9 @@ func drainChan[T any](ch chan T) []T {
 	n := len(ch)
 	if n == 0 {
 		return nil
+	}
+	if n > unifiedWriterDrainLimit {
+		n = unifiedWriterDrainLimit
 	}
 	buf := make([]T, 0, n)
 	for i := 0; i < n; i++ {

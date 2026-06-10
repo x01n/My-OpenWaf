@@ -15,7 +15,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := db.AutoMigrate(&store.AccessLog{}, &store.SecurityEvent{}, &store.Rule{}, &store.Site{}, &store.SiteListener{}); err != nil {
+	if err := db.AutoMigrate(&store.AccessLog{}, &store.SecurityEvent{}, &store.BotScoreLog{}, &store.Rule{}, &store.Site{}, &store.SiteListener{}); err != nil {
 		t.Fatalf("migrate db: %v", err)
 	}
 	return db
@@ -49,6 +49,63 @@ func TestAccessLogRepoListStatusGroup(t *testing.T) {
 	}
 }
 
+func TestAccessLogRepoListTLSFilters(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewAccessLogRepo(db)
+	items := []store.AccessLog{
+		{
+			SiteID:     1,
+			Host:       "example.com",
+			Path:       "/checkout",
+			Method:     "GET",
+			StatusCode: 403,
+			TLSVersion: "TLS13",
+			TLSSNI:     "checkout.example.com",
+			TLSALPN:    "h2",
+			TLSJA3Hash: "ja3-checkout",
+			TLSJA4:     "ja4-checkout",
+		},
+		{
+			SiteID:     1,
+			Host:       "example.com",
+			Path:       "/api",
+			Method:     "GET",
+			StatusCode: 200,
+			TLSVersion: "TLS12",
+			TLSSNI:     "api.example.com",
+			TLSALPN:    "http/1.1",
+			TLSJA3Hash: "ja3-api",
+			TLSJA4:     "ja4-api",
+		},
+	}
+	if err := repo.BatchCreate(items); err != nil {
+		t.Fatalf("create logs: %v", err)
+	}
+
+	got, total, err := repo.List(0, 20, AccessLogFilter{
+		TLSVersion: "TLS13",
+		TLSSNI:     "checkout",
+		TLSALPN:    "h2",
+		TLSJA3Hash: "ja3-checkout",
+		TLSJA4:     "ja4-checkout",
+	})
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	if total != 1 || len(got) != 1 || got[0].TLSSNI != "checkout.example.com" {
+		t.Fatalf("TLS filters returned total=%d items=%#v", total, got)
+	}
+	if accessLogCountCacheKey(AccessLogFilter{TLSSNI: "checkout"}) == accessLogCountCacheKey(AccessLogFilter{TLSSNI: "api"}) {
+		t.Fatal("tls_sni filters must not share access log count cache keys")
+	}
+	if accessLogCountCacheKey(AccessLogFilter{TLSJA3Hash: "ja3-checkout"}) == accessLogCountCacheKey(AccessLogFilter{TLSJA3Hash: "ja3-api"}) {
+		t.Fatal("tls_ja3_hash filters must not share access log count cache keys")
+	}
+	if accessLogCountCacheKey(AccessLogFilter{TLSJA4: "ja4-checkout"}) == accessLogCountCacheKey(AccessLogFilter{TLSJA4: "ja4-api"}) {
+		t.Fatal("tls_ja4 filters must not share access log count cache keys")
+	}
+}
+
 func TestAccessLogRepoListFingerprintsSQLite(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewAccessLogRepo(db)
@@ -62,6 +119,12 @@ func TestAccessLogRepoListFingerprintsSQLite(t *testing.T) {
 	if err := repo.BatchCreate(items); err != nil {
 		t.Fatalf("create logs: %v", err)
 	}
+	if err := db.Create(&store.BotScoreLog{TLSJA3Hash: "aaa", TLSJA4: "ja4-a", TLSVersion: "TLS13", TLSALPN: "h2", TLSSNI: "example.com", TotalScore: 80, IsHighRisk: true, CreatedAt: now}).Error; err != nil {
+		t.Fatalf("create matching bot score log: %v", err)
+	}
+	if err := db.Create(&store.BotScoreLog{TLSJA3Hash: "aaa", TLSJA4: "ja4-a", TLSVersion: "TLS13", TLSALPN: "h2", TLSSNI: "other.example.com", TotalScore: 20, IsHighRisk: true, CreatedAt: now}).Error; err != nil {
+		t.Fatalf("create other sni bot score log: %v", err)
+	}
 
 	got, total, err := repo.ListFingerprints(0, 20)
 	if err != nil {
@@ -72,6 +135,9 @@ func TestAccessLogRepoListFingerprintsSQLite(t *testing.T) {
 	}
 	if got[0].Count != 2 || got[0].TLSJA3Hash != "aaa" {
 		t.Fatalf("expected newest aggregate first, got %#v", got[0])
+	}
+	if got[0].HighRiskCount != 1 || got[0].AvgBotScore != 80 {
+		t.Fatalf("expected bot score aggregation to stay scoped by tls_sni, got %#v", got[0])
 	}
 }
 
@@ -99,6 +165,64 @@ func TestSecurityEventRepoListHostAndPathFilters(t *testing.T) {
 	}
 	if secEventCountCacheKey(SecurityEventFilter{Path: "/a"}) == secEventCountCacheKey(SecurityEventFilter{Path: "/b"}) {
 		t.Fatal("path filters must not share security event count cache keys")
+	}
+}
+
+func TestSecurityEventRepoListTLSFilters(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewSecurityEventRepo(db)
+	items := []store.SecurityEvent{
+		{
+			SiteID:      1,
+			Host:        "example.com",
+			Path:        "/blocked",
+			Action:      "intercept",
+			TLSVersion:  "TLS13",
+			TLSSNI:      "checkout.example.com",
+			TLSALPN:     "h2",
+			TLSJA3Hash:  "ja3-checkout",
+			TLSJA4:      "ja4-checkout",
+			HeaderOrder: "Host,User-Agent,Accept",
+		},
+		{
+			SiteID:      1,
+			Host:        "example.com",
+			Path:        "/blocked",
+			Action:      "intercept",
+			TLSVersion:  "TLS12",
+			TLSSNI:      "api.example.com",
+			TLSALPN:     "http/1.1",
+			TLSJA3Hash:  "ja3-api",
+			TLSJA4:      "ja4-api",
+			HeaderOrder: "Host,Accept,User-Agent",
+		},
+	}
+	if err := repo.BatchCreate(items); err != nil {
+		t.Fatalf("create security events: %v", err)
+	}
+
+	got, total, err := repo.List(0, 20, SecurityEventFilter{
+		TLSVersion:  "TLS13",
+		TLSSNI:      "checkout",
+		TLSALPN:     "h2",
+		TLSJA3Hash:  "ja3-checkout",
+		TLSJA4:      "ja4-checkout",
+		HeaderOrder: "User-Agent,Accept",
+	})
+	if err != nil {
+		t.Fatalf("list security events: %v", err)
+	}
+	if total != 1 || len(got) != 1 || got[0].TLSSNI != "checkout.example.com" {
+		t.Fatalf("TLS filters returned total=%d items=%#v", total, got)
+	}
+	if secEventCountCacheKey(SecurityEventFilter{TLSSNI: "checkout"}) == secEventCountCacheKey(SecurityEventFilter{TLSSNI: "api"}) {
+		t.Fatal("tls_sni filters must not share security event count cache keys")
+	}
+	if secEventCountCacheKey(SecurityEventFilter{TLSJA3Hash: "ja3-checkout"}) == secEventCountCacheKey(SecurityEventFilter{TLSJA3Hash: "ja3-api"}) {
+		t.Fatal("tls_ja3_hash filters must not share security event count cache keys")
+	}
+	if secEventCountCacheKey(SecurityEventFilter{TLSJA4: "ja4-checkout"}) == secEventCountCacheKey(SecurityEventFilter{TLSJA4: "ja4-api"}) {
+		t.Fatal("tls_ja4 filters must not share security event count cache keys")
 	}
 }
 

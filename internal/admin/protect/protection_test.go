@@ -108,6 +108,26 @@ func TestGetProtectionSettingsDefaultsMissingCVEAutoDropFields(t *testing.T) {
 	}
 }
 
+func TestProtectionResponseDefaultsJSONFields(t *testing.T) {
+	cfg := store.DefaultProtectionConfig()
+
+	got := buildProtectionResponse(cfg)
+	for _, key := range []string{"cc_rules", "chain_steps", "escalation_steps"} {
+		items, ok := got[key].([]any)
+		if !ok || len(items) != 0 {
+			t.Fatalf("%s should default to empty array, got %#v", key, got[key])
+		}
+	}
+	for _, key := range []string{"owasp_modules", "owasp_rules_config", "cve_rules_config", "category_sensitivity"} {
+		obj, ok := got[key].(map[string]any)
+		if !ok || len(obj) != 0 {
+			if typed, typedOK := got[key].(map[string]string); !typedOK || len(typed) != 0 {
+				t.Fatalf("%s should default to empty object, got %#v", key, got[key])
+			}
+		}
+	}
+}
+
 func TestPutProtectionSettingsPartialBodyPreservesChallengeFields(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	cfg := store.DefaultProtectionConfig()
@@ -137,6 +157,96 @@ func TestPutProtectionSettingsPartialBodyPreservesChallengeFields(t *testing.T) 
 	steps := loaded.GetEscalationSteps()
 	if len(steps) != 1 || steps[0].Threshold != 3 || steps[0].Action != "challenge" {
 		t.Fatalf("partial update should preserve escalation steps: %#v", steps)
+	}
+}
+
+func TestPutProtectionSettingsRejectsRedirectWithoutTargetField(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+
+	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{"request_ratelimit_action":"redirect"}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+}
+
+func TestPutProtectionSettingsRejectsCCRuleRedirectWithoutTargetField(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+
+	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{
+		"cc_use_custom": true,
+		"cc_rules": [
+			{
+				"enabled": true,
+				"action": "redirect",
+				"conditions": [{"target":"url_path","operator":"prefix","value":"/admin"}]
+			}
+		]
+	}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+}
+
+func TestPutProtectionSettingsSavesStructuredCCRules(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CCUseCustom = false
+	cfg.CCRules = "[]"
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+
+	body := []byte(`{
+		"cc_use_custom": true,
+		"cc_rules": [
+			{
+				"enabled": true,
+				"action": "challenge",
+				"conditions": [
+					{"target":"url_path","operator":"prefix","value":"/admin"},
+					{"target":"method","operator":"equals","value":"POST"}
+				],
+				"window": 60,
+				"threshold": 100,
+				"duration": 5
+			}
+		]
+	}`)
+	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	loaded := shared.LoadProtectionConfig(repo)
+	if !loaded.CCUseCustom {
+		t.Fatal("cc_use_custom was not saved")
+	}
+	var rules []map[string]any
+	if err := json.Unmarshal([]byte(loaded.CCRules), &rules); err != nil {
+		t.Fatalf("cc_rules was not stored as array JSON: %v; raw=%s", err, loaded.CCRules)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("stored cc_rules length = %d want 1: %#v", len(rules), rules)
+	}
+	if rules[0]["action"] != "challenge" {
+		t.Fatalf("stored action = %#v want challenge", rules[0]["action"])
+	}
+	if rules[0]["window"] != float64(60) || rules[0]["threshold"] != float64(100) || rules[0]["duration"] != float64(5) {
+		t.Fatalf("stored rate settings were not preserved: %#v", rules[0])
+	}
+
+	resp := buildProtectionResponse(loaded)
+	exposed, ok := resp["cc_rules"].([]any)
+	if !ok || len(exposed) != 1 {
+		t.Fatalf("response cc_rules should expand to array, got %#v", resp["cc_rules"])
 	}
 }
 
@@ -338,5 +448,37 @@ func TestUpdateBotSettingsListPatchDoesNotSyncDefaultEnabledOrThreshold(t *testi
 	}
 	if dropPolicy.BotScoreThreshold != 92 {
 		t.Fatalf("bot list-only patch should not sync default threshold=60 into drop policy, got %d", dropPolicy.BotScoreThreshold)
+	}
+}
+
+func TestUpdateBotSettingsRejectsInvalidScoreThreshold(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	for _, body := range [][]byte{
+		[]byte(`{"score_threshold":0}`),
+		[]byte(`{"score_threshold":101}`),
+	} {
+		ctx := invokeProtectHandler(t, UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", body)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("expected invalid score_threshold to return 400, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+		}
+	}
+	if val, err := repo.Get("bot_settings"); err == nil && val != "" {
+		t.Fatalf("invalid score_threshold should not create bot_settings, got %s", val)
+	}
+}
+
+func TestUpdateDropPolicyRejectsInvalidBotScoreThreshold(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	for _, body := range [][]byte{
+		[]byte(`{"bot_score_threshold":0}`),
+		[]byte(`{"bot_score_threshold":101}`),
+	} {
+		ctx := invokeProtectHandler(t, UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", body)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("expected invalid bot_score_threshold to return 400, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+		}
+	}
+	if val, err := repo.Get("drop_policy"); err == nil && val != "" {
+		t.Fatalf("invalid bot_score_threshold should not create drop_policy, got %s", val)
 	}
 }

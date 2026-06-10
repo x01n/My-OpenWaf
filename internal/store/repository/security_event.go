@@ -38,19 +38,25 @@ func (r *SecurityEventRepo) SetWriteQueue(wq WriteQueueBackend) {
 
 // SecurityEventFilter holds query filters for listing events.
 type SecurityEventFilter struct {
-	ID        uint
-	SiteID    uint
-	RequestID string
-	Action    string
-	Phase     string
-	Category  string
-	ClientIP  string
-	Host      string
-	Path      string
-	RuleID    uint
-	RuleIDStr string
-	Since     *time.Time
-	Until     *time.Time
+	ID          uint
+	SiteID      uint
+	RequestID   string
+	Action      string
+	Phase       string
+	Category    string
+	ClientIP    string
+	Host        string
+	Path        string
+	RuleID      uint
+	RuleIDStr   string
+	TLSVersion  string
+	TLSSNI      string
+	TLSALPN     string
+	TLSJA3Hash  string
+	TLSJA4      string
+	HeaderOrder string
+	Since       *time.Time
+	Until       *time.Time
 }
 
 func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
@@ -134,6 +140,24 @@ func secEventCountCacheKey(f SecurityEventFilter) string {
 	}
 	if f.RuleIDStr != "" {
 		key += ":rs" + f.RuleIDStr
+	}
+	if f.TLSVersion != "" {
+		key += ":tv" + f.TLSVersion
+	}
+	if f.TLSSNI != "" {
+		key += ":sni" + f.TLSSNI
+	}
+	if f.TLSALPN != "" {
+		key += ":alpn" + f.TLSALPN
+	}
+	if f.TLSJA3Hash != "" {
+		key += ":j3h" + f.TLSJA3Hash
+	}
+	if f.TLSJA4 != "" {
+		key += ":j4" + f.TLSJA4
+	}
+	if f.HeaderOrder != "" {
+		key += ":ho" + f.HeaderOrder
 	}
 	if f.Since != nil {
 		key += ":si" + f.Since.Format("0601021504")
@@ -438,6 +462,24 @@ func applyEventFilters(q *gorm.DB, f SecurityEventFilter) *gorm.DB {
 	}
 	if f.RuleIDStr != "" {
 		q = q.Where("rule_id_str = ?", f.RuleIDStr)
+	}
+	if f.TLSVersion != "" {
+		q = q.Where("tls_version = ?", f.TLSVersion)
+	}
+	if f.TLSSNI != "" {
+		q = q.Where("tls_sni LIKE ?", "%"+f.TLSSNI+"%")
+	}
+	if f.TLSALPN != "" {
+		q = q.Where("tls_alpn = ?", f.TLSALPN)
+	}
+	if f.TLSJA3Hash != "" {
+		q = q.Where("tls_ja3_hash = ?", f.TLSJA3Hash)
+	}
+	if f.TLSJA4 != "" {
+		q = q.Where("tls_ja4 = ?", f.TLSJA4)
+	}
+	if f.HeaderOrder != "" {
+		q = q.Where("header_order LIKE ?", "%"+f.HeaderOrder+"%")
 	}
 	if f.Since != nil {
 		q = q.Where("created_at >= ?", *f.Since)

@@ -28,3 +28,15 @@ func TestValidatePersistedRuleAction(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizePersistedRuleConfigRequiresRedirectTarget(t *testing.T) {
+	item := store.Rule{Action: store.ActionRedirect}
+	if got := normalizePersistedRuleConfig(&item); got != "redirect_to required" {
+		t.Fatalf("normalizePersistedRuleConfig() = %q, want redirect_to required", got)
+	}
+
+	item.RedirectTo = "/blocked"
+	if got := normalizePersistedRuleConfig(&item); got != "" {
+		t.Fatalf("normalizePersistedRuleConfig() = %q, want empty error", got)
+	}
+}

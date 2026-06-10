@@ -35,19 +35,27 @@ func NewSelfSignedCache() *SelfSignedCache {
 // GetOrCreate 获取或创建指定地址的自签证书。
 // 当通过 IP:端口 直接访问 HTTPS 时使用此证书。
 func (c *SelfSignedCache) GetOrCreate(addr string) (tls.Certificate, error) {
+	cert, err := c.GetOrCreatePtr(addr)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return *cert, nil
+}
+
+// GetOrCreatePtr 获取或创建指定地址的自签证书，并返回缓存中的稳定指针。
+func (c *SelfSignedCache) GetOrCreatePtr(addr string) (*tls.Certificate, error) {
 	now := time.Now()
 	c.mu.RLock()
 	if entry, ok := c.certs[addr]; ok && now.Before(entry.expiry) {
 		c.mu.RUnlock()
-		return entry.cert, nil
+		return &entry.cert, nil
 	}
 	c.mu.RUnlock()
 
 	c.mu.Lock()
 	if entry, ok := c.certs[addr]; ok && now.Before(entry.expiry) {
-		cert := entry.cert
 		c.mu.Unlock()
-		return cert, nil
+		return &entry.cert, nil
 	}
 	for key, entry := range c.certs {
 		if !now.Before(entry.expiry) {
@@ -57,15 +65,16 @@ func (c *SelfSignedCache) GetOrCreate(addr string) (tls.Certificate, error) {
 	cert, err := GenerateSelfSigned(addr)
 	if err != nil {
 		c.mu.Unlock()
-		return tls.Certificate{}, err
+		return nil, err
 	}
-	c.certs[addr] = &selfSignedEntry{
+	entry := &selfSignedEntry{
 		cert:   cert,
 		expiry: now.Add(24 * time.Hour),
 	}
+	c.certs[addr] = entry
 	c.mu.Unlock()
 
-	return cert, nil
+	return &entry.cert, nil
 }
 
 // GenerateSelfSigned 生成一个自签名 TLS 证书。

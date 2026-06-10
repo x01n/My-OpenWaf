@@ -116,18 +116,21 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			if err != nil {
 				continue
 			}
-			if req.Enabled != nil {
-				existing.Enabled = *req.Enabled
-				if *req.Enabled {
-					existing.Approved = true
-				}
-			}
 			if req.Action != "" {
-				if normalized, ok := shared.ValidateRuleAction(req.Action); ok {
+				if normalized, ok := shared.ValidateActionWithoutRedirectTarget(req.Action); ok {
 					existing.Action = normalized
 				} else {
 					continue
 				}
+			}
+			if req.Enabled != nil {
+				if *req.Enabled {
+					if _, ok := shared.ValidateActionWithoutRedirectTarget(existing.Action); !ok {
+						continue
+					}
+					existing.Approved = true
+				}
+				existing.Enabled = *req.Enabled
 			}
 			if repo.Update(existing) == nil {
 				updated++
@@ -164,17 +167,23 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			return
 		}
 
-		if req.Enabled != nil {
-			existing.Enabled = *req.Enabled
-			existing.Approved = true
-		}
 		if req.Action != "" {
-			if normalized, ok := shared.ValidateRuleAction(req.Action); ok {
+			if normalized, ok := shared.ValidateActionWithoutRedirectTarget(req.Action); ok {
 				existing.Action = normalized
 			} else {
 				c.JSON(400, map[string]string{"error": "invalid action"})
 				return
 			}
+		}
+		if req.Enabled != nil {
+			if *req.Enabled {
+				if _, ok := shared.ValidateActionWithoutRedirectTarget(existing.Action); !ok {
+					c.JSON(400, map[string]string{"error": "invalid action"})
+					return
+				}
+				existing.Approved = true
+			}
+			existing.Enabled = *req.Enabled
 		}
 		if req.Severity != "" {
 			existing.Severity = req.Severity

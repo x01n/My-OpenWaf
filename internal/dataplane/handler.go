@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,6 +49,7 @@ type Options struct {
 	CaptchaManager        *challenge.CaptchaManager
 	ShieldManager         *challenge.ShieldManager
 	ChainManager          *challenge.ChainChallengeManager
+	ACMEChallengeResponse func(token string) (string, bool)
 	RecordedResourceRepo  *repository.RecordedResourceRepo
 	Upstreams             *upstream.Pool
 	AccessLogSamplingRate uint32
@@ -62,37 +62,25 @@ const (
 
 type tlsFingerprintContextValueKey struct{}
 
-type tlsFingerprintConnKey struct {
-	Local  string
-	Remote string
-}
-
-var tlsFingerprintConns sync.Map
-
-func RememberTLSFingerprintConn(conn net.Conn, fp bot.TLSClientFingerprint) {
-	if !fp.HasValue() || conn == nil || conn.LocalAddr() == nil || conn.RemoteAddr() == nil {
-		return
-	}
-	tlsFingerprintConns.Store(tlsFingerprintConnKey{Local: conn.LocalAddr().String(), Remote: conn.RemoteAddr().String()}, fp)
-}
-
-func takeTLSFingerprintConn(conn net.Conn) (bot.TLSClientFingerprint, bool) {
-	if conn == nil || conn.LocalAddr() == nil || conn.RemoteAddr() == nil {
-		return bot.TLSClientFingerprint{}, false
-	}
-	key := tlsFingerprintConnKey{Local: conn.LocalAddr().String(), Remote: conn.RemoteAddr().String()}
-	if value, ok := tlsFingerprintConns.LoadAndDelete(key); ok {
-		fp, ok := value.(bot.TLSClientFingerprint)
-		return fp, ok && fp.HasValue()
-	}
-	return bot.TLSClientFingerprint{}, false
-}
-
 func ContextWithTLSFingerprint(ctx context.Context, fp bot.TLSClientFingerprint) context.Context {
 	if !fp.HasValue() {
 		return ctx
 	}
 	return context.WithValue(ctx, tlsFingerprintContextValueKey{}, fp)
+}
+
+func ContextWithTLSHandshakeInfo(ctx context.Context, version string, sni string, alpn string) context.Context {
+	fp, _ := tlsFingerprintFromContext(ctx)
+	if version != "" {
+		fp.TLSVersion = version
+	}
+	if sni != "" {
+		fp.SNI = sni
+	}
+	if alpn != "" {
+		fp.ALPN = []string{alpn}
+	}
+	return ContextWithTLSFingerprint(ctx, fp)
 }
 
 func tlsFingerprintFromContext(ctx context.Context) (bot.TLSClientFingerprint, bool) {
@@ -139,6 +127,10 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
+		if handleACMEChallenge(c, opts.ACMEChallengeResponse) {
+			return
+		}
+
 		// Handle challenge verification endpoints
 		if handleChallengeVerify(c, opts) {
 			return
@@ -168,11 +160,13 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 		rt, ok := sn.MatchSite(bind, host)
 		if !ok {
-			opts.Log.Warn("no site match",
-				slog.String("host", host),
-				slog.String("bind", bind),
-				slog.Int("sites", len(sn.Sites)),
-			)
+			if shouldLogNoSiteMatchConsole() {
+				opts.Log.Warn("no site match",
+					slog.String("host", host),
+					slog.String("bind", bind),
+					slog.Int("sites", len(sn.Sites)),
+				)
+			}
 			pages.WriteWelcomePage(ctx, c)
 			return
 		}
@@ -498,18 +492,32 @@ func Handler(opts Options) app.HandlerFunc {
 		// Bot score logging via buffered writer.
 		if reqCtx.BotScoreResult != nil && opts.Writer != nil {
 			bsi := reqCtx.BotScoreResult
-			if reqCtx.TLS.TLSVersion != "" && !strings.Contains(bsi.Details, "tls_version") {
+			if bsi.Details != "" {
 				var details map[string]any
 				if err := json.Unmarshal([]byte(bsi.Details), &details); err == nil {
-					details["tls_version"] = reqCtx.TLS.TLSVersion
+					changed := false
+					if reqCtx.TLS.TLSVersion != "" {
+						if _, ok := details["tls_version"]; !ok {
+							details["tls_version"] = reqCtx.TLS.TLSVersion
+							changed = true
+						}
+					}
 					if reqCtx.TLS.SNI != "" {
-						details["tls_sni"] = reqCtx.TLS.SNI
+						if _, ok := details["tls_sni"]; !ok {
+							details["tls_sni"] = reqCtx.TLS.SNI
+							changed = true
+						}
 					}
 					if len(reqCtx.TLS.ALPN) > 0 {
-						details["tls_alpn"] = reqCtx.TLS.ALPN
+						if _, ok := details["tls_alpn"]; !ok {
+							details["tls_alpn"] = strings.Join(reqCtx.TLS.ALPN, ",")
+							changed = true
+						}
 					}
-					if encoded, err := json.Marshal(details); err == nil {
-						bsi.Details = string(encoded)
+					if changed {
+						if encoded, err := json.Marshal(details); err == nil {
+							bsi.Details = string(encoded)
+						}
 					}
 				}
 			}
@@ -523,6 +531,7 @@ func Handler(opts Options) app.HandlerFunc {
 				TLSJA3Hash:       reqCtx.TLS.JA3Hash,
 				TLSJA4:           reqCtx.TLS.JA4,
 				TLSVersion:       reqCtx.TLS.TLSVersion,
+				TLSSNI:           reqCtx.TLS.SNI,
 				TLSALPN:          strings.Join(reqCtx.TLS.ALPN, ","),
 				HeaderOrder:      strings.Join(reqCtx.HeaderKeys, ","),
 				TotalScore:       bsi.TotalScore,
@@ -643,15 +652,17 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 
 			if result.Action.IsDrop() && dropEnabled(opts.Engine) {
-				secLog.Warn("drop",
-					slog.String("request_id", reqID),
-					slog.String("rule_id", result.Action.RuleIDStr),
-					slog.Uint64("rule_id_num", uint64(result.Action.RuleID)),
-					slog.String("phase", result.Action.Phase),
-					slog.String("action", "drop"),
-					slog.String("match", result.Action.MatchDesc),
-					slog.String("category", result.Action.Category),
-				)
+				if shouldLogDropConsole() {
+					secLog.Warn("drop",
+						slog.String("request_id", reqID),
+						slog.String("rule_id", result.Action.RuleIDStr),
+						slog.Uint64("rule_id_num", uint64(result.Action.RuleID)),
+						slog.String("phase", result.Action.Phase),
+						slog.String("action", "drop"),
+						slog.String("match", result.Action.MatchDesc),
+						slog.String("category", result.Action.Category),
+					)
+				}
 				if opts.Writer != nil {
 					recordSecurityEvent(c, opts, store.SecurityEvent{
 						SiteID:     rt.Site.ID,
@@ -741,9 +752,9 @@ func Handler(opts Options) app.HandlerFunc {
 				default:
 					pages.WriteChallengeResponse(c, reqID, result.Site, statusCode)
 				}
-				logAccess(accessLog, reqID, method, path, host, statusCode, "challenge")
+				logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
 				scrubResponseHopByHopHeaders(c)
-				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: "challenge", CacheState: "bypass"})
+				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass"})
 				return
 			}
 
@@ -863,6 +874,7 @@ func Handler(opts Options) app.HandlerFunc {
 			proxy.ForwardBufferedResponse(c, bufferedResp)
 		}
 		upstreamLatencyMs := time.Since(upstreamStart).Milliseconds()
+		responseSize := int64(0)
 		if opts.Upstreams != nil {
 			opts.Upstreams.Mark(base, upstreamErr)
 		}
@@ -878,8 +890,10 @@ func Handler(opts Options) app.HandlerFunc {
 			// with a non-204/304 status, render a friendly error page.
 			respStatus := c.Response.StatusCode()
 			respBodyLen := len(c.Response.Body())
+			responseSize = int64(respBodyLen)
 			if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
 				pages.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
+				responseSize = int64(len(c.Response.Body()))
 			}
 		}
 		if c.Response.Header.Get("Server") != "" && !hasUpstreamServerHeader(c) {
@@ -901,7 +915,7 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 		aPath := accessPath(c)
 		logAccess(accessLog, reqID, method, aPath, host, statusCode, wafAction)
-		recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: aPath, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: cacheState, Upstream: base, UpstreamLatencyMs: upstreamLatencyMs, ResponseSize: int64(len(c.Response.Body()))})
+		recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: aPath, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: cacheState, Upstream: base, UpstreamLatencyMs: upstreamLatencyMs, ResponseSize: responseSize})
 
 		// Async application route resource recording.
 		// Match rules before launching the goroutine so unmatched requests avoid
@@ -971,6 +985,30 @@ func serveOWAFStatic(c *app.RequestContext, webFS fs.FS) bool {
 	return true
 }
 
+func handleACMEChallenge(c *app.RequestContext, lookup func(token string) (string, bool)) bool {
+	const prefix = "/.well-known/acme-challenge/"
+	if lookup == nil {
+		return false
+	}
+	path := string(c.Path())
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	token := strings.TrimPrefix(path, prefix)
+	if token == "" || strings.Contains(token, "/") {
+		c.String(404, "not found")
+		return true
+	}
+	response, ok := lookup(token)
+	if !ok {
+		c.String(404, "not found")
+		return true
+	}
+	c.Response.Header.Set("Content-Type", "text/plain")
+	c.String(200, response)
+	return true
+}
+
 func logAccess(log *slog.Logger, reqID string, method string, path string, host string, statusCode int, wafAction string) {
 	if !log.Enabled(context.Background(), slog.LevelDebug) {
 		return
@@ -983,6 +1021,29 @@ func logAccess(log *slog.Logger, reqID string, method string, path string, host 
 		slog.Int("status", statusCode),
 		slog.String("waf_action", wafAction),
 	)
+}
+
+var dropConsoleLogCounter atomic.Uint64
+var noSiteMatchConsoleLogCounter atomic.Uint64
+
+func shouldLogConsoleSampleCount(count uint64) bool {
+	return count <= 16 || count%1024 == 0
+}
+
+func shouldLogDropConsoleCount(count uint64) bool {
+	return shouldLogConsoleSampleCount(count)
+}
+
+func shouldLogDropConsole() bool {
+	return shouldLogDropConsoleCount(dropConsoleLogCounter.Add(1))
+}
+
+func shouldLogNoSiteMatchConsoleCount(count uint64) bool {
+	return shouldLogConsoleSampleCount(count)
+}
+
+func shouldLogNoSiteMatchConsole() bool {
+	return shouldLogNoSiteMatchConsoleCount(noSiteMatchConsoleLogCounter.Add(1))
 }
 
 var accessLogSampleCounter atomic.Uint32
@@ -1030,6 +1091,29 @@ func recordSecurityEvent(c *app.RequestContext, opts Options, ev store.SecurityE
 		ev.QueryString = string(c.URI().QueryString())
 	}
 	ev.QueryString = sanitizeQueryString(ev.QueryString)
+	if fp, ok := tlsFingerprintFromRequestContext(c); ok {
+		if ev.TLSJA3 == "" {
+			ev.TLSJA3 = fp.JA3
+		}
+		if ev.TLSJA3Hash == "" {
+			ev.TLSJA3Hash = fp.JA3Hash
+		}
+		if ev.TLSJA4 == "" {
+			ev.TLSJA4 = fp.JA4
+		}
+		if ev.TLSVersion == "" {
+			ev.TLSVersion = fp.TLSVersion
+		}
+		if ev.TLSSNI == "" {
+			ev.TLSSNI = fp.SNI
+		}
+		if ev.TLSALPN == "" && len(fp.ALPN) > 0 {
+			ev.TLSALPN = strings.Join(fp.ALPN, ",")
+		}
+	}
+	if ev.HeaderOrder == "" {
+		ev.HeaderOrder = strings.Join(requestHeaderOrder(c), ",")
+	}
 	if shouldRecordDetailedSecurityEvent(ev) {
 		reqBody, truncated, size := requestBodyPreview(c)
 		ev.RequestHeaders = valueOrFallback(ev.RequestHeaders, requestHeadersJSON(c))
@@ -1048,8 +1132,10 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	if info.HTTPProtocol == "" {
 		info.HTTPProtocol = requestProtocol(c)
 	}
-	if !(info.HTTPProtocol == "h3" && isInternalHTTP3Request(c)) && !info.TLSFingerprint.HasValue() {
-		info.TLSFingerprint, _ = tlsFingerprintFromRequestContext(c)
+	if !(info.HTTPProtocol == "h3" && isInternalHTTP3Request(c)) {
+		if fp, ok := tlsFingerprintFromRequestContext(c); ok {
+			info.TLSFingerprint = mergeTLSFingerprint(info.TLSFingerprint, fp)
+		}
 	}
 	if len(info.HeaderOrder) == 0 {
 		info.HeaderOrder = requestHeaderOrder(c)
@@ -1059,6 +1145,10 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	requestSize := info.RequestSize
 	requestHeaders := info.RequestHeaders
 	responseHeaders := info.ResponseHeaders
+	responseSize := info.ResponseSize
+	if responseSize == 0 {
+		responseSize = int64(len(c.Response.Body()))
+	}
 	if info.Detailed {
 		if requestBody == "" || requestSize == 0 {
 			var bodyTruncated bool
@@ -1095,8 +1185,42 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 		TLSJA4:               info.TLSFingerprint.JA4,
 		HeaderOrder:          strings.Join(info.HeaderOrder, ","),
 		UpstreamLatencyMs:    info.UpstreamLatencyMs,
-		ResponseSize:         info.ResponseSize,
+		ResponseSize:         responseSize,
 	}
+}
+
+func mergeTLSFingerprint(base bot.TLSClientFingerprint, extra bot.TLSClientFingerprint) bot.TLSClientFingerprint {
+	if base.JA3 == "" {
+		base.JA3 = extra.JA3
+	}
+	if base.JA3Hash == "" {
+		base.JA3Hash = extra.JA3Hash
+	}
+	if base.JA4 == "" {
+		base.JA4 = extra.JA4
+	}
+	if base.TLSVersion == "" {
+		base.TLSVersion = extra.TLSVersion
+	}
+	if base.SNI == "" {
+		base.SNI = extra.SNI
+	}
+	if len(base.ALPN) == 0 {
+		base.ALPN = extra.ALPN
+	}
+	if len(base.CipherSuites) == 0 {
+		base.CipherSuites = extra.CipherSuites
+	}
+	if len(base.Extensions) == 0 {
+		base.Extensions = extra.Extensions
+	}
+	if len(base.Curves) == 0 {
+		base.Curves = extra.Curves
+	}
+	if len(base.PointFormats) == 0 {
+		base.PointFormats = extra.PointFormats
+	}
+	return base
 }
 
 const (
@@ -1275,11 +1399,11 @@ func tlsFingerprintFromRequestContext(c *app.RequestContext) (bot.TLSClientFinge
 			return fp, true
 		}
 	}
-	if fp, ok := takeTLSFingerprintConn(c.GetConn()); ok {
+	if fp, ok := bot.TLSFingerprintFromConn(c.GetConn()); ok {
 		c.Set(tlsFingerprintContextKey, fp)
 		return fp, true
 	}
-	return bot.TLSFingerprintFromConn(c.GetConn())
+	return bot.TLSClientFingerprint{}, false
 }
 
 func enqueueAccessLog(writer accessLogRecorder, al store.AccessLog) {
@@ -1324,13 +1448,7 @@ func isInternalHTTP3Request(c *app.RequestContext) bool {
 }
 
 func requestProtocol(c *app.RequestContext) string {
-	if fp, ok := tlsFingerprintFromRequestContext(c); ok && fp.HasValue() {
-		if isInternalHTTP3Request(c) {
-			return "h3"
-		}
-		return "https"
-	}
-	if fp, ok := bot.TLSFingerprintFromConn(c.GetConn()); ok && fp.HasValue() {
+	if _, ok := tlsFingerprintFromRequestContext(c); ok {
 		if isInternalHTTP3Request(c) {
 			return "h3"
 		}

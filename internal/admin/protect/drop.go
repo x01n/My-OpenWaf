@@ -74,6 +74,10 @@ func UpdateDropPolicy(settingsRepo *repository.SystemSettingsRepo, reload func()
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if req.BotScoreThreshold != nil && !shared.ValidateBotScoreThreshold(*req.BotScoreThreshold) {
+			c.JSON(400, map[string]string{"error": "bot_score_threshold must be between 1 and 100"})
+			return
+		}
 
 		current := defaultDropPolicyResponse(settingsRepo)
 		if val, err := settingsRepo.Get("drop_policy"); err == nil && val != "" {

@@ -126,7 +126,7 @@ func (r *DropEventRepo) Stats24hBySite(siteID uint) (*DropStatsSummary, error) {
 	since := time.Now().Add(-24 * time.Hour)
 	var stats DropStatsSummary
 	q := r.db.Model(&store.DropEvent{}).
-		Select("COUNT(*) AS total24h, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_bot, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_cve, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_rule, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_ip_reputation", "bot", "cve", "rule", "ip_reputation").
+		Select("COUNT(*) AS total_24h, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_bot, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_cve, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_rule, SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS by_ip_reputation", "bot", "cve", "rule", "ip_reputation").
 		Where("created_at >= ?", since)
 	if siteID > 0 {
 		q = q.Where("site_id = ?", siteID)

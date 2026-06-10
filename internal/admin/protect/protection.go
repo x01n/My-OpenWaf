@@ -3,11 +3,11 @@ package protect
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
-	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
@@ -24,6 +24,13 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 	out := make(map[string]any)
 	raw, _ := json.Marshal(cfg)
 	_ = json.Unmarshal(raw, &out)
+
+	out["cc_rules"] = []any{}
+	out["owasp_modules"] = map[string]string{}
+	out["owasp_rules_config"] = map[string]any{}
+	out["cve_rules_config"] = map[string]any{}
+	out["chain_steps"] = []any{}
+	out["escalation_steps"] = []any{}
 
 	// Expand legacy owasp_modules string and expose category_sensitivity as the UI source.
 	if cfg.OWASPModules != "" {
@@ -42,6 +49,18 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 		var rules []any
 		if json.Unmarshal([]byte(cfg.CCRules), &rules) == nil {
 			out["cc_rules"] = rules
+		}
+	}
+	if cfg.OWASPRulesConfig != "" {
+		var rulesConfig map[string]any
+		if json.Unmarshal([]byte(cfg.OWASPRulesConfig), &rulesConfig) == nil {
+			out["owasp_rules_config"] = rulesConfig
+		}
+	}
+	if cfg.CVERulesConfig != "" {
+		var rulesConfig map[string]any
+		if json.Unmarshal([]byte(cfg.CVERulesConfig), &rulesConfig) == nil {
+			out["cve_rules_config"] = rulesConfig
 		}
 	}
 	if cfg.ChainSteps != "" {
@@ -108,14 +127,31 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			cfg.CVERulesConfig = s
 		}
 
-		for _, candidate := range []string{cfg.RequestRateLimitAction, cfg.ErrorRateLimitAction, cfg.OWASPAction, cfg.CVEAction, cfg.AutoBanAction} {
-			if candidate == "" {
+		actionFields := map[string]struct {
+			value       string
+			enableField string
+			enabled     bool
+		}{
+			"request_ratelimit_action": {value: cfg.RequestRateLimitAction, enableField: "request_ratelimit_enabled", enabled: cfg.RequestRateLimitEnabled},
+			"error_ratelimit_action":   {value: cfg.ErrorRateLimitAction, enableField: "error_ratelimit_enabled", enabled: cfg.ErrorRateLimitEnabled},
+			"builtin_owasp_on_hit":     {value: cfg.OWASPAction, enableField: "builtin_owasp_enabled", enabled: cfg.OWASPEnabled},
+			"cve_action":               {value: cfg.CVEAction, enableField: "cve_enabled", enabled: cfg.CVEEnabled},
+			"auto_ban_action":          {value: cfg.AutoBanAction, enableField: "auto_ban_enabled", enabled: cfg.AutoBanEnabled},
+		}
+		for field, spec := range actionFields {
+			if (!present[field] && !(present[spec.enableField] && spec.enabled)) || spec.value == "" {
 				continue
 			}
-			if !action.IsValid(action.Type(candidate)) || action.Normalize(action.Type(candidate)) == action.Allow || action.Normalize(action.Type(candidate)) == action.Tag {
+			if normalized, ok := shared.ValidateActionWithoutRedirectTarget(spec.value); ok {
+				setProtectionActionField(&cfg, field, normalized)
+			} else {
 				c.JSON(400, map[string]string{"error": "invalid action"})
 				return
 			}
+		}
+		if (present["cc_rules"] || (present["cc_use_custom"] && cfg.CCUseCustom)) && !validateCCRuleActions(cfg.CCRules) {
+			c.JSON(400, map[string]string{"error": "invalid cc rule action"})
+			return
 		}
 
 		data, err := json.Marshal(cfg)
@@ -149,4 +185,41 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		}
 		c.JSON(200, buildProtectionResponse(cfg))
 	}
+}
+
+func setProtectionActionField(cfg *store.ProtectionConfig, field string, value string) {
+	switch field {
+	case "request_ratelimit_action":
+		cfg.RequestRateLimitAction = value
+	case "error_ratelimit_action":
+		cfg.ErrorRateLimitAction = value
+	case "builtin_owasp_on_hit":
+		cfg.OWASPAction = value
+	case "cve_action":
+		cfg.CVEAction = value
+	case "auto_ban_action":
+		cfg.AutoBanAction = value
+	}
+}
+
+func validateCCRuleActions(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
+	}
+	var rules []struct {
+		Action string `json:"action"`
+	}
+	if err := json.Unmarshal([]byte(raw), &rules); err != nil {
+		return false
+	}
+	for _, rule := range rules {
+		actionValue := strings.ToLower(strings.TrimSpace(rule.Action))
+		if actionValue == "" || actionValue == "captcha" {
+			continue
+		}
+		if _, ok := shared.ValidateActionWithoutRedirectTarget(actionValue); !ok {
+			return false
+		}
+	}
+	return true
 }

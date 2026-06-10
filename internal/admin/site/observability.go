@@ -43,6 +43,11 @@ func ListSiteAccessLogs(siteRepo *repository.SiteRepo, repo *repository.AccessLo
 			WAFAction:   string(c.Query("waf_action")),
 			CacheState:  string(c.Query("cache_state")),
 			StatusGroup: string(c.Query("status_group")),
+			TLSVersion:  string(c.Query("tls_version")),
+			TLSSNI:      string(c.Query("tls_sni")),
+			TLSALPN:     string(c.Query("tls_alpn")),
+			TLSJA3Hash:  string(c.Query("tls_ja3_hash")),
+			TLSJA4:      string(c.Query("tls_ja4")),
 		}
 		if since := string(c.Query("since")); since != "" {
 			if t, err := time.Parse(time.RFC3339, since); err == nil {
@@ -105,6 +110,16 @@ func ListSiteDropEvents(siteRepo *repository.SiteRepo, repo *repository.DropEven
 			SiteID:   siteID,
 			ClientIP: string(c.Query("client_ip")),
 			Source:   string(c.Query("source")),
+		}
+		if v := string(c.Query("start_time")); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				f.StartTime = &t
+			}
+		}
+		if v := string(c.Query("end_time")); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				f.EndTime = &t
+			}
 		}
 		items, total, err := repo.List(offset, limit, f)
 		if err != nil {

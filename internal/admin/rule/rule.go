@@ -87,6 +87,10 @@ func CreateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if errMsg := normalizePersistedRuleConfig(&item); errMsg != "" {
+			c.JSON(400, map[string]string{"error": errMsg})
+			return
+		}
 		if err := repo.Create(&item); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -116,6 +120,10 @@ func UpdateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 			return
 		}
 		existing.ID = id
+		if errMsg := normalizePersistedRuleConfig(existing); errMsg != "" {
+			c.JSON(400, map[string]string{"error": errMsg})
+			return
+		}
 		if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -218,6 +226,18 @@ func validatePersistedRuleAction(a store.RuleAction) (store.RuleAction, bool) {
 	return store.RuleAction(string(t)), true
 }
 
+func normalizePersistedRuleConfig(item *store.Rule) string {
+	normalized, ok := validatePersistedRuleAction(item.Action)
+	if !ok {
+		return "invalid action"
+	}
+	item.Action = normalized
+	if action.Normalize(action.Type(item.Action)) == action.Redirect && strings.TrimSpace(item.RedirectTo) == "" {
+		return "redirect_to required"
+	}
+	return ""
+}
+
 // ExportRules returns all rules as a JSON array for backup/migration.
 func ExportRules(repo *repository.RuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -246,10 +266,8 @@ func ImportRules(repo *repository.RuleRepo, reload func() error) app.HandlerFunc
 		}
 
 		for i := range body.Rules {
-			if normalized, ok := validatePersistedRuleAction(body.Rules[i].Action); ok {
-				body.Rules[i].Action = normalized
-			} else {
-				c.JSON(400, map[string]any{"error": "invalid action", "index": i})
+			if errMsg := normalizePersistedRuleConfig(&body.Rules[i]); errMsg != "" {
+				c.JSON(400, map[string]any{"error": errMsg, "index": i})
 				return
 			}
 		}

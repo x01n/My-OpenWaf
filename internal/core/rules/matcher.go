@@ -707,6 +707,9 @@ func buildMatcher(kind, arg string) Matcher {
 	case "tls_version":
 		return &tlsFingerprintMatcher{name: "x-owaf-tls-version", value: arg}
 
+	case "tls_sni":
+		return &tlsFingerprintMatcher{name: "x-owaf-tls-sni", value: arg}
+
 	case "tls_alpn":
 		return &tlsFingerprintMatcher{name: "x-owaf-tls-alpn", value: arg}
 

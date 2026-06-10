@@ -80,7 +80,7 @@ func ParsePattern(p string) (kind, arg string) {
 		"host:", "host_full:", "host_regex:", "host_contains:", "host_not_contains:",
 		"full_url_contains:", "full_url_regex:",
 		"cookie_contains:", "referer_contains:",
-		"tls_ja3:", "tls_ja3_hash:", "tls_ja4:", "tls_version:", "tls_alpn:", "header_order_contains:", "header_order_regex:",
+		"tls_ja3:", "tls_ja3_hash:", "tls_ja4:", "tls_version:", "tls_sni:", "tls_alpn:", "header_order_contains:", "header_order_regex:",
 		"block_multipart:",
 	}
 	for _, pfx := range prefixes {

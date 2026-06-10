@@ -23,6 +23,7 @@ type BotScoreFilter struct {
 	RequestID string
 	JA3Hash   string
 	JA4       string
+	TLSSNI    string
 	HighRisk  *bool
 	MinScore  *int
 	MaxScore  *int
@@ -60,18 +61,28 @@ func (r *BotScoreRepo) List(offset, limit int, f BotScoreFilter) ([]store.BotSco
 
 // BotScoreStats holds aggregated bot detection statistics.
 type BotScoreStats struct {
-	Total24h    int64 `json:"total_24h"`
-	Blocked24h  int64 `json:"blocked_24h"`
-	HighRisk24h int64 `json:"high_risk_24h"`
+	Total24h    int64   `json:"total_24h"`
+	Blocked24h  int64   `json:"blocked_24h"`
+	HighRisk24h int64   `json:"high_risk_24h"`
+	AvgScore24h float64 `json:"avg_score_24h"`
 }
 
 func (r *BotScoreRepo) Stats24h() (*BotScoreStats, error) {
 	since := time.Now().Add(-24 * time.Hour)
 	var stats BotScoreStats
 
-	r.db.Model(&store.BotScoreLog{}).Where("created_at >= ?", since).Count(&stats.Total24h)
-	r.db.Model(&store.BotScoreLog{}).Where("created_at >= ? AND action IN ('block','drop')", since).Count(&stats.Blocked24h)
-	r.db.Model(&store.BotScoreLog{}).Where("created_at >= ? AND is_high_risk = ?", since, true).Count(&stats.HighRisk24h)
+	if err := r.db.Model(&store.BotScoreLog{}).Where("created_at >= ?", since).Count(&stats.Total24h).Error; err != nil {
+		return nil, err
+	}
+	if err := r.db.Model(&store.BotScoreLog{}).Where("created_at >= ? AND action IN ('block','drop')", since).Count(&stats.Blocked24h).Error; err != nil {
+		return nil, err
+	}
+	if err := r.db.Model(&store.BotScoreLog{}).Where("created_at >= ? AND is_high_risk = ?", since, true).Count(&stats.HighRisk24h).Error; err != nil {
+		return nil, err
+	}
+	if err := r.db.Model(&store.BotScoreLog{}).Select("COALESCE(AVG(total_score), 0)").Where("created_at >= ?", since).Scan(&stats.AvgScore24h).Error; err != nil {
+		return nil, err
+	}
 
 	return &stats, nil
 }
@@ -97,6 +108,9 @@ func applyBotScoreFilters(q *gorm.DB, f BotScoreFilter) *gorm.DB {
 	}
 	if f.JA4 != "" {
 		q = q.Where("tls_ja4 = ?", f.JA4)
+	}
+	if f.TLSSNI != "" {
+		q = q.Where("tls_sni LIKE ?", "%"+f.TLSSNI+"%")
 	}
 	if f.HighRisk != nil {
 		q = q.Where("is_high_risk = ?", *f.HighRisk)

@@ -53,6 +53,11 @@ type AccessLogFilter struct {
 	WAFAction   string
 	CacheState  string
 	StatusGroup string
+	TLSVersion  string
+	TLSSNI      string
+	TLSALPN     string
+	TLSJA3Hash  string
+	TLSJA4      string
 	Since       *time.Time
 	Until       *time.Time
 }
@@ -175,7 +180,7 @@ func (r *AccessLogRepo) ListFingerprints(offset, limit int) ([]FingerprintSummar
 		var avgBotScore float64
 		if r.db.Migrator().HasTable(&store.BotScoreLog{}) {
 			botQuery := r.db.Model(&store.BotScoreLog{}).
-				Where("tls_ja3_hash = ? AND tls_ja4 = ? AND tls_version = ? AND tls_alpn = ?", row.TLSJA3Hash, row.TLSJA4, row.TLSVersion, row.TLSALPN)
+				Where("tls_ja3_hash = ? AND tls_ja4 = ? AND tls_version = ? AND tls_alpn = ? AND tls_sni = ?", row.TLSJA3Hash, row.TLSJA4, row.TLSVersion, row.TLSALPN, row.TLSSNI)
 			botQuery.Where("is_high_risk = ?", true).Count(&highRiskCount)
 			botQuery.Select("COALESCE(AVG(total_score), 0)").Scan(&avgBotScore)
 		}
@@ -228,6 +233,21 @@ func accessLogCountCacheKey(f AccessLogFilter) string {
 	}
 	if f.StatusGroup != "" {
 		key += ":sg" + f.StatusGroup
+	}
+	if f.TLSVersion != "" {
+		key += ":tv" + f.TLSVersion
+	}
+	if f.TLSSNI != "" {
+		key += ":sni" + f.TLSSNI
+	}
+	if f.TLSALPN != "" {
+		key += ":alpn" + f.TLSALPN
+	}
+	if f.TLSJA3Hash != "" {
+		key += ":j3h" + f.TLSJA3Hash
+	}
+	if f.TLSJA4 != "" {
+		key += ":j4" + f.TLSJA4
 	}
 	if f.Since != nil {
 		key += ":si" + f.Since.Format("0601021504")
@@ -333,6 +353,21 @@ func applyAccessLogFilters(q *gorm.DB, f AccessLogFilter) *gorm.DB {
 		q = q.Where("status_code >= ? AND status_code < ?", 400, 500)
 	case "5xx":
 		q = q.Where("status_code >= ? AND status_code < ?", 500, 600)
+	}
+	if f.TLSVersion != "" {
+		q = q.Where("tls_version = ?", f.TLSVersion)
+	}
+	if f.TLSSNI != "" {
+		q = q.Where("tls_sni LIKE ?", "%"+f.TLSSNI+"%")
+	}
+	if f.TLSALPN != "" {
+		q = q.Where("tls_alpn = ?", f.TLSALPN)
+	}
+	if f.TLSJA3Hash != "" {
+		q = q.Where("tls_ja3_hash = ?", f.TLSJA3Hash)
+	}
+	if f.TLSJA4 != "" {
+		q = q.Where("tls_ja4 = ?", f.TLSJA4)
 	}
 	if f.Since != nil {
 		q = q.Where("created_at >= ?", *f.Since)

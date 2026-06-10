@@ -16,9 +16,10 @@ type DropStats struct {
 }
 
 type DropExecutor struct {
-	stats   *DropStats
-	enabled bool
-	log     *slog.Logger
+	stats      *DropStats
+	enabled    bool
+	log        *slog.Logger
+	logCounter atomic.Uint64
 }
 
 type DropReason struct {
@@ -51,15 +52,21 @@ func (d *DropExecutor) Execute(conn net.Conn, reason DropReason) error {
 	}
 	err := conn.Close()
 	d.recordStats(reason)
-	d.log.Warn("connection dropped",
-		slog.String("source", reason.Source),
-		slog.String("rule_id", reason.RuleID),
-		slog.String("client_ip", reason.ClientIP),
-		slog.String("host", reason.Host),
-		slog.String("path", reason.Path),
-		slog.String("detail", reason.Detail),
-	)
+	if shouldLogConnectionDropCount(d.logCounter.Add(1)) {
+		d.log.Warn("connection dropped",
+			slog.String("source", reason.Source),
+			slog.String("rule_id", reason.RuleID),
+			slog.String("client_ip", reason.ClientIP),
+			slog.String("host", reason.Host),
+			slog.String("path", reason.Path),
+			slog.String("detail", reason.Detail),
+		)
+	}
 	return err
+}
+
+func shouldLogConnectionDropCount(count uint64) bool {
+	return count <= 16 || count%1024 == 0
 }
 
 func (d *DropExecutor) recordStats(reason DropReason) {

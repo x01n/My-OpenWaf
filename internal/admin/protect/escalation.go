@@ -2,6 +2,7 @@ package protect
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -113,6 +114,10 @@ func GetEscalationIPStatus(mgr *wafescalation.EscalationManager) app.HandlerFunc
 			c.JSON(400, map[string]string{"error": "ip required"})
 			return
 		}
+		siteID, ok := escalationStatusSiteID(c)
+		if !ok {
+			return
+		}
 		if mgr == nil {
 			c.JSON(200, map[string]any{
 				"ip":           ip,
@@ -122,7 +127,7 @@ func GetEscalationIPStatus(mgr *wafescalation.EscalationManager) app.HandlerFunc
 			})
 			return
 		}
-		status := mgr.GetIPStatus(ip, 0)
+		status := mgr.GetIPStatus(ip, siteID)
 		c.JSON(200, status)
 	}
 }
@@ -134,9 +139,26 @@ func ResetEscalationIPStatus(mgr *wafescalation.EscalationManager) app.HandlerFu
 			c.JSON(400, map[string]string{"error": "ip required"})
 			return
 		}
+		siteID, ok := escalationStatusSiteID(c)
+		if !ok {
+			return
+		}
 		if mgr != nil {
-			mgr.ResetIP(ip, 0)
+			mgr.ResetIP(ip, siteID)
 		}
 		c.JSON(200, map[string]string{"message": "escalation state reset for " + ip})
 	}
+}
+
+func escalationStatusSiteID(c *app.RequestContext) (uint, bool) {
+	raw := string(c.Query("site_id"))
+	if raw == "" {
+		return 0, true
+	}
+	siteID, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		c.JSON(400, map[string]string{"error": "invalid site_id"})
+		return 0, false
+	}
+	return uint(siteID), true
 }

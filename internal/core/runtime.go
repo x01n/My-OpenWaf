@@ -2,13 +2,16 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/database"
 	"My-OpenWaf/internal/core/redis"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/snapshot"
+	"My-OpenWaf/internal/store"
 
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -43,6 +46,15 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("database: %w", err)
+	}
+	cfg = applyStoredRedisConfig(db, cfg)
+	warnings, err = cfg.Validate()
+	if err != nil {
+		closeRuntimeDB(db)
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	for _, w := range warnings {
+		log.Warn(w)
 	}
 	logDB, err := database.Open(database.Options{
 		Driver:  cfg.DBDriver,
@@ -92,6 +104,39 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		Snapshot: &snapshot.Holder{},
 		Cache:    cl,
 	}, nil
+}
+
+type storedRedisConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Addr     string `json:"addr"`
+	Password string `json:"password,omitempty"`
+	DB       int    `json:"db"`
+}
+
+func applyStoredRedisConfig(db *gorm.DB, cfg Config) Config {
+	if db == nil || !db.Migrator().HasTable(&store.SystemSettings{}) {
+		return cfg
+	}
+	var setting store.SystemSettings
+	if err := db.Where("`key` = ?", store.SettingKeyRedisConfig).First(&setting).Error; err != nil || setting.Value == "" {
+		return cfg
+	}
+	var stored storedRedisConfig
+	if err := json.Unmarshal([]byte(setting.Value), &stored); err != nil {
+		return cfg
+	}
+	if !stored.Enabled {
+		cfg.RedisAddr = ""
+		cfg.RedisPassword = ""
+		cfg.RedisDB = 0
+		return cfg
+	}
+	cfg.RedisAddr = strings.TrimSpace(stored.Addr)
+	cfg.RedisPassword = stored.Password
+	if stored.DB >= 0 {
+		cfg.RedisDB = stored.DB
+	}
+	return cfg
 }
 
 func (r *Runtime) ReloadSnapshot() error {

@@ -62,34 +62,38 @@ func (c *Checker) ReadinessHandler() app.HandlerFunc {
 // StatusHandler returns a Hertz handler for /status with runtime info.
 func (c *Checker) StatusHandler() app.HandlerFunc {
 	return func(ctx context.Context, rc *app.RequestContext) {
-		var mem runtime.MemStats
-		runtime.ReadMemStats(&mem)
+		rc.JSON(200, c.StatusSnapshot())
+	}
+}
 
-		sn := c.holder.Load()
-		rev := uint64(0)
-		sites := 0
-		listeners := 0
-		if sn != nil {
-			rev = sn.Revision
-			siteIDs := make(map[uint]struct{})
-			listenerSet := make(map[string]bool)
-			for _, site := range sn.Sites {
-				siteIDs[site.Site.ID] = struct{}{}
-				listenerSet[site.Bind] = true
-			}
-			sites = len(siteIDs)
-			listeners = len(listenerSet)
+func (c *Checker) StatusSnapshot() map[string]any {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	sn := c.holder.Load()
+	rev := uint64(0)
+	sites := 0
+	listeners := 0
+	if sn != nil {
+		rev = sn.Revision
+		siteIDs := make(map[uint]struct{})
+		listenerSet := make(map[string]bool)
+		for _, site := range sn.Sites {
+			siteIDs[site.Site.ID] = struct{}{}
+			listenerSet[site.Bind] = true
 		}
-		rc.JSON(200, map[string]any{
-			"alive":      c.Alive(),
-			"ready":      c.Ready(),
-			"revision":   rev,
-			"sites":      sites,
-			"listeners":  listeners,
-			"goroutines": runtime.NumGoroutine(),
-			"heap_alloc": mem.HeapAlloc,
-			"go_version": runtime.Version(),
-			"num_cpu":    runtime.NumCPU(),
-		})
+		sites = len(siteIDs)
+		listeners = len(listenerSet)
+	}
+	return map[string]any{
+		"alive":      c.Alive(),
+		"ready":      c.Ready(),
+		"revision":   rev,
+		"sites":      sites,
+		"listeners":  listeners,
+		"goroutines": runtime.NumGoroutine(),
+		"heap_alloc": mem.HeapAlloc,
+		"go_version": runtime.Version(),
+		"num_cpu":    runtime.NumCPU(),
 	}
 }

@@ -12,6 +12,7 @@ import (
 
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store"
+	wafescalation "My-OpenWaf/internal/waf/escalation"
 )
 
 func invokeEscalationConfigHandler(t *testing.T, handler app.HandlerFunc, payload []byte) *app.RequestContext {
@@ -25,6 +26,19 @@ func invokeEscalationConfigHandler(t *testing.T, handler app.HandlerFunc, payloa
 	ctx := app.NewContext(0)
 	req.CopyTo(&ctx.Request)
 	ctx.Params = param.Params{{Key: "id", Value: "global"}}
+	handler(context.Background(), ctx)
+	return ctx
+}
+
+func invokeEscalationStatusHandler(t *testing.T, handler app.HandlerFunc, method, uri, ip string) *app.RequestContext {
+	t.Helper()
+	var req protocol.Request
+	req.SetMethod(method)
+	req.SetRequestURI(uri)
+
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "ip", Value: ip}}
 	handler(context.Background(), ctx)
 	return ctx
 }
@@ -54,6 +68,57 @@ func TestUpdateEscalationConfigPreservesOmittedEnabledAndWindow(t *testing.T) {
 	steps := loaded.GetEscalationSteps()
 	if len(steps) != 1 || steps[0].Threshold != 7 || steps[0].Action != "intercept" {
 		t.Fatalf("steps-only patch did not update escalation steps: %#v", steps)
+	}
+}
+
+func TestGetEscalationIPStatusUsesSiteIDQuery(t *testing.T) {
+	mgr := wafescalation.NewEscalationManager(nil)
+	defer mgr.Close()
+	mgr.SetDefaultConfig(wafescalation.EscalationConfig{
+		Enabled:    true,
+		WindowSecs: 60,
+		Steps: []wafescalation.EscalationStep{
+			{Threshold: 1, Action: "challenge"},
+		},
+	})
+	const ip = "203.0.113.10"
+	mgr.RecordHit(ip, 7, nil)
+
+	ctx := invokeEscalationStatusHandler(t, GetEscalationIPStatus(mgr), "GET", "/api/v1/escalation/status/203.0.113.10?site_id=7", ip)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["hit_count"] != float64(1) || resp["current_step"] != float64(0) || resp["action"] != "challenge" {
+		t.Fatalf("unexpected site-scoped status: %#v", resp)
+	}
+}
+
+func TestResetEscalationIPStatusUsesSiteIDQuery(t *testing.T) {
+	mgr := wafescalation.NewEscalationManager(nil)
+	defer mgr.Close()
+	mgr.SetDefaultConfig(wafescalation.EscalationConfig{
+		Enabled:    true,
+		WindowSecs: 60,
+		Steps: []wafescalation.EscalationStep{
+			{Threshold: 1, Action: "challenge"},
+		},
+	})
+	const ip = "203.0.113.10"
+	mgr.RecordHit(ip, 7, nil)
+
+	ctx := invokeEscalationStatusHandler(t, ResetEscalationIPStatus(mgr), "POST", "/api/v1/escalation/status/203.0.113.10/reset?site_id=7", ip)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	status := mgr.GetIPStatus(ip, 7)
+	if status.HitCount != 0 || status.Level != -1 || status.Action != "" {
+		t.Fatalf("unexpected status after reset: %#v", status)
 	}
 }
 

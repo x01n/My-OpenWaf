@@ -2,6 +2,8 @@ package dataplane
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
@@ -10,8 +12,10 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/network"
 	"github.com/cloudwego/hertz/pkg/protocol"
 
+	"My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/bot"
@@ -208,14 +212,38 @@ func TestTLSFingerprintCarrierPreservesHandshakeUpdates(t *testing.T) {
 
 	pc := &peekConn{Conn: server, fingerprint: bot.TLSClientFingerprint{JA3Hash: "ja3"}}
 	wrapped := bot.WrapFingerprintConn(pc, pc.fingerprint)
-	pc.SetTLSHandshakeInfo("TLS13", "h2")
+	pc.SetTLSHandshakeInfo("TLS13", "client.example", "h2")
 
 	fp, ok := bot.TLSFingerprintFromConn(wrapped)
 	if !ok {
 		t.Fatal("expected fingerprint from wrapped connection")
 	}
-	if fp.JA3Hash != "ja3" || fp.TLSVersion != "TLS13" || len(fp.ALPN) != 1 || fp.ALPN[0] != "h2" {
+	if fp.JA3Hash != "ja3" || fp.TLSVersion != "TLS13" || fp.SNI != "client.example" || len(fp.ALPN) != 1 || fp.ALPN[0] != "h2" {
 		t.Fatalf("unexpected fingerprint after handshake update: %+v", fp)
+	}
+}
+
+func TestBuildAccessLogEntryMergesHandshakeTLSMetadata(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Set(tlsFingerprintContextKey, bot.TLSClientFingerprint{
+		TLSVersion: "TLS13",
+		SNI:        "client.example",
+		ALPN:       []string{"h2"},
+	})
+
+	entry := buildAccessLogEntry(ctx, accessLogInfo{
+		SiteID:       1,
+		HTTPProtocol: "https",
+		TLSFingerprint: bot.TLSClientFingerprint{
+			JA3Hash: "ja3",
+			JA4:     "ja4",
+		},
+	})
+	if entry.TLSJA3Hash != "ja3" || entry.TLSJA4 != "ja4" {
+		t.Fatalf("expected parsed JA3/JA4 to be retained, got %+v", entry)
+	}
+	if entry.TLSVersion != "TLS13" || entry.TLSSNI != "client.example" || entry.TLSALPN != "h2" {
+		t.Fatalf("expected handshake TLS metadata to be merged, got %+v", entry)
 	}
 }
 
@@ -229,5 +257,215 @@ func TestFixURIConnForwardsTLSFingerprint(t *testing.T) {
 	fp, ok := bot.TLSFingerprintFromConn(fixed)
 	if !ok || fp.TLSVersion != "TLS13" || fp.JA3Hash != "real" {
 		t.Fatalf("expected FixURIConn to forward TLS fingerprint, got ok=%v fp=%+v", ok, fp)
+	}
+}
+
+func TestFixURIWrappersForwardHandshakeInfoThroughNetConn(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	parsed := bot.TLSClientFingerprint{
+		JA3Hash:    "ja3",
+		JA4:        "ja4",
+		TLSVersion: "TLS13",
+		SNI:        "client.example",
+		ALPN:       []string{"h2", "http/1.1"},
+	}
+	pc := &peekConn{Conn: server, fingerprint: parsed}
+	tlsLike := &testNetConnUnwrapper{Conn: server, inner: pc}
+	fixed := &FixURIConn{Conn: tlsLike}
+	hertzConn := newFixURIHertzConn(fixed)
+
+	hertzConn.SetTLSHandshakeInfo("TLS12", "client.example", "http/1.1")
+
+	fp, ok := pc.TLSFingerprint()
+	if !ok {
+		t.Fatal("expected fingerprint after handshake update")
+	}
+	if fp.JA3Hash != "ja3" || fp.JA4 != "ja4" {
+		t.Fatalf("expected parsed JA3/JA4 to be retained, got %+v", fp)
+	}
+	if fp.TLSVersion != "TLS12" || fp.SNI != "client.example" || len(fp.ALPN) != 1 || fp.ALPN[0] != "http/1.1" {
+		t.Fatalf("expected final handshake metadata to reach peekConn, got %+v", fp)
+	}
+	got, ok := bot.TLSFingerprintFromConn(hertzConn)
+	if !ok {
+		t.Fatal("expected Hertz connection to expose TLS fingerprint")
+	}
+	if got.TLSVersion != "TLS12" || got.SNI != "client.example" || len(got.ALPN) != 1 || got.ALPN[0] != "http/1.1" {
+		t.Fatalf("expected Hertz connection to expose final TLS metadata, got %+v", got)
+	}
+}
+
+func TestContextWithTLSHandshakeInfoPreservesParsedFingerprint(t *testing.T) {
+	ctx := ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+		JA3Hash: "ja3",
+		JA4:     "ja4",
+		SNI:     "client.example",
+		ALPN:    []string{"http/1.1"},
+	})
+
+	ctx = ContextWithTLSHandshakeInfo(ctx, "TLS13", "client.example", "h2")
+
+	fp, ok := tlsFingerprintFromContext(ctx)
+	if !ok {
+		t.Fatal("expected TLS fingerprint in context")
+	}
+	if fp.JA3Hash != "ja3" || fp.JA4 != "ja4" || fp.SNI != "client.example" || fp.TLSVersion != "TLS13" {
+		t.Fatalf("unexpected merged TLS fingerprint: %+v", fp)
+	}
+	if len(fp.ALPN) != 1 || fp.ALPN[0] != "h2" {
+		t.Fatalf("unexpected merged ALPN: %+v", fp.ALPN)
+	}
+}
+
+func TestTLSFingerprintFromRequestContextUsesCachedValue(t *testing.T) {
+	ctx := app.NewContext(0)
+	want := bot.TLSClientFingerprint{JA3Hash: "cached-ja3", JA4: "cached-ja4", TLSVersion: "TLS13"}
+	ctx.Set(tlsFingerprintContextKey, want)
+
+	got, ok := tlsFingerprintFromRequestContext(ctx)
+	if !ok {
+		t.Fatal("expected cached TLS fingerprint")
+	}
+	if got.JA3Hash != want.JA3Hash || got.JA4 != want.JA4 || got.TLSVersion != want.TLSVersion {
+		t.Fatalf("unexpected cached fingerprint: %+v", got)
+	}
+}
+
+func TestTLSFingerprintFromRequestContextFallsBackToConnectionCarrier(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	want := bot.TLSClientFingerprint{JA3Hash: "conn-ja3", JA4: "conn-ja4", TLSVersion: "TLS13"}
+	ctx := app.NewContext(0)
+	ctx.SetConn(&testHertzConn{Conn: bot.WrapFingerprintConn(server, want)})
+
+	got, ok := tlsFingerprintFromRequestContext(ctx)
+	if !ok {
+		t.Fatal("expected connection TLS fingerprint")
+	}
+	if got.JA3Hash != want.JA3Hash || got.JA4 != want.JA4 || got.TLSVersion != want.TLSVersion {
+		t.Fatalf("unexpected connection fingerprint: %+v", got)
+	}
+	cached, exists := ctx.Get(tlsFingerprintContextKey)
+	if !exists {
+		t.Fatal("expected connection fingerprint to be cached in request context")
+	}
+	if cachedFP, ok := cached.(bot.TLSClientFingerprint); !ok || cachedFP.JA3Hash != want.JA3Hash {
+		t.Fatalf("unexpected cached connection fingerprint: %+v", cached)
+	}
+}
+
+type singleConnListener struct {
+	conn net.Conn
+	used bool
+}
+
+type testNetConnUnwrapper struct {
+	net.Conn
+	inner net.Conn
+}
+
+func (c *testNetConnUnwrapper) NetConn() net.Conn { return c.inner }
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if l.used {
+		return nil, net.ErrClosed
+	}
+	l.used = true
+	return l.conn, nil
+}
+
+func (l *singleConnListener) Close() error {
+	if l.conn == nil {
+		return nil
+	}
+	return l.conn.Close()
+}
+
+func (l *singleConnListener) Addr() net.Addr { return testAddr("single-conn") }
+
+type testAddr string
+
+func (a testAddr) Network() string { return string(a) }
+func (a testAddr) String() string  { return string(a) }
+
+func TestFixURITLSTransportOnConnectRunsAfterHandshake(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	cert, err := acme.GenerateSelfSigned("localhost")
+	if err != nil {
+		t.Fatalf("generate self-signed cert: %v", err)
+	}
+
+	stateCh := make(chan tls.ConnectionState, 1)
+	handlerCh := make(chan struct{}, 1)
+	errCh := make(chan error, 1)
+
+	transport := &fixURITLSTransport{
+		ln: &singleConnListener{conn: serverConn},
+		tls: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS13,
+			MaxVersion:   tls.VersionTLS13,
+			NextProtos:   []string{"h2"},
+		},
+		OnConnect: func(ctx context.Context, conn network.Conn) context.Context {
+			stateProvider, ok := conn.(interface{ ConnectionState() tls.ConnectionState })
+			if !ok {
+				t.Fatal("expected connection state provider")
+			}
+			stateCh <- stateProvider.ConnectionState()
+			return ctx
+		},
+	}
+
+	go func() {
+		errCh <- transport.ListenAndServe(func(ctx context.Context, conn interface{}) error {
+			handlerCh <- struct{}{}
+			if closer, ok := conn.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+			return nil
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         "localhost",
+		MinVersion:         tls.VersionTLS13,
+		MaxVersion:         tls.VersionTLS13,
+		NextProtos:         []string{"h2"},
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("client TLS handshake: %v", err)
+	}
+
+	select {
+	case state := <-stateCh:
+		if state.Version != tls.VersionTLS13 || state.NegotiatedProtocol != "h2" || state.ServerName != "localhost" {
+			t.Fatalf("unexpected TLS state in OnConnect: version=%#x alpn=%q sni=%q", state.Version, state.NegotiatedProtocol, state.ServerName)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OnConnect")
+	}
+
+	select {
+	case <-handlerCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for handler")
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("transport returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transport shutdown")
 	}
 }

@@ -5,11 +5,13 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/pkg/logger"
+	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -39,6 +41,24 @@ type TLSDefaultConfig struct {
 	CurvePreferences         string `json:"curve_preferences"` // 逗号分隔
 	PreferServerCipherSuites bool   `json:"prefer_server_cipher_suites"`
 	SelfSignedOnIP           bool   `json:"self_signed_on_ip"` // IP 直接访问时使用自签证书
+}
+
+// RedisConfig Redis 连接配置。
+type RedisConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Addr     string `json:"addr"`
+	Password string `json:"password,omitempty"`
+	DB       int    `json:"db"`
+}
+
+// RedisConfigResponse Redis 配置响应，不回显密码。
+type RedisConfigResponse struct {
+	Enabled         bool   `json:"enabled"`
+	Addr            string `json:"addr"`
+	DB              int    `json:"db"`
+	PasswordSet     bool   `json:"password_set"`
+	Source          string `json:"source"`
+	RestartRequired bool   `json:"restart_required"`
 }
 
 const (
@@ -203,6 +223,53 @@ func UpdateTLSDefaultConfig(repo *repository.SystemSettingsRepo, reload func() e
 	}
 }
 
+// GetRedisConfig 获取 Redis 连接配置。
+func GetRedisConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		cfg := LoadRedisConfig(repo)
+		c.JSON(200, redisConfigResponse(cfg))
+	}
+}
+
+// UpdateRedisConfig 更新 Redis 连接配置，保存后需要重启进程才会重建 Redis 客户端。
+func UpdateRedisConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var req struct {
+			Enabled  *bool   `json:"enabled"`
+			Addr     *string `json:"addr"`
+			Password *string `json:"password"`
+			DB       *int    `json:"db"`
+		}
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(400, map[string]string{"error": "invalid request body"})
+			return
+		}
+		cfg := LoadRedisConfig(repo)
+		if req.Enabled != nil {
+			cfg.Enabled = *req.Enabled
+		}
+		if req.Addr != nil {
+			cfg.Addr = strings.TrimSpace(*req.Addr)
+		}
+		if req.Password != nil {
+			cfg.Password = *req.Password
+		}
+		if req.DB != nil {
+			cfg.DB = *req.DB
+		}
+		if err := validateRedisConfig(cfg); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		data, _ := json.Marshal(cfg)
+		if err := repo.Set(store.SettingKeyRedisConfig, string(data)); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		c.JSON(200, redisConfigResponse(cfg))
+	}
+}
+
 // ListCipherSuites 列出所有可用的 TLS 密码套件。
 func ListCipherSuites() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -217,6 +284,47 @@ func ListCipherSuites() app.HandlerFunc {
 			},
 		})
 	}
+}
+
+func LoadRedisConfig(repo *repository.SystemSettingsRepo) RedisConfig {
+	cfg := RedisConfig{}
+	val, err := repo.Get(store.SettingKeyRedisConfig)
+	if err != nil || val == "" {
+		return cfg
+	}
+	_ = json.Unmarshal([]byte(val), &cfg)
+	cfg.Addr = strings.TrimSpace(cfg.Addr)
+	if cfg.DB < 0 {
+		cfg.DB = 0
+	}
+	return cfg
+}
+
+func redisConfigResponse(cfg RedisConfig) RedisConfigResponse {
+	return RedisConfigResponse{
+		Enabled:         cfg.Enabled,
+		Addr:            cfg.Addr,
+		DB:              cfg.DB,
+		PasswordSet:     cfg.Password != "",
+		Source:          "database",
+		RestartRequired: true,
+	}
+}
+
+func validateRedisConfig(cfg RedisConfig) error {
+	if cfg.DB < 0 {
+		return fmt.Errorf("redis db must be >= 0")
+	}
+	if !cfg.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.Addr) == "" {
+		return fmt.Errorf("redis addr is required when enabled")
+	}
+	if _, _, err := net.SplitHostPort(cfg.Addr); err != nil {
+		return fmt.Errorf("invalid redis addr %q: %w", cfg.Addr, err)
+	}
+	return nil
 }
 
 func loadNetworkConfig(repo *repository.SystemSettingsRepo) NetworkConfig {

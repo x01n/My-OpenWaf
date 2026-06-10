@@ -3,6 +3,7 @@ package site
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ var (
 	siteStatusMap   = make(map[uint]string)
 	siteStatusMutex sync.RWMutex
 )
+
+var errInvalidSiteAction = errors.New("invalid action")
 
 type siteListItem struct {
 	store.Site
@@ -119,6 +122,10 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			item.ApplyProtectionModeOverrides()
 		}
 		clearInheritedProtectionOverrides(&item)
+		if err := validateSiteActions(&item, func(string) bool { return true }); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := shared.ValidateSiteTLSCertificate(item.TLSEnabled, item.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -157,6 +164,24 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			existing.ApplyProtectionModeOverrides()
 		}
 		clearInheritedProtectionOverrides(existing)
+		shouldValidateAction := func(field string) bool {
+			switch field {
+			case "owasp_action":
+				return siteRequestHasField(body, field) || (siteRequestHasField(body, "owasp_enabled") && existing.OWASPEnabled != nil && *existing.OWASPEnabled) || siteRequestHasField(body, "attack_protection_level")
+			case "cve_action":
+				return siteRequestHasField(body, field) || (siteRequestHasField(body, "cve_enabled") && existing.CVEEnabled != nil && *existing.CVEEnabled) || siteRequestHasField(body, "attack_protection_level")
+			case "rate_limit_action":
+				return siteRequestHasField(body, field) || (siteRequestHasField(body, "rate_limit_enabled") && existing.RateLimitEnabled != nil && *existing.RateLimitEnabled) || siteRequestHasField(body, "attack_protection_level")
+			case "anti_replay_action":
+				return siteRequestHasField(body, field) || (siteRequestHasField(body, "anti_replay_enabled") && existing.AntiReplayEnabled)
+			default:
+				return false
+			}
+		}
+		if err := validateSiteActions(existing, shouldValidateAction); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := shared.ValidateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -183,6 +208,9 @@ func siteRequestHasField(body []byte, field string) bool {
 }
 
 func clearInheritedProtectionOverrides(item *store.Site) {
+	if item.BotProtectionEnabled == nil {
+		item.BotProtectionLevel = ""
+	}
 	if item.OWASPEnabled == nil {
 		item.OWASPSensitivity = ""
 		item.OWASPAction = ""
@@ -195,6 +223,38 @@ func clearInheritedProtectionOverrides(item *store.Site) {
 		item.RateLimitMax = 0
 		item.RateLimitAction = ""
 	}
+}
+
+func validateSiteActions(item *store.Site, shouldValidate func(string) bool) error {
+	if shouldValidate("owasp_action") && item.OWASPAction != "" {
+		normalized, ok := shared.ValidateActionWithoutRedirectTarget(item.OWASPAction)
+		if !ok {
+			return errInvalidSiteAction
+		}
+		item.OWASPAction = normalized
+	}
+	if shouldValidate("cve_action") && item.CVEAction != "" {
+		normalized, ok := shared.ValidateActionWithoutRedirectTarget(item.CVEAction)
+		if !ok {
+			return errInvalidSiteAction
+		}
+		item.CVEAction = normalized
+	}
+	if shouldValidate("rate_limit_action") && item.RateLimitAction != "" {
+		normalized, ok := shared.ValidateActionWithoutRedirectTarget(item.RateLimitAction)
+		if !ok {
+			return errInvalidSiteAction
+		}
+		item.RateLimitAction = normalized
+	}
+	if shouldValidate("anti_replay_action") && item.AntiReplayAction != "" {
+		normalized, ok := shared.ValidateAntiReplayAction(item.AntiReplayAction)
+		if !ok {
+			return errInvalidSiteAction
+		}
+		item.AntiReplayAction = normalized
+	}
+	return nil
 }
 
 func DeleteSite(repo *repository.SiteRepo, listenerRepo *repository.SiteListenerRepo, reload func() error) app.HandlerFunc {
