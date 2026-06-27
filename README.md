@@ -161,11 +161,11 @@ docker run -d \
 启动后访问 `https://localhost:9443` 进入管理面板。
 
 ### 🔨 从源码构建
-**前置要求**：Go 1.25+、Node.js 22+、GCC
+**前置要求**：Go 1.25+、Bun、GCC
 
 ```bash
 # 1. 构建前端
-cd frontend && npm ci && npm run build
+cd frontend && bun install --frozen-lockfile && bun run build
 
 # 2. 构建后端（前端产物自动嵌入）
 cd .. && CGO_ENABLED=1 go build -ldflags="-s -w" -o bin/my-openwaf ./cmd/...

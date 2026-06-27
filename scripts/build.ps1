@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $root) { $root = (Get-Location).Path }
 Push-Location "$root\frontend"
-npx next build
+bun run build
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Pop-Location
 $dest = "$root\internal\core\adminweb\dist"
