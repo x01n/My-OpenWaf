@@ -373,7 +373,8 @@ func TestParseTLSClientHelloMatchesUTLSReferenceVariants(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := &tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			record := clientHelloRecordWithConfigForTest(t, &tt.config)
 			got := requireTLSClientHelloMatchesUTLSReference(t, record)
