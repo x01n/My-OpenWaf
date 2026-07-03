@@ -1164,8 +1164,8 @@ func TestHandlerRejectsTooManyRequestHeaders(t *testing.T) {
 	if got := ctx.Response.StatusCode(); got != 431 {
 		t.Fatalf("status = %d, want 431", got)
 	}
-	if got := string(ctx.Response.Body()); got != "too many request header fields" {
-		t.Fatalf("body = %q, want %q", got, "too many request header fields")
+	if got := string(ctx.Response.Body()); !strings.Contains(got, "431") || !strings.Contains(got, "Request Header Field(s) Too Large") {
+		t.Fatalf("body = %q, want 431 error page", got)
 	}
 }
 

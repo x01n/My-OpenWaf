@@ -666,6 +666,7 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 	full := upstreamRequestURL(c, base)
 
 	isStream := c.Request.IsBodyStream()
+	hertzContentLength := c.Request.Header.ContentLength()
 	var rdr io.Reader
 	var bodyBytes []byte
 	var bodyLen int64
@@ -693,7 +694,7 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 	}
 	if rdr != nil {
 		req.ContentLength = bodyLen
-		if !isStream && len(bodyBytes) > 0 {
+		if !isStream && len(bodyBytes) > 0 && hertzContentLength >= 0 {
 			snap := append([]byte(nil), bodyBytes...)
 			req.GetBody = func() (io.ReadCloser, error) {
 				return &byteSliceReadCloser{data: snap}, nil
@@ -964,6 +965,17 @@ func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
 	}
 	if len(removed) > 0 {
 		slog.Debug("upstream hop-by-hop response headers stripped", slog.Any("headers", removed))
+	}
+}
+
+// AddResponseTrailerHeaders re-adds the Trailer declaration header after copyResponseHeaders
+// strips it.  This tells the downstream HTTP client which trailer fields to expect.
+func AddResponseTrailerHeaders(dst *app.RequestContext, trailers http.Header) {
+	if len(trailers) == 0 {
+		return
+	}
+	for k := range trailers {
+		dst.Response.Header.Add("Trailer", k)
 	}
 }
 
@@ -1453,6 +1465,9 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	}
 
 	copyResponseHeaders(c, resp.Header)
+	if len(resp.Trailer) > 0 {
+		AddResponseTrailerHeaders(c, resp.Trailer)
+	}
 
 	// 动态防护处理：根据配置对响应内容进行加密/混淆/水印
 	dp := rt.DynamicProtection

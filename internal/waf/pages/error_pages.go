@@ -24,8 +24,9 @@ var defaultErrorPages = map[int]*ErrorPageConfig{
 	403: {StatusCode: 403, Title: "Access Denied", Body: "Your request has been blocked by the web application firewall.\n您的请求已被Web应用防火墙拦截。"},
 	404: {StatusCode: 404, Title: "Not Found", Body: "The requested resource could not be found.\n请求的资源未找到。"},
 	429: {StatusCode: 429, Title: "Too Many Requests", Body: "You have exceeded the rate limit. Please try again later.\n您的请求过于频繁，请稍后再试。"},
+	431: {StatusCode: 431, Title: "Request Header Field(s) Too Large", Body: "HTTP Error 431: too many request header fields.\n请求头字段过多。"},
 	502: {StatusCode: 502, Title: "Bad Gateway", Body: "The server received an invalid response from the upstream.\n上游服务器返回了无效的响应。"},
-	503: {StatusCode: 503, Title: "Service Unavailable", Body: "The service is temporarily unavailable.\n服务暂时不可用，请稍后再试。"},
+	503: {StatusCode: 503, Title: "Service Unavailable", Body: "The service is temporarily unavailable, please try again later.\n服务暂时不可用，请稍后再试。"},
 	504: {StatusCode: 504, Title: "Gateway Timeout", Body: "The upstream server did not respond in time.\n上游服务器未能及时响应。"},
 }
 
@@ -78,6 +79,9 @@ func RenderErrorPage(statusCode int, customConfig *ErrorPageConfig) []byte {
 	case 429:
 		icon = "&#9203;"
 		titleZh = "请求过于频繁"
+	case 431:
+		icon = "&#128203;"
+		titleZh = "请求头字段过多"
 	case 502:
 		icon = "&#9889;"
 		titleZh = "网关错误"

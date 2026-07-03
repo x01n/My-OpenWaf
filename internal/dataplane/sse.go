@@ -61,6 +61,9 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 			c.Response.Header.Add(k, v)
 		}
 	}
+	if len(resp.Trailer) > 0 {
+		proxy.AddResponseTrailerHeaders(c, resp.Trailer)
+	}
 	if resp.Header.Get("Server") == "" {
 		c.Response.Header.Del("Server")
 	}
@@ -69,6 +72,7 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	c.Response.Header.Set("Cache-Control", "no-cache")
 	c.Response.Header.Del("Connection")
 	c.Response.Header.Del("Content-Length")
+	c.Response.Header.SetContentLength(-1)
 	c.Response.ImmediateHeaderFlush = true
 	c.Response.SetBodyStream(&sseBodyStream{rc: resp.Body, resp: resp, hertzCtx: c}, -1)
 
@@ -133,8 +137,11 @@ type sseBodyStream struct {
 }
 
 func (r *sseBodyStream) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, io.EOF
+	}
 	n, err := r.rc.Read(p)
-	if err != nil && !r.closed {
+	if err != nil {
 		r.closed = true
 		_ = r.rc.Close()
 		copySSETrailers(r.hertzCtx, r.resp.Trailer)

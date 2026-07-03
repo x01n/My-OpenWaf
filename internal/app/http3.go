@@ -167,6 +167,16 @@ type HTTP3ServerConfig struct {
 
 func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 	proxy := &httputil.ReverseProxy{}
+	proxy.FlushInterval = -1
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+		contentEncoding := resp.Header.Get("Content-Encoding")
+		if strings.Contains(contentType, "text/event-stream") || contentEncoding != "" {
+			resp.Header.Del("Content-Length")
+			resp.ContentLength = -1
+		}
+		return nil
+	}
 	handshakeFingerprints := newHTTP3HandshakeFingerprintStore()
 	proxyTransport := &http.Transport{
 		TLSClientConfig:       http3LoopbackTLSConfig(),

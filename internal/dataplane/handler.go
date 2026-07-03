@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"mime"
 	"net"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -108,8 +109,14 @@ func listenerBind(c *app.RequestContext) string {
 }
 
 func scrubResponseHopByHopHeaders(c *app.RequestContext) {
-	for _, key := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
+	for _, key := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Transfer-Encoding", "Upgrade"} {
 		c.Response.Header.Del(key)
+	}
+	// Body streams must use chunked framing; drop any Content-Length that the
+	// framework may have inferred from the stream to avoid misleading HTTP/3 clients.
+	if c.Response.IsBodyStream() {
+		c.Response.Header.Del("Content-Length")
+		c.Response.Header.SetContentLength(-1)
 	}
 }
 
@@ -158,7 +165,7 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		if maxH := sn.HTTP2Config.MaxHeaderFields; maxH > 0 && c.Request.Header.Len() > maxH {
-			c.String(431, "too many request header fields")
+			pages.WriteErrorPage(ctx, c, http.StatusRequestHeaderFieldsTooLarge, nil)
 			return
 		}
 
