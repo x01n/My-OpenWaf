@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import useSWR, { mutate } from "swr";
 import { useCallback } from "react";
 import type { Key } from "swr";

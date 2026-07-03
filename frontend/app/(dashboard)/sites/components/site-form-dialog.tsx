@@ -221,9 +221,9 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
                     {...register(`listeners.${index}.port` as const)}
                   />
                   <div className="flex items-center gap-2">
-              {/* eslint-disable-next-line react-hooks/incompatible-library */}
+              { }
                     <Switch
-                      checked={watch(`listeners.${index}.tls_enabled`)}
+                      checked={watch(`listeners.${index}.tls_enabled`)} // eslint-disable-line react-hooks/incompatible-library
                       onCheckedChange={(checked) =>
                         setValue(`listeners.${index}.tls_enabled`, checked)
                       }

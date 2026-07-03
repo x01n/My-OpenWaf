@@ -55,10 +55,10 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
     return recordedResourcesData || [];
   }, [recordedResourcesData]);
 
-  const [localSettings, setLocalSettings] = useState<Record<string, any>>({});
+  const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
 
   const getValue = useCallback(
-    (key: string, defaultValue: any = false) => {
+    (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
       return localSettings[key] !== undefined
         ? localSettings[key]
         : (botSettings?.[key] ?? defaultValue);

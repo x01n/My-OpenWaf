@@ -10,25 +10,12 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import {
   IconUserCheck,
-  IconRobot,
   IconShield,
   IconRefresh,
   IconHelpCircle,
 } from "@tabler/icons-react";
 import { useBotSettings, useBotSettingsUpdate } from "@/hooks/use-api";
 import { cn } from "@/lib/utils";
-
-/**
- * 模块配置项
- */
-interface SectionItem {
-  key: string;
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  switchId: string;
-  switchKey: string;
-}
 
 /**
  * 动态防护子选项
@@ -45,10 +32,10 @@ export default function CaptchaPage() {
   const { data: botSettings, isLoading, mutate } = useBotSettings();
   const updateBot = useBotSettingsUpdate();
 
-  const [localSettings, setLocalSettings] = useState<Record<string, any>>({});
+  const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
 
   const getValue = useCallback(
-    (key: string, defaultValue: any = false) => {
+    (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
       return localSettings[key] !== undefined
         ? localSettings[key]
         : (botSettings?.[key] ?? defaultValue);

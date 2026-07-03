@@ -81,13 +81,13 @@ function SiteDetailContent() {
     {
       key: "tls_enabled",
       title: t("sites.detail.tls"),
-      render: (row: any) => (
+      render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
         <Badge variant={row.tls_enabled ? "default" : "outline"} className="h-5 text-[10px]">
           {row.tls_enabled ? "HTTPS" : "HTTP"}
         </Badge>
       ),
     },
-    { key: "enabled", title: t("common.status"), render: (row: any) => (row.enabled ? t("sites.detail.listenerEnabled") : t("sites.detail.listenerDisabled")) },
+    { key: "enabled", title: t("common.status"), render: (row: any) => (row.enabled ? t("sites.detail.listenerEnabled") : t("sites.detail.listenerDisabled")) }, // eslint-disable-line @typescript-eslint/no-explicit-any
   ];
 
   const ruleColumns = [

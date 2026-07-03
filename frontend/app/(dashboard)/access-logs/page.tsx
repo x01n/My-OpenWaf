@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +24,7 @@ import {
 } from "@/components/ui/pagination";
 import { Badge } from "@/components/ui/badge";
 import { DataTable } from "@/components/data-table";
-import { IconFilter, IconFileText, IconEye } from "@tabler/icons-react";
+import { IconFilter, IconFileText } from "@tabler/icons-react";
 import { useAccessLogs } from "@/hooks/use-api";
 import type { AccessLog } from "@/lib/types";
 

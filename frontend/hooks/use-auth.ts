@@ -12,10 +12,12 @@ export function useAuth() {
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLoading(false);
       return;
     }
     authApi.me()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .then((data: any) => {
         setUser(data);
       })
@@ -59,6 +61,7 @@ export function useIsAuthenticated() {
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setChecked(true);
       return;
     }

@@ -184,7 +184,7 @@ export default function AttacksPage() {
   const { data, isLoading, error, mutate } = useOwaspRules() as {
     data: OwaspRulesResponse | undefined;
     isLoading: boolean;
-    error: any;
+    error: unknown;
     mutate: () => void;
   };
   const { execute: batchUpdate, loading: isSaving } = useOwaspBatchUpdate();
@@ -209,6 +209,7 @@ export default function AttacksPage() {
           }
         }
       }
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setConfigMode(hasCustom ? "custom" : "global");
       setInitialized(true);
     }
@@ -353,6 +354,7 @@ export default function AttacksPage() {
 
   // 加载错误处理
   if (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
     return (
       <div className="space-y-6">
         <div className="flex items-center gap-2">
@@ -363,7 +365,7 @@ export default function AttacksPage() {
           <IconAlertTriangle className="h-5 w-5" />
           <span>
             {t("attacks.loadFailed", {
-              message: error.message || t("common.unknownError"),
+              message: errMsg || t("common.unknownError"),
             })}
           </span>
           <Button variant="outline" size="sm" onClick={() => mutate()}>

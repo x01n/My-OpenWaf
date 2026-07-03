@@ -252,7 +252,7 @@ export function RuleFormDialog({
     control,
     formState: { errors },
   } = useForm<FormValues>({
-    resolver: zodResolver(formSchema) as any,
+    resolver: zodResolver(formSchema) as any, // eslint-disable-line @typescript-eslint/no-explicit-any
     defaultValues: {
       type: "block",
       name: "",
@@ -326,6 +326,8 @@ export function RuleFormDialog({
   // 表单初始化
   // ============================================================
 
+  // 表单初始化
+   
   useEffect(() => {
     if (open && rule) {
       reset({
@@ -337,7 +339,9 @@ export function RuleFormDialog({
         captchaMinutes: 5,
         enabled: rule.enabled,
       });
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setConditionGroups(parsePattern(rule.pattern));
+       
       setConditionError("");
     } else if (open && !rule) {
       reset({
@@ -349,7 +353,9 @@ export function RuleFormDialog({
         captchaMinutes: 5,
         enabled: true,
       });
+       
       setConditionGroups(createDefaultGroups());
+       
       setConditionError("");
     }
   }, [open, rule, reset]);

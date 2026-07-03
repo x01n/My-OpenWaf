@@ -16,7 +16,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import {
   IconShield,
-  IconSettings,
   IconCopy,
   IconCheck,
   IconRefresh,
@@ -177,11 +176,29 @@ export function AttackProtectionDialog({ open, onOpenChange }: AttackProtectionD
           }
         }
       }
-      setConfigMode(hasCustom ? "custom" : "global");
+      setConfigMode(hasCustom ? "custom" : "global"); // eslint-disable-line react-hooks/set-state-in-effect
       setInitialized(true);
     }
   }, [data, initialized]);
 
+  // 从数据推断每个模块的初始模式
+  useEffect(() => {
+    if (data?.grouped && !initialized) {
+      let hasCustom = false;
+      for (const mod of MODULES) {
+        const rules = data.grouped[mod.category];
+        if (rules && rules.length > 0) {
+          const mode = inferMode(rules);
+          if (mode !== GLOBAL_DEFAULT_MODE) {
+            hasCustom = true;
+            break;
+          }
+        }
+      }
+      setConfigMode(hasCustom ? "custom" : "global"); // eslint-disable-line react-hooks/set-state-in-effect
+      setInitialized(true);
+    }
+  }, [data, initialized]);
   // 从数据推断每个模块的初始模式
   const inferredModes = useMemo(() => {
     if (!data?.grouped) return {};

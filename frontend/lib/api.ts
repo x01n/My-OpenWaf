@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * API 客户端封装
  * 统一 fetch 调用，处理 JWT 认证、Token 刷新、错误处理

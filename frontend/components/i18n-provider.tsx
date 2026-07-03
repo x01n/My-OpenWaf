@@ -13,10 +13,12 @@ import en from "@/lib/i18n/locales/en.json";
  * 静态导出场景下，SSR 阶段 useTranslation 会 fallback 到返回 key，客户端 hydrate 后正常显示翻译
  */
 export function I18nProvider({ children }: { children: React.ReactNode }) {
-  const [ready, setReady] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_ready, setReady] = useState(false);
 
   useEffect(() => {
     if (i18n.isInitialized) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setReady(true);
       return;
     }
@@ -38,7 +40,9 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
           useSuspense: false,
         },
       })
-      .then(() => setReady(true));
+      .then(() => {
+        setReady(true);
+      });
   }, []);
 
   return <>{children}</>;

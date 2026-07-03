@@ -257,7 +257,7 @@ export default function SecurityEventsPage() {
       width: "100px",
       render: (row: SecurityEvent) => (
         <Badge
-          variant={(actionColorMap[row.action] || "secondary") as any}
+          variant={(actionColorMap[row.action] || "secondary") as React.ComponentProps<typeof Badge>["variant"]}
           className="h-5 px-1.5 text-[10px]"
         >
           {actionLabelMap[row.action] || row.action}

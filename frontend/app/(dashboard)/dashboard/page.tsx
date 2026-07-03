@@ -23,14 +23,10 @@ import {
 } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
 import {
-  BarChart,
-  Bar,
   XAxis,
   YAxis,
   Tooltip,
   ResponsiveContainer,
-  LineChart,
-  Line,
   CartesianGrid,
   AreaChart,
   Area,
@@ -97,9 +93,11 @@ export default function DashboardPage() {
   const d = data;
 
   const blockTimeline: Array<{ time: string; count: number }> =
-    timelineData?.buckets?.map((b: any) => ({
-      time: typeof b.time === "string" ? b.time.slice(11, 16) : String(b.time),
-      count: b.count ?? 0,
+    timelineData?.buckets?.map((b: unknown) => ({
+      time: typeof (b as { time: unknown }).time === "string"
+        ? ((b as { time: string }).time).slice(11, 16)
+        : String((b as { time: unknown }).time),
+      count: ((b as { count: unknown }).count as number | undefined) ?? 0,
     })) || [];
 
   const cveByType = d.cve_by_type_24h || [];
@@ -320,7 +318,7 @@ export default function DashboardPage() {
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
                       <Pie
-                        data={cveByType.map((c: any) => ({ name: c.category, value: c.count }))}
+                        data={cveByType.map((c: { category: string; count: number }) => ({ name: c.category, value: c.count }))}
                         cx="50%"
                         cy="50%"
                         innerRadius={30}
@@ -328,7 +326,7 @@ export default function DashboardPage() {
                         paddingAngle={2}
                         dataKey="value"
                       >
-                        {cveByType.map((_: any, i: number) => (
+                        {cveByType.map((_: unknown, i: number) => (
                           <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
                         ))}
                       </Pie>
@@ -343,7 +341,7 @@ export default function DashboardPage() {
                   </ResponsiveContainer>
                 </div>
               ) : (
-                cveByType.map((item: any) => (
+                cveByType.map((item: { category: string; count: number }) => (
                   <div key={item.category} className="flex justify-between text-sm">
                     <span className="text-muted-foreground">{item.category}</span>
                     <span className="font-medium">{formatNumber(item.count)}</span>

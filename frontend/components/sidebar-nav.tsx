@@ -18,11 +18,8 @@ import {
   IconKey,
   IconSettings,
   IconShieldCheck,
-  IconFileText,
-  IconBan,
   IconChevronRight,
   IconMenu2,
-  IconX,
 } from "@tabler/icons-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";

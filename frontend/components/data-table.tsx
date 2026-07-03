@@ -20,16 +20,16 @@ interface Column<T> {
   render?: (row: T, index: number) => ReactNode;
 }
 
-interface DataTableProps<T = any> {
+interface DataTableProps<T = unknown> {
   columns: Column<T>[];
   data: T[];
   loading?: boolean;
-  rowKey?: (row: any) => string | number;
+  rowKey?: (row: T) => string | number;
   emptyText?: string;
   className?: string;
 }
 
-export function DataTable<T = any>({
+export function DataTable<T = unknown>({
   columns,
   data,
   loading,
@@ -92,6 +92,7 @@ export function DataTable<T = any>({
             <TableRow key={rowKey ? rowKey(row) : index}>
               {columns.map((col) => (
                 <TableCell key={col.key}>
+                  {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                   {col.render ? col.render(row, index) : (row as any)[col.key]}
                 </TableCell>
               ))}

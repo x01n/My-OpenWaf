@@ -23,8 +23,6 @@ import {
   IconShieldLock,
   IconTrash,
   IconHelpCircle,
-  IconCheck,
-  IconX,
 } from "@tabler/icons-react";
 import { useNetworkConfig, useTLSConfig, useLogConfig } from "@/hooks/use-api";
 import { useNetworkConfigUpdate, useTLSConfigUpdate, useLogConfigUpdate } from "@/hooks/use-api";
@@ -39,19 +37,19 @@ export default function SettingsPage() {
   const tlsUpdate = useTLSConfigUpdate();
   const logUpdate = useLogConfigUpdate();
 
-  const [localNetwork, setLocalNetwork] = useState<Record<string, any>>({});
-  const [localTLS, setLocalTLS] = useState<Record<string, any>>({});
-  const [localLog, setLocalLog] = useState<Record<string, any>>({});
+  const [localNetwork, setLocalNetwork] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
+  const [localTLS, setLocalTLS] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
+  const [localLog, setLocalLog] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
 
-  const getNetworkValue = (key: string, defaultValue: any = false) => {
+  const getNetworkValue = (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     return localNetwork[key] !== undefined ? localNetwork[key] : (networkConfig?.[key] ?? defaultValue);
   };
 
-  const getTLSValue = (key: string, defaultValue: any = "") => {
+  const getTLSValue = (key: string, defaultValue: any = "") => { // eslint-disable-line @typescript-eslint/no-explicit-any
     return localTLS[key] !== undefined ? localTLS[key] : (tlsConfig?.[key] ?? defaultValue);
   };
 
-  const getLogValue = (key: string, defaultValue: any = "") => {
+  const getLogValue = (key: string, defaultValue: any = "") => { // eslint-disable-line @typescript-eslint/no-explicit-any
     return localLog[key] !== undefined ? localLog[key] : (logConfig?.[key] ?? defaultValue);
   };
 

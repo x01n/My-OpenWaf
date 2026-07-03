@@ -53,7 +53,7 @@ export function TopBar() {
     try {
       await reload.execute({});
       toast.success(t("common.saveSuccess"));
-    } catch (err) {
+    } catch {
       toast.error(t("common.saveFailed"));
     }
   };

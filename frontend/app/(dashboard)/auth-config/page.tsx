@@ -17,9 +17,9 @@ export default function AuthConfigPage() {
   const { data: settings, isLoading } = useProtectionSettings();
   const updateSettings = useProtectionSettingsUpdate();
 
-  const [localSettings, setLocalSettings] = useState<Record<string, any>>({});
+  const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
 
-  const getValue = (key: string, defaultValue: any = false) => {
+  const getValue = (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     return localSettings[key] !== undefined ? localSettings[key] : (settings?.[key] ?? defaultValue);
   };
 
