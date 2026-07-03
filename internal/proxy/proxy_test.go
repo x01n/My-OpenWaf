@@ -220,7 +220,6 @@ func TestReadUpstreamResponseBodyDecodesGzip(t *testing.T) {
 	}
 }
 
-
 func TestReadUpstreamResponseBodyDecodesMultipleContentEncodings(t *testing.T) {
 	original := []byte(strings.Repeat("decoded-upstream-body-", 128))
 	encoded := mustEncodeBodyWithContentEncodings(t, original, "gzip", "br")
@@ -2125,7 +2124,6 @@ func BenchmarkCacheControlHasNoTransformString(b *testing.B) {
 	}
 }
 
-
 func TestForwardBufferedResponseStripsConnectionTokenHeaders(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Request.SetMethod("GET")
@@ -2944,7 +2942,6 @@ func TestShouldCacheHTTPResponse_BypassUpstreamPrivate(t *testing.T) {
 		t.Fatal("set-cookie must still block")
 	}
 }
-
 
 func TestSiteCacheTTLDetails_QueryAware(t *testing.T) {
 	rt := snapshot.SiteRuntime{

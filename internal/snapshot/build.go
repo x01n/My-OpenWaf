@@ -235,7 +235,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				BlockHTML:            s.BlockHTML,
 				BlockStatus:          s.BlockStatus,
 				AntiReplayEnabled:    s.AntiReplayEnabled,
-								AntiReplayAction:     s.AntiReplayAction,
+				AntiReplayAction:     s.AntiReplayAction,
 				AppRouteRules:        appRulesBySite[s.ID],
 				DynamicProtection:    dynamicProtection,
 			}

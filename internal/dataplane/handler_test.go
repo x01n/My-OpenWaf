@@ -477,7 +477,6 @@ func TestBuildAccessLogEntryPersistsTLSShapeMetadata(t *testing.T) {
 	}
 }
 
-
 func TestRecordSecurityEventAddsTLSMetadata(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -1184,8 +1183,6 @@ func TestScrubResponseHopByHopHeaders(t *testing.T) {
 		}
 	}
 }
-
-
 
 func TestHandlerHEADCacheMissUsesStreamingForwardPath(t *testing.T) {
 	payload := []byte(strings.Repeat("head-cache-miss-body-", 128))

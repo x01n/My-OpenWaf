@@ -227,9 +227,9 @@ func (h *Holder) Load() *Snapshot   { return h.ptr.Load() }
 
 // Default security header values.
 const (
-	DefaultExpectCTValue         = "max-age=86400, enforce"
-	DefaultHPKPValue             = ""
-	DefaultHPKPReportOnlyValue   = ""
+	DefaultExpectCTValue       = "max-age=86400, enforce"
+	DefaultHPKPValue           = ""
+	DefaultHPKPReportOnlyValue = ""
 )
 
 // Default response compression settings.

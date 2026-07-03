@@ -140,10 +140,10 @@ func TestShieldVerifyEnforcesProtocolRequirements(t *testing.T) {
 	}
 
 	cases := []struct {
-		name           string
-		cfg            ShieldConfig
-		requestProto   string
-		wantVerify     bool
+		name         string
+		cfg          ShieldConfig
+		requestProto string
+		wantVerify   bool
 	}{
 		{
 			name:         "require h3 accepts h3",

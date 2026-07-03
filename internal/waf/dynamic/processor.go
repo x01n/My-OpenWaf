@@ -11,9 +11,9 @@ import (
 
 // ProtectionConfig 是动态防护的运行时配置。
 type ProtectionConfig struct {
-	HTMLObfuscationEnabled bool     `json:"html_obfuscation_enabled"`
-	JSObfuscationEnabled   bool     `json:"js_obfuscation_enabled"`
-	ImageWatermarkEnabled  bool     `json:"image_watermark_enabled"`
+	HTMLObfuscationEnabled bool `json:"html_obfuscation_enabled"`
+	JSObfuscationEnabled   bool `json:"js_obfuscation_enabled"`
+	ImageWatermarkEnabled  bool `json:"image_watermark_enabled"`
 	// JSObfuscationPaths 是需要进行 JS 混淆的资源路径模式（支持通配符）
 	JSObfuscationPaths []string `json:"js_obfuscation_paths,omitempty"`
 	// ImageWatermarkPaths 是需要添加水印的图片路径模式（支持通配符）

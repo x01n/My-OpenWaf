@@ -128,7 +128,7 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		if req.ImageWatermarkPaths != nil {
 			current.ImageWatermarkPaths = req.ImageWatermarkPaths
 		}
-						if req.WatermarkText != nil {
+		if req.WatermarkText != nil {
 			current.WatermarkText = *req.WatermarkText
 		}
 		if req.ExcludeRecordHeaders != nil {

@@ -4,17 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
-	"text/template"
 	"strings"
+	"text/template"
 
 	"My-OpenWaf/internal/security"
 )
 
 var (
-	errSiteUpstreamsRequired          = errors.New("upstream_urls is required")
-	errSiteUpstreamsInvalidList       = errors.New("upstream_urls must be a string array or comma-separated string")
-	errSiteUpstreamsInvalidURL        = errors.New("upstream_urls contains invalid URL")
-	errSiteUpstreamsUnsupportedScheme = errors.New("upstream_urls supports only http, https, h2c, h3")
+	errSiteUpstreamsRequired           = errors.New("upstream_urls is required")
+	errSiteUpstreamsInvalidList        = errors.New("upstream_urls must be a string array or comma-separated string")
+	errSiteUpstreamsInvalidURL         = errors.New("upstream_urls contains invalid URL")
+	errSiteUpstreamsUnsupportedScheme  = errors.New("upstream_urls supports only http, https, h2c, h3")
 	errSiteUpstreamHostInvalidTemplate = errors.New("upstream_host contains invalid template")
 	errSiteUpstreamHostInvalidHost     = errors.New("upstream_host contains invalid host")
 )
