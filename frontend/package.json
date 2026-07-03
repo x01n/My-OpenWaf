@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build && rm -rf ../internal/core/adminweb/dist && cp -R dist ../internal/core/adminweb/dist",
+    "build": "next build && rm -rf ../internal/core/adminweb/dist && cp -R out ../internal/core/adminweb/dist",
     "start": "next start",
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
