@@ -8,7 +8,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
-func TestDefaultFallbackHTMLIncludesSecurityContext(t *testing.T) {
+func TestDefaultFallbackHTMLIncludesRequestID(t *testing.T) {
 	html := defaultFallbackHTML("req-123", action.Result{
 		RuleID:    42,
 		RuleIDStr: "owasp-942100",
@@ -18,9 +18,15 @@ func TestDefaultFallbackHTMLIncludesSecurityContext(t *testing.T) {
 		MatchDesc: "union select",
 	}, false, action.Intercept)
 
-	for _, want := range []string{"req-123", "intercept", "owasp-942100", "owasp", "sqli", "union select"} {
-		if !strings.Contains(html, want) {
-			t.Fatalf("fallback block page missed %q: %s", want, html)
+	if !strings.Contains(html, "req-123") {
+		t.Fatalf("fallback block page missed request ID: %s", html)
+	}
+	if !strings.Contains(html, "403") {
+		t.Fatalf("fallback block page missed status code 403: %s", html)
+	}
+	for _, leak := range []string{"owasp-942100", "sqli", "union select"} {
+		if strings.Contains(html, leak) {
+			t.Fatalf("fallback block page leaked sensitive info %q: %s", leak, html)
 		}
 	}
 }
@@ -38,9 +44,10 @@ func TestWriteBlockResponseAllowsNilSnapshot(t *testing.T) {
 
 func TestDefaultFallbackHTMLNormalizesRateLimitAction(t *testing.T) {
 	html := defaultFallbackHTML("req-429", action.Result{RuleID: 7, Type: action.RateLimit}, false, action.RateLimit)
-	for _, want := range []string{"req-429", "rate_limit", "429 Rate Limit"} {
-		if !strings.Contains(html, want) {
-			t.Fatalf("rate-limit fallback page missed %q: %s", want, html)
-		}
+	if !strings.Contains(html, "req-429") {
+		t.Fatalf("rate-limit fallback page missed request ID: %s", html)
+	}
+	if !strings.Contains(html, "429") {
+		t.Fatalf("rate-limit fallback page missed status code 429: %s", html)
 	}
 }

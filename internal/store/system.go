@@ -8,8 +8,12 @@ type SystemSettings struct {
 }
 
 const (
-	SettingKeyACMEConfig  = "acme_config"
-	SettingKeyRedisConfig = "redis_config"
+	SettingKeyACMEConfig          = "acme_config"
+	SettingKeyRedisConfig         = "redis_config"
+	SettingKeyHPKP                = "hpkp_enabled"
+	SettingKeyHPKPValue           = "hpkp_value"
+	SettingKeyHPKPReportOnly      = "hpkp_report_only_enabled"
+	SettingKeyHPKPReportOnlyValue = "hpkp_report_only_value"
 )
 
 // ConfigRevision is a monotonically increasing snapshot revision number.

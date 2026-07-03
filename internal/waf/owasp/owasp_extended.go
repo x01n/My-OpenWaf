@@ -1104,20 +1104,23 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 		return OWASPHit{}, false
 	}
 
-	// Look up headers case-insensitively.
-	get := func(key string) string {
-		for k, v := range headers {
-			if strings.EqualFold(k, key) {
-				return v
-			}
+	cl := ""
+	te := ""
+	oversizedHeader := ""
+	for k, v := range headers {
+		if cl == "" && equalASCIIFold(k, "content-length") {
+			cl = v
 		}
-		return ""
+		if te == "" && equalASCIIFold(k, "transfer-encoding") {
+			te = v
+		}
+		if oversizedHeader == "" && len(k)+len(v) > 8192 {
+			oversizedHeader = k
+		}
 	}
 
 	// HTTP Request Smuggling: both Content-Length and Transfer-Encoding set.
-	cl := get("Content-Length")
-	te := get("Transfer-Encoding")
-	if cl != "" && te != "" && strings.Contains(strings.ToLower(te), "chunked") {
+	if cl != "" && te != "" && containsASCIIFold(te, "chunked") {
 		return OWASPHit{
 			Category: CatProtoViol, RuleID: "owasp:proto:001", Score: 6,
 			Desc: "request smuggling: CL+TE conflict",
@@ -1133,13 +1136,11 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 	}
 
 	// Excessive header length (potential buffer overflow probe).
-	for k, v := range headers {
-		if len(k)+len(v) > 8192 {
-			return OWASPHit{
-				Category: CatProtoViol, RuleID: "owasp:proto:003", Score: 4,
-				Desc: "oversized header: " + k,
-			}, true
-		}
+	if oversizedHeader != "" {
+		return OWASPHit{
+			Category: CatProtoViol, RuleID: "owasp:proto:003", Score: 4,
+			Desc: "oversized header: " + oversizedHeader,
+		}, true
 	}
 
 	return OWASPHit{}, false

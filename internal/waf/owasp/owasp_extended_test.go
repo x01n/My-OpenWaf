@@ -172,6 +172,17 @@ func TestCheckOWASP_ProtocolViolation_Smuggling(t *testing.T) {
 	}
 }
 
+func TestCheckOWASP_ProtocolViolation_MixedCaseHeaders(t *testing.T) {
+	headers := map[string]string{
+		"content-length":    "10",
+		"TRANSFER-ENCODING": "chunked",
+	}
+	hits := CheckOWASP("mid", "/", "", headers, nil)
+	if !hasCategory(hits, CatProtoViol) {
+		t.Fatalf("expected protocol violation for mixed-case CL+TE smuggling, got %+v", hits)
+	}
+}
+
 func TestCheckOWASP_ProtocolViolation_CanBeDisabledByCategorySensitivity(t *testing.T) {
 	headers := map[string]string{
 		"Content-Length":    "10",
@@ -180,6 +191,16 @@ func TestCheckOWASP_ProtocolViolation_CanBeDisabledByCategorySensitivity(t *test
 	hits := CheckOWASP("mid", "/", "", headers, nil, map[string]string{"protocol_violation": "off"})
 	if hasCategory(hits, CatProtoViol) {
 		t.Fatalf("expected protocol_violation category to be disabled, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_ProtocolViolation_OversizedHeader(t *testing.T) {
+	headers := map[string]string{
+		"X-Trace-Id": strings.Repeat("a", 8200),
+	}
+	hits := CheckOWASP("mid", "/", "", headers, nil)
+	if !hasCategory(hits, CatProtoViol) {
+		t.Fatalf("expected protocol violation for oversized header, got %+v", hits)
 	}
 }
 
@@ -753,6 +774,15 @@ func TestCheckOWASP_Clean_BacktickVersionString(t *testing.T) {
 func hasCategory(hits []OWASPHit, cat OWASPCategory) bool {
 	for _, h := range hits {
 		if h.Category == cat {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRuleID(hits []OWASPHit, ruleID string) bool {
+	for _, h := range hits {
+		if h.RuleID == ruleID {
 			return true
 		}
 	}

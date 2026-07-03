@@ -112,3 +112,75 @@ func TestBindSiteFromRequestBodyPreservesMissingJSONBlobFields(t *testing.T) {
 		t.Fatalf("cipher suites changed: %s", existing.CipherSuites)
 	}
 }
+
+func TestValidateSiteUpstreamURLsAcceptsSupportedSchemes(t *testing.T) {
+	input := `["http://127.0.0.1:9000","https://origin.example/base","h2c://127.0.0.1:9001","h3://127.0.0.1:9443"]`
+	if err := ValidateSiteUpstreamURLs(input); err != nil {
+		t.Fatalf("ValidateSiteUpstreamURLs() returned error: %v", err)
+	}
+}
+
+func TestValidateSiteUpstreamURLsAcceptsCommaSeparatedFormat(t *testing.T) {
+	input := "http://127.0.0.1:9000, h2c://127.0.0.1:9001, h3://127.0.0.1:9443"
+	if err := ValidateSiteUpstreamURLs(input); err != nil {
+		t.Fatalf("ValidateSiteUpstreamURLs() returned error: %v", err)
+	}
+}
+
+func TestValidateSiteUpstreamURLsRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "empty", input: "", want: "upstream_urls is required"},
+		{name: "invalid json array", input: `["http://127.0.0.1:9000", 1]`, want: "upstream_urls must be a string array or comma-separated string"},
+		{name: "missing scheme", input: "127.0.0.1:9000", want: "upstream_urls contains invalid URL"},
+		{name: "unsupported scheme", input: "ftp://127.0.0.1:21", want: "upstream_urls supports only http, https, h2c, h3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSiteUpstreamURLs(tt.input)
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("ValidateSiteUpstreamURLs() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateSiteUpstreamHostAcceptsHostAndTemplate(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "host", input: "backend.example.com"},
+		{name: "host with port", input: "backend.example.com:8443"},
+		{name: "template", input: "{{.Host}}.internal"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateSiteUpstreamHost(tt.input); err != nil {
+				t.Fatalf("ValidateSiteUpstreamHost(%q) returned error: %v", tt.input, err)
+			}
+		})
+	}
+}
+
+func TestValidateSiteUpstreamHostRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "invalid host", input: "bad host", want: "upstream_host contains invalid host"},
+		{name: "invalid template", input: "{{.Missing", want: "upstream_host contains invalid template"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSiteUpstreamHost(tt.input)
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("ValidateSiteUpstreamHost(%q) error = %v, want %q", tt.input, err, tt.want)
+			}
+		})
+	}
+}

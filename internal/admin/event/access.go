@@ -19,19 +19,25 @@ func ListAccessLogs(repo *repository.AccessLogRepo) app.HandlerFunc {
 		offset, limit := utils.Paginate(page, pageSize)
 
 		f := repository.AccessLogFilter{
-			RequestID:   string(c.Query("request_id")),
-			ClientIP:    string(c.Query("client_ip")),
-			Host:        string(c.Query("host")),
-			Path:        string(c.Query("path")),
-			Method:      string(c.Query("method")),
-			WAFAction:   string(c.Query("waf_action")),
-			CacheState:  string(c.Query("cache_state")),
-			StatusGroup: string(c.Query("status_group")),
-			TLSVersion:  string(c.Query("tls_version")),
-			TLSSNI:      string(c.Query("tls_sni")),
-			TLSALPN:     string(c.Query("tls_alpn")),
-			TLSJA3Hash:  string(c.Query("tls_ja3_hash")),
-			TLSJA4:      string(c.Query("tls_ja4")),
+			Query:           string(c.Query("q")),
+			RequestID:       string(c.Query("request_id")),
+			ClientIP:        string(c.Query("client_ip")),
+			Host:            string(c.Query("host")),
+			Path:            string(c.Query("path")),
+			QueryString:     string(c.Query("query_string")),
+			Method:          string(c.Query("method")),
+			WAFAction:       string(c.Query("waf_action")),
+			CacheState:      string(c.Query("cache_state")),
+			StatusGroup:     string(c.Query("status_group")),
+			TLSVersion:      string(c.Query("tls_version")),
+			TLSSNI:          string(c.Query("tls_sni")),
+			TLSALPN:         string(c.Query("tls_alpn")),
+			TLSJA3Hash:      string(c.Query("tls_ja3_hash")),
+			TLSJA4:          string(c.Query("tls_ja4")),
+			TLSCipherSuites: string(c.Query("tls_cipher_suites")),
+			TLSExtensions:   string(c.Query("tls_extensions")),
+			TLSCurves:       string(c.Query("tls_curves")),
+			TLSPointFormats: string(c.Query("tls_point_formats")),
 		}
 		if id := string(c.Query("id")); id != "" {
 			if v, err := strconv.ParseUint(id, 10, 64); err == nil {
@@ -85,7 +91,19 @@ func ListTLSFingerprints(repo *repository.AccessLogRepo) app.HandlerFunc {
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 		offset, limit := utils.Paginate(page, pageSize)
 
-		items, total, err := repo.ListFingerprints(offset, limit)
+		filter := repository.FingerprintFilter{
+			TLSJA3Hash:      string(c.Query("tls_ja3_hash")),
+			TLSJA4:          string(c.Query("tls_ja4")),
+			TLSVersion:      string(c.Query("tls_version")),
+			TLSALPN:         string(c.Query("tls_alpn")),
+			TLSSNI:          string(c.Query("tls_sni")),
+			TLSCipherSuites: string(c.Query("tls_cipher_suites")),
+			TLSExtensions:   string(c.Query("tls_extensions")),
+			TLSCurves:       string(c.Query("tls_curves")),
+			TLSPointFormats: string(c.Query("tls_point_formats")),
+		}
+
+		items, total, err := repo.ListFingerprints(offset, limit, filter)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return

@@ -13,6 +13,7 @@ import (
 
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/utils"
 )
 
@@ -82,6 +83,10 @@ func CreateCertificate(repo *repository.CertificateRepo, reload func() error) ap
 		}
 		if _, err := tls.X509KeyPair([]byte(item.CertPEM), []byte(item.KeyPEM)); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid certificate/key pair: " + err.Error()})
+			return
+		}
+		if !validOptionalOCSPStaple(item.OCSPStaplePEM) {
+			c.JSON(400, map[string]string{"error": "invalid ocsp_staple_pem"})
 			return
 		}
 		parsed, err := parseCertificatePEM(item.CertPEM)
@@ -211,6 +216,10 @@ func UpdateCertificate(repo *repository.CertificateRepo, reload func() error) ap
 			c.JSON(400, map[string]string{"error": "invalid certificate/key pair: " + err.Error()})
 			return
 		}
+		if !validOptionalOCSPStaple(existing.OCSPStaplePEM) {
+			c.JSON(400, map[string]string{"error": "invalid ocsp_staple_pem"})
+			return
+		}
 		existing.ID = id
 		if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
@@ -222,6 +231,14 @@ func UpdateCertificate(repo *repository.CertificateRepo, reload func() error) ap
 		}
 		c.JSON(200, existing)
 	}
+}
+
+func validOptionalOCSPStaple(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
+	}
+	staple, ok := snapshot.ParseOCSPStaple(raw)
+	return ok && len(staple) > 0
 }
 
 func parseCertificatePEM(certPEM string) (*x509.Certificate, error) {

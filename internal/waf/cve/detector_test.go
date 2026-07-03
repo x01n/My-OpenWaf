@@ -32,24 +32,20 @@ func TestLowerTargetsContainAny(t *testing.T) {
 	}
 }
 
-func TestCombinedLowerTargetsContainAnyDoesNotCrossTargetBoundary(t *testing.T) {
-	targets := []string{"path=/ab", "body=cd"}
-	combined := joinLowerTargets(targets)
-	if combinedLowerTargetsContainAny(len(targets), combined, "/abcd") {
-		t.Fatal("combined lower target scan must not match across target boundary")
+func TestRequestTargetContainsAnyAllDoesNotCrossTargetBoundaries(t *testing.T) {
+	req := &CVERequest{
+		AllTargetsLower: []string{"java", "script"},
 	}
-	if !combinedLowerTargetsContainAny(len(targets), combined, "path=/ab") {
-		t.Fatal("combined lower target scan should match first target")
+
+	if requestTargetContainsAny(req, "all", "avas") {
+		t.Fatal("requestTargetContainsAny should not match across target boundaries")
 	}
-	if !combinedLowerTargetsContainAny(len(targets), combined, "body=cd") {
-		t.Fatal("combined lower target scan should match second target")
-	}
-	if combinedLowerTargetsContainAny(0, "", "") {
-		t.Fatal("empty target set should keep lowerTargetsContainAny no-target semantics")
+	if !requestTargetContainsAny(req, "all", "script") {
+		t.Fatal("requestTargetContainsAny should match within a single target")
 	}
 }
 
-func TestRequestTargetContainsAnyAllUsesCombinedLowerSafely(t *testing.T) {
+func TestRequestTargetContainsAnyAllUsesLowerTargetsSafely(t *testing.T) {
 	req := BuildCVERequest("/ab", "", nil, []byte("cd"), "text/plain")
 	if requestTargetContainsAny(req, "all", "/abcd") {
 		t.Fatal("all-target scan must not match across URL/body boundary")
@@ -59,6 +55,29 @@ func TestRequestTargetContainsAnyAllUsesCombinedLowerSafely(t *testing.T) {
 	}
 	if !requestTargetContainsAny(req, "all", "cd") {
 		t.Fatal("all-target scan should match body target")
+	}
+}
+
+func TestCVEHeaderValueReadsLowercaseAndMixedCaseHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		key     string
+		want    string
+		wantOK  bool
+	}{
+		{name: "exact", headers: map[string]string{"Cookie": "a=b"}, key: "Cookie", want: "a=b", wantOK: true},
+		{name: "lowercase", headers: map[string]string{"cookie": "a=b"}, key: "Cookie", want: "a=b", wantOK: true},
+		{name: "mixed case", headers: map[string]string{"CoOkIe": "a=b"}, key: "Cookie", want: "a=b", wantOK: true},
+		{name: "missing", headers: map[string]string{"authorization": "Bearer token"}, key: "Cookie"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := cveHeaderValueOK(tt.headers, tt.key)
+			if ok != tt.wantOK || got != tt.want {
+				t.Fatalf("cveHeaderValueOK(%q) = (%q, %v), want (%q, %v)", tt.key, got, ok, tt.want, tt.wantOK)
+			}
+		})
 	}
 }
 
@@ -267,6 +286,23 @@ func TestBuildCVERequestMultipartKeepsMetadataAndSkipsBinaryFileContent(t *testi
 	}
 	if !found {
 		t.Fatalf("dangerous multipart charset was not detected, matches=%v", matches)
+	}
+}
+
+func TestBuildCVERequestMultipartAcceptsMixedCaseContentType(t *testing.T) {
+	body := []byte("--abc\r\n" +
+		"Content-Disposition: form-data; name=\"username\"\r\n" +
+		"Content-Type: text/plain\r\n" +
+		"\r\n" +
+		"hello\r\n" +
+		"--abc--\r\n")
+
+	req := BuildCVERequest("/upload", "", nil, body, "MuLtIpArT/FORM-DATA; boundary=abc")
+	if len(req.Body) >= len(body) {
+		t.Fatalf("mixed-case multipart CVE body was not reduced: got %d, raw %d", len(req.Body), len(body))
+	}
+	if !strings.Contains(req.Body, "name=username") {
+		t.Fatalf("mixed-case multipart CVE body missing form metadata: %q", req.Body)
 	}
 }
 
@@ -605,9 +641,22 @@ func TestCVEDetector_RecentWebCVEs(t *testing.T) {
 			wantCVE: "CVE-2025-31161",
 		},
 		{
+			name:    "crushftp s3 auth bypass lowercase header",
+			path:    "/WebInterface/function/",
+			query:   "command=getUserList&serverGroup=MainUsers",
+			headers: map[string]string{"authorization": "AWS4-HMAC-SHA256 Credential=crushadmin/, SignedHeaders=host, Signature=deadbeef"},
+			wantCVE: "CVE-2025-31161",
+		},
+		{
 			name:    "fortinet authhash hostcheck rce",
 			path:    "/remote/hostcheck_validate",
 			headers: map[string]string{"Cookie": "AuthHash=enc=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+			wantCVE: "CVE-2025-32756",
+		},
+		{
+			name:    "fortinet authhash hostcheck rce lowercase cookie",
+			path:    "/remote/hostcheck_validate",
+			headers: map[string]string{"cookie": "AuthHash=enc=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
 			wantCVE: "CVE-2025-32756",
 		},
 	}

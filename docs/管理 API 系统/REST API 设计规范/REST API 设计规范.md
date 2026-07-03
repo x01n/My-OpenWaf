@@ -201,7 +201,7 @@ API-->>FE : "{status : ok}"
 ### 数据模型与字段定义
 以下为关键资源的数据模型要点（字段名与类型均来自模型定义）：
 - 站点 Site
-  - host、upstream_urls、bind、network、enabled、tls_enabled、min_tls_version、max_tls_version、cipher_suites、alpn、policy_id、bot_protection_enabled、attack_protection_level、xff_mode、trusted_cidr、preserve_original_host、max_body_bytes、upstream_tls_skip_verify、upstream_tls_server_name、maintenance_enabled、maintenance_html、maintenance_status、block_html、block_status
+  - host、upstream_urls、upstream_host、bind、network、enabled、tls_enabled、min_tls_version、max_tls_version、cipher_suites、alpn、policy_id、bot_protection_enabled、attack_protection_level、xff_mode、trusted_cidr、preserve_original_host、max_body_bytes、upstream_tls_skip_verify、upstream_tls_server_name、maintenance_enabled、maintenance_html、maintenance_status、block_html、block_status
 - 策略 Policy
   - name
 - 规则 Rule

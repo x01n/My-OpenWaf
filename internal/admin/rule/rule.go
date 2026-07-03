@@ -2,6 +2,7 @@ package rule
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -91,6 +92,13 @@ func CreateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 			c.JSON(400, map[string]string{"error": errMsg})
 			return
 		}
+		if errMsg, err := validatePersistedRulePriorityConflict(repo, &item, 0); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		} else if errMsg != "" {
+			c.JSON(400, map[string]string{"error": errMsg})
+			return
+		}
 		if err := repo.Create(&item); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -121,6 +129,13 @@ func UpdateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 		}
 		existing.ID = id
 		if errMsg := normalizePersistedRuleConfig(existing); errMsg != "" {
+			c.JSON(400, map[string]string{"error": errMsg})
+			return
+		}
+		if errMsg, err := validatePersistedRulePriorityConflict(repo, existing, id); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		} else if errMsg != "" {
 			c.JSON(400, map[string]string{"error": errMsg})
 			return
 		}
@@ -213,8 +228,8 @@ func TestRule() app.HandlerFunc {
 	}
 }
 
-// validatePersistedRuleAction checks rule Action values on bulk import and returns the canonical store.RuleAction.
-func validatePersistedRuleAction(a store.RuleAction) (store.RuleAction, bool) {
+// validatePersistedRuleAction checks persisted rule Action values and returns the canonical store.RuleAction.
+func validatePersistedRuleAction(phase store.RulePhase, a store.RuleAction) (store.RuleAction, bool) {
 	s := strings.TrimSpace(string(a))
 	if s == "" {
 		return "", false
@@ -223,11 +238,37 @@ func validatePersistedRuleAction(a store.RuleAction) (store.RuleAction, bool) {
 	if !action.IsValid(t) {
 		return "", false
 	}
+	if t == action.Tag {
+		return "", false
+	}
+	if t == action.Allow && phase != store.PhaseACL {
+		return "", false
+	}
 	return store.RuleAction(string(t)), true
 }
 
+func validatePersistedRulePhase(phase store.RulePhase) (store.RulePhase, bool) {
+	normalized := store.RulePhase(strings.TrimSpace(string(phase)))
+	switch normalized {
+	case store.PhaseACL, store.PhaseSignature, store.PhaseCustom:
+		return normalized, true
+	default:
+		return "", false
+	}
+}
+
 func normalizePersistedRuleConfig(item *store.Rule) string {
-	normalized, ok := validatePersistedRuleAction(item.Action)
+	normalizedPhase, ok := validatePersistedRulePhase(item.Phase)
+	if !ok {
+		return "unsupported phase: only acl, signature, custom are executable custom rule phases"
+	}
+	item.Phase = normalizedPhase
+
+	if _, _, errs := rules.ValidatePattern(item.Pattern); len(errs) > 0 {
+		return "invalid pattern: " + strings.Join(errs, "; ")
+	}
+
+	normalized, ok := validatePersistedRuleAction(item.Phase, item.Action)
 	if !ok {
 		return "invalid action"
 	}
@@ -236,6 +277,60 @@ func normalizePersistedRuleConfig(item *store.Rule) string {
 		return "redirect_to required"
 	}
 	return ""
+}
+
+type persistedRulePriorityKey struct {
+	PolicyID uint
+	Phase    store.RulePhase
+	Priority int
+}
+
+func validatePersistedRulePriorityConflict(repo *repository.RuleRepo, item *store.Rule, excludeID uint) (string, error) {
+	if repo == nil || item == nil {
+		return "", nil
+	}
+	conflict, err := repo.FindPriorityConflict(item.PolicyID, item.Phase, item.Priority, excludeID)
+	if err != nil {
+		return "", fmt.Errorf("validate rule priority conflict: %w", err)
+	}
+	if conflict == nil {
+		return "", nil
+	}
+	return fmt.Sprintf(
+		"priority %d already exists in policy %d phase %s (rule id %d)",
+		item.Priority,
+		item.PolicyID,
+		item.Phase,
+		conflict.ID,
+	), nil
+}
+
+func validateImportedRulePriorityConflicts(repo *repository.RuleRepo, items []store.Rule) (string, error) {
+	seen := make(map[persistedRulePriorityKey]int, len(items))
+	for i := range items {
+		key := persistedRulePriorityKey{
+			PolicyID: items[i].PolicyID,
+			Phase:    items[i].Phase,
+			Priority: items[i].Priority,
+		}
+		if prev, ok := seen[key]; ok {
+			return fmt.Sprintf(
+				"import rules at indexes %d and %d share priority %d in policy %d phase %s",
+				prev,
+				i,
+				key.Priority,
+				key.PolicyID,
+				key.Phase,
+			), nil
+		}
+		seen[key] = i
+		if errMsg, err := validatePersistedRulePriorityConflict(repo, &items[i], 0); err != nil {
+			return "", err
+		} else if errMsg != "" {
+			return errMsg, nil
+		}
+	}
+	return "", nil
 }
 
 // ExportRules returns all rules as a JSON array for backup/migration.
@@ -270,6 +365,13 @@ func ImportRules(repo *repository.RuleRepo, reload func() error) app.HandlerFunc
 				c.JSON(400, map[string]any{"error": errMsg, "index": i})
 				return
 			}
+		}
+		if errMsg, err := validateImportedRulePriorityConflicts(repo, body.Rules); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		} else if errMsg != "" {
+			c.JSON(400, map[string]any{"error": errMsg})
+			return
 		}
 
 		for i := range body.Rules {

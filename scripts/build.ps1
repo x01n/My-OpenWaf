@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $root) { $root = (Get-Location).Path }
 Push-Location "$root\frontend"
+bun install --frozen-lockfile
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 bun run build
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Pop-Location

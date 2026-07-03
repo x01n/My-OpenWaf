@@ -142,6 +142,7 @@ SITE {
 uint id PK
 string host
 string upstream_urls
+string upstream_host
 string bind
 string network
 boolean enabled

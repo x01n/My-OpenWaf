@@ -297,7 +297,7 @@ Matcher <|.. neverMatcher
 
 ### 处理阶段与执行顺序
 - 阶段划分：
-  - ACL：规则型访问控制，允许短路跳过后续阶段。
+  - ACL：规则型访问控制，允许短路跳过 ACL 之后的后续阶段。
   - Signature：签名规则匹配。
   - Custom：自定义规则匹配。
   - Request Rate Limit：请求速率限制。
@@ -305,21 +305,22 @@ Matcher <|.. neverMatcher
   - Bot Detection：两阶段（PreScreen → DeepScore）或单阶段机器人检测。
   - OWASP Default：OWASP 攻击检测。
   - CVE Detection：特定漏洞检测。
-- 执行顺序：引擎装配阶段顺序固定，先 IP 信誉，再 ACL，然后机器人检测，再速率限制，再 OWASP，再 CVE，最后签名与自定义。
+- 执行顺序：引擎装配阶段顺序固定，当前为 IPReputation、AntiReplay、ACL、OWASP、CVE、BotDetection、RequestRateLimit、Signature、Custom；缺少对应管理器或关闭配置时跳过相关阶段。
 - 命中行为：
-  - Allow：短路，不再进入后续阶段。
+  - Allow：在 ACL 阶段短路，不再进入 ACL 之后的后续阶段。
   - Intercept：短路，记录日志。
   - Observe：不短路，仅记录日志供后续阶段继续处理。
 
 ```mermaid
 flowchart LR
-A["IP信誉"] --> B["ACL"]
-B --> C["机器人检测"]
-C --> D["速率限制"]
-D --> E["OWASP"]
-E --> F["CVE"]
-F --> G["签名"]
-G --> H["自定义"]
+A["IPReputation"] --> B["AntiReplay"]
+B --> C["ACL"]
+C --> D["OWASP"]
+D --> E["CVE"]
+E --> F["BotDetection"]
+F --> G["RequestRateLimit"]
+G --> H["Signature"]
+H --> I["Custom"]
 ```
 
 **图表来源**

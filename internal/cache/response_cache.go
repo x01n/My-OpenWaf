@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +36,7 @@ type ResponseCache struct {
 	enabled    atomic.Bool
 	defaultTTL int64
 	stopCh     chan struct{}
+	closeOnce  sync.Once
 }
 
 type shard struct {
@@ -57,18 +59,101 @@ func NewResponseCache(maxSizeMB int, defaultTTLSec int) *ResponseCache {
 	return rc
 }
 
+// MaxEntryBodySize returns the largest body size accepted by Set.
+func (rc *ResponseCache) MaxEntryBodySize() int64 {
+	if rc == nil || rc.maxSize <= 0 {
+		return 0
+	}
+	return rc.maxSize / 10
+}
+
 // CacheKey generates a deterministic key from method + host + path + query.
 func CacheKey(method, host, path, query string) string {
-	h := sha256.New()
-	h.Write([]byte(method))
-	h.Write([]byte{0})
-	h.Write([]byte(host))
-	h.Write([]byte{0})
-	h.Write([]byte(path))
-	h.Write([]byte{0})
-	h.Write([]byte(query))
-	var sum [sha256.Size]byte
-	h.Sum(sum[:0])
+	var stack [512]byte
+	need := len(method) + len(host) + len(path) + len(query) + 3
+	buf := stack[:0]
+	if need > len(stack) {
+		buf = make([]byte, 0, need)
+	}
+	buf = append(buf, method...)
+	buf = append(buf, 0)
+	buf = append(buf, host...)
+	buf = append(buf, 0)
+	buf = append(buf, path...)
+	buf = append(buf, 0)
+	buf = append(buf, query...)
+	sum := sha256.Sum256(buf)
+	var encoded [sha256.Size * 2]byte
+	hex.Encode(encoded[:], sum[:])
+	return string(encoded[:])
+}
+
+// CacheKeyBytes generates a deterministic key from method + host + path + query without forcing byte inputs through strings.
+func CacheKeyBytes(method string, host []byte, path string, query []byte) string {
+	var stack [512]byte
+	need := len(method) + len(host) + len(path) + len(query) + 3
+	buf := stack[:0]
+	if need > len(stack) {
+		buf = make([]byte, 0, need)
+	}
+	buf = append(buf, method...)
+	buf = append(buf, 0)
+	buf = append(buf, host...)
+	buf = append(buf, 0)
+	buf = append(buf, path...)
+	buf = append(buf, 0)
+	buf = append(buf, query...)
+	sum := sha256.Sum256(buf)
+	var encoded [sha256.Size * 2]byte
+	hex.Encode(encoded[:], sum[:])
+	return string(encoded[:])
+}
+
+// CacheKeyWithHostParts generates a cache key while building the host component inside the hash input.
+func CacheKeyWithHostParts(method, bind string, siteID uint64, normalizedHost []byte, path string, query []byte) string {
+	var stack [512]byte
+	need := len(method) + len(bind) + 1 + 20 + 1 + len(normalizedHost) + len(path) + len(query) + 3
+	buf := stack[:0]
+	if need > len(stack) {
+		buf = make([]byte, 0, need)
+	}
+	buf = append(buf, method...)
+	buf = append(buf, 0)
+	buf = append(buf, bind...)
+	buf = append(buf, '|')
+	buf = strconv.AppendUint(buf, siteID, 10)
+	buf = append(buf, '|')
+	buf = append(buf, normalizedHost...)
+	buf = append(buf, 0)
+	buf = append(buf, path...)
+	buf = append(buf, 0)
+	buf = append(buf, query...)
+	sum := sha256.Sum256(buf)
+	var encoded [sha256.Size * 2]byte
+	hex.Encode(encoded[:], sum[:])
+	return string(encoded[:])
+}
+
+// CacheKeyWithHostPartsBytesPath generates a cache key without forcing Hertz path bytes through a string.
+func CacheKeyWithHostPartsBytesPath(method, bind string, siteID uint64, normalizedHost []byte, path []byte, query []byte) string {
+	var stack [512]byte
+	need := len(method) + len(bind) + 1 + 20 + 1 + len(normalizedHost) + len(path) + len(query) + 3
+	buf := stack[:0]
+	if need > len(stack) {
+		buf = make([]byte, 0, need)
+	}
+	buf = append(buf, method...)
+	buf = append(buf, 0)
+	buf = append(buf, bind...)
+	buf = append(buf, '|')
+	buf = strconv.AppendUint(buf, siteID, 10)
+	buf = append(buf, '|')
+	buf = append(buf, normalizedHost...)
+	buf = append(buf, 0)
+	buf = append(buf, path...)
+	buf = append(buf, 0)
+	buf = append(buf, query...)
+	sum := sha256.Sum256(buf)
 	var encoded [sha256.Size * 2]byte
 	hex.Encode(encoded[:], sum[:])
 	return string(encoded[:])
@@ -133,12 +218,12 @@ func (rc *ResponseCache) Set(key string, statusCode int, contentType string, bod
 		ttl = rc.defaultTTL
 	}
 	bodySize := int64(len(body))
-	if bodySize > rc.maxSize/10 {
+	if bodySize > rc.MaxEntryBodySize() {
 		return
 	}
 
 	var hdr http.Header
-	if header != nil && len(header) > 0 {
+	if len(header) > 0 {
 		hdr = header.Clone()
 	}
 
@@ -215,7 +300,9 @@ func (rc *ResponseCache) Stats() (entries int, sizeBytes int64) {
 
 // Close stops the background cleaner.
 func (rc *ResponseCache) Close() {
-	close(rc.stopCh)
+	rc.closeOnce.Do(func() {
+		close(rc.stopCh)
+	})
 }
 
 func (rc *ResponseCache) cleaner() {

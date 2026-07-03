@@ -15,18 +15,30 @@ import (
 
 // BotSettingsUpdate represents the request body for updating bot settings.
 type BotSettingsUpdate struct {
-	Enabled           *bool    `json:"enabled"`
-	ScoreThreshold    *int     `json:"score_threshold"`
-	HighRiskCountries []string `json:"high_risk_countries"`
-	DatacenterASNs    []uint32 `json:"datacenter_asns"`
-	VPNProxyASNs      []uint32 `json:"vpn_proxy_asns"`
-	GeoIPDBPath       *string  `json:"geoip_db_path"`
+	Enabled                  *bool    `json:"enabled"`
+	ScoreThreshold           *int     `json:"score_threshold"`
+	HighRiskCountries        []string `json:"high_risk_countries"`
+	DatacenterASNs           []uint32 `json:"datacenter_asns"`
+	VPNProxyASNs             []uint32 `json:"vpn_proxy_asns"`
+	GeoIPDBPath              *string  `json:"geoip_db_path"`
+	CaptchaEnabled           *bool    `json:"captcha_enabled"`
+	DynamicProtectionEnabled *bool    `json:"dynamic_protection_enabled"`
+	HTMLObfuscation          *bool    `json:"html_obfuscation"`
+	JSObfuscation            *bool    `json:"js_obfuscation"`
+	ImageWatermark           *bool    `json:"image_watermark"`
+	AntiReplayEnabled        *bool    `json:"anti_replay_enabled"`
+	JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
+	ImageWatermarkPaths      []string `json:"image_watermark_paths,omitempty"`
+	WatermarkText            *string  `json:"watermark_text,omitempty"`
+	ExcludeRecordHeaders     []string `json:"exclude_record_headers,omitempty"`
 }
 
 func defaultBotSettingsResponse(settingsRepo *repository.SystemSettingsRepo) shared.BotSettingsResponse {
+	protectionCfg := shared.LoadProtectionConfig(settingsRepo)
 	resp := shared.BotSettingsResponse{
-		Enabled:        shared.LoadProtectionConfig(settingsRepo).BotDetectionEnabled,
+		Enabled:        protectionCfg.BotDetectionEnabled,
 		ScoreThreshold: 60,
+		CaptchaEnabled: protectionCfg.CaptchaEnabled,
 	}
 	if val, err := settingsRepo.Get("drop_policy"); err == nil && val != "" {
 		var dropPolicy struct {
@@ -92,6 +104,36 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		if req.GeoIPDBPath != nil {
 			current.GeoIPDBPath = *req.GeoIPDBPath
 		}
+		if req.CaptchaEnabled != nil {
+			current.CaptchaEnabled = *req.CaptchaEnabled
+		}
+		if req.DynamicProtectionEnabled != nil {
+			current.DynamicProtectionEnabled = *req.DynamicProtectionEnabled
+		}
+		if req.HTMLObfuscation != nil {
+			current.HTMLObfuscation = *req.HTMLObfuscation
+		}
+		if req.JSObfuscation != nil {
+			current.JSObfuscation = *req.JSObfuscation
+		}
+		if req.ImageWatermark != nil {
+			current.ImageWatermark = *req.ImageWatermark
+		}
+		if req.AntiReplayEnabled != nil {
+			current.AntiReplayEnabled = *req.AntiReplayEnabled
+		}
+		if req.JSObfuscationPaths != nil {
+			current.JSObfuscationPaths = req.JSObfuscationPaths
+		}
+		if req.ImageWatermarkPaths != nil {
+			current.ImageWatermarkPaths = req.ImageWatermarkPaths
+		}
+						if req.WatermarkText != nil {
+			current.WatermarkText = *req.WatermarkText
+		}
+		if req.ExcludeRecordHeaders != nil {
+			current.ExcludeRecordHeaders = req.ExcludeRecordHeaders
+		}
 
 		data, _ := json.Marshal(current)
 		if err := settingsRepo.Set("bot_settings", string(data)); err != nil {
@@ -103,6 +145,12 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			// Sync BotDetectionEnabled into the protection config so the engine
 			// sees a consistent value regardless of which page the user toggles.
 			if err := shared.SyncBotEnabledToProtection(settingsRepo, current.Enabled); err != nil {
+				c.JSON(500, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if req.CaptchaEnabled != nil {
+			if err := shared.SyncCaptchaEnabledToProtection(settingsRepo, current.CaptchaEnabled); err != nil {
 				c.JSON(500, map[string]string{"error": err.Error()})
 				return
 			}

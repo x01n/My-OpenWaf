@@ -38,28 +38,35 @@ func (r *SecurityEventRepo) SetWriteQueue(wq WriteQueueBackend) {
 
 // SecurityEventFilter holds query filters for listing events.
 type SecurityEventFilter struct {
-	ID          uint
-	SiteID      uint
-	RequestID   string
-	Action      string
-	Phase       string
-	Category    string
-	ClientIP    string
-	Host        string
-	Path        string
-	RuleID      uint
-	RuleIDStr   string
-	TLSVersion  string
-	TLSSNI      string
-	TLSALPN     string
-	TLSJA3Hash  string
-	TLSJA4      string
-	HeaderOrder string
-	Since       *time.Time
-	Until       *time.Time
+	ID              uint
+	SiteID          uint
+	Query           string
+	RequestID       string
+	Action          string
+	Phase           string
+	Category        string
+	ClientIP        string
+	Host            string
+	Path            string
+	QueryString     string
+	RuleID          uint
+	RuleIDStr       string
+	TLSVersion      string
+	TLSSNI          string
+	TLSALPN         string
+	TLSJA3Hash      string
+	TLSJA4          string
+	TLSCipherSuites string
+	TLSExtensions   string
+	TLSCurves       string
+	TLSPointFormats string
+	HeaderOrder     string
+	Since           *time.Time
+	Until           *time.Time
 }
 
 func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
+	f = normalizeSecurityEventFilter(f)
 	// Try Redis hot cache for large query results.
 	if r.hotCache != nil && r.hotCache.Available() {
 		cacheKey := "se_list:" + secEventCountCacheKey(f) + fmt.Sprintf(":o%d:l%d", offset, limit)
@@ -107,12 +114,16 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 }
 
 func secEventCountCacheKey(f SecurityEventFilter) string {
+	f = normalizeSecurityEventFilter(f)
 	key := "se_count"
 	if f.ID > 0 {
 		key += ":id" + fmt.Sprint(f.ID)
 	}
 	if f.SiteID > 0 {
 		key += ":s" + fmt.Sprint(f.SiteID)
+	}
+	if f.Query != "" {
+		key += ":q" + f.Query
 	}
 	if f.RequestID != "" {
 		key += ":rid" + f.RequestID
@@ -135,6 +146,9 @@ func secEventCountCacheKey(f SecurityEventFilter) string {
 	if f.Path != "" {
 		key += ":p" + f.Path
 	}
+	if f.QueryString != "" {
+		key += ":qs" + f.QueryString
+	}
 	if f.RuleID > 0 {
 		key += ":r" + fmt.Sprint(f.RuleID)
 	}
@@ -155,6 +169,18 @@ func secEventCountCacheKey(f SecurityEventFilter) string {
 	}
 	if f.TLSJA4 != "" {
 		key += ":j4" + f.TLSJA4
+	}
+	if f.TLSCipherSuites != "" {
+		key += ":tcs" + f.TLSCipherSuites
+	}
+	if f.TLSExtensions != "" {
+		key += ":tex" + f.TLSExtensions
+	}
+	if f.TLSCurves != "" {
+		key += ":tcu" + f.TLSCurves
+	}
+	if f.TLSPointFormats != "" {
+		key += ":tpf" + f.TLSPointFormats
 	}
 	if f.HeaderOrder != "" {
 		key += ":ho" + f.HeaderOrder
@@ -232,6 +258,7 @@ func (r *SecurityEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
 }
 
 func (r *SecurityEventRepo) Count(f SecurityEventFilter) (int64, error) {
+	f = normalizeSecurityEventFilter(f)
 	q := r.db.Model(&store.SecurityEvent{})
 	q = applyEventFilters(q, f)
 	var total int64
@@ -430,11 +457,19 @@ func (r *SecurityEventRepo) CountObserveBySite(siteID uint, since time.Time) (in
 }
 
 func applyEventFilters(q *gorm.DB, f SecurityEventFilter) *gorm.DB {
+	f = normalizeSecurityEventFilter(f)
 	if f.ID > 0 {
 		q = q.Where("id = ?", f.ID)
 	}
 	if f.SiteID > 0 {
 		q = q.Where("site_id = ?", f.SiteID)
+	}
+	if f.Query != "" {
+		like := "%" + f.Query + "%"
+		q = q.Where(
+			"(request_id LIKE ? OR client_ip LIKE ? OR host LIKE ? OR path LIKE ? OR query_string LIKE ? OR rule_id_str LIKE ? OR tls_sni LIKE ? OR tls_ja3_hash LIKE ? OR tls_ja4 LIKE ? OR tls_cipher_suites LIKE ? OR tls_extensions LIKE ? OR tls_curves LIKE ? OR tls_point_formats LIKE ? OR header_order LIKE ?)",
+			like, like, like, like, like, like, like, like, like, like, like, like, like, like,
+		)
 	}
 	if f.Action != "" {
 		q = q.Where("action = ?", f.Action)
@@ -457,6 +492,9 @@ func applyEventFilters(q *gorm.DB, f SecurityEventFilter) *gorm.DB {
 	if f.Path != "" {
 		q = q.Where("path LIKE ?", "%"+f.Path+"%")
 	}
+	if f.QueryString != "" {
+		q = q.Where("query_string LIKE ?", "%"+f.QueryString+"%")
+	}
 	if f.RuleID > 0 {
 		q = q.Where("rule_id = ?", f.RuleID)
 	}
@@ -477,6 +515,18 @@ func applyEventFilters(q *gorm.DB, f SecurityEventFilter) *gorm.DB {
 	}
 	if f.TLSJA4 != "" {
 		q = q.Where("tls_ja4 = ?", f.TLSJA4)
+	}
+	if f.TLSCipherSuites != "" {
+		q = q.Where("tls_cipher_suites LIKE ?", "%"+f.TLSCipherSuites+"%")
+	}
+	if f.TLSExtensions != "" {
+		q = q.Where("tls_extensions LIKE ?", "%"+f.TLSExtensions+"%")
+	}
+	if f.TLSCurves != "" {
+		q = q.Where("tls_curves LIKE ?", "%"+f.TLSCurves+"%")
+	}
+	if f.TLSPointFormats != "" {
+		q = q.Where("tls_point_formats LIKE ?", "%"+f.TLSPointFormats+"%")
 	}
 	if f.HeaderOrder != "" {
 		q = q.Where("header_order LIKE ?", "%"+f.HeaderOrder+"%")

@@ -1,6 +1,8 @@
 package appresource
 
 import (
+	"net/http"
+	"strconv"
 	"strings"
 
 	"My-OpenWaf/internal/store"
@@ -39,6 +41,9 @@ func applyOp(op, pattern, value string, re interface{ MatchString(string) bool }
 
 // Subject resolves the string to match for a rule from pre-built material.
 func Subject(cr CompiledRule, m *Material, reqHeader func(string) string) string {
+	if m == nil {
+		return ""
+	}
 	switch cr.Target {
 	case store.AppRouteTargetRequestHeader:
 		if cr.HeaderKeyLower != "" {
@@ -57,12 +62,25 @@ func Subject(cr CompiledRule, m *Material, reqHeader func(string) string) string
 	case store.AppRouteTargetResponseHeadersFull:
 		return m.ResponseHeadersFull
 	case store.AppRouteTargetFullHTTPRequest:
+		if m.FullHTTPRequest == "" {
+			m.FullHTTPRequest = m.Method + " " + m.Path + "\n" + m.RequestHeadersFull + "\n\n" + m.RequestBody
+		}
 		return m.FullHTTPRequest
 	case store.AppRouteTargetFullHTTPResponse:
+		if m.FullHTTPResponse == "" {
+			m.FullHTTPResponse = strconv.Itoa(m.StatusCode) + " " + http.StatusText(m.StatusCode) + "\n" + m.ResponseHeadersFull + "\n\n" + m.ResponseBody
+		}
 		return m.FullHTTPResponse
 	case store.AppRouteTargetRequestMethod:
 		return m.Method
 	case store.AppRouteTargetFingerprint:
+		if m.Fingerprint == "" && (m.JA3Hash != "" || m.UserAgent != "") {
+			var fp strings.Builder
+			fp.WriteString(m.JA3Hash)
+			fp.WriteByte('\t')
+			fp.WriteString(m.UserAgent)
+			m.Fingerprint = truncate(fp.String(), maxFingerprintString)
+		}
 		return m.Fingerprint
 	default:
 		return ""

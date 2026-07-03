@@ -653,6 +653,7 @@ listeners:
     tls_enabled: false
     upstream_urls:
       - "http://localhost:3000"
+    upstream_host: "backend.example.com"
     preserve_original_host: true
 
   - bind: "0.0.0.0:8443"
@@ -661,6 +662,7 @@ listeners:
     tls_key_file: "/etc/certs/server.key"
     upstream_urls:
       - "https://localhost:3001"
+    upstream_host: "{{.Host}}.internal"
 ```
 
 #### 高级配置

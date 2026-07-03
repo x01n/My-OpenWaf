@@ -1,6 +1,8 @@
 package adminweb
 
 import (
+	"errors"
+	"io/fs"
 	"testing"
 	"testing/fstest"
 )
@@ -38,6 +40,34 @@ func TestReadRouteFileKeepsStaticAssetPath(t *testing.T) {
 	}
 	if string(data) != "console.log('ok')" {
 		t.Fatalf("expected asset contents, got %q", string(data))
+	}
+}
+
+func TestReadRouteFileFallsBackToSPAIndexForRoutePath(t *testing.T) {
+	webFS := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("root")},
+	}
+
+	data, resolved, err := ReadRouteFile(webFS, "/unknown/deep/link")
+	if err != nil {
+		t.Fatalf("ReadRouteFile returned error: %v", err)
+	}
+	if resolved != "index.html" {
+		t.Fatalf("expected index.html, got %s", resolved)
+	}
+	if string(data) != "root" {
+		t.Fatalf("expected root page, got %q", string(data))
+	}
+}
+
+func TestReadRouteFileDoesNotFallbackForMissingAssetPath(t *testing.T) {
+	webFS := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("root")},
+	}
+
+	_, _, err := ReadRouteFile(webFS, "/missing/app.js")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected fs.ErrNotExist, got %v", err)
 	}
 }
 

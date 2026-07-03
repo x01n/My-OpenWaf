@@ -78,7 +78,7 @@ Repo --> IPRep
 - IPReputationPhase：规则流水线中的独立阶段，负责调用 IPReputation 执行检查并生成动作结果。
 - IPListRepo/Model：持久化存储黑/白名单条目，支持分页查询、启用筛选与 CRUD 操作。
 - 客户端 IP 解析：根据 X-Forwarded-For 与可信网段策略解析真实客户端 IP。
-- 引擎与流水线：在引擎初始化时将 IP 信誉阶段置于 ACL 阶段之后，确保白名单短路放行、黑名单直接拦截。
+- 引擎与流水线：当前引擎将 IP 信誉阶段置于 ACL 阶段之前；命中白名单时返回 Allow 并短路后续阶段，命中黑名单或自动封禁时返回终端动作。
 
 **章节来源**
 - [iprep.go:19-124](file://internal/waf/iprep.go#L19-L124)
@@ -287,7 +287,7 @@ Srv-->>Admin : "完成重载"
 - [bot.go:205-223](file://internal/waf/bot.go#L205-L223)
 
 ## 依赖关系分析
-- 引擎将 IP 信誉阶段置于 ACL 阶段之后，确保白名单短路放行、黑名单直接拦截。
+- 引擎将 IP 信誉阶段置于 ACL 阶段之前，确保 IP 信誉名单先于自定义 ACL 规则参与决策。
 - IP 信誉阶段依赖 IPReputation；IPReputation 依赖 IPListRepo 的数据源。
 - 客户端 IP 解析依赖站点配置（XFF 模式与可信网段）。
 

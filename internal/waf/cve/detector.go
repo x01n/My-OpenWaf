@@ -279,18 +279,6 @@ func lowCmdTokenAtBoundary(s string, offset int) bool {
 	}
 }
 
-func lowCmdPrefixBoundary(s string, offset int) bool {
-	if offset == 0 {
-		return true
-	}
-	switch s[offset-1] {
-	case '&', '?', '=', '|', ';', '`', ' ', '\t', '\r', '\n':
-		return true
-	default:
-		return false
-	}
-}
-
 func lowCmdSimpleTokenAt(s string, offset int, token string) bool {
 	return hasPrefixAt(s, offset, token) && lowCmdSuffixAfter(s, offset+len(token))
 }
@@ -722,9 +710,6 @@ type CVERequest struct {
 	HeaderTargetsLower []string
 	AllTargets         []string // aggregated targets (path+query+header values+body)
 	AllTargetsLower    []string // pre-lowercased AllTargets for hasCVESuspiciousContent
-	// AllTargetsCombinedLower is AllTargetsLower joined with a separator so
-	// all-target prefilters avoid repeated slice scans without cross-target matches.
-	AllTargetsCombinedLower string
 }
 
 // NewCVEDetector initialises all sub-detectors.
@@ -834,30 +819,28 @@ func BuildCVERequestInto(dst *CVERequest, path, rawQuery string, headers map[str
 	for i, t := range targets {
 		targetsLower[i] = strings.ToLower(t)
 	}
-	allTargetsCombinedLower := joinLowerTargets(targetsLower)
 	urlTargetsLower := targetsLower[:urlTargetsEnd]
 	headerTargetsLower := targetsLower[headerTargetsStart:headerTargetsEnd]
 	bodyTargetsLower := targetsLower[bodyTargetsStart:]
 
 	*dst = CVERequest{
-		Path:                    path,
-		RawQuery:                rawQuery,
-		Headers:                 headers,
-		Body:                    bodyStr,
-		ContentType:             contentType,
-		DecodedPath:             decodedPath,
-		DecodedQuery:            decodedQuery,
-		DecodedBody:             decodedBody,
-		URLTargets:              urlTargets,
-		BodyTargets:             bodyTargets,
-		URLBodyTargets:          urlBodyTargets,
-		HeaderTargets:           headerTargets,
-		URLTargetsLower:         urlTargetsLower,
-		BodyTargetsLower:        bodyTargetsLower,
-		HeaderTargetsLower:      headerTargetsLower,
-		AllTargets:              targets,
-		AllTargetsLower:         targetsLower,
-		AllTargetsCombinedLower: allTargetsCombinedLower,
+		Path:               path,
+		RawQuery:           rawQuery,
+		Headers:            headers,
+		Body:               bodyStr,
+		ContentType:        contentType,
+		DecodedPath:        decodedPath,
+		DecodedQuery:       decodedQuery,
+		DecodedBody:        decodedBody,
+		URLTargets:         urlTargets,
+		BodyTargets:        bodyTargets,
+		URLBodyTargets:     urlBodyTargets,
+		HeaderTargets:      headerTargets,
+		URLTargetsLower:    urlTargetsLower,
+		BodyTargetsLower:   bodyTargetsLower,
+		HeaderTargetsLower: headerTargetsLower,
+		AllTargets:         targets,
+		AllTargetsLower:    targetsLower,
 	}
 }
 
@@ -865,7 +848,7 @@ func buildCVEBodyString(body []byte, contentType string) string {
 	if len(body) == 0 {
 		return ""
 	}
-	if strings.Contains(strings.ToLower(contentType), "multipart/form-data") {
+	if strings.Contains(lowerCVERawTarget(contentType), "multipart/form-data") {
 		return buildCVEMultipartBodyString(body, contentType)
 	}
 	return string(body)
@@ -968,45 +951,14 @@ func requestTargetContainsAny(req *CVERequest, target string, needles ...string)
 	case "header":
 		return lowerTargetsContainAny(req.HeaderTargetsLower, needles...)
 	case "cookie":
-		cookie, ok := req.Headers["Cookie"]
+		cookie, ok := cveHeaderValueOK(req.Headers, "Cookie")
 		if !ok {
 			return false
 		}
 		return stringsContainsAny(strings.ToLower(cookie), needles...)
 	default:
-		return combinedLowerTargetsContainAny(len(req.AllTargetsLower), req.AllTargetsCombinedLower, needles...)
+		return lowerTargetsContainAny(req.AllTargetsLower, needles...)
 	}
-}
-
-const lowerTargetJoinSeparator byte = 0
-
-func joinLowerTargets(targets []string) string {
-	if len(targets) == 0 {
-		return ""
-	}
-	if len(targets) == 1 {
-		return targets[0]
-	}
-	totalLen := len(targets) - 1
-	for _, target := range targets {
-		totalLen += len(target)
-	}
-	var b strings.Builder
-	b.Grow(totalLen)
-	for i, target := range targets {
-		if i > 0 {
-			b.WriteByte(lowerTargetJoinSeparator)
-		}
-		b.WriteString(target)
-	}
-	return b.String()
-}
-
-func combinedLowerTargetsContainAny(targetCount int, combinedLower string, needles ...string) bool {
-	if targetCount == 0 {
-		return false
-	}
-	return stringsContainsAny(combinedLower, needles...)
 }
 
 func stringsContainsAny(value string, needles ...string) bool {
@@ -1120,25 +1072,6 @@ func HasRawCVESuspiciousContent(path, rawQuery string, headers map[string]string
 	return false
 }
 
-func hasRawHTTPSmuggling(headers map[string]string) bool {
-	hasCL := false
-	hasTE := false
-	for k, v := range headers {
-		switch {
-		case strings.EqualFold(k, "content-length"):
-			hasCL = true
-		case strings.EqualFold(k, "transfer-encoding"):
-			hasTE = true
-			vl := strings.ToLower(v)
-			if strings.Contains(vl, " chunked") || strings.Contains(vl, "\tchunked") ||
-				strings.Contains(vl, "chunked ") || strings.Contains(vl, ",chunked") {
-				return true
-			}
-		}
-	}
-	return hasCL && hasTE
-}
-
 func shouldSkipRawCVEHeaderTarget(headerKind int, value string) bool {
 	switch headerKind {
 	case rawCVEHeaderUserAgent:
@@ -1171,7 +1104,7 @@ func rawContentTypeHasCVESuspiciousContent(contentType string) bool {
 	if contentType == "" {
 		return false
 	}
-	if contentType == "application/json" {
+	if strings.EqualFold(contentType, "application/json") {
 		return false
 	}
 	if strings.Contains(contentType, "%") {
@@ -1845,7 +1778,7 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 	if req.DecodedQuery != "" {
 		uri = uri + "?" + req.DecodedQuery
 	}
-	ua := req.Headers["User-Agent"]
+	ua := cveHeaderValue(req.Headers, "User-Agent")
 	regMatches := globalCVERuleRegistry.DetectAll(uri, req.Body, ua, req.Headers)
 	matches = append(matches, regMatches...)
 
@@ -1918,7 +1851,7 @@ func (d *CVEDetector) DetectFirst(req *CVERequest, categorySensitivity ...map[st
 	if req.DecodedQuery != "" {
 		uri = uri + "?" + req.DecodedQuery
 	}
-	ua := req.Headers["User-Agent"]
+	ua := cveHeaderValue(req.Headers, "User-Agent")
 	return globalCVERuleRegistry.DetectFirst(uri, req.Body, ua, req.Headers)
 }
 
@@ -2266,10 +2199,57 @@ func pickTarget(req *CVERequest, target string) string {
 		}
 		return sb.String()
 	case "cookie":
-		return req.Headers["Cookie"]
+		return cveHeaderValue(req.Headers, "Cookie")
 	default:
 		return strings.Join(req.AllTargets, "\n")
 	}
+}
+
+func cveHeaderValue(headers map[string]string, name string) string {
+	value, _ := cveHeaderValueOK(headers, name)
+	return value
+}
+
+func cveHeaderValueOK(headers map[string]string, name string) (string, bool) {
+	if len(headers) == 0 {
+		return "", false
+	}
+	if value, ok := headers[name]; ok {
+		return value, true
+	}
+	if lower := cveLowerHeaderName(name); lower != name {
+		if value, ok := headers[lower]; ok {
+			return value, true
+		}
+	}
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func cveLowerHeaderName(name string) string {
+	switch name {
+	case "Authorization":
+		return "authorization"
+	case "CGIINFO":
+		return "cgiinfo"
+	case "Content-Type":
+		return "content-type"
+	case "Cookie":
+		return "cookie"
+	case "Host":
+		return "host"
+	case "Origin":
+		return "origin"
+	case "Referer":
+		return "referer"
+	case "User-Agent":
+		return "user-agent"
+	}
+	return strings.ToLower(name)
 }
 
 // multiDecode performs URL-decode then attempts base64-decode on the result.

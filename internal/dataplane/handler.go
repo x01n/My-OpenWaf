@@ -28,6 +28,7 @@ import (
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/waf/bot"
 	"My-OpenWaf/internal/waf/challenge"
@@ -79,6 +80,8 @@ func ContextWithTLSHandshakeInfo(ctx context.Context, version string, sni string
 	}
 	if alpn != "" {
 		fp.ALPN = []string{alpn}
+	} else {
+		fp.ALPN = nil
 	}
 	return ContextWithTLSFingerprint(ctx, fp)
 }
@@ -121,6 +124,7 @@ func Handler(opts Options) app.HandlerFunc {
 		if fp, ok := tlsFingerprintFromContext(ctx); ok {
 			c.Set(tlsFingerprintContextKey, fp)
 		}
+		applyInternalHTTP3RequestMetadata(c)
 		// WASM PoW assets must be checked before the generic static handler
 		// because serveOWAFStatic returns true (with 404) for unknown /__owaf/ paths.
 		if handleWASMAssets(c) {
@@ -150,6 +154,11 @@ func Handler(opts Options) app.HandlerFunc {
 		sn := opts.Holder.Load()
 		if sn == nil {
 			c.String(503, "configuration snapshot not loaded")
+			return
+		}
+
+		if maxH := sn.HTTP2Config.MaxHeaderFields; maxH > 0 && c.Request.Header.Len() > maxH {
+			c.String(431, "too many request header fields")
 			return
 		}
 
@@ -199,6 +208,25 @@ func Handler(opts Options) app.HandlerFunc {
 		ua := string(c.UserAgent())
 		pathCached := string(c.Path())
 		errorRateLimitKey := rateLimitKey(clientIP, host)
+
+		if rt.Site.TLSEnabled && opts.Writer != nil {
+			if fp, ok := tlsFingerprintFromRequestContext(c); ok && fp.SNI != "" && fp.SNI != host {
+				recordSecurityEvent(c, opts, store.SecurityEvent{
+					SiteID:    rt.Site.ID,
+					RequestID: reqID,
+					ClientIP:  cipStr,
+					Host:      host,
+					Path:      string(c.Path()),
+					Method:    method,
+					UserAgent: ua,
+					RuleIDStr: "tls:unknown_sni",
+					Phase:     "tls",
+					Action:    "observe",
+					Category:  "tls_sni",
+					MatchDesc: "tls_sni=" + fp.SNI + " host=" + host,
+				})
+			}
+		}
 
 		if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil {
 			decision := ipRep.Check(clientIP)
@@ -458,7 +486,10 @@ func Handler(opts Options) app.HandlerFunc {
 		reqCtx.Host = host
 		reqCtx.UserAgent = ua
 		reqCtx.SiteID = rt.Site.ID
-		tlsFingerprint, _ := tlsFingerprintFromRequestContext(c)
+		tlsFingerprint, ok := tlsFingerprintFromRequestContext(c)
+		if !ok {
+			tlsFingerprint, _ = tlsFingerprintFromContext(ctx)
+		}
 		reqCtx.TLS = tlsFingerprint
 		c.Request.Header.VisitAll(func(k, v []byte) {
 			key := string(k)
@@ -746,7 +777,8 @@ func Handler(opts Options) app.HandlerFunc {
 					challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, statusCode)
 				case result.Action.IsShieldChallenge() && sn.Protection.ShieldEnabled && opts.ShieldManager != nil:
 					origURL := string(c.Request.URI().RequestURI())
-					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, statusCode)
+					proto := inboundProto(c, rt.Site.TLSEnabled)
+					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, proto, statusCode)
 				case result.Action.IsChainChallenge() && sn.Protection.ChainEnabled && opts.ChainManager != nil:
 					challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
 				default:
@@ -824,6 +856,7 @@ func Handler(opts Options) app.HandlerFunc {
 			scrubResponseHopByHopHeaders(c)
 			logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
 			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass"})
+			tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, true)
 			return
 		}
 
@@ -853,10 +886,11 @@ func Handler(opts Options) app.HandlerFunc {
 			if opts.ResponseCache != nil {
 				cacheKey, ttl, ignoreUpstreamCC = proxy.SiteCacheEligible(*result.Site, c)
 			}
-			if cacheKey == "" {
+			if cacheKey == "" || hasConditionalOrRangeHeaders(c) {
 				upstreamErr = proxy.ForwardHTTP(ctx, c, *result.Site, base, clientIP, host)
 				break
 			}
+			staleEntry := opts.ResponseCache.Lookup(cacheKey)
 			if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
 				proxy.WriteCachedResponse(c, method, entry)
 				cacheState = "hit"
@@ -865,7 +899,16 @@ func Handler(opts Options) app.HandlerFunc {
 			cacheState = "miss"
 			bufferedResp, err := proxy.FetchHTTP(ctx, c, *result.Site, base, clientIP, host)
 			if err != nil {
+				if staleEntry != nil {
+					proxy.WriteCachedResponse(c, method, staleEntry)
+					cacheState = "stale"
+					break
+				}
 				upstreamErr = err
+				break
+			}
+			if int64(len(bufferedResp.Body)) > opts.ResponseCache.MaxEntryBodySize() {
+				proxy.ForwardBufferedResponseAsStream(c, bufferedResp)
 				break
 			}
 			if proxy.ShouldCacheHTTPResponse(method, bufferedResp, ignoreUpstreamCC) {
@@ -920,33 +963,73 @@ func Handler(opts Options) app.HandlerFunc {
 		// Async application route resource recording.
 		// Match rules before launching the goroutine so unmatched requests avoid
 		// map copies and background DB work on the hot path.
-		if upstreamErr == nil && len(rt.AppRouteRules) > 0 && opts.RecordedResourceRepo != nil {
-			mat := &appresource.Material{
-				Method:      method,
-				Host:        host,
-				Path:        path,
-				ClientIP:    cipStr,
-				StatusCode:  statusCode,
-				ContentType: string(c.Response.Header.ContentType()),
-				UserAgent:   ua,
-			}
-			headerFn := func(key string) string { return reqCtx.Headers[key] }
-			ids := appresource.MatchedRuleIDs(rt.AppRouteRules, mat, headerFn)
-			if len(ids) > 0 {
-				go recordAppRouteResourceSafe(opts.RecordedResourceRepo, rt.Site.ID, mat, ids)
-			}
-		}
+		// Skip recording if the request contains any excluded header.
+		tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, false)
 	}
 }
 
 func pickUpstream(urls []string, pool *upstream.Pool, next func(uint32) uint32) (string, bool) {
-	if len(urls) == 0 {
-		return "", false
+	return upstream.PickByProtocolPreference(urls, pool, next)
+}
+
+func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, reqCtx *pipeline.RequestCtx, method, host, path, rawQ, cipStr, ua string, statusCode int, isLocalResponse bool) {
+	if opts.RecordedResourceRepo == nil || hasExcludedHeader(c, sn.ExcludeRecordHeaders) {
+		return
 	}
-	if pool == nil {
-		return urls[next(uint32(len(urls)))], true
+	reqBody := string(c.Request.Body())
+	if len(reqBody) > logBodyPreviewLimit {
+		reqBody = reqBody[:logBodyPreviewLimit]
 	}
-	return pool.Pick(urls, next)
+	respBody := string(c.Response.Body())
+	if len(respBody) > logBodyPreviewLimit {
+		respBody = respBody[:logBodyPreviewLimit]
+	}
+	var matTLS appresource.TLSMetadata
+	if fp, ok := tlsFingerprintFromRequestContext(c); ok {
+		matTLS = appresource.TLSMetadata{
+			TLSVersion: fp.TLSVersion,
+			TLSSNI:     fp.SNI,
+			TLSALPN:    strings.Join(fp.ALPN, ","),
+			JA3Hash:    fp.JA3Hash,
+			JA4:        fp.JA4,
+		}
+	}
+	reqCT := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
+	matchRespBody := respBody
+	if isLocalResponse {
+		matchRespBody = ""
+	}
+	mat := &appresource.Material{
+		Method:              method,
+		Host:                host,
+		Path:                path,
+		QueryString:         sanitizeQueryString(rawQ),
+		ClientIP:            cipStr,
+		StatusCode:          statusCode,
+		ContentType:         string(c.Response.Header.ContentType()),
+		UserAgent:           ua,
+		RequestBody:         reqBody,
+		ResponseBody:        matchRespBody,
+		TLSVersion:          matTLS.TLSVersion,
+		TLSSNI:              matTLS.TLSSNI,
+		TLSALPN:             matTLS.TLSALPN,
+		JA3Hash:             matTLS.JA3Hash,
+		JA4:                 matTLS.JA4,
+		RequestHeadersJSON:  requestHeadersJSON(c),
+		ResponseHeadersJSON: responseHeadersJSON(c),
+		RequestBodySnippet:  sanitizeBodyPreview(reqBody, reqCT),
+		ResponseBodySnippet: sanitizeBodyPreview(respBody, strings.ToLower(strings.TrimSpace(string(c.Response.Header.ContentType())))),
+	}
+	var headerFn func(string) string
+	if reqCtx != nil {
+		headerFn = func(key string) string { return reqCtx.Headers[key] }
+	} else {
+		headerFn = appresource.RequestHeaderLookup(c)
+	}
+	ids := appresource.MatchedRuleIDs(rt.AppRouteRules, mat, headerFn)
+	if len(ids) > 0 || len(rt.AppRouteRules) == 0 {
+		go recordAppRouteResourceSafe(opts.RecordedResourceRepo, rt.Site.ID, mat, ids)
+	}
 }
 
 func recordAppRouteResourceSafe(repo *repository.RecordedResourceRepo, siteID uint, m *appresource.Material, ids []uint) {
@@ -958,6 +1041,34 @@ func recordAppRouteResourceSafe(repo *repository.RecordedResourceRepo, siteID ui
 	rec.FirstSeen = time.Now()
 	rec.LastSeen = rec.FirstSeen
 	_ = repo.Upsert(rec)
+}
+
+// hasExcludedHeader checks whether the request carries any header configured
+// in bot_settings.exclude_record_headers. If so, the request should not be
+// recorded as an application route resource.
+func hasExcludedHeader(c *app.RequestContext, excluded []string) bool {
+	if len(excluded) == 0 {
+		return false
+	}
+	for _, name := range excluded {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if len(c.GetHeader(name)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasConditionalOrRangeHeaders(c *app.RequestContext) bool {
+	return len(c.GetHeader("Range")) > 0 ||
+		len(c.GetHeader("If-None-Match")) > 0 ||
+		len(c.GetHeader("If-Modified-Since")) > 0 ||
+		len(c.GetHeader("If-Match")) > 0 ||
+		len(c.GetHeader("If-Unmodified-Since")) > 0 ||
+		len(c.GetHeader("If-Range")) > 0
 }
 
 func serveOWAFStatic(c *app.RequestContext, webFS fs.FS) bool {
@@ -1062,6 +1173,7 @@ type accessLogInfo struct {
 	CacheState           string
 	Upstream             string
 	HTTPProtocol         string
+	UpstreamHTTPProtocol string
 	TLSFingerprint       bot.TLSClientFingerprint
 	HeaderOrder          []string
 	UpstreamLatencyMs    int64
@@ -1110,6 +1222,18 @@ func recordSecurityEvent(c *app.RequestContext, opts Options, ev store.SecurityE
 		if ev.TLSALPN == "" && len(fp.ALPN) > 0 {
 			ev.TLSALPN = strings.Join(fp.ALPN, ",")
 		}
+		if ev.TLSCipherSuites == "" && len(fp.CipherSuites) > 0 {
+			ev.TLSCipherSuites = tlsmeta.FormatCipherSuites(fp.CipherSuites)
+		}
+		if ev.TLSExtensions == "" && len(fp.Extensions) > 0 {
+			ev.TLSExtensions = formatUint16Slice(fp.Extensions)
+		}
+		if ev.TLSCurves == "" && len(fp.Curves) > 0 {
+			ev.TLSCurves = formatUint16Slice(fp.Curves)
+		}
+		if ev.TLSPointFormats == "" && len(fp.PointFormats) > 0 {
+			ev.TLSPointFormats = formatUint8Slice(fp.PointFormats)
+		}
 	}
 	if ev.HeaderOrder == "" {
 		ev.HeaderOrder = strings.Join(requestHeaderOrder(c), ",")
@@ -1132,7 +1256,16 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	if info.HTTPProtocol == "" {
 		info.HTTPProtocol = requestProtocol(c)
 	}
-	if !(info.HTTPProtocol == "h3" && isInternalHTTP3Request(c)) {
+	if info.UpstreamHTTPProtocol == "" {
+		info.UpstreamHTTPProtocol = proxy.UpstreamHTTPProtocol(c)
+	}
+	if isInternalHTTP3Request(c) {
+		if fp, ok := tlsFingerprintFromRequestContext(c); ok {
+			info.TLSFingerprint = fp
+		} else {
+			info.TLSFingerprint = bot.TLSClientFingerprint{}
+		}
+	} else {
 		if fp, ok := tlsFingerprintFromRequestContext(c); ok {
 			info.TLSFingerprint = mergeTLSFingerprint(info.TLSFingerprint, fp)
 		}
@@ -1147,7 +1280,11 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	responseHeaders := info.ResponseHeaders
 	responseSize := info.ResponseSize
 	if responseSize == 0 {
-		responseSize = int64(len(c.Response.Body()))
+		if cl := int64(c.Response.Header.ContentLength()); cl > 0 {
+			responseSize = cl
+		} else if !c.Response.IsBodyStream() {
+			responseSize = int64(len(c.Response.Body()))
+		}
 	}
 	if info.Detailed {
 		if requestBody == "" || requestSize == 0 {
@@ -1177,12 +1314,17 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 		RequestSize:          requestSize,
 		ResponseHeaders:      responseHeaders,
 		HTTPProtocol:         info.HTTPProtocol,
+		UpstreamHTTPProtocol: info.UpstreamHTTPProtocol,
 		TLSVersion:           info.TLSFingerprint.TLSVersion,
 		TLSSNI:               info.TLSFingerprint.SNI,
 		TLSALPN:              strings.Join(info.TLSFingerprint.ALPN, ","),
 		TLSJA3:               info.TLSFingerprint.JA3,
 		TLSJA3Hash:           info.TLSFingerprint.JA3Hash,
 		TLSJA4:               info.TLSFingerprint.JA4,
+		TLSCipherSuites:      tlsmeta.FormatCipherSuites(info.TLSFingerprint.CipherSuites),
+		TLSExtensions:        formatUint16Slice(info.TLSFingerprint.Extensions),
+		TLSCurves:            formatUint16Slice(info.TLSFingerprint.Curves),
+		TLSPointFormats:      formatUint8Slice(info.TLSFingerprint.PointFormats),
 		HeaderOrder:          strings.Join(info.HeaderOrder, ","),
 		UpstreamLatencyMs:    info.UpstreamLatencyMs,
 		ResponseSize:         responseSize,
@@ -1221,6 +1363,34 @@ func mergeTLSFingerprint(base bot.TLSClientFingerprint, extra bot.TLSClientFinge
 		base.PointFormats = extra.PointFormats
 	}
 	return base
+}
+
+func formatUint16Slice(s []uint16) string {
+	if len(s) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, v := range s {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatUint(uint64(v), 10))
+	}
+	return b.String()
+}
+
+func formatUint8Slice(s []uint8) string {
+	if len(s) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, v := range s {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatUint(uint64(v), 10))
+	}
+	return b.String()
 }
 
 const (
@@ -1399,6 +1569,9 @@ func tlsFingerprintFromRequestContext(c *app.RequestContext) (bot.TLSClientFinge
 			return fp, true
 		}
 	}
+	if isInternalHTTP3Request(c) {
+		return bot.TLSClientFingerprint{}, false
+	}
 	if fp, ok := bot.TLSFingerprintFromConn(c.GetConn()); ok {
 		c.Set(tlsFingerprintContextKey, fp)
 		return fp, true
@@ -1444,23 +1617,51 @@ func requestHeaderOrder(c *app.RequestContext) []string {
 }
 
 func isInternalHTTP3Request(c *app.RequestContext) bool {
-	return strings.TrimSpace(string(c.GetHeader("X-OpenWaf-Internal-Proto"))) == "h3" && strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))) == "h3"
+	if value, ok := c.Get(internalHTTP3ContextKey); ok {
+		if b, ok := value.(bool); ok && b {
+			return true
+		}
+	}
+	return strings.TrimSpace(string(c.GetHeader("X-OpenWaf-Internal-Proto"))) == "h3" &&
+		strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))) == "h3"
 }
 
 func requestProtocol(c *app.RequestContext) string {
-	if _, ok := tlsFingerprintFromRequestContext(c); ok {
-		if isInternalHTTP3Request(c) {
-			return "h3"
-		}
-		return "https"
-	}
 	if isInternalHTTP3Request(c) {
 		return "h3"
+	}
+	if proto := normalizeHTTPProtocol(c.Request.Header.GetProtocol()); proto != "" {
+		return proto
+	}
+	if fp, ok := tlsFingerprintFromRequestContext(c); ok {
+		if len(fp.ALPN) > 0 {
+			return strings.ToLower(fp.ALPN[0])
+		}
+		return "https"
 	}
 	if proto := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); proto != "" {
 		return strings.ToLower(proto)
 	}
 	return "http"
+}
+
+func normalizeHTTPProtocol(proto string) string {
+	switch strings.ToUpper(proto) {
+	case "HTTP/2.0", "HTTP/2":
+		return "h2"
+	case "HTTP/1.1":
+		return "http/1.1"
+	case "HTTP/1.0":
+		return "http/1.0"
+	case "H2":
+		return "h2"
+	case "H2C":
+		return "h2c"
+	case "H3":
+		return "h3"
+	default:
+		return ""
+	}
 }
 
 func recordDropEvent(opts Options, siteID uint, clientIP net.IP, reason drop.DropReason) {
@@ -1594,7 +1795,7 @@ func writeAntiReplayActionResponse(c *app.RequestContext, opts Options, sn *snap
 	case action.ShieldChallenge:
 		if sn != nil && sn.Protection.ShieldEnabled && opts.ShieldManager != nil {
 			origURL := string(c.Request.URI().RequestURI())
-			opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, statusCode)
+			opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, inboundProto(c, rt.Site.TLSEnabled), statusCode)
 			return
 		}
 	case action.ChainChallenge:
@@ -1678,6 +1879,17 @@ func handleChallengeVerify(c *app.RequestContext, opts Options) bool {
 	return false
 }
 
+// requestProtoFromContext extracts the request protocol from headers or TLS context.
+func requestProtoFromContext(c *app.RequestContext) string {
+	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
+		return strings.ToLower(v)
+	}
+	if fp, ok := tlsFingerprintFromRequestContext(c); ok && fp.TLSVersion != "" {
+		return "https"
+	}
+	return "http"
+}
+
 func handleCaptchaVerify(c *app.RequestContext, opts Options) bool {
 	if opts.CaptchaManager == nil {
 		c.String(503, "captcha not configured")
@@ -1722,7 +1934,7 @@ func handleShieldVerify(c *app.RequestContext, opts Options) bool {
 		counter, _ = strconv.ParseInt(counterStr, 10, 64)
 	}
 
-	passed, originalURL := opts.ShieldManager.VerifyChallenge(sessionID, captchaAnswer, counter, hash, envFP)
+	passed, originalURL := opts.ShieldManager.VerifyChallenge(sessionID, captchaAnswer, counter, hash, envFP, requestProtoFromContext(c))
 	if passed {
 		setChallengeCookie(c, opts)
 		if originalURL == "" {

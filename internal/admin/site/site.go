@@ -11,8 +11,10 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
+	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/utils"
 )
 
@@ -22,7 +24,10 @@ var (
 	siteStatusMutex sync.RWMutex
 )
 
-var errInvalidSiteAction = errors.New("invalid action")
+var (
+	errInvalidSiteAction  = errors.New("invalid action")
+	errInvalidSiteNetwork = errors.New("invalid network")
+)
 
 type siteListItem struct {
 	store.Site
@@ -122,6 +127,30 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			item.ApplyProtectionModeOverrides()
 		}
 		clearInheritedProtectionOverrides(&item)
+		if err := validateSiteRuntimeTLSVersions(&item, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteTLSCipherSuites(&item, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteALPN(&item, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteNetwork(&item, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := shared.ValidateSiteUpstreamURLs(item.UpstreamURLs); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := shared.ValidateSiteUpstreamHost(item.UpstreamHost); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := validateSiteActions(&item, func(string) bool { return true }); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -164,6 +193,34 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			existing.ApplyProtectionModeOverrides()
 		}
 		clearInheritedProtectionOverrides(existing)
+		if err := validateSiteRuntimeTLSVersions(existing, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteTLSCipherSuites(existing, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteALPN(existing, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteNetwork(existing, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if siteRequestHasField(body, "upstream_urls") {
+			if err := shared.ValidateSiteUpstreamURLs(existing.UpstreamURLs); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if siteRequestHasField(body, "upstream_host") {
+			if err := shared.ValidateSiteUpstreamHost(existing.UpstreamHost); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 		shouldValidateAction := func(field string) bool {
 			switch field {
 			case "owasp_action":
@@ -205,6 +262,74 @@ func siteRequestHasField(body []byte, field string) bool {
 	}
 	_, ok := raw[field]
 	return ok
+}
+
+func validateSiteRuntimeTLSVersions(item *store.Site, body []byte) error {
+	if siteRequestHasField(body, "min_tls_version") {
+		normalized, ok := normalizeSiteRuntimeTLSVersion(item.MinTLSVersion)
+		if !ok {
+			return errors.New("unsupported min_tls_version")
+		}
+		item.MinTLSVersion = normalized
+	}
+	if siteRequestHasField(body, "max_tls_version") {
+		normalized, ok := normalizeSiteRuntimeTLSVersion(item.MaxTLSVersion)
+		if !ok {
+			return errors.New("unsupported max_tls_version")
+		}
+		item.MaxTLSVersion = normalized
+	}
+	if !tlsmeta.RuntimeVersionRangeValid(item.MinTLSVersion, item.MaxTLSVersion) {
+		return errors.New("invalid tls version range")
+	}
+	return nil
+}
+
+func validateSiteTLSCipherSuites(item *store.Site, body []byte) error {
+	if !siteRequestHasField(body, "cipher_suites") {
+		return nil
+	}
+	if invalid := tlsmeta.InvalidTLSConfigCipherSuiteToken(item.CipherSuites); invalid != "" {
+		return errors.New("unsupported cipher_suites: " + invalid)
+	}
+	return nil
+}
+
+func validateSiteALPN(item *store.Site, body []byte) error {
+	if !siteRequestHasField(body, "alpn") {
+		return nil
+	}
+	item.ALPN = snapshotpkg.NormalizeALPNList(item.ALPN)
+	return nil
+}
+
+func validateSiteNetwork(item *store.Site, body []byte) error {
+	if !siteRequestHasField(body, "network") {
+		return nil
+	}
+	raw := strings.TrimSpace(item.Network)
+	if raw == "" {
+		item.Network = ""
+		return nil
+	}
+	normalized := snapshotpkg.NormalizeNetwork(raw)
+	if normalized == "" {
+		return errInvalidSiteNetwork
+	}
+	item.Network = normalized
+	return nil
+}
+
+func normalizeSiteRuntimeTLSVersion(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", true
+	}
+	normalized := tlsmeta.NormalizeRuntimeVersionToken(raw)
+	if normalized == "" {
+		return "", false
+	}
+	return normalized, true
 }
 
 func clearInheritedProtectionOverrides(item *store.Site) {

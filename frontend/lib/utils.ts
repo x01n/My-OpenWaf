@@ -5,26 +5,32 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-export function formatDate(s: string) {
-  if (!s) return "-"
-  return new Date(s).toLocaleString("zh-CN", {
+export function formatNumber(num: number | undefined | null): string {
+  if (num === undefined || num === null) return "-";
+  if (num >= 1000000) {
+    return (num / 1000000).toFixed(1) + "M";
+  }
+  if (num >= 1000) {
+    return (num / 1000).toFixed(1) + "k";
+  }
+  return num.toString();
+}
+
+export function formatDate(date: string | Date | undefined): string {
+  if (!date) return "-";
+  const d = new Date(date);
+  return d.toLocaleString("zh-CN", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  })
+  });
 }
 
-export function formatBytes(bytes: number): string {
-  if (!bytes || bytes === 0) return "-"
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-}
-
-export function formatLatency(ms: number): string {
-  if (!ms || ms === 0) return "-"
-  if (ms < 1000) return `${ms} ms`
-  return `${(ms / 1000).toFixed(2)} s`
+export function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}秒`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时`;
+  return `${Math.floor(seconds / 86400)}天`;
 }

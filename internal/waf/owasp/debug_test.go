@@ -63,6 +63,9 @@ func TestDebugSample(t *testing.T) {
 					}
 				}
 			}
+			if err := scanner.Err(); err != nil {
+				t.Fatalf("scan sample %s: %v", path, err)
+			}
 			body := strings.Join(bodyLines, "\n")
 			_ = contentType
 

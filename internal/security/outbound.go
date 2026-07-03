@@ -3,23 +3,45 @@ package security
 import (
 	"net"
 	"net/http"
-	"strings"
+)
+
+var (
+	forwardedProtoHTTPValues  = []string{"http"}
+	forwardedProtoHTTPSValues = []string{"https"}
+	forwardedProtoH3Values    = []string{"h3"}
 )
 
 // ApplyOutboundForwarding sets XFF / Host on the outgoing request to origin.
-func ApplyOutboundForwarding(out *http.Request, clientIP net.IP, origHost string, preserveOriginalHost bool, proto string) {
+func ApplyOutboundForwarding(out *http.Request, clientIP net.IP, origHost string, preserveOriginalHost bool, upstreamHost string, proto string) {
 	if clientIP != nil {
-		if prior := strings.TrimSpace(out.Header.Get("X-Forwarded-For")); prior != "" {
-			out.Header.Set("X-Forwarded-For", prior+", "+clientIP.String())
+		if prior := ForwardedForHeaderValue(out.Header.Values("X-Forwarded-For")); prior != "" {
+			out.Header["X-Forwarded-For"] = []string{prior + ", " + clientIP.String()}
 		} else {
-			out.Header.Set("X-Forwarded-For", clientIP.String())
+			out.Header["X-Forwarded-For"] = []string{clientIP.String()}
 		}
 	}
 	if proto != "" {
-		out.Header.Set("X-Forwarded-Proto", proto)
+		out.Header["X-Forwarded-Proto"] = forwardedProtoHeaderValues(proto)
+	}
+	if upstreamHost != "" {
+		out.Host = upstreamHost
+	} else if origHost != "" && preserveOriginalHost {
+		out.Host = origHost
 	}
 	if origHost != "" && preserveOriginalHost {
-		out.Host = origHost
-		out.Header.Set("X-Forwarded-Host", origHost)
+		out.Header["X-Forwarded-Host"] = []string{origHost}
+	}
+}
+
+func forwardedProtoHeaderValues(proto string) []string {
+	switch proto {
+	case "http":
+		return forwardedProtoHTTPValues
+	case "https":
+		return forwardedProtoHTTPSValues
+	case "h3":
+		return forwardedProtoH3Values
+	default:
+		return []string{proto}
 	}
 }

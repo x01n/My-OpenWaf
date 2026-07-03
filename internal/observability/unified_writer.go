@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -32,12 +33,44 @@ type UnifiedWriter struct {
 	wg     sync.WaitGroup
 
 	flushInterval time.Duration
+
+	securityEventDropped atomic.Int64
+	accessLogDropped     atomic.Int64
+	dropEventDropped     atomic.Int64
+	botScoreDropped      atomic.Int64
+
+	flushesTotal        atomic.Int64
+	flushErrorsTotal    atomic.Int64
+	lastFlushUnixNano   atomic.Int64
+	lastFlushDurationNs atomic.Int64
+	lastFlushRecords    atomic.Int64
+	totalFlushedRecords atomic.Int64
 }
 
 const (
 	unifiedWriterBatchSize  = 512
 	unifiedWriterDrainLimit = 2048
 )
+
+// UnifiedWriterStats is a point-in-time snapshot of the async observability writer.
+type UnifiedWriterStats struct {
+	SecurityEventQueueLen int `json:"security_event_queue_len"`
+	AccessLogQueueLen     int `json:"access_log_queue_len"`
+	DropEventQueueLen     int `json:"drop_event_queue_len"`
+	BotScoreQueueLen      int `json:"bot_score_queue_len"`
+
+	SecurityEventDropped int64 `json:"security_event_dropped"`
+	AccessLogDropped     int64 `json:"access_log_dropped"`
+	DropEventDropped     int64 `json:"drop_event_dropped"`
+	BotScoreDropped      int64 `json:"bot_score_dropped"`
+
+	FlushesTotal        int64 `json:"flushes_total"`
+	FlushErrorsTotal    int64 `json:"flush_errors_total"`
+	LastFlushRecords    int64 `json:"last_flush_records"`
+	LastFlushDurationMs int64 `json:"last_flush_duration_ms"`
+	LastFlushUnixNano   int64 `json:"last_flush_unix_nano"`
+	TotalFlushedRecords int64 `json:"total_flushed_records"`
+}
 
 // NewUnifiedWriter creates a unified writer with large channel buffers.
 func NewUnifiedWriter(db *gorm.DB, log *slog.Logger) *UnifiedWriter {
@@ -61,11 +94,34 @@ func (w *UnifiedWriter) SetRedis(client *goredis.Client) {
 	w.redis = client
 }
 
+// Stats returns queue, drop and flush counters for runtime diagnostics.
+func (w *UnifiedWriter) Stats() UnifiedWriterStats {
+	return UnifiedWriterStats{
+		SecurityEventQueueLen: len(w.eventCh),
+		AccessLogQueueLen:     len(w.accessCh),
+		DropEventQueueLen:     len(w.dropCh),
+		BotScoreQueueLen:      len(w.botScoreCh),
+
+		SecurityEventDropped: w.securityEventDropped.Load(),
+		AccessLogDropped:     w.accessLogDropped.Load(),
+		DropEventDropped:     w.dropEventDropped.Load(),
+		BotScoreDropped:      w.botScoreDropped.Load(),
+
+		FlushesTotal:        w.flushesTotal.Load(),
+		FlushErrorsTotal:    w.flushErrorsTotal.Load(),
+		LastFlushRecords:    w.lastFlushRecords.Load(),
+		LastFlushDurationMs: w.lastFlushDurationNs.Load() / int64(time.Millisecond),
+		LastFlushUnixNano:   w.lastFlushUnixNano.Load(),
+		TotalFlushedRecords: w.totalFlushedRecords.Load(),
+	}
+}
+
 // RecordEvent enqueues a security event. Non-blocking.
 func (w *UnifiedWriter) RecordEvent(ev store.SecurityEvent) {
 	select {
 	case w.eventCh <- ev:
 	default:
+		w.securityEventDropped.Add(1)
 	}
 }
 
@@ -74,6 +130,7 @@ func (w *UnifiedWriter) RecordAccessLog(al store.AccessLog) {
 	select {
 	case w.accessCh <- al:
 	default:
+		w.accessLogDropped.Add(1)
 	}
 }
 
@@ -82,6 +139,7 @@ func (w *UnifiedWriter) RecordDropEvent(ev store.DropEvent) {
 	select {
 	case w.dropCh <- ev:
 	default:
+		w.dropEventDropped.Add(1)
 	}
 }
 
@@ -90,6 +148,7 @@ func (w *UnifiedWriter) RecordBotScore(bs store.BotScoreLog) {
 	select {
 	case w.botScoreCh <- bs:
 	default:
+		w.botScoreDropped.Add(1)
 	}
 }
 
@@ -104,58 +163,133 @@ func (w *UnifiedWriter) loop() {
 	ticker := time.NewTicker(w.flushInterval)
 	defer ticker.Stop()
 
+	events := make([]store.SecurityEvent, 0, unifiedWriterBatchSize)
+	accessLogs := make([]store.AccessLog, 0, unifiedWriterBatchSize)
+	dropEvents := make([]store.DropEvent, 0, unifiedWriterBatchSize)
+	botScores := make([]store.BotScoreLog, 0, unifiedWriterBatchSize)
+
+	flush := func() {
+		w.flushBuffered(events, accessLogs, dropEvents, botScores)
+		events = events[:0]
+		accessLogs = accessLogs[:0]
+		dropEvents = dropEvents[:0]
+		botScores = botScores[:0]
+	}
+
 	for {
 		select {
+		case ev := <-w.eventCh:
+			events = append(events, ev)
+			if unifiedWriterShouldFlush(len(events), len(accessLogs), len(dropEvents), len(botScores)) {
+				flush()
+			}
+		case al := <-w.accessCh:
+			accessLogs = append(accessLogs, al)
+			if unifiedWriterShouldFlush(len(events), len(accessLogs), len(dropEvents), len(botScores)) {
+				flush()
+			}
+		case ev := <-w.dropCh:
+			dropEvents = append(dropEvents, ev)
+			if unifiedWriterShouldFlush(len(events), len(accessLogs), len(dropEvents), len(botScores)) {
+				flush()
+			}
+		case bs := <-w.botScoreCh:
+			botScores = append(botScores, bs)
+			if unifiedWriterShouldFlush(len(events), len(accessLogs), len(dropEvents), len(botScores)) {
+				flush()
+			}
 		case <-ticker.C:
-			w.drainAndFlush()
+			events = drainChanInto(w.eventCh, events)
+			accessLogs = drainChanInto(w.accessCh, accessLogs)
+			dropEvents = drainChanInto(w.dropCh, dropEvents)
+			botScores = drainChanInto(w.botScoreCh, botScores)
+			flush()
 		case <-w.stopCh:
-			w.drainAndFlush()
+			events = drainChanInto(w.eventCh, events)
+			accessLogs = drainChanInto(w.accessCh, accessLogs)
+			dropEvents = drainChanInto(w.dropCh, dropEvents)
+			botScores = drainChanInto(w.botScoreCh, botScores)
+			flush()
 			return
 		}
 	}
 }
 
-func (w *UnifiedWriter) drainAndFlush() {
-	events := drainChan(w.eventCh)
-	accessLogs := drainChan(w.accessCh)
-	dropEvents := drainChan(w.dropCh)
-	botScores := drainChan(w.botScoreCh)
+func unifiedWriterShouldFlush(events, accessLogs, dropEvents, botScores int) bool {
+	total := events + accessLogs + dropEvents + botScores
+	return total >= unifiedWriterBatchSize ||
+		events >= unifiedWriterBatchSize ||
+		accessLogs >= unifiedWriterBatchSize ||
+		dropEvents >= unifiedWriterBatchSize ||
+		botScores >= unifiedWriterBatchSize
+}
 
-	if len(events) == 0 && len(accessLogs) == 0 && len(dropEvents) == 0 && len(botScores) == 0 {
+func (w *UnifiedWriter) flushBuffered(
+	events []store.SecurityEvent,
+	accessLogs []store.AccessLog,
+	dropEvents []store.DropEvent,
+	botScores []store.BotScoreLog,
+) {
+	records := len(events) + len(accessLogs) + len(dropEvents) + len(botScores)
+	if records == 0 {
 		return
 	}
 
+	start := time.Now()
+	failed := false
+	defer func() {
+		w.recordFlushStats(records, time.Since(start), failed)
+	}()
+
 	// Push to Redis first (low-latency path for real-time consumers).
 	if w.redis != nil {
-		w.pushAllToRedis(events, accessLogs, dropEvents, botScores)
+		if err := w.pushAllToRedis(events, accessLogs, dropEvents, botScores); err != nil {
+			failed = true
+		}
 	}
 
 	// Single DB transaction for all types.
 	err := w.db.Transaction(func(tx *gorm.DB) error {
 		if len(events) > 0 {
 			if e := tx.CreateInBatches(events, unifiedWriterBatchSize).Error; e != nil {
+				failed = true
 				w.log.Error("flush security events failed", slog.Any("err", e), slog.Int("n", len(events)))
 			}
 		}
 		if len(accessLogs) > 0 {
 			if e := tx.CreateInBatches(accessLogs, unifiedWriterBatchSize).Error; e != nil {
+				failed = true
 				w.log.Error("flush access logs failed", slog.Any("err", e), slog.Int("n", len(accessLogs)))
 			}
 		}
 		if len(dropEvents) > 0 {
 			if e := tx.CreateInBatches(dropEvents, unifiedWriterBatchSize).Error; e != nil {
+				failed = true
 				w.log.Error("flush drop events failed", slog.Any("err", e), slog.Int("n", len(dropEvents)))
 			}
 		}
 		if len(botScores) > 0 {
 			if e := tx.CreateInBatches(botScores, unifiedWriterBatchSize).Error; e != nil {
+				failed = true
 				w.log.Error("flush bot scores failed", slog.Any("err", e), slog.Int("n", len(botScores)))
 			}
 		}
 		return nil
 	})
 	if err != nil {
+		failed = true
 		w.log.Error("unified flush transaction failed", slog.Any("err", err))
+	}
+}
+
+func (w *UnifiedWriter) recordFlushStats(records int, duration time.Duration, failed bool) {
+	w.flushesTotal.Add(1)
+	w.totalFlushedRecords.Add(int64(records))
+	w.lastFlushRecords.Store(int64(records))
+	w.lastFlushDurationNs.Store(duration.Nanoseconds())
+	w.lastFlushUnixNano.Store(time.Now().UnixNano())
+	if failed {
+		w.flushErrorsTotal.Add(1)
 	}
 }
 
@@ -164,7 +298,7 @@ func (w *UnifiedWriter) pushAllToRedis(
 	accessLogs []store.AccessLog,
 	dropEvents []store.DropEvent,
 	botScores []store.BotScoreLog,
-) {
+) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -214,7 +348,9 @@ func (w *UnifiedWriter) pushAllToRedis(
 
 	if _, err := pipe.Exec(ctx); err != nil {
 		w.log.Warn("redis push failed", slog.Any("err", err))
+		return err
 	}
+	return nil
 }
 
 // drainChan drains a channel into a slice without blocking.
@@ -236,4 +372,15 @@ func drainChan[T any](ch chan T) []T {
 		}
 	}
 	return buf
+}
+
+func drainChanInto[T any](ch chan T, buf []T) []T {
+	for {
+		select {
+		case v := <-ch:
+			buf = append(buf, v)
+		default:
+			return buf
+		}
+	}
 }

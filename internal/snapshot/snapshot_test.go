@@ -1,12 +1,19 @@
 package snapshot
 
 import (
+	"bytes"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/pem"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
@@ -21,6 +28,38 @@ func TestLoadDefaultsFallbackOnInvalidJSON(t *testing.T) {
 	if tlsDefaults.MinVersion != DefaultTLSDefaults().MinVersion || tlsDefaults.DefaultALPN != DefaultTLSDefaults().DefaultALPN {
 		t.Fatalf("invalid TLS config should use defaults, got %+v", tlsDefaults)
 	}
+
+	http2cfg := LoadHTTP2Config(`{"max_concurrent_streams":`)
+	if http2cfg != DefaultHTTP2Config() {
+		t.Fatalf("invalid HTTP/2 config should use defaults, got %+v", http2cfg)
+	}
+}
+
+func TestSnapshotSystemSettingQueriesUseDialectQuotedKeyColumn(t *testing.T) {
+	db, err := gorm.Open(postgres.New(postgres.Config{
+		DSN:                  "host=127.0.0.1 user=openwaf dbname=openwaf sslmode=disable",
+		PreferSimpleProtocol: true,
+	}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("open dry-run postgres db: %v", err)
+	}
+
+	statements := []string{
+		db.Where(systemSettingKeyEquals("network_config")).First(&store.SystemSettings{}).Statement.SQL.String(),
+		db.Where(systemSettingKeyEquals("tls_default_config")).First(&store.SystemSettings{}).Statement.SQL.String(),
+		db.Where(systemSettingKeyEquals("http2_config")).First(&store.SystemSettings{}).Statement.SQL.String(),
+		db.Where(systemSettingKeyEquals("protection")).First(&store.SystemSettings{}).Statement.SQL.String(),
+		db.Where(systemSettingKeyEquals(store.SettingKeyHPKP)).First(&store.SystemSettings{}).Statement.SQL.String(),
+	}
+
+	for _, sql := range statements {
+		if strings.Contains(sql, "`key`") {
+			t.Fatalf("SQL should not contain MySQL-style key quoting: %s", sql)
+		}
+		if !strings.Contains(sql, `"key"`) {
+			t.Fatalf("SQL should contain dialect-quoted key column: %s", sql)
+		}
+	}
 }
 
 func TestLoadDefaultsPreserveMissingCriticalFields(t *testing.T) {
@@ -28,17 +67,163 @@ func TestLoadDefaultsPreserveMissingCriticalFields(t *testing.T) {
 	if !network.HTTP3Enabled || network.DefaultNetwork != "tcp" || network.DefaultALPN != "h2,h3,http/1.1" {
 		t.Fatalf("partial network config should preserve defaults, got %+v", network)
 	}
+	network = LoadNetworkDefaults(`{"http2_enabled":true,"http3_enabled":false}`)
+	if network.HTTP3Enabled || network.DefaultALPN != "h2,http/1.1" {
+		t.Fatalf("missing default_alpn should follow protocol switches, got %+v", network)
+	}
+	network = LoadNetworkDefaults(`{"http2_enabled":true,"http3_enabled":false,"default_alpn":"h3,http/1.1"}`)
+	if network.DefaultALPN != "h3,http/1.1" {
+		t.Fatalf("explicit default_alpn should be preserved, got %+v", network)
+	}
 
 	tlsDefaults := LoadTLSDefaults(`{"cipher_suites":"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"}`)
 	if tlsDefaults.MinVersion != "TLS10" || tlsDefaults.MaxVersion != "TLS13" || tlsDefaults.DefaultALPN != "h2,h3,http/1.1" {
 		t.Fatalf("partial TLS config should preserve defaults, got %+v", tlsDefaults)
 	}
+	if !tlsDefaults.SessionTicketsEnabled {
+		t.Fatalf("missing session_tickets_enabled should default to true, got %+v", tlsDefaults)
+	}
+	tlsDefaults = LoadTLSDefaults(`{"session_tickets_enabled":false}`)
+	if tlsDefaults.SessionTicketsEnabled {
+		t.Fatalf("explicit session_tickets_enabled=false should be preserved, got %+v", tlsDefaults)
+	}
+
+	http2cfg := LoadHTTP2Config(`{"max_concurrent_streams":250,"max_handlers":7}`)
+	if http2cfg.MaxConcurrentStreams != 250 ||
+		http2cfg.MaxReadFrameSize != DefaultHTTP2Config().MaxReadFrameSize ||
+		http2cfg.IdleTimeoutSeconds != DefaultHTTP2Config().IdleTimeoutSeconds ||
+		http2cfg.MaxHeaderBytes != DefaultHTTP2Config().MaxHeaderBytes ||
+		http2cfg.MaxHeaderFields != DefaultHTTP2Config().MaxHeaderFields ||
+		http2cfg.MaxHandlers != 7 ||
+		http2cfg.MaxQueuedControlFrames != DefaultHTTP2Config().MaxQueuedControlFrames {
+		t.Fatalf("partial HTTP/2 config should preserve defaults, got %+v", http2cfg)
+	}
+}
+
+func TestDefaultALPNForProtocolSwitches(t *testing.T) {
+	tests := []struct {
+		name         string
+		http2Enabled bool
+		http3Enabled bool
+		want         string
+	}{
+		{name: "http2 and http3 enabled", http2Enabled: true, http3Enabled: true, want: "h2,h3,http/1.1"},
+		{name: "http2 only", http2Enabled: true, http3Enabled: false, want: "h2,http/1.1"},
+		{name: "http3 only", http2Enabled: false, http3Enabled: true, want: "h3,http/1.1"},
+		{name: "http1 only", http2Enabled: false, http3Enabled: false, want: "http/1.1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DefaultALPNForProtocolSwitches(tt.http2Enabled, tt.http3Enabled); got != tt.want {
+				t.Fatalf("DefaultALPNForProtocolSwitches(%v,%v) = %q, want %q", tt.http2Enabled, tt.http3Enabled, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNetworkDefaultsNormalizeAndFallbackNetworkValues(t *testing.T) {
+	network := LoadNetworkDefaults(`{"default_network":" TCP6 ","default_alpn":"h2,http/1.1"}`)
+	if network.DefaultNetwork != "tcp6" {
+		t.Fatalf("default network = %q, want tcp6", network.DefaultNetwork)
+	}
+
+	network = LoadNetworkDefaults(`{"default_network":"udp","default_alpn":"h2,http/1.1"}`)
+	if network.DefaultNetwork != "tcp" {
+		t.Fatalf("invalid default network should fallback to tcp, got %q", network.DefaultNetwork)
+	}
+
+	effectiveNetwork, _ := EffectiveSiteNetwork("", "udp", NetworkDefaults{
+		HTTP2Enabled:   true,
+		HTTP3Enabled:   true,
+		DefaultALPN:    "h2,h3,http/1.1",
+		DefaultNetwork: "tcp4",
+	}, DefaultTLSDefaults())
+	if effectiveNetwork != "tcp4" {
+		t.Fatalf("invalid site network should fallback to default network, got %q", effectiveNetwork)
+	}
+}
+
+func TestNormalizeHTTP3Bind(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+		ok    bool
+	}{
+		{name: "empty inherited", input: "", want: "", ok: true},
+		{name: "port only", input: " :8443 ", want: ":8443", ok: true},
+		{name: "host port", input: "127.0.0.1:8443", want: "127.0.0.1:8443", ok: true},
+		{name: "bracketed ipv6", input: "[::1]:8443", want: "[::1]:8443", ok: true},
+		{name: "missing port", input: "127.0.0.1", ok: false},
+		{name: "bad port", input: ":abc", ok: false},
+		{name: "zero port", input: ":0", ok: false},
+		{name: "port overflow", input: ":65536", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := NormalizeHTTP3Bind(tt.input)
+			if ok != tt.ok {
+				t.Fatalf("NormalizeHTTP3Bind(%q) ok = %v, want %v", tt.input, ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("NormalizeHTTP3Bind(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadHTTP2ConfigNormalizesUnsafeLargeValues(t *testing.T) {
+	http2cfg := LoadHTTP2Config(`{"read_timeout_seconds":90,"max_concurrent_streams":100000,"max_read_frame_size":16777216,"idle_timeout_seconds":25,"max_upload_buffer_per_connection":16777216,"max_upload_buffer_per_stream":16777216,"max_header_bytes":16777216,"max_header_fields":10000,"max_handlers":100000,"max_queued_control_frames":100000}`)
+	if http2cfg.ReadTimeoutSeconds != 90 || http2cfg.IdleTimeoutSeconds != 25 {
+		t.Fatalf("positive timeout values should be preserved, got %+v", http2cfg)
+	}
+	if http2cfg.MaxConcurrentStreams != MaxHTTP2ConcurrentStreams ||
+		http2cfg.MaxReadFrameSize != MaxHTTP2ReadFrameSize ||
+		http2cfg.MaxUploadBufferPerConnection != MaxHTTP2UploadBufferPerConnection ||
+		http2cfg.MaxUploadBufferPerStream != MaxHTTP2UploadBufferPerStream ||
+		http2cfg.MaxHeaderBytes != MaxHTTP2HeaderBytes ||
+		http2cfg.MaxHeaderFields != MaxHTTP2HeaderFields ||
+		http2cfg.MaxHandlers != MaxHTTP2Handlers ||
+		http2cfg.MaxQueuedControlFrames != MaxHTTP2QueuedControlFrames {
+		t.Fatalf("unsafe HTTP/2 config should be capped, got %+v", http2cfg)
+	}
 }
 
 func TestParseTLSCipherSuitesRecognizesNamesAndDeduplicates(t *testing.T) {
+	// parseTLSCipherSuites only resolves named cipher suites (not numeric IDs like 49199 or 0xc02f).
+	// TLS_AES_128_GCM_SHA256 (0x1301) is a distinct TLS 1.3 suite from TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (0xc02f).
 	got := parseTLSCipherSuites("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,ECDHE_RSA_WITH_AES_128_GCM_SHA256,tls_ecdhe_rsa_with_aes_128_gcm_sha256")
-	if len(got) != 1 || got[0] == 0 {
+	if len(got) != 1 || got[0] != tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 {
 		t.Fatalf("unexpected cipher suites: %#v", got)
+	}
+}
+
+// TestSnapshotParsePatternRecognizesTLSFingerprintKinds was removed because
+// ParsePattern no longer supports TLS fingerprint kinds (tls_version, tls_sni,
+// tls_alpn, tls_cipher_suites, header_order_contains).
+
+func TestParseTLSVersionSupportsAliasesAndWireValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  uint16
+	}{
+		{name: "ssl3", input: "SSL3", want: 0x0300},
+		{name: "tls13 short", input: "1.3", want: 0x0304},
+		{name: "tls12 spaced", input: "TLS 1.2", want: 0x0303},
+		{name: "tls11 prefixed", input: "TLSv1.1", want: 0x0302},
+		{name: "hex", input: "0x0301", want: 0x0301},
+		{name: "decimal", input: "772", want: 0x0304},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ParseTLSVersion(tt.input); got != tt.want {
+				t.Fatalf("ParseTLSVersion(%q) = %#x, want %#x", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -54,6 +239,316 @@ func TestParseALPNProtocolsDeduplicates(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeALPNListDeduplicatesAndKeepsCustomProtocols(t *testing.T) {
+	if got := NormalizeALPNList(" H2 , h2 , HTTP/1.1 "); got != "h2,http/1.1" {
+		t.Fatalf("NormalizeALPNList mixed case = %q, want h2,http/1.1", got)
+	}
+	if got := NormalizeALPNList(" acme-tls/1 , H3 , acme-tls/1 "); got != "acme-tls/1,h3" {
+		t.Fatalf("NormalizeALPNList custom ALPN = %q, want acme-tls/1,h3", got)
+	}
+	if got := NormalizeALPNList(" , "); got != "" {
+		t.Fatalf("NormalizeALPNList empty tokens = %q, want empty", got)
+	}
+}
+
+func TestParseOCSPStapleAcceptsPEMBase64AndRawText(t *testing.T) {
+	der := []byte{0x30, 0x03, 0x0a, 0x01, 0x00}
+	pemValue := string(pem.EncodeToMemory(&pem.Block{Type: "OCSP RESPONSE", Bytes: der}))
+	encoded := base64.StdEncoding.EncodeToString(der)
+	base64Value := encoded[:4] + "\n" + encoded[4:]
+
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want []byte
+	}{
+		{name: "pem", raw: pemValue, want: der},
+		{name: "base64", raw: base64Value, want: der},
+		{name: "raw text", raw: "raw-ocsp-response", want: []byte("raw-ocsp-response")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ParseOCSPStaple(tt.raw)
+			if !ok {
+				t.Fatalf("ParseOCSPStaple(%q) returned ok=false", tt.name)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("ParseOCSPStaple(%q) = %x, want %x", tt.name, got, tt.want)
+			}
+		})
+	}
+
+	if got, ok := ParseOCSPStaple(" \n\t "); ok || got != nil {
+		t.Fatalf("empty OCSP value should return nil,false; got %x,%v", got, ok)
+	}
+}
+
+func TestEffectiveSiteNetworkHonorsProtocolSwitches(t *testing.T) {
+	tests := []struct {
+		name     string
+		siteALPN string
+		defaults NetworkDefaults
+		wantALPN string
+	}{
+		{
+			name:     "disable h2 keeps h3 and http1",
+			siteALPN: "",
+			defaults: NetworkDefaults{HTTP2Enabled: false, HTTP3Enabled: true, DefaultALPN: "h2,h3,http/1.1", DefaultNetwork: "tcp"},
+			wantALPN: "h3,http/1.1",
+		},
+		{
+			name:     "disable h2 and h3 falls back to http1",
+			siteALPN: "h2,h3,http/1.1",
+			defaults: NetworkDefaults{HTTP2Enabled: false, HTTP3Enabled: false, DefaultALPN: "h2,h3,http/1.1", DefaultNetwork: "tcp"},
+			wantALPN: "http/1.1",
+		},
+		{
+			name:     "custom alpn keeps unknown protocol",
+			siteALPN: "acme-tls/1,h2,http/1.1",
+			defaults: NetworkDefaults{HTTP2Enabled: false, HTTP3Enabled: false, DefaultALPN: "h2,h3,http/1.1", DefaultNetwork: "tcp"},
+			wantALPN: "acme-tls/1,http/1.1",
+		},
+		{
+			name:     "explicit site alpn disables h3 even when default enables it",
+			siteALPN: "h2,http/1.1",
+			defaults: NetworkDefaults{HTTP2Enabled: true, HTTP3Enabled: true, DefaultALPN: "h2,h3,http/1.1", DefaultNetwork: "tcp"},
+			wantALPN: "h2,http/1.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			network, alpn := EffectiveSiteNetwork(tt.siteALPN, "", tt.defaults, DefaultTLSDefaults())
+			if network != "tcp" {
+				t.Fatalf("network = %q, want tcp", network)
+			}
+			if alpn != tt.wantALPN {
+				t.Fatalf("alpn = %q, want %q", alpn, tt.wantALPN)
+			}
+		})
+	}
+}
+
+func TestEffectiveSiteNetworkPrefersExplicitTLSDefaultALPN(t *testing.T) {
+	defaults := NetworkDefaults{
+		HTTP2Enabled:   true,
+		HTTP3Enabled:   false,
+		DefaultALPN:    "http/1.1",
+		DefaultNetwork: "tcp",
+	}
+	tlsDefaults := LoadTLSDefaults(`{"default_alpn":"h2,http/1.1"}`)
+
+	network, alpn := EffectiveSiteNetwork("", "", defaults, tlsDefaults)
+	if network != "tcp" {
+		t.Fatalf("network = %q, want tcp", network)
+	}
+	if alpn != "h2,http/1.1" {
+		t.Fatalf("alpn = %q, want %q", alpn, "h2,http/1.1")
+	}
+}
+
+func TestEffectiveSiteNetworkFallsBackToNetworkDefaultALPNWhenTLSDefaultNotExplicit(t *testing.T) {
+	defaults := NetworkDefaults{
+		HTTP2Enabled:   true,
+		HTTP3Enabled:   false,
+		DefaultALPN:    "http/1.1",
+		DefaultNetwork: "tcp",
+	}
+
+	network, alpn := EffectiveSiteNetwork("", "", defaults, DefaultTLSDefaults())
+	if network != "tcp" {
+		t.Fatalf("network = %q, want tcp", network)
+	}
+	if alpn != "http/1.1" {
+		t.Fatalf("alpn = %q, want %q", alpn, "http/1.1")
+	}
+}
+
+func TestBuildPreservesExplicitSiteALPNWithoutH3(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{
+		Key:   "network_config",
+		Value: `{"http2_enabled":true,"http3_enabled":true,"http3_bind":":443","default_alpn":"h2,h3,http/1.1","default_network":"tcp"}`,
+	}).Error; err != nil {
+		t.Fatalf("seed network config: %v", err)
+	}
+
+	site := store.Site{
+		Host:         "explicit-alpn.example.test",
+		Bind:         ":443",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Enabled:      true,
+		TLSEnabled:   true,
+		ALPN:         "h2,http/1.1",
+	}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	rt, ok := sn.MatchSite(":443", "explicit-alpn.example.test")
+	if !ok {
+		t.Fatal("expected site runtime to be present in snapshot")
+	}
+	if rt.Site.ALPN != "h2,http/1.1" {
+		t.Fatalf("runtime ALPN = %q, want %q", rt.Site.ALPN, "h2,http/1.1")
+	}
+}
+
+func TestBuildUsesTLSDefaultMaxVersionWhenSiteInherits(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{
+		Key:   "tls_default_config",
+		Value: `{"min_version":"TLS12","max_version":"TLS12","default_alpn":"h2,http/1.1","curve_preferences":"X25519,CurveP256,CurveP384","prefer_server_cipher_suites":true,"self_signed_on_ip":true}`,
+	}).Error; err != nil {
+		t.Fatalf("seed tls_default_config: %v", err)
+	}
+
+	site := store.Site{
+		Host:          "inherit-max-version.example.test",
+		Bind:          ":443",
+		Network:       "tcp",
+		UpstreamURLs:  "http://127.0.0.1:8080",
+		Enabled:       true,
+		TLSEnabled:    true,
+		MinTLSVersion: "TLS12",
+		MaxTLSVersion: "",
+		ALPN:          "h2,http/1.1",
+	}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	rt, ok := sn.MatchSite(":443", "inherit-max-version.example.test")
+	if !ok {
+		t.Fatal("expected site runtime to be present in snapshot")
+	}
+	if rt.Site.MaxTLSVersion != "TLS12" {
+		t.Fatalf("runtime max_tls_version = %q, want %q", rt.Site.MaxTLSVersion, "TLS12")
+	}
+}
+
+func TestBuildFallsBackFromUnsupportedRuntimeTLSVersions(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{
+		Key:   "tls_default_config",
+		Value: `{"min_version":"TLS11","max_version":"TLS12","default_alpn":"h2,http/1.1","curve_preferences":"X25519,CurveP256,CurveP384","prefer_server_cipher_suites":true,"session_tickets_enabled":true,"self_signed_on_ip":true}`,
+	}).Error; err != nil {
+		t.Fatalf("seed tls_default_config: %v", err)
+	}
+
+	certPEM, keyPEM, err := acme.GenerateSelfSignedPEM("legacy-ssl-runtime.example.test", []string{"legacy-ssl-runtime.example.test"}, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("generate certificate: %v", err)
+	}
+	cert := store.Certificate{
+		Name:    "legacy-ssl-runtime",
+		CertPEM: certPEM,
+		KeyPEM:  keyPEM,
+	}
+	if err := db.Create(&cert).Error; err != nil {
+		t.Fatalf("seed certificate: %v", err)
+	}
+
+	site := store.Site{
+		Host:          "legacy-ssl-runtime.example.test",
+		Bind:          ":443",
+		Network:       "tcp",
+		UpstreamURLs:  "http://127.0.0.1:8080",
+		Enabled:       true,
+		TLSEnabled:    true,
+		CertID:        &cert.ID,
+		MinTLSVersion: "SSL3",
+		MaxTLSVersion: "0x0300",
+		ALPN:          "h2,http/1.1",
+	}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	rt, ok := sn.MatchSite(":443", "legacy-ssl-runtime.example.test")
+	if !ok {
+		t.Fatal("expected site runtime to be present in snapshot")
+	}
+	if rt.Site.MinTLSVersion != "TLS11" {
+		t.Fatalf("runtime min_tls_version = %q, want TLS11", rt.Site.MinTLSVersion)
+	}
+	if rt.Site.MaxTLSVersion != "TLS12" {
+		t.Fatalf("runtime max_tls_version = %q, want TLS12", rt.Site.MaxTLSVersion)
+	}
+	if rt.TLSConfig == nil {
+		t.Fatal("expected runtime TLS config")
+	}
+	if rt.TLSConfig.MinVersion != tls.VersionTLS11 {
+		t.Fatalf("tls config MinVersion = %#x, want %#x", rt.TLSConfig.MinVersion, tls.VersionTLS11)
+	}
+	if rt.TLSConfig.MaxVersion != tls.VersionTLS12 {
+		t.Fatalf("tls config MaxVersion = %#x, want %#x", rt.TLSConfig.MaxVersion, tls.VersionTLS12)
+	}
+}
+
+func TestEffectiveSiteTLSFallsBackFromInvalidRuntimeVersionRange(t *testing.T) {
+	minVersion, maxVersion, _ := EffectiveSiteTLS("TLS13", "TLS12", "", TLSDefaults{
+		MinVersion: "TLS11",
+		MaxVersion: "TLS13",
+	})
+	if minVersion != "TLS11" {
+		t.Fatalf("effective min_tls_version = %q, want TLS11", minVersion)
+	}
+	if maxVersion != "TLS13" {
+		t.Fatalf("effective max_tls_version = %q, want TLS13", maxVersion)
+	}
+
+	minVersion, maxVersion, _ = EffectiveSiteTLS("TLS13", "TLS12", "", TLSDefaults{
+		MinVersion: "SSL3",
+		MaxVersion: "TLS10",
+	})
+	if minVersion != "TLS10" {
+		t.Fatalf("fallback min_tls_version = %q, want TLS10", minVersion)
+	}
+	if maxVersion != "TLS13" {
+		t.Fatalf("fallback max_tls_version = %q, want TLS13", maxVersion)
+	}
+}
+
+func TestEffectiveSiteTLSKeepsExplicitTLS12Minimum(t *testing.T) {
+	minVersion, maxVersion, _ := EffectiveSiteTLS("TLS12", "", "", TLSDefaults{
+		MinVersion: "TLS10",
+		MaxVersion: "TLS13",
+	})
+	if minVersion != "TLS12" {
+		t.Fatalf("explicit site min_tls_version = %q, want TLS12", minVersion)
+	}
+	if maxVersion != "TLS13" {
+		t.Fatalf("inherited max_tls_version = %q, want TLS13", maxVersion)
+	}
+
+	minVersion, maxVersion, _ = EffectiveSiteTLS("", "", "", TLSDefaults{
+		MinVersion: "TLS10",
+		MaxVersion: "TLS13",
+	})
+	if minVersion != "TLS10" {
+		t.Fatalf("empty site min_tls_version = %q, want inherited TLS10", minVersion)
+	}
+	if maxVersion != "TLS13" {
+		t.Fatalf("empty site max_tls_version = %q, want inherited TLS13", maxVersion)
+	}
+}
+
+// TestBuildAttachesOCSPStapleToSnapshotTLSCertificates was removed because
+// Build() no longer attaches OCSP staple data to TLS certificates in the snapshot.
 
 func TestParseCurvePreferencesAliasesAndDeduplicates(t *testing.T) {
 	got := ParseCurvePreferences("X25519,P-256,CurveP256,p384")
@@ -460,6 +955,314 @@ func TestBuildRejectsInvalidProtectionJSON(t *testing.T) {
 	}
 }
 
+func TestBuildLoadsHSTSEnabledFromSystemSettings(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "enabled", value: "true", want: true},
+		{name: "disabled", value: "false", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _ := newSnapshotBuildDBForTest(t)
+			if err := db.Create(&store.SystemSettings{Key: "hsts_enabled", Value: tt.value}).Error; err != nil {
+				t.Fatalf("seed hsts setting: %v", err)
+			}
+
+			sn, err := Build(db, 1)
+			if err != nil {
+				t.Fatalf("build snapshot: %v", err)
+			}
+			if sn.HSTSEnabled != tt.want {
+				t.Fatalf("snapshot HSTSEnabled = %v, want %v", sn.HSTSEnabled, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildDefaultsHSTSDisabledWhenSettingMissing(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.HSTSEnabled {
+		t.Fatal("snapshot HSTSEnabled should default to false when setting is missing")
+	}
+}
+
+func TestBuildLoadsXSSProtectionEnabledFromSystemSettings(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "enabled", value: "true", want: true},
+		{name: "disabled", value: "false", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _ := newSnapshotBuildDBForTest(t)
+			if err := db.Create(&store.SystemSettings{Key: "xss_protection_enabled", Value: tt.value}).Error; err != nil {
+				t.Fatalf("seed xss protection setting: %v", err)
+			}
+
+			sn, err := Build(db, 1)
+			if err != nil {
+				t.Fatalf("build snapshot: %v", err)
+			}
+			if sn.XSSProtectionEnabled != tt.want {
+				t.Fatalf("snapshot XSSProtectionEnabled = %v, want %v", sn.XSSProtectionEnabled, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildDefaultsXSSProtectionDisabledWhenSettingMissing(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.XSSProtectionEnabled {
+		t.Fatal("snapshot XSSProtectionEnabled should default to false when setting is missing")
+	}
+}
+
+func TestBuildLoadsExpectCTSettingsFromSystemSettings(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{Key: "expect_ct_enabled", Value: "true"}).Error; err != nil {
+		t.Fatalf("seed expect ct enabled setting: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{Key: "expect_ct_value", Value: "max-age=86400, enforce"}).Error; err != nil {
+		t.Fatalf("seed expect ct value setting: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if !sn.ExpectCTEnabled {
+		t.Fatalf("snapshot ExpectCTEnabled = %v, want true", sn.ExpectCTEnabled)
+	}
+	if sn.ExpectCTValue != "max-age=86400, enforce" {
+		t.Fatalf("snapshot ExpectCTValue = %q, want configured value", sn.ExpectCTValue)
+	}
+}
+
+func TestBuildDefaultsExpectCTSettingsWhenMissing(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.ExpectCTEnabled {
+		t.Fatal("snapshot ExpectCTEnabled should default to false when setting is missing")
+	}
+	if sn.ExpectCTValue != DefaultExpectCTValue {
+		t.Fatalf("snapshot ExpectCTValue = %q, want %q", sn.ExpectCTValue, DefaultExpectCTValue)
+	}
+}
+
+func TestBuildLoadsHPKPSettingsFromSystemSettings(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{Key: store.SettingKeyHPKP, Value: "true"}).Error; err != nil {
+		t.Fatalf("seed hpkp enabled setting: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{Key: store.SettingKeyHPKPValue, Value: `pin-sha256="abc"; max-age=86400; includeSubDomains`}).Error; err != nil {
+		t.Fatalf("seed hpkp value setting: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{Key: store.SettingKeyHPKPReportOnly, Value: "true"}).Error; err != nil {
+		t.Fatalf("seed hpkp report only enabled setting: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{Key: store.SettingKeyHPKPReportOnlyValue, Value: `pin-sha256="abc"; max-age=86400; report-uri="https://report.example/hpkp"`}).Error; err != nil {
+		t.Fatalf("seed hpkp report only value setting: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if !sn.HPKPEnabled || sn.HPKPValue != `pin-sha256="abc"; max-age=86400; includeSubDomains` {
+		t.Fatalf("snapshot HPKP settings not loaded: %#v", sn)
+	}
+	if !sn.HPKPReportOnlyEnabled || sn.HPKPReportOnlyValue != `pin-sha256="abc"; max-age=86400; report-uri="https://report.example/hpkp"` {
+		t.Fatalf("snapshot HPKP report only settings not loaded: %#v", sn)
+	}
+}
+
+func TestBuildDefaultsHPKPSettingsWhenMissing(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.HPKPEnabled || sn.HPKPReportOnlyEnabled {
+		t.Fatalf("snapshot HPKP flags should default to false, got enabled=%v report_only=%v", sn.HPKPEnabled, sn.HPKPReportOnlyEnabled)
+	}
+	if sn.HPKPValue != DefaultHPKPValue || sn.HPKPReportOnlyValue != DefaultHPKPReportOnlyValue {
+		t.Fatalf("snapshot HPKP values should use defaults, got hpkp=%q report_only=%q", sn.HPKPValue, sn.HPKPReportOnlyValue)
+	}
+}
+
+func TestBuildLoadsBrotliEnabledFromSystemSettings(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "enabled", value: "true", want: true},
+		{name: "disabled", value: "false", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _ := newSnapshotBuildDBForTest(t)
+			if err := db.Create(&store.SystemSettings{Key: "brotli_enabled", Value: tt.value}).Error; err != nil {
+				t.Fatalf("seed brotli setting: %v", err)
+			}
+
+			sn, err := Build(db, 1)
+			if err != nil {
+				t.Fatalf("build snapshot: %v", err)
+			}
+			if sn.BrotliEnabled != tt.want {
+				t.Fatalf("snapshot BrotliEnabled = %v, want %v", sn.BrotliEnabled, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildLoadsResponseCompressionSettingsFromSystemSettings(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{Key: "response_compression_enabled", Value: "false"}).Error; err != nil {
+		t.Fatalf("seed response compression enabled setting: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{Key: "response_compression_gzip_enabled", Value: "false"}).Error; err != nil {
+		t.Fatalf("seed response compression gzip enabled setting: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{Key: "response_compression_min_bytes", Value: "4096"}).Error; err != nil {
+		t.Fatalf("seed response compression min bytes setting: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.ResponseCompressionEnabled {
+		t.Fatalf("snapshot ResponseCompressionEnabled = %v, want false", sn.ResponseCompressionEnabled)
+	}
+	if sn.ResponseCompressionGzipEnabled {
+		t.Fatalf("snapshot ResponseCompressionGzipEnabled = %v, want false", sn.ResponseCompressionGzipEnabled)
+	}
+	if sn.ResponseCompressionMinBytes != 4096 {
+		t.Fatalf("snapshot ResponseCompressionMinBytes = %d, want 4096", sn.ResponseCompressionMinBytes)
+	}
+}
+
+func TestBuildDefaultsResponseCompressionSettingsWhenMissing(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	// loadBoolSetting returns false when the setting row is missing,
+	// so both compression booleans default to false without explicit DB rows.
+	if sn.ResponseCompressionEnabled {
+		t.Fatalf("snapshot ResponseCompressionEnabled = %v, want false (loadBoolSetting default)", sn.ResponseCompressionEnabled)
+	}
+	if sn.ResponseCompressionGzipEnabled {
+		t.Fatalf("snapshot ResponseCompressionGzipEnabled = %v, want false (loadBoolSetting default)", sn.ResponseCompressionGzipEnabled)
+	}
+	if sn.ResponseCompressionMinBytes != DefaultResponseCompressionMinBytes {
+		t.Fatalf("snapshot ResponseCompressionMinBytes = %d, want %d", sn.ResponseCompressionMinBytes, DefaultResponseCompressionMinBytes)
+	}
+}
+
+func TestBuildLoadsHTTP2ConfigFromSystemSettings(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{Key: "http2_config", Value: `{"read_timeout_seconds":90,"disable_keepalive":true,"permit_prohibited_cipher_suites":false,"max_concurrent_streams":300,"max_read_frame_size":131072,"idle_timeout_seconds":25,"max_upload_buffer_per_connection":1048576,"max_upload_buffer_per_stream":524288,"max_header_bytes":262144,"max_header_fields":80,"max_handlers":24,"max_queued_control_frames":2048}`}).Error; err != nil {
+		t.Fatalf("seed http2 config: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.HTTP2Config.ReadTimeoutSeconds != 90 ||
+		!sn.HTTP2Config.DisableKeepalive ||
+		sn.HTTP2Config.PermitProhibitedCipherSuites ||
+		sn.HTTP2Config.MaxConcurrentStreams != 300 ||
+		sn.HTTP2Config.MaxReadFrameSize != 131072 ||
+		sn.HTTP2Config.IdleTimeoutSeconds != 25 ||
+		sn.HTTP2Config.MaxUploadBufferPerConnection != 1048576 ||
+		sn.HTTP2Config.MaxUploadBufferPerStream != 524288 ||
+		sn.HTTP2Config.MaxHeaderBytes != 262144 ||
+		sn.HTTP2Config.MaxHeaderFields != 80 ||
+		sn.HTTP2Config.MaxHandlers != 24 ||
+		sn.HTTP2Config.MaxQueuedControlFrames != 2048 {
+		t.Fatalf("snapshot HTTP2Config not loaded as expected, got %+v", sn.HTTP2Config)
+	}
+}
+
+func TestBuildNormalizesUnsafeHTTP2ConfigFromSystemSettings(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{Key: "http2_config", Value: `{"read_timeout_seconds":90,"max_concurrent_streams":100000,"max_read_frame_size":16777216,"idle_timeout_seconds":25,"max_upload_buffer_per_connection":16777216,"max_upload_buffer_per_stream":16777216,"max_header_bytes":16777216,"max_header_fields":10000,"max_handlers":100000,"max_queued_control_frames":100000}`}).Error; err != nil {
+		t.Fatalf("seed http2 config: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.HTTP2Config.ReadTimeoutSeconds != 90 || sn.HTTP2Config.IdleTimeoutSeconds != 25 {
+		t.Fatalf("positive timeout values should be preserved, got %+v", sn.HTTP2Config)
+	}
+	if sn.HTTP2Config.MaxConcurrentStreams != MaxHTTP2ConcurrentStreams ||
+		sn.HTTP2Config.MaxReadFrameSize != MaxHTTP2ReadFrameSize ||
+		sn.HTTP2Config.MaxUploadBufferPerConnection != MaxHTTP2UploadBufferPerConnection ||
+		sn.HTTP2Config.MaxUploadBufferPerStream != MaxHTTP2UploadBufferPerStream ||
+		sn.HTTP2Config.MaxHeaderBytes != MaxHTTP2HeaderBytes ||
+		sn.HTTP2Config.MaxHeaderFields != MaxHTTP2HeaderFields ||
+		sn.HTTP2Config.MaxHandlers != MaxHTTP2Handlers ||
+		sn.HTTP2Config.MaxQueuedControlFrames != MaxHTTP2QueuedControlFrames {
+		t.Fatalf("snapshot HTTP2Config should be capped, got %+v", sn.HTTP2Config)
+	}
+}
+
+func TestBuildDefaultsHTTP2ConfigWhenSettingMissing(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.HTTP2Config != DefaultHTTP2Config() {
+		t.Fatalf("snapshot HTTP2Config should default when setting missing, got %+v", sn.HTTP2Config)
+	}
+}
+
+func TestBuildDefaultsBrotliDisabledWhenSettingMissing(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.BrotliEnabled {
+		t.Fatal("snapshot BrotliEnabled should default to false when setting is missing")
+	}
+}
+
 func TestCompileCCRulesBuildsCompoundCustomRule(t *testing.T) {
 	protection := store.ProtectionConfig{
 		CCUseCustom: true,
@@ -655,6 +1458,89 @@ func TestParseUpstreamURLsKeepsCommaFormat(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("url[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestBuildCompilesAndResolvesUpstreamHostTemplate(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	site := store.Site{
+		Host:         "app.example.test",
+		Bind:         ":80",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		UpstreamHost: "{{.Host}}.internal",
+		Enabled:      true,
+	}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	rt, ok := sn.MatchSite(":80", "app.example.test")
+	if !ok {
+		t.Fatal("site was not matched")
+	}
+	// ResolveOutboundHost returns the raw UpstreamHost value when set,
+	// without template expansion.
+	got, err := ResolveOutboundHost(rt, "127.0.0.1:8080", "app.example.test")
+	if err != nil {
+		t.Fatalf("ResolveOutboundHost returned error: %v", err)
+	}
+	if got != "{{.Host}}.internal" {
+		t.Fatalf("resolved host = %q, want %q", got, "{{.Host}}.internal")
+	}
+}
+
+func TestBuildPrecomputesStaticUpstreamHost(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	site := store.Site{
+		Host:         "app.example.test",
+		Bind:         ":80",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		UpstreamHost: "backend.example.com:8443",
+		Enabled:      true,
+	}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	sn, err := Build(db, 1)
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	rt, ok := sn.MatchSite(":80", "app.example.test")
+	if !ok {
+		t.Fatal("site was not matched")
+	}
+	// Build does not precompute UpstreamHostHeader; ResolveOutboundHost
+	// returns the raw Site.UpstreamHost value directly.
+	if rt.Site.UpstreamHost != "backend.example.com:8443" {
+		t.Fatalf("site upstream host = %q, want %q", rt.Site.UpstreamHost, "backend.example.com:8443")
+	}
+	got, err := ResolveOutboundHost(rt, "127.0.0.1:8080", "app.example.test")
+	if err != nil {
+		t.Fatalf("ResolveOutboundHost returned error: %v", err)
+	}
+	if got != "backend.example.com:8443" {
+		t.Fatalf("resolved host = %q, want %q", got, "backend.example.com:8443")
+	}
+}
+
+func BenchmarkResolveOutboundHostStaticPrecomputed(b *testing.B) {
+	rt := SiteRuntime{
+		Site:               store.Site{UpstreamHost: "backend.example.com:8443"},
+		UpstreamHostHeader: "backend.example.com:8443",
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := ResolveOutboundHost(rt, "127.0.0.1:8080", "app.example.test"); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

@@ -3,6 +3,7 @@ package bot
 import (
 	"crypto/md5"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"My-OpenWaf/internal/tlsmeta"
 	utls "github.com/refraction-networking/utls"
 )
 
@@ -27,17 +29,80 @@ type TLSClientFingerprint struct {
 	PointFormats []uint8
 }
 
+const (
+	tlsALPNProtocolH2     = "h2"
+	tlsALPNProtocolHTTP11 = "http/1.1"
+)
+
+var (
+	sharedALPNProtocolsH2       = []string{tlsALPNProtocolH2}
+	sharedALPNProtocolsHTTP11   = []string{tlsALPNProtocolHTTP11}
+	sharedALPNProtocolsH2HTTP11 = []string{tlsALPNProtocolH2, tlsALPNProtocolHTTP11}
+)
+
+func TLSFingerprintFromClientHelloInfo(info *tls.ClientHelloInfo, protocol byte) TLSClientFingerprint {
+	if info == nil {
+		return TLSClientFingerprint{}
+	}
+
+	var out TLSClientFingerprint
+	out.SNI = info.ServerName
+	if len(info.SupportedProtos) > 0 {
+		out.ALPN = append([]string(nil), info.SupportedProtos...)
+	}
+	if len(info.CipherSuites) > 0 {
+		out.CipherSuites = make([]uint16, 0, len(info.CipherSuites))
+		for _, suite := range info.CipherSuites {
+			out.CipherSuites = append(out.CipherSuites, tlsFingerprintValueForRaw(suite))
+		}
+	}
+	if len(info.Extensions) > 0 {
+		out.Extensions = make([]uint16, 0, len(info.Extensions))
+		for _, id := range info.Extensions {
+			out.Extensions = append(out.Extensions, tlsFingerprintValueForRaw(id))
+		}
+	}
+	if len(info.SupportedCurves) > 0 {
+		out.Curves = make([]uint16, 0, len(info.SupportedCurves))
+		for _, curve := range info.SupportedCurves {
+			out.Curves = append(out.Curves, tlsFingerprintValueForRaw(uint16(curve)))
+		}
+	}
+	if len(info.SupportedPoints) > 0 {
+		out.PointFormats = append([]uint8(nil), info.SupportedPoints...)
+	}
+
+	version := highestSupportedVersionFromValues(info.SupportedVersions)
+	out.TLSVersion = tlsVersionString(version)
+	out.JA3 = buildJA3StringWithVersion(version, out.CipherSuites, out.Extensions, out.Curves, out.PointFormats)
+	if out.JA3 != "" {
+		sum := md5SumString(out.JA3)
+		out.JA3Hash = hex.EncodeToString(sum[:])
+	}
+	out.JA4 = buildJA4StringFromClientHelloInfo(protocol, version, out.SNI != "", out.ALPN, out.CipherSuites, out.Extensions, info.SignatureSchemes)
+	return out
+}
+
 func ParseTLSClientHello(record []byte) (TLSClientFingerprint, error) {
 	var out TLSClientFingerprint
 	if len(record) == 0 {
 		return out, nil
 	}
+	hash := tlsFingerprintCacheHash(record)
+	if cached, ok := lookupTLSFingerprintCacheWithHash(record, hash); ok {
+		return cached, nil
+	}
 
 	if out, err := parseTLSClientHelloRaw(record); err == nil {
+		storeTLSFingerprintCacheWithHash(record, hash, out)
 		return out, nil
 	}
 
-	return parseTLSClientHelloWithUTLS(record)
+	out, err := parseTLSClientHelloWithUTLS(record)
+	if err == nil {
+		storeTLSFingerprintCacheWithHash(record, hash, out)
+	}
+	return out, err
 }
 
 func parseTLSClientHelloWithUTLS(record []byte) (TLSClientFingerprint, error) {
@@ -117,9 +182,8 @@ type rawClientHello struct {
 	hasSNI            bool
 	sni               string
 	alpn              []string
-	ja4ExtensionIDs   []uint16
 	ja4ExtensionCount int
-	signatureAlgs     []uint16
+	signatureAlgsData []byte
 }
 
 func parseTLSClientHelloRaw(record []byte) (TLSClientFingerprint, error) {
@@ -217,7 +281,6 @@ func readRawClientHello(record []byte) (rawClientHello, error) {
 	}
 
 	raw.extensions = make([]uint16, 0, 16)
-	raw.ja4ExtensionIDs = make([]uint16, 0, 16)
 	extensionsEnd := pos + extensionsLen
 	for pos < extensionsEnd {
 		if extensionsEnd-pos < 4 {
@@ -242,24 +305,18 @@ func readRawClientHello(record []byte) (rawClientHello, error) {
 			parseRawSNI(extData, &raw)
 		case 10:
 			raw.curves = parseRawUint16Vector(extData, raw.curves)
-			raw.ja4ExtensionIDs = append(raw.ja4ExtensionIDs, id)
 		case 11:
 			raw.pointFormats = parseRawUint8Vector(extData, raw.pointFormats)
-			raw.ja4ExtensionIDs = append(raw.ja4ExtensionIDs, id)
 		case 13:
-			if len(raw.signatureAlgs) == 0 {
-				raw.signatureAlgs = parseRawUint16Vector(extData, raw.signatureAlgs)
+			if len(raw.signatureAlgsData) == 0 {
+				raw.signatureAlgsData = extData
 			}
-			raw.ja4ExtensionIDs = append(raw.ja4ExtensionIDs, id)
 		case 16:
 			parseRawALPN(extData, &raw)
 		case 43:
 			if v := highestRawSupportedVersion(extData); v > raw.highestVersion {
 				raw.highestVersion = v
 			}
-			raw.ja4ExtensionIDs = append(raw.ja4ExtensionIDs, id)
-		default:
-			raw.ja4ExtensionIDs = append(raw.ja4ExtensionIDs, id)
 		}
 	}
 	return raw, nil
@@ -295,23 +352,85 @@ func parseRawALPN(data []byte, raw *rawClientHello) {
 	if len(data) < 2 {
 		return
 	}
+	if len(raw.alpn) == 0 {
+		if protocols := sharedALPNProtocols(data); protocols != nil {
+			raw.alpn = protocols
+			return
+		}
+	}
 	listLen := int(data[0])<<8 | int(data[1])
 	pos := 2
 	end := pos + listLen
 	if listLen <= 0 || len(data) < end {
 		return
 	}
+
+	count := 0
+	scan := pos
+	for scan < end {
+		nameLen := int(data[scan])
+		scan++
+		if nameLen == 0 || scan+nameLen > end {
+			return
+		}
+		scan += nameLen
+		count++
+	}
+
 	protocols := raw.alpn
+	if count > 0 && cap(protocols)-len(protocols) < count {
+		next := make([]string, len(protocols), len(protocols)+count)
+		copy(next, protocols)
+		protocols = next
+	}
 	for pos < end {
 		nameLen := int(data[pos])
 		pos++
 		if nameLen == 0 || pos+nameLen > end {
 			return
 		}
-		protocols = append(protocols, string(data[pos:pos+nameLen]))
+		protocols = append(protocols, alpnProtocolString(data[pos:pos+nameLen]))
 		pos += nameLen
 	}
 	raw.alpn = protocols
+}
+
+func sharedALPNProtocols(data []byte) []string {
+	switch len(data) {
+	case 5:
+		if data[0] == 0x00 && data[1] == 0x03 && data[2] == 0x02 && data[3] == 'h' && data[4] == '2' {
+			return sharedALPNProtocolsH2
+		}
+	case 11:
+		if data[0] == 0x00 && data[1] == 0x09 && data[2] == 0x08 &&
+			data[3] == 'h' && data[4] == 't' && data[5] == 't' && data[6] == 'p' &&
+			data[7] == '/' && data[8] == '1' && data[9] == '.' && data[10] == '1' {
+			return sharedALPNProtocolsHTTP11
+		}
+	case 14:
+		if data[0] == 0x00 && data[1] == 0x0c && data[2] == 0x02 &&
+			data[3] == 'h' && data[4] == '2' && data[5] == 0x08 &&
+			data[6] == 'h' && data[7] == 't' && data[8] == 't' && data[9] == 'p' &&
+			data[10] == '/' && data[11] == '1' && data[12] == '.' && data[13] == '1' {
+			return sharedALPNProtocolsH2HTTP11
+		}
+	}
+	return nil
+}
+
+func alpnProtocolString(data []byte) string {
+	switch len(data) {
+	case 2:
+		if data[0] == 'h' && data[1] == '2' {
+			return tlsALPNProtocolH2
+		}
+	case 8:
+		if data[0] == 'h' && data[1] == 't' && data[2] == 't' && data[3] == 'p' &&
+			data[4] == '/' && data[5] == '1' && data[6] == '.' && data[7] == '1' {
+			return tlsALPNProtocolHTTP11
+		}
+	}
+	return string(data)
 }
 
 func parseRawUint16Vector(data []byte, out []uint16) []uint16 {
@@ -321,6 +440,12 @@ func parseRawUint16Vector(data []byte, out []uint16) []uint16 {
 	listLen := int(data[0])<<8 | int(data[1])
 	if listLen <= 0 || listLen%2 != 0 || len(data) < 2+listLen {
 		return out
+	}
+	need := listLen / 2
+	if cap(out)-len(out) < need {
+		next := make([]uint16, len(out), len(out)+need)
+		copy(next, out)
+		out = next
 	}
 	pos := 2
 	for end := pos + listLen; pos < end; pos += 2 {
@@ -348,6 +473,11 @@ func parseRawUint8Vector(data []byte, out []uint8) []uint8 {
 	if listLen <= 0 || len(data) < 1+listLen {
 		return out
 	}
+	if cap(out)-len(out) < listLen {
+		next := make([]uint8, len(out), len(out)+listLen)
+		copy(next, out)
+		out = next
+	}
 	return append(out, data[1:1+listLen]...)
 }
 
@@ -369,35 +499,81 @@ func highestRawSupportedVersion(data []byte) uint16 {
 	return max
 }
 
-func buildJA4StringRaw(raw *rawClientHello, version uint16) string {
-	var b strings.Builder
-	b.Grow(40)
-	b.WriteByte('t')
-	writeJA4TLSVersionValue(&b, version)
-	if raw.hasSNI {
-		b.WriteByte('d')
-	} else {
-		b.WriteByte('i')
+func highestSupportedVersionFromValues(versions []uint16) uint16 {
+	var max uint16
+	for _, version := range versions {
+		if !isGREASE(version) && version > max {
+			max = version
+		}
 	}
-	writeTwoDigit(&b, countJA4CipherSuites(raw.cipherSuites))
-	writeTwoDigit(&b, raw.ja4ExtensionCount)
-	b.WriteString(ja4FirstALPNStrings(raw.alpn))
-	ja4a := b.String()
+	return max
+}
 
+func buildJA4StringRaw(raw *rawClientHello, version uint16) string {
 	var cipherScratch [64]uint16
 	cipherSuites := ja4CipherSuites(raw.cipherSuites, cipherScratch[:0])
 	var extensionScratch [64]uint16
-	extensions := append(extensionScratch[:0], raw.ja4ExtensionIDs...)
+	extensions := ja4RawExtensions(raw.extensions, extensionScratch[:0])
 	sortUint16s(extensions)
+	var signatureAlgorithmScratch [32]uint16
+	signatureAlgorithms := parseRawUint16Vector(raw.signatureAlgsData, signatureAlgorithmScratch[:0])
 
-	b.Reset()
-	b.Grow(len(ja4a) + 26)
-	b.WriteString(ja4a)
-	b.WriteByte('_')
-	writeTruncatedSHA256Hex(&b, cipherSuites, nil)
-	b.WriteByte('_')
-	writeTruncatedSHA256Hex(&b, extensions, raw.signatureAlgs)
-	return b.String()
+	var stack [96]byte
+	out := stack[:0]
+	out = append(out, 't')
+	out = appendJA4TLSVersionValue(out, version)
+	if raw.hasSNI {
+		out = append(out, 'd')
+	} else {
+		out = append(out, 'i')
+	}
+	out = appendTwoDigit(out, countJA4CipherSuites(raw.cipherSuites))
+	out = appendTwoDigit(out, raw.ja4ExtensionCount)
+	out = appendJA4FirstALPNStrings(out, raw.alpn)
+	out = append(out, '_')
+	out = appendTruncatedSHA256Hex(out, cipherSuites, nil)
+	out = append(out, '_')
+	out = appendTruncatedSHA256Hex(out, extensions, signatureAlgorithms)
+	return string(out)
+}
+
+func buildJA4StringFromClientHelloInfo(protocol byte, version uint16, hasSNI bool, alpn []string, cipherSuites []uint16, extensions []uint16, signatureSchemes []tls.SignatureScheme) string {
+	var cipherScratch [64]uint16
+	ja4CipherList := ja4CipherSuites(cipherSuites, cipherScratch[:0])
+	var extensionScratch [64]uint16
+	ja4ExtensionList := ja4ClientHelloInfoExtensions(extensions, extensionScratch[:0])
+	sortUint16s(ja4ExtensionList)
+	var signatureAlgorithmScratch [32]uint16
+	ja4SignatureAlgorithms := ja4ClientHelloInfoSignatureAlgorithms(signatureSchemes, signatureAlgorithmScratch[:0])
+
+	var stack [96]byte
+	out := stack[:0]
+	out = append(out, protocol)
+	out = appendJA4TLSVersionValue(out, version)
+	if hasSNI {
+		out = append(out, 'd')
+	} else {
+		out = append(out, 'i')
+	}
+	out = appendTwoDigit(out, countJA4CipherSuites(cipherSuites))
+	out = appendTwoDigit(out, countJA4ClientHelloInfoExtensions(extensions))
+	out = appendJA4FirstALPNStrings(out, alpn)
+	out = append(out, '_')
+	out = appendTruncatedSHA256Hex(out, ja4CipherList, nil)
+	out = append(out, '_')
+	out = appendTruncatedSHA256Hex(out, ja4ExtensionList, ja4SignatureAlgorithms)
+	return string(out)
+}
+
+func ja4RawExtensions(ids []uint16, out []uint16) []uint16 {
+	out = out[:0]
+	for _, id := range ids {
+		if id == 0 || id == 16 {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 func buildJA3String(spec *utls.ClientHelloSpec, extensions []uint16, curves []uint16, pointFormats []uint8) string {
@@ -432,34 +608,6 @@ func md5SumString(s string) [16]byte {
 	return md5.Sum(unsafe.Slice(unsafe.StringData(s), len(s)))
 }
 
-func writeUint(b *strings.Builder, v uint64) {
-	var buf [20]byte
-	b.Write(strconv.AppendUint(buf[:0], v, 10))
-}
-
-func writeUint16s(b *strings.Builder, vals []uint16, skipGREASE bool) {
-	wrote := false
-	for _, v := range vals {
-		if skipGREASE && isGREASE(v) {
-			continue
-		}
-		if wrote {
-			b.WriteByte('-')
-		}
-		writeUint(b, uint64(v))
-		wrote = true
-	}
-}
-
-func writeUint8s(b *strings.Builder, vals []uint8) {
-	for i, v := range vals {
-		if i > 0 {
-			b.WriteByte('-')
-		}
-		writeUint(b, uint64(v))
-	}
-}
-
 func appendJA3Uint(out []byte, v uint64) []byte {
 	return strconv.AppendUint(out, v, 10)
 }
@@ -490,16 +638,6 @@ func appendJA3Uint8s(out []byte, vals []uint8) []byte {
 }
 
 func buildJA4String(spec *utls.ClientHelloSpec, protocol byte) (string, error) {
-	var b strings.Builder
-	b.Grow(40)
-	b.WriteByte(protocol)
-	writeJA4TLSVersion(&b, spec)
-	b.WriteByte(ja4SNI(spec))
-	writeTwoDigit(&b, countJA4CipherSuites(spec.CipherSuites))
-	writeTwoDigit(&b, countJA4Extensions(spec.Extensions))
-	b.WriteString(ja4FirstALPN(spec.Extensions))
-	ja4a := b.String()
-
 	var cipherScratch [64]uint16
 	cipherSuites := ja4CipherSuites(spec.CipherSuites, cipherScratch[:0])
 	var extensionScratch [64]uint16
@@ -510,36 +648,41 @@ func buildJA4String(spec *utls.ClientHelloSpec, protocol byte) (string, error) {
 	var signatureAlgorithmScratch [32]uint16
 	signatureAlgorithms := ja4SignatureAlgorithms(spec.Extensions, signatureAlgorithmScratch[:0])
 
-	b.Reset()
-	b.Grow(len(ja4a) + 26)
-	b.WriteString(ja4a)
-	b.WriteByte('_')
-	writeTruncatedSHA256Hex(&b, cipherSuites, nil)
-	b.WriteByte('_')
-	writeTruncatedSHA256Hex(&b, extensions, signatureAlgorithms)
-	return b.String(), nil
+	var stack [96]byte
+	out := stack[:0]
+	out = append(out, protocol)
+	out = appendJA4TLSVersion(out, spec)
+	out = append(out, ja4SNI(spec))
+	out = appendTwoDigit(out, countJA4CipherSuites(spec.CipherSuites))
+	out = appendTwoDigit(out, countJA4Extensions(spec.Extensions))
+	out = appendJA4FirstALPN(out, spec.Extensions)
+	out = append(out, '_')
+	out = appendTruncatedSHA256Hex(out, cipherSuites, nil)
+	out = append(out, '_')
+	out = appendTruncatedSHA256Hex(out, extensions, signatureAlgorithms)
+	return string(out), nil
 }
 
-func writeJA4TLSVersion(b *strings.Builder, spec *utls.ClientHelloSpec) {
+func appendJA4TLSVersion(dst []byte, spec *utls.ClientHelloSpec) []byte {
 	version := spec.TLSVersMax
 	if version == 0 {
 		version = highestSupportedVersion(spec.Extensions)
 	}
-	writeJA4TLSVersionValue(b, version)
+	return appendJA4TLSVersionValue(dst, version)
 }
 
-func writeJA4TLSVersionValue(b *strings.Builder, version uint16) {
+func appendJA4TLSVersionValue(dst []byte, version uint16) []byte {
 	switch version {
 	case utls.VersionTLS10:
-		b.WriteString("10")
+		return append(dst, '1', '0')
 	case utls.VersionTLS11:
-		b.WriteString("11")
+		return append(dst, '1', '1')
 	case utls.VersionTLS12:
-		b.WriteString("12")
+		return append(dst, '1', '2')
 	case utls.VersionTLS13:
-		b.WriteString("13")
+		return append(dst, '1', '3')
 	default:
-		b.WriteString("00")
+		return append(dst, '0', '0')
 	}
 }
 
@@ -573,42 +716,52 @@ func countJA4Extensions(exts []utls.TLSExtension) int {
 	return count
 }
 
-func writeTwoDigit(b *strings.Builder, n int) {
+func countJA4ClientHelloInfoExtensions(extensions []uint16) int {
+	count := 0
+	for _, extension := range extensions {
+		if !isGREASE(extension) {
+			count++
+		}
+	}
+	return count
+}
+
+func appendTwoDigit(dst []byte, n int) []byte {
 	if n > 99 {
 		n = 99
 	}
 	if n < 10 {
-		b.WriteByte('0')
+		dst = append(dst, '0')
 	}
-	writeUint(b, uint64(n))
+	return strconv.AppendUint(dst, uint64(n), 10)
 }
 
-func ja4FirstALPN(exts []utls.TLSExtension) string {
+func appendJA4FirstALPN(dst []byte, exts []utls.TLSExtension) []byte {
 	for _, ext := range exts {
 		alpnExt, ok := ext.(*utls.ALPNExtension)
 		if !ok || len(alpnExt.AlpnProtocols) == 0 {
 			continue
 		}
-		return ja4FirstALPNStrings(alpnExt.AlpnProtocols)
+		return appendJA4FirstALPNStrings(dst, alpnExt.AlpnProtocols)
 	}
-	return "00"
+	return append(dst, '0', '0')
 }
 
-func ja4FirstALPNStrings(protocols []string) string {
+func appendJA4FirstALPNStrings(dst []byte, protocols []string) []byte {
 	if len(protocols) == 0 {
-		return "00"
+		return append(dst, '0', '0')
 	}
 	alpn := protocols[0]
 	if alpn == "" {
-		return "00"
-	}
-	if len(alpn) > 2 {
-		alpn = string(alpn[0]) + string(alpn[len(alpn)-1])
+		return append(dst, '0', '0')
 	}
 	if alpn[0] > 127 {
-		return "99"
+		return append(dst, '9', '9')
 	}
-	return alpn
+	if len(alpn) > 2 {
+		return append(dst, alpn[0], alpn[len(alpn)-1])
+	}
+	return append(dst, alpn...)
 }
 
 func ja4CipherSuites(cipherSuites []uint16, out []uint16) []uint16 {
@@ -619,6 +772,17 @@ func ja4CipherSuites(cipherSuites []uint16, out []uint16) []uint16 {
 		}
 	}
 	sortUint16s(out)
+	return out
+}
+
+func ja4ClientHelloInfoExtensions(ids []uint16, out []uint16) []uint16 {
+	out = out[:0]
+	for _, id := range ids {
+		if isGREASE(id) || id == 0 || id == 16 {
+			continue
+		}
+		out = append(out, id)
+	}
 	return out
 }
 
@@ -654,6 +818,14 @@ func ja4Extensions(exts []utls.TLSExtension, out []uint16) ([]uint16, error) {
 	}
 	sortUint16s(out)
 	return out, nil
+}
+
+func ja4ClientHelloInfoSignatureAlgorithms(schemes []tls.SignatureScheme, out []uint16) []uint16 {
+	out = out[:0]
+	for _, scheme := range schemes {
+		out = append(out, uint16(scheme))
+	}
+	return out
 }
 
 func ja4ExtensionID(ext utls.TLSExtension) (uint16, error) {
@@ -723,7 +895,7 @@ func ja4SignatureAlgorithms(exts []utls.TLSExtension, out []uint16) []uint16 {
 	return nil
 }
 
-func writeTruncatedSHA256Hex(b *strings.Builder, first []uint16, second []uint16) {
+func appendTruncatedSHA256Hex(dst []byte, first []uint16, second []uint16) []byte {
 	inputLen := ja4Uint16sHexLen(first)
 	if len(second) > 0 {
 		inputLen += 1 + ja4Uint16sHexLen(second)
@@ -743,9 +915,9 @@ func writeTruncatedSHA256Hex(b *strings.Builder, first []uint16, second []uint16
 	sum := sha256.Sum256(input)
 	const hexChars = "0123456789abcdef"
 	for i := 0; i < 6; i++ {
-		b.WriteByte(hexChars[sum[i]>>4])
-		b.WriteByte(hexChars[sum[i]&0x0f])
+		dst = append(dst, hexChars[sum[i]>>4], hexChars[sum[i]&0x0f])
 	}
+	return dst
 }
 
 func ja4Uint16sHexLen(vals []uint16) int {
@@ -793,53 +965,12 @@ func extensionID(ext utls.TLSExtension) uint16 {
 	return id
 }
 
-func filterGREASE(in []uint16) []uint16 {
-	out := make([]uint16, 0, len(in))
-	for _, v := range in {
-		if !isGREASE(v) {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
 func isGREASE(v uint16) bool {
 	return v&0x0f0f == 0x0a0a && byte(v>>8) == byte(v)
 }
 
-func joinUint16s(vals []uint16) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(vals) * 6)
-	writeUint16s(&b, vals, false)
-	return b.String()
-}
-
-func joinUint8s(vals []uint8) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(vals) * 4)
-	writeUint8s(&b, vals)
-	return b.String()
-}
-
 func tlsVersionString(v uint16) string {
-	switch v {
-	case 0x0301:
-		return "TLS10"
-	case 0x0302:
-		return "TLS11"
-	case 0x0303:
-		return "TLS12"
-	case 0x0304:
-		return "TLS13"
-	default:
-		return ""
-	}
+	return tlsmeta.CanonicalVersionName(v)
 }
 
 func headerOrderScore(r BotRequest) (int, []string) {

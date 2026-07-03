@@ -2,10 +2,12 @@ package site
 
 import (
 	"context"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
+	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
@@ -74,6 +76,10 @@ func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 		if item.Network == "" {
 			item.Network = "tcp"
 		}
+		if err := validateListenerNetwork(&item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if item.Bind == "" {
 			c.JSON(400, map[string]string{"error": "bind is required"})
 			return
@@ -139,6 +145,13 @@ func UpdateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 		}
 		existing.ID = listenerID
 		existing.SiteID = siteID
+		if existing.Network == "" {
+			existing.Network = "tcp"
+		}
+		if err := validateListenerNetwork(existing); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := shared.ValidateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -153,6 +166,16 @@ func UpdateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 		}
 		c.JSON(200, existing)
 	}
+}
+
+func validateListenerNetwork(item *store.SiteListener) error {
+	raw := strings.TrimSpace(item.Network)
+	normalized := snapshotpkg.NormalizeNetwork(raw)
+	if normalized == "" {
+		return errInvalidSiteNetwork
+	}
+	item.Network = normalized
+	return nil
 }
 
 func DeleteSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteListenerRepo, reload func() error) app.HandlerFunc {

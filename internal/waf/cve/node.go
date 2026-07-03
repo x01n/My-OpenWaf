@@ -117,18 +117,11 @@ var (
 	reRSCPromiseExec      = regexp.MustCompile(`(?i)\.then\s*\(.*(?:eval|Function|require)\s*\(`)
 	reRSCDynamicImport    = regexp.MustCompile(`(?i)import\s*\(\s*['"](?:child_process|fs|net|http|os)['"]`)
 
-	// Next.js App Router RCE (CVE-2025-66478)
-	reNextAction = regexp.MustCompile(`(?i)^Next-Action:\s*.+`)
-
 	// Next.js middleware bypass (CVE-2025-29927)
 	reNextMiddlewareBypass = regexp.MustCompile(`(?i)x-middleware-subrequest:\s*middleware`)
 
 	// Next.js Server Actions path confusion (CVE-2025-55184)
 	reNextServerAction = regexp.MustCompile(`(?i)/_next/data/.*\.json\?.*__nextDataReq`)
-
-	// Deno/Bun runtime code injection
-	reDenoEval = regexp.MustCompile(`(?i)Deno\.(run|command)\s*\(`)
-	reBunShell = regexp.MustCompile(`(?i)Bun\.spawn\s*\(`)
 )
 
 // NewNodeCVEDetector creates a Node.js CVE detector with built-in rules.

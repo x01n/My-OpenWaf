@@ -25,102 +25,111 @@ import (
 
 // MatchCtx is the subset of request data matchers need.
 type MatchCtx struct {
-	ClientIP net.IP
-	Method   string
-	Path     string
-	Query    string
-	Headers  map[string]string
-	Host     string
-	Body     []byte
+	ClientIP         net.IP
+	Method           string
+	Path             string
+	Query            string
+	Headers          map[string]string
+	HeadersLowercase bool
+	Host             string
+	HeaderOrder      string
+	TLSALPN          string
+	TLSCipherSuites  string
+	TLS              *bot.TLSClientFingerprint
+	Body             []byte
 }
 
-func ctxFromPipeline(ctx *pipeline.RequestCtx) MatchCtx {
-	headers := ctx.Headers
-	if ctx.Host != "" || ctx.TLS.JA3 != "" || ctx.TLS.JA3Hash != "" || ctx.TLS.JA4 != "" || ctx.TLS.TLSVersion != "" || ctx.TLS.SNI != "" || len(ctx.TLS.ALPN) > 0 || len(ctx.HeaderKeys) > 0 {
-		headers = make(map[string]string, len(ctx.Headers)+9)
-		for k, v := range ctx.Headers {
-			headers[k] = v
-		}
-		if ctx.Host != "" {
-			headers["Host"] = ctx.Host
-			headers["host"] = ctx.Host
-		}
-		if ctx.TLS.JA3 != "" {
-			headers["X-OWAF-TLS-JA3"] = ctx.TLS.JA3
-			headers["x-owaf-tls-ja3"] = ctx.TLS.JA3
-		}
-		if ctx.TLS.JA3Hash != "" {
-			headers["X-OWAF-TLS-JA3-Hash"] = ctx.TLS.JA3Hash
-			headers["x-owaf-tls-ja3-hash"] = ctx.TLS.JA3Hash
-		}
-		if ctx.TLS.JA4 != "" {
-			headers["X-OWAF-TLS-JA4"] = ctx.TLS.JA4
-			headers["x-owaf-tls-ja4"] = ctx.TLS.JA4
-		}
-		if ctx.TLS.TLSVersion != "" {
-			headers["X-OWAF-TLS-Version"] = ctx.TLS.TLSVersion
-			headers["x-owaf-tls-version"] = ctx.TLS.TLSVersion
-		}
-		if ctx.TLS.SNI != "" {
-			headers["X-OWAF-TLS-SNI"] = ctx.TLS.SNI
-			headers["x-owaf-tls-sni"] = ctx.TLS.SNI
-		}
+func fillMatchCtxFromPipeline(ctx *pipeline.RequestCtx, needsDerivedHeaders bool, mc *MatchCtx) {
+	mc.ClientIP = ctx.ClientIP
+	mc.Method = ctx.Method
+	mc.Path = ctx.Path
+	mc.Query = ctx.RawQuery
+	mc.Headers = ctx.Headers
+	mc.HeadersLowercase = ctx.HeadersLowercase
+	mc.Host = ctx.Host
+	mc.TLS = &ctx.TLS
+	mc.Body = ctx.Body
+	if needsDerivedHeaders {
 		if len(ctx.TLS.ALPN) > 0 {
-			alpn := strings.Join(ctx.TLS.ALPN, ",")
-			headers["X-OWAF-TLS-ALPN"] = alpn
-			headers["x-owaf-tls-alpn"] = alpn
+			mc.TLSALPN = strings.Join(ctx.TLS.ALPN, ",")
+		}
+		if len(ctx.TLS.CipherSuites) > 0 {
+			mc.TLSCipherSuites = formatTLSCipherSuitesHeaderValue(ctx.TLS.CipherSuites)
 		}
 		if len(ctx.HeaderKeys) > 0 {
-			order := strings.Join(ctx.HeaderKeys, ",")
-			headers["X-OWAF-Header-Order"] = order
-			headers["x-owaf-header-order"] = order
+			mc.HeaderOrder = strings.Join(ctx.HeaderKeys, ",")
 		}
 	}
-	return MatchCtx{
-		ClientIP: ctx.ClientIP, Path: ctx.Path, Query: ctx.RawQuery,
-		Headers: headers, Method: ctx.Method, Host: ctx.Host, Body: ctx.Body,
+}
+
+func ctxFromPipeline(ctx *pipeline.RequestCtx, needsDerivedHeaders bool) MatchCtx {
+	var mc MatchCtx
+	fillMatchCtxFromPipeline(ctx, needsDerivedHeaders, &mc)
+	return mc
+}
+
+func executeCompiledPhase(ctx *pipeline.RequestCtx, rules []Compiled, allowShortCircuit bool, needsDerivedHeaders bool) (action.Result, bool) {
+	if len(rules) == 0 {
+		return action.Pass(), false
 	}
+
+	var mc MatchCtx
+	fillMatchCtxFromPipeline(ctx, needsDerivedHeaders, &mc)
+
+	for i := range rules {
+		if !rules[i].Match(mc) {
+			continue
+		}
+		r := hit(rules[i])
+		if allowShortCircuit && r.Type == action.Allow {
+			return r, true
+		}
+		return r, r.IsTerminal()
+	}
+
+	return action.Pass(), false
 }
 
 // ── ACL phase ──
 
-type aclPhase struct{ rules []Compiled }
+type aclPhase struct {
+	rules               []Compiled
+	needsDerivedHeaders bool
+}
 
-func NewACLPhase(rules []Compiled) pipeline.Phase { return &aclPhase{rules: filterPhase(rules, "acl")} }
+func NewACLPhase(rules []Compiled) pipeline.Phase {
+	filtered := filterPhase(rules, "acl")
+	return &aclPhase{rules: filtered, needsDerivedHeaders: compiledRulesNeedDerivedHeaders(filtered)}
+}
 
 // NewACLPhasePrecompiled creates an ACL phase from already-partitioned rules (no filtering needed).
-func NewACLPhasePrecompiled(rules []Compiled) pipeline.Phase { return &aclPhase{rules: rules} }
+func NewACLPhasePrecompiled(rules []Compiled) pipeline.Phase {
+	return &aclPhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
+}
 
 func (p *aclPhase) Name() string { return "acl" }
 
 func (p *aclPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	mc := ctxFromPipeline(ctx)
-	for i := range p.rules {
-		if p.rules[i].Match(mc) {
-			r := hit(p.rules[i])
-			if action.Normalize(r.Type) == action.Allow {
-				return r, true // allow = short-circuit, skip remaining phases
-			}
-			return r, r.IsTerminal()
-		}
-	}
-	return action.Pass(), false
+	return executeCompiledPhase(ctx, p.rules, true, p.needsDerivedHeaders)
 }
 
 // ── ACL allow precheck phase ──
 
-type aclAllowPrecheckPhase struct{ rules []Compiled }
+type aclAllowPrecheckPhase struct {
+	rules               []Compiled
+	needsDerivedHeaders bool
+}
 
 func NewACLAllowPrecheckPhasePrecompiled(rules []Compiled) pipeline.Phase {
-	return &aclAllowPrecheckPhase{rules: rules}
+	return &aclAllowPrecheckPhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
 }
 
 func (p *aclAllowPrecheckPhase) Name() string { return "acl_allow_precheck" }
 
 func (p *aclAllowPrecheckPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	mc := ctxFromPipeline(ctx)
+	mc := ctxFromPipeline(ctx, p.needsDerivedHeaders)
 	for i := range p.rules {
-		if action.Normalize(p.rules[i].Action) != action.Allow {
+		if p.rules[i].runtimeAction != action.Allow {
 			continue
 		}
 		if p.rules[i].Match(mc) {
@@ -132,54 +141,159 @@ func (p *aclAllowPrecheckPhase) Execute(ctx *pipeline.RequestCtx) (action.Result
 
 // ── Signature phase ──
 
-type signaturePhase struct{ rules []Compiled }
+type signaturePhase struct {
+	rules               []Compiled
+	needsDerivedHeaders bool
+}
 
 func NewSignaturePhase(rules []Compiled) pipeline.Phase {
-	return &signaturePhase{rules: filterPhase(rules, "signature")}
+	filtered := filterPhase(rules, "signature")
+	return &signaturePhase{rules: filtered, needsDerivedHeaders: compiledRulesNeedDerivedHeaders(filtered)}
 }
 
 // NewSignaturePhasePrecompiled creates a signature phase from already-partitioned rules.
 func NewSignaturePhasePrecompiled(rules []Compiled) pipeline.Phase {
-	return &signaturePhase{rules: rules}
+	return &signaturePhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
 }
 
 func (p *signaturePhase) Name() string { return "signature" }
 
 func (p *signaturePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	mc := ctxFromPipeline(ctx)
-	for i := range p.rules {
-		if p.rules[i].Match(mc) {
-			r := hit(p.rules[i])
-			return r, r.IsTerminal()
-		}
-	}
-	return action.Pass(), false
+	return executeCompiledPhase(ctx, p.rules, false, p.needsDerivedHeaders)
 }
 
 // ── Custom phase ──
 
-type customPhase struct{ rules []Compiled }
+type customPhase struct {
+	rules               []Compiled
+	needsDerivedHeaders bool
+}
 
 func NewCustomPhase(rules []Compiled) pipeline.Phase {
-	return &customPhase{rules: filterPhase(rules, "custom")}
+	filtered := filterPhase(rules, "custom")
+	return &customPhase{rules: filtered, needsDerivedHeaders: compiledRulesNeedDerivedHeaders(filtered)}
 }
 
 // NewCustomPhasePrecompiled creates a custom phase from already-partitioned rules.
 func NewCustomPhasePrecompiled(rules []Compiled) pipeline.Phase {
-	return &customPhase{rules: rules}
+	return &customPhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
 }
 
 func (p *customPhase) Name() string { return "custom" }
 
 func (p *customPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	mc := ctxFromPipeline(ctx)
-	for i := range p.rules {
-		if p.rules[i].Match(mc) {
-			r := hit(p.rules[i])
-			return r, r.IsTerminal()
+	return executeCustomPhase(ctx, p.rules, p.needsDerivedHeaders)
+}
+
+func executeCustomPhase(ctx *pipeline.RequestCtx, rules []Compiled, needsDerivedHeaders bool) (action.Result, bool) {
+	if len(rules) == 0 {
+		return action.Pass(), false
+	}
+
+	var mc MatchCtx
+	fillMatchCtxFromPipeline(ctx, needsDerivedHeaders, &mc)
+	var observeHits []action.Result
+
+	for i := range rules {
+		if !rules[i].Match(mc) {
+			continue
+		}
+		r := hit(rules[i])
+		if r.ShouldLog() && !r.IsTerminal() {
+			observeHits = append(observeHits, r)
+			continue
+		}
+		if len(observeHits) > 0 {
+			ctx.AppendPhaseObserveHits(observeHits)
+		}
+		return r, r.IsTerminal()
+	}
+
+	if len(observeHits) == 0 {
+		return action.Pass(), false
+	}
+	if len(observeHits) > 1 {
+		ctx.AppendPhaseObserveHits(observeHits[1:])
+	}
+	return observeHits[0], false
+}
+
+func compiledRulesNeedDerivedHeaders(rules []Compiled) bool {
+	for i := range rules {
+		if ruleNeedsDerivedHeaders(rules[i].Kind, rules[i].Arg) {
+			return true
 		}
 	}
-	return action.Pass(), false
+	return false
+}
+
+func ruleNeedsDerivedHeaders(kind string, arg string) bool {
+	switch kind {
+	case "tls_alpn",
+		"tls_cipher_suite",
+		"tls_cipher_suites",
+		"header_order_contains",
+		"header_order_regex":
+		return true
+	case "compound":
+		return compoundNeedsDerivedHeaders(arg)
+	default:
+		return false
+	}
+}
+
+func compoundNeedsDerivedHeaders(raw string) bool {
+	var cond compoundCondition
+	if err := json.Unmarshal([]byte(raw), &cond); err != nil {
+		return false
+	}
+	return compoundConditionNeedsDerivedHeaders(cond)
+}
+
+func compoundConditionNeedsDerivedHeaders(cond compoundCondition) bool {
+	op := strings.ToLower(strings.TrimSpace(cond.Op))
+	switch op {
+	case "and", "or":
+		for i := range cond.Children {
+			if compoundConditionNeedsDerivedHeaders(cond.Children[i]) {
+				return true
+			}
+		}
+		return false
+	case "not", "cc_rate":
+		if len(cond.Children) == 0 {
+			return false
+		}
+		return compoundConditionNeedsDerivedHeaders(cond.Children[0])
+	case "if", "if_else", "ifelse":
+		if cond.If != nil && compoundConditionNeedsDerivedHeaders(*cond.If) {
+			return true
+		}
+		if cond.Then != nil && compoundConditionNeedsDerivedHeaders(*cond.Then) {
+			return true
+		}
+		if cond.Else != nil && compoundConditionNeedsDerivedHeaders(*cond.Else) {
+			return true
+		}
+		return false
+	default:
+		if cond.If != nil && cond.Then != nil {
+			if compoundConditionNeedsDerivedHeaders(*cond.If) {
+				return true
+			}
+			if compoundConditionNeedsDerivedHeaders(*cond.Then) {
+				return true
+			}
+			if cond.Else != nil && compoundConditionNeedsDerivedHeaders(*cond.Else) {
+				return true
+			}
+			return false
+		}
+		if cond.Kind == "" {
+			return false
+		}
+		return ruleNeedsDerivedHeaders(cond.Kind, cond.Arg)
+	}
 }
 
 // ── Request Rate Limit phase ──
@@ -294,7 +408,7 @@ func (p *botPhase) Name() string { return "bot_detection" }
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// Skip challenge for requests that already passed a signed verification cookie.
-	if cookie, ok := ctx.Headers["Cookie"]; ok && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: ctx.UserAgent, SiteID: ctx.SiteID, Bind: ctx.Bind}, time.Now()) {
+	if cookie, ok := lookupHeaderValue(ctx.Headers, "cookie"); ok && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: ctx.UserAgent, SiteID: ctx.SiteID, Bind: ctx.Bind}, time.Now()) {
 		return action.Pass(), false
 	}
 
@@ -653,36 +767,36 @@ func shouldScanOpaqueBodyTarget(body []byte) bool {
 			return true
 		}
 	}
-	lower := strings.ToLower(string(body))
-	return strings.Contains(lower, "%0d") ||
-		strings.Contains(lower, "%0a") ||
-		strings.Contains(lower, "%3c") ||
-		strings.Contains(lower, "%3e") ||
-		strings.Contains(lower, "%27") ||
-		strings.Contains(lower, "%22") ||
-		strings.Contains(lower, "javascript:") ||
-		strings.Contains(lower, "vbscript:") ||
-		strings.Contains(lower, "document.") ||
-		strings.Contains(lower, "onerror") ||
-		strings.Contains(lower, "onload") ||
-		strings.Contains(lower, "onmouse") ||
-		strings.Contains(lower, "onfocus") ||
-		strings.Contains(lower, "alert(") ||
-		strings.Contains(lower, " union ") ||
-		strings.Contains(lower, " select ") ||
-		strings.Contains(lower, " or ") ||
-		strings.Contains(lower, " and ") ||
-		strings.Contains(lower, "sleep(") ||
-		strings.Contains(lower, "benchmark(") ||
-		strings.Contains(lower, "../") ||
-		strings.Contains(lower, "127.0.") ||
-		strings.Contains(lower, "localhost") ||
-		strings.Contains(lower, "169.254.169.254") ||
-		strings.Contains(lower, "metadata.google") ||
-		strings.Contains(lower, "aced0005") ||
-		strings.Contains(lower, "ro0ab") ||
-		strings.Contains(lower, "objectinputstream") ||
-		strings.Contains(lower, "deserializ")
+	s := string(body)
+	return containsFoldASCII(s, "%0d") ||
+		containsFoldASCII(s, "%0a") ||
+		containsFoldASCII(s, "%3c") ||
+		containsFoldASCII(s, "%3e") ||
+		containsFoldASCII(s, "%27") ||
+		containsFoldASCII(s, "%22") ||
+		containsFoldASCII(s, "javascript:") ||
+		containsFoldASCII(s, "vbscript:") ||
+		containsFoldASCII(s, "document.") ||
+		containsFoldASCII(s, "onerror") ||
+		containsFoldASCII(s, "onload") ||
+		containsFoldASCII(s, "onmouse") ||
+		containsFoldASCII(s, "onfocus") ||
+		containsFoldASCII(s, "alert(") ||
+		containsFoldASCII(s, " union ") ||
+		containsFoldASCII(s, " select ") ||
+		containsFoldASCII(s, " or ") ||
+		containsFoldASCII(s, " and ") ||
+		containsFoldASCII(s, "sleep(") ||
+		containsFoldASCII(s, "benchmark(") ||
+		containsFoldASCII(s, "../") ||
+		containsFoldASCII(s, "127.0.") ||
+		containsFoldASCII(s, "localhost") ||
+		containsFoldASCII(s, "169.254.169.254") ||
+		containsFoldASCII(s, "metadata.google") ||
+		containsFoldASCII(s, "aced0005") ||
+		containsFoldASCII(s, "ro0ab") ||
+		containsFoldASCII(s, "objectinputstream") ||
+		containsFoldASCII(s, "deserializ")
 }
 
 // extractBodyTargets parses the request body based on content type and returns
@@ -693,23 +807,23 @@ func extractBodyTargets(body []byte, contentType string) []string {
 	if len(body) == 0 {
 		return nil
 	}
-	ct := strings.ToLower(contentType)
+	ct := contentType
 
 	var primary []string
 	parsedOK := false
 	skipRawFallback := false
 
 	switch {
-	case strings.Contains(ct, "application/x-www-form-urlencoded"):
+	case containsFoldASCII(ct, "application/x-www-form-urlencoded"):
 		primary = extractFormValues(string(body))
 		parsedOK = len(primary) > 0
-	case strings.Contains(ct, "application/json"):
+	case containsFoldASCII(ct, "application/json"):
 		primary = extractJSONValues(body)
 		parsedOK = len(primary) > 0
-	case strings.Contains(ct, "multipart/form-data"):
+	case containsFoldASCII(ct, "multipart/form-data"):
 		primary = extractMultipartFieldValues(body, contentType)
 		parsedOK = len(primary) > 0
-	case strings.Contains(ct, "text/") || strings.Contains(ct, "application/xml") || strings.Contains(ct, "application/soap"):
+	case containsFoldASCII(ct, "text/") || containsFoldASCII(ct, "application/xml") || containsFoldASCII(ct, "application/soap"):
 		limit := 8192
 		if len(body) < limit {
 			limit = len(body)
@@ -757,12 +871,12 @@ func extractBodyTargets(body []byte, contentType string) []string {
 
 	// Content-Type-independent sniffing: also try alternate parsers to prevent
 	// evasion via wrong Content-Type header.
-	if !strings.Contains(ct, "application/json") && looksLikeJSON(body) {
+	if !containsFoldASCII(ct, "application/json") && looksLikeJSON(body) {
 		if extra := extractJSONValues(body); len(extra) > 0 {
 			primary = append(primary, extra...)
 		}
 	}
-	if !strings.Contains(ct, "form-urlencoded") && !strings.Contains(ct, "multipart/form-data") && ct != "" && looksLikeFormEncoded(body) {
+	if !containsFoldASCII(ct, "form-urlencoded") && !containsFoldASCII(ct, "multipart/form-data") && ct != "" && looksLikeFormEncoded(body) {
 		if extra := extractFormValues(string(body)); len(extra) > 0 {
 			primary = append(primary, extra...)
 		}
@@ -953,10 +1067,7 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 		return action.Pass(), false
 	}
 	// Extract nonce from X-Nonce header.
-	nonce := ctx.Headers["X-Nonce"]
-	if nonce == "" {
-		nonce = ctx.Headers["x-nonce"]
-	}
+	nonce, _ := lookupHeaderValue(ctx.Headers, "x-nonce")
 	if nonce == "" {
 		// No nonce provided — skip replay check.
 		return action.Pass(), false
@@ -1074,14 +1185,22 @@ func normalizeConfiguredAction(value string) action.Type {
 }
 
 func hit(c Compiled) action.Result {
-	desc := c.Kind + ":" + c.Arg
-	if c.Kind == "compound" && len(c.Arg) > 60 {
-		desc = "compound:{...}"
+	act := c.runtimeAction
+	if act == "" {
+		act = normalizeConfiguredAction(string(c.Action))
+	}
+	ruleIDStr := c.ruleIDStr
+	if ruleIDStr == "" {
+		ruleIDStr = "rule:" + c.Phase + ":" + c.Kind
+	}
+	desc := c.matchDesc
+	if desc == "" {
+		desc = compiledMatchDesc(c.Kind, c.Arg)
 	}
 	return action.Result{
-		Type:       normalizeConfiguredAction(string(c.Action)),
+		Type:       act,
 		RuleID:     c.ID,
-		RuleIDStr:  "rule:" + c.Phase + ":" + c.Kind,
+		RuleIDStr:  ruleIDStr,
 		Phase:      c.Phase,
 		MatchDesc:  desc,
 		Matched:    true,

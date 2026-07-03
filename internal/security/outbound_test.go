@@ -13,7 +13,7 @@ func TestApplyOutboundForwarding(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		ApplyOutboundForwarding(req, net.ParseIP("203.0.113.10"), "client.example", true, "https")
+		ApplyOutboundForwarding(req, net.ParseIP("203.0.113.10"), "client.example", true, "", "https")
 
 		if got := req.Header.Get("X-Forwarded-For"); got != "203.0.113.10" {
 			t.Fatalf("X-Forwarded-For = %q", got)
@@ -36,7 +36,7 @@ func TestApplyOutboundForwarding(t *testing.T) {
 		}
 		req.Header.Set("X-Forwarded-For", " 198.51.100.7 ")
 
-		ApplyOutboundForwarding(req, net.ParseIP("203.0.113.10"), "", false, "")
+		ApplyOutboundForwarding(req, net.ParseIP("203.0.113.10"), "", false, "", "")
 
 		if got := req.Header.Get("X-Forwarded-For"); got != "198.51.100.7, 203.0.113.10" {
 			t.Fatalf("X-Forwarded-For = %q", got)
@@ -49,6 +49,22 @@ func TestApplyOutboundForwarding(t *testing.T) {
 		}
 	})
 
+	t.Run("preserves repeated forwarded for values", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, "http://origin.local/path", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Add("X-Forwarded-For", " 198.51.100.7 ")
+		req.Header.Add("X-Forwarded-For", "")
+		req.Header.Add("X-Forwarded-For", " 198.51.100.8, 198.51.100.9 ")
+
+		ApplyOutboundForwarding(req, net.ParseIP("203.0.113.10"), "", false, "", "")
+
+		if got := req.Header.Get("X-Forwarded-For"); got != "198.51.100.7, 198.51.100.8, 198.51.100.9, 203.0.113.10" {
+			t.Fatalf("X-Forwarded-For = %q", got)
+		}
+	})
+
 	t.Run("does not preserve host when disabled", func(t *testing.T) {
 		req, err := http.NewRequest(http.MethodGet, "http://origin.local/path", nil)
 		if err != nil {
@@ -56,7 +72,7 @@ func TestApplyOutboundForwarding(t *testing.T) {
 		}
 		initialHost := req.Host
 
-		ApplyOutboundForwarding(req, nil, "client.example", false, "http")
+		ApplyOutboundForwarding(req, nil, "client.example", false, "", "http")
 
 		if req.Host != initialHost {
 			t.Fatalf("Host = %q", req.Host)
@@ -77,7 +93,7 @@ func TestApplyOutboundForwarding(t *testing.T) {
 		req.Header["x-forwarded-proto"] = []string{"old"}
 		req.Header["x-forwarded-host"] = []string{"old.example"}
 
-		ApplyOutboundForwarding(req, nil, "client.example", true, "https")
+		ApplyOutboundForwarding(req, nil, "client.example", true, "", "https")
 
 		if got := req.Header.Get("X-Forwarded-Proto"); got != "https" {
 			t.Fatalf("X-Forwarded-Proto = %q", got)
@@ -97,7 +113,7 @@ func BenchmarkApplyOutboundForwardingProtoOnly(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		req.Header.Del("X-Forwarded-Proto")
-		ApplyOutboundForwarding(req, nil, "", false, "https")
+		ApplyOutboundForwarding(req, nil, "", false, "", "https")
 	}
 }
 
@@ -114,6 +130,22 @@ func BenchmarkApplyOutboundForwardingFull(b *testing.B) {
 		req.Header.Del("X-Forwarded-Proto")
 		req.Header.Del("X-Forwarded-Host")
 		req.Host = ""
-		ApplyOutboundForwarding(req, clientIP, "client.example", true, "https")
+		ApplyOutboundForwarding(req, clientIP, "client.example", true, "", "https")
+	}
+}
+
+func TestApplyOutboundForwardingUsesExplicitUpstreamHostOverride(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "http://origin.local/path", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ApplyOutboundForwarding(req, nil, "client.example", false, "backend.example.com", "http")
+
+	if req.Host != "backend.example.com" {
+		t.Fatalf("Host = %q", req.Host)
+	}
+	if got := req.Header.Get("X-Forwarded-Host"); got != "" {
+		t.Fatalf("X-Forwarded-Host = %q", got)
 	}
 }

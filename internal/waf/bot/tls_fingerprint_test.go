@@ -20,6 +20,12 @@ func TestHeaderOrderScoreDetectsAlphabeticOrder(t *testing.T) {
 	}
 }
 
+func TestTLSVersionStringSupportsSSL3(t *testing.T) {
+	if got := tlsVersionString(0x0300); got != "SSL3" {
+		t.Fatalf("tlsVersionString(0x0300) = %q, want %q", got, "SSL3")
+	}
+}
+
 func TestParseTLSClientHelloEmptyInput(t *testing.T) {
 	fp, err := ParseTLSClientHello(nil)
 	if err != nil {
@@ -451,6 +457,29 @@ func TestParseTLSClientHelloMatchesUTLSReferenceWithDuplicateALPN(t *testing.T) 
 	}
 }
 
+func TestParseTLSClientHelloCommonALPNPathDoesNotLeakAcrossCalls(t *testing.T) {
+	baseRecord := clientHelloRecordForTest(t)
+	duplicateRecord := duplicateTLSClientHelloExtensionForTest(t, baseRecord, 16, []byte{
+		0x00, 0x05,
+		0x04, 'h', '3', '-', '2',
+	})
+
+	first := requireTLSClientHelloMatchesUTLSReference(t, baseRecord)
+	if !reflect.DeepEqual(first.ALPN, []string{"h2", "http/1.1"}) {
+		t.Fatalf("first ALPN = %+v, want %+v", first.ALPN, []string{"h2", "http/1.1"})
+	}
+
+	duplicate := requireTLSClientHelloMatchesUTLSReference(t, duplicateRecord)
+	if !reflect.DeepEqual(duplicate.ALPN, []string{"h2", "http/1.1", "h3-2"}) {
+		t.Fatalf("duplicate ALPN = %+v, want %+v", duplicate.ALPN, []string{"h2", "http/1.1", "h3-2"})
+	}
+
+	second := requireTLSClientHelloMatchesUTLSReference(t, baseRecord)
+	if !reflect.DeepEqual(second.ALPN, []string{"h2", "http/1.1"}) {
+		t.Fatalf("second ALPN = %+v, want %+v", second.ALPN, []string{"h2", "http/1.1"})
+	}
+}
+
 func TestParseTLSClientHelloMatchesUTLSReferenceWithDuplicateSupportedGroups(t *testing.T) {
 	record := duplicateTLSClientHelloExtensionForTest(t, clientHelloRecordForTest(t), 10, []byte{
 		0x00, 0x04,
@@ -519,6 +548,90 @@ func BenchmarkParseTLSClientHello(b *testing.B) {
 		if err != nil || fp.JA3 == "" || fp.JA3Hash == "" || fp.JA4 == "" {
 			b.Fatalf("ParseTLSClientHello() = %+v, %v", fp, err)
 		}
+	}
+}
+
+func BenchmarkParseTLSClientHelloAlternatingRecords(b *testing.B) {
+	records := [][]byte{
+		clientHelloRecordForTest(b),
+		clientHelloRecordWithConfigForTest(b, &tls.Config{
+			ServerName: "api.example.com",
+			NextProtos: []string{"http/1.1"},
+		}),
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		record := records[i&1]
+		fp, err := ParseTLSClientHello(record)
+		if err != nil || fp.JA3 == "" || fp.JA3Hash == "" || fp.JA4 == "" {
+			b.Fatalf("ParseTLSClientHello() = %+v, %v", fp, err)
+		}
+	}
+}
+
+func TestParseTLSClientHelloCacheSeparatesDistinctRecords(t *testing.T) {
+	firstRecord := clientHelloRecordForTest(t)
+	secondRecord := clientHelloRecordWithConfigForTest(t, &tls.Config{
+		ServerName: "api.example.com",
+		NextProtos: []string{"http/1.1"},
+	})
+
+	first, err := ParseTLSClientHello(firstRecord)
+	if err != nil {
+		t.Fatalf("first ParseTLSClientHello() error: %v", err)
+	}
+	second, err := ParseTLSClientHello(secondRecord)
+	if err != nil {
+		t.Fatalf("second ParseTLSClientHello() error: %v", err)
+	}
+	firstAgain, err := ParseTLSClientHello(firstRecord)
+	if err != nil {
+		t.Fatalf("firstAgain ParseTLSClientHello() error: %v", err)
+	}
+	secondAgain, err := ParseTLSClientHello(secondRecord)
+	if err != nil {
+		t.Fatalf("secondAgain ParseTLSClientHello() error: %v", err)
+	}
+
+	if !reflect.DeepEqual(first, firstAgain) {
+		t.Fatalf("first cached fingerprint = %+v, want %+v", firstAgain, first)
+	}
+	if !reflect.DeepEqual(second, secondAgain) {
+		t.Fatalf("second cached fingerprint = %+v, want %+v", secondAgain, second)
+	}
+	if first.SNI == second.SNI {
+		t.Fatalf("expected distinct cached SNI values, got first=%q second=%q", first.SNI, second.SNI)
+	}
+}
+
+func TestParseTLSClientHelloCacheClonesStoredSlices(t *testing.T) {
+	record := clientHelloRecordForTest(t)
+
+	first, err := ParseTLSClientHello(record)
+	if err != nil {
+		t.Fatalf("first ParseTLSClientHello() error: %v", err)
+	}
+	want, err := ParseTLSClientHello(record)
+	if err != nil {
+		t.Fatalf("want ParseTLSClientHello() error: %v", err)
+	}
+
+	if len(first.ALPN) == 0 || len(first.CipherSuites) == 0 || len(first.Extensions) == 0 || len(first.Curves) == 0 || len(first.PointFormats) == 0 {
+		t.Fatalf("expected populated TLS slices, got %+v", first)
+	}
+
+	first.ALPN[0] = "mutated"
+	first.CipherSuites[0] = 0
+	first.Extensions[0] = 0
+	first.Curves[0] = 0
+	first.PointFormats[0] = 255
+
+	got, err := ParseTLSClientHello(record)
+	if err != nil {
+		t.Fatalf("cached ParseTLSClientHello() error: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cached fingerprint changed after caller mutation: got %+v want %+v", got, want)
 	}
 }
 
@@ -952,6 +1065,73 @@ func TestBuildJA4StringMatchesReferenceLibrary(t *testing.T) {
 	want := reference.String()
 	if got != want {
 		t.Fatalf("buildJA4String() = %q, want %q", got, want)
+	}
+}
+
+func TestTLSFingerprintFromClientHelloInfoMatchesReferenceLibrary(t *testing.T) {
+	info := &tls.ClientHelloInfo{
+		CipherSuites:    []uint16{0x0a0a, 4865, 4866, 4867, 49195},
+		ServerName:      "quic.example",
+		SupportedCurves: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384},
+		SupportedPoints: []uint8{0},
+		SignatureSchemes: []tls.SignatureScheme{
+			tls.ECDSAWithP256AndSHA256,
+			tls.PSSWithSHA256,
+		},
+		SupportedProtos: []string{"h3", "h2"},
+		SupportedVersions: []uint16{
+			0x0a0a,
+			tls.VersionTLS13,
+			tls.VersionTLS12,
+		},
+		Extensions: []uint16{0x0a0a, 0, 11, 10, 35, 16, 13, 43, 45, 51, 21},
+	}
+
+	fp := TLSFingerprintFromClientHelloInfo(info, 'q')
+	if fp.JA3 == "" || fp.JA3Hash == "" || fp.JA4 == "" {
+		t.Fatalf("expected complete fingerprints, got %+v", fp)
+	}
+	if fp.TLSVersion != "TLS13" {
+		t.Fatalf("TLSVersion = %q, want %q", fp.TLSVersion, "TLS13")
+	}
+	if fp.SNI != "quic.example" {
+		t.Fatalf("SNI = %q, want %q", fp.SNI, "quic.example")
+	}
+	if !reflect.DeepEqual(fp.ALPN, []string{"h3", "h2"}) {
+		t.Fatalf("ALPN = %+v, want %+v", fp.ALPN, []string{"h3", "h2"})
+	}
+	if !reflect.DeepEqual(fp.Curves, []uint16{uint16(tls.X25519), uint16(tls.CurveP256), uint16(tls.CurveP384)}) {
+		t.Fatalf("Curves = %+v", fp.Curves)
+	}
+
+	var reference ja4.JA4Fingerprint
+	if err := reference.Unmarshal(clientHelloInfoReferenceSpecForTest(), 'q'); err != nil {
+		t.Fatalf("reference Unmarshal() error: %v", err)
+	}
+	if fp.JA4 != reference.String() {
+		t.Fatalf("JA4 = %q, want %q", fp.JA4, reference.String())
+	}
+}
+
+func clientHelloInfoReferenceSpecForTest() *utls.ClientHelloSpec {
+	return &utls.ClientHelloSpec{
+		TLSVersMax: tls.VersionTLS13,
+		CipherSuites: []uint16{
+			0x0a0a, 4865, 4866, 4867, 49195,
+		},
+		Extensions: []utls.TLSExtension{
+			&utls.UtlsGREASEExtension{},
+			&utls.SNIExtension{ServerName: "quic.example"},
+			&utls.SupportedPointsExtension{SupportedPoints: []uint8{0}},
+			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{utls.X25519, utls.CurveP256, utls.CurveP384}},
+			&utls.SessionTicketExtension{},
+			&utls.ALPNExtension{AlpnProtocols: []string{"h3", "h2"}},
+			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{utls.SignatureScheme(tls.ECDSAWithP256AndSHA256), utls.SignatureScheme(tls.PSSWithSHA256)}},
+			&utls.SupportedVersionsExtension{Versions: []uint16{0x0a0a, tls.VersionTLS13, tls.VersionTLS12}},
+			&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
+			&utls.KeyShareExtension{KeyShares: []utls.KeyShare{{Group: utls.X25519}}},
+			&utls.UtlsPaddingExtension{PaddingLen: 8, WillPad: true},
+		},
 	}
 }
 

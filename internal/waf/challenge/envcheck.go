@@ -11,8 +11,13 @@ import (
 	"fmt"
 )
 
-// EnvFingerprint represents the client environment data collected via JavaScript.
+/**
+ * EnvFingerprint 表示通过 JavaScript 收集的客户端环境指纹数据。
+ * 涵盖浏览器 API、渲染/图形、媒体/音频、存储/API、性能/计时、
+ * 权限/安全、自动化检测、环境一致性、DOM/CSS 等多维度检测点。
+ */
 type EnvFingerprint struct {
+	// ── 基础浏览器属性 ──
 	WebDriver      bool    `json:"webdriver"`
 	ChromePresent  bool    `json:"chrome_present"`
 	PluginsCount   int     `json:"plugins_count"`
@@ -39,25 +44,86 @@ type EnvFingerprint struct {
 	PlatformStr    string  `json:"platform"`
 	CookieEnabled  bool    `json:"cookie_enabled"`
 	MemoryGB       float64 `json:"device_memory"`
-	// Automation detection signals
-	AutomationSign string `json:"automation_sign"` // non-empty if automation detected client-side
-	Phantom        bool   `json:"phantom"`         // window.callPhantom or window._phantom
-	Nightmare      bool   `json:"nightmare"`       // window.__nightmare
-	SeleniumSign   bool   `json:"selenium_sign"`   // __selenium_unwrapped etc.
-	HeadlessUA     bool   `json:"headless_ua"`     // HeadlessChrome in UA
-	ChromeCDC      bool   `json:"chrome_cdc"`      // cdc_ property on document (chromedriver)
-	PermNotif      string `json:"perm_notif"`      // Notification.permission
+
+	// ── 自动化检测信号（原有） ──
+	AutomationSign string `json:"automation_sign"`
+	Phantom        bool   `json:"phantom"`
+	Nightmare      bool   `json:"nightmare"`
+	SeleniumSign   bool   `json:"selenium_sign"`
+	HeadlessUA     bool   `json:"headless_ua"`
+	ChromeCDC      bool   `json:"chrome_cdc"`
+	PermNotif      string `json:"perm_notif"`
+
+	// ── Navigator/Browser API（CH-UA 客户端提示） ──
+	UserAgentData  string `json:"user_agent_data"` // navigator.userAgentData JSON 序列化
+	BrowserBrand   string `json:"browser_brand"`   // 从 userAgentData 中提取的主要品牌
+	BrowserVersion string `json:"browser_version"` // 从 userAgentData 中提取的版本号
+	IsMobile       bool   `json:"is_mobile"`       // navigator.userAgentData.mobile
+	UAMismatch     bool   `json:"ua_mismatch"`     // user-agent 字符串与 userAgentData brands 不匹配
+	NavigatorProto bool   `json:"navigator_proto"` // navigator 原型链是否标准
+
+	// ── 渲染/图形 ──
+	WebGLVendor   string `json:"webgl_vendor"`   // WEBGL_debug_renderer_info UNMASKED_VENDOR
+	CanvasToBlob  bool   `json:"canvas_to_blob"` // canvas.toBlob 是否可用
+	WebGL2Support bool   `json:"webgl2_support"` // WebGL2RenderingContext 是否可用
+	SVGSupport    bool   `json:"svg_support"`    // SVGElement 是否可用
+
+	// ── 媒体/音频 ──
+	MediaDevices    bool `json:"media_devices"`    // navigator.mediaDevices 是否可用
+	SpeechSynthesis bool `json:"speech_synthesis"` // window.speechSynthesis 是否可用
+
+	// ── 存储/API ──
+	ServiceWorker    bool `json:"service_worker"`    // navigator.serviceWorker 是否可用
+	CacheAPI         bool `json:"cache_api"`         // window.caches 是否可用
+	WebAssembly      bool `json:"web_assembly"`      // WebAssembly 是否可用
+	SharedWorker     bool `json:"shared_worker"`     // SharedWorker 是否可用
+	BroadcastChannel bool `json:"broadcast_channel"` // BroadcastChannel 是否可用
+
+	// ── 性能/计时 ──
+	PerformanceObserver bool `json:"performance_observer"` // PerformanceObserver 是否可用
+	PerformanceMark     bool `json:"performance_mark"`     // performance.mark 是否可用
+	TimingAPIDepth      int  `json:"timing_api_depth"`     // performance.getEntries 条目数量
+
+	// ── 权限/安全 ──
+	PermissionAPI bool `json:"permission_api"` // navigator.permissions 是否可用
+	CredentialAPI bool `json:"credential_api"` // navigator.credentials 是否可用
+	CSPViolation  bool `json:"csp_violation"`  // 指纹采集过程中是否发生 CSP 违规
+
+	// ── 高级自动化检测 ──
+	WebDriverAdvanced bool `json:"webdriver_advanced"` // 多重 webdriver 指标检测
+	CDPRuntime        bool `json:"cdp_runtime"`        // Chrome DevTools Protocol Runtime.evaluate 痕迹
+	PuppeteerSign     bool `json:"puppeteer_sign"`     // Puppeteer 特有痕迹
+	PlaywrightSign    bool `json:"playwright_sign"`    // Playwright 特有痕迹
+	ElectronSign      bool `json:"electron_sign"`      // 是否运行在 Electron 中
+	CypressSign       bool `json:"cypress_sign"`       // Cypress 测试框架痕迹
+
+	// ── 环境一致性 ──
+	ScreenConsistency   bool `json:"screen_consistency"`   // screen 属性与 window.screen 一致性
+	TimezoneConsistency bool `json:"timezone_consistency"` // Intl 时区与 getTimezoneOffset 一致性
+	LanguageConsistency bool `json:"language_consistency"` // navigator.language 与 Intl 区域设置一致性
+	MathConsistency     bool `json:"math_consistency"`     // Math 函数特定值跨次一致性
+
+	// ── DOM/CSS ──
+	CSSSupportsCheck     bool `json:"css_supports_check"`    // CSS.supports 是否可用
+	IntersectionObserver bool `json:"intersection_observer"` // IntersectionObserver 是否可用
+	MutationObserver     bool `json:"mutation_observer"`     // MutationObserver 是否可用
+	ResizeObserver       bool `json:"resize_observer"`       // ResizeObserver 是否可用
+	HistoryAPI           bool `json:"history_api"`           // history.pushState 是否可用
 }
 
-// EnvCheckResult holds the validation outcome.
+/**
+ * EnvCheckResult 保存环境指纹验证的结果。
+ */
 type EnvCheckResult struct {
-	Score   int      `json:"score"`   // 0-100, higher = more suspicious
-	Reasons []string `json:"reasons"` // explanation of each score contribution
-	Pass    bool     `json:"pass"`    // true if score <= threshold
+	Score   int      `json:"score"`   // 0-100，越高越可疑
+	Reasons []string `json:"reasons"` // 每个评分贡献的说明
+	Pass    bool     `json:"pass"`    // score <= threshold 时为 true
 }
 
-// ValidateEnvFingerprint analyzes the environment fingerprint and returns a risk score.
-// Score > 50 is considered suspicious (bot/automation).
+/**
+ * ValidateEnvFingerprint 分析环境指纹并返回风险评分。
+ * 评分 > 50 表示可疑（机器人/自动化）。
+ */
 func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 	if fp == nil {
 		return EnvCheckResult{Score: 100, Reasons: []string{"no fingerprint data"}, Pass: false}
@@ -66,7 +132,7 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 	score := 0
 	var reasons []string
 
-	// ── Instant-fail signals (definitive automation indicators) ──
+	// ── 即时失败信号（确定性自动化指标） ──
 
 	if fp.WebDriver {
 		return EnvCheckResult{Score: 100, Reasons: []string{"webdriver=true: automated browser detected"}, Pass: false}
@@ -84,6 +150,26 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 		return EnvCheckResult{Score: 100, Reasons: []string{"HeadlessChrome user-agent detected"}, Pass: false}
 	}
 
+	// ── 高级自动化检测（即时失败） ──
+
+	if fp.WebDriverAdvanced {
+		return EnvCheckResult{Score: 100, Reasons: []string{"advanced webdriver indicators detected"}, Pass: false}
+	}
+
+	if fp.PuppeteerSign {
+		return EnvCheckResult{Score: 100, Reasons: []string{"puppeteer automation signatures detected"}, Pass: false}
+	}
+
+	if fp.PlaywrightSign {
+		return EnvCheckResult{Score: 100, Reasons: []string{"playwright automation signatures detected"}, Pass: false}
+	}
+
+	if fp.CypressSign {
+		return EnvCheckResult{Score: 100, Reasons: []string{"cypress testing framework detected"}, Pass: false}
+	}
+
+	// ── DevTools 信号 ──
+
 	if fp.DevtoolsOpen {
 		score += 30
 		reasons = append(reasons, "devtools open (+30)")
@@ -94,7 +180,19 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 		reasons = append(reasons, "devtools timing anomaly (+20)")
 	}
 
-	// ── Strong signals ──
+	// ── CDP / Electron 信号 ──
+
+	if fp.CDPRuntime {
+		score += 25
+		reasons = append(reasons, "Chrome DevTools Protocol runtime detected (+25)")
+	}
+
+	if fp.ElectronSign {
+		score += 15
+		reasons = append(reasons, "Electron environment detected (+15)")
+	}
+
+	// ── 强信号 ──
 
 	if !fp.ChromePresent {
 		score += 10
@@ -137,7 +235,36 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 		reasons = append(reasons, "low hardware concurrency (+5)")
 	}
 
-	// ── New enhanced signals ──
+	// ── UA 一致性信号 ──
+
+	if fp.UAMismatch {
+		score += 20
+		reasons = append(reasons, "user-agent string mismatches userAgentData brands (+20)")
+	}
+
+	// ── 环境一致性信号 ──
+
+	if !fp.ScreenConsistency {
+		score += 15
+		reasons = append(reasons, "screen property inconsistency (+15)")
+	}
+
+	if !fp.TimezoneConsistency {
+		score += 12
+		reasons = append(reasons, "timezone inconsistency between Intl and getTimezoneOffset (+12)")
+	}
+
+	if !fp.LanguageConsistency {
+		score += 10
+		reasons = append(reasons, "language inconsistency between navigator and Intl (+10)")
+	}
+
+	if !fp.MathConsistency {
+		score += 20
+		reasons = append(reasons, "Math function output tampered (+20)")
+	}
+
+	// ── 增强的基础信号 ──
 
 	if fp.ColorDepth == 0 {
 		score += 8
@@ -169,22 +296,50 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 		reasons = append(reasons, "cookies disabled (+10)")
 	}
 
-	// Touch support inconsistency: claims touch but max_touch_points is 0
 	if fp.TouchSupport && fp.MaxTouchPoints == 0 {
 		score += 8
 		reasons = append(reasons, "touch support inconsistency (+8)")
 	}
 
-	// No platform string is suspicious
 	if fp.PlatformStr == "" {
 		score += 5
 		reasons = append(reasons, "empty platform string (+5)")
 	}
 
-	// Font count: real browsers usually have 10+ fonts detectable
 	if fp.FontCount == 0 {
 		score += 5
 		reasons = append(reasons, "zero detectable fonts (+5)")
+	}
+
+	// ── 存储/API 信号 ──
+
+	if !fp.WebAssembly {
+		score += 8
+		reasons = append(reasons, "WebAssembly unavailable (+8)")
+	}
+
+	if !fp.ServiceWorker {
+		score += 5
+		reasons = append(reasons, "ServiceWorker unavailable (+5)")
+	}
+
+	if !fp.MediaDevices {
+		score += 5
+		reasons = append(reasons, "MediaDevices unavailable (+5)")
+	}
+
+	// ── Observer 组合信号 ──
+
+	if !fp.IntersectionObserver && !fp.MutationObserver && !fp.ResizeObserver {
+		score += 10
+		reasons = append(reasons, "all observers missing (Intersection+Mutation+Resize) (+10)")
+	}
+
+	// ── WebGL2 + WebGL Renderer 组合信号 ──
+
+	if !fp.WebGL2Support && fp.WebGLRenderer == "" {
+		score += 12
+		reasons = append(reasons, "no WebGL2 support and no WebGL renderer (+12)")
 	}
 
 	if score > 100 {
@@ -198,7 +353,9 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 	}
 }
 
-// ParseEnvFingerprint parses a JSON string into an EnvFingerprint.
+/**
+ * ParseEnvFingerprint 将 JSON 字符串解析为 EnvFingerprint。
+ */
 func ParseEnvFingerprint(data string) *EnvFingerprint {
 	if data == "" {
 		return nil
@@ -210,7 +367,9 @@ func ParseEnvFingerprint(data string) *EnvFingerprint {
 	return &fp
 }
 
-// DecryptEnvFingerprint decrypts an encrypted env fingerprint using the session-bound key.
+/**
+ * DecryptEnvFingerprint 使用会话绑定密钥解密加密的环境指纹。
+ */
 func DecryptEnvFingerprint(encrypted string, sessionKey []byte) *EnvFingerprint {
 	if encrypted == "" || len(sessionKey) == 0 {
 		return nil
@@ -230,14 +389,18 @@ func DecryptEnvFingerprint(encrypted string, sessionKey []byte) *EnvFingerprint 
 	return &fp
 }
 
-// GenerateEnvSessionKey creates a random 16-byte key for env fingerprint encryption.
+/**
+ * GenerateEnvSessionKey 创建一个 16 字节的随机密钥用于环境指纹加密。
+ */
 func GenerateEnvSessionKey() []byte {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return b
 }
 
-// EnvSessionKeyHex returns the hex-encoded session key for embedding in JS.
+/**
+ * EnvSessionKeyHex 返回十六进制编码的会话密钥，用于嵌入 JS。
+ */
 func EnvSessionKeyHex(key []byte) string {
 	return hex.EncodeToString(key)
 }
@@ -308,12 +471,16 @@ func envContainsCI(s, substr string) bool {
 	return false
 }
 
-// EnvCheckJS returns JavaScript code that collects environment fingerprint data (plain mode).
+/**
+ * EnvCheckJS 返回收集环境指纹数据的 JavaScript 代码（明文模式）。
+ */
 func EnvCheckJS() string {
 	return envCheckJSWithKey("")
 }
 
-// EnvCheckJSEncrypted returns the env collection JS with encryption using the given hex key.
+/**
+ * EnvCheckJSEncrypted 返回使用给定十六进制密钥加密的环境采集 JS。
+ */
 func EnvCheckJSEncrypted(keyHex string) string {
 	return envCheckJSWithKey(keyHex)
 }
@@ -356,9 +523,10 @@ fp.canvas_hash=h.toString();
 try{
 var gl=document.createElement('canvas').getContext('webgl');
 if(gl){var di=gl.getExtension('WEBGL_debug_renderer_info');
-fp.webgl_renderer=di?gl.getParameter(di.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)}
-else{fp.webgl_renderer=''}
-}catch(e){fp.webgl_renderer=''}
+fp.webgl_renderer=di?gl.getParameter(di.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER);
+fp.webgl_vendor=di?gl.getParameter(di.UNMASKED_VENDOR_WEBGL):gl.getParameter(gl.VENDOR)}
+else{fp.webgl_renderer='';fp.webgl_vendor=''}
+}catch(e){fp.webgl_renderer='';fp.webgl_vendor=''}
 try{
 var actx=new(window.AudioContext||window.webkitAudioContext)();
 var osc=actx.createOscillator();var an=actx.createAnalyser();
@@ -393,6 +561,119 @@ try{fp.headless_ua=navigator.userAgent.indexOf('HeadlessChrome')!==-1}catch(e){f
 try{var cdcFound=false;for(var k in document){if(k.match(/^cdc_/)||k.match(/^\$cdc_/)){cdcFound=true;break}}fp.chrome_cdc=cdcFound}catch(e){fp.chrome_cdc=false}
 try{fp.perm_notif=typeof Notification!=='undefined'?Notification.permission:''}catch(e){fp.perm_notif=''}
 try{fp.automation_sign='';if(navigator.webdriver)fp.automation_sign='webdriver';else if(window.__nightmare)fp.automation_sign='nightmare';else if(window.callPhantom||window._phantom)fp.automation_sign='phantom';else if(window.__selenium_unwrapped||document.__selenium_unwrapped)fp.automation_sign='selenium'}catch(e){}
+try{
+if(navigator.userAgentData){
+var ua=navigator.userAgentData;
+fp.is_mobile=!!ua.mobile;
+var brands=ua.brands||[];
+fp.user_agent_data=JSON.stringify({brands:brands,mobile:ua.mobile,platform:ua.platform||''});
+var primary='';var ver='';
+for(var i=0;i<brands.length;i++){var b=brands[i];if(b.brand&&b.brand.indexOf('Not')===0)continue;if(b.brand&&b.brand.indexOf('Chromium')!==-1)continue;primary=b.brand;ver=b.version;break}
+if(!primary&&brands.length>0){for(var i=0;i<brands.length;i++){if(brands[i].brand&&brands[i].brand.indexOf('Chromium')!==-1){primary=brands[i].brand;ver=brands[i].version;break}}}
+fp.browser_brand=primary||'';fp.browser_version=ver||'';
+var uaStr=navigator.userAgent||'';
+var mismatch=true;
+for(var i=0;i<brands.length;i++){if(brands[i].brand&&uaStr.indexOf(brands[i].brand)!==-1){mismatch=false;break}}
+if(uaStr.indexOf('Chrome')!==-1){for(var i=0;i<brands.length;i++){if(brands[i].brand&&(brands[i].brand.indexOf('Chrom')!==-1||brands[i].brand.indexOf('Google')!==-1)){mismatch=false;break}}}
+fp.ua_mismatch=mismatch;
+}else{fp.user_agent_data='';fp.browser_brand='';fp.browser_version='';fp.is_mobile=false;fp.ua_mismatch=false}
+}catch(e){fp.user_agent_data='';fp.browser_brand='';fp.browser_version='';fp.is_mobile=false;fp.ua_mismatch=false}
+try{
+var np=Object.getPrototypeOf(navigator);
+fp.navigator_proto=np===Navigator.prototype;
+}catch(e){fp.navigator_proto=true}
+try{
+var tc=document.createElement('canvas');
+fp.canvas_to_blob=typeof tc.toBlob==='function';
+}catch(e){fp.canvas_to_blob=false}
+try{fp.webgl2_support=typeof WebGL2RenderingContext!=='undefined'}catch(e){fp.webgl2_support=false}
+try{fp.svg_support=typeof SVGElement!=='undefined'}catch(e){fp.svg_support=false}
+try{fp.media_devices=!!(navigator.mediaDevices)}catch(e){fp.media_devices=false}
+try{fp.speech_synthesis=!!window.speechSynthesis}catch(e){fp.speech_synthesis=false}
+try{fp.service_worker=!!navigator.serviceWorker}catch(e){fp.service_worker=false}
+try{fp.cache_api=!!window.caches}catch(e){fp.cache_api=false}
+try{fp.web_assembly=typeof WebAssembly!=='undefined'}catch(e){fp.web_assembly=false}
+try{fp.shared_worker=typeof SharedWorker!=='undefined'}catch(e){fp.shared_worker=false}
+try{fp.broadcast_channel=typeof BroadcastChannel!=='undefined'}catch(e){fp.broadcast_channel=false}
+try{fp.performance_observer=typeof PerformanceObserver!=='undefined'}catch(e){fp.performance_observer=false}
+try{fp.performance_mark=!!(performance&&typeof performance.mark==='function')}catch(e){fp.performance_mark=false}
+try{fp.timing_api_depth=(performance&&typeof performance.getEntries==='function')?performance.getEntries().length:0}catch(e){fp.timing_api_depth=0}
+try{fp.permission_api=!!(navigator.permissions)}catch(e){fp.permission_api=false}
+try{fp.credential_api=!!(navigator.credentials)}catch(e){fp.credential_api=false}
+try{
+var cspV=false;
+document.addEventListener('securitypolicyviolation',function(){cspV=true},{once:true});
+fp.csp_violation=cspV;
+}catch(e){fp.csp_violation=false}
+try{
+var wda=false;
+if(navigator.webdriver)wda=true;
+if(!wda){try{if(Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver')){var desc=Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver');if(desc&&desc.get&&desc.get.toString().indexOf('native code')===-1)wda=true}}catch(e2){}}
+if(!wda&&window.chrome){try{if(window.chrome.runtime&&window.chrome.runtime.id===undefined&&window.chrome.app===undefined)wda=true}catch(e2){}}
+if(!wda){try{if(document.documentElement.getAttribute('webdriver')!==null)wda=true}catch(e2){}}
+if(!wda){try{var ks=['__webdriver_evaluate','__selenium_evaluate','__fxdriver_evaluate','__driver_unwrapped','__webdriver_unwrapped','__driver_evaluate','__selenium_unwrapped','__fxdriver_unwrapped','_Selenium_IDE_Recorder','_selenium','calledSelenium','_WEBDRIVER_ELEM_CACHE','ChromeDriverw','driver-hierarchical-name'];for(var i=0;i<ks.length;i++){if(window[ks[i]]!==undefined){wda=true;break}}}catch(e2){}}
+fp.webdriver_advanced=wda;
+}catch(e){fp.webdriver_advanced=false}
+try{
+var cdp=false;
+if(window.Runtime&&typeof window.Runtime.evaluate==='function')cdp=true;
+if(!cdp){try{if(window.__cdp_runtime||window.cdc_adoQpoasnfa76pfcZLmcfl_Array||window.cdc_adoQpoasnfa76pfcZLmcfl_Promise)cdp=true}catch(e2){}}
+if(!cdp){try{var perfE=performance.getEntries();for(var i=0;i<perfE.length;i++){if(perfE[i].name&&perfE[i].name.indexOf('devtools')!==-1){cdp=true;break}}}catch(e2){}}
+fp.cdp_runtime=cdp;
+}catch(e){fp.cdp_runtime=false}
+try{
+var pp=false;
+if(window.__pptr_tmp_binding||window.__puppeteer_evaluation_script__)pp=true;
+if(!pp){try{if(navigator.webdriver&&window.chrome&&!window.chrome.app)pp=true}catch(e2){}}
+fp.puppeteer_sign=pp;
+}catch(e){fp.puppeteer_sign=false}
+try{
+var pw=false;
+if(window.__playwright||window.__pw_manual)pw=true;
+if(!pw){try{if(window._playwrightInstance||document.__playwright_target__)pw=true}catch(e2){}}
+fp.playwright_sign=pw;
+}catch(e){fp.playwright_sign=false}
+try{
+fp.electron_sign=!!(window.process&&window.process.versions&&window.process.versions.electron);
+}catch(e){fp.electron_sign=false}
+try{
+fp.cypress_sign=!!(window.Cypress||window.__cypress);
+}catch(e){fp.cypress_sign=false}
+try{
+var sw=screen.width;var sh=screen.height;
+var ww=window.screen.width;var wh=window.screen.height;
+fp.screen_consistency=(sw===ww&&sh===wh);
+}catch(e){fp.screen_consistency=true}
+try{
+var intlTz='';
+try{intlTz=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e2){}
+var jsOff=new Date().getTimezoneOffset();
+var consistent=true;
+if(intlTz){
+var d=new Date();var fmt=new Intl.DateTimeFormat('en-US',{timeZone:intlTz,timeZoneName:'shortOffset'});
+var parts=fmt.formatToParts(d);var offStr='';
+for(var i=0;i<parts.length;i++){if(parts[i].type==='timeZoneName'){offStr=parts[i].value;break}}
+if(offStr){
+var m=offStr.match(/GMT([+-]?)(\d+)(?::(\d+))?/);
+if(m){var sign=m[1]==='-'?1:-1;var hrs=parseInt(m[2],10);var mins=parseInt(m[3]||'0',10);var intlOff=sign*(hrs*60+mins);if(Math.abs(intlOff-jsOff)>60)consistent=false}
+}}
+fp.timezone_consistency=consistent;
+}catch(e){fp.timezone_consistency=true}
+try{
+var navLang=(navigator.language||'').split('-')[0].toLowerCase();
+var intlLang='';
+try{intlLang=Intl.DateTimeFormat().resolvedOptions().locale.split('-')[0].toLowerCase()}catch(e2){}
+fp.language_consistency=(!navLang||!intlLang||navLang===intlLang);
+}catch(e){fp.language_consistency=true}
+try{
+var t1=Math.tan(-1e300);var c1=Math.cos(21*Math.LN2);var t2=Math.tan(-1e300);var c2=Math.cos(21*Math.LN2);
+fp.math_consistency=(t1===t2&&c1===c2&&isFinite(c1));
+}catch(e){fp.math_consistency=true}
+try{fp.css_supports_check=typeof CSS!=='undefined'&&typeof CSS.supports==='function'}catch(e){fp.css_supports_check=false}
+try{fp.intersection_observer=typeof IntersectionObserver!=='undefined'}catch(e){fp.intersection_observer=false}
+try{fp.mutation_observer=typeof MutationObserver!=='undefined'}catch(e){fp.mutation_observer=false}
+try{fp.resize_observer=typeof ResizeObserver!=='undefined'}catch(e){fp.resize_observer=false}
+try{fp.history_api=!!(window.history&&typeof window.history.pushState==='function')}catch(e){fp.history_api=false}
 window.__owaf_env=fp;
 var raw=JSON.stringify(fp);
 var keyHex="%s";
@@ -442,6 +723,15 @@ try{fp.indexed_db=!!window.indexedDB}catch(e){fp.indexed_db=false}
 try{fp.cookie_enabled=!!navigator.cookieEnabled}catch(e){fp.cookie_enabled=false}
 try{fp.platform=navigator.platform||''}catch(e){fp.platform=''}
 try{fp.max_touch_points=navigator.maxTouchPoints||0}catch(e){fp.max_touch_points=0}
+try{fp.webgl_vendor='';fp.canvas_to_blob=false;fp.webgl2_support=false;fp.svg_support=false}catch(e){}
+try{fp.user_agent_data='';fp.browser_brand='';fp.browser_version='';fp.is_mobile=false;fp.ua_mismatch=false;fp.navigator_proto=true}catch(e){}
+try{fp.media_devices=false;fp.speech_synthesis=false}catch(e){}
+try{fp.service_worker=false;fp.cache_api=false;fp.web_assembly=typeof WebAssembly!=='undefined';fp.shared_worker=false;fp.broadcast_channel=false}catch(e){}
+try{fp.performance_observer=false;fp.performance_mark=false;fp.timing_api_depth=0}catch(e){}
+try{fp.permission_api=false;fp.credential_api=false;fp.csp_violation=false}catch(e){}
+try{fp.webdriver_advanced=false;fp.cdp_runtime=false;fp.puppeteer_sign=false;fp.playwright_sign=false;fp.electron_sign=false;fp.cypress_sign=false}catch(e){}
+try{fp.screen_consistency=true;fp.timezone_consistency=true;fp.language_consistency=true;fp.math_consistency=true}catch(e){}
+try{fp.css_supports_check=false;fp.intersection_observer=false;fp.mutation_observer=false;fp.resize_observer=false;fp.history_api=false}catch(e){}
 window.__owaf_env=fp;
 window.__owaf_env_encrypted=JSON.stringify(fp);
 })();`

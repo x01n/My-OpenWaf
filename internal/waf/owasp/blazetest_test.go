@@ -90,6 +90,9 @@ func TestBlazeBlackSamples(t *testing.T) {
 				}
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("scan %s: %w", path, err)
+		}
 
 		_ = method
 		_ = host
@@ -221,6 +224,9 @@ func TestBlazeWhiteFalsePositives(t *testing.T) {
 					contentType = v
 				}
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("scan %s: %w", path, err)
 		}
 
 		body := strings.Join(bodyLines, "\n")
@@ -476,6 +482,9 @@ func TestBlazeBlackMissedAnalysis(t *testing.T) {
 					contentType = v
 				}
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("scan %s: %w", path, err)
 		}
 
 		_ = method

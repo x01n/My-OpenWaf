@@ -10,8 +10,9 @@ import (
 
 type FixURIConn struct {
 	net.Conn
-	checked bool
-	prefix  []byte
+	checked     bool
+	prefix      []byte
+	fingerprint bot.TLSClientFingerprint
 }
 
 func NewFixURIConn(conn net.Conn) net.Conn {
@@ -37,10 +38,23 @@ func (c *FixURIConn) ConnectionState() tls.ConnectionState {
 }
 
 func (c *FixURIConn) TLSFingerprint() (bot.TLSClientFingerprint, bool) {
-	return bot.TLSFingerprintFromConn(c.Conn)
+	if fp, ok := bot.TLSFingerprintFromConn(c.Conn); ok {
+		return fp, true
+	}
+	return c.fingerprint, c.fingerprint.HasValue()
 }
 
 func (c *FixURIConn) SetTLSHandshakeInfo(version string, sni string, alpn string) {
+	if version != "" {
+		c.fingerprint.TLSVersion = version
+	}
+	if sni != "" {
+		c.fingerprint.SNI = sni
+	}
+	c.fingerprint.ALPN = nil
+	if alpn != "" {
+		c.fingerprint.ALPN = []string{alpn}
+	}
 	setTLSHandshakeInfoOnConn(c.Conn, version, sni, alpn)
 }
 

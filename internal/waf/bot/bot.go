@@ -46,27 +46,35 @@ type BotRequest struct {
 }
 
 func NewBotRequest(method, path string, headers map[string]string) BotRequest {
-	br := BotRequest{Method: method, Path: path, Headers: headers}
-	for k, v := range headers {
-		lk := strings.ToLower(k)
-		switch lk {
-		case "user-agent":
-			br.UserAgent = v
-		case "accept":
-			br.AcceptHeader = v
-		case "accept-language":
-			br.AcceptLanguage = v
-		case "accept-encoding":
-			br.AcceptEncoding = v
-		case "referer":
-			br.Referer = v
-		case "connection":
-			br.Connection = v
-		case "cookie":
-			br.HasCookie = v != ""
+	return BotRequest{
+		Method:         method,
+		Path:           path,
+		Headers:        headers,
+		UserAgent:      botHeaderValue(headers, "user-agent"),
+		AcceptHeader:   botHeaderValue(headers, "accept"),
+		AcceptLanguage: botHeaderValue(headers, "accept-language"),
+		AcceptEncoding: botHeaderValue(headers, "accept-encoding"),
+		Referer:        botHeaderValue(headers, "referer"),
+		Connection:     botHeaderValue(headers, "connection"),
+		HasCookie:      botHeaderValue(headers, "cookie") != "",
+	}
+}
+
+func botHeaderValue(headers map[string]string, name string) string {
+	if value, ok := headers[name]; ok {
+		return value
+	}
+	if lower := strings.ToLower(name); lower != name {
+		if value, ok := headers[lower]; ok {
+			return value
 		}
 	}
-	return br
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }
 
 var goodBotUA = []*regexp.Regexp{

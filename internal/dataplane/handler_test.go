@@ -1,8 +1,18 @@
 package dataplane
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,16 +20,69 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
+	"My-OpenWaf/internal/appresource"
+	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/antireplay"
 	"My-OpenWaf/internal/waf/bot"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/pages"
 	"My-OpenWaf/internal/waf/ratelimit"
 )
+
+type trackingRequestBodyStream struct {
+	reader io.Reader
+	closed bool
+}
+
+func (s *trackingRequestBodyStream) Read(p []byte) (int, error) {
+	return s.reader.Read(p)
+}
+
+func (s *trackingRequestBodyStream) Close() error {
+	s.closed = true
+	return nil
+}
+
+type closeSensitiveRequestBodyStream struct {
+	reader io.Reader
+	closed bool
+}
+
+func (s *closeSensitiveRequestBodyStream) Read(p []byte) (int, error) {
+	if s.closed {
+		return 0, errors.New("stream closed before replay completed")
+	}
+	return s.reader.Read(p)
+}
+
+func (s *closeSensitiveRequestBodyStream) Close() error {
+	s.closed = true
+	return nil
+}
+
+type unexpectedEOFRequestBodyStream struct {
+	reader     io.Reader
+	emittedEOF bool
+}
+
+func (s *unexpectedEOFRequestBodyStream) Read(p []byte) (int, error) {
+	n, err := s.reader.Read(p)
+	if err == io.EOF && !s.emittedEOF {
+		s.emittedEOF = true
+		return n, io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+func (s *unexpectedEOFRequestBodyStream) Close() error {
+	return nil
+}
 
 func TestNormalizeAntiReplayActionKeepsChallengeActions(t *testing.T) {
 	cases := map[string]string{
@@ -34,6 +97,102 @@ func TestNormalizeAntiReplayActionKeepsChallengeActions(t *testing.T) {
 		if got := normalizeAntiReplayAction(input); got != want {
 			t.Fatalf("normalizeAntiReplayAction(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestRequestBodySamplePreservesBodyStreamForForwarding(t *testing.T) {
+	body := []byte(strings.Repeat("streamed-request-body-", 4096))
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetContentLength(len(body))
+	stream := &trackingRequestBodyStream{reader: bytes.NewReader(body)}
+	ctx.Request.SetBodyStream(stream, len(body))
+
+	sample, truncated, size := requestBodySample(ctx)
+	if len(sample) != requestInspectionBodyLimit {
+		t.Fatalf("sample length = %d, want %d", len(sample), requestInspectionBodyLimit)
+	}
+	if !truncated {
+		t.Fatal("expected truncated sample for oversized stream body")
+	}
+	if size != int64(len(body)) {
+		t.Fatalf("sample size = %d, want %d", size, len(body))
+	}
+	if !bytes.Equal(sample, body[:requestInspectionBodyLimit]) {
+		t.Fatal("sample prefix mismatch")
+	}
+
+	replayed, err := io.ReadAll(ctx.Request.BodyStream())
+	if err != nil {
+		t.Fatalf("read replayed body stream: %v", err)
+	}
+	if !bytes.Equal(replayed, body) {
+		t.Fatalf("replayed body mismatch: got %d bytes want %d bytes", len(replayed), len(body))
+	}
+	if err := ctx.Request.CloseBodyStream(); err != nil {
+		t.Fatalf("CloseBodyStream returned error: %v", err)
+	}
+	if !stream.closed {
+		t.Fatal("expected original stream closer to be invoked")
+	}
+}
+
+func TestRequestBodySampleDoesNotCloseOriginalStreamDuringRebind(t *testing.T) {
+	body := []byte(strings.Repeat("streamed-request-body-", 4096))
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetContentLength(len(body))
+	stream := &closeSensitiveRequestBodyStream{reader: bytes.NewReader(body)}
+	ctx.Request.SetBodyStream(stream, len(body))
+
+	sample, truncated, size := requestBodySample(ctx)
+	if len(sample) != requestInspectionBodyLimit {
+		t.Fatalf("sample length = %d, want %d", len(sample), requestInspectionBodyLimit)
+	}
+	if !truncated {
+		t.Fatal("expected truncated sample for oversized stream body")
+	}
+	if size != int64(len(body)) {
+		t.Fatalf("sample size = %d, want %d", size, len(body))
+	}
+	if stream.closed {
+		t.Fatal("original stream must not be closed during request body rebind")
+	}
+
+	replayed, err := io.ReadAll(ctx.Request.BodyStream())
+	if err != nil {
+		t.Fatalf("read replayed body stream: %v", err)
+	}
+	if !bytes.Equal(replayed, body) {
+		t.Fatalf("replayed body mismatch: got %d bytes want %d bytes", len(replayed), len(body))
+	}
+	if err := ctx.Request.CloseBodyStream(); err != nil {
+		t.Fatalf("CloseBodyStream returned error: %v", err)
+	}
+	if !stream.closed {
+		t.Fatal("expected original stream closer to be invoked after replay finished")
+	}
+}
+
+func TestRequestBodySampleCapturesPrefetchReadError(t *testing.T) {
+	body := []byte(strings.Repeat("prefetch-read-error-", 64))
+
+	ctx := app.NewContext(0)
+	stream := &unexpectedEOFRequestBodyStream{reader: bytes.NewReader(body)}
+	ctx.Request.SetBodyStream(stream, -1)
+
+	sample, truncated, size := requestBodySample(ctx)
+	if truncated {
+		t.Fatal("unexpected truncated sample for short stream body")
+	}
+	if !bytes.Equal(sample, body) {
+		t.Fatal("sample body mismatch")
+	}
+	if size != int64(len(body)) {
+		t.Fatalf("sample size = %d, want %d", size, len(body))
+	}
+	if err := requestBodySnapshotError(ctx); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("requestBodySnapshotError() = %v, want %v", err, io.ErrUnexpectedEOF)
 	}
 }
 
@@ -66,12 +225,258 @@ func TestAccessLogKeepsSpecificChallengeActions(t *testing.T) {
 		"chain_challenge",
 	} {
 		ctx := app.NewContext(0)
-		entry := buildAccessLogEntry(ctx, accessLogInfo{WAFAction: actionName, StatusCode: 422})
+		entry := buildAccessLogEntry(ctx, accessLogInfo{WAFAction: actionName, StatusCode: 403})
 		if entry.WAFAction != actionName {
 			t.Fatalf("access log WAFAction = %q, want %q", entry.WAFAction, actionName)
 		}
 	}
 }
+
+func TestAntiReplayChallengeActionsRenderSpecificChallengePages(t *testing.T) {
+	captchaManager := challenge.NewCaptchaManager(nil, 0)
+	defer captchaManager.Close()
+	shieldManager := challenge.NewShieldManager(captchaManager, nil, 1)
+	defer shieldManager.Close()
+	chainManager := challenge.NewChainChallengeManager(captchaManager, nil)
+
+	baseProtection := store.DefaultProtectionConfig()
+	baseProtection.CaptchaEnabled = true
+	baseProtection.CaptchaType = "math"
+	baseProtection.ShieldEnabled = true
+	baseProtection.ChainEnabled = true
+
+	opts := Options{
+		CaptchaManager: captchaManager,
+		ShieldManager:  shieldManager,
+		ChainManager:   chainManager,
+	}
+
+	cases := []struct {
+		name       string
+		actionName action.Type
+		wantParts  []string
+	}{
+		{
+			name:       "captcha",
+			actionName: action.CaptchaChallenge,
+			wantParts: []string{
+				`action="/__owaf/captcha/verify"`,
+				`name="__waf_captcha_session"`,
+				`Security Verification / 安全验证`,
+			},
+		},
+		{
+			name:       "shield",
+			actionName: action.ShieldChallenge,
+			wantParts: []string{
+				`action='/__owaf/shield/verify'`,
+				`__waf_shield_session`,
+				`shield-icon`,
+			},
+		},
+		{
+			name:       "chain",
+			actionName: action.ChainChallenge,
+			wantParts: []string{
+				`action='/__owaf/chain/verify'`,
+				`__waf_chain_session`,
+				`Environment Check / 环境检测`,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := app.NewContext(0)
+			ctx.Request.Header.SetMethod("GET")
+			ctx.Request.SetRequestURI("/guarded?from=anti-replay")
+
+			sn := &snapshot.Snapshot{Protection: baseProtection}
+			rt := &snapshot.SiteRuntime{Site: store.Site{ID: 1, Host: "example.com"}}
+			result := action.Result{Type: tc.actionName, Matched: true}
+
+			writeAntiReplayActionResponse(ctx, opts, sn, rt, "req-specific-challenge", string(tc.actionName), result, 403)
+
+			if got := ctx.Response.StatusCode(); got != 403 {
+				t.Fatalf("status = %d, want 403", got)
+			}
+			body := string(ctx.Response.Body())
+			for _, want := range tc.wantParts {
+				if !strings.Contains(body, want) {
+					t.Fatalf("response body missing %q", want)
+				}
+			}
+			if strings.Contains(body, "__waf_challenge_token") {
+				t.Fatalf("%s response used generic JS challenge token", tc.actionName)
+			}
+		})
+	}
+}
+
+func TestHandlerRuleChallengeActionsRenderSpecificChallengePages(t *testing.T) {
+	captchaManager := challenge.NewCaptchaManager(nil, 0)
+	defer captchaManager.Close()
+	shieldManager := challenge.NewShieldManager(captchaManager, nil, 1)
+	defer shieldManager.Close()
+	chainManager := challenge.NewChainChallengeManager(captchaManager, nil)
+
+	cases := []struct {
+		name       string
+		actionName store.RuleAction
+		wantParts  []string
+	}{
+		{
+			name:       "captcha",
+			actionName: store.ActionCaptchaChallenge,
+			wantParts: []string{
+				`action="/__owaf/captcha/verify"`,
+				`name="__waf_captcha_session"`,
+				`Security Verification / 安全验证`,
+			},
+		},
+		{
+			name:       "shield",
+			actionName: store.ActionShieldChallenge,
+			wantParts: []string{
+				`action='/__owaf/shield/verify'`,
+				`__waf_shield_session`,
+				`shield-icon`,
+			},
+		},
+		{
+			name:       "chain",
+			actionName: store.ActionChainChallenge,
+			wantParts: []string{
+				`action='/__owaf/chain/verify'`,
+				`__waf_chain_session`,
+				`Environment Check / 环境检测`,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			holder := &snapshot.Holder{}
+			protection := store.DefaultProtectionConfig()
+			protection.BotDetectionEnabled = false
+			protection.CaptchaEnabled = true
+			protection.CaptchaType = "math"
+			protection.ShieldEnabled = true
+			protection.ChainEnabled = true
+
+			rt := snapshot.SiteRuntime{
+				Site: store.Site{
+					ID:   1,
+					Host: "challenge-rule.example.com",
+					Bind: ":80",
+				},
+				Bind:     ":80",
+				PolicyID: 1,
+				Rules: []snapshot.CompiledRule{
+					{
+						ID:       81,
+						Phase:    store.PhaseCustom,
+						Kind:     "block_path_exact",
+						Arg:      "/guarded",
+						Action:   tc.actionName,
+						Priority: 1,
+					},
+				},
+				EffectiveProtection: &protection,
+			}
+			sn := &snapshot.Snapshot{
+				Revision:   1,
+				Protection: protection,
+				Sites: map[string]snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", "challenge-rule.example.com"): rt,
+				},
+			}
+			holder.Store(sn)
+
+			handler := Handler(Options{
+				Holder:         holder,
+				Engine:         engine.New(holder, nil, nil, nil),
+				Log:            slog.Default(),
+				Bind:           ":80",
+				CaptchaManager: captchaManager,
+				ShieldManager:  shieldManager,
+				ChainManager:   chainManager,
+			})
+
+			ctx := app.NewContext(0)
+			ctx.Request.Header.SetMethod("GET")
+			ctx.Request.SetRequestURI("/guarded?from=rule")
+			ctx.Request.Header.SetHost("challenge-rule.example.com")
+
+			handler(context.Background(), ctx)
+
+			if got := ctx.Response.StatusCode(); got != 403 {
+				t.Fatalf("status = %d, want 403", got)
+			}
+			body := string(ctx.Response.Body())
+			for _, want := range tc.wantParts {
+				if !strings.Contains(body, want) {
+					t.Fatalf("response body missing %q", want)
+				}
+			}
+			if strings.Contains(body, "__waf_challenge_token") {
+				t.Fatalf("%s response used generic JS challenge token", tc.actionName)
+			}
+		})
+	}
+}
+
+func TestBuildAccessLogEntryKeepsHTTPProtocol(t *testing.T) {
+	ctx := app.NewContext(0)
+	entry := buildAccessLogEntry(ctx, accessLogInfo{
+		SiteID:       1,
+		StatusCode:   200,
+		WAFAction:    "none",
+		HTTPProtocol: "h2",
+	})
+	if entry.HTTPProtocol != "h2" {
+		t.Fatalf("HTTPProtocol = %q, want %q", entry.HTTPProtocol, "h2")
+	}
+}
+
+func TestBuildAccessLogEntryPersistsTLSCipherSuites(t *testing.T) {
+	ctx := app.NewContext(0)
+	entry := buildAccessLogEntry(ctx, accessLogInfo{
+		SiteID:     1,
+		StatusCode: 403,
+		WAFAction:  "intercept",
+		TLSFingerprint: bot.TLSClientFingerprint{
+			CipherSuites: []uint16{4865, 4866},
+		},
+	})
+	if entry.TLSCipherSuites != "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384" {
+		t.Fatalf("TLSCipherSuites = %q, want canonical TLS suite names", entry.TLSCipherSuites)
+	}
+}
+
+func TestBuildAccessLogEntryPersistsTLSShapeMetadata(t *testing.T) {
+	ctx := app.NewContext(0)
+	entry := buildAccessLogEntry(ctx, accessLogInfo{
+		SiteID:     1,
+		StatusCode: 403,
+		WAFAction:  "intercept",
+		TLSFingerprint: bot.TLSClientFingerprint{
+			Extensions:   []uint16{0, 16, 43},
+			Curves:       []uint16{29, 23},
+			PointFormats: []uint8{0},
+		},
+	})
+	if entry.TLSExtensions != "0,16,43" {
+		t.Fatalf("TLSExtensions = %q, want %q", entry.TLSExtensions, "0,16,43")
+	}
+	if entry.TLSCurves != "29,23" {
+		t.Fatalf("TLSCurves = %q, want %q", entry.TLSCurves, "29,23")
+	}
+	if entry.TLSPointFormats != "0" {
+		t.Fatalf("TLSPointFormats = %q, want %q", entry.TLSPointFormats, "0")
+	}
+}
+
 
 func TestRecordSecurityEventAddsTLSMetadata(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -89,12 +494,16 @@ func TestRecordSecurityEventAddsTLSMetadata(t *testing.T) {
 	ctx.Request.Header.Set("Host", "127.0.0.1")
 	ctx.Request.Header.Set("User-Agent", "tls-security-event-test")
 	reqCtx := ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
-		JA3:        "771,4865-4866,0-11,29,0",
-		JA3Hash:    "0123456789abcdef0123456789abcdef",
-		JA4:        "t13d1516h2_aaaaaaaaaaaa_bbbbbbbbbbbb",
-		TLSVersion: "TLS13",
-		SNI:        "security-event.example",
-		ALPN:       []string{"h2", "http/1.1"},
+		JA3:          "771,4865-4866,0-11,29,0",
+		JA3Hash:      "0123456789abcdef0123456789abcdef",
+		JA4:          "t13d1516h2_aaaaaaaaaaaa_bbbbbbbbbbbb",
+		TLSVersion:   "TLS13",
+		SNI:          "security-event.example",
+		ALPN:         []string{"h2", "http/1.1"},
+		CipherSuites: []uint16{4865, 4866},
+		Extensions:   []uint16{0, 11, 29},
+		Curves:       []uint16{29, 23},
+		PointFormats: []uint8{0},
 	})
 	if fp, ok := tlsFingerprintFromContext(reqCtx); ok {
 		ctx.Set(tlsFingerprintContextKey, fp)
@@ -127,8 +536,637 @@ func TestRecordSecurityEventAddsTLSMetadata(t *testing.T) {
 	if got.TLSJA3Hash != "0123456789abcdef0123456789abcdef" || got.TLSJA4 == "" || got.TLSJA3 == "" {
 		t.Fatalf("security event missed TLS fingerprint: %#v", got)
 	}
+	if got.TLSCipherSuites != "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384" {
+		t.Fatalf("security event missed TLS cipher suites: %#v", got)
+	}
+	if got.TLSExtensions != "0,11,29" || got.TLSCurves != "29,23" || got.TLSPointFormats != "0" {
+		t.Fatalf("security event missed TLS shape metadata: %#v", got)
+	}
 	if got.HeaderOrder == "" {
 		t.Fatalf("security event missed header order: %#v", got)
+	}
+}
+
+func TestRecordSecurityEventAddsInternalHTTP3TLSMetadata(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate log db: %v", err)
+	}
+	writer := observability.NewUnifiedWriter(db, slog.Default())
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/h3-security-event?q=1")
+	ctx.Request.Header.Set("Host", "h3.example.com")
+	ctx.Request.Header.Set("User-Agent", "h3-security-event-test")
+	ctx.Request.Header.Set(InternalHTTP3ProtoHeader, "h3")
+	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
+	ctx.Request.Header.Set(InternalHTTP3TLSVersionHeader, "TLS13")
+	ctx.Request.Header.Set(InternalHTTP3TLSSNIHeader, "client.example")
+	ctx.Request.Header.Set(InternalHTTP3TLSALPNHeader, "h3")
+	ctx.Request.Header.Set(InternalHTTP3TLSJA3Header, "771,4865-4866,0-16-43,29,0")
+	ctx.Request.Header.Set(InternalHTTP3TLSJA3HashHeader, "0123456789abcdef0123456789abcdef")
+	ctx.Request.Header.Set(InternalHTTP3TLSJA4Header, "q13d0511h3_fea09b2e4d67_1234567890ab")
+	ctx.Request.Header.Set(InternalHTTP3TLSCipherSuitesHeader, "4865,4866")
+	ctx.Request.Header.Set(InternalHTTP3TLSExtensionsHeader, "0,16,43")
+	ctx.Request.Header.Set(InternalHTTP3TLSCurvesHeader, "29,23")
+	ctx.Request.Header.Set(InternalHTTP3TLSPointFormatsHeader, "0")
+	ctx.SetConn(&loopbackHertzConn{
+		Conn:       &testHertzConn{Conn: server},
+		localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443},
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+	})
+
+	applyInternalHTTP3RequestMetadata(ctx)
+
+	recordSecurityEvent(ctx, Options{Writer: writer}, store.SecurityEvent{
+		SiteID:     1,
+		RequestID:  "req-h3-tls-security",
+		ClientIP:   "127.0.0.1",
+		Host:       "h3.example.com",
+		Path:       "/h3-security-event",
+		Method:     "GET",
+		UserAgent:  "h3-security-event-test",
+		RuleIDStr:  "custom:h3:001",
+		Phase:      "custom",
+		Action:     "intercept",
+		Category:   "fingerprint",
+		MatchDesc:  "HTTP/3 fingerprint match",
+		StatusCode: 403,
+	})
+	writer.Close()
+
+	var got store.SecurityEvent
+	if err := db.Where("request_id = ?", "req-h3-tls-security").First(&got).Error; err != nil {
+		t.Fatalf("read security event: %v", err)
+	}
+	if got.TLSVersion != "TLS13" || got.TLSSNI != "client.example" || got.TLSALPN != "h3" {
+		t.Fatalf("internal HTTP/3 security event missed TLS metadata: %#v", got)
+	}
+	if got.TLSJA3 != "771,4865-4866,0-16-43,29,0" || got.TLSJA3Hash != "0123456789abcdef0123456789abcdef" || got.TLSJA4 != "q13d0511h3_fea09b2e4d67_1234567890ab" {
+		t.Fatalf("internal HTTP/3 security event missed JA3/JA4 metadata: %#v", got)
+	}
+	if got.TLSCipherSuites != "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384" {
+		t.Fatalf("internal HTTP/3 security event missed TLS cipher suites: %#v", got)
+	}
+	if got.TLSExtensions != "0,16,43" || got.TLSCurves != "29,23" || got.TLSPointFormats != "0" {
+		t.Fatalf("internal HTTP/3 security event missed TLS shape metadata: %#v", got)
+	}
+}
+
+func TestHandlerRecordsTLSSNIWarningForHostMismatch(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate log db: %v", err)
+	}
+	writer := observability.NewUnifiedWriter(db, slog.Default())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:         1,
+			Host:       "app.example.com",
+			Bind:       ":443",
+			TLSEnabled: true,
+		},
+		Bind:                ":443",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "app.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	handler := Handler(Options{
+		Holder: holder,
+		Engine: engine.New(holder, nil, nil, nil),
+		Writer: writer,
+		Log:    slog.Default(),
+		Bind:   ":443",
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/sni-warning")
+	ctx.Request.Header.SetHost("app.example.com")
+	ctx.Request.Header.Set("User-Agent", "tls-sni-warning-test")
+
+	handler(ContextWithTLSHandshakeInfo(context.Background(), "TLS13", "other.example.com", "h2"), ctx)
+	writer.Close()
+
+	if got := ctx.Response.StatusCode(); got != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", got, http.StatusNoContent)
+	}
+
+	var got store.SecurityEvent
+	if err := db.Where("site_id = ? AND rule_id_str = ?", 1, "tls:unknown_sni").First(&got).Error; err != nil {
+		t.Fatalf("read TLS SNI warning event: %v", err)
+	}
+	if got.Action != "observe" || got.Phase != "tls" || got.Category != "tls_sni" {
+		t.Fatalf("unexpected TLS SNI warning classification: %#v", got)
+	}
+	if got.Host != "app.example.com" || got.TLSSNI != "other.example.com" || got.TLSVersion != "TLS13" || got.TLSALPN != "h2" {
+		t.Fatalf("unexpected TLS SNI warning metadata: %#v", got)
+	}
+	if got.Path != "/sni-warning" || got.Method != "GET" || got.UserAgent != "tls-sni-warning-test" {
+		t.Fatalf("unexpected TLS SNI request metadata: %#v", got)
+	}
+	if got.MatchDesc != "tls_sni=other.example.com host=app.example.com" {
+		t.Fatalf("match_desc = %q", got.MatchDesc)
+	}
+}
+
+func TestHandlerSkipsTLSSNIWarningWhenHostMatches(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate log db: %v", err)
+	}
+	writer := observability.NewUnifiedWriter(db, slog.Default())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:         1,
+			Host:       "app.example.com",
+			Bind:       ":443",
+			TLSEnabled: true,
+		},
+		Bind:                ":443",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "app.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	handler := Handler(Options{
+		Holder: holder,
+		Engine: engine.New(holder, nil, nil, nil),
+		Writer: writer,
+		Log:    slog.Default(),
+		Bind:   ":443",
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/sni-ok")
+	ctx.Request.Header.SetHost("app.example.com")
+
+	handler(ContextWithTLSHandshakeInfo(context.Background(), "TLS13", "app.example.com", "h2"), ctx)
+	writer.Close()
+
+	if got := ctx.Response.StatusCode(); got != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", got, http.StatusNoContent)
+	}
+
+	var count int64
+	if err := db.Model(&store.SecurityEvent{}).Where("category = ?", "tls_sni").Count(&count).Error; err != nil {
+		t.Fatalf("count TLS SNI warning events: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("TLS SNI warning event count = %d, want 0", count)
+	}
+}
+
+func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "recorded_resources.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("upstream method = %s, want POST", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Set-Cookie", "sid=resp-secret")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"token":"resp-secret","status":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:   1,
+			Host: "app.example.com",
+			Bind: ":80",
+		},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 11, Target: store.AppRouteTargetRequestBody, Op: store.AppRouteOpContains, Pattern: `"password":"secret"`},
+			{ID: 12, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: `"token":"resp-secret"`},
+			{ID: 13, Target: store.AppRouteTargetFingerprint, Op: store.AppRouteOpContains, Pattern: "ja3-match-value"},
+		},
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder:               holder,
+		Engine:               eng,
+		Log:                  slog.Default(),
+		Bind:                 ":80",
+		RecordedResourceRepo: recordedRepo,
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("/submit?page=1&token=query-secret")
+	ctx.Request.Header.SetHost("app.example.com")
+	ctx.Request.Header.Set("User-Agent", "handler-recorded-resource-test")
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.Header.Set("Authorization", "Bearer req-secret")
+	ctx.Request.SetBody([]byte(`{"username":"alice","password":"secret"}`))
+
+	handler(ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+		TLSVersion: "TLS13",
+		SNI:        "client.example",
+		ALPN:       []string{"h3"},
+		JA3Hash:    "ja3-match-value",
+		JA4:        "ja4-match-value",
+	}), ctx)
+
+	if got := ctx.Response.StatusCode(); got != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", got, http.StatusCreated)
+	}
+
+	var rec store.RecordedResource
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err = db.Where("site_id = ? AND method = ? AND host = ? AND path = ?", 1, "POST", "app.example.com", "/submit").First(&rec).Error
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			t.Fatalf("load recorded resource: %v", err)
+		}
+		if time.Now().After(deadline) {
+			var rows []store.RecordedResource
+			if listErr := db.Order("id ASC").Find(&rows).Error; listErr != nil {
+				t.Fatalf("timed out waiting for recorded resource row; list rows failed: %v", listErr)
+			}
+			t.Fatalf("timed out waiting for recorded resource row, existing rows=%#v", rows)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if rec.MatchedRuleIDs != "11,12,13" || rec.PrimaryRuleID != 11 {
+		t.Fatalf("unexpected matched rule metadata: %#v", rec)
+	}
+	if rec.TLSVersion != "TLS13" || rec.TLSSNI != "client.example" || rec.TLSALPN != "h3" {
+		t.Fatalf("unexpected TLS metadata: %#v", rec)
+	}
+	if rec.JA3Hash != "ja3-match-value" || rec.JA4 != "ja4-match-value" {
+		t.Fatalf("unexpected TLS fingerprint metadata: %#v", rec)
+	}
+	if rec.QueryString != "page=1&token=%5Bredacted%5D" {
+		t.Fatalf("QueryString = %q, want sanitized query", rec.QueryString)
+	}
+	if strings.Contains(rec.RequestHeadersJSON, "req-secret") || !strings.Contains(rec.RequestHeadersJSON, `[redacted]`) {
+		t.Fatalf("request_headers_json should redact secrets, got %q", rec.RequestHeadersJSON)
+	}
+	if strings.Contains(rec.ResponseHeadersJSON, "resp-secret") || !strings.Contains(rec.ResponseHeadersJSON, `[redacted]`) {
+		t.Fatalf("response_headers_json should redact secrets, got %q", rec.ResponseHeadersJSON)
+	}
+	if strings.Contains(rec.RequestBodySnippet, "secret") || !strings.Contains(rec.RequestBodySnippet, `[redacted]`) {
+		t.Fatalf("request_body_snippet should redact secrets, got %q", rec.RequestBodySnippet)
+	}
+	if strings.Contains(rec.ResponseBodySnippet, "resp-secret") || !strings.Contains(rec.ResponseBodySnippet, `[redacted]`) {
+		t.Fatalf("response_body_snippet should redact secrets, got %q", rec.ResponseBodySnippet)
+	}
+}
+
+func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "recorded_resources_h3.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:         1,
+			Host:       "h3-resource.example.com",
+			Bind:       ":443",
+			TLSEnabled: true,
+		},
+		Bind:                ":443",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "h3-resource.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder:               holder,
+		Engine:               eng,
+		Log:                  slog.Default(),
+		Bind:                 ":443",
+		RecordedResourceRepo: recordedRepo,
+	})
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/assets/app.js?v=1")
+	ctx.Request.Header.SetHost("h3-resource.example.com")
+	ctx.Request.Header.Set(InternalHTTP3ProtoHeader, "h3")
+	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
+	ctx.Request.Header.Set(InternalHTTP3TLSVersionHeader, "TLS13")
+	ctx.Request.Header.Set(InternalHTTP3TLSSNIHeader, "client.example")
+	ctx.Request.Header.Set(InternalHTTP3TLSALPNHeader, "h3")
+	ctx.Request.Header.Set(InternalHTTP3TLSJA3Header, "771,4865-4866,0-16-43,29,0")
+	ctx.Request.Header.Set(InternalHTTP3TLSJA3HashHeader, "0123456789abcdef0123456789abcdef")
+	ctx.Request.Header.Set(InternalHTTP3TLSJA4Header, "q13d0511h3_fea09b2e4d67_1234567890ab")
+	ctx.SetConn(&loopbackHertzConn{
+		Conn: &testHertzConn{Conn: bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{
+			TLSVersion: "TLS13",
+			SNI:        "proxy.example",
+			ALPN:       []string{"h2"},
+			JA3Hash:    "proxy-ja3",
+			JA4:        "proxy-ja4",
+		})},
+		localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443},
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+	})
+
+	handler(context.Background(), ctx)
+
+	if got := ctx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("status = %d, want %d", got, http.StatusOK)
+	}
+
+	var rec store.RecordedResource
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err = db.Where("site_id = ? AND method = ? AND host = ? AND path = ?", 1, "GET", "h3-resource.example.com", "/assets/app.js").First(&rec).Error
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			t.Fatalf("load recorded resource: %v", err)
+		}
+		if time.Now().After(deadline) {
+			var rows []store.RecordedResource
+			if listErr := db.Order("id ASC").Find(&rows).Error; listErr != nil {
+				t.Fatalf("timed out waiting for recorded resource row; list rows failed: %v", listErr)
+			}
+			t.Fatalf("timed out waiting for recorded resource row, existing rows=%#v", rows)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if rec.TLSVersion != "TLS13" || rec.TLSSNI != "client.example" || rec.TLSALPN != "h3" {
+		t.Fatalf("recorded resource missed internal HTTP/3 TLS metadata: %#v", rec)
+	}
+	if rec.JA3Hash != "0123456789abcdef0123456789abcdef" || rec.JA4 != "q13d0511h3_fea09b2e4d67_1234567890ab" {
+		t.Fatalf("recorded resource missed internal HTTP/3 JA3/JA4 metadata: %#v", rec)
+	}
+	if rec.QueryString != "v=1" {
+		t.Fatalf("QueryString = %q, want %q", rec.QueryString, "v=1")
+	}
+}
+
+func TestHandlerRecordedResourcesIncludeInterceptedRequestsWithoutTreatingLocalBlockPageAsUpstreamResponse(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "recorded_resources_intercept.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:   1,
+			Host: "blocked.example.com",
+			Bind: ":80",
+		},
+		Bind:     ":80",
+		PolicyID: 1,
+		Rules: []snapshot.CompiledRule{
+			{
+				ID:       41,
+				Phase:    store.PhaseCustom,
+				Kind:     "block_path_exact",
+				Arg:      "/blocked",
+				Action:   store.ActionIntercept,
+				Priority: 1,
+			},
+		},
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 71, Target: store.AppRouteTargetRequestMethod, Op: store.AppRouteOpEq, Pattern: "POST"},
+			{ID: 72, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: "访问被拒绝"},
+		},
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "blocked.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder:               holder,
+		Engine:               eng,
+		Log:                  slog.Default(),
+		Bind:                 ":80",
+		RecordedResourceRepo: recordedRepo,
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("/blocked?redirect=%2Fconsole&token=req-secret")
+	ctx.Request.Header.SetHost("blocked.example.com")
+	ctx.Request.Header.Set("User-Agent", "handler-intercept-recorded-resource-test")
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.SetBody([]byte(`{"token":"body-secret","status":"attempt"}`))
+
+	handler(ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+		TLSVersion: "TLS13",
+		SNI:        "blocked.example.com",
+		ALPN:       []string{"h2"},
+		JA3Hash:    "ja3-intercept-value",
+		JA4:        "ja4-intercept-value",
+	}), ctx)
+
+	if got := ctx.Response.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+	}
+
+	var rec store.RecordedResource
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err = db.Where("site_id = ? AND method = ? AND host = ? AND path = ?", 1, "POST", "blocked.example.com", "/blocked").First(&rec).Error
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			t.Fatalf("load recorded resource: %v", err)
+		}
+		if time.Now().After(deadline) {
+			var rows []store.RecordedResource
+			if listErr := db.Order("id ASC").Find(&rows).Error; listErr != nil {
+				t.Fatalf("timed out waiting for recorded resource row; list rows failed: %v", listErr)
+			}
+			t.Fatalf("timed out waiting for recorded resource row, existing rows=%#v", rows)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if rec.MatchedRuleIDs != "71" || rec.PrimaryRuleID != 71 {
+		t.Fatalf("unexpected matched rule metadata: %#v", rec)
+	}
+	if rec.TLSVersion != "TLS13" || rec.TLSSNI != "blocked.example.com" || rec.TLSALPN != "h2" {
+		t.Fatalf("unexpected TLS metadata: %#v", rec)
+	}
+	if rec.JA3Hash != "ja3-intercept-value" || rec.JA4 != "ja4-intercept-value" {
+		t.Fatalf("unexpected TLS fingerprint metadata: %#v", rec)
+	}
+	if rec.QueryString != "redirect=%2Fconsole&token=%5Bredacted%5D" {
+		t.Fatalf("QueryString = %q, want sanitized query", rec.QueryString)
+	}
+	if strings.Contains(rec.RequestBodySnippet, "body-secret") || !strings.Contains(rec.RequestBodySnippet, `[redacted]`) {
+		t.Fatalf("request_body_snippet should redact secrets, got %q", rec.RequestBodySnippet)
+	}
+	if !strings.Contains(rec.ResponseBodySnippet, "访问被拒绝") {
+		t.Fatalf("response_body_snippet should keep local intercept page preview, got %q", rec.ResponseBodySnippet)
+	}
+}
+
+func TestHandlerRejectsTooManyRequestHeaders(t *testing.T) {
+	holder := &snapshot.Holder{}
+	sn := &snapshot.Snapshot{
+		Revision:    1,
+		Protection:  store.DefaultProtectionConfig(),
+		HTTP2Config: snapshot.HTTP2Config{MaxHeaderFields: 3},
+	}
+	holder.Store(sn)
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder: holder,
+		Engine: eng,
+		Log:    slog.Default(),
+		Bind:   ":443",
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/")
+	ctx.Request.Header.SetHost("headers.example.com")
+	for i := 0; i < 4; i++ {
+		ctx.Request.Header.Add("X-Header-"+strconv.Itoa(i), "v")
+	}
+
+	handler(context.Background(), ctx)
+
+	if got := ctx.Response.StatusCode(); got != 431 {
+		t.Fatalf("status = %d, want 431", got)
+	}
+	if got := string(ctx.Response.Body()); got != "too many request header fields" {
+		t.Fatalf("body = %q, want %q", got, "too many request header fields")
 	}
 }
 
@@ -144,6 +1182,682 @@ func TestScrubResponseHopByHopHeaders(t *testing.T) {
 		if got := string(ctx.Response.Header.Peek(key)); got != "" {
 			t.Fatalf("%s header was not scrubbed: %q", key, got)
 		}
+	}
+}
+
+
+
+func TestHandlerHEADCacheMissUsesStreamingForwardPath(t *testing.T) {
+	payload := []byte(strings.Repeat("head-cache-miss-body-", 128))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Errorf("upstream method = %s, want HEAD", r.Method)
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.Header().Set("X-Upstream", "head-cache-miss")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:   1,
+			Host: "cache.example.com",
+			Bind: ":80",
+		},
+		Bind:         ":80",
+		UpstreamURLs: []string{upstream.URL},
+		CacheEnabled: true,
+		CacheRules: []store.SiteCacheRule{
+			{Type: "prefix", Value: "/cacheable", TTL: 60},
+		},
+		EffectiveProtection: &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	responseCache := cache.NewResponseCache(16, 60)
+	defer responseCache.Close()
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder:        holder,
+		Engine:        eng,
+		Log:           slog.Default(),
+		Bind:          ":80",
+		ResponseCache: responseCache,
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("HEAD")
+	ctx.Request.SetRequestURI("/cacheable/head.txt")
+	ctx.Request.Header.SetHost("cache.example.com")
+
+	handler(context.Background(), ctx)
+
+	if got := ctx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("status = %d, want %d", got, http.StatusOK)
+	}
+	if got := len(ctx.Response.Body()); got != 0 {
+		t.Fatalf("HEAD response body length = %d, want 0", got)
+	}
+	if got := string(ctx.Response.Header.Peek("Content-Encoding")); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	if got := string(ctx.Response.Header.Peek("Content-Length")); got != strconv.Itoa(len(payload)) {
+		t.Fatalf("Content-Length = %q, want %d", got, len(payload))
+	}
+	if got := string(ctx.Response.Header.Peek("X-Upstream")); got != "head-cache-miss" {
+		t.Fatalf("X-Upstream = %q, want head-cache-miss", got)
+	}
+	if entries, _ := responseCache.Stats(); entries != 0 {
+		t.Fatalf("response cache entries = %d, want 0", entries)
+	}
+}
+
+func TestHandlerHEADCacheHitWritesMetadataWithoutBody(t *testing.T) {
+	payload := []byte(strings.Repeat("head-cache-hit-body-", 128))
+	var upstreamRequests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
+		if r.Method != http.MethodGet {
+			t.Errorf("upstream method = %s, want GET", r.Method)
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:   1,
+			Host: "cache.example.com",
+			Bind: ":80",
+		},
+		Bind:         ":80",
+		UpstreamURLs: []string{upstream.URL},
+		CacheEnabled: true,
+		CacheRules: []store.SiteCacheRule{
+			{Type: "prefix", Value: "/cacheable", TTL: 60},
+		},
+		EffectiveProtection: &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	responseCache := cache.NewResponseCache(16, 60)
+	defer responseCache.Close()
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder:        holder,
+		Engine:        eng,
+		Log:           slog.Default(),
+		Bind:          ":80",
+		ResponseCache: responseCache,
+	})
+
+	getCtx := app.NewContext(0)
+	getCtx.Request.Header.SetMethod("GET")
+	getCtx.Request.SetRequestURI("/cacheable/head-hit.txt")
+	getCtx.Request.Header.SetHost("cache.example.com")
+
+	handler(context.Background(), getCtx)
+
+	if got := getCtx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("GET status = %d, want %d", got, http.StatusOK)
+	}
+	if !bytes.Equal(getCtx.Response.Body(), payload) {
+		t.Fatalf("GET body length = %d, want %d", len(getCtx.Response.Body()), len(payload))
+	}
+	if entries, _ := responseCache.Stats(); entries != 1 {
+		t.Fatalf("response cache entries after GET = %d, want 1", entries)
+	}
+
+	headCtx := app.NewContext(0)
+	headCtx.Request.Header.SetMethod("HEAD")
+	headCtx.Request.SetRequestURI("/cacheable/head-hit.txt")
+	headCtx.Request.Header.SetHost("cache.example.com")
+
+	handler(context.Background(), headCtx)
+
+	if got := headCtx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("HEAD status = %d, want %d", got, http.StatusOK)
+	}
+	if got := len(headCtx.Response.Body()); got != 0 {
+		t.Fatalf("HEAD response body length = %d, want 0", got)
+	}
+	if got := string(headCtx.Response.Header.Peek("Content-Length")); got != strconv.Itoa(len(payload)) {
+		t.Fatalf("HEAD Content-Length = %q, want %d", got, len(payload))
+	}
+	if got := string(headCtx.Response.Header.Peek("Content-Type")); got != "text/plain; charset=utf-8" {
+		t.Fatalf("HEAD Content-Type = %q, want text/plain; charset=utf-8", got)
+	}
+	if got := upstreamRequests.Load(); got != 1 {
+		t.Fatalf("upstream requests = %d, want 1", got)
+	}
+}
+
+func TestHandlerCacheHitBypassesRangeAndConditionalRequests(t *testing.T) {
+	basePayload := []byte("cacheable-full-body")
+	tests := []struct {
+		name       string
+		headerName string
+		headerVal  string
+		wantStatus int
+		wantBody   []byte
+	}{
+		{
+			name:       "range",
+			headerName: "Range",
+			headerVal:  "bytes=0-4",
+			wantStatus: http.StatusPartialContent,
+			wantBody:   []byte("cache"),
+		},
+		{
+			name:       "if-none-match",
+			headerName: "If-None-Match",
+			headerVal:  `"cache-etag"`,
+			wantStatus: http.StatusNotModified,
+			wantBody:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var upstreamRequests atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamRequests.Add(1)
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.Header().Set("ETag", `"cache-etag"`)
+
+				switch {
+				case r.Header.Get("Range") != "":
+					if got := r.Header.Get("Range"); got != tt.headerVal {
+						t.Errorf("Range = %q, want %q", got, tt.headerVal)
+					}
+					w.Header().Set("Content-Range", "bytes 0-4/19")
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = w.Write(tt.wantBody)
+				case r.Header.Get("If-None-Match") != "":
+					if got := r.Header.Get("If-None-Match"); got != tt.headerVal {
+						t.Errorf("If-None-Match = %q, want %q", got, tt.headerVal)
+					}
+					w.WriteHeader(http.StatusNotModified)
+				default:
+					_, _ = w.Write(basePayload)
+				}
+			}))
+			defer upstream.Close()
+
+			holder := &snapshot.Holder{}
+			protection := store.DefaultProtectionConfig()
+			protection.BotDetectionEnabled = false
+			rt := snapshot.SiteRuntime{
+				Site: store.Site{
+					ID:   1,
+					Host: "cache.example.com",
+					Bind: ":80",
+				},
+				Bind:         ":80",
+				UpstreamURLs: []string{upstream.URL},
+				CacheEnabled: true,
+				CacheRules: []store.SiteCacheRule{
+					{Type: "prefix", Value: "/cacheable", TTL: 60},
+				},
+				EffectiveProtection: &protection,
+			}
+			sn := &snapshot.Snapshot{
+				Revision:   1,
+				Protection: protection,
+				Sites: map[string]snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+				},
+			}
+			holder.Store(sn)
+
+			responseCache := cache.NewResponseCache(16, 60)
+			defer responseCache.Close()
+
+			eng := engine.New(holder, nil, nil, nil)
+			handler := Handler(Options{
+				Holder:        holder,
+				Engine:        eng,
+				Log:           slog.Default(),
+				Bind:          ":80",
+				ResponseCache: responseCache,
+			})
+
+			getCtx := app.NewContext(0)
+			getCtx.Request.Header.SetMethod("GET")
+			getCtx.Request.SetRequestURI("/cacheable/item.txt")
+			getCtx.Request.Header.SetHost("cache.example.com")
+
+			handler(context.Background(), getCtx)
+
+			if got := getCtx.Response.StatusCode(); got != http.StatusOK {
+				t.Fatalf("GET status = %d, want %d", got, http.StatusOK)
+			}
+			if !bytes.Equal(getCtx.Response.Body(), basePayload) {
+				t.Fatalf("GET body = %q, want %q", getCtx.Response.Body(), basePayload)
+			}
+			if entries, _ := responseCache.Stats(); entries != 1 {
+				t.Fatalf("response cache entries after GET = %d, want 1", entries)
+			}
+
+			bypassCtx := app.NewContext(0)
+			bypassCtx.Request.Header.SetMethod("GET")
+			bypassCtx.Request.SetRequestURI("/cacheable/item.txt")
+			bypassCtx.Request.Header.SetHost("cache.example.com")
+			bypassCtx.Request.Header.Set(tt.headerName, tt.headerVal)
+
+			handler(context.Background(), bypassCtx)
+
+			if got := bypassCtx.Response.StatusCode(); got != tt.wantStatus {
+				t.Fatalf("%s status = %d, want %d", tt.name, got, tt.wantStatus)
+			}
+			if !bytes.Equal(bypassCtx.Response.Body(), tt.wantBody) {
+				t.Fatalf("%s body = %q, want %q", tt.name, bypassCtx.Response.Body(), tt.wantBody)
+			}
+			if got := upstreamRequests.Load(); got != 2 {
+				t.Fatalf("upstream requests = %d, want 2", got)
+			}
+		})
+	}
+}
+
+func TestHandlerServesStaleCacheWhenUpstreamFailsAfterCacheExpiry(t *testing.T) {
+	staleBody := []byte("stale cached body")
+	var upstreamRequests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Length", strconv.Itoa(len(staleBody)))
+		_, _ = w.Write(staleBody)
+	}))
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:   1,
+			Host: "cache.example.com",
+			Bind: ":80",
+		},
+		Bind:         ":80",
+		UpstreamURLs: []string{upstream.URL},
+		CacheEnabled: true,
+		CacheRules: []store.SiteCacheRule{
+			{Type: "prefix", Value: "/cacheable", TTL: 1},
+		},
+		EffectiveProtection: &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	responseCache := cache.NewResponseCache(16, 60)
+	defer responseCache.Close()
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder:        holder,
+		Engine:        eng,
+		Log:           slog.Default(),
+		Bind:          ":80",
+		ResponseCache: responseCache,
+	})
+
+	fillCtx := app.NewContext(0)
+	fillCtx.Request.Header.SetMethod("GET")
+	fillCtx.Request.SetRequestURI("/cacheable/stale.txt")
+	fillCtx.Request.Header.SetHost("cache.example.com")
+
+	handler(context.Background(), fillCtx)
+
+	if got := fillCtx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("fill status = %d, want %d", got, http.StatusOK)
+	}
+	if !bytes.Equal(fillCtx.Response.Body(), staleBody) {
+		t.Fatalf("fill body = %q, want %q", fillCtx.Response.Body(), staleBody)
+	}
+	if got := upstreamRequests.Load(); got != 1 {
+		t.Fatalf("upstream requests after fill = %d, want 1", got)
+	}
+
+	time.Sleep(2 * time.Second)
+	upstream.Close()
+
+	staleCtx := app.NewContext(0)
+	staleCtx.Request.Header.SetMethod("GET")
+	staleCtx.Request.SetRequestURI("/cacheable/stale.txt")
+	staleCtx.Request.Header.SetHost("cache.example.com")
+
+	handler(context.Background(), staleCtx)
+
+	if got := staleCtx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("stale status = %d, want %d", got, http.StatusOK)
+	}
+	if !bytes.Equal(staleCtx.Response.Body(), staleBody) {
+		t.Fatalf("stale body = %q, want %q", staleCtx.Response.Body(), staleBody)
+	}
+	if got := string(staleCtx.Response.Header.Peek("Content-Type")); got != "text/plain; charset=utf-8" {
+		t.Fatalf("stale Content-Type = %q, want text/plain; charset=utf-8", got)
+	}
+	if got := upstreamRequests.Load(); got != 1 {
+		t.Fatalf("upstream requests after stale fallback = %d, want 1", got)
+	}
+}
+
+func TestHandlerCacheMissLargeResponseStreamsWithoutCaching(t *testing.T) {
+	payload := []byte(strings.Repeat("large-cache-miss-body-", 6000))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("upstream method = %s, want GET", r.Method)
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:   1,
+			Host: "cache.example.com",
+			Bind: ":80",
+		},
+		Bind:         ":80",
+		UpstreamURLs: []string{upstream.URL},
+		CacheEnabled: true,
+		CacheRules: []store.SiteCacheRule{
+			{Type: "prefix", Value: "/cacheable", TTL: 60},
+		},
+		EffectiveProtection: &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	responseCache := cache.NewResponseCache(1, 60)
+	defer responseCache.Close()
+	if int64(len(payload)) <= responseCache.MaxEntryBodySize() {
+		t.Fatalf("test payload length = %d, want above cache max entry size %d", len(payload), responseCache.MaxEntryBodySize())
+	}
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder:        holder,
+		Engine:        eng,
+		Log:           slog.Default(),
+		Bind:          ":80",
+		ResponseCache: responseCache,
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/cacheable/large.txt")
+	ctx.Request.Header.SetHost("cache.example.com")
+
+	handler(context.Background(), ctx)
+
+	if got := ctx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("status = %d, want %d", got, http.StatusOK)
+	}
+	if !bytes.Equal(ctx.Response.Body(), payload) {
+		t.Fatalf("response body length = %d, want %d", len(ctx.Response.Body()), len(payload))
+	}
+	if got := string(ctx.Response.Header.Peek("Content-Length")); got != "" {
+		t.Fatalf("Content-Length = %q, want empty for streamed overflow response", got)
+	}
+	if entries, _ := responseCache.Stats(); entries != 0 {
+		t.Fatalf("response cache entries = %d, want 0", entries)
+	}
+}
+
+func TestHandlerMatchesTLSHandshakeMetadataRuleWithoutClientHelloFingerprint(t *testing.T) {
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:         1,
+			Host:       "tls-rule.example.com",
+			Bind:       ":443",
+			TLSEnabled: true,
+		},
+		Bind:     ":443",
+		PolicyID: 1,
+		Rules: []snapshot.CompiledRule{
+			{
+				ID:       11,
+				Phase:    store.PhaseCustom,
+				Kind:     "tls_sni",
+				Arg:      "client.example",
+				Action:   store.ActionIntercept,
+				Priority: 1,
+			},
+		},
+		EffectiveProtection: &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "tls-rule.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder: holder,
+		Engine: eng,
+		Log:    slog.Default(),
+		Bind:   ":443",
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/")
+	ctx.Request.Header.SetHost("tls-rule.example.com")
+
+	handler(ContextWithTLSHandshakeInfo(context.Background(), "TLS13", "client.example", "h2"), ctx)
+
+	if ctx.Response.StatusCode() != 403 {
+		t.Fatalf("status = %d, want 403", ctx.Response.StatusCode())
+	}
+}
+
+func TestHandlerMatchesInternalHTTP3TLSFingerprintRules(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		rules   []snapshot.CompiledRule
+	}{
+		{
+			name: "ja3 hash rule",
+			headers: map[string]string{
+				InternalHTTP3TLSVersionHeader: "TLS13",
+				InternalHTTP3TLSJA3HashHeader: "0123456789abcdef0123456789abcdef",
+				InternalHTTP3TLSJA4Header:     "q13d0511h3_fea09b2e4d67_1234567890ab",
+			},
+			rules: []snapshot.CompiledRule{
+				{
+					ID:       11,
+					Phase:    store.PhaseCustom,
+					Kind:     "tls_ja3_hash",
+					Arg:      "0123456789abcdef0123456789abcdef",
+					Action:   store.ActionIntercept,
+					Priority: 1,
+				},
+			},
+		},
+		{
+			name: "cipher suites rule",
+			headers: map[string]string{
+				InternalHTTP3TLSVersionHeader:      "TLS13",
+				InternalHTTP3TLSCipherSuitesHeader: "4865,4866",
+				InternalHTTP3TLSCurvesHeader:       "29,23",
+			},
+			rules: []snapshot.CompiledRule{
+				{
+					ID:       12,
+					Phase:    store.PhaseCustom,
+					Kind:     "tls_cipher_suites",
+					Arg:      "TLS_AES_128_GCM_SHA256",
+					Action:   store.ActionIntercept,
+					Priority: 1,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			holder := &snapshot.Holder{}
+			protection := store.DefaultProtectionConfig()
+			protection.BotDetectionEnabled = false
+			rt := snapshot.SiteRuntime{
+				Site: store.Site{
+					ID:         1,
+					Host:       "h3-rule.example.com",
+					Bind:       ":443",
+					TLSEnabled: true,
+				},
+				Bind:                ":443",
+				PolicyID:            1,
+				Rules:               tt.rules,
+				EffectiveProtection: &protection,
+			}
+			sn := &snapshot.Snapshot{
+				Revision:   1,
+				Protection: protection,
+				Sites: map[string]snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":443", "h3-rule.example.com"): rt,
+				},
+			}
+			holder.Store(sn)
+
+			eng := engine.New(holder, nil, nil, nil)
+			handler := Handler(Options{
+				Holder: holder,
+				Engine: eng,
+				Log:    slog.Default(),
+				Bind:   ":443",
+			})
+
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+
+			ctx := app.NewContext(0)
+			ctx.Request.Header.SetMethod("GET")
+			ctx.Request.SetRequestURI("/")
+			ctx.Request.Header.SetHost("h3-rule.example.com")
+			ctx.Request.Header.Set(InternalHTTP3ProtoHeader, "h3")
+			ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
+			for key, value := range tt.headers {
+				ctx.Request.Header.Set(key, value)
+			}
+			ctx.SetConn(&loopbackHertzConn{
+				Conn: &testHertzConn{Conn: bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{
+					TLSVersion: "TLS13",
+					JA3Hash:    "proxy-ja3",
+					JA4:        "proxy-ja4",
+				})},
+				localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443},
+				remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+			})
+
+			handler(context.Background(), ctx)
+
+			if ctx.Response.StatusCode() != 403 {
+				t.Fatalf("status = %d, want 403", ctx.Response.StatusCode())
+			}
+		})
+	}
+}
+
+func TestHandlerAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *testing.T) {
+	holder := &snapshot.Holder{}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: store.DefaultProtectionConfig(),
+		Sites:      make(map[string]snapshot.SiteRuntime),
+	}
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:               1,
+			Host:             "ttl.example.com",
+			AntiReplayTTL:    1,
+			AntiReplayAction: "shield_challenge",
+		},
+		Bind:              ":80",
+		AntiReplayEnabled: true,
+	}
+	sn.Sites[snapshot.SiteMapKey(":80", "ttl.example.com")] = rt
+	holder.Store(sn)
+
+	eng := engine.New(holder, nil, nil, nil)
+	mgr := antireplay.NewAntiReplayManager("handler-anti-replay-ttl", nil, 5*time.Minute)
+	eng.SetAntiReplayManager(mgr)
+
+	nonce := mgr.GenerateNonce("")
+	time.Sleep(1100 * time.Millisecond)
+
+	handler := Handler(Options{
+		Holder: holder,
+		Engine: eng,
+		Log:    slog.Default(),
+		Bind:   ":80",
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/")
+	ctx.Request.Header.SetHost("ttl.example.com")
+	ctx.Request.Header.Set("X-Nonce", nonce)
+
+	handler(context.Background(), ctx)
+
+	if ctx.Response.StatusCode() != 403 {
+		t.Fatalf("status = %d, want 403", ctx.Response.StatusCode())
 	}
 }
 

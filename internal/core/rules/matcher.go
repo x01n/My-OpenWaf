@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -10,11 +11,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"My-OpenWaf/internal/tlsmeta"
 )
 
 // Matcher tests a single condition against request fields.
 type Matcher interface {
-	Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool
+	Match(ctx MatchCtx) bool
 }
 
 type ccRateMatcher struct {
@@ -33,8 +36,8 @@ type ccRateState struct {
 	blockedTill int64
 }
 
-func (m *ccRateMatcher) Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool {
-	if m.child == nil || !m.child.Match(ip, method, path, query, headers, body) {
+func (m *ccRateMatcher) Match(ctx MatchCtx) bool {
+	if m.child == nil || !m.child.Match(ctx) {
 		return false
 	}
 	if m.window <= 0 || m.threshold <= 0 {
@@ -42,7 +45,7 @@ func (m *ccRateMatcher) Match(ip net.IP, method, path, query string, headers map
 	}
 
 	now := time.Now().Unix()
-	key := ccRateKey(ip, headers)
+	key := ccRateKey(ctx)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.clients == nil {
@@ -74,24 +77,39 @@ func (m *ccRateMatcher) Match(ip net.IP, method, path, query string, headers map
 	return true
 }
 
-func ccRateKey(ip net.IP, headers map[string]string) string {
+func ccRateKey(ctx MatchCtx) string {
 	client := ""
-	if ip != nil {
-		client = ip.String()
+	if ctx.ClientIP != nil {
+		client = ctx.ClientIP.String()
 	}
-	return client + "|" + headerValue(headers, "host")
+	return client + "|" + hostValue(ctx)
 }
 
-func headerValue(headers map[string]string, name string) string {
-	value, _ := lookupHeaderValue(headers, name)
+func headerValue(ctx MatchCtx, name string) string {
+	value, _ := lookupHeaderValueInCtx(ctx, name)
 	return value
+}
+
+func lookupHeaderValueInCtx(ctx MatchCtx, name string) (string, bool) {
+	if ctx.HeadersLowercase {
+		if value, ok := ctx.Headers[name]; ok {
+			return value, true
+		}
+		if lower, changed := lowerASCIIIfNeeded(name); changed {
+			if value, ok := ctx.Headers[lower]; ok {
+				return value, true
+			}
+		}
+		return "", false
+	}
+	return lookupHeaderValue(ctx.Headers, name)
 }
 
 func lookupHeaderValue(headers map[string]string, name string) (string, bool) {
 	if value, ok := headers[name]; ok {
 		return value, true
 	}
-	if lower := strings.ToLower(name); lower != name {
+	if lower, changed := lowerASCIIIfNeeded(name); changed {
 		if value, ok := headers[lower]; ok {
 			return value, true
 		}
@@ -104,13 +122,116 @@ func lookupHeaderValue(headers map[string]string, name string) (string, bool) {
 	return "", false
 }
 
+func headerOrderValue(ctx MatchCtx) string {
+	if ctx.HeaderOrder != "" {
+		return ctx.HeaderOrder
+	}
+	return headerValue(ctx, "x-owaf-header-order")
+}
+
+func tlsFingerprintValue(ctx MatchCtx, name string) string {
+	if ctx.TLS == nil {
+		switch name {
+		case "x-owaf-tls-alpn":
+			return ctx.TLSALPN
+		case tlsCipherSuitesHeaderLower:
+			return ctx.TLSCipherSuites
+		default:
+			return headerValue(ctx, name)
+		}
+	}
+	switch name {
+	case "x-owaf-tls-ja3":
+		if ctx.TLS.JA3 != "" {
+			return ctx.TLS.JA3
+		}
+	case "x-owaf-tls-ja3-hash":
+		if ctx.TLS.JA3Hash != "" {
+			return ctx.TLS.JA3Hash
+		}
+	case "x-owaf-tls-ja4":
+		if ctx.TLS.JA4 != "" {
+			return ctx.TLS.JA4
+		}
+	case "x-owaf-tls-version":
+		if ctx.TLS.TLSVersion != "" {
+			return ctx.TLS.TLSVersion
+		}
+	case "x-owaf-tls-sni":
+		if ctx.TLS.SNI != "" {
+			return ctx.TLS.SNI
+		}
+	case "x-owaf-tls-alpn":
+		if ctx.TLSALPN != "" {
+			return ctx.TLSALPN
+		}
+	case tlsCipherSuitesHeaderLower:
+		if ctx.TLSCipherSuites != "" {
+			return ctx.TLSCipherSuites
+		}
+	}
+	return headerValue(ctx, name)
+}
+
+func tlsCipherSuitesValue(ctx MatchCtx) string {
+	if ctx.TLSCipherSuites != "" {
+		return ctx.TLSCipherSuites
+	}
+	return headerValue(ctx, tlsCipherSuitesHeaderLower)
+}
+
+func lowerASCIIIfNeeded(raw string) (string, bool) {
+	for i := 0; i < len(raw); i++ {
+		b := raw[i]
+		if 'A' <= b && b <= 'Z' {
+			return strings.ToLower(raw), true
+		}
+	}
+	return raw, false
+}
+
+func asciiLowerByte(b byte) byte {
+	if 'A' <= b && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+func containsFoldASCII(s, substr string) bool {
+	n := len(substr)
+	if n == 0 {
+		return true
+	}
+	if n > len(s) {
+		return false
+	}
+	first := asciiLowerByte(substr[0])
+	last := len(s) - n
+	for i := 0; i <= last; i++ {
+		if asciiLowerByte(s[i]) != first {
+			continue
+		}
+		match := true
+		for j := 1; j < n; j++ {
+			if asciiLowerByte(s[i+j]) != asciiLowerByte(substr[j]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
 // ── compound matchers ──
 
 type andMatcher struct{ children []Matcher }
 
-func (m *andMatcher) Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool {
+func (m *andMatcher) Match(ctx MatchCtx) bool {
 	for _, c := range m.children {
-		if !c.Match(ip, method, path, query, headers, body) {
+		if !c.Match(ctx) {
 			return false
 		}
 	}
@@ -119,9 +240,9 @@ func (m *andMatcher) Match(ip net.IP, method, path, query string, headers map[st
 
 type orMatcher struct{ children []Matcher }
 
-func (m *orMatcher) Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool {
+func (m *orMatcher) Match(ctx MatchCtx) bool {
 	for _, c := range m.children {
-		if c.Match(ip, method, path, query, headers, body) {
+		if c.Match(ctx) {
 			return true
 		}
 	}
@@ -130,46 +251,46 @@ func (m *orMatcher) Match(ip net.IP, method, path, query string, headers map[str
 
 type notMatcher struct{ child Matcher }
 
-func (m *notMatcher) Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool {
-	return !m.child.Match(ip, method, path, query, headers, body)
+func (m *notMatcher) Match(ctx MatchCtx) bool {
+	return !m.child.Match(ctx)
 }
 
 // ── concrete matchers ──
 
 type ipCIDRMatcher struct{ cidr *net.IPNet }
 
-func (m *ipCIDRMatcher) Match(ip net.IP, _, _, _ string, _ map[string]string, _ []byte) bool {
-	return ip != nil && m.cidr.Contains(ip)
+func (m *ipCIDRMatcher) Match(ctx MatchCtx) bool {
+	return ctx.ClientIP != nil && m.cidr.Contains(ctx.ClientIP)
 }
 
 type pathPrefixMatcher struct{ prefix string }
 
-func (m *pathPrefixMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string, _ []byte) bool {
-	return strings.HasPrefix(path, m.prefix)
+func (m *pathPrefixMatcher) Match(ctx MatchCtx) bool {
+	return strings.HasPrefix(ctx.Path, m.prefix)
 }
 
 type pathRegexMatcher struct{ re *regexp.Regexp }
 
-func (m *pathRegexMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string, _ []byte) bool {
-	return m.re.MatchString(path)
+func (m *pathRegexMatcher) Match(ctx MatchCtx) bool {
+	return m.re.MatchString(ctx.Path)
 }
 
 type queryContainsMatcher struct{ substr string }
 
-func (m *queryContainsMatcher) Match(_ net.IP, _, _, query string, _ map[string]string, _ []byte) bool {
-	return strings.Contains(query, m.substr)
+func (m *queryContainsMatcher) Match(ctx MatchCtx) bool {
+	return strings.Contains(ctx.Query, m.substr)
 }
 
 type queryRegexMatcher struct{ re *regexp.Regexp }
 
-func (m *queryRegexMatcher) Match(_ net.IP, _, _, query string, _ map[string]string, _ []byte) bool {
-	return m.re.MatchString(query)
+func (m *queryRegexMatcher) Match(ctx MatchCtx) bool {
+	return m.re.MatchString(ctx.Query)
 }
 
 type headerContainsMatcher struct{ name, substr string }
 
-func (m *headerContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	value, ok := lookupHeaderValue(headers, m.name)
+func (m *headerContainsMatcher) Match(ctx MatchCtx) bool {
+	value, ok := lookupHeaderValueInCtx(ctx, m.name)
 	return ok && strings.Contains(value, m.substr)
 }
 
@@ -180,8 +301,8 @@ type headerRegexMatcher struct {
 
 type headerOrderContainsMatcher struct{ substr string }
 
-func (m *headerOrderContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	return strings.Contains(headerValue(headers, "x-owaf-header-order"), m.substr)
+func (m *headerOrderContainsMatcher) Match(ctx MatchCtx) bool {
+	return strings.Contains(headerOrderValue(ctx), m.substr)
 }
 
 type headerOrderRegexMatcher struct{ re *regexp.Regexp }
@@ -191,13 +312,21 @@ type tlsFingerprintMatcher struct {
 	value string
 }
 
-func (m *tlsFingerprintMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	value := headerValue(headers, m.name)
-	if strings.EqualFold(value, m.value) {
-		return true
+type tlsCipherSuitesMatcher struct {
+	values map[string]struct{}
+}
+
+func (m *tlsFingerprintMatcher) Match(ctx MatchCtx) bool {
+	value := tlsFingerprintValue(ctx, m.name)
+	if value != "" {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), m.value) {
+				return true
+			}
+		}
 	}
 	if m.name == "x-owaf-tls-ja3-hash" && value == "" {
-		ja3 := headerValue(headers, "x-owaf-tls-ja3")
+		ja3 := tlsFingerprintValue(ctx, "x-owaf-tls-ja3")
 		if ja3 == "" {
 			return false
 		}
@@ -207,41 +336,60 @@ func (m *tlsFingerprintMatcher) Match(_ net.IP, _, _, _ string, headers map[stri
 	return false
 }
 
-func (m *headerOrderRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	return m.re.MatchString(headerValue(headers, "x-owaf-header-order"))
-}
-
-func (m *headerRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	value, ok := lookupHeaderValue(headers, m.name)
-	return ok && m.re.MatchString(value)
-}
-
-type exactPathMatcher struct{ path string }
-
-func (m *exactPathMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string, _ []byte) bool {
-	return path == m.path
-}
-
-type methodMatcher struct{ method string }
-
-func (m *methodMatcher) Match(_ net.IP, method, _, _ string, _ map[string]string, _ []byte) bool {
-	return strings.EqualFold(method, m.method)
-}
-
-type contentTypeMatcher struct{ ctype string }
-
-func (m *contentTypeMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	for k, v := range headers {
-		if strings.EqualFold(k, "Content-Type") {
-			return strings.Contains(strings.ToLower(v), m.ctype)
+func (m *tlsCipherSuitesMatcher) Match(ctx MatchCtx) bool {
+	if len(m.values) == 0 {
+		return false
+	}
+	value := tlsCipherSuitesValue(ctx)
+	if value == "" {
+		return false
+	}
+	for _, token := range strings.Split(value, ",") {
+		trimmed := strings.TrimSpace(token)
+		if _, ok := m.values[trimmed]; ok {
+			return true
+		}
+		normalized := normalizeTLSCipherSuiteToken(trimmed)
+		if normalized != "" && normalized != trimmed {
+			if _, ok := m.values[normalized]; ok {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+func (m *headerOrderRegexMatcher) Match(ctx MatchCtx) bool {
+	return m.re.MatchString(headerOrderValue(ctx))
+}
+
+func (m *headerRegexMatcher) Match(ctx MatchCtx) bool {
+	value, ok := lookupHeaderValueInCtx(ctx, m.name)
+	return ok && m.re.MatchString(value)
+}
+
+type exactPathMatcher struct{ path string }
+
+func (m *exactPathMatcher) Match(ctx MatchCtx) bool {
+	return ctx.Path == m.path
+}
+
+type methodMatcher struct{ method string }
+
+func (m *methodMatcher) Match(ctx MatchCtx) bool {
+	return strings.EqualFold(ctx.Method, m.method)
+}
+
+type contentTypeMatcher struct{ ctype string }
+
+func (m *contentTypeMatcher) Match(ctx MatchCtx) bool {
+	value, ok := lookupHeaderValueInCtx(ctx, "content-type")
+	return ok && containsFoldASCII(value, m.ctype)
+}
+
 type alwaysMatcher struct{}
 
-func (m *alwaysMatcher) Match(net.IP, string, string, string, map[string]string, []byte) bool {
+func (m *alwaysMatcher) Match(MatchCtx) bool {
 	return true
 }
 
@@ -251,32 +399,32 @@ type ifElseMatcher struct {
 	elseMatch Matcher
 }
 
-func (m *ifElseMatcher) Match(ip net.IP, method, path, query string, headers map[string]string, body []byte) bool {
+func (m *ifElseMatcher) Match(ctx MatchCtx) bool {
 	if m.condition == nil {
 		return false
 	}
-	if m.condition.Match(ip, method, path, query, headers, body) {
-		return m.thenMatch != nil && m.thenMatch.Match(ip, method, path, query, headers, body)
+	if m.condition.Match(ctx) {
+		return m.thenMatch != nil && m.thenMatch.Match(ctx)
 	}
-	return m.elseMatch != nil && m.elseMatch.Match(ip, method, path, query, headers, body)
+	return m.elseMatch != nil && m.elseMatch.Match(ctx)
 }
 
 type neverMatcher struct{}
 
-func (m *neverMatcher) Match(net.IP, string, string, string, map[string]string, []byte) bool {
+func (m *neverMatcher) Match(MatchCtx) bool {
 	return false
 }
 
-type bodyContainsMatcher struct{ substr string }
+type bodyContainsMatcher struct{ substr []byte }
 
-func (m *bodyContainsMatcher) Match(_ net.IP, _, _, _ string, _ map[string]string, body []byte) bool {
-	return len(body) > 0 && strings.Contains(string(body), m.substr)
+func (m *bodyContainsMatcher) Match(ctx MatchCtx) bool {
+	return len(ctx.Body) > 0 && bytes.Contains(ctx.Body, m.substr)
 }
 
 type bodyRegexMatcher struct{ re *regexp.Regexp }
 
-func (m *bodyRegexMatcher) Match(_ net.IP, _, _, _ string, _ map[string]string, body []byte) bool {
-	return len(body) > 0 && m.re.Match(body)
+func (m *bodyRegexMatcher) Match(ctx MatchCtx) bool {
+	return len(ctx.Body) > 0 && m.re.Match(ctx.Body)
 }
 
 // bodyJSONPathMatcher checks if a dot-notation JSON path exists and optionally matches a pattern.
@@ -285,19 +433,16 @@ type bodyJSONPathMatcher struct {
 	pattern  *regexp.Regexp
 }
 
-func (m *bodyJSONPathMatcher) Match(_ net.IP, _, _, _ string, _ map[string]string, body []byte) bool {
-	if len(body) == 0 {
+func (m *bodyJSONPathMatcher) Match(ctx MatchCtx) bool {
+	if len(ctx.Body) == 0 {
 		return false
 	}
 	var raw map[string]any
-	if json.Unmarshal(body, &raw) != nil {
+	if json.Unmarshal(ctx.Body, &raw) != nil {
 		return false
 	}
 	// Strip leading "$." if present.
-	path := m.jsonPath
-	if strings.HasPrefix(path, "$.") {
-		path = path[2:]
-	}
+	path := strings.TrimPrefix(m.jsonPath, "$.")
 	parts := strings.Split(path, ".")
 	var current any = raw
 	for _, part := range parts {
@@ -329,22 +474,19 @@ func (m *bodyJSONPathMatcher) Match(_ net.IP, _, _, _ string, _ map[string]strin
 // multipartMatcher checks multipart upload filenames for suspicious extensions.
 type multipartMatcher struct{ re *regexp.Regexp }
 
-func (m *multipartMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, body []byte) bool {
-	if len(body) == 0 {
+func (m *multipartMatcher) Match(ctx MatchCtx) bool {
+	if len(ctx.Body) == 0 {
 		return false
 	}
-	ct := ""
-	for k, v := range headers {
-		if strings.EqualFold(k, "Content-Type") {
-			ct = v
-			break
-		}
-	}
-	if !strings.Contains(strings.ToLower(ct), "multipart/form-data") {
+	ct := headerValue(ctx, "content-type")
+	if !containsFoldASCII(ct, "multipart/form-data") {
 		return false
 	}
 	// Extract boundary and scan part headers for filenames.
-	idx := strings.Index(strings.ToLower(ct), "boundary=")
+	if lower, changed := lowerASCIIIfNeeded(ct); changed {
+		ct = lower
+	}
+	idx := strings.Index(ct, "boundary=")
 	if idx < 0 {
 		return false
 	}
@@ -357,10 +499,13 @@ func (m *multipartMatcher) Match(_ net.IP, _, _, _ string, headers map[string]st
 		return false
 	}
 	// Scan raw body for Content-Disposition filename values.
-	bodyStr := string(body)
+	bodyStr := string(ctx.Body)
 	parts := strings.Split(bodyStr, "--"+boundary)
 	for _, part := range parts {
-		low := strings.ToLower(part)
+		low := part
+		if lowered, changed := lowerASCIIIfNeeded(part); changed {
+			low = lowered
+		}
 		if fi := strings.Index(low, "filename="); fi >= 0 {
 			fnStart := fi + len("filename=")
 			if fnStart < len(part) {
@@ -382,18 +527,19 @@ func (m *multipartMatcher) Match(_ net.IP, _, _, _ string, headers map[string]st
 // geoBlockMatcher blocks requests based on geo country code headers.
 type geoBlockMatcher struct{ countries map[string]bool }
 
-func (m *geoBlockMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	// Check common geo-country headers.
-	for k, v := range headers {
-		lk := strings.ToLower(k)
-		if lk == "x-geo-country" || lk == "cf-ipcountry" {
-			code := strings.TrimSpace(strings.ToUpper(v))
-			if m.countries[code] {
-				return true
-			}
+func (m *geoBlockMatcher) Match(ctx MatchCtx) bool {
+	if value, ok := lookupHeaderValueInCtx(ctx, "x-geo-country"); ok {
+		code := strings.TrimSpace(strings.ToUpper(value))
+		if m.countries[code] {
+			return true
 		}
 	}
-	return false
+	value, ok := lookupHeaderValueInCtx(ctx, "cf-ipcountry")
+	if !ok {
+		return false
+	}
+	code := strings.TrimSpace(strings.ToUpper(value))
+	return m.countries[code]
 }
 
 type queryParamMatcher struct {
@@ -439,11 +585,11 @@ func rawQueryContainsParamName(query, name string) bool {
 	}
 }
 
-func (m *queryParamMatcher) Match(_ net.IP, _, _, query string, _ map[string]string, _ []byte) bool {
-	if query == "" || !rawQueryMayContainParam(query, m.param) {
+func (m *queryParamMatcher) Match(ctx MatchCtx) bool {
+	if ctx.Query == "" || !rawQueryMayContainParam(ctx.Query, m.param) {
 		return false
 	}
-	values, err := url.ParseQuery(query)
+	values, err := url.ParseQuery(ctx.Query)
 	if err != nil {
 		return false
 	}
@@ -462,11 +608,11 @@ func (m *queryParamMatcher) Match(_ net.IP, _, _, query string, _ map[string]str
 	return false
 }
 
-func (m *queryParamRegexMatcher) Match(_ net.IP, _, _, query string, _ map[string]string, _ []byte) bool {
-	if query == "" || !rawQueryMayContainParam(query, m.param) {
+func (m *queryParamRegexMatcher) Match(ctx MatchCtx) bool {
+	if ctx.Query == "" || !rawQueryMayContainParam(ctx.Query, m.param) {
 		return false
 	}
-	values, err := url.ParseQuery(query)
+	values, err := url.ParseQuery(ctx.Query)
 	if err != nil {
 		return false
 	}
@@ -482,19 +628,26 @@ func (m *queryParamRegexMatcher) Match(_ net.IP, _, _, query string, _ map[strin
 	return false
 }
 
-func (m *pathContainsMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string, _ []byte) bool {
-	return strings.Contains(path, m.substr)
+func (m *pathContainsMatcher) Match(ctx MatchCtx) bool {
+	return strings.Contains(ctx.Path, m.substr)
 }
 
-func (m *pathNotContainsMatcher) Match(_ net.IP, _, path, _ string, _ map[string]string, _ []byte) bool {
-	return !strings.Contains(path, m.substr)
+func (m *pathNotContainsMatcher) Match(ctx MatchCtx) bool {
+	return !strings.Contains(ctx.Path, m.substr)
 }
 
 // hostMatcher matches the Host header exactly or with wildcard prefix.
 type hostMatcher struct{ pattern string }
 
-func (m *hostMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	host, _ := splitHostPortHeader(headerValue(headers, "host"))
+func hostValue(ctx MatchCtx) string {
+	if ctx.Host != "" {
+		return ctx.Host
+	}
+	return headerValue(ctx, "host")
+}
+
+func (m *hostMatcher) Match(ctx MatchCtx) bool {
+	host, _ := splitHostPortHeader(hostValue(ctx))
 	if host == "" {
 		return false
 	}
@@ -507,7 +660,10 @@ func (m *hostMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string,
 }
 
 func splitHostPortHeader(host string) (nameOnly, fullLower string) {
-	fullLower = strings.ToLower(strings.TrimSpace(host))
+	fullLower = strings.TrimSpace(host)
+	if lower, changed := lowerASCIIIfNeeded(fullLower); changed {
+		fullLower = lower
+	}
 	nameOnly = fullLower
 	if i := strings.LastIndex(fullLower, ":"); i > 0 {
 		tail := fullLower[i+1:]
@@ -528,26 +684,27 @@ func splitHostPortHeader(host string) (nameOnly, fullLower string) {
 // hostFullMatcher matches Host including explicit port; wildcard applies to hostname only.
 type hostFullMatcher struct{ pattern string }
 
-func (m *hostFullMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	raw := strings.TrimSpace(headerValue(headers, "host"))
+func (m *hostFullMatcher) Match(ctx MatchCtx) bool {
+	raw := strings.TrimSpace(hostValue(ctx))
 	if raw == "" {
 		return false
 	}
 	hostName, fullLower := splitHostPortHeader(raw)
 	pat := strings.TrimSpace(m.pattern)
-	patLower := strings.ToLower(pat)
-	if strings.HasPrefix(patLower, "*.") {
-		suffix := patLower[1:]
-		return strings.HasSuffix(hostName, suffix) || hostName == strings.TrimPrefix(patLower, "*.")
+	if lower, changed := lowerASCIIIfNeeded(pat); changed {
+		pat = lower
 	}
-	pl := strings.ToLower(pat)
-	return fullLower == pl || hostName == pl
+	if strings.HasPrefix(pat, "*.") {
+		suffix := pat[1:]
+		return strings.HasSuffix(hostName, suffix) || hostName == strings.TrimPrefix(pat, "*.")
+	}
+	return fullLower == pat || hostName == pat
 }
 
 type hostRegexMatcher struct{ re *regexp.Regexp }
 
-func (m *hostRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	raw := strings.TrimSpace(headerValue(headers, "host"))
+func (m *hostRegexMatcher) Match(ctx MatchCtx) bool {
+	raw := strings.TrimSpace(hostValue(ctx))
 	if raw == "" {
 		return false
 	}
@@ -557,44 +714,44 @@ func (m *hostRegexMatcher) Match(_ net.IP, _, _, _ string, headers map[string]st
 
 type hostContainsMatcher struct{ substr string }
 
-func (m *hostContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	raw := strings.TrimSpace(headerValue(headers, "host"))
+func (m *hostContainsMatcher) Match(ctx MatchCtx) bool {
+	raw := strings.TrimSpace(hostValue(ctx))
 	if raw == "" {
 		return false
 	}
 	hostName, _ := splitHostPortHeader(raw)
-	return strings.Contains(hostName, strings.ToLower(m.substr))
+	return strings.Contains(hostName, m.substr)
 }
 
 type hostNotContainsMatcher struct{ substr string }
 
-func (m *hostNotContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	raw := strings.TrimSpace(headerValue(headers, "host"))
+func (m *hostNotContainsMatcher) Match(ctx MatchCtx) bool {
+	raw := strings.TrimSpace(hostValue(ctx))
 	if raw == "" {
 		return true
 	}
 	hostName, _ := splitHostPortHeader(raw)
-	return !strings.Contains(hostName, strings.ToLower(m.substr))
+	return !strings.Contains(hostName, m.substr)
 }
 
 // fullURLContainsMatcher matches path + raw query (lowercased) for a substring.
 type fullURLContainsMatcher struct{ substr string }
 
-func (m *fullURLContainsMatcher) Match(_ net.IP, _, path, query string, _ map[string]string, _ []byte) bool {
-	u := path
-	if query != "" {
-		u += "?" + query
+func (m *fullURLContainsMatcher) Match(ctx MatchCtx) bool {
+	u := ctx.Path
+	if ctx.Query != "" {
+		u += "?" + ctx.Query
 	}
-	return strings.Contains(strings.ToLower(u), strings.ToLower(m.substr))
+	return containsFoldASCII(u, m.substr)
 }
 
 // fullURLRegexMatcher matches path + raw query against a regex.
 type fullURLRegexMatcher struct{ re *regexp.Regexp }
 
-func (m *fullURLRegexMatcher) Match(_ net.IP, _, path, query string, _ map[string]string, _ []byte) bool {
-	u := path
-	if query != "" {
-		u += "?" + query
+func (m *fullURLRegexMatcher) Match(ctx MatchCtx) bool {
+	u := ctx.Path
+	if ctx.Query != "" {
+		u += "?" + ctx.Query
 	}
 	return m.re.MatchString(u)
 }
@@ -602,25 +759,17 @@ func (m *fullURLRegexMatcher) Match(_ net.IP, _, path, query string, _ map[strin
 // cookieContainsMatcher checks if any cookie contains the given substring.
 type cookieContainsMatcher struct{ substr string }
 
-func (m *cookieContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	for k, v := range headers {
-		if strings.EqualFold(k, "Cookie") {
-			return strings.Contains(v, m.substr)
-		}
-	}
-	return false
+func (m *cookieContainsMatcher) Match(ctx MatchCtx) bool {
+	value, ok := lookupHeaderValueInCtx(ctx, "cookie")
+	return ok && strings.Contains(value, m.substr)
 }
 
 // refererContainsMatcher checks if the Referer header contains a substring.
 type refererContainsMatcher struct{ substr string }
 
-func (m *refererContainsMatcher) Match(_ net.IP, _, _, _ string, headers map[string]string, _ []byte) bool {
-	for k, v := range headers {
-		if strings.EqualFold(k, "Referer") {
-			return strings.Contains(v, m.substr)
-		}
-	}
-	return false
+func (m *refererContainsMatcher) Match(ctx MatchCtx) bool {
+	value, ok := lookupHeaderValueInCtx(ctx, "referer")
+	return ok && strings.Contains(value, m.substr)
 }
 
 // buildMatcher creates a Matcher from a parsed kind:arg pattern.
@@ -705,13 +854,31 @@ func buildMatcher(kind, arg string) Matcher {
 		return &tlsFingerprintMatcher{name: "x-owaf-tls-ja4", value: arg}
 
 	case "tls_version":
-		return &tlsFingerprintMatcher{name: "x-owaf-tls-version", value: arg}
+		normalized := tlsmeta.NormalizeRuntimeVersionToken(arg)
+		if normalized == "" {
+			return &neverMatcher{}
+		}
+		return &tlsFingerprintMatcher{name: "x-owaf-tls-version", value: normalized}
 
 	case "tls_sni":
 		return &tlsFingerprintMatcher{name: "x-owaf-tls-sni", value: arg}
 
 	case "tls_alpn":
 		return &tlsFingerprintMatcher{name: "x-owaf-tls-alpn", value: arg}
+
+	case "tls_cipher_suite", "tls_cipher_suites":
+		values := make(map[string]struct{})
+		for _, token := range strings.Split(arg, ",") {
+			normalized := normalizeTLSCipherSuiteToken(token)
+			if normalized == "" {
+				continue
+			}
+			values[normalized] = struct{}{}
+		}
+		if len(values) == 0 {
+			return &neverMatcher{}
+		}
+		return &tlsCipherSuitesMatcher{values: values}
 
 	case "header_order_contains":
 		return &headerOrderContainsMatcher{substr: arg}
@@ -732,7 +899,7 @@ func buildMatcher(kind, arg string) Matcher {
 		return &headerRegexMatcher{name: strings.ToLower(name), re: re}
 
 	case "body_contains", "block_body_contains":
-		return &bodyContainsMatcher{substr: arg}
+		return &bodyContainsMatcher{substr: []byte(arg)}
 
 	case "body_regex", "block_body_regex":
 		re, err := cachedCompile(arg)
@@ -763,10 +930,10 @@ func buildMatcher(kind, arg string) Matcher {
 		return &pathNotContainsMatcher{substr: arg}
 
 	case "host_full":
-		return &hostFullMatcher{pattern: arg}
+		return &hostFullMatcher{pattern: strings.ToLower(arg)}
 
 	case "full_url_contains":
-		return &fullURLContainsMatcher{substr: arg}
+		return &fullURLContainsMatcher{substr: strings.ToLower(arg)}
 
 	case "full_url_regex":
 		re, err := cachedCompile(arg)
@@ -776,7 +943,7 @@ func buildMatcher(kind, arg string) Matcher {
 		return &fullURLRegexMatcher{re: re}
 
 	case "host":
-		return &hostMatcher{pattern: arg}
+		return &hostMatcher{pattern: strings.ToLower(arg)}
 
 	case "host_regex":
 		re, err := cachedCompile(arg)
@@ -786,10 +953,10 @@ func buildMatcher(kind, arg string) Matcher {
 		return &hostRegexMatcher{re: re}
 
 	case "host_contains":
-		return &hostContainsMatcher{substr: arg}
+		return &hostContainsMatcher{substr: strings.ToLower(arg)}
 
 	case "host_not_contains":
-		return &hostNotContainsMatcher{substr: arg}
+		return &hostNotContainsMatcher{substr: strings.ToLower(arg)}
 
 	case "cookie_contains":
 		return &cookieContainsMatcher{substr: arg}

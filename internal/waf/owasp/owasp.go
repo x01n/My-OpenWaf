@@ -39,6 +39,19 @@ const BuiltinVersion = "builtin_owasp_v2"
 // maxTargetLen bounds the length of each scan target to limit regex execution time.
 const maxTargetLen = 16384
 
+var asciiLowerTable = func() [256]byte {
+	var table [256]byte
+	for i := 0; i < 256; i++ {
+		b := byte(i)
+		if b >= 'A' && b <= 'Z' {
+			table[i] = b + ('a' - 'A')
+		} else {
+			table[i] = b
+		}
+	}
+	return table
+}()
+
 // owaspPattern 表示一条 OWASP 检测规则。
 // hint 字段是该正则必须匹配的字面量子串；如果非空，在执行正则前
 // 先用 strings.Contains 快速检查，不存在则跳过该正则。
@@ -102,8 +115,8 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 	_, fileUploadEnabled := categoryThreshold(CatFileUpload)
 
 	var hits []OWASPHit
-
 	lowerPath := strings.ToLower(path)
+
 	// Path-aware body-scan suppression: known telemetry/API endpoints that produce
 	// false positives from binary/base64-decoded body content should skip certain
 	// body-level detection categories. The path+query are still scanned normally.
@@ -152,20 +165,22 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 	// running it twice per request.
 
 	var stopHits []OWASPHit
+	cleanPath := isCleanPathTarget(path)
+	cleanPlainQuery := isCleanPlainQueryTarget(query)
 	type unicodeBase64Target struct {
 		raw              string
 		queryPlusAsSpace bool
 	}
 	var unicodeBase64Targets []unicodeBase64Target
-	forEachOWASPTarget(path, query, headers, bodyTargets, func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool {
+	forEachOWASPTarget(path, query, headers, bodyTargets, cleanPath, cleanPlainQuery, cleanPlainQuery, func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool {
 		if raw == "" {
 			return true
 		}
 		if !isBodyTarget {
-			if raw == path && isCleanPathTarget(lowerPath) {
+			if raw == path && cleanPath {
 				return true
 			}
-			if raw == query && isCleanPlainQueryTarget(raw) {
+			if raw == query && cleanPlainQuery {
 				return true
 			}
 		}
@@ -504,14 +519,6 @@ var webExecutableExtensions = map[string]bool{
 	".pl": true, ".py": true, ".rb": true, ".htaccess": true,
 }
 
-var safeWebExtensions = map[string]bool{
-	".js": true, ".css": true, ".html": true, ".htm": true,
-	".json": true, ".xml": true, ".txt": true, ".map": true,
-	".svg": true, ".woff": true, ".woff2": true, ".ttf": true,
-	".eot": true, ".ico": true, ".png": true, ".jpg": true,
-	".jpeg": true, ".gif": true, ".webp": true, ".avif": true,
-}
-
 // checkPathFileUpload detects double-extension bypass patterns in URL paths,
 // e.g. /uploadfiles/shell.php.jpg. Single extensions like /page.php are normal
 // web requests and should not trigger.
@@ -545,85 +552,84 @@ func checkPathFileUpload(path string) (OWASPHit, bool) {
 // checkDangerousPath detects CVE-specific dangerous API endpoints and paths
 // that are commonly exploited for RCE, deserialization, or other attacks.
 func checkDangerousPath(path string) (OWASPHit, bool) {
-	lower := strings.ToLower(path)
 	// F5 BIG-IP RCE (CVE-2020-5902, CVE-2022-1388)
-	if strings.Contains(lower, "/mgmt/tm/util/bash") {
+	if containsASCIIFold(path, "/mgmt/tm/util/bash") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:001", Score: 6,
 			Desc: "F5 BIG-IP RCE endpoint"}, true
 	}
 	// Liferay JSONWS deserialization (CVE-2020-7961)
-	if strings.Contains(lower, "/api/jsonws/invoke") {
+	if containsASCIIFold(path, "/api/jsonws/invoke") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:path:002", Score: 6,
 			Desc: "Liferay JSONWS deserialization endpoint"}, true
 	}
 	// Apache OFBiz webtools RCE (CVE-2023-49070, CVE-2023-51467)
-	if strings.Contains(lower, "/webtools/control/xmlrpc") ||
-		strings.Contains(lower, "/webtools/control/soapservice") {
+	if containsASCIIFold(path, "/webtools/control/xmlrpc") ||
+		containsASCIIFold(path, "/webtools/control/soapservice") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:path:004", Score: 6,
 			Desc: "Apache OFBiz webtools RCE endpoint"}, true
 	}
 	// Atlassian Confluence OGNL injection (CVE-2021-26084, CVE-2022-26134)
-	if strings.Contains(lower, "/rest/tinymce/1/macro/preview") {
+	if containsASCIIFold(path, "/rest/tinymce/1/macro/preview") {
 		return OWASPHit{Category: CatExprLang, RuleID: "owasp:path:005", Score: 6,
 			Desc: "Confluence OGNL injection endpoint"}, true
 	}
 	// Cisco ASA path traversal (CVE-2020-3452)
-	if strings.Contains(lower, "+cscot+/") || strings.Contains(lower, "+cscoe+/") || strings.Contains(lower, "%2bcscot%2b/") || strings.Contains(lower, "%2bcscoe%2b/") {
+	if containsASCIIFold(path, "+cscot+/") || containsASCIIFold(path, "+cscoe+/") || containsASCIIFold(path, "%2bcscot%2b/") || containsASCIIFold(path, "%2bcscoe%2b/") {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:006", Score: 5,
 			Desc: "Cisco ASA path traversal"}, true
 	}
 	// ThinkPHP RCE (invokefunction)
-	if strings.Contains(lower, "/think") && strings.Contains(lower, "invokefunction") {
+	if containsASCIIFold(path, "/think") && containsASCIIFold(path, "invokefunction") {
 		return OWASPHit{Category: CatWebshell, RuleID: "owasp:path:007", Score: 6,
 			Desc: "ThinkPHP invokefunction RCE"}, true
 	}
 	// Atlassian gadgets makeRequest SSRF (CVE-2019-3396 and similar)
-	if strings.Contains(lower, "/gadgets/makerequest") {
+	if containsASCIIFold(path, "/gadgets/makerequest") {
 		return OWASPHit{Category: CatSSRF, RuleID: "owasp:path:008", Score: 5,
 			Desc: "Atlassian gadgets SSRF endpoint"}, true
 	}
 	// Nexus Repository Manager RCE
-	if strings.Contains(lower, "coreui_user") || strings.Contains(lower, "coreui_component") {
+	if containsASCIIFold(path, "coreui_user") || containsASCIIFold(path, "coreui_component") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:009", Score: 5,
 			Desc: "Nexus Repository Manager RCE"}, true
 	}
 	// Coremail config leak
-	if strings.Contains(lower, "/mailsms/") {
+	if containsASCIIFold(path, "/mailsms/") {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:010", Score: 5,
 			Desc: "Coremail config leak"}, true
 	}
-	if strings.Contains(lower, "/.git/") || strings.HasSuffix(lower, "/.git") {
+	if containsASCIIFold(path, "/.git/") || (len(path) >= 5 && equalASCIIFold(path[len(path)-5:], "/.git")) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:011", Score: 5,
 			Desc: ".git directory access"}, true
 	}
-	if strings.Contains(lower, "/securityrealm/") && strings.Contains(lower, "descriptorbyname") {
+	if containsASCIIFold(path, "/securityrealm/") && containsASCIIFold(path, "descriptorbyname") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:012", Score: 5,
 			Desc: "Jenkins Script Security RCE"}, true
 	}
-	if strings.Contains(lower, "deleteusername") || strings.Contains(lower, "deleteuserrequestinfobyxml") {
+	if containsASCIIFold(path, "deleteusername") || containsASCIIFold(path, "deleteuserrequestinfobyxml") {
 		return OWASPHit{Category: CatXXE, RuleID: "owasp:path:013", Score: 5,
 			Desc: "OFS XXE endpoint"}, true
 	}
 	// Semicolon path parameter bypass (Tomcat/Spring)
-	if strings.Contains(lower, ";") && (strings.Contains(lower, "swagger") ||
-		strings.Contains(lower, "actuator") || strings.Contains(lower, "admin") ||
-		strings.Contains(lower, "console") || strings.Contains(lower, "manager")) {
+	if strings.Contains(path, ";") && (containsASCIIFold(path, "swagger") ||
+		containsASCIIFold(path, "actuator") || containsASCIIFold(path, "admin") ||
+		containsASCIIFold(path, "console") || containsASCIIFold(path, "manager")) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:014", Score: 5,
 			Desc: "Semicolon path parameter bypass"}, true
 	}
 	// Joomla API config leak (CVE-2023-23752)
-	if strings.Contains(lower, "/api/index.php/v1/config/") ||
-		(strings.Contains(lower, "/api/") && strings.Contains(lower, "/v1/config/application")) {
+	if containsASCIIFold(path, "/api/index.php/v1/config/") ||
+		(containsASCIIFold(path, "/api/") && containsASCIIFold(path, "/v1/config/application")) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5,
 			Desc: "Joomla API config information leak"}, true
 	}
 	// Nexus Repository Manager RCE
-	if strings.Contains(lower, "/service/rest/") && strings.Contains(lower, "/repositories/") {
+	if containsASCIIFold(path, "/service/rest/") && containsASCIIFold(path, "/repositories/") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:016", Score: 5,
 			Desc: "Nexus Repository Manager API"}, true
 	}
 	// Service extdirect RCE
-	if strings.Contains(lower, "/service/extdirect") {
+	if containsASCIIFold(path, "/service/extdirect") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:017", Score: 5,
 			Desc: "ExtDirect RCE endpoint"}, true
 	}
@@ -684,46 +690,6 @@ func sensitivityThresholdForNormalizedLevel(level string) int {
 	}
 }
 
-// skipHeaders lists standard headers whose values are not user-controlled payloads.
-// Scanning these causes false positives (e.g. Host: 127.0.0.1 → SSRF alert).
-var skipHeaders = map[string]bool{
-	"host":                      true,
-	"connection":                true,
-	"content-length":            true,
-	"content-type":              false,
-	"accept":                    false,
-	"accept-language":           true,
-	"accept-encoding":           true,
-	"cookie":                    true,
-	"authorization":             true,
-	"cache-control":             true,
-	"pragma":                    true,
-	"if-modified-since":         true,
-	"if-none-match":             true,
-	"upgrade":                   true,
-	"upgrade-insecure-requests": true,
-	"dnt":                       true,
-	"te":                        true,
-	"origin":                    true,
-	"sec-fetch-mode":            true,
-	"sec-fetch-site":            true,
-	"sec-fetch-dest":            true,
-	"sec-fetch-user":            true,
-	"sec-ch-ua":                 true,
-	"sec-ch-ua-mobile":          true,
-	"sec-ch-ua-platform":        true,
-	// Extended Client Hints — browser-controlled values, not user payloads.
-	"sec-ch-ua-arch":              true,
-	"sec-ch-ua-bitness":           true,
-	"sec-ch-ua-full-version":      true,
-	"sec-ch-ua-full-version-list": true,
-	"sec-ch-ua-model":             true,
-	"sec-ch-ua-platform-version":  true,
-	// Google proprietary header sent by Chrome alongside reCAPTCHA/SafeBrowsing requests.
-	// Contains base64-encoded client experiment IDs — not user-supplied data.
-	"x-client-data": true,
-}
-
 func collectTargets(path, query string, headers map[string]string, extraCapacity int) []string {
 	out := make([]string, 0, 2+len(headers)+extraCapacity)
 	out = append(out, path, query)
@@ -750,9 +716,6 @@ func collectTargets(path, query string, headers map[string]string, extraCapacity
 			out = append(out, extractRefererTargets(v)...)
 			continue
 		}
-		if skipHeaders[lk] {
-			continue
-		}
 		if shouldSkipHeaderTarget(lk, v) {
 			continue
 		}
@@ -761,19 +724,28 @@ func collectTargets(path, query string, headers map[string]string, extraCapacity
 	return out
 }
 
-func forEachOWASPTarget(path, query string, headers map[string]string, bodyTargets []string, fn func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool) bool {
-	if !fn(path, false, true) || !fn(query, false, true) {
-		return false
+func forEachOWASPTarget(path, query string, headers map[string]string, bodyTargets []string, skipCleanPath, skipCleanQuery, skipDecodedQuery bool, fn func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool) bool {
+	if !skipCleanPath {
+		if !fn(path, false, true) {
+			return false
+		}
 	}
-	if path != "" && !strings.HasPrefix(path, "/") {
+	if !skipCleanQuery {
+		if !fn(query, false, true) {
+			return false
+		}
+	}
+	if path != "" && !strings.HasPrefix(path, "/") && !skipCleanPath {
 		if !fn("/"+path, false, true) {
 			return false
 		}
 	}
-	if query != "" && !forEachDecodedQueryValue(query, func(value string) bool {
-		return fn(value, false, false)
-	}) {
-		return false
+	if query != "" && !skipDecodedQuery {
+		if !forEachDecodedQueryValue(query, func(value string) bool {
+			return fn(value, false, false)
+		}) {
+			return false
+		}
 	}
 	for k, v := range headers {
 		lk := lowerHeaderName(k)
@@ -796,9 +768,6 @@ func forEachOWASPTarget(path, query string, headers map[string]string, bodyTarge
 			}) {
 				return false
 			}
-			continue
-		}
-		if skipHeaders[lk] {
 			continue
 		}
 		if shouldSkipHeaderTarget(lk, v) {
@@ -830,6 +799,36 @@ func shouldSkipHeaderTarget(name, value string) bool {
 			return true
 		}
 		return isCleanAcceptHeader(value)
+	case "host",
+		"connection",
+		"content-length",
+		"accept-language",
+		"accept-encoding",
+		"authorization",
+		"cache-control",
+		"pragma",
+		"if-modified-since",
+		"if-none-match",
+		"upgrade",
+		"upgrade-insecure-requests",
+		"dnt",
+		"te",
+		"origin",
+		"sec-fetch-mode",
+		"sec-fetch-site",
+		"sec-fetch-dest",
+		"sec-fetch-user",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"sec-ch-ua-arch",
+		"sec-ch-ua-bitness",
+		"sec-ch-ua-full-version",
+		"sec-ch-ua-full-version-list",
+		"sec-ch-ua-model",
+		"sec-ch-ua-platform-version",
+		"x-client-data":
+		return true
 	default:
 		return false
 	}
@@ -1202,6 +1201,34 @@ func equalASCIIFold(s, lower string) bool {
 	return true
 }
 
+func containsASCIIFold(s, lower string) bool {
+	n := len(lower)
+	if n == 0 {
+		return true
+	}
+	if n > len(s) {
+		return false
+	}
+	first := lowerASCIIByte(lower[0])
+	last := len(s) - n
+	for i := 0; i <= last; i++ {
+		if lowerASCIIByte(s[i]) != first {
+			continue
+		}
+		match := true
+		for j := 1; j < n; j++ {
+			if lowerASCIIByte(s[i+j]) != lower[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
 func hasASCIIFoldAt(s string, start int, lower string) bool {
 	if start+len(lower) > len(s) {
 		return false
@@ -1215,10 +1242,7 @@ func hasASCIIFoldAt(s string, start int, lower string) bool {
 }
 
 func lowerASCIIByte(b byte) byte {
-	if b >= 'A' && b <= 'Z' {
-		return b + ('a' - 'A')
-	}
-	return b
+	return asciiLowerTable[b]
 }
 
 func lowerHeaderName(name string) string {
@@ -1358,7 +1382,7 @@ func shouldScanDecodedQueryValue(raw, decoded string) bool {
 	if strings.Count(decoded, `\\u00`) >= 4 {
 		return true
 	}
-	if (hasBase64Candidate(raw) || hasBase64Candidate(decoded)) && len(decoded) >= 12 {
+	if (hasLikelyBase64Candidate(raw) || hasLikelyBase64Candidate(decoded)) && len(decoded) >= 12 {
 		return true
 	}
 	return false
@@ -1450,7 +1474,7 @@ func normalize(s string) string {
 
 func normalizeTarget(s string, queryPlusAsSpace bool) string {
 	// Overlong UTF-8 percent-encoded sequences → real characters (evasion technique).
-	if strings.Contains(s, "%") {
+	if strings.Contains(s, "%") && containsOverlongUTF8Escape(s) {
 		s = reOverlongDot.ReplaceAllString(s, ".")
 		s = reOverlongSlash.ReplaceAllString(s, "/")
 		s = reOverlongBackslash.ReplaceAllString(s, "\\")
@@ -1844,7 +1868,7 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 
 	s := normalizeTarget(raw, queryPlusAsSpace)
 	// Fast path: if normalized string has no base64-length tokens, skip expensive scanning.
-	if len(s) < 8 || !hasBase64Candidate(s) && !hasBase64Candidate(raw) {
+	if len(s) < 8 || !hasLikelyBase64Candidate(s) && (raw == s || !hasLikelyBase64Candidate(raw)) {
 		return s
 	}
 	// Build a case-preserving URL-decoded version for base64 extraction.
@@ -1899,7 +1923,7 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 			}
 			seen[tok] = true
 			decoded := decodeBase64IfSuspicious(tok)
-			if decoded == "" && start > 0 {
+			if decoded == "" && start > 0 && isURLSafeBase64LeadByte(src[start-1]) {
 				decoded = decodeBase64IfSuspicious(src[start-1 : end])
 			}
 			if decoded == "" {
@@ -1964,6 +1988,31 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 	return s
 }
 
+func containsOverlongUTF8Escape(s string) bool {
+	for i := 0; i+2 < len(s); i++ {
+		if s[i] != '%' {
+			continue
+		}
+		first := lowerASCIIByte(s[i+1])
+		second := lowerASCIIByte(s[i+2])
+		switch first {
+		case 'c':
+			if second == '0' || second == '1' {
+				return true
+			}
+		case 'e':
+			if second == '0' {
+				return true
+			}
+		case 'f':
+			if second == '0' || second == '8' || second == 'c' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hasBase64Candidate quickly checks if a string might contain a base64 token.
 // Looks for 8+ consecutive base64 chars. Much cheaper than regex.
 func hasBase64Candidate(s string) bool {
@@ -1980,6 +2029,93 @@ func hasBase64Candidate(s string) bool {
 		}
 	}
 	return false
+}
+
+// hasLikelyBase64Candidate tightens the fast-path candidate filter so ordinary
+// lowercase words and percent-encoded separators do not enter the expensive
+// base64 expansion path.
+func hasLikelyBase64Candidate(s string) bool {
+	lowerRun := 0
+	maxLowerRun := 0
+	run := 0
+	hasNonLower := false
+	inBase64Mode := false
+
+	commitLowerRun := func() {
+		if lowerRun > maxLowerRun {
+			maxLowerRun = lowerRun
+		}
+		lowerRun = 0
+	}
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !inBase64Mode {
+			if c >= 'a' && c <= 'z' {
+				lowerRun++
+				if lowerRun >= 16 {
+					return true
+				}
+				continue
+			}
+			if c == '%' {
+				commitLowerRun()
+				if maxLowerRun >= 12 {
+					return true
+				}
+				inBase64Mode = true
+				continue
+			}
+			if c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '/' {
+				commitLowerRun()
+				if maxLowerRun >= 12 {
+					return true
+				}
+				inBase64Mode = true
+				run = 1
+				hasNonLower = true
+				if run >= 8 && (hasNonLower || run >= 12) {
+					return true
+				}
+				continue
+			}
+			commitLowerRun()
+			continue
+		}
+		if c == '%' && i+2 < len(s) && isHexByte(s[i+1]) && isHexByte(s[i+2]) {
+			run = 0
+			hasNonLower = false
+			i += 2
+			continue
+		}
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' {
+			run++
+			if c < 'a' || c > 'z' {
+				hasNonLower = true
+			}
+			if run >= 8 && (hasNonLower || run >= 12) {
+				return true
+			}
+			continue
+		}
+		run = 0
+		hasNonLower = false
+	}
+	if !inBase64Mode {
+		if lowerRun > maxLowerRun {
+			maxLowerRun = lowerRun
+		}
+		return maxLowerRun >= 16
+	}
+	return false
+}
+
+func isHexByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+func isURLSafeBase64LeadByte(b byte) bool {
+	return b == '-' || b == '_'
 }
 
 var reBase64Token = regexp.MustCompile(`[A-Za-z0-9+/]{8,}={0,2}`)
@@ -2029,12 +2165,14 @@ func stripSQLComments(s string) string {
 	if !hasBlock && !hasLine {
 		return s
 	}
-	if !hasStrippableSQLComment(s, hasBlock, hasLine) {
+	start, ok := firstStrippableSQLCommentIndex(s, hasBlock, hasLine)
+	if !ok {
 		return s
 	}
 	var buf strings.Builder
 	buf.Grow(len(s))
-	i := 0
+	buf.WriteString(s[:start])
+	i := start
 	for i < len(s) {
 		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
 			if i+2 < len(s) && s[i+2] == '!' {
@@ -2063,28 +2201,24 @@ func stripSQLComments(s string) string {
 	return buf.String()
 }
 
-func hasStrippableSQLComment(s string, hasBlock, hasLine bool) bool {
-	if hasBlock {
-		for i := 0; i+1 < len(s); i++ {
-			if s[i] != '/' || s[i+1] != '*' {
-				continue
-			}
+func firstStrippableSQLCommentIndex(s string, hasBlock, hasLine bool) (int, bool) {
+	i := 0
+	for i < len(s) {
+		if hasBlock && i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
 			if i+2 < len(s) && s[i+2] == '!' {
+				i++
 				continue
 			}
 			if strings.Contains(s[i+2:], "*/") {
-				return true
+				return i, true
 			}
 		}
-	}
-	if hasLine {
-		for i := 0; i < len(s); i++ {
-			if isSQLLineCommentStart(s, i) {
-				return true
-			}
+		if hasLine && isSQLLineCommentStart(s, i) {
+			return i, true
 		}
+		i++
 	}
-	return false
+	return 0, false
 }
 
 func isSQLLineCommentStart(s string, i int) bool {
@@ -2239,6 +2373,7 @@ func isCleanPathTarget(s string) bool {
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
 		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
 		case c >= '0' && c <= '9':
 		case c == '/' || c == '-' || c == '_' || c == '.':
 		default:
@@ -2291,41 +2426,92 @@ func isSuspiciousBase64PathSegment(segment string) bool {
 }
 
 func hasPlainTargetAttackKeyword(s string) bool {
-	return strings.Contains(s, "..") ||
-		strings.Contains(s, "union") ||
-		strings.Contains(s, "select") ||
-		strings.Contains(s, "insert") ||
-		strings.Contains(s, "update") ||
-		strings.Contains(s, "delete") ||
-		strings.Contains(s, "drop") ||
-		strings.Contains(s, "alter") ||
-		strings.Contains(s, "truncate") ||
-		strings.Contains(s, "sleep") ||
-		strings.Contains(s, "benchmark") ||
-		strings.Contains(s, "waitfor") ||
-		strings.Contains(s, "script") ||
-		strings.Contains(s, "onload") ||
-		strings.Contains(s, "onerror") ||
-		strings.Contains(s, "onclick") ||
-		strings.Contains(s, "javascript") ||
-		strings.Contains(s, "etc/") ||
-		strings.Contains(s, "passwd") ||
-		strings.Contains(s, "win.ini") ||
-		strings.Contains(s, "boot.ini") ||
-		strings.Contains(s, "web-inf") ||
-		strings.Contains(s, "meta-inf") ||
-		strings.Contains(s, ".git") ||
-		strings.Contains(s, "127.0.") ||
-		strings.Contains(s, "localhost") ||
-		strings.Contains(s, "169.254") ||
-		strings.Contains(s, "whoami") ||
-		strings.Contains(s, "wget") ||
-		strings.Contains(s, "curl") ||
-		strings.Contains(s, "jndi") ||
-		strings.Contains(s, "ldap") ||
-		strings.Contains(s, "__") ||
-		strings.Contains(s, "or1=1") ||
-		strings.Contains(s, "and1=1")
+	for i := 0; i < len(s); i++ {
+		switch lowerASCIIByte(s[i]) {
+		case '.':
+			if hasASCIIFoldAt(s, i, "..") || hasASCIIFoldAt(s, i, ".git") {
+				return true
+			}
+		case 'a':
+			if hasASCIIFoldAt(s, i, "alter") || hasASCIIFoldAt(s, i, "and1=1") {
+				return true
+			}
+		case 'b':
+			if hasASCIIFoldAt(s, i, "benchmark") || hasASCIIFoldAt(s, i, "boot.ini") {
+				return true
+			}
+		case 'c':
+			if hasASCIIFoldAt(s, i, "curl") {
+				return true
+			}
+		case 'd':
+			if hasASCIIFoldAt(s, i, "delete") || hasASCIIFoldAt(s, i, "drop") {
+				return true
+			}
+		case 'e':
+			if hasASCIIFoldAt(s, i, "etc/") {
+				return true
+			}
+		case 'i':
+			if hasASCIIFoldAt(s, i, "insert") {
+				return true
+			}
+		case 'j':
+			if hasASCIIFoldAt(s, i, "jndi") || hasASCIIFoldAt(s, i, "javascript") {
+				return true
+			}
+		case 'l':
+			if hasASCIIFoldAt(s, i, "localhost") || hasASCIIFoldAt(s, i, "ldap") {
+				return true
+			}
+		case 'm':
+			if hasASCIIFoldAt(s, i, "meta-inf") {
+				return true
+			}
+		case 'o':
+			if hasASCIIFoldAt(s, i, "onclick") ||
+				hasASCIIFoldAt(s, i, "onload") ||
+				hasASCIIFoldAt(s, i, "onerror") ||
+				hasASCIIFoldAt(s, i, "or1=1") {
+				return true
+			}
+		case 'p':
+			if hasASCIIFoldAt(s, i, "passwd") {
+				return true
+			}
+		case 's':
+			if hasASCIIFoldAt(s, i, "select") ||
+				hasASCIIFoldAt(s, i, "sleep") ||
+				hasASCIIFoldAt(s, i, "script") {
+				return true
+			}
+		case 't':
+			if hasASCIIFoldAt(s, i, "truncate") {
+				return true
+			}
+		case 'u':
+			if hasASCIIFoldAt(s, i, "union") || hasASCIIFoldAt(s, i, "update") {
+				return true
+			}
+		case 'w':
+			if hasASCIIFoldAt(s, i, "waitfor") ||
+				hasASCIIFoldAt(s, i, "whoami") ||
+				hasASCIIFoldAt(s, i, "wget") ||
+				hasASCIIFoldAt(s, i, "web-inf") ||
+				hasASCIIFoldAt(s, i, "win.ini") {
+				return true
+			}
+		case '_':
+			if hasASCIIFoldAt(s, i, "__") {
+				return true
+			}
+		case '1':
+			if hasASCIIFoldAt(s, i, "127.0.") || hasASCIIFoldAt(s, i, "169.254") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var suspiciousCharSet [256]bool
@@ -3327,26 +3513,6 @@ var reANDORSleep = regexp.MustCompile(`\b(and|or)\s+(sleep|pg_sleep|benchmark)\s
 // quote/digit, indicating injection context like "1); sleep(5)--".
 var reSQLTerminatorCtx = regexp.MustCompile(`['")\d]\s*(--|/\*)`)
 
-// reUnionSelectAttackCtx confirms that a "union select" hit (sqli:001) is a genuine SQL injection
-// attempt rather than natural-language text about SQL (e.g. developer search queries, docs).
-// Analytics beacons frequently carry page URLs like "q=union+select+syntax+in+sql" where
-// the phrase appears in a human search query with no structural SQL markers.
-// Suppress sqli:001 unless at least one structural indicator is present.
-var reUnionSelectAttackCtx = regexp.MustCompile(`(` +
-	`\bnull\b` + // NULL placeholder in UNION columns
-	`|\d+\s*,\s*\d+` + // numeric column list (1,2,3)
-	`|\bfrom\s+[\w` + "`" + `'"]` + // FROM table reference
-	`|@@\w` + // MySQL global variable
-	`|\binformation_schema\b` + // schema enumeration
-	`|\b(user|database|version|schema|sleep|benchmark|group_concat|extractvalue|updatexml|load_file|char|unhex)\s*\(` + // SQL function calls
-	`|\(\s*select\b` + // subquery SELECT
-	`|(--|/\*)` + // SQL comment terminator
-	`|['"]\s*(and|or|where|having|group|order|union)\b` + // operator after quote
-	`|union\s+(all\s+)?select\s+['"\d(@]` + // UNION SELECT followed by column value
-	`|\bwhere\s+\d+\s*=\s*\d+` + // WHERE 1=1 tautology
-	`|\border\s+by\s+\d` + // ORDER BY n probing
-	`)`)
-
 func hasUnionSelectAttackContext(s string) bool {
 	return hasSQLWord(s, "null") ||
 		hasDigitCommaDigit(s) ||
@@ -3964,29 +4130,6 @@ var sqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`%25(27|22|3[bB]|2[dD]2[dD])`), 5, "owasp:sqli:054", "%25"},
 }
 
-func checkSQLi(s string, threshold int) (OWASPHit, bool) {
-	if !hasSQLiIndicator(s) {
-		return OWASPHit{}, false
-	}
-	total := 0
-	best := ""
-	for _, p := range sqliPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
-			continue
-		}
-		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
-			}
-			if total >= threshold {
-				return OWASPHit{Category: CatSQLi, RuleID: best, Score: total, Desc: "SQL injection signals"}, true
-			}
-		}
-	}
-	return OWASPHit{}, false
-}
-
 // ── Webshell ──
 
 var webshellPatterns = []owaspPattern{
@@ -4296,10 +4439,6 @@ func collectSQLiPatternSignals(normalized string) sqliPatternSignals {
 		containsFullwidthS:      strings.Contains(normalized, "\xef\xbd\x93") || strings.Contains(normalized, "\xef\xbc\xb3"),
 		containsDoubleURLEncode: strings.Contains(normalized, "%25"),
 	}
-}
-
-func shouldScanSQLiPattern(normalized string, p owaspPattern) bool {
-	return shouldScanSQLiPatternWithSignals(normalized, p, collectSQLiPatternSignals(normalized))
 }
 
 func shouldScanSQLiPatternWithSignals(normalized string, p owaspPattern, signals sqliPatternSignals) bool {
@@ -4738,10 +4877,7 @@ func isOpaqueEncodedAttackBody(raw, normalized string, headers map[string]string
 		return false
 	}
 	plusSlash := strings.Count(compact, "+") + strings.Count(compact, "/")
-	if plusSlash < 16 {
-		return false
-	}
-	return true
+	return plusSlash >= 16
 }
 
 var pathTravPatterns = []owaspPattern{

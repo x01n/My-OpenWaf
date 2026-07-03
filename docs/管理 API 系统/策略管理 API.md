@@ -63,7 +63,7 @@ Snapshot --> Engine["WAF 执行引擎<br/>internal/core/engine/engine.go"]
 
 ## 核心组件
 - 策略（Policy）：用于分组管理规则，绑定到站点后生效。策略本身不直接包含规则，规则通过 PolicyID 关联到策略。
-- 规则（Rule）：定义具体的安全检测与处置动作，支持多阶段（如 ACL、速率限制、OWASP 默认、签名、自定义）。
+- 规则（Rule）：定义具体的安全检测与处置动作，支持多阶段（如 ACL、签名、自定义；rate_limit、owasp_default 属于内置/配置驱动阶段）。
 - 快照（Snapshot）：从数据库构建的只读运行时视图，包含站点、证书、规则编译结果与保护配置。
 - 执行引擎（WAF Eval）：按阶段顺序评估请求，支持 ACL、路径/查询匹配、OWASP 默认规则、自定义规则等。
 - OWASP 规则集：内置的攻击检测规则库，支持多种攻击类型的识别与评分。
@@ -114,8 +114,8 @@ Note over E,S : 请求到达时，引擎按阶段评估
 ### 策略模型与规则模型
 - 策略（Policy）：包含自增 ID、创建/更新时间、名称等字段。
 - 规则（Rule）：包含名称、所属策略 ID、阶段、模式（DSL）、动作、优先级、启用状态等。
-- 规则阶段（RulePhase）：支持 acl、rate_limit、owasp_default、signature、custom。
-- 规则动作（RuleAction）：支持 allow、intercept、observe、drop，并兼容历史别名 block、log_only。
+- 规则阶段（RulePhase）：模型枚举包含 acl、rate_limit、owasp_default、signature、custom；规则 CRUD 可保存的自定义规则阶段为 acl、signature、custom，rate_limit、owasp_default 属于内置/配置驱动阶段。
+- 规则动作（RuleAction）：持久化规则支持 allow、intercept、observe、drop、challenge、captcha_challenge、shield_challenge、chain_challenge、redirect、rate_limit，并兼容历史别名 block、log_only；allow 仅允许用于 acl，tag 不支持持久化规则。
 
 ```mermaid
 classDiagram
@@ -214,7 +214,7 @@ F --> G["注册站点映射"]
 - [snapshot_build.go:14-143](file://internal/snapshot/build.go#L14-L143)
 
 ### 策略执行机制
-- 阶段顺序：ACL → 签名/自定义 → OWASP 默认（可选）→ 速率限制（可选）。
+- 阶段顺序：IPReputation → AntiReplay → ACL → OWASP → CVE → BotDetection → RequestRateLimit → Signature → Custom；缺少对应管理器或关闭配置时跳过相关阶段。
 - 匹配逻辑：ACL 使用 IP/CIDR 匹配；路径/查询匹配支持前缀与包含两种简单模式；OWASP 默认规则在高灵敏度下更严格。
 - 冲突处理：一旦某规则命中并产生终端动作（如拦截、丢弃），立即短路返回；观察（observe）命中仅记录，不终止后续阶段。
 

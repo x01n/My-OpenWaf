@@ -159,33 +159,38 @@ func TestBuildAccessLogSnapshotUsesDefaultPageAndLightDTO(t *testing.T) {
 			UpstreamLatencyMs:  12,
 		},
 		{
-			SiteID:             1,
-			RequestID:          "req-new",
-			ClientIP:           "192.0.2.11",
-			Host:               "new.example",
-			Path:               "/new",
-			QueryString:        "page=1",
-			Method:             "POST",
-			StatusCode:         403,
-			WAFAction:          "intercept",
-			CacheState:         "bypass",
-			Upstream:           "https://upstream.example",
-			UserAgent:          "ua-new",
-			RequestHeaders:     `{"cookie":["secret"]}`,
-			RequestBodyPreview: "token=secret",
-			RequestSize:        128,
-			ResponseHeaders:    `{"authorization":["secret"]}`,
-			HTTPProtocol:       "https",
-			TLSVersion:         "TLS13",
-			TLSSNI:             "new.example",
-			TLSALPN:            "h2",
-			TLSJA3:             "full-ja3-string",
-			TLSJA3Hash:         "d4f68581a02a302e6ed609df31fc84cd",
-			TLSJA4:             "t13i191000_9dc949149365_e5728521abd4",
-			HeaderOrder:        "Host,User-Agent",
-			CreatedAt:          now,
-			UpstreamLatencyMs:  34,
-			ResponseSize:       256,
+			SiteID:               1,
+			RequestID:            "req-new",
+			ClientIP:             "192.0.2.11",
+			Host:                 "new.example",
+			Path:                 "/new",
+			QueryString:          "page=1",
+			Method:               "POST",
+			StatusCode:           403,
+			WAFAction:            "intercept",
+			CacheState:           "bypass",
+			Upstream:             "https://upstream.example",
+			UserAgent:            "ua-new",
+			RequestHeaders:       `{"cookie":["secret"]}`,
+			RequestBodyPreview:   "token=secret",
+			RequestSize:          128,
+			ResponseHeaders:      `{"authorization":["secret"]}`,
+			HTTPProtocol:         "h2",
+			UpstreamHTTPProtocol: "HTTP/2.0",
+			TLSVersion:           "TLS13",
+			TLSSNI:               "new.example",
+			TLSALPN:              "h2",
+			TLSJA3:               "full-ja3-string",
+			TLSJA3Hash:           "d4f68581a02a302e6ed609df31fc84cd",
+			TLSJA4:               "t13i191000_9dc949149365_e5728521abd4",
+			TLSCipherSuites:      "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
+			TLSExtensions:        "0,16,43",
+			TLSCurves:            "29,23",
+			TLSPointFormats:      "0",
+			HeaderOrder:          "Host,User-Agent",
+			CreatedAt:            now,
+			UpstreamLatencyMs:    34,
+			ResponseSize:         256,
 		},
 	}
 	if err := repo.BatchCreate(items); err != nil {
@@ -202,11 +207,17 @@ func TestBuildAccessLogSnapshotUsesDefaultPageAndLightDTO(t *testing.T) {
 	if got[0].RequestID != "req-new" || got[1].RequestID != "req-old" {
 		t.Fatalf("snapshot should use id desc default page, got %#v", got)
 	}
-	if got[0].HTTPProtocol != "https" || got[0].TLSVersion != "TLS13" || got[0].TLSJA3Hash == "" || got[0].TLSJA4 == "" {
+	if got[0].HTTPProtocol != "h2" || got[0].TLSVersion != "TLS13" || got[0].TLSJA3Hash == "" || got[0].TLSJA4 == "" {
 		t.Fatalf("access log realtime dto missed TLS metadata: %#v", got[0])
+	}
+	if got[0].UpstreamHTTPProtocol != "HTTP/2.0" {
+		t.Fatalf("access log realtime dto missed upstream protocol: %#v", got[0])
 	}
 	if got[0].HeaderOrder != "Host,User-Agent" || got[0].ResponseSize != 256 || got[0].RequestSize != 128 {
 		t.Fatalf("access log realtime dto missed size/header metadata: %#v", got[0])
+	}
+	if got[0].TLSCipherSuites != "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384" || got[0].TLSExtensions != "0,16,43" || got[0].TLSCurves != "29,23" || got[0].TLSPointFormats != "0" {
+		t.Fatalf("access log realtime dto missed TLS shape metadata: %#v", got[0])
 	}
 	raw, err := json.Marshal(got[0])
 	if err != nil {
@@ -244,6 +255,10 @@ func TestBuildSecurityEventSnapshotUsesLightDTO(t *testing.T) {
 			TLSJA3:             "full-ja3-string",
 			TLSJA3Hash:         "d4f68581a02a302e6ed609df31fc84cd",
 			TLSJA4:             "t13i191000_9dc949149365_e5728521abd4",
+			TLSCipherSuites:    "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
+			TLSExtensions:      "0,16,43",
+			TLSCurves:          "29,23",
+			TLSPointFormats:    "0",
 			HeaderOrder:        "Host,User-Agent",
 			StatusCode:         403,
 		},
@@ -262,6 +277,9 @@ func TestBuildSecurityEventSnapshotUsesLightDTO(t *testing.T) {
 	if got[0].TLSVersion != "TLS13" || got[0].TLSSNI != "sec.example" || got[0].TLSJA3Hash == "" || got[0].TLSJA4 == "" || got[0].HeaderOrder == "" {
 		t.Fatalf("security event realtime dto missed TLS metadata: %#v", got[0])
 	}
+	if got[0].TLSCipherSuites != "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384" || got[0].TLSExtensions != "0,16,43" || got[0].TLSCurves != "29,23" || got[0].TLSPointFormats != "0" {
+		t.Fatalf("security event realtime dto missed TLS shape metadata: %#v", got[0])
+	}
 	raw, err := json.Marshal(got[0])
 	if err != nil {
 		t.Fatalf("marshal security event dto: %v", err)
@@ -278,15 +296,15 @@ func TestBuildFingerprintSnapshotUsesDefaultPage(t *testing.T) {
 	accessRepo := repository.NewAccessLogRepo(db)
 	now := time.Now()
 	logs := []store.AccessLog{
-		{SiteID: 1, Host: "example.com", TLSJA3Hash: "aaa", TLSJA4: "ja4-a", TLSVersion: "TLS13", TLSALPN: "h2", TLSSNI: "example.com", UserAgent: "ua-old", ClientIP: "203.0.113.10", HeaderOrder: "h1,h2", CreatedAt: now.Add(-time.Minute)},
-		{SiteID: 1, Host: "example.com", TLSJA3Hash: "aaa", TLSJA4: "ja4-a", TLSVersion: "TLS13", TLSALPN: "h2", TLSSNI: "example.com", UserAgent: "ua-new", ClientIP: "203.0.113.11", HeaderOrder: "h2,h1", CreatedAt: now},
-		{SiteID: 1, Host: "api.example.com", TLSJA3Hash: "bbb", TLSJA4: "ja4-b", TLSVersion: "TLS12", TLSALPN: "http/1.1", TLSSNI: "api.example.com", UserAgent: "ua-b", ClientIP: "203.0.113.12", HeaderOrder: "h3,h4", CreatedAt: now.Add(-2 * time.Minute)},
+		{SiteID: 1, RequestID: "fp-old", Host: "example.com", TLSJA3Hash: "aaa", TLSJA4: "ja4-a", TLSVersion: "TLS13", TLSALPN: "h2", TLSSNI: "example.com", TLSCipherSuites: "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384", TLSExtensions: "0,16,43", TLSCurves: "29,23", TLSPointFormats: "0", UserAgent: "ua-old", ClientIP: "203.0.113.10", HeaderOrder: "h1,h2", CreatedAt: now.Add(-time.Minute)},
+		{SiteID: 1, RequestID: "fp-new", Host: "example.com", TLSJA3Hash: "aaa", TLSJA4: "ja4-a", TLSVersion: "TLS13", TLSALPN: "h2", TLSSNI: "example.com", TLSCipherSuites: "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384", TLSExtensions: "0,16,43", TLSCurves: "29,23", TLSPointFormats: "0", UserAgent: "ua-new", ClientIP: "203.0.113.11", HeaderOrder: "h2,h1", CreatedAt: now},
+		{SiteID: 1, RequestID: "fp-b", Host: "api.example.com", TLSJA3Hash: "bbb", TLSJA4: "ja4-b", TLSVersion: "TLS12", TLSALPN: "http/1.1", TLSSNI: "api.example.com", TLSCipherSuites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", TLSExtensions: "0,11,35", TLSCurves: "24,25", TLSPointFormats: "1", UserAgent: "ua-b", ClientIP: "203.0.113.12", HeaderOrder: "h3,h4", CreatedAt: now.Add(-2 * time.Minute)},
 		{SiteID: 1, Host: "empty.example", CreatedAt: now},
 	}
 	if err := accessRepo.BatchCreate(logs); err != nil {
 		t.Fatalf("create access logs: %v", err)
 	}
-	if err := db.Create(&store.BotScoreLog{TLSJA3Hash: "aaa", TLSJA4: "ja4-a", TLSVersion: "TLS13", TLSALPN: "h2", TLSSNI: "example.com", TotalScore: 80, IsHighRisk: true, CreatedAt: now}).Error; err != nil {
+	if err := db.Create(&store.BotScoreLog{RequestID: "fp-new", TLSJA3Hash: "aaa", TLSJA4: "ja4-a", TLSVersion: "TLS13", TLSALPN: "h2", TLSSNI: "example.com", TotalScore: 80, IsHighRisk: true, CreatedAt: now}).Error; err != nil {
 		t.Fatalf("create bot score: %v", err)
 	}
 
@@ -299,6 +317,12 @@ func TestBuildFingerprintSnapshotUsesDefaultPage(t *testing.T) {
 	}
 	if got[0].TLSJA3Hash != "aaa" || got[0].Count != 2 || got[0].HighRiskCount != 1 || got[0].AvgBotScore != 80 {
 		t.Fatalf("unexpected first fingerprint aggregate: %#v", got[0])
+	}
+	if got[0].TLSCipherSuites != "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384" {
+		t.Fatalf("fingerprint snapshot should include tls_cipher_suites, got %#v", got[0])
+	}
+	if got[0].TLSExtensions != "0,16,43" || got[0].TLSCurves != "29,23" || got[0].TLSPointFormats != "0" {
+		t.Fatalf("fingerprint snapshot should include TLS shape metadata, got %#v", got[0])
 	}
 	if got[0].LastUserAgent != "ua-new" || got[0].LastClientIP != "203.0.113.11" {
 		t.Fatalf("expected latest client details, got %#v", got[0])

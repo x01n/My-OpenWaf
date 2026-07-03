@@ -18,6 +18,7 @@ func TestParsePatternNewKinds(t *testing.T) {
 		{"block_content_type:application/xml", "block_content_type", "application/xml"},
 		{"block_ip:10.0.0.0/8", "block_ip", "10.0.0.0/8"},
 		{"tls_sni:login.example.com", "tls_sni", "login.example.com"},
+		{"tls_cipher_suites:TLS_AES_128_GCM_SHA256", "tls_cipher_suites", "TLS_AES_128_GCM_SHA256"},
 		{"unknown:foo", "", ""},
 	}
 	for _, tt := range tests {
@@ -302,20 +303,107 @@ func TestTLSFingerprintMatchers(t *testing.T) {
 		{ID: 1, Name: "ja4", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "tls_ja4:t13d1516h2", Action: store.ActionIntercept, Enabled: true},
 		{ID: 2, Name: "ja3-hash", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "tls_ja3_hash:27a5061c22108817120d1d3870cba0e0", Action: store.ActionIntercept, Enabled: true},
 		{ID: 3, Name: "tls-sni", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "tls_sni:login.example.com", Action: store.ActionIntercept, Enabled: true},
-		{ID: 4, Name: "header-order", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "header_order_contains:user-agent,accept", Action: store.ActionIntercept, Enabled: true},
+		{ID: 4, Name: "tls-cipher-suites", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "tls_cipher_suites:4865", Action: store.ActionIntercept, Enabled: true},
+		{ID: 5, Name: "header-order", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "header_order_contains:user-agent,accept", Action: store.ActionIntercept, Enabled: true},
 	})
-	if len(rules) != 4 {
-		t.Fatalf("expected 4 compiled fingerprint rules, got %d", len(rules))
+	if len(rules) != 5 {
+		t.Fatalf("expected 5 compiled fingerprint rules, got %d", len(rules))
 	}
 	mc := MatchCtx{Headers: map[string]string{
-		"X-OWAF-TLS-JA4":      "t13d1516h2",
-		"X-OWAF-TLS-JA3-Hash": "27a5061c22108817120d1d3870cba0e0",
-		"X-OWAF-TLS-SNI":      "login.example.com",
-		"X-OWAF-Header-Order": "host,user-agent,accept",
+		"X-OWAF-TLS-JA4":           "t13d1516h2",
+		"X-OWAF-TLS-JA3-Hash":      "27a5061c22108817120d1d3870cba0e0",
+		"X-OWAF-TLS-SNI":           "login.example.com",
+		"X-OWAF-TLS-Cipher-Suites": "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
+		"X-OWAF-Header-Order":      "host,user-agent,accept",
 	}}
 	for _, rule := range rules {
 		if !rule.Match(mc) {
 			t.Fatalf("expected fingerprint rule %s to match", rule.Kind)
 		}
+	}
+}
+
+func TestTLSCipherSuitesMatcherKeepsNumericAndCanonicalCompatibility(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		value   string
+	}{
+		{
+			name:    "canonical rule matches numeric request value",
+			pattern: "tls_cipher_suites:TLS_AES_128_GCM_SHA256",
+			value:   "4865,TLS_AES_256_GCM_SHA384",
+		},
+		{
+			name:    "numeric rule matches canonical request value",
+			pattern: "tls_cipher_suites:4865",
+			value:   "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
+		},
+		{
+			name:    "hex rule matches canonical request value",
+			pattern: "tls_cipher_suites:0x1301",
+			value:   "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
+		},
+		{
+			name:    "alias rule matches canonical request value",
+			pattern: "tls_cipher_suites:AES_128_GCM_SHA256",
+			value:   "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rules := Compile([]store.Rule{
+				{Phase: store.PhaseCustom, Pattern: tt.pattern, Action: store.ActionIntercept, Enabled: true},
+			})
+			if len(rules) != 1 {
+				t.Fatalf("expected 1 compiled rule, got %d", len(rules))
+			}
+			if !rules[0].Match(MatchCtx{TLSCipherSuites: tt.value}) {
+				t.Fatalf("expected pattern %q to match TLS cipher suites %q", tt.pattern, tt.value)
+			}
+		})
+	}
+}
+
+func TestTLSVersionMatcherNormalizesAliases(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		header  string
+	}{
+		{name: "short tls13", pattern: "tls_version:1.3", header: "TLS13"},
+		{name: "spaced tls12", pattern: "tls_version:TLS 1.2", header: "TLS12"},
+		{name: "hex wire value", pattern: "tls_version:0x0304", header: "TLS13"},
+		{name: "decimal wire value", pattern: "tls_version:771", header: "TLS12"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rules := Compile([]store.Rule{
+				{Phase: store.PhaseCustom, Pattern: tt.pattern, Action: store.ActionIntercept, Enabled: true},
+			})
+			if len(rules) != 1 {
+				t.Fatalf("expected 1 compiled rule, got %d", len(rules))
+			}
+			mc := MatchCtx{Headers: map[string]string{"X-OWAF-TLS-Version": tt.header}}
+			if !rules[0].Match(mc) {
+				t.Fatalf("expected pattern %q to match header %q", tt.pattern, tt.header)
+			}
+		})
+	}
+}
+
+func TestTLSVersionMatcherRejectsSSL3RuleToken(t *testing.T) {
+	rules := Compile([]store.Rule{
+		{Phase: store.PhaseCustom, Pattern: "tls_version:SSL3", Action: store.ActionIntercept, Enabled: true},
+	})
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 compiled rule, got %d", len(rules))
+	}
+
+	mc := MatchCtx{Headers: map[string]string{"X-OWAF-TLS-Version": "SSL3"}}
+	if rules[0].Match(mc) {
+		t.Fatal("tls_version:SSL3 should not match; runtime rules support only TLS 1.0 through TLS 1.3")
 	}
 }

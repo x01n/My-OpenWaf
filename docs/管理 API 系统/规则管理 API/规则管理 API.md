@@ -111,7 +111,7 @@ Phases --> Engine
 - 前端规则构建器生成 DSL（简单或复合 JSON），并通过验证接口进行语法检查。
 - 后端处理器接收请求，调用编译器将规则转换为可执行的 Compiled 结构，并按优先级排序。
 - 执行阶段根据请求上下文（客户端 IP、方法、路径、查询、头部）逐个匹配规则。
-- 引擎将规则阶段串联为流水线，短路允许（allow）并返回最终动作。
+- 引擎将规则阶段串联为流水线；ACL 阶段的 allow 可短路后续阶段，最终返回动作。
 
 ```mermaid
 sequenceDiagram
@@ -245,7 +245,7 @@ notMatcher ..|> Matcher
 - [matcher.go:11-261](file://internal/core/rules/matcher.go#L11-L261)
 
 ### 规则阶段与执行流程
-- 规则按阶段执行：ACL → Bot → 请求速率限制 → OWASP → CVE → 签名 → 自定义。
+- 运行时阶段按代码装配顺序执行：IP Reputation → AntiReplay → ACL → OWASP → CVE → Bot → 请求速率限制 → 签名 → 自定义；缺少对应管理器或关闭配置时跳过相关阶段。
 - ACL 阶段允许（allow）可短路跳过后续阶段；其他阶段按顺序匹配并返回动作。
 - 引擎将规则转换为 Compiled 并注入对应阶段，最终输出动作与命中信息。
 
@@ -256,12 +256,14 @@ Resolve --> CheckMaint["检查维护模式"]
 CheckMaint --> |是| ReturnMaint["返回维护动作"]
 CheckMaint --> |否| Compile["编译规则为 Compiled 列表"]
 Compile --> Phases["按阶段执行"]
-Phases --> ACL["ACL 阶段"]
-ACL --> Bot["Bot 检测"]
-Bot --> Rate["请求速率限制"]
-Rate --> OWASP["OWASP 默认规则"]
+Phases --> IPRep["IP Reputation"]
+IPRep --> AntiReplay["AntiReplay"]
+AntiReplay --> ACL["ACL 阶段"]
+ACL --> OWASP["OWASP 默认规则"]
 OWASP --> CVE["CVE 检测"]
-CVE --> Sign["签名匹配"]
+CVE --> Bot["Bot 检测"]
+Bot --> Rate["请求速率限制"]
+Rate --> Sign["签名匹配"]
 Sign --> Custom["自定义规则"]
 Custom --> Done(["返回最终动作"])
 ```
@@ -383,7 +385,7 @@ PHASE --> ENG["引擎"]
 
 ## 性能考量
 - 正则缓存：匹配器对正则表达式进行缓存，避免重复编译带来的性能损耗。
-- 优先级排序：规则按优先级与 ID 排序，短路允许（allow）动作，减少后续阶段匹配成本。
+- 优先级排序：规则按优先级与 ID 排序；ACL allow 动作可短路后续阶段，减少后续匹配成本。
 - 复合规则：合理使用 AND/OR/NOT，避免过深嵌套导致匹配复杂度上升。
 - 速率限制与维护模式：在早期阶段短路，降低后续阶段压力。
 - 建议：对高频正则与复杂条件进行基准测试，必要时拆分为多条规则以提升可读性与性能。
@@ -401,8 +403,8 @@ PHASE --> ENG["引擎"]
   - 现象：POST /api/v1/rules/test 返回未命中。
   - 排查：核对测试请求中的路径、方法、IP、头部、查询参数是否符合预期；正则表达式是否正确。
 - 导入失败
-  - 现象：POST /api/v1/rules/import 返回部分导入成功。
-  - 排查：检查规则数组中每条规则的 pattern 是否有效；数据库约束是否满足。
+  - 现象：POST /api/v1/rules/import 返回 400 或 500。
+  - 排查：检查规则数组中每条规则的 phase、pattern、action 与优先级是否有效；导入是整体事务语义，任一规则无效或优先级冲突都不会创建新规则。
 - 规则未生效
   - 现象：规则创建/更新后未生效。
   - 排查：确认是否触发了重载；规则优先级是否过高导致被更早规则覆盖；阶段设置是否正确。
@@ -522,8 +524,11 @@ PHASE --> ENG["引擎"]
 - 关键字段
   - id、name、policy_id、phase、pattern、action、priority、enabled
 - 枚举与规范化
-  - phase：acl、rate_limit、owasp_default、signature、custom
-  - action：allow、intercept、observe、drop、legacy block/log_only 已规范化
+  - 可通过规则 CRUD 与导入接口保存的 phase：acl、signature、custom
+  - 模型枚举中的 rate_limit、owasp_default 属于内置/配置驱动阶段，不通过自定义规则 CRUD 创建
+  - 可持久化 action：allow、intercept、observe、drop、challenge、captcha_challenge、shield_challenge、chain_challenge、redirect、rate_limit
+  - allow 仅允许用于 acl 阶段；tag 不支持持久化规则
+  - legacy block/log_only 会规范化为 intercept/observe
 - 字段约束
   - priority 默认 100，启用排序
   - enabled 默认 true

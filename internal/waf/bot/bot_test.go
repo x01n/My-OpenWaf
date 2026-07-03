@@ -2,6 +2,75 @@ package bot
 
 import "testing"
 
+func TestNewBotRequestExtractsCanonicalHeadersWithoutMapScan(t *testing.T) {
+	req := NewBotRequest("POST", "/login", map[string]string{
+		"User-Agent":      "Mozilla/5.0",
+		"Accept":          "application/json",
+		"Accept-Language": "zh-CN,zh;q=0.9",
+		"Accept-Encoding": "gzip, br",
+		"Referer":         "https://example.com/login",
+		"Connection":      "keep-alive",
+		"Cookie":          "sid=abc",
+		"X-Test":          "1",
+	})
+
+	if req.UserAgent != "Mozilla/5.0" {
+		t.Fatalf("UserAgent = %q, want %q", req.UserAgent, "Mozilla/5.0")
+	}
+	if req.AcceptHeader != "application/json" {
+		t.Fatalf("AcceptHeader = %q, want %q", req.AcceptHeader, "application/json")
+	}
+	if req.AcceptLanguage != "zh-CN,zh;q=0.9" {
+		t.Fatalf("AcceptLanguage = %q, want %q", req.AcceptLanguage, "zh-CN,zh;q=0.9")
+	}
+	if req.AcceptEncoding != "gzip, br" {
+		t.Fatalf("AcceptEncoding = %q, want %q", req.AcceptEncoding, "gzip, br")
+	}
+	if req.Referer != "https://example.com/login" {
+		t.Fatalf("Referer = %q, want %q", req.Referer, "https://example.com/login")
+	}
+	if req.Connection != "keep-alive" {
+		t.Fatalf("Connection = %q, want %q", req.Connection, "keep-alive")
+	}
+	if !req.HasCookie {
+		t.Fatal("HasCookie = false, want true")
+	}
+}
+
+func TestNewBotRequestAcceptsLowercaseHeaders(t *testing.T) {
+	req := NewBotRequest("GET", "/", map[string]string{
+		"user-agent":      "curl/8.0",
+		"accept":          "*/*",
+		"accept-language": "en-US",
+		"accept-encoding": "gzip",
+		"referer":         "https://example.com",
+		"connection":      "close",
+		"cookie":          "sid=xyz",
+	})
+
+	if req.UserAgent != "curl/8.0" {
+		t.Fatalf("UserAgent = %q, want %q", req.UserAgent, "curl/8.0")
+	}
+	if req.AcceptHeader != "*/*" {
+		t.Fatalf("AcceptHeader = %q, want %q", req.AcceptHeader, "*/*")
+	}
+	if req.AcceptLanguage != "en-US" {
+		t.Fatalf("AcceptLanguage = %q, want %q", req.AcceptLanguage, "en-US")
+	}
+	if req.AcceptEncoding != "gzip" {
+		t.Fatalf("AcceptEncoding = %q, want %q", req.AcceptEncoding, "gzip")
+	}
+	if req.Referer != "https://example.com" {
+		t.Fatalf("Referer = %q, want %q", req.Referer, "https://example.com")
+	}
+	if req.Connection != "close" {
+		t.Fatalf("Connection = %q, want %q", req.Connection, "close")
+	}
+	if !req.HasCookie {
+		t.Fatal("HasCookie = false, want true")
+	}
+}
+
 func TestBotMaliciousToolUARules(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -73,6 +142,41 @@ func BenchmarkCheckBotWithLevelCleanBrowserUA(b *testing.B) {
 		got := CheckBotWithLevel(req, "medium")
 		if got.IsBot {
 			b.Fatalf("clean browser User-Agent should be human: %+v", got)
+		}
+	}
+}
+
+func BenchmarkNewBotRequestDenseHeaders(b *testing.B) {
+	headers := map[string]string{
+		"User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"user-agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language":  "zh-CN,zh;q=0.9,en;q=0.8",
+		"accept-language":  "zh-CN,zh;q=0.9,en;q=0.8",
+		"Accept-Encoding":  "gzip, deflate, br",
+		"accept-encoding":  "gzip, deflate, br",
+		"Referer":          "https://example.com/dashboard",
+		"referer":          "https://example.com/dashboard",
+		"Connection":       "keep-alive",
+		"connection":       "keep-alive",
+		"Cookie":           "sid=abc; pref=1",
+		"cookie":           "sid=abc; pref=1",
+		"X-Forwarded-For":  "203.0.113.10",
+		"x-forwarded-for":  "203.0.113.10",
+		"X-Requested-With": "XMLHttpRequest",
+		"x-requested-with": "XMLHttpRequest",
+		"Cache-Control":    "no-cache",
+		"cache-control":    "no-cache",
+		"Upgrade-Insecure": "1",
+		"upgrade-insecure": "1",
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		req := NewBotRequest("GET", "/dashboard", headers)
+		if req.UserAgent == "" || !req.HasCookie {
+			b.Fatalf("unexpected bot request: %+v", req)
 		}
 	}
 }

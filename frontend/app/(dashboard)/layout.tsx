@@ -1,54 +1,25 @@
-"use client"
+/**
+ * Dashboard 布局
+ * 包含侧边栏 + 顶部栏 + 主内容区
+ */
 
-import { useState } from "react"
-import { AuthGuard } from "@/components/auth-guard"
-import { Sidebar } from "@/components/layout/sidebar"
-import { Topbar } from "@/components/layout/topbar"
-import { Toaster } from "@/components/ui/sonner"
-import { AdminRealtimeProvider } from "@/lib/admin-realtime"
+import { Sidebar } from "@/components/sidebar-nav";
+import { TopBar } from "@/components/top-bar";
 
 export default function DashboardLayout({
   children,
 }: {
-  children: React.ReactNode
+  children: React.ReactNode;
 }) {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [mobileOpen, setMobileOpen] = useState(false)
-
   return (
-    <AuthGuard>
-      <AdminRealtimeProvider>
-        <div className="console-app-shell flex h-svh overflow-hidden text-foreground">
-          {mobileOpen && (
-            <div
-              className="fixed inset-0 z-40 bg-foreground/40 lg:hidden"
-              onClick={() => setMobileOpen(false)}
-            />
-          )}
-          <div
-            className={
-              mobileOpen
-                ? "fixed inset-y-0 left-0 z-50 lg:relative lg:z-auto"
-                : "hidden lg:flex"
-            }
-          >
-            <Sidebar
-              collapsed={sidebarCollapsed}
-              onToggle={() => {
-                setSidebarCollapsed((v) => !v)
-                if (mobileOpen) setMobileOpen(false)
-              }}
-            />
-          </div>
-          <div className="flex min-w-0 flex-1 flex-col">
-            <Topbar onMobileMenuToggle={() => setMobileOpen((v) => !v)} />
-            <main className="flex-1 overflow-y-auto p-4 sm:p-5 lg:p-6">
-              <div className="w-full">{children}</div>
-            </main>
-          </div>
-        </div>
-      </AdminRealtimeProvider>
-      <Toaster richColors />
-    </AuthGuard>
-  )
+    <div className="flex min-h-svh">
+      <Sidebar />
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <TopBar />
+        <main className="flex-1 overflow-auto bg-background p-4 lg:p-6">
+          {children}
+        </main>
+      </div>
+    </div>
+  );
 }

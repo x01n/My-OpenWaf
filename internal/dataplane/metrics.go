@@ -16,7 +16,6 @@ type Metrics struct {
 	WAFObserves   atomic.Int64
 	BuiltinHits   atomic.Int64
 
-	ringMu    [0]func() // padding; we use atomic CAS on ringIdx instead of mutex for the hot path
 	ringIdx   atomic.Int64
 	ring      [qpsRingSize]ringEntry
 	startTime time.Time

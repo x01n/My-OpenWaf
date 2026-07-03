@@ -1,8 +1,11 @@
 package security
 
 import (
+	"bytes"
 	"net"
+	"net/netip"
 	"strings"
+	"unsafe"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -11,11 +14,7 @@ import (
 
 // ResolveClientIP applies XFF semantics for WAF decisions.
 func ResolveClientIP(c *app.RequestContext, xffMode, trustedCIDR string) net.IP {
-	remoteHost, _, err := net.SplitHostPort(c.RemoteAddr().String())
-	if err != nil {
-		remoteHost = c.RemoteAddr().String()
-	}
-	direct := net.ParseIP(remoteHost)
+	direct := remoteIPFromAddr(c.RemoteAddr())
 	if direct == nil {
 		return nil
 	}
@@ -31,16 +30,8 @@ func ResolveClientIP(c *app.RequestContext, xffMode, trustedCIDR string) net.IP 
 		if !remoteInTrustedCIDR(direct, trustedCIDR) {
 			return direct
 		}
-		xff := strings.TrimSpace(c.Request.Header.Get("X-Forwarded-For"))
-		if xff == "" {
-			return direct
-		}
-		parts := strings.Split(xff, ",")
-		for _, p := range parts {
-			ip := net.ParseIP(strings.TrimSpace(p))
-			if ip != nil {
-				return ip
-			}
+		if ip := forwardedForFirstValidIPBytes(c.Request.Header.PeekAll("X-Forwarded-For")); ip != nil {
+			return ip
 		}
 		return direct
 	default:
@@ -48,32 +39,109 @@ func ResolveClientIP(c *app.RequestContext, xffMode, trustedCIDR string) net.IP 
 	}
 }
 
+func remoteIPFromAddr(addr net.Addr) net.IP {
+	switch v := addr.(type) {
+	case *net.TCPAddr:
+		if v != nil {
+			return v.IP
+		}
+	case *net.UDPAddr:
+		if v != nil {
+			return v.IP
+		}
+	case *net.IPAddr:
+		if v != nil {
+			return v.IP
+		}
+	}
+	if addr == nil {
+		return nil
+	}
+	remoteHost, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		remoteHost = addr.String()
+	}
+	return net.ParseIP(remoteHost)
+}
+
+func forwardedForFirstValidIPBytes(values [][]byte) net.IP {
+	for _, raw := range values {
+		for len(raw) > 0 {
+			segment := raw
+			if comma := bytes.IndexByte(raw, ','); comma >= 0 {
+				segment = raw[:comma]
+				raw = raw[comma+1:]
+			} else {
+				raw = nil
+			}
+			segment = bytes.TrimSpace(segment)
+			if len(segment) == 0 {
+				continue
+			}
+			if ip, ok := forwardedForSegmentIP(segment); ok {
+				return ip
+			}
+		}
+	}
+	return nil
+}
+
+func forwardedForSegmentIP(segment []byte) (net.IP, bool) {
+	if len(segment) == 0 {
+		return nil, false
+	}
+	addr, err := netip.ParseAddr(unsafe.String(unsafe.SliceData(segment), len(segment)))
+	if err != nil {
+		return nil, false
+	}
+	addr = addr.Unmap()
+	return net.IP(addr.AsSlice()), true
+}
+
 func remoteInTrustedCIDR(ip net.IP, raw string) bool {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return false
 	}
-	for _, line := range strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ',' || r == '\n' || r == ';'
-	}) {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	ipAddr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	ipAddr = ipAddr.Unmap()
+	for start := 0; start < len(raw); {
+		for start < len(raw) && isCIDRTokenDelimiter(raw[start]) {
+			start++
+		}
+		if start >= len(raw) {
+			break
+		}
+		end := start
+		for end < len(raw) && !isCIDRTokenDelimiter(raw[end]) {
+			end++
+		}
+		token := strings.TrimSpace(raw[start:end])
+		if token == "" {
+			start = end + 1
 			continue
 		}
-		_, n, err := net.ParseCIDR(line)
-		if err != nil {
-			single := net.ParseIP(line)
-			if single == nil {
-				continue
-			}
-			if single.Equal(ip) {
+		if prefix, err := netip.ParsePrefix(token); err == nil {
+			if prefix.Contains(ipAddr) {
 				return true
 			}
-			continue
+		} else if single, err := netip.ParseAddr(token); err == nil {
+			if single == ipAddr {
+				return true
+			}
 		}
-		if n.Contains(ip) {
-			return true
-		}
+		start = end + 1
 	}
 	return false
+}
+
+func isCIDRTokenDelimiter(b byte) bool {
+	return b == ',' || b == '\n' || b == ';' || isASCIIWhitespace(b)
+}
+
+func isASCIIWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\v' || b == '\f'
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,14 +48,58 @@ func DefaultShieldConfig() ShieldConfig {
 	}
 }
 
+func shieldProtocolValue(raw string) string {
+	protocol := normalizeShieldProtocol(raw)
+	if protocol == "" {
+		return "http/1.1"
+	}
+	return protocol
+}
+
+func normalizeShieldProtocol(raw string) string {
+	protocol := strings.ToLower(strings.TrimSpace(raw))
+	switch protocol {
+	case "http/2.0", "h2":
+		return "h2"
+	case "http/3.0", "h3":
+		return "h3"
+	case "http/1.0", "http/1.1", "http", "https":
+		return "http/1.1"
+	default:
+		return protocol
+	}
+}
+
+func shieldProtocolAllowed(cfg ShieldConfig, requestProtocol string) bool {
+	protocol := shieldProtocolValue(requestProtocol)
+	if cfg.RequireHTTP2 && cfg.RequireHTTP3 {
+		if protocol != "h2" && protocol != "h3" {
+			return false
+		}
+	} else if cfg.RequireHTTP2 {
+		if protocol != "h2" {
+			return false
+		}
+	} else if cfg.RequireHTTP3 {
+		if protocol != "h3" {
+			return false
+		}
+	}
+	if !cfg.AllowHTTP1 && protocol == "http/1.1" {
+		return false
+	}
+	return true
+}
+
 // ShieldSession stores the server-side state for a pending shield challenge.
 type ShieldSession struct {
-	ID          string    `json:"id"`
-	Nonce       string    `json:"nonce"`
-	Difficulty  int       `json:"difficulty"`
-	OriginalURL string    `json:"original_url"`
-	EnvKey      []byte    `json:"env_key"` // AES key for env fingerprint encryption
-	CreatedAt   time.Time `json:"created_at"`
+	ID              string    `json:"id"`
+	Nonce           string    `json:"nonce"`
+	Difficulty      int       `json:"difficulty"`
+	OriginalURL     string    `json:"original_url"`
+	RequestProtocol string    `json:"request_protocol"`
+	EnvKey          []byte    `json:"env_key"` // AES key for env fingerprint encryption
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // ShieldManager orchestrates 5-second shield challenges (PoW + env fingerprint).
@@ -90,6 +135,25 @@ func NewShieldManager(captcha *CaptchaManager, redis *goredis.Client, difficulty
 
 func (sm *ShieldManager) Close() {
 	sm.once.Do(func() { close(sm.done) })
+}
+
+func (sm *ShieldManager) redisClient() *goredis.Client {
+	if sm == nil {
+		return nil
+	}
+	sm.mu.RLock()
+	client := sm.redis
+	sm.mu.RUnlock()
+	return client
+}
+
+func (sm *ShieldManager) SetRedis(redis *goredis.Client) {
+	if sm == nil {
+		return
+	}
+	sm.mu.Lock()
+	sm.redis = redis
+	sm.mu.Unlock()
 }
 
 // SetConfig 更新 Shield 配置。
@@ -139,29 +203,36 @@ func (sm *ShieldManager) Config() ShieldConfig {
 }
 
 // GenerateChallenge creates a new shield challenge session (no captcha needed).
-func (sm *ShieldManager) GenerateChallenge(originalURL string) (*ShieldSession, error) {
+func (sm *ShieldManager) GenerateChallenge(originalURL string, requestProtocol string) (*ShieldSession, error) {
 	nonce := GeneratePoWNonce()
 	sessionID := shieldGenSessionID()
 	envKey := GenerateEnvSessionKey()
 	session := &ShieldSession{
-		ID:          sessionID,
-		Nonce:       nonce,
-		Difficulty:  sm.difficultyValue(),
-		OriginalURL: originalURL,
-		EnvKey:      envKey,
-		CreatedAt:   time.Now(),
+		ID:              sessionID,
+		Nonce:           nonce,
+		Difficulty:      sm.difficultyValue(),
+		OriginalURL:     originalURL,
+		RequestProtocol: shieldProtocolValue(requestProtocol),
+		EnvKey:          envKey,
+		CreatedAt:       time.Now(),
 	}
 	sm.saveShieldSession(session)
 	return session, nil
 }
 
 // VerifyChallenge checks PoW + env fingerprint.
-func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON string) (bool, string) {
+func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, requestProtocol string) (bool, string) {
 	session := sm.loadShieldSession(sessionID)
 	if session == nil {
 		return false, ""
 	}
 	sm.deleteShieldSession(sessionID)
+	if !shieldProtocolAllowed(sm.Config(), requestProtocol) {
+		return false, session.OriginalURL
+	}
+	if session.RequestProtocol != "" && shieldProtocolValue(requestProtocol) != session.RequestProtocol {
+		return false, session.OriginalURL
+	}
 	// PoW verification is the primary challenge.
 	if !VerifyPoW(session.Nonce, powCounter, powHash, session.Difficulty) {
 		return false, session.OriginalURL
@@ -185,9 +256,9 @@ func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCou
 }
 
 // WriteShieldChallengeResponse renders the Cloudflare-style shield HTML page.
-func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, reqID, originalURL string, statusCode int) {
+func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, reqID, originalURL, requestProtocol string, statusCode int) {
 	prepareChallengeResponseHeaders(c, reqID)
-	session, err := sm.GenerateChallenge(originalURL)
+	session, err := sm.GenerateChallenge(originalURL, requestProtocol)
 	if err != nil {
 		c.String(500, "shield challenge generation failed")
 		return
@@ -202,12 +273,12 @@ func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, req
 		envJS = EnvCheckJSEncrypted(EnvSessionKeyHex(session.EnvKey))
 	}
 
-	html := shieldPageHTMLWithConfig(session.ID, cfg, envJS, powScript)
+	html := shieldPageHTMLWithConfig(session.ID, cfg, session.RequestProtocol, envJS, powScript)
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
-func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, envJS, powScript string) string {
-	return fmt.Sprintf(shieldPageHTML, sessionID, cfg.AutoStartDelay, cfg.TimeoutSecs*1000, cfg.MaxRetries, cfg.EnableEnvCheck, cfg.EnableDevToolsDetect, cfg.RequireHTTP2, cfg.RequireHTTP3, cfg.AllowHTTP1, envJS, powScript)
+func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, requestProtocol, envJS, powScript string) string {
+	return fmt.Sprintf(shieldPageHTML, sessionID, cfg.AutoStartDelay, cfg.TimeoutSecs*1000, cfg.MaxRetries, cfg.EnableEnvCheck, cfg.EnableDevToolsDetect, cfg.RequireHTTP2, cfg.RequireHTTP3, cfg.AllowHTTP1, shieldProtocolValue(requestProtocol), envJS, powScript)
 }
 
 const shieldPageHTML = `<!DOCTYPE html>
@@ -266,7 +337,7 @@ h1{font-size:1.15rem;font-weight:600;color:#334155;margin-bottom:4px}
 </div>
 <script>
 (function(){
-var sid="%s",autoDelay=%d,timeoutMs=%d,maxRetries=%d,retryCount=0,enableEnv=%t,detectDev=%t,requireH2=%t,requireH3=%t,allowH1=%t,pc=0,ph="",env="",solving=false,solved=false;
+var sid="%s",autoDelay=%d,timeoutMs=%d,maxRetries=%d,retryCount=0,enableEnv=%t,detectDev=%t,requireH2=%t,requireH3=%t,allowH1=%t,requestProto="%s",pc=0,ph="",env="",solving=false,solved=false;
 %s
 var cbw=document.getElementById('cbw'),cbl=document.getElementById('cbl'),st=document.getElementById('st'),retry=document.getElementById('retry');
 
@@ -301,7 +372,8 @@ retry.style.display='inline-block';
 }
 
 function detectDevToolsEnabled(){return detectDev&&detectDevTools()}
-function protocolAllowed(){var p=(location.protocol||'').toLowerCase();if(requireH3)return false;if(requireH2&&p!=='https:')return false;if(!allowH1&&p==='http:')return false;return true}
+function normalizeProtocolToken(raw){var p=(raw||'').toLowerCase().trim();if(p.endsWith(':'))p=p.slice(0,-1);if(p==='http/2.0'||p==='h2')return'h2';if(p==='http/3.0'||p==='h3')return'h3';if(p==='http'||p==='http/1.0'||p==='http/1.1'||p==='https')return'http/1.1';return p}
+function protocolAllowed(){var p=normalizeProtocolToken(requestProto||location.protocol||'');if(requireH2&&requireH3){if(p!=='h2'&&p!=='h3')return false}else if(requireH2){if(p!=='h2')return false}else if(requireH3){if(p!=='h3')return false}if(!allowH1&&p==='http/1.1')return false;return true}
 function failVerify(msg){solving=false;solved=false;cbw.className='cb-wrap fail';cbl.textContent='Verification failed / 验证失败';st.textContent=msg;if(retryCount>=maxRetries){solved=true;retry.style.display='inline-block'}}
 
 // Continuous environment monitoring — check every 2 seconds during solving.
@@ -388,11 +460,11 @@ document.body.appendChild(f);f.submit();
 </html>`
 
 func (sm *ShieldManager) saveShieldSession(s *ShieldSession) {
-	if sm.redis != nil {
+	if redis := sm.redisClient(); redis != nil {
 		data, _ := json.Marshal(s)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if sm.redis.Set(ctx, sm.prefix+s.ID, data, 5*time.Minute).Err() == nil {
+		if redis.Set(ctx, sm.prefix+s.ID, data, 5*time.Minute).Err() == nil {
 			return
 		}
 	}
@@ -402,10 +474,10 @@ func (sm *ShieldManager) saveShieldSession(s *ShieldSession) {
 }
 
 func (sm *ShieldManager) loadShieldSession(id string) *ShieldSession {
-	if sm.redis != nil {
+	if redis := sm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		data, err := sm.redis.Get(ctx, sm.prefix+id).Bytes()
+		data, err := redis.Get(ctx, sm.prefix+id).Bytes()
 		if err == nil {
 			var s ShieldSession
 			if json.Unmarshal(data, &s) == nil {
@@ -420,10 +492,10 @@ func (sm *ShieldManager) loadShieldSession(id string) *ShieldSession {
 }
 
 func (sm *ShieldManager) deleteShieldSession(id string) {
-	if sm.redis != nil {
+	if redis := sm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		sm.redis.Del(ctx, sm.prefix+id)
+		redis.Del(ctx, sm.prefix+id)
 	}
 	sm.mu.Lock()
 	delete(sm.sessions, id)

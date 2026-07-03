@@ -33,6 +33,7 @@ type localEntry struct {
 }
 
 type EscalationManager struct {
+	redisMu     sync.RWMutex
 	redis       *goredis.Client
 	localCache  sync.Map
 	defaultCfg  atomic.Value
@@ -47,10 +48,27 @@ func NewEscalationManager(redisClient *goredis.Client) *EscalationManager {
 }
 
 func (m *EscalationManager) SetDefaultConfig(cfg EscalationConfig) { m.defaultCfg.Store(cfg) }
+func (m *EscalationManager) SetRedis(redisClient *goredis.Client) {
+	if m == nil {
+		return
+	}
+	m.redisMu.Lock()
+	m.redis = redisClient
+	m.redisMu.Unlock()
+}
 func (m *EscalationManager) DefaultConfig() EscalationConfig {
 	return m.defaultCfg.Load().(EscalationConfig)
 }
 func (m *EscalationManager) Close() { close(m.cleanupDone) }
+func (m *EscalationManager) redisClient() *goredis.Client {
+	if m == nil {
+		return nil
+	}
+	m.redisMu.RLock()
+	client := m.redis
+	m.redisMu.RUnlock()
+	return client
+}
 func redisEscalationKey(ip string, siteID uint) string {
 	return fmt.Sprintf("owaf:escalation:%s:%d", ip, siteID)
 }
@@ -66,7 +84,7 @@ func (m *EscalationManager) RecordHit(ip string, siteID uint, cfg *EscalationCon
 	if !ec.Enabled || ec.WindowSecs <= 0 {
 		return
 	}
-	if m.redis != nil {
+	if m.redisClient() != nil {
 		if m.recordHitRedis(ip, siteID, ec.WindowSecs) {
 			return
 		}
@@ -77,7 +95,11 @@ func (m *EscalationManager) recordHitRedis(ip string, siteID uint, windowSecs in
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	key := redisEscalationKey(ip, siteID)
-	pipe := m.redis.Pipeline()
+	redis := m.redisClient()
+	if redis == nil {
+		return false
+	}
+	pipe := redis.Pipeline()
 	incrCmd := pipe.Incr(ctx, key)
 	pipe.Expire(ctx, key, time.Duration(windowSecs)*time.Second)
 	_, err := pipe.Exec(ctx)
@@ -103,7 +125,7 @@ func (m *EscalationManager) recordHitLocal(ip string, siteID uint, windowSecs in
 	m.localCache.Store(key, &localEntry{count: 1, expires: expiry})
 }
 func (m *EscalationManager) getCount(ip string, siteID uint) int {
-	if m.redis != nil {
+	if m.redisClient() != nil {
 		if count, ok := m.getCountRedis(ip, siteID); ok {
 			return count
 		}
@@ -114,7 +136,11 @@ func (m *EscalationManager) getCountRedis(ip string, siteID uint) (int, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	key := redisEscalationKey(ip, siteID)
-	val, err := m.redis.Get(ctx, key).Int()
+	redis := m.redisClient()
+	if redis == nil {
+		return 0, false
+	}
+	val, err := redis.Get(ctx, key).Int()
 	if err != nil {
 		return 0, false
 	}
@@ -172,10 +198,10 @@ func (m *EscalationManager) GetIPStatus(ip string, siteID uint) IPEscalationStat
 }
 func (m *EscalationManager) ResetIP(ip string, siteID uint) {
 	m.localCache.Delete(localEscalationKey(ip, siteID))
-	if m.redis != nil {
+	if redis := m.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		m.redis.Del(ctx, redisEscalationKey(ip, siteID))
+		redis.Del(ctx, redisEscalationKey(ip, siteID))
 	}
 }
 func resolveAction(count int, steps []EscalationStep) string {

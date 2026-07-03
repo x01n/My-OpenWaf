@@ -94,6 +94,25 @@ func (cm *CaptchaManager) Close() {
 	cm.once.Do(func() { close(cm.done) })
 }
 
+func (cm *CaptchaManager) redisClient() *goredis.Client {
+	if cm == nil {
+		return nil
+	}
+	cm.mu.RLock()
+	client := cm.redis
+	cm.mu.RUnlock()
+	return client
+}
+
+func (cm *CaptchaManager) SetRedis(redis *goredis.Client) {
+	if cm == nil {
+		return
+	}
+	cm.mu.Lock()
+	cm.redis = redis
+	cm.mu.Unlock()
+}
+
 // SetGoCaptchaProvider 设置 go-captcha 高级验证码提供器。
 func (cm *CaptchaManager) SetGoCaptchaProvider(p *GoCaptchaProvider) {
 	cm.mu.Lock()
@@ -268,12 +287,12 @@ func (cm *CaptchaManager) storeSession(session *CaptchaSession) error {
 		return err
 	}
 
-	if cm.redis != nil {
+	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		key := cm.prefix + session.ID
 		timeout := cm.timeoutValue()
-		err := cm.redis.Set(ctx, key, data, timeout).Err()
+		err := redis.Set(ctx, key, data, timeout).Err()
 		if err == nil {
 			return nil
 		}
@@ -288,11 +307,11 @@ func (cm *CaptchaManager) storeSession(session *CaptchaSession) error {
 
 // loadSession retrieves a session from Redis or in-memory fallback.
 func (cm *CaptchaManager) loadSession(sessionID string) (*CaptchaSession, error) {
-	if cm.redis != nil {
+	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		key := cm.prefix + sessionID
-		data, err := cm.redis.Get(ctx, key).Bytes()
+		data, err := redis.Get(ctx, key).Bytes()
 		if err == nil {
 			var session CaptchaSession
 			if json.Unmarshal(data, &session) == nil {
@@ -313,10 +332,10 @@ func (cm *CaptchaManager) loadSession(sessionID string) (*CaptchaSession, error)
 
 // deleteSession removes a session from storage.
 func (cm *CaptchaManager) deleteSession(sessionID string) {
-	if cm.redis != nil {
+	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		cm.redis.Del(ctx, cm.prefix+sessionID)
+		redis.Del(ctx, cm.prefix+sessionID)
 	}
 
 	cm.mu.Lock()

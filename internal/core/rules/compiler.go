@@ -10,20 +10,26 @@ import (
 
 // Compiled is a runtime-ready rule with a pre-built matcher.
 type Compiled struct {
-	ID         uint
-	Phase      string
-	Action     action.Type
-	Priority   int
-	Kind       string
-	Arg        string
-	StatusCode int    // custom HTTP status code (0 = default)
-	RedirectTo string // URL for redirect action
-	matcher    Matcher
+	ID            uint
+	Phase         string
+	Action        action.Type
+	Priority      int
+	Kind          string
+	Arg           string
+	StatusCode    int    // custom HTTP status code (0 = default)
+	RedirectTo    string // URL for redirect action
+	matcher       Matcher
+	runtimeAction action.Type
+	ruleIDStr     string
+	matchDesc     string
 }
 
 // Match delegates to the pre-built matcher.
 func (c *Compiled) Match(ctx MatchCtx) bool {
-	return c.matcher.Match(ctx.ClientIP, ctx.Method, ctx.Path, ctx.Query, ctx.Headers, ctx.Body)
+	if c.matcher != nil {
+		return c.matcher.Match(ctx)
+	}
+	return false
 }
 
 // Compile converts persisted Rule models into sorted, matcher-ready Compiled slices.
@@ -37,16 +43,20 @@ func Compile(rs []store.Rule) []Compiled {
 		if kind == "" {
 			continue
 		}
+		matcher := buildMatcher(kind, arg)
 		out = append(out, Compiled{
-			ID:         r.ID,
-			Phase:      string(r.Phase),
-			Action:     action.Type(r.Action),
-			Priority:   r.Priority,
-			Kind:       kind,
-			Arg:        arg,
-			StatusCode: r.StatusCode,
-			RedirectTo: r.RedirectTo,
-			matcher:    buildMatcher(kind, arg),
+			ID:            r.ID,
+			Phase:         string(r.Phase),
+			Action:        action.Type(r.Action),
+			Priority:      r.Priority,
+			Kind:          kind,
+			Arg:           arg,
+			StatusCode:    r.StatusCode,
+			RedirectTo:    r.RedirectTo,
+			matcher:       matcher,
+			runtimeAction: normalizeConfiguredAction(string(r.Action)),
+			ruleIDStr:     "rule:" + string(r.Phase) + ":" + kind,
+			matchDesc:     compiledMatchDesc(kind, arg),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -55,6 +65,43 @@ func Compile(rs []store.Rule) []Compiled {
 		}
 		return out[i].ID < out[j].ID
 	})
+	return out
+}
+
+func compiledMatchDesc(kind string, arg string) string {
+	if kind == "compound" && len(arg) > 60 {
+		return "compound:{...}"
+	}
+	return kind + ":" + arg
+}
+
+func ensureCompiledMetadata(rules []Compiled) []Compiled {
+	if len(rules) == 0 {
+		return nil
+	}
+	needsCopy := false
+	for i := range rules {
+		if rules[i].ruleIDStr == "" || rules[i].matchDesc == "" || rules[i].runtimeAction == "" {
+			needsCopy = true
+			break
+		}
+	}
+	if !needsCopy {
+		return rules
+	}
+
+	out := append([]Compiled(nil), rules...)
+	for i := range out {
+		if out[i].ruleIDStr == "" {
+			out[i].ruleIDStr = "rule:" + out[i].Phase + ":" + out[i].Kind
+		}
+		if out[i].matchDesc == "" {
+			out[i].matchDesc = compiledMatchDesc(out[i].Kind, out[i].Arg)
+		}
+		if out[i].runtimeAction == "" {
+			out[i].runtimeAction = normalizeConfiguredAction(string(out[i].Action))
+		}
+	}
 	return out
 }
 
@@ -80,7 +127,7 @@ func ParsePattern(p string) (kind, arg string) {
 		"host:", "host_full:", "host_regex:", "host_contains:", "host_not_contains:",
 		"full_url_contains:", "full_url_regex:",
 		"cookie_contains:", "referer_contains:",
-		"tls_ja3:", "tls_ja3_hash:", "tls_ja4:", "tls_version:", "tls_sni:", "tls_alpn:", "header_order_contains:", "header_order_regex:",
+		"tls_ja3:", "tls_ja3_hash:", "tls_ja4:", "tls_version:", "tls_sni:", "tls_alpn:", "tls_cipher_suite:", "tls_cipher_suites:", "header_order_contains:", "header_order_regex:",
 		"block_multipart:",
 	}
 	for _, pfx := range prefixes {

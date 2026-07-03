@@ -46,7 +46,7 @@ subgraph "数据面"
 Listener["监听器"]
 Engine["WAF 引擎"]
 Pipeline["处理流水线"]
-Phases["阶段集合<br/>ACL → Bot → OWASP → 签名 → 自定义"]
+Phases["阶段集合<br/>IPReputation → AntiReplay → ACL → OWASP → CVE → BotDetection → RequestRateLimit → Signature → Custom"]
 OWASP["OWASP 检测引擎<br/>基础/扩展规则"]
 Block["阻断响应渲染"]
 end
@@ -175,7 +175,7 @@ class OWASP扩展规则 {
 ### 规则分类与优先级
 - 基础规则：由 OWASP 默认阶段扫描，覆盖 SQL 注入、XSS、命令注入、路径遍历、WebShell、反向 Shell、SSRF、XXE、LDAP 注入、NoSQL 注入、模板注入、JNDI、CRLF、表达式语言、反序列化、文件上传、协议违规等。
 - 扩展规则：独立模块，针对特定攻击面的更细粒度规则与评分。
-- 优先级：规则按 priority 升序、ID 升序执行；ACL allow 可短路整条流水线；首个拦截结果即终止后续阶段。
+- 优先级：规则按 priority 升序、ID 升序执行；ACL allow 可短路 ACL 之后的后续阶段；首个拦截结果即终止后续阶段。
 
 **章节来源**
 - [docs/安全防护功能/OWASP 检测/OWASP 检测.md:212-220](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L212-L220)

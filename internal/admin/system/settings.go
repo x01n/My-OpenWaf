@@ -11,14 +11,19 @@ import (
 )
 
 var protectedSettingKeys = map[string]string{
-	"protection":                "/api/v1/protection-settings",
-	"bot_settings":              "/api/v1/bot-settings/update",
-	"drop_policy":               "/api/v1/drop-policy/update",
-	store.SettingKeyRedisConfig: "/api/v1/redis-config",
-	settingKeyNetwork:           "/api/v1/network-config",
-	settingKeyLog:               "/api/v1/log-config",
-	settingKeyTLSDefault:        "/api/v1/tls-config",
-	store.SettingKeyACMEConfig:  "/api/v1/certificates/acme/config",
+	"protection":                        "/api/v1/protection-settings",
+	"bot_settings":                      "/api/v1/bot-settings/update",
+	"drop_policy":                       "/api/v1/drop-policy/update",
+	store.SettingKeyRedisConfig:         "/api/v1/redis-config",
+	store.SettingKeyHPKP:                "/api/v1/protection-settings",
+	store.SettingKeyHPKPValue:           "/api/v1/protection-settings",
+	store.SettingKeyHPKPReportOnly:      "/api/v1/protection-settings",
+	store.SettingKeyHPKPReportOnlyValue: "/api/v1/protection-settings",
+	settingKeyNetwork:                   "/api/v1/network-config",
+	settingKeyHTTP2:                     "/api/v1/http2-config",
+	settingKeyLog:                       "/api/v1/log-config",
+	settingKeyTLSDefault:                "/api/v1/tls-config",
+	store.SettingKeyACMEConfig:          "/api/v1/certificates/acme/config",
 }
 
 func rejectProtectedSettingWrite(c *app.RequestContext, key string) bool {

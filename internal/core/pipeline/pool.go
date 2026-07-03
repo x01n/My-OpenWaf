@@ -33,6 +33,7 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.Host = ""
 	ctx.UserAgent = ""
 	ctx.SiteID = 0
+	ctx.HeadersLowercase = false
 	ctx.Body = nil
 	ctx.ContentType = ""
 	ctx.TLS = bot.TLSClientFingerprint{}
@@ -40,10 +41,14 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.QueryParams = nil
 	ctx.BodyTargets = nil
 	ctx.BodyTargetsDone = false
+	ctx.ClearMatcherHeadersCache()
 	ctx.BotScoreResult = nil
-	ctx.HeaderKeys = ctx.HeaderKeys[:0]
-	for k := range ctx.Headers {
-		delete(ctx.Headers, k)
+	if ctx.phaseObserveHits != nil {
+		ctx.phaseObserveHits = ctx.phaseObserveHits[:0]
 	}
+	if len(ctx.Headers) > 0 {
+		clear(ctx.Headers)
+	}
+	ctx.ClearHeaderKeys()
 	ctxPool.Put(ctx)
 }

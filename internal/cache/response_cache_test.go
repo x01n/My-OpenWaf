@@ -1,7 +1,11 @@
 package cache
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,6 +72,12 @@ func TestResponseCacheDisabled(t *testing.T) {
 	}
 }
 
+func TestResponseCacheCloseIsIdempotent(t *testing.T) {
+	rc := NewResponseCache(10, 60)
+	rc.Close()
+	rc.Close()
+}
+
 func TestResponseCacheLookupExpired(t *testing.T) {
 	rc := NewResponseCache(10, 1)
 	defer rc.Close()
@@ -110,9 +120,114 @@ func TestCacheKeyDeterministic(t *testing.T) {
 	}
 }
 
+func TestCacheKeyMatchesPreviousHashInput(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		host   string
+		path   string
+		query  string
+	}{
+		{name: "empty query", method: "GET", host: ":80|1|127.0.0.1", path: "/favicon.ico"},
+		{name: "with query", method: "GET", host: ":443|7|cache.example.com", path: "/assets/app.js", query: "v=1&lang=zh"},
+		{name: "head normalized upstream", method: "GET", host: ":80|9|example.com", path: "/index.html", query: "utm=1"},
+		{name: "long path", method: "GET", host: ":80|1|example.com", path: "/" + strings.Repeat("a", 600), query: "x=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CacheKey(tt.method, tt.host, tt.path, tt.query)
+			want := cacheKeyStringForTest(tt.method, tt.host, tt.path, tt.query)
+			if got != want {
+				t.Fatalf("CacheKey() = %q, want %q", got, want)
+			}
+			gotBytes := CacheKeyBytes(tt.method, []byte(tt.host), tt.path, []byte(tt.query))
+			if gotBytes != want {
+				t.Fatalf("CacheKeyBytes() = %q, want %q", gotBytes, want)
+			}
+			partsHost := tt.host
+			if strings.Count(partsHost, "|") == 2 {
+				parts := strings.Split(partsHost, "|")
+				siteID, err := strconv.ParseUint(parts[1], 10, 64)
+				if err != nil {
+					t.Fatalf("parse site id: %v", err)
+				}
+				gotParts := CacheKeyWithHostParts(tt.method, parts[0], siteID, []byte(parts[2]), tt.path, []byte(tt.query))
+				if gotParts != want {
+					t.Fatalf("CacheKeyWithHostParts() = %q, want %q", gotParts, want)
+				}
+				gotPartsBytesPath := CacheKeyWithHostPartsBytesPath(tt.method, parts[0], siteID, []byte(parts[2]), []byte(tt.path), []byte(tt.query))
+				if gotPartsBytesPath != want {
+					t.Fatalf("CacheKeyWithHostPartsBytesPath() = %q, want %q", gotPartsBytesPath, want)
+				}
+			}
+		})
+	}
+}
+
+func cacheKeyStringForTest(method, host, path, query string) string {
+	h := sha256.New()
+	h.Write([]byte(method))
+	h.Write([]byte{0})
+	h.Write([]byte(host))
+	h.Write([]byte{0})
+	h.Write([]byte(path))
+	h.Write([]byte{0})
+	h.Write([]byte(query))
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
+	var encoded [sha256.Size * 2]byte
+	hex.Encode(encoded[:], sum[:])
+	return string(encoded[:])
+}
+
 func BenchmarkCacheKey(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if CacheKey("GET", ":80|1|127.0.0.1", "/favicon.ico", "") == "" {
+			b.Fatal("empty key")
+		}
+	}
+}
+
+func BenchmarkCacheKeyStringForTest(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if cacheKeyStringForTest("GET", ":80|1|127.0.0.1", "/favicon.ico", "") == "" {
+			b.Fatal("empty key")
+		}
+	}
+}
+
+func BenchmarkCacheKeyBytes(b *testing.B) {
+	host := []byte(":80|1|127.0.0.1")
+	query := []byte("x=1")
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if CacheKeyBytes("GET", host, "/favicon.ico", query) == "" {
+			b.Fatal("empty key")
+		}
+	}
+}
+
+func BenchmarkCacheKeyWithHostParts(b *testing.B) {
+	host := []byte("127.0.0.1")
+	query := []byte("x=1")
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if CacheKeyWithHostParts("GET", ":80", 1, host, "/favicon.ico", query) == "" {
+			b.Fatal("empty key")
+		}
+	}
+}
+
+func BenchmarkCacheKeyWithHostPartsBytesPath(b *testing.B) {
+	host := []byte("127.0.0.1")
+	path := []byte("/favicon.ico")
+	query := []byte("x=1")
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if CacheKeyWithHostPartsBytesPath("GET", ":80", 1, host, path, query) == "" {
 			b.Fatal("empty key")
 		}
 	}
@@ -148,5 +263,25 @@ func TestResponseCacheEvictsToMaxSize(t *testing.T) {
 	_, size := rc.Stats()
 	if size > 1024*1024 {
 		t.Fatalf("cache exceeded max size: %d", size)
+	}
+}
+
+func TestResponseCacheMaxEntryBodySizeMatchesSetLimit(t *testing.T) {
+	rc := NewResponseCache(1, 60)
+	defer rc.Close()
+
+	limit := rc.MaxEntryBodySize()
+	if limit != 1024*1024/10 {
+		t.Fatalf("MaxEntryBodySize = %d, want %d", limit, 1024*1024/10)
+	}
+
+	rc.Set("within", 200, "text/plain", make([]byte, limit), 60, nil)
+	if rc.Get("within") == nil {
+		t.Fatal("expected body at max entry size to be cached")
+	}
+
+	rc.Set("too-large", 200, "text/plain", make([]byte, limit+1), 60, nil)
+	if rc.Get("too-large") != nil {
+		t.Fatal("expected body above max entry size to be rejected")
 	}
 }

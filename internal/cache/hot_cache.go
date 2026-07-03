@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -19,6 +20,7 @@ import (
 //   - Writes invalidate the relevant cache key so stale data is never served after mutation.
 //   - Thread-safe: backed by Redis atomic operations.
 type HotCache struct {
+	mu     sync.RWMutex
 	redis  *goredis.Client
 	log    *slog.Logger
 	prefix string
@@ -35,15 +37,35 @@ func NewHotCache(redis *goredis.Client, log *slog.Logger) *HotCache {
 	}
 }
 
+func (h *HotCache) redisClient() *goredis.Client {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	client := h.redis
+	h.mu.RUnlock()
+	return client
+}
+
+func (h *HotCache) SetRedis(redis *goredis.Client) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.redis = redis
+	h.mu.Unlock()
+}
+
 // Get retrieves a cached JSON value. Returns false on miss or when Redis is unavailable.
 func (h *HotCache) Get(key string, dest any) bool {
-	if h == nil || h.redis == nil {
+	client := h.redisClient()
+	if client == nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	data, err := h.redis.Get(ctx, h.prefix+key).Bytes()
+	data, err := client.Get(ctx, h.prefix+key).Bytes()
 	if err != nil {
 		return false
 	}
@@ -56,7 +78,8 @@ func (h *HotCache) Get(key string, dest any) bool {
 
 // Set stores a value as JSON with the given TTL.
 func (h *HotCache) Set(key string, value any, ttl time.Duration) {
-	if h == nil || h.redis == nil {
+	client := h.redisClient()
+	if client == nil {
 		return
 	}
 	data, err := json.Marshal(value)
@@ -65,29 +88,31 @@ func (h *HotCache) Set(key string, value any, ttl time.Duration) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := h.redis.Set(ctx, h.prefix+key, data, ttl).Err(); err != nil {
+	if err := client.Set(ctx, h.prefix+key, data, ttl).Err(); err != nil {
 		h.log.Warn("hot cache set failed", slog.String("key", key), slog.Any("err", err))
 	}
 }
 
 // SetBytes stores raw bytes with the given TTL (for pre-serialized data).
 func (h *HotCache) SetBytes(key string, data []byte, ttl time.Duration) {
-	if h == nil || h.redis == nil {
+	client := h.redisClient()
+	if client == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	h.redis.Set(ctx, h.prefix+key, data, ttl)
+	client.Set(ctx, h.prefix+key, data, ttl)
 }
 
 // GetBytes retrieves raw bytes. Returns nil on miss.
 func (h *HotCache) GetBytes(key string) []byte {
-	if h == nil || h.redis == nil {
+	client := h.redisClient()
+	if client == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	data, err := h.redis.Get(ctx, h.prefix+key).Bytes()
+	data, err := client.Get(ctx, h.prefix+key).Bytes()
 	if err != nil {
 		return nil
 	}
@@ -96,18 +121,20 @@ func (h *HotCache) GetBytes(key string) []byte {
 
 // Invalidate removes a specific cache key.
 func (h *HotCache) Invalidate(key string) {
-	if h == nil || h.redis == nil {
+	client := h.redisClient()
+	if client == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	h.redis.Del(ctx, h.prefix+key)
+	client.Del(ctx, h.prefix+key)
 }
 
 // InvalidatePattern removes all keys matching the glob pattern.
 // Use with caution — SCAN-based deletion can be expensive on large keyspaces.
 func (h *HotCache) InvalidatePattern(pattern string) {
-	if h == nil || h.redis == nil {
+	client := h.redisClient()
+	if client == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -115,12 +142,12 @@ func (h *HotCache) InvalidatePattern(pattern string) {
 
 	var cursor uint64
 	for {
-		keys, next, err := h.redis.Scan(ctx, cursor, h.prefix+pattern, 200).Result()
+		keys, next, err := client.Scan(ctx, cursor, h.prefix+pattern, 200).Result()
 		if err != nil {
 			break
 		}
 		if len(keys) > 0 {
-			h.redis.Del(ctx, keys...)
+			client.Del(ctx, keys...)
 		}
 		cursor = next
 		if cursor == 0 {
@@ -131,7 +158,7 @@ func (h *HotCache) InvalidatePattern(pattern string) {
 
 // Available returns true if Redis is connected.
 func (h *HotCache) Available() bool {
-	return h != nil && h.redis != nil
+	return h.redisClient() != nil
 }
 
 // GetOrLoad implements the read-through pattern: try cache first, on miss call loader,
@@ -166,7 +193,7 @@ type ListCacheEntry struct {
 // GetListRaw retrieves a cached list result as raw bytes + total count.
 // This method satisfies the repository.HotCacheBackend interface without cross-package types.
 func (h *HotCache) GetListRaw(key string) (items []byte, total int64, ok bool) {
-	if h == nil || h.redis == nil {
+	if !h.Available() {
 		return nil, 0, false
 	}
 	var entry ListCacheEntry
@@ -178,7 +205,7 @@ func (h *HotCache) GetListRaw(key string) (items []byte, total int64, ok bool) {
 
 // GetList retrieves a cached list result.
 func (h *HotCache) GetList(key string) (*ListCacheEntry, bool) {
-	if h == nil || h.redis == nil {
+	if !h.Available() {
 		return nil, false
 	}
 	var entry ListCacheEntry
@@ -190,7 +217,7 @@ func (h *HotCache) GetList(key string) (*ListCacheEntry, bool) {
 
 // SetList stores a list result with TTL.
 func (h *HotCache) SetList(key string, items any, total int64, ttl time.Duration) {
-	if h == nil || h.redis == nil {
+	if !h.Available() {
 		return
 	}
 	data, err := json.Marshal(items)

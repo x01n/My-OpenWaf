@@ -31,8 +31,8 @@ const (
 	AppRouteOpFuzzy       = "fuzzy" // case-insensitive substring
 )
 
-// ApplicationRouteRule defines when to record a resource for a site.
-// When any enabled rule matches the live traffic, a row in RecordedResource is upserted.
+// ApplicationRouteRule defines how observed site resources attach historical rule metadata.
+// RecordedResource itself is written for observed site traffic; matched rules only enrich the row.
 type ApplicationRouteRule struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -51,7 +51,7 @@ type ApplicationRouteRule struct {
 
 func (ApplicationRouteRule) TableName() string { return "application_route_rules" }
 
-// RecordedResource aggregates observed HTTP resources per site when rules match.
+// RecordedResource aggregates observed HTTP resources per site.
 type RecordedResource struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -61,10 +61,15 @@ type RecordedResource struct {
 	Method         string `gorm:"size:16;uniqueIndex:ux_recorded_res_key" json:"method"`
 	Host           string `gorm:"size:255;uniqueIndex:ux_recorded_res_key" json:"host"`
 	Path           string `gorm:"size:2048;uniqueIndex:ux_recorded_res_key" json:"path"`
+	QueryString    string `gorm:"size:2048;uniqueIndex:ux_recorded_res_key" json:"query_string"`
 	ClientIP       string `gorm:"size:45" json:"client_ip"`
 	StatusCode     int    `json:"status_code"`
 	ContentType    string `gorm:"size:256" json:"content_type"`
+	TLSVersion     string `gorm:"size:16" json:"tls_version"`
+	TLSSNI         string `gorm:"size:255" json:"tls_sni"`
+	TLSALPN        string `gorm:"size:128" json:"tls_alpn"`
 	JA3Hash        string `gorm:"size:64" json:"ja3_hash"`
+	JA4            string `gorm:"size:255" json:"ja4"`
 	UserAgent      string `gorm:"size:512" json:"user_agent"`
 	MatchedRuleIDs string `gorm:"size:512" json:"matched_rule_ids"`
 	PrimaryRuleID  uint   `gorm:"index" json:"primary_rule_id"`

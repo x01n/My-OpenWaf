@@ -25,6 +25,15 @@ func (r *Resolver) Match(bind string, host string) (snapshot.SiteRuntime, bool) 
 	return sn.MatchSite(bind, host)
 }
 
+// MatchPtr finds the SiteRuntime pointer for a bind address + host combination.
+func (r *Resolver) MatchPtr(bind string, host string) (*snapshot.SiteRuntime, bool) {
+	sn := r.holder.Load()
+	if sn == nil {
+		return nil, false
+	}
+	return sn.MatchSitePtr(bind, host)
+}
+
 // Snapshot returns the current snapshot (may be nil before first load).
 func (r *Resolver) Snapshot() *snapshot.Snapshot {
 	return r.holder.Load()

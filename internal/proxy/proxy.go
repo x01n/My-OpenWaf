@@ -17,11 +17,17 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	hertzclient "github.com/cloudwego/hertz/pkg/app/client"
+	hertzprotocol "github.com/cloudwego/hertz/pkg/protocol"
+	http2config "github.com/hertz-contrib/http2/config"
+	http2factory "github.com/hertz-contrib/http2/factory"
+	"github.com/quic-go/quic-go/http3"
 
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/dynamic"
 )
 
 type byteSliceReadCloser struct {
@@ -47,6 +53,7 @@ type transportKey struct {
 	tlsServerName string
 	tlsSkipVerify bool
 	isHTTPS       bool
+	h2cPrior      bool
 }
 
 var (
@@ -68,9 +75,11 @@ func SharedTransport(rt snapshot.SiteRuntime) *http.Transport {
 func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Transport {
 	isHTTPS := isHTTPSUpstreamBase(base)
 	key := transportKey{
-		tlsServerName: rt.Site.UpstreamTLSServerName,
-		tlsSkipVerify: rt.Site.UpstreamTLSSkipVerify,
-		isHTTPS:       isHTTPS,
+		isHTTPS: isHTTPS,
+	}
+	if isHTTPS {
+		key.tlsServerName = rt.Site.UpstreamTLSServerName
+		key.tlsSkipVerify = rt.Site.UpstreamTLSSkipVerify
 	}
 
 	transportMu.RLock()
@@ -81,11 +90,12 @@ func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Tran
 	transportMu.RUnlock()
 
 	tr := &http.Transport{
-		MaxIdleConns:        512,
-		MaxIdleConnsPerHost: 128,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
-		DisableCompression:  true,
+		MaxIdleConns:          512,
+		MaxIdleConnsPerHost:   128,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ForceAttemptHTTP2:     true,
+		DisableCompression:    true,
 	}
 	if isHTTPS {
 		tr.TLSClientConfig = &tls.Config{
@@ -147,12 +157,324 @@ func sharedClient(tr *http.Transport) *http.Client {
 	return hc
 }
 
+type hertzClientKey struct {
+	tlsServerName string
+	tlsSkipVerify bool
+	h2c           bool
+}
+
+var (
+	hertzClientMu    sync.RWMutex
+	hertzClientCache = make(map[hertzClientKey]*hertzclient.Client)
+)
+
+func sharedHertzH2CClient() (*hertzclient.Client, error) {
+	key := hertzClientKey{h2c: true}
+	hertzClientMu.RLock()
+	if cli, ok := hertzClientCache[key]; ok {
+		hertzClientMu.RUnlock()
+		return cli, nil
+	}
+	hertzClientMu.RUnlock()
+	cli, err := hertzclient.NewClient(
+		hertzclient.WithResponseBodyStream(true),
+		hertzclient.WithDisablePathNormalizing(true),
+		hertzclient.WithNoDefaultUserAgentHeader(true),
+		hertzclient.WithDialTimeout(30*time.Second),
+		hertzclient.WithMaxConnsPerHost(128),
+		hertzclient.WithKeepAlive(true),
+	)
+	if err != nil {
+		return nil, err
+	}
+	cli.SetClientFactory(http2factory.NewClientFactory(
+		http2config.WithAllowHTTP(true),
+	))
+	hertzClientMu.Lock()
+	if existing, ok := hertzClientCache[key]; ok {
+		hertzClientMu.Unlock()
+		return existing, nil
+	}
+	hertzClientCache[key] = cli
+	hertzClientMu.Unlock()
+	return cli, nil
+}
+
+func shouldUseHertzUpstream(base string) bool {
+	lower := strings.ToLower(base)
+	return strings.HasPrefix(lower, "h2c://")
+}
+
+const upstreamHTTPProtocolContextKey = "owaf.upstream_http_protocol"
+
+func SetUpstreamHTTPProtocol(c *app.RequestContext, proto string) {
+	proto = strings.TrimSpace(proto)
+	if c == nil || proto == "" {
+		return
+	}
+	c.Set(upstreamHTTPProtocolContextKey, proto)
+}
+
+func UpstreamHTTPProtocol(c *app.RequestContext) string {
+	if c == nil {
+		return ""
+	}
+	value, ok := c.Get(upstreamHTTPProtocolContextKey)
+	if !ok {
+		return ""
+	}
+	proto, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(proto)
+}
+
+func releaseHertzUpstreamRequest(req *hertzprotocol.Request) {
+	if req == nil {
+		return
+	}
+	_ = req.CloseBodyStream()
+	hertzprotocol.ReleaseRequest(req)
+}
+
+func hertzHeaderToHTTPHeader(src interface{ VisitAll(func(key, value []byte)) }) http.Header {
+	dst := make(http.Header)
+	src.VisitAll(func(key, value []byte) {
+		dst.Add(string(key), string(value))
+	})
+	return dst
+}
+
+func hertzTrailerToHTTPHeader(src *hertzprotocol.Trailer) http.Header {
+	dst := make(http.Header)
+	if src == nil {
+		return dst
+	}
+	src.VisitAll(func(key, value []byte) {
+		dst.Add(string(key), string(value))
+	})
+	return dst
+}
+
+type hertzResponseBody struct {
+	reader  io.Reader
+	resp    *hertzprotocol.Response
+	trailer http.Header
+	closed  bool
+}
+
+func (b *hertzResponseBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	if err != nil {
+		b.syncTrailer()
+	}
+	return n, err
+}
+
+func (b *hertzResponseBody) Close() error {
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	b.syncTrailer()
+	var closeErr error
+	if b.resp != nil {
+		closeErr = b.resp.CloseBodyStream()
+		hertzprotocol.ReleaseResponse(b.resp)
+		b.resp = nil
+	}
+	return closeErr
+}
+
+func (b *hertzResponseBody) syncTrailer() {
+	if b.resp == nil || b.trailer == nil {
+		return
+	}
+	for k := range b.trailer {
+		delete(b.trailer, k)
+	}
+	for k, vv := range hertzTrailerToHTTPHeader(b.resp.Header.Trailer()) {
+		b.trailer[k] = append([]string(nil), vv...)
+	}
+}
+
+func httpProtoForBase(base string) string {
+	lower := strings.ToLower(base)
+	switch {
+	case strings.HasPrefix(lower, "h2c://"):
+		return "HTTP/2.0"
+	case strings.HasPrefix(lower, "https://"):
+		return "HTTP/2.0"
+	default:
+		return "HTTP/1.1"
+	}
+}
+
+func hertzResponseToHTTPResponse(base string, hresp *hertzprotocol.Response) *http.Response {
+	if hresp == nil {
+		return nil
+	}
+	body := hresp.BodyStream()
+	trailer := make(http.Header)
+	return &http.Response{
+		StatusCode:    hresp.StatusCode(),
+		Proto:         httpProtoForBase(base),
+		ContentLength: int64(hresp.Header.ContentLength()),
+		Header:        hertzHeaderToHTTPHeader(&hresp.Header),
+		Trailer:       trailer,
+		Body:          &hertzResponseBody{reader: body, resp: hresp, trailer: trailer},
+	}
+}
+
+func copyHTTPRequestHeadersToHertz(dst *hertzprotocol.Request, src *http.Request) {
+	if dst == nil || src == nil {
+		return
+	}
+	if src.Body != nil {
+		if src.ContentLength > 0 {
+			dst.SetBodyStream(src.Body, int(src.ContentLength))
+		} else {
+			dst.SetBodyStream(src.Body, -1)
+		}
+	}
+	for k, vv := range src.Header {
+		for _, v := range vv {
+			dst.Header.Add(k, v)
+		}
+	}
+	if src.Host != "" {
+		dst.Header.SetHost(src.Host)
+	}
+}
+
+func doHertzUpstream(ctx context.Context, rt snapshot.SiteRuntime, base string, req *http.Request) (*hertzprotocol.Response, error) {
+	if req == nil {
+		return nil, errors.New("nil upstream request")
+	}
+	var (
+		clientInst *hertzclient.Client
+		err        error
+	)
+	clientInst, err = sharedHertzH2CClient()
+	if err != nil {
+		return nil, err
+	}
+	hreq := hertzprotocol.AcquireRequest()
+	hreq.SetRequestURI(req.URL.String())
+	hreq.Header.SetMethod(req.Method)
+	hreq.URI().DisablePathNormalizing = true
+	copyHTTPRequestHeadersToHertz(hreq, req)
+	resp := hertzprotocol.AcquireResponse()
+	if err := clientInst.Do(ctx, hreq, resp); err != nil {
+		releaseHertzUpstreamRequest(hreq)
+		hertzprotocol.ReleaseResponse(resp)
+		return nil, err
+	}
+	return resp, nil
+}
+
+// NormalizeUpstreamURL converts h2c:// and h3:// URLs to http:// and https://
+// so standard Go http.Client can process them.
+func NormalizeUpstreamURL(raw string) string {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "h2c://") {
+		return "http://" + raw[6:]
+	}
+	if strings.HasPrefix(lower, "h3://") {
+		return "https://" + raw[5:]
+	}
+	return raw
+}
+
+// UpstreamRoundTripperForBase returns an appropriate http.RoundTripper and
+// normalized base URL for the given upstream URL scheme.
+func UpstreamRoundTripperForBase(rt snapshot.SiteRuntime, base string) (http.RoundTripper, string) {
+	lower := strings.ToLower(base)
+	if strings.HasPrefix(lower, "h2c://") {
+		normalizedBase := "http://" + base[6:]
+		tr := h2cTransportForUpstream()
+		return tr, normalizedBase
+	}
+	if strings.HasPrefix(lower, "h3://") {
+		normalizedBase := "https://" + base[5:]
+		tr := http3TransportForUpstream(rt)
+		return tr, normalizedBase
+	}
+	return SharedTransportForUpstream(rt, base), base
+}
+
+var (
+	h2cTransportMu   sync.RWMutex
+	h2cTransportInst *http.Transport
+)
+
+func h2cTransportForUpstream() *http.Transport {
+	h2cTransportMu.RLock()
+	if h2cTransportInst != nil {
+		h2cTransportMu.RUnlock()
+		return h2cTransportInst
+	}
+	h2cTransportMu.RUnlock()
+
+	tr := &http.Transport{
+		MaxIdleConns:        512,
+		MaxIdleConnsPerHost: 128,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
+		DisableCompression:  true,
+	}
+	tr.Protocols = new(http.Protocols)
+	tr.Protocols.SetUnencryptedHTTP2(true)
+
+	h2cTransportMu.Lock()
+	if h2cTransportInst != nil {
+		h2cTransportMu.Unlock()
+		return h2cTransportInst
+	}
+	h2cTransportInst = tr
+	h2cTransportMu.Unlock()
+	return tr
+}
+
+func http3TransportForUpstream(rt snapshot.SiteRuntime) *http3.Transport {
+	key := http3TransportKey{
+		tlsServerName: rt.Site.UpstreamTLSServerName,
+		tlsSkipVerify: rt.Site.UpstreamTLSSkipVerify,
+	}
+	http3TransportMu.RLock()
+	if tr, ok := http3TransportPool[key]; ok {
+		http3TransportMu.RUnlock()
+		return tr
+	}
+	http3TransportMu.RUnlock()
+
+	tr := &http3.Transport{
+		TLSClientConfig: &tls.Config{
+			ServerName:         rt.Site.UpstreamTLSServerName,
+			InsecureSkipVerify: rt.Site.UpstreamTLSSkipVerify,
+			MinVersion:         tls.VersionTLS13,
+			NextProtos:         []string{http3.NextProtoH3},
+		},
+		DisableCompression: true,
+	}
+	http3TransportMu.Lock()
+	if existing, ok := http3TransportPool[key]; ok {
+		http3TransportMu.Unlock()
+		return existing
+	}
+	http3TransportPool[key] = tr
+	http3TransportMu.Unlock()
+	return tr
+}
+
 // HTTPResponse is a buffered upstream response used by the cache path.
 type HTTPResponse struct {
-	StatusCode  int
-	ContentType string
-	Body        []byte
-	Header      http.Header
+	StatusCode           int
+	ContentType          string
+	Body                 []byte
+	Header               http.Header
+	UpstreamHTTPProtocol string
 }
 
 var upstreamErrorLogCounter atomic.Uint64
@@ -217,9 +539,23 @@ func logUpstreamRequestError(ctx context.Context, mode string, req *http.Request
 		slog.String("path", upstreamLogPath(req)),
 		slog.Int("query_len", queryLen),
 		slog.String("host", origHost),
+		slog.String("upstream_protocol", upstreamProtocolFromScheme(scheme)),
 		slog.Uint64("failure_count", count),
 		slog.String("err", upstreamErrorReason(err)),
 	)
+}
+
+func upstreamProtocolFromScheme(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "https":
+		return "h3"
+	case "h2c":
+		return "h2c"
+	case "h3":
+		return "h3"
+	default:
+		return scheme
+	}
 }
 
 func requestPath(c *app.RequestContext) string {
@@ -234,6 +570,7 @@ func requestPath(c *app.RequestContext) string {
 }
 
 func upstreamRequestURL(c *app.RequestContext, base string) string {
+	base = NormalizeUpstreamURL(base)
 	path := c.Request.URI().PathOriginal()
 	if len(path) == 0 {
 		path = c.Path()
@@ -328,32 +665,176 @@ func inboundProto(c *app.RequestContext) string {
 func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base string, clientIP net.IP, origHost string, preserveOriginalHost bool) (*http.Request, error) {
 	full := upstreamRequestURL(c, base)
 
-	body := c.Request.Body()
+	isStream := c.Request.IsBodyStream()
 	var rdr io.Reader
-	if len(body) > 0 {
-		rdr = &byteSliceReadCloser{data: body}
+	var bodyBytes []byte
+	var bodyLen int64
+
+	if isStream {
+		stream := c.Request.BodyStream()
+		if stream != nil {
+			rdr = stream
+			bodyLen = int64(c.Request.Header.ContentLength())
+			if bodyLen < 0 {
+				bodyLen = -1
+			}
+		}
+	} else {
+		bodyBytes = c.Request.Body()
+		if len(bodyBytes) > 0 {
+			rdr = &byteSliceReadCloser{data: bodyBytes}
+			bodyLen = int64(len(bodyBytes))
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, requestMethod(c), full, rdr)
 	if err != nil {
 		return nil, err
 	}
-	if len(body) > 0 {
-		req.ContentLength = int64(len(body))
-		req.GetBody = func() (io.ReadCloser, error) {
-			return &byteSliceReadCloser{data: body}, nil
+	if rdr != nil {
+		req.ContentLength = bodyLen
+		if !isStream && len(bodyBytes) > 0 {
+			snap := append([]byte(nil), bodyBytes...)
+			req.GetBody = func() (io.ReadCloser, error) {
+				return &byteSliceReadCloser{data: snap}, nil
+			}
 		}
 	}
 
+	connStripper := NewRequestConnectionHeaderStripper(c)
+	var rawTE string
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		if isHopByHopBytes(k) {
+			if asciiEqualFoldBytes(k, "te") {
+				rawTE = string(v)
+			}
+			return
+		}
+		if asciiEqualFoldBytes(k, "host") {
+			return
+		}
+		if connStripper.ShouldStrip(k) {
 			return
 		}
 		addUpstreamHeader(req.Header, k, v)
 	})
 
-	security.ApplyOutboundForwarding(req, clientIP, origHost, preserveOriginalHost, inboundProto(c))
+	if te := forwardableTEValue(rawTE); te != "" {
+		req.Header.Set("TE", te)
+	}
+
+	ce := req.Header.Get("Content-Encoding")
+	if ce != "" && rdr != nil {
+		if isStream {
+			decoded, didDecode, decErr := decodeUpstreamRequestBodyStream(req.Body, ce)
+			if decErr != nil {
+				return nil, decErr
+			}
+			if didDecode {
+				req.Header.Del("Content-Encoding")
+				req.Header.Del("Content-Length")
+				req.Body = decoded
+				req.ContentLength = -1
+				req.GetBody = nil
+			}
+		} else if len(bodyBytes) > 0 {
+			decoded, didDecode, decErr := decodeUpstreamRequestBody(bodyBytes, ce)
+			if decErr != nil {
+				return nil, decErr
+			}
+			if didDecode {
+				req.Header.Del("Content-Encoding")
+				req.Header.Del("Content-Length")
+				req.Body = io.NopCloser(bytes.NewReader(decoded))
+				req.ContentLength = int64(len(decoded))
+				req.GetBody = func() (io.ReadCloser, error) {
+					return io.NopCloser(bytes.NewReader(decoded)), nil
+				}
+			}
+		}
+	}
+
+	if trailer := hertzRequestTrailer(c); trailer != nil {
+		req.Trailer = trailer
+		if req.ContentLength >= 0 {
+			req.ContentLength = -1
+			req.GetBody = nil
+		}
+		if req.Body != nil {
+			req.Body = io.NopCloser(&trailerSyncBody{
+				inner:   req.Body,
+				hertz:   c,
+				trailer: trailer,
+			})
+		}
+	}
+
+	security.ApplyOutboundForwarding(req, clientIP, origHost, preserveOriginalHost, "", inboundProto(c))
 	return req, nil
+}
+
+func forwardableTEValue(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	for _, token := range strings.Split(raw, ",") {
+		part := strings.TrimSpace(token)
+		if part == "" {
+			continue
+		}
+		name := part
+		if semi := strings.IndexByte(part, ';'); semi >= 0 {
+			name = strings.TrimSpace(part[:semi])
+		}
+		if strings.EqualFold(name, "trailers") {
+			return "trailers"
+		}
+	}
+	return ""
+}
+
+func hertzRequestTrailer(c *app.RequestContext) http.Header {
+	ht := c.Request.Header.Trailer()
+	if ht == nil {
+		return nil
+	}
+	trailer := make(http.Header)
+	ht.VisitAll(func(k, v []byte) {
+		key := http.CanonicalHeaderKey(string(k))
+		trailer[key] = append(trailer[key], string(v))
+	})
+	if len(trailer) == 0 {
+		return nil
+	}
+	return trailer
+}
+
+type trailerSyncBody struct {
+	inner   io.Reader
+	hertz   *app.RequestContext
+	trailer http.Header
+	synced  bool
+}
+
+func (b *trailerSyncBody) Read(p []byte) (int, error) {
+	n, err := b.inner.Read(p)
+	if err == io.EOF && !b.synced {
+		b.synced = true
+		syncHertzTrailerToHTTP(b.hertz, b.trailer)
+	}
+	return n, err
+}
+
+func syncHertzTrailerToHTTP(c *app.RequestContext, dst http.Header) {
+	ht := c.Request.Header.Trailer()
+	if ht == nil {
+		return
+	}
+	ht.VisitAll(func(k, v []byte) {
+		key := http.CanonicalHeaderKey(string(k))
+		dst[key] = []string{string(v)}
+	})
 }
 
 func addUpstreamHeader(header http.Header, key, value []byte) {
@@ -465,8 +946,10 @@ func addUpstreamHeader(header http.Header, key, value []byte) {
 func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
 	debugEnabled := slog.Default().Enabled(context.Background(), slog.LevelDebug)
 	var removed []string
+	connTokens := responseConnectionTokens(src)
 	for k, vv := range src {
-		if isHopByHop(k) {
+		lk := strings.ToLower(k)
+		if isHopByHop(lk) || connTokens[lk] {
 			if debugEnabled {
 				removed = append(removed, k)
 			}
@@ -484,6 +967,21 @@ func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
 	}
 }
 
+func responseConnectionTokens(h http.Header) map[string]bool {
+	conn := h.Get("Connection")
+	if conn == "" {
+		return nil
+	}
+	tokens := make(map[string]bool)
+	for _, tok := range strings.Split(conn, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok != "" {
+			tokens[strings.ToLower(tok)] = true
+		}
+	}
+	return tokens
+}
+
 // FetchHTTP performs the upstream request and returns a buffered response.
 func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*HTTPResponse, error) {
 	req, err := buildUpstreamRequest(ctx, c, base, clientIP, origHost, rt.PreserveOriginalHost)
@@ -491,13 +989,45 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 		return nil, err
 	}
 
-	tr := SharedTransportForUpstream(rt, base)
-	hc := sharedClient(tr)
 	debugEnabled := slog.Default().Enabled(ctx, slog.LevelDebug)
 	var start time.Time
 	if debugEnabled {
 		start = time.Now()
 	}
+
+	if shouldUseHertzUpstream(base) {
+		hresp, err := doHertzUpstream(ctx, rt, base, req)
+		if err != nil {
+			logUpstreamRequestError(ctx, "buffered", req, origHost, err)
+			return nil, err
+		}
+		defer hertzprotocol.ReleaseResponse(hresp)
+		defer hresp.CloseBodyStream()
+		if debugEnabled {
+			slog.Debug("upstream buffered response received",
+				slog.String("method", req.Method),
+				slog.String("url", req.URL.String()),
+				slog.String("host", origHost),
+				slog.Int("status", hresp.StatusCode()),
+				slog.Duration("latency", time.Since(start)),
+			)
+		}
+		respBody, err := io.ReadAll(hresp.BodyStream())
+		if err != nil {
+			return nil, err
+		}
+		headers := hertzHeaderToHTTPHeader(&hresp.Header)
+		return &HTTPResponse{
+			StatusCode:           hresp.StatusCode(),
+			ContentType:          string(hresp.Header.ContentType()),
+			Body:                 respBody,
+			Header:               headers,
+			UpstreamHTTPProtocol: httpProtoForBase(base),
+		}, nil
+	}
+
+	transport, _ := UpstreamRoundTripperForBase(rt, base)
+	hc := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	resp, err := hc.Do(req)
 	if err != nil {
 		logUpstreamRequestError(ctx, "buffered", req, origHost, err)
@@ -519,11 +1049,20 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 	if err != nil {
 		return nil, err
 	}
+
+	headers := resp.Header.Clone()
+	for k, vv := range resp.Trailer {
+		for _, v := range vv {
+			headers.Add(k, v)
+		}
+	}
+
 	return &HTTPResponse{
-		StatusCode:  resp.StatusCode,
-		ContentType: resp.Header.Get("Content-Type"),
-		Body:        respBody,
-		Header:      resp.Header.Clone(),
+		StatusCode:           resp.StatusCode,
+		ContentType:          resp.Header.Get("Content-Type"),
+		Body:                 respBody,
+		Header:               headers,
+		UpstreamHTTPProtocol: resp.Proto,
 	}, nil
 }
 
@@ -531,6 +1070,7 @@ func ForwardBufferedResponse(c *app.RequestContext, resp *HTTPResponse) {
 	if resp == nil {
 		return
 	}
+	SetUpstreamHTTPProtocol(c, resp.UpstreamHTTPProtocol)
 	if resp.Header != nil {
 		copyResponseHeaders(c, resp.Header)
 	}
@@ -538,7 +1078,38 @@ func ForwardBufferedResponse(c *app.RequestContext, resp *HTTPResponse) {
 		c.SetContentType(resp.ContentType)
 	}
 	c.Status(resp.StatusCode)
-	c.Response.SetBodyRaw(resp.Body)
+
+	body := resp.Body
+	opts := DefaultResponseCompressionOptions(true)
+	body = applyClientResponseCompressionWithOptions(c, resp.StatusCode, body, opts)
+
+	method := strings.ToUpper(string(c.Request.Method()))
+	if method == "HEAD" {
+		if len(body) > 0 {
+			c.Response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		}
+		c.Response.SetBodyRaw(nil)
+		return
+	}
+	c.Response.SetBodyRaw(body)
+}
+
+// ForwardBufferedResponseAsStream writes a buffered response as a body stream
+// so Content-Length is omitted (chunked transfer).
+func ForwardBufferedResponseAsStream(c *app.RequestContext, resp *HTTPResponse) {
+	if resp == nil {
+		return
+	}
+	SetUpstreamHTTPProtocol(c, resp.UpstreamHTTPProtocol)
+	if resp.Header != nil {
+		copyResponseHeaders(c, resp.Header)
+	}
+	if resp.ContentType != "" && (resp.Header == nil || resp.Header.Get("Content-Type") == "") {
+		c.SetContentType(resp.ContentType)
+	}
+	c.Response.Header.Del("Content-Length")
+	c.Status(resp.StatusCode)
+	c.Response.SetBodyStream(bytes.NewReader(resp.Body), -1)
 }
 
 // SanitizeHeadersForEdgeCache strips hop-by-hop headers and Content-Length before persisting
@@ -547,9 +1118,11 @@ func SanitizeHeadersForEdgeCache(src http.Header) http.Header {
 	if src == nil {
 		return nil
 	}
+	connTokens := responseConnectionTokens(src)
 	dst := src.Clone()
 	for k := range dst {
-		if isHopByHop(k) {
+		lk := strings.ToLower(k)
+		if isHopByHop(lk) || connTokens[lk] {
 			dst.Del(k)
 		}
 	}
@@ -565,17 +1138,8 @@ func WriteCachedResponse(c *app.RequestContext, method string, e *cache.Response
 	if e == nil {
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(method), "HEAD") {
-		if e.ContentType != "" {
-			c.SetContentType(e.ContentType)
-		}
-		c.Status(e.StatusCode)
-		if len(e.Body) > 0 {
-			c.Response.Header.Set("Content-Length", strconv.Itoa(len(e.Body)))
-		}
-		c.Response.SetBodyRaw(nil)
-		return
-	}
+	isHead := strings.EqualFold(strings.TrimSpace(method), "HEAD")
+
 	if e.Header != nil && len(e.Header) > 0 {
 		copyResponseHeaders(c, e.Header)
 	}
@@ -583,7 +1147,19 @@ func WriteCachedResponse(c *app.RequestContext, method string, e *cache.Response
 		c.SetContentType(e.ContentType)
 	}
 	c.Status(e.StatusCode)
-	c.Response.SetBodyRaw(e.Body)
+
+	body := e.Body
+	opts := DefaultResponseCompressionOptions(false)
+	body = applyClientResponseCompressionWithOptions(c, e.StatusCode, body, opts)
+
+	if isHead {
+		if len(body) > 0 {
+			c.Response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		}
+		c.Response.SetBodyRaw(nil)
+		return
+	}
+	c.Response.SetBodyRaw(body)
 }
 
 func ShouldCacheResponse(method string, statusCode int, body []byte) bool {
@@ -827,6 +1403,13 @@ func isCacheableRequestMethod(method []byte) bool {
 	return false
 }
 
+// streamProbeSize is the buffer used to attempt a single Read on unknown-length
+// responses. If the entire body fits in one Read (EOF returned), ForwardHTTP
+// serves it buffered without compression. Otherwise it switches to streaming
+// compression. 32 KiB balances memory per request with typical small-body sizes.
+const streamProbeSize = 32768
+const completeUnknownLengthCompressMaxBytes = 5 * snapshot.DefaultResponseCompressionMinBytes
+
 // ForwardHTTP copies the incoming request to upstream and streams the response.
 func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) error {
 	req, err := buildUpstreamRequest(ctx, c, base, clientIP, origHost, rt.PreserveOriginalHost)
@@ -834,19 +1417,30 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		return err
 	}
 
-	tr := SharedTransportForUpstream(rt, base)
-	hc := sharedClient(tr)
 	debugEnabled := slog.Default().Enabled(ctx, slog.LevelDebug)
 	var start time.Time
 	if debugEnabled {
 		start = time.Now()
 	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		logUpstreamRequestError(ctx, "streaming", req, origHost, err)
-		return err
+	var resp *http.Response
+	if shouldUseHertzUpstream(base) {
+		hresp, err := doHertzUpstream(ctx, rt, base, req)
+		if err != nil {
+			logUpstreamRequestError(ctx, "streaming", req, origHost, err)
+			return err
+		}
+		resp = hertzResponseToHTTPResponse(base, hresp)
+	} else {
+		transport, _ := UpstreamRoundTripperForBase(rt, base)
+		hc := &http.Client{Transport: transport, Timeout: 0}
+		var err error
+		resp, err = hc.Do(req)
+		if err != nil {
+			logUpstreamRequestError(ctx, "streaming", req, origHost, err)
+			return err
+		}
 	}
-	defer resp.Body.Close()
+	SetUpstreamHTTPProtocol(c, resp.Proto)
 	if debugEnabled {
 		slog.Debug("upstream streaming response received",
 			slog.String("method", req.Method),
@@ -859,9 +1453,357 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	}
 
 	copyResponseHeaders(c, resp.Header)
+
+	// 动态防护处理：根据配置对响应内容进行加密/混淆/水印
+	dp := rt.DynamicProtection
+	if dp.HTMLObfuscationEnabled || dp.JSObfuscationEnabled || dp.ImageWatermarkEnabled {
+		ct := resp.Header.Get("Content-Type")
+		if kind := dynamic.ShouldProcessContentType(ct); kind != "" {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				return readErr
+			}
+			processor := dynamic.NewProcessor(dp)
+			processed, procErr := processor.Process(requestPath(c), ct, body)
+			if procErr != nil {
+				processed = body
+			}
+			c.Status(resp.StatusCode)
+			c.Response.SetBodyRaw(processed)
+			return nil
+		}
+	}
+
 	c.Status(resp.StatusCode)
-	_, err = io.Copy(c.Response.BodyWriter(), resp.Body)
-	return err
+
+	if responseStatusDisallowsBody(resp.StatusCode) {
+		resp.Body.Close()
+		return nil
+	}
+	method := strings.ToUpper(string(c.Method()))
+	if method == "HEAD" {
+		resp.Body.Close()
+		return nil
+	}
+
+	bodyReader, closeFn, decoded, decErr := upstreamResponseReader(resp)
+	if decErr != nil {
+		resp.Body.Close()
+		return decErr
+	}
+
+	bodySize := int(resp.ContentLength)
+	if decoded {
+		bodySize = -1
+		c.Response.Header.Del("Content-Encoding")
+		c.Response.Header.Del("Content-Length")
+	}
+
+	compOpts := defaultStreamCompressionOptions()
+	effectiveCE := resp.Header.Get("Content-Encoding")
+	if decoded {
+		effectiveCE = ""
+	}
+
+	encoding := responseEncodingIdentity
+	canCompress := false
+
+	if bodySize >= 0 {
+		canCompress = shouldTransformStreamingResponseBody(
+			resp.StatusCode,
+			resp.Header.Get("Content-Type"),
+			effectiveCE,
+			resp.Header.Get("Cache-Control"),
+			resp.Header.Get("Content-Range"),
+			bodySize,
+			compOpts.MinBytes,
+		)
+	} else {
+		canCompress = shouldTransformResponseMetadata(
+			resp.StatusCode,
+			resp.Header.Get("Content-Type"),
+			effectiveCE,
+			resp.Header.Get("Cache-Control"),
+			resp.Header.Get("Content-Range"),
+		)
+	}
+
+	if canCompress {
+		encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled)
+	}
+
+	if decoded && encoding != responseEncodingIdentity {
+		return streamRecompressedResponse(ctx, c, bodyReader, closeFn, resp, encoding)
+	}
+
+	if encoding != responseEncodingIdentity && bodySize >= 0 {
+		return streamCompressedResponseFromReader(ctx, c, bodyReader, closeFn, resp, encoding, bodySize)
+	}
+
+	if encoding != responseEncodingIdentity && bodySize < 0 {
+		probeBuf := make([]byte, streamProbeSize)
+		n, readErr := bodyReader.Read(probeBuf)
+		if readErr == io.EOF {
+			if closeFn != nil {
+				_ = closeFn()
+			}
+			copyResponseTrailers(c, resp)
+			if n >= compOpts.MinBytes && n <= completeUnknownLengthCompressMaxBytes {
+				encodedBody, encErr := compressResponseBody(probeBuf[:n], encoding)
+				if encErr == nil {
+					ensureVaryAcceptEncoding(c)
+					c.Response.Header.Set("Content-Encoding", string(encoding))
+					c.Response.Header.Del("Content-Length")
+					c.Response.SetBodyRaw(encodedBody)
+					return nil
+				}
+			}
+			c.Response.SetBodyRaw(probeBuf[:n])
+			return nil
+		}
+		if readErr != nil {
+			if closeFn != nil {
+				_ = closeFn()
+			}
+			resp.Body.Close()
+			return readErr
+		}
+		if n < compOpts.MinBytes {
+			n2, err2 := bodyReader.Read(probeBuf[n:])
+			n += n2
+			if err2 == io.EOF {
+				if closeFn != nil {
+					_ = closeFn()
+				}
+				copyResponseTrailers(c, resp)
+				c.Response.SetBodyRaw(probeBuf[:n])
+				return nil
+			}
+			if err2 != nil {
+				if closeFn != nil {
+					_ = closeFn()
+				}
+				resp.Body.Close()
+				return err2
+			}
+		}
+		probedReader, isComplete, probeErr := probeStreamEOF(bodyReader)
+		if probeErr != nil {
+			if closeFn != nil {
+				_ = closeFn()
+			}
+			resp.Body.Close()
+			return probeErr
+		}
+		if isComplete {
+			if closeFn != nil {
+				_ = closeFn()
+			}
+			copyResponseTrailers(c, resp)
+			c.Response.SetBodyRaw(probeBuf[:n])
+			return nil
+		}
+		bodyReader = probedReader
+		combined := io.MultiReader(bytes.NewReader(probeBuf[:n]), bodyReader)
+		return streamRecompressedResponse(ctx, c, combined, closeFn, resp, encoding)
+	}
+
+	c.Response.ImmediateHeaderFlush = true
+	stream := newProxyBodyStream(ctx, bodyReader, closeFn, resp, c)
+	c.Response.SetBodyStream(stream, bodySize)
+	return nil
+}
+
+func defaultStreamCompressionOptions() ResponseCompressionOptions {
+	return ResponseCompressionOptions{
+		Enabled:       true,
+		BrotliEnabled: true,
+		GzipEnabled:   true,
+		MinBytes:      snapshot.DefaultResponseCompressionMinBytes,
+	}
+}
+
+// streamRecompressedResponse sets up a non-blocking streaming compression
+// pipeline: a goroutine reads from src, compresses, and writes into a pipe;
+// the pipe reader is handed to Hertz via SetBodyStream so ForwardHTTP returns
+// immediately.
+func streamRecompressedResponse(ctx context.Context, c *app.RequestContext, src io.Reader, closeFn func() error, resp *http.Response, encoding responseEncoding) error {
+	ensureVaryAcceptEncoding(c)
+	c.Response.Header.Set("Content-Encoding", string(encoding))
+	c.Response.Header.Del("Content-Length")
+
+	pr, pw := io.Pipe()
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		compWriter, closeComp := newStreamCompressWriter(pw, encoding)
+		_, copyErr := io.Copy(compWriter, src)
+		closeComp()
+		copyResponseTrailers(c, resp)
+		if closeFn != nil {
+			_ = closeFn()
+		}
+		if copyErr != nil {
+			_ = pw.CloseWithError(copyErr)
+		} else {
+			_ = pw.Close()
+		}
+	}()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			resp.Body.Close()
+		case <-streamDone:
+		}
+	}()
+
+	c.Response.ImmediateHeaderFlush = true
+	c.Response.SetBodyStream(pr, -1)
+	return nil
+}
+
+// streamCompressedResponseFromReader sets up streaming compression for a
+// known-length response body.
+func streamCompressedResponseFromReader(ctx context.Context, c *app.RequestContext, src io.Reader, closeFn func() error, resp *http.Response, encoding responseEncoding, bodySize int) error {
+	return streamRecompressedResponse(ctx, c, src, closeFn, resp, encoding)
+}
+
+// proxyBodyStream wraps an upstream body reader for SetBodyStream. It closes
+// the underlying resources and copies trailers on EOF or Close, and monitors
+// the request context for cancellation.
+type proxyBodyStream struct {
+	reader   io.Reader
+	closeFn  func() error
+	resp     *http.Response
+	hertzCtx *app.RequestContext
+	done     chan struct{}
+	closed   bool
+}
+
+func newProxyBodyStream(ctx context.Context, reader io.Reader, closeFn func() error, resp *http.Response, hertzCtx *app.RequestContext) *proxyBodyStream {
+	s := &proxyBodyStream{
+		reader:   reader,
+		closeFn:  closeFn,
+		resp:     resp,
+		hertzCtx: hertzCtx,
+		done:     make(chan struct{}),
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			resp.Body.Close()
+		case <-s.done:
+		}
+	}()
+	return s
+}
+
+func (s *proxyBodyStream) Read(p []byte) (int, error) {
+	n, err := s.reader.Read(p)
+	if err != nil && !s.closed {
+		s.cleanup()
+	}
+	return n, err
+}
+
+func (s *proxyBodyStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.cleanup()
+	return nil
+}
+
+func (s *proxyBodyStream) cleanup() {
+	s.closed = true
+	close(s.done)
+	copyResponseTrailers(s.hertzCtx, s.resp)
+	if s.closeFn != nil {
+		_ = s.closeFn()
+	}
+}
+
+const probeEOFTimeout = 5 * time.Millisecond
+
+// probeStreamEOF attempts a short non-blocking read to detect whether the
+// upstream body is already complete. For chunked responses the first Read may
+// return all data bytes without EOF because the zero-length terminator chunk
+// has not arrived yet. This helper spawns a brief goroutine read: if EOF
+// arrives within probeEOFTimeout the body is fully buffered; otherwise
+// bodyReader remains usable for streaming.
+func probeStreamEOF(bodyReader io.Reader) (io.Reader, bool, error) {
+	type probeResult struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan probeResult, 1)
+	go func() {
+		var one [1]byte
+		n, err := bodyReader.Read(one[:])
+		res := probeResult{err: err}
+		if n > 0 {
+			res.data = append(res.data, one[:n]...)
+		}
+		ch <- res
+	}()
+
+	timer := time.NewTimer(probeEOFTimeout)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.err == io.EOF && len(r.data) == 0 {
+			return bytes.NewReader(nil), true, nil
+		}
+		if r.err != nil && r.err != io.EOF {
+			return nil, false, r.err
+		}
+		if len(r.data) == 0 {
+			return bodyReader, false, nil
+		}
+		if r.err == io.EOF {
+			return bytes.NewReader(r.data), false, nil
+		}
+		return io.MultiReader(bytes.NewReader(r.data), bodyReader), false, nil
+	case <-timer.C:
+		pr, pw := io.Pipe()
+		go func() {
+			r := <-ch
+			if len(r.data) > 0 {
+				if _, err := pw.Write(r.data); err != nil {
+					_ = pw.CloseWithError(err)
+					return
+				}
+			}
+			if r.err != nil && r.err != io.EOF {
+				_ = pw.CloseWithError(r.err)
+				return
+			}
+			_ = pw.Close()
+		}()
+		return io.MultiReader(pr, bodyReader), false, nil
+	}
+}
+
+func copyResponseTrailers(c *app.RequestContext, resp *http.Response) {
+	for k, vv := range resp.Trailer {
+		lk := strings.ToLower(k)
+		if isHopByHop(lk) {
+			continue
+		}
+		for _, v := range vv {
+			c.Response.Header.Trailer().Set(k, v)
+		}
+	}
 }
 
 var hopByHopHeaders = map[string]struct{}{
@@ -953,3 +1895,240 @@ func isHopByHop(name string) bool {
 // IsHopByHop returns whether the given header name is a hop-by-hop header
 // that should be stripped when forwarding responses.
 func IsHopByHop(name string) bool { return isHopByHop(name) }
+
+// RequestConnectionHeaderStripper strips tokens listed in the Connection header.
+type RequestConnectionHeaderStripper struct {
+	tokens map[string]struct{}
+}
+
+// NewRequestConnectionHeaderStripper creates a stripper from the Connection header of a request.
+func NewRequestConnectionHeaderStripper(c *app.RequestContext) *RequestConnectionHeaderStripper {
+	s := &RequestConnectionHeaderStripper{tokens: make(map[string]struct{})}
+	for _, val := range c.Request.Header.PeekAll("Connection") {
+		parseConnectionTokensInto(val, s.tokens)
+	}
+	parseRawHeaderConnectionTokens(c.Request.Header.RawHeaders(), s.tokens)
+	return s
+}
+
+func parseConnectionTokensInto(val []byte, tokens map[string]struct{}) {
+	for len(val) > 0 {
+		part := val
+		if comma := bytes.IndexByte(val, ','); comma >= 0 {
+			part = val[:comma]
+			val = val[comma+1:]
+		} else {
+			val = nil
+		}
+		part = bytes.TrimSpace(part)
+		if len(part) > 0 {
+			tokens[strings.ToLower(string(part))] = struct{}{}
+		}
+	}
+}
+
+func parseRawHeaderConnectionTokens(raw []byte, tokens map[string]struct{}) {
+	for len(raw) > 0 {
+		var line []byte
+		if idx := bytes.Index(raw, []byte("\r\n")); idx >= 0 {
+			line = raw[:idx]
+			raw = raw[idx+2:]
+		} else {
+			line = raw
+			raw = nil
+		}
+		colon := bytes.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		key := bytes.TrimSpace(line[:colon])
+		if asciiEqualFoldBytes(key, "connection") {
+			parseConnectionTokensInto(bytes.TrimSpace(line[colon+1:]), tokens)
+		}
+	}
+}
+
+// ShouldStrip returns whether the given header key should be stripped.
+func (s *RequestConnectionHeaderStripper) ShouldStrip(key []byte) bool {
+	if s == nil || s.tokens == nil {
+		return false
+	}
+	_, ok := s.tokens[strings.ToLower(string(key))]
+	return ok
+}
+
+// trimASCIIHeaderSpaceBytes trims ASCII space characters from both ends of a byte slice.
+func trimASCIIHeaderSpaceBytes(raw []byte) []byte {
+	start := 0
+	end := len(raw)
+	for start < end && isASCIISpace(raw[start]) {
+		start++
+	}
+	for end > start && isASCIISpace(raw[end-1]) {
+		end--
+	}
+	return raw[start:end]
+}
+
+// PruneStats records the number of pruned upstream transports and clients.
+type PruneStats struct {
+	HTTPTransports           int
+	HTTP2CleartextTransports int
+	HTTPClients              int
+	HTTPNoTimeoutClients     int
+	HTTP3Transports          int
+	HTTP3Clients             int
+	HTTP3NoTimeoutClients    int
+}
+
+// Changed returns whether any transports or clients were pruned.
+func (s PruneStats) Changed() bool {
+	return s.HTTPTransports > 0 || s.HTTP2CleartextTransports > 0 || s.HTTPClients > 0 || s.HTTPNoTimeoutClients > 0 ||
+		s.HTTP3Transports > 0 || s.HTTP3Clients > 0 || s.HTTP3NoTimeoutClients > 0
+}
+
+// PruneInactiveUpstreamTransports removes transports and clients that are not referenced by any site in the snapshot.
+func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
+	if sn == nil || len(sn.Sites) == 0 {
+		return PruneStats{}
+	}
+	// Build set of active transport keys from current snapshot.
+	active := make(map[transportKey]struct{})
+	for _, rt := range sn.Sites {
+		base := ""
+		if len(rt.UpstreamURLs) > 0 {
+			base = rt.UpstreamURLs[0]
+		}
+		key := transportKeyForUpstream(base, rt)
+		active[key] = struct{}{}
+	}
+
+	var stats PruneStats
+	transportMu.Lock()
+	for key, tr := range transportPool {
+		if _, ok := active[key]; !ok {
+			delete(transportPool, key)
+			if key.h2cPrior {
+				stats.HTTP2CleartextTransports++
+			} else {
+				stats.HTTPTransports++
+			}
+			// Remove associated clients.
+			clientPoolMu.Lock()
+			if hc, ok := clientCache[tr]; ok {
+				delete(clientCache, tr)
+				if hc.Timeout == 0 {
+					stats.HTTPNoTimeoutClients++
+				} else {
+					stats.HTTPClients++
+				}
+			}
+			clientPoolMu.Unlock()
+		}
+	}
+	transportMu.Unlock()
+	return stats
+}
+
+// CloseIdleUpstreamTransports closes idle connections on all cached transports.
+// Returns counts of closed HTTP, H2C, and HTTP/3 transports.
+func CloseIdleUpstreamTransports() (int, int, int) {
+	var httpCount, h2cCount, h3Count int
+	transportMu.RLock()
+	all := make([]*http.Transport, 0, len(transportPool))
+	for key, tr := range transportPool {
+		all = append(all, tr)
+		if key.h2cPrior {
+			h2cCount++
+		} else {
+			httpCount++
+		}
+	}
+	transportMu.RUnlock()
+	for _, tr := range all {
+		tr.CloseIdleConnections()
+	}
+	http3TransportMu.RLock()
+	h3Count = len(http3TransportPool)
+	http3TransportMu.RUnlock()
+	for _, tr := range http3TransportPool {
+		tr.CloseIdleConnections()
+	}
+	return httpCount, h2cCount, h3Count
+}
+
+// transportKeyForUpstream builds a transport key from the upstream base URL and site runtime.
+func transportKeyForUpstream(base string, rt snapshot.SiteRuntime) transportKey {
+	key := transportKey{}
+	if base != "" {
+		u, err := url.Parse(base)
+		if err == nil {
+			key.isHTTPS = u.Scheme == "https" || u.Scheme == "wss"
+			key.h2cPrior = u.Scheme == "h2c"
+		}
+	}
+	key.tlsServerName = rt.Site.UpstreamTLSServerName
+	key.tlsSkipVerify = rt.Site.UpstreamTLSSkipVerify
+	return key
+}
+
+// HTTP/3 transport pool for upstream connections.
+type http3TransportKey struct {
+	tlsServerName string
+	tlsSkipVerify bool
+}
+
+var (
+	http3TransportMu   sync.RWMutex
+	http3TransportPool = make(map[http3TransportKey]*http3.Transport)
+)
+
+// UpstreamTransportPoolStats holds snapshot statistics for upstream transport pools.
+type UpstreamTransportPoolStats struct {
+	HTTPTransports           int
+	HTTP2CleartextTransports int
+	HTTP3Transports          int
+	HTTPClients              int
+	HTTPNoTimeoutClients     int
+	HTTP3Clients             int
+	HTTP3NoTimeoutClients    int
+}
+
+// UpstreamTransportPoolStatsSnapshot returns current pool statistics.
+func UpstreamTransportPoolStatsSnapshot() UpstreamTransportPoolStats {
+	transportMu.RLock()
+	httpTransports := 0
+	h2cTransports := 0
+	for key := range transportPool {
+		if key.h2cPrior {
+			h2cTransports++
+		} else {
+			httpTransports++
+		}
+	}
+	transportMu.RUnlock()
+
+	clientPoolMu.RLock()
+	httpClients := len(clientCache)
+	noTimeoutClients := 0
+	for _, hc := range clientCache {
+		if hc.Timeout == 0 {
+			noTimeoutClients++
+		}
+	}
+	clientPoolMu.RUnlock()
+
+	http3TransportMu.RLock()
+	http3Transports := len(http3TransportPool)
+	http3TransportMu.RUnlock()
+
+	return UpstreamTransportPoolStats{
+		HTTPTransports:           httpTransports,
+		HTTP2CleartextTransports: h2cTransports,
+		HTTP3Transports:          http3Transports,
+		HTTPClients:              httpClients,
+		HTTPNoTimeoutClients:     noTimeoutClients,
+		HTTP3Clients:             0, // placeholder
+		HTTP3NoTimeoutClients:    0, // placeholder
+	}
+}

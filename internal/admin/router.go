@@ -16,10 +16,10 @@ import (
 	"My-OpenWaf/internal/admin/site"
 	"My-OpenWaf/internal/admin/system"
 	"My-OpenWaf/internal/cache"
-	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/core/adminweb"
 	"My-OpenWaf/internal/dataplane"
 	"My-OpenWaf/internal/pkg/logger"
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/waf/challenge"
@@ -32,6 +32,9 @@ import (
 type Dependencies struct {
 	Repos         *repository.Repos
 	Reload        func() error
+	ReloadRedis   func() error
+	RuntimeState  system.RuntimeStateProvider
+	Snapshot      *snapshot.Holder
 	StaticFS      string
 	JWTSecret     []byte
 	Metrics       *dataplane.Metrics
@@ -52,7 +55,7 @@ type Dependencies struct {
 
 func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	adminLog := logger.New("admin")
-	h.Use(SecurityHeaders())
+	h.Use(SecurityHeaders(deps.Snapshot))
 	h.Use(AccessLog(adminLog))
 
 	h.GET("/api/v1/health", system.HealthCheck())
@@ -161,7 +164,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/drop-stats", protect.GetDropStats(r.DropEvent))
 		readGroup.GET("/drop-events", protect.GetDropEvents(r.DropEvent))
 		readGroup.GET("/upstreams/status", system.UpstreamStatus(deps.Upstreams))
-		readGroup.GET("/runtime-config", system.GetRuntimeConfig(core.LoadConfigFromEnv()))
+		readGroup.GET("/runtime-config", system.GetRuntimeConfig(deps.RuntimeState, deps.Snapshot, deps.Repos.SystemSettings))
 		readGroup.GET("/realtime/ticket", deps.Realtime.TicketHandler())
 	}
 
@@ -244,8 +247,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		adminGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
 		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
-		adminGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings))
-		adminGroup.POST("/redis-config", system.UpdateRedisConfig(r.SystemSettings))
+		adminGroup.GET("/http2-config", system.GetHTTP2Config(r.SystemSettings))
+		adminGroup.POST("/http2-config", system.UpdateHTTP2Config(r.SystemSettings, reload))
+		adminGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))
+		adminGroup.POST("/redis-config", system.UpdateRedisConfig(r.SystemSettings, deps.ReloadRedis))
 		adminGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
 		adminGroup.POST("/log-config", system.UpdateLogConfig(r.SystemSettings))
 		adminGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))

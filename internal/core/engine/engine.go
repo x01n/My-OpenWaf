@@ -34,6 +34,11 @@ type phasesEntry struct {
 	phases []pipeline.Phase
 }
 
+type phasesCacheKey struct {
+	policyID          uint
+	antiReplayEnabled bool
+}
+
 // Engine orchestrates the full WAF processing pipeline for each request.
 type Engine struct {
 	resolver       *sites.Resolver
@@ -53,10 +58,11 @@ type Engine struct {
 	compiledRevision uint64
 	compiledCache    map[uint]*compiledRules
 
-	// Per-snapshot phase chain cache. Key: policyID. Invalidated when revision changes.
+	// Per-snapshot phase chain cache. Key: site-level phase-affecting inputs.
+	// Invalidated when revision changes.
 	phasesMu       sync.RWMutex
 	phasesRevision uint64
-	phasesCache    map[uint]*phasesEntry
+	phasesCache    map[phasesCacheKey]*phasesEntry
 }
 
 // New creates a WAF engine backed by the given snapshot holder and rate limiters.
@@ -69,7 +75,7 @@ func New(holder *snapshot.Holder, reqRL, errRL ratelimit.RateLimiterBackend, ipR
 		botThreshold:   80,
 		cveDetector:    cve.NewCVEDetector(),
 		compiledCache:  make(map[uint]*compiledRules),
-		phasesCache:    make(map[uint]*phasesEntry),
+		phasesCache:    make(map[phasesCacheKey]*phasesEntry),
 	}
 }
 
@@ -93,6 +99,46 @@ type ProcessResult struct {
 	Site        *snapshot.SiteRuntime
 	ObserveHits []action.Result
 	Maintenance bool
+}
+
+func (e *Engine) processResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, reqCtx *pipeline.RequestCtx) ProcessResult {
+	if sn == nil || rt == nil {
+		return ProcessResult{}
+	}
+
+	// Maintenance gate: global or per-site.
+	if sn.Protection.MaintenanceGlobalEnabled || rt.MaintenanceEnabled {
+		return ProcessResult{
+			Action: action.Result{
+				Type:      action.Intercept,
+				Phase:     "maintenance",
+				MatchDesc: "maintenance mode active",
+				Matched:   true,
+			},
+			Site:        rt,
+			Maintenance: true,
+		}
+	}
+
+	// Use pre-compiled, pre-partitioned rules (compiled once per snapshot revision per policy).
+	cr := e.getCompiledRules(sn, rt)
+
+	// Use per-site effective protection (merged global + site overrides).
+	prot := &sn.Protection
+	if rt.EffectiveProtection != nil {
+		prot = rt.EffectiveProtection
+	}
+
+	// Pre-allocated capacity: up to ~9 phases (IPReputation, AntiReplay,
+	// ACL, OWASP, CVE, Bot, RateLimit, Signature, Custom).
+	phases := e.getOrBuildPhases(sn, rt, cr, prot)
+
+	runResult := pipeline.Run(phases, reqCtx)
+	return ProcessResult{
+		Action:      runResult.Action,
+		Site:        rt,
+		ObserveHits: runResult.ObserveHits,
+	}
 }
 
 // getCompiledRules returns pre-compiled, pre-partitioned rules for a site,
@@ -137,18 +183,22 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 }
 
 // getOrBuildPhases returns a cached phase chain for the given site or builds
-// one. The chain is keyed by (snapshotRevision, policyID) and stays valid as
-// long as the snapshot pointer / effective protection do not change.
+// one. The chain is keyed by per-site phase inputs and stays valid as long as
+// the snapshot revision, effective protection pointer and site-level phase
+// toggles do not change.
 //
 // Hot path optimisation: this avoids allocating ~10 phase structs and a slice
 // on every request. The cache hit cost is one RLock + one map lookup.
 func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, cr *compiledRules, prot *store.ProtectionConfig) []pipeline.Phase {
 	rev := sn.Revision
-	policyID := rt.PolicyID
+	key := phasesCacheKey{
+		policyID:          rt.PolicyID,
+		antiReplayEnabled: rt.AntiReplayEnabled,
+	}
 
 	e.phasesMu.RLock()
 	if e.phasesRevision == rev {
-		if entry, ok := e.phasesCache[policyID]; ok && entry.prot == prot {
+		if entry, ok := e.phasesCache[key]; ok && entry.prot == prot {
 			e.phasesMu.RUnlock()
 			return entry.phases
 		}
@@ -165,8 +215,9 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		phases = append(phases, rules.NewAntiReplayPhase(e.antiReplay))
 	}
 
-	phases = append(phases, rules.NewACLAllowPrecheckPhasePrecompiled(cr.ACL))
-	phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
+	if len(cr.ACL) > 0 {
+		phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
+	}
 
 	if prot.OWASPEnabled {
 		phases = append(phases, rules.NewOWASPPhase(prot))
@@ -184,17 +235,19 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		phases = append(phases, rules.NewReqRateLimitPhase(e.reqRateLimiter, act))
 	}
 
-	phases = append(phases,
-		rules.NewSignaturePhasePrecompiled(cr.Signature),
-		rules.NewCustomPhasePrecompiled(cr.Custom),
-	)
+	if len(cr.Signature) > 0 {
+		phases = append(phases, rules.NewSignaturePhasePrecompiled(cr.Signature))
+	}
+	if len(cr.Custom) > 0 {
+		phases = append(phases, rules.NewCustomPhasePrecompiled(cr.Custom))
+	}
 
 	e.phasesMu.Lock()
 	if e.phasesRevision != rev {
-		e.phasesCache = make(map[uint]*phasesEntry)
+		e.phasesCache = make(map[phasesCacheKey]*phasesEntry)
 		e.phasesRevision = rev
 	}
-	e.phasesCache[policyID] = &phasesEntry{prot: prot, phases: phases}
+	e.phasesCache[key] = &phasesEntry{prot: prot, phases: phases}
 	e.phasesMu.Unlock()
 
 	return phases
@@ -207,44 +260,18 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 		return ProcessResult{}
 	}
 
-	rt, ok := sn.MatchSite(reqCtx.Bind, reqCtx.Host)
+	rt, ok := sn.MatchSitePtr(reqCtx.Bind, reqCtx.Host)
 	if !ok {
 		return ProcessResult{}
 	}
+	return e.processResolved(sn, rt, reqCtx)
+}
 
-	// Maintenance gate: global or per-site.
-	if sn.Protection.MaintenanceGlobalEnabled || rt.MaintenanceEnabled {
-		return ProcessResult{
-			Action: action.Result{
-				Type:      action.Intercept,
-				Phase:     "maintenance",
-				MatchDesc: "maintenance mode active",
-				Matched:   true,
-			},
-			Site:        &rt,
-			Maintenance: true,
-		}
-	}
-
-	// Use pre-compiled, pre-partitioned rules (compiled once per snapshot revision per policy).
-	cr := e.getCompiledRules(sn, &rt)
-
-	// Use per-site effective protection (merged global + site overrides).
-	prot := &sn.Protection
-	if rt.EffectiveProtection != nil {
-		prot = rt.EffectiveProtection
-	}
-
-	// Pre-allocated capacity: up to ~9 phases (IPReputation, AntiReplay,
-	// ACLAllowPrecheck, ACL, ParallelOWASPCVE, Bot, RateLimit, Signature, Custom).
-	phases := e.getOrBuildPhases(sn, &rt, cr, prot)
-
-	runResult := pipeline.Run(phases, reqCtx)
-	return ProcessResult{
-		Action:      runResult.Action,
-		Site:        &rt,
-		ObserveHits: runResult.ObserveHits,
-	}
+// ProcessResolved runs the WAF pipeline for an already-resolved site.
+// The dataplane already resolves bind+host before pre-checks; reusing that
+// result avoids a second MatchSite lookup and the associated per-request copy.
+func (e *Engine) ProcessResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, reqCtx *pipeline.RequestCtx) ProcessResult {
+	return e.processResolved(sn, rt, reqCtx)
 }
 
 // Evaluate runs only the WAF rule chain for an already-resolved site (testing helper).

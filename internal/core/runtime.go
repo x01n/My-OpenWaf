@@ -15,6 +15,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Runtime struct {
@@ -29,9 +30,16 @@ type Runtime struct {
 
 func NewRuntime(ctx context.Context) (*Runtime, error) {
 	cfg := LoadConfigFromEnv()
+	preflightCfg := cfg
+	// Redis can be overridden by the stored redis_config row, so bootstrap
+	// validation must not fail on environment Redis values before the database
+	// has been opened and the stored override applied.
+	preflightCfg.RedisAddr = ""
+	preflightCfg.RedisPassword = ""
+	preflightCfg.RedisDB = 0
 
 	log := logger.New("config")
-	warnings, err := cfg.Validate()
+	warnings, err := preflightCfg.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
@@ -74,10 +82,15 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	if err := redis.Ping(ctx, rcli); err != nil {
 		if rcli != nil {
 			_ = rcli.Close()
+			rcli = nil
 		}
-		closeRuntimeDB(db)
-		closeRuntimeDB(logDB)
-		return nil, fmt.Errorf("redis: %w", err)
+		if strings.TrimSpace(cfg.RedisAddr) != "" {
+			log.Warn("redis unavailable, continuing without redis",
+				"addr", cfg.RedisAddr,
+				"db", cfg.RedisDB,
+				"err", err,
+			)
+		}
 	}
 
 	cl, err := cache.NewLayer()
@@ -91,7 +104,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	}
 
 	redisKV := cache.NewRedisKV(rcli)
-	if redisKV != nil {
+	if redisKV.Available() {
 		log.Info("redis distributed cache enabled")
 	}
 
@@ -113,12 +126,16 @@ type storedRedisConfig struct {
 	DB       int    `json:"db"`
 }
 
+func systemSettingKeyEquals(key string) clause.Eq {
+	return clause.Eq{Column: clause.Column{Name: "key"}, Value: key}
+}
+
 func applyStoredRedisConfig(db *gorm.DB, cfg Config) Config {
 	if db == nil || !db.Migrator().HasTable(&store.SystemSettings{}) {
 		return cfg
 	}
 	var setting store.SystemSettings
-	if err := db.Where("`key` = ?", store.SettingKeyRedisConfig).First(&setting).Error; err != nil || setting.Value == "" {
+	if err := db.Where(systemSettingKeyEquals(store.SettingKeyRedisConfig)).First(&setting).Error; err != nil || setting.Value == "" {
 		return cfg
 	}
 	var stored storedRedisConfig

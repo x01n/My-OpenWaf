@@ -25,6 +25,7 @@ type Site struct {
 
 	Host         string `gorm:"size:255;not null;index" json:"host"`
 	UpstreamURLs string `gorm:"type:text;not null" json:"upstream_urls"`
+	UpstreamHost string `gorm:"size:255" json:"upstream_host"`
 
 	Bind    string `gorm:"size:255;not null;index" json:"bind"`
 	Network string `gorm:"size:16;default:tcp" json:"network"`
@@ -33,7 +34,7 @@ type Site struct {
 	TLSEnabled    bool   `gorm:"default:false" json:"tls_enabled"`
 	CertID        *uint  `json:"cert_id,omitempty"`
 	MinTLSVersion string `gorm:"size:32" json:"min_tls_version"`
-	MaxTLSVersion string `gorm:"size:32;default:TLS13" json:"max_tls_version"`
+	MaxTLSVersion string `gorm:"size:32" json:"max_tls_version"`
 	CipherSuites  string `gorm:"type:text" json:"cipher_suites"`
 	ALPN          string `gorm:"size:255" json:"alpn"`
 

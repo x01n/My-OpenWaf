@@ -1,10 +1,8 @@
 package appresource
 
 import (
-	"encoding/json"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -20,6 +18,7 @@ const (
 type Material struct {
 	Method              string
 	Path                string
+	QueryString         string
 	Host                string
 	ClientIP            string
 	RequestBody         string
@@ -32,11 +31,24 @@ type Material struct {
 	StatusCode          int
 	ContentType         string
 	UserAgent           string
+	TLSVersion          string
+	TLSSNI              string
+	TLSALPN             string
 	JA3Hash             string
+	JA4                 string
 	RequestHeadersJSON  string
 	ResponseHeadersJSON string
 	RequestBodySnippet  string
 	ResponseBodySnippet string
+}
+
+// TLSMetadata captures the TLS fields used by application-route recording.
+type TLSMetadata struct {
+	TLSVersion string
+	TLSSNI     string
+	TLSALPN    string
+	JA3Hash    string
+	JA4        string
 }
 
 func truncate(s string, n int) string {
@@ -53,150 +65,112 @@ func requestPath(c *app.RequestContext) string {
 	return string(c.Path())
 }
 
-func serializeRequestHeaders(c *app.RequestContext) string {
-	var b strings.Builder
-	c.Request.Header.VisitAll(func(k, v []byte) {
-		b.Write(k)
-		b.WriteString(": ")
-		b.Write(v)
-		b.WriteByte('\n')
-	})
-	return b.String()
-}
-
-func serializeResponseHeaders(c *app.RequestContext) string {
-	var b strings.Builder
-	c.Response.Header.VisitAll(func(k, v []byte) {
-		b.Write(k)
-		b.WriteString(": ")
-		b.Write(v)
-		b.WriteByte('\n')
-	})
-	return b.String()
-}
-
-func headersMapJSONFromRequest(c *app.RequestContext) string {
-	m := make(map[string]string)
-	c.Request.Header.VisitAll(func(k, v []byte) {
-		m[string(k)] = string(v)
-	})
-	b, err := json.Marshal(m)
-	if err != nil {
-		return ""
-	}
-	return truncate(string(b), maxHeadersJSON)
-}
-
-func headersMapJSONFromResponse(c *app.RequestContext) string {
-	m := make(map[string]string)
-	c.Response.Header.VisitAll(func(k, v []byte) {
-		m[string(k)] = string(v)
-	})
-	b, err := json.Marshal(m)
-	if err != nil {
-		return ""
-	}
-	return truncate(string(b), maxHeadersJSON)
-}
-
-func headersMapJSONFromHTTP(h http.Header) string {
-	if h == nil {
-		return ""
-	}
-	m := make(map[string]string)
-	for k, vs := range h {
-		m[k] = strings.Join(vs, ", ")
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return ""
-	}
-	return truncate(string(b), maxHeadersJSON)
-}
-
-func headersTextFromHTTP(h http.Header) string {
-	if h == nil {
-		return ""
-	}
-	var b strings.Builder
-	for k, vs := range h {
-		for _, v := range vs {
-			b.WriteString(k)
-			b.WriteString(": ")
-			b.WriteString(v)
-			b.WriteByte('\n')
-		}
-	}
-	return b.String()
-}
-
 // RequestHeaderLookup returns the concatenated values for a header (case-insensitive key).
 func RequestHeaderLookup(c *app.RequestContext) func(string) string {
+	var cached map[string]string
+	var loaded bool
 	return func(key string) string {
-		want := strings.ToLower(strings.TrimSpace(key))
-		var out string
-		c.Request.Header.VisitAll(func(k, v []byte) {
-			if strings.ToLower(string(k)) == want {
-				if out != "" {
-					out += ", "
-				}
-				out += string(v)
+		if !loaded {
+			grouped := make(map[string][]string)
+			c.Request.Header.VisitAll(func(k, v []byte) {
+				lower := strings.ToLower(strings.TrimSpace(string(k)))
+				grouped[lower] = append(grouped[lower], string(v))
+			})
+			cached = make(map[string]string, len(grouped))
+			for lower, values := range grouped {
+				cached[lower] = strings.Join(values, ", ")
 			}
-		})
-		return out
+			loaded = true
+		}
+		return cached[strings.ToLower(strings.TrimSpace(key))]
 	}
 }
 
 // BuildMaterial extracts strings from the request context synchronously.
-// ja3 is optional (TLS fingerprint hash); pass empty when unavailable.
+// tls is optional; pass a zero-value metadata struct when unavailable.
 // If upstreamHeader is non-nil, response header fields prefer upstream headers;
 // respBody should be upstream body bytes when available.
-func BuildMaterial(c *app.RequestContext, clientIP net.IP, ja3 string, respBody []byte, upstreamHeader http.Header) *Material {
+func BuildMaterial(c *app.RequestContext, clientIP net.IP, tls TLSMetadata, respBody []byte, upstreamHeader http.Header) *Material {
+	reqBodyBytes, _ := c.Body()
+	return BuildMaterialFromRequestBody(c, clientIP, tls, reqBodyBytes, respBody, upstreamHeader, true)
+}
+
+// BuildMaterialFromRequestBody builds material using a caller-supplied request
+// body snapshot. Callers may pass nil to skip request-body capture without
+// consuming an unread request stream.
+// When captureResponse is false, the full response body and response header text
+// are skipped to keep resource recording on the hot path lightweight.
+func BuildMaterialFromRequestBody(c *app.RequestContext, clientIP net.IP, tls TLSMetadata, reqBody []byte, respBody []byte, upstreamHeader http.Header, captureResponse bool) *Material {
+	if c == nil {
+		return nil
+	}
+	if reqBody == nil && !c.Request.IsBodyStream() {
+		reqBody = c.Request.Body()
+	}
 	m := &Material{}
 	m.Method = string(c.Method())
 	m.Path = requestPath(c)
+	m.QueryString = sanitizeRecordedQueryString(string(c.URI().QueryString()))
 	m.Host = string(c.Host())
 	if clientIP != nil {
 		m.ClientIP = clientIP.String()
 	}
-	m.JA3Hash = ja3
+	m.TLSVersion = strings.TrimSpace(tls.TLSVersion)
+	m.TLSSNI = strings.TrimSpace(tls.TLSSNI)
+	m.TLSALPN = strings.TrimSpace(tls.TLSALPN)
+	m.JA3Hash = strings.TrimSpace(tls.JA3Hash)
+	m.JA4 = strings.TrimSpace(tls.JA4)
 	m.UserAgent = string(c.UserAgent())
-	var fp strings.Builder
-	fp.WriteString(m.JA3Hash)
-	fp.WriteByte('\t')
-	fp.WriteString(m.UserAgent)
-	m.Fingerprint = truncate(fp.String(), maxFingerprintString)
 
-	reqBodyBytes, _ := c.Body()
-	reqBody := string(reqBodyBytes)
-	m.RequestBody = truncate(reqBody, maxBodySnippet)
-	m.RequestBodySnippet = m.RequestBody
-	m.RequestHeadersFull = serializeRequestHeaders(c)
-	m.RequestHeadersJSON = headersMapJSONFromRequest(c)
+	reqBodyText := string(reqBody)
+	m.RequestBody = reqBodyText
+	m.RequestBodySnippet = truncate(sanitizeRecordedBodySnippet(reqBodyText, string(c.Request.Header.ContentType())), maxBodySnippet)
+	requestHeaders := captureRecordedRequestHeaders(c, recordedHeaderCaptureText|recordedHeaderCaptureJSON)
+	m.RequestHeadersFull = requestHeaders.text
+	m.RequestHeadersJSON = requestHeaders.json
 
-	rb := append([]byte(nil), respBody...)
-	if len(rb) == 0 {
-		rb = append([]byte(nil), c.Response.Body()...)
+	responseContentType := ""
+	responseMode := recordedHeaderCaptureJSON
+	if captureResponse {
+		responseMode |= recordedHeaderCaptureText
 	}
-	m.ResponseBody = string(rb)
-	m.ResponseBodySnippet = truncate(m.ResponseBody, maxBodySnippet)
-
 	if upstreamHeader != nil {
-		m.ResponseHeadersFull = headersTextFromHTTP(upstreamHeader)
-		m.ResponseHeadersJSON = headersMapJSONFromHTTP(upstreamHeader)
+		responseHeaders := captureRecordedHTTPHeaders(upstreamHeader, responseMode)
+		m.ResponseHeadersJSON = responseHeaders.json
+		if captureResponse {
+			m.ResponseHeadersFull = responseHeaders.text
+		}
 		if vs := upstreamHeader.Values("Content-Type"); len(vs) > 0 {
-			m.ContentType = vs[0]
+			responseContentType = vs[0]
 		}
 	} else {
-		m.ResponseHeadersFull = serializeResponseHeaders(c)
-		m.ResponseHeadersJSON = headersMapJSONFromResponse(c)
-		m.ContentType = string(c.Response.Header.ContentType())
+		responseHeaders := captureRecordedResponseHeaders(c, responseMode)
+		m.ResponseHeadersJSON = responseHeaders.json
+		if captureResponse {
+			m.ResponseHeadersFull = responseHeaders.text
+		}
+		responseContentType = string(c.Response.Header.ContentType())
+	}
+	m.ContentType = responseContentType
+	if captureResponse {
+		rb := append([]byte(nil), respBody...)
+		if len(rb) == 0 {
+			rb = append([]byte(nil), c.Response.Body()...)
+		}
+		m.ResponseBody = string(rb)
+		m.ResponseBodySnippet = truncate(sanitizeRecordedBodySnippet(m.ResponseBody, responseContentType), maxBodySnippet)
+	} else {
+		responseSample := respBody
+		if len(responseSample) == 0 && !c.Response.IsBodyStream() {
+			responseSample = c.Response.BodyBytes()
+		}
+		if len(responseSample) > maxBodySnippet {
+			responseSample = responseSample[:maxBodySnippet]
+		}
+		m.ResponseBodySnippet = truncate(sanitizeRecordedBodySnippet(string(responseSample), responseContentType), maxBodySnippet)
 	}
 
 	m.StatusCode = c.Response.StatusCode()
-	st := m.StatusCode
-	m.FullHTTPRequest = m.Method + " " + m.Path + "\n" + m.RequestHeadersFull + "\n\n" + m.RequestBodySnippet
-	m.FullHTTPResponse = strconv.Itoa(st) + " " + http.StatusText(st) + "\n" + m.ResponseHeadersFull + "\n\n" + m.ResponseBodySnippet
 
 	return m
 }

@@ -19,20 +19,26 @@ func ListSecurityEvents(repo *repository.SecurityEventRepo) app.HandlerFunc {
 		offset, limit := utils.Paginate(page, pageSize)
 
 		f := repository.SecurityEventFilter{
-			RequestID:   string(c.Query("request_id")),
-			Action:      string(c.Query("action")),
-			Phase:       string(c.Query("phase")),
-			Category:    string(c.Query("category")),
-			ClientIP:    string(c.Query("client_ip")),
-			Host:        string(c.Query("host")),
-			Path:        string(c.Query("path")),
-			RuleIDStr:   string(c.Query("rule_id_str")),
-			TLSVersion:  string(c.Query("tls_version")),
-			TLSSNI:      string(c.Query("tls_sni")),
-			TLSALPN:     string(c.Query("tls_alpn")),
-			TLSJA3Hash:  string(c.Query("tls_ja3_hash")),
-			TLSJA4:      string(c.Query("tls_ja4")),
-			HeaderOrder: string(c.Query("header_order")),
+			Query:           string(c.Query("q")),
+			RequestID:       string(c.Query("request_id")),
+			Action:          string(c.Query("action")),
+			Phase:           string(c.Query("phase")),
+			Category:        string(c.Query("category")),
+			ClientIP:        string(c.Query("client_ip")),
+			Host:            string(c.Query("host")),
+			Path:            string(c.Query("path")),
+			QueryString:     string(c.Query("query_string")),
+			RuleIDStr:       string(c.Query("rule_id_str")),
+			TLSVersion:      string(c.Query("tls_version")),
+			TLSSNI:          string(c.Query("tls_sni")),
+			TLSALPN:         string(c.Query("tls_alpn")),
+			TLSJA3Hash:      string(c.Query("tls_ja3_hash")),
+			TLSJA4:          string(c.Query("tls_ja4")),
+			TLSCipherSuites: string(c.Query("tls_cipher_suites")),
+			TLSExtensions:   string(c.Query("tls_extensions")),
+			TLSCurves:       string(c.Query("tls_curves")),
+			TLSPointFormats: string(c.Query("tls_point_formats")),
+			HeaderOrder:     string(c.Query("header_order")),
 		}
 		if id := string(c.Query("id")); id != "" {
 			if v, err := strconv.ParseUint(id, 10, 64); err == nil {
@@ -42,6 +48,11 @@ func ListSecurityEvents(repo *repository.SecurityEventRepo) app.HandlerFunc {
 		if rid := string(c.Query("rule_id")); rid != "" {
 			if v, err := strconv.ParseUint(rid, 10, 64); err == nil {
 				f.RuleID = uint(v)
+			}
+		}
+		if siteID := string(c.Query("site_id")); siteID != "" {
+			if v, err := strconv.ParseUint(siteID, 10, 64); err == nil {
+				f.SiteID = uint(v)
 			}
 		}
 		if since := string(c.Query("since")); since != "" {
@@ -91,8 +102,7 @@ func ListSiteSecurityEvents(siteRepo *repository.SiteRepo, repo *repository.Secu
 			c.JSON(400, map[string]string{"error": "invalid id"})
 			return
 		}
-		site, err := siteRepo.Get(siteID)
-		if err != nil {
+		if _, err := siteRepo.Get(siteID); err != nil {
 			c.JSON(404, map[string]string{"error": "site not found"})
 			return
 		}
@@ -100,19 +110,25 @@ func ListSiteSecurityEvents(siteRepo *repository.SiteRepo, repo *repository.Secu
 		pageSize, _ := strconv.Atoi(string(c.Query("page_size")))
 		offset, limit := utils.Paginate(page, pageSize)
 		f := repository.SecurityEventFilter{
-			RequestID:   string(c.Query("request_id")),
-			Action:      string(c.Query("action")),
-			Phase:       string(c.Query("phase")),
-			Category:    string(c.Query("category")),
-			ClientIP:    string(c.Query("client_ip")),
-			Path:        string(c.Query("path")),
-			Host:        site.Host,
-			TLSVersion:  string(c.Query("tls_version")),
-			TLSSNI:      string(c.Query("tls_sni")),
-			TLSALPN:     string(c.Query("tls_alpn")),
-			TLSJA3Hash:  string(c.Query("tls_ja3_hash")),
-			TLSJA4:      string(c.Query("tls_ja4")),
-			HeaderOrder: string(c.Query("header_order")),
+			Query:           string(c.Query("q")),
+			RequestID:       string(c.Query("request_id")),
+			Action:          string(c.Query("action")),
+			Phase:           string(c.Query("phase")),
+			Category:        string(c.Query("category")),
+			ClientIP:        string(c.Query("client_ip")),
+			Path:            string(c.Query("path")),
+			QueryString:     string(c.Query("query_string")),
+			Host:            string(c.Query("host")),
+			TLSVersion:      string(c.Query("tls_version")),
+			TLSSNI:          string(c.Query("tls_sni")),
+			TLSALPN:         string(c.Query("tls_alpn")),
+			TLSJA3Hash:      string(c.Query("tls_ja3_hash")),
+			TLSJA4:          string(c.Query("tls_ja4")),
+			TLSCipherSuites: string(c.Query("tls_cipher_suites")),
+			TLSExtensions:   string(c.Query("tls_extensions")),
+			TLSCurves:       string(c.Query("tls_curves")),
+			TLSPointFormats: string(c.Query("tls_point_formats")),
+			HeaderOrder:     string(c.Query("header_order")),
 		}
 		if since := string(c.Query("since")); since != "" {
 			if t, err := time.Parse(time.RFC3339, since); err == nil {

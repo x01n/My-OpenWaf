@@ -1,6 +1,7 @@
 package challenge
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
 
 func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 	mgr := NewShieldManager(NewCaptchaManager(nil, 0), nil, 4)
-	mgr.SetConfig(ShieldConfig{
+	cfg := ShieldConfig{
 		Difficulty:           2,
 		TimeoutSecs:          7,
 		AutoStartDelay:       1234,
@@ -91,15 +92,16 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 		EnableWASM:           false,
 		EnableEnvCheck:       false,
 		EnableDevToolsDetect: false,
-	})
+	}
+	mgr.SetConfig(cfg)
 
-	session, err := mgr.GenerateChallenge("/shield")
+	session, err := mgr.GenerateChallenge("/shield", "h2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	powScript := GeneratePoWScript(session.Difficulty, session.Nonce)
-	cfg := mgr.Config()
-	html := shieldPageHTMLWithConfig(session.ID, cfg, "", powScript)
+	runtimeCfg := mgr.Config()
+	html := shieldPageHTMLWithConfig(session.ID, runtimeCfg, "h2", "", powScript)
 
 	checks := []string{
 		`autoDelay=1234`,
@@ -109,6 +111,7 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 		`detectDev=false`,
 		`requireH2=true`,
 		`allowH1=false`,
+		`requestProto="h2"`,
 		`window.__powWorker=w`,
 	}
 	for _, want := range checks {
@@ -116,6 +119,88 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 			t.Fatalf("shield page did not include %q: %s", want, html)
 		}
 	}
+}
+
+func TestShieldVerifyEnforcesProtocolRequirements(t *testing.T) {
+	mgr := NewShieldManager(NewCaptchaManager(nil, 0), nil, 1)
+
+	makeConfig := func(requireH2, requireH3, allowH1 bool) ShieldConfig {
+		cfg := DefaultShieldConfig()
+		cfg.Difficulty = 1
+		cfg.TimeoutSecs = 7
+		cfg.AutoStartDelay = 50
+		cfg.MaxRetries = 1
+		cfg.RequireHTTP2 = requireH2
+		cfg.RequireHTTP3 = requireH3
+		cfg.AllowHTTP1 = allowH1
+		cfg.EnableWASM = false
+		cfg.EnableEnvCheck = false
+		cfg.EnableDevToolsDetect = false
+		return cfg
+	}
+
+	cases := []struct {
+		name           string
+		cfg            ShieldConfig
+		requestProto   string
+		wantVerify     bool
+	}{
+		{
+			name:         "require h3 accepts h3",
+			cfg:          makeConfig(false, true, false),
+			requestProto: "h3",
+			wantVerify:   true,
+		},
+		{
+			name:         "require h2 accepts h2",
+			cfg:          makeConfig(true, false, false),
+			requestProto: "h2",
+			wantVerify:   true,
+		},
+		{
+			name:         "disallow http1 rejects http1",
+			cfg:          makeConfig(false, false, false),
+			requestProto: "http/1.1",
+			wantVerify:   false,
+		},
+		{
+			name:         "require h3 rejects h2",
+			cfg:          makeConfig(false, true, true),
+			requestProto: "h2",
+			wantVerify:   false,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr.SetConfig(tt.cfg)
+			session, err := mgr.GenerateChallenge("/shield", tt.requestProto)
+			if err != nil {
+				t.Fatalf("GenerateChallenge(): %v", err)
+			}
+			counter, hash := findShieldPoWSolution(t, session.Nonce, session.Difficulty)
+			ok, redirect := mgr.VerifyChallenge(session.ID, "", counter, hash, "", tt.requestProto)
+			if ok != tt.wantVerify {
+				t.Fatalf("VerifyChallenge() ok = %v, want %v", ok, tt.wantVerify)
+			}
+			if redirect != "/shield" {
+				t.Fatalf("VerifyChallenge() redirect = %q, want %q", redirect, "/shield")
+			}
+		})
+	}
+}
+
+func findShieldPoWSolution(t *testing.T, nonce string, difficulty int) (int64, string) {
+	t.Helper()
+	prefix := strings.Repeat("0", difficulty)
+	for counter := int64(0); counter < 1_000_000; counter++ {
+		hash := sha256Hex(fmt.Sprintf("%s%d", nonce, counter))
+		if strings.HasPrefix(hash, prefix) {
+			return counter, hash
+		}
+	}
+	t.Fatalf("no PoW solution found for nonce %q difficulty %d", nonce, difficulty)
+	return 0, ""
 }
 
 func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {

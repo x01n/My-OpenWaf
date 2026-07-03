@@ -118,6 +118,25 @@ func (cm *ChainChallengeManager) Reconfigure(steps []ChainStepConfig, difficulty
 	cm.mu.Unlock()
 }
 
+func (cm *ChainChallengeManager) redisClient() *goredis.Client {
+	if cm == nil {
+		return nil
+	}
+	cm.mu.RLock()
+	client := cm.redis
+	cm.mu.RUnlock()
+	return client
+}
+
+func (cm *ChainChallengeManager) SetRedis(redis *goredis.Client) {
+	if cm == nil {
+		return
+	}
+	cm.mu.Lock()
+	cm.redis = redis
+	cm.mu.Unlock()
+}
+
 func (cm *ChainChallengeManager) configuredSteps() []ChainStepConfig {
 	cm.mu.RLock()
 	steps := append([]ChainStepConfig(nil), cm.steps...)
@@ -399,7 +418,7 @@ func (cm *ChainChallengeManager) ListSessions() []ChainSessionInfo {
 	if cm == nil {
 		return nil
 	}
-	if cm.redis != nil {
+	if cm.redisClient() != nil {
 		return cm.listRedisSessions()
 	}
 	cm.mu.RLock()
@@ -423,12 +442,16 @@ func (cm *ChainChallengeManager) DeleteSession(id string) bool {
 }
 
 func (cm *ChainChallengeManager) listRedisSessions() []ChainSessionInfo {
+	redis := cm.redisClient()
+	if redis == nil {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	iter := cm.redis.Scan(ctx, 0, cm.prefix+"*", 100).Iterator()
+	iter := redis.Scan(ctx, 0, cm.prefix+"*", 100).Iterator()
 	sessions := make([]ChainSessionInfo, 0)
 	for iter.Next(ctx) {
-		data, err := cm.redis.Get(ctx, iter.Val()).Bytes()
+		data, err := redis.Get(ctx, iter.Val()).Bytes()
 		if err != nil {
 			continue
 		}
@@ -455,11 +478,11 @@ func chainSessionInfoFromState(state *ChainState) ChainSessionInfo {
 }
 
 func (cm *ChainChallengeManager) saveChainState(state *ChainState) {
-	if cm.redis != nil {
+	if redis := cm.redisClient(); redis != nil {
 		data, _ := json.Marshal(state)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if cm.redis.Set(ctx, cm.prefix+state.SessionID, data, 10*time.Minute).Err() == nil {
+		if redis.Set(ctx, cm.prefix+state.SessionID, data, 10*time.Minute).Err() == nil {
 			return
 		}
 	}
@@ -469,10 +492,10 @@ func (cm *ChainChallengeManager) saveChainState(state *ChainState) {
 }
 
 func (cm *ChainChallengeManager) loadChainState(id string) *ChainState {
-	if cm.redis != nil {
+	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		data, err := cm.redis.Get(ctx, cm.prefix+id).Bytes()
+		data, err := redis.Get(ctx, cm.prefix+id).Bytes()
 		if err == nil {
 			var s ChainState
 			if json.Unmarshal(data, &s) == nil {
@@ -487,10 +510,10 @@ func (cm *ChainChallengeManager) loadChainState(id string) *ChainState {
 }
 
 func (cm *ChainChallengeManager) deleteChainState(id string) {
-	if cm.redis != nil {
+	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		cm.redis.Del(ctx, cm.prefix+id)
+		redis.Del(ctx, cm.prefix+id)
 	}
 	cm.mu.Lock()
 	delete(cm.states, id)

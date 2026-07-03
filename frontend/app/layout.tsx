@@ -1,5 +1,8 @@
+import { Toaster } from "@/components/ui/sonner"
+import { TooltipProvider } from "@/components/ui/tooltip"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
+import { I18nProvider } from "@/components/i18n-provider"
 
 export default function RootLayout({
   children,
@@ -9,12 +12,18 @@ export default function RootLayout({
   return (
     <html
       lang="zh-CN"
-      data-scroll-behavior="smooth"
       suppressHydrationWarning
-      className="font-sans antialiased"
+      className="antialiased"
     >
-      <body>
-        <ThemeProvider>{children}</ThemeProvider>
+      <body className="font-sans">
+        <ThemeProvider>
+          <I18nProvider>
+            <TooltipProvider>
+              {children}
+              <Toaster position="top-center" />
+            </TooltipProvider>
+          </I18nProvider>
+        </ThemeProvider>
       </body>
     </html>
   )

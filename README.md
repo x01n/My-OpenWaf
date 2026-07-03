@@ -107,6 +107,7 @@ flowchart TB
 
 ### 🌐 反向代理能力
 - 多上游负载均衡
+- `upstream_urls` 指定上游连接目标，`upstream_host` 指定发给上游的 `Host` 头，支持域名、域名:端口和 Go template
 - TLS 终止与证书管理
 - WebSocket / SSE 透传
 
@@ -161,7 +162,7 @@ docker run -d \
 启动后访问 `https://localhost:9443` 进入管理面板。
 
 ### 🔨 从源码构建
-**前置要求**：Go 1.25+、Bun、GCC
+**前置要求**：Go 1.25+、Bun 1.3.14+、GCC
 
 ```bash
 # 1. 构建前端
@@ -228,7 +229,7 @@ scripts/            构建脚本
 | --- | --- |
 | 后端语言 | Go 1.25 |
 | Web 框架 | [Hertz](https://github.com/cloudwego/hertz) v0.10.4 |
-| 前端 | Next.js + React（Node.js 22） |
+| 前端 | Next.js + React（Bun 1.3.14） |
 | 数据库 | SQLite / MySQL / PostgreSQL（GORM） |
 | 本地缓存 | [Ristretto](https://github.com/dgraph-io/ristretto) |
 | 分布式缓存 | [go-redis](https://github.com/redis/go-redis) |
@@ -255,11 +256,14 @@ scripts/            构建脚本
 # Go 测试
 go test -v ./...
 
+# QPS 诊断
+./scripts/qps-diagnose.ps1 -TargetUrl http://127.0.0.1/ -MetricsUrl http://127.0.0.1:9443/metrics -Requests 1000 -Concurrency 40
+
 # 前端
 cd frontend
-npm run dev
-npm run lint
-npm run typecheck
+bun run dev
+bun run lint
+bun run typecheck
 ```
 
 <details>

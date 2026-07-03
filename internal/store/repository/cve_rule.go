@@ -3,6 +3,7 @@ package repository
 import (
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/cve"
+	"strings"
 
 	"gorm.io/gorm"
 )
@@ -19,6 +20,7 @@ type CVERuleFilter struct {
 	Severity string
 	Enabled  *bool
 	Source   string
+	Query    string
 }
 
 func (r *CVERuleRepo) List(offset, limit int, f CVERuleFilter) ([]cve.CVERuleModel, int64, error) {
@@ -34,6 +36,10 @@ func (r *CVERuleRepo) List(offset, limit int, f CVERuleFilter) ([]cve.CVERuleMod
 	}
 	if f.Source != "" {
 		q = q.Where("source = ?", f.Source)
+	}
+	if strings.TrimSpace(f.Query) != "" {
+		like := "%" + strings.ToLower(strings.TrimSpace(f.Query)) + "%"
+		q = q.Where("LOWER(cve_id) LIKE ? OR LOWER(description) LIKE ?", like, like)
 	}
 
 	var total int64

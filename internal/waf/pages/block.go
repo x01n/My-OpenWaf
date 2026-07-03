@@ -105,6 +105,8 @@ func renderTemplatePage(c *app.RequestContext, html, reqID string, res action.Re
 		c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, res, maintenance, action.Intercept)))
 		return
 	}
+	// 防止信息泄露：仅填充 RequestID 和 StatusCode，
+	// 其余字段保留空字符串以兼容自定义模板引用但不暴露 WAF 内部信息。
 	var buf bytes.Buffer
 	_ = tpl.Execute(&buf, struct {
 		RequestID  string
@@ -117,12 +119,12 @@ func renderTemplatePage(c *app.RequestContext, html, reqID string, res action.Re
 		StatusCode int
 	}{
 		RequestID:  reqID,
-		RuleID:     strconv.FormatUint(uint64(res.RuleID), 10),
-		RuleIDStr:  valueOrFallback(res.RuleIDStr, strconv.FormatUint(uint64(res.RuleID), 10)),
-		Phase:      res.Phase,
-		Action:     string(action.Normalize(res.Type)),
-		Category:   res.Category,
-		MatchDesc:  res.MatchDesc,
+		RuleID:     "",
+		RuleIDStr:  "",
+		Phase:      "",
+		Action:     "",
+		Category:   "",
+		MatchDesc:  "",
 		StatusCode: statusCode,
 	})
 	c.Data(statusCode, "text/html; charset=utf-8", buf.Bytes())
@@ -155,19 +157,17 @@ func defaultFallbackHTML(reqID string, res action.Result, maintenance bool, acti
 	if maintenance {
 		return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service Maintenance</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128736;</div><div><div class="kicker">Maintenance</div><h1 class="title">服务维护中</h1></div></div><p class="msg">服务正在进行维护，请稍后再试。The service is under maintenance, please try again later.</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div></div><div class="footer"><span>Protected by My-OpenWaf</span><span class="pill">503 Service Unavailable</span></div></section></main></body></html>`
 	}
+	// 防止信息泄露：仅向用户展示 Request ID，
+	// 不暴露 Action、Rule ID、Phase、Category、MatchDesc 等 WAF 内部信息。
 	title := "访问被拒绝"
-	label := "403 Intercept"
+	label := "403 Forbidden"
 	message := "您的请求已被 Web 应用防火墙拦截。Your request was blocked by the web application firewall."
 	if action.Normalize(actionType) == action.RateLimit {
 		title = "请求过于频繁"
-		label = "429 Rate Limit"
+		label = "429 Too Many Requests"
 		message = "当前访问频率过高，请稍后重试。Too many requests, please retry later."
 	}
-	ruleID := valueOrFallback(res.RuleIDStr, strconv.FormatUint(uint64(res.RuleID), 10))
-	phase := valueOrFallback(res.Phase, "-")
-	category := valueOrFallback(res.Category, "-")
-	matchDesc := valueOrFallback(res.MatchDesc, "-")
-	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128737;</div><div><div class="kicker">Security Event</div><h1 class="title">` + title + `</h1></div></div><p class="msg">` + message + `</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div><div class="row"><span>Action</span><code>` + string(action.Normalize(actionType)) + `</code></div><div class="row"><span>Rule</span><code>` + ruleID + `</code></div><div class="row"><span>Phase</span><code>` + phase + `</code></div><div class="row"><span>Category</span><code>` + category + `</code></div><div class="row"><span>Reason</span><code>` + matchDesc + `</code></div></div><div class="footer"><span>Protected by My-OpenWAF</span><span class="pill">` + label + `</span></div></section></main></body></html>`
+	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128737;</div><div><div class="kicker">Security Event</div><h1 class="title">` + title + `</h1></div></div><p class="msg">` + message + `</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div></div><div class="footer"><span>Protected by My-OpenWAF</span><span class="pill">` + label + `</span></div></section></main></body></html>`
 }
 
 func valueOrFallback(value, fallback string) string {

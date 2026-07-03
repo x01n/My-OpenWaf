@@ -243,8 +243,37 @@ func ListRecordedResources(siteRepo *repository.SiteRepo, repo *repository.Recor
 		}
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+		var filter repository.RecordedResourceFilter
+		filter.Query = strings.TrimSpace(c.Query("q"))
+		filter.Method = strings.TrimSpace(c.Query("method"))
+		filter.Host = strings.TrimSpace(c.Query("host"))
+		filter.Path = strings.TrimSpace(c.Query("path"))
+		filter.QueryString = strings.TrimSpace(c.Query("query_string"))
+		filter.ClientIP = strings.TrimSpace(c.Query("client_ip"))
+		filter.TLSVersion = strings.TrimSpace(c.Query("tls_version"))
+		filter.TLSSNI = strings.TrimSpace(c.Query("tls_sni"))
+		filter.TLSALPN = strings.TrimSpace(c.Query("tls_alpn"))
+		filter.JA3Hash = strings.TrimSpace(c.Query("ja3_hash"))
+		filter.JA4 = strings.TrimSpace(c.Query("ja4"))
+		filter.UserAgent = strings.TrimSpace(c.Query("user_agent"))
+		if raw := strings.TrimSpace(c.Query("status_code")); raw != "" {
+			statusCode, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || statusCode <= 0 {
+				c.JSON(400, map[string]string{"error": "invalid status_code"})
+				return
+			}
+			filter.StatusCode = statusCode
+		}
+		if raw := strings.TrimSpace(c.Query("rule_id")); raw != "" {
+			ruleID, parseErr := strconv.ParseUint(raw, 10, 64)
+			if parseErr != nil || ruleID == 0 {
+				c.JSON(400, map[string]string{"error": "invalid rule_id"})
+				return
+			}
+			filter.RuleID = uint(ruleID)
+		}
 		offset, limit := utils.Paginate(page, pageSize)
-		items, total, err := repo.ListBySite(siteID, offset, limit)
+		items, total, err := repo.ListBySite(siteID, offset, limit, filter)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return

@@ -89,6 +89,32 @@ func TestResponseHeadersJSONRedactsSensitiveHeadersAndTruncates(t *testing.T) {
 		t.Fatalf("large response header was not truncated: %s", got)
 	}
 }
+
+func TestRequestHeadersSnapshotSharesOrderAndJSON(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Request.Header.Add("X-First", "one")
+	ctx.Request.Header.Add("Authorization", "Bearer secret")
+	ctx.Request.Header.Add("X-First", "two")
+
+	order := requestHeaderOrder(ctx)
+	if len(order) != 3 {
+		t.Fatalf("requestHeaderOrder() length = %d want 3", len(order))
+	}
+	if order[0] != "X-First" || order[1] != "Authorization" || order[2] != "X-First" {
+		t.Fatalf("requestHeaderOrder() = %#v", order)
+	}
+
+	got := requestHeadersJSON(ctx)
+	if strings.Contains(got, "secret") {
+		t.Fatalf("sensitive header leaked: %s", got)
+	}
+	if !strings.Contains(got, `[redacted]`) {
+		t.Fatalf("sensitive header was not redacted: %s", got)
+	}
+	if !strings.Contains(got, `"X-First"`) {
+		t.Fatalf("expected header key missing from json: %s", got)
+	}
+}
 func TestBuildAccessLogEntrySkipsDetailedFieldsForSampledPass(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Request.Header.Set("Authorization", "Bearer secret")
@@ -119,6 +145,16 @@ func TestBuildAccessLogEntryUsesResponseBodyLengthWhenMissing(t *testing.T) {
 	entry := buildAccessLogEntry(ctx, accessLogInfo{SiteID: 1, WAFAction: "intercept", StatusCode: 403, Detailed: true})
 	if entry.ResponseSize != int64(len("blocked")) {
 		t.Fatalf("response_size = %d want %d", entry.ResponseSize, len("blocked"))
+	}
+}
+
+func TestBuildAccessLogEntryUsesStreamContentLengthWithoutReadingBody(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Response.SetBodyStream(panicResponseBodyReader{}, 16)
+
+	entry := buildAccessLogEntry(ctx, accessLogInfo{SiteID: 1, WAFAction: "intercept", StatusCode: 403, Detailed: true})
+	if entry.ResponseSize != 16 {
+		t.Fatalf("response_size = %d want %d", entry.ResponseSize, 16)
 	}
 }
 

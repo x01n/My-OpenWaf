@@ -23,6 +23,7 @@ func ListCVERules(repo *repository.CVERuleRepo) app.HandlerFunc {
 			Category: c.DefaultQuery("category", ""),
 			Severity: c.DefaultQuery("severity", ""),
 			Source:   c.DefaultQuery("source", ""),
+			Query:    c.DefaultQuery("q", ""),
 		}
 		if v := c.DefaultQuery("enabled", ""); v != "" {
 			b := v == "true" || v == "1"

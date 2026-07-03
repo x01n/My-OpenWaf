@@ -215,6 +215,35 @@ func TestTLSFingerprintListenerParsesClientHelloWithTrailingHandshakeBytes(t *te
 	}
 }
 
+func TestPeekConnSetTLSHandshakeInfoClearsOfferedALPNWhenNegotiatedEmpty(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	pc := &peekConn{
+		Conn: server,
+		fingerprint: bot.TLSClientFingerprint{
+			JA3Hash: "ja3",
+			JA4:     "ja4",
+			SNI:     "client.example",
+			ALPN:    []string{"h2", "http/1.1"},
+		},
+	}
+
+	pc.SetTLSHandshakeInfo("TLS11", "client.example", "")
+
+	fp, ok := pc.TLSFingerprint()
+	if !ok {
+		t.Fatal("expected TLS fingerprint after handshake update")
+	}
+	if fp.JA3Hash != "ja3" || fp.JA4 != "ja4" || fp.SNI != "client.example" || fp.TLSVersion != "TLS11" {
+		t.Fatalf("unexpected merged TLS fingerprint: %+v", fp)
+	}
+	if len(fp.ALPN) != 0 {
+		t.Fatalf("ALPN = %+v, want empty negotiated ALPN", fp.ALPN)
+	}
+}
+
 func TestTLSFingerprintListenerReplaysNonTLSPrefix(t *testing.T) {
 	payload := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	conn := connWithInitialBytesForTest(t, payload)
@@ -279,6 +308,14 @@ func BenchmarkTLSFingerprintConnSmallClientHello(b *testing.B) {
 	benchmarkTLSFingerprintConn(b, record)
 }
 
+func BenchmarkTLSFingerprintConnSmallClientHelloCore(b *testing.B) {
+	record := clientHelloRecordForDataplaneTest(b, &tls.Config{
+		ServerName: "example.com",
+		NextProtos: []string{"h2", "http/1.1"},
+	})
+	benchmarkTLSFingerprintConnCore(b, record)
+}
+
 func BenchmarkTLSFingerprintConnLargeClientHello(b *testing.B) {
 	record := clientHelloRecordForDataplaneTest(b, &tls.Config{
 		ServerName: "example.com",
@@ -290,6 +327,17 @@ func BenchmarkTLSFingerprintConnLargeClientHello(b *testing.B) {
 	benchmarkTLSFingerprintConn(b, record)
 }
 
+func BenchmarkTLSFingerprintConnLargeClientHelloCore(b *testing.B) {
+	record := clientHelloRecordForDataplaneTest(b, &tls.Config{
+		ServerName: "example.com",
+		NextProtos: largeALPNProtocolsForTest(),
+	})
+	if len(record) <= 4096 {
+		b.Fatalf("client hello record length = %d, want > 4096", len(record))
+	}
+	benchmarkTLSFingerprintConnCore(b, record)
+}
+
 func BenchmarkTLSFingerprintConnFragmentedClientHello(b *testing.B) {
 	record := clientHelloRecordForDataplaneTest(b, &tls.Config{
 		ServerName: "fragmented.example",
@@ -299,13 +347,42 @@ func BenchmarkTLSFingerprintConnFragmentedClientHello(b *testing.B) {
 	benchmarkTLSFingerprintConn(b, fragmented)
 }
 
+func BenchmarkTLSFingerprintConnFragmentedClientHelloCore(b *testing.B) {
+	record := clientHelloRecordForDataplaneTest(b, &tls.Config{
+		ServerName: "fragmented.example",
+		NextProtos: []string{"h2", "http/1.1"},
+	})
+	fragmented := fragmentTLSClientHelloRecordForDataplaneTest(b, record, 2)
+	benchmarkTLSFingerprintConnCore(b, fragmented)
+}
+
 func benchmarkTLSFingerprintConn(b *testing.B, record []byte) {
 	b.Helper()
 	b.ReportAllocs()
+	conn := &bytesConnForBenchmark{}
 	for i := 0; i < b.N; i++ {
-		conn := &bytesConnForBenchmark{Reader: bytes.NewReader(record)}
+		conn.Reset(record)
 		wrapped := newTLSFingerprintConn(conn)
 		buf := make([]byte, len(record))
+		if _, err := io.ReadFull(wrapped, buf); err != nil {
+			b.Fatalf("read wrapped record: %v", err)
+		}
+		fp, ok := bot.TLSFingerprintFromConn(wrapped)
+		if !ok || fp.JA3 == "" || fp.JA3Hash == "" || fp.JA4 == "" {
+			b.Fatalf("unexpected fingerprint: %+v, ok=%v", fp, ok)
+		}
+	}
+}
+
+func benchmarkTLSFingerprintConnCore(b *testing.B, record []byte) {
+	b.Helper()
+	b.ReportAllocs()
+	conn := &bytesConnForBenchmark{}
+	buf := make([]byte, len(record))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		conn.Reset(record)
+		wrapped := newTLSFingerprintConn(conn)
 		if _, err := io.ReadFull(wrapped, buf); err != nil {
 			b.Fatalf("read wrapped record: %v", err)
 		}
@@ -459,7 +536,7 @@ func connWithInitialBytesForTest(tb testing.TB, payload []byte) net.Conn {
 }
 
 type bytesConnForBenchmark struct {
-	*bytes.Reader
+	bytes.Reader
 }
 
 func (c *bytesConnForBenchmark) Write(p []byte) (int, error) { return len(p), nil }

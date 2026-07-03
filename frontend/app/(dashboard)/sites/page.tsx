@@ -1,619 +1,294 @@
-"use client"
+"use client";
 
-import { useCallback, useEffect, useState } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import Link from "next/link";
+import { useSites, useSiteDelete, useSiteStart, useSiteStop } from "@/hooks/use-api";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
 import {
-  ExternalLink,
-  Globe,
-  AlertTriangle,
-  Loader2,
-  Plus,
-  Power,
-  Shield,
-  Trash2,
-} from "@/lib/icons"
-import { deferEffect } from "@/lib/effects"
-import { AddSiteDialog } from "@/components/add-site-dialog"
-import { EmptyState, PageIntro } from "@/components/console-shell"
-import { CopyableBlock } from "@/components/log-presentation"
-import { Pagination } from "@/components/pagination"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
+  Card,
+  CardHeader,
+  CardTitle,
+  CardAction,
+  CardContent,
+  CardFooter,
+} from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/confirm-dialog";
+import { toast } from "sonner";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
-import { Button } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
-import {
-  deleteSite,
-  getConfigAppliedReloadFailureDetails,
-  getConfigAppliedReloadFailureItem,
-  getSiteStatus,
-  isConfigAppliedReloadFailureError,
-  listSites,
-  startSite,
-  stopSite,
-  updateSite,
-  type Site,
-} from "@/lib/api"
-import { parseSiteUpstreams } from "@/lib/site-upstreams"
-import {
-  getProtectionMode,
-  ProtectionModeDialog,
-  protectionModeLabel,
-  type ProtectionMode,
-} from "@/components/protection-mode-dialog"
-import { formatDate, cn } from "@/lib/utils"
-import { toast } from "sonner"
-
-function pageFromSearchParams(searchParams: URLSearchParams) {
-  const value = Number(searchParams.get("page") ?? "1")
-  return Number.isInteger(value) && value > 0 ? value : 1
-}
+  IconPlus,
+  IconShield,
+  IconWorld,
+  IconEdit,
+  IconTrash,
+  IconEye,
+  IconSettings,
+  IconShieldCheck,
+  IconRobot,
+  IconFingerprint,
+  IconBug,
+} from "@tabler/icons-react";
+import type { Site } from "@/lib/types";
+import { SiteFormDialog } from "./components/site-form-dialog";
 
 export default function SitesPage() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
-  const [sites, setSites] = useState<Site[]>([])
-  const [loading, setLoading] = useState(true)
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [busyId, setBusyId] = useState<number | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Site | null>(null)
-  const [modeTarget, setModeTarget] = useState<Site | null>(null)
-  const [modeSaving, setModeSaving] = useState(false)
-  const [deleting, setDeleting] = useState(false)
-  const [siteStatuses, setSiteStatuses] = useState<Record<number, string>>({})
-  const [page, setPage] = useState(() => pageFromSearchParams(searchParams))
-  const [total, setTotal] = useState(0)
-  const [reloadFailureDetails, setReloadFailureDetails] =
-    useState<Record<string, unknown> | null>(null)
-  const [operationDetails, setOperationDetails] =
-    useState<Record<string, unknown> | null>(null)
-  const pageSize = 20
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const { t } = useTranslation();
+  const [search, setSearch] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [editingSite, setEditingSite] = useState<Site | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  const load = useCallback(async (targetPage: number) => {
-    setLoading(true)
+  const { data, isLoading } = useSites({ page: 1, page_size: 50 });
+  const deleteSite = useSiteDelete();
+  const startSite = useSiteStart();
+  const stopSite = useSiteStop();
+
+  const items = (data?.items || []).filter((site) =>
+    site.host.toLowerCase().includes(search.toLowerCase())
+  );
+  const total = data?.total || 0;
+
+  const handleDelete = async () => {
+    if (!deletingId) return;
     try {
-      const res = await listSites({ page: targetPage, page_size: pageSize })
-      const nextItems = res.items ?? []
-      const nextTotal = res.total ?? 0
-      if (targetPage > 1 && nextItems.length === 0 && nextTotal > 0) {
-        setPage(targetPage - 1)
-        return
-      }
-      setSites(nextItems)
-      setTotal(nextTotal)
-      setSiteStatuses((prev) => {
-        const next: Record<number, string> = {}
-        for (const item of nextItems) {
-          next[item.id] =
-            prev[item.id] || (item.enabled ? "running" : "stopped")
-        }
-        return next
-      })
-      let statusLoadFailed = false
-      const statusEntries = await Promise.all(
-        nextItems.map(async (item) => {
-          try {
-            const status = await getSiteStatus(item.id)
-            return [item.id, status.status] as const
-          } catch {
-            statusLoadFailed = true
-            return [item.id, item.enabled ? "running" : "stopped"] as const
-          }
-        })
-      )
-      setSiteStatuses(Object.fromEntries(statusEntries))
-      if (statusLoadFailed) {
-        toast.error("部分站点运行状态加载失败，已使用启停配置兜底显示")
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "加载站点列表失败")
-      setSites([])
-      setTotal(0)
-      setSiteStatuses({})
+      await deleteSite.execute(deletingId);
+      toast.success(t("sites.deleteSuccess"));
+    } catch {
+      toast.error(t("common.deleteFailed"));
     } finally {
-      setLoading(false)
+      setDeletingId(null);
     }
-  }, [])
+  };
 
-  useEffect(() => {
-    return deferEffect(() => load(page))
-  }, [load, page])
-
-  function rememberReloadFailureDetails(error: unknown) {
-    const details =
-      getConfigAppliedReloadFailureDetails<Record<string, unknown>>(error)
-    if (details) {
-      setReloadFailureDetails(details)
-    }
-  }
-
-  function rememberSiteReloadFailureOperation(
-    error: unknown,
-    operation: string,
-    site: Site,
-    payload?: Record<string, unknown>
-  ) {
-    const item = getConfigAppliedReloadFailureItem<Site>(error)
-    const details =
-      getConfigAppliedReloadFailureDetails<Record<string, unknown>>(error)
-    setOperationDetails({
-      operation,
-      site_id: site.id,
-      host: site.host,
-      payload: payload ?? null,
-      response: {
-        site: item,
-        reload_failed: true,
-        reload_error: error instanceof Error ? error.message : null,
-        reload_failure: details,
-      },
-    })
-  }
-
-  function openAddSiteDialog() {
-    setReloadFailureDetails(null)
-    setOperationDetails(null)
-    setDialogOpen(true)
-  }
-
-  async function toggleSite(site: Site) {
-    const payload = { enabled: !site.enabled }
-    setBusyId(site.id)
-    setReloadFailureDetails(null)
-    setOperationDetails(null)
+  const handleToggle = async (site: Site) => {
     try {
-      let response
       if (site.enabled) {
-        response = await stopSite(site.id)
+        await stopSite.execute(site.id);
+        toast.success(t("sites.stopSuccess"));
       } else {
-        response = await startSite(site.id)
+        await startSite.execute(site.id);
+        toast.success(t("sites.startSuccess"));
       }
-      setOperationDetails({
-        operation: site.enabled ? "stop" : "start",
-        site_id: site.id,
-        host: site.host,
-        payload,
-        response,
-      })
-      setSiteStatuses((prev) => ({
-        ...prev,
-        [site.id]: site.enabled ? "stopped" : "running",
-      }))
-      toast.success(site.enabled ? "站点已停用" : "站点已启用")
-      load(page)
-    } catch (err) {
-      if (isConfigAppliedReloadFailureError(err)) {
-        rememberReloadFailureDetails(err)
-        rememberSiteReloadFailureOperation(
-          err,
-          site.enabled ? "stop" : "start",
-          site,
-          payload
-        )
-        await load(page)
-      }
-      toast.error(err instanceof Error ? err.message : "更新站点状态失败")
-    } finally {
-      setBusyId(null)
+    } catch {
+      toast.error(t("common.operationFailed"));
     }
-  }
+  };
 
-  async function removeSite() {
-    if (!deleteTarget) return
-    const target = deleteTarget
-    setDeleting(true)
-    setBusyId(target.id)
-    setReloadFailureDetails(null)
-    setOperationDetails(null)
-    try {
-      await deleteSite(target.id)
-      setOperationDetails({
-        operation: "delete",
-        site_id: target.id,
-        host: target.host,
-        payload: {
-          id: target.id,
-          host: target.host,
-        },
-        status_code: 204,
-        response: null,
-      })
-      toast.success("站点已删除")
-      setDeleteTarget(null)
-      load(page)
-    } catch (err) {
-      if (isConfigAppliedReloadFailureError(err)) {
-        rememberReloadFailureDetails(err)
-        const details =
-          getConfigAppliedReloadFailureDetails<Record<string, unknown>>(err)
-        if (details) {
-          setOperationDetails({
-            operation: "delete",
-            site_id: target.id,
-            host: target.host,
-            payload: {
-              id: target.id,
-              host: target.host,
-            },
-            response: details,
-          })
-        }
-        setDeleteTarget(null)
-        await load(page)
-      }
-      toast.error(err instanceof Error ? err.message : "删除站点失败")
-    } finally {
-      setDeleting(false)
-      setBusyId(null)
-    }
-  }
-
-  async function updateProtectionMode(mode: ProtectionMode) {
-    if (!modeTarget) return
-    setModeSaving(true)
-    setBusyId(modeTarget.id)
-    setReloadFailureDetails(null)
-    setOperationDetails(null)
-    const payload = {
-      attack_protection_level: mode === "observe" ? "observe" : "protect",
-      maintenance_enabled: mode === "maintenance",
-    }
-    try {
-      const result = await updateSite(modeTarget.id, payload)
-      setOperationDetails({
-        operation: "update_protection_mode",
-        site_id: modeTarget.id,
-        host: modeTarget.host,
-        mode,
-        payload,
-        response: result,
-      })
-      toast.success("防护模式已更新")
-      setModeTarget(null)
-      load(page)
-    } catch (err) {
-      if (isConfigAppliedReloadFailureError(err)) {
-        rememberReloadFailureDetails(err)
-        rememberSiteReloadFailureOperation(
-          err,
-          "update_protection_mode",
-          modeTarget,
-          {
-            mode,
-            ...payload,
-          }
-        )
-        setModeTarget(null)
-        await load(page)
-      }
-      toast.error(err instanceof Error ? err.message : "更新防护模式失败")
-    } finally {
-      setModeSaving(false)
-      setBusyId(null)
-    }
-  }
+  /** 构建监听端口摘要文本 */
+  const getListenerText = (site: Site): string => {
+    if (site.listener_summary) return site.listener_summary;
+    const port = site.bind?.replace(/^.*:/, "") || site.bind;
+    return site.tls_enabled ? `${port}/HTTPS` : `${port}/HTTP`;
+  };
 
   return (
-    <div className="flex flex-col gap-5">
-      <PageIntro
-        eyebrow="Applications"
-        title="站点管理"
-        description={`共 ${total} 个防护应用，统一管理域名、监听地址、上游与防护模式。`}
-        actions={
+    <div className="space-y-4">
+      {/* 顶部操作栏 */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <IconShield className="h-6 w-6 text-primary" />
+          <h1 className="text-xl font-semibold">{t("sites.title")}</h1>
+          <Badge variant="secondary" className="h-5 px-2 text-xs">
+            {t("common.total", { count: total })}
+          </Badge>
+        </div>
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder={t("sites.searchPlaceholder")}
+            className="h-9 w-64"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
           <Button
-            onClick={openAddSiteDialog}
-            className="w-full rounded-lg shadow-sm sm:w-auto"
+            className="h-9 bg-primary hover:bg-primary/90"
+            onClick={() => {
+              setEditingSite(null);
+              setShowForm(true);
+            }}
           >
-            <Plus data-icon="inline-start" />
-            添加应用
+            <IconPlus className="mr-1 h-4 w-4" />
+            {t("sites.add")}
           </Button>
-        }
-      />
+        </div>
+      </div>
 
-      {reloadFailureDetails ? (
-        <Alert className="gap-3">
-          <AlertTriangle />
-          <AlertTitle>配置已保存但运行时重载失败</AlertTitle>
-          <AlertDescription>
-            后端已返回站点操作响应体；请核对 item 或 error 字段。
-          </AlertDescription>
-          <CopyableBlock
-            label="reload 失败响应体"
-            value={JSON.stringify(reloadFailureDetails, null, 2)}
-            className="col-span-full"
-            redact
-            defaultOpen={false}
-          />
-        </Alert>
-      ) : null}
-
-      {operationDetails ? (
-        <Alert className="gap-3">
-          <Shield />
-          <AlertTitle>最近站点操作响应</AlertTitle>
-          <AlertDescription>
-            后端已返回站点操作响应；请核对 operation、site_id 与响应字段。
-          </AlertDescription>
-          <CopyableBlock
-            label="站点操作响应体"
-            value={JSON.stringify(operationDetails, null, 2)}
-            className="col-span-full"
-            redact
-            defaultOpen={false}
-          />
-        </Alert>
-      ) : null}
-
-      {/* Site cards */}
-      {loading ? (
-        <div className="flex flex-col gap-4">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton
-              key={i}
-              className="h-[140px] rounded-lg border border-border shadow-sm"
-            />
+      {/* 站点卡片网格 */}
+      {isLoading ? (
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i} className="animate-pulse">
+              <CardContent className="h-48" />
+            </Card>
           ))}
         </div>
-      ) : sites.length === 0 ? (
-        <EmptyState
-          title="还没有防护应用"
-          description="创建站点后即可绑定域名、监听地址与上游目标。"
-          action={
-            <Button onClick={openAddSiteDialog} className="rounded-lg">
-              <Plus data-icon="inline-start" />
-              新建站点
-            </Button>
-          }
-        />
+      ) : items.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+          <IconWorld className="h-12 w-12 mb-3 opacity-40" />
+          <p className="text-sm">{t("sites.empty")}</p>
+        </div>
       ) : (
-        <div className="flex flex-col gap-3">
-          {sites.map((site) => {
-            const upstreams = parseSiteUpstreams(site.upstream_urls)
-            const isBusy = busyId === site.id
-            const listenerSummary =
-              site.listener_summary || site.bind?.replace(/^.*:/, "") || "80"
-            const tlsSummary =
-              site.tls_summary || (site.tls_enabled ? "HTTPS" : "HTTP")
-            const siteHosts = site.host
-              ? site.host
-                  .split(",")
-                  .map((h) => h.trim())
-                  .filter(Boolean)
-              : []
-            const primaryHost = siteHosts[0] || site.host
-            const protectionMode = getProtectionMode(site)
-            const runtimeStatus =
-              siteStatuses[site.id] || (site.enabled ? "running" : "stopped")
-            const isRunning = runtimeStatus === "running"
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {items.map((site) => (
+            <Card
+              key={site.id}
+              className="transition-shadow hover:shadow-lg"
+            >
+              {/* 卡片头部：图标 + 站点名 + 操作按钮 */}
+              <CardHeader>
+                <div className="flex items-center gap-2 min-w-0">
+                  <IconWorld
+                    className={`h-5 w-5 shrink-0 ${
+                      site.enabled ? "text-emerald-500" : "text-muted-foreground"
+                    }`}
+                  />
+                  <CardTitle className="truncate text-sm">
+                    {site.host}
+                  </CardTitle>
+                </div>
+                <CardAction>
+                  <div className="flex items-center gap-0.5">
+                    <Link href={`/sites/detail/?id=${site.id}`}>
+                      <Button variant="ghost" size="icon" className="h-7 w-7">
+                        <IconEye className="h-3.5 w-3.5" />
+                      </Button>
+                    </Link>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => {
+                        setEditingSite(site);
+                        setShowForm(true);
+                      }}
+                    >
+                      <IconSettings className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </CardAction>
+              </CardHeader>
 
-            return (
-              <div
-                key={site.id}
-                className="console-panel overflow-hidden transition-shadow hover:shadow-md"
-              >
-                <div className="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center">
-                  {/* Icon */}
-                  <div
-                    className={cn(
-                      "flex size-10 shrink-0 items-center justify-center rounded-full",
-                      site.enabled
-                        ? "bg-primary/10 text-primary"
-                        : "bg-muted text-muted-foreground"
-                    )}
+              {/* 卡片内容 */}
+              <CardContent className="space-y-3">
+                {/* 防护模式 + 状态开关 */}
+                <div className="flex items-center justify-between">
+                  <Badge
+                    variant={site.owasp_enabled !== false ? "default" : "outline"}
+                    className={
+                      site.owasp_enabled !== false
+                        ? "bg-emerald-500/15 text-emerald-700 border-emerald-500/25 dark:text-emerald-400"
+                        : "bg-amber-500/15 text-amber-700 border-amber-500/25 dark:text-amber-400"
+                    }
                   >
-                    <Globe className="size-5" aria-hidden="true" />
+                    {site.owasp_enabled !== false
+                      ? t("sites.protectionMode", "防护模式")
+                      : t("sites.observeMode", "观察模式")}
+                  </Badge>
+                  <div className="flex items-center gap-1.5">
+                    <Switch
+                      checked={site.enabled}
+                      onCheckedChange={() => handleToggle(site)}
+                      className="scale-90"
+                    />
+                    <span
+                      className={`text-xs ${
+                        site.enabled ? "text-emerald-600" : "text-muted-foreground"
+                      }`}
+                    >
+                      {site.enabled ? t("common.running") : t("common.stopped")}
+                    </span>
                   </div>
+                </div>
 
-                  {/* Info */}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h2 className="truncate text-[15px] font-semibold text-foreground">
-                        {primaryHost}
-                      </h2>
-                      {siteHosts.length > 1 && (
-                        <Badge variant="secondary" className="rounded-md">
-                          +{siteHosts.length - 1} 域名
-                        </Badge>
-                      )}
-                      <Badge
-                        variant={isRunning ? "outline" : "secondary"}
-                        className="rounded-md"
-                      >
-                        {isRunning ? "运行中" : "已停止"}
-                      </Badge>
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
-                      {siteHosts.slice(0, 3).map((h) => (
-                        <span key={h} className="flex items-center gap-1">
-                          <Globe className="size-3" aria-hidden="true" />
-                          {h}
-                        </span>
-                      ))}
-                      {siteHosts.length > 3 && (
-                        <span className="text-muted-foreground">
-                          +{siteHosts.length - 3}
-                        </span>
-                      )}
-                      <span className="flex items-center gap-1">
-                        <Shield className="size-3" aria-hidden="true" />
-                        {listenerSummary}/{tlsSummary}
-                      </span>
-                    </div>
+                {/* 域名与监听端口 */}
+                <div className="space-y-1.5 text-sm">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-muted-foreground shrink-0">
+                      {t("sites.host", "域名")}:
+                    </span>
+                    <span className="truncate font-medium">{site.host}</span>
                   </div>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-muted-foreground shrink-0">
+                      {t("sites.listeners", "监听")}:
+                    </span>
+                    <span className="truncate">{getListenerText(site)}</span>
+                  </div>
+                </div>
 
-                  {/* Protection mode button */}
+                {/* 今日统计 */}
+                <div className="flex items-center gap-4 rounded-md bg-muted/50 px-3 py-2">
+                  <div className="flex flex-col items-center flex-1">
+                    <span className="text-xs text-muted-foreground">
+                      {t("sites.todayRequests", "今日请求")}
+                    </span>
+                    <span className="text-base font-semibold tabular-nums">
+                      {(site as Site & { today_requests?: number }).today_requests ?? 0}
+                    </span>
+                  </div>
+                  <div className="w-px h-6 bg-border" />
+                  <div className="flex flex-col items-center flex-1">
+                    <span className="text-xs text-muted-foreground">
+                      {t("sites.todayBlocks", "今日拦截")}
+                    </span>
+                    <span className="text-base font-semibold tabular-nums text-destructive">
+                      {(site as Site & { today_blocks?: number }).today_blocks ?? 0}
+                    </span>
+                  </div>
+                </div>
+              </CardContent>
+
+              {/* 快捷功能按钮 + 删除 */}
+              <CardFooter className="flex-wrap gap-1.5 pt-0">
+                <Badge variant="outline" className="cursor-default text-[10px] gap-1 px-1.5">
+                  <IconShieldCheck className="h-3 w-3" />
+                  {t("sites.ccProtection", "CC防护")}
+                </Badge>
+                <Badge variant="outline" className="cursor-default text-[10px] gap-1 px-1.5">
+                  <IconRobot className="h-3 w-3" />
+                  {t("sites.botProtection", "BOT防护")}
+                </Badge>
+                <Badge variant="outline" className="cursor-default text-[10px] gap-1 px-1.5">
+                  <IconFingerprint className="h-3 w-3" />
+                  {t("sites.authProtection", "身份认证")}
+                </Badge>
+                <Badge variant="outline" className="cursor-default text-[10px] gap-1 px-1.5">
+                  <IconBug className="h-3 w-3" />
+                  {t("sites.attackProtection", "攻击防护")}
+                </Badge>
+                <div className="ml-auto">
                   <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="rounded-lg text-[13px]"
-                    disabled={isBusy}
-                    onClick={() => setModeTarget(site)}
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 text-destructive hover:text-destructive"
+                    onClick={() => setDeletingId(site.id)}
                   >
-                    <Shield data-icon="inline-start" />
-                    {protectionModeLabel(protectionMode)}
+                    <IconTrash className="h-3.5 w-3.5" />
                   </Button>
-
-                  {/* Actions */}
-                  <div className="flex w-full flex-wrap items-center justify-end gap-1.5 lg:w-auto lg:flex-nowrap">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-xs"
-                      onClick={() => router.push(`/sites/_/?id=${site.id}`)}
-                    >
-                      详情
-                      <ExternalLink data-icon="inline-end" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="rounded-md"
-                      disabled={isBusy}
-                      onClick={() => toggleSite(site)}
-                      aria-label={site.enabled ? "停用站点" : "启用站点"}
-                      title={site.enabled ? "停用" : "启用"}
-                    >
-                      {isBusy ? (
-                        <Loader2
-                          data-icon="inline-start"
-                          className="animate-spin"
-                        />
-                      ) : (
-                        <Power
-                          data-icon="inline-start"
-                          className={cn(
-                            site.enabled
-                              ? "text-primary"
-                              : "text-muted-foreground"
-                          )}
-                        />
-                      )}
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="icon"
-                      className="rounded-md"
-                      disabled={isBusy}
-                      onClick={() => setDeleteTarget(site)}
-                      aria-label="删除站点"
-                    >
-                      <Trash2 data-icon="inline-start" />
-                    </Button>
-                  </div>
                 </div>
-
-                {/* Stats row */}
-                <Separator />
-                <div className="flex flex-col gap-3 px-5 py-3 text-[12px] sm:flex-row sm:items-center">
-                  <div className="flex flex-wrap items-center gap-3 text-muted-foreground">
-                    <span>请求统计请到站点详情查看</span>
-                    <span className="text-muted-foreground/45">•</span>
-                    <span>创建于 {formatDate(site.created_at)}</span>
-                  </div>
-                  <div className="flex min-w-0 flex-wrap items-center gap-2 sm:ml-auto sm:justify-end">
-                    {upstreams.slice(0, 2).map((u, i) => (
-                      <span
-                        key={i}
-                        className="inline-flex items-center gap-1 rounded border border-border bg-muted/35 px-2 py-0.5 font-mono text-[11px] text-muted-foreground"
-                      >
-                        {u}
-                        {isRunning && (
-                          <span className="text-primary">●</span>
-                        )}
-                      </span>
-                    ))}
-                    {upstreams.length > 2 && (
-                      <span className="text-muted-foreground">
-                        +{upstreams.length - 2}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
+              </CardFooter>
+            </Card>
+          ))}
         </div>
       )}
 
-      {!loading && total > 0 ? (
-        <Pagination
-          page={page}
-          totalPages={totalPages}
-          total={total}
-          pageSize={pageSize}
-          onPageChange={setPage}
-        />
-      ) : null}
-
-      <AddSiteDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        onSuccess={() => load(page)}
-        onReloadFailureDetails={(details) => setReloadFailureDetails(details)}
-        onOperationDetails={(details) => setOperationDetails(details)}
+      <SiteFormDialog
+        open={showForm}
+        onOpenChange={setShowForm}
+        site={editingSite}
       />
 
-      {modeTarget && (
-        <ProtectionModeDialog
-          open={!!modeTarget}
-          onOpenChange={(open) => !open && setModeTarget(null)}
-          currentMode={getProtectionMode(modeTarget)}
-          onConfirm={updateProtectionMode}
-          loading={modeSaving}
-        />
-      )}
-
-      <AlertDialog
-        open={!!deleteTarget}
-        onOpenChange={(open) => {
-          if (!open && !deleting) setDeleteTarget(null)
-        }}
-      >
-        <AlertDialogContent className="max-w-md rounded-xl">
-          <AlertDialogHeader>
-            <AlertDialogTitle>确认删除站点</AlertDialogTitle>
-            <AlertDialogDescription>
-              删除后该站点入口、监听配置与运行时状态都会移除，此操作不可撤销。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <Alert variant="destructive">
-            <AlertDescription>
-              目标站点：
-              <strong>
-                {deleteTarget?.host
-                  ?.split(",")
-                  .map((h) => h.trim())
-                  .join(", ") || "-"}
-              </strong>
-            </AlertDescription>
-          </Alert>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              disabled={deleting}
-              onClick={(event) => {
-                event.preventDefault()
-                removeSite()
-              }}
-            >
-              {deleting ? "删除中..." : "确认删除"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={!!deletingId}
+        onOpenChange={() => setDeletingId(null)}
+        title={t("sites.deleteTitle")}
+        description={t("sites.deleteConfirm")}
+        confirmText={t("common.delete")}
+        onConfirm={handleDelete}
+        loading={deleteSite.loading}
+      />
     </div>
-  )
+  );
 }

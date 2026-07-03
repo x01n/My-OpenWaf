@@ -109,7 +109,6 @@ var (
 	reStruts3       = regexp.MustCompile(`(?i)#rt\s*=\s*@java\.lang\.Runtime`)
 	reStruts4       = regexp.MustCompile(`(?i)ognl\.OgnlContext`)
 	reStruts5       = regexp.MustCompile(`(?i)multipart/form-data.*%\{`)
-	reStruts6       = regexp.MustCompile(`(?i)\$\{[^}]*\}`)
 	reShiro1        = regexp.MustCompile(`(?i)rememberMe=[A-Za-z0-9+/=]{100,}`)
 	reJackson1      = regexp.MustCompile(`(?i)\["org\.apache\.commons\.`)
 	reJackson2      = regexp.MustCompile(`(?i)com\.sun\.org\.apache\.xalan`)

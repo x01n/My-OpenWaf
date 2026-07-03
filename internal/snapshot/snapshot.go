@@ -8,6 +8,7 @@ import (
 
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/dynamic"
 )
 
 // CompiledRule is a lightweight runtime rule (MVP ACL parser).
@@ -70,6 +71,12 @@ type SiteRuntime struct {
 
 	// Application route rules (compiled per snapshot).
 	AppRouteRules []appresource.CompiledRule
+
+	// DynamicProtection holds the dynamic protection config (HTML obfuscation, JS obfuscation, watermark).
+	DynamicProtection dynamic.ProtectionConfig
+
+	// Upstream host header override (for explicit upstream host resolution).
+	UpstreamHostHeader string
 }
 
 // Snapshot is an immutable view for the dataplane (atomic pointer swap).
@@ -87,6 +94,36 @@ type Snapshot struct {
 
 	// Protection settings loaded from SystemSettings.
 	Protection store.ProtectionConfig
+
+	// HTTP2 configuration
+	HTTP2Config HTTP2Config
+
+	// HSTS
+	HSTSEnabled bool
+
+	// XSS protection
+	XSSProtectionEnabled bool
+
+	// Expect-CT
+	ExpectCTEnabled bool
+	ExpectCTValue   string
+
+	// HPKP
+	HPKPEnabled           bool
+	HPKPValue             string
+	HPKPReportOnlyEnabled bool
+	HPKPReportOnlyValue   string
+
+	// Response compression
+	ResponseCompressionEnabled     bool
+	ResponseCompressionGzipEnabled bool
+	ResponseCompressionMinBytes    int
+
+	// Brotli
+	BrotliEnabled bool
+
+	// ExcludeRecordHeaders holds header names that should skip resource recording.
+	ExcludeRecordHeaders []string
 }
 
 func SiteMapKey(bind string, host string) string {
@@ -121,6 +158,32 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 
 	// 3. No match — return false. Caller shows "site not found".
 	return SiteRuntime{}, false
+}
+
+// MatchSitePtr finds the SiteRuntime pointer for a bind address + host combination.
+func (sn *Snapshot) MatchSitePtr(bind string, hostHeader string) (*SiteRuntime, bool) {
+	_, ok := sn.MatchSite(bind, hostHeader)
+	if !ok {
+		return nil, false
+	}
+	// Look up the actual map entry to return its address.
+	host := NormalizeMatchHost(hostHeader)
+	if host == "" {
+		return nil, false
+	}
+	key := SiteMapKey(bind, host)
+	if rtPtr, ok := sn.Sites[key]; ok {
+		return &rtPtr, true
+	}
+	if !isIPAddress(host) {
+		if idx := strings.Index(host, "."); idx > 0 {
+			wild := "*." + host[idx+1:]
+			if rtPtr, ok := sn.Sites[SiteMapKey(bind, wild)]; ok {
+				return &rtPtr, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // NormalizeMatchHost lowercases, trims, and strips the port from a host header.
@@ -161,3 +224,17 @@ type Holder struct {
 
 func (h *Holder) Store(s *Snapshot) { h.ptr.Store(s) }
 func (h *Holder) Load() *Snapshot   { return h.ptr.Load() }
+
+// Default security header values.
+const (
+	DefaultExpectCTValue         = "max-age=86400, enforce"
+	DefaultHPKPValue             = ""
+	DefaultHPKPReportOnlyValue   = ""
+)
+
+// Default response compression settings.
+const (
+	DefaultResponseCompressionEnabled     = true
+	DefaultResponseCompressionGzipEnabled = true
+	DefaultResponseCompressionMinBytes    = 1024
+)

@@ -25,6 +25,8 @@ type Certificate struct {
 	Name    string `gorm:"size:128;not null" json:"name"`
 	CertPEM string `gorm:"type:text;not null" json:"cert_pem"`
 	KeyPEM  string `gorm:"type:text;not null" json:"key_pem"`
+	// OCSPStaplePEM stores an optional OCSP response in PEM or raw DER form.
+	OCSPStaplePEM string `gorm:"type:text" json:"ocsp_staple_pem,omitempty"`
 
 	// ACME 相关字段
 	Source      string     `gorm:"size:32;default:manual" json:"source"`

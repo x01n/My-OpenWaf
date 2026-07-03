@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/dynamic"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Build loads DB into an immutable Snapshot.
@@ -83,6 +86,24 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	for sid, raws := range rawBySite {
 		appRulesBySite[sid] = appresource.CompileRules(raws)
 	}
+
+	// Load dynamic protection and exclude record headers from bot_settings.
+	dynamicProtection := loadDynamicProtection(db)
+	excludeRecordHeaders := loadExcludeRecordHeaders(db)
+
+	http2Config := loadHTTP2Config(db)
+	hstsEnabled := loadBoolSetting(db, "hsts_enabled")
+	xssProtectionEnabled := loadBoolSetting(db, "xss_protection_enabled")
+	expectCTEnabled := loadBoolSetting(db, "expect_ct_enabled")
+	expectCTValue := loadStringSetting(db, "expect_ct_value", DefaultExpectCTValue)
+	hpkpEnabled := loadBoolSetting(db, store.SettingKeyHPKP)
+	hpkpValue := loadStringSetting(db, store.SettingKeyHPKPValue, DefaultHPKPValue)
+	hpkpReportOnlyEnabled := loadBoolSetting(db, store.SettingKeyHPKPReportOnly)
+	hpkpReportOnlyValue := loadStringSetting(db, store.SettingKeyHPKPReportOnlyValue, DefaultHPKPReportOnlyValue)
+	brotliEnabled := loadBoolSetting(db, "brotli_enabled")
+	responseCompressionEnabled := loadBoolSetting(db, "response_compression_enabled")
+	responseCompressionGzipEnabled := loadBoolSetting(db, "response_compression_gzip_enabled")
+	responseCompressionMinBytes := loadIntSetting(db, "response_compression_min_bytes", DefaultResponseCompressionMinBytes)
 
 	sniCerts := make(map[string]tls.Certificate)
 	siteMap := make(map[string]SiteRuntime)
@@ -214,9 +235,11 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				BlockHTML:            s.BlockHTML,
 				BlockStatus:          s.BlockStatus,
 				AntiReplayEnabled:    s.AntiReplayEnabled,
-				AntiReplayAction:     s.AntiReplayAction,
+								AntiReplayAction:     s.AntiReplayAction,
 				AppRouteRules:        appRulesBySite[s.ID],
+				DynamicProtection:    dynamicProtection,
 			}
+			registerSiteKeys(siteMap, rt)
 			registerSiteKeys(siteMap, rt)
 		}
 		// EffectiveProtection is computed later once global protection is loaded.
@@ -230,13 +253,27 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	}
 
 	return &Snapshot{
-		Revision:         rev,
-		Sites:            siteMap,
-		NetworkDefaults:  networkDefaults,
-		TLSDefaults:      tlsDefaults,
-		DefaultBlockHTML: "",
-		SiteTLSCertBySNI: sniCerts,
-		Protection:       protection,
+		Revision:                       rev,
+		Sites:                          siteMap,
+		NetworkDefaults:                networkDefaults,
+		TLSDefaults:                    tlsDefaults,
+		DefaultBlockHTML:               "",
+		SiteTLSCertBySNI:               sniCerts,
+		Protection:                     protection,
+		HTTP2Config:                    http2Config,
+		HSTSEnabled:                    hstsEnabled,
+		XSSProtectionEnabled:           xssProtectionEnabled,
+		ExpectCTEnabled:                expectCTEnabled,
+		ExpectCTValue:                  expectCTValue,
+		HPKPEnabled:                    hpkpEnabled,
+		HPKPValue:                      hpkpValue,
+		HPKPReportOnlyEnabled:          hpkpReportOnlyEnabled,
+		HPKPReportOnlyValue:            hpkpReportOnlyValue,
+		ResponseCompressionEnabled:     responseCompressionEnabled,
+		ResponseCompressionGzipEnabled: responseCompressionGzipEnabled,
+		ResponseCompressionMinBytes:    responseCompressionMinBytes,
+		BrotliEnabled:                  brotliEnabled,
+		ExcludeRecordHeaders:           excludeRecordHeaders,
 	}, nil
 }
 
@@ -728,4 +765,106 @@ func loadProtectionConfig(db *gorm.DB) (store.ProtectionConfig, error) {
 		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
 	}
 	return cfg, nil
+}
+func loadDynamicProtection(db *gorm.DB) dynamic.ProtectionConfig {
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", "bot_settings").First(&setting).Error; err != nil {
+		return dynamic.ProtectionConfig{}
+	}
+
+	var bs struct {
+		DynamicProtectionEnabled bool     `json:"dynamic_protection_enabled"`
+		HTMLObfuscation          bool     `json:"html_obfuscation"`
+		JSObfuscation            bool     `json:"js_obfuscation"`
+		ImageWatermark           bool     `json:"image_watermark"`
+		JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
+		ImageWatermarkPaths      []string `json:"image_watermark_paths,omitempty"`
+		WatermarkText            string   `json:"watermark_text,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(setting.Value), &bs); err != nil {
+		return dynamic.ProtectionConfig{}
+	}
+
+	return dynamic.ProtectionConfig{
+		HTMLObfuscationEnabled: bs.DynamicProtectionEnabled && bs.HTMLObfuscation,
+		JSObfuscationEnabled:   bs.DynamicProtectionEnabled && bs.JSObfuscation,
+		ImageWatermarkEnabled:  bs.DynamicProtectionEnabled && bs.ImageWatermark,
+		JSObfuscationPaths:     bs.JSObfuscationPaths,
+		ImageWatermarkPaths:    bs.ImageWatermarkPaths,
+		WatermarkText:          bs.WatermarkText,
+	}
+}
+
+func loadExcludeRecordHeaders(db *gorm.DB) []string {
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", "bot_settings").First(&setting).Error; err != nil {
+		return nil
+	}
+	var bs struct {
+		ExcludeRecordHeaders []string `json:"exclude_record_headers,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(setting.Value), &bs); err != nil {
+		return nil
+	}
+	return bs.ExcludeRecordHeaders
+}
+
+func loadHTTP2Config(db *gorm.DB) HTTP2Config {
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", "http2_config").First(&setting).Error; err != nil {
+		return DefaultHTTP2Config()
+	}
+	return LoadHTTP2Config(setting.Value)
+}
+
+func loadBoolSetting(db *gorm.DB, key string) bool {
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", key).First(&setting).Error; err != nil {
+		return false
+	}
+	v := strings.TrimSpace(strings.ToLower(setting.Value))
+	return v == "true" || v == "1" || v == "yes"
+}
+
+func loadStringSetting(db *gorm.DB, key string, defaultValue string) string {
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", key).First(&setting).Error; err != nil {
+		return defaultValue
+	}
+	if strings.TrimSpace(setting.Value) == "" {
+		return defaultValue
+	}
+	return setting.Value
+}
+
+func loadIntSetting(db *gorm.DB, key string, defaultValue int) int {
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", key).First(&setting).Error; err != nil {
+		return defaultValue
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(setting.Value))
+	if err != nil {
+		return defaultValue
+	}
+	return v
+}
+
+// systemSettingKeyEquals returns a GORM clause for querying system settings by key.
+func systemSettingKeyEquals(key string) clause.Eq {
+	return clause.Eq{Column: clause.Column{Name: "key"}, Value: key}
+}
+
+// ResolveOutboundHost resolves the upstream host for a request.
+// It prefers the site's explicit upstream host, then the upstream host header, and falls back to the incoming host.
+func ResolveOutboundHost(rt SiteRuntime, upstreamHost string, incomingHost string) (string, error) {
+	if rt.Site.UpstreamHost != "" {
+		return rt.Site.UpstreamHost, nil
+	}
+	if rt.UpstreamHostHeader != "" {
+		return rt.UpstreamHostHeader, nil
+	}
+	if upstreamHost != "" {
+		return upstreamHost, nil
+	}
+	return incomingHost, nil
 }

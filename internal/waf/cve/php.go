@@ -82,12 +82,11 @@ var (
 	rePHPPhar         = regexp.MustCompile(`(?i)phar://`)
 
 	// ThinkPHP RCE (CVE-2018-20062 and related)
-	reThinkPHP1     = regexp.MustCompile(`(?i)s=index/think\\\\app/invokefunction`)
-	reThinkPHP2     = regexp.MustCompile(`(?i)_method=__construct.*filter\[\]=system`)
-	reThinkPHP3     = regexp.MustCompile(`(?i)c=Runtime&a=getContent`)
-	reThinkPHP4     = regexp.MustCompile(`(?i)think\\\\app/invokefunction`)
-	reThinkPHP5     = regexp.MustCompile(`(?i)filter\[\]\s*=\s*(system|exec|passthru|shell_exec)`)
-	reThinkPHPDebug = regexp.MustCompile(`(?i)(?:^|[?&])s=captcha(?:&|$)|/runtime/(?:logs|temp)/|/application/runtime/|/runtime/log/\d{2}_[0-9]{2}_[0-9]{2}\.log`)
+	reThinkPHP1 = regexp.MustCompile(`(?i)s=index/think\\\\app/invokefunction`)
+	reThinkPHP2 = regexp.MustCompile(`(?i)_method=__construct.*filter\[\]=system`)
+	reThinkPHP3 = regexp.MustCompile(`(?i)c=Runtime&a=getContent`)
+	reThinkPHP4 = regexp.MustCompile(`(?i)think\\\\app/invokefunction`)
+	reThinkPHP5 = regexp.MustCompile(`(?i)filter\[\]\s*=\s*(system|exec|passthru|shell_exec)`)
 
 	// Laravel RCE
 	reLaravel1 = regexp.MustCompile(`(?i)_ignition/execute-solution`)
@@ -307,7 +306,7 @@ func resolveTargets(req *CVERequest, target string) []string {
 		}
 		return out
 	case "cookie":
-		c, ok := req.Headers["Cookie"]
+		c, ok := cveHeaderValueOK(req.Headers, "Cookie")
 		if !ok {
 			return nil
 		}

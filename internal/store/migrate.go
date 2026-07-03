@@ -12,9 +12,21 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := migrations.V2MigrateSingleSite(db); err != nil {
 		return err
 	}
+	if err := migrations.V3MigrateLegacyRulePhases(db); err != nil {
+		return err
+	}
+	if err := migrations.V4MigrateRecordedResourceQueryString(db); err != nil {
+		return err
+	}
+	if err := migrations.V5MigrateSiteTLSInheritanceDefaults(db); err != nil {
+		return err
+	}
+	if err := migrations.V6MigrateSiteTLSMinVersionInheritance(db); err != nil {
+		return err
+	}
 
 	// Then apply schema migrations
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&Certificate{},
 		&Policy{},
 		&Rule{},
@@ -35,7 +47,14 @@ func AutoMigrate(db *gorm.DB) error {
 		&CVESyncLog{},
 		&ApplicationRouteRule{},
 		&RecordedResource{},
-	)
+	); err != nil {
+		return err
+	}
+
+	// V6 needs both legacy sites and the system_settings marker table. Running
+	// it again after schema migration handles older databases that did not yet
+	// have system_settings when the pre-schema data migrations ran.
+	return migrations.V6MigrateSiteTLSMinVersionInheritance(db)
 }
 
 func AutoMigrateLogs(db *gorm.DB) error {

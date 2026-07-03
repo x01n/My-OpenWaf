@@ -16,6 +16,7 @@ import (
 
 type AntiReplayManager struct {
 	secret      []byte
+	redisMu     sync.RWMutex
 	rdb         *goredis.Client
 	ttl         time.Duration
 	localMu     sync.Mutex
@@ -53,6 +54,25 @@ func NewAntiReplayManager(secret string, rdb *goredis.Client, ttl time.Duration)
 		ttl = 5 * time.Minute
 	}
 	return &AntiReplayManager{secret: []byte(secret), rdb: rdb, ttl: ttl, spentUntil: make(map[string]time.Time, 4096), idemRotated: make(map[string]idemEntry, 1024)}
+}
+
+func (m *AntiReplayManager) redisClient() *goredis.Client {
+	if m == nil {
+		return nil
+	}
+	m.redisMu.RLock()
+	client := m.rdb
+	m.redisMu.RUnlock()
+	return client
+}
+
+func (m *AntiReplayManager) SetRedis(rdb *goredis.Client) {
+	if m == nil {
+		return
+	}
+	m.redisMu.Lock()
+	m.rdb = rdb
+	m.redisMu.Unlock()
 }
 
 func (m *AntiReplayManager) GenerateNonce(clientIP string) string {
@@ -113,12 +133,12 @@ func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string, ses
 		spentTTL = 86400
 	}
 	newNonce := m.GenerateNonce(clientIP)
-	if m.rdb != nil {
+	if redis := m.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 		defer cancel()
 		spentKey := fmt.Sprintf("waf:nonce:spent:%s", nonce)
 		idemKey := fmt.Sprintf("waf:nonce:idem:%s", nonce)
-		res, err := m.rdb.Eval(ctx, redisNonceLua, []string{spentKey, idemKey}, spentTTL, antiReplayIdemSeconds, newNonce).Result()
+		res, err := redis.Eval(ctx, redisNonceLua, []string{spentKey, idemKey}, spentTTL, antiReplayIdemSeconds, newNonce).Result()
 		if err == nil {
 			switch arr := res.(type) {
 			case []any:

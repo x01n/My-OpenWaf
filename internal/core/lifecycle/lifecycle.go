@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -14,6 +15,11 @@ import (
 
 // Default graceful shutdown timeout for individual servers.
 const defaultShutdownTimeout = 10 * time.Second
+
+// Hot reload removes must release the caller quickly; full process shutdown keeps the longer timeout above.
+const defaultRemoveShutdownTimeout = 500 * time.Millisecond
+
+const hertzEngineNotRunningError = "engine is not running"
 
 // Server is any stoppable server managed by the lifecycle manager.
 type Server interface {
@@ -26,6 +32,10 @@ type hertzServer struct{ h *server.Hertz }
 
 func (s *hertzServer) Spin()                              { s.h.Spin() }
 func (s *hertzServer) Shutdown(ctx context.Context) error { return s.h.Shutdown(ctx) }
+
+func serverAlreadyStopped(err error) bool {
+	return err != nil && strings.TrimSpace(err.Error()) == hertzEngineNotRunningError
+}
 
 // Manager coordinates startup, shutdown, and signal handling for multiple servers.
 type Manager struct {
@@ -118,9 +128,13 @@ func (m *Manager) Remove(name string) {
 		return
 	}
 	m.log.Info("removing server", slog.String("name", name))
-	ctx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultRemoveShutdownTimeout)
 	defer cancel()
 	if err := ent.srv.Shutdown(ctx); err != nil {
+		if serverAlreadyStopped(err) {
+			m.log.Info("server removed", slog.String("name", name))
+			return
+		}
 		m.log.Error("remove shutdown error", slog.String("name", name), slog.Any("err", err))
 	} else {
 		m.log.Info("server removed", slog.String("name", name))
@@ -165,6 +179,10 @@ func (m *Manager) Shutdown(ctx context.Context) {
 		go func(ent entry) {
 			defer wg.Done()
 			if err := ent.srv.Shutdown(ctx); err != nil {
+				if serverAlreadyStopped(err) {
+					m.log.Info("server shutdown complete", slog.String("name", ent.name))
+					return
+				}
 				m.log.Error("shutdown error", slog.String("name", ent.name), slog.Any("err", err))
 			} else {
 				m.log.Info("server shutdown complete", slog.String("name", ent.name))

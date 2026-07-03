@@ -10,7 +10,17 @@ import (
 	"github.com/google/uuid"
 
 	"My-OpenWaf/internal/admin/auth"
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store/repository"
+)
+
+const (
+	adminHSTSHeaderName           = "Strict-Transport-Security"
+	adminHSTSHeaderValue          = "max-age=31536000"
+	adminXSSHeaderName            = "X-XSS-Protection"
+	adminXSSHeaderValue           = "1; mode=block"
+	adminHPKPHeaderName           = "Public-Key-Pins"
+	adminHPKPReportOnlyHeaderName = "Public-Key-Pins-Report-Only"
 )
 
 // AuthMiddleware supports JWT (Bearer) or API Key authentication.
@@ -118,12 +128,147 @@ func AccessLog(log *slog.Logger) app.HandlerFunc {
 	}
 }
 
-func SecurityHeaders() app.HandlerFunc {
+func SecurityHeaders(holder *snapshot.Holder) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		c.Response.Header.Set("X-Content-Type-Options", "nosniff")
 		c.Response.Header.Set("X-Frame-Options", "DENY")
 		c.Response.Header.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Response.Header.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
 		c.Next(ctx)
+		ensureAdminXSSProtection(c, holder)
+		ensureAdminHPKP(c, holder)
+		ensureAdminHPKPReportOnly(c, holder)
+		ensureAdminStrictTransportSecurity(c, holder)
 	}
+}
+
+func ensureAdminXSSProtection(c *app.RequestContext, holder *snapshot.Holder) {
+	if !shouldWriteAdminXSSProtection(c, holder) {
+		return
+	}
+	if len(c.Response.Header.Peek(adminXSSHeaderName)) != 0 {
+		return
+	}
+	c.Response.Header.Set(adminXSSHeaderName, adminXSSHeaderValue)
+}
+
+func ensureAdminStrictTransportSecurity(c *app.RequestContext, holder *snapshot.Holder) {
+	if !shouldWriteAdminStrictTransportSecurity(c, holder) {
+		return
+	}
+	if len(c.Response.Header.Peek(adminHSTSHeaderName)) != 0 {
+		return
+	}
+	c.Response.Header.Set(adminHSTSHeaderName, adminHSTSHeaderValue)
+}
+
+func ensureAdminHPKP(c *app.RequestContext, holder *snapshot.Holder) {
+	if !shouldWriteAdminHPKP(c, holder) {
+		return
+	}
+	if len(c.Response.Header.Peek(adminHPKPHeaderName)) != 0 {
+		return
+	}
+	sn := holder.Load()
+	if sn == nil {
+		return
+	}
+	value := strings.TrimSpace(sn.HPKPValue)
+	if value == "" {
+		return
+	}
+	c.Response.Header.Set(adminHPKPHeaderName, value)
+}
+
+func ensureAdminHPKPReportOnly(c *app.RequestContext, holder *snapshot.Holder) {
+	if !shouldWriteAdminHPKPReportOnly(c, holder) {
+		return
+	}
+	if len(c.Response.Header.Peek(adminHPKPReportOnlyHeaderName)) != 0 {
+		return
+	}
+	sn := holder.Load()
+	if sn == nil {
+		return
+	}
+	value := strings.TrimSpace(sn.HPKPReportOnlyValue)
+	if value == "" {
+		return
+	}
+	c.Response.Header.Set(adminHPKPReportOnlyHeaderName, value)
+}
+
+func shouldWriteAdminXSSProtection(c *app.RequestContext, holder *snapshot.Holder) bool {
+	if holder == nil {
+		return false
+	}
+	sn := holder.Load()
+	return sn != nil && sn.XSSProtectionEnabled && c.Response.StatusCode() > 0
+}
+
+func shouldWriteAdminStrictTransportSecurity(c *app.RequestContext, holder *snapshot.Holder) bool {
+	if holder == nil {
+		return false
+	}
+	sn := holder.Load()
+	if sn == nil || !sn.HSTSEnabled {
+		return false
+	}
+	if c.Response.StatusCode() <= 0 {
+		return false
+	}
+	switch adminRequestProtocol(c) {
+	case "https", "h3":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldWriteAdminHPKP(c *app.RequestContext, holder *snapshot.Holder) bool {
+	if holder == nil {
+		return false
+	}
+	sn := holder.Load()
+	if sn == nil || !sn.HPKPEnabled {
+		return false
+	}
+	if c.Response.StatusCode() <= 0 {
+		return false
+	}
+	switch adminRequestProtocol(c) {
+	case "https", "h3":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldWriteAdminHPKPReportOnly(c *app.RequestContext, holder *snapshot.Holder) bool {
+	if holder == nil {
+		return false
+	}
+	sn := holder.Load()
+	if sn == nil || !sn.HPKPReportOnlyEnabled {
+		return false
+	}
+	if c.Response.StatusCode() <= 0 {
+		return false
+	}
+	switch adminRequestProtocol(c) {
+	case "https", "h3":
+		return true
+	default:
+		return false
+	}
+}
+
+func adminRequestProtocol(c *app.RequestContext) string {
+	if proto := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); proto != "" {
+		return strings.ToLower(proto)
+	}
+	if scheme := strings.TrimSpace(string(c.URI().Scheme())); scheme != "" {
+		return strings.ToLower(scheme)
+	}
+	return "http"
 }

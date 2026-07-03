@@ -224,15 +224,6 @@ func init() {
 	registerPathTraversalRules()
 }
 
-func registerPatternRules(category string, patterns []struct {
-	re    interface{} // not used here — just for naming
-	score int
-	id    string
-}, names map[string]string) {
-	// This is a helper that we don't use directly since patterns have *regexp.Regexp.
-	// Instead each register function iterates its own pattern slice.
-}
-
 func registerSQLiRules() {
 	for _, p := range sqliPatterns {
 		id := p.id

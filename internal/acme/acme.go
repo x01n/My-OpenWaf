@@ -35,6 +35,7 @@ type Manager struct {
 	email        string
 	directoryURL string
 	log          *slog.Logger
+	caaPolicy    CAAPolicy
 
 	// HTTP-01 质询令牌存储
 	challenges  map[string]string
@@ -50,6 +51,7 @@ type Config struct {
 	DirectoryURL string // 默认 Let's Encrypt 生产环境
 	Log          *slog.Logger
 	OnRenew      func(domain, certPEM, keyPEM string, expiry time.Time, renewErr error) error
+	CAAPolicy    CAAPolicy
 }
 
 // DefaultDirectoryURL Let's Encrypt 生产环境 URL。
@@ -84,6 +86,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		email:        cfg.Email,
 		directoryURL: cfg.DirectoryURL,
 		log:          cfg.Log,
+		caaPolicy:    normalizeCAAPolicy(cfg.CAAPolicy),
 		challenges:   make(map[string]string),
 		onRenew:      cfg.OnRenew,
 	}
@@ -117,6 +120,10 @@ func (m *Manager) ObtainCertificate(ctx context.Context, domain string) (*Certif
 	defer m.mu.Unlock()
 
 	m.log.Info("开始申请证书", slog.String("domain", domain))
+
+	if err := CheckCAAIssuance(ctx, domain, m.caaPolicy); err != nil {
+		return nil, fmt.Errorf("caa check failed: %w", err)
+	}
 
 	// 创建订单
 	order, err := m.client.AuthorizeOrder(ctx, acme.DomainIDs(domain))
@@ -227,6 +234,16 @@ func (m *Manager) ObtainCertificate(ctx context.Context, domain string) (*Certif
 	)
 
 	return result, nil
+}
+
+func normalizeCAAPolicy(policy CAAPolicy) CAAPolicy {
+	if len(normalizeCAAAllowedIssuers(policy.AllowedIssuers)) == 0 {
+		policy.AllowedIssuers = []string{DefaultCAAAllowedIssuer}
+	}
+	if policy.Timeout <= 0 {
+		policy.Timeout = defaultCAAQueryTimeout
+	}
+	return policy
 }
 
 // HandleHTTP01Challenge 处理 HTTP-01 质询请求。

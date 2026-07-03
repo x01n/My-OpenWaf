@@ -5,12 +5,15 @@ import (
 	"crypto/tls"
 	"net"
 	"time"
+
+	"My-OpenWaf/internal/waf/bot"
 )
 
 type fixURIHertzConn struct {
 	net.Conn
-	readBuf []byte
-	write   bytes.Buffer
+	readBuf     []byte
+	write       bytes.Buffer
+	fingerprint bot.TLSClientFingerprint
 }
 
 func newFixURIHertzConn(conn net.Conn) *fixURIHertzConn {
@@ -144,6 +147,23 @@ func (c *fixURIHertzConn) ConnectionState() tls.ConnectionState {
 	return tls.ConnectionState{}
 }
 
+func (c *fixURIHertzConn) TLSFingerprint() (bot.TLSClientFingerprint, bool) {
+	if fp, ok := bot.TLSFingerprintFromConn(c.Conn); ok {
+		return fp, true
+	}
+	return c.fingerprint, c.fingerprint.HasValue()
+}
+
 func (c *fixURIHertzConn) SetTLSHandshakeInfo(version string, sni string, alpn string) {
+	if version != "" {
+		c.fingerprint.TLSVersion = version
+	}
+	if sni != "" {
+		c.fingerprint.SNI = sni
+	}
+	c.fingerprint.ALPN = nil
+	if alpn != "" {
+		c.fingerprint.ALPN = []string{alpn}
+	}
 	setTLSHandshakeInfoOnConn(c.Conn, version, sni, alpn)
 }

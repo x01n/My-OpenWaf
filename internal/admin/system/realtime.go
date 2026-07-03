@@ -63,54 +63,63 @@ type realtimeClient struct {
 }
 
 type realtimeAccessLog struct {
-	ID                uint      `json:"id"`
-	CreatedAt         time.Time `json:"created_at"`
-	SiteID            uint      `json:"site_id"`
-	RequestID         string    `json:"request_id"`
-	ClientIP          string    `json:"client_ip"`
-	Host              string    `json:"host"`
-	Path              string    `json:"path"`
-	QueryString       string    `json:"query_string"`
-	Method            string    `json:"method"`
-	StatusCode        int       `json:"status_code"`
-	WAFAction         string    `json:"waf_action"`
-	CacheState        string    `json:"cache_state"`
-	Upstream          string    `json:"upstream"`
-	UserAgent         string    `json:"user_agent"`
-	RequestSize       int64     `json:"request_size"`
-	HTTPProtocol      string    `json:"http_protocol"`
-	TLSVersion        string    `json:"tls_version"`
-	TLSSNI            string    `json:"tls_sni"`
-	TLSALPN           string    `json:"tls_alpn"`
-	TLSJA3Hash        string    `json:"tls_ja3_hash"`
-	TLSJA4            string    `json:"tls_ja4"`
-	HeaderOrder       string    `json:"header_order"`
-	UpstreamLatencyMs int64     `json:"upstream_latency_ms"`
-	ResponseSize      int64     `json:"response_size"`
+	ID                   uint      `json:"id"`
+	CreatedAt            time.Time `json:"created_at"`
+	SiteID               uint      `json:"site_id"`
+	RequestID            string    `json:"request_id"`
+	ClientIP             string    `json:"client_ip"`
+	Host                 string    `json:"host"`
+	Path                 string    `json:"path"`
+	QueryString          string    `json:"query_string"`
+	Method               string    `json:"method"`
+	StatusCode           int       `json:"status_code"`
+	WAFAction            string    `json:"waf_action"`
+	CacheState           string    `json:"cache_state"`
+	Upstream             string    `json:"upstream"`
+	UserAgent            string    `json:"user_agent"`
+	RequestSize          int64     `json:"request_size"`
+	HTTPProtocol         string    `json:"http_protocol"`
+	UpstreamHTTPProtocol string    `json:"upstream_http_protocol"`
+	TLSVersion           string    `json:"tls_version"`
+	TLSSNI               string    `json:"tls_sni"`
+	TLSALPN              string    `json:"tls_alpn"`
+	TLSJA3Hash           string    `json:"tls_ja3_hash"`
+	TLSJA4               string    `json:"tls_ja4"`
+	TLSCipherSuites      string    `json:"tls_cipher_suites"`
+	TLSExtensions        string    `json:"tls_extensions"`
+	TLSCurves            string    `json:"tls_curves"`
+	TLSPointFormats      string    `json:"tls_point_formats"`
+	HeaderOrder          string    `json:"header_order"`
+	UpstreamLatencyMs    int64     `json:"upstream_latency_ms"`
+	ResponseSize         int64     `json:"response_size"`
 }
 
 type realtimeSecurityEvent struct {
-	ID          uint      `json:"id"`
-	CreatedAt   time.Time `json:"created_at"`
-	SiteID      uint      `json:"site_id"`
-	RequestID   string    `json:"request_id"`
-	ClientIP    string    `json:"client_ip"`
-	Host        string    `json:"host"`
-	Path        string    `json:"path"`
-	Method      string    `json:"method"`
-	RuleID      uint      `json:"rule_id"`
-	RuleIDStr   string    `json:"rule_id_str"`
-	Phase       string    `json:"phase"`
-	Action      string    `json:"action"`
-	Category    string    `json:"category"`
-	MatchDesc   string    `json:"match_desc"`
-	TLSVersion  string    `json:"tls_version"`
-	TLSSNI      string    `json:"tls_sni"`
-	TLSALPN     string    `json:"tls_alpn"`
-	TLSJA3Hash  string    `json:"tls_ja3_hash"`
-	TLSJA4      string    `json:"tls_ja4"`
-	HeaderOrder string    `json:"header_order"`
-	StatusCode  int       `json:"status_code"`
+	ID              uint      `json:"id"`
+	CreatedAt       time.Time `json:"created_at"`
+	SiteID          uint      `json:"site_id"`
+	RequestID       string    `json:"request_id"`
+	ClientIP        string    `json:"client_ip"`
+	Host            string    `json:"host"`
+	Path            string    `json:"path"`
+	Method          string    `json:"method"`
+	RuleID          uint      `json:"rule_id"`
+	RuleIDStr       string    `json:"rule_id_str"`
+	Phase           string    `json:"phase"`
+	Action          string    `json:"action"`
+	Category        string    `json:"category"`
+	MatchDesc       string    `json:"match_desc"`
+	TLSVersion      string    `json:"tls_version"`
+	TLSSNI          string    `json:"tls_sni"`
+	TLSALPN         string    `json:"tls_alpn"`
+	TLSJA3Hash      string    `json:"tls_ja3_hash"`
+	TLSJA4          string    `json:"tls_ja4"`
+	TLSCipherSuites string    `json:"tls_cipher_suites"`
+	TLSExtensions   string    `json:"tls_extensions"`
+	TLSCurves       string    `json:"tls_curves"`
+	TLSPointFormats string    `json:"tls_point_formats"`
+	HeaderOrder     string    `json:"header_order"`
+	StatusCode      int       `json:"status_code"`
 }
 
 type realtimeFingerprintSummary struct {
@@ -119,6 +128,10 @@ type realtimeFingerprintSummary struct {
 	TLSVersion      string    `json:"tls_version"`
 	TLSALPN         string    `json:"tls_alpn"`
 	TLSSNI          string    `json:"tls_sni"`
+	TLSCipherSuites string    `json:"tls_cipher_suites"`
+	TLSExtensions   string    `json:"tls_extensions"`
+	TLSCurves       string    `json:"tls_curves"`
+	TLSPointFormats string    `json:"tls_point_formats"`
 	Count           int64     `json:"count"`
 	HighRiskCount   int64     `json:"high_risk_count"`
 	AvgBotScore     float64   `json:"avg_bot_score"`
@@ -250,7 +263,7 @@ func BuildSecurityEventSnapshot(repo *repository.SecurityEventRepo) ([]realtimeS
 }
 
 func BuildFingerprintSnapshot(repo *repository.AccessLogRepo) ([]realtimeFingerprintSummary, int64, error) {
-	items, total, err := repo.ListFingerprints(0, 20)
+	items, total, err := repo.ListFingerprints(0, 20, repository.FingerprintFilter{})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -261,30 +274,35 @@ func mapAccessLogSnapshot(items []store.AccessLog) []realtimeAccessLog {
 	out := make([]realtimeAccessLog, 0, len(items))
 	for _, item := range items {
 		out = append(out, realtimeAccessLog{
-			ID:                item.ID,
-			CreatedAt:         item.CreatedAt,
-			SiteID:            item.SiteID,
-			RequestID:         item.RequestID,
-			ClientIP:          item.ClientIP,
-			Host:              item.Host,
-			Path:              item.Path,
-			QueryString:       item.QueryString,
-			Method:            item.Method,
-			StatusCode:        item.StatusCode,
-			WAFAction:         item.WAFAction,
-			CacheState:        item.CacheState,
-			Upstream:          item.Upstream,
-			UserAgent:         item.UserAgent,
-			RequestSize:       item.RequestSize,
-			HTTPProtocol:      item.HTTPProtocol,
-			TLSVersion:        item.TLSVersion,
-			TLSSNI:            item.TLSSNI,
-			TLSALPN:           item.TLSALPN,
-			TLSJA3Hash:        item.TLSJA3Hash,
-			TLSJA4:            item.TLSJA4,
-			HeaderOrder:       item.HeaderOrder,
-			UpstreamLatencyMs: item.UpstreamLatencyMs,
-			ResponseSize:      item.ResponseSize,
+			ID:                   item.ID,
+			CreatedAt:            item.CreatedAt,
+			SiteID:               item.SiteID,
+			RequestID:            item.RequestID,
+			ClientIP:             item.ClientIP,
+			Host:                 item.Host,
+			Path:                 item.Path,
+			QueryString:          item.QueryString,
+			Method:               item.Method,
+			StatusCode:           item.StatusCode,
+			WAFAction:            item.WAFAction,
+			CacheState:           item.CacheState,
+			Upstream:             item.Upstream,
+			UserAgent:            item.UserAgent,
+			RequestSize:          item.RequestSize,
+			HTTPProtocol:         item.HTTPProtocol,
+			UpstreamHTTPProtocol: item.UpstreamHTTPProtocol,
+			TLSVersion:           item.TLSVersion,
+			TLSSNI:               item.TLSSNI,
+			TLSALPN:              item.TLSALPN,
+			TLSJA3Hash:           item.TLSJA3Hash,
+			TLSJA4:               item.TLSJA4,
+			TLSCipherSuites:      item.TLSCipherSuites,
+			TLSExtensions:        item.TLSExtensions,
+			TLSCurves:            item.TLSCurves,
+			TLSPointFormats:      item.TLSPointFormats,
+			HeaderOrder:          item.HeaderOrder,
+			UpstreamLatencyMs:    item.UpstreamLatencyMs,
+			ResponseSize:         item.ResponseSize,
 		})
 	}
 	return out
@@ -299,6 +317,10 @@ func mapFingerprintSnapshot(items []repository.FingerprintSummary) []realtimeFin
 			TLSVersion:      item.TLSVersion,
 			TLSALPN:         item.TLSALPN,
 			TLSSNI:          item.TLSSNI,
+			TLSCipherSuites: item.TLSCipherSuites,
+			TLSExtensions:   item.TLSExtensions,
+			TLSCurves:       item.TLSCurves,
+			TLSPointFormats: item.TLSPointFormats,
 			Count:           item.Count,
 			HighRiskCount:   item.HighRiskCount,
 			AvgBotScore:     item.AvgBotScore,
@@ -315,27 +337,31 @@ func mapSecurityEventSnapshot(items []store.SecurityEvent) []realtimeSecurityEve
 	out := make([]realtimeSecurityEvent, 0, len(items))
 	for _, item := range items {
 		out = append(out, realtimeSecurityEvent{
-			ID:          item.ID,
-			CreatedAt:   item.CreatedAt,
-			SiteID:      item.SiteID,
-			RequestID:   item.RequestID,
-			ClientIP:    item.ClientIP,
-			Host:        item.Host,
-			Path:        item.Path,
-			Method:      item.Method,
-			RuleID:      item.RuleID,
-			RuleIDStr:   item.RuleIDStr,
-			Phase:       item.Phase,
-			Action:      item.Action,
-			Category:    item.Category,
-			MatchDesc:   item.MatchDesc,
-			TLSVersion:  item.TLSVersion,
-			TLSSNI:      item.TLSSNI,
-			TLSALPN:     item.TLSALPN,
-			TLSJA3Hash:  item.TLSJA3Hash,
-			TLSJA4:      item.TLSJA4,
-			HeaderOrder: item.HeaderOrder,
-			StatusCode:  item.StatusCode,
+			ID:              item.ID,
+			CreatedAt:       item.CreatedAt,
+			SiteID:          item.SiteID,
+			RequestID:       item.RequestID,
+			ClientIP:        item.ClientIP,
+			Host:            item.Host,
+			Path:            item.Path,
+			Method:          item.Method,
+			RuleID:          item.RuleID,
+			RuleIDStr:       item.RuleIDStr,
+			Phase:           item.Phase,
+			Action:          item.Action,
+			Category:        item.Category,
+			MatchDesc:       item.MatchDesc,
+			TLSVersion:      item.TLSVersion,
+			TLSSNI:          item.TLSSNI,
+			TLSALPN:         item.TLSALPN,
+			TLSJA3Hash:      item.TLSJA3Hash,
+			TLSJA4:          item.TLSJA4,
+			TLSCipherSuites: item.TLSCipherSuites,
+			TLSExtensions:   item.TLSExtensions,
+			TLSCurves:       item.TLSCurves,
+			TLSPointFormats: item.TLSPointFormats,
+			HeaderOrder:     item.HeaderOrder,
+			StatusCode:      item.StatusCode,
 		})
 	}
 	return out

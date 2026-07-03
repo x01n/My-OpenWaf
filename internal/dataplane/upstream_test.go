@@ -24,6 +24,14 @@ func TestPickUpstreamNoPoolUsesRoundRobinIndex(t *testing.T) {
 	}
 }
 
+func TestPickUpstreamPrefersHigherProtocolTier(t *testing.T) {
+	pool := upstream.NewPool()
+	got, ok := pickUpstream([]string{"http://plain-a", "h2c://clear-a", "https://secure-a", "h3://quic-a"}, pool, func(uint32) uint32 { return 0 })
+	if !ok || got != "h3://quic-a" {
+		t.Fatalf("got %q ok=%v", got, ok)
+	}
+}
+
 type errForTest struct{}
 
 func (errForTest) Error() string { return "err" }

@@ -124,6 +124,21 @@ func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, ena
 	return settingsRepo.Set("protection", string(data))
 }
 
+// SyncCaptchaEnabledToProtection updates ProtectionConfig.CaptchaEnabled
+// so the engine stays consistent when the bot settings page toggles the captcha flag.
+func SyncCaptchaEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
+	cfg := store.DefaultProtectionConfig()
+	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &cfg)
+	}
+	if cfg.CaptchaEnabled == enabled {
+		return nil
+	}
+	cfg.CaptchaEnabled = enabled
+	data, _ := json.Marshal(cfg)
+	return settingsRepo.Set("protection", string(data))
+}
+
 // SyncBotThresholdToDropPolicy keeps the runtime bot threshold aligned with the bot settings page.
 func SyncBotThresholdToDropPolicy(settingsRepo *repository.SystemSettingsRepo, threshold int) error {
 	if threshold <= 0 {
@@ -211,10 +226,20 @@ func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, en
 
 // BotSettingsResponse represents the bot detection configuration returned by the API.
 type BotSettingsResponse struct {
-	Enabled           bool     `json:"enabled"`
-	ScoreThreshold    int      `json:"score_threshold"`
-	HighRiskCountries []string `json:"high_risk_countries"`
-	DatacenterASNs    []uint32 `json:"datacenter_asns"`
-	VPNProxyASNs      []uint32 `json:"vpn_proxy_asns"`
-	GeoIPDBPath       string   `json:"geoip_db_path"`
+	Enabled                  bool     `json:"enabled"`
+	ScoreThreshold           int      `json:"score_threshold"`
+	HighRiskCountries        []string `json:"high_risk_countries"`
+	DatacenterASNs           []uint32 `json:"datacenter_asns"`
+	VPNProxyASNs             []uint32 `json:"vpn_proxy_asns"`
+	GeoIPDBPath              string   `json:"geoip_db_path"`
+	CaptchaEnabled           bool     `json:"captcha_enabled"`
+	DynamicProtectionEnabled bool     `json:"dynamic_protection_enabled"`
+	HTMLObfuscation          bool     `json:"html_obfuscation"`
+	JSObfuscation            bool     `json:"js_obfuscation"`
+	ImageWatermark           bool     `json:"image_watermark"`
+	AntiReplayEnabled        bool     `json:"anti_replay_enabled"`
+	JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
+	ImageWatermarkPaths      []string `json:"image_watermark_paths,omitempty"`
+	WatermarkText            string   `json:"watermark_text,omitempty"`
+	ExcludeRecordHeaders     []string `json:"exclude_record_headers,omitempty"`
 }

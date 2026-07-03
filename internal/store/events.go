@@ -28,13 +28,17 @@ type SecurityEvent struct {
 	RequestBodyTruncated bool   `gorm:"default:false" json:"request_body_truncated"`
 	RequestSize          int64  `gorm:"default:0" json:"request_size"`
 
-	TLSVersion  string `gorm:"size:16" json:"tls_version"`
-	TLSSNI      string `gorm:"size:255" json:"tls_sni"`
-	TLSALPN     string `gorm:"size:128" json:"tls_alpn"`
-	TLSJA3      string `gorm:"size:1024" json:"tls_ja3"`
-	TLSJA3Hash  string `gorm:"size:32" json:"tls_ja3_hash"`
-	TLSJA4      string `gorm:"size:255" json:"tls_ja4"`
-	HeaderOrder string `gorm:"size:1024" json:"header_order"`
+	TLSVersion      string `gorm:"size:16" json:"tls_version"`
+	TLSSNI          string `gorm:"size:255" json:"tls_sni"`
+	TLSALPN         string `gorm:"size:128" json:"tls_alpn"`
+	TLSJA3          string `gorm:"size:1024" json:"tls_ja3"`
+	TLSJA3Hash      string `gorm:"size:32" json:"tls_ja3_hash"`
+	TLSJA4          string `gorm:"size:255" json:"tls_ja4"`
+	TLSCipherSuites string `gorm:"type:text" json:"tls_cipher_suites"`
+	TLSExtensions   string `gorm:"type:text" json:"tls_extensions"`
+	TLSCurves       string `gorm:"type:text" json:"tls_curves"`
+	TLSPointFormats string `gorm:"type:text" json:"tls_point_formats"`
+	HeaderOrder     string `gorm:"size:1024" json:"header_order"`
 
 	GeoCountry string `gorm:"size:2" json:"geo_country"`
 	GeoCity    string `gorm:"size:128" json:"geo_city"`
@@ -65,14 +69,19 @@ type AccessLog struct {
 	RequestSize          int64  `gorm:"default:0" json:"request_size"`
 	ResponseHeaders      string `gorm:"type:text" json:"response_headers"`
 
-	HTTPProtocol string `gorm:"size:32" json:"http_protocol"`
-	TLSVersion   string `gorm:"size:16" json:"tls_version"`
-	TLSSNI       string `gorm:"size:255" json:"tls_sni"`
-	TLSALPN      string `gorm:"size:128" json:"tls_alpn"`
-	TLSJA3       string `gorm:"size:1024" json:"tls_ja3"`
-	TLSJA3Hash   string `gorm:"size:32;index:idx_al_tls_ja3_hash" json:"tls_ja3_hash"`
-	TLSJA4       string `gorm:"size:255;index:idx_al_tls_ja4" json:"tls_ja4"`
-	HeaderOrder  string `gorm:"size:1024" json:"header_order"`
+	HTTPProtocol         string `gorm:"size:32" json:"http_protocol"`
+	UpstreamHTTPProtocol string `gorm:"size:32" json:"upstream_http_protocol"`
+	TLSVersion           string `gorm:"size:16" json:"tls_version"`
+	TLSSNI               string `gorm:"size:255" json:"tls_sni"`
+	TLSALPN              string `gorm:"size:128" json:"tls_alpn"`
+	TLSJA3               string `gorm:"size:1024" json:"tls_ja3"`
+	TLSJA3Hash           string `gorm:"size:32;index:idx_al_tls_ja3_hash" json:"tls_ja3_hash"`
+	TLSJA4               string `gorm:"size:255;index:idx_al_tls_ja4" json:"tls_ja4"`
+	TLSCipherSuites      string `gorm:"type:text" json:"tls_cipher_suites"`
+	TLSExtensions        string `gorm:"type:text" json:"tls_extensions"`
+	TLSCurves            string `gorm:"type:text" json:"tls_curves"`
+	TLSPointFormats      string `gorm:"type:text" json:"tls_point_formats"`
+	HeaderOrder          string `gorm:"size:1024" json:"header_order"`
 
 	UpstreamLatencyMs int64 `gorm:"default:0" json:"upstream_latency_ms"`
 	ResponseSize      int64 `gorm:"default:0" json:"response_size"`

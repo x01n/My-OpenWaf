@@ -22,11 +22,14 @@ import (
 
 // ACMEConfig ACME 证书申请配置。
 type ACMEConfig struct {
-	Enabled         bool   `json:"enabled"`
-	Email           string `json:"email"`
-	DirectoryURL    string `json:"directory_url"`
-	AutoRenew       bool   `json:"auto_renew"`
-	RenewBeforeDays int    `json:"renew_before_days"`
+	Enabled           bool   `json:"enabled"`
+	Email             string `json:"email"`
+	DirectoryURL      string `json:"directory_url"`
+	AutoRenew         bool   `json:"auto_renew"`
+	RenewBeforeDays   int    `json:"renew_before_days"`
+	CAACheckEnabled   bool   `json:"caa_check_enabled"`
+	CAAAllowedIssuers string `json:"caa_allowed_issuers"`
+	CAADNSServer      string `json:"caa_dns_server"`
 }
 
 // ACMEManagerStore 维护当前进程可重载的 ACME manager。
@@ -72,9 +75,10 @@ func NewACMEManagerStore(settings *repository.SystemSettingsRepo, certificates *
 
 func defaultACMEConfig() ACMEConfig {
 	return ACMEConfig{
-		DirectoryURL:    acmepkg.DefaultDirectoryURL,
-		AutoRenew:       true,
-		RenewBeforeDays: 30,
+		DirectoryURL:      acmepkg.DefaultDirectoryURL,
+		AutoRenew:         true,
+		RenewBeforeDays:   30,
+		CAAAllowedIssuers: acmepkg.DefaultCAAAllowedIssuer,
 	}
 }
 
@@ -87,11 +91,16 @@ func loadACMEConfig(repo *repository.SystemSettingsRepo) ACMEConfig {
 	_ = json.Unmarshal([]byte(val), &cfg)
 	cfg.Email = strings.TrimSpace(cfg.Email)
 	cfg.DirectoryURL = strings.TrimSpace(cfg.DirectoryURL)
+	cfg.CAAAllowedIssuers = strings.TrimSpace(cfg.CAAAllowedIssuers)
+	cfg.CAADNSServer = strings.TrimSpace(cfg.CAADNSServer)
 	if cfg.DirectoryURL == "" {
 		cfg.DirectoryURL = acmepkg.DefaultDirectoryURL
 	}
 	if cfg.RenewBeforeDays <= 0 {
 		cfg.RenewBeforeDays = 30
+	}
+	if cfg.CAAAllowedIssuers == "" {
+		cfg.CAAAllowedIssuers = acmepkg.DefaultCAAAllowedIssuer
 	}
 	return cfg
 }
@@ -99,11 +108,16 @@ func loadACMEConfig(repo *repository.SystemSettingsRepo) ACMEConfig {
 func saveACMEConfig(repo *repository.SystemSettingsRepo, cfg ACMEConfig) error {
 	cfg.Email = strings.TrimSpace(cfg.Email)
 	cfg.DirectoryURL = strings.TrimSpace(cfg.DirectoryURL)
+	cfg.CAAAllowedIssuers = strings.TrimSpace(cfg.CAAAllowedIssuers)
+	cfg.CAADNSServer = strings.TrimSpace(cfg.CAADNSServer)
 	if cfg.DirectoryURL == "" {
 		cfg.DirectoryURL = acmepkg.DefaultDirectoryURL
 	}
 	if cfg.RenewBeforeDays <= 0 {
 		cfg.RenewBeforeDays = 30
+	}
+	if cfg.CAAAllowedIssuers == "" {
+		cfg.CAAAllowedIssuers = acmepkg.DefaultCAAAllowedIssuer
 	}
 	data, _ := json.Marshal(cfg)
 	return repo.Set(store.SettingKeyACMEConfig, string(data))
@@ -175,7 +189,13 @@ func (s *ACMEManagerStore) Manager() (*acmepkg.Manager, ACMEConfig, error) {
 			return nil, cfg, fmt.Errorf("save ACME config: %w", err)
 		}
 	}
-	key := cfg.Email + "\n" + cfg.DirectoryURL
+	key := strings.Join([]string{
+		cfg.Email,
+		cfg.DirectoryURL,
+		fmt.Sprintf("%t", cfg.CAACheckEnabled),
+		cfg.CAAAllowedIssuers,
+		cfg.CAADNSServer,
+	}, "\n")
 
 	s.mu.RLock()
 	mgr := s.manager
@@ -195,6 +215,11 @@ func (s *ACMEManagerStore) Manager() (*acmepkg.Manager, ACMEConfig, error) {
 		DirectoryURL: cfg.DirectoryURL,
 		Log:          s.log,
 		OnRenew:      s.onRenew,
+		CAAPolicy: acmepkg.CAAPolicy{
+			Enabled:        cfg.CAACheckEnabled,
+			AllowedIssuers: []string{cfg.CAAAllowedIssuers},
+			DNSServer:      cfg.CAADNSServer,
+		},
 	})
 	if err != nil {
 		return nil, cfg, err
@@ -309,11 +334,14 @@ func GetACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 func UpdateACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
-			Enabled         *bool   `json:"enabled"`
-			Email           *string `json:"email"`
-			DirectoryURL    *string `json:"directory_url"`
-			AutoRenew       *bool   `json:"auto_renew"`
-			RenewBeforeDays *int    `json:"renew_before_days"`
+			Enabled           *bool   `json:"enabled"`
+			Email             *string `json:"email"`
+			DirectoryURL      *string `json:"directory_url"`
+			AutoRenew         *bool   `json:"auto_renew"`
+			RenewBeforeDays   *int    `json:"renew_before_days"`
+			CAACheckEnabled   *bool   `json:"caa_check_enabled"`
+			CAAAllowedIssuers *string `json:"caa_allowed_issuers"`
+			CAADNSServer      *string `json:"caa_dns_server"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid request body"})
@@ -335,6 +363,15 @@ func UpdateACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 		if req.RenewBeforeDays != nil {
 			cfg.RenewBeforeDays = *req.RenewBeforeDays
 		}
+		if req.CAACheckEnabled != nil {
+			cfg.CAACheckEnabled = *req.CAACheckEnabled
+		}
+		if req.CAAAllowedIssuers != nil {
+			cfg.CAAAllowedIssuers = strings.TrimSpace(*req.CAAAllowedIssuers)
+		}
+		if req.CAADNSServer != nil {
+			cfg.CAADNSServer = strings.TrimSpace(*req.CAADNSServer)
+		}
 		if cfg.Enabled && cfg.Email == "" {
 			email, err := randomACMEEmail("")
 			if err != nil {
@@ -346,6 +383,16 @@ func UpdateACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 		if cfg.RenewBeforeDays <= 0 {
 			c.JSON(400, map[string]string{"error": "renew_before_days must be > 0"})
 			return
+		}
+		if cfg.CAACheckEnabled {
+			if strings.TrimSpace(cfg.CAADNSServer) == "" {
+				c.JSON(400, map[string]string{"error": "caa_dns_server is required when caa_check_enabled is true"})
+				return
+			}
+			if strings.TrimSpace(cfg.CAAAllowedIssuers) == "" {
+				c.JSON(400, map[string]string{"error": "caa_allowed_issuers is required when caa_check_enabled is true"})
+				return
+			}
 		}
 		if err := saveACMEConfig(repo, cfg); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})

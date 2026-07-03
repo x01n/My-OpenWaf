@@ -136,10 +136,7 @@ func init() {
 		Category: "cve_general",
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
-			referer := headers["Referer"]
-			if referer == "" {
-				referer = headers["referer"]
-			}
+			referer := cveHeaderValue(headers, "Referer")
 			if reSharePointToolPane.MatchString(uri) && reSharePointEditMode.MatchString(uri) && reSharePointSignOut.MatchString(referer) && reSharePointDWP.MatchString(body) {
 				return &CVEMatch{
 					CVEID:       "CVE-2025-53770",
@@ -239,10 +236,7 @@ func init() {
 		Category: "cve_general",
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
-			cgiInfo := headers["CGIINFO"]
-			if cgiInfo == "" {
-				cgiInfo = headers["cgiinfo"]
-			}
+			cgiInfo := cveHeaderValue(headers, "CGIINFO")
 			if reFortiWebFWBCGI.MatchString(uri) && reFortiWebCGIInfo.MatchString("CGIINFO: "+cgiInfo) {
 				return &CVEMatch{
 					CVEID:       "CVE-2025-64446",
@@ -331,10 +325,7 @@ func init() {
 		Category: "cve_general",
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
-			authorization := headers["Authorization"]
-			if authorization == "" {
-				authorization = headers["authorization"]
-			}
+			authorization := cveHeaderValue(headers, "Authorization")
 			if reCrushFTPAdminEndpoint.MatchString(uri) && reCrushFTPS3Auth.MatchString(authorization) {
 				return &CVEMatch{
 					CVEID:       "CVE-2025-31161",
@@ -357,10 +348,7 @@ func init() {
 		Category: "cve_general",
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
-			cookie := headers["Cookie"]
-			if cookie == "" {
-				cookie = headers["cookie"]
-			}
+			cookie := cveHeaderValue(headers, "Cookie")
 			if reFortinetHostcheck.MatchString(uri) && reFortinetAuthHash.MatchString(cookie) {
 				return &CVEMatch{
 					CVEID:       "CVE-2025-32756",
@@ -387,10 +375,7 @@ func init() {
 		Category: "cve_general",
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
-			ct := headers["Content-Type"]
-			if ct == "" {
-				ct = headers["content-type"]
-			}
+			ct := cveHeaderValue(headers, "Content-Type")
 			if reSpringDataRestPatch.MatchString(ct) && reSpringDataRestSpEL.MatchString(body) {
 				return &CVEMatch{
 					CVEID:       "CVE-2017-8046",
@@ -771,21 +756,17 @@ var (
 	reCRLF_raw         = regexp.MustCompile(`\r\n`)
 	reCRLF_header      = regexp.MustCompile(`(?i)%0[dD]%0[aA](Set-Cookie|Location|Content-Type):`)
 	reSmuggle_clte     = regexp.MustCompile(`(?i)transfer-encoding\s*:\s*chunked`)
-	reSmuggle_te       = regexp.MustCompile(`(?i)transfer-encoding\s*:\s*[\s,]*(chunked|identity)`)
 	reShellShock       = regexp.MustCompile(`(?i)\(\)\s*\{[^}]*\}\s*;`)
-	reHeartbleed       = regexp.MustCompile(`(?i)heartbleed`)
 
 	// HTTP header injection
 	reHeaderInject = regexp.MustCompile(`(?i)%0[dD]%0[aA]\s*(HTTP/|Content-|Location:|Set-Cookie)`)
 
 	// SAP NetWeaver Visual Composer (CVE-2025-31324)
 	reSAPMetadataUploader = regexp.MustCompile(`(?i)/developmentserver/metadatauploader`)
-	reSAPIRJServlet       = regexp.MustCompile(`(?i)/irj/servlet`)
 
 	// PHP-CGI argument injection (CVE-2024-4577)
-	rePHPCGISoftHyphen  = regexp.MustCompile(`(?i)[%\x00-\xff]ad.*-[dD]\s*(allow_url_include|auto_prepend_file)`)
-	rePHPCGIArgInject   = regexp.MustCompile(`(?i)php://input.*allow_url_include|auto_prepend_file.*php://input`)
-	rePHPCGISoftHyphen2 = regexp.MustCompile(`%[aA][dD]`)
+	rePHPCGISoftHyphen = regexp.MustCompile(`(?i)[%\x00-\xff]ad.*-[dD]\s*(allow_url_include|auto_prepend_file)`)
+	rePHPCGIArgInject  = regexp.MustCompile(`(?i)php://input.*allow_url_include|auto_prepend_file.*php://input`)
 
 	// PAN-OS GlobalProtect (CVE-2024-3400)
 	rePANOSCookieTraversal = regexp.MustCompile(`(?i)SESSID=.*\.\.`)
@@ -1082,18 +1063,6 @@ func NewGeneralCVEDetector() *GeneralCVEDetector {
 		},
 	}
 	return d
-}
-
-// Detect scans the request for general CVE exploitation attempts.
-func generalRequestContainsAny(req *CVERequest, needles ...string) bool {
-	for _, needle := range needles {
-		for _, lower := range req.AllTargetsLower {
-			if strings.Contains(lower, needle) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func shouldScanGeneralRule(req *CVERequest, rule generalCVERule) bool {
@@ -1431,24 +1400,6 @@ func checkHTTPSmuggling(req *CVERequest) bool {
 	return hasCL && hasTE
 }
 
-// matchAllPatterns returns true only if ALL patterns in the rule match.
-func matchAllPatterns(req *CVERequest, rule generalCVERule) bool {
-	targets := resolveTargets(req, rule.target)
-	for _, pat := range rule.patterns {
-		matched := false
-		for _, target := range targets {
-			if pat.MatchString(target) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
-	}
-	return true
-}
-
 func isPackageManifestRequest(uri string, headers map[string]string) bool {
 	pathOnly := uri
 	if i := strings.IndexByte(pathOnly, '?'); i >= 0 {
@@ -1457,21 +1408,12 @@ func isPackageManifestRequest(uri string, headers map[string]string) bool {
 	if !strings.HasSuffix(strings.ToLower(pathOnly), "/package.json") {
 		return false
 	}
-	host := strings.ToLower(headers["Host"])
-	if host == "" {
-		host = strings.ToLower(headers["host"])
-	}
+	host := strings.ToLower(cveHeaderValue(headers, "Host"))
 	if host == "cdn.jsdelivr.net" || host == "codesandbox.io" || host == "raw.githubusercontent.com" {
 		return true
 	}
-	referer := strings.ToLower(headers["Referer"])
-	if referer == "" {
-		referer = strings.ToLower(headers["referer"])
-	}
-	origin := strings.ToLower(headers["Origin"])
-	if origin == "" {
-		origin = strings.ToLower(headers["origin"])
-	}
+	referer := strings.ToLower(cveHeaderValue(headers, "Referer"))
+	origin := strings.ToLower(cveHeaderValue(headers, "Origin"))
 	return strings.HasPrefix(pathOnly, "/npm/") ||
 		(strings.HasPrefix(pathOnly, "/public/vscode-extensions/") && strings.Contains(referer, "codesandbox.io/")) ||
 		(strings.HasPrefix(pathOnly, "/SchemaStore/") && (strings.Contains(referer, "codesandbox.io/") || strings.Contains(origin, "codesandbox.io")))

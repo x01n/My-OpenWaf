@@ -85,6 +85,59 @@ func BenchmarkNextSQLiHitUnionSelect(b *testing.B) {
 	}
 }
 
+func BenchmarkIsCleanPathTarget(b *testing.B) {
+	path := "/api/login"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPBoolSink = isCleanPathTarget(path)
+	}
+}
+
+func BenchmarkIsCleanPlainQueryTarget(b *testing.B) {
+	query := "page=1&sort=name"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPBoolSink = isCleanPlainQueryTarget(query)
+	}
+}
+
+func BenchmarkHasPlainTargetAttackKeyword(b *testing.B) {
+	input := "/api/login"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPBoolSink = hasPlainTargetAttackKeyword(input)
+	}
+}
+
+func BenchmarkCheckProtocolViolationCleanHeaders(b *testing.B) {
+	headers := map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Host":            "example.com",
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPHitSink, benchmarkOWASPBoolSink = checkProtocolViolation(headers, 4)
+	}
+}
+
+func BenchmarkCheckProtocolViolationMixedCaseHeaders(b *testing.B) {
+	headers := map[string]string{
+		"content-length":    "10",
+		"TRANSFER-ENCODING": "chunked",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPHitSink, benchmarkOWASPBoolSink = checkProtocolViolation(headers, 4)
+	}
+}
+
 func TestForEachBase64TokenIndexMatchesRegexp(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -125,6 +178,45 @@ func TestDecodeBase64IfSuspiciousKeepsCurrentSemantics(t *testing.T) {
 		if got := decodeBase64IfSuspicious(input); got != "" {
 			t.Fatalf("plain token %q should not decode as suspicious content, got %q", input, got)
 		}
+	}
+}
+
+func TestHasLikelyBase64CandidateSkipsPlainLowercaseWords(t *testing.T) {
+	if hasLikelyBase64Candidate("username") {
+		t.Fatal("plain lowercase word should not enter the base64 expansion path")
+	}
+	if hasLikelyBase64Candidate("password") {
+		t.Fatal("plain lowercase word should not enter the base64 expansion path")
+	}
+	if hasLikelyBase64Candidate("1%20union%20select%20username,password%20from%20users--") {
+		t.Fatal("plain SQLi query string should not enter the base64 expansion path")
+	}
+	if hasLikelyBase64Candidate("1 union select username,password from users--") {
+		t.Fatal("normalized SQLi query string should not enter the base64 expansion path")
+	}
+	if hasLikelyBase64Candidate("abc123def") {
+		t.Fatal("digits alone should not force the base64 expansion path")
+	}
+	if !hasLikelyBase64Candidate(strings.Repeat("a", 12) + "%zz") {
+		t.Fatal("percent marker should lower the lowercase threshold to 12")
+	}
+	if hasLikelyBase64Candidate(strings.Repeat("a", 11) + "%zz") {
+		t.Fatal("lowercase run below 12 should still be skipped even with percent marker")
+	}
+	if !hasLikelyBase64Candidate("e3sgMzMzMSozMzMwIH19") {
+		t.Fatal("mixed base64 payload should still enter the base64 expansion path")
+	}
+}
+
+func TestNormalizeWithDecodeKeepsUrlSafeBase64LeadByteRecovery(t *testing.T) {
+	withLead := normalizeWithDecodeTarget("x=-TkrenJcO0M", false)
+	withoutLead := normalizeWithDecodeTarget("x=TkrenJcO0M", false)
+
+	if !strings.Contains(strings.ToLower(withLead), "zr\\;c") {
+		t.Fatalf("expected URL-safe base64 payload with leading hyphen to decode, got %q", withLead)
+	}
+	if strings.Contains(strings.ToLower(withoutLead), "zr\\;c") {
+		t.Fatalf("payload without leading hyphen should not decode the same way, got %q", withoutLead)
 	}
 }
 
@@ -278,7 +370,7 @@ func TestForEachOWASPTargetMatchesCollectTargetsAndMarksBody(t *testing.T) {
 	var got []string
 	var bodyFlags []bool
 	var queryPlusFlags []bool
-	forEachOWASPTarget("api/login", query, nil, bodyTargets, func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool {
+	forEachOWASPTarget("api/login", query, nil, bodyTargets, false, false, false, func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool {
 		got = append(got, raw)
 		bodyFlags = append(bodyFlags, isBodyTarget)
 		queryPlusFlags = append(queryPlusFlags, queryPlusAsSpace)
@@ -467,6 +559,50 @@ func TestShouldSkipHeaderTargetAcceptBoundaries(t *testing.T) {
 	}
 }
 
+func TestShouldSkipHeaderTargetStandardHeaders(t *testing.T) {
+	skipped := []string{
+		"host",
+		"connection",
+		"content-length",
+		"accept-language",
+		"accept-encoding",
+		"authorization",
+		"cache-control",
+		"pragma",
+		"if-modified-since",
+		"if-none-match",
+		"upgrade",
+		"upgrade-insecure-requests",
+		"dnt",
+		"te",
+		"origin",
+		"sec-fetch-mode",
+		"sec-fetch-site",
+		"sec-fetch-dest",
+		"sec-fetch-user",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"sec-ch-ua-arch",
+		"sec-ch-ua-bitness",
+		"sec-ch-ua-full-version",
+		"sec-ch-ua-full-version-list",
+		"sec-ch-ua-model",
+		"sec-ch-ua-platform-version",
+		"x-client-data",
+	}
+	for _, name := range skipped {
+		if !shouldSkipHeaderTarget(name, "value") {
+			t.Fatalf("header %q should use the skip fast path", name)
+		}
+	}
+	for _, name := range []string{"content-type", "x-test"} {
+		if shouldSkipHeaderTarget(name, "value") {
+			t.Fatalf("header %q should not be skipped unconditionally", name)
+		}
+	}
+}
+
 func TestCheckOWASP_UserAgentPayloadsStillDetected(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -614,6 +750,13 @@ func TestCheckOWASP_Clean(t *testing.T) {
 	hits := CheckOWASP("mid", "/api/v1/users", "page=1&limit=10", nil, nil)
 	if len(hits) > 0 {
 		t.Fatalf("expected no hits for clean request, got %d", len(hits))
+	}
+}
+
+func TestCheckOWASP_Clean_MixedCasePath(t *testing.T) {
+	hits := CheckOWASP("mid", "/API/LOGIN", "page=1&limit=10", nil, nil)
+	if len(hits) > 0 {
+		t.Fatalf("expected no hits for mixed-case clean path, got %d", len(hits))
 	}
 }
 
@@ -766,6 +909,7 @@ func TestCheckOWASP_Clean_NormalPagination(t *testing.T) {
 func TestCleanPathAndQueryFastPathBoundaries(t *testing.T) {
 	cleanPaths := []string{
 		"/api/login",
+		"/API/LOGIN",
 		"/assets/app.v1/main-js",
 		"/v1/users_2026/profile",
 	}
@@ -846,6 +990,30 @@ func TestCheckOWASP_Clean_FilenamePath(t *testing.T) {
 	hits := CheckOWASP("mid", "/files/reports/q1-2024.pdf", "", nil, nil)
 	if len(hits) > 0 {
 		t.Fatalf("normal file path should not trigger, got %+v", hits)
+	}
+}
+
+func TestCheckOWASP_DangerousPathCaseInsensitive(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		category OWASPCategory
+		ruleID   string
+	}{
+		{name: "f5", path: "/MGMT/TM/UTIL/BASH", category: CatCmdInject, ruleID: "owasp:path:001"},
+		{name: "ofbiz", path: "/WEBTOOLS/CONTROL/SOAPSERVICE", category: CatDeserial, ruleID: "owasp:path:004"},
+		{name: "confluence", path: "/REST/TINYMCE/1/MACRO/PREVIEW", category: CatExprLang, ruleID: "owasp:path:005"},
+		{name: "cisco", path: "/%2BCSCOT%2B/config", category: CatPathTrav, ruleID: "owasp:path:006"},
+		{name: "extdirect", path: "/SERVICE/EXTDIRECT", category: CatCmdInject, ruleID: "owasp:path:017"},
+	}
+	for _, tt := range tests {
+		hits := CheckOWASP("mid", tt.path, "", nil, nil)
+		if !hasCategory(hits, tt.category) {
+			t.Fatalf("%s: expected category %s for path %q, got %+v", tt.name, tt.category, tt.path, hits)
+		}
+		if !hasRuleID(hits, tt.ruleID) {
+			t.Fatalf("%s: expected rule %s for path %q, got %+v", tt.name, tt.ruleID, tt.path, hits)
+		}
 	}
 }
 
