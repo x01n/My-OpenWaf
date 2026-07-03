@@ -39,7 +39,7 @@ jobs:
           fi
 
       - name: Download frontend export
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-out
           path: internal/core/adminweb/dist
@@ -99,7 +99,7 @@ jobs:
           cache: true
 
       - name: Download frontend export
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-out
           path: internal/core/adminweb/dist

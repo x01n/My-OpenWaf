@@ -159,7 +159,7 @@ jobs:
     needs: [release-meta, build]
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist/release
           merge-multiple: true
