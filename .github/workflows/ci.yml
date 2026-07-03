@@ -78,7 +78,7 @@ jobs:
         run: bun run build
 
       - name: Upload frontend export
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-out
           path: frontend/out
@@ -110,7 +110,7 @@ jobs:
           go build -o bin/my-openwaf ./cmd/...
 
       - name: Upload Linux binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: my-openwaf-linux-amd64
           path: bin/my-openwaf
