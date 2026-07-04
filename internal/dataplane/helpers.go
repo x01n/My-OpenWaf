@@ -1,10 +1,12 @@
 package dataplane
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/waf/challenge"
 )
 
@@ -27,7 +29,7 @@ func isStaticAsset(lowerPath string) bool {
 
 // setNonceCookie sets the anti-replay nonce cookie on the response.
 func setNonceCookie(c *app.RequestContext, nonce string, secure bool) {
-	cookie := challenge.NonceKey + "=" + nonce + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
+	cookie := challenge.NonceKey + "=" + nonce + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + strconv.Itoa(snapshot.OneDaySeconds)
 	if secure {
 		cookie += "; Secure"
 	}

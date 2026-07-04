@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"io"
 
+	"My-OpenWaf/internal/snapshot"
+
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol"
 )
 
 const (
-	requestInspectionBodyLimit     = 48 * 1024
+	requestInspectionBodyLimit     = snapshot.WAFBodyScanLimit
 	requestBodySnapshotContextKey  = "openwaf_request_body_snapshot"
 	requestBodySnapshotReadMaxSize = requestInspectionBodyLimit + 1
 )

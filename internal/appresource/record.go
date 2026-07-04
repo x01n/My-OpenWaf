@@ -7,6 +7,19 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
+// Record field length limits aligned with store schema sizes.
+const (
+	recordQueryStringLimit    = 2048
+	recordContentTypeLimit    = 256
+	recordTLSVersionLimit     = 16
+	recordTLSSNILimit         = 255
+	recordTLSALPNLimit        = 128
+	recordJA3HashLimit        = 64
+	recordJA4Limit            = 255
+	recordUserAgentLimit      = 512
+	recordMatchedRuleIDsLimit = 512
+)
+
 // BuildRecordedResource builds a persistence row from matched rule ids and material.
 func BuildRecordedResource(siteID uint, matched []uint, m *Material) *store.RecordedResource {
 	if m == nil {
@@ -25,17 +38,17 @@ func BuildRecordedResource(siteID uint, matched []uint, m *Material) *store.Reco
 		Method:              m.Method,
 		Host:                m.Host,
 		Path:                m.Path,
-		QueryString:         truncate(m.QueryString, 2048),
+		QueryString:         truncate(m.QueryString, recordQueryStringLimit),
 		ClientIP:            m.ClientIP,
 		StatusCode:          m.StatusCode,
-		ContentType:         truncate(m.ContentType, 256),
-		TLSVersion:          truncate(m.TLSVersion, 16),
-		TLSSNI:              truncate(m.TLSSNI, 255),
-		TLSALPN:             truncate(m.TLSALPN, 128),
-		JA3Hash:             truncate(m.JA3Hash, 64),
-		JA4:                 truncate(m.JA4, 255),
-		UserAgent:           truncate(m.UserAgent, 512),
-		MatchedRuleIDs:      truncate(strings.Join(idsStr, ","), 512),
+		ContentType:         truncate(m.ContentType, recordContentTypeLimit),
+		TLSVersion:          truncate(m.TLSVersion, recordTLSVersionLimit),
+		TLSSNI:              truncate(m.TLSSNI, recordTLSSNILimit),
+		TLSALPN:             truncate(m.TLSALPN, recordTLSALPNLimit),
+		JA3Hash:             truncate(m.JA3Hash, recordJA3HashLimit),
+		JA4:                 truncate(m.JA4, recordJA4Limit),
+		UserAgent:           truncate(m.UserAgent, recordUserAgentLimit),
+		MatchedRuleIDs:      truncate(strings.Join(idsStr, ","), recordMatchedRuleIDsLimit),
 		PrimaryRuleID:       primaryRuleID,
 		RequestHeadersJSON:  m.RequestHeadersJSON,
 		ResponseHeadersJSON: m.ResponseHeadersJSON,

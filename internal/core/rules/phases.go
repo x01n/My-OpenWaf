@@ -13,6 +13,7 @@ import (
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/antireplay"
 	"My-OpenWaf/internal/waf/bot"
@@ -831,7 +832,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 		primary = []string{string(body[:limit])}
 		parsedOK = true
 	default:
-		limit := 48 * 1024
+		limit := snapshot.WAFBodyScanLimit
 		if len(body) < limit {
 			limit = len(body)
 		}
@@ -862,7 +863,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 	// is base64-wrapped but Content-Type says application/json), always scan the
 	// raw body so normalizeWithDecode can peel the base64 layer.
 	if !parsedOK && !skipRawFallback && len(body) > 0 {
-		limit := 48 * 1024
+		limit := snapshot.WAFBodyScanLimit
 		if len(body) < limit {
 			limit = len(body)
 		}

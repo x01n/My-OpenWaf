@@ -225,6 +225,16 @@ type Holder struct {
 func (h *Holder) Store(s *Snapshot) { h.ptr.Store(s) }
 func (h *Holder) Load() *Snapshot   { return h.ptr.Load() }
 
+// Shared runtime limits.
+const (
+	WAFBodyScanLimit = 48 * 1024 // 48 KB
+)
+
+// Time constants (seconds).
+const (
+	OneDaySeconds = 86400
+)
+
 // Default security header values.
 const (
 	DefaultExpectCTValue       = "max-age=86400, enforce"

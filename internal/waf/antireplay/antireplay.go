@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"My-OpenWaf/internal/snapshot"
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -129,8 +130,8 @@ func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string, ses
 	if spentTTL < 5 {
 		spentTTL = 5
 	}
-	if spentTTL > 86400 {
-		spentTTL = 86400
+	if spentTTL > snapshot.OneDaySeconds {
+		spentTTL = snapshot.OneDaySeconds
 	}
 	newNonce := m.GenerateNonce(clientIP)
 	if redis := m.redisClient(); redis != nil {

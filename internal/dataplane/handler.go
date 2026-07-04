@@ -469,8 +469,8 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 			if len(body) > 0 {
 				rawBody := strings.TrimSpace(string(body))
-				if len(rawBody) > 48*1024 {
-					rawBody = rawBody[:48*1024]
+				if len(rawBody) > snapshot.WAFBodyScanLimit {
+					rawBody = rawBody[:snapshot.WAFBodyScanLimit]
 				}
 				normalized := owasp.NormalizeForDebug(rawBody)
 				if owasp.IsOpaqueEncodedAttackBodyForDebug(rawBody, normalized, map[string]string{"Host": host}, 3) {
@@ -508,7 +508,7 @@ func Handler(opts Options) app.HandlerFunc {
 			reqCtx.HeaderKeys = append(reqCtx.HeaderKeys, key)
 		})
 
-		const maxWAFBody = 48 * 1024
+		const maxWAFBody = snapshot.WAFBodyScanLimit
 		if body := c.Request.Body(); len(body) > 0 {
 			if len(body) > maxWAFBody {
 				reqCtx.Body = body[:maxWAFBody]
