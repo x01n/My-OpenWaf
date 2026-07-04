@@ -95,6 +95,50 @@ func (d http3RouteConflictDiagnostics) Summary() string {
 	return strings.Join(parts, ";")
 }
 
+type cancelableBody struct {
+	ctx    context.Context
+	body   io.ReadCloser
+	closed bool
+	mu     sync.Mutex
+}
+
+func (b *cancelableBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, io.ErrClosedPipe
+	}
+	b.mu.Unlock()
+
+	if b.ctx.Done() == nil {
+		return b.body.Read(p)
+	}
+
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := b.body.Read(p)
+		ch <- result{n, err}
+	}()
+
+	select {
+	case res := <-ch:
+		return res.n, res.err
+	case <-b.ctx.Done():
+		return 0, b.ctx.Err()
+	}
+}
+
+func (b *cancelableBody) Close() error {
+	b.mu.Lock()
+	b.closed = true
+	b.mu.Unlock()
+	return b.body.Close()
+}
+
 type http3ServerPlan struct {
 	Bind       string
 	Tag        string
@@ -169,9 +213,15 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 	proxy := &httputil.ReverseProxy{}
 	proxy.FlushInterval = -1
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		if resp != nil && resp.Body != nil && resp.Request != nil {
+			resp.Body = &cancelableBody{ctx: resp.Request.Context(), body: resp.Body}
+		}
 		contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 		contentEncoding := resp.Header.Get("Content-Encoding")
 		if strings.Contains(contentType, "text/event-stream") || contentEncoding != "" {
+			if resp.Request != nil && strings.EqualFold(resp.Request.Method, http.MethodHead) {
+				return nil
+			}
 			resp.Header.Del("Content-Length")
 			resp.ContentLength = -1
 		}
@@ -249,7 +299,7 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 			http.Error(w, "no HTTP/3 route target", http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(cfg.Bind), snapshotpkg.OneDaySeconds))
+		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=86400`, extractPort(cfg.Bind)))
 		proxy.ServeHTTP(w, r)
 	})
 
@@ -761,7 +811,7 @@ func buildHTTP3AltSvcAdvertisementWithPlans(siteRT snapshotpkg.SiteRuntime, sn *
 		return http3AltSvcAdvertisement{}, false
 	}
 	return http3AltSvcAdvertisement{
-		value:      fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(plan.Bind), snapshotpkg.OneDaySeconds),
+		value:      fmt.Sprintf(`h3=":%s"; ma=86400`, extractPort(plan.Bind)),
 		tcpBind:    siteRT.Bind,
 		udpBind:    plan.Bind,
 		routeTable: plan.RouteTable,

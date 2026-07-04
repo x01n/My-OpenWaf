@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"mime"
 	"net"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -109,14 +108,8 @@ func listenerBind(c *app.RequestContext) string {
 }
 
 func scrubResponseHopByHopHeaders(c *app.RequestContext) {
-	for _, key := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Transfer-Encoding", "Upgrade"} {
+	for _, key := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
 		c.Response.Header.Del(key)
-	}
-	// Body streams must use chunked framing; drop any Content-Length that the
-	// framework may have inferred from the stream to avoid misleading HTTP/3 clients.
-	if c.Response.IsBodyStream() {
-		c.Response.Header.Del("Content-Length")
-		c.Response.Header.SetContentLength(-1)
 	}
 }
 
@@ -165,7 +158,7 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		if maxH := sn.HTTP2Config.MaxHeaderFields; maxH > 0 && c.Request.Header.Len() > maxH {
-			pages.WriteErrorPage(ctx, c, http.StatusRequestHeaderFieldsTooLarge, nil)
+			c.String(431, "too many request header fields")
 			return
 		}
 
@@ -469,8 +462,8 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 			if len(body) > 0 {
 				rawBody := strings.TrimSpace(string(body))
-				if len(rawBody) > snapshot.WAFBodyScanLimit {
-					rawBody = rawBody[:snapshot.WAFBodyScanLimit]
+				if len(rawBody) > 48*1024 {
+					rawBody = rawBody[:48*1024]
 				}
 				normalized := owasp.NormalizeForDebug(rawBody)
 				if owasp.IsOpaqueEncodedAttackBodyForDebug(rawBody, normalized, map[string]string{"Host": host}, 3) {
@@ -508,8 +501,9 @@ func Handler(opts Options) app.HandlerFunc {
 			reqCtx.HeaderKeys = append(reqCtx.HeaderKeys, key)
 		})
 
-		const maxWAFBody = snapshot.WAFBodyScanLimit
-		if body := c.Request.Body(); len(body) > 0 {
+		const maxWAFBody = 48 * 1024
+		body, _, _ := requestBodySample(c)
+		if len(body) > 0 {
 			if len(body) > maxWAFBody {
 				reqCtx.Body = body[:maxWAFBody]
 			} else {
@@ -941,6 +935,9 @@ func Handler(opts Options) app.HandlerFunc {
 			respStatus := c.Response.StatusCode()
 			respBodyLen := len(c.Response.Body())
 			responseSize = int64(respBodyLen)
+			if c.Response.Header.Get("Trailer") != "" {
+				responseSize = 0
+			}
 			if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
 				pages.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
 				responseSize = int64(len(c.Response.Body()))
@@ -1286,7 +1283,7 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	requestHeaders := info.RequestHeaders
 	responseHeaders := info.ResponseHeaders
 	responseSize := info.ResponseSize
-	if responseSize == 0 {
+	if responseSize == 0 && c.Response.Header.Get("Trailer") == "" && string(c.Request.Method()) != "HEAD" {
 		if cl := int64(c.Response.Header.ContentLength()); cl > 0 {
 			responseSize = cl
 		} else if !c.Response.IsBodyStream() {

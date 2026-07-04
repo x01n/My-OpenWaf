@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -160,6 +161,7 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 
 	clearInternalHTTP3RequestMetadataHeaders(c)
 	c.Set(internalHTTP3ContextKey, true)
+	fmt.Printf("[DEBUG] applyInternalHTTP3RequestMetadata: proto=%s forwardedProto=%s isLoopback=%v alpn=%s\n", proto, forwardedProto, isLoopbackRemoteAddr(c), alpn)
 
 	if version == "" && sni == "" && alpn == "" && ja3 == "" && ja3Hash == "" && ja4 == "" &&
 		len(cipherSuites) == 0 && len(extensions) == 0 && len(curves) == 0 && len(pointFormats) == 0 {
@@ -197,7 +199,9 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	if len(pointFormats) > 0 {
 		fp.PointFormats = pointFormats
 	}
+	fmt.Printf("[DEBUG] applyInternalHTTP3RequestMetadata before Set: fp.ALPN=%v fp.HasValue=%v\n", fp.ALPN, fp.HasValue())
 	c.Set(tlsFingerprintContextKey, fp)
+	fmt.Printf("[DEBUG] applyInternalHTTP3RequestMetadata after Set: c.Get=%v\n", func() bool { _, ok := c.Get(tlsFingerprintContextKey); return ok }())
 }
 
 func clearInternalHTTP3RequestMetadataHeaders(c *app.RequestContext) {

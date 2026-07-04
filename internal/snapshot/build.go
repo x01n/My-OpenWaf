@@ -179,6 +179,9 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				if c, ok := certByID[*listenerSite.CertID]; ok {
 					cert = &c
 					if tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
+						if staple, ok := ParseOCSPStaple(c.OCSPStaplePEM); ok {
+							tlsCert.OCSPStaple = staple
+						}
 						minVer := ParseTLSVersion(listenerSite.MinTLSVersion)
 						if minVer == 0 {
 							minVer = tls.VersionTLS12
@@ -629,6 +632,7 @@ func ParsePattern(p string) (kind, arg string) {
 		"block_user_agent:", "block_user_agent_regex:",
 		"header_regex:", "body_contains:", "body_regex:", "query_param:",
 		"host:", "cookie_contains:", "referer_contains:",
+		"tls_ja3:", "tls_ja3_hash:", "tls_ja4:", "tls_version:", "tls_sni:", "tls_alpn:", "tls_cipher_suite:", "tls_cipher_suites:", "header_order_contains:", "header_order_regex:",
 	}
 	for _, pfx := range prefixes {
 		if strings.HasPrefix(p, pfx) {
