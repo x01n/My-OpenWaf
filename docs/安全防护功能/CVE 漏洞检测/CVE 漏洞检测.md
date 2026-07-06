@@ -1,7 +1,9 @@
+> [返回 安全防护功能](../安全防护功能.md)
+
 # CVE 漏洞检测
 
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [detector.go](file://internal/waf/cve/detector.go)
 - [php.go](file://internal/waf/cve/php.go)
 - [java.go](file://internal/waf/cve/java.go)

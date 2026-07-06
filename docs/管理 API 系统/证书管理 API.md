@@ -1,5 +1,7 @@
 # 证书管理 API
 
+> [返回 管理 API 系统](管理 API 系统.md)
+
 <cite>
 **本文引用的文件**
 - [internal/admin/system/certificate.go](file://internal/admin/system/certificate.go)

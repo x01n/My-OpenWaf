@@ -1,7 +1,9 @@
 # 规则 CRUD 操作
 
+> [返回 管理 API 系统](../管理 API 系统.md)
+
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [rule.go](file://internal/admin/rule/rule.go)
 - [validate.go](file://internal/admin/rule/validate.go)
 - [rule.go](file://internal/store/repository/rule.go)

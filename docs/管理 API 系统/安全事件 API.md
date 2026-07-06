@@ -1,7 +1,9 @@
 # 安全事件 API
 
+> [返回 管理 API 系统](管理 API 系统.md)
+
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [安全事件 API.md](file://docs/管理 API 系统/安全事件 API.md)
 - [security.go](file://internal/admin/event/security.go)
 - [security_event.go](file://internal/store/repository/security_event.go)

@@ -1,7 +1,9 @@
 # 系统设置 API
 
+> [返回 管理 API 系统](管理 API 系统.md)
+
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [系统设置 API.md](file://docs/管理 API 系统/系统设置 API.md)
 - [settings.go](file://internal/admin/system/settings.go)
 - [apikey.go](file://internal/admin/system/apikey.go)

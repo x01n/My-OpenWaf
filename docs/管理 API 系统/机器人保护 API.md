@@ -1,5 +1,7 @@
 # 机器人保护 API
 
+> [返回 管理 API 系统](管理 API 系统.md)
+
 <cite>
 **本文引用的文件**
 - [router.go](file://internal/admin/router.go)

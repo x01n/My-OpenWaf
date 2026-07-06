@@ -1,7 +1,9 @@
 # 策略管理 API
 
+> [返回 管理 API 系统](管理 API 系统.md)
+
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [router.go](file://internal/admin/router.go)
 - [policy.go](file://internal/admin/system/policy.go)
 - [policy_repo.go](file://internal/store/repository/policy.go)

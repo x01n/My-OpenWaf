@@ -1,5 +1,7 @@
 # Redis 集成
 
+> [返回 数据存储层](数据存储层.md)
+
 <cite>
 **本文引用的文件**
 - [internal/cache/redis_kv.go](file://internal/cache/redis_kv.go)

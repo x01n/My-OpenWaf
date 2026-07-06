@@ -1,5 +1,7 @@
 # GORM 配置与使用
 
+> [返回 数据存储层](数据存储层.md)
+
 <cite>
 **本文引用的文件**
 - [cmd/main.go](file://cmd/main.go)

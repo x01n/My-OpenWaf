@@ -1,5 +1,7 @@
 # CRUD 页面组件
 
+> [返回 前端管理界面](../前端管理界面.md)
+
 <cite>
 **本文引用的文件**
 - [crud-page.tsx](file://frontend/components/crud-page.tsx)
