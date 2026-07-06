@@ -1896,8 +1896,8 @@ func TestRunProxiesHTTP3HEADWithoutResponseBodyInSeparateProcess(t *testing.T) {
 	if got := resp.Header.Get("X-Upstream"); got != "h3-head" {
 		t.Fatalf("HTTP/3 HEAD X-Upstream = %q, want h3-head", got)
 	}
-	if got := resp.Header.Get("Alt-Svc"); got != fmt.Sprintf(`h3=":%s"; ma=86400`, extractPort(udpBind)) {
-		t.Fatalf("HTTP/3 HEAD Alt-Svc = %q, want %q", got, fmt.Sprintf(`h3=":%s"; ma=86400`, extractPort(udpBind)))
+	if got := resp.Header.Get("Alt-Svc"); got != fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(udpBind), 86400) {
+		t.Fatalf("HTTP/3 HEAD Alt-Svc = %q, want %q", got, fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(udpBind), 86400))
 	}
 	accessLog := requireAppProcessObservedRequest(t, appProc, appProcessObservedRequestExpectation{
 		label:            "HTTP/3 HEAD response",

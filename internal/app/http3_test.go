@@ -1747,8 +1747,8 @@ func TestHTTP3ServerProxiesPUTStreamingBodyAndResponse(t *testing.T) {
 		if got.contentType != "application/octet-stream" {
 			t.Fatalf("upstream Content-Type = %q, want %q", got.contentType, "application/octet-stream")
 		}
-		if got.contentLength != int64(len(requestBody)) {
-			t.Fatalf("upstream ContentLength = %d, want %d for buffered streaming body", got.contentLength, len(requestBody))
+		if got.contentLength != -1 {
+			t.Fatalf("upstream ContentLength = %d, want -1 for streaming body", got.contentLength)
 		}
 		if !bytes.Equal(got.body, requestBody) {
 			t.Fatalf("upstream PUT body mismatch: got %d bytes want %d bytes", len(got.body), len(requestBody))
@@ -1956,13 +1956,33 @@ func TestHTTP3ServerCancelsUpstreamRequestBodyWhenClientCancelsUpload(t *testing
 		clientDone <- clientResult{resp: resp, err: err}
 	}()
 
-	// Hertz's FastHTTP engine buffers the entire request body before forwarding to upstream.
-	// Therefore upstream does not receive a streaming partial notification. Skip this check.
 	select {
-	case <-upstreamPartial:
-		// FastHTTP buffers the whole body before forwarding; partial notification is not expected.
+	case got := <-upstreamPartial:
+		if got.method != http.MethodPut {
+			t.Fatalf("upstream HTTP/3 upload cancel method = %q, want %q", got.method, http.MethodPut)
+		}
+		if got.path != "/h3-upload-cancel/body" {
+			t.Fatalf("upstream HTTP/3 upload cancel path = %q, want %q", got.path, "/h3-upload-cancel/body")
+		}
+		if got.rawQuery != "stream=1" {
+			t.Fatalf("upstream HTTP/3 upload cancel raw query = %q, want %q", got.rawQuery, "stream=1")
+		}
+		if got.contentType != "application/octet-stream" {
+			t.Fatalf("upstream HTTP/3 upload cancel Content-Type = %q, want %q", got.contentType, "application/octet-stream")
+		}
+		if got.contentLength != -1 {
+			t.Fatalf("upstream HTTP/3 upload cancel ContentLength = %d, want -1", got.contentLength)
+		}
+		if got.forwarded != "h3" {
+			t.Fatalf("upstream HTTP/3 upload cancel X-Forwarded-Proto = %q, want %q", got.forwarded, "h3")
+		}
+		if got.protoMark != "" {
+			t.Fatalf("upstream HTTP/3 upload cancel leaked %s = %q, want empty", dataplane.InternalHTTP3ProtoHeader, got.protoMark)
+		}
 	case <-time.After(2 * time.Second):
-		// Expected timeout; upstream will receive the full buffered body via upstreamFinished.
+		cancelReq()
+		_ = bodyWriter.CloseWithError(context.Canceled)
+		t.Fatal("upstream did not receive HTTP/3 upload cancel prefix")
 	}
 
 	cancelReq()
@@ -1979,13 +1999,11 @@ func TestHTTP3ServerCancelsUpstreamRequestBodyWhenClientCancelsUpload(t *testing
 		if got.bytesRead < wantPrefixBytes {
 			t.Fatalf("upstream HTTP/3 upload cancel bytes read = %d, want at least %d", got.bytesRead, wantPrefixBytes)
 		}
-		// FastHTTP buffers the entire request body, so upstream reads the full body
-		// and gets EOF rather than a cancellation error.
-		if got.readErr != nil && got.readErr != io.EOF {
-			t.Fatalf("upstream HTTP/3 upload cancel read error = %v, want EOF or nil", got.readErr)
+		if got.readErr == nil {
+			t.Fatal("upstream HTTP/3 upload cancel read error is nil, want cancellation error")
 		}
-		if got.contextErr != nil {
-			t.Fatalf("upstream HTTP/3 upload cancel context error = %v, want nil; readErr=%v", got.contextErr, got.readErr)
+		if !errors.Is(got.contextErr, context.Canceled) {
+			t.Fatalf("upstream HTTP/3 upload cancel context error = %v, want context canceled; readErr=%v", got.contextErr, got.readErr)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream HTTP/3 upload body did not stop after client cancellation")
@@ -3032,13 +3050,13 @@ func TestHTTP3ServerCancelsUpstreamSSEWhenClientClosesResponseBody(t *testing.T)
 		t.Fatalf("close HTTP/3 SSE cancel response body: %v", err)
 	}
 
-	// ReverseProxy does not cancel upstream context when the client closes the response body.
-	// The upstream handler will time out after 3s. Accept either outcome.
 	select {
-	case <-upstreamCanceled:
-		// May receive context.Canceled (if proxy forwards it) or a timeout error.
-	case <-time.After(4 * time.Second):
-		// Expected: ReverseProxy does not propagate client disconnect to upstream context.
+	case err := <-upstreamCanceled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HTTP/3 upstream SSE cancel error = %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP/3 upstream SSE was not canceled after client closed response body")
 	}
 
 	readyReq, err := http.NewRequest(http.MethodGet, "https://"+udpBind+"/h3-sse-cancel-ready", nil)
@@ -3289,13 +3307,13 @@ func TestHTTP3ServerCancelsUpstreamStreamingResponseWhenClientClosesResponseBody
 		t.Fatalf("close HTTP/3 streaming cancel response body: %v", err)
 	}
 
-	// ReverseProxy does not cancel upstream context when the client closes the response body.
-	// The upstream handler will time out after 3s. Accept either outcome.
 	select {
-	case <-upstreamCanceled:
-		// May receive context.Canceled (if proxy forwards it) or a timeout error.
-	case <-time.After(4 * time.Second):
-		// Expected: ReverseProxy does not propagate client disconnect to upstream context.
+	case err := <-upstreamCanceled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HTTP/3 upstream streaming cancel error = %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP/3 upstream streaming response was not canceled after client closed response body")
 	}
 
 	readyReq, err := http.NewRequest(http.MethodGet, "https://"+udpBind+"/h3-stream-cancel-ready", nil)
@@ -3548,13 +3566,13 @@ func TestHTTP3ServerShutdownClosesActiveStreamAndCancelsUpstream(t *testing.T) {
 		t.Fatalf("HTTP/3 shutdown active stream error: %v", err)
 	}
 
-	// http3.Server.Shutdown closes connections but does not cancel upstream request contexts.
-	// The upstream handler will time out after 3s. Accept either outcome.
 	select {
-	case <-upstreamCanceled:
-		// May receive context.Canceled (if server forwards it) or a timeout error.
-	case <-time.After(4 * time.Second):
-		// Expected: Shutdown does not propagate cancel to upstream context.
+	case err := <-upstreamCanceled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HTTP/3 upstream active stream shutdown error = %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP/3 upstream active stream was not canceled after shutdown deadline")
 	}
 }
 

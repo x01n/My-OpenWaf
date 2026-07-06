@@ -666,6 +666,7 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 	full := upstreamRequestURL(c, base)
 
 	isStream := c.Request.IsBodyStream()
+	hertzContentLength := c.Request.Header.ContentLength()
 	var rdr io.Reader
 	var bodyBytes []byte
 	var bodyLen int64
@@ -693,7 +694,7 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 	}
 	if rdr != nil {
 		req.ContentLength = bodyLen
-		if !isStream && len(bodyBytes) > 0 {
+		if !isStream && len(bodyBytes) > 0 && hertzContentLength >= 0 {
 			snap := append([]byte(nil), bodyBytes...)
 			req.GetBody = func() (io.ReadCloser, error) {
 				return &byteSliceReadCloser{data: snap}, nil
@@ -964,6 +965,17 @@ func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
 	}
 	if len(removed) > 0 {
 		slog.Debug("upstream hop-by-hop response headers stripped", slog.Any("headers", removed))
+	}
+}
+
+// AddResponseTrailerHeaders re-adds the Trailer declaration header after copyResponseHeaders
+// strips it.  This tells the downstream HTTP client which trailer fields to expect.
+func AddResponseTrailerHeaders(dst *app.RequestContext, trailers http.Header) {
+	if len(trailers) == 0 {
+		return
+	}
+	for k := range trailers {
+		dst.Response.Header.Add("Trailer", k)
 	}
 }
 
@@ -1453,6 +1465,9 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	}
 
 	copyResponseHeaders(c, resp.Header)
+	if len(resp.Trailer) > 0 {
+		AddResponseTrailerHeaders(c, resp.Trailer)
+	}
 
 	// 动态防护处理：根据配置对响应内容进行加密/混淆/水印
 	dp := rt.DynamicProtection
@@ -1549,9 +1564,9 @@ func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 				_ = closeFn()
 			}
 			copyResponseTrailers(c, resp)
-			if n >= compOpts.MinBytes {
+			if n >= compOpts.MinBytes && n <= completeUnknownLengthCompressMaxBytes {
 				encodedBody, encErr := compressResponseBody(probeBuf[:n], encoding)
-				if encErr == nil && len(encodedBody) < n {
+				if encErr == nil {
 					ensureVaryAcceptEncoding(c)
 					c.Response.Header.Set("Content-Encoding", string(encoding))
 					c.Response.Header.Del("Content-Length")
@@ -1726,6 +1741,13 @@ func (s *proxyBodyStream) cleanup() {
 }
 
 const probeEOFTimeout = 5 * time.Millisecond
+
+// probeStreamEOF attempts a short non-blocking read to detect whether the
+// upstream body is already complete. For chunked responses the first Read may
+// return all data bytes without EOF because the zero-length terminator chunk
+// has not arrived yet. This helper spawns a brief goroutine read: if EOF
+// arrives within probeEOFTimeout the body is fully buffered; otherwise
+// bodyReader remains usable for streaming.
 func probeStreamEOF(bodyReader io.Reader) (io.Reader, bool, error) {
 	type probeResult struct {
 		data []byte
@@ -1797,10 +1819,6 @@ func copyResponseTrailers(c *app.RequestContext, resp *http.Response) {
 			c.Response.Header.Trailer().Set(k, v)
 		}
 	}
-}
-
-func AddResponseTrailerHeaders(c *app.RequestContext, trailer http.Header) {
-	copyResponseTrailers(c, &http.Response{Trailer: trailer})
 }
 
 var hopByHopHeaders = map[string]struct{}{
@@ -2027,6 +2045,8 @@ func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 	return stats
 }
 
+// CloseIdleUpstreamTransports closes idle connections on all cached transports.
+// Returns counts of closed HTTP, H2C, and HTTP/3 transports.
 func CloseIdleUpstreamTransports() (int, int, int) {
 	var httpCount, h2cCount, h3Count int
 	transportMu.RLock()

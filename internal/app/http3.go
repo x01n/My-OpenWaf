@@ -299,7 +299,7 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 			http.Error(w, "no HTTP/3 route target", http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=86400`, extractPort(cfg.Bind)))
+		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(cfg.Bind), snapshotpkg.OneDaySeconds))
 		proxy.ServeHTTP(w, r)
 	})
 
@@ -811,7 +811,7 @@ func buildHTTP3AltSvcAdvertisementWithPlans(siteRT snapshotpkg.SiteRuntime, sn *
 		return http3AltSvcAdvertisement{}, false
 	}
 	return http3AltSvcAdvertisement{
-		value:      fmt.Sprintf(`h3=":%s"; ma=86400`, extractPort(plan.Bind)),
+		value:      fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(plan.Bind), snapshotpkg.OneDaySeconds),
 		tcpBind:    siteRT.Bind,
 		udpBind:    plan.Bind,
 		routeTable: plan.RouteTable,
