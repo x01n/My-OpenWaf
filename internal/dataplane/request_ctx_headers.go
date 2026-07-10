@@ -1,10 +1,12 @@
 package dataplane
 
 import (
-	"fmt"
+	"crypto/rand"
+	"encoding/hex"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -14,6 +16,7 @@ import (
 
 const (
 	InternalHTTP3ProtoHeader           = "X-OpenWaf-Internal-Proto"
+	InternalHTTP3CancelTokenHeader     = "X-OpenWaf-Internal-Cancel-Token"
 	InternalHTTP3TLSVersionHeader      = "X-OpenWaf-Internal-TLS-Version"
 	InternalHTTP3TLSSNIHeader          = "X-OpenWaf-Internal-TLS-SNI"
 	InternalHTTP3TLSALPNHeader         = "X-OpenWaf-Internal-TLS-ALPN"
@@ -27,6 +30,43 @@ const (
 
 	internalHTTP3ContextKey = "dataplane_internal_http3"
 )
+
+var internalHTTP3CancelSignals = struct {
+	sync.Mutex
+	items map[string]<-chan struct{}
+}{items: make(map[string]<-chan struct{})}
+
+func RegisterInternalHTTP3CancelSignal(done <-chan struct{}) (string, func()) {
+	if done == nil {
+		return "", func() {}
+	}
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", func() {}
+	}
+	token := hex.EncodeToString(raw[:])
+	internalHTTP3CancelSignals.Lock()
+	internalHTTP3CancelSignals.items[token] = done
+	internalHTTP3CancelSignals.Unlock()
+
+	unregister := func() {
+		internalHTTP3CancelSignals.Lock()
+		delete(internalHTTP3CancelSignals.items, token)
+		internalHTTP3CancelSignals.Unlock()
+	}
+	return token, unregister
+}
+
+func takeInternalHTTP3CancelSignal(token string) (<-chan struct{}, bool) {
+	if token == "" {
+		return nil, false
+	}
+	internalHTTP3CancelSignals.Lock()
+	done, ok := internalHTTP3CancelSignals.items[token]
+	delete(internalHTTP3CancelSignals.items, token)
+	internalHTTP3CancelSignals.Unlock()
+	return done, ok && done != nil
+}
 
 // populateRequestCtxHeaders copies request headers into RequestCtx using
 // lowercase keys only. HeaderKeys still preserves the original order and case
@@ -159,9 +199,12 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	curves := parseInternalHTTP3Uint16List(trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSCurvesHeader)))
 	pointFormats := parseInternalHTTP3Uint8List(trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSPointFormatsHeader)))
 
+	cancelToken := trimRequestHeaderValue(c.GetHeader(InternalHTTP3CancelTokenHeader))
+	if done, ok := takeInternalHTTP3CancelSignal(cancelToken); ok {
+		c.Set(InternalHTTP3CancelTokenHeader, done)
+	}
 	clearInternalHTTP3RequestMetadataHeaders(c)
 	c.Set(internalHTTP3ContextKey, true)
-	fmt.Printf("[DEBUG] applyInternalHTTP3RequestMetadata: proto=%s forwardedProto=%s isLoopback=%v alpn=%s\n", proto, forwardedProto, isLoopbackRemoteAddr(c), alpn)
 
 	if version == "" && sni == "" && alpn == "" && ja3 == "" && ja3Hash == "" && ja4 == "" &&
 		len(cipherSuites) == 0 && len(extensions) == 0 && len(curves) == 0 && len(pointFormats) == 0 {
@@ -199,9 +242,7 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	if len(pointFormats) > 0 {
 		fp.PointFormats = pointFormats
 	}
-	fmt.Printf("[DEBUG] applyInternalHTTP3RequestMetadata before Set: fp.ALPN=%v fp.HasValue=%v\n", fp.ALPN, fp.HasValue())
 	c.Set(tlsFingerprintContextKey, fp)
-	fmt.Printf("[DEBUG] applyInternalHTTP3RequestMetadata after Set: c.Get=%v\n", func() bool { _, ok := c.Get(tlsFingerprintContextKey); return ok }())
 }
 
 func clearInternalHTTP3RequestMetadataHeaders(c *app.RequestContext) {
@@ -209,6 +250,7 @@ func clearInternalHTTP3RequestMetadataHeaders(c *app.RequestContext) {
 		return
 	}
 	c.Request.Header.Del(InternalHTTP3ProtoHeader)
+	c.Request.Header.Del(InternalHTTP3CancelTokenHeader)
 	c.Request.Header.Del(InternalHTTP3TLSVersionHeader)
 	c.Request.Header.Del(InternalHTTP3TLSSNIHeader)
 	c.Request.Header.Del(InternalHTTP3TLSALPNHeader)

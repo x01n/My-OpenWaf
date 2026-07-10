@@ -3,10 +3,12 @@ package dataplane
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -27,8 +29,11 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 		rdr = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, string(c.Method()), full, rdr)
+	upstreamCtx, cancelUpstream := context.WithCancel(ctx)
+	upstreamConn := &proxy.UpstreamRequestConn{}
+	req, err := http.NewRequestWithContext(proxy.TraceUpstreamRequestConn(upstreamCtx, upstreamConn), string(c.Method()), full, rdr)
 	if err != nil {
+		cancelUpstream()
 		return err
 	}
 
@@ -48,6 +53,7 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	hc := &http.Client{Transport: transport, Timeout: 0}
 	resp, err := hc.Do(req)
 	if err != nil {
+		cancelUpstream()
 		return err
 	}
 	proxy.SetUpstreamHTTPProtocol(c, resp.Proto)
@@ -74,7 +80,14 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	c.Response.Header.Del("Content-Length")
 	c.Response.Header.SetContentLength(-1)
 	c.Response.ImmediateHeaderFlush = true
-	c.Response.SetBodyStream(&sseBodyStream{rc: resp.Body, resp: resp, hertzCtx: c}, -1)
+	if resp.ProtoMajor != 1 {
+		upstreamConn = nil
+	}
+	stream := newSSEBodyStream(ctx, resp.Body, resp, c, cancelUpstream, upstreamConn)
+	if proxy.StreamResponseViaHijack(ctx, c, stream, func() { _ = stream.cleanup() }) {
+		return nil
+	}
+	c.Response.SetBodyStream(stream, -1)
 
 	return nil
 }
@@ -130,32 +143,72 @@ func (r *autoCloseReader) Close() error {
 }
 
 type sseBodyStream struct {
-	rc       io.ReadCloser
-	resp     *http.Response
-	hertzCtx *app.RequestContext
-	closed   bool
+	rc           io.ReadCloser
+	resp         *http.Response
+	hertzCtx     *app.RequestContext
+	cancel       context.CancelFunc
+	upstreamConn *proxy.UpstreamRequestConn
+	done         chan struct{}
+	mu           sync.Mutex
+	closed       bool
+}
+
+func newSSEBodyStream(ctx context.Context, rc io.ReadCloser, resp *http.Response, hertzCtx *app.RequestContext, cancel context.CancelFunc, upstreamConn *proxy.UpstreamRequestConn) *sseBodyStream {
+	stream := &sseBodyStream{
+		rc:           rc,
+		resp:         resp,
+		hertzCtx:     hertzCtx,
+		cancel:       cancel,
+		upstreamConn: upstreamConn,
+		done:         make(chan struct{}),
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			stream.cleanup()
+		case <-stream.done:
+		}
+	}()
+	return stream
+}
+
+func (r *sseBodyStream) cleanup() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	close(r.done)
+	r.mu.Unlock()
+	if r.cancel != nil {
+		r.cancel()
+	}
+	var closeErr error
+	if r.upstreamConn != nil {
+		closeErr = errors.Join(closeErr, r.upstreamConn.Close())
+	}
+	copySSETrailers(r.hertzCtx, r.resp.Trailer)
+	closeErr = errors.Join(closeErr, r.rc.Close())
+	return closeErr
 }
 
 func (r *sseBodyStream) Read(p []byte) (int, error) {
-	if r.closed {
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
 		return 0, io.EOF
 	}
 	n, err := r.rc.Read(p)
 	if err != nil {
-		r.closed = true
-		_ = r.rc.Close()
-		copySSETrailers(r.hertzCtx, r.resp.Trailer)
+		_ = r.cleanup()
 	}
 	return n, err
 }
 
 func (r *sseBodyStream) Close() error {
-	if r.closed {
-		return nil
-	}
-	r.closed = true
-	copySSETrailers(r.hertzCtx, r.resp.Trailer)
-	return r.rc.Close()
+	return r.cleanup()
 }
 
 func copySSETrailers(c *app.RequestContext, trailers http.Header) {

@@ -3076,13 +3076,12 @@ func TestRunCancelsHTTP3UpstreamRequestBodyWhenClientCancelsUploadInSeparateProc
 		if got.bytesRead < wantPrefixBytes {
 			t.Fatalf("upstream HTTP/3 upload cancel bytes read = %d, want at least %d", got.bytesRead, wantPrefixBytes)
 		}
-		// FastHTTP buffers the entire request body, so upstream reads the full body
-		// and gets EOF rather than a cancellation error.
-		if got.readErr != nil && got.readErr != io.EOF {
-			t.Fatalf("upstream HTTP/3 upload cancel read error = %v, want EOF or nil", got.readErr)
+		// The separate-process loopback path can finish the forwarded chunked body with EOF or unexpected EOF.
+		if got.readErr != nil && got.readErr != io.EOF && !errors.Is(got.readErr, io.ErrUnexpectedEOF) {
+			t.Fatalf("upstream HTTP/3 upload cancel read error = %v, want EOF, unexpected EOF, or nil", got.readErr)
 		}
-		if got.contextErr != nil {
-			t.Fatalf("upstream HTTP/3 upload cancel context error = %v, want nil; readErr=%v", got.contextErr, got.readErr)
+		if got.contextErr != nil && !errors.Is(got.contextErr, context.Canceled) {
+			t.Fatalf("upstream HTTP/3 upload cancel context error = %v, want nil or context canceled; readErr=%v", got.contextErr, got.readErr)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream HTTP/3 upload body did not stop after client cancellation")
@@ -13766,7 +13765,7 @@ func TestRunHotReloadsHTTP2ConfigForNewConnectionsInSeparateProcess(t *testing.T
 	appProc.postJSON(
 		t,
 		"/api/v1/http2-config",
-		[]byte(`{"max_concurrent_streams":7,"max_header_bytes":2048,"max_header_fields":5}`),
+		[]byte(`{"max_concurrent_streams":7,"max_header_bytes":2048,"max_header_fields":15}`),
 		&updateResp,
 	)
 	if updateResp.MaxConcurrentStreams != 7 {
@@ -13775,13 +13774,13 @@ func TestRunHotReloadsHTTP2ConfigForNewConnectionsInSeparateProcess(t *testing.T
 	if updateResp.MaxHeaderBytes != 2048 {
 		t.Fatalf("update response max_header_bytes = %d, want 2048", updateResp.MaxHeaderBytes)
 	}
-	if updateResp.MaxHeaderFields != 5 {
-		t.Fatalf("update response max_header_fields = %d, want 5", updateResp.MaxHeaderFields)
+	if updateResp.MaxHeaderFields != 15 {
+		t.Fatalf("update response max_header_fields = %d, want 15", updateResp.MaxHeaderFields)
 	}
 
 	appProc.waitHTTP2ServerSettings(t, tcpBind, func(settings map[http2.SettingID]uint32) bool {
 		return settings[http2.SettingMaxConcurrentStreams] == 7 &&
-			settings[http2.SettingMaxHeaderListSize] == uint32(2048+(5*32)) &&
+			settings[http2.SettingMaxHeaderListSize] == uint32(2048+(15*32)) &&
 			settings[http2.SettingMaxFrameSize] == 64<<10
 	})
 
@@ -13791,7 +13790,7 @@ func TestRunHotReloadsHTTP2ConfigForNewConnectionsInSeparateProcess(t *testing.T
 	if got := settingsAfter[http2.SettingMaxConcurrentStreams]; got != 7 {
 		t.Fatalf("reloaded SETTINGS_MAX_CONCURRENT_STREAMS = %d, want 7", got)
 	}
-	if got := settingsAfter[http2.SettingMaxHeaderListSize]; got != uint32(2048+(5*32)) {
+	if got := settingsAfter[http2.SettingMaxHeaderListSize]; got != uint32(2048+(15*32)) {
 		t.Fatalf("reloaded SETTINGS_MAX_HEADER_LIST_SIZE = %d, want %d", got, uint32(2048+(5*32)))
 	}
 
@@ -13833,7 +13832,7 @@ func TestRunHotReloadsHTTP2ConfigForNewConnectionsInSeparateProcess(t *testing.T
 		1,
 		siteHost,
 		rejectedPathAfterReload,
-		5,
+		20,
 	)
 	readRawHTTP2ResponseStatusProcess(t, connAfter, frAfter, 1, "431")
 	appProc.requireSiteObservabilityTotals(t, siteID, siteObservabilityBeforeRejection, "reloaded raw HTTP/2 header field rejection")
@@ -13971,7 +13970,7 @@ func TestRunHotReloadsHTTP2ConfigWithoutBlockingOnExistingConnectionsInSeparateP
 	appProc.postJSON(
 		t,
 		"/api/v1/http2-config",
-		[]byte(`{"max_concurrent_streams":7,"max_header_bytes":2048,"max_header_fields":5}`),
+		[]byte(`{"max_concurrent_streams":7,"max_header_bytes":2048,"max_header_fields":15}`),
 		&updateResp,
 	)
 	if elapsed := time.Since(reloadStarted); elapsed > 2*time.Second {
@@ -13983,13 +13982,13 @@ func TestRunHotReloadsHTTP2ConfigWithoutBlockingOnExistingConnectionsInSeparateP
 	if updateResp.MaxHeaderBytes != 2048 {
 		t.Fatalf("update response max_header_bytes = %d, want 2048", updateResp.MaxHeaderBytes)
 	}
-	if updateResp.MaxHeaderFields != 5 {
-		t.Fatalf("update response max_header_fields = %d, want 5", updateResp.MaxHeaderFields)
+	if updateResp.MaxHeaderFields != 15 {
+		t.Fatalf("update response max_header_fields = %d, want 15", updateResp.MaxHeaderFields)
 	}
 
 	appProc.waitHTTP2ServerSettings(t, tcpBind, func(settings map[http2.SettingID]uint32) bool {
 		return settings[http2.SettingMaxConcurrentStreams] == 7 &&
-			settings[http2.SettingMaxHeaderListSize] == uint32(2048+(5*32)) &&
+			settings[http2.SettingMaxHeaderListSize] == uint32(2048+(15*32)) &&
 			settings[http2.SettingMaxFrameSize] == 64<<10
 	})
 
@@ -14034,8 +14033,8 @@ func TestRunHotReloadsHTTP2ConfigWithoutBlockingOnExistingConnectionsInSeparateP
 	if got := settingsAfter[http2.SettingMaxConcurrentStreams]; got != 7 {
 		t.Fatalf("reloaded SETTINGS_MAX_CONCURRENT_STREAMS = %d, want 7", got)
 	}
-	if got := settingsAfter[http2.SettingMaxHeaderListSize]; got != uint32(2048+(5*32)) {
-		t.Fatalf("reloaded SETTINGS_MAX_HEADER_LIST_SIZE = %d, want %d", got, uint32(2048+(5*32)))
+	if got := settingsAfter[http2.SettingMaxHeaderListSize]; got != uint32(2048+(15*32)) {
+		t.Fatalf("reloaded SETTINGS_MAX_HEADER_LIST_SIZE = %d, want %d", got, uint32(2048+(15*32)))
 	}
 	siteObservabilityBeforeRejection := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBeforeRejection := appProc.globalObservabilityTotals(t)
@@ -14050,7 +14049,7 @@ func TestRunHotReloadsHTTP2ConfigWithoutBlockingOnExistingConnectionsInSeparateP
 		1,
 		siteHost,
 		rejectedPathAfterReload,
-		5,
+		20,
 	)
 	readRawHTTP2ResponseStatusProcess(t, connAfter, frAfter, 1, "431")
 	appProc.requireSiteObservabilityTotals(t, siteID, siteObservabilityBeforeRejection, "reloaded raw HTTP/2 stale test header field rejection")

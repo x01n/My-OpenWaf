@@ -68,6 +68,8 @@ func http2ServerFactoryOptions(cfg snapshotpkg.HTTP2Config) []shconfig.Option {
 		shconfig.WithIdleTimeout(time.Duration(cfg.IdleTimeoutSeconds) * time.Second),
 		shconfig.WithMaxUploadBufferPerConnection(cfg.MaxUploadBufferPerConnection),
 		shconfig.WithMaxUploadBufferPerStream(cfg.MaxUploadBufferPerStream),
+		shconfig.WithServerMaxHeaderListSize(uint32(cfg.MaxHeaderBytes + cfg.MaxHeaderFields*32)),
+		shconfig.WithServerMaxHeaderFields(cfg.MaxHeaderFields),
 	}
 }
 
@@ -543,6 +545,7 @@ func Run() {
 				RouteTable: plan.RouteTable,
 				TLSConfig:  plan.TLSConfig,
 				Log:        log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)),
+				Allow0RTT:  newSn.TLSDefaults.SessionTicketsEnabled,
 			})
 			lm.AddWithTag(name, h3Srv, plan.Tag)
 			lm.StartOne(name)
@@ -791,6 +794,7 @@ func Run() {
 				RouteTable: plan.RouteTable,
 				TLSConfig:  plan.TLSConfig,
 				Log:        log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)),
+				Allow0RTT:  sn.TLSDefaults.SessionTicketsEnabled,
 			})
 			lm.AddWithTag(name, h3Srv, plan.Tag)
 			log.Info("HTTP/3 QUIC listener registered",
@@ -1131,6 +1135,7 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 		server.WithMaxHeaderBytes(http2cfg.MaxHeaderBytes),
 		server.WithMaxRequestBodySize(32 << 20),
 		server.WithMaxKeepBodySize(64 << 10),
+		server.WithSenseClientDisconnection(true),
 	}
 	if siteRT.Site.TLSEnabled {
 		opts = append(opts,

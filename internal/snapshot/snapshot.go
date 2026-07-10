@@ -75,6 +75,12 @@ type SiteRuntime struct {
 	// DynamicProtection holds the dynamic protection config (HTML obfuscation, JS obfuscation, watermark).
 	DynamicProtection dynamic.ProtectionConfig
 
+	ResponseCompressionConfigured  bool
+	ResponseCompressionEnabled     bool
+	ResponseCompressionGzipEnabled bool
+	ResponseCompressionMinBytes    int
+	BrotliEnabled                  bool
+
 	// Upstream host header override (for explicit upstream host resolution).
 	UpstreamHostHeader string
 }

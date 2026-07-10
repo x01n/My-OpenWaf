@@ -1049,6 +1049,37 @@ func TestFetchHTTPBuffersResponseTrailers(t *testing.T) {
 	}
 }
 
+func TestFetchHTTPDecodesCompressedBufferedResponse(t *testing.T) {
+	upstreamBody := strings.Repeat("decoded buffered upstream gzip response.", 64)
+	upstreamEncodedBody := mustGzipBytes(t, []byte(upstreamBody))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(len(upstreamEncodedBody)))
+		_, _ = w.Write(upstreamEncodedBody)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod("GET")
+	ctx.Request.SetRequestURI("/compressed-buffered")
+	ctx.Request.Header.Set("Accept-Encoding", "br, gzip")
+
+	resp, err := FetchHTTP(context.Background(), ctx, snapshot.SiteRuntime{}, upstream.URL, nil, "example.test")
+	if err != nil {
+		t.Fatalf("FetchHTTP returned error: %v", err)
+	}
+	if got := string(resp.Body); got != upstreamBody {
+		t.Fatalf("buffered body = %q, want decoded upstream body", got)
+	}
+	if got := resp.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("buffered Content-Encoding = %q, want empty", got)
+	}
+	if got := resp.Header.Get("Content-Length"); got != "" {
+		t.Fatalf("buffered Content-Length = %q, want empty", got)
+	}
+}
+
 func TestFetchHTTPReturnsHTTP2ProtocolForHTTPSUpstream(t *testing.T) {
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Proto != "HTTP/2.0" {

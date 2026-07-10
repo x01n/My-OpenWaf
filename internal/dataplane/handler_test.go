@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -1350,6 +1351,100 @@ func TestHandlerHEADCacheHitWritesMetadataWithoutBody(t *testing.T) {
 	}
 	if got := string(headCtx.Response.Header.Peek("Content-Type")); got != "text/plain; charset=utf-8" {
 		t.Fatalf("HEAD Content-Type = %q, want text/plain; charset=utf-8", got)
+	}
+	if got := upstreamRequests.Load(); got != 1 {
+		t.Fatalf("upstream requests = %d, want 1", got)
+	}
+}
+
+func TestHandlerRecompressesDecodedCachedUpstreamCompressedResponses(t *testing.T) {
+	upstreamBody := []byte(strings.Repeat("cached decoded handler gzip response.", 96))
+	var encoded bytes.Buffer
+	gzipWriter := gzip.NewWriter(&encoded)
+	if _, err := gzipWriter.Write(upstreamBody); err != nil {
+		t.Fatalf("write gzip body: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip body: %v", err)
+	}
+	var upstreamRequests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(encoded.Len()))
+		_, _ = w.Write(encoded.Bytes())
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:   1,
+			Host: "cache.example.com",
+			Bind: ":80",
+		},
+		Bind:                           ":80",
+		UpstreamURLs:                   []string{upstream.URL},
+		CacheEnabled:                   true,
+		ResponseCompressionConfigured:  true,
+		ResponseCompressionEnabled:     true,
+		ResponseCompressionGzipEnabled: true,
+		ResponseCompressionMinBytes:    1024,
+		BrotliEnabled:                  true,
+		CacheRules:                     []store.SiteCacheRule{{Type: "prefix", Value: "/cacheable", TTL: 60}},
+		EffectiveProtection:            &protection,
+	}
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		},
+	}
+	holder.Store(sn)
+
+	responseCache := cache.NewResponseCache(16, 60)
+	defer responseCache.Close()
+
+	eng := engine.New(holder, nil, nil, nil)
+	handler := Handler(Options{
+		Holder:        holder,
+		Engine:        eng,
+		Log:           slog.Default(),
+		Bind:          ":80",
+		ResponseCache: responseCache,
+	})
+
+	request := func() *app.RequestContext {
+		ctx := app.NewContext(0)
+		ctx.Request.Header.SetMethod("GET")
+		ctx.Request.SetRequestURI("/cacheable/compressed.txt")
+		ctx.Request.Header.SetHost("cache.example.com")
+		ctx.Request.Header.Set("Accept-Encoding", "br, gzip")
+		handler(context.Background(), ctx)
+		return ctx
+	}
+
+	missCtx := request()
+	if got := missCtx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("miss status = %d, want %d", got, http.StatusOK)
+	}
+	if got := string(missCtx.Response.Header.Peek("Content-Encoding")); got != "br" {
+		t.Fatalf("miss Content-Encoding = %q, want br", got)
+	}
+	if entries, _ := responseCache.Stats(); entries != 1 {
+		t.Fatalf("response cache entries after miss = %d, want 1", entries)
+	}
+
+	hitCtx := request()
+	if got := hitCtx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("hit status = %d, want %d", got, http.StatusOK)
+	}
+	if got := string(hitCtx.Response.Header.Peek("Content-Encoding")); got != "br" {
+		t.Fatalf("hit Content-Encoding = %q, want br", got)
 	}
 	if got := upstreamRequests.Load(); got != 1 {
 		t.Fatalf("upstream requests = %d, want 1", got)

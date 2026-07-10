@@ -3,6 +3,8 @@ package dataplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -108,7 +110,7 @@ func listenerBind(c *app.RequestContext) string {
 }
 
 func scrubResponseHopByHopHeaders(c *app.RequestContext) {
-	for _, key := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
+	for _, key := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Transfer-Encoding", "Upgrade"} {
 		c.Response.Header.Del(key)
 	}
 }
@@ -121,10 +123,31 @@ func Handler(opts Options) app.HandlerFunc {
 	staticFS, _ := adminweb.ResolveFS("")
 
 	return func(ctx context.Context, c *app.RequestContext) {
+		ctx, closeNotifyCancel := bindStreamCloseNotifyContext(ctx, c)
+		defer func() {
+			if c.Response.GetHijackWriter() == nil && !c.Response.IsBodyStream() {
+				closeNotifyCancel()
+			}
+		}()
 		if fp, ok := tlsFingerprintFromContext(ctx); ok {
 			c.Set(tlsFingerprintContextKey, fp)
 		}
 		applyInternalHTTP3RequestMetadata(c)
+		if doneValue, ok := c.Get(InternalHTTP3CancelTokenHeader); ok {
+			if done, ok := doneValue.(<-chan struct{}); ok && done != nil {
+				parentCtx := ctx
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(parentCtx)
+				go func() {
+					select {
+					case <-done:
+						cancel()
+					case <-parentCtx.Done():
+						cancel()
+					}
+				}()
+			}
+		}
 		// WASM PoW assets must be checked before the generic static handler
 		// because serveOWAFStatic returns true (with 404) for unknown /__owaf/ paths.
 		if handleWASMAssets(c) {
@@ -158,7 +181,7 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		if maxH := sn.HTTP2Config.MaxHeaderFields; maxH > 0 && c.Request.Header.Len() > maxH {
-			c.String(431, "too many request header fields")
+			pages.WriteErrorPage(ctx, c, 431, nil)
 			return
 		}
 
@@ -168,6 +191,13 @@ func Handler(opts Options) app.HandlerFunc {
 			bind = opts.Bind
 		}
 		rt, ok := sn.MatchSite(bind, host)
+		if ok && sn.ResponseCompressionMinBytes > 0 {
+			rt.ResponseCompressionConfigured = true
+			rt.ResponseCompressionEnabled = sn.ResponseCompressionEnabled
+			rt.ResponseCompressionGzipEnabled = sn.ResponseCompressionGzipEnabled
+			rt.ResponseCompressionMinBytes = sn.ResponseCompressionMinBytes
+			rt.BrotliEnabled = sn.BrotliEnabled
+		}
 		if !ok {
 			if shouldLogNoSiteMatchConsole() {
 				opts.Log.Warn("no site match",
@@ -857,13 +887,29 @@ func Handler(opts Options) app.HandlerFunc {
 			scrubResponseHopByHopHeaders(c)
 			logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
 			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass"})
-			tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, true)
+			tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, true, nil)
 			return
 		}
 
 		if result.Site == nil || len(result.Site.UpstreamURLs) == 0 {
 			c.String(502, "no upstream configured")
 			return
+		}
+
+		// Abort proxying if the client body stream ended prematurely before the
+		// request body snapshot could be fully prefetched. This prevents starting
+		// upstream requests for clients that closed the connection (or sent an
+		// HTTP/2 RST_STREAM) while the WAF body prefetch is still reading.
+		if c.Request.IsBodyStream() {
+			if err := requestBodySnapshotError(c); err != nil && !errors.Is(err, io.EOF) {
+				if secLog.Enabled(ctx, slog.LevelDebug) {
+					secLog.Debug("aborting upstream proxy due to client body read error",
+						slog.String("request_id", reqID),
+						slog.String("error", err.Error()),
+					)
+				}
+				return
+			}
 		}
 
 		base, ok := pickUpstream(result.Site.UpstreamURLs, opts.Upstreams, func(n uint32) uint32 {
@@ -875,25 +921,36 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		var upstreamErr error
+		var bufferedResp *proxy.HTTPResponse
 		cacheState := "bypass"
 		upstreamStart := time.Now()
+		recordResponseBody := shouldRecordAppRouteResponseBody(result.Site)
 		switch {
 		case IsWebSocketUpgrade(c):
 			upstreamErr = ForwardWebSocket(c, *result.Site, base, clientIP, opts.Engine)
 		case IsSSERequest(c):
 			upstreamErr = ForwardSSE(ctx, c, *result.Site, base, clientIP, host)
+		case recordResponseBody:
+			bufferedResp, upstreamErr = proxy.FetchHTTP(ctx, c, *result.Site, base, clientIP, host)
+			if upstreamErr == nil {
+				proxy.ForwardBufferedResponse(c, bufferedResp)
+			}
 		default:
 			cacheKey, ttl, ignoreUpstreamCC := "", int64(0), false
 			if opts.ResponseCache != nil {
 				cacheKey, ttl, ignoreUpstreamCC = proxy.SiteCacheEligible(*result.Site, c)
 			}
 			if cacheKey == "" || hasConditionalOrRangeHeaders(c) {
-				upstreamErr = proxy.ForwardHTTP(ctx, c, *result.Site, base, clientIP, host)
+				if isInternalHTTP3Request(c) && !c.Request.IsBodyStream() {
+					upstreamErr = proxy.ForwardHTTPPreserveRequestBodyOnCancel(ctx, c, *result.Site, base, clientIP, host)
+				} else {
+					upstreamErr = proxy.ForwardHTTP(ctx, c, *result.Site, base, clientIP, host)
+				}
 				break
 			}
 			staleEntry := opts.ResponseCache.Lookup(cacheKey)
 			if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
-				proxy.WriteCachedResponse(c, method, entry)
+				proxy.WriteCachedResponseForSite(c, method, entry, *result.Site)
 				cacheState = "hit"
 				break
 			}
@@ -901,7 +958,7 @@ func Handler(opts Options) app.HandlerFunc {
 			bufferedResp, err := proxy.FetchHTTP(ctx, c, *result.Site, base, clientIP, host)
 			if err != nil {
 				if staleEntry != nil {
-					proxy.WriteCachedResponse(c, method, staleEntry)
+					proxy.WriteCachedResponseForSite(c, method, staleEntry, *result.Site)
 					cacheState = "stale"
 					break
 				}
@@ -915,7 +972,7 @@ func Handler(opts Options) app.HandlerFunc {
 			if proxy.ShouldCacheHTTPResponse(method, bufferedResp, ignoreUpstreamCC) {
 				opts.ResponseCache.Set(cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, ttl, proxy.SanitizeHeadersForEdgeCache(bufferedResp.Header))
 			}
-			proxy.ForwardBufferedResponse(c, bufferedResp)
+			proxy.ForwardBufferedResponseForSite(c, bufferedResp, *result.Site)
 		}
 		upstreamLatencyMs := time.Since(upstreamStart).Milliseconds()
 		responseSize := int64(0)
@@ -930,17 +987,27 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 			pages.WriteErrorPage(ctx, c, errCode, siteErrorPage(result.Site, errCode))
 		} else if !IsWebSocketUpgrade(c) && !IsSSERequest(c) {
-			// Upstream empty body fallback: if upstream returns empty body
-			// with a non-204/304 status, render a friendly error page.
-			respStatus := c.Response.StatusCode()
-			respBodyLen := len(c.Response.Body())
-			responseSize = int64(respBodyLen)
-			if c.Response.Header.Get("Trailer") != "" {
+			if proxy.ResponseSizeUnknown(c) {
 				responseSize = 0
-			}
-			if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
-				pages.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
-				responseSize = int64(len(c.Response.Body()))
+			} else if c.Response.IsBodyStream() || c.Response.GetHijackWriter() != nil {
+				if c.Response.Header.Get("Trailer") == "" {
+					if cl := int64(c.Response.Header.ContentLength()); cl > 0 {
+						responseSize = cl
+					}
+				}
+			} else {
+				// Upstream empty body fallback: if upstream returns empty body
+				// with a non-204/304 status, render a friendly error page.
+				respStatus := c.Response.StatusCode()
+				respBodyLen := len(c.Response.Body())
+				responseSize = int64(respBodyLen)
+				if c.Response.Header.Get("Trailer") != "" {
+					responseSize = 0
+				}
+				if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
+					pages.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
+					responseSize = int64(len(c.Response.Body()))
+				}
 			}
 		}
 		if c.Response.Header.Get("Server") != "" && !hasUpstreamServerHeader(c) {
@@ -962,13 +1029,13 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 		aPath := accessPath(c)
 		logAccess(accessLog, reqID, method, aPath, host, statusCode, wafAction)
-		recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: aPath, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: cacheState, Upstream: base, UpstreamLatencyMs: upstreamLatencyMs, ResponseSize: responseSize})
+		recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: aPath, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: cacheState, Upstream: base, UpstreamLatencyMs: upstreamLatencyMs, ResponseSize: responseSize, ResponseSizeKnown: true})
 
 		// Async application route resource recording.
 		// Match rules before launching the goroutine so unmatched requests avoid
 		// map copies and background DB work on the hot path.
 		// Skip recording if the request contains any excluded header.
-		tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, false)
+		tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, false, bufferedResponseBody(bufferedResp))
 	}
 }
 
@@ -976,7 +1043,7 @@ func pickUpstream(urls []string, pool *upstream.Pool, next func(uint32) uint32) 
 	return upstream.PickByProtocolPreference(urls, pool, next)
 }
 
-func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, reqCtx *pipeline.RequestCtx, method, host, path, rawQ, cipStr, ua string, statusCode int, isLocalResponse bool) {
+func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, reqCtx *pipeline.RequestCtx, method, host, path, rawQ, cipStr, ua string, statusCode int, isLocalResponse bool, responseBody []byte) {
 	if opts.RecordedResourceRepo == nil || hasExcludedHeader(c, sn.ExcludeRecordHeaders) {
 		return
 	}
@@ -984,7 +1051,10 @@ func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot
 	if len(reqBody) > logBodyPreviewLimit {
 		reqBody = reqBody[:logBodyPreviewLimit]
 	}
-	respBody := string(c.Response.Body())
+	respBody := string(responseBody)
+	if respBody == "" && !c.Response.IsBodyStream() {
+		respBody = string(c.Response.Body())
+	}
 	if len(respBody) > logBodyPreviewLimit {
 		respBody = respBody[:logBodyPreviewLimit]
 	}
@@ -1007,7 +1077,7 @@ func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot
 		Method:              method,
 		Host:                host,
 		Path:                path,
-		QueryString:         sanitizeQueryString(rawQ),
+		QueryString:         rawQ,
 		ClientIP:            cipStr,
 		StatusCode:          statusCode,
 		ContentType:         string(c.Response.Header.ContentType()),
@@ -1032,7 +1102,9 @@ func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot
 	}
 	ids := appresource.MatchedRuleIDs(rt.AppRouteRules, mat, headerFn)
 	if len(ids) > 0 || len(rt.AppRouteRules) == 0 {
-		go recordAppRouteResourceSafe(opts.RecordedResourceRepo, rt.Site.ID, mat, ids)
+		recordMat := *mat
+		recordMat.QueryString = sanitizeQueryString(rawQ)
+		go recordAppRouteResourceSafe(opts.RecordedResourceRepo, rt.Site.ID, &recordMat, ids)
 	}
 }
 
@@ -1045,6 +1117,26 @@ func recordAppRouteResourceSafe(repo *repository.RecordedResourceRepo, siteID ui
 	rec.FirstSeen = time.Now()
 	rec.LastSeen = rec.FirstSeen
 	_ = repo.Upsert(rec)
+}
+
+func shouldRecordAppRouteResponseBody(rt *snapshot.SiteRuntime) bool {
+	if rt == nil || len(rt.AppRouteRules) == 0 {
+		return false
+	}
+	for _, rule := range rt.AppRouteRules {
+		switch rule.Target {
+		case store.AppRouteTargetResponseBody, store.AppRouteTargetFullHTTPResponse:
+			return true
+		}
+	}
+	return false
+}
+
+func bufferedResponseBody(resp *proxy.HTTPResponse) []byte {
+	if resp == nil || len(resp.Body) == 0 {
+		return nil
+	}
+	return resp.Body
 }
 
 // hasExcludedHeader checks whether the request carries any header configured
@@ -1182,6 +1274,7 @@ type accessLogInfo struct {
 	HeaderOrder          []string
 	UpstreamLatencyMs    int64
 	ResponseSize         int64
+	ResponseSizeKnown    bool
 	RequestHeaders       string
 	RequestBodyPreview   string
 	RequestBodyTruncated bool
@@ -1283,7 +1376,7 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	requestHeaders := info.RequestHeaders
 	responseHeaders := info.ResponseHeaders
 	responseSize := info.ResponseSize
-	if responseSize == 0 && c.Response.Header.Get("Trailer") == "" && string(c.Request.Method()) != "HEAD" {
+	if !info.ResponseSizeKnown && responseSize == 0 && c.Response.Header.Get("Trailer") == "" && string(c.Request.Method()) != "HEAD" {
 		if cl := int64(c.Response.Header.ContentLength()); cl > 0 {
 			responseSize = cl
 		} else if !c.Response.IsBodyStream() {

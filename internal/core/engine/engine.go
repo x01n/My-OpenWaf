@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"net"
 	"sync"
 
@@ -160,7 +159,6 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	// Compile rules (this is the expensive operation we want to do only once).
 	all := convertAndCompile(rt.Rules)
 	cr := &compiledRules{}
-	fmt.Printf("[DEBUG] getCompiledRules: rt.Rules=%d cr.Custom=%d\n", len(rt.Rules), len(cr.Custom))
 	for i := range all {
 		switch all[i].Phase {
 		case "acl":

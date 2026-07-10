@@ -3,7 +3,6 @@ package rules
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -188,7 +187,6 @@ func (p *customPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 }
 
 func executeCustomPhase(ctx *pipeline.RequestCtx, rules []Compiled, needsDerivedHeaders bool) (action.Result, bool) {
-	fmt.Printf("[DEBUG] executeCustomPhase: ctx.TLS.ALPN=%v ctx.TLS.HasValue=%v needsDerivedHeaders=%v\n", ctx.TLS.ALPN, ctx.TLS.HasValue(), needsDerivedHeaders)
 	if len(rules) == 0 {
 		return action.Pass(), false
 	}

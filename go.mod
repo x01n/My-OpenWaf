@@ -4,6 +4,7 @@ go 1.25.5
 
 require (
 	github.com/andybalholm/brotli v1.2.2
+	github.com/cloudwego/gopkg v0.2.0
 	github.com/cloudwego/hertz v0.10.5
 	github.com/dgraph-io/ristretto v0.2.0
 	github.com/glebarez/sqlite v1.11.0
@@ -19,9 +20,9 @@ require (
 	github.com/refraction-networking/utls v1.8.2
 	github.com/wenlng/go-captcha/v2 v2.0.5
 	github.com/wu238121-a11y/go-ja4 v1.0.0
-	golang.org/x/crypto v0.53.0
-	golang.org/x/image v0.43.0
-	golang.org/x/net v0.56.0
+	golang.org/x/crypto v0.54.0
+	golang.org/x/image v0.44.0
+	golang.org/x/net v0.57.0
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.31.2
@@ -34,7 +35,6 @@ require (
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
-	github.com/cloudwego/gopkg v0.2.0 // indirect
 	github.com/cloudwego/netpoll v0.7.4 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
@@ -58,13 +58,15 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/arch v0.28.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/arch v0.29.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	modernc.org/libc v1.73.5 // indirect
+	modernc.org/libc v1.74.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.53.0 // indirect
 )
+
+replace github.com/hertz-contrib/http2 => ./third_party/hertz-contrib-http2

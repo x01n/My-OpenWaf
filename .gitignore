@@ -45,6 +45,5 @@ AGENTS.md
 .mcp.json
 *.png
 rule.md
-third_party/
-third_party/**
 *.test
+blazehttp
