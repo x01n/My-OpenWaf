@@ -19,7 +19,15 @@ func ListIPEntries(repo *repository.IPListRepo) app.HandlerFunc {
 		offset, limit := utils.Paginate(page, pageSize)
 		kind := string(c.Query("kind"))
 
-		items, total, err := repo.List(offset, limit, kind)
+		var siteID *uint
+		if raw := string(c.Query("site_id")); raw != "" {
+			if v, err := strconv.ParseUint(raw, 10, 64); err == nil {
+				sid := uint(v)
+				siteID = &sid
+			}
+		}
+
+		items, total, err := repo.List(offset, limit, kind, siteID)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -95,6 +103,7 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			Note    *string           `json:"note"`
 			Enabled *bool             `json:"enabled"`
 			Action  *string           `json:"action"`
+			SiteID  **uint            `json:"site_id"`
 		}
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -127,6 +136,9 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 				c.JSON(400, map[string]string{"error": "action must be intercept or drop"})
 				return
 			}
+		}
+		if body.SiteID != nil {
+			existing.SiteID = *body.SiteID
 		}
 		if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})

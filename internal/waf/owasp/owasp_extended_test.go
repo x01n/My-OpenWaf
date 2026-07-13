@@ -232,6 +232,29 @@ func TestCheckFileUpload_NullByte(t *testing.T) {
 	}
 }
 
+func TestCheckFileUpload_SemicolonDoubleExtension(t *testing.T) {
+	hit, ok := CheckFileUpload("shell.php;.jpg", "image/jpeg")
+	if !ok || hit.RuleID != "owasp:upload:002" {
+		t.Fatalf("semicolon double extension hit = %#v, want owasp:upload:002", hit)
+	}
+}
+
+func TestCheckFileUpload_DoesNotCollapseInternalSpaces(t *testing.T) {
+	for _, filename := range []string{"report.p h p.jpg", "manual.phpunit.jpg", "manual.php-docs.jpg", "notes;draft.txt", "report: Q1.jpg"} {
+		if hit, ok := CheckFileUpload(filename, "image/jpeg"); ok {
+			t.Fatalf("clean filename %q matched %#v", filename, hit)
+		}
+	}
+}
+
+func TestCheckRawMultipartFilenames_SemicolonDoubleExtension(t *testing.T) {
+	body := []byte("Content-Disposition: form-data; name=\"uploaded\"; filename=\"shell.php;.jpg\"\r\n")
+	hit, ok := CheckRawMultipartFilenames(body)
+	if !ok || hit.RuleID != "owasp:upload:002" {
+		t.Fatalf("raw semicolon double extension hit = %#v, want owasp:upload:002", hit)
+	}
+}
+
 // Enhanced SQLi patterns
 func TestCheckOWASP_SQLi_Boolean(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=1 or 1=1", nil, nil)

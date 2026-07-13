@@ -84,6 +84,22 @@ const (
 
 var noBody io.ReadCloser = ioutil.NopCloser(bytes.NewReader(nil))
 
+type requestDoneObserverKey struct{}
+
+func WithRequestDoneObserver(ctx context.Context, observer func(<-chan struct{})) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, requestDoneObserverKey{}, observer)
+}
+
+func notifyRequestDoneObserver(ctx context.Context, done <-chan struct{}) {
+	observer, _ := ctx.Value(requestDoneObserverKey{}).(func(<-chan struct{}))
+	if observer != nil {
+		observer(done)
+	}
+}
+
 type missingBody struct{}
 
 func (missingBody) Close() error             { return nil }
@@ -241,6 +257,7 @@ func (cc *clientConn) RoundTrip(ctx context.Context, req *protocol.Request, rsp 
 		cs.reqBody = bytes.NewReader(req.Body())
 	}
 
+	notifyRequestDoneObserver(ctx, cs.donec)
 	go cs.doRequest(req)
 
 	waitDone := func() error {
@@ -680,9 +697,10 @@ type clientStream struct {
 	abort     chan struct{} // closed to signal stream should end immediately
 	abortErr  error         // set if abort is closed
 
-	peerClosed chan struct{} // closed when the peer sends an END_STREAM flag
-	donec      chan struct{} // closed after the stream is in the closed state
-	on100      chan struct{} // buffered; written to if a 100 is received
+	peerClosed   chan struct{} // closed when the peer sends an END_STREAM flag
+	donec        chan struct{} // closed after the stream is in the closed state
+	readLoopRefs sync.WaitGroup
+	on100        chan struct{} // buffered; written to if a 100 is received
 
 	respHeaderRecv chan struct{}      // closed when headers are received
 	res            *protocol.Response // set if respHeaderRecv is closed
@@ -1302,6 +1320,7 @@ func (cs *clientStream) cleanupWriteRequest(err error) {
 	if cs.ID != 0 {
 		cc.forgetStreamID(cs.ID)
 	}
+	cs.readLoopRefs.Wait()
 
 	cc.wmu.Lock()
 	werr := cc.werr
@@ -1893,6 +1912,7 @@ func (rl *clientConnReadLoop) run() error {
 					se.Cause = cc.fr.errDetail
 				}
 				rl.endStreamError(cs, se)
+				cs.readLoopRefs.Done()
 			}
 			continue
 		} else if err != nil {
@@ -1946,6 +1966,7 @@ func (rl *clientConnReadLoop) processHeaders(f *MetaHeadersFrame) error {
 		// was just something we canceled, ignore it.
 		return nil
 	}
+	defer cs.readLoopRefs.Done()
 	if cs.readClosed {
 		rl.endStreamError(cs, StreamError{
 			StreamID: f.StreamID,
@@ -2235,6 +2256,7 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) error {
 		}
 		return nil
 	}
+	defer cs.readLoopRefs.Done()
 	if cs.readClosed {
 		hlog.SystemLogger().Error("HTTP2: protocol error: received DATA after END_STREAM")
 		rl.endStreamError(cs, StreamError{
@@ -2336,6 +2358,7 @@ func (rl *clientConnReadLoop) streamByID(id uint32) *clientStream {
 	defer rl.cc.mu.Unlock()
 	cs := rl.cc.streams[id]
 	if cs != nil && !cs.readAborted {
+		cs.readLoopRefs.Add(1)
 		return cs
 	}
 	return nil
@@ -2442,6 +2465,9 @@ func (rl *clientConnReadLoop) processWindowUpdate(f *WindowUpdateFrame) error {
 	if f.StreamID != 0 && cs == nil {
 		return nil
 	}
+	if cs != nil {
+		defer cs.readLoopRefs.Done()
+	}
 
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
@@ -2463,6 +2489,7 @@ func (rl *clientConnReadLoop) processResetStream(f *RSTStreamFrame) error {
 		// TODO: return error if server tries to RST_STREAM an idle stream
 		return nil
 	}
+	defer cs.readLoopRefs.Done()
 	serr := streamError(cs.ID, f.ErrCode)
 	serr.Cause = errFromPeer
 	if f.ErrCode == ErrCodeProtocol {

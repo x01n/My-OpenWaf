@@ -204,9 +204,9 @@ export const siteApi = {
     get(`/sites/${id}/access-logs`, params),
   getRules: (id: string | number) => get<{ items: Rule[]; total: number; policy_id?: number }>(`/sites/${id}/rules`),
   getRouteRules: (id: string | number) =>
-    get<AppRouteRule[]>(`/sites/${id}/application-route-rules`),
+    get<{ items: AppRouteRule[]; total: number }>(`/sites/${id}/application-route-rules`).then((r) => r.items ?? []),
   getRecordedResources: (id: string | number) =>
-    get<RecordedResource[]>(`/sites/${id}/recorded-resources`),
+    get<{ items: RecordedResource[]; total: number }>(`/sites/${id}/recorded-resources`).then((r) => r.items ?? []),
   getErrorPages: (id: string | number) => get(`/sites/${id}/error-pages`),
   updateErrorPages: (id: string | number, data: any) =>
     post(`/sites/${id}/error-pages`, data),
@@ -216,7 +216,7 @@ export const siteApi = {
  * 证书相关 API
  */
 export const certificateApi = {
-  list: () => get<Certificate[]>("/certificates"),
+  list: () => get<{ items: Certificate[]; total: number }>("/certificates").then((r) => r.items ?? []),
   get: (id: string | number) => get<Certificate>(`/certificates/${id}`),
   create: (data: Partial<Certificate>) => post<Certificate>("/certificates", data),
   update: (id: string | number, data: Partial<Certificate>) =>
@@ -251,7 +251,7 @@ export const ruleApi = {
  * 策略相关 API
  */
 export const policyApi = {
-  list: () => get<Policy[]>("/policies"),
+  list: () => get<{ items: Policy[]; total: number }>("/policies").then((r) => r.items ?? []),
   get: (id: string | number) => get<Policy>(`/policies/${id}`),
   create: (data: Partial<Policy>) => post<Policy>("/policies", data),
   update: (id: string | number, data: Partial<Policy>) =>
@@ -279,10 +279,12 @@ export const protectionApi = {
  * IP 列表相关 API
  */
 export const ipListApi = {
-  list: () => get<{ items: any[]; total: number }>("/ip-lists"),
-  get: (id: string | number) => get(`/ip-lists/${id}`),
-  create: (data: any) => post("/ip-lists", data),
-  update: (id: string | number, data: any) => post(`/ip-lists/${id}/update`, data),
+  list: (params?: { kind?: string; site_id?: number; page?: number }) =>
+    get<{ items: IPEntry[]; total: number; page?: number }>("/ip-lists", params),
+  get: (id: string | number) => get<IPEntry>(`/ip-lists/${id}`),
+  create: (data: Partial<IPEntry>) => post<IPEntry>("/ip-lists", data),
+  update: (id: string | number, data: Partial<IPEntry>) =>
+    post<IPEntry>(`/ip-lists/${id}/update`, data),
   delete: (id: string | number) => post(`/ip-lists/${id}/delete`),
 };
 
@@ -310,6 +312,15 @@ export const accessLogApi = {
   get: (id: string | number) => get<AccessLog>(`/access-lists/${id}`),
   getSiteStats: (id: string | number, params?: any) =>
     get(`/sites/${id}/access-logs/stats`, params),
+};
+
+/**
+ * 请求追踪相关 API
+ * 通过 request_id 查询完整链路
+ */
+export const requestTraceApi = {
+  get: (requestId: string) =>
+    get<RequestTrace>(`/request/${encodeURIComponent(requestId)}`),
 };
 
 /**
@@ -404,7 +415,7 @@ export const settingsApi = {
  * 上游相关 API
  */
 export const upstreamApi = {
-  getStatus: () => get("/upstreams/status"),
+  getStatus: () => get<UpstreamStatusResponse>("/upstreams/status"),
 };
 
 /**
@@ -418,9 +429,23 @@ export const runtimeApi = {
  * API 密钥相关 API
  */
 export const apiKeyApi = {
-  list: () => get("/api-keys"),
-  create: (data: any) => post("/api-keys", data),
+  list: () => get<{ items: AdminAPIKey[] }>("/api-keys").then((r) => r.items ?? []),
+  create: (data: { name: string }) => post<{ key: AdminAPIKey; token: string }>("/api-keys", data),
   delete: (id: string | number) => post(`/api-keys/${id}/delete`),
+};
+
+/**
+ * 管理员账户相关 API
+ */
+export const adminUserApi = {
+  list: () => get<{ items: AdminUser[] }>("/admin-users").then((r) => r.items ?? []),
+  create: (data: { username: string; password: string; role: string }) =>
+    post<AdminUser>("/admin-users", data),
+  updateRole: (id: string | number, role: string) =>
+    post(`/admin-users/${id}/update-role`, { role }),
+  updatePassword: (id: string | number, password: string) =>
+    post(`/admin-users/${id}/update-password`, { password }),
+  delete: (id: string | number) => post(`/admin-users/${id}/delete`),
 };
 
 /**
@@ -438,9 +463,114 @@ export const systemApi = {
   reload: () => post("/reload"),
 };
 
+/**
+ * 威胁情报订阅相关 API
+ */
+export const threatIntelApi = {
+  list: () => get<{ items: ThreatIntelFeed[]; total: number }>("/threat-intel-feeds"),
+  create: (data: Partial<ThreatIntelFeed>) =>
+    post<ThreatIntelFeed>("/threat-intel-feeds", data),
+  update: (id: string | number, data: Partial<ThreatIntelFeed>) =>
+    post<ThreatIntelFeed>(`/threat-intel-feeds/${id}/update`, data),
+  delete: (id: string | number) => post(`/threat-intel-feeds/${id}/delete`),
+  sync: (id: string | number) => post<ThreatIntelFeed>(`/threat-intel-feeds/${id}/sync`),
+  listSyncLogs: (params?: {
+    page?: number;
+    page_size?: number;
+    feed_id?: number;
+    status?: "success" | "failed";
+  }) =>
+    get<{
+      items: ThreatIntelSyncLog[];
+      total: number;
+      page: number;
+      page_size: number;
+    }>("/threat-intel-sync-logs", params),
+};
+
+/**
+ * 站点访问控制相关 API
+ */
+export const accessApi = {
+  getConfig: (siteId: string | number) =>
+    get<SiteAccessConfig>(`/sites/${siteId}/access`),
+  saveConfig: (siteId: string | number, data: { enabled?: boolean; shared_password?: string; session_ttl?: number }) =>
+    post(`/sites/${siteId}/access`, data),
+
+  listProviders: (siteId: string | number) =>
+    get<{ providers: AccessProvider[] }>(`/sites/${siteId}/access/providers`).then((r) => r.providers ?? []),
+  createProvider: (siteId: string | number, data: Partial<AccessProvider>) =>
+    post<AccessProvider>(`/sites/${siteId}/access/providers`, data),
+  updateProvider: (siteId: string | number, pid: string | number, data: Partial<AccessProvider>) =>
+    post(`/sites/${siteId}/access/providers/${pid}/update`, data),
+  deleteProvider: (siteId: string | number, pid: string | number) =>
+    post(`/sites/${siteId}/access/providers/${pid}/delete`),
+
+  listUsers: (siteId: string | number) =>
+    get<{ users: AccessUser[] }>(`/sites/${siteId}/access/users`).then((r) => r.users ?? []),
+  createUser: (siteId: string | number, data: { username: string; password: string; enabled?: boolean }) =>
+    post<AccessUser>(`/sites/${siteId}/access/users`, data),
+  deleteUser: (siteId: string | number, uid: string | number) =>
+    post(`/sites/${siteId}/access/users/${uid}/delete`),
+
+  listPathRules: (siteId: string | number) =>
+    get<{ rules: AccessPathRule[] }>(`/sites/${siteId}/access/rules`).then((r) => r.rules ?? []),
+  createPathRule: (siteId: string | number, data: Partial<AccessPathRule>) =>
+    post<AccessPathRule>(`/sites/${siteId}/access/rules`, data),
+  updatePathRule: (siteId: string | number, rid: string | number, data: Partial<AccessPathRule>) =>
+    post(`/sites/${siteId}/access/rules/${rid}/update`, data),
+  deletePathRule: (siteId: string | number, rid: string | number) =>
+    post(`/sites/${siteId}/access/rules/${rid}/delete`),
+};
+
+/**
+ * 误报反馈相关 API
+ */
+export const falsePositiveApi = {
+  list: (params?: { page?: number; page_size?: number; status?: string }) =>
+    get<{ items: FalsePositiveReport[]; total: number; page?: number; page_size?: number }>(
+      "/false-positives",
+      params,
+    ),
+  create: (data: Partial<FalsePositiveReport>) =>
+    post<FalsePositiveReport>("/false-positives", data),
+  updateStatus: (id: number, status: string) =>
+    post<{ id: number; status: string }>(`/false-positives/${id}/status`, { status }),
+  delete: (id: number) => post(`/false-positives/${id}/delete`),
+};
+
+/**
+ * 配置备份/恢复相关 API
+ */
+export const backupApi = {
+  export: () => get<BackupData>("/backup/export"),
+  import: (data: BackupData, replaceMode: boolean) =>
+    post<ImportResult>("/backup/import", { data, replace_mode: replaceMode }),
+};
+
+/**
+ * 预置爬虫白名单相关 API
+ * - preview: 预览预置条目，不写库
+ * - seed: 将预置条目写入 IP 白名单表（已存在的跳过）
+ */
+export const presetBotWhitelistApi = {
+  preview: () =>
+    get<{ items: Array<{ value: string; note: string }>; total: number }>(
+      "/preset-bot-whitelist",
+    ),
+  seed: () =>
+    post<{ added: number; skipped: number; entries: string[] }>(
+      "/preset-bot-whitelist/seed",
+    ),
+};
+
 // 引入类型（避免循环依赖，在文件末尾导入类型声明）
 import type {
   Site, SiteListener, Certificate, Rule, Policy,
   SecurityEvent, AccessLog, DashboardSummary,
   AppRouteRule, RecordedResource,
+  SiteAccessConfig, AccessProvider, AccessUser, AccessPathRule,
+  AdminAPIKey, AdminUser, IPEntry, ThreatIntelFeed, ThreatIntelSyncLog,
+  BackupData, ImportResult, FalsePositiveReport,
+  RequestTrace, UpstreamStatusResponse,
 } from "./types";

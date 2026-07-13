@@ -13,6 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { toast } from "sonner";
 import {
   IconUserCheck,
@@ -96,6 +97,13 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
 
   const handleTextChange = useCallback(
     (key: string, value: string) => {
+      setLocalSettings((prev) => ({ ...prev, [key]: value }));
+    },
+    []
+  );
+
+  const handleValueChange = useCallback(
+    (key: string, value: unknown) => {
       setLocalSettings((prev) => ({ ...prev, [key]: value }));
     },
     []
@@ -248,7 +256,15 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                   >
                     {dynamicOptions.map((option) => {
                       const optionEnabled = getValue(option.key, false);
-                      const hasResourceConfig = option.configKey && siteId;
+                      const isJs = option.key === "js_obfuscation";
+                      const jsMode = getValue("js_protection_mode", "all") as
+                        | "all"
+                        | "paths";
+                      // JS 保护在 all 模式下不需要选择路径，仅 paths 模式展示路径树
+                      const showResourceTree =
+                        option.configKey &&
+                        siteId &&
+                        (!isJs || jsMode === "paths");
 
                       return (
                         <div key={option.key} className="space-y-2">
@@ -282,8 +298,43 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                             </div>
                           </div>
 
+                          {/* JS 保护范围模式选择 */}
+                          {isJs && optionEnabled && dynamicProtectionEnabled && (
+                            <div className="ml-7 space-y-2">
+                              <Label className="text-xs font-medium">
+                                {t("captcha.jsProtectionMode")}
+                              </Label>
+                              <RadioGroup
+                                value={jsMode}
+                                onValueChange={(v) =>
+                                  handleValueChange("js_protection_mode", v)
+                                }
+                                className="flex flex-col gap-1.5"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <RadioGroupItem value="all" id="dlg-js-mode-all" />
+                                  <Label
+                                    htmlFor="dlg-js-mode-all"
+                                    className="cursor-pointer text-xs font-normal"
+                                  >
+                                    {t("captcha.jsProtectionModeAll")}
+                                  </Label>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <RadioGroupItem value="paths" id="dlg-js-mode-paths" />
+                                  <Label
+                                    htmlFor="dlg-js-mode-paths"
+                                    className="cursor-pointer text-xs font-normal"
+                                  >
+                                    {t("captcha.jsProtectionModePaths")}
+                                  </Label>
+                                </div>
+                              </RadioGroup>
+                            </div>
+                          )}
+
                           {/* 从已记录资源中选择路径 */}
-                          {hasResourceConfig && optionEnabled && dynamicProtectionEnabled && (
+                          {showResourceTree && optionEnabled && dynamicProtectionEnabled && (
                             <div className="ml-7 space-y-1">
                               <Label className="text-xs font-medium">
                                 {t(option.resourceLabelKey!)}
@@ -322,6 +373,35 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                           value={getValue("watermark_text", "")}
                           onChange={(e) => handleTextChange("watermark_text", e.target.value)}
                         />
+                      </div>
+                    )}
+
+                    {/* 解密缓存时间 */}
+                    {dynamicProtectionEnabled && (
+                      <div className="ml-7 space-y-1">
+                        <Label className="text-xs font-medium">
+                          {t("captcha.decryptCacheTtl")}
+                        </Label>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            type="number"
+                            min={0}
+                            className="w-32 text-xs"
+                            value={getValue("decrypt_cache_ttl_seconds", 0)}
+                            onChange={(e) =>
+                              handleValueChange(
+                                "decrypt_cache_ttl_seconds",
+                                Math.max(0, Number(e.target.value) || 0)
+                              )
+                            }
+                          />
+                          <span className="text-xs text-muted-foreground">
+                            {t("captcha.decryptCacheTtlUnit")}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground">
+                          {t("captcha.decryptCacheTtlDesc")}
+                        </p>
                       </div>
                     )}
                   </div>

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
@@ -278,6 +277,44 @@ func releaseHertzUpstreamRequest(req *hertzprotocol.Request) {
 	hertzprotocol.ReleaseRequest(req)
 }
 
+func releaseHertzUpstreamRequestWhenDone(req *hertzprotocol.Request, doneSignals []<-chan struct{}) {
+	releaseHertzUpstreamResourcesWhenDone(req, nil, doneSignals)
+}
+
+func releaseHertzUpstreamResourcesWhenDone(req *hertzprotocol.Request, resp *hertzprotocol.Response, doneSignals []<-chan struct{}) {
+	if req == nil && resp == nil {
+		return
+	}
+	release := func() {
+		if resp != nil {
+			hertzprotocol.ReleaseResponse(resp)
+		}
+		releaseHertzUpstreamRequest(req)
+	}
+	if len(doneSignals) == 0 {
+		release()
+		return
+	}
+	allDone := true
+	for _, done := range doneSignals {
+		select {
+		case <-done:
+		default:
+			allDone = false
+		}
+	}
+	if allDone {
+		release()
+		return
+	}
+	go func() {
+		for _, done := range doneSignals {
+			<-done
+		}
+		release()
+	}()
+}
+
 func hertzHeaderToHTTPHeader(src interface{ VisitAll(func(key, value []byte)) }) http.Header {
 	dst := make(http.Header)
 	src.VisitAll(func(key, value []byte) {
@@ -298,36 +335,104 @@ func hertzTrailerToHTTPHeader(src *hertzprotocol.Trailer) http.Header {
 }
 
 type hertzResponseBody struct {
-	reader  io.Reader
-	resp    *hertzprotocol.Response
-	trailer http.Header
-	closed  bool
+	reader        io.Reader
+	resp          *hertzprotocol.Response
+	req           *hertzprotocol.Request
+	requestDone   []<-chan struct{}
+	trailer       http.Header
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	cond          *sync.Cond
+	activeReaders int
+	closing       bool
+	closed        bool
+	closeErr      error
 }
 
 func (b *hertzResponseBody) Read(p []byte) (int, error) {
-	n, err := b.reader.Read(p)
-	if err != nil {
-		b.syncTrailer()
+	b.mu.Lock()
+	if b.closing || b.closed {
+		b.mu.Unlock()
+		return 0, io.EOF
 	}
+	reader := b.reader
+	b.activeReaders++
+	b.mu.Unlock()
+
+	n, err := reader.Read(p)
+
+	b.mu.Lock()
+	if err != nil {
+		b.syncTrailerLocked()
+	}
+	b.activeReaders--
+	if b.activeReaders == 0 && b.cond != nil {
+		b.cond.Broadcast()
+	}
+	b.mu.Unlock()
 	return n, err
 }
 
 func (b *hertzResponseBody) Close() error {
+	b.mu.Lock()
 	if b.closed {
-		return nil
+		err := b.closeErr
+		b.mu.Unlock()
+		return err
 	}
-	b.closed = true
-	b.syncTrailer()
+	if b.closing {
+		b.initCondLocked()
+		for !b.closed {
+			b.cond.Wait()
+		}
+		err := b.closeErr
+		b.mu.Unlock()
+		return err
+	}
+	b.closing = true
+	cancel := b.cancel
+	b.cancel = nil
+	b.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+
+	b.mu.Lock()
+	b.initCondLocked()
+	for b.activeReaders > 0 {
+		b.cond.Wait()
+	}
+	b.syncTrailerLocked()
+	resp := b.resp
+	req := b.req
+	requestDone := b.requestDone
+	b.resp = nil
+	b.req = nil
+	b.requestDone = nil
+	b.mu.Unlock()
+
 	var closeErr error
-	if b.resp != nil {
-		closeErr = b.resp.CloseBodyStream()
-		hertzprotocol.ReleaseResponse(b.resp)
-		b.resp = nil
+	if resp != nil {
+		closeErr = resp.CloseBodyStream()
 	}
+	releaseHertzUpstreamResourcesWhenDone(req, resp, requestDone)
+
+	b.mu.Lock()
+	b.closeErr = closeErr
+	b.closed = true
+	b.cond.Broadcast()
+	b.mu.Unlock()
 	return closeErr
 }
 
-func (b *hertzResponseBody) syncTrailer() {
+func (b *hertzResponseBody) initCondLocked() {
+	if b.cond == nil {
+		b.cond = sync.NewCond(&b.mu)
+	}
+}
+
+func (b *hertzResponseBody) syncTrailerLocked() {
 	if b.resp == nil || b.trailer == nil {
 		return
 	}
@@ -351,7 +456,7 @@ func httpProtoForBase(base string) string {
 	}
 }
 
-func hertzResponseToHTTPResponse(base string, hresp *hertzprotocol.Response) *http.Response {
+func hertzResponseToHTTPResponse(base string, hresp *hertzprotocol.Response, hreq *hertzprotocol.Request, requestDone []<-chan struct{}, cancel context.CancelFunc) *http.Response {
 	if hresp == nil {
 		return nil
 	}
@@ -363,7 +468,7 @@ func hertzResponseToHTTPResponse(base string, hresp *hertzprotocol.Response) *ht
 		ContentLength: int64(hresp.Header.ContentLength()),
 		Header:        hertzHeaderToHTTPHeader(&hresp.Header),
 		Trailer:       trailer,
-		Body:          &hertzResponseBody{reader: body, resp: hresp, trailer: trailer},
+		Body:          &hertzResponseBody{reader: body, resp: hresp, req: hreq, requestDone: requestDone, trailer: trailer, cancel: cancel},
 	}
 }
 
@@ -388,9 +493,9 @@ func copyHTTPRequestHeadersToHertz(dst *hertzprotocol.Request, src *http.Request
 	}
 }
 
-func doHertzUpstream(ctx context.Context, rt snapshot.SiteRuntime, base string, req *http.Request) (*hertzprotocol.Response, error) {
+func doHertzUpstream(ctx context.Context, rt snapshot.SiteRuntime, base string, req *http.Request) (*hertzprotocol.Response, *hertzprotocol.Request, []<-chan struct{}, context.CancelFunc, error) {
 	if req == nil {
-		return nil, errors.New("nil upstream request")
+		return nil, nil, nil, nil, errors.New("nil upstream request")
 	}
 	var (
 		clientInst *hertzclient.Client
@@ -398,7 +503,7 @@ func doHertzUpstream(ctx context.Context, rt snapshot.SiteRuntime, base string, 
 	)
 	clientInst, err = sharedHertzH2CClient()
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, nil, err
 	}
 	hreq := hertzprotocol.AcquireRequest()
 	hreq.SetRequestURI(req.URL.String())
@@ -406,12 +511,17 @@ func doHertzUpstream(ctx context.Context, rt snapshot.SiteRuntime, base string, 
 	hreq.URI().DisablePathNormalizing = true
 	copyHTTPRequestHeadersToHertz(hreq, req)
 	resp := hertzprotocol.AcquireResponse()
-	if err := clientInst.Do(ctx, hreq, resp); err != nil {
-		releaseHertzUpstreamRequest(hreq)
-		hertzprotocol.ReleaseResponse(resp)
-		return nil, err
+	requestCtx, cancel := context.WithCancel(ctx)
+	requestDone := make([]<-chan struct{}, 0, 1)
+	requestCtx = http2.WithRequestDoneObserver(requestCtx, func(done <-chan struct{}) {
+		requestDone = append(requestDone, done)
+	})
+	if err := clientInst.Do(requestCtx, hreq, resp); err != nil {
+		cancel()
+		releaseHertzUpstreamResourcesWhenDone(hreq, resp, requestDone)
+		return nil, nil, nil, nil, err
 	}
-	return resp, nil
+	return resp, hreq, requestDone, cancel, nil
 }
 
 // NormalizeUpstreamURL converts h2c:// and h3:// URLs to http:// and https://
@@ -515,6 +625,114 @@ type HTTPResponse struct {
 	Body                 []byte
 	Header               http.Header
 	UpstreamHTTPProtocol string
+}
+
+type identityResponseEntity struct {
+	Path        string
+	ContentType string
+	Body        []byte
+}
+
+type identityResponseTransformer interface {
+	Transform(identityResponseEntity) (identityResponseEntity, error)
+}
+
+type identityResponseTransformerFunc func(identityResponseEntity) (identityResponseEntity, error)
+
+func (fn identityResponseTransformerFunc) Transform(entity identityResponseEntity) (identityResponseEntity, error) {
+	return fn(entity)
+}
+
+// responseEntityTransformerForSite 在站点启用动态保护（HTML/JS 混淆或图片水印）时，
+// 返回一个基于 dynamic.Processor 的响应实体变换器；否则返回 nil 以跳过变换。
+func responseEntityTransformerForSite(rt snapshot.SiteRuntime) identityResponseTransformer {
+	cfg := rt.DynamicProtection
+	if !cfg.HTMLObfuscationEnabled && !cfg.JSObfuscationEnabled && !cfg.ImageWatermarkEnabled {
+		return nil
+	}
+	proc := dynamic.NewProcessor(cfg)
+	return identityResponseTransformerFunc(func(entity identityResponseEntity) (identityResponseEntity, error) {
+		transformed, err := proc.Process(entity.Path, entity.ContentType, entity.Body)
+		if err != nil {
+			return entity, err
+		}
+		entity.Body = transformed
+		return entity, nil
+	})
+}
+
+func shouldTransformIdentityResponse(c *app.RequestContext, statusCode int) bool {
+	if c == nil || statusCode != http.StatusOK {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(string(c.Request.Method())), http.MethodHead) {
+		return false
+	}
+	if len(c.Request.Header.Peek("Range")) > 0 || len(c.Request.Header.Peek("If-Range")) > 0 {
+		return false
+	}
+	if len(trimASCIIHeaderSpaceBytes(c.Response.Header.Peek("Content-Range"))) > 0 {
+		return false
+	}
+	if cacheControlHasNoTransformBytes(c.Response.Header.Peek("Cache-Control")) {
+		return false
+	}
+	encoding := normalizedContentEncodingBytes(c.Response.Header.ContentEncoding())
+	if encoding != "" && encoding != "identity" {
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(string(c.Response.Header.ContentType())))
+	return !strings.HasPrefix(contentType, "text/event-stream")
+}
+
+func transformIdentityResponseBody(c *app.RequestContext, statusCode int, body []byte, transformer identityResponseTransformer) ([]byte, bool, error) {
+	if transformer == nil || !shouldTransformIdentityResponse(c, statusCode) {
+		return body, false, nil
+	}
+	entity, err := transformer.Transform(identityResponseEntity{
+		Path:        requestPath(c),
+		ContentType: string(c.Response.Header.ContentType()),
+		Body:        body,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if entity.Body == nil {
+		entity.Body = []byte{}
+	}
+	if bytes.Equal(entity.Body, body) && (entity.ContentType == "" || entity.ContentType == string(c.Response.Header.ContentType())) {
+		return body, false, nil
+	}
+	if entity.ContentType != "" {
+		c.Response.Header.SetContentType(entity.ContentType)
+	}
+	invalidateTransformedEntityHeaders(c)
+	return entity.Body, true, nil
+}
+
+func invalidateTransformedEntityHeaders(c *app.RequestContext) {
+	if c == nil {
+		return
+	}
+	for _, header := range []string{
+		"Content-Encoding",
+		"Content-Length",
+		"ETag",
+		"Digest",
+		"Content-Digest",
+		"Content-MD5",
+		"Accept-Ranges",
+	} {
+		c.Response.Header.Del(header)
+	}
+}
+
+func writeResponseTransformFailure(c *app.RequestContext) {
+	c.Response.Reset()
+	c.Response.Header.Set("Cache-Control", "no-store")
+	c.Response.Header.SetContentType("text/plain; charset=utf-8")
+	c.Response.SetStatusCode(http.StatusBadGateway)
+	c.Response.SetBodyString("response transformation failed")
 }
 
 var upstreamErrorLogCounter atomic.Uint64
@@ -735,9 +953,8 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 	if rdr != nil {
 		req.ContentLength = bodyLen
 		if !isStream && len(bodyBytes) > 0 && hertzContentLength >= 0 {
-			snap := append([]byte(nil), bodyBytes...)
 			req.GetBody = func() (io.ReadCloser, error) {
-				return &byteSliceReadCloser{data: snap}, nil
+				return &byteSliceReadCloser{data: bodyBytes}, nil
 			}
 		}
 	}
@@ -1049,7 +1266,7 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 	}
 
 	if shouldUseHertzUpstream(base) {
-		hresp, err := doHertzUpstream(ctx, rt, base, req)
+		hresp, hreq, requestDone, cancel, err := doHertzUpstream(ctx, rt, base, req)
 		if err != nil {
 			logUpstreamRequestError(ctx, "buffered", req, origHost, err)
 			return nil, err
@@ -1063,7 +1280,7 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 				slog.Duration("latency", time.Since(start)),
 			)
 		}
-		resp := hertzResponseToHTTPResponse(base, hresp)
+		resp := hertzResponseToHTTPResponse(base, hresp, hreq, requestDone, cancel)
 		return bufferedHTTPResponseFromUpstream(resp, req.Method)
 	}
 
@@ -1126,14 +1343,14 @@ func bufferedHTTPResponseFromUpstream(resp *http.Response, method string) (*HTTP
 }
 
 func ForwardBufferedResponse(c *app.RequestContext, resp *HTTPResponse) {
-	forwardBufferedResponseWithOptions(c, resp, DefaultResponseCompressionOptions(true))
+	forwardBufferedResponseWithOptions(c, resp, DefaultResponseCompressionOptions(true), nil)
 }
 
 func ForwardBufferedResponseForSite(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime) {
-	forwardBufferedResponseWithOptions(c, resp, streamCompressionOptions(rt))
+	forwardBufferedResponseWithOptions(c, resp, streamCompressionOptions(rt), responseEntityTransformerForSite(rt))
 }
 
-func forwardBufferedResponseWithOptions(c *app.RequestContext, resp *HTTPResponse, opts ResponseCompressionOptions) {
+func forwardBufferedResponseWithOptions(c *app.RequestContext, resp *HTTPResponse, opts ResponseCompressionOptions, transformer identityResponseTransformer) {
 	if resp == nil {
 		return
 	}
@@ -1146,7 +1363,11 @@ func forwardBufferedResponseWithOptions(c *app.RequestContext, resp *HTTPRespons
 	}
 	c.Status(resp.StatusCode)
 
-	body := resp.Body
+	body, _, err := transformIdentityResponseBody(c, resp.StatusCode, resp.Body, transformer)
+	if err != nil {
+		writeResponseTransformFailure(c)
+		return
+	}
 	body = applyClientResponseCompressionWithOptions(c, resp.StatusCode, body, opts)
 
 	method := strings.ToUpper(string(c.Request.Method()))
@@ -1178,6 +1399,33 @@ func ForwardBufferedResponseAsStream(c *app.RequestContext, resp *HTTPResponse) 
 	c.Response.SetBodyStream(bytes.NewReader(resp.Body), -1)
 }
 
+func ForwardBufferedResponseAsStreamForSite(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime) {
+	if resp == nil {
+		return
+	}
+	SetUpstreamHTTPProtocol(c, resp.UpstreamHTTPProtocol)
+	if resp.Header != nil {
+		copyResponseHeaders(c, resp.Header)
+	}
+	if resp.ContentType != "" && (resp.Header == nil || resp.Header.Get("Content-Type") == "") {
+		c.SetContentType(resp.ContentType)
+	}
+	c.Status(resp.StatusCode)
+
+	body, changed, err := transformIdentityResponseBody(c, resp.StatusCode, resp.Body, responseEntityTransformerForSite(rt))
+	if err != nil {
+		writeResponseTransformFailure(c)
+		return
+	}
+	if changed {
+		body = applyClientResponseCompressionWithOptions(c, resp.StatusCode, body, streamCompressionOptions(rt))
+		c.Response.SetBodyRaw(body)
+		return
+	}
+	c.Response.Header.Del("Content-Length")
+	c.Response.SetBodyStream(bytes.NewReader(body), -1)
+}
+
 // SanitizeHeadersForEdgeCache strips hop-by-hop headers and Content-Length before persisting
 // upstream metadata with the body. Keeps Content-Encoding (e.g. br) so cache hits decode correctly.
 func SanitizeHeadersForEdgeCache(src http.Header) http.Header {
@@ -1201,14 +1449,14 @@ func SanitizeHeadersForEdgeCache(src http.Header) http.Header {
 
 // WriteCachedResponse replays a cache.ResponseEntry, including stored headers when present.
 func WriteCachedResponse(c *app.RequestContext, method string, e *cache.ResponseEntry) {
-	writeCachedResponseWithOptions(c, method, e, DefaultResponseCompressionOptions(false))
+	writeCachedResponseWithOptions(c, method, e, DefaultResponseCompressionOptions(false), nil)
 }
 
 func WriteCachedResponseForSite(c *app.RequestContext, method string, e *cache.ResponseEntry, rt snapshot.SiteRuntime) {
-	writeCachedResponseWithOptions(c, method, e, streamCompressionOptions(rt))
+	writeCachedResponseWithOptions(c, method, e, streamCompressionOptions(rt), responseEntityTransformerForSite(rt))
 }
 
-func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cache.ResponseEntry, opts ResponseCompressionOptions) {
+func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cache.ResponseEntry, opts ResponseCompressionOptions, transformer identityResponseTransformer) {
 	if e == nil {
 		return
 	}
@@ -1222,7 +1470,11 @@ func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cac
 	}
 	c.Status(e.StatusCode)
 
-	body := e.Body
+	body, _, err := transformIdentityResponseBody(c, e.StatusCode, e.Body, transformer)
+	if err != nil {
+		writeResponseTransformFailure(c)
+		return
+	}
 	body = applyClientResponseCompressionWithOptions(c, e.StatusCode, body, opts)
 
 	if isHead {
@@ -1483,6 +1735,11 @@ func isCacheableRequestMethod(method []byte) bool {
 const streamProbeSize = 32768
 const completeUnknownLengthCompressMaxBytes = 5 * snapshot.DefaultResponseCompressionMinBytes
 
+// maxStreamTransformBufferBytes is the maximum body size (post-decompression) that
+// forwardHTTP will buffer into memory for identity response transformation.
+// Responses exceeding this are served untransformed via the normal streaming path.
+const maxStreamTransformBufferBytes = 8 * 1024 * 1024 // 8 MiB
+
 // ForwardHTTP copies the incoming request to upstream and streams the response.
 func closeUpstreamResponse(cancel context.CancelFunc, closeFn func() error, resp *http.Response) {
 	if cancel != nil {
@@ -1495,46 +1752,6 @@ func closeUpstreamResponse(cancel context.CancelFunc, closeFn func() error, resp
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
-}
-
-type UpstreamRequestConn struct {
-	mu   sync.Mutex
-	conn net.Conn
-}
-
-func (c *UpstreamRequestConn) Set(conn net.Conn) {
-	if c == nil || conn == nil {
-		return
-	}
-	c.mu.Lock()
-	c.conn = conn
-	c.mu.Unlock()
-}
-
-func (c *UpstreamRequestConn) Close() error {
-	if c == nil {
-		return nil
-	}
-	c.mu.Lock()
-	conn := c.conn
-	c.mu.Unlock()
-	if conn == nil {
-		return nil
-	}
-	_ = conn.SetDeadline(time.Now())
-	return conn.Close()
-}
-
-func TraceUpstreamRequestConn(ctx context.Context, conn *UpstreamRequestConn) context.Context {
-	if conn == nil {
-		return ctx
-	}
-	trace := &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			conn.Set(info.Conn)
-		},
-	}
-	return httptrace.WithClientTrace(ctx, trace)
 }
 
 func ForwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) error {
@@ -1566,19 +1783,16 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		start = time.Now()
 	}
 	var resp *http.Response
-	var closeHTTP1Conn func() error
 	if shouldUseHertzUpstream(base) {
-		hresp, err := doHertzUpstream(upstreamCtx, rt, base, req)
+		hresp, hreq, requestDone, cancelHertz, err := doHertzUpstream(upstreamCtx, rt, base, req)
 		if err != nil {
 			cancelUpstream()
 			logUpstreamRequestError(ctx, "streaming", req, origHost, err)
 			return err
 		}
-		resp = hertzResponseToHTTPResponse(base, hresp)
+		resp = hertzResponseToHTTPResponse(base, hresp, hreq, requestDone, cancelHertz)
 	} else {
 		transport, _ := UpstreamRoundTripperForBase(rt, base)
-		conn := &UpstreamRequestConn{}
-		req = req.WithContext(TraceUpstreamRequestConn(req.Context(), conn))
 		hc := &http.Client{Transport: transport, Timeout: 0}
 		var err error
 		resp, err = hc.Do(req)
@@ -1591,9 +1805,6 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 			resp.Body.Close()
 			cancelUpstream()
 			return ctx.Err()
-		}
-		if resp.ProtoMajor == 1 {
-			closeHTTP1Conn = conn.Close
 		}
 	}
 	SetUpstreamHTTPProtocol(c, resp.Proto)
@@ -1613,29 +1824,6 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		AddResponseTrailerHeaders(c, resp.Trailer)
 	}
 
-	// 动态防护处理：根据配置对响应内容进行加密/混淆/水印
-	dp := rt.DynamicProtection
-	if dp.HTMLObfuscationEnabled || dp.JSObfuscationEnabled || dp.ImageWatermarkEnabled {
-		ct := resp.Header.Get("Content-Type")
-		if kind := dynamic.ShouldProcessContentType(ct); kind != "" {
-			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			cancelUpstream()
-			if readErr != nil {
-				return readErr
-			}
-			processor := dynamic.NewProcessor(dp)
-			processed, procErr := processor.Process(requestPath(c), ct, body)
-			if procErr != nil {
-				processed = body
-			}
-			c.Status(resp.StatusCode)
-			c.Response.SetBodyRaw(processed)
-			cancelUpstream()
-			return nil
-		}
-	}
-
 	c.Status(resp.StatusCode)
 
 	if responseStatusDisallowsBody(resp.StatusCode) {
@@ -1650,16 +1838,12 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		return nil
 	}
 
-	bodyReader, closeFn, decoded, decErr := upstreamResponseReader(resp)
-	if closeHTTP1Conn != nil {
-		bodyCloseFn := closeFn
-		closeFn = func() error {
-			if bodyCloseFn == nil {
-				return closeHTTP1Conn()
-			}
-			return errors.Join(closeHTTP1Conn(), bodyCloseFn())
-		}
+	transformer := responseEntityTransformerForSite(rt)
+	if transformer != nil && shouldTransformIdentityResponse(c, resp.StatusCode) {
+		return forwardHTTPWithTransform(ctx, c, rt, resp, cancelUpstream, transformer)
 	}
+
+	bodyReader, closeFn, decoded, decErr := upstreamResponseReader(resp)
 	if decErr != nil {
 		resp.Body.Close()
 		cancelUpstream()
@@ -1835,6 +2019,51 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	return nil
 }
 
+// forwardHTTPWithTransform buffers the upstream response (up to maxStreamTransformBufferBytes),
+// applies the identity response transformer, and writes the result. Falls back to untransformed
+// streaming when the body exceeds the buffer limit.
+func forwardHTTPWithTransform(_ context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, resp *http.Response, cancelUpstream context.CancelFunc, transformer identityResponseTransformer) error {
+	bodyReader, closeFn, _, decErr := upstreamResponseReader(resp)
+	if decErr != nil {
+		resp.Body.Close()
+		cancelUpstream()
+		return decErr
+	}
+
+	limitedReader := io.LimitReader(bodyReader, int64(maxStreamTransformBufferBytes)+1)
+	body, readErr := io.ReadAll(limitedReader)
+	if closeFn != nil {
+		_ = closeFn()
+	}
+	resp.Body.Close()
+	cancelUpstream()
+
+	if readErr != nil {
+		return readErr
+	}
+
+	if len(body) > maxStreamTransformBufferBytes {
+		c.Response.Header.Del("Content-Encoding")
+		c.Response.Header.Del("Content-Length")
+		c.Response.SetBodyStream(bytes.NewReader(body), -1)
+		return nil
+	}
+
+	c.Response.Header.Del("Content-Encoding")
+	transformed, changed, err := transformIdentityResponseBody(c, resp.StatusCode, body, transformer)
+	if err != nil {
+		writeResponseTransformFailure(c)
+		return nil
+	}
+	if changed {
+		transformed = applyClientResponseCompressionWithOptions(c, resp.StatusCode, transformed, streamCompressionOptions(rt))
+	} else {
+		transformed = applyClientResponseCompressionWithOptions(c, resp.StatusCode, body, streamCompressionOptions(rt))
+	}
+	c.Response.SetBodyRaw(transformed)
+	return nil
+}
+
 func defaultStreamCompressionOptions() ResponseCompressionOptions {
 	return ResponseCompressionOptions{
 		Enabled:       true,
@@ -1866,6 +2095,22 @@ func shouldCompressCompleteUnknownLengthBody(bodySize int, opts ResponseCompress
 	return bodySize <= completeUnknownLengthCompressMaxBytes
 }
 
+type recompressedResponseBody struct {
+	reader *io.PipeReader
+	stop   func(error)
+	done   <-chan struct{}
+}
+
+func (b *recompressedResponseBody) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
+}
+
+func (b *recompressedResponseBody) Close() error {
+	b.stop(context.Canceled)
+	<-b.done
+	return nil
+}
+
 // streamRecompressedResponse sets up a non-blocking streaming compression
 // pipeline: a goroutine reads from src, compresses, and writes into a pipe;
 // the pipe reader is handed to Hertz via SetBodyStream so ForwardHTTP returns
@@ -1878,26 +2123,36 @@ func streamRecompressedResponse(ctx context.Context, c *app.RequestContext, src 
 
 	pr, pw := io.Pipe()
 	streamDone := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func(err error) {
+		stopOnce.Do(func() {
+			if cancel != nil {
+				cancel()
+			}
+			_ = pr.CloseWithError(err)
+		})
+	}
 	go func() {
 		defer close(streamDone)
+		defer closeUpstreamResponse(cancel, closeFn, resp)
+		defer copyResponseTrailers(c, resp)
+
 		compWriter, closeComp := newStreamCompressWriter(pw, encoding)
 		buf := make([]byte, 32*1024)
 		for {
 			n, readErr := src.Read(buf)
 			if n > 0 {
-				if _, werr := compWriter.Write(buf[:n]); werr != nil {
+				if _, writeErr := compWriter.Write(buf[:n]); writeErr != nil {
 					closeComp()
-					_ = pw.CloseWithError(werr)
+					_ = pw.CloseWithError(writeErr)
 					return
 				}
-				if fw, ok := compWriter.(interface{ Flush() error }); ok {
-					_ = fw.Flush()
+				if flushWriter, ok := compWriter.(interface{ Flush() error }); ok {
+					_ = flushWriter.Flush()
 				}
 			}
 			if readErr != nil {
 				closeComp()
-				copyResponseTrailers(c, resp)
-				closeUpstreamResponse(cancel, closeFn, resp)
 				if readErr != io.EOF {
 					_ = pw.CloseWithError(readErr)
 				} else {
@@ -1911,18 +2166,17 @@ func streamRecompressedResponse(ctx context.Context, c *app.RequestContext, src 
 	go func() {
 		select {
 		case <-ctx.Done():
-			closeUpstreamResponse(cancel, closeFn, resp)
+			stop(ctx.Err())
 		case <-streamDone:
 		}
 	}()
 
 	c.Response.ImmediateHeaderFlush = true
-	if StreamResponseViaHijack(ctx, c, pr, func() {
-		copyResponseTrailers(c, resp)
-	}) {
+	body := &recompressedResponseBody{reader: pr, stop: stop, done: streamDone}
+	if StreamResponseViaHijack(ctx, c, body, func() { _ = body.Close() }) {
 		return nil
 	}
-	c.Response.SetBodyStream(pr, -1)
+	c.Response.SetBodyStream(body, -1)
 	return nil
 }
 
@@ -1978,14 +2232,17 @@ func StreamResponseViaHijack(ctx context.Context, c *app.RequestContext, src io.
 // the underlying resources and copies trailers on EOF or Close, and monitors
 // the request context for cancellation.
 type proxyBodyStream struct {
-	reader   io.Reader
-	closeFn  func() error
-	resp     *http.Response
-	hertzCtx *app.RequestContext
-	cancel   context.CancelFunc
-	done     chan struct{}
-	mu       sync.Mutex
-	closed   bool
+	reader        io.Reader
+	closeFn       func() error
+	resp          *http.Response
+	hertzCtx      *app.RequestContext
+	cancel        context.CancelFunc
+	done          chan struct{}
+	mu            sync.Mutex
+	cond          *sync.Cond
+	activeReaders int
+	closing       bool
+	closed        bool
 }
 
 type finalizeOnceWriter struct {
@@ -2030,12 +2287,21 @@ func newProxyBodyStream(ctx context.Context, reader io.Reader, closeFn func() er
 
 func (s *proxyBodyStream) Read(p []byte) (int, error) {
 	s.mu.Lock()
-	closed := s.closed
-	s.mu.Unlock()
-	if closed {
+	if s.closing || s.closed {
+		s.mu.Unlock()
 		return 0, io.EOF
 	}
+	s.activeReaders++
+	s.mu.Unlock()
+
 	n, err := s.reader.Read(p)
+
+	s.mu.Lock()
+	s.activeReaders--
+	if s.activeReaders == 0 && s.cond != nil {
+		s.cond.Broadcast()
+	}
+	s.mu.Unlock()
 	if err != nil {
 		s.cleanup()
 	}
@@ -2053,11 +2319,44 @@ func (s *proxyBodyStream) cleanup() {
 		s.mu.Unlock()
 		return
 	}
-	s.closed = true
+	if s.closing {
+		s.initCondLocked()
+		for !s.closed {
+			s.cond.Wait()
+		}
+		s.mu.Unlock()
+		return
+	}
+	s.closing = true
 	close(s.done)
+	cancel := s.cancel
+	s.cancel = nil
 	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+
+	s.mu.Lock()
+	s.initCondLocked()
+	for s.activeReaders > 0 {
+		s.cond.Wait()
+	}
+	s.mu.Unlock()
+
 	copyResponseTrailers(s.hertzCtx, s.resp)
-	closeUpstreamResponse(s.cancel, s.closeFn, s.resp)
+	closeUpstreamResponse(nil, s.closeFn, s.resp)
+
+	s.mu.Lock()
+	s.closed = true
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+func (s *proxyBodyStream) initCondLocked() {
+	if s.cond == nil {
+		s.cond = sync.NewCond(&s.mu)
+	}
 }
 
 const probeEOFTimeout = 5 * time.Millisecond

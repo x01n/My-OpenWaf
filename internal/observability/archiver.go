@@ -39,6 +39,7 @@ type Archiver struct {
 	repo         *repository.SecurityEventRepo
 	accessRepo   *repository.AccessLogRepo
 	dropRepo     *repository.DropEventRepo
+	syncLogRepo  *repository.ThreatIntelSyncLogRepo
 	settingsRepo *repository.SystemSettingsRepo
 	db           *gorm.DB
 	log          *slog.Logger
@@ -76,6 +77,12 @@ func NewArchiver(db *gorm.DB, repo *repository.SecurityEventRepo, accessRepo *re
 // SetSettingsRepo allows the archiver to read dynamic retention config from DB.
 func (a *Archiver) SetSettingsRepo(repo *repository.SystemSettingsRepo) {
 	a.settingsRepo = repo
+}
+
+// SetSyncLogRepo 注入威胁情报同步日志仓库，启用同步历史保留清理。
+// 保留天数复用 DropEventDays（同类"运维辅助日志"通常一致）。
+func (a *Archiver) SetSyncLogRepo(repo *repository.ThreatIntelSyncLogRepo) {
+	a.syncLogRepo = repo
 }
 
 // SetRetention updates the retention config dynamically.
@@ -178,6 +185,19 @@ func (a *Archiver) cleanup() {
 		} else if dropDeleted > 0 {
 			a.log.Info("archiver: cleaned old drop events",
 				slog.Int64("deleted", dropDeleted),
+				slog.String("older_than", cutoff.Format(time.RFC3339)))
+		}
+	}
+
+	// 威胁情报同步日志复用 DropEventDays 的保留期（同类"运维辅助日志"）。
+	if cfg.DropEventDays > 0 && a.syncLogRepo != nil {
+		cutoff := time.Now().Add(-time.Duration(cfg.DropEventDays) * 24 * time.Hour)
+		syncDeleted, err := a.syncLogRepo.DeleteOlderThan(cutoff)
+		if err != nil {
+			a.log.Error("archiver: failed to delete old threat-intel sync logs", slog.Any("err", err))
+		} else if syncDeleted > 0 {
+			a.log.Info("archiver: cleaned old threat-intel sync logs",
+				slog.Int64("deleted", syncDeleted),
 				slog.String("older_than", cutoff.Format(time.RFC3339)))
 		}
 	}

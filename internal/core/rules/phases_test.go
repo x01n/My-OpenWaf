@@ -1,7 +1,15 @@
 package rules
 
 import (
+	"bytes"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
 	"reflect"
+	"strings"
 	"testing"
 
 	"My-OpenWaf/internal/core/action"
@@ -382,4 +390,118 @@ func TestDedupeBodyTargetsPreservesFirstOccurrenceOrder(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("deduped body targets = %#v, want %#v", got, want)
 	}
+}
+
+func TestOWASPPhaseDetectsMultipartUploadSemantics(t *testing.T) {
+	cfg := store.DefaultProtectionConfig()
+	cfg.OWASPEnabled = true
+	cfg.OWASPSensitivity = "mid"
+	cfg.OWASPAction = "intercept"
+	phase := NewOWASPPhase(&cfg)
+
+	tests := []struct {
+		name        string
+		filename    string
+		contentType string
+		content     string
+		blocked     bool
+	}{
+		{name: "direct executable", filename: "console.php", contentType: "application/octet-stream", content: "<?php echo 1; ?>", blocked: true},
+		{name: "double extension", filename: "avatar.php.jpg", contentType: "image/jpeg", content: "<?php echo 1; ?>", blocked: true},
+		{name: "semicolon separator", filename: "avatar.php;.jpg", contentType: "image/jpeg", content: "<?php echo 1; ?>", blocked: true},
+		{name: "space separator", filename: "avatar.php .jpg", contentType: "image/jpeg", content: "<?php echo 1; ?>", blocked: true},
+		{name: "null byte", filename: "avatar.php%00.jpg", contentType: "image/jpeg", content: "<?php echo 1; ?>", blocked: true},
+		{name: "path traversal", filename: "../../var/www/console.php", contentType: "application/octet-stream", content: "<?php echo 1; ?>", blocked: true},
+		{name: "image polyglot", filename: "avatar.jpg", contentType: "image/jpeg", content: "GIF89a<?php system($_GET['task']); ?>", blocked: true},
+		{name: "clean image", filename: "quarterly photo.jpg", contentType: "image/jpeg", content: "JPEG image content", blocked: false},
+		{name: "internal spaces do not form extension", filename: "report.p h p.jpg", contentType: "image/jpeg", content: "ordinary report", blocked: false},
+		{name: "similar extension token", filename: "manual.phpunit.jpg", contentType: "image/jpeg", content: "ordinary report", blocked: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, contentType := multipartRequestBody(t, tt.filename, tt.contentType, tt.content)
+			result, stop := phase.Execute(&pipeline.RequestCtx{
+				Method:      http.MethodPost,
+				Path:        "/upload",
+				Body:        body,
+				ContentType: contentType,
+			})
+			blocked := stop && result.IsTerminal()
+			if blocked != tt.blocked {
+				t.Fatalf("blocked = %v, want %v: action=%q phase=%q rule=%q", blocked, tt.blocked, result.Type, result.Phase, result.RuleIDStr)
+			}
+			if blocked && result.Phase != "owasp_default" {
+				t.Fatalf("phase = %q, want owasp_default", result.Phase)
+			}
+		})
+	}
+}
+
+func TestOWASPPhaseSeparatesIndependentEncodedXSSContexts(t *testing.T) {
+	cfg := store.DefaultProtectionConfig()
+	cfg.OWASPEnabled = true
+	cfg.OWASPSensitivity = "mid"
+	cfg.OWASPAction = "intercept"
+	phase := NewOWASPPhase(&cfg)
+
+	tests := []struct {
+		name    string
+		body    string
+		blocked bool
+	}{
+		{name: "active scheme in one decode chain", body: nestedEncodedXSSBody(`<iframe src="j a v a s c r i p t:alert(1)"></iframe>`), blocked: true},
+		{name: "deep semantic decode chain", body: layeredEncodedXSSBody(`&lt;iframe src=&quot;java&#13;scri&#10;pt&#9;&#58;alert(1)&quot;&gt;&lt;/iframe&gt;`), blocked: true},
+		{name: "deep benign decode chain", body: layeredEncodedXSSBody(`&lt;iframe src=&quot;https&#58;//example.invalid/help&quot;&gt;&lt;/iframe&gt;`), blocked: false},
+		{name: "independent benign sibling tokens", body: "markup=PGlmcmFtZSBzcmM9XCJodHRwczovL2V4YW1wbGUuaW52YWxpZFwiPjwvaWZyYW1lPg==&text=amF2YXNjcmlwdCBhbGVydCBkb2N1bWVudGF0aW9u", blocked: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, stop := phase.Execute(&pipeline.RequestCtx{
+				Method:      http.MethodPost,
+				Path:        "/submit",
+				Body:        []byte(tt.body),
+				ContentType: "application/x-www-form-urlencoded",
+			})
+			blocked := stop && result.IsTerminal()
+			if blocked != tt.blocked {
+				t.Fatalf("blocked = %v, want %v: action=%q phase=%q rule=%q", blocked, tt.blocked, result.Type, result.Phase, result.RuleIDStr)
+			}
+		})
+	}
+}
+
+func multipartRequestBody(t *testing.T, filename, partContentType, content string) ([]byte, string) {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="document"; filename=%q`, filename))
+	header.Set("Content-Type", partContentType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		t.Fatalf("create multipart part: %v", err)
+	}
+	if _, err := io.WriteString(part, content); err != nil {
+		t.Fatalf("write multipart part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	return body.Bytes(), writer.FormDataContentType()
+}
+
+func nestedEncodedXSSBody(payload string) string {
+	inner := base64.StdEncoding.EncodeToString([]byte(payload))
+	var escaped strings.Builder
+	for _, b := range []byte(inner) {
+		fmt.Fprintf(&escaped, `\u%04X`, b)
+	}
+	outer := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"payload":"%s"}`, escaped.String())))
+	return "payload=" + outer
+}
+
+func layeredEncodedXSSBody(payload string) string {
+	return nestedEncodedXSSBody(strings.Repeat("&#65;", 180) + payload)
 }

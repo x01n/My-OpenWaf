@@ -384,6 +384,40 @@ func (r *SecurityEventRepo) TopRulesBySite(siteID uint, since time.Time, limit i
 	return stats, err
 }
 
+// CountryStat 表示一个国家/地区的攻击计数（用于地理攻击分布可视化）。
+type CountryStat struct {
+	Country string `json:"country"` // ISO 3166-1 alpha-2 国家代码
+	Count   int64  `json:"count"`
+}
+
+// TopCountries 按国家聚合攻击事件数，用于仪表盘地理分布图。
+// 仅统计有地理信息（geo_country 非空）的拦截/观察事件。
+func (r *SecurityEventRepo) TopCountries(since time.Time, limit int) ([]CountryStat, error) {
+	var stats []CountryStat
+	err := r.db.Model(&store.SecurityEvent{}).
+		Select("geo_country as country, COUNT(*) as count").
+		Where("created_at >= ? AND geo_country != ''", since).
+		Group("geo_country").
+		Order("count DESC").
+		Limit(limit).
+		Scan(&stats).Error
+	return stats, err
+}
+
+// TopCountriesBySite 站点级国家攻击排行，用于站点实时监控面板。
+// 仅统计指定站点且 geo_country 非空的事件。
+func (r *SecurityEventRepo) TopCountriesBySite(siteID uint, since time.Time, limit int) ([]CountryStat, error) {
+	var stats []CountryStat
+	err := r.db.Model(&store.SecurityEvent{}).
+		Select("geo_country as country, COUNT(*) as count").
+		Where("site_id = ? AND created_at >= ? AND geo_country != ''", siteID, since).
+		Group("geo_country").
+		Order("count DESC").
+		Limit(limit).
+		Scan(&stats).Error
+	return stats, err
+}
+
 type TimelineBucket struct {
 	Bucket string `json:"bucket"`
 	Count  int64  `json:"count"`

@@ -28,6 +28,8 @@ type BotSettingsUpdate struct {
 	ImageWatermark           *bool    `json:"image_watermark"`
 	AntiReplayEnabled        *bool    `json:"anti_replay_enabled"`
 	JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
+	JSProtectionMode         *string  `json:"js_protection_mode,omitempty"`
+	DecryptCacheTTLSeconds   *int     `json:"decrypt_cache_ttl_seconds,omitempty"`
 	ImageWatermarkPaths      []string `json:"image_watermark_paths,omitempty"`
 	WatermarkText            *string  `json:"watermark_text,omitempty"`
 	ExcludeRecordHeaders     []string `json:"exclude_record_headers,omitempty"`
@@ -124,6 +126,12 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		}
 		if req.JSObfuscationPaths != nil {
 			current.JSObfuscationPaths = req.JSObfuscationPaths
+		}
+		if req.JSProtectionMode != nil {
+			current.JSProtectionMode = *req.JSProtectionMode
+		}
+		if req.DecryptCacheTTLSeconds != nil {
+			current.DecryptCacheTTLSeconds = *req.DecryptCacheTTLSeconds
 		}
 		if req.ImageWatermarkPaths != nil {
 			current.ImageWatermarkPaths = req.ImageWatermarkPaths

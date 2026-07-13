@@ -1,11 +1,19 @@
 "use client";
 
 import { useRef, useEffect, useState, useCallback } from "react";
-import { useDashboard, useSecurityEventTimeline } from "@/hooks/use-api";
+import { useDashboard, useSecurityEventTimeline, useDashboardStats } from "@/hooks/use-api";
 import { StatCard } from "@/components/stat-card";
+import { GeoAttackDistribution } from "@/components/geo-attack-distribution";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { formatNumber } from "@/lib/utils";
 import {
   IconChartBar,
@@ -20,6 +28,7 @@ import {
   IconTrendingDown,
   IconClock,
   IconActivity,
+  IconMaximize,
 } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -35,6 +44,7 @@ import {
   Pie,
   Cell,
 } from "recharts";
+import Link from "next/link";
 
 const MAX_QPS_POINTS = 60;
 
@@ -63,8 +73,11 @@ const PIE_COLORS = ["#14b8a6", "#6366f1", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4
 
 export default function DashboardPage() {
   const { t } = useTranslation();
+  const [timeRange, setTimeRange] = useState("24");
+  const hours = timeRange === "168" ? 168 : Number(timeRange);
   const { data, isLoading } = useDashboard();
-  const { data: timelineData } = useSecurityEventTimeline({ hours: 24 });
+  const { data: timelineData } = useSecurityEventTimeline({ hours });
+  const { data: statsData } = useDashboardStats({ hours });
 
   const qpsHistoryRef = useRef<QPSPoint[]>([]);
   const [qpsHistory, setQpsHistory] = useState<QPSPoint[]>([]);
@@ -108,6 +121,30 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-4">
+      {/* 时间范围选择器 + 监控大屏入口 */}
+      <div className="flex items-center justify-end gap-2">
+        <Link
+          href="/security-dashboard"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-teal-500/40 bg-teal-500/10 px-3 text-sm font-medium text-teal-600 transition-colors hover:bg-teal-500/20 dark:text-teal-300"
+        >
+          <IconMaximize className="h-4 w-4" />
+          <span>{t("securityDashboard.entry")}</span>
+        </Link>
+        <Select value={timeRange} onValueChange={setTimeRange}>
+          <SelectTrigger className="w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="1">{t("dashboard.timeRange1h")}</SelectItem>
+            <SelectItem value="6">{t("dashboard.timeRange6h")}</SelectItem>
+            <SelectItem value="24">{t("dashboard.timeRange24h")}</SelectItem>
+            <SelectItem value="168">{t("dashboard.timeRange7d")}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
       {/* 核心指标 */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <StatCard
@@ -400,6 +437,83 @@ export default function DashboardPage() {
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      {/* Top 攻击 IP + Top 攻击路径 + 地理分布 */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card>
+          <CardHeader className="flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium">
+              {t("dashboard.topIps")}
+            </CardTitle>
+            <Badge variant="outline" className="h-5 text-[10px]">{hours}h</Badge>
+          </CardHeader>
+          <CardContent>
+            {statsData?.top_ips && statsData.top_ips.length > 0 ? (
+              <div className="space-y-2">
+                {statsData.top_ips.map((item: { client_ip: string; count: number }, idx: number) => (
+                  <Link
+                    key={item.client_ip}
+                    href={`/security-events?client_ip=${encodeURIComponent(item.client_ip)}`}
+                    className="flex items-center gap-3 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-muted"
+                  >
+                    <span className="w-5 text-center text-xs font-medium text-muted-foreground">
+                      {idx + 1}
+                    </span>
+                    <span className="flex-1 truncate font-mono text-xs">
+                      {item.client_ip}
+                    </span>
+                    <Badge variant="secondary" className="text-[10px]">
+                      {formatNumber(item.count)}
+                    </Badge>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
+                {t("dashboard.noData")}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium">
+              {t("dashboard.topUrls")}
+            </CardTitle>
+            <Badge variant="outline" className="h-5 text-[10px]">{hours}h</Badge>
+          </CardHeader>
+          <CardContent>
+            {statsData?.top_paths && statsData.top_paths.length > 0 ? (
+              <div className="space-y-2">
+                {statsData.top_paths.map((item: { path: string; count: number }, idx: number) => (
+                  <Link
+                    key={item.path}
+                    href={`/security-events?path=${encodeURIComponent(item.path)}`}
+                    className="flex items-center gap-3 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-muted"
+                  >
+                    <span className="w-5 text-center text-xs font-medium text-muted-foreground">
+                      {idx + 1}
+                    </span>
+                    <span className="flex-1 truncate font-mono text-xs">
+                      {item.path}
+                    </span>
+                    <Badge variant="secondary" className="text-[10px]">
+                      {formatNumber(item.count)}
+                    </Badge>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
+                {t("dashboard.noData")}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <GeoAttackDistribution data={statsData?.top_countries} hours={hours} />
       </div>
 
       {/* 运行时信息 */}

@@ -5,6 +5,7 @@
 
 import { Sidebar } from "@/components/sidebar-nav";
 import { TopBar } from "@/components/top-bar";
+import { BreadcrumbNav } from "@/components/breadcrumb-nav";
 
 export default function DashboardLayout({
   children,
@@ -17,6 +18,7 @@ export default function DashboardLayout({
       <div className="flex flex-1 flex-col overflow-hidden">
         <TopBar />
         <main className="flex-1 overflow-auto bg-background p-4 lg:p-6">
+          <BreadcrumbNav />
           {children}
         </main>
       </div>

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strconv"
@@ -52,10 +53,12 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	if err := db.Where("enabled = ?", true).Find(&rules).Error; err != nil {
 		return nil, err
 	}
-	// Load settings from SystemSettings (used for listener defaults, CC rules and mergeProtection).
-	networkDefaults := loadNetworkDefaults(db)
-	tlsDefaults := loadTLSDefaults(db)
-	protection, err := loadProtectionConfig(db)
+	// 一次性加载所有 system_settings 到 map，避免多次独立 DB 查询。
+	settingsMap := loadAllSettings(db)
+
+	networkDefaults := networkDefaultsFromMap(settingsMap)
+	tlsDefaults := tlsDefaultsFromMap(settingsMap)
+	protection, err := protectionConfigFromMap(settingsMap)
 	if err != nil {
 		return nil, err
 	}
@@ -87,23 +90,30 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		appRulesBySite[sid] = appresource.CompileRules(raws)
 	}
 
-	// Load dynamic protection and exclude record headers from bot_settings.
-	dynamicProtection := loadDynamicProtection(db)
-	excludeRecordHeaders := loadExcludeRecordHeaders(db)
+	// 从预加载的 settingsMap 中读取动态保护和排除记录头（共用 bot_settings 数据）。
+	botSettingsJSON := settingsMap["bot_settings"]
+	dynamicProtection := parseDynamicProtection(botSettingsJSON)
+	excludeRecordHeaders := parseExcludeRecordHeaders(botSettingsJSON)
 
-	http2Config := loadHTTP2Config(db)
-	hstsEnabled := loadBoolSetting(db, "hsts_enabled")
-	xssProtectionEnabled := loadBoolSetting(db, "xss_protection_enabled")
-	expectCTEnabled := loadBoolSetting(db, "expect_ct_enabled")
-	expectCTValue := loadStringSetting(db, "expect_ct_value", DefaultExpectCTValue)
-	hpkpEnabled := loadBoolSetting(db, store.SettingKeyHPKP)
-	hpkpValue := loadStringSetting(db, store.SettingKeyHPKPValue, DefaultHPKPValue)
-	hpkpReportOnlyEnabled := loadBoolSetting(db, store.SettingKeyHPKPReportOnly)
-	hpkpReportOnlyValue := loadStringSetting(db, store.SettingKeyHPKPReportOnlyValue, DefaultHPKPReportOnlyValue)
-	brotliEnabled := loadBoolSetting(db, "brotli_enabled")
-	responseCompressionEnabled := loadBoolSetting(db, "response_compression_enabled")
-	responseCompressionGzipEnabled := loadBoolSetting(db, "response_compression_gzip_enabled")
-	responseCompressionMinBytes := loadIntSetting(db, "response_compression_min_bytes", DefaultResponseCompressionMinBytes)
+	// Load access control configs per site.
+	accessControlBySite := loadAccessControlConfigs(db)
+
+	// 加载站点级 IP 黑白名单。
+	siteIPLists := loadSiteIPLists(db)
+
+	http2Config := http2ConfigFromMap(settingsMap)
+	hstsEnabled := settingBool(settingsMap, "hsts_enabled")
+	xssProtectionEnabled := settingBool(settingsMap, "xss_protection_enabled")
+	expectCTEnabled := settingBool(settingsMap, "expect_ct_enabled")
+	expectCTValue := settingStr(settingsMap, "expect_ct_value", DefaultExpectCTValue)
+	hpkpEnabled := settingBool(settingsMap, store.SettingKeyHPKP)
+	hpkpValue := settingStr(settingsMap, store.SettingKeyHPKPValue, DefaultHPKPValue)
+	hpkpReportOnlyEnabled := settingBool(settingsMap, store.SettingKeyHPKPReportOnly)
+	hpkpReportOnlyValue := settingStr(settingsMap, store.SettingKeyHPKPReportOnlyValue, DefaultHPKPReportOnlyValue)
+	brotliEnabled := settingBool(settingsMap, "brotli_enabled")
+	responseCompressionEnabled := settingBool(settingsMap, "response_compression_enabled")
+	responseCompressionGzipEnabled := settingBool(settingsMap, "response_compression_gzip_enabled")
+	responseCompressionMinBytes := settingInt(settingsMap, "response_compression_min_bytes", DefaultResponseCompressionMinBytes)
 
 	sniCerts := make(map[string]tls.Certificate)
 	siteMap := make(map[string]SiteRuntime)
@@ -118,7 +128,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		if s.PolicyID != nil {
 			policyID = *s.PolicyID
 		}
-		compiled := append(compileRules(rulesByPolicy[policyID]), ccRules...)
+		compiled := append(compileRules(rulesByPolicy[policyID]), siteCCRules(s, ccRules)...)
 
 		// Build protection configs from site fields
 		botProtection := store.BotProtectionConfig{
@@ -240,15 +250,19 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				AntiReplayEnabled:              s.AntiReplayEnabled,
 				AntiReplayAction:               s.AntiReplayAction,
 				AppRouteRules:                  appRulesBySite[s.ID],
-				DynamicProtection:              dynamicProtection,
+				DynamicProtection:              buildSiteDynamicProtection(dynamicProtection, s),
+				AccessControl:                  accessControlBySite[s.ID],
+				SiteIPWhitelist:                siteIPLists[s.ID].whitelist,
+				SiteIPBlacklist:                siteIPLists[s.ID].blacklist,
 				ResponseCompressionConfigured:  true,
 				ResponseCompressionEnabled:     responseCompressionEnabled,
 				ResponseCompressionGzipEnabled: responseCompressionGzipEnabled,
 				ResponseCompressionMinBytes:    responseCompressionMinBytes,
 				BrotliEnabled:                  brotliEnabled,
 			}
-			registerSiteKeys(siteMap, rt)
-			registerSiteKeys(siteMap, rt)
+			if err := registerSiteKeys(siteMap, rt); err != nil {
+				return nil, err
+			}
 		}
 		// EffectiveProtection is computed later once global protection is loaded.
 	}
@@ -335,7 +349,7 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 	return p
 }
 
-func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) {
+func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) error {
 	bind := rt.Bind
 	for _, host := range splitHosts(rt.Site.Host) {
 		h := NormalizeMatchHost(host)
@@ -343,11 +357,15 @@ func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) {
 			continue
 		}
 		k := SiteMapKey(bind, h)
-		if _, exists := m[k]; exists {
-			continue
+		if existing, exists := m[k]; exists {
+			if existing.Site.ID == rt.Site.ID {
+				continue
+			}
+			return fmt.Errorf("duplicate site route bind=%q host=%q site_ids=%d,%d", bind, h, existing.Site.ID, rt.Site.ID)
 		}
 		m[k] = rt
 	}
+	return nil
 }
 
 // splitHosts splits a host field by comma, supporting multi-host per site.
@@ -493,11 +511,30 @@ func compileCCRules(protection store.ProtectionConfig) []CompiledRule {
 	if !protection.CCUseCustom {
 		return nil
 	}
-	if strings.TrimSpace(protection.CCRules) == "" {
+	return compileCCRulesFromJSON(protection.CCRules)
+}
+
+// siteCCRules 返回站点生效的 CC 规则。
+// 站点 CCUseCustom 为 nil 时继承全局（globalCCRules）；非 nil 时按站点自身配置：
+// true 用站点 CCRules 编译，false 表示站点显式关闭 CC 规则（返回空）。
+func siteCCRules(s store.Site, globalCCRules []CompiledRule) []CompiledRule {
+	if s.CCUseCustom == nil {
+		return globalCCRules
+	}
+	if !*s.CCUseCustom {
+		return nil
+	}
+	return compileCCRulesFromJSON(s.CCRules)
+}
+
+// compileCCRulesFromJSON 从 CC 规则 JSON 编译出运行时规则。
+// 全局配置与站点级覆盖共用此逻辑。
+func compileCCRulesFromJSON(rulesJSON string) []CompiledRule {
+	if strings.TrimSpace(rulesJSON) == "" {
 		return nil
 	}
 	var configs []ccRuleConfig
-	if err := json.Unmarshal([]byte(protection.CCRules), &configs); err != nil {
+	if err := json.Unmarshal([]byte(rulesJSON), &configs); err != nil {
 		return nil
 	}
 	out := make([]CompiledRule, 0, len(configs))
@@ -753,12 +790,30 @@ func loadNetworkDefaults(db *gorm.DB) NetworkDefaults {
 	return LoadNetworkDefaults(setting.Value)
 }
 
+// networkDefaultsFromMap 从预加载的 settings map 中读取网络默认配置。
+func networkDefaultsFromMap(m map[string]string) NetworkDefaults {
+	v, ok := m["network_config"]
+	if !ok || v == "" {
+		return DefaultNetworkDefaults()
+	}
+	return LoadNetworkDefaults(v)
+}
+
 func loadTLSDefaults(db *gorm.DB) TLSDefaults {
 	var setting store.SystemSettings
 	if err := db.Where("key = ?", "tls_default_config").First(&setting).Error; err != nil {
 		return DefaultTLSDefaults()
 	}
 	return LoadTLSDefaults(setting.Value)
+}
+
+// tlsDefaultsFromMap 从预加载的 settings map 中读取 TLS 默认配置。
+func tlsDefaultsFromMap(m map[string]string) TLSDefaults {
+	v, ok := m["tls_default_config"]
+	if !ok || v == "" {
+		return DefaultTLSDefaults()
+	}
+	return LoadTLSDefaults(v)
 }
 
 func loadProtectionConfig(db *gorm.DB) (store.ProtectionConfig, error) {
@@ -775,9 +830,30 @@ func loadProtectionConfig(db *gorm.DB) (store.ProtectionConfig, error) {
 	}
 	return cfg, nil
 }
+
+// protectionConfigFromMap 从预加载的 settings map 中读取 protection 配置。
+func protectionConfigFromMap(m map[string]string) (store.ProtectionConfig, error) {
+	v, ok := m["protection"]
+	if !ok || v == "" {
+		return store.DefaultProtectionConfig(), nil
+	}
+	cfg := store.DefaultProtectionConfig()
+	if err := json.Unmarshal([]byte(v), &cfg); err != nil {
+		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
+	}
+	return cfg, nil
+}
 func loadDynamicProtection(db *gorm.DB) dynamic.ProtectionConfig {
 	var setting store.SystemSettings
 	if err := db.Where("key = ?", "bot_settings").First(&setting).Error; err != nil {
+		return dynamic.ProtectionConfig{}
+	}
+	return parseDynamicProtection(setting.Value)
+}
+
+// parseDynamicProtection 从 bot_settings JSON 字符串解析动态保护配置。
+func parseDynamicProtection(raw string) dynamic.ProtectionConfig {
+	if raw == "" {
 		return dynamic.ProtectionConfig{}
 	}
 
@@ -787,10 +863,12 @@ func loadDynamicProtection(db *gorm.DB) dynamic.ProtectionConfig {
 		JSObfuscation            bool     `json:"js_obfuscation"`
 		ImageWatermark           bool     `json:"image_watermark"`
 		JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
+		JSProtectionMode         string   `json:"js_protection_mode,omitempty"`
+		DecryptCacheTTLSeconds   int      `json:"decrypt_cache_ttl_seconds,omitempty"`
 		ImageWatermarkPaths      []string `json:"image_watermark_paths,omitempty"`
 		WatermarkText            string   `json:"watermark_text,omitempty"`
 	}
-	if err := json.Unmarshal([]byte(setting.Value), &bs); err != nil {
+	if err := json.Unmarshal([]byte(raw), &bs); err != nil {
 		return dynamic.ProtectionConfig{}
 	}
 
@@ -798,10 +876,43 @@ func loadDynamicProtection(db *gorm.DB) dynamic.ProtectionConfig {
 		HTMLObfuscationEnabled: bs.DynamicProtectionEnabled && bs.HTMLObfuscation,
 		JSObfuscationEnabled:   bs.DynamicProtectionEnabled && bs.JSObfuscation,
 		ImageWatermarkEnabled:  bs.DynamicProtectionEnabled && bs.ImageWatermark,
+		JSProtectionMode:       bs.JSProtectionMode,
+		DecryptCacheTTLSeconds: bs.DecryptCacheTTLSeconds,
 		JSObfuscationPaths:     bs.JSObfuscationPaths,
 		ImageWatermarkPaths:    bs.ImageWatermarkPaths,
 		WatermarkText:          bs.WatermarkText,
 	}
+}
+
+// buildSiteDynamicProtection 基于全局动态保护配置，合并站点级覆盖字段。
+func buildSiteDynamicProtection(global dynamic.ProtectionConfig, site store.Site) dynamic.ProtectionConfig {
+	cfg := global
+	cfg.SiteID = site.ID
+
+	if site.DynamicProtectionEnabled != nil && !*site.DynamicProtectionEnabled {
+		cfg.HTMLObfuscationEnabled = false
+		cfg.JSObfuscationEnabled = false
+		return cfg
+	}
+	if site.DynamicHTMLEnabled != nil {
+		cfg.HTMLObfuscationEnabled = *site.DynamicHTMLEnabled
+	}
+	if site.DynamicJSEnabled != nil {
+		cfg.JSObfuscationEnabled = *site.DynamicJSEnabled
+	}
+	if site.DynamicJSMode != "" {
+		cfg.JSProtectionMode = site.DynamicJSMode
+	}
+	if site.DynamicJSPaths != "" {
+		var paths []string
+		if err := json.Unmarshal([]byte(site.DynamicJSPaths), &paths); err == nil && len(paths) > 0 {
+			cfg.JSObfuscationPaths = paths
+		}
+	}
+	if site.DynamicDecryptCacheTTL != nil {
+		cfg.DecryptCacheTTLSeconds = *site.DynamicDecryptCacheTTL
+	}
+	return cfg
 }
 
 func loadExcludeRecordHeaders(db *gorm.DB) []string {
@@ -809,10 +920,18 @@ func loadExcludeRecordHeaders(db *gorm.DB) []string {
 	if err := db.Where("key = ?", "bot_settings").First(&setting).Error; err != nil {
 		return nil
 	}
+	return parseExcludeRecordHeaders(setting.Value)
+}
+
+// parseExcludeRecordHeaders 从 bot_settings JSON 字符串解析排除记录头列表。
+func parseExcludeRecordHeaders(raw string) []string {
+	if raw == "" {
+		return nil
+	}
 	var bs struct {
 		ExcludeRecordHeaders []string `json:"exclude_record_headers,omitempty"`
 	}
-	if err := json.Unmarshal([]byte(setting.Value), &bs); err != nil {
+	if err := json.Unmarshal([]byte(raw), &bs); err != nil {
 		return nil
 	}
 	return bs.ExcludeRecordHeaders
@@ -824,6 +943,15 @@ func loadHTTP2Config(db *gorm.DB) HTTP2Config {
 		return DefaultHTTP2Config()
 	}
 	return LoadHTTP2Config(setting.Value)
+}
+
+// http2ConfigFromMap 从预加载的 settings map 中读取 HTTP/2 配置。
+func http2ConfigFromMap(m map[string]string) HTTP2Config {
+	v, ok := m["http2_config"]
+	if !ok || v == "" {
+		return DefaultHTTP2Config()
+	}
+	return LoadHTTP2Config(v)
 }
 
 func loadBoolSetting(db *gorm.DB, key string) bool {
@@ -858,6 +986,45 @@ func loadIntSetting(db *gorm.DB, key string, defaultValue int) int {
 	return v
 }
 
+// loadAllSettings 一次性加载所有 system_settings 到 map，避免多次独立查询。
+func loadAllSettings(db *gorm.DB) map[string]string {
+	var all []store.SystemSettings
+	db.Find(&all)
+	m := make(map[string]string, len(all))
+	for _, s := range all {
+		m[s.Key] = s.Value
+	}
+	return m
+}
+
+// settingBool 从预加载的 settings map 中读取布尔值。
+func settingBool(m map[string]string, key string) bool {
+	v := strings.TrimSpace(strings.ToLower(m[key]))
+	return v == "true" || v == "1" || v == "yes"
+}
+
+// settingStr 从预加载的 settings map 中读取字符串，为空时返回默认值。
+func settingStr(m map[string]string, key string, defaultValue string) string {
+	v := m[key]
+	if strings.TrimSpace(v) == "" {
+		return defaultValue
+	}
+	return v
+}
+
+// settingInt 从预加载的 settings map 中读取整数，解析失败时返回默认值。
+func settingInt(m map[string]string, key string, defaultValue int) int {
+	raw := strings.TrimSpace(m[key])
+	if raw == "" {
+		return defaultValue
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultValue
+	}
+	return v
+}
+
 // systemSettingKeyEquals returns a GORM clause for querying system settings by key.
 func systemSettingKeyEquals(key string) clause.Eq {
 	return clause.Eq{Column: clause.Column{Name: "key"}, Value: key}
@@ -876,4 +1043,104 @@ func ResolveOutboundHost(rt SiteRuntime, upstreamHost string, incomingHost strin
 		return upstreamHost, nil
 	}
 	return incomingHost, nil
+}
+
+// loadAccessControlConfigs 从数据库批量加载所有站点的访问控制配置，避免 N+1 查询。
+func loadAccessControlConfigs(db *gorm.DB) map[uint]*AccessControlConfig {
+	result := make(map[uint]*AccessControlConfig)
+
+	var configs []store.SiteAccessConfig
+	if err := db.Where("enabled = ?", true).Find(&configs).Error; err != nil {
+		return result
+	}
+
+	// 批量加载所有启用的 provider，按 site_id 分组。
+	var allProviders []store.AccessProvider
+	db.Where("enabled = ?", true).Order("site_id ASC, priority ASC").Find(&allProviders)
+	providersBySite := make(map[uint][]store.AccessProvider)
+	for _, p := range allProviders {
+		providersBySite[p.SiteID] = append(providersBySite[p.SiteID], p)
+	}
+
+	// 批量加载所有启用的路径规则，按 site_id 分组。
+	var allPathRules []store.AccessPathRule
+	db.Where("enabled = ?", true).Order("site_id ASC, priority ASC").Find(&allPathRules)
+	pathRulesBySite := make(map[uint][]store.AccessPathRule)
+	for _, r := range allPathRules {
+		pathRulesBySite[r.SiteID] = append(pathRulesBySite[r.SiteID], r)
+	}
+
+	for _, cfg := range configs {
+		ac := &AccessControlConfig{
+			Enabled:            true,
+			SharedPasswordHash: cfg.SharedPasswordHash,
+			SessionTTL:         cfg.SessionTTL,
+		}
+
+		for _, p := range providersBySite[cfg.SiteID] {
+			ac.Providers = append(ac.Providers, AccessControlProvider{
+				ID:       p.ID,
+				Type:     p.Type,
+				Name:     p.Name,
+				Priority: p.Priority,
+				Config:   p.Config,
+			})
+		}
+
+		for _, r := range pathRulesBySite[cfg.SiteID] {
+			ac.PathRules = append(ac.PathRules, AccessControlPathRule{
+				Path:     r.Path,
+				Action:   r.Action,
+				Priority: r.Priority,
+			})
+		}
+
+		result[cfg.SiteID] = ac
+	}
+	return result
+}
+
+// siteIPListPair 存储一个站点的已解析黑白名单。
+type siteIPListPair struct {
+	whitelist []net.IPNet
+	blacklist []net.IPNet
+}
+
+// loadSiteIPLists 从数据库加载所有站点级 IP 黑白名单（不含全局条目）。
+func loadSiteIPLists(db *gorm.DB) map[uint]siteIPListPair {
+	result := make(map[uint]siteIPListPair)
+	var items []store.IPListEntry
+	if err := db.Where("enabled = ? AND site_id IS NOT NULL", true).Find(&items).Error; err != nil {
+		return result
+	}
+	for _, it := range items {
+		if it.SiteID == nil {
+			continue
+		}
+		siteID := *it.SiteID
+		pair := result[siteID]
+		val := strings.TrimSpace(it.Value)
+		if val == "" {
+			continue
+		}
+		var ipNet net.IPNet
+		if _, cidr, err := net.ParseCIDR(val); err == nil {
+			ipNet = *cidr
+		} else if ip := net.ParseIP(val); ip != nil {
+			if ip4 := ip.To4(); ip4 != nil {
+				ipNet = net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)}
+			} else {
+				ipNet = net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
+			}
+		} else {
+			continue
+		}
+		if it.Kind == store.IPListWhite {
+			pair.whitelist = append(pair.whitelist, ipNet)
+		} else if it.Kind == store.IPListBlack {
+			pair.blacklist = append(pair.blacklist, ipNet)
+		}
+		result[siteID] = pair
+	}
+	return result
 }

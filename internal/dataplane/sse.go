@@ -3,7 +3,6 @@ package dataplane
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -30,8 +29,7 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	}
 
 	upstreamCtx, cancelUpstream := context.WithCancel(ctx)
-	upstreamConn := &proxy.UpstreamRequestConn{}
-	req, err := http.NewRequestWithContext(proxy.TraceUpstreamRequestConn(upstreamCtx, upstreamConn), string(c.Method()), full, rdr)
+	req, err := http.NewRequestWithContext(upstreamCtx, string(c.Method()), full, rdr)
 	if err != nil {
 		cancelUpstream()
 		return err
@@ -80,10 +78,7 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	c.Response.Header.Del("Content-Length")
 	c.Response.Header.SetContentLength(-1)
 	c.Response.ImmediateHeaderFlush = true
-	if resp.ProtoMajor != 1 {
-		upstreamConn = nil
-	}
-	stream := newSSEBodyStream(ctx, resp.Body, resp, c, cancelUpstream, upstreamConn)
+	stream := newSSEBodyStream(ctx, resp.Body, resp, c, cancelUpstream)
 	if proxy.StreamResponseViaHijack(ctx, c, stream, func() { _ = stream.cleanup() }) {
 		return nil
 	}
@@ -143,24 +138,26 @@ func (r *autoCloseReader) Close() error {
 }
 
 type sseBodyStream struct {
-	rc           io.ReadCloser
-	resp         *http.Response
-	hertzCtx     *app.RequestContext
-	cancel       context.CancelFunc
-	upstreamConn *proxy.UpstreamRequestConn
-	done         chan struct{}
-	mu           sync.Mutex
-	closed       bool
+	rc            io.ReadCloser
+	resp          *http.Response
+	hertzCtx      *app.RequestContext
+	cancel        context.CancelFunc
+	done          chan struct{}
+	mu            sync.Mutex
+	cond          *sync.Cond
+	activeReaders int
+	closing       bool
+	closed        bool
+	closeErr      error
 }
 
-func newSSEBodyStream(ctx context.Context, rc io.ReadCloser, resp *http.Response, hertzCtx *app.RequestContext, cancel context.CancelFunc, upstreamConn *proxy.UpstreamRequestConn) *sseBodyStream {
+func newSSEBodyStream(ctx context.Context, rc io.ReadCloser, resp *http.Response, hertzCtx *app.RequestContext, cancel context.CancelFunc) *sseBodyStream {
 	stream := &sseBodyStream{
-		rc:           rc,
-		resp:         resp,
-		hertzCtx:     hertzCtx,
-		cancel:       cancel,
-		upstreamConn: upstreamConn,
-		done:         make(chan struct{}),
+		rc:       rc,
+		resp:     resp,
+		hertzCtx: hertzCtx,
+		cancel:   cancel,
+		done:     make(chan struct{}),
 	}
 	go func() {
 		select {
@@ -175,32 +172,64 @@ func newSSEBodyStream(ctx context.Context, rc io.ReadCloser, resp *http.Response
 func (r *sseBodyStream) cleanup() error {
 	r.mu.Lock()
 	if r.closed {
+		err := r.closeErr
 		r.mu.Unlock()
-		return nil
+		return err
 	}
-	r.closed = true
+	if r.closing {
+		r.initCondLocked()
+		for !r.closed {
+			r.cond.Wait()
+		}
+		err := r.closeErr
+		r.mu.Unlock()
+		return err
+	}
+	r.closing = true
 	close(r.done)
+	cancel := r.cancel
+	r.cancel = nil
 	r.mu.Unlock()
-	if r.cancel != nil {
-		r.cancel()
+
+	if cancel != nil {
+		cancel()
 	}
-	var closeErr error
-	if r.upstreamConn != nil {
-		closeErr = errors.Join(closeErr, r.upstreamConn.Close())
+
+	r.mu.Lock()
+	r.initCondLocked()
+	for r.activeReaders > 0 {
+		r.cond.Wait()
 	}
+	r.mu.Unlock()
+
 	copySSETrailers(r.hertzCtx, r.resp.Trailer)
-	closeErr = errors.Join(closeErr, r.rc.Close())
+	closeErr := r.rc.Close()
+
+	r.mu.Lock()
+	r.closeErr = closeErr
+	r.closed = true
+	r.cond.Broadcast()
+	r.mu.Unlock()
 	return closeErr
 }
 
 func (r *sseBodyStream) Read(p []byte) (int, error) {
 	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
+	if r.closing || r.closed {
+		r.mu.Unlock()
 		return 0, io.EOF
 	}
+	r.activeReaders++
+	r.mu.Unlock()
+
 	n, err := r.rc.Read(p)
+
+	r.mu.Lock()
+	r.activeReaders--
+	if r.activeReaders == 0 && r.cond != nil {
+		r.cond.Broadcast()
+	}
+	r.mu.Unlock()
 	if err != nil {
 		_ = r.cleanup()
 	}
@@ -209,6 +238,12 @@ func (r *sseBodyStream) Read(p []byte) (int, error) {
 
 func (r *sseBodyStream) Close() error {
 	return r.cleanup()
+}
+
+func (r *sseBodyStream) initCondLocked() {
+	if r.cond == nil {
+		r.cond = sync.NewCond(&r.mu)
+	}
 }
 
 func copySSETrailers(c *app.RequestContext, trailers http.Header) {

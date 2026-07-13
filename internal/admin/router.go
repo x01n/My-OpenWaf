@@ -8,6 +8,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 
+	"My-OpenWaf/internal/admin/access"
 	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/admin/detect"
 	"My-OpenWaf/internal/admin/event"
@@ -51,6 +52,7 @@ type Dependencies struct {
 	Realtime      *system.RealtimeHub
 	Cache         *cache.RedisKV
 	Upstreams     *upstream.Pool
+	ThreatIntel   system.ThreatIntelSyncer
 }
 
 func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
@@ -112,6 +114,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/ip-lists", system.ListIPEntries(r.IPList))
 		readGroup.GET("/ip-lists/:id", system.GetIPEntry(r.IPList))
 
+		readGroup.GET("/threat-intel-feeds", system.ListThreatIntelFeeds(r.ThreatIntel))
+		readGroup.GET("/threat-intel-sync-logs", system.ListThreatIntelSyncLogs(r.ThreatIntelSyncLog))
+
 		readGroup.GET("/security-events", event.ListSecurityEvents(r.SecurityEvent))
 		readGroup.GET("/security-events/stats", event.SecurityEventStats(r.SecurityEvent))
 		readGroup.GET("/security-events/timeline", event.SecurityEventTimeline(r.SecurityEvent))
@@ -123,6 +128,12 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites/:id/security-events", event.ListSiteSecurityEvents(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events/stats", event.SiteSecurityEventStats(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events/timeline", event.SiteSecurityEventTimeline(r.Site, r.SecurityEvent))
+
+		// 误报反馈：任意登录用户可提交与查看。
+		readGroup.GET("/false-positives", event.ListFalsePositives(r.FalsePositive))
+
+		// 预置爬虫白名单预览（读端点）。
+		readGroup.GET("/preset-bot-whitelist", system.ListPresetBotWhitelist())
 		readGroup.GET("/sites/:id/access-logs", site.ListSiteAccessLogs(r.Site, r.AccessLog))
 		readGroup.GET("/sites/:id/access-logs/stats", site.SiteAccessLogStats(r.Site, r.AccessLog))
 		readGroup.GET("/sites/:id/drop-events", site.ListSiteDropEvents(r.Site, r.DropEvent))
@@ -131,10 +142,19 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites/:id/application-route-rules", rule.ListApplicationRouteRules(r.Site, r.AppRouteRule))
 		readGroup.GET("/sites/:id/recorded-resources", rule.ListRecordedResources(r.Site, r.RecordedResource))
 
+		readGroup.GET("/sites/:id/access", access.GetAccessConfig(r.AccessControl))
+		readGroup.GET("/sites/:id/access/providers", access.ListProviders(r.AccessControl, deps.JWTSecret))
+		readGroup.GET("/sites/:id/access/users", access.ListUsers(r.AccessControl))
+		readGroup.GET("/sites/:id/access/rules", access.ListPathRules(r.AccessControl))
+
 		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, ConfigDB: deps.DB, LogDB: deps.LogDB, Cache: deps.Cache}
 		readGroup.GET("/dashboard/summary", system.DashboardSummary(dashDeps))
 
 		readGroup.GET("/api-keys", system.ListAPIKeys(r.AdminAPIKey))
+
+		readGroup.GET("/admin-users", ListAdminUsers(r.AdminAccount))
+
+		readGroup.POST("/admin-users/:id/update-password", UpdateAdminPassword(r.AdminAccount))
 
 		readGroup.GET("/bot-settings", protect.GetBotSettings(r.SystemSettings))
 		readGroup.GET("/bot-stats", protect.GetBotStats(r.BotScore))
@@ -205,6 +225,11 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/ip-lists/:id/update", system.UpdateIPEntry(r.IPList, reload))
 		opsGroup.POST("/ip-lists/:id/delete", system.DeleteIPEntry(r.IPList, reload))
 
+		opsGroup.POST("/threat-intel-feeds", system.CreateThreatIntelFeed(r.ThreatIntel, reload))
+		opsGroup.POST("/threat-intel-feeds/:id/update", system.UpdateThreatIntelFeed(r.ThreatIntel, reload))
+		opsGroup.POST("/threat-intel-feeds/:id/delete", system.DeleteThreatIntelFeed(r.ThreatIntel, reload))
+		opsGroup.POST("/threat-intel-feeds/:id/sync", system.SyncThreatIntelFeed(r.ThreatIntel, deps.ThreatIntel))
+
 		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
 
 		opsGroup.POST("/bot-settings/update", protect.UpdateBotSettings(r.SystemSettings, reload))
@@ -235,6 +260,24 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		opsGroup.POST("/sites/:id/error-pages", site.UpdateSiteErrorPages(r.Site, reload))
 		opsGroup.POST("/error-pages/preview", site.PreviewErrorPage())
+
+		opsGroup.POST("/sites/:id/access", access.SaveAccessConfig(r.AccessControl, reload))
+		opsGroup.POST("/sites/:id/access/providers", access.CreateProvider(r.AccessControl, reload, deps.JWTSecret))
+		opsGroup.POST("/sites/:id/access/providers/:pid/update", access.UpdateProvider(r.AccessControl, reload, deps.JWTSecret))
+		opsGroup.POST("/sites/:id/access/providers/:pid/delete", access.DeleteProvider(r.AccessControl, reload))
+		opsGroup.POST("/sites/:id/access/users", access.CreateUser(r.AccessControl, reload))
+		opsGroup.POST("/sites/:id/access/users/:uid/update", access.UpdateUser(r.AccessControl, reload))
+		opsGroup.POST("/sites/:id/access/users/:uid/delete", access.DeleteUser(r.AccessControl, reload))
+		opsGroup.POST("/sites/:id/access/rules", access.CreatePathRule(r.AccessControl, reload))
+		opsGroup.POST("/sites/:id/access/rules/:rid/update", access.UpdatePathRule(r.AccessControl, reload))
+		opsGroup.POST("/sites/:id/access/rules/:rid/delete", access.DeletePathRule(r.AccessControl, reload))
+
+		// 误报反馈：任意登录用户可提交、更新状态；删除仅 admin。
+		opsGroup.POST("/false-positives", event.CreateFalsePositive(r.FalsePositive))
+		opsGroup.POST("/false-positives/:id/status", event.UpdateFalsePositiveStatus(r.FalsePositive))
+
+		// 预置爬虫白名单（Google/Bing/Baidu/360/Yandex 等）。
+		opsGroup.POST("/preset-bot-whitelist/seed", system.SeedBotWhitelist(r.IPList, reload))
 	}
 
 	adminGroup := api.Group("")
@@ -244,6 +287,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/settings/:key", system.SetSetting(r.SystemSettings, reload))
 		adminGroup.POST("/settings/:key/update", system.SetSetting(r.SystemSettings, reload))
 		adminGroup.POST("/settings/:key/delete", system.DeleteSetting(r.SystemSettings, reload))
+
+		// 配置备份/恢复（高危，仅 admin）。
+		adminGroup.GET("/backup/export", system.ExportBackup(deps.DB))
+		adminGroup.POST("/backup/import", system.ImportBackup(deps.DB, reload))
 
 		adminGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
 		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
@@ -262,11 +309,18 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/api-keys", system.CreateAPIKey(r.AdminAPIKey))
 		adminGroup.POST("/api-keys/:id/delete", system.DeleteAPIKey(r.AdminAPIKey))
 
+		adminGroup.POST("/admin-users", CreateAdminUser(r.AdminAccount))
+		adminGroup.POST("/admin-users/:id/update-role", UpdateAdminRole(r.AdminAccount))
+		adminGroup.POST("/admin-users/:id/delete", DeleteAdminUser(r.AdminAccount))
+
 		adminGroup.POST("/drop-policy/update", protect.UpdateDropPolicy(r.SystemSettings, reload))
 
 		adminGroup.POST("/cve-rules", detect.CreateCVERule(r.CVERule, deps.CVEFeedMgr))
 		adminGroup.POST("/cve-rules/:id/update", detect.UpdateCVERule(r.CVERule, deps.CVEFeedMgr))
 		adminGroup.POST("/cve-rules/:id/delete", detect.DeleteCVERule(r.CVERule, deps.CVEFeedMgr))
+
+		// 删除误报反馈仅 admin。
+		adminGroup.POST("/false-positives/:id/delete", event.DeleteFalsePositive(r.FalsePositive))
 	}
 
 	h.GET("/__owaf/pow.wasm", func(ctx context.Context, c *app.RequestContext) {

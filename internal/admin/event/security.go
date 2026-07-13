@@ -171,22 +171,24 @@ func SiteSecurityEventStats(siteRepo *repository.SiteRepo, repo *repository.Secu
 		topIPs, _ := repo.TopIPsBySite(siteID, since, 10)
 		topPaths, _ := repo.TopPathsBySite(siteID, since, 10)
 		topRules, _ := repo.TopRulesBySite(siteID, since, 10)
+		topCountries, _ := repo.TopCountriesBySite(siteID, since, 10)
 		total, _ := repo.CountBySite(siteID, repository.SecurityEventFilter{Since: &since})
 		intercepts, _ := repo.CountTerminalBySite(siteID, since)
 		observes, _ := repo.CountObserveBySite(siteID, since)
 		requestCount, _ := repo.DistinctRequestCountBySite(siteID, since)
 		challenges, _ := repo.CountChallengeBySite(siteID, since)
 		c.JSON(200, map[string]any{
-			"total":      total,
-			"hours":      hours,
-			"categories": categories,
-			"top_ips":    topIPs,
-			"top_paths":  topPaths,
-			"top_rules":  topRules,
-			"intercepts": intercepts,
-			"observes":   observes,
-			"requests":   requestCount,
-			"challenges": challenges,
+			"total":         total,
+			"hours":         hours,
+			"categories":    categories,
+			"top_ips":       topIPs,
+			"top_paths":     topPaths,
+			"top_rules":     topRules,
+			"top_countries": topCountries,
+			"intercepts":    intercepts,
+			"observes":      observes,
+			"requests":      requestCount,
+			"challenges":    challenges,
 		})
 	}
 }
@@ -233,6 +235,7 @@ func SecurityEventStats(repo *repository.SecurityEventRepo) app.HandlerFunc {
 		topIPs, _ := repo.TopIPs(since, 10)
 		topPaths, _ := repo.TopPaths(since, 10)
 		topRules, _ := repo.TopRules(since, 10)
+		topCountries, _ := repo.TopCountries(since, 10)
 
 		total, _ := repo.Count(repository.SecurityEventFilter{Since: &since})
 		intercepts, _ := repo.CountTerminal(since)
@@ -241,16 +244,17 @@ func SecurityEventStats(repo *repository.SecurityEventRepo) app.HandlerFunc {
 		challenges, _ := repo.CountChallenge(since)
 
 		c.JSON(200, map[string]any{
-			"total":      total,
-			"hours":      hours,
-			"categories": categories,
-			"top_ips":    topIPs,
-			"top_paths":  topPaths,
-			"top_rules":  topRules,
-			"intercepts": intercepts,
-			"observes":   observes,
-			"requests":   requestCount,
-			"challenges": challenges,
+			"total":         total,
+			"hours":         hours,
+			"categories":    categories,
+			"top_ips":       topIPs,
+			"top_paths":     topPaths,
+			"top_rules":     topRules,
+			"top_countries": topCountries,
+			"intercepts":    intercepts,
+			"observes":      observes,
+			"requests":      requestCount,
+			"challenges":    challenges,
 		})
 	}
 }

@@ -24,7 +24,8 @@ import {
 } from "@/components/ui/pagination";
 import { Badge } from "@/components/ui/badge";
 import { DataTable } from "@/components/data-table";
-import { IconFilter, IconFileText } from "@tabler/icons-react";
+import Link from "next/link";
+import { IconFilter, IconFileText, IconRoute } from "@tabler/icons-react";
 import { useAccessLogs } from "@/hooks/use-api";
 import type { AccessLog } from "@/lib/types";
 
@@ -76,6 +77,29 @@ export default function AccessLogsPage() {
           <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
             {row.waf_action}
           </Badge>
+        ) : (
+          "-"
+        ),
+    },
+    {
+      key: "operations",
+      title: t("common.action"),
+      width: "80px",
+      render: (row: AccessLog) =>
+        row.request_id ? (
+          <Button
+            asChild
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            title={t("requestTrace.trackThisRequest")}
+          >
+            <Link
+              href={`/request-trace?id=${encodeURIComponent(row.request_id)}`}
+            >
+              <IconRoute className="h-4 w-4" />
+            </Link>
+          </Button>
         ) : (
           "-"
         ),

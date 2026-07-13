@@ -20,6 +20,7 @@ import {
   IconSettings,
   IconWorld,
   IconNetwork,
+  IconRocket,
   IconShieldLock,
   IconTrash,
   IconHelpCircle,
@@ -200,6 +201,58 @@ export default function SettingsPage() {
             ))}
           </div>
           <div className="mt-4 flex justify-end">
+            <Button
+              onClick={handleSaveNetwork}
+              disabled={networkLoading || networkUpdate.loading}
+              className="bg-primary hover:bg-primary/90"
+            >
+              {networkUpdate.loading ? t("common.saving") : t("common.save")}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* HTTP/3 (QUIC) */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <IconRocket className="h-5 w-5 text-primary" />
+            {t("settings.http3.title")}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-start gap-3 rounded-lg border p-3">
+            <Switch
+              checked={getNetworkValue("http3_enabled")}
+              onCheckedChange={() => toggleNetwork("http3_enabled")}
+              id="http3_enabled"
+              disabled={networkLoading}
+            />
+            <div className="space-y-0.5">
+              <Label htmlFor="http3_enabled" className="cursor-pointer text-sm">
+                {t("settings.http3.enableLabel")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t("settings.http3.description")}
+              </p>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label>{t("settings.http3.bindLabel")}</Label>
+            <Input
+              className="w-96"
+              placeholder={t("settings.http3.bindPlaceholder")}
+              value={getNetworkValue("http3_bind", "")}
+              onChange={(e) =>
+                setLocalNetwork((prev) => ({ ...prev, http3_bind: e.target.value }))
+              }
+              disabled={networkLoading || !getNetworkValue("http3_enabled")}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t("settings.http3.bindDescription")}
+            </p>
+          </div>
+          <div className="flex justify-end">
             <Button
               onClick={handleSaveNetwork}
               disabled={networkLoading || networkUpdate.loading}

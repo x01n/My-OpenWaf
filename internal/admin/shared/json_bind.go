@@ -60,6 +60,8 @@ func SiteJSONBlobKeys() []string {
 		"custom_error_pages",
 		"upstream_urls",
 		"cipher_suites",
+		"dynamic_js_paths",
+		"cc_rules",
 	}
 }
 
@@ -94,6 +96,12 @@ func bindSiteFromRaw(raw map[string]json.RawMessage, dst *store.Site) error {
 	}
 	if s, ok := preserved["cipher_suites"]; ok {
 		dst.CipherSuites = s
+	}
+	if s, ok := preserved["dynamic_js_paths"]; ok {
+		dst.DynamicJSPaths = s
+	}
+	if s, ok := preserved["cc_rules"]; ok {
+		dst.CCRules = s
 	}
 	return nil
 }

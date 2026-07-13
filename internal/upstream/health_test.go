@@ -186,6 +186,19 @@ func TestPoolFallsBackWhenAllUnhealthy(t *testing.T) {
 	}
 }
 
+func TestPickByProtocolPreferenceFallsBackWhenAllUnhealthy(t *testing.T) {
+	pool := NewPool()
+	urls := []string{"http://plain", "https://secure"}
+	for _, raw := range urls {
+		pool.Mark(raw, assertErr{})
+		pool.Mark(raw, assertErr{})
+	}
+	got, ok := PickByProtocolPreference(urls, pool, func(uint32) uint32 { return 0 })
+	if !ok || got != "https://secure" {
+		t.Fatalf("got %q ok=%v", got, ok)
+	}
+}
+
 func TestPoolMarkRecoversUpstream(t *testing.T) {
 	pool := NewPool()
 	pool.Mark("http://a", assertErr{})

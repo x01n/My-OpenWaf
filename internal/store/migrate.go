@@ -47,7 +47,22 @@ func AutoMigrate(db *gorm.DB) error {
 		&CVESyncLog{},
 		&ApplicationRouteRule{},
 		&RecordedResource{},
+
+		&SiteAccessConfig{},
+		&AccessProvider{},
+		&AccessUser{},
+		&AccessPathRule{},
+		&AccessSession{},
+
+		&ThreatIntelFeed{},
+		&ThreatIntelSyncLog{},
+		&FalsePositiveReport{},
 	); err != nil {
+		return err
+	}
+
+	// 访问控制表的建表与索引补齐，均为新表，幂等执行。
+	if err := migrations.V7MigrateAccessControl(db); err != nil {
 		return err
 	}
 

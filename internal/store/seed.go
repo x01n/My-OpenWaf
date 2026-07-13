@@ -49,6 +49,7 @@ func SeedDefaults(db *gorm.DB, adminBind string, log *slog.Logger) (firstRunToke
 		a := AdminAccount{
 			Username:     "admin",
 			PasswordHash: string(hash),
+			Role:         RoleAdmin,
 		}
 		if err := db.Create(&a).Error; err != nil {
 			return "", "", fmt.Errorf("seed: create admin account: %w", err)
@@ -62,6 +63,8 @@ func SeedDefaults(db *gorm.DB, adminBind string, log *slog.Logger) (firstRunToke
 
 func generateToken(n int) string {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("store: failed to generate secure random token: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }

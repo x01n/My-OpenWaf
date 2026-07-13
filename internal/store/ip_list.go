@@ -25,4 +25,6 @@ type IPListEntry struct {
 	Note    string     `gorm:"size:255" json:"note"`
 	Enabled bool       `gorm:"default:true" json:"enabled"`
 	Action  string     `json:"action" gorm:"default:'intercept'"` // "intercept" or "block"
+	SiteID  *uint      `gorm:"index" json:"site_id,omitempty"`    // nil = 全局
+	FeedID  *uint      `gorm:"index" json:"feed_id,omitempty"`    // nil = 手动添加，有值 = 来自订阅源
 }

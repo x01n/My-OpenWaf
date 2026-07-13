@@ -77,6 +77,18 @@ export interface Site {
 
   custom_error_pages?: string;
 
+  // 动态保护站点级覆盖（null/undefined = 继承全局）
+  dynamic_protection_enabled?: boolean | null;
+  dynamic_html_enabled?: boolean | null;
+  dynamic_js_enabled?: boolean | null;
+  dynamic_js_mode?: string;
+  dynamic_js_paths?: string; // JSON 数组字符串
+  dynamic_decrypt_cache_ttl?: number | null;
+
+  // 站点级 CC 规则覆盖（null/undefined = 继承全局；true = 站点自定义；false = 站点关闭）
+  cc_use_custom?: boolean | null;
+  cc_rules?: string; // CC 规则 JSON 数组字符串
+
   // 列表返回的扩展字段
   listener_summary?: string;
   tls_summary?: string;
@@ -239,9 +251,11 @@ export interface SecurityEventStats {
   total: number;
   hours: number;
   categories: Array<{ category: string; count: number }>;
-  top_ips: Array<{ ip: string; count: number }>;
+  top_ips: Array<{ client_ip: string; count: number }>;
   top_paths: Array<{ path: string; count: number }>;
-  top_rules: Array<{ rule: string; count: number }>;
+  top_rules: Array<{ rule_id_str: string; count: number }>;
+  /** 攻击来源国家/地区排行，country 为 ISO 3166-1 alpha-2 代码 */
+  top_countries?: Array<{ country: string; count: number }>;
   intercepts: number;
   observes: number;
   requests: number;
@@ -295,6 +309,23 @@ export interface AccessLog {
 
   upstream_latency_ms: number;
   response_size: number;
+}
+
+// ============================================================
+// 请求追踪相关
+// ============================================================
+
+/**
+ * 请求追踪结果
+ * 后端契约：GET /api/v1/request/:request_id
+ * internal/admin/event/request.go 返回 {
+ *   request_id, access_logs, security_events
+ * }
+ */
+export interface RequestTrace {
+  request_id: string;
+  access_logs: AccessLog[] | null;
+  security_events: SecurityEvent[] | null;
 }
 
 // ============================================================
@@ -402,12 +433,114 @@ export interface IPEntry {
   id: number;
   created_at: string;
   updated_at: string;
-  ip?: string;
-  cidr?: string;
-  type: "allow" | "block";
-  reason?: string;
-  expires_at?: string;
-  source?: string;
+  /** 名单类型：黑名单或白名单，对齐后端 IPListKind */
+  kind: "blacklist" | "whitelist";
+  /** IP 或 CIDR，后端统一存为 value，不区分 ip/cidr */
+  value: string;
+  /** 备注说明 */
+  note?: string;
+  /** 命中动作：拦截或丢弃（后端 normalizeIPListAction 归一化后返回 intercept/drop） */
+  action: "intercept" | "drop";
+  enabled: boolean;
+  /** 作用域站点 ID；null/undefined 表示全局 */
+  site_id?: number | null;
+}
+
+// ============================================================
+// 威胁情报订阅相关
+// ============================================================
+
+/**
+ * 威胁情报 IP 订阅源。
+ * 字段严格对齐后端 store.ThreatIntelFeed，不新增后端未定义字段。
+ */
+export interface ThreatIntelFeed {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  /** 订阅源名称 */
+  name: string;
+  /** 订阅 URL */
+  url: string;
+  /** 名单类型：黑名单或白名单 */
+  kind: "blacklist" | "whitelist";
+  /** 命中动作：拦截或丢弃 */
+  action: "intercept" | "drop";
+  enabled: boolean;
+  /** 同步间隔（秒） */
+  sync_interval: number;
+  /** 作用域站点 ID；null/undefined 表示全局 */
+  site_id?: number | null;
+  /** 上次同步时间 */
+  last_sync_at?: string | null;
+  /** 上次同步错误信息 */
+  last_error?: string;
+  /** 当前该源拉取的条目数 */
+  entry_count: number;
+}
+
+/**
+ * 威胁情报订阅源单次同步的历史记录。
+ * 字段严格对齐后端 store.ThreatIntelSyncLog。
+ */
+export interface ThreatIntelSyncLog {
+  id: number;
+  created_at: string;
+  /** 关联订阅源 ID */
+  feed_id: number;
+  /** 冗余存储的订阅源名称，避免关联查询 */
+  feed_name: string;
+  /** 开始时间 */
+  started_at: string;
+  /** 结束时间 */
+  finished_at: string;
+  /** 同步耗时（毫秒） */
+  duration_ms: number;
+  /** HTTP 拉取 + 解析都成功则为 true */
+  success: boolean;
+  /** 本次全量替换后的条目数 */
+  entries_added: number;
+  /** 因格式非法被跳过的条目数 */
+  entries_skipped: number;
+  /** 原始行数 */
+  lines_read: number;
+  /** 触发方式：auto=定时同步，manual=手动触发 */
+  trigger: "auto" | "manual";
+  /** 失败时的错误信息（≤1000 字符） */
+  error?: string;
+}
+
+// ============================================================
+// 误报反馈相关
+// ============================================================
+
+/**
+ * FalsePositiveReport 是管理员标记的一条误报反馈。
+ *
+ * 字段严格对齐后端 store.FalsePositiveReport，不新增后端未定义字段。
+ */
+export interface FalsePositiveReport {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  /** 关联的安全事件 ID */
+  security_event_id: number;
+  /** 请求 ID */
+  request_id: string;
+  /** 命中规则的字符串 ID */
+  rule_id_str: string;
+  /** 命中分类：owasp / cve / bot / rate_limit / ip_rep / access ... */
+  category: string;
+  client_ip: string;
+  host: string;
+  path: string;
+  match_desc: string;
+  /** 提交者用户名，后端从 auth_user 自动填充 */
+  submitted_by: string;
+  /** 提交时的备注 */
+  note: string;
+  /** 审查状态 */
+  status: "pending" | "confirmed" | "rejected";
 }
 
 // ============================================================
@@ -438,6 +571,16 @@ export interface NetworkConfig {
   enable_sse: boolean;
   enable_ntlm: boolean;
   fallback_cert: boolean;
+  /**
+   * 是否启用 HTTP/3 (QUIC)。
+   * 对齐后端 internal/admin/system/network.go NetworkConfig.HTTP3Enabled。
+   */
+  http3_enabled?: boolean;
+  /**
+   * HTTP/3 (QUIC) 监听地址，例如 `:443` 或 `0.0.0.0:8443`。
+   * 对齐后端 internal/admin/system/network.go NetworkConfig.HTTP3Bind。
+   */
+  http3_bind?: string;
 }
 
 export interface LogConfig {
@@ -505,6 +648,8 @@ export interface BotSettings {
   dynamic_protection_enabled: boolean;
   html_obfuscation: boolean;
   js_obfuscation: boolean;
+  js_protection_mode?: "all" | "paths";
+  decrypt_cache_ttl_seconds?: number;
   image_watermark: boolean;
   anti_replay_enabled: boolean;
   anti_replay_ttl: number;
@@ -561,12 +706,79 @@ export interface SiteErrorPages {
 // 上游相关
 // ============================================================
 
+/**
+ * 上游服务器健康状态
+ * 后端契约：internal/admin/system/upstream.go 中的 upstreamStatusItem
+ */
 export interface UpstreamStatus {
-  address: string;
+  url: string;
+  configured_protocol?: string;
+  last_http_protocol?: string;
   healthy: boolean;
-  active: number;
-  pending: number;
-  last_check?: string;
+  fail_count: number;
+  last_failure_kind?: string;
+  last_error?: string;
+  last_latency_ms: number;
+  average_latency_ms: number;
+  checked_at?: string;
+  last_success_at?: string;
+}
+
+export interface UpstreamStatusResponse {
+  items: UpstreamStatus[];
+  total: number;
+}
+
+// ============================================================
+// 站点访问控制相关
+// ============================================================
+
+export interface SiteAccessConfig {
+  enabled: boolean;
+  shared_password_set: boolean;
+  session_ttl: number;
+}
+
+export interface OAuthProviderConfig {
+  client_id: string;
+  client_secret_mask?: string;
+  client_secret_set?: boolean;
+  auth_url?: string;
+  token_url?: string;
+  userinfo_url?: string;
+  issuer?: string;
+  scopes?: string[];
+  redirect_path?: string;
+  use_pkce?: boolean;
+}
+
+export interface AccessProvider {
+  id: number;
+  site_id: number;
+  type: "password" | "oauth2" | "oidc";
+  name: string;
+  priority: number;
+  enabled: boolean;
+  config?: OAuthProviderConfig;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AccessUser {
+  id: number;
+  site_id: number;
+  username: string;
+  enabled: boolean;
+  created_at?: string;
+}
+
+export interface AccessPathRule {
+  id: number;
+  site_id: number;
+  path: string;
+  action: "require_auth" | "allow" | "deny";
+  priority: number;
+  enabled: boolean;
 }
 
 // ============================================================
@@ -576,4 +788,68 @@ export interface UpstreamStatus {
 export interface RealtimeTicket {
   ticket: string;
   expires_at: string;
+}
+
+// ============================================================
+// API 密钥相关
+// ============================================================
+
+export interface AdminAPIKey {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  name: string;
+  last_used_at?: string;
+}
+
+// ============================================================
+// 管理员账户相关
+// ============================================================
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  role: "admin" | "operator" | "readonly";
+  created_at: string;
+  last_login?: string;
+}
+
+// ============================================================
+// 配置备份/恢复相关
+// ============================================================
+
+/**
+ * BackupData 是完整配置备份的载荷。
+ *
+ * 各数组对前端不透明，作为整体导出/导入，前端不解析其内部结构。
+ */
+export interface BackupData {
+  version: number;
+  exported_at: string;
+  certificates: unknown[];
+  policies: unknown[];
+  rules: unknown[];
+  sites: unknown[];
+  site_listeners: unknown[];
+  ip_list_entries: unknown[];
+  threat_intel_feeds: unknown[];
+  cve_rule_records: unknown[];
+  application_routes: unknown[];
+  site_access_configs: unknown[];
+  access_providers: unknown[];
+  access_users: unknown[];
+  access_path_rules: unknown[];
+  system_settings: unknown[];
+}
+
+/**
+ * ImportResult 是恢复配置后的统计结果。
+ */
+export interface ImportResult {
+  status: string;
+  replace_mode: boolean;
+  sites: number;
+  certificates: number;
+  rules: number;
+  ip_entries: number;
 }

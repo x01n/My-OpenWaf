@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { IconKey, IconUser, IconRefresh, IconShield } from "@tabler/icons-react";
 import { useProtectionSettings, useProtectionSettingsUpdate } from "@/hooks/use-api";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
 export default function AuthConfigPage() {
@@ -18,6 +18,14 @@ export default function AuthConfigPage() {
   const updateSettings = useProtectionSettingsUpdate();
 
   const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  useEffect(() => {
+    if (settings?.basic_auth_username) {
+      setUsername(settings.basic_auth_username);
+    }
+  }, [settings?.basic_auth_username]);
 
   const getValue = (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     return localSettings[key] !== undefined ? localSettings[key] : (settings?.[key] ?? defaultValue);
@@ -29,8 +37,12 @@ export default function AuthConfigPage() {
 
   const handleSave = async () => {
     try {
-      await updateSettings.execute({ ...settings, ...localSettings });
+      const payload: Record<string, any> = { ...settings, ...localSettings }; // eslint-disable-line @typescript-eslint/no-explicit-any
+      if (username) payload.basic_auth_username = username;
+      if (password) payload.basic_auth_password = password;
+      await updateSettings.execute(payload);
       toast.success(t("authConfig.saveSuccess"));
+      setPassword("");
     } catch {
       toast.error(t("authConfig.saveFailed"));
     }
@@ -84,11 +96,20 @@ export default function AuthConfigPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label>{t("common.username")}</Label>
-              <Input placeholder={t("authConfig.usernamePlaceholder")} />
+              <Input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder={t("authConfig.usernamePlaceholder")}
+              />
             </div>
             <div className="space-y-2">
               <Label>{t("common.password")}</Label>
-              <Input type="password" placeholder={t("authConfig.passwordPlaceholder")} />
+              <Input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={t("authConfig.passwordPlaceholder")}
+              />
             </div>
           </div>
         </CardContent>

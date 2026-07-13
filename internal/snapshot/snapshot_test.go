@@ -599,6 +599,66 @@ func TestMatchSiteMatchesWithinCurrentBind(t *testing.T) {
 	}
 }
 
+func TestMatchSitePrefersExactThenWildcardThenCatchAll(t *testing.T) {
+	sn := &Snapshot{
+		Sites: map[string]SiteRuntime{
+			SiteMapKey(":443", "app.example.com"): testSiteRuntime(1, ":443", "app.example.com"),
+			SiteMapKey(":443", "*.example.com"):   testSiteRuntime(2, ":443", "*.example.com"),
+			SiteMapKey(":443", "*"):               testSiteRuntime(3, ":443", "*"),
+			SiteMapKey(":8443", "*"):              testSiteRuntime(4, ":8443", "*"),
+		},
+	}
+
+	tests := []struct {
+		name   string
+		bind   string
+		host   string
+		wantID uint
+	}{
+		{name: "exact before wildcard and catch-all", bind: ":443", host: "APP.EXAMPLE.COM:443", wantID: 1},
+		{name: "wildcard before catch-all", bind: ":443", host: "api.example.com", wantID: 2},
+		{name: "bare domain uses catch-all", bind: ":443", host: "example.com", wantID: 3},
+		{name: "unmatched domain uses catch-all", bind: ":443", host: "other.test", wantID: 3},
+		{name: "IP uses catch-all", bind: ":443", host: "192.0.2.10:443", wantID: 3},
+		{name: "catch-all stays within bind", bind: ":8443", host: "other.test", wantID: 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := sn.MatchSite(tt.bind, tt.host)
+			if !ok {
+				t.Fatalf("MatchSite(%q, %q) = no match, want site %d", tt.bind, tt.host, tt.wantID)
+			}
+			if got.Site.ID != tt.wantID {
+				t.Fatalf("MatchSite(%q, %q) = site %d, want %d", tt.bind, tt.host, got.Site.ID, tt.wantID)
+			}
+
+			gotPtr, ok := sn.MatchSitePtr(tt.bind, tt.host)
+			if !ok || gotPtr == nil {
+				t.Fatalf("MatchSitePtr(%q, %q) = no match, want site %d", tt.bind, tt.host, tt.wantID)
+			}
+			if gotPtr.Site.ID != tt.wantID {
+				t.Fatalf("MatchSitePtr(%q, %q) = site %d, want %d", tt.bind, tt.host, gotPtr.Site.ID, tt.wantID)
+			}
+		})
+	}
+}
+
+func TestMatchSiteCatchAllDoesNotCrossBinds(t *testing.T) {
+	sn := &Snapshot{
+		Sites: map[string]SiteRuntime{
+			SiteMapKey(":443", "*"): testSiteRuntime(1, ":443", "*"),
+		},
+	}
+
+	if _, ok := sn.MatchSite(":8443", "other.test"); ok {
+		t.Fatal("MatchSite matched catch-all from another bind")
+	}
+	if got, ok := sn.MatchSitePtr(":8443", "other.test"); ok || got != nil {
+		t.Fatal("MatchSitePtr matched catch-all from another bind")
+	}
+}
+
 func TestMatchSiteIPDetectionAvoidsWildcardForAddresses(t *testing.T) {
 	sn := &Snapshot{
 		Sites: map[string]SiteRuntime{
@@ -698,21 +758,39 @@ func TestMatchSiteNoMatchReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestRegisterSiteKeysKeepsFirstDuplicateBindHost(t *testing.T) {
+func TestRegisterSiteKeysRejectsDuplicateBindHostAcrossSites(t *testing.T) {
 	sites := make(map[string]SiteRuntime)
-	registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com"))
-	registerSiteKeys(sites, testSiteRuntime(2, ":80", "example.com"))
+	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com")); err != nil {
+		t.Fatalf("register first site: %v", err)
+	}
+
+	err := registerSiteKeys(sites, testSiteRuntime(2, ":80", "EXAMPLE.COM:80"))
+	if err == nil {
+		t.Fatal("expected duplicate normalized bind and host to be rejected")
+	}
 
 	got := sites[SiteMapKey(":80", "example.com")]
 	if got.Site.ID != 1 {
-		t.Fatalf("expected first site to remain registered, got %d", got.Site.ID)
+		t.Fatalf("registered site ID = %d, want 1", got.Site.ID)
+	}
+}
+
+func TestRegisterSiteKeysAllowsDuplicateHostWithinSameSite(t *testing.T) {
+	sites := make(map[string]SiteRuntime)
+	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com, EXAMPLE.COM:80")); err != nil {
+		t.Fatalf("register duplicate host within same site: %v", err)
+	}
+	if len(sites) != 1 {
+		t.Fatalf("registered site key count = %d, want 1", len(sites))
 	}
 }
 
 func TestRegisterSiteKeysMultiHost(t *testing.T) {
 	sites := make(map[string]SiteRuntime)
 	// Site with comma-separated hosts including a wildcard
-	registerSiteKeys(sites, testSiteRuntime(1, ":80", "a.example.com, b.example.com, *.example.com"))
+	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "a.example.com, b.example.com, *.example.com")); err != nil {
+		t.Fatalf("register site keys: %v", err)
+	}
 
 	if _, ok := sites[SiteMapKey(":80", "a.example.com")]; !ok {
 		t.Fatal("expected a.example.com to be registered")
@@ -731,7 +809,9 @@ func TestRegisterSiteKeysMultiHost(t *testing.T) {
 
 func TestMatchSiteMultiHost(t *testing.T) {
 	sites := make(map[string]SiteRuntime)
-	registerSiteKeys(sites, testSiteRuntime(1, ":8800", "app.example.com, *.example.org"))
+	if err := registerSiteKeys(sites, testSiteRuntime(1, ":8800", "app.example.com, *.example.org")); err != nil {
+		t.Fatalf("register site keys: %v", err)
+	}
 	sn := &Snapshot{Sites: sites}
 
 	// Exact match
@@ -885,6 +965,33 @@ func newSnapshotBuildDBForTest(t *testing.T) (*gorm.DB, *repository.ApplicationR
 		t.Fatalf("migrate snapshot build tables: %v", err)
 	}
 	return db, repository.NewApplicationRouteRuleRepo(db)
+}
+
+func TestBuildRejectsDuplicateNormalizedRouteAcrossSites(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	sites := []store.Site{
+		{
+			Host:         "example.com",
+			Bind:         ":80",
+			Network:      "tcp",
+			UpstreamURLs: "http://127.0.0.1:8080",
+			Enabled:      true,
+		},
+		{
+			Host:         "EXAMPLE.COM:80",
+			Bind:         ":80",
+			Network:      "tcp",
+			UpstreamURLs: "http://127.0.0.1:8081",
+			Enabled:      true,
+		},
+	}
+	if err := db.Create(&sites).Error; err != nil {
+		t.Fatalf("seed sites: %v", err)
+	}
+
+	if _, err := Build(db, 1); err == nil {
+		t.Fatal("expected Build to reject duplicate normalized site route")
+	}
 }
 
 func TestBuildExcludesDisabledApplicationRouteRules(t *testing.T) {
@@ -1351,6 +1458,70 @@ func TestCompileCCRulesSkipsUnsupportedConditions(t *testing.T) {
 
 	if rules := compileCCRules(protection); len(rules) != 0 {
 		t.Fatalf("compileCCRules() returned %d rules, want 0", len(rules))
+	}
+}
+
+// validCCRulesJSON 返回一条可编译的 CC 规则 JSON（供站点级测试复用）。
+func validCCRulesJSON() string {
+	return `[
+		{
+			"name":"site rule",
+			"enabled":true,
+			"action":"block",
+			"conditions":[{"target":"url_path","operator":"prefix","value":"/api"}],
+			"window":60,
+			"threshold":50,
+			"duration":10
+		}
+	]`
+}
+
+func TestSiteCCRulesInheritsGlobalWhenNil(t *testing.T) {
+	global := compileCCRulesFromJSON(validCCRulesJSON())
+	if len(global) != 1 {
+		t.Fatalf("global cc rules = %d, want 1", len(global))
+	}
+	// CCUseCustom 为 nil：站点继承全局规则。
+	site := store.Site{CCUseCustom: nil}
+	got := siteCCRules(site, global)
+	if len(got) != len(global) {
+		t.Fatalf("inherited cc rules = %d, want %d", len(got), len(global))
+	}
+}
+
+func TestSiteCCRulesDisabledWhenExplicitlyOff(t *testing.T) {
+	global := compileCCRulesFromJSON(validCCRulesJSON())
+	off := false
+	// CCUseCustom = false：站点显式关闭，忽略全局规则。
+	site := store.Site{CCUseCustom: &off, CCRules: validCCRulesJSON()}
+	if got := siteCCRules(site, global); len(got) != 0 {
+		t.Fatalf("disabled site cc rules = %d, want 0", len(got))
+	}
+}
+
+func TestSiteCCRulesUsesSiteRulesWhenEnabled(t *testing.T) {
+	// 全局为空，站点自定义启用：应使用站点自身规则。
+	on := true
+	site := store.Site{CCUseCustom: &on, CCRules: validCCRulesJSON()}
+	got := siteCCRules(site, nil)
+	if len(got) != 1 {
+		t.Fatalf("site cc rules = %d, want 1", len(got))
+	}
+	if got[0].Phase != store.PhaseCustom {
+		t.Fatalf("phase = %q, want %q", got[0].Phase, store.PhaseCustom)
+	}
+	if !strings.Contains(got[0].Arg, `"threshold":50`) {
+		t.Fatalf("site rule missing threshold: %s", got[0].Arg)
+	}
+}
+
+func TestSiteCCRulesEnabledButEmptyReturnsNil(t *testing.T) {
+	// CCUseCustom = true 但站点 CCRules 为空：返回空（不回退全局）。
+	on := true
+	site := store.Site{CCUseCustom: &on, CCRules: ""}
+	global := compileCCRulesFromJSON(validCCRulesJSON())
+	if got := siteCCRules(site, global); len(got) != 0 {
+		t.Fatalf("enabled-but-empty site cc rules = %d, want 0", len(got))
 	}
 }
 

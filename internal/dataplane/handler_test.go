@@ -10,9 +10,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -70,6 +72,18 @@ func (s *closeSensitiveRequestBodyStream) Close() error {
 type unexpectedEOFRequestBodyStream struct {
 	reader     io.Reader
 	emittedEOF bool
+}
+
+type blockingRequestBodyReader struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingRequestBodyReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.release
+	return 0, io.EOF
 }
 
 func (s *unexpectedEOFRequestBodyStream) Read(p []byte) (int, error) {
@@ -133,8 +147,15 @@ func TestRequestBodySamplePreservesBodyStreamForForwarding(t *testing.T) {
 	if err := ctx.Request.CloseBodyStream(); err != nil {
 		t.Fatalf("CloseBodyStream returned error: %v", err)
 	}
+	if stream.closed {
+		t.Fatal("forwarding stream close must not close the original Hertz stream")
+	}
+	restoreOriginalRequestBodyStream(ctx)
+	if err := ctx.Request.CloseBodyStream(); err != nil {
+		t.Fatalf("close restored original stream: %v", err)
+	}
 	if !stream.closed {
-		t.Fatal("expected original stream closer to be invoked")
+		t.Fatal("expected Hertz cleanup to close the restored original stream")
 	}
 }
 
@@ -170,8 +191,73 @@ func TestRequestBodySampleDoesNotCloseOriginalStreamDuringRebind(t *testing.T) {
 	if err := ctx.Request.CloseBodyStream(); err != nil {
 		t.Fatalf("CloseBodyStream returned error: %v", err)
 	}
+	if stream.closed {
+		t.Fatal("forwarding stream close must not close the original Hertz stream")
+	}
+	restoreOriginalRequestBodyStream(ctx)
+	if err := ctx.Request.CloseBodyStream(); err != nil {
+		t.Fatalf("close restored original stream: %v", err)
+	}
 	if !stream.closed {
-		t.Fatal("expected original stream closer to be invoked after replay finished")
+		t.Fatal("expected Hertz cleanup to close the restored original stream")
+	}
+}
+
+func TestPrefetchedRequestBodyStreamCloseWaitsForActiveRead(t *testing.T) {
+	reader := &blockingRequestBodyReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	stream := &prefetchedRequestBodyStream{reader: reader}
+
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		_, _ = stream.Read(make([]byte, 1))
+	}()
+	<-reader.started
+
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		_ = stream.Close()
+	}()
+
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned while Read was still active")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(reader.release)
+	<-readDone
+	<-closeDone
+
+	if n, err := stream.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("Read after Close = (%d, %v), want (0, EOF)", n, err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("second Close returned error: %v", err)
+	}
+}
+
+func TestRestoreOriginalRequestBodyStreamAfterSnapshot(t *testing.T) {
+	body := []byte(strings.Repeat("streamed-request-body-", 4096))
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetContentLength(len(body))
+	stream := &closeSensitiveRequestBodyStream{reader: bytes.NewReader(body)}
+	ctx.Request.SetBodyStream(stream, len(body))
+
+	requestBodySample(ctx)
+	if ctx.Request.BodyStream() == stream {
+		t.Fatal("expected prefetched wrapper before restore")
+	}
+
+	restoreOriginalRequestBodyStream(ctx)
+	if ctx.Request.BodyStream() != stream {
+		t.Fatal("original request stream was not restored")
+	}
+	if stream.closed {
+		t.Fatal("original stream must remain open for server cleanup")
 	}
 }
 
@@ -195,6 +281,229 @@ func TestRequestBodySampleCapturesPrefetchReadError(t *testing.T) {
 	if err := requestBodySnapshotError(ctx); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("requestBodySnapshotError() = %v, want %v", err, io.ErrUnexpectedEOF)
 	}
+}
+
+func TestChallengeSubmissionValuesOnlyAcceptsURLEncodedForm(t *testing.T) {
+	values := url.Values{
+		"__waf_challenge_ts":    {"1700000000"},
+		"__waf_challenge_token": {"signed-token"},
+		"__waf_challenge_rid":   {"request-id"},
+	}
+
+	ts, token, requestID, ok := challengeSubmissionValues([]byte(values.Encode()), "application/x-www-form-urlencoded; charset=UTF-8")
+	if !ok {
+		t.Fatal("expected complete URL-encoded challenge submission")
+	}
+	if ts != "1700000000" || token != "signed-token" || requestID != "request-id" {
+		t.Fatalf("challenge values = %q, %q, %q", ts, token, requestID)
+	}
+
+	if _, _, _, ok := challengeSubmissionValues([]byte(values.Encode()), "multipart/form-data; boundary=test"); ok {
+		t.Fatal("multipart body must not be parsed as a challenge submission")
+	}
+	values.Del("__waf_challenge_token")
+	if _, _, _, ok := challengeSubmissionValues([]byte(values.Encode()), "application/x-www-form-urlencoded"); ok {
+		t.Fatal("incomplete challenge submission must be rejected")
+	}
+}
+
+func TestHandlerMultipartBodyLifecycle(t *testing.T) {
+	tests := []struct {
+		name      string
+		bodySize  int
+		filename  string
+		content   string
+		wantBlock bool
+	}{
+		{name: "forwards 435-byte clean body", bodySize: 435, filename: "report.txt", content: "ordinary report"},
+		{name: "forwards 43336-byte clean body", bodySize: 43336, filename: "report.txt", content: "ordinary report"},
+		{name: "forwards body above inspection limit", bodySize: 64 * 1024, filename: "report.txt", content: "ordinary report"},
+		{name: "blocks 435-byte executable upload", bodySize: 435, filename: "avatar.php;.jpg", content: "<?php system($_GET['task']); ?>", wantBlock: true},
+		{name: "blocks 43336-byte executable upload", bodySize: 43336, filename: "avatar.php;.jpg", content: "<?php system($_GET['task']); ?>", wantBlock: true},
+		{name: "blocks executable upload above inspection limit", bodySize: 64 * 1024, filename: "avatar.php;.jpg", content: "<?php system($_GET['task']); ?>", wantBlock: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, contentType := fixedLengthMultipartBody(t, tt.bodySize, tt.filename, tt.content)
+			var upstreamRequests atomic.Int32
+			receivedBody := make(chan []byte, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamRequests.Add(1)
+				got, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read upstream body: %v", err)
+				}
+				receivedBody <- got
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+			}))
+			defer upstream.Close()
+
+			holder := &snapshot.Holder{}
+			protection := store.DefaultProtectionConfig()
+			protection.OWASPEnabled = true
+			protection.OWASPAction = "intercept"
+			protection.BotDetectionEnabled = false
+			rt := snapshot.SiteRuntime{
+				Site:                store.Site{ID: 1, Host: "upload.example.com", Bind: ":80"},
+				Bind:                ":80",
+				UpstreamURLs:        []string{upstream.URL},
+				EffectiveProtection: &protection,
+			}
+			holder.Store(&snapshot.Snapshot{
+				Revision:   1,
+				Protection: protection,
+				Sites: map[string]snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", "upload.example.com"): rt,
+				},
+			})
+
+			handler := Handler(Options{
+				Holder: holder,
+				Engine: engine.New(holder, nil, nil, nil),
+				Log:    slog.Default(),
+				Bind:   ":80",
+			})
+			ctx := app.NewContext(0)
+			ctx.Request.Header.SetMethod(http.MethodPost)
+			ctx.Request.SetRequestURI("/upload")
+			ctx.Request.Header.SetHost("upload.example.com")
+			ctx.Request.Header.Set("Content-Type", contentType)
+			ctx.Request.SetBodyStream(&trackingRequestBodyStream{reader: bytes.NewReader(body)}, len(body))
+
+			handler(context.Background(), ctx)
+
+			if tt.wantBlock {
+				if got := ctx.Response.StatusCode(); got != http.StatusForbidden {
+					t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+				}
+				if got := upstreamRequests.Load(); got != 0 {
+					t.Fatalf("upstream requests = %d, want 0", got)
+				}
+				return
+			}
+
+			if got := ctx.Response.StatusCode(); got != http.StatusOK {
+				t.Fatalf("status = %d, want %d", got, http.StatusOK)
+			}
+			if got := upstreamRequests.Load(); got != 1 {
+				t.Fatalf("upstream requests = %d, want 1", got)
+			}
+			got := <-receivedBody
+			if !bytes.Equal(got, body) {
+				t.Fatalf("upstream body mismatch: got %d bytes want %d", len(got), len(body))
+			}
+		})
+	}
+}
+
+func TestHandlerEvaluatesWAFBeforeChallengeRedirect(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    string
+		wantStatus int
+		wantCookie bool
+	}{
+		{name: "valid challenge redirects after clean WAF result", wantStatus: http.StatusFound, wantCookie: true},
+		{name: "dangerous body is blocked before valid challenge redirect", payload: `<script>alert(1)</script>`, wantStatus: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var upstreamRequests atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamRequests.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			holder := &snapshot.Holder{}
+			protection := store.DefaultProtectionConfig()
+			protection.OWASPEnabled = true
+			protection.OWASPAction = "intercept"
+			protection.BotDetectionEnabled = false
+			rt := snapshot.SiteRuntime{
+				Site:                store.Site{ID: 1, Host: "challenge.example.com", Bind: ":80"},
+				Bind:                ":80",
+				UpstreamURLs:        []string{upstream.URL},
+				EffectiveProtection: &protection,
+				Rules: []snapshot.CompiledRule{{
+					ID:       1,
+					Phase:    store.PhaseCustom,
+					Action:   store.ActionChallenge,
+					Priority: 1,
+					Kind:     "always",
+				}},
+			}
+			holder.Store(&snapshot.Snapshot{
+				Revision:   1,
+				Protection: protection,
+				Sites: map[string]snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", "challenge.example.com"): rt,
+				},
+			})
+
+			requestID := "challenge-request-id"
+			ts, token := challenge.GenerateChallengeTokenPair(requestID)
+			values := url.Values{
+				"__waf_challenge_ts":    {ts},
+				"__waf_challenge_token": {token},
+				"__waf_challenge_rid":   {requestID},
+			}
+			if tt.payload != "" {
+				values.Set("payload", tt.payload)
+			}
+			body := []byte(values.Encode())
+
+			handler := Handler(Options{
+				Holder: holder,
+				Engine: engine.New(holder, nil, nil, nil),
+				Log:    slog.Default(),
+				Bind:   ":80",
+			})
+			ctx := app.NewContext(0)
+			ctx.Request.Header.SetMethod(http.MethodPost)
+			ctx.Request.SetRequestURI("/guarded")
+			ctx.Request.Header.SetHost("challenge.example.com")
+			ctx.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			ctx.Request.Header.Set("Referer", "/original")
+			ctx.Request.SetBodyStream(&trackingRequestBodyStream{reader: bytes.NewReader(body)}, len(body))
+
+			handler(context.Background(), ctx)
+
+			if got := ctx.Response.StatusCode(); got != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", got, tt.wantStatus)
+			}
+			if got := upstreamRequests.Load(); got != 0 {
+				t.Fatalf("upstream requests = %d, want 0", got)
+			}
+			if got := len(ctx.Response.Header.Peek("Set-Cookie")) > 0; got != tt.wantCookie {
+				t.Fatalf("challenge cookie present = %v, want %v", got, tt.wantCookie)
+			}
+		})
+	}
+}
+
+func fixedLengthMultipartBody(t *testing.T, size int, filename, content string) ([]byte, string) {
+	t.Helper()
+	const boundary = "owaf-lifecycle-boundary"
+	prefix := []byte("--" + boundary + "\r\n" +
+		"Content-Disposition: form-data; name=\"document\"; filename=\"" + filename + "\"\r\n" +
+		"Content-Type: text/plain\r\n\r\n" + content)
+	suffix := []byte("\r\n--" + boundary + "--\r\n")
+	paddingSize := size - len(prefix) - len(suffix)
+	if paddingSize < 0 {
+		t.Fatalf("multipart target size %d is below framing size %d", size, len(prefix)+len(suffix))
+	}
+	body := make([]byte, 0, size)
+	body = append(body, prefix...)
+	body = append(body, bytes.Repeat([]byte("A"), paddingSize)...)
+	body = append(body, suffix...)
+	if len(body) != size {
+		t.Fatalf("multipart body length = %d, want %d", len(body), size)
+	}
+	return body, "multipart/form-data; boundary=" + boundary
 }
 
 func TestErrorRateLimitActionDefaultsToRateLimit(t *testing.T) {

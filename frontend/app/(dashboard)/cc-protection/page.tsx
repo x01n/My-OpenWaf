@@ -7,111 +7,121 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   IconShield,
-  IconClock,
   IconBolt,
   IconAlertTriangle,
-  IconBan,
-  IconPencil,
-  IconPlus,
-  IconHelpCircle,
+  IconLoader2,
 } from "@tabler/icons-react";
-import { cn } from "@/lib/utils";
+import {
+  useProtectionSettings,
+  useProtectionSettingsUpdate,
+} from "@/hooks/use-api";
+import {
+  CCRulesEditor,
+  CC_ACTION_OPTIONS,
+  type CCRule,
+} from "@/components/cc-rules-editor";
 
-interface RateLimitRule {
-  id: string;
-  name: string;
-  description: string;
-  enabled: boolean;
+/**
+ * 防护设置数据类型（已就绪，非空）。
+ */
+type ProtectionSettingsData = NonNullable<
+  ReturnType<typeof useProtectionSettings>["data"]
+>;
+
+interface CCProtectionFormProps {
+  settings: ProtectionSettingsData;
+  /** 请求父组件重挂载本表单以还原为服务端初值 */
+  onReset: () => void;
 }
 
-interface RuleSection {
-  title: string;
-  icon: React.ElementType;
-  rules: RateLimitRule[];
-}
-
-const placeholderRules: RuleSection[] = [
-  {
-    title: "ccProtection.highFrequencyAccessLimit",
-    icon: IconBolt,
-    rules: [
-      {
-        id: "1",
-        name: "ccProtection.basicLimit",
-        description: "ccProtection.basicLimitDesc",
-        enabled: true,
-      },
-    ],
-  },
-  {
-    title: "ccProtection.highFrequencyAttackLimit",
-    icon: IconAlertTriangle,
-    rules: [
-      {
-        id: "2",
-        name: "ccProtection.attackLimit",
-        description: "ccProtection.attackLimitDesc",
-        enabled: true,
-      },
-    ],
-  },
-  {
-    title: "ccProtection.errorLimit",
-    icon: IconBan,
-    rules: [
-      {
-        id: "3",
-        name: "ccProtection.basicErrorLimit",
-        description: "ccProtection.errorLimitDesc",
-        enabled: true,
-      },
-    ],
-  },
-];
-
-export default function CCProtectionPage() {
+/**
+ * CC 防护配置表单。
+ *
+ * 表单本地状态在挂载时通过 lazy 初始化从 settings 派生（不在 effect 中同步），
+ * 因此取消操作由父组件通过 bump key 重挂载来还原初值，避免 effect 内 setState 的级联渲染。
+ */
+function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
   const { t } = useTranslation();
-  const [waitingRoomEnabled, setWaitingRoomEnabled] = useState(false);
-  const [rateLimitMode, setRateLimitMode] = useState<"global" | "custom">("global");
-  const [sections, setSections] = useState<RuleSection[]>(placeholderRules);
-  const [isSaving, setIsSaving] = useState(false);
+  const updateSettings = useProtectionSettingsUpdate();
 
-  const toggleRule = (sectionIndex: number, ruleId: string) => {
-    setSections((prev) =>
-      prev.map((sec, idx) =>
-        idx === sectionIndex
-          ? {
-              ...sec,
-              rules: sec.rules.map((rule) =>
-                rule.id === ruleId ? { ...rule, enabled: !rule.enabled } : rule
-              ),
-            }
-          : sec
-      )
-    );
-  };
+  const [requestRateLimitEnabled, setRequestRateLimitEnabled] = useState(
+    () => settings.request_ratelimit_enabled ?? false
+  );
+  const [requestRateLimitWindow, setRequestRateLimitWindow] = useState(
+    () => settings.request_ratelimit_window ?? 60
+  );
+  const [requestRateLimitMax, setRequestRateLimitMax] = useState(
+    () => settings.request_ratelimit_max ?? 300
+  );
+  const [requestRateLimitAction, setRequestRateLimitAction] = useState(
+    () => settings.request_ratelimit_action ?? "rate_limit"
+  );
+
+  const [errorRateLimitEnabled, setErrorRateLimitEnabled] = useState(
+    () => settings.error_ratelimit_enabled ?? false
+  );
+  const [errorRateLimitWindow, setErrorRateLimitWindow] = useState(
+    () => settings.error_ratelimit_window ?? 300
+  );
+  const [errorRateLimitMax, setErrorRateLimitMax] = useState(
+    () => settings.error_ratelimit_max ?? 30
+  );
+  const [errorRateLimitCount4xx, setErrorRateLimitCount4xx] = useState(
+    () => settings.error_ratelimit_count_4xx ?? true
+  );
+  const [errorRateLimitCount5xx, setErrorRateLimitCount5xx] = useState(
+    () => settings.error_ratelimit_count_5xx ?? true
+  );
+  const [errorRateLimitCountBlock, setErrorRateLimitCountBlock] = useState(
+    () => settings.error_ratelimit_count_block ?? false
+  );
+  const [errorRateLimitAction, setErrorRateLimitAction] = useState(
+    () => settings.error_ratelimit_action ?? "rate_limit"
+  );
+
+  const [ccUseCustom, setCCUseCustom] = useState(() => settings.cc_use_custom ?? false);
+  const [ccRules, setCCRules] = useState<CCRule[]>(() =>
+    Array.isArray(settings.cc_rules) ? settings.cc_rules : []
+  );
 
   const handleSave = async () => {
-    setIsSaving(true);
     try {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await updateSettings.execute({
+        request_ratelimit_enabled: requestRateLimitEnabled,
+        request_ratelimit_window: requestRateLimitWindow,
+        request_ratelimit_max: requestRateLimitMax,
+        request_ratelimit_action: requestRateLimitAction,
+        error_ratelimit_enabled: errorRateLimitEnabled,
+        error_ratelimit_window: errorRateLimitWindow,
+        error_ratelimit_max: errorRateLimitMax,
+        error_ratelimit_count_4xx: errorRateLimitCount4xx,
+        error_ratelimit_count_5xx: errorRateLimitCount5xx,
+        error_ratelimit_count_block: errorRateLimitCountBlock,
+        error_ratelimit_action: errorRateLimitAction,
+        cc_use_custom: ccUseCustom,
+        cc_rules: ccRules,
+      });
       toast.success(t("ccProtection.saveSuccess"));
     } catch {
       toast.error(t("common.saveFailed"));
-    } finally {
-      setIsSaving(false);
     }
   };
 
   const handleCancel = () => {
-    setWaitingRoomEnabled(false);
-    setRateLimitMode("global");
-    setSections(placeholderRules);
     toast.info(t("ccProtection.resetSuccess"));
+    onReset();
   };
 
   return (
@@ -121,135 +131,228 @@ export default function CCProtectionPage() {
         <h1 className="text-xl font-semibold">{t("ccProtection.title")}</h1>
       </div>
 
-      {/* 等候室 */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <IconClock className="h-5 w-5 text-primary" />
-            {t("ccProtection.waitingRoom")}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center gap-4">
-            <Switch
-              checked={waitingRoomEnabled}
-              onCheckedChange={setWaitingRoomEnabled}
-              id="waiting-room"
-            />
-            <div className="space-y-0.5">
-              <Label htmlFor="waiting-room" className="cursor-pointer">
-                {t("ccProtection.waitingRoomToggle")}
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                {t("ccProtection.waitingRoomDesc")}
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* 频率限制 */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <IconBolt className="h-5 w-5 text-primary" />
+      <Tabs defaultValue="rate-limit">
+        <TabsList>
+          <TabsTrigger value="rate-limit">
+            <IconBolt className="mr-1.5 h-4 w-4" />
             {t("ccProtection.rateLimit")}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="flex items-center gap-4">
-            <RadioGroup
-              value={rateLimitMode}
-              onValueChange={(v) => setRateLimitMode(v as "global" | "custom")}
-              className="flex items-center gap-6"
-            >
-              <div className="flex items-center gap-2">
-                <RadioGroupItem value="global" id="rate-limit-global" />
-                <Label htmlFor="rate-limit-global" className="cursor-pointer">
-                  {t("ccProtection.followGlobal")}
+          </TabsTrigger>
+          <TabsTrigger value="custom-rules">
+            <IconAlertTriangle className="mr-1.5 h-4 w-4" />
+            {t("ccProtection.customRules")}
+          </TabsTrigger>
+        </TabsList>
+
+        {/* ==================== 频率限制 ==================== */}
+        <TabsContent value="rate-limit" className="space-y-4">
+          {/* 请求频率限制 */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <IconBolt className="h-5 w-5 text-primary" />
+                {t("ccProtection.requestRateLimit")}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center gap-4">
+                <Switch
+                  checked={requestRateLimitEnabled}
+                  onCheckedChange={setRequestRateLimitEnabled}
+                  id="req-rate-limit"
+                />
+                <Label htmlFor="req-rate-limit" className="cursor-pointer">
+                  {t("ccProtection.enableRequestRateLimit")}
                 </Label>
               </div>
-              <div className="flex items-center gap-2">
-                <RadioGroupItem value="custom" id="rate-limit-custom" />
-                <Label htmlFor="rate-limit-custom" className="cursor-pointer">
-                  {t("ccProtection.customConfig")}
-                </Label>
-              </div>
-            </RadioGroup>
-            <div className="flex items-center gap-1 text-xs text-muted-foreground">
-              <IconHelpCircle className="h-3.5 w-3.5" />
-              <span>{t("ccProtection.rateLimitDesc")}</span>
-            </div>
-          </div>
-
-          {rateLimitMode === "custom" && (
-            <div className="space-y-6">
-              {sections.map((section, sectionIndex) => {
-                const SectionIcon = section.icon;
-                return (
-                  <div key={section.title} className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <SectionIcon className="h-4 w-4 text-primary" />
-                        <h3 className="text-sm font-medium">{t(section.title)}</h3>
-                      </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-8 gap-1 text-xs"
-                        onClick={() => toast.info(t("ccProtection.addRuleDeveloping"))}
-                      >
-                        <IconPlus className="h-3.5 w-3.5" />
-                        {t("ccProtection.addRule")}
-                      </Button>
-                    </div>
-
-                    <div className="space-y-2">
-                      {section.rules.map((rule) => (
-                        <div
-                          key={rule.id}
-                          className={cn(
-                            "flex items-center gap-4 rounded-lg border p-3 transition-colors",
-                            rule.enabled ? "bg-teal-50/50" : "bg-muted/30"
-                          )}
-                        >
-                          <Switch
-                            checked={rule.enabled}
-                            onCheckedChange={() => toggleRule(sectionIndex, rule.id)}
-                            id={`rule-${rule.id}`}
-                          />
-                          <div className="flex-1 space-y-0.5">
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm font-medium">{t(rule.name)}</span>
-                              <Badge
-                                variant={rule.enabled ? "default" : "secondary"}
-                                className="h-4 px-1.5 text-[10px]"
-                              >
-                                {rule.enabled ? t("common.enable") : t("common.disable")}
-                              </Badge>
-                            </div>
-                            <p className="text-xs text-muted-foreground">
-                              {t(rule.description)}
-                            </p>
-                          </div>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 shrink-0"
-                            onClick={() => toast.info(t("ccProtection.editRuleDeveloping"))}
-                          >
-                            <IconPencil className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      ))}
+              {requestRateLimitEnabled && (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  <div className="space-y-1.5">
+                    <Label>{t("ccProtection.window")}</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="number"
+                        min={1}
+                        value={requestRateLimitWindow}
+                        onChange={(e) =>
+                          setRequestRateLimitWindow(Number(e.target.value))
+                        }
+                      />
+                      <span className="text-sm text-muted-foreground">{t("ccProtection.seconds")}</span>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                  <div className="space-y-1.5">
+                    <Label>{t("ccProtection.maxRequests")}</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={requestRateLimitMax}
+                      onChange={(e) =>
+                        setRequestRateLimitMax(Number(e.target.value))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>{t("ccProtection.action")}</Label>
+                    <Select
+                      value={requestRateLimitAction}
+                      onValueChange={setRequestRateLimitAction}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CC_ACTION_OPTIONS.map((action) => (
+                          <SelectItem key={action} value={action}>
+                            {t(`ccProtection.action_${action}`)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* 错误频率限制 */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <IconAlertTriangle className="h-5 w-5 text-primary" />
+                {t("ccProtection.errorRateLimit")}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center gap-4">
+                <Switch
+                  checked={errorRateLimitEnabled}
+                  onCheckedChange={setErrorRateLimitEnabled}
+                  id="err-rate-limit"
+                />
+                <Label htmlFor="err-rate-limit" className="cursor-pointer">
+                  {t("ccProtection.enableErrorRateLimit")}
+                </Label>
+              </div>
+              {errorRateLimitEnabled && (
+                <>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div className="space-y-1.5">
+                      <Label>{t("ccProtection.window")}</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min={1}
+                          value={errorRateLimitWindow}
+                          onChange={(e) =>
+                            setErrorRateLimitWindow(Number(e.target.value))
+                          }
+                        />
+                        <span className="text-sm text-muted-foreground">{t("ccProtection.seconds")}</span>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>{t("ccProtection.maxErrors")}</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={errorRateLimitMax}
+                        onChange={(e) =>
+                          setErrorRateLimitMax(Number(e.target.value))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>{t("ccProtection.action")}</Label>
+                      <Select
+                        value={errorRateLimitAction}
+                        onValueChange={setErrorRateLimitAction}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {CC_ACTION_OPTIONS.map((action) => (
+                            <SelectItem key={action} value={action}>
+                              {t(`ccProtection.action_${action}`)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-6">
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={errorRateLimitCount4xx}
+                        onCheckedChange={setErrorRateLimitCount4xx}
+                        id="count-4xx"
+                      />
+                      <Label htmlFor="count-4xx" className="cursor-pointer text-sm">
+                        {t("ccProtection.count4xx")}
+                      </Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={errorRateLimitCount5xx}
+                        onCheckedChange={setErrorRateLimitCount5xx}
+                        id="count-5xx"
+                      />
+                      <Label htmlFor="count-5xx" className="cursor-pointer text-sm">
+                        {t("ccProtection.count5xx")}
+                      </Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={errorRateLimitCountBlock}
+                        onCheckedChange={setErrorRateLimitCountBlock}
+                        id="count-block"
+                      />
+                      <Label htmlFor="count-block" className="cursor-pointer text-sm">
+                        {t("ccProtection.countBlock")}
+                      </Label>
+                    </div>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ==================== 自定义 CC 规则 ==================== */}
+        <TabsContent value="custom-rules">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center justify-between text-base">
+                <div className="flex items-center gap-2">
+                  <IconAlertTriangle className="h-5 w-5 text-primary" />
+                  {t("ccProtection.customRules")}
+                </div>
+                <div className="flex items-center gap-3">
+                  <Switch
+                    checked={ccUseCustom}
+                    onCheckedChange={setCCUseCustom}
+                    id="cc-use-custom"
+                  />
+                  <Label htmlFor="cc-use-custom" className="cursor-pointer text-sm font-normal">
+                    {t("ccProtection.enableCustomRules")}
+                  </Label>
+                </div>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {!ccUseCustom && (
+                <p className="text-sm text-muted-foreground">
+                  {t("ccProtection.customRulesDisabledHint")}
+                </p>
+              )}
+
+              {ccUseCustom && (
+                <CCRulesEditor rules={ccRules} onChange={setCCRules} />
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
 
       {/* 底部操作按钮 */}
       <div className="flex justify-end gap-3">
@@ -258,12 +361,44 @@ export default function CCProtectionPage() {
         </Button>
         <Button
           onClick={handleSave}
-          disabled={isSaving}
+          disabled={updateSettings.loading}
           className="bg-primary hover:bg-primary/90"
         >
-          {isSaving ? t("common.saving") : t("common.save")}
+          {updateSettings.loading && (
+            <IconLoader2 className="mr-1.5 h-4 w-4 animate-spin" />
+          )}
+          {updateSettings.loading ? t("common.saving") : t("common.save")}
         </Button>
       </div>
     </div>
+  );
+}
+
+export default function CCProtectionPage() {
+  const { t } = useTranslation();
+  const { data: settings, isLoading } = useProtectionSettings();
+  // 用于“取消”时重挂载表单以还原为服务端初值
+  const [formKey, setFormKey] = useState(0);
+
+  if (isLoading || !settings) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-2">
+          <IconShield className="h-6 w-6 text-primary" />
+          <h1 className="text-xl font-semibold">{t("ccProtection.title")}</h1>
+        </div>
+        <Skeleton className="h-32 w-full" />
+        <Skeleton className="h-64 w-full" />
+        <Skeleton className="h-48 w-full" />
+      </div>
+    );
+  }
+
+  return (
+    <CCProtectionForm
+      key={formKey}
+      settings={settings}
+      onReset={() => setFormKey((k) => k + 1)}
+    />
   );
 }

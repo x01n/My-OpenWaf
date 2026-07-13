@@ -75,6 +75,9 @@ type SiteRuntime struct {
 	// DynamicProtection holds the dynamic protection config (HTML obfuscation, JS obfuscation, watermark).
 	DynamicProtection dynamic.ProtectionConfig
 
+	// AccessControl holds the site access control gate config (nil = disabled).
+	AccessControl *AccessControlConfig
+
 	ResponseCompressionConfigured  bool
 	ResponseCompressionEnabled     bool
 	ResponseCompressionGzipEnabled bool
@@ -83,6 +86,35 @@ type SiteRuntime struct {
 
 	// Upstream host header override (for explicit upstream host resolution).
 	UpstreamHostHeader string
+
+	// 站点级 IP 黑白名单（仅对该站点生效）。
+	SiteIPWhitelist []net.IPNet
+	SiteIPBlacklist []net.IPNet
+}
+
+// AccessControlConfig 站点访问控制运行时配置。
+type AccessControlConfig struct {
+	Enabled            bool
+	SharedPasswordHash string
+	SessionTTL         int
+	Providers          []AccessControlProvider
+	PathRules          []AccessControlPathRule
+}
+
+// AccessControlProvider 认证提供方运行时配置。
+type AccessControlProvider struct {
+	ID       uint
+	Type     string
+	Name     string
+	Priority int
+	Config   string // OAuth/OIDC 配置 JSON（密文形式，数据面解密后使用）
+}
+
+// AccessControlPathRule 路径访问控制规则。
+type AccessControlPathRule struct {
+	Path     string
+	Action   string
+	Priority int
 }
 
 // Snapshot is an immutable view for the dataplane (atomic pointer swap).
@@ -146,13 +178,11 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 		return SiteRuntime{}, false
 	}
 
-	// 1. Exact match on bind+host
 	key := SiteMapKey(bind, host)
 	if rt, ok := sn.Sites[key]; ok {
 		return rt, true
 	}
 
-	// 2. Wildcard match (only for domain names, not IP addresses)
 	if !isIPAddress(host) {
 		if idx := strings.Index(host, "."); idx > 0 {
 			wild := "*." + host[idx+1:]
@@ -162,33 +192,38 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 		}
 	}
 
-	// 3. No match — return false. Caller shows "site not found".
+	if rt, ok := sn.Sites[SiteMapKey(bind, "*")]; ok {
+		return rt, true
+	}
+
 	return SiteRuntime{}, false
 }
 
 // MatchSitePtr finds the SiteRuntime pointer for a bind address + host combination.
 func (sn *Snapshot) MatchSitePtr(bind string, hostHeader string) (*SiteRuntime, bool) {
-	_, ok := sn.MatchSite(bind, hostHeader)
-	if !ok {
-		return nil, false
-	}
-	// Look up the actual map entry to return its address.
 	host := NormalizeMatchHost(hostHeader)
 	if host == "" {
 		return nil, false
 	}
+
 	key := SiteMapKey(bind, host)
-	if rtPtr, ok := sn.Sites[key]; ok {
-		return &rtPtr, true
+	if rt, ok := sn.Sites[key]; ok {
+		return &rt, true
 	}
+
 	if !isIPAddress(host) {
 		if idx := strings.Index(host, "."); idx > 0 {
 			wild := "*." + host[idx+1:]
-			if rtPtr, ok := sn.Sites[SiteMapKey(bind, wild)]; ok {
-				return &rtPtr, true
+			if rt, ok := sn.Sites[SiteMapKey(bind, wild)]; ok {
+				return &rt, true
 			}
 		}
 	}
+
+	if rt, ok := sn.Sites[SiteMapKey(bind, "*")]; ok {
+		return &rt, true
+	}
+
 	return nil, false
 }
 

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"time"
 
 	"My-OpenWaf/internal/store"
@@ -10,11 +11,17 @@ import (
 
 type DropEventRepo struct {
 	db         *gorm.DB
+	countCache CountCache
 	writeQueue WriteQueueBackend
 }
 
 func NewDropEventRepo(db *gorm.DB) *DropEventRepo {
 	return &DropEventRepo{db: db}
+}
+
+// SetCountCache configures an optional count cache for list queries.
+func (r *DropEventRepo) SetCountCache(c CountCache) {
+	r.countCache = c
 }
 
 // SetWriteQueue configures async write queue for batch writes.
@@ -76,8 +83,21 @@ func (r *DropEventRepo) List(offset, limit int, f DropEventFilter) ([]store.Drop
 	}
 
 	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		return nil, 0, err
+	cacheKey := dropEventCountCacheKey(f)
+	cached := false
+	if r.countCache != nil {
+		if value, ok := r.countCache.Get(cacheKey); ok {
+			total = value.(int64)
+			cached = true
+		}
+	}
+	if !cached {
+		if err := q.Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
+		if r.countCache != nil {
+			r.countCache.Set(cacheKey, total)
+		}
 	}
 
 	var items []store.DropEvent
@@ -85,6 +105,26 @@ func (r *DropEventRepo) List(offset, limit int, f DropEventFilter) ([]store.Drop
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+func dropEventCountCacheKey(f DropEventFilter) string {
+	key := "de_count"
+	if f.SiteID > 0 {
+		key += ":s" + fmt.Sprint(f.SiteID)
+	}
+	if f.ClientIP != "" {
+		key += ":ip" + f.ClientIP
+	}
+	if f.Source != "" {
+		key += ":src" + f.Source
+	}
+	if f.StartTime != nil {
+		key += ":st" + f.StartTime.Format("0601021504")
+	}
+	if f.EndTime != nil {
+		key += ":et" + f.EndTime.Format("0601021504")
+	}
+	return key
 }
 
 // DropStatsSummary holds aggregated drop statistics.

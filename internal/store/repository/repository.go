@@ -45,6 +45,10 @@ type Repos struct {
 	SiteListener     *SiteListenerRepo
 	AppRouteRule     *ApplicationRouteRuleRepo
 	RecordedResource *RecordedResourceRepo
+	AccessControl    *AccessControlRepo
+	ThreatIntel        *ThreatIntelRepo
+	ThreatIntelSyncLog *ThreatIntelSyncLogRepo
+	FalsePositive      *FalsePositiveRepo
 }
 
 func New(db *gorm.DB) *Repos {
@@ -74,6 +78,10 @@ func NewWithLogDB(db *gorm.DB, logDB *gorm.DB) *Repos {
 		SiteListener:     NewSiteListenerRepo(db),
 		AppRouteRule:     NewApplicationRouteRuleRepo(db),
 		RecordedResource: NewRecordedResourceRepo(db),
+		AccessControl:    NewAccessControlRepo(db),
+		ThreatIntel:        NewThreatIntelRepo(db),
+		ThreatIntelSyncLog: NewThreatIntelSyncLogRepo(db),
+		FalsePositive:      NewFalsePositiveRepo(db),
 	}
 }
 

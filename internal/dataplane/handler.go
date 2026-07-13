@@ -56,6 +56,10 @@ type Options struct {
 	RecordedResourceRepo  *repository.RecordedResourceRepo
 	Upstreams             *upstream.Pool
 	AccessLogSamplingRate uint32
+	// AccessControlRepo 用于访问控制网关的用户密码校验与 OAuth 提供方配置读取。
+	AccessControlRepo *repository.AccessControlRepo
+	// JWTSecret 用于解密 OAuth client_secret（与 Admin 层加密保持一致）。
+	JWTSecret []byte
 }
 
 const (
@@ -93,6 +97,23 @@ func tlsFingerprintFromContext(ctx context.Context) (bot.TLSClientFingerprint, b
 	return fp, ok && fp.HasValue()
 }
 
+func challengeSubmissionValues(body []byte, contentType string) (string, string, string, bool) {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.EqualFold(mediaType, "application/x-www-form-urlencoded") {
+		return "", "", "", false
+	}
+
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		return "", "", "", false
+	}
+
+	ts := values.Get("__waf_challenge_ts")
+	token := values.Get("__waf_challenge_token")
+	requestID := values.Get("__waf_challenge_rid")
+	return ts, token, requestID, ts != "" && token != "" && requestID != ""
+}
+
 func HandlerForBind(bind string, handler app.HandlerFunc) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		c.Set(bindContextKey, bind)
@@ -125,6 +146,7 @@ func Handler(opts Options) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		ctx, closeNotifyCancel := bindStreamCloseNotifyContext(ctx, c)
 		defer func() {
+			restoreOriginalRequestBodyStream(c)
 			if c.Response.GetHijackWriter() == nil && !c.Response.IsBodyStream() {
 				closeNotifyCancel()
 			}
@@ -160,6 +182,11 @@ func Handler(opts Options) app.HandlerFunc {
 
 		// Handle challenge verification endpoints
 		if handleChallengeVerify(c, opts) {
+			return
+		}
+
+		// 站点访问控制端点（登录/验证/OAuth/注销），须在静态处理器之前拦截。
+		if handleAccessControlEndpoints(ctx, c, opts) {
 			return
 		}
 
@@ -258,7 +285,59 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 		}
 
-		if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil {
+		// 站点级 IP 白名单检查：命中则跳过后续所有 IP 声誉检查。
+		siteIPWhitelisted := false
+		if clientIP != nil && len(rt.SiteIPWhitelist) > 0 {
+			for i := range rt.SiteIPWhitelist {
+				if rt.SiteIPWhitelist[i].Contains(clientIP) {
+					siteIPWhitelisted = true
+					break
+				}
+			}
+		}
+
+		// 站点级 IP 黑名单检查。
+		if !siteIPWhitelisted && clientIP != nil && len(rt.SiteIPBlacklist) > 0 {
+			for i := range rt.SiteIPBlacklist {
+				if rt.SiteIPBlacklist[i].Contains(clientIP) {
+					if opts.Metrics != nil {
+						opts.Metrics.RecordWAFBlock()
+						opts.Metrics.RecordAttackIP(cipStr)
+					}
+					blockAction := action.Result{
+						Type:      action.Intercept,
+						Phase:     "ip_reputation",
+						RuleIDStr: "ip:site_blacklist",
+						MatchDesc: "site-level IP blacklist",
+						Matched:   true,
+						Category:  "site_blacklist",
+					}
+					if opts.Writer != nil {
+						recordSecurityEvent(c, opts, store.SecurityEvent{
+							SiteID:     rt.Site.ID,
+							RequestID:  reqID,
+							ClientIP:   cipStr,
+							Host:       host,
+							Path:       pathCached,
+							Method:     method,
+							UserAgent:  ua,
+							RuleIDStr:  blockAction.RuleIDStr,
+							Phase:      blockAction.Phase,
+							Action:     "intercept",
+							Category:   blockAction.Category,
+							MatchDesc:  blockAction.MatchDesc,
+							StatusCode: 403,
+						})
+					}
+					pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+					logAccess(accessLog, reqID, method, pathCached, host, 403, "intercept")
+					recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
+					return
+				}
+			}
+		}
+
+		if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil && !siteIPWhitelisted {
 			decision := ipRep.Check(clientIP)
 			if decision.Matched && !decision.Allowed {
 				if opts.Metrics != nil {
@@ -266,12 +345,13 @@ func Handler(opts Options) app.HandlerFunc {
 					opts.Metrics.RecordAttackIP(cipStr)
 				}
 
-				// Determine action: "block" → TCP RST (drop), default → HTTP 403 (intercept)
+				// Determine action: "drop" → TCP RST, default → HTTP 403 (intercept).
+				// IP 名单与自动封禁的动作在存储/配置层已归一化为 "drop"（旧值 "block" 同义）。
 				ipAction := decision.Action
 				if ipAction == "" {
 					ipAction = "intercept"
 				}
-				useDropAction := ipAction == "block" && dropEnabled(opts.Engine)
+				useDropAction := (ipAction == "drop" || ipAction == "block") && dropEnabled(opts.Engine)
 
 				var actType action.Type
 				var actStr string
@@ -350,27 +430,12 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 		}
 
+		body, _, _ := requestBodySample(c)
+		challengePassed := false
 		if method == "POST" {
-			challengeTS := string(c.FormValue("__waf_challenge_ts"))
-			challengeToken := string(c.FormValue("__waf_challenge_token"))
-			challengeRID := string(c.FormValue("__waf_challenge_rid"))
-			if challengeTS != "" && challengeToken != "" && challengeRID != "" {
-				if challenge.VerifyChallengeToken(challengeRID, challengeTS, challengeToken, 5*time.Minute) {
-					cookie := challenge.BuildChallengePassCookieWithClaims(challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: ua, SiteID: rt.Site.ID, Bind: bind}, rt.Site.TLSEnabled, time.Now(), challengePassTTL(sn.Protection))
-					c.Response.Header.Set("Set-Cookie", cookie)
-					referer := string(c.GetHeader("Referer"))
-					if referer == "" {
-						referer = "/"
-					}
-					c.Redirect(302, []byte(referer))
-					accessLog.Info("challenge_passed",
-						slog.String("request_id", reqID),
-						slog.String("client_ip", cipStr),
-					)
-					recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, Method: method, UserAgent: ua, StatusCode: 302, WAFAction: "challenge_passed", CacheState: "bypass", Upstream: referer})
-					return
-				}
-			}
+			challengeTS, challengeToken, challengeRID, ok := challengeSubmissionValues(body, string(c.Request.Header.ContentType()))
+			challengePassed = ok &&
+				challenge.VerifyChallengeToken(challengeRID, challengeTS, challengeToken, 5*time.Minute)
 		}
 
 		path := pathCached
@@ -475,6 +540,18 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 		}
 
+		// ── 访问控制网关（WAF pipeline 之前，仅做身份放行，不跳过 WAF 检测）──
+		if enforceAccessControl(c, &rt, host, path) {
+			statusCode := c.Response.StatusCode()
+			wafAction := "intercept"
+			if statusCode == 302 {
+				wafAction = "redirect"
+			}
+			logAccess(accessLog, reqID, method, path, host, statusCode, wafAction)
+			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: "bypass"})
+			return
+		}
+
 		lowerPath := strings.ToLower(path)
 		if strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+") || strings.Contains(lowerPath, "%2bcscot%2b") || strings.Contains(lowerPath, "%2bcscoe%2b")) {
 			blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:path:015", MatchDesc: "Cisco translation-table path traversal pattern", Matched: true, Category: string(owasp.CatPathTrav)}
@@ -486,10 +563,6 @@ func Handler(opts Options) app.HandlerFunc {
 
 		contentType := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
 		if strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") && contentType == "" {
-			body := c.Request.Body()
-			if len(body) == 0 {
-				body = c.Request.BodyBytes()
-			}
 			if len(body) > 0 {
 				rawBody := strings.TrimSpace(string(body))
 				if len(rawBody) > 48*1024 {
@@ -521,25 +594,16 @@ func Handler(opts Options) app.HandlerFunc {
 			tlsFingerprint, _ = tlsFingerprintFromContext(ctx)
 		}
 		reqCtx.TLS = tlsFingerprint
-		c.Request.Header.VisitAll(func(k, v []byte) {
-			key := string(k)
-			value := string(v)
-			reqCtx.Headers[key] = value
-			if lower := strings.ToLower(key); lower != key {
-				reqCtx.Headers[lower] = value
-			}
-			reqCtx.HeaderKeys = append(reqCtx.HeaderKeys, key)
-		})
+		populateRequestCtxHeaders(reqCtx, c)
 
 		const maxWAFBody = 48 * 1024
-		body, _, _ := requestBodySample(c)
+		reqCtx.ContentType = string(c.Request.Header.ContentType())
 		if len(body) > 0 {
 			if len(body) > maxWAFBody {
 				reqCtx.Body = body[:maxWAFBody]
 			} else {
 				reqCtx.Body = body
 			}
-			reqCtx.ContentType = string(c.Request.Header.ContentType())
 		}
 
 		defer pipeline.ReleaseCtx(reqCtx)
@@ -659,6 +723,9 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		if result.Action.IsTerminal() {
+			if challengePassed && result.Action.IsChallenge() {
+				result.Action = action.Pass()
+			}
 			// Challenge cookie bypass: if action is a challenge type but client has a
 			// valid signed pass cookie, downgrade to pass and skip the challenge.
 			if result.Action.IsChallenge() {
@@ -891,6 +958,22 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
+		if challengePassed {
+			cookie := challenge.BuildChallengePassCookieWithClaims(challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: ua, SiteID: rt.Site.ID, Bind: bind}, rt.Site.TLSEnabled, time.Now(), challengePassTTL(sn.Protection))
+			c.Response.Header.Set("Set-Cookie", cookie)
+			referer := string(c.GetHeader("Referer"))
+			if referer == "" {
+				referer = "/"
+			}
+			c.Redirect(302, []byte(referer))
+			accessLog.Info("challenge_passed",
+				slog.String("request_id", reqID),
+				slog.String("client_ip", cipStr),
+			)
+			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 302, WAFAction: "challenge_passed", CacheState: "bypass", Upstream: referer})
+			return
+		}
+
 		if result.Site == nil || len(result.Site.UpstreamURLs) == 0 {
 			c.String(502, "no upstream configured")
 			return
@@ -966,7 +1049,7 @@ func Handler(opts Options) app.HandlerFunc {
 				break
 			}
 			if int64(len(bufferedResp.Body)) > opts.ResponseCache.MaxEntryBodySize() {
-				proxy.ForwardBufferedResponseAsStream(c, bufferedResp)
+				proxy.ForwardBufferedResponseAsStreamForSite(c, bufferedResp, *result.Site)
 				break
 			}
 			if proxy.ShouldCacheHTTPResponse(method, bufferedResp, ignoreUpstreamCC) {
@@ -1047,7 +1130,7 @@ func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot
 	if opts.RecordedResourceRepo == nil || hasExcludedHeader(c, sn.ExcludeRecordHeaders) {
 		return
 	}
-	reqBody := string(c.Request.Body())
+	reqBody := string(reqCtx.Body)
 	if len(reqBody) > logBodyPreviewLimit {
 		reqBody = reqBody[:logBodyPreviewLimit]
 	}
@@ -1543,14 +1626,13 @@ func responseHeadersJSON(c *app.RequestContext) string {
 }
 
 func requestBodyPreview(c *app.RequestContext) (string, bool, int64) {
-	body := c.Request.Body()
-	size := int64(len(body))
+	body, truncated, size := requestBodySample(c)
 	if len(body) == 0 {
-		return "", false, size
+		return "", truncated, size
 	}
-	truncated := len(body) > logBodyPreviewLimit
-	if truncated {
+	if len(body) > logBodyPreviewLimit {
 		body = body[:logBodyPreviewLimit]
+		truncated = true
 	}
 	contentType := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
 	return sanitizeBodyPreview(string(body), contentType), truncated, size

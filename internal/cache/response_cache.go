@@ -3,6 +3,7 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -17,9 +18,10 @@ type ResponseEntry struct {
 	Body        []byte
 	// Header holds hop-by-hop-sanitized upstream headers (e.g. Content-Encoding: br) so
 	// cached hits match live fetches. Nil means legacy entries with Content-Type only.
-	Header   http.Header
-	CachedAt int64
-	TTL      int64 // seconds
+	Header     http.Header
+	CachedAt   int64
+	TTL        int64 // seconds
+	lastAccess int64 // unix nano, updated atomically on cache hit
 }
 
 // IsExpired returns true if the entry has passed its TTL.
@@ -181,6 +183,7 @@ func (rc *ResponseCache) Lookup(key string) *ResponseEntry {
 	if !ok {
 		return nil
 	}
+	atomic.StoreInt64(&entry.lastAccess, time.Now().UnixNano())
 	return entry
 }
 
@@ -205,6 +208,7 @@ func (rc *ResponseCache) Get(key string) *ResponseEntry {
 		s.mu.Unlock()
 		return nil
 	}
+	atomic.StoreInt64(&entry.lastAccess, time.Now().UnixNano())
 	return entry
 }
 
@@ -234,6 +238,7 @@ func (rc *ResponseCache) Set(key string, statusCode int, contentType string, bod
 		Header:      hdr,
 		CachedAt:    time.Now().Unix(),
 		TTL:         ttl,
+		lastAccess:  time.Now().UnixNano(),
 	}
 
 	s := rc.shardFor(key)
@@ -252,27 +257,50 @@ func (rc *ResponseCache) evictToMaxSize() {
 		return
 	}
 	now := time.Now().Unix()
-	for rc.curSize.Load() > rc.maxSize {
-		evicted := false
-		for i := range rc.shards {
-			if rc.curSize.Load() <= rc.maxSize {
-				return
-			}
-			s := &rc.shards[i]
-			s.mu.Lock()
-			for k, v := range s.items {
-				delete(s.items, k)
-				rc.curSize.Add(-int64(len(v.Body)))
-				evicted = true
-				if now > v.CachedAt+v.TTL || rc.curSize.Load() <= rc.maxSize {
-					break
-				}
-			}
-			s.mu.Unlock()
-		}
-		if !evicted {
+	// 第一轮：优先驱逐过期条目
+	for i := range rc.shards {
+		if rc.curSize.Load() <= rc.maxSize {
 			return
 		}
+		s := &rc.shards[i]
+		s.mu.Lock()
+		for k, v := range s.items {
+			if now > v.CachedAt+v.TTL {
+				delete(s.items, k)
+				rc.curSize.Add(-int64(len(v.Body)))
+			}
+		}
+		s.mu.Unlock()
+	}
+	// 第二轮：按 lastAccess 最老优先逐条驱逐，直到满足容量
+	for rc.curSize.Load() > rc.maxSize {
+		var oldestKey string
+		var oldestShard *shard
+		var oldestAccess int64 = math.MaxInt64
+		var oldestSize int64
+		for i := range rc.shards {
+			s := &rc.shards[i]
+			s.mu.RLock()
+			for k, v := range s.items {
+				la := atomic.LoadInt64(&v.lastAccess)
+				if la < oldestAccess {
+					oldestAccess = la
+					oldestKey = k
+					oldestShard = s
+					oldestSize = int64(len(v.Body))
+				}
+			}
+			s.mu.RUnlock()
+		}
+		if oldestShard == nil {
+			return
+		}
+		oldestShard.mu.Lock()
+		if _, ok := oldestShard.items[oldestKey]; ok {
+			delete(oldestShard.items, oldestKey)
+			rc.curSize.Add(-oldestSize)
+		}
+		oldestShard.mu.Unlock()
 	}
 }
 

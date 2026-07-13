@@ -69,50 +69,89 @@ type OWASPHit struct {
 	Desc     string
 }
 
-// CheckOWASP scans request fields for OWASP-oriented attacks.
-// bodyTargets are pre-extracted values from the request body (form values, JSON leaves).
-// The path parameter is also used for context: internal API paths get reduced scanning.
-func CheckOWASP(sensitivity string, path, query string, headers map[string]string, bodyTargets []string, categorySensitivity ...map[string]string) []OWASPHit {
-	defaultLevel := normalizeSensitivityLevel(sensitivity)
-	defaultThreshold := sensitivityThresholdForNormalizedLevel(defaultLevel)
-	defaultEnabled := defaultLevel != "off"
+type categoryThresholdConfig struct {
+	threshold int
+	enabled   bool
+}
+
+type CompiledThresholds struct {
+	sqli       categoryThresholdConfig
+	xss        categoryThresholdConfig
+	cmd        categoryThresholdConfig
+	webshell   categoryThresholdConfig
+	revShell   categoryThresholdConfig
+	pathTrav   categoryThresholdConfig
+	ssrf       categoryThresholdConfig
+	xxe        categoryThresholdConfig
+	ldap       categoryThresholdConfig
+	nosqli     categoryThresholdConfig
+	template   categoryThresholdConfig
+	jndi       categoryThresholdConfig
+	crlf       categoryThresholdConfig
+	exprLang   categoryThresholdConfig
+	deserial   categoryThresholdConfig
+	graphql    categoryThresholdConfig
+	proto      categoryThresholdConfig
+	fileUpload categoryThresholdConfig
+}
+
+func CompileThresholds(sensitivity string, categorySensitivity ...map[string]string) CompiledThresholds {
 	var categorySensitivityMap map[string]string
 	if len(categorySensitivity) > 0 {
 		categorySensitivityMap = categorySensitivity[0]
 	}
-	categoryThreshold := func(category OWASPCategory) (int, bool) {
-		if categorySensitivityMap != nil {
-			if level := normalizeSensitivityLevel(categorySensitivityMap[string(category)]); level != "" {
-				if level == "off" {
-					return 0, false
-				}
-				return sensitivityThresholdForNormalizedLevel(level), true
-			}
-		}
-		if !defaultEnabled {
-			return 0, false
-		}
-		return defaultThreshold, true
+	compile := func(category OWASPCategory) categoryThresholdConfig {
+		threshold, enabled := CategoryThreshold(sensitivity, category, categorySensitivityMap)
+		return categoryThresholdConfig{threshold: threshold, enabled: enabled}
 	}
+	return CompiledThresholds{
+		sqli:       compile(CatSQLi),
+		xss:        compile(CatXSS),
+		cmd:        compile(CatCmdInject),
+		webshell:   compile(CatWebshell),
+		revShell:   compile(CatRevShell),
+		pathTrav:   compile(CatPathTrav),
+		ssrf:       compile(CatSSRF),
+		xxe:        compile(CatXXE),
+		ldap:       compile(CatLDAPI),
+		nosqli:     compile(CatNoSQLi),
+		template:   compile(CatTmplInject),
+		jndi:       compile(CatJNDI),
+		crlf:       compile(CatCRLF),
+		exprLang:   compile(CatExprLang),
+		deserial:   compile(CatDeserial),
+		graphql:    compile(CatGraphQLi),
+		proto:      compile(CatProtoViol),
+		fileUpload: compile(CatFileUpload),
+	}
+}
 
-	sqliThreshold, sqliEnabled := categoryThreshold(CatSQLi)
-	xssThreshold, xssEnabled := categoryThreshold(CatXSS)
-	cmdThreshold, cmdEnabled := categoryThreshold(CatCmdInject)
-	webshellThreshold, webshellEnabled := categoryThreshold(CatWebshell)
-	revShellThreshold, revShellEnabled := categoryThreshold(CatRevShell)
-	pathTravThreshold, pathTravEnabled := categoryThreshold(CatPathTrav)
-	ssrfThreshold, ssrfEnabled := categoryThreshold(CatSSRF)
-	xxeThreshold, xxeEnabled := categoryThreshold(CatXXE)
-	ldapThreshold, ldapEnabled := categoryThreshold(CatLDAPI)
-	nosqliThreshold, nosqliEnabled := categoryThreshold(CatNoSQLi)
-	templateThreshold, templateEnabled := categoryThreshold(CatTmplInject)
-	jndiThreshold, jndiEnabled := categoryThreshold(CatJNDI)
-	crlfThreshold, crlfEnabled := categoryThreshold(CatCRLF)
-	exprLangThreshold, exprLangEnabled := categoryThreshold(CatExprLang)
-	deserialThreshold, deserialEnabled := categoryThreshold(CatDeserial)
-	graphqlThreshold, graphqlEnabled := categoryThreshold(CatGraphQLi)
-	protoThreshold, protoEnabled := categoryThreshold(CatProtoViol)
-	_, fileUploadEnabled := categoryThreshold(CatFileUpload)
+// CheckOWASP scans request fields for OWASP-oriented attacks.
+// bodyTargets are pre-extracted values from the request body (form values, JSON leaves).
+// The path parameter is also used for context: internal API paths get reduced scanning.
+func CheckOWASP(sensitivity string, path, query string, headers map[string]string, bodyTargets []string, categorySensitivity ...map[string]string) []OWASPHit {
+	return CheckOWASPWithThresholds(CompileThresholds(sensitivity, categorySensitivity...), path, query, headers, bodyTargets)
+}
+
+func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string) []OWASPHit {
+	sqliThreshold, sqliEnabled := thresholds.sqli.threshold, thresholds.sqli.enabled
+	xssThreshold, xssEnabled := thresholds.xss.threshold, thresholds.xss.enabled
+	cmdThreshold, cmdEnabled := thresholds.cmd.threshold, thresholds.cmd.enabled
+	webshellThreshold, webshellEnabled := thresholds.webshell.threshold, thresholds.webshell.enabled
+	revShellThreshold, revShellEnabled := thresholds.revShell.threshold, thresholds.revShell.enabled
+	pathTravThreshold, pathTravEnabled := thresholds.pathTrav.threshold, thresholds.pathTrav.enabled
+	ssrfThreshold, ssrfEnabled := thresholds.ssrf.threshold, thresholds.ssrf.enabled
+	xxeThreshold, xxeEnabled := thresholds.xxe.threshold, thresholds.xxe.enabled
+	ldapThreshold, ldapEnabled := thresholds.ldap.threshold, thresholds.ldap.enabled
+	nosqliThreshold, nosqliEnabled := thresholds.nosqli.threshold, thresholds.nosqli.enabled
+	templateThreshold, templateEnabled := thresholds.template.threshold, thresholds.template.enabled
+	jndiThreshold, jndiEnabled := thresholds.jndi.threshold, thresholds.jndi.enabled
+	crlfThreshold, crlfEnabled := thresholds.crlf.threshold, thresholds.crlf.enabled
+	exprLangThreshold, exprLangEnabled := thresholds.exprLang.threshold, thresholds.exprLang.enabled
+	deserialThreshold, deserialEnabled := thresholds.deserial.threshold, thresholds.deserial.enabled
+	graphqlThreshold, graphqlEnabled := thresholds.graphql.threshold, thresholds.graphql.enabled
+	protoThreshold, protoEnabled := thresholds.proto.threshold, thresholds.proto.enabled
+	fileUploadEnabled := thresholds.fileUpload.enabled
 
 	var hits []OWASPHit
 	lowerPath := strings.ToLower(path)
@@ -187,7 +226,7 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		if len(raw) >= 30 && shouldScanUnicodeBase64Target(raw) {
 			unicodeBase64Targets = append(unicodeBase64Targets, unicodeBase64Target{raw: raw, queryPlusAsSpace: queryPlusAsSpace})
 		}
-		if isCleanTarget(raw) {
+		if isCleanTarget(raw) && !hasLikelyBase64Candidate(raw) {
 			return true
 		}
 
@@ -240,6 +279,12 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		if xssEnabled {
 			if hit, ok := nextXSSHit(normalized, xssThreshold); ok {
 				if !isKnownTelemetryXSSFalsePositive(path, normalized, hit.RuleID, isBodyTarget) {
+					stopHits = []OWASPHit{hit}
+					return false
+				}
+			}
+			if hit, decodedTarget, ok := nextDecodedXSSHit(raw, queryPlusAsSpace, xssThreshold); ok {
+				if !isKnownTelemetryXSSFalsePositive(path, decodedTarget, hit.RuleID, isBodyTarget) {
 					stopHits = []OWASPHit{hit}
 					return false
 				}
@@ -377,7 +422,7 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 		if jsDec == urlDec {
 			continue
 		}
-		forEachBase64TokenIndex(jsDec, 20, func(start, end int) bool {
+		forEachBase64TokenIndex(jsDec, -1, func(start, end int) bool {
 			tok := jsDec[start:end]
 			if decoded := decodeBase64IfSuspicious(tok); decoded != "" {
 				decodedNorm := normalize(decoded)
@@ -484,8 +529,8 @@ func checkRawMultipartFilenames(body []byte) (OWASPHit, bool) {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:006", Score: 6,
 				Desc: "path traversal in filename"}, true
 		}
-		// Space-extension bypass: "shell.php .jpg"
-		normalized := strings.ReplaceAll(lower, " ", "")
+		// Normalize spaces and suffix separators used to disguise executable extensions.
+		normalized := normalizeUploadFilename(lower)
 		ext := filepath.Ext(normalized)
 		if ext != "" {
 			withoutExt := normalized[:len(normalized)-len(ext)]
@@ -1534,6 +1579,7 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 	if strings.Contains(s, "+A") {
 		s = decodeUTF7Sequences(s)
 	}
+	s = normalizeURLSchemeControls(s)
 	s = strings.ToLower(s)
 	s = strings.ReplaceAll(s, "\x00", " ")
 	// Strip inline SQL/C-style comments to defeat comment-splitting evasion.
@@ -1693,6 +1739,124 @@ func hasSemicolonlessHTMLEntityPrefix(name string) bool {
 
 // collapseWhitespace replaces runs of whitespace with a single space.
 // Faster than regexp for this simple case.
+func normalizeURLSchemeControls(s string) string {
+	if !strings.ContainsAny(s, "\t\r\n") {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if !isASCIIAlpha(s[i]) || i > 0 && isURLSchemeByte(s[i-1]) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+
+		end := i + 1
+		hasControl := false
+		for end < len(s) {
+			c := s[end]
+			if isURLSchemeByte(c) {
+				end++
+				continue
+			}
+			if c == '\t' || c == '\r' || c == '\n' {
+				hasControl = true
+				end++
+				continue
+			}
+			break
+		}
+		if !hasControl || end >= len(s) || s[end] != ':' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+
+		var scheme strings.Builder
+		scheme.Grow(end - i)
+		for _, c := range []byte(s[i:end]) {
+			if c != '\t' && c != '\r' && c != '\n' {
+				scheme.WriteByte(c)
+			}
+		}
+		normalizedScheme := strings.ToLower(scheme.String())
+		if !isExecutableURLSchemeContext(s, i, end+1, normalizedScheme) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		b.WriteString(scheme.String())
+		i = end
+	}
+	return b.String()
+}
+
+func isExecutableURLSchemeContext(s string, start, valueStart int, scheme string) bool {
+	switch scheme {
+	case "javascript", "vbscript", "data":
+	default:
+		return false
+	}
+
+	before := start - 1
+	for before >= 0 && (s[before] == ' ' || s[before] == '\t' || s[before] == '\r' || s[before] == '\n') {
+		before--
+	}
+	if before >= 0 {
+		switch s[before] {
+		case '=':
+			return true
+		case '\'', '"':
+			before--
+			for before >= 0 && (s[before] == ' ' || s[before] == '\t' || s[before] == '\r' || s[before] == '\n') {
+				before--
+			}
+			if before >= 0 && s[before] == '=' {
+				return true
+			}
+		case '(':
+			nameEnd := before
+			nameStart := nameEnd
+			for nameStart > 0 && isASCIIAlpha(s[nameStart-1]) {
+				nameStart--
+			}
+			if strings.EqualFold(s[nameStart:nameEnd], "url") {
+				return true
+			}
+		}
+	}
+
+	value := strings.TrimLeft(s[valueStart:], " \t\r\n")
+	if scheme == "data" {
+		lower := strings.ToLower(value)
+		return strings.HasPrefix(lower, "text/html") || strings.HasPrefix(lower, "image/svg")
+	}
+	if value == "" {
+		return false
+	}
+	if strings.ContainsRune("([{'\"`=!", rune(value[0])) {
+		return true
+	}
+	end := 0
+	for end < len(value) && (isASCIILetterOrDigit(value[end]) || value[end] == '_' || value[end] == '$') {
+		end++
+	}
+	if end == 0 || end >= len(value) {
+		return false
+	}
+	return strings.ContainsRune("(.[=;", rune(value[end]))
+}
+
+func isASCIIAlpha(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+func isURLSchemeByte(c byte) bool {
+	return isASCIILetterOrDigit(c) || c == '+' || c == '-' || c == '.'
+}
+
 func collapseWhitespace(s string) string {
 	needsWork := false
 	for i := 0; i < len(s); i++ {
@@ -1867,13 +2031,9 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 	}
 
 	s := normalizeTarget(raw, queryPlusAsSpace)
-	// Fast path: if normalized string has no base64-length tokens, skip expensive scanning.
 	if len(s) < 8 || !hasLikelyBase64Candidate(s) && (raw == s || !hasLikelyBase64Candidate(raw)) {
 		return s
 	}
-	// Build a case-preserving URL-decoded version for base64 extraction.
-	// normalize() lowercases which destroys base64 case sensitivity,
-	// and raw may have %XX wrapping base64 boundaries (e.g. %22TOKEN%22).
 	urlDecoded := raw
 	if strings.Contains(raw, "%") {
 		for i := range 3 {
@@ -1891,8 +2051,6 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 		}
 	}
 	jsDecoded := ""
-	// Build a case-preserving JS-escape-decoded version for base64 extraction.
-	// \u00XX escapes may encode base64 characters that are case-sensitive.
 	if strings.Contains(urlDecoded, "\\") {
 		jsDecoded = decodeJSEscapes(urlDecoded)
 		if jsDecoded == urlDecoded || jsDecoded == raw || jsDecoded == s {
@@ -1900,40 +2058,49 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 		}
 	}
 
-	const maxTokensPerLevel = 128 // Allow long encoded blobs with many decoy tokens before the real payload
-	const maxTotalBytes = 32768   // 32KB total decoded byte budget
-	const maxDepth = 3            // Increased from 2 to handle triple-encoded payloads
+	const maxTotalBytes = 32768
+	const maxDepth = 3
 
 	var b strings.Builder
 	seen := make(map[string]bool, 8)
 	found := false
 	totalBytes := 0
+	attemptsRemaining := 2 * ((len(raw) + len(s) + len(urlDecoded) + len(jsDecoded) + maxTotalBytes + 7) / 8)
 
-	// decodeSource processes base64 tokens from one source at the given depth.
 	var decodeSource func(src string, depth int) bool
 	decodeSource = func(src string, depth int) bool {
-		if depth > maxDepth || totalBytes >= maxTotalBytes {
+		if depth > maxDepth || totalBytes >= maxTotalBytes || attemptsRemaining <= 0 {
 			return false
 		}
 		stop := false
-		forEachBase64TokenIndex(src, maxTokensPerLevel, func(start, end int) bool {
+		forEachBase64TokenIndex(src, -1, func(start, end int) bool {
 			tok := src[start:end]
 			if seen[tok] {
 				return true
 			}
 			seen[tok] = true
+			if attemptsRemaining <= 0 {
+				stop = true
+				return false
+			}
+			attemptsRemaining--
 			decoded := decodeBase64IfSuspicious(tok)
 			if decoded == "" && start > 0 && isURLSafeBase64LeadByte(src[start-1]) {
+				if attemptsRemaining <= 0 {
+					stop = true
+					return false
+				}
+				attemptsRemaining--
 				decoded = decodeBase64IfSuspicious(src[start-1 : end])
 			}
 			if decoded == "" {
 				return true
 			}
-			totalBytes += len(decoded)
-			if totalBytes > maxTotalBytes {
-				stop = true
-				return false
+			remaining := maxTotalBytes - totalBytes
+			if len(decoded) > remaining {
+				decoded = decoded[:remaining]
 			}
+			totalBytes += len(decoded)
 			if !found {
 				b.Grow(len(s) + 256)
 				b.WriteString(s)
@@ -1955,12 +2122,14 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 					nextJS = ""
 				}
 			}
-			stop = decodeSource(decoded, depth+1)
-			if !stop && nextJS != "" {
+			if nextJS != "" {
 				stop = decodeSource(nextJS, depth+1)
 			}
 			if !stop && nextNormalizedJS != "" {
 				stop = decodeSource(nextNormalizedJS, depth+1)
+			}
+			if !stop {
+				stop = decodeSource(decoded, depth+1)
 			}
 			if stop || totalBytes >= maxTotalBytes {
 				stop = true
@@ -1986,6 +2155,108 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 		return b.String()
 	}
 	return s
+}
+
+func nextDecodedXSSHit(raw string, queryPlusAsSpace bool, threshold int) (OWASPHit, string, bool) {
+	if len(raw) < 8 || !hasLikelyBase64Candidate(raw) {
+		return OWASPHit{}, "", false
+	}
+
+	const maxTotalBytes = 64 * 1024
+	const maxDepth = 3
+
+	seen := make(map[string]bool, 8)
+	totalBytes := 0
+	attemptsRemaining := 2 * ((len(raw) + maxTotalBytes + 7) / 8)
+	var scanSource func(string, int) (OWASPHit, string, bool)
+	scanSource = func(src string, depth int) (OWASPHit, string, bool) {
+		if depth > maxDepth || totalBytes >= maxTotalBytes || attemptsRemaining <= 0 {
+			return OWASPHit{}, "", false
+		}
+		var foundHit OWASPHit
+		var foundTarget string
+		found := false
+		forEachBase64TokenIndex(src, -1, func(start, end int) bool {
+			tok := src[start:end]
+			if seen[tok] {
+				return true
+			}
+			seen[tok] = true
+			if attemptsRemaining <= 0 {
+				return false
+			}
+			attemptsRemaining--
+			decoded := decodeBase64IfSuspicious(tok)
+			if decoded == "" && start > 0 && isURLSafeBase64LeadByte(src[start-1]) {
+				if attemptsRemaining <= 0 {
+					return false
+				}
+				attemptsRemaining--
+				decoded = decodeBase64IfSuspicious(src[start-1 : end])
+			}
+			if decoded == "" {
+				return true
+			}
+			remaining := maxTotalBytes - totalBytes
+			if len(decoded) > remaining {
+				decoded = decoded[:remaining]
+			}
+			totalBytes += len(decoded)
+
+			normalized := normalize(decoded)
+			if hit, ok := nextXSSHit(normalized, threshold); ok {
+				foundHit, foundTarget, found = hit, normalized, true
+				return false
+			}
+
+			jsDecoded := ""
+			if strings.Contains(decoded, "\\") {
+				jsDecoded = decodeJSEscapes(decoded)
+				if jsDecoded != decoded {
+					normalizedJS := normalize(jsDecoded)
+					if hit, ok := nextXSSHit(normalizedJS, threshold); ok {
+						foundHit, foundTarget, found = hit, normalizedJS, true
+						return false
+					}
+				} else {
+					jsDecoded = ""
+				}
+			}
+
+			if jsDecoded != "" {
+				if hit, target, ok := scanSource(jsDecoded, depth+1); ok {
+					foundHit, foundTarget, found = hit, target, true
+					return false
+				}
+			}
+			if hit, target, ok := scanSource(decoded, depth+1); ok {
+				foundHit, foundTarget, found = hit, target, true
+				return false
+			}
+			return totalBytes < maxTotalBytes
+		})
+		return foundHit, foundTarget, found
+	}
+
+	sources := []string{raw}
+	urlDecoded := raw
+	if strings.Contains(raw, "%") || queryPlusAsSpace && strings.Contains(raw, "+") {
+		if decoded, err := unescapeURLComponent(raw, queryPlusAsSpace); err == nil && decoded != raw {
+			urlDecoded = decoded
+			sources = append(sources, decoded)
+		}
+	}
+	if strings.Contains(urlDecoded, "\\") {
+		if decoded := decodeJSEscapes(urlDecoded); decoded != urlDecoded {
+			sources = append(sources, decoded)
+		}
+	}
+	for _, source := range sources {
+		if hit, target, ok := scanSource(source, 1); ok {
+			return hit, target, true
+		}
+	}
+	return OWASPHit{}, "", false
 }
 
 func containsOverlongUTF8Escape(s string) bool {
@@ -2019,7 +2290,7 @@ func hasBase64Candidate(s string) bool {
 	run := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' {
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '-' || c == '_' {
 			run++
 			if run >= 8 {
 				return true
@@ -2066,7 +2337,7 @@ func hasLikelyBase64Candidate(s string) bool {
 				inBase64Mode = true
 				continue
 			}
-			if c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '/' {
+			if c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '-' || c == '_' {
 				commitLowerRun()
 				if maxLowerRun >= 12 {
 					return true
@@ -2088,7 +2359,7 @@ func hasLikelyBase64Candidate(s string) bool {
 			i += 2
 			continue
 		}
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' {
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '-' || c == '_' {
 			run++
 			if c < 'a' || c > 'z' {
 				hasNonLower = true
@@ -2152,7 +2423,7 @@ func forEachBase64TokenIndex(src string, limit int, fn func(start, end int) bool
 }
 
 func isBase64TokenByte(b byte) bool {
-	return isBase64AlphaNum(b) || b == '+' || b == '/'
+	return isBase64AlphaNum(b) || b == '+' || b == '/' || b == '-' || b == '_'
 }
 
 // stripSQLComments removes /* ... */ style inline comments from s to defeat
@@ -2291,9 +2562,12 @@ func decodeBase64WithBuffer(s string, dst []byte) ([]byte, error) {
 			if !strings.ContainsAny(s, "-_") {
 				return nil, err
 			}
-			n, err = base64.RawURLEncoding.Decode(dst, []byte(s))
+			n, err = base64.URLEncoding.Decode(dst, []byte(s))
 			if err != nil {
-				return nil, err
+				n, err = base64.RawURLEncoding.Decode(dst, []byte(s))
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -2308,9 +2582,12 @@ func decodeBase64String(s string) ([]byte, error) {
 			if !strings.ContainsAny(s, "-_") {
 				return nil, err
 			}
-			decoded, err = base64.RawURLEncoding.DecodeString(s)
+			decoded, err = base64.URLEncoding.DecodeString(s)
 			if err != nil {
-				return nil, err
+				decoded, err = base64.RawURLEncoding.DecodeString(s)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

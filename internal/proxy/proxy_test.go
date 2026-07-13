@@ -578,6 +578,249 @@ func TestSharedTransportForUpstreamKeysTLSFieldsOnlyForHTTPS(t *testing.T) {
 	}
 }
 
+type cancelableBlockingReader struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *cancelableBlockingReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.release
+	return 0, context.Canceled
+}
+
+func TestHertzResponseBodyCloseIsIdempotent(t *testing.T) {
+	req := protocol.AcquireRequest()
+	resp := protocol.AcquireResponse()
+	body := &hertzResponseBody{req: req, resp: resp}
+
+	if err := body.Close(); err != nil {
+		t.Fatalf("first Close returned error: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("second Close returned error: %v", err)
+	}
+}
+
+type closeSignalBody struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *closeSignalBody) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (b *closeSignalBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestReleaseHertzUpstreamRequestWhenDoneDefersReset(t *testing.T) {
+	req := protocol.AcquireRequest()
+	body := &closeSignalBody{closed: make(chan struct{})}
+	req.SetBodyStream(body, -1)
+	done := make(chan struct{})
+
+	releaseHertzUpstreamRequestWhenDone(req, []<-chan struct{}{done})
+	select {
+	case <-body.closed:
+		t.Fatal("request body closed before write completion")
+	default:
+	}
+
+	close(done)
+	select {
+	case <-body.closed:
+	case <-time.After(time.Second):
+		t.Fatal("request body was not closed after write completion")
+	}
+}
+
+func TestReleaseHertzUpstreamRequestWhenDoneReleasesCompletedRequest(t *testing.T) {
+	req := protocol.AcquireRequest()
+	body := &closeSignalBody{closed: make(chan struct{})}
+	req.SetBodyStream(body, -1)
+	done := make(chan struct{})
+	close(done)
+
+	releaseHertzUpstreamRequestWhenDone(req, []<-chan struct{}{done})
+	select {
+	case <-body.closed:
+	default:
+		t.Fatal("completed request body was not closed synchronously")
+	}
+}
+
+func TestReleaseHertzUpstreamRequestWhenDoneWaitsForEveryAttempt(t *testing.T) {
+	req := protocol.AcquireRequest()
+	body := &closeSignalBody{closed: make(chan struct{})}
+	req.SetBodyStream(body, -1)
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+
+	releaseHertzUpstreamRequestWhenDone(req, []<-chan struct{}{firstDone, secondDone})
+	close(firstDone)
+	select {
+	case <-body.closed:
+		t.Fatal("request body closed before every write attempt completed")
+	default:
+	}
+
+	close(secondDone)
+	select {
+	case <-body.closed:
+	case <-time.After(time.Second):
+		t.Fatal("request body was not closed after every write attempt completed")
+	}
+}
+
+func TestReleaseHertzUpstreamRequestWhenDoneReleasesWithoutAttempt(t *testing.T) {
+	req := protocol.AcquireRequest()
+	body := &closeSignalBody{closed: make(chan struct{})}
+	req.SetBodyStream(body, -1)
+
+	releaseHertzUpstreamRequestWhenDone(req, nil)
+	select {
+	case <-body.closed:
+	default:
+		t.Fatal("request body was not closed when no write attempt was created")
+	}
+}
+
+func TestHertzResponseBodyCloseCancelsBlockedReadAndWaits(t *testing.T) {
+	reader := &cancelableBlockingReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	var cancelCount int
+	var cancelMu sync.Mutex
+	body := &hertzResponseBody{
+		reader: reader,
+		cancel: func() {
+			cancelMu.Lock()
+			cancelCount++
+			cancelMu.Unlock()
+			close(reader.release)
+		},
+	}
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := body.Read(make([]byte, 1))
+		readDone <- err
+	}()
+	<-reader.started
+
+	closeDone := make(chan error, 2)
+	go func() { closeDone <- body.Close() }()
+	go func() { closeDone <- body.Close() }()
+
+	select {
+	case err := <-readDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Read error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked Read was not released by Close cancellation")
+	}
+	for range 2 {
+		select {
+		case err := <-closeDone:
+			if err != nil {
+				t.Fatalf("Close returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("concurrent Close did not finish after Read exited")
+		}
+	}
+
+	cancelMu.Lock()
+	gotCancelCount := cancelCount
+	cancelMu.Unlock()
+	if gotCancelCount != 1 {
+		t.Fatalf("cancel calls = %d, want 1", gotCancelCount)
+	}
+}
+
+func TestHertzResponseBodySyncsTrailerBeforeRelease(t *testing.T) {
+	resp := protocol.AcquireResponse()
+	if err := resp.Header.Trailer().Set("X-Upstream-Trailer", "done"); err != nil {
+		protocol.ReleaseResponse(resp)
+		t.Fatalf("set response trailer: %v", err)
+	}
+	trailer := make(http.Header)
+	body := &hertzResponseBody{
+		reader:  bytes.NewReader(nil),
+		resp:    resp,
+		trailer: trailer,
+	}
+
+	if err := body.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if got := trailer.Get("X-Upstream-Trailer"); got != "done" {
+		t.Fatalf("trailer X-Upstream-Trailer = %q, want %q", got, "done")
+	}
+}
+
+func TestProxyBodyStreamCloseWaitsForActiveReader(t *testing.T) {
+	reader := &cancelableBlockingReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	var closeCount int
+	var closeMu sync.Mutex
+	stream := newProxyBodyStream(
+		context.Background(),
+		reader,
+		func() error {
+			closeMu.Lock()
+			closeCount++
+			closeMu.Unlock()
+			return nil
+		},
+		&http.Response{},
+		app.NewContext(0),
+		func() { close(reader.release) },
+	)
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := stream.Read(make([]byte, 1))
+		readDone <- err
+	}()
+	<-reader.started
+
+	closeDone := make(chan struct{})
+	go func() {
+		_ = stream.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case err := <-readDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Read error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy stream Read was not released by Close cancellation")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy stream Close did not finish after Read exited")
+	}
+
+	closeMu.Lock()
+	gotCloseCount := closeCount
+	closeMu.Unlock()
+	if gotCloseCount != 1 {
+		t.Fatalf("close function calls = %d, want 1", gotCloseCount)
+	}
+}
+
 func TestBuildUpstreamRequestForwardsRequestTrailers(t *testing.T) {
 	payload := `{"ok":true}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1372,6 +1615,63 @@ func TestForwardHTTPReturnsHTTP2ProtocolForExplicitH2CUpstream(t *testing.T) {
 	}
 	if got := string(ctx.Response.Body()); got != "h2c-stream" {
 		t.Fatalf("response body = %q, want %q", got, "h2c-stream")
+	}
+}
+
+func TestForwardHTTPExplicitH2CWithoutBody(t *testing.T) {
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Proto != "HTTP/2.0" {
+			t.Errorf("upstream request proto = %q, want %q", r.Proto, "HTTP/2.0")
+		}
+		switch r.URL.Path {
+		case "/head":
+			if r.Method != http.MethodHead {
+				t.Errorf("upstream method = %q, want %q", r.Method, http.MethodHead)
+			}
+			w.Header().Set("Content-Length", "128")
+			w.Header().Set("X-Upstream", "head")
+		case "/no-content":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	upstream.Config.Protocols = new(http.Protocols)
+	upstream.Config.Protocols.SetHTTP1(true)
+	upstream.Config.Protocols.SetUnencryptedHTTP2(true)
+	upstream.Start()
+	defer upstream.Close()
+
+	base := strings.Replace(upstream.URL, "http://", "h2c://", 1)
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+	}{
+		{name: "head", method: http.MethodHead, path: "/head", wantStatus: http.StatusOK},
+		{name: "no content", method: http.MethodGet, path: "/no-content", wantStatus: http.StatusNoContent},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := app.NewContext(0)
+			ctx.Request.SetMethod(tc.method)
+			ctx.Request.SetRequestURI(tc.path)
+			ctx.Request.Header.SetHost("proxy.example.com")
+
+			if err := ForwardHTTP(context.Background(), ctx, snapshot.SiteRuntime{}, base, nil, "proxy.example.com"); err != nil {
+				t.Fatalf("ForwardHTTP returned error: %v", err)
+			}
+			if got := ctx.Response.StatusCode(); got != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", got, tc.wantStatus)
+			}
+			if got := len(ctx.Response.Body()); got != 0 {
+				t.Fatalf("response body length = %d, want 0", got)
+			}
+			if ctx.Response.IsBodyStream() {
+				t.Fatal("response is still marked as body stream")
+			}
+		})
 	}
 }
 
@@ -3791,6 +4091,58 @@ func TestForwardHTTPRecompressesDecodedUpstreamGzipResponse(t *testing.T) {
 	}
 }
 
+func TestForwardHTTPAppliesDynamicProtectionWhenEnabled(t *testing.T) {
+	originalBody := []byte("<!doctype html><html><body><script>const value = 1;</script></body></html>")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/dynamic-protected")
+	ctx.Request.Header.SetHost("proxy.example.com")
+
+	rt := snapshot.SiteRuntime{}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	rt.DynamicProtection.JSObfuscationEnabled = true
+
+	if err := ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	got := ctx.Response.Body()
+	if bytes.Equal(got, originalBody) {
+		t.Fatalf("expected dynamic protection to transform the body, but got original unchanged")
+	}
+	if !bytes.Contains(got, []byte("owaf")) {
+		t.Fatalf("transformed body does not contain expected owaf marker: %q", got[:min(len(got), 200)])
+	}
+}
+
+func TestForwardHTTPSkipsDynamicProtectionWhenDisabled(t *testing.T) {
+	originalBody := []byte("<!doctype html><html><body><p>hello</p></body></html>")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/no-dynamic")
+	ctx.Request.Header.SetHost("proxy.example.com")
+
+	rt := snapshot.SiteRuntime{}
+
+	if err := ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	if got := ctx.Response.Body(); !bytes.Equal(got, originalBody) {
+		t.Fatalf("expected original body when dynamic protection disabled, got: %q", got[:min(len(got), 200)])
+	}
+}
+
 func TestForwardHTTPStreamsDecodedUpstreamRecompressionWithoutReadAll(t *testing.T) {
 	first := []byte(strings.Repeat("decoded-upstream-recompress-first-", 96))
 	second := []byte(strings.Repeat("decoded-upstream-recompress-second-", 96))
@@ -3992,6 +4344,54 @@ func TestForwardHTTPClosesUpstreamResponseBodyOnContextCancel(t *testing.T) {
 				t.Fatal("upstream response body was not closed after context cancellation")
 			}
 		})
+	}
+}
+
+func TestForwardHTTPReusesHTTP1ConnectionAfterCompleteResponse(t *testing.T) {
+	var mu sync.Mutex
+	newConnections := 0
+
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Length", "2")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state != http.StateNew {
+			return
+		}
+		mu.Lock()
+		newConnections++
+		mu.Unlock()
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	forward := func(path string) {
+		ctx := app.NewContext(0)
+		ctx.Request.SetMethod("GET")
+		ctx.Request.SetRequestURI(path)
+		ctx.Request.Header.SetHost("proxy.example.com")
+
+		if err := ForwardHTTP(context.Background(), ctx, snapshot.SiteRuntime{}, upstream.URL, nil, "proxy.example.com"); err != nil {
+			t.Fatalf("ForwardHTTP(%q) returned error: %v", path, err)
+		}
+		if got := string(ctx.Response.Body()); got != "ok" {
+			t.Fatalf("ForwardHTTP(%q) body = %q, want %q", path, got, "ok")
+		}
+		if ctx.Response.IsBodyStream() {
+			_ = ctx.Response.CloseBodyStream()
+		}
+	}
+
+	forward("/first")
+	forward("/second")
+
+	mu.Lock()
+	gotConnections := newConnections
+	mu.Unlock()
+	if gotConnections != 1 {
+		t.Fatalf("HTTP/1.1 upstream connections = %d, want 1", gotConnections)
 	}
 }
 

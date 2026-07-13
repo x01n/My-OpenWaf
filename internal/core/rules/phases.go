@@ -521,6 +521,7 @@ type owaspPhase struct {
 	cfg                 *store.ProtectionConfig
 	categorySensitivity map[string]string
 	overrides           map[string]owasp.OWASPRuleOverride
+	thresholds          owasp.CompiledThresholds
 	fileUploadEnabled   bool
 	protoEnabled        bool
 }
@@ -530,6 +531,7 @@ func NewOWASPPhase(cfg *store.ProtectionConfig) pipeline.Phase {
 	if cfg != nil {
 		phase.categorySensitivity = cfg.EffectiveCategorySensitivity()
 		phase.overrides = owasp.ParseOWASPRulesConfig(cfg.OWASPRulesConfig)
+		phase.thresholds = owasp.CompileThresholds(cfg.OWASPSensitivity, phase.categorySensitivity)
 		_, phase.fileUploadEnabled = owasp.CategoryThreshold(cfg.OWASPSensitivity, owasp.CatFileUpload, phase.categorySensitivity)
 		_, phase.protoEnabled = owasp.CategoryThreshold(cfg.OWASPSensitivity, owasp.CatProtoViol, phase.categorySensitivity)
 	}
@@ -591,7 +593,7 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		}
 	}
 
-	hits := owasp.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, categorySensitivity)
+	hits := owasp.CheckOWASPWithThresholds(p.thresholds, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets)
 
 	// Apply per-rule overrides and path whitelists.
 	if len(hits) > 0 {

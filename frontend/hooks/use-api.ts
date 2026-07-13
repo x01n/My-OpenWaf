@@ -23,6 +23,11 @@ import {
   runtimeApi,
   apiKeyApi,
   errorPageApi,
+  adminUserApi,
+  threatIntelApi,
+  falsePositiveApi,
+  presetBotWhitelistApi,
+  requestTraceApi,
 } from "@/lib/api";
 
 /**
@@ -120,6 +125,61 @@ export function useSiteRecordedResources(id: string | number | undefined) {
   );
 }
 
+export function useSiteStats(
+  id: string | number | undefined,
+  params?: { hours?: number },
+  options?: { refreshInterval?: number }
+) {
+  return useApiQuery(
+    id ? ["site-stats", id, params] : null,
+    () => securityEventApi.getSiteStats(id!, params),
+    options
+  );
+}
+
+export function useSiteTimeline(
+  id: string | number | undefined,
+  params?: { hours?: number },
+  options?: { refreshInterval?: number }
+) {
+  return useApiQuery(
+    id ? ["site-timeline", id, params] : null,
+    () => securityEventApi.getSiteTimeline(id!, params),
+    options
+  );
+}
+
+export function useSiteAccessStats(id: string | number | undefined) {
+  return useApiQuery(
+    id ? ["site-access-stats", id] : null,
+    () => accessLogApi.getSiteStats(id!)
+  );
+}
+
+export function useListenerCreate() {
+  return useMutation(
+    async ({ siteId, data }: { siteId: number | string; data: Partial<any> }) =>
+      siteApi.createListener(siteId, data),
+    { invalidateKeys: ["site-listeners"] }
+  );
+}
+
+export function useListenerUpdate() {
+  return useMutation(
+    async ({ siteId, lid, data }: { siteId: number | string; lid: number | string; data: Partial<any> }) =>
+      siteApi.updateListener(siteId, lid, data),
+    { invalidateKeys: ["site-listeners"] }
+  );
+}
+
+export function useListenerDelete() {
+  return useMutation(
+    async ({ siteId, lid }: { siteId: number | string; lid: number | string }) =>
+      siteApi.deleteListener(siteId, lid),
+    { invalidateKeys: ["site-listeners"] }
+  );
+}
+
 // ============================================================
 // 证书相关 Hook
 // ============================================================
@@ -190,8 +250,19 @@ export function useChainConfig() {
 // IP 列表相关 Hook
 // ============================================================
 
-export function useIPLists() {
-  return useApiQuery(["ip-lists"], () => ipListApi.list());
+/**
+ * 查询 IP 名单条目。
+ * @param params 可选筛选参数；传 site_id 时按站点作用域查询，不传则查全局条目
+ * @param enabled 为 false 时跳过请求（SWR key 置空），用于按需触发站点查询
+ */
+export function useIPLists(
+  params?: { site_id?: number; kind?: string },
+  enabled = true
+) {
+  return useApiQuery(
+    enabled ? ["ip-lists", params] : null,
+    () => ipListApi.list(params)
+  );
 }
 
 // ============================================================
@@ -212,6 +283,14 @@ export function useSecurityEventStats(params?: any) {
   );
 }
 
+export function useDashboardStats(params?: { hours?: number }) {
+  return useApiQuery(
+    ["dashboard-stats", params],
+    () => securityEventApi.getStats(params),
+    { refreshInterval: 30000 }
+  );
+}
+
 export function useSecurityEventTimeline(params?: any) {
   return useApiQuery(
     ["security-event-timeline", params],
@@ -227,6 +306,21 @@ export function useAccessLogs(params?: any) {
   return useApiQuery(
     ["access-logs", params],
     () => accessLogApi.list(params)
+  );
+}
+
+// ============================================================
+// 请求追踪相关 Hook
+// ============================================================
+
+/**
+ * 通过 request_id 拉取全链路
+ * requestId 为空时不请求
+ */
+export function useRequestTrace(requestId: string | null | undefined) {
+  return useApiQuery(
+    requestId ? ["request-trace", requestId] : null,
+    () => requestTraceApi.get(requestId!)
   );
 }
 
@@ -294,7 +388,11 @@ export function useRuntimeConfig() {
 }
 
 export function useUpstreamStatus() {
-  return useApiQuery(["upstream-status"], () => upstreamApi.getStatus());
+  return useApiQuery<import("@/lib/types").UpstreamStatusResponse>(
+    ["upstream-status"],
+    () => upstreamApi.getStatus(),
+    { refreshInterval: 10000 }
+  );
 }
 
 // ============================================================
@@ -450,6 +548,88 @@ export function useIPListDelete() {
   );
 }
 
+/**
+ * 预览预置爬虫白名单条目（仅只读，不写库）。
+ */
+export function usePresetBotWhitelist(enabled = true) {
+  return useApiQuery(
+    enabled ? ["preset-bot-whitelist"] : null,
+    () => presetBotWhitelistApi.preview()
+  );
+}
+
+/**
+ * 触发预置爬虫白名单写入 IP 白名单表。写入后自动失效 IP 列表缓存。
+ */
+export function usePresetBotWhitelistSeed() {
+  return useMutation(
+    async () => presetBotWhitelistApi.seed(),
+    { invalidateKeys: ["ip-lists"] }
+  );
+}
+
+// ============================================================
+// 威胁情报订阅相关 Hook
+// ============================================================
+
+/**
+ * 查询威胁情报订阅源列表。
+ */
+export function useThreatIntelFeeds() {
+  return useApiQuery(["threat-intel-feeds"], () => threatIntelApi.list());
+}
+
+/**
+ * 新建 / 更新订阅源。传入 id 走更新，否则走新建。
+ */
+export function useThreatIntelMutation() {
+  return useMutation(
+    async ({ id, data }: { id?: number; data: Partial<any> }) => {
+      if (id) {
+        return threatIntelApi.update(id, data);
+      }
+      return threatIntelApi.create(data);
+    },
+    { invalidateKeys: ["threat-intel-feeds"] }
+  );
+}
+
+/**
+ * 删除订阅源（连带删除该源的 IP 条目）。
+ */
+export function useThreatIntelDelete() {
+  return useMutation(
+    async (id: number) => threatIntelApi.delete(id),
+    { invalidateKeys: ["threat-intel-feeds"] }
+  );
+}
+
+/**
+ * 手动立即同步订阅源。
+ */
+export function useThreatIntelSync() {
+  return useMutation(
+    async (id: number) => threatIntelApi.sync(id),
+    { invalidateKeys: ["threat-intel-feeds"] }
+  );
+}
+
+/**
+ * 分页查询威胁情报同步历史，30 秒自动刷新。
+ */
+export function useThreatIntelSyncLogs(params?: {
+  page?: number;
+  page_size?: number;
+  feed_id?: number;
+  status?: "success" | "failed";
+}) {
+  return useApiQuery(
+    ["threat-intel-sync-logs", params],
+    () => threatIntelApi.listSyncLogs(params),
+    { refreshInterval: 30000 }
+  );
+}
+
 export function useSettingsUpdate() {
   return useMutation(
     async ({ key, value }: { key: string; value: any }) =>
@@ -509,8 +689,47 @@ export function useApiKeyDelete() {
 
 export function useApiKeyCreate() {
   return useMutation(
-    async (data: any) => apiKeyApi.create(data),
+    async (data: { name: string }) => apiKeyApi.create(data),
     { invalidateKeys: ["api-keys"] }
+  );
+}
+
+// ============================================================
+// 管理员账户相关 Hook
+// ============================================================
+
+export function useAdminUsers() {
+  return useApiQuery(["admin-users"], () => adminUserApi.list());
+}
+
+export function useAdminUserCreate() {
+  return useMutation(
+    async (data: { username: string; password: string; role: string }) =>
+      adminUserApi.create(data),
+    { invalidateKeys: ["admin-users"] }
+  );
+}
+
+export function useAdminUserUpdateRole() {
+  return useMutation(
+    async ({ id, role }: { id: number; role: string }) =>
+      adminUserApi.updateRole(id, role),
+    { invalidateKeys: ["admin-users"] }
+  );
+}
+
+export function useAdminUserUpdatePassword() {
+  return useMutation(
+    async ({ id, password }: { id: number; password: string }) =>
+      adminUserApi.updatePassword(id, password),
+    { invalidateKeys: ["admin-users"] }
+  );
+}
+
+export function useAdminUserDelete() {
+  return useMutation(
+    async (id: number) => adminUserApi.delete(id),
+    { invalidateKeys: ["admin-users"] }
   );
 }
 
@@ -519,6 +738,52 @@ export function useErrorPagesUpdate() {
     async ({ siteId, data }: { siteId: number; data: any }) =>
       siteApi.updateErrorPages(siteId, data),
     { invalidateKeys: ["site-error-pages"] }
+  );
+}
+
+// ============================================================
+// 误报反馈相关 Hook
+// ============================================================
+
+/**
+ * 分页查询误报反馈记录。
+ */
+export function useFalsePositives(params?: { page?: number; page_size?: number; status?: string }) {
+  return useApiQuery(
+    ["false-positives", params],
+    () => falsePositiveApi.list(params)
+  );
+}
+
+/**
+ * 提交一条新的误报反馈。
+ */
+export function useFalsePositiveCreate() {
+  return useMutation(
+    async (data: Partial<import("@/lib/types").FalsePositiveReport>) =>
+      falsePositiveApi.create(data),
+    { invalidateKeys: ["false-positives"] }
+  );
+}
+
+/**
+ * 更新一条反馈的审查状态（confirmed / rejected / pending）。
+ */
+export function useFalsePositiveStatusUpdate() {
+  return useMutation(
+    async ({ id, status }: { id: number; status: string }) =>
+      falsePositiveApi.updateStatus(id, status),
+    { invalidateKeys: ["false-positives"] }
+  );
+}
+
+/**
+ * 删除一条反馈记录（仅 admin 可操作）。
+ */
+export function useFalsePositiveDelete() {
+  return useMutation(
+    async (id: number) => falsePositiveApi.delete(id),
+    { invalidateKeys: ["false-positives"] }
   );
 }
 

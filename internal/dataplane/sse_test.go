@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -306,6 +308,19 @@ func TestForwardSSECancelClosesExplicitUpstreamBodyStreams(t *testing.T) {
 		}
 	}
 
+	t.Run("http1", func(t *testing.T) {
+		upstreamDone := make(chan struct{})
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Proto != "HTTP/1.1" {
+				t.Fatalf("upstream request proto = %q, want %q", r.Proto, "HTTP/1.1")
+			}
+			writeSSEOpenChunkAndWaitForCancel(t, w, r, upstreamDone)
+		}))
+		defer upstream.Close()
+
+		assertCanceled(t, upstream.URL, snapshot.SiteRuntime{}, upstreamDone)
+	})
+
 	t.Run("h2c", func(t *testing.T) {
 		upstreamDone := make(chan struct{})
 		upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +355,56 @@ func TestForwardSSECancelClosesExplicitUpstreamBodyStreams(t *testing.T) {
 		}
 		assertCanceled(t, base, rt, upstreamDone)
 	})
+}
+
+func TestForwardSSEReusesHTTP1ConnectionAfterCompleteStream(t *testing.T) {
+	var mu sync.Mutex
+	newConnections := 0
+
+	payload := "data: complete\n\n"
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = io.WriteString(w, payload)
+	}))
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state != http.StateNew {
+			return
+		}
+		mu.Lock()
+		newConnections++
+		mu.Unlock()
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	forward := func(path string) {
+		ctx := app.NewContext(0)
+		ctx.Request.Header.SetMethod(http.MethodGet)
+		ctx.Request.SetRequestURI(path)
+		ctx.Request.Header.SetHost("client.example")
+		ctx.Request.Header.Set("Accept", "text/event-stream")
+
+		if err := ForwardSSE(context.Background(), ctx, snapshot.SiteRuntime{}, upstream.URL, nil, "client.example"); err != nil {
+			t.Fatalf("ForwardSSE(%q) returned error: %v", path, err)
+		}
+		if got := string(ctx.Response.Body()); got != payload {
+			t.Fatalf("ForwardSSE(%q) body = %q, want %q", path, got, payload)
+		}
+		if ctx.Response.IsBodyStream() {
+			_ = ctx.Response.CloseBodyStream()
+		}
+	}
+
+	forward("/first")
+	forward("/second")
+
+	mu.Lock()
+	gotConnections := newConnections
+	mu.Unlock()
+	if gotConnections != 1 {
+		t.Fatalf("HTTP/1.1 SSE upstream connections = %d, want 1", gotConnections)
+	}
 }
 
 func TestIsSSERequestUsesCaseInsensitiveAcceptToken(t *testing.T) {

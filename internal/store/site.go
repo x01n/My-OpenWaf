@@ -78,6 +78,19 @@ type Site struct {
 
 	CustomErrorPages string `json:"custom_error_pages" gorm:"type:text;default:'{}'"`
 
+	// 动态保护站点级覆盖（nil = 继承全局）
+	DynamicProtectionEnabled *bool  `gorm:"column:dynamic_protection_enabled" json:"dynamic_protection_enabled,omitempty"`
+	DynamicHTMLEnabled       *bool  `gorm:"column:dynamic_html_enabled" json:"dynamic_html_enabled,omitempty"`
+	DynamicJSEnabled         *bool  `gorm:"column:dynamic_js_enabled" json:"dynamic_js_enabled,omitempty"`
+	DynamicJSMode            string `gorm:"column:dynamic_js_mode;size:10" json:"dynamic_js_mode,omitempty"`
+	DynamicJSPaths           string `gorm:"column:dynamic_js_paths;type:text" json:"dynamic_js_paths,omitempty"`
+	DynamicDecryptCacheTTL   *int   `gorm:"column:dynamic_decrypt_cache_ttl" json:"dynamic_decrypt_cache_ttl,omitempty"`
+
+	// 站点级自定义 CC 规则覆盖（nil = 继承全局）
+	// CCUseCustom 为 nil 时继承全局 CC 规则；非 nil 时用站点自身的 CCRules。
+	CCUseCustom *bool  `gorm:"column:cc_use_custom" json:"cc_use_custom,omitempty"`
+	CCRules     string `gorm:"column:cc_rules;type:text" json:"cc_rules,omitempty"`
+
 	// Legacy fields (deprecated, kept for migration compatibility)
 	ListenerID          uint  `gorm:"index" json:"listener_id,omitempty"`
 	ForwardingProfileID *uint `json:"forwarding_profile_id,omitempty"`

@@ -24,6 +24,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/network/standard"
 	shconfig "github.com/hertz-contrib/http2/config"
 	shfactory "github.com/hertz-contrib/http2/factory"
+	goredis "github.com/redis/go-redis/v9"
+	"gorm.io/gorm/clause"
 
 	acmepkg "My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/admin"
@@ -52,8 +54,7 @@ import (
 	"My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/iprep"
 	"My-OpenWaf/internal/waf/ratelimit"
-	goredis "github.com/redis/go-redis/v9"
-	"gorm.io/gorm/clause"
+	"My-OpenWaf/internal/waf/threatintel"
 )
 
 var selfSignedCache = acmepkg.NewSelfSignedCache()
@@ -234,6 +235,7 @@ func Run() {
 	defer queryCache.Close()
 	repos.AccessLog.SetCountCache(queryCache)
 	repos.SecurityEvent.SetCountCache(queryCache)
+	repos.DropEvent.SetCountCache(queryCache)
 
 	// Hot cache: Redis-backed read-through cache for hot data and large query results.
 	hotCache := cache.NewHotCache(rt.Redis, logger.New("hotcache"))
@@ -255,6 +257,7 @@ func Run() {
 	// Also performs database optimization (VACUUM/OPTIMIZE) after each cleanup cycle.
 	archiver := observability.NewArchiver(rt.LogDB, repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
 	archiver.SetSettingsRepo(repos.SystemSettings)
+	archiver.SetSyncLogRepo(repos.ThreatIntelSyncLog)
 	defer archiver.Close()
 
 	responseCache := cache.NewResponseCache(64, 60)
@@ -456,6 +459,8 @@ func Run() {
 		ChainManager:          chainMgr,
 		RecordedResourceRepo:  repos.RecordedResource,
 		Upstreams:             upstreamPool,
+		AccessControlRepo:     repos.AccessControl,
+		JWTSecret:             jwtSecret,
 	}
 
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
@@ -725,6 +730,11 @@ func Run() {
 		return reloadRuntime(true)
 	}
 
+	// 威胁情报 IP 订阅：后台定时从各订阅源拉取 IP/CIDR 列表并全量替换其派生条目。
+	threatIntelMgr := threatintel.NewManager(rt.DB, logger.New("threatintel"), reload)
+	threatIntelMgr.Start()
+	defer threatIntelMgr.Stop()
+
 	replaceConfigSync(rt.Redis, func() error {
 		return reloadRuntime(false)
 	})
@@ -772,6 +782,7 @@ func Run() {
 		Realtime:      realtimeHub,
 		Cache:         redisKV,
 		Upstreams:     upstreamPool,
+		ThreatIntel:   threatIntelMgr,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
@@ -992,7 +1003,7 @@ func loadIPLists(rep *iprep.IPReputation, repo *repository.IPListRepo) {
 	if repo == nil {
 		return
 	}
-	items, err := repo.AllEnabled()
+	items, err := repo.AllEnabledGlobal()
 	if err != nil {
 		return
 	}

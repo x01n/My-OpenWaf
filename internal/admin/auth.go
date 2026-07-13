@@ -76,8 +76,11 @@ func LoginHandler(d *AuthDeps) app.HandlerFunc {
 		}
 		recordLoginAttempt(d.DB, acct.Username, clientIP, userAgent, true)
 
-		// Determine role (default admin for now; extend with DB-based roles later).
-		role := auth.RoleAdmin
+		// Determine role (default admin for backward compat if role column empty).
+		role := acct.Role
+		if role == "" {
+			role = auth.RoleAdmin
+		}
 
 		var accessToken string
 		var accessJTI string

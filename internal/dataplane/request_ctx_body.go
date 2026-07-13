@@ -3,6 +3,7 @@ package dataplane
 import (
 	"bytes"
 	"io"
+	"sync"
 
 	"My-OpenWaf/internal/snapshot"
 
@@ -18,25 +19,33 @@ const (
 
 type requestBodySnapshot struct {
 	prefetched []byte
+	original   io.Reader
+	forward    *prefetchedRequestBodyStream
 	size       int64
 	hasMore    bool
 	readErr    error
 }
 
 type prefetchedRequestBodyStream struct {
+	mu     sync.Mutex
 	reader io.Reader
-	closer io.Closer
+	closed bool
 }
 
 func (s *prefetchedRequestBodyStream) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, io.EOF
+	}
 	return s.reader.Read(p)
 }
 
 func (s *prefetchedRequestBodyStream) Close() error {
-	if s.closer == nil {
-		return nil
-	}
-	return s.closer.Close()
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	return nil
 }
 
 func requestBodySample(c *app.RequestContext) ([]byte, bool, int64) {
@@ -81,6 +90,7 @@ func ensureRequestBodySnapshot(c *app.RequestContext) requestBodySnapshot {
 
 	prefetched, readErr := io.ReadAll(io.LimitReader(stream, requestBodySnapshotReadMaxSize))
 	snap.prefetched = prefetched
+	snap.original = stream
 	snap.hasMore = len(prefetched) > requestInspectionBodyLimit
 	snap.readErr = readErr
 	if contentLength >= 0 {
@@ -93,10 +103,11 @@ func ensureRequestBodySnapshot(c *app.RequestContext) requestBodySnapshot {
 	// Hertz SetBodyStream() resets and closes the current body stream first,
 	// which breaks HTTP/2 requestBody pipes before the proxy can continue
 	// streaming the unread remainder upstream.
-	c.Request.ConstructBodyStream(nil, &prefetchedRequestBodyStream{
+	forward := &prefetchedRequestBodyStream{
 		reader: io.MultiReader(bytes.NewReader(prefetched), stream),
-		closer: requestBodyStreamCloser(stream),
-	})
+	}
+	snap.forward = forward
+	c.Request.ConstructBodyStream(nil, forward)
 	c.Set(requestBodySnapshotContextKey, snap)
 	return snap
 }
@@ -123,7 +134,11 @@ func requestBodySnapshotError(c *app.RequestContext) error {
 	return ensureRequestBodySnapshot(c).readErr
 }
 
-func requestBodyStreamCloser(reader io.Reader) io.Closer {
-	closer, _ := reader.(io.Closer)
-	return closer
+func restoreOriginalRequestBodyStream(c *app.RequestContext) {
+	if snap, ok := requestBodySnapshotFromContext(c); ok && snap.original != nil {
+		if snap.forward != nil {
+			_ = snap.forward.Close()
+		}
+		c.Request.ConstructBodyStream(nil, snap.original)
+	}
 }

@@ -710,6 +710,21 @@ var dangerousExtensions = map[string]bool{
 	".htaccess": true,
 }
 
+func normalizeUploadFilename(filename string) string {
+	for {
+		ext := filepath.Ext(filename)
+		if ext == "" {
+			return filename
+		}
+		base := filename[:len(filename)-len(ext)]
+		trimmed := strings.TrimRight(base, " \t;:")
+		if trimmed == base {
+			return filename
+		}
+		filename = trimmed + ext
+	}
+}
+
 func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 	if filename == "" {
 		return OWASPHit{}, false
@@ -728,12 +743,10 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 			Desc: "path traversal in filename"}, true
 	}
 
-	// Normalize spaces in filename for extension checks.
-	// Evasion: "shell.php .jpg" uses space to defeat filepath.Ext double-extension detection.
-	// Apache on Windows strips trailing spaces, so "shell.php .jpg" serves as PHP.
-	normalized := strings.ReplaceAll(lower, " ", "")
+	// Normalize spaces and suffix separators used to disguise executable extensions.
+	normalized := normalizeUploadFilename(lower)
 
-	// Double extension e.g. shell.php.jpg or shell.php .jpg
+	// Double extension e.g. shell.php.jpg, shell.php .jpg, or shell.php;.jpg.
 	ext := filepath.Ext(normalized)
 	if ext != "" {
 		withoutExt := normalized[:len(normalized)-len(ext)]
@@ -749,7 +762,7 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 			Desc: "dangerous file extension: " + ext}, true
 	}
 
-	// Also check the original extension without space normalization
+	// Also check the original extension without normalization.
 	origExt := filepath.Ext(lower)
 	if origExt != ext && dangerousExtensions[origExt] {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:003", Score: 5,

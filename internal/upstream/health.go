@@ -343,7 +343,7 @@ func pickByProtocolPreferenceWithPool(urls []string, pool *Pool, start int) (str
 		}
 		return first[tier], true
 	}
-	return "", false
+	return pickByProtocolPreferenceWithoutPool(urls, start)
 }
 
 func protocolPreference(raw string) int {
