@@ -13,6 +13,7 @@ import {
   CardFooter,
   CardHeader,
 } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,6 +22,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { SiteHoverPreview } from "@/components/site-hover-preview";
+import { EmptyState } from "@/components/empty-state";
 import { toast } from "sonner";
 import {
   IconPlus,
@@ -206,13 +209,15 @@ export default function SitesPage() {
   return (
     <div className="space-y-4">
       {/* 顶部操作栏 */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2">
-          <IconShield className="h-6 w-6 text-primary" />
-          <h1 className="text-xl font-semibold">{t("sites.title")}</h1>
-          <Badge variant="secondary" className="h-5 px-2 text-xs">
-            {t("common.total", { count: total })}
-          </Badge>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight">{t("sites.title")}</h1>
+            <Badge variant="secondary" className="h-5 px-2 text-xs">
+              {t("common.total", { count: total })}
+            </Badge>
+          </div>
+          <p className="text-sm text-muted-foreground mt-1">{t("sites.description")}</p>
         </div>
         <div className="flex items-center gap-2">
           <Input
@@ -222,7 +227,7 @@ export default function SitesPage() {
             onChange={(e) => setSearch(e.target.value)}
           />
           <Button
-            className="h-9 bg-primary hover:bg-primary/90"
+            className="h-9"
             onClick={() => {
               setEditingSite(null);
               setShowForm(true);
@@ -236,34 +241,31 @@ export default function SitesPage() {
 
       {/* 站点卡片网格 */}
       {isLoading ? (
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid gap-5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
-            <Card key={i} className="animate-pulse">
-              <CardContent className="h-56" />
-            </Card>
+            <Skeleton key={i} className="h-56 rounded-xl" />
           ))}
         </div>
       ) : items.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16 text-center">
-          <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
-            <IconWorld className="h-8 w-8 text-primary/60" />
-          </div>
-          <p className="mb-4 text-sm text-muted-foreground">
-            {t("sites.emptyHint", "还没有防护应用，立即添加")}
-          </p>
-          <Button
-            className="bg-primary hover:bg-primary/90"
-            onClick={() => {
-              setEditingSite(null);
-              setShowForm(true);
-            }}
-          >
-            <IconPlus className="mr-1 h-4 w-4" />
-            {t("sites.add")}
-          </Button>
-        </div>
+        <EmptyState
+          icon={IconWorld}
+          title={t("sites.empty")}
+          description={t("sites.emptyHint")}
+          action={
+            <Button
+              onClick={() => {
+                setEditingSite(null);
+                setShowForm(true);
+              }}
+            >
+              <IconPlus className="mr-1.5 h-4 w-4" />
+              {t("sites.add")}
+            </Button>
+          }
+          className="py-20"
+        />
       ) : (
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid gap-5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {items.map((site) => {
             const mode = resolveSiteMode(site);
             const listeners = extractListeners(site);
@@ -273,42 +275,44 @@ export default function SitesPage() {
             return (
               <Card
                 key={site.id}
-                className="group relative transition-all hover:border-primary/40 hover:shadow-lg"
+                className="group relative transition-all duration-200 hover:border-primary/40 hover:shadow-xl hover:-translate-y-0.5 shadow-sm"
               >
                 {/* 头部：状态圆点 + 域名 + 更多操作 */}
-                <CardHeader className="pb-2">
+                <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-2">
-                    <Link
-                      href={`/sites/detail/?id=${site.id}`}
-                      className="group/link flex min-w-0 flex-1 items-center gap-2"
-                    >
-                      {/* 状态圆点：启用绿色 + 脉动，禁用灰色 */}
-                      <span
-                        className="relative flex h-2.5 w-2.5 shrink-0"
-                        aria-label={
-                          site.enabled
-                            ? t("common.running")
-                            : t("common.stopped")
-                        }
+                    <SiteHoverPreview site={site} className="min-w-0 flex-1">
+                      <Link
+                        href={`/sites/detail/?id=${site.id}`}
+                        className="group/link flex min-w-0 flex-1 items-center gap-2.5"
                       >
-                        {site.enabled && (
-                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                        )}
+                        {/* 状态圆点：启用绿色 + 脉动，禁用灰色 */}
                         <span
-                          className={`relative inline-flex h-2.5 w-2.5 rounded-full ${
+                          className="relative flex h-2.5 w-2.5 shrink-0"
+                          aria-label={
                             site.enabled
-                              ? "bg-emerald-500"
-                              : "bg-muted-foreground/50"
-                          }`}
-                        />
-                      </span>
-                      <h3
-                        className="truncate text-base font-semibold group-hover/link:text-primary"
-                        title={site.host}
-                      >
-                        {site.host}
-                      </h3>
-                    </Link>
+                              ? t("common.running")
+                              : t("common.stopped")
+                          }
+                        >
+                          {site.enabled && (
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                          )}
+                          <span
+                            className={`relative inline-flex h-2.5 w-2.5 rounded-full ${
+                              site.enabled
+                                ? "bg-emerald-500"
+                                : "bg-muted-foreground/50"
+                            }`}
+                          />
+                        </span>
+                        <h3
+                          className="truncate text-[15px] font-bold tracking-tight group-hover/link:text-primary transition-colors"
+                          title={site.host}
+                        >
+                          {site.host}
+                        </h3>
+                      </Link>
+                    </SiteHoverPreview>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button

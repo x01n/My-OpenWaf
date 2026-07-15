@@ -36,6 +36,15 @@ function getPageTitle(pathname: string): string {
     "/security-events": "nav.securityEvents",
     "/access-logs": "nav.accessLogs",
     "/drop-events": "nav.dropEvents",
+    "/false-positives": "nav.falsePositives",
+    "/certificates": "nav.certificates",
+    "/ip-lists": "nav.ipLists",
+    "/threat-intel": "nav.threatIntel",
+    "/upstream-status": "nav.upstreamStatus",
+    "/api-keys": "nav.apiKeys",
+    "/admin-users": "nav.adminUsers",
+    "/backup": "nav.backup",
+    "/request-trace": "nav.requestTrace",
   };
   for (const [path, key] of Object.entries(titles)) {
     if (pathname.startsWith(path)) return key;

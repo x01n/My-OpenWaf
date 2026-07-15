@@ -32,6 +32,7 @@ import { cn } from "@/lib/utils";
 import { useUpstreamStatus } from "@/hooks/use-api";
 import { formatRelative } from "@/lib/time-format";
 import type { UpstreamStatus } from "@/lib/types";
+import { EmptyState } from "@/components/empty-state";
 
 function latencyClass(ms: number): string {
   if (ms <= 0) return "text-muted-foreground";
@@ -285,13 +286,11 @@ export default function UpstreamStatusPage() {
           )}
 
           {!isLoading && items.length === 0 && !error && (
-            <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-10 text-center">
-              <IconServer className="h-8 w-8 text-muted-foreground" />
-              <p className="text-sm font-medium">{t("upstreamStatus.empty")}</p>
-              <p className="text-xs text-muted-foreground">
-                {t("upstreamStatus.emptyHint")}
-              </p>
-            </div>
+            <EmptyState
+              icon={IconServer}
+              title={t("upstreamStatus.empty")}
+              description={t("upstreamStatus.emptyHint")}
+            />
           )}
 
           {items.length > 0 && (

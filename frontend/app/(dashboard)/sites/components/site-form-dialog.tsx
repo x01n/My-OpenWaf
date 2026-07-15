@@ -296,19 +296,19 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
             >
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="proxy" id="proxy" />
-                <Label htmlFor="proxy" className="cursor-pointer font-normal">
+                <Label htmlFor="proxy" className="cursor-pointer">
                   {t("sites.form.accessProxy")}
                 </Label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="static" id="static" />
-                <Label htmlFor="static" className="cursor-pointer font-normal">
+                <Label htmlFor="static" className="cursor-pointer">
                   {t("sites.form.accessStatic")}
                 </Label>
               </div>
               <div className="flex items-center gap-2">
                 <RadioGroupItem value="redirect" id="redirect" />
-                <Label htmlFor="redirect" className="cursor-pointer font-normal">
+                <Label htmlFor="redirect" className="cursor-pointer">
                   {t("sites.form.accessRedirect")}
                 </Label>
               </div>
@@ -364,7 +364,6 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
             </Button>
             <Button
               type="submit"
-              className="bg-teal-500 hover:bg-teal-600"
             >
               {t("common.save")}
             </Button>

@@ -25,7 +25,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { DataTable } from "@/components/data-table";
 import Link from "next/link";
-import { IconFilter, IconFileText, IconRoute } from "@tabler/icons-react";
+import { IconFilter, IconRoute } from "@tabler/icons-react";
 import { useAccessLogs } from "@/hooks/use-api";
 import type { AccessLog } from "@/lib/types";
 
@@ -90,8 +90,7 @@ export default function AccessLogsPage() {
           <Button
             asChild
             variant="ghost"
-            size="icon"
-            className="h-8 w-8"
+            size="icon-sm"
             title={t("requestTrace.trackThisRequest")}
           >
             <Link
@@ -108,12 +107,16 @@ export default function AccessLogsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <IconFileText className="h-6 w-6 text-primary" />
-        <h1 className="text-xl font-semibold">{t("accessLogs.title")}</h1>
-        <Badge variant="secondary" className="h-5 px-2 text-xs">
-          {t("accessLogs.total", { count: total })}
-        </Badge>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t("accessLogs.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("accessLogs.description")}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary" className="h-5 px-2 text-xs">
+            {t("accessLogs.total", { count: total })}
+          </Badge>
+        </div>
       </div>
 
       <Card>

@@ -26,7 +26,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username || !password) {
-      toast.error("请输入用户名和密码");
+      toast.error(t("login.emptyCredentials", { defaultValue: "请输入用户名和密码" }));
       return;
     }
     setLoading(true);
@@ -35,7 +35,6 @@ export default function LoginPage() {
       toast.success(t("login.success"));
       router.push("/dashboard");
     } catch (err: any) { // eslint-disable-line @typescript-eslint/no-explicit-any
-      toast.error(err.message || t("login.failed"));
       toast.error(err.message || t("login.failed"));
     } finally {
       setLoading(false);

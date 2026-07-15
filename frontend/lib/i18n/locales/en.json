@@ -85,7 +85,18 @@
     "dark": "Dark",
     "system": "System",
     "copied": "Copied",
-    "copy": "Copy"
+    "copy": "Copy",
+    "seconds": "Seconds",
+    "balanced": "Balanced",
+    "copyFailed": "Copy Failed",
+    "selectAll": "Select all",
+    "clearFilter": "Clear Filter",
+    "clearFilters": "Clear All Filters",
+    "confirmTitle": "Confirm Action",
+    "confirmDescription": "Confirm this action?",
+    "openMenu": "Open Menu",
+    "processing": "Processing...",
+    "retry": "Retry"
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -123,10 +134,12 @@
     "rememberMe": "Remember me",
     "forgotPassword": "Forgot password?",
     "noAccount": "No account?",
-    "register": "Register now"
+    "register": "Register now",
+    "emptyCredentials": "Please enter username and password"
   },
   "dashboard": {
     "title": "Dashboard",
+    "description": "Real-time security posture overview",
     "requests": "Requests",
     "requestsDesc": "Total requests",
     "pv": "Page Views (PV)",
@@ -181,7 +194,12 @@
     "timeRange24h": "Last 24 Hours",
     "timeRange7d": "Last 7 Days",
     "attacks": "Attacks",
-    "rank": "Rank"
+    "rank": "Rank",
+    "tabTraffic": "Traffic Analysis",
+    "tabSecurity": "Security Posture",
+    "tabReport": "Protection Report",
+    "tabFullscreen": "Live Dashboard",
+    "allSites": "All Sites"
   },
   "securityDashboard": {
     "entry": "Live Dashboard",
@@ -201,6 +219,7 @@
   },
   "sites": {
     "title": "Sites",
+    "description": "Manage reverse-proxy sites and protection policies",
     "total": "Total Sites",
     "running": "Running",
     "stopped": "Stopped",
@@ -226,6 +245,17 @@
     "dynamicProtection": "Dynamic",
     "accessControl": "Access",
     "upstreamMoreCount": "{{count}} total",
+    "hover": {
+      "recentAttacks": "Last 24h Events",
+      "total": "Total",
+      "intercepts": "Blocked",
+      "observes": "Observed",
+      "upstreamStatus": "Upstream Status",
+      "noUpstream": "No upstream configured",
+      "unknown": "Not probed",
+      "moreUpstreams": "{{count}} more not shown",
+      "updatedAt": "Updated"
+    },
     "detail": {
       "title": "Site Detail",
       "basicInfo": "Basic Info",
@@ -381,13 +411,25 @@
       "skipVerify": "Skip Certificate Verification",
       "skipVerifyDesc": "Do not verify upstream TLS certificate (dev only)",
       "tlsServerName": "TLS SNI Name",
-      "tlsServerNamePlaceholder": "Leave empty to use upstream address"
+      "tlsServerNamePlaceholder": "Leave empty to use upstream address",
+      "accessMethod": "Access Method",
+      "accessProxy": "Reverse Proxy",
+      "accessRedirect": "Redirect",
+      "accessStatic": "Static Content",
+      "addPort": "Add Port",
+      "addUpstream": "Add Upstream",
+      "certNone": "No Certificate",
+      "listeners": "Listeners",
+      "name": "Site Name",
+      "upstreamServers": "Upstream Servers"
     },
     "deleteTitle": "Delete Site",
     "deleteConfirm": "Are you sure you want to delete this site? This action cannot be undone.",
     "deleteSuccess": "Site deleted",
     "startSuccess": "Site started",
-    "stopSuccess": "Site stopped"
+    "stopSuccess": "Site stopped",
+    "createSuccess": "Site created successfully",
+    "updateSuccess": "Site updated successfully"
   },
   "attacks": {
     "title": "Attack Protection",
@@ -526,10 +568,19 @@
     "captchaMinutesLabel": "Captcha Time (minutes)",
     "enableRule": "Enable Rule",
     "toggleSuccess": "Rule {{action}}",
-    "toggleFailed": "Operation failed"
+    "toggleFailed": "Operation failed",
+    "matchConditions": "Match Conditions",
+    "allow": "Allow",
+    "block": "Block",
+    "compositeCondition": "Composite Condition",
+    "deleteConfirmDescription": "The rule will take effect immediately after deletion. Continue?",
+    "description": "Manage custom allow/block rules by IP, path, headers, and more",
+    "pattern": "Pattern",
+    "priority": "Priority"
   },
   "ccProtection": {
     "title": "CC Protection",
+    "description": "Configure request and error rate limits to defend against CC attacks, and add custom rules for fine-grained interception.",
     "rateLimit": "Rate Limit",
     "requestRateLimit": "Request Rate Limit",
     "enableRequestRateLimit": "Enable Request Rate Limit",
@@ -585,6 +636,7 @@
   },
   "captcha": {
     "title": "Captcha",
+    "description": "Enable human verification, dynamic protection, and anti-replay to defend against bots and replay attacks.",
     "botProtection": "BOT Protection",
     "saveSuccess": "Saved successfully",
     "saveFailed": "Save failed",
@@ -629,13 +681,28 @@
   },
   "authConfig": {
     "title": "Auth Config",
+    "description": "Manage login auth, basic authentication, and session timeout",
     "saveSuccess": "Auth config saved",
     "saveFailed": "Save failed",
     "usernamePlaceholder": "Enter username",
-    "passwordPlaceholder": "Enter password"
+    "passwordPlaceholder": "Enter password",
+    "basicAuth": "Basic Authentication",
+    "basicAuthDesc": "When enabled, all requests must pass basic authentication first",
+    "enableBasicAuth": "Enable Basic Auth",
+    "hour1": "1 hour",
+    "hours2": "2 hours",
+    "hours24": "24 hours",
+    "minutes5": "5 minutes",
+    "minutes15": "15 minutes",
+    "minutes30": "30 minutes",
+    "saveConfig": "Save Configuration",
+    "sessionManagement": "Session Management",
+    "sessionTimeout": "Session Timeout",
+    "sessionTimeoutDesc": "Automatically log out after this period of inactivity"
   },
   "settings": {
     "title": "Settings",
+    "description": "Configure network listeners, TLS compliance, and log retention",
     "network": "Network Config",
     "networkSaveSuccess": "Network config saved",
     "networkSaveFailed": "Save failed",
@@ -676,10 +743,28 @@
     "noCleanup": "No Cleanup",
     "trustedIpsPlaceholder": "e.g. 10.0.0.0/8, 172.16.0.0/12",
     "tlsCipherPlaceholder": "Select or enter cipher suites",
-    "helpDev": "Help documentation is under development"
+    "helpDev": "Help documentation is under development",
+    "advanced": "Advanced Settings",
+    "cipherSuites": "Cipher Suites",
+    "customHeader": "Custom Header",
+    "dataCleanup": "Data Cleanup",
+    "days": "Days",
+    "directConnect": "Direct Connect",
+    "helpDocs": "Help Documentation",
+    "ipMode": "IP Identification Mode",
+    "logRetention": "Log Retention Period",
+    "logRetentionDesc": "Logs older than this period will be automatically purged",
+    "sourceIp": "Source IP",
+    "sslCompliance": "SSL Compliance",
+    "sslVersion": "SSL Version",
+    "tlsSaveFailed": "Failed to save TLS configuration",
+    "tlsSaveSuccess": "TLS configuration saved",
+    "trustedCidr": "Trusted CIDR",
+    "trustedCidrDesc": "Only forwarding headers from these CIDRs are trusted"
   },
   "securityEvents": {
     "title": "Security Events",
+    "description": "All security interception and observation records",
     "action": {
       "block": "Block",
       "intercept": "Intercept",
@@ -698,7 +783,44 @@
     "ipPlaceholder": "Enter IP address",
     "domainPlaceholder": "Enter domain",
     "allActions": "All Actions",
-    "empty": "No security events"
+    "timeRange": "Time Range",
+    "ipHover": {
+      "recentTitle": "Last 5 Events",
+      "totalCount": "{{count}} total",
+      "noEvent": "No history for this IP"
+    },
+    "empty": "No security events",
+    "batch": {
+      "addToBlocklist": "Add to Blocklist",
+      "blocklistPartial": "{{success}} succeeded, {{failed}} failed",
+      "blocklistSuccess": "Added {{success}} IPs to blocklist",
+      "selected": "{{count}} selected",
+      "blocklistNote": "Bulk added to blocklist - security events"
+    },
+    "export": {
+      "csv": "Export CSV",
+      "csvSuccess": "CSV exported successfully",
+      "json": "Export JSON",
+      "jsonSuccess": "JSON exported successfully",
+      "title": "Export"
+    },
+    "csv": {
+      "time": "Time",
+      "clientIp": "Client IP",
+      "path": "Path",
+      "method": "Method",
+      "action": "Action",
+      "category": "Category",
+      "rule": "Rule",
+      "statusCode": "Status Code",
+      "matchDesc": "Match Description"
+    },
+    "categoryPlaceholder": "Select category",
+    "endTime": "End Time",
+    "eventList": "Event List",
+    "phase": "Phase",
+    "startTime": "Start Time",
+    "total": "Total {{count}} events"
   },
   "securityEventDetail": {
     "dialogTitle": "Security Event Details",
@@ -734,6 +856,7 @@
   },
   "accessLogs": {
     "title": "Access Logs",
+    "description": "All incoming request records with WAF verdicts",
     "time": "Time",
     "statusCode": "Status Code",
     "ip": "IP",
@@ -742,10 +865,13 @@
     "ipPlaceholder": "Enter IP",
     "domainPlaceholder": "Enter domain",
     "all": "All",
-    "empty": "No access logs"
+    "empty": "No access logs",
+    "listTitle": "Access Log List",
+    "total": "Total {{count}} access logs"
   },
   "dropEvents": {
     "title": "Drop Events",
+    "description": "Connection-level rejections from TCP drop policy",
     "time": "Time",
     "source": "Source",
     "ip": "IP",
@@ -753,7 +879,9 @@
     "sourcePlaceholder": "Enter source",
     "ipPlaceholder": "Enter IP",
     "domainPlaceholder": "Enter domain",
-    "empty": "No drop events"
+    "empty": "No drop events",
+    "list": "Drop Event List",
+    "total": "Total {{count}} drop events"
   },
   "certificates": {
     "title": "Certificates",
@@ -1090,5 +1218,15 @@
     "refreshInterval": "Auto-refresh: 10s",
     "loading": "Loading...",
     "loadFailed": "Failed to load"
+  },
+  "timeRange": {
+    "last1h": "Last 1h",
+    "last6h": "Last 6h",
+    "last24h": "Last 24h",
+    "last7d": "Last 7d",
+    "allTime": "All time",
+    "apply": "Apply",
+    "anyStart": "Any start",
+    "anyEnd": "Now"
   }
 }

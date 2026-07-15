@@ -21,7 +21,7 @@ import (
 // writes everything in one transaction — eliminating SQLite lock contention.
 type UnifiedWriter struct {
 	db    *gorm.DB
-	redis *goredis.Client
+	redis atomic.Pointer[goredis.Client]
 	log   *slog.Logger
 
 	eventCh    chan store.SecurityEvent
@@ -91,7 +91,7 @@ func NewUnifiedWriter(db *gorm.DB, log *slog.Logger) *UnifiedWriter {
 
 // SetRedis enables Redis dual-write for real-time consumption.
 func (w *UnifiedWriter) SetRedis(client *goredis.Client) {
-	w.redis = client
+	w.redis.Store(client)
 }
 
 // Stats returns queue, drop and flush counters for runtime diagnostics.
@@ -242,8 +242,8 @@ func (w *UnifiedWriter) flushBuffered(
 	}()
 
 	// Push to Redis first (low-latency path for real-time consumers).
-	if w.redis != nil {
-		if err := w.pushAllToRedis(events, accessLogs, dropEvents, botScores); err != nil {
+	if rc := w.redis.Load(); rc != nil {
+		if err := w.pushToRedis(rc, events, accessLogs, dropEvents, botScores); err != nil {
 			failed = true
 		}
 	}
@@ -293,7 +293,8 @@ func (w *UnifiedWriter) recordFlushStats(records int, duration time.Duration, fa
 	}
 }
 
-func (w *UnifiedWriter) pushAllToRedis(
+func (w *UnifiedWriter) pushToRedis(
+	rc *goredis.Client,
 	events []store.SecurityEvent,
 	accessLogs []store.AccessLog,
 	dropEvents []store.DropEvent,
@@ -302,7 +303,7 @@ func (w *UnifiedWriter) pushAllToRedis(
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pipe := w.redis.Pipeline()
+	pipe := rc.Pipeline()
 	ttl := 7 * 24 * time.Hour
 
 	pushJSON := func(key string, items []any, trim int64) {

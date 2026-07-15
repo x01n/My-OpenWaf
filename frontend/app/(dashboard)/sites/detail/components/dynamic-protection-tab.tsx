@@ -187,7 +187,7 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
           {/* 站点动态防护总开关 */}
           <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
             <div className="space-y-0.5">
-              <Label className="text-sm font-medium">{t("sites.detail.dynOverride.master")}</Label>
+              <Label>{t("sites.detail.dynOverride.master")}</Label>
               <p className="text-xs text-muted-foreground">
                 {t("sites.detail.dynOverride.masterDesc")}
               </p>
@@ -226,7 +226,7 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
             {/* HTML 全站加密覆盖 */}
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-0.5">
-                <Label className="text-sm font-normal">{t("sites.detail.dynOverride.html")}</Label>
+                <Label className="font-normal">{t("sites.detail.dynOverride.html")}</Label>
                 <p className="text-xs text-muted-foreground">
                   {t("sites.detail.dynOverride.htmlDesc")}
                 </p>
@@ -244,7 +244,7 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
             {/* JS 加密保护覆盖 */}
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-0.5">
-                <Label className="text-sm font-normal">{t("sites.detail.dynOverride.js")}</Label>
+                <Label className="font-normal">{t("sites.detail.dynOverride.js")}</Label>
                 <p className="text-xs text-muted-foreground">
                   {t("sites.detail.dynOverride.jsDesc")}
                 </p>

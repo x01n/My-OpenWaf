@@ -173,8 +173,7 @@ export function ListenersTab({ site }: ListenersTabProps) {
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"
-            size="icon"
-            className="h-7 w-7"
+            size="icon-sm"
             onClick={() => {
               setEditingListener(row);
               setShowDlg(true);
@@ -184,8 +183,8 @@ export function ListenersTab({ site }: ListenersTabProps) {
           </Button>
           <Button
             variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-destructive"
+            size="icon-sm"
+            className="text-destructive"
             onClick={() => handleDelete(row.id)}
           >
             <IconTrash className="h-3.5 w-3.5" />

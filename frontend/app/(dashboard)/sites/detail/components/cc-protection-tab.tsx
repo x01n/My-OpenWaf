@@ -140,7 +140,7 @@ export function CCProtectionTab({ site }: CCProtectionTabProps) {
             {options.map((opt) => (
               <div key={opt.value} className="flex items-center gap-2">
                 <RadioGroupItem value={opt.value} id={`cc-mode-${opt.value}`} />
-                <Label htmlFor={`cc-mode-${opt.value}`} className="cursor-pointer text-sm font-normal">
+                <Label htmlFor={`cc-mode-${opt.value}`} className="cursor-pointer font-normal">
                   {t(opt.labelKey)}
                 </Label>
               </div>

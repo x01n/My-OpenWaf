@@ -395,6 +395,7 @@ func Run() {
 
 	// ─── Auth subsystems ───
 	tokenMgr := auth.NewTokenManager(jwtSecret, rt.DB)
+	defer tokenMgr.Close()
 	bruteForce := auth.NewBruteForceDetector(prot.LoginMaxAttempts, time.Duration(prot.LoginLockoutMinutes)*time.Minute)
 	sessionMgr := auth.NewSessionManager(rt.DB)
 

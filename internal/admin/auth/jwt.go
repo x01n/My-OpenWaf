@@ -47,6 +47,8 @@ type TokenManager struct {
 
 	// In-memory blacklist (jti -> expiry)
 	blacklist sync.Map
+
+	stopCh chan struct{} // signals cleanupLoop to exit
 }
 
 // NewTokenManager creates a TokenManager with the given primary secret.
@@ -54,6 +56,7 @@ func NewTokenManager(primarySecret []byte, db *gorm.DB) *TokenManager {
 	tm := &TokenManager{
 		primary: primarySecret,
 		db:      db,
+		stopCh:  make(chan struct{}),
 	}
 	// Load persisted blacklist into memory.
 	tm.loadBlacklistFromDB()
@@ -229,19 +232,29 @@ func (tm *TokenManager) loadBlacklistFromDB() {
 func (tm *TokenManager) cleanupLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		tm.blacklist.Range(func(key, value any) bool {
-			if exp, ok := value.(time.Time); ok && now.After(exp) {
-				tm.blacklist.Delete(key)
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			tm.blacklist.Range(func(key, value any) bool {
+				if exp, ok := value.(time.Time); ok && now.After(exp) {
+					tm.blacklist.Delete(key)
+				}
+				return true
+			})
+			// Cleanup expired entries from DB.
+			if tm.db != nil {
+				tm.db.Where("expires_at < ?", now).Delete(&store.TokenBlacklist{})
 			}
-			return true
-		})
-		// Cleanup expired entries from DB.
-		if tm.db != nil {
-			tm.db.Where("expires_at < ?", now).Delete(&store.TokenBlacklist{})
+		case <-tm.stopCh:
+			return
 		}
 	}
+}
+
+// Close stops the background cleanup goroutine.
+func (tm *TokenManager) Close() {
+	close(tm.stopCh)
 }
 
 // GenerateRefreshToken returns a new JTI, the raw token string, and its SHA-256 hash.

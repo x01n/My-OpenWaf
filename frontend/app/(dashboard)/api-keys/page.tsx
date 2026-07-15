@@ -131,7 +131,7 @@ export default function ApiKeysPage() {
       render: (row: AdminAPIKey) => (
         <Button
           variant="ghost"
-          size="icon"
+          size="icon-sm"
           onClick={() => setDeleteId(row.id)}
           className="text-destructive hover:text-destructive"
         >
@@ -142,16 +142,18 @@ export default function ApiKeysPage() {
   ];
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold">{t("apiKeys.title")}</h1>
-          <p className="text-sm text-muted-foreground">{t("apiKeys.description")}</p>
+          <h1 className="text-2xl font-bold tracking-tight">{t("apiKeys.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("apiKeys.description")}</p>
         </div>
-        <Button onClick={() => setCreateOpen(true)}>
-          <IconPlus className="mr-2 h-4 w-4" />
-          {t("apiKeys.create")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setCreateOpen(true)}>
+            <IconPlus className="mr-2 h-4 w-4" />
+            {t("apiKeys.create")}
+          </Button>
+        </div>
       </div>
 
       <DataTable
@@ -171,8 +173,9 @@ export default function ApiKeysPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label>{t("apiKeys.name")}</Label>
+              <Label htmlFor="apikey-name">{t("apiKeys.name")}</Label>
               <Input
+                id="apikey-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder={t("apiKeys.namePlaceholder")}
@@ -205,7 +208,7 @@ export default function ApiKeysPage() {
               <code className="flex-1 rounded border bg-muted p-3 text-sm font-mono break-all">
                 {createdToken}
               </code>
-              <Button variant="outline" size="icon" onClick={handleCopy}>
+              <Button variant="outline" size="icon-sm" onClick={handleCopy}>
                 <IconCopy className="h-4 w-4" />
               </Button>
             </div>

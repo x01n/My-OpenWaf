@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import {
   IconUserCheck,
@@ -203,9 +204,9 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
             </DialogTitle>
           </DialogHeader>
           <div className="px-6 py-8 space-y-4">
-            <div className="h-32 animate-pulse rounded-lg bg-muted" />
-            <div className="h-32 animate-pulse rounded-lg bg-muted" />
-            <div className="h-16 animate-pulse rounded-lg bg-muted" />
+            <Skeleton className="h-32 rounded-lg" />
+            <Skeleton className="h-32 rounded-lg" />
+            <Skeleton className="h-16 rounded-lg" />
           </div>
         </DialogContent>
       </Dialog>
@@ -280,7 +281,7 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                                 <Label
                                   htmlFor={`dlg-${option.key}`}
                                   className={cn(
-                                    "cursor-pointer text-sm font-normal",
+                                    "cursor-pointer font-normal",
                                     !dynamicProtectionEnabled && "cursor-not-allowed"
                                   )}
                                 >
@@ -441,7 +442,6 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
           <Button
             onClick={handleSave}
             disabled={!hasChanges || updateBot.loading}
-            className="bg-primary hover:bg-primary/90"
           >
             {updateBot.loading ? (
               <>

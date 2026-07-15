@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useCertificates, useCertificateMutation, useCertificateDelete } from "@/hooks/use-api";
 import { DataTable } from "@/components/data-table";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -177,19 +178,21 @@ export default function CertificatesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">
             {t("certificates.title")}
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground mt-1">
             {t("certificates.description")}
           </p>
         </div>
-        <Button onClick={() => setDialogOpen(true)}>
-          <IconPlus className="h-4 w-4" />
-          {t("certificates.add")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setDialogOpen(true)}>
+            <IconPlus className="h-4 w-4" />
+            {t("certificates.add")}
+          </Button>
+        </div>
       </div>
 
       <DataTable
@@ -198,6 +201,20 @@ export default function CertificatesPage() {
         loading={isLoading}
         rowKey={(row) => row.id}
         emptyText={t("certificates.empty")}
+        emptyContent={
+          <EmptyState
+            icon={IconCertificate}
+            title={t("certificates.empty")}
+            description={t("certificates.emptyHint", "上传 TLS 证书以启用站点 HTTPS 加密，支持手动上传和 ACME 自动签发")}
+            action={
+              <Button onClick={() => setDialogOpen(true)}>
+                <IconPlus className="mr-1.5 h-4 w-4" />
+                {t("certificates.add")}
+              </Button>
+            }
+            className="py-20"
+          />
+        }
       />
 
       <Dialog open={dialogOpen} onOpenChange={(open) => {
@@ -210,22 +227,23 @@ export default function CertificatesPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label>{t("certificates.name")}</Label>
+              <Label htmlFor="cert-name">{t("certificates.name")}</Label>
               <Input
+                id="cert-name"
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                 placeholder={t("certificates.namePlaceholder")}
               />
             </div>
             <div className="space-y-2">
-              <Label>{t("certificates.source")}</Label>
+              <Label htmlFor="cert-source">{t("certificates.source")}</Label>
               <Select
                 value={form.source}
                 onValueChange={(v) =>
                   setForm((f) => ({ ...f, source: v as "manual" | "acme" | "self_signed" }))
                 }
               >
-                <SelectTrigger>
+                <SelectTrigger id="cert-source">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -236,8 +254,9 @@ export default function CertificatesPage() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label>{t("certificates.domain")}</Label>
+              <Label htmlFor="cert-domain">{t("certificates.domain")}</Label>
               <Input
+                id="cert-domain"
                 value={form.domain}
                 onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
                 placeholder={t("certificates.domainPlaceholder")}
@@ -246,8 +265,9 @@ export default function CertificatesPage() {
             {form.source === "manual" && (
               <>
                 <div className="space-y-2">
-                  <Label>{t("certificates.certPem")}</Label>
+                  <Label htmlFor="cert-pem">{t("certificates.certPem")}</Label>
                   <Textarea
+                    id="cert-pem"
                     value={form.cert_pem}
                     onChange={(e) => setForm((f) => ({ ...f, cert_pem: e.target.value }))}
                     placeholder={t("certificates.certPemPlaceholder")}
@@ -256,8 +276,9 @@ export default function CertificatesPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>{t("certificates.keyPem")}</Label>
+                  <Label htmlFor="cert-key">{t("certificates.keyPem")}</Label>
                   <Textarea
+                    id="cert-key"
                     value={form.key_pem}
                     onChange={(e) => setForm((f) => ({ ...f, key_pem: e.target.value }))}
                     placeholder={t("certificates.keyPemPlaceholder")}
@@ -269,8 +290,9 @@ export default function CertificatesPage() {
             )}
             {form.source === "acme" && (
               <div className="space-y-2">
-                <Label>{t("certificates.acmeEmail")}</Label>
+                <Label htmlFor="cert-acme-email">{t("certificates.acmeEmail")}</Label>
                 <Input
+                  id="cert-acme-email"
                   value={form.acme_email}
                   onChange={(e) => setForm((f) => ({ ...f, acme_email: e.target.value }))}
                   placeholder={t("certificates.acmeEmailPlaceholder")}

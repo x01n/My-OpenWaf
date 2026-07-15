@@ -643,9 +643,8 @@ export function RuleFormDialog({
                     {conditionGroups.length > 1 && (
                       <Button
                         type="button"
-                        variant="outline"
+                        variant="destructive"
                         size="sm"
-                        className="text-destructive border-destructive/30 hover:bg-destructive/5"
                         onClick={() => removeGroup(groupIdx)}
                       >
                         <IconTrash className="mr-1 h-3.5 w-3.5" />

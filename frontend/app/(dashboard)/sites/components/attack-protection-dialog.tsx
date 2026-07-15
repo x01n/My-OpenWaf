@@ -488,7 +488,7 @@ export function AttackProtectionDialog({ open, onOpenChange }: AttackProtectionD
           <Button variant="outline" onClick={handleCancel} disabled={isSaving}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={handleSave} disabled={isLoading || isSaving} className="bg-primary hover:bg-primary/90">
+          <Button onClick={handleSave} disabled={isLoading || isSaving}>
             {isSaving ? (
               <>
                 <IconRefresh className="mr-2 h-4 w-4 animate-spin" />

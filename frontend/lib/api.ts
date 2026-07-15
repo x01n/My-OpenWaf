@@ -309,7 +309,7 @@ export const securityEventApi = {
 export const accessLogApi = {
   list: (params?: any) =>
     get<{ items: AccessLog[]; total: number }>("/access-logs", params),
-  get: (id: string | number) => get<AccessLog>(`/access-lists/${id}`),
+  get: (id: string | number) => get<AccessLog>(`/access-logs/${id}`),
   getSiteStats: (id: string | number, params?: any) =>
     get(`/sites/${id}/access-logs/stats`, params),
 };

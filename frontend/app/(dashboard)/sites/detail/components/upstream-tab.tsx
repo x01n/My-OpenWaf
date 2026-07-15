@@ -55,7 +55,7 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label className="text-sm">{t("sites.detail.upstreamServer")}</Label>
+            <Label>{t("sites.detail.upstreamServer")}</Label>
             <Input
               value={upstreamUrls}
               onChange={(e) => setUpstreamUrls(e.target.value)}
@@ -67,7 +67,7 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
           </div>
 
           <div className="space-y-2">
-            <Label className="text-sm">{t("sites.form.upstreamHost")}</Label>
+            <Label>{t("sites.form.upstreamHost")}</Label>
             <Input
               value={upstreamHost}
               onChange={(e) => setUpstreamHost(e.target.value)}
@@ -80,14 +80,14 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
 
             <div className="flex items-center justify-between">
               <div className="space-y-0.5">
-                <Label className="text-sm">{t("sites.form.skipVerify")}</Label>
+                <Label>{t("sites.form.skipVerify")}</Label>
                 <p className="text-xs text-muted-foreground">{t("sites.form.skipVerifyDesc")}</p>
               </div>
               <Switch checked={skipVerify} onCheckedChange={setSkipVerify} />
             </div>
 
             <div className="space-y-2">
-              <Label className="text-sm">{t("sites.form.tlsServerName")}</Label>
+              <Label>{t("sites.form.tlsServerName")}</Label>
               <Input
                 value={serverName}
                 onChange={(e) => setServerName(e.target.value)}

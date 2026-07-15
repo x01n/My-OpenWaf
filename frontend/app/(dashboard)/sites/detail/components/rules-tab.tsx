@@ -65,8 +65,8 @@ export function RulesTab({ site }: RulesTabProps) {
       render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
         <Button
           variant="ghost"
-          size="icon"
-          className="h-7 w-7 text-destructive"
+          size="icon-sm"
+          className="text-destructive"
           onClick={() => handleDelete(row.id)}
         >
           <IconTrash className="h-3.5 w-3.5" />

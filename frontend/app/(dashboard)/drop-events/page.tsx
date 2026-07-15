@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/pagination";
 import { Badge } from "@/components/ui/badge";
 import { DataTable } from "@/components/data-table";
-import { IconFilter, IconBan } from "@tabler/icons-react";
+import { IconFilter } from "@tabler/icons-react";
 import { useDropEvents } from "@/hooks/use-api";
 import type { DropEvent } from "@/lib/types";
 
@@ -62,12 +62,16 @@ export default function DropEventsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <IconBan className="h-6 w-6 text-primary" />
-        <h1 className="text-xl font-semibold">{t("dropEvents.title")}</h1>
-        <Badge variant="secondary" className="h-5 px-2 text-xs">
-          {t("dropEvents.total", { count: total })}
-        </Badge>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t("dropEvents.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("dropEvents.description")}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary" className="h-5 px-2 text-xs">
+            {t("dropEvents.total", { count: total })}
+          </Badge>
+        </div>
       </div>
 
       <Card>

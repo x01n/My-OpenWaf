@@ -87,7 +87,16 @@
     "copied": "已复制",
     "copy": "复制",
     "seconds": "秒",
-    "balanced": "平衡防护"
+    "balanced": "平衡防护",
+    "copyFailed": "复制失败",
+    "selectAll": "全选",
+    "clearFilter": "清除筛选",
+    "clearFilters": "清除全部筛选",
+    "confirmTitle": "确认操作",
+    "confirmDescription": "确认执行该操作？",
+    "openMenu": "打开菜单",
+    "processing": "处理中...",
+    "retry": "重试"
   },
   "nav": {
     "dashboard": "统计报表",
@@ -125,10 +134,12 @@
     "rememberMe": "记住我",
     "forgotPassword": "忘记密码？",
     "noAccount": "还没有账号？",
-    "register": "立即注册"
+    "register": "立即注册",
+    "emptyCredentials": "请输入用户名和密码"
   },
   "dashboard": {
     "title": "统计报表",
+    "description": "实时安全态势总览",
     "requests": "请求次数",
     "requestsDesc": "总请求量",
     "pv": "访问次数 (PV)",
@@ -183,7 +194,12 @@
     "timeRange24h": "最近 24 小时",
     "timeRange7d": "最近 7 天",
     "attacks": "攻击次数",
-    "rank": "排名"
+    "rank": "排名",
+    "tabTraffic": "流量分析",
+    "tabSecurity": "安全态势",
+    "tabReport": "防护报告",
+    "tabFullscreen": "防护大屏",
+    "allSites": "全部应用"
   },
   "securityDashboard": {
     "entry": "监控大屏",
@@ -203,6 +219,7 @@
   },
   "sites": {
     "title": "防护应用",
+    "description": "管理反向代理站点与防护策略",
     "total": "总站点",
     "running": "运行中",
     "stopped": "已停止",
@@ -231,6 +248,17 @@
     "dynamicProtection": "动态防护",
     "accessControl": "访问控制",
     "upstreamMoreCount": "共 {{count}} 个",
+    "hover": {
+      "recentAttacks": "近 24 小时事件",
+      "total": "总数",
+      "intercepts": "拦截",
+      "observes": "观察",
+      "upstreamStatus": "上游状态",
+      "noUpstream": "未配置上游",
+      "unknown": "未探测",
+      "moreUpstreams": "还有 {{count}} 个未展示",
+      "updatedAt": "更新于"
+    },
     "detail": {
       "title": "站点详情",
       "basicInfo": "基本信息",
@@ -386,10 +414,22 @@
       "skipVerify": "跳过证书验证",
       "skipVerifyDesc": "不验证上游 TLS 证书（仅用于开发环境）",
       "tlsServerName": "TLS SNI 名称",
-      "tlsServerNamePlaceholder": "留空则使用上游地址"
+      "tlsServerNamePlaceholder": "留空则使用上游地址",
+      "accessMethod": "接入方式",
+      "accessProxy": "反向代理",
+      "accessRedirect": "重定向",
+      "accessStatic": "静态资源",
+      "addPort": "新增端口",
+      "addUpstream": "新增上游",
+      "certNone": "不使用证书",
+      "listeners": "监听端口",
+      "name": "站点名称",
+      "upstreamServers": "上游服务器"
     },
     "deleteTitle": "删除站点",
-    "deleteConfirm": "确定要删除此站点吗？此操作不可撤销。"
+    "deleteConfirm": "确定要删除此站点吗？此操作不可撤销。",
+    "createSuccess": "站点创建成功",
+    "updateSuccess": "站点更新成功"
   },
   "attacks": {
     "title": "攻击防护",
@@ -528,10 +568,19 @@
     "captchaMinutesLabel": "验证码时间（分钟）",
     "enableRule": "启用规则",
     "toggleSuccess": "已{{action}}规则",
-    "toggleFailed": "操作失败"
+    "toggleFailed": "操作失败",
+    "matchConditions": "匹配条件",
+    "allow": "放行",
+    "block": "拦截",
+    "compositeCondition": "组合条件",
+    "deleteConfirmDescription": "删除该规则后将立即失效，是否继续？",
+    "description": "管理自定义黑白名单规则，支持按 IP、路径、请求头等条件放行或拦截请求",
+    "pattern": "匹配模式",
+    "priority": "优先级"
   },
   "ccProtection": {
     "title": "CC 防护",
+    "description": "配置请求频率与错误频率限制，防御恶意 CC 攻击并可通过自定义规则实现精细化拦截。",
     "rateLimit": "频率限制",
     "requestRateLimit": "请求频率限制",
     "enableRequestRateLimit": "启用请求频率限制",
@@ -587,6 +636,7 @@
   },
   "captcha": {
     "title": "人机验证",
+    "description": "开启人机验证、动态防护与请求防重放，抵御自动化程序与重放攻击。",
     "botProtection": "BOT 防护",
     "saveSuccess": "保存成功",
     "saveFailed": "保存失败",
@@ -631,13 +681,28 @@
   },
   "authConfig": {
     "title": "身份认证",
+    "description": "管理登录鉴权、基础认证与会话超时",
     "saveSuccess": "身份认证配置已保存",
     "saveFailed": "保存失败",
     "usernamePlaceholder": "输入用户名",
-    "passwordPlaceholder": "输入密码"
+    "passwordPlaceholder": "输入密码",
+    "basicAuth": "基础认证",
+    "basicAuthDesc": "开启后所有请求需先通过基础认证",
+    "enableBasicAuth": "启用基础认证",
+    "hour1": "1 小时",
+    "hours2": "2 小时",
+    "hours24": "24 小时",
+    "minutes5": "5 分钟",
+    "minutes15": "15 分钟",
+    "minutes30": "30 分钟",
+    "saveConfig": "保存配置",
+    "sessionManagement": "会话管理",
+    "sessionTimeout": "会话超时时间",
+    "sessionTimeoutDesc": "超过该时长未活跃会自动退出登录"
   },
   "settings": {
     "title": "通用设置",
+    "description": "配置网络监听、TLS 合规策略与日志清理",
     "network": "网络配置",
     "networkSaveSuccess": "网络配置已保存",
     "networkSaveFailed": "保存失败",
@@ -678,10 +743,28 @@
     "noCleanup": "不清理",
     "trustedIpsPlaceholder": "例如: 10.0.0.0/8, 172.16.0.0/12",
     "tlsCipherPlaceholder": "选择或输入密码套件",
-    "helpDev": "帮助文档功能开发中"
+    "helpDev": "帮助文档功能开发中",
+    "advanced": "高级设置",
+    "cipherSuites": "加密套件",
+    "customHeader": "自定义头",
+    "dataCleanup": "数据清理",
+    "days": "天",
+    "directConnect": "直连",
+    "helpDocs": "帮助文档",
+    "ipMode": "IP 识别模式",
+    "logRetention": "日志保留时长",
+    "logRetentionDesc": "超过该时长的日志将自动清理",
+    "sourceIp": "源 IP",
+    "sslCompliance": "SSL 合规策略",
+    "sslVersion": "SSL 版本",
+    "tlsSaveFailed": "TLS 配置保存失败",
+    "tlsSaveSuccess": "TLS 配置已保存",
+    "trustedCidr": "可信来源 CIDR",
+    "trustedCidrDesc": "仅这些 CIDR 内的代理头会被采信"
   },
   "securityEvents": {
     "title": "安全事件",
+    "description": "所有安全拦截与观察事件记录",
     "action": {
       "block": "阻断",
       "intercept": "拦截",
@@ -700,7 +783,44 @@
     "ipPlaceholder": "输入 IP 地址",
     "domainPlaceholder": "输入域名",
     "allActions": "全部 Action",
-    "empty": "暂无安全事件"
+    "timeRange": "时间范围",
+    "ipHover": {
+      "recentTitle": "最近 5 次事件",
+      "totalCount": "共 {{count}} 条",
+      "noEvent": "该 IP 暂无历史事件"
+    },
+    "empty": "暂无安全事件",
+    "batch": {
+      "addToBlocklist": "批量加入黑名单",
+      "blocklistPartial": "{{success}} 个成功，{{failed}} 个失败",
+      "blocklistSuccess": "已将 {{success}} 个 IP 加入黑名单",
+      "selected": "已选择 {{count}} 条",
+      "blocklistNote": "批量加入黑名单 - 安全事件"
+    },
+    "export": {
+      "csv": "导出 CSV",
+      "csvSuccess": "CSV 导出成功",
+      "json": "导出 JSON",
+      "jsonSuccess": "JSON 导出成功",
+      "title": "导出"
+    },
+    "csv": {
+      "time": "时间",
+      "clientIp": "客户端IP",
+      "path": "路径",
+      "method": "方法",
+      "action": "动作",
+      "category": "分类",
+      "rule": "规则",
+      "statusCode": "状态码",
+      "matchDesc": "匹配描述"
+    },
+    "categoryPlaceholder": "选择分类",
+    "endTime": "结束时间",
+    "eventList": "事件列表",
+    "phase": "阶段",
+    "startTime": "开始时间",
+    "total": "共 {{count}} 条事件"
   },
   "securityEventDetail": {
     "dialogTitle": "安全事件详情",
@@ -736,6 +856,7 @@
   },
   "accessLogs": {
     "title": "访问日志",
+    "description": "全站请求访问记录与 WAF 处置结果",
     "time": "时间",
     "statusCode": "状态码",
     "ip": "IP",
@@ -744,10 +865,13 @@
     "ipPlaceholder": "输入 IP",
     "domainPlaceholder": "输入域名",
     "all": "全部",
-    "empty": "暂无访问日志"
+    "empty": "暂无访问日志",
+    "listTitle": "访问日志列表",
+    "total": "共 {{count}} 条访问日志"
   },
   "dropEvents": {
     "title": "丢弃事件",
+    "description": "TCP 丢弃策略触发的连接级拦截记录",
     "time": "时间",
     "source": "来源",
     "ip": "IP",
@@ -755,7 +879,9 @@
     "sourcePlaceholder": "输入来源",
     "ipPlaceholder": "输入 IP",
     "domainPlaceholder": "输入域名",
-    "empty": "暂无丢弃事件"
+    "empty": "暂无丢弃事件",
+    "list": "Drop 事件列表",
+    "total": "共 {{count}} 条 Drop 事件"
   },
   "certificates": {
     "title": "证书管理",
@@ -1092,5 +1218,15 @@
     "refreshInterval": "自动刷新间隔：10 秒",
     "loading": "加载中...",
     "loadFailed": "加载失败"
+  },
+  "timeRange": {
+    "last1h": "近 1 小时",
+    "last6h": "近 6 小时",
+    "last24h": "近 24 小时",
+    "last7d": "近 7 天",
+    "allTime": "全部时间",
+    "apply": "应用",
+    "anyStart": "起始不限",
+    "anyEnd": "至今"
   }
 }

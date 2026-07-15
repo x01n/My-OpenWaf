@@ -279,7 +279,7 @@ export default function IPListsPage() {
       title: t("ipLists.action"),
       width: "110px",
       render: (row: IPEntry) => (
-        <Badge variant={row.action === "drop" ? "destructive" : "secondary"}>
+        <Badge variant="destructive">
           {row.action === "drop"
             ? t("ipLists.actionDrop")
             : t("ipLists.actionIntercept")}
@@ -312,12 +312,12 @@ export default function IPListsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">
             {t("ipLists.title")}
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground mt-1">
             {t("ipLists.description")}
           </p>
         </div>
@@ -592,6 +592,10 @@ export default function IPListsPage() {
               {presetLoading ? (
                 <div className="p-4 text-center text-sm text-muted-foreground">
                   {t("ipLists.presetBots.loading")}
+                </div>
+              ) : (presetData?.items || []).length === 0 ? (
+                <div className="p-4 text-center text-sm text-muted-foreground">
+                  {t("common.empty")}
                 </div>
               ) : (
                 <table className="w-full text-sm">

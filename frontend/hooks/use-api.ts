@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import useSWR, { mutate } from "swr";
+import useSWR, { mutate, type Key } from "swr";
 import { useCallback } from "react";
-import type { Key } from "swr";
 import {
   siteApi,
   certificateApi,
@@ -28,6 +27,7 @@ import {
   falsePositiveApi,
   presetBotWhitelistApi,
   requestTraceApi,
+  systemApi,
 } from "@/lib/api";
 
 /**
@@ -72,7 +72,15 @@ export function useMutation<T, D = any>(
       try {
         const result = await mutateFn(data);
         if (options?.invalidateKeys) {
-          options.invalidateKeys.forEach((k) => mutate(k));
+          options.invalidateKeys.forEach((key) => {
+            mutate(
+              (cachedKey) =>
+                cachedKey === key ||
+                (Array.isArray(cachedKey) && cachedKey[0] === key),
+              undefined,
+              { revalidate: true }
+            );
+          });
         }
         options?.onSuccess?.(result);
         return result;
@@ -422,7 +430,8 @@ export function useSiteMutation() {
         return siteApi.update(id, data);
       }
       return siteApi.create(data);
-    }
+    },
+    { invalidateKeys: ["sites", "site"] }
   );
 }
 
@@ -473,7 +482,8 @@ export function useCertificateMutation() {
         return certificateApi.update(id, data);
       }
       return certificateApi.create(data);
-    }
+    },
+    { invalidateKeys: ["certificates"] }
   );
 }
 
@@ -788,15 +798,5 @@ export function useFalsePositiveDelete() {
 }
 
 export function useSystemReload() {
-  return useMutation(async () => {
-    const res = await fetch("/api/v1/reload", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
-      },
-    });
-    if (!res.ok) throw new Error("重载失败");
-    return res.json();
-  });
+  return useMutation(async () => systemApi.reload());
 }

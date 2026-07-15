@@ -54,6 +54,9 @@ func ListCertificates(repo *repository.CertificateRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		for i := range items {
+			items[i].KeyPEM = ""
+		}
 		c.JSON(200, map[string]any{"items": items, "total": total})
 	}
 }
@@ -70,6 +73,7 @@ func GetCertificate(repo *repository.CertificateRepo) app.HandlerFunc {
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
+		item.KeyPEM = ""
 		c.JSON(200, item)
 	}
 }

@@ -6,10 +6,11 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
-import { IconKey, IconUser, IconRefresh, IconShield } from "@tabler/icons-react";
+import { IconUser, IconRefresh, IconShield } from "@tabler/icons-react";
 import { useProtectionSettings, useProtectionSettingsUpdate } from "@/hooks/use-api";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 export default function AuthConfigPage() {
@@ -18,14 +19,9 @@ export default function AuthConfigPage() {
   const updateSettings = useProtectionSettingsUpdate();
 
   const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState<string | null>(null);
   const [password, setPassword] = useState("");
-
-  useEffect(() => {
-    if (settings?.basic_auth_username) {
-      setUsername(settings.basic_auth_username);
-    }
-  }, [settings?.basic_auth_username]);
+  const currentUsername = username ?? settings?.basic_auth_username ?? "";
 
   const getValue = (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     return localSettings[key] !== undefined ? localSettings[key] : (settings?.[key] ?? defaultValue);
@@ -38,7 +34,7 @@ export default function AuthConfigPage() {
   const handleSave = async () => {
     try {
       const payload: Record<string, any> = { ...settings, ...localSettings }; // eslint-disable-line @typescript-eslint/no-explicit-any
-      if (username) payload.basic_auth_username = username;
+      if (currentUsername) payload.basic_auth_username = currentUsername;
       if (password) payload.basic_auth_password = password;
       await updateSettings.execute(payload);
       toast.success(t("authConfig.saveSuccess"));
@@ -51,26 +47,28 @@ export default function AuthConfigPage() {
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <div className="flex items-center gap-2">
-          <IconKey className="h-6 w-6 text-primary" />
-          <h1 className="text-xl font-semibold">{t("authConfig.title")}</h1>
+        <div>
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-4 w-64 mt-1" />
         </div>
-        <Card className="h-64 animate-pulse bg-muted" />
+        <Skeleton className="h-64 w-full" />
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <IconKey className="h-6 w-6 text-primary" />
-          <h1 className="text-xl font-semibold">{t("authConfig.title")}</h1>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t("authConfig.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("authConfig.description")}</p>
         </div>
-        <Button className="bg-primary hover:bg-primary/90" onClick={handleSave}>
-          <IconRefresh className="mr-1 h-4 w-4" />
-          {t("authConfig.saveConfig")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleSave}>
+            <IconRefresh className="mr-1 h-4 w-4" />
+            {t("authConfig.saveConfig")}
+          </Button>
+        </div>
       </div>
 
       <Card>
@@ -97,7 +95,7 @@ export default function AuthConfigPage() {
             <div className="space-y-2">
               <Label>{t("common.username")}</Label>
               <Input
-                value={username}
+                value={currentUsername}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder={t("authConfig.usernamePlaceholder")}
               />

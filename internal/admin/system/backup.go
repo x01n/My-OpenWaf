@@ -3,6 +3,7 @@ package system
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -25,8 +26,12 @@ func ExportBackup(db *gorm.DB) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		data, err := store.ExportBackup(db)
 		if err != nil {
-			c.JSON(500, map[string]string{"error": err.Error()})
+			slog.Error("[admin] backup export failed", "error", err)
+			c.JSON(500, map[string]string{"error": "export failed"})
 			return
+		}
+		for i := range data.SystemSettings {
+			data.SystemSettings[i] = redactSettingItem(data.SystemSettings[i])
 		}
 		filename := fmt.Sprintf("owaf-backup-%s.json", time.Now().Format("20060102-150405"))
 		c.Response.Header.Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
@@ -69,12 +74,14 @@ func ImportBackup(db *gorm.DB, reload func() error) app.HandlerFunc {
 		}
 
 		if err := store.ImportBackup(db, &req.Data, req.ReplaceMode); err != nil {
-			c.JSON(500, map[string]string{"error": "import failed: " + err.Error()})
+			slog.Error("[admin] backup import failed", "error", err)
+			c.JSON(500, map[string]string{"error": "import failed, check server logs for details"})
 			return
 		}
 
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]string{"error": "backup imported but reload failed: " + err.Error()})
+			slog.Error("[admin] backup imported but reload failed", "error", err)
+			c.JSON(500, map[string]string{"error": "backup imported but reload failed, check server logs"})
 			return
 		}
 

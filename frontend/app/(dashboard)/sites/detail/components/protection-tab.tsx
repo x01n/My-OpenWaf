@@ -258,7 +258,7 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
                   <option key={opt.value} value={opt.value}>{t(opt.labelKey)}</option>
                 ))}
               </select>
-              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleBatchApply}>
+              <Button size="sm" className="h-7 text-xs" onClick={handleBatchApply}>
                 <IconCopy className="mr-1 h-3 w-3" />
                 {t("attacks.apply")}
               </Button>

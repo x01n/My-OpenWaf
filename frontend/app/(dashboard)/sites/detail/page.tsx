@@ -97,7 +97,7 @@ function SiteDetailContent() {
   return (
     <div className="space-y-4">
       {/* 顶部站点信息栏 */}
-      <div className="flex flex-col gap-4 rounded-lg border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-4 rounded-lg border bg-card p-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-center gap-3">
           <Link href="/sites">
             <Button variant="ghost" size="icon" className="h-8 w-8">
@@ -109,18 +109,18 @@ function SiteDetailContent() {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-base font-semibold">{site.host || t("sites.detail.unnamed")}</h1>
+              <h1 className="text-2xl font-bold tracking-tight">{site.host || t("sites.detail.unnamed")}</h1>
               <Badge variant={site.enabled ? "default" : "secondary"} className="h-5 text-[10px]">
                 {site.enabled ? t("common.running") : t("common.stopped")}
               </Badge>
             </div>
-            <p className="text-xs text-muted-foreground">{site.bind}</p>
+            <p className="text-sm text-muted-foreground mt-1">{site.bind}</p>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
           <Button
-            variant="outline"
+            variant={site.enabled ? "destructive" : "outline"}
             size="sm"
             className="h-8"
             onClick={handleToggle}

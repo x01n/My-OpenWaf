@@ -22,8 +22,10 @@ import {
   IconTrash,
   IconShieldCheck,
   IconBan,
+  IconListDetails,
 } from "@tabler/icons-react";
 import { RuleFormDialog } from "./components/rule-form-dialog";
+import { EmptyState } from "@/components/empty-state";
 import type { Rule } from "@/lib/types";
 
 /**
@@ -178,20 +180,22 @@ export default function RulesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">{t("rules.title")}</h1>
-          <p className="text-sm text-muted-foreground">{t("rules.description")}</p>
+          <p className="text-sm text-muted-foreground mt-1">{t("rules.description")}</p>
         </div>
-        <Button
-          onClick={() => {
-            setEditingRule(null);
-            setDialogOpen(true);
-          }}
-        >
-          <IconPlus className="h-4 w-4" />
-          {t("rules.addTitle")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={() => {
+              setEditingRule(null);
+              setDialogOpen(true);
+            }}
+          >
+            <IconPlus className="h-4 w-4" />
+            {t("rules.addTitle")}
+          </Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-2">
@@ -216,6 +220,25 @@ export default function RulesPage() {
         loading={isLoading}
         rowKey={(row) => row.id}
         emptyText={t("rules.empty")}
+        emptyContent={
+          <EmptyState
+            icon={IconListDetails}
+            title={t("rules.empty")}
+            description={t("rules.emptyHint", "添加自定义黑白名单规则，精准控制站点的访问策略")}
+            action={
+              <Button
+                onClick={() => {
+                  setEditingRule(null);
+                  setDialogOpen(true);
+                }}
+              >
+                <IconPlus className="mr-1.5 h-4 w-4" />
+                {t("rules.addTitle")}
+              </Button>
+            }
+            className="py-20"
+          />
+        }
       />
 
       <RuleFormDialog

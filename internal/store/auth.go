@@ -13,6 +13,7 @@ type AdminAPIKey struct {
 	UpdatedAt  time.Time      `json:"updated_at"`
 	DeletedAt  gorm.DeletedAt `gorm:"index" json:"-"`
 	Name       string         `gorm:"size:128" json:"name"`
+	Prefix     string         `gorm:"size:16;index" json:"-"`
 	TokenHash  string         `gorm:"size:255;not null" json:"-"`
 	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
 }

@@ -154,8 +154,6 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		readGroup.GET("/admin-users", ListAdminUsers(r.AdminAccount))
 
-		readGroup.POST("/admin-users/:id/update-password", UpdateAdminPassword(r.AdminAccount))
-
 		readGroup.GET("/bot-settings", protect.GetBotSettings(r.SystemSettings))
 		readGroup.GET("/bot-stats", protect.GetBotStats(r.BotScore))
 		readGroup.GET("/bot-scores", protect.GetBotScores(r.BotScore))
@@ -310,6 +308,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/api-keys/:id/delete", system.DeleteAPIKey(r.AdminAPIKey))
 
 		adminGroup.POST("/admin-users", CreateAdminUser(r.AdminAccount))
+		adminGroup.POST("/admin-users/:id/update-password", UpdateAdminPassword(r.AdminAccount))
 		adminGroup.POST("/admin-users/:id/update-role", UpdateAdminRole(r.AdminAccount))
 		adminGroup.POST("/admin-users/:id/delete", DeleteAdminUser(r.AdminAccount))
 

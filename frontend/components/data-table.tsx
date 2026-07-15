@@ -26,6 +26,7 @@ interface DataTableProps<T = unknown> {
   loading?: boolean;
   rowKey?: (row: T) => string | number;
   emptyText?: string;
+  emptyContent?: ReactNode;
   className?: string;
 }
 
@@ -35,6 +36,7 @@ export function DataTable<T = unknown>({
   loading,
   rowKey,
   emptyText = "",
+  emptyContent,
   className,
 }: DataTableProps<T>) {
   const { t } = useTranslation();
@@ -68,6 +70,9 @@ export function DataTable<T = unknown>({
   }
 
   if (!data || data.length === 0) {
+    if (emptyContent) {
+      return <>{emptyContent}</>;
+    }
     return (
       <div className={cn("flex h-40 items-center justify-center rounded-md border text-sm text-muted-foreground", className)}>
         {emptyText || t("common.empty")}

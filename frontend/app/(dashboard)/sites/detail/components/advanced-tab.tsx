@@ -116,7 +116,7 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div className="space-y-0.5">
-              <Label className="text-sm font-medium">{t("sites.detail.enableAntiReplay")}</Label>
+              <Label>{t("sites.detail.enableAntiReplay")}</Label>
               <p className="text-xs text-muted-foreground">{t("sites.detail.antiReplayDesc")}</p>
             </div>
             <Switch checked={antiReplayEnabled} onCheckedChange={handleToggleAntiReplay} />
@@ -124,7 +124,7 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
 
           {antiReplayEnabled && (
             <div className="space-y-2">
-              <Label className="text-sm">TTL</Label>
+              <Label>TTL</Label>
               <div className="flex items-center gap-2">
                 <Input
                   type="number"
@@ -148,7 +148,7 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div className="space-y-0.5">
-              <Label className="text-sm font-medium">{t("sites.detail.enableMaintenance")}</Label>
+              <Label>{t("sites.detail.enableMaintenance")}</Label>
               <p className="text-xs text-muted-foreground">{t("sites.detail.maintenanceDesc")}</p>
             </div>
             <Switch checked={maintenanceEnabled} onCheckedChange={handleToggleMaintenance} />
@@ -156,7 +156,7 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
 
           {maintenanceEnabled && (
             <div className="space-y-2">
-              <Label className="text-sm">{t("sites.detail.maintenanceStatus")}</Label>
+              <Label>{t("sites.detail.maintenanceStatus")}</Label>
               <Input
                 type="number"
                 min={100}
@@ -177,7 +177,7 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label className="text-sm">{t("sites.detail.xffMode")}</Label>
+            <Label>{t("sites.detail.xffMode")}</Label>
             <select
               value={xffMode}
               onChange={(e) => setXffMode(e.target.value)}
@@ -190,7 +190,7 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
           </div>
 
           <div className="space-y-2">
-            <Label className="text-sm">{t("sites.detail.trustedCidr")}</Label>
+            <Label>{t("sites.detail.trustedCidr")}</Label>
             <Input
               value={trustedCidr}
               onChange={(e) => setTrustedCidr(e.target.value)}
@@ -200,7 +200,7 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
 
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div className="space-y-0.5">
-              <Label className="text-sm font-medium">{t("sites.detail.preserveHost")}</Label>
+              <Label>{t("sites.detail.preserveHost")}</Label>
               <p className="text-xs text-muted-foreground">{t("sites.detail.preserveHostDesc")}</p>
             </div>
             <Switch checked={preserveHost} onCheckedChange={setPreserveHost} />

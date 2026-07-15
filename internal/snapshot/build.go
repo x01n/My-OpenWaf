@@ -80,7 +80,9 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 
 	// Load application route rules and compile per-site.
 	var appRulesRaw []store.ApplicationRouteRule
-	db.Where("enabled = ?", true).Find(&appRulesRaw)
+	if err := db.Where("enabled = ?", true).Find(&appRulesRaw).Error; err != nil {
+		return nil, fmt.Errorf("load app route rules: %w", err)
+	}
 	rawBySite := make(map[uint][]store.ApplicationRouteRule)
 	for _, ar := range appRulesRaw {
 		rawBySite[ar.SiteID] = append(rawBySite[ar.SiteID], ar)

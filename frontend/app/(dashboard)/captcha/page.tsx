@@ -7,9 +7,9 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import {
-  IconUserCheck,
   IconShield,
   IconRefresh,
   IconHelpCircle,
@@ -101,11 +101,13 @@ export default function CaptchaPage() {
   if (isLoading) {
     return (
       <div className="mx-auto max-w-5xl space-y-6">
-        <div className="flex items-center gap-2">
-          <IconUserCheck className="h-6 w-6 text-primary" />
-          <h1 className="text-xl font-semibold">{t("captcha.botProtection")}</h1>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">{t("captcha.botProtection")}</h1>
+            <p className="text-sm text-muted-foreground mt-1">{t("captcha.description")}</p>
+          </div>
         </div>
-        <Card className="h-96 animate-pulse bg-muted" />
+        <Skeleton className="h-96 w-full" />
       </div>
     );
   }
@@ -113,9 +115,11 @@ export default function CaptchaPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       {/* 页面标题 */}
-      <div className="flex items-center gap-2">
-        <IconUserCheck className="h-6 w-6 text-primary" />
-        <h1 className="text-xl font-semibold">{t("captcha.botProtection")}</h1>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t("captcha.botProtection")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("captcha.description")}</p>
+        </div>
       </div>
 
       <Card className="overflow-hidden">
@@ -243,7 +247,6 @@ export default function CaptchaPage() {
           <Button
             onClick={handleSave}
             disabled={!hasChanges || updateBot.loading}
-            className="bg-primary hover:bg-primary/90"
           >
             {updateBot.loading ? (
               <>

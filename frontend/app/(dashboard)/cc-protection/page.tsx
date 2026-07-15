@@ -18,7 +18,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  IconShield,
   IconBolt,
   IconAlertTriangle,
   IconLoader2,
@@ -120,15 +119,17 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
   };
 
   const handleCancel = () => {
-    toast.info(t("ccProtection.resetSuccess"));
+    toast.success(t("ccProtection.resetSuccess"));
     onReset();
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-2">
-        <IconShield className="h-6 w-6 text-primary" />
-        <h1 className="text-xl font-semibold">{t("ccProtection.title")}</h1>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t("ccProtection.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("ccProtection.description")}</p>
+        </div>
       </div>
 
       <Tabs defaultValue="rate-limit">
@@ -362,7 +363,6 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
         <Button
           onClick={handleSave}
           disabled={updateSettings.loading}
-          className="bg-primary hover:bg-primary/90"
         >
           {updateSettings.loading && (
             <IconLoader2 className="mr-1.5 h-4 w-4 animate-spin" />
@@ -383,9 +383,11 @@ export default function CCProtectionPage() {
   if (isLoading || !settings) {
     return (
       <div className="space-y-6">
-        <div className="flex items-center gap-2">
-          <IconShield className="h-6 w-6 text-primary" />
-          <h1 className="text-xl font-semibold">{t("ccProtection.title")}</h1>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">{t("ccProtection.title")}</h1>
+            <p className="text-sm text-muted-foreground mt-1">{t("ccProtection.description")}</p>
+          </div>
         </div>
         <Skeleton className="h-32 w-full" />
         <Skeleton className="h-64 w-full" />

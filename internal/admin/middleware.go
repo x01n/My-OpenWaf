@@ -31,7 +31,9 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 
 		// Whitelist: health + auth endpoints (login/refresh/logout).
 		if path == "/api/v1/health" ||
-			strings.HasPrefix(path, "/api/v1/auth/") {
+			path == "/api/v1/auth/login" ||
+			path == "/api/v1/auth/refresh" ||
+			path == "/api/v1/auth/logout" {
 			c.Next(ctx)
 			return
 		}

@@ -12,7 +12,7 @@
  *   -> { request_id: string, access_logs: AccessLog[]|null, security_events: SecurityEvent[]|null }
  */
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { format } from "date-fns";
@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/tabs";
 import { DataTable } from "@/components/data-table";
 import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog";
+import { EmptyState } from "@/components/empty-state";
 import {
   IconRoute,
   IconSearch,
@@ -60,19 +61,9 @@ function RequestTraceContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const initialId = searchParams.get("id") || "";
-  const [inputValue, setInputValue] = useState(initialId);
-  const [queryId, setQueryId] = useState(initialId);
-
-  // URL 参数变化时同步（比如从其它页面点"追踪此请求"跳过来）
-  useEffect(() => {
-    const idFromUrl = searchParams.get("id") || "";
-    if (idFromUrl !== queryId) {
-      setInputValue(idFromUrl);
-      setQueryId(idFromUrl);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  const queryId = searchParams.get("id") || "";
+  const [inputState, setInputState] = useState({ source: queryId, value: queryId });
+  const inputValue = inputState.source === queryId ? inputState.value : queryId;
 
   const { data, isLoading, error } = useRequestTrace(queryId || undefined);
   const { data: sitesData } = useSites({ page: 1, page_size: 500 });
@@ -83,15 +74,20 @@ function RequestTraceContent() {
     return m;
   }, [sitesData]);
 
-  const accessLogs: AccessLog[] = data?.access_logs || [];
-  const securityEvents: SecurityEvent[] = data?.security_events || [];
+  const accessLogs = useMemo<AccessLog[]>(
+    () => data?.access_logs || [],
+    [data?.access_logs]
+  );
+  const securityEvents = useMemo<SecurityEvent[]>(
+    () => data?.security_events || [],
+    [data?.security_events]
+  );
   const hasAny = accessLogs.length > 0 || securityEvents.length > 0;
 
   const handleSearch = () => {
     const id = inputValue.trim();
     if (!id) return;
-    setQueryId(id);
-    // 同步 URL 便于分享
+    // 同步 URL 便于分享，并由 URL 驱动查询。
     const url = `/request-trace?id=${encodeURIComponent(id)}`;
     router.replace(url);
   };
@@ -262,7 +258,7 @@ function RequestTraceContent() {
               value={inputValue}
               placeholder={t("requestTrace.searchPlaceholder")}
               className="h-9 flex-1 font-mono text-xs"
-              onChange={(e) => setInputValue(e.target.value)}
+              onChange={(e) => setInputState({ source: queryId, value: e.target.value })}
               onKeyDown={handleKey}
             />
             <Button
@@ -277,9 +273,11 @@ function RequestTraceContent() {
           </div>
 
           {queryId && !isLoading && !hasAny && !error && (
-            <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
-              {t("requestTrace.notFound")}
-            </div>
+            <EmptyState
+              icon={IconSearch}
+              title={t("requestTrace.notFound")}
+              className="py-8"
+            />
           )}
 
           {error && (

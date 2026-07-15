@@ -11,7 +11,6 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import {
-  IconShield,
   IconSettings,
   IconCopy,
   IconCheck,
@@ -357,9 +356,12 @@ export default function AttacksPage() {
     const errMsg = error instanceof Error ? error.message : String(error);
     return (
       <div className="space-y-6">
-        <div className="flex items-center gap-2">
-          <IconShield className="h-6 w-6 text-primary" />
-          <h1 className="text-xl font-semibold">{t("attacks.title")}</h1>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">{t("attacks.title")}</h1>
+            <p className="text-sm text-muted-foreground mt-1">{t("attacks.description")}</p>
+          </div>
+          <div className="flex items-center gap-2" />
         </div>
         <div className="flex h-40 items-center justify-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 text-destructive">
           <IconAlertTriangle className="h-5 w-5" />
@@ -380,12 +382,12 @@ export default function AttacksPage() {
   return (
     <div className="space-y-6">
       {/* 页面标题 */}
-      <div className="flex items-center gap-2">
-        <IconShield className="h-6 w-6 text-primary" />
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold">{t("attacks.title")}</h1>
-          <p className="text-sm text-muted-foreground">{t("attacks.description")}</p>
+          <h1 className="text-2xl font-bold tracking-tight">{t("attacks.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("attacks.description")}</p>
         </div>
+        <div className="flex items-center gap-2" />
       </div>
 
       {/* 防护模式配置 */}
@@ -460,7 +462,7 @@ export default function AttacksPage() {
                   ))}
                 </select>
                 <Button
-                  variant="outline"
+                  variant="default"
                   size="sm"
                   onClick={handleBatchApply}
                   className="h-8"
@@ -490,10 +492,10 @@ export default function AttacksPage() {
               <div key={i} className="flex items-center gap-4 px-6 py-4">
                 <Skeleton className="h-10 w-10 rounded-lg" />
                 <div className="flex-1 space-y-2">
-                  <Skeleton className="h-4 w-32" />
-                  <Skeleton className="h-3 w-48" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-full" />
                 </div>
-                <Skeleton className="h-8 w-64" />
+                <Skeleton className="h-4 w-full max-w-[260px]" />
               </div>
             ))
           ) : (
@@ -579,7 +581,6 @@ export default function AttacksPage() {
           <Button
             onClick={handleSave}
             disabled={isLoading || isSaving}
-            className="bg-primary hover:bg-primary/90"
           >
             {isSaving ? (
               <>

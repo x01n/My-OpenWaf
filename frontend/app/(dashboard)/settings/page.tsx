@@ -16,8 +16,8 @@ import {
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
-  IconSettings,
   IconWorld,
   IconNetwork,
   IconRocket,
@@ -111,11 +111,29 @@ export default function SettingsPage() {
 
   const tlsVersions = ["TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3", "SSLv2", "SSLv3"];
 
+  const isLoading = networkLoading || tlsLoading || logLoading;
+
+  if (isLoading) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-4 w-64 mt-1" />
+        </div>
+        {[...Array(4)].map((_, i) => (
+          <Skeleton key={i} className="h-64 w-full" />
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-2">
-        <IconSettings className="h-6 w-6 text-primary" />
-        <h1 className="text-xl font-semibold">{t("settings.title")}</h1>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t("settings.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("settings.description")}</p>
+        </div>
       </div>
 
       {/* Source IP */}
@@ -162,7 +180,7 @@ export default function SettingsPage() {
             <Button
               onClick={handleSaveNetwork}
               disabled={networkLoading || networkUpdate.loading}
-              className="bg-primary hover:bg-primary/90"
+
             >
               {networkUpdate.loading ? t("common.saving") : t("common.save")}
             </Button>
@@ -204,7 +222,7 @@ export default function SettingsPage() {
             <Button
               onClick={handleSaveNetwork}
               disabled={networkLoading || networkUpdate.loading}
-              className="bg-primary hover:bg-primary/90"
+
             >
               {networkUpdate.loading ? t("common.saving") : t("common.save")}
             </Button>
@@ -256,7 +274,7 @@ export default function SettingsPage() {
             <Button
               onClick={handleSaveNetwork}
               disabled={networkLoading || networkUpdate.loading}
-              className="bg-primary hover:bg-primary/90"
+
             >
               {networkUpdate.loading ? t("common.saving") : t("common.save")}
             </Button>
@@ -324,7 +342,7 @@ export default function SettingsPage() {
             <Button
               onClick={handleSaveTLS}
               disabled={tlsLoading || tlsUpdate.loading}
-              className="bg-primary hover:bg-primary/90"
+
             >
               {tlsUpdate.loading ? t("common.saving") : t("common.save")}
             </Button>
@@ -366,7 +384,7 @@ export default function SettingsPage() {
             <Button
               onClick={handleSaveLog}
               disabled={logLoading || logUpdate.loading}
-              className="bg-primary hover:bg-primary/90"
+
             >
               {logUpdate.loading ? t("common.saving") : t("common.save")}
             </Button>

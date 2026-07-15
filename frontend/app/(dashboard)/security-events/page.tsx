@@ -33,16 +33,19 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { DataTable } from "@/components/data-table";
 import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog";
+import { DateRangePicker } from "@/components/date-range-picker";
+import { IpHoverPreview } from "@/components/ip-hover-preview";
+import { EmptyState } from "@/components/empty-state";
 import Link from "next/link";
 import {
   IconFilter,
-  IconShieldExclamation,
   IconEye,
   IconChevronDown,
   IconDownload,
   IconShieldLock,
   IconX,
   IconRoute,
+  IconShieldOff,
 } from "@tabler/icons-react";
 import { useSecurityEvents } from "@/hooks/use-api";
 import { ipListApi } from "@/lib/api";
@@ -57,7 +60,7 @@ const actionColorMap: Record<string, string> = {
   captcha_challenge: "outline",
   shield_challenge: "outline",
   chain_challenge: "outline",
-  allow: "ghost",
+  allow: "default",
   drop: "destructive",
   log_only: "secondary",
 };
@@ -85,8 +88,8 @@ export default function SecurityEventsPage() {
     category: "",
     client_ip: "",
     host: "",
-    start_time: "",
-    end_time: "",
+    since: "",
+    until: "",
   });
   const [showFilters, setShowFilters] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null);
@@ -114,8 +117,8 @@ export default function SecurityEventsPage() {
       category: "",
       client_ip: "",
       host: "",
-      start_time: "",
-      end_time: "",
+      since: "",
+      until: "",
     });
     setPage(1);
   };
@@ -142,8 +145,17 @@ export default function SecurityEventsPage() {
   const exportCSV = () => {
     if (items.length === 0) return;
     const headers = [
-      "ID", "时间", "客户端IP", "Host", "路径", "方法",
-      "动作", "分类", "规则", "状态码", "匹配描述",
+      "ID",
+      t("securityEvents.csv.time", { defaultValue: "时间" }),
+      t("securityEvents.csv.clientIp", { defaultValue: "客户端IP" }),
+      "Host",
+      t("securityEvents.csv.path", { defaultValue: "路径" }),
+      t("securityEvents.csv.method", { defaultValue: "方法" }),
+      t("securityEvents.csv.action", { defaultValue: "动作" }),
+      t("securityEvents.csv.category", { defaultValue: "分类" }),
+      t("securityEvents.csv.rule", { defaultValue: "规则" }),
+      t("securityEvents.csv.statusCode", { defaultValue: "状态码" }),
+      t("securityEvents.csv.matchDesc", { defaultValue: "匹配描述" }),
     ];
     const rows = items.map((ev) => [
       ev.id,
@@ -200,7 +212,14 @@ export default function SecurityEventsPage() {
     let failed = 0;
     for (const ip of uniqueIPs) {
       try {
-        await ipListApi.create({ value: ip, kind: "blacklist", action: "intercept", note: "批量加入黑名单 - 安全事件" });
+        await ipListApi.create({
+          value: ip,
+          kind: "blacklist",
+          action: "intercept",
+          note: t("securityEvents.batch.blocklistNote", {
+            defaultValue: "批量加入黑名单 - 安全事件",
+          }),
+        });
         success++;
       } catch {
         failed++;
@@ -212,13 +231,15 @@ export default function SecurityEventsPage() {
       toast.success(
         t("securityEvents.batch.blocklistSuccess", {
           defaultValue: `已将 ${success} 个 IP 加入黑名单`,
-          count: success,
+          success,
         })
       );
     } else {
       toast.warning(
         t("securityEvents.batch.blocklistPartial", {
           defaultValue: `${success} 个成功，${failed} 个失败`,
+          success,
+          failed,
         })
       );
     }
@@ -231,7 +252,7 @@ export default function SecurityEventsPage() {
         <Checkbox
           checked={items.length > 0 && selectedIds.size === items.length}
           onCheckedChange={toggleSelectAll}
-          aria-label="全选"
+          aria-label={t("common.selectAll", { defaultValue: "全选" })}
         />
       ),
       width: "40px",
@@ -244,7 +265,17 @@ export default function SecurityEventsPage() {
       ),
     },
     { key: "created_at", title: t("securityEvents.time"), width: "180px" },
-    { key: "client_ip", title: t("securityEvents.clientIp"), width: "140px" },
+    {
+      key: "client_ip",
+      title: t("securityEvents.clientIp"),
+      width: "140px",
+      render: (row: SecurityEvent) =>
+        row.client_ip ? (
+          <IpHoverPreview ip={row.client_ip} />
+        ) : (
+          <span className="text-muted-foreground">-</span>
+        ),
+    },
     { key: "host", title: "Host", width: "180px" },
     { key: "path", title: "Path", width: "200px" },
     { key: "method", title: "Method", width: "80px" },
@@ -271,8 +302,7 @@ export default function SecurityEventsPage() {
         <div className="flex items-center gap-0.5">
           <Button
             variant="ghost"
-            size="icon"
-            className="h-8 w-8"
+            size="icon-sm"
             onClick={() => setSelectedEvent(row)}
             title={t("common.viewDetail")}
           >
@@ -282,8 +312,7 @@ export default function SecurityEventsPage() {
             <Button
               asChild
               variant="ghost"
-              size="icon"
-              className="h-8 w-8"
+              size="icon-sm"
               title={t("requestTrace.trackThisRequest")}
             >
               <Link
@@ -300,12 +329,16 @@ export default function SecurityEventsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <IconShieldExclamation className="h-6 w-6 text-primary" />
-        <h1 className="text-xl font-semibold">{t("securityEvents.title")}</h1>
-        <Badge variant="secondary" className="h-5 px-2 text-xs">
-          {t("securityEvents.total", { count: total })}
-        </Badge>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t("securityEvents.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("securityEvents.description")}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary" className="h-5 px-2 text-xs">
+            {t("securityEvents.total", { count: total })}
+          </Badge>
+        </div>
       </div>
 
       <Card>
@@ -396,22 +429,22 @@ export default function SecurityEventsPage() {
                   onChange={(e) => handleFilterChange("host", e.target.value)}
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">{t("securityEvents.startTime")}</Label>
-                <Input
-                  type="datetime-local"
-                  className="h-8 text-xs"
-                  value={filters.start_time}
-                  onChange={(e) => handleFilterChange("start_time", e.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">{t("securityEvents.endTime")}</Label>
-                <Input
-                  type="datetime-local"
-                  className="h-8 text-xs"
-                  value={filters.end_time}
-                  onChange={(e) => handleFilterChange("end_time", e.target.value)}
+              <div className="space-y-1.5 sm:col-span-2 lg:col-span-2">
+                <Label className="text-xs">
+                  {t("securityEvents.timeRange", {
+                    defaultValue: "时间范围",
+                  })}
+                </Label>
+                <DateRangePicker
+                  value={{ since: filters.since, until: filters.until }}
+                  onChange={(v) => {
+                    setFilters((prev) => ({
+                      ...prev,
+                      since: v.since,
+                      until: v.until,
+                    }));
+                    setPage(1);
+                  }}
                 />
               </div>
               <div className="flex items-end sm:col-span-2 lg:col-span-3">
@@ -433,6 +466,14 @@ export default function SecurityEventsPage() {
             loading={isLoading}
             rowKey={(row) => row.id}
             emptyText={t("securityEvents.empty")}
+            emptyContent={
+              <EmptyState
+                icon={IconShieldOff}
+                title={t("securityEvents.empty")}
+                description={t("securityEvents.emptyHint", "暂未检测到安全事件，当 WAF 拦截或观察到可疑请求时将在此展示")}
+                className="py-16"
+              />
+            }
           />
 
           {totalPages > 1 && (

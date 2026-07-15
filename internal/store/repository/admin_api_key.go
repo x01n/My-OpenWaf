@@ -38,25 +38,45 @@ func (r *AdminAPIKeyRepo) Create(name string) (token string, item *store.AdminAP
 	if err != nil {
 		return "", nil, fmt.Errorf("bcrypt: %w", err)
 	}
-	k := &store.AdminAPIKey{Name: name, TokenHash: string(hash)}
+	prefix := token[:8]
+	k := &store.AdminAPIKey{Name: name, Prefix: prefix, TokenHash: string(hash)}
 	if err := r.db.Create(k).Error; err != nil {
 		return "", nil, err
 	}
 	return token, k, nil
 }
 
-// Verify checks a bearer token against all stored hashes.
+// Verify checks a bearer token against stored hashes.
+// Fast path: match by prefix (first 8 chars). Fallback: full scan for legacy keys without prefix.
 func (r *AdminAPIKeyRepo) Verify(token string) (*store.AdminAPIKey, bool) {
-	var keys []store.AdminAPIKey
-	if err := r.db.Find(&keys).Error; err != nil {
+	if len(token) >= 8 {
+		prefix := token[:8]
+		var keys []store.AdminAPIKey
+		if err := r.db.Where("prefix = ?", prefix).Find(&keys).Error; err == nil && len(keys) > 0 {
+			for i := range keys {
+				if bcrypt.CompareHashAndPassword([]byte(keys[i].TokenHash), []byte(token)) == nil {
+					now := time.Now()
+					keys[i].LastUsedAt = &now
+					_ = r.db.Save(&keys[i]).Error
+					return &keys[i], true
+				}
+			}
+		}
+	}
+	// Fallback: legacy keys without prefix.
+	var legacy []store.AdminAPIKey
+	if err := r.db.Where("prefix = '' OR prefix IS NULL").Find(&legacy).Error; err != nil {
 		return nil, false
 	}
-	for i := range keys {
-		if bcrypt.CompareHashAndPassword([]byte(keys[i].TokenHash), []byte(token)) == nil {
+	for i := range legacy {
+		if bcrypt.CompareHashAndPassword([]byte(legacy[i].TokenHash), []byte(token)) == nil {
 			now := time.Now()
-			keys[i].LastUsedAt = &now
-			_ = r.db.Save(&keys[i]).Error
-			return &keys[i], true
+			legacy[i].LastUsedAt = &now
+			if len(token) >= 8 {
+				legacy[i].Prefix = token[:8]
+			}
+			_ = r.db.Save(&legacy[i]).Error
+			return &legacy[i], true
 		}
 	}
 	return nil, false

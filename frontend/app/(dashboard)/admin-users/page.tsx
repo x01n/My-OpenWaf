@@ -214,7 +214,7 @@ export default function AdminUsersPage() {
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             onClick={() => {
               setPasswordTarget(row);
               setPasswordOpen(true);
@@ -225,7 +225,7 @@ export default function AdminUsersPage() {
           </Button>
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             onClick={() => handleDeleteClick(row)}
             className="text-destructive hover:text-destructive"
             disabled={row.username === currentUser}
@@ -238,16 +238,18 @@ export default function AdminUsersPage() {
   ];
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold">{t("adminUsers.title")}</h1>
-          <p className="text-sm text-muted-foreground">{t("adminUsers.description")}</p>
+          <h1 className="text-2xl font-bold tracking-tight">{t("adminUsers.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("adminUsers.description")}</p>
         </div>
-        <Button onClick={() => setCreateOpen(true)}>
-          <IconPlus className="mr-2 h-4 w-4" />
-          {t("adminUsers.create")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setCreateOpen(true)}>
+            <IconPlus className="mr-2 h-4 w-4" />
+            {t("adminUsers.create")}
+          </Button>
+        </div>
       </div>
 
       <DataTable
@@ -267,16 +269,18 @@ export default function AdminUsersPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label>{t("adminUsers.username")}</Label>
+              <Label htmlFor="admin-username">{t("adminUsers.username")}</Label>
               <Input
+                id="admin-username"
                 value={form.username}
                 onChange={(e) => setForm({ ...form, username: e.target.value })}
                 placeholder={t("adminUsers.usernamePlaceholder")}
               />
             </div>
             <div className="space-y-2">
-              <Label>{t("adminUsers.password")}</Label>
+              <Label htmlFor="admin-password">{t("adminUsers.password")}</Label>
               <Input
+                id="admin-password"
                 type="password"
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
@@ -284,12 +288,12 @@ export default function AdminUsersPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label>{t("adminUsers.role")}</Label>
+              <Label htmlFor="admin-role">{t("adminUsers.role")}</Label>
               <Select
                 value={form.role}
                 onValueChange={(val) => setForm({ ...form, role: val })}
               >
-                <SelectTrigger>
+                <SelectTrigger id="admin-role">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -325,8 +329,9 @@ export default function AdminUsersPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label>{t("adminUsers.newPassword")}</Label>
+              <Label htmlFor="admin-new-password">{t("adminUsers.newPassword")}</Label>
               <Input
+                id="admin-new-password"
                 type="password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
