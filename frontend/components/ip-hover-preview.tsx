@@ -67,9 +67,7 @@ export function IpHoverPreview({
         <div className="mb-2 flex items-center justify-between">
           <span className="font-mono text-sm font-semibold">{ip}</span>
           <span className="text-[10px] text-muted-foreground">
-            {t("securityEvents.ipHover.recentTitle", {
-              defaultValue: "最近 5 次事件",
-            })}
+            {t("securityEvents.ipHover.recentTitle")}
           </span>
         </div>
         {isLoading ? (
@@ -78,16 +76,13 @@ export function IpHoverPreview({
           </p>
         ) : !data || data.items.length === 0 ? (
           <p className="py-3 text-center text-xs text-muted-foreground">
-            {t("securityEvents.ipHover.noEvent", {
-              defaultValue: "该 IP 暂无历史事件",
-            })}
+            {t("securityEvents.ipHover.noEvent")}
           </p>
         ) : (
           <>
             <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
               <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
                 {t("securityEvents.ipHover.totalCount", {
-                  defaultValue: "共 {{count}} 条",
                   count: data.total,
                 })}
               </Badge>

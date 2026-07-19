@@ -153,8 +153,9 @@ func isHTTPSUpstreamBase(base string) bool {
 
 // clientPool caches http.Client instances keyed by transport to avoid repeated allocation.
 var (
-	clientPoolMu sync.RWMutex
-	clientCache  = make(map[*http.Transport]*http.Client)
+	clientPoolMu        sync.RWMutex
+	clientCache         = make(map[*http.Transport]*http.Client)
+	noTimeoutClientPool = make(map[*http.Transport]*http.Client)
 )
 
 func sharedClient(tr *http.Transport) *http.Client {
@@ -172,6 +173,25 @@ func sharedClient(tr *http.Transport) *http.Client {
 		return existing
 	}
 	clientCache[tr] = hc
+	clientPoolMu.Unlock()
+	return hc
+}
+
+func sharedNoTimeoutClient(tr *http.Transport) *http.Client {
+	clientPoolMu.RLock()
+	if hc, ok := noTimeoutClientPool[tr]; ok {
+		clientPoolMu.RUnlock()
+		return hc
+	}
+	clientPoolMu.RUnlock()
+
+	hc := &http.Client{Transport: tr, Timeout: 0}
+	clientPoolMu.Lock()
+	if existing, ok := noTimeoutClientPool[tr]; ok {
+		clientPoolMu.Unlock()
+		return existing
+	}
+	noTimeoutClientPool[tr] = hc
 	clientPoolMu.Unlock()
 	return hc
 }
@@ -1793,7 +1813,12 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		resp = hertzResponseToHTTPResponse(base, hresp, hreq, requestDone, cancelHertz)
 	} else {
 		transport, _ := UpstreamRoundTripperForBase(rt, base)
-		hc := &http.Client{Transport: transport, Timeout: 0}
+		var hc *http.Client
+		if tr, ok := transport.(*http.Transport); ok {
+			hc = sharedNoTimeoutClient(tr)
+		} else {
+			hc = &http.Client{Transport: transport, Timeout: 0}
+		}
 		var err error
 		resp, err = hc.Do(req)
 		if err != nil {
@@ -2649,13 +2674,13 @@ func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 			}
 			// Remove associated clients.
 			clientPoolMu.Lock()
-			if hc, ok := clientCache[tr]; ok {
+			if _, ok := clientCache[tr]; ok {
 				delete(clientCache, tr)
-				if hc.Timeout == 0 {
-					stats.HTTPNoTimeoutClients++
-				} else {
-					stats.HTTPClients++
-				}
+				stats.HTTPClients++
+			}
+			if _, ok := noTimeoutClientPool[tr]; ok {
+				delete(noTimeoutClientPool, tr)
+				stats.HTTPNoTimeoutClients++
 			}
 			clientPoolMu.Unlock()
 		}
@@ -2744,12 +2769,7 @@ func UpstreamTransportPoolStatsSnapshot() UpstreamTransportPoolStats {
 
 	clientPoolMu.RLock()
 	httpClients := len(clientCache)
-	noTimeoutClients := 0
-	for _, hc := range clientCache {
-		if hc.Timeout == 0 {
-			noTimeoutClients++
-		}
-	}
+	noTimeoutClients := len(noTimeoutClientPool)
 	clientPoolMu.RUnlock()
 
 	http3TransportMu.RLock()

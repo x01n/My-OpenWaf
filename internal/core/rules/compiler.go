@@ -105,6 +105,31 @@ func ensureCompiledMetadata(rules []Compiled) []Compiled {
 	return out
 }
 
+// knownPrefixes maps known rule-kind prefixes (without trailing colon) to
+// themselves. Built once at init from the canonical list.
+var knownPrefixes = func() map[string]struct{} {
+	kinds := []string{
+		"allow_ip", "block_ip", "geo_block",
+		"block_path", "block_path_regex", "block_path_exact",
+		"block_query_contains", "block_query_regex",
+		"block_header", "block_header_regex",
+		"block_method", "block_content_type",
+		"block_user_agent", "block_user_agent_regex",
+		"header_regex", "body_contains", "body_regex", "block_body_contains", "block_body_regex", "block_body_json_path", "query_param", "query_param_regex",
+		"path_contains", "path_not_contains",
+		"host", "host_full", "host_regex", "host_contains", "host_not_contains",
+		"full_url_contains", "full_url_regex",
+		"cookie_contains", "referer_contains",
+		"tls_ja3", "tls_ja3_hash", "tls_ja4", "tls_version", "tls_sni", "tls_alpn", "tls_cipher_suite", "tls_cipher_suites", "header_order_contains", "header_order_regex",
+		"block_multipart",
+	}
+	m := make(map[string]struct{}, len(kinds))
+	for _, k := range kinds {
+		m[k] = struct{}{}
+	}
+	return m
+}()
+
 // ParsePattern extracts kind and arg from a DSL string like "block_ip:1.2.3.0/24".
 // Supports both simple patterns and JSON compound conditions.
 func ParsePattern(p string) (kind, arg string) {
@@ -115,25 +140,14 @@ func ParsePattern(p string) (kind, arg string) {
 		return "compound", p
 	}
 
-	prefixes := []string{
-		"allow_ip:", "block_ip:", "geo_block:",
-		"block_path:", "block_path_regex:", "block_path_exact:",
-		"block_query_contains:", "block_query_regex:",
-		"block_header:", "block_header_regex:",
-		"block_method:", "block_content_type:",
-		"block_user_agent:", "block_user_agent_regex:",
-		"header_regex:", "body_contains:", "body_regex:", "block_body_contains:", "block_body_regex:", "block_body_json_path:", "query_param:", "query_param_regex:",
-		"path_contains:", "path_not_contains:",
-		"host:", "host_full:", "host_regex:", "host_contains:", "host_not_contains:",
-		"full_url_contains:", "full_url_regex:",
-		"cookie_contains:", "referer_contains:",
-		"tls_ja3:", "tls_ja3_hash:", "tls_ja4:", "tls_version:", "tls_sni:", "tls_alpn:", "tls_cipher_suite:", "tls_cipher_suites:", "header_order_contains:", "header_order_regex:",
-		"block_multipart:",
+	// Find the first colon and check if the prefix is a known kind.
+	idx := strings.IndexByte(p, ':')
+	if idx <= 0 {
+		return "", ""
 	}
-	for _, pfx := range prefixes {
-		if arg, ok := strings.CutPrefix(p, pfx); ok {
-			return strings.TrimSuffix(pfx, ":"), strings.TrimSpace(arg)
-		}
+	candidate := p[:idx]
+	if _, ok := knownPrefixes[candidate]; ok {
+		return candidate, strings.TrimSpace(p[idx+1:])
 	}
 	return "", ""
 }

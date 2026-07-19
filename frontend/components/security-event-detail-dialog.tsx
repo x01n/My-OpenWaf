@@ -337,8 +337,8 @@ export function SecurityEventDetailDialog({
     }
   })();
 
-  const copySuccess = t("common.copied", { defaultValue: "已复制" });
-  const copyFail = t("common.copyFailed", { defaultValue: "复制失败" });
+  const copySuccess = t("common.copied");
+  const copyFail = t("common.copyFailed");
 
   const handleAddToBlocklist = async () => {
     setBanLoading(true);
@@ -348,21 +348,16 @@ export function SecurityEventDetailDialog({
         kind: "blacklist",
         action: "intercept",
         note: t("securityEventDetail.blocklistNote", {
-          defaultValue: `来自安全事件 #${ev.id}`,
           id: ev.id,
         }),
       };
       await ipListApi.create(payload);
       toast.success(
-        t("securityEventDetail.addedToBlocklist", {
-          defaultValue: "已加入 IP 黑名单",
-        }),
+        t("securityEventDetail.addedToBlocklist"),
       );
     } catch {
       toast.error(
-        t("securityEventDetail.addBlocklistFailed", {
-          defaultValue: "加入黑名单失败",
-        }),
+        t("securityEventDetail.addBlocklistFailed"),
       );
     } finally {
       setBanLoading(false);
@@ -389,16 +384,12 @@ export function SecurityEventDetailDialog({
         note: fpNote,
       });
       toast.success(
-        t("falsePositives.submitSuccess", {
-          defaultValue: "反馈已提交",
-        }),
+        t("falsePositives.submitSuccess"),
       );
       setFpDialogOpen(false);
     } catch {
       toast.error(
-        t("falsePositives.submitFailed", {
-          defaultValue: "反馈提交失败",
-        }),
+        t("falsePositives.submitFailed"),
       );
     } finally {
       setFpLoading(false);
@@ -411,9 +402,7 @@ export function SecurityEventDetailDialog({
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto p-0">
         <div className="sr-only">
           <DialogTitle>
-            {t("securityEventDetail.dialogTitle", {
-              defaultValue: "安全事件详情",
-            })}
+            {t("securityEventDetail.dialogTitle")}
           </DialogTitle>
           <DialogDescription>{fullUrl}</DialogDescription>
         </div>
@@ -431,9 +420,7 @@ export function SecurityEventDetailDialog({
             <button
               type="button"
               className="min-w-0 break-all text-left font-mono text-sm leading-relaxed text-foreground/90 hover:text-primary"
-              title={t("securityEventDetail.clickToCopyUrl", {
-                defaultValue: "点击复制 URL",
-              })}
+              title={t("securityEventDetail.clickToCopyUrl")}
               onClick={() => copyToClipboard(fullUrl, copySuccess, copyFail)}
             >
               {fullUrl}
@@ -450,9 +437,7 @@ export function SecurityEventDetailDialog({
           {/* 攻击者来源 */}
           <InfoRow
             icon={<IconWorld className="h-4 w-4" />}
-            label={t("securityEventDetail.attackSource", {
-              defaultValue: "攻击者来源",
-            })}
+            label={t("securityEventDetail.attackSource")}
           >
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono font-medium">{ev.client_ip}</span>
@@ -474,9 +459,7 @@ export function SecurityEventDetailDialog({
                   onClick={handleAddToBlocklist}
                 >
                   <IconShieldLock className="h-3 w-3" />
-                  {t("securityEventDetail.addToBlocklist", {
-                    defaultValue: "加入黑名单",
-                  })}
+                  {t("securityEventDetail.addToBlocklist")}
                 </Button>
               </div>
             </div>
@@ -485,9 +468,7 @@ export function SecurityEventDetailDialog({
           {/* JA4 指纹 */}
           <InfoRow
             icon={<IconFingerprint className="h-4 w-4" />}
-            label={t("securityEventDetail.ja4Fingerprint", {
-              defaultValue: "JA4 指纹",
-            })}
+            label={t("securityEventDetail.ja4Fingerprint")}
           >
             {ev.tls_ja4 ? (
               <button
@@ -496,17 +477,13 @@ export function SecurityEventDetailDialog({
                 onClick={() =>
                   copyToClipboard(ev.tls_ja4 || "", copySuccess, copyFail)
                 }
-                title={t("securityEventDetail.clickToCopy", {
-                  defaultValue: "点击复制",
-                })}
+                title={t("securityEventDetail.clickToCopy")}
               >
                 {ev.tls_ja4}
               </button>
             ) : (
               <span className="text-xs text-muted-foreground">
-                {t("securityEventDetail.noFingerprint", {
-                  defaultValue: "无（非 TLS 连接）",
-                })}
+                {t("securityEventDetail.noFingerprint")}
               </span>
             )}
           </InfoRow>
@@ -514,9 +491,7 @@ export function SecurityEventDetailDialog({
           {/* 命中防护模块 */}
           <InfoRow
             icon={<IconShieldExclamation className="h-4 w-4" />}
-            label={t("securityEventDetail.hitModule", {
-              defaultValue: "命中防护模块",
-            })}
+            label={t("securityEventDetail.hitModule")}
           >
             <div className="flex items-center gap-2">
               <span>{categoryLabel(ev.category)}</span>
@@ -529,9 +504,7 @@ export function SecurityEventDetailDialog({
           {/* 规则名称 */}
           <InfoRow
             icon={<IconTag className="h-4 w-4" />}
-            label={t("securityEventDetail.ruleName", {
-              defaultValue: "规则名称",
-            })}
+            label={t("securityEventDetail.ruleName")}
           >
             <span className="font-mono text-xs">
               {ev.rule_id_str || `#${ev.rule_id}`}
@@ -541,9 +514,7 @@ export function SecurityEventDetailDialog({
           {/* 攻击时间 */}
           <InfoRow
             icon={<IconClock className="h-4 w-4" />}
-            label={t("securityEventDetail.attackTime", {
-              defaultValue: "攻击时间",
-            })}
+            label={t("securityEventDetail.attackTime")}
           >
             <span>{attackTime}</span>
           </InfoRow>
@@ -551,9 +522,7 @@ export function SecurityEventDetailDialog({
           {/* 请求 ID */}
           <InfoRow
             icon={<IconHash className="h-4 w-4" />}
-            label={t("securityEventDetail.requestId", {
-              defaultValue: "请求 ID",
-            })}
+            label={t("securityEventDetail.requestId")}
           >
             <button
               type="button"
@@ -569,9 +538,7 @@ export function SecurityEventDetailDialog({
           {/* HTTP 方法 + 状态码 */}
           <InfoRow
             icon={<IconRoute className="h-4 w-4" />}
-            label={t("securityEventDetail.methodStatus", {
-              defaultValue: "方法 / 状态码",
-            })}
+            label={t("securityEventDetail.methodStatus")}
           >
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="h-5 px-1.5 text-xs">
@@ -595,9 +562,7 @@ export function SecurityEventDetailDialog({
           {/* Host 与站点 ID */}
           <InfoRow
             icon={<IconMapPin className="h-4 w-4" />}
-            label={t("securityEventDetail.hostSite", {
-              defaultValue: "Host / 站点",
-            })}
+            label={t("securityEventDetail.hostSite")}
           >
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="break-all font-mono text-xs">{ev.host}</span>
@@ -612,9 +577,7 @@ export function SecurityEventDetailDialog({
             <div className="md:col-span-2">
               <InfoRow
                 icon={<IconUser className="h-4 w-4" />}
-                label={t("securityEventDetail.userAgent", {
-                  defaultValue: "User-Agent",
-                })}
+                label={t("securityEventDetail.userAgent")}
               >
                 <button
                   type="button"
@@ -624,12 +587,8 @@ export function SecurityEventDetailDialog({
                   }`}
                   title={
                     uaExpanded
-                      ? t("securityEventDetail.collapse", {
-                          defaultValue: "点击收起",
-                        })
-                      : t("securityEventDetail.expand", {
-                          defaultValue: "点击展开",
-                        })
+                      ? t("securityEventDetail.collapse")
+                      : t("securityEventDetail.expand")
                   }
                 >
                   {ev.user_agent}
@@ -645,9 +604,7 @@ export function SecurityEventDetailDialog({
             <div className="mb-2 flex items-center gap-1.5">
               <IconAlertTriangle className="h-4 w-4 text-amber-500" />
               <span className="text-xs font-medium text-foreground/80">
-                {t("securityEventDetail.attackPayload", {
-                  defaultValue: "攻击载荷",
-                })}
+                {t("securityEventDetail.attackPayload")}
               </span>
             </div>
             <div className="rounded-md border border-red-500/20 bg-red-500/5 px-4 py-3 dark:border-red-500/10 dark:bg-red-500/5">
@@ -665,21 +622,15 @@ export function SecurityEventDetailDialog({
               <TabsList>
                 <TabsTrigger value="request">
                   <IconListDetails className="mr-1 h-3.5 w-3.5" />
-                  {t("securityEventDetail.requestMessage", {
-                    defaultValue: "请求报文",
-                  })}
+                  {t("securityEventDetail.requestMessage")}
                 </TabsTrigger>
                 <TabsTrigger value="response">
                   <IconFileDescription className="mr-1 h-3.5 w-3.5" />
-                  {t("securityEventDetail.responseMessage", {
-                    defaultValue: "响应报文",
-                  })}
+                  {t("securityEventDetail.responseMessage")}
                 </TabsTrigger>
                 <TabsTrigger value="ai" disabled>
                   <IconMessageReport className="mr-1 h-3.5 w-3.5" />
-                  {t("securityEventDetail.aiAnalysis", {
-                    defaultValue: "AI 分析",
-                  })}
+                  {t("securityEventDetail.aiAnalysis")}
                 </TabsTrigger>
               </TabsList>
               <Select
@@ -710,21 +661,15 @@ export function SecurityEventDetailDialog({
                   {ev.status_code
                     ? `HTTP/1.1 ${ev.status_code}\r\n\r\n(${t(
                         "securityEventDetail.responseNotCaptured",
-                        { defaultValue: "响应正文未捕获" },
                       )})`
-                    : t("securityEventDetail.noResponseData", {
-                        defaultValue: "暂无响应数据",
-                      })}
+                    : t("securityEventDetail.noResponseData")}
                 </pre>
               </div>
             </TabsContent>
 
             <TabsContent value="ai">
               <div className="rounded-lg border border-dashed bg-muted/20 p-6 text-center text-xs text-muted-foreground">
-                {t("securityEventDetail.aiAnalysisPlaceholder", {
-                  defaultValue:
-                    "智能 AI 攻击分析即将上线，将根据请求特征给出攻击类型判断和处置建议",
-                })}
+                {t("securityEventDetail.aiAnalysisPlaceholder")}
               </div>
             </TabsContent>
           </Tabs>
@@ -736,7 +681,7 @@ export function SecurityEventDetailDialog({
             <Collapsible>
               <CollapsibleTrigger className="group flex w-full items-center gap-2 text-xs font-medium text-foreground/80 hover:text-foreground">
                 <IconLock className="h-3.5 w-3.5 text-emerald-500" />
-                {t("securityEventDetail.tlsInfo", { defaultValue: "TLS 信息" })}
+                {t("securityEventDetail.tlsInfo")}
                 <IconChevronDown className="ml-auto h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-180" />
               </CollapsibleTrigger>
               <CollapsibleContent>
@@ -847,9 +792,7 @@ export function SecurityEventDetailDialog({
             disabled={fpLoading}
           >
             <IconMessageReport className="h-3.5 w-3.5" />
-            {t("securityEventDetail.reportFalsePositive", {
-              defaultValue: "这是误报，点击反馈",
-            })}
+            {t("securityEventDetail.reportFalsePositive")}
           </Button>
           <div className="flex items-center gap-2">
             <Button
@@ -865,7 +808,7 @@ export function SecurityEventDetailDialog({
               }
             >
               <IconCopy className="h-3.5 w-3.5" />
-              {t("securityEventDetail.copyCurl", { defaultValue: "复制 cURL" })}
+              {t("securityEventDetail.copyCurl")}
             </Button>
             <Button
               variant="ghost"
@@ -873,7 +816,7 @@ export function SecurityEventDetailDialog({
               className="text-xs"
               onClick={() => onOpenChange(false)}
             >
-              {t("common.close", { defaultValue: "关闭" })}
+              {t("common.close")}
             </Button>
           </div>
         </div>
@@ -884,20 +827,15 @@ export function SecurityEventDetailDialog({
       <Dialog open={fpDialogOpen} onOpenChange={setFpDialogOpen}>
         <DialogContent className="max-w-md">
           <DialogTitle>
-            {t("falsePositives.reportDialogTitle", {
-              defaultValue: "提交误报反馈",
-            })}
+            {t("falsePositives.reportDialogTitle")}
           </DialogTitle>
           <DialogDescription>
-            {t("falsePositives.reportDialogDesc", {
-              defaultValue:
-                "确认该请求被误判为攻击？可留下备注帮助后续审查。",
-            })}
+            {t("falsePositives.reportDialogDesc")}
           </DialogDescription>
           <div className="space-y-3 pt-2">
             <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
               <div className="text-muted-foreground">
-                {t("falsePositives.noteRuleId", { defaultValue: "命中规则" })}
+                {t("falsePositives.noteRuleId")}
               </div>
               <div className="mt-0.5 font-mono">
                 {ev.rule_id_str || `#${ev.rule_id}`}{" "}
@@ -908,16 +846,13 @@ export function SecurityEventDetailDialog({
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-medium">
-                {t("falsePositives.noteLabel", { defaultValue: "备注（可选）" })}
+                {t("falsePositives.noteLabel")}
               </label>
               <Textarea
                 rows={4}
                 value={fpNote}
                 onChange={(e) => setFpNote(e.target.value)}
-                placeholder={t("falsePositives.notePlaceholder", {
-                  defaultValue:
-                    "说明为什么这是误报，例如：正常业务参数、误命中的规则等",
-                })}
+                placeholder={t("falsePositives.notePlaceholder")}
                 maxLength={2000}
               />
             </div>
@@ -938,7 +873,7 @@ export function SecurityEventDetailDialog({
             >
               {fpLoading
                 ? t("common.submitting")
-                : t("falsePositives.submit", { defaultValue: "提交" })}
+                : t("falsePositives.submit")}
             </Button>
           </div>
         </DialogContent>

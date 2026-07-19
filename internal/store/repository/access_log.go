@@ -206,6 +206,8 @@ func (r *AccessLogRepo) ListFingerprints(offset, limit int, f FingerprintFilter)
 		return nil, 0, err
 	}
 
+	hasBotScoreTable := r.db.Migrator().HasTable(&store.BotScoreLog{})
+
 	items := make([]FingerprintSummary, 0, len(rows))
 	for _, row := range rows {
 		var last store.AccessLog
@@ -229,7 +231,7 @@ func (r *AccessLogRepo) ListFingerprints(offset, limit int, f FingerprintFilter)
 		}
 		var highRiskCount int64
 		var avgBotScore float64
-		if r.db.Migrator().HasTable(&store.BotScoreLog{}) {
+		if hasBotScoreTable {
 			requestIDs := func() *gorm.DB {
 				return r.db.Model(&store.AccessLog{}).
 					Distinct().

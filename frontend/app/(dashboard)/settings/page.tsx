@@ -24,9 +24,10 @@ import {
   IconShieldLock,
   IconTrash,
   IconHelpCircle,
+  IconDatabase,
 } from "@tabler/icons-react";
-import { useNetworkConfig, useTLSConfig, useLogConfig } from "@/hooks/use-api";
-import { useNetworkConfigUpdate, useTLSConfigUpdate, useLogConfigUpdate } from "@/hooks/use-api";
+import { useNetworkConfig, useTLSConfig, useLogConfig, useRedisConfig } from "@/hooks/use-api";
+import { useNetworkConfigUpdate, useTLSConfigUpdate, useLogConfigUpdate, useRedisConfigUpdate } from "@/hooks/use-api";
 
 export default function SettingsPage() {
   const { t } = useTranslation();
@@ -391,6 +392,94 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Redis Configuration */}
+      <RedisConfigCard />
     </div>
+  );
+}
+
+function RedisConfigCard() {
+  const { t } = useTranslation();
+  const { data: redisConfig, isLoading } = useRedisConfig();
+  const redisUpdate = useRedisConfigUpdate();
+
+  const [addr, setAddr] = useState("");
+  const [password, setPassword] = useState("");
+  const [db, setDb] = useState("0");
+  const [initialized, setInitialized] = useState(false);
+
+  if (!initialized && redisConfig) {
+    setAddr(redisConfig.redis_addr ?? "");
+    setPassword(redisConfig.redis_password ?? "");
+    setDb(String(redisConfig.redis_db ?? 0));
+    setInitialized(true);
+  }
+
+  const handleSave = async () => {
+    try {
+      await redisUpdate.execute({
+        redis_addr: addr,
+        redis_password: password || undefined,
+        redis_db: parseInt(db, 10) || 0,
+      });
+      toast.success(t("settings.redisSaveSuccess"));
+    } catch {
+      toast.error(t("settings.redisSaveFailed"));
+    }
+  };
+
+  if (isLoading) {
+    return <Skeleton className="h-48 w-full" />;
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <IconDatabase className="h-5 w-5 text-primary" />
+          {t("settings.redis")}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label>{t("settings.redisAddr")}</Label>
+            <Input
+              value={addr}
+              onChange={(e) => setAddr(e.target.value)}
+              placeholder="127.0.0.1:6379"
+            />
+            <p className="text-xs text-muted-foreground">{t("settings.redisAddrDesc")}</p>
+          </div>
+          <div className="space-y-2">
+            <Label>{t("settings.redisPassword")}</Label>
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={t("settings.redisPasswordPlaceholder")}
+            />
+          </div>
+        </div>
+        <div className="space-y-2">
+          <Label>{t("settings.redisDb")}</Label>
+          <Input
+            type="number"
+            min={0}
+            max={15}
+            value={db}
+            onChange={(e) => setDb(e.target.value)}
+            className="w-32"
+          />
+          <p className="text-xs text-muted-foreground">{t("settings.redisDbDesc")}</p>
+        </div>
+        <div className="flex justify-end">
+          <Button onClick={handleSave} disabled={redisUpdate.loading}>
+            {redisUpdate.loading ? t("common.saving") : t("common.save")}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

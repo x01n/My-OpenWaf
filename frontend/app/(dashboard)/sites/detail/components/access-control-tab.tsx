@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,8 @@ import {
   IconKey,
   IconRoute,
 } from "@tabler/icons-react";
-import { useSiteMutation } from "@/hooks/use-api";
+import { useAccessConfig } from "@/hooks/use-api";
+import { accessApi } from "@/lib/api";
 import type { Site } from "@/lib/types";
 
 interface AccessControlTabProps {
@@ -27,24 +28,36 @@ interface AccessControlTabProps {
 
 export function AccessControlTab({ site }: AccessControlTabProps) {
   const { t } = useTranslation();
-  const updateSite = useSiteMutation();
+  const { data: accessConfig, mutate: refreshConfig } = useAccessConfig(site.id);
 
   const [accessEnabled, setAccessEnabled] = useState(false);
   const [sharedPassword, setSharedPassword] = useState("");
   const [showPasswordInput, setShowPasswordInput] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // 同步后端状态到本地
+  useEffect(() => {
+    if (accessConfig) setAccessEnabled(accessConfig.enabled);
+  }, [accessConfig]);
+
   const handleToggleAccess = async (enabled: boolean) => {
     setAccessEnabled(enabled);
-    // TODO: 后端 API 就绪后实际保存
-    toast.success(t("common.saveSuccess"));
+    try {
+      await accessApi.saveConfig(site.id, { enabled });
+      await refreshConfig();
+      toast.success(t("common.saveSuccess"));
+    } catch {
+      setAccessEnabled(!enabled);
+      toast.error(t("common.operationFailed"));
+    }
   };
 
   const handleSavePassword = async () => {
     if (!sharedPassword.trim()) return;
     setSaving(true);
     try {
-      // TODO: 后端 API 就绪后实际保存
+      await accessApi.saveConfig(site.id, { shared_password: sharedPassword });
+      await refreshConfig();
       toast.success(t("common.saveSuccess"));
       setSharedPassword("");
       setShowPasswordInput(false);

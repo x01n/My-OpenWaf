@@ -32,6 +32,7 @@ import {
   IconDatabaseExport,
   IconRoute,
   IconServer,
+  IconTemplate,
 } from "@tabler/icons-react";
 import { useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
@@ -209,6 +210,11 @@ function SidebarContent() {
     [
       { label: t("nav.apiKeys"), href: "/api-keys", icon: IconApi },
       { label: t("nav.adminUsers"), href: "/admin-users", icon: IconUsers },
+      {
+        label: t("nav.pageTemplates"),
+        href: "/page-templates",
+        icon: IconTemplate,
+      },
       {
         label: t("nav.backup"),
         href: "/backup",

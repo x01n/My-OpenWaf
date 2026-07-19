@@ -2,6 +2,8 @@ package dataplane
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -550,6 +552,17 @@ func Handler(opts Options) app.HandlerFunc {
 			logAccess(accessLog, reqID, method, path, host, statusCode, wafAction)
 			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: "bypass"})
 			return
+		}
+
+		// ── Basic Auth enforcement (global level) ──────
+		if sn.Protection.BasicAuthEnabled && sn.Protection.BasicAuthUsername != "" {
+			if !validateBasicAuth(string(c.Request.Header.Peek("Authorization")), sn.Protection.BasicAuthUsername, sn.Protection.BasicAuthPassword) {
+				c.Response.Header.Set("WWW-Authenticate", `Basic realm="WAF Protected"`)
+				c.String(401, "Unauthorized")
+				logAccess(accessLog, reqID, method, pathCached, host, 401, "basic_auth")
+				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 401, WAFAction: "basic_auth", CacheState: "bypass"})
+				return
+			}
 		}
 
 		lowerPath := strings.ToLower(path)
@@ -2025,15 +2038,15 @@ func isTimeoutError(err error) bool {
 	return false
 }
 
-// handleWASMAssets serves the PoW WASM binary and wasm_exec.js glue.
+// handleWASMAssets serves the PoW WASM binary and JS glue.
 func handleWASMAssets(c *app.RequestContext) bool {
 	path := string(c.Path())
 	switch path {
 	case "/__owaf/pow.wasm":
 		challenge.ServePoWWASM(c)
 		return true
-	case "/__owaf/wasm_exec.js":
-		challenge.ServeWasmExecJS(c)
+	case "/__owaf/pow_glue.js":
+		challenge.ServePowGlueJS(c)
 		return true
 	}
 	return false
@@ -2186,4 +2199,22 @@ func challengePassTTL(prot store.ProtectionConfig) time.Duration {
 		return time.Duration(prot.CaptchaTimeout) * time.Second
 	}
 	return time.Hour
+}
+
+// validateBasicAuth 校验 HTTP Basic Auth 凭据，使用常量时间比较防止时序攻击。
+func validateBasicAuth(authHeader, expectedUser, expectedPass string) bool {
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Basic ") {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(authHeader[6:])
+	if err != nil {
+		return false
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	userMatch := subtle.ConstantTimeCompare([]byte(parts[0]), []byte(expectedUser)) == 1
+	passMatch := subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expectedPass)) == 1
+	return userMatch && passMatch
 }

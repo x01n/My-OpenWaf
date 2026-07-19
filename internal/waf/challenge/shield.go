@@ -25,7 +25,6 @@ type ShieldConfig struct {
 	RequireHTTP3         bool `json:"require_http3"`          // 要求客户端支持 HTTP/3 (QUIC)
 	AllowHTTP1           bool `json:"allow_http1"`            // 是否允许 HTTP/1.x
 	EnableJSChallenge    bool `json:"enable_js_challenge"`    // 启用 JS 挑战验证
-	EnableWASM           bool `json:"enable_wasm"`            // 启用 WASM PoW（否则使用纯 JS）
 	EnableEnvCheck       bool `json:"enable_env_check"`       // 启用环境指纹检测
 	EnableDevToolsDetect bool `json:"enable_devtools_detect"` // 启用开发者工具检测
 }
@@ -42,7 +41,6 @@ func DefaultShieldConfig() ShieldConfig {
 		RequireHTTP3:         false,
 		AllowHTTP1:           true,
 		EnableJSChallenge:    true,
-		EnableWASM:           true,
 		EnableEnvCheck:       true,
 		EnableDevToolsDetect: true,
 	}
@@ -264,10 +262,7 @@ func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, req
 		return
 	}
 	cfg := sm.Config()
-	powScript := GeneratePoWScript(session.Difficulty, session.Nonce)
-	if cfg.EnableWASM {
-		powScript = GeneratePoWWASMScript(session.Difficulty, session.Nonce)
-	}
+	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce, EnvSessionKeyHex(session.EnvKey))
 	envJS := ""
 	if cfg.EnableEnvCheck {
 		envJS = EnvCheckJSEncrypted(EnvSessionKeyHex(session.EnvKey))
@@ -278,7 +273,31 @@ func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, req
 }
 
 func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, requestProtocol, envJS, powScript string) string {
-	return fmt.Sprintf(shieldPageHTML, sessionID, cfg.AutoStartDelay, cfg.TimeoutSecs*1000, cfg.MaxRetries, cfg.EnableEnvCheck, cfg.EnableDevToolsDetect, cfg.RequireHTTP2, cfg.RequireHTTP3, cfg.AllowHTTP1, shieldProtocolValue(requestProtocol), envJS, powScript)
+	html := fmt.Sprintf(shieldPageHTML, sessionID, cfg.AutoStartDelay, cfg.TimeoutSecs*1000, cfg.MaxRetries, cfg.EnableEnvCheck, cfg.EnableDevToolsDetect, cfg.RequireHTTP2, cfg.RequireHTTP3, cfg.AllowHTTP1, shieldProtocolValue(requestProtocol), envJS, powScript)
+	return obfuscateShieldJS(html)
+}
+
+func obfuscateShieldJS(html string) string {
+	v := randomVarNames(12)
+	r := strings.NewReplacer(
+		"var sid=", "var "+v[0]+"=",
+		",sid,", ","+v[0]+",",
+		"'__waf_shield_session':sid", "'__waf_shield_session':"+v[0],
+		"autoDelay", v[1],
+		"timeoutMs", v[2],
+		"maxRetries", v[3],
+		"retryCount", v[4],
+		"enableEnv", v[5],
+		"detectDev,", v[6]+",",
+		"detectDev&&", v[6]+"&&",
+		"detectDev=", v[6]+"=",
+		"requireH2", v[7],
+		"requireH3", v[8],
+		"allowH1", v[9],
+		"requestProto", v[10],
+		"envMonitor", v[11],
+	)
+	return r.Replace(html)
 }
 
 const shieldPageHTML = `<!DOCTYPE html>

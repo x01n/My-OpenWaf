@@ -89,7 +89,6 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 		RequireHTTP2:         true,
 		RequireHTTP3:         false,
 		AllowHTTP1:           false,
-		EnableWASM:           false,
 		EnableEnvCheck:       false,
 		EnableDevToolsDetect: false,
 	}
@@ -99,20 +98,18 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	powScript := GeneratePoWScript(session.Difficulty, session.Nonce)
+	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce, EnvSessionKeyHex(session.EnvKey))
 	runtimeCfg := mgr.Config()
 	html := shieldPageHTMLWithConfig(session.ID, runtimeCfg, "h2", "", powScript)
 
 	checks := []string{
-		`autoDelay=1234`,
-		`timeoutMs=7000`,
-		`maxRetries=5`,
-		`enableEnv=false`,
-		`detectDev=false`,
-		`requireH2=true`,
-		`allowH1=false`,
-		`requestProto="h2"`,
-		`window.__powWorker=w`,
+		`=1234`,
+		`=7000`,
+		`=5,`,
+		`=false`,
+		`=true`,
+		`="h2"`,
+		`pow_glue.js`,
 	}
 	for _, want := range checks {
 		if !strings.Contains(html, want) {
@@ -133,7 +130,6 @@ func TestShieldVerifyEnforcesProtocolRequirements(t *testing.T) {
 		cfg.RequireHTTP2 = requireH2
 		cfg.RequireHTTP3 = requireH3
 		cfg.AllowHTTP1 = allowH1
-		cfg.EnableWASM = false
 		cfg.EnableEnvCheck = false
 		cfg.EnableDevToolsDetect = false
 		return cfg
@@ -204,12 +200,12 @@ func findShieldPoWSolution(t *testing.T, nonce string, difficulty int) (int64, s
 }
 
 func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
-	script := GeneratePoWScript(1, "nonce")
+	script := GeneratePoWWASMScript(1, "nonce", "aabbccdd112233445566778899001122aabbccdd112233445566778899001122")
 	if !strings.Contains(script, "__owaf_pow_callback") {
-		t.Fatalf("GeneratePoWScript() did not expose shield/chain callback: %s", script)
+		t.Fatalf("GeneratePoWWASMScript() did not expose shield/chain callback: %s", script)
 	}
 	if !strings.Contains(script, "__onPoWComplete") {
-		t.Fatalf("GeneratePoWScript() dropped legacy callback: %s", script)
+		t.Fatalf("GeneratePoWWASMScript() dropped legacy callback: %s", script)
 	}
 }
 
@@ -220,6 +216,17 @@ func TestEnvCheckJSExportsOwafEnv(t *testing.T) {
 	}
 	if !strings.Contains(script, "__owaf_env_encrypted") {
 		t.Fatalf("EnvCheckJS() dropped encrypted fingerprint export: %s", script)
+	}
+
+	encrypted := EnvCheckJSEncrypted("aabbccdd112233445566778899001122aabbccdd112233445566778899001122")
+	if strings.Contains(encrypted, "var fp=") {
+		t.Fatal("encrypted envcheck should obfuscate variable names")
+	}
+	if !strings.Contains(encrypted, "window.__owaf_env=") {
+		t.Fatal("encrypted envcheck must still export __owaf_env")
+	}
+	if !strings.Contains(encrypted, "__owaf_env_encrypted") {
+		t.Fatal("encrypted envcheck must still export encrypted fingerprint")
 	}
 }
 

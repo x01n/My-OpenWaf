@@ -95,15 +95,16 @@ func (r *IPReputation) Check(ip net.IP) IPDecision {
 	if ip == nil {
 		return IPDecision{Allowed: true}
 	}
+	now := time.Now().Unix()
 	r.mu.RLock()
 	for _, e := range r.whitelist {
-		if entryMatches(e, ip) {
+		if entryMatchesAt(e, ip, now) {
 			r.mu.RUnlock()
 			return IPDecision{Allowed: true, Matched: true, Reason: e.Note, Category: "whitelist"}
 		}
 	}
 	for _, e := range r.blacklist {
-		if entryMatches(e, ip) {
+		if entryMatchesAt(e, ip, now) {
 			r.mu.RUnlock()
 			return IPDecision{Allowed: false, Matched: true, Reason: e.Note, Category: "blacklist", Action: e.Action}
 		}
@@ -171,7 +172,11 @@ func (r *IPReputation) ActiveBans() []BanEntry {
 }
 
 func entryMatches(e IPListEntry, ip net.IP) bool {
-	if e.ExpireAt > 0 && time.Now().Unix() > e.ExpireAt {
+	return entryMatchesAt(e, ip, time.Now().Unix())
+}
+
+func entryMatchesAt(e IPListEntry, ip net.IP, now int64) bool {
+	if e.ExpireAt > 0 && now > e.ExpireAt {
 		return false
 	}
 	if e.CIDR != nil && e.CIDR.Contains(ip) {

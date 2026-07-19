@@ -376,7 +376,7 @@ func drainChan[T any](ch chan T) []T {
 }
 
 func drainChanInto[T any](ch chan T, buf []T) []T {
-	for {
+	for len(buf) < unifiedWriterDrainLimit {
 		select {
 		case v := <-ch:
 			buf = append(buf, v)
@@ -384,4 +384,5 @@ func drainChanInto[T any](ch chan T, buf []T) []T {
 			return buf
 		}
 	}
+	return buf
 }

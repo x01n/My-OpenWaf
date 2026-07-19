@@ -741,6 +741,7 @@ export interface SiteAccessConfig {
 
 export interface OAuthProviderConfig {
   client_id: string;
+  client_secret?: string;
   client_secret_mask?: string;
   client_secret_set?: boolean;
   auth_url?: string;

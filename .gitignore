@@ -48,3 +48,6 @@ rule.md
 *.test
 blazehttp
 .next/
+wasm-pow-solver/target/
+
+wasm-pow-solver/target/

@@ -225,6 +225,36 @@ func containsFoldASCII(s, substr string) bool {
 	return false
 }
 
+// containsFoldASCIIBytes performs case-insensitive substring search on []byte
+// without allocating a string copy.
+func containsFoldASCIIBytes(s []byte, substr string) bool {
+	n := len(substr)
+	if n == 0 {
+		return true
+	}
+	if n > len(s) {
+		return false
+	}
+	first := asciiLowerByte(substr[0])
+	last := len(s) - n
+	for i := 0; i <= last; i++ {
+		if asciiLowerByte(s[i]) != first {
+			continue
+		}
+		match := true
+		for j := 1; j < n; j++ {
+			if asciiLowerByte(s[i+j]) != asciiLowerByte(substr[j]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
 // ── compound matchers ──
 
 type andMatcher struct{ children []Matcher }
@@ -319,13 +349,21 @@ type tlsCipherSuitesMatcher struct {
 func (m *tlsFingerprintMatcher) Match(ctx MatchCtx) bool {
 	value := tlsFingerprintValue(ctx, m.name)
 	if value != "" {
-		for _, token := range strings.Split(value, ",") {
+		for value != "" {
+			token := value
+			if i := strings.IndexByte(value, ','); i >= 0 {
+				token = value[:i]
+				value = value[i+1:]
+			} else {
+				value = ""
+			}
 			if strings.EqualFold(strings.TrimSpace(token), m.value) {
 				return true
 			}
 		}
+		return false
 	}
-	if m.name == "x-owaf-tls-ja3-hash" && value == "" {
+	if m.name == "x-owaf-tls-ja3-hash" {
 		ja3 := tlsFingerprintValue(ctx, "x-owaf-tls-ja3")
 		if ja3 == "" {
 			return false
@@ -344,7 +382,14 @@ func (m *tlsCipherSuitesMatcher) Match(ctx MatchCtx) bool {
 	if value == "" {
 		return false
 	}
-	for _, token := range strings.Split(value, ",") {
+	for value != "" {
+		token := value
+		if i := strings.IndexByte(value, ','); i >= 0 {
+			token = value[:i]
+			value = value[i+1:]
+		} else {
+			value = ""
+		}
 		trimmed := strings.TrimSpace(token)
 		if _, ok := m.values[trimmed]; ok {
 			return true

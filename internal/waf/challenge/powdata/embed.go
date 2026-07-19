@@ -5,5 +5,5 @@ import _ "embed"
 //go:embed pow.wasm
 var WASMBinary []byte
 
-//go:embed wasm_exec.js
-var WasmExecJS []byte
+//go:embed pow_glue.js
+var PowGlueJS []byte

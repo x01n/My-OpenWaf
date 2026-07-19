@@ -8,8 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
-import { IconUser, IconRefresh, IconShield } from "@tabler/icons-react";
-import { useProtectionSettings, useProtectionSettingsUpdate } from "@/hooks/use-api";
+import { IconUser, IconRefresh, IconShield, IconLogout } from "@tabler/icons-react";
+import { useProtectionSettings, useProtectionSettingsUpdate, useAdminSessions, useForceLogout } from "@/hooks/use-api";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -140,6 +140,77 @@ export default function AuthConfigPage() {
           </div>
         </CardContent>
       </Card>
+
+      <ActiveSessionsCard />
     </div>
+  );
+}
+
+function ActiveSessionsCard() {
+  const { t } = useTranslation();
+  const { data, isLoading } = useAdminSessions();
+  const forceLogout = useForceLogout();
+
+  const handleForceLogout = async (sessionId: number) => {
+    try {
+      await forceLogout.execute(sessionId);
+      toast.success(t("authConfig.forceLogoutSuccess"));
+    } catch {
+      toast.error(t("authConfig.forceLogoutFailed"));
+    }
+  };
+
+  if (isLoading) {
+    return <Skeleton className="h-48 w-full" />;
+  }
+
+  const sessions = data?.items ?? [];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <IconUser className="h-5 w-5 text-primary" />
+          {t("authConfig.activeSessions")}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {sessions.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t("authConfig.noActiveSessions")}</p>
+        ) : (
+          <div className="space-y-3">
+            {sessions.map((session) => (
+              <div
+                key={session.id}
+                className="flex items-center justify-between rounded-lg border p-3"
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{session.username}</span>
+                    <span className="text-xs text-muted-foreground">{session.ip}</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground truncate max-w-md" title={session.user_agent}>
+                    {session.user_agent}
+                  </p>
+                  <div className="flex gap-4 text-xs text-muted-foreground">
+                    <span>{t("authConfig.loginAt")}: {new Date(session.login_at).toLocaleString()}</span>
+                    <span>{t("authConfig.lastActive")}: {new Date(session.last_active_at).toLocaleString()}</span>
+                  </div>
+                </div>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => handleForceLogout(session.id)}
+                  disabled={forceLogout.loading}
+                >
+                  <IconLogout className="mr-1 h-4 w-4" />
+                  {t("authConfig.forceLogout")}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

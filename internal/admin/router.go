@@ -79,6 +79,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	api.Use(AuthMiddleware(deps.Repos.AdminAPIKey, deps.TokenMgr, deps.SessionMgr))
 
 	api.GET("/auth/me", MeHandler(authDeps))
+	api.POST("/auth/change-password", ChangeOwnPasswordHandler(authDeps))
 
 	api.GET("/auth/sessions", ListSessionsHandler(authDeps))
 	api.POST("/auth/sessions/force-logout", RequireRole(auth.RoleAdmin), ForceLogoutSessionHandler(authDeps))
@@ -184,6 +185,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/upstreams/status", system.UpstreamStatus(deps.Upstreams))
 		readGroup.GET("/runtime-config", system.GetRuntimeConfig(deps.RuntimeState, deps.Snapshot, deps.Repos.SystemSettings))
 		readGroup.GET("/realtime/ticket", deps.Realtime.TicketHandler())
+
+		readGroup.GET("/page-templates", protect.GetPageTemplates(r.SystemSettings))
+		readGroup.GET("/page-templates/:type", protect.GetPageTemplate(r.SystemSettings))
+		readGroup.GET("/page-templates/:type/preview", protect.PreviewPageTemplate(r.SystemSettings))
 	}
 
 	opsGroup := api.Group("")
@@ -242,6 +247,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		opsGroup.POST("/captcha/config", protect.UpdateCaptchaConfig(r.SystemSettings, reload))
 		opsGroup.POST("/captcha/test", protect.TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
+
+		opsGroup.POST("/page-templates/:type", protect.UpdatePageTemplate(r.SystemSettings, reload))
+		opsGroup.POST("/page-templates/:type/reset", protect.ResetPageTemplate(r.SystemSettings, reload))
 
 		opsGroup.POST("/chain/config", protect.UpdateChainConfig(r.SystemSettings, reload))
 		opsGroup.POST("/chain/sessions/:id/delete", protect.DeleteChainSession(deps.ChainMgr))
@@ -324,9 +332,6 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 	h.GET("/__owaf/pow.wasm", func(ctx context.Context, c *app.RequestContext) {
 		challenge.ServePoWWASM(c)
-	})
-	h.GET("/__owaf/wasm_exec.js", func(ctx context.Context, c *app.RequestContext) {
-		challenge.ServeWasmExecJS(c)
 	})
 	h.GET("/api/v1/realtime/ws", deps.Realtime.WebSocketHandler())
 	h.GET("/.well-known/acme-challenge/:token", func(ctx context.Context, c *app.RequestContext) {

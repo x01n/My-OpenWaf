@@ -287,7 +287,8 @@ func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 	case ChainStepEnv:
 		body = fmt.Sprintf(chainEnvHTML, stepNum, total, dots, EnvCheckJS(), state.SessionID)
 	case ChainStepPoW:
-		body = fmt.Sprintf(chainPowHTML, stepNum, total, dots, GeneratePoWScript(cm.difficultyValue(), state.Nonce), state.SessionID)
+		powJS := GeneratePoWWASMScript(cm.difficultyValue(), state.Nonce, EnvSessionKeyHex([]byte(state.Nonce)))
+		body = fmt.Sprintf(chainPowHTML, stepNum, total, dots, powJS, state.SessionID)
 	case ChainStepCaptcha:
 		captchaBlock := ""
 		ch, _ := cm.captcha.Generate(normalizeChainCaptchaType(step.CaptchaType))

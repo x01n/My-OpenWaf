@@ -417,7 +417,6 @@ func Run() {
 			RequireHTTP3:         p.ShieldRequireHTTP3,
 			AllowHTTP1:           p.ShieldAllowHTTP1,
 			EnableJSChallenge:    p.ShieldEnableJSChallenge,
-			EnableWASM:           p.ShieldEnableWASM,
 			EnableEnvCheck:       p.ShieldEnableEnvCheck,
 			EnableDevToolsDetect: p.ShieldEnableDevTools,
 		})

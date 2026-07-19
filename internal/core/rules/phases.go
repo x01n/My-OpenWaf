@@ -770,36 +770,35 @@ func shouldScanOpaqueBodyTarget(body []byte) bool {
 			return true
 		}
 	}
-	s := string(body)
-	return containsFoldASCII(s, "%0d") ||
-		containsFoldASCII(s, "%0a") ||
-		containsFoldASCII(s, "%3c") ||
-		containsFoldASCII(s, "%3e") ||
-		containsFoldASCII(s, "%27") ||
-		containsFoldASCII(s, "%22") ||
-		containsFoldASCII(s, "javascript:") ||
-		containsFoldASCII(s, "vbscript:") ||
-		containsFoldASCII(s, "document.") ||
-		containsFoldASCII(s, "onerror") ||
-		containsFoldASCII(s, "onload") ||
-		containsFoldASCII(s, "onmouse") ||
-		containsFoldASCII(s, "onfocus") ||
-		containsFoldASCII(s, "alert(") ||
-		containsFoldASCII(s, " union ") ||
-		containsFoldASCII(s, " select ") ||
-		containsFoldASCII(s, " or ") ||
-		containsFoldASCII(s, " and ") ||
-		containsFoldASCII(s, "sleep(") ||
-		containsFoldASCII(s, "benchmark(") ||
-		containsFoldASCII(s, "../") ||
-		containsFoldASCII(s, "127.0.") ||
-		containsFoldASCII(s, "localhost") ||
-		containsFoldASCII(s, "169.254.169.254") ||
-		containsFoldASCII(s, "metadata.google") ||
-		containsFoldASCII(s, "aced0005") ||
-		containsFoldASCII(s, "ro0ab") ||
-		containsFoldASCII(s, "objectinputstream") ||
-		containsFoldASCII(s, "deserializ")
+	return containsFoldASCIIBytes(body, "%0d") ||
+		containsFoldASCIIBytes(body, "%0a") ||
+		containsFoldASCIIBytes(body, "%3c") ||
+		containsFoldASCIIBytes(body, "%3e") ||
+		containsFoldASCIIBytes(body, "%27") ||
+		containsFoldASCIIBytes(body, "%22") ||
+		containsFoldASCIIBytes(body, "javascript:") ||
+		containsFoldASCIIBytes(body, "vbscript:") ||
+		containsFoldASCIIBytes(body, "document.") ||
+		containsFoldASCIIBytes(body, "onerror") ||
+		containsFoldASCIIBytes(body, "onload") ||
+		containsFoldASCIIBytes(body, "onmouse") ||
+		containsFoldASCIIBytes(body, "onfocus") ||
+		containsFoldASCIIBytes(body, "alert(") ||
+		containsFoldASCIIBytes(body, " union ") ||
+		containsFoldASCIIBytes(body, " select ") ||
+		containsFoldASCIIBytes(body, " or ") ||
+		containsFoldASCIIBytes(body, " and ") ||
+		containsFoldASCIIBytes(body, "sleep(") ||
+		containsFoldASCIIBytes(body, "benchmark(") ||
+		containsFoldASCIIBytes(body, "../") ||
+		containsFoldASCIIBytes(body, "127.0.") ||
+		containsFoldASCIIBytes(body, "localhost") ||
+		containsFoldASCIIBytes(body, "169.254.169.254") ||
+		containsFoldASCIIBytes(body, "metadata.google") ||
+		containsFoldASCIIBytes(body, "aced0005") ||
+		containsFoldASCIIBytes(body, "ro0ab") ||
+		containsFoldASCIIBytes(body, "objectinputstream") ||
+		containsFoldASCIIBytes(body, "deserializ")
 }
 
 // extractBodyTargets parses the request body based on content type and returns
@@ -893,20 +892,7 @@ func dedupeBodyTargets(targets []string) []string {
 		return targets
 	}
 
-	duplicate := false
 	seen := make(map[string]struct{}, len(targets))
-	for _, target := range targets {
-		if _, ok := seen[target]; ok {
-			duplicate = true
-			break
-		}
-		seen[target] = struct{}{}
-	}
-	if !duplicate {
-		return targets
-	}
-
-	seen = make(map[string]struct{}, len(targets))
 	out := targets[:0]
 	for _, target := range targets {
 		if _, ok := seen[target]; ok {

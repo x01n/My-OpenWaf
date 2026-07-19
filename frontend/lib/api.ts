@@ -42,9 +42,21 @@ function clearToken(): void {
 }
 
 /**
- * 刷新 token
+ * 刷新 token（并发去重：多个 401 只触发一次 refresh）
  */
+let refreshPromise: Promise<string | null> | null = null;
+
 async function refreshToken(): Promise<string | null> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = doRefreshToken();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+async function doRefreshToken(): Promise<string | null> {
   try {
     const resp = await fetch(`${API_BASE}/auth/refresh`, {
       method: "POST",
@@ -172,9 +184,15 @@ export function del<T = any>(path: string): Promise<T> {
  */
 export const authApi = {
   login: (username: string, password: string) =>
-    post<{ access_token: string; username: string; role: string }>("/auth/login", { username, password }),
+    post<{ access_token: string; username: string; role: "admin" | "operator" | "readonly" }>("/auth/login", { username, password }),
   logout: () => post("/auth/logout"),
-  me: () => get<{ username: string; role: string }>("/auth/me"),
+  me: () => get<{ username: string; role: "admin" | "operator" | "readonly" }>("/auth/me"),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    post<{ status: string }>("/auth/change-password", { old_password: oldPassword, new_password: newPassword }),
+  listSessions: () =>
+    get<{ items: Array<{ id: number; username: string; ip: string; user_agent: string; login_at: string; last_active_at: string; expires_at: string }> }>("/auth/sessions"),
+  forceLogout: (sessionId: number) =>
+    post("/auth/sessions/force-logout", { session_id: sessionId }),
 };
 
 /**
@@ -228,6 +246,7 @@ export const certificateApi = {
   updateACMEConfig: (data: any) => post("/certificates/acme/config", data),
   acmeApply: (data: any) => post("/certificates/acme/apply", data),
   acmeRenew: (id: string | number) => post(`/certificates/acme/${id}/renew`),
+  getACMEStatus: () => get("/certificates/acme/status"),
 };
 
 /**
@@ -409,6 +428,9 @@ export const settingsApi = {
   getTLS: () => get("/tls-config"),
   updateTLS: (data: any) => post("/tls-config", data),
   getCipherSuites: () => get("/tls-cipher-suites"),
+  getRedis: () => get("/redis-config"),
+  updateRedis: (data: { redis_addr: string; redis_password?: string; redis_db?: number }) =>
+    post("/redis-config", data),
 };
 
 /**
@@ -454,6 +476,18 @@ export const adminUserApi = {
 export const errorPageApi = {
   getDefaults: () => get("/error-pages/defaults"),
   preview: (data: any) => post("/error-pages/preview", data),
+};
+
+/**
+ * 页面模板相关 API
+ */
+export const pageTemplateApi = {
+  getAll: () => get("/page-templates"),
+  get: (type: string) => get(`/page-templates/${type}`),
+  update: (type: string, data: Record<string, string>) =>
+    post(`/page-templates/${type}`, data),
+  reset: (type: string) => post(`/page-templates/${type}/reset`),
+  preview: (type: string) => get(`/page-templates/${type}/preview`),
 };
 
 /**
@@ -510,6 +544,8 @@ export const accessApi = {
     get<{ users: AccessUser[] }>(`/sites/${siteId}/access/users`).then((r) => r.users ?? []),
   createUser: (siteId: string | number, data: { username: string; password: string; enabled?: boolean }) =>
     post<AccessUser>(`/sites/${siteId}/access/users`, data),
+  updateUser: (siteId: string | number, uid: string | number, data: Partial<AccessUser>) =>
+    post(`/sites/${siteId}/access/users/${uid}/update`, data),
   deleteUser: (siteId: string | number, uid: string | number) =>
     post(`/sites/${siteId}/access/users/${uid}/delete`),
 
@@ -562,6 +598,14 @@ export const presetBotWhitelistApi = {
     post<{ added: number; skipped: number; entries: string[] }>(
       "/preset-bot-whitelist/seed",
     ),
+};
+
+/**
+ * TLS 指纹相关 API
+ */
+export const fingerprintApi = {
+  list: (params?: { page?: number; page_size?: number }) =>
+    get<{ items: any[]; total: number }>("/fingerprints", params),
 };
 
 // 引入类型（避免循环依赖，在文件末尾导入类型声明）

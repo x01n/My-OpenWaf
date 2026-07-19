@@ -120,7 +120,8 @@
     "backup": "Backup",
     "falsePositives": "False Positives",
     "requestTrace": "Request Trace",
-    "upstreamStatus": "Upstream Status"
+    "upstreamStatus": "Upstream Status",
+    "pageTemplates": "Page Templates"
   },
   "login": {
     "title": "Login My OpenWAF",
@@ -388,7 +389,45 @@
       "editListener": "Edit Listener",
       "listenerDialogDesc": "Configure the listener bind address and TLS option",
       "bindRequired": "Bind address is required",
-      "addRule": "Add Rule"
+      "addRule": "Add Rule",
+      "actionAllow": "Allow",
+      "actionDeny": "Deny",
+      "actionRequireAuth": "Require Auth",
+      "addPathRule": "Add Path Rule",
+      "addProvider": "Add Provider",
+      "addUser": "Add User",
+      "authUrl": "Auth URL",
+      "clientId": "Client ID",
+      "clientSecret": "Client Secret",
+      "clientSecretPlaceholder": "Enter Client Secret",
+      "editPathRule": "Edit Path Rule",
+      "editProvider": "Edit Provider",
+      "editUser": "Edit User",
+      "issuer": "Issuer",
+      "oauthConfig": "OAuth Config",
+      "pathPlaceholder": "/api/*",
+      "pathRuleAction": "Action",
+      "pathRuleCreated": "Path rule created",
+      "pathRuleUpdated": "Path rule updated",
+      "providerCreated": "Provider created",
+      "providerName": "Provider Name",
+      "providerPriority": "Priority",
+      "providerType": "Provider Type",
+      "providerUpdated": "Provider updated",
+      "redirectPath": "Redirect Path",
+      "scopes": "Scopes",
+      "scopesPlaceholder": "openid profile email",
+      "tokenUrl": "Token URL",
+      "typeOauth2": "OAuth2",
+      "typeOidc": "OIDC",
+      "typePassword": "Password",
+      "usePkce": "Use PKCE",
+      "userCreated": "User created",
+      "userEnabled": "Enabled",
+      "userinfoUrl": "UserInfo URL",
+      "userPassword": "Password",
+      "userPasswordPlaceholder": "Enter password",
+      "userUpdated": "User updated"
     },
     "form": {
       "editTitle": "Edit Site",
@@ -576,7 +615,8 @@
     "deleteConfirmDescription": "The rule will take effect immediately after deletion. Continue?",
     "description": "Manage custom allow/block rules by IP, path, headers, and more",
     "pattern": "Pattern",
-    "priority": "Priority"
+    "priority": "Priority",
+    "emptyHint": "No rules yet, click the button above to add one"
   },
   "ccProtection": {
     "title": "CC Protection",
@@ -698,7 +738,14 @@
     "saveConfig": "Save Configuration",
     "sessionManagement": "Session Management",
     "sessionTimeout": "Session Timeout",
-    "sessionTimeoutDesc": "Automatically log out after this period of inactivity"
+    "sessionTimeoutDesc": "Automatically log out after this period of inactivity",
+    "activeSessions": "Active Sessions",
+    "noActiveSessions": "No active sessions",
+    "forceLogout": "Force Logout",
+    "forceLogoutSuccess": "Session logged out",
+    "forceLogoutFailed": "Logout failed",
+    "loginAt": "Login at",
+    "lastActive": "Last active"
   },
   "settings": {
     "title": "Settings",
@@ -760,7 +807,16 @@
     "tlsSaveFailed": "Failed to save TLS configuration",
     "tlsSaveSuccess": "TLS configuration saved",
     "trustedCidr": "Trusted CIDR",
-    "trustedCidrDesc": "Only forwarding headers from these CIDRs are trusted"
+    "trustedCidrDesc": "Only forwarding headers from these CIDRs are trusted",
+    "redis": "Redis Configuration",
+    "redisAddr": "Redis Address",
+    "redisAddrDesc": "Redis server address, leave empty to disable Redis",
+    "redisPassword": "Redis Password",
+    "redisPasswordPlaceholder": "Leave empty if no password",
+    "redisDb": "Redis DB",
+    "redisDbDesc": "Redis database number (0-15)",
+    "redisSaveSuccess": "Redis configuration saved",
+    "redisSaveFailed": "Failed to save Redis configuration"
   },
   "securityEvents": {
     "title": "Security Events",
@@ -820,7 +876,8 @@
     "eventList": "Event List",
     "phase": "Phase",
     "startTime": "Start Time",
-    "total": "Total {{count}} events"
+    "total": "Total {{count}} events",
+    "emptyHint": "No security events"
   },
   "securityEventDetail": {
     "dialogTitle": "Security Event Details",
@@ -909,7 +966,8 @@
     "createSuccess": "Certificate added successfully",
     "createFailed": "Failed to add certificate",
     "deleteConfirm": "The certificate will be invalidated immediately. Sites using this certificate will not be accessible via HTTPS. Confirm deletion?",
-    "empty": "No certificates"
+    "empty": "No certificates",
+    "emptyHint": "No certificates yet, click the button above to add one"
   },
   "ipLists": {
     "title": "IP Lists",
@@ -1228,5 +1286,44 @@
     "apply": "Apply",
     "anyStart": "Any start",
     "anyEnd": "Now"
+  },
+  "pageTemplates": {
+    "title": "Page Templates",
+    "description": "Customize the appearance of WAF challenge and block pages",
+    "captcha": "Captcha Page",
+    "challenge": "JS Challenge Page",
+    "block": "Block Page",
+    "brandName": "Brand Name",
+    "primaryColor": "Primary Color",
+    "bgGradient": "Background Gradient",
+    "logoUrl": "Logo URL",
+    "pageTitle": "Page Title",
+    "footerText": "Footer Text",
+    "customCss": "Custom CSS",
+    "subtitle": "Subtitle",
+    "subtitleZh": "Subtitle (Chinese)",
+    "submitText": "Submit Button Text",
+    "checkingText": "Checking Text",
+    "checkingTextZh": "Checking Text (Chinese)",
+    "waitText": "Wait Text",
+    "waitTextZh": "Wait Text (Chinese)",
+    "blockTitle": "Block Title",
+    "blockMessage": "Block Message",
+    "rateLimitTitle": "Rate Limit Title",
+    "rateLimitMsg": "Rate Limit Message",
+    "save": "Save",
+    "saved": "Saved successfully",
+    "preview": "Preview",
+    "reset": "Reset to Default",
+    "resetConfirm": "Confirm Reset?",
+    "resetConfirmDesc": "This will restore the page template to system defaults. This action cannot be undone.",
+    "resetSuccess": "Reset to default",
+    "saveFailed": "Save failed",
+    "resetFailed": "Reset failed"
+  },
+  "error": {
+    "pageLoadFailed": "Page load failed",
+    "retry": "Retry",
+    "unexpectedError": "An unexpected error occurred"
   }
 }

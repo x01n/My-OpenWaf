@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 
 /**
  * @typedef {object} EmptyStateProps
@@ -61,24 +60,5 @@ export function EmptyState({
         </div>
       )}
     </div>
-  );
-}
-
-/**
- * 便捷版：当外部只想传一个"主按钮"文案+回调时用。
- */
-export function EmptyStateButton({
-  onClick,
-  children,
-  variant = "default",
-}: {
-  onClick: () => void;
-  children: React.ReactNode;
-  variant?: React.ComponentProps<typeof Button>["variant"];
-}) {
-  return (
-    <Button size="sm" variant={variant} onClick={onClick}>
-      {children}
-    </Button>
   );
 }

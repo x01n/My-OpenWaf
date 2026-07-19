@@ -71,7 +71,6 @@ type ProtectionConfig struct {
 	ShieldRequireHTTP2      bool `json:"shield_require_http2"`       // 要求 HTTP/2
 	ShieldRequireHTTP3      bool `json:"shield_require_http3"`       // 要求 HTTP/3
 	ShieldAllowHTTP1        bool `json:"shield_allow_http1"`         // 允许 HTTP/1.x
-	ShieldEnableWASM        bool `json:"shield_enable_wasm"`         // 启用 WASM PoW
 	ShieldEnableJSChallenge bool `json:"shield_enable_js_challenge"` // 启用 JS 挑战
 	ShieldEnableEnvCheck    bool `json:"shield_enable_env_check"`    // 启用环境指纹
 	ShieldEnableDevTools    bool `json:"shield_enable_devtools"`     // 启用 DevTools 检测
@@ -82,6 +81,10 @@ type ProtectionConfig struct {
 	EscalationEnabled    bool   `json:"escalation_enabled"`
 	EscalationWindowSecs int    `json:"escalation_window_secs"`
 	EscalationSteps      string `json:"escalation_steps,omitempty"`
+
+	BasicAuthEnabled  bool   `json:"basic_auth_enabled"`
+	BasicAuthUsername string `json:"basic_auth_username"`
+	BasicAuthPassword string `json:"basic_auth_password"`
 }
 
 func DefaultProtectionConfig() ProtectionConfig {
@@ -116,7 +119,6 @@ func DefaultProtectionConfig() ProtectionConfig {
 		ShieldMaxRetries:        3,
 		ShieldEnvStrictness:     1,
 		ShieldAllowHTTP1:        true,
-		ShieldEnableWASM:        true,
 		ShieldEnableJSChallenge: true,
 		ShieldEnableEnvCheck:    true,
 		ShieldEnableDevTools:    true,

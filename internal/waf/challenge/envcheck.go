@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 /**
@@ -489,7 +490,27 @@ func envCheckJSWithKey(keyHex string) string {
 	if keyHex == "" {
 		return envCheckJSPlain()
 	}
-	return fmt.Sprintf(`
+	js := fmt.Sprintf(envCheckJSTemplate, keyHex)
+	fpVar := "_" + hex.EncodeToString(func() []byte { b := make([]byte, 3); rand.Read(b); return b }())
+	rawVar := "_" + hex.EncodeToString(func() []byte { b := make([]byte, 3); rand.Read(b); return b }())
+	khVar := "_" + hex.EncodeToString(func() []byte { b := make([]byte, 3); rand.Read(b); return b }())
+	r := strings.NewReplacer(
+		"var fp=", "var "+fpVar+"=",
+		"fp.", fpVar+".",
+		"(fp)", "("+fpVar+")",
+		"=fp;", "="+fpVar+";",
+		"(fp,", "("+fpVar+",",
+		"var raw=", "var "+rawVar+"=",
+		"(raw,", "("+rawVar+",",
+		"(raw)", "("+rawVar+")",
+		"var keyHex=", "var "+khVar+"=",
+		"if(keyHex", "if("+khVar,
+		",keyHex)", ","+khVar+")",
+	)
+	return r.Replace(js)
+}
+
+const envCheckJSTemplate = `
 (function(){
 var fp={};
 try{fp.webdriver=!!navigator.webdriver}catch(e){fp.webdriver=false}
@@ -677,7 +698,9 @@ try{fp.history_api=!!(window.history&&typeof window.history.pushState==='functio
 window.__owaf_env=fp;
 var raw=JSON.stringify(fp);
 var keyHex="%s";
-if(keyHex&&window.crypto&&window.crypto.subtle){
+if(keyHex&&typeof wasm_bindgen!=='undefined'&&typeof wasm_bindgen.encrypt_env_data==='function'){
+window.__owaf_env_encrypted=wasm_bindgen.encrypt_env_data(raw,keyHex);
+}else if(keyHex&&window.crypto&&window.crypto.subtle){
 var keyBytes=new Uint8Array(keyHex.length/2);
 for(var i=0;i<keyHex.length;i+=2)keyBytes[i/2]=parseInt(keyHex.substr(i,2),16);
 crypto.subtle.importKey('raw',keyBytes,{name:'AES-GCM'},false,['encrypt']).then(function(key){
@@ -699,8 +722,7 @@ window.__owaf_env_encrypted=b64;
 });
 }).catch(function(){window.__owaf_env_encrypted='';});
 }else{window.__owaf_env_encrypted='';}
-})();`, keyHex)
-}
+})();`
 
 func envCheckJSPlain() string {
 	return `

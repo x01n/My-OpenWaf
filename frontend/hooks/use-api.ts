@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import useSWR, { mutate, type Key } from "swr";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import {
   siteApi,
   certificateApi,
@@ -28,6 +28,10 @@ import {
   presetBotWhitelistApi,
   requestTraceApi,
   systemApi,
+  pageTemplateApi,
+  authApi,
+  accessApi,
+  fingerprintApi,
 } from "@/lib/api";
 
 /**
@@ -97,8 +101,6 @@ export function useMutation<T, D = any>(
 
   return { execute, loading, error };
 }
-
-import { useState } from "react";
 
 // ============================================================
 // 站点相关 Hook
@@ -669,6 +671,29 @@ export function useLogConfigUpdate() {
   );
 }
 
+export function useRedisConfig() {
+  return useApiQuery(["redis-config"], () => settingsApi.getRedis());
+}
+
+export function useRedisConfigUpdate() {
+  return useMutation(
+    async (data: { redis_addr: string; redis_password?: string; redis_db?: number }) =>
+      settingsApi.updateRedis(data),
+    { invalidateKeys: ["redis-config"] }
+  );
+}
+
+export function useAdminSessions() {
+  return useApiQuery("admin-sessions", () => authApi.listSessions());
+}
+
+export function useForceLogout() {
+  return useMutation(
+    async (sessionId: number) => authApi.forceLogout(sessionId),
+    { invalidateKeys: ["admin-sessions"] }
+  );
+}
+
 export function useDropPolicyUpdate() {
   return useMutation(
     async (data: any) => dropApi.updatePolicy(data),
@@ -799,4 +824,198 @@ export function useFalsePositiveDelete() {
 
 export function useSystemReload() {
   return useMutation(async () => systemApi.reload());
+}
+
+// ── Page Templates ──
+
+export function usePageTemplate(type: string) {
+  return useApiQuery(`page-template-${type}`, () => pageTemplateApi.get(type));
+}
+
+export function usePageTemplateUpdate() {
+  return useMutation(
+    async ({ type, data }: { type: string; data: Record<string, string> }) =>
+      pageTemplateApi.update(type, data),
+    { invalidateKeys: ["page-template-captcha", "page-template-challenge", "page-template-block"] }
+  );
+}
+
+export function usePageTemplateReset() {
+  return useMutation(
+    async (type: string) => pageTemplateApi.reset(type),
+    { invalidateKeys: ["page-template-captcha", "page-template-challenge", "page-template-block"] }
+  );
+}
+
+export function usePageTemplatePreview(type: string) {
+  return useApiQuery(`page-template-preview-${type}`, () => pageTemplateApi.preview(type));
+}
+
+// ── Access Control (per-site) ──
+
+export function useAccessProviderCreate() {
+  return useMutation(
+    async ({ siteId, data }: { siteId: number; data: any }) =>
+      accessApi.createProvider(siteId, data),
+    { invalidateKeys: ["access-providers"] }
+  );
+}
+
+export function useAccessProviderUpdate() {
+  return useMutation(
+    async ({ siteId, pid, data }: { siteId: number; pid: number; data: any }) =>
+      accessApi.updateProvider(siteId, pid, data),
+    { invalidateKeys: ["access-providers"] }
+  );
+}
+
+export function useAccessUserCreate() {
+  return useMutation(
+    async ({ siteId, data }: { siteId: number; data: { username: string; password: string; enabled?: boolean } }) =>
+      accessApi.createUser(siteId, data),
+    { invalidateKeys: ["access-users"] }
+  );
+}
+
+export function useAccessUserUpdate() {
+  return useMutation(
+    async ({ siteId, uid, data }: { siteId: number; uid: number; data: any }) =>
+      accessApi.updateUser(siteId, uid, data),
+    { invalidateKeys: ["access-users"] }
+  );
+}
+
+export function useAccessPathRuleCreate() {
+  return useMutation(
+    async ({ siteId, data }: { siteId: number; data: any }) =>
+      accessApi.createPathRule(siteId, data),
+    { invalidateKeys: ["access-path-rules"] }
+  );
+}
+
+export function useAccessPathRuleUpdate() {
+  return useMutation(
+    async ({ siteId, rid, data }: { siteId: number; rid: number; data: any }) =>
+      accessApi.updatePathRule(siteId, rid, data),
+    { invalidateKeys: ["access-path-rules"] }
+  );
+}
+
+// ============================================================
+// 站点访问控制 Query Hooks
+// ============================================================
+
+export function useAccessConfig(siteId: number | string | undefined) {
+  return useApiQuery(
+    siteId ? ["access-config", siteId] : null,
+    () => accessApi.getConfig(siteId!)
+  );
+}
+
+export function useAccessProviders(siteId: number | string | undefined) {
+  return useApiQuery(
+    siteId ? ["access-providers", siteId] : null,
+    () => accessApi.listProviders(siteId!)
+  );
+}
+
+export function useAccessUsers(siteId: number | string | undefined) {
+  return useApiQuery(
+    siteId ? ["access-users", siteId] : null,
+    () => accessApi.listUsers(siteId!)
+  );
+}
+
+export function useAccessPathRules(siteId: number | string | undefined) {
+  return useApiQuery(
+    siteId ? ["access-path-rules", siteId] : null,
+    () => accessApi.listPathRules(siteId!)
+  );
+}
+
+// ============================================================
+// 证书 ACME 状态 Hook
+// ============================================================
+
+export function useACMEStatus() {
+  return useApiQuery(["acme-status"], () => certificateApi.getACMEStatus());
+}
+
+export function useACMEConfig() {
+  return useApiQuery(["acme-config"], () => certificateApi.getACMEConfig());
+}
+
+// ============================================================
+// TLS 指纹 Hook
+// ============================================================
+
+export function useFingerprints(params?: { page?: number; page_size?: number }) {
+  return useApiQuery(["fingerprints", params], () => fingerprintApi.list(params));
+}
+
+// ============================================================
+// Drop 统计 Hook
+// ============================================================
+
+export function useDropStats() {
+  return useApiQuery(["drop-stats"], () => dropApi.getStats());
+}
+
+// ============================================================
+// Bot 统计 Hook
+// ============================================================
+
+export function useBotStats() {
+  return useApiQuery(["bot-stats"], () => botApi.getStats());
+}
+
+export function useBotScores() {
+  return useApiQuery(["bot-scores"], () => botApi.getScores());
+}
+
+// ============================================================
+// CVE/OWASP 统计 Hook
+// ============================================================
+
+export function useCveStats() {
+  return useApiQuery(["cve-stats"], () => cveApi.getStats());
+}
+
+export function useCveFeedStatus() {
+  return useApiQuery(["cve-feed-status"], () => cveApi.getFeedStatus());
+}
+
+export function useOwaspStats() {
+  return useApiQuery(["owasp-stats"], () => owaspApi.getStats());
+}
+
+// ============================================================
+// Chain Sessions Hook
+// ============================================================
+
+export function useChainSessions() {
+  return useApiQuery(["chain-sessions"], () => chainApi.getSessions());
+}
+
+// ============================================================
+// HTTP2 Config Hook
+// ============================================================
+
+export function useHTTP2Config() {
+  return useApiQuery(["http2-config"], () => settingsApi.getHTTP2());
+}
+
+export function useHTTP2ConfigUpdate() {
+  return useMutation(
+    async (data: any) => settingsApi.updateHTTP2(data),
+    { invalidateKeys: ["http2-config"] }
+  );
+}
+
+// ============================================================
+// TLS Cipher Suites Hook
+// ============================================================
+
+export function useCipherSuites() {
+  return useApiQuery(["cipher-suites"], () => settingsApi.getCipherSuites());
 }

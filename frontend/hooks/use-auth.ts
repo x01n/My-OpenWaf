@@ -1,25 +1,27 @@
 import { useState, useEffect, useCallback } from "react";
 import { authApi } from "@/lib/api";
-import type { User } from "@/lib/types";
+
+export interface AuthUser {
+  username: string;
+  role: "admin" | "operator" | "readonly";
+}
 
 /**
  * 认证状态管理 Hook
  */
 export function useAuth() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLoading(false);
       return;
     }
     authApi.me()
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .then((data: any) => {
-        setUser(data);
+      .then((data) => {
+        setUser({ username: data.username, role: data.role });
       })
       .catch(() => {
         localStorage.removeItem("token");
@@ -33,7 +35,7 @@ export function useAuth() {
     const data = await authApi.login(username, password);
     if (data.access_token) {
       localStorage.setItem("token", data.access_token);
-      setUser({ username: data.username, role: data.role } as User);
+      setUser({ username: data.username, role: data.role });
     }
     return data;
   }, []);
@@ -61,7 +63,6 @@ export function useIsAuthenticated() {
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setChecked(true);
       return;
     }

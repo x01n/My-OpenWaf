@@ -26,7 +26,6 @@ type captchaConfigResponse struct {
 	ShieldRequireHTTP2      bool   `json:"shield_require_http2"`
 	ShieldRequireHTTP3      bool   `json:"shield_require_http3"`
 	ShieldAllowHTTP1        bool   `json:"shield_allow_http1"`
-	ShieldEnableWASM        bool   `json:"shield_enable_wasm"`
 	ShieldEnableJSChallenge bool   `json:"shield_enable_js_challenge"`
 	ShieldEnableEnvCheck    bool   `json:"shield_enable_env_check"`
 	ShieldEnableDevTools    bool   `json:"shield_enable_devtools"`
@@ -46,7 +45,6 @@ type captchaConfigRequest struct {
 	ShieldRequireHTTP2      *bool  `json:"shield_require_http2"`
 	ShieldRequireHTTP3      *bool  `json:"shield_require_http3"`
 	ShieldAllowHTTP1        *bool  `json:"shield_allow_http1"`
-	ShieldEnableWASM        *bool  `json:"shield_enable_wasm"`
 	ShieldEnableJSChallenge *bool  `json:"shield_enable_js_challenge"`
 	ShieldEnableEnvCheck    *bool  `json:"shield_enable_env_check"`
 	ShieldEnableDevTools    *bool  `json:"shield_enable_devtools"`
@@ -75,7 +73,6 @@ func buildCaptchaConfigResponse(cfg store.ProtectionConfig) captchaConfigRespons
 		ShieldRequireHTTP2:      cfg.ShieldRequireHTTP2,
 		ShieldRequireHTTP3:      cfg.ShieldRequireHTTP3,
 		ShieldAllowHTTP1:        cfg.ShieldAllowHTTP1,
-		ShieldEnableWASM:        cfg.ShieldEnableWASM,
 		ShieldEnableJSChallenge: cfg.ShieldEnableJSChallenge,
 		ShieldEnableEnvCheck:    cfg.ShieldEnableEnvCheck,
 		ShieldEnableDevTools:    cfg.ShieldEnableDevTools,
@@ -136,9 +133,6 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 		}
 		if req.ShieldAllowHTTP1 != nil {
 			cfg.ShieldAllowHTTP1 = *req.ShieldAllowHTTP1
-		}
-		if req.ShieldEnableWASM != nil {
-			cfg.ShieldEnableWASM = *req.ShieldEnableWASM
 		}
 		if req.ShieldEnableJSChallenge != nil {
 			cfg.ShieldEnableJSChallenge = *req.ShieldEnableJSChallenge

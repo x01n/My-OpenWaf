@@ -26,7 +26,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username || !password) {
-      toast.error(t("login.emptyCredentials", { defaultValue: "请输入用户名和密码" }));
+      toast.error(t("login.emptyCredentials"));
       return;
     }
     setLoading(true);

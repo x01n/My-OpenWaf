@@ -19,8 +19,8 @@ import (
 var (
 	gzipWASMOnce sync.Once
 	gzipWASM     []byte
-	gzipExecOnce sync.Once
-	gzipExecJS   []byte
+	gzipGlueOnce sync.Once
+	gzipGlueJS   []byte
 )
 
 func gzipBytes(data []byte) []byte {
@@ -37,18 +37,18 @@ func ServePoWWASM(c *app.RequestContext) {
 	c.Response.SetStatusCode(200)
 	c.Response.Header.Set("Content-Type", "application/wasm")
 	c.Response.Header.Set("Content-Encoding", "gzip")
-	c.Response.Header.Set("Cache-Control", "no-store")
+	c.Response.Header.Set("Cache-Control", "public,max-age=3600,immutable")
 	c.Response.SetBody(gzipWASM)
 }
 
-// ServeWasmExecJS serves the Go wasm_exec.js glue (gzipped).
-func ServeWasmExecJS(c *app.RequestContext) {
-	gzipExecOnce.Do(func() { gzipExecJS = gzipBytes(powdata.WasmExecJS) })
+// ServePowGlueJS serves the Rust wasm-bindgen glue JS (gzipped).
+func ServePowGlueJS(c *app.RequestContext) {
+	gzipGlueOnce.Do(func() { gzipGlueJS = gzipBytes(powdata.PowGlueJS) })
 	c.Response.SetStatusCode(200)
 	c.Response.Header.Set("Content-Type", "application/javascript")
 	c.Response.Header.Set("Content-Encoding", "gzip")
-	c.Response.Header.Set("Cache-Control", "no-store")
-	c.Response.SetBody(gzipExecJS)
+	c.Response.Header.Set("Cache-Control", "public,max-age=3600,immutable")
+	c.Response.SetBody(gzipGlueJS)
 }
 
 // GeneratePoWNonce creates a cryptographically random nonce for PoW challenges.
@@ -58,56 +58,6 @@ func GeneratePoWNonce() string {
 	return hex.EncodeToString(b)
 }
 
-// GeneratePoWScript returns inline JavaScript that performs SHA-256 proof-of-work
-// in a Web Worker (inline blob). The script finds a counter such that
-// SHA-256(nonce + counter) has `difficulty` leading zero hex characters.
-//
-// Phase 1: Pure JS Web Worker implementation.
-// Phase 2 (future): WASM module for faster computation.
-func GeneratePoWScript(difficulty int, nonce string) string {
-	return fmt.Sprintf(`
-(function(){
-var nonce="%s",difficulty=%d;
-var workerCode='self.onmessage=function(e){var nonce=e.data.nonce,diff=e.data.difficulty,prefix="";for(var i=0;i<diff;i++)prefix+="0";var counter=0;function toHex(buf){var h="";var u=new Uint8Array(buf);for(var i=0;i<u.length;i++){var s=u[i].toString(16);h+=s.length===1?"0"+s:s}return h}function check(){var batch=5000;for(var i=0;i<batch;i++){var msg=nonce+counter;crypto.subtle.digest("SHA-256",new TextEncoder().encode(msg)).then(function(c,hash){var hex=toHex(hash);if(hex.substring(0,diff)===prefix){self.postMessage({found:true,counter:c,hash:hex})}}.bind(null,counter));counter++}setTimeout(check,0)}check()}';
-var blob=new Blob([workerCode],{type:'application/javascript'});
-var w=new Worker(URL.createObjectURL(blob));
-w.postMessage({nonce:nonce,difficulty:difficulty});
-w.onmessage=function(e){
-if(e.data.found){
-w.terminate();
-window.__powResult={nonce:nonce,counter:e.data.counter,hash:e.data.hash,difficulty:difficulty};
-if(window.__owaf_pow_callback)window.__owaf_pow_callback(e.data.counter,e.data.hash,window.__powResult);
-if(window.__onPoWComplete)window.__onPoWComplete(window.__powResult);
-}};
-window.__powWorker=w;
-})();`, nonce, difficulty)
-}
-
-// GeneratePoWScriptSync returns a synchronous (main-thread) PoW script fallback
-// for environments where Web Workers may not be available.
-func GeneratePoWScriptSync(difficulty int, nonce string) string {
-	return fmt.Sprintf(`
-(function(){
-var nonce="%s",difficulty=%d;
-var prefix="";for(var i=0;i<difficulty;i++)prefix+="0";
-async function solve(){
-var counter=0;
-while(true){
-var msg=nonce+counter;
-var buf=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(msg));
-var u=new Uint8Array(buf);var h="";
-for(var i=0;i<u.length;i++){var s=u[i].toString(16);h+=s.length===1?"0"+s:s;}
-if(h.substring(0,difficulty)===prefix){
-window.__powResult={nonce:nonce,counter:counter,hash:h,difficulty:difficulty};
-if(window.__owaf_pow_callback)window.__owaf_pow_callback(counter,h,window.__powResult);
-if(window.__onPoWComplete)window.__onPoWComplete(window.__powResult);
-return;}
-counter++;
-if(counter%%1000===0)await new Promise(r=>setTimeout(r,0));
-}}
-solve();
-})();`, nonce, difficulty)
-}
 
 // VerifyPoW verifies a proof-of-work solution.
 // It checks that SHA-256(nonce + counter) has the required leading zeros.
@@ -164,43 +114,54 @@ func GenerateVMProgram() string {
 	return hex.EncodeToString(prog)
 }
 
-// GeneratePoWWASMScript returns a minimal JS loader that loads the WASM module
-// and invokes the PoW solver. All computation happens inside WASM; JS only
-// passes nonce, difficulty, and the VM bytecode program.
-func GeneratePoWWASMScript(difficulty int, nonce string) string {
+// GeneratePoWWASMScript returns a JS loader that spawns multiple Web Workers
+// (one per CPU core) to solve PoW in parallel using the Rust WASM module.
+// Each worker processes a different counter range via solve_pow_batched.
+// If the WASM module fails to load, an error is thrown — there is no JS fallback.
+func GeneratePoWWASMScript(difficulty int, nonce string, envKeyHex string) string {
 	v := randomVarNames(6)
 	encodedNonce := polymorphicEncode(nonce)
 	program := GenerateVMProgram()
-	// Cache-busting: add random query parameter to prevent browser/proxy caching of assets.
 	cacheBust := make([]byte, 4)
 	_, _ = rand.Read(cacheBust)
 	cb := hex.EncodeToString(cacheBust)
 
 	return fmt.Sprintf(`(function(){
 var %s=%s,%s=%d,%s="%s";
-var %s=document.createElement("script");
-%s.src="/__owaf/wasm_exec.js?_=%s";
-%s.onerror=function(){if(window.__owaf_pow_error)window.__owaf_pow_error("wasm_exec.js load failed")};
-%s.onload=function(){
-var go=new Go();
-fetch("/__owaf/pow.wasm?_=%s").then(function(r){if(!r.ok)throw new Error("pow.wasm "+r.status);return r.arrayBuffer()}).then(function(b){
-return WebAssembly.instantiate(b,go.importObject)
-}).then(function(r){
-go.run(r.instance);
-__wasm_pow_solve(%s,%s,%s);
-}).catch(function(e){if(window.__owaf_pow_error)window.__owaf_pow_error(e.message||"wasm load failed")});
-};
-document.head.appendChild(%s);
+var envD=window.__owaf_env?JSON.stringify(window.__owaf_env):"";
+var ek="%s";
+var nc=navigator.hardwareConcurrency||4;
+var bs=50000;
+var ws=[];
+var done=false;
+var wc='importScripts("'+location.origin+'/__owaf/pow_glue.js?_=%s");wasm_bindgen("'+location.origin+'/__owaf/pow.wasm?_=%s").then(function(){var off=self.__off;function batch(){if(self.__stop)return;var r=wasm_bindgen.solve_pow_batched(self.__n,self.__d,self.__p,self.__bs,off);var o=JSON.parse(r);if(o.found){var enc="";if(self.__e&&self.__k){try{enc=wasm_bindgen.encrypt_env_data(self.__e,self.__k)}catch(x){}}self.postMessage(JSON.stringify({found:true,pow:r,enc:enc}))}else{off+=self.__bs*self.__nc;self.postMessage(JSON.stringify({found:false}));setTimeout(batch,0)}}batch()}).catch(function(e){self.postMessage(JSON.stringify({error:e.message||"wasm init failed"}))});';
+for(var i=0;i<nc;i++){
+var code='self.__n='+JSON.stringify(%s)+';self.__d='+%s+';self.__p='+JSON.stringify(%s)+';self.__e='+JSON.stringify(envD)+';self.__k='+JSON.stringify(ek)+';self.__off='+i+'*'+bs+';self.__bs='+bs+';self.__nc='+nc+';self.__stop=false;'+wc;
+var b=new Blob([code],{type:'application/javascript'});
+var w=new Worker(URL.createObjectURL(b));
+w.onmessage=function(e){
+if(done)return;
+try{var msg=JSON.parse(e.data);
+if(msg.error){done=true;for(var j=0;j<ws.length;j++)ws[j].terminate();throw new Error("[OWAF] WASM PoW failed: "+msg.error)}
+if(msg.found){done=true;
+for(var j=0;j<ws.length;j++)ws[j].terminate();
+var p=JSON.parse(msg.pow);
+if(msg.enc&&!window.__owaf_env_encrypted)window.__owaf_env_encrypted=msg.enc;
+window.__powResult={nonce:%s,counter:p.counter,hash:p.hash,difficulty:%s,env_score:p.env_score,markers:p.markers,sig:p.sig};
+if(window.__owaf_pow_callback)window.__owaf_pow_callback(p.counter,p.hash,window.__powResult);
+if(window.__onPoWComplete)window.__onPoWComplete(window.__powResult);
+}}catch(ex){if(!done){done=true;for(var j=0;j<ws.length;j++)ws[j].terminate();}throw ex}};
+w.onerror=function(e){if(!done){done=true;for(var j=0;j<ws.length;j++)ws[j].terminate();throw new Error("[OWAF] WASM Worker error: "+(e.message||"unknown"))}};
+ws.push(w);
+}
 })();`,
 		v[0], encodedNonce,
 		v[1], difficulty,
 		v[2], program,
-		v[3],
-		v[3], cb,
-		v[3],
-		v[3], cb,
+		envKeyHex,
+		cb, cb,
 		v[0], v[1], v[2],
-		v[3],
+		v[0], v[1],
 	)
 }
 
@@ -215,7 +176,7 @@ func randomVarNames(n int) []string {
 }
 
 func polymorphicEncode(s string) string {
-	switch randIntN(3) {
+	switch randIntN(5) {
 	case 0:
 		var parts []string
 		for _, c := range s {
@@ -228,9 +189,28 @@ func polymorphicEncode(s string) string {
 			parts = append(parts, fmt.Sprintf("'%c'", c))
 		}
 		return fmt.Sprintf("[%s].join('')", strings.Join(parts, ","))
-	default:
+	case 2:
 		return fmt.Sprintf(`(function(){for(var h="%s",r="",i=0;i<h.length;i+=2)r+=String.fromCharCode(parseInt(h.substr(i,2),16));return r})()`, hex.EncodeToString([]byte(s)))
+	case 3:
+		reversed := reverseString(s)
+		return fmt.Sprintf(`"%s".split('').reverse().join('')`, reversed)
+	default:
+		key := byte(randIntN(200) + 33)
+		var encoded []string
+		for _, c := range []byte(s) {
+			encoded = append(encoded, fmt.Sprintf("%d", c^key))
+		}
+		return fmt.Sprintf(`(function(){for(var a=[%s],k=%d,r="",i=0;i<a.length;i++)r+=String.fromCharCode(a[i]^k);return r})()`,
+			strings.Join(encoded, ","), key)
 	}
+}
+
+func reverseString(s string) string {
+	runes := []rune(s)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+	return string(runes)
 }
 
 func randIntN(max int) int {

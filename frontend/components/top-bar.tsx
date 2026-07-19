@@ -1,9 +1,9 @@
+"use client";
+
 /**
  * 顶部栏组件
  * 显示页面标题、用户信息、退出登录
  */
-
-"use client";
 
 import { useTranslation } from "react-i18next";
 import { usePathname } from "next/navigation";

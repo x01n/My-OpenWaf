@@ -120,7 +120,8 @@
     "backup": "备份恢复",
     "falsePositives": "误报反馈",
     "requestTrace": "请求追踪",
-    "upstreamStatus": "上游状态"
+    "upstreamStatus": "上游状态",
+    "pageTemplates": "页面模板"
   },
   "login": {
     "title": "登录 My OpenWAF",
@@ -391,7 +392,45 @@
       "editListener": "编辑监听器",
       "listenerDialogDesc": "配置监听器的绑定地址和 TLS 选项",
       "bindRequired": "绑定地址不能为空",
-      "addRule": "新增规则"
+      "addRule": "新增规则",
+      "actionAllow": "允许",
+      "actionDeny": "拒绝",
+      "actionRequireAuth": "需要认证",
+      "addPathRule": "添加路径规则",
+      "addProvider": "添加认证提供者",
+      "addUser": "添加用户",
+      "authUrl": "授权 URL",
+      "clientId": "Client ID",
+      "clientSecret": "Client Secret",
+      "clientSecretPlaceholder": "输入 Client Secret",
+      "editPathRule": "编辑路径规则",
+      "editProvider": "编辑认证提供者",
+      "editUser": "编辑用户",
+      "issuer": "Issuer",
+      "oauthConfig": "OAuth 配置",
+      "pathPlaceholder": "/api/*",
+      "pathRuleAction": "规则动作",
+      "pathRuleCreated": "路径规则已创建",
+      "pathRuleUpdated": "路径规则已更新",
+      "providerCreated": "认证提供者已创建",
+      "providerName": "提供者名称",
+      "providerPriority": "优先级",
+      "providerType": "提供者类型",
+      "providerUpdated": "认证提供者已更新",
+      "redirectPath": "回调路径",
+      "scopes": "Scopes",
+      "scopesPlaceholder": "openid profile email",
+      "tokenUrl": "Token URL",
+      "typeOauth2": "OAuth2",
+      "typeOidc": "OIDC",
+      "typePassword": "用户名密码",
+      "usePkce": "使用 PKCE",
+      "userCreated": "用户已创建",
+      "userEnabled": "启用用户",
+      "userinfoUrl": "UserInfo URL",
+      "userPassword": "密码",
+      "userPasswordPlaceholder": "输入密码",
+      "userUpdated": "用户已更新"
     },
     "form": {
       "editTitle": "编辑应用",
@@ -576,7 +615,8 @@
     "deleteConfirmDescription": "删除该规则后将立即失效，是否继续？",
     "description": "管理自定义黑白名单规则，支持按 IP、路径、请求头等条件放行或拦截请求",
     "pattern": "匹配模式",
-    "priority": "优先级"
+    "priority": "优先级",
+    "emptyHint": "还没有规则，点击上方按钮添加"
   },
   "ccProtection": {
     "title": "CC 防护",
@@ -698,7 +738,14 @@
     "saveConfig": "保存配置",
     "sessionManagement": "会话管理",
     "sessionTimeout": "会话超时时间",
-    "sessionTimeoutDesc": "超过该时长未活跃会自动退出登录"
+    "sessionTimeoutDesc": "超过该时长未活跃会自动退出登录",
+    "activeSessions": "活跃会话",
+    "noActiveSessions": "暂无活跃会话",
+    "forceLogout": "强制注销",
+    "forceLogoutSuccess": "会话已注销",
+    "forceLogoutFailed": "注销失败",
+    "loginAt": "登录时间",
+    "lastActive": "最后活跃"
   },
   "settings": {
     "title": "通用设置",
@@ -760,7 +807,16 @@
     "tlsSaveFailed": "TLS 配置保存失败",
     "tlsSaveSuccess": "TLS 配置已保存",
     "trustedCidr": "可信来源 CIDR",
-    "trustedCidrDesc": "仅这些 CIDR 内的代理头会被采信"
+    "trustedCidrDesc": "仅这些 CIDR 内的代理头会被采信",
+    "redis": "Redis 配置",
+    "redisAddr": "Redis 地址",
+    "redisAddrDesc": "Redis 服务器连接地址，留空则禁用 Redis",
+    "redisPassword": "Redis 密码",
+    "redisPasswordPlaceholder": "如无密码留空",
+    "redisDb": "Redis DB",
+    "redisDbDesc": "Redis 数据库编号 (0-15)",
+    "redisSaveSuccess": "Redis 配置已保存",
+    "redisSaveFailed": "Redis 配置保存失败"
   },
   "securityEvents": {
     "title": "安全事件",
@@ -820,7 +876,8 @@
     "eventList": "事件列表",
     "phase": "阶段",
     "startTime": "开始时间",
-    "total": "共 {{count}} 条事件"
+    "total": "共 {{count}} 条事件",
+    "emptyHint": "暂无安全事件"
   },
   "securityEventDetail": {
     "dialogTitle": "安全事件详情",
@@ -909,7 +966,8 @@
     "createSuccess": "证书添加成功",
     "createFailed": "证书添加失败",
     "deleteConfirm": "删除后证书将立即失效，使用该证书的站点将无法通过 HTTPS 访问。是否确认删除？",
-    "empty": "暂无证书"
+    "empty": "暂无证书",
+    "emptyHint": "还没有证书，点击上方按钮添加"
   },
   "ipLists": {
     "title": "IP 列表",
@@ -1228,5 +1286,44 @@
     "apply": "应用",
     "anyStart": "起始不限",
     "anyEnd": "至今"
+  },
+  "pageTemplates": {
+    "title": "页面模板",
+    "description": "自定义 WAF 挑战和拦截页面的外观",
+    "captcha": "验证码页面",
+    "challenge": "JS 挑战页面",
+    "block": "拦截页面",
+    "brandName": "品牌名称",
+    "primaryColor": "主色调",
+    "bgGradient": "背景渐变",
+    "logoUrl": "Logo URL",
+    "pageTitle": "页面标题",
+    "footerText": "页脚文案",
+    "customCss": "自定义 CSS",
+    "subtitle": "副标题",
+    "subtitleZh": "副标题（中文）",
+    "submitText": "提交按钮文案",
+    "checkingText": "检查中文案",
+    "checkingTextZh": "检查中文案（中文）",
+    "waitText": "等待文案",
+    "waitTextZh": "等待文案（中文）",
+    "blockTitle": "拦截标题",
+    "blockMessage": "拦截消息",
+    "rateLimitTitle": "限流标题",
+    "rateLimitMsg": "限流消息",
+    "save": "保存",
+    "saved": "保存成功",
+    "preview": "预览",
+    "reset": "重置为默认",
+    "resetConfirm": "确认重置？",
+    "resetConfirmDesc": "此操作将恢复页面模板为系统默认值，无法撤销。",
+    "resetSuccess": "已重置为默认",
+    "saveFailed": "保存失败",
+    "resetFailed": "重置失败"
+  },
+  "error": {
+    "pageLoadFailed": "页面加载失败",
+    "retry": "重试",
+    "unexpectedError": "发生了意外错误"
   }
 }

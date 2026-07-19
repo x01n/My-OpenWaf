@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -207,13 +208,16 @@ func LogoutHandler(d *AuthDeps) app.HandlerFunc {
 		}
 
 		// Blacklist access token JTI.
-		if jtiVal, exists := c.Get("auth_jti"); exists {
-			if jti, ok := jtiVal.(string); ok && jti != "" {
-				if d.TokenMgr != nil {
-					d.TokenMgr.BlacklistToken(jti, time.Now().Add(auth.AccessTTL), "logout")
-				}
-				if d.SessionMgr != nil {
-					d.SessionMgr.RemoveSession(jti)
+		// Logout is outside auth middleware, so parse the token here directly.
+		if d.TokenMgr != nil {
+			if header := strings.TrimSpace(string(c.GetHeader("Authorization"))); header != "" {
+				if token := strings.TrimPrefix(header, "Bearer "); token != header {
+					if claims, err := d.TokenMgr.VerifyAccessToken(token); err == nil && claims.ID != "" {
+						d.TokenMgr.BlacklistToken(claims.ID, time.Now().Add(auth.AccessTTL), "logout")
+						if d.SessionMgr != nil {
+							d.SessionMgr.RemoveSession(claims.ID)
+						}
+					}
 				}
 			}
 		}
@@ -231,5 +235,44 @@ func MeHandler(d *AuthDeps) app.HandlerFunc {
 			"username": username,
 			"role":     role,
 		})
+	}
+}
+
+func ChangeOwnPasswordHandler(d *AuthDeps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		usernameVal, _ := c.Get("auth_user")
+		username, _ := usernameVal.(string)
+		if username == "" {
+			c.JSON(401, map[string]string{"error": "unauthorized"})
+			return
+		}
+
+		var body struct {
+			OldPassword string `json:"old_password"`
+			NewPassword string `json:"new_password"`
+		}
+		if err := c.BindJSON(&body); err != nil {
+			c.JSON(400, map[string]string{"error": "invalid request body"})
+			return
+		}
+		if body.OldPassword == "" || body.NewPassword == "" {
+			c.JSON(400, map[string]string{"error": "old_password and new_password are required"})
+			return
+		}
+		if len(body.NewPassword) < 8 {
+			c.JSON(400, map[string]string{"error": "new password must be at least 8 characters"})
+			return
+		}
+
+		if _, ok := d.AccountRepo.VerifyPassword(username, body.OldPassword); !ok {
+			c.JSON(403, map[string]string{"error": "current password is incorrect"})
+			return
+		}
+
+		if err := d.AccountRepo.UpdatePassword(username, body.NewPassword); err != nil {
+			c.JSON(500, map[string]string{"error": "failed to update password"})
+			return
+		}
+		c.JSON(200, map[string]string{"status": "ok"})
 	}
 }
