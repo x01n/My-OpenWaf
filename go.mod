@@ -13,7 +13,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hertz-contrib/http2 v0.1.8
 	github.com/hertz-contrib/websocket v0.2.0
-	github.com/klauspost/compress v1.19.0
+	github.com/klauspost/compress v1.19.1
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/quic-go/quic-go v0.60.0
 	github.com/redis/go-redis/v9 v9.21.0
