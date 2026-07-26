@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import {
   useIPLists,
   useIPListMutation,
@@ -14,6 +15,7 @@ import { DataTable } from "@/components/data-table";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -65,11 +67,13 @@ export default function IPListsPage() {
   const {
     data: globalData,
     isLoading: globalLoading,
+    error: globalError,
     mutate: mutateGlobal,
   } = useIPLists();
   const {
     data: siteData,
     isLoading: siteLoading,
+    error: siteError,
     mutate: mutateSite,
   } = useIPLists(
     scopeSiteId !== undefined ? { site_id: scopeSiteId } : undefined,
@@ -312,33 +316,36 @@ export default function IPListsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            {t("ipLists.title")}
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            {t("ipLists.description")}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            onClick={() => setPresetDialogOpen(true)}
-          >
-            <IconRobot className="h-4 w-4" />
-            {t("ipLists.presetBots.button")}
-          </Button>
-          <Button variant="outline" onClick={() => setBulkDialogOpen(true)}>
-            <IconUpload className="h-4 w-4" />
-            {t("ipLists.bulkImport")}
-          </Button>
-          <Button onClick={() => setDialogOpen(true)}>
-            <IconPlus className="h-4 w-4" />
-            {t("ipLists.add")}
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        title={t("ipLists.title")}
+        description={t("ipLists.description")}
+        actions={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setPresetDialogOpen(true)}
+            >
+              <IconRobot className="h-4 w-4" />
+              {t("ipLists.presetBots.button")}
+            </Button>
+            <Button variant="outline" onClick={() => setBulkDialogOpen(true)}>
+              <IconUpload className="h-4 w-4" />
+              {t("ipLists.bulkImport")}
+            </Button>
+            <Button onClick={() => setDialogOpen(true)}>
+              <IconPlus className="h-4 w-4" />
+              {t("ipLists.add")}
+            </Button>
+          </>
+        }
+      />
+
+      {(globalError || siteError) && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>{((globalError || siteError) as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+        </Alert>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Input

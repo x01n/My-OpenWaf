@@ -71,14 +71,29 @@ func WriteMaintenanceResponse(c *app.RequestContext, reqID string, rt *snapshot.
 }
 
 // WriteChallengeResponse renders a JS challenge page that the client must solve.
-func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, statusCode int) {
+// envCheck 为 true 时在挑战页注入浏览器/环境采集 JS，提交时携带 __waf_env_fp，
+// 服务端据此判定是否为真实浏览器（明文指纹，硬信号即拒绝）。
+//
+// tokenClaims 把挑战 token 绑定到发起请求的客户端（IP/UA/Host/站点），
+// 其他客户端拿到页面里的 rid/ts/token 三元组也无法换取通行凭证。
+func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, envCheck bool, statusCode int, tokenClaims challenge.ChallengeTokenClaims) {
 	c.Response.Header.Set("X-Request-ID", reqID)
 	c.Response.Header.Del("Server")
 	c.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 
-	ts, token := challenge.GenerateChallengeTokenPair(reqID)
+	ts, token := challenge.GenerateChallengeTokenPairWithClaims(reqID, tokenClaims)
 
-	html := buildChallengeHTML(reqID, ts, token)
+	envJS := ""
+	envKeyHex := ""
+	if envCheck {
+		envJS = challenge.EnvCheckJS()
+		envKeyHex = challenge.EnvSessionKeyHex(challenge.GenerateEnvSessionKey())
+	}
+	// 工作量证明一律由 Rust WASM 模块在 Web Worker 中求解，无 JS 降级路径：
+	// WASM 加载失败即抛错、挑战不通过，避免纯 JS 实现被轻易改写或跳过。
+	// 以 token 作为 nonce，使工作量与本次挑战绑定，无法预算或跨挑战复用。
+	powScript := challenge.GeneratePoWWASMScript(challenge.ChallengeProofDifficulty, token, envKeyHex)
+	html := buildChallengeHTML(reqID, ts, token, envJS, powScript)
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
@@ -227,7 +242,7 @@ func buildErrorFallbackHTML(reqID string, statusCode int) string {
 		`</div></body></html>`
 }
 
-func buildChallengeHTML(reqID, ts, token string) string {
+func buildChallengeHTML(reqID, ts, token, envJS, powScript string) string {
 	return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Security Check</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -257,19 +272,36 @@ h2{font-size:1.15rem;font-weight:600;color:#334155;margin-bottom:6px}
 <div class="footer">Protected by My-OpenWAF</div>
 </div>
 <script>
+` + envJS + `
+` + powScript + `
 (function(){
 var ts="` + ts + `",tk="` + token + `",rid="` + reqID + `";
-function solve(){
-var start=Date.now(),sum=0;
-for(var i=0;i<1e6;i++) sum=(sum+i*7)%1e9;
-var elapsed=Date.now()-start;
+var submitted=false;
+function fail(m){
+var el=document.getElementById("msg");
+if(el){el.textContent=m;el.style.display="block"}
+}
+function submit(counter,hash,res){
+if(submitted)return;submitted=true;
 var d=document.createElement("form");d.method="POST";d.style.display="none";
 function af(n,v){var i=document.createElement("input");i.type="hidden";i.name=n;i.value=v;d.appendChild(i)}
 af("__waf_challenge_ts",ts);af("__waf_challenge_token",tk);af("__waf_challenge_rid",rid);
-af("__waf_challenge_proof",sum.toString());af("__waf_challenge_elapsed",elapsed.toString());
+af("__waf_challenge_proof",hash);af("__waf_challenge_counter",String(counter));
+try{
+if(res){
+if(res.env_score!==undefined&&res.env_score!==null)af("__waf_env_score",String(res.env_score));
+if(res.markers)af("__waf_env_markers",String(res.markers));
+if(res.sig)af("__waf_pow_sig",String(res.sig));
+}
+if(window.__owaf_env_encrypted)af("__waf_env_fp",window.__owaf_env_encrypted);
+}catch(e){}
 document.body.appendChild(d);d.submit();
 }
-setTimeout(solve,800+Math.random()*400);
+// WASM 求解完成后回调；无 JS 降级，WASM 不可用即无法通过挑战。
+window.__owaf_pow_callback=function(c,h,res){submit(c,h,res)};
+setTimeout(function(){
+if(!submitted)fail("Verification is taking longer than expected. Please refresh. / 验证超时，请刷新页面。")
+},30000);
 })();
 </script></body></html>`
 }

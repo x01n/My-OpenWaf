@@ -131,7 +131,7 @@ func ParseCertificate(siteRepo *repository.SiteRepo) app.HandlerFunc {
 			c.JSON(400, map[string]string{"error": "invalid certificate pem: " + err.Error()})
 			return
 		}
-		sites, _, err := siteRepo.List(0, 0)
+		sites, err := siteRepo.ListAll()
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -163,7 +163,7 @@ func ApplyCertificateToSites(certRepo *repository.CertificateRepo, siteRepo *rep
 			c.JSON(400, map[string]string{"error": "invalid certificate pem: " + err.Error()})
 			return
 		}
-		sites, _, err := siteRepo.List(0, 0)
+		sites, err := siteRepo.ListAll()
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -229,6 +229,9 @@ func UpdateCertificate(repo *repository.CertificateRepo, reload func() error) ap
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 与 ListCertificates/GetCertificate 一致：响应中不回显私钥。
+		// 在落库之后、任何响应分支之前清空，避免 reload 失败路径回显 key_pem。
+		existing.KeyPEM = ""
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": existing})
 			return

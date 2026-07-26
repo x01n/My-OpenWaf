@@ -24,6 +24,11 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := migrations.V6MigrateSiteTLSMinVersionInheritance(db); err != nil {
 		return err
 	}
+	// 必须在 AutoMigrate 之前：AutoMigrate 会创建 ux_recorded_res_dedup 唯一索引，
+	// 而旧库的 dedup_key 尚未回填，先建索引会因重复值冲突而失败。
+	if err := migrations.V8MigrateRecordedResourceDedupKey(db); err != nil {
+		return err
+	}
 
 	// Then apply schema migrations
 	if err := db.AutoMigrate(
@@ -57,6 +62,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&ThreatIntelFeed{},
 		&ThreatIntelSyncLog{},
 		&FalsePositiveReport{},
+
+		&LuaPlugin{},
 	); err != nil {
 		return err
 	}

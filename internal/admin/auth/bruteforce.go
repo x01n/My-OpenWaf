@@ -74,18 +74,19 @@ func (bf *BruteForceDetector) IsLocked(ip, username string) bool {
 	return bf.isLockedKey(bruteforceKey(ip, username))
 }
 
+// isLockedKey reports whether the key is currently locked out.
+// It must stay read-only: callers hold only mu.RLock(), and RWMutex allows
+// concurrent readers, so mutating bf.attempts here would let two concurrent
+// IsLocked calls write the map at once and crash the process with
+// "fatal error: concurrent map writes". Expired records are left in place;
+// recordForKey resets them on the next failure and cleanupLoop reclaims them.
 func (bf *BruteForceDetector) isLockedKey(key string) bool {
 	rec, ok := bf.attempts[key]
 	if !ok {
 		return false
 	}
 	if rec.failures >= bf.maxFailures {
-		if time.Since(rec.lockedAt) < bf.lockoutDur {
-			return true
-		}
-		// Lockout expired, reset.
-		delete(bf.attempts, key)
-		return false
+		return time.Since(rec.lockedAt) < bf.lockoutDur
 	}
 	return false
 }
@@ -107,6 +108,13 @@ func (bf *BruteForceDetector) recordForKey(key string, now time.Time) {
 	if !ok {
 		rec = &attemptRecord{}
 		bf.attempts[key] = rec
+	}
+	// A record whose lockout has already elapsed starts a fresh count, so the
+	// caller regains the full failure budget instead of being re-locked by a
+	// single failure. isLockedKey deliberately leaves such records behind.
+	if rec.failures >= bf.maxFailures && now.Sub(rec.lockedAt) >= bf.lockoutDur {
+		rec.failures = 0
+		rec.lockedAt = time.Time{}
 	}
 	rec.failures++
 	rec.lastFail = now
@@ -130,6 +138,11 @@ func (bf *BruteForceDetector) RemainingAttempts(ip, username string) int {
 	key := bruteforceKey(ip, username)
 	rec, ok := bf.attempts[key]
 	if !ok {
+		return bf.maxFailures
+	}
+	// An expired lockout record is reset by the next recordForKey, so report
+	// the full budget rather than the stale zero it still holds.
+	if rec.failures >= bf.maxFailures && time.Since(rec.lockedAt) >= bf.lockoutDur {
 		return bf.maxFailures
 	}
 	remaining := bf.maxFailures - rec.failures

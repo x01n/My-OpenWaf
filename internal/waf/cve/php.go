@@ -190,42 +190,21 @@ func NewPHPCVEDetector() *PHPCVEDetector {
 	return d
 }
 
-// Detect scans the request for PHP CVE exploitation attempts.
-func phpRequestContainsAny(req *CVERequest, rule phpCVERule, needles ...string) bool {
-	return requestTargetContainsAny(req, rule.target, needles...)
-}
-
-func shouldScanPHPRule(req *CVERequest, rule phpCVERule) bool {
+func shouldScanPHPRule(req *CVERequest, rule phpCVERule, hits *subDetectorHits) bool {
 	switch rule.cveID {
-	case "CVE-2015-6835":
-		return phpRequestContainsAny(req, rule, "unserialize", "o:", "a:")
-	case "CVE-2018-14884":
-		return phpRequestContainsAny(req, rule, "php://", "data://", "expect://", "phar://")
-	case "CVE-2018-20062":
-		return phpRequestContainsAny(req, rule, "invokefunction", "thinkphp", "think\\app", "filter[]=", "filter%5b%5d=", "call_user_func", "_method=__construct", "c=runtime", "a=getcontent")
-	case "CVE-2021-3129":
-		return phpRequestContainsAny(req, rule, "_ignition/execute-solution", "_ignition/health-check", "laravel", "facade/ignition", "illuminate\\")
-	case "CVE-2016-WEBSHELL":
-		return phpRequestContainsAny(req, rule, "<?php", "eval(", "system(", "exec(", "passthru(", "shell_exec")
-	case "CVE-2016-WEBSHELL-EXT":
-		return phpRequestContainsAny(req, rule, ".php", ".phtml", ".phar", "filename=")
-	case "CVE-2018-7600":
-		return phpRequestContainsAny(req, rule, "drupal", "form_id=", "#post_render", "#markup", "#type")
-	case "CVE-2017-9841":
-		return phpRequestContainsAny(req, rule, "eval-stdin", "phpunit")
-	case "CVE-2024-4577":
-		return phpRequestContainsAny(req, rule, "%ad", "auto_prepend_file", "allow_url_include", "cgi.force_redirect")
-	case "CVE-2023-41892":
-		return phpRequestContainsAny(req, rule, "conditions/render", "actions/conditions", "configobject", "craftcms", "craft cms")
+	case "CVE-2015-6835", "CVE-2018-14884", "CVE-2018-20062", "CVE-2021-3129",
+		"CVE-2016-WEBSHELL", "CVE-2016-WEBSHELL-EXT", "CVE-2018-7600",
+		"CVE-2017-9841", "CVE-2024-4577", "CVE-2023-41892":
+		return subDetectorACGate(rule.cveID, rule.target, hits)
 	default:
 		return true
 	}
 }
 
-func (d *PHPCVEDetector) Detect(req *CVERequest) []CVEMatch {
+func (d *PHPCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMatch {
 	var matches []CVEMatch
 	for _, rule := range d.rules {
-		if !shouldScanPHPRule(req, rule) {
+		if !shouldScanPHPRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)
@@ -254,9 +233,9 @@ func (d *PHPCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	return matches
 }
 
-func (d *PHPCVEDetector) DetectFirst(req *CVERequest) (CVEMatch, bool) {
+func (d *PHPCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (CVEMatch, bool) {
 	for _, rule := range d.rules {
-		if !shouldScanPHPRule(req, rule) {
+		if !shouldScanPHPRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)

@@ -32,7 +32,13 @@ import {
   authApi,
   accessApi,
   fingerprintApi,
+  luaPluginApi,
 } from "@/lib/api";
+import type {
+  LuaPlugin,
+  LuaPluginStage,
+  LuaDryRunRequest,
+} from "@/lib/types";
 
 /**
  * 通用 fetcher
@@ -639,6 +645,91 @@ export function useThreatIntelSyncLogs(params?: {
     ["threat-intel-sync-logs", params],
     () => threatIntelApi.listSyncLogs(params),
     { refreshInterval: 30000 }
+  );
+}
+
+// ============================================================
+// Lua 自定义策略插件相关 Hook
+// ============================================================
+
+/**
+ * 查询全部 Lua 策略脚本。
+ */
+export function useLuaPlugins() {
+  return useApiQuery(["lua-plugins"], () => luaPluginApi.list());
+}
+
+/**
+ * 查询脚本运行时统计。
+ *
+ * 计数器只存在于引擎内存中，任何配置改动都会重新编译脚本并让计数归零，
+ * 因此写操作后必须连带失效这个 key（见 LUA_MUTATION_KEYS），否则页面会
+ * 继续显示上一批脚本的计数。
+ */
+export function useLuaPluginStats() {
+  return useApiQuery(["lua-plugin-stats"], () => luaPluginApi.stats(), {
+    refreshInterval: 15000,
+  });
+}
+
+/**
+ * 脚本写操作需要失效的缓存 key。
+ * 统计随配置重载归零，与列表同时失效才不会出现「新脚本 + 旧计数」的错配视图。
+ */
+const LUA_MUTATION_KEYS: Key[] = ["lua-plugins", "lua-plugin-stats"];
+
+/**
+ * 新建 / 更新脚本。传入 id 走更新，否则走新建。
+ */
+export function useLuaPluginMutation() {
+  return useMutation(
+    async ({ id, data }: { id?: number; data: Partial<LuaPlugin> }) => {
+      if (id) {
+        return luaPluginApi.update(id, data);
+      }
+      return luaPluginApi.create(data);
+    },
+    { invalidateKeys: LUA_MUTATION_KEYS }
+  );
+}
+
+/**
+ * 删除脚本。
+ */
+export function useLuaPluginDelete() {
+  return useMutation(
+    async (id: number) => luaPluginApi.delete(id),
+    { invalidateKeys: LUA_MUTATION_KEYS }
+  );
+}
+
+/**
+ * 切换脚本启用状态。显式传 enabled 避免与列表乐观更新竞态。
+ */
+export function useLuaPluginToggle() {
+  return useMutation(
+    async ({ id, enabled }: { id: number; enabled: boolean }) =>
+      luaPluginApi.toggle(id, enabled),
+    { invalidateKeys: LUA_MUTATION_KEYS }
+  );
+}
+
+/**
+ * 语法校验：只编译，不保存也不执行，因此无需失效任何缓存。
+ */
+export function useLuaPluginValidate() {
+  return useMutation(
+    async (data: { stage: LuaPluginStage; source: string }) =>
+      luaPluginApi.validate(data)
+  );
+}
+
+/**
+ * 试运行：用样例请求执行脚本，不触碰线上配置。
+ */
+export function useLuaPluginDryRun() {
+  return useMutation(async (data: LuaDryRunRequest) =>
+    luaPluginApi.dryRun(data)
   );
 }
 

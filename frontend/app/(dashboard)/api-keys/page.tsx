@@ -2,10 +2,12 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { useApiKeys, useApiKeyCreate, useApiKeyDelete } from "@/hooks/use-api";
 import { DataTable } from "@/components/data-table";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -32,7 +34,7 @@ function formatTime(t: string | undefined | null): string {
 
 export default function ApiKeysPage() {
   const { t } = useTranslation();
-  const { data, isLoading, mutate } = useApiKeys();
+  const { data, isLoading, error, mutate } = useApiKeys();
   const { execute: createKey, loading: createLoading } = useApiKeyCreate();
   const { execute: deleteKey, loading: deleteLoading } = useApiKeyDelete();
 
@@ -143,18 +145,25 @@ export default function ApiKeysPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("apiKeys.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("apiKeys.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("apiKeys.title")}
+        description={t("apiKeys.description")}
+        actions={
           <Button onClick={() => setCreateOpen(true)}>
             <IconPlus className="mr-2 h-4 w-4" />
             {t("apiKeys.create")}
           </Button>
-        </div>
-      </div>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <DataTable
         columns={columns}

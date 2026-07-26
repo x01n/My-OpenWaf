@@ -2,11 +2,21 @@
 
 import { useState, useMemo, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import {
@@ -29,7 +39,7 @@ interface DynamicOption {
 
 export default function CaptchaPage() {
   const { t } = useTranslation();
-  const { data: botSettings, isLoading, mutate } = useBotSettings();
+  const { data: botSettings, isLoading, error, mutate } = useBotSettings();
   const updateBot = useBotSettingsUpdate();
 
   const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -56,6 +66,10 @@ export default function CaptchaPage() {
     },
     [getValue]
   );
+
+  const handleValue = useCallback((key: string, value: string | number) => {
+    setLocalSettings((prev) => ({ ...prev, [key]: value }));
+  }, []);
 
   const hasChanges = useMemo(() => {
     return Object.keys(localSettings).length > 0;
@@ -101,12 +115,10 @@ export default function CaptchaPage() {
   if (isLoading) {
     return (
       <div className="mx-auto max-w-5xl space-y-6">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">{t("captcha.botProtection")}</h1>
-            <p className="text-sm text-muted-foreground mt-1">{t("captcha.description")}</p>
-          </div>
-        </div>
+        <PageHeader
+          title={t("captcha.botProtection")}
+          description={t("captcha.description")}
+        />
         <Skeleton className="h-96 w-full" />
       </div>
     );
@@ -115,12 +127,19 @@ export default function CaptchaPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       {/* 页面标题 */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("captcha.botProtection")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("captcha.description")}</p>
-        </div>
-      </div>
+      <PageHeader
+        title={t("captcha.botProtection")}
+        description={t("captcha.description")}
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card className="overflow-hidden">
         <CardContent className="space-y-8 p-6">
@@ -230,6 +249,94 @@ export default function CaptchaPage() {
                 <span className="cursor-pointer text-primary hover:underline">
                   {t("captcha.link")}
                 </span>
+              </div>
+            </div>
+          </div>
+
+          {/* 浏览器签名校验 */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="h-5 w-1 rounded-full bg-primary" />
+              <span className="text-sm font-medium">
+                {t("captcha.section.browserSign")}
+              </span>
+              <Switch
+                checked={getValue("browser_sign_enabled", false)}
+                onCheckedChange={() => handleToggle("browser_sign_enabled")}
+                id="browser_sign_enabled"
+              />
+              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                <IconHelpCircle className="h-3.5 w-3.5" />
+                <span>{t("captcha.enableBrowserSignDesc")}</span>
+                <span className="cursor-pointer text-primary hover:underline">
+                  {t("captcha.link")}
+                </span>
+              </div>
+            </div>
+
+            <div
+              className={cn(
+                "ml-4 grid gap-4 rounded-lg border p-4 transition-all sm:grid-cols-2",
+                getValue("browser_sign_enabled", false)
+                  ? "opacity-100"
+                  : "pointer-events-none opacity-40"
+              )}
+            >
+              <div className="space-y-1.5">
+                <Label htmlFor="browser_sign_ttl">
+                  {t("captcha.browserSignTtl")}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="browser_sign_ttl"
+                    type="number"
+                    min={30}
+                    max={3600}
+                    disabled={!getValue("browser_sign_enabled", false)}
+                    value={getValue("browser_sign_ttl", 300)}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      handleValue(
+                        "browser_sign_ttl",
+                        Number.isFinite(n) && n > 0 ? n : 300
+                      );
+                    }}
+                  />
+                  <span className="text-sm text-muted-foreground">
+                    {t("captcha.browserSignTtlUnit")}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {t("captcha.browserSignTtlDesc")}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="browser_sign_action">
+                  {t("captcha.browserSignAction")}
+                </Label>
+                <Select
+                  value={getValue("browser_sign_action", "challenge")}
+                  onValueChange={(v) => handleValue("browser_sign_action", v)}
+                  disabled={!getValue("browser_sign_enabled", false)}
+                >
+                  <SelectTrigger id="browser_sign_action">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="observe">
+                      {t("captcha.browserSignActionObserve")}
+                    </SelectItem>
+                    <SelectItem value="challenge">
+                      {t("captcha.browserSignActionChallenge")}
+                    </SelectItem>
+                    <SelectItem value="intercept">
+                      {t("captcha.browserSignActionIntercept")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t("captcha.browserSignActionDesc")}
+                </p>
               </div>
             </div>
           </div>

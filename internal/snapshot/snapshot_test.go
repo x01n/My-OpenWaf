@@ -557,8 +557,8 @@ func TestParseCurvePreferencesAliasesAndDeduplicates(t *testing.T) {
 	}
 }
 
-func testSiteRuntime(id uint, bind, host string) SiteRuntime {
-	return SiteRuntime{
+func testSiteRuntime(id uint, bind, host string) *SiteRuntime {
+	return &SiteRuntime{
 		Site: store.Site{
 			ID:   id,
 			Host: host,
@@ -569,7 +569,7 @@ func testSiteRuntime(id uint, bind, host string) SiteRuntime {
 
 func TestMatchSiteMatchesWithinCurrentBind(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "app.example.com"): testSiteRuntime(1, ":443", "app.example.com"),
 			SiteMapKey(":443", "*.example.com"):   testSiteRuntime(2, ":443", "*.example.com"),
 		},
@@ -601,7 +601,7 @@ func TestMatchSiteMatchesWithinCurrentBind(t *testing.T) {
 
 func TestMatchSitePrefersExactThenWildcardThenCatchAll(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "app.example.com"): testSiteRuntime(1, ":443", "app.example.com"),
 			SiteMapKey(":443", "*.example.com"):   testSiteRuntime(2, ":443", "*.example.com"),
 			SiteMapKey(":443", "*"):               testSiteRuntime(3, ":443", "*"),
@@ -646,7 +646,7 @@ func TestMatchSitePrefersExactThenWildcardThenCatchAll(t *testing.T) {
 
 func TestMatchSiteCatchAllDoesNotCrossBinds(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "*"): testSiteRuntime(1, ":443", "*"),
 		},
 	}
@@ -661,7 +661,7 @@ func TestMatchSiteCatchAllDoesNotCrossBinds(t *testing.T) {
 
 func TestMatchSiteIPDetectionAvoidsWildcardForAddresses(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "*.0.0.1"):       testSiteRuntime(1, ":443", "*.0.0.1"),
 			SiteMapKey(":443", "*.example.com"): testSiteRuntime(2, ":443", "*.example.com"),
 		},
@@ -695,7 +695,7 @@ func TestMatchSiteIPDetectionAvoidsWildcardForAddresses(t *testing.T) {
 
 func BenchmarkMatchSiteNoMatchDomainHost(b *testing.B) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "app.example.com"): testSiteRuntime(1, ":443", "app.example.com"),
 		},
 	}
@@ -710,7 +710,7 @@ func BenchmarkMatchSiteNoMatchDomainHost(b *testing.B) {
 
 func TestMatchSiteDoesNotFallbackAcrossBinds(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":80", "public.example.com"):                testSiteRuntime(1, ":80", "public.example.com"),
 			SiteMapKey(":80", "other.example.com"):                 testSiteRuntime(2, ":80", "other.example.com"),
 			SiteMapKey("127.0.0.1:8081", "admin.internal.example"): testSiteRuntime(3, "127.0.0.1:8081", "admin.internal.example"),
@@ -724,7 +724,7 @@ func TestMatchSiteDoesNotFallbackAcrossBinds(t *testing.T) {
 
 func TestMatchSiteNoMatchReturnsFalse(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":8800", "a.example.com"): testSiteRuntime(1, ":8800", "a.example.com"),
 			SiteMapKey(":8800", "b.example.com"): testSiteRuntime(2, ":8800", "b.example.com"),
 			SiteMapKey(":8800", "*.example.com"): testSiteRuntime(3, ":8800", "*.example.com"),
@@ -759,7 +759,7 @@ func TestMatchSiteNoMatchReturnsFalse(t *testing.T) {
 }
 
 func TestRegisterSiteKeysRejectsDuplicateBindHostAcrossSites(t *testing.T) {
-	sites := make(map[string]SiteRuntime)
+	sites := make(map[string]*SiteRuntime)
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com")); err != nil {
 		t.Fatalf("register first site: %v", err)
 	}
@@ -776,7 +776,7 @@ func TestRegisterSiteKeysRejectsDuplicateBindHostAcrossSites(t *testing.T) {
 }
 
 func TestRegisterSiteKeysAllowsDuplicateHostWithinSameSite(t *testing.T) {
-	sites := make(map[string]SiteRuntime)
+	sites := make(map[string]*SiteRuntime)
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com, EXAMPLE.COM:80")); err != nil {
 		t.Fatalf("register duplicate host within same site: %v", err)
 	}
@@ -786,7 +786,7 @@ func TestRegisterSiteKeysAllowsDuplicateHostWithinSameSite(t *testing.T) {
 }
 
 func TestRegisterSiteKeysMultiHost(t *testing.T) {
-	sites := make(map[string]SiteRuntime)
+	sites := make(map[string]*SiteRuntime)
 	// Site with comma-separated hosts including a wildcard
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "a.example.com, b.example.com, *.example.com")); err != nil {
 		t.Fatalf("register site keys: %v", err)
@@ -808,7 +808,7 @@ func TestRegisterSiteKeysMultiHost(t *testing.T) {
 }
 
 func TestMatchSiteMultiHost(t *testing.T) {
-	sites := make(map[string]SiteRuntime)
+	sites := make(map[string]*SiteRuntime)
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":8800", "app.example.com, *.example.org")); err != nil {
 		t.Fatalf("register site keys: %v", err)
 	}

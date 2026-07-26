@@ -27,28 +27,29 @@ type HotCacheBackend interface {
 
 // Repos aggregates all entity repositories.
 type Repos struct {
-	Site             *SiteRepo
-	Certificate      *CertificateRepo
-	Policy           *PolicyRepo
-	Rule             *RuleRepo
-	SystemSettings   *SystemSettingsRepo
-	AdminAPIKey      *AdminAPIKeyRepo
-	AdminAccount     *AdminAccountRepo
-	RefreshToken     *RefreshTokenRepo
-	SecurityEvent    *SecurityEventRepo
-	AccessLog        *AccessLogRepo
-	IPList           *IPListRepo
-	BotScore         *BotScoreRepo
-	CVERule          *CVERuleRepo
-	CVESyncLog       *CVESyncLogRepo
-	DropEvent        *DropEventRepo
-	SiteListener     *SiteListenerRepo
-	AppRouteRule     *ApplicationRouteRuleRepo
-	RecordedResource *RecordedResourceRepo
-	AccessControl    *AccessControlRepo
+	Site               *SiteRepo
+	Certificate        *CertificateRepo
+	Policy             *PolicyRepo
+	Rule               *RuleRepo
+	SystemSettings     *SystemSettingsRepo
+	AdminAPIKey        *AdminAPIKeyRepo
+	AdminAccount       *AdminAccountRepo
+	RefreshToken       *RefreshTokenRepo
+	SecurityEvent      *SecurityEventRepo
+	AccessLog          *AccessLogRepo
+	IPList             *IPListRepo
+	BotScore           *BotScoreRepo
+	CVERule            *CVERuleRepo
+	CVESyncLog         *CVESyncLogRepo
+	DropEvent          *DropEventRepo
+	SiteListener       *SiteListenerRepo
+	AppRouteRule       *ApplicationRouteRuleRepo
+	RecordedResource   *RecordedResourceRepo
+	AccessControl      *AccessControlRepo
 	ThreatIntel        *ThreatIntelRepo
 	ThreatIntelSyncLog *ThreatIntelSyncLogRepo
 	FalsePositive      *FalsePositiveRepo
+	LuaPlugin          *LuaPluginRepo
 }
 
 func New(db *gorm.DB) *Repos {
@@ -60,28 +61,29 @@ func NewWithLogDB(db *gorm.DB, logDB *gorm.DB) *Repos {
 		logDB = db
 	}
 	return &Repos{
-		Site:             NewSiteRepo(db),
-		Certificate:      NewCertificateRepo(db),
-		Policy:           NewPolicyRepo(db),
-		Rule:             NewRuleRepo(db),
-		SystemSettings:   NewSystemSettingsRepo(db),
-		AdminAPIKey:      NewAdminAPIKeyRepo(db),
-		AdminAccount:     NewAdminAccountRepo(db),
-		RefreshToken:     NewRefreshTokenRepo(db),
-		SecurityEvent:    NewSecurityEventRepo(logDB),
-		AccessLog:        NewAccessLogRepo(logDB),
-		IPList:           NewIPListRepo(db),
-		BotScore:         NewBotScoreRepo(logDB),
-		CVERule:          NewCVERuleRepo(db),
-		CVESyncLog:       NewCVESyncLogRepo(db),
-		DropEvent:        NewDropEventRepo(logDB),
-		SiteListener:     NewSiteListenerRepo(db),
-		AppRouteRule:     NewApplicationRouteRuleRepo(db),
-		RecordedResource: NewRecordedResourceRepo(db),
-		AccessControl:    NewAccessControlRepo(db),
+		Site:               NewSiteRepo(db),
+		Certificate:        NewCertificateRepo(db),
+		Policy:             NewPolicyRepo(db),
+		Rule:               NewRuleRepo(db),
+		SystemSettings:     NewSystemSettingsRepo(db),
+		AdminAPIKey:        NewAdminAPIKeyRepo(db),
+		AdminAccount:       NewAdminAccountRepo(db),
+		RefreshToken:       NewRefreshTokenRepo(db),
+		SecurityEvent:      NewSecurityEventRepo(logDB),
+		AccessLog:          NewAccessLogRepo(logDB),
+		IPList:             NewIPListRepo(db),
+		BotScore:           NewBotScoreRepo(logDB),
+		CVERule:            NewCVERuleRepo(db),
+		CVESyncLog:         NewCVESyncLogRepo(db),
+		DropEvent:          NewDropEventRepo(logDB),
+		SiteListener:       NewSiteListenerRepo(db),
+		AppRouteRule:       NewApplicationRouteRuleRepo(db),
+		RecordedResource:   NewRecordedResourceRepo(db),
+		AccessControl:      NewAccessControlRepo(db),
 		ThreatIntel:        NewThreatIntelRepo(db),
 		ThreatIntelSyncLog: NewThreatIntelSyncLogRepo(db),
 		FalsePositive:      NewFalsePositiveRepo(db),
+		LuaPlugin:          NewLuaPluginRepo(db),
 	}
 }
 

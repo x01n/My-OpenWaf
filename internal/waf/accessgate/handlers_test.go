@@ -52,8 +52,8 @@ func TestSanitizeReturnURL(t *testing.T) {
 		{"javascript:alert(1)", "/"},
 	}
 	for _, tt := range tests {
-		if got := sanitizeReturnURL(tt.in); got != tt.want {
-			t.Errorf("sanitizeReturnURL(%q) = %q, want %q", tt.in, got, tt.want)
+		if got := SanitizeReturnURL(tt.in); got != tt.want {
+			t.Errorf("SanitizeReturnURL(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }

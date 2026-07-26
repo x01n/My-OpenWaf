@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,6 @@ import { toast } from "sonner";
 import {
   IconLock,
   IconPlus,
-  IconTrash,
   IconDeviceFloppy,
   IconUsers,
   IconKey,
@@ -30,15 +29,16 @@ export function AccessControlTab({ site }: AccessControlTabProps) {
   const { t } = useTranslation();
   const { data: accessConfig, mutate: refreshConfig } = useAccessConfig(site.id);
 
-  const [accessEnabled, setAccessEnabled] = useState(false);
+  const [prevConfig, setPrevConfig] = useState(accessConfig);
+  const [accessEnabled, setAccessEnabled] = useState(accessConfig?.enabled ?? false);
   const [sharedPassword, setSharedPassword] = useState("");
   const [showPasswordInput, setShowPasswordInput] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // 同步后端状态到本地
-  useEffect(() => {
+  if (accessConfig !== prevConfig) {
+    setPrevConfig(accessConfig);
     if (accessConfig) setAccessEnabled(accessConfig.enabled);
-  }, [accessConfig]);
+  }
 
   const handleToggleAccess = async (enabled: boolean) => {
     setAccessEnabled(enabled);

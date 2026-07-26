@@ -2,7 +2,8 @@ package repository
 
 import (
 	"encoding/json"
-	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"My-OpenWaf/internal/store"
@@ -67,10 +68,12 @@ type SecurityEventFilter struct {
 
 func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
 	f = normalizeSecurityEventFilter(f)
+	cacheKey := secEventCountCacheKey(f)
+
 	// Try Redis hot cache for large query results.
 	if r.hotCache != nil && r.hotCache.Available() {
-		cacheKey := "se_list:" + secEventCountCacheKey(f) + fmt.Sprintf(":o%d:l%d", offset, limit)
-		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(cacheKey); ok {
+		hcKey := "se_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
+		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(hcKey); ok {
 			var items []store.SecurityEvent
 			if json.Unmarshal(rawItems, &items) == nil {
 				return items, cachedTotal, nil
@@ -82,7 +85,6 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 	q = applyEventFilters(q, f)
 
 	var total int64
-	cacheKey := secEventCountCacheKey(f)
 	cached := false
 	if r.countCache != nil {
 		if value, ok := r.countCache.Get(cacheKey); ok {
@@ -106,7 +108,7 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 
 	// Cache results in Redis.
 	if r.hotCache != nil && r.hotCache.Available() && len(items) > 0 {
-		hcKey := "se_list:" + cacheKey + fmt.Sprintf(":o%d:l%d", offset, limit)
+		hcKey := "se_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
 		r.hotCache.SetList(hcKey, items, total, 5*time.Second)
 	}
 
@@ -115,83 +117,111 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 
 func secEventCountCacheKey(f SecurityEventFilter) string {
 	f = normalizeSecurityEventFilter(f)
-	key := "se_count"
+	var b strings.Builder
+	var ibuf [20]byte
+	b.Grow(64)
+	b.WriteString("se_count")
 	if f.ID > 0 {
-		key += ":id" + fmt.Sprint(f.ID)
+		b.WriteString(":id")
+		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.ID), 10))
 	}
 	if f.SiteID > 0 {
-		key += ":s" + fmt.Sprint(f.SiteID)
+		b.WriteString(":s")
+		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.SiteID), 10))
 	}
 	if f.Query != "" {
-		key += ":q" + f.Query
+		b.WriteString(":q")
+		b.WriteString(f.Query)
 	}
 	if f.RequestID != "" {
-		key += ":rid" + f.RequestID
+		b.WriteString(":rid")
+		b.WriteString(f.RequestID)
 	}
 	if f.Action != "" {
-		key += ":a" + f.Action
+		b.WriteString(":a")
+		b.WriteString(f.Action)
 	}
 	if f.Phase != "" {
-		key += ":ph" + f.Phase
+		b.WriteString(":ph")
+		b.WriteString(f.Phase)
 	}
 	if f.Category != "" {
-		key += ":c" + f.Category
+		b.WriteString(":c")
+		b.WriteString(f.Category)
 	}
 	if f.ClientIP != "" {
-		key += ":ip" + f.ClientIP
+		b.WriteString(":ip")
+		b.WriteString(f.ClientIP)
 	}
 	if f.Host != "" {
-		key += ":h" + f.Host
+		b.WriteString(":h")
+		b.WriteString(f.Host)
 	}
 	if f.Path != "" {
-		key += ":p" + f.Path
+		b.WriteString(":p")
+		b.WriteString(f.Path)
 	}
 	if f.QueryString != "" {
-		key += ":qs" + f.QueryString
+		b.WriteString(":qs")
+		b.WriteString(f.QueryString)
 	}
 	if f.RuleID > 0 {
-		key += ":r" + fmt.Sprint(f.RuleID)
+		b.WriteString(":r")
+		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.RuleID), 10))
 	}
 	if f.RuleIDStr != "" {
-		key += ":rs" + f.RuleIDStr
+		b.WriteString(":rs")
+		b.WriteString(f.RuleIDStr)
 	}
 	if f.TLSVersion != "" {
-		key += ":tv" + f.TLSVersion
+		b.WriteString(":tv")
+		b.WriteString(f.TLSVersion)
 	}
 	if f.TLSSNI != "" {
-		key += ":sni" + f.TLSSNI
+		b.WriteString(":sni")
+		b.WriteString(f.TLSSNI)
 	}
 	if f.TLSALPN != "" {
-		key += ":alpn" + f.TLSALPN
+		b.WriteString(":alpn")
+		b.WriteString(f.TLSALPN)
 	}
 	if f.TLSJA3Hash != "" {
-		key += ":j3h" + f.TLSJA3Hash
+		b.WriteString(":j3h")
+		b.WriteString(f.TLSJA3Hash)
 	}
 	if f.TLSJA4 != "" {
-		key += ":j4" + f.TLSJA4
+		b.WriteString(":j4")
+		b.WriteString(f.TLSJA4)
 	}
 	if f.TLSCipherSuites != "" {
-		key += ":tcs" + f.TLSCipherSuites
+		b.WriteString(":tcs")
+		b.WriteString(f.TLSCipherSuites)
 	}
 	if f.TLSExtensions != "" {
-		key += ":tex" + f.TLSExtensions
+		b.WriteString(":tex")
+		b.WriteString(f.TLSExtensions)
 	}
 	if f.TLSCurves != "" {
-		key += ":tcu" + f.TLSCurves
+		b.WriteString(":tcu")
+		b.WriteString(f.TLSCurves)
 	}
 	if f.TLSPointFormats != "" {
-		key += ":tpf" + f.TLSPointFormats
+		b.WriteString(":tpf")
+		b.WriteString(f.TLSPointFormats)
 	}
 	if f.HeaderOrder != "" {
-		key += ":ho" + f.HeaderOrder
+		b.WriteString(":ho")
+		b.WriteString(f.HeaderOrder)
 	}
 	if f.Since != nil {
-		key += ":si" + f.Since.Format("0601021504")
+		b.WriteString(":si")
+		b.WriteString(f.Since.Format("0601021504"))
 	}
 	if f.Until != nil {
-		key += ":un" + f.Until.Format("0601021504")
+		b.WriteString(":un")
+		b.WriteString(f.Until.Format("0601021504"))
 	}
-	return key
+	return b.String()
 }
 
 func (r *SecurityEventRepo) ListBySite(siteID uint, offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
@@ -423,10 +453,31 @@ type TimelineBucket struct {
 	Count  int64  `json:"count"`
 }
 
+/**
+ * hourBucketExpr 返回把 created_at 截断到「小时」的方言相关 SQL 表达式。
+ *
+ * strftime 是 SQLite 专有函数，在 MySQL/PostgreSQL 上会直接报错。三种方言必须
+ * 产出**完全一致**的 `YYYY-MM-DD HH:00` 文本，因为前端按该格式（空格分隔、
+ * 非 ISO）切分出 HH:mm 作为图表轴标签。
+ *
+ * @param db 用于识别方言的 GORM 句柄。
+ * @return 可直接嵌入 Select 的表达式，别名为 bucket。
+ */
+func hourBucketExpr(db *gorm.DB) string {
+	switch strings.ToLower(db.Dialector.Name()) {
+	case "mysql":
+		return "DATE_FORMAT(created_at, '%Y-%m-%d %H:00') as bucket"
+	case "postgres", "postgresql":
+		return "to_char(date_trunc('hour', created_at), 'YYYY-MM-DD HH24:00') as bucket"
+	default: // sqlite
+		return "strftime('%Y-%m-%d %H:00', created_at) as bucket"
+	}
+}
+
 func (r *SecurityEventRepo) Timeline(since, until time.Time) ([]TimelineBucket, error) {
 	var buckets []TimelineBucket
 	err := r.db.Model(&store.SecurityEvent{}).
-		Select("strftime('%Y-%m-%d %H:00', created_at) as bucket, COUNT(*) as count").
+		Select(hourBucketExpr(r.db)+", COUNT(*) as count").
 		Where("created_at >= ? AND created_at <= ?", since, until).
 		Group("bucket").
 		Order("bucket ASC").
@@ -437,7 +488,7 @@ func (r *SecurityEventRepo) Timeline(since, until time.Time) ([]TimelineBucket, 
 func (r *SecurityEventRepo) TimelineBySite(siteID uint, since, until time.Time) ([]TimelineBucket, error) {
 	var buckets []TimelineBucket
 	err := r.db.Model(&store.SecurityEvent{}).
-		Select("strftime('%Y-%m-%d %H:00', created_at) as bucket, COUNT(*) as count").
+		Select(hourBucketExpr(r.db)+", COUNT(*) as count").
 		Where("site_id = ? AND created_at >= ? AND created_at <= ?", siteID, since, until).
 		Group("bucket").
 		Order("bucket ASC").

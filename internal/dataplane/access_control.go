@@ -3,6 +3,8 @@ package dataplane
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -197,7 +199,7 @@ func handleAccessVerify(c *app.RequestContext, opts Options, gate *accessgate.Ga
 		return
 	}
 	setAccessSessionCookie(c, gate.CookieName(), token, cfg.SessionTTL, rt.Site.TLSEnabled)
-	c.Redirect(302, []byte(accessReturnURL(c)))
+	c.Redirect(302, []byte(accessReturnURL(c, host)))
 }
 
 /**
@@ -214,7 +216,7 @@ func handleAccessOAuthStart(c *app.RequestContext, opts Options, gate *accessgat
 		c.String(400, "invalid oauth provider")
 		return
 	}
-	returnURL := accessReturnURL(c)
+	returnURL := accessReturnURL(c, host)
 	authURL, err := flow.StartAuthFlow(globalAccessOAuthStateStore, rt.Site.ID, returnURL)
 	if err != nil {
 		c.String(502, "oauth start failed")
@@ -359,14 +361,84 @@ func renderAccessLoginError(c *app.RequestContext, host string, cfg accessgate.C
 }
 
 // accessReturnURL 解析验证成功后的跳转地址：优先表单 return_url，其次 Referer，否则根路径。
-func accessReturnURL(c *app.RequestContext) string {
-	if v := strings.TrimSpace(string(c.FormValue("return_url"))); v != "" && strings.HasPrefix(v, "/") {
-		return v
+func accessReturnURL(c *app.RequestContext, host string) string {
+	// 走 accessgate.SanitizeReturnURL 而不是自己判一次 HasPrefix(v, "/")：
+	// 后者放行 "//evil.com" 与 "/\\evil.com"，浏览器会把它们当成站外地址跳出去。
+	if v := strings.TrimSpace(string(c.FormValue("return_url"))); v != "" {
+		if safe := accessgate.SanitizeReturnURL(v); safe != "/" {
+			return safe
+		}
 	}
+	// Referer 由外部页面决定，必须先确认同源再取路径——原先原样返回，
+	// 攻击者只要从自己的页面链到登录页，用户登录后就会被送去那里。
 	if ref := strings.TrimSpace(string(c.GetHeader("Referer"))); ref != "" {
-		return ref
+		if p := sameSiteRefererPath(ref, host); p != "" {
+			return p
+		}
 	}
 	return "/"
+}
+
+/**
+ * sameSiteRefererPath 在 Referer 与当前站点同源时取出其站内路径。
+ *
+ * 跨站 Referer 一律丢弃：它完全由外部页面控制，直接拿来做登录后跳转
+ * 等于把重定向目标交给攻击者。
+ *
+ * @param referer 原始 Referer 头。
+ * @param host    当前请求的站点主机名（可带端口）。
+ * @return 站内路径（含查询串）；跨站或无法解析时返回空串。
+ */
+func sameSiteRefererPath(referer, host string) string {
+	u, err := url.Parse(referer)
+	if err != nil {
+		return ""
+	}
+	// 相对形式的 Referer 没有 host，视为站内。
+	if u.Host != "" && !strings.EqualFold(hostnameOnly(u.Host), hostnameOnly(host)) {
+		return ""
+	}
+	target := u.EscapedPath()
+	if u.RawQuery != "" {
+		target += "?" + u.RawQuery
+	}
+	if target == "" {
+		return ""
+	}
+	// 同源也要过一遍归一化：Referer 里同样可能出现 "//" 开头的怪异路径。
+	if safe := accessgate.SanitizeReturnURL(target); safe != "/" {
+		return safe
+	}
+	return ""
+}
+
+/**
+ * safeRefererRedirect 取出可安全用于「跳回原页面」的站内路径。
+ *
+ * 挑战与验证流程习惯用 Referer 把用户送回来处，但 Referer 完全由外部页面决定：
+ * 攻击者从自己的页面发起提交，Referer 就是攻击者域名，用户完成验证后会被送去那里，
+ * 且此时页面还顶着「刚通过站点验证」的上下文。这里统一收口：跨站或缺失一律回根路径。
+ *
+ * @param c 请求上下文。
+ * @return 站内路径；无法采信时返回 "/"。
+ */
+func safeRefererRedirect(c *app.RequestContext) string {
+	ref := strings.TrimSpace(string(c.GetHeader("Referer")))
+	if ref == "" {
+		return "/"
+	}
+	if p := sameSiteRefererPath(ref, string(c.Host())); p != "" {
+		return p
+	}
+	return "/"
+}
+
+// hostnameOnly 去掉主机名上的端口，IPv6 字面量也能正确处理。
+func hostnameOnly(h string) string {
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
+	}
+	return h
 }
 
 // setAccessSessionCookie 下发按站点隔离的会话 cookie，不记录 cookie 值到日志。

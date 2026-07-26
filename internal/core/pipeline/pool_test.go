@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"strconv"
 	"testing"
 
 	"My-OpenWaf/internal/core/action"
@@ -50,6 +51,29 @@ func TestAcquireCtxReusesHeaderMapCapacity(t *testing.T) {
 	}
 	if len(next.Headers) != 0 {
 		t.Fatalf("expected cleared headers map, got %#v", next.Headers)
+	}
+	ReleaseCtx(next)
+}
+
+func TestReleaseCtxShrinksOversizedBuffers(t *testing.T) {
+	ctx := AcquireCtx()
+	for i := 0; i < maxPooledHeaderMapLen+10; i++ {
+		k := "X-H-" + strconv.Itoa(i)
+		ctx.Headers[k] = "v"
+		ctx.AppendHeaderKey(k)
+	}
+	ctx.observeHitsBuf = make([]action.Result, 0, maxPooledObserveHitsCap+8)
+	ReleaseCtx(ctx)
+
+	next := AcquireCtx()
+	if cap(next.HeaderKeys) > maxPooledHeaderKeysCap {
+		t.Fatalf("HeaderKeys cap should shrink, got %d", cap(next.HeaderKeys))
+	}
+	if cap(next.observeHitsBuf) > maxPooledObserveHitsCap {
+		t.Fatalf("observeHitsBuf cap should shrink, got %d", cap(next.observeHitsBuf))
+	}
+	if len(next.Headers) != 0 {
+		t.Fatalf("headers should be empty after oversized rebuild, got %d", len(next.Headers))
 	}
 	ReleaseCtx(next)
 }

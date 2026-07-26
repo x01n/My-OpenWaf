@@ -15,7 +15,7 @@ import (
 var validRoles = map[string]bool{
 	auth.RoleAdmin:    true,
 	auth.RoleOperator: true,
-	auth.RoleReadonly:  true,
+	auth.RoleReadonly: true,
 }
 
 // ListAdminUsers returns all admin accounts (password hash excluded via json:"-").

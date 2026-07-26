@@ -140,13 +140,18 @@ func (m *PageTemplateManager) SetBlockConfig(cfg BlockPageConfig) {
 }
 
 // SanitizeCSS performs basic CSS sanitization to prevent XSS via style injection.
+// Matching is case-insensitive to prevent bypass via mixed-case patterns like EXPRESSION().
 func SanitizeCSS(css string) string {
 	dangerous := []string{"expression(", "javascript:", "url(", "@import", "behavior:", "binding:"}
 	result := css
-	lower := strings.ToLower(result)
 	for _, pattern := range dangerous {
-		if strings.Contains(lower, pattern) {
-			result = strings.ReplaceAll(result, pattern, "")
+		lower := strings.ToLower(result)
+		for {
+			idx := strings.Index(lower, pattern)
+			if idx < 0 {
+				break
+			}
+			result = result[:idx] + result[idx+len(pattern):]
 			lower = strings.ToLower(result)
 		}
 	}

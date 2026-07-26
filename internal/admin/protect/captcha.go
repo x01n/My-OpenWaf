@@ -168,7 +168,7 @@ func TestCaptcha(repo *repository.SystemSettingsRepo, mgr *challenge.CaptchaMana
 		if captchaType == "" {
 			captchaType = challenge.CaptchaTypeMath
 		}
-		captchaChallenge, err := mgr.Generate(captchaType)
+		captchaChallenge, err := mgr.Generate(captchaType, false)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": "captcha generation failed: " + err.Error()})
 			return

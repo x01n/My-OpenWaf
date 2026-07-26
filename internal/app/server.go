@@ -40,6 +40,7 @@ import (
 	"My-OpenWaf/internal/dataplane"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/pkg/logger"
+	"My-OpenWaf/internal/pkg/memreclaim"
 	"My-OpenWaf/internal/proxy"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
@@ -53,6 +54,7 @@ import (
 	"My-OpenWaf/internal/waf/drop"
 	"My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/luaplugin"
 	"My-OpenWaf/internal/waf/ratelimit"
 	"My-OpenWaf/internal/waf/threatintel"
 )
@@ -260,8 +262,11 @@ func Run() {
 	archiver.SetSyncLogRepo(repos.ThreatIntelSyncLog)
 	defer archiver.Close()
 
-	responseCache := cache.NewResponseCache(64, 60)
+	responseCache := cache.NewResponseCache(rt.Config.ResponseCacheMB, rt.Config.ResponseCacheTTLSec)
 	defer responseCache.Close()
+	// 高并发峰值后周期性将空闲 heap 归还 OS，降低 RSS 粘滞。
+	stopMemReclaim := memreclaim.Start(memreclaim.Config{Logger: logger.New("memreclaim")})
+	defer stopMemReclaim()
 
 	// Data-plane metrics (shared across all data listeners).
 	metrics := dataplane.NewMetrics()
@@ -292,6 +297,16 @@ func Run() {
 	ipRep.ConfigureAutoBanAction(prot.AutoBanAction)
 
 	eng := engine.New(rt.Snapshot, reqRL, errRL, ipRep)
+
+	// 自定义 Lua 策略引擎：脚本由 snapshot 在构建期编译，此处只负责持有与热替换。
+	// KV 复用 RedisKV，Redis 不可用时脚本侧 kv.available() 返回 false，
+	// 策略降级而非站点不可用。
+	luaEngine := luaplugin.NewEngine(rt.RedisKV, logger.New("lua_plugin"))
+	eng.SetLuaPlugins(luaEngine)
+	// 用初始 snapshot 装载一次，避免首个 reload 之前脚本不生效。
+	if sn := rt.Snapshot.Load(); sn != nil {
+		luaEngine.Reload(sn.LuaPlugins)
+	}
 	cveFeedInterval, err := time.ParseDuration(rt.Config.CVE.FeedInterval)
 	if err != nil || cveFeedInterval <= 0 {
 		cveFeedInterval = 6 * time.Hour
@@ -308,8 +323,13 @@ func Run() {
 	// GeoIP resolver for bot two-phase scoring (graceful degradation if DB missing).
 	var geoResolver *bot.MaxMindResolver
 	botCfg := rt.Config.Bot
+	// loadedGeoIPPath 记录 resolver 当前打开的库路径，供 reload 时判断是否需要换库。
+	loadedGeoIPPath := botCfg.GeoIPDBPath
 	if botCfg.Enabled {
 		geoResolver = bot.NewMaxMindResolver(botCfg.GeoIPDBPath, botCfg.GeoIPDBPath, botCfg)
+		// 持有 city/asn 两个 maxminddb 文件句柄，与本函数里其余资源一样在退出时释放。
+		// 放在这里而不是函数开头：Close 会取锁，nil 接收者会 panic。
+		defer geoResolver.Close()
 		eng.SetGeoResolver(geoResolver, botCfg.ScoreThreshold)
 		// Also set the global GeoResolver so LookupGeo works everywhere.
 		bot.SetGeoResolver(geoResolver)
@@ -369,6 +389,36 @@ func Run() {
 		}
 		return snapshot
 	})
+	// 缓存命中率指标：汇总各缓存层的 hits/misses，通过 /metrics 暴露。
+	promMetrics.SetCacheStatsProvider(func() []observability.CacheLayerStats {
+		qcHits, qcMisses := queryCache.HitStats()
+		hcHits, hcMisses := hotCache.HitStats()
+		rcHits, rcMisses := responseCache.HitStats()
+		return []observability.CacheLayerStats{
+			{Name: "query", Hits: qcHits, Misses: qcMisses},
+			// hot 层走 Redis，故障（不可达/超时）与「键不存在」分开计数，
+			// 便于区分「缓存未命中」与「依赖不可用导致穿透」。
+			{Name: "hot", Hits: hcHits, Misses: hcMisses, Errors: hotCache.ErrorCount()},
+			{Name: "response", Hits: rcHits, Misses: rcMisses},
+		}
+	})
+	// Lua 策略脚本指标：脚本失败/超时只写日志就静默跳过，没有指标就无法告警。
+	// 这里做单位换算与结构适配，observability 不反向依赖 luaplugin。
+	promMetrics.SetLuaScriptStatsProvider(func() []observability.LuaScriptStats {
+		stats := luaEngine.Stats()
+		out := make([]observability.LuaScriptStats, 0, len(stats))
+		for _, s := range stats {
+			out = append(out, observability.LuaScriptStats{
+				Name:          s.Name,
+				Stage:         s.Stage,
+				Runs:          s.Runs,
+				Failures:      s.Failures,
+				Timeouts:      s.Timeouts,
+				AvgDurationMs: float64(s.AvgTime.Nanoseconds()) / 1e6,
+			})
+		}
+		return out
+	})
 
 	hc := health.New(rt.DB, rt.Snapshot)
 	lm := lifecycle.New(log)
@@ -376,7 +426,9 @@ func Run() {
 	dpLog := logger.New("dataplane")
 
 	// Challenge managers: CAPTCHA, Shield (5-second), Chain.
+	// 三者都会启动内存态会话清理协程，必须随进程优雅关闭一并停止。
 	captchaMgr := challenge.NewCaptchaManager(rt.Redis, time.Duration(prot.CaptchaTimeout)*time.Second)
+	defer captchaMgr.Close()
 
 	// 初始化 go-captcha 高级验证码（点击/滑动/旋转）
 	goCaptchaCfg := challenge.DefaultGoCaptchaConfig()
@@ -387,7 +439,9 @@ func Run() {
 	captchaMgr.SetGoCaptchaProvider(goCaptchaProvider)
 
 	shieldMgr := challenge.NewShieldManager(captchaMgr, rt.Redis, prot.ShieldDifficulty)
+	defer shieldMgr.Close()
 	chainMgr := challenge.NewChainChallengeManager(captchaMgr, rt.Redis)
+	defer chainMgr.Close()
 
 	// Anti-replay nonce protection manager.
 	antiReplayMgr := antireplay.NewAntiReplayManager("", rt.Redis, 5*time.Minute)
@@ -426,6 +480,18 @@ func Run() {
 		dropPolicy := loadDropPolicy(repos.SystemSettings, runtimeCfg.Drop)
 		dropExec.Reconfigure(dropPolicy.Enabled)
 		eng.SetBotThreshold(dropPolicy.BotScoreThreshold)
+
+		// 把管理界面保存的 GeoIP 配置同步给 resolver。不做这一步的话，
+		// UI 上的高风险国家 / 机房 ASN / VPN ASN 保存成功却永远不生效。
+		if geoResolver != nil {
+			geoCfg := loadBotGeoConfig(repos.SystemSettings, runtimeCfg.Bot)
+			// 换库要重新打开 mmap 文件，只在路径真的变了时做。
+			if geoCfg.GeoIPDBPath != loadedGeoIPPath {
+				geoResolver.Reload(geoCfg.GeoIPDBPath, geoCfg.GeoIPDBPath)
+				loadedGeoIPPath = geoCfg.GeoIPDBPath
+			}
+			geoResolver.UpdateConfig(geoCfg)
+		}
 		if p.EscalationEnabled {
 			steps := p.GetEscalationSteps()
 			wafSteps := make([]escalation.EscalationStep, len(steps))
@@ -445,6 +511,12 @@ func Run() {
 	eng.SetEscalationManager(escalationMgr)
 	defer escalationMgr.Close()
 
+	// resourceAggregator 将 AppRoute 命中在内存中按资源唯一键聚合后批量落库，
+	// 替代每命中一次 spawn goroutine + 同步 Upsert，显著降低高频写放大与 CPU 占用。
+	resourceAggregator := dataplane.NewRecordedResourceAggregator(repos.RecordedResource, logger.New("resource-agg"))
+	resourceAggregator.SetRedis(redisKV)
+	defer resourceAggregator.Close()
+
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
 	dpOpts := dataplane.Options{
 		Holder:                rt.Snapshot,
@@ -457,7 +529,7 @@ func Run() {
 		CaptchaManager:        captchaMgr,
 		ShieldManager:         shieldMgr,
 		ChainManager:          chainMgr,
-		RecordedResourceRepo:  repos.RecordedResource,
+		ResourceAggregator:    resourceAggregator,
 		Upstreams:             upstreamPool,
 		AccessControlRepo:     repos.AccessControl,
 		JWTSecret:             jwtSecret,
@@ -584,6 +656,16 @@ func Run() {
 		}
 	}
 
+	// replaceConfigSync 只关掉被替换下来的那个，最后一个实例得在退出时收尾——
+	// 否则它的 Subscribe goroutine 会在优雅关闭期间继续消费 reload 通知。
+	// Close 用 sync.Once 且 nil 安全，与上面的 old.Close() 重复调用也无妨。
+	defer func() {
+		configSyncMu.RLock()
+		current := configSync
+		configSyncMu.RUnlock()
+		current.Close()
+	}()
+
 	publishConfigReload := func() {
 		configSyncMu.RLock()
 		current := configSync
@@ -601,6 +683,12 @@ func Run() {
 		currentSnapshot := rt.Snapshot.Load()
 		if currentSnapshot != nil {
 			applyProtectionRuntimeConfig(currentSnapshot.Protection)
+			// 热替换 Lua 脚本集合：整体替换是原子的，正在执行的调用继续用旧集合跑完。
+			luaEngine.Reload(currentSnapshot.LuaPlugins)
+			for name, msg := range currentSnapshot.LuaPluginErrors {
+				log.Warn("lua plugin compile failed, skipped",
+					slog.String("script", name), slog.String("err", msg))
+			}
 		}
 		loadIPLists(ipRep, repos.IPList)
 		reconcileListeners()
@@ -783,6 +871,7 @@ func Run() {
 		Cache:         redisKV,
 		Upstreams:     upstreamPool,
 		ThreatIntel:   threatIntelMgr,
+		LuaEngine:     luaEngine,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
@@ -989,7 +1078,7 @@ func listenerRuntimesByBind(sn *snapshotpkg.Snapshot) []snapshotpkg.SiteRuntime 
 	for _, rt := range sn.Sites {
 		current, exists := byBind[rt.Bind]
 		if !exists || (!current.Site.TLSEnabled && rt.Site.TLSEnabled) {
-			byBind[rt.Bind] = rt
+			byBind[rt.Bind] = *rt
 		}
 	}
 	items := make([]snapshotpkg.SiteRuntime, 0, len(byBind))
@@ -1020,6 +1109,68 @@ func loadIPLists(rep *iprep.IPReputation, repo *repository.IPListRepo) {
 		}
 	}
 	rep.SetLists(blacks, whites)
+}
+
+/**
+ * loadBotGeoConfig 把管理界面保存的 bot_settings 合并进启动时的 BotConfig。
+ *
+ * 管理端把高风险国家、机房 ASN、VPN/代理 ASN 与 GeoIP 库路径写进 SystemSettings 的
+ * `bot_settings`，但 `core.BotConfig` 只来自硬编码默认值加两个环境变量，两条线原先
+ * 没有交汇——UI 上保存成功，评分时用的却仍是默认值（`HighRiskCountries` 默认为 nil，
+ * 意味着高风险国家评分从未生效）。这里补上缺的那一环。
+ *
+ * 只覆盖请求里出现过的字段：nil 切片表示「没配过」，保留 fallback；空切片是用户
+ * 主动清空，如实生效。
+ *
+ * @param repo     系统设置仓储，nil 时原样返回 fallback。
+ * @param fallback 启动时的 BotConfig（默认值 + 环境变量）。
+ * @return 合并后的配置；读取或解析失败时返回 fallback，不让坏数据打断 reload。
+ */
+func loadBotGeoConfig(repo *repository.SystemSettingsRepo, fallback core.BotConfig) core.BotConfig {
+	if repo == nil {
+		return fallback
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil || strings.TrimSpace(val) == "" {
+		return fallback
+	}
+	// 字段名对齐管理端的 BotSettingsResponse：注意那边是 DatacenterASNs（小写 c）、
+	// 这边 core.BotConfig 是 DataCenterASNs，靠 json tag 对应而非字段名。
+	type botGeoSettings struct {
+		HighRiskCountries []string `json:"high_risk_countries"`
+		DatacenterASNs    []uint32 `json:"datacenter_asns"`
+		VPNProxyASNs      []uint32 `json:"vpn_proxy_asns"`
+		GeoIPDBPath       *string  `json:"geoip_db_path"`
+	}
+	var stored botGeoSettings
+	if err := json.Unmarshal([]byte(val), &stored); err != nil {
+		return fallback
+	}
+
+	cfg := fallback
+	if stored.HighRiskCountries != nil {
+		cfg.HighRiskCountries = stored.HighRiskCountries
+	}
+	if stored.DatacenterASNs != nil {
+		cfg.DataCenterASNs = uint32SliceToUint(stored.DatacenterASNs)
+	}
+	if stored.VPNProxyASNs != nil {
+		cfg.VPNProxyASNs = uint32SliceToUint(stored.VPNProxyASNs)
+	}
+	// 路径留空表示沿用环境变量配置的库，不要用空串把已加载的库顶掉。
+	if stored.GeoIPDBPath != nil && strings.TrimSpace(*stored.GeoIPDBPath) != "" {
+		cfg.GeoIPDBPath = strings.TrimSpace(*stored.GeoIPDBPath)
+	}
+	return cfg
+}
+
+// uint32SliceToUint 转换 ASN 列表：管理端用 uint32，core.BotConfig 用 uint。
+func uint32SliceToUint(in []uint32) []uint {
+	out := make([]uint, len(in))
+	for i, v := range in {
+		out[i] = uint(v)
+	}
+	return out
 }
 
 func loadDropPolicy(repo *repository.SystemSettingsRepo, fallback core.DropConfig) core.DropConfig {
@@ -1147,6 +1298,9 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 		server.WithMaxRequestBodySize(32 << 20),
 		server.WithMaxKeepBodySize(64 << 10),
 		server.WithSenseClientDisconnection(true),
+		// 将连接读缓冲从默认 4KB 提升到 16KB，减少读取请求头/体时的
+		// read 系统调用次数，属于保守的读路径吞吐优化，不影响超时与保活语义。
+		server.WithReadBufferSize(16 << 10),
 	}
 	if siteRT.Site.TLSEnabled {
 		opts = append(opts,
@@ -1298,16 +1452,21 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := strings.ToLower(strings.TrimSpace(hello.ServerName))
 
-			clientTLSMin := uint16(0)
-			if len(hello.SupportedVersions) > 0 {
-				clientTLSMin = hello.SupportedVersions[0]
+			// 该回调在每次 TLS 握手时执行。slog 的可变参数在调用点即求值并装箱，
+			// 因此必须先判级别再构造属性，否则默认 info 级别下每次握手都会产生
+			// 一批立刻被丢弃的堆分配。
+			if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+				clientTLSMin := uint16(0)
+				if len(hello.SupportedVersions) > 0 {
+					clientTLSMin = hello.SupportedVersions[0]
+				}
+				slog.Debug("TLS ClientHello received",
+					slog.String("bind", bind),
+					slog.String("sni", sni),
+					slog.Any("client_alpn", hello.SupportedProtos),
+					slog.Int("client_tls_first", int(clientTLSMin)),
+				)
 			}
-			slog.Debug("TLS ClientHello received",
-				slog.String("bind", bind),
-				slog.String("sni", sni),
-				slog.Any("client_alpn", hello.SupportedProtos),
-				slog.Int("client_tls_first", int(clientTLSMin)),
-			)
 
 			// 情况 1：SNI 为空 → IP 直接访问
 			if sni == "" {
@@ -1335,11 +1494,14 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 
 			// 情况 4：SNI 不匹配任何已知站点 → 检查 snapshot 是否有此站点
 			if _, found := sn.MatchSite(bind, sni); !found {
-				// 站点不存在：返回自签证书，防止证书泄露真实域名
-				slog.Debug("未知 SNI，返回自签证书",
-					slog.String("sni", sni),
-					slog.String("bind", bind),
-				)
+				// 站点不存在：返回自签证书，防止证书泄露真实域名。
+				// IP 扫描与随机 SNI 探测会把这条路径打热，同样需要先判级别。
+				if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+					slog.Debug("未知 SNI，返回自签证书",
+						slog.String("sni", sni),
+						slog.String("bind", bind),
+					)
+				}
 				return selfSignedForBind(bind), nil
 			}
 
@@ -1551,7 +1713,7 @@ func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 			continue
 		}
 		seenSites[rt.Site.ID] = struct{}{}
-		runtimes = append(runtimes, rt)
+		runtimes = append(runtimes, *rt)
 	}
 	sort.Slice(runtimes, func(i, j int) bool {
 		if runtimes[i].Site.ID != runtimes[j].Site.ID {

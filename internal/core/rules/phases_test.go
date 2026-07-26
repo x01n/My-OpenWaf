@@ -25,13 +25,13 @@ func TestBotPhaseStoreBotScoreDetailsOnlyForHighRisk(t *testing.T) {
 	if ctx.BotScoreResult == nil {
 		t.Fatal("expected bot score result")
 	}
-	if ctx.BotScoreResult.Details != "" {
-		t.Fatalf("non-high-risk bot score should skip JSON details, got %q", ctx.BotScoreResult.Details)
+	if ctx.BotScoreResult.Details != nil {
+		t.Fatalf("non-high-risk bot score should skip details, got %v", ctx.BotScoreResult.Details)
 	}
 
 	ctx = &pipeline.RequestCtx{}
 	phase.storeBotScore(ctx, bot.BotVerdict{Category: "malicious", Score: 90}, bot.BotScore{Total: 90, IsHighRisk: true, Details: map[string]string{"ua": "10"}})
-	if ctx.BotScoreResult == nil || ctx.BotScoreResult.Details == "" {
+	if ctx.BotScoreResult == nil || len(ctx.BotScoreResult.Details) == 0 {
 		t.Fatalf("high-risk bot score should keep details: %#v", ctx.BotScoreResult)
 	}
 }
@@ -504,4 +504,45 @@ func nestedEncodedXSSBody(payload string) string {
 
 func layeredEncodedXSSBody(payload string) string {
 	return nestedEncodedXSSBody(strings.Repeat("&#65;", 180) + payload)
+}
+
+func TestBrowserSignPhaseRequiresAPISignature(t *testing.T) {
+	cfg := &store.ProtectionConfig{
+		BrowserSignEnabled:   true,
+		BrowserSignAction:    string(action.Challenge),
+		ShieldEnableEnvCheck: true,
+	}
+	phase := NewBrowserSignPhase(cfg)
+
+	// non-api document navigation should pass
+	pass, terminal := phase.Execute(&pipeline.RequestCtx{
+		Method: "GET",
+		Path:   "/",
+		Headers: map[string]string{
+			"accept":         "text/html",
+			"sec-fetch-mode": "navigate",
+			"sec-fetch-dest": "document",
+		},
+	})
+	if terminal || pass.Matched {
+		t.Fatalf("document request should pass, terminal=%v result=%+v", terminal, pass)
+	}
+
+	// api without headers should challenge
+	result, terminal := phase.Execute(&pipeline.RequestCtx{
+		Method: "POST",
+		Path:   "/api/v1/items",
+		Host:   "example.com",
+		SiteID: 1,
+		Headers: map[string]string{
+			"content-type": "application/json",
+			"accept":       "application/json",
+		},
+	})
+	if !terminal || result.Type != action.Challenge {
+		t.Fatalf("missing signature should challenge, terminal=%v result=%+v", terminal, result)
+	}
+	if result.Phase != "browser_sign" {
+		t.Fatalf("phase = %q", result.Phase)
+	}
 }

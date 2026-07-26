@@ -7,6 +7,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol"
+	"github.com/cloudwego/hertz/pkg/route/param"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
@@ -311,5 +312,266 @@ func TestImportRulesRejectsInvalidCompoundTLSPattern(t *testing.T) {
 	}
 	if resp.Index != 0 {
 		t.Fatalf("index = %d, want 0", resp.Index)
+	}
+}
+
+func invokeRuleGetHandler(t *testing.T, handler app.HandlerFunc, uri string, ps param.Params) *app.RequestContext {
+	t.Helper()
+	var req protocol.Request
+	req.SetMethod("GET")
+	req.SetRequestURI(uri)
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	if ps != nil {
+		ctx.Params = ps
+	}
+	handler(context.Background(), ctx)
+	return ctx
+}
+
+func newSiteAndRuleReposForTest(t *testing.T) (*repository.SiteRepo, *repository.RuleRepo) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.Site{}, &store.Policy{}, &store.Rule{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.Create(&store.Policy{Name: "p1"}).Error; err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+	policyID := uint(1)
+	if err := db.Create(&store.Site{Host: "example.test", Bind: ":80", Network: "tcp", Enabled: true, PolicyID: &policyID}).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+	return repository.NewSiteRepo(db), repository.NewRuleRepo(db)
+}
+
+func TestListRulesReturns200OnEmptyDB(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	ctx := invokeRuleGetHandler(t, ListRules(repo), "/api/v1/rules", nil)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	var resp struct {
+		Items []store.Rule `json:"items"`
+		Total int64        `json:"total"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 0 || len(resp.Items) != 0 {
+		t.Fatalf("expected empty list, got total=%d items=%d", resp.Total, len(resp.Items))
+	}
+}
+
+func TestGetRuleInvalidIDReturns400(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	ctx := invokeRuleGetHandler(t, GetRule(repo), "/api/v1/rules/abc",
+		param.Params{{Key: "id", Value: "abc"}})
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unexpected status %d", ctx.Response.StatusCode())
+	}
+}
+
+func TestGetRuleNotFoundReturns404(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	ctx := invokeRuleGetHandler(t, GetRule(repo), "/api/v1/rules/9999",
+		param.Params{{Key: "id", Value: "9999"}})
+	if ctx.Response.StatusCode() != 404 {
+		t.Fatalf("unexpected status %d", ctx.Response.StatusCode())
+	}
+}
+
+func TestCreateAndGetRuleSuccess(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	reloaded := 0
+	createCtx := invokePersistedRuleHandler(t, CreateRule(repo, func() error {
+		reloaded++
+		return nil
+	}), "/api/v1/rules", []byte(`{
+		"name":"test-create","policy_id":1,"phase":"custom",
+		"pattern":"block_path:/blocked","action":"intercept",
+		"priority":5,"enabled":true
+	}`))
+	if createCtx.Response.StatusCode() != 201 {
+		t.Fatalf("create status %d: %s", createCtx.Response.StatusCode(), createCtx.Response.Body())
+	}
+	if reloaded != 1 {
+		t.Fatalf("expected 1 reload, got %d", reloaded)
+	}
+	var created store.Rule
+	if err := json.Unmarshal(createCtx.Response.Body(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatal("expected non-zero ID after create")
+	}
+
+	getCtx := invokeRuleGetHandler(t, GetRule(repo), "/api/v1/rules/1",
+		param.Params{{Key: "id", Value: "1"}})
+	if getCtx.Response.StatusCode() != 200 {
+		t.Fatalf("get status %d: %s", getCtx.Response.StatusCode(), getCtx.Response.Body())
+	}
+}
+
+func TestUpdateRuleNotFoundReturns404(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	ctx := invokePersistedRuleHandler(t,
+		UpdateRule(repo, func() error { return nil }),
+		"/api/v1/rules/9999/update",
+		[]byte(`{"name":"x","policy_id":1,"phase":"custom","pattern":"block_path:/x","action":"intercept","priority":1,"enabled":true}`),
+	)
+	ctx.Params = param.Params{{Key: "id", Value: "9999"}}
+	UpdateRule(repo, func() error { return nil })(context.Background(), ctx)
+	if ctx.Response.StatusCode() != 404 {
+		t.Fatalf("unexpected status %d", ctx.Response.StatusCode())
+	}
+}
+
+func TestUpdateRuleSuccess(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	seed := store.Rule{Name: "orig", PolicyID: 1, Phase: store.PhaseCustom,
+		Pattern: "block_path:/orig", Action: store.ActionIntercept, Priority: 3, Enabled: true}
+	if err := repo.Create(&seed); err != nil {
+		t.Fatalf("seed rule: %v", err)
+	}
+
+	updatePayload := []byte(`{"name":"updated","policy_id":1,"phase":"custom","pattern":"block_path:/updated","action":"observe","priority":3,"enabled":false}`)
+	var req protocol.Request
+	req.SetMethod("POST")
+	req.SetRequestURI("/api/v1/rules/1/update")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBody(updatePayload)
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "id", Value: "1"}}
+	UpdateRule(repo, func() error { return nil })(context.Background(), ctx)
+
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("update status %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	var updated store.Rule
+	if err := json.Unmarshal(ctx.Response.Body(), &updated); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if updated.Name != "updated" || updated.Enabled {
+		t.Fatalf("unexpected updated rule: %+v", updated)
+	}
+}
+
+func TestDeleteRuleSuccess(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	seed := store.Rule{Name: "to-delete", PolicyID: 1, Phase: store.PhaseACL,
+		Pattern: "block_ip:1.2.3.4", Action: store.ActionIntercept, Priority: 1, Enabled: true}
+	if err := repo.Create(&seed); err != nil {
+		t.Fatalf("seed rule: %v", err)
+	}
+
+	var req protocol.Request
+	req.SetMethod("POST")
+	req.SetRequestURI("/api/v1/rules/1/delete")
+	req.Header.Set("Content-Type", "application/json")
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "id", Value: "1"}}
+	DeleteRule(repo, func() error { return nil })(context.Background(), ctx)
+
+	if ctx.Response.StatusCode() != 204 {
+		t.Fatalf("delete status %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+
+	getCtx := invokeRuleGetHandler(t, GetRule(repo), "/api/v1/rules/1",
+		param.Params{{Key: "id", Value: "1"}})
+	if getCtx.Response.StatusCode() != 404 {
+		t.Fatalf("expected 404 after delete, got %d", getCtx.Response.StatusCode())
+	}
+}
+
+func TestExportRulesEmpty(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	ctx := invokeRuleGetHandler(t, ExportRules(repo), "/api/v1/rules/export", nil)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("export status %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	var resp struct {
+		Rules []store.Rule `json:"rules"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Rules) != 0 {
+		t.Fatalf("expected empty export, got %d rules", len(resp.Rules))
+	}
+}
+
+func TestImportRulesSuccess(t *testing.T) {
+	repo := newRuleRepoForHandlerTest(t)
+	reloaded := 0
+	ctx := invokePersistedRuleHandler(t, ImportRules(repo, func() error {
+		reloaded++
+		return nil
+	}), "/api/v1/rules/import", []byte(`{
+		"rules":[
+			{"name":"r1","policy_id":1,"phase":"acl","pattern":"block_ip:10.0.0.1","action":"intercept","priority":1,"enabled":true},
+			{"name":"r2","policy_id":1,"phase":"acl","pattern":"block_ip:10.0.0.2","action":"intercept","priority":2,"enabled":true}
+		]
+	}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("import status %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	if reloaded != 1 {
+		t.Fatalf("expected 1 reload, got %d", reloaded)
+	}
+	var resp struct {
+		Imported int `json:"imported"`
+		Total    int `json:"total"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Imported != 2 || resp.Total != 2 {
+		t.Fatalf("expected imported=2 total=2, got %+v", resp)
+	}
+}
+
+func TestListSiteRulesNoPolicyReturnsEmpty(t *testing.T) {
+	_, ruleRepo := newSiteAndRuleReposForTest(t)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.Site{}); err != nil {
+		t.Fatalf("migrate site: %v", err)
+	}
+	if err := db.Create(&store.Site{Host: "nopolicy.test", Bind: ":8080", Network: "tcp", Enabled: true}).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+	siteRepoNP := repository.NewSiteRepo(db)
+
+	ctx := invokeRuleGetHandler(t, ListSiteRules(siteRepoNP, ruleRepo), "/api/v1/sites/1/rules",
+		param.Params{{Key: "id", Value: "1"}})
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("status %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	var resp struct {
+		Items []store.Rule `json:"items"`
+		Total int          `json:"total"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 0 || len(resp.Items) != 0 {
+		t.Fatalf("expected empty list for site without policy, got %+v", resp)
+	}
+}
+
+func TestListSiteRulesNotFoundReturns404(t *testing.T) {
+	siteRepo, ruleRepo := newSiteAndRuleReposForTest(t)
+	ctx := invokeRuleGetHandler(t, ListSiteRules(siteRepo, ruleRepo), "/api/v1/sites/9999/rules",
+		param.Params{{Key: "id", Value: "9999"}})
+	if ctx.Response.StatusCode() != 404 {
+		t.Fatalf("expected 404 for missing site, got %d", ctx.Response.StatusCode())
 	}
 }

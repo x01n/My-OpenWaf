@@ -32,7 +32,7 @@ func TestTopCountriesAggregatesByGeoCountry(t *testing.T) {
 		{GeoCountry: "US", CreatedAt: now.Add(-time.Hour)},
 		{GeoCountry: "US", CreatedAt: now.Add(-2 * time.Hour)},
 		{GeoCountry: "JP", CreatedAt: now.Add(-time.Hour)},
-		{GeoCountry: "", CreatedAt: now.Add(-time.Hour)},   // 无地理信息应被排除
+		{GeoCountry: "", CreatedAt: now.Add(-time.Hour)},        // 无地理信息应被排除
 		{GeoCountry: "RU", CreatedAt: now.Add(-48 * time.Hour)}, // 超出时间窗应被排除
 	}
 	for i := range events {

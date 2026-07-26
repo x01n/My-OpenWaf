@@ -195,41 +195,21 @@ func NewJavaCVEDetector() *JavaCVEDetector {
 	return d
 }
 
-func javaRequestContainsAny(req *CVERequest, rule javaCVERule, needles ...string) bool {
-	return requestTargetContainsAny(req, rule.target, needles...)
-}
-
-func shouldScanJavaRule(req *CVERequest, rule javaCVERule) bool {
+func shouldScanJavaRule(req *CVERequest, rule javaCVERule, hits *subDetectorHits) bool {
 	switch rule.cveID {
-	case "CVE-2021-44228":
-		return javaRequestContainsAny(req, rule, "${", "jndi:", "ldap://", "rmi://", "ldaps://")
-	case "CVE-2022-22965":
-		return javaRequestContainsAny(req, rule, "class.module", "classloader", "class.classloader", "spring")
-	case "CVE-2022-22963":
-		return javaRequestContainsAny(req, rule, "functionrouter", "spring.cloud.function", "spel", "#{")
-	case "CVE-2017-18349":
-		return javaRequestContainsAny(req, rule, "@type", "autotype", "fastjson", "com.sun.", "java.lang.runtime", "java.net.", "javax.naming", "org.apache.xbean", "com.mchange.v2.c3p0")
-	case "CVE-2017-5638":
-		return javaRequestContainsAny(req, rule, "ognl", "#_member", "valuestack", "actioncontext", "struts")
-	case "CVE-2016-4437":
-		return javaRequestContainsAny(req, rule, "rememberme=")
-	case "CVE-2017-7525":
-		return javaRequestContainsAny(req, rule, "jackson", "@class", "polymorphic", "objectmapper", "[\"org.apache.commons.", "com.sun.org.apache.xalan")
-	case "CVE-2023-49070":
-		return javaRequestContainsAny(req, rule, "webtools/control", "ofbiz", "programexport")
-	case "CVE-2023-46604":
-		return javaRequestContainsAny(req, rule, "activemq", "exceptionresponse", "classpathxml", "classpathxmlapplicationcontext", "classinfo", "org.springframework", "spring-beans")
-	case "CVE-2022-26134":
-		return javaRequestContainsAny(req, rule, "confluence", "ognl", "${")
+	case "CVE-2021-44228", "CVE-2022-22965", "CVE-2022-22963", "CVE-2017-18349",
+		"CVE-2017-5638", "CVE-2016-4437", "CVE-2017-7525",
+		"CVE-2023-49070", "CVE-2023-46604", "CVE-2022-26134":
+		return subDetectorACGate(rule.cveID, rule.target, hits)
 	default:
 		return true
 	}
 }
 
-func (d *JavaCVEDetector) Detect(req *CVERequest) []CVEMatch {
+func (d *JavaCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMatch {
 	var matches []CVEMatch
 	for _, rule := range d.rules {
-		if !shouldScanJavaRule(req, rule) {
+		if !shouldScanJavaRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)
@@ -258,9 +238,9 @@ func (d *JavaCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	return matches
 }
 
-func (d *JavaCVEDetector) DetectFirst(req *CVERequest) (CVEMatch, bool) {
+func (d *JavaCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (CVEMatch, bool) {
 	for _, rule := range d.rules {
-		if !shouldScanJavaRule(req, rule) {
+		if !shouldScanJavaRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)

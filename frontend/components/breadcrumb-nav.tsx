@@ -11,30 +11,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
-
-const routeKeyMap: Record<string, string> = {
-  dashboard: "nav.dashboard",
-  sites: "nav.sites",
-  detail: "common.detail",
-  "security-events": "nav.securityEvents",
-  "access-logs": "nav.accessLogs",
-  "drop-events": "nav.dropEvents",
-  attacks: "nav.attacks",
-  "false-positives": "nav.falsePositives",
-  rules: "nav.rules",
-  "cc-protection": "nav.ccProtection",
-  captcha: "nav.captcha",
-  "auth-config": "nav.authConfig",
-  certificates: "nav.certificates",
-  "ip-lists": "nav.ipLists",
-  "threat-intel": "nav.threatIntel",
-  "upstream-status": "nav.upstreamStatus",
-  "api-keys": "nav.apiKeys",
-  "admin-users": "nav.adminUsers",
-  backup: "nav.backup",
-  "request-trace": "nav.requestTrace",
-  settings: "nav.settings",
-};
+import { segmentKeyMap } from "@/lib/route-titles";
 
 export function BreadcrumbNav() {
   const pathname = usePathname();
@@ -45,8 +22,8 @@ export function BreadcrumbNav() {
 
   const crumbs = segments.map((segment, index) => {
     const href = "/" + segments.slice(0, index + 1).join("/");
-    const label = routeKeyMap[segment]
-      ? t(routeKeyMap[segment])
+    const label = segmentKeyMap[segment]
+      ? t(segmentKeyMap[segment])
       : decodeURIComponent(segment);
     return { href, label };
   });

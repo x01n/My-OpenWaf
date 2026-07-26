@@ -173,6 +173,52 @@ func HitPassesOverrideSensitivity(hit OWASPHit, ov OWASPRuleOverride, catSens ma
 
 // FilterHits filters OWASP hits based on rule overrides, path whitelists, and optional
 // per-rule sensitivity overrides (requires category sensitivity map from ProtectionConfig).
+
+// HitPassesFilters 判断单个命中是否通过覆盖/白名单/类别灵敏度过滤。
+func HitPassesFilters(h OWASPHit, path string, overrides map[string]OWASPRuleOverride, catSens ...map[string]string) bool {
+	if ShouldSkipRule(h.RuleID, path, overrides) {
+		return false
+	}
+	if len(overrides) == 0 {
+		return true
+	}
+	var cs map[string]string
+	if len(catSens) > 0 {
+		cs = catSens[0]
+	}
+	ov := RuleOverride(h.RuleID, overrides)
+	if cs != nil && !HitPassesOverrideSensitivity(h, ov, cs) {
+		return false
+	}
+	return true
+}
+
+// FilterFirstHit 返回第一个通过覆盖/白名单过滤的命中；无命中时 ok=false。
+// 引擎路径只消费首个命中，避免 FilterHits 再分配 filtered slice。
+func FilterFirstHit(hits []OWASPHit, path string, overrides map[string]OWASPRuleOverride, catSens ...map[string]string) (OWASPHit, bool) {
+	if len(hits) == 0 {
+		return OWASPHit{}, false
+	}
+	if len(overrides) == 0 {
+		return hits[0], true
+	}
+	var cs map[string]string
+	if len(catSens) > 0 {
+		cs = catSens[0]
+	}
+	for _, h := range hits {
+		if ShouldSkipRule(h.RuleID, path, overrides) {
+			continue
+		}
+		ov := RuleOverride(h.RuleID, overrides)
+		if cs != nil && !HitPassesOverrideSensitivity(h, ov, cs) {
+			continue
+		}
+		return h, true
+	}
+	return OWASPHit{}, false
+}
+
 func FilterHits(hits []OWASPHit, path string, overrides map[string]OWASPRuleOverride, catSens ...map[string]string) []OWASPHit {
 	if len(overrides) == 0 || len(hits) == 0 {
 		return hits

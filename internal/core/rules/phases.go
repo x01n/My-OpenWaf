@@ -52,13 +52,19 @@ func fillMatchCtxFromPipeline(ctx *pipeline.RequestCtx, needsDerivedHeaders bool
 	mc.Body = ctx.Body
 	if needsDerivedHeaders {
 		if len(ctx.TLS.ALPN) > 0 {
-			mc.TLSALPN = strings.Join(ctx.TLS.ALPN, ",")
+			mc.TLSALPN = ctx.DerivedALPN(func() string {
+				return strings.Join(ctx.TLS.ALPN, ",")
+			})
 		}
 		if len(ctx.TLS.CipherSuites) > 0 {
-			mc.TLSCipherSuites = formatTLSCipherSuitesHeaderValue(ctx.TLS.CipherSuites)
+			mc.TLSCipherSuites = ctx.DerivedCipherSuites(func() string {
+				return formatTLSCipherSuitesHeaderValue(ctx.TLS.CipherSuites)
+			})
 		}
 		if len(ctx.HeaderKeys) > 0 {
-			mc.HeaderOrder = strings.Join(ctx.HeaderKeys, ",")
+			mc.HeaderOrder = ctx.DerivedHeaderOrder(func() string {
+				return strings.Join(ctx.HeaderKeys, ",")
+			})
 		}
 	}
 }
@@ -112,32 +118,6 @@ func (p *aclPhase) Name() string { return "acl" }
 
 func (p *aclPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return executeCompiledPhase(ctx, p.rules, true, p.needsDerivedHeaders)
-}
-
-// ── ACL allow precheck phase ──
-
-type aclAllowPrecheckPhase struct {
-	rules               []Compiled
-	needsDerivedHeaders bool
-}
-
-func NewACLAllowPrecheckPhasePrecompiled(rules []Compiled) pipeline.Phase {
-	return &aclAllowPrecheckPhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
-}
-
-func (p *aclAllowPrecheckPhase) Name() string { return "acl_allow_precheck" }
-
-func (p *aclAllowPrecheckPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	mc := ctxFromPipeline(ctx, p.needsDerivedHeaders)
-	for i := range p.rules {
-		if p.rules[i].runtimeAction != action.Allow {
-			continue
-		}
-		if p.rules[i].Match(mc) {
-			return hit(p.rules[i]), true
-		}
-	}
-	return action.Pass(), false
 }
 
 // ── Signature phase ──
@@ -451,11 +431,9 @@ func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs 
 			actionStr = "observe"
 		}
 	}
-	detailStr := ""
+	var details map[string]string
 	if bs.IsHighRisk && len(bs.Details) > 0 {
-		if data, err := json.Marshal(bs.Details); err == nil {
-			detailStr = string(data)
-		}
+		details = bs.Details
 	}
 	ctx.BotScoreResult = &pipeline.BotScoreInfo{
 		TotalScore:       bs.Total,
@@ -465,7 +443,7 @@ func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs 
 		IPRepScore:       bs.IPRepScore,
 		IsHighRisk:       bs.IsHighRisk,
 		Action:           actionStr,
-		Details:          detailStr,
+		Details:          details,
 	}
 }
 
@@ -593,17 +571,11 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		}
 	}
 
-	hits := owasp.CheckOWASPWithThresholds(p.thresholds, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets)
-
-	// Apply per-rule overrides and path whitelists.
-	if len(hits) > 0 {
-		hits = owasp.FilterHits(hits, ctx.Path, overrides, categorySensitivity)
-	}
-
-	if len(hits) == 0 {
+	hit, ok := owasp.FirstAcceptedOWASPHitWithThresholds(p.thresholds, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, overrides, categorySensitivity)
+	if !ok {
 		return action.Pass(), false
 	}
-	result := owaspHitResult(hits[0], p.cfg, overrides)
+	result := owaspHitResult(hit, p.cfg, overrides)
 	return result, result.IsTerminal()
 }
 
@@ -908,7 +880,7 @@ func dedupeBodyTargets(targets []string) []string {
 // Both parameter names (keys) and values are scanned — attackers may inject
 // payloads via key names (e.g. `1 UNION SELECT--=x`).
 func extractFormValues(body string) []string {
-	var vals []string
+	vals := make([]string, 0, (strings.Count(body, "&")+1)*2)
 	for body != "" {
 		pair := body
 		if i := strings.IndexByte(pair, '&'); i >= 0 {
@@ -921,18 +893,22 @@ func extractFormValues(body string) []string {
 		}
 		paramKey, value, hasEq := strings.Cut(pair, "=")
 		if hasEq {
-			dv, err := url.QueryUnescape(value)
-			if err != nil {
-				dv = value
+			dv := value
+			if strings.IndexByte(value, '%') >= 0 || strings.IndexByte(value, '+') >= 0 {
+				if decoded, err := url.QueryUnescape(value); err == nil {
+					dv = decoded
+				}
 			}
 			if dv != "" {
 				vals = append(vals, dv)
 			}
 		}
 		// Also scan the parameter name for injected payloads.
-		dk, err := url.QueryUnescape(paramKey)
-		if err != nil {
-			dk = paramKey
+		dk := paramKey
+		if strings.IndexByte(paramKey, '%') >= 0 || strings.IndexByte(paramKey, '+') >= 0 {
+			if decoded, err := url.QueryUnescape(paramKey); err == nil {
+				dk = decoded
+			}
 		}
 		if dk != "" {
 			vals = append(vals, dk)
@@ -1197,4 +1173,59 @@ func hit(c Compiled) action.Result {
 		StatusCode: c.StatusCode,
 		RedirectTo: c.RedirectTo,
 	}
+}
+
+// ── Browser Sign phase ──
+
+type browserSignPhase struct {
+	cfg *store.ProtectionConfig
+}
+
+// NewBrowserSignPhase 创建浏览器请求签名校验 phase。
+// 仅对 IsLikelyAPIRequest 识别为 API 的请求强制校验请求头签名。
+func NewBrowserSignPhase(cfg *store.ProtectionConfig) pipeline.Phase {
+	return &browserSignPhase{cfg: cfg}
+}
+
+func (p *browserSignPhase) Name() string { return "browser_sign" }
+
+func (p *browserSignPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	if p.cfg == nil || !p.cfg.BrowserSignEnabled {
+		return action.Pass(), false
+	}
+	if !challenge.IsLikelyAPIRequest(ctx.Method, ctx.Path, ctx.Headers) {
+		return action.Pass(), false
+	}
+	// 已通过挑战 cookie 的请求不重复强制签名，避免刷新后误伤。
+	if cookie, ok := lookupHeaderValue(ctx.Headers, "cookie"); ok &&
+		challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{
+			Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: ctx.UserAgent, SiteID: ctx.SiteID, Bind: ctx.Bind,
+		}, time.Now()) {
+		return action.Pass(), false
+	}
+
+	envHardFail := p.cfg.ShieldEnableEnvCheck
+	ok, reason := challenge.VerifyBrowserSignHeaders(ctx.Headers, ctx.Method, ctx.Path, ctx.Host, ctx.SiteID, time.Now(), envHardFail)
+	if ok {
+		return action.Pass(), false
+	}
+
+	act := action.Normalize(action.Type(p.cfg.BrowserSignAction))
+	switch act {
+	case action.Intercept, action.Challenge, action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge, action.Observe, action.Drop:
+	default:
+		act = action.Challenge
+	}
+	result := action.Result{
+		Type:      act,
+		Phase:     "browser_sign",
+		MatchDesc: reason,
+		Matched:   true,
+		Category:  "browser_sign",
+		RuleIDStr: "browser_sign",
+	}
+	if act == action.Observe {
+		return result, false
+	}
+	return result, true
 }

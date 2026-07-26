@@ -102,6 +102,11 @@ type Config struct {
 
 	// Drop (TCP connection close) strategy configuration.
 	Drop DropConfig
+
+	// ResponseCacheMB is the max response cache size in MiB (0 = use default 64).
+	ResponseCacheMB int
+	// ResponseCacheTTLSec is the default cache TTL in seconds (0 = use default 60).
+	ResponseCacheTTLSec int
 }
 
 // CVEConfig controls CVE-specific detection and feed synchronisation.
@@ -177,18 +182,33 @@ func LoadConfigFromEnv() Config {
 		}
 	}
 
+	cacheMB := 64
+	if v := strings.TrimSpace(os.Getenv("MY_OPENWAF_RESPONSE_CACHE_MB")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cacheMB = n
+		}
+	}
+	cacheTTL := 60
+	if v := strings.TrimSpace(os.Getenv("MY_OPENWAF_RESPONSE_CACHE_TTL_SEC")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cacheTTL = n
+		}
+	}
+
 	return Config{
-		DBDriver:       driver,
-		DBDSN:          dsn,
-		LogDBDSN:       logDSN,
-		DataDir:        dir,
-		RedisAddr:      strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_ADDR")),
-		RedisPassword:  strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_PASSWORD")),
-		RedisDB:        rd,
-		AdminBind:      adminBind,
-		AdminStaticDir: strings.TrimSpace(os.Getenv("MY_OPENWAF_ADMIN_STATIC_DIR")),
-		Bot:            botCfg,
-		CVE:            cveCfg,
-		Drop:           dropCfg,
+		DBDriver:            driver,
+		DBDSN:               dsn,
+		LogDBDSN:            logDSN,
+		DataDir:             dir,
+		RedisAddr:           strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_ADDR")),
+		RedisPassword:       strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_PASSWORD")),
+		RedisDB:             rd,
+		AdminBind:           adminBind,
+		AdminStaticDir:      strings.TrimSpace(os.Getenv("MY_OPENWAF_ADMIN_STATIC_DIR")),
+		Bot:                 botCfg,
+		CVE:                 cveCfg,
+		Drop:                dropCfg,
+		ResponseCacheMB:     cacheMB,
+		ResponseCacheTTLSec: cacheTTL,
 	}
 }

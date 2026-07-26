@@ -27,6 +27,9 @@ type BotSettingsUpdate struct {
 	JSObfuscation            *bool    `json:"js_obfuscation"`
 	ImageWatermark           *bool    `json:"image_watermark"`
 	AntiReplayEnabled        *bool    `json:"anti_replay_enabled"`
+	BrowserSignEnabled       *bool    `json:"browser_sign_enabled"`
+	BrowserSignTTL           *int     `json:"browser_sign_ttl"`
+	BrowserSignAction        *string  `json:"browser_sign_action"`
 	JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
 	JSProtectionMode         *string  `json:"js_protection_mode,omitempty"`
 	DecryptCacheTTLSeconds   *int     `json:"decrypt_cache_ttl_seconds,omitempty"`
@@ -38,9 +41,18 @@ type BotSettingsUpdate struct {
 func defaultBotSettingsResponse(settingsRepo *repository.SystemSettingsRepo) shared.BotSettingsResponse {
 	protectionCfg := shared.LoadProtectionConfig(settingsRepo)
 	resp := shared.BotSettingsResponse{
-		Enabled:        protectionCfg.BotDetectionEnabled,
-		ScoreThreshold: 60,
-		CaptchaEnabled: protectionCfg.CaptchaEnabled,
+		Enabled:            protectionCfg.BotDetectionEnabled,
+		ScoreThreshold:     60,
+		CaptchaEnabled:     protectionCfg.CaptchaEnabled,
+		BrowserSignEnabled: protectionCfg.BrowserSignEnabled,
+		BrowserSignTTL:     protectionCfg.BrowserSignTTL,
+		BrowserSignAction:  protectionCfg.BrowserSignAction,
+	}
+	if resp.BrowserSignTTL <= 0 {
+		resp.BrowserSignTTL = 300
+	}
+	if resp.BrowserSignAction == "" {
+		resp.BrowserSignAction = "challenge"
 	}
 	if val, err := settingsRepo.Get("drop_policy"); err == nil && val != "" {
 		var dropPolicy struct {
@@ -64,6 +76,21 @@ func GetBotSettings(settingsRepo *repository.SystemSettingsRepo) app.HandlerFunc
 		if err := json.Unmarshal([]byte(val), &resp); err != nil {
 			c.JSON(200, defaultBotSettingsResponse(settingsRepo))
 			return
+		}
+		// bot_settings JSON 可能尚未包含浏览器签名字段；以 protection 为权威源回填。
+		prot := shared.LoadProtectionConfig(settingsRepo)
+		resp.BrowserSignEnabled = prot.BrowserSignEnabled
+		if prot.BrowserSignTTL > 0 {
+			resp.BrowserSignTTL = prot.BrowserSignTTL
+		}
+		if prot.BrowserSignAction != "" {
+			resp.BrowserSignAction = prot.BrowserSignAction
+		}
+		if resp.BrowserSignTTL <= 0 {
+			resp.BrowserSignTTL = 300
+		}
+		if resp.BrowserSignAction == "" {
+			resp.BrowserSignAction = "challenge"
 		}
 		c.JSON(200, resp)
 	}
@@ -124,6 +151,15 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		if req.AntiReplayEnabled != nil {
 			current.AntiReplayEnabled = *req.AntiReplayEnabled
 		}
+		if req.BrowserSignEnabled != nil {
+			current.BrowserSignEnabled = *req.BrowserSignEnabled
+		}
+		if req.BrowserSignTTL != nil && *req.BrowserSignTTL > 0 {
+			current.BrowserSignTTL = *req.BrowserSignTTL
+		}
+		if req.BrowserSignAction != nil && *req.BrowserSignAction != "" {
+			current.BrowserSignAction = *req.BrowserSignAction
+		}
 		if req.JSObfuscationPaths != nil {
 			current.JSObfuscationPaths = req.JSObfuscationPaths
 		}
@@ -159,6 +195,12 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		}
 		if req.CaptchaEnabled != nil {
 			if err := shared.SyncCaptchaEnabledToProtection(settingsRepo, current.CaptchaEnabled); err != nil {
+				c.JSON(500, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if req.BrowserSignEnabled != nil || req.BrowserSignTTL != nil || req.BrowserSignAction != nil {
+			if err := shared.SyncBrowserSignToProtection(settingsRepo, current.BrowserSignEnabled, current.BrowserSignTTL, current.BrowserSignAction); err != nil {
 				c.JSON(500, map[string]string{"error": err.Error()})
 				return
 			}

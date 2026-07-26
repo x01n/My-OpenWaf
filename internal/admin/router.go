@@ -26,6 +26,7 @@ import (
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/escalation"
+	"My-OpenWaf/internal/waf/luaplugin"
 
 	"gorm.io/gorm"
 )
@@ -53,6 +54,8 @@ type Dependencies struct {
 	Cache         *cache.RedisKV
 	Upstreams     *upstream.Pool
 	ThreatIntel   system.ThreatIntelSyncer
+	// LuaEngine 只用于读取运行时统计；可为 nil，此时统计端点返回空列表。
+	LuaEngine *luaplugin.Engine
 }
 
 func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
@@ -117,6 +120,11 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		readGroup.GET("/threat-intel-feeds", system.ListThreatIntelFeeds(r.ThreatIntel))
 		readGroup.GET("/threat-intel-sync-logs", system.ListThreatIntelSyncLogs(r.ThreatIntelSyncLog))
+		readGroup.GET("/lua-plugins", system.ListLuaPlugins(deps.Repos.LuaPlugin))
+		// stats 是静态段，须与下面的 :id 共存；Hertz 路由树静态优先，
+		// 排列同 /security-events/stats（见 TestLuaPluginStatsRouteBeatsIDParam）。
+		readGroup.GET("/lua-plugins/stats", system.GetLuaPluginStats(deps.LuaEngine))
+		readGroup.GET("/lua-plugins/:id", system.GetLuaPlugin(deps.Repos.LuaPlugin))
 
 		readGroup.GET("/security-events", event.ListSecurityEvents(r.SecurityEvent))
 		readGroup.GET("/security-events/stats", event.SecurityEventStats(r.SecurityEvent))
@@ -232,6 +240,15 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/threat-intel-feeds/:id/update", system.UpdateThreatIntelFeed(r.ThreatIntel, reload))
 		opsGroup.POST("/threat-intel-feeds/:id/delete", system.DeleteThreatIntelFeed(r.ThreatIntel, reload))
 		opsGroup.POST("/threat-intel-feeds/:id/sync", system.SyncThreatIntelFeed(r.ThreatIntel, deps.ThreatIntel))
+
+		// 自定义 Lua 策略脚本。校验与试运行虽不改配置，但会编译/执行用户代码，
+		// 故一并置于 opsGroup（需要写权限）而非只读组。
+		opsGroup.POST("/lua-plugins", system.CreateLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/update", system.UpdateLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/delete", system.DeleteLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/toggle", system.ToggleLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/validate", system.ValidateLuaPlugin())
+		opsGroup.POST("/lua-plugins/dry-run", system.DryRunLuaPlugin(deps.Cache))
 
 		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
 

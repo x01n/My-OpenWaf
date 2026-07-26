@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 type OWASPCategory string
@@ -134,6 +133,46 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 }
 
 func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string) []OWASPHit {
+	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets)
+	if multi != nil {
+		return multi
+	}
+	if ok {
+		return []OWASPHit{hit}
+	}
+	return nil
+}
+
+// FirstOWASPHitWithThresholds 返回首个 OWASP 命中，不在 stop/deep/early 路径分配 []OWASPHit。
+// multi 场景（末尾协议/上传/危险路径软命中列表）取第一个。
+func FirstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string) (OWASPHit, bool) {
+	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets)
+	if multi != nil {
+		if len(multi) == 0 {
+			return OWASPHit{}, false
+		}
+		return multi[0], true
+	}
+	return hit, ok
+}
+
+// FirstAcceptedOWASPHitWithThresholds 返回第一个通过覆盖/白名单过滤的命中。
+// stop/deep/early 路径零 []OWASPHit 分配；仅 multi 软命中列表需要遍历过滤。
+func FirstAcceptedOWASPHitWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string, overrides map[string]OWASPRuleOverride, catSens ...map[string]string) (OWASPHit, bool) {
+	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets)
+	if multi != nil {
+		return FilterFirstHit(multi, path, overrides, catSens...)
+	}
+	if !ok {
+		return OWASPHit{}, false
+	}
+	if !HitPassesFilters(hit, path, overrides, catSens...) {
+		return OWASPHit{}, false
+	}
+	return hit, true
+}
+
+func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string) (hit OWASPHit, ok bool, multi []OWASPHit) {
 	sqliThreshold, sqliEnabled := thresholds.sqli.threshold, thresholds.sqli.enabled
 	xssThreshold, xssEnabled := thresholds.xss.threshold, thresholds.xss.enabled
 	cmdThreshold, cmdEnabled := thresholds.cmd.threshold, thresholds.cmd.enabled
@@ -182,7 +221,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 		skipBodySQLi = true
 	}
 	if crlfEnabled && (strings.ContainsAny(path, "\r\n") || strings.Contains(lowerPath, "%0d") || strings.Contains(lowerPath, "%0a")) {
-		return []OWASPHit{{Category: CatCRLF, RuleID: "owasp:crlf:005", Score: 5, Desc: "bare CR/LF in URL path"}}
+		return OWASPHit{Category: CatCRLF, RuleID: "owasp:crlf:005", Score: 5, Desc: "bare CR/LF in URL path"}, true, nil
 	}
 	if protoEnabled && strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") {
 		for _, raw := range bodyTargets {
@@ -191,26 +230,28 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 			}
 			normalized := normalizeWithDecode(raw)
 			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
-				return []OWASPHit{{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}}
+				return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}, true, nil
 			}
 		}
 	}
 	if pathTravEnabled && strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+")) {
-		return []OWASPHit{{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5, Desc: "Cisco translation-table path traversal pattern"}}
+		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5, Desc: "Cisco translation-table path traversal pattern"}, true, nil
 	}
 
 	// proto check on body targets is merged into the main loop below
 	// (after normalizeWithDecode is computed once per target) to avoid
 	// running it twice per request.
 
-	var stopHits []OWASPHit
+	var stopHit OWASPHit
+	hasStop := false
 	cleanPath := isCleanPathTarget(path)
 	cleanPlainQuery := isCleanPlainQueryTarget(query)
 	type unicodeBase64Target struct {
 		raw              string
 		queryPlusAsSpace bool
 	}
-	var unicodeBase64Targets []unicodeBase64Target
+	// 绝大多数请求不会进入 unicode/base64 深扫；小 cap 预分配避免 0->1->2 扩容。
+	unicodeBase64Targets := make([]unicodeBase64Target, 0, 2)
 	forEachOWASPTarget(path, query, headers, bodyTargets, cleanPath, cleanPlainQuery, cleanPlainQuery, func(raw string, isBodyTarget bool, queryPlusAsSpace bool) bool {
 		if raw == "" {
 			return true
@@ -232,22 +273,21 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 
 		normalized := normalizeWithDecodeTarget(raw, queryPlusAsSpace)
 		if len(normalized) > maxTargetLen {
-			tail := normalized[len(normalized)-maxTargetLen:]
-			normalized = normalized[:maxTargetLen] + " " + tail
+			normalized = truncateTarget(normalized)
 		}
 
 		// Opaque-encoded attack body detection only applies to body targets.
 		// Folded into the main loop so we don't recompute normalizeWithDecode.
 		if protoEnabled && isBodyTarget {
 			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
-				stopHits = []OWASPHit{{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}}
+				stopHit, hasStop = OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}, true
 				return false
 			}
 		}
 
 		if deserialEnabled && (strings.Contains(raw, "%ac%ed") || strings.Contains(raw, "%AC%ED") ||
 			strings.Contains(raw, "aced0005") || strings.Contains(raw, "ACED0005")) {
-			stopHits = []OWASPHit{{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java serialization magic bytes (URL-encoded)"}}
+			stopHit, hasStop = OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java serialization magic bytes (URL-encoded)"}, true
 			return false
 		}
 
@@ -261,7 +301,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 			lower := strings.ToLower(urlDec)
 			if hit, ok := checkCRLF(lower, crlfThreshold); ok {
 				if !isCRLFFalsePositive(lower, hit.RuleID) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
@@ -272,20 +312,20 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 		}
 		if sqliEnabled && !(isBodyTarget && skipBodySQLi) {
 			if hit, ok := nextSQLiHit(normalized, sqliThreshold); ok {
-				stopHits = []OWASPHit{hit}
+				stopHit, hasStop = hit, true
 				return false
 			}
 		}
 		if xssEnabled {
 			if hit, ok := nextXSSHit(normalized, xssThreshold); ok {
 				if !isKnownTelemetryXSSFalsePositive(path, normalized, hit.RuleID, isBodyTarget) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
 			if hit, decodedTarget, ok := nextDecodedXSSHit(raw, queryPlusAsSpace, xssThreshold); ok {
 				if !isKnownTelemetryXSSFalsePositive(path, decodedTarget, hit.RuleID, isBodyTarget) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
@@ -296,7 +336,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 					return true
 				}
 				if !isCmdInjectionFalsePositive(normalized, hit.RuleID) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
@@ -304,14 +344,14 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 		if webshellEnabled && !(isBodyTarget && skipBodyWebshell) {
 			if hit, ok := checkWebshell(normalized, webshellThreshold); ok {
 				if !isWebshellFalsePositive(normalized, hit.RuleID) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
 		}
 		if revShellEnabled {
 			if hit, ok := checkRevShell(normalized, revShellThreshold); ok {
-				stopHits = []OWASPHit{hit}
+				stopHit, hasStop = hit, true
 				return false
 			}
 		}
@@ -321,7 +361,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 					return true
 				}
 				if pathTravThreshold <= 2 || !isPathTravFalsePositive(normalized, hit.RuleID) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
@@ -335,7 +375,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 		}
 		if xxeEnabled {
 			if hit, ok := checkXXE(normalized, xxeThreshold); ok {
-				stopHits = []OWASPHit{hit}
+				stopHit, hasStop = hit, true
 				return false
 			}
 		}
@@ -353,20 +393,20 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 		}
 		if templateEnabled {
 			if hit, ok := checkTemplateInjection(normalized, templateThreshold); ok {
-				stopHits = []OWASPHit{hit}
+				stopHit, hasStop = hit, true
 				return false
 			}
 		}
 		if jndiEnabled {
 			if hit, ok := checkJNDI(normalized, jndiThreshold); ok {
-				stopHits = []OWASPHit{hit}
+				stopHit, hasStop = hit, true
 				return false
 			}
 		}
 		if crlfEnabled {
 			if hit, ok := checkCRLF(normalized, crlfThreshold); ok {
 				if !isCRLFFalsePositive(normalized, hit.RuleID) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
@@ -374,7 +414,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 		if exprLangEnabled {
 			if hit, ok := checkExprLang(normalized, exprLangThreshold); ok {
 				if !isELFalsePositive(normalized, hit.RuleID) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
@@ -382,30 +422,32 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 		if deserialEnabled {
 			if hit, ok := checkDeserialization(normalized, deserialThreshold); ok {
 				if !isDeserFalsePositive(normalized, hit.RuleID) {
-					stopHits = []OWASPHit{hit}
+					stopHit, hasStop = hit, true
 					return false
 				}
 			}
 		}
 		if graphqlEnabled {
 			if hit, ok := checkGraphQLi(normalized, graphqlThreshold); ok {
-				stopHits = []OWASPHit{hit}
+				stopHit, hasStop = hit, true
 				return false
 			}
 		}
 		if len(hits) > 0 {
-			stopHits = hits
+			// 软命中（ssrf/ldap/nosqli 等）取首个作为终止结果。
+			stopHit, hasStop = hits[0], true
 			return false
 		}
 		return true
 	})
-	if stopHits != nil {
-		return stopHits
+	if hasStop {
+		return stopHit, true, nil
 	}
 
 	// Second pass: deep base64-in-unicode-escape scan only materializes the
 	// subset that can reach this path, keeping the clean request path allocation-free.
-	var deepHit *OWASPHit
+	var deepHit OWASPHit
+	hasDeep := false
 	for _, target := range unicodeBase64Targets {
 		raw := target.raw
 		urlDec := raw
@@ -418,7 +460,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 		if strings.Count(urlDec, "\\u00") < 5 {
 			continue
 		}
-		jsDec := decodeJSEscapes(urlDec)
+		jsDec := decodeJSEscapesPooled(urlDec)
 		if jsDec == urlDec {
 			continue
 		}
@@ -428,14 +470,14 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 				decodedNorm := normalize(decoded)
 				if sqliEnabled {
 					if hit, ok := nextSQLiHit(decodedNorm, sqliThreshold); ok {
-						deepHit = &hit
+						deepHit, hasDeep = hit, true
 						return false
 					}
 				}
 				if xssEnabled {
 					if hit, ok := nextXSSHit(decodedNorm, xssThreshold); ok {
 						if !isKnownTelemetryXSSFalsePositive(path, decodedNorm, hit.RuleID, true) {
-							deepHit = &hit
+							deepHit, hasDeep = hit, true
 							return false
 						}
 					}
@@ -446,7 +488,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 							return true
 						}
 						if !isCmdInjectionFalsePositive(decodedNorm, hit.RuleID) {
-							deepHit = &hit
+							deepHit, hasDeep = hit, true
 							return false
 						}
 					}
@@ -454,12 +496,12 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 			}
 			return true
 		})
-		if deepHit != nil {
+		if hasDeep {
 			break
 		}
 	}
-	if deepHit != nil {
-		return []OWASPHit{*deepHit}
+	if hasDeep {
+		return deepHit, true, nil
 	}
 
 	if protoEnabled {
@@ -477,7 +519,13 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 			hits = append(hits, hit)
 		}
 	}
-	return hits
+	if len(hits) == 0 {
+		return OWASPHit{}, false, nil
+	}
+	if len(hits) == 1 {
+		return hits[0], true, nil
+	}
+	return OWASPHit{}, false, hits
 }
 
 func shouldScanUnicodeBase64Target(raw string) bool {
@@ -1507,7 +1555,13 @@ func isLikelySessionID(val string) bool {
 
 func unescapeURLComponent(s string, queryPlusAsSpace bool) (string, error) {
 	if queryPlusAsSpace {
+		if strings.IndexByte(s, '%') < 0 && strings.IndexByte(s, '+') < 0 {
+			return s, nil // 无 %/+ 时 QueryUnescape 必返回原串且 err==nil，零拷贝短路
+		}
 		return url.QueryUnescape(s)
+	}
+	if strings.IndexByte(s, '%') < 0 {
+		return s, nil
 	}
 	return url.PathUnescape(s)
 }
@@ -1561,7 +1615,7 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 	// JavaScript escape sequence decode: \xNN, \uXXXX, \u{XXXX}, \NNN (octal).
 	// This defeats obfuscation like window['\x61\x6c\x65\x72\x74'] → window['alert'].
 	if strings.Contains(s, "\\") {
-		s = decodeJSEscapes(s)
+		s = decodeJSEscapesPooled(s)
 	}
 	// Post-JS-escape URL decode: JS escapes may produce percent-encoded chars
 	// (e.g. %28 → %28 → '('). Multi-pass to handle double/triple encoding.
@@ -1580,12 +1634,12 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 		s = decodeUTF7Sequences(s)
 	}
 	s = normalizeURLSchemeControls(s)
-	s = strings.ToLower(s)
+	s = toLowerASCII(s)
 	s = strings.ReplaceAll(s, "\x00", " ")
 	// Strip inline SQL/C-style comments to defeat comment-splitting evasion.
 	// Empty replacement joins adjacent tokens: sel/**/ect → select, un/**/ion → union.
-	s = stripSQLComments(s)
-	s = collapseWhitespace(s)
+	s = stripSQLCommentsPooled(s)
+	s = collapseWhitespacePooled(s)
 	return s
 }
 
@@ -1891,78 +1945,6 @@ func collapseWhitespace(s string) string {
 	return b.String()
 }
 
-// decodeJSEscapes replaces JavaScript escape sequences with their characters:
-//   - \xNN (hex byte)
-//   - \uXXXX (Unicode BMP)
-//   - \u{XXXX} (Unicode extended)
-//   - \NNN (octal, 1-3 digits)
-func decodeJSEscapes(s string) string {
-	if !strings.Contains(s, "\\") {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	i := 0
-	for i < len(s) {
-		if s[i] != '\\' || i+1 >= len(s) {
-			b.WriteByte(s[i])
-			i++
-			continue
-		}
-		switch s[i+1] {
-		case 'x', 'X':
-			// \xNN
-			if i+3 < len(s) {
-				if v, err := strconv.ParseUint(s[i+2:i+4], 16, 8); err == nil {
-					b.WriteByte(byte(v))
-					i += 4
-					continue
-				}
-			}
-		case 'u', 'U':
-			// \u{XXXX} or \uXXXX
-			if i+2 < len(s) && s[i+2] == '{' {
-				end := strings.IndexByte(s[i+3:], '}')
-				if end > 0 && end <= 6 {
-					hex := s[i+3 : i+3+end]
-					if v, err := strconv.ParseUint(hex, 16, 32); err == nil {
-						var buf [4]byte
-						n := utf8.EncodeRune(buf[:], rune(v))
-						b.Write(buf[:n])
-						i = i + 3 + end + 1
-						continue
-					}
-				}
-			} else if i+5 < len(s) {
-				if v, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
-					var buf [4]byte
-					n := utf8.EncodeRune(buf[:], rune(v))
-					b.Write(buf[:n])
-					i += 6
-					continue
-				}
-			}
-		default:
-			// Octal: \NNN (1-3 digits, value ≤ 377)
-			if s[i+1] >= '0' && s[i+1] <= '7' {
-				end := i + 2
-				for end < len(s) && end < i+4 && s[end] >= '0' && s[end] <= '7' {
-					end++
-				}
-				if v, err := strconv.ParseUint(s[i+1:end], 8, 8); err == nil {
-					b.WriteByte(byte(v))
-					i = end
-					continue
-				}
-			}
-		}
-		// Not a recognized escape — keep the backslash.
-		b.WriteByte(s[i])
-		i++
-	}
-	return b.String()
-}
-
 // decodeUTF7Sequences replaces UTF-7 encoded characters (+ADw- → <, +AD4- → >, etc.).
 // This is used in XSS attacks with charset=UTF-7: +ADw-script+AD4-alert(1)+ADw-/script+AD4-
 var reUTF7 = regexp.MustCompile(`\+([A-Za-z0-9+/]{2,8})-?`)
@@ -2052,7 +2034,7 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 	}
 	jsDecoded := ""
 	if strings.Contains(urlDecoded, "\\") {
-		jsDecoded = decodeJSEscapes(urlDecoded)
+		jsDecoded = decodeJSEscapesPooled(urlDecoded)
 		if jsDecoded == urlDecoded || jsDecoded == raw || jsDecoded == s {
 			jsDecoded = ""
 		}
@@ -2061,7 +2043,10 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 	const maxTotalBytes = 32768
 	const maxDepth = 3
 
-	var b strings.Builder
+	// acc 累积「归一化串 + 各层解码结果」。仅在首个 base64 token 真正解出内容时
+	// 才从 normBufPool 取缓冲，避免绝大多数无解码结果的请求付出取还成本。
+	var accPtr *[]byte
+	var acc []byte
 	seen := make(map[string]bool, 8)
 	found := false
 	totalBytes := 0
@@ -2102,22 +2087,26 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 			}
 			totalBytes += len(decoded)
 			if !found {
-				b.Grow(len(s) + 256)
-				b.WriteString(s)
+				accPtr = getNormBuf()
+				acc = *accPtr
+				if cap(acc) < len(s)+256 {
+					acc = make([]byte, 0, len(s)+256)
+				}
+				acc = append(acc[:0], s...)
 				found = true
 			}
 			normalizedDecoded := normalize(decoded)
-			b.WriteByte(' ')
-			b.WriteString(normalizedDecoded)
+			acc = append(acc, ' ')
+			acc = append(acc, normalizedDecoded...)
 
 			nextJS := ""
 			nextNormalizedJS := ""
 			if strings.Contains(decoded, "\\") {
-				nextJS = decodeJSEscapes(decoded)
+				nextJS = decodeJSEscapesPooled(decoded)
 				if nextJS != decoded {
 					nextNormalizedJS = normalize(nextJS)
-					b.WriteByte(' ')
-					b.WriteString(nextNormalizedJS)
+					acc = append(acc, ' ')
+					acc = append(acc, nextNormalizedJS...)
 				} else {
 					nextJS = ""
 				}
@@ -2152,7 +2141,11 @@ func normalizeWithDecodeTarget(raw string, queryPlusAsSpace bool) string {
 	}
 
 	if found {
-		return b.String()
+		// 必须复制：acc 底层数组随即归还池，返回值不得指向池化缓冲。
+		result := string(acc)
+		*accPtr = acc
+		putNormBuf(accPtr)
+		return result
 	}
 	return s
 }
@@ -2211,7 +2204,7 @@ func nextDecodedXSSHit(raw string, queryPlusAsSpace bool, threshold int) (OWASPH
 
 			jsDecoded := ""
 			if strings.Contains(decoded, "\\") {
-				jsDecoded = decodeJSEscapes(decoded)
+				jsDecoded = decodeJSEscapesPooled(decoded)
 				if jsDecoded != decoded {
 					normalizedJS := normalize(jsDecoded)
 					if hit, ok := nextXSSHit(normalizedJS, threshold); ok {
@@ -2247,7 +2240,7 @@ func nextDecodedXSSHit(raw string, queryPlusAsSpace bool, threshold int) (OWASPH
 		}
 	}
 	if strings.Contains(urlDecoded, "\\") {
-		if decoded := decodeJSEscapes(urlDecoded); decoded != urlDecoded {
+		if decoded := decodeJSEscapesPooled(urlDecoded); decoded != urlDecoded {
 			sources = append(sources, decoded)
 		}
 	}
@@ -2927,14 +2920,12 @@ func hasXSSIndicator(s string) bool {
 		strings.Contains(s, "expression(") ||
 		strings.Contains(s, "srcdoc") ||
 		strings.Contains(s, "{{") ||
-		// Global object bracket property access (JS obfuscation).
 		strings.Contains(s, "self[") ||
 		strings.Contains(s, "top[") ||
 		strings.Contains(s, "parent[") ||
 		strings.Contains(s, "frames[") ||
 		strings.Contains(s, "globalthis[") ||
 		strings.Contains(s, "this[") ||
-		// Standalone dangerous function names (may be accessed via bracket notation).
 		strings.Contains(s, "alert(") ||
 		strings.Contains(s, "alert'") ||
 		strings.Contains(s, "prompt(") ||
@@ -2947,10 +2938,8 @@ func hasXSSIndicator(s string) bool {
 		strings.Contains(s, "+{}") ||
 		strings.Contains(s, "+[]") ||
 		strings.Contains(s, "(![") ||
-		// constructor/prototype only suspicious in template/JS-execution context
 		strings.Contains(s, "constructor.constructor") ||
 		strings.Contains(s, "constructor.prototype[") ||
-		// Specific HTML event handler names — avoids matching "connection","function","location" etc.
 		strings.Contains(s, "onclick") ||
 		strings.Contains(s, "onload") ||
 		strings.Contains(s, "onerror") ||
@@ -3185,6 +3174,11 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		return true // sleep()/benchmark() without SQL context → JavaScript FP
 
 	case "owasp:sqli:006": // '\s*;\s*\w — apostrophe + semicolon + word char
+		// 二进制 body（PDF/压缩流）中该三字符模式极易随机碰撞，
+		// 且其上下文校验会被二进制里偶然出现的 from/order 等英文词满足。
+		if isBinaryScanTarget(raw) {
+			return true
+		}
 		// This pattern fires on JavaScript/TypeScript imports and string literals:
 		// e.g. `from 'antd'; import { ... }` or `target='_blank'; rel='noopener'`.
 		// Keep only when SQL structure confirms stacked-query context.

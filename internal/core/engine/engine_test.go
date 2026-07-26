@@ -15,7 +15,7 @@ func newTestHolder(prot store.ProtectionConfig, rules []snapshot.CompiledRule) *
 	holder := &snapshot.Holder{}
 	holder.Store(&snapshot.Snapshot{
 		Revision: 1,
-		Sites: map[string]snapshot.SiteRuntime{
+		Sites: map[string]*snapshot.SiteRuntime{
 			snapshot.SiteMapKey(":80", "example.com"): {
 				Site:     store.Site{ID: 1, Host: "example.com", Bind: ":80"},
 				Bind:     ":80",
@@ -114,7 +114,7 @@ func TestProcessDoesNotReuseAntiReplayPhaseAcrossSitesWithSamePolicy(t *testing.
 	holder := &snapshot.Holder{}
 	holder.Store(&snapshot.Snapshot{
 		Revision: 1,
-		Sites: map[string]snapshot.SiteRuntime{
+		Sites: map[string]*snapshot.SiteRuntime{
 			snapshot.SiteMapKey(":80", "disabled.example.com"): {
 				Site:              store.Site{ID: 1, Host: "disabled.example.com", Bind: ":80"},
 				Bind:              ":80",

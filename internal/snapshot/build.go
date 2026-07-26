@@ -118,7 +118,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	responseCompressionMinBytes := settingInt(settingsMap, "response_compression_min_bytes", DefaultResponseCompressionMinBytes)
 
 	sniCerts := make(map[string]tls.Certificate)
-	siteMap := make(map[string]SiteRuntime)
+	siteMap := make(map[string]*SiteRuntime)
 
 	for _, s := range sites {
 		urls := parseUpstreamURLs(s.UpstreamURLs)
@@ -262,7 +262,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				ResponseCompressionMinBytes:    responseCompressionMinBytes,
 				BrotliEnabled:                  brotliEnabled,
 			}
-			if err := registerSiteKeys(siteMap, rt); err != nil {
+			if err := registerSiteKeys(siteMap, &rt); err != nil {
 				return nil, err
 			}
 		}
@@ -270,13 +270,18 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	}
 
 	// Compute effective per-site protection by merging site overrides onto global config.
-	for key, rt := range siteMap {
+	for _, rt := range siteMap {
 		ep := mergeProtection(protection, rt.Site)
 		rt.EffectiveProtection = &ep
-		siteMap[key] = rt
 	}
 
+	// 自定义 Lua 策略：在此编译，语法错误在 reload 时即暴露。
+	// 单脚本编译失败只记错误、不中断构建（见 loadLuaPlugins）。
+	luaScripts, luaErrs := loadLuaPlugins(db)
+
 	return &Snapshot{
+		LuaPlugins:                     luaScripts,
+		LuaPluginErrors:                luaErrs,
 		Revision:                       rev,
 		Sites:                          siteMap,
 		NetworkDefaults:                networkDefaults,
@@ -351,14 +356,14 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 	return p
 }
 
-func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) error {
+func registerSiteKeys(m map[string]*SiteRuntime, rt *SiteRuntime) error {
 	bind := rt.Bind
 	for _, host := range splitHosts(rt.Site.Host) {
 		h := NormalizeMatchHost(host)
 		if h == "" {
 			continue
 		}
-		k := SiteMapKey(bind, h)
+		k := siteMapKeyNorm(bind, h)
 		if existing, exists := m[k]; exists {
 			if existing.Site.ID == rt.Site.ID {
 				continue

@@ -171,6 +171,7 @@ func FormatCipherSuites(cipherSuites []uint16) string {
 	}
 	catalog := loadTLSCipherSuiteCatalog()
 	var b strings.Builder
+	b.Grow(len(cipherSuites) * 24)
 	for i, suiteID := range cipherSuites {
 		if i > 0 {
 			b.WriteByte(',')
@@ -179,7 +180,12 @@ func FormatCipherSuites(cipherSuites []uint16) string {
 			b.WriteString(canonical)
 			continue
 		}
-		b.WriteString(fmt.Sprintf("0x%04x", suiteID))
+		b.WriteString("0x")
+		hex := strconv.FormatUint(uint64(suiteID), 16)
+		for pad := 4 - len(hex); pad > 0; pad-- {
+			b.WriteByte('0')
+		}
+		b.WriteString(hex)
 	}
 	return b.String()
 }

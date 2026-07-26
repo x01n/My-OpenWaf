@@ -2,7 +2,7 @@ package repository
 
 import (
 	"encoding/json"
-	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,10 +112,12 @@ type FingerprintFilter struct {
 
 func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.AccessLog, int64, error) {
 	f = normalizeAccessLogFilter(f)
+	cacheKey := accessLogCountCacheKey(f)
+
 	// Try Redis hot cache for large query results.
 	if r.hotCache != nil && r.hotCache.Available() {
-		cacheKey := "al_list:" + accessLogCountCacheKey(f) + fmt.Sprintf(":o%d:l%d", offset, limit)
-		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(cacheKey); ok {
+		hcKey := "al_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
+		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(hcKey); ok {
 			var items []store.AccessLog
 			if json.Unmarshal(rawItems, &items) == nil {
 				normalizeAccessLogProtocols(items)
@@ -128,7 +130,6 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 	q = applyAccessLogFilters(q, f)
 
 	var total int64
-	cacheKey := accessLogCountCacheKey(f)
 	cached := false
 	if r.countCache != nil {
 		if value, ok := r.countCache.Get(cacheKey); ok {
@@ -153,7 +154,7 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 
 	// Cache large results in Redis for subsequent requests.
 	if r.hotCache != nil && r.hotCache.Available() && len(items) > 0 {
-		hcKey := "al_list:" + cacheKey + fmt.Sprintf(":o%d:l%d", offset, limit)
+		hcKey := "al_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
 		r.hotCache.SetList(hcKey, items, total, 5*time.Second)
 	}
 
@@ -288,10 +289,10 @@ func (r *AccessLogRepo) ListFingerprints(offset, limit int, f FingerprintFilter)
 func applyFingerprintFilters(q *gorm.DB, f FingerprintFilter) *gorm.DB {
 	f = normalizeFingerprintFilter(f)
 	if f.TLSJA3Hash != "" {
-		q = q.Where("tls_ja3_hash LIKE ?", "%"+f.TLSJA3Hash+"%")
+		q = q.Where("tls_ja3_hash = ?", f.TLSJA3Hash)
 	}
 	if f.TLSJA4 != "" {
-		q = q.Where("tls_ja4 LIKE ?", "%"+f.TLSJA4+"%")
+		q = q.Where("tls_ja4 = ?", f.TLSJA4)
 	}
 	if f.TLSVersion != "" {
 		q = q.Where("tls_version = ?", f.TLSVersion)
@@ -319,77 +320,103 @@ func applyFingerprintFilters(q *gorm.DB, f FingerprintFilter) *gorm.DB {
 
 func accessLogCountCacheKey(f AccessLogFilter) string {
 	f = normalizeAccessLogFilter(f)
-	key := "al_count"
+	var b strings.Builder
+	var ibuf [20]byte
+	b.Grow(64)
+	b.WriteString("al_count")
 	if f.ID > 0 {
-		key += ":id" + fmt.Sprint(f.ID)
+		b.WriteString(":id")
+		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.ID), 10))
 	}
 	if f.SiteID > 0 {
-		key += ":s" + fmt.Sprint(f.SiteID)
+		b.WriteString(":s")
+		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.SiteID), 10))
 	}
 	if f.Query != "" {
-		key += ":q" + f.Query
+		b.WriteString(":q")
+		b.WriteString(f.Query)
 	}
 	if f.RequestID != "" {
-		key += ":rid" + f.RequestID
+		b.WriteString(":rid")
+		b.WriteString(f.RequestID)
 	}
 	if f.ClientIP != "" {
-		key += ":ip" + f.ClientIP
+		b.WriteString(":ip")
+		b.WriteString(f.ClientIP)
 	}
 	if f.Host != "" {
-		key += ":h" + f.Host
+		b.WriteString(":h")
+		b.WriteString(f.Host)
 	}
 	if f.Path != "" {
-		key += ":p" + f.Path
+		b.WriteString(":p")
+		b.WriteString(f.Path)
 	}
 	if f.QueryString != "" {
-		key += ":qs" + f.QueryString
+		b.WriteString(":qs")
+		b.WriteString(f.QueryString)
 	}
 	if f.Method != "" {
-		key += ":m" + f.Method
+		b.WriteString(":m")
+		b.WriteString(f.Method)
 	}
 	if f.WAFAction != "" {
-		key += ":wa" + f.WAFAction
+		b.WriteString(":wa")
+		b.WriteString(f.WAFAction)
 	}
 	if f.CacheState != "" {
-		key += ":cs" + f.CacheState
+		b.WriteString(":cs")
+		b.WriteString(f.CacheState)
 	}
 	if f.StatusGroup != "" {
-		key += ":sg" + f.StatusGroup
+		b.WriteString(":sg")
+		b.WriteString(f.StatusGroup)
 	}
 	if f.TLSVersion != "" {
-		key += ":tv" + f.TLSVersion
+		b.WriteString(":tv")
+		b.WriteString(f.TLSVersion)
 	}
 	if f.TLSSNI != "" {
-		key += ":sni" + f.TLSSNI
+		b.WriteString(":sni")
+		b.WriteString(f.TLSSNI)
 	}
 	if f.TLSALPN != "" {
-		key += ":alpn" + f.TLSALPN
+		b.WriteString(":alpn")
+		b.WriteString(f.TLSALPN)
 	}
 	if f.TLSJA3Hash != "" {
-		key += ":j3h" + f.TLSJA3Hash
+		b.WriteString(":j3h")
+		b.WriteString(f.TLSJA3Hash)
 	}
 	if f.TLSJA4 != "" {
-		key += ":j4" + f.TLSJA4
+		b.WriteString(":j4")
+		b.WriteString(f.TLSJA4)
 	}
 	if f.TLSCipherSuites != "" {
-		key += ":tcs" + f.TLSCipherSuites
+		b.WriteString(":tcs")
+		b.WriteString(f.TLSCipherSuites)
 	}
 	if f.TLSExtensions != "" {
-		key += ":tex" + f.TLSExtensions
+		b.WriteString(":tex")
+		b.WriteString(f.TLSExtensions)
 	}
 	if f.TLSCurves != "" {
-		key += ":tcu" + f.TLSCurves
+		b.WriteString(":tcu")
+		b.WriteString(f.TLSCurves)
 	}
 	if f.TLSPointFormats != "" {
-		key += ":tpf" + f.TLSPointFormats
+		b.WriteString(":tpf")
+		b.WriteString(f.TLSPointFormats)
 	}
 	if f.Since != nil {
-		key += ":si" + f.Since.Format("0601021504")
+		b.WriteString(":si")
+		b.WriteString(f.Since.Format("0601021504"))
 	}
 	if f.Until != nil {
-		key += ":un" + f.Until.Format("0601021504")
+		b.WriteString(":un")
+		b.WriteString(f.Until.Format("0601021504"))
 	}
-	return key
+	return b.String()
 }
 
 func (r *AccessLogRepo) Create(item *store.AccessLog) error {

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -16,12 +15,6 @@ import (
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/utils"
-)
-
-// siteStatusMap tracks runtime status of sites (running/stopped).
-var (
-	siteStatusMap   = make(map[uint]string)
-	siteStatusMutex sync.RWMutex
 )
 
 var (
@@ -118,6 +111,9 @@ func GetSite(repo *repository.SiteRepo) app.HandlerFunc {
 func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item store.Site
+		// 先填模型声明的默认值，再让请求体覆盖：json 只写出现过的字段，
+		// 这样「未提供」保留默认值，「显式传 false/0」才能如实落库。
+		_ = store.ApplyModelDefaults(&item)
 		body := c.Request.Body()
 		if err := shared.BindSiteFromRequestBody(body, &item); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -424,10 +420,6 @@ func StartSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 			return
 		}
 
-		siteStatusMutex.Lock()
-		siteStatusMap[id] = "running"
-		siteStatusMutex.Unlock()
-
 		c.JSON(200, map[string]string{"status": "running", "message": "site started"})
 	}
 }
@@ -455,10 +447,6 @@ func StopSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 			return
 		}
 
-		siteStatusMutex.Lock()
-		siteStatusMap[id] = "stopped"
-		siteStatusMutex.Unlock()
-
 		c.JSON(200, map[string]string{"status": "stopped", "message": "site stopped"})
 	}
 }
@@ -476,16 +464,12 @@ func GetSiteStatus(repo *repository.SiteRepo) app.HandlerFunc {
 			return
 		}
 
-		siteStatusMutex.RLock()
-		status, exists := siteStatusMap[id]
-		siteStatusMutex.RUnlock()
-
-		if !exists {
-			if site.Enabled {
-				status = "running"
-			} else {
-				status = "stopped"
-			}
+		// 站点运行状态的唯一真相源是 site.Enabled：StartSite/StopSite 正是通过写该
+		// 字段实现的，UpdateSite 也能改它。此处不再维护额外的进程级状态缓存，
+		// 否则常规站点编辑改动 enabled 后状态接口会返回陈旧值。
+		status := "stopped"
+		if site.Enabled {
+			status = "running"
 		}
 
 		c.JSON(200, map[string]any{

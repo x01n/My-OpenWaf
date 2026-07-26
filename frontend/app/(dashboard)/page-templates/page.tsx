@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Card,
   CardContent,
@@ -38,29 +40,23 @@ import {
 const TEMPLATE_TYPES = ["captcha", "challenge", "block"] as const;
 type TemplateType = (typeof TEMPLATE_TYPES)[number];
 
-interface CommonFields {
-  brand_name: string;
-  primary_color: string;
-  bg_gradient: string;
-  logo_url: string;
-  title: string;
-  footer_text: string;
-  custom_css: string;
-}
+
 
 function TemplateEditor({ type }: { type: TemplateType }) {
   const { t } = useTranslation();
-  const { data, isLoading, mutate } = usePageTemplate(type);
+  const { data, isLoading, error, mutate } = usePageTemplate(type);
   const updateTemplate = usePageTemplateUpdate();
   const resetTemplate = usePageTemplateReset();
   const { data: previewData, mutate: refreshPreview } = usePageTemplatePreview(type);
 
-  const [form, setForm] = useState<Record<string, string>>({});
+  const [prevData, setPrevData] = useState(data);
+  const [form, setForm] = useState<Record<string, string>>(data ? (data as Record<string, string>) : {});
   const [showPreview, setShowPreview] = useState(false);
 
-  useEffect(() => {
+  if (data !== prevData) {
+    setPrevData(data);
     if (data) setForm(data as Record<string, string>);
-  }, [data]);
+  }
 
   const setField = (key: string, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -118,6 +114,15 @@ function TemplateEditor({ type }: { type: TemplateType }) {
         <Skeleton className="h-10 w-full" />
         <Skeleton className="h-10 w-full" />
       </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+        <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+      </Alert>
     );
   }
 
@@ -231,7 +236,7 @@ function TemplateEditor({ type }: { type: TemplateType }) {
       {showPreview && previewData && (
         <div className="mt-4 rounded-lg border overflow-hidden">
           <iframe
-            srcDoc={typeof previewData === "string" ? previewData : (previewData as any).html || ""}
+            srcDoc={typeof previewData === "string" ? previewData : (previewData as { html?: string }).html || ""}
             className="w-full h-[500px]"
             sandbox="allow-same-origin"
             title="Template Preview"
@@ -247,14 +252,10 @@ export default function PageTemplatesPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">
-          {t("pageTemplates.title")}
-        </h1>
-        <p className="text-muted-foreground">
-          {t("pageTemplates.description")}
-        </p>
-      </div>
+      <PageHeader
+        title={t("pageTemplates.title")}
+        description={t("pageTemplates.description")}
+      />
 
       <Tabs defaultValue="captcha">
         <TabsList>

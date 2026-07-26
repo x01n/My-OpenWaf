@@ -3,6 +3,7 @@ package shared
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -120,7 +121,10 @@ func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, ena
 		return nil
 	}
 	cfg.BotDetectionEnabled = enabled
-	data, _ := json.Marshal(cfg)
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal protection config: %w", err)
+	}
 	return settingsRepo.Set("protection", string(data))
 }
 
@@ -135,7 +139,40 @@ func SyncCaptchaEnabledToProtection(settingsRepo *repository.SystemSettingsRepo,
 		return nil
 	}
 	cfg.CaptchaEnabled = enabled
-	data, _ := json.Marshal(cfg)
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal protection config: %w", err)
+	}
+	return settingsRepo.Set("protection", string(data))
+}
+
+// SyncBrowserSignToProtection 将 bot_settings 中的浏览器签名配置同步到 protection，
+// 供引擎 phase 与 proxy HTML 注入读取。
+func SyncBrowserSignToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool, ttl int, action string) error {
+	cfg := store.DefaultProtectionConfig()
+	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &cfg)
+	}
+	changed := false
+	if cfg.BrowserSignEnabled != enabled {
+		cfg.BrowserSignEnabled = enabled
+		changed = true
+	}
+	if ttl > 0 && cfg.BrowserSignTTL != ttl {
+		cfg.BrowserSignTTL = ttl
+		changed = true
+	}
+	if action != "" && cfg.BrowserSignAction != action {
+		cfg.BrowserSignAction = action
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal protection config: %w", err)
+	}
 	return settingsRepo.Set("protection", string(data))
 }
 
@@ -162,7 +199,10 @@ func SyncBotThresholdToDropPolicy(settingsRepo *repository.SystemSettingsRepo, t
 		return nil
 	}
 	current.BotScoreThreshold = threshold
-	data, _ := json.Marshal(current)
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal drop policy: %w", err)
+	}
 	return settingsRepo.Set("drop_policy", string(data))
 }
 
@@ -181,7 +221,10 @@ func SyncDropThresholdToBotSettings(settingsRepo *repository.SystemSettingsRepo,
 		return nil
 	}
 	current.ScoreThreshold = threshold
-	data, _ := json.Marshal(current)
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
@@ -205,7 +248,10 @@ func SyncCVEAutoDropToDropPolicy(settingsRepo *repository.SystemSettingsRepo, cr
 	}
 	current.CVEAutoDropCritical = critical
 	current.CVEAutoDropHigh = high
-	data, _ := json.Marshal(current)
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal drop policy: %w", err)
+	}
 	return settingsRepo.Set("drop_policy", string(data))
 }
 
@@ -220,7 +266,10 @@ func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, en
 		return nil
 	}
 	current.Enabled = enabled
-	data, _ := json.Marshal(current)
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
@@ -238,6 +287,9 @@ type BotSettingsResponse struct {
 	JSObfuscation            bool     `json:"js_obfuscation"`
 	ImageWatermark           bool     `json:"image_watermark"`
 	AntiReplayEnabled        bool     `json:"anti_replay_enabled"`
+	BrowserSignEnabled       bool     `json:"browser_sign_enabled"`
+	BrowserSignTTL           int      `json:"browser_sign_ttl"`
+	BrowserSignAction        string   `json:"browser_sign_action"`
 	JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
 	JSProtectionMode         string   `json:"js_protection_mode,omitempty"`
 	DecryptCacheTTLSeconds   int      `json:"decrypt_cache_ttl_seconds,omitempty"`

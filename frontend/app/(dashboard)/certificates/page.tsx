@@ -2,12 +2,14 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { useCertificates, useCertificateMutation, useCertificateDelete } from "@/hooks/use-api";
 import { DataTable } from "@/components/data-table";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -36,7 +38,7 @@ import type { Certificate } from "@/lib/types";
 
 export default function CertificatesPage() {
   const { t } = useTranslation();
-  const { data, isLoading, mutate } = useCertificates();
+  const { data, isLoading, error, mutate } = useCertificates();
   const { execute: mutateCert, loading: mutateLoading } = useCertificateMutation();
   const { execute: deleteCert, loading: deleteLoading } = useCertificateDelete();
 
@@ -178,22 +180,25 @@ export default function CertificatesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            {t("certificates.title")}
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            {t("certificates.description")}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("certificates.title")}
+        description={t("certificates.description")}
+        actions={
           <Button onClick={() => setDialogOpen(true)}>
             <IconPlus className="h-4 w-4" />
             {t("certificates.add")}
           </Button>
-        </div>
-      </div>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <DataTable
         columns={columns}

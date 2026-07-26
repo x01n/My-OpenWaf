@@ -2,7 +2,6 @@ package ratelimit
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -92,7 +91,7 @@ func (rl *RedisRateLimiter) Allow(key string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	redisKey := fmt.Sprintf("%s:rl:%s", rl.prefix, key)
+	redisKey := rl.prefix + ":rl:" + key
 	now := time.Now().UnixMilli()
 	windowMs := atomic.LoadInt64(&rl.windowS) * 1000
 	maxReqs := atomic.LoadInt64(&rl.maxReqs)
@@ -112,7 +111,7 @@ func (rl *RedisRateLimiter) Increment(key string) int64 {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	redisKey := fmt.Sprintf("%s:rl:%s", rl.prefix, key)
+	redisKey := rl.prefix + ":rl:" + key
 	now := time.Now().UnixMilli()
 	windowMs := atomic.LoadInt64(&rl.windowS) * 1000
 
@@ -131,7 +130,7 @@ func (rl *RedisRateLimiter) IsOverLimit(key string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	redisKey := fmt.Sprintf("%s:rl:%s", rl.prefix, key)
+	redisKey := rl.prefix + ":rl:" + key
 	now := time.Now().UnixMilli()
 	windowMs := atomic.LoadInt64(&rl.windowS) * 1000
 	maxReqs := atomic.LoadInt64(&rl.maxReqs)

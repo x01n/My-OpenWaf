@@ -38,7 +38,7 @@ export interface Site {
   alpn?: string;
 
   policy_id?: number;
-  bot_protection_enabled?: boolean;
+  bot_protection_enabled?: boolean | null;
   bot_protection_level?: string;
   attack_protection_level?: string;
 
@@ -46,12 +46,12 @@ export interface Site {
   anti_replay_ttl: number;
   anti_replay_action: string;
 
-  owasp_enabled?: boolean;
+  owasp_enabled?: boolean | null;
   owasp_sensitivity?: string;
   owasp_action?: string;
-  cve_enabled?: boolean;
+  cve_enabled?: boolean | null;
   cve_action?: string;
-  rate_limit_enabled?: boolean;
+  rate_limit_enabled?: boolean | null;
   rate_limit_window: number;
   rate_limit_max: number;
   rate_limit_action?: string;
@@ -653,6 +653,9 @@ export interface BotSettings {
   image_watermark: boolean;
   anti_replay_enabled: boolean;
   anti_replay_ttl: number;
+  browser_sign_enabled?: boolean;
+  browser_sign_ttl?: number;
+  browser_sign_action?: string;
   js_obfuscation_paths?: string[];
   image_watermark_paths?: string[];
   watermark_text?: string;
@@ -840,6 +843,7 @@ export interface BackupData {
   access_providers: unknown[];
   access_users: unknown[];
   access_path_rules: unknown[];
+  lua_plugins: unknown[];
   system_settings: unknown[];
 }
 
@@ -853,4 +857,151 @@ export interface ImportResult {
   certificates: number;
   rules: number;
   ip_entries: number;
+}
+
+/**
+ * LuaPluginStage 是脚本的执行阶段。
+ * - pre：在 ACL 之后、OWASP 之前，可在昂贵检测前提早放行或拦截
+ * - post：在全部内置阶段之后，能读到内置判定；只有 allow 能推翻内置拦截
+ */
+export type LuaPluginStage = "pre" | "post";
+
+/** LuaPluginAction 是脚本可返回的合法动作，对齐后端 action.IsValid 的白名单。 */
+export type LuaPluginAction =
+  | "allow"
+  | "intercept"
+  | "observe"
+  | "drop"
+  | "challenge"
+  | "captcha_challenge"
+  | "shield_challenge"
+  | "chain_challenge"
+  | "redirect"
+  | "rate_limit"
+  | "tag";
+
+/**
+ * LuaPlugin 是一段用户自定义的 Lua 策略脚本。
+ *
+ * 字段严格对齐后端 store.LuaPlugin，不新增后端未定义字段。
+ */
+export interface LuaPlugin {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  /** 脚本名称 */
+  name: string;
+  /** 执行阶段 */
+  stage: LuaPluginStage;
+  /** Lua 源码，必须定义全局函数 handle(ctx) */
+  source: string;
+  enabled: boolean;
+  /** 同阶段内的执行顺序，数值小者先执行 */
+  priority: number;
+  /** 作用域站点 ID；null/undefined 表示全站生效 */
+  site_id?: number | null;
+  /** 执行超时（毫秒），0 表示用后端默认值 */
+  timeout_ms: number;
+  /** 运维备注 */
+  description: string;
+}
+
+/** LuaValidateResult 是语法校验结果，对齐 POST /lua-plugins/validate 的响应。 */
+export interface LuaValidateResult {
+  valid: boolean;
+  /** 仅 valid 为 false 时存在 */
+  error?: string;
+}
+
+/**
+ * LuaDryRunRequestView 是试运行的样例请求。
+ *
+ * 字段与后端 luaDryRunRequest.Request 一一对应，也就是脚本侧可读到的 ctx。
+ */
+export interface LuaDryRunRequestView {
+  client_ip?: string;
+  method?: string;
+  path?: string;
+  query?: string;
+  host?: string;
+  user_agent?: string;
+  site_id?: number;
+  content_type?: string;
+  body?: string;
+  headers?: Record<string, string>;
+  query_params?: Record<string, string>;
+  tls_version?: string;
+  tls_ja3?: string;
+  tls_ja4?: string;
+  tls_sni?: string;
+  /** 模拟内置引擎命中的阶段，仅 post 阶段有意义 */
+  phase?: string;
+  /** 模拟内置引擎的判定动作，仅 post 阶段有意义 */
+  action?: string;
+}
+
+/** LuaDryRunRequest 是试运行的请求体，对齐后端 luaDryRunRequest。 */
+export interface LuaDryRunRequest {
+  stage: LuaPluginStage;
+  source: string;
+  /** 0 或省略表示用后端默认超时 */
+  timeout_ms?: number;
+  request: LuaDryRunRequestView;
+}
+
+/**
+ * LuaDecision 是脚本给出的判定。
+ *
+ * 字段名首字母大写：后端 luaplugin.Decision 未加 json tag，
+ * encoding/json 直接输出 Go 字段名，改成小写会读不到值。
+ */
+export interface LuaDecision {
+  /** 空串表示脚本未判定，请求继续走后续阶段 */
+  Action: string;
+  Message: string;
+  RedirectTo: string;
+  /** 0 表示用默认响应码 */
+  StatusCode: number;
+  SetHeaders: Record<string, string> | null;
+  Tags: string[] | null;
+}
+
+/**
+ * LuaPluginStat 是单个脚本的运行时统计，对齐 GET /lua-plugins/stats 的 items 元素。
+ *
+ * 计数器挂在引擎内存里的已编译脚本上。配置重载会重新编译脚本、计数随之归零，
+ * 因此这些值不是历史总量，只反映当前载入的这一批脚本跑了多少。
+ *
+ * failures 与 timeouts 互斥：后端在超时分支直接返回、不再累加 failures，
+ * 所以成功次数是 runs - failures - timeouts，两个占比可以分别独立解读。
+ */
+export interface LuaPluginStat {
+  /** 脚本名。统计不含数据库 id，与插件列表的关联键就是它 */
+  name: string;
+  stage: LuaPluginStage;
+  /** 累计执行次数，含失败与超时的那几次 */
+  runs: number;
+  /** 累计失败次数，不含超时：handle 报错、panic、缺少入口函数等 */
+  failures: number;
+  /** 累计超时次数 */
+  timeouts: number;
+  /** 平均执行耗时（毫秒）。分母是 runs，所以超时的执行也会把它拉高 */
+  avg_ms: number;
+}
+
+/** LuaPluginStatsResponse 是运行时统计的响应体，对齐 GET /lua-plugins/stats。 */
+export interface LuaPluginStatsResponse {
+  items: LuaPluginStat[];
+  total: number;
+}
+
+/** LuaDryRunResult 是试运行结果，对齐后端 luaplugin.DryRunResult。 */
+export interface LuaDryRunResult {
+  /** 非空表示未通过编译，此时其余字段无意义 */
+  compile_error?: string;
+  /** 非空表示脚本执行出错（含超时） */
+  runtime_error?: string;
+  decision: LuaDecision;
+  /** 执行耗时（毫秒） */
+  elapsed_ms: number;
 }

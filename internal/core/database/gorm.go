@@ -89,23 +89,47 @@ func openSQLite(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	// SQLite should use a single connection to avoid locking issues.
+	// WAL 模式允许「多读者 + 单写者」并发，因此读连接不应被限制为 1：
+	// 单连接会把 dashboard 统计、访问日志分页等读操作也串行化，
+	// 实测 16 协程并发读时吞吐仅为 8 连接的约 1/4.7。
+	//
+	// 写侧的安全性由两层保证：应用层 observability.WriteQueue 把高频写归并到
+	// 单 goroutine；仍并发的写由 busy_timeout(10000) 吸收锁等待。已实测
+	// 16 协程 × 60 次并发写在 8 连接下零失败。
+	//
+	// 取 8 而非更大值：实测 8 已达吞吐平台期（16 连接无进一步收益），
+	// 更多连接只是徒增 SQLite 内部锁竞争与内存占用。
 	sqlDB, err := db.DB()
 	if err == nil {
-		sqlDB.SetMaxOpenConns(1)
-		sqlDB.SetMaxIdleConns(1)
-		sqlDB.SetConnMaxLifetime(0) // no lifetime limit for single connection
+		sqlDB.SetMaxOpenConns(sqliteMaxOpenConns)
+		sqlDB.SetMaxIdleConns(sqliteMaxOpenConns)
+		sqlDB.SetConnMaxLifetime(0) // 本地文件连接无需轮换
 	}
 
 	return db, nil
 }
+
+// sqliteMaxOpenConns 是 SQLite 的最大连接数。
+// 见 openSQLite 中关于 WAL 读并发与写安全性的说明。
+const sqliteMaxOpenConns = 8
 
 func openMySQL(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 	dsn := strings.TrimSpace(opt.DSN)
 	if dsn == "" {
 		return nil, fmt.Errorf("mysql requires MY_OPENWAF_DSN (e.g. user:pass@tcp(127.0.0.1:3306)/waf?charset=utf8mb4&parseTime=True&loc=Local)")
 	}
-	return gorm.Open(mysql.Open(dsn), gcfg)
+	// parseTime=True 是必需的：缺失时 DATE/DATETIME 列会被扫描成 []byte，
+	// 而模型里是 time.Time，导致 created_at 等字段读取报错。
+	// 这类问题只在运行时首次查询才暴露，故在启动阶段就给出明确提示。
+	if !strings.Contains(strings.ToLower(dsn), "parsetime=true") {
+		return nil, fmt.Errorf("mysql DSN must include parseTime=True so DATETIME columns scan into time.Time (got %q)", maskDSN(dsn))
+	}
+	return gorm.Open(mysql.New(mysql.Config{
+		DSN: dsn,
+		// 让 GORM 用 MySQL 8+ 的原生 ALTER 语义；低版本会自动回退。
+		DontSupportRenameIndex:  false,
+		DontSupportRenameColumn: false,
+	}), gcfg)
 }
 
 func openPostgres(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
@@ -113,5 +137,28 @@ func openPostgres(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 	if dsn == "" {
 		return nil, fmt.Errorf("postgres requires MY_OPENWAF_DSN (e.g. postgres://user:pass@localhost:5432/waf?sslmode=disable)")
 	}
-	return gorm.Open(postgres.Open(dsn), gcfg)
+	return gorm.Open(postgres.New(postgres.Config{
+		DSN: dsn,
+		// PreferSimpleProtocol=false 保留 prepared statement（与 gcfg.PrepareStmt 配合）。
+		// 若部署在 PgBouncer 的 transaction 模式后，需要显式关闭——见文档说明。
+		PreferSimpleProtocol: preferSimpleProtocolFromDSN(dsn),
+	}), gcfg)
+}
+
+// preferSimpleProtocolFromDSN 在 DSN 里出现 pgbouncer=true 时改用简单协议。
+//
+// PgBouncer 的 transaction/statement 池化模式不保证同一连接，服务端 prepared
+// statement 会失效并报 "prepared statement does not exist"。此时必须退回简单协议。
+func preferSimpleProtocolFromDSN(dsn string) bool {
+	return strings.Contains(strings.ToLower(dsn), "pgbouncer=true")
+}
+
+// maskDSN 遮蔽 DSN 中的口令，供错误信息安全输出。
+func maskDSN(dsn string) string {
+	if i := strings.Index(dsn, ":"); i > 0 {
+		if j := strings.Index(dsn, "@"); j > i {
+			return dsn[:i+1] + "***" + dsn[j:]
+		}
+	}
+	return dsn
 }

@@ -143,7 +143,10 @@ func TestUnifiedWriterFlushesAccessLogsWhenBatchIsFull(t *testing.T) {
 		})
 	}
 
-	deadline := time.After(2 * time.Second)
+	// 截止时间需留足余量：单独运行约 1s（512 条 SQLite 批量写），整包并发跑时
+	// 其他用例竞争 CPU 与 SQLite 写锁会成倍拉长，2s 只有 1 倍余量必然偶发失败。
+	// 本用例断言的是「批满即刷」这一行为，不是刷新耗时。
+	deadline := time.After(20 * time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {

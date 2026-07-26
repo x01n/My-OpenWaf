@@ -117,7 +117,7 @@ type ShieldManager struct {
 func NewShieldManager(captcha *CaptchaManager, redis *goredis.Client, difficulty int) *ShieldManager {
 	cfg := DefaultShieldConfig()
 	if difficulty > 0 {
-		cfg.Difficulty = difficulty
+		cfg.Difficulty = ClampPoWDifficulty(difficulty)
 	}
 	sm := &ShieldManager{
 		captcha:  captcha,
@@ -155,10 +155,12 @@ func (sm *ShieldManager) SetRedis(redis *goredis.Client) {
 }
 
 // SetConfig 更新 Shield 配置。
+// 难度会被钳制到 VerifyPoW 支持的区间，否则超出上限的配置会让挑战永远无法通过。
 func (sm *ShieldManager) SetConfig(cfg ShieldConfig) {
 	if cfg.Difficulty <= 0 {
 		cfg.Difficulty = 4
 	}
+	cfg.Difficulty = ClampPoWDifficulty(cfg.Difficulty)
 	if cfg.TimeoutSecs <= 0 {
 		cfg.TimeoutSecs = 30
 	}
@@ -173,15 +175,6 @@ func (sm *ShieldManager) SetConfig(cfg ShieldConfig) {
 	sm.mu.Unlock()
 }
 
-func (sm *ShieldManager) SetDifficulty(difficulty int) {
-	if difficulty <= 0 {
-		difficulty = 4
-	}
-	sm.mu.Lock()
-	sm.config.Difficulty = difficulty
-	sm.mu.Unlock()
-}
-
 func (sm *ShieldManager) difficultyValue() int {
 	sm.mu.RLock()
 	difficulty := sm.config.Difficulty
@@ -189,7 +182,7 @@ func (sm *ShieldManager) difficultyValue() int {
 	if difficulty <= 0 {
 		return 4
 	}
-	return difficulty
+	return ClampPoWDifficulty(difficulty)
 }
 
 // Config 返回当前配置的副本。
@@ -219,12 +212,16 @@ func (sm *ShieldManager) GenerateChallenge(originalURL string, requestProtocol s
 }
 
 // VerifyChallenge checks PoW + env fingerprint.
+// 会话通过原子“取出即删除”获得，保证一份 PoW 解只能被兑换一次；
+// 过期会话直接拒绝，不依赖清理协程的调度间隔。
 func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, requestProtocol string) (bool, string) {
-	session := sm.loadShieldSession(sessionID)
+	session := sm.takeShieldSession(sessionID)
 	if session == nil {
 		return false, ""
 	}
-	sm.deleteShieldSession(sessionID)
+	if time.Since(session.CreatedAt) > shieldSessionTTL {
+		return false, session.OriginalURL
+	}
 	if !shieldProtocolAllowed(sm.Config(), requestProtocol) {
 		return false, session.OriginalURL
 	}
@@ -478,12 +475,15 @@ document.body.appendChild(f);f.submit();
 </body>
 </html>`
 
+// shieldSessionTTL 是 shield 会话的有效期，Redis 与内存两条路径共用。
+const shieldSessionTTL = 5 * time.Minute
+
 func (sm *ShieldManager) saveShieldSession(s *ShieldSession) {
 	if redis := sm.redisClient(); redis != nil {
 		data, _ := json.Marshal(s)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if redis.Set(ctx, sm.prefix+s.ID, data, 5*time.Minute).Err() == nil {
+		if redis.Set(ctx, sm.prefix+s.ID, data, shieldSessionTTL).Err() == nil {
 			return
 		}
 	}
@@ -492,33 +492,39 @@ func (sm *ShieldManager) saveShieldSession(s *ShieldSession) {
 	sm.mu.Unlock()
 }
 
-func (sm *ShieldManager) loadShieldSession(id string) *ShieldSession {
+// takeShieldSession 原子地取出并删除一个 shield 会话。
+// 返回 nil 表示会话不存在或已被其他请求兑换，从而保证 PoW 解的一次性。
+func (sm *ShieldManager) takeShieldSession(id string) *ShieldSession {
+	if id == "" {
+		return nil
+	}
 	if redis := sm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		data, err := redis.Get(ctx, sm.prefix+id).Bytes()
-		if err == nil {
+		raw, err := takeAndDeleteScript.Run(ctx, redis, []string{sm.prefix + id}).Text()
+		data := []byte(raw)
+		if err == nil && len(data) > 0 {
 			var s ShieldSession
 			if json.Unmarshal(data, &s) == nil {
+				sm.mu.Lock()
+				delete(sm.sessions, id)
+				sm.mu.Unlock()
 				return &s
 			}
+			return nil
 		}
-	}
-	sm.mu.RLock()
-	s := sm.sessions[id]
-	sm.mu.RUnlock()
-	return s
-}
-
-func (sm *ShieldManager) deleteShieldSession(id string) {
-	if redis := sm.redisClient(); redis != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		redis.Del(ctx, sm.prefix+id)
+		// Redis 未命中或不可用时回退到内存存储。
 	}
 	sm.mu.Lock()
-	delete(sm.sessions, id)
+	s, ok := sm.sessions[id]
+	if ok {
+		delete(sm.sessions, id)
+	}
 	sm.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return s
 }
 
 func (sm *ShieldManager) cleanupLoop() {
@@ -530,9 +536,12 @@ func (sm *ShieldManager) cleanupLoop() {
 			sm.mu.Lock()
 			now := time.Now()
 			for id, s := range sm.sessions {
-				if now.Sub(s.CreatedAt) > 5*time.Minute {
+				if now.Sub(s.CreatedAt) > shieldSessionTTL {
 					delete(sm.sessions, id)
 				}
+			}
+			if len(sm.sessions) == 0 {
+				sm.sessions = make(map[string]*ShieldSession)
 			}
 			sm.mu.Unlock()
 		case <-sm.done:

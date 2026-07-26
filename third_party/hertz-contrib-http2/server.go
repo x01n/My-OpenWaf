@@ -2258,5 +2258,3 @@ func new400Handler(err error) app.HandlerFunc {
 func h1ServerKeepAlivesDisabled(hs *BaseEngine) bool {
 	return hs.DisableKeepalive || !hs.Core.IsRunning()
 }
-
-

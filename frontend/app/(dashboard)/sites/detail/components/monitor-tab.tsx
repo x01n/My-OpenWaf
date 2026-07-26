@@ -35,6 +35,12 @@ import {
 } from "@tabler/icons-react";
 import { useSiteStats, useSiteTimeline } from "@/hooks/use-api";
 import { formatNumber } from "@/lib/utils";
+import {
+  chartTooltipStyle,
+  chartTooltipLabelStyle,
+  CHART_DANGER,
+  CHART_DANGER_FILL,
+} from "@/lib/chart-theme";
 import type { Site } from "@/lib/types";
 
 /**
@@ -204,18 +210,14 @@ export function MonitorTab({ site }: MonitorTabProps) {
                     />
                     <YAxis fontSize={12} tickLine={false} axisLine={false} />
                     <Tooltip
-                      contentStyle={{
-                        backgroundColor: "hsl(var(--card))",
-                        border: "1px solid hsl(var(--border))",
-                        borderRadius: "8px",
-                        fontSize: "12px",
-                      }}
+                      contentStyle={chartTooltipStyle}
+                      labelStyle={chartTooltipLabelStyle}
                     />
                     <Area
                       type="monotone"
                       dataKey="count"
-                      stroke="#ef4444"
-                      fill="rgba(239,68,68,0.12)"
+                      stroke={CHART_DANGER}
+                      fill={CHART_DANGER_FILL}
                       strokeWidth={2}
                       name={t("sites.detail.monitor.attackTrend")}
                     />

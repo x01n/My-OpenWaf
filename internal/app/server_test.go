@@ -44,7 +44,7 @@ import (
 )
 
 func TestSnapshotUpstreamsDeduplicatesTrimsAndSorts(t *testing.T) {
-	sn := &snapshotpkg.Snapshot{Sites: map[string]snapshotpkg.SiteRuntime{
+	sn := &snapshotpkg.Snapshot{Sites: map[string]*snapshotpkg.SiteRuntime{
 		"a": {UpstreamURLs: []string{" http://b ", "http://a"}},
 		"b": {UpstreamURLs: []string{"http://a", ""}},
 	}}
@@ -55,11 +55,11 @@ func TestSnapshotUpstreamsDeduplicatesTrimsAndSorts(t *testing.T) {
 }
 
 func TestSnapshotUpstreamSetChangedIgnoresOrderDuplicatesAndWhitespace(t *testing.T) {
-	previous := &snapshotpkg.Snapshot{Sites: map[string]snapshotpkg.SiteRuntime{
+	previous := &snapshotpkg.Snapshot{Sites: map[string]*snapshotpkg.SiteRuntime{
 		"a": {UpstreamURLs: []string{" http://b ", "http://a"}},
 		"b": {UpstreamURLs: []string{"http://a"}},
 	}}
-	current := &snapshotpkg.Snapshot{Sites: map[string]snapshotpkg.SiteRuntime{
+	current := &snapshotpkg.Snapshot{Sites: map[string]*snapshotpkg.SiteRuntime{
 		"c": {UpstreamURLs: []string{"http://a", "http://b"}},
 	}}
 	if snapshotUpstreamSetChanged(previous, current) {
@@ -68,10 +68,10 @@ func TestSnapshotUpstreamSetChangedIgnoresOrderDuplicatesAndWhitespace(t *testin
 }
 
 func TestSnapshotUpstreamSetChangedDetectsEndpointChange(t *testing.T) {
-	previous := &snapshotpkg.Snapshot{Sites: map[string]snapshotpkg.SiteRuntime{
+	previous := &snapshotpkg.Snapshot{Sites: map[string]*snapshotpkg.SiteRuntime{
 		"a": {UpstreamURLs: []string{"http://a", "h3://b"}},
 	}}
-	current := &snapshotpkg.Snapshot{Sites: map[string]snapshotpkg.SiteRuntime{
+	current := &snapshotpkg.Snapshot{Sites: map[string]*snapshotpkg.SiteRuntime{
 		"a": {UpstreamURLs: []string{"http://a", "h3://c"}},
 	}}
 	if !snapshotUpstreamSetChanged(previous, current) {
@@ -80,7 +80,7 @@ func TestSnapshotUpstreamSetChangedDetectsEndpointChange(t *testing.T) {
 }
 
 func TestListenerRuntimesByBindDeduplicatesBindAndPrefersTLS(t *testing.T) {
-	sn := &snapshotpkg.Snapshot{Sites: map[string]snapshotpkg.SiteRuntime{
+	sn := &snapshotpkg.Snapshot{Sites: map[string]*snapshotpkg.SiteRuntime{
 		"a": {Bind: ":443", Site: store.Site{ID: 1, Bind: ":443", TLSEnabled: false}},
 		"b": {Bind: ":443", Site: store.Site{ID: 2, Bind: ":443", TLSEnabled: true}},
 		"c": {Bind: ":80", Site: store.Site{ID: 3, Bind: ":80", TLSEnabled: false}},
@@ -330,8 +330,8 @@ func TestBuildListenerTLSReturnsOCSPStapledCertificate(t *testing.T) {
 		TLSDefaults:     snapshotpkg.DefaultTLSDefaults(),
 	}
 	sn := &snapshotpkg.Snapshot{
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(":443", "ocsp.example.test"): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(":443", "ocsp.example.test"): &rt,
 		},
 	}
 
@@ -378,8 +378,8 @@ func TestBuildDataServerNegotiatesHTTP2WithEffectiveTLSALPN(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -497,8 +497,8 @@ func TestBuildDataServerHTTP2PermitProhibitedCipherSuitesControlsTLS12CBC(t *tes
 				Revision:    1,
 				Protection:  protection,
 				HTTP2Config: http2Config,
-				Sites: map[string]snapshotpkg.SiteRuntime{
-					snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+				Sites: map[string]*snapshotpkg.SiteRuntime{
+					snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 				},
 			}
 			holder.Store(sn)
@@ -634,8 +634,8 @@ func TestBuildDataServerServesConfiguredTLSVersionsWithHTTP11Response(t *testing
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -866,8 +866,8 @@ func TestBuildDataServerDoesNotNegotiateHTTP2BelowTLS12WhenALPNIsH2Only(t *testi
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -978,8 +978,8 @@ func TestBuildDataServerRejectsTooManyRequestHeadersOverHTTP2(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1090,8 +1090,8 @@ func TestBuildDataServerRejectsRawHTTP2CookieCrumbBurstOverHeaderFieldLimit(t *t
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1195,8 +1195,8 @@ func TestBuildDataServerRejectsRawHTTP2HPACKHeaderBombOverHeaderListBudget(t *te
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1345,8 +1345,8 @@ func TestBuildDataServerRejectsRawHTTP2HPACKHeaderBombWithManyContinuationFragme
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1510,8 +1510,8 @@ func TestBuildDataServerRejectsRepeatedRawHTTP2HPACKHeaderBombsAcrossStreamsOnSa
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1716,8 +1716,8 @@ func TestBuildDataServerRejectsBurstOfRawHTTP2HPACKHeaderBombsAcrossManyStreamsO
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1923,8 +1923,8 @@ func TestBuildDataServerInterleavesHealthyAndRawHTTP2HPACKBombStreamsOnSameConne
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2187,8 +2187,8 @@ func TestBuildDataServerHonorsHTTP2MaxConcurrentStreams(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2377,8 +2377,8 @@ func TestBuildDataServerCancelsUpstreamWhenHTTP2ClientCancelsStream(t *testing.T
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2554,8 +2554,8 @@ func TestBuildDataServerSurvivesHTTP2CanceledStreamBurst(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2749,8 +2749,8 @@ func TestBuildDataServerSurvivesRawHTTP2RSTStreamBurst(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2894,8 +2894,8 @@ func TestBuildDataServerCancelsUpstreamWhenRawHTTP2ZeroIncrementWindowUpdateBurs
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3025,8 +3025,8 @@ func TestBuildDataServerRejectsRawHTTP2WindowUpdateOnIdleStream(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3120,8 +3120,8 @@ func TestBuildDataServerCancelsUpstreamWhenRawHTTP2ClientSendsDataAfterEndStream
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3233,8 +3233,8 @@ func TestBuildDataServerRejectsRawHTTP2ContinuationOnWrongStream(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3319,8 +3319,8 @@ func TestBuildDataServerTimesOutStalledRawHTTP2HeaderBlock(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3405,8 +3405,8 @@ func TestBuildDataServerTimesOutStalledRawHTTP2RequestBody(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3497,8 +3497,8 @@ func TestBuildDataServerRecoversAfterRawHTTP2StalledRequestBodyBurstTimesOut(t *
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3634,8 +3634,8 @@ func TestBuildDataServerRejectsRawHTTP2DataOverPerStreamFlowControlWindow(t *tes
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3744,8 +3744,8 @@ func TestBuildDataServerKeepsHealthyRawHTTP2DataStreamAliveWhenSiblingStreamExce
 	http2cfg.MaxConcurrentStreams = 4
 	sn := &snapshotpkg.Snapshot{
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	tlsCfg := buildListenerTLS(rt, sn)
@@ -3911,8 +3911,8 @@ func TestBuildDataServerKeepsHealthyRawHTTP2ResponseStreamAliveWhenSiblingRespon
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4020,8 +4020,8 @@ func TestBuildDataServerRejectsRawHTTP2DataOverConnectionFlowControlWindow(t *te
 	http2cfg.MaxUploadBufferPerStream = streamWindow
 	sn := &snapshotpkg.Snapshot{
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	tlsCfg := buildListenerTLS(rt, sn)
@@ -4145,8 +4145,8 @@ func TestBuildDataServerRejectsRawHTTP2PingOnNonZeroStream(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4229,8 +4229,8 @@ func TestBuildDataServerRejectsRawHTTP2ConnectionWindowUpdateOverflow(t *testing
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4325,8 +4325,8 @@ func TestBuildDataServerCancelsUpstreamWhenRawHTTP2StreamWindowUpdateOverflows(t
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4455,8 +4455,8 @@ func TestBuildDataServerCompletesActiveStreamAfterRawHTTP2ConnectionGoAway(t *te
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4746,7 +4746,7 @@ func TestBuildListenerTLSAppliesSessionTicketSwitch(t *testing.T) {
 func TestSiteListenerFingerprintIncludesTLSDefaultsThatAffectListenerTLS(t *testing.T) {
 	buildSnapshot := func(curves string, preferServerCipherSuites bool, sessionTicketsEnabled bool) *snapshotpkg.Snapshot {
 		return &snapshotpkg.Snapshot{
-			Sites: map[string]snapshotpkg.SiteRuntime{
+			Sites: map[string]*snapshotpkg.SiteRuntime{
 				"site": {
 					Bind: ":443",
 					Site: store.Site{
@@ -4812,8 +4812,8 @@ func TestSiteListenerFingerprintIncludesOCSPStapleMaterial(t *testing.T) {
 		}
 		return &snapshotpkg.Snapshot{
 			TLSDefaults: tlsDefaults,
-			Sites: map[string]snapshotpkg.SiteRuntime{
-				snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): rt,
+			Sites: map[string]*snapshotpkg.SiteRuntime{
+				snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): &rt,
 			},
 		}
 	}
@@ -4828,7 +4828,7 @@ func TestSiteListenerFingerprintIncludesOCSPStapleMaterial(t *testing.T) {
 func TestSiteListenerFingerprintChangesWhenHTTP3BindChanges(t *testing.T) {
 	buildSnapshot := func(http3Bind string) *snapshotpkg.Snapshot {
 		return &snapshotpkg.Snapshot{
-			Sites: map[string]snapshotpkg.SiteRuntime{
+			Sites: map[string]*snapshotpkg.SiteRuntime{
 				"site": {
 					Bind: ":443",
 					Site: store.Site{
@@ -4863,7 +4863,7 @@ func TestSiteListenerFingerprintChangesWhenHTTP2ConfigChanges(t *testing.T) {
 		http2cfg := snapshotpkg.DefaultHTTP2Config()
 		http2cfg.MaxConcurrentStreams = maxConcurrentStreams
 		return &snapshotpkg.Snapshot{
-			Sites: map[string]snapshotpkg.SiteRuntime{
+			Sites: map[string]*snapshotpkg.SiteRuntime{
 				"site": {
 					Bind: ":443",
 					Site: store.Site{
@@ -4893,7 +4893,7 @@ func TestSiteListenerFingerprintChangesWhenHTTP2HeaderBytesChange(t *testing.T) 
 		http2cfg := snapshotpkg.DefaultHTTP2Config()
 		http2cfg.MaxHeaderBytes = maxHeaderBytes
 		return &snapshotpkg.Snapshot{
-			Sites: map[string]snapshotpkg.SiteRuntime{
+			Sites: map[string]*snapshotpkg.SiteRuntime{
 				"site": {
 					Bind: ":443",
 					Site: store.Site{
@@ -4923,7 +4923,7 @@ func TestSiteListenerFingerprintChangesWhenHTTP2HeaderFieldLimitChanges(t *testi
 		http2cfg := snapshotpkg.DefaultHTTP2Config()
 		http2cfg.MaxHeaderFields = maxHeaderFields
 		return &snapshotpkg.Snapshot{
-			Sites: map[string]snapshotpkg.SiteRuntime{
+			Sites: map[string]*snapshotpkg.SiteRuntime{
 				"site": {
 					Bind: ":443",
 					Site: store.Site{
@@ -4953,7 +4953,7 @@ func TestSiteListenerFingerprintChangesWhenHTTP2MaxHandlersChanges(t *testing.T)
 		http2cfg := snapshotpkg.DefaultHTTP2Config()
 		http2cfg.MaxHandlers = maxHandlers
 		return &snapshotpkg.Snapshot{
-			Sites: map[string]snapshotpkg.SiteRuntime{
+			Sites: map[string]*snapshotpkg.SiteRuntime{
 				"site": {
 					Bind: ":443",
 					Site: store.Site{
@@ -4980,7 +4980,7 @@ func TestSiteListenerFingerprintChangesWhenHTTP2MaxHandlersChanges(t *testing.T)
 
 func TestBuildHTTP3ServerPlansGroupsSitesByHTTP3Bind(t *testing.T) {
 	sn := &snapshotpkg.Snapshot{
-		Sites: map[string]snapshotpkg.SiteRuntime{
+		Sites: map[string]*snapshotpkg.SiteRuntime{
 			"a": {
 				Bind: ":443",
 				Site: store.Site{
@@ -5041,7 +5041,7 @@ func TestBuildHTTP3ServerPlansGroupsSitesByHTTP3Bind(t *testing.T) {
 
 func TestBuildHTTP3ServerPlansUsesInheritedTLSDefaultALPN(t *testing.T) {
 	sn := &snapshotpkg.Snapshot{
-		Sites: map[string]snapshotpkg.SiteRuntime{
+		Sites: map[string]*snapshotpkg.SiteRuntime{
 			"a": {
 				Bind: ":443",
 				Site: store.Site{
@@ -5175,8 +5175,8 @@ func TestBuildDataServerAdvertisesConfiguredHTTP2MaxHeaderListSize(t *testing.T)
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -5270,8 +5270,8 @@ func TestBuildDataServerAcceptsConfiguredLargeHTTP2ReadFrame(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: http2cfg,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -5357,8 +5357,8 @@ func TestBuildDataServerEnablesStreamRequestBody(t *testing.T) {
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -5464,8 +5464,8 @@ func TestBuildDataServerStreamsHTTPRequestBodyToUpstreamBeforeClientFinishes(t *
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -5634,8 +5634,8 @@ func TestBuildDataServerStreamsHTTP2RequestBodyToUpstreamBeforeClientFinishes(t 
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -5817,8 +5817,8 @@ func TestBuildDataServerCancelsUpstreamStreamingHTTP2RequestBodyWhenRawClientSen
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -5962,8 +5962,8 @@ func TestBuildDataServerCancelsUpstreamStreamingHTTP2RequestBodyWhenRawClientClo
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -6111,8 +6111,8 @@ func TestBuildDataServerCancelsUpstreamDecodedStreamingHTTP2RequestBodyWhenRawCl
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -6272,8 +6272,8 @@ func TestBuildDataServerStreamsHTTP2RequestBodyWithTrailersToUpstreamBeforeClien
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -6406,8 +6406,8 @@ func TestBuildDataServerCancelsUpstreamStreamingHTTP2RequestBodyWithTrailersWhen
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -6552,8 +6552,8 @@ func TestBuildDataServerCancelsUpstreamStreamingHTTP2RequestBodyWithTrailersWhen
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -6683,8 +6683,8 @@ func TestBuildDataServerCancelsUpstreamStreamingHTTPRequestBodyWhenRawClientClos
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -6818,8 +6818,8 @@ func TestBuildDataServerDoesNotStartUpstreamStreamingHTTPRequestWhenRawClientClo
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -6936,8 +6936,8 @@ func TestBuildDataServerDoesNotStartUpstreamStreamingHTTP2RequestWhenRawClientSe
 		Revision:    1,
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -7071,8 +7071,8 @@ func TestBuildDataServerCancelsUpstreamDecodedStreamingHTTPRequestBodyWhenRawCli
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -7275,8 +7275,8 @@ func TestBuildDataServerForwardsExpectContinueBeforeSendingBody(t *testing.T) {
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -7439,8 +7439,8 @@ func TestBuildDataServerForwardsRequestTrailers(t *testing.T) {
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -7609,8 +7609,8 @@ func TestBuildDataServerStreamsHTTPRequestBodyWithTrailersToUpstreamBeforeClient
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -7764,8 +7764,8 @@ func TestBuildDataServerCancelsUpstreamStreamingHTTPRequestBodyWithTrailersWhenR
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -7924,8 +7924,8 @@ func TestBuildDataServerForwardsResponseTrailers(t *testing.T) {
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -8059,8 +8059,8 @@ func TestBuildDataServerStreamsSSEResponseAfterHandlerReturns(t *testing.T) {
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -8191,8 +8191,8 @@ func TestBuildDataServerCancelsUpstreamSSEWhenClientClosesStream(t *testing.T) {
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -8331,8 +8331,8 @@ func TestBuildDataServerCancelsUpstreamSSEWhenRawHTTP2ClientSendsRSTStream(t *te
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -8438,8 +8438,8 @@ func TestBuildDataServerFlushesRawHTTP2ResponseHeadersBeforeStreamingBodyReaches
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -8536,8 +8536,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWhenRawHTTP2ClientSendsR
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -8649,8 +8649,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWhenRawHTTP2ClientSendsR
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -8766,8 +8766,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWhenRawHTTP2ClientCloses
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -8889,8 +8889,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWhenRawHTTP2ClientSendsR
 		ResponseCompressionEnabled:     true,
 		ResponseCompressionGzipEnabled: true,
 		ResponseCompressionMinBytes:    1024,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -9020,8 +9020,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWhenRawHTTP2ClientCloses
 		ResponseCompressionEnabled:     true,
 		ResponseCompressionGzipEnabled: true,
 		ResponseCompressionMinBytes:    1024,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -9154,8 +9154,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWhenRawHTTP2ClientSendsR
 		ResponseCompressionEnabled:     true,
 		ResponseCompressionGzipEnabled: true,
 		ResponseCompressionMinBytes:    1024,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -9284,8 +9284,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWithDecodedGzipWhenRawHT
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -9412,8 +9412,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWithDecodedGzipWhenRawHT
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -9568,8 +9568,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWithTrailersWhenRawHTTP2
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -9720,8 +9720,8 @@ func TestBuildDataServerCancelsUpstreamStreamingResponseWithTrailersWhenRawHTTP2
 	sn := &snapshotpkg.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)

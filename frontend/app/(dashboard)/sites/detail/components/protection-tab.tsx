@@ -1,19 +1,16 @@
 "use client";
 
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import {
-  IconShield,
   IconCopy,
-  IconCheck,
   IconRefresh,
   IconDatabase,
   IconCode,
@@ -76,6 +73,57 @@ const MODE_OPTIONS: { value: ModuleMode; labelKey: string }[] = [
 
 const GLOBAL_DEFAULT_MODE: ModuleMode = "balanced";
 
+type TriState = "inherit" | "on" | "off";
+
+function toTriState(v: boolean | null | undefined): TriState {
+  if (v === true) return "on";
+  if (v === false) return "off";
+  return "inherit";
+}
+
+function fromTriState(v: TriState): boolean | null {
+  if (v === "on") return true;
+  if (v === "off") return false;
+  return null;
+}
+
+function TriStateToggle({
+  value,
+  onChange,
+  idPrefix,
+}: {
+  value: TriState;
+  onChange: (v: TriState) => void;
+  idPrefix: string;
+}) {
+  const { t } = useTranslation();
+  const opts: { v: TriState; k: string }[] = [
+    { v: "inherit", k: "sites.detail.dynOverride.inherit" },
+    { v: "on", k: "sites.detail.dynOverride.on" },
+    { v: "off", k: "sites.detail.dynOverride.off" },
+  ];
+  return (
+    <div className="inline-flex items-center gap-1 rounded-md border p-0.5">
+      {opts.map((opt) => (
+        <button
+          key={opt.v}
+          type="button"
+          id={`${idPrefix}-${opt.v}`}
+          onClick={() => onChange(opt.v)}
+          className={cn(
+            "rounded px-2.5 py-1 text-xs transition-colors",
+            value === opt.v
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-muted"
+          )}
+        >
+          {t(opt.k)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function inferMode(rules: OwaspRule[] | undefined): ModuleMode {
   if (!rules || rules.length === 0) return GLOBAL_DEFAULT_MODE;
   const allDisabled = rules.every((r) => !r.enabled);
@@ -121,9 +169,9 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
   const { execute: batchUpdate, loading: isSaving } = useOwaspBatchUpdate();
   const updateSite = useSiteMutation();
 
-  const [owaspEnabled, setOwaspEnabled] = useState(site.owasp_enabled ?? true);
-  const [cveEnabled, setCveEnabled] = useState(site.cve_enabled ?? true);
-  const [botEnabled, setBotEnabled] = useState(site.bot_protection_enabled ?? false);
+  const [owaspState, setOwaspState] = useState<TriState>(() => toTriState(site.owasp_enabled));
+  const [cveState, setCveState] = useState<TriState>(() => toTriState(site.cve_enabled));
+  const [botState, setBotState] = useState<TriState>(() => toTriState(site.bot_protection_enabled));
   const [moduleModes, setModuleModes] = useState<Record<string, ModuleMode>>({});
   const [hasChanges, setHasChanges] = useState(false);
   const [batchMode, setBatchMode] = useState<ModuleMode>("balanced");
@@ -163,18 +211,18 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
     toast.success(t("attacks.batchApplied"));
   }, [batchMode, data, t]);
 
-  const handleToggleSwitch = async (key: string, value: boolean) => {
+  const handleTriStateChange = async (key: "owasp" | "cve" | "bot", value: TriState) => {
     try {
       const payload: Record<string, unknown> = {};
       if (key === "owasp") {
-        setOwaspEnabled(value);
-        payload.owasp_enabled = value;
+        setOwaspState(value);
+        payload.owasp_enabled = fromTriState(value);
       } else if (key === "cve") {
-        setCveEnabled(value);
-        payload.cve_enabled = value;
+        setCveState(value);
+        payload.cve_enabled = fromTriState(value);
       } else if (key === "bot") {
-        setBotEnabled(value);
-        payload.bot_protection_enabled = value;
+        setBotState(value);
+        payload.bot_protection_enabled = fromTriState(value);
       }
       await updateSite.execute({ id: site.id, data: payload });
       toast.success(t("common.saveSuccess"));
@@ -222,7 +270,7 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
               <Label className="text-sm font-medium">OWASP {t("sites.detail.protection")}</Label>
               <p className="text-xs text-muted-foreground">{t("sites.detail.owaspDesc")}</p>
             </div>
-            <Switch checked={owaspEnabled} onCheckedChange={(v) => handleToggleSwitch("owasp", v)} />
+            <TriStateToggle value={owaspState} onChange={(v) => handleTriStateChange("owasp", v)} idPrefix="prot-owasp" />
           </div>
 
           <div className="flex items-center justify-between rounded-lg border p-3">
@@ -230,7 +278,7 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
               <Label className="text-sm font-medium">CVE {t("sites.detail.protection")}</Label>
               <p className="text-xs text-muted-foreground">{t("sites.detail.cveDesc")}</p>
             </div>
-            <Switch checked={cveEnabled} onCheckedChange={(v) => handleToggleSwitch("cve", v)} />
+            <TriStateToggle value={cveState} onChange={(v) => handleTriStateChange("cve", v)} idPrefix="prot-cve" />
           </div>
 
           <div className="flex items-center justify-between rounded-lg border p-3">
@@ -238,7 +286,7 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
               <Label className="text-sm font-medium">Bot {t("sites.detail.protection")}</Label>
               <p className="text-xs text-muted-foreground">{t("sites.detail.botDesc")}</p>
             </div>
-            <Switch checked={botEnabled} onCheckedChange={(v) => handleToggleSwitch("bot", v)} />
+            <TriStateToggle value={botState} onChange={(v) => handleTriStateChange("bot", v)} idPrefix="prot-bot" />
           </div>
         </CardContent>
       </Card>

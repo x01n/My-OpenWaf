@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +24,8 @@ import {
   PaginationEllipsis,
 } from "@/components/ui/pagination";
 import { Badge } from "@/components/ui/badge";
+import { ActionBadge } from "@/components/action-badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { DataTable } from "@/components/data-table";
 import Link from "next/link";
 import { IconFilter, IconRoute } from "@tabler/icons-react";
@@ -41,7 +44,7 @@ export default function AccessLogsPage() {
   });
   const [showFilters, setShowFilters] = useState(false);
 
-  const { data, isLoading } = useAccessLogs({
+  const { data, isLoading, error } = useAccessLogs({
     page,
     page_size: pageSize,
     ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "")),
@@ -63,20 +66,18 @@ export default function AccessLogsPage() {
 
   const columns = [
     { key: "created_at", title: t("accessLogs.time"), width: "180px" },
-    { key: "client_ip", title: "IP", width: "140px" },
-    { key: "host", title: "Host", width: "180px" },
-    { key: "path", title: "Path", width: "200px" },
-    { key: "method", title: "Method", width: "80px" },
-    { key: "status_code", title: "Status", width: "80px" },
+    { key: "client_ip", title: t("accessLogs.ip"), width: "140px" },
+    { key: "host", title: t("accessLogs.host"), width: "180px" },
+    { key: "path", title: t("accessLogs.path"), width: "200px" },
+    { key: "method", title: t("accessLogs.method"), width: "80px" },
+    { key: "status_code", title: t("accessLogs.status"), width: "80px" },
     {
       key: "waf_action",
-      title: "WAF Action",
+      title: t("accessLogs.wafAction"),
       width: "100px",
       render: (row: AccessLog) =>
         row.waf_action ? (
-          <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
-            {row.waf_action}
-          </Badge>
+          <ActionBadge action={row.waf_action} className="h-5 px-1.5 text-[10px]" />
         ) : (
           "-"
         ),
@@ -107,17 +108,24 @@ export default function AccessLogsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("accessLogs.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("accessLogs.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("accessLogs.title")}
+        description={t("accessLogs.description")}
+        actions={
           <Badge variant="secondary" className="h-5 px-2 text-xs">
             {t("accessLogs.total", { count: total })}
           </Badge>
-        </div>
-      </div>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader className="pb-3">

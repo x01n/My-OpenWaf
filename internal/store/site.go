@@ -76,7 +76,10 @@ type Site struct {
 	BlockHTML   string `gorm:"type:text" json:"block_html"`
 	BlockStatus int    `gorm:"default:403" json:"block_status"`
 
-	CustomErrorPages string `json:"custom_error_pages" gorm:"type:text;default:'{}'"`
+	// 不设 DB 默认值：MySQL 禁止 BLOB/TEXT 列带 DEFAULT（Error 1101），
+	// 带上会让 AutoMigrate 直接失败。空串与 "{}" 由读取方等价处理
+	// （见 GetCustomErrorPages 与 dataplane 的错误页解析）。
+	CustomErrorPages string `json:"custom_error_pages" gorm:"type:text"`
 
 	// 动态保护站点级覆盖（nil = 继承全局）
 	DynamicProtectionEnabled *bool  `gorm:"column:dynamic_protection_enabled" json:"dynamic_protection_enabled,omitempty"`

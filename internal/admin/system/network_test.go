@@ -1017,7 +1017,7 @@ func TestGetRuntimeConfigIncludesBrotliRuntimeState(t *testing.T) {
 	}
 	holder := &snapshotpkg.Holder{}
 	holder.Store(&snapshotpkg.Snapshot{
-		Sites: map[string]snapshotpkg.SiteRuntime{
+		Sites: map[string]*snapshotpkg.SiteRuntime{
 			snapshotpkg.SiteMapKey(":443", "example.com"): {
 				TLSConfig: &tls.Config{
 					Certificates: []tls.Certificate{{OCSPStaple: []byte("ocsp")}},

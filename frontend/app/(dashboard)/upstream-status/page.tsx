@@ -11,6 +11,7 @@
 
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -238,32 +239,32 @@ export default function UpstreamStatusPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <IconServer className="h-6 w-6 text-primary" />
-          <h1 className="text-xl font-semibold">{t("upstreamStatus.title")}</h1>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline" className="gap-1 font-mono">
-            {t("upstreamStatus.totalCount", { count: total })}
-          </Badge>
-          <Badge className="gap-1 bg-teal-500/15 text-teal-700 hover:bg-teal-500/20 dark:text-teal-300">
-            <IconCircleCheckFilled className="h-3.5 w-3.5" />
-            {t("upstreamStatus.healthyCount", { count: healthyCount })}
-          </Badge>
-          <Badge
-            variant={unhealthyCount > 0 ? "destructive" : "outline"}
-            className="gap-1"
-          >
-            <IconCircleXFilled className="h-3.5 w-3.5" />
-            {t("upstreamStatus.unhealthyCount", { count: unhealthyCount })}
-          </Badge>
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <IconRefresh className="h-3.5 w-3.5" />
-            {t("upstreamStatus.refreshInterval")}
-          </span>
-        </div>
-      </div>
+      <PageHeader
+        icon={<IconServer className="h-6 w-6 text-primary" />}
+        title={t("upstreamStatus.title")}
+        actions={
+          <>
+            <Badge variant="outline" className="gap-1 font-mono">
+              {t("upstreamStatus.totalCount", { count: total })}
+            </Badge>
+            <Badge className="gap-1 bg-teal-500/15 text-teal-700 hover:bg-teal-500/20 dark:text-teal-300">
+              <IconCircleCheckFilled className="h-3.5 w-3.5" />
+              {t("upstreamStatus.healthyCount", { count: healthyCount })}
+            </Badge>
+            <Badge
+              variant={unhealthyCount > 0 ? "destructive" : "outline"}
+              className="gap-1"
+            >
+              <IconCircleXFilled className="h-3.5 w-3.5" />
+              {t("upstreamStatus.unhealthyCount", { count: unhealthyCount })}
+            </Badge>
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <IconRefresh className="h-3.5 w-3.5" />
+              {t("upstreamStatus.refreshInterval")}
+            </span>
+          </>
+        }
+      />
 
       <Card>
         <CardHeader className="pb-3">

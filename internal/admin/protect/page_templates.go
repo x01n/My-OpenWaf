@@ -54,7 +54,12 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 		pageType := c.Param("type")
 		body := c.Request.Body()
 
-		var settingKey string
+		// 必须持久化清洗后的配置：直接存原始 body 会让 sanitizePageCSS 形同虚设，
+		// expression()/javascript: 等载荷将原样渲染进挑战页与拦截页。
+		var (
+			settingKey string
+			sanitized  []byte
+		)
 		switch pageType {
 		case "captcha":
 			var cfg pageconfig.CaptchaPageConfig
@@ -64,6 +69,7 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
 			settingKey = settingKeyCaptchaPage
+			sanitized, _ = json.Marshal(&cfg)
 		case "challenge":
 			var cfg pageconfig.ChallengePageConfig
 			if err := json.Unmarshal(body, &cfg); err != nil {
@@ -72,6 +78,7 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
 			settingKey = settingKeyChallengePage
+			sanitized, _ = json.Marshal(&cfg)
 		case "block":
 			var cfg pageconfig.BlockPageConfig
 			if err := json.Unmarshal(body, &cfg); err != nil {
@@ -80,12 +87,13 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
 			settingKey = settingKeyBlockPage
+			sanitized, _ = json.Marshal(&cfg)
 		default:
 			c.JSON(400, map[string]string{"error": "invalid page type, must be one of: captcha, challenge, block"})
 			return
 		}
 
-		if err := repo.Set(settingKey, string(body)); err != nil {
+		if err := repo.Set(settingKey, string(sanitized)); err != nil {
 			c.JSON(500, map[string]string{"error": "failed to save page template: " + err.Error()})
 			return
 		}

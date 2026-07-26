@@ -7,15 +7,17 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { toast } from "sonner";
 import { IconUser, IconRefresh, IconShield, IconLogout } from "@tabler/icons-react";
 import { useProtectionSettings, useProtectionSettingsUpdate, useAdminSessions, useForceLogout } from "@/hooks/use-api";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 
 export default function AuthConfigPage() {
   const { t } = useTranslation();
-  const { data: settings, isLoading } = useProtectionSettings();
+  const { data: settings, isLoading, error } = useProtectionSettings();
   const updateSettings = useProtectionSettingsUpdate();
 
   const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -56,20 +58,30 @@ export default function AuthConfigPage() {
     );
   }
 
+  if (error || !settings) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title={t("authConfig.title")} description={t("authConfig.description")} />
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("authConfig.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("authConfig.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("authConfig.title")}
+        description={t("authConfig.description")}
+        actions={
           <Button onClick={handleSave}>
             <IconRefresh className="mr-1 h-4 w-4" />
             {t("authConfig.saveConfig")}
           </Button>
-        </div>
-      </div>
+        }
+      />
 
       <Card>
         <CardHeader className="pb-3">
@@ -148,7 +160,7 @@ export default function AuthConfigPage() {
 
 function ActiveSessionsCard() {
   const { t } = useTranslation();
-  const { data, isLoading } = useAdminSessions();
+  const { data, isLoading, error } = useAdminSessions();
   const forceLogout = useForceLogout();
 
   const handleForceLogout = async (sessionId: number) => {
@@ -162,6 +174,15 @@ function ActiveSessionsCard() {
 
   if (isLoading) {
     return <Skeleton className="h-48 w-full" />;
+  }
+
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+        <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+      </Alert>
+    );
   }
 
   const sessions = data?.items ?? [];

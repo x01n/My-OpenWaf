@@ -120,6 +120,9 @@ func (rl *RateLimiter) cleaner() {
 					delete(rl.windows, k)
 				}
 			}
+			if len(rl.windows) == 0 {
+				rl.windows = make(map[string]*window)
+			}
 			rl.mu.Unlock()
 		}
 	}

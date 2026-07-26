@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // ProtectionConfig 是动态防护的运行时配置。
@@ -35,15 +36,84 @@ type Processor struct {
 	kek []byte // Key Encryption Key（用于包装 CEK 交付给客户端）
 }
 
-// NewProcessor 创建一个新的动态防护处理器。
-func NewProcessor(cfg ProtectionConfig) *Processor {
+// derivedKeys 是一组站点密钥。缓存后按值共享，故内容不可修改。
+type derivedKeys struct {
+	cek []byte
+	kek []byte
+}
+
+// keyCacheKey 覆盖全部影响密钥派生的字段。
+//
+// EncryptionKeyBase 以 string 承载（Go 中 string 可比较且 []byte→string 只是一次
+// 小额复制，比再算一次摘要便宜）。base 为空时走 defaultKeyBase，其种子只由
+// SiteID 与两个开关决定，故这三项也纳入键。
+type keyCacheKey struct {
+	base   string
+	siteID uint
+	htmlOn bool
+	jsOn   bool
+}
+
+// keyCacheMaxEntries 是密钥缓存的条目上限。
+//
+// 键的数量约等于「站点数 × 配置变体数」，本身有界；设上限只为防御异常场景
+// （例如快照反复重建导致 base 不断变化）下的无界增长。超限即整体清空重建，
+// 代价仅是下一批请求重新派生一次。
+const keyCacheMaxEntries = 1024
+
+var (
+	keyCacheMu sync.RWMutex
+	keyCache   = make(map[keyCacheKey]derivedKeys, 16)
+)
+
+/**
+ * lookupDerivedKeys 返回站点密钥，命中缓存时跳过 HKDF 派生。
+ *
+ * 密钥派生要跑 2~3 次 HKDF-SHA256（未配置 EncryptionKeyBase 时还需先算
+ * defaultKeyBase），而响应转换器对每个响应都会构造一次 Processor，
+ * 该开销在 pprof 中是最大的单点分配来源。配置在快照周期内不变，故可缓存。
+ *
+ * @param cfg 动态防护配置。
+ * @return 该配置对应的 CEK/KEK。
+ */
+func lookupDerivedKeys(cfg ProtectionConfig) derivedKeys {
+	k := keyCacheKey{
+		base:   string(cfg.EncryptionKeyBase),
+		siteID: cfg.SiteID,
+		htmlOn: cfg.HTMLObfuscationEnabled,
+		jsOn:   cfg.JSObfuscationEnabled,
+	}
+
+	keyCacheMu.RLock()
+	keys, ok := keyCache[k]
+	keyCacheMu.RUnlock()
+	if ok {
+		return keys
+	}
+
 	base := cfg.EncryptionKeyBase
 	if len(base) == 0 {
 		base = defaultKeyBase(cfg)
 	}
-	cek := deriveKey(base, fmt.Sprintf("owaf-brp/1:cek:site:%d", cfg.SiteID), 32)
-	kek := deriveKey(base, fmt.Sprintf("owaf-brp/1:kek:site:%d", cfg.SiteID), 32)
-	return &Processor{cfg: cfg, cek: cek, kek: kek}
+	keys = derivedKeys{
+		cek: deriveKey(base, fmt.Sprintf("owaf-brp/1:cek:site:%d", cfg.SiteID), 32),
+		kek: deriveKey(base, fmt.Sprintf("owaf-brp/1:kek:site:%d", cfg.SiteID), 32),
+	}
+
+	keyCacheMu.Lock()
+	if len(keyCache) >= keyCacheMaxEntries {
+		keyCache = make(map[keyCacheKey]derivedKeys, 16)
+	}
+	keyCache[k] = keys
+	keyCacheMu.Unlock()
+	return keys
+}
+
+// NewProcessor 创建一个新的动态防护处理器。
+// 密钥经进程内缓存复用，避免每个响应都重跑 HKDF 派生。
+func NewProcessor(cfg ProtectionConfig) *Processor {
+	keys := lookupDerivedKeys(cfg)
+	return &Processor{cfg: cfg, cek: keys.cek, kek: keys.kek}
 }
 
 // ProcessHTML 对 HTML 响应进行 AES-256-GCM 加密保护。

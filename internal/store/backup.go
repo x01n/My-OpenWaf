@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"reflect"
 	"time"
 
 	"gorm.io/gorm"
@@ -30,11 +32,29 @@ type BackupData struct {
 	AccessProviders   []AccessProvider       `json:"access_providers"`
 	AccessUsers       []AccessUser           `json:"access_users"`
 	AccessPathRules   []AccessPathRule       `json:"access_path_rules"`
+	LuaPlugins        []LuaPlugin            `json:"lua_plugins"`
 	SystemSettings    []SystemSettings       `json:"system_settings"`
 }
 
 // BackupVersion 是当前备份格式版本号。
 const BackupVersion = 1
+
+/**
+ * BackupModels 返回 BackupData 覆盖的全部模型，顺序按外键依赖排列（被引用者在前）。
+ *
+ * 存在的意义是消灭「手写迁移清单」：ExportBackup 会逐表查询，任一表缺失就整体失败，
+ * 而失败发生在导出阶段、报的是 "no such table"，不易一眼联想到迁移漏了模型。
+ * 测试库请用它做 AutoMigrate，不要各自维护列表——新增备份模型时才不会漏。
+ * TestBackupModelsCoverBackupData 会用反射守住它与 BackupData 的一致性。
+ */
+func BackupModels() []interface{} {
+	return []interface{}{
+		&Certificate{}, &Policy{}, &Rule{}, &Site{}, &SiteListener{},
+		&IPListEntry{}, &ThreatIntelFeed{}, &CVERuleRecord{},
+		&ApplicationRouteRule{}, &SiteAccessConfig{}, &AccessProvider{},
+		&AccessUser{}, &AccessPathRule{}, &LuaPlugin{}, &SystemSettings{},
+	}
+}
 
 /**
  * ExportBackup 从数据库导出全部配置类数据。
@@ -88,6 +108,9 @@ func ExportBackup(db *gorm.DB) (*BackupData, error) {
 	if err := db.Find(&data.AccessPathRules).Error; err != nil {
 		return nil, err
 	}
+	if err := db.Find(&data.LuaPlugins).Error; err != nil {
+		return nil, err
+	}
 	if err := db.Find(&data.SystemSettings).Error; err != nil {
 		return nil, err
 	}
@@ -128,6 +151,8 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 			data.AccessProviders,
 			data.AccessUsers,
 			data.AccessPathRules,
+			// LuaPlugins 排在 Sites 之后：SiteID 非空时指向具体站点。
+			data.LuaPlugins,
 		}
 		for _, records := range ordered {
 			if err := upsertSlice(tx, records); err != nil {
@@ -222,6 +247,11 @@ func upsertSlice(tx *gorm.DB, records interface{}) error {
 			return nil
 		}
 		return upsertBatch(tx, v)
+	case []LuaPlugin:
+		if len(v) == 0 {
+			return nil
+		}
+		return upsertBatch(tx, v)
 	}
 	return nil
 }
@@ -230,9 +260,80 @@ func upsertSlice(tx *gorm.DB, records interface{}) error {
  * upsertBatch 用主键冲突全列更新的方式批量插入记录，保留原始 ID。
  */
 func upsertBatch[T any](tx *gorm.DB, records []T) error {
-	return tx.Clauses(clause.OnConflict{
+	// 先留快照：GORM 在 Create 过程中会把「带 default 且当前为零值」的字段
+	// 就地改写成默认值（callbacks/create.go 中的
+	// field.Set(ctx, rv, field.DefaultValueInterface)），插入之后就读不到原始值了。
+	original := make([]T, len(records))
+	copy(original, records)
+
+	if err := tx.Clauses(clause.OnConflict{
 		UpdateAll: true,
-	}).Create(&records).Error
+	}).Create(&records).Error; err != nil {
+		return err
+	}
+	return restoreZeroValuedDefaults(tx, records, original)
+}
+
+/**
+ * restoreZeroValuedDefaults 把「带 default 标签且备份中为零值」的字段显式写回。
+ *
+ * GORM 在 INSERT 时不会写入这类字段的零值：`callbacks/create.go` 的
+ * ConvertToCreateValues 判到 isZero 后，会用 `field.DefaultValueInterface` 顶替，
+ * 落库拿到的是默认值而不是备份里的值。`OnConflict{UpdateAll}` 也补不回来——
+ * 它的更新列以 `!field.HasDefaultValue` 排除了这类字段。只能在插入后再 UPDATE 一次。
+ *
+ * 影响的正是「用户主动关掉或清零」的配置，不修就会在恢复时被静默逆转：
+ * 停用的站点重新对外服务（`Site.Enabled` 默认 true）、`Rule.Priority` 从 0 变 100
+ * 改变规则执行顺序（规则按 priority ASC, ID ASC 排序）、`Site.MaxBodyBytes` 从 0 变
+ * 10 MB、停用的 Lua 策略被重新启用。
+ *
+ * @param inserted 插入后的记录，用于取主键（新记录的主键此时才确定）。
+ * @param original 插入前的快照，用于取未被 GORM 改写的原始值。两者按下标一一对应。
+ * @return 任一条更新失败即返回错误，由调用方回滚整个导入。
+ */
+func restoreZeroValuedDefaults[T any](tx *gorm.DB, inserted, original []T) error {
+	if len(original) == 0 || len(inserted) != len(original) {
+		return nil
+	}
+
+	stmt := &gorm.Statement{DB: tx}
+	if err := stmt.Parse(&original[0]); err != nil {
+		return err
+	}
+	sch := stmt.Schema
+	if sch == nil || sch.PrioritizedPrimaryField == nil {
+		return nil
+	}
+
+	candidates := ZeroDefaultCandidates(sch)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	ctx := context.Background()
+	pkField := sch.PrioritizedPrimaryField
+	for i := range original {
+		origVal := reflect.Indirect(reflect.ValueOf(&original[i]))
+		updates := make(map[string]interface{}, len(candidates))
+		for _, f := range candidates {
+			if _, isZero := f.ValueOf(ctx, origVal); isZero {
+				updates[f.DBName] = reflect.Zero(f.FieldType).Interface()
+			}
+		}
+		if len(updates) == 0 {
+			continue
+		}
+		pk, zero := pkField.ValueOf(ctx, reflect.Indirect(reflect.ValueOf(&inserted[i])))
+		if zero {
+			// 没有主键就无法定位记录，跳过好过发出无条件 UPDATE。
+			continue
+		}
+		if err := tx.Model(&inserted[i]).Where(pkField.DBName+" = ?", pk).
+			UpdateColumns(updates).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 /**
@@ -242,6 +343,8 @@ func upsertBatch[T any](tx *gorm.DB, records []T) error {
 func clearConfigTables(tx *gorm.DB) error {
 	// 逆序：先删引用他表的记录，再删被引用的记录。
 	models := []interface{}{
+		// LuaPlugin 可引用 Site，须在 Site 之前清空。
+		&LuaPlugin{},
 		&AccessPathRule{},
 		&AccessUser{},
 		&AccessProvider{},

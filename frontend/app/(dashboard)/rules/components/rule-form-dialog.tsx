@@ -398,7 +398,10 @@ export function RuleFormDialog({
         action: values.type === "allow" ? "allow" : values.action,
         phase: "custom",
         enabled: values.enabled,
-        priority: 0,
+        // 不提交 priority：本表单没有优先级输入项，交给后端取模型默认值（100）。
+        // 曾经写死 0，而后端此前靠 GORM「零值即未设置」把它当默认值处理；
+        // 现在后端会如实落库，再传 0 会让每条新规则都排到最高优先级
+        // （规则按 priority ASC, ID ASC 执行）。更新时不传则保持原值不变。
         status_code: 403,
         window_seconds: values.windowSeconds,
         request_count: values.requestCount,

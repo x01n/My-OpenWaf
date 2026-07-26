@@ -50,6 +50,62 @@ jobs:
       - name: Run Go tests
         run: go test -v -timeout=30m ./...
 
+  dialect-migration:
+    # 在真实 MySQL / PostgreSQL 上跑 AutoMigrate。
+    # SQLite 宽容得多，多类 schema 问题只在这两种方言暴露，例如：
+    #   - TEXT 列带 DEFAULT（MySQL Error 1101）
+    #   - 复合唯一索引键长超过 3072 字节（MySQL Error 1071）
+    # 独立作业，不阻塞主测试路径。
+    name: DB dialect migration
+    runs-on: ubuntu-latest
+    needs: [frontend-test]
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: citest
+          MYSQL_DATABASE: waf
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -uroot -pcitest --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: citest
+          POSTGRES_DB: waf
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download frontend export
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-out
+          path: internal/core/adminweb/dist
+
+      - name: Run dialect migration tests
+        env:
+          MY_OPENWAF_TEST_MYSQL_DSN: root:citest@tcp(127.0.0.1:3306)/waf?charset=utf8mb4&parseTime=True&loc=Local
+          MY_OPENWAF_TEST_POSTGRES_DSN: postgres://postgres:citest@127.0.0.1:5432/waf?sslmode=disable
+        run: go test -v -timeout=10m -run TestAutoMigrateOnExternalDialect ./internal/store/
+
   frontend-test:
     name: Frontend checks
     runs-on: ubuntu-latest

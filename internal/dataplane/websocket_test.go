@@ -427,8 +427,8 @@ func TestForwardWebSocketReturnsWhenWAFInterceptsClientFrame(t *testing.T) {
 	holder.Store(&snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "client.example"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "client.example"): &rt,
 		},
 	})
 	eng := engine.New(holder, nil, nil, nil)
@@ -1147,7 +1147,7 @@ func TestInspectWebSocketPayloadAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *te
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: store.DefaultProtectionConfig(),
-		Sites:      make(map[string]snapshot.SiteRuntime),
+		Sites:      make(map[string]*snapshot.SiteRuntime),
 	}
 	rt := snapshot.SiteRuntime{
 		Site: store.Site{
@@ -1159,7 +1159,7 @@ func TestInspectWebSocketPayloadAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *te
 		Bind:              ":80",
 		AntiReplayEnabled: true,
 	}
-	sn.Sites[snapshot.SiteMapKey(":80", "ws-ttl.example.com")] = rt
+	sn.Sites[snapshot.SiteMapKey(":80", "ws-ttl.example.com")] = &rt
 	holder.Store(sn)
 
 	eng := engine.New(holder, nil, nil, nil)
@@ -1212,8 +1212,8 @@ func TestInspectWebSocketPayloadUsesCachedTLSHandshakeMetadata(t *testing.T) {
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":443", "ws-tls.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "ws-tls.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)

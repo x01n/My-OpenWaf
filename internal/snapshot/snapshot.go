@@ -9,6 +9,7 @@ import (
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/dynamic"
+	"My-OpenWaf/internal/waf/luaplugin"
 )
 
 // CompiledRule is a lightweight runtime rule (MVP ACL parser).
@@ -121,7 +122,7 @@ type AccessControlPathRule struct {
 type Snapshot struct {
 	Revision uint64
 
-	Sites map[string]SiteRuntime
+	Sites map[string]*SiteRuntime
 
 	NetworkDefaults NetworkDefaults
 	TLSDefaults     TLSDefaults
@@ -132,6 +133,16 @@ type Snapshot struct {
 
 	// Protection settings loaded from SystemSettings.
 	Protection store.ProtectionConfig
+
+	// LuaPlugins 是已编译的自定义 Lua 策略脚本。
+	//
+	// 在 snapshot 构建期编译而非请求期：编译有成本，且语法错误应在 reload 时
+	// 就被发现。单个脚本编译失败不会使整个 snapshot 构建失败——错误记入
+	// LuaPluginErrors 供管理端展示，其余脚本照常生效，避免一处语法错误
+	// 导致整次配置重载失败。
+	LuaPlugins []*luaplugin.Script
+	// LuaPluginErrors 按脚本名记录编译错误。
+	LuaPluginErrors map[string]string
 
 	// HTTP2 configuration
 	HTTP2Config HTTP2Config
@@ -168,6 +179,11 @@ func SiteMapKey(bind string, host string) string {
 	return bind + "\x00" + strings.ToLower(strings.TrimSpace(host))
 }
 
+// siteMapKeyNorm builds a map key assuming host is already normalized (lowercase, trimmed, port-stripped).
+func siteMapKeyNorm(bind string, host string) string {
+	return bind + "\x00" + host
+}
+
 func SNICertKey(bind string, sni string) string {
 	return "sni:" + bind + "\x00" + strings.ToLower(strings.TrimSpace(sni))
 }
@@ -178,57 +194,72 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 		return SiteRuntime{}, false
 	}
 
-	key := SiteMapKey(bind, host)
+	key := siteMapKeyNorm(bind, host)
 	if rt, ok := sn.Sites[key]; ok {
-		return rt, true
+		return *rt, true
 	}
 
 	if !isIPAddress(host) {
 		if idx := strings.Index(host, "."); idx > 0 {
 			wild := "*." + host[idx+1:]
-			if rt, ok := sn.Sites[SiteMapKey(bind, wild)]; ok {
-				return rt, true
+			if rt, ok := sn.Sites[siteMapKeyNorm(bind, wild)]; ok {
+				return *rt, true
 			}
 		}
 	}
 
-	if rt, ok := sn.Sites[SiteMapKey(bind, "*")]; ok {
-		return rt, true
+	if rt, ok := sn.Sites[siteMapKeyNorm(bind, "*")]; ok {
+		return *rt, true
 	}
 
 	return SiteRuntime{}, false
 }
 
 // MatchSitePtr finds the SiteRuntime pointer for a bind address + host combination.
+// Zero-copy: returns the pointer stored directly in the Sites map.
 func (sn *Snapshot) MatchSitePtr(bind string, hostHeader string) (*SiteRuntime, bool) {
 	host := NormalizeMatchHost(hostHeader)
 	if host == "" {
 		return nil, false
 	}
 
-	key := SiteMapKey(bind, host)
+	key := siteMapKeyNorm(bind, host)
 	if rt, ok := sn.Sites[key]; ok {
-		return &rt, true
+		return rt, true
 	}
 
 	if !isIPAddress(host) {
 		if idx := strings.Index(host, "."); idx > 0 {
 			wild := "*." + host[idx+1:]
-			if rt, ok := sn.Sites[SiteMapKey(bind, wild)]; ok {
-				return &rt, true
+			if rt, ok := sn.Sites[siteMapKeyNorm(bind, wild)]; ok {
+				return rt, true
 			}
 		}
 	}
 
-	if rt, ok := sn.Sites[SiteMapKey(bind, "*")]; ok {
-		return &rt, true
+	if rt, ok := sn.Sites[siteMapKeyNorm(bind, "*")]; ok {
+		return rt, true
 	}
 
 	return nil, false
 }
 
 // NormalizeMatchHost lowercases, trims, and strips the port from a host header.
+// Fast path: if the host is already lowercase ASCII with no whitespace or port, returns it without allocation.
 func NormalizeMatchHost(host string) string {
+	// Fast path: check if already normalized (common case for well-behaved clients).
+	needsWork := false
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		if c >= 'A' && c <= 'Z' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ':' {
+			needsWork = true
+			break
+		}
+	}
+	if !needsWork {
+		return host
+	}
+
 	host = strings.ToLower(strings.TrimSpace(host))
 	// Strip port: find last colon and verify everything after is digits.
 	if i := strings.LastIndex(host, ":"); i >= 0 {

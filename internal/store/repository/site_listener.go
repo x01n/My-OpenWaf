@@ -33,8 +33,9 @@ func (r *SiteListenerRepo) Get(id uint) (*store.SiteListener, error) {
 	return &item, r.db.First(&item, id).Error
 }
 
+// Create 新建监听器。Enabled 带 gorm default:true，见 CreateWithZeroDefaults。
 func (r *SiteListenerRepo) Create(item *store.SiteListener) error {
-	return r.db.Create(item).Error
+	return store.CreateWithZeroDefaults(r.db, item)
 }
 
 func (r *SiteListenerRepo) Update(item *store.SiteListener) error {

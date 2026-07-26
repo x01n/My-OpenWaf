@@ -393,11 +393,25 @@ func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
 	}
 	total := 0
 	best := ""
+	binaryChecked, binaryTarget := false, false
 	for _, p := range cmdInjectPatterns {
 		if !shouldScanCmdPattern(s, p) {
 			continue
 		}
 		if p.re.MatchString(s) {
+			// 二进制 body（压缩流、PDF、图片）中，低分短模式的随机碰撞概率极高：
+			// owasp:cmd:002 的 `[^`]*` 无长度上界且命令词无词边界，owasp:cmd:010
+			// 的 \w+=\S+ 同理。此类目标只接受高置信度规则（如反引号紧跟命令词的
+			// owasp:cmd:024），真实攻击载荷仍能检出。
+			if p.score < binaryTargetMinCmdScore {
+				if !binaryChecked {
+					binaryTarget = isBinaryScanTarget(s)
+					binaryChecked = true
+				}
+				if binaryTarget {
+					continue
+				}
+			}
 			total += p.score
 			if best == "" {
 				best = p.id

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +17,7 @@ import {
   PaginationEllipsis,
 } from "@/components/ui/pagination";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { DataTable } from "@/components/data-table";
 import { IconFilter } from "@tabler/icons-react";
 import { useDropEvents } from "@/hooks/use-api";
@@ -32,7 +34,7 @@ export default function DropEventsPage() {
   });
   const [showFilters, setShowFilters] = useState(false);
 
-  const { data, isLoading } = useDropEvents({
+  const { data, isLoading, error } = useDropEvents({
     page,
     page_size: pageSize,
     ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "")),
@@ -54,25 +56,32 @@ export default function DropEventsPage() {
 
   const columns = [
     { key: "created_at", title: t("dropEvents.time"), width: "180px" },
-    { key: "client_ip", title: "IP", width: "140px" },
-    { key: "source", title: "Source", width: "120px" },
-    { key: "host", title: "Host", width: "180px" },
-    { key: "path", title: "Path", width: "200px" },
+    { key: "client_ip", title: t("dropEvents.ip"), width: "140px" },
+    { key: "source", title: t("dropEvents.source"), width: "120px" },
+    { key: "host", title: t("dropEvents.host"), width: "180px" },
+    { key: "path", title: t("dropEvents.path"), width: "200px" },
   ];
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("dropEvents.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("dropEvents.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("dropEvents.title")}
+        description={t("dropEvents.description")}
+        actions={
           <Badge variant="secondary" className="h-5 px-2 text-xs">
             {t("dropEvents.total", { count: total })}
           </Badge>
-        </div>
-      </div>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader className="pb-3">

@@ -11,14 +11,11 @@ export interface AuthUser {
  */
 export function useAuth() {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !!localStorage.getItem("token"));
 
   useEffect(() => {
     const token = localStorage.getItem("token");
-    if (!token) {
-      setLoading(false);
-      return;
-    }
+    if (!token) return;
     authApi.me()
       .then((data) => {
         setUser({ username: data.username, role: data.role });
@@ -58,14 +55,11 @@ export function useAuth() {
  */
 export function useIsAuthenticated() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [checked, setChecked] = useState(false);
+  const [checked, setChecked] = useState(() => !localStorage.getItem("token"));
 
   useEffect(() => {
     const token = localStorage.getItem("token");
-    if (!token) {
-      setChecked(true);
-      return;
-    }
+    if (!token) return;
     authApi.me()
       .then(() => setIsAuthenticated(true))
       .catch(() => localStorage.removeItem("token"))

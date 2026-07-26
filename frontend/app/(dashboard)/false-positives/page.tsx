@@ -9,6 +9,7 @@
 
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { toast } from "sonner";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
@@ -20,6 +21,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -95,7 +97,7 @@ export default function FalsePositivesPage() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<FalsePositiveReport | null>(null);
 
-  const { data, isLoading } = useFalsePositives({
+  const { data, isLoading, error } = useFalsePositives({
     page,
     page_size: pageSize,
     status: status || undefined,
@@ -278,15 +280,24 @@ export default function FalsePositivesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <IconAlertHexagon className="h-6 w-6 text-primary" />
-        <h1 className="text-xl font-semibold">
-          {t("falsePositives.title", { defaultValue: "误报反馈" })}
-        </h1>
-        <Badge variant="secondary" className="h-5 px-2 text-xs">
-          {t("common.total", { count: total })}
-        </Badge>
-      </div>
+      <PageHeader
+        icon={<IconAlertHexagon className="h-6 w-6 text-primary" />}
+        title={t("falsePositives.title", { defaultValue: "误报反馈" })}
+        titleExtra={
+          <Badge variant="secondary" className="h-5 px-2 text-xs">
+            {t("common.total", { count: total })}
+          </Badge>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader className="pb-3">

@@ -24,15 +24,6 @@ type RetentionConfig struct {
 	StatsDays         int `json:"stats_retention_days"`
 }
 
-func DefaultRetentionConfig() RetentionConfig {
-	return RetentionConfig{
-		SecurityEventDays: 30,
-		AccessLogDays:     30,
-		DropEventDays:     30,
-		StatsDays:         7,
-	}
-}
-
 // Archiver periodically deletes security events, access logs and drop events older than the retention period.
 // After cleanup it optimizes the database (VACUUM for SQLite, OPTIMIZE TABLE for MySQL, VACUUM ANALYZE for PostgreSQL).
 type Archiver struct {

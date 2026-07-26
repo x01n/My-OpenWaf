@@ -2,7 +2,8 @@ package escalation
 
 import (
 	"context"
-	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,9 +71,24 @@ func (m *EscalationManager) redisClient() *goredis.Client {
 	return client
 }
 func redisEscalationKey(ip string, siteID uint) string {
-	return fmt.Sprintf("owaf:escalation:%s:%d", ip, siteID)
+	var b strings.Builder
+	var ibuf [20]byte
+	b.Grow(len("owaf:escalation:") + len(ip) + 11)
+	b.WriteString("owaf:escalation:")
+	b.WriteString(ip)
+	b.WriteByte(':')
+	b.Write(strconv.AppendUint(ibuf[:0], uint64(siteID), 10))
+	return b.String()
 }
-func localEscalationKey(ip string, siteID uint) string { return fmt.Sprintf("%s:%d", ip, siteID) }
+func localEscalationKey(ip string, siteID uint) string {
+	var b strings.Builder
+	var ibuf [20]byte
+	b.Grow(len(ip) + 11)
+	b.WriteString(ip)
+	b.WriteByte(':')
+	b.Write(strconv.AppendUint(ibuf[:0], uint64(siteID), 10))
+	return b.String()
+}
 func (m *EscalationManager) effectiveCfg(cfg *EscalationConfig) EscalationConfig {
 	if cfg != nil && cfg.Enabled {
 		return *cfg

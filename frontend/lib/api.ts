@@ -601,6 +601,32 @@ export const presetBotWhitelistApi = {
 };
 
 /**
+ * Lua 自定义策略插件相关 API
+ *
+ * update 只覆盖请求中提供的字段；site_id 显式传 null 才会改回「全站生效」，
+ * 省略则保持原值——这是后端 json.RawMessage 三态语义，不能简化为可选字段。
+ */
+export const luaPluginApi = {
+  list: () => get<{ items: LuaPlugin[]; total: number }>("/lua-plugins"),
+  get: (id: string | number) => get<LuaPlugin>(`/lua-plugins/${id}`),
+  create: (data: Partial<LuaPlugin>) => post<LuaPlugin>("/lua-plugins", data),
+  update: (id: string | number, data: Partial<LuaPlugin>) =>
+    post<LuaPlugin>(`/lua-plugins/${id}/update`, data),
+  delete: (id: string | number) => post(`/lua-plugins/${id}/delete`),
+  toggle: (id: string | number, enabled?: boolean) =>
+    post<{ id: number; enabled: boolean }>(
+      `/lua-plugins/${id}/toggle`,
+      enabled === undefined ? undefined : { enabled },
+    ),
+  validate: (data: { stage: LuaPluginStage; source: string }) =>
+    post<LuaValidateResult>("/lua-plugins/validate", data),
+  dryRun: (data: LuaDryRunRequest) =>
+    post<LuaDryRunResult>("/lua-plugins/dry-run", data),
+  /** 运行时统计。按脚本名聚合，不含数据库 id，只覆盖当前已载入引擎的脚本。 */
+  stats: () => get<LuaPluginStatsResponse>("/lua-plugins/stats"),
+};
+
+/**
  * TLS 指纹相关 API
  */
 export const fingerprintApi = {
@@ -617,4 +643,6 @@ import type {
   AdminAPIKey, AdminUser, IPEntry, ThreatIntelFeed, ThreatIntelSyncLog,
   BackupData, ImportResult, FalsePositiveReport,
   RequestTrace, UpstreamStatusResponse,
+  LuaPlugin, LuaPluginStage, LuaValidateResult, LuaDryRunRequest, LuaDryRunResult,
+  LuaPluginStatsResponse,
 } from "./types";

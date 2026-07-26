@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -42,6 +43,42 @@ type UpstreamMetricsSnapshot struct {
 	LatencySamples   int64
 }
 
+// CacheLayerStats holds cumulative hit/miss counters for a single named cache layer.
+type CacheLayerStats struct {
+	Name   string
+	Hits   int64
+	Misses int64
+	// Errors 是后端故障次数（如 Redis 不可达），与「键不存在」的 Misses 区分。
+	// 该值增长说明请求正在穿透到数据库，而非缓存策略失效。
+	Errors int64
+}
+
+// LuaScriptStats holds cumulative execution counters for a single Lua policy script.
+//
+// 脚本失败/超时后只写一条 warn 日志就静默跳过，请求判定不受影响——这对可用性
+// 是对的，但也意味着策略长期失效不会有任何外部信号。把这些计数器暴露出来，
+// 运维才能对 Failures/Timeouts 的占比告警。
+type LuaScriptStats struct {
+	// Name 是脚本名，来自用户输入，作为 label 输出前必须转义。
+	Name  string
+	Stage string
+	// Runs 是总执行次数，含失败与超时的那几次。
+	Runs int64
+	// Failures 是不含超时的失败：handle 报错、panic、入口缺失、状态机获取失败。
+	Failures int64
+	// Timeouts 与 Failures 互斥——超时分支直接返回、不再累加 Failures
+	// （internal/waf/luaplugin/exec.go），故成功次数是 Runs-Failures-Timeouts。
+	Timeouts int64
+	// AvgDurationMs 的分母是 Runs，超时的执行也会把它拉高。
+	AvgDurationMs float64
+}
+
+// CacheStatsSnapshotProvider returns per-layer cache hit/miss counters.
+type CacheStatsSnapshotProvider func() []CacheLayerStats
+
+// LuaScriptStatsProvider returns per-script Lua policy plugin counters.
+type LuaScriptStatsProvider func() []LuaScriptStats
+
 // DataPlaneMetricsSnapshotProvider returns a current data-plane metrics snapshot.
 type DataPlaneMetricsSnapshotProvider func() DataPlaneMetricsSnapshot
 
@@ -62,6 +99,8 @@ type Metrics struct {
 	unifiedWriterStatsProvider atomic.Value
 	dataPlaneMetricsProvider   atomic.Value
 	upstreamMetricsProvider    atomic.Value
+	cacheStatsProvider         atomic.Value
+	luaScriptStatsProvider     atomic.Value
 }
 
 // NewMetrics creates a new metrics collector.
@@ -112,6 +151,22 @@ func (m *Metrics) SetUpstreamMetricsProvider(provider UpstreamMetricsSnapshotPro
 		return
 	}
 	m.upstreamMetricsProvider.Store(provider)
+}
+
+// SetCacheStatsProvider attaches per-layer cache hit/miss metrics to /metrics.
+func (m *Metrics) SetCacheStatsProvider(provider CacheStatsSnapshotProvider) {
+	if provider == nil {
+		return
+	}
+	m.cacheStatsProvider.Store(provider)
+}
+
+// SetLuaScriptStatsProvider attaches per-script Lua policy plugin metrics to /metrics.
+func (m *Metrics) SetLuaScriptStatsProvider(provider LuaScriptStatsProvider) {
+	if provider == nil {
+		return
+	}
+	m.luaScriptStatsProvider.Store(provider)
 }
 
 // PrometheusHandler returns a Hertz handler that serves /metrics in Prometheus text format.
@@ -213,6 +268,16 @@ openwaf_gc_pause_total_ns %d
 			body += prometheusUpstreamMetrics(provider())
 		}
 	}
+	if v := m.cacheStatsProvider.Load(); v != nil {
+		if provider, ok := v.(CacheStatsSnapshotProvider); ok {
+			body += prometheusCacheStats(provider())
+		}
+	}
+	if v := m.luaScriptStatsProvider.Load(); v != nil {
+		if provider, ok := v.(LuaScriptStatsProvider); ok {
+			body += prometheusLuaScriptStats(provider())
+		}
+	}
 
 	return body
 }
@@ -308,6 +373,114 @@ openwaf_upstream_latency_samples_total %d
 		snapshot.MaxLastLatencyMs,
 		snapshot.LatencySamples,
 	)
+}
+
+func prometheusCacheStats(layers []CacheLayerStats) string {
+	body := `
+# HELP owaf_cache_hits_total Cache hits by cache layer
+# TYPE owaf_cache_hits_total counter
+`
+	for _, l := range layers {
+		body += fmt.Sprintf("owaf_cache_hits_total{cache=%q} %d\n", l.Name, l.Hits)
+	}
+	body += `
+# HELP owaf_cache_misses_total Cache misses by cache layer
+# TYPE owaf_cache_misses_total counter
+`
+	for _, l := range layers {
+		body += fmt.Sprintf("owaf_cache_misses_total{cache=%q} %d\n", l.Name, l.Misses)
+	}
+	body += `
+# HELP owaf_cache_errors_total Cache backend failures by cache layer (excludes key-not-found)
+# TYPE owaf_cache_errors_total counter
+`
+	for _, l := range layers {
+		body += fmt.Sprintf("owaf_cache_errors_total{cache=%q} %d\n", l.Name, l.Errors)
+	}
+	return body
+}
+
+/**
+ * escapePrometheusLabelValue 转义 label 值中的特殊字符。
+ *
+ * Prometheus 文本格式只定义三种转义：反斜杠、双引号、换行，分别写作 \\ 、\" 、\n。
+ * 未转义的双引号会提前闭合 label，未转义的换行会被解析成新的一行样本——脚本名
+ * 由用户自由填写，不转义就等于把整份 /metrics 的格式交给用户控制。
+ *
+ * 不用 %q：Go 的引号语法还会把制表符、控制字符写成 \t 、\x01，这些在 Prometheus
+ * 里是**非法**转义序列，解析器会直接报错，比不转义更糟。
+ *
+ * @param v 原始 label 值。
+ * @return 已转义的值，不含外层引号。
+ */
+func escapePrometheusLabelValue(v string) string {
+	if !strings.ContainsAny(v, "\\\"\n") {
+		return v
+	}
+	var b strings.Builder
+	b.Grow(len(v) + 8)
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; c {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+/**
+ * prometheusLuaScriptStats 渲染每个 Lua 策略脚本的运行统计。
+ *
+ * 无脚本时返回空串而不是空的 HELP/TYPE 头：label 组合本就随配置变化，
+ * 没有脚本就没有系列。
+ *
+ * @param scripts 脚本统计快照。
+ * @return Prometheus 文本片段，以空行开头以便直接拼接。
+ */
+func prometheusLuaScriptStats(scripts []LuaScriptStats) string {
+	if len(scripts) == 0 {
+		return ""
+	}
+
+	// label 部分四组指标共用，先转义一次避免重复开销。
+	labels := make([]string, len(scripts))
+	for i, s := range scripts {
+		labels[i] = fmt.Sprintf(`{script="%s",stage="%s"}`,
+			escapePrometheusLabelValue(s.Name), escapePrometheusLabelValue(s.Stage))
+	}
+
+	var b strings.Builder
+	b.WriteString("\n# HELP openwaf_lua_script_runs_total Lua policy script executions by script and stage\n")
+	b.WriteString("# TYPE openwaf_lua_script_runs_total counter\n")
+	for i, s := range scripts {
+		fmt.Fprintf(&b, "openwaf_lua_script_runs_total%s %d\n", labels[i], s.Runs)
+	}
+
+	b.WriteString("\n# HELP openwaf_lua_script_failures_total Lua policy script failures excluding timeouts: handle errors, panics and missing entrypoint\n")
+	b.WriteString("# TYPE openwaf_lua_script_failures_total counter\n")
+	for i, s := range scripts {
+		fmt.Fprintf(&b, "openwaf_lua_script_failures_total%s %d\n", labels[i], s.Failures)
+	}
+
+	b.WriteString("\n# HELP openwaf_lua_script_timeouts_total Lua policy script executions aborted by the per-script timeout\n")
+	b.WriteString("# TYPE openwaf_lua_script_timeouts_total counter\n")
+	for i, s := range scripts {
+		fmt.Fprintf(&b, "openwaf_lua_script_timeouts_total%s %d\n", labels[i], s.Timeouts)
+	}
+
+	b.WriteString("\n# HELP openwaf_lua_script_avg_duration_ms Average Lua policy script execution time in milliseconds\n")
+	b.WriteString("# TYPE openwaf_lua_script_avg_duration_ms gauge\n")
+	for i, s := range scripts {
+		fmt.Fprintf(&b, "openwaf_lua_script_avg_duration_ms%s %.6f\n", labels[i], s.AvgDurationMs)
+	}
+
+	return b.String()
 }
 
 func prometheusUnifiedWriterStats(stats UnifiedWriterStats) string {

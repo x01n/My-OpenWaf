@@ -16,10 +16,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(i18n.isInitialized);
 
   useEffect(() => {
-    if (i18n.isInitialized) {
-      setReady(true);
-      return;
-    }
+    if (i18n.isInitialized) return;
     i18n
       .use(LanguageDetector)
       .use(initReactI18next)

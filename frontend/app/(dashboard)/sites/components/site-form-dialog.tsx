@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { useTranslation } from "react-i18next";
-import { useForm, useFieldArray } from "react-hook-form";
+import { useForm, useFieldArray, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
@@ -10,6 +11,7 @@ import { mutate } from "swr";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -17,7 +19,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -25,40 +27,61 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { siteApi } from "@/lib/api";
 import { useCertificates } from "@/hooks/use-api";
+import { parseUpstreamUrls } from "@/lib/site-display";
 import type { Site } from "@/lib/types";
-import {
-  IconPlus,
-  IconTrash,
-} from "@tabler/icons-react";
+import { IconExternalLink, IconPlus, IconTrash } from "@tabler/icons-react";
+
+/**
+ * 「不使用证书」的哨兵值。
+ * Radix Select 不接受空字符串作为 SelectItem 的 value，必须用非空占位。
+ */
+const CERT_NONE = "none";
+
+/** 后端 `internal/admin/shared/site_upstreams.go` 允许的上游 scheme */
+const UPSTREAM_SCHEMES = ["http://", "https://", "h2c://", "h3://"];
 
 const siteFormSchema = z.object({
   host: z.string().min(1, "sites.form.hostRequired"),
-  name: z.string().optional(),
   listeners: z
     .array(
       z.object({
         port: z
           .string()
           .min(1, "sites.form.portRequired")
-          .regex(/^\d+$/, "sites.form.portNumber"),
+          .regex(/^\d+$/, "sites.form.portNumber")
+          .refine((v) => {
+            const n = Number(v);
+            return n >= 1 && n <= 65535;
+          }, "sites.form.portRange"),
         tls_enabled: z.boolean(),
       })
     )
     .min(1, "sites.form.listenersRequired"),
   cert_id: z.number().optional(),
-  access_mode: z.enum(["proxy", "static", "redirect"]),
   upstreams: z
     .array(
       z.object({
-        url: z.string().min(1, "sites.form.upstreamUrlRequired"),
+        url: z
+          .string()
+          .min(1, "sites.form.upstreamUrlRequired")
+          .refine(
+            (v) =>
+              UPSTREAM_SCHEMES.some((s) => v.trim().toLowerCase().startsWith(s)),
+            "sites.form.upstreamScheme"
+          ),
       })
     )
     .min(1, "sites.form.upstreamRequired"),
   upstream_host: z.string().optional(),
-});
+})
+  // 对齐后端 shared.ValidateSiteTLSCertificate：启用 TLS 的站点必须绑定证书
+  .refine(
+    (v) => !v.listeners.some((l) => l.tls_enabled) || v.cert_id !== undefined,
+    { message: "sites.form.certRequired", path: ["cert_id"] }
+  );
 
 type SiteFormValues = z.infer<typeof siteFormSchema>;
 
@@ -68,9 +91,23 @@ interface SiteFormDialogProps {
   site?: Site | null;
 }
 
+/** 新建站点时的初始表单值 */
+const EMPTY_VALUES: SiteFormValues = {
+  host: "",
+  listeners: [{ port: "80", tls_enabled: false }],
+  cert_id: undefined,
+  upstreams: [{ url: "http://127.0.0.1:8080" }],
+  upstream_host: "",
+};
+
 /**
- * @description 添加/编辑站点弹窗组件
- * 支持动态监听端口、上游服务器、证书选择、接入方式选择
+ * 添加 / 编辑防护应用弹窗。
+ *
+ * 仅暴露后端 `store.Site` 真实存在的字段：域名、监听端口 + TLS、证书、
+ * 上游服务器列表与上游 Host 覆盖。
+ *
+ * @param {SiteFormDialogProps} props 组件属性
+ * @returns {React.ReactElement} 弹窗
  */
 export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps) {
   const { t } = useTranslation();
@@ -79,88 +116,75 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
 
   const form = useForm<SiteFormValues>({
     resolver: zodResolver(siteFormSchema),
-    defaultValues: {
-      host: "",
-      name: "",
-      listeners: [{ port: "80", tls_enabled: false }],
-      cert_id: undefined,
-      access_mode: "proxy",
-      upstreams: [{ url: "http://127.0.0.1:8080" }],
-      upstream_host: "",
-    },
+    defaultValues: EMPTY_VALUES,
   });
 
   const {
     register,
     handleSubmit,
     control,
-    watch,
     setValue,
     reset,
-    formState: { errors },
+    formState: { errors, isSubmitting },
   } = form;
 
   const listenerArray = useFieldArray({ control, name: "listeners" });
   const upstreamArray = useFieldArray({ control, name: "upstreams" });
 
-  /** @description 当弹窗打开或编辑对象变化时，重置表单数据 */
+  // useWatch 订阅的是 control，可安全 memo；useForm().watch() 会被 React Compiler 跳过优化
+  const watchedListeners = useWatch({ control, name: "listeners" });
+  const watchedCertId = useWatch({ control, name: "cert_id" });
+
+  /** 弹窗打开或编辑目标变化时重置表单 */
   useEffect(() => {
-    if (open && site) {
-      const bind = site.bind || "";
-      const portMatch = bind.match(/:(\d+)$/);
-      const port = portMatch ? portMatch[1] : "80";
+    if (!open) return;
+    if (site) {
+      const portMatch = (site.bind || "").match(/:(\d+)$/);
+      const upstreams = parseUpstreamUrls(site.upstream_urls);
       reset({
         host: site.host,
-        name: site.host,
-        listeners: [{ port, tls_enabled: site.tls_enabled }],
+        listeners: [
+          { port: portMatch ? portMatch[1] : "80", tls_enabled: site.tls_enabled },
+        ],
         cert_id: site.cert_id,
-        access_mode: "proxy",
-        upstreams: site.upstream_urls
-          ? site.upstream_urls.split(",").map((s) => ({ url: s.trim() }))
-          : [{ url: "" }],
+        upstreams:
+          upstreams.length > 0
+            ? upstreams.map((url) => ({ url }))
+            : [{ url: "" }],
         upstream_host: site.upstream_host || "",
       });
-    } else if (open && !site) {
-      reset({
-        host: "",
-        name: "",
-        listeners: [{ port: "80", tls_enabled: false }],
-        cert_id: undefined,
-        access_mode: "proxy",
-        upstreams: [{ url: "http://127.0.0.1:8080" }],
-        upstream_host: "",
-      });
+    } else {
+      reset(EMPTY_VALUES);
     }
   }, [open, site, reset]);
 
   /**
-   * @description 表单提交处理
-   * 创建时：先创建站点，再创建额外监听器
-   * 编辑时：仅更新站点主配置
+   * 提交表单。
+   *
+   * 新建时用第一个端口作为站点主 bind，其余端口创建为受管监听器；
+   * 编辑时只更新站点主配置，额外监听器在站点详情页的「监听端口」中管理。
    */
   const onSubmit = async (values: SiteFormValues) => {
     try {
-      const primaryListener = values.listeners[0];
-      const bind = `0.0.0.0:${primaryListener.port}`;
-
+      const primary = values.listeners[0];
       const payload: Partial<Site> = {
-        host: values.host,
-        bind,
-        tls_enabled: primaryListener.tls_enabled,
+        host: values.host.trim(),
+        bind: `0.0.0.0:${primary.port}`,
+        tls_enabled: primary.tls_enabled,
         cert_id: values.cert_id,
-        upstream_urls: values.upstreams.map((u) => u.url).join(","),
-        upstream_host: values.upstream_host || undefined,
+        upstream_urls: values.upstreams
+          .map((u) => u.url.trim())
+          .filter(Boolean)
+          .join(","),
+        upstream_host: values.upstream_host?.trim() || undefined,
       };
 
       if (isEdit && site) {
         await siteApi.update(site.id, payload);
         toast.success(t("sites.updateSuccess"));
-        mutate(["sites"]);
         mutate(["site", site.id]);
-        onOpenChange(false);
       } else {
         const result = await siteApi.create(payload);
-        // 创建额外的监听器
         for (let i = 1; i < values.listeners.length; i++) {
           const l = values.listeners[i];
           await siteApi.createListener(result.id, {
@@ -171,169 +195,220 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
           });
         }
         toast.success(t("sites.createSuccess"));
-        mutate(["sites"]);
-        onOpenChange(false);
       }
+      mutate(["sites"]);
+      onOpenChange(false);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : t("common.operationFailed"));
+      toast.error(
+        err instanceof Error ? err.message : t("common.operationFailed")
+      );
     }
   };
 
+  const needsCert = (watchedListeners ?? []).some((l) => l?.tls_enabled);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>{isEdit ? t("sites.form.editTitle") : t("sites.form.addTitle")}</DialogTitle>
+          <DialogTitle>
+            {isEdit ? t("sites.form.editTitle") : t("sites.form.addTitle")}
+          </DialogTitle>
+          <DialogDescription>{t("sites.form.dialogDesc")}</DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
           {/* 域名 */}
           <div className="space-y-1.5">
-            <Label htmlFor="host">{t("sites.form.host")} *</Label>
+            <Label htmlFor="host">
+              {t("sites.form.host")}
+              <span className="ms-0.5 text-destructive">*</span>
+            </Label>
             <Input
               id="host"
               placeholder="example.com"
+              autoComplete="off"
               {...register("host")}
             />
+            <p className="text-[11px] text-muted-foreground">
+              {t("sites.form.hostHint")}
+            </p>
             {errors.host && (
               <p className="text-xs text-destructive">{t(errors.host.message!)}</p>
             )}
           </div>
 
-          {/* 应用名称 */}
-          <div className="space-y-1.5">
-            <Label htmlFor="name">{t("sites.form.name")}</Label>
-            <Input
-              id="name"
-              placeholder={t("sites.form.name")}
-              {...register("name")}
-            />
-          </div>
-
           {/* 监听端口 */}
           <div className="space-y-2">
-            <Label>{t("sites.form.listeners")}</Label>
+            <div className="flex items-center justify-between">
+              <Label>
+                {t("sites.form.listeners")}
+                <span className="ms-0.5 text-destructive">*</span>
+              </Label>
+              {isEdit && site && (
+                <Link
+                  href={`/sites/detail/?id=${site.id}&tab=listeners`}
+                  className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+                >
+                  {t("sites.form.manageListeners")}
+                  <IconExternalLink className="size-3" />
+                </Link>
+              )}
+            </div>
+
             <div className="space-y-2">
               {listenerArray.fields.map((field, index) => (
                 <div key={field.id} className="flex items-center gap-2">
                   <Input
                     placeholder="80"
-                    className="w-24"
+                    inputMode="numeric"
+                    className="w-28 font-mono"
                     {...register(`listeners.${index}.port` as const)}
                   />
-                  <div className="flex items-center gap-2">
-              { }
-                    <Switch
-                      checked={watch(`listeners.${index}.tls_enabled`)} // eslint-disable-line react-hooks/incompatible-library
-                      onCheckedChange={(checked) =>
-                        setValue(`listeners.${index}.tls_enabled`, checked)
-                      }
-                    />
-                    <span className="text-xs text-muted-foreground">
-                      {watch(`listeners.${index}.tls_enabled`) ? t("sites.https") : t("sites.http")}
-                    </span>
-                  </div>
-                  {listenerArray.fields.length > 1 && (
+                  <ToggleGroup
+                    type="single"
+                    variant="outline"
+                    size="sm"
+                    value={
+                      watchedListeners?.[index]?.tls_enabled ? "https" : "http"
+                    }
+                    onValueChange={(v) => {
+                      if (!v) return;
+                      setValue(`listeners.${index}.tls_enabled`, v === "https", {
+                        shouldDirty: true,
+                      });
+                    }}
+                  >
+                    <ToggleGroupItem value="http" className="px-3 text-xs">
+                      {t("sites.http")}
+                    </ToggleGroupItem>
+                    <ToggleGroupItem value="https" className="px-3 text-xs">
+                      {t("sites.https")}
+                    </ToggleGroupItem>
+                  </ToggleGroup>
+                  {index === 0 ? (
+                    <Badge
+                      variant="secondary"
+                      className="h-6 shrink-0 px-2 text-[10px]"
+                    >
+                      {t("sites.form.primaryListener")}
+                    </Badge>
+                  ) : (
                     <Button
                       type="button"
                       variant="ghost"
-                      size="icon-xs"
+                      size="icon-sm"
+                      className="text-muted-foreground hover:text-destructive"
+                      aria-label={t("common.delete")}
                       onClick={() => listenerArray.remove(index)}
                     >
-                      <IconTrash className="h-4 w-4 text-destructive" />
+                      <IconTrash />
                     </Button>
                   )}
                 </div>
               ))}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  listenerArray.append({ port: "", tls_enabled: false })
-                }
-              >
-                <IconPlus className="h-3.5 w-3.5 mr-1" />
-                {t("sites.form.addPort")}
-              </Button>
+
+              {/* 编辑态下新增的端口不会被保存，因此只在新建时提供 */}
+              {!isEdit && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="w-full border-dashed"
+                  onClick={() =>
+                    listenerArray.append({ port: "", tls_enabled: false })
+                  }
+                >
+                  <IconPlus className="size-3.5" />
+                  {t("sites.form.addPort")}
+                </Button>
+              )}
             </div>
-            {errors.listeners && (
+
+            {errors.listeners?.message && (
               <p className="text-xs text-destructive">
-                {t(errors.listeners.message!)}
+                {t(errors.listeners.message)}
               </p>
+            )}
+            {listenerArray.fields.map((field, index) =>
+              errors.listeners?.[index]?.port ? (
+                <p key={field.id} className="text-xs text-destructive">
+                  {t(errors.listeners[index]!.port!.message!)}
+                </p>
+              ) : null
             )}
           </div>
 
-          {/* 证书选择 */}
+          {/* 证书 */}
           <div className="space-y-1.5">
             <Label>{t("sites.form.cert")}</Label>
             <Select
-              value={watch("cert_id")?.toString() || ""}
+              value={watchedCertId?.toString() ?? CERT_NONE}
               onValueChange={(v) =>
-                setValue("cert_id", v ? Number(v) : undefined)
+                setValue("cert_id", v === CERT_NONE ? undefined : Number(v), {
+                  shouldDirty: true,
+                })
               }
             >
-              <SelectTrigger>
+              <SelectTrigger className="w-full">
                 <SelectValue placeholder={t("sites.form.certPlaceholder")} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">{t("sites.form.certNone")}</SelectItem>
+                <SelectItem value={CERT_NONE}>
+                  {t("sites.form.certNone")}
+                </SelectItem>
                 {certificates?.map((cert) => (
                   <SelectItem key={cert.id} value={cert.id.toString()}>
-                    {cert.name} ({cert.domain})
+                    {cert.name}
+                    {cert.domain ? ` (${cert.domain})` : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-          </div>
-
-          {/* 接入方式 */}
-          <div className="space-y-1.5">
-            <Label>{t("sites.form.accessMethod")}</Label>
-            <RadioGroup
-              value={watch("access_mode")}
-              onValueChange={(v) => setValue("access_mode", v as SiteFormValues["access_mode"])}
-              className="flex flex-col gap-2"
-            >
-              <div className="flex items-center gap-2">
-                <RadioGroupItem value="proxy" id="proxy" />
-                <Label htmlFor="proxy" className="cursor-pointer">
-                  {t("sites.form.accessProxy")}
-                </Label>
-              </div>
-              <div className="flex items-center gap-2">
-                <RadioGroupItem value="static" id="static" />
-                <Label htmlFor="static" className="cursor-pointer">
-                  {t("sites.form.accessStatic")}
-                </Label>
-              </div>
-              <div className="flex items-center gap-2">
-                <RadioGroupItem value="redirect" id="redirect" />
-                <Label htmlFor="redirect" className="cursor-pointer">
-                  {t("sites.form.accessRedirect")}
-                </Label>
-              </div>
-            </RadioGroup>
+            {errors.cert_id ? (
+              <p className="text-xs text-destructive">
+                {t(errors.cert_id.message!)}
+              </p>
+            ) : needsCert && watchedCertId === undefined ? (
+              <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                {t("sites.form.certRequiredHint")}
+              </p>
+            ) : null}
           </div>
 
           {/* 上游服务器 */}
           <div className="space-y-2">
-            <Label>{t("sites.form.upstreamServers")}</Label>
+            <Label>
+              {t("sites.form.upstreamServers")}
+              <span className="ms-0.5 text-destructive">*</span>
+            </Label>
             <div className="space-y-2">
               {upstreamArray.fields.map((field, index) => (
-                <div key={field.id} className="flex items-center gap-2">
-                  <Input
-                    placeholder="http://127.0.0.1:8080"
-                    {...register(`upstreams.${index}.url` as const)}
-                  />
-                  {upstreamArray.fields.length > 1 && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      onClick={() => upstreamArray.remove(index)}
-                    >
-                      <IconTrash className="h-4 w-4 text-destructive" />
-                    </Button>
+                <div key={field.id} className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      placeholder="http://127.0.0.1:8080"
+                      autoComplete="off"
+                      className="font-mono text-xs"
+                      {...register(`upstreams.${index}.url` as const)}
+                    />
+                    {upstreamArray.fields.length > 1 && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="shrink-0 text-muted-foreground hover:text-destructive"
+                        aria-label={t("common.delete")}
+                        onClick={() => upstreamArray.remove(index)}
+                      >
+                        <IconTrash />
+                      </Button>
+                    )}
+                  </div>
+                  {errors.upstreams?.[index]?.url && (
+                    <p className="text-xs text-destructive">
+                      {t(errors.upstreams[index]!.url!.message!)}
+                    </p>
                   )}
                 </div>
               ))}
@@ -341,17 +416,33 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
                 type="button"
                 variant="outline"
                 size="sm"
+                className="w-full border-dashed"
                 onClick={() => upstreamArray.append({ url: "" })}
               >
-                <IconPlus className="h-3.5 w-3.5 mr-1" />
+                <IconPlus className="size-3.5" />
                 {t("sites.form.addUpstream")}
               </Button>
             </div>
-            {errors.upstreams && (
+            <p className="text-[11px] text-muted-foreground">
+              {t("sites.form.upstreamUrlsHint")}
+            </p>
+            {errors.upstreams?.message && (
               <p className="text-xs text-destructive">
-                {t(errors.upstreams.message!)}
+                {t(errors.upstreams.message)}
               </p>
             )}
+          </div>
+
+          {/* 上游 Host 覆盖 */}
+          <div className="space-y-1.5">
+            <Label htmlFor="upstream_host">{t("sites.form.upstreamHost")}</Label>
+            <Input
+              id="upstream_host"
+              placeholder={t("sites.form.upstreamHostPlaceholder")}
+              autoComplete="off"
+              className="font-mono text-xs"
+              {...register("upstream_host")}
+            />
           </div>
 
           <DialogFooter>
@@ -362,10 +453,8 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
             >
               {t("common.cancel")}
             </Button>
-            <Button
-              type="submit"
-            >
-              {t("common.save")}
+            <Button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? t("common.saving") : t("common.save")}
             </Button>
           </DialogFooter>
         </form>

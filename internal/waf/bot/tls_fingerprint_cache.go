@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-const tlsFingerprintCacheSize = 256
+const tlsFingerprintCacheSize = 4096
 
 type tlsFingerprintCacheEntry struct {
 	mu     sync.RWMutex

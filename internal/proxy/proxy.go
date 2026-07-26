@@ -23,12 +23,14 @@ import (
 	http2 "github.com/hertz-contrib/http2"
 	http2config "github.com/hertz-contrib/http2/config"
 	http2factory "github.com/hertz-contrib/http2/factory"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/dynamic"
 )
 
@@ -109,9 +111,13 @@ func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Tran
 	transportMu.RUnlock()
 
 	tr := &http.Transport{
-		MaxIdleConns:          512,
-		MaxIdleConnsPerHost:   128,
-		IdleConnTimeout:       90 * time.Second,
+		// 256/32 比默认 512/128 更节省高并发后的空闲连接内存；
+		// 30s timeout 让峰值后的 idle conn 更快释放（原90s）。
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       30 * time.Second,
+		ReadBufferSize:        16 << 10,
+		WriteBufferSize:       16 << 10,
 		ExpectContinueTimeout: time.Second,
 		ForceAttemptHTTP2:     true,
 		DisableCompression:    true,
@@ -121,6 +127,10 @@ func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Tran
 			ServerName:         rt.Site.UpstreamTLSServerName,
 			InsecureSkipVerify: rt.Site.UpstreamTLSSkipVerify,
 			MinVersion:         tls.VersionTLS12,
+			// 复用 TLS 会话（session ticket/ID），命中时走简化握手，
+			// 避免每条新连接都做完整握手。每个上游 transport 独享一份缓存，
+			// 容量与 MaxIdleConnsPerHost 对齐。
+			ClientSessionCache: tls.NewLRUClientSessionCache(32),
 		}
 	}
 
@@ -193,6 +203,35 @@ func sharedNoTimeoutClient(tr *http.Transport) *http.Client {
 	}
 	noTimeoutClientPool[tr] = hc
 	clientPoolMu.Unlock()
+	return hc
+}
+
+// rtClientPool caches no-timeout http.Client instances keyed by RoundTripper
+// interface value, so streaming callers (SSE) reuse a single client per
+// upstream transport instead of allocating one per request.
+var (
+	rtClientMu   sync.RWMutex
+	rtClientPool = make(map[http.RoundTripper]*http.Client)
+)
+
+// SharedNoTimeoutClientForRoundTripper returns a cached timeout-less http.Client
+// bound to the given RoundTripper. Suitable for long-lived streaming responses.
+func SharedNoTimeoutClientForRoundTripper(rt http.RoundTripper) *http.Client {
+	rtClientMu.RLock()
+	if hc, ok := rtClientPool[rt]; ok {
+		rtClientMu.RUnlock()
+		return hc
+	}
+	rtClientMu.RUnlock()
+
+	hc := &http.Client{Transport: rt, Timeout: 0}
+	rtClientMu.Lock()
+	if existing, ok := rtClientPool[rt]; ok {
+		rtClientMu.Unlock()
+		return existing
+	}
+	rtClientPool[rt] = hc
+	rtClientMu.Unlock()
 	return hc
 }
 
@@ -568,7 +607,11 @@ func UpstreamRoundTripperForBase(rt snapshot.SiteRuntime, base string) (http.Rou
 	}
 	if strings.HasPrefix(lower, "h3://") {
 		normalizedBase := "https://" + base[5:]
-		tr := http3TransportForUpstream(rt)
+		h3Host := base[5:]
+		if i := strings.IndexByte(h3Host, '/'); i >= 0 {
+			h3Host = h3Host[:i]
+		}
+		tr := http3TransportForUpstream(rt, h3Host)
 		return tr, normalizedBase
 	}
 	return SharedTransportForUpstream(rt, base), base
@@ -607,8 +650,9 @@ func h2cTransportForUpstream() *http.Transport {
 	return tr
 }
 
-func http3TransportForUpstream(rt snapshot.SiteRuntime) *http3.Transport {
+func http3TransportForUpstream(rt snapshot.SiteRuntime, upstreamHost string) *http3.Transport {
 	key := http3TransportKey{
+		upstreamHost:  upstreamHost,
 		tlsServerName: rt.Site.UpstreamTLSServerName,
 		tlsSkipVerify: rt.Site.UpstreamTLSSkipVerify,
 	}
@@ -625,8 +669,19 @@ func http3TransportForUpstream(rt snapshot.SiteRuntime) *http3.Transport {
 			InsecureSkipVerify: rt.Site.UpstreamTLSSkipVerify,
 			MinVersion:         tls.VersionTLS13,
 			NextProtos:         []string{http3.NextProtoH3},
+			// 复用 QUIC/TLS1.3 会话，命中后可走 1-RTT 恢复握手，降低上游 QUIC 连接建立开销。
+			ClientSessionCache: tls.NewLRUClientSessionCache(32),
 		},
 		DisableCompression: true,
+		QUICConfig: &quic.Config{
+			MaxIdleTimeout:                 30 * time.Second,
+			KeepAlivePeriod:                15 * time.Second,
+			MaxIncomingStreams:             256,
+			InitialStreamReceiveWindow:     2 << 20,
+			MaxStreamReceiveWindow:         6 << 20,
+			InitialConnectionReceiveWindow: 4 << 20,
+			MaxConnectionReceiveWindow:     15 << 20,
+		},
 	}
 	http3TransportMu.Lock()
 	if existing, ok := http3TransportPool[key]; ok {
@@ -663,22 +718,71 @@ func (fn identityResponseTransformerFunc) Transform(entity identityResponseEntit
 	return fn(entity)
 }
 
-// responseEntityTransformerForSite 在站点启用动态保护（HTML/JS 混淆或图片水印）时，
-// 返回一个基于 dynamic.Processor 的响应实体变换器；否则返回 nil 以跳过变换。
+// responseEntityTransformerForSite 在站点启用动态保护（HTML/JS 混淆或图片水印）
+// 或浏览器签名挂载时，返回响应实体变换器；否则返回 nil 以跳过变换。
 func responseEntityTransformerForSite(rt snapshot.SiteRuntime) identityResponseTransformer {
-	cfg := rt.DynamicProtection
-	if !cfg.HTMLObfuscationEnabled && !cfg.JSObfuscationEnabled && !cfg.ImageWatermarkEnabled {
+	dynCfg := rt.DynamicProtection
+	browserSignEnabled := false
+	browserSignTTL := 300
+	envCheck := true
+	if rt.EffectiveProtection != nil {
+		browserSignEnabled = rt.EffectiveProtection.BrowserSignEnabled
+		if rt.EffectiveProtection.BrowserSignTTL > 0 {
+			browserSignTTL = rt.EffectiveProtection.BrowserSignTTL
+		}
+		envCheck = rt.EffectiveProtection.ShieldEnableEnvCheck
+	}
+	dynEnabled := dynCfg.HTMLObfuscationEnabled || dynCfg.JSObfuscationEnabled || dynCfg.ImageWatermarkEnabled
+	if !dynEnabled && !browserSignEnabled {
 		return nil
 	}
-	proc := dynamic.NewProcessor(cfg)
+
+	var proc *dynamic.Processor
+	if dynEnabled {
+		proc = dynamic.NewProcessor(dynCfg)
+	}
+	siteID := rt.Site.ID
+	host := rt.Site.Host
 	return identityResponseTransformerFunc(func(entity identityResponseEntity) (identityResponseEntity, error) {
-		transformed, err := proc.Process(entity.Path, entity.ContentType, entity.Body)
-		if err != nil {
-			return entity, err
+		body := entity.Body
+		if proc != nil {
+			transformed, err := proc.Process(entity.Path, entity.ContentType, body)
+			if err != nil {
+				return entity, err
+			}
+			body = transformed
 		}
-		entity.Body = transformed
+		// 在动态保护处理后注入签名脚本，确保 HTML 混淆时脚本仍位于外层 bootstrap 之后，
+		// 明文 HTML 路径则直接挂到 </body> 前。
+		if browserSignEnabled && isHTMLContentType(entity.ContentType) {
+			ticket := challenge.IssueBrowserSignTicket(siteID, firstHostToken(host), browserSignTTL, envCheck)
+			body = challenge.InjectBrowserSignIntoHTML(body, ticket)
+		}
+		entity.Body = body
 		return entity, nil
 	})
+}
+
+func isHTMLContentType(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if ct == "" {
+		return false
+	}
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	return ct == "text/html" || ct == "application/xhtml+xml"
+}
+
+func firstHostToken(raw string) string {
+	parts := strings.Split(raw, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			return p
+		}
+	}
+	return strings.TrimSpace(raw)
 }
 
 func shouldTransformIdentityResponse(c *app.RequestContext, statusCode int) bool {
@@ -1227,7 +1331,7 @@ func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
 	connTokens := responseConnectionTokens(src)
 	for k, vv := range src {
 		lk := strings.ToLower(k)
-		if isHopByHop(lk) || connTokens[lk] {
+		if _, ok := hopByHopHeaders[lk]; ok || connTokens[lk] {
 			if debugEnabled {
 				removed = append(removed, k)
 			}
@@ -1390,8 +1494,7 @@ func forwardBufferedResponseWithOptions(c *app.RequestContext, resp *HTTPRespons
 	}
 	body = applyClientResponseCompressionWithOptions(c, resp.StatusCode, body, opts)
 
-	method := strings.ToUpper(string(c.Request.Method()))
-	if method == "HEAD" {
+	if bytes.EqualFold(c.Request.Method(), []byte("HEAD")) {
 		if len(body) > 0 {
 			c.Response.Header.Set("Content-Length", strconv.Itoa(len(body)))
 		}
@@ -1755,6 +1858,25 @@ func isCacheableRequestMethod(method []byte) bool {
 const streamProbeSize = 32768
 const completeUnknownLengthCompressMaxBytes = 5 * snapshot.DefaultResponseCompressionMinBytes
 
+// streamCopyBufSize 是流式拷贝/压缩探测缓冲的标准容量。
+const streamCopyBufSize = 32 * 1024
+
+// streamCopyBufPool 复用流式转发的 32KiB 拷贝缓冲，削减每请求固定分配与 GC 压力。
+// Put 时只接受恰好 streamCopyBufSize 容量的缓冲，避免探测路径偶发扩容后污染池。
+var streamCopyBufPool = sync.Pool{New: func() any { b := make([]byte, streamCopyBufSize); return &b }}
+
+func putStreamCopyBuf(bp *[]byte) {
+	if bp == nil {
+		return
+	}
+	if cap(*bp) != streamCopyBufSize {
+		return
+	}
+	// 保持 len==cap，下次 Get 可直接按 32KiB 使用。
+	*bp = (*bp)[:streamCopyBufSize]
+	streamCopyBufPool.Put(bp)
+}
+
 // maxStreamTransformBufferBytes is the maximum body size (post-decompression) that
 // forwardHTTP will buffer into memory for identity response transformation.
 // Responses exceeding this are served untransformed via the normal streaming path.
@@ -1856,8 +1978,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		cancelUpstream()
 		return nil
 	}
-	method := strings.ToUpper(string(c.Method()))
-	if method == "HEAD" {
+	if bytes.EqualFold(c.Method(), []byte("HEAD")) {
 		resp.Body.Close()
 		cancelUpstream()
 		return nil
@@ -1930,7 +2051,23 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	}
 
 	if encoding != responseEncodingIdentity && bodySize < 0 {
-		probeBuf := make([]byte, streamProbeSize)
+		// 复用 streamCopy 的 32KiB 池，避免未知长度压缩探测每次固定分配 32KiB。
+		// 任何可能逃逸出本函数的 body 切片都必须 copy；池缓冲只在本函数内使用。
+		probeBufp := streamCopyBufPool.Get().(*[]byte)
+		probeBuf := *probeBufp
+		if cap(probeBuf) < streamProbeSize {
+			probeBuf = make([]byte, streamProbeSize)
+			*probeBufp = probeBuf
+		} else {
+			probeBuf = probeBuf[:streamProbeSize]
+		}
+		defer putStreamCopyBuf(probeBufp)
+		cloneProbe := func(n int) []byte {
+			if n <= 0 {
+				return []byte{}
+			}
+			return append([]byte(nil), probeBuf[:n]...)
+		}
 		n, readErr := bodyReader.Read(probeBuf)
 		if readErr == io.EOF {
 			if closeFn != nil {
@@ -1940,7 +2077,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 			copyResponseTrailers(c, resp)
 			if shouldCompressCompleteUnknownLengthBody(n, compOpts, rt) {
 				if len(resp.Trailer) > 0 || rt.ResponseCompressionConfigured {
-					return streamRecompressedResponse(ctx, c, bytes.NewReader(probeBuf[:n]), nil, resp, nil, encoding)
+					return streamRecompressedResponse(ctx, c, bytes.NewReader(cloneProbe(n)), nil, resp, nil, encoding)
 				}
 				encodedBody, encErr := compressResponseBody(probeBuf[:n], encoding)
 				if encErr == nil {
@@ -1952,7 +2089,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 				}
 			}
 			markResponseSizeUnknown(c)
-			c.Response.SetBodyRaw(probeBuf[:n])
+			c.Response.SetBodyRaw(cloneProbe(n))
 			return nil
 		}
 		if readErr != nil {
@@ -1982,7 +2119,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 						return nil
 					}
 				}
-				c.Response.SetBodyRaw(probeBuf[:n])
+				c.Response.SetBodyRaw(cloneProbe(n))
 				return nil
 			}
 			if err2 != nil {
@@ -2011,7 +2148,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 			copyResponseTrailers(c, resp)
 			if shouldCompressCompleteUnknownLengthBody(n, compOpts, rt) {
 				if len(resp.Trailer) > 0 || rt.ResponseCompressionConfigured {
-					return streamRecompressedResponse(ctx, c, bytes.NewReader(probeBuf[:n]), nil, resp, nil, encoding)
+					return streamRecompressedResponse(ctx, c, bytes.NewReader(cloneProbe(n)), nil, resp, nil, encoding)
 				}
 				encodedBody, encErr := compressResponseBody(probeBuf[:n], encoding)
 				if encErr == nil {
@@ -2023,11 +2160,12 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 				}
 			}
 			markResponseSizeUnknown(c)
-			c.Response.SetBodyRaw(probeBuf[:n])
+			c.Response.SetBodyRaw(cloneProbe(n))
 			return nil
 		}
 		bodyReader = probedReader
-		combined := io.MultiReader(bytes.NewReader(probeBuf[:n]), bodyReader)
+		// MultiReader 可能在 return 后异步消费，必须 copy 前缀。
+		combined := io.MultiReader(bytes.NewReader(cloneProbe(n)), bodyReader)
 		return streamRecompressedResponse(ctx, c, combined, closeFn, resp, cancelUpstream, encoding)
 	}
 
@@ -2163,7 +2301,9 @@ func streamRecompressedResponse(ctx context.Context, c *app.RequestContext, src 
 		defer copyResponseTrailers(c, resp)
 
 		compWriter, closeComp := newStreamCompressWriter(pw, encoding)
-		buf := make([]byte, 32*1024)
+		bufp := streamCopyBufPool.Get().(*[]byte)
+		defer putStreamCopyBuf(bufp)
+		buf := *bufp
 		for {
 			n, readErr := src.Read(buf)
 			if n > 0 {
@@ -2224,7 +2364,9 @@ func StreamResponseViaHijack(ctx context.Context, c *app.RequestContext, src io.
 	if cleanup != nil {
 		defer cleanup()
 	}
-	buf := make([]byte, streamProbeSize)
+	bufp := streamCopyBufPool.Get().(*[]byte)
+	defer putStreamCopyBuf(bufp)
+	buf := *bufp
 
 	// 立即发送响应头，避免在 src.Read 阻塞时客户端无法收到 headers
 	_, _ = c.Write(nil)
@@ -2658,7 +2800,7 @@ func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 		if len(rt.UpstreamURLs) > 0 {
 			base = rt.UpstreamURLs[0]
 		}
-		key := transportKeyForUpstream(base, rt)
+		key := transportKeyForUpstream(base, *rt)
 		active[key] = struct{}{}
 	}
 
@@ -2733,6 +2875,7 @@ func transportKeyForUpstream(base string, rt snapshot.SiteRuntime) transportKey 
 
 // HTTP/3 transport pool for upstream connections.
 type http3TransportKey struct {
+	upstreamHost  string
 	tlsServerName string
 	tlsSkipVerify bool
 }

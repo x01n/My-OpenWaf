@@ -105,3 +105,56 @@ func TestShouldLogConnectionDropCount(t *testing.T) {
 		}
 	}
 }
+
+func TestDropExecutor_Reconfigure(t *testing.T) {
+	executor := NewDropExecutor(false, slog.Default())
+	if executor.Enabled() {
+		t.Error("expected disabled initially")
+	}
+	executor.Reconfigure(true)
+	if !executor.Enabled() {
+		t.Error("expected enabled after Reconfigure(true)")
+	}
+	executor.Reconfigure(false)
+	if executor.Enabled() {
+		t.Error("expected disabled after Reconfigure(false)")
+	}
+}
+
+func TestDropExecutor_DefaultSourceCountsAsRule(t *testing.T) {
+	executor := NewDropExecutor(true, slog.Default())
+	conn := &mockConn{}
+	executor.Execute(conn, DropReason{Source: "unknown_source", Timestamp: time.Now()})
+	stats := executor.GetStats()
+	if stats.DroppedByRule.Load() != 1 {
+		t.Errorf("unknown source should count as rule drop, DroppedByRule = %d", stats.DroppedByRule.Load())
+	}
+}
+
+func TestDropExecutor_LastDropTimeRecorded(t *testing.T) {
+	executor := NewDropExecutor(true, slog.Default())
+	ts := time.Now().Truncate(time.Second)
+	conn := &mockConn{}
+	executor.Execute(conn, DropReason{Source: "bot", Timestamp: ts})
+	stats := executor.GetStats()
+	v := stats.LastDropTime.Load()
+	if v == nil {
+		t.Fatal("LastDropTime should not be nil after Execute")
+	}
+	got, ok := v.(time.Time)
+	if !ok {
+		t.Fatalf("LastDropTime value type unexpected: %T", v)
+	}
+	if !got.Equal(ts) {
+		t.Errorf("LastDropTime = %v, want %v", got, ts)
+	}
+}
+
+func TestNewDropExecutorNilLogger(t *testing.T) {
+	// nil logger 应使用 slog.Default()，不应 panic
+	executor := NewDropExecutor(true, nil)
+	conn := &mockConn{}
+	if err := executor.Execute(conn, DropReason{Source: "bot", Timestamp: time.Now()}); err != nil {
+		t.Errorf("Execute with nil logger returned error: %v", err)
+	}
+}

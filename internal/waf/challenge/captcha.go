@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,7 +12,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
-	"math/big"
+
 	"sync"
 	"time"
 
@@ -35,6 +36,10 @@ type CaptchaSession struct {
 	Answer    string      `json:"answer"` // JSON-encoded expected answer
 	CreatedAt time.Time   `json:"created_at"`
 	ExpiresAt time.Time   `json:"expires_at"`
+	// EnvKey 是会话绑定的环境指纹加密密钥（16 字节）。
+	// 与 shield_challenge 一致，用于解密客户端提交的 __waf_env_fp。
+	// 为空表示该会话未启用浏览器/环境检查。
+	EnvKey []byte `json:"env_key,omitempty"`
 }
 
 // CaptchaChallenge is the data sent to the client.
@@ -47,6 +52,9 @@ type CaptchaChallenge struct {
 	Width     int    `json:"width"`
 	Height    int    `json:"height"`
 	Fallback  bool   `json:"fallback"`
+	// EnvKeyHex 是会话绑定环境指纹密钥的十六进制编码，供页面注入环境采集 JS。
+	// 为空表示该验证码未启用浏览器/环境检查。
+	EnvKeyHex string `json:"-"`
 }
 
 func (ch *CaptchaChallenge) MarkFallback(requested CaptchaType) *CaptchaChallenge {
@@ -141,22 +149,29 @@ func (cm *CaptchaManager) timeoutValue() time.Duration {
 
 // Generate creates a new CAPTCHA challenge of the specified type.
 // Returns the challenge data to render to the client.
-func (cm *CaptchaManager) Generate(captchaType CaptchaType) (*CaptchaChallenge, error) {
+// Generate 生成指定类型的验证码。
+// envCheck 为 true 时会为该会话绑定一个环境指纹密钥，
+// 页面据此注入浏览器/环境采集 JS，验证时校验环境指纹。
+func (cm *CaptchaManager) Generate(captchaType CaptchaType, envCheck bool) (*CaptchaChallenge, error) {
+	var envKey []byte
+	if envCheck {
+		envKey = GenerateEnvSessionKey()
+	}
 	var (
 		challenge *CaptchaChallenge
 		err       error
 	)
 	switch captchaType {
 	case CaptchaTypeMath:
-		return cm.generateMath()
+		return cm.generateMath(envKey)
 	case CaptchaTypeClick:
-		challenge, err = cm.generateClick()
+		challenge, err = cm.generateClick(envKey)
 	case CaptchaTypeSlide:
-		challenge, err = cm.generateSlide()
+		challenge, err = cm.generateSlide(envKey)
 	case CaptchaTypeRotate:
-		challenge, err = cm.generateRotate()
+		challenge, err = cm.generateRotate(envKey)
 	default:
-		return cm.generateMath()
+		return cm.generateMath(envKey)
 	}
 	if err != nil {
 		return nil, err
@@ -165,42 +180,106 @@ func (cm *CaptchaManager) Generate(captchaType CaptchaType) (*CaptchaChallenge, 
 }
 
 // Verify checks a client's CAPTCHA answer against the stored session.
+// 会话通过原子“取出即删除”获得，保证一份正确答案只能被兑换一次。
 func (cm *CaptchaManager) Verify(sessionID, answer string) bool {
-	session, err := cm.loadSession(sessionID)
-	if err != nil || session == nil {
+	session := cm.takeSession(sessionID)
+	if session == nil {
 		return false
 	}
-	// Delete session after verification attempt (one-time use)
-	cm.deleteSession(sessionID)
 
 	if time.Now().After(session.ExpiresAt) {
 		return false
 	}
 
-	return session.Answer == answer
+	return constantTimeEqualString(session.Answer, answer)
+}
+
+// constantTimeEqualString 以常量时间比较两个字符串，避免逐字节比较泄漏答案前缀。
+func constantTimeEqualString(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// takeAndDeleteScript 原子地取出并删除一个会话键。
+// Redis 的 GET+DEL 若拆成两条命令，并发请求会同时读到同一会话，
+// 导致同一个验证码答案/PoW 解被重复兑换，因此必须用 Lua 保证原子性。
+// 使用 EVAL 而非 GETDEL 是为了兼容 Redis 6.2 之前的服务端。
+var takeAndDeleteScript = goredis.NewScript(`
+local v = redis.call('GET', KEYS[1])
+if v then
+  redis.call('DEL', KEYS[1])
+end
+return v
+`)
+
+// takeSession 原子地取出并删除一个验证码会话。
+// 返回 nil 表示会话不存在或已被其他请求兑换。
+func (cm *CaptchaManager) takeSession(sessionID string) *CaptchaSession {
+	if sessionID == "" {
+		return nil
+	}
+	if redis := cm.redisClient(); redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		key := cm.prefix + sessionID
+		raw, err := takeAndDeleteScript.Run(ctx, redis, []string{key}).Text()
+		data := []byte(raw)
+		if err == nil && len(data) > 0 {
+			var session CaptchaSession
+			if json.Unmarshal(data, &session) == nil {
+				// 会话只会存在于 Redis 或内存其中之一，仍清理内存副本以防降级期间的残留。
+				cm.mu.Lock()
+				delete(cm.sessions, sessionID)
+				cm.mu.Unlock()
+				return &session
+			}
+			return nil
+		}
+		// Redis 未命中或不可用时回退到内存存储。
+	}
+
+	cm.mu.Lock()
+	session, ok := cm.sessions[sessionID]
+	if ok {
+		delete(cm.sessions, sessionID)
+	}
+	cm.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return session
+}
+
+const (
+	// mathAnswerMin/mathAnswerMax 界定内置算式验证码的答案取值范围。
+	// 先均匀抽取答案再反推算式，可保证答案在整个区间上均匀分布；
+	// 旧实现先抽取操作数再计算答案，导致答案集中在 81 个取值上、
+	// 且分布呈三角形，猜测最高频答案的命中率约 2.5%，配合无限次重新取题
+	// 即可低成本暴力绕过。
+	mathAnswerMin = 100
+	mathAnswerMax = 999
+
+	// mathOperandMin/mathOperandMax 界定第二个操作数，保持“三位数 ± 两位数”
+	// 的心算难度，同时让第一个操作数最多为四位、可在验证码画布内完整渲染。
+	mathOperandMin = 11
+	mathOperandMax = 99
+)
+
+// randomMathProblem 生成一道算式验证码题目，返回题面与答案。
+// 答案在 [mathAnswerMin, mathAnswerMax] 上均匀分布。
+func randomMathProblem() (expr string, answer int) {
+	answer = mathAnswerMin + randIntN(mathAnswerMax-mathAnswerMin+1)
+	operand := mathOperandMin + randIntN(mathOperandMax-mathOperandMin+1)
+	if randIntN(2) == 0 {
+		// answer = a + operand
+		return fmt.Sprintf("%d + %d = ?", answer-operand, operand), answer
+	}
+	// answer = a - operand
+	return fmt.Sprintf("%d - %d = ?", answer+operand, operand), answer
 }
 
 // generateMath creates a simple math CAPTCHA (addition/subtraction).
-func (cm *CaptchaManager) generateMath() (*CaptchaChallenge, error) {
-	a, _ := rand.Int(rand.Reader, big.NewInt(50))
-	b, _ := rand.Int(rand.Reader, big.NewInt(30))
-	opRand, _ := rand.Int(rand.Reader, big.NewInt(2))
-
-	aVal := int(a.Int64()) + 1
-	bVal := int(b.Int64()) + 1
-	var answer int
-	var expr string
-
-	if opRand.Int64() == 0 {
-		answer = aVal + bVal
-		expr = fmt.Sprintf("%d + %d = ?", aVal, bVal)
-	} else {
-		if aVal < bVal {
-			aVal, bVal = bVal, aVal
-		}
-		answer = aVal - bVal
-		expr = fmt.Sprintf("%d - %d = ?", aVal, bVal)
-	}
+func (cm *CaptchaManager) generateMath(envKey []byte) (*CaptchaChallenge, error) {
+	expr, answer := randomMathProblem()
 
 	sessionID := generateSessionID()
 	session := &CaptchaSession{
@@ -209,6 +288,7 @@ func (cm *CaptchaManager) generateMath() (*CaptchaChallenge, error) {
 		Answer:    fmt.Sprintf("%d", answer),
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(cm.timeoutValue()),
+		EnvKey:    envKey,
 	}
 
 	if err := cm.storeSession(session); err != nil {
@@ -225,6 +305,7 @@ func (cm *CaptchaManager) generateMath() (*CaptchaChallenge, error) {
 		Prompt:    "请计算图中的算式",
 		Width:     200,
 		Height:    80,
+		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
 
@@ -237,14 +318,17 @@ func (cm *CaptchaManager) renderMathImage(expr string) string {
 	bgColor := color.RGBA{240, 243, 248, 255}
 	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
 
-	// Add noise dots
-	for i := 0; i < 100; i++ {
-		x, _ := rand.Int(rand.Reader, big.NewInt(int64(width)))
-		y, _ := rand.Int(rand.Reader, big.NewInt(int64(height)))
-		r, _ := rand.Int(rand.Reader, big.NewInt(200))
-		g, _ := rand.Int(rand.Reader, big.NewInt(200))
-		b, _ := rand.Int(rand.Reader, big.NewInt(200))
-		img.Set(int(x.Int64()), int(y.Int64()), color.RGBA{uint8(r.Int64()), uint8(g.Int64()), uint8(b.Int64()), 255})
+	// Add noise dots.
+	// 一次性读取随机字节再切分，避免每个噪点做 5 次 crypto/rand 系统调用——
+	// 验证码是可被匿名请求无限触发的路径，逐点取随机数会成为 CPU 消耗点。
+	const noiseDots = 100
+	noise := make([]byte, noiseDots*5)
+	_, _ = rand.Read(noise)
+	for i := 0; i < noiseDots; i++ {
+		o := i * 5
+		x := int(noise[o]) * width / 256
+		y := int(noise[o+1]) * height / 256
+		img.Set(x, y, color.RGBA{noise[o+2] % 200, noise[o+3] % 200, noise[o+4] % 200, 255})
 	}
 
 	// Draw simple text using pixel font (no external font dependency)
@@ -356,6 +440,9 @@ func (cm *CaptchaManager) cleanupLoop() {
 				if now.After(s.ExpiresAt) {
 					delete(cm.sessions, id)
 				}
+			}
+			if len(cm.sessions) == 0 {
+				cm.sessions = make(map[string]*CaptchaSession)
 			}
 			cm.mu.Unlock()
 		case <-cm.done:

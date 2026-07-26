@@ -216,12 +216,7 @@ func (w *UnifiedWriter) loop() {
 }
 
 func unifiedWriterShouldFlush(events, accessLogs, dropEvents, botScores int) bool {
-	total := events + accessLogs + dropEvents + botScores
-	return total >= unifiedWriterBatchSize ||
-		events >= unifiedWriterBatchSize ||
-		accessLogs >= unifiedWriterBatchSize ||
-		dropEvents >= unifiedWriterBatchSize ||
-		botScores >= unifiedWriterBatchSize
+	return events+accessLogs+dropEvents+botScores >= unifiedWriterBatchSize
 }
 
 func (w *UnifiedWriter) flushBuffered(

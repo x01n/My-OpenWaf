@@ -2,10 +2,12 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -125,12 +127,10 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("ccProtection.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("ccProtection.description")}</p>
-        </div>
-      </div>
+      <PageHeader
+        title={t("ccProtection.title")}
+        description={t("ccProtection.description")}
+      />
 
       <Tabs defaultValue="rate-limit">
         <TabsList>
@@ -376,22 +376,37 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
 
 export default function CCProtectionPage() {
   const { t } = useTranslation();
-  const { data: settings, isLoading } = useProtectionSettings();
+  const { data: settings, isLoading, error } = useProtectionSettings();
   // 用于“取消”时重挂载表单以还原为服务端初值
   const [formKey, setFormKey] = useState(0);
 
-  if (isLoading || !settings) {
+  if (isLoading) {
     return (
       <div className="space-y-6">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">{t("ccProtection.title")}</h1>
-            <p className="text-sm text-muted-foreground mt-1">{t("ccProtection.description")}</p>
-          </div>
-        </div>
+        <PageHeader
+          title={t("ccProtection.title")}
+          description={t("ccProtection.description")}
+        />
         <Skeleton className="h-32 w-full" />
         <Skeleton className="h-64 w-full" />
         <Skeleton className="h-48 w-full" />
+      </div>
+    );
+  }
+
+  if (error || !settings) {
+    return (
+      <div className="space-y-6">
+        <PageHeader
+          title={t("ccProtection.title")}
+          description={t("ccProtection.description")}
+        />
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error?.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
       </div>
     );
   }

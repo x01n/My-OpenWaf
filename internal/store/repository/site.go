@@ -22,6 +22,14 @@ func (r *SiteRepo) List(offset, limit int) ([]store.Site, int64, error) {
 	return items, total, nil
 }
 
+// ListAll 返回全部站点（含已禁用），不分页。
+// 调用方若用 List(0, 0) 表达“取全部”会命中 GORM 的 LIMIT 0 而拿到空集，
+// 因此需要全量站点的场景应改用本方法。
+func (r *SiteRepo) ListAll() ([]store.Site, error) {
+	var items []store.Site
+	return items, r.db.Order("id ASC").Find(&items).Error
+}
+
 func (r *SiteRepo) FindEnabled() ([]store.Site, error) {
 	var items []store.Site
 	return items, r.db.Where("enabled = ?", true).Order("id ASC").Find(&items).Error
@@ -37,7 +45,13 @@ func (r *SiteRepo) Get(id uint) (*store.Site, error) {
 	return &item, r.db.First(&item, id).Error
 }
 
-func (r *SiteRepo) Create(item *store.Site) error { return r.db.Create(item).Error }
+// Create 新建站点。
+//
+// 走 CreateWithZeroDefaults：Site 的 Enabled/MaxBodyBytes/BlockStatus 等字段带
+// gorm default，直接 db.Create 会把「用户显式设为停用/清零」当成未设置而套用默认值。
+func (r *SiteRepo) Create(item *store.Site) error {
+	return store.CreateWithZeroDefaults(r.db, item)
+}
 
 func (r *SiteRepo) Update(item *store.Site) error { return r.db.Save(item).Error }
 

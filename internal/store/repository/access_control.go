@@ -37,8 +37,20 @@ func (r *AccessControlRepo) ListAccessProviders(siteID uint) ([]store.AccessProv
 }
 
 // CreateAccessProvider 创建认证提供方。
+// Enabled 字段带 gorm default:true，插入 false 会被 GORM 当作零值改用默认值，
+// 因此显式禁用时需要在插入后回写该列。
 func (r *AccessControlRepo) CreateAccessProvider(provider *store.AccessProvider) error {
-	return r.db.Create(provider).Error
+	enabled := provider.Enabled
+	if err := r.db.Create(provider).Error; err != nil {
+		return err
+	}
+	if !enabled {
+		if err := r.db.Model(provider).UpdateColumn("enabled", false).Error; err != nil {
+			return err
+		}
+		provider.Enabled = false
+	}
+	return nil
 }
 
 // UpdateAccessProvider 更新认证提供方。
@@ -76,8 +88,20 @@ func (r *AccessControlRepo) GetAccessProvider(id uint) (*store.AccessProvider, e
 }
 
 // CreateAccessUser 创建本地用户。
+// Enabled 字段带 gorm default:true，插入 false 会被 GORM 当作零值改用默认值，
+// 因此显式禁用时需要在插入后回写该列。
 func (r *AccessControlRepo) CreateAccessUser(user *store.AccessUser) error {
-	return r.db.Create(user).Error
+	enabled := user.Enabled
+	if err := r.db.Create(user).Error; err != nil {
+		return err
+	}
+	if !enabled {
+		if err := r.db.Model(user).UpdateColumn("enabled", false).Error; err != nil {
+			return err
+		}
+		user.Enabled = false
+	}
+	return nil
 }
 
 // UpdateAccessUser 更新本地用户。
@@ -97,8 +121,20 @@ func (r *AccessControlRepo) ListAccessPathRules(siteID uint) ([]store.AccessPath
 }
 
 // CreateAccessPathRule 创建路径访问控制规则。
+// Enabled 字段带 gorm default:true，插入 false 会被 GORM 当作零值改用默认值，
+// 因此显式禁用时需要在插入后回写该列。
 func (r *AccessControlRepo) CreateAccessPathRule(rule *store.AccessPathRule) error {
-	return r.db.Create(rule).Error
+	enabled := rule.Enabled
+	if err := r.db.Create(rule).Error; err != nil {
+		return err
+	}
+	if !enabled {
+		if err := r.db.Model(rule).UpdateColumn("enabled", false).Error; err != nil {
+			return err
+		}
+		rule.Enabled = false
+	}
+	return nil
 }
 
 // UpdateAccessPathRule 更新路径访问控制规则。

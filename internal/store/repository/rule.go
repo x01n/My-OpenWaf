@@ -77,7 +77,14 @@ func (r *RuleRepo) Get(id uint) (*store.Rule, error) {
 	return &item, r.db.First(&item, id).Error
 }
 
-func (r *RuleRepo) Create(item *store.Rule) error { return r.db.Create(item).Error }
+// Create 新建规则。
+//
+// Enabled 带 default:true、Priority 带 default:100。后者尤其关键：规则按
+// priority ASC, ID ASC 排序执行，priority=0 被改成 100 会让本该抢先生效的
+// 规则排到所有默认优先级规则之后。
+func (r *RuleRepo) Create(item *store.Rule) error {
+	return store.CreateWithZeroDefaults(r.db, item)
+}
 
 func (r *RuleRepo) Update(item *store.Rule) error { return r.db.Save(item).Error }
 

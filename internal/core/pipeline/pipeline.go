@@ -49,6 +49,18 @@ type RequestCtx struct {
 	// phaseObserveHits stores observe-only hits emitted inside a phase before that
 	// phase later returns a stronger terminal action.
 	phaseObserveHits []action.Result
+
+	// observeHitsBuf is a reusable buffer for collecting observe hits during
+	// pipeline.Run, avoiding per-request slice allocation.
+	observeHitsBuf []action.Result
+
+	// Derived header string cache: computed once per request, reused across phases.
+	derivedALPN         string
+	derivedALPNDone     bool
+	derivedHeaderOrder  string
+	derivedHeaderDone   bool
+	derivedCipherSuites string
+	derivedCipherDone   bool
 }
 
 // CachedMatcherHeaders returns the per-request matcher header cache when ready.
@@ -128,6 +140,33 @@ func (ctx *RequestCtx) DrainPhaseObserveHits() []action.Result {
 	return hits
 }
 
+// DerivedALPN returns the cached ALPN join string, computing it on first call.
+func (ctx *RequestCtx) DerivedALPN(compute func() string) string {
+	if !ctx.derivedALPNDone {
+		ctx.derivedALPN = compute()
+		ctx.derivedALPNDone = true
+	}
+	return ctx.derivedALPN
+}
+
+// DerivedHeaderOrder returns the cached header order join string, computing it on first call.
+func (ctx *RequestCtx) DerivedHeaderOrder(compute func() string) string {
+	if !ctx.derivedHeaderDone {
+		ctx.derivedHeaderOrder = compute()
+		ctx.derivedHeaderDone = true
+	}
+	return ctx.derivedHeaderOrder
+}
+
+// DerivedCipherSuites returns the cached cipher suites format string, computing it on first call.
+func (ctx *RequestCtx) DerivedCipherSuites(compute func() string) string {
+	if !ctx.derivedCipherDone {
+		ctx.derivedCipherSuites = compute()
+		ctx.derivedCipherDone = true
+	}
+	return ctx.derivedCipherSuites
+}
+
 // BotScoreInfo stores bot detection scoring details for logging purposes.
 type BotScoreInfo struct {
 	TotalScore       int
@@ -137,7 +176,7 @@ type BotScoreInfo struct {
 	IPRepScore       int
 	IsHighRisk       bool
 	Action           string
-	Details          string
+	Details          map[string]string
 }
 
 // Phase is one stage in the WAF processing pipeline.
@@ -169,7 +208,7 @@ func New(phases ...Phase) *Pipeline {
 // (OWASP, CVE, etc.) still run. If a higher-priority terminal action appears later,
 // it overrides the challenge. Otherwise the challenge is returned at the end.
 func Run(phases []Phase, ctx *RequestCtx) RunResult {
-	var observeHits []action.Result
+	observeHits := ctx.observeHitsBuf[:0]
 	var pendingChallenge *action.Result
 
 	for _, ph := range phases {

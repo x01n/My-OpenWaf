@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -247,14 +248,14 @@ func (p *GoCaptchaProvider) GenerateRotate() (masterB64, thumbB64 string, data *
 // ── CaptchaManager 集成方法 ──
 
 // generateClick 使用 go-captcha 生成点击验证码。
-func (cm *CaptchaManager) generateClick() (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateClick(envKey []byte) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath()
+		return cm.generateMath(envKey)
 	}
 
 	masterB64, thumbB64, data, err := cm.goCaptcha.GenerateClick()
 	if err != nil {
-		return cm.generateMath()
+		return cm.generateMath(envKey)
 	}
 
 	// 序列化答案坐标
@@ -266,6 +267,7 @@ func (cm *CaptchaManager) generateClick() (*CaptchaChallenge, error) {
 		Answer:    string(answerJSON),
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(cm.timeoutValue()),
+		EnvKey:    envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -279,18 +281,19 @@ func (cm *CaptchaManager) generateClick() (*CaptchaChallenge, error) {
 		Prompt:    "请按顺序点击图中对应的文字",
 		Width:     300,
 		Height:    240,
+		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
 
 // generateSlide 使用 go-captcha 生成滑动验证码。
-func (cm *CaptchaManager) generateSlide() (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateSlide(envKey []byte) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath()
+		return cm.generateMath(envKey)
 	}
 
 	masterB64, tileB64, data, err := cm.goCaptcha.GenerateSlide()
 	if err != nil {
-		return cm.generateMath()
+		return cm.generateMath(envKey)
 	}
 
 	answerJSON, _ := json.Marshal(data)
@@ -301,6 +304,7 @@ func (cm *CaptchaManager) generateSlide() (*CaptchaChallenge, error) {
 		Answer:    string(answerJSON),
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(cm.timeoutValue()),
+		EnvKey:    envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -314,18 +318,19 @@ func (cm *CaptchaManager) generateSlide() (*CaptchaChallenge, error) {
 		Prompt:    "请将滑块拖动到正确位置",
 		Width:     300,
 		Height:    180,
+		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
 
 // generateRotate 使用 go-captcha 生成旋转验证码。
-func (cm *CaptchaManager) generateRotate() (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateRotate(envKey []byte) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath()
+		return cm.generateMath(envKey)
 	}
 
 	masterB64, thumbB64, data, err := cm.goCaptcha.GenerateRotate()
 	if err != nil {
-		return cm.generateMath()
+		return cm.generateMath(envKey)
 	}
 
 	answerJSON, _ := json.Marshal(data)
@@ -336,6 +341,7 @@ func (cm *CaptchaManager) generateRotate() (*CaptchaChallenge, error) {
 		Answer:    string(answerJSON),
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(cm.timeoutValue()),
+		EnvKey:    envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -349,34 +355,43 @@ func (cm *CaptchaManager) generateRotate() (*CaptchaChallenge, error) {
 		Prompt:    "请旋转图片至正确方向",
 		Width:     200,
 		Height:    200,
+		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
 
 // VerifyAdvanced 验证高级验证码答案（点击/滑动/旋转），支持容差。
 func (cm *CaptchaManager) VerifyAdvanced(sessionID, answer string) bool {
-	session, err := cm.loadSession(sessionID)
-	if err != nil || session == nil {
-		return false
+	ok, _ := cm.VerifyAdvancedSession(sessionID, answer)
+	return ok
+}
+
+// VerifyAdvancedSession 与 VerifyAdvanced 等价，但额外返回被校验的会话，
+// 供调用方读取会话绑定的环境指纹密钥（EnvKey）执行浏览器/环境检查。
+// 会话为一次性使用，无论校验成败都会在加载后立即删除。
+// 返回的 *CaptchaSession 在会话不存在时为 nil。
+func (cm *CaptchaManager) VerifyAdvancedSession(sessionID, answer string) (bool, *CaptchaSession) {
+	session := cm.takeSession(sessionID)
+	if session == nil {
+		return false, nil
 	}
-	cm.deleteSession(sessionID)
 
 	if time.Now().After(session.ExpiresAt) {
-		return false
+		return false, session
 	}
 
 	tolerance := cm.getGoCaptchaTolerance(session.Type)
 
 	switch session.Type {
 	case CaptchaTypeClick:
-		return verifyClickAnswer(session.Answer, answer, tolerance)
+		return verifyClickAnswer(session.Answer, answer, tolerance), session
 	case CaptchaTypeSlide:
-		return verifySlideAnswer(session.Answer, answer, tolerance)
+		return verifySlideAnswer(session.Answer, answer, tolerance), session
 	case CaptchaTypeRotate:
-		return verifyRotateAnswer(session.Answer, answer, tolerance)
+		return verifyRotateAnswer(session.Answer, answer, tolerance), session
 	case CaptchaTypeMath:
-		return session.Answer == answer
+		return constantTimeEqualString(session.Answer, answer), session
 	default:
-		return session.Answer == answer
+		return constantTimeEqualString(session.Answer, answer), session
 	}
 }
 
@@ -404,9 +419,13 @@ type ClickPoint struct {
 	Y int `json:"y"`
 }
 
+// verifyClickAnswer 校验点击验证码。go-captcha 生成的答案是 map[int]*click.Dot，
+// 序列化为 JSON 后 key 为字符的顺序索引（"0","1",...）。点击验证码要求“按顺序”
+// 点击文字，因此必须按 index 升序还原答案序列后再与用户点击序列逐一比对，
+// 不能直接遍历 map（Go map 迭代顺序随机会导致校验错乱）。判定采用字符包围盒
+// [X-tol, X+Width+tol] × [Y-tol, Y+Height+tol]，坐标以 go-captcha 缩略图为准。
 func verifyClickAnswer(storedAnswer, userAnswer string, tolerance int) bool {
-	// 尝试解析 go-captcha 格式的点数据
-	var storedDots map[string]interface{}
+	var storedDots map[string]map[string]interface{}
 	if err := json.Unmarshal([]byte(storedAnswer), &storedDots); err != nil {
 		return false
 	}
@@ -416,30 +435,35 @@ func verifyClickAnswer(storedAnswer, userAnswer string, tolerance int) bool {
 		return false
 	}
 
-	// 简化验证：检查用户点击数是否匹配
-	if len(userPoints) != len(storedDots) {
+	if len(userPoints) == 0 || len(userPoints) != len(storedDots) {
 		return false
 	}
 
-	// 对 go-captcha 生成的点数据进行坐标验证
-	i := 0
-	for _, dotRaw := range storedDots {
-		if i >= len(userPoints) {
+	// 按 dot 的 index 字段升序还原点击顺序。
+	type dotBox struct {
+		index      int
+		x, y, w, h int
+	}
+	dots := make([]dotBox, 0, len(storedDots))
+	for _, dotMap := range storedDots {
+		dots = append(dots, dotBox{
+			index: int(getFloat(dotMap, "index")),
+			x:     int(getFloat(dotMap, "x")),
+			y:     int(getFloat(dotMap, "y")),
+			w:     int(getFloat(dotMap, "width")),
+			h:     int(getFloat(dotMap, "height")),
+		})
+	}
+	sort.Slice(dots, func(i, j int) bool { return dots[i].index < dots[j].index })
+
+	for i, d := range dots {
+		px, py := userPoints[i].X, userPoints[i].Y
+		if px < d.x-tolerance || px > d.x+d.w+tolerance {
 			return false
 		}
-		dotMap, ok := dotRaw.(map[string]interface{})
-		if !ok {
-			i++
-			continue
-		}
-		expectedX := int(getFloat(dotMap, "x"))
-		expectedY := int(getFloat(dotMap, "y"))
-		dx := abs(userPoints[i].X - expectedX)
-		dy := abs(userPoints[i].Y - expectedY)
-		if dx > tolerance || dy > tolerance {
+		if py < d.y-tolerance || py > d.y+d.h+tolerance {
 			return false
 		}
-		i++
 	}
 	return true
 }

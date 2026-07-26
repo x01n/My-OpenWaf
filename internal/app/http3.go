@@ -748,7 +748,22 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		Handler:   handler,
 		TLSConfig: tlsCfg,
 		QUICConfig: &quic.Config{
+			// Allow0RTT 沿用站点会话票据开关，不强制开启：0-RTT 数据存在重放风险，
+			// 是否接受由上层配置决定，此处仅透传。
 			Allow0RTT: cfg.Allow0RTT,
+			// 显式设为 30s（与 quic-go 默认一致），无活动连接超时回收，避免空闲 QUIC 连接长期占用。
+			MaxIdleTimeout: 30 * time.Second,
+			// 周期性保活包（取 MaxIdleTimeout 一半），维持长连接不被 NAT/对端超时断开，
+			// 从而复用已建立的 QUIC 连接、减少重复握手。
+			KeepAlivePeriod: 15 * time.Second,
+			// 单连接并发双向流上限，默认 100，反代高并发下适度上调到 256 以提升多路复用能力。
+			MaxIncomingStreams: 256,
+			// 流接收窗口：初始 2MB，最大 6MB（quic-go 默认 512KB/6MB），
+			// 反代场景大响应体受益于更大初始窗口避免流控暂停。
+			InitialStreamReceiveWindow:     2 << 20,
+			MaxStreamReceiveWindow:         6 << 20,
+			InitialConnectionReceiveWindow: 4 << 20,
+			MaxConnectionReceiveWindow:     15 << 20,
 		},
 		ConnContext: func(ctx context.Context, conn *quic.Conn) context.Context {
 			if conn == nil {
@@ -1492,7 +1507,7 @@ func uniqueHTTP3SiteRuntimes(sn *snapshotpkg.Snapshot) []snapshotpkg.SiteRuntime
 			continue
 		}
 		seen[key] = struct{}{}
-		items = append(items, rt)
+		items = append(items, *rt)
 	}
 	return items
 }

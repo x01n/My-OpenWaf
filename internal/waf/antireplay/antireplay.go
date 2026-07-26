@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"fmt"
 	"sync"
 	"time"
 
@@ -137,8 +136,8 @@ func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string, ses
 	if redis := m.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 		defer cancel()
-		spentKey := fmt.Sprintf("waf:nonce:spent:%s", nonce)
-		idemKey := fmt.Sprintf("waf:nonce:idem:%s", nonce)
+		spentKey := "waf:nonce:spent:" + nonce
+		idemKey := "waf:nonce:idem:" + nonce
 		res, err := redis.Eval(ctx, redisNonceLua, []string{spentKey, idemKey}, spentTTL, antiReplayIdemSeconds, newNonce).Result()
 		if err == nil {
 			switch arr := res.(type) {

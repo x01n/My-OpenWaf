@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import {
   useThreatIntelFeeds,
   useThreatIntelMutation,
@@ -14,6 +15,7 @@ import { DataTable } from "@/components/data-table";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -102,15 +104,11 @@ export default function ThreatIntelPage() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
-          <IconWorldBolt className="h-6 w-6" />
-          {t("threatIntel.title")}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {t("threatIntel.description")}
-        </p>
-      </div>
+      <PageHeader
+        icon={<IconWorldBolt className="h-6 w-6" />}
+        title={t("threatIntel.title")}
+        description={t("threatIntel.description")}
+      />
 
       <Tabs defaultValue="feeds" className="space-y-4">
         <TabsList>
@@ -142,7 +140,7 @@ export default function ThreatIntelPage() {
 function FeedsTab() {
   const { t } = useTranslation();
 
-  const { data, isLoading, mutate: refresh } = useThreatIntelFeeds();
+  const { data, isLoading, error, mutate: refresh } = useThreatIntelFeeds();
   const feeds = useMemo(() => data?.items || [], [data]);
 
   // 站点列表用于作用域下拉与站点名映射（显示名用 host）
@@ -331,7 +329,7 @@ function FeedsTab() {
       title: t("threatIntel.entryCount"),
       width: "90px",
       render: (row: ThreatIntelFeed) => (
-        <span className="font-mono text-sm">{row.entry_count}</span>
+        <span className="font-mono text-sm">{row.entry_count?.toLocaleString() ?? "-"}</span>
       ),
     },
     {
@@ -422,6 +420,12 @@ function FeedsTab() {
 
   return (
     <div className="space-y-4">
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+        </Alert>
+      )}
       <div className="flex justify-end">
         <Button onClick={openCreate}>
           <IconPlus className="h-4 w-4" />
@@ -641,7 +645,7 @@ function SyncHistoryTab() {
     [page, feedFilter, statusFilter],
   );
 
-  const { data, isLoading } = useThreatIntelSyncLogs(queryParams);
+  const { data, isLoading, error } = useThreatIntelSyncLogs(queryParams);
   const items = data?.items || [];
   const total = data?.total || 0;
   const totalPages = Math.ceil(total / pageSize) || 1;
@@ -719,7 +723,7 @@ function SyncHistoryTab() {
       width: "90px",
       render: (row: ThreatIntelSyncLog) => (
         <span className="font-mono text-sm">
-          {row.success ? row.entries_added : "-"}
+          {row.success ? (row.entries_added?.toLocaleString() ?? "0") : "-"}
         </span>
       ),
     },
@@ -748,6 +752,12 @@ function SyncHistoryTab() {
 
   return (
     <div className="space-y-4">
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+        </Alert>
+      )}
       <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="space-y-1.5">
           <Label className="text-xs">

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -17,6 +18,7 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   IconWorld,
   IconNetwork,
@@ -31,9 +33,9 @@ import { useNetworkConfigUpdate, useTLSConfigUpdate, useLogConfigUpdate, useRedi
 
 export default function SettingsPage() {
   const { t } = useTranslation();
-  const { data: networkConfig, isLoading: networkLoading } = useNetworkConfig();
-  const { data: tlsConfig, isLoading: tlsLoading } = useTLSConfig();
-  const { data: logConfig, isLoading: logLoading } = useLogConfig();
+  const { data: networkConfig, isLoading: networkLoading, error: networkError } = useNetworkConfig();
+  const { data: tlsConfig, isLoading: tlsLoading, error: tlsError } = useTLSConfig();
+  const { data: logConfig, isLoading: logLoading, error: logError } = useLogConfig();
 
   const networkUpdate = useNetworkConfigUpdate();
   const tlsUpdate = useTLSConfigUpdate();
@@ -113,6 +115,7 @@ export default function SettingsPage() {
   const tlsVersions = ["TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3", "SSLv2", "SSLv3"];
 
   const isLoading = networkLoading || tlsLoading || logLoading;
+  const hasError = networkError || tlsError || logError;
 
   if (isLoading) {
     return (
@@ -128,14 +131,24 @@ export default function SettingsPage() {
     );
   }
 
+  if (hasError) {
+    return (
+      <div className="space-y-6">
+        <PageHeader title={t("settings.title")} description={t("settings.description")} />
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>{(hasError as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("settings.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("settings.description")}</p>
-        </div>
-      </div>
+      <PageHeader
+        title={t("settings.title")}
+        description={t("settings.description")}
+      />
 
       {/* Source IP */}
       <Card>
@@ -401,7 +414,7 @@ export default function SettingsPage() {
 
 function RedisConfigCard() {
   const { t } = useTranslation();
-  const { data: redisConfig, isLoading } = useRedisConfig();
+  const { data: redisConfig, isLoading, error } = useRedisConfig();
   const redisUpdate = useRedisConfigUpdate();
 
   const [addr, setAddr] = useState("");
@@ -431,6 +444,15 @@ function RedisConfigCard() {
 
   if (isLoading) {
     return <Skeleton className="h-48 w-full" />;
+  }
+
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+        <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+      </Alert>
+    );
   }
 
   return (

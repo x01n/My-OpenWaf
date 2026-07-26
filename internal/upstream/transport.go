@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"My-OpenWaf/internal/snapshot"
@@ -55,11 +56,60 @@ func cipherSuiteSupportsTLS10ToTLS12(versions []uint16) bool {
 	return false
 }
 
+// dialTLSConfigKey 隔离不同上游的会话缓存。
+//
+// skipVerify 必须参与键：否则跳过校验的连接所建立的会话，可能被要求校验证书的
+// 连接复用，等于绕过证书校验。
+//
+// 键里不含实际拨号的 host 是有意为之：crypto/tls 的 clientSessionCacheKey 在
+// ServerName 非空时用 ServerName 作会话键，为空时回退到远端地址，因此同一份
+// ClientSessionCache 内部已按上游身份隔离，不会跨主机误用会话。
+type dialTLSConfigKey struct {
+	serverName string
+	skipVerify bool
+}
+
+var (
+	dialTLSConfigMu    sync.RWMutex
+	dialTLSConfigCache = make(map[dialTLSConfigKey]*tls.Config)
+)
+
+// sharedDialTLSConfig 返回可跨连接复用的客户端 TLS 配置。
+//
+// 复用的目的是让 ClientSessionCache 真正生效：每次新建 tls.Config 会同时新建一个
+// 空会话缓存，导致每条连接都做完整握手（含非对称密钥交换）。配置本身在放入缓存后
+// 不再修改，crypto/tls 也不会修改传入的 Config，因此并发读取是安全的。
+//
+// 注意：HTTPSClientTLSConfig 仍然每次返回独立实例，因为它的调用方会就地修改
+// NextProtos 等字段；此处不能改用共享实例。
+func sharedDialTLSConfig(serverName string, skipVerify bool) *tls.Config {
+	key := dialTLSConfigKey{serverName: serverName, skipVerify: skipVerify}
+
+	dialTLSConfigMu.RLock()
+	if cfg, ok := dialTLSConfigCache[key]; ok {
+		dialTLSConfigMu.RUnlock()
+		return cfg
+	}
+	dialTLSConfigMu.RUnlock()
+
+	cfg := HTTPSClientTLSConfig(serverName, skipVerify)
+	// 容量与 proxy 侧上游 transport 的 MaxIdleConnsPerHost 保持一致。
+	cfg.ClientSessionCache = tls.NewLRUClientSessionCache(32)
+
+	dialTLSConfigMu.Lock()
+	defer dialTLSConfigMu.Unlock()
+	if existing, ok := dialTLSConfigCache[key]; ok {
+		return existing
+	}
+	dialTLSConfigCache[key] = cfg
+	return cfg
+}
+
 func TLSDialWithDialer(dialer *net.Dialer, host string, serverName string, skipVerify bool) (net.Conn, error) {
 	if dialer == nil {
 		dialer = &net.Dialer{}
 	}
-	return tls.DialWithDialer(dialer, "tcp", host, HTTPSClientTLSConfig(serverName, skipVerify))
+	return tls.DialWithDialer(dialer, "tcp", host, sharedDialTLSConfig(serverName, skipVerify))
 }
 
 // HTTPTransport returns a pooled transport suitable for reverse-proxying to the site's first upstream scheme.

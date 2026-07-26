@@ -5,9 +5,11 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -58,24 +60,73 @@ func GeneratePoWNonce() string {
 	return hex.EncodeToString(b)
 }
 
+const (
+	// sha256HexLen 是 SHA-256 十六进制摘要的固定长度。
+	sha256HexLen = 64
+
+	// minPoWDifficulty 是允许的最小 PoW 难度（前导零个数）。
+	// 难度 0 等价于“零工作量”，必须拒绝。
+	minPoWDifficulty = 1
+
+	// maxPoWDifficulty 是允许的最大 PoW 难度。
+	// 每增加 1 位前导零，期望哈希次数 ×16；难度 7 的期望工作量约 2.7e8 次
+	// SHA-256，在多 Worker WASM 求解器上已是数秒级，再高会导致真实用户超时。
+	// 生成与校验两侧都必须钳制到同一上限，否则会出现“永远无法通过”的挑战。
+	maxPoWDifficulty = 7
+)
+
+// ClampPoWDifficulty 将配置的 PoW 难度钳制到 [minPoWDifficulty, maxPoWDifficulty]。
+// 生成挑战与校验解答必须使用同一钳制结果，避免二者难度不一致导致挑战永不通过。
+func ClampPoWDifficulty(difficulty int) int {
+	if difficulty < minPoWDifficulty {
+		return minPoWDifficulty
+	}
+	if difficulty > maxPoWDifficulty {
+		return maxPoWDifficulty
+	}
+	return difficulty
+}
+
+// isLowerHexSHA256 判断字符串是否为 64 位小写十六进制摘要。
+// 客户端提交的 hash 必须与 hex.EncodeToString 的输出编码完全一致，
+// 否则大小写变体会绕过前导零前缀检查。
+func isLowerHexSHA256(s string) bool {
+	if len(s) != sha256HexLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // VerifyPoW verifies a proof-of-work solution.
 // It checks that SHA-256(nonce + counter) has the required leading zeros.
+//
+// 校验顺序：先拒绝非法难度与畸形摘要，再检查前导零，最后重算摘要做常量时间比较。
+// difficulty 超出 [minPoWDifficulty, maxPoWDifficulty] 一律拒绝——难度 0 会接受
+// 零工作量解答，负难度会让 strings.Repeat panic。
 func VerifyPoW(nonce string, counter int64, hash string, difficulty int) bool {
-	if len(hash) < difficulty {
+	if difficulty < minPoWDifficulty || difficulty > maxPoWDifficulty {
 		return false
 	}
-	prefix := ""
+	if counter < 0 {
+		return false
+	}
+	if !isLowerHexSHA256(hash) {
+		return false
+	}
 	for i := 0; i < difficulty; i++ {
-		prefix += "0"
+		if hash[i] != '0' {
+			return false
+		}
 	}
-	if hash[:difficulty] != prefix {
-		return false
-	}
-	// Re-compute to verify (prevent hash spoofing)
-	msg := fmt.Sprintf("%s%d", nonce, counter)
+	msg := nonce + strconv.FormatInt(counter, 10)
 	computed := sha256Hex(msg)
-	return computed == hash
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(hash)) == 1
 }
 
 func sha256Hex(s string) string {
@@ -216,4 +267,66 @@ func reverseString(s string) string {
 func randIntN(max int) int {
 	n, _ := rand.Int(rand.Reader, big.NewInt(int64(max)))
 	return int(n.Int64())
+}
+
+// ChallengeProofDifficulty 是 JS 挑战页 PoW 的前导零位数。
+// 挑战页脚本与本包校验必须使用同一取值，否则合法解答会被判失败。
+const ChallengeProofDifficulty = 4
+
+// powResultSalt 与 wasm-pow-solver/src/integrity.rs 的 COMPILE_SALT 一致。
+//
+// 该盐嵌在下发给客户端的 WASM 内，攻击者可从中提取，因此 sig 只能证明
+// env_score/markers 未被 WASM 之外的脚本改写（防篡改），不能证明它们出自
+// 未被修改的 WASM（防伪造）。据此，env_score 只用作附加信号，
+// 真正的准入判定仍由服务端侧的 PoW 与 token 校验承担。
+var powResultSalt = []byte("owaf_pow_v2_2026")
+
+/**
+ * VerifyPoWResultSig 校验 WASM 回传的结果签名。
+ *
+ * 与 Rust 侧 compute_result_sig 保持一致：
+ * sha256("nonce:counter:hash:score:markers" || COMPILE_SALT) 取前 8 字节的十六进制。
+ *
+ * @param nonce   PoW 的 nonce（JS 挑战页用挑战 token）。
+ * @param counter 客户端求得的计数器。
+ * @param hash    PoW 摘要。
+ * @param score   WASM 计算的环境分。
+ * @param markers WASM 输出的标记位（十六进制字符串）。
+ * @param sig     客户端回传的签名。
+ * @return 签名匹配则为 true。
+ */
+func VerifyPoWResultSig(nonce, counter, hash string, score, markers, sig string) bool {
+	if sig == "" {
+		return false
+	}
+	payload := nonce + ":" + counter + ":" + hash + ":" + score + ":" + markers
+	h := sha256.New()
+	h.Write([]byte(payload))
+	h.Write(powResultSalt)
+	want := hex.EncodeToString(h.Sum(nil)[:8])
+	return subtle.ConstantTimeCompare([]byte(want), []byte(sig)) == 1
+}
+
+/**
+ * VerifyChallengeProof 校验 JS 挑战页提交的工作量证明。
+ *
+ * 挑战页以签名 token 作为 nonce 求解 SHA-256(token+counter) 的前导零，
+ * 因此工作量与该次挑战一一绑定：token 每次签发都不同，攻击者无法预先算好或
+ * 硬编码结果复用。历史实现提交的是一个与 token 无关的常量（定值 996500000），
+ * 校验它没有任何意义，故一并改为真实 PoW。
+ *
+ * @param token   挑战页下发的签名 token，充当 PoW 的 nonce。
+ * @param counter 客户端求得的计数器（十进制字符串）。
+ * @param hash    客户端算出的十六进制小写摘要。
+ * @return 解答有效则为 true；参数缺失或不匹配均为 false。
+ */
+func VerifyChallengeProof(token, counter, hash string) bool {
+	if token == "" || counter == "" || hash == "" {
+		return false
+	}
+	n, err := strconv.ParseInt(counter, 10, 64)
+	if err != nil {
+		return false
+	}
+	return VerifyPoW(token, n, hash, ChallengeProofDifficulty)
 }

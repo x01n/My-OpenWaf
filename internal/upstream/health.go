@@ -565,13 +565,6 @@ func (p *Pool) StartWithResult(ctx context.Context, urls func() []string, interv
 	}()
 }
 
-func HTTPProbe(timeout time.Duration) ProbeFunc {
-	probe := HTTPProbeWithResult(timeout)
-	return func(ctx context.Context, raw string) error {
-		return probe(ctx, raw).Err
-	}
-}
-
 func HTTPProbeWithResult(timeout time.Duration) ProbeResultFunc {
 	if timeout <= 0 {
 		timeout = 2 * time.Second

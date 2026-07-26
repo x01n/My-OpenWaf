@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import useSWR from "swr";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { format } from "date-fns";
@@ -13,17 +14,9 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
 import {
   Select,
   SelectContent,
@@ -31,31 +24,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import {
   IconCopy,
-  IconShieldExclamation,
   IconShieldOff,
   IconLock,
-  IconChevronDown,
-  IconListDetails,
-  IconWorld,
   IconFingerprint,
-  IconTag,
-  IconRoute,
-  IconClock,
-  IconHash,
-  IconUser,
-  IconFileDescription,
-  IconAlertTriangle,
   IconMessageReport,
   IconShieldLock,
-  IconMapPin,
 } from "@tabler/icons-react";
-import type { SecurityEvent, IPEntry } from "@/lib/types";
-import { ipListApi, falsePositiveApi } from "@/lib/api";
+import type { AccessLog, SecurityEvent, IPEntry } from "@/lib/types";
+import { ipListApi, falsePositiveApi, requestTraceApi } from "@/lib/api";
 import { countryFlag, countryName } from "@/lib/country-names";
 import { categoryLabel } from "@/lib/attack-category";
-import { Textarea } from "@/components/ui/textarea";
+import { IpHoverPreview } from "@/components/ip-hover-preview";
+import { cn } from "@/lib/utils";
 
 interface SecurityEventDetailDialogProps {
   event: SecurityEvent | null;
@@ -63,16 +46,150 @@ interface SecurityEventDetailDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
+/** 报文区渲染字符上限，超出部分截断展示，避免超大报文拖垮渲染 */
+const MAX_MESSAGE_CHARS = 16384;
+
+/** 脱敏占位符，与后端 internal/dataplane/handler.go 保持一致 */
+const REDACTED = "[redacted]";
+
 /**
- * 判断动作是否属于"拦截/阻断"类型
+ * 敏感头部名称片段，与后端 isSensitiveLogKey
+ * (internal/dataplane/handler.go) 的列表保持一致。
+ * 后端写入时已脱敏，此处为前端二次防御：历史数据或非常规写入路径同样不泄露。
  */
+const SENSITIVE_KEY_PARTS = [
+  "authorization",
+  "cookie",
+  "token",
+  "secret",
+  "password",
+  "passwd",
+  "pwd",
+  "session",
+  "api-key",
+  "apikey",
+  "csrf",
+  "credential",
+  "key",
+];
+
+/**
+ * 判断头部名称是否命中敏感片段。
+ *
+ * @param name 头部名称
+ * @returns 命中任一敏感片段时返回 true
+ */
+function isSensitiveHeaderName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return SENSITIVE_KEY_PARTS.some((part) => lower.includes(part));
+}
+
+/** 单条头部条目 */
+interface HeaderEntry {
+  name: string;
+  value: string;
+  sensitive: boolean;
+}
+
+/**
+ * 解析头部字段。
+ *
+ * 后端 requestHeadersJSON / responseHeadersJSON
+ * (internal/dataplane/handler.go) 以 JSON 对象
+ * `{"Name":["v1","v2"]}` 形式落库；早期数据可能为换行分隔文本，
+ * 因此保留文本回退分支。
+ *
+ * @param raw 落库的头部字符串
+ * @param order `header_order` 字段（逗号分隔），用于还原真实上报顺序
+ * @returns 有序头部条目列表
+ */
+function parseHeaderEntries(raw?: string, order?: string): HeaderEntry[] {
+  const text = (raw || "").trim();
+  if (!text) return [];
+
+  if (text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const entries: HeaderEntry[] = [];
+      const consumed = new Set<string>();
+
+      const push = (key: string) => {
+        const value = parsed[key];
+        const values = Array.isArray(value) ? value : [value];
+        for (const item of values) {
+          entries.push({
+            name: key,
+            value: item == null ? "" : String(item),
+            sensitive: isSensitiveHeaderName(key),
+          });
+        }
+      };
+
+      // header_order 与 headers 的 key 同源于 Hertz VisitAll 的 string(k)，可直接精确匹配
+      for (const rawName of (order || "").split(",")) {
+        const name = rawName.trim();
+        if (!name || consumed.has(name)) continue;
+        if (Object.prototype.hasOwnProperty.call(parsed, name)) {
+          consumed.add(name);
+          push(name);
+        }
+      }
+      for (const key of Object.keys(parsed)) {
+        if (consumed.has(key)) continue;
+        consumed.add(key);
+        push(key);
+      }
+      return entries;
+    } catch {
+      // JSON 解析失败时按文本格式处理
+    }
+  }
+
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const idx = line.indexOf(":");
+      const name = idx > 0 ? line.slice(0, idx) : line;
+      const value = idx > 0 ? line.slice(idx + 1).trim() : "";
+      return { name, value, sensitive: isSensitiveHeaderName(name) };
+    });
+}
+
+/**
+ * 取头部展示值：敏感头部一律以占位符替换。
+ */
+function headerDisplayValue(entry: HeaderEntry): string {
+  return entry.sensitive ? REDACTED : entry.value;
+}
+
+/**
+ * 按所选编码转换文本。ASCII 模式下将非 ASCII 字符转义为 \xHH / \uHHHH。
+ */
+function applyEncoding(text: string, encoding: "utf8" | "ascii"): string {
+  if (encoding !== "ascii") return text;
+  return text.replace(/[^\x00-\x7F]/g, (ch) => {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp <= 0xff) return `\\x${cp.toString(16).padStart(2, "0")}`;
+    return `\\u${cp.toString(16).padStart(4, "0")}`;
+  });
+}
+
+/**
+ * 截断超长报文并追加提示标记。
+ */
+function capMessage(text: string, truncatedLabel: string): string {
+  if (text.length <= MAX_MESSAGE_CHARS) return text;
+  return `${text.slice(0, MAX_MESSAGE_CHARS)}\n... [${truncatedLabel}]`;
+}
+
+/** 判断动作是否属于拦截/阻断类型 */
 function isBlockAction(action: string): boolean {
   return action === "block" || action === "intercept" || action === "drop";
 }
 
-/**
- * 判断动作是否属于"挑战"类型
- */
+/** 判断动作是否属于挑战类型 */
 function isChallengeAction(action: string): boolean {
   return (
     action === "challenge" ||
@@ -82,9 +199,7 @@ function isChallengeAction(action: string): boolean {
   );
 }
 
-/**
- * 获取动作对应的 Badge 样式类名
- */
+/** 动作对应的 Badge 样式类名 */
 function getActionBadgeClass(action: string): string {
   if (isBlockAction(action))
     return "border-red-500/40 bg-red-500/15 text-red-600 dark:text-red-400";
@@ -97,9 +212,7 @@ function getActionBadgeClass(action: string): string {
   return "";
 }
 
-/**
- * 印章类型：拦截 -> deny；观察 -> observe；放行 -> allow
- */
+/** 印章类型：拦截/挑战 -> deny；放行 -> allow；观察 -> observe */
 function stampVariant(action: string): "deny" | "allow" | "observe" | null {
   if (isBlockAction(action) || isChallengeAction(action)) return "deny";
   if (action === "allow") return "allow";
@@ -108,7 +221,7 @@ function stampVariant(action: string): "deny" | "allow" | "observe" | null {
 }
 
 /**
- * 构建完整请求 URL
+ * 构建完整请求 URL。
  */
 function buildFullUrl(ev: SecurityEvent): string {
   const scheme = ev.tls_version ? "https" : "http";
@@ -119,47 +232,111 @@ function buildFullUrl(ev: SecurityEvent): string {
 }
 
 /**
- * 重建 HTTP 请求报文用于展示。
+ * 将访问日志的 `http_protocol` 还原为报文中的协议标识。
  *
- * @param ev 安全事件
- * @param encoding "utf8"（默认）或 "ascii"（对非 ASCII 字符转义为 \xHH）
+ * 后端 normalizeHTTPProtocol (internal/dataplane/handler.go) 把协议归一化为
+ * ALPN 风格的 token，此处为其精确逆映射；无法确定对应关系的取值（例如回退到
+ * X-Forwarded-Proto 的 `https`）返回空串，不做任何推测。
+ *
+ * @param token 访问日志中的 `http_protocol`
+ * @returns 报文协议标识，未知时为空串
  */
-function reconstructRequest(ev: SecurityEvent, encoding: "utf8" | "ascii"): string {
-  const path = ev.path || "/";
-  const qs = ev.query_string ? `?${ev.query_string}` : "";
-  let text = `${ev.method} ${path}${qs} HTTP/1.1\r\nHost: ${ev.host}\r\n`;
-  if (ev.request_headers) {
-    text += ev.request_headers
-      .split("\n")
-      .filter((l) => !/^host:/i.test(l.trim()))
-      .join("\n");
+function wireProtocolLabel(token?: string): string {
+  switch ((token || "").toLowerCase()) {
+    case "http/1.0":
+      return "HTTP/1.0";
+    case "http/1.1":
+      return "HTTP/1.1";
+    case "h2":
+    case "h2c":
+      return "HTTP/2";
+    case "h3":
+      return "HTTP/3";
+    default:
+      return "";
   }
-  if (ev.request_body_preview) {
-    text += `\r\n\r\n${ev.request_body_preview}`;
-    if (ev.request_body_truncated) text += "\n... (truncated)";
-  }
-  if (encoding === "ascii") {
-    return text.replace(/[^\x00-\x7F]/g, (ch) => {
-      const cp = ch.codePointAt(0) ?? 0;
-      if (cp <= 0xff) return `\\x${cp.toString(16).padStart(2, "0")}`;
-      return `\\u${cp.toString(16).padStart(4, "0")}`;
-    });
-  }
-  return text;
 }
 
 /**
- * 根据事件详情生成 cURL 命令
+ * 重建 HTTP 请求报文用于展示。
+ *
+ * @param ev 安全事件
+ * @param protocol 协议标识，由 {@link wireProtocolLabel} 得出；未知时省略
+ * @param encoding 展示编码
+ * @param labels 截断提示文案
+ */
+function reconstructRequest(
+  ev: SecurityEvent,
+  protocol: string,
+  encoding: "utf8" | "ascii",
+  labels: { bodyTruncated: string; displayTruncated: string }
+): string {
+  const path = ev.path || "/";
+  const qs = ev.query_string ? `?${ev.query_string}` : "";
+  const requestLine = [ev.method, `${path}${qs}`, protocol]
+    .filter(Boolean)
+    .join(" ");
+  const lines = [requestLine];
+
+  const entries = parseHeaderEntries(ev.request_headers, ev.header_order);
+  const hasHost = entries.some((e) => e.name.toLowerCase() === "host");
+  if (!hasHost && ev.host) lines.push(`Host: ${ev.host}`);
+  for (const entry of entries) {
+    lines.push(`${entry.name}: ${headerDisplayValue(entry)}`);
+  }
+
+  let text = lines.join("\n");
+  if (ev.request_body_preview) {
+    text += `\n\n${ev.request_body_preview}`;
+    if (ev.request_body_truncated) text += `\n... [${labels.bodyTruncated}]`;
+  }
+  return capMessage(applyEncoding(text, encoding), labels.displayTruncated);
+}
+
+/**
+ * 重建 HTTP 响应报文用于展示。
+ *
+ * 响应头取自同 request_id 的访问日志（`response_headers`）。
+ * 后端不落库响应体，因此仅能展示状态行与响应头。
+ *
+ * @returns 无任何可用响应数据时返回空字符串
+ */
+function reconstructResponse(
+  ev: SecurityEvent,
+  log: AccessLog | null,
+  encoding: "utf8" | "ascii",
+  displayTruncated: string
+): string {
+  const status = log?.status_code || ev.status_code;
+  const entries = parseHeaderEntries(log?.response_headers);
+  if (!status && entries.length === 0) return "";
+
+  const statusLine = [
+    wireProtocolLabel(log?.http_protocol),
+    status ? String(status) : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const lines = statusLine ? [statusLine] : [];
+  for (const entry of entries) {
+    lines.push(`${entry.name}: ${headerDisplayValue(entry)}`);
+  }
+  return capMessage(
+    applyEncoding(lines.join("\n"), encoding),
+    displayTruncated
+  );
+}
+
+/**
+ * 生成 cURL 命令。敏感头部以占位符导出，避免凭据经剪贴板外泄。
  */
 function buildCurlCommand(ev: SecurityEvent): string {
   const url = buildFullUrl(ev);
   let cmd = `curl -X ${ev.method} '${url}'`;
-  if (ev.request_headers) {
-    const lines = ev.request_headers.split("\n").filter(Boolean);
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed) cmd += ` \\\n  -H '${trimmed}'`;
-    }
+  for (const entry of parseHeaderEntries(ev.request_headers, ev.header_order)) {
+    if (entry.name.toLowerCase() === "host") continue;
+    const value = headerDisplayValue(entry).replace(/'/g, "'\\''");
+    cmd += ` \\\n  -H '${entry.name}: ${value}'`;
   }
   if (ev.request_body_preview) {
     const escaped = ev.request_body_preview.replace(/'/g, "'\\''");
@@ -170,37 +347,46 @@ function buildCurlCommand(ev: SecurityEvent): string {
 }
 
 /**
- * 简单 HTTP 报文语法高亮渲染
+ * HTTP 报文语法高亮渲染：首行方法/路径/协议着色，其余按 `名称: 值` 着色。
  */
 function renderHttpSyntax(raw: string): React.ReactNode {
-  const lines = raw.split(/\r?\n/);
-  return lines.map((line, i) => {
-    const colonIdx = line.indexOf(":");
+  return raw.split(/\r?\n/).map((line, i) => {
     if (i === 0) {
-      const parts = line.match(/^(\S+)\s(.+?)\s(HTTP\/\S+)/);
+      const parts = line.match(/^(\S+)\s(.*?)(?:\s(HTTP\/\S+))?$/);
       if (parts) {
         return (
           <span key={i}>
-            <span className="text-emerald-400 font-semibold">{parts[1]}</span>{" "}
-            <span className="text-sky-300">{parts[2]}</span>{" "}
-            <span className="text-zinc-500">{parts[3]}</span>
+            <span className="font-semibold text-teal-700 dark:text-emerald-400">
+              {parts[1]}
+            </span>
+            {parts[2] ? (
+              <>
+                {" "}
+                <span className="text-sky-700 dark:text-sky-300">
+                  {parts[2]}
+                </span>
+              </>
+            ) : null}
+            {parts[3] ? (
+              <>
+                {" "}
+                <span className="text-muted-foreground">{parts[3]}</span>
+              </>
+            ) : null}
             {"\n"}
           </span>
         );
       }
     }
-    if (
-      colonIdx > 0 &&
-      i > 0 &&
-      !line.startsWith(" ") &&
-      !line.startsWith("\t")
-    ) {
-      const headerName = line.slice(0, colonIdx);
-      const headerVal = line.slice(colonIdx);
+    const colonIdx = line.indexOf(":");
+    if (colonIdx > 0 && i > 0 && !/^[\s\t]/.test(line)) {
+      const name = line.slice(0, colonIdx);
+      const value = line.slice(colonIdx + 1);
       return (
         <span key={i}>
-          <span className="text-violet-400">{headerName}</span>
-          <span className="text-zinc-400">{headerVal}</span>
+          <span className="text-amber-700 dark:text-amber-400">{name}</span>
+          <span className="text-muted-foreground">:</span>
+          <span className="text-foreground/80">{value}</span>
           {"\n"}
         </span>
       );
@@ -220,7 +406,7 @@ function renderHttpSyntax(raw: string): React.ReactNode {
 function copyToClipboard(text: string, successMsg: string, failMsg: string) {
   navigator.clipboard.writeText(text).then(
     () => toast.success(successMsg),
-    () => toast.error(failMsg),
+    () => toast.error(failMsg)
   );
 }
 
@@ -230,53 +416,78 @@ function copyToClipboard(text: string, successMsg: string, failMsg: string) {
 function StampBadge({ variant }: { variant: "deny" | "allow" | "observe" }) {
   const cls =
     variant === "deny"
-      ? "border-red-500/60 text-red-500/80"
+      ? "border-red-500/70 text-red-500/85"
       : variant === "allow"
-        ? "border-emerald-500/60 text-emerald-500/80"
-        : "border-amber-500/60 text-amber-500/80";
+        ? "border-emerald-500/70 text-emerald-500/85"
+        : "border-amber-500/70 text-amber-500/85";
   const text =
-    variant === "deny" ? "DENY" : variant === "allow" ? "ALLOW" : "OBSERVE";
+    variant === "deny" ? "Deny" : variant === "allow" ? "Allow" : "Observe";
   return (
     <div
-      className={`pointer-events-none absolute right-6 top-1/2 -translate-y-1/2 rotate-[-12deg] rounded-md border-[3px] px-3 py-1 font-mono text-lg font-black tracking-widest opacity-70 select-none ${cls}`}
+      className="pointer-events-none absolute top-1/2 right-5 -translate-y-1/2 -rotate-12 opacity-80 select-none"
       aria-hidden
     >
-      {text}
-    </div>
-  );
-}
-
-/**
- * 单元格条目：图标 + 标签 + 值 + 可选操作。
- */
-function InfoRow({
-  icon,
-  label,
-  children,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-start gap-2.5 rounded-md border bg-muted/20 px-3 py-2.5">
-      <div className="mt-0.5 shrink-0 text-muted-foreground">{icon}</div>
-      <div className="min-w-0 flex-1 space-y-0.5">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          {label}
+      <div className={cn("rounded-lg border-2 border-dashed p-1", cls)}>
+        <div
+          className={cn(
+            "rounded-md border-2 px-3 py-0.5 font-mono text-base font-black tracking-[0.15em]",
+            cls
+          )}
+        >
+          {text}
         </div>
-        <div className="text-sm">{children}</div>
       </div>
     </div>
   );
 }
 
 /**
- * 安全事件详情弹窗组件。
+ * 详情行：左侧标签 + 右侧值，窄屏自动堆叠。
+ */
+function DetailRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-0.5 py-1.5 sm:grid-cols-[128px_minmax(0,1fr)] sm:gap-3">
+      <div className="text-xs text-muted-foreground sm:pt-0.5">{label}</div>
+      <div className="min-w-0 text-sm">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * 报文展示区：等宽字体 + 语法高亮 + 固定高度滚动。
+ */
+function MessageView({ text, empty }: { text: string; empty: string }) {
+  if (!text) {
+    return (
+      <div className="flex h-[300px] items-center justify-center rounded-lg border border-dashed bg-muted/20 px-6 text-center text-xs text-muted-foreground">
+        {empty}
+      </div>
+    );
+  }
+  return (
+    <ScrollArea className="h-[300px] rounded-lg border bg-muted/30 dark:bg-zinc-950/60">
+      <pre className="p-4 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap">
+        {renderHttpSyntax(text)}
+      </pre>
+    </ScrollArea>
+  );
+}
+
+/**
+ * 安全事件详情弹窗。
  *
- * 展示雷池风格的攻击详情：顶部动作徽章 + URL + Deny 印章；
- * 中部关键信息网格；底部 Tab 切换请求/响应报文与 AI 分析（占位）；
- * 支持复制 cURL、加入黑名单、误报反馈等快捷操作。
+ * 顶部信息卡展示动作徽章、请求 URL、Deny 印章与关键字段；
+ * 中部按 Tab 切换请求/响应报文（等宽高亮、可滚动、支持编码切换）；
+ * 底部提供误报反馈、复制 cURL 与关闭操作。
+ *
+ * 敏感头部（Authorization / Cookie / Set-Cookie / API Key 等）在展示与
+ * cURL 导出两条路径上均以占位符替换；超长报文按 {@link MAX_MESSAGE_CHARS} 截断。
  */
 export function SecurityEventDetailDialog({
   event,
@@ -284,12 +495,21 @@ export function SecurityEventDetailDialog({
   onOpenChange,
 }: SecurityEventDetailDialogProps) {
   const { t } = useTranslation();
-  const [reqEncoding, setReqEncoding] = useState<"utf8" | "ascii">("utf8");
-  const [uaExpanded, setUaExpanded] = useState(false);
+  const [encoding, setEncoding] = useState<"utf8" | "ascii">("utf8");
+  const [fingerprintOpen, setFingerprintOpen] = useState(false);
   const [banLoading, setBanLoading] = useState(false);
   const [fpDialogOpen, setFpDialogOpen] = useState(false);
   const [fpNote, setFpNote] = useState("");
   const [fpLoading, setFpLoading] = useState(false);
+
+  const requestId = event?.request_id || "";
+
+  // 同 request_id 的访问日志提供响应头与协议标识（安全事件模型本身不含这两项）
+  const { data: trace, isLoading: traceLoading } = useSWR(
+    open && requestId ? ["security-event-trace", requestId] : null,
+    () => requestTraceApi.get(requestId),
+    { revalidateOnFocus: false }
+  );
 
   const actionLabelMap: Record<string, string> = useMemo(
     () => ({
@@ -304,7 +524,7 @@ export function SecurityEventDetailDialog({
       drop: t("securityEvents.action.drop"),
       log_only: t("securityEvents.action.log_only"),
     }),
-    [t],
+    [t]
   );
 
   if (!event) {
@@ -318,14 +538,37 @@ export function SecurityEventDetailDialog({
   const ev = event;
   const fullUrl = buildFullUrl(ev);
   const stamp = stampVariant(ev.action);
-  const hasTls =
+  const accessLog = trace?.access_logs?.[0] ?? null;
+  const hasFingerprint = Boolean(
     ev.tls_version ||
     ev.tls_sni ||
     ev.tls_ja3 ||
     ev.tls_ja3_hash ||
     ev.tls_ja4 ||
     ev.tls_alpn ||
-    ev.tls_cipher_suites;
+    ev.tls_cipher_suites ||
+    ev.tls_extensions ||
+    ev.tls_curves ||
+    ev.tls_point_formats ||
+    ev.header_order
+  );
+
+  const truncateLabels = {
+    bodyTruncated: t("securityEventDetail.bodyTruncated"),
+    displayTruncated: t("securityEventDetail.displayTruncated"),
+  };
+  const requestText = reconstructRequest(
+    ev,
+    wireProtocolLabel(accessLog?.http_protocol),
+    encoding,
+    truncateLabels
+  );
+  const responseText = reconstructResponse(
+    ev,
+    accessLog,
+    encoding,
+    truncateLabels.displayTruncated
+  );
 
   const attackTime = (() => {
     try {
@@ -347,26 +590,15 @@ export function SecurityEventDetailDialog({
         value: ev.client_ip,
         kind: "blacklist",
         action: "intercept",
-        note: t("securityEventDetail.blocklistNote", {
-          id: ev.id,
-        }),
+        note: t("securityEventDetail.blocklistNote", { id: ev.id }),
       };
       await ipListApi.create(payload);
-      toast.success(
-        t("securityEventDetail.addedToBlocklist"),
-      );
+      toast.success(t("securityEventDetail.addedToBlocklist"));
     } catch {
-      toast.error(
-        t("securityEventDetail.addBlocklistFailed"),
-      );
+      toast.error(t("securityEventDetail.addBlocklistFailed"));
     } finally {
       setBanLoading(false);
     }
-  };
-
-  const handleReportFalsePositive = () => {
-    setFpNote("");
-    setFpDialogOpen(true);
   };
 
   const handleSubmitFalsePositive = async () => {
@@ -383,452 +615,370 @@ export function SecurityEventDetailDialog({
         match_desc: ev.match_desc || "",
         note: fpNote,
       });
-      toast.success(
-        t("falsePositives.submitSuccess"),
-      );
+      toast.success(t("falsePositives.submitSuccess"));
       setFpDialogOpen(false);
     } catch {
-      toast.error(
-        t("falsePositives.submitFailed"),
-      );
+      toast.error(t("falsePositives.submitFailed"));
     } finally {
       setFpLoading(false);
     }
   };
 
+  /** 指纹字段清单，仅渲染后端实际返回的项 */
+  const fingerprintFields: Array<{ label: string; value?: string }> = [
+    { label: "TLS Version", value: ev.tls_version },
+    { label: "SNI", value: ev.tls_sni },
+    { label: "ALPN", value: ev.tls_alpn },
+    { label: "JA4", value: ev.tls_ja4 },
+    { label: "JA3 Hash", value: ev.tls_ja3_hash },
+    { label: "JA3", value: ev.tls_ja3 },
+    { label: "Cipher Suites", value: ev.tls_cipher_suites },
+    { label: "Extensions", value: ev.tls_extensions },
+    { label: "Curves", value: ev.tls_curves },
+    { label: "Point Formats", value: ev.tls_point_formats },
+    { label: "Header Order", value: ev.header_order },
+  ];
+
   return (
     <>
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto p-0">
-        <div className="sr-only">
-          <DialogTitle>
-            {t("securityEventDetail.dialogTitle")}
-          </DialogTitle>
-          <DialogDescription>{fullUrl}</DialogDescription>
-        </div>
-
-        {/* ====== 顶部横幅：动作 Badge + URL + Deny/Allow 印章 ====== */}
-        <div className="relative overflow-hidden border-b bg-gradient-to-br from-muted/60 via-muted/30 to-transparent px-6 py-5">
-          <div className="flex items-start gap-3 pr-24">
-            <Badge
-              className={`mt-0.5 shrink-0 border px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide ${getActionBadgeClass(
-                ev.action,
-              )}`}
-            >
-              {actionLabelMap[ev.action] || ev.action}
-            </Badge>
-            <button
-              type="button"
-              className="min-w-0 break-all text-left font-mono text-sm leading-relaxed text-foreground/90 hover:text-primary"
-              title={t("securityEventDetail.clickToCopyUrl")}
-              onClick={() => copyToClipboard(fullUrl, copySuccess, copyFail)}
-            >
-              {fullUrl}
-            </button>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto bg-muted/30 p-4 sm:p-5">
+          <div className="sr-only">
+            <DialogTitle>{t("securityEventDetail.dialogTitle")}</DialogTitle>
+            <DialogDescription>{fullUrl}</DialogDescription>
           </div>
-          {stamp && <StampBadge variant={stamp} />}
-          <div className="pointer-events-none absolute -bottom-6 -left-4 opacity-[0.05]">
-            <IconShieldOff className="h-40 w-40" strokeWidth={1} />
-          </div>
-        </div>
 
-        {/* ====== 关键信息网格 ====== */}
-        <div className="grid grid-cols-1 gap-2.5 border-b px-6 py-5 md:grid-cols-2">
-          {/* 攻击者来源 */}
-          <InfoRow
-            icon={<IconWorld className="h-4 w-4" />}
-            label={t("securityEventDetail.attackSource")}
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono font-medium">{ev.client_ip}</span>
-              {ev.geo_country && (
-                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                  <span className="text-base leading-none">
-                    {countryFlag(ev.geo_country)}
-                  </span>
-                  <span>{countryName(ev.geo_country)}</span>
-                  {ev.geo_city && <span>/ {ev.geo_city}</span>}
-                </span>
-              )}
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 gap-1 px-1.5 text-xs text-primary hover:bg-primary/10"
-                  disabled={banLoading}
-                  onClick={handleAddToBlocklist}
-                >
-                  <IconShieldLock className="h-3 w-3" />
-                  {t("securityEventDetail.addToBlocklist")}
-                </Button>
-              </div>
-            </div>
-          </InfoRow>
-
-          {/* JA4 指纹 */}
-          <InfoRow
-            icon={<IconFingerprint className="h-4 w-4" />}
-            label={t("securityEventDetail.ja4Fingerprint")}
-          >
-            {ev.tls_ja4 ? (
+          {/* ====== 信息卡 ====== */}
+          <div className="relative overflow-hidden rounded-xl border bg-background px-5 py-4 shadow-sm">
+            <div className="flex items-start gap-2.5 pr-28">
+              <Badge
+                className={cn(
+                  "mt-0.5 shrink-0 border px-2 py-0.5 text-xs font-semibold",
+                  getActionBadgeClass(ev.action)
+                )}
+              >
+                {actionLabelMap[ev.action] || ev.action}
+              </Badge>
               <button
                 type="button"
-                className="break-all text-left font-mono text-xs hover:text-primary"
-                onClick={() =>
-                  copyToClipboard(ev.tls_ja4 || "", copySuccess, copyFail)
-                }
-                title={t("securityEventDetail.clickToCopy")}
+                className="min-w-0 text-left font-mono text-sm leading-relaxed break-all hover:text-primary"
+                title={t("securityEventDetail.clickToCopyUrl")}
+                onClick={() => copyToClipboard(fullUrl, copySuccess, copyFail)}
               >
-                {ev.tls_ja4}
+                {fullUrl}
               </button>
-            ) : (
-              <span className="text-xs text-muted-foreground">
-                {t("securityEventDetail.noFingerprint")}
-              </span>
-            )}
-          </InfoRow>
-
-          {/* 命中防护模块 */}
-          <InfoRow
-            icon={<IconShieldExclamation className="h-4 w-4" />}
-            label={t("securityEventDetail.hitModule")}
-          >
-            <div className="flex items-center gap-2">
-              <span>{categoryLabel(ev.category)}</span>
-              <span className="text-xs text-muted-foreground">
-                ({ev.phase})
-              </span>
             </div>
-          </InfoRow>
+            {stamp && <StampBadge variant={stamp} />}
 
-          {/* 规则名称 */}
-          <InfoRow
-            icon={<IconTag className="h-4 w-4" />}
-            label={t("securityEventDetail.ruleName")}
-          >
-            <span className="font-mono text-xs">
-              {ev.rule_id_str || `#${ev.rule_id}`}
-            </span>
-          </InfoRow>
-
-          {/* 攻击时间 */}
-          <InfoRow
-            icon={<IconClock className="h-4 w-4" />}
-            label={t("securityEventDetail.attackTime")}
-          >
-            <span>{attackTime}</span>
-          </InfoRow>
-
-          {/* 请求 ID */}
-          <InfoRow
-            icon={<IconHash className="h-4 w-4" />}
-            label={t("securityEventDetail.requestId")}
-          >
-            <button
-              type="button"
-              className="break-all text-left font-mono text-xs text-foreground/70 hover:text-primary"
-              onClick={() =>
-                copyToClipboard(ev.request_id, copySuccess, copyFail)
-              }
-            >
-              {ev.request_id}
-            </button>
-          </InfoRow>
-
-          {/* HTTP 方法 + 状态码 */}
-          <InfoRow
-            icon={<IconRoute className="h-4 w-4" />}
-            label={t("securityEventDetail.methodStatus")}
-          >
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" className="h-5 px-1.5 text-xs">
-                {ev.method}
-              </Badge>
-              {ev.status_code > 0 && (
-                <Badge
-                  variant="outline"
-                  className={`h-5 px-1.5 text-xs ${
-                    ev.status_code >= 400
-                      ? "border-red-500/40 text-red-600 dark:text-red-400"
-                      : ""
-                  }`}
-                >
-                  {ev.status_code}
-                </Badge>
-              )}
-            </div>
-          </InfoRow>
-
-          {/* Host 与站点 ID */}
-          <InfoRow
-            icon={<IconMapPin className="h-4 w-4" />}
-            label={t("securityEventDetail.hostSite")}
-          >
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="break-all font-mono text-xs">{ev.host}</span>
-              <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
-                site #{ev.site_id}
-              </Badge>
-            </div>
-          </InfoRow>
-
-          {/* User-Agent（可展开） */}
-          {ev.user_agent && (
-            <div className="md:col-span-2">
-              <InfoRow
-                icon={<IconUser className="h-4 w-4" />}
-                label={t("securityEventDetail.userAgent")}
-              >
-                <button
-                  type="button"
-                  onClick={() => setUaExpanded((v) => !v)}
-                  className={`block w-full break-all text-left font-mono text-xs text-foreground/80 hover:text-primary ${
-                    uaExpanded ? "" : "line-clamp-1"
-                  }`}
-                  title={
-                    uaExpanded
-                      ? t("securityEventDetail.collapse")
-                      : t("securityEventDetail.expand")
-                  }
-                >
-                  {ev.user_agent}
-                </button>
-              </InfoRow>
-            </div>
-          )}
-        </div>
-
-        {/* ====== 攻击载荷 ====== */}
-        {ev.match_desc && (
-          <div className="border-b px-6 py-4">
-            <div className="mb-2 flex items-center gap-1.5">
-              <IconAlertTriangle className="h-4 w-4 text-amber-500" />
-              <span className="text-xs font-medium text-foreground/80">
-                {t("securityEventDetail.attackPayload")}
-              </span>
-            </div>
-            <div className="rounded-md border border-red-500/20 bg-red-500/5 px-4 py-3 dark:border-red-500/10 dark:bg-red-500/5">
-              <p className="break-all font-mono text-xs leading-relaxed text-red-700 dark:text-red-300">
-                {ev.match_desc}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* ====== Tab 切换：请求 / 响应 / AI 分析 ====== */}
-        <div className="border-b px-6 py-4">
-          <Tabs defaultValue="request">
-            <div className="mb-3 flex items-center justify-between">
-              <TabsList>
-                <TabsTrigger value="request">
-                  <IconListDetails className="mr-1 h-3.5 w-3.5" />
-                  {t("securityEventDetail.requestMessage")}
-                </TabsTrigger>
-                <TabsTrigger value="response">
-                  <IconFileDescription className="mr-1 h-3.5 w-3.5" />
-                  {t("securityEventDetail.responseMessage")}
-                </TabsTrigger>
-                <TabsTrigger value="ai" disabled>
-                  <IconMessageReport className="mr-1 h-3.5 w-3.5" />
-                  {t("securityEventDetail.aiAnalysis")}
-                </TabsTrigger>
-              </TabsList>
-              <Select
-                value={reqEncoding}
-                onValueChange={(v) => setReqEncoding(v as "utf8" | "ascii")}
-              >
-                <SelectTrigger className="h-7 w-[120px] text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent align="end">
-                  <SelectItem value="utf8">UTF-8</SelectItem>
-                  <SelectItem value="ascii">ASCII</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <TabsContent value="request">
-              <div className="overflow-auto rounded-lg bg-zinc-900 p-4 dark:bg-zinc-950">
-                <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-zinc-200">
-                  {renderHttpSyntax(reconstructRequest(ev, reqEncoding))}
-                </pre>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="response">
-              <div className="overflow-auto rounded-lg bg-zinc-900 p-4 dark:bg-zinc-950">
-                <pre className="font-mono text-xs leading-relaxed text-zinc-400">
-                  {ev.status_code
-                    ? `HTTP/1.1 ${ev.status_code}\r\n\r\n(${t(
-                        "securityEventDetail.responseNotCaptured",
-                      )})`
-                    : t("securityEventDetail.noResponseData")}
-                </pre>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="ai">
-              <div className="rounded-lg border border-dashed bg-muted/20 p-6 text-center text-xs text-muted-foreground">
-                {t("securityEventDetail.aiAnalysisPlaceholder")}
-              </div>
-            </TabsContent>
-          </Tabs>
-        </div>
-
-        {/* ====== TLS 信息折叠区 ====== */}
-        {hasTls && (
-          <div className="border-b px-6 py-4">
-            <Collapsible>
-              <CollapsibleTrigger className="group flex w-full items-center gap-2 text-xs font-medium text-foreground/80 hover:text-foreground">
-                <IconLock className="h-3.5 w-3.5 text-emerald-500" />
-                {t("securityEventDetail.tlsInfo")}
-                <IconChevronDown className="ml-auto h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-180" />
-              </CollapsibleTrigger>
-              <CollapsibleContent>
-                <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 rounded-lg border bg-muted/30 p-4">
-                  {ev.tls_version && (
-                    <div>
-                      <span className="text-xs text-muted-foreground">
-                        TLS Version
+            <div className="mt-3.5 divide-y divide-border/40 pr-0 sm:pr-28">
+              {/* 攻击者来源 */}
+              <DetailRow label={t("securityEventDetail.attackSource")}>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <IpHoverPreview
+                    ip={ev.client_ip}
+                    className="text-sm font-medium"
+                  />
+                  {ev.geo_country && (
+                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                      <span className="text-base leading-none">
+                        {countryFlag(ev.geo_country)}
                       </span>
-                      <p className="font-mono text-xs">{ev.tls_version}</p>
-                    </div>
+                      <span>{countryName(ev.geo_country)}</span>
+                      {ev.geo_city && <span>/ {ev.geo_city}</span>}
+                    </span>
                   )}
-                  {ev.tls_sni && (
-                    <div>
-                      <span className="text-xs text-muted-foreground">SNI</span>
-                      <p className="break-all font-mono text-xs">
-                        {ev.tls_sni}
-                      </p>
-                    </div>
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="h-auto gap-1 p-0 text-xs"
+                    disabled={banLoading}
+                    onClick={handleAddToBlocklist}
+                  >
+                    <IconShieldLock className="h-3.5 w-3.5" />
+                    {t("securityEventDetail.addToBlocklist")}
+                  </Button>
+                </div>
+              </DetailRow>
+
+              {/* JA4 指纹 */}
+              <DetailRow label={t("securityEventDetail.ja4Fingerprint")}>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  {ev.tls_ja4 ? (
+                    <button
+                      type="button"
+                      className="text-left font-mono text-xs break-all hover:text-primary"
+                      title={t("securityEventDetail.clickToCopy")}
+                      onClick={() =>
+                        copyToClipboard(ev.tls_ja4 || "", copySuccess, copyFail)
+                      }
+                    >
+                      {ev.tls_ja4}
+                    </button>
+                  ) : (
+                    <span className="text-muted-foreground">-</span>
                   )}
-                  {ev.tls_alpn && (
-                    <div>
-                      <span className="text-xs text-muted-foreground">
-                        ALPN
-                      </span>
-                      <p className="font-mono text-xs">{ev.tls_alpn}</p>
-                    </div>
-                  )}
-                  {ev.tls_ja3_hash && (
-                    <div>
-                      <span className="text-xs text-muted-foreground">
-                        JA3 Hash
-                      </span>
-                      <p className="break-all font-mono text-xs">
-                        {ev.tls_ja3_hash}
-                      </p>
-                    </div>
-                  )}
-                  {ev.tls_ja3 && (
-                    <div className="col-span-2">
-                      <span className="text-xs text-muted-foreground">JA3</span>
-                      <p className="break-all font-mono text-xs">
-                        {ev.tls_ja3}
-                      </p>
-                    </div>
-                  )}
-                  {ev.tls_ja4 && (
-                    <div className="col-span-2">
-                      <span className="text-xs text-muted-foreground">JA4</span>
-                      <p className="break-all font-mono text-xs">
-                        {ev.tls_ja4}
-                      </p>
-                    </div>
-                  )}
-                  {ev.tls_cipher_suites && (
-                    <div className="col-span-2">
-                      <span className="text-xs text-muted-foreground">
-                        Cipher Suites
-                      </span>
-                      <p className="break-all font-mono text-xs">
-                        {ev.tls_cipher_suites}
-                      </p>
-                    </div>
-                  )}
-                  {ev.tls_extensions && (
-                    <div className="col-span-2">
-                      <span className="text-xs text-muted-foreground">
-                        Extensions
-                      </span>
-                      <p className="break-all font-mono text-xs">
-                        {ev.tls_extensions}
-                      </p>
-                    </div>
-                  )}
-                  {ev.tls_curves && (
-                    <div className="col-span-2">
-                      <span className="text-xs text-muted-foreground">
-                        Curves
-                      </span>
-                      <p className="break-all font-mono text-xs">
-                        {ev.tls_curves}
-                      </p>
-                    </div>
-                  )}
-                  {ev.tls_point_formats && (
-                    <div className="col-span-2">
-                      <span className="text-xs text-muted-foreground">
-                        Point Formats
-                      </span>
-                      <p className="break-all font-mono text-xs">
-                        {ev.tls_point_formats}
-                      </p>
-                    </div>
+                  {hasFingerprint && (
+                    <Button
+                      variant="link"
+                      size="sm"
+                      className="h-auto gap-1 p-0 text-xs"
+                      onClick={() => setFingerprintOpen((v) => !v)}
+                    >
+                      <IconFingerprint className="h-3.5 w-3.5" />
+                      {t("securityEventDetail.viewFingerprintProfile")}
+                    </Button>
                   )}
                 </div>
-              </CollapsibleContent>
-            </Collapsible>
-          </div>
-        )}
+              </DetailRow>
 
-        {/* ====== 底部操作栏 ====== */}
-        <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-4">
-          <Button
-            variant="link"
-            size="sm"
-            className="h-auto gap-1 p-0 text-xs text-muted-foreground hover:text-primary"
-            onClick={handleReportFalsePositive}
-            disabled={fpLoading}
-          >
-            <IconMessageReport className="h-3.5 w-3.5" />
-            {t("securityEventDetail.reportFalsePositive")}
-          </Button>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5 text-xs"
-              onClick={() =>
-                copyToClipboard(
-                  buildCurlCommand(ev),
-                  copySuccess,
-                  copyFail,
-                )
-              }
-            >
-              <IconCopy className="h-3.5 w-3.5" />
-              {t("securityEventDetail.copyCurl")}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-xs"
-              onClick={() => onOpenChange(false)}
-            >
+              {/* 攻击载荷 */}
+              <DetailRow label={t("securityEventDetail.attackPayload")}>
+                {ev.match_desc ? (
+                  <code className="inline-block max-w-full rounded border border-red-500/20 bg-red-500/5 px-2 py-1 font-mono text-xs leading-relaxed break-all text-red-700 dark:text-red-300">
+                    {ev.match_desc}
+                  </code>
+                ) : (
+                  <span className="text-muted-foreground">-</span>
+                )}
+              </DetailRow>
+
+              {/* 命中防护模块 */}
+              <DetailRow label={t("securityEventDetail.hitModule")}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span>{categoryLabel(ev.category)}</span>
+                  {ev.phase && (
+                    <Badge
+                      variant="secondary"
+                      className="h-4 px-1.5 font-mono text-[10px] font-normal"
+                    >
+                      {ev.phase}
+                    </Badge>
+                  )}
+                </div>
+              </DetailRow>
+
+              {/* 规则名称 */}
+              <DetailRow label={t("securityEventDetail.ruleName")}>
+                <span className="font-mono text-xs break-all">
+                  {ev.rule_id_str || `#${ev.rule_id}`}
+                </span>
+              </DetailRow>
+
+              {/* 请求方法 / 状态码 / 站点 */}
+              <DetailRow label={t("securityEventDetail.methodStatus")}>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge variant="outline" className="h-5 px-1.5 text-xs">
+                    {ev.method}
+                  </Badge>
+                  {ev.status_code > 0 && (
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "h-5 px-1.5 text-xs",
+                        ev.status_code >= 400 &&
+                          "border-red-500/40 text-red-600 dark:text-red-400"
+                      )}
+                    >
+                      {ev.status_code}
+                    </Badge>
+                  )}
+                  <Badge
+                    variant="secondary"
+                    className="h-5 px-1.5 text-[10px] font-normal"
+                  >
+                    site #{ev.site_id}
+                  </Badge>
+                </div>
+              </DetailRow>
+
+              {/* User-Agent */}
+              {ev.user_agent && (
+                <DetailRow label={t("securityEventDetail.userAgent")}>
+                  <span className="block font-mono text-xs break-all text-foreground/80">
+                    {ev.user_agent}
+                  </span>
+                </DetailRow>
+              )}
+
+              {/* 攻击时间 */}
+              <DetailRow label={t("securityEventDetail.attackTime")}>
+                <span>{attackTime}</span>
+              </DetailRow>
+
+              {/* 请求 ID */}
+              <DetailRow label={t("securityEventDetail.requestId")}>
+                <button
+                  type="button"
+                  className="text-left font-mono text-xs break-all text-foreground/70 hover:text-primary"
+                  title={t("securityEventDetail.clickToCopy")}
+                  onClick={() =>
+                    copyToClipboard(ev.request_id, copySuccess, copyFail)
+                  }
+                >
+                  {ev.request_id}
+                </button>
+              </DetailRow>
+            </div>
+
+            {/* 指纹画像折叠区 */}
+            {hasFingerprint && (
+              <Collapsible
+                open={fingerprintOpen}
+                onOpenChange={setFingerprintOpen}
+              >
+                <CollapsibleContent>
+                  <div className="mt-3 rounded-lg border bg-muted/40 p-4">
+                    <div className="mb-2 flex items-center gap-1.5 text-xs font-medium">
+                      <IconLock className="h-3.5 w-3.5 text-emerald-500" />
+                      {t("securityEventDetail.tlsInfo")}
+                    </div>
+                    <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
+                      {fingerprintFields
+                        .filter((f) => f.value)
+                        .map((f) => (
+                          <div key={f.label} className="min-w-0">
+                            <span className="text-[11px] text-muted-foreground">
+                              {f.label}
+                            </span>
+                            <p className="font-mono text-xs break-all">
+                              {f.value}
+                            </p>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            )}
+
+            <div className="pointer-events-none absolute -bottom-8 -left-6 opacity-[0.04]">
+              <IconShieldOff className="h-40 w-40" strokeWidth={1} />
+            </div>
+          </div>
+
+          {/* ====== 报文区 ====== */}
+          <div className="mt-4 rounded-xl border bg-background px-5 py-4 shadow-sm">
+            <Tabs defaultValue="request">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <TabsList>
+                  <TabsTrigger value="request">
+                    {t("securityEventDetail.requestMessage")}
+                  </TabsTrigger>
+                  <TabsTrigger value="response">
+                    {t("securityEventDetail.responseMessage")}
+                  </TabsTrigger>
+                </TabsList>
+                <Select
+                  value={encoding}
+                  onValueChange={(v) => setEncoding(v as "utf8" | "ascii")}
+                >
+                  <SelectTrigger className="h-7 w-[110px] text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent align="end">
+                    <SelectItem value="utf8">UTF-8</SelectItem>
+                    <SelectItem value="ascii">ASCII</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <TabsContent value="request">
+                <MessageView
+                  text={requestText}
+                  empty={t("securityEventDetail.noRequestData")}
+                />
+              </TabsContent>
+
+              <TabsContent value="response">
+                <MessageView
+                  text={responseText}
+                  empty={
+                    traceLoading
+                      ? t("common.loading")
+                      : t("securityEventDetail.noResponseData")
+                  }
+                />
+                {responseText && (
+                  <p className="mt-2 text-[11px] text-muted-foreground">
+                    {t("securityEventDetail.responseBodyNotStored")}
+                  </p>
+                )}
+                {accessLog && (
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                    {accessLog.upstream && (
+                      <span>
+                        {t("securityEventDetail.upstream")}:{" "}
+                        <span className="font-mono">{accessLog.upstream}</span>
+                      </span>
+                    )}
+                    {accessLog.cache_state && (
+                      <span>
+                        {t("securityEventDetail.cacheState")}:{" "}
+                        <span className="font-mono">
+                          {accessLog.cache_state}
+                        </span>
+                      </span>
+                    )}
+                    <span>
+                      {t("securityEventDetail.upstreamLatency")}:{" "}
+                      <span className="font-mono">
+                        {accessLog.upstream_latency_ms} ms
+                      </span>
+                    </span>
+                    <span>
+                      {t("securityEventDetail.responseSize")}:{" "}
+                      <span className="font-mono">
+                        {accessLog.response_size} B
+                      </span>
+                    </span>
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              {t("securityEventDetail.redactionHint")}
+            </p>
+          </div>
+
+          {/* ====== 底部操作栏 ====== */}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-4">
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto gap-1 p-0 text-xs"
+                onClick={() => {
+                  setFpNote("");
+                  setFpDialogOpen(true);
+                }}
+                disabled={fpLoading}
+              >
+                <IconMessageReport className="h-3.5 w-3.5" />
+                {t("securityEventDetail.reportFalsePositive")}
+              </Button>
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto gap-1 p-0 text-xs"
+                onClick={() =>
+                  copyToClipboard(buildCurlCommand(ev), copySuccess, copyFail)
+                }
+              >
+                <IconCopy className="h-3.5 w-3.5" />
+                {t("securityEventDetail.copyCurl")}
+              </Button>
+            </div>
+            <Button size="sm" onClick={() => onOpenChange(false)}>
               {t("common.close")}
             </Button>
           </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+        </DialogContent>
+      </Dialog>
 
       {/* ====== 误报反馈提交对话框 ====== */}
       <Dialog open={fpDialogOpen} onOpenChange={setFpDialogOpen}>
         <DialogContent className="max-w-md">
-          <DialogTitle>
-            {t("falsePositives.reportDialogTitle")}
-          </DialogTitle>
+          <DialogTitle>{t("falsePositives.reportDialogTitle")}</DialogTitle>
           <DialogDescription>
             {t("falsePositives.reportDialogDesc")}
           </DialogDescription>
@@ -871,9 +1021,7 @@ export function SecurityEventDetailDialog({
               onClick={handleSubmitFalsePositive}
               disabled={fpLoading}
             >
-              {fpLoading
-                ? t("common.submitting")
-                : t("falsePositives.submit")}
+              {fpLoading ? t("common.submitting") : t("falsePositives.submit")}
             </Button>
           </div>
         </DialogContent>

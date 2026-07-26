@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import {
   useAdminUsers,
   useAdminUserCreate,
@@ -13,6 +14,7 @@ import { DataTable } from "@/components/data-table";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -52,7 +54,7 @@ function roleBadgeVariant(role: string): "default" | "secondary" | "outline" {
 
 export default function AdminUsersPage() {
   const { t } = useTranslation();
-  const { data, isLoading, mutate } = useAdminUsers();
+  const { data, isLoading, error, mutate } = useAdminUsers();
   const { execute: createUser, loading: createLoading } = useAdminUserCreate();
   const { execute: updateRole } = useAdminUserUpdateRole();
   const { execute: updatePassword, loading: pwdLoading } = useAdminUserUpdatePassword();
@@ -239,18 +241,25 @@ export default function AdminUsersPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("adminUsers.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("adminUsers.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("adminUsers.title")}
+        description={t("adminUsers.description")}
+        actions={
           <Button onClick={() => setCreateOpen(true)}>
             <IconPlus className="mr-2 h-4 w-4" />
             {t("adminUsers.create")}
           </Button>
-        </div>
-      </div>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <DataTable
         columns={columns}

@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"testing"
 
-	"My-OpenWaf/internal/store"
-	"My-OpenWaf/internal/store/repository"
-
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/route/param"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+
+	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
 )
 
 func newSystemSettingsRepoForTest(t *testing.T) *repository.SystemSettingsRepo {
@@ -191,5 +193,196 @@ func TestSyncCVEAutoDropToDropPolicyPreservesBotFields(t *testing.T) {
 	}
 	if got.CVEAutoDropCritical || got.CVEAutoDropHigh {
 		t.Fatalf("cve auto drop was not synced: %+v", got)
+	}
+}
+
+func TestLoadProtectionConfigDefaultOnMissingKey(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := LoadProtectionConfig(repo)
+	def := store.DefaultProtectionConfig()
+	data1, _ := json.Marshal(cfg)
+	data2, _ := json.Marshal(def)
+	if string(data1) != string(data2) {
+		t.Fatalf("expected default config on missing key, got %s", data1)
+	}
+}
+
+func TestSaveAndLoadProtectionConfig(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	def := store.DefaultProtectionConfig()
+	def.BotDetectionEnabled = !def.BotDetectionEnabled
+	if err := SaveProtectionConfig(repo, def); err != nil {
+		t.Fatalf("SaveProtectionConfig: %v", err)
+	}
+	got := LoadProtectionConfig(repo)
+	if got.BotDetectionEnabled != def.BotDetectionEnabled {
+		t.Fatalf("expected BotDetectionEnabled %v, got %v", def.BotDetectionEnabled, got.BotDetectionEnabled)
+	}
+}
+
+func TestParseUintParam(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Params = param.Params{{Key: "id", Value: "42"}}
+	v, err := ParseUintParam(ctx, "id")
+	if err != nil || v != 42 {
+		t.Fatalf("ParseUintParam(42) = (%d, %v), want (42, nil)", v, err)
+	}
+	ctx.Params = param.Params{{Key: "id", Value: "notanumber"}}
+	_, err = ParseUintParam(ctx, "id")
+	if err == nil {
+		t.Fatal("expected error for non-numeric id")
+	}
+}
+
+func TestValidateRuleAction(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"", "", true},
+		{"intercept", "intercept", true},
+		{"block", "intercept", true},
+		{"observe", "observe", true},
+		{"allow", "", false},
+		{"tag", "", false},
+		{"unknown_xyz", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := ValidateRuleAction(tt.in)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("ValidateRuleAction(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestValidateActionWithoutRedirectTarget(t *testing.T) {
+	_, ok := ValidateActionWithoutRedirectTarget("redirect")
+	if ok {
+		t.Fatal("redirect action should be rejected when no redirect target is present")
+	}
+	got, ok := ValidateActionWithoutRedirectTarget("intercept")
+	if !ok || got != "intercept" {
+		t.Fatalf("intercept should be valid: got (%q, %v)", got, ok)
+	}
+	_, ok = ValidateActionWithoutRedirectTarget("")
+	if !ok {
+		t.Fatal("empty action should be valid (inherits default)")
+	}
+}
+
+func TestValidateAntiReplayAction(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"", "", true},
+		{"intercept", "intercept", true},
+		{"challenge", "challenge", true},
+		{"captcha_challenge", "captcha_challenge", true},
+		{"shield_challenge", "shield_challenge", true},
+		{"chain_challenge", "chain_challenge", true},
+		{"drop", "", false},
+		{"observe", "", false},
+		{"allow", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := ValidateAntiReplayAction(tt.in)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("ValidateAntiReplayAction(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestValidateBotScoreThreshold(t *testing.T) {
+	for _, v := range []int{1, 50, 100} {
+		if !ValidateBotScoreThreshold(v) {
+			t.Errorf("ValidateBotScoreThreshold(%d) should be true", v)
+		}
+	}
+	for _, v := range []int{0, -1, 101, 200} {
+		if ValidateBotScoreThreshold(v) {
+			t.Errorf("ValidateBotScoreThreshold(%d) should be false", v)
+		}
+	}
+}
+
+func TestReloadCVERulesNilDoesNotPanic(t *testing.T) {
+	ReloadCVERules(nil)
+}
+
+func TestSyncBotEnabledToProtection(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := SyncBotEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncBotEnabledToProtection(true): %v", err)
+	}
+	cfg := LoadProtectionConfig(repo)
+	if !cfg.BotDetectionEnabled {
+		t.Fatal("BotDetectionEnabled should be true after sync")
+	}
+	if err := SyncBotEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncBotEnabledToProtection same value: %v", err)
+	}
+	if err := SyncBotEnabledToProtection(repo, false); err != nil {
+		t.Fatalf("SyncBotEnabledToProtection(false): %v", err)
+	}
+	cfg = LoadProtectionConfig(repo)
+	if cfg.BotDetectionEnabled {
+		t.Fatal("BotDetectionEnabled should be false after disabling")
+	}
+}
+
+func TestSyncCaptchaEnabledToProtection(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := SyncCaptchaEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncCaptchaEnabledToProtection(true): %v", err)
+	}
+	cfg := LoadProtectionConfig(repo)
+	if !cfg.CaptchaEnabled {
+		t.Fatal("CaptchaEnabled should be true after sync")
+	}
+	if err := SyncCaptchaEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncCaptchaEnabledToProtection same value: %v", err)
+	}
+}
+
+func TestSyncBrowserSignToProtection(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := SyncBrowserSignToProtection(repo, true, 600, "intercept"); err != nil {
+		t.Fatalf("SyncBrowserSignToProtection: %v", err)
+	}
+	cfg := LoadProtectionConfig(repo)
+	if !cfg.BrowserSignEnabled || cfg.BrowserSignTTL != 600 || cfg.BrowserSignAction != "intercept" {
+		t.Fatalf("unexpected BrowserSign state: enabled=%v ttl=%d action=%q",
+			cfg.BrowserSignEnabled, cfg.BrowserSignTTL, cfg.BrowserSignAction)
+	}
+	if err := SyncBrowserSignToProtection(repo, true, 600, "intercept"); err != nil {
+		t.Fatalf("SyncBrowserSignToProtection same value: %v", err)
+	}
+}
+
+func TestSyncProtectionBotToSettings(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	initial := BotSettingsResponse{Enabled: false, ScoreThreshold: 75}
+	data, _ := json.Marshal(initial)
+	_ = repo.Set("bot_settings", string(data))
+
+	if err := SyncProtectionBotToSettings(repo, true); err != nil {
+		t.Fatalf("SyncProtectionBotToSettings(true): %v", err)
+	}
+	val, _ := repo.Get("bot_settings")
+	var got BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("Enabled should be true after sync")
+	}
+	if got.ScoreThreshold != 75 {
+		t.Fatalf("unrelated ScoreThreshold changed: got %d", got.ScoreThreshold)
+	}
+	if err := SyncProtectionBotToSettings(repo, true); err != nil {
+		t.Fatalf("SyncProtectionBotToSettings same value: %v", err)
 	}
 }

@@ -206,9 +206,9 @@ func TestHTTP3AltSvcAdvertisementFollowsRouteTable(t *testing.T) {
 	}
 	sn := &snapshotpkg.Snapshot{
 		TLSDefaults: tlsDefaults,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			"a": rtA,
-			"b": rtB,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			"a": &rtA,
+			"b": &rtB,
 		},
 	}
 
@@ -299,8 +299,8 @@ func TestHTTP3AltSvcAdvertisementRequiresTLSHTTP3Plan(t *testing.T) {
 	}
 	sn := &snapshotpkg.Snapshot{
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			"plain": rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			"plain": &rt,
 		},
 	}
 
@@ -839,8 +839,8 @@ func TestHTTP3ServerCompletesQUICHandshakeAndProxiesResponse(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1011,8 +1011,8 @@ func TestHTTP3ServerProxiesHEADWithoutResponseBody(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1200,8 +1200,8 @@ func TestHTTP3ServerProxiesPOSTBodyAndNoContentResponse(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1400,8 +1400,8 @@ func TestHTTP3ServerProxiesPATCHBodyAndResponse(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1604,8 +1604,8 @@ func TestHTTP3ServerProxiesPUTStreamingBodyAndResponse(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1864,8 +1864,8 @@ func TestHTTP3ServerCancelsUpstreamRequestBodyWhenClientCancelsUpload(t *testing
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2121,8 +2121,8 @@ func TestHTTP3ServerProxiesDELETEBodyAndResponse(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2327,8 +2327,8 @@ func TestHTTP3ServerProxiesOPTIONSPreflightHeadersAndResponse(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2517,8 +2517,8 @@ func TestHTTP3ServerProxiesResponseTrailers(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2689,8 +2689,8 @@ func TestHTTP3ServerProxiesSSEResponseStream(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2912,8 +2912,8 @@ func TestHTTP3ServerCancelsUpstreamSSEWhenClientClosesResponseBody(t *testing.T)
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3173,8 +3173,8 @@ func TestHTTP3ServerCancelsUpstreamStreamingResponseWhenClientClosesResponseBody
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3430,8 +3430,8 @@ func TestHTTP3ServerShutdownClosesActiveStreamAndCancelsUpstream(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3641,8 +3641,8 @@ func TestHTTP3ServerCompressesResponseForGzipClient(t *testing.T) {
 		ResponseCompressionEnabled:     true,
 		ResponseCompressionGzipEnabled: true,
 		ResponseCompressionMinBytes:    snapshotpkg.DefaultResponseCompressionMinBytes,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -3847,8 +3847,8 @@ func TestHTTP3ServerDoesNotInjectAcceptEncodingWhenClientOmitsIt(t *testing.T) {
 		ResponseCompressionEnabled:     true,
 		ResponseCompressionGzipEnabled: true,
 		ResponseCompressionMinBytes:    snapshotpkg.DefaultResponseCompressionMinBytes,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4038,8 +4038,8 @@ func TestHTTP3ServerCompressesResponseForBrotliClient(t *testing.T) {
 		ResponseCompressionEnabled:     true,
 		ResponseCompressionGzipEnabled: true,
 		ResponseCompressionMinBytes:    snapshotpkg.DefaultResponseCompressionMinBytes,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4237,8 +4237,8 @@ func TestHTTP3ServerSkipsGzipCompressionForNoTransformResponse(t *testing.T) {
 		ResponseCompressionEnabled:     true,
 		ResponseCompressionGzipEnabled: true,
 		ResponseCompressionMinBytes:    snapshotpkg.DefaultResponseCompressionMinBytes,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4436,8 +4436,8 @@ func TestHTTP3ServerProxiesRequestTrailersToUpstream(t *testing.T) {
 		Protection:  protection,
 		HTTP2Config: snapshotpkg.DefaultHTTP2Config(),
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(tcpBind, rt.Site.Host): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -4721,8 +4721,8 @@ func TestBuildHTTP3ServerTLSConfigReturnsOCSPStapledCertificate(t *testing.T) {
 	}
 	sn := &snapshotpkg.Snapshot{
 		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): &rt,
 		},
 	}
 
@@ -4784,9 +4784,9 @@ func TestBuildHTTP3ServerTLSConfigUsesRouteBindCertificate(t *testing.T) {
 	runtimes := []snapshotpkg.SiteRuntime{rtA, rtB}
 	sn := &snapshotpkg.Snapshot{
 		TLSDefaults: tlsDefaults,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bindA, hostA): rtA,
-			snapshotpkg.SiteMapKey(bindB, hostB): rtB,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bindA, hostA): &rtA,
+			snapshotpkg.SiteMapKey(bindB, hostB): &rtB,
 		},
 		SiteTLSCertBySNI: map[string]tls.Certificate{
 			snapshotpkg.SNICertKey(bindA, hostA): certA,
@@ -4849,9 +4849,9 @@ func TestBuildHTTP3ServerTLSConfigUsesSelfSignedForConflictingSNI(t *testing.T) 
 	runtimes := []snapshotpkg.SiteRuntime{rtA, rtB}
 	sn := &snapshotpkg.Snapshot{
 		TLSDefaults: tlsDefaults,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(bindA, conflictHost): rtA,
-			snapshotpkg.SiteMapKey(bindB, conflictHost): rtB,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bindA, conflictHost): &rtA,
+			snapshotpkg.SiteMapKey(bindB, conflictHost): &rtB,
 		},
 		SiteTLSCertBySNI: map[string]tls.Certificate{
 			snapshotpkg.SNICertKey(bindA, conflictHost): certA,
@@ -4891,8 +4891,8 @@ func TestBuildHTTP3ServerTLSConfigAppliesSessionTicketSwitch(t *testing.T) {
 	}
 	sn := &snapshotpkg.Snapshot{
 		TLSDefaults: tlsDefaults,
-		Sites: map[string]snapshotpkg.SiteRuntime{
-			snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): rt,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): &rt,
 		},
 	}
 
@@ -4924,8 +4924,8 @@ func TestHTTP3ListenerFingerprintIncludesSessionTicketSwitch(t *testing.T) {
 		runtimes := []snapshotpkg.SiteRuntime{rt}
 		return &snapshotpkg.Snapshot{
 			TLSDefaults: tlsDefaults,
-			Sites: map[string]snapshotpkg.SiteRuntime{
-				snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): rt,
+			Sites: map[string]*snapshotpkg.SiteRuntime{
+				snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): &rt,
 			},
 		}, runtimes, buildHTTP3RouteTable(runtimes)
 	}
@@ -4968,8 +4968,8 @@ func TestHTTP3ListenerFingerprintIncludesOCSPStapleMaterial(t *testing.T) {
 		runtimes := []snapshotpkg.SiteRuntime{rt}
 		return &snapshotpkg.Snapshot{
 			TLSDefaults: tlsDefaults,
-			Sites: map[string]snapshotpkg.SiteRuntime{
-				snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): rt,
+			Sites: map[string]*snapshotpkg.SiteRuntime{
+				snapshotpkg.SiteMapKey(rt.Bind, rt.Site.Host): &rt,
 			},
 		}, runtimes, buildHTTP3RouteTable(runtimes)
 	}

@@ -13,14 +13,20 @@ func prepareChallengeResponseHeaders(c *app.RequestContext, reqID string) {
 }
 
 // WriteCaptchaChallengeResponse renders a standalone CAPTCHA challenge page.
-func WriteCaptchaChallengeResponse(c *app.RequestContext, reqID string, cm *CaptchaManager, captchaType CaptchaType, statusCode int) {
+// envCheck 为 true 时为该验证码会话绑定环境指纹密钥，并在页面注入加密的
+// 浏览器/环境采集 JS，提交时携带 __waf_env_fp 供服务端校验是否为真实浏览器。
+func WriteCaptchaChallengeResponse(c *app.RequestContext, reqID string, cm *CaptchaManager, captchaType CaptchaType, envCheck bool, statusCode int) {
 	prepareChallengeResponseHeaders(c, reqID)
-	challenge, err := cm.Generate(captchaType)
+	challenge, err := cm.Generate(captchaType, envCheck)
 	if err != nil {
 		c.String(500, "captcha generation failed")
 		return
 	}
-	html := fmt.Sprintf(captchaPageHTML, renderCaptchaHTML(challenge), challenge.SessionID, challenge.Type, challenge.Prompt, inputModeForCaptcha(challenge.Type), reqID)
+	envJS := ""
+	if envCheck && challenge.EnvKeyHex != "" {
+		envJS = "<script>" + EnvCheckJSEncrypted(challenge.EnvKeyHex) + "</script>"
+	}
+	html := fmt.Sprintf(captchaPageHTML, renderCaptchaHTML(challenge), challenge.SessionID, challenge.Type, challenge.Prompt, inputModeForCaptcha(challenge.Type), reqID, envJS)
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
@@ -98,6 +104,7 @@ input[type=text]:focus{border-color:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166
 <form method="POST" action="/__owaf/captcha/verify">
 <input type="hidden" name="__waf_captcha_session" value="%s">
 <input type="hidden" id="cap-type" value="%s">
+<input type="hidden" id="cap-env" name="__waf_env_fp" value="">
 <input type="text" id="cap-answer" name="__waf_captcha_answer" placeholder="%s" aria-label="%s" autocomplete="off" autofocus>
 <button type="submit" class="btn">Submit / 提交</button>
 </form>
@@ -136,8 +143,16 @@ if(type==='rotate'&&rotate&&img){
   answer.type='hidden';
   rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});img.style.transform='rotate('+rotate.value+'deg)';});
 }
+var capEnv=document.getElementById('cap-env');
+var capForm=answer&&answer.form;
+if(capEnv&&capForm){
+  capForm.addEventListener('submit',function(){
+    try{if(window.__owaf_env_encrypted)capEnv.value=window.__owaf_env_encrypted;}catch(e){}
+  });
+}
 })();
 </script>
+%s
 <div class="footer">Protected by My-OpenWAF</div>
 </div>
 </body>

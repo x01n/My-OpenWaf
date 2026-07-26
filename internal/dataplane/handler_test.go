@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -290,20 +292,54 @@ func TestChallengeSubmissionValuesOnlyAcceptsURLEncodedForm(t *testing.T) {
 		"__waf_challenge_rid":   {"request-id"},
 	}
 
-	ts, token, requestID, ok := challengeSubmissionValues([]byte(values.Encode()), "application/x-www-form-urlencoded; charset=UTF-8")
+	sub, ok := challengeSubmissionValues([]byte(values.Encode()), "application/x-www-form-urlencoded; charset=UTF-8")
 	if !ok {
 		t.Fatal("expected complete URL-encoded challenge submission")
 	}
-	if ts != "1700000000" || token != "signed-token" || requestID != "request-id" {
-		t.Fatalf("challenge values = %q, %q, %q", ts, token, requestID)
+	if sub.TS != "1700000000" || sub.Token != "signed-token" || sub.RequestID != "request-id" || sub.EnvFP != "" {
+		t.Fatalf("challenge values = %+v", sub)
 	}
 
-	if _, _, _, ok := challengeSubmissionValues([]byte(values.Encode()), "multipart/form-data; boundary=test"); ok {
+	if _, ok := challengeSubmissionValues([]byte(values.Encode()), "multipart/form-data; boundary=test"); ok {
 		t.Fatal("multipart body must not be parsed as a challenge submission")
 	}
 	values.Del("__waf_challenge_token")
-	if _, _, _, ok := challengeSubmissionValues([]byte(values.Encode()), "application/x-www-form-urlencoded"); ok {
+	if _, ok := challengeSubmissionValues([]byte(values.Encode()), "application/x-www-form-urlencoded"); ok {
 		t.Fatal("incomplete challenge submission must be rejected")
+	}
+}
+
+// solveChallengePoW 以挑战页脚本相同的算法求出合法工作量证明，
+// 供端到端测试构造「客户端已完成挑战」的提交。
+func solveChallengePoW(t *testing.T, token string) (counter, hash string) {
+	t.Helper()
+	prefix := strings.Repeat("0", challenge.ChallengeProofDifficulty)
+	for i := int64(0); i < 5_000_000; i++ {
+		sum := sha256.Sum256([]byte(token + strconv.FormatInt(i, 10)))
+		h := hex.EncodeToString(sum[:])
+		if strings.HasPrefix(h, prefix) {
+			return strconv.FormatInt(i, 10), h
+		}
+	}
+	t.Fatalf("未能求出难度 %d 的解", challenge.ChallengeProofDifficulty)
+	return "", ""
+}
+
+// TestChallengeSubmissionValuesParsesProofFields 验证工作量证明字段被正确解析。
+func TestChallengeSubmissionValuesParsesProofFields(t *testing.T) {
+	values := url.Values{
+		"__waf_challenge_ts":      {"1700000000"},
+		"__waf_challenge_token":   {"signed-token"},
+		"__waf_challenge_rid":     {"request-id"},
+		"__waf_challenge_proof":   {"0000abcdef"},
+		"__waf_challenge_counter": {"12345"},
+	}
+	sub, ok := challengeSubmissionValues([]byte(values.Encode()), "application/x-www-form-urlencoded")
+	if !ok {
+		t.Fatal("expected complete submission")
+	}
+	if sub.Proof != "0000abcdef" || sub.Counter != "12345" {
+		t.Fatalf("proof fields = %q / %q", sub.Proof, sub.Counter)
 	}
 }
 
@@ -354,8 +390,8 @@ func TestHandlerMultipartBodyLifecycle(t *testing.T) {
 			holder.Store(&snapshot.Snapshot{
 				Revision:   1,
 				Protection: protection,
-				Sites: map[string]snapshot.SiteRuntime{
-					snapshot.SiteMapKey(":80", "upload.example.com"): rt,
+				Sites: map[string]*snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", "upload.example.com"): &rt,
 				},
 			})
 
@@ -439,17 +475,26 @@ func TestHandlerEvaluatesWAFBeforeChallengeRedirect(t *testing.T) {
 			holder.Store(&snapshot.Snapshot{
 				Revision:   1,
 				Protection: protection,
-				Sites: map[string]snapshot.SiteRuntime{
-					snapshot.SiteMapKey(":80", "challenge.example.com"): rt,
+				Sites: map[string]*snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", "challenge.example.com"): &rt,
 				},
 			})
 
 			requestID := "challenge-request-id"
-			ts, token := challenge.GenerateChallengeTokenPair(requestID)
+			// token 必须按数据面实际使用的客户端绑定信息签发，否则校验会失败。
+			// app.NewContext 无远端地址时 ResolveClientIP 解析为 0.0.0.0。
+			ts, token := challenge.GenerateChallengeTokenPairWithClaims(requestID, challenge.ChallengeTokenClaims{
+				ClientIP: "0.0.0.0",
+				Host:     "challenge.example.com",
+				SiteID:   1,
+			})
+			proofCounter, proofHash := solveChallengePoW(t, token)
 			values := url.Values{
-				"__waf_challenge_ts":    {ts},
-				"__waf_challenge_token": {token},
-				"__waf_challenge_rid":   {requestID},
+				"__waf_challenge_ts":      {ts},
+				"__waf_challenge_token":   {token},
+				"__waf_challenge_rid":     {requestID},
+				"__waf_challenge_counter": {proofCounter},
+				"__waf_challenge_proof":   {proofHash},
 			}
 			if tt.payload != "" {
 				values.Set("payload", tt.payload)
@@ -482,6 +527,98 @@ func TestHandlerEvaluatesWAFBeforeChallengeRedirect(t *testing.T) {
 				t.Fatalf("challenge cookie present = %v, want %v", got, tt.wantCookie)
 			}
 		})
+	}
+}
+
+// TestChallengeTokenCannotBeReplayedOrShared 端到端验证 JS 挑战 token 的两条约束：
+// 同一 token 只能兑换一次通行 cookie，且不能被另一个客户端（不同 UA）复用。
+//
+// 修复前 token = HMAC(reqID+":"+ts)，既不绑定客户端也没有一次性约束，
+// 抓取一份挑战页即可让任意数量的客户端在 5 分钟内反复换取通行 cookie。
+func TestChallengeTokenCannotBeReplayedOrShared(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.OWASPEnabled = false
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "replay.example.com", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+		Rules: []snapshot.CompiledRule{{
+			ID:       1,
+			Phase:    store.PhaseCustom,
+			Action:   store.ActionChallenge,
+			Priority: 1,
+			Kind:     "always",
+		}},
+	}
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "replay.example.com"): &rt,
+		},
+	})
+
+	const requestID = "replay-request-id"
+	const ownerUA = "Mozilla/5.0 owner"
+	ts, token := challenge.GenerateChallengeTokenPairWithClaims(requestID, challenge.ChallengeTokenClaims{
+		ClientIP:  "0.0.0.0",
+		UserAgent: ownerUA,
+		Host:      "replay.example.com",
+		SiteID:    1,
+	})
+	replayCounter, replayHash := solveChallengePoW(t, token)
+	body := []byte(url.Values{
+		"__waf_challenge_ts":      {ts},
+		"__waf_challenge_token":   {token},
+		"__waf_challenge_rid":     {requestID},
+		"__waf_challenge_counter": {replayCounter},
+		"__waf_challenge_proof":   {replayHash},
+	}.Encode())
+
+	handler := Handler(Options{
+		Holder: holder,
+		Engine: engine.New(holder, nil, nil, nil),
+		Log:    slog.Default(),
+		Bind:   ":80",
+	})
+
+	submit := func(userAgent string) *app.RequestContext {
+		ctx := app.NewContext(0)
+		ctx.Request.Header.SetMethod(http.MethodPost)
+		ctx.Request.SetRequestURI("/guarded")
+		ctx.Request.Header.SetHost("replay.example.com")
+		ctx.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		ctx.Request.Header.Set("User-Agent", userAgent)
+		ctx.Request.Header.Set("Referer", "/original")
+		ctx.Request.SetBodyStream(&trackingRequestBodyStream{reader: bytes.NewReader(body)}, len(body))
+		handler(context.Background(), ctx)
+		return ctx
+	}
+
+	first := submit(ownerUA)
+	if got := first.Response.StatusCode(); got != http.StatusFound {
+		t.Fatalf("first submission status = %d, want %d", got, http.StatusFound)
+	}
+	if len(first.Response.Header.Peek("Set-Cookie")) == 0 {
+		t.Fatal("first submission should issue a challenge pass cookie")
+	}
+
+	replay := submit(ownerUA)
+	if got := replay.Response.StatusCode(); got == http.StatusFound {
+		t.Fatal("replayed challenge token must not issue a second pass cookie")
+	}
+
+	shared := submit("curl/8.0")
+	if got := shared.Response.StatusCode(); got == http.StatusFound {
+		t.Fatal("challenge token must not be usable by a different client")
 	}
 }
 
@@ -697,8 +834,8 @@ func TestHandlerRuleChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 			sn := &snapshot.Snapshot{
 				Revision:   1,
 				Protection: protection,
-				Sites: map[string]snapshot.SiteRuntime{
-					snapshot.SiteMapKey(":80", "challenge-rule.example.com"): rt,
+				Sites: map[string]*snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", "challenge-rule.example.com"): &rt,
 				},
 			}
 			holder.Store(sn)
@@ -962,8 +1099,8 @@ func TestHandlerRecordsTLSSNIWarningForHostMismatch(t *testing.T) {
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":443", "app.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "app.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1039,8 +1176,8 @@ func TestHandlerSkipsTLSSNIWarningWhenHostMatches(t *testing.T) {
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":443", "app.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "app.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1122,19 +1259,20 @@ func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *tes
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "app.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
 
 	eng := engine.New(holder, nil, nil, nil)
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
 	handler := Handler(Options{
-		Holder:               holder,
-		Engine:               eng,
-		Log:                  slog.Default(),
-		Bind:                 ":80",
-		RecordedResourceRepo: recordedRepo,
+		Holder:             holder,
+		Engine:             eng,
+		Log:                slog.Default(),
+		Bind:               ":80",
+		ResourceAggregator: resourceAgg,
 	})
 
 	ctx := app.NewContext(0)
@@ -1153,6 +1291,9 @@ func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *tes
 		JA3Hash:    "ja3-match-value",
 		JA4:        "ja4-match-value",
 	}), ctx)
+
+	// Record 为同步调用，Close 强制 flush 内存聚合条目，落库后即可确定性查询。
+	resourceAgg.Close()
 
 	if got := ctx.Response.StatusCode(); got != http.StatusCreated {
 		t.Fatalf("status = %d, want %d", got, http.StatusCreated)
@@ -1240,23 +1381,27 @@ func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
 		Bind:                ":443",
 		UpstreamURLs:        []string{upstream.URL},
 		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 21, Target: store.AppRouteTargetRequestMethod, Op: store.AppRouteOpEq, Pattern: "GET"},
+		},
 	}
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":443", "h3-resource.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "h3-resource.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
 
 	eng := engine.New(holder, nil, nil, nil)
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
 	handler := Handler(Options{
-		Holder:               holder,
-		Engine:               eng,
-		Log:                  slog.Default(),
-		Bind:                 ":443",
-		RecordedResourceRepo: recordedRepo,
+		Holder:             holder,
+		Engine:             eng,
+		Log:                slog.Default(),
+		Bind:               ":443",
+		ResourceAggregator: resourceAgg,
 	})
 
 	client, server := net.Pipe()
@@ -1288,6 +1433,9 @@ func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
 	})
 
 	handler(context.Background(), ctx)
+
+	// Record 为同步调用，Close 强制 flush 内存聚合条目，落库后即可确定性查询。
+	resourceAgg.Close()
 
 	if got := ctx.Response.StatusCode(); got != http.StatusOK {
 		t.Fatalf("status = %d, want %d", got, http.StatusOK)
@@ -1370,19 +1518,20 @@ func TestHandlerRecordedResourcesIncludeInterceptedRequestsWithoutTreatingLocalB
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "blocked.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "blocked.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
 
 	eng := engine.New(holder, nil, nil, nil)
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
 	handler := Handler(Options{
-		Holder:               holder,
-		Engine:               eng,
-		Log:                  slog.Default(),
-		Bind:                 ":80",
-		RecordedResourceRepo: recordedRepo,
+		Holder:             holder,
+		Engine:             eng,
+		Log:                slog.Default(),
+		Bind:               ":80",
+		ResourceAggregator: resourceAgg,
 	})
 
 	ctx := app.NewContext(0)
@@ -1400,6 +1549,9 @@ func TestHandlerRecordedResourcesIncludeInterceptedRequestsWithoutTreatingLocalB
 		JA3Hash:    "ja3-intercept-value",
 		JA4:        "ja4-intercept-value",
 	}), ctx)
+
+	// Record 为同步调用，Close 强制 flush 内存聚合条目，落库后即可确定性查询。
+	resourceAgg.Close()
 
 	if got := ctx.Response.StatusCode(); got != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
@@ -1528,8 +1680,8 @@ func TestHandlerHEADCacheMissUsesStreamingForwardPath(t *testing.T) {
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1607,8 +1759,8 @@ func TestHandlerHEADCacheHitWritesMetadataWithoutBody(t *testing.T) {
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1709,8 +1861,8 @@ func TestHandlerRecompressesDecodedCachedUpstreamCompressedResponses(t *testing.
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1832,8 +1984,8 @@ func TestHandlerCacheHitBypassesRangeAndConditionalRequests(t *testing.T) {
 			sn := &snapshot.Snapshot{
 				Revision:   1,
 				Protection: protection,
-				Sites: map[string]snapshot.SiteRuntime{
-					snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+				Sites: map[string]*snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", "cache.example.com"): &rt,
 				},
 			}
 			holder.Store(sn)
@@ -1918,8 +2070,8 @@ func TestHandlerServesStaleCacheWhenUpstreamFailsAfterCacheExpiry(t *testing.T) 
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2009,8 +2161,8 @@ func TestHandlerCacheMissLargeResponseStreamsWithoutCaching(t *testing.T) {
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "cache.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "cache.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2079,8 +2231,8 @@ func TestHandlerMatchesTLSHandshakeMetadataRuleWithoutClientHelloFingerprint(t *
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":443", "tls-rule.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "tls-rule.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -2169,8 +2321,8 @@ func TestHandlerMatchesInternalHTTP3TLSFingerprintRules(t *testing.T) {
 			sn := &snapshot.Snapshot{
 				Revision:   1,
 				Protection: protection,
-				Sites: map[string]snapshot.SiteRuntime{
-					snapshot.SiteMapKey(":443", "h3-rule.example.com"): rt,
+				Sites: map[string]*snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":443", "h3-rule.example.com"): &rt,
 				},
 			}
 			holder.Store(sn)
@@ -2220,7 +2372,7 @@ func TestHandlerAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *testing.T) {
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: store.DefaultProtectionConfig(),
-		Sites:      make(map[string]snapshot.SiteRuntime),
+		Sites:      make(map[string]*snapshot.SiteRuntime),
 	}
 	rt := snapshot.SiteRuntime{
 		Site: store.Site{
@@ -2232,7 +2384,7 @@ func TestHandlerAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *testing.T) {
 		Bind:              ":80",
 		AntiReplayEnabled: true,
 	}
-	sn.Sites[snapshot.SiteMapKey(":80", "ttl.example.com")] = rt
+	sn.Sites[snapshot.SiteMapKey(":80", "ttl.example.com")] = &rt
 	holder.Store(sn)
 
 	eng := engine.New(holder, nil, nil, nil)

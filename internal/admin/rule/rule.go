@@ -84,6 +84,9 @@ func GetRule(repo *repository.RuleRepo) app.HandlerFunc {
 func CreateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item store.Rule
+		// 先填模型声明的默认值，再让请求体覆盖：json 只写出现过的字段，
+		// 这样「未提供」保留默认值，「显式传 false/0」才能如实落库。
+		_ = store.ApplyModelDefaults(&item)
 		if err := c.BindJSON(&item); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return

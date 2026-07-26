@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
@@ -16,6 +18,7 @@ import (
 	"My-OpenWaf/internal/waf/drop"
 	"My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/luaplugin"
 	"My-OpenWaf/internal/waf/ratelimit"
 )
 
@@ -24,6 +27,13 @@ type compiledRules struct {
 	ACL       []rules.Compiled
 	Signature []rules.Compiled
 	Custom    []rules.Compiled
+}
+
+// compiledSnapshot is an immutable snapshot of the compiled rules cache.
+// Accessed via atomic.Pointer for lock-free reads on the hot path.
+type compiledSnapshot struct {
+	revision uint64
+	cache    map[uint]*compiledRules
 }
 
 // phasesEntry holds a pre-built phase chain along with the protection-config
@@ -39,6 +49,13 @@ type phasesCacheKey struct {
 	antiReplayEnabled bool
 }
 
+// phasesSnapshot is an immutable snapshot of the phases cache.
+// Accessed via atomic.Pointer for lock-free reads on the hot path.
+type phasesSnapshot struct {
+	revision uint64
+	cache    map[phasesCacheKey]*phasesEntry
+}
+
 // Engine orchestrates the full WAF processing pipeline for each request.
 type Engine struct {
 	resolver       *sites.Resolver
@@ -52,31 +69,36 @@ type Engine struct {
 	antiReplay     *antireplay.AntiReplayManager // nonce-based replay prevention
 	escalation     *escalation.EscalationManager // step-up response escalation
 
-	// Per-snapshot rule compilation cache. Key: snapshotRevision<<32 | policyID.
-	// Cleared on snapshot change via revision check.
-	compiledMu       sync.RWMutex
-	compiledRevision uint64
-	compiledCache    map[uint]*compiledRules
+	// Lock-free compiled rules cache. Hot-path reads use atomic.Pointer.Load()
+	// (single atomic load, no cache-line bouncing). Writes are serialized by
+	// compiledWriteMu and publish a new immutable snapshot via Store().
+	compiledPtr     atomic.Pointer[compiledSnapshot]
+	compiledWriteMu sync.Mutex
 
-	// Per-snapshot phase chain cache. Key: site-level phase-affecting inputs.
-	// Invalidated when revision changes.
-	phasesMu       sync.RWMutex
-	phasesRevision uint64
-	phasesCache    map[phasesCacheKey]*phasesEntry
+	// Lock-free phase chain cache. Same pattern as compiledPtr.
+	phasesPtr     atomic.Pointer[phasesSnapshot]
+	phasesWriteMu sync.Mutex
+
+	// luaPlugins 为自定义 Lua 策略引擎，可为 nil（未启用）。
+	//
+	// 请求路径并发读、reload 路径写，故用 atomic.Pointer 而非裸指针：
+	// 后者在此处会构成数据竞争。引擎内部的脚本集合替换有自己的锁。
+	luaPlugins atomic.Pointer[luaplugin.Engine]
 }
 
 // New creates a WAF engine backed by the given snapshot holder and rate limiters.
 func New(holder *snapshot.Holder, reqRL, errRL ratelimit.RateLimiterBackend, ipRep *iprep.IPReputation) *Engine {
-	return &Engine{
+	e := &Engine{
 		resolver:       sites.NewResolver(holder),
 		reqRateLimiter: reqRL,
 		errRateLimiter: errRL,
 		ipRep:          ipRep,
 		botThreshold:   80,
 		cveDetector:    cve.NewCVEDetector(),
-		compiledCache:  make(map[uint]*compiledRules),
-		phasesCache:    make(map[phasesCacheKey]*phasesEntry),
 	}
+	e.compiledPtr.Store(&compiledSnapshot{cache: make(map[uint]*compiledRules)})
+	e.phasesPtr.Store(&phasesSnapshot{cache: make(map[phasesCacheKey]*phasesEntry)})
+	return e
 }
 
 // SetGeoResolver attaches a MaxMind GeoIP resolver for bot two-phase scoring.
@@ -93,6 +115,83 @@ func (e *Engine) SetBotThreshold(threshold int) {
 
 // IPReputation returns the underlying IP reputation system.
 func (e *Engine) IPReputation() *iprep.IPReputation { return e.ipRep }
+
+// SetLuaPlugins 设置或热替换自定义 Lua 策略引擎。传 nil 即停用插件。
+func (e *Engine) SetLuaPlugins(lp *luaplugin.Engine) {
+	if e == nil {
+		return
+	}
+	e.luaPlugins.Store(lp)
+}
+
+// LuaPlugins 返回当前的 Lua 策略引擎，可能为 nil。
+func (e *Engine) LuaPlugins() *luaplugin.Engine {
+	if e == nil {
+		return nil
+	}
+	return e.luaPlugins.Load()
+}
+
+/**
+ * applyPostLuaDecision 让后置脚本在拿到内置判定后决定是否覆盖它。
+ *
+ * 后置策略不能作为普通管道阶段实现：管道遇终止动作即 return，链尾阶段
+ * 永远读不到「已被拦截」的判定，也就无法实现「对误报放行」这一核心用例。
+ *
+ * 覆盖规则刻意收紧：
+ *   - 只有 allow 能推翻内置的终止判定
+ *   - 其余动作仅在内置未给出终止判定时生效，避免脚本绕过内置的终止优先级
+ *     语义（drop > intercept > rate_limit > challenge > redirect）
+ *   - 无法识别的动作一律忽略：自定义策略的笔误不应升级为误封
+ *
+ * @param lp      Lua 引擎。
+ * @param reqCtx  请求上下文。
+ * @param builtin 内置管道给出的判定。
+ * @return 最终判定。
+ */
+func applyPostLuaDecision(lp *luaplugin.Engine, reqCtx *pipeline.RequestCtx, builtin action.Result) action.Result {
+	view := rules.BuildLuaRequestView(reqCtx)
+	// 把内置判定暴露给脚本，使其能针对具体阶段与动作做决策。
+	view.Phase = builtin.Phase
+	if builtin.Matched {
+		view.Action = string(builtin.Type)
+	}
+
+	dec := lp.Evaluate(context.Background(), luaplugin.StagePost, view)
+	if !dec.HasAction() {
+		return builtin
+	}
+	act := action.Normalize(action.Type(dec.Action))
+	if !action.IsValid(act) {
+		return builtin
+	}
+
+	if act == action.Allow {
+		// 放行：清空内置判定，请求继续走向上游。
+		return action.Result{Phase: "lua_post", Category: "lua_plugin", MatchDesc: dec.Message}
+	}
+	if builtin.IsTerminal() {
+		// 内置已判终止且脚本未要求放行：保留内置判定。
+		return builtin
+	}
+
+	// Matched 必须置位：action.Result.IsTerminal() 以它为前提，
+	// 漏设会让 intercept/drop 等终止动作被当作未命中而静默放行。
+	res := action.Result{
+		Type:      act,
+		Matched:   true,
+		Phase:     "lua_post",
+		Category:  "lua_plugin",
+		MatchDesc: dec.Message,
+	}
+	if dec.RedirectTo != "" {
+		res.RedirectTo = dec.RedirectTo
+	}
+	if dec.StatusCode > 0 {
+		res.StatusCode = dec.StatusCode
+	}
+	return res
+}
 
 type ProcessResult struct {
 	Action      action.Result
@@ -134,8 +233,17 @@ func (e *Engine) processResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime
 	phases := e.getOrBuildPhases(sn, rt, cr, prot)
 
 	runResult := pipeline.Run(phases, reqCtx)
+	res := runResult.Action
+
+	// 后置 Lua 策略在此执行而非作为管道阶段：管道遇终止动作即 return，
+	// 挂在链尾的阶段永远读不到「已被拦截」的判定，也就无法实现
+	// 「对特定误报放行」这一核心用例。放在这里才能拿到完整结果并覆盖它。
+	if lp := e.luaPlugins.Load(); lp != nil && lp.HasScripts(luaplugin.StagePost) {
+		res = applyPostLuaDecision(lp, reqCtx, res)
+	}
+
 	return ProcessResult{
-		Action:      runResult.Action,
+		Action:      res,
 		Site:        rt,
 		ObserveHits: runResult.ObserveHits,
 	}
@@ -143,20 +251,20 @@ func (e *Engine) processResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime
 
 // getCompiledRules returns pre-compiled, pre-partitioned rules for a site,
 // compiling them once per snapshot revision per policy.
+// Hot-path read: single atomic.Pointer.Load() — no lock, no contention.
 func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime) *compiledRules {
 	rev := sn.Revision
 	policyID := rt.PolicyID
 
-	e.compiledMu.RLock()
-	if e.compiledRevision == rev {
-		if cr, ok := e.compiledCache[policyID]; ok {
-			e.compiledMu.RUnlock()
+	// Lock-free fast path: load immutable snapshot and check cache.
+	snap := e.compiledPtr.Load()
+	if snap.revision == rev {
+		if cr, ok := snap.cache[policyID]; ok {
 			return cr
 		}
 	}
-	e.compiledMu.RUnlock()
 
-	// Compile rules (this is the expensive operation we want to do only once).
+	// Cache miss — compile rules (expensive, but happens at most once per policy per revision).
 	all := convertAndCompile(rt.Rules)
 	cr := &compiledRules{}
 	for i := range all {
@@ -170,14 +278,23 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		}
 	}
 
-	e.compiledMu.Lock()
-	if e.compiledRevision != rev {
-		// Snapshot changed — clear old cache.
-		e.compiledCache = make(map[uint]*compiledRules)
-		e.compiledRevision = rev
+	// Serialize writes: copy-on-write the immutable map, then atomic Store.
+	e.compiledWriteMu.Lock()
+	current := e.compiledPtr.Load()
+	var newCache map[uint]*compiledRules
+	if current.revision != rev {
+		// Revision changed — start fresh.
+		newCache = make(map[uint]*compiledRules)
+	} else {
+		// Same revision — copy existing entries + add new one.
+		newCache = make(map[uint]*compiledRules, len(current.cache)+1)
+		for k, v := range current.cache {
+			newCache[k] = v
+		}
 	}
-	e.compiledCache[policyID] = cr
-	e.compiledMu.Unlock()
+	newCache[policyID] = cr
+	e.compiledPtr.Store(&compiledSnapshot{revision: rev, cache: newCache})
+	e.compiledWriteMu.Unlock()
 
 	return cr
 }
@@ -187,8 +304,7 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 // the snapshot revision, effective protection pointer and site-level phase
 // toggles do not change.
 //
-// Hot path optimisation: this avoids allocating ~10 phase structs and a slice
-// on every request. The cache hit cost is one RLock + one map lookup.
+// Hot-path read: single atomic.Pointer.Load() — no lock, no cache-line bouncing.
 func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, cr *compiledRules, prot *store.ProtectionConfig) []pipeline.Phase {
 	rev := sn.Revision
 	key := phasesCacheKey{
@@ -196,14 +312,13 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		antiReplayEnabled: rt.AntiReplayEnabled,
 	}
 
-	e.phasesMu.RLock()
-	if e.phasesRevision == rev {
-		if entry, ok := e.phasesCache[key]; ok && entry.prot == prot {
-			e.phasesMu.RUnlock()
+	// Lock-free fast path.
+	snap := e.phasesPtr.Load()
+	if snap.revision == rev {
+		if entry, ok := snap.cache[key]; ok && entry.prot == prot {
 			return entry.phases
 		}
 	}
-	e.phasesMu.RUnlock()
 
 	// Build a fresh chain. Pre-allocate capacity for the maximum size.
 	phases := make([]pipeline.Phase, 0, 9)
@@ -219,6 +334,12 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
 	}
 
+	// 前置 Lua 策略：位于 ACL 之后、OWASP 之前，可在昂贵检测前提早判定。
+	// 后置策略不在此处——它需读到内置判定，见 applyPostLuaDecision。
+	if lp := e.luaPlugins.Load(); lp != nil && lp.HasScripts(luaplugin.StagePre) {
+		phases = append(phases, rules.NewLuaPhase(lp, luaplugin.StagePre))
+	}
+
 	if prot.OWASPEnabled {
 		phases = append(phases, rules.NewOWASPPhase(prot))
 	}
@@ -228,6 +349,11 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 
 	if prot.BotDetectionEnabled {
 		phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
+	}
+
+	// 浏览器签名校验：对 API 特征请求校验页面挂载 JS 写入的短时效签名头。
+	if prot.BrowserSignEnabled {
+		phases = append(phases, rules.NewBrowserSignPhase(prot))
 	}
 
 	if prot.RequestRateLimitEnabled && e.reqRateLimiter != nil {
@@ -242,13 +368,21 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		phases = append(phases, rules.NewCustomPhasePrecompiled(cr.Custom))
 	}
 
-	e.phasesMu.Lock()
-	if e.phasesRevision != rev {
-		e.phasesCache = make(map[phasesCacheKey]*phasesEntry)
-		e.phasesRevision = rev
+	// Serialize writes: copy-on-write the immutable map, then atomic Store.
+	e.phasesWriteMu.Lock()
+	current := e.phasesPtr.Load()
+	var newCache map[phasesCacheKey]*phasesEntry
+	if current.revision != rev {
+		newCache = make(map[phasesCacheKey]*phasesEntry)
+	} else {
+		newCache = make(map[phasesCacheKey]*phasesEntry, len(current.cache)+1)
+		for k, v := range current.cache {
+			newCache[k] = v
+		}
 	}
-	e.phasesCache[key] = &phasesEntry{prot: prot, phases: phases}
-	e.phasesMu.Unlock()
+	newCache[key] = &phasesEntry{prot: prot, phases: phases}
+	e.phasesPtr.Store(&phasesSnapshot{revision: rev, cache: newCache})
+	e.phasesWriteMu.Unlock()
 
 	return phases
 }

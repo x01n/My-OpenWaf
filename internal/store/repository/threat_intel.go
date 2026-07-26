@@ -31,8 +31,9 @@ func (r *ThreatIntelRepo) ListEnabled() ([]store.ThreatIntelFeed, error) {
 }
 
 // Create 新建订阅源。
+// Create 新建订阅源。Enabled/SyncInterval 带 gorm default，见 CreateWithZeroDefaults。
 func (r *ThreatIntelRepo) Create(item *store.ThreatIntelFeed) error {
-	return r.db.Create(item).Error
+	return store.CreateWithZeroDefaults(r.db, item)
 }
 
 // Update 全量保存订阅源。

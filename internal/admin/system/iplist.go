@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -55,6 +56,9 @@ func GetIPEntry(repo *repository.IPListRepo) app.HandlerFunc {
 func CreateIPEntry(repo *repository.IPListRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var body store.IPListEntry
+		// 先填模型声明的默认值，再让请求体覆盖：json 只写出现过的字段，
+		// 这样「未提供」保留默认值，「显式传 false/0」才能如实落库。
+		_ = store.ApplyModelDefaults(&body)
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -103,7 +107,7 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			Note    *string           `json:"note"`
 			Enabled *bool             `json:"enabled"`
 			Action  *string           `json:"action"`
-			SiteID  **uint            `json:"site_id"`
+			SiteID  json.RawMessage   `json:"site_id"`
 		}
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -137,8 +141,11 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 				return
 			}
 		}
-		if body.SiteID != nil {
-			existing.SiteID = *body.SiteID
+		if present, siteID, scopeErr := parseSiteScope(body.SiteID); scopeErr != nil {
+			c.JSON(400, map[string]string{"error": scopeErr.Error()})
+			return
+		} else if present {
+			existing.SiteID = siteID
 		}
 		if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})

@@ -201,40 +201,21 @@ func NewNodeCVEDetector() *NodeCVEDetector {
 	return d
 }
 
-// Detect scans the request for Node.js CVE exploitation attempts.
-func nodeRequestContainsAny(req *CVERequest, rule nodeCVERule, needles ...string) bool {
-	return requestTargetContainsAny(req, rule.target, needles...)
-}
-
-func shouldScanNodeRule(req *CVERequest, rule nodeCVERule) bool {
+func shouldScanNodeRule(req *CVERequest, rule nodeCVERule, hits *subDetectorHits) bool {
 	switch rule.cveID {
-	case "CVE-2019-10744":
-		return nodeRequestContainsAny(req, rule, "__proto__", "constructor.prototype", "prototype[")
-	case "CVE-2020-REACT-SSR":
-		return nodeRequestContainsAny(req, rule, "dangerouslysetinnerhtml", "__next_data__", "react")
-	case "CVE-2019-NODE-CMD":
-		return nodeRequestContainsAny(req, rule, "child_process", "exec(", "spawn(", "process.env", "require(", "whoami", "uname", "wget", "curl", "|", "`")
-	case "CVE-2017-14849":
-		return nodeRequestContainsAny(req, rule, "../", "%2e", "%5c", "..\\")
-	case "CVE-2022-29078":
-		return nodeRequestContainsAny(req, rule, "ejs", "<%", "template")
-	case "CVE-2023-32314":
-		return nodeRequestContainsAny(req, rule, "vm2", "constructor", "globalthis")
-	case "CVE-2024-34351", "CVE-2025-29927":
-		return nodeRequestContainsAny(req, rule, "x-middleware", "middleware-subrequest")
-	case "CVE-2025-55182":
-		return nodeRequestContainsAny(req, rule, "react.server", "rsc", "$@", "$1:", "__proto__", "child_process", "constructor", "function(", "new blob", "new response", "dynamic import")
-	case "CVE-2025-55184":
-		return nodeRequestContainsAny(req, rule, "server-action", "server action", "next-action", "/_next/data/", "__nextdatareq")
+	case "CVE-2019-10744", "CVE-2020-REACT-SSR", "CVE-2019-NODE-CMD",
+		"CVE-2017-14849", "CVE-2022-29078", "CVE-2023-32314",
+		"CVE-2024-34351", "CVE-2025-29927", "CVE-2025-55182", "CVE-2025-55184":
+		return subDetectorACGate(rule.cveID, rule.target, hits)
 	default:
 		return true
 	}
 }
 
-func (d *NodeCVEDetector) Detect(req *CVERequest) []CVEMatch {
+func (d *NodeCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMatch {
 	var matches []CVEMatch
 	for _, rule := range d.rules {
-		if !shouldScanNodeRule(req, rule) {
+		if !shouldScanNodeRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)
@@ -263,9 +244,9 @@ func (d *NodeCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	return matches
 }
 
-func (d *NodeCVEDetector) DetectFirst(req *CVERequest) (CVEMatch, bool) {
+func (d *NodeCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (CVEMatch, bool) {
 	for _, rule := range d.rules {
-		if !shouldScanNodeRule(req, rule) {
+		if !shouldScanNodeRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)

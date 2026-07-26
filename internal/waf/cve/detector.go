@@ -130,11 +130,12 @@ func (r *CVERuleRegistry) DetectAll(uri, body, ua string, headers map[string]str
 	defer r.mu.RUnlock()
 	var matches []CVEMatch
 	combinedLower := registryCombinedLower(uri, body, ua, headers)
+	acHit := registryACData.ac.matchMask(combinedLower)
 	for _, rule := range r.rules {
 		if !rule.Enabled {
 			continue
 		}
-		if !shouldScanRegisteredCVERule(rule, combinedLower) {
+		if !shouldScanRegisteredCVERuleAC(rule, combinedLower, &acHit) {
 			continue
 		}
 		if m := rule.CheckFunc(uri, body, ua, headers); m != nil {
@@ -149,11 +150,12 @@ func (r *CVERuleRegistry) DetectFirst(uri, body, ua string, headers map[string]s
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	combinedLower := registryCombinedLower(uri, body, ua, headers)
+	acHit := registryACData.ac.matchMask(combinedLower)
 	for _, rule := range r.rules {
 		if !rule.Enabled {
 			continue
 		}
-		if !shouldScanRegisteredCVERule(rule, combinedLower) {
+		if !shouldScanRegisteredCVERuleAC(rule, combinedLower, &acHit) {
 			continue
 		}
 		if m := rule.CheckFunc(uri, body, ua, headers); m != nil {
@@ -624,62 +626,39 @@ func lowerTargetsHaveNoSQLInjectSignal(targets []string) bool {
 	return false
 }
 
-func shouldScanRegisteredCVERule(rule *CVERule, combinedLower string) bool {
+// shouldScanRegisteredCVERuleAC 使用 AC bitset 判定纯 OR gate,复合 helper 原样调用。
+// hit 为调用方在 for 循环外对 combinedLower 做的一次 matchMask 结果。
+func shouldScanRegisteredCVERuleAC(rule *CVERule, combinedLower string, hit *acGateMask) bool {
 	switch rule.CVE {
+	// 复合 helper(含边界检查/AND/计数逻辑,不可 AC 化)——原样保留
 	case "CVE-2023-GRAPHQL":
 		return hasGraphQLIntrospectionSignalLower(combinedLower)
-	case "CVE-2014-6271":
-		return registeredCVERuleContainsAny(combinedLower, "() {")
 	case "CVE-2025-30208":
 		return hasViteFSBypassSignalLower(combinedLower)
 	case "CVE-2025-3248":
 		return hasLangflowValidateCodeSignalLower(combinedLower)
-	case "CVE-2025-24893":
-		return registeredCVERuleContainsAny(combinedLower, "solrsearch", "media=rss", "groovy", "{{async", "{{ async")
 	case "CVE-2025-53770":
 		return hasSharePointToolShellSignalLower(combinedLower)
 	case "CVE-2025-34028":
 		return hasCommvaultDeploySignalLower(combinedLower)
-	case "CVE-2025-47812":
-		return registeredCVERuleContainsAny(combinedLower, "loginok.html", "%00", "io.popen", "lua")
-	case "CVE-2025-4632":
-		return registeredCVERuleContainsAny(combinedLower, "swupdatefileuploader", "filename=", "magicinfo", "../")
-	case "CVE-2025-64446":
-		return registeredCVERuleContainsAny(combinedLower, "fwbcgi", "cgiinfo")
-	case "CVE-2025-10035":
-		return registeredCVERuleContainsAny(combinedLower, "unlicensed.xhtml", "garequestaction=activate", "javax.faces.viewstate")
-	case "CVE-2025-41243":
-		return registeredCVERuleContainsAny(combinedLower, "actuator/gateway", "addresponseheader", "#{", "spel")
-	case "CVE-2025-47916":
-		return registeredCVERuleContainsAny(combinedLower, "themeeditor", "customcss", "expression=")
-	case "CVE-2025-31161":
-		return registeredCVERuleContainsAny(combinedLower, "webinterface/function", "aws4-hmac-sha256", "crushftp")
-	case "CVE-2025-32756":
-		return registeredCVERuleContainsAny(combinedLower, "hostcheck_validate", "authhash")
-	case "CVE-2017-8046":
-		return registeredCVERuleContainsAny(combinedLower, "json-patch", "application/patch+json", "spel", "#{", "t(")
 	case "CVE-2023-1454":
 		return hasJeecgSQLiSignalLower(combinedLower)
-	case "CVE-2021-21351":
-		return registeredCVERuleContainsAny(combinedLower, "<java", "<sorted-set", "<dynamic-proxy", "xstream", "processbuilder", "runtime")
 	case "CVE-2019-3929":
 		return hasRouterCGIPathSignalLower(combinedLower)
 	case "CVE-2024-JAVAINJ":
 		return hasJavaCodeInjectSignalLower(combinedLower) || hasJavaOGNLSpELSignalLower(combinedLower)
-	case "CVE-2024-REMOTECALL":
-		return registeredCVERuleContainsAny(combinedLower, "jndi:", "ldap://", "rmi://", "iiop://", "jdbc:", "dns://")
 	case "CVE-2024-DEEPPATH":
 		return hasDeepPathTraversalSignalLower(combinedLower)
-	case "CVE-2024-XXEUTF7":
-		return registeredCVERuleContainsAny(combinedLower, "utf-7", "+adw-", "+adi-", "+afw-")
-	case "CVE-2024-LDAPI":
-		return registeredCVERuleContainsAny(combinedLower, "objectclass=", ")(|", ")(uid=", "*)(", "ldap")
 	case "CVE-2024-NOSQLI":
 		return hasNoSQLInjectSignalLower(combinedLower)
-	case "CVE-2024-SENSFILE":
-		return registeredCVERuleContainsAny(combinedLower, "/.env", "/.git/config", "/.htaccess", "/wp-config.php", "/web.config", "/etc/passwd")
 	case "CVE-2024-LOWCMD":
 		return registeredCVERuleContainsLowCmdSignal(combinedLower)
+	// 纯 OR gate——用 AC bitset 等价替代 registeredCVERuleContainsAny
+	case "CVE-2014-6271", "CVE-2025-24893", "CVE-2025-47812", "CVE-2025-4632",
+		"CVE-2025-64446", "CVE-2025-10035", "CVE-2025-41243", "CVE-2025-47916",
+		"CVE-2025-31161", "CVE-2025-32756", "CVE-2017-8046", "CVE-2021-21351",
+		"CVE-2024-REMOTECALL", "CVE-2024-XXEUTF7", "CVE-2024-LDAPI", "CVE-2024-SENSFILE":
+		return registryACGate(rule.CVE, hit)
 	default:
 		return true
 	}
@@ -1718,6 +1697,9 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 
 	var matches []CVEMatch
 
+	// 一次性计算四子检测器 AC hit mask
+	hits := computeSubDetectorHits(req)
+
 	// Run detectors sequentially. Most requests won't match any, and
 	// sequential execution avoids goroutine spawn/sync overhead.
 	// General detector runs first as it covers the broadest set.
@@ -1730,22 +1712,22 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 	}
 
 	if isDetectorEnabled("cve_general") {
-		if m := d.generalDetector.Detect(req); len(m) > 0 {
+		if m := d.generalDetector.Detect(req, &hits); len(m) > 0 {
 			matches = append(matches, m...)
 		}
 	}
 	if isDetectorEnabled("cve_php") {
-		if m := d.phpDetector.Detect(req); len(m) > 0 {
+		if m := d.phpDetector.Detect(req, &hits); len(m) > 0 {
 			matches = append(matches, m...)
 		}
 	}
 	if isDetectorEnabled("cve_java") {
-		if m := d.javaDetector.Detect(req); len(m) > 0 {
+		if m := d.javaDetector.Detect(req, &hits); len(m) > 0 {
 			matches = append(matches, m...)
 		}
 	}
 	if isDetectorEnabled("cve_node") {
-		if m := d.nodeDetector.Detect(req); len(m) > 0 {
+		if m := d.nodeDetector.Detect(req, &hits); len(m) > 0 {
 			matches = append(matches, m...)
 		}
 	}
@@ -1804,23 +1786,26 @@ func (d *CVEDetector) DetectFirst(req *CVERequest, categorySensitivity ...map[st
 		return level != "none" && level != "off"
 	}
 
+	// 一次性计算四子检测器 AC hit mask
+	hits := computeSubDetectorHits(req)
+
 	if isDetectorEnabled("cve_general") {
-		if m, ok := d.generalDetector.DetectFirst(req); ok {
+		if m, ok := d.generalDetector.DetectFirst(req, &hits); ok {
 			return m, true
 		}
 	}
 	if isDetectorEnabled("cve_php") {
-		if m, ok := d.phpDetector.DetectFirst(req); ok {
+		if m, ok := d.phpDetector.DetectFirst(req, &hits); ok {
 			return m, true
 		}
 	}
 	if isDetectorEnabled("cve_java") {
-		if m, ok := d.javaDetector.DetectFirst(req); ok {
+		if m, ok := d.javaDetector.DetectFirst(req, &hits); ok {
 			return m, true
 		}
 	}
 	if isDetectorEnabled("cve_node") {
-		if m, ok := d.nodeDetector.DetectFirst(req); ok {
+		if m, ok := d.nodeDetector.DetectFirst(req, &hits); ok {
 			return m, true
 		}
 	}

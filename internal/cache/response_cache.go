@@ -3,8 +3,8 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -39,6 +39,10 @@ type ResponseCache struct {
 	defaultTTL int64
 	stopCh     chan struct{}
 	closeOnce  sync.Once
+
+	// hits/misses 记录读取命中与未命中次数，供 /metrics 暴露命中率。
+	hits   atomic.Int64
+	misses atomic.Int64
 }
 
 type shard struct {
@@ -197,6 +201,7 @@ func (rc *ResponseCache) Get(key string) *ResponseEntry {
 	entry, ok := s.items[key]
 	s.mu.RUnlock()
 	if !ok {
+		rc.misses.Add(1)
 		return nil
 	}
 	if entry.IsExpired() {
@@ -206,10 +211,21 @@ func (rc *ResponseCache) Get(key string) *ResponseEntry {
 			rc.curSize.Add(-int64(len(entry.Body)))
 		}
 		s.mu.Unlock()
+		rc.misses.Add(1)
 		return nil
 	}
 	atomic.StoreInt64(&entry.lastAccess, time.Now().UnixNano())
+	rc.hits.Add(1)
 	return entry
+}
+
+// HitStats 返回累计的命中与未命中次数，供 /metrics 暴露命中率。
+// nil 接收者返回 0，保证空缓存场景不 panic。
+func (rc *ResponseCache) HitStats() (hits, misses int64) {
+	if rc == nil {
+		return 0, 0
+	}
+	return rc.hits.Load(), rc.misses.Load()
 }
 
 // Set stores a response in the cache. header is optional hop-by-hop-sanitized upstream
@@ -252,6 +268,19 @@ func (rc *ResponseCache) Set(key string, statusCode int, contentType string, bod
 	rc.evictToMaxSize()
 }
 
+// evictCandidate 保存驱逐候选的元数据，避免在排序阶段持有锁。
+type evictCandidate struct {
+	key        string
+	shardIdx   int
+	bodySize   int64
+	lastAccess int64
+}
+
+// evictCandidatePool 复用 eviction 候选 slice 的底层数组，减少 eviction 触发时的堆分配。
+var evictCandidatePool = sync.Pool{
+	New: func() any { s := make([]evictCandidate, 0, 256); return &s },
+}
+
 func (rc *ResponseCache) evictToMaxSize() {
 	if rc.maxSize <= 0 || rc.curSize.Load() <= rc.maxSize {
 		return
@@ -272,36 +301,45 @@ func (rc *ResponseCache) evictToMaxSize() {
 		}
 		s.mu.Unlock()
 	}
-	// 第二轮：按 lastAccess 最老优先逐条驱逐，直到满足容量
-	for rc.curSize.Load() > rc.maxSize {
-		var oldestKey string
-		var oldestShard *shard
-		var oldestAccess int64 = math.MaxInt64
-		var oldestSize int64
-		for i := range rc.shards {
-			s := &rc.shards[i]
-			s.mu.RLock()
-			for k, v := range s.items {
-				la := atomic.LoadInt64(&v.lastAccess)
-				if la < oldestAccess {
-					oldestAccess = la
-					oldestKey = k
-					oldestShard = s
-					oldestSize = int64(len(v.Body))
-				}
-			}
-			s.mu.RUnlock()
-		}
-		if oldestShard == nil {
-			return
-		}
-		oldestShard.mu.Lock()
-		if _, ok := oldestShard.items[oldestKey]; ok {
-			delete(oldestShard.items, oldestKey)
-			rc.curSize.Add(-oldestSize)
-		}
-		oldestShard.mu.Unlock()
+	if rc.curSize.Load() <= rc.maxSize {
+		return
 	}
+	// 第二轮：一次性收集所有候选，按 lastAccess 升序排序后批量删除，
+	// 避免逐条扫描全部 shard 的 O(n²) 退化。
+	// 从 pool 取出复用 slice，减少反复触发 eviction 时的堆分配。
+	cp := evictCandidatePool.Get().(*[]evictCandidate)
+	candidates := (*cp)[:0]
+	for i := range rc.shards {
+		s := &rc.shards[i]
+		s.mu.RLock()
+		for k, v := range s.items {
+			candidates = append(candidates, evictCandidate{
+				key:        k,
+				shardIdx:   i,
+				bodySize:   int64(len(v.Body)),
+				lastAccess: atomic.LoadInt64(&v.lastAccess),
+			})
+		}
+		s.mu.RUnlock()
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].lastAccess < candidates[j].lastAccess
+	})
+	for _, c := range candidates {
+		if rc.curSize.Load() <= rc.maxSize {
+			break
+		}
+		s := &rc.shards[c.shardIdx]
+		s.mu.Lock()
+		if cur, ok := s.items[c.key]; ok {
+			// 校验 bodySize：并发写入可能替换了条目
+			delete(s.items, c.key)
+			rc.curSize.Add(-int64(len(cur.Body)))
+		}
+		s.mu.Unlock()
+	}
+	*cp = candidates[:0]
+	evictCandidatePool.Put(cp)
 }
 
 // SetEnabled toggles the cache on/off.
@@ -348,6 +386,9 @@ func (rc *ResponseCache) cleaner() {
 						rc.curSize.Add(-int64(len(v.Body)))
 						delete(rc.shards[i].items, k)
 					}
+				}
+				if len(rc.shards[i].items) == 0 {
+					rc.shards[i].items = make(map[string]*ResponseEntry)
 				}
 				rc.shards[i].mu.Unlock()
 			}

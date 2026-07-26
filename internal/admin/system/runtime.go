@@ -371,7 +371,7 @@ func runtimeUniqueHTTP3SiteRuntimes(sn *snapshot.Snapshot) []snapshot.SiteRuntim
 			continue
 		}
 		seen[key] = struct{}{}
-		items = append(items, rt)
+		items = append(items, *rt)
 	}
 	return items
 }

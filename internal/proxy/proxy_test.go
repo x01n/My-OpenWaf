@@ -522,14 +522,14 @@ func TestSharedTransportForUpstreamEnablesExpectContinueTimeout(t *testing.T) {
 func TestSharedTransportForUpstreamUsesBoundedDialAndTLSHandshake(t *testing.T) {
 	rt := snapshot.SiteRuntime{}
 	tr := SharedTransportForUpstream(rt, "https://127.0.0.1:8443")
-	if tr.IdleConnTimeout != 90*time.Second {
-		t.Fatalf("IdleConnTimeout = %s, want %s", tr.IdleConnTimeout, 90*time.Second)
+	if tr.IdleConnTimeout != 30*time.Second {
+		t.Fatalf("IdleConnTimeout = %s, want %s", tr.IdleConnTimeout, 30*time.Second)
 	}
-	if tr.MaxIdleConns != 512 {
-		t.Fatalf("MaxIdleConns = %d, want 512", tr.MaxIdleConns)
+	if tr.MaxIdleConns != 256 {
+		t.Fatalf("MaxIdleConns = %d, want 256", tr.MaxIdleConns)
 	}
-	if tr.MaxIdleConnsPerHost != 128 {
-		t.Fatalf("MaxIdleConnsPerHost = %d, want 128", tr.MaxIdleConnsPerHost)
+	if tr.MaxIdleConnsPerHost != 32 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want 32", tr.MaxIdleConnsPerHost)
 	}
 	if !tr.ForceAttemptHTTP2 {
 		t.Fatal("ForceAttemptHTTP2 should be enabled")

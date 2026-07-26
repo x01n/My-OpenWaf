@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -24,7 +25,9 @@ import {
   PaginationEllipsis,
 } from "@/components/ui/pagination";
 import { Badge } from "@/components/ui/badge";
+import { ActionBadge } from "@/components/action-badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -51,19 +54,6 @@ import { useSecurityEvents } from "@/hooks/use-api";
 import { ipListApi } from "@/lib/api";
 import type { SecurityEvent } from "@/lib/types";
 import { format } from "date-fns";
-
-const actionColorMap: Record<string, string> = {
-  block: "destructive",
-  intercept: "destructive",
-  observe: "secondary",
-  challenge: "outline",
-  captcha_challenge: "outline",
-  shield_challenge: "outline",
-  chain_challenge: "outline",
-  allow: "default",
-  drop: "destructive",
-  log_only: "secondary",
-};
 
 export default function SecurityEventsPage() {
   const { t } = useTranslation();
@@ -96,7 +86,7 @@ export default function SecurityEventsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [batchLoading, setBatchLoading] = useState(false);
 
-  const { data, isLoading } = useSecurityEvents({
+  const { data, isLoading, error } = useSecurityEvents({
     page,
     page_size: pageSize,
     ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "")),
@@ -276,20 +266,15 @@ export default function SecurityEventsPage() {
           <span className="text-muted-foreground">-</span>
         ),
     },
-    { key: "host", title: "Host", width: "180px" },
-    { key: "path", title: "Path", width: "200px" },
-    { key: "method", title: "Method", width: "80px" },
+    { key: "host", title: t("securityEvents.host"), width: "180px" },
+    { key: "path", title: t("securityEvents.path"), width: "200px" },
+    { key: "method", title: t("securityEvents.method"), width: "80px" },
     {
       key: "action",
-      title: "Action",
+      title: t("securityEvents.actionLabel"),
       width: "100px",
       render: (row: SecurityEvent) => (
-        <Badge
-          variant={(actionColorMap[row.action] || "secondary") as React.ComponentProps<typeof Badge>["variant"]}
-          className="h-5 px-1.5 text-[10px]"
-        >
-          {actionLabelMap[row.action] || row.action}
-        </Badge>
+        <ActionBadge action={row.action} className="h-5 px-1.5 text-[10px]" />
       ),
     },
     { key: "category", title: "Category", width: "120px" },
@@ -329,17 +314,24 @@ export default function SecurityEventsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("securityEvents.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("securityEvents.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("securityEvents.title")}
+        description={t("securityEvents.description")}
+        actions={
           <Badge variant="secondary" className="h-5 px-2 text-xs">
             {t("securityEvents.total", { count: total })}
           </Badge>
-        </div>
-      </div>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader className="pb-3">

@@ -7,6 +7,7 @@ import { format } from "date-fns";
 
 import { cn } from "@/lib/utils";
 import type { Site, UpstreamStatus } from "@/lib/types";
+import { parseUpstreamUrls } from "@/lib/site-display";
 import { securityEventApi, upstreamApi } from "@/lib/api";
 import {
   HoverCard,
@@ -22,18 +23,6 @@ import {
   IconShieldExclamation,
   IconX,
 } from "@tabler/icons-react";
-
-/**
- * 从站点 upstream_urls 中提取上游 URL 列表。
- */
-function parseUpstreams(site: Site): string[] {
-  const raw = (site.upstream_urls || "").trim();
-  if (!raw) return [];
-  return raw
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
 
 interface SiteHoverPreviewProps {
   site: Site;
@@ -58,7 +47,10 @@ export function SiteHoverPreview({
   const { t } = useTranslation();
   const [enabled, setEnabled] = React.useState(false);
 
-  const upstreams = React.useMemo(() => parseUpstreams(site), [site]);
+  const upstreams = React.useMemo(
+    () => parseUpstreamUrls(site.upstream_urls),
+    [site.upstream_urls],
+  );
 
   const { data: statsData, isLoading: statsLoading } = useSWR(
     enabled ? ["site-hover-stats", site.id] : null,

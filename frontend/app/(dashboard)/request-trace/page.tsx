@@ -15,11 +15,12 @@
 import { Suspense, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { format } from "date-fns";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+import { ActionBadge } from "@/components/action-badge";
 import {
   Tabs,
   TabsContent,
@@ -27,6 +28,7 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import { DataTable } from "@/components/data-table";
+import { formatBytes, formatLatencyMs } from "@/lib/utils";
 import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog";
 import { EmptyState } from "@/components/empty-state";
 import {
@@ -42,19 +44,6 @@ import {
 } from "@tabler/icons-react";
 import { useRequestTrace, useSites } from "@/hooks/use-api";
 import type { AccessLog, SecurityEvent, Site } from "@/lib/types";
-
-const actionColorMap: Record<string, string> = {
-  block: "destructive",
-  intercept: "destructive",
-  observe: "secondary",
-  challenge: "outline",
-  captcha_challenge: "outline",
-  shield_challenge: "outline",
-  chain_challenge: "outline",
-  allow: "ghost",
-  drop: "destructive",
-  log_only: "secondary",
-};
 
 function RequestTraceContent() {
   const { t } = useTranslation();
@@ -146,12 +135,7 @@ function RequestTraceContent() {
       width: "100px",
       render: (row: AccessLog) =>
         row.waf_action ? (
-          <Badge
-            variant={(actionColorMap[row.waf_action] || "secondary") as React.ComponentProps<typeof Badge>["variant"]}
-            className="h-5 px-1.5 text-[10px]"
-          >
-            {row.waf_action}
-          </Badge>
+          <ActionBadge action={row.waf_action} className="h-5 px-1.5 text-[10px]" />
         ) : (
           "-"
         ),
@@ -161,13 +145,13 @@ function RequestTraceContent() {
       title: t("requestTrace.upstreamLatency"),
       width: "120px",
       render: (row: AccessLog) =>
-        row.upstream_latency_ms > 0 ? `${row.upstream_latency_ms} ms` : "-",
+        formatLatencyMs(row.upstream_latency_ms),
     },
     {
       key: "response_size",
       title: t("requestTrace.responseSize"),
       width: "120px",
-      render: (row: AccessLog) => (row.response_size > 0 ? `${row.response_size} B` : "-"),
+      render: (row: AccessLog) => formatBytes(row.response_size),
     },
     {
       key: "tls_version",
@@ -197,12 +181,7 @@ function RequestTraceContent() {
       title: t("requestTrace.action"),
       width: "110px",
       render: (row: SecurityEvent) => (
-        <Badge
-          variant={(actionColorMap[row.action] || "secondary") as React.ComponentProps<typeof Badge>["variant"]}
-          className="h-5 px-1.5 text-[10px]"
-        >
-          {row.action}
-        </Badge>
+        <ActionBadge action={row.action} className="h-5 px-1.5 text-[10px]" />
       ),
     },
     { key: "category", title: t("requestTrace.category"), width: "130px" },
@@ -240,10 +219,10 @@ function RequestTraceContent() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <IconRoute className="h-6 w-6 text-primary" />
-        <h1 className="text-xl font-semibold">{t("requestTrace.title")}</h1>
-      </div>
+      <PageHeader
+        icon={<IconRoute className="h-6 w-6 text-primary" />}
+        title={t("requestTrace.title")}
+      />
 
       <Card>
         <CardHeader className="pb-3">
@@ -351,12 +330,10 @@ function RequestTraceContent() {
               <SummaryItem
                 label={t("requestTrace.wafAction")}
                 value={
-                  <Badge
-                    variant={(actionColorMap[summary.wafAction] || "secondary") as React.ComponentProps<typeof Badge>["variant"]}
+                  <ActionBadge
+                    action={summary.wafAction}
                     className="h-5 px-1.5 text-[10px]"
-                  >
-                    {summary.wafAction}
-                  </Badge>
+                  />
                 }
               />
             </div>

@@ -1716,3 +1716,44 @@ func TestCheckOWASP_Debug_BingCSPReport(t *testing.T) {
 		t.Fatalf("Bing CSP report body should not trigger SQLi, got %+v", hits)
 	}
 }
+
+func BenchmarkFirstOWASPSQLiTraffic(b *testing.B) {
+	headers := map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Host":            "example.com",
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+	}
+	thresholds := CompileThresholds("mid")
+	hit, ok := FirstOWASPHitWithThresholds(thresholds, "/search", "q=1%20union%20select%20username,password%20from%20users--", headers, nil)
+	if !ok {
+		b.Fatal("expected SQLi hit")
+	}
+	benchmarkOWASPHitSink = hit
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hit, ok = FirstOWASPHitWithThresholds(thresholds, "/search", "q=1%20union%20select%20username,password%20from%20users--", headers, nil)
+		if ok {
+			benchmarkOWASPHitSink = hit
+		}
+	}
+}
+
+func BenchmarkFirstOWASPXSSBareEventHandlerTraffic(b *testing.B) {
+	thresholds := CompileThresholds("mid")
+	hit, ok := FirstOWASPHitWithThresholds(thresholds, "/", `name=" onmouseover="alert(1)`, nil, nil)
+	if !ok {
+		b.Fatal("expected XSS hit")
+	}
+	benchmarkOWASPHitSink = hit
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hit, ok = FirstOWASPHitWithThresholds(thresholds, "/", `name=" onmouseover="alert(1)`, nil, nil)
+		if ok {
+			benchmarkOWASPHitSink = hit
+		}
+	}
+}

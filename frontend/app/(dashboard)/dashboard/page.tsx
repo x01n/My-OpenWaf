@@ -2,12 +2,15 @@
 
 import { useRef, useEffect, useState, useCallback } from "react";
 import { useDashboard, useSecurityEventTimeline, useDashboardStats } from "@/hooks/use-api";
-import { StatCard } from "@/components/stat-card";
+import { MetricTile } from "@/components/metric-tile";
+import { MetricStrip, type MetricStripItem } from "@/components/metric-strip";
+import { RankedBarList, type RankedItem } from "@/components/ranked-bar-list";
 import { GeoAttackDistribution } from "@/components/geo-attack-distribution";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -17,20 +20,25 @@ import {
 } from "@/components/ui/select";
 import { formatNumber } from "@/lib/utils";
 import {
+  chartTooltipStyle,
+  chartTooltipLabelStyle,
+  CHART_ACCENT,
+  CHART_DANGER,
+  CHART_GRID_STROKE,
+  CHART_AXIS_TICK,
+} from "@/lib/chart-theme";
+import {
   IconChartBar,
   IconShield,
-  IconEye,
-  IconUsers,
-  IconMapPin,
   IconBan,
-  IconAlertTriangle,
   IconBolt,
   IconTrendingUp,
-  IconTrendingDown,
   IconClock,
   IconActivity,
   IconMaximize,
-  IconPercentage,
+  IconCategory2,
+  IconTargetArrow,
+  IconListNumbers,
 } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -53,6 +61,94 @@ const MAX_QPS_POINTS = 60;
 interface QPSPoint {
   time: string;
   qps: number;
+}
+
+/**
+ * `/api/v1/security-events/stats` 的返回结构。
+ *
+ * 字段名取自 `internal/admin/event/security.go` 的 `SecurityEventStats`，
+ * 其中 `categories` 为完整 GROUP BY，`top_*` 系列均被后端限制为 10 条。
+ */
+interface SecurityEventStats {
+  total: number;
+  hours: number;
+  intercepts: number;
+  observes: number;
+  challenges: number;
+  requests: number;
+  categories: Array<{ category: string; count: number }> | null;
+  top_ips: Array<{ client_ip: string; count: number }> | null;
+  top_paths: Array<{ path: string; count: number }> | null;
+  top_rules: Array<{ rule_id_str: string; count: number }> | null;
+  top_countries: Array<{ country: string; count: number }> | null;
+}
+
+/**
+ * 带渐变填充的面积图。
+ *
+ * 网格使用实心发丝线：虚线网格会被读作「阈值」或「预测区间」，而这里只是刻度参考。
+ */
+function GradientArea({
+  data,
+  dataKey,
+  color,
+  gradientId,
+  name,
+}: {
+  data: object[];
+  dataKey: string;
+  color: string;
+  gradientId: string;
+  name?: string;
+}) {
+  return (
+    <ResponsiveContainer width="100%" height="100%">
+      <AreaChart data={data} margin={{ top: 6, right: 10, left: 0, bottom: 0 }}>
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity={0.28} />
+            <stop offset="100%" stopColor={color} stopOpacity={0.02} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid
+          vertical={false}
+          stroke={CHART_GRID_STROKE}
+          strokeOpacity={0.7}
+        />
+        <XAxis
+          dataKey="time"
+          tick={CHART_AXIS_TICK}
+          tickLine={false}
+          axisLine={false}
+          interval="preserveStartEnd"
+          minTickGap={24}
+        />
+        {/* 刻度缩写为 20k/15k，避免五位数被轴宽截断成 "000"、"500" */}
+        <YAxis
+          tick={CHART_AXIS_TICK}
+          tickLine={false}
+          axisLine={false}
+          width={38}
+          allowDecimals={false}
+          tickFormatter={(v: number) => formatNumber(v)}
+        />
+        <Tooltip
+          contentStyle={chartTooltipStyle}
+          labelStyle={chartTooltipLabelStyle}
+          cursor={{ stroke: CHART_GRID_STROKE, strokeWidth: 1 }}
+        />
+        <Area
+          type="monotone"
+          dataKey={dataKey}
+          stroke={color}
+          strokeWidth={2}
+          fill={`url(#${gradientId})`}
+          name={name}
+          activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--card)" }}
+        />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
 }
 
 function DashboardSkeleton() {
@@ -78,7 +174,7 @@ export default function DashboardPage() {
   const { t } = useTranslation();
   const [timeRange, setTimeRange] = useState("24");
   const hours = timeRange === "168" ? 168 : Number(timeRange);
-  const { data, isLoading } = useDashboard();
+  const { data, isLoading, error } = useDashboard();
   const { data: timelineData } = useSecurityEventTimeline({ hours });
   const { data: statsData } = useDashboardStats({ hours });
 
@@ -102,19 +198,37 @@ export default function DashboardPage() {
     updateQpsHistory();
   }, [data, updateQpsHistory]);
 
-  if (isLoading || !data) {
+  if (isLoading) {
     return <DashboardSkeleton />;
+  }
+
+  if (error || !data) {
+    return (
+      <div className="space-y-6 p-6">
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+        </Alert>
+      </div>
+    );
   }
 
   const d = data;
 
+  // 后端 /security-events/timeline 返回 { buckets: [{ bucket: "2026-07-26 06:00", count }] }，
+  // 字段名是 bucket 而非 time，格式为空格分隔而非 ISO。取末尾的 HH:mm 作为轴标签。
   const blockTimeline: Array<{ time: string; count: number }> =
-    timelineData?.buckets?.map((b: unknown) => ({
-      time: typeof (b as { time: unknown }).time === "string"
-        ? ((b as { time: string }).time).slice(11, 16)
-        : String((b as { time: unknown }).time),
-      count: ((b as { count: unknown }).count as number | undefined) ?? 0,
-    })) || [];
+    timelineData?.buckets?.map((b: unknown) => {
+      const raw = (b as { bucket?: unknown }).bucket;
+      const label =
+        typeof raw === "string"
+          ? (raw.split(" ")[1] ?? raw).slice(0, 5) || raw
+          : "";
+      return {
+        time: label,
+        count: ((b as { count?: unknown }).count as number | undefined) ?? 0,
+      };
+    }) || [];
 
   const cveByType = d.cve_by_type_24h || [];
   const dropBySource = d.drop_by_source_24h || {};
@@ -122,12 +236,68 @@ export default function DashboardPage() {
     .filter(([, v]) => (v as number) > 0)
     .map(([k, v]) => ({ name: k, value: v as number }));
 
-  const tooltipStyle = {
-    backgroundColor: "hsl(var(--card))",
-    border: "1px solid hsl(var(--border))",
-    borderRadius: "8px",
-    fontSize: "12px",
-  };
+  // 拦截趋势的真实序列，用于统计卡的迷你折线（与「访问/拦截趋势」图同源）
+  const blockSparkline = blockTimeline.map((b) => b.count);
+
+  // ---- 窗口口径指标：来自 /security-events/stats，随上方时间范围变化 ----
+  // 注意与 /dashboard/summary 的区别：后者是进程内 atomic 计数（重启归零、不随时间范围变化），
+  // 两者口径不同，必须分区展示，否则时间范围切换后数字不动会让人以为页面坏了。
+  const s = statsData as SecurityEventStats | undefined;
+  const eventsTotal = s?.total ?? 0;
+  const intercepts = s?.intercepts ?? 0;
+  const categories = s?.categories ?? [];
+  // categories 是完整 GROUP BY（后端未截断），因此类别数可作为真实聚合值使用；
+  // top_ips / top_paths / top_rules 均被后端限制为 10 条，其长度不能当作总数。
+  const attackTypeCount = categories.length;
+  const interceptShare = eventsTotal > 0 ? (intercepts / eventsTotal) * 100 : 0;
+
+  const categoryItems: RankedItem[] = categories.map((c) => ({
+    label: c.category,
+    count: c.count,
+  }));
+  const ruleItems: RankedItem[] = (s?.top_rules ?? []).map((r) => ({
+    label: r.rule_id_str,
+    count: r.count,
+  }));
+
+  const uptimeText = `${Math.floor(d.uptime_sec / 86400)}d ${Math.floor(
+    (d.uptime_sec % 86400) / 3600
+  )}h ${Math.floor((d.uptime_sec % 3600) / 60)}m`;
+
+  const pct = (part: number, whole: number) =>
+    whole > 0 ? ((part / whole) * 100).toFixed(2) + "%" : "0%";
+
+  /** 运行时累计计数：全部来自 /dashboard/summary 的进程内计数器 */
+  const runtimeItems: MetricStripItem[] = [
+    { label: t("dashboard.requests"), value: formatNumber(d.requests_total), rawValue: d.requests_total },
+    { label: t("dashboard.pv"), value: formatNumber(d.status_2xx), rawValue: d.status_2xx },
+    { label: t("dashboard.uniqueIp"), value: formatNumber(d.unique_ips), rawValue: d.unique_ips },
+    { label: t("dashboard.attackIp"), value: formatNumber(d.attack_ips), rawValue: d.attack_ips },
+    { label: t("dashboard.blocks"), value: formatNumber(d.waf_blocks), rawValue: d.waf_blocks },
+    { label: t("dashboard.uv"), value: formatNumber(d.waf_observes), rawValue: d.waf_observes },
+    {
+      label: t("dashboard.blocks4xxRate"),
+      value: formatNumber(d.builtin_hits),
+      rawValue: d.builtin_hits,
+    },
+    {
+      label: t("dashboard.blocks4xx"),
+      value: pct(d.waf_blocks, d.requests_total),
+      rawValue: d.waf_blocks,
+    },
+    { label: t("dashboard.errors4xx"), value: formatNumber(d.errors_upstream_4xx), rawValue: d.errors_upstream_4xx },
+    {
+      label: t("dashboard.errors4xxRate"),
+      value: pct(d.errors_upstream_4xx, d.requests_total),
+      rawValue: d.errors_upstream_4xx,
+    },
+    { label: t("dashboard.errors5xx"), value: formatNumber(d.errors_upstream_5xx), rawValue: d.errors_upstream_5xx },
+    {
+      label: t("dashboard.errors5xxRate"),
+      value: pct(d.errors_upstream_5xx, d.requests_total),
+      rawValue: d.errors_upstream_5xx,
+    },
+  ];
 
   return (
     <div className="space-y-3">
@@ -167,136 +337,69 @@ export default function DashboardPage() {
 
         {/* Tab: 流量分析 */}
         <TabsContent value="traffic" className="space-y-3">
-          {/* 统计卡片 3 行 x 4 列 */}
-          <div className="grid gap-2.5 grid-cols-2 md:grid-cols-4">
-            <StatCard
-              compact
-              title={t("dashboard.requests")}
-              value={formatNumber(d.requests_total)}
+          {/* 第一层：窗口口径的攻击拦截主指标（随时间范围变化的真实聚合） */}
+          <div className="grid gap-2.5 grid-cols-2 lg:grid-cols-4">
+            <MetricTile
+              title={t("dashboard.securityEvents")}
+              value={formatNumber(eventsTotal)}
+              rawValue={eventsTotal}
+              tone="accent"
               icon={<IconChartBar className="h-3.5 w-3.5" />}
-              description={t("dashboard.requestsDesc")}
+              description={t("dashboard.securityEventsDesc")}
+              badge={
+                <Badge variant="outline" className="h-5 shrink-0 text-[10px]">
+                  {hours}h
+                </Badge>
+              }
+              sparkline={blockSparkline}
+              sparklineLabel={t("dashboard.eventSparklineHint", { hours })}
             />
-            <StatCard
-              compact
-              title={t("dashboard.pv")}
-              value={formatNumber(d.status_2xx)}
-              icon={<IconEye className="h-3.5 w-3.5" />}
-              description={t("dashboard.pvDesc")}
-            />
-            <StatCard
-              compact
-              title={t("dashboard.uv")}
-              value={formatNumber(d.unique_ips)}
-              icon={<IconUsers className="h-3.5 w-3.5" />}
-              description={t("dashboard.uvDesc")}
-            />
-            <StatCard
-              compact
-              title={t("dashboard.uniqueIp")}
-              value={formatNumber(d.unique_ips)}
-              icon={<IconMapPin className="h-3.5 w-3.5" />}
-              description={t("dashboard.uniqueIpDesc")}
-            />
-          </div>
-
-          <div className="grid gap-2.5 grid-cols-2 md:grid-cols-4">
-            <StatCard
-              compact
-              title={t("dashboard.blocks")}
-              value={formatNumber(d.waf_blocks)}
+            {/*
+              「已拦截」不挂折线：/security-events/timeline 是对全部安全事件做 COUNT(*)，
+              并未按 action 过滤，挂在拦截指标下会被误读成「拦截数随时间的变化」。
+            */}
+            <MetricTile
+              title={t("dashboard.intercepted")}
+              value={formatNumber(intercepts)}
+              rawValue={intercepts}
+              tone="danger"
               icon={<IconBan className="h-3.5 w-3.5" />}
-              description={t("dashboard.blocksDesc")}
-              trend="down"
+              description={t("dashboard.interceptedDesc")}
             />
-            <StatCard
-              compact
-              title={t("dashboard.attackIp")}
-              value={formatNumber(d.attack_ips)}
-              icon={<IconAlertTriangle className="h-3.5 w-3.5" />}
-              description={t("dashboard.attackIpDesc")}
-              trend="down"
+            <MetricTile
+              title={t("dashboard.attackTypes")}
+              value={formatNumber(attackTypeCount)}
+              rawValue={attackTypeCount}
+              tone="warning"
+              icon={<IconCategory2 className="h-3.5 w-3.5" />}
+              description={t("dashboard.attackTypesDesc")}
             />
-            <StatCard
-              compact
-              title={t("dashboard.errors4xx")}
-              value={formatNumber(d.errors_upstream_4xx)}
-              icon={<IconTrendingDown className="h-3.5 w-3.5" />}
-              description={t("dashboard.upstream4xx")}
-            />
-            <StatCard
-              compact
-              title={t("dashboard.errors4xxRate")}
-              value={d.requests_total > 0 ? ((d.errors_upstream_4xx / d.requests_total) * 100).toFixed(2) + "%" : "0%"}
-              icon={<IconPercentage className="h-3.5 w-3.5" />}
-              description={t("dashboard.upstream4xxDesc")}
+            <MetricTile
+              title={t("dashboard.interceptShare")}
+              value={eventsTotal > 0 ? interceptShare.toFixed(1) + "%" : "0%"}
+              rawValue={eventsTotal}
+              tone="success"
+              icon={<IconTargetArrow className="h-3.5 w-3.5" />}
+              description={t("dashboard.interceptShareDesc")}
             />
           </div>
 
-          <div className="grid gap-2.5 grid-cols-2 md:grid-cols-4">
-            <StatCard
-              compact
-              title={t("dashboard.blocks4xx")}
-              value={formatNumber(d.waf_blocks)}
-              icon={<IconShield className="h-3.5 w-3.5" />}
-              description={t("dashboard.blocksDesc")}
-            />
-            <StatCard
-              compact
-              title={t("dashboard.blocks4xxRate")}
-              value={d.errors_upstream_4xx > 0 ? ((d.waf_blocks / d.errors_upstream_4xx) * 100).toFixed(2) + "%" : "0%"}
-              icon={<IconShield className="h-3.5 w-3.5" />}
-              description={t("dashboard.blockRate")}
-            />
-            <StatCard
-              compact
-              title={t("dashboard.errors5xx")}
-              value={formatNumber(d.errors_upstream_5xx)}
-              icon={<IconTrendingUp className="h-3.5 w-3.5" />}
-              description={t("dashboard.upstream5xx")}
-            />
-            <StatCard
-              compact
-              title={t("dashboard.errors5xxRate")}
-              value={d.requests_total > 0 ? ((d.errors_upstream_5xx / d.requests_total) * 100).toFixed(2) + "%" : "0%"}
-              icon={<IconPercentage className="h-3.5 w-3.5" />}
-              description={t("dashboard.upstream5xxDesc")}
-            />
-          </div>
+          {/* 第二层：进程内运行时计数，口径与上方不同，折叠成紧凑指标条 */}
+          <MetricStrip
+            title={t("dashboard.runtimeCounters")}
+            caption={t("dashboard.runtimeCountersCaption")}
+            action={
+              <Badge variant="secondary" className="h-5 shrink-0 gap-1 text-[10px]">
+                <IconClock className="h-3 w-3" />
+                {uptimeText}
+              </Badge>
+            }
+            items={runtimeItems}
+          />
 
-          {/* 实时 QPS + 拦截趋势 */}
+          {/* 第三层：趋势图 */}
           <div className="grid gap-3 lg:grid-cols-2">
-            <Card>
-              <CardHeader className="flex-row items-center justify-between px-4 py-2.5">
-                <CardTitle className="text-sm font-medium">
-                  {t("dashboard.realtimeQps")}
-                </CardTitle>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <IconActivity className="h-3.5 w-3.5" />
-                  <span>{d.qps_5s ?? 0}</span>
-                </div>
-              </CardHeader>
-              <CardContent className="px-4 pb-3 pt-0">
-                <div className="h-56">
-                  {qpsHistory.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={qpsHistory}>
-                        <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                        <XAxis dataKey="time" fontSize={10} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-                        <YAxis fontSize={11} tickLine={false} axisLine={false} />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Area type="monotone" dataKey="qps" stroke="hsl(var(--primary))" fill="hsl(var(--primary)/0.15)" strokeWidth={2} />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  ) : (
-                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                      {t("dashboard.waitingData")}
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
+            <Card className="py-0">
               <CardHeader className="flex-row items-center justify-between px-4 py-2.5">
                 <CardTitle className="text-sm font-medium">
                   {t("dashboard.visitBlockTrend")}
@@ -304,17 +407,15 @@ export default function DashboardPage() {
                 <Badge variant="outline" className="h-5 text-[10px]">{hours}h</Badge>
               </CardHeader>
               <CardContent className="px-4 pb-3 pt-0">
-                <div className="h-56">
+                <div className="h-52">
                   {blockTimeline.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={blockTimeline}>
-                        <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                        <XAxis dataKey="time" fontSize={10} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-                        <YAxis fontSize={11} tickLine={false} axisLine={false} />
-                        <Tooltip contentStyle={tooltipStyle} />
-                        <Area type="monotone" dataKey="count" stroke="#ef4444" fill="rgba(239,68,68,0.12)" strokeWidth={2} name={t("dashboard.blocks")} />
-                      </AreaChart>
-                    </ResponsiveContainer>
+                    <GradientArea
+                      data={blockTimeline}
+                      dataKey="count"
+                      color={CHART_DANGER}
+                      gradientId="dashBlockTrend"
+                      name={t("dashboard.blocks")}
+                    />
                   ) : (
                     <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                       {t("dashboard.noData")}
@@ -323,6 +424,62 @@ export default function DashboardPage() {
                 </div>
               </CardContent>
             </Card>
+
+            <Card className="py-0">
+              <CardHeader className="flex-row items-center justify-between px-4 py-2.5">
+                <CardTitle className="text-sm font-medium">
+                  {t("dashboard.realtimeQps")}
+                </CardTitle>
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <IconActivity className="h-3.5 w-3.5" />
+                  <span className="tabular-nums">{d.qps_5s ?? 0}</span>
+                </div>
+              </CardHeader>
+              <CardContent className="px-4 pb-3 pt-0">
+                <div className="h-52">
+                  {qpsHistory.length > 0 ? (
+                    <GradientArea
+                      data={qpsHistory}
+                      dataKey="qps"
+                      color={CHART_ACCENT}
+                      gradientId="dashQps"
+                      name="QPS"
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                      {t("dashboard.waitingData")}
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* 第四层：攻击构成 —— 类别分布与规则命中排行，均为窗口口径真实聚合 */}
+          <div className="grid gap-3 lg:grid-cols-2">
+            <RankedBarList
+              title={t("dashboard.attackCategoryDist")}
+              action={
+                <Badge variant="outline" className="h-5 text-[10px]">{hours}h</Badge>
+              }
+              items={categoryItems}
+              restLabel={(n) => t("dashboard.otherCategories", { count: n })}
+              emptyText={t("dashboard.noData")}
+              tone="danger"
+            />
+            <RankedBarList
+              title={t("dashboard.topRuleHits")}
+              action={
+                <Badge variant="outline" className="h-5 gap-1 text-[10px]">
+                  <IconListNumbers className="h-3 w-3" />
+                  {hours}h
+                </Badge>
+              }
+              items={ruleItems}
+              maxItems={8}
+              emptyText={t("dashboard.noData")}
+              tone="accent"
+            />
           </div>
         </TabsContent>
 
@@ -534,35 +691,48 @@ export default function DashboardPage() {
 
         {/* Tab: 防护报告 */}
         <TabsContent value="report" className="space-y-3">
-          {/* 核心指标概览（紧凑卡片） */}
-          <div className="grid gap-2.5 grid-cols-2 md:grid-cols-4">
-            <StatCard
-              compact
-              title={t("dashboard.requests")}
-              value={formatNumber(d.requests_total)}
+          {/*
+            核心指标概览。与「流量分析」同口径：用 /security-events/stats 的窗口聚合，
+            而非 /dashboard/summary 的进程内计数 —— 防护报告按时间范围出具，
+            用重启即归零的累计值会让报告在每次重启后失真。
+          */}
+          <div className="grid gap-2.5 grid-cols-2 lg:grid-cols-4">
+            <MetricTile
+              title={t("dashboard.securityEvents")}
+              value={formatNumber(eventsTotal)}
+              rawValue={eventsTotal}
+              tone="accent"
               icon={<IconChartBar className="h-3.5 w-3.5" />}
-              description={t("dashboard.requestsDesc")}
+              description={t("dashboard.securityEventsDesc")}
+              badge={
+                <Badge variant="outline" className="h-5 shrink-0 text-[10px]">
+                  {hours}h
+                </Badge>
+              }
+              sparkline={blockSparkline}
+              sparklineLabel={t("dashboard.eventSparklineHint", { hours })}
             />
-            <StatCard
-              compact
-              title={t("dashboard.blocks")}
-              value={formatNumber(d.waf_blocks)}
+            <MetricTile
+              title={t("dashboard.intercepted")}
+              value={formatNumber(intercepts)}
+              rawValue={intercepts}
+              tone="danger"
               icon={<IconBan className="h-3.5 w-3.5" />}
-              description={t("dashboard.blocksDesc")}
-              trend="down"
+              description={t("dashboard.interceptedDesc")}
             />
-            <StatCard
-              compact
-              title={t("dashboard.attackIp")}
-              value={formatNumber(d.attack_ips)}
-              icon={<IconAlertTriangle className="h-3.5 w-3.5" />}
-              description={t("dashboard.attackIpDesc")}
-              trend="down"
+            <MetricTile
+              title={t("dashboard.attackTypes")}
+              value={formatNumber(attackTypeCount)}
+              rawValue={attackTypeCount}
+              tone="warning"
+              icon={<IconCategory2 className="h-3.5 w-3.5" />}
+              description={t("dashboard.attackTypesDesc")}
             />
-            <StatCard
-              compact
+            <MetricTile
               title={t("dashboard.errors5xx")}
               value={formatNumber(d.errors_upstream_5xx)}
+              rawValue={d.errors_upstream_5xx}
+              tone="warning"
               icon={<IconTrendingUp className="h-3.5 w-3.5" />}
               description={t("dashboard.upstream5xx")}
             />
@@ -579,15 +749,13 @@ export default function DashboardPage() {
             <CardContent className="px-4 pb-3 pt-0">
               <div className="h-56">
                 {blockTimeline.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={blockTimeline}>
-                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                      <XAxis dataKey="time" fontSize={10} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-                      <YAxis fontSize={11} tickLine={false} axisLine={false} />
-                      <Tooltip contentStyle={tooltipStyle} />
-                      <Area type="monotone" dataKey="count" stroke="#ef4444" fill="rgba(239,68,68,0.12)" strokeWidth={2} name={t("dashboard.blocks")} />
-                    </AreaChart>
-                  </ResponsiveContainer>
+                  <GradientArea
+                    data={blockTimeline}
+                    dataKey="count"
+                    color={CHART_DANGER}
+                    gradientId="reportBlockTrend"
+                    name={t("dashboard.blocks")}
+                  />
                 ) : (
                   <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                     {t("dashboard.noData")}

@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { useOwaspRules, useOwaspBatchUpdate } from "@/hooks/use-api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -356,13 +357,10 @@ export default function AttacksPage() {
     const errMsg = error instanceof Error ? error.message : String(error);
     return (
       <div className="space-y-6">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">{t("attacks.title")}</h1>
-            <p className="text-sm text-muted-foreground mt-1">{t("attacks.description")}</p>
-          </div>
-          <div className="flex items-center gap-2" />
-        </div>
+        <PageHeader
+          title={t("attacks.title")}
+          description={t("attacks.description")}
+        />
         <div className="flex h-40 items-center justify-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 text-destructive">
           <IconAlertTriangle className="h-5 w-5" />
           <span>
@@ -381,14 +379,10 @@ export default function AttacksPage() {
 
   return (
     <div className="space-y-6">
-      {/* 页面标题 */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("attacks.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("attacks.description")}</p>
-        </div>
-        <div className="flex items-center gap-2" />
-      </div>
+      <PageHeader
+        title={t("attacks.title")}
+        description={t("attacks.description")}
+      />
 
       {/* 防护模式配置 */}
       <Card>

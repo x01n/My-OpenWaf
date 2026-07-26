@@ -7,7 +7,6 @@
 
 import { useTranslation } from "react-i18next";
 import { usePathname } from "next/navigation";
-import { MobileSidebar } from "./sidebar-nav";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,34 +21,12 @@ import { toast } from "sonner";
 import { useSystemReload } from "@/hooks/use-api";
 import { cn } from "@/lib/utils";
 import { LanguageSwitcher } from "./language-switcher";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import { ThemeToggle, AccentToggle } from "./appearance-toggle";
+import { getPageTitleKey } from "@/lib/route-titles";
 
 function getPageTitle(pathname: string): string {
-  const titles: Record<string, string> = {
-    "/dashboard": "nav.dashboard",
-    "/sites": "nav.sites",
-    "/attacks": "nav.attacks",
-    "/rules": "nav.rules",
-    "/cc-protection": "nav.ccProtection",
-    "/captcha": "nav.captcha",
-    "/auth-config": "nav.authConfig",
-    "/settings": "nav.settings",
-    "/security-events": "nav.securityEvents",
-    "/access-logs": "nav.accessLogs",
-    "/drop-events": "nav.dropEvents",
-    "/false-positives": "nav.falsePositives",
-    "/certificates": "nav.certificates",
-    "/ip-lists": "nav.ipLists",
-    "/threat-intel": "nav.threatIntel",
-    "/upstream-status": "nav.upstreamStatus",
-    "/api-keys": "nav.apiKeys",
-    "/admin-users": "nav.adminUsers",
-    "/backup": "nav.backup",
-    "/request-trace": "nav.requestTrace",
-  };
-  for (const [path, key] of Object.entries(titles)) {
-    if (pathname.startsWith(path)) return key;
-  }
-  return "My OpenWAF";
+  return getPageTitleKey(pathname) ?? "My OpenWAF";
 }
 
 export function TopBar() {
@@ -68,8 +45,8 @@ export function TopBar() {
   };
 
   return (
-    <header className="flex h-14 items-center gap-4 border-b bg-card px-4 lg:px-6">
-      <MobileSidebar />
+    <header className="flex h-14 items-center gap-3 border-b bg-card px-4 lg:px-6">
+      <SidebarTrigger className="h-8 w-8" />
       <h1 className="text-sm font-semibold lg:text-base">{t(getPageTitle(pathname))}</h1>
       <div className="ml-auto flex items-center gap-2">
         <Button
@@ -82,6 +59,8 @@ export function TopBar() {
           <IconReload className={cn("mr-2 h-4 w-4", reload.loading && "animate-spin")} />
           {t("common.save")}
         </Button>
+        <ThemeToggle />
+        <AccentToggle />
         <LanguageSwitcher />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

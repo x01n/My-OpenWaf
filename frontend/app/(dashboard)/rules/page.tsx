@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { useRules, useRuleMutation, useRuleDelete } from "@/hooks/use-api";
 import { DataTable } from "@/components/data-table";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -24,6 +25,7 @@ import {
   IconBan,
   IconListDetails,
 } from "@tabler/icons-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { RuleFormDialog } from "./components/rule-form-dialog";
 import { EmptyState } from "@/components/empty-state";
 import type { Rule } from "@/lib/types";
@@ -39,7 +41,7 @@ export default function RulesPage() {
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
   const [deleteId, setDeleteId] = useState<number | null>(null);
 
-  const { data, isLoading, mutate } = useRules();
+  const { data, isLoading, error, mutate } = useRules();
   const { execute: mutateRule } = useRuleMutation();
   const { execute: deleteRule, loading: deleteLoading } = useRuleDelete();
 
@@ -180,12 +182,10 @@ export default function RulesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("rules.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("rules.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("rules.title")}
+        description={t("rules.description")}
+        actions={
           <Button
             onClick={() => {
               setEditingRule(null);
@@ -195,8 +195,17 @@ export default function RulesPage() {
             <IconPlus className="h-4 w-4" />
             {t("rules.addTitle")}
           </Button>
-        </div>
-      </div>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="flex items-center gap-2">
         <Select

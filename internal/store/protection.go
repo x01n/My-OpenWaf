@@ -49,9 +49,12 @@ type ProtectionConfig struct {
 
 	AutoBanAction string `json:"auto_ban_action" gorm:"default:'intercept'"`
 
-	CategorySensitivity string `json:"category_sensitivity,omitempty" gorm:"column:category_sensitivity;type:text;default:'{}'"`
+	// 以下两个 TEXT 字段不设 DB 默认值：MySQL 禁止 BLOB/TEXT 列带 DEFAULT
+	// （Error 1101），带上会让 AutoMigrate 直接失败。空串与 "{}" 由
+	// GetCategorySensitivity / GetOWASPRulesConfig 等价处理。
+	CategorySensitivity string `json:"category_sensitivity,omitempty" gorm:"column:category_sensitivity;type:text"`
 
-	OWASPRulesConfig string `json:"owasp_rules_config" gorm:"type:text;default:'{}'"`
+	OWASPRulesConfig string `json:"owasp_rules_config" gorm:"type:text"`
 
 	LoginMinPasswordLength int `json:"login_min_password_length"`
 	LoginMaxAttempts       int `json:"login_max_attempts"`
@@ -85,6 +88,13 @@ type ProtectionConfig struct {
 	BasicAuthEnabled  bool   `json:"basic_auth_enabled"`
 	BasicAuthUsername string `json:"basic_auth_username"`
 	BasicAuthPassword string `json:"basic_auth_password"`
+
+	// BrowserSignEnabled 启用站点 HTML 挂载混淆签名 JS，并对识别为 API 的请求校验请求头签名。
+	BrowserSignEnabled bool `json:"browser_sign_enabled"`
+	// BrowserSignTTL 签名票据有效期（秒）。
+	BrowserSignTTL int `json:"browser_sign_ttl"`
+	// BrowserSignAction 签名校验失败动作：observe / challenge / intercept。
+	BrowserSignAction string `json:"browser_sign_action"`
 }
 
 func DefaultProtectionConfig() ProtectionConfig {
@@ -123,6 +133,9 @@ func DefaultProtectionConfig() ProtectionConfig {
 		ShieldEnableEnvCheck:    true,
 		ShieldEnableDevTools:    true,
 		EscalationWindowSecs:    60,
+		BrowserSignEnabled:      false,
+		BrowserSignTTL:          300,
+		BrowserSignAction:       "challenge",
 	}
 }
 
