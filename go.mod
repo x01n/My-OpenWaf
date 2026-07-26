@@ -15,7 +15,7 @@ require (
 	github.com/hertz-contrib/websocket v0.2.0
 	github.com/klauspost/compress v1.19.0
 	github.com/oschwald/maxminddb-golang v1.13.1
-	github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/quic-go v0.61.0
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/wenlng/go-captcha/v2 v2.0.5
