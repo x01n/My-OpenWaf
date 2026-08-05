@@ -125,15 +125,18 @@ func MoreSevere(a, b Type) bool {
 
 // Result is the outcome of rule evaluation for a single request.
 type Result struct {
-	Type       Type   `json:"type"`
-	RuleID     uint   `json:"rule_id,omitempty"`
-	RuleIDStr  string `json:"rule_id_str,omitempty"` // builtin rules like "owasp:sqli:001"
-	Phase      string `json:"phase,omitempty"`
-	MatchDesc  string `json:"match_desc,omitempty"`
-	Matched    bool   `json:"matched"`
-	Category   string `json:"category,omitempty"`
-	StatusCode int    `json:"status_code,omitempty"` // custom HTTP status code (0 = use default)
-	RedirectTo string `json:"redirect_to,omitempty"` // URL for redirect action
+	Type         Type               `json:"type"`
+	RuleID       uint               `json:"rule_id,omitempty"`
+	RuleIDStr    string             `json:"rule_id_str,omitempty"` // builtin rules like "owasp:sqli:001"
+	Phase        string             `json:"phase,omitempty"`
+	MatchDesc    string             `json:"match_desc,omitempty"`
+	Matched      bool               `json:"matched"`
+	Category     string             `json:"category,omitempty"`
+	StatusCode   int                `json:"status_code,omitempty"`   // custom HTTP status code (0 = use default)
+	RedirectTo   string             `json:"redirect_to,omitempty"`   // URL for redirect action
+	SetHeaders   *map[string]string `json:"set_headers,omitempty"`   // Controlled response headers from Lua
+	ResponseBody *string            `json:"response_body,omitempty"` // Controlled response body from Lua
+	Tags         *[]string          `json:"tags,omitempty"`          // Labels for observability
 }
 
 // IsTerminal returns true when this action must short-circuit

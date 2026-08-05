@@ -474,11 +474,13 @@ func hourBucketExpr(db *gorm.DB) string {
 	}
 }
 
+var terminalSecurityEventActions = []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}
+
 func (r *SecurityEventRepo) Timeline(since, until time.Time) ([]TimelineBucket, error) {
 	var buckets []TimelineBucket
 	err := r.db.Model(&store.SecurityEvent{}).
 		Select(hourBucketExpr(r.db)+", COUNT(*) as count").
-		Where("created_at >= ? AND created_at <= ?", since, until).
+		Where("created_at >= ? AND created_at <= ? AND action IN ?", since, until, terminalSecurityEventActions).
 		Group("bucket").
 		Order("bucket ASC").
 		Scan(&buckets).Error
@@ -489,7 +491,7 @@ func (r *SecurityEventRepo) TimelineBySite(siteID uint, since, until time.Time) 
 	var buckets []TimelineBucket
 	err := r.db.Model(&store.SecurityEvent{}).
 		Select(hourBucketExpr(r.db)+", COUNT(*) as count").
-		Where("site_id = ? AND created_at >= ? AND created_at <= ?", siteID, since, until).
+		Where("site_id = ? AND created_at >= ? AND created_at <= ? AND action IN ?", siteID, since, until, terminalSecurityEventActions).
 		Group("bucket").
 		Order("bucket ASC").
 		Scan(&buckets).Error
@@ -508,7 +510,7 @@ func (r *SecurityEventRepo) DistinctRequestCount(since time.Time) (int64, error)
 
 func (r *SecurityEventRepo) CountTerminal(since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, terminalSecurityEventActions).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) CountObserve(since time.Time) (int64, error) {
@@ -533,7 +535,7 @@ func (r *SecurityEventRepo) GetLatestBySite(siteID uint, limit int) ([]store.Sec
 
 func (r *SecurityEventRepo) CountTerminalBySite(siteID uint, since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, terminalSecurityEventActions).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) CountObserveBySite(siteID uint, since time.Time) (int64, error) {

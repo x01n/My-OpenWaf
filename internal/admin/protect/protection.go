@@ -149,9 +149,11 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 				return
 			}
 		}
-		if (present["cc_rules"] || (present["cc_use_custom"] && cfg.CCUseCustom)) && !validateCCRuleActions(cfg.CCRules) {
-			c.JSON(400, map[string]string{"error": "invalid cc rule action"})
-			return
+		if present["cc_rules"] || (present["cc_use_custom"] && cfg.CCUseCustom) {
+			if err := shared.ValidateCCRules(cfg.CCRules); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
 		}
 
 		data, err := json.Marshal(cfg)
@@ -213,11 +215,7 @@ func validateCCRuleActions(raw string) bool {
 		return false
 	}
 	for _, rule := range rules {
-		actionValue := strings.ToLower(strings.TrimSpace(rule.Action))
-		if actionValue == "" || actionValue == "captcha" {
-			continue
-		}
-		if _, ok := shared.ValidateActionWithoutRedirectTarget(actionValue); !ok {
+		if _, ok := shared.ValidateCCRuleAction(rule.Action); !ok && strings.TrimSpace(rule.Action) != "" {
 			return false
 		}
 	}

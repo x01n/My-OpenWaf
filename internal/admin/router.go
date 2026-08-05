@@ -103,6 +103,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/certificates/acme/config", system.GetACMEConfig(r.SystemSettings))
 
 		readGroup.GET("/policies", system.ListPolicies(r.Policy))
+		readGroup.GET("/policies/default", system.GetDefaultPolicy(r.Policy))
 		readGroup.GET("/policies/:id", system.GetPolicy(r.Policy))
 
 		readGroup.GET("/rules", rule.ListRules(r.Rule))
@@ -173,6 +174,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		readGroup.GET("/owasp-rules", detect.ListOWASPRulesFromRegistry(r.SystemSettings))
 		readGroup.GET("/owasp-rules/stats", detect.GetOWASPRuleStats(r.SystemSettings))
+		readGroup.GET("/policies/:policyId/owasp-rules", detect.ListOWASPRulesFromRegistry(r.SystemSettings))
+		readGroup.GET("/policies/:policyId/owasp-rules/stats", detect.GetOWASPRuleStats(r.SystemSettings))
 
 		readGroup.GET("/captcha/config", protect.GetCaptchaConfig(r.SystemSettings))
 
@@ -220,6 +223,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/certificates/acme/:id/renew", system.ACMERenew(deps.Repos, reload, deps.ACMEStore))
 
 		opsGroup.POST("/policies", system.CreatePolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/set-default", system.SetDefaultPolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/default", system.SetDefaultPolicy(r.Policy, reload))
 		opsGroup.POST("/policies/:id/update", system.UpdatePolicy(r.Policy, reload))
 		opsGroup.POST("/policies/:id/delete", system.DeletePolicy(r.Policy, r.Site, reload))
 
@@ -254,19 +259,25 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		opsGroup.POST("/bot-settings/update", protect.UpdateBotSettings(r.SystemSettings, reload))
 
-		opsGroup.POST("/cve-rules/:id/toggle", detect.ToggleCVERule(r.CVERule, deps.CVEFeedMgr))
-		opsGroup.POST("/cve-rules/:id/patch", detect.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr))
-		opsGroup.POST("/cve-rules/batch", detect.BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/:id/toggle", detect.ToggleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		opsGroup.POST("/cve-rules/:id/patch", detect.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		opsGroup.POST("/cve-rules/:id/reset", detect.ResetCVERuleOverride(r.CVERule, reload))
+		opsGroup.POST("/cve-rules/batch", detect.BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr, reload))
 		opsGroup.POST("/cve-rules/sync", detect.SyncCVERules(deps.CVEFeedMgr))
 
 		opsGroup.POST("/owasp-rules/:id/update", detect.UpdateSingleOWASPRule(r.SystemSettings, reload))
+		opsGroup.POST("/owasp-rules/:id/reset", detect.ResetOWASPRuleOverride(r.SystemSettings, reload))
 		opsGroup.POST("/owasp-rules/batch", detect.BatchUpdateOWASPRules(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/:id", detect.UpdateSingleOWASPRule(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/:id/reset", detect.ResetOWASPRuleOverride(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/batch", detect.BatchUpdateOWASPRules(r.SystemSettings, reload))
 
 		opsGroup.POST("/captcha/config", protect.UpdateCaptchaConfig(r.SystemSettings, reload))
 		opsGroup.POST("/captcha/test", protect.TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
 
 		opsGroup.POST("/page-templates/:type", protect.UpdatePageTemplate(r.SystemSettings, reload))
 		opsGroup.POST("/page-templates/:type/reset", protect.ResetPageTemplate(r.SystemSettings, reload))
+		opsGroup.POST("/page-templates/:type/preview", protect.PreviewPageTemplateDraft(r.SystemSettings))
 
 		opsGroup.POST("/chain/config", protect.UpdateChainConfig(r.SystemSettings, reload))
 		opsGroup.POST("/chain/sessions/:id/delete", protect.DeleteChainSession(deps.ChainMgr))
@@ -339,9 +350,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		adminGroup.POST("/drop-policy/update", protect.UpdateDropPolicy(r.SystemSettings, reload))
 
-		adminGroup.POST("/cve-rules", detect.CreateCVERule(r.CVERule, deps.CVEFeedMgr))
-		adminGroup.POST("/cve-rules/:id/update", detect.UpdateCVERule(r.CVERule, deps.CVEFeedMgr))
-		adminGroup.POST("/cve-rules/:id/delete", detect.DeleteCVERule(r.CVERule, deps.CVEFeedMgr))
+		adminGroup.POST("/cve-rules", detect.CreateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		adminGroup.POST("/cve-rules/:id/update", detect.UpdateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		adminGroup.POST("/cve-rules/:id/delete", detect.DeleteCVERule(r.CVERule, deps.CVEFeedMgr, reload))
 
 		// 删除误报反馈仅 admin。
 		adminGroup.POST("/false-positives/:id/delete", event.DeleteFalsePositive(r.FalsePositive))
@@ -349,6 +360,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 	h.GET("/__owaf/pow.wasm", func(ctx context.Context, c *app.RequestContext) {
 		challenge.ServePoWWASM(c)
+	})
+	h.GET("/__owaf/pow_glue.js", func(ctx context.Context, c *app.RequestContext) {
+		challenge.ServePowGlueJS(c)
 	})
 	h.GET("/api/v1/realtime/ws", deps.Realtime.WebSocketHandler())
 	h.GET("/.well-known/acme-challenge/:token", func(ctx context.Context, c *app.RequestContext) {

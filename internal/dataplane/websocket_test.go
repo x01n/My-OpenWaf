@@ -65,7 +65,7 @@ func TestForwardWebSocketUsesTLS10ConfigForWSSUpstream(t *testing.T) {
 	}
 	t.Cleanup(func() { tlsDialWebSocketUpstream = originalDial })
 
-	err := ForwardWebSocket(ctx, rt, "https://127.0.0.1:9443", nil, nil)
+	err := ForwardWebSocket(context.Background(), "", ctx, rt, "https://127.0.0.1:9443", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "stop after tls config check") {
 		t.Fatalf("ForwardWebSocket error = %v", err)
 	}
@@ -112,6 +112,10 @@ func TestBuildWebSocketHandshakeHeadersAppliesForwarding(t *testing.T) {
 	req.Header.Set("Sec-WebSocket-Key", "abc")
 	req.Header.Set("X-Custom", "yes")
 	req.Header.Set("X-Hop", "drop")
+	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	req.Header.Set("X-Forwarded-Host", "spoofed.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Forwarded", "for=198.51.100.7;host=spoofed.example;proto=https")
 	ctx := app.NewContext(0)
 	req.CopyTo(&ctx.Request)
 
@@ -126,7 +130,7 @@ func TestBuildWebSocketHandshakeHeadersAppliesForwarding(t *testing.T) {
 		"Host: client.example\r\n",
 		"X-Forwarded-For: 203.0.113.10\r\n",
 		"X-Forwarded-Host: client.example\r\n",
-		"X-Forwarded-Proto: https\r\n",
+		"X-Forwarded-Proto: http\r\n",
 		"Sec-Websocket-Key: abc\r\n",
 		"Connection: Upgrade\r\n",
 		"X-Custom: yes\r\n",
@@ -141,9 +145,12 @@ func TestBuildWebSocketHandshakeHeadersAppliesForwarding(t *testing.T) {
 	if strings.Contains(got, "X-Hop:") {
 		t.Fatalf("dynamic Connection token header leaked into upstream handshake: %q", got)
 	}
+	if strings.Contains(got, "\r\nForwarded:") {
+		t.Fatalf("RFC Forwarded header leaked into upstream handshake: %q", got)
+	}
 }
 
-func TestBuildWebSocketHandshakeHeadersPreservesRepeatedForwardedForValues(t *testing.T) {
+func TestBuildWebSocketHandshakeHeadersRebuildsRepeatedForwardedForValues(t *testing.T) {
 	var req protocol.Request
 	req.SetMethod("GET")
 	req.SetHost("client.example")
@@ -159,9 +166,9 @@ func TestBuildWebSocketHandshakeHeadersPreservesRepeatedForwardedForValues(t *te
 	if err != nil {
 		t.Fatalf("buildWebSocketHandshakeHeaders returned error: %v", err)
 	}
-	want := "X-Forwarded-For: 198.51.100.7, 198.51.100.8, 198.51.100.9, 203.0.113.10\r\n"
+	want := "X-Forwarded-For: 203.0.113.10\r\n"
 	if !strings.Contains(got, want) {
-		t.Fatalf("handshake headers missing preserved X-Forwarded-For chain %q in %q", want, got)
+		t.Fatalf("handshake headers missing rebuilt X-Forwarded-For %q in %q", want, got)
 	}
 	if strings.Count(got, "X-Forwarded-For:") != 1 {
 		t.Fatalf("X-Forwarded-For should be rebuilt exactly once, got %q", got)
@@ -210,7 +217,7 @@ func TestBuildWebSocketHandshakeHeadersUsesConfiguredUpstreamHost(t *testing.T) 
 	}
 }
 
-func TestBuildWebSocketHandshakeHeadersInfersHTTPSForwardedProtoFromOrigin(t *testing.T) {
+func TestBuildWebSocketHandshakeHeadersIgnoresOriginForForwardedProto(t *testing.T) {
 	var req protocol.Request
 	req.SetMethod("GET")
 	req.SetHost("client.example")
@@ -224,11 +231,11 @@ func TestBuildWebSocketHandshakeHeadersInfersHTTPSForwardedProtoFromOrigin(t *te
 	if err != nil {
 		t.Fatalf("buildWebSocketHandshakeHeaders returned error: %v", err)
 	}
-	if !strings.Contains(got, "X-Forwarded-Proto: https\r\n") {
-		t.Fatalf("expected HTTPS forwarded proto inferred from websocket Origin, got %q", got)
+	if !strings.Contains(got, "X-Forwarded-Proto: http\r\n") {
+		t.Fatalf("expected HTTP forwarded proto from the connection, got %q", got)
 	}
-	if strings.Contains(got, "X-Forwarded-Proto: http\r\n") {
-		t.Fatalf("websocket HTTPS Origin must not be downgraded to http, got %q", got)
+	if strings.Contains(got, "X-Forwarded-Proto: https\r\n") {
+		t.Fatalf("websocket Origin must not control forwarded proto, got %q", got)
 	}
 }
 
@@ -316,7 +323,7 @@ func TestForwardWebSocketReturnsWhenClientClosesAfterHandshake(t *testing.T) {
 
 	forwardDone := make(chan error, 1)
 	go func() {
-		forwardDone <- ForwardWebSocket(ctx, snapshot.SiteRuntime{}, "http://"+upstreamListener.Addr().String(), nil, nil)
+		forwardDone <- ForwardWebSocket(context.Background(), "", ctx, snapshot.SiteRuntime{}, "http://"+upstreamListener.Addr().String(), nil, nil)
 	}()
 
 	clientReader := bufio.NewReader(client)
@@ -450,7 +457,7 @@ func TestForwardWebSocketReturnsWhenWAFInterceptsClientFrame(t *testing.T) {
 
 	forwardDone := make(chan error, 1)
 	go func() {
-		forwardDone <- ForwardWebSocket(ctx, rt, "http://"+upstreamListener.Addr().String(), nil, eng)
+		forwardDone <- ForwardWebSocket(context.Background(), "", ctx, rt, "http://"+upstreamListener.Addr().String(), nil, eng)
 	}()
 
 	clientReader := bufio.NewReader(client)
@@ -718,7 +725,7 @@ func TestInspectWebSocketClientFramesStreamsRemainingPayload(t *testing.T) {
 
 	done := make(chan error, 2)
 	ctx := app.NewContext(0)
-	go inspectWebSocketClientFrames(proxyClientConn, proxyUpstreamConn, ctx, snapshot.SiteRuntime{}, nil, done)
+	go inspectWebSocketClientFrames(context.Background(), "", nil, proxyClientConn, proxyUpstreamConn, ctx, snapshot.SiteRuntime{}, nil, done)
 
 	writeErr := make(chan error, 1)
 	go func() {
@@ -781,7 +788,7 @@ func TestInspectWebSocketClientFramesSendsSingleError(t *testing.T) {
 
 	wantErr := errors.New("upstream write failed")
 	done := make(chan error, 2)
-	inspectWebSocketClientFrames(proxyClientConn, &failingWriteConn{err: wantErr}, app.NewContext(0), snapshot.SiteRuntime{}, nil, done)
+	inspectWebSocketClientFrames(context.Background(), "", nil, proxyClientConn, &failingWriteConn{err: wantErr}, app.NewContext(0), snapshot.SiteRuntime{}, nil, done)
 
 	got := <-done
 	if !errors.Is(got, wantErr) {
@@ -930,6 +937,7 @@ func TestBuildAccessLogEntryDoesNotRecordProxyTLSFingerprintForHTTP3(t *testing.
 		localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443},
 		remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
 	})
+	applyInternalHTTP3RequestMetadata(ctx)
 
 	entry := buildAccessLogEntry(ctx, accessLogInfo{SiteID: 1})
 	if entry.HTTPProtocol != "h3" {
@@ -1175,7 +1183,7 @@ func TestInspectWebSocketPayloadAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *te
 	ctx.Request.Header.SetHost("ws-ttl.example.com")
 	ctx.Request.Header.Set("X-Nonce", nonce)
 
-	got := inspectWebSocketPayload(ctx, rt, eng, []byte("hello"))
+	got := inspectWebSocketPayload(context.Background(), "", nil, ctx, rt, eng, []byte("hello"))
 	if got.Type != action.Intercept {
 		t.Fatalf("inspectWebSocketPayload action = %#v, want intercept", got)
 	}
@@ -1229,7 +1237,7 @@ func TestInspectWebSocketPayloadUsesCachedTLSHandshakeMetadata(t *testing.T) {
 		ALPN:       []string{"h2"},
 	})
 
-	got := inspectWebSocketPayload(ctx, rt, eng, []byte("hello"))
+	got := inspectWebSocketPayload(context.Background(), "", nil, ctx, rt, eng, []byte("hello"))
 	if got.Type != action.Intercept {
 		t.Fatalf("inspectWebSocketPayload action = %#v, want intercept", got)
 	}

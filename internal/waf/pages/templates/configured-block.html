@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.PageTitle}}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:{{.Background}};color:#0f172a}
+.shell{width:min(720px,92vw);padding:22px}
+.card{position:relative;overflow:hidden;background:rgba(255,255,255,.94);border:1px solid rgba(148,163,184,.25);border-radius:28px;box-shadow:0 24px 80px rgba(15,23,42,.14);padding:42px}
+.card:before{content:"";position:absolute;inset:0 0 auto 0;height:6px;background:{{.PrimaryColor}}}
+.top{display:flex;gap:18px;align-items:center}.logo{display:block;max-width:64px;max-height:64px;object-fit:contain}.icon{width:64px;height:64px;border-radius:22px;display:grid;place-items:center;font-size:34px;background:#e0f2fe}.kicker{font-size:12px;font-weight:700;text-transform:uppercase;color:#64748b}.title{margin-top:6px;font-size:28px;font-weight:800}.msg{margin-top:18px;color:#475569;line-height:1.8;font-size:15px}.meta{display:grid;gap:10px;margin-top:28px;padding:16px;border-radius:18px;background:#f8fafc;border:1px solid #e2e8f0}.row{display:flex;justify-content:space-between;gap:18px;font-size:12px;color:#64748b}.row code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#0f172a;word-break:break-all}.footer{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:24px;color:#94a3b8;font-size:12px}.pill{border-radius:999px;border:1px solid #e2e8f0;background:#fff;padding:6px 10px;color:#64748b}
+{{.CustomCSS}}
+</style>
+</head>
+<body><main class="shell"><section class="card">
+<div class="top">{{if .LogoURL}}<img class="logo" src="{{.LogoURL}}" alt="">{{else}}<div class="icon">&#128737;</div>{{end}}<div><div class="kicker">{{.BrandName}}</div><h1 class="title">{{.Heading}}</h1></div></div>
+<p class="msg">{{.Message}}</p>
+<div class="meta"><div class="row"><span>Request ID</span><code>{{.RequestID}}</code></div></div>
+<div class="footer"><span>{{.FooterText}}</span><span class="pill">{{.StatusLabel}}</span></div>
+</section></main></body>
+</html>

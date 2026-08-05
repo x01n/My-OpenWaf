@@ -1,11 +1,13 @@
 package challenge
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +41,7 @@ type ChainSessionInfo struct {
 }
 
 type ChainState struct {
+	ChallengeSessionBinding
 	SessionID   string            `json:"session_id"`
 	CurrentStep int               `json:"current_step"`
 	Steps       []ChainStepConfig `json:"steps"`
@@ -276,16 +279,22 @@ func (cm *ChainChallengeManager) difficultyValue() int {
 
 // StartChain begins a new chain challenge and returns the session ID and HTML for the first step.
 func (cm *ChainChallengeManager) StartChain(originalURL string) (string, string) {
+	return cm.StartChainWithBinding(originalURL, ChallengeSessionBinding{})
+}
+
+// StartChainWithBinding creates a chain session bound to the matched site.
+func (cm *ChainChallengeManager) StartChainWithBinding(originalURL string, binding ChallengeSessionBinding) (string, string) {
 	sid := chainGenID()
 	state := &ChainState{
-		SessionID:   sid,
-		CurrentStep: 0,
-		Steps:       cm.configuredSteps(),
-		Scores:      make(map[string]int),
-		OriginalURL: originalURL,
-		Nonce:       GeneratePoWNonce(),
-		Difficulty:  cm.difficultyValue(),
-		CreatedAt:   time.Now(),
+		ChallengeSessionBinding: binding.normalized(),
+		SessionID:               sid,
+		CurrentStep:             0,
+		Steps:                   cm.configuredSteps(),
+		Scores:                  make(map[string]int),
+		OriginalURL:             originalURL,
+		Nonce:                   GeneratePoWNonce(),
+		Difficulty:              cm.difficultyValue(),
+		CreatedAt:               time.Now(),
 	}
 	cm.saveChainState(state)
 	return sid, cm.renderStepHTML(state)
@@ -311,7 +320,12 @@ type ChainStepOutcome struct {
 // ProcessStepDetailed 与 ProcessStep 行为一致，但额外报告本次提交是否校验失败。
 // 数据面应使用本方法，以便对失败重试做服务端侧限制。
 func (cm *ChainChallengeManager) ProcessStepDetailed(sessionID string, formData map[string]string) ChainStepOutcome {
-	passed, redirectURL, nextHTML, failed := cm.processStep(sessionID, formData)
+	return cm.ProcessStepDetailedWithBinding(sessionID, formData, ChallengeSessionBinding{})
+}
+
+// ProcessStepDetailedWithBinding advances a chain only for its issuing site.
+func (cm *ChainChallengeManager) ProcessStepDetailedWithBinding(sessionID string, formData map[string]string, binding ChallengeSessionBinding) ChainStepOutcome {
+	passed, redirectURL, nextHTML, failed := cm.processStepWithBinding(sessionID, formData, binding)
 	return ChainStepOutcome{
 		Passed:      passed,
 		RedirectURL: redirectURL,
@@ -324,26 +338,25 @@ func (cm *ChainChallengeManager) ProcessStepDetailed(sessionID string, formData 
 //
 // Deprecated: 该签名无法区分步内校验失败与正常推进，数据面请改用 ProcessStepDetailed。
 func (cm *ChainChallengeManager) ProcessStep(sessionID string, formData map[string]string) (bool, string, string) {
-	passed, redirectURL, nextHTML, _ := cm.processStep(sessionID, formData)
+	passed, redirectURL, nextHTML, _ := cm.processStepWithBinding(sessionID, formData, ChallengeSessionBinding{})
 	return passed, redirectURL, nextHTML
 }
 
 // processStep 是实现主体，第四个返回值标识本次提交是否校验失败。
 // 整个 “读状态 → 校验当前步骤 → 推进 → 写状态” 序列在会话级串行锁内完成，
 // 保证并发提交同一会话时状态机只按一条路径推进，且通行结果最多产生一次。
-func (cm *ChainChallengeManager) processStep(sessionID string, formData map[string]string) (bool, string, string, bool) {
+func (cm *ChainChallengeManager) processStepWithBinding(sessionID string, formData map[string]string, binding ChallengeSessionBinding) (bool, string, string, bool) {
 	if sessionID == "" {
 		return false, "", "", true
 	}
 	cm.gate.lock(sessionID)
 	defer cm.gate.unlock(sessionID)
 
-	state := cm.loadChainState(sessionID)
+	state := cm.takeChainStateWithBinding(sessionID, binding)
 	if state == nil {
 		return false, "", "", true
 	}
 	if state.CurrentStep >= len(state.Steps) {
-		cm.deleteChainState(sessionID)
 		return true, state.OriginalURL, "", false
 	}
 	step := state.Steps[state.CurrentStep]
@@ -371,8 +384,8 @@ func (cm *ChainChallengeManager) processStep(sessionID string, formData map[stri
 		state.Scores["pow"] = 0
 	case ChainStepCaptcha:
 		answer := formData["captcha_answer"]
-		if state.CaptchaID == "" || !cm.captcha.VerifyAdvanced(state.CaptchaID, answer) {
-			ch, _ := cm.captcha.Generate(normalizeChainCaptchaType(step.CaptchaType), false)
+		if state.CaptchaID == "" || !cm.captcha.VerifyAdvancedWithBinding(state.CaptchaID, answer, state.ChallengeSessionBinding) {
+			ch, _ := cm.captcha.GenerateWithBinding(normalizeChainCaptchaType(step.CaptchaType), false, state.ChallengeSessionBinding)
 			if ch != nil {
 				state.CaptchaID = ch.SessionID
 			}
@@ -390,14 +403,13 @@ func (cm *ChainChallengeManager) processStep(sessionID string, formData map[stri
 		state.CurrentStep++
 	}
 	if state.CurrentStep >= len(state.Steps) {
-		cm.deleteChainState(sessionID)
 		return true, state.OriginalURL, "", false
 	}
 	ns := state.Steps[state.CurrentStep]
 	if ns.Type == ChainStepPoW {
 		state.Nonce = GeneratePoWNonce()
 	} else if ns.Type == ChainStepCaptcha {
-		ch, _ := cm.captcha.Generate(normalizeChainCaptchaType(ns.CaptchaType), false)
+		ch, _ := cm.captcha.GenerateWithBinding(normalizeChainCaptchaType(ns.CaptchaType), false, state.ChallengeSessionBinding)
 		if ch != nil {
 			state.CaptchaID = ch.SessionID
 		}
@@ -428,155 +440,95 @@ func (cm *ChainChallengeManager) shouldRunStep(step ChainStepConfig, state *Chai
 	return true
 }
 
+var chainPageTmpl = template.Must(template.ParseFS(challengePageFS, "templates/chain.html"))
+
+type chainCaptchaPageData struct {
+	Type       string
+	MasterImg  template.URL
+	ThumbImg   template.URL
+	Prompt     string
+	SlideWidth int
+	IsClick    bool
+	IsSlide    bool
+	IsRotate   bool
+}
+
+type chainPageData struct {
+	StepNum   int
+	Total     int
+	Dots      []string
+	SessionID string
+	IsEnv     bool
+	IsPoW     bool
+	IsCaptcha bool
+	EnvJS     template.JS
+	PowJS     template.JS
+	Captcha   *chainCaptchaPageData
+}
+
+func newChainCaptchaPageData(ch *CaptchaChallenge) *chainCaptchaPageData {
+	if ch == nil {
+		return nil
+	}
+	captchaType := CaptchaType(ch.Type)
+	return &chainCaptchaPageData{
+		Type:       ch.Type,
+		MasterImg:  captchaImageURL(ch.MasterImg),
+		ThumbImg:   captchaImageURL(ch.ThumbImg),
+		Prompt:     ch.Prompt,
+		SlideWidth: firstPositiveInt(ch.Width, 360),
+		IsClick:    captchaType == CaptchaTypeClick,
+		IsSlide:    captchaType == CaptchaTypeSlide,
+		IsRotate:   captchaType == CaptchaTypeRotate,
+	}
+}
+
 func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 	if state.CurrentStep >= len(state.Steps) {
 		return ""
 	}
 	step := state.Steps[state.CurrentStep]
-	stepNum := state.CurrentStep + 1
-	total := len(state.Steps)
-
-	dots := ""
-	for i := 0; i < total; i++ {
-		cls := "sd"
+	data := chainPageData{
+		StepNum:   state.CurrentStep + 1,
+		Total:     len(state.Steps),
+		SessionID: state.SessionID,
+		Dots:      make([]string, len(state.Steps)),
+	}
+	for i := range state.Steps {
+		className := "sd"
 		if i < state.CurrentStep {
-			cls += " done"
+			className += " done"
 		} else if i == state.CurrentStep {
-			cls += " active"
+			className += " active"
 		}
-		dots += fmt.Sprintf(`<div class="%s"></div>`, cls)
+		data.Dots[i] = className
 	}
 
-	header := fmt.Sprintf(chainHdrHTML, stepNum, total)
-	var body string
 	switch step.Type {
 	case ChainStepEnv:
-		body = fmt.Sprintf(chainEnvHTML, stepNum, total, dots, EnvCheckJS(), state.SessionID)
+		data.IsEnv = true
+		data.EnvJS = template.JS(EnvCheckJS())
 	case ChainStepPoW:
-		// PoW 步骤只提交 counter/hash，不提交环境指纹，因此不下发环境加密密钥。
-		// 此前传入的是 state.Nonce——它本身就随页面明文下发给客户端，
-		// 用它当“会话密钥”只是伪装，不提供任何机密性。
-		powJS := GeneratePoWWASMScript(state.powDifficulty(cm.difficultyValue()), state.Nonce, "")
-		body = fmt.Sprintf(chainPowHTML, stepNum, total, dots, powJS, state.SessionID)
+		data.IsPoW = true
+		data.PowJS = template.JS(GeneratePoWWASMScript(state.powDifficulty(state.Difficulty), state.Nonce, ""))
 	case ChainStepCaptcha:
-		captchaBlock := ""
-		ch, _ := cm.captcha.Generate(normalizeChainCaptchaType(step.CaptchaType), false)
-		if ch != nil {
-			state.CaptchaID = ch.SessionID
+		data.IsCaptcha = true
+		challenge, _ := cm.captcha.GenerateWithBinding(normalizeChainCaptchaType(step.CaptchaType), false, state.ChallengeSessionBinding)
+		if challenge != nil {
+			state.CaptchaID = challenge.SessionID
 			cm.saveChainState(state)
-			captchaBlock = renderChainCaptchaHTML(ch)
+			data.Captcha = newChainCaptchaPageData(challenge)
 		}
-		body = fmt.Sprintf(chainCapHTML, stepNum, total, dots, captchaBlock, state.SessionID)
-	}
-	return header + body + "</div></body></html>"
-}
-
-func renderChainCaptchaHTML(ch *CaptchaChallenge) string {
-	if ch == nil {
-		return `<input type="text" class="ci" id="ans" autocomplete="off">`
-	}
-	switch CaptchaType(ch.Type) {
-	case CaptchaTypeClick:
-		return fmt.Sprintf(`<input type="hidden" id="cap-type" value="%s"><div class="img-wrap"><img id="cap-img" src="%s" alt="CAPTCHA"></div><img class="thumb" src="%s" alt="target"><input type="hidden" class="ci" id="ans"><button type="button" class="mini" id="clear-clicks">Clear clicks / 清空点击</button>`, ch.Type, ch.MasterImg, ch.ThumbImg)
-	case CaptchaTypeSlide:
-		return fmt.Sprintf(`<input type="hidden" id="cap-type" value="%s"><img src="%s" alt="CAPTCHA"><img id="slide-thumb" class="thumb slide-thumb" src="%s" alt="slider"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="%d" value="0" id="slide-range">`, ch.Type, ch.MasterImg, ch.ThumbImg, firstPositiveInt(ch.Width, 360))
-	case CaptchaTypeRotate:
-		return fmt.Sprintf(`<input type="hidden" id="cap-type" value="%s"><img id="cap-img" src="%s" alt="CAPTCHA"><img class="thumb" src="%s" alt="target"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="360" value="0" id="rotate-range">`, ch.Type, ch.MasterImg, ch.ThumbImg)
 	default:
-		return fmt.Sprintf(`<input type="hidden" id="cap-type" value="%s"><img src="%s" alt="CAPTCHA"><input type="text" class="ci" id="ans" placeholder="%s" autocomplete="off">`, ch.Type, ch.MasterImg, ch.Prompt)
+		return ""
 	}
+
+	var buf bytes.Buffer
+	if err := chainPageTmpl.ExecuteTemplate(&buf, "chain.html", data); err != nil {
+		return "<!DOCTYPE html><html><body><p>Unable to render security verification.</p></body></html>"
+	}
+	return buf.String()
 }
-
-const chainHdrHTML = `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Security Verification - Step %d/%d</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"Helvetica Neue",sans-serif;background:linear-gradient(160deg,#f0fdfa 0%%,#f8fafc 40%%,#f1f5f9 100%%);display:flex;justify-content:center;align-items:center;min-height:100vh}
-.ct{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);padding:48px 40px;max-width:460px;width:92%%;text-align:center}
-.chain-icon{font-size:42px;margin-bottom:10px;line-height:1.2}
-h1{font-size:1.1rem;font-weight:600;color:#334155;margin-bottom:4px}
-.si{color:#64748b;font-size:.8rem;margin-bottom:16px}
-.divider{width:48px;height:3px;background:#14b8a6;border-radius:2px;margin:0 auto 20px}
-.ps{display:flex;justify-content:center;gap:6px;margin-bottom:24px}
-.sd{width:12px;height:12px;border-radius:50%%;background:#e2e8f0;transition:all .3s;border:2px solid transparent}
-.sd.active{background:#14b8a6;border-color:#0d9488;box-shadow:0 0 0 3px rgba(20,184,166,.15)}
-.sd.done{background:#22c55e;border-color:#16a34a}
-.st{color:#64748b;font-size:.8rem;margin-top:16px;min-height:1.2em}
-.ci{width:100%%;padding:14px 16px;border:2px solid #e2e8f0;border-radius:10px;font-size:1rem;margin-top:14px;outline:none;transition:border-color .2s,box-shadow .2s;background:#f8fafc}
-.ci:focus{border-color:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166,.12);background:#fff}
-.btn{width:100%%;padding:14px;background:linear-gradient(135deg,#14b8a6,#0d9488);color:#fff;border:none;border-radius:10px;font-size:1rem;font-weight:500;cursor:pointer;margin-top:16px;transition:opacity .2s,transform .1s}
-.btn:hover{opacity:.92}.btn:active{transform:scale(.98)}
-.btn:disabled{background:#cbd5e1;cursor:not-allowed;opacity:.7}
-.captcha-box{background:#f8fafc;border-radius:12px;padding:16px;border:1px solid #e2e8f0}
-.captcha-box img{max-width:100%%;border-radius:8px;display:block;margin:0 auto}
-.img-wrap{position:relative;width:fit-content;margin:0 auto}.dot{position:absolute;transform:translate(-50%%,-50%%);border-radius:999px;background:#14b8a6;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;box-shadow:0 2px 8px rgba(15,118,110,.35)}.mini{border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:7px 10px;color:#64748b;cursor:pointer}.thumb{max-height:84px;object-fit:contain}.slide-thumb{background:#e2e8f0;padding:6px;transition:transform .12s}input[type=range]{width:100%%;accent-color:#14b8a6}
-img{max-width:100%%;border-radius:8px;margin:12px 0}
-.pb{width:100%%;height:6px;background:#e2e8f0;border-radius:3px;margin:20px 0;overflow:hidden}
-.pf{height:100%%;background:linear-gradient(90deg,#14b8a6,#0d9488);width:10%%;transition:width .4s ease;border-radius:3px}
-.footer{margin-top:24px;padding-top:14px;border-top:1px solid #f1f5f9;font-size:.7rem;color:#94a3b8}
-</style></head><body><div class="ct">`
-
-const chainEnvHTML = `<div class="chain-icon">&#128270;</div>
-<h1>Environment Check / 环境检测</h1>
-<p class="si">Step %d of %d</p><div class="divider"></div><div class="ps">%s</div>
-<p class="st" id="st">Collecting browser information... / 正在收集浏览器信息...</p>
-<div class="footer">Protected by My-OpenWAF</div>
-<script>
-%s
-setTimeout(function(){
-var d=window.__owaf_env?JSON.stringify(window.__owaf_env):'{}';
-var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
-var fl={'__waf_chain_session':'%s','__waf_chain_step':'env','__waf_env_fp':d};
-for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
-document.body.appendChild(f);f.submit()},1500);
-</script>`
-
-const chainPowHTML = `<div class="chain-icon">&#9881;</div>
-<h1>Proof of Work / 工作量证明</h1>
-<p class="si">Step %d of %d</p><div class="divider"></div><div class="ps">%s</div>
-<div class="pb"><div class="pf" id="pg"></div></div>
-<p class="st" id="st">Computing... / 正在计算...</p>
-<div class="footer">Protected by My-OpenWAF</div>
-<script>
-%s
-window.__owaf_pow_callback=function(c,h){
-document.getElementById('pg').style.width='100%%';
-document.getElementById('st').textContent='Complete! / 完成！';
-var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
-var fl={'__waf_chain_session':'%s','__waf_chain_step':'pow','__waf_pow_counter':String(c),'__waf_pow_hash':h};
-for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
-document.body.appendChild(f);f.submit()};
-</script>`
-
-const chainCapHTML = `<div class="chain-icon">&#128274;</div>
-<h1>CAPTCHA Verification / 验证码验证</h1>
-<p class="si">Step %d of %d</p><div class="divider"></div><div class="ps">%s</div>
-<div class="captcha-box">%s</div>
-<button class="btn" onclick="go()">Submit / 提交</button>
-<div class="footer">Protected by My-OpenWAF</div>
-<script>
-(function(){
-var type=(document.getElementById('cap-type')||{}).value||'math';
-var answer=document.getElementById('ans');
-var img=document.getElementById('cap-img');
-if(type==='click'&&img){
-  var points=[];
-  img.addEventListener('click',function(e){var r=img.getBoundingClientRect();var x=Math.round(((e.clientX-r.left)/r.width)*(img.naturalWidth||r.width));var y=Math.round(((e.clientY-r.top)/r.height)*(img.naturalHeight||r.height));points.push({x:x,y:y});answer.value=JSON.stringify(points);var d=document.createElement('span');d.className='dot';d.textContent=String(points.length);d.style.left=((x/(img.naturalWidth||r.width))*100)+'%%';d.style.top=((y/(img.naturalHeight||r.height))*100)+'%%';img.parentNode.appendChild(d);});
-  var clear=document.getElementById('clear-clicks');if(clear){clear.addEventListener('click',function(){points=[];answer.value='';document.querySelectorAll('.dot').forEach(function(n){n.remove();});});}
-}
-var slide=document.getElementById('slide-range');var thumb=document.getElementById('slide-thumb');
-if(type==='slide'&&slide){slide.addEventListener('input',function(){answer.value=JSON.stringify({x:Number(slide.value)});if(thumb){thumb.style.transform='translateX('+slide.value+'px)';}});}
-var rotate=document.getElementById('rotate-range');
-if(type==='rotate'&&rotate&&img){rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});img.style.transform='rotate('+rotate.value+'deg)';});}
-})();
-function go(){var a=document.getElementById('ans').value.trim();if(!a)return;
-var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
-var fl={'__waf_chain_session':'%s','__waf_chain_step':'captcha','__waf_captcha_answer':a};
-for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
-document.body.appendChild(f);f.submit()}
-document.getElementById('ans').addEventListener('keypress',function(e){if(e.key==='Enter')go()});
-</script>`
 
 func chainGenID() string {
 	b := make([]byte, 16)
@@ -596,7 +548,6 @@ func (cm *ChainChallengeManager) ListSessions() []ChainSessionInfo {
 	defer cm.mu.RUnlock()
 	sessions := make([]ChainSessionInfo, 0, len(cm.states))
 	for _, state := range cm.states {
-		// 过期但尚未被清理协程回收的会话不再对外可见。
 		if now.Sub(state.CreatedAt) > chainStateTTL {
 			continue
 		}
@@ -675,19 +626,19 @@ func (cm *ChainChallengeManager) loadChainState(id string) *ChainState {
 		defer cancel()
 		data, err := redis.Get(ctx, cm.prefix+id).Bytes()
 		if err == nil {
-			var s ChainState
-			if json.Unmarshal(data, &s) == nil {
-				if time.Since(s.CreatedAt) > chainStateTTL {
+			var state ChainState
+			if json.Unmarshal(data, &state) == nil {
+				if time.Since(state.CreatedAt) > chainStateTTL {
 					cm.deleteChainState(id)
 					return nil
 				}
-				return &s
+				return &state
 			}
 		}
 	}
 	cm.mu.Lock()
-	s, ok := cm.states[id]
-	if ok && time.Since(s.CreatedAt) > chainStateTTL {
+	state, ok := cm.states[id]
+	if ok && time.Since(state.CreatedAt) > chainStateTTL {
 		delete(cm.states, id)
 		ok = false
 	}
@@ -695,7 +646,52 @@ func (cm *ChainChallengeManager) loadChainState(id string) *ChainState {
 	if !ok {
 		return nil
 	}
-	return s.clone()
+	return state.clone()
+}
+
+// takeChainStateWithBinding atomically claims a chain state after checking its
+// persisted site binding. Successful nonterminal processing stores the updated
+// state again; terminal success intentionally leaves it consumed.
+func (cm *ChainChallengeManager) takeChainStateWithBinding(id string, binding ChallengeSessionBinding) *ChainState {
+	if id == "" {
+		return nil
+	}
+	binding = binding.normalized()
+	if redis := cm.redisClient(); redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{cm.prefix + id}, binding.SiteID, binding.Host, binding.Bind).Text()
+		if err == nil && raw != "" {
+			var state ChainState
+			if json.Unmarshal([]byte(raw), &state) == nil {
+				if time.Since(state.CreatedAt) <= chainStateTTL {
+					cm.mu.Lock()
+					delete(cm.states, id)
+					cm.mu.Unlock()
+					return &state
+				}
+			}
+			return nil
+		}
+	}
+
+	cm.mu.Lock()
+	state, ok := cm.states[id]
+	if ok && time.Since(state.CreatedAt) > chainStateTTL {
+		delete(cm.states, id)
+		ok = false
+	}
+	if ok && state != nil && state.ChallengeSessionBinding.matches(binding) {
+		delete(cm.states, id)
+		state = state.clone()
+	} else {
+		ok = false
+	}
+	cm.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return state
 }
 
 func (cm *ChainChallengeManager) deleteChainState(id string) {

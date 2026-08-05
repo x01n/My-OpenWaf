@@ -1,33 +1,33 @@
-"use client";
+"use client"
 
-import { Card, CardContent } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
-import { ReactNode } from "react";
+import { Card, CardContent } from "@/components/ui/card"
+import { cn } from "@/lib/utils"
+import { ReactNode } from "react"
 
 /** 单个次要指标 */
 export interface MetricStripItem {
   /** 指标名 */
-  label: string;
+  label: string
   /** 已格式化的展示值 */
-  value: string;
+  value: string
   /**
    * 原始数值，仅用于「零值降级」判断。
    * 为 0 时该项以低对比度渲染，让有数据的指标先被看到。
    */
-  rawValue?: number;
+  rawValue?: number
   /** 悬停提示，用于说明统计口径 */
-  hint?: string;
+  hint?: string
 }
 
 interface MetricStripProps {
   /** 分组标题，用于声明这一组指标的统计口径 */
-  title: string;
+  title: string
   /** 口径补充说明（例如「自进程启动累计，重启后归零」） */
-  caption?: string;
+  caption?: string
   /** 标题右侧插槽，通常放徽章 */
-  action?: ReactNode;
-  items: MetricStripItem[];
-  className?: string;
+  action?: ReactNode
+  items: MetricStripItem[]
+  className?: string
 }
 
 /**
@@ -61,7 +61,7 @@ export function MetricStrip({
 
         <dl className="mt-3 grid grid-cols-3 gap-x-4 gap-y-3 border-t border-border/60 pt-3 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8">
           {items.map((item) => {
-            const isZero = item.rawValue === 0;
+            const isZero = item.rawValue === 0
             return (
               <div key={item.label} className="min-w-0" title={item.hint}>
                 <dt className="truncate text-[11px] leading-none text-muted-foreground">
@@ -69,17 +69,17 @@ export function MetricStrip({
                 </dt>
                 <dd
                   className={cn(
-                    "mt-1.5 text-base font-semibold leading-none tabular-nums",
+                    "mt-1.5 text-base leading-none font-semibold tabular-nums",
                     isZero ? "text-muted-foreground/45" : "text-foreground"
                   )}
                 >
                   {item.value}
                 </dd>
               </div>
-            );
+            )
           })}
         </dl>
       </CardContent>
     </Card>
-  );
+  )
 }

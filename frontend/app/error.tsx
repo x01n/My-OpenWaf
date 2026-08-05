@@ -1,20 +1,20 @@
-"use client";
+"use client"
 
-import { useEffect } from "react";
-import { Button } from "@/components/ui/button";
+import { useEffect } from "react"
+import { Button } from "@/components/ui/button"
 
 export default function Error({
   error,
   reset,
 }: {
-  error: Error & { digest?: string };
-  reset: () => void;
+  error: Error & { digest?: string }
+  reset: () => void
 }) {
   useEffect(() => {
     if (process.env.NODE_ENV === "development") {
-      console.error("[Error Boundary]", error);
+      console.error("[Error Boundary]", error)
     }
-  }, [error]);
+  }, [error])
 
   return (
     <div className="flex min-h-[50vh] items-center justify-center p-4">
@@ -28,5 +28,5 @@ export default function Error({
         </Button>
       </div>
     </div>
-  );
+  )
 }

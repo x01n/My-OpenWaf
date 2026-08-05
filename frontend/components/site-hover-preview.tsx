@@ -1,20 +1,20 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import { useTranslation } from "react-i18next";
-import useSWR from "swr";
-import { format } from "date-fns";
+import * as React from "react"
+import { useTranslation } from "react-i18next"
+import useSWR from "swr"
+import { format } from "date-fns"
 
-import { cn } from "@/lib/utils";
-import type { Site, UpstreamStatus } from "@/lib/types";
-import { parseUpstreamUrls } from "@/lib/site-display";
-import { securityEventApi, upstreamApi } from "@/lib/api";
+import { cn } from "@/lib/utils"
+import type { Site, UpstreamStatus } from "@/lib/types"
+import { parseUpstreamUrls } from "@/lib/site-display"
+import { securityEventApi, upstreamApi } from "@/lib/api"
 import {
   HoverCard,
   HoverCardContent,
   HoverCardTrigger,
-} from "@/components/ui/hover-card";
-import { Badge } from "@/components/ui/badge";
+} from "@/components/ui/hover-card"
+import { Badge } from "@/components/ui/badge"
 import {
   IconActivity,
   IconAlertTriangle,
@@ -22,13 +22,13 @@ import {
   IconServer,
   IconShieldExclamation,
   IconX,
-} from "@tabler/icons-react";
+} from "@tabler/icons-react"
 
 interface SiteHoverPreviewProps {
-  site: Site;
-  children: React.ReactNode;
-  align?: "start" | "center" | "end";
-  className?: string;
+  site: Site
+  children: React.ReactNode
+  align?: "start" | "center" | "end"
+  className?: string
 }
 
 /**
@@ -44,13 +44,13 @@ export function SiteHoverPreview({
   align = "start",
   className,
 }: SiteHoverPreviewProps) {
-  const { t } = useTranslation();
-  const [enabled, setEnabled] = React.useState(false);
+  const { t } = useTranslation()
+  const [enabled, setEnabled] = React.useState(false)
 
   const upstreams = React.useMemo(
     () => parseUpstreamUrls(site.upstream_urls),
-    [site.upstream_urls],
-  );
+    [site.upstream_urls]
+  )
 
   const { data: statsData, isLoading: statsLoading } = useSWR(
     enabled ? ["site-hover-stats", site.id] : null,
@@ -58,34 +58,34 @@ export function SiteHoverPreview({
       const res = (await securityEventApi.getSiteStats(site.id, {
         hours: 24,
       })) as {
-        total: number;
-        intercepts: number;
-        observes: number;
-        challenges: number;
-        requests: number;
-      };
-      return res;
+        total: number
+        intercepts: number
+        observes: number
+        challenges: number
+        requests: number
+      }
+      return res
     },
-    { revalidateOnFocus: false },
-  );
+    { revalidateOnFocus: false }
+  )
 
   const { data: upstreamData, isLoading: upstreamLoading } = useSWR(
     enabled ? ["upstream-status-all"] : null,
     async () => upstreamApi.getStatus(),
-    { revalidateOnFocus: false, refreshInterval: 15000 },
-  );
+    { revalidateOnFocus: false, refreshInterval: 15000 }
+  )
 
   const relatedUpstreams: UpstreamStatus[] = React.useMemo(() => {
-    if (!upstreamData?.items || upstreams.length === 0) return [];
-    return upstreamData.items.filter((it) => upstreams.includes(it.url));
-  }, [upstreamData, upstreams]);
+    if (!upstreamData?.items || upstreams.length === 0) return []
+    return upstreamData.items.filter((it) => upstreams.includes(it.url))
+  }, [upstreamData, upstreams])
 
   return (
     <HoverCard
       openDelay={250}
       closeDelay={120}
       onOpenChange={(o) => {
-        if (o) setEnabled(true);
+        if (o) setEnabled(true)
       }}
     >
       <HoverCardTrigger asChild>
@@ -158,7 +158,7 @@ export function SiteHoverPreview({
           ) : (
             <ul className="space-y-1">
               {upstreams.slice(0, 4).map((url) => {
-                const found = relatedUpstreams.find((u) => u.url === url);
+                const found = relatedUpstreams.find((u) => u.url === url)
                 return (
                   <li
                     key={url}
@@ -195,7 +195,7 @@ export function SiteHoverPreview({
                       </span>
                     )}
                   </li>
-                );
+                )
               })}
               {upstreams.length > 4 ? (
                 <li className="pt-0.5 text-center text-[10px] text-muted-foreground">
@@ -217,7 +217,7 @@ export function SiteHoverPreview({
         </div>
       </HoverCardContent>
     </HoverCard>
-  );
+  )
 }
 
 function MetricCell({
@@ -225,16 +225,16 @@ function MetricCell({
   label,
   tone,
 }: {
-  value: number;
-  label: React.ReactNode;
-  tone?: "destructive" | "warning";
+  value: number
+  label: React.ReactNode
+  tone?: "destructive" | "warning"
 }) {
   const color =
     tone === "destructive"
       ? "text-destructive"
       : tone === "warning"
         ? "text-amber-600 dark:text-amber-400"
-        : "text-foreground";
+        : "text-foreground"
   return (
     <div className="rounded-md bg-background/60 py-1">
       <div className={cn("text-sm font-semibold tabular-nums", color)}>
@@ -242,14 +242,14 @@ function MetricCell({
       </div>
       <div className="text-[10px] text-muted-foreground">{label}</div>
     </div>
-  );
+  )
 }
 
 function safeFormat(iso?: string): string {
-  if (!iso) return "-";
+  if (!iso) return "-"
   try {
-    return format(new Date(iso), "MM-dd HH:mm");
+    return format(new Date(iso), "MM-dd HH:mm")
   } catch {
-    return iso;
+    return iso
   }
 }

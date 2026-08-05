@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"My-OpenWaf/internal/store"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -87,5 +88,53 @@ func TestTimelineQueryRunsOnSQLite(t *testing.T) {
 		if !strings.Contains(b.Bucket, " ") || !strings.HasSuffix(b.Bucket, ":00") {
 			t.Errorf("bucket 应形如 'YYYY-MM-DD HH:00'：%q", b.Bucket)
 		}
+	}
+}
+
+// TestTimelineOnlyCountsTerminalActions 验证时间线口径与 CountTerminal 一致，observe/tag 不计入。
+func TestTimelineOnlyCountsTerminalActions(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewSecurityEventRepo(db)
+	now := time.Now()
+
+	events := []store.SecurityEvent{
+		{Action: "observe", CreatedAt: now.Add(-time.Hour)},
+		{Action: "tag", CreatedAt: now.Add(-time.Hour)},
+		{Action: "intercept", CreatedAt: now.Add(-time.Hour)},
+		{Action: "challenge", CreatedAt: now.Add(-time.Hour)},
+	}
+	if err := db.Create(&events).Error; err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+
+	buckets, err := repo.Timeline(now.Add(-2*time.Hour), now)
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	var total int64
+	for _, b := range buckets {
+		total += b.Count
+	}
+	if total != 2 {
+		t.Fatalf("Timeline total = %d, want 2 terminal actions only", total)
+	}
+
+	siteID := uint(1)
+	if err := db.Create(&store.SecurityEvent{SiteID: siteID, Action: "observe", CreatedAt: now.Add(-time.Hour)}).Error; err != nil {
+		t.Fatalf("seed site observe: %v", err)
+	}
+	if err := db.Create(&store.SecurityEvent{SiteID: siteID, Action: "drop", CreatedAt: now.Add(-time.Hour)}).Error; err != nil {
+		t.Fatalf("seed site drop: %v", err)
+	}
+	siteBuckets, err := repo.TimelineBySite(siteID, now.Add(-2*time.Hour), now)
+	if err != nil {
+		t.Fatalf("TimelineBySite: %v", err)
+	}
+	var siteTotal int64
+	for _, b := range siteBuckets {
+		siteTotal += b.Count
+	}
+	if siteTotal != 1 {
+		t.Fatalf("TimelineBySite total = %d, want 1 terminal action only", siteTotal)
 	}
 }

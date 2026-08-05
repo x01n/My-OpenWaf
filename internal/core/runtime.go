@@ -26,6 +26,8 @@ type Runtime struct {
 	RedisKV  *cache.RedisKV
 	Snapshot *snapshot.Holder
 	Cache    *cache.Layer
+
+	snapshotDynamicKeyBase []byte
 }
 
 func NewRuntime(ctx context.Context) (*Runtime, error) {
@@ -119,6 +121,15 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	}, nil
 }
 
+// SetSnapshotDynamicKeyBase configures the process-stable secret material used by dynamic protection snapshots.
+func (r *Runtime) SetSnapshotDynamicKeyBase(keyBase []byte) error {
+	if len(keyBase) != 32 {
+		return fmt.Errorf("dynamic protection key base must be 32 bytes")
+	}
+	r.snapshotDynamicKeyBase = append(r.snapshotDynamicKeyBase[:0], keyBase...)
+	return nil
+}
+
 type storedRedisConfig struct {
 	Enabled  bool   `json:"enabled"`
 	Addr     string `json:"addr"`
@@ -157,6 +168,9 @@ func applyStoredRedisConfig(db *gorm.DB, cfg Config) Config {
 }
 
 func (r *Runtime) ReloadSnapshot() error {
+	if len(r.snapshotDynamicKeyBase) != 32 {
+		return fmt.Errorf("dynamic protection key base is not configured")
+	}
 	rev, err := currentRevision(r.DB)
 	if err != nil {
 		return err
@@ -165,7 +179,7 @@ func (r *Runtime) ReloadSnapshot() error {
 		r.Snapshot.Store(sn)
 		return nil
 	}
-	sn, err := snapshot.Build(r.DB, rev)
+	sn, err := snapshot.Build(r.DB, rev, r.snapshotDynamicKeyBase)
 	if err != nil {
 		return fmt.Errorf("snapshot build: %w", err)
 	}

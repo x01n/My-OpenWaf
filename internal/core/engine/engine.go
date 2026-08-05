@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -31,9 +30,14 @@ type compiledRules struct {
 
 // compiledSnapshot is an immutable snapshot of the compiled rules cache.
 // Accessed via atomic.Pointer for lock-free reads on the hot path.
+type compiledRulesKey struct {
+	siteID   uint
+	policyID uint
+}
+
 type compiledSnapshot struct {
 	revision uint64
-	cache    map[uint]*compiledRules
+	cache    map[compiledRulesKey]*compiledRules
 }
 
 // phasesEntry holds a pre-built phase chain along with the protection-config
@@ -46,6 +50,7 @@ type phasesEntry struct {
 
 type phasesCacheKey struct {
 	policyID          uint
+	siteID            uint
 	antiReplayEnabled bool
 }
 
@@ -96,7 +101,7 @@ func New(holder *snapshot.Holder, reqRL, errRL ratelimit.RateLimiterBackend, ipR
 		botThreshold:   80,
 		cveDetector:    cve.NewCVEDetector(),
 	}
-	e.compiledPtr.Store(&compiledSnapshot{cache: make(map[uint]*compiledRules)})
+	e.compiledPtr.Store(&compiledSnapshot{cache: make(map[compiledRulesKey]*compiledRules)})
 	e.phasesPtr.Store(&phasesSnapshot{cache: make(map[phasesCacheKey]*phasesEntry)})
 	return e
 }
@@ -156,9 +161,27 @@ func applyPostLuaDecision(lp *luaplugin.Engine, reqCtx *pipeline.RequestCtx, bui
 	if builtin.Matched {
 		view.Action = string(builtin.Type)
 	}
+	view.Verdict = luaplugin.VerdictView{
+		Matched:    builtin.Matched,
+		Phase:      builtin.Phase,
+		Action:     view.Action,
+		Category:   builtin.Category,
+		RuleID:     builtin.RuleID,
+		RuleIDStr:  builtin.RuleIDStr,
+		StatusCode: builtin.StatusCode,
+		RedirectTo: builtin.RedirectTo,
+	}
+	if builtin.Tags != nil {
+		view.Verdict.Tags = append([]string(nil), (*builtin.Tags)...)
+	}
 
-	dec := lp.Evaluate(context.Background(), luaplugin.StagePost, view)
-	if !dec.HasAction() {
+	runCtx := reqCtx.ContextOrBackground()
+	if runCtx.Err() != nil {
+		return builtin
+	}
+
+	dec := lp.Evaluate(runCtx, luaplugin.StagePost, view)
+	if runCtx.Err() != nil || !dec.HasAction() {
 		return builtin
 	}
 	act := action.Normalize(action.Type(dec.Action))
@@ -166,24 +189,38 @@ func applyPostLuaDecision(lp *luaplugin.Engine, reqCtx *pipeline.RequestCtx, bui
 		return builtin
 	}
 
+	makeResult := func(result action.Result) action.Result {
+		if len(dec.SetHeaders) > 0 {
+			headers := dec.SetHeaders
+			result.SetHeaders = &headers
+		}
+		if dec.ResponseBody != "" {
+			body := dec.ResponseBody
+			result.ResponseBody = &body
+		}
+		if len(dec.Tags) > 0 {
+			tags := dec.Tags
+			result.Tags = &tags
+		}
+		return result
+	}
+
 	if act == action.Allow {
 		// 放行：清空内置判定，请求继续走向上游。
-		return action.Result{Phase: "lua_post", Category: "lua_plugin", MatchDesc: dec.Message}
+		return makeResult(action.Result{Phase: "lua_post", Category: "lua_plugin", MatchDesc: dec.Message})
 	}
 	if builtin.IsTerminal() {
 		// 内置已判终止且脚本未要求放行：保留内置判定。
 		return builtin
 	}
 
-	// Matched 必须置位：action.Result.IsTerminal() 以它为前提，
-	// 漏设会让 intercept/drop 等终止动作被当作未命中而静默放行。
-	res := action.Result{
+	res := makeResult(action.Result{
 		Type:      act,
 		Matched:   true,
 		Phase:     "lua_post",
 		Category:  "lua_plugin",
 		MatchDesc: dec.Message,
-	}
+	})
 	if dec.RedirectTo != "" {
 		res.RedirectTo = dec.RedirectTo
 	}
@@ -254,17 +291,17 @@ func (e *Engine) processResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime
 // Hot-path read: single atomic.Pointer.Load() — no lock, no contention.
 func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime) *compiledRules {
 	rev := sn.Revision
-	policyID := rt.PolicyID
+	key := compiledRulesKey{siteID: rt.Site.ID, policyID: rt.PolicyID}
 
 	// Lock-free fast path: load immutable snapshot and check cache.
 	snap := e.compiledPtr.Load()
 	if snap.revision == rev {
-		if cr, ok := snap.cache[policyID]; ok {
+		if cr, ok := snap.cache[key]; ok {
 			return cr
 		}
 	}
 
-	// Cache miss — compile rules (expensive, but happens at most once per policy per revision).
+	// Cache miss — compile rules (expensive, but happens at most once per site and policy per revision).
 	all := convertAndCompile(rt.Rules)
 	cr := &compiledRules{}
 	for i := range all {
@@ -281,18 +318,18 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	// Serialize writes: copy-on-write the immutable map, then atomic Store.
 	e.compiledWriteMu.Lock()
 	current := e.compiledPtr.Load()
-	var newCache map[uint]*compiledRules
+	var newCache map[compiledRulesKey]*compiledRules
 	if current.revision != rev {
 		// Revision changed — start fresh.
-		newCache = make(map[uint]*compiledRules)
+		newCache = make(map[compiledRulesKey]*compiledRules)
 	} else {
 		// Same revision — copy existing entries + add new one.
-		newCache = make(map[uint]*compiledRules, len(current.cache)+1)
-		for k, v := range current.cache {
-			newCache[k] = v
+		newCache = make(map[compiledRulesKey]*compiledRules, len(current.cache)+1)
+		for existingKey, value := range current.cache {
+			newCache[existingKey] = value
 		}
 	}
-	newCache[policyID] = cr
+	newCache[key] = cr
 	e.compiledPtr.Store(&compiledSnapshot{revision: rev, cache: newCache})
 	e.compiledWriteMu.Unlock()
 
@@ -309,6 +346,7 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	rev := sn.Revision
 	key := phasesCacheKey{
 		policyID:          rt.PolicyID,
+		siteID:            rt.Site.ID,
 		antiReplayEnabled: rt.AntiReplayEnabled,
 	}
 

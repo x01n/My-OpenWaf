@@ -1,33 +1,35 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { toast } from "sonner";
-import { IconDeviceFloppy } from "@tabler/icons-react";
-import { useSiteMutation } from "@/hooks/use-api";
-import type { Site } from "@/lib/types";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
+import { toast } from "sonner"
+import { IconDeviceFloppy } from "@tabler/icons-react"
+import { useSiteMutation } from "@/hooks/use-api"
+import type { Site } from "@/lib/types"
 
 interface UpstreamTabProps {
-  site: Site;
+  site: Site
 }
 
 export function UpstreamTab({ site }: UpstreamTabProps) {
-  const { t } = useTranslation();
-  const updateSite = useSiteMutation();
+  const { t } = useTranslation()
+  const updateSite = useSiteMutation()
 
-  const [upstreamUrls, setUpstreamUrls] = useState(site.upstream_urls || "");
-  const [upstreamHost, setUpstreamHost] = useState(site.upstream_host || "");
-  const [skipVerify, setSkipVerify] = useState(site.upstream_tls_skip_verify);
-  const [serverName, setServerName] = useState(site.upstream_tls_server_name || "");
-  const [saving, setSaving] = useState(false);
+  const [upstreamUrls, setUpstreamUrls] = useState(site.upstream_urls || "")
+  const [upstreamHost, setUpstreamHost] = useState(site.upstream_host || "")
+  const [skipVerify, setSkipVerify] = useState(site.upstream_tls_skip_verify)
+  const [serverName, setServerName] = useState(
+    site.upstream_tls_server_name || ""
+  )
+  const [saving, setSaving] = useState(false)
 
   const handleSave = async () => {
-    setSaving(true);
+    setSaving(true)
     try {
       await updateSite.execute({
         id: site.id,
@@ -37,20 +39,22 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
           upstream_tls_skip_verify: skipVerify,
           upstream_tls_server_name: serverName,
         },
-      });
-      toast.success(t("common.saveSuccess"));
+      })
+      toast.success(t("common.saveSuccess"))
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     } finally {
-      setSaving(false);
+      setSaving(false)
     }
-  };
+  }
 
   return (
     <div className="space-y-4">
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">{t("sites.detail.upstreamServer")}</CardTitle>
+          <CardTitle className="text-base">
+            {t("sites.detail.upstreamServer")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -75,12 +79,16 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
           </div>
 
           <div className="space-y-4 rounded-lg border p-4">
-            <h4 className="text-sm font-medium">{t("sites.detail.upstreamTls")}</h4>
+            <h4 className="text-sm font-medium">
+              {t("sites.detail.upstreamTls")}
+            </h4>
 
             <div className="flex items-center justify-between">
               <div className="space-y-0.5">
                 <Label>{t("sites.form.skipVerify")}</Label>
-                <p className="text-xs text-muted-foreground">{t("sites.form.skipVerifyDesc")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t("sites.form.skipVerifyDesc")}
+                </p>
               </div>
               <Switch checked={skipVerify} onCheckedChange={setSkipVerify} />
             </div>
@@ -104,5 +112,5 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

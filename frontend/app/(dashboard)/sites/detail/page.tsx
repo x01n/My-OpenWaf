@@ -1,15 +1,15 @@
-"use client";
+"use client"
 
-import { Suspense, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import Link from "next/link";
-import { useTranslation } from "react-i18next";
-import { useSite, useSiteRules, useSiteMutation } from "@/hooks/use-api";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Skeleton } from "@/components/ui/skeleton";
-import { toast } from "sonner";
+import { Suspense, useState } from "react"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import Link from "next/link"
+import { useTranslation } from "react-i18next"
+import { useSite, useSiteRules, useSiteMutation } from "@/hooks/use-api"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Skeleton } from "@/components/ui/skeleton"
+import { toast } from "sonner"
 import {
   IconArrowLeft,
   IconWorld,
@@ -27,19 +27,19 @@ import {
   IconRoute,
   IconList,
   IconChartBar,
-} from "@tabler/icons-react";
-import { SiteFormDialog } from "../components/site-form-dialog";
-import { OverviewTab } from "./components/overview-tab";
-import { UpstreamTab } from "./components/upstream-tab";
-import { ProtectionTab } from "./components/protection-tab";
-import { DynamicProtectionTab } from "./components/dynamic-protection-tab";
-import { CCProtectionTab } from "./components/cc-protection-tab";
-import { AccessControlTab } from "./components/access-control-tab";
-import { CacheTab } from "./components/cache-tab";
-import { AdvancedTab } from "./components/advanced-tab";
-import { ListenersTab } from "./components/listeners-tab";
-import { RulesTab } from "./components/rules-tab";
-import { MonitorTab } from "./components/monitor-tab";
+} from "@tabler/icons-react"
+import { SiteFormDialog } from "../components/site-form-dialog"
+import { OverviewTab } from "./components/overview-tab"
+import { UpstreamTab } from "./components/upstream-tab"
+import { ProtectionTab } from "./components/protection-tab"
+import { DynamicProtectionTab } from "./components/dynamic-protection-tab"
+import { CCProtectionTab } from "./components/cc-protection-tab"
+import { AccessControlTab } from "./components/access-control-tab"
+import { CacheTab } from "./components/cache-tab"
+import { AdvancedTab } from "./components/advanced-tab"
+import { ListenersTab } from "./components/listeners-tab"
+import { RulesTab } from "./components/rules-tab"
+import { MonitorTab } from "./components/monitor-tab"
 
 function SiteDetailSkeleton() {
   return (
@@ -48,7 +48,7 @@ function SiteDetailSkeleton() {
       <Skeleton className="h-32" />
       <Skeleton className="h-64" />
     </div>
-  );
+  )
 }
 
 const ALLOWED_TABS = [
@@ -63,35 +63,49 @@ const ALLOWED_TABS = [
   "access",
   "cache",
   "advanced",
-] as const;
+] as const
 
 function SiteDetailContent() {
-  const { t } = useTranslation();
-  const searchParams = useSearchParams();
-  const siteId = searchParams.get("id") || "";
-  const tabParam = searchParams.get("tab") || "";
-  const initialTab = (ALLOWED_TABS as readonly string[]).includes(tabParam)
+  const { t } = useTranslation()
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const siteId = searchParams.get("id") || ""
+  const tabParam = searchParams.get("tab") || ""
+  const activeTab = (ALLOWED_TABS as readonly string[]).includes(tabParam)
     ? tabParam
-    : "overview";
+    : "overview"
 
-  const { data: site, isLoading: siteLoading } = useSite(siteId);
-  const { data: rules } = useSiteRules(siteId);
-  const updateSite = useSiteMutation();
+  const handleTabChange = (nextTab: string) => {
+    const params = new URLSearchParams(searchParams.toString())
+    if (siteId) params.set("id", siteId)
+    params.set("tab", nextTab)
+    router.replace(`${pathname}?${params.toString()}`)
+  }
 
-  const [showEdit, setShowEdit] = useState(false);
+  const { data: site, isLoading: siteLoading } = useSite(siteId)
+  const { data: rules } = useSiteRules(siteId)
+  const updateSite = useSiteMutation()
+
+  const [showEdit, setShowEdit] = useState(false)
 
   const handleToggle = async () => {
-    if (!site) return;
+    if (!site) return
     try {
-      await updateSite.execute({ id: site.id, data: { enabled: !site.enabled } });
-      toast.success(site.enabled ? t("sites.stopSuccess") : t("sites.startSuccess"));
+      await updateSite.execute({
+        id: site.id,
+        data: { enabled: !site.enabled },
+      })
+      toast.success(
+        site.enabled ? t("sites.stopSuccess") : t("sites.startSuccess")
+      )
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   if (siteLoading || !site) {
-    return <SiteDetailSkeleton />;
+    return <SiteDetailSkeleton />
   }
 
   return (
@@ -109,12 +123,17 @@ function SiteDetailContent() {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold tracking-tight">{site.host || t("sites.detail.unnamed")}</h1>
-              <Badge variant={site.enabled ? "default" : "secondary"} className="h-5 text-[10px]">
+              <h1 className="text-2xl font-bold tracking-tight">
+                {site.host || t("sites.detail.unnamed")}
+              </h1>
+              <Badge
+                variant={site.enabled ? "default" : "secondary"}
+                className="h-5 text-[10px]"
+              >
                 {site.enabled ? t("common.running") : t("common.stopped")}
               </Badge>
             </div>
-            <p className="text-sm text-muted-foreground mt-1">{site.bind}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{site.bind}</p>
           </div>
         </div>
 
@@ -145,7 +164,11 @@ function SiteDetailContent() {
       </div>
 
       {/* Tab 内容 */}
-      <Tabs defaultValue={initialTab} className="space-y-4">
+      <Tabs
+        value={activeTab}
+        onValueChange={handleTabChange}
+        className="space-y-4"
+      >
         <TabsList className="flex-wrap">
           <TabsTrigger value="overview">
             <IconLayoutDashboard className="mr-1 h-4 w-4" />
@@ -222,7 +245,7 @@ function SiteDetailContent() {
         </TabsContent>
 
         <TabsContent value="cc">
-          <CCProtectionTab site={site} />
+          <CCProtectionTab key={`${site.id}-${site.updated_at}`} site={site} />
         </TabsContent>
 
         <TabsContent value="access">
@@ -234,17 +257,13 @@ function SiteDetailContent() {
         </TabsContent>
 
         <TabsContent value="advanced">
-          <AdvancedTab site={site} />
+          <AdvancedTab key={`${site.id}-${site.updated_at}`} site={site} />
         </TabsContent>
       </Tabs>
 
-      <SiteFormDialog
-        open={showEdit}
-        onOpenChange={setShowEdit}
-        site={site}
-      />
+      <SiteFormDialog open={showEdit} onOpenChange={setShowEdit} site={site} />
     </div>
-  );
+  )
 }
 
 export default function SiteDetailPage() {
@@ -252,5 +271,5 @@ export default function SiteDetailPage() {
     <Suspense fallback={<SiteDetailSkeleton />}>
       <SiteDetailContent />
     </Suspense>
-  );
+  )
 }

@@ -1,32 +1,29 @@
-"use client";
+"use client"
 
-import { useState, useCallback } from "react";
-import { useTranslation } from "react-i18next";
+import { useState, useCallback } from "react"
+import { useTranslation } from "react-i18next"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { toast } from "sonner";
-import { IconDeviceFloppy } from "@tabler/icons-react";
-import {
-  useAccessUserCreate,
-  useAccessUserUpdate,
-} from "@/hooks/use-api";
-import type { AccessUser } from "@/lib/types";
+} from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
+import { toast } from "sonner"
+import { IconDeviceFloppy } from "@tabler/icons-react"
+import { useAccessUserCreate, useAccessUserUpdate } from "@/hooks/use-api"
+import type { AccessUser } from "@/lib/types"
 
 interface AccessUserDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  siteId: number;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  siteId: number
   /** 编辑目标用户，为 null 时表示新建。 */
-  user?: AccessUser | null;
+  user?: AccessUser | null
 }
 
 /**
@@ -39,21 +36,21 @@ export function AccessUserDialog({
   siteId,
   user,
 }: AccessUserDialogProps) {
-  const { t } = useTranslation();
-  const isEdit = !!user;
+  const { t } = useTranslation()
+  const isEdit = !!user
 
   // 表单初值用 useState 懒初始化从 props 同步；父组件以 key 重挂载触发刷新，避免 effect 内 setState。
-  const [username, setUsername] = useState(() => user?.username ?? "");
-  const [password, setPassword] = useState("");
-  const [enabled, setEnabled] = useState(() => user?.enabled ?? true);
+  const [username, setUsername] = useState(() => user?.username ?? "")
+  const [password, setPassword] = useState("")
+  const [enabled, setEnabled] = useState(() => user?.enabled ?? true)
 
-  const createMutation = useAccessUserCreate();
-  const updateMutation = useAccessUserUpdate();
-  const loading = createMutation.loading || updateMutation.loading;
+  const createMutation = useAccessUserCreate()
+  const updateMutation = useAccessUserUpdate()
+  const loading = createMutation.loading || updateMutation.loading
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
-      e.preventDefault();
+      e.preventDefault()
       try {
         if (isEdit && user) {
           await updateMutation.execute({
@@ -63,26 +60,37 @@ export function AccessUserDialog({
               password: password.trim() || undefined,
               enabled,
             },
-          });
-          toast.success(t("sites.detail.userUpdated"));
+          })
+          toast.success(t("sites.detail.userUpdated"))
         } else {
           if (!username.trim() || !password.trim()) {
-            toast.error(t("common.operationFailed"));
-            return;
+            toast.error(t("common.operationFailed"))
+            return
           }
           await createMutation.execute({
             siteId,
             data: { username: username.trim(), password, enabled },
-          });
-          toast.success(t("sites.detail.userCreated"));
+          })
+          toast.success(t("sites.detail.userCreated"))
         }
-        onOpenChange(false);
+        onOpenChange(false)
       } catch {
-        toast.error(t("common.operationFailed"));
+        toast.error(t("common.operationFailed"))
       }
     },
-    [isEdit, user, username, password, enabled, siteId, createMutation, updateMutation, onOpenChange, t]
-  );
+    [
+      isEdit,
+      user,
+      username,
+      password,
+      enabled,
+      siteId,
+      createMutation,
+      updateMutation,
+      onOpenChange,
+      t,
+    ]
+  )
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -147,5 +155,5 @@ export function AccessUserDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

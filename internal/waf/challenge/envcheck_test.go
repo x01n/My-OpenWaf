@@ -1,7 +1,12 @@
 package challenge
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -31,8 +36,8 @@ func TestParseEnvFingerprintValidJSON(t *testing.T) {
 
 func TestGenerateEnvSessionKeyLength(t *testing.T) {
 	key := GenerateEnvSessionKey()
-	if len(key) != 16 {
-		t.Errorf("GenerateEnvSessionKey() length = %d, want 16", len(key))
+	if len(key) != 32 {
+		t.Errorf("GenerateEnvSessionKey() length = %d, want 32", len(key))
 	}
 }
 
@@ -54,8 +59,49 @@ func TestGenerateEnvSessionKeyIsRandom(t *testing.T) {
 func TestEnvSessionKeyHexLength(t *testing.T) {
 	key := GenerateEnvSessionKey()
 	hex := EnvSessionKeyHex(key)
-	if len(hex) != 32 {
-		t.Errorf("EnvSessionKeyHex length = %d, want 32 (16 bytes × 2)", len(hex))
+	if len(hex) != 64 {
+		t.Errorf("EnvSessionKeyHex length = %d, want 64 (32 bytes x 2)", len(hex))
+	}
+}
+
+func TestEnvSessionKeyFromChallengeToken(t *testing.T) {
+	key := EnvSessionKeyFromChallengeToken(strings.Repeat("ab", envSessionKeySize))
+	if len(key) != envSessionKeySize {
+		t.Fatalf("decoded key length = %d, want %d", len(key), envSessionKeySize)
+	}
+	if EnvSessionKeyFromChallengeToken("not-hex") != nil {
+		t.Fatal("invalid token must not produce an environment key")
+	}
+}
+
+func TestDecryptEnvFingerprintRejectsPlaintextAndAcceptsAuthenticatedCiphertext(t *testing.T) {
+	key := GenerateEnvSessionKey()
+	fp := EnvFingerprint{ChromePresent: true, Languages: "zh-CN"}
+	plaintext, err := json.Marshal(fp)
+	if err != nil {
+		t.Fatalf("marshal fingerprint: %v", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("new cipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("new GCM: %v", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatalf("random nonce: %v", err)
+	}
+	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+	encrypted := base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
+
+	got := DecryptEnvFingerprint(encrypted, key)
+	if got == nil || got.Languages != fp.Languages {
+		t.Fatalf("encrypted fingerprint = %+v, want language %q", got, fp.Languages)
+	}
+	if DecryptEnvFingerprint(string(plaintext), key) != nil {
+		t.Fatal("plaintext fingerprint must not be accepted")
 	}
 }
 

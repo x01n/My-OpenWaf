@@ -33,6 +33,7 @@ type BrowserSignTicket struct {
 	SignKey   string // hex，客户端用于请求 HMAC；由 challengeSecret 派生，短时效
 	EnvKeyHex string // 可选环境指纹加密密钥
 	TTL       int
+	CSPNonce  string // 注入脚本的 CSP nonce
 }
 
 // IssueBrowserSignTicket 签发短时效 nonce+HMAC 票据。
@@ -45,6 +46,9 @@ func IssueBrowserSignTicket(siteID uint, host string, ttlSecs int, envCheck bool
 	nonceBytes := make([]byte, 16)
 	_, _ = rand.Read(nonceBytes)
 	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
+	cspNonceBytes := make([]byte, 16)
+	_, _ = rand.Read(cspNonceBytes)
+	cspNonce := base64.RawURLEncoding.EncodeToString(cspNonceBytes)
 	exp := time.Now().Add(time.Duration(ttlSecs) * time.Second).Unix()
 	// host 参数保留以兼容调用方；ticket 仅绑定 siteID，避免多 Host 站点注入/校验不一致。
 	_ = host
@@ -62,6 +66,7 @@ func IssueBrowserSignTicket(siteID uint, host string, ttlSecs int, envCheck bool
 		SignKey:   hex.EncodeToString(signKey),
 		EnvKeyHex: envKeyHex,
 		TTL:       ttlSecs,
+		CSPNonce:  cspNonce,
 	}
 }
 
@@ -102,12 +107,14 @@ func VerifyBrowserSignHeaders(headers map[string]string, method, path, host stri
 	if !hmac.Equal([]byte(reqSig), []byte(expectedReq)) {
 		return false, "browser sign request mac mismatch"
 	}
-	if envHardFail && envFP != "" {
+	if envHardFail {
+		if envFP == "" {
+			return false, "missing browser env fingerprint"
+		}
 		// 站点签名链路无会话密钥，环境指纹使用明文 JSON。
 		fp := ParseEnvFingerprint(envFP)
 		if fp == nil {
-			// 非 JSON（例如加密串）时不阻断，避免误伤。
-			return true, ""
+			return false, "invalid browser env fingerprint"
 		}
 		if ValidateEnvFingerprint(fp).Score >= 100 {
 			return false, "browser env hard-fail"
@@ -137,7 +144,11 @@ func BrowserSignInjectScript(ticket BrowserSignTicket) string {
 	)
 	// 先拼接环境采集，再拼接签名 hook。
 	combined := envJS + "\n" + raw
-	return "<script>" + obfuscateBrowserSignJS(combined) + "</script>"
+	attr := ""
+	if ticket.CSPNonce != "" {
+		attr = ` nonce="` + ticket.CSPNonce + `" data-owaf-bs="1"`
+	}
+	return "<script" + attr + ">" + obfuscateBrowserSignJS(combined) + "</script>"
 }
 
 // InjectBrowserSignIntoHTML 将签名脚本注入 HTML 响应体。
@@ -341,8 +352,11 @@ var __owaf_bs_hm="%s";
 var __owaf_bs_hts="%s";
 var __owaf_bs_hs="%s";
 var __owaf_bs_henv="%s";
-function hexToBytes(h){var a=new Uint8Array(h.length/2);for(var i=0;i<h.length;i+=2)a[i/2]=parseInt(h.substr(i,2),16);return a}
-function bytesToHex(buf){var a=new Uint8Array(buf),s="";for(var i=0;i<a.length;i++){var x=a[i].toString(16);s+=(x.length===1?"0":"")+x}return s}
+function loadWasm(){
+if(typeof wasm_bindgen!=="undefined")return wasm_bindgen("/__owaf/pow.wasm?v=f54bf002");
+return new Promise(function(ok,err){var sc=document.createElement("script");sc.src="/__owaf/pow_glue.js?v=7ad1dbac";sc.onload=function(){wasm_bindgen("/__owaf/pow.wasm?v=f54bf002").then(ok).catch(err)};sc.onerror=function(){err(new Error("browser sign wasm glue load failed"))};document.head.appendChild(sc)})
+}
+var __owaf_bs_wasm=loadWasm();
 function pathOnly(u){try{var x=new URL(u,location.href);return x.pathname||"/"}catch(e){var p=String(u||"");var i=p.indexOf("?");return i>=0?p.slice(0,i):p}}
 function shouldSign(u,method){
 try{
@@ -359,14 +373,14 @@ var ts=Math.floor(Date.now()/1000);
 var path=pathOnly(url);
 var m=(method||"GET").toUpperCase();
 var payload=m+"|"+path+"|"+String(ts)+"|"+__owaf_bs_nonce;
-var key=await crypto.subtle.importKey("raw",hexToBytes(__owaf_bs_key),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
-var sig=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(payload));
+await __owaf_bs_wasm;
+var sig=wasm_bindgen.hmac_sha256(__owaf_bs_key,payload);
 var h={};
 h[__owaf_bs_hn]=__owaf_bs_nonce;
 h[__owaf_bs_he]=String(__owaf_bs_exp);
 h[__owaf_bs_hm]=__owaf_bs_mac;
 h[__owaf_bs_hts]=String(ts);
-h[__owaf_bs_hs]=bytesToHex(sig);
+h[__owaf_bs_hs]=sig;
 try{if(window.__owaf_env_encrypted)h[__owaf_bs_henv]=window.__owaf_env_encrypted}catch(e){}
 return h;
 }

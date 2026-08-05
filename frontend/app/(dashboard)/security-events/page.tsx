@@ -1,20 +1,21 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { toast } from "sonner";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useMemo, useState } from "react"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { toast } from "sonner"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@/components/ui/select"
 import {
   Pagination,
   PaginationContent,
@@ -23,23 +24,23 @@ import {
   PaginationNext,
   PaginationPrevious,
   PaginationEllipsis,
-} from "@/components/ui/pagination";
-import { Badge } from "@/components/ui/badge";
-import { ActionBadge } from "@/components/action-badge";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+} from "@/components/ui/pagination"
+import { Badge } from "@/components/ui/badge"
+import { ActionBadge } from "@/components/action-badge"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { DataTable } from "@/components/data-table";
-import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog";
-import { DateRangePicker } from "@/components/date-range-picker";
-import { IpHoverPreview } from "@/components/ip-hover-preview";
-import { EmptyState } from "@/components/empty-state";
-import Link from "next/link";
+} from "@/components/ui/dropdown-menu"
+import { DataTable } from "@/components/data-table"
+import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog"
+import { DateRangePicker } from "@/components/date-range-picker"
+import { IpHoverPreview } from "@/components/ip-hover-preview"
+import { EmptyState } from "@/components/empty-state"
+import Link from "next/link"
 import {
   IconFilter,
   IconEye,
@@ -49,14 +50,25 @@ import {
   IconX,
   IconRoute,
   IconShieldOff,
-} from "@tabler/icons-react";
-import { useSecurityEvents } from "@/hooks/use-api";
-import { ipListApi } from "@/lib/api";
-import type { SecurityEvent } from "@/lib/types";
-import { format } from "date-fns";
+} from "@tabler/icons-react"
+import { useSecurityEvents } from "@/hooks/use-api"
+import { ipListApi } from "@/lib/api"
+import type { SecurityEvent } from "@/lib/types"
+import { categoryLabel } from "@/lib/attack-category"
+import { format } from "date-fns"
+
+const FILTER_ALL = "__all__"
+type SelectionState = { scope: string; ids: Set<number> }
+
+function parsePositivePage(raw: string | null): number {
+  const value = Number(raw)
+  return Number.isFinite(value) && Number.isInteger(value) && value >= 1
+    ? value
+    : 1
+}
 
 export default function SecurityEventsPage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   const actionLabelMap: Record<string, string> = {
     block: t("securityEvents.action.block"),
@@ -69,71 +81,100 @@ export default function SecurityEventsPage() {
     allow: t("securityEvents.action.allow"),
     drop: t("securityEvents.action.drop"),
     log_only: t("securityEvents.action.log_only"),
-  };
+  }
 
-  const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
-  const [filters, setFilters] = useState({
-    action: "",
-    category: "",
-    client_ip: "",
-    host: "",
-    since: "",
-    until: "",
-  });
-  const [showFilters, setShowFilters] = useState(false);
-  const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [batchLoading, setBatchLoading] = useState(false);
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const [pageSize] = useState(20)
+  const [showFilters, setShowFilters] = useState(false)
+  const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null)
+  const [selection, setSelection] = useState<SelectionState>({
+    scope: "",
+    ids: new Set(),
+  })
+  const [batchLoading, setBatchLoading] = useState(false)
+  const page = parsePositivePage(searchParams.get("page"))
+  const filters = {
+    action: searchParams.get("action") || "",
+    category: searchParams.get("category") || "",
+    client_ip: searchParams.get("client_ip") || "",
+    host: searchParams.get("host") || "",
+    path: searchParams.get("path") || "",
+    site_id: searchParams.get("site_id") || "",
+    since: searchParams.get("since") || "",
+    until: searchParams.get("until") || "",
+  }
+
+  const updateQuery = (updates: Record<string, string | undefined>) => {
+    const params = new URLSearchParams(searchParams.toString())
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) params.set(key, value)
+      else params.delete(key)
+    }
+    if (!("page" in updates)) params.set("page", "1")
+    router.replace(`${pathname}?${params.toString()}`)
+  }
 
   const { data, isLoading, error } = useSecurityEvents({
     page,
     page_size: pageSize,
     ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "")),
-  });
+  })
 
-  const items = data?.items || [];
-  const total = data?.total || 0;
-  const totalPages = Math.ceil(total / pageSize) || 1;
+  const items = useMemo(() => data?.items || [], [data?.items])
+  const total = data?.total || 0
+  const totalPages = Math.ceil(total / pageSize) || 1
+  const selectionScope = `${page}:${JSON.stringify(filters)}`
+  const scopedSelectedIds =
+    selection.scope === selectionScope ? selection.ids : new Set<number>()
+  const selectedCurrentPageCount = items.reduce(
+    (count, item) => count + (scopedSelectedIds.has(item.id) ? 1 : 0),
+    0
+  )
+  const allCurrentPageSelected =
+    items.length > 0 && selectedCurrentPageCount === items.length
 
   const handleFilterChange = (key: string, value: string) => {
-    setFilters((prev) => ({ ...prev, [key]: value }));
-    setPage(1);
-  };
+    updateQuery({ [key]: value })
+  }
 
   const clearFilters = () => {
-    setFilters({
-      action: "",
-      category: "",
-      client_ip: "",
-      host: "",
-      since: "",
-      until: "",
-    });
-    setPage(1);
-  };
+    updateQuery({
+      action: undefined,
+      category: undefined,
+      client_ip: undefined,
+      host: undefined,
+      path: undefined,
+      site_id: undefined,
+      since: undefined,
+      until: undefined,
+    })
+  }
 
   const toggleSelect = (id: number) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+    setSelection((prev) => {
+      const next = new Set(prev.scope === selectionScope ? prev.ids : [])
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return { scope: selectionScope, ids: next }
+    })
+  }
 
   const toggleSelectAll = () => {
-    if (selectedIds.size === items.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(items.map((item) => item.id)));
-    }
-  };
+    setSelection({
+      scope: selectionScope,
+      ids: allCurrentPageSelected
+        ? new Set()
+        : new Set(items.map((item) => item.id)),
+    })
+  }
 
-  const clearSelection = () => setSelectedIds(new Set());
+  const clearSelection = () =>
+    setSelection({ scope: selectionScope, ids: new Set() })
 
   const exportCSV = () => {
-    if (items.length === 0) return;
+    if (items.length === 0) return
     const headers = [
       "ID",
       t("securityEvents.csv.time", { defaultValue: "时间" }),
@@ -146,7 +187,7 @@ export default function SecurityEventsPage() {
       t("securityEvents.csv.rule", { defaultValue: "规则" }),
       t("securityEvents.csv.statusCode", { defaultValue: "状态码" }),
       t("securityEvents.csv.matchDesc", { defaultValue: "匹配描述" }),
-    ];
+    ]
     const rows = items.map((ev) => [
       ev.id,
       ev.created_at,
@@ -155,51 +196,55 @@ export default function SecurityEventsPage() {
       ev.path,
       ev.method,
       ev.action,
-      ev.category,
+      categoryLabel(ev.category),
       ev.rule_id_str || ev.rule_id,
       ev.status_code,
       (ev.match_desc || "").replace(/"/g, '""'),
-    ]);
+    ])
     const csv = [
       headers.join(","),
       ...rows.map((r) => r.map((v) => `"${v}"`).join(",")),
-    ].join("\n");
-    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
-    downloadBlob(blob, `security-events-${formatFileDate()}.csv`);
-    toast.success(t("securityEvents.export.csvSuccess", { defaultValue: "CSV 导出成功" }));
-  };
+    ].join("\n")
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" })
+    downloadBlob(blob, `security-events-${formatFileDate()}.csv`)
+    toast.success(
+      t("securityEvents.export.csvSuccess", { defaultValue: "CSV 导出成功" })
+    )
+  }
 
   const exportJSON = () => {
-    if (items.length === 0) return;
-    const json = JSON.stringify(items, null, 2);
-    const blob = new Blob([json], { type: "application/json;charset=utf-8;" });
-    downloadBlob(blob, `security-events-${formatFileDate()}.json`);
-    toast.success(t("securityEvents.export.jsonSuccess", { defaultValue: "JSON 导出成功" }));
-  };
+    if (items.length === 0) return
+    const json = JSON.stringify(items, null, 2)
+    const blob = new Blob([json], { type: "application/json;charset=utf-8;" })
+    downloadBlob(blob, `security-events-${formatFileDate()}.json`)
+    toast.success(
+      t("securityEvents.export.jsonSuccess", { defaultValue: "JSON 导出成功" })
+    )
+  }
 
   const formatFileDate = () => {
-    return format(new Date(), "yyyyMMdd-HHmmss");
-  };
+    return format(new Date(), "yyyyMMdd-HHmmss")
+  }
 
   const downloadBlob = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
 
   const batchAddToBlocklist = async () => {
-    const selectedItems = items.filter((item) => selectedIds.has(item.id));
-    const uniqueIPs = [...new Set(selectedItems.map((item) => item.client_ip))];
-    if (uniqueIPs.length === 0) return;
+    const selectedItems = items.filter((item) => scopedSelectedIds.has(item.id))
+    const uniqueIPs = [...new Set(selectedItems.map((item) => item.client_ip))]
+    if (uniqueIPs.length === 0) return
 
-    setBatchLoading(true);
-    let success = 0;
-    let failed = 0;
+    setBatchLoading(true)
+    let success = 0
+    let failed = 0
     for (const ip of uniqueIPs) {
       try {
         await ipListApi.create({
@@ -209,21 +254,21 @@ export default function SecurityEventsPage() {
           note: t("securityEvents.batch.blocklistNote", {
             defaultValue: "批量加入黑名单 - 安全事件",
           }),
-        });
-        success++;
+        })
+        success++
       } catch {
-        failed++;
+        failed++
       }
     }
-    setBatchLoading(false);
-    clearSelection();
+    setBatchLoading(false)
+    clearSelection()
     if (failed === 0) {
       toast.success(
         t("securityEvents.batch.blocklistSuccess", {
           defaultValue: `已将 ${success} 个 IP 加入黑名单`,
           success,
         })
-      );
+      )
     } else {
       toast.warning(
         t("securityEvents.batch.blocklistPartial", {
@@ -231,16 +276,16 @@ export default function SecurityEventsPage() {
           success,
           failed,
         })
-      );
+      )
     }
-  };
+  }
 
   const columns = [
     {
       key: "select",
       title: (
         <Checkbox
-          checked={items.length > 0 && selectedIds.size === items.length}
+          checked={allCurrentPageSelected}
           onCheckedChange={toggleSelectAll}
           aria-label={t("common.selectAll", { defaultValue: "全选" })}
         />
@@ -248,7 +293,7 @@ export default function SecurityEventsPage() {
       width: "40px",
       render: (row: SecurityEvent) => (
         <Checkbox
-          checked={selectedIds.has(row.id)}
+          checked={scopedSelectedIds.has(row.id)}
           onCheckedChange={() => toggleSelect(row.id)}
           aria-label={`选择事件 ${row.id}`}
         />
@@ -277,7 +322,12 @@ export default function SecurityEventsPage() {
         <ActionBadge action={row.action} className="h-5 px-1.5 text-[10px]" />
       ),
     },
-    { key: "category", title: "Category", width: "120px" },
+    {
+      key: "category",
+      title: t("securityEvents.category", { defaultValue: "类别" }),
+      width: "120px",
+      render: (row: SecurityEvent) => categoryLabel(row.category),
+    },
     { key: "rule_id_str", title: "Rule", width: "120px" },
     {
       key: "operations",
@@ -310,7 +360,7 @@ export default function SecurityEventsPage() {
         </div>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
@@ -336,7 +386,9 @@ export default function SecurityEventsPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">{t("securityEvents.eventList")}</CardTitle>
+            <CardTitle className="text-base">
+              {t("securityEvents.eventList")}
+            </CardTitle>
             <div className="flex items-center gap-2">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -353,10 +405,14 @@ export default function SecurityEventsPage() {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onClick={exportCSV}>
-                    {t("securityEvents.export.csv", { defaultValue: "导出 CSV" })}
+                    {t("securityEvents.export.csv", {
+                      defaultValue: "导出 CSV",
+                    })}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={exportJSON}>
-                    {t("securityEvents.export.json", { defaultValue: "导出 JSON" })}
+                    {t("securityEvents.export.json", {
+                      defaultValue: "导出 JSON",
+                    })}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -367,7 +423,9 @@ export default function SecurityEventsPage() {
                 onClick={() => setShowFilters(!showFilters)}
               >
                 <IconFilter className="h-3.5 w-3.5" />
-                {showFilters ? t("common.collapseFilter") : t("common.advancedFilter")}
+                {showFilters
+                  ? t("common.collapseFilter")
+                  : t("common.advancedFilter")}
               </Button>
             </div>
           </div>
@@ -376,16 +434,22 @@ export default function SecurityEventsPage() {
           {showFilters && (
             <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-3">
               <div className="space-y-1.5">
-                <Label className="text-xs">Action</Label>
+                <Label className="text-xs">
+                  {t("securityEvents.actionLabel")}
+                </Label>
                 <Select
-                  value={filters.action}
-                  onValueChange={(v) => handleFilterChange("action", v)}
+                  value={filters.action || FILTER_ALL}
+                  onValueChange={(v) =>
+                    handleFilterChange("action", v === FILTER_ALL ? "" : v)
+                  }
                 >
                   <SelectTrigger className="h-8 text-xs">
                     <SelectValue placeholder={t("securityEvents.allActions")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">{t("common.all")}</SelectItem>
+                    <SelectItem value={FILTER_ALL}>
+                      {t("common.all")}
+                    </SelectItem>
                     {Object.entries(actionLabelMap).map(([key, label]) => (
                       <SelectItem key={key} value={key}>
                         {label}
@@ -395,21 +459,29 @@ export default function SecurityEventsPage() {
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs">Category</Label>
+                <Label className="text-xs">
+                  {t("securityEvents.category", { defaultValue: "类别" })}
+                </Label>
                 <Input
                   className="h-8 text-xs"
                   placeholder={t("securityEvents.categoryPlaceholder")}
                   value={filters.category}
-                  onChange={(e) => handleFilterChange("category", e.target.value)}
+                  onChange={(e) =>
+                    handleFilterChange("category", e.target.value)
+                  }
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs">{t("securityEvents.clientIp")}</Label>
+                <Label className="text-xs">
+                  {t("securityEvents.clientIp")}
+                </Label>
                 <Input
                   className="h-8 text-xs"
                   placeholder={t("securityEvents.ipPlaceholder")}
                   value={filters.client_ip}
-                  onChange={(e) => handleFilterChange("client_ip", e.target.value)}
+                  onChange={(e) =>
+                    handleFilterChange("client_ip", e.target.value)
+                  }
                 />
               </div>
               <div className="space-y-1.5">
@@ -429,14 +501,9 @@ export default function SecurityEventsPage() {
                 </Label>
                 <DateRangePicker
                   value={{ since: filters.since, until: filters.until }}
-                  onChange={(v) => {
-                    setFilters((prev) => ({
-                      ...prev,
-                      since: v.since,
-                      until: v.until,
-                    }));
-                    setPage(1);
-                  }}
+                  onChange={(v) =>
+                    updateQuery({ since: v.since, until: v.until })
+                  }
                 />
               </div>
               <div className="flex items-end sm:col-span-2 lg:col-span-3">
@@ -462,7 +529,10 @@ export default function SecurityEventsPage() {
               <EmptyState
                 icon={IconShieldOff}
                 title={t("securityEvents.empty")}
-                description={t("securityEvents.emptyHint", "暂未检测到安全事件，当 WAF 拦截或观察到可疑请求时将在此展示")}
+                description={t(
+                  "securityEvents.emptyHint",
+                  "暂未检测到安全事件，当 WAF 拦截或观察到可疑请求时将在此展示"
+                )}
                 className="py-16"
               />
             }
@@ -473,22 +543,26 @@ export default function SecurityEventsPage() {
               <PaginationContent>
                 <PaginationItem>
                   <PaginationPrevious
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    className={page <= 1 ? "pointer-events-none opacity-50" : ""}
+                    onClick={() =>
+                      updateQuery({ page: String(Math.max(1, page - 1)) })
+                    }
+                    className={
+                      page <= 1 ? "pointer-events-none opacity-50" : ""
+                    }
                   />
                 </PaginationItem>
                 {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                  const pageNum = i + 1;
+                  const pageNum = i + 1
                   return (
                     <PaginationItem key={pageNum}>
                       <PaginationLink
                         isActive={page === pageNum}
-                        onClick={() => setPage(pageNum)}
+                        onClick={() => updateQuery({ page: String(pageNum) })}
                       >
                         {pageNum}
                       </PaginationLink>
                     </PaginationItem>
-                  );
+                  )
                 })}
                 {totalPages > 5 && (
                   <PaginationItem>
@@ -497,8 +571,14 @@ export default function SecurityEventsPage() {
                 )}
                 <PaginationItem>
                   <PaginationNext
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    className={page >= totalPages ? "pointer-events-none opacity-50" : ""}
+                    onClick={() =>
+                      updateQuery({
+                        page: String(Math.min(totalPages, page + 1)),
+                      })
+                    }
+                    className={
+                      page >= totalPages ? "pointer-events-none opacity-50" : ""
+                    }
                   />
                 </PaginationItem>
               </PaginationContent>
@@ -507,13 +587,13 @@ export default function SecurityEventsPage() {
         </CardContent>
       </Card>
 
-      {selectedIds.size > 0 && (
+      {selectedCurrentPageCount > 0 && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
           <div className="flex items-center gap-3 rounded-xl border bg-background/95 px-5 py-3 shadow-lg backdrop-blur-sm">
             <span className="text-sm font-medium text-muted-foreground">
               {t("securityEvents.batch.selected", {
-                defaultValue: `已选择 ${selectedIds.size} 条`,
-                count: selectedIds.size,
+                defaultValue: `已选择 ${selectedCurrentPageCount} 条`,
+                count: selectedCurrentPageCount,
               })}
             </span>
             <Button
@@ -524,7 +604,9 @@ export default function SecurityEventsPage() {
               onClick={batchAddToBlocklist}
             >
               <IconShieldLock className="h-3.5 w-3.5" />
-              {t("securityEvents.batch.addToBlocklist", { defaultValue: "批量加入黑名单" })}
+              {t("securityEvents.batch.addToBlocklist", {
+                defaultValue: "批量加入黑名单",
+              })}
             </Button>
             <Button
               variant="ghost"
@@ -543,9 +625,9 @@ export default function SecurityEventsPage() {
         event={selectedEvent}
         open={!!selectedEvent}
         onOpenChange={(open) => {
-          if (!open) setSelectedEvent(null);
+          if (!open) setSelectedEvent(null)
         }}
       />
     </div>
-  );
+  )
 }

@@ -3,6 +3,7 @@ package dataplane
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/core/rules"
 	"My-OpenWaf/internal/proxy"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
@@ -68,7 +70,7 @@ func asciiEqualFoldBytes(got []byte, want string) bool {
 }
 
 // ForwardWebSocket forwards the WS handshake and inspects text/binary frames.
-func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, eng *engine.Engine) error {
+func ForwardWebSocket(ctx context.Context, reqID string, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, eng *engine.Engine) error {
 	target := strings.TrimRight(base, "/") + string(c.Path())
 	q := c.URI().QueryString()
 	if len(q) > 0 {
@@ -134,7 +136,7 @@ func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base strin
 		_ = pipeUpstream.Close()
 		copyErr <- e
 	}()
-	go inspectWebSocketClientFrames(pipeClient, upConn, c, rt, eng, copyErr)
+	go inspectWebSocketClientFrames(ctx, reqID, clientIP, pipeClient, upConn, c, rt, eng, copyErr)
 
 	for range 3 {
 		if err := <-copyErr; err != nil && !errors.Is(err, io.EOF) && !isNetClosed(err) {
@@ -163,7 +165,7 @@ func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string,
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := strings.ToLower(string(k))
 		switch key {
-		case "host", "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto":
+		case "host", "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto":
 			return
 		}
 		if connectionHeaderStripper.ShouldStrip(k) {
@@ -184,23 +186,16 @@ func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string,
 	hdr.WriteString(host)
 	hdr.WriteString("\r\n")
 	hdr.WriteString("Connection: Upgrade\r\n")
-	if clientIP != nil {
-		hdr.WriteString("X-Forwarded-For: ")
-		if prior := security.ForwardedForHeaderValueBytes(c.Request.Header.PeekAll("X-Forwarded-For")); prior != "" {
-			hdr.WriteString(prior)
-			hdr.WriteString(", ")
+	forwardingHeaders := make(http.Header)
+	security.RebuildOutboundForwardingHeaders(forwardingHeaders, clientIP, origHost, rt.PreserveOriginalHost, security.TrustedInboundForwardedProto(c))
+	for _, name := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+		if value := forwardingHeaders.Get(name); value != "" {
+			hdr.WriteString(name)
+			hdr.WriteString(": ")
+			hdr.WriteString(value)
+			hdr.WriteString("\r\n")
 		}
-		hdr.WriteString(clientIP.String())
-		hdr.WriteString("\r\n")
 	}
-	if rt.PreserveOriginalHost && origHost != "" {
-		hdr.WriteString("X-Forwarded-Host: ")
-		hdr.WriteString(origHost)
-		hdr.WriteString("\r\n")
-	}
-	hdr.WriteString("X-Forwarded-Proto: ")
-	hdr.WriteString(webSocketForwardedProto(c, upstreamProto))
-	hdr.WriteString("\r\n")
 	hdr.WriteString("\r\n")
 	return hdr.String(), nil
 }
@@ -331,7 +326,7 @@ func splitHTTPHeaderLine(line string) (string, string, bool) {
 	return strings.TrimSpace(line[:idx]), strings.TrimSpace(line[idx+1:]), true
 }
 
-func inspectWebSocketClientFrames(src net.Conn, dst net.Conn, c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, done chan<- error) {
+func inspectWebSocketClientFrames(ctx context.Context, reqID string, clientIP net.IP, src net.Conn, dst net.Conn, c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, done chan<- error) {
 	var result error
 	defer func() { done <- result }()
 	for {
@@ -343,7 +338,7 @@ func inspectWebSocketClientFrames(src net.Conn, dst net.Conn, c *app.RequestCont
 			return
 		}
 		if eng != nil && len(frame.Payload) > 0 && (frame.Opcode == 0x1 || frame.Opcode == 0x2) {
-			if hit := inspectWebSocketPayload(c, rt, eng, frame.Payload); hit.IsTerminal() {
+			if hit := inspectWebSocketPayload(ctx, reqID, clientIP, c, rt, eng, frame.Payload); hit.IsTerminal() {
 				_ = dst.Close()
 				_ = src.Close()
 				return
@@ -363,13 +358,19 @@ func inspectWebSocketClientFrames(src net.Conn, dst net.Conn, c *app.RequestCont
 	}
 }
 
-func inspectWebSocketPayload(c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, payload []byte) action.Result {
+func inspectWebSocketPayload(ctx context.Context, reqID string, clientIP net.IP, c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, payload []byte) action.Result {
 	reqCtx := pipeline.AcquireCtx()
+	reqCtx.Context = ctx
+	reqCtx.RequestID = reqID
 	reqCtx.Bind = rt.Bind
+	reqCtx.ClientIP = clientIP
 	reqCtx.Method = string(c.Method())
 	reqCtx.Path = string(c.Path())
 	reqCtx.RawQuery = string(c.URI().QueryString())
 	reqCtx.Host = string(c.Host())
+	reqCtx.UserAgent = string(c.UserAgent())
+	reqCtx.SiteID = rt.Site.ID
+	rules.PopulateLuaQueryParams(reqCtx)
 	reqCtx.AntiReplayTTL = rt.Site.AntiReplayTTL
 	reqCtx.Body = payload
 	reqCtx.ContentType = "application/octet-stream"

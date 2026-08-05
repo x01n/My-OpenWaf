@@ -31,6 +31,7 @@ const (
 
 // CaptchaSession stores the server-side state for a pending CAPTCHA verification.
 type CaptchaSession struct {
+	ChallengeSessionBinding
 	ID        string      `json:"id"`
 	Type      CaptchaType `json:"type"`
 	Answer    string      `json:"answer"` // JSON-encoded expected answer
@@ -153,6 +154,12 @@ func (cm *CaptchaManager) timeoutValue() time.Duration {
 // envCheck 为 true 时会为该会话绑定一个环境指纹密钥，
 // 页面据此注入浏览器/环境采集 JS，验证时校验环境指纹。
 func (cm *CaptchaManager) Generate(captchaType CaptchaType, envCheck bool) (*CaptchaChallenge, error) {
+	return cm.GenerateWithBinding(captchaType, envCheck, ChallengeSessionBinding{})
+}
+
+// GenerateWithBinding creates a CAPTCHA session bound to the matched site.
+func (cm *CaptchaManager) GenerateWithBinding(captchaType CaptchaType, envCheck bool, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
+	binding = binding.normalized()
 	var envKey []byte
 	if envCheck {
 		envKey = GenerateEnvSessionKey()
@@ -163,15 +170,15 @@ func (cm *CaptchaManager) Generate(captchaType CaptchaType, envCheck bool) (*Cap
 	)
 	switch captchaType {
 	case CaptchaTypeMath:
-		return cm.generateMath(envKey)
+		return cm.generateMath(envKey, binding)
 	case CaptchaTypeClick:
-		challenge, err = cm.generateClick(envKey)
+		challenge, err = cm.generateClick(envKey, binding)
 	case CaptchaTypeSlide:
-		challenge, err = cm.generateSlide(envKey)
+		challenge, err = cm.generateSlide(envKey, binding)
 	case CaptchaTypeRotate:
-		challenge, err = cm.generateRotate(envKey)
+		challenge, err = cm.generateRotate(envKey, binding)
 	default:
-		return cm.generateMath(envKey)
+		return cm.generateMath(envKey, binding)
 	}
 	if err != nil {
 		return nil, err
@@ -182,7 +189,13 @@ func (cm *CaptchaManager) Generate(captchaType CaptchaType, envCheck bool) (*Cap
 // Verify checks a client's CAPTCHA answer against the stored session.
 // 会话通过原子“取出即删除”获得，保证一份正确答案只能被兑换一次。
 func (cm *CaptchaManager) Verify(sessionID, answer string) bool {
-	session := cm.takeSession(sessionID)
+	return cm.VerifyWithBinding(sessionID, answer, ChallengeSessionBinding{})
+}
+
+// VerifyWithBinding atomically consumes a CAPTCHA session only after the
+// request's matched-site binding has been checked.
+func (cm *CaptchaManager) VerifyWithBinding(sessionID, answer string, binding ChallengeSessionBinding) bool {
+	session := cm.takeSessionWithBinding(sessionID, binding)
 	if session == nil {
 		return false
 	}
@@ -203,30 +216,44 @@ func constantTimeEqualString(a, b string) bool {
 // Redis 的 GET+DEL 若拆成两条命令，并发请求会同时读到同一会话，
 // 导致同一个验证码答案/PoW 解被重复兑换，因此必须用 Lua 保证原子性。
 // 使用 EVAL 而非 GETDEL 是为了兼容 Redis 6.2 之前的服务端。
-var takeAndDeleteScript = goredis.NewScript(`
+var takeAndDeleteBoundScript = goredis.NewScript(`
 local v = redis.call('GET', KEYS[1])
-if v then
-  redis.call('DEL', KEYS[1])
+if not v then
+  return ''
 end
+local ok, session = pcall(cjson.decode, v)
+if not ok or type(session) ~= 'table' then
+  return ''
+end
+if tostring(session.site_id or '') ~= ARGV[1] then
+  return ''
+end
+if string.lower(tostring(session.host or '')) ~= string.lower(ARGV[2]) then
+  return ''
+end
+if tostring(session.bind or '') ~= ARGV[3] then
+  return ''
+end
+redis.call('DEL', KEYS[1])
 return v
 `)
 
 // takeSession 原子地取出并删除一个验证码会话。
 // 返回 nil 表示会话不存在或已被其他请求兑换。
-func (cm *CaptchaManager) takeSession(sessionID string) *CaptchaSession {
+func (cm *CaptchaManager) takeSessionWithBinding(sessionID string, binding ChallengeSessionBinding) *CaptchaSession {
 	if sessionID == "" {
 		return nil
 	}
+	binding = binding.normalized()
 	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		key := cm.prefix + sessionID
-		raw, err := takeAndDeleteScript.Run(ctx, redis, []string{key}).Text()
+		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{key}, binding.SiteID, binding.Host, binding.Bind).Text()
 		data := []byte(raw)
 		if err == nil && len(data) > 0 {
 			var session CaptchaSession
 			if json.Unmarshal(data, &session) == nil {
-				// 会话只会存在于 Redis 或内存其中之一，仍清理内存副本以防降级期间的残留。
 				cm.mu.Lock()
 				delete(cm.sessions, sessionID)
 				cm.mu.Unlock()
@@ -234,13 +261,14 @@ func (cm *CaptchaManager) takeSession(sessionID string) *CaptchaSession {
 			}
 			return nil
 		}
-		// Redis 未命中或不可用时回退到内存存储。
 	}
 
 	cm.mu.Lock()
 	session, ok := cm.sessions[sessionID]
-	if ok {
+	if ok && session != nil && session.ChallengeSessionBinding.matches(binding) {
 		delete(cm.sessions, sessionID)
+	} else {
+		ok = false
 	}
 	cm.mu.Unlock()
 	if !ok {
@@ -278,17 +306,18 @@ func randomMathProblem() (expr string, answer int) {
 }
 
 // generateMath creates a simple math CAPTCHA (addition/subtraction).
-func (cm *CaptchaManager) generateMath(envKey []byte) (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateMath(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	expr, answer := randomMathProblem()
 
 	sessionID := generateSessionID()
 	session := &CaptchaSession{
-		ID:        sessionID,
-		Type:      CaptchaTypeMath,
-		Answer:    fmt.Sprintf("%d", answer),
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(cm.timeoutValue()),
-		EnvKey:    envKey,
+		ChallengeSessionBinding: binding,
+		ID:                      sessionID,
+		Type:                    CaptchaTypeMath,
+		Answer:                  fmt.Sprintf("%d", answer),
+		CreatedAt:               time.Now(),
+		ExpiresAt:               time.Now().Add(cm.timeoutValue()),
+		EnvKey:                  envKey,
 	}
 
 	if err := cm.storeSession(session); err != nil {

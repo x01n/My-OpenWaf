@@ -1,24 +1,24 @@
-"use client";
+"use client"
 
-import { useEffect } from "react";
-import { useTranslation } from "react-i18next";
-import { Button } from "@/components/ui/button";
-import { IconAlertTriangle, IconRefresh } from "@tabler/icons-react";
+import { useEffect } from "react"
+import { useTranslation } from "react-i18next"
+import { Button } from "@/components/ui/button"
+import { IconAlertTriangle, IconRefresh } from "@tabler/icons-react"
 
 export default function DashboardError({
   error,
   reset,
 }: {
-  error: Error & { digest?: string };
-  reset: () => void;
+  error: Error & { digest?: string }
+  reset: () => void
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   useEffect(() => {
     if (process.env.NODE_ENV === "development") {
-      console.error("[Dashboard Error]", error);
+      console.error("[Dashboard Error]", error)
     }
-  }, [error]);
+  }, [error])
 
   return (
     <div className="flex min-h-[60vh] items-center justify-center p-6">
@@ -36,5 +36,5 @@ export default function DashboardError({
         </Button>
       </div>
     </div>
-  );
+  )
 }

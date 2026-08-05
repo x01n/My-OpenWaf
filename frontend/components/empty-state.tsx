@@ -1,7 +1,7 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import { cn } from "@/lib/utils";
+import * as React from "react"
+import { cn } from "@/lib/utils"
 
 /**
  * @typedef {object} EmptyStateProps
@@ -13,12 +13,12 @@ import { cn } from "@/lib/utils";
  * @property {string} [className] 外层容器 className
  */
 export interface EmptyStateProps {
-  icon?: React.ComponentType<{ className?: string }>;
-  title: React.ReactNode;
-  description?: React.ReactNode;
-  action?: React.ReactNode;
-  secondaryAction?: React.ReactNode;
-  className?: string;
+  icon?: React.ComponentType<{ className?: string }>
+  title: React.ReactNode
+  description?: React.ReactNode
+  action?: React.ReactNode
+  secondaryAction?: React.ReactNode
+  className?: string
 }
 
 /**
@@ -36,8 +36,8 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center rounded-xl border border-dashed py-16 px-6 text-center",
-        className,
+        "flex flex-col items-center justify-center rounded-xl border border-dashed px-6 py-16 text-center",
+        className
       )}
     >
       {Icon ? (
@@ -45,7 +45,9 @@ export function EmptyState({
           <Icon className="h-10 w-10 text-primary/50" />
         </div>
       ) : null}
-      <h3 className="mb-1.5 text-base font-semibold text-foreground">{title}</h3>
+      <h3 className="mb-1.5 text-base font-semibold text-foreground">
+        {title}
+      </h3>
       {description ? (
         <p className="mb-5 max-w-sm text-sm leading-relaxed text-muted-foreground">
           {description}
@@ -60,5 +62,5 @@ export function EmptyState({
         </div>
       )}
     </div>
-  );
+  )
 }

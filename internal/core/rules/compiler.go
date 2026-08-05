@@ -112,7 +112,7 @@ var knownPrefixes = func() map[string]struct{} {
 		"allow_ip", "block_ip", "geo_block",
 		"block_path", "block_path_regex", "block_path_exact",
 		"block_query_contains", "block_query_regex",
-		"block_header", "block_header_regex",
+		"block_header", "block_header_exact", "block_header_prefix", "block_header_regex",
 		"block_method", "block_content_type",
 		"block_user_agent", "block_user_agent_regex",
 		"header_regex", "body_contains", "body_regex", "block_body_contains", "block_body_regex", "block_body_json_path", "query_param", "query_param_regex",

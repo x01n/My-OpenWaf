@@ -118,6 +118,28 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestShieldPageNormalizesUnsafeProtocolBeforeRendering(t *testing.T) {
+	cfg := DefaultShieldConfig()
+	unsafeProtocol := `";alert(document.domain);//`
+	html := shieldPageHTMLWithConfig("session", cfg, unsafeProtocol, "", "")
+
+	if strings.Contains(html, unsafeProtocol) || strings.Contains(html, "alert(document.domain)") {
+		t.Fatalf("shield page reflected unsafe protocol into inline script: %s", html)
+	}
+	if !strings.Contains(html, `="http/1.1"`) {
+		t.Fatalf("shield page did not fall back to HTTP/1.1: %s", html)
+	}
+}
+
+func TestNormalizeShieldProtocolRejectsUnknownValues(t *testing.T) {
+	if got := normalizeShieldProtocol(`";alert(document.domain);//`); got != "" {
+		t.Fatalf("normalizeShieldProtocol() = %q, want empty value for unknown protocol", got)
+	}
+	if got := shieldProtocolValue(`";alert(document.domain);//`); got != "http/1.1" {
+		t.Fatalf("shieldProtocolValue() = %q, want %q", got, "http/1.1")
+	}
+}
+
 func TestShieldVerifyEnforcesProtocolRequirements(t *testing.T) {
 	mgr := NewShieldManager(NewCaptchaManager(nil, 0), nil, 1)
 
@@ -206,6 +228,21 @@ func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
 	}
 	if !strings.Contains(script, "__onPoWComplete") {
 		t.Fatalf("GeneratePoWWASMScript() dropped legacy callback: %s", script)
+	}
+	markers := []string{
+		"BigInt(self.__off)",
+		"BigInt(self.__bs*self.__nc)",
+		"wasm_bindgen({module_or_path:",
+		"__owaf_pow_error",
+		"__owaf_pow_cancel",
+	}
+	for _, marker := range markers {
+		if !strings.Contains(script, marker) {
+			t.Fatalf("GeneratePoWWASMScript() missing marker %q: %s", marker, script)
+		}
+	}
+	if strings.Contains(script, "var off=self.__off") || strings.Contains(script, "off+=self.__bs*self.__nc") {
+		t.Fatalf("GeneratePoWWASMScript() still uses numeric start_counter: %s", script)
 	}
 }
 

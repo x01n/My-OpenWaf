@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,9 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/database"
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 
+	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -330,6 +334,65 @@ func TestNewRuntimeUsesStoredRedisConfigOnStartup(t *testing.T) {
 	}
 	if !sawSelect {
 		t.Fatalf("expected SELECT 7 in commands, got %v", commands)
+	}
+}
+
+func TestRuntimeReloadSnapshotReusesConfiguredDynamicKeyBase(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrate(db); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	if err := db.Create(&store.Site{
+		Host:         "runtime-dynamic-key.example.test",
+		Bind:         ":80",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Enabled:      true,
+	}).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{
+		Key:   "bot_settings",
+		Value: `{"dynamic_protection_enabled":true,"html_obfuscation":true}`,
+	}).Error; err != nil {
+		t.Fatalf("seed dynamic protection settings: %v", err)
+	}
+	layer, err := cache.NewLayer()
+	if err != nil {
+		t.Fatalf("create snapshot cache: %v", err)
+	}
+	rt := &Runtime{DB: db, Snapshot: &snapshot.Holder{}, Cache: layer}
+	keyBase := bytes.Repeat([]byte{0x4c}, 32)
+	expected := append([]byte(nil), keyBase...)
+	if err := rt.SetSnapshotDynamicKeyBase(keyBase); err != nil {
+		t.Fatalf("configure dynamic key base: %v", err)
+	}
+	keyBase[0] = 0
+	if err := rt.ReloadSnapshot(); err != nil {
+		t.Fatalf("initial snapshot reload: %v", err)
+	}
+	first, ok := rt.Snapshot.Load().MatchSite(":80", "runtime-dynamic-key.example.test")
+	if !ok {
+		t.Fatal("runtime dynamic protection site was not matched")
+	}
+	if !bytes.Equal(first.DynamicProtection.EncryptionKeyBase, expected) {
+		t.Fatalf("initial snapshot key base did not match the configured key base (length=%d)", len(first.DynamicProtection.EncryptionKeyBase))
+	}
+	if err := store.BumpRevision(db); err != nil {
+		t.Fatalf("bump revision: %v", err)
+	}
+	if err := rt.ReloadSnapshot(); err != nil {
+		t.Fatalf("reloaded snapshot: %v", err)
+	}
+	second, ok := rt.Snapshot.Load().MatchSite(":80", "runtime-dynamic-key.example.test")
+	if !ok {
+		t.Fatal("reloaded dynamic protection site was not matched")
+	}
+	if !bytes.Equal(second.DynamicProtection.EncryptionKeyBase, expected) {
+		t.Fatalf("reloaded snapshot key base did not match the initial key base (length=%d)", len(second.DynamicProtection.EncryptionKeyBase))
 	}
 }
 

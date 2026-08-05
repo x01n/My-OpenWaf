@@ -97,6 +97,20 @@ func (r *CVERuleRegistry) Register(rule *CVERule) {
 	r.index[rule.ID] = rule
 }
 
+// All 返回注册表中所有内置规则的只读快照。
+func (r *CVERuleRegistry) All() []CVERule {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]CVERule, 0, len(r.rules))
+	for _, rule := range r.rules {
+		if rule == nil {
+			continue
+		}
+		out = append(out, *rule)
+	}
+	return out
+}
+
 // ApplyOverrides 应用 JSON 配置的禁用/敏感度覆盖
 func (r *CVERuleRegistry) ApplyOverrides(overrides map[string]CVERuleOverride) {
 	r.mu.Lock()

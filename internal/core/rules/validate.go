@@ -9,16 +9,18 @@ import (
 )
 
 type compoundPattern struct {
-	Op        string            `json:"op"`
-	Kind      string            `json:"kind"`
-	Arg       string            `json:"arg"`
-	Children  []compoundPattern `json:"children"`
-	If        *compoundPattern  `json:"if"`
-	Then      *compoundPattern  `json:"then"`
-	Else      *compoundPattern  `json:"else"`
-	Window    int64             `json:"window"`
-	Threshold int64             `json:"threshold"`
-	Duration  int64             `json:"duration"`
+	Op              string            `json:"op"`
+	Kind            string            `json:"kind"`
+	Arg             string            `json:"arg"`
+	Children        []compoundPattern `json:"children"`
+	If              *compoundPattern  `json:"if"`
+	Then            *compoundPattern  `json:"then"`
+	Else            *compoundPattern  `json:"else"`
+	Window          int64             `json:"window"`
+	Threshold       int64             `json:"threshold"`
+	Duration        int64             `json:"duration"`
+	DurationUnit    string            `json:"duration_unit"`
+	DurationSeconds int64             `json:"duration_seconds"`
 }
 
 // ValidatePattern performs syntax and semantic validation for a persisted rule
@@ -75,6 +77,9 @@ func validateCompoundNode(cond compoundPattern) []string {
 		if len(cond.Children) == 0 {
 			return []string{"cc_rate condition requires at least one child"}
 		}
+		if !validCompoundDurationUnit(cond.DurationUnit) {
+			return []string{"cc_rate duration_unit must be seconds or minutes"}
+		}
 		return validateCompoundChildren(cond.Children[:1])
 	default:
 		if cond.If != nil && cond.Then != nil {
@@ -100,6 +105,15 @@ func validateCompoundChildren(children []compoundPattern) []string {
 		errs = append(errs, validateCompoundNode(child)...)
 	}
 	return errs
+}
+
+func validCompoundDurationUnit(unit string) bool {
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "", "seconds", "minutes":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateSimplePattern(kind, arg string) string {

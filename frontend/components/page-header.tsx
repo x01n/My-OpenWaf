@@ -1,7 +1,7 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import { cn } from "@/lib/utils";
+import * as React from "react"
+import { cn } from "@/lib/utils"
 
 /**
  * @typedef {object} PageHeaderProps
@@ -13,12 +13,12 @@ import { cn } from "@/lib/utils";
  * @property {string} [className] 外层容器附加 className
  */
 export interface PageHeaderProps {
-  title: React.ReactNode;
-  description?: React.ReactNode;
-  icon?: React.ReactNode;
-  titleExtra?: React.ReactNode;
-  actions?: React.ReactNode;
-  className?: string;
+  title: React.ReactNode
+  description?: React.ReactNode
+  icon?: React.ReactNode
+  titleExtra?: React.ReactNode
+  actions?: React.ReactNode
+  className?: string
 }
 
 /**
@@ -39,7 +39,7 @@ export function PageHeader({
     <div
       className={cn(
         "flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between",
-        className,
+        className
       )}
     >
       <div className="min-w-0">
@@ -56,5 +56,5 @@ export function PageHeader({
         <div className="flex flex-wrap items-center gap-2">{actions}</div>
       ) : null}
     </div>
-  );
+  )
 }

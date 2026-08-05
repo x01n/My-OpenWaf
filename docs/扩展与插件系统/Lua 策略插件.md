@@ -121,11 +121,11 @@ IPReputation → AntiReplay → ACL → LuaPre → OWASP → CVE → BotDetectio
 
 同一阶段的多个脚本按 `priority ASC, id ASC` 排序（`internal/snapshot/lua.go` 与 `LuaPluginRepo.ListEnabled`），数值小的先执行。`Engine.Evaluate` 返回**第一个给出判定的脚本**的结果，之后的脚本不再执行。返回 `nil` 的脚本不算判定，链会继续往下走。
 
-### 站点范围的注意事项
+### 站点范围的宿主隔离
 
-`lua_plugins` 表有 `site_id` 列（`null` 表示全站），管理 API 也能读写它，但**当前的加载逻辑不按站点过滤**：`internal/snapshot/lua.go` 的 `loadLuaPlugins` 只按 `enabled` 过滤，编译出的 `luaplugin.Script` 不携带站点信息。
+`lua_plugins.site_id` 决定脚本作用域：`null` 表示全站脚本，正整数表示只绑定该站点。快照加载时，`internal/snapshot/lua.go` 会调用 `Script.SetSiteID` 把作用域写入编译结果；线上执行时，`Engine.Evaluate` 会在调用 `handle(ctx)` 前比较请求的 `SiteID`，不匹配的脚本不会执行。
 
-因此 `site_id` 目前只是一个标注字段，**不影响脚本实际生效范围**。要做按站点区分，必须在脚本内部判断 `ctx.site_id`（见 `lua-examples/06-per-site-policy.lua`）。
+因此站点隔离由宿主强制实施，脚本不能通过修改 `ctx.site_id` 扩大自身作用域。全站脚本仍可读取 `ctx.site_id`，在已获准执行的请求中做进一步的站点分支（见 `lua-examples/06-per-site-policy.lua`）。
 
 ## 沙箱能力与限制
 
@@ -286,13 +286,13 @@ JA4 格式为 `ja4_a` + `_` + `ja4_b` + `_` + `ja4_c`，其中 `ja4_a` 是 10 �
 
 ### 降级而非报错
 
-后端不可用（Redis 未配置或客户端为 nil）时，所有 `kv.*` 调用返回 `nil` / `false`，**不抛错**。这是有意的：Redis 故障应让策略降级，而不是让脚本抛错、进而使判定失败。
+后端不可用（Redis 未配置、客户端为 nil，或后端健康状态已变为不可用）时，所有 `kv.*` 调用仍返回 `nil` / `false`，不抛错。除此之外，线上宿主还有一层强制的可用性边界：`Engine.Evaluate` 只有在注入的 KV 后端可用时才会执行脚本；如果执行期间后端变为不可用，宿主会丢弃当前及后续脚本的判定。因此 KV 后端不可用时，**所有线上 Lua 脚本都强制 fail-open，不采纳任何 Lua 判定**，脚本不能通过直接返回终止动作绕过这一规则。
 
-所以依赖 KV 的脚本应该显式处理不可用的情况：
+`ctx.kv.available()` 仍可用于让源码显式表达依赖关系，也能避免在 dry-run 或直接调用 `Script.Run` 时把 `nil` / `false` 当成有效数据。但它不是线上 fail-open 的责任边界，线上是否采纳判定由宿主强制决定：
 
 ```lua
 if not ctx.kv.available() then
-  return nil   -- 拿不到计数就别判定，放行给后续阶段
+  return nil   -- 防御性写法；线上宿主本身也会强制 fail-open
 end
 ```
 
@@ -327,10 +327,12 @@ return "intercept"
 
 ```lua
 return {
-  action = "redirect",
+  action = "intercept",
   message = "unrecognized client fingerprint",
-  redirect_to = "/verify",
-  status_code = 302,
+  status_code = 403,
+  headers = { ["X-Lua-Policy"] = "fingerprint" },
+  response_body = "blocked by lua policy",
+  tags = { "fingerprint", "lua" },
 }
 ```
 
@@ -342,11 +344,20 @@ return {
 | `message` | string | 写入 `Result.MatchDesc`，出现在安全事件的 `match_desc` 与拦截页调试信息里。不参与判定 |
 | `redirect_to` | string | 仅 `action = "redirect"` 时有意义 |
 | `status_code` | number | 覆盖响应码；0 或缺失时用动作的默认码（`intercept` → 403，`rate_limit` → 429，`redirect` → 302，各挑战 → 403） |
-| `headers` | table | **当前未生效**，见下 |
-| `tags` | table | **当前未生效**，见下 |
+| `headers` | table | 受控响应头，仅用于普通 Lua 终止拦截响应，过滤规则见下 |
+| `response_body` | string | 可选的受控响应体，最多 **16 KiB**，超出部分按 UTF-8 边界截断 |
+| `tags` | table | 标签会进入 `action.Result.Tags`；当前没有独立的日志持久化字段，见下 |
 
-> **`headers` 与 `tags` 目前会被解析但不会被应用。**
-> `decisionFromTable` 会把它们填进 `Decision.SetHeaders` / `Decision.Tags`，但 `lua_phase.go` 和 `applyPostLuaDecision` 都没有读这两个字段——它们不会被加到转发给上游的请求头上，也不会进日志。写了不报错，只是没有任何效果。需要给下游传标记时，暂时用 `message`（它会进安全事件）。
+`headers` 和 `response_body` 只在数据面处理普通 Lua 终止拦截响应时使用。它们不会修改转发给上游的请求，也不会用于 `allow`、`observe`、`tag`、`drop`、`redirect`、各种 challenge 或上游响应。只返回 `headers` 而不返回 `response_body` 时，响应头会附加到标准拦截页；返回非空 `response_body` 时，宿主用它替换标准拦截页正文。
+
+`headers` 在进入 `action.Result.SetHeaders` 前会过滤：
+
+- 敏感认证与会话头，如 `Authorization`、`Proxy-Authorization`、`Cookie`、`Set-Cookie`、`WWW-Authenticate`、`Proxy-Authenticate`；
+- 逐跳头，如 `Connection`、`Keep-Alive`、`Proxy-Connection`、`TE`、`Trailer`、`Transfer-Encoding`、`Upgrade`；
+- `Content-Length` 与 `Location`；
+- 非法字段名，以及值中含 CR/LF 的字段。
+
+单个响应头值最多 4 KiB，超出部分按 UTF-8 边界截断。`tags` 会由 `lua_phase.go` / `applyPostLuaDecision` 复制到 `action.Result.Tags`，但当前 `SecurityEvent` 与 `AccessLog` 都没有独立的 tags 持久化字段，不能把它们当成已写入安全事件或访问日志的标签。
 
 类型不匹配的字段会被静默忽略（例如 `status_code = "302"` 是字符串，不会被采纳）。返回上述三种之外的类型（如 number、function）会被当作执行错误。
 
@@ -389,12 +400,14 @@ return {
 | 脚本 panic（如栈溢出） | 被 `recover` 转为普通错误，同上处理，不会打崩数据面 |
 | 脚本未定义 `handle` | 视为失败（`ErrNoHandler`），记 `failures`，不判定 |
 | 脚本返回不支持的类型 | 视为失败，不判定 |
+| KV 后端在执行前不可用 | 宿主不执行任何线上 Lua 脚本，直接按无 Lua 判定继续后续流程 |
+| KV 后端在脚本执行期间变为不可用 | 丢弃本次及后续 Lua 判定，强制 fail-open |
 | 编译失败（语法错误/超限） | 该脚本被跳过，不进入运行集合，错误记入 `Snapshot.LuaPluginErrors` 并在 reload 时打 warn 日志。**其他脚本与整份配置照常生效** |
 
 超时相关的数值：
 
 - 默认超时 **50 ms**（`runtime.go` 的 `defaultTimeout`）。取这个值是因为脚本在数据面每请求同步执行，再长会显著拉高 P99；而正常脚本（读几个字段 + 少量字符串判断）耗时在微秒级，50 ms 足以覆盖含一次 KV 往返的场景。
-- 单脚本可用 `timeout_ms` 覆盖，管理 API 限制在 **0 ~ 1000 ms**（`luaMaxTimeoutMS`），`0` 表示用默认值。
+- 单脚本可用 `timeout_ms` 覆盖，管理 API 限制在 **0 ~ 1200 ms**（`luaMaxTimeoutMS`），`0` 表示用默认值。
 - 除了挂钟超时，调用方 context 取消（客户端断开）也会中断脚本执行。
 - `while true do end` 这类死循环会被可靠中断——这是沙箱最关键的一条保证，有专门的测试覆盖（`TestInfiniteLoopIsInterrupted`）。
 
@@ -439,9 +452,9 @@ return {
 | `source` | Lua 源码。新建必填，上限 256 KiB |
 | `enabled` | 省略时新建默认 `true`、更新时保持原值 |
 | `priority` | 同阶段执行顺序，小者先执行。默认 `100` |
-| `timeout_ms` | 0 ~ 1000，`0` 表示用 50 ms 默认值 |
+| `timeout_ms` | 0 ~ 1200，`0` 表示用 50 ms 默认值 |
 | `description` | 备注，上限 512 字符 |
-| `site_id` | 三态：**字段缺失**保持原值；**显式 `null`** 改为全站；**正整数**绑定站点（`0` 与非数字会报错）。注意这个字段目前不影响实际生效范围 |
+| `site_id` | 三态：**字段缺失**保持原值；**显式 `null`** 改为全站；**正整数**绑定站点（`0` 与非数字会报错）。非空值由宿主强制隔离，仅对应站点的请求会执行该脚本；全站脚本才会对所有站点执行 |
 
 ### dry-run 的请求体
 
@@ -472,7 +485,7 @@ return {
 }
 ```
 
-`request.phase` / `request.action` 用来模拟内置判定，是验证 post 脚本分支的关键。`timeout_ms` 超过 1000 或非正数时回落到默认超时。
+`request.phase` / `request.action` 用来模拟内置判定，是验证 post 脚本分支的关键。`timeout_ms` 超过 1200 或非正数时回落到默认超时。
 
 响应：
 
@@ -480,14 +493,16 @@ return {
 {
   "compile_error": "",
   "runtime_error": "",
-  "decision": {"Action": "allow", "Message": "known false positive", "RedirectTo": "", "StatusCode": 0, "SetHeaders": null, "Tags": null},
+  "decision": {"Action": "allow", "Message": "known false positive", "RedirectTo": "", "StatusCode": 0, "SetHeaders": null, "ResponseBody": "", "Tags": null},
   "elapsed_ms": 0.12
 }
 ```
 
 `compile_error` 非空时其余字段无意义。`runtime_error` 非空表示执行出错（含超时）。`decision.Action` 为空串表示脚本未做判定。
 
-> dry-run 用独立的状态机池，不复用线上状态机，试运行不会污染生产请求。但它**会**用真实的 KV 后端，所以试跑带 `kv.incr` 的脚本会真的写 Redis 计数。
+> dry-run 用独立的状态机池，不复用线上状态机，试运行不会污染生产请求。但它**会**用真实的 KV 后端，所以试跑带 `kv.incr` 的脚本会真的写 Redis 计数。dry-run 直接执行脚本，不经过线上 `Engine.Evaluate` 的 KV 可用性门禁；因此 KV 不可用时，dry-run 仍可能展示脚本返回的 `decision`，这不代表线上会采纳该判定。线上宿主在 KV 不可用时始终强制 fail-open。
+>
+> dry-run 返回的是**脚本原始 `Decision`**，不会调用线上动作归一化，也不会执行 `post` 阶段的最终判定合并。因此脚本返回 `block` / `log_only` 时，试运行可能显示别名；线上分别按 `intercept` / `observe` 处理。若线上已有终止判定，`post` 脚本返回非 `allow` 的动作在线上会保留原判定，而 dry-run 只展示脚本自身返回值。界面中的判定结果不能当作最终 WAF 响应。
 
 ## 排错指引
 
@@ -514,7 +529,7 @@ luaplugin: compile "validate": <file>:3: unexpected symbol near 'end'
 4. **阶段选对了没。** 想推翻内置拦截必须是 `post` + `allow`；想在 OWASP 之前决策必须是 `pre`。
 5. **前面有没有别的脚本先给了判定。** 同阶段按 `priority` 升序执行，`Engine.Evaluate` 返回第一个有判定的结果，后面的脚本根本不会跑。
 6. **返回的动作名是不是有效的。** 无法识别的动作被静默忽略。对照上面的动作表。
-7. **是不是踩了 `ctx.query_params` 恒空 / `headers`、`tags` 不生效 / `tag` 无日志这几个坑。**
+7. **是不是踩了 `ctx.query_params` 恒空、Lua 响应控制范围或 KV fail-open 这几个坑。** `headers` / `response_body` 只在普通 Lua 终止拦截响应分支使用；`headers` 还会过滤敏感/逐跳/`Content-Length`/`Location`/非法字段名/CRLF。`tags` 只进入 `action.Result.Tags`，当前没有独立日志持久化字段。线上 KV 不可用时宿主强制丢弃 Lua 判定。
 
 ### 运行时报错与超时
 
@@ -553,7 +568,7 @@ lua plugin failed, skipping   script=<脚本名> stage=<pre|post> err=<错误>
 
 ### 排查 KV
 
-脚本写的键在 Redis 里的完整键名是 `openwaf:owaf:lua:<脚本里的键>`。想确认脚本到底写没写进去，按这个前缀扫。`kv.available()` 返回 false 说明 Redis 根本没配置或客户端未连上，此时所有 KV 调用都静默降级。
+脚本写的键在 Redis 里的完整键名是 `openwaf:owaf:lua:<脚本里的键>`。想确认脚本到底写没写进去，按这个前缀扫。`kv.available()` 返回 false 说明 Redis 根本没配置、客户端未连上或后端已不可用，此时所有 KV 调用都静默降级；线上宿主还会强制丢弃所有 Lua 判定并继续后续流程。dry-run 不经过这道线上门禁，不能用 KV 不可用时的 dry-run `decision` 推断线上结果。
 
 ### 性能
 
@@ -594,7 +609,7 @@ lua plugin failed, skipping   script=<脚本名> stage=<pre|post> err=<错误>
 | [03-scanner-block.lua](./lua-examples/03-scanner-block.lua) | `pre` | 按 UA + 路径组合拦截扫描器 |
 | [04-ja4-client-classify.lua](./lua-examples/04-ja4-client-classify.lua) | `pre` | 基于 TLS JA4 指纹识别与分流客户端 |
 | [05-observe-suspicious.lua](./lua-examples/05-observe-suspicious.lua) | `pre` | 给可疑请求打观察记录而不拦截 |
-| [06-per-site-policy.lua](./lua-examples/06-per-site-policy.lua) | `pre` | 用 `ctx.site_id` 按站点区分策略 |
+| [06-per-site-policy.lua](./lua-examples/06-per-site-policy.lua) | `pre` | 全站脚本用 `ctx.site_id` 对不同站点进一步分流 |
 
 ## 常量速查表
 
@@ -602,9 +617,11 @@ lua plugin failed, skipping   script=<脚本名> stage=<pre|post> err=<错误>
 | --- | --- | --- |
 | 入口函数名 | `handle` | `exec.go` `handlerName` |
 | 默认执行超时 | 50 ms | `runtime.go` `defaultTimeout` |
-| 单脚本超时可配范围 | 0 ~ 1000 ms | `admin/system/lua_plugin.go` `luaMaxTimeoutMS` |
+| 单脚本超时可配范围 | 0 ~ 1200 ms | `admin/system/lua_plugin.go` `luaMaxTimeoutMS` |
 | 脚本源码上限 | 256 KiB | `runtime.go` `maxScriptBytes` |
 | 请求体可见上限 | 48 KiB | `dataplane/handler.go` `maxWAFBody` |
+| Lua 响应体上限 | 16 KiB | `runtime.go` `maxResponseBody` |
+| 单个 Lua 响应头值上限 | 4 KiB | `runtime.go` `maxHeaderValue` |
 | KV 键前缀 | `owaf:lua:` | `api.go` `kvKeyPrefix` |
 | KV 键长上限 | 256 字节 | `api.go` `kvMaxKeyLen` |
 | KV 值大小上限 | 64 KiB | `api.go` `kvMaxValueLen` |

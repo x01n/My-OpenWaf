@@ -1,30 +1,30 @@
-"use client";
+"use client"
 
-import { useMemo, useState } from "react";
-import useSWR from "swr";
-import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
-import { format } from "date-fns";
-import { zhCN } from "date-fns/locale";
+import { useMemo, useState } from "react"
+import useSWR from "swr"
+import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
+import { format } from "date-fns"
+import { zhCN } from "date-fns/locale"
 import {
   Dialog,
   DialogContent,
   DialogTitle,
   DialogDescription,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
+} from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
+} from "@/components/ui/select"
+import { Textarea } from "@/components/ui/textarea"
 import {
   IconCopy,
   IconShieldOff,
@@ -32,25 +32,25 @@ import {
   IconFingerprint,
   IconMessageReport,
   IconShieldLock,
-} from "@tabler/icons-react";
-import type { AccessLog, SecurityEvent, IPEntry } from "@/lib/types";
-import { ipListApi, falsePositiveApi, requestTraceApi } from "@/lib/api";
-import { countryFlag, countryName } from "@/lib/country-names";
-import { categoryLabel } from "@/lib/attack-category";
-import { IpHoverPreview } from "@/components/ip-hover-preview";
-import { cn } from "@/lib/utils";
+} from "@tabler/icons-react"
+import type { AccessLog, SecurityEvent, IPEntry } from "@/lib/types"
+import { ipListApi, falsePositiveApi, requestTraceApi } from "@/lib/api"
+import { countryFlag, countryName } from "@/lib/country-names"
+import { categoryLabel } from "@/lib/attack-category"
+import { IpHoverPreview } from "@/components/ip-hover-preview"
+import { cn } from "@/lib/utils"
 
 interface SecurityEventDetailDialogProps {
-  event: SecurityEvent | null;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  event: SecurityEvent | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
 }
 
 /** 报文区渲染字符上限，超出部分截断展示，避免超大报文拖垮渲染 */
-const MAX_MESSAGE_CHARS = 16384;
+const MAX_MESSAGE_CHARS = 16384
 
 /** 脱敏占位符，与后端 internal/dataplane/handler.go 保持一致 */
-const REDACTED = "[redacted]";
+const REDACTED = "[redacted]"
 
 /**
  * 敏感头部名称片段，与后端 isSensitiveLogKey
@@ -71,7 +71,7 @@ const SENSITIVE_KEY_PARTS = [
   "csrf",
   "credential",
   "key",
-];
+]
 
 /**
  * 判断头部名称是否命中敏感片段。
@@ -80,15 +80,15 @@ const SENSITIVE_KEY_PARTS = [
  * @returns 命中任一敏感片段时返回 true
  */
 function isSensitiveHeaderName(name: string): boolean {
-  const lower = name.toLowerCase();
-  return SENSITIVE_KEY_PARTS.some((part) => lower.includes(part));
+  const lower = name.toLowerCase()
+  return SENSITIVE_KEY_PARTS.some((part) => lower.includes(part))
 }
 
 /** 单条头部条目 */
 interface HeaderEntry {
-  name: string;
-  value: string;
-  sensitive: boolean;
+  name: string
+  value: string
+  sensitive: boolean
 }
 
 /**
@@ -104,42 +104,42 @@ interface HeaderEntry {
  * @returns 有序头部条目列表
  */
 function parseHeaderEntries(raw?: string, order?: string): HeaderEntry[] {
-  const text = (raw || "").trim();
-  if (!text) return [];
+  const text = (raw || "").trim()
+  if (!text) return []
 
   if (text.startsWith("{")) {
     try {
-      const parsed = JSON.parse(text) as Record<string, unknown>;
-      const entries: HeaderEntry[] = [];
-      const consumed = new Set<string>();
+      const parsed = JSON.parse(text) as Record<string, unknown>
+      const entries: HeaderEntry[] = []
+      const consumed = new Set<string>()
 
       const push = (key: string) => {
-        const value = parsed[key];
-        const values = Array.isArray(value) ? value : [value];
+        const value = parsed[key]
+        const values = Array.isArray(value) ? value : [value]
         for (const item of values) {
           entries.push({
             name: key,
             value: item == null ? "" : String(item),
             sensitive: isSensitiveHeaderName(key),
-          });
+          })
         }
-      };
+      }
 
       // header_order 与 headers 的 key 同源于 Hertz VisitAll 的 string(k)，可直接精确匹配
       for (const rawName of (order || "").split(",")) {
-        const name = rawName.trim();
-        if (!name || consumed.has(name)) continue;
+        const name = rawName.trim()
+        if (!name || consumed.has(name)) continue
         if (Object.prototype.hasOwnProperty.call(parsed, name)) {
-          consumed.add(name);
-          push(name);
+          consumed.add(name)
+          push(name)
         }
       }
       for (const key of Object.keys(parsed)) {
-        if (consumed.has(key)) continue;
-        consumed.add(key);
-        push(key);
+        if (consumed.has(key)) continue
+        consumed.add(key)
+        push(key)
       }
-      return entries;
+      return entries
     } catch {
       // JSON 解析失败时按文本格式处理
     }
@@ -150,43 +150,43 @@ function parseHeaderEntries(raw?: string, order?: string): HeaderEntry[] {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const idx = line.indexOf(":");
-      const name = idx > 0 ? line.slice(0, idx) : line;
-      const value = idx > 0 ? line.slice(idx + 1).trim() : "";
-      return { name, value, sensitive: isSensitiveHeaderName(name) };
-    });
+      const idx = line.indexOf(":")
+      const name = idx > 0 ? line.slice(0, idx) : line
+      const value = idx > 0 ? line.slice(idx + 1).trim() : ""
+      return { name, value, sensitive: isSensitiveHeaderName(name) }
+    })
 }
 
 /**
  * 取头部展示值：敏感头部一律以占位符替换。
  */
 function headerDisplayValue(entry: HeaderEntry): string {
-  return entry.sensitive ? REDACTED : entry.value;
+  return entry.sensitive ? REDACTED : entry.value
 }
 
 /**
  * 按所选编码转换文本。ASCII 模式下将非 ASCII 字符转义为 \xHH / \uHHHH。
  */
 function applyEncoding(text: string, encoding: "utf8" | "ascii"): string {
-  if (encoding !== "ascii") return text;
+  if (encoding !== "ascii") return text
   return text.replace(/[^\x00-\x7F]/g, (ch) => {
-    const cp = ch.codePointAt(0) ?? 0;
-    if (cp <= 0xff) return `\\x${cp.toString(16).padStart(2, "0")}`;
-    return `\\u${cp.toString(16).padStart(4, "0")}`;
-  });
+    const cp = ch.codePointAt(0) ?? 0
+    if (cp <= 0xff) return `\\x${cp.toString(16).padStart(2, "0")}`
+    return `\\u${cp.toString(16).padStart(4, "0")}`
+  })
 }
 
 /**
  * 截断超长报文并追加提示标记。
  */
 function capMessage(text: string, truncatedLabel: string): string {
-  if (text.length <= MAX_MESSAGE_CHARS) return text;
-  return `${text.slice(0, MAX_MESSAGE_CHARS)}\n... [${truncatedLabel}]`;
+  if (text.length <= MAX_MESSAGE_CHARS) return text
+  return `${text.slice(0, MAX_MESSAGE_CHARS)}\n... [${truncatedLabel}]`
 }
 
 /** 判断动作是否属于拦截/阻断类型 */
 function isBlockAction(action: string): boolean {
-  return action === "block" || action === "intercept" || action === "drop";
+  return action === "block" || action === "intercept" || action === "drop"
 }
 
 /** 判断动作是否属于挑战类型 */
@@ -196,39 +196,39 @@ function isChallengeAction(action: string): boolean {
     action === "captcha_challenge" ||
     action === "shield_challenge" ||
     action === "chain_challenge"
-  );
+  )
 }
 
 /** 动作对应的 Badge 样式类名 */
 function getActionBadgeClass(action: string): string {
   if (isBlockAction(action))
-    return "border-red-500/40 bg-red-500/15 text-red-600 dark:text-red-400";
+    return "border-red-500/40 bg-red-500/15 text-red-600 dark:text-red-400"
   if (action === "observe" || action === "log_only")
-    return "border-amber-500/40 bg-amber-500/15 text-amber-600 dark:text-amber-400";
+    return "border-amber-500/40 bg-amber-500/15 text-amber-600 dark:text-amber-400"
   if (isChallengeAction(action))
-    return "border-blue-500/40 bg-blue-500/15 text-blue-600 dark:text-blue-400";
+    return "border-blue-500/40 bg-blue-500/15 text-blue-600 dark:text-blue-400"
   if (action === "allow")
-    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400";
-  return "";
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+  return ""
 }
 
 /** 印章类型：拦截/挑战 -> deny；放行 -> allow；观察 -> observe */
 function stampVariant(action: string): "deny" | "allow" | "observe" | null {
-  if (isBlockAction(action) || isChallengeAction(action)) return "deny";
-  if (action === "allow") return "allow";
-  if (action === "observe" || action === "log_only") return "observe";
-  return null;
+  if (isBlockAction(action) || isChallengeAction(action)) return "deny"
+  if (action === "allow") return "allow"
+  if (action === "observe" || action === "log_only") return "observe"
+  return null
 }
 
 /**
  * 构建完整请求 URL。
  */
 function buildFullUrl(ev: SecurityEvent): string {
-  const scheme = ev.tls_version ? "https" : "http";
-  const host = ev.host || "unknown";
-  const path = ev.path || "/";
-  const qs = ev.query_string ? `?${ev.query_string}` : "";
-  return `${scheme}://${host}${path}${qs}`;
+  const scheme = ev.tls_version ? "https" : "http"
+  const host = ev.host || "unknown"
+  const path = ev.path || "/"
+  const qs = ev.query_string ? `?${ev.query_string}` : ""
+  return `${scheme}://${host}${path}${qs}`
 }
 
 /**
@@ -244,16 +244,16 @@ function buildFullUrl(ev: SecurityEvent): string {
 function wireProtocolLabel(token?: string): string {
   switch ((token || "").toLowerCase()) {
     case "http/1.0":
-      return "HTTP/1.0";
+      return "HTTP/1.0"
     case "http/1.1":
-      return "HTTP/1.1";
+      return "HTTP/1.1"
     case "h2":
     case "h2c":
-      return "HTTP/2";
+      return "HTTP/2"
     case "h3":
-      return "HTTP/3";
+      return "HTTP/3"
     default:
-      return "";
+      return ""
   }
 }
 
@@ -271,26 +271,26 @@ function reconstructRequest(
   encoding: "utf8" | "ascii",
   labels: { bodyTruncated: string; displayTruncated: string }
 ): string {
-  const path = ev.path || "/";
-  const qs = ev.query_string ? `?${ev.query_string}` : "";
+  const path = ev.path || "/"
+  const qs = ev.query_string ? `?${ev.query_string}` : ""
   const requestLine = [ev.method, `${path}${qs}`, protocol]
     .filter(Boolean)
-    .join(" ");
-  const lines = [requestLine];
+    .join(" ")
+  const lines = [requestLine]
 
-  const entries = parseHeaderEntries(ev.request_headers, ev.header_order);
-  const hasHost = entries.some((e) => e.name.toLowerCase() === "host");
-  if (!hasHost && ev.host) lines.push(`Host: ${ev.host}`);
+  const entries = parseHeaderEntries(ev.request_headers, ev.header_order)
+  const hasHost = entries.some((e) => e.name.toLowerCase() === "host")
+  if (!hasHost && ev.host) lines.push(`Host: ${ev.host}`)
   for (const entry of entries) {
-    lines.push(`${entry.name}: ${headerDisplayValue(entry)}`);
+    lines.push(`${entry.name}: ${headerDisplayValue(entry)}`)
   }
 
-  let text = lines.join("\n");
+  let text = lines.join("\n")
   if (ev.request_body_preview) {
-    text += `\n\n${ev.request_body_preview}`;
-    if (ev.request_body_truncated) text += `\n... [${labels.bodyTruncated}]`;
+    text += `\n\n${ev.request_body_preview}`
+    if (ev.request_body_truncated) text += `\n... [${labels.bodyTruncated}]`
   }
-  return capMessage(applyEncoding(text, encoding), labels.displayTruncated);
+  return capMessage(applyEncoding(text, encoding), labels.displayTruncated)
 }
 
 /**
@@ -307,43 +307,40 @@ function reconstructResponse(
   encoding: "utf8" | "ascii",
   displayTruncated: string
 ): string {
-  const status = log?.status_code || ev.status_code;
-  const entries = parseHeaderEntries(log?.response_headers);
-  if (!status && entries.length === 0) return "";
+  const status = log?.status_code || ev.status_code
+  const entries = parseHeaderEntries(log?.response_headers)
+  if (!status && entries.length === 0) return ""
 
   const statusLine = [
     wireProtocolLabel(log?.http_protocol),
     status ? String(status) : "",
   ]
     .filter(Boolean)
-    .join(" ");
-  const lines = statusLine ? [statusLine] : [];
+    .join(" ")
+  const lines = statusLine ? [statusLine] : []
   for (const entry of entries) {
-    lines.push(`${entry.name}: ${headerDisplayValue(entry)}`);
+    lines.push(`${entry.name}: ${headerDisplayValue(entry)}`)
   }
-  return capMessage(
-    applyEncoding(lines.join("\n"), encoding),
-    displayTruncated
-  );
+  return capMessage(applyEncoding(lines.join("\n"), encoding), displayTruncated)
 }
 
 /**
  * 生成 cURL 命令。敏感头部以占位符导出，避免凭据经剪贴板外泄。
  */
 function buildCurlCommand(ev: SecurityEvent): string {
-  const url = buildFullUrl(ev);
-  let cmd = `curl -X ${ev.method} '${url}'`;
+  const url = buildFullUrl(ev)
+  let cmd = `curl -X ${ev.method} '${url}'`
   for (const entry of parseHeaderEntries(ev.request_headers, ev.header_order)) {
-    if (entry.name.toLowerCase() === "host") continue;
-    const value = headerDisplayValue(entry).replace(/'/g, "'\\''");
-    cmd += ` \\\n  -H '${entry.name}: ${value}'`;
+    if (entry.name.toLowerCase() === "host") continue
+    const value = headerDisplayValue(entry).replace(/'/g, "'\\''")
+    cmd += ` \\\n  -H '${entry.name}: ${value}'`
   }
   if (ev.request_body_preview) {
-    const escaped = ev.request_body_preview.replace(/'/g, "'\\''");
-    cmd += ` \\\n  --data '${escaped}'`;
+    const escaped = ev.request_body_preview.replace(/'/g, "'\\''")
+    cmd += ` \\\n  --data '${escaped}'`
   }
-  if (ev.tls_version) cmd += " \\\n  --insecure";
-  return cmd;
+  if (ev.tls_version) cmd += " \\\n  --insecure"
+  return cmd
 }
 
 /**
@@ -352,7 +349,7 @@ function buildCurlCommand(ev: SecurityEvent): string {
 function renderHttpSyntax(raw: string): React.ReactNode {
   return raw.split(/\r?\n/).map((line, i) => {
     if (i === 0) {
-      const parts = line.match(/^(\S+)\s(.*?)(?:\s(HTTP\/\S+))?$/);
+      const parts = line.match(/^(\S+)\s(.*?)(?:\s(HTTP\/\S+))?$/)
       if (parts) {
         return (
           <span key={i}>
@@ -375,13 +372,13 @@ function renderHttpSyntax(raw: string): React.ReactNode {
             ) : null}
             {"\n"}
           </span>
-        );
+        )
       }
     }
-    const colonIdx = line.indexOf(":");
+    const colonIdx = line.indexOf(":")
     if (colonIdx > 0 && i > 0 && !/^[\s\t]/.test(line)) {
-      const name = line.slice(0, colonIdx);
-      const value = line.slice(colonIdx + 1);
+      const name = line.slice(0, colonIdx)
+      const value = line.slice(colonIdx + 1)
       return (
         <span key={i}>
           <span className="text-amber-700 dark:text-amber-400">{name}</span>
@@ -389,15 +386,15 @@ function renderHttpSyntax(raw: string): React.ReactNode {
           <span className="text-foreground/80">{value}</span>
           {"\n"}
         </span>
-      );
+      )
     }
     return (
       <span key={i}>
         {line}
         {"\n"}
       </span>
-    );
-  });
+    )
+  })
 }
 
 /**
@@ -407,7 +404,7 @@ function copyToClipboard(text: string, successMsg: string, failMsg: string) {
   navigator.clipboard.writeText(text).then(
     () => toast.success(successMsg),
     () => toast.error(failMsg)
-  );
+  )
 }
 
 /**
@@ -419,9 +416,9 @@ function StampBadge({ variant }: { variant: "deny" | "allow" | "observe" }) {
       ? "border-red-500/70 text-red-500/85"
       : variant === "allow"
         ? "border-emerald-500/70 text-emerald-500/85"
-        : "border-amber-500/70 text-amber-500/85";
+        : "border-amber-500/70 text-amber-500/85"
   const text =
-    variant === "deny" ? "Deny" : variant === "allow" ? "Allow" : "Observe";
+    variant === "deny" ? "Deny" : variant === "allow" ? "Allow" : "Observe"
   return (
     <div
       className="pointer-events-none absolute top-1/2 right-5 -translate-y-1/2 -rotate-12 opacity-80 select-none"
@@ -438,7 +435,7 @@ function StampBadge({ variant }: { variant: "deny" | "allow" | "observe" }) {
         </div>
       </div>
     </div>
-  );
+  )
 }
 
 /**
@@ -448,15 +445,15 @@ function DetailRow({
   label,
   children,
 }: {
-  label: string;
-  children: React.ReactNode;
+  label: string
+  children: React.ReactNode
 }) {
   return (
     <div className="grid grid-cols-1 gap-0.5 py-1.5 sm:grid-cols-[128px_minmax(0,1fr)] sm:gap-3">
       <div className="text-xs text-muted-foreground sm:pt-0.5">{label}</div>
       <div className="min-w-0 text-sm">{children}</div>
     </div>
-  );
+  )
 }
 
 /**
@@ -468,7 +465,7 @@ function MessageView({ text, empty }: { text: string; empty: string }) {
       <div className="flex h-[300px] items-center justify-center rounded-lg border border-dashed bg-muted/20 px-6 text-center text-xs text-muted-foreground">
         {empty}
       </div>
-    );
+    )
   }
   return (
     <ScrollArea className="h-[300px] rounded-lg border bg-muted/30 dark:bg-zinc-950/60">
@@ -476,7 +473,7 @@ function MessageView({ text, empty }: { text: string; empty: string }) {
         {renderHttpSyntax(text)}
       </pre>
     </ScrollArea>
-  );
+  )
 }
 
 /**
@@ -494,22 +491,22 @@ export function SecurityEventDetailDialog({
   open,
   onOpenChange,
 }: SecurityEventDetailDialogProps) {
-  const { t } = useTranslation();
-  const [encoding, setEncoding] = useState<"utf8" | "ascii">("utf8");
-  const [fingerprintOpen, setFingerprintOpen] = useState(false);
-  const [banLoading, setBanLoading] = useState(false);
-  const [fpDialogOpen, setFpDialogOpen] = useState(false);
-  const [fpNote, setFpNote] = useState("");
-  const [fpLoading, setFpLoading] = useState(false);
+  const { t } = useTranslation()
+  const [encoding, setEncoding] = useState<"utf8" | "ascii">("utf8")
+  const [fingerprintOpen, setFingerprintOpen] = useState(false)
+  const [banLoading, setBanLoading] = useState(false)
+  const [fpDialogOpen, setFpDialogOpen] = useState(false)
+  const [fpNote, setFpNote] = useState("")
+  const [fpLoading, setFpLoading] = useState(false)
 
-  const requestId = event?.request_id || "";
+  const requestId = event?.request_id || ""
 
   // 同 request_id 的访问日志提供响应头与协议标识（安全事件模型本身不含这两项）
   const { data: trace, isLoading: traceLoading } = useSWR(
     open && requestId ? ["security-event-trace", requestId] : null,
     () => requestTraceApi.get(requestId),
     { revalidateOnFocus: false }
-  );
+  )
 
   const actionLabelMap: Record<string, string> = useMemo(
     () => ({
@@ -525,20 +522,20 @@ export function SecurityEventDetailDialog({
       log_only: t("securityEvents.action.log_only"),
     }),
     [t]
-  );
+  )
 
   if (!event) {
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-4xl" />
       </Dialog>
-    );
+    )
   }
 
-  const ev = event;
-  const fullUrl = buildFullUrl(ev);
-  const stamp = stampVariant(ev.action);
-  const accessLog = trace?.access_logs?.[0] ?? null;
+  const ev = event
+  const fullUrl = buildFullUrl(ev)
+  const stamp = stampVariant(ev.action)
+  const accessLog = trace?.access_logs?.[0] ?? null
   const hasFingerprint = Boolean(
     ev.tls_version ||
     ev.tls_sni ||
@@ -551,58 +548,58 @@ export function SecurityEventDetailDialog({
     ev.tls_curves ||
     ev.tls_point_formats ||
     ev.header_order
-  );
+  )
 
   const truncateLabels = {
     bodyTruncated: t("securityEventDetail.bodyTruncated"),
     displayTruncated: t("securityEventDetail.displayTruncated"),
-  };
+  }
   const requestText = reconstructRequest(
     ev,
     wireProtocolLabel(accessLog?.http_protocol),
     encoding,
     truncateLabels
-  );
+  )
   const responseText = reconstructResponse(
     ev,
     accessLog,
     encoding,
     truncateLabels.displayTruncated
-  );
+  )
 
   const attackTime = (() => {
     try {
       return format(new Date(ev.created_at), "yyyy-MM-dd HH:mm:ss", {
         locale: zhCN,
-      });
+      })
     } catch {
-      return ev.created_at;
+      return ev.created_at
     }
-  })();
+  })()
 
-  const copySuccess = t("common.copied");
-  const copyFail = t("common.copyFailed");
+  const copySuccess = t("common.copied")
+  const copyFail = t("common.copyFailed")
 
   const handleAddToBlocklist = async () => {
-    setBanLoading(true);
+    setBanLoading(true)
     try {
       const payload: Partial<IPEntry> = {
         value: ev.client_ip,
         kind: "blacklist",
         action: "intercept",
         note: t("securityEventDetail.blocklistNote", { id: ev.id }),
-      };
-      await ipListApi.create(payload);
-      toast.success(t("securityEventDetail.addedToBlocklist"));
+      }
+      await ipListApi.create(payload)
+      toast.success(t("securityEventDetail.addedToBlocklist"))
     } catch {
-      toast.error(t("securityEventDetail.addBlocklistFailed"));
+      toast.error(t("securityEventDetail.addBlocklistFailed"))
     } finally {
-      setBanLoading(false);
+      setBanLoading(false)
     }
-  };
+  }
 
   const handleSubmitFalsePositive = async () => {
-    setFpLoading(true);
+    setFpLoading(true)
     try {
       await falsePositiveApi.create({
         security_event_id: ev.id,
@@ -614,15 +611,15 @@ export function SecurityEventDetailDialog({
         path: ev.path,
         match_desc: ev.match_desc || "",
         note: fpNote,
-      });
-      toast.success(t("falsePositives.submitSuccess"));
-      setFpDialogOpen(false);
+      })
+      toast.success(t("falsePositives.submitSuccess"))
+      setFpDialogOpen(false)
     } catch {
-      toast.error(t("falsePositives.submitFailed"));
+      toast.error(t("falsePositives.submitFailed"))
     } finally {
-      setFpLoading(false);
+      setFpLoading(false)
     }
-  };
+  }
 
   /** 指纹字段清单，仅渲染后端实际返回的项 */
   const fingerprintFields: Array<{ label: string; value?: string }> = [
@@ -637,7 +634,7 @@ export function SecurityEventDetailDialog({
     { label: "Curves", value: ev.tls_curves },
     { label: "Point Formats", value: ev.tls_point_formats },
     { label: "Header Order", value: ev.header_order },
-  ];
+  ]
 
   return (
     <>
@@ -948,8 +945,8 @@ export function SecurityEventDetailDialog({
                 size="sm"
                 className="h-auto gap-1 p-0 text-xs"
                 onClick={() => {
-                  setFpNote("");
-                  setFpDialogOpen(true);
+                  setFpNote("")
+                  setFpDialogOpen(true)
                 }}
                 disabled={fpLoading}
               >
@@ -1027,5 +1024,5 @@ export function SecurityEventDetailDialog({
         </DialogContent>
       </Dialog>
     </>
-  );
+  )
 }

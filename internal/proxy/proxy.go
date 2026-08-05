@@ -700,12 +700,21 @@ type HTTPResponse struct {
 	Body                 []byte
 	Header               http.Header
 	UpstreamHTTPProtocol string
+
+	remainingBody    io.Reader
+	closeBody        func() error
+	upstreamResponse *http.Response
+	decodedBody      bool
 }
 
 type identityResponseEntity struct {
-	Path        string
-	ContentType string
-	Body        []byte
+	Path           string
+	ContentType    string
+	Body           []byte
+	Request        *app.RequestContext
+	ClientIP       net.IP
+	DynamicVariant bool
+	ScriptNonces   []string
 }
 
 type identityResponseTransformer interface {
@@ -721,6 +730,10 @@ func (fn identityResponseTransformerFunc) Transform(entity identityResponseEntit
 // responseEntityTransformerForSite 在站点启用动态保护（HTML/JS 混淆或图片水印）
 // 或浏览器签名挂载时，返回响应实体变换器；否则返回 nil 以跳过变换。
 func responseEntityTransformerForSite(rt snapshot.SiteRuntime) identityResponseTransformer {
+	return responseEntityTransformerForSiteWithClient(rt, nil)
+}
+
+func responseEntityTransformerForSiteWithClient(rt snapshot.SiteRuntime, clientIP net.IP) identityResponseTransformer {
 	dynCfg := rt.DynamicProtection
 	browserSignEnabled := false
 	browserSignTTL := 300
@@ -737,30 +750,87 @@ func responseEntityTransformerForSite(rt snapshot.SiteRuntime) identityResponseT
 		return nil
 	}
 
-	var proc *dynamic.Processor
-	if dynEnabled {
-		proc = dynamic.NewProcessor(dynCfg)
-	}
 	siteID := rt.Site.ID
 	host := rt.Site.Host
+	bind := rt.Bind
 	return identityResponseTransformerFunc(func(entity identityResponseEntity) (identityResponseEntity, error) {
 		body := entity.Body
-		if proc != nil {
-			transformed, err := proc.Process(entity.Path, entity.ContentType, body)
-			if err != nil {
-				return entity, err
-			}
-			body = transformed
-		}
-		// 在动态保护处理后注入签名脚本，确保 HTML 混淆时脚本仍位于外层 bootstrap 之后，
-		// 明文 HTML 路径则直接挂到 </body> 前。
 		if browserSignEnabled && isHTMLContentType(entity.ContentType) {
 			ticket := challenge.IssueBrowserSignTicket(siteID, firstHostToken(host), browserSignTTL, envCheck)
 			body = challenge.InjectBrowserSignIntoHTML(body, ticket)
+			if ticket.CSPNonce != "" {
+				entity.ScriptNonces = append(entity.ScriptNonces, ticket.CSPNonce)
+			}
+		}
+		if dynEnabled {
+			kind := dynamic.ShouldProcessContentType(entity.ContentType)
+			if kind == "html" || kind == "js" {
+				claims := dynamicProtectionClaimsFromEntity(entity, siteID, bind)
+				if claims.ClientIP == nil {
+					claims.ClientIP = clientIP
+				}
+				if entity.Request != nil && challenge.VerifyDynamicProtectionSessionCookieWithClaims(string(entity.Request.Request.Header.Peek("Cookie")), claims, time.Now()) {
+					entity.Body = body
+					entity.DynamicVariant = true
+					return entity, nil
+				}
+				proc := dynamic.NewProcessorWithKeyTicketSigner(dynCfg, func(key string, ttl int, kekB64 string) string {
+					return challenge.SignDynamicProtectionKeyTicket(challenge.DynamicProtectionKeyClaims{DynamicProtectionClaims: claims, Key: key}, time.Now(), time.Duration(ttl)*time.Second, kekB64)
+				})
+				var transformed []byte
+				var scriptNonce string
+				var err error
+				if kind == "html" {
+					transformed, scriptNonce, err = proc.ProcessHTMLWithScriptNonce(body)
+				} else {
+					transformed, err = proc.Process(entity.Path, entity.ContentType, body)
+				}
+				if err != nil {
+					return entity, err
+				}
+				if scriptNonce != "" {
+					entity.ScriptNonces = append(entity.ScriptNonces, scriptNonce)
+				}
+				body = transformed
+			} else {
+				proc := dynamic.NewProcessor(dynCfg)
+				transformed, err := proc.Process(entity.Path, entity.ContentType, body)
+				if err != nil {
+					return entity, err
+				}
+				body = transformed
+			}
 		}
 		entity.Body = body
 		return entity, nil
 	})
+}
+
+func dynamicProtectionClaimsFromEntity(entity identityResponseEntity, siteID uint, bind string) challenge.DynamicProtectionClaims {
+	claims := challenge.DynamicProtectionClaims{ClientIP: entity.ClientIP, SiteID: siteID, Bind: bind}
+	if entity.Request != nil {
+		claims.Host = string(entity.Request.Host())
+		claims.UserAgent = string(entity.Request.UserAgent())
+	}
+	return claims
+}
+
+func markDynamicResponseVariant(c *app.RequestContext) {
+	if c == nil {
+		return
+	}
+	c.Response.Header.Set("Cache-Control", "no-store")
+	vary := string(c.Response.Header.Peek("Vary"))
+	for _, item := range strings.Split(vary, ",") {
+		if strings.EqualFold(strings.TrimSpace(item), "Cookie") {
+			return
+		}
+	}
+	if vary == "" {
+		c.Response.Header.Set("Vary", "Cookie")
+		return
+	}
+	c.Response.Header.Set("Vary", vary+", Cookie")
 }
 
 func isHTMLContentType(contentType string) bool {
@@ -801,15 +871,14 @@ func shouldTransformIdentityResponse(c *app.RequestContext, statusCode int) bool
 	if cacheControlHasNoTransformBytes(c.Response.Header.Peek("Cache-Control")) {
 		return false
 	}
-	encoding := normalizedContentEncodingBytes(c.Response.Header.ContentEncoding())
-	if encoding != "" && encoding != "identity" {
+	if _, supported := parseContentEncodingsBytes(c.Response.Header.ContentEncoding()); !supported {
 		return false
 	}
 	contentType := strings.ToLower(strings.TrimSpace(string(c.Response.Header.ContentType())))
 	return !strings.HasPrefix(contentType, "text/event-stream")
 }
 
-func transformIdentityResponseBody(c *app.RequestContext, statusCode int, body []byte, transformer identityResponseTransformer) ([]byte, bool, error) {
+func transformIdentityResponseBody(c *app.RequestContext, statusCode int, body []byte, transformer identityResponseTransformer, clientIP net.IP) ([]byte, bool, error) {
 	if transformer == nil || !shouldTransformIdentityResponse(c, statusCode) {
 		return body, false, nil
 	}
@@ -817,6 +886,8 @@ func transformIdentityResponseBody(c *app.RequestContext, statusCode int, body [
 		Path:        requestPath(c),
 		ContentType: string(c.Response.Header.ContentType()),
 		Body:        body,
+		Request:     c,
+		ClientIP:    clientIP,
 	})
 	if err != nil {
 		return nil, false, err
@@ -825,12 +896,17 @@ func transformIdentityResponseBody(c *app.RequestContext, statusCode int, body [
 		entity.Body = []byte{}
 	}
 	if bytes.Equal(entity.Body, body) && (entity.ContentType == "" || entity.ContentType == string(c.Response.Header.ContentType())) {
+		if entity.DynamicVariant {
+			markDynamicResponseVariant(c)
+		}
 		return body, false, nil
 	}
 	if entity.ContentType != "" {
 		c.Response.Header.SetContentType(entity.ContentType)
 	}
 	invalidateTransformedEntityHeaders(c)
+	markDynamicResponseVariant(c)
+	applyDynamicProtectionCSPNonce(c, entity.ScriptNonces)
 	return entity.Body, true, nil
 }
 
@@ -849,6 +925,75 @@ func invalidateTransformedEntityHeaders(c *app.RequestContext) {
 	} {
 		c.Response.Header.Del(header)
 	}
+}
+
+func applyDynamicProtectionCSPNonce(c *app.RequestContext, nonces []string) {
+	if c == nil || len(nonces) == 0 {
+		return
+	}
+	rawPolicies := c.Response.Header.PeekAll("Content-Security-Policy")
+	if len(rawPolicies) == 0 {
+		return
+	}
+	policies := make([]string, len(rawPolicies))
+	for i, policy := range rawPolicies {
+		policies[i] = string(policy)
+		for _, nonce := range nonces {
+			if nonce != "" {
+				policies[i] = cspWithScriptNonce(policies[i], nonce)
+			}
+		}
+	}
+	c.Response.Header.Del("Content-Security-Policy")
+	for _, policy := range policies {
+		c.Response.Header.Add("Content-Security-Policy", policy)
+	}
+}
+
+func cspWithScriptNonce(policy, nonce string) string {
+	nonceToken := "'nonce-" + nonce + "'"
+	directives := strings.Split(policy, ";")
+	defaultSrc := ""
+	scriptSrcFound := false
+	scriptSrcElemFound := false
+	for i, directive := range directives {
+		trimmed := strings.TrimSpace(directive)
+		if trimmed == "" {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 {
+			continue
+		}
+		switch strings.ToLower(fields[0]) {
+		case "default-src":
+			defaultSrc = strings.Join(fields[1:], " ")
+		case "script-src":
+			scriptSrcFound = true
+			directives[i] = cspDirectiveWithToken(trimmed, nonceToken)
+		case "script-src-elem":
+			scriptSrcElemFound = true
+			directives[i] = cspDirectiveWithToken(trimmed, nonceToken)
+		}
+	}
+	if !scriptSrcFound && !scriptSrcElemFound {
+		base := "script-src"
+		if defaultSrc != "" {
+			base += " " + defaultSrc
+		}
+		directives = append(directives, cspDirectiveWithToken(base, nonceToken))
+	}
+	return strings.Join(directives, ";")
+}
+
+func cspDirectiveWithToken(directive, token string) string {
+	fields := strings.Fields(directive)
+	for _, field := range fields[1:] {
+		if field == token {
+			return directive
+		}
+	}
+	return directive + " " + token
 }
 
 func writeResponseTransformFailure(c *app.RequestContext) {
@@ -1151,7 +1296,7 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 		}
 	}
 
-	security.ApplyOutboundForwarding(req, clientIP, origHost, preserveOriginalHost, "", inboundProto(c))
+	security.ApplyOutboundForwarding(req, clientIP, origHost, preserveOriginalHost, "", security.TrustedInboundForwardedProto(c))
 	return req, nil
 }
 
@@ -1337,6 +1482,10 @@ func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
 			}
 			continue
 		}
+		if lk == "content-encoding" {
+			dst.Response.Header.Set(k, strings.Join(vv, ", "))
+			continue
+		}
 		for _, v := range vv {
 			dst.Response.Header.Add(k, v)
 		}
@@ -1377,10 +1526,10 @@ func responseConnectionTokens(h http.Header) map[string]bool {
 }
 
 // FetchHTTP performs the upstream request and returns a buffered response.
-func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*HTTPResponse, error) {
+func fetchHTTPResponse(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*http.Response, string, error) {
 	req, err := buildUpstreamRequest(ctx, c, base, clientIP, origHost, rt.PreserveOriginalHost)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	debugEnabled := slog.Default().Enabled(ctx, slog.LevelDebug)
@@ -1393,7 +1542,7 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 		hresp, hreq, requestDone, cancel, err := doHertzUpstream(ctx, rt, base, req)
 		if err != nil {
 			logUpstreamRequestError(ctx, "buffered", req, origHost, err)
-			return nil, err
+			return nil, "", err
 		}
 		if debugEnabled {
 			slog.Debug("upstream buffered response received",
@@ -1404,8 +1553,7 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 				slog.Duration("latency", time.Since(start)),
 			)
 		}
-		resp := hertzResponseToHTTPResponse(base, hresp, hreq, requestDone, cancel)
-		return bufferedHTTPResponseFromUpstream(resp, req.Method)
+		return hertzResponseToHTTPResponse(base, hresp, hreq, requestDone, cancel), req.Method, nil
 	}
 
 	transport, _ := UpstreamRoundTripperForBase(rt, base)
@@ -1413,7 +1561,7 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 	resp, err := hc.Do(req)
 	if err != nil {
 		logUpstreamRequestError(ctx, "buffered", req, origHost, err)
-		return nil, err
+		return nil, "", err
 	}
 	if debugEnabled {
 		slog.Debug("upstream buffered response received",
@@ -1425,22 +1573,54 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 			slog.Duration("latency", time.Since(start)),
 		)
 	}
-
-	return bufferedHTTPResponseFromUpstream(resp, req.Method)
+	return resp, req.Method, nil
 }
 
-func bufferedHTTPResponseFromUpstream(resp *http.Response, method string) (*HTTPResponse, error) {
+func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*HTTPResponse, error) {
+	return FetchHTTPLimited(ctx, c, rt, base, clientIP, origHost, 0)
+}
+
+// FetchHTTPForAppRouteCapture buffers an upstream response for AppRoute response-body
+// matching while enforcing the dynamic-transform body limit. Oversized bodies remain
+// streamable via ForwardCapturedResponseForSite.
+func FetchHTTPForAppRouteCapture(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*HTTPResponse, error) {
+	return FetchHTTPLimited(ctx, c, rt, base, clientIP, origHost, maxStreamTransformBufferBytes)
+}
+
+// FetchHTTPLimited buffers the upstream response up to maxBodyBytes (post-decode).
+// When maxBodyBytes > 0 and the body exceeds the limit, the returned HTTPResponse
+// keeps the unread remainder so callers can stream the complete response without
+// truncating or fully materializing a compression bomb.
+func FetchHTTPLimited(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string, maxBodyBytes int64) (*HTTPResponse, error) {
+	resp, method, err := fetchHTTPResponse(ctx, c, rt, base, clientIP, origHost)
+	if err != nil {
+		return nil, err
+	}
+	return bufferedHTTPResponseFromUpstream(resp, method, maxBodyBytes)
+}
+
+func bufferedHTTPResponseFromUpstream(resp *http.Response, method string, maxBodyBytes int64) (*HTTPResponse, error) {
 	if resp == nil {
 		return nil, nil
 	}
 
 	var body []byte
 	var headers http.Header
+	var remaining io.Reader
+	var closeFn func() error
+	var decoded bool
+	var truncated bool
 	if strings.EqualFold(method, http.MethodHead) || responseStatusDisallowsBody(resp.StatusCode) {
 		if resp.Body != nil {
 			_ = resp.Body.Close()
 		}
 		headers = resp.Header.Clone()
+	} else if maxBodyBytes > 0 {
+		var err error
+		body, headers, remaining, closeFn, decoded, truncated, err = readUpstreamResponseBodyLimitedForCapture(resp, maxBodyBytes)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		var err error
 		body, headers, err = readUpstreamResponseBody(resp)
@@ -1451,30 +1631,119 @@ func bufferedHTTPResponseFromUpstream(resp *http.Response, method string) (*HTTP
 	if headers == nil {
 		headers = http.Header{}
 	}
-	for k, vv := range resp.Trailer {
-		for _, v := range vv {
-			headers.Add(k, v)
+	if !truncated {
+		for k, vv := range resp.Trailer {
+			for _, v := range vv {
+				headers.Add(k, v)
+			}
 		}
 	}
 
-	return &HTTPResponse{
+	result := &HTTPResponse{
 		StatusCode:           resp.StatusCode,
 		ContentType:          headers.Get("Content-Type"),
 		Body:                 body,
 		Header:               headers,
 		UpstreamHTTPProtocol: resp.Proto,
-	}, nil
+	}
+	if truncated {
+		result.remainingBody = remaining
+		result.closeBody = closeFn
+		result.upstreamResponse = resp
+		result.decodedBody = decoded
+	}
+	return result, nil
 }
 
 func ForwardBufferedResponse(c *app.RequestContext, resp *HTTPResponse) {
-	forwardBufferedResponseWithOptions(c, resp, DefaultResponseCompressionOptions(true), nil)
+	forwardBufferedResponseWithOptions(c, resp, DefaultResponseCompressionOptions(true), nil, nil)
 }
 
 func ForwardBufferedResponseForSite(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime) {
-	forwardBufferedResponseWithOptions(c, resp, streamCompressionOptions(rt), responseEntityTransformerForSite(rt))
+	ForwardBufferedResponseForSiteWithClientIP(c, resp, rt, nil)
 }
 
-func forwardBufferedResponseWithOptions(c *app.RequestContext, resp *HTTPResponse, opts ResponseCompressionOptions, transformer identityResponseTransformer) {
+func ForwardBufferedResponseForSiteWithClientIP(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime, clientIP net.IP) {
+	forwardBufferedResponseWithOptions(c, resp, streamCompressionOptions(rt), responseEntityTransformerForSiteWithClient(rt, clientIP), clientIP)
+}
+
+// ForwardCapturedResponseForSite forwards a response returned by FetchHTTPLimited.
+// Buffered responses retain the normal dynamic transform path; oversized responses
+// stream the unread remainder without transformation and preserve the full body.
+func ForwardCapturedResponseForSite(ctx context.Context, c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime) error {
+	return ForwardCapturedResponseForSiteWithClientIP(ctx, c, resp, rt, nil)
+}
+
+func ForwardCapturedResponseForSiteWithClientIP(ctx context.Context, c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime, clientIP net.IP) error {
+	if resp == nil || resp.remainingBody == nil {
+		ForwardBufferedResponseForSiteWithClientIP(c, resp, rt, clientIP)
+		return nil
+	}
+
+	SetUpstreamHTTPProtocol(c, resp.UpstreamHTTPProtocol)
+	copyResponseHeaders(c, resp.Header)
+	if resp.ContentType != "" && resp.Header.Get("Content-Type") == "" {
+		c.SetContentType(resp.ContentType)
+	}
+	c.Status(resp.StatusCode)
+
+	upstreamResp := resp.upstreamResponse
+	if upstreamResp != nil && len(upstreamResp.Trailer) > 0 {
+		AddResponseTrailerHeaders(c, upstreamResp.Trailer)
+	}
+	if responseStatusDisallowsBody(resp.StatusCode) || bytes.EqualFold(c.Method(), []byte(http.MethodHead)) {
+		if resp.closeBody != nil {
+			_ = resp.closeBody()
+		}
+		return nil
+	}
+
+	bodyReader := io.MultiReader(bytes.NewReader(resp.Body), resp.remainingBody)
+	effectiveCE := contentEncodingHeaderValue(resp.Header)
+	bodySize := -1
+	if upstreamResp != nil && !resp.decodedBody {
+		bodySize = int(upstreamResp.ContentLength)
+	}
+	if resp.decodedBody {
+		c.Response.Header.Del("Content-Encoding")
+		c.Response.Header.Del("Content-Length")
+		effectiveCE = ""
+		bodySize = -1
+	}
+
+	compOpts := streamCompressionOptions(rt)
+	encoding := responseEncodingIdentity
+	if compOpts.Enabled && shouldTransformStreamingResponseBody(
+		resp.StatusCode,
+		resp.Header.Get("Content-Type"),
+		effectiveCE,
+		resp.Header.Get("Cache-Control"),
+		resp.Header.Get("Content-Range"),
+		maxStreamTransformBufferBytes+1,
+		compOpts.MinBytes,
+	) {
+		encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled)
+	}
+	if encoding != responseEncodingIdentity {
+		c.Response.Header.Del("Content-Encoding")
+		c.Response.Header.Del("Content-Length")
+		return streamRecompressedResponse(ctx, c, bodyReader, resp.closeBody, upstreamResp, nil, encoding)
+	}
+
+	c.Response.ImmediateHeaderFlush = true
+	if bodySize < 0 {
+		c.Response.Header.Del("Content-Length")
+		c.Response.Header.SetContentLength(-1)
+	}
+	stream := newProxyBodyStream(ctx, bodyReader, resp.closeBody, upstreamResp, c, nil)
+	if StreamResponseViaHijack(ctx, c, stream, stream.cleanup) {
+		return nil
+	}
+	c.Response.SetBodyStream(stream, bodySize)
+	return nil
+}
+
+func forwardBufferedResponseWithOptions(c *app.RequestContext, resp *HTTPResponse, opts ResponseCompressionOptions, transformer identityResponseTransformer, clientIP net.IP) {
 	if resp == nil {
 		return
 	}
@@ -1487,7 +1756,7 @@ func forwardBufferedResponseWithOptions(c *app.RequestContext, resp *HTTPRespons
 	}
 	c.Status(resp.StatusCode)
 
-	body, _, err := transformIdentityResponseBody(c, resp.StatusCode, resp.Body, transformer)
+	body, _, err := transformIdentityResponseBody(c, resp.StatusCode, resp.Body, transformer, clientIP)
 	if err != nil {
 		writeResponseTransformFailure(c)
 		return
@@ -1523,6 +1792,10 @@ func ForwardBufferedResponseAsStream(c *app.RequestContext, resp *HTTPResponse) 
 }
 
 func ForwardBufferedResponseAsStreamForSite(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime) {
+	ForwardBufferedResponseAsStreamForSiteWithClientIP(c, resp, rt, nil)
+}
+
+func ForwardBufferedResponseAsStreamForSiteWithClientIP(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime, clientIP net.IP) {
 	if resp == nil {
 		return
 	}
@@ -1535,7 +1808,7 @@ func ForwardBufferedResponseAsStreamForSite(c *app.RequestContext, resp *HTTPRes
 	}
 	c.Status(resp.StatusCode)
 
-	body, changed, err := transformIdentityResponseBody(c, resp.StatusCode, resp.Body, responseEntityTransformerForSite(rt))
+	body, changed, err := transformIdentityResponseBody(c, resp.StatusCode, resp.Body, responseEntityTransformerForSiteWithClient(rt, clientIP), clientIP)
 	if err != nil {
 		writeResponseTransformFailure(c)
 		return
@@ -1572,14 +1845,18 @@ func SanitizeHeadersForEdgeCache(src http.Header) http.Header {
 
 // WriteCachedResponse replays a cache.ResponseEntry, including stored headers when present.
 func WriteCachedResponse(c *app.RequestContext, method string, e *cache.ResponseEntry) {
-	writeCachedResponseWithOptions(c, method, e, DefaultResponseCompressionOptions(false), nil)
+	writeCachedResponseWithOptions(c, method, e, DefaultResponseCompressionOptions(false), nil, nil)
 }
 
 func WriteCachedResponseForSite(c *app.RequestContext, method string, e *cache.ResponseEntry, rt snapshot.SiteRuntime) {
-	writeCachedResponseWithOptions(c, method, e, streamCompressionOptions(rt), responseEntityTransformerForSite(rt))
+	WriteCachedResponseForSiteWithClientIP(c, method, e, rt, nil)
 }
 
-func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cache.ResponseEntry, opts ResponseCompressionOptions, transformer identityResponseTransformer) {
+func WriteCachedResponseForSiteWithClientIP(c *app.RequestContext, method string, e *cache.ResponseEntry, rt snapshot.SiteRuntime, clientIP net.IP) {
+	writeCachedResponseWithOptions(c, method, e, streamCompressionOptions(rt), responseEntityTransformerForSiteWithClient(rt, clientIP), clientIP)
+}
+
+func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cache.ResponseEntry, opts ResponseCompressionOptions, transformer identityResponseTransformer, clientIP net.IP) {
 	if e == nil {
 		return
 	}
@@ -1593,7 +1870,7 @@ func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cac
 	}
 	c.Status(e.StatusCode)
 
-	body, _, err := transformIdentityResponseBody(c, e.StatusCode, e.Body, transformer)
+	body, _, err := transformIdentityResponseBody(c, e.StatusCode, e.Body, transformer, clientIP)
 	if err != nil {
 		writeResponseTransformFailure(c)
 		return
@@ -1984,9 +2261,9 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		return nil
 	}
 
-	transformer := responseEntityTransformerForSite(rt)
+	transformer := responseEntityTransformerForSiteWithClient(rt, clientIP)
 	if transformer != nil && shouldTransformIdentityResponse(c, resp.StatusCode) {
-		return forwardHTTPWithTransform(ctx, c, rt, resp, cancelUpstream, transformer)
+		return forwardHTTPWithTransform(ctx, c, rt, resp, cancelUpstream, transformer, clientIP)
 	}
 
 	bodyReader, closeFn, decoded, decErr := upstreamResponseReader(resp)
@@ -2010,7 +2287,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	}
 
 	compOpts := streamCompressionOptions(rt)
-	effectiveCE := resp.Header.Get("Content-Encoding")
+	effectiveCE := contentEncodingHeaderValue(resp.Header)
 	if decoded {
 		effectiveCE = ""
 	}
@@ -2185,35 +2462,51 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 // forwardHTTPWithTransform buffers the upstream response (up to maxStreamTransformBufferBytes),
 // applies the identity response transformer, and writes the result. Falls back to untransformed
 // streaming when the body exceeds the buffer limit.
-func forwardHTTPWithTransform(_ context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, resp *http.Response, cancelUpstream context.CancelFunc, transformer identityResponseTransformer) error {
-	bodyReader, closeFn, _, decErr := upstreamResponseReader(resp)
-	if decErr != nil {
-		resp.Body.Close()
-		cancelUpstream()
-		return decErr
-	}
-
-	limitedReader := io.LimitReader(bodyReader, int64(maxStreamTransformBufferBytes)+1)
-	body, readErr := io.ReadAll(limitedReader)
-	if closeFn != nil {
-		_ = closeFn()
-	}
-	resp.Body.Close()
-	cancelUpstream()
-
+func forwardHTTPWithTransform(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, resp *http.Response, cancelUpstream context.CancelFunc, transformer identityResponseTransformer, clientIP net.IP) error {
+	body, _, remaining, closeFn, decoded, truncated, readErr := readUpstreamResponseBodyLimited(resp, maxStreamTransformBufferBytes)
 	if readErr != nil {
+		cancelUpstream()
 		return readErr
 	}
 
-	if len(body) > maxStreamTransformBufferBytes {
+	if truncated {
+		bodyReader := io.MultiReader(bytes.NewReader(body), remaining)
 		c.Response.Header.Del("Content-Encoding")
 		c.Response.Header.Del("Content-Length")
-		c.Response.SetBodyStream(bytes.NewReader(body), -1)
+		c.Response.Header.SetContentLength(-1)
+
+		compOpts := streamCompressionOptions(rt)
+		encoding := responseEncodingIdentity
+		if compOpts.Enabled && shouldTransformStreamingResponseBody(
+			resp.StatusCode,
+			resp.Header.Get("Content-Type"),
+			"",
+			resp.Header.Get("Cache-Control"),
+			resp.Header.Get("Content-Range"),
+			maxStreamTransformBufferBytes+1,
+			compOpts.MinBytes,
+		) {
+			encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled)
+		}
+		if encoding != responseEncodingIdentity {
+			return streamRecompressedResponse(ctx, c, bodyReader, closeFn, resp, cancelUpstream, encoding)
+		}
+
+		c.Response.ImmediateHeaderFlush = true
+		stream := newProxyBodyStream(ctx, bodyReader, closeFn, resp, c, cancelUpstream)
+		if StreamResponseViaHijack(ctx, c, stream, stream.cleanup) {
+			return nil
+		}
+		c.Response.SetBodyStream(stream, -1)
 		return nil
 	}
 
+	cancelUpstream()
 	c.Response.Header.Del("Content-Encoding")
-	transformed, changed, err := transformIdentityResponseBody(c, resp.StatusCode, body, transformer)
+	if decoded {
+		c.Response.Header.Del("Content-Length")
+	}
+	transformed, changed, err := transformIdentityResponseBody(c, resp.StatusCode, body, transformer, clientIP)
 	if err != nil {
 		writeResponseTransformFailure(c)
 		return nil

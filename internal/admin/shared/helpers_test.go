@@ -271,6 +271,65 @@ func TestValidateActionWithoutRedirectTarget(t *testing.T) {
 	}
 }
 
+func TestValidateActionWithRedirectTarget(t *testing.T) {
+	target := "https://example.com/blocked"
+	got, ok := ValidateActionWithRedirectTarget("redirect", &target)
+	if !ok || got != "redirect" {
+		t.Fatalf("redirect with target should be valid: got (%q, %v)", got, ok)
+	}
+	blank := "   "
+	if _, ok := ValidateActionWithRedirectTarget("redirect", &blank); ok {
+		t.Fatal("redirect with blank target should be rejected")
+	}
+	if got, ok := ValidateActionWithRedirectTarget("intercept", nil); !ok || got != "intercept" {
+		t.Fatalf("intercept without target should be valid: got (%q, %v)", got, ok)
+	}
+}
+
+func TestValidateCCRules(t *testing.T) {
+	valid := []string{
+		`[]`,
+		`[{
+			"enabled":true,
+			"name":"api",
+			"action":"intercept",
+			"conditions":[{"target":"url_path","operator":"equals","value":"/api"}],
+			"window":60,
+			"threshold":10,
+			"duration":0,
+			"duration_unit":"seconds"
+		}]`,
+		`[{"action":"challenge","conditions":[{"target":"method","operator":"equals","value":"GET"}],"window":60,"threshold":10}]`,
+		`[{"action":"log_only","conditions":[{"target":"header","operator":"prefix","value":"User-Agent=curl"}],"window":60,"threshold":10}]`,
+	}
+	for _, raw := range valid {
+		if err := ValidateCCRules(raw); err != nil {
+			t.Errorf("ValidateCCRules(%q) returned error: %v", raw, err)
+		}
+	}
+
+	invalid := []string{
+		`null`,
+		`{"action":"drop"}`,
+		`[{"action":"redirect","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"equals","value":""}],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"method","operator":"contains","value":"GET"}],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"header","operator":"equals","value":"User-Agent"}],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":0,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":0}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":-1,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":1.5}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":10,"duration_unit":"hours"}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":10,"extra":true}]`,
+	}
+	for _, raw := range invalid {
+		if err := ValidateCCRules(raw); err == nil {
+			t.Errorf("ValidateCCRules(%q) returned nil error", raw)
+		}
+	}
+}
+
 func TestValidateAntiReplayAction(t *testing.T) {
 	tests := []struct {
 		in   string

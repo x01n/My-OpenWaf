@@ -1,13 +1,17 @@
-"use client";
+"use client"
 
-import { useEffect } from "react";
-import Link from "next/link";
-import { useTranslation } from "react-i18next";
-import { useForm, useFieldArray, useWatch } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
-import { toast } from "sonner";
-import { mutate } from "swr";
+import { useEffect } from "react"
+import Link from "next/link"
+import { useTranslation } from "react-i18next"
+import { useForm, useFieldArray, useWatch } from "react-hook-form"
+import { zodResolver } from "@hookform/resolvers/zod"
+import { z } from "zod"
+import { toast } from "sonner"
+import {
+  invalidateSiteCaches,
+  useCertificates,
+  usePolicies,
+} from "@/hooks/use-api"
 import {
   Dialog,
   DialogContent,
@@ -15,80 +19,90 @@ import {
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
+} from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Badge } from "@/components/ui/badge"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { siteApi } from "@/lib/api";
-import { useCertificates } from "@/hooks/use-api";
-import { parseUpstreamUrls } from "@/lib/site-display";
-import type { Site } from "@/lib/types";
-import { IconExternalLink, IconPlus, IconTrash } from "@tabler/icons-react";
+} from "@/components/ui/select"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { siteApi } from "@/lib/api"
+import {
+  normalizeSiteHosts,
+  parseSiteHosts,
+  parseUpstreamUrls,
+} from "@/lib/site-display"
+import type { Site } from "@/lib/types"
+import { IconExternalLink, IconPlus, IconTrash } from "@tabler/icons-react"
 
 /**
  * 「不使用证书」的哨兵值。
  * Radix Select 不接受空字符串作为 SelectItem 的 value，必须用非空占位。
  */
-const CERT_NONE = "none";
+const CERT_NONE = "none"
+const POLICY_INHERIT = "inherit-default"
 
 /** 后端 `internal/admin/shared/site_upstreams.go` 允许的上游 scheme */
-const UPSTREAM_SCHEMES = ["http://", "https://", "h2c://", "h3://"];
+const UPSTREAM_SCHEMES = ["http://", "https://", "h2c://", "h3://"]
 
-const siteFormSchema = z.object({
-  host: z.string().min(1, "sites.form.hostRequired"),
-  listeners: z
-    .array(
-      z.object({
-        port: z
-          .string()
-          .min(1, "sites.form.portRequired")
-          .regex(/^\d+$/, "sites.form.portNumber")
-          .refine((v) => {
-            const n = Number(v);
-            return n >= 1 && n <= 65535;
-          }, "sites.form.portRange"),
-        tls_enabled: z.boolean(),
-      })
-    )
-    .min(1, "sites.form.listenersRequired"),
-  cert_id: z.number().optional(),
-  upstreams: z
-    .array(
-      z.object({
-        url: z
-          .string()
-          .min(1, "sites.form.upstreamUrlRequired")
-          .refine(
-            (v) =>
-              UPSTREAM_SCHEMES.some((s) => v.trim().toLowerCase().startsWith(s)),
-            "sites.form.upstreamScheme"
-          ),
-      })
-    )
-    .min(1, "sites.form.upstreamRequired"),
-  upstream_host: z.string().optional(),
-})
+const siteFormSchema = z
+  .object({
+    host: z
+      .string()
+      .refine((v) => parseSiteHosts(v).length > 0, "sites.form.hostRequired"),
+    listeners: z
+      .array(
+        z.object({
+          port: z
+            .string()
+            .min(1, "sites.form.portRequired")
+            .regex(/^\d+$/, "sites.form.portNumber")
+            .refine((v) => {
+              const n = Number(v)
+              return n >= 1 && n <= 65535
+            }, "sites.form.portRange"),
+          tls_enabled: z.boolean(),
+        })
+      )
+      .min(1, "sites.form.listenersRequired"),
+    cert_id: z.number().optional(),
+    policy_id: z.number().nullable().optional(),
+    upstreams: z
+      .array(
+        z.object({
+          url: z
+            .string()
+            .min(1, "sites.form.upstreamUrlRequired")
+            .refine(
+              (v) =>
+                UPSTREAM_SCHEMES.some((s) =>
+                  v.trim().toLowerCase().startsWith(s)
+                ),
+              "sites.form.upstreamScheme"
+            ),
+        })
+      )
+      .min(1, "sites.form.upstreamRequired"),
+    upstream_host: z.string().optional(),
+  })
   // 对齐后端 shared.ValidateSiteTLSCertificate：启用 TLS 的站点必须绑定证书
   .refine(
     (v) => !v.listeners.some((l) => l.tls_enabled) || v.cert_id !== undefined,
     { message: "sites.form.certRequired", path: ["cert_id"] }
-  );
+  )
 
-type SiteFormValues = z.infer<typeof siteFormSchema>;
+type SiteFormValues = z.infer<typeof siteFormSchema>
 
 interface SiteFormDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  site?: Site | null;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  site?: Site | null
 }
 
 /** 新建站点时的初始表单值 */
@@ -96,9 +110,10 @@ const EMPTY_VALUES: SiteFormValues = {
   host: "",
   listeners: [{ port: "80", tls_enabled: false }],
   cert_id: undefined,
+  policy_id: null,
   upstreams: [{ url: "http://127.0.0.1:8080" }],
   upstream_host: "",
-};
+}
 
 /**
  * 添加 / 编辑防护应用弹窗。
@@ -109,15 +124,20 @@ const EMPTY_VALUES: SiteFormValues = {
  * @param {SiteFormDialogProps} props 组件属性
  * @returns {React.ReactElement} 弹窗
  */
-export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps) {
-  const { t } = useTranslation();
-  const isEdit = !!site;
-  const { data: certificates } = useCertificates();
+export function SiteFormDialog({
+  open,
+  onOpenChange,
+  site,
+}: SiteFormDialogProps) {
+  const { t } = useTranslation()
+  const isEdit = !!site
+  const { data: certificates } = useCertificates()
+  const { data: policies = [] } = usePolicies()
 
   const form = useForm<SiteFormValues>({
     resolver: zodResolver(siteFormSchema),
     defaultValues: EMPTY_VALUES,
-  });
+  })
 
   const {
     register,
@@ -126,37 +146,42 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
     setValue,
     reset,
     formState: { errors, isSubmitting },
-  } = form;
+  } = form
 
-  const listenerArray = useFieldArray({ control, name: "listeners" });
-  const upstreamArray = useFieldArray({ control, name: "upstreams" });
+  const listenerArray = useFieldArray({ control, name: "listeners" })
+  const upstreamArray = useFieldArray({ control, name: "upstreams" })
 
   // useWatch 订阅的是 control，可安全 memo；useForm().watch() 会被 React Compiler 跳过优化
-  const watchedListeners = useWatch({ control, name: "listeners" });
-  const watchedCertId = useWatch({ control, name: "cert_id" });
+  const watchedListeners = useWatch({ control, name: "listeners" })
+  const watchedCertId = useWatch({ control, name: "cert_id" })
+  const watchedPolicyId = useWatch({ control, name: "policy_id" })
 
   /** 弹窗打开或编辑目标变化时重置表单 */
   useEffect(() => {
-    if (!open) return;
+    if (!open) return
     if (site) {
-      const portMatch = (site.bind || "").match(/:(\d+)$/);
-      const upstreams = parseUpstreamUrls(site.upstream_urls);
+      const portMatch = (site.bind || "").match(/:(\d+)$/)
+      const upstreams = parseUpstreamUrls(site.upstream_urls)
       reset({
         host: site.host,
         listeners: [
-          { port: portMatch ? portMatch[1] : "80", tls_enabled: site.tls_enabled },
+          {
+            port: portMatch ? portMatch[1] : "80",
+            tls_enabled: site.tls_enabled,
+          },
         ],
         cert_id: site.cert_id,
+        policy_id: site.policy_id ?? null,
         upstreams:
           upstreams.length > 0
             ? upstreams.map((url) => ({ url }))
             : [{ url: "" }],
         upstream_host: site.upstream_host || "",
-      });
+      })
     } else {
-      reset(EMPTY_VALUES);
+      reset(EMPTY_VALUES)
     }
-  }, [open, site, reset]);
+  }, [open, site, reset])
 
   /**
    * 提交表单。
@@ -166,46 +191,49 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
    */
   const onSubmit = async (values: SiteFormValues) => {
     try {
-      const primary = values.listeners[0];
+      const primary = values.listeners[0]
       const payload: Partial<Site> = {
-        host: values.host.trim(),
+        host: normalizeSiteHosts(values.host),
         bind: `0.0.0.0:${primary.port}`,
         tls_enabled: primary.tls_enabled,
         cert_id: values.cert_id,
+        policy_id: values.policy_id ?? null,
         upstream_urls: values.upstreams
           .map((u) => u.url.trim())
           .filter(Boolean)
           .join(","),
         upstream_host: values.upstream_host?.trim() || undefined,
-      };
+      }
 
+      let savedSiteId: string | number
       if (isEdit && site) {
-        await siteApi.update(site.id, payload);
-        toast.success(t("sites.updateSuccess"));
-        mutate(["site", site.id]);
+        await siteApi.update(site.id, payload)
+        savedSiteId = site.id
+        toast.success(t("sites.updateSuccess"))
       } else {
-        const result = await siteApi.create(payload);
+        const result = await siteApi.create(payload)
+        savedSiteId = result.id
         for (let i = 1; i < values.listeners.length; i++) {
-          const l = values.listeners[i];
+          const l = values.listeners[i]
           await siteApi.createListener(result.id, {
             bind: `0.0.0.0:${l.port}`,
             tls_enabled: l.tls_enabled,
             cert_id: l.tls_enabled ? values.cert_id : undefined,
             enabled: true,
-          });
+          })
         }
-        toast.success(t("sites.createSuccess"));
+        toast.success(t("sites.createSuccess"))
       }
-      mutate(["sites"]);
-      onOpenChange(false);
+      await invalidateSiteCaches(savedSiteId)
+      onOpenChange(false)
     } catch (err: unknown) {
       toast.error(
         err instanceof Error ? err.message : t("common.operationFailed")
-      );
+      )
     }
-  };
+  }
 
-  const needsCert = (watchedListeners ?? []).some((l) => l?.tls_enabled);
+  const needsCert = (watchedListeners ?? []).some((l) => l?.tls_enabled)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -226,7 +254,7 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
             </Label>
             <Input
               id="host"
-              placeholder="example.com"
+              placeholder={t("sites.form.hostPlaceholder")}
               autoComplete="off"
               {...register("host")}
             />
@@ -234,7 +262,9 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
               {t("sites.form.hostHint")}
             </p>
             {errors.host && (
-              <p className="text-xs text-destructive">{t(errors.host.message!)}</p>
+              <p className="text-xs text-destructive">
+                {t(errors.host.message!)}
+              </p>
             )}
           </div>
 
@@ -273,10 +303,14 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
                       watchedListeners?.[index]?.tls_enabled ? "https" : "http"
                     }
                     onValueChange={(v) => {
-                      if (!v) return;
-                      setValue(`listeners.${index}.tls_enabled`, v === "https", {
-                        shouldDirty: true,
-                      });
+                      if (!v) return
+                      setValue(
+                        `listeners.${index}.tls_enabled`,
+                        v === "https",
+                        {
+                          shouldDirty: true,
+                        }
+                      )
                     }}
                   >
                     <ToggleGroupItem value="http" className="px-3 text-xs">
@@ -376,6 +410,53 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
             ) : null}
           </div>
 
+          {/* 策略 */}
+          <div className="space-y-1.5">
+            <Label>
+              {t("sites.form.policy", { defaultValue: "防护策略" })}
+            </Label>
+            <Select
+              value={
+                watchedPolicyId == null
+                  ? POLICY_INHERIT
+                  : String(watchedPolicyId)
+              }
+              onValueChange={(v) =>
+                setValue("policy_id", v === POLICY_INHERIT ? null : Number(v), {
+                  shouldDirty: true,
+                })
+              }
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue
+                  placeholder={t("sites.form.policyPlaceholder", {
+                    defaultValue: "选择策略",
+                  })}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={POLICY_INHERIT}>
+                  {t("sites.form.policyInheritDefault", {
+                    defaultValue: "继承默认策略",
+                  })}
+                </SelectItem>
+                {policies.map((policy) => (
+                  <SelectItem key={policy.id} value={String(policy.id)}>
+                    {policy.name}
+                    {policy.is_default
+                      ? ` (${t("common.default", { defaultValue: "默认" })})`
+                      : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              {t("sites.form.policyHint", {
+                defaultValue: "不选择时站点继承当前默认策略。",
+              })}
+            </p>
+          </div>
+
           {/* 上游服务器 */}
           <div className="space-y-2">
             <Label>
@@ -435,7 +516,9 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
 
           {/* 上游 Host 覆盖 */}
           <div className="space-y-1.5">
-            <Label htmlFor="upstream_host">{t("sites.form.upstreamHost")}</Label>
+            <Label htmlFor="upstream_host">
+              {t("sites.form.upstreamHost")}
+            </Label>
             <Input
               id="upstream_host"
               placeholder={t("sites.form.upstreamHostPlaceholder")}
@@ -460,5 +543,5 @@ export function SiteFormDialog({ open, onOpenChange, site }: SiteFormDialogProps
         </form>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

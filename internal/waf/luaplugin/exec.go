@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	lua "github.com/yuin/gopher-lua"
+	"golang.org/x/net/http/httpguts"
 )
 
 // handlerName 是脚本必须定义的入口函数名。
@@ -31,15 +34,60 @@ type RequestView struct {
 	ContentType string
 	Headers     map[string]string
 	QueryParams map[string]string
+	QueryValues map[string][]string
 	Body        string
 	TLSVersion  string
 	TLSJA3      string
 	TLSJA4      string
 	TLSSNI      string
 	// Phase/Action 是内置阶段的判定结果，仅 post 阶段有值。
-	// 让后置脚本能基于「内置引擎怎么判的」做二次决策，例如对特定误报路径放行。
 	Phase  string
 	Action string
+	// Verdict 是仅在 post 阶段注入的安全内置判定元数据。
+	Verdict VerdictView
+
+	// Response 是可选的上游响应快照；pre 阶段通常为空。
+	Response ResponseView
+	// Config 是由受信任调用方注入的只读外部配置。
+	Config map[string]string
+	// Runtime 是由受信任调用方注入的只读运行时参数。
+	Runtime map[string]string
+	// Metrics 是由受信任调用方注入的只读指标快照。
+	Metrics map[string]float64
+	// Log/Debug 只允许写入宿主统一日志；nil 时对应 Lua API 为安全空操作。
+	Log   func(level, message string)
+	Debug func(message string)
+}
+
+// ResponseView 是可选的、受限的上游响应快照。
+type ResponseView struct {
+	StatusCode  int
+	ContentType string
+	Headers     map[string]string
+	Body        string
+}
+
+// VerdictView is the safe subset of the builtin verdict exposed to post scripts.
+type VerdictView struct {
+	Matched    bool
+	Phase      string
+	Action     string
+	Category   string
+	RuleID     uint
+	RuleIDStr  string
+	StatusCode int
+	RedirectTo string
+	Tags       []string
+}
+
+// SetRuntimeHooks 注入每次脚本调用可使用的受控观测回调。
+// 回调只在当前请求执行期间使用，不会进入 Lua 全局状态。
+func (r *RequestView) SetRuntimeHooks(logFn func(string, string), debugFn func(string)) {
+	if r == nil {
+		return
+	}
+	r.Log = logFn
+	r.Debug = debugFn
 }
 
 // Run 执行脚本并返回判定。
@@ -62,6 +110,7 @@ func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBa
 		s.failures.Add(1)
 		return Decision{}, errors.New("luaplugin: failed to acquire lua state")
 	}
+	L.SetTop(0)
 	defer pool.put(L)
 
 	// 超时与指令上限双闸：context 负责挂钟超时，指令钩子兜住紧密循环
@@ -73,6 +122,10 @@ func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBa
 
 	dec, err := s.callHandler(L, req, kv)
 	if err == nil {
+		if ctxErr := runCtx.Err(); ctxErr != nil {
+			s.timeouts.Add(1)
+			return Decision{}, fmt.Errorf("luaplugin: %q exceeded %s: %w", s.name, s.timeout, ctxErr)
+		}
 		return dec, nil
 	}
 
@@ -98,8 +151,6 @@ func (s *Script) callHandler(L *lua.LState, req RequestView, kv KVBackend) (dec 
 		}
 	}()
 
-	resetGlobals(L)
-
 	// 载入已编译原型并执行顶层代码（定义 handle 等）。
 	L.Push(L.NewFunctionFromProto(s.proto))
 	if err := L.PCall(0, lua.MultRet, nil); err != nil {
@@ -111,7 +162,7 @@ func (s *Script) callHandler(L *lua.LState, req RequestView, kv KVBackend) (dec 
 		return Decision{}, ErrNoHandler
 	}
 
-	ctxTable := buildContextTable(L, req, kv)
+	ctxTable := buildContextTable(L, req, kv, &apiBudget{})
 	L.Push(handler)
 	L.Push(ctxTable)
 	if err := L.PCall(1, 1, nil); err != nil {
@@ -126,7 +177,7 @@ func (s *Script) callHandler(L *lua.LState, req RequestView, kv KVBackend) (dec 
 // decisionFromLua 把脚本返回值转换为 Decision。
 //
 // 返回 nil / false 表示不判定；返回字符串等价于只给 action；
-// 返回表可携带 message / redirect_to / status_code / headers / tags。
+// 返回表可携带 message / redirect_to / status_code / headers / response_body / tags。
 func decisionFromLua(v lua.LValue) (Decision, error) {
 	switch val := v.(type) {
 	case *lua.LNilType:
@@ -146,33 +197,105 @@ func decisionFromLua(v lua.LValue) (Decision, error) {
 func decisionFromTable(tbl *lua.LTable) (Decision, error) {
 	dec := Decision{}
 	if s, ok := tbl.RawGetString("action").(lua.LString); ok {
-		dec.Action = string(s)
+		dec.Action = truncateString(string(s), maxAPIStringBytes)
 	}
 	if s, ok := tbl.RawGetString("message").(lua.LString); ok {
-		dec.Message = string(s)
+		if value := truncateString(string(s), maxAPIStringBytes); !containsSensitiveDecisionText(value) {
+			dec.Message = value
+		}
 	}
 	if s, ok := tbl.RawGetString("redirect_to").(lua.LString); ok {
-		dec.RedirectTo = string(s)
+		dec.RedirectTo = safeRedirectTarget(string(s))
 	}
 	if n, ok := tbl.RawGetString("status_code").(lua.LNumber); ok {
-		dec.StatusCode = int(n)
+		status := int(n)
+		if status >= 100 && status <= 599 {
+			dec.StatusCode = status
+		}
+	}
+	if s, ok := tbl.RawGetString("response_body").(lua.LString); ok {
+		if value := truncateString(string(s), maxResponseBody); !containsSensitiveDecisionText(value) {
+			dec.ResponseBody = value
+		}
 	}
 	if hdrs, ok := tbl.RawGetString("headers").(*lua.LTable); ok {
-		dec.SetHeaders = make(map[string]string, hdrs.Len())
+		dec.SetHeaders = make(map[string]string, minInt(hdrs.Len(), maxAPIMapEntries))
+		entries := 0
 		hdrs.ForEach(func(k, val lua.LValue) {
+			if entries >= maxAPIMapEntries {
+				return
+			}
 			ks, kok := k.(lua.LString)
 			vs, vok := val.(lua.LString)
-			if kok && vok {
-				dec.SetHeaders[string(ks)] = string(vs)
+			name := string(ks)
+			value := string(vs)
+			if !kok || !vok || name == "" || len(name) > maxAPIStringBytes ||
+				!httpguts.ValidHeaderFieldName(name) || !allowedDecisionHeader(name) ||
+				strings.ContainsAny(value, "\r\n") || containsSensitiveDecisionText(value) {
+				return
 			}
+			dec.SetHeaders[name] = truncateString(value, maxHeaderValue)
+			entries++
 		})
 	}
 	if tags, ok := tbl.RawGetString("tags").(*lua.LTable); ok {
-		tags.ForEach(func(_, val lua.LValue) {
-			if s, isStr := val.(lua.LString); isStr {
-				dec.Tags = append(dec.Tags, string(s))
+		for i := 1; i <= maxDecisionTags; i++ {
+			if s, isStr := tags.RawGetInt(i).(lua.LString); isStr {
+				if value := truncateString(string(s), maxAPIStringBytes); !containsSensitiveDecisionText(value) {
+					dec.Tags = append(dec.Tags, value)
+				}
 			}
-		})
+		}
 	}
 	return dec, nil
+}
+
+// containsSensitiveDecisionText 报告 Lua Decision 输出是否含明显认证秘密。
+// 请求上下文仍按用户决策保留原始可读；净化只发生在返回宿主、进入日志/响应前。
+func containsSensitiveDecisionText(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"authorization", "cookie", "set-cookie", "bearer"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// allowedDecisionHeader 限制 Lua 只能设置普通端到端响应头。
+// 敏感认证头、逐跳头和实体长度头由宿主统一生成，避免脚本破坏响应边界。
+func allowedDecisionHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie", "www-authenticate", "proxy-authenticate",
+		"connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
+		"content-length", "location":
+		return false
+	default:
+		return true
+	}
+}
+
+func safeRedirectTarget(raw string) string {
+	value := strings.TrimSpace(truncateString(raw, maxAPIStringBytes))
+	if value == "" || strings.ContainsAny(value, "\r\n") || strings.HasPrefix(value, "//") {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return ""
+	}
+	if parsed.IsAbs() && parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	if !parsed.IsAbs() && !strings.HasPrefix(value, "/") {
+		return ""
+	}
+	return value
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

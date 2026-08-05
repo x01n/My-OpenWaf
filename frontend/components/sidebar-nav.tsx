@@ -3,10 +3,10 @@
  * 基于 shadcn ui/sidebar 重建：支持整栏 icon 折叠、cookie 持久化、移动端 Sheet。
  */
 
-"use client";
+"use client"
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import Link from "next/link"
+import { usePathname } from "next/navigation"
 import {
   IconChartBar,
   IconShield,
@@ -33,13 +33,13 @@ import {
   IconServer,
   IconTemplate,
   IconCode,
-} from "@tabler/icons-react";
-import { useTranslation } from "react-i18next";
+} from "@tabler/icons-react"
+import { useTranslation } from "react-i18next"
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+} from "@/components/ui/collapsible"
 import {
   Sidebar,
   SidebarContent,
@@ -55,7 +55,7 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
   useSidebar,
-} from "@/components/ui/sidebar";
+} from "@/components/ui/sidebar"
 
 /**
  * 活动项样式。
@@ -65,43 +65,43 @@ import {
  * 这里叠加主色文字与左侧指示条，让活动态在悬停时依然可辨认。
  */
 const ACTIVE_ITEM_CLASS =
-  "relative data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:before:absolute data-[active=true]:before:inset-y-1.5 data-[active=true]:before:start-0 data-[active=true]:before:w-[3px] data-[active=true]:before:rounded-full data-[active=true]:before:bg-primary";
+  "relative data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:before:absolute data-[active=true]:before:inset-y-1.5 data-[active=true]:before:start-0 data-[active=true]:before:w-[3px] data-[active=true]:before:rounded-full data-[active=true]:before:bg-primary"
 
 /** 子项活动态：同一套语义，指示条更细 */
 const ACTIVE_SUB_ITEM_CLASS =
-  "relative data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:font-medium data-[active=true]:before:absolute data-[active=true]:before:inset-y-1 data-[active=true]:before:start-0 data-[active=true]:before:w-0.5 data-[active=true]:before:rounded-full data-[active=true]:before:bg-primary [&>svg]:transition-colors data-[active=true]:[&>svg]:text-primary";
+  "relative data-[active=true]:bg-primary/10 data-[active=true]:text-primary data-[active=true]:font-medium data-[active=true]:before:absolute data-[active=true]:before:inset-y-1 data-[active=true]:before:start-0 data-[active=true]:before:w-0.5 data-[active=true]:before:rounded-full data-[active=true]:before:bg-primary [&>svg]:transition-colors data-[active=true]:[&>svg]:text-primary"
 
 interface NavItem {
-  label: string;
-  href: string;
-  icon: React.ElementType;
-  children?: NavItem[];
+  label: string
+  href: string
+  icon: React.ElementType
+  children?: NavItem[]
 }
 
 interface NavGroup {
   /** 分组标题的 i18n key，为空则不显示标题 */
-  labelKey?: string;
-  items: NavItem[];
+  labelKey?: string
+  items: NavItem[]
 }
 
 /** 判断某导航项（含子项）是否命中当前路径（前缀匹配） */
 function isChildActive(item: NavItem, pathname: string): boolean {
   if (pathname === item.href || pathname.startsWith(item.href + "/")) {
-    return true;
+    return true
   }
   if (item.children) {
-    return item.children.some((child) => isChildActive(child, pathname));
+    return item.children.some((child) => isChildActive(child, pathname))
   }
-  return false;
+  return false
 }
 
 /** 单个可展开的导航项（带 children） */
 function CollapsibleNavItem({ item }: { item: NavItem }) {
-  const pathname = usePathname();
-  const Icon = item.icon;
+  const pathname = usePathname()
+  const Icon = item.icon
   const groupActive = item.children!.some((child) =>
     isChildActive(child, pathname)
-  );
+  )
 
   return (
     <Collapsible defaultOpen={groupActive} className="group/collapsible">
@@ -121,9 +121,8 @@ function CollapsibleNavItem({ item }: { item: NavItem }) {
           <SidebarMenuSub>
             {item.children!.map((child) => {
               const childActive =
-                pathname === child.href ||
-                pathname.startsWith(child.href + "/");
-              const ChildIcon = child.icon;
+                pathname === child.href || pathname.startsWith(child.href + "/")
+              const ChildIcon = child.icon
               return (
                 <SidebarMenuSubItem key={child.href}>
                   <SidebarMenuSubButton
@@ -137,21 +136,20 @@ function CollapsibleNavItem({ item }: { item: NavItem }) {
                     </Link>
                   </SidebarMenuSubButton>
                 </SidebarMenuSubItem>
-              );
+              )
             })}
           </SidebarMenuSub>
         </CollapsibleContent>
       </SidebarMenuItem>
     </Collapsible>
-  );
+  )
 }
 
 /** 单个普通导航项（无 children） */
 function SimpleNavItem({ item }: { item: NavItem }) {
-  const pathname = usePathname();
-  const Icon = item.icon;
-  const active =
-    pathname === item.href || pathname.startsWith(item.href + "/");
+  const pathname = usePathname()
+  const Icon = item.icon
+  const active = pathname === item.href || pathname.startsWith(item.href + "/")
 
   return (
     <SidebarMenuItem>
@@ -167,12 +165,12 @@ function SimpleNavItem({ item }: { item: NavItem }) {
         </Link>
       </SidebarMenuButton>
     </SidebarMenuItem>
-  );
+  )
 }
 
 /** 构造导航分组数据（保留原 navGroups 全部条目/图标/href/children） */
 function useNavGroups(): NavGroup[] {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   return [
     {
@@ -233,7 +231,22 @@ function useNavGroups(): NavGroup[] {
     {
       labelKey: "nav.groupProtection",
       items: [
+        {
+          label: t("nav.policies", { defaultValue: "策略" }),
+          href: "/policies",
+          icon: IconShieldCheck,
+        },
         { label: t("nav.rules"), href: "/rules", icon: IconListCheck },
+        {
+          label: t("nav.owaspRules", { defaultValue: "OWASP 规则" }),
+          href: "/rules/owasp",
+          icon: IconFlame,
+        },
+        {
+          label: t("nav.cveRules", { defaultValue: "CVE 规则" }),
+          href: "/rules/cve",
+          icon: IconAlertHexagon,
+        },
         {
           label: t("nav.ccProtection"),
           href: "/cc-protection",
@@ -282,17 +295,17 @@ function useNavGroups(): NavGroup[] {
         { label: t("nav.settings"), href: "/settings", icon: IconSettings },
       ],
     },
-  ];
+  ]
 }
 
 /**
  * 应用侧边栏。桌面端支持 icon 折叠，移动端自动切换为内置 Sheet。
  */
 export function AppSidebar() {
-  const { t } = useTranslation();
-  const { state } = useSidebar();
-  const navGroups = useNavGroups();
-  const collapsed = state === "collapsed";
+  const { t } = useTranslation()
+  const { state } = useSidebar()
+  const navGroups = useNavGroups()
+  const collapsed = state === "collapsed"
 
   return (
     <Sidebar collapsible="icon">
@@ -330,5 +343,5 @@ export function AppSidebar() {
         )}
       </SidebarFooter>
     </Sidebar>
-  );
+  )
 }

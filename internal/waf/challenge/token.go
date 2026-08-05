@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -24,12 +25,17 @@ const NonceKey = "__waf_nonce"
 // ChallengePassCookieName is the cookie name for challenge pass cookies.
 const ChallengePassCookieName = "__waf_passed"
 
+// DynamicProtectionSessionCookieName is the cookie name for dynamic protection bypass sessions.
+const DynamicProtectionSessionCookieName = "__owaf_dp_session"
+
 // challengeSecret is used to sign JS challenge tokens and pass cookies.
 // Generated at startup so it cannot be extracted from the binary.
 // This means cookies are invalidated on restart, which is acceptable for security.
 // 使用 atomic.Pointer 保存：SetChallengeSecret 可能在启动接线之外被调用，
 // 而签名/校验发生在请求处理协程中，普通全局变量会构成数据竞争。
 var challengeSecret atomic.Pointer[[]byte]
+
+var challengeNonceReader io.Reader = rand.Reader
 
 func init() {
 	challengeSecret.Store(generateChallengeSecret())
@@ -64,6 +70,26 @@ type ChallengeTokenClaims struct {
 	UserAgent string
 	Host      string
 	SiteID    uint
+}
+
+// ChallengeSessionBinding identifies the matched site that issued a server-side
+// challenge session. The fields are persisted with every captcha, shield, and
+// chain session and are checked before the session is consumed or advanced.
+type ChallengeSessionBinding struct {
+	SiteID uint   `json:"site_id"`
+	Host   string `json:"host"`
+	Bind   string `json:"bind"`
+}
+
+func (b ChallengeSessionBinding) normalized() ChallengeSessionBinding {
+	b.Host = strings.ToLower(strings.TrimSpace(b.Host))
+	return b
+}
+
+func (b ChallengeSessionBinding) matches(other ChallengeSessionBinding) bool {
+	b = b.normalized()
+	other = other.normalized()
+	return b.SiteID == other.SiteID && b.Host == other.Host && b.Bind == other.Bind
 }
 
 // signChallengeToken 用挑战密钥对 (reqID, ts, 客户端身份) 做 HMAC 签名。
@@ -141,6 +167,7 @@ const challengeTokenClockSkew = 30 * time.Second
 const challengeTokenGuardMaxEntries = 65536
 
 var challengeTokenReplayGuard = newReplayGuard()
+var dynamicProtectionKeyReplayGuard = newReplayGuard()
 
 // replayGuard 记录已被兑换的挑战 token，保证一次性使用。
 // 条目在过期后由惰性清扫回收——挑战 token 的生命周期只有几分钟，
@@ -193,6 +220,19 @@ type ChallengePassClaims struct {
 	Bind      string
 }
 
+type DynamicProtectionClaims struct {
+	Host      string
+	ClientIP  net.IP
+	UserAgent string
+	SiteID    uint
+	Bind      string
+}
+
+type DynamicProtectionKeyClaims struct {
+	DynamicProtectionClaims
+	Key string
+}
+
 func BuildChallengePassCookie(host string, clientIP net.IP, tlsEnabled bool, now time.Time, ttl time.Duration) string {
 	return BuildChallengePassCookieWithClaims(ChallengePassClaims{Host: host, ClientIP: clientIP}, tlsEnabled, now, ttl)
 }
@@ -219,7 +259,9 @@ func SignChallengePassValueWithClaims(claims ChallengePassClaims, now time.Time,
 	ttl = normalizeChallengePassTTL(ttl)
 	expires := now.Add(ttl).Unix()
 	sessionNonce := make([]byte, 8)
-	_, _ = rand.Read(sessionNonce)
+	if _, err := rand.Read(sessionNonce); err != nil {
+		return ""
+	}
 	payload := fmt.Sprintf("v3|%s|%s|%d|%x|shield|%s|%d|%s",
 		strings.ToLower(claims.Host),
 		challengeIPString(claims.ClientIP),
@@ -297,6 +339,145 @@ func VerifyChallengePassValueWithClaims(value string, claims ChallengePassClaims
 	return false
 }
 
+func SignDynamicProtectionKeyTicket(claims DynamicProtectionKeyClaims, now time.Time, ttl time.Duration, kekB64 string) string {
+	ttl = normalizeChallengePassTTL(ttl)
+	expires := now.Add(ttl).Unix()
+	sessionNonce := make([]byte, 8)
+	_, _ = rand.Read(sessionNonce)
+	payload := fmt.Sprintf("dpkey|%s|%s|%d|%x|%s|%d|%s|%s|%s",
+		strings.ToLower(claims.Host),
+		challengeIPString(claims.ClientIP),
+		expires,
+		sessionNonce,
+		challengeUserAgentHash(claims.UserAgent),
+		claims.SiteID,
+		claims.Bind,
+		claims.Key,
+		kekB64,
+	)
+	encrypted, err := challengeEncrypt([]byte(payload))
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(encrypted)
+}
+
+func VerifyDynamicProtectionKeyTicket(value string, claims DynamicProtectionKeyClaims, now time.Time) (string, bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(raw) == 0 {
+		return "", false
+	}
+	plaintext, err := challengeDecrypt(raw)
+	if err != nil {
+		return "", false
+	}
+	parts := strings.Split(string(plaintext), "|")
+	if len(parts) != 10 || parts[0] != "dpkey" {
+		return "", false
+	}
+	expires, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || now.Unix() >= expires {
+		return "", false
+	}
+	siteID, err := strconv.ParseUint(parts[6], 10, 64)
+	if err != nil {
+		return "", false
+	}
+	if parts[1] != strings.ToLower(claims.Host) ||
+		parts[2] != challengeIPString(claims.ClientIP) ||
+		parts[5] != challengeUserAgentHash(claims.UserAgent) ||
+		uint(siteID) != claims.SiteID ||
+		parts[7] != claims.Bind ||
+		parts[8] != claims.Key {
+		return "", false
+	}
+	if !dynamicProtectionKeyReplayGuard.consume(value, time.Unix(expires, 0)) {
+		return "", false
+	}
+	return parts[9], true
+}
+
+func BuildDynamicProtectionSessionCookieWithClaims(claims DynamicProtectionClaims, tlsEnabled bool, now time.Time, ttl time.Duration) string {
+	value := SignDynamicProtectionSessionValueWithClaims(claims, now, ttl)
+	cookie := &http.Cookie{
+		Name:     DynamicProtectionSessionCookieName,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   int(normalizeChallengePassTTL(ttl).Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   tlsEnabled,
+	}
+	return cookie.String()
+}
+
+func SignDynamicProtectionSessionValueWithClaims(claims DynamicProtectionClaims, now time.Time, ttl time.Duration) string {
+	ttl = normalizeChallengePassTTL(ttl)
+	expires := now.Add(ttl).Unix()
+	sessionNonce := make([]byte, 8)
+	_, _ = rand.Read(sessionNonce)
+	payload := fmt.Sprintf("dpsess|%s|%s|%d|%x|%s|%d|%s",
+		strings.ToLower(claims.Host),
+		challengeIPString(claims.ClientIP),
+		expires,
+		sessionNonce,
+		challengeUserAgentHash(claims.UserAgent),
+		claims.SiteID,
+		claims.Bind,
+	)
+	encrypted, err := challengeEncrypt([]byte(payload))
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(encrypted)
+}
+
+func VerifyDynamicProtectionSessionCookieWithClaims(cookieHeader string, claims DynamicProtectionClaims, now time.Time) bool {
+	if cookieHeader == "" {
+		return false
+	}
+	for _, raw := range strings.Split(cookieHeader, ";") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(raw, "=")
+		if !ok || name != DynamicProtectionSessionCookieName {
+			continue
+		}
+		return VerifyDynamicProtectionSessionValueWithClaims(value, claims, now)
+	}
+	return false
+}
+
+func VerifyDynamicProtectionSessionValueWithClaims(value string, claims DynamicProtectionClaims, now time.Time) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(raw) == 0 {
+		return false
+	}
+	plaintext, err := challengeDecrypt(raw)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(string(plaintext), "|")
+	if len(parts) != 8 || parts[0] != "dpsess" {
+		return false
+	}
+	expires, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || now.Unix() > expires {
+		return false
+	}
+	siteID, err := strconv.ParseUint(parts[6], 10, 64)
+	if err != nil {
+		return false
+	}
+	return parts[1] == strings.ToLower(claims.Host) &&
+		parts[2] == challengeIPString(claims.ClientIP) &&
+		parts[5] == challengeUserAgentHash(claims.UserAgent) &&
+		uint(siteID) == claims.SiteID &&
+		parts[7] == claims.Bind
+}
+
 func challengeUserAgentHash(userAgent string) string {
 	sum := sha256.Sum256([]byte(userAgent))
 	return hex.EncodeToString(sum[:16])
@@ -313,7 +494,9 @@ func challengeEncrypt(plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	_, _ = rand.Read(nonce)
+	if _, err := io.ReadFull(challengeNonceReader, nonce); err != nil {
+		return nil, fmt.Errorf("generate challenge nonce: %w", err)
+	}
 	return gcm.Seal(nonce, nonce, plaintext, nil), nil
 }
 

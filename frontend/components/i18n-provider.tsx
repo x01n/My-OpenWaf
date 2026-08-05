@@ -1,11 +1,11 @@
-"use client";
+"use client"
 
-import { useEffect, useState } from "react";
-import i18n from "i18next";
-import { initReactI18next } from "react-i18next";
-import LanguageDetector from "i18next-browser-languagedetector";
-import zh from "@/lib/i18n/locales/zh.json";
-import en from "@/lib/i18n/locales/en.json";
+import { useEffect, useState } from "react"
+import i18n from "i18next"
+import { initReactI18next } from "react-i18next"
+import LanguageDetector from "i18next-browser-languagedetector"
+import zh from "@/lib/i18n/locales/zh.json"
+import en from "@/lib/i18n/locales/en.json"
 
 /**
  * i18n 客户端初始化 Provider
@@ -13,10 +13,10 @@ import en from "@/lib/i18n/locales/en.json";
  * 静态导出场景下，SSR 阶段 useTranslation 会 fallback 到返回 key，客户端 hydrate 后正常显示翻译
  */
 export function I18nProvider({ children }: { children: React.ReactNode }) {
-  const [ready, setReady] = useState(i18n.isInitialized);
+  const [ready, setReady] = useState(i18n.isInitialized)
 
   useEffect(() => {
-    if (i18n.isInitialized) return;
+    if (i18n.isInitialized) return
     i18n
       .use(LanguageDetector)
       .use(initReactI18next)
@@ -36,10 +36,10 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
         },
       })
       .then(() => {
-        setReady(true);
-      });
-  }, []);
+        setReady(true)
+      })
+  }, [])
 
-  if (!ready) return null;
-  return <>{children}</>;
+  if (!ready) return null
+  return <>{children}</>
 }

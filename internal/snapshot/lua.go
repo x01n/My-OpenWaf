@@ -56,6 +56,8 @@ func loadLuaPlugins(db *gorm.DB) ([]*luaplugin.Script, map[string]string) {
 			errs[row.Name] = err.Error()
 			continue
 		}
+		script.SetID(row.ID)
+		script.SetSiteID(row.SiteID)
 		if row.TimeoutMS > 0 {
 			script.SetTimeout(time.Duration(row.TimeoutMS) * time.Millisecond)
 		}

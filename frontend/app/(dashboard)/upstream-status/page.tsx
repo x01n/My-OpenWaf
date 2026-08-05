@@ -1,4 +1,4 @@
-"use client";
+"use client"
 
 /**
  * 上游服务器状态页面
@@ -9,17 +9,17 @@
  *   参见 internal/admin/system/upstream.go
  */
 
-import { useMemo } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { useMemo } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@/components/ui/tooltip"
 import {
   IconServer,
   IconAlertTriangle,
@@ -28,18 +28,18 @@ import {
   IconClock,
   IconRefresh,
   IconArrowRight,
-} from "@tabler/icons-react";
-import { cn } from "@/lib/utils";
-import { useUpstreamStatus } from "@/hooks/use-api";
-import { formatRelative } from "@/lib/time-format";
-import type { UpstreamStatus } from "@/lib/types";
-import { EmptyState } from "@/components/empty-state";
+} from "@tabler/icons-react"
+import { cn } from "@/lib/utils"
+import { useUpstreamStatus } from "@/hooks/use-api"
+import { formatRelative } from "@/lib/time-format"
+import type { UpstreamStatus } from "@/lib/types"
+import { EmptyState } from "@/components/empty-state"
 
 function latencyClass(ms: number): string {
-  if (ms <= 0) return "text-muted-foreground";
-  if (ms < 100) return "text-emerald-600 dark:text-emerald-400";
-  if (ms <= 500) return "text-amber-600 dark:text-amber-400";
-  return "text-red-600 dark:text-red-400";
+  if (ms <= 0) return "text-muted-foreground"
+  if (ms < 100) return "text-emerald-600 dark:text-emerald-400"
+  if (ms <= 500) return "text-amber-600 dark:text-amber-400"
+  return "text-red-600 dark:text-red-400"
 }
 
 /**
@@ -50,26 +50,26 @@ function StatusDot({ healthy }: { healthy: boolean }) {
     <span
       aria-hidden
       className={cn(
-        "inline-block h-2.5 w-2.5 rounded-full shrink-0",
+        "inline-block h-2.5 w-2.5 shrink-0 rounded-full",
         healthy
           ? "bg-teal-500 shadow-[0_0_0_3px_rgba(20,184,166,0.15)]"
           : "bg-red-500 shadow-[0_0_0_3px_rgba(239,68,68,0.15)]"
       )}
     />
-  );
+  )
 }
 
 function ProtocolPair({
   configured,
   actual,
 }: {
-  configured?: string;
-  actual?: string;
+  configured?: string
+  actual?: string
 }) {
-  const cfg = configured || "-";
-  const act = actual || "-";
+  const cfg = configured || "-"
+  const act = actual || "-"
   return (
-    <div className="inline-flex items-center gap-1.5 text-xs font-mono">
+    <div className="inline-flex items-center gap-1.5 font-mono text-xs">
       <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">
         {cfg}
       </span>
@@ -77,18 +77,21 @@ function ProtocolPair({
       <span
         className={cn(
           "rounded px-1.5 py-0.5",
-          actual ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
+          actual
+            ? "bg-primary/10 text-primary"
+            : "bg-muted text-muted-foreground"
         )}
       >
         {act}
       </span>
     </div>
-  );
+  )
 }
 
 function UpstreamRow({ item }: { item: UpstreamStatus }) {
-  const { t } = useTranslation();
-  const hasFailure = item.fail_count > 0 || !!item.last_failure_kind || !!item.last_error;
+  const { t } = useTranslation()
+  const hasFailure =
+    item.fail_count > 0 || !!item.last_failure_kind || !!item.last_error
 
   return (
     <Card className="transition-colors hover:border-primary/40">
@@ -97,7 +100,7 @@ function UpstreamRow({ item }: { item: UpstreamStatus }) {
           <div className="min-w-0 flex-1 space-y-1.5">
             <div className="flex items-center gap-2">
               <StatusDot healthy={item.healthy} />
-              <span className="break-all font-mono text-base font-semibold">
+              <span className="font-mono text-base font-semibold break-all">
                 {item.url}
               </span>
               <Badge
@@ -117,7 +120,10 @@ function UpstreamRow({ item }: { item: UpstreamStatus }) {
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
             {item.fail_count > 0 && (
-              <Badge variant="destructive" className="h-5 gap-1 px-1.5 text-[10px]">
+              <Badge
+                variant="destructive"
+                className="h-5 gap-1 px-1.5 text-[10px]"
+              >
                 <IconAlertTriangle className="h-3 w-3" />
                 {t("upstreamStatus.failCountValue", { count: item.fail_count })}
               </Badge>
@@ -145,17 +151,23 @@ function UpstreamRow({ item }: { item: UpstreamStatus }) {
 
         <div className="grid gap-2 border-t pt-3 sm:grid-cols-2 lg:grid-cols-3">
           <MetricCell
-            label={t("upstreamStatus.currentLatency", { value: item.last_latency_ms })}
+            label={t("upstreamStatus.currentLatency", {
+              value: item.last_latency_ms,
+            })}
             hint={t("upstreamStatus.latency")}
             colorClass={latencyClass(item.last_latency_ms)}
           />
           <MetricCell
-            label={t("upstreamStatus.averageLatency", { value: item.average_latency_ms })}
+            label={t("upstreamStatus.averageLatency", {
+              value: item.average_latency_ms,
+            })}
             hint={t("upstreamStatus.averageLatencyLabel")}
             colorClass={latencyClass(item.average_latency_ms)}
           />
           <MetricCell
-            label={t("upstreamStatus.failCountValue", { count: item.fail_count })}
+            label={t("upstreamStatus.failCountValue", {
+              count: item.fail_count,
+            })}
             hint={t("upstreamStatus.failCount")}
             colorClass={
               item.fail_count > 0
@@ -173,8 +185,12 @@ function UpstreamRow({ item }: { item: UpstreamStatus }) {
             </span>
             {item.last_failure_kind && (
               <span className="text-muted-foreground">
-                <span className="mr-1">{t("upstreamStatus.lastFailureKind")}:</span>
-                <span className="font-mono text-foreground">{item.last_failure_kind}</span>
+                <span className="mr-1">
+                  {t("upstreamStatus.lastFailureKind")}:
+                </span>
+                <span className="font-mono text-foreground">
+                  {item.last_failure_kind}
+                </span>
               </span>
             )}
             {item.last_error && (
@@ -182,11 +198,13 @@ function UpstreamRow({ item }: { item: UpstreamStatus }) {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span className="block max-w-full truncate font-mono text-muted-foreground">
-                      <span className="mr-1">{t("upstreamStatus.lastError")}:</span>
+                      <span className="mr-1">
+                        {t("upstreamStatus.lastError")}:
+                      </span>
                       {item.last_error}
                     </span>
                   </TooltipTrigger>
-                  <TooltipContent className="max-w-md whitespace-pre-wrap break-all">
+                  <TooltipContent className="max-w-md break-all whitespace-pre-wrap">
                     {item.last_error}
                   </TooltipContent>
                 </Tooltip>
@@ -196,7 +214,7 @@ function UpstreamRow({ item }: { item: UpstreamStatus }) {
         )}
       </CardContent>
     </Card>
-  );
+  )
 }
 
 function MetricCell({
@@ -204,38 +222,38 @@ function MetricCell({
   hint,
   colorClass,
 }: {
-  label: string;
-  hint: string;
-  colorClass?: string;
+  label: string
+  hint: string
+  colorClass?: string
 }) {
   return (
     <div className="rounded-md border bg-muted/20 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+      <div className="text-[10px] tracking-wide text-muted-foreground uppercase">
         {hint}
       </div>
       <div className={cn("mt-0.5 text-sm font-semibold", colorClass)}>
         {label}
       </div>
     </div>
-  );
+  )
 }
 
 export default function UpstreamStatusPage() {
-  const { t } = useTranslation();
-  const { data, error, isLoading } = useUpstreamStatus();
+  const { t } = useTranslation()
+  const { data, error, isLoading } = useUpstreamStatus()
 
-  const items: UpstreamStatus[] = useMemo(() => data?.items || [], [data]);
-  const total = data?.total ?? items.length;
+  const items: UpstreamStatus[] = useMemo(() => data?.items || [], [data])
+  const total = data?.total ?? items.length
 
   const { healthyCount, unhealthyCount } = useMemo(() => {
-    let h = 0;
-    let u = 0;
+    let h = 0
+    let u = 0
     for (const it of items) {
-      if (it.healthy) h += 1;
-      else u += 1;
+      if (it.healthy) h += 1
+      else u += 1
     }
-    return { healthyCount: h, unhealthyCount: u };
-  }, [items]);
+    return { healthyCount: h, unhealthyCount: u }
+  }, [items])
 
   return (
     <div className="space-y-4">
@@ -268,7 +286,9 @@ export default function UpstreamStatusPage() {
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">{t("upstreamStatus.title")}</CardTitle>
+          <CardTitle className="text-base">
+            {t("upstreamStatus.title")}
+          </CardTitle>
           <p className="text-xs text-muted-foreground">
             {t("upstreamStatus.description")}
           </p>
@@ -304,5 +324,5 @@ export default function UpstreamStatusPage() {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

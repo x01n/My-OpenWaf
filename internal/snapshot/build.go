@@ -14,17 +14,43 @@ import (
 
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/dynamic"
+	"My-OpenWaf/internal/waf/owasp"
+	"My-OpenWaf/internal/waf/pageconfig"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // Build loads DB into an immutable Snapshot.
-func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
+func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	var sites []store.Site
 	if err := db.Where("enabled = ?", true).Find(&sites).Error; err != nil {
 		return nil, err
+	}
+
+	hasPolicyTable := db.Migrator().HasTable(&store.Policy{})
+	policyByID := make(map[uint]store.Policy)
+	defaultPolicyID := uint(0)
+	if hasPolicyTable {
+		var policies []store.Policy
+		if err := db.Find(&policies).Error; err != nil {
+			return nil, fmt.Errorf("load policies: %w", err)
+		}
+		policyByID = make(map[uint]store.Policy, len(policies))
+		for _, policy := range policies {
+			policyByID[policy.ID] = policy
+			if policy.DefaultSlot != nil && *policy.DefaultSlot == 1 {
+				if defaultPolicyID != 0 {
+					return nil, fmt.Errorf("multiple default policies configured")
+				}
+				defaultPolicyID = policy.ID
+			}
+		}
+		if defaultPolicyID == 0 {
+			return nil, fmt.Errorf("default policy not configured")
+		}
 	}
 
 	var listeners []store.SiteListener
@@ -63,8 +89,24 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		return nil, err
 	}
 	ccRules := compileCCRules(protection)
+	owaspConfigsByPolicy, err := loadPolicyOWASPConfigs(db)
+	if err != nil {
+		return nil, err
+	}
+	cveConfigsBySite, err := loadSiteCVEConfigs(db, sites, defaultPolicyID)
+	if err != nil {
+		return nil, err
+	}
 	rulesByPolicy := make(map[uint][]store.Rule)
 	for _, r := range rules {
+		if hasPolicyTable && r.PolicyID == 0 {
+			return nil, fmt.Errorf("rule %d has invalid policy_id 0", r.ID)
+		}
+		if hasPolicyTable {
+			if _, ok := policyByID[r.PolicyID]; !ok {
+				return nil, fmt.Errorf("rule %d references missing policy %d", r.ID, r.PolicyID)
+			}
+		}
 		rulesByPolicy[r.PolicyID] = append(rulesByPolicy[r.PolicyID], r)
 	}
 	for pid := range rulesByPolicy {
@@ -95,6 +137,10 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	// 从预加载的 settingsMap 中读取动态保护和排除记录头（共用 bot_settings 数据）。
 	botSettingsJSON := settingsMap["bot_settings"]
 	dynamicProtection := parseDynamicProtection(botSettingsJSON)
+	if len(dynamicKeyBase) != 32 {
+		return nil, fmt.Errorf("dynamic protection key base must be 32 bytes")
+	}
+	dynamicProtection.EncryptionKeyBase = append([]byte(nil), dynamicKeyBase...)
 	excludeRecordHeaders := parseExcludeRecordHeaders(botSettingsJSON)
 
 	// Load access control configs per site.
@@ -116,6 +162,9 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	responseCompressionEnabled := settingBool(settingsMap, "response_compression_enabled")
 	responseCompressionGzipEnabled := settingBool(settingsMap, "response_compression_gzip_enabled")
 	responseCompressionMinBytes := settingInt(settingsMap, "response_compression_min_bytes", DefaultResponseCompressionMinBytes)
+	captchaPage := pageconfig.ParseCaptchaPageConfig(settingsMap[pageconfig.SettingKeyCaptchaPage])
+	challengePage := pageconfig.ParseChallengePageConfig(settingsMap[pageconfig.SettingKeyChallengePage])
+	blockPage := pageconfig.ParseBlockPageConfig(settingsMap[pageconfig.SettingKeyBlockPage])
 
 	sniCerts := make(map[string]tls.Certificate)
 	siteMap := make(map[string]*SiteRuntime)
@@ -126,8 +175,13 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 			continue
 		}
 
-		policyID := uint(0)
-		if s.PolicyID != nil {
+		policyID := defaultPolicyID
+		if s.PolicyID != nil && *s.PolicyID != 0 {
+			if hasPolicyTable {
+				if _, ok := policyByID[*s.PolicyID]; !ok {
+					return nil, fmt.Errorf("site %d references missing policy %d", s.ID, *s.PolicyID)
+				}
+			}
 			policyID = *s.PolicyID
 		}
 		compiled := append(compileRules(rulesByPolicy[policyID]), siteCCRules(s, ccRules)...)
@@ -159,6 +213,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 			xffMode = store.XFFModeStrip
 		}
 		cacheRules := parseSiteCacheRules(s.CacheRules)
+		clientIPHeaderOrder := parseClientIPHeaderOrder(s.ClientIPHeaderOrder)
 
 		siteListeners := enabledListenersBySite[s.ID]
 		if len(siteListeners) == 0 && !hasListenerRowsBySite[s.ID] && s.Bind != "" {
@@ -226,6 +281,11 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				}
 			}
 
+			siteDynamicProtection := buildSiteDynamicProtection(dynamicProtection, s)
+			if (siteDynamicProtection.HTMLObfuscationEnabled || siteDynamicProtection.JSObfuscationEnabled) && len(siteDynamicProtection.EncryptionKeyBase) != 32 {
+				return nil, fmt.Errorf("site %d dynamic protection requires a 32-byte encryption key base", s.ID)
+			}
+
 			rt := SiteRuntime{
 				Site:                           listenerSite,
 				PolicyID:                       policyID,
@@ -240,6 +300,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				AttackProtection:               attackProtection,
 				XFFMode:                        xffMode,
 				TrustedCIDR:                    s.TrustedCIDR,
+				ClientIPHeaderOrder:            clientIPHeaderOrder,
 				PreserveOriginalHost:           s.PreserveOriginalHost,
 				CacheEnabled:                   s.CacheEnabled,
 				CacheDefaultTTL:                s.CacheDefaultTTL,
@@ -252,7 +313,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				AntiReplayEnabled:              s.AntiReplayEnabled,
 				AntiReplayAction:               s.AntiReplayAction,
 				AppRouteRules:                  appRulesBySite[s.ID],
-				DynamicProtection:              buildSiteDynamicProtection(dynamicProtection, s),
+				DynamicProtection:              siteDynamicProtection,
 				AccessControl:                  accessControlBySite[s.ID],
 				SiteIPWhitelist:                siteIPLists[s.ID].whitelist,
 				SiteIPBlacklist:                siteIPLists[s.ID].blacklist,
@@ -272,6 +333,14 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	// Compute effective per-site protection by merging site overrides onto global config.
 	for _, rt := range siteMap {
 		ep := mergeProtection(protection, rt.Site)
+		if raw, ok := owaspConfigsByPolicy[rt.PolicyID]; ok {
+			ep.OWASPRulesConfig = raw
+		} else if rt.PolicyID != defaultPolicyID {
+			ep.OWASPRulesConfig = "{}"
+		}
+		if raw, ok := cveConfigsBySite[rt.Site.ID]; ok {
+			ep.CVERulesConfig = raw
+		}
 		rt.EffectiveProtection = &ep
 	}
 
@@ -287,6 +356,9 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		NetworkDefaults:                networkDefaults,
 		TLSDefaults:                    tlsDefaults,
 		DefaultBlockHTML:               "",
+		CaptchaPage:                    captchaPage,
+		ChallengePage:                  challengePage,
+		BlockPage:                      blockPage,
 		SiteTLSCertBySNI:               sniCerts,
 		Protection:                     protection,
 		HTTP2Config:                    http2Config,
@@ -308,6 +380,109 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 
 // mergeProtection creates a ProtectionConfig for a site by overlaying
 // per-site overrides onto the global config. nil = inherit global.
+func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, error) {
+	if !db.Migrator().HasTable(&store.PolicyOWASPRuleConfig{}) {
+		return map[uint]string{}, nil
+	}
+	var configs []store.PolicyOWASPRuleConfig
+	if err := db.Find(&configs).Error; err != nil {
+		return nil, fmt.Errorf("load policy OWASP configs: %w", err)
+	}
+	grouped := make(map[uint]map[string]owasp.OWASPRuleOverride)
+	for _, config := range configs {
+		override := owasp.OWASPRuleOverride{}
+		if config.Enabled != nil {
+			override.Enabled = config.Enabled
+		}
+		if config.Action != nil {
+			override.Action = *config.Action
+		}
+		if config.Sensitivity != nil {
+			override.Sensitivity = *config.Sensitivity
+		}
+		if config.StatusCode != nil {
+			override.StatusCode = *config.StatusCode
+		}
+		if config.RedirectTo != nil {
+			override.RedirectTo = *config.RedirectTo
+		}
+		if config.Whitelist != nil && strings.TrimSpace(*config.Whitelist) != "" {
+			_ = json.Unmarshal([]byte(*config.Whitelist), &override.Whitelist)
+		}
+		if grouped[config.PolicyID] == nil {
+			grouped[config.PolicyID] = make(map[string]owasp.OWASPRuleOverride)
+		}
+		grouped[config.PolicyID][config.RuleID] = override
+	}
+	result := make(map[uint]string, len(grouped))
+	for policyID, overrides := range grouped {
+		result[policyID] = owasp.SerializeOWASPRulesConfig(overrides)
+	}
+	return result, nil
+}
+
+func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (map[uint]string, error) {
+	if !db.Migrator().HasTable(&store.CVERuleRecord{}) || !db.Migrator().HasTable(&store.CVERuleScopeOverride{}) {
+		return map[uint]string{}, nil
+	}
+	var rules []store.CVERuleRecord
+	if err := db.Where("approved = ?", true).Find(&rules).Error; err != nil {
+		return nil, fmt.Errorf("load CVE catalog: %w", err)
+	}
+	var scoped []store.CVERuleScopeOverride
+	if err := db.Find(&scoped).Error; err != nil {
+		return nil, fmt.Errorf("load CVE scope overrides: %w", err)
+	}
+	byRule := make(map[uint][]store.CVERuleScopeOverride)
+	for _, item := range scoped {
+		byRule[item.RuleID] = append(byRule[item.RuleID], item)
+	}
+	result := make(map[uint]string, len(sites))
+	for _, site := range sites {
+		policyID := defaultPolicyID
+		if site.PolicyID != nil && *site.PolicyID != 0 {
+			policyID = *site.PolicyID
+		}
+		profile := make(map[string]cve.CVERuleOverride, len(rules))
+		for _, rule := range rules {
+			enabled := rule.Enabled
+			override := cve.CVERuleOverride{Enabled: &enabled, Action: rule.Action}
+			apply := func(scopeType string, scopeID uint) {
+				for _, item := range byRule[rule.ID] {
+					if item.ScopeType != scopeType || item.ScopeID != scopeID {
+						continue
+					}
+					if item.Enabled != nil {
+						override.Enabled = item.Enabled
+					}
+					if item.Action != nil {
+						override.Action = *item.Action
+					}
+					if item.Sensitivity != nil {
+						override.Sensitivity = *item.Sensitivity
+					}
+					if item.StatusCode != nil {
+						override.StatusCode = *item.StatusCode
+					}
+					if item.RedirectTo != nil {
+						override.RedirectTo = *item.RedirectTo
+					}
+				}
+			}
+			apply(store.CVEScopeGlobal, 0)
+			apply(store.CVEScopePolicy, policyID)
+			apply(store.CVEScopeSite, site.ID)
+			profile[rule.CVEID] = override
+		}
+		raw, err := json.Marshal(profile)
+		if err != nil {
+			return nil, err
+		}
+		result[site.ID] = string(raw)
+	}
+	return result, nil
+}
+
 func mergeProtection(global store.ProtectionConfig, site store.Site) store.ProtectionConfig {
 	p := global // shallow copy
 
@@ -498,12 +673,13 @@ func compileRules(rs []store.Rule) []CompiledRule {
 }
 
 type ccRuleConfig struct {
-	Enabled    *bool             `json:"enabled"`
-	Action     string            `json:"action"`
-	Conditions []ccRuleCondition `json:"conditions"`
-	Window     int               `json:"window"`
-	Threshold  int               `json:"threshold"`
-	Duration   int               `json:"duration"`
+	Enabled      *bool             `json:"enabled"`
+	Action       string            `json:"action"`
+	Conditions   []ccRuleCondition `json:"conditions"`
+	Window       int               `json:"window"`
+	Threshold    int               `json:"threshold"`
+	Duration     int               `json:"duration"`
+	DurationUnit string            `json:"duration_unit"`
 }
 
 type ccRuleCondition struct {
@@ -519,6 +695,27 @@ func compileCCRules(protection store.ProtectionConfig) []CompiledRule {
 		return nil
 	}
 	return compileCCRulesFromJSON(protection.CCRules)
+}
+
+func normalizedCCDurationUnit(unit string) string {
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "seconds", "second", "sec", "s":
+		return "seconds"
+	case "minutes", "minute", "min", "m":
+		return "minutes"
+	default:
+		return "minutes"
+	}
+}
+
+func ccDurationSeconds(duration int, unit string) int {
+	if duration <= 0 {
+		return 0
+	}
+	if normalizedCCDurationUnit(unit) == "seconds" {
+		return duration
+	}
+	return duration * 60
 }
 
 // siteCCRules 返回站点生效的 CC 规则。
@@ -569,11 +766,13 @@ func compileCCRulesFromJSON(rulesJSON string) []CompiledRule {
 		}
 		if cfg.Window > 0 && cfg.Threshold > 0 {
 			raw, err := json.Marshal(map[string]any{
-				"op":        "cc_rate",
-				"children":  []any{compiled},
-				"window":    cfg.Window,
-				"threshold": cfg.Threshold,
-				"duration":  cfg.Duration,
+				"op":               "cc_rate",
+				"children":         []any{compiled},
+				"window":           cfg.Window,
+				"threshold":        cfg.Threshold,
+				"duration":         cfg.Duration,
+				"duration_unit":    normalizedCCDurationUnit(cfg.DurationUnit),
+				"duration_seconds": ccDurationSeconds(cfg.Duration, cfg.DurationUnit),
 			})
 			if err != nil {
 				continue
@@ -611,8 +810,10 @@ func compileCCCondition(cond ccRuleCondition) (string, string, bool) {
 		switch operator {
 		case "equals":
 			return "block_path_exact", value, true
-		case "prefix", "contains":
+		case "prefix":
 			return "block_path", value, true
+		case "contains":
+			return "path_contains", value, true
 		}
 	case "method":
 		if operator == "equals" {
@@ -624,8 +825,12 @@ func compileCCCondition(cond ccRuleCondition) (string, string, bool) {
 			return "", "", false
 		}
 		switch operator {
-		case "equals", "contains", "prefix":
+		case "equals":
+			return "block_header_exact", name + ":" + headerValue, true
+		case "contains":
 			return "block_header", name + ":" + headerValue, true
+		case "prefix":
+			return "block_header_prefix", name + ":" + headerValue, true
 		}
 	}
 	return "", "", false
@@ -787,6 +992,17 @@ func parseSiteCacheRules(raw string) []store.SiteCacheRule {
 		return li > lj
 	})
 	return filtered
+}
+
+func parseClientIPHeaderOrder(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var inbound []string
+	if err := json.Unmarshal([]byte(raw), &inbound); err != nil {
+		return nil
+	}
+	return append([]string(nil), inbound...)
 }
 
 func loadNetworkDefaults(db *gorm.DB) NetworkDefaults {

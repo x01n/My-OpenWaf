@@ -1,42 +1,43 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
+import { Badge } from "@/components/ui/badge"
+import { Switch } from "@/components/ui/switch"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { IconPencil, IconPlus, IconTrash } from "@tabler/icons-react";
-import { cn } from "@/lib/utils";
+} from "@/components/ui/select"
+import { IconPencil, IconPlus, IconTrash } from "@tabler/icons-react"
+import { cn } from "@/lib/utils"
 
 /**
  * CC 规则单条匹配条件。
  */
 export interface CCRuleCondition {
-  target: string;
-  operator: string;
-  value: string;
+  target: string
+  operator: string
+  value: string
 }
 
 /**
  * CC 规则数据结构，与全局 CC 防护及站点级 CC 防护共用同一契约。
  */
 export interface CCRule {
-  enabled?: boolean;
-  name?: string;
-  action: string;
-  conditions: CCRuleCondition[];
-  window: number;
-  threshold: number;
-  duration: number;
+  enabled?: boolean
+  name?: string
+  action: string
+  conditions: CCRuleCondition[]
+  window: number
+  threshold: number
+  duration: number
+  duration_unit?: "seconds" | "minutes"
 }
 
 /**
@@ -51,12 +52,12 @@ export const CC_ACTION_OPTIONS = [
   "chain_challenge",
   "drop",
   "observe",
-] as const;
+] as const
 
 /**
  * CC 规则条件匹配目标。
  */
-export const CC_CONDITION_TARGETS = ["url_path", "method", "header"] as const;
+export const CC_CONDITION_TARGETS = ["url_path", "method", "header"] as const
 
 /**
  * 各匹配目标可用的操作符集合。
@@ -65,7 +66,7 @@ export const CC_CONDITION_OPERATORS: Record<string, string[]> = {
   url_path: ["equals", "prefix", "contains"],
   method: ["equals"],
   header: ["equals", "contains", "prefix"],
-};
+}
 
 /**
  * 构造一条默认 CC 规则。
@@ -81,12 +82,13 @@ export function emptyCCRule(): CCRule {
     window: 60,
     threshold: 100,
     duration: 300,
-  };
+    duration_unit: "seconds",
+  }
 }
 
 interface CCRulesEditorProps {
-  rules: CCRule[];
-  onChange: (rules: CCRule[]) => void;
+  rules: CCRule[]
+  onChange: (rules: CCRule[]) => void
 }
 
 /**
@@ -96,89 +98,96 @@ interface CCRulesEditorProps {
  * 全局 CC 防护页与站点级 CC 防护 Tab 共用本组件以保证行为一致。
  */
 export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
-  const { t } = useTranslation();
-  const [editingRuleIndex, setEditingRuleIndex] = useState<number | null>(null);
-  const [editingRule, setEditingRule] = useState<CCRule | null>(null);
+  const { t } = useTranslation()
+  const [editingRuleIndex, setEditingRuleIndex] = useState<number | null>(null)
+  const [editingRule, setEditingRule] = useState<CCRule | null>(null)
 
   const toggleRule = (index: number) => {
+    if (editingRuleIndex !== null) return
     onChange(
       rules.map((rule, i) =>
         i === index ? { ...rule, enabled: !(rule.enabled ?? true) } : rule
       )
-    );
-  };
+    )
+  }
 
   const deleteRule = (index: number) => {
-    onChange(rules.filter((_, i) => i !== index));
-  };
+    if (editingRuleIndex !== null) return
+    onChange(rules.filter((_, i) => i !== index))
+  }
 
   const startAddRule = () => {
-    setEditingRuleIndex(-1);
-    setEditingRule(emptyCCRule());
-  };
+    setEditingRuleIndex(-1)
+    setEditingRule(emptyCCRule())
+  }
 
   const startEditRule = (index: number) => {
-    setEditingRuleIndex(index);
-    setEditingRule({ ...rules[index] });
-  };
+    if (editingRuleIndex !== null) return
+    setEditingRuleIndex(index)
+    setEditingRule({ ...rules[index] })
+  }
 
   const cancelEditRule = () => {
-    setEditingRuleIndex(null);
-    setEditingRule(null);
-  };
+    setEditingRuleIndex(null)
+    setEditingRule(null)
+  }
 
   const saveEditRule = () => {
-    if (!editingRule) return;
+    if (!editingRule) return
     if (editingRuleIndex === -1) {
-      onChange([...rules, editingRule]);
+      onChange([...rules, editingRule])
     } else if (editingRuleIndex !== null) {
-      onChange(rules.map((rule, i) => (i === editingRuleIndex ? editingRule : rule)));
+      onChange(
+        rules.map((rule, i) => (i === editingRuleIndex ? editingRule : rule))
+      )
     }
-    setEditingRuleIndex(null);
-    setEditingRule(null);
-  };
+    setEditingRuleIndex(null)
+    setEditingRule(null)
+  }
 
   const updateEditingCondition = (
     condIndex: number,
     field: keyof CCRuleCondition,
     value: string
   ) => {
-    if (!editingRule) return;
+    if (!editingRule) return
     const newConditions = editingRule.conditions.map((cond, i) =>
       i === condIndex ? { ...cond, [field]: value } : cond
-    );
+    )
     if (field === "target") {
-      const ops = CC_CONDITION_OPERATORS[value] ?? ["equals"];
+      const ops = CC_CONDITION_OPERATORS[value] ?? ["equals"]
       if (!ops.includes(newConditions[condIndex].operator)) {
-        newConditions[condIndex].operator = ops[0];
+        newConditions[condIndex].operator = ops[0]
       }
     }
-    setEditingRule({ ...editingRule, conditions: newConditions });
-  };
+    setEditingRule({ ...editingRule, conditions: newConditions })
+  }
 
   const addEditingCondition = () => {
-    if (!editingRule) return;
+    if (!editingRule) return
     setEditingRule({
       ...editingRule,
       conditions: [
         ...editingRule.conditions,
         { target: "url_path", operator: "prefix", value: "" },
       ],
-    });
-  };
+    })
+  }
 
   const removeEditingCondition = (condIndex: number) => {
-    if (!editingRule || editingRule.conditions.length <= 1) return;
+    if (!editingRule || editingRule.conditions.length <= 1) return
     setEditingRule({
       ...editingRule,
       conditions: editingRule.conditions.filter((_, i) => i !== condIndex),
-    });
-  };
+    })
+  }
 
   return (
     <div className="space-y-4">
       {rules.length === 0 && editingRuleIndex === null && (
-        <p className="text-sm text-muted-foreground">{t("ccProtection.noCustomRules")}</p>
+        <p className="text-sm text-muted-foreground">
+          {t("ccProtection.noCustomRules")}
+        </p>
       )}
 
       <div className="space-y-2">
@@ -187,10 +196,16 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
             key={index}
             className={cn(
               "flex items-center gap-4 rounded-lg border p-3 transition-colors",
-              (rule.enabled ?? true) ? "bg-teal-50/50 dark:bg-teal-950/20" : "bg-muted/30"
+              (rule.enabled ?? true)
+                ? "bg-teal-50/50 dark:bg-teal-950/20"
+                : "bg-muted/30"
             )}
           >
-            <Switch checked={rule.enabled ?? true} onCheckedChange={() => toggleRule(index)} />
+            <Switch
+              checked={rule.enabled ?? true}
+              disabled={editingRuleIndex !== null}
+              onCheckedChange={() => toggleRule(index)}
+            />
             <div className="flex-1 space-y-0.5">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium">
@@ -200,7 +215,9 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                   variant={(rule.enabled ?? true) ? "default" : "secondary"}
                   className="h-4 px-1.5 text-[10px]"
                 >
-                  {(rule.enabled ?? true) ? t("common.enable") : t("common.disable")}
+                  {(rule.enabled ?? true)
+                    ? t("common.enable")
+                    : t("common.disable")}
                 </Badge>
                 <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
                   {rule.action}
@@ -224,6 +241,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 size="icon"
                 className="h-8 w-8 shrink-0"
                 onClick={() => startEditRule(index)}
+                disabled={editingRuleIndex !== null}
               >
                 <IconPencil className="h-4 w-4" />
               </Button>
@@ -232,6 +250,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 size="icon"
                 className="h-8 w-8 shrink-0 text-destructive hover:text-destructive"
                 onClick={() => deleteRule(index)}
+                disabled={editingRuleIndex !== null}
               >
                 <IconTrash className="h-4 w-4" />
               </Button>
@@ -242,9 +261,11 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
 
       {/* 编辑/新增规则面板 */}
       {editingRule !== null && (
-        <div className="rounded-lg border-2 border-primary/30 bg-muted/20 p-4 space-y-4">
+        <div className="space-y-4 rounded-lg border-2 border-primary/30 bg-muted/20 p-4">
           <h4 className="text-sm font-medium">
-            {editingRuleIndex === -1 ? t("ccProtection.addRule") : t("ccProtection.editRule")}
+            {editingRuleIndex === -1
+              ? t("ccProtection.addRule")
+              : t("ccProtection.editRule")}
           </h4>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -252,7 +273,9 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
               <Label>{t("ccProtection.ruleName")}</Label>
               <Input
                 value={editingRule.name ?? ""}
-                onChange={(e) => setEditingRule({ ...editingRule, name: e.target.value })}
+                onChange={(e) =>
+                  setEditingRule({ ...editingRule, name: e.target.value })
+                }
                 placeholder={t("ccProtection.ruleNamePlaceholder")}
               />
             </div>
@@ -260,7 +283,9 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
               <Label>{t("ccProtection.action")}</Label>
               <Select
                 value={editingRule.action}
-                onValueChange={(v) => setEditingRule({ ...editingRule, action: v })}
+                onValueChange={(v) =>
+                  setEditingRule({ ...editingRule, action: v })
+                }
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -289,7 +314,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 <div key={condIndex}>
                   {condIndex > 0 && (
                     <div className="relative flex h-6 items-center justify-center">
-                      <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-teal-300/60 dark:bg-teal-700/50" />
+                      <div className="absolute top-0 left-1/2 h-full w-px -translate-x-1/2 bg-teal-300/60 dark:bg-teal-700/50" />
                       <Badge
                         variant="outline"
                         className="relative z-10 h-5 border-teal-400/60 bg-teal-50 px-2 text-[10px] font-semibold tracking-wider text-teal-700 dark:border-teal-600/60 dark:bg-teal-950/40 dark:text-teal-300"
@@ -306,7 +331,9 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                         </Label>
                         <Select
                           value={cond.target}
-                          onValueChange={(v) => updateEditingCondition(condIndex, "target", v)}
+                          onValueChange={(v) =>
+                            updateEditingCondition(condIndex, "target", v)
+                          }
                         >
                           <SelectTrigger>
                             <SelectValue />
@@ -326,13 +353,17 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                         </Label>
                         <Select
                           value={cond.operator}
-                          onValueChange={(v) => updateEditingCondition(condIndex, "operator", v)}
+                          onValueChange={(v) =>
+                            updateEditingCondition(condIndex, "operator", v)
+                          }
                         >
                           <SelectTrigger>
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {(CC_CONDITION_OPERATORS[cond.target] ?? ["equals"]).map((op) => (
+                            {(
+                              CC_CONDITION_OPERATORS[cond.target] ?? ["equals"]
+                            ).map((op) => (
                               <SelectItem key={op} value={op}>
                                 {t(`ccProtection.operator_${op}`)}
                               </SelectItem>
@@ -347,7 +378,11 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                         <Input
                           value={cond.value}
                           onChange={(e) =>
-                            updateEditingCondition(condIndex, "value", e.target.value)
+                            updateEditingCondition(
+                              condIndex,
+                              "value",
+                              e.target.value
+                            )
                           }
                           placeholder={
                             cond.target === "header"
@@ -399,10 +434,15 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                   min={0}
                   value={editingRule.window}
                   onChange={(e) =>
-                    setEditingRule({ ...editingRule, window: Number(e.target.value) })
+                    setEditingRule({
+                      ...editingRule,
+                      window: Number(e.target.value),
+                    })
                   }
                 />
-                <span className="text-sm text-muted-foreground">{t("ccProtection.seconds")}</span>
+                <span className="text-sm text-muted-foreground">
+                  {t("ccProtection.seconds")}
+                </span>
               </div>
             </div>
             <div className="space-y-1.5">
@@ -412,7 +452,10 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 min={0}
                 value={editingRule.threshold}
                 onChange={(e) =>
-                  setEditingRule({ ...editingRule, threshold: Number(e.target.value) })
+                  setEditingRule({
+                    ...editingRule,
+                    threshold: Number(e.target.value),
+                  })
                 }
               />
             </div>
@@ -424,10 +467,33 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                   min={0}
                   value={editingRule.duration}
                   onChange={(e) =>
-                    setEditingRule({ ...editingRule, duration: Number(e.target.value) })
+                    setEditingRule({
+                      ...editingRule,
+                      duration: Number(e.target.value),
+                    })
                   }
                 />
-                <span className="text-sm text-muted-foreground">{t("ccProtection.seconds")}</span>
+                <Select
+                  value={editingRule.duration_unit ?? "minutes"}
+                  onValueChange={(v) =>
+                    setEditingRule({
+                      ...editingRule,
+                      duration_unit: v as "seconds" | "minutes",
+                    })
+                  }
+                >
+                  <SelectTrigger className="w-28 shrink-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="seconds">
+                      {t("ccProtection.seconds")}
+                    </SelectItem>
+                    <SelectItem value="minutes">
+                      {t("ccProtection.minutes")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           </div>
@@ -444,11 +510,16 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
       )}
 
       {editingRuleIndex === null && (
-        <Button variant="outline" size="sm" className="gap-1" onClick={startAddRule}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1"
+          onClick={startAddRule}
+        >
           <IconPlus className="h-3.5 w-3.5" />
           {t("ccProtection.addRule")}
         </Button>
       )}
     </div>
-  );
+  )
 }

@@ -2,9 +2,9 @@ package pages
 
 import (
 	"bytes"
+	"html/template"
 	"io/fs"
 	"strconv"
-	"text/template"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -12,6 +12,7 @@ import (
 	"My-OpenWaf/internal/core/adminweb"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/pageconfig"
 )
 
 // WriteBlockResponse renders the intercept block page.
@@ -39,7 +40,20 @@ func WriteBlockResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRu
 		return
 	}
 
-	c.Data(statusCode, "text/html; charset=utf-8", []byte(defaultFallbackHTML(reqID, res, false, res.Type)))
+	if sn != nil {
+		data := configuredPageConfig(sn.BlockPage, action.Normalize(res.Type) == action.RateLimit)
+		data.RequestID = reqID
+		data.StatusLabel = strconv.Itoa(statusCode)
+		if statusCode == 429 {
+			data.StatusLabel += " Too Many Requests"
+		} else {
+			data.StatusLabel += " Forbidden"
+		}
+		c.Data(statusCode, "text/html; charset=utf-8", renderConfiguredBlockPage(data))
+		return
+	}
+
+	renderEmbeddedPage(c, "block/index.html", statusCode, reqID, res.RuleIDStr)
 }
 
 // WriteMaintenanceResponse renders the maintenance page.
@@ -71,12 +85,12 @@ func WriteMaintenanceResponse(c *app.RequestContext, reqID string, rt *snapshot.
 }
 
 // WriteChallengeResponse renders a JS challenge page that the client must solve.
-// envCheck 为 true 时在挑战页注入浏览器/环境采集 JS，提交时携带 __waf_env_fp，
-// 服务端据此判定是否为真实浏览器（明文指纹，硬信号即拒绝）。
+// envCheck 为 true 时在挑战页注入浏览器/环境采集 JS，提交时携带 v1 AES-256-GCM
+// 加密的 __waf_env_fp；服务端使用挑战令牌的原始 32 字节值校验该密文。
 //
 // tokenClaims 把挑战 token 绑定到发起请求的客户端（IP/UA/Host/站点），
 // 其他客户端拿到页面里的 rid/ts/token 三元组也无法换取通行凭证。
-func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, envCheck bool, statusCode int, tokenClaims challenge.ChallengeTokenClaims) {
+func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, envCheck bool, statusCode int, cfg pageconfig.ChallengePageConfig, tokenClaims challenge.ChallengeTokenClaims) {
 	c.Response.Header.Set("X-Request-ID", reqID)
 	c.Response.Header.Del("Server")
 	c.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -86,14 +100,18 @@ func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.Si
 	envJS := ""
 	envKeyHex := ""
 	if envCheck {
-		envJS = challenge.EnvCheckJS()
-		envKeyHex = challenge.EnvSessionKeyHex(challenge.GenerateEnvSessionKey())
+		envKeyHex = challenge.EnvSessionKeyHex(challenge.EnvSessionKeyFromChallengeToken(token))
+		if envKeyHex == "" {
+			c.String(500, "environment challenge key generation failed")
+			return
+		}
+		envJS = challenge.EnvCheckJSEncrypted(envKeyHex)
 	}
 	// 工作量证明一律由 Rust WASM 模块在 Web Worker 中求解，无 JS 降级路径：
 	// WASM 加载失败即抛错、挑战不通过，避免纯 JS 实现被轻易改写或跳过。
 	// 以 token 作为 nonce，使工作量与本次挑战绑定，无法预算或跨挑战复用。
 	powScript := challenge.GeneratePoWWASMScript(challenge.ChallengeProofDifficulty, token, envKeyHex)
-	html := buildChallengeHTML(reqID, ts, token, envJS, powScript)
+	html := buildChallengeHTML(reqID, ts, token, envJS, powScript, cfg)
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
@@ -152,7 +170,11 @@ func renderEmbeddedPage(c *app.RequestContext, assetPath string, statusCode int,
 		return
 	}
 
+	page = bytes.ReplaceAll(page, []byte("__WAF_STATUS_CODE__"), []byte(strconv.Itoa(statusCode)))
 	page = bytes.ReplaceAll(page, []byte("__WAF_REQUEST_ID__"), []byte(reqID))
+	if assetPath == "block/index.html" {
+		ruleID = ""
+	}
 	page = bytes.ReplaceAll(page, []byte("__WAF_RULE_ID__"), []byte(ruleID))
 	page = bytes.ReplaceAll(page, []byte(`"/_next/`), []byte(`"/__owaf/_next/`))
 	page = bytes.ReplaceAll(page, []byte(`'/_next/`), []byte(`'/__owaf/_next/`))
@@ -167,22 +189,26 @@ func loadEmbeddedPage(assetPath string) ([]byte, error) {
 	return fs.ReadFile(webFS, assetPath)
 }
 
-func defaultFallbackHTML(reqID string, res action.Result, maintenance bool, actionType action.Type) string {
-	baseStyle := `*{margin:0;padding:0;box-sizing:border-box}body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at top left,#ecfeff 0,#f8fafc 32%,#eef2ff 100%);color:#0f172a}.shell{width:min(720px,92vw);padding:22px}.card{position:relative;overflow:hidden;background:rgba(255,255,255,.94);border:1px solid rgba(148,163,184,.25);border-radius:28px;box-shadow:0 24px 80px rgba(15,23,42,.14);padding:42px}.card:before{content:"";position:absolute;inset:0 0 auto 0;height:6px;background:linear-gradient(90deg,#06b6d4,#6366f1,#f43f5e)}.top{display:flex;gap:18px;align-items:center}.icon{width:64px;height:64px;border-radius:22px;display:grid;place-items:center;font-size:34px;background:linear-gradient(135deg,#e0f2fe,#ede9fe);box-shadow:inset 0 1px 0 rgba(255,255,255,.8)}.kicker{font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#64748b}.title{margin-top:6px;font-size:28px;font-weight:800;letter-spacing:-.03em}.msg{margin-top:18px;color:#475569;line-height:1.8;font-size:15px}.meta{display:grid;gap:10px;margin-top:28px;padding:16px;border-radius:18px;background:#f8fafc;border:1px solid #e2e8f0}.row{display:flex;justify-content:space-between;gap:18px;font-size:12px;color:#64748b}.row code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#0f172a;word-break:break-all}.footer{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:24px;color:#94a3b8;font-size:12px}.pill{border-radius:999px;border:1px solid #e2e8f0;background:#fff;padding:6px 10px;color:#64748b}`
+func defaultFallbackHTML(reqID string, _ action.Result, maintenance bool, actionType action.Type) string {
+	data := fallbackPageData{
+		Maintenance: maintenance,
+		RequestID:   reqID,
+	}
 	if maintenance {
-		return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service Maintenance</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128736;</div><div><div class="kicker">Maintenance</div><h1 class="title">服务维护中</h1></div></div><p class="msg">服务正在进行维护，请稍后再试。The service is under maintenance, please try again later.</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div></div><div class="footer"><span>Protected by My-OpenWaf</span><span class="pill">503 Service Unavailable</span></div></section></main></body></html>`
+		data.Title = "服务维护中"
+		data.Message = "服务正在进行维护，请稍后再试。The service is under maintenance, please try again later."
+		data.Label = "503 Service Unavailable"
+	} else {
+		data.Title = "访问被拒绝"
+		data.Message = "您的请求已被 Web 应用防火墙拦截。Your request was blocked by the web application firewall."
+		data.Label = "403 Forbidden"
+		if action.Normalize(actionType) == action.RateLimit {
+			data.Title = "请求过于频繁"
+			data.Message = "当前访问频率过高，请稍后重试。Too many requests, please retry later."
+			data.Label = "429 Too Many Requests"
+		}
 	}
-	// 防止信息泄露：仅向用户展示 Request ID，
-	// 不暴露 Action、Rule ID、Phase、Category、MatchDesc 等 WAF 内部信息。
-	title := "访问被拒绝"
-	label := "403 Forbidden"
-	message := "您的请求已被 Web 应用防火墙拦截。Your request was blocked by the web application firewall."
-	if action.Normalize(actionType) == action.RateLimit {
-		title = "请求过于频繁"
-		label = "429 Too Many Requests"
-		message = "当前访问频率过高，请稍后重试。Too many requests, please retry later."
-	}
-	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title><style>` + baseStyle + `</style></head><body><main class="shell"><section class="card"><div class="top"><div class="icon">&#128737;</div><div><div class="kicker">Security Event</div><h1 class="title">` + title + `</h1></div></div><p class="msg">` + message + `</p><div class="meta"><div class="row"><span>Request ID</span><code>` + reqID + `</code></div></div><div class="footer"><span>Protected by My-OpenWAF</span><span class="pill">` + label + `</span></div></section></main></body></html>`
+	return renderFallbackPage(data)
 }
 
 func valueOrFallback(value, fallback string) string {
@@ -193,115 +219,65 @@ func valueOrFallback(value, fallback string) string {
 }
 
 func buildErrorFallbackHTML(reqID string, statusCode int) string {
-	title := "Error"
-	titleZh := "错误"
-	msg := "An error occurred while processing your request."
-	msgZh := "处理您的请求时发生错误。"
-	icon := "&#9888;"
+	data := upstreamErrorPageData{
+		StatusCode: statusCode,
+		Title:      "Error",
+		TitleZh:    "错误",
+		Message:    "An error occurred while processing your request.",
+		MessageZh:  "处理您的请求时发生错误。",
+		RequestID:  reqID,
+		Icon:       template.HTML("&#9888;"),
+	}
 	switch statusCode {
 	case 502:
-		title = "Bad Gateway"
-		titleZh = "网关错误"
-		msg = "The upstream server returned an invalid response."
-		msgZh = "上游服务器返回了无效的响应。"
-		icon = "&#9889;"
+		data.Title = "Bad Gateway"
+		data.TitleZh = "网关错误"
+		data.Message = "The upstream server returned an invalid response."
+		data.MessageZh = "上游服务器返回了无效的响应。"
+		data.Icon = template.HTML("&#9889;")
 	case 503:
-		title = "Service Unavailable"
-		titleZh = "服务不可用"
-		msg = "The service is temporarily unavailable."
-		msgZh = "服务暂时不可用，请稍后再试。"
-		icon = "&#128736;"
+		data.Title = "Service Unavailable"
+		data.TitleZh = "服务不可用"
+		data.Message = "The service is temporarily unavailable."
+		data.MessageZh = "服务暂时不可用，请稍后再试。"
+		data.Icon = template.HTML("&#128736;")
 	case 504:
-		title = "Gateway Timeout"
-		titleZh = "网关超时"
-		msg = "The upstream server did not respond in time."
-		msgZh = "上游服务器未能及时响应。"
-		icon = "&#9203;"
+		data.Title = "Gateway Timeout"
+		data.TitleZh = "网关超时"
+		data.Message = "The upstream server did not respond in time."
+		data.MessageZh = "上游服务器未能及时响应。"
+		data.Icon = template.HTML("&#9203;")
 	}
-	return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + title + `</title>` +
-		`<style>` +
-		`*{margin:0;padding:0;box-sizing:border-box}` +
-		`body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 40%,#f1f5f9 100%);color:#1e293b}` +
-		`.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);max-width:480px;width:92%;padding:48px 40px;text-align:center}` +
-		`.icon{font-size:52px;margin-bottom:8px;line-height:1.2}` +
-		`.code{font-size:4rem;font-weight:800;color:#14b8a6;margin-bottom:4px}` +
-		`h2{font-size:1.2rem;font-weight:600;color:#334155;margin-bottom:6px}` +
-		`.msg{font-size:.9rem;color:#64748b;line-height:1.6;margin-bottom:4px}` +
-		`.divider{width:48px;height:3px;background:#14b8a6;border-radius:2px;margin:20px auto}` +
-		`.rid{font-size:.75rem;color:#94a3b8;margin-top:8px}` +
-		`.footer{margin-top:24px;padding-top:16px;border-top:1px solid #f1f5f9;font-size:.7rem;color:#94a3b8}` +
-		`</style></head><body><div class="card">` +
-		`<div class="icon">` + icon + `</div>` +
-		`<div class="code">` + strconv.Itoa(statusCode) + `</div>` +
-		`<h2>` + title + ` / ` + titleZh + `</h2>` +
-		`<div class="divider"></div>` +
-		`<p class="msg">` + msg + `</p>` +
-		`<p class="msg">` + msgZh + `</p>` +
-		`<p class="rid">Request ID: ` + reqID + `</p>` +
-		`<div class="footer">Protected by My-OpenWAF</div>` +
-		`</div></body></html>`
+	return renderUpstreamErrorPage(data)
 }
 
-func buildChallengeHTML(reqID, ts, token, envJS, powScript string) string {
-	return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Security Check</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 40%,#f1f5f9 100%);color:#1e293b}
-.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);max-width:460px;width:92%;padding:48px 40px;text-align:center}
-.icon{font-size:48px;margin-bottom:16px;line-height:1.2}
-.spinner{width:40px;height:40px;border:3px solid #e2e8f0;border-top-color:#14b8a6;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 20px}
-@keyframes spin{to{transform:rotate(360deg)}}
-h2{font-size:1.15rem;font-weight:600;color:#334155;margin-bottom:6px}
-.sub{font-size:.875rem;color:#64748b;margin-bottom:4px}
-.bar{width:100%;height:4px;background:#e2e8f0;border-radius:2px;margin:20px 0;overflow:hidden}
-.bar-fill{height:100%;width:30%;background:linear-gradient(90deg,#14b8a6,#0d9488);border-radius:2px;animation:loading 2s ease-in-out infinite}
-@keyframes loading{0%{width:10%}50%{width:70%}100%{width:95%}}
-#msg{margin-top:12px;color:#ef4444;font-size:.8rem;display:none}
-.rid{font-size:.7rem;color:#94a3b8;margin-top:20px}
-.footer{margin-top:20px;padding-top:14px;border-top:1px solid #f1f5f9;font-size:.7rem;color:#94a3b8}
-</style>
-</head><body><div class="card">
-<div class="icon">&#128737;</div>
-<div class="spinner"></div>
-<h2>Checking your browser / 正在验证您的浏览器</h2>
-<p class="sub">This process is automatic, please wait...</p>
-<p class="sub">此过程是自动的，请稍候...</p>
-<div class="bar"><div class="bar-fill"></div></div>
-<p id="msg"></p>
-<p class="rid">Request ID: ` + reqID + `</p>
-<div class="footer">Protected by My-OpenWAF</div>
-</div>
-<script>
-` + envJS + `
-` + powScript + `
-(function(){
-var ts="` + ts + `",tk="` + token + `",rid="` + reqID + `";
-var submitted=false;
-function fail(m){
-var el=document.getElementById("msg");
-if(el){el.textContent=m;el.style.display="block"}
-}
-function submit(counter,hash,res){
-if(submitted)return;submitted=true;
-var d=document.createElement("form");d.method="POST";d.style.display="none";
-function af(n,v){var i=document.createElement("input");i.type="hidden";i.name=n;i.value=v;d.appendChild(i)}
-af("__waf_challenge_ts",ts);af("__waf_challenge_token",tk);af("__waf_challenge_rid",rid);
-af("__waf_challenge_proof",hash);af("__waf_challenge_counter",String(counter));
-try{
-if(res){
-if(res.env_score!==undefined&&res.env_score!==null)af("__waf_env_score",String(res.env_score));
-if(res.markers)af("__waf_env_markers",String(res.markers));
-if(res.sig)af("__waf_pow_sig",String(res.sig));
-}
-if(window.__owaf_env_encrypted)af("__waf_env_fp",window.__owaf_env_encrypted);
-}catch(e){}
-document.body.appendChild(d);d.submit();
-}
-// WASM 求解完成后回调；无 JS 降级，WASM 不可用即无法通过挑战。
-window.__owaf_pow_callback=function(c,h,res){submit(c,h,res)};
-setTimeout(function(){
-if(!submitted)fail("Verification is taking longer than expected. Please refresh. / 验证超时，请刷新页面。")
-},30000);
-})();
-</script></body></html>`
+func buildChallengeHTML(reqID, ts, token, envJS, powScript string, cfg pageconfig.ChallengePageConfig) string {
+	defaults := pageconfig.DefaultChallengePageConfig()
+	if cfg.BrandName == "" {
+		cfg = defaults
+	}
+	data := challengePageData{
+		RequestID:      reqID,
+		EnvJS:          template.JS(envJS),
+		PowScript:      template.JS(powScript),
+		TimestampJS:    javascriptString(ts),
+		TokenJS:        javascriptString(token),
+		RequestIDJS:    javascriptString(reqID),
+		PageTitle:      valueOrFallback(cfg.Title, defaults.Title),
+		BrandName:      valueOrFallback(cfg.BrandName, defaults.BrandName),
+		CheckingText:   valueOrFallback(cfg.CheckingText, defaults.CheckingText),
+		CheckingTextZh: valueOrFallback(cfg.CheckingTextZh, defaults.CheckingTextZh),
+		WaitText:       valueOrFallback(cfg.WaitText, defaults.WaitText),
+		WaitTextZh:     valueOrFallback(cfg.WaitTextZh, defaults.WaitTextZh),
+		FooterText:     valueOrFallback(cfg.FooterText, defaults.FooterText),
+		PrimaryColor:   template.CSS(pageconfig.SafePrimaryColor(cfg.PrimaryColor, defaults.PrimaryColor)),
+		Background:     template.CSS(pageconfig.SafeBackground(cfg.BgGradient, defaults.BgGradient)),
+		LogoURL:        pageconfig.SafeLogoURL(cfg.LogoURL),
+		CustomCSS:      template.CSS(pageconfig.SanitizeCSS(cfg.CustomCSS)),
+	}
+	page, err := executePageTemplate("challenge.html", data)
+	if err != nil {
+		return "<!DOCTYPE html><html><head><title>Security Check</title></head><body><h1>Security Check</h1></body></html>"
+	}
+	return string(page)
 }

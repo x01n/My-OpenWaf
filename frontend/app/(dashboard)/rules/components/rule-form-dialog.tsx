@@ -1,33 +1,38 @@
-"use client";
+"use client"
 
-import { useEffect, useState, useCallback } from "react";
-import { useTranslation } from "react-i18next";
-import { useForm, Controller, useWatch } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
+import { useEffect, useState, useCallback } from "react"
+import { useTranslation } from "react-i18next"
+import { useForm, Controller, useWatch } from "react-hook-form"
+import { zodResolver } from "@hookform/resolvers/zod"
+import { z } from "zod"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+} from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Checkbox } from "@/components/ui/checkbox";
-import { cn } from "@/lib/utils";
-import { IconShieldCheck, IconBan, IconPlus, IconTrash } from "@tabler/icons-react";
-import { useRuleMutation } from "@/hooks/use-api";
-import { toast } from "sonner";
-import type { Rule } from "@/lib/types";
+} from "@/components/ui/select"
+import { Checkbox } from "@/components/ui/checkbox"
+import { cn } from "@/lib/utils"
+import {
+  IconShieldCheck,
+  IconBan,
+  IconPlus,
+  IconTrash,
+} from "@tabler/icons-react"
+import { useRuleMutation } from "@/hooks/use-api"
+import { toast } from "sonner"
+import type { Rule } from "@/lib/types"
 
 // ============================================================
 // 条件行与条件组类型定义
@@ -35,24 +40,24 @@ import type { Rule } from "@/lib/types";
 
 /** 单个匹配条件行 */
 interface ConditionRow {
-  target: string;
-  method: string;
-  content: string;
+  target: string
+  method: string
+  content: string
 }
 
 /**
  * 条件组结构：外层数组为 OR 关系，内层数组为 AND 关系
  * 例如: [[row1, row2], [row3]] 表示 (row1 AND row2) OR (row3)
  */
-type ConditionGroups = ConditionRow[][];
+type ConditionGroups = ConditionRow[][]
 
 /** 序列化后的条件 JSON 结构 */
 interface ConditionNode {
-  op?: "and" | "or";
-  children?: ConditionNode[];
-  target?: string;
-  method?: string;
-  content?: string;
+  op?: "and" | "or"
+  children?: ConditionNode[]
+  target?: string
+  method?: string
+  content?: string
 }
 
 // ============================================================
@@ -74,7 +79,7 @@ const matchTargets = [
   { value: "http_resp", label: "rules.targetHttpResp" },
   { value: "method", label: "rules.targetMethod" },
   { value: "ja4", label: "rules.targetJa4" },
-];
+]
 
 /** 匹配方式选项 */
 const matchMethods = [
@@ -87,13 +92,13 @@ const matchMethods = [
   { value: "not_in_ip_group", label: "rules.methodNotInIpGroup" },
   { value: "in_geo", label: "rules.methodInGeo" },
   { value: "not_in_geo", label: "rules.methodNotInGeo" },
-];
+]
 
 /** 限制结果选项 */
 const limitActions = [
   { value: "captcha_challenge", label: "rules.actionCaptcha" },
   { value: "block", label: "rules.actionBlock" },
-];
+]
 
 // ============================================================
 // 条件组序列化/反序列化
@@ -101,12 +106,12 @@ const limitActions = [
 
 /** 创建一个空的条件行 */
 function createEmptyRow(): ConditionRow {
-  return { target: "src_ip", method: "eq", content: "" };
+  return { target: "src_ip", method: "eq", content: "" }
 }
 
 /** 创建包含一个空条件行的默认条件组 */
 function createDefaultGroups(): ConditionGroups {
-  return [[createEmptyRow()]];
+  return [[createEmptyRow()]]
 }
 
 /**
@@ -120,7 +125,7 @@ function serializeGroups(groups: ConditionGroups): string {
         target: rows[0].target,
         method: rows[0].method,
         content: rows[0].content,
-      };
+      }
     }
     return {
       op: "and" as const,
@@ -129,14 +134,14 @@ function serializeGroups(groups: ConditionGroups): string {
         method: r.method,
         content: r.content,
       })),
-    };
-  });
+    }
+  })
 
   if (orChildren.length === 1) {
-    return JSON.stringify(orChildren[0]);
+    return JSON.stringify(orChildren[0])
   }
 
-  return JSON.stringify({ op: "or", children: orChildren });
+  return JSON.stringify({ op: "or", children: orChildren })
 }
 
 /**
@@ -145,15 +150,15 @@ function serializeGroups(groups: ConditionGroups): string {
  */
 function parsePattern(pattern: string): ConditionGroups {
   if (!pattern || pattern.trim() === "") {
-    return createDefaultGroups();
+    return createDefaultGroups()
   }
 
   try {
-    const parsed = JSON.parse(pattern) as ConditionNode;
-    return nodeToGroups(parsed);
+    const parsed = JSON.parse(pattern) as ConditionNode
+    return nodeToGroups(parsed)
   } catch {
     // 旧格式：纯字符串作为单条件的 content
-    return [[{ target: "src_ip", method: "eq", content: pattern }]];
+    return [[{ target: "src_ip", method: "eq", content: pattern }]]
   }
 }
 
@@ -161,40 +166,52 @@ function parsePattern(pattern: string): ConditionGroups {
 function nodeToGroups(node: ConditionNode): ConditionGroups {
   // 叶子节点：包含 target/method/content
   if (node.target && node.method) {
-    return [[{
-      target: node.target,
-      method: node.method,
-      content: node.content || "",
-    }]];
+    return [
+      [
+        {
+          target: node.target,
+          method: node.method,
+          content: node.content || "",
+        },
+      ],
+    ]
   }
 
   if (node.op === "or" && node.children) {
     return node.children.flatMap((child) => {
       if (child.op === "and" && child.children) {
-        return [child.children.map((leaf) => ({
-          target: leaf.target || "src_ip",
-          method: leaf.method || "eq",
-          content: leaf.content || "",
-        }))];
+        return [
+          child.children.map((leaf) => ({
+            target: leaf.target || "src_ip",
+            method: leaf.method || "eq",
+            content: leaf.content || "",
+          })),
+        ]
       }
       // 单叶子作为一个 OR 组
-      return [[{
-        target: child.target || "src_ip",
-        method: child.method || "eq",
-        content: child.content || "",
-      }]];
-    });
+      return [
+        [
+          {
+            target: child.target || "src_ip",
+            method: child.method || "eq",
+            content: child.content || "",
+          },
+        ],
+      ]
+    })
   }
 
   if (node.op === "and" && node.children) {
-    return [node.children.map((leaf) => ({
-      target: leaf.target || "src_ip",
-      method: leaf.method || "eq",
-      content: leaf.content || "",
-    }))];
+    return [
+      node.children.map((leaf) => ({
+        target: leaf.target || "src_ip",
+        method: leaf.method || "eq",
+        content: leaf.content || "",
+      })),
+    ]
   }
 
-  return createDefaultGroups();
+  return createDefaultGroups()
 }
 
 // ============================================================
@@ -209,22 +226,23 @@ const formSchema = z.object({
   action: z.string().min(1, "rules.actionRequired"),
   captchaMinutes: z.number().min(0, "rules.captchaMinutesInvalid").optional(),
   enabled: z.boolean(),
-});
+})
 
 type FormValues = {
-  type: "allow" | "block";
-  name: string;
-  windowSeconds?: number;
-  requestCount?: number;
-  action: string;
-  captchaMinutes?: number;
-  enabled: boolean;
-};
+  type: "allow" | "block"
+  name: string
+  windowSeconds?: number
+  requestCount?: number
+  action: string
+  captchaMinutes?: number
+  enabled: boolean
+}
 
 interface RuleFormDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  rule?: Rule | null;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  rule?: Rule | null
+  policyId?: number
 }
 
 /**
@@ -235,15 +253,16 @@ export function RuleFormDialog({
   open,
   onOpenChange,
   rule,
+  policyId,
 }: RuleFormDialogProps) {
-  const { execute: mutateRule, loading } = useRuleMutation();
-  const { t } = useTranslation();
+  const { execute: mutateRule, loading } = useRuleMutation()
+  const { t } = useTranslation()
 
   // 条件组状态，独立于 react-hook-form 管理
   const [conditionGroups, setConditionGroups] = useState<ConditionGroups>(
     createDefaultGroups()
-  );
-  const [conditionError, setConditionError] = useState<string>("");
+  )
+  const [conditionError, setConditionError] = useState<string>("")
 
   const {
     register,
@@ -262,9 +281,9 @@ export function RuleFormDialog({
       captchaMinutes: 5,
       enabled: true,
     },
-  });
+  })
 
-  const typeValue = useWatch({ control, name: "type" });
+  const typeValue = useWatch({ control, name: "type" })
 
   // ============================================================
   // 条件组操作方法
@@ -272,62 +291,67 @@ export function RuleFormDialog({
 
   /** 更新指定条件行的某个字段 */
   const updateRow = useCallback(
-    (groupIdx: number, rowIdx: number, field: keyof ConditionRow, value: string) => {
+    (
+      groupIdx: number,
+      rowIdx: number,
+      field: keyof ConditionRow,
+      value: string
+    ) => {
       setConditionGroups((prev) => {
-        const next = prev.map((g) => g.map((r) => ({ ...r })));
-        next[groupIdx][rowIdx][field] = value;
-        return next;
-      });
-      setConditionError("");
+        const next = prev.map((g) => g.map((r) => ({ ...r })))
+        next[groupIdx][rowIdx][field] = value
+        return next
+      })
+      setConditionError("")
     },
     []
-  );
+  )
 
   /** 在指定 AND 组内添加一行条件 */
   const addRowToGroup = useCallback((groupIdx: number) => {
     setConditionGroups((prev) => {
-      const next = prev.map((g) => [...g]);
-      next[groupIdx] = [...next[groupIdx], createEmptyRow()];
-      return next;
-    });
-  }, []);
+      const next = prev.map((g) => [...g])
+      next[groupIdx] = [...next[groupIdx], createEmptyRow()]
+      return next
+    })
+  }, [])
 
   /** 删除指定条件行；如果组内只有一行则删除整个组 */
   const removeRow = useCallback((groupIdx: number, rowIdx: number) => {
     setConditionGroups((prev) => {
-      const next = prev.map((g) => [...g]);
+      const next = prev.map((g) => [...g])
       if (next[groupIdx].length <= 1) {
         // 删除整个 OR 组
-        next.splice(groupIdx, 1);
+        next.splice(groupIdx, 1)
         // 至少保留一个组
-        if (next.length === 0) return createDefaultGroups();
-        return next;
+        if (next.length === 0) return createDefaultGroups()
+        return next
       }
-      next[groupIdx] = next[groupIdx].filter((_, i) => i !== rowIdx);
-      return next;
-    });
-  }, []);
+      next[groupIdx] = next[groupIdx].filter((_, i) => i !== rowIdx)
+      return next
+    })
+  }, [])
 
   /** 删除整个 OR 条件组 */
   const removeGroup = useCallback((groupIdx: number) => {
     setConditionGroups((prev) => {
-      const next = prev.filter((_, i) => i !== groupIdx);
-      if (next.length === 0) return createDefaultGroups();
-      return next;
-    });
-  }, []);
+      const next = prev.filter((_, i) => i !== groupIdx)
+      if (next.length === 0) return createDefaultGroups()
+      return next
+    })
+  }, [])
 
   /** 添加一个新的 OR 条件组 */
   const addGroup = useCallback(() => {
-    setConditionGroups((prev) => [...prev, [createEmptyRow()]]);
-  }, []);
+    setConditionGroups((prev) => [...prev, [createEmptyRow()]])
+  }, [])
 
   // ============================================================
   // 表单初始化
   // ============================================================
 
   // 表单初始化
-   
+
   useEffect(() => {
     if (open && rule) {
       reset({
@@ -338,11 +362,11 @@ export function RuleFormDialog({
         action: rule.action === "allow" ? "block" : rule.action,
         captchaMinutes: 5,
         enabled: rule.enabled,
-      });
+      })
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setConditionGroups(parsePattern(rule.pattern));
-       
-      setConditionError("");
+      setConditionGroups(parsePattern(rule.pattern))
+
+      setConditionError("")
     } else if (open && !rule) {
       reset({
         type: "block",
@@ -352,13 +376,13 @@ export function RuleFormDialog({
         action: "block",
         captchaMinutes: 5,
         enabled: true,
-      });
-       
-      setConditionGroups(createDefaultGroups());
-       
-      setConditionError("");
+      })
+
+      setConditionGroups(createDefaultGroups())
+
+      setConditionError("")
     }
-  }, [open, rule, reset]);
+  }, [open, rule, reset])
 
   // ============================================================
   // 条件组验证
@@ -369,31 +393,37 @@ export function RuleFormDialog({
     for (const group of conditionGroups) {
       for (const row of group) {
         if (!row.target || !row.method || !row.content.trim()) {
-          setConditionError(t("rules.conditionIncomplete", "请完善所有匹配条件"));
-          return false;
+          setConditionError(
+            t("rules.conditionIncomplete", "请完善所有匹配条件")
+          )
+          return false
         }
       }
     }
-    if (conditionGroups.length === 0 || conditionGroups.every((g) => g.length === 0)) {
-      setConditionError(t("rules.conditionRequired", "至少需要一个匹配条件"));
-      return false;
+    if (
+      conditionGroups.length === 0 ||
+      conditionGroups.every((g) => g.length === 0)
+    ) {
+      setConditionError(t("rules.conditionRequired", "至少需要一个匹配条件"))
+      return false
     }
-    setConditionError("");
-    return true;
-  };
+    setConditionError("")
+    return true
+  }
 
   // ============================================================
   // 表单提交
   // ============================================================
 
   const onSubmit = async (values: FormValues) => {
-    if (!validateConditions()) return;
+    if (!validateConditions()) return
 
     try {
-      const patternJson = serializeGroups(conditionGroups);
+      const patternJson = serializeGroups(conditionGroups)
 
       const payload: Record<string, unknown> = {
         name: values.name,
+        policy_id: rule?.policy_id ?? policyId,
         pattern: patternJson,
         action: values.type === "allow" ? "allow" : values.action,
         phase: "custom",
@@ -406,25 +436,25 @@ export function RuleFormDialog({
         window_seconds: values.windowSeconds,
         request_count: values.requestCount,
         captcha_minutes: values.captchaMinutes,
-      };
+      }
 
       await mutateRule({
         id: rule?.id,
         data: payload,
-      });
+      })
 
-      toast.success(rule ? t("rules.updateSuccess") : t("rules.createSuccess"));
-      onOpenChange(false);
+      toast.success(rule ? t("rules.updateSuccess") : t("rules.createSuccess"))
+      onOpenChange(false)
     } catch (err: unknown) {
       const message =
         err instanceof Error
           ? err.message
           : rule
             ? t("rules.updateFailed")
-            : t("rules.createFailed");
-      toast.error(message);
+            : t("rules.createFailed")
+      toast.error(message)
     }
-  };
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -514,7 +544,7 @@ export function RuleFormDialog({
                 )}
 
                 {/* 单个 AND 条件组 */}
-                <div className="rounded-2xl border border-dashed p-4 space-y-3">
+                <div className="space-y-3 rounded-2xl border border-dashed p-4">
                   {group.map((row, rowIdx) => (
                     <div key={rowIdx}>
                       {/* AND 分隔标签 */}
@@ -528,7 +558,7 @@ export function RuleFormDialog({
                       )}
 
                       {/* 条件行：匹配目标 + 匹配方式 + 匹配内容 + 删除 */}
-                      <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end">
+                      <div className="grid grid-cols-[1fr_1fr_1fr_auto] items-end gap-2">
                         {/* 匹配目标 */}
                         <div className="space-y-1">
                           {rowIdx === 0 && (
@@ -636,7 +666,7 @@ export function RuleFormDialog({
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="text-primary border-primary/30 hover:bg-primary/5"
+                      className="border-primary/30 text-primary hover:bg-primary/5"
                       onClick={() => addRowToGroup(groupIdx)}
                     >
                       <IconPlus className="mr-1 h-3.5 w-3.5" />
@@ -763,5 +793,5 @@ export function RuleFormDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

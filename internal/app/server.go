@@ -7,7 +7,9 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -25,6 +27,8 @@ import (
 	shconfig "github.com/hertz-contrib/http2/config"
 	shfactory "github.com/hertz-contrib/http2/factory"
 	goredis "github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/hkdf"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
 	acmepkg "My-OpenWaf/internal/acme"
@@ -55,6 +59,7 @@ import (
 	"My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/iprep"
 	"My-OpenWaf/internal/waf/luaplugin"
+	"My-OpenWaf/internal/waf/owasp"
 	"My-OpenWaf/internal/waf/ratelimit"
 	"My-OpenWaf/internal/waf/threatintel"
 )
@@ -166,7 +171,8 @@ func ResetAdminPassword(args []string) error {
 func Run() {
 	hlog.SetLevel(hlog.LevelFatal)
 	log := logger.New("app")
-	ctx := context.Background()
+	ctx, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
 	acmeCtx, cancelACME := context.WithCancel(ctx)
 	defer cancelACME()
 
@@ -179,6 +185,10 @@ func Run() {
 
 	if err := store.AutoMigrate(rt.DB); err != nil {
 		log.Error("auto migrate failed", slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := owasp.ReconcileBuiltinCatalog(rt.DB); err != nil {
+		log.Error("reconcile OWASP catalog failed", slog.Any("err", err))
 		os.Exit(1)
 	}
 	if err := store.AutoMigrateLogs(rt.LogDB); err != nil {
@@ -207,13 +217,21 @@ func Run() {
 		logger.Banner(bannerLines...)
 	}
 
+	// Resolve the persistent process secret before building snapshots so dynamic
+	// protection never falls back to its deterministic public key material.
+	jwtSecret, err := resolveJWTSecret(rt)
+	if err != nil {
+		log.Error("resolve persistent JWT secret failed", slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := rt.SetSnapshotDynamicKeyBase(deriveDynamicProtectionKeyBase(jwtSecret)); err != nil {
+		log.Error("configure snapshot dynamic protection key failed", slog.Any("err", err))
+		os.Exit(1)
+	}
 	if err := rt.ReloadSnapshot(); err != nil {
 		log.Error("initial snapshot build failed", slog.Any("err", err))
 		os.Exit(1)
 	}
-
-	// Resolve JWT secret from env or DB.
-	jwtSecret := resolveJWTSecret(rt)
 
 	// Derive challenge cookie secret from JWT secret for persistence across restarts.
 	challenge.SetChallengeSecret(jwtSecret)
@@ -913,6 +931,7 @@ func Run() {
 
 	lm.Start()
 	lm.WaitForSignal()
+	stopBackground()
 }
 
 func siteListenerName(bind string) string {
@@ -1207,19 +1226,46 @@ func loadDropPolicy(repo *repository.SystemSettingsRepo, fallback core.DropConfi
 	return cfg
 }
 
-func resolveJWTSecret(rt *core.Runtime) []byte {
+func resolveJWTSecret(rt *core.Runtime) ([]byte, error) {
+	return resolveJWTSecretWithRandomRead(rt, rand.Read)
+}
+
+func resolveJWTSecretWithRandomRead(rt *core.Runtime, randomRead func([]byte) (int, error)) ([]byte, error) {
 	if s := strings.TrimSpace(os.Getenv("MY_OPENWAF_JWT_SECRET")); s != "" {
-		return []byte(s)
+		return []byte(s), nil
 	}
 	var setting store.SystemSettings
-	if err := rt.DB.Where(clause.Eq{Column: clause.Column{Name: "key"}, Value: "jwt_secret"}).First(&setting).Error; err == nil && setting.Value != "" {
-		return []byte(setting.Value)
+	err := rt.DB.Where(clause.Eq{Column: clause.Column{Name: "key"}, Value: store.SettingKeyJWTSecret}).First(&setting).Error
+	if err == nil {
+		if setting.Value != "" {
+			return []byte(setting.Value), nil
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("load JWT secret from database: %w", err)
 	}
+
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := randomRead(b); err != nil {
+		return nil, fmt.Errorf("generate JWT secret: %w", err)
+	}
 	secret := hex.EncodeToString(b)
-	rt.DB.Create(&store.SystemSettings{Key: "jwt_secret", Value: secret})
-	return []byte(secret)
+	if err := rt.DB.Create(&store.SystemSettings{Key: store.SettingKeyJWTSecret, Value: secret}).Error; err != nil {
+		return nil, fmt.Errorf("persist generated JWT secret: %w", err)
+	}
+	return []byte(secret), nil
+}
+
+const dynamicProtectionKeyInfo = "my-openwaf/dynamic-protection/encryption-key-base/v1"
+
+// deriveDynamicProtectionKeyBase derives a dedicated 32-byte dynamic-protection
+// key base from the existing persistent JWT secret without reusing the JWT key directly.
+func deriveDynamicProtectionKeyBase(jwtSecret []byte) []byte {
+	reader := hkdf.New(sha256.New, jwtSecret, nil, []byte(dynamicProtectionKeyInfo))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(reader, key); err != nil {
+		panic("dynamic protection key derivation failed: " + err.Error())
+	}
+	return key
 }
 
 // buildDataServer creates a Hertz server for a data-plane listener,

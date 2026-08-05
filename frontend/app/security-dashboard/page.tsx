@@ -1,4 +1,4 @@
-"use client";
+"use client"
 
 /**
  * 安全防护监控大屏
@@ -13,8 +13,8 @@
  * 数据源全部复用 dashboard 现有 hook，30 秒轮询由 SWR 自动完成。
  */
 
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import Link from "next/link";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react"
+import Link from "next/link"
 import {
   IconArrowLeft,
   IconMaximize,
@@ -27,7 +27,7 @@ import {
   IconTrophyFilled,
   IconActivity,
   IconAlertTriangle,
-} from "@tabler/icons-react";
+} from "@tabler/icons-react"
 import {
   Bar,
   BarChart,
@@ -36,24 +36,25 @@ import {
   Tooltip,
   XAxis,
   YAxis,
-} from "recharts";
-import { useTranslation } from "react-i18next";
+} from "recharts"
+import { useTranslation } from "react-i18next"
 import {
   useDashboard,
   useDashboardStats,
   useSecurityEvents,
-} from "@/hooks/use-api";
-import { GeoAttackDistribution } from "@/components/geo-attack-distribution";
-import { formatNumber } from "@/lib/utils";
-import { countryFlag, countryName } from "@/lib/country-names";
-import type { SecurityEvent, SecurityEventStats } from "@/lib/types";
+} from "@/hooks/use-api"
+import { GeoAttackDistribution } from "@/components/geo-attack-distribution"
+import { formatNumber } from "@/lib/utils"
+import { categoryLabel } from "@/lib/attack-category"
+import { countryFlag, countryName } from "@/lib/country-names"
+import type { SecurityEvent, SecurityEventStats } from "@/lib/types"
 
-const MAX_QPS_POINTS = 30;
-const LIVE_ATTACK_LIMIT = 12;
+const MAX_QPS_POINTS = 30
+const LIVE_ATTACK_LIMIT = 12
 
 interface QPSPoint {
-  time: string;
-  qps: number;
+  time: string
+  qps: number
 }
 
 /**
@@ -61,11 +62,11 @@ interface QPSPoint {
  */
 function formatTime(iso: string): string {
   try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return "--:--:--";
-    return d.toTimeString().slice(0, 8);
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return "--:--:--"
+    return d.toTimeString().slice(0, 8)
   } catch {
-    return "--:--:--";
+    return "--:--:--"
   }
 }
 
@@ -75,13 +76,13 @@ function formatTime(iso: string): string {
 function medalClass(idx: number): string {
   switch (idx) {
     case 0:
-      return "text-yellow-400";
+      return "text-yellow-400"
     case 1:
-      return "text-slate-300";
+      return "text-slate-300"
     case 2:
-      return "text-amber-600";
+      return "text-amber-600"
     default:
-      return "text-slate-500";
+      return "text-slate-500"
   }
 }
 
@@ -94,10 +95,10 @@ function Panel({
   children,
   className = "",
 }: {
-  title?: string;
-  icon?: React.ReactNode;
-  children: React.ReactNode;
-  className?: string;
+  title?: string
+  icon?: React.ReactNode
+  children: React.ReactNode
+  className?: string
 }) {
   return (
     <div
@@ -111,7 +112,7 @@ function Panel({
       )}
       <div className="flex-1 overflow-hidden p-4">{children}</div>
     </div>
-  );
+  )
 }
 
 /**
@@ -123,14 +124,14 @@ function BigStat({
   icon,
   accent,
 }: {
-  label: string;
-  value: string;
-  icon: React.ReactNode;
-  accent: string;
+  label: string
+  value: string
+  icon: React.ReactNode
+  accent: string
 }) {
   return (
     <div className="relative flex flex-col justify-between overflow-hidden rounded-xl border border-teal-500/20 bg-gradient-to-br from-slate-900/70 to-slate-950/70 p-4 shadow-[0_0_24px_-12px_rgba(20,184,166,0.4)] backdrop-blur">
-      <div className="flex items-center justify-between text-xs uppercase tracking-wider text-slate-400">
+      <div className="flex items-center justify-between text-xs tracking-wider text-slate-400 uppercase">
         <span>{label}</span>
         <span className={accent}>{icon}</span>
       </div>
@@ -141,85 +142,85 @@ function BigStat({
         {value}
       </div>
     </div>
-  );
+  )
 }
 
 export default function SecurityDashboardPage() {
-  const { t } = useTranslation();
-  const HOURS = 24;
+  const { t } = useTranslation()
+  const HOURS = 24
 
-  const { data: dashboard } = useDashboard();
+  const { data: dashboard } = useDashboard()
   const { data: stats } = useDashboardStats({ hours: HOURS }) as {
-    data?: SecurityEventStats;
-  };
+    data?: SecurityEventStats
+  }
   const { data: eventsResp } = useSecurityEvents({
     page: 1,
     page_size: LIVE_ATTACK_LIMIT,
-  }) as { data?: { items: SecurityEvent[]; total: number } };
+  }) as { data?: { items: SecurityEvent[]; total: number } }
 
   // 实时时间
-  const [now, setNow] = useState<Date | null>(null);
+  const [now, setNow] = useState<Date | null>(null)
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+    const timer = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   // 全屏切换
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false)
   useEffect(() => {
-    const handler = () => setIsFullscreen(Boolean(document.fullscreenElement));
-    document.addEventListener("fullscreenchange", handler);
-    return () => document.removeEventListener("fullscreenchange", handler);
-  }, []);
+    const handler = () => setIsFullscreen(Boolean(document.fullscreenElement))
+    document.addEventListener("fullscreenchange", handler)
+    return () => document.removeEventListener("fullscreenchange", handler)
+  }, [])
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
+      document.exitFullscreen().catch(() => {})
     } else {
-      document.documentElement.requestFullscreen().catch(() => {});
+      document.documentElement.requestFullscreen().catch(() => {})
     }
-  }, []);
+  }, [])
 
   // 实时 QPS 采样
-  const qpsRef = useRef<QPSPoint[]>([]);
-  const [qpsHistory, setQpsHistory] = useState<QPSPoint[]>([]);
+  const qpsRef = useRef<QPSPoint[]>([])
+  const [qpsHistory, setQpsHistory] = useState<QPSPoint[]>([])
   useEffect(() => {
-    if (!dashboard) return;
-    const d = new Date();
-    const timeStr = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+    if (!dashboard) return
+    const d = new Date()
+    const timeStr = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`
     const point: QPSPoint = {
       time: timeStr,
       qps: dashboard.qps_5s ?? dashboard.qps_1s ?? 0,
-    };
-    const next = [...qpsRef.current, point];
-    if (next.length > MAX_QPS_POINTS) {
-      next.splice(0, next.length - MAX_QPS_POINTS);
     }
-    qpsRef.current = next;
-    setQpsHistory([...next]);
-  }, [dashboard]);
+    const next = [...qpsRef.current, point]
+    if (next.length > MAX_QPS_POINTS) {
+      next.splice(0, next.length - MAX_QPS_POINTS)
+    }
+    qpsRef.current = next
+    setQpsHistory([...next])
+  }, [dashboard])
 
   // 攻击 IP -> 国家映射（利用最近事件补充地理信息）
   const ipCountryMap = useMemo(() => {
-    const map = new Map<string, string>();
+    const map = new Map<string, string>()
     for (const ev of eventsResp?.items ?? []) {
       if (ev.client_ip && ev.geo_country && !map.has(ev.client_ip)) {
-        map.set(ev.client_ip, ev.geo_country);
+        map.set(ev.client_ip, ev.geo_country)
       }
     }
-    return map;
-  }, [eventsResp]);
+    return map
+  }, [eventsResp])
 
-  const topIps = (stats?.top_ips ?? []).slice(0, 5);
-  const uniqueVisitors = stats?.top_ips?.length ?? 0;
-  const totalRequests = stats?.requests ?? 0;
-  const totalIntercepts = stats?.intercepts ?? 0;
+  const topIps = (stats?.top_ips ?? []).slice(0, 5)
+  const uniqueVisitors = dashboard?.unique_visitors_24h ?? 0
+  const totalRequests = stats?.requests ?? 0
+  const totalIntercepts = stats?.intercepts ?? 0
 
-  const liveAttacks = (eventsResp?.items ?? []).slice(0, LIVE_ATTACK_LIMIT);
+  const liveAttacks = (eventsResp?.items ?? []).slice(0, LIVE_ATTACK_LIMIT)
 
   const dateStr = now
     ? `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
-    : "----/--/--";
-  const timeStr = now ? now.toTimeString().slice(0, 8) : "--:--:--";
+    : "----/--/--"
+  const timeStr = now ? now.toTimeString().slice(0, 8) : "--:--:--"
 
   return (
     <div className="relative flex min-h-svh flex-col overflow-hidden bg-slate-950 text-slate-100">
@@ -251,7 +252,7 @@ export default function SecurityDashboardPage() {
         <div className="flex items-center gap-6">
           <div className="hidden text-right md:block">
             <div className="font-mono text-xs text-slate-400">{dateStr}</div>
-            <div className="font-mono text-lg font-semibold tabular-nums text-teal-300">
+            <div className="font-mono text-lg font-semibold text-teal-300 tabular-nums">
               {timeStr}
             </div>
           </div>
@@ -317,7 +318,7 @@ export default function SecurityDashboardPage() {
               {topIps.length > 0 ? (
                 <ul className="space-y-2.5">
                   {topIps.map((ip, idx) => {
-                    const cc = ipCountryMap.get(ip.client_ip);
+                    const cc = ipCountryMap.get(ip.client_ip)
                     return (
                       <li
                         key={ip.client_ip}
@@ -343,11 +344,11 @@ export default function SecurityDashboardPage() {
                             <span>{countryName(cc)}</span>
                           </span>
                         )}
-                        <span className="ml-auto font-mono text-sm font-semibold tabular-nums text-rose-400">
+                        <span className="ml-auto font-mono text-sm font-semibold text-rose-400 tabular-nums">
                           {formatNumber(ip.count)}
                         </span>
                       </li>
-                    );
+                    )
                   })}
                 </ul>
               ) : (
@@ -398,9 +399,9 @@ export default function SecurityDashboardPage() {
                       )}
                       <span className="ml-auto flex items-center gap-2">
                         <span className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-300">
-                          {ev.category || ev.action}
+                          {categoryLabel(ev.category || ev.action)}
                         </span>
-                        <span className="font-mono tabular-nums text-slate-400">
+                        <span className="font-mono text-slate-400 tabular-nums">
                           {formatTime(ev.created_at)}
                         </span>
                       </span>
@@ -423,10 +424,10 @@ export default function SecurityDashboardPage() {
             >
               <div className="flex items-center gap-6">
                 <div className="hidden shrink-0 flex-col md:flex">
-                  <span className="text-xs uppercase tracking-wider text-slate-400">
+                  <span className="text-xs tracking-wider text-slate-400 uppercase">
                     QPS
                   </span>
-                  <span className="font-mono text-3xl font-bold tabular-nums text-teal-300 drop-shadow-[0_0_8px_currentColor]">
+                  <span className="font-mono text-3xl font-bold text-teal-300 tabular-nums drop-shadow-[0_0_8px_currentColor]">
                     {dashboard?.qps_5s ?? dashboard?.qps_1s ?? 0}
                   </span>
                 </div>
@@ -498,5 +499,5 @@ export default function SecurityDashboardPage() {
         </div>
       </main>
     </div>
-  );
+  )
 }

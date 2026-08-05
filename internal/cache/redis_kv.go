@@ -3,8 +3,10 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -21,12 +23,15 @@ const redisPrefix = "openwaf:"
 type RedisKV struct {
 	mu     sync.RWMutex
 	client *goredis.Client
+	health atomic.Bool
 }
 
 // NewRedisKV creates a Redis KV cache. The wrapper stays usable even when the
 // underlying client is nil so runtime hot reload can attach Redis later.
 func NewRedisKV(client *goredis.Client) *RedisKV {
-	return &RedisKV{client: client}
+	r := &RedisKV{client: client}
+	r.health.Store(client != nil)
+	return r
 }
 
 func (r *RedisKV) clientValue() *goredis.Client {
@@ -46,21 +51,24 @@ func (r *RedisKV) SetClient(client *goredis.Client) {
 	r.mu.Lock()
 	r.client = client
 	r.mu.Unlock()
+	r.health.Store(client != nil)
 }
 
 func (r *RedisKV) Available() bool {
-	return r.clientValue() != nil
+	return r != nil && r.clientValue() != nil && r.health.Load()
 }
 
 // Set stores a byte value with TTL.
 func (r *RedisKV) Set(key string, value []byte, ttl time.Duration) error {
 	client := r.clientValue()
 	if client == nil {
-		return nil
+		return errors.New("redis kv unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	return client.Set(ctx, redisPrefix+key, value, ttl).Err()
+	err := client.Set(ctx, redisPrefix+key, value, ttl).Err()
+	r.health.Store(err == nil)
+	return err
 }
 
 // Get retrieves a byte value. Returns nil, false on miss.
@@ -73,8 +81,14 @@ func (r *RedisKV) Get(key string) ([]byte, bool) {
 	defer cancel()
 	val, err := client.Get(ctx, redisPrefix+key).Bytes()
 	if err != nil {
+		if err == goredis.Nil {
+			r.health.Store(true)
+		} else {
+			r.health.Store(false)
+		}
 		return nil, false
 	}
+	r.health.Store(true)
 	return val, true
 }
 
@@ -86,7 +100,8 @@ func (r *RedisKV) Delete(key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	client.Del(ctx, redisPrefix+key)
+	err := client.Del(ctx, redisPrefix+key).Err()
+	r.health.Store(err == nil)
 }
 
 // SetJSON marshals v to JSON and stores it with TTL.
@@ -114,7 +129,7 @@ func (r *RedisKV) GetJSON(key string, dest any) bool {
 func (r *RedisKV) Incr(key string, ttl time.Duration) (int64, error) {
 	client := r.clientValue()
 	if client == nil {
-		return 0, nil
+		return 0, errors.New("redis kv unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -123,8 +138,10 @@ func (r *RedisKV) Incr(key string, ttl time.Duration) (int64, error) {
 	pipe.Expire(ctx, redisPrefix+key, ttl)
 	_, err := pipe.Exec(ctx)
 	if err != nil {
+		r.health.Store(false)
 		return 0, err
 	}
+	r.health.Store(true)
 	return incr.Val(), nil
 }
 

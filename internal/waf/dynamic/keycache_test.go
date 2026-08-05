@@ -83,15 +83,19 @@ func TestDerivedKeysVaryWithKeyBase(t *testing.T) {
 	}
 }
 
-// TestDerivedKeysVaryWithDefaultBaseInputs 验证未配置 base 时，
-// 影响 defaultKeyBase 种子的开关变化会产出不同密钥（缓存键须覆盖这些字段）。
-func TestDerivedKeysVaryWithDefaultBaseInputs(t *testing.T) {
+// TestDerivedKeysIgnoreFeatureToggles 验证密钥只由基础密钥和站点隔离，
+// 开关变化不会造成无意义的密钥轮换。
+func TestDerivedKeysIgnoreFeatureToggles(t *testing.T) {
 	resetKeyCache()
-	htmlOnly := NewProcessor(ProtectionConfig{SiteID: 5, HTMLObfuscationEnabled: true})
-	both := NewProcessor(ProtectionConfig{SiteID: 5, HTMLObfuscationEnabled: true, JSObfuscationEnabled: true})
+	base := bytes.Repeat([]byte{0x5C}, 32)
+	htmlOnly := NewProcessor(ProtectionConfig{SiteID: 5, HTMLObfuscationEnabled: true, EncryptionKeyBase: base})
+	both := NewProcessor(ProtectionConfig{SiteID: 5, HTMLObfuscationEnabled: true, JSObfuscationEnabled: true, EncryptionKeyBase: base})
 
-	if bytes.Equal(htmlOnly.cek, both.cek) {
-		t.Fatal("defaultKeyBase 种子不同时必须派生出不同密钥")
+	if !bytes.Equal(htmlOnly.cek, both.cek) || !bytes.Equal(htmlOnly.kek, both.kek) {
+		t.Fatal("相同基础密钥和站点必须派生出相同密钥")
+	}
+	if keyCacheLen() != 1 {
+		t.Fatalf("缓存条目数 = %d, want 1", keyCacheLen())
 	}
 }
 

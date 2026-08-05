@@ -10,11 +10,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html
-      lang="zh-CN"
-      suppressHydrationWarning
-      className="antialiased"
-    >
+    <html lang="zh-CN" suppressHydrationWarning className="antialiased">
       <body className="font-sans">
         <ThemeProvider>
           <I18nProvider>

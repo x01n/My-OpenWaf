@@ -1,49 +1,54 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { useCertificates, useCertificateMutation, useCertificateDelete } from "@/hooks/use-api";
-import { DataTable } from "@/components/data-table";
-import { ConfirmDialog } from "@/components/confirm-dialog";
-import { EmptyState } from "@/components/empty-state";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import {
+  useCertificates,
+  useCertificateMutation,
+  useCertificateDelete,
+} from "@/hooks/use-api"
+import { DataTable } from "@/components/data-table"
+import { ConfirmDialog } from "@/components/confirm-dialog"
+import { EmptyState } from "@/components/empty-state"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from "@/components/ui/dialog";
+} from "@/components/ui/dialog"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { toast } from "sonner";
+} from "@/components/ui/select"
+import { toast } from "sonner"
 import {
   IconPlus,
   IconTrash,
   IconCertificate,
   IconAlertTriangle,
-} from "@tabler/icons-react";
-import type { Certificate } from "@/lib/types";
+} from "@tabler/icons-react"
+import type { Certificate } from "@/lib/types"
 
 export default function CertificatesPage() {
-  const { t } = useTranslation();
-  const { data, isLoading, error, mutate } = useCertificates();
-  const { execute: mutateCert, loading: mutateLoading } = useCertificateMutation();
-  const { execute: deleteCert, loading: deleteLoading } = useCertificateDelete();
+  const { t } = useTranslation()
+  const { data, isLoading, error, mutate } = useCertificates()
+  const { execute: mutateCert, loading: mutateLoading } =
+    useCertificateMutation()
+  const { execute: deleteCert, loading: deleteLoading } = useCertificateDelete()
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [deleteId, setDeleteId] = useState<number | null>(null)
   const [form, setForm] = useState({
     name: "",
     cert_pem: "",
@@ -52,39 +57,39 @@ export default function CertificatesPage() {
     domain: "",
     acme_email: "",
     auto_renew: false,
-  });
+  })
 
-  const certificates: Certificate[] = data || [];
+  const certificates: Certificate[] = data || []
 
   const daysUntilExpiry = (expiresAt?: string): number | null => {
-    if (!expiresAt) return null;
-    const diff = new Date(expiresAt).getTime() - Date.now();
-    return Math.ceil(diff / (1000 * 60 * 60 * 24));
-  };
+    if (!expiresAt) return null
+    const diff = new Date(expiresAt).getTime() - Date.now()
+    return Math.ceil(diff / (1000 * 60 * 60 * 24))
+  }
 
   const handleCreate = async () => {
     try {
-      await mutateCert({ data: form });
-      toast.success(t("certificates.createSuccess"));
-      setDialogOpen(false);
-      resetForm();
-      mutate();
+      await mutateCert({ data: form })
+      toast.success(t("certificates.createSuccess"))
+      setDialogOpen(false)
+      resetForm()
+      mutate()
     } catch {
-      toast.error(t("certificates.createFailed"));
+      toast.error(t("certificates.createFailed"))
     }
-  };
+  }
 
   const confirmDelete = async () => {
-    if (!deleteId) return;
+    if (!deleteId) return
     try {
-      await deleteCert(deleteId);
-      toast.success(t("common.deleteSuccess"));
-      setDeleteId(null);
-      mutate();
+      await deleteCert(deleteId)
+      toast.success(t("common.deleteSuccess"))
+      setDeleteId(null)
+      mutate()
     } catch {
-      toast.error(t("common.deleteFailed"));
+      toast.error(t("common.deleteFailed"))
     }
-  };
+  }
 
   const resetForm = () => {
     setForm({
@@ -95,8 +100,8 @@ export default function CertificatesPage() {
       domain: "",
       acme_email: "",
       auto_renew: false,
-    });
-  };
+    })
+  }
 
   const columns = [
     {
@@ -129,13 +134,12 @@ export default function CertificatesPage() {
       title: t("certificates.expiresAt"),
       width: "180px",
       render: (row: Certificate) => {
-        const days = daysUntilExpiry(row.expires_at);
-        if (!row.expires_at) return <span className="text-muted-foreground">-</span>;
+        const days = daysUntilExpiry(row.expires_at)
+        if (!row.expires_at)
+          return <span className="text-muted-foreground">-</span>
         return (
           <div className="flex items-center gap-2">
-            <span className="text-sm">
-              {row.expires_at.slice(0, 10)}
-            </span>
+            <span className="text-sm">{row.expires_at.slice(0, 10)}</span>
             {days !== null && days <= 30 && days > 0 && (
               <Badge variant="destructive" className="flex items-center gap-1">
                 <IconAlertTriangle className="h-3 w-3" />
@@ -143,12 +147,10 @@ export default function CertificatesPage() {
               </Badge>
             )}
             {days !== null && days <= 0 && (
-              <Badge variant="destructive">
-                {t("certificates.expired")}
-              </Badge>
+              <Badge variant="destructive">{t("certificates.expired")}</Badge>
             )}
           </div>
-        );
+        )
       },
     },
     {
@@ -176,7 +178,7 @@ export default function CertificatesPage() {
         </Button>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
@@ -210,7 +212,10 @@ export default function CertificatesPage() {
           <EmptyState
             icon={IconCertificate}
             title={t("certificates.empty")}
-            description={t("certificates.emptyHint", "上传 TLS 证书以启用站点 HTTPS 加密，支持手动上传和 ACME 自动签发")}
+            description={t(
+              "certificates.emptyHint",
+              "上传 TLS 证书以启用站点 HTTPS 加密，支持手动上传和 ACME 自动签发"
+            )}
             action={
               <Button onClick={() => setDialogOpen(true)}>
                 <IconPlus className="mr-1.5 h-4 w-4" />
@@ -222,10 +227,13 @@ export default function CertificatesPage() {
         }
       />
 
-      <Dialog open={dialogOpen} onOpenChange={(open) => {
-        setDialogOpen(open);
-        if (!open) resetForm();
-      }}>
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(open) => {
+          setDialogOpen(open)
+          if (!open) resetForm()
+        }}
+      >
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{t("certificates.addTitle")}</DialogTitle>
@@ -236,7 +244,9 @@ export default function CertificatesPage() {
               <Input
                 id="cert-name"
                 value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, name: e.target.value }))
+                }
                 placeholder={t("certificates.namePlaceholder")}
               />
             </div>
@@ -245,16 +255,25 @@ export default function CertificatesPage() {
               <Select
                 value={form.source}
                 onValueChange={(v) =>
-                  setForm((f) => ({ ...f, source: v as "manual" | "acme" | "self_signed" }))
+                  setForm((f) => ({
+                    ...f,
+                    source: v as "manual" | "acme" | "self_signed",
+                  }))
                 }
               >
                 <SelectTrigger id="cert-source">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="manual">{t("certificates.sourceManual")}</SelectItem>
-                  <SelectItem value="acme">{t("certificates.sourceAcme")}</SelectItem>
-                  <SelectItem value="self_signed">{t("certificates.sourceSelfSigned")}</SelectItem>
+                  <SelectItem value="manual">
+                    {t("certificates.sourceManual")}
+                  </SelectItem>
+                  <SelectItem value="acme">
+                    {t("certificates.sourceAcme")}
+                  </SelectItem>
+                  <SelectItem value="self_signed">
+                    {t("certificates.sourceSelfSigned")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -263,7 +282,9 @@ export default function CertificatesPage() {
               <Input
                 id="cert-domain"
                 value={form.domain}
-                onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, domain: e.target.value }))
+                }
                 placeholder={t("certificates.domainPlaceholder")}
               />
             </div>
@@ -274,7 +295,9 @@ export default function CertificatesPage() {
                   <Textarea
                     id="cert-pem"
                     value={form.cert_pem}
-                    onChange={(e) => setForm((f) => ({ ...f, cert_pem: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, cert_pem: e.target.value }))
+                    }
                     placeholder={t("certificates.certPemPlaceholder")}
                     rows={5}
                     className="font-mono text-xs"
@@ -285,7 +308,9 @@ export default function CertificatesPage() {
                   <Textarea
                     id="cert-key"
                     value={form.key_pem}
-                    onChange={(e) => setForm((f) => ({ ...f, key_pem: e.target.value }))}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, key_pem: e.target.value }))
+                    }
                     placeholder={t("certificates.keyPemPlaceholder")}
                     rows={5}
                     className="font-mono text-xs"
@@ -295,11 +320,15 @@ export default function CertificatesPage() {
             )}
             {form.source === "acme" && (
               <div className="space-y-2">
-                <Label htmlFor="cert-acme-email">{t("certificates.acmeEmail")}</Label>
+                <Label htmlFor="cert-acme-email">
+                  {t("certificates.acmeEmail")}
+                </Label>
                 <Input
                   id="cert-acme-email"
                   value={form.acme_email}
-                  onChange={(e) => setForm((f) => ({ ...f, acme_email: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, acme_email: e.target.value }))
+                  }
                   placeholder={t("certificates.acmeEmailPlaceholder")}
                 />
               </div>
@@ -309,7 +338,10 @@ export default function CertificatesPage() {
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={handleCreate} disabled={mutateLoading || !form.name}>
+            <Button
+              onClick={handleCreate}
+              disabled={mutateLoading || !form.name}
+            >
               {mutateLoading ? t("common.submitting") : t("common.create")}
             </Button>
           </DialogFooter>
@@ -326,5 +358,5 @@ export default function CertificatesPage() {
         loading={deleteLoading}
       />
     </div>
-  );
+  )
 }

@@ -7,6 +7,10 @@ import (
 	"testing"
 
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestCreateSiteRejectsMalformedBody(t *testing.T) {
@@ -431,5 +435,64 @@ func TestSiteRequestHasField(t *testing.T) {
 				t.Fatalf("siteRequestHasField(%q, %q) = %v, want %v", tt.body, tt.field, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCreateAndUpdateSiteValidatePolicyReferences(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.Site{}, &store.Policy{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	repo := repository.NewSiteRepo(db)
+	active := store.Policy{Name: "active"}
+	deleted := store.Policy{Name: "deleted"}
+	if err := db.Create(&active).Error; err != nil {
+		t.Fatalf("seed active policy: %v", err)
+	}
+	if err := db.Create(&deleted).Error; err != nil {
+		t.Fatalf("seed deleted policy: %v", err)
+	}
+	if err := db.Delete(&deleted).Error; err != nil {
+		t.Fatalf("soft delete policy: %v", err)
+	}
+
+	for _, policyID := range []uint{999, deleted.ID} {
+		body := []byte(`{"host":"policy-create.example","upstream_urls":"http://127.0.0.1:8080","bind":":8080","network":"tcp","enabled":true,"policy_id":` + strconv.FormatUint(uint64(policyID), 10) + `}`)
+		ctx := invokeCreateSiteHandler(t, CreateSite(repo, nil, func() error { return nil }), body)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("create policy %d status %d: %s", policyID, ctx.Response.StatusCode(), ctx.Response.Body())
+		}
+	}
+
+	validBody := []byte(`{"host":"policy-valid.example","upstream_urls":"http://127.0.0.1:8080","bind":":8080","network":"tcp","enabled":true,"policy_id":` + strconv.FormatUint(uint64(active.ID), 10) + `}`)
+	createdCtx := invokeCreateSiteHandler(t, CreateSite(repo, nil, func() error { return nil }), validBody)
+	if createdCtx.Response.StatusCode() != 201 {
+		t.Fatalf("valid create status %d: %s", createdCtx.Response.StatusCode(), createdCtx.Response.Body())
+	}
+	var created store.Site
+	if err := json.Unmarshal(createdCtx.Response.Body(), &created); err != nil {
+		t.Fatalf("decode created site: %v", err)
+	}
+
+	for _, policyID := range []uint{999, deleted.ID} {
+		ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), created.ID, []byte(`{"policy_id":`+strconv.FormatUint(uint64(policyID), 10)+`}`))
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("update policy %d status %d: %s", policyID, ctx.Response.StatusCode(), ctx.Response.Body())
+		}
+	}
+
+	inheritCtx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), created.ID, []byte(`{"policy_id":0}`))
+	if inheritCtx.Response.StatusCode() != 200 {
+		t.Fatalf("inherit update status %d: %s", inheritCtx.Response.StatusCode(), inheritCtx.Response.Body())
+	}
+	loaded, err := repo.Get(created.ID)
+	if err != nil {
+		t.Fatalf("load updated site: %v", err)
+	}
+	if loaded.PolicyID != nil {
+		t.Fatalf("policy_id = %v, want nil inheritance", loaded.PolicyID)
 	}
 }

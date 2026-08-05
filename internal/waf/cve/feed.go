@@ -189,7 +189,7 @@ func (m *CVEFeedManager) doSync() error {
 
 func (m *CVEFeedManager) loadRulesIntoDetector() {
 	var rules []CVERuleModel
-	if err := m.db.Where("enabled = ? AND approved = ?", true, true).Find(&rules).Error; err != nil {
+	if err := m.db.Where("approved = ? AND source <> ?", true, "catalog").Find(&rules).Error; err != nil {
 		m.log.Error("cve_feed: failed to load rules", slog.String("error", err.Error()))
 		return
 	}
@@ -203,7 +203,7 @@ func (m *CVEFeedManager) loadRulesIntoDetector() {
 			Target:      r.Target,
 			Severity:    r.Severity,
 			Action:      r.Action,
-			Enabled:     r.Enabled,
+			Enabled:     true,
 			Description: r.Description,
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +332,31 @@ func TestBuildConfiguredOutputAlsoStdout(t *testing.T) {
 	}
 	if _, err := w.Write([]byte("multi-writer test\n")); err != nil {
 		t.Fatalf("write to multi-writer: %v", err)
+	}
+}
+
+func TestBuildConfiguredOutputWithBasename(t *testing.T) {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	temporaryDir := t.TempDir()
+	if err := os.Chdir(temporaryDir); err != nil {
+		t.Fatalf("change working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = Close()
+		_ = os.Chdir(workingDir)
+	})
+
+	w := buildConfiguredOutput("app.log", false)
+	if w == nil {
+		t.Fatal("buildConfiguredOutput(basename) returned nil")
+	}
+	if _, err := w.Write([]byte("basename test\n")); err != nil {
+		t.Fatalf("write to basename log: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(temporaryDir, "app.log")); err != nil {
+		t.Fatalf("basename log was not created: %v", err)
 	}
 }

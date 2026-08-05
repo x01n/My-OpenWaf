@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -713,7 +715,8 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := resolveHTTP3TCPBind(cfg.RouteTable, r); !ok {
+		targetBind, ok := resolveHTTP3TCPBind(cfg.RouteTable, r)
+		if !ok {
 			http.Error(w, "no HTTP/3 route target", http.StatusBadGateway)
 			return
 		}
@@ -730,7 +733,14 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		cancelAware.startFlushWatch(ctx)
 		defer cancelAware.Close()
 		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(cfg.Bind), snapshotpkg.OneDaySeconds))
-		proxy.ServeHTTP(cancelAware, r.WithContext(ctx))
+		request := r.WithContext(ctx)
+		if isHTTP3WebSocketConnect(request) {
+			if err := serveHTTP3WebSocketBridge(cancelAware, request, targetBind, h3ServerState, state); err != nil {
+				http.Error(w, "HTTP/3 WebSocket bridge failed", http.StatusBadGateway)
+			}
+			return
+		}
+		proxy.ServeHTTP(cancelAware, request)
 	})
 
 	tlsCfg := cfg.TLSConfig.Clone()
@@ -789,6 +799,187 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		activeLoopbackCancels: make(map[uint64]context.CancelFunc),
 	}
 	return h3ServerState
+}
+
+func isHTTP3WebSocketConnect(r *http.Request) bool {
+	return r != nil && r.Method == http.MethodConnect && r.Proto == "websocket"
+}
+
+func newHTTP3WebSocketLoopbackRequest(ctx context.Context, r *http.Request, targetBind string) (*http.Request, error) {
+	if r == nil || r.URL == nil {
+		return nil, errors.New("HTTP/3 WebSocket request is missing URL")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestURI := r.URL.RequestURI()
+	if requestURI == "" {
+		requestURI = "/"
+	}
+	out, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+loopbackTargetHost(targetBind)+requestURI, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build HTTP/1.1 WebSocket loopback request: %w", err)
+	}
+	copyHTTP3WebSocketRequestHeaders(out.Header, r.Header)
+	clearInternalHTTP3TLSHeaders(out.Header)
+	out.Header.Del("X-Forwarded-For")
+	out.Header.Del("X-Forwarded-Host")
+	out.Header.Del("X-Forwarded-Proto")
+	proxyRequest := &httputil.ProxyRequest{In: r, Out: out}
+	proxyRequest.SetXForwarded()
+	out.Host = r.Host
+	if out.Host == "" {
+		out.Host = r.URL.Host
+	}
+	if out.Host != "" {
+		out.Header.Set("X-Forwarded-Host", out.Host)
+	} else {
+		out.Header.Del("X-Forwarded-Host")
+	}
+	out.Header.Set("X-Forwarded-Proto", "h3")
+	out.Header.Set(dataplane.InternalHTTP3ProtoHeader, "h3")
+	applyHTTP3ProxyTLSHeaders(out)
+
+	var key [16]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return nil, fmt.Errorf("generate HTTP/1.1 WebSocket key: %w", err)
+	}
+	out.Header.Set("Connection", "Upgrade")
+	out.Header.Set("Upgrade", "websocket")
+	out.Header.Set("Sec-WebSocket-Key", base64.StdEncoding.EncodeToString(key[:]))
+	out.Header.Set("Sec-WebSocket-Version", "13")
+	return out, nil
+}
+
+func copyHTTP3WebSocketRequestHeaders(dst http.Header, src http.Header) {
+	for key, values := range src {
+		if isHTTP3WebSocketHopByHopHeader(key, src) ||
+			strings.EqualFold(key, "Host") ||
+			strings.EqualFold(key, "Content-Length") ||
+			strings.EqualFold(key, "Sec-WebSocket-Key") ||
+			strings.EqualFold(key, "Sec-WebSocket-Version") {
+			continue
+		}
+		dst[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+	}
+}
+
+func copyHTTP3WebSocketResponseHeaders(dst http.Header, src http.Header, upgraded bool) {
+	for key, values := range src {
+		if isHTTP3WebSocketHopByHopHeader(key, src) ||
+			(upgraded && strings.EqualFold(key, "Sec-WebSocket-Accept")) {
+			continue
+		}
+		dst[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+	}
+}
+
+func isHTTP3WebSocketHopByHopHeader(key string, headers http.Header) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	}
+	for _, value := range headers.Values("Connection") {
+		for token := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), key) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func serveHTTP3WebSocketBridge(w *http3CancelAwareResponseWriter, r *http.Request, targetBind string, server *HTTP3Server, state *http3LoopbackRequestState) error {
+	if w == nil || r == nil || server == nil || server.proxyHTTP11Transport == nil {
+		return errors.New("HTTP/3 WebSocket bridge is unavailable")
+	}
+	streamer, ok := w.Unwrap().(http3.HTTPStreamer)
+	if !ok {
+		return errors.New("HTTP/3 response writer does not expose its stream")
+	}
+
+	bridgeCtx, cancelBridge := context.WithCancel(r.Context())
+	defer cancelBridge()
+	if state != nil {
+		state.SetCancel(cancelBridge)
+	}
+	unregisterLoopbackCancel := server.registerLoopbackCancel(cancelBridge)
+	defer unregisterLoopbackCancel()
+
+	out, err := newHTTP3WebSocketLoopbackRequest(bridgeCtx, r, targetBind)
+	if err != nil {
+		return err
+	}
+	if token, unregister := dataplane.RegisterInternalHTTP3CancelSignal(bridgeCtx.Done()); token != "" {
+		out.Header.Set(dataplane.InternalHTTP3CancelTokenHeader, token)
+		defer unregister()
+	}
+
+	resp, err := server.proxyHTTP11Transport.RoundTrip(out)
+	if err != nil {
+		return fmt.Errorf("round trip HTTP/1.1 WebSocket loopback request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		copyHTTP3WebSocketResponseHeaders(w.Header(), resp.Header, false)
+		w.WriteHeader(resp.StatusCode)
+		if resp.Body != nil {
+			_, _ = io.Copy(w, resp.Body)
+		}
+		return nil
+	}
+
+	loopbackStream, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		return errors.New("HTTP/1.1 WebSocket upgrade response is not bidirectional")
+	}
+	copyHTTP3WebSocketResponseHeaders(w.Header(), resp.Header, true)
+	w.WriteHeader(http.StatusOK)
+	h3Stream := streamer.HTTPStream()
+	if h3Stream == nil {
+		return errors.New("HTTP/3 response stream is unavailable")
+	}
+	defer h3Stream.Close()
+
+	requestBody := r.Body
+	if requestBody == nil {
+		requestBody = http.NoBody
+	}
+	_ = bridgeHTTP3WebSocketStreams(bridgeCtx, requestBody, h3Stream, loopbackStream)
+	return nil
+}
+
+func bridgeHTTP3WebSocketStreams(ctx context.Context, requestBody io.ReadCloser, h3Stream io.ReadWriteCloser, loopbackStream io.ReadWriteCloser) error {
+	if requestBody == nil || h3Stream == nil || loopbackStream == nil {
+		return errors.New("HTTP/3 WebSocket bridge stream is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stopCancelWatch := context.AfterFunc(ctx, func() {
+		_ = requestBody.Close()
+		_ = h3Stream.Close()
+		_ = loopbackStream.Close()
+	})
+	defer stopCancelWatch()
+
+	copyDone := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(loopbackStream, requestBody)
+		copyDone <- err
+	}()
+	go func() {
+		_, err := io.Copy(h3Stream, loopbackStream)
+		copyDone <- err
+	}()
+
+	firstErr := <-copyDone
+	_ = requestBody.Close()
+	_ = h3Stream.Close()
+	_ = loopbackStream.Close()
+	secondErr := <-copyDone
+	return errors.Join(firstErr, secondErr)
 }
 
 func http3LoopbackTLSConfig() *tls.Config {

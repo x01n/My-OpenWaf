@@ -76,3 +76,22 @@ func (r *SiteListenerRepo) CreateWithLegacyPromotion(item *store.SiteListener, l
 		return tx.Create(item).Error
 	})
 }
+
+func (r *SiteListenerRepo) CreateLegacyReplacement(item *store.SiteListener) (bool, error) {
+	created := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&store.SiteListener{}).Where("site_id = ?", item.SiteID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 0 {
+			return nil
+		}
+		if err := store.CreateWithZeroDefaults(tx, item); err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	return created, err
+}

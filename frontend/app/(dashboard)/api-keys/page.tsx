@@ -1,15 +1,15 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { useApiKeys, useApiKeyCreate, useApiKeyDelete } from "@/hooks/use-api";
-import { DataTable } from "@/components/data-table";
-import { ConfirmDialog } from "@/components/confirm-dialog";
-import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { useApiKeys, useApiKeyCreate, useApiKeyDelete } from "@/hooks/use-api"
+import { DataTable } from "@/components/data-table"
+import { ConfirmDialog } from "@/components/confirm-dialog"
+import { Button } from "@/components/ui/button"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Dialog,
   DialogContent,
@@ -17,76 +17,76 @@ import {
   DialogTitle,
   DialogFooter,
   DialogDescription,
-} from "@/components/ui/dialog";
-import { toast } from "sonner";
-import { IconPlus, IconTrash, IconCopy, IconKey } from "@tabler/icons-react";
-import type { AdminAPIKey } from "@/lib/types";
+} from "@/components/ui/dialog"
+import { toast } from "sonner"
+import { IconPlus, IconTrash, IconCopy, IconKey } from "@tabler/icons-react"
+import type { AdminAPIKey } from "@/lib/types"
 
 function maskKey(name: string): string {
-  if (name.length <= 8) return name;
-  return `${name.slice(0, 4)}****${name.slice(-4)}`;
+  if (name.length <= 8) return name
+  return `${name.slice(0, 4)}****${name.slice(-4)}`
 }
 
 function formatTime(t: string | undefined | null): string {
-  if (!t) return "-";
-  return new Date(t).toLocaleString();
+  if (!t) return "-"
+  return new Date(t).toLocaleString()
 }
 
 export default function ApiKeysPage() {
-  const { t } = useTranslation();
-  const { data, isLoading, error, mutate } = useApiKeys();
-  const { execute: createKey, loading: createLoading } = useApiKeyCreate();
-  const { execute: deleteKey, loading: deleteLoading } = useApiKeyDelete();
+  const { t } = useTranslation()
+  const { data, isLoading, error, mutate } = useApiKeys()
+  const { execute: createKey, loading: createLoading } = useApiKeyCreate()
+  const { execute: deleteKey, loading: deleteLoading } = useApiKeyDelete()
 
-  const [createOpen, setCreateOpen] = useState(false);
-  const [resultOpen, setResultOpen] = useState(false);
-  const [deleteId, setDeleteId] = useState<number | null>(null);
-  const [name, setName] = useState("");
-  const [createdToken, setCreatedToken] = useState("");
+  const [createOpen, setCreateOpen] = useState(false)
+  const [resultOpen, setResultOpen] = useState(false)
+  const [deleteId, setDeleteId] = useState<number | null>(null)
+  const [name, setName] = useState("")
+  const [createdToken, setCreatedToken] = useState("")
 
-  const keys: AdminAPIKey[] = data || [];
+  const keys: AdminAPIKey[] = data || []
 
   const handleCreate = async () => {
-    if (!name.trim()) return;
+    if (!name.trim()) return
     try {
-      const result = await createKey({ name: name.trim() });
-      setCreatedToken(result.token);
-      setCreateOpen(false);
-      setResultOpen(true);
-      setName("");
-      mutate();
+      const result = await createKey({ name: name.trim() })
+      setCreatedToken(result.token)
+      setCreateOpen(false)
+      setResultOpen(true)
+      setName("")
+      mutate()
     } catch {
-      toast.error(t("apiKeys.createFailed"));
+      toast.error(t("apiKeys.createFailed"))
     }
-  };
+  }
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(createdToken);
-      toast.success(t("apiKeys.copied"));
+      await navigator.clipboard.writeText(createdToken)
+      toast.success(t("apiKeys.copied"))
     } catch {
       // fallback
-      const el = document.createElement("textarea");
-      el.value = createdToken;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand("copy");
-      document.body.removeChild(el);
-      toast.success(t("apiKeys.copied"));
+      const el = document.createElement("textarea")
+      el.value = createdToken
+      document.body.appendChild(el)
+      el.select()
+      document.execCommand("copy")
+      document.body.removeChild(el)
+      toast.success(t("apiKeys.copied"))
     }
-  };
+  }
 
   const confirmDelete = async () => {
-    if (!deleteId) return;
+    if (!deleteId) return
     try {
-      await deleteKey(deleteId);
-      toast.success(t("common.deleteSuccess"));
-      setDeleteId(null);
-      mutate();
+      await deleteKey(deleteId)
+      toast.success(t("common.deleteSuccess"))
+      setDeleteId(null)
+      mutate()
     } catch {
-      toast.error(t("common.deleteFailed"));
+      toast.error(t("common.deleteFailed"))
     }
-  };
+  }
 
   const columns = [
     {
@@ -141,7 +141,7 @@ export default function ApiKeysPage() {
         </Button>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-6">
@@ -189,7 +189,7 @@ export default function ApiKeysPage() {
                 onChange={(e) => setName(e.target.value)}
                 placeholder={t("apiKeys.namePlaceholder")}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") handleCreate();
+                  if (e.key === "Enter") handleCreate()
                 }}
               />
             </div>
@@ -198,7 +198,10 @@ export default function ApiKeysPage() {
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={handleCreate} disabled={createLoading || !name.trim()}>
+            <Button
+              onClick={handleCreate}
+              disabled={createLoading || !name.trim()}
+            >
               {createLoading ? t("common.submitting") : t("common.create")}
             </Button>
           </DialogFooter>
@@ -214,7 +217,7 @@ export default function ApiKeysPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded border bg-muted p-3 text-sm font-mono break-all">
+              <code className="flex-1 rounded border bg-muted p-3 font-mono text-sm break-all">
                 {createdToken}
               </code>
               <Button variant="outline" size="icon-sm" onClick={handleCopy}>
@@ -240,5 +243,5 @@ export default function ApiKeysPage() {
         loading={deleteLoading}
       />
     </div>
-  );
+  )
 }

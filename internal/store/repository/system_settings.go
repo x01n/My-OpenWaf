@@ -52,3 +52,5 @@ func (r *SystemSettingsRepo) All() ([]store.SystemSettings, error) {
 func (r *SystemSettingsRepo) Delete(key string) error {
 	return r.db.Where(systemSettingKeyEquals(key)).Delete(&store.SystemSettings{}).Error
 }
+
+func (r *SystemSettingsRepo) DB() *gorm.DB { return r.db }

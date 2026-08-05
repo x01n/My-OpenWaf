@@ -1,4 +1,4 @@
-"use client";
+"use client"
 
 /**
  * 请求追踪页面
@@ -12,25 +12,20 @@
  *   -> { request_id: string, access_logs: AccessLog[]|null, security_events: SecurityEvent[]|null }
  */
 
-import { Suspense, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { format } from "date-fns";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { ActionBadge } from "@/components/action-badge";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
-import { DataTable } from "@/components/data-table";
-import { formatBytes, formatLatencyMs } from "@/lib/utils";
-import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog";
-import { EmptyState } from "@/components/empty-state";
+import { Suspense, useMemo, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { format } from "date-fns"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { ActionBadge } from "@/components/action-badge"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { DataTable } from "@/components/data-table"
+import { formatBytes, formatLatencyMs } from "@/lib/utils"
+import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog"
+import { EmptyState } from "@/components/empty-state"
 import {
   IconRoute,
   IconSearch,
@@ -41,64 +36,68 @@ import {
   IconFileText,
   IconEye,
   IconMapPin,
-} from "@tabler/icons-react";
-import { useRequestTrace, useSites } from "@/hooks/use-api";
-import type { AccessLog, SecurityEvent, Site } from "@/lib/types";
+} from "@tabler/icons-react"
+import { useRequestTrace, useSites } from "@/hooks/use-api"
+import type { AccessLog, SecurityEvent, Site } from "@/lib/types"
 
 function RequestTraceContent() {
-  const { t } = useTranslation();
-  const router = useRouter();
-  const searchParams = useSearchParams();
+  const { t } = useTranslation()
+  const router = useRouter()
+  const searchParams = useSearchParams()
 
-  const queryId = searchParams.get("id") || "";
-  const [inputState, setInputState] = useState({ source: queryId, value: queryId });
-  const inputValue = inputState.source === queryId ? inputState.value : queryId;
+  const queryId = searchParams.get("id") || ""
+  const [inputState, setInputState] = useState({
+    source: queryId,
+    value: queryId,
+  })
+  const inputValue = inputState.source === queryId ? inputState.value : queryId
 
-  const { data, isLoading, error } = useRequestTrace(queryId || undefined);
-  const { data: sitesData } = useSites({ page: 1, page_size: 500 });
+  const { data, isLoading, error } = useRequestTrace(queryId || undefined)
+  const { data: sitesData } = useSites({ page: 1, page_size: 500 })
 
   const siteMap = useMemo(() => {
-    const m = new Map<number, Site>();
-    (sitesData?.items || []).forEach((s) => m.set(s.id, s));
-    return m;
-  }, [sitesData]);
+    const m = new Map<number, Site>()
+    ;(sitesData?.items || []).forEach((s) => m.set(s.id, s))
+    return m
+  }, [sitesData])
 
   const accessLogs = useMemo<AccessLog[]>(
     () => data?.access_logs || [],
     [data?.access_logs]
-  );
+  )
   const securityEvents = useMemo<SecurityEvent[]>(
     () => data?.security_events || [],
     [data?.security_events]
-  );
-  const hasAny = accessLogs.length > 0 || securityEvents.length > 0;
+  )
+  const hasAny = accessLogs.length > 0 || securityEvents.length > 0
 
   const handleSearch = () => {
-    const id = inputValue.trim();
-    if (!id) return;
+    const id = inputValue.trim()
+    if (!id) return
     // 同步 URL 便于分享，并由 URL 驱动查询。
-    const url = `/request-trace?id=${encodeURIComponent(id)}`;
-    router.replace(url);
-  };
+    const url = `/request-trace?id=${encodeURIComponent(id)}`
+    router.replace(url)
+  }
 
   const handleKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") handleSearch();
-  };
+    if (e.key === "Enter") handleSearch()
+  }
 
   // 概要信息：优先取安全事件（更完整），否则取访问日志
   const summary = useMemo(() => {
-    const first = securityEvents[0] || accessLogs[0];
-    if (!first) return null;
-    const site = siteMap.get(first.site_id);
+    const first = securityEvents[0] || accessLogs[0]
+    if (!first) return null
+    const site = siteMap.get(first.site_id)
     // 状态码：优先取访问日志
     const statusCode =
-      accessLogs[0]?.status_code ?? securityEvents[0]?.status_code ?? 0;
+      accessLogs[0]?.status_code ?? securityEvents[0]?.status_code ?? 0
     // WAF 动作：优先取访问日志中的 waf_action，其次取安全事件动作
     const wafAction =
       accessLogs[0]?.waf_action ||
-      securityEvents.find((e) => e.action !== "observe" && e.action !== "allow")?.action ||
+      securityEvents.find((e) => e.action !== "observe" && e.action !== "allow")
+        ?.action ||
       securityEvents[0]?.action ||
-      "-";
+      "-"
     return {
       requestId: data?.request_id || queryId,
       time: first.created_at,
@@ -110,11 +109,11 @@ function RequestTraceContent() {
       method: first.method,
       statusCode,
       wafAction,
-    };
-  }, [accessLogs, securityEvents, data?.request_id, queryId, siteMap]);
+    }
+  }, [accessLogs, securityEvents, data?.request_id, queryId, siteMap])
 
   // 安全事件详情弹窗
-  const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null)
 
   const accessLogColumns = [
     {
@@ -122,7 +121,9 @@ function RequestTraceContent() {
       title: t("requestTrace.firstSeen"),
       width: "180px",
       render: (row: AccessLog) =>
-        row.created_at ? format(new Date(row.created_at), "yyyy-MM-dd HH:mm:ss") : "-",
+        row.created_at
+          ? format(new Date(row.created_at), "yyyy-MM-dd HH:mm:ss")
+          : "-",
     },
     { key: "client_ip", title: "IP", width: "140px" },
     { key: "host", title: "Host", width: "180px" },
@@ -135,7 +136,10 @@ function RequestTraceContent() {
       width: "100px",
       render: (row: AccessLog) =>
         row.waf_action ? (
-          <ActionBadge action={row.waf_action} className="h-5 px-1.5 text-[10px]" />
+          <ActionBadge
+            action={row.waf_action}
+            className="h-5 px-1.5 text-[10px]"
+          />
         ) : (
           "-"
         ),
@@ -144,8 +148,7 @@ function RequestTraceContent() {
       key: "upstream_latency_ms",
       title: t("requestTrace.upstreamLatency"),
       width: "120px",
-      render: (row: AccessLog) =>
-        formatLatencyMs(row.upstream_latency_ms),
+      render: (row: AccessLog) => formatLatencyMs(row.upstream_latency_ms),
     },
     {
       key: "response_size",
@@ -165,7 +168,7 @@ function RequestTraceContent() {
       width: "180px",
       render: (row: AccessLog) => row.upstream || "-",
     },
-  ];
+  ]
 
   const securityEventColumns = [
     {
@@ -173,7 +176,9 @@ function RequestTraceContent() {
       title: t("requestTrace.firstSeen"),
       width: "180px",
       render: (row: SecurityEvent) =>
-        row.created_at ? format(new Date(row.created_at), "yyyy-MM-dd HH:mm:ss") : "-",
+        row.created_at
+          ? format(new Date(row.created_at), "yyyy-MM-dd HH:mm:ss")
+          : "-",
     },
     { key: "phase", title: t("requestTrace.phase"), width: "120px" },
     {
@@ -189,13 +194,14 @@ function RequestTraceContent() {
       key: "rule_id_str",
       title: t("requestTrace.rule"),
       width: "160px",
-      render: (row: SecurityEvent) => row.rule_id_str || String(row.rule_id) || "-",
+      render: (row: SecurityEvent) =>
+        row.rule_id_str || String(row.rule_id) || "-",
     },
     {
       key: "match_desc",
       title: t("requestTrace.matchDesc"),
       render: (row: SecurityEvent) => (
-        <span className="text-xs text-muted-foreground line-clamp-2">
+        <span className="line-clamp-2 text-xs text-muted-foreground">
           {row.match_desc || "-"}
         </span>
       ),
@@ -215,7 +221,7 @@ function RequestTraceContent() {
         </Button>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
@@ -237,7 +243,9 @@ function RequestTraceContent() {
               value={inputValue}
               placeholder={t("requestTrace.searchPlaceholder")}
               className="h-9 flex-1 font-mono text-xs"
-              onChange={(e) => setInputState({ source: queryId, value: e.target.value })}
+              onChange={(e) =>
+                setInputState({ source: queryId, value: e.target.value })
+              }
               onKeyDown={handleKey}
             />
             <Button
@@ -384,11 +392,11 @@ function RequestTraceContent() {
         event={selectedEvent}
         open={!!selectedEvent}
         onOpenChange={(open) => {
-          if (!open) setSelectedEvent(null);
+          if (!open) setSelectedEvent(null)
         }}
       />
     </div>
-  );
+  )
 }
 
 /**
@@ -400,10 +408,10 @@ function SummaryItem({
   value,
   mono,
 }: {
-  icon?: React.ReactNode;
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
+  icon?: React.ReactNode
+  label: string
+  value: React.ReactNode
+  mono?: boolean
 }) {
   return (
     <div className="flex flex-col gap-1 rounded-md border bg-muted/20 p-3">
@@ -411,21 +419,19 @@ function SummaryItem({
         {icon}
         <span>{label}</span>
       </div>
-      <div
-        className={
-          "text-sm break-all " + (mono ? "font-mono" : "")
-        }
-      >
+      <div className={"text-sm break-all " + (mono ? "font-mono" : "")}>
         {value}
       </div>
     </div>
-  );
+  )
 }
 
 export default function RequestTracePage() {
   return (
-    <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">...</div>}>
+    <Suspense
+      fallback={<div className="p-4 text-sm text-muted-foreground">...</div>}
+    >
       <RequestTraceContent />
     </Suspense>
-  );
+  )
 }

@@ -106,6 +106,31 @@ func TestRenderErrorPageCustomCSS(t *testing.T) {
 	}
 }
 
+func TestRenderErrorPageEscapesDefaultTitleAndBody(t *testing.T) {
+	custom := &ErrorPageConfig{
+		Title: `<script>alert("title")</script>`,
+		Body:  `<img src=x onerror=alert("body")>`,
+	}
+	out := string(RenderErrorPage(403, custom))
+	if strings.Contains(out, `<script>alert("title")</script>`) || strings.Contains(out, `<img src=x onerror=alert("body")>`) {
+		t.Fatalf("RenderErrorPage should escape default title/body content: %s", out)
+	}
+	if !strings.Contains(out, `&lt;script&gt;`) || !strings.Contains(out, `&lt;img`) {
+		t.Fatalf("RenderErrorPage escaped markers missing: %s", out)
+	}
+}
+
+func TestRenderErrorPageSanitizesCustomCSSStyleBreakout(t *testing.T) {
+	custom := &ErrorPageConfig{CustomCSS: `.ok{color:red}</style><script>alert(1)</script>`}
+	out := string(RenderErrorPage(403, custom))
+	if strings.Contains(strings.ToLower(out), `</style><script`) || strings.Contains(strings.ToLower(out), `<script`) {
+		t.Fatalf("RenderErrorPage should sanitize CSS style breakout: %s", out)
+	}
+	if !strings.Contains(out, `.ok{color:red}`) {
+		t.Fatalf("RenderErrorPage should keep safe CSS prefix: %s", out)
+	}
+}
+
 func TestRenderErrorPageDoesNotLeakInternalDetails(t *testing.T) {
 	out := RenderErrorPage(403, nil)
 	s := string(out)

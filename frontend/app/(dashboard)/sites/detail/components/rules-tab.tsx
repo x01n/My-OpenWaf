@@ -1,46 +1,46 @@
-"use client";
+"use client"
 
-import { useTranslation } from "react-i18next";
-import { useRouter } from "next/navigation";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { toast } from "sonner";
-import { IconPlus, IconTrash } from "@tabler/icons-react";
-import { useSiteRules, useRuleDelete } from "@/hooks/use-api";
-import { ruleApi } from "@/lib/api";
-import { DataTable } from "@/components/data-table";
-import type { Site } from "@/lib/types";
+import { useTranslation } from "react-i18next"
+import { useRouter } from "next/navigation"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { toast } from "sonner"
+import { IconPlus, IconTrash } from "@tabler/icons-react"
+import { useSiteRules, useRuleDelete } from "@/hooks/use-api"
+import { ruleApi } from "@/lib/api"
+import { DataTable } from "@/components/data-table"
+import type { Rule, Site } from "@/lib/types"
 
 interface RulesTabProps {
-  site: Site;
+  site: Site
 }
 
 export function RulesTab({ site }: RulesTabProps) {
-  const { t } = useTranslation();
-  const router = useRouter();
-  const { data: rules, mutate } = useSiteRules(site.id);
-  const deleteRule = useRuleDelete();
+  const { t } = useTranslation()
+  const router = useRouter()
+  const { data: rules, mutate } = useSiteRules(site.id)
+  const deleteRule = useRuleDelete()
 
-  const handleToggle = async (rule: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const handleToggle = async (rule: Rule) => {
     try {
-      await ruleApi.update(rule.id, { enabled: !rule.enabled });
-      toast.success(t("common.updateSuccess"));
-      mutate();
+      await ruleApi.update(rule.id, { enabled: !rule.enabled })
+      toast.success(t("common.updateSuccess"))
+      mutate()
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   const handleDelete = async (id: number) => {
     try {
-      await deleteRule.execute(id);
-      toast.success(t("common.deleteSuccess"));
-      mutate();
+      await deleteRule.execute(id)
+      toast.success(t("common.deleteSuccess"))
+      mutate()
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   const columns = [
     { key: "name", title: t("common.name") },
@@ -51,7 +51,7 @@ export function RulesTab({ site }: RulesTabProps) {
     {
       key: "_enabled",
       title: t("common.enabled"),
-      render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
+      render: (row: Rule) => (
         <Switch
           checked={row.enabled}
           onCheckedChange={() => handleToggle(row)}
@@ -62,7 +62,7 @@ export function RulesTab({ site }: RulesTabProps) {
     {
       key: "_actions",
       title: "",
-      render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
+      render: (row: Rule) => (
         <Button
           variant="ghost"
           size="icon-sm"
@@ -73,7 +73,7 @@ export function RulesTab({ site }: RulesTabProps) {
         </Button>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
@@ -83,7 +83,10 @@ export function RulesTab({ site }: RulesTabProps) {
           <Button
             size="sm"
             className="h-8"
-            onClick={() => router.push("/rules")}
+            onClick={() => {
+              const policyId = rules?.policy_id
+              router.push(policyId ? `/rules?policy_id=${policyId}` : "/rules")
+            }}
           >
             <IconPlus className="mr-1 h-4 w-4" />
             {t("sites.detail.addRule")}
@@ -100,5 +103,5 @@ export function RulesTab({ site }: RulesTabProps) {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

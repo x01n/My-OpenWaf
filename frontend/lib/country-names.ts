@@ -54,7 +54,7 @@ export const COUNTRY_NAMES_ZH: Record<string, string> = {
   BD: "孟加拉国",
   NG: "尼日利亚",
   NZ: "新西兰",
-};
+}
 
 /**
  * 将 ISO alpha-2 国家代码转换为中文名称。
@@ -63,9 +63,9 @@ export const COUNTRY_NAMES_ZH: Record<string, string> = {
  * @returns 对应中文名；未知代码返回代码本身（大写）
  */
 export function countryName(code: string): string {
-  if (!code) return "未知";
-  const key = code.toUpperCase();
-  return COUNTRY_NAMES_ZH[key] ?? key;
+  if (!code) return "未知"
+  const key = code.toUpperCase()
+  return COUNTRY_NAMES_ZH[key] ?? key
 }
 
 /**
@@ -75,10 +75,13 @@ export function countryName(code: string): string {
  * @returns 国旗 emoji；非法代码返回地球 emoji
  */
 export function countryFlag(code: string): string {
-  if (!code || code.length !== 2) return "\u{1F310}";
-  const key = code.toUpperCase();
-  if (!/^[A-Z]{2}$/.test(key)) return "\u{1F310}";
-  const base = 0x1f1e6;
-  const a = "A".charCodeAt(0);
-  return String.fromCodePoint(base + (key.charCodeAt(0) - a), base + (key.charCodeAt(1) - a));
+  if (!code || code.length !== 2) return "\u{1F310}"
+  const key = code.toUpperCase()
+  if (!/^[A-Z]{2}$/.test(key)) return "\u{1F310}"
+  const base = 0x1f1e6
+  const a = "A".charCodeAt(0)
+  return String.fromCodePoint(
+    base + (key.charCodeAt(0) - a),
+    base + (key.charCodeAt(1) - a)
+  )
 }

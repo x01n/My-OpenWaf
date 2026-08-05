@@ -15,6 +15,20 @@ type DryRunResult struct {
 	Decision Decision `json:"decision"`
 	// ElapsedMS 是执行耗时（毫秒），供用户评估脚本开销。
 	ElapsedMS float64 `json:"elapsed_ms"`
+	// Iteration 是本结果对应的第几次样例请求，单次试运行时为 1。
+	Iteration int `json:"iteration"`
+}
+
+// DryRunBatchResult 是连续试运行的结果。
+type DryRunBatchResult struct {
+	CompileError string         `json:"compile_error,omitempty"`
+	RuntimeError string         `json:"runtime_error,omitempty"`
+	Decision     Decision       `json:"decision"`
+	ElapsedMS    float64        `json:"elapsed_ms"`
+	Iteration    int            `json:"iteration"`
+	Iterations   int            `json:"iterations"`
+	KVAvailable  bool           `json:"kv_available"`
+	Runs         []DryRunResult `json:"runs,omitempty"`
 }
 
 /**
@@ -33,24 +47,48 @@ type DryRunResult struct {
  * @return 试运行结果，永不返回 error——所有失败都体现在结果字段里。
  */
 func DryRun(stage Stage, source string, req RequestView, kv KVBackend, timeout time.Duration) DryRunResult {
+	batch := DryRunN(stage, source, req, kv, timeout, 1)
+	if len(batch.Runs) == 0 {
+		return DryRunResult{CompileError: batch.CompileError, RuntimeError: batch.RuntimeError, Iteration: 1}
+	}
+	return batch.Runs[0]
+}
+
+func DryRunN(stage Stage, source string, req RequestView, kv KVBackend, timeout time.Duration, iterations int) DryRunBatchResult {
+	if iterations <= 0 {
+		iterations = 1
+	}
+	if iterations > 100 {
+		iterations = 100
+	}
 	script, err := Compile("dryrun", stage, source)
 	if err != nil {
-		return DryRunResult{CompileError: err.Error()}
+		return DryRunBatchResult{CompileError: err.Error(), Iterations: iterations, KVAvailable: kv != nil && kv.Available()}
 	}
 	script.SetTimeout(timeout)
 
-	// 独立池：试运行不复用线上状态机，避免脚本残留影响生产请求。
 	pool := newVMPool()
-	start := time.Now()
-	dec, runErr := script.Run(context.Background(), pool, req, kv)
-	elapsed := time.Since(start)
-
-	out := DryRunResult{
-		Decision:  dec,
-		ElapsedMS: float64(elapsed.Nanoseconds()) / 1e6,
+	out := DryRunBatchResult{
+		Iterations:  iterations,
+		KVAvailable: kv != nil && kv.Available(),
+		Runs:        make([]DryRunResult, 0, iterations),
 	}
-	if runErr != nil {
-		out.RuntimeError = runErr.Error()
+	for i := 0; i < iterations; i++ {
+		start := time.Now()
+		dec, runErr := script.Run(context.Background(), pool, req, kv)
+		elapsed := time.Since(start)
+		one := DryRunResult{Decision: dec, ElapsedMS: float64(elapsed.Nanoseconds()) / 1e6, Iteration: i + 1}
+		if runErr != nil {
+			one.RuntimeError = runErr.Error()
+		}
+		out.Runs = append(out.Runs, one)
+		out.ElapsedMS += one.ElapsedMS
+		out.Iteration = one.Iteration
+		out.Decision = one.Decision
+		out.RuntimeError = one.RuntimeError
+		if one.RuntimeError != "" || one.Decision.HasAction() {
+			break
+		}
 	}
 	return out
 }

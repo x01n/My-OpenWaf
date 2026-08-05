@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -322,7 +323,7 @@ func TestUpdateAndResetPageTemplateWithNilReload(t *testing.T) {
 	}
 }
 
-// TestPreviewPageTemplate 验证预览接口对三种类型返回 config + preview_note，非法类型返回 400。
+// TestPreviewPageTemplate 验证预览接口对三种类型返回可直接放入 iframe srcDoc 的 HTML，非法类型返回 400。
 func TestPreviewPageTemplate(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 
@@ -331,22 +332,57 @@ func TestPreviewPageTemplate(t *testing.T) {
 		if ctx.Response.StatusCode() != 200 {
 			t.Fatalf("%s: unexpected status %d: %s", pageType, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
-		var got map[string]any
-		if err := json.Unmarshal(ctx.Response.Body(), &got); err != nil {
-			t.Fatalf("%s: decode response: %v", pageType, err)
+		if got := string(ctx.Response.Header.ContentType()); got != "text/html; charset=utf-8" {
+			t.Fatalf("%s: content type = %q", pageType, got)
 		}
-		if _, ok := got["config"]; !ok {
-			t.Fatalf("%s: preview response missing config: %#v", pageType, got)
-		}
-		note, ok := got["preview_note"].(string)
-		if !ok || note == "" {
-			t.Fatalf("%s: preview response missing preview_note: %#v", pageType, got)
+		body := string(ctx.Response.Body())
+		if !strings.Contains(body, "<!DOCTYPE html>") || !strings.Contains(body, "preview-request") {
+			t.Fatalf("%s: preview response is not rendered HTML: %s", pageType, body)
 		}
 	}
 
 	ctx := invokePageTemplateHandler(t, PreviewPageTemplate(repo), "GET", "shield", nil)
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("expected 400 for invalid preview type, got %d", ctx.Response.StatusCode())
+	}
+}
+
+// TestPreviewPageTemplateDraftUsesBodyAndDoesNotPersist 验证草稿预览只使用请求体且不落库。
+func TestPreviewPageTemplateDraftUsesBodyAndDoesNotPersist(t *testing.T) {
+	for _, pageType := range []string{"captcha", "challenge", "block"} {
+		repo := newSystemSettingsRepoForTest(t)
+		body := []byte(`{"brand_name":"DraftBrand","title":"Draft Title","custom_css":"body{width:expression(alert(1))}"}`)
+		ctx := invokePageTemplateHandler(t, PreviewPageTemplateDraft(repo), "POST", pageType, body)
+		if ctx.Response.StatusCode() != 200 {
+			t.Fatalf("%s: unexpected status %d: %s", pageType, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+		}
+		preview := string(ctx.Response.Body())
+		if !strings.Contains(preview, "DraftBrand") || !strings.Contains(preview, "Draft Title") {
+			t.Fatalf("%s: draft preview did not use submitted body: %s", pageType, preview)
+		}
+		if strings.Contains(preview, "expression(") {
+			t.Fatalf("%s: draft preview did not sanitize custom CSS: %s", pageType, preview)
+		}
+		for _, key := range []string{settingKeyCaptchaPage, settingKeyChallengePage, settingKeyBlockPage} {
+			if val, err := repo.Get(key); err == nil && val != "" {
+				t.Fatalf("%s: draft preview must not persist %s, got %s", pageType, key, val)
+			}
+		}
+	}
+}
+
+// TestPreviewPageTemplateDraftRejectsInvalidInput 验证草稿预览对非法类型和非法 JSON 返回 400。
+func TestPreviewPageTemplateDraftRejectsInvalidInput(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	ctx := invokePageTemplateHandler(t, PreviewPageTemplateDraft(repo), "POST", "shield", []byte(`{"brand_name":"X"}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("expected 400 for invalid page type, got %d", ctx.Response.StatusCode())
+	}
+	for _, pageType := range []string{"captcha", "challenge", "block"} {
+		ctx := invokePageTemplateHandler(t, PreviewPageTemplateDraft(repo), "POST", pageType, []byte(`{"brand_name":`))
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("%s: expected 400 for malformed body, got %d", pageType, ctx.Response.StatusCode())
+		}
 	}
 }
 
@@ -369,7 +405,7 @@ func TestLoadPageConfigsIgnoreCorruptedStoredJSON(t *testing.T) {
 	}
 }
 
-// TestSanitizePageCSS 验证危险 CSS 片段被剔除，包含大小写混写与拼接重组绕过。
+// TestSanitizePageCSS 验证危险 CSS 整段被拒绝，安全 CSS 原样保留。
 func TestSanitizePageCSS(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -378,15 +414,13 @@ func TestSanitizePageCSS(t *testing.T) {
 	}{
 		{"empty", "", ""},
 		{"safe", "body{color:red}", "body{color:red}"},
-		{"expression", "a{width:expression(1)}", "a{width:1)}"},
-		{"expression_mixed_case", "a{width:EXPRESSION(1)}", "a{width:1)}"},
-		{"javascript_scheme", "a{background:javascript:alert(1)}", "a{background:alert(1)}"},
-		{"javascript_mixed_case", "a{background:JavaScript:alert(1)}", "a{background:alert(1)}"},
-		{"import", "@import url(x);body{}", " url(x);body{}"},
-		{"behavior", "a{behavior:url(x)}", "a{url(x)}"},
-		{"binding", "a{binding:url(x)}", "a{url(x)}"},
-		{"reassembly_bypass", "expexpression(ression(", ""},
-		{"multiple_patterns", "expression(javascript:@import", ""},
+		{"expression", "a{width:expression(1)}", ""},
+		{"expression_mixed_case", "a{width:EXPRESSION(1)}", ""},
+		{"javascript_scheme", "a{background:javascript:alert(1)}", ""},
+		{"import", "@import url(x);body{}", ""},
+		{"behavior", "a{behavior:url(x)}", ""},
+		{"style_breakout", "</style><script>alert(1)</script>", ""},
+		{"escaped_marker", `body{color:\72 ed}`, ""},
 	}
 	for _, tc := range cases {
 		if got := sanitizePageCSS(tc.input); got != tc.want {
@@ -395,11 +429,10 @@ func TestSanitizePageCSS(t *testing.T) {
 	}
 }
 
-// TestSanitizePageCSSKeepsURLFunction 验证本地净化器不剥离 url(，与 pageconfig.SanitizeCSS 的策略差异是有意为之。
-func TestSanitizePageCSSKeepsURLFunction(t *testing.T) {
+func TestSanitizePageCSSRejectsURLFunction(t *testing.T) {
 	const css = "body{background:url(/static/bg.png)}"
-	if got := sanitizePageCSS(css); got != css {
-		t.Fatalf("sanitizePageCSS should keep plain url(), got %q", got)
+	if got := sanitizePageCSS(css); got != "" {
+		t.Fatalf("sanitizePageCSS must reject url(), got %q", got)
 	}
 }
 

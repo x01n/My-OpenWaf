@@ -1,50 +1,46 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { toast } from "sonner";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Switch } from "@/components/ui/switch";
-import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { toast } from "sonner"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Switch } from "@/components/ui/switch"
+import { Button } from "@/components/ui/button"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import {
-  IconBolt,
-  IconAlertTriangle,
-  IconLoader2,
-} from "@tabler/icons-react";
+} from "@/components/ui/select"
+import { IconBolt, IconAlertTriangle, IconLoader2 } from "@tabler/icons-react"
 import {
   useProtectionSettings,
   useProtectionSettingsUpdate,
-} from "@/hooks/use-api";
+} from "@/hooks/use-api"
 import {
   CCRulesEditor,
   CC_ACTION_OPTIONS,
   type CCRule,
-} from "@/components/cc-rules-editor";
+} from "@/components/cc-rules-editor"
 
 /**
  * 防护设置数据类型（已就绪，非空）。
  */
 type ProtectionSettingsData = NonNullable<
   ReturnType<typeof useProtectionSettings>["data"]
->;
+>
 
 interface CCProtectionFormProps {
-  settings: ProtectionSettingsData;
+  settings: ProtectionSettingsData
   /** 请求父组件重挂载本表单以还原为服务端初值 */
-  onReset: () => void;
+  onReset: () => void
 }
 
 /**
@@ -54,48 +50,50 @@ interface CCProtectionFormProps {
  * 因此取消操作由父组件通过 bump key 重挂载来还原初值，避免 effect 内 setState 的级联渲染。
  */
 function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
-  const { t } = useTranslation();
-  const updateSettings = useProtectionSettingsUpdate();
+  const { t } = useTranslation()
+  const updateSettings = useProtectionSettingsUpdate()
 
   const [requestRateLimitEnabled, setRequestRateLimitEnabled] = useState(
     () => settings.request_ratelimit_enabled ?? false
-  );
+  )
   const [requestRateLimitWindow, setRequestRateLimitWindow] = useState(
     () => settings.request_ratelimit_window ?? 60
-  );
+  )
   const [requestRateLimitMax, setRequestRateLimitMax] = useState(
     () => settings.request_ratelimit_max ?? 300
-  );
+  )
   const [requestRateLimitAction, setRequestRateLimitAction] = useState(
     () => settings.request_ratelimit_action ?? "rate_limit"
-  );
+  )
 
   const [errorRateLimitEnabled, setErrorRateLimitEnabled] = useState(
     () => settings.error_ratelimit_enabled ?? false
-  );
+  )
   const [errorRateLimitWindow, setErrorRateLimitWindow] = useState(
     () => settings.error_ratelimit_window ?? 300
-  );
+  )
   const [errorRateLimitMax, setErrorRateLimitMax] = useState(
     () => settings.error_ratelimit_max ?? 30
-  );
+  )
   const [errorRateLimitCount4xx, setErrorRateLimitCount4xx] = useState(
     () => settings.error_ratelimit_count_4xx ?? true
-  );
+  )
   const [errorRateLimitCount5xx, setErrorRateLimitCount5xx] = useState(
     () => settings.error_ratelimit_count_5xx ?? true
-  );
+  )
   const [errorRateLimitCountBlock, setErrorRateLimitCountBlock] = useState(
     () => settings.error_ratelimit_count_block ?? false
-  );
+  )
   const [errorRateLimitAction, setErrorRateLimitAction] = useState(
     () => settings.error_ratelimit_action ?? "rate_limit"
-  );
+  )
 
-  const [ccUseCustom, setCCUseCustom] = useState(() => settings.cc_use_custom ?? false);
+  const [ccUseCustom, setCCUseCustom] = useState(
+    () => settings.cc_use_custom ?? false
+  )
   const [ccRules, setCCRules] = useState<CCRule[]>(() =>
     Array.isArray(settings.cc_rules) ? settings.cc_rules : []
-  );
+  )
 
   const handleSave = async () => {
     try {
@@ -113,17 +111,17 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
         error_ratelimit_action: errorRateLimitAction,
         cc_use_custom: ccUseCustom,
         cc_rules: ccRules,
-      });
-      toast.success(t("ccProtection.saveSuccess"));
+      })
+      toast.success(t("ccProtection.saveSuccess"))
     } catch {
-      toast.error(t("common.saveFailed"));
+      toast.error(t("common.saveFailed"))
     }
-  };
+  }
 
   const handleCancel = () => {
-    toast.success(t("ccProtection.resetSuccess"));
-    onReset();
-  };
+    toast.success(t("ccProtection.resetSuccess"))
+    onReset()
+  }
 
   return (
     <div className="space-y-6">
@@ -178,7 +176,9 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                           setRequestRateLimitWindow(Number(e.target.value))
                         }
                       />
-                      <span className="text-sm text-muted-foreground">{t("ccProtection.seconds")}</span>
+                      <span className="text-sm text-muted-foreground">
+                        {t("ccProtection.seconds")}
+                      </span>
                     </div>
                   </div>
                   <div className="space-y-1.5">
@@ -248,7 +248,9 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                             setErrorRateLimitWindow(Number(e.target.value))
                           }
                         />
-                        <span className="text-sm text-muted-foreground">{t("ccProtection.seconds")}</span>
+                        <span className="text-sm text-muted-foreground">
+                          {t("ccProtection.seconds")}
+                        </span>
                       </div>
                     </div>
                     <div className="space-y-1.5">
@@ -288,7 +290,10 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                         onCheckedChange={setErrorRateLimitCount4xx}
                         id="count-4xx"
                       />
-                      <Label htmlFor="count-4xx" className="cursor-pointer text-sm">
+                      <Label
+                        htmlFor="count-4xx"
+                        className="cursor-pointer text-sm"
+                      >
                         {t("ccProtection.count4xx")}
                       </Label>
                     </div>
@@ -298,7 +303,10 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                         onCheckedChange={setErrorRateLimitCount5xx}
                         id="count-5xx"
                       />
-                      <Label htmlFor="count-5xx" className="cursor-pointer text-sm">
+                      <Label
+                        htmlFor="count-5xx"
+                        className="cursor-pointer text-sm"
+                      >
                         {t("ccProtection.count5xx")}
                       </Label>
                     </div>
@@ -308,7 +316,10 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                         onCheckedChange={setErrorRateLimitCountBlock}
                         id="count-block"
                       />
-                      <Label htmlFor="count-block" className="cursor-pointer text-sm">
+                      <Label
+                        htmlFor="count-block"
+                        className="cursor-pointer text-sm"
+                      >
                         {t("ccProtection.countBlock")}
                       </Label>
                     </div>
@@ -334,7 +345,10 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                     onCheckedChange={setCCUseCustom}
                     id="cc-use-custom"
                   />
-                  <Label htmlFor="cc-use-custom" className="cursor-pointer text-sm font-normal">
+                  <Label
+                    htmlFor="cc-use-custom"
+                    className="cursor-pointer text-sm font-normal"
+                  >
                     {t("ccProtection.enableCustomRules")}
                   </Label>
                 </div>
@@ -360,10 +374,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
         <Button variant="outline" onClick={handleCancel}>
           {t("common.cancel")}
         </Button>
-        <Button
-          onClick={handleSave}
-          disabled={updateSettings.loading}
-        >
+        <Button onClick={handleSave} disabled={updateSettings.loading}>
           {updateSettings.loading && (
             <IconLoader2 className="mr-1.5 h-4 w-4 animate-spin" />
           )}
@@ -371,14 +382,14 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
         </Button>
       </div>
     </div>
-  );
+  )
 }
 
 export default function CCProtectionPage() {
-  const { t } = useTranslation();
-  const { data: settings, isLoading, error } = useProtectionSettings();
+  const { t } = useTranslation()
+  const { data: settings, isLoading, error } = useProtectionSettings()
   // 用于“取消”时重挂载表单以还原为服务端初值
-  const [formKey, setFormKey] = useState(0);
+  const [formKey, setFormKey] = useState(0)
 
   if (isLoading) {
     return (
@@ -391,7 +402,7 @@ export default function CCProtectionPage() {
         <Skeleton className="h-64 w-full" />
         <Skeleton className="h-48 w-full" />
       </div>
-    );
+    )
   }
 
   if (error || !settings) {
@@ -408,7 +419,7 @@ export default function CCProtectionPage() {
           </AlertDescription>
         </Alert>
       </div>
-    );
+    )
   }
 
   return (
@@ -417,5 +428,5 @@ export default function CCProtectionPage() {
       settings={settings}
       onReset={() => setFormKey((k) => k + 1)}
     />
-  );
+  )
 }

@@ -1,97 +1,95 @@
-"use client";
+"use client"
 
-import { useState, useMemo, useCallback } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
+import { useState, useMemo, useCallback } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { Card, CardContent } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Switch } from "@/components/ui/switch"
+import { Label } from "@/components/ui/label"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { toast } from "sonner";
-import {
-  IconShield,
-  IconRefresh,
-  IconHelpCircle,
-} from "@tabler/icons-react";
-import { useBotSettings, useBotSettingsUpdate } from "@/hooks/use-api";
-import { cn } from "@/lib/utils";
+} from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
+import { toast } from "sonner"
+import { IconShield, IconRefresh, IconHelpCircle } from "@tabler/icons-react"
+import { useBotSettings, useBotSettingsUpdate } from "@/hooks/use-api"
+import { cn } from "@/lib/utils"
 
 /**
  * 动态防护子选项
  */
 interface DynamicOption {
-  key: string;
-  label: string;
-  description?: string;
-  recommended?: boolean;
+  key: string
+  label: string
+  description?: string
+  recommended?: boolean
 }
 
 export default function CaptchaPage() {
-  const { t } = useTranslation();
-  const { data: botSettings, isLoading, error, mutate } = useBotSettings();
-  const updateBot = useBotSettingsUpdate();
+  const { t } = useTranslation()
+  const { data: botSettings, isLoading, error, mutate } = useBotSettings()
+  const updateBot = useBotSettingsUpdate()
 
-  const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
+  const [localSettings, setLocalSettings] = useState<Record<string, unknown>>(
+    {}
+  )
 
   const getValue = useCallback(
-    (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    (key: string, defaultValue: unknown = false) => {
       return localSettings[key] !== undefined
         ? localSettings[key]
-        : (botSettings?.[key] ?? defaultValue);
+        : (botSettings?.[key] ?? defaultValue)
     },
     [localSettings, botSettings]
-  );
+  )
 
   const handleToggle = useCallback(
     (key: string) => {
-      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }));
+      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }))
     },
     [getValue]
-  );
+  )
 
   const handleSubToggle = useCallback(
     (key: string) => {
-      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }));
+      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }))
     },
     [getValue]
-  );
+  )
 
   const handleValue = useCallback((key: string, value: string | number) => {
-    setLocalSettings((prev) => ({ ...prev, [key]: value }));
-  }, []);
+    setLocalSettings((prev) => ({ ...prev, [key]: value }))
+  }, [])
 
   const hasChanges = useMemo(() => {
-    return Object.keys(localSettings).length > 0;
-  }, [localSettings]);
+    return Object.keys(localSettings).length > 0
+  }, [localSettings])
 
   const handleSave = useCallback(async () => {
     try {
-      await updateBot.execute({ ...botSettings, ...localSettings });
-      toast.success(t("captcha.saveSuccess"));
-      setLocalSettings({});
-      mutate();
+      await updateBot.execute({ ...botSettings, ...localSettings })
+      toast.success(t("captcha.saveSuccess"))
+      setLocalSettings({})
+      mutate()
     } catch {
-      toast.error(t("captcha.saveFailed"));
+      toast.error(t("captcha.saveFailed"))
     }
-  }, [botSettings, localSettings, updateBot, mutate, t]);
+  }, [botSettings, localSettings, updateBot, mutate, t])
 
   const handleCancel = useCallback(() => {
-    setLocalSettings({});
-    toast.info(t("attacks.cancelled"));
-  }, [t]);
+    setLocalSettings({})
+    toast.info(t("attacks.cancelled"))
+  }, [t])
 
-  const dynamicProtectionEnabled = getValue("dynamic_protection_enabled", false);
+  const dynamicProtectionEnabled = getValue("dynamic_protection_enabled", false)
 
   const dynamicOptions: DynamicOption[] = [
     {
@@ -110,7 +108,7 @@ export default function CaptchaPage() {
       label: t("captcha.imageWatermark"),
       description: t("captcha.performanceWarning"),
     },
-  ];
+  ]
 
   if (isLoading) {
     return (
@@ -121,7 +119,7 @@ export default function CaptchaPage() {
         />
         <Skeleton className="h-96 w-full" />
       </div>
-    );
+    )
   }
 
   return (
@@ -174,7 +172,9 @@ export default function CaptchaPage() {
               </span>
               <Switch
                 checked={dynamicProtectionEnabled}
-                onCheckedChange={() => handleToggle("dynamic_protection_enabled")}
+                onCheckedChange={() =>
+                  handleToggle("dynamic_protection_enabled")
+                }
                 id="dynamic_protection_enabled"
               />
               <div className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -295,11 +295,11 @@ export default function CaptchaPage() {
                     disabled={!getValue("browser_sign_enabled", false)}
                     value={getValue("browser_sign_ttl", 300)}
                     onChange={(e) => {
-                      const n = Number(e.target.value);
+                      const n = Number(e.target.value)
                       handleValue(
                         "browser_sign_ttl",
                         Number.isFinite(n) && n > 0 ? n : 300
-                      );
+                      )
                     }}
                   />
                   <span className="text-sm text-muted-foreground">
@@ -370,5 +370,5 @@ export default function CaptchaPage() {
         </div>
       </Card>
     </div>
-  );
+  )
 }

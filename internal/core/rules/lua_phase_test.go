@@ -1,10 +1,12 @@
 package rules
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
@@ -12,13 +14,25 @@ import (
 	"My-OpenWaf/internal/waf/luaplugin"
 )
 
+type luaPhaseTestKV struct{}
+
+func (luaPhaseTestKV) Available() bool { return true }
+
+func (luaPhaseTestKV) Get(string) ([]byte, bool) { return nil, false }
+
+func (luaPhaseTestKV) Set(string, []byte, time.Duration) error { return nil }
+
+func (luaPhaseTestKV) Delete(string) {}
+
+func (luaPhaseTestKV) Incr(string, time.Duration) (int64, error) { return 1, nil }
+
 func luaPhaseWith(t *testing.T, src string) pipeline.Phase {
 	t.Helper()
 	script, err := luaplugin.Compile("t", luaplugin.StagePre, src)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	e := luaplugin.NewEngine(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e := luaplugin.NewEngine(luaPhaseTestKV{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.Reload([]*luaplugin.Script{script})
 	return NewLuaPhase(e, luaplugin.StagePre)
 }
@@ -115,6 +129,43 @@ end`)
 	}
 }
 
+func TestLuaPhaseCarriesControlledOutput(t *testing.T) {
+	phase := luaPhaseWith(t, `
+function handle(ctx)
+  return {
+    action="intercept",
+    headers={["x-lua-pre"]="matched"},
+    response_body="pre response",
+    tags={"pre", "lua"}
+  }
+end`)
+	res, terminal := phase.Execute(&pipeline.RequestCtx{})
+	if !terminal || res.Type != action.Intercept {
+		t.Fatalf("pre 判定未保留终止动作：%+v terminal=%v", res, terminal)
+	}
+	if res.SetHeaders == nil || (*res.SetHeaders)["x-lua-pre"] != "matched" {
+		t.Errorf("pre SetHeaders 未进入 action.Result：%+v", res.SetHeaders)
+	}
+	if res.ResponseBody == nil || *res.ResponseBody != "pre response" {
+		t.Errorf("pre ResponseBody 未进入 action.Result：%v", res.ResponseBody)
+	}
+	if res.Tags == nil || len(*res.Tags) != 2 || (*res.Tags)[0] != "pre" || (*res.Tags)[1] != "lua" {
+		t.Errorf("pre Tags 未进入 action.Result：%+v", res.Tags)
+	}
+}
+
+// TestLuaPhaseCanceledRequestDoesNotBlock 验证已取消请求不会把 Lua 判定转为 WAF 动作。
+func TestLuaPhaseCanceledRequestDoesNotBlock(t *testing.T) {
+	phase := luaPhaseWith(t, `function handle(ctx) return "intercept" end`)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res, terminal := phase.Execute(&pipeline.RequestCtx{Context: ctx})
+	if res.Matched || terminal {
+		t.Fatalf("cancelled request must skip Lua decision, got %+v terminal=%v", res, terminal)
+	}
+}
+
 // TestBuildLuaRequestViewMapsFields 验证上下文字段被正确传给脚本。
 func TestBuildLuaRequestViewMapsFields(t *testing.T) {
 	ctx := &pipeline.RequestCtx{
@@ -128,7 +179,6 @@ func TestBuildLuaRequestViewMapsFields(t *testing.T) {
 		SiteID:      12,
 		ContentType: "application/json",
 		Headers:     map[string]string{"x-forwarded-for": "1.2.3.4"},
-		QueryParams: map[string]string{"next": "/home"},
 		Body:        []byte(`{"u":"admin"}`),
 		TLS: bot.TLSClientFingerprint{
 			TLSVersion: "TLS13", JA3Hash: "abc", JA4: "t13d", SNI: "app.example.com",
@@ -148,6 +198,9 @@ func TestBuildLuaRequestViewMapsFields(t *testing.T) {
 	if view.QueryParams["next"] != "/home" {
 		t.Errorf("QueryParams 未映射")
 	}
+	if values := view.QueryValues["next"]; len(values) != 1 || values[0] != "/home" {
+		t.Errorf("QueryValues 未映射: %#v", values)
+	}
 	if view.Body != `{"u":"admin"}` {
 		t.Errorf("Body = %q", view.Body)
 	}
@@ -157,6 +210,23 @@ func TestBuildLuaRequestViewMapsFields(t *testing.T) {
 }
 
 // TestBuildLuaRequestViewNilClientIP 验证 ClientIP 为 nil 时不 panic。
+func TestBuildLuaRequestViewParsesRepeatedQueryValues(t *testing.T) {
+	ctx := &pipeline.RequestCtx{RawQuery: "tag=first&tag=second&path=%2Fhome&blank=&flag"}
+	view := BuildLuaRequestView(ctx)
+	if view.QueryParams["tag"] != "first" || view.QueryParams["path"] != "/home" {
+		t.Fatalf("QueryParams = %#v", view.QueryParams)
+	}
+	if values := view.QueryValues["tag"]; len(values) != 2 || values[0] != "first" || values[1] != "second" {
+		t.Fatalf("QueryValues[tag] = %#v", values)
+	}
+	if values := view.QueryValues["blank"]; len(values) != 1 || values[0] != "" {
+		t.Fatalf("QueryValues[blank] = %#v", values)
+	}
+	if values := view.QueryValues["flag"]; len(values) != 1 || values[0] != "" {
+		t.Fatalf("QueryValues[flag] = %#v", values)
+	}
+}
+
 func TestBuildLuaRequestViewNilClientIP(t *testing.T) {
 	view := BuildLuaRequestView(&pipeline.RequestCtx{})
 	if view.ClientIP != "" {

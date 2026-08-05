@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"mime"
 	"net"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	"My-OpenWaf/internal/core/adminweb"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/core/rules"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/proxy"
 	"My-OpenWaf/internal/security"
@@ -67,8 +69,10 @@ type Options struct {
 }
 
 const (
-	bindContextKey           = "dataplane_bind"
-	tlsFingerprintContextKey = "dataplane_tls_fingerprint"
+	bindContextKey                     = "dataplane_bind"
+	tlsFingerprintContextKey           = "dataplane_tls_fingerprint"
+	dynamicProtectionKeyRequestBodyMax = 20 * 1024
+	dynamicProtectionKeyPath           = "/__owaf/dynamic/key"
 )
 
 type tlsFingerprintContextValueKey struct{}
@@ -164,6 +168,28 @@ func scrubResponseHopByHopHeaders(c *app.RequestContext) {
 	}
 }
 
+// applyLuaResponse 应用 Lua 已通过运行时校验的响应控制字段。
+// 仅普通 Lua 终止拦截响应调用；挑战、重定向、丢弃和上游响应不允许被 Lua 改写。
+func applyLuaResponse(c *app.RequestContext, result action.Result, statusCode int) bool {
+	if c == nil || result.SetHeaders == nil && result.ResponseBody == nil {
+		return false
+	}
+	if result.SetHeaders != nil {
+		for key, value := range *result.SetHeaders {
+			c.Response.Header.Set(key, value)
+		}
+	}
+	if result.ResponseBody == nil {
+		return false
+	}
+	c.SetStatusCode(statusCode)
+	if len(c.Response.Header.ContentType()) == 0 {
+		c.Response.Header.SetContentType("text/plain; charset=utf-8")
+	}
+	c.SetBodyString(*result.ResponseBody)
+	return true
+}
+
 // Handler returns a Hertz middleware: maintenance → WAF → block fuse or reverse proxy.
 func Handler(opts Options) app.HandlerFunc {
 	var rr atomic.Uint32
@@ -210,6 +236,10 @@ func Handler(opts Options) app.HandlerFunc {
 
 		// Handle challenge verification endpoints
 		if handleChallengeVerify(c, opts) {
+			return
+		}
+
+		if handleDynamicProtectionKey(c, opts) {
 			return
 		}
 
@@ -265,7 +295,7 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
-		clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR)
+		clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
 		cipStr := clientIPStr(clientIP)
 		if clientIP != nil && opts.Metrics != nil {
 			opts.Metrics.RecordClientIP(cipStr)
@@ -481,13 +511,12 @@ func Handler(opts Options) app.HandlerFunc {
 					}
 				}
 			}
-			// 浏览器/环境检查：仅当命中确定性自动化硬信号（Score==100）时否决，
-			// 明文指纹解析失败或仅可疑分值均放行，避免误伤真实浏览器。
-			if challengePassed && sn.Protection.ShieldEnableEnvCheck && sub.EnvFP != "" {
-				if fp := challenge.ParseEnvFingerprint(sub.EnvFP); fp != nil {
-					if challenge.ValidateEnvFingerprint(fp).Score >= 100 {
-						challengePassed = false
-					}
+			// 环境检查启用时，令牌已验签后才从它导出 AES-256-GCM 密钥。
+			// 缺失、解密失败或评分不通过均拒绝，不能回退到客户端可伪造的明文指纹。
+			if challengePassed && sn.Protection.ShieldEnableEnvCheck {
+				key := challenge.EnvSessionKeyFromChallengeToken(sub.Token)
+				if !challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprint(sub.EnvFP, key)).Pass {
+					challengePassed = false
 				}
 			}
 			// 失败计入 IP 信誉，限制无限重试。
@@ -655,12 +684,14 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 
 		reqCtx := pipeline.AcquireCtx()
+		reqCtx.Context = ctx
 		reqCtx.RequestID = reqID
 		reqCtx.Bind = bind
 		reqCtx.ClientIP = clientIP
 		reqCtx.Method = method
 		reqCtx.Path = path
 		reqCtx.RawQuery = rawQ
+		rules.PopulateLuaQueryParams(reqCtx)
 		reqCtx.Host = host
 		reqCtx.UserAgent = ua
 		reqCtx.SiteID = rt.Site.ID
@@ -943,15 +974,15 @@ func Handler(opts Options) app.HandlerFunc {
 				switch {
 				case result.Action.IsCaptchaChallenge() && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil:
 					captchaType := challenge.CaptchaType(sn.Protection.CaptchaType)
-					challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, statusCode)
+					binding := challengeSessionBindingForSite(rt.Site.ID, host, bind)
+					challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, binding, statusCode, sn.CaptchaPage)
 				case result.Action.IsShieldChallenge() && sn.Protection.ShieldEnabled && opts.ShieldManager != nil:
 					origURL := string(c.Request.URI().RequestURI())
-					proto := inboundProto(c, rt.Site.TLSEnabled)
-					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, proto, statusCode)
+					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, requestProtocol(c), challengeSessionBindingForSite(rt.Site.ID, host, bind), statusCode)
 				case result.Action.IsChainChallenge() && sn.Protection.ChainEnabled && opts.ChainManager != nil:
-					challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
+					challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, challengeSessionBindingForSite(rt.Site.ID, host, bind), statusCode)
 				default:
-					pages.WriteChallengeResponse(c, reqID, result.Site, sn.Protection.ShieldEnableEnvCheck, statusCode,
+					pages.WriteChallengeResponse(c, reqID, result.Site, sn.Protection.ShieldEnableEnvCheck, statusCode, sn.ChallengePage,
 						challenge.ChallengeTokenClaims{ClientIP: cipStr, UserAgent: ua, Host: host, SiteID: rt.Site.ID})
 				}
 				logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
@@ -1022,11 +1053,13 @@ func Handler(opts Options) app.HandlerFunc {
 					StatusCode: statusCode,
 				})
 			}
-			pages.WriteBlockResponse(c, reqID, result.Site, sn, result.Action)
+			if !applyLuaResponse(c, result.Action, statusCode) {
+				pages.WriteBlockResponse(c, reqID, result.Site, sn, result.Action)
+			}
 			scrubResponseHopByHopHeaders(c)
 			logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
 			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass", HeaderOrder: reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }), TLSFingerprint: reqCtx.TLS})
-			tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, true, nil)
+			tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, clientIP, statusCode, true, c.Response.BodyBytes(), nil)
 			return
 		}
 
@@ -1079,13 +1112,16 @@ func Handler(opts Options) app.HandlerFunc {
 		recordResponseBody := shouldRecordAppRouteResponseBody(result.Site)
 		switch {
 		case IsWebSocketUpgrade(c):
-			upstreamErr = ForwardWebSocket(c, *result.Site, base, clientIP, opts.Engine)
+			upstreamErr = ForwardWebSocket(ctx, reqID, c, *result.Site, base, clientIP, opts.Engine)
 		case IsSSERequest(c):
 			upstreamErr = ForwardSSE(ctx, c, *result.Site, base, clientIP, host)
 		case recordResponseBody:
-			bufferedResp, upstreamErr = proxy.FetchHTTP(ctx, c, *result.Site, base, clientIP, host)
+			// Cap post-decode buffering to the same limit used by dynamic transform so a
+			// compressed upstream body cannot force unlimited memory growth. Oversized
+			// responses keep a readable remainder and stream without transformation.
+			bufferedResp, upstreamErr = proxy.FetchHTTPForAppRouteCapture(ctx, c, *result.Site, base, clientIP, host)
 			if upstreamErr == nil {
-				proxy.ForwardBufferedResponse(c, bufferedResp)
+				upstreamErr = proxy.ForwardCapturedResponseForSiteWithClientIP(ctx, c, bufferedResp, *result.Site, clientIP)
 			}
 		default:
 			cacheKey, ttl, ignoreUpstreamCC := "", int64(0), false
@@ -1102,7 +1138,7 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 			staleEntry := opts.ResponseCache.Lookup(cacheKey)
 			if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
-				proxy.WriteCachedResponseForSite(c, method, entry, *result.Site)
+				proxy.WriteCachedResponseForSiteWithClientIP(c, method, entry, *result.Site, clientIP)
 				cacheState = "hit"
 				break
 			}
@@ -1110,7 +1146,7 @@ func Handler(opts Options) app.HandlerFunc {
 			bufferedResp, err := proxy.FetchHTTP(ctx, c, *result.Site, base, clientIP, host)
 			if err != nil {
 				if staleEntry != nil {
-					proxy.WriteCachedResponseForSite(c, method, staleEntry, *result.Site)
+					proxy.WriteCachedResponseForSiteWithClientIP(c, method, staleEntry, *result.Site, clientIP)
 					cacheState = "stale"
 					break
 				}
@@ -1118,13 +1154,13 @@ func Handler(opts Options) app.HandlerFunc {
 				break
 			}
 			if int64(len(bufferedResp.Body)) > opts.ResponseCache.MaxEntryBodySize() {
-				proxy.ForwardBufferedResponseAsStreamForSite(c, bufferedResp, *result.Site)
+				proxy.ForwardBufferedResponseAsStreamForSiteWithClientIP(c, bufferedResp, *result.Site, clientIP)
 				break
 			}
 			if proxy.ShouldCacheHTTPResponse(method, bufferedResp, ignoreUpstreamCC) {
 				opts.ResponseCache.Set(cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, ttl, proxy.SanitizeHeadersForEdgeCache(bufferedResp.Header))
 			}
-			proxy.ForwardBufferedResponseForSite(c, bufferedResp, *result.Site)
+			proxy.ForwardBufferedResponseForSiteWithClientIP(c, bufferedResp, *result.Site, clientIP)
 		}
 		upstreamLatencyMs := time.Since(upstreamStart).Milliseconds()
 		responseSize := int64(0)
@@ -1186,7 +1222,11 @@ func Handler(opts Options) app.HandlerFunc {
 		// Match rules before launching the goroutine so unmatched requests avoid
 		// map copies and background DB work on the hot path.
 		// Skip recording if the request contains any excluded header.
-		tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, false, bufferedResponseBody(bufferedResp))
+		var upstreamHeader http.Header
+		if bufferedResp != nil {
+			upstreamHeader = bufferedResp.Header
+		}
+		tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, clientIP, statusCode, false, bufferedResponseBody(bufferedResp), upstreamHeader)
 	}
 }
 
@@ -1194,23 +1234,28 @@ func pickUpstream(urls []string, pool *upstream.Pool, next func(uint32) uint32) 
 	return upstream.PickByProtocolPreference(urls, pool, next)
 }
 
-func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, reqCtx *pipeline.RequestCtx, method, host, path, rawQ, cipStr, ua string, statusCode int, isLocalResponse bool, responseBody []byte) {
+func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, reqCtx *pipeline.RequestCtx, clientIP net.IP, statusCode int, isLocalResponse bool, responseBody []byte, upstreamHeader http.Header) {
 	// 无 AppRoute 规则时该请求永远不会命中任何资源规则，直接返回，避免在热路径上
 	// 构造 Material（请求/响应体拷贝、两份 header JSON、两个 snippet）与后台 DB 写。
 	// 对应“命中站点规则才发现资源”的语义：无规则站点记录恒为空，无需付出任何构造代价。
 	if opts.ResourceAggregator == nil || len(rt.AppRouteRules) == 0 || hasExcludedHeader(c, sn.ExcludeRecordHeaders) {
 		return
 	}
-	reqBody := string(reqCtx.Body)
-	if len(reqBody) > logBodyPreviewLimit {
-		reqBody = reqBody[:logBodyPreviewLimit]
+	var reqBody []byte
+	if reqCtx != nil {
+		reqBody = reqCtx.Body
 	}
-	respBody := string(responseBody)
-	if respBody == "" && !c.Response.IsBodyStream() {
-		respBody = string(c.Response.Body())
+	matchRespBody := responseBody
+	if len(matchRespBody) == 0 && !c.Response.IsBodyStream() {
+		matchRespBody = c.Response.Body()
 	}
-	if len(respBody) > logBodyPreviewLimit {
-		respBody = respBody[:logBodyPreviewLimit]
+	recordRespBody := matchRespBody
+	if isLocalResponse {
+		matchRespBody = nil
+		if statusCode == http.StatusForbidden {
+			recordRespBody = append([]byte("访问被拒绝\n"), recordRespBody...)
+		}
+		upstreamHeader = nil
 	}
 	var matTLS appresource.TLSMetadata
 	if fp, ok := tlsFingerprintFromRequestContext(c); ok {
@@ -1222,32 +1267,11 @@ func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot
 			JA4:        fp.JA4,
 		}
 	}
-	reqCT := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
-	matchRespBody := respBody
-	if isLocalResponse {
-		matchRespBody = ""
+	mat := appresource.BuildMaterialFromRequestBody(c, clientIP, matTLS, reqBody, recordRespBody, upstreamHeader, !isLocalResponse)
+	if mat == nil {
+		return
 	}
-	mat := &appresource.Material{
-		Method:              method,
-		Host:                host,
-		Path:                path,
-		QueryString:         rawQ,
-		ClientIP:            cipStr,
-		StatusCode:          statusCode,
-		ContentType:         string(c.Response.Header.ContentType()),
-		UserAgent:           ua,
-		RequestBody:         reqBody,
-		ResponseBody:        matchRespBody,
-		TLSVersion:          matTLS.TLSVersion,
-		TLSSNI:              matTLS.TLSSNI,
-		TLSALPN:             matTLS.TLSALPN,
-		JA3Hash:             matTLS.JA3Hash,
-		JA4:                 matTLS.JA4,
-		RequestHeadersJSON:  requestHeadersJSON(c),
-		ResponseHeadersJSON: responseHeadersJSON(c),
-		RequestBodySnippet:  sanitizeBodyPreview(reqBody, reqCT),
-		ResponseBodySnippet: sanitizeBodyPreview(respBody, strings.ToLower(strings.TrimSpace(string(c.Response.Header.ContentType())))),
-	}
+	mat.StatusCode = statusCode
 	var headerFn func(string) string
 	if reqCtx != nil {
 		headerFn = func(key string) string { return reqCtx.Headers[key] }
@@ -1258,7 +1282,7 @@ func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot
 	// 命中站点资源规则才记录：未命中的请求不代表任何被管理资源，记录会稀释数据。
 	if len(ids) > 0 {
 		recordMat := *mat
-		recordMat.QueryString = sanitizeQueryString(rawQ)
+		recordMat.QueryString = sanitizeQueryString(string(c.URI().QueryString()))
 		opts.ResourceAggregator.Record(rt.Site.ID, ids, &recordMat)
 	}
 }
@@ -1537,6 +1561,9 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 		requestHeaders = valueOrFallback(requestHeaders, requestHeadersJSON(c))
 		responseHeaders = valueOrFallback(responseHeaders, responseHeadersJSON(c))
 	}
+	if isDynamicProtectionKeyPath(c, info.Path) {
+		requestBody = "[redacted]"
+	}
 	return store.AccessLog{
 		SiteID:               info.SiteID,
 		RequestID:            info.RequestID,
@@ -1643,7 +1670,7 @@ const (
 	logHeaderValuesLimit = 32
 )
 
-var sensitiveLogValuePattern = regexp.MustCompile(`(?i)(password|passwd|pwd|token|secret|session|api[_-]?key|auth[_-]?token|csrf|code)(["'\s:=]+)([^&\s,"'}]+)`)
+var sensitiveLogValuePattern = regexp.MustCompile(`(?i)(password|passwd|pwd|token|secret|session|api[_-]?key|auth[_-]?token|csrf|code|ticket|env)(["'\s:=]+)([^&\s,"'}]+)`)
 
 func requestHeadersJSON(c *app.RequestContext) string {
 	headers := make(map[string][]string)
@@ -1693,15 +1720,25 @@ func responseHeadersJSON(c *app.RequestContext) string {
 
 func requestBodyPreview(c *app.RequestContext) (string, bool, int64) {
 	body, truncated, size := requestBodySample(c)
-	if len(body) == 0 {
-		return "", truncated, size
-	}
 	if len(body) > logBodyPreviewLimit {
 		body = body[:logBodyPreviewLimit]
 		truncated = true
 	}
+	if isDynamicProtectionKeyPath(c, "") {
+		return "[redacted]", truncated, size
+	}
+	if len(body) == 0 {
+		return "", truncated, size
+	}
 	contentType := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
 	return sanitizeBodyPreview(string(body), contentType), truncated, size
+}
+
+func isDynamicProtectionKeyPath(c *app.RequestContext, loggedPath string) bool {
+	if loggedPath == dynamicProtectionKeyPath {
+		return true
+	}
+	return c != nil && string(c.Path()) == dynamicProtectionKeyPath
 }
 
 func sanitizeQueryString(raw string) string {
@@ -1724,6 +1761,8 @@ func sanitizeQueryString(raw string) string {
 	return values.Encode()
 }
 
+// queryParams 以与 net/url 相同的解码规则生成 Lua 可见的查询参数。
+// 重复键保留第一个值，与 dry-run 的 map 契约一致；解析失败时返回 nil。
 func sanitizeBodyPreview(body, contentType string) string {
 	if body == "" {
 		return ""
@@ -1784,7 +1823,7 @@ func sanitizeJSONValue(value any) any {
 var sensitiveLogValueHints = []string{
 	"password", "passwd", "pwd", "token", "secret", "session",
 	"api_key", "api-key", "apikey", "auth_token", "auth-token", "authtoken",
-	"csrf", "code",
+	"csrf", "code", "ticket", "env",
 }
 
 /**
@@ -1828,7 +1867,7 @@ func truncateLogValue(value string, limit int) string {
 // sensitiveLogKeyParts 是需要整体遮蔽取值的 header 名片段（全小写）。
 var sensitiveLogKeyParts = []string{
 	"authorization", "cookie", "token", "secret", "password", "passwd", "pwd",
-	"session", "api-key", "apikey", "csrf", "credential", "key",
+	"session", "api-key", "apikey", "csrf", "credential", "key", "ticket", "env",
 }
 
 // isSensitiveLogKey 判断 header 名是否属于敏感项。接受任意大小写。
@@ -1925,8 +1964,7 @@ func isInternalHTTP3Request(c *app.RequestContext) bool {
 			return true
 		}
 	}
-	return strings.TrimSpace(string(c.GetHeader("X-OpenWaf-Internal-Proto"))) == "h3" &&
-		strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))) == "h3"
+	return false
 }
 
 func requestProtocol(c *app.RequestContext) string {
@@ -1941,9 +1979,6 @@ func requestProtocol(c *app.RequestContext) string {
 			return strings.ToLower(fp.ALPN[0])
 		}
 		return "https"
-	}
-	if proto := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); proto != "" {
-		return strings.ToLower(proto)
 	}
 	return "http"
 }
@@ -2086,40 +2121,69 @@ func normalizeAntiReplayAction(raw string) string {
 // challengeTokenClaims 组装 JS 挑战 token 的客户端绑定信息。
 // 客户端 IP 按站点的 XFF 策略解析，与通行 cookie 使用同一套身份字段，
 // 保证挑战页与其换取的通行凭证绑定到同一个客户端。
+func challengeSessionBinding(c *app.RequestContext, opts Options) (challenge.ChallengeSessionBinding, bool) {
+	if opts.Holder == nil {
+		return challenge.ChallengeSessionBinding{}, false
+	}
+	sn := opts.Holder.Load()
+	if sn == nil {
+		return challenge.ChallengeSessionBinding{}, false
+	}
+	host := string(c.Host())
+	bind := listenerBind(c)
+	if bind == "" {
+		bind = opts.Bind
+	}
+	rt, ok := sn.MatchSite(bind, host)
+	if !ok {
+		return challenge.ChallengeSessionBinding{}, false
+	}
+	return challengeSessionBindingForSite(rt.Site.ID, host, bind), true
+}
+
+func challengeSessionBindingForSite(siteID uint, host, bind string) challenge.ChallengeSessionBinding {
+	return challenge.ChallengeSessionBinding{SiteID: siteID, Host: snapshot.NormalizeMatchHost(host), Bind: bind}
+}
+
 func challengeTokenClaims(c *app.RequestContext, rt *snapshot.SiteRuntime) challenge.ChallengeTokenClaims {
 	claims := challenge.ChallengeTokenClaims{
 		UserAgent: string(c.UserAgent()),
 		Host:      string(c.Host()),
 	}
 	if rt != nil {
-		claims.ClientIP = clientIPStr(security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR))
+		claims.ClientIP = clientIPStr(security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder))
 		claims.SiteID = rt.Site.ID
 	}
 	return claims
 }
 
 func writeAntiReplayActionResponse(c *app.RequestContext, opts Options, sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, reqID, antiReplayAct string, result action.Result, statusCode int) {
+	bind := listenerBind(c)
+	if bind == "" {
+		bind = opts.Bind
+	}
+	binding := challengeSessionBindingForSite(rt.Site.ID, string(c.Host()), bind)
 	switch action.Type(antiReplayAct) {
 	case action.CaptchaChallenge:
 		if sn != nil && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil {
 			captchaType := challenge.CaptchaType(sn.Protection.CaptchaType)
-			challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, statusCode)
+			challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, binding, statusCode, sn.CaptchaPage)
 			return
 		}
 	case action.ShieldChallenge:
 		if sn != nil && sn.Protection.ShieldEnabled && opts.ShieldManager != nil {
 			origURL := string(c.Request.URI().RequestURI())
-			opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, inboundProto(c, rt.Site.TLSEnabled), statusCode)
+			opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, requestProtocol(c), binding, statusCode)
 			return
 		}
 	case action.ChainChallenge:
 		if sn != nil && sn.Protection.ChainEnabled && opts.ChainManager != nil {
-			challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
+			challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, binding, statusCode)
 			return
 		}
 	case action.Challenge:
 		envCheck := sn != nil && sn.Protection.ShieldEnableEnvCheck
-		pages.WriteChallengeResponse(c, reqID, rt, envCheck, statusCode, challengeTokenClaims(c, rt))
+		pages.WriteChallengeResponse(c, reqID, rt, envCheck, statusCode, sn.ChallengePage, challengeTokenClaims(c, rt))
 		return
 	}
 	pages.WriteBlockResponse(c, reqID, rt, sn, result)
@@ -2194,6 +2258,129 @@ func handleChallengeVerify(c *app.RequestContext, opts Options) bool {
 	return false
 }
 
+type dynamicProtectionKeyRequest struct {
+	Ticket string          `json:"ticket"`
+	Key    string          `json:"key"`
+	Env    json.RawMessage `json:"env"`
+}
+
+func handleDynamicProtectionKey(c *app.RequestContext, opts Options) bool {
+	if string(c.Path()) != dynamicProtectionKeyPath {
+		return false
+	}
+	statusCode := http.StatusOK
+	wafAction := "dynamic_key"
+	requestID := fastRequestID()
+	c.Response.Header.Set("X-Request-ID", requestID)
+	c.Response.Header.Set("Cache-Control", "no-store")
+	c.Response.Header.Set("Pragma", "no-cache")
+	if opts.Metrics != nil {
+		opts.Metrics.RecordRequest()
+	}
+	host := string(c.Host())
+	bind := listenerBind(c)
+	if bind == "" {
+		bind = opts.Bind
+	}
+	var siteID uint
+	var logClientIP net.IP
+	defer func() {
+		if opts.Metrics != nil {
+			opts.Metrics.RecordStatus(statusCode)
+		}
+		if logClientIP == nil {
+			logClientIP = security.ResolveClientIP(c, "", "", nil)
+		}
+		recordAccessLog(c, opts, accessLogInfo{SiteID: siteID, RequestID: requestID, ClientIP: clientIPStr(logClientIP), Host: host, Path: string(c.Path()), Method: string(c.Method()), UserAgent: string(c.UserAgent()), StatusCode: statusCode, WAFAction: wafAction, CacheState: "bypass"})
+	}()
+	if string(c.Method()) != http.MethodPost {
+		statusCode = http.StatusMethodNotAllowed
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return true
+	}
+	body := c.Request.Body()
+	if len(body) > dynamicProtectionKeyRequestBodyMax {
+		statusCode = http.StatusRequestEntityTooLarge
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "dynamic key request body too large"})
+		return true
+	}
+	sn := opts.Holder.Load()
+	if sn == nil {
+		statusCode = http.StatusServiceUnavailable
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "configuration snapshot not loaded"})
+		return true
+	}
+	var req dynamicProtectionKeyRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		statusCode = http.StatusBadRequest
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid dynamic key request"})
+		return true
+	}
+	if req.Ticket == "" || req.Key == "" {
+		statusCode = http.StatusBadRequest
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusBadRequest, map[string]string{"error": "missing dynamic key request fields"})
+		return true
+	}
+	if !validDynamicProtectionEnv(req.Env) {
+		statusCode = http.StatusBadRequest
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid dynamic environment payload"})
+		return true
+	}
+	rt, ok := sn.MatchSite(bind, host)
+	if !ok {
+		statusCode = http.StatusNotFound
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusNotFound, map[string]string{"error": "site not found"})
+		return true
+	}
+	siteID = rt.Site.ID
+	clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
+	logClientIP = clientIP
+	ttl := rt.DynamicProtection.DecryptCacheTTLSeconds
+	if ttl <= 0 {
+		ttl = 300
+	}
+	claims := challenge.DynamicProtectionClaims{Host: host, ClientIP: clientIP, UserAgent: string(c.UserAgent()), SiteID: rt.Site.ID, Bind: bind}
+	kek, ok := challenge.VerifyDynamicProtectionKeyTicket(req.Ticket, challenge.DynamicProtectionKeyClaims{DynamicProtectionClaims: claims, Key: req.Key}, time.Now())
+	if !ok {
+		statusCode = http.StatusForbidden
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusForbidden, map[string]string{"error": "invalid dynamic key ticket"})
+		return true
+	}
+	cookie := challenge.BuildDynamicProtectionSessionCookieWithClaims(claims, rt.Site.TLSEnabled, time.Now(), time.Duration(ttl)*time.Second)
+	c.Response.Header.Add("Set-Cookie", cookie)
+	c.JSON(http.StatusOK, map[string]any{"kek": kek, "ttl": ttl})
+	return true
+}
+
+func validDynamicProtectionEnv(raw json.RawMessage) bool {
+	if len(raw) == 0 || len(raw) > 16*1024 {
+		return false
+	}
+	var env struct {
+		Blocked     *bool          `json:"blocked"`
+		Reasons     []string       `json:"reasons"`
+		SoftReasons []string       `json:"softReasons"`
+		SoftScore   *float64       `json:"softScore"`
+		Signals     map[string]any `json:"signals"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || env.Blocked == nil || env.Reasons == nil || env.SoftReasons == nil || env.SoftScore == nil || len(env.Signals) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 5 {
+		return false
+	}
+	return !*env.Blocked
+}
+
 /**
  * recordChallengeFailure 在服务端记录一次挑战验证失败。
  *
@@ -2219,7 +2406,7 @@ func recordChallengeFailure(c *app.RequestContext, opts Options) {
 	if ipRep == nil {
 		return
 	}
-	clientIP := security.ResolveClientIP(c, store.XFFModeStrip, "")
+	clientIP := security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
 	if clientIP == nil {
 		return
 	}
@@ -2244,28 +2431,27 @@ func handleCaptchaVerify(c *app.RequestContext, opts Options) bool {
 		c.String(503, "captcha not configured")
 		return true
 	}
+	binding, ok := challengeSessionBinding(c, opts)
+	if !ok {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
+	}
 
 	sessionID := string(c.FormValue("__waf_captcha_session"))
 	answer := string(c.FormValue("__waf_captcha_answer"))
 
 	if sessionID == "" || answer == "" {
 		recordChallengeFailure(c, opts)
-		c.Redirect(302, []byte("/"))
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
 		return true
 	}
 
-	ok, session := opts.CaptchaManager.VerifyAdvancedSession(sessionID, answer)
+	ok, session := opts.CaptchaManager.VerifyAdvancedSessionWithBinding(sessionID, answer, binding)
 	if ok && session != nil && len(session.EnvKey) > 0 {
-		// 会话启用了浏览器/环境检查：解密并校验环境指纹。
-		// 分级策略：仅当命中确定性自动化硬信号（Score==100）时拒绝，
-		// 其余可疑分值记录日志后放行，避免误伤真实浏览器。
-		if envFP := string(c.FormValue("__waf_env_fp")); envFP != "" {
-			if fp := challenge.DecryptEnvFingerprint(envFP, session.EnvKey); fp != nil {
-				result := challenge.ValidateEnvFingerprint(fp)
-				if result.Score >= 100 {
-					ok = false
-				}
-			}
+		result := challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprint(string(c.FormValue("__waf_env_fp")), session.EnvKey))
+		if !result.Pass {
+			ok = false
 		}
 	}
 
@@ -2284,6 +2470,12 @@ func handleShieldVerify(c *app.RequestContext, opts Options) bool {
 		c.String(503, "shield not configured")
 		return true
 	}
+	binding, ok := challengeSessionBinding(c, opts)
+	if !ok {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
+	}
 
 	sessionID := string(c.FormValue("__waf_shield_session"))
 	captchaAnswer := string(c.FormValue("__waf_captcha_answer"))
@@ -2296,7 +2488,7 @@ func handleShieldVerify(c *app.RequestContext, opts Options) bool {
 		counter, _ = strconv.ParseInt(counterStr, 10, 64)
 	}
 
-	passed, originalURL := opts.ShieldManager.VerifyChallenge(sessionID, captchaAnswer, counter, hash, envFP, requestProtoFromContext(c))
+	passed, originalURL := opts.ShieldManager.VerifyChallengeWithBinding(sessionID, captchaAnswer, counter, hash, envFP, requestProtocol(c), binding)
 	if passed {
 		setChallengeCookie(c, opts)
 		if originalURL == "" {
@@ -2317,6 +2509,12 @@ func handleChainVerify(c *app.RequestContext, opts Options) bool {
 		c.String(503, "chain challenge not configured")
 		return true
 	}
+	binding, ok := challengeSessionBinding(c, opts)
+	if !ok {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
+	}
 
 	sessionID := string(c.FormValue("__waf_chain_session"))
 	stepType := string(c.FormValue("__waf_chain_step"))
@@ -2331,7 +2529,7 @@ func handleChainVerify(c *app.RequestContext, opts Options) bool {
 
 	// 用 Detailed 版本：链内「正常推进到下一步」与「步内校验失败重渲染当前步」
 	// 的三元返回值完全相同，只有 Failed 能区分，否则会把正常访客计为失败。
-	outcome := opts.ChainManager.ProcessStepDetailed(sessionID, formData)
+	outcome := opts.ChainManager.ProcessStepDetailedWithBinding(sessionID, formData, binding)
 	if outcome.Failed {
 		recordChallengeFailure(c, opts)
 	}
@@ -2365,7 +2563,7 @@ func setChallengeCookie(c *app.RequestContext, opts Options) {
 	if !ok {
 		return
 	}
-	clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR)
+	clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
 	cookie := challenge.BuildChallengePassCookieWithClaims(challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: string(c.UserAgent()), SiteID: rt.Site.ID, Bind: bind}, rt.Site.TLSEnabled, time.Now(), challengePassTTL(sn.Protection))
 	c.Response.Header.Set("Set-Cookie", cookie)
 }

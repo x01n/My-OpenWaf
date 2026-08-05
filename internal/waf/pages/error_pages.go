@@ -3,7 +3,6 @@ package pages
 import (
 	"context"
 	"html/template"
-	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -62,66 +61,42 @@ func RenderErrorPage(statusCode int, customConfig *ErrorPageConfig) []byte {
 		}
 	}
 
-	customStyle := ""
-	if cfg.CustomCSS != "" {
-		customStyle = cfg.CustomCSS
+	data := errorPageTemplateData{
+		StatusCode: statusCode,
+		Title:      cfg.Title,
+		TitleZh:    "错误",
+		CustomCSS:  template.CSS(sanitizeTemplateCSS(cfg.CustomCSS)),
+		Icon:       template.HTML("&#9888;"),
 	}
-
-	icon := "&#9888;"
-	titleZh := "错误"
-	switch statusCode {
-	case 403:
-		icon = "&#128737;"
-		titleZh = "访问被拒绝"
-	case 404:
-		icon = "&#128269;"
-		titleZh = "页面未找到"
-	case 429:
-		icon = "&#9203;"
-		titleZh = "请求过于频繁"
-	case 431:
-		icon = "&#128203;"
-		titleZh = "请求头字段过多"
-	case 502:
-		icon = "&#9889;"
-		titleZh = "网关错误"
-	case 503:
-		icon = "&#128736;"
-		titleZh = "服务不可用"
-	case 504:
-		icon = "&#9203;"
-		titleZh = "网关超时"
-	}
-
-	bodyHTML := ""
 	for _, line := range strings.Split(cfg.Body, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			bodyHTML += `<p class="body-line">` + line + `</p>`
+		if line = strings.TrimSpace(line); line != "" {
+			data.BodyLines = append(data.BodyLines, line)
 		}
 	}
-
-	html := `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + cfg.Title + `</title><style>` +
-		`*{margin:0;padding:0;box-sizing:border-box}` +
-		`body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 40%,#f1f5f9 100%);color:#1e293b}` +
-		`.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);text-align:center;max-width:500px;width:92%;padding:48px 40px}` +
-		`.icon{font-size:48px;margin-bottom:8px;line-height:1.2}` +
-		`.status-code{font-size:4rem;font-weight:800;color:#14b8a6;line-height:1;margin-bottom:4px}` +
-		`.title{font-size:1.2rem;font-weight:600;color:#334155;margin-bottom:6px}` +
-		`.divider{width:48px;height:3px;background:#14b8a6;border-radius:2px;margin:16px auto}` +
-		`.body-line{font-size:.9rem;color:#64748b;line-height:1.6;margin-bottom:4px}` +
-		`.footer{font-size:.7rem;color:#94a3b8;border-top:1px solid #f1f5f9;padding-top:16px;margin-top:24px}` +
-		customStyle +
-		`</style></head><body><div class="card">` +
-		`<div class="icon">` + icon + `</div>` +
-		`<div class="status-code">` + strconv.Itoa(statusCode) + `</div>` +
-		`<div class="title">` + cfg.Title + ` / ` + titleZh + `</div>` +
-		`<div class="divider"></div>` +
-		bodyHTML +
-		`<div class="footer">Protected by My-OpenWAF</div>` +
-		`</div></body></html>`
-
-	return []byte(html)
+	switch statusCode {
+	case 403:
+		data.Icon = template.HTML("&#128737;")
+		data.TitleZh = "访问被拒绝"
+	case 404:
+		data.Icon = template.HTML("&#128269;")
+		data.TitleZh = "页面未找到"
+	case 429:
+		data.Icon = template.HTML("&#9203;")
+		data.TitleZh = "请求过于频繁"
+	case 431:
+		data.Icon = template.HTML("&#128203;")
+		data.TitleZh = "请求头字段过多"
+	case 502:
+		data.Icon = template.HTML("&#9889;")
+		data.TitleZh = "网关错误"
+	case 503:
+		data.Icon = template.HTML("&#128736;")
+		data.TitleZh = "服务不可用"
+	case 504:
+		data.Icon = template.HTML("&#9203;")
+		data.TitleZh = "网关超时"
+	}
+	return renderBuiltInErrorPage(data)
 }
 
 func renderErrorTemplate(html string, statusCode int, title string) string {
@@ -154,34 +129,5 @@ func WriteErrorPage(_ context.Context, c *app.RequestContext, statusCode int, cu
 func WriteWelcomePage(_ context.Context, c *app.RequestContext) {
 	c.Response.Header.Del("Server")
 	c.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
-
-	html := `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>My-OpenWAF</title><style>` +
-		`*{margin:0;padding:0;box-sizing:border-box}` +
-		`body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 40%,#f1f5f9 100%);color:#1e293b}` +
-		`.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);text-align:center;max-width:500px;width:92%;padding:48px 40px}` +
-		`.shield{font-size:52px;margin-bottom:8px;line-height:1.2}` +
-		`.logo{font-size:2rem;font-weight:800;color:#0d9488;margin-bottom:4px}` +
-		`.subtitle{font-size:1rem;color:#64748b;margin-bottom:24px}` +
-		`.status-badge{display:inline-flex;align-items:center;gap:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:24px;padding:8px 20px;font-size:.875rem;color:#16a34a;margin-bottom:24px}` +
-		`.status-dot{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}` +
-		`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}` +
-		`.divider{width:48px;height:3px;background:#14b8a6;border-radius:2px;margin:0 auto 20px}` +
-		`.info{font-size:.875rem;color:#64748b;line-height:1.8}` +
-		`.info p{margin-bottom:4px}` +
-		`.footer{font-size:.7rem;color:#94a3b8;border-top:1px solid #f1f5f9;padding-top:16px;margin-top:24px}` +
-		`</style></head><body><div class="card">` +
-		`<div class="shield">&#128737;</div>` +
-		`<div class="logo">My-OpenWAF</div>` +
-		`<div class="subtitle">Web Application Firewall</div>` +
-		`<div class="status-badge"><span class="status-dot"></span>Running</div>` +
-		`<div class="divider"></div>` +
-		`<div class="info">` +
-		`<p>The WAF is active and protecting your applications.</p>` +
-		`<p>WAF 正在运行并保护您的应用程序。</p>` +
-		`<p>This page is displayed because no site is configured for this domain.</p>` +
-		`</div>` +
-		`<div class="footer">Protected by My-OpenWAF</div>` +
-		`</div></body></html>`
-
-	c.Data(200, "text/html; charset=utf-8", []byte(html))
+	c.Data(200, "text/html; charset=utf-8", renderWelcomePage())
 }

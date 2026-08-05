@@ -4,12 +4,19 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
+)
+
+const (
+	// EnvFingerprintProtocolVersion 是环境指纹 AES-256-GCM 密文封装的唯一协议版本。
+	EnvFingerprintProtocolVersion = "v1"
+	envSessionKeySize             = 32
+	envNonceSize                  = 12
+	envCiphertextPrefix           = EnvFingerprintProtocolVersion + "."
 )
 
 /**
@@ -19,32 +26,56 @@ import (
  */
 type EnvFingerprint struct {
 	// ── 基础浏览器属性 ──
-	WebDriver      bool    `json:"webdriver"`
-	ChromePresent  bool    `json:"chrome_present"`
-	PluginsCount   int     `json:"plugins_count"`
-	Languages      string  `json:"languages"`
-	DevtoolsOpen   bool    `json:"devtools_open"`
-	CanvasHash     string  `json:"canvas_hash"`
-	WebGLRenderer  string  `json:"webgl_renderer"`
-	ScreenWidth    int     `json:"screen_width"`
-	ScreenHeight   int     `json:"screen_height"`
-	TimezoneOffset int     `json:"timezone_offset"`
-	TouchSupport   bool    `json:"touch_support"`
-	HardwareConcur int     `json:"hardware_concurrency"`
-	ColorDepth     int     `json:"color_depth"`
-	PixelRatio     float64 `json:"pixel_ratio"`
-	AudioHash      string  `json:"audio_hash"`
-	FontCount      int     `json:"font_count"`
-	SessionStorage bool    `json:"session_storage"`
-	IndexedDB      bool    `json:"indexed_db"`
-	PDFViewer      bool    `json:"pdf_viewer"`
-	DoNotTrack     string  `json:"do_not_track"`
-	MaxTouchPoints int     `json:"max_touch_points"`
-	ConnectionType string  `json:"connection_type"`
-	DevtoolsTiming float64 `json:"devtools_timing"`
-	PlatformStr    string  `json:"platform"`
-	CookieEnabled  bool    `json:"cookie_enabled"`
-	MemoryGB       float64 `json:"device_memory"`
+	WebDriver       bool    `json:"webdriver"`
+	ChromePresent   bool    `json:"chrome_present"`
+	PluginsCount    int     `json:"plugins_count"`
+	Languages       string  `json:"languages"`
+	DevtoolsOpen    bool    `json:"devtools_open"`
+	CanvasHash      string  `json:"canvas_hash"`
+	WebGLRenderer   string  `json:"webgl_renderer"`
+	ScreenWidth     int     `json:"screen_width"`
+	ScreenHeight    int     `json:"screen_height"`
+	TimezoneOffset  int     `json:"timezone_offset"`
+	TouchSupport    bool    `json:"touch_support"`
+	HardwareConcur  int     `json:"hardware_concurrency"`
+	ColorDepth      int     `json:"color_depth"`
+	PixelRatio      float64 `json:"pixel_ratio"`
+	AudioHash       string  `json:"audio_hash"`
+	FontCount       int     `json:"font_count"`
+	SessionStorage  bool    `json:"session_storage"`
+	IndexedDB       bool    `json:"indexed_db"`
+	PDFViewer       bool    `json:"pdf_viewer"`
+	DoNotTrack      string  `json:"do_not_track"`
+	MaxTouchPoints  int     `json:"max_touch_points"`
+	ConnectionType  string  `json:"connection_type"`
+	DevtoolsTiming  float64 `json:"devtools_timing"`
+	PlatformStr     string  `json:"platform"`
+	CookieEnabled   bool    `json:"cookie_enabled"`
+	MemoryGB        float64 `json:"device_memory"`
+	UserAgent       string  `json:"user_agent"`
+	Vendor          string  `json:"vendor"`
+	Product         string  `json:"product"`
+	AppVersion      string  `json:"app_version"`
+	Language        string  `json:"language"`
+	ViewportWidth   int     `json:"viewport_width"`
+	ViewportHeight  int     `json:"viewport_height"`
+	OuterWidth      int     `json:"outer_width"`
+	OuterHeight     int     `json:"outer_height"`
+	InnerWidth      int     `json:"inner_width"`
+	InnerHeight     int     `json:"inner_height"`
+	ScreenX         int     `json:"screen_x"`
+	ScreenY         int     `json:"screen_y"`
+	NotificationAPI bool    `json:"notification_api"`
+	PushAPI         bool    `json:"push_api"`
+	ClipboardAPI    bool    `json:"clipboard_api"`
+	GeolocationAPI  bool    `json:"geolocation_api"`
+	WebRTCAPI       bool    `json:"webrtc_api"`
+	FetchAPI        bool    `json:"fetch_api"`
+	WebSocketAPI    bool    `json:"websocket_api"`
+	CryptoAPI       bool    `json:"crypto_api"`
+	BatteryAPI      bool    `json:"battery_api"`
+	GamepadAPI      bool    `json:"gamepad_api"`
+	VibrateAPI      bool    `json:"vibrate_api"`
 
 	// ── 自动化检测信号（原有） ──
 	AutomationSign string `json:"automation_sign"`
@@ -372,16 +403,16 @@ func ParseEnvFingerprint(data string) *EnvFingerprint {
  * DecryptEnvFingerprint 使用会话绑定密钥解密加密的环境指纹。
  */
 func DecryptEnvFingerprint(encrypted string, sessionKey []byte) *EnvFingerprint {
-	if encrypted == "" || len(sessionKey) == 0 {
+	if encrypted == "" || len(sessionKey) != envSessionKeySize {
 		return nil
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(encrypted)
 	if err != nil {
-		return ParseEnvFingerprint(encrypted)
+		return nil
 	}
 	plaintext, err := envDecrypt(raw, sessionKey)
 	if err != nil {
-		return ParseEnvFingerprint(encrypted)
+		return nil
 	}
 	var fp EnvFingerprint
 	if json.Unmarshal(plaintext, &fp) != nil {
@@ -391,24 +422,40 @@ func DecryptEnvFingerprint(encrypted string, sessionKey []byte) *EnvFingerprint 
 }
 
 /**
- * GenerateEnvSessionKey 创建一个 16 字节的随机密钥用于环境指纹加密。
+ * GenerateEnvSessionKey 创建一个 32 字节的随机 AES-256-GCM 会话密钥。
  */
 func GenerateEnvSessionKey() []byte {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return b
+	key := make([]byte, envSessionKeySize)
+	if _, err := rand.Read(key); err != nil {
+		return nil
+	}
+	return key
 }
 
 /**
  * EnvSessionKeyHex 返回十六进制编码的会话密钥，用于嵌入 JS。
  */
 func EnvSessionKeyHex(key []byte) string {
+	if len(key) != envSessionKeySize {
+		return ""
+	}
 	return hex.EncodeToString(key)
 }
 
+// EnvSessionKeyFromChallengeToken 将 HMAC-SHA256 挑战令牌解码为 AES-256-GCM 密钥。
+func EnvSessionKeyFromChallengeToken(token string) []byte {
+	key, err := hex.DecodeString(token)
+	if err != nil || len(key) != envSessionKeySize {
+		return nil
+	}
+	return key
+}
+
 func envDecrypt(ciphertext, key []byte) ([]byte, error) {
-	h := sha256.Sum256(key)
-	block, err := aes.NewCipher(h[:])
+	if len(key) != envSessionKeySize {
+		return nil, fmt.Errorf("invalid session key length")
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
@@ -416,11 +463,10 @@ func envDecrypt(ciphertext, key []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	ns := gcm.NonceSize()
-	if len(ciphertext) < ns+1 {
-		return nil, fmt.Errorf("too short")
+	if gcm.NonceSize() != envNonceSize || len(ciphertext) < envNonceSize+gcm.Overhead() {
+		return nil, fmt.Errorf("ciphertext too short")
 	}
-	nonce, ct := ciphertext[:ns], ciphertext[ns:]
+	nonce, ct := ciphertext[:envNonceSize], ciphertext[envNonceSize:]
 	return gcm.Open(nil, nonce, ct, nil)
 }
 
@@ -519,13 +565,23 @@ try{fp.plugins_count=navigator.plugins?navigator.plugins.length:0}catch(e){fp.pl
 try{fp.languages=navigator.languages?navigator.languages.join(','):navigator.language||''}catch(e){fp.languages=''}
 try{fp.platform=navigator.platform||''}catch(e){fp.platform=''}
 try{fp.cookie_enabled=!!navigator.cookieEnabled}catch(e){fp.cookie_enabled=false}
+try{fp.user_agent=navigator.userAgent||''}catch(e){fp.user_agent=''}
+try{fp.vendor=navigator.vendor||''}catch(e){fp.vendor=''}
+try{fp.product=navigator.product||''}catch(e){fp.product=''}
+try{fp.app_version=navigator.appVersion||''}catch(e){fp.app_version=''}
+try{fp.language=navigator.language||''}catch(e){fp.language=''}
 try{fp.do_not_track=navigator.doNotTrack||''}catch(e){fp.do_not_track=''}
 try{fp.pdf_viewer=!!navigator.pdfViewerEnabled}catch(e){fp.pdf_viewer=false}
 try{fp.device_memory=navigator.deviceMemory||0}catch(e){fp.device_memory=0}
 try{fp.max_touch_points=navigator.maxTouchPoints||0}catch(e){fp.max_touch_points=0}
+try{fp.notification_api=typeof Notification!=='undefined';fp.push_api=typeof PushManager!=='undefined';fp.clipboard_api=!!navigator.clipboard;fp.geolocation_api=!!navigator.geolocation}catch(e){fp.notification_api=false;fp.push_api=false;fp.clipboard_api=false;fp.geolocation_api=false}
+try{fp.webrtc_api=typeof RTCPeerConnection!=='undefined';fp.fetch_api=typeof fetch==='function';fp.websocket_api=typeof WebSocket!=='undefined';fp.crypto_api=!!(window.crypto&&window.crypto.subtle);fp.battery_api=typeof navigator.getBattery==='function';fp.gamepad_api=typeof navigator.getGamepads==='function';fp.vibrate_api=typeof navigator.vibrate==='function'}catch(e){fp.webrtc_api=false;fp.fetch_api=false;fp.websocket_api=false;fp.crypto_api=false;fp.battery_api=false;fp.gamepad_api=false;fp.vibrate_api=false}
 try{fp.color_depth=screen.colorDepth||0}catch(e){fp.color_depth=0}
 try{fp.pixel_ratio=window.devicePixelRatio||0}catch(e){fp.pixel_ratio=0}
 try{fp.screen_width=screen.width;fp.screen_height=screen.height}catch(e){fp.screen_width=0;fp.screen_height=0}
+try{fp.viewport_width=window.visualViewport?Math.round(window.visualViewport.width):window.innerWidth||0;fp.viewport_height=window.visualViewport?Math.round(window.visualViewport.height):window.innerHeight||0}catch(e){fp.viewport_width=0;fp.viewport_height=0}
+try{fp.outer_width=window.outerWidth||0;fp.outer_height=window.outerHeight||0;fp.inner_width=window.innerWidth||0;fp.inner_height=window.innerHeight||0}catch(e){fp.outer_width=0;fp.outer_height=0;fp.inner_width=0;fp.inner_height=0}
+try{fp.screen_x=window.screenX||window.screenLeft||0;fp.screen_y=window.screenY||window.screenTop||0}catch(e){fp.screen_x=0;fp.screen_y=0}
 try{fp.timezone_offset=new Date().getTimezoneOffset()}catch(e){fp.timezone_offset=0}
 try{fp.touch_support='ontouchstart' in window||navigator.maxTouchPoints>0}catch(e){fp.touch_support=false}
 try{fp.hardware_concurrency=navigator.hardwareConcurrency||0}catch(e){fp.hardware_concurrency=0}
@@ -700,27 +756,6 @@ var raw=JSON.stringify(fp);
 var keyHex="%s";
 if(keyHex&&typeof wasm_bindgen!=='undefined'&&typeof wasm_bindgen.encrypt_env_data==='function'){
 window.__owaf_env_encrypted=wasm_bindgen.encrypt_env_data(raw,keyHex);
-}else if(keyHex&&window.crypto&&window.crypto.subtle){
-var keyBytes=new Uint8Array(keyHex.length/2);
-for(var i=0;i<keyHex.length;i+=2)keyBytes[i/2]=parseInt(keyHex.substr(i,2),16);
-crypto.subtle.importKey('raw',keyBytes,{name:'AES-GCM'},false,['encrypt']).then(function(key){
-var iv=crypto.getRandomValues(new Uint8Array(12));
-var enc=new TextEncoder();
-return crypto.subtle.encrypt({name:'AES-GCM',iv:iv},key,enc.encode(raw)).then(function(ct){
-var buf=new Uint8Array(iv.length+ct.byteLength);
-buf.set(iv);buf.set(new Uint8Array(ct),iv.length);
-var b64='';var bytes=buf;
-for(var i=0;i<bytes.length;i+=3){
-var a=bytes[i],b=bytes[i+1]||0,c2=bytes[i+2]||0;
-var t=(a<<16)|(b<<8)|c2;
-var chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-b64+=chars[(t>>18)&63]+chars[(t>>12)&63];
-if(i+1<bytes.length)b64+=chars[(t>>6)&63];
-if(i+2<bytes.length)b64+=chars[t&63];
-}
-window.__owaf_env_encrypted=b64;
-});
-}).catch(function(){window.__owaf_env_encrypted='';});
 }else{window.__owaf_env_encrypted='';}
 })();`
 
@@ -736,6 +771,9 @@ try{fp.devtools_open=false;fp.devtools_timing=0}catch(e){}
 try{fp.color_depth=screen.colorDepth||0}catch(e){fp.color_depth=0}
 try{fp.pixel_ratio=window.devicePixelRatio||0}catch(e){fp.pixel_ratio=0}
 try{fp.screen_width=screen.width;fp.screen_height=screen.height}catch(e){fp.screen_width=0;fp.screen_height=0}
+try{fp.viewport_width=window.visualViewport?Math.round(window.visualViewport.width):window.innerWidth||0;fp.viewport_height=window.visualViewport?Math.round(window.visualViewport.height):window.innerHeight||0}catch(e){fp.viewport_width=0;fp.viewport_height=0}
+try{fp.outer_width=window.outerWidth||0;fp.outer_height=window.outerHeight||0;fp.inner_width=window.innerWidth||0;fp.inner_height=window.innerHeight||0}catch(e){fp.outer_width=0;fp.outer_height=0;fp.inner_width=0;fp.inner_height=0}
+try{fp.screen_x=window.screenX||window.screenLeft||0;fp.screen_y=window.screenY||window.screenTop||0}catch(e){fp.screen_x=0;fp.screen_y=0}
 try{fp.timezone_offset=new Date().getTimezoneOffset()}catch(e){fp.timezone_offset=0}
 try{fp.touch_support='ontouchstart' in window||navigator.maxTouchPoints>0}catch(e){fp.touch_support=false}
 try{fp.hardware_concurrency=navigator.hardwareConcurrency||0}catch(e){fp.hardware_concurrency=0}
@@ -743,8 +781,18 @@ try{fp.canvas_hash='';fp.webgl_renderer='';fp.audio_hash='';fp.font_count=0}catc
 try{fp.session_storage=!!window.sessionStorage}catch(e){fp.session_storage=false}
 try{fp.indexed_db=!!window.indexedDB}catch(e){fp.indexed_db=false}
 try{fp.cookie_enabled=!!navigator.cookieEnabled}catch(e){fp.cookie_enabled=false}
+try{fp.user_agent=navigator.userAgent||''}catch(e){fp.user_agent=''}
+try{fp.vendor=navigator.vendor||''}catch(e){fp.vendor=''}
+try{fp.product=navigator.product||''}catch(e){fp.product=''}
+try{fp.app_version=navigator.appVersion||''}catch(e){fp.app_version=''}
+try{fp.language=navigator.language||''}catch(e){fp.language=''}
 try{fp.platform=navigator.platform||''}catch(e){fp.platform=''}
 try{fp.max_touch_points=navigator.maxTouchPoints||0}catch(e){fp.max_touch_points=0}
+try{fp.viewport_width=window.visualViewport?Math.round(window.visualViewport.width):window.innerWidth||0;fp.viewport_height=window.visualViewport?Math.round(window.visualViewport.height):window.innerHeight||0}catch(e){fp.viewport_width=0;fp.viewport_height=0}
+try{fp.outer_width=window.outerWidth||0;fp.outer_height=window.outerHeight||0;fp.inner_width=window.innerWidth||0;fp.inner_height=window.innerHeight||0}catch(e){fp.outer_width=0;fp.outer_height=0;fp.inner_width=0;fp.inner_height=0}
+try{fp.screen_x=window.screenX||window.screenLeft||0;fp.screen_y=window.screenY||window.screenTop||0}catch(e){fp.screen_x=0;fp.screen_y=0}
+try{fp.notification_api=typeof Notification!=='undefined';fp.push_api=typeof PushManager!=='undefined';fp.clipboard_api=!!(navigator.clipboard);fp.geolocation_api=!!(navigator.geolocation)}catch(e){fp.notification_api=false;fp.push_api=false;fp.clipboard_api=false;fp.geolocation_api=false}
+try{fp.webrtc_api=typeof RTCPeerConnection!=='undefined';fp.fetch_api=typeof fetch==='function';fp.websocket_api=typeof WebSocket!=='undefined';fp.crypto_api=!!(window.crypto&&window.crypto.subtle);fp.battery_api=typeof navigator.getBattery==='function';fp.gamepad_api=typeof navigator.getGamepads==='function';fp.vibrate_api=typeof navigator.vibrate==='function'}catch(e){fp.webrtc_api=false;fp.fetch_api=false;fp.websocket_api=false;fp.crypto_api=false;fp.battery_api=false;fp.gamepad_api=false;fp.vibrate_api=false}
 try{fp.webgl_vendor='';fp.canvas_to_blob=false;fp.webgl2_support=false;fp.svg_support=false}catch(e){}
 try{fp.user_agent_data='';fp.browser_brand='';fp.browser_version='';fp.is_mobile=false;fp.ua_mismatch=false;fp.navigator_proto=true}catch(e){}
 try{fp.media_devices=false;fp.speech_synthesis=false}catch(e){}

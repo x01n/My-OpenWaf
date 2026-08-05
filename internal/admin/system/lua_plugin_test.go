@@ -7,7 +7,10 @@ import (
 	"io"
 	"log/slog"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/route/param"
 	"github.com/glebarez/sqlite"
@@ -34,6 +37,50 @@ func newLuaPluginRepoForTest(t *testing.T) *repository.LuaPluginRepo {
 }
 
 const validLuaSource = `function handle(ctx) return nil end`
+
+type luaTestKV struct {
+	mu   sync.Mutex
+	data map[string][]byte
+}
+
+func newLuaTestKV() *luaTestKV {
+	return &luaTestKV{data: map[string][]byte{}}
+}
+
+func (k *luaTestKV) Available() bool { return true }
+
+func (k *luaTestKV) Get(key string) ([]byte, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	v, ok := k.data[key]
+	return v, ok
+}
+
+func (k *luaTestKV) Set(key string, value []byte, _ time.Duration) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.data[key] = append([]byte(nil), value...)
+	return nil
+}
+
+func (k *luaTestKV) Delete(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.data, key)
+}
+
+func (k *luaTestKV) Incr(key string, _ time.Duration) (int64, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	n := int64(1)
+	if raw, ok := k.data[key]; ok {
+		if parsed, err := strconv.ParseInt(string(raw), 10, 64); err == nil {
+			n = parsed + 1
+		}
+	}
+	k.data[key] = []byte(strconv.FormatInt(n, 10))
+	return n, nil
+}
 
 func idParam(id uint) param.Params {
 	return param.Params{{Key: "id", Value: strconv.FormatUint(uint64(id), 10)}}
@@ -87,6 +134,32 @@ func TestCreateLuaPluginRequiresFields(t *testing.T) {
 		if ctx.Response.StatusCode() != 400 {
 			t.Errorf("%s: 应返回 400，得到 %d", tt.name, ctx.Response.StatusCode())
 		}
+	}
+}
+
+func TestCreateLuaPluginRejectsOverlongMetadata(t *testing.T) {
+	repo := newLuaPluginRepoForTest(t)
+	handler := CreateLuaPlugin(repo, func() error { return nil })
+	cases := []map[string]any{
+		{"name": strings.Repeat("n", 129), "stage": "pre", "source": validLuaSource},
+		{"name": "valid", "stage": "pre", "source": validLuaSource, "description": strings.Repeat("d", 513)},
+	}
+	for _, request := range cases {
+		body, err := json.Marshal(request)
+		if err != nil {
+			t.Fatalf("marshal request: %v", err)
+		}
+		ctx := invokeThreatIntelHandler(t, handler, "POST", "/x", nil, body)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("overlong metadata should return 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+		}
+	}
+	items, err := repo.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("invalid metadata must not persist, got %d items", len(items))
 	}
 }
 
@@ -359,6 +432,57 @@ end`,
 }
 
 // TestDryRunLuaPluginReportsCompileError 验证试运行会报告编译错误而非 500。
+func TestDryRunLuaPluginRepeatsRequestUntilDecision(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"stage":      "pre",
+		"iterations": 2,
+		"source": `
+function handle(ctx)
+  if not ctx.kv.available() then
+    return nil
+  end
+  local hits = ctx.kv.incr("rl:" .. ctx.client_ip, 60)
+  if hits ~= nil and hits > 1 then
+    return {action="rate_limit", message="per-ip rate limit exceeded", tags={"lua_rate_limit"}}
+  end
+  return nil
+end`,
+		"request": map[string]any{"client_ip": "203.0.113.7", "method": "GET", "path": "/"},
+	})
+	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(newLuaTestKV()), "POST", "/x", nil, body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	var resp struct {
+		KVAvailable bool `json:"kv_available"`
+		Iteration   int  `json:"iteration"`
+		Decision    struct {
+			Action  string   `json:"Action"`
+			Message string   `json:"Message"`
+			Tags    []string `json:"Tags"`
+		} `json:"decision"`
+		Runs []struct {
+			Iteration int `json:"iteration"`
+			Decision  struct {
+				Action string `json:"Action"`
+			} `json:"decision"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.KVAvailable {
+		t.Fatalf("dry-run 应报告 kv_available=true: %s", ctx.Response.Body())
+	}
+	if resp.Iteration != 2 || resp.Decision.Action != "rate_limit" {
+		t.Fatalf("第二次请求应触发 rate_limit，得到 iteration=%d decision=%+v body=%s", resp.Iteration, resp.Decision, ctx.Response.Body())
+	}
+	if len(resp.Runs) != 2 || resp.Runs[0].Decision.Action != "" || resp.Runs[1].Decision.Action != "rate_limit" {
+		t.Fatalf("runs 应保留连续执行轨迹，得到 %#v", resp.Runs)
+	}
+}
+
 func TestDryRunLuaPluginReportsCompileError(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"stage": "pre", "source": `function handle( end`,
@@ -404,6 +528,50 @@ func TestDryRunLuaPluginRejectsBadStage(t *testing.T) {
 	}
 }
 
+func TestDryRunLuaPluginRejectsInvalidTimeout(t *testing.T) {
+	for _, timeout := range []int{-1, luaMaxTimeoutMS + 1} {
+		body, err := json.Marshal(map[string]any{
+			"stage": "pre", "source": validLuaSource, "timeout_ms": timeout,
+		})
+		if err != nil {
+			t.Fatalf("marshal request: %v", err)
+		}
+		ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(nil), "POST", "/x", nil, body)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("timeout %d should return 400, got %d: %s", timeout, ctx.Response.StatusCode(), ctx.Response.Body())
+		}
+	}
+}
+
+func TestDryRunLuaPluginClearsPreVerdictFields(t *testing.T) {
+	body, err := json.Marshal(map[string]any{
+		"stage": "pre",
+		"source": `function handle(ctx)
+			if ctx.phase == "" and ctx.action == "" then return "observe" end
+			return "intercept"
+		end`,
+		"request": map[string]any{"phase": "owasp", "action": "intercept"},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(nil), "POST", "/x", nil, body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	var response struct {
+		Decision struct {
+			Action string `json:"Action"`
+		} `json:"decision"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if response.Decision.Action != "observe" {
+		t.Fatalf("pre dry-run must clear phase/action, got %q", response.Decision.Action)
+	}
+}
+
 // ---- 列表与详情 ----
 
 func TestListAndGetLuaPlugin(t *testing.T) {
@@ -446,6 +614,7 @@ func TestListAndGetLuaPlugin(t *testing.T) {
 // luaStatsResponse 是统计端点的响应形态，字段名即对外契约。
 type luaStatsResponse struct {
 	Items []struct {
+		ID       uint    `json:"id"`
 		Name     string  `json:"name"`
 		Stage    string  `json:"stage"`
 		Runs     int64   `json:"runs"`
@@ -469,7 +638,7 @@ func decodeLuaStats(t *testing.T, body []byte) luaStatsResponse {
 //
 // 这是运维唯一的可见信号：脚本失败/超时在数据面只写一条 warn 就静默跳过。
 func TestGetLuaPluginStatsReportsRuns(t *testing.T) {
-	engine := luaplugin.NewEngine(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := luaplugin.NewEngine(newLuaTestKV(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	okScript, err := luaplugin.Compile("ok", luaplugin.StagePre, validLuaSource)
 	if err != nil {
 		t.Fatalf("compile ok: %v", err)
@@ -478,6 +647,8 @@ func TestGetLuaPluginStatsReportsRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile boom: %v", err)
 	}
+	okScript.SetID(1)
+	badScript.SetID(2)
 	engine.Reload([]*luaplugin.Script{okScript, badScript})
 
 	for i := 0; i < 3; i++ {
@@ -516,12 +687,41 @@ func TestGetLuaPluginStatsReportsRuns(t *testing.T) {
 	}
 }
 
+func TestGetLuaPluginStatsDistinguishesDuplicateNamesByID(t *testing.T) {
+	engine := luaplugin.NewEngine(newLuaTestKV(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	first, err := luaplugin.Compile("duplicate", luaplugin.StagePre, validLuaSource)
+	if err != nil {
+		t.Fatalf("compile first: %v", err)
+	}
+	second, err := luaplugin.Compile("duplicate", luaplugin.StagePre, validLuaSource)
+	if err != nil {
+		t.Fatalf("compile second: %v", err)
+	}
+	first.SetID(101)
+	second.SetID(202)
+	engine.Reload([]*luaplugin.Script{first, second})
+	engine.Evaluate(context.Background(), luaplugin.StagePre, luaplugin.RequestView{})
+
+	ctx := invokeThreatIntelHandler(t, GetLuaPluginStats(engine), "GET", "/x", nil, nil)
+	response := decodeLuaStats(t, ctx.Response.Body())
+	if len(response.Items) != 2 {
+		t.Fatalf("want 2 stats items, got %#v", response.Items)
+	}
+	ids := map[uint]int64{}
+	for _, item := range response.Items {
+		ids[item.ID] = item.Runs
+	}
+	if ids[101] != 1 || ids[202] != 1 {
+		t.Fatalf("duplicate names must retain independent stats, got %#v", ids)
+	}
+}
+
 // TestGetLuaPluginStatsAvgIsMilliseconds 验证 avg_ms 的单位是毫秒而非纳秒。
 //
 // AvgTime 是 time.Duration（纳秒），漏掉换算会让 200µs 显示成 200000，
 // 用户按毫秒读就会误判脚本慢了六个数量级。
 func TestGetLuaPluginStatsAvgIsMilliseconds(t *testing.T) {
-	engine := luaplugin.NewEngine(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := luaplugin.NewEngine(newLuaTestKV(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	script, err := luaplugin.Compile("timed", luaplugin.StagePre, validLuaSource)
 	if err != nil {
 		t.Fatalf("compile: %v", err)

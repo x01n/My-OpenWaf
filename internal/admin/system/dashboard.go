@@ -35,13 +35,14 @@ type cveCatStat struct {
 }
 
 type dashboardDBStats struct {
-	BotTotal24h    int64            `json:"bot_total_24h"`
-	BotBlocked24h  int64            `json:"bot_blocked_24h"`
-	BotHighRisk24h int64            `json:"bot_high_risk_24h"`
-	CVETotal24h    int64            `json:"cve_total_24h"`
-	CVEByType      []cveCatStat     `json:"cve_by_type_24h"`
-	DropTotal24h   int64            `json:"drop_total_24h"`
-	DropBySource   map[string]int64 `json:"drop_by_source_24h"`
+	UniqueVisitors24h int64            `json:"unique_visitors_24h"`
+	BotTotal24h       int64            `json:"bot_total_24h"`
+	BotBlocked24h     int64            `json:"bot_blocked_24h"`
+	BotHighRisk24h    int64            `json:"bot_high_risk_24h"`
+	CVETotal24h       int64            `json:"cve_total_24h"`
+	CVEByType         []cveCatStat     `json:"cve_by_type_24h"`
+	DropTotal24h      int64            `json:"drop_total_24h"`
+	DropBySource      map[string]int64 `json:"drop_by_source_24h"`
 }
 
 func buildDashboardResponse(s dataplane.Summary, rev uint64, ds dashboardDBStats) map[string]any {
@@ -58,6 +59,7 @@ func buildDashboardResponse(s dataplane.Summary, rev uint64, ds dashboardDBStats
 		"uptime_sec":          s.UptimeSec,
 		"unique_ips":          s.UniqueIPs,
 		"attack_ips":          s.AttackIPs,
+		"unique_visitors_24h": ds.UniqueVisitors24h,
 		"revision":            rev,
 		"bot_total_24h":       ds.BotTotal24h,
 		"bot_blocked_24h":     ds.BotBlocked24h,
@@ -79,6 +81,9 @@ func BuildDashboardSnapshot(d *DashboardDeps) map[string]any {
 	}
 
 	since24h := time.Now().Add(-24 * time.Hour)
+	var uniqueVisitors24h int64
+	d.LogDB.Model(&store.AccessLog{}).Distinct("client_ip").Where("created_at >= ?", since24h).Count(&uniqueVisitors24h)
+
 	var botTotal24h, botBlocked24h, botHighRisk24h int64
 	d.LogDB.Model(&store.BotScoreLog{}).Where("created_at >= ?", since24h).Count(&botTotal24h)
 	d.LogDB.Model(&store.BotScoreLog{}).Where("created_at >= ? AND action IN ('block','drop')", since24h).Count(&botBlocked24h)
@@ -102,12 +107,13 @@ func BuildDashboardSnapshot(d *DashboardDeps) map[string]any {
 	d.LogDB.Model(&store.DropEvent{}).Where("created_at >= ? AND source = 'ip_reputation'", since24h).Count(&dropByIPRep)
 
 	stats := dashboardDBStats{
-		BotTotal24h:    botTotal24h,
-		BotBlocked24h:  botBlocked24h,
-		BotHighRisk24h: botHighRisk24h,
-		CVETotal24h:    cveTotal24h,
-		CVEByType:      cveByType,
-		DropTotal24h:   dropTotal24h,
+		UniqueVisitors24h: uniqueVisitors24h,
+		BotTotal24h:       botTotal24h,
+		BotBlocked24h:     botBlocked24h,
+		BotHighRisk24h:    botHighRisk24h,
+		CVETotal24h:       cveTotal24h,
+		CVEByType:         cveByType,
+		DropTotal24h:      dropTotal24h,
 		DropBySource: map[string]int64{
 			"bot":           dropByBot,
 			"cve":           dropByCVE,

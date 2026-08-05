@@ -66,6 +66,53 @@ func TestVerifyBrowserSignHeadersRejectsHardEnv(t *testing.T) {
 	}
 }
 
+func TestVerifyBrowserSignHeadersEnvHardFailRequiresValidEnv(t *testing.T) {
+	SetChallengeSecret([]byte("test-browser-sign-secret-3"))
+	ticket := IssueBrowserSignTicket(3, "env.test", 60, true)
+	now := time.Now()
+	ts := now.Unix()
+	method := "POST"
+	path := "/api/resource"
+	baseHeaders := map[string]string{
+		BrowserSignHeaderNonce: ticket.Nonce,
+		BrowserSignHeaderExp:   strconv.FormatInt(ticket.ExpiresAt, 10),
+		BrowserSignHeaderMAC:   ticket.TicketMAC,
+		BrowserSignHeaderTS:    strconv.FormatInt(ts, 10),
+		BrowserSignHeaderSig:   browserSignRequestMAC(ticket.Nonce, method, path, ts),
+	}
+
+	tests := []struct {
+		name        string
+		envHardFail bool
+		env         string
+		includeEnv  bool
+		wantOK      bool
+		wantReason  string
+	}{
+		{name: "hard fail missing env", envHardFail: true, wantReason: "missing browser env fingerprint"},
+		{name: "hard fail invalid env", envHardFail: true, env: "not-json", includeEnv: true, wantReason: "invalid browser env fingerprint"},
+		{name: "soft fail missing env", wantOK: true},
+		{name: "soft fail invalid env", env: "not-json", includeEnv: true, wantOK: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := make(map[string]string, len(baseHeaders)+1)
+			for name, value := range baseHeaders {
+				headers[name] = value
+			}
+			if tt.includeEnv {
+				headers[BrowserSignHeaderEnv] = tt.env
+			}
+
+			ok, reason := VerifyBrowserSignHeaders(headers, method, path, "env.test", 3, now, tt.envHardFail)
+			if ok != tt.wantOK || reason != tt.wantReason {
+				t.Fatalf("VerifyBrowserSignHeaders() = (%v, %q), want (%v, %q)", ok, reason, tt.wantOK, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestIsLikelyAPIRequest(t *testing.T) {
 	if !IsLikelyAPIRequest("POST", "/api/v1/login", map[string]string{
 		"content-type": "application/json",
@@ -95,17 +142,17 @@ func TestInjectBrowserSignIntoHTML(t *testing.T) {
 	html := []byte("<html><body><h1>ok</h1></body></html>")
 	out := InjectBrowserSignIntoHTML(html, ticket)
 	s := string(out)
-	if !strings.Contains(s, BrowserSignHeaderNonce) && !strings.Contains(s, "X-OWAF") {
-		// 变量名会被混淆，至少应包含 script 与 nonce 值
-	}
 	if !strings.Contains(s, ticket.Nonce) {
 		t.Fatal("expected ticket nonce in injected html")
 	}
 	if !strings.Contains(s, "</body>") {
 		t.Fatal("expected body close tag retained")
 	}
-	if !strings.Contains(s, "<script>") {
-		t.Fatal("expected script tag")
+	if ticket.CSPNonce == "" {
+		t.Fatal("expected CSP nonce in ticket")
+	}
+	if !strings.Contains(s, `<script nonce="`+ticket.CSPNonce+`" data-owaf-bs="1">`) {
+		t.Fatal("expected CSP nonce script tag")
 	}
 }
 

@@ -1,50 +1,50 @@
-"use client";
+"use client"
 
-import { useMemo, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { DataTable } from "@/components/data-table";
-import { ConfirmDialog } from "@/components/confirm-dialog";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useMemo, useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { DataTable } from "@/components/data-table"
+import { ConfirmDialog } from "@/components/confirm-dialog"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Switch } from "@/components/ui/switch"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { toast } from "sonner";
+} from "@/components/ui/tooltip"
+import { toast } from "sonner"
 import {
   useLuaPlugins,
   useLuaPluginDelete,
   useLuaPluginToggle,
   useLuaPluginStats,
   useSites,
-} from "@/hooks/use-api";
+} from "@/hooks/use-api"
 import {
   IconPlus,
   IconTrash,
   IconEdit,
   IconCode,
   IconInfoCircle,
-} from "@tabler/icons-react";
-import type { LuaPlugin, LuaPluginStage } from "@/lib/types";
-import { PluginEditorDialog } from "./components/plugin-editor-dialog";
+} from "@tabler/icons-react"
+import type { LuaPlugin, LuaPluginStage } from "@/lib/types"
+import { PluginEditorDialog } from "./components/plugin-editor-dialog"
 import {
   buildLuaStatsIndex,
   lookupLuaStat,
   LuaRuntimeStatsAlert,
   LuaRuntimeStatsCell,
   LuaRuntimeStatsSummary,
-} from "./components/runtime-stats";
+} from "./components/runtime-stats"
 
 /** 阶段徽章配色：pre 与 post 的执行时机不同，用不同色系区分以免误读。 */
 const STAGE_CLASS: Record<LuaPluginStage, string> = {
   pre: "border-sky-500/30 bg-sky-500/12 text-sky-700 dark:border-sky-400/30 dark:bg-sky-400/15 dark:text-sky-300",
   post: "border-violet-500/30 bg-violet-500/12 text-violet-700 dark:border-violet-400/30 dark:bg-violet-400/15 dark:text-violet-300",
-};
+}
 
 /**
  * Lua 自定义策略脚本管理页。
@@ -52,73 +52,72 @@ const STAGE_CLASS: Record<LuaPluginStage, string> = {
  * @returns {React.ReactElement} 页面元素
  */
 export default function LuaPluginsPage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
-  const { data, isLoading, error, mutate: refresh } = useLuaPlugins();
-  const plugins = useMemo(() => data?.items || [], [data]);
+  const { data, isLoading, error, mutate: refresh } = useLuaPlugins()
+  const plugins = useMemo(() => data?.items || [], [data])
 
   // 运行时统计是独立的只读接口：拉取失败只让统计区降级，不影响脚本的增删改查。
   const {
     data: statsData,
     isLoading: statsLoading,
     error: statsError,
-  } = useLuaPluginStats();
-  const statsItems = statsData?.items;
-  const statsIndex = useMemo(() => buildLuaStatsIndex(statsItems), [statsItems]);
+  } = useLuaPluginStats()
+  const statsItems = statsData?.items
+  const statsIndex = useMemo(() => buildLuaStatsIndex(statsItems), [statsItems])
   // 轮询期间的一次失败不该抹掉已有数据：SWR 会同时保留 data 和 error，
   // 此时继续展示上一轮的真实计数，只有从未拿到过数据才降级为「不可用」。
-  const statsUnavailable = Boolean(statsError) && statsItems === undefined;
+  const statsUnavailable = Boolean(statsError) && statsItems === undefined
 
-  const { data: sitesData } = useSites({ page_size: 500 });
+  const { data: sitesData } = useSites({ page_size: 500 })
   const siteNameMap = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const s of sitesData?.items || []) map.set(s.id, s.host);
-    return map;
-  }, [sitesData]);
+    const map = new Map<number, string>()
+    for (const s of sitesData?.items || []) map.set(s.id, s.host)
+    return map
+  }, [sitesData])
 
-  const { execute: deletePlugin, loading: deleteLoading } =
-    useLuaPluginDelete();
-  const { execute: togglePlugin } = useLuaPluginToggle();
+  const { execute: deletePlugin, loading: deleteLoading } = useLuaPluginDelete()
+  const { execute: togglePlugin } = useLuaPluginToggle()
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<LuaPlugin | null>(null);
-  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editing, setEditing] = useState<LuaPlugin | null>(null)
+  const [deleteId, setDeleteId] = useState<number | null>(null)
   // 每次打开都递增，作为编辑器的 key 强制重挂载，使表单态从 editing 重新初始化。
   // 只在打开时变化，因此不会打断对话框的关闭动画。
-  const [dialogSeq, setDialogSeq] = useState(0);
+  const [dialogSeq, setDialogSeq] = useState(0)
 
   const openCreate = () => {
-    setEditing(null);
-    setDialogSeq((n) => n + 1);
-    setDialogOpen(true);
-  };
+    setEditing(null)
+    setDialogSeq((n) => n + 1)
+    setDialogOpen(true)
+  }
 
   const openEdit = (plugin: LuaPlugin) => {
-    setEditing(plugin);
-    setDialogSeq((n) => n + 1);
-    setDialogOpen(true);
-  };
+    setEditing(plugin)
+    setDialogSeq((n) => n + 1)
+    setDialogOpen(true)
+  }
 
   const handleToggle = async (plugin: LuaPlugin, enabled: boolean) => {
     try {
-      await togglePlugin({ id: plugin.id, enabled });
-      refresh();
+      await togglePlugin({ id: plugin.id, enabled })
+      refresh()
     } catch {
-      toast.error(t("common.updateFailed"));
+      toast.error(t("common.updateFailed"))
     }
-  };
+  }
 
   const confirmDelete = async () => {
-    if (deleteId === null) return;
+    if (deleteId === null) return
     try {
-      await deletePlugin(deleteId);
-      toast.success(t("common.deleteSuccess"));
-      setDeleteId(null);
-      refresh();
+      await deletePlugin(deleteId)
+      toast.success(t("common.deleteSuccess"))
+      setDeleteId(null)
+      refresh()
     } catch {
-      toast.error(t("common.deleteFailed"));
+      toast.error(t("common.deleteFailed"))
     }
-  };
+  }
 
   const columns = [
     {
@@ -178,7 +177,7 @@ export default function LuaPluginsPage() {
       title: t("common.description"),
       render: (row: LuaPlugin) => {
         if (!row.description) {
-          return <span className="text-muted-foreground">-</span>;
+          return <span className="text-muted-foreground">-</span>
         }
         return (
           <TooltipProvider delayDuration={200}>
@@ -193,7 +192,7 @@ export default function LuaPluginsPage() {
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-        );
+        )
       },
     },
     {
@@ -245,7 +244,7 @@ export default function LuaPluginsPage() {
         </div>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
@@ -316,5 +315,5 @@ export default function LuaPluginsPage() {
         loading={deleteLoading}
       />
     </div>
-  );
+  )
 }

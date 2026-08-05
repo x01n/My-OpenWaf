@@ -1,7 +1,10 @@
 package luaplugin
 
 import (
+	"math"
+	"sort"
 	"time"
+	"unicode/utf8"
 
 	lua "github.com/yuin/gopher-lua"
 )
@@ -24,7 +27,19 @@ const (
 )
 
 // buildContextTable 构造传给 handle(ctx) 的上下文表。
-func buildContextTable(L *lua.LState, req RequestView, kv KVBackend) *lua.LTable {
+type apiBudget struct {
+	calls int
+}
+
+func (b *apiBudget) allow() bool {
+	if b == nil || b.calls >= maxAPICalls {
+		return false
+	}
+	b.calls++
+	return true
+}
+
+func buildContextTable(L *lua.LState, req RequestView, kv KVBackend, budget *apiBudget) *lua.LTable {
 	t := L.NewTable()
 
 	t.RawSetString("request_id", lua.LString(req.RequestID))
@@ -38,8 +53,9 @@ func buildContextTable(L *lua.LState, req RequestView, kv KVBackend) *lua.LTable
 	t.RawSetString("content_type", lua.LString(req.ContentType))
 	t.RawSetString("body", lua.LString(req.Body))
 
-	t.RawSetString("headers", stringMapToTable(L, req.Headers))
-	t.RawSetString("query_params", stringMapToTable(L, req.QueryParams))
+	t.RawSetString("headers", stringMapToTable(L, req.Headers, false))
+	t.RawSetString("query_params", stringMapToTable(L, req.QueryParams, false))
+	t.RawSetString("query_values", stringSliceMapToTable(L, req.QueryValues))
 
 	tls := L.NewTable()
 	tls.RawSetString("version", lua.LString(req.TLSVersion))
@@ -51,24 +67,161 @@ func buildContextTable(L *lua.LState, req RequestView, kv KVBackend) *lua.LTable
 	// 内置阶段的判定结果，仅 post 阶段非空。
 	t.RawSetString("phase", lua.LString(req.Phase))
 	t.RawSetString("action", lua.LString(req.Action))
+	verdict := L.NewTable()
+	verdict.RawSetString("matched", lua.LBool(req.Verdict.Matched))
+	verdict.RawSetString("phase", lua.LString(req.Verdict.Phase))
+	verdict.RawSetString("action", lua.LString(req.Verdict.Action))
+	verdict.RawSetString("category", lua.LString(req.Verdict.Category))
+	verdict.RawSetString("rule_id", lua.LNumber(req.Verdict.RuleID))
+	verdict.RawSetString("rule_id_str", lua.LString(req.Verdict.RuleIDStr))
+	verdict.RawSetString("status_code", lua.LNumber(req.Verdict.StatusCode))
+	verdict.RawSetString("redirect_to", lua.LString(req.Verdict.RedirectTo))
+	verdict.RawSetString("tags", stringSliceToTable(L, req.Verdict.Tags))
+	t.RawSetString("verdict", verdict)
 
-	t.RawSetString("kv", buildKVTable(L, kv))
+	response := L.NewTable()
+	response.RawSetString("status_code", lua.LNumber(req.Response.StatusCode))
+	response.RawSetString("content_type", lua.LString(req.Response.ContentType))
+	response.RawSetString("headers", stringMapToTable(L, req.Response.Headers, true))
+	response.RawSetString("body", lua.LString(req.Response.Body))
+	t.RawSetString("response", response)
+
+	t.RawSetString("config", stringMapToTable(L, req.Config, false))
+	t.RawSetString("runtime", stringMapToTable(L, req.Runtime, false))
+	t.RawSetString("metrics", floatMapToTable(L, req.Metrics))
+	t.RawSetString("kv", buildKVTable(L, kv, budget))
+	t.RawSetString("log", buildLogFunction(L, req.Log, budget))
+	t.RawSetString("debug", buildDebugFunction(L, req.Debug, budget))
 	return t
 }
 
-func stringMapToTable(L *lua.LState, m map[string]string) *lua.LTable {
+func stringMapToTable(L *lua.LState, m map[string]string, redact bool) *lua.LTable {
 	t := L.NewTable()
-	for k, v := range m {
-		t.RawSetString(k, lua.LString(v))
+	keys := sortedStringMapKeys(m)
+	for i, k := range keys {
+		if i >= maxAPIMapEntries {
+			break
+		}
+		v := m[k]
+		if redact && sensitiveHeader(k) {
+			v = "[redacted]"
+		}
+		t.RawSetString(k, lua.LString(truncateString(v, maxAPIStringBytes)))
 	}
 	return t
+}
+
+func floatMapToTable(L *lua.LState, m map[string]float64) *lua.LTable {
+	t := L.NewTable()
+	keys := sortedFloatMapKeys(m)
+	for i, k := range keys {
+		if i >= maxAPIMapEntries {
+			break
+		}
+		t.RawSetString(k, lua.LNumber(m[k]))
+	}
+	return t
+}
+
+func stringSliceMapToTable(L *lua.LState, values map[string][]string) *lua.LTable {
+	t := L.NewTable()
+	for i, key := range sortedStringSliceMapKeys(values) {
+		if i >= maxAPIMapEntries {
+			break
+		}
+		t.RawSetString(key, stringSliceToTable(L, values[key]))
+	}
+	return t
+}
+
+func stringSliceToTable(L *lua.LState, values []string) *lua.LTable {
+	t := L.NewTable()
+	for i, value := range values {
+		if i >= maxAPIMapEntries {
+			break
+		}
+		t.RawSetInt(i+1, lua.LString(truncateString(value, maxAPIStringBytes)))
+	}
+	return t
+}
+
+func sortedStringMapKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedFloatMapKeys(m map[string]float64) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedStringSliceMapKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func truncateString(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	if limit <= 0 {
+		return ""
+	}
+	end := limit
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
+}
+
+func sensitiveHeader(name string) bool {
+	switch name {
+	case "authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildLogFunction(L *lua.LState, logFn func(string, string), budget *apiBudget) *lua.LFunction {
+	return L.NewFunction(func(l *lua.LState) int {
+		if !budget.allow() || logFn == nil {
+			return 0
+		}
+		level := l.CheckString(1)
+		message := truncateString(l.CheckString(2), maxAPIStringBytes)
+		logFn(level, message)
+		return 0
+	})
+}
+
+func buildDebugFunction(L *lua.LState, debugFn func(string), budget *apiBudget) *lua.LFunction {
+	return L.NewFunction(func(l *lua.LState) int {
+		if !budget.allow() || debugFn == nil {
+			return 0
+		}
+		debugFn(truncateString(l.CheckString(1), maxAPIStringBytes))
+		return 0
+	})
 }
 
 // buildKVTable 构造 ctx.kv 的方法表。
 //
 // 后端不可用时各方法返回 nil/false 而非报错：Redis 故障应让策略降级，
 // 而不是让脚本抛错、进而使请求判定失败。
-func buildKVTable(L *lua.LState, kv KVBackend) *lua.LTable {
+func buildKVTable(L *lua.LState, kv KVBackend, budget *apiBudget) *lua.LTable {
 	t := L.NewTable()
 
 	available := kv != nil && kv.Available()
@@ -78,7 +231,7 @@ func buildKVTable(L *lua.LState, kv KVBackend) *lua.LTable {
 	}))
 
 	t.RawSetString("get", L.NewFunction(func(l *lua.LState) int {
-		if !available {
+		if !available || !budget.allow() {
 			l.Push(lua.LNil)
 			return 1
 		}
@@ -96,7 +249,7 @@ func buildKVTable(L *lua.LState, kv KVBackend) *lua.LTable {
 	}))
 
 	t.RawSetString("set", L.NewFunction(func(l *lua.LState) int {
-		if !available {
+		if !available || !budget.allow() {
 			l.Push(lua.LBool(false))
 			return 1
 		}
@@ -112,7 +265,7 @@ func buildKVTable(L *lua.LState, kv KVBackend) *lua.LTable {
 	}))
 
 	t.RawSetString("delete", L.NewFunction(func(l *lua.LState) int {
-		if !available {
+		if !available || !budget.allow() {
 			return 0
 		}
 		if key, ok := scriptKey(l.CheckString(1)); ok {
@@ -123,7 +276,7 @@ func buildKVTable(L *lua.LState, kv KVBackend) *lua.LTable {
 
 	// incr 是自定义限速的基础：原子自增并在首次写入时设置过期。
 	t.RawSetString("incr", L.NewFunction(func(l *lua.LState) int {
-		if !available {
+		if !available || !budget.allow() {
 			l.Push(lua.LNil)
 			return 1
 		}
@@ -159,12 +312,19 @@ func ttlFromArg(l *lua.LState, idx int) time.Duration {
 		return kvDefaultTTL
 	}
 	num, ok := l.Get(idx).(lua.LNumber)
-	if !ok || num <= 0 {
+	if !ok {
 		return kvDefaultTTL
 	}
-	ttl := time.Duration(float64(num)) * time.Second
-	if ttl > kvMaxTTL {
+	seconds := float64(num)
+	if seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return kvDefaultTTL
+	}
+	if seconds > float64(kvMaxTTL/time.Second) {
 		return kvMaxTTL
+	}
+	ttl := time.Duration(math.Trunc(seconds)) * time.Second
+	if ttl <= 0 {
+		return kvDefaultTTL
 	}
 	return ttl
 }

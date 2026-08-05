@@ -1202,6 +1202,20 @@ func (sc *serverConn) processFrame(f Frame) error {
 		sc.sawFirstSettings = true
 	}
 
+	// Discard frames for streams initiated after the last stream received
+	// before GOAWAY, or all frames after sending an error. DATA still needs
+	// connection-level flow control credit returned.
+	if sc.inGoAway && (sc.goAwayCode != ErrCodeNo || f.Header().StreamID > sc.maxClientStreamID) {
+		if data, ok := f.(*DataFrame); ok {
+			if sc.inflow.available() < int32(data.Length) {
+				return streamError(data.Header().StreamID, ErrCodeFlowControl)
+			}
+			sc.inflow.take(int32(data.Length))
+			sc.sendWindowUpdate(nil, int(data.Length))
+		}
+		return nil
+	}
+
 	switch f := f.(type) {
 	case *SettingsFrame:
 		return sc.processSettings(f)

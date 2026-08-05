@@ -30,6 +30,7 @@ func ExportBackup(db *gorm.DB) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": "export failed"})
 			return
 		}
+		data.SystemSettings = filterInternalSettingItems(data.SystemSettings)
 		for i := range data.SystemSettings {
 			data.SystemSettings[i] = redactSettingItem(data.SystemSettings[i])
 		}
@@ -73,6 +74,7 @@ func ImportBackup(db *gorm.DB, reload func() error) app.HandlerFunc {
 			return
 		}
 
+		req.Data.SystemSettings = filterInternalSettingItems(req.Data.SystemSettings)
 		if err := store.ImportBackup(db, &req.Data, req.ReplaceMode); err != nil {
 			slog.Error("[admin] backup import failed", "error", err)
 			c.JSON(500, map[string]string{"error": "import failed, check server logs for details"})

@@ -49,5 +49,7 @@ rule.md
 blazehttp
 .next/
 wasm-pow-solver/target/
-
 wasm-pow-solver/target/
+.cursor/
+internal/waf/cve/testdata/detectfirst_golden.txt
+My-OpenWaf

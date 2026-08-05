@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import useSWR, { mutate, type Key } from "swr";
-import { useCallback, useState } from "react";
+import useSWR, { mutate, type Key } from "swr"
+import { useCallback, useState } from "react"
 import {
   siteApi,
   certificateApi,
@@ -33,32 +33,97 @@ import {
   accessApi,
   fingerprintApi,
   luaPluginApi,
-} from "@/lib/api";
+} from "@/lib/api"
 import type {
+  SiteUpdate,
+  LogConfig,
+  LogConfigUpdate,
   LuaPlugin,
   LuaPluginStage,
   LuaDryRunRequest,
-} from "@/lib/types";
+  NetworkConfig,
+  NetworkConfigUpdate,
+  TLSConfig,
+  TLSConfigUpdate,
+  RedisConfigUpdate,
+  RedisConfigResponse,
+} from "@/lib/types"
 
 /**
  * 通用 fetcher
  */
 function fetcher<T>(fn: () => Promise<T>) {
-  return fn();
+  return fn()
 }
 
 /**
  * 通用 SWR Hook 工厂
  */
-function useApiQuery<T>(
-  key: Key,
-  fetchFn: () => Promise<T>,
-  options?: any
-) {
+function useApiQuery<T>(key: Key, fetchFn: () => Promise<T>, options?: any) {
   return useSWR<T>(key, () => fetcher(fetchFn), {
     revalidateOnFocus: false,
     ...options,
-  });
+  })
+}
+
+function cacheId(id: string | number | undefined | null): string | undefined {
+  if (id === undefined || id === null) return undefined
+  const normalized = String(id).trim()
+  return normalized === "" ? undefined : normalized
+}
+
+function matchesPrefix(cachedKey: Key | undefined, prefix: string): boolean {
+  return (
+    cachedKey === prefix ||
+    (Array.isArray(cachedKey) && cachedKey[0] === prefix)
+  )
+}
+
+async function revalidatePrefixes(prefixes: string[]) {
+  await Promise.all(
+    prefixes.map((prefix) =>
+      mutate((cachedKey) => matchesPrefix(cachedKey, prefix), undefined, {
+        revalidate: true,
+      })
+    )
+  )
+}
+
+export async function invalidateSiteCaches(id?: string | number) {
+  const normalized = cacheId(id)
+  await mutate(
+    (cachedKey) => {
+      if (!Array.isArray(cachedKey)) return false
+      const prefix = cachedKey[0]
+      if (prefix === "sites") return true
+      if (prefix === "sites-all" && cachedKey.length === 1) return true
+      if (!normalized) {
+        return [
+          "site",
+          "site-listeners",
+          "site-rules",
+          "site-recorded-resources",
+          "site-stats",
+          "site-timeline",
+          "site-access-stats",
+        ].includes(String(prefix))
+      }
+      return (
+        [
+          "site",
+          "site-listeners",
+          "site-rules",
+          "site-recorded-resources",
+          "site-stats",
+          "site-timeline",
+          "site-access-stats",
+        ].includes(String(prefix)) &&
+        cacheId(cachedKey[1] as string | number) === normalized
+      )
+    },
+    undefined,
+    { revalidate: true }
+  )
 }
 
 /**
@@ -67,45 +132,39 @@ function useApiQuery<T>(
 export function useMutation<T, D = any>(
   mutateFn: (data: D) => Promise<T>,
   options?: {
-    onSuccess?: (data: T) => void;
-    onError?: (error: any) => void;
-    invalidateKeys?: Key[];
+    onSuccess?: (data: T) => void
+    onError?: (error: any) => void
+    invalidateKeys?: Key[]
   }
 ) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<Error | null>(null)
 
   const execute = useCallback(
     async (data: D) => {
-      setLoading(true);
-      setError(null);
+      setLoading(true)
+      setError(null)
       try {
-        const result = await mutateFn(data);
+        const result = await mutateFn(data)
         if (options?.invalidateKeys) {
-          options.invalidateKeys.forEach((key) => {
-            mutate(
-              (cachedKey) =>
-                cachedKey === key ||
-                (Array.isArray(cachedKey) && cachedKey[0] === key),
-              undefined,
-              { revalidate: true }
-            );
-          });
+          await revalidatePrefixes(options.invalidateKeys.map(String)).catch(
+            () => undefined
+          )
         }
-        options?.onSuccess?.(result);
-        return result;
+        options?.onSuccess?.(result)
+        return result
       } catch (err) {
-        setError(err as Error);
-        options?.onError?.(err);
-        throw err;
+        setError(err as Error)
+        options?.onError?.(err)
+        throw err
       } finally {
-        setLoading(false);
+        setLoading(false)
       }
     },
     [mutateFn, options]
-  );
+  )
 
-  return { execute, loading, error };
+  return { execute, loading, error }
 }
 
 // ============================================================
@@ -113,32 +172,51 @@ export function useMutation<T, D = any>(
 // ============================================================
 
 export function useSites(params?: { page?: number; page_size?: number }) {
-  return useApiQuery(["sites", params], () => siteApi.list(params));
+  return useApiQuery(["sites", params], () => siteApi.list(params))
+}
+
+export function useAllSites() {
+  return useApiQuery(["sites-all"], async () => {
+    const pageSize = 200
+    const firstPage = await siteApi.list({ page: 1, page_size: pageSize })
+    const items = [...firstPage.items]
+    const total = firstPage.total
+    for (let page = 2; items.length < total; page++) {
+      const nextPage = await siteApi.list({ page, page_size: pageSize })
+      if (nextPage.items.length === 0) break
+      items.push(...nextPage.items)
+    }
+    return { items, total }
+  })
 }
 
 export function useSite(id: string | number | undefined) {
-  return useApiQuery(id ? ["site", id] : null, () => siteApi.get(id!));
+  const normalized = cacheId(id)
+  return useApiQuery(normalized ? ["site", normalized] : null, () =>
+    siteApi.get(normalized!)
+  )
 }
 
 export function useSiteListeners(id: string | number | undefined) {
-  return useApiQuery(
-    id ? ["site-listeners", id] : null,
-    () => siteApi.getListeners(id!)
-  );
+  const normalized = cacheId(id)
+  return useApiQuery(normalized ? ["site-listeners", normalized] : null, () =>
+    siteApi.getListeners(normalized!)
+  )
 }
 
 export function useSiteRules(id: string | number | undefined) {
-  return useApiQuery(
-    id ? ["site-rules", id] : null,
-    () => siteApi.getRules(id!)
-  );
+  const normalized = cacheId(id)
+  return useApiQuery(normalized ? ["site-rules", normalized] : null, () =>
+    siteApi.getRules(normalized!)
+  )
 }
 
 export function useSiteRecordedResources(id: string | number | undefined) {
+  const normalized = cacheId(id)
   return useApiQuery(
-    id ? ["site-recorded-resources", id] : null,
-    () => siteApi.getRecordedResources(id!)
-  );
+    normalized ? ["site-recorded-resources", normalized] : null,
+    () => siteApi.getRecordedResources(normalized!)
+  )
 }
 
 export function useSiteStats(
@@ -146,11 +224,12 @@ export function useSiteStats(
   params?: { hours?: number },
   options?: { refreshInterval?: number }
 ) {
+  const normalized = cacheId(id)
   return useApiQuery(
-    id ? ["site-stats", id, params] : null,
-    () => securityEventApi.getSiteStats(id!, params),
+    normalized ? ["site-stats", normalized, params] : null,
+    () => securityEventApi.getSiteStats(normalized!, params),
     options
-  );
+  )
 }
 
 export function useSiteTimeline(
@@ -158,42 +237,70 @@ export function useSiteTimeline(
   params?: { hours?: number },
   options?: { refreshInterval?: number }
 ) {
+  const normalized = cacheId(id)
   return useApiQuery(
-    id ? ["site-timeline", id, params] : null,
-    () => securityEventApi.getSiteTimeline(id!, params),
+    normalized ? ["site-timeline", normalized, params] : null,
+    () => securityEventApi.getSiteTimeline(normalized!, params),
     options
-  );
+  )
 }
 
 export function useSiteAccessStats(id: string | number | undefined) {
+  const normalized = cacheId(id)
   return useApiQuery(
-    id ? ["site-access-stats", id] : null,
-    () => accessLogApi.getSiteStats(id!)
-  );
+    normalized ? ["site-access-stats", normalized] : null,
+    () => accessLogApi.getSiteStats(normalized!)
+  )
 }
 
 export function useListenerCreate() {
   return useMutation(
-    async ({ siteId, data }: { siteId: number | string; data: Partial<any> }) =>
-      siteApi.createListener(siteId, data),
-    { invalidateKeys: ["site-listeners"] }
-  );
+    async ({
+      siteId,
+      data,
+    }: {
+      siteId: number | string
+      data: Partial<any>
+    }) => {
+      const result = await siteApi.createListener(siteId, data)
+      await invalidateSiteCaches(siteId).catch(() => undefined)
+      return result
+    }
+  )
 }
 
 export function useListenerUpdate() {
   return useMutation(
-    async ({ siteId, lid, data }: { siteId: number | string; lid: number | string; data: Partial<any> }) =>
-      siteApi.updateListener(siteId, lid, data),
-    { invalidateKeys: ["site-listeners"] }
-  );
+    async ({
+      siteId,
+      lid,
+      data,
+    }: {
+      siteId: number | string
+      lid: number | string
+      data: Partial<any>
+    }) => {
+      const result = await siteApi.updateListener(siteId, lid, data)
+      await invalidateSiteCaches(siteId).catch(() => undefined)
+      return result
+    }
+  )
 }
 
 export function useListenerDelete() {
   return useMutation(
-    async ({ siteId, lid }: { siteId: number | string; lid: number | string }) =>
-      siteApi.deleteListener(siteId, lid),
-    { invalidateKeys: ["site-listeners"] }
-  );
+    async ({
+      siteId,
+      lid,
+    }: {
+      siteId: number | string
+      lid: number | string
+    }) => {
+      const result = await siteApi.deleteListener(siteId, lid)
+      await invalidateSiteCaches(siteId).catch(() => undefined)
+      return result
+    }
+  )
 }
 
 // ============================================================
@@ -201,14 +308,13 @@ export function useListenerDelete() {
 // ============================================================
 
 export function useCertificates() {
-  return useApiQuery(["certificates"], () => certificateApi.list());
+  return useApiQuery(["certificates"], () => certificateApi.list())
 }
 
 export function useCertificate(id: string | number | undefined) {
-  return useApiQuery(
-    id ? ["certificate", id] : null,
-    () => certificateApi.get(id!)
-  );
+  return useApiQuery(id ? ["certificate", id] : null, () =>
+    certificateApi.get(id!)
+  )
 }
 
 // ============================================================
@@ -216,15 +322,15 @@ export function useCertificate(id: string | number | undefined) {
 // ============================================================
 
 export function useRules(params?: any) {
-  return useApiQuery(["rules", params], () => ruleApi.list(params));
+  return useApiQuery(["rules", params], () => ruleApi.list(params))
 }
 
 export function useRule(id: string | number | undefined) {
-  return useApiQuery(id ? ["rule", id] : null, () => ruleApi.get(id!));
+  return useApiQuery(id ? ["rule", id] : null, () => ruleApi.get(id!))
 }
 
 export function useRuleTemplates() {
-  return useApiQuery(["rule-templates"], () => ruleApi.getTemplates());
+  return useApiQuery(["rule-templates"], () => ruleApi.getTemplates())
 }
 
 // ============================================================
@@ -232,14 +338,25 @@ export function useRuleTemplates() {
 // ============================================================
 
 export function usePolicies() {
-  return useApiQuery(["policies"], () => policyApi.list());
+  return useApiQuery(["policies"], async () => {
+    const pageSize = 200
+    const firstPage = await policyApi.list({ page: 1, page_size: pageSize })
+    const items = [...firstPage.items]
+    for (let page = 2; items.length < firstPage.total; page++) {
+      const nextPage = await policyApi.list({ page, page_size: pageSize })
+      if (nextPage.items.length === 0) break
+      items.push(...nextPage.items)
+    }
+    return items
+  })
+}
+
+export function useDefaultPolicy() {
+  return useApiQuery(["policy-default"], () => policyApi.getDefault())
 }
 
 export function usePolicy(id: string | number | undefined) {
-  return useApiQuery(
-    id ? ["policy", id] : null,
-    () => policyApi.get(id!)
-  );
+  return useApiQuery(id ? ["policy", id] : null, () => policyApi.get(id!))
 }
 
 // ============================================================
@@ -247,19 +364,19 @@ export function usePolicy(id: string | number | undefined) {
 // ============================================================
 
 export function useProtectionSettings() {
-  return useApiQuery(["protection-settings"], () => protectionApi.getSettings());
+  return useApiQuery(["protection-settings"], () => protectionApi.getSettings())
 }
 
 export function useBotSettings() {
-  return useApiQuery(["bot-settings"], () => botApi.getSettings());
+  return useApiQuery(["bot-settings"], () => botApi.getSettings())
 }
 
 export function useCaptchaConfig() {
-  return useApiQuery(["captcha-config"], () => captchaApi.getConfig());
+  return useApiQuery(["captcha-config"], () => captchaApi.getConfig())
 }
 
 export function useChainConfig() {
-  return useApiQuery(["chain-config"], () => chainApi.getConfig());
+  return useApiQuery(["chain-config"], () => chainApi.getConfig())
 }
 
 // ============================================================
@@ -275,10 +392,9 @@ export function useIPLists(
   params?: { site_id?: number; kind?: string },
   enabled = true
 ) {
-  return useApiQuery(
-    enabled ? ["ip-lists", params] : null,
-    () => ipListApi.list(params)
-  );
+  return useApiQuery(enabled ? ["ip-lists", params] : null, () =>
+    ipListApi.list(params)
+  )
 }
 
 // ============================================================
@@ -286,17 +402,15 @@ export function useIPLists(
 // ============================================================
 
 export function useSecurityEvents(params?: any) {
-  return useApiQuery(
-    ["security-events", params],
-    () => securityEventApi.list(params)
-  );
+  return useApiQuery(["security-events", params], () =>
+    securityEventApi.list(params)
+  )
 }
 
 export function useSecurityEventStats(params?: any) {
-  return useApiQuery(
-    ["security-event-stats", params],
-    () => securityEventApi.getStats(params)
-  );
+  return useApiQuery(["security-event-stats", params], () =>
+    securityEventApi.getStats(params)
+  )
 }
 
 export function useDashboardStats(params?: { hours?: number }) {
@@ -304,14 +418,13 @@ export function useDashboardStats(params?: { hours?: number }) {
     ["dashboard-stats", params],
     () => securityEventApi.getStats(params),
     { refreshInterval: 30000 }
-  );
+  )
 }
 
 export function useSecurityEventTimeline(params?: any) {
-  return useApiQuery(
-    ["security-event-timeline", params],
-    () => securityEventApi.getTimeline(params)
-  );
+  return useApiQuery(["security-event-timeline", params], () =>
+    securityEventApi.getTimeline(params)
+  )
 }
 
 // ============================================================
@@ -319,10 +432,7 @@ export function useSecurityEventTimeline(params?: any) {
 // ============================================================
 
 export function useAccessLogs(params?: any) {
-  return useApiQuery(
-    ["access-logs", params],
-    () => accessLogApi.list(params)
-  );
+  return useApiQuery(["access-logs", params], () => accessLogApi.list(params))
 }
 
 // ============================================================
@@ -334,10 +444,9 @@ export function useAccessLogs(params?: any) {
  * requestId 为空时不请求
  */
 export function useRequestTrace(requestId: string | null | undefined) {
-  return useApiQuery(
-    requestId ? ["request-trace", requestId] : null,
-    () => requestTraceApi.get(requestId!)
-  );
+  return useApiQuery(requestId ? ["request-trace", requestId] : null, () =>
+    requestTraceApi.get(requestId!)
+  )
 }
 
 // ============================================================
@@ -345,23 +454,25 @@ export function useRequestTrace(requestId: string | null | undefined) {
 // ============================================================
 
 export function useDashboard() {
-  return useApiQuery(
-    ["dashboard"],
-    () => dashboardApi.getSummary(),
-    { refreshInterval: 10000 }
-  );
+  return useApiQuery(["dashboard"], () => dashboardApi.getSummary(), {
+    refreshInterval: 10000,
+  })
 }
 
 // ============================================================
 // CVE / OWASP 相关 Hook
 // ============================================================
 
-export function useCveRules() {
-  return useApiQuery(["cve-rules"], () => cveApi.list());
+export function useCveRules(params?: any | null) {
+  return useApiQuery(params === null ? null : ["cve-rules", params], () =>
+    cveApi.list(params)
+  )
 }
 
-export function useOwaspRules() {
-  return useApiQuery(["owasp-rules"], () => owaspApi.list());
+export function useOwaspRules(params?: any | null) {
+  return useApiQuery(params === null ? null : ["owasp-rules", params], () =>
+    owaspApi.list(params)
+  )
 }
 
 // ============================================================
@@ -369,14 +480,11 @@ export function useOwaspRules() {
 // ============================================================
 
 export function useDropPolicy() {
-  return useApiQuery(["drop-policy"], () => dropApi.getPolicy());
+  return useApiQuery(["drop-policy"], () => dropApi.getPolicy())
 }
 
 export function useDropEvents(params?: any) {
-  return useApiQuery(
-    ["drop-events", params],
-    () => dropApi.getEvents(params)
-  );
+  return useApiQuery(["drop-events", params], () => dropApi.getEvents(params))
 }
 
 // ============================================================
@@ -384,23 +492,25 @@ export function useDropEvents(params?: any) {
 // ============================================================
 
 export function useSettings() {
-  return useApiQuery(["settings"], () => settingsApi.list());
+  return useApiQuery(["settings"], () => settingsApi.list())
 }
 
 export function useNetworkConfig() {
-  return useApiQuery(["network-config"], () => settingsApi.getNetwork());
+  return useApiQuery<NetworkConfig>(["network-config"], () =>
+    settingsApi.getNetwork()
+  )
 }
 
 export function useTLSConfig() {
-  return useApiQuery(["tls-config"], () => settingsApi.getTLS());
+  return useApiQuery<TLSConfig>(["tls-config"], () => settingsApi.getTLS())
 }
 
 export function useLogConfig() {
-  return useApiQuery(["log-config"], () => settingsApi.getLog());
+  return useApiQuery<LogConfig>(["log-config"], () => settingsApi.getLog())
 }
 
 export function useRuntimeConfig() {
-  return useApiQuery(["runtime-config"], () => runtimeApi.getConfig());
+  return useApiQuery(["runtime-config"], () => runtimeApi.getConfig())
 }
 
 export function useUpstreamStatus() {
@@ -408,7 +518,7 @@ export function useUpstreamStatus() {
     ["upstream-status"],
     () => upstreamApi.getStatus(),
     { refreshInterval: 10000 }
-  );
+  )
 }
 
 // ============================================================
@@ -416,7 +526,7 @@ export function useUpstreamStatus() {
 // ============================================================
 
 export function useApiKeys() {
-  return useApiQuery(["api-keys"], () => apiKeyApi.list());
+  return useApiQuery(["api-keys"], () => apiKeyApi.list())
 }
 
 // ============================================================
@@ -424,7 +534,7 @@ export function useApiKeys() {
 // ============================================================
 
 export function useDefaultErrorPages() {
-  return useApiQuery(["error-pages-defaults"], () => errorPageApi.getDefaults());
+  return useApiQuery(["error-pages-defaults"], () => errorPageApi.getDefaults())
 }
 
 // ============================================================
@@ -433,157 +543,171 @@ export function useDefaultErrorPages() {
 
 export function useSiteMutation() {
   return useMutation(
-    async ({ id, data }: { id?: number; data: Partial<any> }) => {
-      if (id) {
-        return siteApi.update(id, data);
-      }
-      return siteApi.create(data);
-    },
-    { invalidateKeys: ["sites", "site"] }
-  );
+    async ({ id, data }: { id?: number; data: SiteUpdate }) => {
+      const result = id
+        ? await siteApi.update(id, data)
+        : await siteApi.create(data)
+      await invalidateSiteCaches(id).catch(() => undefined)
+      return result
+    }
+  )
 }
 
 export function useSiteDelete() {
-  return useMutation(
-    async (id: number) => siteApi.delete(id),
-    { invalidateKeys: ["sites"] }
-  );
+  return useMutation(async (id: number) => {
+    const result = await siteApi.delete(id)
+    await invalidateSiteCaches(id).catch(() => undefined)
+    return result
+  })
 }
 
 export function useSiteStart() {
-  return useMutation(
-    async (id: number) => siteApi.start(id),
-    { invalidateKeys: ["sites", "site"] }
-  );
+  return useMutation(async (id: number) => {
+    const result = await siteApi.start(id)
+    await invalidateSiteCaches(id).catch(() => undefined)
+    return result
+  })
 }
 
 export function useSiteStop() {
-  return useMutation(
-    async (id: number) => siteApi.stop(id),
-    { invalidateKeys: ["sites", "site"] }
-  );
+  return useMutation(async (id: number) => {
+    const result = await siteApi.stop(id)
+    await invalidateSiteCaches(id).catch(() => undefined)
+    return result
+  })
 }
 
 export function useRuleMutation() {
   return useMutation(
     async ({ id, data }: { id?: number; data: Partial<any> }) => {
       if (id) {
-        return ruleApi.update(id, data);
+        return ruleApi.update(id, data)
       }
-      return ruleApi.create(data);
+      return ruleApi.create(data)
     },
-    { invalidateKeys: ["rules"] }
-  );
+    { invalidateKeys: ["rules", "site-rules"] }
+  )
 }
 
 export function useRuleDelete() {
-  return useMutation(
-    async (id: number) => ruleApi.delete(id),
-    { invalidateKeys: ["rules"] }
-  );
+  return useMutation(async (id: number) => ruleApi.delete(id), {
+    invalidateKeys: ["rules", "site-rules"],
+  })
 }
 
 export function useCertificateMutation() {
   return useMutation(
     async ({ id, data }: { id?: number; data: Partial<any> }) => {
       if (id) {
-        return certificateApi.update(id, data);
+        return certificateApi.update(id, data)
       }
-      return certificateApi.create(data);
+      return certificateApi.create(data)
     },
     { invalidateKeys: ["certificates"] }
-  );
+  )
 }
 
 export function useCertificateDelete() {
-  return useMutation(
-    async (id: number) => certificateApi.delete(id),
-    { invalidateKeys: ["certificates"] }
-  );
+  return useMutation(async (id: number) => certificateApi.delete(id), {
+    invalidateKeys: ["certificates"],
+  })
 }
 
 export function usePolicyMutation() {
   return useMutation(
     async ({ id, data }: { id?: number; data: Partial<any> }) => {
       if (id) {
-        return policyApi.update(id, data);
+        return policyApi.update(id, data)
       }
-      return policyApi.create(data);
+      return policyApi.create(data)
+    },
+    {
+      invalidateKeys: [
+        "policies",
+        "policy",
+        "policy-default",
+        "rules",
+        "site-rules",
+        "sites",
+      ],
     }
-  );
+  )
+}
+
+export function usePolicySetDefault() {
+  return useMutation(async (id: number) => policyApi.setDefault(id), {
+    invalidateKeys: [
+      "policies",
+      "policy",
+      "policy-default",
+      "rules",
+      "site-rules",
+      "sites",
+    ],
+  })
 }
 
 export function usePolicyDelete() {
-  return useMutation(
-    async (id: number) => policyApi.delete(id),
-    { invalidateKeys: ["policies"] }
-  );
+  return useMutation(async (id: number) => policyApi.delete(id), {
+    invalidateKeys: ["policies"],
+  })
 }
 
 export function useProtectionSettingsUpdate() {
-  return useMutation(
-    async (data: any) => protectionApi.updateSettings(data),
-    { invalidateKeys: ["protection-settings"] }
-  );
+  return useMutation(async (data: any) => protectionApi.updateSettings(data), {
+    invalidateKeys: ["protection-settings"],
+  })
 }
 
 export function useBotSettingsUpdate() {
-  return useMutation(
-    async (data: any) => botApi.updateSettings(data),
-    { invalidateKeys: ["bot-settings"] }
-  );
+  return useMutation(async (data: any) => botApi.updateSettings(data), {
+    invalidateKeys: ["bot-settings"],
+  })
 }
 
 export function useCaptchaConfigUpdate() {
-  return useMutation(
-    async (data: any) => captchaApi.updateConfig(data),
-    { invalidateKeys: ["captcha-config"] }
-  );
+  return useMutation(async (data: any) => captchaApi.updateConfig(data), {
+    invalidateKeys: ["captcha-config"],
+  })
 }
 
 export function useChainConfigUpdate() {
-  return useMutation(
-    async (data: any) => chainApi.updateConfig(data),
-    { invalidateKeys: ["chain-config"] }
-  );
+  return useMutation(async (data: any) => chainApi.updateConfig(data), {
+    invalidateKeys: ["chain-config"],
+  })
 }
 
 export function useIPListMutation() {
-  return useMutation(
-    async ({ id, data }: { id?: number; data: any }) => {
-      if (id) {
-        return ipListApi.update(id, data);
-      }
-      return ipListApi.create(data);
+  return useMutation(async ({ id, data }: { id?: number; data: any }) => {
+    if (id) {
+      return ipListApi.update(id, data)
     }
-  );
+    return ipListApi.create(data)
+  })
 }
 
 export function useIPListDelete() {
-  return useMutation(
-    async (id: number) => ipListApi.delete(id),
-    { invalidateKeys: ["ip-lists"] }
-  );
+  return useMutation(async (id: number) => ipListApi.delete(id), {
+    invalidateKeys: ["ip-lists"],
+  })
 }
 
 /**
  * 预览预置爬虫白名单条目（仅只读，不写库）。
  */
 export function usePresetBotWhitelist(enabled = true) {
-  return useApiQuery(
-    enabled ? ["preset-bot-whitelist"] : null,
-    () => presetBotWhitelistApi.preview()
-  );
+  return useApiQuery(enabled ? ["preset-bot-whitelist"] : null, () =>
+    presetBotWhitelistApi.preview()
+  )
 }
 
 /**
  * 触发预置爬虫白名单写入 IP 白名单表。写入后自动失效 IP 列表缓存。
  */
 export function usePresetBotWhitelistSeed() {
-  return useMutation(
-    async () => presetBotWhitelistApi.seed(),
-    { invalidateKeys: ["ip-lists"] }
-  );
+  return useMutation(async () => presetBotWhitelistApi.seed(), {
+    invalidateKeys: ["ip-lists"],
+  })
 }
 
 // ============================================================
@@ -594,7 +718,7 @@ export function usePresetBotWhitelistSeed() {
  * 查询威胁情报订阅源列表。
  */
 export function useThreatIntelFeeds() {
-  return useApiQuery(["threat-intel-feeds"], () => threatIntelApi.list());
+  return useApiQuery(["threat-intel-feeds"], () => threatIntelApi.list())
 }
 
 /**
@@ -604,48 +728,46 @@ export function useThreatIntelMutation() {
   return useMutation(
     async ({ id, data }: { id?: number; data: Partial<any> }) => {
       if (id) {
-        return threatIntelApi.update(id, data);
+        return threatIntelApi.update(id, data)
       }
-      return threatIntelApi.create(data);
+      return threatIntelApi.create(data)
     },
     { invalidateKeys: ["threat-intel-feeds"] }
-  );
+  )
 }
 
 /**
  * 删除订阅源（连带删除该源的 IP 条目）。
  */
 export function useThreatIntelDelete() {
-  return useMutation(
-    async (id: number) => threatIntelApi.delete(id),
-    { invalidateKeys: ["threat-intel-feeds"] }
-  );
+  return useMutation(async (id: number) => threatIntelApi.delete(id), {
+    invalidateKeys: ["threat-intel-feeds"],
+  })
 }
 
 /**
  * 手动立即同步订阅源。
  */
 export function useThreatIntelSync() {
-  return useMutation(
-    async (id: number) => threatIntelApi.sync(id),
-    { invalidateKeys: ["threat-intel-feeds"] }
-  );
+  return useMutation(async (id: number) => threatIntelApi.sync(id), {
+    invalidateKeys: ["threat-intel-feeds"],
+  })
 }
 
 /**
  * 分页查询威胁情报同步历史，30 秒自动刷新。
  */
 export function useThreatIntelSyncLogs(params?: {
-  page?: number;
-  page_size?: number;
-  feed_id?: number;
-  status?: "success" | "failed";
+  page?: number
+  page_size?: number
+  feed_id?: number
+  status?: "success" | "failed"
 }) {
   return useApiQuery(
     ["threat-intel-sync-logs", params],
     () => threatIntelApi.listSyncLogs(params),
     { refreshInterval: 30000 }
-  );
+  )
 }
 
 // ============================================================
@@ -656,7 +778,7 @@ export function useThreatIntelSyncLogs(params?: {
  * 查询全部 Lua 策略脚本。
  */
 export function useLuaPlugins() {
-  return useApiQuery(["lua-plugins"], () => luaPluginApi.list());
+  return useApiQuery(["lua-plugins"], () => luaPluginApi.list())
 }
 
 /**
@@ -669,14 +791,14 @@ export function useLuaPlugins() {
 export function useLuaPluginStats() {
   return useApiQuery(["lua-plugin-stats"], () => luaPluginApi.stats(), {
     refreshInterval: 15000,
-  });
+  })
 }
 
 /**
  * 脚本写操作需要失效的缓存 key。
  * 统计随配置重载归零，与列表同时失效才不会出现「新脚本 + 旧计数」的错配视图。
  */
-const LUA_MUTATION_KEYS: Key[] = ["lua-plugins", "lua-plugin-stats"];
+const LUA_MUTATION_KEYS: Key[] = ["lua-plugins", "lua-plugin-stats"]
 
 /**
  * 新建 / 更新脚本。传入 id 走更新，否则走新建。
@@ -685,22 +807,21 @@ export function useLuaPluginMutation() {
   return useMutation(
     async ({ id, data }: { id?: number; data: Partial<LuaPlugin> }) => {
       if (id) {
-        return luaPluginApi.update(id, data);
+        return luaPluginApi.update(id, data)
       }
-      return luaPluginApi.create(data);
+      return luaPluginApi.create(data)
     },
     { invalidateKeys: LUA_MUTATION_KEYS }
-  );
+  )
 }
 
 /**
  * 删除脚本。
  */
 export function useLuaPluginDelete() {
-  return useMutation(
-    async (id: number) => luaPluginApi.delete(id),
-    { invalidateKeys: LUA_MUTATION_KEYS }
-  );
+  return useMutation(async (id: number) => luaPluginApi.delete(id), {
+    invalidateKeys: LUA_MUTATION_KEYS,
+  })
 }
 
 /**
@@ -711,17 +832,16 @@ export function useLuaPluginToggle() {
     async ({ id, enabled }: { id: number; enabled: boolean }) =>
       luaPluginApi.toggle(id, enabled),
     { invalidateKeys: LUA_MUTATION_KEYS }
-  );
+  )
 }
 
 /**
  * 语法校验：只编译，不保存也不执行，因此无需失效任何缓存。
  */
 export function useLuaPluginValidate() {
-  return useMutation(
-    async (data: { stage: LuaPluginStage; source: string }) =>
-      luaPluginApi.validate(data)
-  );
+  return useMutation(async (data: { stage: LuaPluginStage; source: string }) =>
+    luaPluginApi.validate(data)
+  )
 }
 
 /**
@@ -730,7 +850,7 @@ export function useLuaPluginValidate() {
 export function useLuaPluginDryRun() {
   return useMutation(async (data: LuaDryRunRequest) =>
     luaPluginApi.dryRun(data)
-  );
+  )
 }
 
 export function useSettingsUpdate() {
@@ -738,86 +858,82 @@ export function useSettingsUpdate() {
     async ({ key, value }: { key: string; value: any }) =>
       settingsApi.set(key, value),
     { invalidateKeys: ["settings"] }
-  );
+  )
 }
 
 export function useNetworkConfigUpdate() {
-  return useMutation(
-    async (data: any) => settingsApi.updateNetwork(data),
+  return useMutation<NetworkConfig, NetworkConfigUpdate>(
+    (data) => settingsApi.updateNetwork(data),
     { invalidateKeys: ["network-config"] }
-  );
+  )
 }
 
 export function useTLSConfigUpdate() {
-  return useMutation(
-    async (data: any) => settingsApi.updateTLS(data),
+  return useMutation<TLSConfig, TLSConfigUpdate>(
+    (data) => settingsApi.updateTLS(data),
     { invalidateKeys: ["tls-config"] }
-  );
+  )
 }
 
 export function useLogConfigUpdate() {
-  return useMutation(
-    async (data: any) => settingsApi.updateLog(data),
+  return useMutation<LogConfig, LogConfigUpdate>(
+    (data) => settingsApi.updateLog(data),
     { invalidateKeys: ["log-config"] }
-  );
+  )
 }
 
 export function useRedisConfig() {
-  return useApiQuery(["redis-config"], () => settingsApi.getRedis());
+  return useApiQuery<RedisConfigResponse>(["redis-config"], () =>
+    settingsApi.getRedis()
+  )
 }
 
 export function useRedisConfigUpdate() {
-  return useMutation(
-    async (data: { redis_addr: string; redis_password?: string; redis_db?: number }) =>
-      settingsApi.updateRedis(data),
+  return useMutation<RedisConfigResponse, RedisConfigUpdate>(
+    (data) => settingsApi.updateRedis(data),
     { invalidateKeys: ["redis-config"] }
-  );
+  )
 }
 
 export function useAdminSessions() {
-  return useApiQuery("admin-sessions", () => authApi.listSessions());
+  return useApiQuery("admin-sessions", () => authApi.listSessions())
 }
 
 export function useForceLogout() {
   return useMutation(
     async (sessionId: number) => authApi.forceLogout(sessionId),
     { invalidateKeys: ["admin-sessions"] }
-  );
+  )
 }
 
 export function useDropPolicyUpdate() {
-  return useMutation(
-    async (data: any) => dropApi.updatePolicy(data),
-    { invalidateKeys: ["drop-policy"] }
-  );
+  return useMutation(async (data: any) => dropApi.updatePolicy(data), {
+    invalidateKeys: ["drop-policy"],
+  })
 }
 
 export function useCveBatchUpdate() {
-  return useMutation(
-    async (data: any) => cveApi.batch(data),
-    { invalidateKeys: ["cve-rules"] }
-  );
+  return useMutation(async (data: any) => cveApi.batch(data), {
+    invalidateKeys: ["cve-rules"],
+  })
 }
 
 export function useOwaspBatchUpdate() {
-  return useMutation(
-    async (data: any) => owaspApi.batch(data),
-    { invalidateKeys: ["owasp-rules"] }
-  );
+  return useMutation(async (data: any) => owaspApi.batch(data), {
+    invalidateKeys: ["owasp-rules"],
+  })
 }
 
 export function useApiKeyDelete() {
-  return useMutation(
-    async (id: number) => apiKeyApi.delete(id),
-    { invalidateKeys: ["api-keys"] }
-  );
+  return useMutation(async (id: number) => apiKeyApi.delete(id), {
+    invalidateKeys: ["api-keys"],
+  })
 }
 
 export function useApiKeyCreate() {
-  return useMutation(
-    async (data: { name: string }) => apiKeyApi.create(data),
-    { invalidateKeys: ["api-keys"] }
-  );
+  return useMutation(async (data: { name: string }) => apiKeyApi.create(data), {
+    invalidateKeys: ["api-keys"],
+  })
 }
 
 // ============================================================
@@ -825,7 +941,7 @@ export function useApiKeyCreate() {
 // ============================================================
 
 export function useAdminUsers() {
-  return useApiQuery(["admin-users"], () => adminUserApi.list());
+  return useApiQuery(["admin-users"], () => adminUserApi.list())
 }
 
 export function useAdminUserCreate() {
@@ -833,7 +949,7 @@ export function useAdminUserCreate() {
     async (data: { username: string; password: string; role: string }) =>
       adminUserApi.create(data),
     { invalidateKeys: ["admin-users"] }
-  );
+  )
 }
 
 export function useAdminUserUpdateRole() {
@@ -841,7 +957,7 @@ export function useAdminUserUpdateRole() {
     async ({ id, role }: { id: number; role: string }) =>
       adminUserApi.updateRole(id, role),
     { invalidateKeys: ["admin-users"] }
-  );
+  )
 }
 
 export function useAdminUserUpdatePassword() {
@@ -849,22 +965,24 @@ export function useAdminUserUpdatePassword() {
     async ({ id, password }: { id: number; password: string }) =>
       adminUserApi.updatePassword(id, password),
     { invalidateKeys: ["admin-users"] }
-  );
+  )
 }
 
 export function useAdminUserDelete() {
-  return useMutation(
-    async (id: number) => adminUserApi.delete(id),
-    { invalidateKeys: ["admin-users"] }
-  );
+  return useMutation(async (id: number) => adminUserApi.delete(id), {
+    invalidateKeys: ["admin-users"],
+  })
 }
 
 export function useErrorPagesUpdate() {
   return useMutation(
-    async ({ siteId, data }: { siteId: number; data: any }) =>
-      siteApi.updateErrorPages(siteId, data),
+    async ({ siteId, data }: { siteId: number; data: any }) => {
+      const result = await siteApi.updateErrorPages(siteId, data)
+      await invalidateSiteCaches(siteId).catch(() => undefined)
+      return result
+    },
     { invalidateKeys: ["site-error-pages"] }
-  );
+  )
 }
 
 // ============================================================
@@ -874,11 +992,14 @@ export function useErrorPagesUpdate() {
 /**
  * 分页查询误报反馈记录。
  */
-export function useFalsePositives(params?: { page?: number; page_size?: number; status?: string }) {
-  return useApiQuery(
-    ["false-positives", params],
-    () => falsePositiveApi.list(params)
-  );
+export function useFalsePositives(params?: {
+  page?: number
+  page_size?: number
+  status?: string
+}) {
+  return useApiQuery(["false-positives", params], () =>
+    falsePositiveApi.list(params)
+  )
 }
 
 /**
@@ -889,7 +1010,7 @@ export function useFalsePositiveCreate() {
     async (data: Partial<import("@/lib/types").FalsePositiveReport>) =>
       falsePositiveApi.create(data),
     { invalidateKeys: ["false-positives"] }
-  );
+  )
 }
 
 /**
@@ -900,46 +1021,56 @@ export function useFalsePositiveStatusUpdate() {
     async ({ id, status }: { id: number; status: string }) =>
       falsePositiveApi.updateStatus(id, status),
     { invalidateKeys: ["false-positives"] }
-  );
+  )
 }
 
 /**
  * 删除一条反馈记录（仅 admin 可操作）。
  */
 export function useFalsePositiveDelete() {
-  return useMutation(
-    async (id: number) => falsePositiveApi.delete(id),
-    { invalidateKeys: ["false-positives"] }
-  );
+  return useMutation(async (id: number) => falsePositiveApi.delete(id), {
+    invalidateKeys: ["false-positives"],
+  })
 }
 
 export function useSystemReload() {
-  return useMutation(async () => systemApi.reload());
+  return useMutation(async () => systemApi.reload())
 }
 
 // ── Page Templates ──
 
 export function usePageTemplate(type: string) {
-  return useApiQuery(`page-template-${type}`, () => pageTemplateApi.get(type));
+  return useApiQuery(`page-template-${type}`, () => pageTemplateApi.get(type))
 }
 
 export function usePageTemplateUpdate() {
   return useMutation(
     async ({ type, data }: { type: string; data: Record<string, string> }) =>
       pageTemplateApi.update(type, data),
-    { invalidateKeys: ["page-template-captcha", "page-template-challenge", "page-template-block"] }
-  );
+    {
+      invalidateKeys: [
+        "page-template-captcha",
+        "page-template-challenge",
+        "page-template-block",
+      ],
+    }
+  )
 }
 
 export function usePageTemplateReset() {
-  return useMutation(
-    async (type: string) => pageTemplateApi.reset(type),
-    { invalidateKeys: ["page-template-captcha", "page-template-challenge", "page-template-block"] }
-  );
+  return useMutation(async (type: string) => pageTemplateApi.reset(type), {
+    invalidateKeys: [
+      "page-template-captcha",
+      "page-template-challenge",
+      "page-template-block",
+    ],
+  })
 }
 
 export function usePageTemplatePreview(type: string) {
-  return useApiQuery(`page-template-preview-${type}`, () => pageTemplateApi.preview(type));
+  return useApiQuery(`page-template-preview-${type}`, () =>
+    pageTemplateApi.preview(type)
+  )
 }
 
 // ── Access Control (per-site) ──
@@ -949,7 +1080,7 @@ export function useAccessProviderCreate() {
     async ({ siteId, data }: { siteId: number; data: any }) =>
       accessApi.createProvider(siteId, data),
     { invalidateKeys: ["access-providers"] }
-  );
+  )
 }
 
 export function useAccessProviderUpdate() {
@@ -957,15 +1088,20 @@ export function useAccessProviderUpdate() {
     async ({ siteId, pid, data }: { siteId: number; pid: number; data: any }) =>
       accessApi.updateProvider(siteId, pid, data),
     { invalidateKeys: ["access-providers"] }
-  );
+  )
 }
 
 export function useAccessUserCreate() {
   return useMutation(
-    async ({ siteId, data }: { siteId: number; data: { username: string; password: string; enabled?: boolean } }) =>
-      accessApi.createUser(siteId, data),
+    async ({
+      siteId,
+      data,
+    }: {
+      siteId: number
+      data: { username: string; password: string; enabled?: boolean }
+    }) => accessApi.createUser(siteId, data),
     { invalidateKeys: ["access-users"] }
-  );
+  )
 }
 
 export function useAccessUserUpdate() {
@@ -973,7 +1109,7 @@ export function useAccessUserUpdate() {
     async ({ siteId, uid, data }: { siteId: number; uid: number; data: any }) =>
       accessApi.updateUser(siteId, uid, data),
     { invalidateKeys: ["access-users"] }
-  );
+  )
 }
 
 export function useAccessPathRuleCreate() {
@@ -981,7 +1117,7 @@ export function useAccessPathRuleCreate() {
     async ({ siteId, data }: { siteId: number; data: any }) =>
       accessApi.createPathRule(siteId, data),
     { invalidateKeys: ["access-path-rules"] }
-  );
+  )
 }
 
 export function useAccessPathRuleUpdate() {
@@ -989,7 +1125,7 @@ export function useAccessPathRuleUpdate() {
     async ({ siteId, rid, data }: { siteId: number; rid: number; data: any }) =>
       accessApi.updatePathRule(siteId, rid, data),
     { invalidateKeys: ["access-path-rules"] }
-  );
+  )
 }
 
 // ============================================================
@@ -997,31 +1133,27 @@ export function useAccessPathRuleUpdate() {
 // ============================================================
 
 export function useAccessConfig(siteId: number | string | undefined) {
-  return useApiQuery(
-    siteId ? ["access-config", siteId] : null,
-    () => accessApi.getConfig(siteId!)
-  );
+  return useApiQuery(siteId ? ["access-config", siteId] : null, () =>
+    accessApi.getConfig(siteId!)
+  )
 }
 
 export function useAccessProviders(siteId: number | string | undefined) {
-  return useApiQuery(
-    siteId ? ["access-providers", siteId] : null,
-    () => accessApi.listProviders(siteId!)
-  );
+  return useApiQuery(siteId ? ["access-providers", siteId] : null, () =>
+    accessApi.listProviders(siteId!)
+  )
 }
 
 export function useAccessUsers(siteId: number | string | undefined) {
-  return useApiQuery(
-    siteId ? ["access-users", siteId] : null,
-    () => accessApi.listUsers(siteId!)
-  );
+  return useApiQuery(siteId ? ["access-users", siteId] : null, () =>
+    accessApi.listUsers(siteId!)
+  )
 }
 
 export function useAccessPathRules(siteId: number | string | undefined) {
-  return useApiQuery(
-    siteId ? ["access-path-rules", siteId] : null,
-    () => accessApi.listPathRules(siteId!)
-  );
+  return useApiQuery(siteId ? ["access-path-rules", siteId] : null, () =>
+    accessApi.listPathRules(siteId!)
+  )
 }
 
 // ============================================================
@@ -1029,19 +1161,24 @@ export function useAccessPathRules(siteId: number | string | undefined) {
 // ============================================================
 
 export function useACMEStatus() {
-  return useApiQuery(["acme-status"], () => certificateApi.getACMEStatus());
+  return useApiQuery(["acme-status"], () => certificateApi.getACMEStatus())
 }
 
 export function useACMEConfig() {
-  return useApiQuery(["acme-config"], () => certificateApi.getACMEConfig());
+  return useApiQuery(["acme-config"], () => certificateApi.getACMEConfig())
 }
 
 // ============================================================
 // TLS 指纹 Hook
 // ============================================================
 
-export function useFingerprints(params?: { page?: number; page_size?: number }) {
-  return useApiQuery(["fingerprints", params], () => fingerprintApi.list(params));
+export function useFingerprints(params?: {
+  page?: number
+  page_size?: number
+}) {
+  return useApiQuery(["fingerprints", params], () =>
+    fingerprintApi.list(params)
+  )
 }
 
 // ============================================================
@@ -1049,7 +1186,7 @@ export function useFingerprints(params?: { page?: number; page_size?: number }) 
 // ============================================================
 
 export function useDropStats() {
-  return useApiQuery(["drop-stats"], () => dropApi.getStats());
+  return useApiQuery(["drop-stats"], () => dropApi.getStats())
 }
 
 // ============================================================
@@ -1057,27 +1194,31 @@ export function useDropStats() {
 // ============================================================
 
 export function useBotStats() {
-  return useApiQuery(["bot-stats"], () => botApi.getStats());
+  return useApiQuery(["bot-stats"], () => botApi.getStats())
 }
 
 export function useBotScores() {
-  return useApiQuery(["bot-scores"], () => botApi.getScores());
+  return useApiQuery(["bot-scores"], () => botApi.getScores())
 }
 
 // ============================================================
 // CVE/OWASP 统计 Hook
 // ============================================================
 
-export function useCveStats() {
-  return useApiQuery(["cve-stats"], () => cveApi.getStats());
+export function useCveStats(params?: any | null) {
+  return useApiQuery(params === null ? null : ["cve-stats", params], () =>
+    cveApi.getStats(params)
+  )
 }
 
 export function useCveFeedStatus() {
-  return useApiQuery(["cve-feed-status"], () => cveApi.getFeedStatus());
+  return useApiQuery(["cve-feed-status"], () => cveApi.getFeedStatus())
 }
 
-export function useOwaspStats() {
-  return useApiQuery(["owasp-stats"], () => owaspApi.getStats());
+export function useOwaspStats(params?: any | null) {
+  return useApiQuery(params === null ? null : ["owasp-stats", params], () =>
+    owaspApi.getStats(params)
+  )
 }
 
 // ============================================================
@@ -1085,7 +1226,7 @@ export function useOwaspStats() {
 // ============================================================
 
 export function useChainSessions() {
-  return useApiQuery(["chain-sessions"], () => chainApi.getSessions());
+  return useApiQuery(["chain-sessions"], () => chainApi.getSessions())
 }
 
 // ============================================================
@@ -1093,14 +1234,13 @@ export function useChainSessions() {
 // ============================================================
 
 export function useHTTP2Config() {
-  return useApiQuery(["http2-config"], () => settingsApi.getHTTP2());
+  return useApiQuery(["http2-config"], () => settingsApi.getHTTP2())
 }
 
 export function useHTTP2ConfigUpdate() {
-  return useMutation(
-    async (data: any) => settingsApi.updateHTTP2(data),
-    { invalidateKeys: ["http2-config"] }
-  );
+  return useMutation(async (data: any) => settingsApi.updateHTTP2(data), {
+    invalidateKeys: ["http2-config"],
+  })
 }
 
 // ============================================================
@@ -1108,5 +1248,5 @@ export function useHTTP2ConfigUpdate() {
 // ============================================================
 
 export function useCipherSuites() {
-  return useApiQuery(["cipher-suites"], () => settingsApi.getCipherSuites());
+  return useApiQuery(["cipher-suites"], () => settingsApi.getCipherSuites())
 }

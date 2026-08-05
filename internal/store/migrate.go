@@ -12,6 +12,9 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := migrations.V2MigrateSingleSite(db); err != nil {
 		return err
 	}
+	if err := migrations.V10MigrateSiteXFFModes(db); err != nil {
+		return err
+	}
 	if err := migrations.V3MigrateLegacyRulePhases(db); err != nil {
 		return err
 	}
@@ -48,7 +51,10 @@ func AutoMigrate(db *gorm.DB) error {
 		&LoginAttempt{},
 		&ActiveSession{},
 
+		&OWASPRuleCatalog{},
+		&PolicyOWASPRuleConfig{},
 		&CVERuleRecord{},
+		&CVERuleScopeOverride{},
 		&CVESyncLog{},
 		&ApplicationRouteRule{},
 		&RecordedResource{},
@@ -65,6 +71,9 @@ func AutoMigrate(db *gorm.DB) error {
 
 		&LuaPlugin{},
 	); err != nil {
+		return err
+	}
+	if err := migrations.V9EnsureDefaultPolicy(db); err != nil {
 		return err
 	}
 

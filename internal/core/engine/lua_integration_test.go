@@ -1,14 +1,28 @@
 package engine
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/waf/luaplugin"
 )
+
+type luaEngineTestKV struct{}
+
+func (luaEngineTestKV) Available() bool { return true }
+
+func (luaEngineTestKV) Get(string) ([]byte, bool) { return nil, false }
+
+func (luaEngineTestKV) Set(string, []byte, time.Duration) error { return nil }
+
+func (luaEngineTestKV) Delete(string) {}
+
+func (luaEngineTestKV) Incr(string, time.Duration) (int64, error) { return 1, nil }
 
 func luaEngineWith(t *testing.T, stage luaplugin.Stage, src string) *luaplugin.Engine {
 	t.Helper()
@@ -16,7 +30,7 @@ func luaEngineWith(t *testing.T, stage luaplugin.Stage, src string) *luaplugin.E
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	e := luaplugin.NewEngine(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e := luaplugin.NewEngine(luaEngineTestKV{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.Reload([]*luaplugin.Script{script})
 	return e
 }
@@ -105,13 +119,70 @@ func TestPostLuaIgnoresUnknownAction(t *testing.T) {
 }
 
 // TestPostLuaSeesBuiltinPhase 验证内置阶段名被传给脚本。
-func TestPostLuaSeesBuiltinPhase(t *testing.T) {
+func TestPostLuaSeesBuiltinVerdict(t *testing.T) {
 	lp := luaEngineWith(t, luaplugin.StagePost, `
-function handle(ctx) return {action="observe", message=ctx.phase} end`)
+function handle(ctx)
+  local v = ctx.verdict
+  if not v.matched or v.phase ~= "owasp" or v.action ~= "intercept" then return "intercept" end
+  if v.category ~= "sqli" or v.rule_id ~= 17 or v.rule_id_str ~= "owasp:sqli:017" then return "intercept" end
+  if v.status_code ~= 403 or v.redirect_to ~= "" then return "intercept" end
+  if v.tags[1] ~= "sql" or v.tags[2] ~= "builtin" then return "intercept" end
+  return {action="allow", message=v.phase}
+end`)
 
-	got := applyPostLuaDecision(lp, &pipeline.RequestCtx{}, action.Result{Phase: "owasp"})
+	tags := []string{"sql", "builtin"}
+	got := applyPostLuaDecision(lp, &pipeline.RequestCtx{}, action.Result{
+		Type: action.Intercept, Matched: true, Phase: "owasp", Category: "sqli",
+		RuleID: 17, RuleIDStr: "owasp:sqli:017", StatusCode: 403, Tags: &tags,
+	})
+	if got.IsTerminal() {
+		t.Fatalf("verdict metadata matching allow should override builtin terminal: %+v", got)
+	}
 	if got.MatchDesc != "owasp" {
-		t.Errorf("脚本读到的 phase = %q, want owasp", got.MatchDesc)
+		t.Errorf("脚本读到的 verdict.phase = %q, want owasp", got.MatchDesc)
+	}
+}
+
+// TestPostLuaCanceledRequestKeepsBuiltinDecision 验证取消请求不接受 post 脚本的覆盖。
+func TestPostLuaCanceledRequestKeepsBuiltinDecision(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	builtin := action.Result{Type: action.Intercept, Matched: true, Phase: "owasp"}
+	allow := luaEngineWith(t, luaplugin.StagePost, `function handle(ctx) return "allow" end`)
+	if got := applyPostLuaDecision(allow, &pipeline.RequestCtx{Context: ctx}, builtin); got != builtin {
+		t.Fatalf("cancelled request must keep builtin decision, got %+v", got)
+	}
+
+	intercept := luaEngineWith(t, luaplugin.StagePost, `function handle(ctx) return "intercept" end`)
+	if got := applyPostLuaDecision(intercept, &pipeline.RequestCtx{Context: ctx}, action.Result{}); got.Matched {
+		t.Fatalf("cancelled request must not become Lua intercept, got %+v", got)
+	}
+}
+
+func TestPostLuaCarriesControlledOutput(t *testing.T) {
+	lp := luaEngineWith(t, luaplugin.StagePost, `
+function handle(ctx)
+  return {
+    action="intercept",
+    headers={["x-lua-post"]="matched"},
+    response_body="post response",
+    tags={"post", "lua"}
+  }
+end`)
+
+	got := applyPostLuaDecision(lp, &pipeline.RequestCtx{}, action.Result{})
+	if got.Type != action.Intercept || !got.Matched {
+		t.Fatalf("post 判定未进入 action.Result：%+v", got)
+	}
+	if got.SetHeaders == nil || (*got.SetHeaders)["x-lua-post"] != "matched" {
+		t.Errorf("post SetHeaders 未进入 action.Result：%+v", got.SetHeaders)
+	}
+	if got.ResponseBody == nil || *got.ResponseBody != "post response" {
+		t.Errorf("post ResponseBody 未进入 action.Result：%v", got.ResponseBody)
+	}
+	if got.Tags == nil || len(*got.Tags) != 2 || (*got.Tags)[0] != "post" || (*got.Tags)[1] != "lua" {
+		t.Errorf("post Tags 未进入 action.Result：%+v", got.Tags)
 	}
 }
 

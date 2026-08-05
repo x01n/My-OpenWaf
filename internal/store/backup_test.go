@@ -487,3 +487,62 @@ func TestBackupModelsCoverBackupData(t *testing.T) {
 			"存在多余或缺失的模型", sliceFields, len(models))
 	}
 }
+
+func TestImportBackupRepairsPolicyReferencesAndPreservesExplicitDefault(t *testing.T) {
+	db := newBackupTestDB(t)
+	defaultID := uint(20)
+	orphanID := uint(999)
+	data := &BackupData{
+		Version:         BackupVersion,
+		DefaultPolicyID: &defaultID,
+		Policies: []Policy{
+			{ID: 10, Name: "first policy"},
+			{ID: defaultID, Name: "explicit default"},
+		},
+		Rules: []Rule{
+			{ID: 1, Name: "zero", PolicyID: 0, Phase: PhaseCustom, Pattern: "block_path:/zero", Action: ActionIntercept, Enabled: true},
+			{ID: 2, Name: "orphan", PolicyID: orphanID, Phase: PhaseCustom, Pattern: "block_path:/orphan", Action: ActionIntercept, Enabled: true},
+		},
+		Sites: []Site{
+			{ID: 1, Host: "zero.example", Bind: ":80", PolicyID: uintPtrForBackupTest(0)},
+			{ID: 2, Host: "orphan.example", Bind: ":81", PolicyID: &orphanID},
+		},
+	}
+
+	if err := ImportBackup(db, data, false); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if err := ImportBackup(db, data, false); err != nil {
+		t.Fatalf("repeat import: %v", err)
+	}
+
+	var defaultPolicy Policy
+	if err := db.Where("default_slot = ?", 1).First(&defaultPolicy).Error; err != nil {
+		t.Fatalf("load default policy: %v", err)
+	}
+	if defaultPolicy.ID != defaultID {
+		t.Fatalf("default policy id = %d, want %d", defaultPolicy.ID, defaultID)
+	}
+
+	var rules []Rule
+	if err := db.Order("id ASC").Find(&rules).Error; err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	for i := range rules {
+		if rules[i].PolicyID != defaultID {
+			t.Fatalf("rule %d policy_id = %d, want %d", rules[i].ID, rules[i].PolicyID, defaultID)
+		}
+	}
+
+	var sites []Site
+	if err := db.Order("id ASC").Find(&sites).Error; err != nil {
+		t.Fatalf("load sites: %v", err)
+	}
+	for i := range sites {
+		if sites[i].PolicyID != nil {
+			t.Fatalf("site %d policy_id = %v, want nil", sites[i].ID, sites[i].PolicyID)
+		}
+	}
+}
+
+func uintPtrForBackupTest(value uint) *uint { return &value }

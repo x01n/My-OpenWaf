@@ -364,6 +364,33 @@ func TestUpdateSiteListenerRejectsInvalidRouteParams(t *testing.T) {
 	}
 }
 
+func TestUpdateSiteListenerMigratesLegacyEntry(t *testing.T) {
+	siteRepo, listenerRepo := newSiteAndListenerReposForTest(t)
+	item := seedListenerSite(t, siteRepo, "listener-legacy-update.example", ":8080")
+	reloadCalled := false
+
+	ctx := invokeUpdateSiteListenerHandler(t, UpdateSiteListener(siteRepo, listenerRepo, nil, func() error {
+		reloadCalled = true
+		return nil
+	}), item.ID, 0, []byte(`{"bind":":8443","network":"tcp6","enabled":false}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if !reloadCalled {
+		t.Fatal("reload was not called")
+	}
+	rows, err := listenerRepo.ListBySite(item.ID)
+	if err != nil {
+		t.Fatalf("list listeners: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one migrated listener, got %#v", rows)
+	}
+	if rows[0].ID == 0 || rows[0].Bind != ":8443" || rows[0].Network != "tcp6" || rows[0].Enabled {
+		t.Fatalf("legacy listener was not migrated with submitted values: %#v", rows[0])
+	}
+}
+
 func TestUpdateSiteListenerPersistsChanges(t *testing.T) {
 	siteRepo, listenerRepo := newSiteAndListenerReposForTest(t)
 	item := seedListenerSite(t, siteRepo, "listener-update-ok.example", ":8080")
@@ -477,6 +504,23 @@ func TestUpdateSiteListenerReportsReloadFailure(t *testing.T) {
 	}
 	if loaded.Bind != ":9443" {
 		t.Fatalf("update persists before reload, bind = %q", loaded.Bind)
+	}
+}
+
+func TestDeleteSiteListenerRejectsLegacyEntry(t *testing.T) {
+	siteRepo, listenerRepo := newSiteAndListenerReposForTest(t)
+	item := seedListenerSite(t, siteRepo, "listener-legacy-delete.example", ":8080")
+	ctx := invokeSiteRouteHandler(t, DeleteSiteListener(siteRepo, listenerRepo, func() error { return nil }), "POST", "/api/v1/sites/1/listeners/0/delete", listenerParams(strconv.FormatUint(uint64(item.ID), 10), "0"), nil)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	requireErrorMessage(t, ctx.Response.Body(), "legacy listener cannot be deleted")
+	rows, err := listenerRepo.ListBySite(item.ID)
+	if err != nil {
+		t.Fatalf("list listeners: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("legacy delete should not create or remove rows: %#v", rows)
 	}
 }
 

@@ -2,54 +2,56 @@
  * 登录页面
  */
 
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { useTranslation } from "react-i18next";
-import { useAuth } from "@/hooks/use-auth";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { IconShieldCheck } from "@tabler/icons-react";
-import { toast } from "sonner";
+import { useState } from "react"
+import { useRouter } from "next/navigation"
+import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { IconShieldCheck } from "@tabler/icons-react"
+import { toast } from "sonner"
 
 export default function LoginPage() {
-  const router = useRouter();
-  const { t } = useTranslation();
-  const { login } = useAuth();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
+  const router = useRouter()
+  const { t } = useTranslation()
+  const { login } = useAuth()
+  const [username, setUsername] = useState("")
+  const [password, setPassword] = useState("")
+  const [loading, setLoading] = useState(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+    e.preventDefault()
     if (!username || !password) {
-      toast.error(t("login.emptyCredentials"));
-      return;
+      toast.error(t("login.emptyCredentials"))
+      return
     }
-    setLoading(true);
+    setLoading(true)
     try {
-      await login(username, password);
-      toast.success(t("login.success"));
-      router.push("/dashboard");
-    } catch (err: any) { // eslint-disable-line @typescript-eslint/no-explicit-any
-      toast.error(err.message || t("login.failed"));
+      await login(username, password)
+      toast.success(t("login.success"))
+      router.push("/dashboard")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("login.failed"))
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  };
+  }
 
   return (
     <div className="flex min-h-svh items-center justify-center bg-muted/40 p-4">
       <Card className="w-full max-w-sm">
         <CardHeader className="space-y-1">
-          <div className="flex items-center justify-center gap-2 mb-4">
+          <div className="mb-4 flex items-center justify-center gap-2">
             <IconShieldCheck className="h-8 w-8 text-primary" />
             <span className="text-xl font-bold">OpenWAF</span>
           </div>
-          <CardTitle className="text-center text-lg">{t("login.title")}</CardTitle>
+          <CardTitle className="text-center text-lg">
+            {t("login.title")}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -81,5 +83,5 @@ export default function LoginPage() {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

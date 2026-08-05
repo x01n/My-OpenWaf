@@ -1,59 +1,95 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { toast } from "sonner";
-import { IconDeviceFloppy } from "@tabler/icons-react";
-import { useSiteMutation } from "@/hooks/use-api";
-import type { Site } from "@/lib/types";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Badge } from "@/components/ui/badge"
+import { toast } from "sonner"
+import {
+  IconArrowDown,
+  IconArrowUp,
+  IconDeviceFloppy,
+} from "@tabler/icons-react"
+import { useSiteMutation } from "@/hooks/use-api"
+import { SiteXFFMode, type Site } from "@/lib/types"
 
 interface AdvancedTabProps {
-  site: Site;
+  site: Site
 }
 
 export function AdvancedTab({ site }: AdvancedTabProps) {
-  const { t } = useTranslation();
-  const updateSite = useSiteMutation();
+  const { t } = useTranslation()
+  const updateSite = useSiteMutation()
 
-  const [antiReplayEnabled, setAntiReplayEnabled] = useState(site.anti_replay_enabled);
-  const [antiReplayTtl, setAntiReplayTtl] = useState(site.anti_replay_ttl);
-  const [maintenanceEnabled, setMaintenanceEnabled] = useState(site.maintenance_enabled);
-  const [maintenanceStatus, setMaintenanceStatus] = useState(site.maintenance_status);
-  const [xffMode, setXffMode] = useState(site.xff_mode);
-  const [trustedCidr, setTrustedCidr] = useState(site.trusted_cidr || "");
-  const [preserveHost, setPreserveHost] = useState(site.preserve_original_host);
-  const [saving, setSaving] = useState(false);
+  const [antiReplayEnabled, setAntiReplayEnabled] = useState(
+    site.anti_replay_enabled
+  )
+  const [antiReplayTtl, setAntiReplayTtl] = useState(site.anti_replay_ttl)
+  const [maintenanceEnabled, setMaintenanceEnabled] = useState(
+    site.maintenance_enabled
+  )
+  const [maintenanceStatus, setMaintenanceStatus] = useState(
+    site.maintenance_status
+  )
+  const [xffMode, setXffMode] = useState(site.xff_mode)
+  const [trustedCidr, setTrustedCidr] = useState(site.trusted_cidr)
+  const [clientIPHeaderOrder, setClientIPHeaderOrder] = useState(
+    site.client_ip_header_order || ["x_forwarded_for"]
+  )
+  const [preserveHost, setPreserveHost] = useState(site.preserve_original_host)
+  const [saving, setSaving] = useState(false)
+
+  const moveClientIPHeader = (index: number, direction: -1 | 1) => {
+    const target = index + direction
+    if (target < 0 || target >= clientIPHeaderOrder.length) return
+    setClientIPHeaderOrder((current) => {
+      const next = [...current]
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return next
+    })
+  }
+
+  const toggleClientIPHeader = (header: string, enabled: boolean) => {
+    setClientIPHeaderOrder((current) => {
+      if (enabled) return [...current, header]
+      return current.filter((item) => item !== header)
+    })
+  }
 
   const handleToggleAntiReplay = async (enabled: boolean) => {
-    setAntiReplayEnabled(enabled);
+    setAntiReplayEnabled(enabled)
     try {
-      await updateSite.execute({ id: site.id, data: { anti_replay_enabled: enabled } });
-      toast.success(t("common.saveSuccess"));
+      await updateSite.execute({
+        id: site.id,
+        data: { anti_replay_enabled: enabled },
+      })
+      toast.success(t("common.saveSuccess"))
     } catch {
-      toast.error(t("common.operationFailed"));
-      setAntiReplayEnabled(!enabled);
+      toast.error(t("common.operationFailed"))
+      setAntiReplayEnabled(!enabled)
     }
-  };
+  }
 
   const handleToggleMaintenance = async (enabled: boolean) => {
-    setMaintenanceEnabled(enabled);
+    setMaintenanceEnabled(enabled)
     try {
-      await updateSite.execute({ id: site.id, data: { maintenance_enabled: enabled } });
-      toast.success(t("common.saveSuccess"));
+      await updateSite.execute({
+        id: site.id,
+        data: { maintenance_enabled: enabled },
+      })
+      toast.success(t("common.saveSuccess"))
     } catch {
-      toast.error(t("common.operationFailed"));
-      setMaintenanceEnabled(!enabled);
+      toast.error(t("common.operationFailed"))
+      setMaintenanceEnabled(!enabled)
     }
-  };
+  }
 
   const handleSave = async () => {
-    setSaving(true);
+    setSaving(true)
     try {
       await updateSite.execute({
         id: site.id,
@@ -64,16 +100,17 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
           maintenance_status: maintenanceStatus,
           xff_mode: xffMode,
           trusted_cidr: trustedCidr,
+          client_ip_header_order: clientIPHeaderOrder,
           preserve_original_host: preserveHost,
         },
-      });
-      toast.success(t("common.saveSuccess"));
+      })
+      toast.success(t("common.saveSuccess"))
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     } finally {
-      setSaving(false);
+      setSaving(false)
     }
-  };
+  }
 
   return (
     <div className="space-y-4">
@@ -85,9 +122,14 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <span className="text-muted-foreground">{t("sites.detail.tls")}</span>
+              <span className="text-muted-foreground">
+                {t("sites.detail.tls")}
+              </span>
               <p className="font-medium">
-                <Badge variant={site.tls_enabled ? "default" : "outline"} className="h-5 text-[10px]">
+                <Badge
+                  variant={site.tls_enabled ? "default" : "outline"}
+                  className="h-5 text-[10px]"
+                >
                   {site.tls_enabled ? "HTTPS" : "HTTP"}
                 </Badge>
               </p>
@@ -95,12 +137,20 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
             {site.tls_enabled && (
               <>
                 <div>
-                  <span className="text-muted-foreground">{t("sites.detail.minTlsVersion")}</span>
-                  <p className="font-medium">{site.min_tls_version || "TLS 1.2"}</p>
+                  <span className="text-muted-foreground">
+                    {t("sites.detail.minTlsVersion")}
+                  </span>
+                  <p className="font-medium">
+                    {site.min_tls_version || "TLS 1.2"}
+                  </p>
                 </div>
                 <div>
-                  <span className="text-muted-foreground">{t("sites.detail.maxTlsVersion")}</span>
-                  <p className="font-medium">{site.max_tls_version || "TLS 1.3"}</p>
+                  <span className="text-muted-foreground">
+                    {t("sites.detail.maxTlsVersion")}
+                  </span>
+                  <p className="font-medium">
+                    {site.max_tls_version || "TLS 1.3"}
+                  </p>
                 </div>
               </>
             )}
@@ -117,9 +167,14 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div className="space-y-0.5">
               <Label>{t("sites.detail.enableAntiReplay")}</Label>
-              <p className="text-xs text-muted-foreground">{t("sites.detail.antiReplayDesc")}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.antiReplayDesc")}
+              </p>
             </div>
-            <Switch checked={antiReplayEnabled} onCheckedChange={handleToggleAntiReplay} />
+            <Switch
+              checked={antiReplayEnabled}
+              onCheckedChange={handleToggleAntiReplay}
+            />
           </div>
 
           {antiReplayEnabled && (
@@ -131,9 +186,13 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
                   min={1}
                   className="w-32"
                   value={antiReplayTtl}
-                  onChange={(e) => setAntiReplayTtl(Math.max(1, Number(e.target.value) || 60))}
+                  onChange={(e) =>
+                    setAntiReplayTtl(Math.max(1, Number(e.target.value) || 60))
+                  }
                 />
-                <span className="text-sm text-muted-foreground">{t("common.seconds")}</span>
+                <span className="text-sm text-muted-foreground">
+                  {t("common.seconds")}
+                </span>
               </div>
             </div>
           )}
@@ -143,15 +202,22 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
       {/* 维护模式 */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">{t("sites.detail.maintenanceMode")}</CardTitle>
+          <CardTitle className="text-base">
+            {t("sites.detail.maintenanceMode")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div className="space-y-0.5">
               <Label>{t("sites.detail.enableMaintenance")}</Label>
-              <p className="text-xs text-muted-foreground">{t("sites.detail.maintenanceDesc")}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.maintenanceDesc")}
+              </p>
             </div>
-            <Switch checked={maintenanceEnabled} onCheckedChange={handleToggleMaintenance} />
+            <Switch
+              checked={maintenanceEnabled}
+              onCheckedChange={handleToggleMaintenance}
+            />
           </div>
 
           {maintenanceEnabled && (
@@ -163,7 +229,9 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
                 max={599}
                 className="w-32"
                 value={maintenanceStatus}
-                onChange={(e) => setMaintenanceStatus(Number(e.target.value) || 503)}
+                onChange={(e) =>
+                  setMaintenanceStatus(Number(e.target.value) || 503)
+                }
               />
             </div>
           )}
@@ -173,19 +241,32 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
       {/* 网络配置 */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">{t("sites.detail.networkConfig")}</CardTitle>
+          <CardTitle className="text-base">
+            {t("sites.detail.networkConfig")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <Label>{t("sites.detail.xffMode")}</Label>
             <select
               value={xffMode}
-              onChange={(e) => setXffMode(e.target.value)}
+              onChange={(e) => {
+                const value = e.target.value
+                if (
+                  value === SiteXFFMode.Strip ||
+                  value === SiteXFFMode.TrustOuter
+                ) {
+                  setXffMode(value)
+                }
+              }}
               className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
             >
-              <option value="append">append</option>
-              <option value="overwrite">overwrite</option>
-              <option value="transparent">transparent</option>
+              <option value={SiteXFFMode.Strip}>
+                Use direct peer IP
+              </option>
+              <option value={SiteXFFMode.TrustOuter}>
+                Trust outer WAF CIDR and use leftmost configured header
+              </option>
             </select>
           </div>
 
@@ -198,10 +279,64 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
             />
           </div>
 
+          <div className="space-y-2">
+            <Label>{t("sites.detail.clientIPHeaderOrder")}</Label>
+            <p className="text-xs text-muted-foreground">
+              {t("sites.detail.clientIPHeaderOrderDesc")}
+            </p>
+            <div className="space-y-2 rounded-lg border p-3">
+              {[
+                ["x_forwarded_for", "X-Forwarded-For"],
+                ["x_real_ip", "X-Real-IP"],
+                ["forwarded", "Forwarded"],
+              ].map(([value, label]) => {
+                const index = clientIPHeaderOrder.indexOf(value)
+                const enabled = index >= 0
+                return (
+                  <div key={value} className="flex items-center gap-2">
+                    <Switch
+                      checked={enabled}
+                      onCheckedChange={(checked) =>
+                        toggleClientIPHeader(value, checked)
+                      }
+                    />
+                    <span className="min-w-0 flex-1 text-sm">{label}</span>
+                    {enabled && (
+                      <>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t("sites.detail.moveHeaderUp")}
+                          disabled={index === 0}
+                          onClick={() => moveClientIPHeader(index, -1)}
+                        >
+                          <IconArrowUp className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t("sites.detail.moveHeaderDown")}
+                          disabled={index === clientIPHeaderOrder.length - 1}
+                          onClick={() => moveClientIPHeader(index, 1)}
+                        >
+                          <IconArrowDown className="h-4 w-4" />
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div className="space-y-0.5">
               <Label>{t("sites.detail.preserveHost")}</Label>
-              <p className="text-xs text-muted-foreground">{t("sites.detail.preserveHostDesc")}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.preserveHostDesc")}
+              </p>
             </div>
             <Switch checked={preserveHost} onCheckedChange={setPreserveHost} />
           </div>
@@ -216,5 +351,5 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
         </Button>
       </div>
     </div>
-  );
+  )
 }

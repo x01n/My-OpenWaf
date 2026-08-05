@@ -932,6 +932,42 @@ func TestUpdateRedisConfigPreservesStoredPasswordWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestUpdateRedisConfigAcceptsFrontendFieldNames(t *testing.T) {
+	redisSrv := startTestRedisServer(t)
+	defer redisSrv.Close()
+
+	repo := newSystemSettingsRepoForTest(t)
+	payload := []byte(fmt.Sprintf(`{"redis_addr":%q,"redis_db":0}`, redisSrv.Addr()))
+	reloaded := 0
+	ctx := invokeSystemConfigHandler(t, UpdateRedisConfig(repo, func() error { reloaded++; return nil }), "POST", "/api/v1/redis-config", payload)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if reloaded != 1 {
+		t.Fatalf("reload count = %d, want 1", reloaded)
+	}
+
+	val, err := repo.Get(store.SettingKeyRedisConfig)
+	if err != nil {
+		t.Fatalf("load redis config: %v", err)
+	}
+	var stored RedisConfig
+	if err := json.Unmarshal([]byte(val), &stored); err != nil {
+		t.Fatalf("decode stored redis config: %v", err)
+	}
+	if !stored.Enabled || stored.Addr != redisSrv.Addr() || stored.DB != 0 {
+		t.Fatalf("frontend redis fields were not saved/enabled: %#v", stored)
+	}
+
+	var resp RedisConfigResponse
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode redis response: %v", err)
+	}
+	if !resp.Enabled || resp.RedisAddr != redisSrv.Addr() || resp.RedisDB != 0 {
+		t.Fatalf("response should expose redis_* aliases for frontend, got %#v", resp)
+	}
+}
+
 func TestListCipherSuitesIncludesCanonicalMetadata(t *testing.T) {
 	ctx := invokeSystemConfigHandler(t, ListCipherSuites(), "GET", "/api/v1/tls-cipher-suites", nil)
 	if ctx.Response.StatusCode() != 200 {

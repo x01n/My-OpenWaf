@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"time"
+
+	"My-OpenWaf/internal/store/migrations"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,8 +19,9 @@ import (
  * 以维持模型间的外键关联（Site.CertID → Certificate.ID 等）。
  */
 type BackupData struct {
-	Version    int       `json:"version"`
-	ExportedAt time.Time `json:"exported_at"`
+	Version         int       `json:"version"`
+	ExportedAt      time.Time `json:"exported_at"`
+	DefaultPolicyID *uint     `json:"default_policy_id,omitempty"`
 
 	Certificates      []Certificate          `json:"certificates"`
 	Policies          []Policy               `json:"policies"`
@@ -75,6 +79,13 @@ func ExportBackup(db *gorm.DB) (*BackupData, error) {
 	if err := db.Find(&data.Policies).Error; err != nil {
 		return nil, err
 	}
+	for i := range data.Policies {
+		if data.Policies[i].DefaultSlot != nil && *data.Policies[i].DefaultSlot == 1 {
+			id := data.Policies[i].ID
+			data.DefaultPolicyID = &id
+			break
+		}
+	}
 	if err := db.Find(&data.Rules).Error; err != nil {
 		return nil, err
 	}
@@ -128,6 +139,8 @@ func ExportBackup(db *gorm.DB) (*BackupData, error) {
  * @return 任一步骤失败则整体回滚并返回错误。
  */
 func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
+	sites := normalizeBackupSiteXFFModes(data.Sites)
+
 	return db.Transaction(func(tx *gorm.DB) error {
 		if replaceMode {
 			if err := clearConfigTables(tx); err != nil {
@@ -135,13 +148,25 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 			}
 		}
 
+		defaultPolicyID := data.DefaultPolicyID
+		policies := append([]Policy(nil), data.Policies...)
+		for i := range policies {
+			if defaultPolicyID == nil && policies[i].DefaultSlot != nil && *policies[i].DefaultSlot == 1 {
+				id := policies[i].ID
+				defaultPolicyID = &id
+			}
+			// 先清空导入行的唯一默认槽，避免合并恢复时与目标库当前默认策略冲突。
+			policies[i].DefaultSlot = nil
+			policies[i].IsDefault = false
+		}
+
 		// 按依赖顺序插入：被引用的表在前。
 		// 使用 upsert（主键冲突时更新）以保留原始 ID 并支持合并模式。
 		ordered := []interface{}{
 			data.Certificates,
-			data.Policies,
+			policies,
 			data.ThreatIntelFeeds,
-			data.Sites,
+			sites,
 			data.SiteListeners,
 			data.Rules,
 			data.IPListEntries,
@@ -159,6 +184,22 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 				return err
 			}
 		}
+		if defaultPolicyID != nil {
+			var count int64
+			if err := tx.Model(&Policy{}).Where("id = ?", *defaultPolicyID).Count(&count).Error; err != nil {
+				return err
+			}
+			if count != 1 {
+				return fmt.Errorf("default_policy_id %d does not reference an imported policy", *defaultPolicyID)
+			}
+			if err := tx.Unscoped().Model(&Policy{}).Where("default_slot = ?", 1).Update("default_slot", nil).Error; err != nil {
+				return err
+			}
+			one := uint(1)
+			if err := tx.Model(&Policy{}).Where("id = ?", *defaultPolicyID).Update("default_slot", &one).Error; err != nil {
+				return err
+			}
+		}
 
 		// SystemSettings 以 key 为唯一键 upsert。
 		for i := range data.SystemSettings {
@@ -171,8 +212,26 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 			}
 		}
 
+		// 旧备份可能没有显式默认策略，或带有 0、孤儿和软删除策略引用。
+		// 在同一事务内复用幂等迁移，保证恢复完成时引用立即可用。
+		if err := migrations.V9EnsureDefaultPolicy(tx); err != nil {
+			return fmt.Errorf("repair imported policy references: %w", err)
+		}
 		return nil
 	})
+}
+
+func normalizeBackupSiteXFFModes(sites []Site) []Site {
+	normalized := make([]Site, len(sites))
+	copy(normalized, sites)
+	for i := range normalized {
+		switch normalized[i].XFFMode {
+		case XFFModeStrip, XFFModeTrustOuter:
+		default:
+			normalized[i].XFFMode = XFFModeStrip
+		}
+	}
+	return normalized
 }
 
 /**

@@ -10,6 +10,7 @@ type SystemSettings struct {
 const (
 	SettingKeyACMEConfig          = "acme_config"
 	SettingKeyRedisConfig         = "redis_config"
+	SettingKeyJWTSecret           = "jwt_secret"
 	SettingKeyHPKP                = "hpkp_enabled"
 	SettingKeyHPKPValue           = "hpkp_value"
 	SettingKeyHPKPReportOnly      = "hpkp_report_only_enabled"

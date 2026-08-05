@@ -3,6 +3,7 @@ package rules
 import (
 	"net"
 	"testing"
+	"time"
 
 	"My-OpenWaf/internal/store"
 )
@@ -159,6 +160,29 @@ func TestPathContainsMatchers(t *testing.T) {
 	}
 }
 
+func TestHeaderValueMatchers(t *testing.T) {
+	ctx := MatchCtx{Headers: map[string]string{"X-Test": "prefix-middle-suffix"}}
+	tests := []struct {
+		pattern string
+		want    bool
+	}{
+		{"block_header:X-Test:middle", true},
+		{"block_header_exact:X-Test:prefix-middle-suffix", true},
+		{"block_header_exact:X-Test:prefix", false},
+		{"block_header_prefix:X-Test:prefix-middle", true},
+		{"block_header_prefix:X-Test:middle", false},
+	}
+	for _, tt := range tests {
+		compiled := Compile([]store.Rule{{Phase: "custom", Pattern: tt.pattern, Action: "intercept", Priority: 1, Enabled: true}})
+		if len(compiled) != 1 {
+			t.Fatalf("Compile(%q) returned %d rules", tt.pattern, len(compiled))
+		}
+		if got := compiled[0].Match(ctx); got != tt.want {
+			t.Errorf("Match(%q) = %v, want %v", tt.pattern, got, tt.want)
+		}
+	}
+}
+
 func TestExactPathMatcher(t *testing.T) {
 	rules := Compile([]store.Rule{
 		{Phase: "custom", Pattern: "block_path_exact:/.env", Action: "intercept", Priority: 1, Enabled: true},
@@ -295,6 +319,52 @@ func TestCCRateMatcherThresholdAndHostIsolation(t *testing.T) {
 	mc.Headers["Host"] = "b.example"
 	if rules[0].Match(mc) {
 		t.Fatal("different host should have an independent counter")
+	}
+}
+
+func TestCCRateMatcherSharesStateAcrossCompiles(t *testing.T) {
+	pattern := `{"op":"cc_rate","window":60,"threshold":2,"duration":1,"duration_unit":"seconds","children":[{"kind":"block_path","arg":"/shared-cc-state"}]}`
+	r1 := Compile([]store.Rule{{Phase: "custom", Pattern: pattern, Action: "challenge", Priority: 1, Enabled: true}})
+	r2 := Compile([]store.Rule{{Phase: "custom", Pattern: pattern, Action: "challenge", Priority: 1, Enabled: true}})
+	if len(r1) != 1 || len(r2) != 1 {
+		t.Fatalf("expected both compiles to return one rule, got %d and %d", len(r1), len(r2))
+	}
+
+	mc := MatchCtx{ClientIP: net.ParseIP("10.10.10.10"), Path: "/shared-cc-state", Headers: map[string]string{"Host": "shared.example"}}
+	if r1[0].Match(mc) {
+		t.Fatal("first matching request should stay below threshold")
+	}
+	if !r2[0].Match(mc) {
+		t.Fatal("second matching request from recompiled rule should share state and reach threshold")
+	}
+}
+
+func TestCCRateMatcherDurationUnitSeconds(t *testing.T) {
+	pattern := `{"op":"cc_rate","window":1,"threshold":2,"duration":1,"duration_unit":"seconds","children":[{"kind":"block_path","arg":"/second-duration"}]}`
+	rules := Compile([]store.Rule{{Phase: "custom", Pattern: pattern, Action: "challenge", Priority: 1, Enabled: true}})
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 compiled rule, got %d", len(rules))
+	}
+
+	mc := MatchCtx{ClientIP: net.ParseIP("10.10.10.11"), Path: "/second-duration", Headers: map[string]string{"Host": "duration.example"}}
+	if rules[0].Match(mc) {
+		t.Fatal("first matching request should stay below threshold")
+	}
+	if !rules[0].Match(mc) {
+		t.Fatal("second matching request should reach threshold")
+	}
+	time.Sleep(2 * time.Second)
+	if rules[0].Match(mc) {
+		t.Fatal("seconds duration should expire after the configured second-level window")
+	}
+}
+
+func TestCCDurationSecondsLegacyDefault(t *testing.T) {
+	if got := ccDurationSeconds(2, ""); got != 120 {
+		t.Fatalf("legacy empty unit duration = %d, want 120", got)
+	}
+	if got := ccDurationSeconds(2, "seconds"); got != 2 {
+		t.Fatalf("seconds duration = %d, want 2", got)
 	}
 }
 

@@ -54,6 +54,93 @@ func TestSnapshotUpstreamsDeduplicatesTrimsAndSorts(t *testing.T) {
 	}
 }
 
+func TestDynamicProtectionKeyBaseUsesPersistentJWTSecret(t *testing.T) {
+	t.Setenv("MY_OPENWAF_JWT_SECRET", "")
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.SystemSettings{}); err != nil {
+		t.Fatalf("migrate system settings: %v", err)
+	}
+	const storedSecret = "persisted-jwt-secret-for-dynamic-protection"
+	if err := db.Create(&store.SystemSettings{Key: "jwt_secret", Value: storedSecret}).Error; err != nil {
+		t.Fatalf("seed jwt secret: %v", err)
+	}
+
+	firstSecret, err := resolveJWTSecret(&core.Runtime{DB: db})
+	if err != nil {
+		t.Fatalf("resolve persisted jwt secret: %v", err)
+	}
+	secondSecret, err := resolveJWTSecret(&core.Runtime{DB: db})
+	if err != nil {
+		t.Fatalf("resolve persisted jwt secret after restart: %v", err)
+	}
+	first := deriveDynamicProtectionKeyBase(firstSecret)
+	second := deriveDynamicProtectionKeyBase(secondSecret)
+	if len(first) != 32 {
+		t.Fatalf("derived key base length = %d, want 32", len(first))
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("stored JWT secret must derive the same key base after runtime restart")
+	}
+	if bytes.Equal(first, []byte(storedSecret)) {
+		t.Fatal("dynamic protection must not reuse the JWT secret directly")
+	}
+}
+
+func TestResolveJWTSecretPersistsGeneratedSecret(t *testing.T) {
+	t.Setenv("MY_OPENWAF_JWT_SECRET", "")
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.SystemSettings{}); err != nil {
+		t.Fatalf("migrate system settings: %v", err)
+	}
+
+	first, err := resolveJWTSecret(&core.Runtime{DB: db})
+	if err != nil {
+		t.Fatalf("generate persisted jwt secret: %v", err)
+	}
+	second, err := resolveJWTSecret(&core.Runtime{DB: db})
+	if err != nil {
+		t.Fatalf("reload persisted jwt secret: %v", err)
+	}
+	if len(first) != 64 {
+		t.Fatalf("persisted jwt secret length = %d, want 64 hex characters", len(first))
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("generated jwt secret changed after reload")
+	}
+	var setting store.SystemSettings
+	if err := db.Where("key = ?", "jwt_secret").First(&setting).Error; err != nil {
+		t.Fatalf("load stored jwt secret: %v", err)
+	}
+	if setting.Value != string(first) {
+		t.Fatal("resolver did not return the persisted jwt secret")
+	}
+}
+
+func TestResolveJWTSecretReturnsDatabaseError(t *testing.T) {
+	t.Setenv("MY_OPENWAF_JWT_SECRET", "")
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql database: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close sql database: %v", err)
+	}
+
+	if _, err := resolveJWTSecret(&core.Runtime{DB: db}); err == nil {
+		t.Fatal("resolveJWTSecret should fail when the settings database is unavailable")
+	}
+}
+
 func TestSnapshotUpstreamSetChangedIgnoresOrderDuplicatesAndWhitespace(t *testing.T) {
 	previous := &snapshotpkg.Snapshot{Sites: map[string]*snapshotpkg.SiteRuntime{
 		"a": {UpstreamURLs: []string{" http://b ", "http://a"}},

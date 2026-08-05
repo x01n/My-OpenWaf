@@ -128,6 +128,12 @@ func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Dec
 	if e == nil {
 		return Decision{}
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return Decision{}
+	}
 	scripts := e.scriptsFor(stage)
 	if len(scripts) == 0 {
 		return Decision{}
@@ -137,9 +143,28 @@ func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Dec
 	if h := e.kv.Load(); h != nil {
 		kv = h.kv
 	}
+	// Lua 策略依赖受控 KV 时，后端不可用必须强制 fail-open。
+	// 不能让脚本绕过 ctx.kv.available() 直接返回终止动作。
+	if kv == nil || !kv.Available() {
+		return Decision{}
+	}
 
 	for _, s := range scripts {
+		if ctx.Err() != nil {
+			return Decision{}
+		}
+		if s == nil || (s.siteID != nil && *s.siteID != req.SiteID) {
+			continue
+		}
 		dec, err := s.Run(ctx, e.pool, req, kv)
+		if ctx.Err() != nil {
+			return Decision{}
+		}
+		// KV 操作可能在脚本执行期间失败；健康状态变为不可用后，
+		// 丢弃本次以及后续脚本判定，强制请求继续通过。
+		if !kv.Available() {
+			return Decision{}
+		}
 		if err != nil {
 			e.log.Warn("lua plugin failed, skipping",
 				slog.String("script", s.name),
@@ -156,6 +181,7 @@ func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Dec
 
 // Stats 汇总各脚本的运行统计，供 /metrics 与管理端展示。
 type Stats struct {
+	ID       uint
 	Name     string
 	Stage    string
 	Runs     int64
@@ -181,6 +207,7 @@ func (e *Engine) Stats() []Stats {
 	for _, s := range all {
 		runs, failures, timeouts, avg := s.Stats()
 		out = append(out, Stats{
+			ID:       s.id,
 			Name:     s.name,
 			Stage:    string(s.stage),
 			Runs:     runs,

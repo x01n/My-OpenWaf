@@ -1,20 +1,20 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import { useTranslation } from "react-i18next";
-import { format } from "date-fns";
-import useSWR from "swr";
+import * as React from "react"
+import { useTranslation } from "react-i18next"
+import { format } from "date-fns"
+import useSWR from "swr"
 
-import { cn } from "@/lib/utils";
-import { securityEventApi } from "@/lib/api";
-import type { SecurityEvent } from "@/lib/types";
+import { cn } from "@/lib/utils"
+import { securityEventApi } from "@/lib/api"
+import type { SecurityEvent } from "@/lib/types"
 import {
   HoverCard,
   HoverCardContent,
   HoverCardTrigger,
-} from "@/components/ui/hover-card";
-import { Badge } from "@/components/ui/badge";
-import { IconClock, IconRoute, IconWorld } from "@tabler/icons-react";
+} from "@/components/ui/hover-card"
+import { Badge } from "@/components/ui/badge"
+import { IconClock, IconRoute, IconWorld } from "@tabler/icons-react"
 
 /**
  * 悬停时展示该 IP 最近 5 次安全事件的预览卡片。
@@ -25,12 +25,12 @@ export function IpHoverPreview({
   className,
   children,
 }: {
-  ip: string;
-  className?: string;
-  children?: React.ReactNode;
+  ip: string
+  className?: string
+  children?: React.ReactNode
 }) {
-  const { t } = useTranslation();
-  const [enabled, setEnabled] = React.useState(false);
+  const { t } = useTranslation()
+  const [enabled, setEnabled] = React.useState(false)
 
   const { data, isLoading } = useSWR(
     enabled && ip ? ["ip-hover-preview", ip] : null,
@@ -39,25 +39,25 @@ export function IpHoverPreview({
         client_ip: ip,
         page: 1,
         page_size: 5,
-      })) as { items: SecurityEvent[]; total: number };
-      return res;
+      })) as { items: SecurityEvent[]; total: number }
+      return res
     },
-    { revalidateOnFocus: false },
-  );
+    { revalidateOnFocus: false }
+  )
 
   return (
     <HoverCard
       openDelay={200}
       closeDelay={100}
       onOpenChange={(o) => {
-        if (o) setEnabled(true);
+        if (o) setEnabled(true)
       }}
     >
       <HoverCardTrigger asChild>
         <span
           className={cn(
             "cursor-help font-mono decoration-dotted underline-offset-2 hover:underline",
-            className,
+            className
           )}
         >
           {children ?? ip}
@@ -140,13 +140,13 @@ export function IpHoverPreview({
         )}
       </HoverCardContent>
     </HoverCard>
-  );
+  )
 }
 
 function formatShortTime(iso: string): string {
   try {
-    return format(new Date(iso), "MM-dd HH:mm:ss");
+    return format(new Date(iso), "MM-dd HH:mm:ss")
   } catch {
-    return iso;
+    return iso
   }
 }

@@ -17,7 +17,7 @@ func TestSensitiveLogValueHintsCoverPattern(t *testing.T) {
 		"password", "passwd", "pwd", "token", "secret", "session",
 		"apikey", "api_key", "api-key",
 		"authtoken", "auth_token", "auth-token",
-		"csrf", "code",
+		"csrf", "code", "ticket", "env",
 	}
 	for _, kw := range patternKeywords {
 		input := kw + "=supersecretvalue"

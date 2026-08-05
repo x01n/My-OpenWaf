@@ -10,7 +10,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/route/param"
 
-	"My-OpenWaf/internal/admin/shared"
+	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/owasp"
 )
 
@@ -62,9 +62,9 @@ func TestGetOWASPRuleStatsCountsRegistry(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	registryTotal := len(owasp.DefaultOWASPRegistry.All())
-	if resp.Total != registryTotal {
-		t.Fatalf("total = %d, want %d", resp.Total, registryTotal)
+	catalogTotal := len(owasp.BuiltinRuleDefinitions())
+	if resp.Total != catalogTotal {
+		t.Fatalf("total = %d, want %d", resp.Total, catalogTotal)
 	}
 	if resp.EnabledCount+resp.DisabledCount != resp.Total {
 		t.Fatalf("enabled(%d) + disabled(%d) != total(%d)", resp.EnabledCount, resp.DisabledCount, resp.Total)
@@ -112,7 +112,7 @@ func TestGetOWASPRuleStatsRespectsDisableOverride(t *testing.T) {
 
 func TestListOWASPRulesFiltersByCategory(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
-	rules := owasp.DefaultOWASPRegistry.All()
+	rules := owasp.BuiltinRuleDefinitions()
 	if len(rules) == 0 {
 		t.Fatal("expected default OWASP rules")
 	}
@@ -156,7 +156,7 @@ func TestListOWASPRulesReturnsWhitelistOverride(t *testing.T) {
 		"whitelist": []string{"/healthz", "/metrics"},
 	})
 
-	ctx := invokeOWASPGet(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules")
+	ctx := invokeOWASPGet(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules?page_size=500")
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d", ctx.Response.StatusCode())
 	}
@@ -181,7 +181,7 @@ func TestListOWASPRulesReturnsWhitelistOverride(t *testing.T) {
 // TestListOWASPRulesSortsByID 验证响应按规则 ID 升序排列。
 func TestListOWASPRulesSortsByID(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
-	ctx := invokeOWASPGet(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules")
+	ctx := invokeOWASPGet(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules?page_size=500")
 	var resp struct {
 		Items []owaspRuleView `json:"items"`
 	}
@@ -227,10 +227,12 @@ func TestUpdateSingleOWASPRuleAcceptsRedirectWithTarget(t *testing.T) {
 		"action":      "redirect",
 		"redirect_to": "https://example.com/blocked",
 	})
-	cfg := shared.LoadProtectionConfig(repo)
-	override := cfg.GetOWASPRulesConfig()[ruleID].(map[string]interface{})
-	if override["action"] != "redirect" || override["redirect_to"] != "https://example.com/blocked" {
-		t.Fatalf("unexpected override: %#v", override)
+	var config store.PolicyOWASPRuleConfig
+	if err := repo.DB().Where("rule_id = ?", ruleID).First(&config).Error; err != nil {
+		t.Fatalf("load override: %v", err)
+	}
+	if config.Action == nil || *config.Action != "redirect" || config.RedirectTo == nil || *config.RedirectTo != "https://example.com/blocked" {
+		t.Fatalf("unexpected override: %#v", config)
 	}
 }
 
@@ -247,11 +249,11 @@ func TestBatchUpdateOWASPRulesRejectsEmptyArray(t *testing.T) {
 
 func TestBatchUpdateOWASPRulesAppliesOverrides(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
-	rules := owasp.DefaultOWASPRegistry.All()
+	rules := owasp.BuiltinRuleDefinitions()
 	if len(rules) < 2 {
 		t.Skip("registry needs at least 2 rules for batch test")
 	}
-	id1, id2 := rules[0].ID, rules[1].ID
+	id1, id2 := rules[0].RuleID, rules[1].RuleID
 
 	body, _ := json.Marshal(map[string]any{
 		"rules": []map[string]any{
@@ -266,29 +268,31 @@ func TestBatchUpdateOWASPRulesAppliesOverrides(t *testing.T) {
 	}
 	var resp struct {
 		Updated int `json:"updated"`
-		Total   int `json:"total"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Updated != 2 || resp.Total != 2 {
-		t.Fatalf("updated=%d total=%d, want 2/2", resp.Updated, resp.Total)
+	if resp.Updated != 2 {
+		t.Fatalf("updated=%d, want 2", resp.Updated)
 	}
 
-	cfg := shared.LoadProtectionConfig(repo)
-	rulesConfig := cfg.GetOWASPRulesConfig()
-	ov1 := rulesConfig[id1].(map[string]interface{})
-	if ov1["enabled"] != false {
-		t.Fatalf("rule %s enabled = %#v, want false", id1, ov1["enabled"])
+	var config1, config2 store.PolicyOWASPRuleConfig
+	if err := repo.DB().Where("rule_id = ?", id1).First(&config1).Error; err != nil {
+		t.Fatalf("load first override: %v", err)
 	}
-	ov2 := rulesConfig[id2].(map[string]interface{})
-	if ov2["sensitivity"] != "strict" {
-		t.Fatalf("rule %s sensitivity = %#v, want strict", id2, ov2["sensitivity"])
+	if config1.Enabled == nil || *config1.Enabled {
+		t.Fatalf("rule %s enabled override = %#v, want false", id1, config1.Enabled)
+	}
+	if err := repo.DB().Where("rule_id = ?", id2).First(&config2).Error; err != nil {
+		t.Fatalf("load second override: %v", err)
+	}
+	if config2.Sensitivity == nil || *config2.Sensitivity != "strict" {
+		t.Fatalf("rule %s sensitivity override = %#v, want strict", id2, config2.Sensitivity)
 	}
 }
 
 // TestBatchUpdateOWASPRulesSkipsUnknownIDs 验证未知规则 ID 被跳过而非计入 updated。
-func TestBatchUpdateOWASPRulesSkipsUnknownIDs(t *testing.T) {
+func TestBatchUpdateOWASPRulesRejectsUnknownIDsAtomically(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	ruleID := firstOWASPRuleID(t)
 	body, _ := json.Marshal(map[string]any{
@@ -299,23 +303,20 @@ func TestBatchUpdateOWASPRulesSkipsUnknownIDs(t *testing.T) {
 	})
 	ctx := invokeOWASPPost(t, BatchUpdateOWASPRules(repo, func() error { return nil }),
 		"/api/v1/owasp-rules/batch-update", "", body)
-	if ctx.Response.StatusCode() != 200 {
-		t.Fatalf("want 200, got %d", ctx.Response.StatusCode())
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("want 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
-	var resp struct {
-		Updated int `json:"updated"`
-		Total   int `json:"total"`
+	var count int64
+	if err := repo.DB().Model(&store.PolicyOWASPRuleConfig{}).Count(&count).Error; err != nil {
+		t.Fatalf("count configs: %v", err)
 	}
-	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Updated != 1 || resp.Total != 2 {
-		t.Fatalf("updated=%d total=%d, want 1/2", resp.Updated, resp.Total)
+	if count != 0 {
+		t.Fatalf("config count = %d, want 0 after atomic rejection", count)
 	}
 }
 
 // TestBatchUpdateOWASPRulesSkipsRedirectWithoutTarget 验证启用态 redirect 缺 target 时被跳过。
-func TestBatchUpdateOWASPRulesSkipsRedirectWithoutTarget(t *testing.T) {
+func TestBatchUpdateOWASPRulesRejectsRedirectWithoutTarget(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	ruleID := firstOWASPRuleID(t)
 	body, _ := json.Marshal(map[string]any{
@@ -325,17 +326,15 @@ func TestBatchUpdateOWASPRulesSkipsRedirectWithoutTarget(t *testing.T) {
 	})
 	ctx := invokeOWASPPost(t, BatchUpdateOWASPRules(repo, func() error { return nil }),
 		"/api/v1/owasp-rules/batch-update", "", body)
-	if ctx.Response.StatusCode() != 200 {
-		t.Fatalf("want 200, got %d", ctx.Response.StatusCode())
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("want 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
-	var resp struct {
-		Updated int `json:"updated"`
+	var count int64
+	if err := repo.DB().Model(&store.PolicyOWASPRuleConfig{}).Count(&count).Error; err != nil {
+		t.Fatalf("count configs: %v", err)
 	}
-	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Updated != 0 {
-		t.Fatalf("updated = %d, want 0 (redirect without target must be skipped)", resp.Updated)
+	if count != 0 {
+		t.Fatalf("config count = %d, want 0 after invalid redirect", count)
 	}
 }
 

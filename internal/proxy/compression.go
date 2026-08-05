@@ -89,6 +89,14 @@ func readUpstreamResponseBody(resp *http.Response) ([]byte, http.Header, error) 
 }
 
 func readUpstreamResponseBodyLimited(resp *http.Response, maxBodyBytes int64) ([]byte, http.Header, io.Reader, func() error, bool, bool, error) {
+	return readUpstreamResponseBodyLimitedInternal(resp, maxBodyBytes, true)
+}
+
+func readUpstreamResponseBodyLimitedForCapture(resp *http.Response, maxBodyBytes int64) ([]byte, http.Header, io.Reader, func() error, bool, bool, error) {
+	return readUpstreamResponseBodyLimitedInternal(resp, maxBodyBytes, false)
+}
+
+func readUpstreamResponseBodyLimitedInternal(resp *http.Response, maxBodyBytes int64, skipKnownOversize bool) ([]byte, http.Header, io.Reader, func() error, bool, bool, error) {
 	reader, closeFn, decoded, err := upstreamResponseReader(resp)
 	if err != nil {
 		return nil, nil, nil, nil, false, false, err
@@ -109,7 +117,7 @@ func readUpstreamResponseBodyLimited(resp *http.Response, maxBodyBytes int64) ([
 	if maxBodyBytes > int64(math.MaxInt) {
 		maxBodyBytes = int64(math.MaxInt)
 	}
-	if resp != nil && !decoded && resp.ContentLength > maxBodyBytes {
+	if skipKnownOversize && resp != nil && !decoded && resp.ContentLength > maxBodyBytes {
 		return nil, headers, reader, closeFn, decoded, true, nil
 	}
 	limited := io.LimitReader(reader, maxBodyBytes+1)
@@ -135,13 +143,20 @@ func readUpstreamResponseBodyLimited(resp *http.Response, maxBodyBytes int64) ([
 	return prefix, headers, remaining, closeFn, decoded, true, nil
 }
 
+func contentEncodingHeaderValue(header http.Header) string {
+	if header == nil {
+		return ""
+	}
+	return strings.Join(header.Values("Content-Encoding"), ", ")
+}
+
 func upstreamResponseReader(resp *http.Response) (io.Reader, func() error, bool, error) {
 	if resp == nil || resp.Body == nil {
 		return bytes.NewReader(nil), nil, false, nil
 	}
 
 	closeBody := func() error { return resp.Body.Close() }
-	encodings, supported := parseContentEncodings(resp.Header.Get("Content-Encoding"))
+	encodings, supported := parseContentEncodings(contentEncodingHeaderValue(resp.Header))
 	if len(encodings) == 0 {
 		return resp.Body, closeBody, false, nil
 	}

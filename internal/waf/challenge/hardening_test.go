@@ -1,6 +1,7 @@
 package challenge
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -81,6 +82,57 @@ func TestShieldSessionSequentialReplayRejected(t *testing.T) {
 	}
 	if ok, _ := mgr.VerifyChallenge(session.ID, "", counter, hash, "", "http/1.1"); ok {
 		t.Fatal("replayed shield PoW solution must be rejected")
+	}
+}
+
+/**
+ * TestShieldSessionTimeoutIsFrozen 验证会话创建后不受后续配置热重载影响，
+ * 并且缺少 timeout_secs 的旧 Redis JSON 会话仍按原有五分钟期限处理。
+ */
+func TestShieldSessionTimeoutIsFrozen(t *testing.T) {
+	captcha := NewCaptchaManager(nil, 0)
+	defer captcha.Close()
+	mgr := NewShieldManager(captcha, nil, 1)
+	defer mgr.Close()
+
+	cfg := DefaultShieldConfig()
+	cfg.Difficulty = 1
+	cfg.TimeoutSecs = 1
+	cfg.EnableEnvCheck = false
+	cfg.EnableDevToolsDetect = false
+	mgr.SetConfig(cfg)
+	session, err := mgr.GenerateChallenge("/protected", "http/1.1")
+	if err != nil {
+		t.Fatalf("GenerateChallenge(): %v", err)
+	}
+	if got := session.sessionTTL(); got != time.Second {
+		t.Fatalf("session TTL = %s, want 1s", got)
+	}
+
+	cfg.TimeoutSecs = 60
+	mgr.SetConfig(cfg)
+	if got := mgr.shieldPageConfig(session).TimeoutSecs; got != 1 {
+		t.Fatalf("shield page timeout = %d, want frozen value 1", got)
+	}
+
+	session.CreatedAt = time.Now().Add(-2 * time.Second)
+	counter, hash := findShieldPoWSolution(t, session.Nonce, session.Difficulty)
+	if ok, redirect := mgr.VerifyChallenge(session.ID, "", counter, hash, "", "http/1.1"); ok || redirect != "/protected" {
+		t.Fatalf("expired shield session = (%t, %q), want (false, %q)", ok, redirect, "/protected")
+	}
+
+	var legacy ShieldSession
+	if err := json.Unmarshal([]byte(`{"id":"legacy","created_at":"2026-08-05T00:00:00Z"}`), &legacy); err != nil {
+		t.Fatalf("decode legacy Redis session: %v", err)
+	}
+	if got := legacy.sessionTTL(); got != legacyShieldSessionTTL {
+		t.Fatalf("legacy session TTL = %s, want %s", got, legacyShieldSessionTTL)
+	}
+	if legacy.expiredAt(time.Date(2026, time.August, 5, 0, 4, 0, 0, time.UTC)) {
+		t.Fatal("legacy session expired before its five-minute fallback TTL")
+	}
+	if !legacy.expiredAt(time.Date(2026, time.August, 5, 0, 6, 0, 0, time.UTC)) {
+		t.Fatal("legacy session must expire after its five-minute fallback TTL")
 	}
 }
 

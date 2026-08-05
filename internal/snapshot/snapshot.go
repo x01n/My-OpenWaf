@@ -10,6 +10,7 @@ import (
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/dynamic"
 	"My-OpenWaf/internal/waf/luaplugin"
+	"My-OpenWaf/internal/waf/pageconfig"
 )
 
 // CompiledRule is a lightweight runtime rule (MVP ACL parser).
@@ -46,6 +47,7 @@ type SiteRuntime struct {
 	// Forwarding settings (now in Site model)
 	XFFMode              string
 	TrustedCIDR          string
+	ClientIPHeaderOrder  []string
 	PreserveOriginalHost bool
 
 	// Per-site maintenance
@@ -128,6 +130,9 @@ type Snapshot struct {
 	TLSDefaults     TLSDefaults
 
 	DefaultBlockHTML string
+	CaptchaPage      pageconfig.CaptchaPageConfig
+	ChallengePage    pageconfig.ChallengePageConfig
+	BlockPage        pageconfig.BlockPageConfig
 
 	SiteTLSCertBySNI map[string]tls.Certificate
 

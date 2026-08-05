@@ -1,14 +1,14 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { toast } from "sonner";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Badge } from "@/components/ui/badge"
+import { toast } from "sonner"
 import {
   IconLock,
   IconPlus,
@@ -16,57 +16,59 @@ import {
   IconUsers,
   IconKey,
   IconRoute,
-} from "@tabler/icons-react";
-import { useAccessConfig } from "@/hooks/use-api";
-import { accessApi } from "@/lib/api";
-import type { Site } from "@/lib/types";
+} from "@tabler/icons-react"
+import { useAccessConfig } from "@/hooks/use-api"
+import { accessApi } from "@/lib/api"
+import type { Site } from "@/lib/types"
 
 interface AccessControlTabProps {
-  site: Site;
+  site: Site
 }
 
 export function AccessControlTab({ site }: AccessControlTabProps) {
-  const { t } = useTranslation();
-  const { data: accessConfig, mutate: refreshConfig } = useAccessConfig(site.id);
+  const { t } = useTranslation()
+  const { data: accessConfig, mutate: refreshConfig } = useAccessConfig(site.id)
 
-  const [prevConfig, setPrevConfig] = useState(accessConfig);
-  const [accessEnabled, setAccessEnabled] = useState(accessConfig?.enabled ?? false);
-  const [sharedPassword, setSharedPassword] = useState("");
-  const [showPasswordInput, setShowPasswordInput] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [prevConfig, setPrevConfig] = useState(accessConfig)
+  const [accessEnabled, setAccessEnabled] = useState(
+    accessConfig?.enabled ?? false
+  )
+  const [sharedPassword, setSharedPassword] = useState("")
+  const [showPasswordInput, setShowPasswordInput] = useState(false)
+  const [saving, setSaving] = useState(false)
 
   if (accessConfig !== prevConfig) {
-    setPrevConfig(accessConfig);
-    if (accessConfig) setAccessEnabled(accessConfig.enabled);
+    setPrevConfig(accessConfig)
+    if (accessConfig) setAccessEnabled(accessConfig.enabled)
   }
 
   const handleToggleAccess = async (enabled: boolean) => {
-    setAccessEnabled(enabled);
+    setAccessEnabled(enabled)
     try {
-      await accessApi.saveConfig(site.id, { enabled });
-      await refreshConfig();
-      toast.success(t("common.saveSuccess"));
+      await accessApi.saveConfig(site.id, { enabled })
+      await refreshConfig()
+      toast.success(t("common.saveSuccess"))
     } catch {
-      setAccessEnabled(!enabled);
-      toast.error(t("common.operationFailed"));
+      setAccessEnabled(!enabled)
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   const handleSavePassword = async () => {
-    if (!sharedPassword.trim()) return;
-    setSaving(true);
+    if (!sharedPassword.trim()) return
+    setSaving(true)
     try {
-      await accessApi.saveConfig(site.id, { shared_password: sharedPassword });
-      await refreshConfig();
-      toast.success(t("common.saveSuccess"));
-      setSharedPassword("");
-      setShowPasswordInput(false);
+      await accessApi.saveConfig(site.id, { shared_password: sharedPassword })
+      await refreshConfig()
+      toast.success(t("common.saveSuccess"))
+      setSharedPassword("")
+      setShowPasswordInput(false)
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     } finally {
-      setSaving(false);
+      setSaving(false)
     }
-  };
+  }
 
   return (
     <div className="space-y-4">
@@ -81,10 +83,17 @@ export function AccessControlTab({ site }: AccessControlTabProps) {
         <CardContent>
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div className="space-y-0.5">
-              <Label className="text-sm font-medium">{t("sites.detail.enableAccessControl")}</Label>
-              <p className="text-xs text-muted-foreground">{t("sites.detail.accessControlDesc")}</p>
+              <Label className="text-sm font-medium">
+                {t("sites.detail.enableAccessControl")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.accessControlDesc")}
+              </p>
             </div>
-            <Switch checked={accessEnabled} onCheckedChange={handleToggleAccess} />
+            <Switch
+              checked={accessEnabled}
+              onCheckedChange={handleToggleAccess}
+            />
           </div>
         </CardContent>
       </Card>
@@ -121,7 +130,11 @@ export function AccessControlTab({ site }: AccessControlTabProps) {
                 placeholder={t("sites.detail.enterPassword")}
                 className="flex-1"
               />
-              <Button size="sm" onClick={handleSavePassword} disabled={saving || !sharedPassword.trim()}>
+              <Button
+                size="sm"
+                onClick={handleSavePassword}
+                disabled={saving || !sharedPassword.trim()}
+              >
                 <IconDeviceFloppy className="mr-1 h-3.5 w-3.5" />
                 {t("common.save")}
               </Button>
@@ -216,5 +229,5 @@ export function AccessControlTab({ site }: AccessControlTabProps) {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

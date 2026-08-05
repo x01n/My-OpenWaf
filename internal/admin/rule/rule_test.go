@@ -3,6 +3,8 @@ package rule
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -214,6 +216,12 @@ func TestTestRuleMatchesTLSCipherSuitesHeader(t *testing.T) {
 
 func newRuleRepoForHandlerTest(t *testing.T) *repository.RuleRepo {
 	t.Helper()
+	repo, _ := newRuleRepoAndDBForHandlerTest(t)
+	return repo
+}
+
+func newRuleRepoAndDBForHandlerTest(t *testing.T) (*repository.RuleRepo, *gorm.DB) {
+	t.Helper()
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -228,7 +236,7 @@ func newRuleRepoForHandlerTest(t *testing.T) *repository.RuleRepo {
 	}).Error; err != nil {
 		t.Fatalf("seed policy: %v", err)
 	}
-	return repository.NewRuleRepo(db)
+	return repository.NewRuleRepo(db), db
 }
 
 func invokePersistedRuleHandler(
@@ -536,34 +544,109 @@ func TestImportRulesSuccess(t *testing.T) {
 	}
 }
 
+func TestRuleWritesRejectMissingOrSoftDeletedPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		policyID   uint
+		softDelete bool
+	}{
+		{name: "missing", policyID: 999},
+		{name: "soft deleted", policyID: 2, softDelete: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, db := newRuleRepoAndDBForHandlerTest(t)
+			if tt.softDelete {
+				policy := store.Policy{ID: tt.policyID, Name: "deleted policy"}
+				if err := db.Create(&policy).Error; err != nil {
+					t.Fatalf("seed policy: %v", err)
+				}
+				if err := db.Delete(&policy).Error; err != nil {
+					t.Fatalf("soft delete policy: %v", err)
+				}
+			}
+
+			reloaded := 0
+			createPayload := []byte(fmt.Sprintf(`{"name":"orphan","policy_id":%d,"phase":"custom","pattern":"block_path:/orphan","action":"intercept","priority":1,"enabled":true}`, tt.policyID))
+			createCtx := invokePersistedRuleHandler(t, CreateRule(repo, func() error {
+				reloaded++
+				return nil
+			}), "/api/v1/rules", createPayload)
+			if createCtx.Response.StatusCode() != 400 {
+				t.Fatalf("create status %d: %s", createCtx.Response.StatusCode(), createCtx.Response.Body())
+			}
+
+			seed := store.Rule{Name: "existing", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "block_path:/existing", Action: store.ActionIntercept, Priority: 2, Enabled: true}
+			if err := repo.Create(&seed); err != nil {
+				t.Fatalf("seed rule: %v", err)
+			}
+			updateCtx := invokePersistedRuleHandler(t, UpdateRule(repo, func() error {
+				reloaded++
+				return nil
+			}), "/api/v1/rules/1/update", createPayload)
+			updateCtx.Params = param.Params{{Key: "id", Value: strconv.FormatUint(uint64(seed.ID), 10)}}
+			UpdateRule(repo, func() error {
+				reloaded++
+				return nil
+			})(context.Background(), updateCtx)
+			if updateCtx.Response.StatusCode() != 400 {
+				t.Fatalf("update status %d: %s", updateCtx.Response.StatusCode(), updateCtx.Response.Body())
+			}
+
+			importPayload := []byte(fmt.Sprintf(`{"rules":[{"name":"orphan","policy_id":%d,"phase":"custom","pattern":"block_path:/import","action":"intercept","priority":3,"enabled":true}]}`, tt.policyID))
+			importCtx := invokePersistedRuleHandler(t, ImportRules(repo, func() error {
+				reloaded++
+				return nil
+			}), "/api/v1/rules/import", importPayload)
+			if importCtx.Response.StatusCode() != 400 {
+				t.Fatalf("import status %d: %s", importCtx.Response.StatusCode(), importCtx.Response.Body())
+			}
+			if reloaded != 0 {
+				t.Fatalf("reload count = %d, want 0", reloaded)
+			}
+		})
+	}
+}
+
 func TestListSiteRulesNoPolicyReturnsEmpty(t *testing.T) {
-	_, ruleRepo := newSiteAndRuleReposForTest(t)
+	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.Site{}); err != nil {
-		t.Fatalf("migrate site: %v", err)
+	if err := db.AutoMigrate(&store.Site{}, &store.Policy{}, &store.Rule{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	defaultSlot := uint(1)
+	if err := db.Create(&store.Policy{Name: "default", DefaultSlot: &defaultSlot}).Error; err != nil {
+		t.Fatalf("seed default policy: %v", err)
 	}
 	if err := db.Create(&store.Site{Host: "nopolicy.test", Bind: ":8080", Network: "tcp", Enabled: true}).Error; err != nil {
 		t.Fatalf("seed site: %v", err)
 	}
-	siteRepoNP := repository.NewSiteRepo(db)
+	if err := db.Create(&store.Rule{Name: "default rule", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "block_path:/blocked", Action: store.ActionIntercept, Priority: 1, Enabled: true}).Error; err != nil {
+		t.Fatalf("seed rule: %v", err)
+	}
+	siteRepo := repository.NewSiteRepo(db)
+	ruleRepo := repository.NewRuleRepo(db)
 
-	ctx := invokeRuleGetHandler(t, ListSiteRules(siteRepoNP, ruleRepo), "/api/v1/sites/1/rules",
+	ctx := invokeRuleGetHandler(t, ListSiteRules(siteRepo, ruleRepo), "/api/v1/sites/1/rules",
 		param.Params{{Key: "id", Value: "1"}})
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("status %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 	var resp struct {
-		Items []store.Rule `json:"items"`
-		Total int          `json:"total"`
+		Items     []store.Rule `json:"items"`
+		Total     int          `json:"total"`
+		PolicyID  uint         `json:"policy_id"`
+		Inherited bool         `json:"inherited"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Total != 0 || len(resp.Items) != 0 {
-		t.Fatalf("expected empty list for site without policy, got %+v", resp)
+	if resp.Total != 1 || len(resp.Items) != 1 || resp.PolicyID != 1 || !resp.Inherited {
+		t.Fatalf("expected default policy rules, got %+v", resp)
 	}
 }
 

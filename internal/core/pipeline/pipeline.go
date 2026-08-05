@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"net"
 
 	"My-OpenWaf/internal/core/action"
@@ -9,6 +10,8 @@ import (
 
 // RequestCtx carries all decoded request data through the pipeline.
 type RequestCtx struct {
+	// Context 是请求生命周期上下文；为 nil 时保持测试和外部调用方的兼容行为。
+	Context   context.Context
 	RequestID string
 	Bind      string // Listener bind address (e.g., ":443")
 	ClientIP  net.IP
@@ -30,6 +33,7 @@ type RequestCtx struct {
 	AntiReplayTTL int
 
 	QueryParams map[string]string
+	QueryValues map[string][]string
 
 	// BodyTargets caches extracted body targets to avoid re-parsing in
 	// multiple phases (OWASP + CVE both need the same targets).
@@ -61,6 +65,14 @@ type RequestCtx struct {
 	derivedHeaderDone   bool
 	derivedCipherSuites string
 	derivedCipherDone   bool
+}
+
+// ContextOrBackground 返回请求上下文；对直接构造 RequestCtx 的调用方回退到 Background。
+func (ctx *RequestCtx) ContextOrBackground() context.Context {
+	if ctx == nil || ctx.Context == nil {
+		return context.Background()
+	}
+	return ctx.Context
 }
 
 // CachedMatcherHeaders returns the per-request matcher header cache when ready.

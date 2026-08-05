@@ -277,7 +277,7 @@ func TestPutProtectionSettingsAcceptsJSONBlobsAsObjectsAndStrings(t *testing.T) 
 	}
 
 	body := []byte(`{
-		"cc_rules":[{"action":"drop"}],
+		"cc_rules":[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/api"}],"window":60,"threshold":10,"duration":5}],
 		"owasp_modules":{"sqli":"high"},
 		"chain_steps":[{"type":"env","condition":"all"}],
 		"escalation_steps":[{"threshold":3,"action":"shield_challenge"}],
@@ -292,7 +292,7 @@ func TestPutProtectionSettingsAcceptsJSONBlobsAsObjectsAndStrings(t *testing.T) 
 
 	loaded := shared.LoadProtectionConfig(repo)
 	verbatim := map[string][2]string{
-		"cc_rules":           {loaded.CCRules, `[{"action":"drop"}]`},
+		"cc_rules":           {loaded.CCRules, `[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/api"}],"window":60,"threshold":10,"duration":5}]`},
 		"owasp_modules":      {loaded.OWASPModules, `{"sqli":"high"}`},
 		"chain_steps":        {loaded.ChainSteps, `[{"type":"env","condition":"all"}]`},
 		"escalation_steps":   {loaded.EscalationSteps, `[{"threshold":3,"action":"shield_challenge"}]`},

@@ -137,9 +137,12 @@ func buildConfiguredOutput(filePath string, alsoStdout bool) io.Writer {
 	}
 
 	// 创建日志目录
-	dir := filePath[:max(strings.LastIndex(filePath, "/"), strings.LastIndex(filePath, "\\"))]
-	if dir != "" {
-		os.MkdirAll(dir, 0755)
+	separator := max(strings.LastIndex(filePath, "/"), strings.LastIndex(filePath, "\\"))
+	if separator >= 0 {
+		dir := filePath[:separator]
+		if dir != "" {
+			_ = os.MkdirAll(dir, 0755)
+		}
 	}
 
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)

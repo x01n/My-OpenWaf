@@ -1,24 +1,24 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import Link from "next/link";
-import { useTranslation } from "react-i18next";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import * as React from "react"
+import Link from "next/link"
+import { useTranslation } from "react-i18next"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@/components/ui/tooltip"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
-import type { Site } from "@/lib/types";
+} from "@/components/ui/dropdown-menu"
+import { cn } from "@/lib/utils"
+import type { Site } from "@/lib/types"
 import {
   parseSiteListeners,
   parseUpstreamUrls,
@@ -26,7 +26,7 @@ import {
   resolveSiteMode,
   type SiteCapabilityKey,
   type SiteMode,
-} from "@/lib/site-display";
+} from "@/lib/site-display"
 import {
   IconActivity,
   IconArrowRight,
@@ -42,15 +42,15 @@ import {
   IconShield,
   IconShieldCheck,
   IconTrash,
-} from "@tabler/icons-react";
+} from "@tabler/icons-react"
 
 /**
  * 站点行/卡片共用的操作回调。
  */
 export interface SiteActionHandlers {
-  onEdit: (site: Site) => void;
-  onToggle: (site: Site) => void;
-  onDelete: (site: Site) => void;
+  onEdit: (site: Site) => void
+  onToggle: (site: Site) => void
+  onDelete: (site: Site) => void
 }
 
 /** 防护姿态 -> 徽章样式与图标 */
@@ -73,14 +73,14 @@ const MODE_STYLE: Record<
       "border-slate-500/30 bg-slate-500/12 text-slate-700 dark:border-slate-400/30 dark:bg-slate-400/15 dark:text-slate-300",
     icon: IconPlayerPause,
   },
-};
+}
 
 /** 防护姿态 -> i18n key */
 const MODE_LABEL: Record<SiteMode, string> = {
   protection: "sites.protectionMode",
   observe: "sites.observeMode",
   maintenance: "sites.maintenanceMode",
-};
+}
 
 /**
  * 防护姿态徽章。
@@ -90,22 +90,26 @@ export function SiteModeBadge({
   site,
   className,
 }: {
-  site: Site;
-  className?: string;
+  site: Site
+  className?: string
 }) {
-  const { t } = useTranslation();
-  const mode = resolveSiteMode(site);
-  const { className: toneClass, icon: Icon } = MODE_STYLE[mode];
+  const { t } = useTranslation()
+  const mode = resolveSiteMode(site)
+  const { className: toneClass, icon: Icon } = MODE_STYLE[mode]
 
   return (
     <Badge
       variant="outline"
-      className={cn("h-5 gap-1 px-1.5 text-[11px] font-medium", toneClass, className)}
+      className={cn(
+        "h-5 gap-1 px-1.5 text-[11px] font-medium",
+        toneClass,
+        className
+      )}
     >
       <Icon className="size-3" />
       {t(MODE_LABEL[mode])}
     </Badge>
-  );
+  )
 }
 
 /**
@@ -113,7 +117,7 @@ export function SiteModeBadge({
  * @param {{ enabled: boolean }} props 组件属性
  */
 export function SiteStatusDot({ enabled }: { enabled: boolean }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -136,7 +140,7 @@ export function SiteStatusDot({ enabled }: { enabled: boolean }) {
         {enabled ? t("common.running") : t("common.stopped")}
       </TooltipContent>
     </Tooltip>
-  );
+  )
 }
 
 /**
@@ -151,19 +155,19 @@ export function SiteListenerBadges({
   site,
   max = 4,
 }: {
-  site: Site;
-  max?: number;
+  site: Site
+  max?: number
 }) {
-  const { t } = useTranslation();
-  const listeners = React.useMemo(() => parseSiteListeners(site), [site]);
-  const isMulti = (site.managed_listener_count ?? 0) > 0;
+  const { t } = useTranslation()
+  const listeners = React.useMemo(() => parseSiteListeners(site), [site])
+  const isMulti = (site.managed_listener_count ?? 0) > 0
 
   if (listeners.length === 0) {
-    return <span className="text-xs text-muted-foreground">-</span>;
+    return <span className="text-xs text-muted-foreground">-</span>
   }
 
-  const shown = listeners.slice(0, max);
-  const rest = listeners.length - shown.length;
+  const shown = listeners.slice(0, max)
+  const rest = listeners.length - shown.length
 
   return (
     <div className="flex flex-wrap items-center gap-1">
@@ -209,7 +213,7 @@ export function SiteListenerBadges({
         </Tooltip>
       )}
     </div>
-  );
+  )
 }
 
 /**
@@ -220,17 +224,17 @@ export function SiteUpstream({
   site,
   className,
 }: {
-  site: Site;
-  className?: string;
+  site: Site
+  className?: string
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
   const upstreams = React.useMemo(
     () => parseUpstreamUrls(site.upstream_urls),
     [site.upstream_urls]
-  );
+  )
 
   if (upstreams.length === 0) {
-    return <span className="text-xs text-muted-foreground">-</span>;
+    return <span className="text-xs text-muted-foreground">-</span>
   }
 
   return (
@@ -251,7 +255,7 @@ export function SiteUpstream({
         </Badge>
       )}
     </div>
-  );
+  )
 }
 
 /** 能力标识 -> i18n key */
@@ -263,7 +267,7 @@ const CAPABILITY_LABEL: Record<SiteCapabilityKey, string> = {
   antiReplay: "sites.capability.antiReplay",
   dynamic: "sites.capability.dynamic",
   cc: "sites.capability.cc",
-};
+}
 
 /**
  * 已显式开启的防护能力徽章组。
@@ -277,22 +281,22 @@ export function SiteCapabilityBadges({
   site,
   max = 4,
 }: {
-  site: Site;
-  max?: number;
+  site: Site
+  max?: number
 }) {
-  const { t } = useTranslation();
-  const caps = React.useMemo(() => resolveSiteCapabilities(site), [site]);
+  const { t } = useTranslation()
+  const caps = React.useMemo(() => resolveSiteCapabilities(site), [site])
 
   if (caps.length === 0) {
     return (
       <span className="text-[11px] text-muted-foreground/70">
         {t("sites.capability.none")}
       </span>
-    );
+    )
   }
 
-  const shown = caps.slice(0, max);
-  const rest = caps.slice(max);
+  const shown = caps.slice(0, max)
+  const rest = caps.slice(max)
 
   return (
     <div className="flex flex-wrap items-center gap-1">
@@ -321,7 +325,7 @@ export function SiteCapabilityBadges({
         </Tooltip>
       )}
     </div>
-  );
+  )
 }
 
 /**
@@ -331,18 +335,38 @@ export function SiteCapabilityBadges({
  * （`app/(dashboard)/sites/detail/page.tsx`）。
  */
 export const QUICK_LINKS: Array<{
-  key: string;
-  tab: string;
-  icon: typeof IconRobot;
-  labelKey: string;
+  key: string
+  tab: string
+  icon: typeof IconRobot
+  labelKey: string
 }> = [
-  { key: "monitor", tab: "monitor", icon: IconActivity, labelKey: "sites.detail.monitor.tab" },
-  { key: "protection", tab: "protection", icon: IconShield, labelKey: "sites.attackProtection" },
+  {
+    key: "monitor",
+    tab: "monitor",
+    icon: IconActivity,
+    labelKey: "sites.detail.monitor.tab",
+  },
+  {
+    key: "protection",
+    tab: "protection",
+    icon: IconShield,
+    labelKey: "sites.attackProtection",
+  },
   { key: "bot", tab: "rules", icon: IconRobot, labelKey: "sites.detail.rules" },
   { key: "cc", tab: "cc", icon: IconGauge, labelKey: "sites.ccProtection" },
-  { key: "dynamic", tab: "dynamic", icon: IconBolt, labelKey: "sites.dynamicProtection" },
-  { key: "access", tab: "access", icon: IconLock, labelKey: "sites.accessControl" },
-];
+  {
+    key: "dynamic",
+    tab: "dynamic",
+    icon: IconBolt,
+    labelKey: "sites.dynamicProtection",
+  },
+  {
+    key: "access",
+    tab: "access",
+    icon: IconLock,
+    labelKey: "sites.accessControl",
+  },
+]
 
 /**
  * 快捷入口图标条：纯图标 + Tooltip，深链到详情页对应 Tab。
@@ -352,15 +376,15 @@ export function SiteQuickLinks({
   siteId,
   className,
 }: {
-  siteId: number;
-  className?: string;
+  siteId: number
+  className?: string
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
   return (
     <div className={cn("flex items-center gap-0.5", className)}>
       {QUICK_LINKS.map((item) => {
-        const Icon = item.icon;
-        const label = t(item.labelKey);
+        const Icon = item.icon
+        const label = t(item.labelKey)
         return (
           <Tooltip key={item.key}>
             <TooltipTrigger asChild>
@@ -380,10 +404,10 @@ export function SiteQuickLinks({
             </TooltipTrigger>
             <TooltipContent>{label}</TooltipContent>
           </Tooltip>
-        );
+        )
       })}
     </div>
-  );
+  )
 }
 
 /**
@@ -396,7 +420,7 @@ export function SiteActionsMenu({
   onToggle,
   onDelete,
 }: { site: Site } & SiteActionHandlers) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -440,5 +464,5 @@ export function SiteActionsMenu({
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-  );
+  )
 }

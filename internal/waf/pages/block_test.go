@@ -8,6 +8,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/pageconfig"
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
@@ -115,7 +116,7 @@ func TestBuildErrorFallbackHTML504(t *testing.T) {
 }
 
 func TestBuildChallengeHTMLContainsTokens(t *testing.T) {
-	html := buildChallengeHTML("req-chal", "ts-value", "tok-value", "", "")
+	html := buildChallengeHTML("req-chal", "ts-value", "tok-value", "", "", pageconfig.DefaultChallengePageConfig())
 	if !strings.Contains(html, "req-chal") {
 		t.Fatalf("challenge HTML missed reqID: %s", html)
 	}
@@ -127,8 +128,23 @@ func TestBuildChallengeHTMLContainsTokens(t *testing.T) {
 	}
 }
 
+func TestBuildChallengeHTMLEscapesHTMLAndJavaScriptValues(t *testing.T) {
+	payload := `</script><script>alert("challenge")</script>`
+	html := buildChallengeHTML(payload, payload, payload, "", "", pageconfig.DefaultChallengePageConfig())
+
+	if strings.Contains(html, `<script>alert("challenge")</script>`) {
+		t.Fatalf("challenge HTML reflected executable input: %s", html)
+	}
+	if !strings.Contains(html, `&lt;/script&gt;`) {
+		t.Fatalf("challenge HTML did not escape request ID text: %s", html)
+	}
+	if !strings.Contains(html, "\\u003c/script\\u003e") {
+		t.Fatalf("challenge HTML did not encode JavaScript string values: %s", html)
+	}
+}
+
 func TestBuildChallengeHTMLWithEnvJS(t *testing.T) {
-	html := buildChallengeHTML("req-env", "ts2", "tok2", "var env_injected=1;", "")
+	html := buildChallengeHTML("req-env", "ts2", "tok2", "var env_injected=1;", "", pageconfig.DefaultChallengePageConfig())
 	if !strings.Contains(html, "env_injected") {
 		t.Fatalf("challenge HTML missed injected envJS: %s", html)
 	}
@@ -136,7 +152,7 @@ func TestBuildChallengeHTMLWithEnvJS(t *testing.T) {
 
 // TestBuildChallengeHTMLInjectsPoWScript 验证 WASM PoW 脚本被注入挑战页。
 func TestBuildChallengeHTMLInjectsPoWScript(t *testing.T) {
-	html := buildChallengeHTML("req-pow", "ts3", "tok3", "", "var __pow_marker=1;")
+	html := buildChallengeHTML("req-pow", "ts3", "tok3", "", "var __pow_marker=1;", pageconfig.DefaultChallengePageConfig())
 	if !strings.Contains(html, "__pow_marker") {
 		t.Fatalf("challenge HTML missed injected PoW script: %s", html)
 	}
@@ -149,12 +165,57 @@ func TestBuildChallengeHTMLInjectsPoWScript(t *testing.T) {
 // 工作量证明必须只由 WASM 求解，页面内不得内联 JS 版 SHA-256 实现，
 // 否则攻击者可绕过 WASM 直接用脚本求解。
 func TestBuildChallengeHTMLHasNoJSPoWFallback(t *testing.T) {
-	html := buildChallengeHTML("req-nofb", "ts4", "tok4", "", "")
+	html := buildChallengeHTML("req-nofb", "ts4", "tok4", "", "", pageconfig.DefaultChallengePageConfig())
 	// 纯 JS SHA-256 实现的特征常量（K 表首项与初始哈希值）。
 	for _, marker := range []string{"0x428a2f98", "0x6a09e667", "0x71374491"} {
 		if strings.Contains(html, marker) {
 			t.Fatalf("challenge HTML must not embed a JS SHA-256 fallback (found %s)", marker)
 		}
+	}
+}
+
+func TestBuildChallengeHTMLUsesConfigAndRejectsUnsafeValues(t *testing.T) {
+	cfg := pageconfig.DefaultChallengePageConfig()
+	cfg.BrandName = `<img src=x onerror=alert(1)>`
+	cfg.Title = "Configured title"
+	cfg.CheckingText = "Configured checking"
+	cfg.WaitText = "Configured wait"
+	cfg.LogoURL = "data:text/html,<script>alert(1)</script>"
+	cfg.CustomCSS = `</style><script>alert(1)</script>.configured{color:red}`
+	html := buildChallengeHTML("request", "ts", "token", "", "", cfg)
+
+	for _, want := range []string{"Configured title", "Configured checking", "Configured wait", "&lt;img src=x onerror=alert(1)&gt;"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("challenge page missed configured value %q: %s", want, html)
+		}
+	}
+	for _, forbidden := range []string{`src="data:text/html`, `</style><script>alert(1)</script>`, `.configured{color:red}`} {
+		if strings.Contains(html, forbidden) {
+			t.Fatalf("challenge page included unsafe configured value %q: %s", forbidden, html)
+		}
+	}
+}
+
+func TestWriteBlockResponseUsesConfiguredBlockPage(t *testing.T) {
+	var c app.RequestContext
+	cfg := pageconfig.DefaultBlockPageConfig()
+	cfg.BrandName = "Configured brand"
+	cfg.BlockTitle = `<script>alert(1)</script>Blocked`
+	cfg.BlockMessage = "Configured message"
+	cfg.PrimaryColor = "javascript:alert(1)"
+	cfg.LogoURL = "javascript:alert(1)"
+	cfg.CustomCSS = `</style><script>alert(1)</script>.configured{color:red}`
+	sn := &snapshot.Snapshot{BlockPage: cfg}
+	WriteBlockResponse(&c, "configured-request", nil, sn, action.Result{Type: action.Intercept})
+	body := string(c.Response.Body())
+
+	for _, want := range []string{"Configured brand", "Configured message", "&lt;script&gt;alert(1)&lt;/script&gt;Blocked", "configured-request"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("configured block page missed %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, `</style><script>alert(1)</script>`) || strings.Contains(body, `.configured{color:red}`) || strings.Contains(body, `src="javascript:`) {
+		t.Fatalf("configured block page included executable config: %s", body)
 	}
 }
 
@@ -173,7 +234,7 @@ func TestWriteUpstreamErrorResponseSetsStatusCode(t *testing.T) {
 func TestWriteChallengeResponseSetsHeaders(t *testing.T) {
 	var c app.RequestContext
 	claims := challenge.ChallengeTokenClaims{ClientIP: "203.0.113.9", UserAgent: "ua", Host: "a.example", SiteID: 3}
-	WriteChallengeResponse(&c, "req-chal-hdr", nil, false, 403, claims)
+	WriteChallengeResponse(&c, "req-chal-hdr", nil, false, 403, pageconfig.DefaultChallengePageConfig(), claims)
 	if c.Response.StatusCode() != 403 {
 		t.Fatalf("status = %d, want 403", c.Response.StatusCode())
 	}
@@ -191,7 +252,7 @@ func TestWriteChallengeResponseSetsHeaders(t *testing.T) {
 func TestWriteChallengeResponseIssuesClientBoundToken(t *testing.T) {
 	var c app.RequestContext
 	owner := challenge.ChallengeTokenClaims{ClientIP: "203.0.113.9", UserAgent: "ua", Host: "a.example", SiteID: 3}
-	WriteChallengeResponse(&c, "req-chal-bound", nil, false, 403, owner)
+	WriteChallengeResponse(&c, "req-chal-bound", nil, false, 403, pageconfig.DefaultChallengePageConfig(), owner)
 
 	body := string(c.Response.Body())
 	ts := extractHiddenField(t, body, "__waf_challenge_ts")
@@ -248,5 +309,31 @@ func TestWriteBlockResponseWithCustomBlockHTML(t *testing.T) {
 	body := string(c.Response.Body())
 	if !strings.Contains(body, "req-custom") {
 		t.Fatalf("custom block page missed request ID: %s", body)
+	}
+}
+
+func TestWriteBlockResponseSiteBlockHTMLOverridesSnapshotDefault(t *testing.T) {
+	var c app.RequestContext
+	rt := &snapshot.SiteRuntime{BlockHTML: "<html>site block {{.RequestID}}</html>"}
+	sn := &snapshot.Snapshot{DefaultBlockHTML: "<html>default block {{.RequestID}}</html>"}
+	WriteBlockResponse(&c, "req-site", rt, sn, action.Result{Type: action.Intercept})
+	body := string(c.Response.Body())
+	if !strings.Contains(body, "site block req-site") {
+		t.Fatalf("site block page did not render: %s", body)
+	}
+	if strings.Contains(body, "default block") {
+		t.Fatalf("snapshot default block page should not override site block page: %s", body)
+	}
+}
+
+func TestWriteBlockResponseEmbeddedPageHidesRuleID(t *testing.T) {
+	var c app.RequestContext
+	WriteBlockResponse(&c, "req-rule-hidden", nil, nil, action.Result{Type: action.Intercept, RuleIDStr: "secret-rule-id"})
+	body := string(c.Response.Body())
+	if strings.Contains(body, "secret-rule-id") {
+		t.Fatalf("embedded block page leaked rule ID: %s", body)
+	}
+	if !strings.Contains(body, "req-rule-hidden") {
+		t.Fatalf("embedded block page missed request ID: %s", body)
 	}
 }

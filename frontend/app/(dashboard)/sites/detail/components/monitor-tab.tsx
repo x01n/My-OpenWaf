@@ -1,8 +1,8 @@
-"use client";
+"use client"
 
-import { useState, useMemo } from "react";
-import Link from "next/link";
-import { useTranslation } from "react-i18next";
+import { useState, useMemo } from "react"
+import Link from "next/link"
+import { useTranslation } from "react-i18next"
 import {
   AreaChart,
   Area,
@@ -15,66 +15,62 @@ import {
   Pie,
   Cell,
   Legend,
-} from "recharts";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { StatCard } from "@/components/stat-card";
-import { GeoAttackDistribution } from "@/components/geo-attack-distribution";
+} from "recharts"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { StatCard } from "@/components/stat-card"
+import { GeoAttackDistribution } from "@/components/geo-attack-distribution"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import {
-  IconChartBar,
-  IconBan,
-  IconEye,
-  IconPuzzle,
-} from "@tabler/icons-react";
-import { useSiteStats, useSiteTimeline } from "@/hooks/use-api";
-import { formatNumber } from "@/lib/utils";
+} from "@/components/ui/select"
+import { IconChartBar, IconBan, IconEye, IconPuzzle } from "@tabler/icons-react"
+import { useSiteStats, useSiteTimeline } from "@/hooks/use-api"
+import { categoryLabel } from "@/lib/attack-category"
+import { formatNumber } from "@/lib/utils"
 import {
   chartTooltipStyle,
   chartTooltipLabelStyle,
   CHART_DANGER,
   CHART_DANGER_FILL,
-} from "@/lib/chart-theme";
-import type { Site } from "@/lib/types";
+} from "@/lib/chart-theme"
+import type { Site } from "@/lib/types"
 
 /**
  * 站点级实时监控 Tab 属性。
  * @property site 当前站点对象，仅使用 id 触发接口
  */
 interface MonitorTabProps {
-  site: Site;
+  site: Site
 }
 
 /** 时间线桶结构（后端 GET /security-events/timeline 返回） */
 interface TimelineBucket {
-  bucket?: string;
-  time?: string;
-  count?: number;
+  bucket?: string
+  time?: string
+  count?: number
 }
 
 /** stats 接口返回结构（仅使用需要的字段） */
 interface SiteStatsResp {
-  total?: number;
-  hours?: number;
-  requests?: number;
-  intercepts?: number;
-  observes?: number;
-  challenges?: number;
-  categories?: Array<{ category: string; count: number }>;
-  top_ips?: Array<{ client_ip: string; count: number }>;
-  top_paths?: Array<{ path: string; count: number }>;
-  top_countries?: Array<{ country: string; count: number }>;
+  total?: number
+  hours?: number
+  requests?: number
+  intercepts?: number
+  observes?: number
+  challenges?: number
+  categories?: Array<{ category: string; count: number }>
+  top_ips?: Array<{ client_ip: string; count: number }>
+  top_paths?: Array<{ path: string; count: number }>
+  top_countries?: Array<{ country: string; count: number }>
 }
 
 interface SiteTimelineResp {
-  buckets?: TimelineBucket[];
-  hours?: number;
+  buckets?: TimelineBucket[]
+  hours?: number
 }
 
 /** 饼图配色，与 dashboard 保持一致 */
@@ -85,10 +81,10 @@ const PIE_COLORS = [
   "#ef4444",
   "#8b5cf6",
   "#ec4899",
-];
+]
 
 /** 30 秒自动刷新间隔（毫秒） */
-const REFRESH_INTERVAL_MS = 30_000;
+const REFRESH_INTERVAL_MS = 30_000
 
 /**
  * 站点级实时监控 Tab。
@@ -96,41 +92,41 @@ const REFRESH_INTERVAL_MS = 30_000;
  * 趋势、类别、Top IP/路径与国家分布。
  */
 export function MonitorTab({ site }: MonitorTabProps) {
-  const { t } = useTranslation();
-  const [timeRange, setTimeRange] = useState("24");
-  const hours = timeRange === "168" ? 168 : Number(timeRange);
+  const { t } = useTranslation()
+  const [timeRange, setTimeRange] = useState("24")
+  const hours = timeRange === "168" ? 168 : Number(timeRange)
 
   const { data: statsData } = useSiteStats(
     site.id,
     { hours },
     { refreshInterval: REFRESH_INTERVAL_MS }
-  ) as { data: SiteStatsResp | undefined };
+  ) as { data: SiteStatsResp | undefined }
   const { data: timelineData } = useSiteTimeline(
     site.id,
     { hours },
     { refreshInterval: REFRESH_INTERVAL_MS }
-  ) as { data: SiteTimelineResp | undefined };
+  ) as { data: SiteTimelineResp | undefined }
 
   /**
    * 时间线数据归一化：兼容 bucket / time 两种字段，仅取时分段。
    */
   const trendData = useMemo(() => {
-    const rows = timelineData?.buckets || [];
+    const rows = timelineData?.buckets || []
     return rows.map((b) => {
-      const raw = b.bucket || b.time || "";
-      const label = raw.length >= 16 ? raw.slice(11, 16) : raw;
-      return { time: label, count: Number(b.count ?? 0) };
-    });
-  }, [timelineData]);
+      const raw = b.bucket || b.time || ""
+      const label = raw.length >= 16 ? raw.slice(11, 16) : raw
+      return { time: label, count: Number(b.count ?? 0) }
+    })
+  }, [timelineData])
 
-  const categories = statsData?.categories || [];
-  const topIps = statsData?.top_ips || [];
-  const topPaths = statsData?.top_paths || [];
-  const topCountries = statsData?.top_countries || [];
+  const categories = statsData?.categories || []
+  const topIps = statsData?.top_ips || []
+  const topPaths = statsData?.top_paths || []
+  const topCountries = statsData?.top_countries || []
 
   const pieData = categories
     .filter((c) => c.count > 0)
-    .map((c) => ({ name: c.category, value: c.count }));
+    .map((c) => ({ name: categoryLabel(c.category), value: c.count }))
 
   return (
     <div className="space-y-4">
@@ -200,7 +196,10 @@ export function MonitorTab({ site }: MonitorTabProps) {
               {trendData.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={trendData}>
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      className="stroke-muted"
+                    />
                     <XAxis
                       dataKey="time"
                       fontSize={10}
@@ -256,7 +255,10 @@ export function MonitorTab({ site }: MonitorTabProps) {
                       dataKey="value"
                     >
                       {pieData.map((_, i) => (
-                        <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                        <Cell
+                          key={i}
+                          fill={PIE_COLORS[i % PIE_COLORS.length]}
+                        />
                       ))}
                     </Pie>
                     <Tooltip />
@@ -359,5 +361,5 @@ export function MonitorTab({ site }: MonitorTabProps) {
         <GeoAttackDistribution data={topCountries} hours={hours} />
       </div>
     </div>
-  );
+  )
 }

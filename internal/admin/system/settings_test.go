@@ -36,6 +36,7 @@ func protectedSettingKeysForTest() []string {
 		"bot_settings",
 		"drop_policy",
 		store.SettingKeyRedisConfig,
+		store.SettingKeyJWTSecret,
 		store.SettingKeyHPKP,
 		store.SettingKeyHPKPValue,
 		store.SettingKeyHPKPReportOnly,
@@ -148,5 +149,35 @@ func TestGenericSettingsRedactsRedisPasswordOnRead(t *testing.T) {
 	}
 	if !bytes.Contains(listCtx.Response.Body(), []byte("plain-value")) {
 		t.Fatalf("custom setting should remain readable in list response: %s", bytes.TrimSpace(listCtx.Response.Body()))
+	}
+}
+
+func TestGenericSettingsHidesJWTSecret(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := repo.Set(store.SettingKeyJWTSecret, "jwt-secret-value"); err != nil {
+		t.Fatalf("seed jwt secret: %v", err)
+	}
+	if err := repo.Set("custom_note", "plain-value"); err != nil {
+		t.Fatalf("seed custom setting: %v", err)
+	}
+
+	listCtx := invokeSettingsHandler(t, ListSettings(repo), "GET", "/api/v1/settings", nil, nil)
+	if listCtx.Response.StatusCode() != 200 {
+		t.Fatalf("list settings status %d: %s", listCtx.Response.StatusCode(), bytes.TrimSpace(listCtx.Response.Body()))
+	}
+	if bytes.Contains(listCtx.Response.Body(), []byte(store.SettingKeyJWTSecret)) || bytes.Contains(listCtx.Response.Body(), []byte("jwt-secret-value")) {
+		t.Fatalf("settings list leaked the jwt secret: %s", bytes.TrimSpace(listCtx.Response.Body()))
+	}
+	if !bytes.Contains(listCtx.Response.Body(), []byte("plain-value")) {
+		t.Fatalf("custom setting should remain readable in list response: %s", bytes.TrimSpace(listCtx.Response.Body()))
+	}
+
+	getCtx := invokeSettingsHandler(t, GetSetting(repo), "GET", "/api/v1/settings/"+store.SettingKeyJWTSecret,
+		param.Params{{Key: "key", Value: store.SettingKeyJWTSecret}}, nil)
+	if getCtx.Response.StatusCode() != 404 {
+		t.Fatalf("get jwt secret status %d: %s", getCtx.Response.StatusCode(), bytes.TrimSpace(getCtx.Response.Body()))
+	}
+	if bytes.Contains(getCtx.Response.Body(), []byte("jwt-secret-value")) {
+		t.Fatalf("setting detail leaked the jwt secret: %s", bytes.TrimSpace(getCtx.Response.Body()))
 	}
 }

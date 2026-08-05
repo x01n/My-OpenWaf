@@ -3,7 +3,6 @@ package luaplugin
 import (
 	"bufio"
 	"strings"
-	"sync"
 
 	lua "github.com/yuin/gopher-lua"
 	"github.com/yuin/gopher-lua/parse"
@@ -50,7 +49,7 @@ var bannedBaseFuncs = []string{
 	"print",
 	// getmetatable/setmetatable 是实测可用的沙箱穿透入口：
 	// getmetatable("").__index.upper = ... 能改写字符串方法，而字符串元表是
-	// 状态机级共享对象，池化复用下会污染同一状态机上后续执行的所有脚本
+	// 状态机内的共享对象；若状态机被错误复用，会污染后续执行的所有脚本
 	// （已由 TestScriptCannotEscapeViaMetatable 覆盖）。
 	// rawset/rawget 绕过元方法直接操作表，同样可用于篡改共享结构。
 	// 策略脚本只需读上下文、做字符串与数值判断，无需这些能力。
@@ -61,38 +60,28 @@ var bannedBaseFuncs = []string{
 	"module",
 }
 
-// vmPool 复用 Lua 状态机。
+// vmPool 管理一次执行一个的 Lua 状态机。
 //
-// 创建状态机需注册标准库并分配栈，实测约几十微秒；数据面每请求都新建会直接
-// 压垮吞吐。池化后单次调用只需重置栈顶与清理全局变量。
-type vmPool struct {
-	pool sync.Pool
-}
+// 标准库和 _G 都是可变对象，无法在不遗漏嵌套表、函数或元表的前提下可靠复原。
+// 因此状态机绝不跨脚本或请求复用，执行结束立即关闭；已编译的函数原型仍由
+// compileProto 共享，避免重复解析和编译脚本源码。
+type vmPool struct{}
 
 func newVMPool() *vmPool {
-	p := &vmPool{}
-	p.pool.New = func() any { return newSandboxedState() }
-	return p
+	return &vmPool{}
 }
 
-// get 取出一个已沙箱化的状态机。
+// get 创建一个已沙箱化的全新状态机。
 func (p *vmPool) get() *lua.LState {
-	L, _ := p.pool.Get().(*lua.LState)
-	if L == nil {
-		L = newSandboxedState()
-	}
-	return L
+	return newSandboxedState()
 }
 
-// put 归还状态机。
-//
-// 已关闭的状态机不再复用。归还前不清理全局表——脚本间的全局污染由
-// 每次执行前的 resetGlobals 处理，放在取用侧更不易漏。
+// put 清空栈并关闭执行完毕的状态机，丢弃所有脚本可能改写的库表和全局状态。
 func (p *vmPool) put(L *lua.LState) {
-	if L == nil || L.IsClosed() {
-		return
+	if L != nil && !L.IsClosed() {
+		L.SetTop(0)
+		L.Close()
 	}
-	p.pool.Put(L)
 }
 
 // newSandboxedState 创建一个仅注册白名单库、且移除危险 base 函数的状态机。
@@ -117,45 +106,11 @@ func newSandboxedState() *lua.LState {
 	for _, name := range bannedBaseFuncs {
 		L.SetGlobal(name, lua.LNil)
 	}
+	// gopher-lua 的 math.randomseed 使用进程级 math/rand 状态，不能允许脚本
+	// 通过它影响其他 VM 或请求的随机序列。
+	if mathLib, ok := L.GetGlobal(lua.MathLibName).(*lua.LTable); ok {
+		mathLib.RawSetString("randomseed", lua.LNil)
+	}
 
 	return L
-}
-
-// scriptGlobalWhitelist 是执行前后允许存在的全局名。
-//
-// 脚本可能定义 handle 之外的辅助全局；为避免同一状态机上前后两次执行相互
-// 污染（尤其是恶意脚本借全局变量在请求间传递状态），每次执行前清掉不在
-// 白名单里的全局名。
-// 注意：此处不含 bannedBaseFuncs 里的任何名字（getmetatable/rawset/load 等），
-// 它们已被置为 nil；若误列入白名单，resetGlobals 就不会清掉脚本重新定义的同名
-// 全局，等于把穿透入口还给脚本。
-var scriptGlobalWhitelist = map[string]bool{
-	"_G": true, "_VERSION": true,
-	"assert": true, "error": true, "ipairs": true, "next": true, "pairs": true,
-	"pcall": true, "xpcall": true, "select": true,
-	"tonumber": true, "tostring": true, "type": true, "unpack": true,
-	"table": true, "string": true, "math": true,
-}
-
-// resetGlobals 清除脚本此前留下的全局变量。
-func resetGlobals(L *lua.LState) {
-	globals := L.Get(lua.GlobalsIndex)
-	tbl, ok := globals.(*lua.LTable)
-	if !ok {
-		return
-	}
-	var stale []lua.LValue
-	tbl.ForEach(func(k, _ lua.LValue) {
-		name, isStr := k.(lua.LString)
-		if !isStr {
-			stale = append(stale, k)
-			return
-		}
-		if !scriptGlobalWhitelist[string(name)] {
-			stale = append(stale, k)
-		}
-	})
-	for _, k := range stale {
-		tbl.RawSet(k, lua.LNil)
-	}
 }

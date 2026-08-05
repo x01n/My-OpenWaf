@@ -133,14 +133,29 @@ func UpdateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 			c.JSON(400, map[string]string{"error": "invalid listener id"})
 			return
 		}
-		if _, err := siteRepo.Get(siteID); err != nil {
+		site, err := siteRepo.Get(siteID)
+		if err != nil {
 			c.JSON(404, map[string]string{"error": "site not found"})
 			return
 		}
-		existing, err := repo.Get(listenerID)
-		if err != nil || existing.SiteID != siteID {
-			c.JSON(404, map[string]string{"error": "listener not found"})
-			return
+
+		var existing *store.SiteListener
+		if listenerID == 0 {
+			existing = &store.SiteListener{
+				SiteID:     site.ID,
+				Bind:       site.Bind,
+				Network:    site.Network,
+				TLSEnabled: site.TLSEnabled,
+				CertID:     site.CertID,
+				Enabled:    site.Enabled,
+				Note:       "migrated from legacy bind",
+			}
+		} else {
+			existing, err = repo.Get(listenerID)
+			if err != nil || existing.SiteID != siteID {
+				c.JSON(404, map[string]string{"error": "listener not found"})
+				return
+			}
 		}
 		if err := c.BindJSON(existing); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -155,11 +170,25 @@ func UpdateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if existing.Bind == "" {
+			c.JSON(400, map[string]string{"error": "bind is required"})
+			return
+		}
 		if err := shared.ValidateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := repo.Update(existing); err != nil {
+		if listenerID == 0 {
+			created, err := repo.CreateLegacyReplacement(existing)
+			if err != nil {
+				c.JSON(500, map[string]string{"error": err.Error()})
+				return
+			}
+			if !created {
+				c.JSON(404, map[string]string{"error": "listener not found"})
+				return
+			}
+		} else if err := repo.Update(existing); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -191,6 +220,14 @@ func DeleteSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 		listenerID, err := utils.ParseUint(c.Param("lid"))
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid listener id"})
+			return
+		}
+		if _, err := siteRepo.Get(siteID); err != nil {
+			c.JSON(404, map[string]string{"error": "site not found"})
+			return
+		}
+		if listenerID == 0 {
+			c.JSON(400, map[string]string{"error": "legacy listener cannot be deleted"})
 			return
 		}
 		existing, err := repo.Get(listenerID)

@@ -7,13 +7,15 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/pageconfig"
+	wafpages "My-OpenWaf/internal/waf/pages"
 )
 
 const (
-	settingKeyCaptchaPage   = "page_template_captcha"
-	settingKeyChallengePage = "page_template_challenge"
-	settingKeyBlockPage     = "page_template_block"
+	settingKeyCaptchaPage   = pageconfig.SettingKeyCaptchaPage
+	settingKeyChallengePage = pageconfig.SettingKeyChallengePage
+	settingKeyBlockPage     = pageconfig.SettingKeyBlockPage
 )
 
 // GetPageTemplates returns all page template configurations.
@@ -140,66 +142,78 @@ func ResetPageTemplate(repo *repository.SystemSettingsRepo, reload func() error)
 func PreviewPageTemplate(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		pageType := c.Param("type")
+		var html []byte
 		switch pageType {
 		case "captcha":
-			cfg := loadCaptchaPageConfig(repo)
-			c.JSON(200, map[string]any{"config": cfg, "preview_note": "captcha preview requires live captcha generation"})
+			html = challenge.RenderCaptchaPreview(loadCaptchaPageConfig(repo))
 		case "challenge":
-			cfg := loadChallengePageConfig(repo)
-			c.JSON(200, map[string]any{"config": cfg, "preview_note": "challenge preview requires token generation"})
+			html = wafpages.RenderChallengePreview(loadChallengePageConfig(repo))
 		case "block":
-			cfg := loadBlockPageConfig(repo)
-			c.JSON(200, map[string]any{"config": cfg, "preview_note": "block page preview"})
+			html = wafpages.RenderBlockPreview(loadBlockPageConfig(repo))
 		default:
 			c.JSON(400, map[string]string{"error": "invalid page type"})
+			return
 		}
+		c.Data(200, "text/html; charset=utf-8", html)
+	}
+}
+
+// PreviewPageTemplateDraft renders a preview using the submitted draft config without persisting it.
+func PreviewPageTemplateDraft(repo *repository.SystemSettingsRepo) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		pageType := c.Param("type")
+		body := c.Request.Body()
+		var html []byte
+		switch pageType {
+		case "captcha":
+			var cfg pageconfig.CaptchaPageConfig
+			if err := json.Unmarshal(body, &cfg); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				return
+			}
+			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
+			html = challenge.RenderCaptchaPreview(cfg)
+		case "challenge":
+			var cfg pageconfig.ChallengePageConfig
+			if err := json.Unmarshal(body, &cfg); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				return
+			}
+			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
+			html = wafpages.RenderChallengePreview(cfg)
+		case "block":
+			var cfg pageconfig.BlockPageConfig
+			if err := json.Unmarshal(body, &cfg); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				return
+			}
+			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
+			html = wafpages.RenderBlockPreview(cfg)
+		default:
+			c.JSON(400, map[string]string{"error": "invalid page type"})
+			return
+		}
+		c.Data(200, "text/html; charset=utf-8", html)
 	}
 }
 
 func loadCaptchaPageConfig(repo *repository.SystemSettingsRepo) pageconfig.CaptchaPageConfig {
-	cfg := pageconfig.DefaultCaptchaPageConfig()
-	val, err := repo.Get(settingKeyCaptchaPage)
-	if err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &cfg)
-	}
-	return cfg
+	val, _ := repo.Get(settingKeyCaptchaPage)
+	return pageconfig.ParseCaptchaPageConfig(val)
 }
 
 func loadChallengePageConfig(repo *repository.SystemSettingsRepo) pageconfig.ChallengePageConfig {
-	cfg := pageconfig.DefaultChallengePageConfig()
-	val, err := repo.Get(settingKeyChallengePage)
-	if err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &cfg)
-	}
-	return cfg
+	val, _ := repo.Get(settingKeyChallengePage)
+	return pageconfig.ParseChallengePageConfig(val)
 }
 
 func loadBlockPageConfig(repo *repository.SystemSettingsRepo) pageconfig.BlockPageConfig {
-	cfg := pageconfig.DefaultBlockPageConfig()
-	val, err := repo.Get(settingKeyBlockPage)
-	if err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &cfg)
-	}
-	return cfg
+	val, _ := repo.Get(settingKeyBlockPage)
+	return pageconfig.ParseBlockPageConfig(val)
 }
 
 func sanitizePageCSS(css string) string {
-	if css == "" {
-		return ""
-	}
-	dangerous := []string{"expression(", "javascript:", "@import", "behavior:", "binding:"}
-	lower := css
-	for _, pattern := range dangerous {
-		for {
-			idx := indexCaseInsensitive(lower, pattern)
-			if idx == -1 {
-				break
-			}
-			css = css[:idx] + css[idx+len(pattern):]
-			lower = css
-		}
-	}
-	return css
+	return pageconfig.SanitizeCSS(css)
 }
 
 func indexCaseInsensitive(s, substr string) int {

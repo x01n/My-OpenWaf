@@ -34,6 +34,7 @@ func AcquireCtx() *RequestCtx {
 
 // ReleaseCtx returns a RequestCtx to the pool after clearing its fields.
 func ReleaseCtx(ctx *RequestCtx) {
+	ctx.Context = nil
 	ctx.RequestID = ""
 	ctx.Bind = ""
 	ctx.ClientIP = nil
@@ -49,6 +50,7 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.TLS = bot.TLSClientFingerprint{}
 	ctx.AntiReplayTTL = 0
 	ctx.QueryParams = nil
+	ctx.QueryValues = nil
 	ctx.BodyTargets = nil
 	ctx.BodyTargetsDone = false
 	ctx.ClearMatcherHeadersCache()

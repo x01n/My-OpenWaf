@@ -640,8 +640,32 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 
 	var req cve.CVERequest
 	cve.BuildCVERequestInto(&req, ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType)
-	best, ok := p.detector.DetectFirst(&req, categorySensitivity)
-	if !ok {
+	matches := p.detector.Detect(&req, categorySensitivity)
+	if len(matches) == 0 {
+		return action.Pass(), false
+	}
+	var best cve.CVEMatch
+	overrides := p.ruleOverrides
+	if !p.cachedConfig {
+		overrides = cve.ParseCVERuleOverrides(p.cfg.CVERulesConfig)
+	}
+	found := false
+	for _, match := range matches {
+		disabled := false
+		for _, key := range []string{match.Pattern, "cve:" + match.Pattern, match.CVEID, "cve:" + match.CVEID} {
+			if ov, ok := overrides[key]; ok {
+				disabled = ov.Enabled != nil && !*ov.Enabled
+				break
+			}
+		}
+		if disabled {
+			continue
+		}
+		best = match
+		found = true
+		break
+	}
+	if !found {
 		return action.Pass(), false
 	}
 
@@ -658,12 +682,8 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		act = normalizeConfiguredAction(best.Action)
 		explicitAction = true
 	}
-	overrides := p.ruleOverrides
-	if !p.cachedConfig {
-		overrides = cve.ParseCVERuleOverrides(p.cfg.CVERulesConfig)
-	}
 	if len(overrides) > 0 {
-		for _, key := range []string{best.CVEID, "cve:" + best.CVEID} {
+		for _, key := range []string{best.Pattern, "cve:" + best.Pattern, best.CVEID, "cve:" + best.CVEID} {
 			if ov, ok := overrides[key]; ok {
 				if ov.Action != "" {
 					act = normalizeConfiguredAction(ov.Action)

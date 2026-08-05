@@ -1,73 +1,98 @@
-"use client";
+"use client"
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { toast } from "sonner";
-import { IconUser, IconRefresh, IconShield, IconLogout } from "@tabler/icons-react";
-import { useProtectionSettings, useProtectionSettingsUpdate, useAdminSessions, useForceLogout } from "@/hooks/use-api";
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { toast } from "sonner"
+import {
+  IconUser,
+  IconRefresh,
+  IconShield,
+  IconLogout,
+} from "@tabler/icons-react"
+import {
+  useProtectionSettings,
+  useProtectionSettingsUpdate,
+  useAdminSessions,
+  useForceLogout,
+} from "@/hooks/use-api"
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
 
 export default function AuthConfigPage() {
-  const { t } = useTranslation();
-  const { data: settings, isLoading, error } = useProtectionSettings();
-  const updateSettings = useProtectionSettingsUpdate();
+  const { t } = useTranslation()
+  const { data: settings, isLoading, error } = useProtectionSettings()
+  const updateSettings = useProtectionSettingsUpdate()
 
-  const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
-  const [username, setUsername] = useState<string | null>(null);
-  const [password, setPassword] = useState("");
-  const currentUsername = username ?? settings?.basic_auth_username ?? "";
+  const [localSettings, setLocalSettings] = useState<Record<string, unknown>>(
+    {}
+  )
+  const [username, setUsername] = useState<string | null>(null)
+  const [password, setPassword] = useState("")
+  const currentUsername = username ?? settings?.basic_auth_username ?? ""
 
-  const getValue = (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-    return localSettings[key] !== undefined ? localSettings[key] : (settings?.[key] ?? defaultValue);
-  };
+  const getValue = (key: string, defaultValue: unknown = false) => {
+    return localSettings[key] !== undefined
+      ? localSettings[key]
+      : (settings?.[key] ?? defaultValue)
+  }
 
   const handleToggle = (key: string) => {
-    setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }));
-  };
+    setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }))
+  }
 
   const handleSave = async () => {
     try {
-      const payload: Record<string, any> = { ...settings, ...localSettings }; // eslint-disable-line @typescript-eslint/no-explicit-any
-      if (currentUsername) payload.basic_auth_username = currentUsername;
-      if (password) payload.basic_auth_password = password;
-      await updateSettings.execute(payload);
-      toast.success(t("authConfig.saveSuccess"));
-      setPassword("");
+      const payload: Record<string, unknown> = { ...settings, ...localSettings }
+      if (currentUsername) payload.basic_auth_username = currentUsername
+      if (password) payload.basic_auth_password = password
+      await updateSettings.execute(payload)
+      toast.success(t("authConfig.saveSuccess"))
+      setPassword("")
     } catch {
-      toast.error(t("authConfig.saveFailed"));
+      toast.error(t("authConfig.saveFailed"))
     }
-  };
+  }
 
   if (isLoading) {
     return (
       <div className="space-y-4">
         <div>
           <Skeleton className="h-8 w-48" />
-          <Skeleton className="h-4 w-64 mt-1" />
+          <Skeleton className="mt-1 h-4 w-64" />
         </div>
         <Skeleton className="h-64 w-full" />
       </div>
-    );
+    )
   }
 
   if (error || !settings) {
     return (
       <div className="space-y-4">
-        <PageHeader title={t("authConfig.title")} description={t("authConfig.description")} />
+        <PageHeader
+          title={t("authConfig.title")}
+          description={t("authConfig.description")}
+        />
         <Alert variant="destructive">
           <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
-          <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+          <AlertDescription>
+            {(error as Error)?.message || t("error.unexpectedError")}
+          </AlertDescription>
         </Alert>
       </div>
-    );
+    )
   }
 
   return (
@@ -98,8 +123,12 @@ export default function AuthConfigPage() {
               id="basic_auth"
             />
             <div>
-              <Label htmlFor="basic_auth" className="cursor-pointer">{t("authConfig.enableBasicAuth")}</Label>
-              <p className="text-xs text-muted-foreground">{t("authConfig.basicAuthDesc")}</p>
+              <Label htmlFor="basic_auth" className="cursor-pointer">
+                {t("authConfig.enableBasicAuth")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t("authConfig.basicAuthDesc")}
+              </p>
             </div>
           </div>
 
@@ -142,50 +171,56 @@ export default function AuthConfigPage() {
               <SelectContent>
                 <SelectItem value="300">{t("authConfig.minutes5")}</SelectItem>
                 <SelectItem value="900">{t("authConfig.minutes15")}</SelectItem>
-                <SelectItem value="1800">{t("authConfig.minutes30")}</SelectItem>
+                <SelectItem value="1800">
+                  {t("authConfig.minutes30")}
+                </SelectItem>
                 <SelectItem value="3600">{t("authConfig.hour1")}</SelectItem>
                 <SelectItem value="7200">{t("authConfig.hours2")}</SelectItem>
                 <SelectItem value="86400">{t("authConfig.hours24")}</SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-xs text-muted-foreground">{t("authConfig.sessionTimeoutDesc")}</p>
+            <p className="text-xs text-muted-foreground">
+              {t("authConfig.sessionTimeoutDesc")}
+            </p>
           </div>
         </CardContent>
       </Card>
 
       <ActiveSessionsCard />
     </div>
-  );
+  )
 }
 
 function ActiveSessionsCard() {
-  const { t } = useTranslation();
-  const { data, isLoading, error } = useAdminSessions();
-  const forceLogout = useForceLogout();
+  const { t } = useTranslation()
+  const { data, isLoading, error } = useAdminSessions()
+  const forceLogout = useForceLogout()
 
   const handleForceLogout = async (sessionId: number) => {
     try {
-      await forceLogout.execute(sessionId);
-      toast.success(t("authConfig.forceLogoutSuccess"));
+      await forceLogout.execute(sessionId)
+      toast.success(t("authConfig.forceLogoutSuccess"))
     } catch {
-      toast.error(t("authConfig.forceLogoutFailed"));
+      toast.error(t("authConfig.forceLogoutFailed"))
     }
-  };
+  }
 
   if (isLoading) {
-    return <Skeleton className="h-48 w-full" />;
+    return <Skeleton className="h-48 w-full" />
   }
 
   if (error) {
     return (
       <Alert variant="destructive">
         <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
-        <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+        <AlertDescription>
+          {(error as Error)?.message || t("error.unexpectedError")}
+        </AlertDescription>
       </Alert>
-    );
+    )
   }
 
-  const sessions = data?.items ?? [];
+  const sessions = data?.items ?? []
 
   return (
     <Card>
@@ -197,7 +232,9 @@ function ActiveSessionsCard() {
       </CardHeader>
       <CardContent>
         {sessions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t("authConfig.noActiveSessions")}</p>
+          <p className="text-sm text-muted-foreground">
+            {t("authConfig.noActiveSessions")}
+          </p>
         ) : (
           <div className="space-y-3">
             {sessions.map((session) => (
@@ -207,15 +244,28 @@ function ActiveSessionsCard() {
               >
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">{session.username}</span>
-                    <span className="text-xs text-muted-foreground">{session.ip}</span>
+                    <span className="text-sm font-medium">
+                      {session.username}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {session.ip}
+                    </span>
                   </div>
-                  <p className="text-xs text-muted-foreground truncate max-w-md" title={session.user_agent}>
+                  <p
+                    className="max-w-md truncate text-xs text-muted-foreground"
+                    title={session.user_agent}
+                  >
                     {session.user_agent}
                   </p>
                   <div className="flex gap-4 text-xs text-muted-foreground">
-                    <span>{t("authConfig.loginAt")}: {new Date(session.login_at).toLocaleString()}</span>
-                    <span>{t("authConfig.lastActive")}: {new Date(session.last_active_at).toLocaleString()}</span>
+                    <span>
+                      {t("authConfig.loginAt")}:{" "}
+                      {new Date(session.login_at).toLocaleString()}
+                    </span>
+                    <span>
+                      {t("authConfig.lastActive")}:{" "}
+                      {new Date(session.last_active_at).toLocaleString()}
+                    </span>
                   </div>
                 </div>
                 <Button
@@ -233,5 +283,5 @@ function ActiveSessionsCard() {
         )}
       </CardContent>
     </Card>
-  );
+  )
 }

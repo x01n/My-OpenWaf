@@ -248,26 +248,27 @@ func (p *GoCaptchaProvider) GenerateRotate() (masterB64, thumbB64 string, data *
 // ── CaptchaManager 集成方法 ──
 
 // generateClick 使用 go-captcha 生成点击验证码。
-func (cm *CaptchaManager) generateClick(envKey []byte) (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateClick(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath(envKey)
+		return cm.generateMath(envKey, binding)
 	}
 
 	masterB64, thumbB64, data, err := cm.goCaptcha.GenerateClick()
 	if err != nil {
-		return cm.generateMath(envKey)
+		return cm.generateMath(envKey, binding)
 	}
 
 	// 序列化答案坐标
 	answerJSON, _ := json.Marshal(data)
 	sessionID := generateSessionID()
 	session := &CaptchaSession{
-		ID:        sessionID,
-		Type:      CaptchaTypeClick,
-		Answer:    string(answerJSON),
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(cm.timeoutValue()),
-		EnvKey:    envKey,
+		ChallengeSessionBinding: binding,
+		ID:                      sessionID,
+		Type:                    CaptchaTypeClick,
+		Answer:                  string(answerJSON),
+		CreatedAt:               time.Now(),
+		ExpiresAt:               time.Now().Add(cm.timeoutValue()),
+		EnvKey:                  envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -286,25 +287,26 @@ func (cm *CaptchaManager) generateClick(envKey []byte) (*CaptchaChallenge, error
 }
 
 // generateSlide 使用 go-captcha 生成滑动验证码。
-func (cm *CaptchaManager) generateSlide(envKey []byte) (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateSlide(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath(envKey)
+		return cm.generateMath(envKey, binding)
 	}
 
 	masterB64, tileB64, data, err := cm.goCaptcha.GenerateSlide()
 	if err != nil {
-		return cm.generateMath(envKey)
+		return cm.generateMath(envKey, binding)
 	}
 
 	answerJSON, _ := json.Marshal(data)
 	sessionID := generateSessionID()
 	session := &CaptchaSession{
-		ID:        sessionID,
-		Type:      CaptchaTypeSlide,
-		Answer:    string(answerJSON),
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(cm.timeoutValue()),
-		EnvKey:    envKey,
+		ChallengeSessionBinding: binding,
+		ID:                      sessionID,
+		Type:                    CaptchaTypeSlide,
+		Answer:                  string(answerJSON),
+		CreatedAt:               time.Now(),
+		ExpiresAt:               time.Now().Add(cm.timeoutValue()),
+		EnvKey:                  envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -323,25 +325,26 @@ func (cm *CaptchaManager) generateSlide(envKey []byte) (*CaptchaChallenge, error
 }
 
 // generateRotate 使用 go-captcha 生成旋转验证码。
-func (cm *CaptchaManager) generateRotate(envKey []byte) (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateRotate(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath(envKey)
+		return cm.generateMath(envKey, binding)
 	}
 
 	masterB64, thumbB64, data, err := cm.goCaptcha.GenerateRotate()
 	if err != nil {
-		return cm.generateMath(envKey)
+		return cm.generateMath(envKey, binding)
 	}
 
 	answerJSON, _ := json.Marshal(data)
 	sessionID := generateSessionID()
 	session := &CaptchaSession{
-		ID:        sessionID,
-		Type:      CaptchaTypeRotate,
-		Answer:    string(answerJSON),
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(cm.timeoutValue()),
-		EnvKey:    envKey,
+		ChallengeSessionBinding: binding,
+		ID:                      sessionID,
+		Type:                    CaptchaTypeRotate,
+		Answer:                  string(answerJSON),
+		CreatedAt:               time.Now(),
+		ExpiresAt:               time.Now().Add(cm.timeoutValue()),
+		EnvKey:                  envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -361,7 +364,12 @@ func (cm *CaptchaManager) generateRotate(envKey []byte) (*CaptchaChallenge, erro
 
 // VerifyAdvanced 验证高级验证码答案（点击/滑动/旋转），支持容差。
 func (cm *CaptchaManager) VerifyAdvanced(sessionID, answer string) bool {
-	ok, _ := cm.VerifyAdvancedSession(sessionID, answer)
+	return cm.VerifyAdvancedWithBinding(sessionID, answer, ChallengeSessionBinding{})
+}
+
+// VerifyAdvancedWithBinding verifies a CAPTCHA response for the matched site.
+func (cm *CaptchaManager) VerifyAdvancedWithBinding(sessionID, answer string, binding ChallengeSessionBinding) bool {
+	ok, _ := cm.VerifyAdvancedSessionWithBinding(sessionID, answer, binding)
 	return ok
 }
 
@@ -370,7 +378,13 @@ func (cm *CaptchaManager) VerifyAdvanced(sessionID, answer string) bool {
 // 会话为一次性使用，无论校验成败都会在加载后立即删除。
 // 返回的 *CaptchaSession 在会话不存在时为 nil。
 func (cm *CaptchaManager) VerifyAdvancedSession(sessionID, answer string) (bool, *CaptchaSession) {
-	session := cm.takeSession(sessionID)
+	return cm.VerifyAdvancedSessionWithBinding(sessionID, answer, ChallengeSessionBinding{})
+}
+
+// VerifyAdvancedSessionWithBinding atomically consumes the session only when
+// its persisted site binding matches the current matched-site context.
+func (cm *CaptchaManager) VerifyAdvancedSessionWithBinding(sessionID, answer string, binding ChallengeSessionBinding) (bool, *CaptchaSession) {
+	session := cm.takeSessionWithBinding(sessionID, binding)
 	if session == nil {
 		return false, nil
 	}

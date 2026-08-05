@@ -52,16 +52,23 @@ func ListSiteRules(siteRepo *repository.SiteRepo, repo *repository.RuleRepo) app
 			c.JSON(404, map[string]string{"error": "site not found"})
 			return
 		}
-		if site.PolicyID == nil {
-			c.JSON(200, map[string]any{"items": []store.Rule{}, "total": 0})
-			return
+		policyID := uint(0)
+		inherited := site.PolicyID == nil || *site.PolicyID == 0
+		if inherited {
+			policyID, err = repo.DefaultPolicyID()
+			if err != nil {
+				c.JSON(500, map[string]string{"error": "default policy not configured"})
+				return
+			}
+		} else {
+			policyID = *site.PolicyID
 		}
-		items, err := repo.ListByPolicy(*site.PolicyID)
+		items, err := repo.ListByPolicy(policyID)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		c.JSON(200, map[string]any{"items": items, "total": len(items), "policy_id": *site.PolicyID})
+		c.JSON(200, map[string]any{"items": items, "total": len(items), "policy_id": policyID, "inherited": inherited})
 	}
 }
 
@@ -89,6 +96,15 @@ func CreateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 		_ = store.ApplyModelDefaults(&item)
 		if err := c.BindJSON(&item); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		exists, err := repo.PolicyExists(item.PolicyID)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		if !exists {
+			c.JSON(400, map[string]string{"error": "policy_id must reference an existing policy"})
 			return
 		}
 		if errMsg := normalizePersistedRuleConfig(&item); errMsg != "" {
@@ -131,6 +147,15 @@ func UpdateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 			return
 		}
 		existing.ID = id
+		exists, err := repo.PolicyExists(existing.PolicyID)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		if !exists {
+			c.JSON(400, map[string]string{"error": "policy_id must reference an existing policy"})
+			return
+		}
 		if errMsg := normalizePersistedRuleConfig(existing); errMsg != "" {
 			c.JSON(400, map[string]string{"error": errMsg})
 			return
@@ -364,6 +389,15 @@ func ImportRules(repo *repository.RuleRepo, reload func() error) app.HandlerFunc
 		}
 
 		for i := range body.Rules {
+			exists, err := repo.PolicyExists(body.Rules[i].PolicyID)
+			if err != nil {
+				c.JSON(500, map[string]any{"error": err.Error(), "index": i})
+				return
+			}
+			if !exists {
+				c.JSON(400, map[string]any{"error": "policy_id must reference an existing policy", "index": i})
+				return
+			}
 			if errMsg := normalizePersistedRuleConfig(&body.Rules[i]); errMsg != "" {
 				c.JSON(400, map[string]any{"error": errMsg, "index": i})
 				return

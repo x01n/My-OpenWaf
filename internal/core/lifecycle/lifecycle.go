@@ -171,14 +171,25 @@ func (m *Manager) Start() {
 
 // Shutdown gracefully stops all servers with the given context deadline.
 func (m *Manager) Shutdown(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	shutdownCtx, cancel := context.WithTimeout(ctx, defaultShutdownTimeout)
+	defer cancel()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	var wg sync.WaitGroup
+	entries := make([]entry, 0, len(m.entries))
 	for _, e := range m.entries {
+		entries = append(entries, e)
+	}
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, e := range entries {
 		wg.Add(1)
 		go func(ent entry) {
 			defer wg.Done()
-			if err := ent.srv.Shutdown(ctx); err != nil {
+			if err := ent.srv.Shutdown(shutdownCtx); err != nil {
 				if serverAlreadyStopped(err) {
 					m.log.Info("server shutdown complete", slog.String("name", ent.name))
 					return
@@ -189,7 +200,17 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			}
 		}(e)
 	}
-	wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-shutdownCtx.Done():
+		m.log.Warn("shutdown deadline exceeded", slog.Any("err", shutdownCtx.Err()))
+	}
 }
 
 // WaitForSignal blocks until SIGINT or SIGTERM, then calls Shutdown.
@@ -198,5 +219,7 @@ func (m *Manager) WaitForSignal() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sig
 	m.log.Info("received signal, shutting down", slog.String("signal", s.String()))
-	m.Shutdown(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+	defer cancel()
+	m.Shutdown(ctx)
 }

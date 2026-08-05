@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
+	"My-OpenWaf/internal/security"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
@@ -18,8 +19,11 @@ import (
 )
 
 var (
-	errInvalidSiteAction  = errors.New("invalid action")
-	errInvalidSiteNetwork = errors.New("invalid network")
+	errInvalidSiteAction      = errors.New("invalid action")
+	errInvalidSiteNetwork     = errors.New("invalid network")
+	errInvalidSiteXFFMode     = errors.New("invalid xff_mode")
+	errInvalidSiteTrustedCIDR = errors.New("invalid trusted_cidr")
+	errInvalidSiteHeaderOrder = errors.New("invalid client_ip_header_order")
 )
 
 type siteListItem struct {
@@ -123,6 +127,10 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			item.ApplyProtectionModeOverrides()
 		}
 		clearInheritedProtectionOverrides(&item)
+		if err := repo.NormalizePolicyID(&item.PolicyID); err != nil {
+			c.JSON(400, map[string]string{"error": "policy_id must reference an existing policy"})
+			return
+		}
 		if err := validateSiteRuntimeTLSVersions(&item, body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -139,6 +147,10 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := validateSiteClientIP(&item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := shared.ValidateSiteUpstreamURLs(item.UpstreamURLs); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -150,6 +162,12 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 		if err := validateSiteActions(&item, func(string) bool { return true }); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
+		}
+		if siteRequestHasField(body, "cc_rules") || (item.CCUseCustom != nil && *item.CCUseCustom) {
+			if err := shared.ValidateCCRules(item.CCRules); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
 		}
 		if err := shared.ValidateSiteTLSCertificate(item.TLSEnabled, item.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -189,6 +207,10 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			existing.ApplyProtectionModeOverrides()
 		}
 		clearInheritedProtectionOverrides(existing)
+		if err := repo.NormalizePolicyID(&existing.PolicyID); err != nil {
+			c.JSON(400, map[string]string{"error": "policy_id must reference an existing policy"})
+			return
+		}
 		if err := validateSiteRuntimeTLSVersions(existing, body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -202,6 +224,10 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			return
 		}
 		if err := validateSiteNetwork(existing, body); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteClientIP(existing); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
@@ -234,6 +260,12 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 		if err := validateSiteActions(existing, shouldValidateAction); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
+		}
+		if siteRequestHasField(body, "cc_rules") || (siteRequestHasField(body, "cc_use_custom") && existing.CCUseCustom != nil && *existing.CCUseCustom) {
+			if err := shared.ValidateCCRules(existing.CCRules); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
 		}
 		if err := shared.ValidateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -313,6 +345,24 @@ func validateSiteNetwork(item *store.Site, body []byte) error {
 		return errInvalidSiteNetwork
 	}
 	item.Network = normalized
+	return nil
+}
+
+func validateSiteClientIP(item *store.Site) error {
+	if item.XFFMode == "" {
+		item.XFFMode = store.XFFModeStrip
+	}
+	switch item.XFFMode {
+	case store.XFFModeStrip, store.XFFModeTrustOuter:
+	default:
+		return errInvalidSiteXFFMode
+	}
+	if !security.ValidateTrustedCIDR(item.TrustedCIDR) {
+		return errInvalidSiteTrustedCIDR
+	}
+	if !security.ValidateClientIPHeaderOrder(item.ClientIPHeaderOrder) {
+		return errInvalidSiteHeaderOrder
+	}
 	return nil
 }
 

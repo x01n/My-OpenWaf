@@ -1,4 +1,4 @@
-"use client";
+"use client"
 
 import {
   Table,
@@ -7,35 +7,35 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table";
-import { Skeleton } from "@/components/ui/skeleton";
-import { EmptyState } from "@/components/empty-state";
-import { cn } from "@/lib/utils";
-import { ReactNode } from "react";
-import { useTranslation } from "react-i18next";
-import { IconInbox } from "@tabler/icons-react";
+} from "@/components/ui/table"
+import { Skeleton } from "@/components/ui/skeleton"
+import { EmptyState } from "@/components/empty-state"
+import { cn } from "@/lib/utils"
+import { ReactNode } from "react"
+import { useTranslation } from "react-i18next"
+import { IconInbox } from "@tabler/icons-react"
 
 /** 骨架屏行数：与列表页默认 pageSize 无关，仅用于占位，避免过长的空白区 */
-const SKELETON_ROWS = 6;
+const SKELETON_ROWS = 6
 
 /** 骨架单元格宽度循环，制造参差感，避免整片等宽色块 */
-const SKELETON_WIDTHS = ["w-4/5", "w-3/5", "w-full", "w-2/5", "w-3/4"];
+const SKELETON_WIDTHS = ["w-4/5", "w-3/5", "w-full", "w-2/5", "w-3/4"]
 
 interface Column<T> {
-  key: string;
-  title: string | ReactNode;
-  width?: string;
-  render?: (row: T, index: number) => ReactNode;
+  key: string
+  title: string | ReactNode
+  width?: string
+  render?: (row: T, index: number) => ReactNode
 }
 
 interface DataTableProps<T = unknown> {
-  columns: Column<T>[];
-  data: T[];
-  loading?: boolean;
-  rowKey?: (row: T) => string | number;
-  emptyText?: string;
-  emptyContent?: ReactNode;
-  className?: string;
+  columns: Column<T>[]
+  data: T[]
+  loading?: boolean
+  rowKey?: (row: T) => string | number
+  emptyText?: string
+  emptyContent?: ReactNode
+  className?: string
 }
 
 export function DataTable<T = unknown>({
@@ -47,7 +47,7 @@ export function DataTable<T = unknown>({
   emptyContent,
   className,
 }: DataTableProps<T>) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   if (loading) {
     return (
@@ -71,7 +71,9 @@ export function DataTable<T = unknown>({
                     <Skeleton
                       className={cn(
                         "h-4",
-                        SKELETON_WIDTHS[(rowIdx + colIdx) % SKELETON_WIDTHS.length]
+                        SKELETON_WIDTHS[
+                          (rowIdx + colIdx) % SKELETON_WIDTHS.length
+                        ]
                       )}
                     />
                   </TableCell>
@@ -81,12 +83,12 @@ export function DataTable<T = unknown>({
           </TableBody>
         </Table>
       </div>
-    );
+    )
   }
 
   if (!data || data.length === 0) {
     if (emptyContent) {
-      return <>{emptyContent}</>;
+      return <>{emptyContent}</>
     }
     return (
       <EmptyState
@@ -94,7 +96,7 @@ export function DataTable<T = unknown>({
         title={emptyText || t("common.empty")}
         className={cn("py-12", className)}
       />
-    );
+    )
   }
 
   return (
@@ -130,5 +132,5 @@ export function DataTable<T = unknown>({
         </TableBody>
       </Table>
     </div>
-  );
+  )
 }

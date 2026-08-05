@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -82,6 +84,119 @@ func ValidateActionWithoutRedirectTarget(value string) (string, bool) {
 		return "", false
 	}
 	return normalized, true
+}
+
+func ValidateActionWithRedirectTarget(value string, redirectTo *string) (string, bool) {
+	normalized, ok := ValidateRuleAction(value)
+	if !ok {
+		return "", false
+	}
+	if action.Normalize(action.Type(normalized)) == action.Redirect && (redirectTo == nil || strings.TrimSpace(*redirectTo) == "") {
+		return "", false
+	}
+	return normalized, true
+}
+
+// ValidateCCRules validates the shared global/site CC rule JSON contract.
+func ValidateCCRules(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var rules []struct {
+		Enabled    *bool   `json:"enabled"`
+		Name       *string `json:"name"`
+		Action     string  `json:"action"`
+		Conditions []struct {
+			Target   string `json:"target"`
+			Operator string `json:"operator"`
+			Value    string `json:"value"`
+		} `json:"conditions"`
+		Window       int    `json:"window"`
+		Threshold    int    `json:"threshold"`
+		Duration     int    `json:"duration"`
+		DurationUnit string `json:"duration_unit"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&rules); err != nil {
+		return fmt.Errorf("invalid cc rules: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return errors.New("invalid cc rules: multiple JSON values")
+	}
+	if rules == nil {
+		return errors.New("cc rules must be an array")
+	}
+	for _, rule := range rules {
+		if _, ok := ValidateCCRuleAction(rule.Action); !ok {
+			return errors.New("invalid cc rule action")
+		}
+		if len(rule.Conditions) == 0 {
+			return errors.New("cc rule requires conditions")
+		}
+		if rule.Window <= 0 || rule.Threshold <= 0 {
+			return errors.New("cc rule window and threshold must be positive")
+		}
+		if rule.Duration < 0 {
+			return errors.New("cc rule duration must be non-negative")
+		}
+		if !validCCDurationUnit(rule.DurationUnit) {
+			return errors.New("invalid cc rule duration unit")
+		}
+		for _, condition := range rule.Conditions {
+			target := strings.ToLower(strings.TrimSpace(condition.Target))
+			op := strings.ToLower(strings.TrimSpace(condition.Operator))
+			if strings.TrimSpace(condition.Value) == "" {
+				return errors.New("cc rule condition value is required")
+			}
+			valid := false
+			switch target {
+			case "url_path":
+				valid = op == "equals" || op == "prefix" || op == "contains"
+			case "method":
+				valid = op == "equals"
+			case "header":
+				valid = op == "equals" || op == "contains" || op == "prefix"
+				if valid {
+					name, value := splitCCHeaderValueForValidation(condition.Value)
+					valid = name != "" && value != ""
+				}
+			}
+			if !valid {
+				return errors.New("invalid cc rule condition")
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateCCRuleAction validates supported CC actions and legacy aliases.
+func ValidateCCRuleAction(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "intercept", "rate_limit", "captcha", "captcha_challenge", "shield_challenge", "chain_challenge", "drop", "observe", "challenge", "block", "log_only":
+		return strings.ToLower(strings.TrimSpace(value)), true
+	default:
+		return "", false
+	}
+}
+
+func validCCDurationUnit(unit string) bool {
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "", "seconds", "minutes":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitCCHeaderValueForValidation(value string) (string, string) {
+	for _, separator := range []string{":", "="} {
+		if name, headerValue, ok := strings.Cut(value, separator); ok {
+			return strings.TrimSpace(name), strings.TrimSpace(headerValue)
+		}
+	}
+	return "", ""
 }
 
 // ValidateAntiReplayAction validates the actions preserved by the anti-replay dataplane path.

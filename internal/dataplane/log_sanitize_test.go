@@ -54,6 +54,123 @@ func TestRequestBodyPreviewRedactsJSONAndFormSecrets(t *testing.T) {
 	}
 }
 
+func TestDynamicProtectionRequestBodyPreviewRedactsTicketKeyAndEnv(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Request.SetRequestURI(dynamicProtectionKeyPath)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.SetBody([]byte(`{"ticket":"ticket-secret","key":"key-secret","env":{"nested":{"fingerprint":"env-secret"}},"票据":"unicode-secret"}`))
+
+	preview, truncated, size := requestBodyPreview(ctx)
+	if preview != "[redacted]" {
+		t.Fatalf("dynamic protection request body was not redacted as a whole: %s", preview)
+	}
+	if truncated {
+		t.Fatal("short dynamic protection request body should not be marked truncated")
+	}
+	if size != int64(len(ctx.Request.Body())) {
+		t.Fatalf("request body size = %d, want %d", size, len(ctx.Request.Body()))
+	}
+	for _, secret := range []string{"ticket-secret", "key-secret", "env-secret", "unicode-secret"} {
+		if strings.Contains(preview, secret) {
+			t.Fatalf("dynamic protection secret leaked in request body preview: %s", preview)
+		}
+	}
+}
+
+func TestDynamicProtectionMalformedRequestBodyPreviewRedactsTicketAndEnv(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Request.SetRequestURI(dynamicProtectionKeyPath)
+	ctx.Request.Header.Set("Content-Type", "text/plain")
+	ctx.Request.SetBody([]byte(`{"ticket":"ticket-secret","env":{"nested":"env-secret"}`))
+
+	preview, truncated, _ := requestBodyPreview(ctx)
+	if preview != "[redacted]" {
+		t.Fatalf("dynamic protection body with unexpected content type was not redacted as a whole: %s", preview)
+	}
+	if truncated {
+		t.Fatal("malformed dynamic protection request body should not be marked truncated")
+	}
+	for _, secret := range []string{"ticket-secret", "env-secret"} {
+		if strings.Contains(preview, secret) {
+			t.Fatalf("malformed dynamic protection secret leaked: %s", preview)
+		}
+	}
+}
+
+func TestRecordDynamicProtectionAccessLogPersistsRedactedBody(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Request.SetRequestURI(dynamicProtectionKeyPath)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.SetBody([]byte(`{"ticket":"ticket-secret","key":"key-secret","env":{"fingerprint":"env-secret"}}`))
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessLog{}); err != nil {
+		t.Fatalf("migrate access logs: %v", err)
+	}
+
+	writer := observability.NewUnifiedWriter(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	recordAccessLog(ctx, Options{Writer: writer}, accessLogInfo{
+		SiteID:     1,
+		WAFAction:  "dynamic_key_error",
+		StatusCode: 400,
+	})
+	writer.Close()
+
+	var entry store.AccessLog
+	if err := db.First(&entry).Error; err != nil {
+		t.Fatalf("load access log: %v", err)
+	}
+	if entry.RequestBodyPreview != "[redacted]" {
+		t.Fatalf("persisted dynamic protection request body was not redacted as a whole: %s", entry.RequestBodyPreview)
+	}
+	for _, secret := range []string{"ticket-secret", "key-secret", "env-secret"} {
+		if strings.Contains(entry.RequestBodyPreview, secret) {
+			t.Fatalf("persisted request body preview leaked %q: %s", secret, entry.RequestBodyPreview)
+		}
+	}
+}
+
+func TestDynamicProtectionTruncatedJSONRequestBodyPreviewRedactsWholeBody(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Request.SetRequestURI(dynamicProtectionKeyPath)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	body := `{"ticket":"ticket-secret","key":"key-secret","env":{"nested":"env-secret"},` + strings.Repeat("x", logBodyPreviewLimit)
+	ctx.Request.SetBody([]byte(body))
+
+	preview, truncated, size := requestBodyPreview(ctx)
+	if preview != "[redacted]" {
+		t.Fatalf("truncated dynamic protection JSON was not redacted as a whole: %s", preview)
+	}
+	if !truncated {
+		t.Fatal("oversized dynamic protection request body should be marked truncated")
+	}
+	if size != int64(len(body)) {
+		t.Fatalf("request body size = %d, want %d", size, len(body))
+	}
+	for _, secret := range []string{"ticket-secret", "key-secret", "env-secret"} {
+		if strings.Contains(preview, secret) {
+			t.Fatalf("truncated dynamic protection secret leaked: %s", preview)
+		}
+	}
+}
+
+func TestBuildAccessLogEntryRedactsPrefilledDynamicProtectionBody(t *testing.T) {
+	ctx := app.NewContext(0)
+	entry := buildAccessLogEntry(ctx, accessLogInfo{
+		Path:               dynamicProtectionKeyPath,
+		RequestBodyPreview: `{"ticket":"ticket-secret","key":"key-secret","env":{"nested":"env-secret"}}`,
+		RequestSize:        1,
+		WAFAction:          "dynamic_key_error",
+		StatusCode:         400,
+	})
+	if entry.RequestBodyPreview != "[redacted]" {
+		t.Fatalf("prefilled dynamic protection request body was not redacted as a whole: %s", entry.RequestBodyPreview)
+	}
+}
+
 func TestRequestHeadersJSONRedactsSensitiveHeadersAndTruncates(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Request.Header.Set("Authorization", "Bearer secret")

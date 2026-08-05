@@ -17,6 +17,71 @@ func openMemDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// TestV9EnsureDefaultPolicyRepairsReferencesIdempotently 验证默认策略迁移会忽略软删除策略并幂等修复规则与站点引用。
+func TestV9EnsureDefaultPolicyRepairsReferencesIdempotently(t *testing.T) {
+	db := openMemDB(t)
+	statements := []string{
+		`CREATE TABLE policies (id INTEGER PRIMARY KEY, created_at DATETIME, updated_at DATETIME, deleted_at DATETIME, name TEXT, description TEXT, default_slot INTEGER)`,
+		`CREATE TABLE rules (id INTEGER PRIMARY KEY, policy_id INTEGER)`,
+		`CREATE TABLE sites (id INTEGER PRIMARY KEY, policy_id INTEGER)`,
+		`INSERT INTO policies (id, name, default_slot, deleted_at) VALUES (1, 'deleted default', 1, '2026-01-01T00:00:00Z'), (2, 'active policy', NULL, NULL)`,
+		`INSERT INTO rules (id, policy_id) VALUES (1, NULL), (2, 0), (3, 99), (4, 2)`,
+		`INSERT INTO sites (id, policy_id) VALUES (1, NULL), (2, 0), (3, 99), (4, 2)`,
+	}
+	for _, statement := range statements {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatalf("setup migration fixture: %v", err)
+		}
+	}
+
+	if err := V9EnsureDefaultPolicy(db); err != nil {
+		t.Fatalf("first V9 migration: %v", err)
+	}
+	if err := V9EnsureDefaultPolicy(db); err != nil {
+		t.Fatalf("second V9 migration: %v", err)
+	}
+
+	var defaults []struct {
+		ID uint
+	}
+	if err := db.Raw("SELECT id FROM policies WHERE default_slot = 1 AND deleted_at IS NULL").Scan(&defaults).Error; err != nil {
+		t.Fatalf("load default policies: %v", err)
+	}
+	if len(defaults) != 1 || defaults[0].ID != 3 {
+		t.Fatalf("expected one active default policy with id 3, got %+v", defaults)
+	}
+
+	var rulePolicies []struct {
+		PolicyID *uint `gorm:"column:policy_id"`
+	}
+	if err := db.Raw("SELECT policy_id FROM rules ORDER BY id").Scan(&rulePolicies).Error; err != nil {
+		t.Fatalf("load repaired rule references: %v", err)
+	}
+	for i, item := range rulePolicies {
+		if i < 3 {
+			if item.PolicyID == nil || *item.PolicyID != 3 {
+				t.Fatalf("unexpected rule reference at index %d: %+v", i, item)
+			}
+			continue
+		}
+		if item.PolicyID == nil || *item.PolicyID != 2 {
+			t.Fatalf("unexpected rule reference at index %d: %+v", i, item)
+		}
+	}
+
+	var sitePolicies []struct {
+		PolicyID *uint `gorm:"column:policy_id"`
+	}
+	if err := db.Raw("SELECT policy_id FROM sites ORDER BY id").Scan(&sitePolicies).Error; err != nil {
+		t.Fatalf("load repaired site references: %v", err)
+	}
+	for i, item := range sitePolicies {
+		if i < 3 && item.PolicyID != nil || i == 3 && (item.PolicyID == nil || *item.PolicyID != 2) {
+			t.Fatalf("unexpected site reference at index %d: %+v", i, item)
+		}
+	}
+}
+
 // TestIsIgnorableDropDefaultError 验证各类 MySQL/Postgres 错误消息的判断逻辑。
 func TestIsIgnorableDropDefaultError(t *testing.T) {
 	cases := []struct {
@@ -100,6 +165,29 @@ func TestV7MigrateAccessControlIdempotent(t *testing.T) {
 	if err := V7MigrateAccessControl(db); err != nil {
 		t.Errorf("V7MigrateAccessControl second call (idempotent): %v", err)
 	}
+}
+
+func TestV10MigrateSiteXFFModesSkipsWhenSitesOrXFFModeMissing(t *testing.T) {
+	t.Run("sites missing", func(t *testing.T) {
+		db := openMemDB(t)
+		for pass := 1; pass <= 2; pass++ {
+			if err := V10MigrateSiteXFFModes(db); err != nil {
+				t.Fatalf("migration pass %d: %v", pass, err)
+			}
+		}
+	})
+
+	t.Run("xff_mode missing", func(t *testing.T) {
+		db := openMemDB(t)
+		if err := db.Exec("CREATE TABLE sites (id INTEGER PRIMARY KEY)").Error; err != nil {
+			t.Fatalf("create sites table: %v", err)
+		}
+		for pass := 1; pass <= 2; pass++ {
+			if err := V10MigrateSiteXFFModes(db); err != nil {
+				t.Fatalf("migration pass %d: %v", pass, err)
+			}
+		}
+	})
 }
 
 // TestV3MigrateLegacyRulePhasesWithRulesTable 验证有 rules 表时迁移可执行完成。

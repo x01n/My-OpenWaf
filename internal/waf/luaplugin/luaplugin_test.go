@@ -2,16 +2,62 @@ package luaplugin
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	lua "github.com/yuin/gopher-lua"
 )
 
-func silentEngine(kv KVBackend) *Engine {
+type testKV struct {
+	available bool
+}
+
+func (k testKV) Available() bool { return k.available }
+
+func (testKV) Get(string) ([]byte, bool) { return nil, false }
+
+func (testKV) Set(string, []byte, time.Duration) error { return nil }
+
+func (testKV) Delete(string) {}
+
+func (testKV) Incr(string, time.Duration) (int64, error) { return 1, nil }
+
+func newSilentEngine(kv KVBackend) *Engine {
 	return NewEngine(kv, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func silentEngine(kv KVBackend) *Engine {
+	if kv == nil {
+		kv = testKV{available: true}
+	}
+	return newSilentEngine(kv)
+}
+
+type recordingKV struct {
+	setTTL  time.Duration
+	incrTTL time.Duration
+}
+
+func (*recordingKV) Available() bool { return true }
+
+func (*recordingKV) Get(string) ([]byte, bool) { return nil, false }
+
+func (k *recordingKV) Set(_ string, _ []byte, ttl time.Duration) error {
+	k.setTTL = ttl
+	return nil
+}
+
+func (*recordingKV) Delete(string) {}
+
+func (k *recordingKV) Incr(_ string, ttl time.Duration) (int64, error) {
+	k.incrTTL = ttl
+	return 1, nil
 }
 
 func mustCompile(t *testing.T, stage Stage, src string) *Script {
@@ -28,6 +74,38 @@ func evalOne(t *testing.T, src string, req RequestView, kv KVBackend) Decision {
 	e := silentEngine(kv)
 	e.Reload([]*Script{mustCompile(t, StagePre, src)})
 	return e.Evaluate(context.Background(), StagePre, req)
+}
+
+func TestKVTTLAlwaysExpires(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want time.Duration
+	}{
+		{"超时上限", `function handle(ctx) ctx.kv.set("key", "value", 86401) return nil end`, kvMaxTTL},
+		{"巨大有限数", `function handle(ctx) ctx.kv.set("key", "value", 1e12) return nil end`, kvMaxTTL},
+		{"Lua 最大数", `function handle(ctx) ctx.kv.set("key", "value", math.huge) return nil end`, kvMaxTTL},
+		{"NaN", `function handle(ctx) ctx.kv.set("key", "value", 0 / 0) return nil end`, kvDefaultTTL},
+		{"负无穷", `function handle(ctx) ctx.kv.incr("key", -math.huge) return nil end`, kvDefaultTTL},
+		{"亚秒截断", `function handle(ctx) ctx.kv.incr("key", 0.5) return nil end`, kvDefaultTTL},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			kv := &recordingKV{}
+			evalOne(t, tt.src, RequestView{}, kv)
+			got := kv.setTTL
+			if strings.Contains(tt.src, "ctx.kv.incr") {
+				got = kv.incrTTL
+			}
+			if got != tt.want {
+				t.Fatalf("TTL = %s, want %s", got, tt.want)
+			}
+			if got <= 0 {
+				t.Fatal("KV TTL must always expire")
+			}
+		})
+	}
 }
 
 // ---- 沙箱：死循环必须被中断 ----
@@ -88,18 +166,31 @@ func TestCallerContextCancelStopsScript(t *testing.T) {
 	}
 }
 
+// TestCanceledContextNeverAdoptsLuaDecision 验证调用方取消后即使脚本快速返回，
+// 也不会采纳 Lua 判定。
+func TestCanceledContextNeverAdoptsLuaDecision(t *testing.T) {
+	e := silentEngine(nil)
+	e.Reload([]*Script{mustCompile(t, StagePre, `function handle(ctx) return "intercept" end`)})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if got := e.Evaluate(ctx, StagePre, RequestView{}); got.HasAction() {
+		t.Fatalf("cancelled context must not return a Lua decision, got %+v", got)
+	}
+}
+
 // ---- 沙箱：危险能力必须不可达 ----
 
 // TestDangerousGlobalsUnavailable 验证能触达文件系统、动态求值与运行时内部的
 // 全局名一律不可用。任一项可用都意味着沙箱被穿透。
 func TestDangerousGlobalsUnavailable(t *testing.T) {
 	for _, name := range []string{
-		"io", "os", "debug", "package", "coroutine",
+		"io", "os", "debug",
 		"dofile", "loadfile", "load", "loadstring", "require",
 		"collectgarbage", "print",
 		// 元表与 raw 系列是实测可用的穿透入口，必须不可达。
 		"getmetatable", "setmetatable", "rawset", "rawget", "newproxy", "module",
-	} {
+		"math.randomseed"} {
 		src := `function handle(ctx) if ` + name + ` ~= nil then return "intercept" end return nil end`
 		dec := evalOne(t, src, RequestView{}, nil)
 		if dec.HasAction() {
@@ -128,10 +219,10 @@ end`
 	}
 }
 
-// TestMetatablePollutionDoesNotCrossScripts 是池化复用的安全前提。
+// TestMetatablePollutionDoesNotCrossScripts 验证状态机隔离阻止元表污染跨运行传播。
 //
-// 状态机在脚本间复用，若一个脚本能污染共享的元表，同池后续脚本的行为
-// 都会被改写——单个恶意/出错脚本即可影响整个策略体系。
+// 若状态机被复用，脚本改写共享元表后会影响后续脚本；单个恶意/出错脚本
+// 不应影响整个策略体系。
 func TestMetatablePollutionDoesNotCrossScripts(t *testing.T) {
 	e := silentEngine(nil)
 
@@ -149,7 +240,7 @@ end`)})
 		e.Evaluate(context.Background(), StagePre, RequestView{})
 	}
 
-	// 再用同一个 Engine（同一状态机池）跑受害脚本。
+	// 再用同一个 Engine 跑受害脚本，验证 Reload 后仍获得 pristine VM。
 	e.Reload([]*Script{mustCompile(t, StagePre, `
 function handle(ctx)
   if ("x"):upper() ~= "X" then return "intercept" end
@@ -157,7 +248,7 @@ function handle(ctx)
   return nil
 end`)})
 	if dec := e.Evaluate(context.Background(), StagePre, RequestView{}); dec.HasAction() {
-		t.Fatal("污染跨脚本残留——同池后续脚本的字符串方法已被改写")
+		t.Fatal("污染跨脚本残留——Reload 后的受害脚本未获得干净状态机")
 	}
 }
 
@@ -202,6 +293,7 @@ func TestScriptReadsRequestFields(t *testing.T) {
 		Body:        `{"u":"admin"}`,
 		Headers:     map[string]string{"x-real-ip": "5.6.7.8"},
 		QueryParams: map[string]string{"next": "/"},
+		QueryValues: map[string][]string{"next": {"/", "/fallback"}},
 		TLSVersion:  "TLS13", TLSJA4: "t13d1516h2",
 	}
 	src := `
@@ -214,6 +306,7 @@ function handle(ctx)
   if ctx.site_id ~= 7 then return "intercept" end
   if ctx.headers["x-real-ip"] ~= "5.6.7.8" then return "intercept" end
   if ctx.query_params["next"] ~= "/" then return "intercept" end
+  if ctx.query_values["next"][1] ~= "/" or ctx.query_values["next"][2] ~= "/fallback" then return "intercept" end
   if ctx.tls.version ~= "TLS13" then return "intercept" end
   if ctx.tls.ja4 ~= "t13d1516h2" then return "intercept" end
   if not string.find(ctx.body, "admin", 1, true) then return "intercept" end
@@ -267,6 +360,36 @@ func TestDecisionReturnForms(t *testing.T) {
 	}
 }
 
+func TestDecisionRejectsUnsafeRedirectTargets(t *testing.T) {
+	unsafeTargets := []string{"javascript:alert(1)", "//evil.example", "relative/path"}
+	for _, target := range unsafeTargets {
+		src := `function handle(ctx) return {action="redirect", redirect_to="` + target + `"} end`
+		dec := evalOne(t, src, RequestView{}, nil)
+		if dec.RedirectTo != "" {
+			t.Fatalf("unsafe redirect target %q was accepted as %q", target, dec.RedirectTo)
+		}
+	}
+	L := lua.NewState()
+	t.Cleanup(L.Close)
+	table := L.NewTable()
+	table.RawSetString("action", lua.LString("redirect"))
+	table.RawSetString("redirect_to", lua.LString("/ok\r\nX-Test: injected"))
+	dec, err := decisionFromTable(table)
+	if err != nil {
+		t.Fatalf("decisionFromTable: %v", err)
+	}
+	if dec.RedirectTo != "" {
+		t.Fatalf("CRLF redirect target was accepted as %q", dec.RedirectTo)
+	}
+	for _, target := range []string{"/safe/path", "https://example.test/path"} {
+		src := `function handle(ctx) return {action="redirect", redirect_to="` + target + `"} end`
+		dec := evalOne(t, src, RequestView{}, nil)
+		if dec.RedirectTo != target {
+			t.Fatalf("safe redirect target %q became %q", target, dec.RedirectTo)
+		}
+	}
+}
+
 func TestDecisionHeadersAndTags(t *testing.T) {
 	src := `
 function handle(ctx)
@@ -278,6 +401,69 @@ end`
 	}
 	if len(dec.Tags) != 2 {
 		t.Errorf("tags 未解析：%+v", dec.Tags)
+	}
+}
+
+func TestDecisionHeadersRejectUnsafeValues(t *testing.T) {
+	src := `
+function handle(ctx)
+  return {
+    action="observe",
+    headers={
+      ["x-safe"]="accepted",
+      ["authorization"]="secret",
+      ["set-cookie"]="session=secret",
+      ["connection"]="close",
+      ["content-length"]="999",
+      ["bad header"]="invalid",
+      ["x-crlf"]="ok\r\nX: y"
+    }
+  }
+end`
+	dec := evalOne(t, src, RequestView{}, nil)
+	if len(dec.SetHeaders) != 1 || dec.SetHeaders["x-safe"] != "accepted" {
+		t.Fatalf("不安全响应头未被完整过滤：%+v", dec.SetHeaders)
+	}
+	for _, name := range []string{
+		"authorization", "set-cookie", "connection", "content-length", "bad header", "x-crlf",
+	} {
+		if _, ok := dec.SetHeaders[name]; ok {
+			t.Errorf("响应头 %q 不应被 Lua 判定接受", name)
+		}
+	}
+}
+
+func TestDecisionOutputRedactsSensitiveText(t *testing.T) {
+	req := RequestView{
+		Headers: map[string]string{"authorization": "Bearer request-token", "cookie": "session=request-cookie"},
+		Body:    "request body remains visible",
+	}
+	src := `
+function handle(ctx)
+  if ctx.headers["authorization"] ~= "Bearer request-token" then return "intercept" end
+  if ctx.headers["cookie"] ~= "session=request-cookie" then return "intercept" end
+  if ctx.body ~= "request body remains visible" then return "intercept" end
+  return {
+    action="observe",
+    message="Authorization: Bearer decision-token",
+    response_body="Cookie: response-cookie",
+    headers={ ["x-safe"]="accepted", ["x-token"]="Bearer header-token", ["set-cookie"]="session=forbidden" },
+    tags={"safe", "Cookie: tag-token", "Bearer tag-token"}
+  }
+end`
+
+	dec := evalOne(t, src, req, nil)
+	if dec.Action != "observe" {
+		t.Fatalf("请求上下文应保持可读，得到 %+v", dec)
+	}
+	if dec.Message != "" || dec.ResponseBody != "" {
+		t.Fatalf("敏感输出未被丢弃：%+v", dec)
+	}
+	if len(dec.SetHeaders) != 1 || dec.SetHeaders["x-safe"] != "accepted" {
+		t.Fatalf("敏感响应头未被丢弃：%+v", dec.SetHeaders)
+	}
+	if len(dec.Tags) != 1 || dec.Tags[0] != "safe" {
+		t.Fatalf("敏感标签未被丢弃：%+v", dec.Tags)
 	}
 }
 
@@ -312,6 +498,38 @@ func TestStageIsolation(t *testing.T) {
 	}
 }
 
+// TestSiteScopedScriptsExecuteInIsolation 验证站点脚本不会泄漏到其他站点，
+// 同时全局脚本在每个站点继续执行。
+// TestSiteScopedScriptsExecuteInIsolation verifies scoped scripts only execute for their site while global scripts continue to run.
+func TestSiteScopedScriptsExecuteInIsolation(t *testing.T) {
+	global := mustCompile(t, StagePre, `function handle(ctx) return nil end`)
+	site1 := mustCompile(t, StagePre, `function handle(ctx) return "intercept" end`)
+	site2 := mustCompile(t, StagePre, `function handle(ctx) return "drop" end`)
+	site1ID, site2ID := uint(1), uint(2)
+	site1.SetSiteID(&site1ID)
+	site2.SetSiteID(&site2ID)
+
+	e := silentEngine(nil)
+	e.Reload([]*Script{global, site1, site2})
+
+	for _, tt := range []struct {
+		name   string
+		siteID uint
+		want   string
+	}{
+		{name: "site1", siteID: 1, want: "intercept"},
+		{name: "site2", siteID: 2, want: "drop"},
+		{name: "other-site", siteID: 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := e.Evaluate(context.Background(), StagePre, RequestView{SiteID: tt.siteID})
+			if dec.Action != tt.want {
+				t.Fatalf("SiteID=%d action = %q, want %q", tt.siteID, dec.Action, tt.want)
+			}
+		})
+	}
+}
+
 func TestNilEngineSafe(t *testing.T) {
 	var e *Engine
 	if e.HasScripts(StagePre) {
@@ -329,8 +547,7 @@ func TestNilEngineSafe(t *testing.T) {
 
 // TestGlobalsDoNotLeakBetweenRuns 验证脚本无法借全局变量在请求间传递状态。
 //
-// 状态机是池化复用的，若不清理全局表，恶意脚本可借此累积跨请求状态，
-// 或不同脚本相互干扰。
+// 每次执行都创建新状态机；此用例防止未来改回复用时重新引入跨请求全局污染。
 func TestGlobalsDoNotLeakBetweenRuns(t *testing.T) {
 	e := silentEngine(nil)
 	e.Reload([]*Script{mustCompile(t, StagePre, `
@@ -344,6 +561,44 @@ end`)})
 		if dec := e.Evaluate(context.Background(), StagePre, RequestView{}); dec.HasAction() {
 			t.Fatalf("第 %d 次执行看到了上次遗留的全局变量", i+1)
 		}
+	}
+}
+
+// TestStandardLibraryAndGlobalsDoNotLeak 验证脚本直接改写允许库和 _G 后，
+// 同一脚本的下一次运行以及同一引擎的下一脚本都只能看到干净状态。
+func TestStandardLibraryAndGlobalsDoNotLeak(t *testing.T) {
+	e := silentEngine(nil)
+	poison := mustCompile(t, StagePre, `
+function handle(ctx)
+  if _G.request_leak ~= nil then return "intercept" end
+  if string.upper("x") ~= "X" then return "intercept" end
+  if table.concat({"a", "b"}, ":") ~= "a:b" then return "intercept" end
+  if math.abs(-7) ~= 7 then return "intercept" end
+  _G = {request_leak = true}
+  string.upper = function(_) return "poisoned" end
+  table.concat = function(_) return "poisoned" end
+  math.abs = function(_) return 0 end
+  return nil
+end`)
+	e.Reload([]*Script{poison})
+
+	for i := 0; i < 2; i++ {
+		if dec := e.Evaluate(context.Background(), StagePre, RequestView{}); dec.HasAction() {
+			t.Fatalf("第 %d 次运行看到了上一运行污染的库表或全局状态: %+v", i+1, dec)
+		}
+	}
+
+	e.Reload([]*Script{mustCompile(t, StagePre, `
+function handle(ctx)
+  if _G.request_leak ~= nil then return "intercept" end
+  if string.upper("x") ~= "X" then return "intercept" end
+  if table.concat({"a", "b"}, ":") ~= "a:b" then return "intercept" end
+  if math.abs(-7) ~= 7 then return "intercept" end
+  if type(assert) ~= "function" or type(pairs) ~= "function" then return "intercept" end
+  return nil
+end`)})
+	if dec := e.Evaluate(context.Background(), StagePre, RequestView{}); dec.HasAction() {
+		t.Fatalf("下一脚本看到了前一脚本污染，或允许标准库不可用: %+v", dec)
 	}
 }
 
@@ -405,5 +660,140 @@ func TestStatsAccumulate(t *testing.T) {
 	}
 	if stats[0].Stage != string(StagePre) {
 		t.Errorf("Stage = %q", stats[0].Stage)
+	}
+}
+
+func TestControlledContextExtensions(t *testing.T) {
+	var logs []string
+	var debugs []string
+	req := RequestView{
+		Response: ResponseView{
+			StatusCode:  502,
+			ContentType: "application/json",
+			Headers:     map[string]string{"content-type": "application/json", "authorization": "secret"},
+			Body:        "upstream error",
+		},
+		Config:  map[string]string{"mode": "safe"},
+		Runtime: map[string]string{"instance": "node-1"},
+		Metrics: map[string]float64{"requests": 12},
+	}
+	req.SetRuntimeHooks(func(level, message string) { logs = append(logs, level+":"+message) }, func(message string) { debugs = append(debugs, message) })
+	src := `
+function handle(ctx)
+  if ctx.response.status_code ~= 502 or ctx.response.content_type ~= "application/json" then return "intercept" end
+  if ctx.response.headers["authorization"] ~= "[redacted]" then return "intercept" end
+  if ctx.response.body ~= "upstream error" then return "intercept" end
+  if ctx.config.mode ~= "safe" or ctx.runtime.instance ~= "node-1" then return "intercept" end
+  if ctx.metrics.requests ~= 12 then return "intercept" end
+  ctx.log("warn", "seen")
+  ctx.debug("trace")
+  return "observe"
+end`
+	if dec := evalOne(t, src, req, nil); dec.Action != "observe" {
+		t.Fatalf("受控上下文读取失败：%+v", dec)
+	}
+	if len(logs) != 1 || logs[0] != "warn:seen" {
+		t.Fatalf("log 回调 = %v", logs)
+	}
+	if len(debugs) != 1 || debugs[0] != "trace" {
+		t.Fatalf("debug 回调 = %v", debugs)
+	}
+}
+
+func TestUnavailableKVAlwaysFailsOpen(t *testing.T) {
+	for _, backend := range []struct {
+		name string
+		kv   KVBackend
+	}{
+		{name: "nil KV"},
+		{name: "不可用 KV", kv: testKV{}},
+	} {
+		for _, verdict := range []string{"intercept", "drop"} {
+			t.Run(backend.name+"/"+verdict, func(t *testing.T) {
+				e := newSilentEngine(backend.kv)
+				e.Reload([]*Script{mustCompile(t, StagePre, `function handle(ctx) return "`+verdict+`" end`)})
+				if dec := e.Evaluate(context.Background(), StagePre, RequestView{}); dec.HasAction() {
+					t.Fatalf("KV 不可用时脚本 %q 必须无判定，得到 %+v", verdict, dec)
+				}
+			})
+		}
+	}
+}
+
+func TestEvaluateDiscardsDecisionWhenKVFailsDuringScript(t *testing.T) {
+	kv := &failingDuringRunKV{available: true}
+	e := newSilentEngine(kv)
+	e.Reload([]*Script{mustCompile(t, StagePre, `
+function handle(ctx)
+  ctx.kv.set("x", "y")
+  return "intercept"
+end`)})
+
+	if dec := e.Evaluate(context.Background(), StagePre, RequestView{}); dec.HasAction() {
+		t.Fatalf("KV 执行期间失效时必须丢弃终止判定：%+v", dec)
+	}
+}
+
+type failingDuringRunKV struct {
+	available bool
+}
+
+func (k *failingDuringRunKV) Available() bool         { return k != nil && k.available }
+func (*failingDuringRunKV) Get(string) ([]byte, bool) { return nil, false }
+func (k *failingDuringRunKV) Set(string, []byte, time.Duration) error {
+	k.available = false
+	return errors.New("kv unavailable")
+}
+func (*failingDuringRunKV) Delete(string)                             {}
+func (*failingDuringRunKV) Incr(string, time.Duration) (int64, error) { return 0, nil }
+
+func TestLuaAPIOutputLimits(t *testing.T) {
+	src := `
+function handle(ctx)
+  local tags = {}
+  for i = 1, 40 do tags[i] = string.rep("t", 2000) end
+  local headers = {}
+  for i = 1, 300 do headers["x-" .. tostring(i)] = string.rep("h", 5000) end
+  return {action="observe", message=string.rep("m", 30000), response_body=string.rep("b", 30000), headers=headers, tags=tags}
+end`
+	dec := evalOne(t, src, RequestView{}, nil)
+	if len(dec.Message) != maxAPIStringBytes || len(dec.ResponseBody) != maxResponseBody {
+		t.Fatalf("输出字符串未截断：message=%d body=%d", len(dec.Message), len(dec.ResponseBody))
+	}
+	if len(dec.SetHeaders) != maxAPIMapEntries || len(dec.Tags) != maxDecisionTags {
+		t.Fatalf("输出表项未限流：headers=%d tags=%d", len(dec.SetHeaders), len(dec.Tags))
+	}
+	for key, value := range dec.SetHeaders {
+		if len(value) != maxHeaderValue {
+			t.Fatalf("header %q 未截断：%d", key, len(value))
+		}
+	}
+}
+
+func TestTruncateStringPreservesUTF8Boundary(t *testing.T) {
+	value := "abc世界"
+	got := truncateString(value, 5)
+	if got != "abc" {
+		t.Fatalf("truncateString split UTF-8 boundary: %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateString returned invalid UTF-8: %x", []byte(got))
+	}
+}
+
+func TestLuaAPICallBudget(t *testing.T) {
+	calls := 0
+	req := RequestView{}
+	req.SetRuntimeHooks(func(string, string) { calls++ }, nil)
+	src := `
+function handle(ctx)
+  for i = 1, 256 do ctx.log("info", "x") end
+  return "observe"
+end`
+	if dec := evalOne(t, src, req, nil); dec.Action != "observe" {
+		t.Fatalf("API 调用预算不应改变合法判定：%+v", dec)
+	}
+	if calls != maxAPICalls {
+		t.Fatalf("API 调用次数 = %d, want %d", calls, maxAPICalls)
 	}
 }

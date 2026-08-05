@@ -1,22 +1,22 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Skeleton } from "@/components/ui/skeleton";
+} from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,84 +27,99 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
-import { toast } from "sonner";
-import { IconDeviceFloppy, IconRefresh, IconEye } from "@tabler/icons-react";
+} from "@/components/ui/alert-dialog"
+import { toast } from "sonner"
+import { IconDeviceFloppy, IconRefresh, IconEye } from "@tabler/icons-react"
+import { pageTemplateApi } from "@/lib/api"
 import {
   usePageTemplate,
   usePageTemplateUpdate,
   usePageTemplateReset,
-  usePageTemplatePreview,
-} from "@/hooks/use-api";
+} from "@/hooks/use-api"
 
-const TEMPLATE_TYPES = ["captcha", "challenge", "block"] as const;
-type TemplateType = (typeof TEMPLATE_TYPES)[number];
-
-
+const TEMPLATE_TYPES = ["captcha", "challenge", "block"] as const
+type TemplateType = (typeof TEMPLATE_TYPES)[number]
 
 function TemplateEditor({ type }: { type: TemplateType }) {
-  const { t } = useTranslation();
-  const { data, isLoading, error, mutate } = usePageTemplate(type);
-  const updateTemplate = usePageTemplateUpdate();
-  const resetTemplate = usePageTemplateReset();
-  const { data: previewData, mutate: refreshPreview } = usePageTemplatePreview(type);
+  const { t } = useTranslation()
+  const { data, isLoading, error, mutate } = usePageTemplate(type)
+  const updateTemplate = usePageTemplateUpdate()
+  const resetTemplate = usePageTemplateReset()
 
-  const [prevData, setPrevData] = useState(data);
-  const [form, setForm] = useState<Record<string, string>>(data ? (data as Record<string, string>) : {});
-  const [showPreview, setShowPreview] = useState(false);
+  const [prevData, setPrevData] = useState(data)
+  const [form, setForm] = useState<Record<string, string>>(
+    data ? (data as Record<string, string>) : {}
+  )
+  const [showPreview, setShowPreview] = useState(false)
+  const [previewHtml, setPreviewHtml] = useState("")
+  const [previewLoading, setPreviewLoading] = useState(false)
 
   if (data !== prevData) {
-    setPrevData(data);
-    if (data) setForm(data as Record<string, string>);
+    setPrevData(data)
+    if (data) setForm(data as Record<string, string>)
   }
 
   const setField = (key: string, value: string) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  };
+    setForm((prev) => ({ ...prev, [key]: value }))
+  }
 
   const handleSave = async () => {
     try {
-      await updateTemplate.execute({ type, data: form });
-      await mutate();
-      await refreshPreview();
-      toast.success(t("pageTemplates.saved"));
+      await updateTemplate.execute({ type, data: form })
+      await mutate()
+      toast.success(t("pageTemplates.saved"))
     } catch {
-      toast.error(t("pageTemplates.saveFailed"));
+      toast.error(t("pageTemplates.saveFailed"))
     }
-  };
+  }
 
   const handleReset = async () => {
     try {
-      await resetTemplate.execute(type);
-      await mutate();
-      await refreshPreview();
-      toast.success(t("pageTemplates.resetSuccess"));
+      await resetTemplate.execute(type)
+      await mutate()
+      toast.success(t("pageTemplates.resetSuccess"))
     } catch {
-      toast.error(t("pageTemplates.resetFailed"));
+      toast.error(t("pageTemplates.resetFailed"))
     }
-  };
+  }
 
-  const extraFields: { key: string; label: string }[] = [];
+  const handlePreview = async () => {
+    const next = !showPreview
+    setShowPreview(next)
+    if (!next) return
+    setPreviewLoading(true)
+    try {
+      const html = await pageTemplateApi.previewDraft(type, form)
+      setPreviewHtml(typeof html === "string" ? html : String(html ?? ""))
+    } catch {
+      setPreviewHtml("")
+      toast.error(t("pageTemplates.previewFailed", { defaultValue: "Preview failed" }))
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
+  const extraFields: { key: string; label: string }[] = []
   if (type === "captcha") {
     extraFields.push(
       { key: "subtitle", label: t("pageTemplates.subtitle") },
       { key: "subtitle_zh", label: t("pageTemplates.subtitleZh") },
       { key: "submit_text", label: t("pageTemplates.submitText") }
-    );
+    )
   } else if (type === "challenge") {
     extraFields.push(
       { key: "checking_text", label: t("pageTemplates.checkingText") },
       { key: "checking_text_zh", label: t("pageTemplates.checkingTextZh") },
       { key: "wait_text", label: t("pageTemplates.waitText") },
       { key: "wait_text_zh", label: t("pageTemplates.waitTextZh") }
-    );
+    )
   } else if (type === "block") {
     extraFields.push(
       { key: "block_title", label: t("pageTemplates.blockTitle") },
       { key: "block_message", label: t("pageTemplates.blockMessage") },
       { key: "rate_limit_title", label: t("pageTemplates.rateLimitTitle") },
       { key: "rate_limit_message", label: t("pageTemplates.rateLimitMsg") }
-    );
+    )
   }
 
   if (isLoading) {
@@ -114,16 +129,18 @@ function TemplateEditor({ type }: { type: TemplateType }) {
         <Skeleton className="h-10 w-full" />
         <Skeleton className="h-10 w-full" />
       </div>
-    );
+    )
   }
 
   if (error) {
     return (
       <Alert variant="destructive">
         <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
-        <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+        <AlertDescription>
+          {(error as Error)?.message || t("error.unexpectedError")}
+        </AlertDescription>
       </Alert>
-    );
+    )
   }
 
   return (
@@ -206,7 +223,8 @@ function TemplateEditor({ type }: { type: TemplateType }) {
         </Button>
         <Button
           variant="outline"
-          onClick={() => setShowPreview(!showPreview)}
+          onClick={handlePreview}
+          disabled={previewLoading}
         >
           <IconEye className="mr-1 h-4 w-4" />
           {t("pageTemplates.preview")}
@@ -220,35 +238,43 @@ function TemplateEditor({ type }: { type: TemplateType }) {
           </AlertDialogTrigger>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>{t("pageTemplates.resetConfirm")}</AlertDialogTitle>
+              <AlertDialogTitle>
+                {t("pageTemplates.resetConfirm")}
+              </AlertDialogTitle>
               <AlertDialogDescription>
                 {t("pageTemplates.resetConfirmDesc")}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleReset}>Confirm</AlertDialogAction>
+              <AlertDialogAction onClick={handleReset}>
+                Confirm
+              </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
       </div>
 
-      {showPreview && previewData && (
-        <div className="mt-4 rounded-lg border overflow-hidden">
-          <iframe
-            srcDoc={typeof previewData === "string" ? previewData : (previewData as { html?: string }).html || ""}
-            className="w-full h-[500px]"
-            sandbox="allow-same-origin"
-            title="Template Preview"
-          />
+      {showPreview && (
+        <div className="mt-4 overflow-hidden rounded-lg border">
+          {previewLoading ? (
+            <Skeleton className="h-[500px] w-full" />
+          ) : (
+            <iframe
+              srcDoc={previewHtml}
+              className="h-[500px] w-full"
+              sandbox="allow-same-origin"
+              title="Template Preview"
+            />
+          )}
         </div>
       )}
     </div>
-  );
+  )
 }
 
 export default function PageTemplatesPage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   return (
     <div className="space-y-6">
@@ -282,5 +308,5 @@ export default function PageTemplatesPage() {
         ))}
       </Tabs>
     </div>
-  );
+  )
 }

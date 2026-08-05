@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -4996,4 +4997,425 @@ func reserveUDPBind(t *testing.T) string {
 		t.Fatalf("release UDP bind: %v", err)
 	}
 	return addr
+}
+
+func TestHTTP3WebSocketConnectDetection(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *http.Request
+		want bool
+	}{
+		{
+			name: "extended connect",
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodConnect, "https://example.test/socket", nil)
+				r.Proto = "websocket"
+				return r
+			}(),
+			want: true,
+		},
+		{
+			name: "ordinary connect",
+			req:  httptest.NewRequest(http.MethodConnect, "https://example.test/socket", nil),
+			want: false,
+		},
+		{
+			name: "ordinary websocket upgrade method",
+			req:  httptest.NewRequest(http.MethodGet, "https://example.test/socket", nil),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isHTTP3WebSocketConnect(tt.req); got != tt.want {
+				t.Fatalf("extended CONNECT detection = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewHTTP3WebSocketLoopbackRequest(t *testing.T) {
+	const host = "websocket.example.test"
+	r, err := http.NewRequest(http.MethodConnect, "https://"+host+"/socket/a%2Fb?x=1;semi=2", nil)
+	if err != nil {
+		t.Fatalf("build HTTP/3 extended CONNECT request: %v", err)
+	}
+	r.Proto = "websocket"
+	r.RemoteAddr = "192.0.2.1:1234"
+	r.Host = host
+	r.Header.Set("Origin", "https://origin.example.test")
+	r.Header.Set("Cookie", "session=redacted")
+	r.Header.Set("Authorization", "Bearer redacted")
+	r.Header.Set("Sec-WebSocket-Protocol", "chat")
+	r.Header.Set("Sec-WebSocket-Extensions", "permessage-deflate")
+	r.Header.Set("X-Forwarded-For", "spoofed.example")
+	r.Header.Set(dataplane.InternalHTTP3TLSJA3Header, "stale")
+
+	out, err := newHTTP3WebSocketLoopbackRequest(r.Context(), r, "127.0.0.1:18443")
+	if err != nil {
+		t.Fatalf("build loopback request: %v", err)
+	}
+	if out.Method != http.MethodGet {
+		t.Fatalf("loopback method = %q, want GET", out.Method)
+	}
+	if out.URL.Host != "127.0.0.1:18443" {
+		t.Fatalf("loopback URL host = %q", out.URL.Host)
+	}
+	if got := out.URL.RequestURI(); got != "/socket/a%2Fb?x=1;semi=2" {
+		t.Fatalf("loopback request URI = %q", got)
+	}
+	if out.Host != host {
+		t.Fatalf("loopback Host = %q, want %q", out.Host, host)
+	}
+	if got := out.Header.Get("Origin"); got != "https://origin.example.test" {
+		t.Fatalf("Origin = %q", got)
+	}
+	if got := out.Header.Get("Cookie"); got != "session=redacted" {
+		t.Fatalf("Cookie = %q", got)
+	}
+	if got := out.Header.Get("Authorization"); got != "Bearer redacted" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := out.Header.Get("Sec-WebSocket-Protocol"); got != "chat" {
+		t.Fatalf("Sec-WebSocket-Protocol = %q", got)
+	}
+	if got := out.Header.Get("Sec-WebSocket-Extensions"); got != "permessage-deflate" {
+		t.Fatalf("Sec-WebSocket-Extensions = %q", got)
+	}
+	if got := out.Header.Get("Connection"); got != "Upgrade" {
+		t.Fatalf("Connection = %q, want Upgrade", got)
+	}
+	if got := out.Header.Get("Upgrade"); got != "websocket" {
+		t.Fatalf("Upgrade = %q, want websocket", got)
+	}
+	if got := out.Header.Get("Sec-WebSocket-Version"); got != "13" {
+		t.Fatalf("Sec-WebSocket-Version = %q, want 13", got)
+	}
+	key, err := base64.StdEncoding.DecodeString(out.Header.Get("Sec-WebSocket-Key"))
+	if err != nil || len(key) != 16 {
+		t.Fatalf("Sec-WebSocket-Key = %q, decoded length = %d, error = %v", out.Header.Get("Sec-WebSocket-Key"), len(key), err)
+	}
+	if got := out.Header.Get("X-Forwarded-Host"); got != host {
+		t.Fatalf("X-Forwarded-Host = %q, want %q", got, host)
+	}
+	if got := out.Header.Get("X-Forwarded-Proto"); got != "h3" {
+		t.Fatalf("X-Forwarded-Proto = %q, want h3", got)
+	}
+	if got := out.Header.Get(dataplane.InternalHTTP3ProtoHeader); got != "h3" {
+		t.Fatalf("internal HTTP/3 proto = %q, want h3", got)
+	}
+	if got := out.Header.Get(dataplane.InternalHTTP3TLSJA3Header); got != "" {
+		t.Fatalf("stale internal TLS metadata = %q, want empty", got)
+	}
+	if got := out.Header.Get("X-Forwarded-For"); got != "192.0.2.1" {
+		t.Fatalf("X-Forwarded-For = %q, want trusted client address", got)
+	}
+}
+
+func TestCopyHTTP3WebSocketResponseHeaders(t *testing.T) {
+	src := http.Header{
+		"Connection":               []string{"Upgrade, X-Connection-Only"},
+		"Upgrade":                  []string{"websocket"},
+		"X-Connection-Only":        []string{"remove"},
+		"Sec-WebSocket-Accept":     []string{"remove-on-upgrade"},
+		"Sec-WebSocket-Protocol":   []string{"chat"},
+		"Sec-WebSocket-Extensions": []string{"permessage-deflate"},
+		"Content-Type":             []string{"application/octet-stream"},
+	}
+	dst := make(http.Header)
+	copyHTTP3WebSocketResponseHeaders(dst, src, true)
+	for _, key := range []string{"Connection", "Upgrade", "X-Connection-Only", "Sec-WebSocket-Accept"} {
+		if got := dst.Get(key); got != "" {
+			t.Fatalf("response header %s = %q, want filtered", key, got)
+		}
+	}
+	for key, want := range map[string]string{
+		"Sec-WebSocket-Protocol":   "chat",
+		"Sec-WebSocket-Extensions": "permessage-deflate",
+		"Content-Type":             "application/octet-stream",
+	} {
+		if got := dst.Get(key); got != want {
+			t.Fatalf("response header %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestBridgeHTTP3WebSocketStreamsCopiesBothDirections(t *testing.T) {
+	requestBodyReader, requestBodyWriter := io.Pipe()
+	loopbackPeer, loopbackStream := net.Pipe()
+	h3Peer, h3Stream := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bridgeHTTP3WebSocketStreams(ctx, requestBodyReader, h3Stream, loopbackStream)
+	}()
+
+	clientPayload := []byte("client-to-upstream")
+	writeClient := make(chan error, 1)
+	go func() {
+		_, err := requestBodyWriter.Write(clientPayload)
+		writeClient <- err
+	}()
+	gotClient := make([]byte, len(clientPayload))
+	if _, err := io.ReadFull(loopbackPeer, gotClient); err != nil {
+		t.Fatalf("read client payload at loopback: %v", err)
+	}
+	if string(gotClient) != string(clientPayload) {
+		t.Fatalf("client payload = %q, want %q", gotClient, clientPayload)
+	}
+	if err := <-writeClient; err != nil {
+		t.Fatalf("write client payload: %v", err)
+	}
+
+	serverPayload := []byte("upstream-to-client")
+	writeServer := make(chan error, 1)
+	go func() {
+		_, err := loopbackPeer.Write(serverPayload)
+		writeServer <- err
+	}()
+	gotServer := make([]byte, len(serverPayload))
+	if _, err := io.ReadFull(h3Peer, gotServer); err != nil {
+		t.Fatalf("read server payload at HTTP/3 stream: %v", err)
+	}
+	if string(gotServer) != string(serverPayload) {
+		t.Fatalf("server payload = %q, want %q", gotServer, serverPayload)
+	}
+	if err := <-writeServer; err != nil {
+		t.Fatalf("write server payload: %v", err)
+	}
+
+	_ = loopbackPeer.Close()
+	_ = requestBodyWriter.Close()
+	if err := <-done; err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("bridge streams: %v", err)
+	}
+}
+
+func TestHTTP3ServerBridgesExtendedConnectWebSocket(t *testing.T) {
+	const host = "h3-websocket.example.test"
+	const clientPayload = "client-to-loopback"
+	const serverPayload = "loopback-to-client"
+
+	type observedRequest struct {
+		method         string
+		path           string
+		host           string
+		origin         string
+		connection     string
+		upgrade        string
+		key            string
+		version        string
+		forwardedHost  string
+		forwardedProto string
+		internalProto  string
+	}
+	observed := make(chan observedRequest, 1)
+	loopbackDone := make(chan error, 1)
+	loopback := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observed <- observedRequest{
+			method:         r.Method,
+			path:           r.URL.RequestURI(),
+			host:           r.Host,
+			origin:         r.Header.Get("Origin"),
+			connection:     r.Header.Get("Connection"),
+			upgrade:        r.Header.Get("Upgrade"),
+			key:            r.Header.Get("Sec-WebSocket-Key"),
+			version:        r.Header.Get("Sec-WebSocket-Version"),
+			forwardedHost:  r.Header.Get("X-Forwarded-Host"),
+			forwardedProto: r.Header.Get("X-Forwarded-Proto"),
+			internalProto:  r.Header.Get(dataplane.InternalHTTP3ProtoHeader),
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			loopbackDone <- errors.New("loopback response writer does not support hijacking")
+			return
+		}
+		conn, readWriter, err := hijacker.Hijack()
+		if err != nil {
+			loopbackDone <- err
+			return
+		}
+		defer conn.Close()
+		if _, err := io.WriteString(readWriter, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: loopback-accept\r\nSec-WebSocket-Protocol: chat\r\nSec-WebSocket-Extensions: permessage-deflate\r\nX-WebSocket-Bridge: active\r\n\r\n"); err != nil {
+			loopbackDone <- err
+			return
+		}
+		if err := readWriter.Flush(); err != nil {
+			loopbackDone <- err
+			return
+		}
+		payload := make([]byte, len(clientPayload))
+		if _, err := io.ReadFull(conn, payload); err != nil {
+			loopbackDone <- err
+			return
+		}
+		if string(payload) != clientPayload {
+			loopbackDone <- errors.New("loopback received unexpected client payload")
+			return
+		}
+		_, err = io.WriteString(conn, serverPayload)
+		loopbackDone <- err
+	}))
+	loopback.TLS = &tls.Config{NextProtos: []string{"http/1.1"}}
+	loopback.StartTLS()
+	t.Cleanup(loopback.Close)
+
+	_, _, cert := mustHTTP3TestCertificate(t, host)
+	udpBind := reserveUDPBind(t)
+	h3Srv := NewHTTP3Server(HTTP3ServerConfig{
+		Bind: udpBind,
+		RouteTable: http3RouteTable{
+			exact: map[string]string{host: loopback.Listener.Addr().String()},
+		},
+		TLSConfig: &tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			Certificates: []tls.Certificate{cert},
+		},
+		Log: slog.Default(),
+	})
+	go h3Srv.Spin()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = h3Srv.Shutdown(ctx)
+	})
+
+	transport := &http3.Transport{TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         host,
+	}}
+	t.Cleanup(func() { _ = transport.Close() })
+	requestBody, requestWriter := io.Pipe()
+	t.Cleanup(func() { _ = requestWriter.Close() })
+	req, err := http.NewRequest(http.MethodConnect, "https://"+udpBind+"/socket/a%2Fb?keep=1", requestBody)
+	if err != nil {
+		t.Fatalf("build extended CONNECT request: %v", err)
+	}
+	req.Proto = "websocket"
+	req.Host = host
+	req.Header.Set("Origin", "https://origin.example.test")
+
+	responseCh := make(chan struct {
+		resp *http.Response
+		err  error
+	}, 1)
+	go func() {
+		resp, err := transport.RoundTrip(req)
+		responseCh <- struct {
+			resp *http.Response
+			err  error
+		}{resp: resp, err: err}
+	}()
+	var resp *http.Response
+	select {
+	case result := <-responseCh:
+		if result.err != nil {
+			t.Fatalf("send extended CONNECT request: %v", result.err)
+		}
+		resp = result.resp
+	case <-time.After(5 * time.Second):
+		t.Fatal("extended CONNECT response did not arrive")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HTTP/3 bridge status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	for key, want := range map[string]string{
+		"Sec-WebSocket-Protocol":   "chat",
+		"Sec-WebSocket-Extensions": "permessage-deflate",
+		"X-WebSocket-Bridge":       "active",
+	} {
+		if got := resp.Header.Get(key); got != want {
+			t.Fatalf("HTTP/3 bridge response header %s = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"Connection", "Upgrade", "Sec-WebSocket-Accept"} {
+		if got := resp.Header.Get(key); got != "" {
+			t.Fatalf("HTTP/3 bridge response header %s = %q, want filtered", key, got)
+		}
+	}
+
+	if _, err := io.WriteString(requestWriter, clientPayload); err != nil {
+		t.Fatalf("write extended CONNECT payload: %v", err)
+	}
+	payload := make([]byte, len(serverPayload))
+	if _, err := io.ReadFull(resp.Body, payload); err != nil {
+		t.Fatalf("read bridge response payload: %v", err)
+	}
+	if string(payload) != serverPayload {
+		t.Fatalf("bridge response payload = %q, want %q", payload, serverPayload)
+	}
+	_ = requestWriter.Close()
+
+	select {
+	case got := <-observed:
+		if got.method != http.MethodGet {
+			t.Fatalf("loopback method = %q, want GET", got.method)
+		}
+		if got.path != "/socket/a%2Fb?keep=1" {
+			t.Fatalf("loopback path = %q", got.path)
+		}
+		if got.host != host || got.forwardedHost != host {
+			t.Fatalf("loopback hosts = %q, %q; want %q", got.host, got.forwardedHost, host)
+		}
+		if got.origin != "https://origin.example.test" {
+			t.Fatalf("loopback Origin = %q", got.origin)
+		}
+		if got.connection != "Upgrade" || got.upgrade != "websocket" || got.version != "13" || got.key == "" {
+			t.Fatalf("loopback WebSocket handshake = %+v", got)
+		}
+		if got.forwardedProto != "h3" || got.internalProto != "h3" {
+			t.Fatalf("loopback HTTP/3 markers = %q, %q", got.forwardedProto, got.internalProto)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loopback did not receive WebSocket handshake")
+	}
+	select {
+	case err := <-loopbackDone:
+		if err != nil {
+			t.Fatalf("loopback bridge: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loopback bridge did not finish")
+	}
+}
+
+func TestBridgeHTTP3WebSocketStreamsStopsOnCancellation(t *testing.T) {
+	requestBodyReader, requestBodyWriter := io.Pipe()
+	loopbackPeer, loopbackStream := net.Pipe()
+	h3Peer, h3Stream := net.Pipe()
+	defer requestBodyWriter.Close()
+	defer loopbackPeer.Close()
+	defer h3Peer.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- bridgeHTTP3WebSocketStreams(ctx, requestBodyReader, h3Stream, loopbackStream)
+	}()
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("canceled WebSocket bridge did not stop")
+	}
+}
+
+func TestHTTP3ServerShutdownCancelsWebSocketBridge(t *testing.T) {
+	server := &HTTP3Server{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unregister := server.registerLoopbackCancel(cancel)
+	defer unregister()
+
+	server.cancelActiveLoopbackRequests()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("HTTP/3 shutdown did not cancel WebSocket loopback request")
+	}
 }

@@ -9,10 +9,10 @@
  *   存在受管监听器时用 `" / "` 连接各 `listener.Bind`，否则直接取 `site.bind`。
  */
 
-import type { Site } from "@/lib/types";
+import type { Site } from "@/lib/types"
 
 /** 站点在列表中的运行姿态，由后端字段推导而来 */
-export type SiteMode = "protection" | "observe" | "maintenance";
+export type SiteMode = "protection" | "observe" | "maintenance"
 
 /**
  * 解析站点上游地址列表。
@@ -24,17 +24,17 @@ export type SiteMode = "protection" | "observe" | "maintenance";
  * @returns {string[]} 去空白后的上游地址列表
  */
 export function parseUpstreamUrls(raw?: string | null): string[] {
-  const text = (raw || "").trim();
-  if (!text) return [];
+  const text = (raw || "").trim()
+  if (!text) return []
 
   if (text.startsWith("[")) {
     try {
-      const parsed: unknown = JSON.parse(text);
+      const parsed: unknown = JSON.parse(text)
       if (Array.isArray(parsed)) {
         return parsed
           .filter((v): v is string => typeof v === "string")
           .map((v) => v.trim())
-          .filter(Boolean);
+          .filter(Boolean)
       }
     } catch {
       // JSON 解析失败时退回逗号分隔，与后端的宽松处理保持一致
@@ -44,7 +44,33 @@ export function parseUpstreamUrls(raw?: string | null): string[] {
   return text
     .split(",")
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+}
+
+/**
+ * 解析站点 Host 列表。
+ *
+ * 后端 `internal/snapshot/build.go` 的 `splitHosts` 仅按英文逗号分隔，
+ * 因此前端保存和展示都必须使用同一规则。
+ *
+ * @param {string | null | undefined} raw 站点 `host` 原始值
+ * @returns {string[]} 去空白后的 Host 列表
+ */
+export function parseSiteHosts(raw?: string | null): string[] {
+  return (raw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/**
+ * 规范化站点 Host 输入，保持后端逗号分隔格式。
+ *
+ * @param {string} raw 用户输入的 Host 串
+ * @returns {string} 逗号后带单个空格的 Host 串
+ */
+export function normalizeSiteHosts(raw: string): string {
+  return parseSiteHosts(raw).join(", ")
 }
 
 /**
@@ -55,17 +81,17 @@ export function parseUpstreamUrls(raw?: string | null): string[] {
  * @returns {string} 端口号；无法识别时回退为原始串
  */
 function extractPort(bind: string): string {
-  const idx = bind.lastIndexOf(":");
-  if (idx < 0) return bind;
-  return bind.slice(idx + 1) || bind;
+  const idx = bind.lastIndexOf(":")
+  if (idx < 0) return bind
+  return bind.slice(idx + 1) || bind
 }
 
 /** 单条监听端口的展示信息 */
 export interface SiteListenerBadge {
   /** 原始 bind 地址，用于 title 提示 */
-  bind: string;
+  bind: string
   /** 端口号 */
-  port: string;
+  port: string
   /**
    * 协议标注。
    *
@@ -73,7 +99,7 @@ export interface SiteListenerBadge {
    * 与站点级 `tls_enabled` 生成摘要）时可以确定。多监听场景下列表接口只返回聚合的
    * `tls_summary`，不含逐条监听的 TLS 状态，此时为 `null`，不做推测。
    */
-  scheme: "HTTP" | "HTTPS" | null;
+  scheme: "HTTP" | "HTTPS" | null
 }
 
 /**
@@ -83,12 +109,12 @@ export interface SiteListenerBadge {
  * @returns {SiteListenerBadge[]} 监听端口展示列表
  */
 export function parseSiteListeners(site: Site): SiteListenerBadge[] {
-  const isMulti = (site.managed_listener_count ?? 0) > 0;
-  const source = (site.listener_summary || site.bind || "").trim();
-  if (!source) return [];
+  const isMulti = (site.managed_listener_count ?? 0) > 0
+  const source = (site.listener_summary || site.bind || "").trim()
+  if (!source) return []
 
   // 受管监听器摘要用 " / " 连接；单监听时整串就是一个 bind
-  const binds = isMulti ? source.split(" / ") : [source];
+  const binds = isMulti ? source.split(" / ") : [source]
 
   return binds
     .map((b) => b.trim())
@@ -97,7 +123,7 @@ export function parseSiteListeners(site: Site): SiteListenerBadge[] {
       bind,
       port: extractPort(bind),
       scheme: isMulti ? null : site.tls_enabled ? "HTTPS" : "HTTP",
-    }));
+    }))
 }
 
 /**
@@ -110,22 +136,16 @@ export function parseSiteListeners(site: Site): SiteListenerBadge[] {
  * @returns {SiteMode} 防护姿态
  */
 export function resolveSiteMode(site: Site): SiteMode {
-  if (site.maintenance_enabled) return "maintenance";
+  if (site.maintenance_enabled) return "maintenance"
   const observeAction =
-    site.owasp_action === "observe" || site.owasp_action === "log_only";
-  if (site.owasp_enabled === false || observeAction) return "observe";
-  return "protection";
+    site.owasp_action === "observe" || site.owasp_action === "log_only"
+  if (site.owasp_enabled === false || observeAction) return "observe"
+  return "protection"
 }
 
 /** 站点已显式开启的防护能力标识 */
 export type SiteCapabilityKey =
-  | "bot"
-  | "cve"
-  | "rateLimit"
-  | "cache"
-  | "antiReplay"
-  | "dynamic"
-  | "cc";
+  "bot" | "cve" | "rateLimit" | "cache" | "antiReplay" | "dynamic" | "cc"
 
 /**
  * 汇总站点上「显式开启」的防护能力。
@@ -137,13 +157,13 @@ export type SiteCapabilityKey =
  * @returns {SiteCapabilityKey[]} 显式开启的能力列表
  */
 export function resolveSiteCapabilities(site: Site): SiteCapabilityKey[] {
-  const caps: SiteCapabilityKey[] = [];
-  if (site.bot_protection_enabled === true) caps.push("bot");
-  if (site.cve_enabled === true) caps.push("cve");
-  if (site.rate_limit_enabled === true) caps.push("rateLimit");
-  if (site.cache_enabled) caps.push("cache");
-  if (site.anti_replay_enabled) caps.push("antiReplay");
-  if (site.dynamic_protection_enabled === true) caps.push("dynamic");
-  if (site.cc_use_custom === true) caps.push("cc");
-  return caps;
+  const caps: SiteCapabilityKey[] = []
+  if (site.bot_protection_enabled === true) caps.push("bot")
+  if (site.cve_enabled === true) caps.push("cve")
+  if (site.rate_limit_enabled === true) caps.push("rateLimit")
+  if (site.cache_enabled) caps.push("cache")
+  if (site.anti_replay_enabled) caps.push("antiReplay")
+  if (site.dynamic_protection_enabled === true) caps.push("dynamic")
+  if (site.cc_use_custom === true) caps.push("cc")
+  return caps
 }

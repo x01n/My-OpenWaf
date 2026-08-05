@@ -62,6 +62,7 @@ func SiteJSONBlobKeys() []string {
 		"cipher_suites",
 		"dynamic_js_paths",
 		"cc_rules",
+		"client_ip_header_order",
 	}
 }
 
@@ -102,6 +103,9 @@ func bindSiteFromRaw(raw map[string]json.RawMessage, dst *store.Site) error {
 	}
 	if s, ok := preserved["cc_rules"]; ok {
 		dst.CCRules = s
+	}
+	if s, ok := preserved["client_ip_header_order"]; ok {
+		dst.ClientIPHeaderOrder = s
 	}
 	return nil
 }

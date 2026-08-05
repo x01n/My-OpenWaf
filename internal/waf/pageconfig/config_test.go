@@ -40,6 +40,32 @@ func TestSanitizeCSSPreservesSafeCSS(t *testing.T) {
 	}
 }
 
+func TestSafePageStyleValuesAndLogoURL(t *testing.T) {
+	defaults := DefaultPageConfig()
+	if got := SafePrimaryColor("#12aBCd", defaults.PrimaryColor); got != "#12aBCd" {
+		t.Fatalf("safe primary color rejected: %q", got)
+	}
+	if got := SafePrimaryColor("red;}</style><script>", defaults.PrimaryColor); got != defaults.PrimaryColor {
+		t.Fatalf("unsafe primary color did not fall back: %q", got)
+	}
+	if got := SafeBackground("linear-gradient(90deg,#fff 0%,#000 100%)", defaults.BgGradient); got == defaults.BgGradient {
+		t.Fatalf("safe background rejected: %q", got)
+	}
+	if got := SafeBackground("url(javascript:alert(1))", defaults.BgGradient); got != defaults.BgGradient {
+		t.Fatalf("unsafe background did not fall back: %q", got)
+	}
+	for _, safe := range []string{"/brand/logo.png", "https://cdn.example/logo.png", "http://cdn.example/logo.png"} {
+		if got := string(SafeLogoURL(safe)); got != safe {
+			t.Fatalf("SafeLogoURL(%q) = %q", safe, got)
+		}
+	}
+	for _, unsafe := range []string{"javascript:alert(1)", "data:text/html,<script>alert(1)</script>", "//evil.example/logo.png", "relative/logo.png"} {
+		if got := SafeLogoURL(unsafe); got != "" {
+			t.Fatalf("SafeLogoURL(%q) = %q, want empty", unsafe, got)
+		}
+	}
+}
+
 // TestDefaultPageConfigFields 验证默认配置包含必要的非空字段。
 func TestDefaultPageConfigFields(t *testing.T) {
 	cfg := DefaultPageConfig()
@@ -81,6 +107,38 @@ func TestDefaultBlockPageConfigFields(t *testing.T) {
 	}
 	if cfg.RateLimitTitle == "" || cfg.RateLimitMsg == "" {
 		t.Errorf("BlockPageConfig missing rate-limit fields: %+v", cfg)
+	}
+}
+
+func TestParsePageConfigsMergeStoredOverrides(t *testing.T) {
+	captcha := ParseCaptchaPageConfig(`{"brand_name":"Custom","submit_text":"Continue"}`)
+	if captcha.BrandName != "Custom" || captcha.SubmitText != "Continue" {
+		t.Fatalf("captcha overrides were not applied: %#v", captcha)
+	}
+	if captcha.Subtitle != DefaultCaptchaPageConfig().Subtitle {
+		t.Fatalf("captcha defaults were not preserved: %#v", captcha)
+	}
+
+	challenge := ParseChallengePageConfig(`{"checking_text":"Inspecting"}`)
+	if challenge.CheckingText != "Inspecting" || challenge.WaitText != DefaultChallengePageConfig().WaitText {
+		t.Fatalf("challenge config merge failed: %#v", challenge)
+	}
+
+	block := ParseBlockPageConfig(`{"block_title":"Denied"}`)
+	if block.BlockTitle != "Denied" || block.RateLimitTitle != DefaultBlockPageConfig().RateLimitTitle {
+		t.Fatalf("block config merge failed: %#v", block)
+	}
+}
+
+func TestParsePageConfigsFallBackFromInvalidJSON(t *testing.T) {
+	if got := ParseCaptchaPageConfig(`not-json`); got != DefaultCaptchaPageConfig() {
+		t.Fatalf("invalid captcha JSON did not use defaults: %#v", got)
+	}
+	if got := ParseChallengePageConfig(`not-json`); got != DefaultChallengePageConfig() {
+		t.Fatalf("invalid challenge JSON did not use defaults: %#v", got)
+	}
+	if got := ParseBlockPageConfig(`not-json`); got != DefaultBlockPageConfig() {
+		t.Fatalf("invalid block JSON did not use defaults: %#v", got)
 	}
 }
 

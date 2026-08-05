@@ -3,8 +3,10 @@ package system
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -33,7 +35,7 @@ type luaPluginRequest struct {
 // luaMaxTimeoutMS 限制单脚本超时上限。
 //
 // 脚本在数据面同步执行，允许过长会让单个慢脚本拖垮 P99 延迟。
-const luaMaxTimeoutMS = 1000
+const luaMaxTimeoutMS = 1200
 
 // ListLuaPlugins 返回全部自定义 Lua 策略脚本。
 func ListLuaPlugins(repo *repository.LuaPluginRepo) app.HandlerFunc {
@@ -69,6 +71,7 @@ func GetLuaPlugin(repo *repository.LuaPluginRepo) app.HandlerFunc {
 // 在 admin 层单独定义而非给 luaplugin.Stats 加 json tag：后者的 Go 字段名
 // （Runs/Failures/Timeouts/AvgTime）已被文档直接引用，加 tag 只会让两处命名分叉。
 type luaPluginStatsItem struct {
+	ID    uint   `json:"id"`
 	Name  string `json:"name"`
 	Stage string `json:"stage"`
 	Runs  int64  `json:"runs"`
@@ -97,6 +100,7 @@ func GetLuaPluginStats(engine *luaplugin.Engine) app.HandlerFunc {
 		items := make([]luaPluginStatsItem, 0, len(stats))
 		for _, s := range stats {
 			items = append(items, luaPluginStatsItem{
+				ID:       s.ID,
 				Name:     s.Name,
 				Stage:    s.Stage,
 				Runs:     s.Runs,
@@ -264,9 +268,10 @@ func ValidateLuaPlugin() app.HandlerFunc {
 
 // luaDryRunRequest 是试运行的请求体。
 type luaDryRunRequest struct {
-	Stage     string `json:"stage"`
-	Source    string `json:"source"`
-	TimeoutMS int    `json:"timeout_ms"`
+	Stage      string `json:"stage"`
+	Source     string `json:"source"`
+	TimeoutMS  int    `json:"timeout_ms"`
+	Iterations int    `json:"iterations"`
 	// Request 是样例请求，字段与脚本可见的 ctx 对应。
 	Request struct {
 		ClientIP    string            `json:"client_ip"`
@@ -279,7 +284,6 @@ type luaDryRunRequest struct {
 		ContentType string            `json:"content_type"`
 		Body        string            `json:"body"`
 		Headers     map[string]string `json:"headers"`
-		QueryParams map[string]string `json:"query_params"`
 		TLSVersion  string            `json:"tls_version"`
 		TLSJA3      string            `json:"tls_ja3"`
 		TLSJA4      string            `json:"tls_ja4"`
@@ -290,6 +294,8 @@ type luaDryRunRequest struct {
 	} `json:"request"`
 }
 
+// queryParams 将试运行原始查询串转换为与数据面一致的 Lua 查询参数视图。
+// 重复键保留第一个值；非法编码作为空参数处理。
 // DryRunLuaPlugin 用样例请求试运行脚本，不影响线上配置。
 //
 // 策略脚本的错误往往只在真实请求形态下暴露，光有语法校验不够；
@@ -307,10 +313,11 @@ func DryRunLuaPlugin(kv luaplugin.KVBackend) app.HandlerFunc {
 			return
 		}
 
-		timeout := time.Duration(req.TimeoutMS) * time.Millisecond
-		if req.TimeoutMS <= 0 || req.TimeoutMS > luaMaxTimeoutMS {
-			timeout = 0 // 交由 DryRun 使用默认值
+		if req.TimeoutMS < 0 || req.TimeoutMS > luaMaxTimeoutMS {
+			c.JSON(400, map[string]string{"error": "timeout_ms must be between 0 and 1200"})
+			return
 		}
+		timeout := time.Duration(req.TimeoutMS) * time.Millisecond
 
 		view := luaplugin.RequestView{
 			RequestID:   "dry-run",
@@ -324,7 +331,6 @@ func DryRunLuaPlugin(kv luaplugin.KVBackend) app.HandlerFunc {
 			ContentType: req.Request.ContentType,
 			Body:        req.Request.Body,
 			Headers:     req.Request.Headers,
-			QueryParams: req.Request.QueryParams,
 			TLSVersion:  req.Request.TLSVersion,
 			TLSJA3:      req.Request.TLSJA3,
 			TLSJA4:      req.Request.TLSJA4,
@@ -332,8 +338,37 @@ func DryRunLuaPlugin(kv luaplugin.KVBackend) app.HandlerFunc {
 			Phase:       req.Request.Phase,
 			Action:      req.Request.Action,
 		}
+		populateDryRunQuery(&req, &view)
+		if stage == luaplugin.StagePre {
+			view.Phase = ""
+			view.Action = ""
+		}
 
-		c.JSON(200, luaplugin.DryRun(stage, req.Source, view, kv, timeout))
+		c.JSON(200, luaplugin.DryRunN(stage, req.Source, view, kv, timeout, req.Iterations))
+	}
+}
+
+func populateDryRunQuery(req *luaDryRunRequest, view *luaplugin.RequestView) {
+	if view == nil {
+		return
+	}
+	view.QueryParams = nil
+	view.QueryValues = nil
+	if req == nil || req.Request.Query == "" {
+		return
+	}
+	values, err := url.ParseQuery(req.Request.Query)
+	if err != nil {
+		return
+	}
+	view.QueryParams = make(map[string]string, len(values))
+	view.QueryValues = make(map[string][]string, len(values))
+	for key, items := range values {
+		if len(items) == 0 {
+			continue
+		}
+		view.QueryParams[key] = items[0]
+		view.QueryValues[key] = append([]string(nil), items...)
 	}
 }
 
@@ -347,6 +382,12 @@ func DryRunLuaPlugin(kv luaplugin.KVBackend) app.HandlerFunc {
  */
 func applyLuaPluginRequest(item *store.LuaPlugin, req luaPluginRequest, creating bool) string {
 	if name := strings.TrimSpace(req.Name); name != "" {
+		if !utf8.ValidString(name) {
+			return "name must be valid UTF-8"
+		}
+		if utf8.RuneCountInString(name) > 128 {
+			return "name must be at most 128 characters"
+		}
 		item.Name = name
 	} else if creating {
 		return "name is required"
@@ -381,11 +422,17 @@ func applyLuaPluginRequest(item *store.LuaPlugin, req luaPluginRequest, creating
 	}
 	if req.TimeoutMS != nil {
 		if *req.TimeoutMS < 0 || *req.TimeoutMS > luaMaxTimeoutMS {
-			return "timeout_ms must be between 0 and 1000"
+			return "timeout_ms must be between 0 and 1200"
 		}
 		item.TimeoutMS = *req.TimeoutMS
 	}
 	if req.Description != nil {
+		if !utf8.ValidString(*req.Description) {
+			return "description must be valid UTF-8"
+		}
+		if utf8.RuneCountInString(*req.Description) > 512 {
+			return "description must be at most 512 characters"
+		}
 		item.Description = *req.Description
 	}
 

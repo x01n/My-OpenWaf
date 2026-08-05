@@ -1,24 +1,29 @@
-"use client";
+"use client"
 
-import { useMemo, useState, useSyncExternalStore } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { useSites, useSiteDelete, useSiteStart, useSiteStop } from "@/hooks/use-api";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { useMemo, useState, useSyncExternalStore } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import {
+  useSites,
+  useSiteDelete,
+  useSiteStart,
+  useSiteStop,
+} from "@/hooks/use-api"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Input } from "@/components/ui/input"
+import { Skeleton } from "@/components/ui/skeleton"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { ConfirmDialog } from "@/components/confirm-dialog";
-import { EmptyState } from "@/components/empty-state";
-import { MetricTile } from "@/components/metric-tile";
-import { toast } from "sonner";
+} from "@/components/ui/tooltip"
+import { ConfirmDialog } from "@/components/confirm-dialog"
+import { EmptyState } from "@/components/empty-state"
+import { MetricTile } from "@/components/metric-tile"
+import { toast } from "sonner"
 import {
   IconLayoutGrid,
   IconList,
@@ -29,19 +34,19 @@ import {
   IconShieldCheck,
   IconWorld,
   IconWorldOff,
-} from "@tabler/icons-react";
-import type { Site } from "@/lib/types";
-import { SiteFormDialog } from "./components/site-form-dialog";
-import { SiteCard } from "./components/site-card";
-import { SiteTable } from "./components/site-table";
+} from "@tabler/icons-react"
+import type { Site } from "@/lib/types"
+import { SiteFormDialog } from "./components/site-form-dialog"
+import { SiteCard } from "./components/site-card"
+import { SiteTable } from "./components/site-table"
 
 /** 列表展现形式 */
-type ViewMode = "table" | "grid";
+type ViewMode = "table" | "grid"
 /** 运行状态筛选 */
-type StatusFilter = "all" | "running" | "stopped";
+type StatusFilter = "all" | "running" | "stopped"
 
 /** 视图偏好的本地存储键 */
-const VIEW_STORAGE_KEY = "owaf.sites.view";
+const VIEW_STORAGE_KEY = "owaf.sites.view"
 
 /**
  * 视图偏好的外部存储。
@@ -50,21 +55,21 @@ const VIEW_STORAGE_KEY = "owaf.sites.view";
  * 在 effect 里 setState 又会引发级联渲染。这里用 `useSyncExternalStore` 的标准做法：
  * 服务端快照固定返回默认视图，客户端水合后再切到用户偏好。
  */
-const viewListeners = new Set<() => void>();
-let cachedView: ViewMode | null = null;
+const viewListeners = new Set<() => void>()
+let cachedView: ViewMode | null = null
 
 /** @returns {ViewMode} 客户端当前视图偏好（缓存以保证快照引用稳定） */
 function getViewSnapshot(): ViewMode {
   if (cachedView === null) {
-    const saved = window.localStorage.getItem(VIEW_STORAGE_KEY);
-    cachedView = saved === "grid" || saved === "table" ? saved : "table";
+    const saved = window.localStorage.getItem(VIEW_STORAGE_KEY)
+    cachedView = saved === "grid" || saved === "table" ? saved : "table"
   }
-  return cachedView;
+  return cachedView
 }
 
 /** @returns {ViewMode} 预渲染阶段使用的默认视图 */
 function getViewServerSnapshot(): ViewMode {
-  return "table";
+  return "table"
 }
 
 /**
@@ -72,10 +77,10 @@ function getViewServerSnapshot(): ViewMode {
  * @returns {() => void} 取消订阅
  */
 function subscribeView(onChange: () => void): () => void {
-  viewListeners.add(onChange);
+  viewListeners.add(onChange)
   return () => {
-    viewListeners.delete(onChange);
-  };
+    viewListeners.delete(onChange)
+  }
 }
 
 /**
@@ -83,105 +88,105 @@ function subscribeView(onChange: () => void): () => void {
  * @param {ViewMode} next 目标视图
  */
 function setStoredView(next: ViewMode): void {
-  cachedView = next;
-  window.localStorage.setItem(VIEW_STORAGE_KEY, next);
-  viewListeners.forEach((listener) => listener());
+  cachedView = next
+  window.localStorage.setItem(VIEW_STORAGE_KEY, next)
+  viewListeners.forEach((listener) => listener())
 }
 
 export default function SitesPage() {
-  const { t } = useTranslation();
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const { t } = useTranslation()
+  const [search, setSearch] = useState("")
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
   const view = useSyncExternalStore(
     subscribeView,
     getViewSnapshot,
     getViewServerSnapshot
-  );
-  const [showForm, setShowForm] = useState(false);
-  const [editingSite, setEditingSite] = useState<Site | null>(null);
-  const [deletingSite, setDeletingSite] = useState<Site | null>(null);
+  )
+  const [showForm, setShowForm] = useState(false)
+  const [editingSite, setEditingSite] = useState<Site | null>(null)
+  const [deletingSite, setDeletingSite] = useState<Site | null>(null)
 
-  const { data, isLoading, error } = useSites({ page: 1, page_size: 50 });
-  const deleteSite = useSiteDelete();
-  const startSite = useSiteStart();
-  const stopSite = useSiteStop();
+  const { data, isLoading, error } = useSites({ page: 1, page_size: 50 })
+  const deleteSite = useSiteDelete()
+  const startSite = useSiteStart()
+  const stopSite = useSiteStop()
 
   const handleViewChange = (next: string) => {
-    if (next !== "grid" && next !== "table") return;
-    setStoredView(next);
-  };
+    if (next !== "grid" && next !== "table") return
+    setStoredView(next)
+  }
 
-  const allItems = useMemo(() => data?.items || [], [data?.items]);
-  const total = data?.total || 0;
+  const allItems = useMemo(() => data?.items || [], [data?.items])
+  const total = data?.total || 0
 
   /**
    * 统计口径：`total` 是后端返回的全局总数；运行中/已停止/维护中只能基于
    * 已加载的这一页数据统计。当总数超过已加载数量时在指标区标注口径。
    */
-  const loadedCount = allItems.length;
-  const isPartialScope = total > loadedCount;
+  const loadedCount = allItems.length
+  const isPartialScope = total > loadedCount
   const runningCount = useMemo(
     () => allItems.filter((s) => s.enabled).length,
     [allItems]
-  );
+  )
   const maintenanceCount = useMemo(
     () => allItems.filter((s) => s.maintenance_enabled).length,
     [allItems]
-  );
+  )
 
   const items = useMemo(() => {
-    const keyword = search.trim().toLowerCase();
+    const keyword = search.trim().toLowerCase()
     return allItems.filter((site) => {
-      if (keyword && !site.host.toLowerCase().includes(keyword)) return false;
-      if (statusFilter === "running" && !site.enabled) return false;
-      if (statusFilter === "stopped" && site.enabled) return false;
-      return true;
-    });
-  }, [allItems, search, statusFilter]);
+      if (keyword && !site.host.toLowerCase().includes(keyword)) return false
+      if (statusFilter === "running" && !site.enabled) return false
+      if (statusFilter === "stopped" && site.enabled) return false
+      return true
+    })
+  }, [allItems, search, statusFilter])
 
-  const isFiltering = search.trim() !== "" || statusFilter !== "all";
+  const isFiltering = search.trim() !== "" || statusFilter !== "all"
 
   const handleDelete = async () => {
-    if (!deletingSite) return;
+    if (!deletingSite) return
     try {
-      await deleteSite.execute(deletingSite.id);
-      toast.success(t("sites.deleteSuccess"));
+      await deleteSite.execute(deletingSite.id)
+      toast.success(t("sites.deleteSuccess"))
     } catch {
-      toast.error(t("common.deleteFailed"));
+      toast.error(t("common.deleteFailed"))
     } finally {
-      setDeletingSite(null);
+      setDeletingSite(null)
     }
-  };
+  }
 
   const handleToggle = async (site: Site) => {
     try {
       if (site.enabled) {
-        await stopSite.execute(site.id);
-        toast.success(t("sites.stopSuccess"));
+        await stopSite.execute(site.id)
+        toast.success(t("sites.stopSuccess"))
       } else {
-        await startSite.execute(site.id);
-        toast.success(t("sites.startSuccess"));
+        await startSite.execute(site.id)
+        toast.success(t("sites.startSuccess"))
       }
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   const handleEdit = (site: Site) => {
-    setEditingSite(site);
-    setShowForm(true);
-  };
+    setEditingSite(site)
+    setShowForm(true)
+  }
 
   const openCreate = () => {
-    setEditingSite(null);
-    setShowForm(true);
-  };
+    setEditingSite(null)
+    setShowForm(true)
+  }
 
   const actionHandlers = {
     onEdit: handleEdit,
     onToggle: handleToggle,
     onDelete: setDeletingSite,
-  };
+  }
 
   return (
     <div className="space-y-4">
@@ -303,7 +308,10 @@ export default function SitesPage() {
           >
             <Tooltip>
               <TooltipTrigger asChild>
-                <ToggleGroupItem value="table" aria-label={t("sites.view.list")}>
+                <ToggleGroupItem
+                  value="table"
+                  aria-label={t("sites.view.list")}
+                >
                   <IconList className="size-4" />
                 </ToggleGroupItem>
               </TooltipTrigger>
@@ -354,8 +362,8 @@ export default function SitesPage() {
             <Button
               variant="outline"
               onClick={() => {
-                setSearch("");
-                setStatusFilter("all");
+                setSearch("")
+                setStatusFilter("all")
               }}
             >
               {t("sites.filter.reset")}
@@ -398,5 +406,5 @@ export default function SitesPage() {
         loading={deleteSite.loading}
       />
     </div>
-  );
+  )
 }

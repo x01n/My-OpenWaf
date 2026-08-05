@@ -1,21 +1,21 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import { cn } from "@/lib/utils";
+import * as React from "react"
+import { cn } from "@/lib/utils"
 
 /**
  * 缩进宽度。Lua 社区惯例为 2 空格，与内置示例脚本保持一致。
  */
-const INDENT = "  ";
+const INDENT = "  "
 
 /**
  * 行高（px）。行号栏与文本域必须逐像素对齐，因此写成常量而非分散的
  * Tailwind 类——两侧任一处改动都会立刻错位。
  */
-const LINE_HEIGHT = 20;
+const LINE_HEIGHT = 20
 
 /** 上下内边距（px），同样需要两侧一致。 */
-const PAD_Y = 12;
+const PAD_Y = 12
 
 /**
  * @typedef {object} LuaCodeEditorProps
@@ -28,13 +28,13 @@ const PAD_Y = 12;
  * @property {string} [ariaLabel] 无障碍标签
  */
 export interface LuaCodeEditorProps {
-  value: string;
-  onChange: (value: string) => void;
-  placeholder?: string;
-  rows?: number;
-  readOnly?: boolean;
-  className?: string;
-  ariaLabel?: string;
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+  rows?: number
+  readOnly?: boolean
+  className?: string
+  ariaLabel?: string
 }
 
 /**
@@ -55,13 +55,10 @@ export function LuaCodeEditor({
   className,
   ariaLabel,
 }: LuaCodeEditorProps) {
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
-  const gutterRef = React.useRef<HTMLDivElement>(null);
+  const textareaRef = React.useRef<HTMLTextAreaElement>(null)
+  const gutterRef = React.useRef<HTMLDivElement>(null)
 
-  const lineCount = React.useMemo(
-    () => value.split("\n").length,
-    [value],
-  );
+  const lineCount = React.useMemo(() => value.split("\n").length, [value])
 
   /**
    * 行号栏与文本域滚动同步。
@@ -69,12 +66,12 @@ export function LuaCodeEditor({
    * textarea 无法内嵌行号，只能并排渲染再同步 scrollTop。
    */
   const handleScroll = React.useCallback(() => {
-    const gutter = gutterRef.current;
-    const textarea = textareaRef.current;
+    const gutter = gutterRef.current
+    const textarea = textareaRef.current
     if (gutter && textarea) {
-      gutter.scrollTop = textarea.scrollTop;
+      gutter.scrollTop = textarea.scrollTop
     }
-  }, []);
+  }, [])
 
   /**
    * Tab 插入缩进而非移动焦点。
@@ -84,37 +81,37 @@ export function LuaCodeEditor({
    */
   const handleKeyDown = React.useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key !== "Tab" || e.shiftKey || readOnly) return;
-      e.preventDefault();
+      if (e.key !== "Tab" || e.shiftKey || readOnly) return
+      e.preventDefault()
 
-      const el = e.currentTarget;
-      const start = el.selectionStart;
-      const end = el.selectionEnd;
-      onChange(value.slice(0, start) + INDENT + value.slice(end));
+      const el = e.currentTarget
+      const start = el.selectionStart
+      const end = el.selectionEnd
+      onChange(value.slice(0, start) + INDENT + value.slice(end))
 
-      const caret = start + INDENT.length;
+      const caret = start + INDENT.length
       requestAnimationFrame(() => {
-        el.selectionStart = caret;
-        el.selectionEnd = caret;
-      });
+        el.selectionStart = caret
+        el.selectionEnd = caret
+      })
     },
-    [onChange, readOnly, value],
-  );
+    [onChange, readOnly, value]
+  )
 
   // 行号栏宽度随位数增长，避免四位行号被裁切。
-  const gutterWidth = `calc(${String(lineCount).length}ch + 1.25rem)`;
+  const gutterWidth = `calc(${String(lineCount).length}ch + 1.25rem)`
 
   return (
     <div
       className={cn(
         "flex overflow-hidden rounded-md border bg-muted/30 focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
-        className,
+        className
       )}
     >
       <div
         ref={gutterRef}
         aria-hidden="true"
-        className="shrink-0 select-none overflow-hidden border-e bg-muted/60 text-end font-mono text-xs text-muted-foreground"
+        className="shrink-0 overflow-hidden border-e bg-muted/60 text-end font-mono text-xs text-muted-foreground select-none"
         style={{
           width: gutterWidth,
           paddingTop: PAD_Y,
@@ -151,5 +148,5 @@ export function LuaCodeEditor({
         }}
       />
     </div>
-  );
+  )
 }

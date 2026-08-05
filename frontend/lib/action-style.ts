@@ -16,7 +16,7 @@ export type ActionTone =
   | "redirect"
   | "observe"
   | "allow"
-  | "unknown";
+  | "unknown"
 
 /** 后端动作名 -> 语义类别。键为后端实际返回的字符串，不做大小写以外的推测。 */
 const ACTION_TONE: Record<string, ActionTone> = {
@@ -33,7 +33,7 @@ const ACTION_TONE: Record<string, ActionTone> = {
   log_only: "observe",
   tag: "observe",
   allow: "allow",
-};
+}
 
 /** 语义类别 -> 徽章类名（浅/深色双向可读，边框 + 半透明底色） */
 const TONE_CLASS: Record<ActionTone, string> = {
@@ -50,7 +50,7 @@ const TONE_CLASS: Record<ActionTone, string> = {
   allow:
     "border-emerald-500/30 bg-emerald-500/12 text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-400/15 dark:text-emerald-300",
   unknown: "border-border bg-muted text-muted-foreground",
-};
+}
 
 /** 语义类别 -> 严重度分值，与后端 TerminalPriority 同序，供排序/强调使用 */
 const TONE_SEVERITY: Record<ActionTone, number> = {
@@ -62,7 +62,7 @@ const TONE_SEVERITY: Record<ActionTone, number> = {
   observe: 10,
   allow: 0,
   unknown: 0,
-};
+}
 
 /** i18n 中已存在文案的动作名（`securityEvents.action.*`），未列入的直接回显原值 */
 const TRANSLATABLE_ACTIONS = new Set([
@@ -76,7 +76,7 @@ const TRANSLATABLE_ACTIONS = new Set([
   "allow",
   "drop",
   "log_only",
-]);
+])
 
 /**
  * 解析动作字符串为语义类别。
@@ -84,8 +84,8 @@ const TRANSLATABLE_ACTIONS = new Set([
  * @returns {ActionTone} 语义类别；未知动作返回 "unknown"
  */
 export function actionTone(action?: string | null): ActionTone {
-  if (!action) return "unknown";
-  return ACTION_TONE[action.toLowerCase()] ?? "unknown";
+  if (!action) return "unknown"
+  return ACTION_TONE[action.toLowerCase()] ?? "unknown"
 }
 
 /**
@@ -94,7 +94,7 @@ export function actionTone(action?: string | null): ActionTone {
  * @returns {string} Tailwind 类名串，需与 Badge variant="outline" 搭配
  */
 export function actionBadgeClass(action?: string | null): string {
-  return TONE_CLASS[actionTone(action)];
+  return TONE_CLASS[actionTone(action)]
 }
 
 /**
@@ -103,7 +103,7 @@ export function actionBadgeClass(action?: string | null): string {
  * @returns {number} 与后端 TerminalPriority 同序的分值
  */
 export function actionSeverity(action?: string | null): number {
-  return TONE_SEVERITY[actionTone(action)];
+  return TONE_SEVERITY[actionTone(action)]
 }
 
 /**
@@ -112,5 +112,5 @@ export function actionSeverity(action?: string | null): number {
  * @returns {boolean} true 表示可用 `securityEvents.action.<action>` 取文案
  */
 export function hasActionLabel(action?: string | null): boolean {
-  return !!action && TRANSLATABLE_ACTIONS.has(action.toLowerCase());
+  return !!action && TRANSLATABLE_ACTIONS.has(action.toLowerCase())
 }

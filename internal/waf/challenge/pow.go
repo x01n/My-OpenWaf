@@ -181,11 +181,15 @@ func GeneratePoWWASMScript(difficulty int, nonce string, envKeyHex string) strin
 var %s=%s,%s=%d,%s="%s";
 var envD=window.__owaf_env?JSON.stringify(window.__owaf_env):"";
 var ek="%s";
+if(window.__owaf_pow_cancel){try{window.__owaf_pow_cancel()}catch(e){}}
 var nc=navigator.hardwareConcurrency||4;
 var bs=50000;
 var ws=[];
 var done=false;
-var wc='importScripts("'+location.origin+'/__owaf/pow_glue.js?_=%s");wasm_bindgen("'+location.origin+'/__owaf/pow.wasm?_=%s").then(function(){var off=self.__off;function batch(){if(self.__stop)return;var r=wasm_bindgen.solve_pow_batched(self.__n,self.__d,self.__p,self.__bs,off);var o=JSON.parse(r);if(o.found){var enc="";if(self.__e&&self.__k){try{enc=wasm_bindgen.encrypt_env_data(self.__e,self.__k)}catch(x){}}self.postMessage(JSON.stringify({found:true,pow:r,enc:enc}))}else{off+=self.__bs*self.__nc;self.postMessage(JSON.stringify({found:false}));setTimeout(batch,0)}}batch()}).catch(function(e){self.postMessage(JSON.stringify({error:e.message||"wasm init failed"}))});';
+function cleanup(){for(var j=0;j<ws.length;j++)ws[j].terminate();ws=[]}
+function fail(msg){if(done)return;done=true;cleanup();if(window.__owaf_pow_error)window.__owaf_pow_error(msg);else throw new Error(msg)}
+window.__owaf_pow_cancel=function(){done=true;cleanup()};
+var wc='importScripts("'+location.origin+'/__owaf/pow_glue.js?_=%s");wasm_bindgen({module_or_path:location.origin+"/__owaf/pow.wasm?_=%s"}).then(function(){var off=BigInt(self.__off);function batch(){if(self.__stop)return;try{var r=wasm_bindgen.solve_pow_batched(self.__n,self.__d,"00",self.__bs,off);var o=JSON.parse(r);if(o.found){var enc="";if(self.__e&&self.__k){try{enc=wasm_bindgen.encrypt_env_data(self.__e,self.__k)}catch(x){}}self.postMessage(JSON.stringify({found:true,pow:r,enc:enc}))}else{off+=BigInt(self.__bs*self.__nc);self.postMessage(JSON.stringify({found:false}));setTimeout(batch,0)}}catch(e){self.postMessage(JSON.stringify({error:e.message||String(e)||"pow solve failed"}))}}batch()}).catch(function(e){self.postMessage(JSON.stringify({error:e.message||"wasm init failed"}))});';
 for(var i=0;i<nc;i++){
 var code='self.__n='+JSON.stringify(%s)+';self.__d='+%s+';self.__p='+JSON.stringify(%s)+';self.__e='+JSON.stringify(envD)+';self.__k='+JSON.stringify(ek)+';self.__off='+i+'*'+bs+';self.__bs='+bs+';self.__nc='+nc+';self.__stop=false;'+wc;
 var b=new Blob([code],{type:'application/javascript'});
@@ -193,16 +197,16 @@ var w=new Worker(URL.createObjectURL(b));
 w.onmessage=function(e){
 if(done)return;
 try{var msg=JSON.parse(e.data);
-if(msg.error){done=true;for(var j=0;j<ws.length;j++)ws[j].terminate();throw new Error("[OWAF] WASM PoW failed: "+msg.error)}
+if(msg.error){fail("[OWAF] WASM PoW failed: "+msg.error);return}
 if(msg.found){done=true;
-for(var j=0;j<ws.length;j++)ws[j].terminate();
+cleanup();
 var p=JSON.parse(msg.pow);
 if(msg.enc&&!window.__owaf_env_encrypted)window.__owaf_env_encrypted=msg.enc;
 window.__powResult={nonce:%s,counter:p.counter,hash:p.hash,difficulty:%s,env_score:p.env_score,markers:p.markers,sig:p.sig};
 if(window.__owaf_pow_callback)window.__owaf_pow_callback(p.counter,p.hash,window.__powResult);
 if(window.__onPoWComplete)window.__onPoWComplete(window.__powResult);
-}}catch(ex){if(!done){done=true;for(var j=0;j<ws.length;j++)ws[j].terminate();}throw ex}};
-w.onerror=function(e){if(!done){done=true;for(var j=0;j<ws.length;j++)ws[j].terminate();throw new Error("[OWAF] WASM Worker error: "+(e.message||"unknown"))}};
+}}catch(ex){fail(ex.message||String(ex)||"[OWAF] WASM PoW failed")}};
+w.onerror=function(e){fail("[OWAF] WASM Worker error: "+(e.message||"unknown"))};
 ws.push(w);
 }
 })();`,

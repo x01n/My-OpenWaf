@@ -1,10 +1,11 @@
-"use client";
+"use client"
 
-import Link from "next/link";
-import { useTranslation } from "react-i18next";
-import { Card } from "@/components/ui/card";
-import { SiteHoverPreview } from "@/components/site-hover-preview";
-import type { Site } from "@/lib/types";
+import Link from "next/link"
+import { useTranslation } from "react-i18next"
+import { Card } from "@/components/ui/card"
+import { SiteHoverPreview } from "@/components/site-hover-preview"
+import { parseSiteHosts } from "@/lib/site-display"
+import type { Site } from "@/lib/types"
 import {
   SiteActionsMenu,
   SiteCapabilityBadges,
@@ -14,7 +15,7 @@ import {
   SiteStatusDot,
   SiteUpstream,
   type SiteActionHandlers,
-} from "./site-presentation";
+} from "./site-presentation"
 
 /**
  * 站点网格卡片。
@@ -31,7 +32,9 @@ export function SiteCard({
   onToggle,
   onDelete,
 }: { site: Site } & SiteActionHandlers) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
+  const hosts = parseSiteHosts(site.host)
+  const primaryHost = hosts[0] || site.host
 
   return (
     <Card
@@ -55,11 +58,18 @@ export function SiteCard({
             className="group/link flex min-w-0 items-center gap-2"
           >
             <SiteStatusDot enabled={site.enabled} />
-            <span
-              className="truncate text-sm font-semibold tracking-tight transition-colors group-hover/link:text-primary"
-              title={site.host}
-            >
-              {site.host}
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span
+                className="truncate text-sm font-semibold tracking-tight transition-colors group-hover/link:text-primary"
+                title={hosts.join("\n") || site.host}
+              >
+                {primaryHost}
+              </span>
+              {hosts.length > 1 && (
+                <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  +{hosts.length - 1}
+                </span>
+              )}
             </span>
           </Link>
         </SiteHoverPreview>
@@ -113,5 +123,5 @@ export function SiteCard({
         </Link>
       </div>
     </Card>
-  );
+  )
 }

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"testing"
 
 	"My-OpenWaf/internal/core/action"
@@ -90,6 +91,18 @@ func TestNewPipelineRunMatchesFreeRun(t *testing.T) {
 
 	if r1.Action.Type != r2.Action.Type {
 		t.Errorf("New().Run() = %v, Run() = %v, should match", r2.Action.Type, r1.Action.Type)
+	}
+}
+
+func TestReleaseCtxClearsRequestContext(t *testing.T) {
+	ctx := AcquireCtx()
+	ctx.Context = context.Background()
+	ReleaseCtx(ctx)
+
+	ctx = AcquireCtx()
+	defer ReleaseCtx(ctx)
+	if ctx.Context != nil {
+		t.Fatal("ReleaseCtx must clear request Context before reuse")
 	}
 }
 

@@ -1,55 +1,55 @@
-"use client";
+"use client"
 
-import { useState, useCallback } from "react";
-import { useTranslation } from "react-i18next";
+import { useState, useCallback } from "react"
+import { useTranslation } from "react-i18next"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Checkbox } from "@/components/ui/checkbox";
-import { NumberField } from "@/components/ui/number-field";
+} from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
+import { Checkbox } from "@/components/ui/checkbox"
+import { NumberField } from "@/components/ui/number-field"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
-import { toast } from "sonner";
-import { IconDeviceFloppy } from "@tabler/icons-react";
+} from "@/components/ui/select"
+import { Separator } from "@/components/ui/separator"
+import { toast } from "sonner"
+import { IconDeviceFloppy } from "@tabler/icons-react"
 import {
   useAccessProviderCreate,
   useAccessProviderUpdate,
-} from "@/hooks/use-api";
-import type { AccessProvider, OAuthProviderConfig } from "@/lib/types";
+} from "@/hooks/use-api"
+import type { AccessProvider, OAuthProviderConfig } from "@/lib/types"
 
 interface AccessProviderDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  siteId: number;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  siteId: number
   /** 编辑目标提供方，为 null 时表示新建。 */
-  provider?: AccessProvider | null;
+  provider?: AccessProvider | null
 }
 
 /** OAuth/OIDC 配置表单字段。 */
 interface OAuthForm {
-  client_id: string;
-  client_secret: string;
-  auth_url: string;
-  token_url: string;
-  userinfo_url: string;
-  issuer: string;
-  scopes: string;
-  redirect_path: string;
-  use_pkce: boolean;
+  client_id: string
+  client_secret: string
+  auth_url: string
+  token_url: string
+  userinfo_url: string
+  issuer: string
+  scopes: string
+  redirect_path: string
+  use_pkce: boolean
 }
 
 /**
@@ -63,16 +63,18 @@ export function AccessProviderDialog({
   siteId,
   provider,
 }: AccessProviderDialogProps) {
-  const { t } = useTranslation();
-  const isEdit = !!provider;
+  const { t } = useTranslation()
+  const isEdit = !!provider
 
   // 表单初值用 useState 懒初始化从 props 同步；父组件以 key 重挂载触发刷新，避免 effect 内 setState。
-  const [type, setType] = useState<AccessProvider["type"]>(() => provider?.type ?? "password");
-  const [name, setName] = useState(() => provider?.name ?? "");
-  const [priority, setPriority] = useState(() => provider?.priority ?? 100);
-  const [enabled, setEnabled] = useState(() => provider?.enabled ?? true);
+  const [type, setType] = useState<AccessProvider["type"]>(
+    () => provider?.type ?? "password"
+  )
+  const [name, setName] = useState(() => provider?.name ?? "")
+  const [priority, setPriority] = useState(() => provider?.priority ?? 100)
+  const [enabled, setEnabled] = useState(() => provider?.enabled ?? true)
   const [oauth, setOauth] = useState<OAuthForm>(() => {
-    const cfg = provider?.config;
+    const cfg = provider?.config
     return {
       client_id: cfg?.client_id ?? "",
       client_secret: "",
@@ -83,21 +85,21 @@ export function AccessProviderDialog({
       scopes: (cfg?.scopes ?? []).join(" "),
       redirect_path: cfg?.redirect_path ?? "",
       use_pkce: cfg?.use_pkce ?? false,
-    };
-  });
+    }
+  })
 
-  const createMutation = useAccessProviderCreate();
-  const updateMutation = useAccessProviderUpdate();
-  const loading = createMutation.loading || updateMutation.loading;
+  const createMutation = useAccessProviderCreate()
+  const updateMutation = useAccessProviderUpdate()
+  const loading = createMutation.loading || updateMutation.loading
 
-  const isOAuth = type === "oauth2" || type === "oidc";
+  const isOAuth = type === "oauth2" || type === "oidc"
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
-      e.preventDefault();
+      e.preventDefault()
       if (!name.trim()) {
-        toast.error(t("common.operationFailed"));
-        return;
+        toast.error(t("common.operationFailed"))
+        return
       }
       const cfg: OAuthProviderConfig | undefined = isOAuth
         ? {
@@ -114,7 +116,7 @@ export function AccessProviderDialog({
             redirect_path: oauth.redirect_path || undefined,
             use_pkce: oauth.use_pkce,
           }
-        : undefined;
+        : undefined
       try {
         if (isEdit && provider) {
           await updateMutation.execute({
@@ -127,8 +129,8 @@ export function AccessProviderDialog({
               type,
               config: cfg,
             },
-          });
-          toast.success(t("sites.detail.providerUpdated"));
+          })
+          toast.success(t("sites.detail.providerUpdated"))
         } else {
           await createMutation.execute({
             siteId,
@@ -139,23 +141,39 @@ export function AccessProviderDialog({
               type,
               config: cfg,
             },
-          });
-          toast.success(t("sites.detail.providerCreated"));
+          })
+          toast.success(t("sites.detail.providerCreated"))
         }
-        onOpenChange(false);
+        onOpenChange(false)
       } catch {
-        toast.error(t("common.operationFailed"));
+        toast.error(t("common.operationFailed"))
       }
     },
-    [isEdit, provider, type, name, priority, enabled, isOAuth, oauth, siteId, createMutation, updateMutation, onOpenChange, t]
-  );
+    [
+      isEdit,
+      provider,
+      type,
+      name,
+      priority,
+      enabled,
+      isOAuth,
+      oauth,
+      siteId,
+      createMutation,
+      updateMutation,
+      onOpenChange,
+      t,
+    ]
+  )
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>
-            {isEdit ? t("sites.detail.editProvider") : t("sites.detail.addProvider")}
+            {isEdit
+              ? t("sites.detail.editProvider")
+              : t("sites.detail.addProvider")}
           </DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -170,9 +188,15 @@ export function AccessProviderDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="password">{t("sites.detail.typePassword")}</SelectItem>
-                <SelectItem value="oauth2">{t("sites.detail.typeOauth2")}</SelectItem>
-                <SelectItem value="oidc">{t("sites.detail.typeOidc")}</SelectItem>
+                <SelectItem value="password">
+                  {t("sites.detail.typePassword")}
+                </SelectItem>
+                <SelectItem value="oauth2">
+                  {t("sites.detail.typeOauth2")}
+                </SelectItem>
+                <SelectItem value="oidc">
+                  {t("sites.detail.typeOidc")}
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -216,7 +240,9 @@ export function AccessProviderDialog({
                   <Label>{t("sites.detail.clientId")}</Label>
                   <Input
                     value={oauth.client_id}
-                    onChange={(e) => setOauth({ ...oauth, client_id: e.target.value })}
+                    onChange={(e) =>
+                      setOauth({ ...oauth, client_id: e.target.value })
+                    }
                   />
                 </div>
                 <div className="space-y-2">
@@ -224,7 +250,9 @@ export function AccessProviderDialog({
                   <Input
                     type="password"
                     value={oauth.client_secret}
-                    onChange={(e) => setOauth({ ...oauth, client_secret: e.target.value })}
+                    onChange={(e) =>
+                      setOauth({ ...oauth, client_secret: e.target.value })
+                    }
                     placeholder={t("sites.detail.clientSecretPlaceholder")}
                   />
                 </div>
@@ -233,14 +261,18 @@ export function AccessProviderDialog({
                     <Label>{t("sites.detail.authUrl")}</Label>
                     <Input
                       value={oauth.auth_url}
-                      onChange={(e) => setOauth({ ...oauth, auth_url: e.target.value })}
+                      onChange={(e) =>
+                        setOauth({ ...oauth, auth_url: e.target.value })
+                      }
                     />
                   </div>
                   <div className="space-y-2">
                     <Label>{t("sites.detail.tokenUrl")}</Label>
                     <Input
                       value={oauth.token_url}
-                      onChange={(e) => setOauth({ ...oauth, token_url: e.target.value })}
+                      onChange={(e) =>
+                        setOauth({ ...oauth, token_url: e.target.value })
+                      }
                     />
                   </div>
                 </div>
@@ -249,14 +281,18 @@ export function AccessProviderDialog({
                     <Label>{t("sites.detail.userinfoUrl")}</Label>
                     <Input
                       value={oauth.userinfo_url}
-                      onChange={(e) => setOauth({ ...oauth, userinfo_url: e.target.value })}
+                      onChange={(e) =>
+                        setOauth({ ...oauth, userinfo_url: e.target.value })
+                      }
                     />
                   </div>
                   <div className="space-y-2">
                     <Label>{t("sites.detail.issuer")}</Label>
                     <Input
                       value={oauth.issuer}
-                      onChange={(e) => setOauth({ ...oauth, issuer: e.target.value })}
+                      onChange={(e) =>
+                        setOauth({ ...oauth, issuer: e.target.value })
+                      }
                     />
                   </div>
                 </div>
@@ -264,7 +300,9 @@ export function AccessProviderDialog({
                   <Label>{t("sites.detail.scopes")}</Label>
                   <Input
                     value={oauth.scopes}
-                    onChange={(e) => setOauth({ ...oauth, scopes: e.target.value })}
+                    onChange={(e) =>
+                      setOauth({ ...oauth, scopes: e.target.value })
+                    }
                     placeholder={t("sites.detail.scopesPlaceholder")}
                   />
                 </div>
@@ -272,7 +310,9 @@ export function AccessProviderDialog({
                   <Label>{t("sites.detail.redirectPath")}</Label>
                   <Input
                     value={oauth.redirect_path}
-                    onChange={(e) => setOauth({ ...oauth, redirect_path: e.target.value })}
+                    onChange={(e) =>
+                      setOauth({ ...oauth, redirect_path: e.target.value })
+                    }
                     placeholder="/__owaf/oauth/callback"
                   />
                 </div>
@@ -280,7 +320,9 @@ export function AccessProviderDialog({
                   <Checkbox
                     id="use-pkce"
                     checked={oauth.use_pkce}
-                    onCheckedChange={(v) => setOauth({ ...oauth, use_pkce: v === true })}
+                    onCheckedChange={(v) =>
+                      setOauth({ ...oauth, use_pkce: v === true })
+                    }
                   />
                   <Label htmlFor="use-pkce" className="cursor-pointer text-sm">
                     {t("sites.detail.usePkce")}
@@ -307,5 +349,5 @@ export function AccessProviderDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

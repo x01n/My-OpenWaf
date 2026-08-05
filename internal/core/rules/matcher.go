@@ -25,6 +25,10 @@ type ccRateMatcher struct {
 	window    int64
 	threshold int64
 	duration  int64
+	state     *ccRateSharedState
+}
+
+type ccRateSharedState struct {
 	mu        sync.Mutex
 	clients   map[string]*ccRateState
 	lastSweep int64
@@ -36,6 +40,8 @@ type ccRateState struct {
 	blockedTill int64
 }
 
+var ccRateStates sync.Map
+
 func (m *ccRateMatcher) Match(ctx MatchCtx) bool {
 	if m.child == nil || !m.child.Match(ctx) {
 		return false
@@ -45,36 +51,45 @@ func (m *ccRateMatcher) Match(ctx MatchCtx) bool {
 	}
 
 	now := time.Now().Unix()
-	key := ccRateKey(ctx)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.clients == nil {
-		m.clients = make(map[string]*ccRateState)
+	stateStore := m.state
+	if stateStore == nil {
+		stateStore = newCCRateSharedState()
+		m.state = stateStore
 	}
-	if now-m.lastSweep >= 60 {
-		for k, state := range m.clients {
+	key := ccRateKey(ctx)
+	stateStore.mu.Lock()
+	defer stateStore.mu.Unlock()
+	if stateStore.clients == nil {
+		stateStore.clients = make(map[string]*ccRateState)
+	}
+	if now-stateStore.lastSweep >= 60 {
+		for k, state := range stateStore.clients {
 			if state == nil || (state.windowUntil <= now && state.blockedTill <= now) {
-				delete(m.clients, k)
+				delete(stateStore.clients, k)
 			}
 		}
-		m.lastSweep = now
+		stateStore.lastSweep = now
 	}
-	state := m.clients[key]
+	state := stateStore.clients[key]
 	if state != nil && state.blockedTill > now {
 		return true
 	}
 	if state == nil || state.windowUntil <= now {
 		state = &ccRateState{windowUntil: now + m.window}
-		m.clients[key] = state
+		stateStore.clients[key] = state
 	}
 	state.count++
 	if state.count < m.threshold {
 		return false
 	}
 	if m.duration > 0 {
-		state.blockedTill = now + m.duration*60
+		state.blockedTill = now + m.duration
 	}
 	return true
+}
+
+func newCCRateSharedState() *ccRateSharedState {
+	return &ccRateSharedState{clients: make(map[string]*ccRateState)}
 }
 
 func ccRateKey(ctx MatchCtx) string {
@@ -318,6 +333,20 @@ func (m *queryRegexMatcher) Match(ctx MatchCtx) bool {
 }
 
 type headerContainsMatcher struct{ name, substr string }
+
+type headerExactMatcher struct{ name, value string }
+
+func (m *headerExactMatcher) Match(ctx MatchCtx) bool {
+	value, ok := lookupHeaderValueInCtx(ctx, m.name)
+	return ok && value == m.value
+}
+
+type headerPrefixMatcher struct{ name, prefix string }
+
+func (m *headerPrefixMatcher) Match(ctx MatchCtx) bool {
+	value, ok := lookupHeaderValueInCtx(ctx, m.name)
+	return ok && strings.HasPrefix(value, m.prefix)
+}
 
 func (m *headerContainsMatcher) Match(ctx MatchCtx) bool {
 	value, ok := lookupHeaderValueInCtx(ctx, m.name)
@@ -862,6 +891,14 @@ func buildMatcher(kind, arg string) Matcher {
 		name, substr := splitHeaderArg(arg)
 		return &headerContainsMatcher{name: strings.ToLower(name), substr: substr}
 
+	case "block_header_exact":
+		name, value := splitHeaderArg(arg)
+		return &headerExactMatcher{name: strings.ToLower(name), value: value}
+
+	case "block_header_prefix":
+		name, prefix := splitHeaderArg(arg)
+		return &headerPrefixMatcher{name: strings.ToLower(name), prefix: prefix}
+
 	case "block_header_regex":
 		name, pattern := splitHeaderArg(arg)
 		re, err := cachedCompile(pattern)
@@ -1091,16 +1128,18 @@ func cachedCompile(pattern string) (*regexp.Regexp, error) {
 // ── compound JSON condition ──
 
 type compoundCondition struct {
-	Op        string              `json:"op"`
-	Kind      string              `json:"kind"`
-	Arg       string              `json:"arg"`
-	Children  []compoundCondition `json:"children"`
-	If        *compoundCondition  `json:"if"`
-	Then      *compoundCondition  `json:"then"`
-	Else      *compoundCondition  `json:"else"`
-	Window    int64               `json:"window"`
-	Threshold int64               `json:"threshold"`
-	Duration  int64               `json:"duration"`
+	Op              string              `json:"op"`
+	Kind            string              `json:"kind"`
+	Arg             string              `json:"arg"`
+	Children        []compoundCondition `json:"children"`
+	If              *compoundCondition  `json:"if"`
+	Then            *compoundCondition  `json:"then"`
+	Else            *compoundCondition  `json:"else"`
+	Window          int64               `json:"window"`
+	Threshold       int64               `json:"threshold"`
+	Duration        int64               `json:"duration"`
+	DurationUnit    string              `json:"duration_unit"`
+	DurationSeconds int64               `json:"duration_seconds"`
 }
 
 func parseCompoundJSON(raw string) Matcher {
@@ -1109,6 +1148,47 @@ func parseCompoundJSON(raw string) Matcher {
 		return &neverMatcher{}
 	}
 	return buildCompound(cond)
+}
+
+func ccRateDurationSeconds(cond compoundCondition) int64 {
+	if cond.DurationSeconds > 0 {
+		return cond.DurationSeconds
+	}
+	return ccDurationSeconds(cond.Duration, cond.DurationUnit)
+}
+
+func ccDurationSeconds(duration int64, unit string) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "seconds", "second", "sec", "s":
+		return duration
+	case "", "minutes", "minute", "min", "m":
+		return duration * 60
+	default:
+		return duration * 60
+	}
+}
+
+func ccRateStateKey(cond compoundCondition) string {
+	keyData := struct {
+		Child           compoundCondition `json:"child"`
+		Window          int64             `json:"window"`
+		Threshold       int64             `json:"threshold"`
+		DurationSeconds int64             `json:"duration_seconds"`
+	}{
+		Child:           cond.Children[0],
+		Window:          cond.Window,
+		Threshold:       cond.Threshold,
+		DurationSeconds: ccRateDurationSeconds(cond),
+	}
+	raw, err := json.Marshal(keyData)
+	if err != nil {
+		raw = []byte(cond.Op)
+	}
+	sum := md5.Sum(raw)
+	return "cc_rate:" + hex.EncodeToString(sum[:])
 }
 
 func buildCompound(cond compoundCondition) Matcher {
@@ -1144,12 +1224,14 @@ func buildCompound(cond compoundCondition) Matcher {
 		if len(cond.Children) == 0 {
 			return &neverMatcher{}
 		}
+		stateKey := ccRateStateKey(cond)
+		state, _ := ccRateStates.LoadOrStore(stateKey, newCCRateSharedState())
 		return &ccRateMatcher{
 			child:     buildCompound(cond.Children[0]),
 			window:    cond.Window,
 			threshold: cond.Threshold,
-			duration:  cond.Duration,
-			clients:   make(map[string]*ccRateState),
+			duration:  ccRateDurationSeconds(cond),
+			state:     state.(*ccRateSharedState),
 		}
 	default:
 		if cond.If != nil && cond.Then != nil {

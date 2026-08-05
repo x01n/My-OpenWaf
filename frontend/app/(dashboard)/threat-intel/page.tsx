@@ -1,8 +1,8 @@
-"use client";
+"use client"
 
-import { useMemo, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
+import { useMemo, useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
 import {
   useThreatIntelFeeds,
   useThreatIntelMutation,
@@ -10,36 +10,36 @@ import {
   useThreatIntelSync,
   useThreatIntelSyncLogs,
   useSites,
-} from "@/hooks/use-api";
-import { DataTable } from "@/components/data-table";
-import { ConfirmDialog } from "@/components/confirm-dialog";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
+} from "@/hooks/use-api"
+import { DataTable } from "@/components/data-table"
+import { ConfirmDialog } from "@/components/confirm-dialog"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from "@/components/ui/dialog";
+} from "@/components/ui/dialog"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+} from "@/components/ui/select"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@/components/ui/tooltip"
 import {
   Pagination,
   PaginationContent,
@@ -48,9 +48,9 @@ import {
   PaginationLink,
   PaginationNext,
   PaginationPrevious,
-} from "@/components/ui/pagination";
-import { toast } from "sonner";
-import { formatDate } from "@/lib/utils";
+} from "@/components/ui/pagination"
+import { toast } from "sonner"
+import { formatDate } from "@/lib/utils"
 import {
   IconPlus,
   IconTrash,
@@ -61,14 +61,14 @@ import {
   IconWorldBolt,
   IconHistory,
   IconList,
-} from "@tabler/icons-react";
-import type { ThreatIntelFeed, ThreatIntelSyncLog } from "@/lib/types";
+} from "@tabler/icons-react"
+import type { ThreatIntelFeed, ThreatIntelSyncLog } from "@/lib/types"
 
 /** 作用域下拉的全局选项标识值（Select 不接受空字符串作为 value） */
-const SCOPE_GLOBAL = "global";
+const SCOPE_GLOBAL = "global"
 
 /** 同步历史筛选的“全部”选项标识值 */
-const FILTER_ALL = "all";
+const FILTER_ALL = "all"
 
 /** 常用同步间隔（秒） */
 const INTERVAL_OPTIONS = [
@@ -77,16 +77,16 @@ const INTERVAL_OPTIONS = [
   { value: 3600, key: "interval1h" },
   { value: 21600, key: "interval6h" },
   { value: 86400, key: "interval24h" },
-] as const;
+] as const
 
 interface FeedForm {
-  name: string;
-  url: string;
-  kind: "blacklist" | "whitelist";
-  action: "intercept" | "drop";
-  sync_interval: number;
-  scope: string;
-  enabled: boolean;
+  name: string
+  url: string
+  kind: "blacklist" | "whitelist"
+  action: "intercept" | "drop"
+  sync_interval: number
+  scope: string
+  enabled: boolean
 }
 
 const emptyForm: FeedForm = {
@@ -97,10 +97,10 @@ const emptyForm: FeedForm = {
   sync_interval: 3600,
   scope: SCOPE_GLOBAL,
   enabled: true,
-};
+}
 
 export default function ThreatIntelPage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   return (
     <div className="space-y-4">
@@ -131,63 +131,65 @@ export default function ThreatIntelPage() {
         </TabsContent>
       </Tabs>
     </div>
-  );
+  )
 }
 
 /**
  * 订阅源 Tab：完整保留原有 CRUD 与手动同步逻辑。
  */
 function FeedsTab() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
-  const { data, isLoading, error, mutate: refresh } = useThreatIntelFeeds();
-  const feeds = useMemo(() => data?.items || [], [data]);
+  const { data, isLoading, error, mutate: refresh } = useThreatIntelFeeds()
+  const feeds = useMemo(() => data?.items || [], [data])
 
   // 站点列表用于作用域下拉与站点名映射（显示名用 host）
-  const { data: sitesData } = useSites({ page_size: 500 });
-  const sites = useMemo(() => sitesData?.items || [], [sitesData]);
+  const { data: sitesData } = useSites({ page_size: 500 })
+  const sites = useMemo(() => sitesData?.items || [], [sitesData])
   const siteNameMap = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const s of sites) map.set(s.id, s.host);
-    return map;
-  }, [sites]);
+    const map = new Map<number, string>()
+    for (const s of sites) map.set(s.id, s.host)
+    return map
+  }, [sites])
 
-  const { execute: mutateFeed, loading: mutateLoading } = useThreatIntelMutation();
-  const { execute: deleteFeed, loading: deleteLoading } = useThreatIntelDelete();
-  const { execute: syncFeed } = useThreatIntelSync();
+  const { execute: mutateFeed, loading: mutateLoading } =
+    useThreatIntelMutation()
+  const { execute: deleteFeed, loading: deleteLoading } = useThreatIntelDelete()
+  const { execute: syncFeed } = useThreatIntelSync()
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editId, setEditId] = useState<number | null>(null);
-  const [form, setForm] = useState<FeedForm>(emptyForm);
-  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editId, setEditId] = useState<number | null>(null)
+  const [form, setForm] = useState<FeedForm>(emptyForm)
+  const [deleteId, setDeleteId] = useState<number | null>(null)
   // 单行同步中的 ID 集合，用于按钮 loading
-  const [syncingIds, setSyncingIds] = useState<Set<number>>(new Set());
+  const [syncingIds, setSyncingIds] = useState<Set<number>>(new Set())
 
   /** 将站点 ID 映射为可读作用域名称 */
   const scopeLabel = (siteId?: number | null) => {
-    if (siteId === undefined || siteId === null) return t("threatIntel.scopeGlobal");
-    return siteNameMap.get(siteId) || `#${siteId}`;
-  };
+    if (siteId === undefined || siteId === null)
+      return t("threatIntel.scopeGlobal")
+    return siteNameMap.get(siteId) || `#${siteId}`
+  }
 
   /** 将秒数格式化为友好的间隔文案 */
   const formatInterval = (seconds: number) => {
     if (seconds > 0 && seconds % 3600 === 0) {
-      return t("threatIntel.hours", { count: seconds / 3600 });
+      return t("threatIntel.hours", { count: seconds / 3600 })
     }
     if (seconds > 0 && seconds % 60 === 0) {
-      return t("threatIntel.minutes", { count: seconds / 60 });
+      return t("threatIntel.minutes", { count: seconds / 60 })
     }
-    return t("threatIntel.seconds", { count: seconds });
-  };
+    return t("threatIntel.seconds", { count: seconds })
+  }
 
   const openCreate = () => {
-    setEditId(null);
-    setForm(emptyForm);
-    setDialogOpen(true);
-  };
+    setEditId(null)
+    setForm(emptyForm)
+    setDialogOpen(true)
+  }
 
   const openEdit = (feed: ThreatIntelFeed) => {
-    setEditId(feed.id);
+    setEditId(feed.id)
     setForm({
       name: feed.name,
       url: feed.url,
@@ -199,9 +201,9 @@ function FeedsTab() {
           ? SCOPE_GLOBAL
           : String(feed.site_id),
       enabled: feed.enabled,
-    });
-    setDialogOpen(true);
-  };
+    })
+    setDialogOpen(true)
+  }
 
   const handleSubmit = async () => {
     try {
@@ -213,56 +215,59 @@ function FeedsTab() {
         sync_interval: form.sync_interval,
         enabled: form.enabled,
         site_id: form.scope === SCOPE_GLOBAL ? null : Number(form.scope),
-      };
-      await mutateFeed({ id: editId ?? undefined, data: payload });
+      }
+      await mutateFeed({ id: editId ?? undefined, data: payload })
       toast.success(
         editId ? t("common.updateSuccess") : t("common.createSuccess")
-      );
-      setDialogOpen(false);
-      refresh();
+      )
+      setDialogOpen(false)
+      refresh()
     } catch {
-      toast.error(editId ? t("common.updateFailed") : t("common.createFailed"));
+      toast.error(editId ? t("common.updateFailed") : t("common.createFailed"))
     }
-  };
+  }
 
   /** 行内启用开关：合并现有字段避免覆盖，仅切换 enabled */
-  const handleToggleEnabled = async (feed: ThreatIntelFeed, enabled: boolean) => {
+  const handleToggleEnabled = async (
+    feed: ThreatIntelFeed,
+    enabled: boolean
+  ) => {
     try {
-      await mutateFeed({ id: feed.id, data: { enabled } });
-      refresh();
+      await mutateFeed({ id: feed.id, data: { enabled } })
+      refresh()
     } catch {
-      toast.error(t("common.updateFailed"));
+      toast.error(t("common.updateFailed"))
     }
-  };
+  }
 
   const handleSync = async (id: number) => {
-    setSyncingIds((prev) => new Set(prev).add(id));
+    setSyncingIds((prev) => new Set(prev).add(id))
     try {
-      await syncFeed(id);
-      toast.success(t("threatIntel.syncSuccess"));
-      refresh();
+      await syncFeed(id)
+      toast.success(t("threatIntel.syncSuccess"))
+      refresh()
     } catch {
-      toast.error(t("threatIntel.syncFailed"));
+      toast.error(t("threatIntel.syncFailed"))
     } finally {
       setSyncingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
-  };
+  }
 
   const confirmDelete = async () => {
-    if (deleteId === null) return;
+    if (deleteId === null) return
     try {
-      await deleteFeed(deleteId);
-      toast.success(t("common.deleteSuccess"));
-      setDeleteId(null);
-      refresh();
+      await deleteFeed(deleteId)
+      toast.success(t("common.deleteSuccess"))
+      setDeleteId(null)
+      refresh()
     } catch {
-      toast.error(t("common.deleteFailed"));
+      toast.error(t("common.deleteFailed"))
     }
-  };
+  }
 
   const columns = [
     {
@@ -329,7 +334,9 @@ function FeedsTab() {
       title: t("threatIntel.entryCount"),
       width: "90px",
       render: (row: ThreatIntelFeed) => (
-        <span className="font-mono text-sm">{row.entry_count?.toLocaleString() ?? "-"}</span>
+        <span className="font-mono text-sm">
+          {row.entry_count?.toLocaleString() ?? "-"}
+        </span>
       ),
     },
     {
@@ -416,14 +423,16 @@ function FeedsTab() {
         </div>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
       {error && (
         <Alert variant="destructive">
           <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
-          <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+          <AlertDescription>
+            {(error as Error)?.message || t("error.unexpectedError")}
+          </AlertDescription>
         </Alert>
       )}
       <div className="flex justify-end">
@@ -463,7 +472,9 @@ function FeedsTab() {
               <Label>{t("threatIntel.url")}</Label>
               <Input
                 value={form.url}
-                onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, url: e.target.value }))
+                }
                 placeholder={t("threatIntel.urlPlaceholder")}
                 className="font-mono text-sm"
               />
@@ -569,9 +580,7 @@ function FeedsTab() {
               <Label>{t("threatIntel.enabled")}</Label>
               <Switch
                 checked={form.enabled}
-                onCheckedChange={(v) =>
-                  setForm((f) => ({ ...f, enabled: v }))
-                }
+                onCheckedChange={(v) => setForm((f) => ({ ...f, enabled: v }))}
               />
             </div>
           </div>
@@ -581,9 +590,7 @@ function FeedsTab() {
             </Button>
             <Button
               onClick={handleSubmit}
-              disabled={
-                mutateLoading || !form.name.trim() || !form.url.trim()
-              }
+              disabled={mutateLoading || !form.name.trim() || !form.url.trim()}
             >
               {mutateLoading
                 ? t("common.submitting")
@@ -605,59 +612,58 @@ function FeedsTab() {
         loading={deleteLoading}
       />
     </div>
-  );
+  )
 }
 
 /**
  * 将毫秒数格式化为可读的耗时字符串（>=1s 用 "X.Xs"，否则 "Xms"）。
  */
 function formatDurationMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "-";
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${ms}ms`;
+  if (!Number.isFinite(ms) || ms < 0) return "-"
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
+  return `${ms}ms`
 }
 
 /**
  * 同步历史 Tab：分页展示订阅源每次同步的结果，30 秒自动刷新。
  */
 function SyncHistoryTab() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
-  const [page, setPage] = useState(1);
-  const pageSize = 20;
-  const [feedFilter, setFeedFilter] = useState<string>(FILTER_ALL);
-  const [statusFilter, setStatusFilter] = useState<string>(FILTER_ALL);
+  const [page, setPage] = useState(1)
+  const pageSize = 20
+  const [feedFilter, setFeedFilter] = useState<string>(FILTER_ALL)
+  const [statusFilter, setStatusFilter] = useState<string>(FILTER_ALL)
 
-  const { data: feedsData } = useThreatIntelFeeds();
-  const feeds = useMemo(() => feedsData?.items || [], [feedsData]);
+  const { data: feedsData } = useThreatIntelFeeds()
+  const feeds = useMemo(() => feedsData?.items || [], [feedsData])
 
   const queryParams = useMemo(
     () => ({
       page,
       page_size: pageSize,
-      feed_id:
-        feedFilter === FILTER_ALL ? undefined : Number(feedFilter),
+      feed_id: feedFilter === FILTER_ALL ? undefined : Number(feedFilter),
       status:
         statusFilter === FILTER_ALL
           ? undefined
           : (statusFilter as "success" | "failed"),
     }),
-    [page, feedFilter, statusFilter],
-  );
+    [page, feedFilter, statusFilter]
+  )
 
-  const { data, isLoading, error } = useThreatIntelSyncLogs(queryParams);
-  const items = data?.items || [];
-  const total = data?.total || 0;
-  const totalPages = Math.ceil(total / pageSize) || 1;
+  const { data, isLoading, error } = useThreatIntelSyncLogs(queryParams)
+  const items = data?.items || []
+  const total = data?.total || 0
+  const totalPages = Math.ceil(total / pageSize) || 1
 
   const handleFeedChange = (v: string) => {
-    setFeedFilter(v);
-    setPage(1);
-  };
+    setFeedFilter(v)
+    setPage(1)
+  }
   const handleStatusChange = (v: string) => {
-    setStatusFilter(v);
-    setPage(1);
-  };
+    setStatusFilter(v)
+    setPage(1)
+  }
 
   const columns = [
     {
@@ -731,7 +737,7 @@ function SyncHistoryTab() {
       key: "error",
       title: t("threatIntel.syncHistory.columns.error"),
       render: (row: ThreatIntelSyncLog) => {
-        if (!row.error) return <span className="text-muted-foreground">-</span>;
+        if (!row.error) return <span className="text-muted-foreground">-</span>
         return (
           <TooltipProvider delayDuration={200}>
             <Tooltip>
@@ -740,22 +746,24 @@ function SyncHistoryTab() {
                   {row.error}
                 </span>
               </TooltipTrigger>
-              <TooltipContent className="max-w-md whitespace-pre-wrap break-all">
+              <TooltipContent className="max-w-md break-all whitespace-pre-wrap">
                 {row.error}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-        );
+        )
       },
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
       {error && (
         <Alert variant="destructive">
           <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
-          <AlertDescription>{(error as Error)?.message || t("error.unexpectedError")}</AlertDescription>
+          <AlertDescription>
+            {(error as Error)?.message || t("error.unexpectedError")}
+          </AlertDescription>
         </Alert>
       )}
       <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -816,13 +824,11 @@ function SyncHistoryTab() {
             <PaginationItem>
               <PaginationPrevious
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                className={
-                  page <= 1 ? "pointer-events-none opacity-50" : ""
-                }
+                className={page <= 1 ? "pointer-events-none opacity-50" : ""}
               />
             </PaginationItem>
             {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-              const pageNum = i + 1;
+              const pageNum = i + 1
               return (
                 <PaginationItem key={pageNum}>
                   <PaginationLink
@@ -832,7 +838,7 @@ function SyncHistoryTab() {
                     {pageNum}
                   </PaginationLink>
                 </PaginationItem>
-              );
+              )
             })}
             {totalPages > 5 && (
               <PaginationItem>
@@ -841,9 +847,7 @@ function SyncHistoryTab() {
             )}
             <PaginationItem>
               <PaginationNext
-                onClick={() =>
-                  setPage((p) => Math.min(totalPages, p + 1))
-                }
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 className={
                   page >= totalPages ? "pointer-events-none opacity-50" : ""
                 }
@@ -853,5 +857,5 @@ function SyncHistoryTab() {
         </Pagination>
       )}
     </div>
-  );
+  )
 }

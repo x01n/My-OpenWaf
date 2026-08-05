@@ -1,150 +1,147 @@
-"use client";
+"use client"
 
-import { useState, useMemo, useCallback } from "react";
-import { useTranslation } from "react-i18next";
+import { useState, useMemo, useCallback } from "react"
+import { useTranslation } from "react-i18next"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Skeleton } from "@/components/ui/skeleton";
-import { toast } from "sonner";
+} from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { Label } from "@/components/ui/label"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { Skeleton } from "@/components/ui/skeleton"
+import { toast } from "sonner"
 import {
   IconUserCheck,
   IconShield,
   IconRefresh,
   IconHelpCircle,
   IconFileSearch,
-} from "@tabler/icons-react";
+} from "@tabler/icons-react"
 import {
   useBotSettings,
   useBotSettingsUpdate,
   useSiteRecordedResources,
-} from "@/hooks/use-api";
-import { ResourcePathTree } from "@/components/ui/resource-path-tree";
-import { cn } from "@/lib/utils";
+} from "@/hooks/use-api"
+import { ResourcePathTree } from "@/components/ui/resource-path-tree"
+import { cn } from "@/lib/utils"
 
 interface DynamicOption {
-  key: string;
-  labelKey: string;
-  descKey: string;
-  recommended?: boolean;
-  configKey?: string;
-  resourceLabelKey?: string;
-  resourceEmptyKey?: string;
+  key: string
+  labelKey: string
+  descKey: string
+  recommended?: boolean
+  configKey?: string
+  resourceLabelKey?: string
+  resourceEmptyKey?: string
 }
 
 interface BotProtectionDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  siteId?: number;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  siteId?: number
 }
 
-export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectionDialogProps) {
-  const { t } = useTranslation();
-  const { data: botSettings, isLoading, mutate } = useBotSettings();
-  const updateBot = useBotSettingsUpdate();
-  const { data: recordedResourcesData } = useSiteRecordedResources(siteId);
+export function BotProtectionDialog({
+  open,
+  onOpenChange,
+  siteId,
+}: BotProtectionDialogProps) {
+  const { t } = useTranslation()
+  const { data: botSettings, isLoading, mutate } = useBotSettings()
+  const updateBot = useBotSettingsUpdate()
+  const { data: recordedResourcesData } = useSiteRecordedResources(siteId)
 
   const recordedResources = useMemo(() => {
-    return recordedResourcesData || [];
-  }, [recordedResourcesData]);
+    return recordedResourcesData || []
+  }, [recordedResourcesData])
 
-  const [localSettings, setLocalSettings] = useState<Record<string, any>>({}); // eslint-disable-line @typescript-eslint/no-explicit-any
+  const [localSettings, setLocalSettings] = useState<Record<string, unknown>>(
+    {}
+  )
 
   const getValue = useCallback(
-    (key: string, defaultValue: any = false) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    (key: string, defaultValue: unknown = false) => {
       return localSettings[key] !== undefined
         ? localSettings[key]
-        : (botSettings?.[key] ?? defaultValue);
+        : (botSettings?.[key] ?? defaultValue)
     },
     [localSettings, botSettings]
-  );
+  )
 
   const handleToggle = useCallback(
     (key: string) => {
-      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }));
+      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }))
     },
     [getValue]
-  );
+  )
 
   const handleSubToggle = useCallback(
     (key: string) => {
-      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }));
+      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }))
     },
     [getValue]
-  );
+  )
 
   const handleResourceSelect = useCallback(
     (key: string, path: string, checked: boolean) => {
-      const current = (getValue(key, []) as string[]) || [];
-      let next: string[];
+      const current = (getValue(key, []) as string[]) || []
+      let next: string[]
       if (checked) {
-        next = current.includes(path) ? current : [...current, path];
+        next = current.includes(path) ? current : [...current, path]
       } else {
-        next = current.filter((p) => p !== path);
+        next = current.filter((p) => p !== path)
       }
-      setLocalSettings((prev) => ({ ...prev, [key]: next }));
+      setLocalSettings((prev) => ({ ...prev, [key]: next }))
     },
     [getValue]
-  );
+  )
 
-  const handleTextChange = useCallback(
-    (key: string, value: string) => {
-      setLocalSettings((prev) => ({ ...prev, [key]: value }));
-    },
-    []
-  );
+  const handleTextChange = useCallback((key: string, value: string) => {
+    setLocalSettings((prev) => ({ ...prev, [key]: value }))
+  }, [])
 
-  const handleValueChange = useCallback(
-    (key: string, value: unknown) => {
-      setLocalSettings((prev) => ({ ...prev, [key]: value }));
-    },
-    []
-  );
+  const handleValueChange = useCallback((key: string, value: unknown) => {
+    setLocalSettings((prev) => ({ ...prev, [key]: value }))
+  }, [])
 
-  const handleArrayChange = useCallback(
-    (key: string, value: string) => {
-      setLocalSettings((prev) => ({
-        ...prev,
-        [key]: value
-          .split("\n")
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0),
-      }));
-    },
-    []
-  );
+  const handleArrayChange = useCallback((key: string, value: string) => {
+    setLocalSettings((prev) => ({
+      ...prev,
+      [key]: value
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+    }))
+  }, [])
 
   const hasChanges = useMemo(() => {
-    return Object.keys(localSettings).length > 0;
-  }, [localSettings]);
+    return Object.keys(localSettings).length > 0
+  }, [localSettings])
 
   const handleSave = useCallback(async () => {
     try {
-      await updateBot.execute({ ...botSettings, ...localSettings });
-      toast.success(t("captcha.saveSuccess"));
-      setLocalSettings({});
-      mutate();
-      onOpenChange(false);
+      await updateBot.execute({ ...botSettings, ...localSettings })
+      toast.success(t("captcha.saveSuccess"))
+      setLocalSettings({})
+      mutate()
+      onOpenChange(false)
     } catch {
-      toast.error(t("captcha.saveFailed"));
+      toast.error(t("captcha.saveFailed"))
     }
-  }, [botSettings, localSettings, updateBot, mutate, t, onOpenChange]);
+  }, [botSettings, localSettings, updateBot, mutate, t, onOpenChange])
 
   const handleCancel = useCallback(() => {
-    setLocalSettings({});
-    onOpenChange(false);
-  }, [onOpenChange]);
+    setLocalSettings({})
+    onOpenChange(false)
+  }, [onOpenChange])
 
-  const dynamicProtectionEnabled = getValue("dynamic_protection_enabled", false);
+  const dynamicProtectionEnabled = getValue("dynamic_protection_enabled", false)
 
   const dynamicOptions: DynamicOption[] = [
     {
@@ -169,7 +166,7 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
       resourceLabelKey: "captcha.imageWatermarkPaths",
       resourceEmptyKey: "captcha.noRecordedResources",
     },
-  ];
+  ]
 
   const sections = [
     {
@@ -191,11 +188,16 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
       switchKey: "anti_replay_enabled",
       descKey: "captcha.enableAntiReplayDesc",
     },
-  ];
+  ]
 
   if (isLoading) {
     return (
-      <Dialog open={open} onOpenChange={(v) => { if (!v) handleCancel(); }}>
+      <Dialog
+        open={open}
+        onOpenChange={(v) => {
+          if (!v) handleCancel()
+        }}
+      >
         <DialogContent className="max-w-lg p-0">
           <DialogHeader className="px-6 pt-6 pb-2">
             <DialogTitle className="flex items-center gap-2 text-base">
@@ -203,19 +205,24 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
               {t("captcha.botProtection")}
             </DialogTitle>
           </DialogHeader>
-          <div className="px-6 py-8 space-y-4">
+          <div className="space-y-4 px-6 py-8">
             <Skeleton className="h-32 rounded-lg" />
             <Skeleton className="h-32 rounded-lg" />
             <Skeleton className="h-16 rounded-lg" />
           </div>
         </DialogContent>
       </Dialog>
-    );
+    )
   }
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!v) handleCancel(); }}>
-      <DialogContent className="max-w-xl p-0 max-h-[85vh] overflow-y-auto">
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v) handleCancel()
+      }}
+    >
+      <DialogContent className="max-h-[85vh] max-w-xl overflow-y-auto p-0">
         <DialogHeader className="px-6 pt-6 pb-2">
           <DialogTitle className="flex items-center gap-2 text-base">
             <IconUserCheck className="h-5 w-5 text-primary" />
@@ -223,17 +230,19 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
           </DialogTitle>
         </DialogHeader>
 
-        <div className="px-6 space-y-6 py-2">
+        <div className="space-y-6 px-6 py-2">
           {sections.map((section) => {
-            const enabled = getValue(section.switchKey, false);
-            const isDynamic = section.key === "dynamic";
+            const enabled = getValue(section.switchKey, false)
+            const isDynamic = section.key === "dynamic"
 
             return (
               <div key={section.key} className="space-y-3">
                 {/* 标题行 */}
                 <div className="flex items-center gap-3">
                   <div className="h-5 w-1 rounded-full bg-primary" />
-                  <span className="text-sm font-medium">{t(section.titleKey)}</span>
+                  <span className="text-sm font-medium">
+                    {t(section.titleKey)}
+                  </span>
                   <Switch
                     checked={enabled}
                     onCheckedChange={() => handleToggle(section.switchKey)}
@@ -256,16 +265,15 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                     )}
                   >
                     {dynamicOptions.map((option) => {
-                      const optionEnabled = getValue(option.key, false);
-                      const isJs = option.key === "js_obfuscation";
+                      const optionEnabled = getValue(option.key, false)
+                      const isJs = option.key === "js_obfuscation"
                       const jsMode = getValue("js_protection_mode", "all") as
-                        | "all"
-                        | "paths";
+                        "all" | "paths"
                       // JS 保护在 all 模式下不需要选择路径，仅 paths 模式展示路径树
                       const showResourceTree =
                         option.configKey &&
                         siteId &&
-                        (!isJs || jsMode === "paths");
+                        (!isJs || jsMode === "paths")
 
                       return (
                         <div key={option.key} className="space-y-2">
@@ -273,7 +281,9 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                             <Checkbox
                               id={`dlg-${option.key}`}
                               checked={optionEnabled}
-                              onCheckedChange={() => handleSubToggle(option.key)}
+                              onCheckedChange={() =>
+                                handleSubToggle(option.key)
+                              }
                               disabled={!dynamicProtectionEnabled}
                             />
                             <div className="flex flex-col gap-0.5">
@@ -282,7 +292,8 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                                   htmlFor={`dlg-${option.key}`}
                                   className={cn(
                                     "cursor-pointer font-normal",
-                                    !dynamicProtectionEnabled && "cursor-not-allowed"
+                                    !dynamicProtectionEnabled &&
+                                      "cursor-not-allowed"
                                   )}
                                 >
                                   {t(option.labelKey)}
@@ -300,82 +311,102 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                           </div>
 
                           {/* JS 保护范围模式选择 */}
-                          {isJs && optionEnabled && dynamicProtectionEnabled && (
-                            <div className="ml-7 space-y-2">
-                              <Label className="text-xs font-medium">
-                                {t("captcha.jsProtectionMode")}
-                              </Label>
-                              <RadioGroup
-                                value={jsMode}
-                                onValueChange={(v) =>
-                                  handleValueChange("js_protection_mode", v)
-                                }
-                                className="flex flex-col gap-1.5"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <RadioGroupItem value="all" id="dlg-js-mode-all" />
-                                  <Label
-                                    htmlFor="dlg-js-mode-all"
-                                    className="cursor-pointer text-xs font-normal"
-                                  >
-                                    {t("captcha.jsProtectionModeAll")}
-                                  </Label>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <RadioGroupItem value="paths" id="dlg-js-mode-paths" />
-                                  <Label
-                                    htmlFor="dlg-js-mode-paths"
-                                    className="cursor-pointer text-xs font-normal"
-                                  >
-                                    {t("captcha.jsProtectionModePaths")}
-                                  </Label>
-                                </div>
-                              </RadioGroup>
-                            </div>
-                          )}
+                          {isJs &&
+                            optionEnabled &&
+                            dynamicProtectionEnabled && (
+                              <div className="ml-7 space-y-2">
+                                <Label className="text-xs font-medium">
+                                  {t("captcha.jsProtectionMode")}
+                                </Label>
+                                <RadioGroup
+                                  value={jsMode}
+                                  onValueChange={(v) =>
+                                    handleValueChange("js_protection_mode", v)
+                                  }
+                                  className="flex flex-col gap-1.5"
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <RadioGroupItem
+                                      value="all"
+                                      id="dlg-js-mode-all"
+                                    />
+                                    <Label
+                                      htmlFor="dlg-js-mode-all"
+                                      className="cursor-pointer text-xs font-normal"
+                                    >
+                                      {t("captcha.jsProtectionModeAll")}
+                                    </Label>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <RadioGroupItem
+                                      value="paths"
+                                      id="dlg-js-mode-paths"
+                                    />
+                                    <Label
+                                      htmlFor="dlg-js-mode-paths"
+                                      className="cursor-pointer text-xs font-normal"
+                                    >
+                                      {t("captcha.jsProtectionModePaths")}
+                                    </Label>
+                                  </div>
+                                </RadioGroup>
+                              </div>
+                            )}
 
                           {/* 从已记录资源中选择路径 */}
-                          {showResourceTree && optionEnabled && dynamicProtectionEnabled && (
-                            <div className="ml-7 space-y-1">
-                              <Label className="text-xs font-medium">
-                                {t(option.resourceLabelKey!)}
-                              </Label>
-                              {recordedResources.length > 0 ? (
-                                <ResourcePathTree
-                                  resources={recordedResources}
-                                  selectedPaths={
-                                    (getValue(option.configKey!, []) as string[]) || []
-                                  }
-                                  onSelect={(path, checked) =>
-                                    handleResourceSelect(option.configKey!, path, checked)
-                                  }
-                                />
-                              ) : (
-                                <div className="flex items-center gap-2 rounded-md border bg-muted/50 p-3 text-xs text-muted-foreground">
-                                  <IconFileSearch className="h-4 w-4" />
-                                  {t(option.resourceEmptyKey!)}
-                                </div>
-                              )}
-                            </div>
-                          )}
+                          {showResourceTree &&
+                            optionEnabled &&
+                            dynamicProtectionEnabled && (
+                              <div className="ml-7 space-y-1">
+                                <Label className="text-xs font-medium">
+                                  {t(option.resourceLabelKey!)}
+                                </Label>
+                                {recordedResources.length > 0 ? (
+                                  <ResourcePathTree
+                                    resources={recordedResources}
+                                    selectedPaths={
+                                      (getValue(
+                                        option.configKey!,
+                                        []
+                                      ) as string[]) || []
+                                    }
+                                    onSelect={(path, checked) =>
+                                      handleResourceSelect(
+                                        option.configKey!,
+                                        path,
+                                        checked
+                                      )
+                                    }
+                                  />
+                                ) : (
+                                  <div className="flex items-center gap-2 rounded-md border bg-muted/50 p-3 text-xs text-muted-foreground">
+                                    <IconFileSearch className="h-4 w-4" />
+                                    {t(option.resourceEmptyKey!)}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                         </div>
-                      );
+                      )
                     })}
 
                     {/* 水印文字单独放在图片水印下方 */}
-                    {getValue("image_watermark", false) && dynamicProtectionEnabled && (
-                      <div className="ml-7 space-y-1">
-                        <Label className="text-xs font-medium">
-                          {t("captcha.watermarkText")}
-                        </Label>
-                        <Input
-                          className="text-xs"
-                          placeholder={t("captcha.watermarkTextPlaceholder")}
-                          value={getValue("watermark_text", "")}
-                          onChange={(e) => handleTextChange("watermark_text", e.target.value)}
-                        />
-                      </div>
-                    )}
+                    {getValue("image_watermark", false) &&
+                      dynamicProtectionEnabled && (
+                        <div className="ml-7 space-y-1">
+                          <Label className="text-xs font-medium">
+                            {t("captcha.watermarkText")}
+                          </Label>
+                          <Input
+                            className="text-xs"
+                            placeholder={t("captcha.watermarkTextPlaceholder")}
+                            value={getValue("watermark_text", "")}
+                            onChange={(e) =>
+                              handleTextChange("watermark_text", e.target.value)
+                            }
+                          />
+                        </div>
+                      )}
 
                     {/* 解密缓存时间 */}
                     {dynamicProtectionEnabled && (
@@ -408,24 +439,30 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
                   </div>
                 )}
               </div>
-            );
+            )
           })}
 
           {/* 排除采集头部配置 */}
           <div className="space-y-3">
             <div className="flex items-center gap-3">
               <div className="h-5 w-1 rounded-full bg-primary" />
-              <span className="text-sm font-medium">{t("captcha.excludeRecordHeaders")}</span>
+              <span className="text-sm font-medium">
+                {t("captcha.excludeRecordHeaders")}
+              </span>
             </div>
             <div className="ml-4 space-y-1">
               <Label className="text-xs font-medium">
                 {t("captcha.excludeRecordHeadersLabel")}
               </Label>
               <textarea
-                className="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                className="min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
                 placeholder={t("captcha.excludeRecordHeadersPlaceholder")}
-                value={(getValue("exclude_record_headers", []) as string[]).join("\n")}
-                onChange={(e) => handleArrayChange("exclude_record_headers", e.target.value)}
+                value={(
+                  getValue("exclude_record_headers", []) as string[]
+                ).join("\n")}
+                onChange={(e) =>
+                  handleArrayChange("exclude_record_headers", e.target.value)
+                }
               />
               <p className="text-[10px] text-muted-foreground">
                 {t("captcha.excludeRecordHeadersHint")}
@@ -436,7 +473,11 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
 
         {/* 底部按钮 */}
         <div className="flex items-center justify-end gap-3 border-t px-6 py-4">
-          <Button variant="outline" onClick={handleCancel} disabled={updateBot.loading}>
+          <Button
+            variant="outline"
+            onClick={handleCancel}
+            disabled={updateBot.loading}
+          >
             {t("captcha.cancel")}
           </Button>
           <Button
@@ -458,5 +499,5 @@ export function BotProtectionDialog({ open, onOpenChange, siteId }: BotProtectio
         </div>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

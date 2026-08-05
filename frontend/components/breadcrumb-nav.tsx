@@ -1,8 +1,8 @@
-"use client";
+"use client"
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useTranslation } from "react-i18next";
+import Link from "next/link"
+import { usePathname } from "next/navigation"
+import { useTranslation } from "react-i18next"
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -10,23 +10,23 @@ import {
   BreadcrumbList,
   BreadcrumbPage,
   BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb";
-import { segmentKeyMap } from "@/lib/route-titles";
+} from "@/components/ui/breadcrumb"
+import { segmentKeyMap } from "@/lib/route-titles"
 
 export function BreadcrumbNav() {
-  const pathname = usePathname();
-  const { t } = useTranslation();
+  const pathname = usePathname()
+  const { t } = useTranslation()
 
-  const segments = pathname.split("/").filter(Boolean);
-  if (segments.length === 0) return null;
+  const segments = pathname.split("/").filter(Boolean)
+  if (segments.length === 0) return null
 
   const crumbs = segments.map((segment, index) => {
-    const href = "/" + segments.slice(0, index + 1).join("/");
+    const href = "/" + segments.slice(0, index + 1).join("/")
     const label = segmentKeyMap[segment]
       ? t(segmentKeyMap[segment])
-      : decodeURIComponent(segment);
-    return { href, label };
-  });
+      : decodeURIComponent(segment)
+    return { href, label }
+  })
 
   return (
     <Breadcrumb className="mb-4">
@@ -52,5 +52,5 @@ export function BreadcrumbNav() {
         ))}
       </BreadcrumbList>
     </Breadcrumb>
-  );
+  )
 }

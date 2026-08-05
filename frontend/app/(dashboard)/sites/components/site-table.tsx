@@ -1,7 +1,7 @@
-"use client";
+"use client"
 
-import Link from "next/link";
-import { useTranslation } from "react-i18next";
+import Link from "next/link"
+import { useTranslation } from "react-i18next"
 import {
   Table,
   TableBody,
@@ -9,9 +9,10 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table";
-import { SiteHoverPreview } from "@/components/site-hover-preview";
-import type { Site } from "@/lib/types";
+} from "@/components/ui/table"
+import { SiteHoverPreview } from "@/components/site-hover-preview"
+import { parseSiteHosts } from "@/lib/site-display"
+import type { Site } from "@/lib/types"
 import {
   SiteActionsMenu,
   SiteCapabilityBadges,
@@ -21,7 +22,7 @@ import {
   SiteStatusDot,
   SiteUpstream,
   type SiteActionHandlers,
-} from "./site-presentation";
+} from "./site-presentation"
 
 /**
  * 站点列表（表格视图）。
@@ -38,7 +39,7 @@ export function SiteTable({
   onToggle,
   onDelete,
 }: { sites: Site[] } & SiteActionHandlers) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   return (
     <div className="overflow-x-auto rounded-xl border">
@@ -65,54 +66,66 @@ export function SiteTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {sites.map((site) => (
-            <TableRow
-              key={site.id}
-              className={site.enabled ? undefined : "bg-muted/25"}
-            >
-              <TableCell className="ps-4">
-                <SiteHoverPreview site={site} className="min-w-0">
-                  <Link
-                    href={`/sites/detail/?id=${site.id}`}
-                    className="group/link flex min-w-0 items-center gap-2"
-                  >
-                    <SiteStatusDot enabled={site.enabled} />
-                    <span
-                      className="truncate text-sm font-medium transition-colors group-hover/link:text-primary"
-                      title={site.host}
+          {sites.map((site) => {
+            const hosts = parseSiteHosts(site.host)
+            const primaryHost = hosts[0] || site.host
+
+            return (
+              <TableRow
+                key={site.id}
+                className={site.enabled ? undefined : "bg-muted/25"}
+              >
+                <TableCell className="ps-4">
+                  <SiteHoverPreview site={site} className="min-w-0">
+                    <Link
+                      href={`/sites/detail/?id=${site.id}`}
+                      className="group/link flex min-w-0 items-center gap-2"
                     >
-                      {site.host}
-                    </span>
-                  </Link>
-                </SiteHoverPreview>
-              </TableCell>
-              <TableCell>
-                <SiteModeBadge site={site} />
-              </TableCell>
-              <TableCell>
-                <SiteListenerBadges site={site} max={3} />
-              </TableCell>
-              <TableCell className="max-w-0">
-                <SiteUpstream site={site} />
-              </TableCell>
-              <TableCell className="hidden lg:table-cell">
-                <SiteCapabilityBadges site={site} max={3} />
-              </TableCell>
-              <TableCell className="hidden xl:table-cell">
-                <SiteQuickLinks siteId={site.id} />
-              </TableCell>
-              <TableCell className="pe-4 text-end">
-                <SiteActionsMenu
-                  site={site}
-                  onEdit={onEdit}
-                  onToggle={onToggle}
-                  onDelete={onDelete}
-                />
-              </TableCell>
-            </TableRow>
-          ))}
+                      <SiteStatusDot enabled={site.enabled} />
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          className="truncate text-sm font-medium transition-colors group-hover/link:text-primary"
+                          title={hosts.join("\n") || site.host}
+                        >
+                          {primaryHost}
+                        </span>
+                        {hosts.length > 1 && (
+                          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                            +{hosts.length - 1}
+                          </span>
+                        )}
+                      </span>
+                    </Link>
+                  </SiteHoverPreview>
+                </TableCell>
+                <TableCell>
+                  <SiteModeBadge site={site} />
+                </TableCell>
+                <TableCell>
+                  <SiteListenerBadges site={site} max={3} />
+                </TableCell>
+                <TableCell className="max-w-0">
+                  <SiteUpstream site={site} />
+                </TableCell>
+                <TableCell className="hidden lg:table-cell">
+                  <SiteCapabilityBadges site={site} max={3} />
+                </TableCell>
+                <TableCell className="hidden xl:table-cell">
+                  <SiteQuickLinks siteId={site.id} />
+                </TableCell>
+                <TableCell className="pe-4 text-end">
+                  <SiteActionsMenu
+                    site={site}
+                    onEdit={onEdit}
+                    onToggle={onToggle}
+                    onDelete={onDelete}
+                  />
+                </TableCell>
+              </TableRow>
+            )
+          })}
         </TableBody>
       </Table>
     </div>
-  );
+  )
 }

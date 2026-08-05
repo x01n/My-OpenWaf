@@ -13,6 +13,7 @@ package luaplugin
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"sync/atomic"
 	"time"
 
@@ -34,14 +35,21 @@ func (s Stage) Valid() bool { return s == StagePre || s == StagePost }
 
 const (
 	// defaultTimeout 是单次脚本执行的挂钟上限。
-	//
-	// 取 50ms：数据面每请求同步执行，再长会显著拉高 P99 延迟；
-	// 而正常的策略脚本（读若干字段 + 少量字符串判断）耗时在微秒级，
-	// 50ms 足以覆盖含 KV 往返的场景。
 	defaultTimeout = 50 * time.Millisecond
+
+	// maxTimeout 是单脚本允许的最长执行时间。
+	maxTimeout = 1200 * time.Millisecond
 
 	// maxScriptBytes 限制脚本体积，避免超大脚本拖慢编译与占用内存。
 	maxScriptBytes = 256 * 1024
+
+	// 运行时 API 的资源上限，避免脚本通过大量表项或回调放大请求开销。
+	maxAPICalls       = 128
+	maxAPIMapEntries  = 256
+	maxAPIStringBytes = 16 * 1024
+	maxHeaderValue    = 4 * 1024
+	maxResponseBody   = 16 * 1024
+	maxDecisionTags   = 32
 )
 
 // ErrScriptTooLarge 表示脚本超过体积上限。
@@ -57,8 +65,10 @@ type Decision struct {
 	RedirectTo string
 	// StatusCode 覆盖拦截响应码，0 表示用默认值。
 	StatusCode int
-	// SetHeaders 是脚本要求追加/覆盖的转发请求头。
+	// SetHeaders 是脚本要求追加/覆盖的受控响应头。
 	SetHeaders map[string]string
+	// ResponseBody 是可选的受限响应体覆盖。
+	ResponseBody string
 	// Tags 是脚本打的标签，仅用于日志与下游观测。
 	Tags []string
 }
@@ -82,9 +92,13 @@ type KVBackend interface {
 //
 // 编译产物（*lua.FunctionProto）在多个 Lua 状态机间共享，故只编译一次。
 type Script struct {
+	id    uint
 	name  string
 	stage Stage
 	proto *lua.FunctionProto
+
+	// siteID 为 nil 表示全局脚本；非 nil 时仅对指定站点执行。
+	siteID *uint
 
 	// timeout 允许按脚本覆盖默认超时。
 	timeout time.Duration
@@ -101,6 +115,21 @@ func (s *Script) Name() string { return s.name }
 
 // Stage 返回脚本的执行时机。
 func (s *Script) Stage() Stage { return s.stage }
+
+// ID returns the persisted plugin identifier used to correlate runtime statistics.
+func (s *Script) ID() uint {
+	if s == nil {
+		return 0
+	}
+	return s.id
+}
+
+// SetID assigns the persisted plugin identifier during snapshot compilation.
+func (s *Script) SetID(id uint) {
+	if s != nil {
+		s.id = id
+	}
+}
 
 // Stats 返回累计运行统计：执行次数、失败次数、超时次数、平均耗时。
 func (s *Script) Stats() (runs, failures, timeouts int64, avg time.Duration) {
@@ -142,9 +171,45 @@ func Compile(name string, stage Stage, source string) (*Script, error) {
 	}, nil
 }
 
+// ParseQueryParams 将原始查询串转换为 Lua 可见的查询参数。
+// 重复键保留第一个值；非法编码返回 nil。
+func ParseQueryParams(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return nil
+	}
+	params := make(map[string]string, len(values))
+	for key, values := range values {
+		if len(values) > 0 {
+			params[key] = values[0]
+		}
+	}
+	return params
+}
+
+// SetSiteID 设置脚本的站点作用域。nil 表示全局脚本。
+func (s *Script) SetSiteID(siteID *uint) {
+	if s == nil {
+		return
+	}
+	if siteID == nil {
+		s.siteID = nil
+		return
+	}
+	id := *siteID
+	s.siteID = &id
+}
+
 // SetTimeout 覆盖该脚本的执行超时。非正值表示保留默认。
 func (s *Script) SetTimeout(timeout time.Duration) {
-	if timeout > 0 {
-		s.timeout = timeout
+	if timeout <= 0 {
+		return
 	}
+	if timeout > maxTimeout {
+		timeout = maxTimeout
+	}
+	s.timeout = timeout
 }

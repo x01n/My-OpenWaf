@@ -1,12 +1,12 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/page-header";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Pagination,
   PaginationContent,
@@ -15,44 +15,44 @@ import {
   PaginationNext,
   PaginationPrevious,
   PaginationEllipsis,
-} from "@/components/ui/pagination";
-import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { DataTable } from "@/components/data-table";
-import { IconFilter } from "@tabler/icons-react";
-import { useDropEvents } from "@/hooks/use-api";
-import type { DropEvent } from "@/lib/types";
+} from "@/components/ui/pagination"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { DataTable } from "@/components/data-table"
+import { IconFilter } from "@tabler/icons-react"
+import { useDropEvents } from "@/hooks/use-api"
+import type { DropEvent } from "@/lib/types"
 
 export default function DropEventsPage() {
-  const { t } = useTranslation();
-  const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
+  const { t } = useTranslation()
+  const [page, setPage] = useState(1)
+  const [pageSize] = useState(20)
   const [filters, setFilters] = useState({
     source: "",
     client_ip: "",
     host: "",
-  });
-  const [showFilters, setShowFilters] = useState(false);
+  })
+  const [showFilters, setShowFilters] = useState(false)
 
   const { data, isLoading, error } = useDropEvents({
     page,
     page_size: pageSize,
     ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "")),
-  });
+  })
 
-  const items = data?.items || [];
-  const total = data?.total || 0;
-  const totalPages = Math.ceil(total / pageSize) || 1;
+  const items = data?.items || []
+  const total = data?.total || 0
+  const totalPages = Math.ceil(total / pageSize) || 1
 
   const handleFilterChange = (key: string, value: string) => {
-    setFilters((prev) => ({ ...prev, [key]: value }));
-    setPage(1);
-  };
+    setFilters((prev) => ({ ...prev, [key]: value }))
+    setPage(1)
+  }
 
   const clearFilters = () => {
-    setFilters({ source: "", client_ip: "", host: "" });
-    setPage(1);
-  };
+    setFilters({ source: "", client_ip: "", host: "" })
+    setPage(1)
+  }
 
   const columns = [
     { key: "created_at", title: t("dropEvents.time"), width: "180px" },
@@ -60,7 +60,7 @@ export default function DropEventsPage() {
     { key: "source", title: t("dropEvents.source"), width: "120px" },
     { key: "host", title: t("dropEvents.host"), width: "180px" },
     { key: "path", title: t("dropEvents.path"), width: "200px" },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
@@ -94,7 +94,9 @@ export default function DropEventsPage() {
               onClick={() => setShowFilters(!showFilters)}
             >
               <IconFilter className="h-3.5 w-3.5" />
-              {showFilters ? t("common.collapseFilter") : t("common.advancedFilter")}
+              {showFilters
+                ? t("common.collapseFilter")
+                : t("common.advancedFilter")}
             </Button>
           </div>
         </CardHeader>
@@ -116,7 +118,9 @@ export default function DropEventsPage() {
                   className="h-8 text-xs"
                   placeholder={t("dropEvents.ipPlaceholder")}
                   value={filters.client_ip}
-                  onChange={(e) => handleFilterChange("client_ip", e.target.value)}
+                  onChange={(e) =>
+                    handleFilterChange("client_ip", e.target.value)
+                  }
                 />
               </div>
               <div className="space-y-1.5">
@@ -129,7 +133,12 @@ export default function DropEventsPage() {
                 />
               </div>
               <div className="flex items-end sm:col-span-2 lg:col-span-3">
-                <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={clearFilters}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs"
+                  onClick={clearFilters}
+                >
                   {t("common.clearFilter")}
                 </Button>
               </div>
@@ -150,18 +159,23 @@ export default function DropEventsPage() {
                 <PaginationItem>
                   <PaginationPrevious
                     onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    className={page <= 1 ? "pointer-events-none opacity-50" : ""}
+                    className={
+                      page <= 1 ? "pointer-events-none opacity-50" : ""
+                    }
                   />
                 </PaginationItem>
                 {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                  const pageNum = i + 1;
+                  const pageNum = i + 1
                   return (
                     <PaginationItem key={pageNum}>
-                      <PaginationLink isActive={page === pageNum} onClick={() => setPage(pageNum)}>
+                      <PaginationLink
+                        isActive={page === pageNum}
+                        onClick={() => setPage(pageNum)}
+                      >
                         {pageNum}
                       </PaginationLink>
                     </PaginationItem>
-                  );
+                  )
                 })}
                 {totalPages > 5 && (
                   <PaginationItem>
@@ -171,7 +185,9 @@ export default function DropEventsPage() {
                 <PaginationItem>
                   <PaginationNext
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    className={page >= totalPages ? "pointer-events-none opacity-50" : ""}
+                    className={
+                      page >= totalPages ? "pointer-events-none opacity-50" : ""
+                    }
                   />
                 </PaginationItem>
               </PaginationContent>
@@ -180,5 +196,5 @@ export default function DropEventsPage() {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

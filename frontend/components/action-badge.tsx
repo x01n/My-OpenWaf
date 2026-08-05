@@ -1,9 +1,9 @@
-"use client";
+"use client"
 
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
-import { actionBadgeClass, hasActionLabel } from "@/lib/action-style";
-import { useTranslation } from "react-i18next";
+import { Badge } from "@/components/ui/badge"
+import { cn } from "@/lib/utils"
+import { actionBadgeClass, hasActionLabel } from "@/lib/action-style"
+import { useTranslation } from "react-i18next"
 
 /**
  * @typedef {object} ActionBadgeProps
@@ -12,25 +12,29 @@ import { useTranslation } from "react-i18next";
  * @property {string} [className] 附加类名
  */
 export interface ActionBadgeProps {
-  action?: string | null;
-  fallback?: string;
-  className?: string;
+  action?: string | null
+  fallback?: string
+  className?: string
 }
 
 /**
  * WAF 动作徽章：颜色按后端终端优先级语义分级，文案走 i18n。
  * 未知动作保持中性色并原样回显，避免误导为“已拦截”。
  */
-export function ActionBadge({ action, fallback = "-", className }: ActionBadgeProps) {
-  const { t } = useTranslation();
+export function ActionBadge({
+  action,
+  fallback = "-",
+  className,
+}: ActionBadgeProps) {
+  const { t } = useTranslation()
 
   if (!action) {
-    return <span className="text-muted-foreground">{fallback}</span>;
+    return <span className="text-muted-foreground">{fallback}</span>
   }
 
   const label = hasActionLabel(action)
     ? t(`securityEvents.action.${action.toLowerCase()}`)
-    : action;
+    : action
 
   return (
     <Badge
@@ -39,5 +43,5 @@ export function ActionBadge({ action, fallback = "-", className }: ActionBadgePr
     >
       {label}
     </Badge>
-  );
+  )
 }

@@ -6,7 +6,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -30,6 +32,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/observability"
+	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
@@ -459,6 +462,7 @@ func TestHandlerEvaluatesWAFBeforeChallengeRedirect(t *testing.T) {
 			protection.OWASPEnabled = true
 			protection.OWASPAction = "intercept"
 			protection.BotDetectionEnabled = false
+			protection.ShieldEnableEnvCheck = false
 			rt := snapshot.SiteRuntime{
 				Site:                store.Site{ID: 1, Host: "challenge.example.com", Bind: ":80"},
 				Bind:                ":80",
@@ -545,6 +549,7 @@ func TestChallengeTokenCannotBeReplayedOrShared(t *testing.T) {
 	protection := store.DefaultProtectionConfig()
 	protection.OWASPEnabled = false
 	protection.BotDetectionEnabled = false
+	protection.ShieldEnableEnvCheck = false
 	rt := snapshot.SiteRuntime{
 		Site:                store.Site{ID: 1, Host: "replay.example.com", Bind: ":80"},
 		Bind:                ":80",
@@ -871,6 +876,171 @@ func TestHandlerRuleChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestShieldProtocolRequirementsUseTrustedConnectionMetadata(t *testing.T) {
+	mgr := challenge.NewShieldManager(nil, nil, 1)
+	defer mgr.Close()
+
+	cfg := challenge.DefaultShieldConfig()
+	cfg.Difficulty = 1
+	cfg.EnableEnvCheck = false
+	cfg.EnableDevToolsDetect = false
+	cfg.RequireHTTP2 = true
+	cfg.RequireHTTP3 = true
+	cfg.AllowHTTP1 = false
+	mgr.SetConfig(cfg)
+
+	cases := []struct {
+		name      string
+		prepare   func(*testing.T, *app.RequestContext)
+		wantProto string
+		wantPass  bool
+	}{
+		{
+			name: "http1 ignores spoofed forwarded h3",
+			prepare: func(_ *testing.T, c *app.RequestContext) {
+				c.Request.Header.SetProtocol("HTTP/1.1")
+				c.Request.Header.Set("X-Forwarded-Proto", "h3")
+			},
+			wantProto: "http/1.1",
+			wantPass:  false,
+		},
+		{
+			name: "http2 request protocol wins over spoofed forwarded h3",
+			prepare: func(_ *testing.T, c *app.RequestContext) {
+				c.Request.Header.SetProtocol("HTTP/2.0")
+				c.Request.Header.Set("X-Forwarded-Proto", "h3")
+			},
+			wantProto: "h2",
+			wantPass:  true,
+		},
+		{
+			name: "verified internal http3 metadata",
+			prepare: func(t *testing.T, c *app.RequestContext) {
+				client, server := net.Pipe()
+				t.Cleanup(func() {
+					_ = client.Close()
+					_ = server.Close()
+				})
+				c.Request.Header.Set(InternalHTTP3ProtoHeader, "h3")
+				c.Request.Header.Set("X-Forwarded-Proto", "h3")
+				c.SetConn(&loopbackHertzConn{
+					Conn:       &testHertzConn{Conn: server},
+					localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443},
+					remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+				})
+				applyInternalHTTP3RequestMetadata(c)
+			},
+			wantProto: "h3",
+			wantPass:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := app.NewContext(0)
+			tc.prepare(t, ctx)
+
+			protocol := requestProtocol(ctx)
+			if protocol != tc.wantProto {
+				t.Fatalf("requestProtocol() = %q, want %q", protocol, tc.wantProto)
+			}
+
+			session, err := mgr.GenerateChallenge("/shield", protocol)
+			if err != nil {
+				t.Fatalf("GenerateChallenge(): %v", err)
+			}
+			counter, hash := solveShieldPoW(t, session.Nonce, session.Difficulty)
+			passed, _ := mgr.VerifyChallenge(session.ID, "", counter, hash, "", protocol)
+			if passed != tc.wantPass {
+				t.Fatalf("VerifyChallenge() = %v, want %v", passed, tc.wantPass)
+			}
+		})
+	}
+}
+
+func TestShieldChallengeResponseIgnoresSpoofedForwardedProtocol(t *testing.T) {
+	mgr := challenge.NewShieldManager(nil, nil, 1)
+	defer mgr.Close()
+
+	cfg := store.DefaultProtectionConfig()
+	cfg.ShieldEnabled = true
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/shield")
+	ctx.Request.Header.SetProtocol("HTTP/1.1")
+	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
+
+	writeAntiReplayActionResponse(
+		ctx,
+		Options{ShieldManager: mgr},
+		&snapshot.Snapshot{Protection: cfg},
+		&snapshot.SiteRuntime{Site: store.Site{ID: 1, Host: "shield.example.com"}},
+		"req-shield-protocol",
+		string(action.ShieldChallenge),
+		action.Result{Type: action.ShieldChallenge, Matched: true},
+		403,
+	)
+
+	body := string(ctx.Response.Body())
+	if !strings.Contains(body, `="http/1.1",`) {
+		t.Fatal("shield challenge response did not retain the HTTP/1.1 connection protocol")
+	}
+	if strings.Contains(body, `="h3",`) {
+		t.Fatal("shield challenge response trusted spoofed X-Forwarded-Proto")
+	}
+}
+
+func TestHandleShieldVerifyRejectsSpoofedForwardedProtocol(t *testing.T) {
+	mgr := challenge.NewShieldManager(nil, nil, 1)
+	defer mgr.Close()
+
+	cfg := challenge.DefaultShieldConfig()
+	cfg.Difficulty = 1
+	cfg.EnableEnvCheck = false
+	cfg.EnableDevToolsDetect = false
+	cfg.RequireHTTP3 = true
+	mgr.SetConfig(cfg)
+
+	session, err := mgr.GenerateChallenge("/shield", "h3")
+	if err != nil {
+		t.Fatalf("GenerateChallenge(): %v", err)
+	}
+	counter, hash := solveShieldPoW(t, session.Nonce, session.Difficulty)
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("/__owaf/shield/verify")
+	ctx.Request.Header.SetProtocol("HTTP/1.1")
+	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
+	ctx.Request.Header.SetContentTypeBytes([]byte("application/x-www-form-urlencoded"))
+	ctx.Request.SetBodyString(url.Values{
+		"__waf_shield_session": {session.ID},
+		"__waf_pow_counter":    {strconv.FormatInt(counter, 10)},
+		"__waf_pow_hash":       {hash},
+	}.Encode())
+
+	if !handleShieldVerify(ctx, Options{ShieldManager: mgr}) {
+		t.Fatal("shield verification request was not handled")
+	}
+	if got := string(ctx.Response.Header.Peek("Location")); got == "/shield" {
+		t.Fatalf("spoofed forwarded protocol accepted shield verification, redirect = %q", got)
+	}
+}
+
+func solveShieldPoW(t *testing.T, nonce string, difficulty int) (int64, string) {
+	t.Helper()
+	prefix := strings.Repeat("0", difficulty)
+	for counter := int64(0); counter < 1_000_000; counter++ {
+		sum := sha256.Sum256([]byte(nonce + strconv.FormatInt(counter, 10)))
+		hash := hex.EncodeToString(sum[:])
+		if strings.HasPrefix(hash, prefix) {
+			return counter, hash
+		}
+	}
+	t.Fatalf("未能求出 Shield PoW 难度 %d 的解", difficulty)
+	return 0, ""
 }
 
 func TestBuildAccessLogEntryKeepsHTTPProtocol(t *testing.T) {
@@ -1345,6 +1515,637 @@ func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *tes
 	}
 }
 
+func TestHandlerRecordResponseBodyPathAppliesSiteDynamicProtection(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "record_response_body_dynamic.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	originalBody := []byte("<!doctype html><html><body><script>const match_marker = 1;</script></body></html>")
+	clientIP := net.ParseIP("203.0.113.77")
+	const userAgent = "dynamic-capture-client-ip-test"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{
+			ID:   1,
+			Host: "app.example.com",
+			Bind: ":80",
+		},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		XFFMode:             store.XFFModeTrustOuter,
+		TrustedCIDR:         "127.0.0.1/32",
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 21, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: "match_marker"},
+		},
+	}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	rt.DynamicProtection.JSObfuscationEnabled = true
+	sn := &snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): &rt,
+		},
+	}
+	holder.Store(sn)
+
+	eng := engine.New(holder, nil, nil, nil)
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
+	handler := Handler(Options{
+		Holder:             holder,
+		Engine:             eng,
+		Log:                slog.Default(),
+		Bind:               ":80",
+		ResourceAggregator: resourceAgg,
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/record-response-body")
+	ctx.Request.Header.SetHost("app.example.com")
+	ctx.Request.Header.Set("User-Agent", userAgent)
+	ctx.Request.Header.Set("X-Forwarded-For", clientIP.String())
+	ctx.SetConn(&loopbackHertzConn{
+		Conn:       &testHertzConn{},
+		localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 80},
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+	})
+	if got := security.ResolveClientIP(ctx, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder); !got.Equal(clientIP) {
+		t.Fatalf("resolved client IP = %v, want %v", got, clientIP)
+	}
+
+	handler(context.Background(), ctx)
+	resourceAgg.Close()
+
+	if got := ctx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("status = %d, want %d", got, http.StatusOK)
+	}
+	got := ctx.Response.Body()
+	if bytes.Equal(got, originalBody) {
+		t.Fatalf("expected response-body capture path to apply site dynamic protection")
+	}
+	if !bytes.Contains(got, []byte("owaf")) {
+		t.Fatalf("transformed body does not contain expected owaf marker: %q", got[:min(len(got), 200)])
+	}
+	attribute := func(name string) string {
+		prefix := []byte(name + `="`)
+		start := bytes.Index(got, prefix)
+		if start < 0 {
+			return ""
+		}
+		start += len(prefix)
+		end := bytes.IndexByte(got[start:], '"')
+		if end < 0 {
+			return ""
+		}
+		return string(got[start : start+end])
+	}
+	ticket := attribute("data-owaf-ticket")
+	key := html.UnescapeString(attribute("data-owaf-key"))
+	claims := challenge.DynamicProtectionKeyClaims{
+		DynamicProtectionClaims: challenge.DynamicProtectionClaims{
+			Host: "app.example.com", ClientIP: clientIP, UserAgent: userAgent, SiteID: rt.Site.ID, Bind: rt.Bind,
+		},
+		Key: key,
+	}
+	if ticket == "" || key == "" {
+		t.Fatal("capture response missing dynamic protection ticket or key")
+	}
+	if kek, ok := challenge.VerifyDynamicProtectionKeyTicket(ticket, claims, time.Now()); !ok || kek == "" {
+		t.Fatal("capture response dynamic ticket did not use the resolved client IP")
+	}
+
+	var rec store.RecordedResource
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err = db.Where("site_id = ? AND method = ? AND host = ? AND path = ?", 1, "GET", "app.example.com", "/record-response-body").First(&rec).Error
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			t.Fatalf("load recorded resource: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for recorded resource matched on pre-transform body")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rec.MatchedRuleIDs != "21" {
+		t.Fatalf("MatchedRuleIDs = %q, want 21", rec.MatchedRuleIDs)
+	}
+	if strings.Contains(rec.ResponseBodySnippet, "owaf") {
+		t.Fatalf("recorded response snippet must use pre-transform body, got %q", rec.ResponseBodySnippet)
+	}
+	if !strings.Contains(rec.ResponseBodySnippet, "match_marker") && !strings.Contains(rec.ResponseBodySnippet, "[redacted]") {
+		t.Fatalf("recorded response snippet should retain pre-transform match content, got %q", rec.ResponseBodySnippet)
+	}
+}
+
+func TestHandlerRecordResponseBodyPathMissDoesNotRecordButStillTransforms(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "record_response_body_dynamic_miss.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	originalBody := []byte("<!doctype html><html><body><script>const visible_marker = 1;</script></body></html>")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "app.example.com", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 22, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: "missing_marker"},
+		},
+	}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	rt.DynamicProtection.JSObfuscationEnabled = true
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): &rt,
+		},
+	})
+
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
+	handler := Handler(Options{
+		Holder:             holder,
+		Engine:             engine.New(holder, nil, nil, nil),
+		Log:                slog.Default(),
+		Bind:               ":80",
+		ResourceAggregator: resourceAgg,
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/record-response-body-miss")
+	ctx.Request.Header.SetHost("app.example.com")
+
+	handler(context.Background(), ctx)
+	resourceAgg.Close()
+
+	if got := ctx.Response.Body(); bytes.Equal(got, originalBody) || !bytes.Contains(got, []byte("owaf")) {
+		t.Fatalf("unmatched capture response should still be dynamically transformed")
+	}
+	var count int64
+	if err := db.Model(&store.RecordedResource{}).Count(&count).Error; err != nil {
+		t.Fatalf("count recorded resources: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("recorded resource count = %d, want 0 for unmatched response-body rule", count)
+	}
+}
+
+func TestHandlerRecordResponseBodyPathStreamsOversizedCompressedResponse(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "record_response_body_oversized.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	tail := []byte("oversized-app-route-tail-sentinel</body></html>")
+	originalBody := append([]byte("<!doctype html><html><body>capture_marker"), bytes.Repeat([]byte("x"), 8*1024*1024+4096)...)
+	originalBody = append(originalBody, tail...)
+	var encoded bytes.Buffer
+	writer := gzip.NewWriter(&encoded)
+	if _, err := writer.Write(originalBody); err != nil {
+		t.Fatalf("encode gzip body: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(encoded.Len()))
+		_, _ = w.Write(encoded.Bytes())
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "app.example.com", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 23, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: "capture_marker"},
+		},
+	}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): &rt,
+		},
+	})
+
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
+	handler := Handler(Options{
+		Holder:             holder,
+		Engine:             engine.New(holder, nil, nil, nil),
+		Log:                slog.Default(),
+		Bind:               ":80",
+		ResourceAggregator: resourceAgg,
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/record-response-body-oversized")
+	ctx.Request.Header.SetHost("app.example.com")
+	ctx.Request.Header.Set("Accept-Encoding", "identity")
+
+	handler(context.Background(), ctx)
+	resourceAgg.Close()
+
+	got := ctx.Response.Body()
+	if !bytes.Equal(got, originalBody) || !bytes.HasSuffix(got, tail) {
+		t.Fatalf("oversized captured response mismatch: got %d bytes, want %d", len(got), len(originalBody))
+	}
+	if bytes.Contains(got, []byte("owaf")) {
+		t.Fatal("oversized captured response must stream without dynamic transformation")
+	}
+	var rec store.RecordedResource
+	if err := db.Where("site_id = ? AND path = ?", 1, "/record-response-body-oversized").First(&rec).Error; err != nil {
+		t.Fatalf("load oversized recorded resource: %v", err)
+	}
+	if rec.MatchedRuleIDs != "23" {
+		t.Fatalf("MatchedRuleIDs = %q, want 23", rec.MatchedRuleIDs)
+	}
+}
+
+func TestHandlerRecordResponseBodyPathStreamsOversizedCompressedResponseDoesNotBlockOnTail(t *testing.T) {
+	prefix := append([]byte("<!doctype html><html><body>capture_marker"), bytes.Repeat([]byte("x"), 8*1024*1024+4096)...)
+	tail := []byte("blocking-tail-sentinel</body></html>")
+	originalBody := append(append([]byte(nil), prefix...), tail...)
+	releaseTail := make(chan struct{})
+	prefixFlushed := make(chan struct{})
+	releaseOnce := sync.Once{}
+	defer releaseOnce.Do(func() { close(releaseTail) })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		if _, err := gz.Write(prefix); err != nil {
+			t.Errorf("write gzip prefix: %v", err)
+			return
+		}
+		if err := gz.Flush(); err != nil {
+			t.Errorf("flush gzip prefix: %v", err)
+			return
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(prefixFlushed)
+		<-releaseTail
+		if _, err := gz.Write(tail); err != nil {
+			t.Errorf("write gzip tail: %v", err)
+			return
+		}
+		if err := gz.Close(); err != nil {
+			t.Errorf("close gzip stream: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "app.example.com", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 24, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: "capture_marker"},
+		},
+	}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): &rt,
+		},
+	})
+
+	handler := Handler(Options{
+		Holder: holder,
+		Engine: engine.New(holder, nil, nil, nil),
+		Log:    slog.Default(),
+		Bind:   ":80",
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/record-response-body-oversized-blocking")
+	ctx.Request.Header.SetHost("app.example.com")
+	ctx.Request.Header.Set("Accept-Encoding", "identity")
+
+	done := make(chan struct{})
+	go func() {
+		handler(context.Background(), ctx)
+		close(done)
+	}()
+	select {
+	case <-prefixFlushed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("upstream did not flush the oversized gzip prefix")
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler waited for oversized gzip tail instead of returning with a stream")
+	}
+	releaseOnce.Do(func() { close(releaseTail) })
+
+	got := ctx.Response.Body()
+	if !bytes.Equal(got, originalBody) || !bytes.HasSuffix(got, tail) {
+		t.Fatalf("oversized blocking response mismatch: got %d bytes, want %d", len(got), len(originalBody))
+	}
+	if bytes.Contains(got, []byte("owaf")) {
+		t.Fatal("oversized blocking response must stream without dynamic transformation")
+	}
+}
+
+func TestHandlerRecordFullHTTPResponsePathMatchesPreTransformResponseHeadersAndStillTransforms(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "record_full_http_response_dynamic.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	originalBody := []byte("<!doctype html><html><body><script>const full_response_marker = 1;</script></body></html>")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-App-Route-Match", "full-response-marker")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "app.example.com", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 25, Target: store.AppRouteTargetFullHTTPResponse, Op: store.AppRouteOpContains, Pattern: "X-App-Route-Match: full-response-marker"},
+		},
+	}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	rt.DynamicProtection.JSObfuscationEnabled = true
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): &rt,
+		},
+	})
+
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
+	handler := Handler(Options{
+		Holder:             holder,
+		Engine:             engine.New(holder, nil, nil, nil),
+		Log:                slog.Default(),
+		Bind:               ":80",
+		ResourceAggregator: resourceAgg,
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/record-full-http-response")
+	ctx.Request.Header.SetHost("app.example.com")
+
+	handler(context.Background(), ctx)
+	resourceAgg.Close()
+
+	got := ctx.Response.Body()
+	if bytes.Equal(got, originalBody) || !bytes.Contains(got, []byte("owaf")) {
+		t.Fatalf("full_http_response capture response should still be dynamically transformed")
+	}
+	var rec store.RecordedResource
+	if err := db.Where("site_id = ? AND path = ?", 1, "/record-full-http-response").First(&rec).Error; err != nil {
+		t.Fatalf("load full_http_response recorded resource: %v", err)
+	}
+	if rec.HitCount != 1 || rec.MatchedRuleIDs != "25" || rec.PrimaryRuleID != 25 {
+		t.Fatalf("unexpected matched rule metadata: %#v", rec)
+	}
+	if strings.Contains(rec.ResponseBodySnippet, "owaf") {
+		t.Fatalf("recorded full_http_response snippet must use pre-transform body, got %q", rec.ResponseBodySnippet)
+	}
+	if !strings.Contains(rec.ResponseHeadersJSON, "X-App-Route-Match") {
+		t.Fatalf("recorded response headers should include upstream match header, got %q", rec.ResponseHeadersJSON)
+	}
+}
+
+func TestHandlerRecordFullHTTPResponsePathMissDoesNotRecordButStillTransforms(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "record_full_http_response_miss.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	originalBody := []byte("<!doctype html><html><body><script>const miss_marker = 1;</script></body></html>")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-App-Route-Match", "different-marker")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "app.example.com", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 26, Target: store.AppRouteTargetFullHTTPResponse, Op: store.AppRouteOpContains, Pattern: "X-App-Route-Match: missing-marker"},
+		},
+	}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	rt.DynamicProtection.JSObfuscationEnabled = true
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): &rt,
+		},
+	})
+
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
+	handler := Handler(Options{
+		Holder:             holder,
+		Engine:             engine.New(holder, nil, nil, nil),
+		Log:                slog.Default(),
+		Bind:               ":80",
+		ResourceAggregator: resourceAgg,
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/record-full-http-response-miss")
+	ctx.Request.Header.SetHost("app.example.com")
+
+	handler(context.Background(), ctx)
+	resourceAgg.Close()
+
+	if got := ctx.Response.Body(); bytes.Equal(got, originalBody) || !bytes.Contains(got, []byte("owaf")) {
+		t.Fatalf("unmatched full_http_response should still be dynamically transformed")
+	}
+	var count int64
+	if err := db.Model(&store.RecordedResource{}).Count(&count).Error; err != nil {
+		t.Fatalf("count recorded resources: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("recorded resource count = %d, want 0 for unmatched full_http_response rule", count)
+	}
+}
+
+func TestHandlerRecordResponseBodyPathNonTargetContentTypeRecordsWithoutTransform(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "record_response_body_plain.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("open sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+		t.Fatalf("migrate recorded resources: %v", err)
+	}
+	recordedRepo := repository.NewRecordedResourceRepo(db)
+
+	originalBody := []byte("plain response capture_marker")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "app.example.com", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+		AppRouteRules: []appresource.CompiledRule{
+			{ID: 27, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: "capture_marker"},
+		},
+	}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	rt.DynamicProtection.JSObfuscationEnabled = true
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "app.example.com"): &rt,
+		},
+	})
+
+	resourceAgg := NewRecordedResourceAggregator(recordedRepo, slog.Default())
+	handler := Handler(Options{
+		Holder:             holder,
+		Engine:             engine.New(holder, nil, nil, nil),
+		Log:                slog.Default(),
+		Bind:               ":80",
+		ResourceAggregator: resourceAgg,
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/record-response-body-plain")
+	ctx.Request.Header.SetHost("app.example.com")
+
+	handler(context.Background(), ctx)
+	resourceAgg.Close()
+
+	if got := ctx.Response.Body(); !bytes.Equal(got, originalBody) || bytes.Contains(got, []byte("owaf")) {
+		t.Fatalf("plain response should be recorded but not dynamically transformed, got %q", got)
+	}
+	var rec store.RecordedResource
+	if err := db.Where("site_id = ? AND path = ?", 1, "/record-response-body-plain").First(&rec).Error; err != nil {
+		t.Fatalf("load plain recorded resource: %v", err)
+	}
+	if rec.MatchedRuleIDs != "27" || rec.PrimaryRuleID != 27 {
+		t.Fatalf("unexpected matched rule metadata: %#v", rec)
+	}
+}
+
 func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "recorded_resources_h3.db")
 	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
@@ -1643,6 +2444,203 @@ func TestScrubResponseHopByHopHeaders(t *testing.T) {
 		if got := string(ctx.Response.Header.Peek(key)); got != "" {
 			t.Fatalf("%s header was not scrubbed: %q", key, got)
 		}
+	}
+}
+
+func TestApplyLuaResponseControlsBodyAndHeaders(t *testing.T) {
+	ctx := app.NewContext(0)
+	headers := map[string]string{"X-Lua-Policy": "blocked"}
+	body := "blocked by lua"
+	result := action.Result{SetHeaders: &headers, ResponseBody: &body}
+
+	if !applyLuaResponse(ctx, result, 418) {
+		t.Fatal("expected Lua response body override to be applied")
+	}
+	if got := ctx.Response.StatusCode(); got != 418 {
+		t.Fatalf("status = %d, want 418", got)
+	}
+	if got := string(ctx.Response.Header.Peek("X-Lua-Policy")); got != "blocked" {
+		t.Fatalf("X-Lua-Policy = %q", got)
+	}
+	if got := string(ctx.Response.Body()); got != body {
+		t.Fatalf("body = %q, want %q", got, body)
+	}
+}
+
+func TestApplyLuaResponseHeaderOnlyKeepsRenderer(t *testing.T) {
+	ctx := app.NewContext(0)
+	headers := map[string]string{"X-Lua-Policy": "observe"}
+	result := action.Result{SetHeaders: &headers}
+
+	if applyLuaResponse(ctx, result, 403) {
+		t.Fatal("header-only Lua decision must keep the standard response renderer")
+	}
+	if got := string(ctx.Response.Header.Peek("X-Lua-Policy")); got != "observe" {
+		t.Fatalf("X-Lua-Policy = %q", got)
+	}
+}
+
+func TestValidDynamicProtectionEnvRequiresJSONObject(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+		want bool
+	}{
+		{name: "missing", raw: nil, want: false},
+		{name: "null", raw: json.RawMessage(`null`), want: false},
+		{name: "array", raw: json.RawMessage(`[]`), want: false},
+		{name: "string", raw: json.RawMessage(`"fingerprint"`), want: false},
+		{name: "malformed", raw: json.RawMessage(`{"fingerprint":`), want: false},
+		{name: "empty object", raw: json.RawMessage(`{}`), want: false},
+		{name: "missing blocked", raw: json.RawMessage(`{"reasons":[],"softReasons":[],"softScore":0,"signals":{"webdriver":false}}`), want: false},
+		{name: "blocked true", raw: json.RawMessage(`{"blocked":true,"reasons":[],"softReasons":[],"softScore":0,"signals":{"webdriver":false}}`), want: false},
+		{name: "blocked string", raw: json.RawMessage(`{"blocked":"false","reasons":[],"softReasons":[],"softScore":0,"signals":{"webdriver":false}}`), want: false},
+		{name: "blocked null", raw: json.RawMessage(`{"blocked":null,"reasons":[],"softReasons":[],"softScore":0,"signals":{"webdriver":false}}`), want: false},
+		{name: "blocked number", raw: json.RawMessage(`{"blocked":0,"reasons":[],"softReasons":[],"softScore":0,"signals":{"webdriver":false}}`), want: false},
+		{name: "wrong reasons type", raw: json.RawMessage(`{"blocked":false,"reasons":"none","softReasons":[],"softScore":0,"signals":{"webdriver":false}}`), want: false},
+		{name: "wrong soft reasons type", raw: json.RawMessage(`{"blocked":false,"reasons":[],"softReasons":"none","softScore":0,"signals":{"webdriver":false}}`), want: false},
+		{name: "wrong soft score type", raw: json.RawMessage(`{"blocked":false,"reasons":[],"softReasons":[],"softScore":"0","signals":{"webdriver":false}}`), want: false},
+		{name: "wrong signals type", raw: json.RawMessage(`{"blocked":false,"reasons":[],"softReasons":[],"softScore":0,"signals":[]}`), want: false},
+		{name: "null signals", raw: json.RawMessage(`{"blocked":false,"reasons":[],"softReasons":[],"softScore":0,"signals":null}`), want: false},
+		{name: "empty signals", raw: json.RawMessage(`{"blocked":false,"reasons":[],"softReasons":[],"softScore":0,"signals":{}}`), want: false},
+		{name: "unknown field", raw: json.RawMessage(`{"blocked":false,"reasons":[],"softReasons":[],"softScore":0,"signals":{"webdriver":false},"extra":true}`), want: false},
+		{name: "complete environment", raw: json.RawMessage(`{"blocked":false,"reasons":[],"softReasons":[],"softScore":0,"signals":{"webdriver":false}}`), want: true},
+		{name: "oversized", raw: json.RawMessage(`{"blocked":false,"reasons":[],"softReasons":[],"softScore":0,"signals":{"fingerprint":"` + strings.Repeat("a", 16*1024) + `"}}`), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validDynamicProtectionEnv(tt.raw); got != tt.want {
+				t.Fatalf("validDynamicProtectionEnv() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleDynamicProtectionKeySuccessSetsNoStoreAndMetrics(t *testing.T) {
+	holder := &snapshot.Holder{}
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{ID: 1, Host: "dynamic.example.com", Bind: ":80"},
+		Bind: ":80",
+	}
+	rt.DynamicProtection.DecryptCacheTTLSeconds = 120
+	holder.Store(&snapshot.Snapshot{
+		Revision: 1,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "dynamic.example.com"): &rt,
+		},
+	})
+	metrics := NewMetrics()
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodPost)
+	ctx.Request.SetRequestURI("/__owaf/dynamic/key")
+	ctx.Request.Header.SetHost("dynamic.example.com")
+	ctx.Request.Header.Set("User-Agent", "dynamic-test-agent")
+	clientIP := security.ResolveClientIP(ctx, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
+	claims := challenge.DynamicProtectionClaims{
+		Host:      "dynamic.example.com",
+		ClientIP:  clientIP,
+		UserAgent: "dynamic-test-agent",
+		SiteID:    1,
+		Bind:      ":80",
+	}
+	const (
+		key = "dynamic-key"
+		kek = "dynamic-kek"
+	)
+	ticket := challenge.SignDynamicProtectionKeyTicket(
+		challenge.DynamicProtectionKeyClaims{DynamicProtectionClaims: claims, Key: key},
+		time.Now(),
+		time.Minute,
+		kek,
+	)
+	body, err := json.Marshal(map[string]any{
+		"ticket": ticket,
+		"key":    key,
+		"env": map[string]any{
+			"blocked":     false,
+			"reasons":     []string{},
+			"softReasons": []string{},
+			"softScore":   0,
+			"signals":     map[string]any{"webdriver": false},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	ctx.Request.SetBody(body)
+
+	if !handleDynamicProtectionKey(ctx, Options{Holder: holder, Metrics: metrics, Bind: ":80"}) {
+		t.Fatal("dynamic key endpoint was not handled")
+	}
+	if got := ctx.Response.StatusCode(); got != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", got, http.StatusOK, ctx.Response.Body())
+	}
+	if got := string(ctx.Response.Header.Peek("Cache-Control")); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := string(ctx.Response.Header.Peek("Pragma")); got != "no-cache" {
+		t.Fatalf("Pragma = %q, want no-cache", got)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := response["kek"]; got != kek {
+		t.Fatalf("kek = %#v, want %q", got, kek)
+	}
+	summary := metrics.Summary()
+	if summary.ReqTotal != 1 || summary.Status2xx != 1 {
+		t.Fatalf("metrics = %+v, want one request and one 2xx", summary)
+	}
+}
+
+func TestHandleDynamicProtectionKeyRejectsOversizedBodyWithNoStoreAndMetrics(t *testing.T) {
+	metrics := NewMetrics()
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodPost)
+	ctx.Request.SetRequestURI("/__owaf/dynamic/key")
+	ctx.Request.Header.SetHost("dynamic.example.com")
+	ctx.Request.SetBodyString(strings.Repeat("x", dynamicProtectionKeyRequestBodyMax+1))
+
+	if !handleDynamicProtectionKey(ctx, Options{Metrics: metrics, Bind: ":80"}) {
+		t.Fatal("dynamic key endpoint was not handled")
+	}
+	if got := ctx.Response.StatusCode(); got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", got, http.StatusRequestEntityTooLarge)
+	}
+	if got := string(ctx.Response.Header.Peek("Cache-Control")); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := string(ctx.Response.Header.Peek("Pragma")); got != "no-cache" {
+		t.Fatalf("Pragma = %q, want no-cache", got)
+	}
+	summary := metrics.Summary()
+	if summary.ReqTotal != 1 || summary.Status4xx != 1 {
+		t.Fatalf("metrics = %+v, want one request and one 4xx", summary)
+	}
+}
+
+func TestHandleDynamicProtectionKeyRejectsUnsupportedMethodWithNoStore(t *testing.T) {
+	metrics := NewMetrics()
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/__owaf/dynamic/key")
+
+	if !handleDynamicProtectionKey(ctx, Options{Metrics: metrics, Bind: ":80"}) {
+		t.Fatal("dynamic key endpoint was not handled")
+	}
+	if got := ctx.Response.StatusCode(); got != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", got, http.StatusMethodNotAllowed)
+	}
+	if got := string(ctx.Response.Header.Peek("Cache-Control")); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := string(ctx.Response.Header.Peek("Pragma")); got != "no-cache" {
+		t.Fatalf("Pragma = %q, want no-cache", got)
+	}
+	summary := metrics.Summary()
+	if summary.ReqTotal != 1 || summary.Status4xx != 1 {
+		t.Fatalf("metrics = %+v, want one request and one 4xx", summary)
 	}
 }
 

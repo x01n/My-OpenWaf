@@ -1,19 +1,19 @@
-"use client";
+"use client"
 
-import { useTranslation } from "react-i18next";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { useTranslation } from "react-i18next"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Card, CardContent } from "@/components/ui/card"
 import {
   HoverCard,
   HoverCardContent,
   HoverCardTrigger,
-} from "@/components/ui/hover-card";
-import { MetricStrip } from "@/components/metric-strip";
-import { Skeleton } from "@/components/ui/skeleton";
-import { cn, formatNumber } from "@/lib/utils";
-import { IconAlertTriangle, IconInfoCircle } from "@tabler/icons-react";
-import type { LuaPlugin, LuaPluginStage, LuaPluginStat } from "@/lib/types";
+} from "@/components/ui/hover-card"
+import { MetricStrip } from "@/components/metric-strip"
+import { Skeleton } from "@/components/ui/skeleton"
+import { cn, formatNumber } from "@/lib/utils"
+import { IconAlertTriangle, IconInfoCircle } from "@tabler/icons-react"
+import type { LuaPlugin, LuaPluginStat } from "@/lib/types"
 
 /**
  * 判定「持续失败 / 持续超时」所需的最小样本量。
@@ -21,7 +21,7 @@ import type { LuaPlugin, LuaPluginStage, LuaPluginStat } from "@/lib/types";
  * 几十次执行里出现一次异常算不出有意义的占比，此时着色只会误导，
  * 所以样本不足时一律按中性呈现，只把原始计数摆出来。
  */
-const MIN_RATE_SAMPLE = 100;
+const MIN_RATE_SAMPLE = 100
 
 /**
  * 超时率分级线。
@@ -31,8 +31,8 @@ const MIN_RATE_SAMPLE = 100;
  * 连续调用里出现过一次孤立超时（约 0.025%），脚本本身并没有问题。
  * 因此告警线取到该基线的数十倍以上，偶发几次保持中性配色。
  */
-const TIMEOUT_WARN_RATE = 0.01;
-const TIMEOUT_DANGER_RATE = 0.05;
+const TIMEOUT_WARN_RATE = 0.01
+const TIMEOUT_DANGER_RATE = 0.05
 
 /**
  * 失败率分级线。
@@ -40,11 +40,11 @@ const TIMEOUT_DANGER_RATE = 0.05;
  * 失败来自 handle 报错、panic、缺少入口函数这类确定性缺陷，不是运行时抖动，
  * 所以阈值比超时更严。
  */
-const FAILURE_WARN_RATE = 0.005;
-const FAILURE_DANGER_RATE = 0.02;
+const FAILURE_WARN_RATE = 0.005
+const FAILURE_DANGER_RATE = 0.02
 
 /** 占比的语义分级。muted 表示「不下健康结论」，不是「健康」。 */
-type RateTone = "muted" | "warning" | "danger";
+type RateTone = "muted" | "warning" | "danger"
 
 /** 分级 -> 徽章配色。与本页 STAGE_CLASS 同一套写法，保持浅/深色双向可读。 */
 const TONE_CHIP: Record<RateTone, string> = {
@@ -53,51 +53,30 @@ const TONE_CHIP: Record<RateTone, string> = {
     "border-amber-500/30 bg-amber-500/12 text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-300",
   danger:
     "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:border-rose-400/30 dark:bg-rose-400/15 dark:text-rose-300",
-};
-
-/** 统计索引的键。后端统计只给 name + stage，带上 stage 可以少一层重名歧义。 */
-function statsKey(name: string, stage: LuaPluginStage): string {
-  return `${name}\u0000${stage}`;
 }
 
-/** 按 name + stage 索引的统计表。 */
-export type LuaStatsIndex = Map<string, LuaPluginStat>;
+/** 统计索引的键。持久化插件 ID 在数据库内唯一。 */
+function statsKey(id: number): string {
+  return String(id)
+}
+
+/** 按持久化插件 ID 索引的统计表。 */
+export type LuaStatsIndex = Map<string, LuaPluginStat>
 
 /**
  * 建立统计索引。
  *
- * 同名同阶段的条目会被合并：后端按已编译脚本逐个上报，而脚本名在库里没有唯一
- * 约束，真出现重名时无法凭 name 区分，合并计数至少不会丢数。
- *
  * @param items 后端返回的统计条目，可为空。
- * @returns 按 name + stage 索引的统计表。
+ * @returns 按持久化插件 ID 索引的统计表。
  */
 export function buildLuaStatsIndex(
-  items: LuaPluginStat[] | undefined,
+  items: LuaPluginStat[] | undefined
 ): LuaStatsIndex {
-  const index: LuaStatsIndex = new Map();
+  const index: LuaStatsIndex = new Map()
   for (const item of items || []) {
-    const key = statsKey(item.name, item.stage);
-    const prev = index.get(key);
-    if (!prev) {
-      index.set(key, item);
-      continue;
-    }
-    const runs = prev.runs + item.runs;
-    index.set(key, {
-      name: item.name,
-      stage: item.stage,
-      runs,
-      failures: prev.failures + item.failures,
-      timeouts: prev.timeouts + item.timeouts,
-      // avg_ms 的分母是各自的 runs，合并时必须按次数加权，直接取算术平均会失真
-      avg_ms:
-        runs > 0
-          ? (prev.avg_ms * prev.runs + item.avg_ms * item.runs) / runs
-          : 0,
-    });
+    index.set(statsKey(item.id), item)
   }
-  return index;
+  return index
 }
 
 /**
@@ -109,9 +88,9 @@ export function buildLuaStatsIndex(
  */
 export function lookupLuaStat(
   index: LuaStatsIndex,
-  plugin: LuaPlugin,
+  plugin: LuaPlugin
 ): LuaPluginStat | undefined {
-  return index.get(statsKey(plugin.name, plugin.stage));
+  return index.get(statsKey(plugin.id))
 }
 
 /**
@@ -122,9 +101,9 @@ export function lookupLuaStat(
  */
 function rateOf(part: number, total: number): number | null {
   if (!Number.isFinite(part) || !Number.isFinite(total) || total <= 0) {
-    return null;
+    return null
   }
-  return part / total;
+  return part / total
 }
 
 /**
@@ -134,21 +113,21 @@ function rateOf(part: number, total: number): number | null {
  * 否则会与「一次都没发生」混淆。
  */
 function formatRate(rate: number | null): string {
-  if (rate === null) return "-";
-  if (rate <= 0) return "0%";
-  if (rate < 0.0001) return "<0.01%";
-  if (rate < 0.01) return `${(rate * 100).toFixed(2)}%`;
-  if (rate < 0.1) return `${(rate * 100).toFixed(1)}%`;
-  return `${Math.round(rate * 100)}%`;
+  if (rate === null) return "-"
+  if (rate <= 0) return "0%"
+  if (rate < 0.0001) return "<0.01%"
+  if (rate < 0.01) return `${(rate * 100).toFixed(2)}%`
+  if (rate < 0.1) return `${(rate * 100).toFixed(1)}%`
+  return `${Math.round(rate * 100)}%`
 }
 
 /** 平均耗时格式化。后端给的是浮点毫秒，正常脚本在 0.1~0.2 ms 量级，需要保留小数。 */
 function formatAvgMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0 ms";
-  if (ms < 0.01) return "<0.01 ms";
-  if (ms < 1) return `${ms.toFixed(2)} ms`;
-  if (ms < 10) return `${ms.toFixed(1)} ms`;
-  return `${Math.round(ms)} ms`;
+  if (!Number.isFinite(ms) || ms <= 0) return "0 ms"
+  if (ms < 0.01) return "<0.01 ms"
+  if (ms < 1) return `${ms.toFixed(2)} ms`
+  if (ms < 10) return `${ms.toFixed(1)} ms`
+  return `${Math.round(ms)} ms`
 }
 
 /**
@@ -160,23 +139,23 @@ function rateTone(
   rate: number | null,
   runs: number,
   warn: number,
-  danger: number,
+  danger: number
 ): RateTone {
-  if (rate === null || rate <= 0) return "muted";
-  if (runs < MIN_RATE_SAMPLE) return "muted";
-  if (rate >= danger) return "danger";
-  if (rate >= warn) return "warning";
-  return "muted";
+  if (rate === null || rate <= 0) return "muted"
+  if (runs < MIN_RATE_SAMPLE) return "muted"
+  if (rate >= danger) return "danger"
+  if (rate >= warn) return "warning"
+  return "muted"
 }
 
 /** 单个脚本的健康判定结果。 */
 interface LuaHealth {
-  failureRate: number | null;
-  timeoutRate: number | null;
-  failureTone: RateTone;
-  timeoutTone: RateTone;
+  failureRate: number | null
+  timeoutRate: number | null
+  failureTone: RateTone
+  timeoutTone: RateTone
   /** 两项中较重的分级，用于汇总告警的严重度 */
-  worst: RateTone;
+  worst: RateTone
 }
 
 /**
@@ -186,27 +165,27 @@ interface LuaHealth {
  * @returns 失败率、超时率及各自的分级。
  */
 function evaluateHealth(stat: LuaPluginStat): LuaHealth {
-  const failureRate = rateOf(stat.failures, stat.runs);
-  const timeoutRate = rateOf(stat.timeouts, stat.runs);
+  const failureRate = rateOf(stat.failures, stat.runs)
+  const timeoutRate = rateOf(stat.timeouts, stat.runs)
   const failureTone = rateTone(
     failureRate,
     stat.runs,
     FAILURE_WARN_RATE,
-    FAILURE_DANGER_RATE,
-  );
+    FAILURE_DANGER_RATE
+  )
   const timeoutTone = rateTone(
     timeoutRate,
     stat.runs,
     TIMEOUT_WARN_RATE,
-    TIMEOUT_DANGER_RATE,
-  );
+    TIMEOUT_DANGER_RATE
+  )
   const worst: RateTone =
     failureTone === "danger" || timeoutTone === "danger"
       ? "danger"
       : failureTone === "warning" || timeoutTone === "warning"
         ? "warning"
-        : "muted";
-  return { failureRate, timeoutRate, failureTone, timeoutTone, worst };
+        : "muted"
+  return { failureRate, timeoutRate, failureTone, timeoutTone, worst }
 }
 
 /**
@@ -223,18 +202,18 @@ export function LuaRuntimeStatsCell({
   loading,
   unavailable,
 }: {
-  plugin: LuaPlugin;
+  plugin: LuaPlugin
   /** 该脚本的统计条目；未载入引擎时为 undefined */
-  stat?: LuaPluginStat;
+  stat?: LuaPluginStat
   /** 统计请求进行中 */
-  loading?: boolean;
+  loading?: boolean
   /** 统计请求失败，无法判断脚本状态 */
-  unavailable?: boolean;
+  unavailable?: boolean
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   if (loading) {
-    return <Skeleton className="h-4 w-24" />;
+    return <Skeleton className="h-4 w-24" />
   }
 
   if (unavailable) {
@@ -245,7 +224,7 @@ export function LuaRuntimeStatsCell({
       >
         -
       </span>
-    );
+    )
   }
 
   // 停用的脚本不会被编译进引擎，本就没有统计条目；先判 enabled 才不会把
@@ -265,7 +244,7 @@ export function LuaRuntimeStatsCell({
       >
         {t("luaPlugins.stats.disabled")}
       </span>
-    );
+    )
   }
 
   if (stat.runs <= 0) {
@@ -276,11 +255,11 @@ export function LuaRuntimeStatsCell({
       >
         {t("luaPlugins.stats.neverRun")}
       </span>
-    );
+    )
   }
 
-  const health = evaluateHealth(stat);
-  const successes = Math.max(0, stat.runs - stat.failures - stat.timeouts);
+  const health = evaluateHealth(stat)
+  const successes = Math.max(0, stat.runs - stat.failures - stat.timeouts)
 
   return (
     <HoverCard openDelay={150} closeDelay={80}>
@@ -355,9 +334,7 @@ export function LuaRuntimeStatsCell({
             </span>
           </dd>
 
-          <dt className="text-muted-foreground">
-            {t("luaPlugins.stats.avg")}
-          </dt>
+          <dt className="text-muted-foreground">{t("luaPlugins.stats.avg")}</dt>
           <dd className="text-end font-mono tabular-nums">
             {formatAvgMs(stat.avg_ms)}
           </dd>
@@ -372,7 +349,7 @@ export function LuaRuntimeStatsCell({
         )}
       </HoverCardContent>
     </HoverCard>
-  );
+  )
 }
 
 /**
@@ -388,11 +365,11 @@ export function LuaRuntimeStatsSummary({
   loading,
   error,
 }: {
-  items: LuaPluginStat[] | undefined;
-  loading?: boolean;
-  error?: unknown;
+  items: LuaPluginStat[] | undefined
+  loading?: boolean
+  error?: unknown
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   if (loading) {
     return (
@@ -410,7 +387,7 @@ export function LuaRuntimeStatsSummary({
           </div>
         </CardContent>
       </Card>
-    );
+    )
   }
 
   // 统计只是辅助信息，取不到不代表页面坏了：用低干扰的虚线提示，
@@ -424,18 +401,18 @@ export function LuaRuntimeStatsSummary({
           {(error as Error)?.message ? `（${(error as Error).message}）` : ""}
         </span>
       </div>
-    );
+    )
   }
 
-  const list = items || [];
-  const totalRuns = list.reduce((sum, s) => sum + s.runs, 0);
-  const totalFailures = list.reduce((sum, s) => sum + s.failures, 0);
-  const totalTimeouts = list.reduce((sum, s) => sum + s.timeouts, 0);
+  const list = items || []
+  const totalRuns = list.reduce((sum, s) => sum + s.runs, 0)
+  const totalFailures = list.reduce((sum, s) => sum + s.failures, 0)
+  const totalTimeouts = list.reduce((sum, s) => sum + s.timeouts, 0)
   // avg_ms 各自的分母是自己的 runs，汇总必须按次数加权
   const weightedAvgMs =
     totalRuns > 0
       ? list.reduce((sum, s) => sum + s.avg_ms * s.runs, 0) / totalRuns
-      : 0;
+      : 0
 
   return (
     <MetricStrip
@@ -491,7 +468,7 @@ export function LuaRuntimeStatsSummary({
         },
       ]}
     />
-  );
+  )
 }
 
 /**
@@ -505,24 +482,24 @@ export function LuaRuntimeStatsSummary({
 export function LuaRuntimeStatsAlert({
   items,
 }: {
-  items: LuaPluginStat[] | undefined;
+  items: LuaPluginStat[] | undefined
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   const flagged = (items || [])
     .map((stat) => ({ stat, health: evaluateHealth(stat) }))
-    .filter(({ health }) => health.worst !== "muted");
+    .filter(({ health }) => health.worst !== "muted")
 
-  if (flagged.length === 0) return null;
+  if (flagged.length === 0) return null
 
-  const hasDanger = flagged.some(({ health }) => health.worst === "danger");
+  const hasDanger = flagged.some(({ health }) => health.worst === "danger")
 
   return (
     <Alert
       variant={hasDanger ? "destructive" : "default"}
       className={cn(
         !hasDanger &&
-          "border-amber-500/40 text-amber-700 dark:border-amber-400/40 dark:text-amber-300",
+          "border-amber-500/40 text-amber-700 dark:border-amber-400/40 dark:text-amber-300"
       )}
     >
       <IconAlertTriangle className="h-4 w-4" />
@@ -534,7 +511,7 @@ export function LuaRuntimeStatsAlert({
         <ul className="space-y-0.5">
           {flagged.map(({ stat, health }) => (
             <li
-              key={statsKey(stat.name, stat.stage)}
+              key={statsKey(stat.id)}
               className="font-mono text-xs"
             >
               {stat.name}
@@ -550,5 +527,5 @@ export function LuaRuntimeStatsAlert({
         </ul>
       </AlertDescription>
     </Alert>
-  );
+  )
 }

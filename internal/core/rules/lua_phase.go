@@ -2,6 +2,7 @@ package rules
 
 import (
 	"context"
+	"net/url"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
@@ -48,8 +49,13 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		return action.Result{}, false
 	}
 
-	dec := p.engine.Evaluate(context.Background(), p.stage, BuildLuaRequestView(ctx))
-	if !dec.HasAction() {
+	runCtx := ctx.ContextOrBackground()
+	if runCtx.Err() != nil {
+		return action.Result{}, false
+	}
+
+	dec := p.engine.Evaluate(runCtx, p.stage, BuildLuaRequestView(ctx))
+	if runCtx.Err() != nil || !dec.HasAction() {
 		return action.Result{}, false
 	}
 
@@ -60,8 +66,6 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		return action.Result{}, false
 	}
 
-	// Matched 必须置位：action.Result.IsTerminal() 以它为前提，
-	// 漏设会让 intercept/drop 等终止动作被当作未命中而静默放行。
 	res := action.Result{
 		Type:      act,
 		Matched:   true,
@@ -74,6 +78,18 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 	if dec.StatusCode > 0 {
 		res.StatusCode = dec.StatusCode
+	}
+	if len(dec.SetHeaders) > 0 {
+		headers := dec.SetHeaders
+		res.SetHeaders = &headers
+	}
+	if dec.ResponseBody != "" {
+		body := dec.ResponseBody
+		res.ResponseBody = &body
+	}
+	if len(dec.Tags) > 0 {
+		tags := dec.Tags
+		res.Tags = &tags
 	}
 
 	// tag 与 observe 是非终止动作，交由上层记录后继续；其余为终止动作。
@@ -89,6 +105,9 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 // 传副本而非指针：脚本无法借它改写 WAF 内部状态。Body 按管道已截断的
 // 检查窗口传递，不额外读取。
 func BuildLuaRequestView(ctx *pipeline.RequestCtx) luaplugin.RequestView {
+	if ctx.QueryParams == nil && ctx.QueryValues == nil {
+		PopulateLuaQueryParams(ctx)
+	}
 	view := luaplugin.RequestView{
 		RequestID:   ctx.RequestID,
 		Method:      ctx.Method,
@@ -100,6 +119,7 @@ func BuildLuaRequestView(ctx *pipeline.RequestCtx) luaplugin.RequestView {
 		ContentType: ctx.ContentType,
 		Headers:     ctx.Headers,
 		QueryParams: ctx.QueryParams,
+		QueryValues: ctx.QueryValues,
 		TLSVersion:  ctx.TLS.TLSVersion,
 		TLSJA3:      ctx.TLS.JA3Hash,
 		TLSJA4:      ctx.TLS.JA4,
@@ -112,4 +132,26 @@ func BuildLuaRequestView(ctx *pipeline.RequestCtx) luaplugin.RequestView {
 		view.Body = string(ctx.Body)
 	}
 	return view
+}
+
+// PopulateLuaQueryParams parses the raw query once for Lua request contexts.
+// QueryParams preserves the first value for existing scripts, while QueryValues
+// preserves every decoded value in request order for new scripts.
+func PopulateLuaQueryParams(ctx *pipeline.RequestCtx) {
+	if ctx == nil || ctx.RawQuery == "" {
+		return
+	}
+	values, err := url.ParseQuery(ctx.RawQuery)
+	if err != nil {
+		return
+	}
+	ctx.QueryParams = make(map[string]string, len(values))
+	ctx.QueryValues = make(map[string][]string, len(values))
+	for key, items := range values {
+		if len(items) == 0 {
+			continue
+		}
+		ctx.QueryParams[key] = items[0]
+		ctx.QueryValues[key] = append([]string(nil), items...)
+	}
 }

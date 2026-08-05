@@ -87,3 +87,21 @@ func (r *SiteRepo) DeleteWithListeners(id uint) error {
 		return tx.Delete(&store.Site{}, id).Error
 	})
 }
+
+func (r *SiteRepo) NormalizePolicyID(policyID **uint) error {
+	if policyID == nil || *policyID == nil {
+		return nil
+	}
+	if **policyID == 0 {
+		*policyID = nil
+		return nil
+	}
+	var count int64
+	if err := r.db.Model(&store.Policy{}).Where("id = ?", **policyID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}

@@ -12,11 +12,25 @@ const (
 	XFFModeStrip      = "strip_all_and_set_remote"
 	XFFModeTrustOuter = "trust_outer_waf_cidr_then_take_leftmost"
 
+	ClientIPHeaderXForwardedFor = "x_forwarded_for"
+	ClientIPHeaderXRealIP       = "x_real_ip"
+	ClientIPHeaderForwarded     = "forwarded"
+
 	SiteProtectionModeProtect = "protect"
 	SiteProtectionModeObserve = "observe"
 )
 
 // Site holds a virtual host configuration: listener, TLS, protection, forwarding.
+// IsClientIPHeader reports whether header is supported for trusted client IP extraction.
+func IsClientIPHeader(header string) bool {
+	switch header {
+	case ClientIPHeaderXForwardedFor, ClientIPHeaderXRealIP, ClientIPHeaderForwarded:
+		return true
+	default:
+		return false
+	}
+}
+
 type Site struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -59,6 +73,7 @@ type Site struct {
 
 	XFFMode              string `gorm:"size:64;default:strip_all_and_set_remote" json:"xff_mode"`
 	TrustedCIDR          string `gorm:"type:text" json:"trusted_cidr"`
+	ClientIPHeaderOrder  string `gorm:"type:text" json:"client_ip_header_order"`
 	PreserveOriginalHost bool   `gorm:"default:false" json:"preserve_original_host"`
 
 	MaxBodyBytes          int64  `gorm:"default:10485760" json:"max_body_bytes"`

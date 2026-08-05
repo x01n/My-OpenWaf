@@ -1,4 +1,4 @@
-"use client";
+"use client"
 
 import {
   AlertDialog,
@@ -9,18 +9,18 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { useTranslation } from "react-i18next";
+} from "@/components/ui/alert-dialog"
+import { useTranslation } from "react-i18next"
 
 interface ConfirmDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  title?: string;
-  description?: string;
-  confirmText?: string;
-  cancelText?: string;
-  onConfirm: () => void;
-  loading?: boolean;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  title?: string
+  description?: string
+  confirmText?: string
+  cancelText?: string
+  onConfirm: () => void
+  loading?: boolean
 }
 
 export function ConfirmDialog({
@@ -33,12 +33,12 @@ export function ConfirmDialog({
   onConfirm,
   loading,
 }: ConfirmDialogProps) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
-  const resolvedTitle = title ?? t("common.confirmTitle");
-  const resolvedDescription = description ?? t("common.confirmDescription");
-  const resolvedConfirmText = confirmText ?? t("common.confirm");
-  const resolvedCancelText = cancelText ?? t("common.cancel");
+  const resolvedTitle = title ?? t("common.confirmTitle")
+  const resolvedDescription = description ?? t("common.confirmDescription")
+  const resolvedConfirmText = confirmText ?? t("common.confirm")
+  const resolvedCancelText = cancelText ?? t("common.cancel")
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
@@ -48,19 +48,21 @@ export function ConfirmDialog({
           <AlertDialogDescription>{resolvedDescription}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel disabled={loading}>{resolvedCancelText}</AlertDialogCancel>
+          <AlertDialogCancel disabled={loading}>
+            {resolvedCancelText}
+          </AlertDialogCancel>
           <AlertDialogAction
             onClick={(e) => {
-              e.preventDefault();
-              onConfirm();
+              e.preventDefault()
+              onConfirm()
             }}
             disabled={loading}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            className="text-destructive-foreground bg-destructive hover:bg-destructive/90"
           >
             {loading ? t("common.processing") : resolvedConfirmText}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-  );
+  )
 }

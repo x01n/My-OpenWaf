@@ -89,3 +89,20 @@ func (r *RuleRepo) Create(item *store.Rule) error {
 func (r *RuleRepo) Update(item *store.Rule) error { return r.db.Save(item).Error }
 
 func (r *RuleRepo) Delete(id uint) error { return r.db.Delete(&store.Rule{}, id).Error }
+
+func (r *RuleRepo) PolicyExists(policyID uint) (bool, error) {
+	if policyID == 0 {
+		return false, nil
+	}
+	var count int64
+	err := r.db.Model(&store.Policy{}).Where("id = ?", policyID).Count(&count).Error
+	return count == 1, err
+}
+
+func (r *RuleRepo) DefaultPolicyID() (uint, error) {
+	var item store.Policy
+	if err := r.db.Where("default_slot = ?", 1).First(&item).Error; err != nil {
+		return 0, err
+	}
+	return item.ID, nil
+}

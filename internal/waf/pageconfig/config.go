@@ -1,12 +1,20 @@
 package pageconfig
 
 import (
+	"encoding/json"
 	"html/template"
+	"net/url"
 	"strings"
 	"sync"
 )
 
 // PageConfig holds customizable branding/theme settings for WAF pages.
+const (
+	SettingKeyCaptchaPage   = "page_template_captcha"
+	SettingKeyChallengePage = "page_template_challenge"
+	SettingKeyBlockPage     = "page_template_block"
+)
+
 type PageConfig struct {
 	BrandName    string `json:"brand_name"`
 	PrimaryColor string `json:"primary_color"`
@@ -87,6 +95,30 @@ func DefaultBlockPageConfig() BlockPageConfig {
 }
 
 // PageTemplateManager manages page template configurations.
+func ParseCaptchaPageConfig(raw string) CaptchaPageConfig {
+	cfg := DefaultCaptchaPageConfig()
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	return cfg
+}
+
+func ParseChallengePageConfig(raw string) ChallengePageConfig {
+	cfg := DefaultChallengePageConfig()
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	return cfg
+}
+
+func ParseBlockPageConfig(raw string) BlockPageConfig {
+	cfg := DefaultBlockPageConfig()
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	return cfg
+}
+
 type PageTemplateManager struct {
 	captchaCfg   CaptchaPageConfig
 	challengeCfg ChallengePageConfig
@@ -139,23 +171,97 @@ func (m *PageTemplateManager) SetBlockConfig(cfg BlockPageConfig) {
 	m.blockCfg = cfg
 }
 
-// SanitizeCSS performs basic CSS sanitization to prevent XSS via style injection.
-// Matching is case-insensitive to prevent bypass via mixed-case patterns like EXPRESSION().
+// SanitizeCSS rejects an entire custom stylesheet when it contains active or external CSS constructs.
+// Safe CSS is returned unchanged so the renderer never executes a string created by deleting attacker input.
 func SanitizeCSS(css string) string {
-	dangerous := []string{"expression(", "javascript:", "url(", "@import", "behavior:", "binding:"}
-	result := css
-	for _, pattern := range dangerous {
-		lower := strings.ToLower(result)
-		for {
-			idx := strings.Index(lower, pattern)
-			if idx < 0 {
-				break
-			}
-			result = result[:idx] + result[idx+len(pattern):]
-			lower = strings.ToLower(result)
+	value := strings.TrimSpace(css)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range []string{
+		"</style", "<", ">", "expression(", "javascript:", "vbscript:",
+		"url(", "@import", "behavior:", "binding:", "-moz-binding", "/*", "\\",
+	} {
+		if strings.Contains(lower, marker) {
+			return ""
 		}
 	}
-	return result
+	return css
+}
+
+// SafePrimaryColor returns a restricted CSS color value or the supplied fallback.
+func SafePrimaryColor(raw, fallback string) string {
+	value := sanitizeCSSValue(raw)
+	if value == "" || !isCSSColor(value) {
+		return fallback
+	}
+	return value
+}
+
+// SafeBackground returns a restricted CSS background value or the supplied fallback.
+func SafeBackground(raw, fallback string) string {
+	value := sanitizeCSSValue(raw)
+	lower := strings.ToLower(value)
+	if value == "" || (!strings.HasPrefix(lower, "linear-gradient(") && !strings.HasPrefix(lower, "radial-gradient(")) || !strings.HasSuffix(value, ")") {
+		return fallback
+	}
+	return value
+}
+
+// SafeLogoURL permits same-origin paths and explicitly http(s) image URLs only.
+func SafeLogoURL(raw string) template.URL {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") {
+		return template.URL(value)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	return template.URL(value)
+}
+
+func sanitizeCSSValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"url(", "expression(", "javascript:", "@import", "behavior:", "binding:", "var(", "<", ">", "{", "}", ";", "\"", "'"} {
+		if strings.Contains(lower, marker) {
+			return ""
+		}
+	}
+	for _, r := range value {
+		if !(r == '#' || r == '(' || r == ')' || r == ',' || r == '.' || r == '%' || r == '-' || r == '/' || r == ':' || r == ' ' || r == '\t' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
+			return ""
+		}
+	}
+	return value
+}
+
+func isCSSColor(value string) bool {
+	if strings.HasPrefix(value, "#") {
+		length := len(value)
+		if length != 4 && length != 5 && length != 7 && length != 9 {
+			return false
+		}
+		for _, r := range value[1:] {
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
+		return true
+	}
+	lower := strings.ToLower(value)
+	return (strings.HasPrefix(lower, "rgb(") || strings.HasPrefix(lower, "rgba(") || strings.HasPrefix(lower, "hsl(") || strings.HasPrefix(lower, "hsla(")) && strings.HasSuffix(value, ")")
 }
 
 // SafeHTMLAttr escapes a string for safe use in HTML attribute context.

@@ -18,28 +18,34 @@ func ListCVERules(repo *repository.CVERuleRepo) app.HandlerFunc {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 		offset, limit := utils.Paginate(page, size)
-
-		f := repository.CVERuleFilter{
-			Category: c.DefaultQuery("category", ""),
-			Severity: c.DefaultQuery("severity", ""),
-			Source:   c.DefaultQuery("source", ""),
-			Query:    c.DefaultQuery("q", ""),
+		scope, err := resolveCVEScope(repo.DB(), c, "", 0, 0)
+		if err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
 		}
-		if v := c.DefaultQuery("enabled", ""); v != "" {
-			b := v == "true" || v == "1"
-			f.Enabled = &b
+		filter := repository.CVERuleFilter{Category: c.DefaultQuery("category", ""), Severity: c.DefaultQuery("severity", ""), Source: c.DefaultQuery("source", ""), Query: c.DefaultQuery("q", "")}
+		if raw := c.DefaultQuery("enabled", ""); raw != "" {
+			want := raw == "true" || raw == "1"
+			filter.Enabled = &want
 		}
-
-		items, total, err := repo.List(offset, limit, f)
+		views, err := listEffectiveCVERules(repo, scope, filter)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		c.JSON(200, map[string]any{"items": items, "total": total})
+		total := int64(len(views))
+		end := offset + limit
+		if offset > len(views) {
+			offset = len(views)
+		}
+		if end > len(views) {
+			end = len(views)
+		}
+		c.JSON(200, map[string]any{"items": views[offset:end], "total": total, "scope": scope.ScopeType, "scope_id": scope.ScopeID})
 	}
 }
 
-func CreateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) app.HandlerFunc {
+func CreateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, reload ...func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item cve.CVERuleModel
 		if err := c.BindJSON(&item); err != nil {
@@ -71,11 +77,17 @@ func CreateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) ap
 			return
 		}
 		shared.ReloadCVERules(feedMgr)
+		if len(reload) > 0 && reload[0] != nil {
+			if err := reload[0](); err != nil {
+				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+				return
+			}
+		}
 		c.JSON(201, item)
 	}
 }
 
-func UpdateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) app.HandlerFunc {
+func UpdateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, reload ...func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -138,11 +150,17 @@ func UpdateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) ap
 			return
 		}
 		shared.ReloadCVERules(feedMgr)
+		if len(reload) > 0 && reload[0] != nil {
+			if err := reload[0](); err != nil {
+				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+				return
+			}
+		}
 		c.JSON(200, existing)
 	}
 }
 
-func DeleteCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) app.HandlerFunc {
+func DeleteCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, reload ...func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -167,11 +185,17 @@ func DeleteCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) ap
 			return
 		}
 		shared.ReloadCVERules(feedMgr)
+		if len(reload) > 0 && reload[0] != nil {
+			if err := reload[0](); err != nil {
+				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+				return
+			}
+		}
 		c.JSON(200, map[string]string{"message": "deleted"})
 	}
 }
 
-func ToggleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) app.HandlerFunc {
+func ToggleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, reload ...func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
@@ -209,6 +233,12 @@ func ToggleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager) ap
 			return
 		}
 		shared.ReloadCVERules(feedMgr)
+		if len(reload) > 0 && reload[0] != nil {
+			if err := reload[0](); err != nil {
+				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+				return
+			}
+		}
 		c.JSON(200, map[string]any{"id": id, "enabled": existing.Enabled, "approved": existing.Approved})
 	}
 }

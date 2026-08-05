@@ -15,6 +15,13 @@ type Policy struct {
 
 	Name        string `gorm:"size:128;not null" json:"name"`
 	Description string `gorm:"type:text" json:"description"`
+	DefaultSlot *uint  `gorm:"uniqueIndex:ux_policies_default_slot" json:"-"`
+	IsDefault   bool   `gorm:"-" json:"is_default"`
+}
+
+func (p *Policy) AfterFind(_ *gorm.DB) error {
+	p.IsDefault = p.DefaultSlot != nil && *p.DefaultSlot == 1
+	return nil
 }
 
 type RulePhase string

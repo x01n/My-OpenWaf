@@ -1,16 +1,16 @@
-"use client";
+"use client"
 
-import { useMemo, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { LuaCodeEditor } from "@/components/lua-code-editor";
+import { useMemo, useState } from "react"
+import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { LuaCodeEditor } from "@/components/lua-code-editor"
 import {
   Dialog,
   DialogContent,
@@ -18,20 +18,20 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@/components/ui/dialog"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+} from "@/components/ui/select"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   useSites,
   useLuaPluginMutation,
   useLuaPluginValidate,
-} from "@/hooks/use-api";
+} from "@/hooks/use-api"
 import {
   IconFileCode,
   IconFlask,
@@ -39,21 +39,17 @@ import {
   IconCircleCheck,
   IconAlertTriangle,
   IconInfoCircle,
-} from "@tabler/icons-react";
-import type {
-  LuaPlugin,
-  LuaPluginStage,
-  LuaValidateResult,
-} from "@/lib/types";
-import { LUA_SKELETON } from "./examples";
-import { DryRunPanel } from "./dry-run-panel";
-import { LuaHelpPanel } from "./lua-help-panel";
+} from "@tabler/icons-react"
+import type { LuaPlugin, LuaPluginStage, LuaValidateResult } from "@/lib/types"
+import { LUA_SKELETON } from "./examples"
+import { DryRunPanel } from "./dry-run-panel"
+import { LuaHelpPanel } from "./lua-help-panel"
 
 /** 作用域下拉里代表「全站生效」的选项值（Select 不接受空字符串作为 value）。 */
-const SCOPE_GLOBAL = "global";
+const SCOPE_GLOBAL = "global"
 
 /** 超时上限（毫秒），与后端 luaMaxTimeoutMS 一致。 */
-const MAX_TIMEOUT_MS = 1000;
+const MAX_TIMEOUT_MS = 1200
 
 /**
  * @typedef {object} PluginForm
@@ -61,14 +57,14 @@ const MAX_TIMEOUT_MS = 1000;
  *   提交时再映射回 site_id 的 null / number。
  */
 interface PluginForm {
-  name: string;
-  stage: LuaPluginStage;
-  source: string;
-  priority: number;
-  timeout_ms: number;
-  scope: string;
-  description: string;
-  enabled: boolean;
+  name: string
+  stage: LuaPluginStage
+  source: string
+  priority: number
+  timeout_ms: number
+  scope: string
+  description: string
+  enabled: boolean
 }
 
 const emptyForm: PluginForm = {
@@ -80,7 +76,7 @@ const emptyForm: PluginForm = {
   scope: SCOPE_GLOBAL,
   description: "",
   enabled: true,
-};
+}
 
 /**
  * 把超时输入钳制到后端接受的区间。
@@ -92,9 +88,9 @@ const emptyForm: PluginForm = {
  * @returns {number} 0 到 MAX_TIMEOUT_MS 之间的整数
  */
 function clampTimeout(raw: string): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.min(Math.round(n), MAX_TIMEOUT_MS);
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return Math.min(Math.round(n), MAX_TIMEOUT_MS)
 }
 
 /**
@@ -104,7 +100,7 @@ function clampTimeout(raw: string): number {
  * @returns {PluginForm} 初始表单态
  */
 function initialForm(editing: LuaPlugin | null): PluginForm {
-  if (!editing) return emptyForm;
+  if (!editing) return emptyForm
   return {
     name: editing.name,
     stage: editing.stage,
@@ -117,7 +113,7 @@ function initialForm(editing: LuaPlugin | null): PluginForm {
         : String(editing.site_id),
     description: editing.description ?? "",
     enabled: editing.enabled,
-  };
+  }
 }
 
 /**
@@ -128,10 +124,10 @@ function initialForm(editing: LuaPlugin | null): PluginForm {
  * @property {() => void} onSaved 保存成功回调，供父级刷新列表
  */
 export interface PluginEditorDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  editing: LuaPlugin | null;
-  onSaved: () => void;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  editing: LuaPlugin | null
+  onSaved: () => void
 }
 
 /**
@@ -150,19 +146,19 @@ export function PluginEditorDialog({
   editing,
   onSaved,
 }: PluginEditorDialogProps) {
-  const { t } = useTranslation();
-  const [form, setForm] = useState<PluginForm>(() => initialForm(editing));
-  const [tab, setTab] = useState("script");
-  const [validation, setValidation] = useState<LuaValidateResult | null>(null);
+  const { t } = useTranslation()
+  const [form, setForm] = useState<PluginForm>(() => initialForm(editing))
+  const [tab, setTab] = useState("script")
+  const [validation, setValidation] = useState<LuaValidateResult | null>(null)
 
-  const { data: sitesData } = useSites({ page_size: 500 });
-  const sites = useMemo(() => sitesData?.items || [], [sitesData]);
+  const { data: sitesData } = useSites({ page_size: 500 })
+  const sites = useMemo(() => sitesData?.items || [], [sitesData])
 
-  const { execute: save, loading: saving } = useLuaPluginMutation();
-  const { execute: validate, loading: validating } = useLuaPluginValidate();
+  const { execute: save, loading: saving } = useLuaPluginMutation()
+  const { execute: validate, loading: validating } = useLuaPluginValidate()
 
   const set = <K extends keyof PluginForm>(key: K, value: PluginForm[K]) =>
-    setForm((f) => ({ ...f, [key]: value }));
+    setForm((f) => ({ ...f, [key]: value }))
 
   /**
    * 改动源码或阶段后作废上一次校验结果。
@@ -170,36 +166,36 @@ export function PluginEditorDialog({
    * 留着旧的「校验通过」徽章会让用户以为改动后的脚本也已通过校验。
    */
   const setSource = (source: string) => {
-    setValidation(null);
-    set("source", source);
-  };
+    setValidation(null)
+    set("source", source)
+  }
 
   const setStage = (stage: LuaPluginStage) => {
-    setValidation(null);
-    set("stage", stage);
-  };
+    setValidation(null)
+    set("stage", stage)
+  }
 
   const handleApplyExample = (source: string, stage: LuaPluginStage) => {
-    setValidation(null);
-    setForm((f) => ({ ...f, source, stage }));
-    setTab("script");
-    toast.success(t("luaPlugins.help.applied"));
-  };
+    setValidation(null)
+    setForm((f) => ({ ...f, source, stage }))
+    setTab("script")
+    toast.success(t("luaPlugins.help.applied"))
+  }
 
   const handleValidate = async () => {
     try {
-      const res = await validate({ stage: form.stage, source: form.source });
-      setValidation(res);
+      const res = await validate({ stage: form.stage, source: form.source })
+      setValidation(res)
       if (res.valid) {
-        toast.success(t("luaPlugins.validatePassed"));
+        toast.success(t("luaPlugins.validatePassed"))
       }
     } catch (err) {
       setValidation({
         valid: false,
         error: (err as Error)?.message || t("error.unexpectedError"),
-      });
+      })
     }
-  };
+  }
 
   const handleSubmit = async () => {
     // site_id 显式传 null 才会改回全站；省略会被后端当作「保持原值」。
@@ -212,29 +208,29 @@ export function PluginEditorDialog({
       description: form.description,
       enabled: form.enabled,
       site_id: form.scope === SCOPE_GLOBAL ? null : Number(form.scope),
-    };
+    }
 
     try {
-      await save({ id: editing?.id, data: payload });
+      await save({ id: editing?.id, data: payload })
       toast.success(
-        editing ? t("common.updateSuccess") : t("common.createSuccess"),
-      );
-      onOpenChange(false);
-      onSaved();
+        editing ? t("common.updateSuccess") : t("common.createSuccess")
+      )
+      onOpenChange(false)
+      onSaved()
     } catch (err) {
       // 后端保存前会编译校验，语法错误会以 400 返回；原样透出比泛化文案有用。
-      const message = (err as Error)?.message;
+      const message = (err as Error)?.message
       toast.error(
         message ||
-          (editing ? t("common.updateFailed") : t("common.createFailed")),
-      );
+          (editing ? t("common.updateFailed") : t("common.createFailed"))
+      )
       if (message) {
-        setValidation({ valid: false, error: message });
+        setValidation({ valid: false, error: message })
       }
     }
-  };
+  }
 
-  const canSubmit = form.name.trim() !== "" && form.source.trim() !== "";
+  const canSubmit = form.name.trim() !== "" && form.source.trim() !== ""
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -423,7 +419,7 @@ export function PluginEditorDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+  )
 }
 
 /**
@@ -434,15 +430,13 @@ export function PluginEditorDialog({
  * @returns {React.ReactElement} 提示元素
  */
 function StageNotice({ stage }: { stage: LuaPluginStage }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   return (
     <Alert>
       <IconInfoCircle className="h-4 w-4" />
       <AlertTitle>
-        {stage === "pre"
-          ? t("luaPlugins.stagePre")
-          : t("luaPlugins.stagePost")}
+        {stage === "pre" ? t("luaPlugins.stagePre") : t("luaPlugins.stagePost")}
       </AlertTitle>
       <AlertDescription className="space-y-1">
         <span>
@@ -457,7 +451,7 @@ function StageNotice({ stage }: { stage: LuaPluginStage }) {
         )}
       </AlertDescription>
     </Alert>
-  );
+  )
 }
 
 /**
@@ -467,7 +461,7 @@ function StageNotice({ stage }: { stage: LuaPluginStage }) {
  * @returns {React.ReactElement} 结果元素
  */
 function ValidationResult({ result }: { result: LuaValidateResult }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   if (result.valid) {
     return (
@@ -478,7 +472,7 @@ function ValidationResult({ result }: { result: LuaValidateResult }) {
         <IconCircleCheck className="h-3.5 w-3.5" />
         {t("luaPlugins.validatePassed")}
       </Badge>
-    );
+    )
   }
 
   return (
@@ -491,5 +485,5 @@ function ValidationResult({ result }: { result: LuaValidateResult }) {
         {result.error || t("error.unexpectedError")}
       </pre>
     </div>
-  );
+  )
 }

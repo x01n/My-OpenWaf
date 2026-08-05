@@ -3,6 +3,7 @@ package challenge
 import (
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -277,6 +278,35 @@ func TestChallengeEncryptDecrypt(t *testing.T) {
 	}
 }
 
+func TestChallengeEncryptFailsWhenNonceGenerationFails(t *testing.T) {
+	previousReader := challengeNonceReader
+	challengeNonceReader = strings.NewReader("")
+	t.Cleanup(func() {
+		challengeNonceReader = previousReader
+	})
+
+	ciphertext, err := challengeEncrypt([]byte("must not be encrypted with a zero nonce"))
+	if err == nil {
+		t.Fatal("nonce generation failure should return an error")
+	}
+	if ciphertext != nil {
+		t.Fatalf("nonce generation failure should not return ciphertext, got %x", ciphertext)
+	}
+}
+
+func TestSignChallengePassValueFailsClosedWhenNonceGenerationFails(t *testing.T) {
+	previousReader := challengeNonceReader
+	challengeNonceReader = strings.NewReader("")
+	t.Cleanup(func() {
+		challengeNonceReader = previousReader
+	})
+
+	value := SignChallengePassValue("example.com", net.ParseIP("192.0.2.1"), time.Now(), time.Minute)
+	if value != "" {
+		t.Fatalf("nonce generation failure should not issue a challenge pass value, got %q", value)
+	}
+}
+
 func TestChallengeDecryptTooShort(t *testing.T) {
 	_, err := challengeDecrypt([]byte("short"))
 	if err == nil {
@@ -291,5 +321,102 @@ func TestBuildChallengePassCookie(t *testing.T) {
 	cookie := BuildChallengePassCookie("example.com", ip, false, time.Now(), 5*time.Minute)
 	if !strings.Contains(cookie, "__waf_passed=") {
 		t.Errorf("cookie should contain name __waf_passed, got %q", cookie)
+	}
+}
+
+func TestVerifyDynamicProtectionKeyTicketConsumesOnlyAfterClaimsMatch(t *testing.T) {
+	dynamicProtectionKeyReplayGuard = newReplayGuard()
+	now := time.Now()
+	claims := DynamicProtectionKeyClaims{
+		DynamicProtectionClaims: DynamicProtectionClaims{
+			Host:      "dynamic.example.com",
+			ClientIP:  net.ParseIP("192.0.2.10"),
+			UserAgent: "dynamic-test-agent",
+			SiteID:    7,
+			Bind:      ":443",
+		},
+		Key: "dynamic-key",
+	}
+	const kek = "dynamic-kek"
+	ticket := SignDynamicProtectionKeyTicket(claims, now, time.Minute, kek)
+	if ticket == "" {
+		t.Fatal("dynamic protection key ticket should not be empty")
+	}
+
+	wrongClaims := claims
+	wrongClaims.Key = "wrong-key"
+	if _, ok := VerifyDynamicProtectionKeyTicket(ticket, wrongClaims, now); ok {
+		t.Fatal("ticket should reject mismatched claims")
+	}
+	if got, ok := VerifyDynamicProtectionKeyTicket(ticket, claims, now); !ok || got != kek {
+		t.Fatalf("first matching verification = (%q, %v), want (%q, true)", got, ok, kek)
+	}
+	if _, ok := VerifyDynamicProtectionKeyTicket(ticket, claims, now); ok {
+		t.Fatal("ticket should be rejected after its first successful verification")
+	}
+}
+
+func TestVerifyDynamicProtectionKeyTicketConcurrentSingleUse(t *testing.T) {
+	dynamicProtectionKeyReplayGuard = newReplayGuard()
+	now := time.Now()
+	claims := DynamicProtectionKeyClaims{
+		DynamicProtectionClaims: DynamicProtectionClaims{
+			Host:      "dynamic.example.com",
+			ClientIP:  net.ParseIP("192.0.2.20"),
+			UserAgent: "concurrent-test-agent",
+			SiteID:    8,
+			Bind:      ":443",
+		},
+		Key: "concurrent-key",
+	}
+	ticket := SignDynamicProtectionKeyTicket(claims, now, time.Minute, "concurrent-kek")
+	if ticket == "" {
+		t.Fatal("dynamic protection key ticket should not be empty")
+	}
+
+	const attempts = 32
+	results := make(chan bool, attempts)
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for range attempts {
+		go func() {
+			defer wg.Done()
+			_, ok := VerifyDynamicProtectionKeyTicket(ticket, claims, now)
+			results <- ok
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for ok := range results {
+		if ok {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful concurrent verifications = %d, want 1", successes)
+	}
+}
+
+func TestVerifyDynamicProtectionKeyTicketRejectsExpirationBoundary(t *testing.T) {
+	dynamicProtectionKeyReplayGuard = newReplayGuard()
+	now := time.Now()
+	claims := DynamicProtectionKeyClaims{
+		DynamicProtectionClaims: DynamicProtectionClaims{
+			Host:      "dynamic.example.com",
+			ClientIP:  net.ParseIP("192.0.2.30"),
+			UserAgent: "expiry-test-agent",
+			SiteID:    9,
+			Bind:      ":443",
+		},
+		Key: "expiry-key",
+	}
+	ticket := SignDynamicProtectionKeyTicket(claims, now, time.Second, "expiry-kek")
+	if ticket == "" {
+		t.Fatal("dynamic protection key ticket should not be empty")
+	}
+	if _, ok := VerifyDynamicProtectionKeyTicket(ticket, claims, now.Add(time.Second)); ok {
+		t.Fatal("ticket should be rejected at its expiration boundary")
 	}
 }
