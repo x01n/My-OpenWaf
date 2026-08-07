@@ -126,6 +126,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		// 排列同 /security-events/stats（见 TestLuaPluginStatsRouteBeatsIDParam）。
 		readGroup.GET("/lua-plugins/stats", system.GetLuaPluginStats(deps.LuaEngine))
 		readGroup.GET("/lua-plugins/:id", system.GetLuaPlugin(deps.Repos.LuaPlugin))
+		readGroup.GET("/js-plugins", system.ListJSPlugins(deps.Repos.JSPlugin))
+		readGroup.GET("/js-plugins/stats", system.GetJSPluginStats())
+		readGroup.GET("/js-plugins/:id", system.GetJSPlugin(deps.Repos.JSPlugin))
 
 		readGroup.GET("/security-events", event.ListSecurityEvents(r.SecurityEvent))
 		readGroup.GET("/security-events/stats", event.SecurityEventStats(r.SecurityEvent))
@@ -254,6 +257,12 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/lua-plugins/:id/toggle", system.ToggleLuaPlugin(deps.Repos.LuaPlugin, reload))
 		opsGroup.POST("/lua-plugins/validate", system.ValidateLuaPlugin())
 		opsGroup.POST("/lua-plugins/dry-run", system.DryRunLuaPlugin(deps.Cache))
+		opsGroup.POST("/js-plugins", system.CreateJSPlugin(deps.Repos.JSPlugin, reload))
+		opsGroup.POST("/js-plugins/:id/update", system.UpdateJSPlugin(deps.Repos.JSPlugin, reload))
+		opsGroup.POST("/js-plugins/:id/delete", system.DeleteJSPlugin(deps.Repos.JSPlugin, reload))
+		opsGroup.POST("/js-plugins/:id/toggle", system.ToggleJSPlugin(deps.Repos.JSPlugin, reload))
+		opsGroup.POST("/js-plugins/validate", system.ValidateJSPlugin())
+		opsGroup.POST("/js-plugins/dry-run", system.DryRunJSPlugin())
 
 		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
 
