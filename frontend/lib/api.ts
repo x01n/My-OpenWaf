@@ -1,23 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type {
-  LogConfig,
-  LogConfigUpdate,
-  NetworkConfig,
-  NetworkConfigUpdate,
-  TLSConfig,
-  TLSConfigUpdate,
-  RedisConfigResponse,
-  RedisConfigUpdate,
-  ProtectionSettings,
-  BotSettings,
-  CaptchaConfig,
-} from "@/lib/types"
 /**
  * API 客户端封装
  * 统一 fetch 调用，处理 JWT 认证、Token 刷新、错误处理
  */
 
-const API_BASE = "/api/v1"
+const API_BASE = "/api/v1";
 
 export class ApiError extends Error {
   constructor(
@@ -25,8 +12,8 @@ export class ApiError extends Error {
     message: string,
     public data?: any
   ) {
-    super(message)
-    this.name = "ApiError"
+    super(message);
+    this.name = "ApiError";
   }
 }
 
@@ -34,38 +21,38 @@ export class ApiError extends Error {
  * 获取存储的 access token
  */
 function getToken(): string | null {
-  if (typeof window === "undefined") return null
-  return localStorage.getItem("token")
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("token");
 }
 
 /**
  * 设置 access token
  */
 function setToken(token: string): void {
-  if (typeof window === "undefined") return
-  localStorage.setItem("token", token)
+  if (typeof window === "undefined") return;
+  localStorage.setItem("token", token);
 }
 
 /**
  * 清除 token
  */
 function clearToken(): void {
-  if (typeof window === "undefined") return
-  localStorage.removeItem("token")
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("token");
 }
 
 /**
  * 刷新 token（并发去重：多个 401 只触发一次 refresh）
  */
-let refreshPromise: Promise<string | null> | null = null
+let refreshPromise: Promise<string | null> | null = null;
 
 async function refreshToken(): Promise<string | null> {
-  if (refreshPromise) return refreshPromise
-  refreshPromise = doRefreshToken()
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = doRefreshToken();
   try {
-    return await refreshPromise
+    return await refreshPromise;
   } finally {
-    refreshPromise = null
+    refreshPromise = null;
   }
 }
 
@@ -74,16 +61,16 @@ async function doRefreshToken(): Promise<string | null> {
     const resp = await fetch(`${API_BASE}/auth/refresh`, {
       method: "POST",
       credentials: "include",
-    })
-    if (!resp.ok) return null
-    const data = await resp.json()
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
     if (data.access_token) {
-      setToken(data.access_token)
-      return data.access_token
+      setToken(data.access_token);
+      return data.access_token;
     }
-    return null
+    return null;
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -94,86 +81,75 @@ export async function apiRequest<T = any>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const url = `${API_BASE}${path}`
-  const token = getToken()
+  const url = `${API_BASE}${path}`;
+  const token = getToken();
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...((options.headers as Record<string, string>) || {}),
-  }
+  };
 
   if (token) {
-    headers["Authorization"] = `Bearer ${token}`
+    headers["Authorization"] = `Bearer ${token}`;
   }
 
   const config: RequestInit = {
     ...options,
     headers,
     credentials: "include",
-  }
+  };
 
   // 开发模式打印请求
   if (process.env.NODE_ENV === "development") {
-    console.log(`[API] ${config.method || "GET"} ${url}`)
+    console.log(`[API] ${config.method || "GET"} ${url}`);
   }
 
-  let response = await fetch(url, config)
+  let response = await fetch(url, config);
 
   // 401 时尝试刷新 token
   if (response.status === 401) {
-    const newToken = await refreshToken()
+    const newToken = await refreshToken();
     if (newToken) {
-      headers["Authorization"] = `Bearer ${newToken}`
-      config.headers = headers
-      response = await fetch(url, config)
+      headers["Authorization"] = `Bearer ${newToken}`;
+      config.headers = headers;
+      response = await fetch(url, config);
     } else {
-      clearToken()
+      clearToken();
       if (typeof window !== "undefined") {
-        window.location.href = "/login"
+        window.location.href = "/login";
       }
-      throw new ApiError(401, "会话已过期，请重新登录")
+      throw new ApiError(401, "会话已过期，请重新登录");
     }
   }
 
-  if (response.status === 204 || response.status === 205) {
-    return null as T
-  }
-
-  let data: any
-  const contentType = response.headers.get("content-type")
+  let data: any;
+  const contentType = response.headers.get("content-type");
   if (contentType && contentType.includes("application/json")) {
-    data = await response.json()
+    data = await response.json();
   } else {
-    const text = await response.text()
-    data = text ? { text } : null
+    const text = await response.text();
+    data = text ? { text } : null;
   }
 
   if (!response.ok) {
-    const message = data?.error || `请求失败: ${response.status}`
-    throw new ApiError(response.status, message, data)
+    const message = data?.error || `请求失败: ${response.status}`;
+    throw new ApiError(response.status, message, data);
   }
 
-  return data as T
+  return data as T;
 }
 
 /**
  * GET 请求快捷方法
  */
-export function get<T = any>(
-  path: string,
-  params?: Record<string, string | number | undefined>
-): Promise<T> {
+export function get<T = any>(path: string, params?: Record<string, string | number | undefined>): Promise<T> {
   const query = params
-    ? "?" +
-      Object.entries(params)
+    ? "?" + Object.entries(params)
         .filter(([, v]) => v !== undefined && v !== "")
-        .map(
-          ([k, v]) =>
-            `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`
-        )
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
         .join("&")
-    : ""
-  return apiRequest<T>(`${path}${query}`)
+    : "";
+  return apiRequest<T>(`${path}${query}`);
 }
 
 /**
@@ -183,7 +159,7 @@ export function post<T = any>(path: string, body?: any): Promise<T> {
   return apiRequest<T>(path, {
     method: "POST",
     body: body ? JSON.stringify(body) : undefined,
-  })
+  });
 }
 
 /**
@@ -193,14 +169,14 @@ export function put<T = any>(path: string, body?: any): Promise<T> {
   return apiRequest<T>(path, {
     method: "PUT",
     body: body ? JSON.stringify(body) : undefined,
-  })
+  });
 }
 
 /**
  * DELETE 请求快捷方法
  */
 export function del<T = any>(path: string): Promise<T> {
-  return apiRequest<T>(path, { method: "DELETE" })
+  return apiRequest<T>(path, { method: "DELETE" });
 }
 
 /**
@@ -208,36 +184,16 @@ export function del<T = any>(path: string): Promise<T> {
  */
 export const authApi = {
   login: (username: string, password: string) =>
-    post<{
-      access_token: string
-      username: string
-      role: "admin" | "operator" | "readonly"
-    }>("/auth/login", { username, password }),
+    post<{ access_token: string; username: string; role: "admin" | "operator" | "readonly" }>("/auth/login", { username, password }),
   logout: () => post("/auth/logout"),
-  me: () =>
-    get<{ username: string; role: "admin" | "operator" | "readonly" }>(
-      "/auth/me"
-    ),
+  me: () => get<{ username: string; role: "admin" | "operator" | "readonly" }>("/auth/me"),
   changePassword: (oldPassword: string, newPassword: string) =>
-    post<{ status: string }>("/auth/change-password", {
-      old_password: oldPassword,
-      new_password: newPassword,
-    }),
+    post<{ status: string }>("/auth/change-password", { old_password: oldPassword, new_password: newPassword }),
   listSessions: () =>
-    get<{
-      items: Array<{
-        id: number
-        username: string
-        ip: string
-        user_agent: string
-        login_at: string
-        last_active_at: string
-        expires_at: string
-      }>
-    }>("/auth/sessions"),
+    get<{ items: Array<{ id: number; username: string; ip: string; user_agent: string; login_at: string; last_active_at: string; expires_at: string }> }>("/auth/sessions"),
   forceLogout: (sessionId: number) =>
     post("/auth/sessions/force-logout", { session_id: sessionId }),
-}
+};
 
 /**
  * 站点相关 API
@@ -246,57 +202,41 @@ export const siteApi = {
   list: (params?: { page?: number; page_size?: number }) =>
     get<{ items: Site[]; total: number }>("/sites", params),
   get: (id: string | number) => get<Site>(`/sites/${id}`),
-  create: (data: SiteUpdate) => post<Site>("/sites", data),
-  update: (id: string | number, data: SiteUpdate) =>
+  create: (data: Partial<Site>) => post<Site>("/sites", data),
+  update: (id: string | number, data: Partial<Site>) =>
     post<Site>(`/sites/${id}/update`, data),
   delete: (id: string | number) => post(`/sites/${id}/delete`),
   start: (id: string | number) => post(`/sites/${id}/start`),
   stop: (id: string | number) => post(`/sites/${id}/stop`),
-  getStatus: (id: string | number) =>
-    get<{ status: string }>(`/sites/${id}/status`),
-  getListeners: (id: string | number) =>
-    get<{ items: SiteListener[]; total: number }>(`/sites/${id}/listeners`),
+  getStatus: (id: string | number) => get<{ status: string }>(`/sites/${id}/status`),
+  getListeners: (id: string | number) => get<{ items: SiteListener[]; total: number }>(`/sites/${id}/listeners`),
   createListener: (id: string | number, data: Partial<SiteListener>) =>
     post(`/sites/${id}/listeners`, data),
-  updateListener: (
-    id: string | number,
-    lid: string | number,
-    data: Partial<SiteListener>
-  ) => post(`/sites/${id}/listeners/${lid}/update`, data),
+  updateListener: (id: string | number, lid: string | number, data: Partial<SiteListener>) =>
+    post(`/sites/${id}/listeners/${lid}/update`, data),
   deleteListener: (id: string | number, lid: string | number) =>
     post(`/sites/${id}/listeners/${lid}/delete`),
   getSecurityEvents: (id: string | number, params?: any) =>
     get(`/sites/${id}/security-events`, params),
   getAccessLogs: (id: string | number, params?: any) =>
     get(`/sites/${id}/access-logs`, params),
-  getRules: (id: string | number) =>
-    get<{ items: Rule[]; total: number; policy_id?: number }>(
-      `/sites/${id}/rules`
-    ),
+  getRules: (id: string | number) => get<{ items: Rule[]; total: number; policy_id?: number }>(`/sites/${id}/rules`),
   getRouteRules: (id: string | number) =>
-    get<{ items: AppRouteRule[]; total: number }>(
-      `/sites/${id}/application-route-rules`
-    ).then((r) => r.items ?? []),
+    get<{ items: AppRouteRule[]; total: number }>(`/sites/${id}/application-route-rules`).then((r) => r.items ?? []),
   getRecordedResources: (id: string | number) =>
-    get<{ items: RecordedResource[]; total: number }>(
-      `/sites/${id}/recorded-resources`
-    ).then((r) => r.items ?? []),
+    get<{ items: RecordedResource[]; total: number }>(`/sites/${id}/recorded-resources`).then((r) => r.items ?? []),
   getErrorPages: (id: string | number) => get(`/sites/${id}/error-pages`),
   updateErrorPages: (id: string | number, data: any) =>
     post(`/sites/${id}/error-pages`, data),
-}
+};
 
 /**
  * 证书相关 API
  */
 export const certificateApi = {
-  list: () =>
-    get<{ items: Certificate[]; total: number }>("/certificates").then(
-      (r) => r.items ?? []
-    ),
+  list: () => get<{ items: Certificate[]; total: number }>("/certificates").then((r) => r.items ?? []),
   get: (id: string | number) => get<Certificate>(`/certificates/${id}`),
-  create: (data: Partial<Certificate>) =>
-    post<Certificate>("/certificates", data),
+  create: (data: Partial<Certificate>) => post<Certificate>("/certificates", data),
   update: (id: string | number, data: Partial<Certificate>) =>
     post(`/certificates/${id}/update`, data),
   delete: (id: string | number) => post(`/certificates/${id}/delete`),
@@ -307,14 +247,13 @@ export const certificateApi = {
   acmeApply: (data: any) => post("/certificates/acme/apply", data),
   acmeRenew: (id: string | number) => post(`/certificates/acme/${id}/renew`),
   getACMEStatus: () => get("/certificates/acme/status"),
-}
+};
 
 /**
  * 规则相关 API
  */
 export const ruleApi = {
-  list: (params?: any) =>
-    get<{ items: Rule[]; total: number }>("/rules", params),
+  list: (params?: any) => get<{ items: Rule[]; total: number }>("/rules", params),
   get: (id: string | number) => get<Rule>(`/rules/${id}`),
   create: (data: Partial<Rule>) => post<Rule>("/rules", data),
   update: (id: string | number, data: Partial<Rule>) =>
@@ -325,31 +264,26 @@ export const ruleApi = {
   import: (data: any) => post("/rules/import", data),
   export: () => get("/rules/export"),
   getTemplates: () => get("/rules/templates"),
-}
+};
 
 /**
  * 策略相关 API
  */
 export const policyApi = {
-  list: (params?: { page?: number; page_size?: number }) =>
-    get<{ items: Policy[]; total: number }>("/policies", params),
+  list: () => get<{ items: Policy[]; total: number }>("/policies").then((r) => r.items ?? []),
   get: (id: string | number) => get<Policy>(`/policies/${id}`),
-  getDefault: () => get<Policy>("/policies/default"),
   create: (data: Partial<Policy>) => post<Policy>("/policies", data),
   update: (id: string | number, data: Partial<Policy>) =>
-    post<Policy>(`/policies/${id}/update`, data),
-  setDefault: (id: string | number) =>
-    post<Policy>(`/policies/${id}/set-default`),
+    post(`/policies/${id}/update`, data),
   delete: (id: string | number) => post(`/policies/${id}/delete`),
-}
+};
 
 /**
  * 防护设置相关 API
  */
 export const protectionApi = {
-  getSettings: () => get<ProtectionSettings>("/protection-settings"),
-  updateSettings: (data: Partial<ProtectionSettings>) =>
-    post<ProtectionSettings>("/protection-settings", data),
+  getSettings: () => get("/protection-settings"),
+  updateSettings: (data: any) => post("/protection-settings", data),
   getSensitivity: (id: string | number) => get(`/protection/${id}/sensitivity`),
   updateSensitivity: (id: string | number, data: any) =>
     post(`/protection/${id}/sensitivity`, data),
@@ -358,33 +292,27 @@ export const protectionApi = {
     post(`/protection/${id}/escalation`, data),
   getEscalationStatus: (ip: string) => get(`/escalation/status/${ip}`),
   resetEscalation: (ip: string) => post(`/escalation/status/${ip}/reset`),
-}
+};
 
 /**
  * IP 列表相关 API
  */
 export const ipListApi = {
   list: (params?: { kind?: string; site_id?: number; page?: number }) =>
-    get<{ items: IPEntry[]; total: number; page?: number }>(
-      "/ip-lists",
-      params
-    ),
+    get<{ items: IPEntry[]; total: number; page?: number }>("/ip-lists", params),
   get: (id: string | number) => get<IPEntry>(`/ip-lists/${id}`),
   create: (data: Partial<IPEntry>) => post<IPEntry>("/ip-lists", data),
   update: (id: string | number, data: Partial<IPEntry>) =>
     post<IPEntry>(`/ip-lists/${id}/update`, data),
   delete: (id: string | number) => post(`/ip-lists/${id}/delete`),
-}
+};
 
 /**
  * 安全事件相关 API
  */
 export const securityEventApi = {
   list: (params?: any) =>
-    get<{ items: SecurityEvent[]; total: number; page: number }>(
-      "/security-events",
-      params
-    ),
+    get<{ items: SecurityEvent[]; total: number; page: number }>("/security-events", params),
   get: (id: string | number) => get<SecurityEvent>(`/security-events/${id}`),
   getStats: (params?: any) => get("/security-events/stats", params),
   getTimeline: (params?: any) => get("/security-events/timeline", params),
@@ -392,7 +320,7 @@ export const securityEventApi = {
     get(`/sites/${id}/security-events/stats`, params),
   getSiteTimeline: (id: string | number, params?: any) =>
     get(`/sites/${id}/security-events/timeline`, params),
-}
+};
 
 /**
  * 访问日志相关 API
@@ -403,7 +331,7 @@ export const accessLogApi = {
   get: (id: string | number) => get<AccessLog>(`/access-logs/${id}`),
   getSiteStats: (id: string | number, params?: any) =>
     get(`/sites/${id}/access-logs/stats`, params),
-}
+};
 
 /**
  * 请求追踪相关 API
@@ -412,35 +340,33 @@ export const accessLogApi = {
 export const requestTraceApi = {
   get: (requestId: string) =>
     get<RequestTrace>(`/request/${encodeURIComponent(requestId)}`),
-}
+};
 
 /**
  * Dashboard 相关 API
  */
 export const dashboardApi = {
   getSummary: () => get<DashboardSummary>("/dashboard/summary"),
-}
+};
 
 /**
  * Bot 相关 API
  */
 export const botApi = {
-  getSettings: () => get<BotSettings>("/bot-settings"),
-  updateSettings: (data: Partial<BotSettings>) =>
-    post<BotSettings>("/bot-settings/update", data),
+  getSettings: () => get("/bot-settings"),
+  updateSettings: (data: any) => post("/bot-settings/update", data),
   getStats: () => get("/bot-stats"),
   getScores: () => get("/bot-scores"),
-}
+};
 
 /**
  * 验证码相关 API
  */
 export const captchaApi = {
-  getConfig: () => get<CaptchaConfig>("/captcha/config"),
-  updateConfig: (data: Partial<CaptchaConfig>) =>
-    post<CaptchaConfig>("/captcha/config", data),
+  getConfig: () => get("/captcha/config"),
+  updateConfig: (data: any) => post("/captcha/config", data),
   test: () => post("/captcha/test"),
-}
+};
 
 /**
  * 链式验证相关 API
@@ -450,72 +376,30 @@ export const chainApi = {
   updateConfig: (data: any) => post("/chain/config", data),
   getSessions: () => get("/chain/sessions"),
   deleteSession: (id: string | number) => post(`/chain/sessions/${id}/delete`),
-}
+};
 
 /**
  * CVE 规则相关 API
  */
 export const cveApi = {
-  list: (params?: any) =>
-    get<{
-      items: CVERuleItem[]
-      total: number
-      scope?: string
-      scope_id?: number
-    }>("/cve-rules", params),
-  getStats: (params?: any) => get<CVEStats>("/cve-rules/stats", params),
+  list: () => get("/cve-rules"),
+  getStats: () => get("/cve-rules/stats"),
   getFeedStatus: () => get("/cve-feed/status"),
   toggle: (id: string | number) => post(`/cve-rules/${id}/toggle`),
-  patch: (id: string | number, data: any) =>
-    post(`/cve-rules/${id}/patch`, data),
-  reset: (id: string | number, params?: Record<string, unknown>) => {
-    const qs = params
-      ? `?${new URLSearchParams(
-          Object.entries(params)
-            .filter(
-              ([, value]) =>
-                value !== undefined && value !== null && value !== ""
-            )
-            .map(([key, value]) => [key, String(value)])
-        ).toString()}`
-      : ""
-    return post(`/cve-rules/${id}/reset${qs}`)
-  },
+  patch: (id: string | number, data: any) => post(`/cve-rules/${id}/patch`, data),
   batch: (data: any) => post("/cve-rules/batch", data),
   sync: () => post("/cve-rules/sync"),
-}
+};
 
 /**
  * OWASP 规则相关 API
  */
 export const owaspApi = {
-  list: (params?: any) =>
-    get<{
-      items: OWASPRuleItem[]
-      grouped?: Record<string, OWASPRuleItem[]>
-      total: number
-      policy_id: number
-    }>("/owasp-rules", params),
-  getStats: (params?: any) => get<OWASPStats>("/owasp-rules/stats", params),
-  update: (id: string | number, data: any) => {
-    const policyId = data?.policy_id
-    const payload = { ...(data ?? {}) }
-    delete payload.policy_id
-    return policyId
-      ? post(`/policies/${policyId}/owasp-rules/${id}`, payload)
-      : post(`/owasp-rules/${id}/update`, payload)
-  },
-  reset: (id: string | number, policyId?: string | number) =>
-    policyId
-      ? post(`/policies/${policyId}/owasp-rules/${id}/reset`)
-      : post(`/owasp-rules/${id}/reset`),
-  batch: (data: any) => {
-    const policyId = data?.policy_id
-    return policyId
-      ? post(`/policies/${policyId}/owasp-rules/batch`, data)
-      : post("/owasp-rules/batch", data)
-  },
-}
+  list: () => get("/owasp-rules"),
+  getStats: () => get("/owasp-rules/stats"),
+  update: (id: string | number, data: any) => post(`/owasp-rules/${id}/update`, data),
+  batch: (data: any) => post("/owasp-rules/batch", data),
+};
 
 /**
  * 丢弃策略相关 API
@@ -525,7 +409,7 @@ export const dropApi = {
   updatePolicy: (data: any) => post("/drop-policy/update", data),
   getStats: () => get("/drop-stats"),
   getEvents: (params?: any) => get("/drop-events", params),
-}
+};
 
 /**
  * 系统设置相关 API
@@ -535,52 +419,48 @@ export const settingsApi = {
   get: (key: string) => get(`/settings/${key}`),
   set: (key: string, value: any) => post(`/settings/${key}`, { value }),
   delete: (key: string) => post(`/settings/${key}/delete`),
-  getNetwork: () => get<NetworkConfig>("/network-config"),
-  updateNetwork: (data: NetworkConfigUpdate) =>
-    post<NetworkConfig>("/network-config", data),
+  getNetwork: () => get("/network-config"),
+  updateNetwork: (data: any) => post("/network-config", data),
   getHTTP2: () => get("/http2-config"),
   updateHTTP2: (data: any) => post("/http2-config", data),
-  getLog: () => get<LogConfig>("/log-config"),
-  updateLog: (data: LogConfigUpdate) => post<LogConfig>("/log-config", data),
-  getTLS: () => get<TLSConfig>("/tls-config"),
-  updateTLS: (data: TLSConfigUpdate) => post<TLSConfig>("/tls-config", data),
+  getLog: () => get("/log-config"),
+  updateLog: (data: any) => post("/log-config", data),
+  getTLS: () => get("/tls-config"),
+  updateTLS: (data: any) => post("/tls-config", data),
   getCipherSuites: () => get("/tls-cipher-suites"),
-  getRedis: () => get<RedisConfigResponse>("/redis-config"),
-  updateRedis: (data: RedisConfigUpdate) =>
-    post<RedisConfigResponse>("/redis-config", data),
-}
+  getRedis: () => get("/redis-config"),
+  updateRedis: (data: { redis_addr: string; redis_password?: string; redis_db?: number }) =>
+    post("/redis-config", data),
+};
 
 /**
  * 上游相关 API
  */
 export const upstreamApi = {
   getStatus: () => get<UpstreamStatusResponse>("/upstreams/status"),
-}
+};
 
 /**
  * 运行时配置相关 API
  */
 export const runtimeApi = {
   getConfig: () => get("/runtime-config"),
-}
+};
 
 /**
  * API 密钥相关 API
  */
 export const apiKeyApi = {
-  list: () =>
-    get<{ items: AdminAPIKey[] }>("/api-keys").then((r) => r.items ?? []),
-  create: (data: { name: string }) =>
-    post<{ key: AdminAPIKey; token: string }>("/api-keys", data),
+  list: () => get<{ items: AdminAPIKey[] }>("/api-keys").then((r) => r.items ?? []),
+  create: (data: { name: string }) => post<{ key: AdminAPIKey; token: string }>("/api-keys", data),
   delete: (id: string | number) => post(`/api-keys/${id}/delete`),
-}
+};
 
 /**
  * 管理员账户相关 API
  */
 export const adminUserApi = {
-  list: () =>
-    get<{ items: AdminUser[] }>("/admin-users").then((r) => r.items ?? []),
+  list: () => get<{ items: AdminUser[] }>("/admin-users").then((r) => r.items ?? []),
   create: (data: { username: string; password: string; role: string }) =>
     post<AdminUser>("/admin-users", data),
   updateRole: (id: string | number, role: string) =>
@@ -588,7 +468,7 @@ export const adminUserApi = {
   updatePassword: (id: string | number, password: string) =>
     post(`/admin-users/${id}/update-password`, { password }),
   delete: (id: string | number) => post(`/admin-users/${id}/delete`),
-}
+};
 
 /**
  * 错误页面相关 API
@@ -596,7 +476,7 @@ export const adminUserApi = {
 export const errorPageApi = {
   getDefaults: () => get("/error-pages/defaults"),
   preview: (data: any) => post("/error-pages/preview", data),
-}
+};
 
 /**
  * 页面模板相关 API
@@ -607,49 +487,40 @@ export const pageTemplateApi = {
   update: (type: string, data: Record<string, string>) =>
     post(`/page-templates/${type}`, data),
   reset: (type: string) => post(`/page-templates/${type}/reset`),
-  previewDraft: (type: string, data: Record<string, string>) =>
-    post<{ text?: string }>(`/page-templates/${type}/preview`, data).then(
-      (response) => response?.text ?? ""
-    ),
-  preview: (type: string) =>
-    get<{ text?: string }>(`/page-templates/${type}/preview`).then(
-      (response) => response?.text ?? ""
-    ),
-}
+  preview: (type: string) => get(`/page-templates/${type}/preview`),
+};
 
 /**
  * 系统相关 API
  */
 export const systemApi = {
   reload: () => post("/reload"),
-}
+};
 
 /**
  * 威胁情报订阅相关 API
  */
 export const threatIntelApi = {
-  list: () =>
-    get<{ items: ThreatIntelFeed[]; total: number }>("/threat-intel-feeds"),
+  list: () => get<{ items: ThreatIntelFeed[]; total: number }>("/threat-intel-feeds"),
   create: (data: Partial<ThreatIntelFeed>) =>
     post<ThreatIntelFeed>("/threat-intel-feeds", data),
   update: (id: string | number, data: Partial<ThreatIntelFeed>) =>
     post<ThreatIntelFeed>(`/threat-intel-feeds/${id}/update`, data),
   delete: (id: string | number) => post(`/threat-intel-feeds/${id}/delete`),
-  sync: (id: string | number) =>
-    post<ThreatIntelFeed>(`/threat-intel-feeds/${id}/sync`),
+  sync: (id: string | number) => post<ThreatIntelFeed>(`/threat-intel-feeds/${id}/sync`),
   listSyncLogs: (params?: {
-    page?: number
-    page_size?: number
-    feed_id?: number
-    status?: "success" | "failed"
+    page?: number;
+    page_size?: number;
+    feed_id?: number;
+    status?: "success" | "failed";
   }) =>
     get<{
-      items: ThreatIntelSyncLog[]
-      total: number
-      page: number
-      page_size: number
+      items: ThreatIntelSyncLog[];
+      total: number;
+      page: number;
+      page_size: number;
     }>("/threat-intel-sync-logs", params),
-}
+};
 
 /**
  * 站点访问控制相关 API
@@ -657,75 +528,52 @@ export const threatIntelApi = {
 export const accessApi = {
   getConfig: (siteId: string | number) =>
     get<SiteAccessConfig>(`/sites/${siteId}/access`),
-  saveConfig: (
-    siteId: string | number,
-    data: { enabled?: boolean; shared_password?: string; session_ttl?: number }
-  ) => post(`/sites/${siteId}/access`, data),
+  saveConfig: (siteId: string | number, data: { enabled?: boolean; shared_password?: string; session_ttl?: number }) =>
+    post(`/sites/${siteId}/access`, data),
 
   listProviders: (siteId: string | number) =>
-    get<{ providers: AccessProvider[] }>(
-      `/sites/${siteId}/access/providers`
-    ).then((r) => r.providers ?? []),
+    get<{ providers: AccessProvider[] }>(`/sites/${siteId}/access/providers`).then((r) => r.providers ?? []),
   createProvider: (siteId: string | number, data: Partial<AccessProvider>) =>
     post<AccessProvider>(`/sites/${siteId}/access/providers`, data),
-  updateProvider: (
-    siteId: string | number,
-    pid: string | number,
-    data: Partial<AccessProvider>
-  ) => post(`/sites/${siteId}/access/providers/${pid}/update`, data),
+  updateProvider: (siteId: string | number, pid: string | number, data: Partial<AccessProvider>) =>
+    post(`/sites/${siteId}/access/providers/${pid}/update`, data),
   deleteProvider: (siteId: string | number, pid: string | number) =>
     post(`/sites/${siteId}/access/providers/${pid}/delete`),
 
   listUsers: (siteId: string | number) =>
-    get<{ users: AccessUser[] }>(`/sites/${siteId}/access/users`).then(
-      (r) => r.users ?? []
-    ),
-  createUser: (
-    siteId: string | number,
-    data: { username: string; password: string; enabled?: boolean }
-  ) => post<AccessUser>(`/sites/${siteId}/access/users`, data),
-  updateUser: (
-    siteId: string | number,
-    uid: string | number,
-    data: Partial<AccessUser>
-  ) => post(`/sites/${siteId}/access/users/${uid}/update`, data),
+    get<{ users: AccessUser[] }>(`/sites/${siteId}/access/users`).then((r) => r.users ?? []),
+  createUser: (siteId: string | number, data: { username: string; password: string; enabled?: boolean }) =>
+    post<AccessUser>(`/sites/${siteId}/access/users`, data),
+  updateUser: (siteId: string | number, uid: string | number, data: Partial<AccessUser>) =>
+    post(`/sites/${siteId}/access/users/${uid}/update`, data),
   deleteUser: (siteId: string | number, uid: string | number) =>
     post(`/sites/${siteId}/access/users/${uid}/delete`),
 
   listPathRules: (siteId: string | number) =>
-    get<{ rules: AccessPathRule[] }>(`/sites/${siteId}/access/rules`).then(
-      (r) => r.rules ?? []
-    ),
+    get<{ rules: AccessPathRule[] }>(`/sites/${siteId}/access/rules`).then((r) => r.rules ?? []),
   createPathRule: (siteId: string | number, data: Partial<AccessPathRule>) =>
     post<AccessPathRule>(`/sites/${siteId}/access/rules`, data),
-  updatePathRule: (
-    siteId: string | number,
-    rid: string | number,
-    data: Partial<AccessPathRule>
-  ) => post(`/sites/${siteId}/access/rules/${rid}/update`, data),
+  updatePathRule: (siteId: string | number, rid: string | number, data: Partial<AccessPathRule>) =>
+    post(`/sites/${siteId}/access/rules/${rid}/update`, data),
   deletePathRule: (siteId: string | number, rid: string | number) =>
     post(`/sites/${siteId}/access/rules/${rid}/delete`),
-}
+};
 
 /**
  * 误报反馈相关 API
  */
 export const falsePositiveApi = {
   list: (params?: { page?: number; page_size?: number; status?: string }) =>
-    get<{
-      items: FalsePositiveReport[]
-      total: number
-      page?: number
-      page_size?: number
-    }>("/false-positives", params),
+    get<{ items: FalsePositiveReport[]; total: number; page?: number; page_size?: number }>(
+      "/false-positives",
+      params,
+    ),
   create: (data: Partial<FalsePositiveReport>) =>
     post<FalsePositiveReport>("/false-positives", data),
   updateStatus: (id: number, status: string) =>
-    post<{ id: number; status: string }>(`/false-positives/${id}/status`, {
-      status,
-    }),
+    post<{ id: number; status: string }>(`/false-positives/${id}/status`, { status }),
   delete: (id: number) => post(`/false-positives/${id}/delete`),
-}
+};
 
 /**
  * 配置备份/恢复相关 API
@@ -734,7 +582,7 @@ export const backupApi = {
   export: () => get<BackupData>("/backup/export"),
   import: (data: BackupData, replaceMode: boolean) =>
     post<ImportResult>("/backup/import", { data, replace_mode: replaceMode }),
-}
+};
 
 /**
  * 预置爬虫白名单相关 API
@@ -744,13 +592,13 @@ export const backupApi = {
 export const presetBotWhitelistApi = {
   preview: () =>
     get<{ items: Array<{ value: string; note: string }>; total: number }>(
-      "/preset-bot-whitelist"
+      "/preset-bot-whitelist",
     ),
   seed: () =>
     post<{ added: number; skipped: number; entries: string[] }>(
-      "/preset-bot-whitelist/seed"
+      "/preset-bot-whitelist/seed",
     ),
-}
+};
 
 /**
  * Lua 自定义策略插件相关 API
@@ -768,15 +616,34 @@ export const luaPluginApi = {
   toggle: (id: string | number, enabled?: boolean) =>
     post<{ id: number; enabled: boolean }>(
       `/lua-plugins/${id}/toggle`,
-      enabled === undefined ? undefined : { enabled }
+      enabled === undefined ? undefined : { enabled },
     ),
   validate: (data: { stage: LuaPluginStage; source: string }) =>
     post<LuaValidateResult>("/lua-plugins/validate", data),
   dryRun: (data: LuaDryRunRequest) =>
     post<LuaDryRunResult>("/lua-plugins/dry-run", data),
-  /** 运行时统计。按持久化插件 ID 关联，只覆盖当前已载入引擎的脚本。 */
+  /** 运行时统计。按脚本名聚合，不含数据库 id，只覆盖当前已载入引擎的脚本。 */
   stats: () => get<LuaPluginStatsResponse>("/lua-plugins/stats"),
-}
+};
+
+/** JavaScript 边缘插件相关 API。 */
+export const jsPluginApi = {
+  list: () => get<JSPluginListResponse>("/js-plugins"),
+  get: (id: string | number) => get<JSPlugin>(`/js-plugins/${id}`),
+  create: (data: JSPluginCreateRequest) => post<JSPlugin>("/js-plugins", data),
+  update: (id: string | number, data: JSPluginUpdateRequest) =>
+    post<JSPlugin>(`/js-plugins/${id}/update`, data),
+  delete: (id: string | number) => post(`/js-plugins/${id}/delete`),
+  toggle: (id: string | number, enabled?: boolean) =>
+    post<JSPluginToggleResponse>(
+      `/js-plugins/${id}/toggle`,
+      enabled === undefined ? undefined : { enabled },
+    ),
+  validate: (data: JSPluginValidateRequest) =>
+    post<JSPluginValidateResult>("/js-plugins/validate", data),
+  dryRun: () => post<JSPluginDryRunResponse>("/js-plugins/dry-run"),
+  stats: () => get<JSPluginStatsResponse>("/js-plugins/stats"),
+};
 
 /**
  * TLS 指纹相关 API
@@ -784,43 +651,21 @@ export const luaPluginApi = {
 export const fingerprintApi = {
   list: (params?: { page?: number; page_size?: number }) =>
     get<{ items: any[]; total: number }>("/fingerprints", params),
-}
+};
 
 // 引入类型（避免循环依赖，在文件末尾导入类型声明）
 import type {
-  Site,
-  SiteUpdate,
-  SiteListener,
-  Certificate,
-  Rule,
-  Policy,
-  SecurityEvent,
-  AccessLog,
-  DashboardSummary,
-  AppRouteRule,
-  RecordedResource,
-  SiteAccessConfig,
-  AccessProvider,
-  AccessUser,
-  AccessPathRule,
-  AdminAPIKey,
-  AdminUser,
-  IPEntry,
-  ThreatIntelFeed,
-  ThreatIntelSyncLog,
-  BackupData,
-  ImportResult,
-  FalsePositiveReport,
-  RequestTrace,
-  UpstreamStatusResponse,
-  LuaPlugin,
-  LuaPluginStage,
-  LuaValidateResult,
-  LuaDryRunRequest,
-  LuaDryRunResult,
+  Site, SiteListener, Certificate, Rule, Policy,
+  SecurityEvent, AccessLog, DashboardSummary,
+  AppRouteRule, RecordedResource,
+  SiteAccessConfig, AccessProvider, AccessUser, AccessPathRule,
+  AdminAPIKey, AdminUser, IPEntry, ThreatIntelFeed, ThreatIntelSyncLog,
+  BackupData, ImportResult, FalsePositiveReport,
+  RequestTrace, UpstreamStatusResponse,
+  LuaPlugin, LuaPluginStage, LuaValidateResult, LuaDryRunRequest, LuaDryRunResult,
   LuaPluginStatsResponse,
-  OWASPRuleItem,
-  OWASPStats,
-  CVERuleItem,
-  CVEStats,
-} from "./types"
+  JSPlugin, JSPluginCreateRequest, JSPluginUpdateRequest,
+  JSPluginListResponse, JSPluginToggleResponse,
+  JSPluginValidateRequest, JSPluginValidateResult,
+  JSPluginDryRunResponse, JSPluginStatsResponse,
+} from "./types";
