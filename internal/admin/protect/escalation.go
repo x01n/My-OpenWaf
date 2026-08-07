@@ -7,6 +7,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
+	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
@@ -63,8 +64,11 @@ func UpdateEscalationConfig(repo *repository.SystemSettingsRepo, reload func() e
 					c.JSON(400, map[string]string{"error": "step threshold must be positive"})
 					return
 				}
-				if step.Action == "" {
-					c.JSON(400, map[string]string{"error": "step action required"})
+				switch action.Normalize(action.Type(step.Action)) {
+				case action.Intercept, action.Drop, action.Challenge,
+					action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge:
+				default:
+					c.JSON(400, map[string]string{"error": "unsupported escalation action"})
 					return
 				}
 				if i > 0 && step.Threshold <= (*req.EscalationSteps)[i-1].Threshold {

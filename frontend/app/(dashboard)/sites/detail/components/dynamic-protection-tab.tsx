@@ -57,7 +57,10 @@ function fromTriState(value: TriState): boolean | null {
  * @param raw JSON 数组字符串
  * @returns 路径字符串数组
  */
-function parseJSPaths(raw: string | undefined): string[] {
+function parseJSPaths(raw: string | string[] | undefined): string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter((p): p is string => typeof p === "string")
+  }
   if (!raw) return []
   try {
     const parsed = JSON.parse(raw)
@@ -174,14 +177,10 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
       dynamic_protection_enabled: fromTriState(master),
       dynamic_html_enabled: fromTriState(html),
       dynamic_js_enabled: fromTriState(js),
+      dynamic_js_mode: js === "on" ? jsMode : "",
+      dynamic_js_paths:
+        js === "on" && jsMode === "paths" ? jsPaths : "",
       dynamic_decrypt_cache_ttl: ttlValue,
-    }
-    if (js === "on") {
-      payload.dynamic_js_mode = jsMode
-      if (jsMode === "paths") {
-        // 后端将数组序列化为 JSON 字符串存储；继承/关闭时保留休眠路径配置。
-        payload.dynamic_js_paths = jsPaths as unknown as string
-      }
     }
     try {
       await updateSite.execute({ id: site.id, data: payload })

@@ -108,7 +108,7 @@ func TestUpdateCaptchaConfigIgnoresNonPositiveNumbers(t *testing.T) {
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	body := []byte(`{"captcha_timeout":0,"captcha_pass_ttl":-1,"shield_difficulty":0,"shield_timeout_secs":-5,"shield_max_retries":0}`)
+	body := []byte(`{"captcha_timeout":0,"captcha_pass_ttl":-1,"shield_timeout_secs":-5,"shield_max_retries":0}`)
 	ctx := invokeProtectHandler(t, UpdateCaptchaConfig(repo, func() error { return nil }), "POST", "/api/v1/captcha/config", body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
@@ -136,7 +136,7 @@ func TestUpdateCaptchaConfigAppliesPositiveShieldNumbers(t *testing.T) {
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	body := []byte(`{"shield_difficulty":7,"shield_timeout_secs":25,"shield_max_retries":5,"shield_auto_start_delay":1500,"shield_env_strictness":3}`)
+	body := []byte(`{"shield_difficulty":7,"shield_timeout_secs":25,"shield_max_retries":5,"shield_auto_start_delay":1500,"shield_env_strictness":2}`)
 	ctx := invokeProtectHandler(t, UpdateCaptchaConfig(repo, func() error { return nil }), "POST", "/api/v1/captcha/config", body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
@@ -146,12 +146,39 @@ func TestUpdateCaptchaConfigAppliesPositiveShieldNumbers(t *testing.T) {
 	if loaded.ShieldDifficulty != 7 || loaded.ShieldTimeoutSecs != 25 || loaded.ShieldMaxRetries != 5 {
 		t.Fatalf("positive shield numbers not applied: %#v", loaded)
 	}
-	if loaded.ShieldAutoStartDelay != 1500 || loaded.ShieldEnvStrictness != 3 {
+	if loaded.ShieldAutoStartDelay != 1500 || loaded.ShieldEnvStrictness != 2 {
 		t.Fatalf("shield delay/strictness not applied: %#v", loaded)
 	}
 }
 
+/**
+ * TestUpdateCaptchaConfigRejectsInvalidEnvStrictness 验证 Shield 严格度只接受 0、1、2。
+ */
+func TestUpdateCaptchaConfigRejectsInvalidEnvStrictness(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.ShieldEnvStrictness = 2
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+
+	for _, invalid := range []int{-1, 3} {
+		body, err := json.Marshal(map[string]int{"shield_env_strictness": invalid})
+		if err != nil {
+			t.Fatalf("marshal strictness %d: %v", invalid, err)
+		}
+		ctx := invokeProtectHandler(t, UpdateCaptchaConfig(repo, func() error { return nil }), "POST", "/api/v1/captcha/config", body)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("strictness=%d: expected 400, got %d: %s", invalid, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+		}
+		if loaded := shared.LoadProtectionConfig(repo); loaded.ShieldEnvStrictness != 2 {
+			t.Fatalf("strictness=%d: rejected value must not be stored: %#v", invalid, loaded)
+		}
+	}
+}
+
 // TestUpdateCaptchaConfigIgnoresNegativeEnvStrictnessAndDelay 验证仅负值被忽略，0 是合法取值。
+// TestUpdateCaptchaConfigIgnoresNegativeEnvStrictnessAndDelay 验证延迟负值忽略，严格度负值被拒绝。
 func TestUpdateCaptchaConfigIgnoresNegativeEnvStrictnessAndDelay(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	cfg := store.DefaultProtectionConfig()
@@ -162,13 +189,13 @@ func TestUpdateCaptchaConfigIgnoresNegativeEnvStrictnessAndDelay(t *testing.T) {
 	}
 
 	ctx := invokeProtectHandler(t, UpdateCaptchaConfig(repo, func() error { return nil }), "POST", "/api/v1/captcha/config", []byte(`{"shield_auto_start_delay":-1,"shield_env_strictness":-1}`))
-	if ctx.Response.StatusCode() != 200 {
+	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
 	loaded := shared.LoadProtectionConfig(repo)
 	if loaded.ShieldAutoStartDelay != 500 || loaded.ShieldEnvStrictness != 2 {
-		t.Fatalf("negative shield values should be ignored: %#v", loaded)
+		t.Fatalf("rejected strictness must not change persisted configuration: %#v", loaded)
 	}
 }
 
@@ -212,6 +239,35 @@ func TestUpdateCaptchaConfigPreservesUnrelatedProtectionFields(t *testing.T) {
 	}
 }
 
+// TestUpdateCaptchaConfigSyncsBotCaptchaProjection 验证 CAPTCHA API 修改 protection 后同步 Bot 投影。
+func TestUpdateCaptchaConfigSyncsBotCaptchaProjection(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CaptchaEnabled = true
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	if err := repo.Set("bot_settings", `{"enabled":true,"captcha_enabled":false,"score_threshold":71}`); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+
+	ctx := invokeProtectHandler(t, UpdateCaptchaConfig(repo, func() error { return nil }), "POST", "/api/v1/captcha/config", []byte(`{"captcha_enabled":true,"shield_enable_env_check":true}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatalf("load bot settings: %v", err)
+	}
+	var got shared.BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.CaptchaEnabled || !got.Enabled || got.ScoreThreshold != 71 {
+		t.Fatalf("CAPTCHA update did not synchronize projection: %#v", got)
+	}
+}
+
 // TestUpdateCaptchaConfigReloadFailureReturns500 验证 reload 失败时返回 500，但配置已落库。
 func TestUpdateCaptchaConfigReloadFailureReturns500(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
@@ -220,7 +276,7 @@ func TestUpdateCaptchaConfigReloadFailureReturns500(t *testing.T) {
 		t.Fatalf("expected 500 on reload failure, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 	if !shared.LoadProtectionConfig(repo).CaptchaEnabled {
-		t.Fatal("config should already be saved before reload is attempted")
+		t.Fatal("config should remain saved when reload fails")
 	}
 }
 

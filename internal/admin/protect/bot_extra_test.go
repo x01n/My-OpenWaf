@@ -34,7 +34,7 @@ func TestUpdateBotSettingsAppliesEveryField(t *testing.T) {
 		"browser_sign_ttl": 900,
 		"browser_sign_action": "captcha_challenge",
 		"js_obfuscation_paths": ["/app.js"],
-		"js_protection_mode": "strict",
+		"js_protection_mode": "all",
 		"decrypt_cache_ttl_seconds": 45,
 		"image_watermark_paths": ["/img/*"],
 		"watermark_text": "confidential",
@@ -74,7 +74,7 @@ func TestUpdateBotSettingsAppliesEveryField(t *testing.T) {
 	if !saved.BrowserSignEnabled || saved.BrowserSignTTL != 900 || saved.BrowserSignAction != "captcha_challenge" {
 		t.Fatalf("browser sign fields not applied: %#v", saved)
 	}
-	if len(saved.JSObfuscationPaths) != 1 || saved.JSProtectionMode != "strict" || saved.DecryptCacheTTLSeconds != 45 {
+	if len(saved.JSObfuscationPaths) != 1 || saved.JSProtectionMode != "all" || saved.DecryptCacheTTLSeconds != 45 {
 		t.Fatalf("js protection fields not applied: %#v", saved)
 	}
 	if len(saved.ImageWatermarkPaths) != 1 || saved.WatermarkText != "confidential" {
@@ -110,6 +110,38 @@ func TestUpdateBotSettingsSyncsCaptchaAndBrowserSignToProtection(t *testing.T) {
 	// 浏览器签名动作必须保留具体的挑战子类型。
 	if !loaded.BrowserSignEnabled || loaded.BrowserSignTTL != 1200 || loaded.BrowserSignAction != "shield_challenge" {
 		t.Fatalf("browser sign config was not synced into protection: %#v", loaded)
+	}
+}
+
+// TestUpdateBotSettingsPreservesProtectionCaptchaOnPartialPatch 验证 Bot 局部更新不会把旧 CAPTCHA 投影写回权威配置。
+func TestUpdateBotSettingsPreservesProtectionCaptchaOnPartialPatch(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CaptchaEnabled = true
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	if err := repo.Set("bot_settings", `{"enabled":true,"captcha_enabled":false}`); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+
+	ctx := invokeProtectHandler(t, UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", []byte(`{"enabled":false}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var got shared.BotSettingsResponse
+	val, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatalf("load bot settings: %v", err)
+	}
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if got.CaptchaEnabled != true {
+		t.Fatalf("partial bot update persisted stale captcha_enabled: %#v", got)
+	}
+	if !shared.LoadProtectionConfig(repo).CaptchaEnabled {
+		t.Fatal("partial bot update changed protection captcha_enabled")
 	}
 }
 
@@ -277,5 +309,30 @@ func TestGetBotSettingsNormalizesBrowserSignFallbacks(t *testing.T) {
 	}
 	if got.BrowserSignTTL != 300 || got.BrowserSignAction != "challenge" {
 		t.Fatalf("browser sign fallbacks not applied: %#v", got)
+	}
+}
+
+// TestGetBotSettingsUsesProtectionCaptchaValue 验证 GET Bot 设置始终返回 protection 中的 CAPTCHA 开关。
+func TestGetBotSettingsUsesProtectionCaptchaValue(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CaptchaEnabled = true
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	if err := repo.Set("bot_settings", `{"captcha_enabled":false,"enabled":true}`); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+
+	ctx := invokeProtectHandler(t, GetBotSettings(repo), "GET", "/api/v1/bot-settings", nil)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var got shared.BotSettingsResponse
+	if err := json.Unmarshal(ctx.Response.Body(), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.CaptchaEnabled {
+		t.Fatalf("GET bot settings returned stale captcha_enabled: %#v", got)
 	}
 }

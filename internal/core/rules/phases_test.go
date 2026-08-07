@@ -2,20 +2,26 @@ package rules
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/challenge"
 )
 
 func TestBotPhaseStoreBotScoreDetailsOnlyForHighRisk(t *testing.T) {
@@ -544,5 +550,51 @@ func TestBrowserSignPhaseRequiresAPISignature(t *testing.T) {
 	}
 	if result.Phase != "browser_sign" {
 		t.Fatalf("phase = %q", result.Phase)
+	}
+
+	now := time.Now()
+	ticket := challenge.IssueBrowserSignTicket(1, "example.com", 60, true)
+	rawQuery := "filter=active&sort=created%2Bdesc"
+	ts := now.Unix()
+	signKey, err := hex.DecodeString(ticket.SignKey)
+	if err != nil {
+		t.Fatalf("decode browser sign key: %v", err)
+	}
+	payload := "POST|/api/v1/items|" + rawQuery + "|" + strconv.FormatInt(ts, 10) + "|" + ticket.Nonce
+	mac := hmac.New(sha256.New, signKey)
+	_, _ = mac.Write([]byte(payload))
+	headers := map[string]string{
+		"content-type":                   "application/json",
+		"accept":                         "application/json",
+		challenge.BrowserSignHeaderNonce: ticket.Nonce,
+		challenge.BrowserSignHeaderExp:   strconv.FormatInt(ticket.ExpiresAt, 10),
+		challenge.BrowserSignHeaderMAC:   ticket.TicketMAC,
+		challenge.BrowserSignHeaderTS:    strconv.FormatInt(ts, 10),
+		challenge.BrowserSignHeaderSig:   hex.EncodeToString(mac.Sum(nil)),
+		challenge.BrowserSignHeaderEnv:   `{"webdriver":false,"chrome_present":true,"plugins_count":3,"languages":"zh-CN","canvas_hash":"1","webgl_renderer":"NVIDIA","screen_width":1920,"screen_height":1080,"hardware_concurrency":8,"session_storage":true,"indexed_db":true,"cookie_enabled":true,"platform":"Linux","web_assembly":true,"screen_consistency":true,"timezone_consistency":true,"language_consistency":true,"math_consistency":true}`,
+	}
+
+	pass, terminal = phase.Execute(&pipeline.RequestCtx{
+		Method:   "POST",
+		Path:     "/api/v1/items",
+		RawQuery: rawQuery,
+		Host:     "example.com",
+		SiteID:   1,
+		Headers:  headers,
+	})
+	if terminal || pass.Matched {
+		t.Fatalf("valid query-bound signature should pass, terminal=%v result=%+v", terminal, pass)
+	}
+
+	result, terminal = phase.Execute(&pipeline.RequestCtx{
+		Method:   "POST",
+		Path:     "/api/v1/items",
+		RawQuery: rawQuery + "&page=2",
+		Host:     "example.com",
+		SiteID:   1,
+		Headers:  headers,
+	})
+	if !terminal || result.MatchDesc != "browser sign request mac mismatch" {
+		t.Fatalf("modified raw query should challenge, terminal=%v result=%+v", terminal, result)
 	}
 }

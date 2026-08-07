@@ -3,8 +3,10 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/database"
@@ -28,6 +30,7 @@ type Runtime struct {
 	Cache    *cache.Layer
 
 	snapshotDynamicKeyBase []byte
+	reloadMu               sync.Mutex
 }
 
 func NewRuntime(ctx context.Context) (*Runtime, error) {
@@ -57,7 +60,11 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("database: %w", err)
 	}
-	cfg = applyStoredRedisConfig(db, cfg)
+	cfg, err = applyStoredRedisConfig(db, cfg)
+	if err != nil {
+		closeRuntimeDB(db)
+		return nil, fmt.Errorf("redis config: %w", err)
+	}
 	warnings, err = cfg.Validate()
 	if err != nil {
 		closeRuntimeDB(db)
@@ -141,51 +148,82 @@ func systemSettingKeyEquals(key string) clause.Eq {
 	return clause.Eq{Column: clause.Column{Name: "key"}, Value: key}
 }
 
-func applyStoredRedisConfig(db *gorm.DB, cfg Config) Config {
+func applyStoredRedisConfig(db *gorm.DB, cfg Config) (Config, error) {
 	if db == nil || !db.Migrator().HasTable(&store.SystemSettings{}) {
-		return cfg
+		return cfg, nil
 	}
 	var setting store.SystemSettings
-	if err := db.Where(systemSettingKeyEquals(store.SettingKeyRedisConfig)).First(&setting).Error; err != nil || setting.Value == "" {
-		return cfg
+	if err := db.Where(systemSettingKeyEquals(store.SettingKeyRedisConfig)).First(&setting).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return cfg, nil
+		}
+		return cfg, fmt.Errorf("load redis config: %w", err)
+	}
+	if setting.Value == "" {
+		return cfg, nil
 	}
 	var stored storedRedisConfig
 	if err := json.Unmarshal([]byte(setting.Value), &stored); err != nil {
-		return cfg
+		return cfg, fmt.Errorf("decode redis config: %w", err)
+	}
+	stored.Addr = strings.TrimSpace(stored.Addr)
+	if stored.DB < 0 {
+		return cfg, fmt.Errorf("redis db must be >= 0")
+	}
+	if stored.Enabled && stored.Addr == "" {
+		return cfg, fmt.Errorf("redis addr is required when enabled")
 	}
 	if !stored.Enabled {
 		cfg.RedisAddr = ""
 		cfg.RedisPassword = ""
 		cfg.RedisDB = 0
-		return cfg
+		return cfg, nil
 	}
-	cfg.RedisAddr = strings.TrimSpace(stored.Addr)
+	cfg.RedisAddr = stored.Addr
 	cfg.RedisPassword = stored.Password
-	if stored.DB >= 0 {
-		cfg.RedisDB = stored.DB
-	}
-	return cfg
+	cfg.RedisDB = stored.DB
+	return cfg, nil
 }
 
 func (r *Runtime) ReloadSnapshot() error {
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+
 	if len(r.snapshotDynamicKeyBase) != 32 {
 		return fmt.Errorf("dynamic protection key base is not configured")
 	}
-	rev, err := currentRevision(r.DB)
-	if err != nil {
-		return err
+	for {
+		rev, err := currentRevision(r.DB)
+		if err != nil {
+			return err
+		}
+		if sn, ok := r.Cache.GetSnapshot(rev); ok {
+			latest, err := currentRevision(r.DB)
+			if err != nil {
+				return err
+			}
+			if latest != rev {
+				continue
+			}
+			r.Snapshot.StoreIfNewer(sn)
+			return nil
+		}
+		sn, err := snapshot.Build(r.DB, rev, r.snapshotDynamicKeyBase)
+		if err != nil {
+			return fmt.Errorf("snapshot build: %w", err)
+		}
+		latest, err := currentRevision(r.DB)
+		if err != nil {
+			return err
+		}
+		if latest != rev {
+			continue
+		}
+		r.Cache.SetSnapshot(rev, sn)
+		if r.Snapshot.StoreIfNewer(sn) {
+			return nil
+		}
 	}
-	if sn, ok := r.Cache.GetSnapshot(rev); ok {
-		r.Snapshot.Store(sn)
-		return nil
-	}
-	sn, err := snapshot.Build(r.DB, rev, r.snapshotDynamicKeyBase)
-	if err != nil {
-		return fmt.Errorf("snapshot build: %w", err)
-	}
-	r.Cache.SetSnapshot(rev, sn)
-	r.Snapshot.Store(sn)
-	return nil
 }
 
 type runtimeConfigRevision struct {

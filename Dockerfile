@@ -4,6 +4,7 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY frontend/ ./
+RUN mkdir -p /app/internal/core/adminweb/dist
 RUN bun run build
 
 # Stage 2: Build Go binary
@@ -11,6 +12,7 @@ FROM golang:1.25-alpine AS backend
 RUN apk add --no-cache gcc musl-dev
 WORKDIR /app
 COPY go.mod go.sum ./
+COPY third_party/hertz-contrib-http2/go.mod third_party/hertz-contrib-http2/go.sum ./third_party/hertz-contrib-http2/
 RUN go mod download
 COPY . .
 COPY --from=frontend /app/frontend/out ./internal/core/adminweb/dist

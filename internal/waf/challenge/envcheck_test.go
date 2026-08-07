@@ -81,9 +81,29 @@ func TestDecryptEnvFingerprintRejectsPlaintextAndAcceptsAuthenticatedCiphertext(
 	if err != nil {
 		t.Fatalf("marshal fingerprint: %v", err)
 	}
+	aad := "owaf-env:v1|challenge|7|example.test|:443|request"
+	encrypted := encryptVersionedEnvFingerprint(t, plaintext, key, aad)
+
+	got := DecryptEnvFingerprintWithAAD(encrypted, key, aad)
+	if got == nil || got.Languages != fp.Languages {
+		t.Fatalf("encrypted fingerprint = %+v, want language %q", got, fp.Languages)
+	}
+	if DecryptEnvFingerprintWithAAD(encrypted, key, aad+"-other") != nil {
+		t.Fatal("fingerprint authenticated for a different AAD")
+	}
+	if DecryptEnvFingerprintWithAAD(strings.TrimPrefix(encrypted, envCiphertextPrefix), key, aad) != nil {
+		t.Fatal("unversioned fingerprint must not be accepted")
+	}
+	if DecryptEnvFingerprintWithAAD(string(plaintext), key, aad) != nil {
+		t.Fatal("plaintext fingerprint must not be accepted")
+	}
+}
+
+func encryptVersionedEnvFingerprint(t *testing.T, plaintext, key []byte, aad string) string {
+	t.Helper()
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		t.Fatalf("new cipher: %v", err)
+		t.Fatalf("new AES cipher: %v", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
@@ -93,16 +113,8 @@ func TestDecryptEnvFingerprintRejectsPlaintextAndAcceptsAuthenticatedCiphertext(
 	if _, err := rand.Read(nonce); err != nil {
 		t.Fatalf("random nonce: %v", err)
 	}
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
-	encrypted := base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
-
-	got := DecryptEnvFingerprint(encrypted, key)
-	if got == nil || got.Languages != fp.Languages {
-		t.Fatalf("encrypted fingerprint = %+v, want language %q", got, fp.Languages)
-	}
-	if DecryptEnvFingerprint(string(plaintext), key) != nil {
-		t.Fatal("plaintext fingerprint must not be accepted")
-	}
+	ciphertext := gcm.Seal(nil, nonce, plaintext, []byte(aad))
+	return envCiphertextPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
 }
 
 func TestIsSuspiciousRendererKnownVMs(t *testing.T) {
@@ -181,10 +193,18 @@ func TestValidateEnvFingerprintNoBotSignalScoresLow(t *testing.T) {
 }
 
 func TestDecryptEnvFingerprintEmptyReturnsNil(t *testing.T) {
-	if DecryptEnvFingerprint("", []byte("key")) != nil {
+	if DecryptEnvFingerprintWithAAD("", []byte("key"), "owaf-env:v1|test|1|example.test|:443|session") != nil {
 		t.Error("empty encrypted should return nil")
 	}
-	if DecryptEnvFingerprint("data", nil) != nil {
+	if DecryptEnvFingerprintWithAAD("data", nil, "owaf-env:v1|test|1|example.test|:443|session") != nil {
 		t.Error("empty key should return nil")
+	}
+}
+
+func TestEnvFingerprintAADMatchesVersionConstant(t *testing.T) {
+	got := EnvFingerprintAAD("challenge", "session", ChallengeSessionBinding{SiteID: 1, Host: "example.test", Bind: ":443"})
+	want := "owaf-env:" + EnvFingerprintProtocolVersion + "|challenge|1|example.test|:443|session"
+	if got != want {
+		t.Fatalf("EnvFingerprintAAD() = %q, want %q", got, want)
 	}
 }

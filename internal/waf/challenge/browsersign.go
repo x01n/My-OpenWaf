@@ -72,7 +72,8 @@ func IssueBrowserSignTicket(siteID uint, host string, ttlSecs int, envCheck bool
 
 // VerifyBrowserSignHeaders 校验请求头中的浏览器签名。
 // 返回 ok 与原因（失败时）。host 保留兼容调用方，不参与 ticket 校验。
-func VerifyBrowserSignHeaders(headers map[string]string, method, path, host string, siteID uint, now time.Time, envHardFail bool) (bool, string) {
+// query 参与请求 MAC，防止在固定 path 上篡改查询参数绕过。
+func VerifyBrowserSignHeaders(headers map[string]string, method, path, query, host string, siteID uint, now time.Time, envHardFail bool) (bool, string) {
 	_ = host
 	nonce, _ := lookupBrowserSignHeader(headers, BrowserSignHeaderNonce)
 	expRaw, _ := lookupBrowserSignHeader(headers, BrowserSignHeaderExp)
@@ -103,7 +104,7 @@ func VerifyBrowserSignHeaders(headers map[string]string, method, path, host stri
 	if !hmac.Equal([]byte(ticketMAC), []byte(expectedTicket)) {
 		return false, "browser sign ticket mac mismatch"
 	}
-	expectedReq := browserSignRequestMAC(nonce, method, path, ts)
+	expectedReq := browserSignRequestMAC(nonce, method, path, query, ts)
 	if !hmac.Equal([]byte(reqSig), []byte(expectedReq)) {
 		return false, "browser sign request mac mismatch"
 	}
@@ -125,10 +126,10 @@ func VerifyBrowserSignHeaders(headers map[string]string, method, path, host stri
 
 // BrowserSignInjectScript 生成注入到 HTML 的混淆签名/环境采集脚本。
 func BrowserSignInjectScript(ticket BrowserSignTicket) string {
-	// 站点签名链路无服务端会话，环境指纹使用明文采集，避免无法解密。
+	// 站点签名链路不签发服务端会话，环境数据仅作不可信风险信号，不参与授权。
 	envJS := ""
 	if ticket.EnvKeyHex != "" {
-		envJS = EnvCheckJS()
+		envJS = EnvCheckJSPlain()
 	}
 	raw := fmt.Sprintf(browserSignJSTemplate,
 		ticket.Nonce,
@@ -142,7 +143,6 @@ func BrowserSignInjectScript(ticket BrowserSignTicket) string {
 		BrowserSignHeaderSig,
 		BrowserSignHeaderEnv,
 	)
-	// 先拼接环境采集，再拼接签名 hook。
 	combined := envJS + "\n" + raw
 	attr := ""
 	if ticket.CSPNonce != "" {
@@ -259,17 +259,23 @@ func browserSignRequestKey(nonce string) []byte {
 	return sum[:16]
 }
 
-func browserSignRequestMAC(nonce, method, path string, ts int64) string {
+func browserSignRequestMAC(nonce, method, path, query string, ts int64) string {
 	key := browserSignRequestKey(nonce)
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if method == "" {
 		method = "GET"
 	}
-	// 仅签 path（不含 query），避免缓存/追踪参数导致误伤。
+	// path 与 query 分开签名：若 path 自带 query 且显式 query 为空，则从 path 拆出 query，
+	// 保证与客户端 URL 解析（pathname + search）一致。
 	if i := strings.IndexByte(path, '?'); i >= 0 {
+		if query == "" {
+			query = path[i+1:]
+		}
 		path = path[:i]
 	}
-	payload := method + "|" + path + "|" + strconv.FormatInt(ts, 10) + "|" + nonce
+	query = strings.TrimPrefix(query, "?")
+	// query 参与签名，防止在固定 path 上篡改查询参数绕过；使用原始串直接比对，两端保持一致。
+	payload := method + "|" + path + "|" + query + "|" + strconv.FormatInt(ts, 10) + "|" + nonce
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
@@ -339,7 +345,7 @@ func obfuscateBrowserSignJS(js string) string {
 }
 
 // browserSignJSTemplate：挂载后 hook fetch/XHR，为请求附加短时效签名头与环境指纹。
-// 使用 Web Crypto 对 method|path|ts|nonce 做 HMAC-SHA256。
+// 使用 Web Crypto 对 method|path|query|ts|nonce 做 HMAC-SHA256。
 const browserSignJSTemplate = `
 (function(){
 var __owaf_bs_nonce="%s";
@@ -358,6 +364,7 @@ return new Promise(function(ok,err){var sc=document.createElement("script");sc.s
 }
 var __owaf_bs_wasm=loadWasm();
 function pathOnly(u){try{var x=new URL(u,location.href);return x.pathname||"/"}catch(e){var p=String(u||"");var i=p.indexOf("?");return i>=0?p.slice(0,i):p}}
+function queryOnly(u){try{var x=new URL(u,location.href);var s=x.search||"";return s.charAt(0)==="?"?s.slice(1):s}catch(e){var p=String(u||"");var i=p.indexOf("?");return i>=0?p.slice(i+1):""}}
 function shouldSign(u,method){
 try{
 var x=new URL(u,location.href);
@@ -371,8 +378,9 @@ return true;
 async function signHeaders(method,url){
 var ts=Math.floor(Date.now()/1000);
 var path=pathOnly(url);
+var query=queryOnly(url);
 var m=(method||"GET").toUpperCase();
-var payload=m+"|"+path+"|"+String(ts)+"|"+__owaf_bs_nonce;
+var payload=m+"|"+path+"|"+query+"|"+String(ts)+"|"+__owaf_bs_nonce;
 await __owaf_bs_wasm;
 var sig=wasm_bindgen.hmac_sha256(__owaf_bs_key,payload);
 var h={};
@@ -394,16 +402,17 @@ var out={};for(var k in base)out[k]=base[k];for(var k2 in extra)out[k2]=extra[k2
 if(window.fetch){
 var ofetch=window.fetch;
 window.fetch=function(input,init){
+var fetchThis=this,fetchArgs=arguments;
 try{
 var url=(typeof input==="string")?input:(input&&input.url)||location.href;
 var method=(init&&init.method)||(input&&input.method)||"GET";
-if(!shouldSign(url,method))return ofetch.apply(this,arguments);
+if(!shouldSign(url,method))return ofetch.apply(fetchThis,fetchArgs);
 return signHeaders(method,url).then(function(h){
 init=init?Object.assign({},init):{};
 init.headers=mergeHeaders(init.headers||(input&&input.headers),h);
-return ofetch.call(this,input,init);
-}).catch(function(){return ofetch.apply(this,arguments)});
-}catch(e){return ofetch.apply(this,arguments)}
+return ofetch.call(fetchThis,input,init);
+}).catch(function(){return ofetch.apply(fetchThis,fetchArgs)});
+}catch(e){return ofetch.apply(fetchThis,fetchArgs)}
 };
 }
 if(window.XMLHttpRequest){

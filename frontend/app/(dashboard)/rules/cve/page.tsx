@@ -98,7 +98,7 @@ export default function CVERulesPage() {
     try {
       await cveApi.reset(rule.id, scopedPatch())
       await refresh()
-      toast.success(t("cveRules.resetSuccess", { defaultValue: "已恢复继承" }))
+      toast.success(t("cveRules.resetSuccess"))
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : t("common.operationFailed")
@@ -120,14 +120,14 @@ export default function CVERulesPage() {
     },
     {
       key: "rule",
-      title: t("cveRules.rule", { defaultValue: "规则" }),
+      title: t("cveRules.rule"),
       render: (row: CVERuleItem) => (
         <div className="space-y-1">
           <div className="flex items-center gap-2 font-mono text-xs">
             {row.cve_id || row.cve || `#${row.id}`}
             {row.overridden && (
               <Badge variant="outline">
-                {t("cveRules.overridden", { defaultValue: "已覆盖" })}
+                {t("cveRules.overridden")}
               </Badge>
             )}
             {row.inherited_from && (
@@ -145,13 +145,13 @@ export default function CVERulesPage() {
     },
     {
       key: "category",
-      title: t("common.category", { defaultValue: "分类" }),
+      title: t("common.category"),
       width: "120px",
       render: (row: CVERuleItem) => categoryLabel(row.category),
     },
     {
       key: "severity",
-      title: t("cveRules.severity", { defaultValue: "严重度" }),
+      title: t("cveRules.severity"),
       width: "100px",
       render: (row: CVERuleItem) => severityLabel(row.severity),
     },
@@ -197,10 +197,8 @@ export default function CVERulesPage() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title={t("cveRules.title", { defaultValue: "CVE 规则" })}
-        description={t("cveRules.description", {
-          defaultValue: "按全局、策略或站点作用域管理 CVE 规则覆盖。",
-        })}
+        title={t("cveRules.title")}
+        description={t("cveRules.description")}
         actions={
           <Button variant="outline" onClick={refresh}>
             <IconRefresh className="mr-1 h-4 w-4" />
@@ -217,7 +215,7 @@ export default function CVERulesPage() {
       <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-4">
         <div className="space-y-1.5">
           <label className="text-sm font-medium">
-            {t("cveRules.scope", { defaultValue: "作用域" })}
+            {t("cveRules.scope")}
           </label>
           <Select
             value={scope}
@@ -228,13 +226,13 @@ export default function CVERulesPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="global">
-                {t("cveRules.scopeGlobal", { defaultValue: "全局" })}
+                {t("cveRules.scopeGlobal")}
               </SelectItem>
               <SelectItem value="policy">
-                {t("cveRules.scopePolicy", { defaultValue: "策略" })}
+                {t("cveRules.scopePolicy")}
               </SelectItem>
               <SelectItem value="site">
-                {t("cveRules.scopeSite", { defaultValue: "站点" })}
+                {t("cveRules.scopeSite")}
               </SelectItem>
             </SelectContent>
           </Select>
@@ -246,9 +244,7 @@ export default function CVERulesPage() {
           >
             <SelectTrigger className="w-64">
               <SelectValue
-                placeholder={t("rules.policyPlaceholder", {
-                  defaultValue: "选择策略",
-                })}
+                placeholder={t("rules.policyPlaceholder")}
               />
             </SelectTrigger>
             <SelectContent>
@@ -256,7 +252,7 @@ export default function CVERulesPage() {
                 <SelectItem key={p.id} value={String(p.id)}>
                   {p.name}
                   {p.is_default
-                    ? ` (${t("common.default", { defaultValue: "默认" })})`
+                    ? ` (${t("common.default")})`
                     : ""}
                 </SelectItem>
               ))}
@@ -282,7 +278,7 @@ export default function CVERulesPage() {
         )}
         {stats && (
           <Badge variant="secondary" className="mb-2">
-            {stats.enabled_count}/{stats.total} enabled
+            {stats.enabled_count}/{stats.total} {t("common.enabled")}
           </Badge>
         )}
       </div>
@@ -291,7 +287,7 @@ export default function CVERulesPage() {
         data={rules}
         loading={isLoading}
         rowKey={(row) => row.id}
-        emptyText={t("cveRules.empty", { defaultValue: "暂无 CVE 规则" })}
+        emptyText={t("cveRules.empty")}
       />
     </div>
   )

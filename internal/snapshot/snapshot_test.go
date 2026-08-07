@@ -17,6 +17,7 @@ import (
 	"My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/dynamic"
 )
 
 func TestLoadDefaultsFallbackOnInvalidJSON(t *testing.T) {
@@ -949,6 +950,104 @@ func TestMergeProtectionDisablesCVEAutoDropForSiteObserveAction(t *testing.T) {
 	}
 }
 
+func TestLoadAllSettingsPropagatesQueryError(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := loadAllSettings(db); err == nil {
+		t.Fatal("loadAllSettings should report a missing-table query error")
+	}
+}
+
+func TestLoadOptionalSnapshotTablesAllowMissingTables(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if got, err := loadAccessControlConfigs(db); err != nil || len(got) != 0 {
+		t.Fatalf("missing access-control tables should be empty without error: got=%v err=%v", got, err)
+	}
+	if got, err := loadSiteIPLists(db); err != nil || len(got) != 0 {
+		t.Fatalf("missing IP-list table should be empty without error: got=%v err=%v", got, err)
+	}
+	if got, errs, err := loadLuaPlugins(db); err != nil || got != nil || errs != nil {
+		t.Fatalf("missing Lua table should be empty without error: scripts=%v errs=%v err=%v", got, errs, err)
+	}
+}
+
+func TestLoadLuaPluginsKeepsCompileErrorsNonFatal(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.LuaPlugin{}); err != nil {
+		t.Fatalf("migrate lua plugins: %v", err)
+	}
+	if err := db.Create(&store.LuaPlugin{
+		Name:    "broken",
+		Stage:   store.LuaStagePre,
+		Source:  "function handle(ctx) local",
+		Enabled: true,
+	}).Error; err != nil {
+		t.Fatalf("seed broken plugin: %v", err)
+	}
+	scripts, compileErrors, err := loadLuaPlugins(db)
+	if err != nil {
+		t.Fatalf("loadLuaPlugins query failed: %v", err)
+	}
+	if len(scripts) != 0 || compileErrors["broken"] == "" {
+		t.Fatalf("compile error should be non-fatal: scripts=%v errors=%v", scripts, compileErrors)
+	}
+}
+
+func TestSnapshotLoadersPropagateExistingTableQueryErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		table string
+		load  func(*gorm.DB) error
+	}{
+		{
+			name:  "access control",
+			table: "site_access_configs",
+			load: func(db *gorm.DB) error {
+				_, err := loadAccessControlConfigs(db)
+				return err
+			},
+		},
+		{
+			name:  "IP lists",
+			table: "ip_list_entries",
+			load: func(db *gorm.DB) error {
+				_, err := loadSiteIPLists(db)
+				return err
+			},
+		},
+		{
+			name:  "Lua plugins",
+			table: "lua_plugins",
+			load: func(db *gorm.DB) error {
+				_, _, err := loadLuaPlugins(db)
+				return err
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+			if err != nil {
+				t.Fatalf("open sqlite: %v", err)
+			}
+			if err := db.Exec("CREATE TABLE " + tc.table + " (id INTEGER)").Error; err != nil {
+				t.Fatalf("create malformed %s table: %v", tc.table, err)
+			}
+			if err := tc.load(db); err == nil {
+				t.Fatalf("%s loader should report query error", tc.name)
+			}
+		})
+	}
+}
 func newSnapshotBuildDBForTest(t *testing.T) (*gorm.DB, *repository.ApplicationRouteRuleRepo) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -1044,6 +1143,51 @@ func TestBuildInjectsDynamicProtectionKeyBase(t *testing.T) {
 	if bytes.Contains(encoded, []byte("encryption_key_base")) {
 		t.Fatal("dynamic protection key base must not be serialized")
 	}
+}
+
+func TestBuildSiteDynamicProtectionHonorsSiteOverrides(t *testing.T) {
+	global := dynamic.ProtectionConfig{
+		HTMLObfuscationEnabled:    false,
+		JSObfuscationEnabled:      false,
+		ImageWatermarkEnabled:     false,
+		GlobalHTMLConfigured:      true,
+		GlobalJSConfigured:        true,
+		GlobalWatermarkConfigured: true,
+		JSProtectionMode:          "all",
+		JSObfuscationPaths:        []string{"/global/*"},
+		DecryptCacheTTLSeconds:    dynamic.DefaultDecryptCacheTTLSeconds,
+	}
+	enabled := true
+	disabled := false
+	paths, err := json.Marshal([]string{})
+	if err != nil {
+		t.Fatalf("marshal paths: %v", err)
+	}
+
+	t.Run("master on restores globally configured features", func(t *testing.T) {
+		cfg := buildSiteDynamicProtection(global, store.Site{ID: 1, DynamicProtectionEnabled: &enabled})
+		if !cfg.HTMLObfuscationEnabled || !cfg.JSObfuscationEnabled || !cfg.ImageWatermarkEnabled {
+			t.Fatalf("master on did not restore configured features: %#v", cfg)
+		}
+	})
+	t.Run("master off disables image watermark too", func(t *testing.T) {
+		cfg := buildSiteDynamicProtection(global, store.Site{ID: 1, DynamicProtectionEnabled: &disabled})
+		if cfg.HTMLObfuscationEnabled || cfg.JSObfuscationEnabled || cfg.ImageWatermarkEnabled {
+			t.Fatalf("master off left dynamic processing enabled: %#v", cfg)
+		}
+	})
+	t.Run("empty path override clears global paths", func(t *testing.T) {
+		cfg := buildSiteDynamicProtection(global, store.Site{ID: 1, DynamicJSEnabled: &enabled, DynamicJSMode: "paths", DynamicJSPaths: string(paths)})
+		if len(cfg.JSObfuscationPaths) != 0 {
+			t.Fatalf("empty site paths did not clear global paths: %#v", cfg.JSObfuscationPaths)
+		}
+	})
+	t.Run("invalid stored mode fails closed", func(t *testing.T) {
+		cfg := buildSiteDynamicProtection(global, store.Site{ID: 1, DynamicJSMode: "invalid"})
+		if cfg.JSProtectionMode != "" {
+			t.Fatalf("invalid site mode = %q, want empty", cfg.JSProtectionMode)
+		}
+	})
 }
 
 func TestBuildRejectsMissingDynamicProtectionKeyBase(t *testing.T) {
@@ -1999,5 +2143,21 @@ func TestParseSiteCacheRulesRegexCaseInsensitive(t *testing.T) {
 	}
 	if !rules[0].Regex.MatchString("/a/b.JS") {
 		t.Fatal("expected case-insensitive regex match")
+	}
+}
+
+func TestHolderStoreIfNewerRejectsOlderRevision(t *testing.T) {
+	h := &Holder{}
+	if !h.StoreIfNewer(&Snapshot{Revision: 2}) {
+		t.Fatal("StoreIfNewer should publish the first snapshot")
+	}
+	if h.StoreIfNewer(&Snapshot{Revision: 1}) {
+		t.Fatal("StoreIfNewer should reject an older snapshot")
+	}
+	if h.StoreIfNewer(&Snapshot{Revision: 2}) {
+		t.Fatal("StoreIfNewer should reject an equal revision")
+	}
+	if got := h.Load(); got == nil || got.Revision != 2 {
+		t.Fatalf("active snapshot revision = %v, want 2", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -157,7 +158,23 @@ func TestUpdatePageTemplatePersistsAndTriggersReload(t *testing.T) {
 	}
 }
 
-// TestUpdatePageTemplateRejectsInvalidType 验证非法页面类型返回 400 且不写入任何配置键。
+// TestUpdatePageTemplateReportsReloadFailure 验证保存成功但 reload 失败时返回明确错误。
+func TestUpdatePageTemplateReportsReloadFailure(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	reloadErr := errors.New("reload failed")
+	ctx := invokePageTemplateHandler(t, UpdatePageTemplate(repo, func() error { return reloadErr }), "POST", "block", []byte(`{"brand_name":"Applied"}`))
+	if ctx.Response.StatusCode() != 500 {
+		t.Fatalf("expected 500, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if got := string(bytes.TrimSpace(ctx.Response.Body())); !strings.Contains(got, "config applied but reload failed: reload failed") {
+		t.Fatalf("unexpected reload error response: %s", got)
+	}
+	stored, err := repo.Get(settingKeyBlockPage)
+	if err != nil || stored == "" {
+		t.Fatalf("configuration was not persisted before reload failure: value=%q err=%v", stored, err)
+	}
+}
+
 func TestUpdatePageTemplateRejectsInvalidType(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	ctx := invokePageTemplateHandler(t, UpdatePageTemplate(repo, func() error { return nil }), "POST", "shield", []byte(`{"brand_name":"X"}`))
@@ -199,9 +216,6 @@ func TestUpdatePageTemplateRejectsTypeMismatchedField(t *testing.T) {
 }
 
 // TestUpdatePageTemplatePersistsSanitizedCustomCSS 验证保存前的 CSS 净化结果被真正写入存储。
-//
-// 已知缺陷复现：page_templates.go 中 UpdatePageTemplate 对解析后的 cfg 调用了
-// sanitizePageCSS，但随后落库的是原始请求体 body，净化结果被丢弃。
 func TestUpdatePageTemplatePersistsSanitizedCustomCSS(t *testing.T) {
 	for _, pageType := range []struct {
 		name       string
@@ -262,7 +276,25 @@ func TestResetPageTemplateRestoresDefaults(t *testing.T) {
 	}
 }
 
-// TestResetPageTemplateRejectsInvalidType 验证非法类型返回 400 且不触发 reload。
+// TestResetPageTemplateReportsReloadFailure 验证删除成功但 reload 失败时返回明确错误。
+func TestResetPageTemplateReportsReloadFailure(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := repo.Set(settingKeyBlockPage, `{"brand_name":"Applied"}`); err != nil {
+		t.Fatalf("seed template: %v", err)
+	}
+	reloadErr := errors.New("reload failed")
+	ctx := invokePageTemplateHandler(t, ResetPageTemplate(repo, func() error { return reloadErr }), "POST", "block", nil)
+	if ctx.Response.StatusCode() != 500 {
+		t.Fatalf("expected 500, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if got := string(bytes.TrimSpace(ctx.Response.Body())); !strings.Contains(got, "config applied but reload failed: reload failed") {
+		t.Fatalf("unexpected reload error response: %s", got)
+	}
+	if _, err := repo.Get(settingKeyBlockPage); err == nil {
+		t.Fatal("template should be deleted before reload failure is reported")
+	}
+}
+
 func TestResetPageTemplateRejectsInvalidType(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	reloaded := false

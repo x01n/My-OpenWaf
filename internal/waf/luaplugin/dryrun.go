@@ -54,7 +54,11 @@ func DryRun(stage Stage, source string, req RequestView, kv KVBackend, timeout t
 	return batch.Runs[0]
 }
 
-func DryRunN(stage Stage, source string, req RequestView, kv KVBackend, timeout time.Duration, iterations int) DryRunBatchResult {
+// DryRunNContext 使用调用方 context 试运行脚本；请求取消会中断 Lua 执行。
+func DryRunNContext(ctx context.Context, stage Stage, source string, req RequestView, kv KVBackend, timeout time.Duration, iterations int) DryRunBatchResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if iterations <= 0 {
 		iterations = 1
 	}
@@ -74,8 +78,12 @@ func DryRunN(stage Stage, source string, req RequestView, kv KVBackend, timeout 
 		Runs:        make([]DryRunResult, 0, iterations),
 	}
 	for i := 0; i < iterations; i++ {
+		if err := ctx.Err(); err != nil {
+			out.RuntimeError = err.Error()
+			break
+		}
 		start := time.Now()
-		dec, runErr := script.Run(context.Background(), pool, req, kv)
+		dec, runErr := script.Run(ctx, pool, req, kv)
 		elapsed := time.Since(start)
 		one := DryRunResult{Decision: dec, ElapsedMS: float64(elapsed.Nanoseconds()) / 1e6, Iteration: i + 1}
 		if runErr != nil {
@@ -91,6 +99,10 @@ func DryRunN(stage Stage, source string, req RequestView, kv KVBackend, timeout 
 		}
 	}
 	return out
+}
+
+func DryRunN(stage Stage, source string, req RequestView, kv KVBackend, timeout time.Duration, iterations int) DryRunBatchResult {
+	return DryRunNContext(context.Background(), stage, source, req, kv, timeout, iterations)
 }
 
 /**

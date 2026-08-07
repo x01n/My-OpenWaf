@@ -16,14 +16,17 @@ import (
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/utils"
+	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
 )
 
 var (
-	errInvalidSiteAction      = errors.New("invalid action")
-	errInvalidSiteNetwork     = errors.New("invalid network")
-	errInvalidSiteXFFMode     = errors.New("invalid xff_mode")
-	errInvalidSiteTrustedCIDR = errors.New("invalid trusted_cidr")
-	errInvalidSiteHeaderOrder = errors.New("invalid client_ip_header_order")
+	errInvalidSiteAction        = errors.New("invalid action")
+	errInvalidSiteNetwork       = errors.New("invalid network")
+	errInvalidSiteXFFMode       = errors.New("invalid xff_mode")
+	errInvalidSiteTrustedCIDR   = errors.New("invalid trusted_cidr")
+	errInvalidSiteHeaderOrder   = errors.New("invalid client_ip_header_order")
+	errInvalidSiteDynamicJSMode = errors.New("dynamic_js_mode must be one of: all, paths")
+	errInvalidSiteDynamicTTL    = errors.New("dynamic_decrypt_cache_ttl must be between 0 and 1800 seconds")
 )
 
 type siteListItem struct {
@@ -151,6 +154,10 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := validateSiteDynamicProtection(&item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := shared.ValidateSiteUpstreamURLs(item.UpstreamURLs); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -168,6 +175,10 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 				c.JSON(400, map[string]string{"error": err.Error()})
 				return
 			}
+		}
+		if err := shared.ValidateCCRules(item.CCRules); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
 		}
 		if err := shared.ValidateSiteTLSCertificate(item.TLSEnabled, item.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -231,6 +242,10 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := validateSiteDynamicProtection(existing); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if siteRequestHasField(body, "upstream_urls") {
 			if err := shared.ValidateSiteUpstreamURLs(existing.UpstreamURLs); err != nil {
 				c.JSON(400, map[string]string{"error": err.Error()})
@@ -267,6 +282,10 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 				return
 			}
 		}
+		if err := shared.ValidateCCRules(existing.CCRules); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := shared.ValidateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -290,6 +309,17 @@ func siteRequestHasField(body []byte, field string) bool {
 	}
 	_, ok := raw[field]
 	return ok
+}
+
+// validateSiteDynamicProtection 校验站点级动态保护的枚举和 TTL 覆盖。
+func validateSiteDynamicProtection(item *store.Site) error {
+	if !dynamicpkg.IsValidJSProtectionMode(item.DynamicJSMode) {
+		return errInvalidSiteDynamicJSMode
+	}
+	if item.DynamicDecryptCacheTTL != nil && (*item.DynamicDecryptCacheTTL < 0 || *item.DynamicDecryptCacheTTL > dynamicpkg.MaxDecryptCacheTTLSeconds) {
+		return errInvalidSiteDynamicTTL
+	}
+	return nil
 }
 
 func validateSiteRuntimeTLSVersions(item *store.Site, body []byte) error {

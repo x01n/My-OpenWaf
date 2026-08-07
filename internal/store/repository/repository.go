@@ -50,6 +50,7 @@ type Repos struct {
 	ThreatIntelSyncLog *ThreatIntelSyncLogRepo
 	FalsePositive      *FalsePositiveRepo
 	LuaPlugin          *LuaPluginRepo
+	JSPlugin           *JSPluginRepo
 }
 
 func New(db *gorm.DB) *Repos {
@@ -84,6 +85,7 @@ func NewWithLogDB(db *gorm.DB, logDB *gorm.DB) *Repos {
 		ThreatIntelSyncLog: NewThreatIntelSyncLogRepo(db),
 		FalsePositive:      NewFalsePositiveRepo(db),
 		LuaPlugin:          NewLuaPluginRepo(db),
+		JSPlugin:           NewJSPluginRepo(db),
 	}
 }
 

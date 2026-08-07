@@ -8,6 +8,9 @@ import type {
   TLSConfigUpdate,
   RedisConfigResponse,
   RedisConfigUpdate,
+  ProtectionSettings,
+  BotSettings,
+  CaptchaConfig,
 } from "@/lib/types"
 /**
  * API 客户端封装
@@ -344,8 +347,9 @@ export const policyApi = {
  * 防护设置相关 API
  */
 export const protectionApi = {
-  getSettings: () => get("/protection-settings"),
-  updateSettings: (data: any) => post("/protection-settings", data),
+  getSettings: () => get<ProtectionSettings>("/protection-settings"),
+  updateSettings: (data: Partial<ProtectionSettings>) =>
+    post<ProtectionSettings>("/protection-settings", data),
   getSensitivity: (id: string | number) => get(`/protection/${id}/sensitivity`),
   updateSensitivity: (id: string | number, data: any) =>
     post(`/protection/${id}/sensitivity`, data),
@@ -421,8 +425,9 @@ export const dashboardApi = {
  * Bot 相关 API
  */
 export const botApi = {
-  getSettings: () => get("/bot-settings"),
-  updateSettings: (data: any) => post("/bot-settings/update", data),
+  getSettings: () => get<BotSettings>("/bot-settings"),
+  updateSettings: (data: Partial<BotSettings>) =>
+    post<BotSettings>("/bot-settings/update", data),
   getStats: () => get("/bot-stats"),
   getScores: () => get("/bot-scores"),
 }
@@ -431,8 +436,9 @@ export const botApi = {
  * 验证码相关 API
  */
 export const captchaApi = {
-  getConfig: () => get("/captcha/config"),
-  updateConfig: (data: any) => post("/captcha/config", data),
+  getConfig: () => get<CaptchaConfig>("/captcha/config"),
+  updateConfig: (data: Partial<CaptchaConfig>) =>
+    post<CaptchaConfig>("/captcha/config", data),
   test: () => post("/captcha/test"),
 }
 

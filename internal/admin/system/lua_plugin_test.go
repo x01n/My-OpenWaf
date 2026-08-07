@@ -403,7 +403,7 @@ end`,
 		},
 	})
 
-	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(nil), "POST", "/x", nil, body)
+	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(), "POST", "/x", nil, body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -432,39 +432,35 @@ end`,
 }
 
 // TestDryRunLuaPluginReportsCompileError 验证试运行会报告编译错误而非 500。
-func TestDryRunLuaPluginRepeatsRequestUntilDecision(t *testing.T) {
+func TestDryRunLuaPluginDoesNotUseProductionKV(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"stage":      "pre",
 		"iterations": 2,
 		"source": `
 function handle(ctx)
-  if not ctx.kv.available() then
-    return nil
+  if ctx.kv.available() then
+    return {action="intercept", message="production KV was exposed"}
   end
-  local hits = ctx.kv.incr("rl:" .. ctx.client_ip, 60)
-  if hits ~= nil and hits > 1 then
-    return {action="rate_limit", message="per-ip rate limit exceeded", tags={"lua_rate_limit"}}
+  local ok = ctx.kv.set("rl:" .. ctx.client_ip, "1", 60)
+  if ok then
+    return {action="intercept", message="dry-run wrote KV"}
   end
   return nil
 end`,
 		"request": map[string]any{"client_ip": "203.0.113.7", "method": "GET", "path": "/"},
 	})
-	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(newLuaTestKV()), "POST", "/x", nil, body)
+	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(), "POST", "/x", nil, body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
 	var resp struct {
 		KVAvailable bool `json:"kv_available"`
-		Iteration   int  `json:"iteration"`
 		Decision    struct {
-			Action  string   `json:"Action"`
-			Message string   `json:"Message"`
-			Tags    []string `json:"Tags"`
+			Action string `json:"Action"`
 		} `json:"decision"`
 		Runs []struct {
-			Iteration int `json:"iteration"`
-			Decision  struct {
+			Decision struct {
 				Action string `json:"Action"`
 			} `json:"decision"`
 		} `json:"runs"`
@@ -472,14 +468,11 @@ end`,
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !resp.KVAvailable {
-		t.Fatalf("dry-run 应报告 kv_available=true: %s", ctx.Response.Body())
+	if resp.KVAvailable {
+		t.Fatalf("dry-run must not expose production KV: %s", ctx.Response.Body())
 	}
-	if resp.Iteration != 2 || resp.Decision.Action != "rate_limit" {
-		t.Fatalf("第二次请求应触发 rate_limit，得到 iteration=%d decision=%+v body=%s", resp.Iteration, resp.Decision, ctx.Response.Body())
-	}
-	if len(resp.Runs) != 2 || resp.Runs[0].Decision.Action != "" || resp.Runs[1].Decision.Action != "rate_limit" {
-		t.Fatalf("runs 应保留连续执行轨迹，得到 %#v", resp.Runs)
+	if resp.Decision.Action != "" || len(resp.Runs) != 2 || resp.Runs[0].Decision.Action != "" || resp.Runs[1].Decision.Action != "" {
+		t.Fatalf("KV-dependent dry-run must produce no decision: %s", ctx.Response.Body())
 	}
 }
 
@@ -487,7 +480,7 @@ func TestDryRunLuaPluginReportsCompileError(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"stage": "pre", "source": `function handle( end`,
 	})
-	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(nil), "POST", "/x", nil, body)
+	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(), "POST", "/x", nil, body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("试运行本身不应失败，want 200, got %d", ctx.Response.StatusCode())
 	}
@@ -507,7 +500,7 @@ func TestDryRunLuaPluginTimesOut(t *testing.T) {
 		"source":     `function handle(ctx) while true do end end`,
 		"timeout_ms": 50,
 	})
-	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(nil), "POST", "/x", nil, body)
+	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(), "POST", "/x", nil, body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d", ctx.Response.StatusCode())
 	}
@@ -522,7 +515,7 @@ func TestDryRunLuaPluginTimesOut(t *testing.T) {
 
 func TestDryRunLuaPluginRejectsBadStage(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{"stage": "middle", "source": validLuaSource})
-	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(nil), "POST", "/x", nil, body)
+	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(), "POST", "/x", nil, body)
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("非法 stage 应返回 400，得到 %d", ctx.Response.StatusCode())
 	}
@@ -536,7 +529,7 @@ func TestDryRunLuaPluginRejectsInvalidTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal request: %v", err)
 		}
-		ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(nil), "POST", "/x", nil, body)
+		ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(), "POST", "/x", nil, body)
 		if ctx.Response.StatusCode() != 400 {
 			t.Fatalf("timeout %d should return 400, got %d: %s", timeout, ctx.Response.StatusCode(), ctx.Response.Body())
 		}
@@ -555,7 +548,7 @@ func TestDryRunLuaPluginClearsPreVerdictFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
-	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(nil), "POST", "/x", nil, body)
+	ctx := invokeThreatIntelHandler(t, DryRunLuaPlugin(), "POST", "/x", nil, body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}

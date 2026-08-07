@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,7 @@ type ChainState struct {
 	Steps       []ChainStepConfig `json:"steps"`
 	Scores      map[string]int    `json:"scores"`
 	EnvScore    int               `json:"env_score"`
+	EnvKey      []byte            `json:"env_key,omitempty"`
 	OriginalURL string            `json:"original_url"`
 	Nonce       string            `json:"nonce"`
 	// Difficulty 是本会话签发时锁定的 PoW 难度。
@@ -199,7 +201,7 @@ func defaultChainSteps() []ChainStepConfig {
 	return []ChainStepConfig{
 		{Type: ChainStepEnv, Condition: "all"},
 		{Type: ChainStepPoW, Condition: "all"},
-		{Type: ChainStepCaptcha, Condition: "env_score>30"},
+		{Type: ChainStepCaptcha, Condition: "all"},
 	}
 }
 
@@ -211,6 +213,8 @@ func normalizeChainSteps(steps []ChainStepConfig) []ChainStepConfig {
 			step.CaptchaType = ""
 			out = append(out, step)
 		case ChainStepCaptcha:
+			// CAPTCHA 是链式挑战的最终人工校验步骤，不得依据客户端环境分数条件跳过。
+			step.Condition = "all"
 			step.CaptchaType = normalizeChainCaptchaType(step.CaptchaType)
 			out = append(out, step)
 		}
@@ -362,21 +366,34 @@ func (cm *ChainChallengeManager) processStepWithBinding(sessionID string, formDa
 	step := state.Steps[state.CurrentStep]
 	switch step.Type {
 	case ChainStepEnv:
-		envFP := formData["env_fp"]
-		if envFP != "" {
-			var fp EnvFingerprint
-			if err := json.Unmarshal([]byte(envFP), &fp); err == nil {
-				result := ValidateEnvFingerprint(&fp)
-				state.EnvScore = result.Score
-				state.Scores["env"] = result.Score
-			}
+		envFP := DecryptEnvFingerprintWithAAD(
+			formData["env_fp"],
+			state.EnvKey,
+			EnvFingerprintAAD("chain", state.SessionID, state.ChallengeSessionBinding),
+		)
+		if envFP == nil {
+			state.EnvKey = nil
+			cm.saveChainState(state)
+			return false, "", cm.renderStepHTML(state), true
+		}
+		result := ValidateEnvFingerprint(envFP)
+		state.EnvScore = result.Score
+		state.Scores["env"] = result.Score
+		state.EnvKey = nil
+		if !result.Pass {
+			cm.saveChainState(state)
+			return false, "", cm.renderStepHTML(state), true
 		}
 	case ChainStepPoW:
 		hash := formData["pow_hash"]
-		counterStr := formData["pow_counter"]
-		var counter int64
-		fmt.Sscanf(counterStr, "%d", &counter)
-		if !VerifyPoW(state.Nonce, counter, hash, state.powDifficulty(cm.difficultyValue())) {
+		counterStr := strings.TrimSpace(formData["pow_counter"])
+		if counterStr == "" {
+			state.Nonce = GeneratePoWNonce()
+			cm.saveChainState(state)
+			return false, "", cm.renderStepHTML(state), true
+		}
+		counter, err := strconv.ParseInt(counterStr, 10, 64)
+		if err != nil || counter < 0 || !VerifyPoW(state.Nonce, counter, hash, state.powDifficulty(cm.difficultyValue())) {
 			state.Nonce = GeneratePoWNonce()
 			cm.saveChainState(state)
 			return false, "", cm.renderStepHTML(state), true
@@ -419,6 +436,9 @@ func (cm *ChainChallengeManager) processStepWithBinding(sessionID string, formDa
 }
 
 func (cm *ChainChallengeManager) shouldRunStep(step ChainStepConfig, state *ChainState) bool {
+	if step.Type == ChainStepCaptcha {
+		return true
+	}
 	cond := step.Condition
 	if cond == "" || cond == "all" {
 		return true
@@ -507,17 +527,29 @@ func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 	switch step.Type {
 	case ChainStepEnv:
 		data.IsEnv = true
-		data.EnvJS = template.JS(EnvCheckJS())
+		envKey := GenerateEnvSessionKey()
+		if len(envKey) != envSessionKeySize {
+			return ""
+		}
+		state.EnvKey = envKey
+		data.EnvJS = template.JS(EnvCheckJSEncrypted(
+			EnvSessionKeyHex(envKey),
+			EnvFingerprintAAD("chain", state.SessionID, state.ChallengeSessionBinding),
+		))
+		if data.EnvJS == "" {
+			return ""
+		}
+		cm.saveChainState(state)
 	case ChainStepPoW:
 		data.IsPoW = true
-		data.PowJS = template.JS(GeneratePoWWASMScript(state.powDifficulty(state.Difficulty), state.Nonce, ""))
+		data.PowJS = template.JS(GeneratePoWWASMScript(state.powDifficulty(state.Difficulty), state.Nonce))
 	case ChainStepCaptcha:
 		data.IsCaptcha = true
-		challenge, _ := cm.captcha.GenerateWithBinding(normalizeChainCaptchaType(step.CaptchaType), false, state.ChallengeSessionBinding)
-		if challenge != nil {
-			state.CaptchaID = challenge.SessionID
+		captchaChallenge, _ := cm.captcha.GenerateWithBinding(normalizeChainCaptchaType(step.CaptchaType), false, state.ChallengeSessionBinding)
+		if captchaChallenge != nil {
+			state.CaptchaID = captchaChallenge.SessionID
 			cm.saveChainState(state)
-			data.Captcha = newChainCaptchaPageData(challenge)
+			data.Captcha = newChainCaptchaPageData(captchaChallenge)
 		}
 	default:
 		return ""
@@ -610,9 +642,10 @@ func (cm *ChainChallengeManager) saveChainState(state *ChainState) {
 		data, _ := json.Marshal(state)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if redis.Set(ctx, cm.prefix+state.SessionID, data, chainStateTTL).Err() == nil {
+		if err := redis.Set(ctx, cm.prefix+state.SessionID, data, chainStateTTL).Err(); err != nil {
 			return
 		}
+		return
 	}
 	cm.mu.Lock()
 	cm.states[state.SessionID] = state.clone()
@@ -625,16 +658,18 @@ func (cm *ChainChallengeManager) loadChainState(id string) *ChainState {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		data, err := redis.Get(ctx, cm.prefix+id).Bytes()
-		if err == nil {
-			var state ChainState
-			if json.Unmarshal(data, &state) == nil {
-				if time.Since(state.CreatedAt) > chainStateTTL {
-					cm.deleteChainState(id)
-					return nil
-				}
-				return &state
-			}
+		if err != nil {
+			return nil
 		}
+		var state ChainState
+		if json.Unmarshal(data, &state) != nil {
+			return nil
+		}
+		if time.Since(state.CreatedAt) > chainStateTTL {
+			cm.deleteChainState(id)
+			return nil
+		}
+		return &state
 	}
 	cm.mu.Lock()
 	state, ok := cm.states[id]
@@ -661,18 +696,20 @@ func (cm *ChainChallengeManager) takeChainStateWithBinding(id string, binding Ch
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{cm.prefix + id}, binding.SiteID, binding.Host, binding.Bind).Text()
-		if err == nil && raw != "" {
-			var state ChainState
-			if json.Unmarshal([]byte(raw), &state) == nil {
-				if time.Since(state.CreatedAt) <= chainStateTTL {
-					cm.mu.Lock()
-					delete(cm.states, id)
-					cm.mu.Unlock()
-					return &state
-				}
-			}
+		if err != nil || raw == "" {
 			return nil
 		}
+		var state ChainState
+		if json.Unmarshal([]byte(raw), &state) != nil {
+			return nil
+		}
+		if time.Since(state.CreatedAt) > chainStateTTL {
+			return nil
+		}
+		cm.mu.Lock()
+		delete(cm.states, id)
+		cm.mu.Unlock()
+		return &state
 	}
 
 	cm.mu.Lock()

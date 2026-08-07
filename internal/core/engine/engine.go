@@ -41,11 +41,15 @@ type compiledSnapshot struct {
 }
 
 // phasesEntry holds a pre-built phase chain along with the protection-config
-// pointer it was built from. Because ProtectionConfig is immutable per snapshot,
-// pointer equality is enough to detect when the cached chain is still valid.
+// pointer and Lua script generation it was built from. Because ProtectionConfig
+// is immutable per snapshot, pointer equality is enough for the protection
+// portion; the Lua generation also invalidates a chain when scripts are added,
+// removed, or replaced without a snapshot revision change.
 type phasesEntry struct {
-	prot   *store.ProtectionConfig
-	phases []pipeline.Phase
+	prot        *store.ProtectionConfig
+	lua         *luaplugin.Engine
+	luaRevision uint64
+	phases      []pipeline.Phase
 }
 
 type phasesCacheKey struct {
@@ -301,7 +305,7 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		}
 	}
 
-	// Cache miss — compile rules (expensive, but happens at most once per site and policy per revision).
+	// Cache miss — compile rules (expensive, but happens at most once per site per revision).
 	all := convertAndCompile(rt.Rules)
 	cr := &compiledRules{}
 	for i := range all {
@@ -325,8 +329,8 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	} else {
 		// Same revision — copy existing entries + add new one.
 		newCache = make(map[compiledRulesKey]*compiledRules, len(current.cache)+1)
-		for existingKey, value := range current.cache {
-			newCache[existingKey] = value
+		for k, v := range current.cache {
+			newCache[k] = v
 		}
 	}
 	newCache[key] = cr
@@ -349,11 +353,16 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		siteID:            rt.Site.ID,
 		antiReplayEnabled: rt.AntiReplayEnabled,
 	}
+	lp := e.luaPlugins.Load()
+	var luaRevision uint64
+	if lp != nil {
+		luaRevision = lp.Revision()
+	}
 
 	// Lock-free fast path.
 	snap := e.phasesPtr.Load()
 	if snap.revision == rev {
-		if entry, ok := snap.cache[key]; ok && entry.prot == prot {
+		if entry, ok := snap.cache[key]; ok && entry.prot == prot && entry.lua == lp && entry.luaRevision == luaRevision {
 			return entry.phases
 		}
 	}
@@ -418,7 +427,7 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 			newCache[k] = v
 		}
 	}
-	newCache[key] = &phasesEntry{prot: prot, phases: phases}
+	newCache[key] = &phasesEntry{prot: prot, lua: lp, luaRevision: luaRevision, phases: phases}
 	e.phasesPtr.Store(&phasesSnapshot{revision: rev, cache: newCache})
 	e.phasesWriteMu.Unlock()
 

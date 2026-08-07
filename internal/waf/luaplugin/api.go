@@ -1,6 +1,7 @@
 package luaplugin
 
 import (
+	"context"
 	"math"
 	"sort"
 	"time"
@@ -39,7 +40,7 @@ func (b *apiBudget) allow() bool {
 	return true
 }
 
-func buildContextTable(L *lua.LState, req RequestView, kv KVBackend, budget *apiBudget) *lua.LTable {
+func buildContextTable(L *lua.LState, runCtx context.Context, req RequestView, kv KVBackend, budget *apiBudget) *lua.LTable {
 	t := L.NewTable()
 
 	t.RawSetString("request_id", lua.LString(req.RequestID))
@@ -89,7 +90,7 @@ func buildContextTable(L *lua.LState, req RequestView, kv KVBackend, budget *api
 	t.RawSetString("config", stringMapToTable(L, req.Config, false))
 	t.RawSetString("runtime", stringMapToTable(L, req.Runtime, false))
 	t.RawSetString("metrics", floatMapToTable(L, req.Metrics))
-	t.RawSetString("kv", buildKVTable(L, kv, budget))
+	t.RawSetString("kv", buildKVTable(L, runCtx, kv, budget))
 	t.RawSetString("log", buildLogFunction(L, req.Log, budget))
 	t.RawSetString("debug", buildDebugFunction(L, req.Debug, budget))
 	return t
@@ -221,7 +222,7 @@ func buildDebugFunction(L *lua.LState, debugFn func(string), budget *apiBudget) 
 //
 // 后端不可用时各方法返回 nil/false 而非报错：Redis 故障应让策略降级，
 // 而不是让脚本抛错、进而使请求判定失败。
-func buildKVTable(L *lua.LState, kv KVBackend, budget *apiBudget) *lua.LTable {
+func buildKVTable(L *lua.LState, runCtx context.Context, kv KVBackend, budget *apiBudget) *lua.LTable {
 	t := L.NewTable()
 
 	available := kv != nil && kv.Available()
@@ -240,7 +241,7 @@ func buildKVTable(L *lua.LState, kv KVBackend, budget *apiBudget) *lua.LTable {
 			l.Push(lua.LNil)
 			return 1
 		}
-		if raw, found := kv.Get(key); found {
+		if raw, found := getKV(runCtx, kv, key); found {
 			l.Push(lua.LString(raw))
 		} else {
 			l.Push(lua.LNil)
@@ -260,7 +261,7 @@ func buildKVTable(L *lua.LState, kv KVBackend, budget *apiBudget) *lua.LTable {
 			return 1
 		}
 		ttl := ttlFromArg(l, 3)
-		l.Push(lua.LBool(kv.Set(key, []byte(value), ttl) == nil))
+		l.Push(lua.LBool(setKV(runCtx, kv, key, []byte(value), ttl) == nil))
 		return 1
 	}))
 
@@ -269,7 +270,7 @@ func buildKVTable(L *lua.LState, kv KVBackend, budget *apiBudget) *lua.LTable {
 			return 0
 		}
 		if key, ok := scriptKey(l.CheckString(1)); ok {
-			kv.Delete(key)
+			deleteKV(runCtx, kv, key)
 		}
 		return 0
 	}))
@@ -285,7 +286,7 @@ func buildKVTable(L *lua.LState, kv KVBackend, budget *apiBudget) *lua.LTable {
 			l.Push(lua.LNil)
 			return 1
 		}
-		n, err := kv.Incr(key, ttlFromArg(l, 2))
+		n, err := incrKV(runCtx, kv, key, ttlFromArg(l, 2))
 		if err != nil {
 			l.Push(lua.LNil)
 			return 1
@@ -295,6 +296,35 @@ func buildKVTable(L *lua.LState, kv KVBackend, budget *apiBudget) *lua.LTable {
 	}))
 
 	return t
+}
+
+func getKV(ctx context.Context, kv KVBackend, key string) ([]byte, bool) {
+	if contextual, ok := kv.(ContextKVBackend); ok {
+		return contextual.GetContext(ctx, key)
+	}
+	return kv.Get(key)
+}
+
+func setKV(ctx context.Context, kv KVBackend, key string, value []byte, ttl time.Duration) error {
+	if contextual, ok := kv.(ContextKVBackend); ok {
+		return contextual.SetContext(ctx, key, value, ttl)
+	}
+	return kv.Set(key, value, ttl)
+}
+
+func deleteKV(ctx context.Context, kv KVBackend, key string) {
+	if contextual, ok := kv.(ContextKVBackend); ok {
+		contextual.DeleteContext(ctx, key)
+		return
+	}
+	kv.Delete(key)
+}
+
+func incrKV(ctx context.Context, kv KVBackend, key string, ttl time.Duration) (int64, error) {
+	if contextual, ok := kv.(ContextKVBackend); ok {
+		return contextual.IncrContext(ctx, key, ttl)
+	}
+	return kv.Incr(key, ttl)
 }
 
 // scriptKey 校验并加前缀。

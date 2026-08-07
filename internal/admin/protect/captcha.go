@@ -93,6 +93,10 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 			c.JSON(400, map[string]string{"error": "captcha_type must be one of: math, click, slide, rotate"})
 			return
 		}
+		if req.ShieldEnvStrictness != nil && (*req.ShieldEnvStrictness < 0 || *req.ShieldEnvStrictness > 2) {
+			c.JSON(400, map[string]string{"error": "shield_env_strictness must be one of: 0, 1, 2"})
+			return
+		}
 
 		cfg := shared.LoadProtectionConfig(repo)
 		if req.CaptchaEnabled != nil {
@@ -110,7 +114,11 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 		if req.ShieldEnabled != nil {
 			cfg.ShieldEnabled = *req.ShieldEnabled
 		}
-		if req.ShieldDifficulty != nil && *req.ShieldDifficulty > 0 {
+		if req.ShieldDifficulty != nil {
+			if *req.ShieldDifficulty < 1 || *req.ShieldDifficulty > 7 {
+				c.JSON(400, map[string]string{"error": "shield_difficulty must be between 1 and 7"})
+				return
+			}
 			cfg.ShieldDifficulty = *req.ShieldDifficulty
 		}
 		if req.ShieldTimeoutSecs != nil && *req.ShieldTimeoutSecs > 0 {
@@ -122,7 +130,7 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 		if req.ShieldMaxRetries != nil && *req.ShieldMaxRetries > 0 {
 			cfg.ShieldMaxRetries = *req.ShieldMaxRetries
 		}
-		if req.ShieldEnvStrictness != nil && *req.ShieldEnvStrictness >= 0 {
+		if req.ShieldEnvStrictness != nil {
 			cfg.ShieldEnvStrictness = *req.ShieldEnvStrictness
 		}
 		if req.ShieldRequireHTTP2 != nil {
@@ -144,7 +152,15 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 			cfg.ShieldEnableDevTools = *req.ShieldEnableDevTools
 		}
 
-		if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		if err := repo.Transaction(func(txRepo *repository.SystemSettingsRepo) error {
+			if err := shared.SaveProtectionConfig(txRepo, cfg); err != nil {
+				return err
+			}
+			if req.CaptchaEnabled != nil {
+				return shared.SyncProtectionCaptchaToSettings(txRepo, cfg.CaptchaEnabled)
+			}
+			return nil
+		}); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}

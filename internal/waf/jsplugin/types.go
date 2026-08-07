@@ -17,6 +17,8 @@ var (
 	ErrEngineClosed = errors.New("jsplugin: engine is closed")
 	// ErrNoSlot 表示有界执行槽池无法再接受请求。
 	ErrNoSlot = errors.New("jsplugin: execution slot unavailable")
+	// ErrScriptTimeout 表示脚本执行超过了配置的挂钟上限。
+	ErrScriptTimeout = errors.New("jsplugin: script execution timed out")
 )
 
 const (

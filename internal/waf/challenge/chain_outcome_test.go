@@ -30,6 +30,21 @@ func chainStateOf(t *testing.T, mgr *ChainChallengeManager, sessionID string) *C
 	return st
 }
 
+func chainEnvironmentEnvelope(t *testing.T, manager *ChainChallengeManager, sessionID string, binding ChallengeSessionBinding) string {
+	t.Helper()
+	state := chainStateOf(t, manager, sessionID)
+	if len(state.EnvKey) != envSessionKeySize {
+		t.Fatalf("chain environment key length = %d, want %d", len(state.EnvKey), envSessionKeySize)
+	}
+	payload := marshalShieldEnvFingerprint(t, shieldNormalEnvFingerprint())
+	return encryptVersionedEnvFingerprint(
+		t,
+		[]byte(payload),
+		state.EnvKey,
+		EnvFingerprintAAD("chain", sessionID, binding),
+	)
+}
+
 // TestProcessStepDetailedMissingSessionIsFailure 验证会话缺失被判为失败。
 func TestProcessStepDetailedMissingSessionIsFailure(t *testing.T) {
 	mgr := NewChainChallengeManager(NewCaptchaManager(nil, 0), nil)
@@ -49,23 +64,30 @@ func TestProcessStepDetailedMissingSessionIsFailure(t *testing.T) {
 func TestProcessStepDetailedAdvanceIsNotFailure(t *testing.T) {
 	mgr := NewChainChallengeManager(NewCaptchaManager(nil, 0), nil)
 	defer mgr.Close()
-	// 首步为 env，第二步为 pow：提交 env 后应推进而非失败。
 	mgr.Reconfigure([]ChainStepConfig{
 		{Type: ChainStepEnv, Condition: "all"},
 		{Type: ChainStepPoW, Condition: "all"},
 	}, 3)
 
 	sessionID, _ := mgr.StartChain("/admin")
-	got := mgr.ProcessStepDetailed(sessionID, map[string]string{"env_fp": "{}"})
+	state := chainStateOf(t, mgr, sessionID)
+	payload := marshalShieldEnvFingerprint(t, shieldNormalEnvFingerprint())
+	envelope := encryptVersionedEnvFingerprint(
+		t,
+		[]byte(payload),
+		state.EnvKey,
+		EnvFingerprintAAD("chain", sessionID, state.ChallengeSessionBinding),
+	)
+	got := mgr.ProcessStepDetailed(sessionID, map[string]string{"env_fp": envelope})
 
 	if got.Failed {
-		t.Fatal("env 步正常推进不得判为失败（否则会误封正常访客）")
+		t.Fatal("valid encrypted env step must not be marked failed")
 	}
 	if got.Passed {
-		t.Fatal("尚有后续步骤，不应直接通过")
+		t.Fatal("a chain with a remaining PoW step must not pass")
 	}
 	if got.NextHTML == "" {
-		t.Fatal("应渲染下一步页面")
+		t.Fatal("valid env step should render the next page")
 	}
 }
 

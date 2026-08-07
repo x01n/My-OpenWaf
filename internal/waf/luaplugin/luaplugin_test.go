@@ -60,6 +60,54 @@ func (k *recordingKV) Incr(_ string, ttl time.Duration) (int64, error) {
 	return 1, nil
 }
 
+type contextRecordingKV struct {
+	recordingKV
+	calls chan context.Context
+}
+
+func (k *contextRecordingKV) GetContext(ctx context.Context, _ string) ([]byte, bool) {
+	k.calls <- ctx
+	return nil, false
+}
+
+func (k *contextRecordingKV) SetContext(ctx context.Context, _ string, _ []byte, _ time.Duration) error {
+	k.calls <- ctx
+	return nil
+}
+
+func (k *contextRecordingKV) DeleteContext(ctx context.Context, _ string) {
+	k.calls <- ctx
+}
+
+func (k *contextRecordingKV) IncrContext(ctx context.Context, _ string, _ time.Duration) (int64, error) {
+	k.calls <- ctx
+	return 1, nil
+}
+
+type blockingContextKV struct {
+	started  chan struct{}
+	observed chan error
+}
+
+func (*blockingContextKV) Available() bool                           { return true }
+func (*blockingContextKV) Get(string) ([]byte, bool)                 { return nil, false }
+func (*blockingContextKV) Set(string, []byte, time.Duration) error   { return nil }
+func (*blockingContextKV) Delete(string)                             {}
+func (*blockingContextKV) Incr(string, time.Duration) (int64, error) { return 1, nil }
+func (k *blockingContextKV) GetContext(ctx context.Context, _ string) ([]byte, bool) {
+	close(k.started)
+	<-ctx.Done()
+	k.observed <- ctx.Err()
+	return nil, false
+}
+func (k *blockingContextKV) SetContext(context.Context, string, []byte, time.Duration) error {
+	return nil
+}
+func (k *blockingContextKV) DeleteContext(context.Context, string) {}
+func (k *blockingContextKV) IncrContext(context.Context, string, time.Duration) (int64, error) {
+	return 1, nil
+}
+
 func mustCompile(t *testing.T, stage Stage, src string) *Script {
 	t.Helper()
 	s, err := Compile("test", stage, src)
@@ -74,6 +122,75 @@ func evalOne(t *testing.T, src string, req RequestView, kv KVBackend) Decision {
 	e := silentEngine(kv)
 	e.Reload([]*Script{mustCompile(t, StagePre, src)})
 	return e.Evaluate(context.Background(), StagePre, req)
+}
+
+func TestContextKVBackendReceivesScriptRunContext(t *testing.T) {
+	kv := &contextRecordingKV{calls: make(chan context.Context, 4)}
+	script := mustCompile(t, StagePre, `
+function handle(ctx)
+  ctx.kv.get("key")
+  ctx.kv.set("key", "value")
+  ctx.kv.delete("key")
+  ctx.kv.incr("key")
+  return nil
+end`)
+	script.SetTimeout(time.Second)
+
+	e := newSilentEngine(kv)
+	e.Reload([]*Script{script})
+	type contextKey struct{}
+	key := contextKey{}
+	callerCtx, cancel := context.WithCancel(context.WithValue(context.Background(), key, "request"))
+	defer cancel()
+	e.Evaluate(callerCtx, StagePre, RequestView{})
+
+	for i := 0; i < cap(kv.calls); i++ {
+		select {
+		case callCtx := <-kv.calls:
+			if callCtx.Value(key) != "request" {
+				t.Fatal("KV did not receive a context derived from the caller context")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("context-aware KV method was not called")
+		}
+	}
+}
+
+func TestContextKVBackendObservesCancellation(t *testing.T) {
+	started := make(chan struct{})
+	observed := make(chan error, 1)
+	kv := &blockingContextKV{started: started, observed: observed}
+	script := mustCompile(t, StagePre, `function handle(ctx) ctx.kv.get("key") return nil end`)
+	script.SetTimeout(time.Second)
+
+	e := newSilentEngine(kv)
+	e.Reload([]*Script{script})
+	callerCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		e.Evaluate(callerCtx, StagePre, RequestView{})
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware KV get was not called")
+	}
+	cancel()
+	select {
+	case err := <-observed:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("KV context error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("KV did not observe script cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("script did not return after cancellation")
+	}
 }
 
 func TestKVTTLAlwaysExpires(t *testing.T) {
@@ -142,6 +259,26 @@ func TestInfiniteLoopIsInterrupted(t *testing.T) {
 
 // TestCallerContextCancelStopsScript 验证调用方取消能中断脚本，
 // 使请求断开时不再继续消耗 CPU。
+func TestDryRunNContextStopsOnCallerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan DryRunBatchResult, 1)
+	go func() {
+		done <- DryRunNContext(ctx, StagePre, `function handle(ctx) while true do end end`, RequestView{}, nil, 10*time.Second, 1)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case result := <-done:
+		if result.RuntimeError == "" {
+			t.Fatalf("caller cancellation must be reported, got %+v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dry-run did not stop after caller cancellation")
+	}
+}
+
 func TestCallerContextCancelStopsScript(t *testing.T) {
 	script := mustCompile(t, StagePre, `function handle(ctx) while true do end end`)
 	script.SetTimeout(10 * time.Second) // 故意设长，确保中断来自 ctx 取消
@@ -342,7 +479,7 @@ func TestTopLevelReturnValuesAreDiscarded(t *testing.T) {
 	L := pool.get()
 	defer pool.put(L)
 
-	dec, err := script.callHandler(L, RequestView{}, nil)
+	dec, err := script.callHandler(L, context.Background(), RequestView{}, nil)
 	if err != nil {
 		t.Fatalf("callHandler: %v", err)
 	}
@@ -799,14 +936,14 @@ function handle(ctx)
   return {action="observe", message=string.rep("m", 30000), response_body=string.rep("b", 30000), headers=headers, tags=tags}
 end`
 	dec := evalOne(t, src, RequestView{}, nil)
-	if len(dec.Message) != maxAPIStringBytes || len(dec.ResponseBody) != maxResponseBody {
+	if len(dec.Message) != maxDecisionMessageBytes || len(dec.ResponseBody) != maxResponseBody {
 		t.Fatalf("输出字符串未截断：message=%d body=%d", len(dec.Message), len(dec.ResponseBody))
 	}
-	if len(dec.SetHeaders) != maxAPIMapEntries || len(dec.Tags) != maxDecisionTags {
+	if len(dec.SetHeaders) != maxDecisionHeaders || len(dec.Tags) != maxDecisionTags {
 		t.Fatalf("输出表项未限流：headers=%d tags=%d", len(dec.SetHeaders), len(dec.Tags))
 	}
 	for key, value := range dec.SetHeaders {
-		if len(value) != maxHeaderValue {
+		if len(value) != maxDecisionHeaderValueBytes {
 			t.Fatalf("header %q 未截断：%d", key, len(value))
 		}
 	}

@@ -140,7 +140,7 @@ func newSettingsRepoBlockingKeyForTest(t *testing.T, blockedKey string) *reposit
 }
 
 // TestPutProtectionSettingsReturns500WhenBotSyncFails 验证同步 bot_settings 失败时返回 500，
-// 此时 protection 已写入而 reload 不会执行。
+// 此时事务会回滚 protection，且 reload 不会执行。
 func TestPutProtectionSettingsReturns500WhenBotSyncFails(t *testing.T) {
 	repo := newSettingsRepoBlockingKeyForTest(t, "bot_settings")
 	reloaded := false
@@ -154,8 +154,8 @@ func TestPutProtectionSettingsReturns500WhenBotSyncFails(t *testing.T) {
 	if reloaded {
 		t.Fatal("reload must not run after a failed sync")
 	}
-	if val, err := repo.Get("protection"); err != nil || val == "" {
-		t.Fatal("protection should already be persisted before the sync is attempted")
+	if val, err := repo.Get("protection"); err == nil && val != "" {
+		t.Fatal("protection must roll back when bot_settings sync fails")
 	}
 }
 

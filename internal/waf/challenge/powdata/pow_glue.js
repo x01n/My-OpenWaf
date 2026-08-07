@@ -5,6 +5,39 @@ let wasm_bindgen = (function(exports) {
     }
 
     /**
+     *
+     * * collect_and_encrypt_fingerprint creates the canonical v1 envelope in WASM.
+     *
+     * @param {string} key_hex
+     * @param {string} aad
+     * @returns {string}
+     */
+    function collect_and_encrypt_fingerprint(key_hex, aad) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(key_hex, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(aad, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.collect_and_encrypt_fingerprint(retptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred3_0 = r0;
+            deferred3_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
+        }
+    }
+    exports.collect_and_encrypt_fingerprint = collect_and_encrypt_fingerprint;
+
+    /**
+     *
+     * * collect_canvas_fingerprint computes the Canvas SHA-256 digest in WASM.
+     *
      * @returns {string}
      */
     function collect_canvas_fingerprint() {
@@ -26,30 +59,35 @@ let wasm_bindgen = (function(exports) {
     exports.collect_canvas_fingerprint = collect_canvas_fingerprint;
 
     /**
-     * @param {string} key_hex
+     *
+     * * collect_fingerprint assembles and serializes browser observations in Rust.
+     * * JavaScript only transports browser API reads through wasm-bindgen; it does
+     * * not define fields, classify signals, hash data, or encrypt the result.
+     *
      * @returns {string}
      */
-    function collect_fingerprint(key_hex) {
-        let deferred2_0;
-        let deferred2_1;
+    function collect_fingerprint() {
+        let deferred1_0;
+        let deferred1_1;
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(key_hex, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len0 = WASM_VECTOR_LEN;
-            wasm.collect_fingerprint(retptr, ptr0, len0);
+            wasm.collect_fingerprint(retptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            deferred2_0 = r0;
-            deferred2_1 = r1;
+            deferred1_0 = r0;
+            deferred1_1 = r1;
             return getStringFromWasm0(r0, r1);
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export4(deferred2_0, deferred2_1, 1);
+            wasm.__wbindgen_export4(deferred1_0, deferred1_1, 1);
         }
     }
     exports.collect_fingerprint = collect_fingerprint;
 
     /**
+     *
+     * * collect_webgl_fingerprint computes a WebGL digest in WASM from raw API values.
+     *
      * @returns {string}
      */
     function collect_webgl_fingerprint() {
@@ -243,28 +281,34 @@ let wasm_bindgen = (function(exports) {
     exports.encrypt_env_data = encrypt_env_data;
 
     /**
-     * @param {string} program
+     * @param {string} json_data
+     * @param {string} key_hex
+     * @param {string} aad
      * @returns {string}
      */
-    function get_env_score(program) {
-        let deferred2_0;
-        let deferred2_1;
+    function encrypt_env_data_with_aad(json_data, key_hex, aad) {
+        let deferred4_0;
+        let deferred4_1;
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(program, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const ptr0 = passStringToWasm0(json_data, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
-            wasm.get_env_score(retptr, ptr0, len0);
+            const ptr1 = passStringToWasm0(key_hex, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(aad, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len2 = WASM_VECTOR_LEN;
+            wasm.encrypt_env_data_with_aad(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            deferred2_0 = r0;
-            deferred2_1 = r1;
+            deferred4_0 = r0;
+            deferred4_1 = r1;
             return getStringFromWasm0(r0, r1);
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export4(deferred2_0, deferred2_1, 1);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
-    exports.get_env_score = get_env_score;
+    exports.encrypt_env_data_with_aad = encrypt_env_data_with_aad;
 
     /**
      * @param {string} key_hex
@@ -342,40 +386,11 @@ let wasm_bindgen = (function(exports) {
     exports.sha256_hash_bytes = sha256_hash_bytes;
 
     /**
-     * @param {string} nonce
-     * @param {number} difficulty
-     * @param {string} program
-     * @param {string} env_data
-     * @param {string} env_key
-     * @returns {string}
-     */
-    function solve_pow(nonce, difficulty, program, env_data, env_key) {
-        let deferred5_0;
-        let deferred5_1;
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(nonce, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(program, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len1 = WASM_VECTOR_LEN;
-            const ptr2 = passStringToWasm0(env_data, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len2 = WASM_VECTOR_LEN;
-            const ptr3 = passStringToWasm0(env_key, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len3 = WASM_VECTOR_LEN;
-            wasm.solve_pow(retptr, ptr0, len0, difficulty, ptr1, len1, ptr2, len2, ptr3, len3);
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            deferred5_0 = r0;
-            deferred5_1 = r1;
-            return getStringFromWasm0(r0, r1);
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export4(deferred5_0, deferred5_1, 1);
-        }
-    }
-    exports.solve_pow = solve_pow;
-
-    /**
+     *
+     * * solve_pow_batched performs only the deterministic proof-of-work calculation
+     * * in a Worker-safe WASM context. Browser environment collection is performed
+     * * by collect_and_encrypt_fingerprint on the main thread, where DOM APIs exist.
+     *
      * @param {string} nonce
      * @param {number} difficulty
      * @param {string} program
@@ -513,17 +528,13 @@ let wasm_bindgen = (function(exports) {
                 const ret = getObject(arg0).crypto;
                 return addHeapObject(ret);
             },
+            __wbg_devicePixelRatio_1c0e0ed7deb19cd8: function(arg0) {
+                const ret = getObject(arg0).devicePixelRatio;
+                return ret;
+            },
             __wbg_document_179650d6cb13c263: function(arg0) {
                 const ret = getObject(arg0).document;
                 return isLikeNone(ret) ? 0 : addHeapObject(ret);
-            },
-            __wbg_eval_832ed6e42a9be51c: function() { return handleError(function (arg0, arg1) {
-                const ret = eval(getStringFromWasm0(arg0, arg1));
-                return addHeapObject(ret);
-            }, arguments); },
-            __wbg_eval_9e6de6a2c7546267: function(arg0, arg1) {
-                const ret = eval(getStringFromWasm0(arg0, arg1));
-                return addHeapObject(ret);
             },
             __wbg_fillRect_97b1f503e30148c3: function(arg0, arg1, arg2, arg3, arg4) {
                 getObject(arg0).fillRect(arg1, arg2, arg3, arg4);
@@ -536,10 +547,6 @@ let wasm_bindgen = (function(exports) {
             },
             __wbg_getContext_e79ddf6a9cb3cc76: function() { return handleError(function (arg0, arg1, arg2) {
                 const ret = getObject(arg0).getContext(getStringFromWasm0(arg1, arg2));
-                return isLikeNone(ret) ? 0 : addHeapObject(ret);
-            }, arguments); },
-            __wbg_getExtension_72db47e91b2d77c7: function() { return handleError(function (arg0, arg1, arg2) {
-                const ret = getObject(arg0).getExtension(getStringFromWasm0(arg1, arg2));
                 return isLikeNone(ret) ? 0 : addHeapObject(ret);
             }, arguments); },
             __wbg_getParameter_039a5899307fab55: function() { return handleError(function (arg0, arg1) {
@@ -613,14 +620,6 @@ let wasm_bindgen = (function(exports) {
                 const ret = getObject(arg0).node;
                 return addHeapObject(ret);
             },
-            __wbg_now_390768da5ee9e776: function(arg0) {
-                const ret = getObject(arg0).now();
-                return ret;
-            },
-            __wbg_performance_3ef602e13d6c3b56: function(arg0) {
-                const ret = getObject(arg0).performance;
-                return isLikeNone(ret) ? 0 : addHeapObject(ret);
-            },
             __wbg_process_44c7a14e11e9f69e: function(arg0) {
                 const ret = getObject(arg0).process;
                 return addHeapObject(ret);
@@ -634,6 +633,10 @@ let wasm_bindgen = (function(exports) {
             __wbg_require_b4edbdcf3e2a1ef0: function() { return handleError(function () {
                 const ret = module.require;
                 return addHeapObject(ret);
+            }, arguments); },
+            __wbg_sessionStorage_812615d3ac31fa09: function() { return handleError(function (arg0) {
+                const ret = getObject(arg0).sessionStorage;
+                return isLikeNone(ret) ? 0 : addHeapObject(ret);
             }, arguments); },
             __wbg_set_fillStyle_4360b989b9352bbb: function(arg0, arg1, arg2) {
                 getObject(arg0).fillStyle = getStringFromWasm0(arg1, arg2);
@@ -666,6 +669,10 @@ let wasm_bindgen = (function(exports) {
                 const ret = typeof window === 'undefined' ? null : window;
                 return isLikeNone(ret) ? 0 : addHeapObject(ret);
             },
+            __wbg_stringify_b54333f60f1e4dad: function() { return handleError(function (arg0) {
+                const ret = JSON.stringify(getObject(arg0));
+                return addHeapObject(ret);
+            }, arguments); },
             __wbg_subarray_3ed232c8a6baee09: function(arg0, arg1, arg2) {
                 const ret = getObject(arg0).subarray(arg1 >>> 0, arg2 >>> 0);
                 return addHeapObject(ret);
@@ -677,20 +684,21 @@ let wasm_bindgen = (function(exports) {
                 getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
                 getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
             }, arguments); },
-            __wbg_toString_cd410cd7b3174f1b: function(arg0) {
-                const ret = getObject(arg0).toString();
-                return addHeapObject(ret);
-            },
             __wbg_versions_276b2795b1c6a219: function(arg0) {
                 const ret = getObject(arg0).versions;
                 return addHeapObject(ret);
             },
-            __wbindgen_cast_0000000000000001: function(arg0, arg1) {
+            __wbindgen_cast_0000000000000001: function(arg0) {
+                // Cast intrinsic for `F64 -> Externref`.
+                const ret = arg0;
+                return addHeapObject(ret);
+            },
+            __wbindgen_cast_0000000000000002: function(arg0, arg1) {
                 // Cast intrinsic for `Ref(Slice(U8)) -> NamedExternref("Uint8Array")`.
                 const ret = getArrayU8FromWasm0(arg0, arg1);
                 return addHeapObject(ret);
             },
-            __wbindgen_cast_0000000000000002: function(arg0, arg1) {
+            __wbindgen_cast_0000000000000003: function(arg0, arg1) {
                 // Cast intrinsic for `Ref(String) -> Externref`.
                 const ret = getStringFromWasm0(arg0, arg1);
                 return addHeapObject(ret);

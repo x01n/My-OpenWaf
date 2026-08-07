@@ -71,6 +71,9 @@ func normalizeChainStepPayload(raw json.RawMessage) (string, bool) {
 			captchaType := step.CaptchaType
 			if step.Type != challenge.ChainStepCaptcha {
 				captchaType = ""
+			} else {
+				// CAPTCHA 步骤存在时必须执行，不得被客户端环境分数条件跳过。
+				condition = "all"
 			}
 			steps = append(steps, challenge.ChainStepConfig{Type: step.Type, Condition: condition, CaptchaType: captchaType})
 		default:

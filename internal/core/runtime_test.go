@@ -208,7 +208,10 @@ func TestApplyStoredRedisConfigOverridesEnvValues(t *testing.T) {
 		RedisPassword: "env-pass",
 		RedisDB:       1,
 	}
-	got := applyStoredRedisConfig(db, cfg)
+	got, err := applyStoredRedisConfig(db, cfg)
+	if err != nil {
+		t.Fatalf("apply stored redis config: %v", err)
+	}
 
 	if got.RedisAddr != "127.0.0.1:6380" {
 		t.Fatalf("redis addr = %q, want %q", got.RedisAddr, "127.0.0.1:6380")
@@ -239,6 +242,37 @@ func TestRuntimeStoredRedisConfigQueryUsesDialectQuotedKeyColumn(t *testing.T) {
 	}
 }
 
+func TestApplyStoredRedisConfigRejectsInvalidStoredValues(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "invalid json", raw: "{"},
+		{name: "negative db", raw: `{"enabled":false,"db":-1}`},
+		{name: "enabled without address", raw: `{"enabled":true}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "waf.db")
+			seedRedisConfigDBAndOpen(t, dbPath, tt.raw)
+			db, err := database.Open(database.Options{
+				Driver:  "sqlite",
+				DSN:     dbPath,
+				DataDir: filepath.Dir(dbPath),
+			})
+			if err != nil {
+				t.Fatalf("reopen sqlite db: %v", err)
+			}
+			defer closeRuntimeDB(db)
+
+			_, err = applyStoredRedisConfig(db, Config{})
+			if err == nil {
+				t.Fatal("applyStoredRedisConfig() error = nil, want validation error")
+			}
+		})
+	}
+}
+
 func TestApplyStoredRedisConfigDisablesEnvRedisWhenStoredConfigDisabled(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "waf.db")
 	seedRedisConfigDBAndOpen(t, dbPath, `{"enabled":false,"addr":"127.0.0.1:6380","password":"db-pass","db":5}`)
@@ -258,7 +292,10 @@ func TestApplyStoredRedisConfigDisablesEnvRedisWhenStoredConfigDisabled(t *testi
 		RedisPassword: "env-pass",
 		RedisDB:       1,
 	}
-	got := applyStoredRedisConfig(db, cfg)
+	got, err := applyStoredRedisConfig(db, cfg)
+	if err != nil {
+		t.Fatalf("apply stored redis config: %v", err)
+	}
 
 	if got.RedisAddr != "" {
 		t.Fatalf("redis addr = %q, want empty", got.RedisAddr)

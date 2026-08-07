@@ -1,0 +1,42 @@
+# Version control and local tooling
+.git/
+.gitignore
+.claude/
+.cursor/
+.qoder/
+.serena/
+.playwright-mcp/
+.mcp.json
+
+# Runtime data and local artifacts
+data/
+bin/
+temp/
+tools/
+*.db
+*.log
+*.test
+*.png
+*.exe
+blazehttp
+blazehttp_*.json
+shield-*.png
+TestResults.xml
+My-OpenWaf
+
+# Frontend dependencies and generated output
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+node_modules/
+.next/
+internal/core/adminweb/dist/
+
+# Rust generated output
+wasm-pow-solver/target/
+
+# Local documentation and agent metadata
+CLAUDE.md
+AGENTS.md
+devlog.md
+rule.md

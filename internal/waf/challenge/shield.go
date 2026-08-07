@@ -95,14 +95,21 @@ func shieldProtocolAllowed(cfg ShieldConfig, requestProtocol string) bool {
 // ShieldSession stores the server-side state for a pending shield challenge.
 type ShieldSession struct {
 	ChallengeSessionBinding
-	ID              string    `json:"id"`
-	Nonce           string    `json:"nonce"`
-	Difficulty      int       `json:"difficulty"`
-	TimeoutSecs     int       `json:"timeout_secs"`
-	OriginalURL     string    `json:"original_url"`
-	RequestProtocol string    `json:"request_protocol"`
-	EnvKey          []byte    `json:"env_key"` // AES key for env fingerprint encryption
-	CreatedAt       time.Time `json:"created_at"`
+	ID                   string    `json:"id"`
+	Nonce                string    `json:"nonce"`
+	Difficulty           int       `json:"difficulty"`
+	TimeoutSecs          int       `json:"timeout_secs"`
+	EnvStrictness        int       `json:"env_strictness"`
+	EnableEnvCheck       bool      `json:"enable_env_check"`
+	EnvConfigFrozen      bool      `json:"env_config_frozen"`
+	RequireHTTP2         bool      `json:"require_http2"`
+	RequireHTTP3         bool      `json:"require_http3"`
+	AllowHTTP1           bool      `json:"allow_http1"`
+	ProtocolConfigFrozen bool      `json:"protocol_config_frozen"`
+	OriginalURL          string    `json:"original_url"`
+	RequestProtocol      string    `json:"request_protocol"`
+	EnvKey               []byte    `json:"env_key"` // AES key for env fingerprint encryption
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 func (s *ShieldSession) sessionTTL() time.Duration {
@@ -113,7 +120,47 @@ func (s *ShieldSession) sessionTTL() time.Duration {
 }
 
 func (s *ShieldSession) expiredAt(now time.Time) bool {
-	return now.Sub(s.CreatedAt) > s.sessionTTL()
+	return now.Sub(s.CreatedAt) >= s.sessionTTL()
+}
+
+func (s *ShieldSession) hasFrozenConfig() bool {
+	if s == nil || !s.EnvConfigFrozen || !s.ProtocolConfigFrozen {
+		return false
+	}
+	if s.EnvStrictness < 0 || s.EnvStrictness > 2 {
+		return false
+	}
+	if normalizeShieldProtocol(s.RequestProtocol) == "" {
+		return false
+	}
+	return !s.EnableEnvCheck || len(s.EnvKey) == envSessionKeySize
+}
+
+func decodeShieldSession(data []byte) *ShieldSession {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return nil
+	}
+	for _, field := range []string{
+		"env_strictness",
+		"enable_env_check",
+		"env_config_frozen",
+		"require_http2",
+		"require_http3",
+		"allow_http1",
+		"protocol_config_frozen",
+		"request_protocol",
+	} {
+		raw, ok := fields[field]
+		if !ok || string(raw) == "null" {
+			return nil
+		}
+	}
+	var session ShieldSession
+	if json.Unmarshal(data, &session) != nil || !session.hasFrozenConfig() {
+		return nil
+	}
+	return &session
 }
 
 // ShieldManager orchestrates 5-second shield challenges (PoW + env fingerprint).
@@ -186,6 +233,9 @@ func (sm *ShieldManager) SetConfig(cfg ShieldConfig) {
 	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 3
 	}
+	if cfg.EnvStrictness < 0 || cfg.EnvStrictness > 2 {
+		cfg.EnvStrictness = 1
+	}
 	sm.mu.Lock()
 	sm.config = cfg
 	sm.mu.Unlock()
@@ -212,6 +262,11 @@ func (sm *ShieldManager) Config() ShieldConfig {
 func (sm *ShieldManager) shieldPageConfig(session *ShieldSession) ShieldConfig {
 	cfg := sm.Config()
 	cfg.TimeoutSecs = int(session.sessionTTL() / time.Second)
+	cfg.EnvStrictness = session.EnvStrictness
+	cfg.EnableEnvCheck = session.EnableEnvCheck
+	cfg.RequireHTTP2 = session.RequireHTTP2
+	cfg.RequireHTTP3 = session.RequireHTTP3
+	cfg.AllowHTTP1 = session.AllowHTTP1
 	return cfg
 }
 
@@ -238,12 +293,21 @@ func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, reques
 		Nonce:                   nonce,
 		Difficulty:              cfg.Difficulty,
 		TimeoutSecs:             cfg.TimeoutSecs,
+		EnvStrictness:           cfg.EnvStrictness,
+		EnableEnvCheck:          cfg.EnableEnvCheck,
+		EnvConfigFrozen:         true,
+		RequireHTTP2:            cfg.RequireHTTP2,
+		RequireHTTP3:            cfg.RequireHTTP3,
+		AllowHTTP1:              cfg.AllowHTTP1,
+		ProtocolConfigFrozen:    true,
 		OriginalURL:             originalURL,
 		RequestProtocol:         shieldProtocolValue(requestProtocol),
 		EnvKey:                  envKey,
 		CreatedAt:               time.Now(),
 	}
-	sm.saveShieldSession(session)
+	if err := sm.saveShieldSession(session); err != nil {
+		return nil, err
+	}
 	return session, nil
 }
 
@@ -251,7 +315,15 @@ func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, reques
 // 会话通过原子“取出即删除”获得，保证一份 PoW 解只能被兑换一次；
 // 过期会话直接拒绝，不依赖清理协程的调度间隔。
 func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, requestProtocol string) (bool, string) {
-	return sm.VerifyChallengeWithBinding(sessionID, captchaAnswer, powCounter, powHash, envFPJSON, requestProtocol, ChallengeSessionBinding{})
+	return sm.VerifyChallengeWithBinding(
+		sessionID,
+		captchaAnswer,
+		powCounter,
+		powHash,
+		envFPJSON,
+		requestProtocol,
+		ChallengeSessionBinding{},
+	)
 }
 
 // VerifyChallengeWithBinding compares the matched-site binding before atomically
@@ -264,19 +336,36 @@ func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer str
 	if session.expiredAt(time.Now()) {
 		return false, session.OriginalURL
 	}
+	if !session.hasFrozenConfig() {
+		return false, session.OriginalURL
+	}
+	if shieldProtocolValue(requestProtocol) != session.RequestProtocol {
+		return false, session.OriginalURL
+	}
 	if !shieldProtocolAllowed(sm.shieldPageConfig(session), requestProtocol) {
 		return false, session.OriginalURL
 	}
 	if !VerifyPoW(session.Nonce, powCounter, powHash, session.Difficulty) {
 		return false, session.OriginalURL
 	}
-	if len(session.EnvKey) > 0 {
-		result := ValidateEnvFingerprint(DecryptEnvFingerprint(envFPJSON, session.EnvKey))
-		if !result.Pass {
-			return false, session.OriginalURL
-		}
+	if !session.EnableEnvCheck {
+		return true, session.OriginalURL
 	}
-	return true, session.OriginalURL
+
+	fp := DecryptEnvFingerprintWithAAD(
+		envFPJSON,
+		session.EnvKey,
+		EnvFingerprintAAD("shield", session.ID, session.ChallengeSessionBinding),
+	)
+	if fp == nil {
+		return false, session.OriginalURL
+	}
+
+	result := ValidateEnvFingerprint(fp)
+	if session.EnvStrictness == 0 {
+		return result.Score < 100, session.OriginalURL
+	}
+	return result.Score <= 50, session.OriginalURL
 }
 
 // WriteShieldChallengeResponse renders the Cloudflare-style shield HTML page.
@@ -288,10 +377,15 @@ func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, req
 		return
 	}
 	cfg := sm.shieldPageConfig(session)
-	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce, EnvSessionKeyHex(session.EnvKey))
+	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce)
 	envJS := ""
 	if cfg.EnableEnvCheck {
-		envJS = EnvCheckJSEncrypted(EnvSessionKeyHex(session.EnvKey))
+		aad := EnvFingerprintAAD("shield", session.ID, binding)
+		envJS = EnvCheckJSEncrypted(EnvSessionKeyHex(session.EnvKey), aad)
+		if envJS == "" {
+			c.String(500, "shield environment initialization failed")
+			return
+		}
 	}
 
 	html := shieldPageHTMLWithConfig(session.ID, cfg, session.RequestProtocol, envJS, powScript)
@@ -363,18 +457,23 @@ func obfuscateShieldJS(html string) string {
 // shieldSessionTTL 是 shield 会话的有效期，Redis 与内存两条路径共用。
 const legacyShieldSessionTTL = 5 * time.Minute
 
-func (sm *ShieldManager) saveShieldSession(s *ShieldSession) {
+func (sm *ShieldManager) saveShieldSession(s *ShieldSession) error {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
 	if redis := sm.redisClient(); redis != nil {
-		data, _ := json.Marshal(s)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if redis.Set(ctx, sm.prefix+s.ID, data, s.sessionTTL()).Err() == nil {
-			return
+		if err := redis.Set(ctx, sm.prefix+s.ID, data, s.sessionTTL()).Err(); err != nil {
+			return fmt.Errorf("store Shield session in Redis: %w", err)
 		}
+		return nil
 	}
 	sm.mu.Lock()
 	sm.sessions[s.ID] = s
 	sm.mu.Unlock()
+	return nil
 }
 
 // takeShieldSession 原子地取出并删除一个 shield 会话。
@@ -389,16 +488,19 @@ func (sm *ShieldManager) takeShieldSessionWithBinding(id string, binding Challen
 		defer cancel()
 		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{sm.prefix + id}, binding.SiteID, binding.Host, binding.Bind).Text()
 		data := []byte(raw)
-		if err == nil && len(data) > 0 {
-			var s ShieldSession
-			if json.Unmarshal(data, &s) == nil {
-				sm.mu.Lock()
-				delete(sm.sessions, id)
-				sm.mu.Unlock()
-				return &s
-			}
+		if err != nil {
 			return nil
 		}
+		if len(data) == 0 {
+			return nil
+		}
+		if session := decodeShieldSession(data); session != nil {
+			sm.mu.Lock()
+			delete(sm.sessions, id)
+			sm.mu.Unlock()
+			return session
+		}
+		return nil
 	}
 	sm.mu.Lock()
 	s, ok := sm.sessions[id]

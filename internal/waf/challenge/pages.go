@@ -128,16 +128,21 @@ func prepareChallengeResponseHeaders(c *app.RequestContext, reqID string) {
 // 浏览器/环境采集 JS，提交时携带 __waf_env_fp 供服务端校验是否为真实浏览器。
 func WriteCaptchaChallengeResponse(c *app.RequestContext, reqID string, cm *CaptchaManager, captchaType CaptchaType, envCheck bool, binding ChallengeSessionBinding, statusCode int, cfg pageconfig.CaptchaPageConfig) {
 	prepareChallengeResponseHeaders(c, reqID)
-	challenge, err := cm.GenerateWithBinding(captchaType, envCheck, binding)
+	captchaChallenge, err := cm.GenerateWithBinding(captchaType, envCheck, binding)
 	if err != nil {
 		c.String(500, "captcha generation failed")
 		return
 	}
 	envJS := ""
-	if envCheck && challenge.EnvKeyHex != "" {
-		envJS = EnvCheckJSEncrypted(challenge.EnvKeyHex)
+	if envCheck && captchaChallenge.EnvKeyHex != "" {
+		aad := EnvFingerprintAAD("captcha", captchaChallenge.SessionID, binding)
+		envJS = EnvCheckJSEncrypted(captchaChallenge.EnvKeyHex, aad)
+		if envJS == "" {
+			c.String(500, "environment challenge initialization failed")
+			return
+		}
 	}
-	c.Data(statusCode, "text/html; charset=utf-8", renderCaptchaPage(challenge, reqID, envJS, cfg))
+	c.Data(statusCode, "text/html; charset=utf-8", renderCaptchaPage(captchaChallenge, reqID, envJS, cfg))
 }
 
 // WriteChainChallengeResponse starts a chain challenge and renders the first step.

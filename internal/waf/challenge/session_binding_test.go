@@ -59,7 +59,8 @@ func TestChainSessionBindingRejectsOtherSiteWithoutAdvance(t *testing.T) {
 	if outcome := manager.ProcessStepDetailedWithBinding(sessionID, map[string]string{"env_fp": "{}"}, other); !outcome.Failed || outcome.Passed {
 		t.Fatalf("cross-site chain outcome = %+v, want failed without pass", outcome)
 	}
-	if outcome := manager.ProcessStepDetailedWithBinding(sessionID, map[string]string{"env_fp": "{}"}, issuer); !outcome.Passed || outcome.RedirectURL != "/protected" {
+	envelope := chainEnvironmentEnvelope(t, manager, sessionID, issuer)
+	if outcome := manager.ProcessStepDetailedWithBinding(sessionID, map[string]string{"env_fp": envelope}, issuer); !outcome.Passed || outcome.RedirectURL != "/protected" {
 		t.Fatalf("issuing site chain outcome = %+v, want pass to protected URL", outcome)
 	}
 }

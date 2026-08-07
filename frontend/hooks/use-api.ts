@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { useCallback, useRef, useState } from "react"
 import useSWR, { mutate, type Key } from "swr"
-import { useCallback, useState } from "react"
+import type { CaptchaConfig } from "@/lib/types"
 import {
   siteApi,
   certificateApi,
@@ -139,9 +140,13 @@ export function useMutation<T, D = any>(
 ) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<Error | null>(null)
+  const latestRequestId = useRef(0)
+  const inFlightCount = useRef(0)
 
   const execute = useCallback(
     async (data: D) => {
+      const requestId = ++latestRequestId.current
+      inFlightCount.current += 1
       setLoading(true)
       setError(null)
       try {
@@ -154,11 +159,16 @@ export function useMutation<T, D = any>(
         options?.onSuccess?.(result)
         return result
       } catch (err) {
-        setError(err as Error)
+        if (requestId === latestRequestId.current) {
+          setError(err as Error)
+        }
         options?.onError?.(err)
         throw err
       } finally {
-        setLoading(false)
+        inFlightCount.current -= 1
+        if (inFlightCount.current === 0) {
+          setLoading(false)
+        }
       }
     },
     [mutateFn, options]
@@ -655,20 +665,35 @@ export function usePolicyDelete() {
 
 export function useProtectionSettingsUpdate() {
   return useMutation(async (data: any) => protectionApi.updateSettings(data), {
-    invalidateKeys: ["protection-settings"],
+    invalidateKeys: [
+      "protection-settings",
+      "captcha-config",
+      "bot-settings",
+    ],
   })
 }
 
 export function useBotSettingsUpdate() {
   return useMutation(async (data: any) => botApi.updateSettings(data), {
-    invalidateKeys: ["bot-settings"],
+    invalidateKeys: [
+      "bot-settings",
+      "protection-settings",
+      "captcha-config",
+    ],
   })
 }
 
 export function useCaptchaConfigUpdate() {
-  return useMutation(async (data: any) => captchaApi.updateConfig(data), {
-    invalidateKeys: ["captcha-config"],
-  })
+  return useMutation<CaptchaConfig, Partial<CaptchaConfig>>(
+    async (data) => captchaApi.updateConfig(data),
+    {
+      invalidateKeys: [
+        "captcha-config",
+        "protection-settings",
+        "bot-settings",
+      ],
+    }
+  )
 }
 
 export function useChainConfigUpdate() {

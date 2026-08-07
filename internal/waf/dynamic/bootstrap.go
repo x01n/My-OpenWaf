@@ -49,7 +49,7 @@ var result={blocked:blocked,reasons:reasons.concat(blocked?softReasons:[]),softR
 function owafDebugJSON(v){try{var s=JSON.stringify(v,null,2);return s.length>12000?s.slice(0,12000)+"\n... truncated":s}catch(e){return String(v)}}
 function owafErrorInfo(e){if(!e){return null}return{name:e.name||"Error",message:e.message||String(e),stack:e.stack||""}}
 function owafEnvelopeInfo(x){return{present:!!x,hasData:!!(x&&x.owafData),dataLength:x&&x.owafData?x.owafData.length:0,hasIv:!!(x&&x.owafIv),ivLength:x&&x.owafIv?x.owafIv.length:0,hasWrap:!!(x&&x.owafWrap),wrapLength:x&&x.owafWrap?x.owafWrap.length:0,hasTicket:!!(x&&x.owafTicket),ticketLength:x&&x.owafTicket?x.owafTicket.length:0,hasKek:!!(x&&x.owafKek),kekLength:x&&x.owafKek?x.owafKek.length:0,hasKey:!!(x&&x.owafKey),keyLength:x&&x.owafKey?x.owafKey.length:0,ttl:x&&x.owafTtl?x.owafTtl:""}}
-function owafExchangeDynamicKey(ticket,key,env){return fetch("/__owaf/dynamic/key",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({ticket:ticket||"",key:key||"",env:env||null})}).then(function(r){return r.text().then(function(t){var j={};try{j=t?JSON.parse(t):{}}catch(e){throw new Error("dynamic key response parse failed: "+t.slice(0,512))}if(!r.ok){throw new Error(j.error||("dynamic key exchange failed: "+r.status))}if(!j.kek){throw new Error("dynamic key response missing kek")}return j})})}
+function owafExchangeDynamicKey(ticket,key){return fetch("/__owaf/dynamic/key",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({ticket:ticket||"",key:key||""})}).then(function(r){return r.text().then(function(t){var j={};try{j=t?JSON.parse(t):{}}catch(e){throw new Error("dynamic key response parse failed: "+t.slice(0,512))}if(!r.ok){throw new Error(j.error||("dynamic key exchange failed: "+r.status))}if(!j.kek){throw new Error("dynamic key response missing kek")}return j})})}
 function owafDebugPayload(stage,err,extra){var g=window.__owafDP=window.__owafDP||{},payload={stage:stage||"unknown",error:owafErrorInfo(err),extra:extra||{},environment:g.envResult||null,cache:{cekCached:!!g.cekCached,hasCek:!!g.cek,hasCekKey:!!g.cekKey,sessionStorage:!!window.sessionStorage},browser:{href:location.href,secureContext:!!window.isSecureContext,crypto:!!(window.crypto&&window.crypto.subtle),language:navigator.language||"",userAgent:navigator.userAgent||"",time:(new Date()).toISOString()}};return payload}
 function owafHasRecentSuccess(){try{var now=Date.now(),s=parseInt(sessionStorage.getItem("__owafDPFastUntil")||"0",10),l=parseInt(localStorage.getItem("__owafDPFastUntil")||"0",10);if(s>now||l>now){return true}}catch(e){}try{return document.cookie.indexOf("__owaf_dp_recent=1")>=0}catch(e){return false}}
 function owafMarkRecentSuccess(ttl){var n=parseInt(ttl||"0",10);if(n<=0){n=300}n=Math.min(n,1800);var exp=Date.now()+n*1000;try{sessionStorage.setItem("__owafDPFastUntil",String(exp));localStorage.setItem("__owafDPFastUntil",String(exp))}catch(e){}try{document.cookie="__owaf_dp_recent=1; Max-Age="+n+"; Path=/; SameSite=Lax"}catch(e){}}
@@ -85,7 +85,7 @@ await wasm();var ttl=parseInt(x.owafTtl||"0",10),key=x.owafKey||x.owafWrap;
 if(ttl<=0){forget()}
 if(!force&&g.cek&&g.cekKey===key){g.cekCached=true;return g.cek}
 if(!force&&ttl>0){try{var c=sessionStorage.getItem("__owafDPCek");if(c){var o=JSON.parse(c);if(o.exp>Date.now()&&o.key===key){g.cek=u(o.raw);g.cekKey=key;g.cekCached=true;return g.cek}}}catch(e){}}
-g.cekCached=false;var kek=x.owafKek||"";if(!kek&&x.owafTicket){var env=owafCheckEnvironment();var rsp=await owafExchangeDynamicKey(x.owafTicket,key,env);kek=rsp.kek;ttl=parseInt(rsp.ttl||ttl||"0",10)||ttl}
+g.cekCached=false;var kek=x.owafKek||"";if(!kek&&x.owafTicket){var rsp=await owafExchangeDynamicKey(x.owafTicket,key);kek=rsp.kek;ttl=parseInt(rsp.ttl||ttl||"0",10)||ttl}
 var raw=wasm_bindgen.unwrap_dynamic_cek(x.owafWrap,kek);g.cek=raw;g.cekKey=key;
 try{if(ttl>0){sessionStorage.setItem("__owafDPCek",JSON.stringify({key:key,raw:b64(raw),exp:Date.now()+ttl*1000}))}}catch(e){}
 return raw}
@@ -115,7 +115,7 @@ await wasm();
 if(ttl<=0){forget()}
 if(!force&&g.cek&&g.cekKey===key){g.cekCached=true;return g.cek}
 if(!force&&ttl>0){try{var c=sessionStorage.getItem("__owafDPCek");if(c){var o=JSON.parse(c);if(o.exp>Date.now()&&o.key===key){g.cek=u(o.raw);g.cekKey=key;g.cekCached=true;return g.cek}}}catch(e){}}
-g.cekCached=false;var kek=K;if(!kek&&T){var env=owafCheckEnvironment();var rsp=await owafExchangeDynamicKey(T,key,env);kek=rsp.kek;if(rsp.ttl){ttl=parseInt(rsp.ttl,10)||ttl;g.owafTtl=String(ttl)}}
+g.cekCached=false;var kek=K;if(!kek&&T){var rsp=await owafExchangeDynamicKey(T,key);kek=rsp.kek;if(rsp.ttl){ttl=parseInt(rsp.ttl,10)||ttl;g.owafTtl=String(ttl)}}
 var raw=wasm_bindgen.unwrap_dynamic_cek(W,kek);g.cek=raw;g.cekKey=key;if(ttl>0){try{sessionStorage.setItem("__owafDPCek",JSON.stringify({key:key,raw:b64(raw),exp:Date.now()+ttl*1000}))}catch(e){}}return raw}
 async function decryptWithRetry(){var g=window.__owafDP||{},k;try{k=await cek(false);return wasm_bindgen.decrypt_dynamic_with_cek(D,V,k)}catch(e){if(g.cekCached){forget();k=await cek(true);return wasm_bindgen.decrypt_dynamic_with_cek(D,V,k)}throw e}}
 (async function(){

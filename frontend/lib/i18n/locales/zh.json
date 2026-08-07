@@ -39,6 +39,8 @@
     "type": "类型",
     "name": "名称",
     "description": "描述",
+    "category": "分类",
+    "default": "默认",
     "action": "操作",
     "actions": "动作",
     "time": "时间",
@@ -501,7 +503,11 @@
       "primaryListener": "主监听",
       "upstreamScheme": "上游地址需以 http://、https://、h2c:// 或 h3:// 开头",
       "certRequiredHint": "已启用 HTTPS，必须选择证书后才能保存。",
-      "certRequired": "启用 HTTPS 的监听端口必须选择证书"
+      "certRequired": "启用 HTTPS 的监听端口必须选择证书",
+      "policy": "防护策略",
+      "policyPlaceholder": "选择策略",
+      "policyInheritDefault": "继承默认策略",
+      "policyHint": "不选择时站点继承当前默认策略。"
     },
     "deleteTitle": "删除站点",
     "deleteConfirm": "确定要删除此站点吗？此操作不可撤销。",
@@ -566,6 +572,15 @@
     "observe": "仅观察",
     "balanced": "平衡防护",
     "strict": "高强度防护",
+    "sensitivity": "敏感度",
+    "sensitivityValues": {
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "very_high": "极高",
+      "strict": "严格",
+      "off": "关闭"
+    },
     "batchApplied": "批量配置已应用到所有模块",
     "dataNotLoaded": "数据尚未加载，请稍后重试",
     "followGlobal": "已切换为跟随全局配置",
@@ -676,7 +691,9 @@
     "description": "管理自定义黑白名单规则，支持按 IP、路径、请求头等条件放行或拦截请求",
     "pattern": "匹配模式",
     "priority": "优先级",
-    "emptyHint": "还没有规则，点击上方按钮添加"
+    "emptyHint": "还没有规则，点击上方按钮添加",
+    "policyPlaceholder": "选择策略",
+    "searchPlaceholder": "规则 ID / 名称"
   },
   "ccProtection": {
     "title": "CC 防护",
@@ -789,7 +806,23 @@
     "browserSignActionDesc": "API 请求缺少/伪造签名时的处理动作。",
     "browserSignActionObserve": "仅观察（observe）",
     "browserSignActionChallenge": "JS 挑战（challenge）",
-    "browserSignActionIntercept": "拦截（intercept）"
+    "browserSignActionIntercept": "拦截（intercept）",
+    "shieldEnvironment": {
+      "title": "Shield 环境检测",
+      "description": "在 Shield 质询完成前核验浏览器环境与自动化特征。",
+      "enable": "启用环境检测",
+      "enableDescription": "在 Shield 质询中采集并校验浏览器环境信号。",
+      "strictness": "检测严格度",
+      "strictnessDescription": "严格度越高，环境不一致或自动化浏览器越可能无法通过质询。",
+      "strictnessRelaxed": "宽松（0）",
+      "strictnessStandard": "标准（1）",
+      "strictnessStrict": "严格（2）",
+      "disabledHint": "环境检测已关闭；严格度值将保留，重新启用后继续生效。",
+      "save": "保存环境检测设置",
+      "saveSuccess": "Shield 环境检测设置已保存",
+      "saveFailed": "Shield 环境检测设置保存失败",
+      "unavailable": "未获取到 Shield 环境检测配置，暂不能编辑。"
+    }
   },
   "authConfig": {
     "title": "身份认证",
@@ -1390,6 +1423,43 @@
     "anyStart": "起始不限",
     "anyEnd": "至今"
   },
+  "policies": {
+    "title": "策略管理",
+    "description": "管理站点继承的默认策略和自定义策略。",
+    "create": "新增策略",
+    "empty": "暂无策略",
+    "nameRequired": "请输入策略名称",
+    "namePlaceholder": "策略名称",
+    "createSuccess": "策略已创建",
+    "defaultUpdated": "默认策略已更新",
+    "defaultDeleteBlocked": "默认策略不可删除",
+    "deleteSuccess": "策略已删除",
+    "refs": "引用",
+    "siteRefs": "站点",
+    "ruleRefs": "规则",
+    "setDefault": "设为默认"
+  },
+  "cveRules": {
+    "title": "CVE 规则",
+    "description": "按全局、策略或站点作用域管理 CVE 规则覆盖。",
+    "empty": "暂无 CVE 规则",
+    "overridden": "已覆盖",
+    "resetSuccess": "已恢复继承",
+    "rule": "规则",
+    "scope": "作用域",
+    "scopeGlobal": "全局",
+    "scopePolicy": "策略",
+    "scopeSite": "站点",
+    "severity": "严重度"
+  },
+  "owaspRules": {
+    "title": "OWASP 规则",
+    "description": "按策略管理全部内置 OWASP 规则的启用状态、动作和敏感度。",
+    "empty": "暂无 OWASP 规则",
+    "overridden": "已覆盖",
+    "resetSuccess": "已恢复继承",
+    "rule": "规则"
+  },
   "pageTemplates": {
     "title": "页面模板",
     "description": "自定义 WAF 挑战和拦截页面的外观",
@@ -1422,7 +1492,8 @@
     "resetConfirmDesc": "此操作将恢复页面模板为系统默认值，无法撤销。",
     "resetSuccess": "已重置为默认",
     "saveFailed": "保存失败",
-    "resetFailed": "重置失败"
+    "resetFailed": "重置失败",
+    "previewFailed": "预览失败"
   },
   "luaPlugins": {
     "title": "Lua 策略脚本",
@@ -1503,8 +1574,8 @@
       "help": "帮助"
     },
     "dryRun": {
-      "hint": "用样例请求直接执行当前源码；不会保存配置，但 ctx.kv.set/delete/incr 可能写入真实 Redis。",
-      "contractHint": "试运行直接调用脚本：不会保存配置，但 ctx.kv.set/delete/incr 可能写入真实 Redis；KV 不可用时仍显示脚本结果，线上 Engine 会强制 fail-open。headers、response_body、tags 仍按后端边界校验。",
+      "hint": "用样例请求直接执行当前源码；不会保存配置，也不会连接生产 Redis，ctx.kv.available() 固定为 false。",
+      "contractHint": "试运行直接调用脚本：不会保存配置，也不会连接生产 Redis；ctx.kv.available() 固定为 false，KV 写入不会生效。线上 Engine 会强制 fail-open。headers、response_body、tags 仍按后端边界校验。",
       "method": "请求方法",
       "path": "路径",
       "query": "查询字符串",
@@ -1573,10 +1644,10 @@
       "responseApplicability": "response_body 只由普通 Lua 终止响应消费；challenge、redirect、drop 以及上游响应不会被它覆盖。",
       "blockedHeaders": "拒绝的 header 名称：authorization, proxy-authorization, cookie, set-cookie, www-authenticate, proxy-authenticate, connection, keep-alive, proxy-connection, te, trailer, transfer-encoding, upgrade, content-length, location。",
       "ctxTitle": "ctx 可读字段",
-      "ctxNote": "ctx.headers 为小写键表；ctx.phase 与 ctx.action 仅 post 阶段有值，表示前序管线的判定。ctx.query_params 当前线上为空表，dry-run 可显式传入。",
+      "ctxNote": "ctx.headers 为小写键表；ctx.phase 与 ctx.action 仅 post 阶段有值，表示前序管线的判定。ctx.query_params 由原始查询串填充，重复键保留首个值；dry-run 与线上使用同一映射契约。",
       "ctxSiteNote": "ctx.site_id 始终是当前请求匹配到的站点 ID；脚本自身的 site_id 作用域由 Engine 在执行前过滤。",
       "kvTitle": "ctx.kv 跨请求存储",
-      "kvNote": "配置 Redis 后计数在多实例间共享；未配置时 available() 返回 false，脚本应据此降级而非报错。dry-run 使用真实 KV，set/delete/incr 可能写入 Redis。",
+      "kvNote": "配置 Redis 后线上计数在多实例间共享；未配置时 available() 返回 false，脚本应据此降级而非报错。dry-run 不连接生产 KV，available() 固定为 false，set/delete/incr 不会写入 Redis。",
       "kvRuntimeNote": "ctx.kv 的方法在脚本内仍以 nil/false 降级；但线上 Engine 在执行前后都会检查 KV，发现不可用就丢弃本阶段判定并放行。",
       "examplesTitle": "示例脚本",
       "applyExample": "填入编辑区",

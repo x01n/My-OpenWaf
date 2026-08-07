@@ -156,6 +156,77 @@ func readRESPArgsForTest(r *bufio.Reader) ([]string, error) {
 	return args, nil
 }
 
+func TestLoadRedisConfigRejectsNilRepository(t *testing.T) {
+	if _, err := LoadRedisConfig(nil); err == nil || err.Error() != "redis config repository is nil" {
+		t.Fatalf("LoadRedisConfig(nil) error = %v, want nil repository error", err)
+	}
+}
+
+func TestLoadRedisConfigReturnsZeroForMissingAndEmptyValues(t *testing.T) {
+	tests := []struct {
+		name string
+		seed *string
+	}{
+		{name: "missing", seed: nil},
+		{name: "empty", seed: func() *string { value := ""; return &value }()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newSystemSettingsRepoForTest(t)
+			if tt.seed != nil {
+				if err := repo.Set(store.SettingKeyRedisConfig, *tt.seed); err != nil {
+					t.Fatalf("seed redis config: %v", err)
+				}
+			}
+			got, err := LoadRedisConfig(repo)
+			if err != nil {
+				t.Fatalf("LoadRedisConfig() error = %v", err)
+			}
+			if got != (RedisConfig{}) {
+				t.Fatalf("LoadRedisConfig() = %#v, want zero config", got)
+			}
+		})
+	}
+}
+
+func TestLoadRedisConfigValidatesStoredValues(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "invalid json", raw: "{", want: "decode redis config:"},
+		{name: "negative db", raw: `{"enabled":false,"db":-1}`, want: "redis db must be >= 0"},
+		{name: "enabled without address", raw: `{"enabled":true}`, want: "redis addr is required when enabled"},
+		{name: "whitespace value", raw: "  ", want: "decode redis config:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newSystemSettingsRepoForTest(t)
+			if err := repo.Set(store.SettingKeyRedisConfig, tt.raw); err != nil {
+				t.Fatalf("seed redis config: %v", err)
+			}
+			if _, err := LoadRedisConfig(repo); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("LoadRedisConfig() error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadRedisConfigTrimsValidAddress(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := repo.Set(store.SettingKeyRedisConfig, `{"enabled":true,"addr":" 127.0.0.1:6379 ","db":0}`); err != nil {
+		t.Fatalf("seed redis config: %v", err)
+	}
+	got, err := LoadRedisConfig(repo)
+	if err != nil {
+		t.Fatalf("LoadRedisConfig() error = %v", err)
+	}
+	if got.Addr != "127.0.0.1:6379" {
+		t.Fatalf("redis addr = %q, want trimmed address", got.Addr)
+	}
+}
+
 func TestUpdateNetworkConfigPreservesOmittedHTTP3Bind(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	if err := repo.Set(settingKeyNetwork, `{"ipv6_enabled":false,"http2_enabled":true,"http3_enabled":true,"http3_bind":":8443","default_alpn":"h3,h2,http/1.1","default_network":"tcp"}`); err != nil {

@@ -39,7 +39,7 @@ export default function PoliciesPage() {
     const trimmed = name.trim()
     if (!trimmed) {
       toast.error(
-        t("policies.nameRequired", { defaultValue: "请输入策略名称" })
+        t("policies.nameRequired")
       )
       return
     }
@@ -50,7 +50,7 @@ export default function PoliciesPage() {
       setName("")
       setDescription("")
       await mutate()
-      toast.success(t("policies.createSuccess", { defaultValue: "策略已创建" }))
+      toast.success(t("policies.createSuccess"))
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : t("common.operationFailed")
@@ -64,7 +64,7 @@ export default function PoliciesPage() {
       await setDefault.execute(policy.id)
       await mutate()
       toast.success(
-        t("policies.defaultUpdated", { defaultValue: "默认策略已更新" })
+        t("policies.defaultUpdated")
       )
     } catch (err) {
       toast.error(
@@ -76,14 +76,14 @@ export default function PoliciesPage() {
   const removePolicy = async (policy: Policy) => {
     if (policy.is_default) {
       toast.error(
-        t("policies.defaultDeleteBlocked", { defaultValue: "默认策略不可删除" })
+        t("policies.defaultDeleteBlocked")
       )
       return
     }
     try {
       await deletePolicy.execute(policy.id)
       await mutate()
-      toast.success(t("policies.deleteSuccess", { defaultValue: "策略已删除" }))
+      toast.success(t("policies.deleteSuccess"))
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : t("common.operationFailed")
@@ -100,7 +100,7 @@ export default function PoliciesPage() {
           <div className="flex items-center gap-2 font-medium">
             {row.name}
             {row.is_default && (
-              <Badge>{t("common.default", { defaultValue: "默认" })}</Badge>
+              <Badge>{t("common.default")}</Badge>
             )}
           </div>
           <p className="text-xs text-muted-foreground">
@@ -111,13 +111,13 @@ export default function PoliciesPage() {
     },
     {
       key: "counts",
-      title: t("policies.refs", { defaultValue: "引用" }),
+      title: t("policies.refs"),
       width: "180px",
       render: (row: Policy) => (
         <div className="text-xs text-muted-foreground">
-          {t("policies.siteRefs", { defaultValue: "站点" })}:{" "}
+          {t("policies.siteRefs")}:{" "}
           {row.site_count ?? 0} ·{" "}
-          {t("policies.ruleRefs", { defaultValue: "规则" })}:{" "}
+          {t("policies.ruleRefs")}:{" "}
           {row.rule_count ?? 0}
         </div>
       ),
@@ -135,7 +135,7 @@ export default function PoliciesPage() {
             onClick={() => makeDefault(row)}
           >
             <IconShieldCheck className="mr-1 h-4 w-4" />
-            {t("policies.setDefault", { defaultValue: "设为默认" })}
+            {t("policies.setDefault")}
           </Button>
           <Button
             size="sm"
@@ -153,10 +153,8 @@ export default function PoliciesPage() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title={t("policies.title", { defaultValue: "策略管理" })}
-        description={t("policies.description", {
-          defaultValue: "管理站点继承的默认策略和自定义策略。",
-        })}
+        title={t("policies.title")}
+        description={t("policies.description")}
         actions={
           <Button variant="outline" onClick={() => mutate()}>
             <IconRefresh className="mr-1 h-4 w-4" />
@@ -177,7 +175,7 @@ export default function PoliciesPage() {
       <Card>
         <CardHeader>
           <CardTitle>
-            {t("policies.create", { defaultValue: "新增策略" })}
+            {t("policies.create")}
           </CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] md:items-end">
@@ -186,11 +184,11 @@ export default function PoliciesPage() {
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Default"
+              placeholder={t("policies.namePlaceholder")}
             />
           </div>
           <div className="space-y-1.5">
-            <Label>{t("common.description", { defaultValue: "描述" })}</Label>
+            <Label>{t("common.description")}</Label>
             <Textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -209,7 +207,7 @@ export default function PoliciesPage() {
         data={policies}
         loading={isLoading}
         rowKey={(row) => row.id}
-        emptyText={t("policies.empty", { defaultValue: "暂无策略" })}
+        emptyText={t("policies.empty")}
       />
     </div>
   )

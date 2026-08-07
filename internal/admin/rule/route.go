@@ -3,12 +3,14 @@ package rule
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
+	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
@@ -59,6 +61,14 @@ func validateApplicationRouteRule(r *store.ApplicationRouteRule) error {
 	}
 	if strings.TrimSpace(r.Pattern) == "" {
 		return errors.New("pattern required")
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Op), store.AppRouteOpRegex) {
+		if len(r.Pattern) > appresource.MaxRegexPattern {
+			return errors.New("regex pattern too long")
+		}
+		if _, err := regexp.Compile(r.Pattern); err != nil {
+			return errors.New("invalid regex pattern")
+		}
 	}
 	if strings.EqualFold(strings.TrimSpace(r.Target), store.AppRouteTargetRequestHeader) {
 		if strings.TrimSpace(r.HeaderKey) == "" {

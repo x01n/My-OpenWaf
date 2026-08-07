@@ -480,15 +480,23 @@ function RedisConfigCard() {
   const db = String(draft.redis_db ?? redisConfig?.redis_db ?? 0)
 
   const handleSave = async () => {
+    const payload: RedisConfigUpdate = {}
+    if (draft.enabled !== undefined) {
+      payload.enabled = draft.enabled
+    }
+    if (draft.redis_addr !== undefined) {
+      payload.redis_addr = draft.redis_addr
+    }
+    if (draft.redis_db !== undefined) {
+      payload.redis_db = draft.redis_db
+    }
+    if (passwordTouched) {
+      payload.redis_password = password
+    }
+    if (Object.keys(payload).length === 0) {
+      return
+    }
     try {
-      const payload: RedisConfigUpdate = {
-        enabled,
-        redis_addr: addr,
-        redis_db: parseInt(db, 10) || 0,
-      }
-      if (passwordTouched) {
-        payload.redis_password = password
-      }
       await redisUpdate.execute(payload)
       setDraft({})
       setPasswordTouched(false)

@@ -14,7 +14,11 @@ import (
 
 func GetProtectionSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		cfg := shared.LoadProtectionConfig(repo)
+		cfg, err := shared.LoadProtectionConfigStrict(repo)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": "invalid protection configuration"})
+			return
+		}
 		c.JSON(200, buildProtectionResponse(cfg))
 	}
 }
@@ -24,6 +28,7 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 	out := make(map[string]any)
 	raw, _ := json.Marshal(cfg)
 	_ = json.Unmarshal(raw, &out)
+	delete(out, "basic_auth_password")
 
 	out["cc_rules"] = []any{}
 	out["owasp_modules"] = map[string]string{}
@@ -88,6 +93,17 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			return
 		}
 
+		if passwordRaw, ok := raw["basic_auth_password"]; ok {
+			var password string
+			if err := json.Unmarshal(passwordRaw, &password); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid basic auth password"})
+				return
+			}
+			if strings.TrimSpace(password) == "" {
+				delete(raw, "basic_auth_password")
+			}
+		}
+
 		present := make(map[string]bool, len(raw))
 		for key := range raw {
 			present[key] = true
@@ -99,7 +115,11 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(400, map[string]string{"error": "invalid config"})
 			return
 		}
-		cfg := shared.LoadProtectionConfig(repo)
+		cfg, err := shared.LoadProtectionConfigStrict(repo)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": "invalid protection configuration"})
+			return
+		}
 		if err := json.Unmarshal(plainBytes, &cfg); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid config"})
 			return
@@ -161,24 +181,32 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := repo.Set("protection", string(data)); err != nil {
+		if err := repo.Transaction(func(txRepo *repository.SystemSettingsRepo) error {
+			if err := txRepo.Set("protection", string(data)); err != nil {
+				return err
+			}
+
+			// Sync bot_detection_enabled to bot_settings.Enabled so the bot page
+			// reflects changes made on the protection page.
+			if present["bot_detection_enabled"] {
+				if err := shared.SyncProtectionBotToSettings(txRepo, cfg.BotDetectionEnabled); err != nil {
+					return err
+				}
+			}
+			if present["captcha_enabled"] {
+				if err := shared.SyncProtectionCaptchaToSettings(txRepo, cfg.CaptchaEnabled); err != nil {
+					return err
+				}
+			}
+			if present["cve_auto_drop_critical"] || present["cve_auto_drop_high"] {
+				if err := shared.SyncCVEAutoDropToDropPolicy(txRepo, cfg.CVEAutoDropCritical, cfg.CVEAutoDropHigh); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
-		}
-
-		// Sync bot_detection_enabled to bot_settings.Enabled so the bot page
-		// reflects changes made on the protection page.
-		if present["bot_detection_enabled"] {
-			if err := shared.SyncProtectionBotToSettings(repo, cfg.BotDetectionEnabled); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
-			}
-		}
-		if present["cve_auto_drop_critical"] || present["cve_auto_drop_high"] {
-			if err := shared.SyncCVEAutoDropToDropPolicy(repo, cfg.CVEAutoDropCritical, cfg.CVEAutoDropHigh); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
-			}
 		}
 
 		if err := reload(); err != nil {

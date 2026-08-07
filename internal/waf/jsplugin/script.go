@@ -8,16 +8,17 @@ import (
 
 // Script 是已校验的 JavaScript 策略脚本。
 type Script struct {
-	name        string
-	source      string
-	siteIDs     map[uint]bool
-	memoryLimit uint64
-	stackLimit  uint64
-	timeout     time.Duration
-	runs        atomic.Int64
-	failures    atomic.Int64
-	timeouts    atomic.Int64
-	totalNanos  atomic.Int64
+	name            string
+	source          string
+	siteIDs         map[uint]bool
+	memoryLimit     uint64
+	stackLimit      uint64
+	timeout         time.Duration
+	timeoutOverride bool
+	runs            atomic.Int64
+	failures        atomic.Int64
+	timeouts        atomic.Int64
+	totalNanos      atomic.Int64
 }
 
 // Name 返回脚本名称。

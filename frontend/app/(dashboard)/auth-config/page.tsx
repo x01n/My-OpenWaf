@@ -30,37 +30,42 @@ import {
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { PageHeader } from "@/components/page-header"
+import type { ProtectionSettings } from "@/lib/types"
+
+type BasicAuthSettings = Pick<
+  ProtectionSettings,
+  "basic_auth_enabled" | "basic_auth_username" | "basic_auth_password"
+>
 
 export default function AuthConfigPage() {
   const { t } = useTranslation()
   const { data: settings, isLoading, error } = useProtectionSettings()
   const updateSettings = useProtectionSettingsUpdate()
 
-  const [localSettings, setLocalSettings] = useState<Record<string, unknown>>(
-    {}
-  )
+  const [localSettings, setLocalSettings] = useState<
+    Partial<Pick<BasicAuthSettings, "basic_auth_enabled">>
+  >({})
   const [username, setUsername] = useState<string | null>(null)
   const [password, setPassword] = useState("")
   const currentUsername = username ?? settings?.basic_auth_username ?? ""
 
-  const getValue = (key: string, defaultValue: unknown = false) => {
-    return localSettings[key] !== undefined
-      ? localSettings[key]
-      : (settings?.[key] ?? defaultValue)
-  }
-
-  const handleToggle = (key: string) => {
-    setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }))
+  const handleToggle = () => {
+    setLocalSettings((prev) => ({
+      ...prev,
+      basic_auth_enabled:
+        !(prev.basic_auth_enabled ?? settings?.basic_auth_enabled ?? false),
+    }))
   }
 
   const handleSave = async () => {
     try {
-      const payload: Record<string, unknown> = { ...settings, ...localSettings }
-      if (currentUsername) payload.basic_auth_username = currentUsername
+      const payload: Partial<BasicAuthSettings> = { ...localSettings }
+      if (username !== null) payload.basic_auth_username = username
       if (password) payload.basic_auth_password = password
       await updateSettings.execute(payload)
       toast.success(t("authConfig.saveSuccess"))
       setPassword("")
+      setLocalSettings({})
     } catch {
       toast.error(t("authConfig.saveFailed"))
     }
@@ -118,8 +123,12 @@ export default function AuthConfigPage() {
         <CardContent className="space-y-4">
           <div className="flex items-center gap-4">
             <Switch
-              checked={getValue("basic_auth_enabled", false)}
-              onCheckedChange={() => handleToggle("basic_auth_enabled")}
+              checked={
+                localSettings.basic_auth_enabled ??
+                settings?.basic_auth_enabled ??
+                false
+              }
+              onCheckedChange={handleToggle}
               id="basic_auth"
             />
             <div>

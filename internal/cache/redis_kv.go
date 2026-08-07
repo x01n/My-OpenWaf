@@ -14,6 +14,14 @@ import (
 
 const redisPrefix = "openwaf:"
 
+const incrFixedWindowScript = `
+local value = redis.call("INCR", KEYS[1])
+if value == 1 then
+	redis.call("PEXPIRE", KEYS[1], ARGV[1])
+end
+return value
+`
+
 // RedisKV is a distributed key-value cache backed by Redis.
 // Used for cross-node shared state: API response caching, rate limit metadata,
 // IP ban synchronization, etc.
@@ -50,58 +58,91 @@ func (r *RedisKV) SetClient(client *goredis.Client) {
 	}
 	r.mu.Lock()
 	r.client = client
-	r.mu.Unlock()
 	r.health.Store(client != nil)
+	r.mu.Unlock()
 }
 
 func (r *RedisKV) Available() bool {
 	return r != nil && r.clientValue() != nil && r.health.Load()
 }
 
+// noteCommandResult updates health only when client is still the active client.
+// redis.Nil is a successful Redis response (a cache miss), not a dependency
+// failure, and therefore restores health just like any other successful command.
+func (r *RedisKV) noteCommandResult(client *goredis.Client, err error) {
+	if r == nil || client == nil {
+		return
+	}
+	r.mu.RLock()
+	if r.client == client {
+		if err == nil || errors.Is(err, goredis.Nil) {
+			r.health.Store(true)
+		} else {
+			r.health.Store(false)
+		}
+	}
+	r.mu.RUnlock()
+}
+
 // Set stores a byte value with TTL.
 func (r *RedisKV) Set(key string, value []byte, ttl time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return r.SetContext(ctx, key, value, ttl)
+}
+
+// SetContext stores a byte value with TTL using the caller's context.
+func (r *RedisKV) SetContext(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	client := r.clientValue()
 	if client == nil {
 		return errors.New("redis kv unavailable")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	err := client.Set(ctx, redisPrefix+key, value, ttl).Err()
-	r.health.Store(err == nil)
+	r.noteCommandResult(client, err)
 	return err
 }
 
 // Get retrieves a byte value. Returns nil, false on miss.
 func (r *RedisKV) Get(key string) ([]byte, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return r.GetContext(ctx, key)
+}
+
+// GetContext retrieves a byte value using the caller's context. It returns nil, false on miss.
+func (r *RedisKV) GetContext(ctx context.Context, key string) ([]byte, bool) {
 	client := r.clientValue()
 	if client == nil {
 		return nil, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	val, err := client.Get(ctx, redisPrefix+key).Bytes()
+	r.noteCommandResult(client, err)
 	if err != nil {
-		if err == goredis.Nil {
-			r.health.Store(true)
-		} else {
-			r.health.Store(false)
-		}
 		return nil, false
 	}
-	r.health.Store(true)
 	return val, true
 }
 
 // Delete removes a key.
 func (r *RedisKV) Delete(key string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r.DeleteContext(ctx, key)
+}
+
+// DeleteContext removes a key using the caller's context.
+func (r *RedisKV) DeleteContext(ctx context.Context, key string) {
 	client := r.clientValue()
 	if client == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	err := client.Del(ctx, redisPrefix+key).Err()
-	r.health.Store(err == nil)
+	r.noteCommandResult(client, client.Del(ctx, redisPrefix+key).Err())
 }
 
 // SetJSON marshals v to JSON and stores it with TTL.
@@ -127,22 +168,27 @@ func (r *RedisKV) GetJSON(key string, dest any) bool {
 
 // Incr atomically increments a counter and returns the new value.
 func (r *RedisKV) Incr(key string, ttl time.Duration) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return r.IncrContext(ctx, key, ttl)
+}
+
+// IncrContext atomically increments a fixed-window counter.
+// The first increment sets the TTL; subsequent increments leave the original
+// window unchanged.
+func (r *RedisKV) IncrContext(ctx context.Context, key string, ttl time.Duration) (int64, error) {
 	client := r.clientValue()
 	if client == nil {
 		return 0, errors.New("redis kv unavailable")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	pipe := client.Pipeline()
-	incr := pipe.Incr(ctx, redisPrefix+key)
-	pipe.Expire(ctx, redisPrefix+key, ttl)
-	_, err := pipe.Exec(ctx)
+	value, err := client.Eval(ctx, incrFixedWindowScript, []string{redisPrefix + key}, ttl.Milliseconds()).Int64()
+	r.noteCommandResult(client, err)
 	if err != nil {
-		r.health.Store(false)
 		return 0, err
 	}
-	r.health.Store(true)
-	return incr.Val(), nil
+	return value, nil
 }
 
 // Exists checks if a key exists.
@@ -154,6 +200,7 @@ func (r *RedisKV) Exists(key string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	n, err := client.Exists(ctx, redisPrefix+key).Result()
+	r.noteCommandResult(client, err)
 	return err == nil && n > 0
 }
 
@@ -191,6 +238,7 @@ func (r *RedisKV) HAggregateFlush(cntKey, metaKey string, counts map[string]int6
 	pipe.Expire(ctx, fullCnt, ttl)
 	pipe.Expire(ctx, fullMeta, ttl)
 	_, err := pipe.Exec(ctx)
+	r.noteCommandResult(client, err)
 	return err
 }
 
@@ -205,6 +253,7 @@ func (r *RedisKV) DrainAggregated(cntKey, metaKey string) (map[string]int64, map
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	res, err := client.Eval(ctx, drainHashPairScript, []string{redisPrefix + cntKey, redisPrefix + metaKey}).Result()
+	r.noteCommandResult(client, err)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -274,6 +323,7 @@ func (r *RedisKV) AcquireLock(key, token string, ttl time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ok, err := client.SetNX(ctx, redisPrefix+key, token, ttl).Result()
+	r.noteCommandResult(client, err)
 	return err == nil && ok
 }
 
@@ -293,5 +343,5 @@ func (r *RedisKV) ReleaseLock(key, token string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_ = client.Eval(ctx, releaseLockScript, []string{redisPrefix + key}, token).Err()
+	r.noteCommandResult(client, client.Eval(ctx, releaseLockScript, []string{redisPrefix + key}, token).Err())
 }

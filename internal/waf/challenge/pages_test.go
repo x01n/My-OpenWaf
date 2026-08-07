@@ -76,6 +76,21 @@ func TestRenderCaptchaPageEscapesDynamicFields(t *testing.T) {
 	}
 }
 
+func TestCaptchaPageWaitsForWASMEnvironmentBeforeSubmit(t *testing.T) {
+	image := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("image"))
+	page := string(renderCaptchaPage(&CaptchaChallenge{
+		SessionID: "session",
+		Type:      string(CaptchaTypeMath),
+		MasterImg: image,
+		Prompt:    "answer",
+	}, "request", EnvCheckJSEncrypted("aabbccdd112233445566778899001122aabbccdd112233445566778899001122", "owaf-env:v1|captcha|1|example.test|:443|session"), pageconfig.DefaultCaptchaPageConfig()))
+	for _, marker := range []string{"window.__owaf_env_ready", "event.preventDefault()", "HTMLFormElement.prototype.submit.call", "__owaf_env_error_callback"} {
+		if !strings.Contains(page, marker) {
+			t.Fatalf("captcha page missing asynchronous WASM marker %q: %s", marker, page)
+		}
+	}
+}
+
 func TestRenderCaptchaPreviewIncludesValidPNG(t *testing.T) {
 	cfg := pageconfig.DefaultCaptchaPageConfig()
 	page := string(RenderCaptchaPreview(cfg))

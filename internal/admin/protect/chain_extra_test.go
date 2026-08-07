@@ -76,6 +76,9 @@ func TestGetChainConfigReturnsStoredSteps(t *testing.T) {
 	if resp.ChainSteps[1].Type != challenge.ChainStepCaptcha || resp.ChainSteps[1].CaptchaType != challenge.CaptchaTypeSlide {
 		t.Fatalf("captcha step lost its captcha type: %#v", resp.ChainSteps[1])
 	}
+	if resp.ChainSteps[1].Condition != "all" {
+		t.Fatalf("captcha step condition = %q, want all", resp.ChainSteps[1].Condition)
+	}
 }
 
 // TestGetChainConfigReturnsEmptyArrayForUnsetOrCorruptSteps 验证未配置或损坏的步骤退化为空数组而非 null。
@@ -184,7 +187,7 @@ func TestUpdateChainConfigRejectsUnsupportedStepType(t *testing.T) {
 // 只有 captcha 步骤保留 captcha_type，env/pow 步骤的该字段被清空。
 func TestUpdateChainConfigStripsCaptchaTypeFromNonCaptchaSteps(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
-	body := []byte(`{"chain_steps":[{"type":"env","captcha_type":"rotate"},{"type":"pow","captcha_type":"click"},{"type":"captcha","captcha_type":"rotate"}]}`)
+	body := []byte(`{"chain_steps":[{"type":"env","captcha_type":"rotate"},{"type":"pow","captcha_type":"click"},{"type":"captcha","condition":"env_score>30","captcha_type":"rotate"}]}`)
 	ctx := invokeProtectHandler(t, UpdateChainConfig(repo, func() error { return nil }), "POST", "/api/v1/chain/config", body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
@@ -203,8 +206,8 @@ func TestUpdateChainConfigStripsCaptchaTypeFromNonCaptchaSteps(t *testing.T) {
 	if steps[1].Type != challenge.ChainStepPoW || steps[1].CaptchaType != "" {
 		t.Fatalf("pow step should drop captcha_type: %#v", steps[1])
 	}
-	if steps[2].Type != challenge.ChainStepCaptcha || steps[2].CaptchaType != challenge.CaptchaTypeRotate {
-		t.Fatalf("captcha step should keep captcha_type: %#v", steps[2])
+	if steps[2].Type != challenge.ChainStepCaptcha || steps[2].CaptchaType != challenge.CaptchaTypeRotate || steps[2].Condition != "all" {
+		t.Fatalf("captcha step should keep captcha_type and become mandatory: %#v", steps[2])
 	}
 }
 

@@ -342,6 +342,35 @@ func TestPutProtectionSettingsSyncsBotDetectionEnabled(t *testing.T) {
 	}
 }
 
+// TestPutProtectionSettingsSyncsCaptchaProjection 验证 protection API 修改 CAPTCHA 后同步 Bot 投影。
+func TestPutProtectionSettingsSyncsCaptchaProjection(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CaptchaEnabled = false
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	if err := repo.Set("bot_settings", `{"enabled":true,"captcha_enabled":false,"score_threshold":73}`); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+
+	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"captcha_enabled":true}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatalf("load bot settings: %v", err)
+	}
+	var got shared.BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.CaptchaEnabled || got.ScoreThreshold != 73 {
+		t.Fatalf("protection update did not synchronize CAPTCHA projection: %#v", got)
+	}
+}
+
 // TestPutProtectionSettingsSyncsCVEAutoDropToDropPolicy 验证 CVE 自动丢弃开关同步写入 drop_policy。
 func TestPutProtectionSettingsSyncsCVEAutoDropToDropPolicy(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)

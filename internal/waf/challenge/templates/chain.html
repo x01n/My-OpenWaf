@@ -49,12 +49,18 @@ img{max-width:100%;border-radius:8px;margin:12px 0}
 <div class="footer">Protected by My-OpenWAF</div>
 <script>
 {{.EnvJS}}
-setTimeout(function(){
-var d=window.__owaf_env?JSON.stringify(window.__owaf_env):'{}';
-var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
-var fl={'__waf_chain_session':{{.SessionID}},'__waf_chain_step':'env','__waf_env_fp':d};
-for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
-document.body.appendChild(f);f.submit()},1500);
+(function(){
+var status=document.getElementById('st');
+function fail(message){status.textContent=message;}
+function submit(envelope){
+ var form=document.createElement('form');form.method='POST';form.action='/__owaf/chain/verify';
+ var fields={'__waf_chain_session':{{.SessionID}},'__waf_chain_step':'env','__waf_env_fp':envelope};
+ for(var key in fields){var input=document.createElement('input');input.type='hidden';input.name=key;input.value=fields[key];form.appendChild(input)}
+ document.body.appendChild(form);form.submit();
+}
+if(!window.__owaf_env_ready){fail('Environment WASM is unavailable. / 环境 WASM 不可用。');return;}
+window.__owaf_env_ready.then(function(envelope){if(!envelope){fail('Environment verification failed. / 环境验证失败。');return;}submit(envelope)}).catch(function(){fail('Environment verification failed. / 环境验证失败。');});
+})();
 </script>
 {{else if .IsPoW}}
 <div class="pb"><div class="pf" id="pg"></div></div>
@@ -62,13 +68,16 @@ document.body.appendChild(f);f.submit()},1500);
 <div class="footer">Protected by My-OpenWAF</div>
 <script>
 {{.PowJS}}
+window.__owaf_pow_error=function(message){
+ document.getElementById('st').textContent='Proof of Work failed: '+(message||'unknown error')+' / 工作量证明失败';
+};
 window.__owaf_pow_callback=function(c,h){
-document.getElementById('pg').style.width='100%';
-document.getElementById('st').textContent='Complete! / 完成！';
-var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
-var fl={'__waf_chain_session':{{.SessionID}},'__waf_chain_step':'pow','__waf_pow_counter':String(c),'__waf_pow_hash':h};
-for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
-document.body.appendChild(f);f.submit()};
+	document.getElementById('pg').style.width='100%';
+	document.getElementById('st').textContent='Complete! / 完成！';
+	var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
+	var fl={'__waf_chain_session':{{.SessionID}},'__waf_chain_step':'pow','__waf_pow_counter':String(c),'__waf_pow_hash':h};
+	for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
+	document.body.appendChild(f);f.submit()};
 </script>
 {{else}}
 <div class="captcha-box">

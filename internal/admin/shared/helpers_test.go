@@ -406,6 +406,28 @@ func TestSyncCaptchaEnabledToProtection(t *testing.T) {
 	}
 }
 
+// TestSyncProtectionCaptchaToSettingsPreservesStoredBotFields 验证 protection 反向同步只更新 CAPTCHA 投影字段。
+func TestSyncProtectionCaptchaToSettingsPreservesStoredBotFields(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := repo.Set("bot_settings", `{"enabled":true,"captcha_enabled":false,"score_threshold":77}`); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+	if err := SyncProtectionCaptchaToSettings(repo, true); err != nil {
+		t.Fatalf("SyncProtectionCaptchaToSettings: %v", err)
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatalf("load bot settings: %v", err)
+	}
+	var got BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.Enabled || !got.CaptchaEnabled || got.ScoreThreshold != 77 {
+		t.Fatalf("reverse CAPTCHA sync lost unrelated fields: %#v", got)
+	}
+}
+
 func TestSyncBrowserSignToProtection(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	if err := SyncBrowserSignToProtection(repo, true, 600, "intercept"); err != nil {

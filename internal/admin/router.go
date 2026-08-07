@@ -256,7 +256,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/lua-plugins/:id/delete", system.DeleteLuaPlugin(deps.Repos.LuaPlugin, reload))
 		opsGroup.POST("/lua-plugins/:id/toggle", system.ToggleLuaPlugin(deps.Repos.LuaPlugin, reload))
 		opsGroup.POST("/lua-plugins/validate", system.ValidateLuaPlugin())
-		opsGroup.POST("/lua-plugins/dry-run", system.DryRunLuaPlugin(deps.Cache))
+		opsGroup.POST("/lua-plugins/dry-run", system.DryRunLuaPlugin())
 		opsGroup.POST("/js-plugins", system.CreateJSPlugin(deps.Repos.JSPlugin, reload))
 		opsGroup.POST("/js-plugins/:id/update", system.UpdateJSPlugin(deps.Repos.JSPlugin, reload))
 		opsGroup.POST("/js-plugins/:id/delete", system.DeleteJSPlugin(deps.Repos.JSPlugin, reload))

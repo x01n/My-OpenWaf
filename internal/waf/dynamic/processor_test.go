@@ -382,3 +382,37 @@ func TestDynamicJSBootstrapIncludesEnvironmentGate(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessJSSkipsEmptyPathsMode(t *testing.T) {
+	p := NewProcessor(ProtectionConfig{
+		JSObfuscationEnabled: true,
+		JSProtectionMode:     "paths",
+		SiteID:               1,
+	})
+	js := []byte(`console.log("plain");`)
+	result, err := p.ProcessJS("/app.js", js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(result, js) {
+		t.Fatal("paths mode with no configured paths must not encrypt JS")
+	}
+}
+
+func TestNormalizeDecryptCacheTTLSeconds(t *testing.T) {
+	tests := []struct {
+		value int
+		want  int
+	}{
+		{value: -1, want: DefaultDecryptCacheTTLSeconds},
+		{value: 0, want: DefaultDecryptCacheTTLSeconds},
+		{value: 45, want: 45},
+		{value: MaxDecryptCacheTTLSeconds, want: MaxDecryptCacheTTLSeconds},
+		{value: MaxDecryptCacheTTLSeconds + 1, want: MaxDecryptCacheTTLSeconds},
+	}
+	for _, tt := range tests {
+		if got := NormalizeDecryptCacheTTLSeconds(tt.value); got != tt.want {
+			t.Fatalf("NormalizeDecryptCacheTTLSeconds(%d) = %d, want %d", tt.value, got, tt.want)
+		}
+	}
+}

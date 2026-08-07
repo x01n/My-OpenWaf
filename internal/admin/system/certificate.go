@@ -111,6 +111,7 @@ func CreateCertificate(repo *repository.CertificateRepo, reload func() error) ap
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		item.KeyPEM = ""
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": item})
 			return

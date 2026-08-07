@@ -1,7 +1,9 @@
 package challenge
 
 import (
+	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +80,38 @@ func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
 	}
 }
 
+// TestChainCaptchaConditionCannotSkip 验证 CAPTCHA 步骤不会被环境分数条件跳过。
+func TestChainCaptchaConditionCannotSkip(t *testing.T) {
+	captchaManager := NewCaptchaManager(nil, 0)
+	defer captchaManager.Close()
+	mgr := NewChainChallengeManager(captchaManager, nil)
+	defer mgr.Close()
+	mgr.Reconfigure([]ChainStepConfig{
+		{Type: ChainStepPoW, Condition: "all"},
+		{Type: ChainStepCaptcha, Condition: "env_score>30", CaptchaType: CaptchaTypeMath},
+	}, 1)
+
+	sessionID, _ := mgr.StartChain("/protected")
+	state := chainStateOf(t, mgr, sessionID)
+	if got := state.Steps[1].Condition; got != "all" {
+		t.Fatalf("CAPTCHA condition = %q, want all", got)
+	}
+	counter, hash := solveChainPoW(t, state.Nonce, state.powDifficulty(mgr.difficultyValue()))
+	got := mgr.ProcessStepDetailed(sessionID, map[string]string{
+		"pow_counter": counter,
+		"pow_hash":    hash,
+	})
+	if got.Passed {
+		t.Fatal("a configured CAPTCHA step must not be skipped by env_score condition")
+	}
+	if got.Failed {
+		t.Fatal("valid PoW advancement must not be marked as failed")
+	}
+	if got.NextHTML == "" || !strings.Contains(got.NextHTML, "CAPTCHA Verification") {
+		t.Fatalf("PoW advancement did not render the mandatory CAPTCHA step: %q", got.NextHTML)
+	}
+}
+
 func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 	mgr := NewShieldManager(NewCaptchaManager(nil, 0), nil, 4)
 	cfg := ShieldConfig{
@@ -98,7 +132,7 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce, EnvSessionKeyHex(session.EnvKey))
+	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce)
 	runtimeCfg := mgr.Config()
 	html := shieldPageHTMLWithConfig(session.ID, runtimeCfg, "h2", "", powScript)
 
@@ -222,7 +256,7 @@ func findShieldPoWSolution(t *testing.T, nonce string, difficulty int) (int64, s
 }
 
 func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
-	script := GeneratePoWWASMScript(1, "nonce", "aabbccdd112233445566778899001122aabbccdd112233445566778899001122")
+	script := GeneratePoWWASMScript(1, "nonce")
 	if !strings.Contains(script, "__owaf_pow_callback") {
 		t.Fatalf("GeneratePoWWASMScript() did not expose shield/chain callback: %s", script)
 	}
@@ -233,6 +267,8 @@ func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
 		"BigInt(self.__off)",
 		"BigInt(self.__bs*self.__nc)",
 		"wasm_bindgen({module_or_path:",
+		"self.__p=",
+		"solve_pow_batched(self.__n,self.__d,self.__p,self.__bs,off)",
 		"__owaf_pow_error",
 		"__owaf_pow_cancel",
 	}
@@ -246,24 +282,91 @@ func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
 	}
 }
 
-func TestEnvCheckJSExportsOwafEnv(t *testing.T) {
-	script := EnvCheckJS()
-	if !strings.Contains(script, "window.__owaf_env=fp") {
-		t.Fatalf("EnvCheckJS() did not expose __owaf_env: %s", script)
-	}
-	if !strings.Contains(script, "__owaf_env_encrypted") {
-		t.Fatalf("EnvCheckJS() dropped encrypted fingerprint export: %s", script)
+func TestGeneratedPoWScriptEmbedsValidVMProgram(t *testing.T) {
+	const (
+		programMarker = "self.__p="
+		programEnd    = ";self.__off="
+	)
+	wantOps := []byte{
+		vmOpLoadNonce,
+		vmOpLoadCounter,
+		vmOpConcat,
+		vmOpSHA256,
+		vmOpCheckPrefix,
 	}
 
-	encrypted := EnvCheckJSEncrypted("aabbccdd112233445566778899001122aabbccdd112233445566778899001122")
-	if strings.Contains(encrypted, "var fp=") {
-		t.Fatal("encrypted envcheck should obfuscate variable names")
+	for i := 0; i < 100; i++ {
+		script := GeneratePoWWASMScript(1, "nonce")
+		start := strings.Index(script, programMarker)
+		if start < 0 {
+			t.Fatalf("generated script is missing %q: %s", programMarker, script)
+		}
+		start += len(programMarker)
+		relEnd := strings.Index(script[start:], programEnd)
+		if relEnd < 0 {
+			t.Fatalf("generated script has no program terminator %q: %s", programEnd, script)
+		}
+		quoted := script[start : start+relEnd]
+		program, err := strconv.Unquote(quoted)
+		if err != nil {
+			t.Fatalf("decode quoted VM program %q: %v", quoted, err)
+		}
+		bytecode, err := hex.DecodeString(program)
+		if err != nil {
+			t.Fatalf("decode VM program %q: %v", program, err)
+		}
+		if len(bytecode) < len(wantOps)+2 || len(bytecode) > len(wantOps)+5 {
+			t.Fatalf("unexpected VM program length %d: %x", len(bytecode), bytecode)
+		}
+
+		nonNops := make([]byte, 0, len(wantOps))
+		nopCount := 0
+		for _, op := range bytecode {
+			if op == vmOpNop {
+				nopCount++
+				continue
+			}
+			nonNops = append(nonNops, op)
+		}
+		if nopCount < 2 || nopCount > 5 {
+			t.Fatalf("unexpected NOP count %d: %x", nopCount, bytecode)
+		}
+		if len(nonNops) != len(wantOps) {
+			t.Fatalf("unexpected non-NOP opcodes %x, want %x", nonNops, wantOps)
+		}
+		for j := range wantOps {
+			if nonNops[j] != wantOps[j] {
+				t.Fatalf("non-NOP opcode order %x, want %x", nonNops, wantOps)
+			}
+		}
 	}
-	if !strings.Contains(encrypted, "window.__owaf_env=") {
-		t.Fatal("encrypted envcheck must still export __owaf_env")
+}
+
+func TestEnvCheckJSUsesWASMOnly(t *testing.T) {
+	script := EnvCheckJSPlain()
+	for _, forbidden := range []string{"navigator.webdriver", "JSON.stringify(fp)", "window.__owaf_env=fp"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("EnvCheckJSPlain() retained JavaScript security calculation %q: %s", forbidden, script)
+		}
 	}
-	if !strings.Contains(encrypted, "__owaf_env_encrypted") {
-		t.Fatal("encrypted envcheck must still export encrypted fingerprint")
+	if !strings.Contains(script, "wasm_bindgen.collect_fingerprint") {
+		t.Fatalf("EnvCheckJSPlain() did not call the WASM collector: %s", script)
+	}
+
+	encrypted := EnvCheckJSEncrypted(
+		"aabbccdd112233445566778899001122aabbccdd112233445566778899001122",
+		"owaf-env:v1|challenge|1|example.test|:443|request",
+	)
+	if encrypted == "" {
+		t.Fatal("encrypted envcheck loader was not generated")
+	}
+	for _, forbidden := range []string{"navigator.webdriver", "JSON.stringify(fp)", "crypto.subtle"} {
+		if strings.Contains(encrypted, forbidden) {
+			t.Fatalf("encrypted envcheck retained JavaScript security calculation %q: %s", forbidden, encrypted)
+		}
+	}
+	if !strings.Contains(encrypted, "wasm_bindgen.collect_and_encrypt_fingerprint") {
+		t.Fatalf("encrypted envcheck must call the WASM collector: %s", encrypted)
 	}
 }
 

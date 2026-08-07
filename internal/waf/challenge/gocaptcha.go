@@ -505,8 +505,13 @@ func verifyRotateAnswer(storedAnswer, userAnswer string, tolerance int) bool {
 	if err := json.Unmarshal([]byte(userAnswer), &provided); err != nil {
 		return false
 	}
-	expectedAngle := int(getFloat(stored, "angle"))
-	providedAngle := int(getFloat(provided, "angle"))
+	expectedValue := getFloat(stored, "angle")
+	providedValue := getFloat(provided, "angle")
+	if expectedValue < 0 || expectedValue > 360 || providedValue < 0 || providedValue > 360 {
+		return false
+	}
+	expectedAngle := int(expectedValue)
+	providedAngle := int(providedValue)
 	diff := abs(providedAngle - expectedAngle)
 	if diff > 180 {
 		diff = 360 - diff

@@ -15,6 +15,7 @@ import (
 type Checker struct {
 	db     *gorm.DB
 	holder *snapshot.Holder
+	ready  func() bool
 }
 
 // New creates a health checker.
@@ -22,12 +23,17 @@ func New(db *gorm.DB, holder *snapshot.Holder) *Checker {
 	return &Checker{db: db, holder: holder}
 }
 
-// Alive returns true if the process is running (always true while reachable).
+func (c *Checker) SetReadyFunc(ready func() bool) {
+	c.ready = ready
+}
 func (c *Checker) Alive() bool { return true }
 
 // Ready returns true when DB is reachable and a snapshot is loaded.
 func (c *Checker) Ready() bool {
 	if c.holder.Load() == nil {
+		return false
+	}
+	if c.ready != nil && !c.ready() {
 		return false
 	}
 	sqlDB, err := c.db.DB()

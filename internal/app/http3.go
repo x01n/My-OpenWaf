@@ -45,6 +45,8 @@ type HTTP3Server struct {
 	spinStarted             bool
 	spinDone                chan struct{}
 	spinDoneOnce            sync.Once
+	startErrMu              sync.Mutex
+	startErr                error
 	activeLoopbackBodiesMu  sync.Mutex
 	activeLoopbackBodies    map[*cancelableBody]struct{}
 	activeLoopbackCancelsMu sync.Mutex
@@ -996,6 +998,30 @@ func http3LoopbackTLSCipherSuites() []uint16 {
 	return cfg.CipherSuites
 }
 
+func (s *HTTP3Server) Ready() bool {
+	if s == nil {
+		return false
+	}
+	s.listenMu.Lock()
+	defer s.listenMu.Unlock()
+	return s.packetConn != nil
+}
+
+func (s *HTTP3Server) Err() error {
+	if s == nil {
+		return errors.New("HTTP/3 server is nil")
+	}
+	s.startErrMu.Lock()
+	defer s.startErrMu.Unlock()
+	return s.startErr
+}
+
+func (s *HTTP3Server) setStartErr(err error) {
+	s.startErrMu.Lock()
+	s.startErr = err
+	s.startErrMu.Unlock()
+}
+
 func (s *HTTP3Server) Spin() {
 	s.listenMu.Lock()
 	s.spinStarted = true
@@ -1017,6 +1043,8 @@ func (s *HTTP3Server) Spin() {
 		case <-s.stopChan:
 			return
 		default:
+			err := fmt.Errorf("HTTP/3 listener bind %s: %w", s.bind, err)
+			s.setStartErr(err)
 			s.log.Error("HTTP/3 server error", slog.Any("err", err))
 			return
 		}
@@ -1033,6 +1061,7 @@ func (s *HTTP3Server) Spin() {
 		select {
 		case <-s.stopChan:
 		default:
+			s.setStartErr(fmt.Errorf("HTTP/3 server: %w", err))
 			s.log.Error("HTTP/3 server error", slog.Any("err", err))
 		}
 	}

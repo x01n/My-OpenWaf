@@ -39,6 +39,7 @@ import (
 	"My-OpenWaf/internal/waf/bot"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/drop"
+	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
 	wafescalation "My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/owasp"
 	"My-OpenWaf/internal/waf/pages"
@@ -504,18 +505,15 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 			// WASM 环境评分：签名有效时才采信，且仅在命中确定性自动化硬信号
 			// （score>=100）时否决，与下方明文指纹检查保持同一判定口径。
-			if challengePassed && sub.PoWSig != "" && sn.Protection.ShieldEnableEnvCheck {
-				if challenge.VerifyPoWResultSig(sub.Token, sub.Counter, sub.Proof, sub.EnvScore, sub.EnvMarkers, sub.PoWSig) {
-					if score, err := strconv.Atoi(sub.EnvScore); err == nil && score >= 100 {
-						challengePassed = false
-					}
-				}
-			}
-			// 环境检查启用时，令牌已验签后才从它导出 AES-256-GCM 密钥。
-			// 缺失、解密失败或评分不通过均拒绝，不能回退到客户端可伪造的明文指纹。
+			// 客户端 WASM 输出、score、markers 和编译期盐均不是授权根。
+			// 环境检查只接受带服务端挑战上下文 AAD 的 WASM v1 密文。
 			if challengePassed && sn.Protection.ShieldEnableEnvCheck {
 				key := challenge.EnvSessionKeyFromChallengeToken(sub.Token)
-				if !challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprint(sub.EnvFP, key)).Pass {
+				aad := challenge.EnvFingerprintAAD("challenge", sub.RequestID, challenge.ChallengeSessionBinding{
+					SiteID: rt.Site.ID,
+					Host:   host,
+				})
+				if !challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprintWithAAD(sub.EnvFP, key, aad)).Pass {
 					challengePassed = false
 				}
 			}
@@ -865,6 +863,12 @@ func Handler(opts Options) app.HandlerFunc {
 							result.Action.Type = action.Intercept
 						case "challenge":
 							result.Action.Type = action.Challenge
+						case "captcha_challenge":
+							result.Action.Type = action.CaptchaChallenge
+						case "shield_challenge":
+							result.Action.Type = action.ShieldChallenge
+						case "chain_challenge":
+							result.Action.Type = action.ChainChallenge
 						}
 						actType = action.Normalize(result.Action.Type)
 						actStr = string(actType)
@@ -2259,9 +2263,28 @@ func handleChallengeVerify(c *app.RequestContext, opts Options) bool {
 }
 
 type dynamicProtectionKeyRequest struct {
-	Ticket string          `json:"ticket"`
-	Key    string          `json:"key"`
-	Env    json.RawMessage `json:"env"`
+	Ticket string `json:"ticket"`
+	Key    string `json:"key"`
+}
+
+// parseDynamicProtectionKeyRequest 仅解析服务端签发票据所需的字段。
+// 浏览器环境信号可由客户端任意构造，不能作为 KEK 兑换授权条件。
+func parseDynamicProtectionKeyRequest(body []byte) (dynamicProtectionKeyRequest, bool) {
+	if len(body) == 0 {
+		return dynamicProtectionKeyRequest{}, false
+	}
+	var req dynamicProtectionKeyRequest
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	if err := dec.Decode(&req); err != nil {
+		return dynamicProtectionKeyRequest{}, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return dynamicProtectionKeyRequest{}, false
+	}
+	if req.Ticket == "" || req.Key == "" {
+		return dynamicProtectionKeyRequest{}, false
+	}
+	return req, true
 }
 
 func handleDynamicProtectionKey(c *app.RequestContext, opts Options) bool {
@@ -2306,30 +2329,18 @@ func handleDynamicProtectionKey(c *app.RequestContext, opts Options) bool {
 		c.JSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "dynamic key request body too large"})
 		return true
 	}
-	sn := opts.Holder.Load()
-	if sn == nil {
-		statusCode = http.StatusServiceUnavailable
-		wafAction = "dynamic_key_error"
-		c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "configuration snapshot not loaded"})
-		return true
-	}
-	var req dynamicProtectionKeyRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	req, ok := parseDynamicProtectionKeyRequest(body)
+	if !ok {
 		statusCode = http.StatusBadRequest
 		wafAction = "dynamic_key_error"
 		c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid dynamic key request"})
 		return true
 	}
-	if req.Ticket == "" || req.Key == "" {
-		statusCode = http.StatusBadRequest
+	sn := opts.Holder.Load()
+	if sn == nil {
+		statusCode = http.StatusServiceUnavailable
 		wafAction = "dynamic_key_error"
-		c.JSON(http.StatusBadRequest, map[string]string{"error": "missing dynamic key request fields"})
-		return true
-	}
-	if !validDynamicProtectionEnv(req.Env) {
-		statusCode = http.StatusBadRequest
-		wafAction = "dynamic_key_error"
-		c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid dynamic environment payload"})
+		c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "configuration snapshot not loaded"})
 		return true
 	}
 	rt, ok := sn.MatchSite(bind, host)
@@ -2342,10 +2353,7 @@ func handleDynamicProtectionKey(c *app.RequestContext, opts Options) bool {
 	siteID = rt.Site.ID
 	clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
 	logClientIP = clientIP
-	ttl := rt.DynamicProtection.DecryptCacheTTLSeconds
-	if ttl <= 0 {
-		ttl = 300
-	}
+	ttl := dynamicpkg.NormalizeDecryptCacheTTLSeconds(rt.DynamicProtection.DecryptCacheTTLSeconds)
 	claims := challenge.DynamicProtectionClaims{Host: host, ClientIP: clientIP, UserAgent: string(c.UserAgent()), SiteID: rt.Site.ID, Bind: bind}
 	kek, ok := challenge.VerifyDynamicProtectionKeyTicket(req.Ticket, challenge.DynamicProtectionKeyClaims{DynamicProtectionClaims: claims, Key: req.Key}, time.Now())
 	if !ok {
@@ -2358,27 +2366,6 @@ func handleDynamicProtectionKey(c *app.RequestContext, opts Options) bool {
 	c.Response.Header.Add("Set-Cookie", cookie)
 	c.JSON(http.StatusOK, map[string]any{"kek": kek, "ttl": ttl})
 	return true
-}
-
-func validDynamicProtectionEnv(raw json.RawMessage) bool {
-	if len(raw) == 0 || len(raw) > 16*1024 {
-		return false
-	}
-	var env struct {
-		Blocked     *bool          `json:"blocked"`
-		Reasons     []string       `json:"reasons"`
-		SoftReasons []string       `json:"softReasons"`
-		SoftScore   *float64       `json:"softScore"`
-		Signals     map[string]any `json:"signals"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil || env.Blocked == nil || env.Reasons == nil || env.SoftReasons == nil || env.SoftScore == nil || len(env.Signals) == 0 {
-		return false
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 5 {
-		return false
-	}
-	return !*env.Blocked
 }
 
 /**
@@ -2449,7 +2436,8 @@ func handleCaptchaVerify(c *app.RequestContext, opts Options) bool {
 
 	ok, session := opts.CaptchaManager.VerifyAdvancedSessionWithBinding(sessionID, answer, binding)
 	if ok && session != nil && len(session.EnvKey) > 0 {
-		result := challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprint(string(c.FormValue("__waf_env_fp")), session.EnvKey))
+		aad := challenge.EnvFingerprintAAD("captcha", session.ID, session.ChallengeSessionBinding)
+		result := challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprintWithAAD(string(c.FormValue("__waf_env_fp")), session.EnvKey, aad))
 		if !result.Pass {
 			ok = false
 		}
@@ -2483,9 +2471,17 @@ func handleShieldVerify(c *app.RequestContext, opts Options) bool {
 	hash := string(c.FormValue("__waf_pow_hash"))
 	envFP := string(c.FormValue("__waf_env_fp"))
 
-	var counter int64
-	if counterStr != "" {
-		counter, _ = strconv.ParseInt(counterStr, 10, 64)
+	counterText := strings.TrimSpace(counterStr)
+	if counterText == "" {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
+	}
+	counter, err := strconv.ParseInt(counterText, 10, 64)
+	if err != nil || counter < 0 {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
 	}
 
 	passed, originalURL := opts.ShieldManager.VerifyChallengeWithBinding(sessionID, captchaAnswer, counter, hash, envFP, requestProtocol(c), binding)

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
@@ -17,20 +18,51 @@ import (
 )
 
 // LoadProtectionConfig reads the protection settings from the system settings repository.
+// It retains the legacy default-on-missing behavior for callers that cannot return an error.
 func LoadProtectionConfig(repo *repository.SystemSettingsRepo) store.ProtectionConfig {
-	val, err := repo.Get("protection")
+	cfg, err := LoadProtectionConfigStrict(repo)
 	if err != nil {
-		return store.DefaultProtectionConfig()
-	}
-	cfg := store.DefaultProtectionConfig()
-	if json.Unmarshal([]byte(val), &cfg) != nil {
 		return store.DefaultProtectionConfig()
 	}
 	return cfg
 }
 
-// SaveProtectionConfig writes the protection settings to the system settings repository.
+// LoadProtectionConfigStrict reads and validates persisted protection settings.
+// Missing settings use defaults; database and JSON errors are returned to the caller.
+func LoadProtectionConfigStrict(repo *repository.SystemSettingsRepo) (store.ProtectionConfig, error) {
+	val, err := repo.Get("protection")
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return store.DefaultProtectionConfig(), nil
+		}
+		return store.ProtectionConfig{}, fmt.Errorf("load protection config: %w", err)
+	}
+	cfg := store.DefaultProtectionConfig()
+	if err := json.Unmarshal([]byte(val), &cfg); err != nil {
+		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
+	}
+	if err := cfg.ValidateBasicAuth(); err != nil {
+		return store.ProtectionConfig{}, err
+	}
+	return cfg, nil
+}
+
+// NormalizeAndValidateBasicAuth trims configured credentials and rejects enabled Basic Auth
+// unless both credentials are non-empty.
+func NormalizeAndValidateBasicAuth(cfg *store.ProtectionConfig) error {
+	cfg.BasicAuthUsername = strings.TrimSpace(cfg.BasicAuthUsername)
+	cfg.BasicAuthPassword = strings.TrimSpace(cfg.BasicAuthPassword)
+	return cfg.ValidateBasicAuth()
+}
+
+// SaveProtectionConfig writes validated protection settings to the system settings repository.
 func SaveProtectionConfig(repo *repository.SystemSettingsRepo, cfg store.ProtectionConfig) error {
+	if _, err := LoadProtectionConfigStrict(repo); err != nil {
+		return err
+	}
+	if err := NormalizeAndValidateBasicAuth(&cfg); err != nil {
+		return err
+	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -227,46 +259,67 @@ func ReloadCVERules(feedMgr *cve.CVEFeedManager) {
 
 // SyncBotEnabledToProtection updates ProtectionConfig.BotDetectionEnabled
 // so the engine stays consistent when the bot settings page toggles the flag.
+// SyncBotEnabledToProtection updates ProtectionConfig.BotDetectionEnabled
+// so the engine stays consistent when the bot settings page toggles the flag.
 func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
-	cfg := store.DefaultProtectionConfig()
-	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &cfg)
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
 	}
 	if cfg.BotDetectionEnabled == enabled {
 		return nil
 	}
 	cfg.BotDetectionEnabled = enabled
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal protection config: %w", err)
-	}
-	return settingsRepo.Set("protection", string(data))
+	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
 // SyncCaptchaEnabledToProtection updates ProtectionConfig.CaptchaEnabled
 // so the engine stays consistent when the bot settings page toggles the captcha flag.
+// SyncCaptchaEnabledToProtection updates ProtectionConfig.CaptchaEnabled
+// so the engine stays consistent when the bot settings page toggles the captcha flag.
 func SyncCaptchaEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
-	cfg := store.DefaultProtectionConfig()
-	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &cfg)
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
 	}
 	if cfg.CaptchaEnabled == enabled {
 		return nil
 	}
 	cfg.CaptchaEnabled = enabled
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal protection config: %w", err)
+	return SaveProtectionConfig(settingsRepo, cfg)
+}
+
+/**
+ * SyncProtectionCaptchaToSettings 将 protection 中的 CAPTCHA 开关同步到 bot_settings 投影。
+ *
+ * @param settingsRepo 系统设置仓库
+ * @param enabled protection 中的 CAPTCHA 开关
+ * @return 持久化错误
+ */
+func SyncProtectionCaptchaToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
+	current := BotSettingsResponse{ScoreThreshold: 60}
+	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
 	}
-	return settingsRepo.Set("protection", string(data))
+	if current.CaptchaEnabled == enabled {
+		return nil
+	}
+	current.CaptchaEnabled = enabled
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
+	return settingsRepo.Set("bot_settings", string(data))
 }
 
 // SyncBrowserSignToProtection 将 bot_settings 中的浏览器签名配置同步到 protection，
 // 供引擎 phase 与 proxy HTML 注入读取。
+// SyncBrowserSignToProtection synchronizes browser signature settings from
+// bot_settings to protection for the engine phase and proxy HTML injection.
 func SyncBrowserSignToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool, ttl int, action string) error {
-	cfg := store.DefaultProtectionConfig()
-	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &cfg)
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
 	}
 	changed := false
 	if cfg.BrowserSignEnabled != enabled {
@@ -284,11 +337,7 @@ func SyncBrowserSignToProtection(settingsRepo *repository.SystemSettingsRepo, en
 	if !changed {
 		return nil
 	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal protection config: %w", err)
-	}
-	return settingsRepo.Set("protection", string(data))
+	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
 // SyncBotThresholdToDropPolicy keeps the runtime bot threshold aligned with the bot settings page.

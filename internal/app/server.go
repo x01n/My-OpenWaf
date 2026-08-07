@@ -440,6 +440,7 @@ func Run() {
 
 	hc := health.New(rt.DB, rt.Snapshot)
 	lm := lifecycle.New(log)
+	hc.SetReadyFunc(lm.Ready)
 
 	dpLog := logger.New("dataplane")
 
@@ -624,7 +625,11 @@ func Run() {
 				continue
 			}
 			lm.AddHertzWithTag(name, srv, de.tag)
-			lm.StartOne(name)
+			if err := lm.StartOne(name); err != nil {
+				log.Error("hot-started site listener failed", slog.String("name", name), slog.Any("err", err))
+				lm.Remove(name)
+				continue
+			}
 			log.Info("hot-started site listener",
 				slog.String("name", name),
 				slog.String("bind", de.siteRT.Bind),
@@ -643,8 +648,11 @@ func Run() {
 				Allow0RTT:  newSn.TLSDefaults.SessionTicketsEnabled,
 			})
 			lm.AddWithTag(name, h3Srv, plan.Tag)
-			lm.StartOne(name)
-			log.Info("hot-started HTTP/3 QUIC listener",
+			if err := lm.StartOne(name); err != nil {
+				log.Error("hot-started HTTP/3 listener failed", slog.String("name", name), slog.Any("err", err))
+				lm.Remove(name)
+				continue
+			}
 				slog.String("name", name),
 				slog.String("bind", plan.Bind),
 				slog.String("targets", plan.RouteTable.targetSummary()),
@@ -742,10 +750,15 @@ func Run() {
 		return nil
 	}
 
+	var runtimeReloadMu sync.Mutex
 	var reloadRuntime func(propagate bool) error
 
-	reloadRedisRuntime := func() error {
-		stored := adminsystem.LoadRedisConfig(repos.SystemSettings)
+	var reloadRedisRuntimeInternal func() error
+	reloadRedisRuntimeInternal = func() error {
+		stored, err := adminsystem.LoadRedisConfig(repos.SystemSettings)
+		if err != nil {
+			return err
+		}
 		var nextClient *goredis.Client
 		if stored.Enabled {
 			nextClient = coreredis.OptionalClient(coreredis.RedisOptions{
@@ -796,36 +809,50 @@ func Run() {
 		return nil
 	}
 
-	ensureRedisRuntime := func() {
+	ensureRedisRuntime := func() error {
 		runtimeCfg, runtimeRedisEnabled := runtimeState()
-		stored := adminsystem.LoadRedisConfig(repos.SystemSettings)
-		if !redisRuntimeSyncNeeded(stored, runtimeCfg, runtimeRedisEnabled) {
-			return
+		stored, err := adminsystem.LoadRedisConfig(repos.SystemSettings)
+		if err != nil {
+			return err
 		}
-		if err := reloadRedisRuntime(); err != nil {
+		if !redisRuntimeSyncNeeded(stored, runtimeCfg, runtimeRedisEnabled) {
+			return nil
+		}
+		if err := reloadRedisRuntimeInternal(); err != nil {
 			log.Warn("redis runtime sync failed during reload",
 				slog.Bool("stored_enabled", stored.Enabled),
 				slog.String("stored_addr", strings.TrimSpace(stored.Addr)),
 				slog.Int("stored_db", stored.DB),
 				slog.Any("err", err),
 			)
+			return fmt.Errorf("redis runtime sync: %w", err)
 		}
+		return nil
 	}
 
 	reloadRuntime = func(propagate bool) error {
-		if err := store.BumpRevision(rt.DB); err != nil {
-			return err
+		runtimeReloadMu.Lock()
+		defer runtimeReloadMu.Unlock()
+		if propagate {
+			if err := store.BumpRevision(rt.DB); err != nil {
+				return err
+			}
 		}
 		if err := applySnapshotReload(); err != nil {
 			return err
 		}
-		stored := adminsystem.LoadRedisConfig(repos.SystemSettings)
+		stored, err := adminsystem.LoadRedisConfig(repos.SystemSettings)
+		if err != nil {
+			return err
+		}
 		runtimeCfg, runtimeRedisEnabled := runtimeState()
 		prePublish := shouldPublishConfigReloadBeforeRedisSwitch(propagate, stored, runtimeCfg, runtimeRedisEnabled)
 		if prePublish {
 			publishConfigReload()
 		}
-		ensureRedisRuntime()
+		if err := ensureRedisRuntime(); err != nil {
+			return err
+		}
 		if propagate && !prePublish {
 			publishConfigReload()
 		}
@@ -867,9 +894,13 @@ func Run() {
 	realtimeHub.Start(ctx)
 
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
-		Repos:         repos,
-		Reload:        reload,
-		ReloadRedis:   reloadRedisRuntime,
+		Repos:  repos,
+		Reload: reload,
+		ReloadRedis: func() error {
+			runtimeReloadMu.Lock()
+			defer runtimeReloadMu.Unlock()
+			return reloadRedisRuntimeInternal()
+		},
 		RuntimeState:  runtimeState,
 		Snapshot:      rt.Snapshot,
 		StaticFS:      rt.Config.AdminStaticDir,
@@ -929,8 +960,11 @@ func Run() {
 		slog.String("admin_bind", rt.Config.AdminBind),
 	)
 
-	lm.Start()
-	lm.WaitForSignal()
+	if err := lm.Start(); err != nil {
+		log.Error("server startup failed", slog.Any("err", err))
+		lm.Shutdown(context.Background())
+		return
+	}
 	stopBackground()
 }
 

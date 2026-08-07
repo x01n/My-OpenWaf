@@ -1,354 +1,265 @@
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum OpCode {
-    Nop = 0x00,
-    CheckWebDriver = 0x10,
-    CheckDevTools = 0x11,
-    CheckAutomation = 0x12,
-    CheckTiming = 0x13,
-    CheckStack = 0x14,
-    CheckMemory = 0x15,
-    CheckCanvas = 0x16,
-    CheckWebGL = 0x17,
-    CheckFingerprint = 0x18,
-    CheckPrototype = 0x19,
-    Jump = 0x20,
-    JumpIfFlag = 0x21,
-    JumpIfNotFlag = 0x22,
-    SetFlag = 0x23,
-    ClearFlag = 0x24,
-    JumpIfScore = 0x25,
-    AddScore = 0x30,
-    SetMarker = 0x31,
-    SetThrottle = 0x32,
-    MulScore = 0x33,
-    ConditionalPenalty = 0x34,
-    Shuffle = 0x40,
-    FakeCheck = 0x41,
-    Delay = 0x42,
-    XorReg = 0x43,
-    RotReg = 0x44,
-    Halt = 0xFF,
+use wasm_bindgen::prelude::*;
+
+const MAX_PROGRAM_BYTES: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpCode {
+    Nop,
+    LoadNonce,
+    LoadCounter,
+    Concat,
+    Sha256,
+    CheckPrefix,
 }
 
 impl OpCode {
-    fn from_byte(b: u8) -> Self {
-        match b {
-            0x00 => Self::Nop,
-            0x10 => Self::CheckWebDriver,
-            0x11 => Self::CheckDevTools,
-            0x12 => Self::CheckAutomation,
-            0x13 => Self::CheckTiming,
-            0x14 => Self::CheckStack,
-            0x15 => Self::CheckMemory,
-            0x16 => Self::CheckCanvas,
-            0x17 => Self::CheckWebGL,
-            0x18 => Self::CheckFingerprint,
-            0x19 => Self::CheckPrototype,
-            0x20 => Self::Jump,
-            0x21 => Self::JumpIfFlag,
-            0x22 => Self::JumpIfNotFlag,
-            0x23 => Self::SetFlag,
-            0x24 => Self::ClearFlag,
-            0x25 => Self::JumpIfScore,
-            0x30 => Self::AddScore,
-            0x31 => Self::SetMarker,
-            0x32 => Self::SetThrottle,
-            0x33 => Self::MulScore,
-            0x34 => Self::ConditionalPenalty,
-            0x40 => Self::Shuffle,
-            0x41 => Self::FakeCheck,
-            0x42 => Self::Delay,
-            0x43 => Self::XorReg,
-            0x44 => Self::RotReg,
-            0xFF => Self::Halt,
-            _ => Self::Nop,
+    fn parse(byte: u8) -> Result<Self, ProgramError> {
+        match byte {
+            0x00 => Ok(Self::Nop),
+            0x10 => Ok(Self::LoadNonce),
+            0x11 => Ok(Self::LoadCounter),
+            0x12 => Ok(Self::Concat),
+            0x13 => Ok(Self::Sha256),
+            0x14 => Ok(Self::CheckPrefix),
+            _ => Err(ProgramError::UnknownOpcode),
         }
     }
 }
 
-pub struct Context {
-    bytecode: Vec<u8>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProgramError {
+    InvalidHex,
+    OddHexLength,
+    ProgramTooLarge,
+    UnknownOpcode,
+    InvalidOpcodeOrder,
 }
 
-pub struct EnvResult {
-    pub score: u32,
-    pub throttle: u64,
+impl ProgramError {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidHex => "invalid_vm_hex",
+            Self::OddHexLength => "odd_vm_hex_length",
+            Self::ProgramTooLarge => "vm_program_too_large",
+            Self::UnknownOpcode => "unknown_vm_opcode",
+            Self::InvalidOpcodeOrder => "invalid_vm_opcode_order",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Context {
+    program: Vec<OpCode>,
+}
+
+pub(crate) struct EnvResult {
+    pub(crate) score: u32,
+    pub(crate) throttle: u64,
     markers: u32,
 }
 
 impl EnvResult {
-    pub fn markers_hex(&self) -> String {
+    pub(crate) fn markers_hex(&self) -> String {
         format!("{:08x}", self.markers)
     }
 }
 
 impl Context {
-    pub fn new(program_hex: &str) -> Self {
-        let bytecode = hex_decode(program_hex);
-        Context { bytecode }
-    }
-    pub fn execute_env_check(&self) -> EnvResult {
-        let mut score: u32 = 0;
-        let mut markers: u32 = 0;
-        let mut throttle: u64 = 0;
-        let mut pc = 0;
-        let mut flags = [false; 16];
-        let registers: [u32; 8] = [0; 8];
-        let code = &self.bytecode;
-        let max_steps = 1024; 
-        let mut steps = 0;
-
-        while pc < code.len() && steps < max_steps {
-            steps += 1;
-            let op = OpCode::from_byte(code[pc]);
-            pc += 1;
-
-            match op {
-                OpCode::Nop => {}
-
-                OpCode::CheckWebDriver => {
-                    if detect_webdriver() {
-                        score += 100;
-                        markers |= 0x01;
-                        throttle = throttle.max(500);
-                    }
-                }
-
-                OpCode::CheckDevTools => {
-                    if detect_devtools() {
-                        score += 30;
-                        markers |= 0x02;
-                        throttle = throttle.max(200);
-                    }
-                }
-
-                OpCode::CheckAutomation => {
-                    if detect_automation() {
-                        score += 80;
-                        markers |= 0x04;
-                        throttle = throttle.max(400);
-                    }
-                }
-
-                OpCode::CheckTiming => {
-                    let anomaly = detect_timing_anomaly();
-                    if anomaly > 0 {
-                        score += anomaly;
-                        markers |= 0x08;
-                        throttle = throttle.max(100 * anomaly as u64);
-                    }
-                }
-
-                OpCode::CheckStack => {
-                    if detect_stack_anomaly() {
-                        score += 20;
-                        markers |= 0x10;
-                        throttle = throttle.max(100);
-                    }
-                }
-
-                OpCode::CheckMemory => {
-                    if detect_memory_anomaly() {
-                        score += 15;
-                        markers |= 0x20;
-                    }
-                }
-
-                OpCode::CheckCanvas => {
-                    if detect_canvas_anomaly() {
-                        score += 25;
-                        markers |= 0x40;
-                        throttle = throttle.max(150);
-                    }
-                }
-
-                OpCode::CheckWebGL => {
-                    if detect_webgl_anomaly() {
-                        score += 20;
-                        markers |= 0x80;
-                    }
-                }
-
-                OpCode::CheckFingerprint => {
-                    let fp = crate::env::fingerprint_hash();
-                    if fp.is_empty() {
-                        score += 15;
-                        markers |= 0x100;
-                    }
-                }
-
-                OpCode::CheckPrototype => {
-                    if detect_prototype_tampering() {
-                        score += 40;
-                        markers |= 0x200;
-                        throttle = throttle.max(300);
-                    }
-                }
-
-                OpCode::Jump => {
-                    if pc < code.len() {
-                        let offset = code[pc] as usize;
-                        pc = offset.min(code.len());
-                    }
-                }
-
-                OpCode::JumpIfFlag => {
-                    if pc + 1 < code.len() {
-                        let flag_idx = (code[pc] & 0x0F) as usize;
-                        let target = code[pc + 1] as usize;
-                        pc += 2;
-                        if flags[flag_idx] {
-                            pc = target.min(code.len());
-                        }
-                    } else {
-                        pc = code.len();
-                    }
-                }
-
-                OpCode::JumpIfNotFlag => {
-                    if pc + 1 < code.len() {
-                        let flag_idx = (code[pc] & 0x0F) as usize;
-                        let target = code[pc + 1] as usize;
-                        pc += 2;
-                        if !flags[flag_idx] {
-                            pc = target.min(code.len());
-                        }
-                    } else {
-                        pc = code.len();
-                    }
-                }
-
-                OpCode::SetFlag => {
-                    if pc < code.len() {
-                        let idx = (code[pc] & 0x0F) as usize;
-                        flags[idx] = true;
-                        pc += 1;
-                    }
-                }
-
-                OpCode::ClearFlag => {
-                    if pc < code.len() {
-                        let idx = (code[pc] & 0x0F) as usize;
-                        flags[idx] = false;
-                        pc += 1;
-                    }
-                }
-
-                OpCode::JumpIfScore => {
-                    if pc + 2 < code.len() {
-                        let threshold = code[pc] as u32;
-                        let target = code[pc + 1] as usize;
-                        pc += 2;
-                        if score >= threshold {
-                            pc = target.min(code.len());
-                        }
-                    } else {
-                        pc = code.len();
-                    }
-                }
-
-                OpCode::AddScore => {
-                    if pc < code.len() {
-                        score += code[pc] as u32;
-                        pc += 1;
-                    }
-                }
-
-                OpCode::SetMarker => {
-                    if pc < code.len() {
-                        markers |= 1u32 << (code[pc] & 0x1F);
-                        pc += 1;
-                    }
-                }
-
-                OpCode::SetThrottle => {
-                    if pc + 1 < code.len() {
-                        let val = u16::from_le_bytes([code[pc], code[pc + 1]]) as u64;
-                        throttle = throttle.max(val);
-                        pc += 2;
-                    } else {
-                        pc = code.len();
-                    }
-                }
-
-                OpCode::MulScore => {
-                    if pc < code.len() {
-                        let factor = code[pc] as u32;
-                        score = score.saturating_mul(factor);
-                        pc += 1;
-                    }
-                }
-
-                OpCode::ConditionalPenalty => {
-                    if pc + 1 < code.len() {
-                        let flag_idx = (code[pc] & 0x0F) as usize;
-                        let penalty = code[pc + 1] as u32;
-                        if flags[flag_idx] {
-                            score = score.saturating_add(penalty);
-                            throttle = throttle.max(penalty as u64 * 2);
-                        }
-                        pc += 2;
-                    } else {
-                        pc = code.len();
-                    }
-                }
-
-                OpCode::Shuffle => {
-                    if pc < code.len() {
-                        let pair = code[pc];
-                        let a = ((pair >> 4) & 0x07) as usize;
-                        let b = (pair & 0x07) as usize;
-                        std::hint::black_box(registers[a] ^ registers[b]);
-                        pc += 1;
-                    }
-                }
-
-                OpCode::FakeCheck => {
-                    if pc < code.len() {
-                        std::hint::black_box(code[pc]);
-                        pc += 1;
-                    }
-                }
-
-                OpCode::Delay => {
-                    if pc < code.len() {
-                        let n = code[pc] as u32 * 100;
-                        burn_nop(n);
-                        pc += 1;
-                    }
-                }
-
-                OpCode::XorReg => {
-                    if pc < code.len() {
-                        let pair = code[pc];
-                        let a = ((pair >> 4) & 0x07) as usize;
-                        let b = (pair & 0x07) as usize;
-                        let result = registers[a] ^ registers[b];
-                        std::hint::black_box(result);
-                        pc += 1;
-                    }
-                }
-
-                OpCode::RotReg => {
-                    if pc < code.len() {
-                        let operand = code[pc];
-                        let reg = (operand >> 4) as usize & 0x07;
-                        let amount = (operand & 0x0F) as u32;
-                        let result = registers[reg].rotate_left(amount);
-                        std::hint::black_box(result);
-                        pc += 1;
-                    }
-                }
-
-                OpCode::Halt => break,
-            }
+    pub(crate) fn parse(program_hex: &str) -> Result<Self, ProgramError> {
+        if program_hex.len() % 2 != 0 {
+            return Err(ProgramError::OddHexLength);
+        }
+        if program_hex.len() / 2 > MAX_PROGRAM_BYTES {
+            return Err(ProgramError::ProgramTooLarge);
         }
 
-        EnvResult { score, markers, throttle }
+        let bytes = decode_hex(program_hex)?;
+        let mut program = Vec::with_capacity(bytes.len());
+        let mut expected = [
+            OpCode::LoadNonce,
+            OpCode::LoadCounter,
+            OpCode::Concat,
+            OpCode::Sha256,
+            OpCode::CheckPrefix,
+        ]
+        .into_iter();
+        let mut next = expected.next();
+
+        for byte in bytes {
+            let opcode = OpCode::parse(byte)?;
+            if opcode != OpCode::Nop {
+                if Some(opcode) != next {
+                    return Err(ProgramError::InvalidOpcodeOrder);
+                }
+                next = expected.next();
+            }
+            program.push(opcode);
+        }
+        if next.is_some() {
+            return Err(ProgramError::InvalidOpcodeOrder);
+        }
+
+        Ok(Self { program })
+    }
+
+    pub(crate) fn check_pow(&self, nonce: &str, counter: u64, difficulty: u32) -> bool {
+        let mut loaded_nonce = None;
+        let mut loaded_counter = None;
+        let mut concatenated = None;
+        let mut digest = None;
+
+        for opcode in &self.program {
+            match opcode {
+                OpCode::Nop => {}
+                OpCode::LoadNonce => loaded_nonce = Some(nonce),
+                OpCode::LoadCounter => loaded_counter = Some(counter),
+                OpCode::Concat => {
+                    let (loaded_nonce, loaded_counter) = match (loaded_nonce, loaded_counter) {
+                        (Some(loaded_nonce), Some(loaded_counter)) => {
+                            (loaded_nonce, loaded_counter)
+                        }
+                        _ => return false,
+                    };
+                    concatenated = Some(format!("{}{}", loaded_nonce, loaded_counter));
+                }
+                OpCode::Sha256 => {
+                    let input = match concatenated.as_deref() {
+                        Some(input) => input,
+                        None => return false,
+                    };
+                    digest = Some(crate::obfuscate::sha256_compute(input.as_bytes()));
+                }
+                OpCode::CheckPrefix => {
+                    return digest
+                        .as_ref()
+                        .is_some_and(|value| has_leading_zero_nibbles(value, difficulty));
+                }
+            }
+        }
+        false
     }
 }
 
+pub(crate) fn collect_environment_check() -> EnvResult {
+    let mut score = 0;
+    let mut markers = 0;
+    let mut throttle = 0;
+
+    if detect_webdriver() {
+        score += 100;
+        markers |= 0x01;
+        throttle = throttle.max(500);
+    }
+    if detect_devtools() {
+        score += 30;
+        markers |= 0x02;
+        throttle = throttle.max(200);
+    }
+    if detect_automation() {
+        score += 80;
+        markers |= 0x04;
+        throttle = throttle.max(400);
+    }
+    let timing = detect_timing_anomaly();
+    if timing > 0 {
+        score += timing;
+        markers |= 0x08;
+        throttle = throttle.max(100 * u64::from(timing));
+    }
+    if detect_stack_anomaly() {
+        score += 20;
+        markers |= 0x10;
+        throttle = throttle.max(100);
+    }
+    if detect_memory_anomaly() {
+        score += 15;
+        markers |= 0x20;
+    }
+    if detect_canvas_anomaly() {
+        score += 25;
+        markers |= 0x40;
+        throttle = throttle.max(150);
+    }
+    if detect_webgl_anomaly() {
+        score += 20;
+        markers |= 0x80;
+    }
+    if crate::env::fingerprint_hash().is_empty() {
+        score += 15;
+        markers |= 0x100;
+    }
+    if detect_prototype_tampering() {
+        score += 40;
+        markers |= 0x200;
+        throttle = throttle.max(300);
+    }
+
+    EnvResult {
+        score,
+        throttle,
+        markers,
+    }
+}
+
+fn decode_hex(program_hex: &str) -> Result<Vec<u8>, ProgramError> {
+    let mut bytes = Vec::with_capacity(program_hex.len() / 2);
+    for pair in program_hex.as_bytes().chunks_exact(2) {
+        let high = hex_nibble(pair[0]).ok_or(ProgramError::InvalidHex)?;
+        let low = hex_nibble(pair[1]).ok_or(ProgramError::InvalidHex)?;
+        bytes.push(high << 4 | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn has_leading_zero_nibbles(hash: &[u8], difficulty: u32) -> bool {
+    let full_bytes = (difficulty / 2) as usize;
+    if full_bytes > hash.len() {
+        return false;
+    }
+    if hash[..full_bytes].iter().any(|byte| *byte != 0) {
+        return false;
+    }
+    difficulty % 2 == 0 || full_bytes < hash.len() && hash[full_bytes] >> 4 == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_go_raw_opcode_program_with_nops() {
+        let context = Context::parse("00100011001200130014").expect("Go raw opcode format");
+        assert_eq!(context.program.len(), 10);
+    }
+
+    #[test]
+    fn rejects_frames_and_non_raw_opcode_programs() {
+        assert_eq!(
+            Context::parse("564d504601c90005").unwrap_err(),
+            ProgramError::UnknownOpcode
+        );
+        assert_eq!(
+            Context::parse("1011121315").unwrap_err(),
+            ProgramError::UnknownOpcode
+        );
+    }
+
+    #[test]
+    fn executes_raw_opcode_pow_semantics() {
+        let context = Context::parse("0010110012130014").expect("raw PoW program");
+        assert!(context.check_pow("nonce", 1, 1));
+        assert!(!context.check_pow("nonce", 1, 64));
+    }
+}
 
 #[wasm_bindgen]
 extern "C" {
@@ -359,17 +270,15 @@ extern "C" {
     fn console_log(s: &str);
 }
 
-use wasm_bindgen::prelude::*;
-
 fn detect_webdriver() -> bool {
     let window = match web_sys::window() {
         Some(w) => w,
-        None => return true, 
+        None => return true,
     };
 
     let nav = window.navigator();
-    let webdriver = js_sys::Reflect::get(&nav, &JsValue::from_str("webdriver"))
-        .unwrap_or(JsValue::FALSE);
+    let webdriver =
+        js_sys::Reflect::get(&nav, &JsValue::from_str("webdriver")).unwrap_or(JsValue::FALSE);
     if webdriver.is_truthy() {
         return true;
     }
@@ -377,9 +286,14 @@ fn detect_webdriver() -> bool {
         Some(d) => d,
         None => return true,
     };
-    let driver_props = ["__webdriver_evaluate", "__selenium_evaluate", "__driver_evaluate"];
+    let driver_props = [
+        "__webdriver_evaluate",
+        "__selenium_evaluate",
+        "__driver_evaluate",
+    ];
     for prop in &driver_props {
-        let val = js_sys::Reflect::get(&doc, &JsValue::from_str(prop)).unwrap_or(JsValue::UNDEFINED);
+        let val =
+            js_sys::Reflect::get(&doc, &JsValue::from_str(prop)).unwrap_or(JsValue::UNDEFINED);
         if !val.is_undefined() {
             return true;
         }
@@ -414,16 +328,26 @@ fn detect_automation() -> bool {
         Some(w) => w,
         None => return true,
     };
-    let phantom_props = ["_phantom", "callPhantom", "__nightmare", "_selenium", "domAutomation", "domAutomationController"];
+    let phantom_props = [
+        "_phantom",
+        "callPhantom",
+        "__nightmare",
+        "_selenium",
+        "domAutomation",
+        "domAutomationController",
+    ];
     for prop in &phantom_props {
-        let val = js_sys::Reflect::get(&window, &JsValue::from_str(prop)).unwrap_or(JsValue::UNDEFINED);
+        let val =
+            js_sys::Reflect::get(&window, &JsValue::from_str(prop)).unwrap_or(JsValue::UNDEFINED);
         if !val.is_undefined() {
             return true;
         }
     }
-    let chrome = js_sys::Reflect::get(&window, &JsValue::from_str("chrome")).unwrap_or(JsValue::UNDEFINED);
+    let chrome =
+        js_sys::Reflect::get(&window, &JsValue::from_str("chrome")).unwrap_or(JsValue::UNDEFINED);
     if !chrome.is_undefined() && !chrome.is_null() {
-        let runtime = js_sys::Reflect::get(&chrome, &JsValue::from_str("runtime")).unwrap_or(JsValue::UNDEFINED);
+        let runtime = js_sys::Reflect::get(&chrome, &JsValue::from_str("runtime"))
+            .unwrap_or(JsValue::UNDEFINED);
         if runtime.is_undefined() {
             return true;
         }
@@ -452,10 +376,10 @@ fn detect_timing_anomaly() -> u32 {
     let all_same = diffs.windows(2).all(|w| w[0] == w[1]);
 
     if all_zero {
-        return 40; 
+        return 40;
     }
     if all_same && diffs[0] > 0.0 {
-        return 25; 
+        return 25;
     }
 
     0
@@ -481,7 +405,7 @@ fn detect_memory_anomaly() -> bool {
     let mem = js_sys::Reflect::get(&nav, &JsValue::from_str("deviceMemory"))
         .unwrap_or(JsValue::UNDEFINED);
     if mem.is_undefined() {
-        return false; 
+        return false;
     }
     if let Some(val) = mem.as_f64() {
         return val <= 0.0;
@@ -525,8 +449,8 @@ fn detect_prototype_tampering() -> bool {
         None => return true,
     };
     let nav = window.navigator();
-    let to_string = js_sys::Reflect::get(&nav, &JsValue::from_str("toString"))
-        .unwrap_or(JsValue::UNDEFINED);
+    let to_string =
+        js_sys::Reflect::get(&nav, &JsValue::from_str("toString")).unwrap_or(JsValue::UNDEFINED);
     if !to_string.is_undefined() {
         let ts_str = js_sys::Function::from(to_string).to_string();
         let ts_val: String = ts_str.into();
@@ -552,7 +476,6 @@ fn detect_prototype_tampering() -> bool {
         Err(_) => false,
     }
 }
-
 
 fn hex_decode(hex: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(hex.len() / 2);

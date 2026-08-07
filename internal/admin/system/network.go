@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"gorm.io/gorm"
 
 	coreredis "My-OpenWaf/internal/core/redis"
 	"My-OpenWaf/internal/pkg/logger"
@@ -375,7 +377,11 @@ func UpdateTLSDefaultConfig(repo *repository.SystemSettingsRepo, reload func() e
 // GetRedisConfig 获取 Redis 连接配置。
 func GetRedisConfig(repo *repository.SystemSettingsRepo, restartRequired bool) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		cfg := LoadRedisConfig(repo)
+		cfg, err := LoadRedisConfig(repo)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
 		c.JSON(200, redisConfigResponse(cfg, restartRequired))
 	}
 }
@@ -396,7 +402,11 @@ func UpdateRedisConfig(repo *repository.SystemSettingsRepo, reload func() error)
 			c.JSON(400, map[string]string{"error": "invalid request body"})
 			return
 		}
-		cfg := LoadRedisConfig(repo)
+		cfg, err := LoadRedisConfig(repo)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
 		if req.Enabled != nil {
 			cfg.Enabled = *req.Enabled
 		}
@@ -460,18 +470,32 @@ func ListCipherSuites() app.HandlerFunc {
 	}
 }
 
-func LoadRedisConfig(repo *repository.SystemSettingsRepo) RedisConfig {
-	cfg := RedisConfig{}
-	val, err := repo.Get(store.SettingKeyRedisConfig)
-	if err != nil || val == "" {
-		return cfg
+func LoadRedisConfig(repo *repository.SystemSettingsRepo) (RedisConfig, error) {
+	if repo == nil {
+		return RedisConfig{}, errors.New("redis config repository is nil")
 	}
-	_ = json.Unmarshal([]byte(val), &cfg)
+	val, err := repo.Get(store.SettingKeyRedisConfig)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return RedisConfig{}, nil
+	}
+	if err != nil {
+		return RedisConfig{}, fmt.Errorf("load redis config: %w", err)
+	}
+	if val == "" {
+		return RedisConfig{}, nil
+	}
+	var cfg RedisConfig
+	if err := json.Unmarshal([]byte(val), &cfg); err != nil {
+		return RedisConfig{}, fmt.Errorf("decode redis config: %w", err)
+	}
 	cfg.Addr = strings.TrimSpace(cfg.Addr)
 	if cfg.DB < 0 {
-		cfg.DB = 0
+		return RedisConfig{}, fmt.Errorf("redis db must be >= 0")
 	}
-	return cfg
+	if cfg.Enabled && cfg.Addr == "" {
+		return RedisConfig{}, fmt.Errorf("redis addr is required when enabled")
+	}
+	return cfg, nil
 }
 
 func redisConfigResponse(cfg RedisConfig, restartRequired bool) RedisConfigResponse {

@@ -374,6 +374,19 @@ func TestCreateCertificateRejectsInvalidInput(t *testing.T) {
 	if created.ExpiresAt == nil {
 		t.Fatalf("expires_at should default to the certificate NotAfter")
 	}
+	if created.KeyPEM != "" {
+		t.Fatal("created certificate key_pem must be blank")
+	}
+	if bytes.Contains(ok.Response.Body(), []byte("PRIVATE KEY")) || bytes.Contains(ok.Response.Body(), []byte(firstPEMLine(keyPEM))) {
+		t.Fatalf("create response leaked private key material")
+	}
+	stored, err := repos.cert.Get(created.ID)
+	if err != nil {
+		t.Fatalf("load created certificate: %v", err)
+	}
+	if stored.KeyPEM == "" {
+		t.Fatal("created certificate private key must remain persisted")
+	}
 }
 
 func TestCreateCertificateReportsReloadFailure(t *testing.T) {
@@ -391,13 +404,28 @@ func TestCreateCertificateReportsReloadFailure(t *testing.T) {
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("reload failure status = %d, want 500", ctx.Response.StatusCode())
 	}
+	if bytes.Contains(ctx.Response.Body(), []byte("PRIVATE KEY")) || bytes.Contains(ctx.Response.Body(), []byte(firstPEMLine(keyPEM))) {
+		t.Fatal("reload failure response leaked private key material")
+	}
+	var response struct {
+		Item store.Certificate `json:"item"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("decode reload failure response: %v", err)
+	}
+	if response.Item.KeyPEM != "" {
+		t.Fatal("reload failure response item key_pem must be blank")
+	}
 	// 记录已落库，仅 reload 失败。
-	_, total, err := repos.cert.List(0, 0)
+	items, total, err := repos.cert.List(0, 0)
 	if err != nil {
 		t.Fatalf("list certificates: %v", err)
 	}
 	if total != 1 {
 		t.Fatalf("certificate total = %d, want 1 even when reload fails", total)
+	}
+	if len(items) != 1 || items[0].KeyPEM == "" {
+		t.Fatal("reload failure must keep the persisted private key")
 	}
 }
 

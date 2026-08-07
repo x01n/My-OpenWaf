@@ -1,6 +1,10 @@
 package challenge
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -98,6 +102,7 @@ func TestShieldSessionTimeoutIsFrozen(t *testing.T) {
 	cfg := DefaultShieldConfig()
 	cfg.Difficulty = 1
 	cfg.TimeoutSecs = 1
+	cfg.EnvStrictness = 0
 	cfg.EnableEnvCheck = false
 	cfg.EnableDevToolsDetect = false
 	mgr.SetConfig(cfg)
@@ -108,11 +113,22 @@ func TestShieldSessionTimeoutIsFrozen(t *testing.T) {
 	if got := session.sessionTTL(); got != time.Second {
 		t.Fatalf("session TTL = %s, want 1s", got)
 	}
+	if !session.expiredAt(session.CreatedAt.Add(time.Second)) {
+		t.Fatal("session must expire at its exact TTL boundary")
+	}
 
 	cfg.TimeoutSecs = 60
+	cfg.EnvStrictness = 2
+	cfg.EnableEnvCheck = true
 	mgr.SetConfig(cfg)
 	if got := mgr.shieldPageConfig(session).TimeoutSecs; got != 1 {
 		t.Fatalf("shield page timeout = %d, want frozen value 1", got)
+	}
+	if mgr.shieldPageConfig(session).EnableEnvCheck {
+		t.Fatal("shield page environment check must preserve the session value")
+	}
+	if got := mgr.shieldPageConfig(session).EnvStrictness; got != 0 {
+		t.Fatalf("shield page environment strictness = %d, want frozen value 0", got)
 	}
 
 	session.CreatedAt = time.Now().Add(-2 * time.Second)
@@ -133,6 +149,230 @@ func TestShieldSessionTimeoutIsFrozen(t *testing.T) {
 	}
 	if !legacy.expiredAt(time.Date(2026, time.August, 5, 0, 6, 0, 0, time.UTC)) {
 		t.Fatal("legacy session must expire after its five-minute fallback TTL")
+	}
+
+	legacySession := &ShieldSession{
+		ID:              "legacy-env-config",
+		Nonce:           GeneratePoWNonce(),
+		Difficulty:      1,
+		OriginalURL:     "/legacy",
+		RequestProtocol: "http/1.1",
+		CreatedAt:       time.Now(),
+	}
+	mgr.mu.Lock()
+	mgr.sessions[legacySession.ID] = legacySession
+	mgr.mu.Unlock()
+	counter, hash = findShieldPoWSolution(t, legacySession.Nonce, legacySession.Difficulty)
+	if ok, redirect := mgr.VerifyChallenge(legacySession.ID, "", counter, hash, "", "http/1.1"); ok || redirect != "/legacy" {
+		t.Fatalf("legacy session without frozen environment config = (%t, %q), want (false, %q)", ok, redirect, "/legacy")
+	}
+}
+
+/**
+ * TestShieldSessionProtocolIsFrozenAndBound 验证 Shield 会话锁定签发协议及协议策略，
+ * 后续配置热重载不能改变已签发会话的协议校验结果。
+ */
+func TestShieldSessionProtocolIsFrozenAndBound(t *testing.T) {
+	captcha := NewCaptchaManager(nil, 0)
+	defer captcha.Close()
+	mgr := NewShieldManager(captcha, nil, 1)
+	defer mgr.Close()
+
+	cfg := DefaultShieldConfig()
+	cfg.Difficulty = 1
+	cfg.EnableEnvCheck = false
+	cfg.RequireHTTP2 = false
+	cfg.RequireHTTP3 = false
+	cfg.AllowHTTP1 = true
+	mgr.SetConfig(cfg)
+
+	h2Session, err := mgr.GenerateChallenge("/protocol", "h2")
+	if err != nil {
+		t.Fatalf("GenerateChallenge(h2): %v", err)
+	}
+	h2Counter, h2Hash := findShieldPoWSolution(t, h2Session.Nonce, h2Session.Difficulty)
+	if ok, redirect := mgr.VerifyChallenge(h2Session.ID, "", h2Counter, h2Hash, "", "http/1.1"); ok || redirect != "/protocol" {
+		t.Fatalf("h2 session verified over HTTP/1.1 = (%t, %q), want (false, %q)", ok, redirect, "/protocol")
+	}
+
+	h1Session, err := mgr.GenerateChallenge("/protocol", "http/1.1")
+	if err != nil {
+		t.Fatalf("GenerateChallenge(http/1.1): %v", err)
+	}
+	reloaded := DefaultShieldConfig()
+	reloaded.Difficulty = 1
+	reloaded.EnableEnvCheck = false
+	reloaded.RequireHTTP2 = true
+	reloaded.AllowHTTP1 = false
+	mgr.SetConfig(reloaded)
+
+	pageCfg := mgr.shieldPageConfig(h1Session)
+	if pageCfg.RequireHTTP2 || pageCfg.RequireHTTP3 || !pageCfg.AllowHTTP1 {
+		t.Fatalf("shield page protocol config = %+v, want session protocol policy", pageCfg)
+	}
+	h1Counter, h1Hash := findShieldPoWSolution(t, h1Session.Nonce, h1Session.Difficulty)
+	if ok, redirect := mgr.VerifyChallenge(h1Session.ID, "", h1Counter, h1Hash, "", "http/1.1"); !ok || redirect != "/protocol" {
+		t.Fatalf("h1 session after protocol reload = (%t, %q), want (true, %q)", ok, redirect, "/protocol")
+	}
+}
+
+/**
+ * TestShieldVerifyChallengeAppliesEnvStrictness 验证环境检测开关及三级严格度在会话签发时冻结。
+ */
+func TestShieldVerifyChallengeAppliesEnvStrictness(t *testing.T) {
+	normalFingerprint := shieldNormalEnvFingerprint()
+	mediumScoreFingerprint := *normalFingerprint
+	mediumScoreFingerprint.DevtoolsOpen = true
+	mediumScoreFingerprint.DevtoolsTiming = 101
+	mediumScoreFingerprint.ElectronSign = true
+	if result := ValidateEnvFingerprint(&mediumScoreFingerprint); result.Score != 65 {
+		t.Fatalf("medium-score fingerprint score = %d, want 65", result.Score)
+	}
+
+	mediumScoreJSON := marshalShieldEnvFingerprint(t, &mediumScoreFingerprint)
+	normalJSON := marshalShieldEnvFingerprint(t, normalFingerprint)
+	cases := []struct {
+		name           string
+		enabled        bool
+		strictness     int
+		envFingerprint string
+		plainPayload   bool
+		wantPass       bool
+	}{
+		{name: "disabled skips automated fingerprint", enabled: false, strictness: 2, envFingerprint: `{"webdriver":true}`, wantPass: true},
+		{name: "strictness zero rejects missing", enabled: true, strictness: 0, wantPass: false},
+		{name: "strictness zero rejects malformed", enabled: true, strictness: 0, envFingerprint: `{`, wantPass: false},
+		{name: "strictness zero accepts score above fifty", enabled: true, strictness: 0, envFingerprint: mediumScoreJSON, plainPayload: true, wantPass: true},
+		{name: "strictness zero rejects score one hundred", enabled: true, strictness: 0, envFingerprint: `{"webdriver":true}`, plainPayload: true, wantPass: false},
+		{name: "strictness one rejects missing", enabled: true, strictness: 1, wantPass: false},
+		{name: "strictness one rejects malformed", enabled: true, strictness: 1, envFingerprint: `{`, wantPass: false},
+		{name: "strictness one rejects score above fifty", enabled: true, strictness: 1, envFingerprint: mediumScoreJSON, plainPayload: true, wantPass: false},
+		{name: "strictness two rejects missing", enabled: true, strictness: 2, wantPass: false},
+		{name: "strictness two rejects malformed", enabled: true, strictness: 2, envFingerprint: `{`, wantPass: false},
+		{name: "strictness two rejects score above fifty", enabled: true, strictness: 2, envFingerprint: mediumScoreJSON, plainPayload: true, wantPass: false},
+		{name: "strictness two accepts score at most fifty", enabled: true, strictness: 2, envFingerprint: normalJSON, plainPayload: true, wantPass: true},
+	}
+
+	captcha := NewCaptchaManager(nil, 0)
+	defer captcha.Close()
+	mgr := NewShieldManager(captcha, nil, 1)
+	defer mgr.Close()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultShieldConfig()
+			cfg.Difficulty = 1
+			cfg.EnableEnvCheck = tc.enabled
+			cfg.EnvStrictness = tc.strictness
+			mgr.SetConfig(cfg)
+
+			session, err := mgr.GenerateChallenge("/protected", "http/1.1")
+			if err != nil {
+				t.Fatalf("GenerateChallenge(): %v", err)
+			}
+			envFingerprint := tc.envFingerprint
+			if tc.plainPayload {
+				envFingerprint = encryptShieldEnvFingerprint(
+					t,
+					envFingerprint,
+					session.EnvKey,
+					EnvFingerprintAAD("shield", session.ID, session.ChallengeSessionBinding),
+				)
+			}
+			reloaded := DefaultShieldConfig()
+			reloaded.Difficulty = 1
+			reloaded.EnableEnvCheck = !tc.enabled
+			reloaded.EnvStrictness = 2
+			mgr.SetConfig(reloaded)
+			if got := mgr.shieldPageConfig(session).EnableEnvCheck; got != tc.enabled {
+				t.Fatalf("shield page environment check = %t, want frozen value %t", got, tc.enabled)
+			}
+			if got := mgr.shieldPageConfig(session).EnvStrictness; got != tc.strictness {
+				t.Fatalf("shield page environment strictness = %d, want frozen value %d", got, tc.strictness)
+			}
+			counter, hash := findShieldPoWSolution(t, session.Nonce, session.Difficulty)
+			got, _ := mgr.VerifyChallenge(session.ID, "", counter, hash, envFingerprint, "http/1.1")
+			if got != tc.wantPass {
+				t.Fatalf("VerifyChallenge() = %t, want %t", got, tc.wantPass)
+			}
+		})
+	}
+}
+
+func shieldNormalEnvFingerprint() *EnvFingerprint {
+	return &EnvFingerprint{
+		ChromePresent:        true,
+		PluginsCount:         2,
+		Languages:            "en-US",
+		CanvasHash:           "canvas",
+		WebGLRenderer:        "Intel",
+		ScreenWidth:          1920,
+		ScreenHeight:         1080,
+		HardwareConcur:       4,
+		ColorDepth:           24,
+		PixelRatio:           1,
+		AudioHash:            "audio",
+		FontCount:            1,
+		SessionStorage:       true,
+		IndexedDB:            true,
+		PlatformStr:          "Win32",
+		CookieEnabled:        true,
+		WebAssembly:          true,
+		ServiceWorker:        true,
+		MediaDevices:         true,
+		WebGL2Support:        true,
+		ScreenConsistency:    true,
+		TimezoneConsistency:  true,
+		LanguageConsistency:  true,
+		MathConsistency:      true,
+		IntersectionObserver: true,
+		MutationObserver:     true,
+		ResizeObserver:       true,
+	}
+}
+
+func marshalShieldEnvFingerprint(t *testing.T, fp *EnvFingerprint) string {
+	t.Helper()
+	data, err := json.Marshal(fp)
+	if err != nil {
+		t.Fatalf("marshal env fingerprint: %v", err)
+	}
+	return string(data)
+}
+
+func encryptShieldEnvFingerprint(t *testing.T, plaintext string, key []byte, aad string) string {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("new AES cipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("new GCM: %v", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatalf("generate nonce: %v", err)
+	}
+	ciphertext := gcm.Seal(nil, nonce, []byte(plaintext), []byte(aad))
+	return envCiphertextPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
+}
+
+/**
+ * TestShieldSetConfigNormalizesInvalidEnvStrictness 验证非法严格度归一为 1。
+ */
+func TestShieldSetConfigNormalizesInvalidEnvStrictness(t *testing.T) {
+	captcha := NewCaptchaManager(nil, 0)
+	defer captcha.Close()
+	mgr := NewShieldManager(captcha, nil, 1)
+	defer mgr.Close()
+
+	for _, strictness := range []int{-1, 3} {
+		cfg := DefaultShieldConfig()
+		cfg.EnvStrictness = strictness
+		mgr.SetConfig(cfg)
+		if got := mgr.Config().EnvStrictness; got != 1 {
+			t.Fatalf("strictness=%d: Config().EnvStrictness = %d, want 1", strictness, got)
+		}
 	}
 }
 
@@ -558,4 +798,23 @@ func TestSetChallengeSecretIsRaceFree(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+/**
+ * TestVerifyRotateAnswerRejectsOutOfRangeAngles 验证旋转验证码拒绝超出 0 到 360 度范围的输入。
+ */
+func TestVerifyRotateAnswerRejectsOutOfRangeAngles(t *testing.T) {
+	stored := `{"angle":90}`
+	for _, answer := range []string{
+		`{"angle":1000000}`,
+		`{"angle":-1000000}`,
+		`{"angle":450}`,
+	} {
+		if verifyRotateAnswer(stored, answer, 10) {
+			t.Fatalf("verifyRotateAnswer accepted out-of-range answer %s", answer)
+		}
+	}
+	if !verifyRotateAnswer(stored, `{"angle":95}`, 10) {
+		t.Fatal("verifyRotateAnswer rejected an in-range answer within tolerance")
+	}
 }

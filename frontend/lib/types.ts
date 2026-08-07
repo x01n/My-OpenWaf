@@ -89,8 +89,8 @@ export interface Site {
   dynamic_protection_enabled?: boolean | null
   dynamic_html_enabled?: boolean | null
   dynamic_js_enabled?: boolean | null
-  dynamic_js_mode?: string
-  dynamic_js_paths?: string // JSON 数组字符串
+  dynamic_js_mode?: "" | "all" | "paths"
+  dynamic_js_paths?: string | string[] // 响应为 JSON 数组字符串，更新时允许提交数组
   dynamic_decrypt_cache_ttl?: number | null
 
   // 站点级 CC 规则覆盖（null/undefined = 继承全局；true = 站点自定义；false = 站点关闭）
@@ -689,7 +689,7 @@ export interface RedisConfigResponse {
 
 export interface RedisConfigUpdate {
   enabled?: boolean
-  redis_addr: string
+  redis_addr?: string
   redis_password?: string
   redis_db?: number
 }
@@ -720,23 +720,74 @@ export interface AuthSession {
 // ============================================================
 
 export interface ProtectionSettings {
-  global_mode: "protect" | "observe" | "maintenance"
-  shield_enabled: boolean
-  shield_ttl: number
-  rate_limit_enabled: boolean
-  rate_limit_window: number
-  rate_limit_max: number
-  rate_limit_action: string
-  bot_protection_enabled: boolean
-  bot_protection_level: string
+  request_ratelimit_enabled: boolean
+  request_ratelimit_window: number
+  request_ratelimit_max: number
+  request_ratelimit_action: string
+  error_ratelimit_enabled: boolean
+  error_ratelimit_window: number
+  error_ratelimit_max: number
+  error_ratelimit_count_4xx: boolean
+  error_ratelimit_count_5xx: boolean
+  error_ratelimit_count_block: boolean
+  error_ratelimit_action: string
+  builtin_owasp_enabled: boolean
+  builtin_owasp_sensitivity: string
+  builtin_owasp_on_hit: string
+  maintenance_global_enabled: boolean
+  maintenance_global_html: string
+  maintenance_global_status: number
+  bot_detection_enabled: boolean
+  auto_ban_enabled: boolean
+  auto_ban_threshold: number
+  auto_ban_window: number
+  auto_ban_duration: number
+  waiting_room_enabled: boolean
+  cc_use_custom: boolean
+  cc_rules: unknown[]
+  owasp_modules: Record<string, string>
+  cve_enabled: boolean
+  cve_action: string
+  cve_auto_drop_critical: boolean
+  cve_auto_drop_high: boolean
+  category_sensitivity: Record<string, string>
+  owasp_rules_config: Record<string, unknown>
+  cve_rules_config: Record<string, unknown>
+  login_min_password_length: number
+  login_max_attempts: number
+  login_lockout_minutes: number
   captcha_enabled: boolean
-  captcha_type: string
+  captcha_type: "math" | "click" | "slide" | "rotate"
+  captcha_timeout: number
+  captcha_pass_ttl: number
+  shield_enabled: boolean
+  shield_difficulty: number
+  shield_timeout_secs: number
+  shield_auto_start_delay: number
+  shield_max_retries: number
+  shield_env_strictness: ShieldEnvStrictness
+  shield_require_http2: boolean
+  shield_require_http3: boolean
+  shield_allow_http1: boolean
+  shield_enable_js_challenge: boolean
+  shield_enable_env_check: boolean
+  shield_enable_devtools: boolean
   chain_enabled: boolean
-  chain_steps: number
+  chain_steps: unknown[]
+  escalation_enabled: boolean
+  escalation_window_secs: number
+  escalation_steps: unknown[]
+  basic_auth_enabled: boolean
+  basic_auth_username: string
+  basic_auth_password: string
+  browser_sign_enabled: boolean
+  browser_sign_ttl: number
+  browser_sign_action: string
 }
 
 export interface BotSettings {
   enabled: boolean
+  captcha_enabled: boolean
   dynamic_protection_enabled: boolean
   html_obfuscation: boolean
   js_obfuscation: boolean
@@ -754,30 +805,57 @@ export interface BotSettings {
   exclude_record_headers?: string[]
 }
 
+export type ShieldEnvStrictness = 0 | 1 | 2
+
 export interface CaptchaConfig {
-  enabled: boolean
-  type: "recaptcha" | "hcaptcha" | "turnstile" | "geetest" | "custom"
-  site_key?: string
-  secret_key?: string
-  api_server?: string
+  captcha_enabled: boolean
+  captcha_type: "math" | "click" | "slide" | "rotate"
+  captcha_timeout: number
+  captcha_pass_ttl: number
+  shield_enabled: boolean
+  shield_difficulty: number
+  shield_timeout_secs: number
+  shield_auto_start_delay: number
+  shield_max_retries: number
+  shield_env_strictness: ShieldEnvStrictness
+  shield_require_http2: boolean
+  shield_require_http3: boolean
+  shield_allow_http1: boolean
+  shield_enable_js_challenge: boolean
+  shield_enable_env_check: boolean
+  shield_enable_devtools: boolean
+}
+
+export type CaptchaType = "math" | "click" | "slide" | "rotate"
+export type ChainStepType = "env" | "pow" | "captcha"
+export type ChainStepCondition =
+  | ""
+  | "all"
+  | "env_score>30"
+  | "env_score<30"
+  | "score>50"
+  | "score>80"
+
+export interface ChainStepConfig {
+  type: ChainStepType
+  condition?: ChainStepCondition
+  captcha_type?: CaptchaType
+}
+
+export interface EscalationStepConfig {
+  threshold: number
+  action: string
 }
 
 export interface ChainConfig {
-  enabled: boolean
-  steps: number
-  timeout: number
-}
-
-export interface SensitivityConfig {
-  level: "low" | "mid" | "high"
-  custom_rules?: string
+  chain_enabled: boolean
+  chain_steps: ChainStepConfig[]
 }
 
 export interface EscalationConfig {
-  enabled: boolean
-  threshold: number
-  window: number
-  action: string
+  escalation_enabled: boolean
+  escalation_window_secs: number
+  escalation_steps: EscalationStepConfig[]
 }
 
 // ============================================================

@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 #[inline(never)]
 pub fn sha256_compute(data: &[u8]) -> [u8; 32] {
@@ -27,7 +27,7 @@ fn path_beta(data: &[u8]) -> [u8; 32] {
     let mid = data.len() / 2;
     hasher.update(&data[..mid]);
     hasher.update(&data[mid..]);
-    let result = hasher.finalize();
+    let result: hmac::digest::array::Array<u8, hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UTerm, hmac::digest::consts::B1>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>> = hasher.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&result);
     out
@@ -39,7 +39,7 @@ fn path_gamma(data: &[u8]) -> [u8; 32] {
     for chunk in data.chunks(8) {
         hasher.update(chunk);
     }
-    let result = hasher.finalize();
+    let result: hmac::digest::array::Array<u8, hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UTerm, hmac::digest::consts::B1>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>> = hasher.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&result);
     out
@@ -56,7 +56,7 @@ fn path_delta(data: &[u8]) -> [u8; 32] {
     } else {
         hasher.update(data);
     }
-    let result = hasher.finalize();
+    let result: hmac::digest::array::Array<u8, hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UInt<hmac::digest::typenum::UTerm, hmac::digest::consts::B1>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>, hmac::digest::consts::B0>> = hasher.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&result);
     out

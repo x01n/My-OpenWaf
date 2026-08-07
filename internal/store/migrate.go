@@ -1,9 +1,12 @@
 package store
 
 import (
+	"fmt"
+
 	"My-OpenWaf/internal/store/migrations"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // AutoMigrate applies schema for all domain models.
@@ -70,6 +73,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&FalsePositiveReport{},
 
 		&LuaPlugin{},
+		&JSPlugin{},
 	); err != nil {
 		return err
 	}
@@ -98,13 +102,24 @@ func AutoMigrateLogs(db *gorm.DB) error {
 }
 
 func BumpRevision(db *gorm.DB) error {
-	var cr ConfigRevision
-	tx := db.FirstOrCreate(&cr, ConfigRevision{ID: 1})
-	if tx.Error != nil {
-		return tx.Error
+	seed := ConfigRevision{ID: 1, Revision: 0}
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoNothing: true,
+	}).Create(&seed).Error; err != nil {
+		return err
 	}
-	cr.Revision++
-	return db.Save(&cr).Error
+
+	result := db.Model(&ConfigRevision{}).
+		Where("id = ?", seed.ID).
+		UpdateColumn("revision", gorm.Expr("revision + ?", 1))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("config revision row %d was not updated", seed.ID)
+	}
+	return nil
 }
 
 func CurrentRevision(db *gorm.DB) (uint64, error) {

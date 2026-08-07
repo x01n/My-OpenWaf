@@ -66,7 +66,7 @@ export default function OWASPRulesPage() {
     effectivePolicyId ? params : null
   )
   const { data: stats, mutate: mutateStats } = useOwaspStats(
-    effectivePolicyId ? { policy_id: effectivePolicyId } : null
+    effectivePolicyId ? params : null
   )
   const rules = useMemo(() => data?.items ?? [], [data?.items])
   const categories = useMemo(() => {
@@ -101,7 +101,7 @@ export default function OWASPRulesPage() {
       await owaspApi.reset(rule.id, effectivePolicyId)
       await refresh()
       toast.success(
-        t("owaspRules.resetSuccess", { defaultValue: "已恢复继承" })
+        t("owaspRules.resetSuccess")
       )
     } catch (err) {
       toast.error(
@@ -124,14 +124,14 @@ export default function OWASPRulesPage() {
     },
     {
       key: "rule",
-      title: t("owaspRules.rule", { defaultValue: "规则" }),
+      title: t("owaspRules.rule"),
       render: (row: OWASPRuleItem) => (
         <div className="space-y-1">
           <div className="flex items-center gap-2 font-mono text-xs">
             {row.id}
             {row.overridden && (
               <Badge variant="outline">
-                {t("owaspRules.overridden", { defaultValue: "已覆盖" })}
+                {t("owaspRules.overridden")}
               </Badge>
             )}
           </div>
@@ -144,7 +144,7 @@ export default function OWASPRulesPage() {
     },
     {
       key: "category",
-      title: t("common.category", { defaultValue: "分类" }),
+      title: t("common.category"),
       width: "140px",
       render: (row: OWASPRuleItem) => owaspCategoryLabel(row.category),
     },
@@ -172,7 +172,7 @@ export default function OWASPRulesPage() {
     },
     {
       key: "sensitivity",
-      title: t("attacks.sensitivity", { defaultValue: "敏感度" }),
+      title: t("attacks.sensitivity"),
       width: "150px",
       render: (row: OWASPRuleItem) => (
         <Select
@@ -185,7 +185,7 @@ export default function OWASPRulesPage() {
           <SelectContent>
             {SENSITIVITIES.map((s) => (
               <SelectItem key={s} value={s}>
-                {s}
+                {t(`attacks.sensitivityValues.${s}`)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -212,11 +212,8 @@ export default function OWASPRulesPage() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title={t("owaspRules.title", { defaultValue: "OWASP 规则" })}
-        description={t("owaspRules.description", {
-          defaultValue:
-            "按策略管理全部内置 OWASP 规则的启用状态、动作和敏感度。",
-        })}
+        title={t("owaspRules.title")}
+        description={t("owaspRules.description")}
         actions={
           <Button variant="outline" onClick={refresh}>
             <IconRefresh className="mr-1 h-4 w-4" />
@@ -232,16 +229,14 @@ export default function OWASPRulesPage() {
       )}
       <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-4">
         <div className="space-y-1.5">
-          <Label>{t("policies.title", { defaultValue: "策略" })}</Label>
+          <Label>{t("policies.title")}</Label>
           <Select
             value={effectivePolicyId ? String(effectivePolicyId) : ""}
             onValueChange={(v) => setPolicyId(Number(v))}
           >
             <SelectTrigger className="w-64">
               <SelectValue
-                placeholder={t("rules.policyPlaceholder", {
-                  defaultValue: "选择策略",
-                })}
+                placeholder={t("rules.policyPlaceholder")}
               />
             </SelectTrigger>
             <SelectContent>
@@ -249,7 +244,7 @@ export default function OWASPRulesPage() {
                 <SelectItem key={p.id} value={String(p.id)}>
                   {p.name}
                   {p.is_default
-                    ? ` (${t("common.default", { defaultValue: "默认" })})`
+                    ? ` (${t("common.default")})`
                     : ""}
                 </SelectItem>
               ))}
@@ -257,7 +252,7 @@ export default function OWASPRulesPage() {
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label>{t("common.category", { defaultValue: "分类" })}</Label>
+          <Label>{t("common.category")}</Label>
           <Select
             value={category || FILTER_ALL}
             onValueChange={(v) => setCategory(v === FILTER_ALL ? "" : v)}
@@ -276,17 +271,17 @@ export default function OWASPRulesPage() {
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label>{t("common.search", { defaultValue: "搜索" })}</Label>
+          <Label>{t("common.search")}</Label>
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="w-64"
-            placeholder="rule id / name"
+            placeholder={t("rules.searchPlaceholder")}
           />
         </div>
         {stats && (
           <Badge variant="secondary" className="mb-2">
-            {stats.enabled_count}/{stats.total} enabled
+            {stats.enabled_count}/{stats.total} {t("common.enabled")}
           </Badge>
         )}
       </div>
@@ -295,7 +290,7 @@ export default function OWASPRulesPage() {
         data={rules}
         loading={isLoading}
         rowKey={(row) => row.id}
-        emptyText={t("owaspRules.empty", { defaultValue: "暂无 OWASP 规则" })}
+        emptyText={t("owaspRules.empty")}
       />
     </div>
   )

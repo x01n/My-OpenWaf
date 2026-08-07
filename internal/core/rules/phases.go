@@ -1225,7 +1225,7 @@ func (p *browserSignPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, boo
 	}
 
 	envHardFail := p.cfg.ShieldEnableEnvCheck
-	ok, reason := challenge.VerifyBrowserSignHeaders(ctx.Headers, ctx.Method, ctx.Path, ctx.Host, ctx.SiteID, time.Now(), envHardFail)
+	ok, reason := challenge.VerifyBrowserSignHeaders(ctx.Headers, ctx.Method, ctx.Path, ctx.RawQuery, ctx.Host, ctx.SiteID, time.Now(), envHardFail)
 	if ok {
 		return action.Pass(), false
 	}

@@ -201,11 +201,9 @@ IPReputation → AntiReplay → ACL → LuaPre → OWASP → CVE → BotDetectio
 | 字段 | 说明 |
 | --- | --- |
 | `ctx.headers` | 请求头映射，**键一律小写**（数据面的 `populateRequestCtxHeaders` 保证）。用 `ctx.headers["user-agent"]`，不要用 `ctx.headers["User-Agent"]`。缺失的头返回 `nil` |
-| `ctx.query_params` | 查询参数映射。**运行时恒为空表**——见下方警告 |
+| `ctx.query_params` | 查询参数映射；重复键保留首个值 |
 
-> **`ctx.query_params` 目前在数据面不可用。**
-> `pipeline.RequestCtx.QueryParams` 在整个数据面路径上从未被填充（只在对象池里被重置为 `nil`），所以线上请求走到脚本时这个表总是空的。而 dry-run 接口**可以**显式传 `query_params`，于是脚本在试运行里能通过、上线后静默失效。
-> **要读查询参数，请自己解析 `ctx.query`**（示例见 `lua-examples/03-scanner-block.lua` 里的 `string.find` 用法）。
+> `ctx.query_params` 由数据面从原始查询串填充；同名参数保留首个值。dry-run 与线上都使用该映射契约。
 
 ### TLS 指纹字段
 
@@ -500,7 +498,7 @@ return {
 
 `compile_error` 非空时其余字段无意义。`runtime_error` 非空表示执行出错（含超时）。`decision.Action` 为空串表示脚本未做判定。
 
-> dry-run 用独立的状态机池，不复用线上状态机，试运行不会污染生产请求。但它**会**用真实的 KV 后端，所以试跑带 `kv.incr` 的脚本会真的写 Redis 计数。dry-run 直接执行脚本，不经过线上 `Engine.Evaluate` 的 KV 可用性门禁；因此 KV 不可用时，dry-run 仍可能展示脚本返回的 `decision`，这不代表线上会采纳该判定。线上宿主在 KV 不可用时始终强制 fail-open。
+> dry-run 使用独立的状态机池，不复用线上状态机，试运行不会污染生产请求；同时不注入生产 RedisKV，`ctx.kv.available()` 固定为 false，KV 操作不会写入生产数据。dry-run 直接执行脚本，不经过线上 `Engine.Evaluate` 的可用性门禁，因此即使脚本返回 `decision`，也不代表线上会采纳该判定。线上宿主在 KV 不可用时始终强制 fail-open。
 >
 > dry-run 返回的是**脚本原始 `Decision`**，不会调用线上动作归一化，也不会执行 `post` 阶段的最终判定合并。因此脚本返回 `block` / `log_only` 时，试运行可能显示别名；线上分别按 `intercept` / `observe` 处理。若线上已有终止判定，`post` 脚本返回非 `allow` 的动作在线上会保留原判定，而 dry-run 只展示脚本自身返回值。界面中的判定结果不能当作最终 WAF 响应。
 
@@ -529,7 +527,7 @@ luaplugin: compile "validate": <file>:3: unexpected symbol near 'end'
 4. **阶段选对了没。** 想推翻内置拦截必须是 `post` + `allow`；想在 OWASP 之前决策必须是 `pre`。
 5. **前面有没有别的脚本先给了判定。** 同阶段按 `priority` 升序执行，`Engine.Evaluate` 返回第一个有判定的结果，后面的脚本根本不会跑。
 6. **返回的动作名是不是有效的。** 无法识别的动作被静默忽略。对照上面的动作表。
-7. **是不是踩了 `ctx.query_params` 恒空、Lua 响应控制范围或 KV fail-open 这几个坑。** `headers` / `response_body` 只在普通 Lua 终止拦截响应分支使用；`headers` 还会过滤敏感/逐跳/`Content-Length`/`Location`/非法字段名/CRLF。`tags` 只进入 `action.Result.Tags`，当前没有独立日志持久化字段。线上 KV 不可用时宿主强制丢弃 Lua 判定。
+7. **是不是踩了 Lua 响应控制范围或 KV fail-open 这几个坑。** `headers` / `response_body` 只在普通 Lua 终止拦截响应分支使用；`headers` 还会过滤敏感/逐跳/`Content-Length`/`Location`/非法字段名/CRLF。`tags` 只进入 `action.Result.Tags`，当前没有独立日志持久化字段。线上 KV 不可用时宿主强制丢弃 Lua 判定。
 
 ### 运行时报错与超时
 
@@ -563,7 +561,7 @@ lua plugin failed, skipping   script=<脚本名> stage=<pre|post> err=<错误>
 
 用 `POST /lua-plugins/dry-run` 固定一个样例请求逐步排查。它返回确切的 `decision` 与 `elapsed_ms`，比看线上日志快得多。注意两点差异：
 
-- dry-run 的 `query_params` 能传值，线上恒空。**别用 dry-run 验证依赖 `query_params` 的逻辑。**
+- dry-run 与线上都会从原始查询串填充 `query_params`；重复键保留首个值。两者使用同一映射契约。
 - dry-run 里的 `phase` / `action` 是你自己填的，不代表内置引擎真的会那样判。想知道内置怎么判，看安全事件里的 `phase` 与 `action` 字段。
 
 ### 排查 KV

@@ -39,6 +39,8 @@
     "type": "Type",
     "name": "Name",
     "description": "Description",
+    "category": "Category",
+    "default": "Default",
     "action": "Action",
     "actions": "Actions",
     "time": "Time",
@@ -498,7 +500,11 @@
       "primaryListener": "Primary",
       "upstreamScheme": "Upstream must start with http://, https://, h2c:// or h3://",
       "certRequiredHint": "HTTPS is enabled — a certificate must be selected before saving.",
-      "certRequired": "A certificate is required when any listener uses HTTPS"
+      "certRequired": "A certificate is required when any listener uses HTTPS",
+      "policy": "Protection Policy",
+      "policyPlaceholder": "Select a policy",
+      "policyInheritDefault": "Inherit default policy",
+      "policyHint": "The site inherits the current default policy when no policy is selected."
     },
     "deleteTitle": "Delete Site",
     "deleteConfirm": "Are you sure you want to delete this site? This action cannot be undone.",
@@ -566,6 +572,15 @@
     "observe": "Observe Only",
     "balanced": "Balanced",
     "strict": "Strict",
+    "sensitivity": "Sensitivity",
+    "sensitivityValues": {
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "very_high": "Very high",
+      "strict": "Strict",
+      "off": "Off"
+    },
     "batchApplied": "Batch config applied to all modules",
     "dataNotLoaded": "Data not loaded yet, please retry",
     "followGlobal": "Switched to follow global config",
@@ -676,7 +691,9 @@
     "description": "Manage custom allow/block rules by IP, path, headers, and more",
     "pattern": "Pattern",
     "priority": "Priority",
-    "emptyHint": "No rules yet, click the button above to add one"
+    "emptyHint": "No rules yet, click the button above to add one",
+    "policyPlaceholder": "Select a policy",
+    "searchPlaceholder": "Rule ID / name"
   },
   "ccProtection": {
     "title": "CC Protection",
@@ -789,7 +806,23 @@
     "browserSignActionDesc": "Action when an API request is missing or forges browser-sign headers.",
     "browserSignActionObserve": "Observe only",
     "browserSignActionChallenge": "JS challenge",
-    "browserSignActionIntercept": "Intercept"
+    "browserSignActionIntercept": "Intercept",
+    "shieldEnvironment": {
+      "title": "Shield Environment Check",
+      "description": "Verify browser environment signals and automation traits before a Shield challenge completes.",
+      "enable": "Enable environment check",
+      "enableDescription": "Collect and validate browser environment signals during the Shield challenge.",
+      "strictness": "Check strictness",
+      "strictnessDescription": "Higher strictness is more likely to reject inconsistent environments and automated browsers.",
+      "strictnessRelaxed": "Relaxed (0)",
+      "strictnessStandard": "Standard (1)",
+      "strictnessStrict": "Strict (2)",
+      "disabledHint": "Environment checks are disabled. The selected strictness is retained and takes effect after re-enabling.",
+      "save": "Save environment check settings",
+      "saveSuccess": "Shield environment check settings saved",
+      "saveFailed": "Failed to save Shield environment check settings",
+      "unavailable": "Shield environment check configuration is unavailable and cannot be edited."
+    }
   },
   "authConfig": {
     "title": "Auth Config",
@@ -1390,6 +1423,43 @@
     "anyStart": "Any start",
     "anyEnd": "Now"
   },
+  "policies": {
+    "title": "Policies",
+    "description": "Manage the default policy inherited by sites and custom policies.",
+    "create": "Create Policy",
+    "empty": "No policies",
+    "nameRequired": "Please enter a policy name",
+    "namePlaceholder": "Policy name",
+    "createSuccess": "Policy created",
+    "defaultUpdated": "Default policy updated",
+    "defaultDeleteBlocked": "The default policy cannot be deleted",
+    "deleteSuccess": "Policy deleted",
+    "refs": "References",
+    "siteRefs": "Sites",
+    "ruleRefs": "Rules",
+    "setDefault": "Set as default"
+  },
+  "cveRules": {
+    "title": "CVE Rules",
+    "description": "Manage CVE rule overrides by global, policy, or site scope.",
+    "empty": "No CVE rules",
+    "overridden": "Overridden",
+    "resetSuccess": "Inheritance restored",
+    "rule": "Rule",
+    "scope": "Scope",
+    "scopeGlobal": "Global",
+    "scopePolicy": "Policy",
+    "scopeSite": "Site",
+    "severity": "Severity"
+  },
+  "owaspRules": {
+    "title": "OWASP Rules",
+    "description": "Manage the enabled state, action, and sensitivity of built-in OWASP rules by policy.",
+    "empty": "No OWASP rules",
+    "overridden": "Overridden",
+    "resetSuccess": "Inheritance restored",
+    "rule": "Rule"
+  },
   "pageTemplates": {
     "title": "Page Templates",
     "description": "Customize the appearance of WAF challenge and block pages",
@@ -1422,7 +1492,8 @@
     "resetConfirmDesc": "This will restore the page template to system defaults. This action cannot be undone.",
     "resetSuccess": "Reset to default",
     "saveFailed": "Save failed",
-    "resetFailed": "Reset failed"
+    "resetFailed": "Reset failed",
+    "previewFailed": "Preview failed"
   },
   "luaPlugins": {
     "title": "Lua Policy Scripts",
@@ -1503,8 +1574,8 @@
       "help": "Help"
     },
     "dryRun": {
-      "hint": "Run the current source directly against a sample request. Config is not saved, but ctx.kv.set/delete/incr may write to the real Redis.",
-      "contractHint": "Dry-run calls the script directly: config is not saved, but ctx.kv.set/delete/incr may write to the real Redis. It still shows the script result when KV is unavailable, while the live Engine always fails open. headers, response_body and tags remain subject to backend limits.",
+      "hint": "Run the current source directly against a sample request. Config is not saved, and production Redis is never connected; ctx.kv.available() is always false.",
+      "contractHint": "Dry-run calls the script directly: config is not saved and production Redis is never connected; ctx.kv.available() is always false and KV writes do not take effect. The live Engine always fails open when KV is unavailable. headers, response_body and tags remain subject to backend limits.",
       "method": "Method",
       "path": "Path",
       "query": "Query String",
@@ -1561,7 +1632,7 @@
       "returnTable": "May carry action, message, redirect_to, status_code, headers, response_body and tags.",
       "sandboxNote": "The sandbox opens only base, table, string and math; load, require, getmetatable and print are removed, so scripts cannot touch the filesystem or the network.",
       "siteScopeNote": "Global scripts run for every site; a site-bound script runs only when ctx.site_id matches.",
-      "kvFailOpenNote": "Online, a nil or unavailable KV backend prevents this stage from running and the request fails open; dry-run executes the script directly and is not the online path.",
+      "kvFailOpenNote": "Online, a nil or unavailable KV backend prevents this stage from running and the request fails open; dry-run executes the script directly with production KV disabled and is not the online path.",
       "actionsTitle": "Valid Actions",
       "actionsHint": "The list shows canonical actions; online Engine also accepts block and log_only and normalizes them to intercept and observe. Other unknown actions are treated as no decision and never block a request by mistake. Dry-run shows the raw script action.",
       "outputTitle": "Decision Output and Limits",
@@ -1573,10 +1644,10 @@
       "responseApplicability": "response_body is consumed only by an ordinary Lua terminal response; challenge, redirect, drop and upstream responses do not use it.",
       "blockedHeaders": "Rejected header names: authorization, proxy-authorization, cookie, set-cookie, www-authenticate, proxy-authenticate, connection, keep-alive, proxy-connection, te, trailer, transfer-encoding, upgrade, content-length and location.",
       "ctxTitle": "Readable ctx Fields",
-      "ctxNote": "ctx.headers uses lowercase keys; ctx.phase and ctx.action are populated only in post and hold the preceding pipeline decision. ctx.query_params is currently empty online but can be supplied to dry-run.",
+      "ctxNote": "ctx.headers uses lowercase keys; ctx.phase and ctx.action are populated only in post and hold the preceding pipeline decision. ctx.query_params is populated from the raw query string; duplicate keys keep the first value, and dry-run uses the same mapping contract.",
       "ctxSiteNote": "ctx.site_id is always the site matched by the current request; Engine filters a script's site_id scope before execution.",
       "kvTitle": "ctx.kv Cross-request Store",
-      "kvNote": "With Redis configured the counters are shared across instances; otherwise available() returns false and the script should degrade rather than error. Dry-run uses the real KV backend, so set/delete/incr may write Redis.",
+      "kvNote": "With Redis configured the counters are shared across instances; otherwise available() returns false and the script should degrade rather than error. Dry-run never connects production KV, so available() is always false and set/delete/incr do not write Redis.",
       "kvRuntimeNote": "ctx.kv methods still degrade to nil/false inside the script; online Engine checks KV before and after execution and discards this stage's decision when KV is unavailable.",
       "examplesTitle": "Example Scripts",
       "applyExample": "Load Into Editor",

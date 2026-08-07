@@ -299,8 +299,26 @@ type Holder struct {
 	ptr atomic.Pointer[Snapshot]
 }
 
+// Store publishes a snapshot unconditionally. Use StoreIfNewer for runtime reloads.
 func (h *Holder) Store(s *Snapshot) { h.ptr.Store(s) }
-func (h *Holder) Load() *Snapshot   { return h.ptr.Load() }
+
+// StoreIfNewer publishes s unless a newer revision is already active.
+func (h *Holder) StoreIfNewer(s *Snapshot) bool {
+	if s == nil {
+		return false
+	}
+	for {
+		current := h.ptr.Load()
+		if current != nil && current.Revision >= s.Revision {
+			return false
+		}
+		if h.ptr.CompareAndSwap(current, s) {
+			return true
+		}
+	}
+}
+
+func (h *Holder) Load() *Snapshot { return h.ptr.Load() }
 
 // Shared runtime limits.
 const (

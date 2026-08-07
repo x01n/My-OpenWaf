@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -12,6 +13,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
+	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
@@ -133,6 +135,48 @@ func TestCreateApplicationRouteRuleHonorsExplicitDisabled(t *testing.T) {
 	}
 }
 
+func TestCreateApplicationRouteRuleRejectsInvalidRegex(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{name: "invalid syntax", pattern: "["},
+		{name: "too long", pattern: strings.Repeat("a", appresource.MaxRegexPattern+1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			siteRepo, ruleRepo := newApplicationRouteReposForTest(t)
+			reloaded := 0
+			handler := CreateApplicationRouteRule(siteRepo, ruleRepo, func() error {
+				reloaded++
+				return nil
+			})
+
+			ctx := invokeApplicationRouteHandler(t, handler, "POST", "/api/v1/sites/1/application-route-rules", param.Params{{Key: "id", Value: "1"}}, map[string]any{
+				"name":     "invalid regex " + tt.name,
+				"priority": 1,
+				"target":   store.AppRouteTargetRequestMethod,
+				"op":       store.AppRouteOpRegex,
+				"pattern":  tt.pattern,
+			})
+			if ctx.Response.StatusCode() != 400 {
+				t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+			}
+			if reloaded != 0 {
+				t.Fatalf("expected no reload, got %d", reloaded)
+			}
+			rules, err := ruleRepo.ListBySite(1)
+			if err != nil {
+				t.Fatalf("list stored rules: %v", err)
+			}
+			if len(rules) != 0 {
+				t.Fatalf("expected no stored rules, got %#v", rules)
+			}
+		})
+	}
+}
+
 func TestUpdateApplicationRouteRuleKeepsEnabledWhenOmitted(t *testing.T) {
 	siteRepo, ruleRepo := newApplicationRouteReposForTest(t)
 	seed := &store.ApplicationRouteRule{
@@ -227,6 +271,63 @@ func TestUpdateApplicationRouteRuleHonorsExplicitDisabled(t *testing.T) {
 	}
 	if stored.Enabled {
 		t.Fatalf("expected explicit enabled false in storage: %#v", stored)
+	}
+}
+
+func TestUpdateApplicationRouteRuleRejectsInvalidRegex(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{name: "invalid syntax", pattern: "["},
+		{name: "too long", pattern: strings.Repeat("a", appresource.MaxRegexPattern+1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			siteRepo, ruleRepo := newApplicationRouteReposForTest(t)
+			seed := &store.ApplicationRouteRule{
+				SiteID:   1,
+				Name:     "existing route",
+				Enabled:  true,
+				Priority: 1,
+				Target:   store.AppRouteTargetRequestMethod,
+				Op:       store.AppRouteOpEq,
+				Pattern:  "GET",
+			}
+			if err := ruleRepo.Create(seed); err != nil {
+				t.Fatalf("seed rule: %v", err)
+			}
+			reloaded := 0
+			handler := UpdateApplicationRouteRule(siteRepo, ruleRepo, func() error {
+				reloaded++
+				return nil
+			})
+
+			ctx := invokeApplicationRouteHandler(t, handler, "POST", "/api/v1/sites/1/application-route-rules/1/update", param.Params{
+				{Key: "id", Value: "1"},
+				{Key: "rid", Value: "1"},
+			}, map[string]any{
+				"name":     "invalid regex " + tt.name,
+				"priority": 2,
+				"target":   store.AppRouteTargetRequestMethod,
+				"op":       store.AppRouteOpRegex,
+				"pattern":  tt.pattern,
+			})
+			if ctx.Response.StatusCode() != 400 {
+				t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+			}
+			if reloaded != 0 {
+				t.Fatalf("expected no reload, got %d", reloaded)
+			}
+			stored, err := ruleRepo.Get(seed.ID)
+			if err != nil {
+				t.Fatalf("load stored rule: %v", err)
+			}
+			if stored.Name != seed.Name || stored.Priority != seed.Priority || stored.Target != seed.Target || stored.Op != seed.Op || stored.Pattern != seed.Pattern {
+				t.Fatalf("expected stored rule to remain unchanged, got %#v", stored)
+			}
+		})
 	}
 }
 

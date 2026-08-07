@@ -93,7 +93,7 @@ function TemplateEditor({ type }: { type: TemplateType }) {
       setPreviewHtml(typeof html === "string" ? html : String(html ?? ""))
     } catch {
       setPreviewHtml("")
-      toast.error(t("pageTemplates.previewFailed", { defaultValue: "Preview failed" }))
+      toast.error(t("pageTemplates.previewFailed"))
     } finally {
       setPreviewLoading(false)
     }

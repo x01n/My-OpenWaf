@@ -17,21 +17,21 @@ import (
  * Snapshot.LuaPluginErrors 把失败暴露给管理端。
  *
  * @param db 数据库句柄。
- * @return 已编译脚本、按脚本名索引的编译错误。表不存在或查询失败时返回两个 nil。
+ * @return 已编译脚本、按脚本名索引的编译错误、数据库查询错误。单个脚本编译错误仍记录在 errors 映射中。
  */
-func loadLuaPlugins(db *gorm.DB) ([]*luaplugin.Script, map[string]string) {
+func loadLuaPlugins(db *gorm.DB) ([]*luaplugin.Script, map[string]string, error) {
+	if !db.Migrator().HasTable(&store.LuaPlugin{}) {
+		return nil, nil, nil
+	}
 	var rows []store.LuaPlugin
 	// 排序决定同阶段内的执行顺序，priority 相同时按 id 兜底以保证稳定。
 	if err := db.Where("enabled = ?", true).
 		Order("stage ASC, priority ASC, id ASC").
 		Find(&rows).Error; err != nil {
-		// 查询失败（最常见是表尚未迁移）不返回错误：Build 失败会让整个 WAF
-		// 起不来，而自定义插件缺失只应导致该功能不可用。与 site_access_configs、
-		// ip_list_entries 等可选表的加载保持同一容错策略。
-		return nil, nil
+		return nil, nil, err
 	}
 	if len(rows) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	scripts := make([]*luaplugin.Script, 0, len(rows))
@@ -64,5 +64,5 @@ func loadLuaPlugins(db *gorm.DB) ([]*luaplugin.Script, map[string]string) {
 		scripts = append(scripts, script)
 	}
 
-	return scripts, errs
+	return scripts, errs, nil
 }

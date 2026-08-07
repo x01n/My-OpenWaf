@@ -48,7 +48,7 @@ local function contains_any(haystack, needles)
   return nil
 end
 
--- 自己解析 ctx.query 判断是否带某个参数名（因为 ctx.query_params 恒空）
+-- 兼容示例：也可以直接使用 ctx.query_params 判断参数名
 local function has_query_key(query, key)
   if query == "" then
     return false

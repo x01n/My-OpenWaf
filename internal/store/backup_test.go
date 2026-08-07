@@ -323,6 +323,112 @@ func TestImportBackupReplaceModeClearsLuaPlugins(t *testing.T) {
 	}
 }
 
+// TestBackupIncludesJSPlugins 验证 JavaScript 边缘脚本及其关键字段被纳入备份。
+func TestBackupIncludesJSPlugins(t *testing.T) {
+	src := newBackupTestDB(t)
+
+	siteID := uint(7)
+	want := JSPlugin{
+		Name:        "edge-response",
+		Source:      `function handle(ctx) { return { action: "observe" }; }`,
+		Enabled:     true,
+		Priority:    23,
+		SiteID:      &siteID,
+		Stage:       JSStageResponse,
+		FailureMode: JSFailureModeClosed,
+		TimeoutMS:   275,
+		Description: "响应阶段脚本",
+	}
+	if err := src.Create(&want).Error; err != nil {
+		t.Fatalf("create js plugin: %v", err)
+	}
+
+	data, err := ExportBackup(src)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(data.JSPlugins) != 1 {
+		t.Fatalf("导出的 JS 脚本数 = %d, want 1", len(data.JSPlugins))
+	}
+	if data.JSPlugins[0].ID != want.ID {
+		t.Fatalf("导出的 JS 脚本 ID = %d, want %d", data.JSPlugins[0].ID, want.ID)
+	}
+
+	dst := newBackupTestDB(t)
+	if err := ImportBackup(dst, data, false); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	var got JSPlugin
+	if err := dst.First(&got, want.ID).Error; err != nil {
+		t.Fatalf("查询恢复的 JS 脚本: %v", err)
+	}
+	if got.Source != want.Source {
+		t.Errorf("Source = %q, want %q", got.Source, want.Source)
+	}
+	if got.SiteID == nil {
+		t.Fatal("SiteID 丢失")
+	} else if *got.SiteID != siteID {
+		t.Errorf("SiteID = %d, want %d", *got.SiteID, siteID)
+	}
+	if got.Stage != want.Stage {
+		t.Errorf("Stage = %q, want %q", got.Stage, want.Stage)
+	}
+	if got.FailureMode != want.FailureMode {
+		t.Errorf("FailureMode = %q, want %q", got.FailureMode, want.FailureMode)
+	}
+	if got.TimeoutMS != want.TimeoutMS {
+		t.Errorf("TimeoutMS = %d, want %d", got.TimeoutMS, want.TimeoutMS)
+	}
+	if got.Description != want.Description {
+		t.Errorf("Description = %q, want %q", got.Description, want.Description)
+	}
+}
+
+// TestImportBackupReplaceModeClearsJSPlugins 验证整体替换模式会清掉旧 JS 脚本。
+func TestImportBackupReplaceModeClearsJSPlugins(t *testing.T) {
+	dst := newBackupTestDB(t)
+	stale := JSPlugin{
+		Name:        "stale-js-plugin",
+		Source:      `function handle(ctx) { return { action: "intercept" }; }`,
+		Stage:       JSStageRequest,
+		FailureMode: JSFailureModeOpen,
+	}
+	if err := dst.Create(&stale).Error; err != nil {
+		t.Fatalf("create stale js plugin: %v", err)
+	}
+
+	src := newBackupTestDB(t)
+	fresh := JSPlugin{
+		Name:        "fresh-js-plugin",
+		Source:      `function handle(ctx) { return null; }`,
+		Stage:       JSStageResponse,
+		FailureMode: JSFailureModeClosed,
+	}
+	if err := src.Create(&fresh).Error; err != nil {
+		t.Fatalf("create fresh js plugin: %v", err)
+	}
+	data, err := ExportBackup(src)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	if err := ImportBackup(dst, data, true); err != nil {
+		t.Fatalf("import replace: %v", err)
+	}
+
+	var got []JSPlugin
+	if err := dst.Order("id").Find(&got).Error; err != nil {
+		t.Fatalf("查询恢复的 JS 脚本: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("替换模式后 JS 脚本数 = %d, want 1", len(got))
+	}
+	if got[0].Name != fresh.Name {
+		t.Errorf("残留了旧 JS 脚本 %q——替换模式退化成了合并", got[0].Name)
+	}
+}
+
 // TestBackupPreservesDisabledSiteAndZeroPriority 验证「用户主动关掉/清零」的配置
 // 能被备份还原，而不是被 DB 默认值悄悄逆转。
 //

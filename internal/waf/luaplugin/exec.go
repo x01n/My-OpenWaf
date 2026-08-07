@@ -111,7 +111,10 @@ func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBa
 		return Decision{}, errors.New("luaplugin: failed to acquire lua state")
 	}
 	L.SetTop(0)
-	defer pool.put(L)
+	defer func() {
+		L.SetTop(0)
+		pool.put(L)
+	}()
 
 	// 超时与指令上限双闸：context 负责挂钟超时，指令钩子兜住紧密循环
 	// （紧密计算循环可能长时间不触发 context 检查点）。
@@ -120,7 +123,7 @@ func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBa
 	L.SetContext(runCtx)
 	defer L.RemoveContext()
 
-	dec, err := s.callHandler(L, req, kv)
+	dec, err := s.callHandler(L, runCtx, req, kv)
 	if err == nil {
 		if ctxErr := runCtx.Err(); ctxErr != nil {
 			s.timeouts.Add(1)
@@ -144,7 +147,7 @@ func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBa
 // callHandler 在受保护的环境中调用脚本入口，并把 panic 转为错误。
 //
 // gopher-lua 在栈溢出等情形下会 panic；不 recover 会直接打崩数据面。
-func (s *Script) callHandler(L *lua.LState, req RequestView, kv KVBackend) (dec Decision, err error) {
+func (s *Script) callHandler(L *lua.LState, runCtx context.Context, req RequestView, kv KVBackend) (dec Decision, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("luaplugin: %q panicked: %v", s.name, r)
@@ -164,7 +167,7 @@ func (s *Script) callHandler(L *lua.LState, req RequestView, kv KVBackend) (dec 
 		return Decision{}, ErrNoHandler
 	}
 
-	ctxTable := buildContextTable(L, req, kv, &apiBudget{})
+	ctxTable := buildContextTable(L, runCtx, req, kv, &apiBudget{})
 	L.Push(handler)
 	L.Push(ctxTable)
 	if err := L.PCall(1, 1, nil); err != nil {
@@ -199,19 +202,19 @@ func decisionFromLua(v lua.LValue) (Decision, error) {
 func decisionFromTable(tbl *lua.LTable) (Decision, error) {
 	dec := Decision{}
 	if s, ok := tbl.RawGetString("action").(lua.LString); ok {
-		dec.Action = truncateString(string(s), maxAPIStringBytes)
+		dec.Action = truncateString(string(s), maxDecisionActionBytes)
 	}
 	if s, ok := tbl.RawGetString("message").(lua.LString); ok {
-		if value := truncateString(string(s), maxAPIStringBytes); !containsSensitiveDecisionText(value) {
+		if value := truncateString(string(s), maxDecisionMessageBytes); !containsSensitiveDecisionText(value) {
 			dec.Message = value
 		}
 	}
 	if s, ok := tbl.RawGetString("redirect_to").(lua.LString); ok {
-		dec.RedirectTo = safeRedirectTarget(string(s))
+		dec.RedirectTo = safeRedirectTarget(truncateString(string(s), maxDecisionRedirectBytes))
 	}
 	if n, ok := tbl.RawGetString("status_code").(lua.LNumber); ok {
 		status := int(n)
-		if status >= 100 && status <= 599 {
+		if n == lua.LNumber(status) && status >= minDecisionStatusCode && status <= maxDecisionStatusCode {
 			dec.StatusCode = status
 		}
 	}
@@ -221,32 +224,49 @@ func decisionFromTable(tbl *lua.LTable) (Decision, error) {
 		}
 	}
 	if hdrs, ok := tbl.RawGetString("headers").(*lua.LTable); ok {
-		dec.SetHeaders = make(map[string]string, minInt(hdrs.Len(), maxAPIMapEntries))
+		dec.SetHeaders = make(map[string]string, maxDecisionHeaders)
 		entries := 0
+		visited := 0
 		hdrs.ForEach(func(k, val lua.LValue) {
-			if entries >= maxAPIMapEntries {
+			if entries >= maxDecisionHeaders || visited >= maxDecisionTableEntries {
 				return
 			}
+			visited++
 			ks, kok := k.(lua.LString)
 			vs, vok := val.(lua.LString)
+			if !kok || !vok || len(ks) == 0 || len(ks) > maxDecisionHeaderNameBytes {
+				return
+			}
 			name := string(ks)
 			value := string(vs)
-			if !kok || !vok || name == "" || len(name) > maxAPIStringBytes ||
-				!httpguts.ValidHeaderFieldName(name) || !allowedDecisionHeader(name) ||
+			if !httpguts.ValidHeaderFieldName(name) || !allowedDecisionHeader(name) ||
 				strings.ContainsAny(value, "\r\n") || containsSensitiveDecisionText(value) {
 				return
 			}
-			dec.SetHeaders[name] = truncateString(value, maxHeaderValue)
+			dec.SetHeaders[name] = truncateString(value, maxDecisionHeaderValueBytes)
 			entries++
 		})
+		if len(dec.SetHeaders) == 0 {
+			dec.SetHeaders = nil
+		}
 	}
 	if tags, ok := tbl.RawGetString("tags").(*lua.LTable); ok {
-		for i := 1; i <= maxDecisionTags; i++ {
-			if s, isStr := tags.RawGetInt(i).(lua.LString); isStr {
-				if value := truncateString(string(s), maxAPIStringBytes); !containsSensitiveDecisionText(value) {
+		dec.Tags = make([]string, 0, maxDecisionTags)
+		visited := 0
+		tags.ForEach(func(_, val lua.LValue) {
+			if len(dec.Tags) >= maxDecisionTags || visited >= maxDecisionTableEntries {
+				return
+			}
+			visited++
+			if s, isStr := val.(lua.LString); isStr {
+				value := truncateString(string(s), maxDecisionTagBytes)
+				if !containsSensitiveDecisionText(value) {
 					dec.Tags = append(dec.Tags, value)
 				}
 			}
+		})
+		if len(dec.Tags) == 0 {
+			dec.Tags = nil
 		}
 	}
 	return dec, nil

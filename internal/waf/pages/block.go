@@ -105,12 +105,16 @@ func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.Si
 			c.String(500, "environment challenge key generation failed")
 			return
 		}
-		envJS = challenge.EnvCheckJSEncrypted(envKeyHex)
+		aad := challenge.EnvFingerprintAAD("challenge", reqID, challenge.ChallengeSessionBinding{
+			SiteID: tokenClaims.SiteID,
+			Host:   tokenClaims.Host,
+		})
+		envJS = challenge.EnvCheckJSEncrypted(envKeyHex, aad)
 	}
 	// 工作量证明一律由 Rust WASM 模块在 Web Worker 中求解，无 JS 降级路径：
 	// WASM 加载失败即抛错、挑战不通过，避免纯 JS 实现被轻易改写或跳过。
 	// 以 token 作为 nonce，使工作量与本次挑战绑定，无法预算或跨挑战复用。
-	powScript := challenge.GeneratePoWWASMScript(challenge.ChallengeProofDifficulty, token, envKeyHex)
+	powScript := challenge.GeneratePoWWASMScript(challenge.ChallengeProofDifficulty, token)
 	html := buildChallengeHTML(reqID, ts, token, envJS, powScript, cfg)
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }

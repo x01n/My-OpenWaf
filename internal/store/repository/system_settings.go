@@ -13,6 +13,18 @@ func NewSystemSettingsRepo(db *gorm.DB) *SystemSettingsRepo {
 	return &SystemSettingsRepo{db: db}
 }
 
+/**
+ * 在同一个数据库事务中执行系统配置读写。
+ *
+ * @param fn 接收绑定当前事务的仓储实例
+ * @returns 事务执行错误
+ */
+func (r *SystemSettingsRepo) Transaction(fn func(txRepo *SystemSettingsRepo) error) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		return fn(NewSystemSettingsRepo(tx))
+	})
+}
+
 func systemSettingKeyEquals(key string) clause.Eq {
 	return clause.Eq{Column: clause.Column{Name: "key"}, Value: key}
 }
@@ -32,16 +44,10 @@ func (r *SystemSettingsRepo) Get(key string) (string, error) {
 }
 
 func (r *SystemSettingsRepo) Set(key, value string) error {
-	var s store.SystemSettings
-	result := r.db.Where(systemSettingKeyEquals(key)).First(&s)
-	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
-			return r.db.Create(&store.SystemSettings{Key: key, Value: value}).Error
-		}
-		return result.Error
-	}
-	s.Value = value
-	return r.db.Save(&s).Error
+	return r.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value"}),
+	}).Create(&store.SystemSettings{Key: key, Value: value}).Error
 }
 
 func (r *SystemSettingsRepo) All() ([]store.SystemSettings, error) {

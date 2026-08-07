@@ -79,8 +79,10 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	if err := db.Where("enabled = ?", true).Find(&rules).Error; err != nil {
 		return nil, err
 	}
-	// 一次性加载所有 system_settings 到 map，避免多次独立 DB 查询。
-	settingsMap := loadAllSettings(db)
+	settingsMap, err := loadAllSettings(db)
+	if err != nil {
+		return nil, fmt.Errorf("load system settings: %w", err)
+	}
 
 	networkDefaults := networkDefaultsFromMap(settingsMap)
 	tlsDefaults := tlsDefaultsFromMap(settingsMap)
@@ -144,10 +146,16 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	excludeRecordHeaders := parseExcludeRecordHeaders(botSettingsJSON)
 
 	// Load access control configs per site.
-	accessControlBySite := loadAccessControlConfigs(db)
+	accessControlBySite, err := loadAccessControlConfigs(db)
+	if err != nil {
+		return nil, fmt.Errorf("load access control configs: %w", err)
+	}
 
 	// 加载站点级 IP 黑白名单。
-	siteIPLists := loadSiteIPLists(db)
+	siteIPLists, err := loadSiteIPLists(db)
+	if err != nil {
+		return nil, fmt.Errorf("load site IP lists: %w", err)
+	}
 
 	http2Config := http2ConfigFromMap(settingsMap)
 	hstsEnabled := settingBool(settingsMap, "hsts_enabled")
@@ -346,7 +354,10 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 
 	// 自定义 Lua 策略：在此编译，语法错误在 reload 时即暴露。
 	// 单脚本编译失败只记错误、不中断构建（见 loadLuaPlugins）。
-	luaScripts, luaErrs := loadLuaPlugins(db)
+	luaScripts, luaErrs, err := loadLuaPlugins(db)
+	if err != nil {
+		return nil, fmt.Errorf("load lua plugins: %w", err)
+	}
 
 	return &Snapshot{
 		LuaPlugins:                     luaScripts,
@@ -1094,16 +1105,23 @@ func parseDynamicProtection(raw string) dynamic.ProtectionConfig {
 	if err := json.Unmarshal([]byte(raw), &bs); err != nil {
 		return dynamic.ProtectionConfig{}
 	}
+	mode := bs.JSProtectionMode
+	if !dynamic.IsValidJSProtectionMode(mode) {
+		mode = ""
+	}
 
 	return dynamic.ProtectionConfig{
-		HTMLObfuscationEnabled: bs.DynamicProtectionEnabled && bs.HTMLObfuscation,
-		JSObfuscationEnabled:   bs.DynamicProtectionEnabled && bs.JSObfuscation,
-		ImageWatermarkEnabled:  bs.DynamicProtectionEnabled && bs.ImageWatermark,
-		JSProtectionMode:       bs.JSProtectionMode,
-		DecryptCacheTTLSeconds: bs.DecryptCacheTTLSeconds,
-		JSObfuscationPaths:     bs.JSObfuscationPaths,
-		ImageWatermarkPaths:    bs.ImageWatermarkPaths,
-		WatermarkText:          bs.WatermarkText,
+		HTMLObfuscationEnabled:    bs.DynamicProtectionEnabled && bs.HTMLObfuscation,
+		JSObfuscationEnabled:      bs.DynamicProtectionEnabled && bs.JSObfuscation,
+		ImageWatermarkEnabled:     bs.DynamicProtectionEnabled && bs.ImageWatermark,
+		GlobalHTMLConfigured:      bs.HTMLObfuscation,
+		GlobalJSConfigured:        bs.JSObfuscation,
+		GlobalWatermarkConfigured: bs.ImageWatermark,
+		JSProtectionMode:          mode,
+		DecryptCacheTTLSeconds:    dynamic.NormalizeDecryptCacheTTLSeconds(bs.DecryptCacheTTLSeconds),
+		JSObfuscationPaths:        bs.JSObfuscationPaths,
+		ImageWatermarkPaths:       bs.ImageWatermarkPaths,
+		WatermarkText:             bs.WatermarkText,
 	}
 }
 
@@ -1112,10 +1130,16 @@ func buildSiteDynamicProtection(global dynamic.ProtectionConfig, site store.Site
 	cfg := global
 	cfg.SiteID = site.ID
 
-	if site.DynamicProtectionEnabled != nil && !*site.DynamicProtectionEnabled {
-		cfg.HTMLObfuscationEnabled = false
-		cfg.JSObfuscationEnabled = false
-		return cfg
+	if site.DynamicProtectionEnabled != nil {
+		if !*site.DynamicProtectionEnabled {
+			cfg.HTMLObfuscationEnabled = false
+			cfg.JSObfuscationEnabled = false
+			cfg.ImageWatermarkEnabled = false
+			return cfg
+		}
+		cfg.HTMLObfuscationEnabled = cfg.GlobalHTMLConfigured
+		cfg.JSObfuscationEnabled = cfg.GlobalJSConfigured
+		cfg.ImageWatermarkEnabled = cfg.GlobalWatermarkConfigured
 	}
 	if site.DynamicHTMLEnabled != nil {
 		cfg.HTMLObfuscationEnabled = *site.DynamicHTMLEnabled
@@ -1124,16 +1148,21 @@ func buildSiteDynamicProtection(global dynamic.ProtectionConfig, site store.Site
 		cfg.JSObfuscationEnabled = *site.DynamicJSEnabled
 	}
 	if site.DynamicJSMode != "" {
-		cfg.JSProtectionMode = site.DynamicJSMode
+		if dynamic.IsValidJSProtectionMode(site.DynamicJSMode) {
+			cfg.JSProtectionMode = site.DynamicJSMode
+		} else {
+			cfg.JSProtectionMode = ""
+		}
 	}
 	if site.DynamicJSPaths != "" {
 		var paths []string
-		if err := json.Unmarshal([]byte(site.DynamicJSPaths), &paths); err == nil && len(paths) > 0 {
+		if err := json.Unmarshal([]byte(site.DynamicJSPaths), &paths); err == nil {
+			// 显式空数组是站点覆盖，不应继续继承全局路径。
 			cfg.JSObfuscationPaths = paths
 		}
 	}
 	if site.DynamicDecryptCacheTTL != nil {
-		cfg.DecryptCacheTTLSeconds = *site.DynamicDecryptCacheTTL
+		cfg.DecryptCacheTTLSeconds = dynamic.NormalizeDecryptCacheTTLSeconds(*site.DynamicDecryptCacheTTL)
 	}
 	return cfg
 }
@@ -1210,14 +1239,16 @@ func loadIntSetting(db *gorm.DB, key string, defaultValue int) int {
 }
 
 // loadAllSettings 一次性加载所有 system_settings 到 map，避免多次独立查询。
-func loadAllSettings(db *gorm.DB) map[string]string {
+func loadAllSettings(db *gorm.DB) (map[string]string, error) {
 	var all []store.SystemSettings
-	db.Find(&all)
+	if err := db.Find(&all).Error; err != nil {
+		return nil, err
+	}
 	m := make(map[string]string, len(all))
 	for _, s := range all {
 		m[s.Key] = s.Value
 	}
-	return m
+	return m, nil
 }
 
 // settingBool 从预加载的 settings map 中读取布尔值。
@@ -1269,26 +1300,39 @@ func ResolveOutboundHost(rt SiteRuntime, upstreamHost string, incomingHost strin
 }
 
 // loadAccessControlConfigs 从数据库批量加载所有站点的访问控制配置，避免 N+1 查询。
-func loadAccessControlConfigs(db *gorm.DB) map[uint]*AccessControlConfig {
+func loadAccessControlConfigs(db *gorm.DB) (map[uint]*AccessControlConfig, error) {
 	result := make(map[uint]*AccessControlConfig)
+	if !db.Migrator().HasTable(&store.SiteAccessConfig{}) {
+		return result, nil
+	}
 
 	var configs []store.SiteAccessConfig
 	if err := db.Where("enabled = ?", true).Find(&configs).Error; err != nil {
-		return result
+		return nil, err
 	}
 
 	// 批量加载所有启用的 provider，按 site_id 分组。
 	var allProviders []store.AccessProvider
-	db.Where("enabled = ?", true).Order("site_id ASC, priority ASC").Find(&allProviders)
 	providersBySite := make(map[uint][]store.AccessProvider)
+	if db.Migrator().HasTable(&store.AccessProvider{}) {
+		if err := db.Where("enabled = ?", true).
+			Order("site_id ASC, priority ASC").Find(&allProviders).Error; err != nil {
+			return nil, err
+		}
+	}
 	for _, p := range allProviders {
 		providersBySite[p.SiteID] = append(providersBySite[p.SiteID], p)
 	}
 
 	// 批量加载所有启用的路径规则，按 site_id 分组。
 	var allPathRules []store.AccessPathRule
-	db.Where("enabled = ?", true).Order("site_id ASC, priority ASC").Find(&allPathRules)
 	pathRulesBySite := make(map[uint][]store.AccessPathRule)
+	if db.Migrator().HasTable(&store.AccessPathRule{}) {
+		if err := db.Where("enabled = ?", true).
+			Order("site_id ASC, priority ASC").Find(&allPathRules).Error; err != nil {
+			return nil, err
+		}
+	}
 	for _, r := range allPathRules {
 		pathRulesBySite[r.SiteID] = append(pathRulesBySite[r.SiteID], r)
 	}
@@ -1320,7 +1364,7 @@ func loadAccessControlConfigs(db *gorm.DB) map[uint]*AccessControlConfig {
 
 		result[cfg.SiteID] = ac
 	}
-	return result
+	return result, nil
 }
 
 // siteIPListPair 存储一个站点的已解析黑白名单。
@@ -1330,11 +1374,15 @@ type siteIPListPair struct {
 }
 
 // loadSiteIPLists 从数据库加载所有站点级 IP 黑白名单（不含全局条目）。
-func loadSiteIPLists(db *gorm.DB) map[uint]siteIPListPair {
+func loadSiteIPLists(db *gorm.DB) (map[uint]siteIPListPair, error) {
 	result := make(map[uint]siteIPListPair)
+	if !db.Migrator().HasTable(&store.IPListEntry{}) {
+		return result, nil
+	}
+
 	var items []store.IPListEntry
 	if err := db.Where("enabled = ? AND site_id IS NOT NULL", true).Find(&items).Error; err != nil {
-		return result
+		return nil, err
 	}
 	for _, it := range items {
 		if it.SiteID == nil {
@@ -1365,5 +1413,5 @@ func loadSiteIPLists(db *gorm.DB) map[uint]siteIPListPair {
 		}
 		result[siteID] = pair
 	}
-	return result
+	return result, nil
 }

@@ -11,6 +11,7 @@ import (
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
+	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
 )
 
 // BotSettingsUpdate represents the request body for updating bot settings.
@@ -77,8 +78,9 @@ func GetBotSettings(settingsRepo *repository.SystemSettingsRepo) app.HandlerFunc
 			c.JSON(200, defaultBotSettingsResponse(settingsRepo))
 			return
 		}
-		// bot_settings JSON 可能尚未包含浏览器签名字段；以 protection 为权威源回填。
+		// bot_settings JSON 可能尚未包含保护字段；以 protection 为权威源回填。
 		prot := shared.LoadProtectionConfig(settingsRepo)
+		resp.CaptchaEnabled = prot.CaptchaEnabled
 		resp.BrowserSignEnabled = prot.BrowserSignEnabled
 		if prot.BrowserSignTTL > 0 {
 			resp.BrowserSignTTL = prot.BrowserSignTTL
@@ -107,12 +109,22 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			c.JSON(400, map[string]string{"error": "score_threshold must be between 1 and 100"})
 			return
 		}
+		if req.JSProtectionMode != nil && !dynamicpkg.IsValidJSProtectionMode(*req.JSProtectionMode) {
+			c.JSON(400, map[string]string{"error": "js_protection_mode must be one of: all, paths"})
+			return
+		}
+		if req.DecryptCacheTTLSeconds != nil && (*req.DecryptCacheTTLSeconds < 0 || *req.DecryptCacheTTLSeconds > dynamicpkg.MaxDecryptCacheTTLSeconds) {
+			c.JSON(400, map[string]string{"error": "decrypt_cache_ttl_seconds must be between 0 and 1800"})
+			return
+		}
 
 		// Load current settings
 		current := defaultBotSettingsResponse(settingsRepo)
 		if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
 			_ = json.Unmarshal([]byte(val), &current)
 		}
+		// protection.captcha_enabled 是运行时权威源，避免部分更新把旧投影写回。
+		current.CaptchaEnabled = shared.LoadProtectionConfig(settingsRepo).CaptchaEnabled
 
 		// Apply updates
 		if req.Enabled != nil {
@@ -179,37 +191,42 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			current.ExcludeRecordHeaders = req.ExcludeRecordHeaders
 		}
 
-		data, _ := json.Marshal(current)
-		if err := settingsRepo.Set("bot_settings", string(data)); err != nil {
+		data, err := json.Marshal(current)
+		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := settingsRepo.Transaction(func(txRepo *repository.SystemSettingsRepo) error {
+			if err := txRepo.Set("bot_settings", string(data)); err != nil {
+				return err
+			}
 
-		if req.Enabled != nil {
-			// Sync BotDetectionEnabled into the protection config so the engine
-			// sees a consistent value regardless of which page the user toggles.
-			if err := shared.SyncBotEnabledToProtection(settingsRepo, current.Enabled); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
+			if req.Enabled != nil {
+				// Sync BotDetectionEnabled into the protection config so the engine
+				// sees a consistent value regardless of which page the user toggles.
+				if err := shared.SyncBotEnabledToProtection(txRepo, current.Enabled); err != nil {
+					return err
+				}
 			}
-		}
-		if req.CaptchaEnabled != nil {
-			if err := shared.SyncCaptchaEnabledToProtection(settingsRepo, current.CaptchaEnabled); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
+			if req.CaptchaEnabled != nil {
+				if err := shared.SyncCaptchaEnabledToProtection(txRepo, current.CaptchaEnabled); err != nil {
+					return err
+				}
 			}
-		}
-		if req.BrowserSignEnabled != nil || req.BrowserSignTTL != nil || req.BrowserSignAction != nil {
-			if err := shared.SyncBrowserSignToProtection(settingsRepo, current.BrowserSignEnabled, current.BrowserSignTTL, current.BrowserSignAction); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
+			if req.BrowserSignEnabled != nil || req.BrowserSignTTL != nil || req.BrowserSignAction != nil {
+				if err := shared.SyncBrowserSignToProtection(txRepo, current.BrowserSignEnabled, current.BrowserSignTTL, current.BrowserSignAction); err != nil {
+					return err
+				}
 			}
-		}
-		if req.ScoreThreshold != nil {
-			if err := shared.SyncBotThresholdToDropPolicy(settingsRepo, current.ScoreThreshold); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
+			if req.ScoreThreshold != nil {
+				if err := shared.SyncBotThresholdToDropPolicy(txRepo, current.ScoreThreshold); err != nil {
+					return err
+				}
 			}
+			return nil
+		}); err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
 		}
 
 		if reload != nil {

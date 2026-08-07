@@ -413,7 +413,7 @@ export function SiteFormDialog({
           {/* 策略 */}
           <div className="space-y-1.5">
             <Label>
-              {t("sites.form.policy", { defaultValue: "防护策略" })}
+              {t("sites.form.policy")}
             </Label>
             <Select
               value={
@@ -429,31 +429,25 @@ export function SiteFormDialog({
             >
               <SelectTrigger className="w-full">
                 <SelectValue
-                  placeholder={t("sites.form.policyPlaceholder", {
-                    defaultValue: "选择策略",
-                  })}
+                  placeholder={t("sites.form.policyPlaceholder")}
                 />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={POLICY_INHERIT}>
-                  {t("sites.form.policyInheritDefault", {
-                    defaultValue: "继承默认策略",
-                  })}
+                  {t("sites.form.policyInheritDefault")}
                 </SelectItem>
                 {policies.map((policy) => (
                   <SelectItem key={policy.id} value={String(policy.id)}>
                     {policy.name}
                     {policy.is_default
-                      ? ` (${t("common.default", { defaultValue: "默认" })})`
+                      ? ` (${t("common.default")})`
                       : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
             <p className="text-[11px] text-muted-foreground">
-              {t("sites.form.policyHint", {
-                defaultValue: "不选择时站点继承当前默认策略。",
-              })}
+              {t("sites.form.policyHint")}
             </p>
           </div>
 

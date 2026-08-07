@@ -438,6 +438,32 @@ func TestSiteRequestHasField(t *testing.T) {
 	}
 }
 
+func TestValidateSiteDynamicProtection(t *testing.T) {
+	validTTL := 1800
+	invalidTTL := 1801
+	tests := []struct {
+		name    string
+		mode    string
+		ttl     *int
+		wantErr error
+	}{
+		{name: "inherit mode", mode: ""},
+		{name: "all mode", mode: "all"},
+		{name: "paths mode", mode: "paths"},
+		{name: "max ttl", mode: "all", ttl: &validTTL},
+		{name: "invalid mode", mode: "strict", wantErr: errInvalidSiteDynamicJSMode},
+		{name: "ttl too large", mode: "all", ttl: &invalidTTL, wantErr: errInvalidSiteDynamicTTL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSiteDynamicProtection(&store.Site{DynamicJSMode: tt.mode, DynamicDecryptCacheTTL: tt.ttl})
+			if err != tt.wantErr {
+				t.Fatalf("validateSiteDynamicProtection() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCreateAndUpdateSiteValidatePolicyReferences(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

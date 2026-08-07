@@ -101,7 +101,10 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 		}
 
 		if reload != nil {
-			_ = reload()
+			if err := reload(); err != nil {
+				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+				return
+			}
 		}
 
 		c.JSON(200, map[string]string{"status": "ok"})
@@ -131,7 +134,10 @@ func ResetPageTemplate(repo *repository.SystemSettingsRepo, reload func() error)
 		}
 
 		if reload != nil {
-			_ = reload()
+			if err := reload(); err != nil {
+				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
+				return
+			}
 		}
 
 		c.JSON(200, map[string]string{"status": "ok"})

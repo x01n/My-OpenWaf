@@ -20,7 +20,13 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { toast } from "sonner"
 import { IconShield, IconRefresh, IconHelpCircle } from "@tabler/icons-react"
-import { useBotSettings, useBotSettingsUpdate } from "@/hooks/use-api"
+import {
+  useBotSettings,
+  useBotSettingsUpdate,
+  useCaptchaConfig,
+  useCaptchaConfigUpdate,
+} from "@/hooks/use-api"
+import type { CaptchaConfig, ShieldEnvStrictness } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 /**
@@ -37,30 +43,47 @@ export default function CaptchaPage() {
   const { t } = useTranslation()
   const { data: botSettings, isLoading, error, mutate } = useBotSettings()
   const updateBot = useBotSettingsUpdate()
+  const {
+    data: captchaConfig,
+    isLoading: isCaptchaConfigLoading,
+    error: captchaConfigError,
+  } = useCaptchaConfig()
+  const updateCaptchaConfig = useCaptchaConfigUpdate()
 
   const [localSettings, setLocalSettings] = useState<Record<string, unknown>>(
     {}
   )
+  const [shieldEnvChanges, setShieldEnvChanges] = useState<
+    Partial<
+      Pick<
+        CaptchaConfig,
+        "shield_enable_env_check" | "shield_env_strictness"
+      >
+    >
+  >({})
 
   const getValue = useCallback(
     (key: string, defaultValue: unknown = false) => {
+      const storedValue = botSettings
+        ? (botSettings as unknown as Record<string, unknown>)[key]
+        : undefined
       return localSettings[key] !== undefined
         ? localSettings[key]
-        : (botSettings?.[key] ?? defaultValue)
+        : (storedValue ?? defaultValue)
     },
     [localSettings, botSettings]
   )
 
   const handleToggle = useCallback(
     (key: string) => {
-      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }))
+      setLocalSettings((prev) => ({ ...prev, [key]: !Boolean(getValue(key)) }))
     },
     [getValue]
   )
 
   const handleSubToggle = useCallback(
     (key: string) => {
-      setLocalSettings((prev) => ({ ...prev, [key]: !getValue(key) }))
+      setLocalSettings((prev) => ({ ...prev, [key]: !Boolean(getValue(key)) }))
     },
     [getValue]
   )
@@ -75,21 +98,67 @@ export default function CaptchaPage() {
 
   const handleSave = useCallback(async () => {
     try {
-      await updateBot.execute({ ...botSettings, ...localSettings })
+      await updateBot.execute(localSettings)
       toast.success(t("captcha.saveSuccess"))
       setLocalSettings({})
       mutate()
     } catch {
       toast.error(t("captcha.saveFailed"))
     }
-  }, [botSettings, localSettings, updateBot, mutate, t])
+  }, [localSettings, updateBot, mutate, t])
 
   const handleCancel = useCallback(() => {
     setLocalSettings({})
     toast.info(t("attacks.cancelled"))
   }, [t])
 
-  const dynamicProtectionEnabled = getValue("dynamic_protection_enabled", false)
+  const handleShieldEnvCheckToggle = useCallback((checked: boolean) => {
+    setShieldEnvChanges((prev) => ({
+      ...prev,
+      shield_enable_env_check: checked,
+    }))
+  }, [])
+
+  const handleShieldEnvStrictnessChange = useCallback((value: string) => {
+    const strictness = Number(value)
+    if (strictness < 0 || strictness > 2 || !Number.isInteger(strictness)) {
+      return
+    }
+    setShieldEnvChanges((prev) => ({
+      ...prev,
+      shield_env_strictness: strictness as ShieldEnvStrictness,
+    }))
+  }, [])
+
+  const handleShieldEnvSave = useCallback(async () => {
+    try {
+      await updateCaptchaConfig.execute(shieldEnvChanges)
+      toast.success(t("captcha.shieldEnvironment.saveSuccess"))
+      setShieldEnvChanges({})
+    } catch {
+      toast.error(t("captcha.shieldEnvironment.saveFailed"))
+    }
+  }, [shieldEnvChanges, t, updateCaptchaConfig])
+
+  const handleShieldEnvCancel = useCallback(() => {
+    setShieldEnvChanges({})
+    toast.info(t("attacks.cancelled"))
+  }, [t])
+
+  const dynamicProtectionEnabled = Boolean(
+    getValue("dynamic_protection_enabled", false)
+  )
+  const shieldEnvValues = captchaConfig
+    ? {
+        enabled:
+          shieldEnvChanges.shield_enable_env_check ??
+          captchaConfig.shield_enable_env_check,
+        strictness:
+          shieldEnvChanges.shield_env_strictness ??
+          captchaConfig.shield_env_strictness,
+      }
+    : undefined
+  const hasShieldEnvChanges = Object.keys(shieldEnvChanges).length > 0
 
   const dynamicOptions: DynamicOption[] = [
     {
@@ -149,7 +218,7 @@ export default function CaptchaPage() {
                 {t("captcha.section.captcha")}
               </span>
               <Switch
-                checked={getValue("captcha_enabled", false)}
+                checked={Boolean(getValue("captcha_enabled", false))}
                 onCheckedChange={() => handleToggle("captcha_enabled")}
                 id="captcha_enabled"
               />
@@ -199,7 +268,7 @@ export default function CaptchaPage() {
                 <div key={option.key} className="flex items-start gap-3">
                   <Checkbox
                     id={option.key}
-                    checked={getValue(option.key, false)}
+                    checked={Boolean(getValue(option.key, false))}
                     onCheckedChange={() => handleSubToggle(option.key)}
                     disabled={!dynamicProtectionEnabled}
                   />
@@ -239,7 +308,7 @@ export default function CaptchaPage() {
                 {t("captcha.section.antiReplay")}
               </span>
               <Switch
-                checked={getValue("anti_replay_enabled", false)}
+                checked={Boolean(getValue("anti_replay_enabled", false))}
                 onCheckedChange={() => handleToggle("anti_replay_enabled")}
                 id="anti_replay_enabled"
               />
@@ -261,7 +330,7 @@ export default function CaptchaPage() {
                 {t("captcha.section.browserSign")}
               </span>
               <Switch
-                checked={getValue("browser_sign_enabled", false)}
+                checked={Boolean(getValue("browser_sign_enabled", false))}
                 onCheckedChange={() => handleToggle("browser_sign_enabled")}
                 id="browser_sign_enabled"
               />
@@ -277,7 +346,7 @@ export default function CaptchaPage() {
             <div
               className={cn(
                 "ml-4 grid gap-4 rounded-lg border p-4 transition-all sm:grid-cols-2",
-                getValue("browser_sign_enabled", false)
+                Boolean(getValue("browser_sign_enabled", false))
                   ? "opacity-100"
                   : "pointer-events-none opacity-40"
               )}
@@ -292,8 +361,8 @@ export default function CaptchaPage() {
                     type="number"
                     min={30}
                     max={3600}
-                    disabled={!getValue("browser_sign_enabled", false)}
-                    value={getValue("browser_sign_ttl", 300)}
+                    disabled={!Boolean(getValue("browser_sign_enabled", false))}
+                    value={getValue("browser_sign_ttl", 300) as number}
                     onChange={(e) => {
                       const n = Number(e.target.value)
                       handleValue(
@@ -315,9 +384,9 @@ export default function CaptchaPage() {
                   {t("captcha.browserSignAction")}
                 </Label>
                 <Select
-                  value={getValue("browser_sign_action", "challenge")}
+                  value={String(getValue("browser_sign_action", "challenge"))}
                   onValueChange={(v) => handleValue("browser_sign_action", v)}
-                  disabled={!getValue("browser_sign_enabled", false)}
+                  disabled={!Boolean(getValue("browser_sign_enabled", false))}
                 >
                   <SelectTrigger id="browser_sign_action">
                     <SelectValue />
@@ -368,6 +437,130 @@ export default function CaptchaPage() {
             )}
           </Button>
         </div>
+      </Card>
+
+      <Card className="overflow-hidden">
+        <CardContent className="space-y-6 p-6">
+          <div className="space-y-1">
+            <div className="flex items-center gap-3">
+              <div className="h-5 w-1 rounded-full bg-primary" />
+              <h2 className="text-sm font-medium">
+                {t("captcha.shieldEnvironment.title")}
+              </h2>
+            </div>
+            <p className="ml-4 text-sm text-muted-foreground">
+              {t("captcha.shieldEnvironment.description")}
+            </p>
+          </div>
+
+          {isCaptchaConfigLoading ? (
+            <Skeleton className="h-36 w-full" />
+          ) : captchaConfigError ? (
+            <Alert variant="destructive">
+              <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+              <AlertDescription>
+                {captchaConfigError.message || t("error.unexpectedError")}
+              </AlertDescription>
+            </Alert>
+          ) : shieldEnvValues ? (
+            <div className="space-y-5">
+              <div className="flex items-start justify-between gap-6 rounded-lg border p-4">
+                <div className="space-y-1">
+                  <Label
+                    htmlFor="shield_enable_env_check"
+                    className="text-sm font-medium"
+                  >
+                    {t("captcha.shieldEnvironment.enable")}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t("captcha.shieldEnvironment.enableDescription")}
+                  </p>
+                </div>
+                <Switch
+                  id="shield_enable_env_check"
+                  checked={shieldEnvValues.enabled}
+                  disabled={updateCaptchaConfig.loading}
+                  onCheckedChange={handleShieldEnvCheckToggle}
+                />
+              </div>
+
+              <div className="space-y-2 rounded-lg border p-4">
+                <Label
+                  htmlFor="shield_env_strictness"
+                  className="text-sm font-medium"
+                >
+                  {t("captcha.shieldEnvironment.strictness")}
+                </Label>
+                <Select
+                  value={String(shieldEnvValues.strictness)}
+                  disabled={!shieldEnvValues.enabled || updateCaptchaConfig.loading}
+                  onValueChange={handleShieldEnvStrictnessChange}
+                >
+                  <SelectTrigger
+                    id="shield_env_strictness"
+                    aria-describedby="shield-env-strictness-description"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="0">
+                      {t("captcha.shieldEnvironment.strictnessRelaxed")}
+                    </SelectItem>
+                    <SelectItem value="1">
+                      {t("captcha.shieldEnvironment.strictnessStandard")}
+                    </SelectItem>
+                    <SelectItem value="2">
+                      {t("captcha.shieldEnvironment.strictnessStrict")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p
+                  id="shield-env-strictness-description"
+                  className="text-xs text-muted-foreground"
+                >
+                  {shieldEnvValues.enabled
+                    ? t("captcha.shieldEnvironment.strictnessDescription")
+                    : t("captcha.shieldEnvironment.disabledHint")}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <Alert>
+              <AlertTitle>{t("common.noData")}</AlertTitle>
+              <AlertDescription>
+                {t("captcha.shieldEnvironment.unavailable")}
+              </AlertDescription>
+            </Alert>
+          )}
+        </CardContent>
+
+        {!isCaptchaConfigLoading && !captchaConfigError && shieldEnvValues && (
+          <div className="flex items-center justify-end gap-3 border-t px-6 py-4">
+            <Button
+              variant="outline"
+              onClick={handleShieldEnvCancel}
+              disabled={!hasShieldEnvChanges || updateCaptchaConfig.loading}
+            >
+              {t("captcha.cancel")}
+            </Button>
+            <Button
+              onClick={handleShieldEnvSave}
+              disabled={!hasShieldEnvChanges || updateCaptchaConfig.loading}
+            >
+              {updateCaptchaConfig.loading ? (
+                <>
+                  <IconRefresh className="mr-2 h-4 w-4 animate-spin" />
+                  {t("common.saving")}
+                </>
+              ) : (
+                <>
+                  <IconShield className="mr-2 h-4 w-4" />
+                  {t("captcha.shieldEnvironment.save")}
+                </>
+              )}
+            </Button>
+          </div>
+        )}
       </Card>
     </div>
   )

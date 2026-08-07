@@ -69,6 +69,51 @@ export const CC_CONDITION_OPERATORS: Record<string, string[]> = {
 }
 
 /**
+ * 运行时校验 CC 规则条件结构。
+ */
+export function isCCRuleCondition(value: unknown): value is CCRuleCondition {
+  if (!value || typeof value !== "object") return false
+  const cond = value as Partial<CCRuleCondition>
+  return (
+    typeof cond.target === "string" &&
+    typeof cond.operator === "string" &&
+    typeof cond.value === "string"
+  )
+}
+
+/**
+ * 运行时校验 CC 规则结构。
+ */
+export function isCCRule(value: unknown): value is CCRule {
+  if (!value || typeof value !== "object") return false
+  const rule = value as Partial<CCRule>
+  return (
+    typeof rule.action === "string" &&
+    rule.action.trim().length > 0 &&
+    Array.isArray(rule.conditions) &&
+    rule.conditions.every(isCCRuleCondition) &&
+    typeof rule.window === "number" &&
+    Number.isFinite(rule.window) &&
+    typeof rule.threshold === "number" &&
+    Number.isFinite(rule.threshold) &&
+    typeof rule.duration === "number" &&
+    Number.isFinite(rule.duration) &&
+    (rule.enabled === undefined || typeof rule.enabled === "boolean") &&
+    (rule.name === undefined || typeof rule.name === "string") &&
+    (rule.duration_unit === undefined ||
+      rule.duration_unit === "seconds" ||
+      rule.duration_unit === "minutes")
+  )
+}
+
+/**
+ * 将未知数据安全转换为 CCRule[]，过滤非法条目。
+ */
+export function toCCRules(value: unknown): CCRule[] {
+  return Array.isArray(value) ? value.filter(isCCRule) : []
+}
+
+/**
  * 构造一条默认 CC 规则。
  *
  * @returns 带默认值的空规则

@@ -96,3 +96,14 @@ func TestInvalidateAllClearsCache(t *testing.T) {
 		t.Error("GetSnapshot should miss after InvalidateAll")
 	}
 }
+
+func TestSetSnapshotRejectsRevisionMismatch(t *testing.T) {
+	l, err := NewLayer()
+	if err != nil {
+		t.Fatalf("NewLayer() error = %v", err)
+	}
+	l.SetSnapshot(2, &snapshot.Snapshot{Revision: 1})
+	if _, ok := l.GetSnapshot(2); ok {
+		t.Fatal("SetSnapshot should reject a snapshot with a mismatched revision")
+	}
+}

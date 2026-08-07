@@ -11,8 +11,10 @@
 package luaplugin
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +46,28 @@ const (
 
 	// maxScriptBytes 限制脚本体积，避免超大脚本拖慢编译与占用内存。
 	maxScriptBytes = 256 * 1024
+
+	// 运行时 API 的资源上限，避免脚本通过大量表项或回调放大请求开销。
+	// 运行时 API 的资源上限，避免脚本通过大量表项或回调放大请求开销。
+	maxAPICalls       = 128
+	maxAPIMapEntries  = 256
+	maxAPIStringBytes = 16 * 1024
+	maxHeaderValue    = 4 * 1024
+	maxResponseBody   = 16 * 1024
+
+	// decisionFromTable 的返回值会继续流入日志、响应与后续请求处理，
+	// 因此不能把 Lua 表里的字符串和条目数原样带出沙箱。
+	maxDecisionActionBytes      = 64
+	maxDecisionMessageBytes     = 512
+	maxDecisionRedirectBytes    = 2048
+	maxDecisionHeaders          = 32
+	maxDecisionHeaderNameBytes  = 256
+	maxDecisionHeaderValueBytes = 2048
+	maxDecisionTags             = 32
+	maxDecisionTagBytes         = 128
+	maxDecisionTableEntries     = 128
+	minDecisionStatusCode       = 100
+	maxDecisionStatusCode       = 599
 )
 
 // ErrScriptTooLarge 表示脚本超过体积上限。
@@ -59,8 +83,10 @@ type Decision struct {
 	RedirectTo string
 	// StatusCode 覆盖拦截响应码，0 表示用默认值。
 	StatusCode int
-	// SetHeaders 是脚本要求追加/覆盖的转发请求头。
+	// SetHeaders 是脚本要求追加/覆盖的受控响应头。
 	SetHeaders map[string]string
+	// ResponseBody 是可选的受限响应体覆盖。
+	ResponseBody string
 	// Tags 是脚本打的标签，仅用于日志与下游观测。
 	Tags []string
 }
@@ -80,13 +106,28 @@ type KVBackend interface {
 	Incr(key string, ttl time.Duration) (int64, error)
 }
 
+// ContextKVBackend 是可选的 KVBackend 扩展。实现它的后端会收到脚本执行的
+// runCtx，使调用方取消、脚本超时和请求作用域值传递到 KV I/O；未实现时仍调用
+// KVBackend 的兼容方法。
+type ContextKVBackend interface {
+	KVBackend
+	GetContext(ctx context.Context, key string) ([]byte, bool)
+	SetContext(ctx context.Context, key string, value []byte, ttl time.Duration) error
+	DeleteContext(ctx context.Context, key string)
+	IncrContext(ctx context.Context, key string, ttl time.Duration) (int64, error)
+}
+
 // Script 是一段已编译的插件脚本。
 //
 // 编译产物（*lua.FunctionProto）在多个 Lua 状态机间共享，故只编译一次。
 type Script struct {
+	id    uint
 	name  string
 	stage Stage
 	proto *lua.FunctionProto
+
+	// siteID 为 nil 表示全局脚本；非 nil 时仅对指定站点执行。
+	siteID *uint
 
 	// timeout 允许按脚本覆盖默认超时。
 	timeout time.Duration
@@ -104,7 +145,53 @@ func (s *Script) Name() string { return s.name }
 // Stage 返回脚本的执行时机。
 func (s *Script) Stage() Stage { return s.stage }
 
-// Stats 返回累计运行统计：执行次数、失败次数、超时次数、平均耗时。
+// ID 返回持久化插件标识，用于关联运行时统计。
+func (s *Script) ID() uint {
+	if s == nil {
+		return 0
+	}
+	return s.id
+}
+
+// SetID 设置持久化插件标识。
+func (s *Script) SetID(id uint) {
+	if s != nil {
+		s.id = id
+	}
+}
+
+// ParseQueryParams 将原始查询串转换为 Lua 可见的查询参数。
+// 重复键保留第一个值；非法编码返回 nil。
+func ParseQueryParams(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return nil
+	}
+	params := make(map[string]string, len(values))
+	for key, values := range values {
+		if len(values) > 0 {
+			params[key] = values[0]
+		}
+	}
+	return params
+}
+
+// SetSiteID 设置脚本的站点作用域。nil 表示全局脚本。
+func (s *Script) SetSiteID(siteID *uint) {
+	if s == nil {
+		return
+	}
+	if siteID == nil {
+		s.siteID = nil
+		return
+	}
+	id := *siteID
+	s.siteID = &id
+}
+
 func (s *Script) Stats() (runs, failures, timeouts int64, avg time.Duration) {
 	runs = s.runs.Load()
 	failures = s.failures.Load()

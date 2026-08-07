@@ -66,10 +66,13 @@ export function BotProtectionDialog({
   )
 
   const getValue = useCallback(
-    (key: string, defaultValue: unknown = false) => {
-      return localSettings[key] !== undefined
-        ? localSettings[key]
-        : (botSettings?.[key] ?? defaultValue)
+    <T,>(key: string, defaultValue: T = false as T): T => {
+      const storedValue = botSettings
+        ? (botSettings as unknown as Record<string, unknown>)[key]
+        : undefined
+      const value =
+        localSettings[key] !== undefined ? localSettings[key] : storedValue
+      return (value ?? defaultValue) as T
     },
     [localSettings, botSettings]
   )
@@ -126,7 +129,7 @@ export function BotProtectionDialog({
 
   const handleSave = useCallback(async () => {
     try {
-      await updateBot.execute({ ...botSettings, ...localSettings })
+      await updateBot.execute(localSettings)
       toast.success(t("captcha.saveSuccess"))
       setLocalSettings({})
       mutate()
@@ -134,7 +137,7 @@ export function BotProtectionDialog({
     } catch {
       toast.error(t("captcha.saveFailed"))
     }
-  }, [botSettings, localSettings, updateBot, mutate, t, onOpenChange])
+  }, [localSettings, updateBot, mutate, t, onOpenChange])
 
   const handleCancel = useCallback(() => {
     setLocalSettings({})

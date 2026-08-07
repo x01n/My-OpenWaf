@@ -37,7 +37,7 @@ type CaptchaSession struct {
 	Answer    string      `json:"answer"` // JSON-encoded expected answer
 	CreatedAt time.Time   `json:"created_at"`
 	ExpiresAt time.Time   `json:"expires_at"`
-	// EnvKey 是会话绑定的环境指纹加密密钥（16 字节）。
+	// EnvKey 是会话绑定的环境指纹加密密钥（32 字节）。
 	// 与 shield_challenge 一致，用于解密客户端提交的 __waf_env_fp。
 	// 为空表示该会话未启用浏览器/环境检查。
 	EnvKey []byte `json:"env_key,omitempty"`
@@ -163,6 +163,9 @@ func (cm *CaptchaManager) GenerateWithBinding(captchaType CaptchaType, envCheck 
 	var envKey []byte
 	if envCheck {
 		envKey = GenerateEnvSessionKey()
+		if len(envKey) != envSessionKeySize {
+			return nil, fmt.Errorf("environment session key generation failed")
+		}
 	}
 	var (
 		challenge *CaptchaChallenge
@@ -250,17 +253,21 @@ func (cm *CaptchaManager) takeSessionWithBinding(sessionID string, binding Chall
 		defer cancel()
 		key := cm.prefix + sessionID
 		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{key}, binding.SiteID, binding.Host, binding.Bind).Text()
-		data := []byte(raw)
-		if err == nil && len(data) > 0 {
-			var session CaptchaSession
-			if json.Unmarshal(data, &session) == nil {
-				cm.mu.Lock()
-				delete(cm.sessions, sessionID)
-				cm.mu.Unlock()
-				return &session
-			}
+		if err != nil {
 			return nil
 		}
+		data := []byte(raw)
+		if len(data) == 0 {
+			return nil
+		}
+		var session CaptchaSession
+		if json.Unmarshal(data, &session) != nil {
+			return nil
+		}
+		cm.mu.Lock()
+		delete(cm.sessions, sessionID)
+		cm.mu.Unlock()
+		return &session
 	}
 
 	cm.mu.Lock()
@@ -405,11 +412,10 @@ func (cm *CaptchaManager) storeSession(session *CaptchaSession) error {
 		defer cancel()
 		key := cm.prefix + session.ID
 		timeout := cm.timeoutValue()
-		err := redis.Set(ctx, key, data, timeout).Err()
-		if err == nil {
-			return nil
+		if err := redis.Set(ctx, key, data, timeout).Err(); err != nil {
+			return fmt.Errorf("store CAPTCHA session in Redis: %w", err)
 		}
-		// Fall through to in-memory on Redis error
+		return nil
 	}
 
 	cm.mu.Lock()

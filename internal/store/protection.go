@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 )
 
@@ -95,6 +96,19 @@ type ProtectionConfig struct {
 	BrowserSignTTL int `json:"browser_sign_ttl"`
 	// BrowserSignAction 签名校验失败动作：observe / challenge / intercept。
 	BrowserSignAction string `json:"browser_sign_action"`
+}
+
+// BasicAuthCredentialsConfigured reports whether normalized Basic Auth credentials are complete.
+func (p ProtectionConfig) BasicAuthCredentialsConfigured() bool {
+	return strings.TrimSpace(p.BasicAuthUsername) != "" && strings.TrimSpace(p.BasicAuthPassword) != ""
+}
+
+// ValidateBasicAuth rejects enabled Basic Auth without complete normalized credentials.
+func (p ProtectionConfig) ValidateBasicAuth() error {
+	if p.BasicAuthEnabled && !p.BasicAuthCredentialsConfigured() {
+		return errors.New("basic auth requires non-empty username and password")
+	}
+	return nil
 }
 
 func DefaultProtectionConfig() ProtectionConfig {

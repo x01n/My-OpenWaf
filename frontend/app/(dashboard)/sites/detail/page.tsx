@@ -241,7 +241,7 @@ function SiteDetailContent() {
         </TabsContent>
 
         <TabsContent value="dynamic">
-          <DynamicProtectionTab site={site} />
+          <DynamicProtectionTab key={`${site.id}-${site.updated_at}`} site={site} />
         </TabsContent>
 
         <TabsContent value="cc">

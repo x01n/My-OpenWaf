@@ -9,6 +9,7 @@ import (
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/luaplugin"
 )
 
@@ -33,6 +34,64 @@ func luaEngineWith(t *testing.T, stage luaplugin.Stage, src string) *luaplugin.E
 	e := luaplugin.NewEngine(luaEngineTestKV{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.Reload([]*luaplugin.Script{script})
 	return e
+}
+
+func mustCompileLua(t *testing.T, stage luaplugin.Stage, src string) *luaplugin.Script {
+	t.Helper()
+	script, err := luaplugin.Compile("test", stage, src)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	return script
+}
+
+func TestLuaPhaseCacheInvalidatesOnPluginReload(t *testing.T) {
+	holder := newTestHolder(store.DefaultProtectionConfig(), nil)
+	eng := New(holder, nil, nil, nil)
+	lp := luaEngineWith(t, luaplugin.StagePre, `function handle(ctx) return "intercept" end`)
+	eng.SetLuaPlugins(lp)
+
+	request := func() action.Result {
+		return eng.Process(&pipeline.RequestCtx{
+			Bind:    ":80",
+			Host:    "example.com",
+			Path:    "/",
+			Headers: map[string]string{},
+		}).Action
+	}
+
+	if got := request(); got.Type != action.Intercept {
+		t.Fatalf("initial Lua pre action = %q, want %q", got.Type, action.Intercept)
+	}
+
+	lp.Reload([]*luaplugin.Script{mustCompileLua(t, luaplugin.StagePre, `function handle(ctx) return "drop" end`)})
+	if got := request(); got.Type != action.Drop {
+		t.Fatalf("reloaded Lua pre action = %q, want %q", got.Type, action.Drop)
+	}
+
+	lp.Reload(nil)
+	if got := request(); got.Matched {
+		t.Fatalf("removed Lua scripts must stop affecting the cached phase: %+v", got)
+	}
+}
+
+func TestLuaRevisionIncrementsOnEveryReload(t *testing.T) {
+	lp := luaEngineWith(t, luaplugin.StagePre, `function handle(ctx) return nil end`)
+	first := lp.Revision()
+	if first == 0 {
+		t.Fatal("initial Reload must publish a non-zero revision")
+	}
+
+	lp.Reload(nil)
+	second := lp.Revision()
+	if second != first+1 {
+		t.Fatalf("revision after removing scripts = %d, want %d", second, first+1)
+	}
+
+	lp.Reload(nil)
+	if got := lp.Revision(); got != second+1 {
+		t.Fatalf("revision after repeated Reload = %d, want %d", got, second+1)
+	}
 }
 
 // TestPostLuaCanOverrideBuiltinIntercept 是后置阶段存在的理由。

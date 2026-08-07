@@ -51,6 +51,7 @@ input[type=text]:focus{border-color:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166
 <button type="submit" class="btn">{{.SubmitText}}</button>
 </form>
 <p class="rid">Request ID: {{.RequestID}}</p>
+<p id="cap-env-status" style="display:none;color:#ef4444;font-size:.8rem;margin-top:10px"></p>
 <script>
 (function(){
 var type=document.getElementById('cap-type').value;
@@ -87,10 +88,33 @@ if(type==='rotate'&&rotate&&img){
 }
 var capEnv=document.getElementById('cap-env');
 var capForm=answer&&answer.form;
+var capStatus=document.getElementById('cap-env-status');
+var submitting=false;
+function showEnvError(message){
+ if(capStatus){capStatus.textContent=message||'Environment verification failed. / 环境验证失败。';capStatus.style.display='block';}
+}
+window.__owaf_env_error_callback=function(message){showEnvError(message);};
 if(capEnv&&capForm){
-  capForm.addEventListener('submit',function(){
-    try{if(window.__owaf_env_encrypted)capEnv.value=window.__owaf_env_encrypted;}catch(e){}
+ capForm.addEventListener('submit',function(event){
+  if(submitting||window.__owaf_env_required!==true)return;
+  event.preventDefault();
+  if(!window.__owaf_env_ready||typeof window.__owaf_env_ready.then!=='function'){
+   showEnvError('Environment WASM is unavailable. / 环境 WASM 不可用。');
+   return;
+  }
+  submitting=true;
+  var submitButton=capForm.querySelector('button[type=submit]');
+  if(submitButton)submitButton.disabled=true;
+  window.__owaf_env_ready.then(function(envelope){
+   if(!envelope)throw new Error('Environment verification failed');
+   capEnv.value=envelope;
+   HTMLFormElement.prototype.submit.call(capForm);
+  }).catch(function(error){
+   submitting=false;
+   if(submitButton)submitButton.disabled=false;
+   showEnvError((error&&error.message)||'Environment verification failed. / 环境验证失败。');
   });
+ });
 }
 })();
 </script>

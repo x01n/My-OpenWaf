@@ -1,15 +1,18 @@
+use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::aes::cipher::{BlockCipherDecrypt, KeyInit as BlockKeyInit};
 use aes_gcm::aes::{Aes256, Block};
-use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, Nonce};
 use hmac::{Hmac, Mac};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use wasm_bindgen::prelude::*;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const BASE64_URL_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const BASE64_URL_CHARS: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const AES_KW_DEFAULT_IV: [u8; 8] = [0xA6; 8];
+const ENV_ENVELOPE_PREFIX: &str = "v1.";
+const ENV_DEFAULT_AAD: &str = "owaf-env:v1|legacy";
 
 fn base64url_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
@@ -33,37 +36,57 @@ fn base64url_encode(data: &[u8]) -> String {
 
 #[wasm_bindgen]
 pub fn encrypt_env_data(json_data: &str, key_hex: &str) -> String {
-    let key_bytes = hex_decode(key_hex);
-    if key_bytes.len() != 32 {
+    encrypt_env_data_with_aad(json_data, key_hex, ENV_DEFAULT_AAD)
+}
+
+#[wasm_bindgen]
+pub fn encrypt_env_data_with_aad(json_data: &str, key_hex: &str, aad: &str) -> String {
+    let key_bytes = match hex_decode(key_hex) {
+        Some(key) if key.len() == 32 => key,
+        _ => return String::new(),
+    };
+    if json_data.len() > 64 * 1024 || aad.is_empty() || aad.len() > 512 {
         return String::new();
     }
     let cipher = match Aes256Gcm::new_from_slice(&key_bytes) {
-        Ok(c) => c,
+        Ok(cipher) => cipher,
         Err(_) => return String::new(),
     };
-
     let mut iv = [0u8; 12];
-    getrandom::getrandom(&mut iv).unwrap_or(());
+    if getrandom::getrandom(&mut iv).is_err() {
+        return String::new();
+    }
     let nonce = Nonce::from(iv);
-
-    match cipher.encrypt(&nonce, json_data.as_bytes()) {
+    match cipher.encrypt(
+        &nonce,
+        Payload {
+            msg: json_data.as_bytes(),
+            aad: aad.as_bytes(),
+        },
+    ) {
         Ok(ciphertext) => {
-            let mut buf = Vec::with_capacity(12 + ciphertext.len());
-            buf.extend_from_slice(&iv);
-            buf.extend_from_slice(&ciphertext);
-            base64url_encode(&buf)
+            let mut envelope = Vec::with_capacity(12 + ciphertext.len());
+            envelope.extend_from_slice(&iv);
+            envelope.extend_from_slice(&ciphertext);
+            format!("{}{}", ENV_ENVELOPE_PREFIX, base64url_encode(&envelope))
         }
         Err(_) => String::new(),
     }
 }
 
 #[wasm_bindgen]
-pub fn decrypt_dynamic_payload(data_b64: &str, iv_b64: &str, wrap_b64: &str, kek_b64: &str) -> Result<Vec<u8>, JsValue> {
+pub fn decrypt_dynamic_payload(
+    data_b64: &str,
+    iv_b64: &str,
+    wrap_b64: &str,
+    kek_b64: &str,
+) -> Result<Vec<u8>, JsValue> {
     let data = base64_decode(data_b64).ok_or_else(|| JsValue::from_str("invalid data base64"))?;
     let iv = base64_decode(iv_b64).ok_or_else(|| JsValue::from_str("invalid iv base64"))?;
     let wrap = base64_decode(wrap_b64).ok_or_else(|| JsValue::from_str("invalid wrap base64"))?;
     let kek = base64_decode(kek_b64).ok_or_else(|| JsValue::from_str("invalid kek base64"))?;
-    let cek = aes_key_unwrap_256(&kek, &wrap).ok_or_else(|| JsValue::from_str("AES-KW unwrap failed"))?;
+    let cek =
+        aes_key_unwrap_256(&kek, &wrap).ok_or_else(|| JsValue::from_str("AES-KW unwrap failed"))?;
     aes_gcm_decrypt_256(&cek, &iv, &data).ok_or_else(|| JsValue::from_str("AES-GCM decrypt failed"))
 }
 
@@ -75,7 +98,11 @@ pub fn unwrap_dynamic_cek(wrap_b64: &str, kek_b64: &str) -> Result<Vec<u8>, JsVa
 }
 
 #[wasm_bindgen]
-pub fn decrypt_dynamic_with_cek(data_b64: &str, iv_b64: &str, cek: &[u8]) -> Result<Vec<u8>, JsValue> {
+pub fn decrypt_dynamic_with_cek(
+    data_b64: &str,
+    iv_b64: &str,
+    cek: &[u8],
+) -> Result<Vec<u8>, JsValue> {
     let data = base64_decode(data_b64).ok_or_else(|| JsValue::from_str("invalid data base64"))?;
     let iv = base64_decode(iv_b64).ok_or_else(|| JsValue::from_str("invalid iv base64"))?;
     aes_gcm_decrypt_256(cek, &iv, &data).ok_or_else(|| JsValue::from_str("AES-GCM decrypt failed"))
@@ -83,7 +110,10 @@ pub fn decrypt_dynamic_with_cek(data_b64: &str, iv_b64: &str, cek: &[u8]) -> Res
 
 #[wasm_bindgen]
 pub fn hmac_sha256(key_hex: &str, message: &str) -> String {
-    let key_bytes = hex_decode(key_hex);
+    let key_bytes = match hex_decode(key_hex) {
+        Some(key) if !key.is_empty() => key,
+        _ => return String::new(),
+    };
     let mut mac = match HmacSha256::new_from_slice(&key_bytes) {
         Ok(m) => m,
         Err(_) => return String::new(),
@@ -126,8 +156,12 @@ pub fn compute_audio_hash(samples: &[u8]) -> String {
 }
 
 #[wasm_bindgen]
-pub fn encode_and_encrypt_fingerprint(json_data: &str, key_hex: &str, hmac_key_hex: &str) -> String {
-    let encrypted = encrypt_env_data(json_data, key_hex);
+pub fn encode_and_encrypt_fingerprint(
+    json_data: &str,
+    key_hex: &str,
+    hmac_key_hex: &str,
+) -> String {
+    let encrypted = encrypt_env_data_with_aad(json_data, key_hex, ENV_DEFAULT_AAD);
     if encrypted.is_empty() {
         return String::new();
     }
@@ -218,21 +252,23 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn hex_decode(hex: &str) -> Vec<u8> {
+fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
     let mut chars = hex.chars();
-    while let (Some(h), Some(l)) = (chars.next(), chars.next()) {
-        let byte = hex_val(h) << 4 | hex_val(l);
-        bytes.push(byte);
+    while let (Some(high), Some(low)) = (chars.next(), chars.next()) {
+        bytes.push(hex_val(high)? << 4 | hex_val(low)?);
     }
-    bytes
+    Some(bytes)
 }
 
-fn hex_val(c: char) -> u8 {
+fn hex_val(c: char) -> Option<u8> {
     match c {
-        '0'..='9' => c as u8 - b'0',
-        'a'..='f' => c as u8 - b'a' + 10,
-        'A'..='F' => c as u8 - b'A' + 10,
-        _ => 0,
+        '0'..='9' => Some(c as u8 - b'0'),
+        'a'..='f' => Some(c as u8 - b'a' + 10),
+        'A'..='F' => Some(c as u8 - b'A' + 10),
+        _ => None,
     }
 }

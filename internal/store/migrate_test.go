@@ -1,6 +1,8 @@
 package store
 
 import (
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -340,6 +342,50 @@ func TestAutoMigrateAddsUpstreamHostColumnAndPersistsValues(t *testing.T) {
 	}
 	if loaded.UpstreamHost != "backend.example.com" {
 		t.Fatalf("loaded upstream_host = %q, want %q", loaded.UpstreamHost, "backend.example.com")
+	}
+}
+
+func TestBumpRevisionConcurrentIncrements(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "revision.db")+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&ConfigRevision{}); err != nil {
+		t.Fatalf("migrate config revisions: %v", err)
+	}
+	if err := db.Create(&ConfigRevision{ID: 1}).Error; err != nil {
+		t.Fatalf("seed config revision: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(16)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			errs <- BumpRevision(db)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("bump revision: %v", err)
+		}
+	}
+
+	rev, err := CurrentRevision(db)
+	if err != nil {
+		t.Fatalf("read current revision: %v", err)
+	}
+	if rev != workers {
+		t.Fatalf("current revision = %d, want %d", rev, workers)
 	}
 }
 

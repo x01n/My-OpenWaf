@@ -887,10 +887,6 @@ func buildMatcher(kind, arg string) Matcher {
 		}
 		return &queryRegexMatcher{re: re}
 
-	case "block_header":
-		name, substr := splitHeaderArg(arg)
-		return &headerContainsMatcher{name: strings.ToLower(name), substr: substr}
-
 	case "block_header_exact":
 		name, value := splitHeaderArg(arg)
 		return &headerExactMatcher{name: strings.ToLower(name), value: value}
@@ -898,6 +894,10 @@ func buildMatcher(kind, arg string) Matcher {
 	case "block_header_prefix":
 		name, prefix := splitHeaderArg(arg)
 		return &headerPrefixMatcher{name: strings.ToLower(name), prefix: prefix}
+
+	case "block_header":
+		name, substr := splitHeaderArg(arg)
+		return &headerContainsMatcher{name: strings.ToLower(name), substr: substr}
 
 	case "block_header_regex":
 		name, pattern := splitHeaderArg(arg)

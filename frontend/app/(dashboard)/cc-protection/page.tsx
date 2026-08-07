@@ -27,6 +27,7 @@ import {
 import {
   CCRulesEditor,
   CC_ACTION_OPTIONS,
+  toCCRules,
   type CCRule,
 } from "@/components/cc-rules-editor"
 
@@ -92,26 +93,44 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
     () => settings.cc_use_custom ?? false
   )
   const [ccRules, setCCRules] = useState<CCRule[]>(() =>
-    Array.isArray(settings.cc_rules) ? settings.cc_rules : []
+    toCCRules(settings.cc_rules)
   )
 
   const handleSave = async () => {
+    const payload: Record<string, unknown> = {}
+    const initialRequestRateLimitEnabled = settings.request_ratelimit_enabled ?? false
+    const initialRequestRateLimitWindow = settings.request_ratelimit_window ?? 60
+    const initialRequestRateLimitMax = settings.request_ratelimit_max ?? 300
+    const initialRequestRateLimitAction = settings.request_ratelimit_action ?? "rate_limit"
+    const initialErrorRateLimitEnabled = settings.error_ratelimit_enabled ?? false
+    const initialErrorRateLimitWindow = settings.error_ratelimit_window ?? 300
+    const initialErrorRateLimitMax = settings.error_ratelimit_max ?? 30
+    const initialErrorRateLimitCount4xx = settings.error_ratelimit_count_4xx ?? true
+    const initialErrorRateLimitCount5xx = settings.error_ratelimit_count_5xx ?? true
+    const initialErrorRateLimitCountBlock = settings.error_ratelimit_count_block ?? false
+    const initialErrorRateLimitAction = settings.error_ratelimit_action ?? "rate_limit"
+    const initialCCUseCustom = settings.cc_use_custom ?? false
+    const initialCCRules = toCCRules(settings.cc_rules)
+
+    if (requestRateLimitEnabled !== initialRequestRateLimitEnabled) payload.request_ratelimit_enabled = requestRateLimitEnabled
+    if (requestRateLimitWindow !== initialRequestRateLimitWindow) payload.request_ratelimit_window = requestRateLimitWindow
+    if (requestRateLimitMax !== initialRequestRateLimitMax) payload.request_ratelimit_max = requestRateLimitMax
+    if (requestRateLimitAction !== initialRequestRateLimitAction) payload.request_ratelimit_action = requestRateLimitAction
+    if (errorRateLimitEnabled !== initialErrorRateLimitEnabled) payload.error_ratelimit_enabled = errorRateLimitEnabled
+    if (errorRateLimitWindow !== initialErrorRateLimitWindow) payload.error_ratelimit_window = errorRateLimitWindow
+    if (errorRateLimitMax !== initialErrorRateLimitMax) payload.error_ratelimit_max = errorRateLimitMax
+    if (errorRateLimitCount4xx !== initialErrorRateLimitCount4xx) payload.error_ratelimit_count_4xx = errorRateLimitCount4xx
+    if (errorRateLimitCount5xx !== initialErrorRateLimitCount5xx) payload.error_ratelimit_count_5xx = errorRateLimitCount5xx
+    if (errorRateLimitCountBlock !== initialErrorRateLimitCountBlock) payload.error_ratelimit_count_block = errorRateLimitCountBlock
+    if (errorRateLimitAction !== initialErrorRateLimitAction) payload.error_ratelimit_action = errorRateLimitAction
+    if (ccUseCustom !== initialCCUseCustom) payload.cc_use_custom = ccUseCustom
+    if (JSON.stringify(ccRules) !== JSON.stringify(initialCCRules)) payload.cc_rules = ccRules
+
+    if (Object.keys(payload).length === 0) {
+      return
+    }
     try {
-      await updateSettings.execute({
-        request_ratelimit_enabled: requestRateLimitEnabled,
-        request_ratelimit_window: requestRateLimitWindow,
-        request_ratelimit_max: requestRateLimitMax,
-        request_ratelimit_action: requestRateLimitAction,
-        error_ratelimit_enabled: errorRateLimitEnabled,
-        error_ratelimit_window: errorRateLimitWindow,
-        error_ratelimit_max: errorRateLimitMax,
-        error_ratelimit_count_4xx: errorRateLimitCount4xx,
-        error_ratelimit_count_5xx: errorRateLimitCount5xx,
-        error_ratelimit_count_block: errorRateLimitCountBlock,
-        error_ratelimit_action: errorRateLimitAction,
-        cc_use_custom: ccUseCustom,
-        cc_rules: ccRules,
-      })
+      await updateSettings.execute(payload)
       toast.success(t("ccProtection.saveSuccess"))
     } catch {
       toast.error(t("common.saveFailed"))

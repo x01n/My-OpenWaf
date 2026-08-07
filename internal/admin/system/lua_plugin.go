@@ -300,7 +300,7 @@ type luaDryRunRequest struct {
 //
 // 策略脚本的错误往往只在真实请求形态下暴露，光有语法校验不够；
 // 试运行让用户在保存前看到判定与耗时。
-func DryRunLuaPlugin(kv luaplugin.KVBackend) app.HandlerFunc {
+func DryRunLuaPlugin() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req luaDryRunRequest
 		if err := c.BindJSON(&req); err != nil {
@@ -344,7 +344,9 @@ func DryRunLuaPlugin(kv luaplugin.KVBackend) app.HandlerFunc {
 			view.Action = ""
 		}
 
-		c.JSON(200, luaplugin.DryRunN(stage, req.Source, view, kv, timeout, req.Iterations))
+		// dry-run 必须与线上 Redis/KV 完全隔离。nil 后端会让 ctx.kv.available()
+		// 固定为 false，避免试运行修改生产计数、影响限速或污染跨请求状态。
+		c.JSON(200, luaplugin.DryRunNContext(ctx, stage, req.Source, view, nil, timeout, req.Iterations))
 	}
 }
 

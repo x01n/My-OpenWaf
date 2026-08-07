@@ -37,6 +37,7 @@ type BackupData struct {
 	AccessUsers       []AccessUser           `json:"access_users"`
 	AccessPathRules   []AccessPathRule       `json:"access_path_rules"`
 	LuaPlugins        []LuaPlugin            `json:"lua_plugins"`
+	JSPlugins         []JSPlugin             `json:"js_plugins"`
 	SystemSettings    []SystemSettings       `json:"system_settings"`
 }
 
@@ -56,7 +57,7 @@ func BackupModels() []interface{} {
 		&Certificate{}, &Policy{}, &Rule{}, &Site{}, &SiteListener{},
 		&IPListEntry{}, &ThreatIntelFeed{}, &CVERuleRecord{},
 		&ApplicationRouteRule{}, &SiteAccessConfig{}, &AccessProvider{},
-		&AccessUser{}, &AccessPathRule{}, &LuaPlugin{}, &SystemSettings{},
+		&AccessUser{}, &AccessPathRule{}, &LuaPlugin{}, &JSPlugin{}, &SystemSettings{},
 	}
 }
 
@@ -122,6 +123,9 @@ func ExportBackup(db *gorm.DB) (*BackupData, error) {
 	if err := db.Find(&data.LuaPlugins).Error; err != nil {
 		return nil, err
 	}
+	if err := db.Find(&data.JSPlugins).Error; err != nil {
+		return nil, err
+	}
 	if err := db.Find(&data.SystemSettings).Error; err != nil {
 		return nil, err
 	}
@@ -176,8 +180,9 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 			data.AccessProviders,
 			data.AccessUsers,
 			data.AccessPathRules,
-			// LuaPlugins 排在 Sites 之后：SiteID 非空时指向具体站点。
+			// LuaPlugins 与 JSPlugins 排在 Sites 之后：SiteID 非空时指向具体站点。
 			data.LuaPlugins,
+			data.JSPlugins,
 		}
 		for _, records := range ordered {
 			if err := upsertSlice(tx, records); err != nil {
@@ -311,6 +316,11 @@ func upsertSlice(tx *gorm.DB, records interface{}) error {
 			return nil
 		}
 		return upsertBatch(tx, v)
+	case []JSPlugin:
+		if len(v) == 0 {
+			return nil
+		}
+		return upsertBatch(tx, v)
 	}
 	return nil
 }
@@ -402,7 +412,8 @@ func restoreZeroValuedDefaults[T any](tx *gorm.DB, inserted, original []T) error
 func clearConfigTables(tx *gorm.DB) error {
 	// 逆序：先删引用他表的记录，再删被引用的记录。
 	models := []interface{}{
-		// LuaPlugin 可引用 Site，须在 Site 之前清空。
+		// JSPlugin 与 LuaPlugin 都可引用 Site，须在 Site 之前清空。
+		&JSPlugin{},
 		&LuaPlugin{},
 		&AccessPathRule{},
 		&AccessUser{},

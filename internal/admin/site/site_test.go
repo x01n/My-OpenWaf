@@ -902,6 +902,116 @@ func TestUpdateSiteAllowsInheritedTLSVersionsAndALPN(t *testing.T) {
 	}
 }
 
+func TestCreateSiteRejectsInvalidCCRules(t *testing.T) {
+	tests := []struct {
+		name    string
+		ccRules string
+	}{
+		{name: "unknown action", ccRules: `[{"action":"unknown","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":1,"threshold":1,"duration":0}]`},
+		{name: "unknown target", ccRules: `[{"action":"intercept","conditions":[{"target":"query","operator":"equals","value":"q"}],"window":1,"threshold":1,"duration":0}]`},
+		{name: "unsupported operator", ccRules: `[{"action":"intercept","conditions":[{"target":"method","operator":"prefix","value":"GET"}],"window":1,"threshold":1,"duration":0}]`},
+		{name: "empty value", ccRules: `[{"action":"intercept","conditions":[{"target":"url_path","operator":"equals","value":" "}],"window":1,"threshold":1,"duration":0}]`},
+		{name: "invalid window", ccRules: `[{"action":"intercept","conditions":[{"target":"url_path","operator":"equals","value":"/"}],"window":0,"threshold":1,"duration":0}]`},
+		{name: "invalid threshold", ccRules: `[{"action":"intercept","conditions":[{"target":"url_path","operator":"equals","value":"/"}],"window":1,"threshold":0,"duration":0}]`},
+		{name: "invalid duration", ccRules: `[{"action":"intercept","conditions":[{"target":"url_path","operator":"equals","value":"/"}],"window":1,"threshold":1,"duration":-1}]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newSiteRepoForTest(t)
+			reloadCalls := 0
+			body := []byte(`{"host":"create-invalid-cc.example","upstream_urls":"http://127.0.0.1:8080","bind":":8080","network":"tcp","enabled":true,"cc_rules":` + tt.ccRules + `}`)
+			ctx := invokeCreateSiteHandler(t, CreateSite(repo, nil, func() error {
+				reloadCalls++
+				return nil
+			}), body)
+			if ctx.Response.StatusCode() != 400 {
+				t.Fatalf("status = %d, body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+			}
+			if reloadCalls != 0 {
+				t.Fatalf("reload calls = %d, want 0", reloadCalls)
+			}
+			_, total, err := repo.List(0, 10)
+			if err != nil {
+				t.Fatalf("list sites: %v", err)
+			}
+			if total != 0 {
+				t.Fatalf("invalid CC rules created a site, total=%d", total)
+			}
+		})
+	}
+}
+
+func TestCreateSitePreservesValidCCRulesJSON(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	ccRules := `[{"name":"  retain spacing  ","enabled":true,"action":"rate_limit","conditions":[{"target":"header","operator":"contains","value":"User-Agent: curl"}],"window":60,"threshold":3,"duration":5,"duration_unit":"minutes"}]`
+	body := []byte(`{"host":"create-valid-cc.example","upstream_urls":"http://127.0.0.1:8080","bind":":8080","network":"tcp","enabled":true,"cc_rules":` + ccRules + `}`)
+	ctx := invokeCreateSiteHandler(t, CreateSite(repo, nil, func() error { return nil }), body)
+	if ctx.Response.StatusCode() != 201 {
+		t.Fatalf("status = %d, body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	items, total, err := repo.List(0, 10)
+	if err != nil {
+		t.Fatalf("list sites: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("stored site count = total:%d items:%d", total, len(items))
+	}
+	if items[0].CCRules != ccRules {
+		t.Fatalf("cc_rules = %q, want byte-for-byte %q", items[0].CCRules, ccRules)
+	}
+}
+
+func TestUpdateSiteRejectsInvalidCCRulesAndPreservesExistingRules(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	originalRules := `[{"action":"intercept","conditions":[{"target":"url_path","operator":"prefix","value":"/api"}],"window":60,"threshold":10,"duration":0}]`
+	item := store.Site{Host: "update-invalid-cc.example", UpstreamURLs: "http://127.0.0.1:8080", Bind: ":8080", Network: "tcp", Enabled: true, CCRules: originalRules}
+	if err := repo.Create(&item); err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	invalidRules := `[{"action":"intercept","conditions":[{"target":"header","operator":"equals","value":"X-Test:"}],"window":60,"threshold":10,"duration":0}]`
+	reloadCalls := 0
+	ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error {
+		reloadCalls++
+		return nil
+	}), item.ID, []byte(`{"cc_rules":`+invalidRules+`}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("status = %d, body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if reloadCalls != 0 {
+		t.Fatalf("reload calls = %d, want 0", reloadCalls)
+	}
+	loaded, err := repo.Get(item.ID)
+	if err != nil {
+		t.Fatalf("load site: %v", err)
+	}
+	if loaded.CCRules != originalRules {
+		t.Fatalf("cc_rules changed after rejected update: got %q want %q", loaded.CCRules, originalRules)
+	}
+}
+
+func TestUpdateSitePreservesValidCCRulesJSON(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	item := store.Site{Host: "update-valid-cc.example", UpstreamURLs: "http://127.0.0.1:8080", Bind: ":8080", Network: "tcp", Enabled: true, CCRules: `[{"action":"intercept","conditions":[{"target":"url_path","operator":"equals","value":"/old"}],"window":1,"threshold":1,"duration":0}]`}
+	if err := repo.Create(&item); err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	ccRules := `[{"name":"preserve exactly","enabled":false,"action":"observe","conditions":[{"target":"method","operator":"equals","value":"POST"}],"window":15,"threshold":2,"duration":0,"duration_unit":"seconds"}]`
+	ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), item.ID, []byte(`{"cc_rules":`+ccRules+`}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("status = %d, body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	loaded, err := repo.Get(item.ID)
+	if err != nil {
+		t.Fatalf("load site: %v", err)
+	}
+	if loaded.CCRules != ccRules {
+		t.Fatalf("cc_rules = %q, want byte-for-byte %q", loaded.CCRules, ccRules)
+	}
+}
+
 func uintPtr(v uint) *uint {
 	return &v
 }

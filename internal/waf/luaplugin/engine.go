@@ -3,6 +3,7 @@ package luaplugin
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -12,8 +13,9 @@ import (
 // 整体替换而非原地改写，读侧才能无锁取用：Reload 构造全新集合再原子换指针，
 // 正在执行的调用继续持有旧集合跑完。
 type scriptSet struct {
-	pre  []*Script
-	post []*Script
+	revision uint64
+	pre      []*Script
+	post     []*Script
 }
 
 // kvHolder 包一层以便用 atomic.Pointer 持有 interface 值。
@@ -34,6 +36,10 @@ type kvHolder struct {
 type Engine struct {
 	scripts atomic.Pointer[scriptSet]
 	kv      atomic.Pointer[kvHolder]
+
+	// generation 串行标记每次 Reload，随脚本集合快照一起发布。
+	generation atomic.Uint64
+	reloadMu   sync.Mutex
 
 	pool *vmPool
 	log  *slog.Logger
@@ -77,7 +83,26 @@ func (e *Engine) Reload(scripts []*Script) {
 			post = append(post, s)
 		}
 	}
-	e.scripts.Store(&scriptSet{pre: pre, post: post})
+	e.reloadMu.Lock()
+	revision := e.generation.Add(1)
+	e.scripts.Store(&scriptSet{revision: revision, pre: pre, post: post})
+	e.reloadMu.Unlock()
+}
+
+// Revision 返回当前脚本集合的代际编号。
+//
+// 每次 Reload 都会递增，即使脚本内容没有变化也会产生新的代际，调用方
+// 可据此让依赖脚本集合的缓存立即失效。返回值与 scripts 快照来自同一次
+// 原子读取，因此不会把旧脚本与新代际拼在一起。
+func (e *Engine) Revision() uint64 {
+	if e == nil {
+		return 0
+	}
+	set := e.scripts.Load()
+	if set == nil {
+		return 0
+	}
+	return set.revision
 }
 
 // scriptsFor 返回指定阶段的脚本快照。

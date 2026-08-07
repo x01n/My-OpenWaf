@@ -137,7 +137,7 @@ export interface DryRunPanelProps {
 /**
  * 试运行面板：填样例请求、执行脚本、展示判定与耗时。
  *
- * 不保存配置、不会改变线上脚本，但 ctx.kv.set/delete/incr 可能写入真实 Redis；后端每次使用独立的状态机池。
+ * 不保存配置、不会改变线上脚本，也不会连接生产 Redis；后端每次使用独立的状态机池。
  *
  * @param {DryRunPanelProps} props 组件属性
  * @returns {React.ReactElement} 面板元素
@@ -209,7 +209,7 @@ export function DryRunPanel({ stage, source, timeoutMs }: DryRunPanelProps) {
       <p className="text-xs text-muted-foreground">
         {t("luaPlugins.dryRun.contractHint", {
           defaultValue:
-            "试运行直接调用脚本：不会保存配置，但 ctx.kv.set/delete/incr 可能写入真实 Redis；KV 不可用时仍显示脚本结果，线上 Engine 会强制 fail-open。headers、response_body、tags 仍按后端边界校验。",
+            "试运行直接调用脚本：不会保存配置，也不会连接生产 Redis；ctx.kv.available() 固定为 false，KV 写入不会生效。线上 Engine 在 KV 不可用时会强制 fail-open。headers、response_body、tags 仍按后端边界校验。",
         })}
       </p>
 

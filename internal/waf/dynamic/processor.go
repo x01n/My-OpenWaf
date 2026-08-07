@@ -14,10 +14,15 @@ type KeyTicketSigner func(key string, ttl int, kekB64 string) string
 
 // ProtectionConfig 是动态防护的运行时配置。
 type ProtectionConfig struct {
-	HTMLObfuscationEnabled bool   `json:"html_obfuscation_enabled"`
-	JSObfuscationEnabled   bool   `json:"js_obfuscation_enabled"`
-	ImageWatermarkEnabled  bool   `json:"image_watermark_enabled"`
-	JSProtectionMode       string `json:"js_protection_mode,omitempty"` // "all" 或 "paths"
+	HTMLObfuscationEnabled bool `json:"html_obfuscation_enabled"`
+	JSObfuscationEnabled   bool `json:"js_obfuscation_enabled"`
+	ImageWatermarkEnabled  bool `json:"image_watermark_enabled"`
+	// 下列 configured 字段保留全局原始子开关，
+	// 使站点强制开启时不会因全局总开关折叠而丢失子项配置。
+	GlobalHTMLConfigured      bool   `json:"-"`
+	GlobalJSConfigured        bool   `json:"-"`
+	GlobalWatermarkConfigured bool   `json:"-"`
+	JSProtectionMode          string `json:"js_protection_mode,omitempty"` // "all" 或 "paths"
 	// JSObfuscationPaths 是需要进行 JS 加密的资源路径模式
 	JSObfuscationPaths []string `json:"js_obfuscation_paths,omitempty"`
 	// ImageWatermarkPaths 是需要添加水印的图片路径模式
@@ -30,6 +35,29 @@ type ProtectionConfig struct {
 	DecryptCacheTTLSeconds int `json:"decrypt_cache_ttl_seconds,omitempty"`
 	// SiteID 站点标识（用于密钥派生隔离）
 	SiteID uint `json:"site_id,omitempty"`
+}
+
+const (
+	// DefaultDecryptCacheTTLSeconds 是动态保护客户端密钥缓存与兑换票据的默认有效期。
+	DefaultDecryptCacheTTLSeconds = 300
+	// MaxDecryptCacheTTLSeconds 是动态保护客户端密钥缓存与兑换票据允许的最大有效期。
+	MaxDecryptCacheTTLSeconds = 1800
+)
+
+// NormalizeDecryptCacheTTLSeconds 将动态保护 TTL 约束到服务端允许的范围。
+func NormalizeDecryptCacheTTLSeconds(ttl int) int {
+	if ttl <= 0 {
+		return DefaultDecryptCacheTTLSeconds
+	}
+	if ttl > MaxDecryptCacheTTLSeconds {
+		return MaxDecryptCacheTTLSeconds
+	}
+	return ttl
+}
+
+// IsValidJSProtectionMode 判断 JS 动态保护模式是否为支持的枚举值。
+func IsValidJSProtectionMode(mode string) bool {
+	return mode == "" || mode == "all" || mode == "paths"
 }
 
 // Processor 是动态防护处理器。
@@ -148,8 +176,11 @@ func (p *Processor) ProcessJS(path string, js []byte) ([]byte, error) {
 	if mode == "" {
 		mode = "all"
 	}
-	if mode == "paths" && !matchPathPatterns(path, p.cfg.JSObfuscationPaths) {
-		return js, nil
+	if mode == "paths" {
+		// paths 模式的空集合表示没有任何 JS 路径覆盖，不能退化为全量加密。
+		if len(p.cfg.JSObfuscationPaths) == 0 || !matchPathPatterns(path, p.cfg.JSObfuscationPaths) {
+			return js, nil
+		}
 	}
 	return p.encryptJS(js)
 }
@@ -201,10 +232,7 @@ func (p *Processor) makeEnvelope(plaintext []byte) (envelope, error) {
 	if err != nil {
 		return envelope{}, err
 	}
-	ttl := p.cfg.DecryptCacheTTLSeconds
-	if ttl <= 0 {
-		ttl = 300
-	}
+	ttl := NormalizeDecryptCacheTTLSeconds(p.cfg.DecryptCacheTTLSeconds)
 	keyHash := sha256.New()
 	keyHash.Write(p.kek)
 	keyHash.Write(wrapped)
