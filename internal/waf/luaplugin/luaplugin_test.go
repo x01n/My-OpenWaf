@@ -335,6 +335,48 @@ end`)})
 
 // ---- 返回值形态 ----
 
+// TestTopLevelReturnValuesAreDiscarded 验证顶层 chunk 的返回值不会残留在池化状态机栈上。
+func TestTopLevelReturnValuesAreDiscarded(t *testing.T) {
+	script := mustCompile(t, StagePre, `function handle(ctx) return "observe" end; return "stale"`)
+	pool := newVMPool()
+	L := pool.get()
+	defer pool.put(L)
+
+	dec, err := script.callHandler(L, RequestView{}, nil)
+	if err != nil {
+		t.Fatalf("callHandler: %v", err)
+	}
+	if dec.Action != "observe" {
+		t.Fatalf("Action = %q, want observe", dec.Action)
+	}
+	if got := L.GetTop(); got != 0 {
+		t.Fatalf("Lua 栈顶层返回值残留：GetTop() = %d, want 0", got)
+	}
+}
+
+// TestSetTimeoutClampsNonZeroValues 验证非零脚本超时统一限制在 1..1000ms。
+func TestSetTimeoutClampsNonZeroValues(t *testing.T) {
+	cases := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{name: "below_minimum", in: 500 * time.Microsecond, want: minTimeout},
+		{name: "within_range", in: 200 * time.Millisecond, want: 200 * time.Millisecond},
+		{name: "above_maximum", in: 2 * time.Second, want: maxTimeout},
+		{name: "zero_keeps_default", in: 0, want: defaultTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script := mustCompile(t, StagePre, `function handle(ctx) end`)
+			script.SetTimeout(tc.in)
+			if script.timeout != tc.want {
+				t.Fatalf("timeout = %s, want %s", script.timeout, tc.want)
+			}
+		})
+	}
+}
+
 func TestDecisionReturnForms(t *testing.T) {
 	cases := []struct {
 		name string

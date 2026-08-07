@@ -153,7 +153,9 @@ func (s *Script) callHandler(L *lua.LState, req RequestView, kv KVBackend) (dec 
 
 	// 载入已编译原型并执行顶层代码（定义 handle 等）。
 	L.Push(L.NewFunctionFromProto(s.proto))
-	if err := L.PCall(0, lua.MultRet, nil); err != nil {
+	// Top-level chunks only define the handler. Discard all chunk return values
+	// so a script's previous results cannot remain below the handler call.
+	if err := L.PCall(0, 0, nil); err != nil {
 		return Decision{}, fmt.Errorf("luaplugin: %q init failed: %w", s.name, err)
 	}
 
