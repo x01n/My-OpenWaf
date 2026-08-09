@@ -139,30 +139,32 @@ func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string, ses
 		spentKey := "waf:nonce:spent:" + nonce
 		idemKey := "waf:nonce:idem:" + nonce
 		res, err := redis.Eval(ctx, redisNonceLua, []string{spentKey, idemKey}, spentTTL, antiReplayIdemSeconds, newNonce).Result()
-		if err == nil {
-			switch arr := res.(type) {
-			case []any:
-				if len(arr) == 0 {
-					return false, true, ""
-				}
-				switch v := arr[0].(type) {
-				case int64:
-					if v == 1 && len(arr) >= 2 {
-						if s, ok := arr[1].(string); ok {
-							return true, false, s
-						}
-						return true, false, newNonce
-					}
-					if v == 2 && len(arr) >= 2 {
-						if s, ok := arr[1].(string); ok && s != "" {
-							return true, false, s
-						}
-					}
-					if v == 0 {
-						return false, true, ""
-					}
-				}
+		if err != nil {
+			return false, true, ""
+		}
+		arr, ok := res.([]any)
+		if !ok {
+			return false, true, ""
+		}
+		switch {
+		case len(arr) == 1:
+			v, ok := arr[0].(int64)
+			if !ok || v != 0 {
+				return false, true, ""
 			}
+			return false, true, ""
+		case len(arr) == 2:
+			v, ok := arr[0].(int64)
+			if !ok || v != 1 && v != 2 {
+				return false, true, ""
+			}
+			s, ok := arr[1].(string)
+			if !ok || s == "" {
+				return false, true, ""
+			}
+			return true, false, s
+		default:
+			return false, true, ""
 		}
 	}
 	return m.validateAndRotateLocal(nonce, newNonce, remaining)
