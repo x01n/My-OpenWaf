@@ -238,7 +238,7 @@ export const certificateApi = {
   get: (id: string | number) => get<Certificate>(`/certificates/${id}`),
   create: (data: Partial<Certificate>) => post<Certificate>("/certificates", data),
   update: (id: string | number, data: Partial<Certificate>) =>
-    post(`/certificates/${id}/update`, data),
+    post<Certificate>(`/certificates/${id}/update`, data),
   delete: (id: string | number) => post(`/certificates/${id}/delete`),
   applyToSites: (id: string | number, siteIds: number[]) =>
     post(`/certificates/${id}/apply-to-sites`, { site_ids: siteIds }),

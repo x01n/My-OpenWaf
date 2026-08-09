@@ -36,6 +36,7 @@ import {
   luaPluginApi,
 } from "@/lib/api"
 import type {
+  Certificate,
   SiteUpdate,
   LogConfig,
   LogConfigUpdate,
@@ -606,8 +607,8 @@ export function useRuleDelete() {
 }
 
 export function useCertificateMutation() {
-  return useMutation(
-    async ({ id, data }: { id?: number; data: Partial<any> }) => {
+  return useMutation<Certificate, { id?: number; data: Partial<Certificate> }>(
+    async ({ id, data }) => {
       if (id) {
         return certificateApi.update(id, data)
       }
