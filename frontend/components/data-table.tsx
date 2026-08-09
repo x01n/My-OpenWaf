@@ -25,6 +25,7 @@ interface Column<T> {
   key: string
   title: string | ReactNode
   width?: string
+  cellClassName?: string
   render?: (row: T, index: number) => ReactNode
 }
 
@@ -51,7 +52,12 @@ export function DataTable<T = unknown>({
 
   if (loading) {
     return (
-      <div className={cn("overflow-x-auto rounded-md border", className)}>
+      <div
+        className={cn(
+          "max-w-full min-w-0 overflow-hidden rounded-md border",
+          className
+        )}
+      >
         <Table>
           {/* 加载态保留真实表头文本：列宽提前确定，数据到达时不再抖动 */}
           <TableHeader>
@@ -67,7 +73,7 @@ export function DataTable<T = unknown>({
             {Array.from({ length: SKELETON_ROWS }).map((_, rowIdx) => (
               <TableRow key={rowIdx} className="hover:bg-transparent">
                 {columns.map((col, colIdx) => (
-                  <TableCell key={col.key}>
+                  <TableCell key={col.key} className={col.cellClassName}>
                     <Skeleton
                       className={cn(
                         "h-4",
@@ -100,7 +106,12 @@ export function DataTable<T = unknown>({
   }
 
   return (
-    <div className={cn("overflow-x-auto rounded-md border", className)}>
+    <div
+      className={cn(
+        "max-w-full min-w-0 overflow-hidden rounded-md border",
+        className
+      )}
+    >
       <Table>
         <TableHeader className="bg-muted/40">
           <TableRow className="hover:bg-transparent">
@@ -122,7 +133,7 @@ export function DataTable<T = unknown>({
               className="hover:bg-primary/[0.06] dark:hover:bg-primary/[0.12]"
             >
               {columns.map((col) => (
-                <TableCell key={col.key}>
+                <TableCell key={col.key} className={col.cellClassName}>
                   {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                   {col.render ? col.render(row, index) : (row as any)[col.key]}
                 </TableCell>

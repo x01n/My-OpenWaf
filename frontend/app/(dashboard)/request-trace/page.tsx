@@ -109,6 +109,9 @@ function RequestTraceContent() {
       method: first.method,
       statusCode,
       wafAction,
+      tlsJa3: first.tls_ja3,
+      tlsJa3Hash: first.tls_ja3_hash,
+      tlsJa4: first.tls_ja4,
     }
   }, [accessLogs, securityEvents, data?.request_id, queryId, siteMap])
 
@@ -126,8 +129,26 @@ function RequestTraceContent() {
           : "-",
     },
     { key: "client_ip", title: "IP", width: "140px" },
-    { key: "host", title: "Host", width: "180px" },
-    { key: "path", title: "Path" },
+    {
+      key: "host",
+      title: "Host",
+      width: "180px",
+      cellClassName: "whitespace-normal break-words align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full break-words">{row.host || "-"}</span>
+      ),
+    },
+    {
+      key: "path",
+      title: "Path",
+      width: "220px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.path || "-"}
+        </span>
+      ),
+    },
     { key: "method", title: "Method", width: "80px" },
     { key: "status_code", title: t("requestTrace.statusCode"), width: "80px" },
     {
@@ -163,10 +184,48 @@ function RequestTraceContent() {
       render: (row: AccessLog) => row.tls_version || "-",
     },
     {
+      key: "tls_ja3",
+      title: "tls_ja3",
+      width: "180px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.tls_ja3 || "-"}
+        </span>
+      ),
+    },
+    {
+      key: "tls_ja3_hash",
+      title: "tls_ja3_hash",
+      width: "180px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.tls_ja3_hash || "-"}
+        </span>
+      ),
+    },
+    {
+      key: "tls_ja4",
+      title: "tls_ja4",
+      width: "150px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.tls_ja4 || "-"}
+        </span>
+      ),
+    },
+    {
       key: "upstream",
       title: t("requestTrace.upstream"),
       width: "180px",
-      render: (row: AccessLog) => row.upstream || "-",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.upstream || "-"}
+        </span>
+      ),
     },
   ]
 
@@ -194,14 +253,16 @@ function RequestTraceContent() {
       key: "rule_id_str",
       title: t("requestTrace.rule"),
       width: "160px",
+      cellClassName: "whitespace-normal break-all align-top",
       render: (row: SecurityEvent) =>
         row.rule_id_str || String(row.rule_id) || "-",
     },
     {
       key: "match_desc",
       title: t("requestTrace.matchDesc"),
+      cellClassName: "whitespace-normal break-words align-top",
       render: (row: SecurityEvent) => (
-        <span className="line-clamp-2 text-xs text-muted-foreground">
+        <span className="line-clamp-2 block max-w-full text-xs break-words text-muted-foreground">
           {row.match_desc || "-"}
         </span>
       ),
@@ -224,20 +285,20 @@ function RequestTraceContent() {
   ]
 
   return (
-    <div className="space-y-4">
+    <div className="max-w-full min-w-0 space-y-4 overflow-x-hidden">
       <PageHeader
         icon={<IconRoute className="h-6 w-6 text-primary" />}
         title={t("requestTrace.title")}
       />
 
-      <Card>
+      <Card className="min-w-0 overflow-hidden">
         <CardHeader className="pb-3">
           <CardTitle className="text-base">{t("requestTrace.title")}</CardTitle>
           <p className="text-xs text-muted-foreground">
             {t("requestTrace.description")}
           </p>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="min-w-0 space-y-4">
           <div className="flex gap-2">
             <Input
               value={inputValue}
@@ -276,13 +337,13 @@ function RequestTraceContent() {
       </Card>
 
       {summary && (
-        <Card>
+        <Card className="min-w-0 overflow-hidden">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">
               {t("requestTrace.summary")}
             </CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="min-w-0">
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <SummaryItem
                 icon={<IconHash className="h-4 w-4" />}
@@ -316,6 +377,25 @@ function RequestTraceContent() {
                 value={summary.clientIp || "-"}
                 mono
               />
+              {(summary.tlsJa3 || summary.tlsJa3Hash || summary.tlsJa4) && (
+                <>
+                  <SummaryItem
+                    label="tls_ja3"
+                    value={summary.tlsJa3 || "-"}
+                    mono
+                  />
+                  <SummaryItem
+                    label="tls_ja3_hash"
+                    value={summary.tlsJa3Hash || "-"}
+                    mono
+                  />
+                  <SummaryItem
+                    label="tls_ja4"
+                    value={summary.tlsJa4 || "-"}
+                    mono
+                  />
+                </>
+              )}
               <SummaryItem
                 icon={<IconWorld className="h-4 w-4" />}
                 label={t("requestTrace.host")}
@@ -350,8 +430,8 @@ function RequestTraceContent() {
       )}
 
       {hasAny && (
-        <Card>
-          <CardContent className="pt-6">
+        <Card className="min-w-0 overflow-hidden">
+          <CardContent className="min-w-0 pt-6">
             <Tabs defaultValue="access_logs">
               <TabsList>
                 <TabsTrigger value="access_logs" className="gap-1.5">
@@ -367,7 +447,7 @@ function RequestTraceContent() {
                   })}
                 </TabsTrigger>
               </TabsList>
-              <TabsContent value="access_logs" className="mt-4">
+              <TabsContent value="access_logs" className="mt-4 min-w-0">
                 <DataTable
                   columns={accessLogColumns}
                   data={accessLogs}
@@ -375,7 +455,7 @@ function RequestTraceContent() {
                   emptyText={t("requestTrace.emptyAccessLogs")}
                 />
               </TabsContent>
-              <TabsContent value="security_events" className="mt-4">
+              <TabsContent value="security_events" className="mt-4 min-w-0">
                 <DataTable
                   columns={securityEventColumns}
                   data={securityEvents}

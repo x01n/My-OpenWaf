@@ -27,6 +27,9 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import {
   IconCopy,
+  IconMinus,
+  IconPlus,
+  IconRefresh,
   IconShieldOff,
   IconLock,
   IconFingerprint,
@@ -457,19 +460,32 @@ function DetailRow({
 }
 
 /**
- * 报文展示区：等宽字体 + 语法高亮 + 固定高度滚动。
+ * 报文展示区：等宽字体 + 语法高亮 + 响应式高度滚动。
  */
-function MessageView({ text, empty }: { text: string; empty: string }) {
+function MessageView({
+  text,
+  empty,
+  fontScale,
+}: {
+  text: string
+  empty: string
+  fontScale: number
+}) {
+  const messageFontSize = `${0.75 * fontScale}rem`
+
   if (!text) {
     return (
-      <div className="flex h-[300px] items-center justify-center rounded-lg border border-dashed bg-muted/20 px-6 text-center text-xs text-muted-foreground">
+      <div className="flex h-[clamp(220px,42dvh,420px)] min-h-0 items-center justify-center rounded-lg border border-dashed bg-muted/20 px-6 text-center text-xs text-muted-foreground">
         {empty}
       </div>
     )
   }
   return (
-    <ScrollArea className="h-[300px] rounded-lg border bg-muted/30 dark:bg-zinc-950/60">
-      <pre className="p-4 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap">
+    <ScrollArea className="h-[clamp(220px,42dvh,420px)] min-h-0 rounded-lg border bg-muted/30 dark:bg-zinc-950/60">
+      <pre
+        className="p-4 font-mono leading-relaxed break-all whitespace-pre-wrap"
+        style={{ fontSize: messageFontSize }}
+      >
         {renderHttpSyntax(text)}
       </pre>
     </ScrollArea>
@@ -493,6 +509,7 @@ export function SecurityEventDetailDialog({
 }: SecurityEventDetailDialogProps) {
   const { t } = useTranslation()
   const [encoding, setEncoding] = useState<"utf8" | "ascii">("utf8")
+  const [messageScale, setMessageScale] = useState(1)
   const [fingerprintOpen, setFingerprintOpen] = useState(false)
   const [banLoading, setBanLoading] = useState(false)
   const [fpDialogOpen, setFpDialogOpen] = useState(false)
@@ -626,9 +643,9 @@ export function SecurityEventDetailDialog({
     { label: "TLS Version", value: ev.tls_version },
     { label: "SNI", value: ev.tls_sni },
     { label: "ALPN", value: ev.tls_alpn },
-    { label: "JA4", value: ev.tls_ja4 },
-    { label: "JA3 Hash", value: ev.tls_ja3_hash },
-    { label: "JA3", value: ev.tls_ja3 },
+    { label: "tls_ja4", value: ev.tls_ja4 },
+    { label: "tls_ja3_hash", value: ev.tls_ja3_hash },
+    { label: "tls_ja3", value: ev.tls_ja3 },
     { label: "Cipher Suites", value: ev.tls_cipher_suites },
     { label: "Extensions", value: ev.tls_extensions },
     { label: "Curves", value: ev.tls_curves },
@@ -639,7 +656,7 @@ export function SecurityEventDetailDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto bg-muted/30 p-4 sm:p-5">
+        <DialogContent className="max-h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-5xl overflow-x-hidden overflow-y-auto bg-muted/30 p-3 sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:p-5">
           <div className="sr-only">
             <DialogTitle>{t("securityEventDetail.dialogTitle")}</DialogTitle>
             <DialogDescription>{fullUrl}</DialogDescription>
@@ -865,6 +882,61 @@ export function SecurityEventDetailDialog({
                     {t("securityEventDetail.responseMessage")}
                   </TabsTrigger>
                 </TabsList>
+                <div
+                  className="flex flex-wrap items-center gap-1.5"
+                  role="group"
+                  aria-label="Message text size"
+                >
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon-sm"
+                    className="h-7 w-7"
+                    aria-label="Decrease message text size"
+                    title="Decrease message text size"
+                    disabled={messageScale <= 0.8}
+                    onClick={() =>
+                      setMessageScale((value) =>
+                        Math.max(0.8, Number((value - 0.1).toFixed(2)))
+                      )
+                    }
+                  >
+                    <IconMinus className="h-3.5 w-3.5" />
+                  </Button>
+                  <span
+                    className="min-w-10 text-center font-mono text-[11px] text-muted-foreground"
+                    aria-live="polite"
+                  >
+                    {Math.round(messageScale * 100)}%
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon-sm"
+                    className="h-7 w-7"
+                    aria-label="Increase message text size"
+                    title="Increase message text size"
+                    disabled={messageScale >= 1.4}
+                    onClick={() =>
+                      setMessageScale((value) =>
+                        Math.min(1.4, Number((value + 0.1).toFixed(2)))
+                      )
+                    }
+                  >
+                    <IconPlus className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="h-7 w-7"
+                    aria-label="Reset message text size"
+                    title="Reset message text size"
+                    onClick={() => setMessageScale(1)}
+                  >
+                    <IconRefresh className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
                 <Select
                   value={encoding}
                   onValueChange={(v) => setEncoding(v as "utf8" | "ascii")}
@@ -883,6 +955,7 @@ export function SecurityEventDetailDialog({
                 <MessageView
                   text={requestText}
                   empty={t("securityEventDetail.noRequestData")}
+                  fontScale={messageScale}
                 />
               </TabsContent>
 
@@ -894,6 +967,7 @@ export function SecurityEventDetailDialog({
                       ? t("common.loading")
                       : t("securityEventDetail.noResponseData")
                   }
+                  fontScale={messageScale}
                 />
                 {responseText && (
                   <p className="mt-2 text-[11px] text-muted-foreground">
@@ -905,7 +979,9 @@ export function SecurityEventDetailDialog({
                     {accessLog.upstream && (
                       <span>
                         {t("securityEventDetail.upstream")}:{" "}
-                        <span className="font-mono">{accessLog.upstream}</span>
+                        <span className="font-mono break-all">
+                          {accessLog.upstream}
+                        </span>
                       </span>
                     )}
                     {accessLog.cache_state && (

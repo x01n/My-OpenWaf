@@ -98,8 +98,37 @@ export default function AccessLogsPage() {
   const columns = [
     { key: "created_at", title: t("accessLogs.time"), width: "180px" },
     { key: "client_ip", title: t("accessLogs.ip"), width: "140px" },
-    { key: "host", title: t("accessLogs.host"), width: "180px" },
-    { key: "path", title: t("accessLogs.path"), width: "200px" },
+    {
+      key: "host",
+      title: t("accessLogs.host"),
+      width: "180px",
+      cellClassName: "whitespace-normal break-words align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full break-words">{row.host || "-"}</span>
+      ),
+    },
+    {
+      key: "path",
+      title: t("accessLogs.path"),
+      width: "220px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.path || "-"}
+        </span>
+      ),
+    },
+    {
+      key: "upstream",
+      title: t("requestTrace.upstream"),
+      width: "190px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.upstream || "-"}
+        </span>
+      ),
+    },
     { key: "method", title: t("accessLogs.method"), width: "80px" },
     { key: "status_code", title: t("accessLogs.status"), width: "80px" },
     {
@@ -115,6 +144,39 @@ export default function AccessLogsPage() {
         ) : (
           "-"
         ),
+    },
+    {
+      key: "tls_ja3",
+      title: "tls_ja3",
+      width: "180px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.tls_ja3 || "-"}
+        </span>
+      ),
+    },
+    {
+      key: "tls_ja3_hash",
+      title: "tls_ja3_hash",
+      width: "180px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.tls_ja3_hash || "-"}
+        </span>
+      ),
+    },
+    {
+      key: "tls_ja4",
+      title: "tls_ja4",
+      width: "150px",
+      cellClassName: "whitespace-normal break-all align-top",
+      render: (row: AccessLog) => (
+        <span className="block max-w-full font-mono text-xs break-all">
+          {row.tls_ja4 || "-"}
+        </span>
+      ),
     },
     {
       key: "operations",
@@ -141,7 +203,7 @@ export default function AccessLogsPage() {
   ]
 
   return (
-    <div className="space-y-4">
+    <div className="max-w-full min-w-0 space-y-4 overflow-x-hidden">
       <PageHeader
         title={t("accessLogs.title")}
         description={t("accessLogs.description")}
@@ -161,7 +223,7 @@ export default function AccessLogsPage() {
         </Alert>
       )}
 
-      <Card>
+      <Card className="min-w-0 overflow-hidden">
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">
@@ -180,7 +242,7 @@ export default function AccessLogsPage() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="min-w-0 space-y-4">
           {showFilters && (
             <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-4">
               <div className="space-y-1.5">
