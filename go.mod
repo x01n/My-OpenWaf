@@ -22,9 +22,9 @@ require (
 	github.com/wenlng/go-captcha/v2 v2.0.5
 	github.com/wu238121-a11y/go-ja4 v1.0.0
 	github.com/yuin/gopher-lua v1.1.2
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/image v0.44.0
-	golang.org/x/net v0.57.0
+	golang.org/x/net v0.58.0
 	golang.org/x/sync v0.22.0
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/driver/postgres v1.6.2
@@ -62,7 +62,7 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.29.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	modernc.org/libc v1.75.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
