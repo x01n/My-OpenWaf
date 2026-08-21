@@ -44,6 +44,33 @@ func TestValidatePatternRegexMatchers(t *testing.T) {
 	}
 }
 
+func TestValidatePatternHostAddressForms(t *testing.T) {
+	tests := []string{
+		"host:2001:db8::1",
+		"host_full:[2001:db8::1]:443",
+		"host:api.example.com:8443",
+		"host_full:*.example.com:8443",
+	}
+	for _, pattern := range tests {
+		t.Run(pattern, func(t *testing.T) {
+			kind, arg, errs := ValidatePattern(pattern)
+			if kind == "" || arg == "" {
+				t.Fatalf("ValidatePattern(%q) = kind %q, arg %q", pattern, kind, arg)
+			}
+			if len(errs) != 0 {
+				t.Fatalf("ValidatePattern(%q) errors = %v, want none", pattern, errs)
+			}
+		})
+	}
+}
+
+func TestValidatePatternRejectsInvalidHostRegex(t *testing.T) {
+	pattern := "host_regex:(?invalid"
+	if _, _, errs := ValidatePattern(pattern); len(errs) == 0 {
+		t.Fatalf("ValidatePattern(%q) should reject invalid regular expression", pattern)
+	}
+}
+
 func TestValidatePatternQueryParamRegexMissingColon(t *testing.T) {
 	pattern := "query_param_regex:nocolon"
 	_, _, errs := ValidatePattern(pattern)
@@ -136,17 +163,17 @@ func TestValidatePatternRejectsInvalidTLSLeaf(t *testing.T) {
 		{
 			name:    "invalid tls version",
 			pattern: "tls_version:TLS 1.9",
-			wantErr: "tls_version requires a supported TLS version token",
+			wantErr: "tls_version 需要合法的 TLS 版本标识",
 		},
 		{
 			name:    "unsupported ssl3 tls version",
 			pattern: "tls_version:SSL3",
-			wantErr: "tls_version requires a supported TLS version token",
+			wantErr: "tls_version 需要合法的 TLS 版本标识",
 		},
 		{
 			name:    "invalid tls cipher suites",
 			pattern: "tls_cipher_suites: , ",
-			wantErr: "tls_cipher_suites requires at least one valid cipher suite token",
+			wantErr: "tls_cipher_suites 至少需要一个合法的密码套件标识",
 		},
 	}
 
@@ -170,7 +197,7 @@ func TestValidatePatternRejectsInvalidCompoundTLSLeaf(t *testing.T) {
 	if kind != "compound" {
 		t.Fatalf("ValidatePattern() kind = %q, want compound", kind)
 	}
-	if len(errs) != 1 || errs[0] != "tls_version requires a supported TLS version token" {
+	if len(errs) != 1 || errs[0] != "tls_version 需要合法的 TLS 版本标识" {
 		t.Fatalf("ValidatePattern() errors = %#v", errs)
 	}
 }
@@ -187,5 +214,124 @@ func TestValidatePatternAcceptsCompoundTLSAliases(t *testing.T) {
 	}
 	if len(errs) != 0 {
 		t.Fatalf("ValidatePattern() errors = %#v, want none", errs)
+	}
+}
+
+func TestValidatePatternCompoundSemanticBoundaries(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			name:  "unknown leaf kind",
+			input: `{"op":"and","children":[{"kind":"unknown_kind","arg":"x"}]}`,
+		},
+		{
+			name:  "unknown operator leaf",
+			input: `{"op":"unknown","kind":"block_path","arg":"/admin"}`,
+		},
+		{
+			name:  "unknown operator branches",
+			input: `{"op":"unknown","if":{"kind":"block_path","arg":"/admin"},"then":{"kind":"block_method","arg":"POST"}}`,
+		},
+		{
+			name:  "not requires one child",
+			input: `{"op":"not","children":[{"kind":"block_path","arg":"/a"},{"kind":"block_path","arg":"/b"}]}`,
+		},
+		{
+			name:  "cc rate requires one child",
+			input: `{"op":"cc_rate","window":60,"threshold":3,"children":[{"kind":"block_path","arg":"/a"},{"kind":"block_path","arg":"/b"}]}`,
+		},
+		{
+			name:  "cc rate window must be positive",
+			input: `{"op":"cc_rate","window":0,"threshold":3,"children":[{"kind":"block_path","arg":"/a"}]}`,
+		},
+		{
+			name:  "cc rate threshold must be positive",
+			input: `{"op":"cc_rate","window":60,"threshold":0,"children":[{"kind":"block_path","arg":"/a"}]}`,
+		},
+		{
+			name:  "cc rate duration cannot be negative",
+			input: `{"op":"cc_rate","window":60,"threshold":3,"duration":-1,"children":[{"kind":"block_path","arg":"/a"}]}`,
+		},
+		{
+			name:  "cc rate duration seconds cannot be negative",
+			input: `{"op":"cc_rate","window":60,"threshold":3,"duration_seconds":-1,"children":[{"kind":"block_path","arg":"/a"}]}`,
+		},
+		{
+			name:  "zero duration retains window semantics",
+			input: `{"op":"cc_rate","window":60,"threshold":3,"duration":0,"children":[{"kind":"block_path","arg":"/a"}]}`,
+			valid: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, errs := ValidatePattern(tt.input)
+			if tt.valid && len(errs) != 0 {
+				t.Fatalf("ValidatePattern(%q) errors = %#v, want none", tt.input, errs)
+			}
+			if !tt.valid && len(errs) == 0 {
+				t.Fatalf("ValidatePattern(%q) unexpectedly succeeded", tt.input)
+			}
+		})
+	}
+}
+
+func TestValidatePatternRejectsEmptyBroadMatchers(t *testing.T) {
+	patterns := []string{
+		"block_query_contains:",
+		"block_path_exact:",
+		"block_method:",
+		"block_content_type:",
+		"block_user_agent:",
+		"header_order_contains:",
+		"body_contains:",
+		"block_body_contains:",
+		"path_contains:",
+		"path_not_contains:",
+		"host:",
+		"host_full:",
+		"full_url_contains:",
+		"host_contains:",
+		"host_not_contains:",
+		"cookie_contains:",
+		"referer_contains:",
+		"tls_ja3:",
+		"tls_ja3_hash:",
+		"tls_ja4:",
+		"tls_sni:",
+		"tls_alpn:",
+		"geo_block:",
+	}
+
+	for _, pattern := range patterns {
+		if _, _, errs := ValidatePattern(pattern); len(errs) == 0 {
+			t.Errorf("ValidatePattern(%q) should reject an empty argument", pattern)
+		}
+	}
+}
+
+func TestValidatePatternRejectsEmptyNameValueComponents(t *testing.T) {
+	patterns := []string{
+		"block_header::value",
+		"block_header:name:",
+		"block_header_exact::value",
+		"block_header_exact:name:",
+		"query_param::value",
+		"query_param:name:",
+	}
+
+	for _, pattern := range patterns {
+		if _, _, errs := ValidatePattern(pattern); len(errs) == 0 {
+			t.Errorf("ValidatePattern(%q) should reject an empty component", pattern)
+		}
+	}
+}
+
+func TestValidatePatternAllowsDefaultMultipartPattern(t *testing.T) {
+	if _, _, errs := ValidatePattern("block_multipart:"); len(errs) != 0 {
+		t.Fatalf("block_multipart without a custom pattern should remain valid: %v", errs)
 	}
 }

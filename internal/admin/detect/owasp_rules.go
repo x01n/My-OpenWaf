@@ -330,7 +330,7 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 			} `json:"rules"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		policyID, err := resolveOWASPPolicyID(repo.DB(), c, req.PolicyID)

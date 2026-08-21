@@ -31,19 +31,14 @@ import {
   IconTrash,
 } from "@tabler/icons-react"
 import { useRuleMutation } from "@/hooks/use-api"
+import { ruleApi } from "@/lib/api"
 import { toast } from "sonner"
-import type { Rule } from "@/lib/types"
-
-// ============================================================
-// 条件行与条件组类型定义
-// ============================================================
-
-/** 单个匹配条件行 */
-interface ConditionRow {
-  target: string
-  method: string
-  content: string
-}
+import type { CaptchaType, Rule } from "@/lib/types"
+import {
+  serializeGroupsToPattern,
+  parsePatternToRows,
+  type ConditionRow,
+} from "./rule-pattern-mapper"
 
 /**
  * 条件组结构：外层数组为 OR 关系，内层数组为 AND 关系
@@ -51,25 +46,13 @@ interface ConditionRow {
  */
 type ConditionGroups = ConditionRow[][]
 
-/** 序列化后的条件 JSON 结构 */
-interface ConditionNode {
-  op?: "and" | "or"
-  children?: ConditionNode[]
-  target?: string
-  method?: string
-  content?: string
-}
-
-// ============================================================
-// 匹配选项常量
-// ============================================================
-
 /** 匹配目标选项 */
 const matchTargets = [
   { value: "src_ip", label: "rules.targetSrcIp" },
   { value: "url", label: "rules.targetUrl" },
   { value: "url_path", label: "rules.targetUrlPath" },
   { value: "host", label: "rules.targetHost" },
+  { value: "host_full", label: "rules.targetHostFull" },
   { value: "get_param", label: "rules.targetGetParam" },
   { value: "post_param", label: "rules.targetPostParam" },
   { value: "req_header", label: "rules.targetReqHeader" },
@@ -86,6 +69,9 @@ const matchMethods = [
   { value: "eq", label: "rules.methodEq" },
   { value: "ne", label: "rules.methodNe" },
   { value: "contains", label: "rules.methodContains" },
+  { value: "regex", label: "rules.methodRegex" },
+  { value: "prefix", label: "rules.methodPrefix" },
+  { value: "wildcard", label: "rules.methodWildcard" },
   { value: "in_cidr", label: "rules.methodInCidr" },
   { value: "not_in_cidr", label: "rules.methodNotInCidr" },
   { value: "in_ip_group", label: "rules.methodInIpGroup" },
@@ -100,9 +86,12 @@ const limitActions = [
   { value: "block", label: "rules.actionBlock" },
 ]
 
-// ============================================================
-// 条件组序列化/反序列化
-// ============================================================
+const captchaTypeOptions: Array<{ value: CaptchaType; label: string }> = [
+  { value: "math", label: "数学" },
+  { value: "click", label: "点选" },
+  { value: "slide", label: "滑块" },
+  { value: "rotate", label: "旋转" },
+]
 
 /** 创建一个空的条件行 */
 function createEmptyRow(): ConditionRow {
@@ -115,108 +104,35 @@ function createDefaultGroups(): ConditionGroups {
 }
 
 /**
- * 将条件组序列化为后端 pattern JSON 格式
- * 单条件直接输出为对象，多条件使用 and/or 嵌套
+ * 将条件组序列化为后端 pattern JSON 格式。
+ *
+ * ——契约要求——
+ * 后端 `parseCompoundJSON`（matcher.go 行 1137-1143）只识别以下节点：
+ *   - `{op: "and"|"or"|"not"|"if"|"cc_rate", children: [...]}` 复合节点
+ *   - 叶子 `{kind, arg}`
+ * 旧形态 `{target, method, content}` 落到 `buildCompound` 的 default 分支
+ * 后会返回 `neverMatcher`，等价于空规则。本函数通过
+ * `rule-pattern-mapper.serializeGroupsToPattern` 把 UI 行翻译成合法
+ * kind/arg 后再序列化为 compound JSON。
  */
-function serializeGroups(groups: ConditionGroups): string {
-  const orChildren: ConditionNode[] = groups.map((rows) => {
-    if (rows.length === 1) {
-      return {
-        target: rows[0].target,
-        method: rows[0].method,
-        content: rows[0].content,
-      }
-    }
-    return {
-      op: "and" as const,
-      children: rows.map((r) => ({
-        target: r.target,
-        method: r.method,
-        content: r.content,
-      })),
-    }
-  })
-
-  if (orChildren.length === 1) {
-    return JSON.stringify(orChildren[0])
-  }
-
-  return JSON.stringify({ op: "or", children: orChildren })
+function serializeGroups(
+  groups: ConditionGroups,
+  options: { allowIP?: boolean } = {}
+): string {
+  return serializeGroupsToPattern(groups, options)
 }
 
 /**
- * 将后端 pattern 字符串解析回条件组
- * 兼容旧格式（纯字符串）和新格式（JSON）
+ * 将后端 pattern 字符串解析回条件组。
+ * 兼容后端的两类持久化形态：
+ *   - 简单 DSL：`block_path_exact:/admin`（个人脚本上手写的旧规则）
+ *   - JSON compound 条件（`serializeGroupsToPattern` 产出的形态）
+ * 旧版前端写出的 `{target, method, content}` 残留 JSON 形态会通过
+ * `parsePatternToRows` 兜底成单行 src_ip + eq。
  */
 function parsePattern(pattern: string): ConditionGroups {
-  if (!pattern || pattern.trim() === "") {
-    return createDefaultGroups()
-  }
-
-  try {
-    const parsed = JSON.parse(pattern) as ConditionNode
-    return nodeToGroups(parsed)
-  } catch {
-    // 旧格式：纯字符串作为单条件的 content
-    return [[{ target: "src_ip", method: "eq", content: pattern }]]
-  }
+  return parsePatternToRows(pattern)
 }
-
-/** 递归解析条件节点为条件组 */
-function nodeToGroups(node: ConditionNode): ConditionGroups {
-  // 叶子节点：包含 target/method/content
-  if (node.target && node.method) {
-    return [
-      [
-        {
-          target: node.target,
-          method: node.method,
-          content: node.content || "",
-        },
-      ],
-    ]
-  }
-
-  if (node.op === "or" && node.children) {
-    return node.children.flatMap((child) => {
-      if (child.op === "and" && child.children) {
-        return [
-          child.children.map((leaf) => ({
-            target: leaf.target || "src_ip",
-            method: leaf.method || "eq",
-            content: leaf.content || "",
-          })),
-        ]
-      }
-      // 单叶子作为一个 OR 组
-      return [
-        [
-          {
-            target: child.target || "src_ip",
-            method: child.method || "eq",
-            content: child.content || "",
-          },
-        ],
-      ]
-    })
-  }
-
-  if (node.op === "and" && node.children) {
-    return [
-      node.children.map((leaf) => ({
-        target: leaf.target || "src_ip",
-        method: leaf.method || "eq",
-        content: leaf.content || "",
-      })),
-    ]
-  }
-
-  return createDefaultGroups()
-}
-
-// ============================================================
-// 表单验证 Schema（条件组由 useState 管理，不走 zod）
-// ============================================================
 
 const formSchema = z.object({
   type: z.enum(["allow", "block"]),
@@ -224,6 +140,7 @@ const formSchema = z.object({
   windowSeconds: z.number().min(0, "rules.timeWindowInvalid").optional(),
   requestCount: z.number().min(0, "rules.countInvalid").optional(),
   action: z.string().min(1, "rules.actionRequired"),
+  captchaType: z.enum(["", "math", "click", "slide", "rotate"]),
   captchaMinutes: z.number().min(0, "rules.captchaMinutesInvalid").optional(),
   enabled: z.boolean(),
 })
@@ -234,6 +151,7 @@ type FormValues = {
   windowSeconds?: number
   requestCount?: number
   action: string
+  captchaType: "" | CaptchaType
   captchaMinutes?: number
   enabled: boolean
 }
@@ -278,28 +196,32 @@ export function RuleFormDialog({
       windowSeconds: 60,
       requestCount: 10,
       action: "block",
+      captchaType: "",
       captchaMinutes: 5,
       enabled: true,
     },
   })
 
   const typeValue = useWatch({ control, name: "type" })
-
-  // ============================================================
-  // 条件组操作方法
-  // ============================================================
+  const actionValue = useWatch({ control, name: "action" })
+  const hasUneditableCondition = conditionGroups.some((group) =>
+    group.some((row) => row.uneditable)
+  )
 
   /** 更新指定条件行的某个字段 */
   const updateRow = useCallback(
     (
       groupIdx: number,
       rowIdx: number,
-      field: keyof ConditionRow,
+      field: "target" | "method" | "content" | "headerName" | "paramName",
       value: string
     ) => {
       setConditionGroups((prev) => {
         const next = prev.map((g) => g.map((r) => ({ ...r })))
-        next[groupIdx][rowIdx][field] = value
+        next[groupIdx][rowIdx] = {
+          ...next[groupIdx][rowIdx],
+          [field]: value,
+        }
         return next
       })
       setConditionError("")
@@ -346,10 +268,6 @@ export function RuleFormDialog({
     setConditionGroups((prev) => [...prev, [createEmptyRow()]])
   }, [])
 
-  // ============================================================
-  // 表单初始化
-  // ============================================================
-
   // 表单初始化
 
   useEffect(() => {
@@ -360,6 +278,7 @@ export function RuleFormDialog({
         windowSeconds: 60,
         requestCount: 10,
         action: rule.action === "allow" ? "block" : rule.action,
+        captchaType: rule.captcha_type ?? "",
         captchaMinutes: 5,
         enabled: rule.enabled,
       })
@@ -374,6 +293,7 @@ export function RuleFormDialog({
         windowSeconds: 60,
         requestCount: 10,
         action: "block",
+        captchaType: "",
         captchaMinutes: 5,
         enabled: true,
       })
@@ -383,15 +303,19 @@ export function RuleFormDialog({
       setConditionError("")
     }
   }, [open, rule, reset])
-
-  // ============================================================
-  // 条件组验证
-  // ============================================================
-
-  /** 校验条件组至少有一个组且每行内容不为空 */
-  const validateConditions = (): boolean => {
+  /** 校验条件组至少有一个组且每行内容不为空，且每行能映射到后端合法 matcher。 */
+  const validateConditions = async (): Promise<boolean> => {
     for (const group of conditionGroups) {
       for (const row of group) {
+        if (row.uneditable) {
+          setConditionError(
+            t(
+              "rules.conditionUneditable",
+              "该规则包含当前表单无法安全编辑的条件，请保留原规则或使用支持该条件的编辑方式。"
+            )
+          )
+          return false
+        }
         if (!row.target || !row.method || !row.content.trim()) {
           setConditionError(
             t("rules.conditionIncomplete", "请完善所有匹配条件")
@@ -407,35 +331,67 @@ export function RuleFormDialog({
       setConditionError(t("rules.conditionRequired", "至少需要一个匹配条件"))
       return false
     }
+    // 二次校验：所有 (target, method) 组合都必须能映射到后端合法 matcher。
+    // 否则会被后端落成 neverMatcher，等同空规则。
+    try {
+      const pattern = serializeGroups(conditionGroups, {
+        allowIP: typeValue === "allow",
+      })
+      if (!pattern) {
+        setConditionError(t("rules.conditionRequired", "至少需要一个匹配条件"))
+        return false
+      }
+      const result = (await ruleApi.validate({ pattern })) as {
+        valid?: boolean
+        message?: string
+        errors?: string[]
+      }
+      if (!result.valid) {
+        setConditionError(
+          result.errors?.join("；") ||
+            result.message ||
+            t("rules.conditionInvalid", "规则条件无法通过后端校验")
+        )
+        return false
+      }
+    } catch (err) {
+      setConditionError(
+        err instanceof Error
+          ? `条件无法编译为合法规则: ${err.message}`
+          : "条件无法编译为合法规则"
+      )
+      return false
+    }
     setConditionError("")
     return true
   }
 
-  // ============================================================
-  // 表单提交
-  // ============================================================
-
   const onSubmit = async (values: FormValues) => {
-    if (!validateConditions()) return
+    if (!(await validateConditions())) return
 
     try {
-      const patternJson = serializeGroups(conditionGroups)
+      const patternJson = serializeGroups(conditionGroups, {
+        allowIP: values.type === "allow",
+      })
 
       const payload: Record<string, unknown> = {
         name: values.name,
-        policy_id: rule?.policy_id ?? policyId,
         pattern: patternJson,
         action: values.type === "allow" ? "allow" : values.action,
-        phase: "custom",
         enabled: values.enabled,
-        // 不提交 priority：本表单没有优先级输入项，交给后端取模型默认值（100）。
-        // 曾经写死 0，而后端此前靠 GORM「零值即未设置」把它当默认值处理；
-        // 现在后端会如实落库，再传 0 会让每条新规则都排到最高优先级
-        // （规则按 priority ASC, ID ASC 执行）。更新时不传则保持原值不变。
-        status_code: 403,
-        window_seconds: values.windowSeconds,
-        request_count: values.requestCount,
-        captcha_minutes: values.captchaMinutes,
+        captcha_type:
+          values.type === "block" && values.action === "captcha_challenge"
+            ? values.captchaType
+            : "",
+      }
+
+      if (!rule) {
+        // 创建时仅补充本表单负责的默认元数据。更新时省略 phase、
+        // status_code、priority、redirect_to 等字段，由后端保留原值，
+        // 避免编辑规则时覆盖其他管理入口维护的配置。
+        payload.policy_id = policyId
+        payload.phase = values.type === "allow" ? "acl" : "custom"
+        payload.status_code = 403
       }
 
       await mutateRule({
@@ -557,106 +513,167 @@ export function RuleFormDialog({
                         </div>
                       )}
 
-                      {/* 条件行：匹配目标 + 匹配方式 + 匹配内容 + 删除 */}
-                      <div className="grid grid-cols-[1fr_1fr_1fr_auto] items-end gap-2">
-                        {/* 匹配目标 */}
-                        <div className="space-y-1">
-                          {rowIdx === 0 && (
-                            <Label className="text-xs text-muted-foreground">
-                              {t("rules.target")}
-                            </Label>
-                          )}
-                          <Select
-                            value={row.target}
-                            onValueChange={(v) =>
-                              updateRow(groupIdx, rowIdx, "target", v)
-                            }
-                          >
-                            <SelectTrigger className="h-9">
-                              <SelectValue
-                                placeholder={t(
-                                  "rules.targetPlaceholder",
-                                  "选择目标"
-                                )}
-                              />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {matchTargets.map((item) => (
-                                <SelectItem key={item.value} value={item.value}>
-                                  {t(item.label)}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-
-                        {/* 匹配方式 */}
-                        <div className="space-y-1">
-                          {rowIdx === 0 && (
-                            <Label className="text-xs text-muted-foreground">
-                              {t("rules.method")}
-                            </Label>
-                          )}
-                          <Select
-                            value={row.method}
-                            onValueChange={(v) =>
-                              updateRow(groupIdx, rowIdx, "method", v)
-                            }
-                          >
-                            <SelectTrigger className="h-9">
-                              <SelectValue
-                                placeholder={t(
-                                  "rules.methodPlaceholder",
-                                  "选择方式"
-                                )}
-                              />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {matchMethods.map((m) => (
-                                <SelectItem key={m.value} value={m.value}>
-                                  {t(m.label)}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-
-                        {/* 匹配内容 */}
-                        <div className="space-y-1">
-                          {rowIdx === 0 && (
-                            <Label className="text-xs text-muted-foreground">
-                              {t("rules.content")}
-                            </Label>
-                          )}
-                          <Input
-                            className="h-9"
-                            value={row.content}
-                            onChange={(e) =>
-                              updateRow(
-                                groupIdx,
-                                rowIdx,
-                                "content",
-                                e.target.value
-                              )
-                            }
-                            placeholder={t(
-                              "rules.contentPlaceholder",
-                              "匹配内容"
+                      {row.uneditable ? (
+                        <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
+                          <p className="text-xs text-muted-foreground">
+                            {t(
+                              "rules.conditionUneditable",
+                              "该规则包含当前表单无法安全编辑的条件，请保留原规则或使用支持该条件的编辑方式。"
                             )}
-                          />
+                          </p>
+                          <code className="block max-h-32 overflow-auto rounded bg-muted px-2 py-1 text-xs break-all whitespace-pre-wrap">
+                            {row.rawPattern ?? ""}
+                          </code>
                         </div>
+                      ) : (
+                        <>
+                          {/* 条件行：匹配目标 + 匹配方式 + 匹配内容 + 删除 */}
+                          <div className="grid grid-cols-[1fr_1fr_1fr_auto] items-end gap-2">
+                            {/* 匹配目标 */}
+                            <div className="space-y-1">
+                              {rowIdx === 0 && (
+                                <Label className="text-xs text-muted-foreground">
+                                  {t("rules.target")}
+                                </Label>
+                              )}
+                              <Select
+                                value={row.target}
+                                onValueChange={(v) =>
+                                  updateRow(groupIdx, rowIdx, "target", v)
+                                }
+                              >
+                                <SelectTrigger className="h-9">
+                                  <SelectValue
+                                    placeholder={t(
+                                      "rules.targetPlaceholder",
+                                      "选择目标"
+                                    )}
+                                  />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {matchTargets.map((item) => (
+                                    <SelectItem
+                                      key={item.value}
+                                      value={item.value}
+                                    >
+                                      {t(item.label)}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
 
-                        {/* 删除按钮 */}
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-9 w-9 text-muted-foreground hover:text-destructive"
-                          onClick={() => removeRow(groupIdx, rowIdx)}
-                        >
-                          <IconTrash className="h-4 w-4" />
-                        </Button>
-                      </div>
+                            {/* 匹配方式 */}
+                            <div className="space-y-1">
+                              {rowIdx === 0 && (
+                                <Label className="text-xs text-muted-foreground">
+                                  {t("rules.method")}
+                                </Label>
+                              )}
+                              <Select
+                                value={row.method}
+                                onValueChange={(v) =>
+                                  updateRow(groupIdx, rowIdx, "method", v)
+                                }
+                              >
+                                <SelectTrigger className="h-9">
+                                  <SelectValue
+                                    placeholder={t(
+                                      "rules.methodPlaceholder",
+                                      "选择方式"
+                                    )}
+                                  />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {matchMethods.map((m) => (
+                                    <SelectItem key={m.value} value={m.value}>
+                                      {t(m.label)}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            {/* 匹配内容 */}
+                            <div className="space-y-1">
+                              {rowIdx === 0 && (
+                                <Label className="text-xs text-muted-foreground">
+                                  {t("rules.content")}
+                                </Label>
+                              )}
+                              <Input
+                                className="h-9"
+                                value={row.content}
+                                onChange={(e) =>
+                                  updateRow(
+                                    groupIdx,
+                                    rowIdx,
+                                    "content",
+                                    e.target.value
+                                  )
+                                }
+                                placeholder={t(
+                                  "rules.contentPlaceholder",
+                                  "匹配内容"
+                                )}
+                              />
+                            </div>
+
+                            {/* 删除按钮 */}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-9 w-9 text-muted-foreground hover:text-destructive"
+                              onClick={() => removeRow(groupIdx, rowIdx)}
+                            >
+                              <IconTrash className="h-4 w-4" />
+                            </Button>
+                          </div>
+
+                          {/* Header / Param 名称输入：仅当 target 需要 name 时显示。
+                          后端 matcher 接受 `Name:value` 形式（splitHeaderArg 切分）。 */}
+                          {(row.target === "req_header" ||
+                            row.target === "get_param" ||
+                            row.target === "post_param") && (
+                            <div className="mt-2 grid grid-cols-[1fr_auto] items-end gap-2 pl-1">
+                              <div className="space-y-1">
+                                <Label className="text-xs text-muted-foreground">
+                                  {row.target === "req_header"
+                                    ? t(
+                                        "rules.headerName",
+                                        "Header 名称（如 User-Agent）"
+                                      )
+                                    : t("rules.paramName", "参数名称（如 id）")}
+                                </Label>
+                                <Input
+                                  className="h-9"
+                                  value={
+                                    row.target === "req_header"
+                                      ? (row.headerName ?? "")
+                                      : (row.paramName ?? "")
+                                  }
+                                  onChange={(e) =>
+                                    updateRow(
+                                      groupIdx,
+                                      rowIdx,
+                                      row.target === "req_header"
+                                        ? "headerName"
+                                        : "paramName",
+                                      e.target.value
+                                    )
+                                  }
+                                  placeholder={
+                                    row.target === "req_header"
+                                      ? "User-Agent"
+                                      : "id"
+                                  }
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
                     </div>
                   ))}
 
@@ -668,6 +685,7 @@ export function RuleFormDialog({
                       size="sm"
                       className="border-primary/30 text-primary hover:bg-primary/5"
                       onClick={() => addRowToGroup(groupIdx)}
+                      disabled={hasUneditableCondition}
                     >
                       <IconPlus className="mr-1 h-3.5 w-3.5" />
                       {t("rules.addAndCondition", "添加一个 AND 条件")}
@@ -679,6 +697,7 @@ export function RuleFormDialog({
                         variant="destructive"
                         size="sm"
                         onClick={() => removeGroup(groupIdx)}
+                        disabled={hasUneditableCondition}
                       >
                         <IconTrash className="mr-1 h-3.5 w-3.5" />
                         {t("rules.deleteGroup", "删除该条件组")}
@@ -695,6 +714,7 @@ export function RuleFormDialog({
               variant="outline"
               className="w-full border-dashed border-primary/40 text-primary hover:bg-primary/5"
               onClick={addGroup}
+              disabled={hasUneditableCondition}
             >
               <IconPlus className="mr-1.5 h-4 w-4" />
               {t("rules.addOrCondition", "添加一个 OR 条件")}
@@ -757,6 +777,40 @@ export function RuleFormDialog({
                 </Label>
                 <Input type="number" {...register("captchaMinutes")} />
               </div>
+              {actionValue === "captcha_challenge" && (
+                <div className="space-y-2">
+                  <Label>{t("rules.captchaTypeLabel", "验证码类型")}</Label>
+                  <Controller
+                    control={control}
+                    name="captchaType"
+                    render={({ field }) => (
+                      <Select
+                        value={field.value || "inherit"}
+                        onValueChange={(value) =>
+                          field.onChange(value === "inherit" ? "" : value)
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="inherit">
+                            {t("rules.captchaTypeInherit", "继承全局")}
+                          </SelectItem>
+                          {captchaTypeOptions.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {t(
+                                `rules.captchaType.${option.value}`,
+                                option.label
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                  />
+                </div>
+              )}
             </div>
           )}
 
@@ -786,7 +840,7 @@ export function RuleFormDialog({
             >
               {t("common.cancel")}
             </Button>
-            <Button type="submit" disabled={loading}>
+            <Button type="submit" disabled={loading || hasUneditableCondition}>
               {loading ? t("common.submitting") : t("common.submit")}
             </Button>
           </DialogFooter>

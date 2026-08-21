@@ -41,6 +41,58 @@ func TestChainReconfigureUpdatesSteps(t *testing.T) {
 	}
 }
 
+func TestChainCaptchaTypeInheritsGlobalAndFallsBackSafely(t *testing.T) {
+	tests := []struct {
+		name       string
+		stepType   CaptchaType
+		globalType CaptchaType
+		want       CaptchaType
+	}{
+		{name: "inherit_global", globalType: CaptchaTypeSlide, want: CaptchaTypeSlide},
+		{name: "empty_global_falls_back", globalType: "", want: CaptchaTypeMath},
+		{name: "invalid_global_falls_back", globalType: "invalid", want: CaptchaTypeMath},
+		{name: "explicit_step_wins", stepType: CaptchaTypeRotate, globalType: CaptchaTypeClick, want: CaptchaTypeRotate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			captcha := NewCaptchaManager(nil, 0)
+			defer captcha.Close()
+			mgr := NewChainChallengeManager(captcha, nil)
+			defer mgr.Close()
+			mgr.ReconfigureWithCaptchaType([]ChainStepConfig{{Type: ChainStepCaptcha, CaptchaType: tt.stepType}}, 1, tt.globalType)
+			sessionID, _ := mgr.StartChain("/")
+			state := chainStateOf(t, mgr, sessionID)
+			if got := state.Steps[0].CaptchaType; got != tt.want {
+				t.Fatalf("captcha_type = %q, want %q; steps = %#v", got, tt.want, state.Steps)
+			}
+		})
+	}
+}
+
+// TestChainCaptchaTypeClearsFromEnvironmentAndPoW 验证 env/pow 步骤始终清空 captcha_type。
+func TestChainCaptchaTypeClearsFromEnvironmentAndPoW(t *testing.T) {
+	captcha := NewCaptchaManager(nil, 0)
+	defer captcha.Close()
+	mgr := NewChainChallengeManager(captcha, nil)
+	defer mgr.Close()
+	mgr.ReconfigureWithCaptchaType([]ChainStepConfig{
+		{Type: ChainStepEnv, CaptchaType: CaptchaTypeClick},
+		{Type: ChainStepPoW, CaptchaType: CaptchaTypeRotate},
+		{Type: ChainStepCaptcha},
+	}, 1, CaptchaTypeSlide)
+	sessionID, _ := mgr.StartChain("/")
+	state := chainStateOf(t, mgr, sessionID)
+	if got := state.Steps[0].CaptchaType; got != "" {
+		t.Fatalf("env captcha_type = %q, want empty", got)
+	}
+	if got := state.Steps[1].CaptchaType; got != "" {
+		t.Fatalf("pow captcha_type = %q, want empty", got)
+	}
+	if got := state.Steps[2].CaptchaType; got != CaptchaTypeSlide {
+		t.Fatalf("captcha inherited type = %q, want %q", got, CaptchaTypeSlide)
+	}
+}
+
 func TestChainReconfigureFallbacksToDefaults(t *testing.T) {
 	mgr := NewChainChallengeManager(NewCaptchaManager(nil, 0), nil)
 	mgr.Reconfigure([]ChainStepConfig{{Type: ChainStepType("unsupported"), Condition: "all"}}, 0)
@@ -57,7 +109,7 @@ func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
 	captchaManager.sessions[sessionID] = &CaptchaSession{
 		ID:        sessionID,
 		Type:      CaptchaTypeClick,
-		Answer:    `{"target":{"x":10,"y":20}}`,
+		Answer:    `{"0":{"index":0,"x":10,"y":20,"width":1,"height":1}}`,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(time.Minute),
 	}
@@ -74,7 +126,7 @@ func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	ok, redirect, nextHTML := mgr.ProcessStep(chainSession, map[string]string{"captcha_answer": `[{"x":12,"y":19}]`})
+	ok, redirect, nextHTML := mgr.ProcessStep(chainSession, map[string]string{"captcha_answer": `[{"x":12,"y":20}]`})
 	if !ok || redirect != "/protected" || nextHTML != "" {
 		t.Fatalf("advanced chain captcha answer was not verified: ok=%v redirect=%q html=%q", ok, redirect, nextHTML)
 	}

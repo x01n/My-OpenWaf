@@ -29,6 +29,7 @@ import {
   useAccessProviderCreate,
   useAccessProviderUpdate,
 } from "@/hooks/use-api"
+import { ApiError } from "@/lib/api"
 import type { AccessProvider, OAuthProviderConfig } from "@/lib/types"
 
 interface AccessProviderDialogProps {
@@ -126,7 +127,6 @@ export function AccessProviderDialog({
               name: name.trim(),
               priority,
               enabled,
-              type,
               config: cfg,
             },
           })
@@ -145,8 +145,12 @@ export function AccessProviderDialog({
           toast.success(t("sites.detail.providerCreated"))
         }
         onOpenChange(false)
-      } catch {
-        toast.error(t("common.operationFailed"))
+      } catch (error) {
+        toast.error(
+          error instanceof ApiError && error.message
+            ? error.message
+            : t("common.operationFailed")
+        )
       }
     },
     [

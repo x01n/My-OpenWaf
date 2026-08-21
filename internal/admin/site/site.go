@@ -267,7 +267,7 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			case "rate_limit_action":
 				return siteRequestHasField(body, field) || (siteRequestHasField(body, "rate_limit_enabled") && existing.RateLimitEnabled != nil && *existing.RateLimitEnabled) || siteRequestHasField(body, "attack_protection_level")
 			case "anti_replay_action":
-				return siteRequestHasField(body, field) || (siteRequestHasField(body, "anti_replay_enabled") && existing.AntiReplayEnabled)
+				return siteRequestHasField(body, field) || (siteRequestHasField(body, "anti_replay_enabled") && existing.AntiReplayEnabled != nil && *existing.AntiReplayEnabled)
 			default:
 				return false
 			}

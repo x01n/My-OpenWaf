@@ -79,6 +79,53 @@ type SiteAccessLogStats struct {
 	CacheStales   int64 `json:"cache_stales"`
 }
 
+// VisitorKindStats 表达窗口内人工/机器/未判定拦截访问数（按唯一 request_id 计）。
+//
+// 与 BotScoreLog 统计区别见 visitorKindStatsInternal 注释。
+//
+// 注意：HumanVisits + BotVisits + UnclassifiedIntercept 不必然等于 TotalVisits。
+// 差额是「其他非安全类」动作（basic_auth / maintenance / dynamic_key*），
+// 三类均采用正向枚举，未知 waf_action 不会被静默归入任何一类。
+type VisitorKindStats struct {
+	HumanVisits           int64 `json:"human_visits"`
+	BotVisits             int64 `json:"bot_visits"`
+	UnclassifiedIntercept int64 `json:"unclassified_intercept"`
+	TotalVisits           int64 `json:"total_visits"`
+}
+
+// visitorKindTerminalActions 是 AccessLog.waf_action 中「安全判定驱动的终止动作」字面值。
+//
+// 取自 internal/core/action/action.go:9-25 常量集与 internal/dataplane/handler.go
+// 直接字面值写入点。"block" 为 legacy 别名（归一化后写 "intercept"），一并列出以覆盖历史数据。
+// "redirect" 归入此类：handler.go:903 记录时携带 result.Action.RedirectTo，
+// 属 WAF 判定驱动的安全重定向，非业务跳转。
+var visitorKindTerminalActions = []string{
+	"intercept",
+	"block",
+	"drop",
+	"rate_limit",
+	"challenge",
+	"captcha_challenge",
+	"shield_challenge",
+	"chain_challenge",
+	"redirect",
+}
+
+// visitorKindHumanActions 是 AccessLog.waf_action 中「请求已放行至上游」的字面值。
+//
+// "challenge_passed"（handler.go:956）归入此类：质询通过意味着真实浏览器解出了质询。
+// "observe" / "tag" / "log_only" 为非终止动作，请求已放行。
+// "" 覆盖未设置 waf_action 的历史行与零值写入，避免正向枚举把它们排除出全部分类。
+var visitorKindHumanActions = []string{
+	"none",
+	"allow",
+	"observe",
+	"tag",
+	"log_only",
+	"challenge_passed",
+	"",
+}
+
 type FingerprintSummary struct {
 	TLSJA3Hash      string    `json:"tls_ja3_hash"`
 	TLSJA4          string    `json:"tls_ja4"`
@@ -169,6 +216,109 @@ func (r *AccessLogRepo) StatsBySite(siteID uint, since time.Time) (SiteAccessLog
 		Where("site_id = ? AND created_at >= ?", siteID, since).
 		Scan(&stats).Error
 	return stats, err
+}
+
+// VisitorKindStats 聚合某窗口内 human/bot/未判定拦截 访问条数（口径二）。
+//
+// bot = 窗口内 BotScoreLog 写入的唯一 request_id 数。BotScoreLog 仅在 bot 分类既非
+// "human" 也非 "good" 时写入（见 internal/core/rules/phases.go:463-464），因此它只覆盖
+// 「被判为 malicious 或 suspicious」的请求。注意与 dashboard.bot_total_24h 含义不同——
+// 后者是 BotScoreLog 条数（未去重）。
+//
+// UnclassifiedIntercept = 无 BotScoreLog 关联、且 waf_action 属安全终止动作的访问。
+// BotDetection 位于 pipeline 第 7 位，OWASP/CVE/ACL/IPRep 的终止动作会短路，这些请求
+// 永不进入 BotDetection、永不写 BotScoreLog；若直接反推会被计入 human，使攻击流量抬高
+// 「人工」占比。单列此类正是口径二相对口径一的关键修正。
+//
+// human = 无 BotScoreLog 关联、且 waf_action 属放行动作的访问。
+//
+// 三类均按唯一 request_id 计数，空 request_id 不计入。TotalVisits 为窗口内唯一 request_id
+// 总数；三类之和与 TotalVisits 的差额是「其他非安全类」动作，见 VisitorKindStats 注释。
+// siteID=0 表示全局。优先级：有 BotScoreLog 关联者一律计入 bot，不再看 waf_action。
+// BotScoreLog 与 AccessLog 共享 LogDB（见 internal/store/repository/repository.go:74-76）。
+func (r *AccessLogRepo) VisitorKindStats(siteID uint, since time.Time) (VisitorKindStats, error) {
+	return r.visitorKindStatsInternal(siteID, since)
+}
+
+// VisitorKindStatsGlobal 聚合全局（跨站点）的 human/bot 访问数。
+func (r *AccessLogRepo) VisitorKindStatsGlobal(since time.Time) (VisitorKindStats, error) {
+	return r.visitorKindStatsInternal(0, since)
+}
+
+func (r *AccessLogRepo) visitorKindStatsInternal(siteID uint, since time.Time) (VisitorKindStats, error) {
+	var stats VisitorKindStats
+
+	// 分母：窗口内唯一 request_id 总数。用于暴露三类之和与总数的差额。
+	totalQ := r.db.Model(&store.AccessLog{}).
+		Where("created_at >= ? AND request_id <> ?", since, "")
+	if siteID > 0 {
+		totalQ = totalQ.Where("site_id = ?", siteID)
+	}
+	if err := totalQ.Distinct("request_id").Count(&stats.TotalVisits).Error; err != nil {
+		return stats, err
+	}
+
+	hasBotScoreTable := r.db.Migrator().HasTable(&store.BotScoreLog{})
+	if !hasBotScoreTable {
+		// 无 BotScoreLog 表：bot 恒为 0，但 human 与「未判定拦截」的区分只依赖
+		// waf_action，与 bot 表无关，故此处仍按正向枚举拆分，不再一律计入 human。
+		humanQ := r.db.Model(&store.AccessLog{}).
+			Where("created_at >= ? AND request_id <> ?", since, "").
+			Where("waf_action IN ?", visitorKindHumanActions)
+		if siteID > 0 {
+			humanQ = humanQ.Where("site_id = ?", siteID)
+		}
+		if err := humanQ.Distinct("request_id").Count(&stats.HumanVisits).Error; err != nil {
+			return stats, err
+		}
+
+		interceptQ := r.db.Model(&store.AccessLog{}).
+			Where("created_at >= ? AND request_id <> ?", since, "").
+			Where("waf_action IN ?", visitorKindTerminalActions)
+		if siteID > 0 {
+			interceptQ = interceptQ.Where("site_id = ?", siteID)
+		}
+		err := interceptQ.Distinct("request_id").Count(&stats.UnclassifiedIntercept).Error
+		return stats, err
+	}
+
+	// bot = 窗口内 BotScoreLog 唯一 request_id 数（仅记录非 human/good 的请求）。
+	botQ := r.db.Model(&store.BotScoreLog{}).
+		Where("created_at >= ? AND request_id <> ?", since, "")
+	if siteID > 0 {
+		botQ = botQ.Where("site_id = ?", siteID)
+	}
+	if err := botQ.Distinct("request_id").Count(&stats.BotVisits).Error; err != nil {
+		return stats, err
+	}
+
+	// 无 bot 关联的判定条件。NOT EXISTS 直推，避免两阶段相减在并发写入下产生负值。
+	const noBotAssoc = "NOT EXISTS (SELECT 1 FROM bot_score_logs bs WHERE bs.request_id = access_logs.request_id AND bs.created_at >= ? AND bs.request_id <> ?)"
+
+	// human = 无 bot 关联 且 waf_action 属放行动作。
+	humanQ := r.db.Model(&store.AccessLog{}).
+		Where("access_logs.created_at >= ? AND access_logs.request_id <> ?", since, "").
+		Where("access_logs.waf_action IN ?", visitorKindHumanActions).
+		Where(noBotAssoc, since, "")
+	if siteID > 0 {
+		humanQ = humanQ.Where("access_logs.site_id = ?", siteID)
+	}
+	if err := humanQ.Distinct("access_logs.request_id").Count(&stats.HumanVisits).Error; err != nil {
+		return stats, err
+	}
+
+	// 未判定拦截 = 无 bot 关联 且 waf_action 属安全终止动作。
+	interceptQ := r.db.Model(&store.AccessLog{}).
+		Where("access_logs.created_at >= ? AND access_logs.request_id <> ?", since, "").
+		Where("access_logs.waf_action IN ?", visitorKindTerminalActions).
+		Where(noBotAssoc, since, "")
+	if siteID > 0 {
+		interceptQ = interceptQ.Where("access_logs.site_id = ?", siteID)
+	}
+	if err := interceptQ.Distinct("access_logs.request_id").Count(&stats.UnclassifiedIntercept).Error; err != nil {
+		return stats, err
+	}
+	return stats, nil
 }
 
 func (r *AccessLogRepo) ListFingerprints(offset, limit int, f FingerprintFilter) ([]FingerprintSummary, int64, error) {
@@ -323,98 +473,86 @@ func accessLogCountCacheKey(f AccessLogFilter) string {
 	var b strings.Builder
 	var ibuf [20]byte
 	b.Grow(64)
-	b.WriteString("al_count")
+	b.WriteString("al_count:v2")
+	appendPart := func(tag, value string) {
+		b.WriteByte('|')
+		b.WriteString(tag)
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(len(value)))
+		b.WriteByte(':')
+		b.WriteString(value)
+	}
+	appendUint := func(tag string, value uint64) {
+		appendPart(tag, string(strconv.AppendUint(ibuf[:0], value, 10)))
+	}
 	if f.ID > 0 {
-		b.WriteString(":id")
-		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.ID), 10))
+		appendUint("id", uint64(f.ID))
 	}
 	if f.SiteID > 0 {
-		b.WriteString(":s")
-		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.SiteID), 10))
+		appendUint("s", uint64(f.SiteID))
 	}
 	if f.Query != "" {
-		b.WriteString(":q")
-		b.WriteString(f.Query)
+		appendPart("q", f.Query)
 	}
 	if f.RequestID != "" {
-		b.WriteString(":rid")
-		b.WriteString(f.RequestID)
+		appendPart("rid", f.RequestID)
 	}
 	if f.ClientIP != "" {
-		b.WriteString(":ip")
-		b.WriteString(f.ClientIP)
+		appendPart("ip", f.ClientIP)
 	}
 	if f.Host != "" {
-		b.WriteString(":h")
-		b.WriteString(f.Host)
+		appendPart("h", f.Host)
 	}
 	if f.Path != "" {
-		b.WriteString(":p")
-		b.WriteString(f.Path)
+		appendPart("p", f.Path)
 	}
 	if f.QueryString != "" {
-		b.WriteString(":qs")
-		b.WriteString(f.QueryString)
+		appendPart("qs", f.QueryString)
 	}
 	if f.Method != "" {
-		b.WriteString(":m")
-		b.WriteString(f.Method)
+		appendPart("m", f.Method)
 	}
 	if f.WAFAction != "" {
-		b.WriteString(":wa")
-		b.WriteString(f.WAFAction)
+		appendPart("wa", f.WAFAction)
 	}
 	if f.CacheState != "" {
-		b.WriteString(":cs")
-		b.WriteString(f.CacheState)
+		appendPart("cs", f.CacheState)
 	}
 	if f.StatusGroup != "" {
-		b.WriteString(":sg")
-		b.WriteString(f.StatusGroup)
+		appendPart("sg", f.StatusGroup)
 	}
 	if f.TLSVersion != "" {
-		b.WriteString(":tv")
-		b.WriteString(f.TLSVersion)
+		appendPart("tv", f.TLSVersion)
 	}
 	if f.TLSSNI != "" {
-		b.WriteString(":sni")
-		b.WriteString(f.TLSSNI)
+		appendPart("sni", f.TLSSNI)
 	}
 	if f.TLSALPN != "" {
-		b.WriteString(":alpn")
-		b.WriteString(f.TLSALPN)
+		appendPart("alpn", f.TLSALPN)
 	}
 	if f.TLSJA3Hash != "" {
-		b.WriteString(":j3h")
-		b.WriteString(f.TLSJA3Hash)
+		appendPart("j3h", f.TLSJA3Hash)
 	}
 	if f.TLSJA4 != "" {
-		b.WriteString(":j4")
-		b.WriteString(f.TLSJA4)
+		appendPart("j4", f.TLSJA4)
 	}
 	if f.TLSCipherSuites != "" {
-		b.WriteString(":tcs")
-		b.WriteString(f.TLSCipherSuites)
+		appendPart("tcs", f.TLSCipherSuites)
 	}
 	if f.TLSExtensions != "" {
-		b.WriteString(":tex")
-		b.WriteString(f.TLSExtensions)
+		appendPart("tex", f.TLSExtensions)
 	}
 	if f.TLSCurves != "" {
-		b.WriteString(":tcu")
-		b.WriteString(f.TLSCurves)
+		appendPart("tcu", f.TLSCurves)
 	}
 	if f.TLSPointFormats != "" {
-		b.WriteString(":tpf")
-		b.WriteString(f.TLSPointFormats)
+		appendPart("tpf", f.TLSPointFormats)
 	}
 	if f.Since != nil {
-		b.WriteString(":si")
-		b.WriteString(f.Since.Format("0601021504"))
+		appendPart("si", f.Since.UTC().Format(time.RFC3339Nano))
 	}
 	if f.Until != nil {
-		b.WriteString(":un")
-		b.WriteString(f.Until.Format("0601021504"))
+		appendPart("un", f.Until.UTC().Format(time.RFC3339Nano))
 	}
 	return b.String()
 }

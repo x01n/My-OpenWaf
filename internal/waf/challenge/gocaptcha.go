@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	_ "image/jpeg"
 	_ "image/png"
 	"log/slog"
@@ -15,6 +16,9 @@ import (
 	"time"
 
 	"github.com/golang/freetype/truetype"
+	"github.com/wenlng/go-captcha-assets/resources/fonts/fzshengsksjw"
+	"github.com/wenlng/go-captcha-assets/resources/imagesv2"
+	assetsTiles "github.com/wenlng/go-captcha-assets/resources/tiles"
 	gocaptcha "github.com/wenlng/go-captcha/v2"
 	"github.com/wenlng/go-captcha/v2/base/option"
 	"github.com/wenlng/go-captcha/v2/click"
@@ -153,6 +157,7 @@ func (p *GoCaptchaProvider) init() {
 	slideBuilder := gocaptcha.NewSlideBuilder()
 	slideBuilder.SetResources(
 		slide.WithBackgrounds(bgImages),
+		slide.WithGraphImages(loadSlideGraphImages()),
 	)
 	p.slideCapt = slideBuilder.Make()
 
@@ -245,8 +250,6 @@ func (p *GoCaptchaProvider) GenerateRotate() (masterB64, thumbB64 string, data *
 	return
 }
 
-// ── CaptchaManager 集成方法 ──
-
 // generateClick 使用 go-captcha 生成点击验证码。
 func (cm *CaptchaManager) generateClick(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
@@ -277,11 +280,11 @@ func (cm *CaptchaManager) generateClick(envKey []byte, binding ChallengeSessionB
 	return &CaptchaChallenge{
 		SessionID: sessionID,
 		Type:      string(CaptchaTypeClick),
-		MasterImg: "data:image/jpeg;base64," + masterB64,
-		ThumbImg:  "data:image/png;base64," + thumbB64,
+		MasterImg: masterB64,
+		ThumbImg:  thumbB64,
 		Prompt:    "请按顺序点击图中对应的文字",
 		Width:     300,
-		Height:    240,
+		Height:    220,
 		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
@@ -315,11 +318,11 @@ func (cm *CaptchaManager) generateSlide(envKey []byte, binding ChallengeSessionB
 	return &CaptchaChallenge{
 		SessionID: sessionID,
 		Type:      string(CaptchaTypeSlide),
-		MasterImg: "data:image/jpeg;base64," + masterB64,
-		ThumbImg:  "data:image/png;base64," + tileB64,
+		MasterImg: masterB64,
+		ThumbImg:  tileB64,
 		Prompt:    "请将滑块拖动到正确位置",
 		Width:     300,
-		Height:    180,
+		Height:    220,
 		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
@@ -353,11 +356,11 @@ func (cm *CaptchaManager) generateRotate(envKey []byte, binding ChallengeSession
 	return &CaptchaChallenge{
 		SessionID: sessionID,
 		Type:      string(CaptchaTypeRotate),
-		MasterImg: "data:image/png;base64," + masterB64,
-		ThumbImg:  "data:image/png;base64," + thumbB64,
+		MasterImg: masterB64,
+		ThumbImg:  thumbB64,
 		Prompt:    "请旋转图片至正确方向",
-		Width:     200,
-		Height:    200,
+		Width:     220,
+		Height:    220,
 		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
@@ -425,57 +428,68 @@ func (cm *CaptchaManager) getGoCaptchaTolerance(t CaptchaType) int {
 	}
 }
 
-// ── 验证辅助函数 ──
-
 // ClickPoint 表示一个点击坐标点。
 type ClickPoint struct {
 	X int `json:"x"`
 	Y int `json:"y"`
 }
 
-// verifyClickAnswer 校验点击验证码。go-captcha 生成的答案是 map[int]*click.Dot，
-// 序列化为 JSON 后 key 为字符的顺序索引（"0","1",...）。点击验证码要求“按顺序”
-// 点击文字，因此必须按 index 升序还原答案序列后再与用户点击序列逐一比对，
-// 不能直接遍历 map（Go map 迭代顺序随机会导致校验错乱）。判定采用字符包围盒
-// [X-tol, X+Width+tol] × [Y-tol, Y+Height+tol]，坐标以 go-captcha 缩略图为准。
+type clickPointAnswer struct {
+	X *int `json:"x"`
+	Y *int `json:"y"`
+}
+
 func verifyClickAnswer(storedAnswer, userAnswer string, tolerance int) bool {
-	var storedDots map[string]map[string]interface{}
+	if tolerance < 0 {
+		return false
+	}
+
+	var storedDots map[string]*struct {
+		Index  *int `json:"index"`
+		X      *int `json:"x"`
+		Y      *int `json:"y"`
+		Width  *int `json:"width"`
+		Height *int `json:"height"`
+	}
 	if err := json.Unmarshal([]byte(storedAnswer), &storedDots); err != nil {
 		return false
 	}
 
-	var userPoints []ClickPoint
+	var userPoints []clickPointAnswer
 	if err := json.Unmarshal([]byte(userAnswer), &userPoints); err != nil {
 		return false
 	}
-
 	if len(userPoints) == 0 || len(userPoints) != len(storedDots) {
 		return false
 	}
 
-	// 按 dot 的 index 字段升序还原点击顺序。
-	type dotBox struct {
+	type clickDot struct {
 		index      int
 		x, y, w, h int
 	}
-	dots := make([]dotBox, 0, len(storedDots))
-	for _, dotMap := range storedDots {
-		dots = append(dots, dotBox{
-			index: int(getFloat(dotMap, "index")),
-			x:     int(getFloat(dotMap, "x")),
-			y:     int(getFloat(dotMap, "y")),
-			w:     int(getFloat(dotMap, "width")),
-			h:     int(getFloat(dotMap, "height")),
-		})
+	dots := make([]clickDot, 0, len(storedDots))
+	seenIndexes := make(map[int]struct{}, len(storedDots))
+	for _, dot := range storedDots {
+		if dot == nil || dot.Index == nil || dot.X == nil || dot.Y == nil || dot.Width == nil || dot.Height == nil {
+			return false
+		}
+		if *dot.Index < 0 || *dot.Index >= len(storedDots) || *dot.X < 0 || *dot.Y < 0 || *dot.Width <= 0 || *dot.Height <= 0 {
+			return false
+		}
+		if _, exists := seenIndexes[*dot.Index]; exists {
+			return false
+		}
+		seenIndexes[*dot.Index] = struct{}{}
+		dots = append(dots, clickDot{index: *dot.Index, x: *dot.X, y: *dot.Y, w: *dot.Width, h: *dot.Height})
 	}
 	sort.Slice(dots, func(i, j int) bool { return dots[i].index < dots[j].index })
 
-	for i, d := range dots {
-		px, py := userPoints[i].X, userPoints[i].Y
-		if px < d.x-tolerance || px > d.x+d.w+tolerance {
+	for i, dot := range dots {
+		point := userPoints[i]
+		if point.X == nil || point.Y == nil || *point.X < 0 || *point.Y < 0 {
 			return false
 		}
-		if py < d.y-tolerance || py > d.y+d.h+tolerance {
+		if !click.Validate(*point.X, *point.Y, dot.x, dot.y, dot.w, dot.h, tolerance) {
 			return false
 		}
 	}
@@ -483,68 +497,64 @@ func verifyClickAnswer(storedAnswer, userAnswer string, tolerance int) bool {
 }
 
 func verifySlideAnswer(storedAnswer, userAnswer string, tolerance int) bool {
-	var stored map[string]interface{}
-	var provided map[string]interface{}
+	var stored struct {
+		X  *int `json:"x"`
+		Y  *int `json:"y"`
+		DX *int `json:"dx"`
+		DY *int `json:"dy"`
+	}
+	var provided struct {
+		X *int `json:"x"`
+		Y *int `json:"y"`
+	}
 	if err := json.Unmarshal([]byte(storedAnswer), &stored); err != nil {
 		return false
 	}
 	if err := json.Unmarshal([]byte(userAnswer), &provided); err != nil {
 		return false
 	}
-	expectedX := int(getFloat(stored, "x"))
-	providedX := int(getFloat(provided, "x"))
-	return abs(providedX-expectedX) <= tolerance
+	if stored.X == nil || stored.Y == nil || stored.DX == nil || stored.DY == nil || provided.X == nil {
+		return false
+	}
+	if *stored.X < 0 || *stored.Y < 0 || *stored.DX < 0 || *stored.DY < 0 || *provided.X < 0 {
+		return false
+	}
+
+	providedY := 0
+	if provided.Y != nil {
+		if *provided.Y < 0 {
+			return false
+		}
+		providedY = *provided.Y
+	}
+	absoluteX := *stored.DX + *provided.X
+	absoluteY := *stored.DY + providedY
+	return slide.Validate(absoluteX, absoluteY, *stored.X, *stored.Y, tolerance)
 }
 
 func verifyRotateAnswer(storedAnswer, userAnswer string, tolerance int) bool {
-	var stored map[string]interface{}
-	var provided map[string]interface{}
+	var stored struct {
+		Angle *int `json:"angle"`
+	}
+	var provided struct {
+		Angle *int `json:"angle"`
+	}
 	if err := json.Unmarshal([]byte(storedAnswer), &stored); err != nil {
 		return false
 	}
 	if err := json.Unmarshal([]byte(userAnswer), &provided); err != nil {
 		return false
 	}
-	expectedValue := getFloat(stored, "angle")
-	providedValue := getFloat(provided, "angle")
-	if expectedValue < 0 || expectedValue > 360 || providedValue < 0 || providedValue > 360 {
+	if stored.Angle == nil || provided.Angle == nil {
 		return false
 	}
-	expectedAngle := int(expectedValue)
-	providedAngle := int(providedValue)
-	diff := abs(providedAngle - expectedAngle)
-	if diff > 180 {
-		diff = 360 - diff
+	if *stored.Angle < 0 || *stored.Angle > 360 || *provided.Angle < 0 || *provided.Angle > 360 {
+		return false
 	}
-	return diff <= tolerance
+	return rotate.Validate(*provided.Angle, *stored.Angle, tolerance)
 }
-
-func getFloat(m map[string]interface{}, key string) float64 {
-	v, ok := m[key]
-	if !ok {
-		return 0
-	}
-	switch val := v.(type) {
-	case float64:
-		return val
-	case int:
-		return float64(val)
-	default:
-		return 0
-	}
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
-// ── 资源辅助函数 ──
 
 func (p *GoCaptchaProvider) loadFont() (*truetype.Font, error) {
-	// 尝试加载自定义字体
 	fontPath := p.config.FontPath
 	if fontPath == "" && p.config.ResourceDir != "" {
 		fontPath = filepath.Join(p.config.ResourceDir, "fonts", "default.ttf")
@@ -563,6 +573,7 @@ func (p *GoCaptchaProvider) loadFont() (*truetype.Font, error) {
 	// 尝试系统字体路径
 	systemFonts := []string{
 		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/dejavu/DejaVuSans.ttf",
 		"/usr/share/fonts/TTF/DejaVuSans.ttf",
 		"C:\\Windows\\Fonts\\msyh.ttc",
 		"C:\\Windows\\Fonts\\simhei.ttf",
@@ -577,6 +588,11 @@ func (p *GoCaptchaProvider) loadFont() (*truetype.Font, error) {
 		if err == nil {
 			return font, nil
 		}
+	}
+
+	// 使用官方内置字体作为最后回退，保证默认中文字符池在没有系统字体时仍可渲染。
+	if font, err := fzshengsksjw.GetFont(); err == nil && font != nil {
+		return font, nil
 	}
 
 	return nil, fmt.Errorf("no font available")
@@ -609,6 +625,10 @@ func (p *GoCaptchaProvider) generateBackgrounds() []image.Image {
 				return imgs
 			}
 		}
+	}
+
+	if official, err := imagesv2.GetImages(); err == nil && len(official) > 0 {
+		return official
 	}
 
 	// 生成程序化背景图
@@ -644,6 +664,48 @@ func generateDefaultBackgrounds() []image.Image {
 		imgs[idx] = img
 	}
 	return imgs
+}
+
+// loadSlideGraphImages 优先加载官方图块资源，失败时使用程序化资源。
+func loadSlideGraphImages() []*slide.GraphImage {
+	if official, err := assetsTiles.GetTiles(); err == nil && len(official) > 0 {
+		graphs := make([]*slide.GraphImage, 0, len(official))
+		for _, graph := range official {
+			if graph == nil || graph.OverlayImage == nil || graph.ShadowImage == nil || graph.MaskImage == nil {
+				continue
+			}
+			graphs = append(graphs, &slide.GraphImage{
+				OverlayImage: graph.OverlayImage,
+				ShadowImage:  graph.ShadowImage,
+				MaskImage:    graph.MaskImage,
+			})
+		}
+		if len(graphs) > 0 {
+			return graphs
+		}
+	}
+	return generateSlideGraphImages()
+}
+
+// generateSlideGraphImages 生成滑动验证码所需的图块、阴影和遮罩资源。
+// go-captcha v2.0.5 不会为滑动验证码自动创建图块资源；缺少这些资源时
+// Generate 会返回 graph image is invalid，调用方随后回退到数学验证码。
+func generateSlideGraphImages() []*slide.GraphImage {
+	const size = 70
+	bounds := image.Rect(0, 0, size, size)
+
+	overlay := image.NewNRGBA(bounds)
+	shadow := image.NewNRGBA(bounds)
+	mask := image.NewNRGBA(bounds)
+	draw.Draw(overlay, bounds, &image.Uniform{C: color.NRGBA{R: 38, G: 99, B: 235, A: 255}}, image.Point{}, draw.Src)
+	draw.Draw(shadow, bounds, &image.Uniform{C: color.NRGBA{R: 15, G: 23, B: 42, A: 180}}, image.Point{}, draw.Src)
+	draw.Draw(mask, bounds, &image.Uniform{C: color.NRGBA{R: 255, G: 255, B: 255, A: 255}}, image.Point{}, draw.Src)
+
+	return []*slide.GraphImage{{
+		OverlayImage: overlay,
+		ShadowImage:  shadow,
+		MaskImage:    mask,
+	}}
 }
 
 // randomSelectChars 从字符池中随机选取指定数量的字符，确保每次验证码字符不同。

@@ -37,6 +37,9 @@ func normalizeFeedFields(kind, action string) (string, string, bool) {
 	if !ok {
 		return "", "", false
 	}
+	if kind == string(store.IPListWhite) {
+		return kind, "intercept", true
+	}
 	return kind, normAction, true
 }
 

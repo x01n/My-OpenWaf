@@ -130,7 +130,23 @@ func TestUpdateBotSettingsSyncsBotDetectionEnabled(t *testing.T) {
 	}
 }
 
-// TestGetBotSettingsBackfillsBrowserSignFromProtection 验证 GetBotSettings 始终以 protection 为权威回填 BrowserSign 字段。
+func TestUpdateBotSettingsSyncsAntiReplayEnabled(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := invokeBotSettingsHandler(t, UpdateBotSettings(repo, func() error { return nil }), map[string]any{
+		"anti_replay_enabled": true,
+	})
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if !shared.LoadProtectionConfig(repo).AntiReplayEnabled {
+		t.Fatal("AntiReplayEnabled not synced to protection config")
+	}
+}
+
 func TestGetBotSettingsBackfillsBrowserSignFromProtection(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	cfg := store.DefaultProtectionConfig()

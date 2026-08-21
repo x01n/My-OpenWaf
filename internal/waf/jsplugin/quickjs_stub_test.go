@@ -1,4 +1,4 @@
-//go:build !cgo
+//go:build !cgo || !quickjs
 
 package jsplugin
 
@@ -28,6 +28,10 @@ func TestPublicTypesAndSiteMatching(t *testing.T) {
 	script := &Script{}
 	if !script.AppliesTo(1) {
 		t.Fatal("zero-value script should be global for interface-level checks")
+	}
+	invalid := MutationPlan{SetHeaders: map[string]string{"X-Test": "bad\r\nvalue"}}
+	if err := validateMutationPlan(invalid); err == nil {
+		t.Fatal("CR/LF mutation header should be rejected")
 	}
 	if err := validateMutationPlan(MutationPlan{}); err != nil {
 		t.Fatal(err)

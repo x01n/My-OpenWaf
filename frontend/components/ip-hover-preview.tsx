@@ -14,6 +14,7 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card"
 import { Badge } from "@/components/ui/badge"
+import { ActionBadge } from "@/components/action-badge"
 import { IconClock, IconRoute, IconWorld } from "@tabler/icons-react"
 
 /**
@@ -98,20 +99,10 @@ export function IpHoverPreview({
                       <IconClock className="h-3 w-3" />
                       {formatShortTime(ev.created_at)}
                     </span>
-                    <Badge
-                      variant={
-                        ev.action === "intercept" ||
-                        ev.action === "block" ||
-                        ev.action === "drop"
-                          ? "destructive"
-                          : ev.action === "observe" || ev.action === "log_only"
-                            ? "secondary"
-                            : "outline"
-                      }
+                    <ActionBadge
+                      action={ev.action}
                       className="h-4 px-1 text-[9px]"
-                    >
-                      {ev.action}
-                    </Badge>
+                    />
                   </div>
                   <div className="mt-1 flex items-center gap-1 truncate text-foreground/80">
                     <span className="rounded bg-muted px-1 font-mono text-[10px]">

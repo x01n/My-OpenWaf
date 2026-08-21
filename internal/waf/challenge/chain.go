@@ -131,29 +131,31 @@ func (g *chainSessionGate) unlock(id string) {
 
 // ChainChallengeManager manages multi-step chain challenges with a state machine.
 type ChainChallengeManager struct {
-	captcha    *CaptchaManager
-	redis      *goredis.Client
-	prefix     string
-	difficulty int
-	steps      []ChainStepConfig
-	mu         sync.RWMutex
-	states     map[string]*ChainState
-	gate       *chainSessionGate
-	done       chan struct{}
-	once       sync.Once
+	captcha     *CaptchaManager
+	redis       *goredis.Client
+	prefix      string
+	difficulty  int
+	captchaType CaptchaType
+	steps       []ChainStepConfig
+	mu          sync.RWMutex
+	states      map[string]*ChainState
+	gate        *chainSessionGate
+	done        chan struct{}
+	once        sync.Once
 }
 
 // NewChainChallengeManager creates a new ChainChallengeManager with default steps.
 func NewChainChallengeManager(captcha *CaptchaManager, redis *goredis.Client) *ChainChallengeManager {
 	cm := &ChainChallengeManager{
-		captcha:    captcha,
-		redis:      redis,
-		prefix:     "owaf:chain:",
-		difficulty: 4,
-		steps:      defaultChainSteps(),
-		states:     make(map[string]*ChainState),
-		gate:       newChainSessionGate(),
-		done:       make(chan struct{}),
+		captcha:     captcha,
+		redis:       redis,
+		prefix:      "owaf:chain:",
+		difficulty:  4,
+		captchaType: CaptchaTypeMath,
+		steps:       normalizeChainStepsWithCaptchaType(defaultChainSteps(), CaptchaTypeMath),
+		states:      make(map[string]*ChainState),
+		gate:        newChainSessionGate(),
+		done:        make(chan struct{}),
 	}
 	go cm.cleanupLoop()
 	return cm
@@ -206,6 +208,12 @@ func defaultChainSteps() []ChainStepConfig {
 }
 
 func normalizeChainSteps(steps []ChainStepConfig) []ChainStepConfig {
+	return normalizeChainStepsWithCaptchaType(steps, CaptchaTypeMath)
+}
+
+// normalizeChainStepsWithCaptchaType 归一化链式步骤，并为未指定类型的 CAPTCHA 继承全局类型。
+func normalizeChainStepsWithCaptchaType(steps []ChainStepConfig, inherited CaptchaType) []ChainStepConfig {
+	inherited = normalizeChainCaptchaType(inherited)
 	out := make([]ChainStepConfig, 0, len(steps))
 	for _, step := range steps {
 		switch step.Type {
@@ -215,12 +223,16 @@ func normalizeChainSteps(steps []ChainStepConfig) []ChainStepConfig {
 		case ChainStepCaptcha:
 			// CAPTCHA 是链式挑战的最终人工校验步骤，不得依据客户端环境分数条件跳过。
 			step.Condition = "all"
-			step.CaptchaType = normalizeChainCaptchaType(step.CaptchaType)
+			if step.CaptchaType == "" {
+				step.CaptchaType = inherited
+			} else {
+				step.CaptchaType = normalizeChainCaptchaType(step.CaptchaType)
+			}
 			out = append(out, step)
 		}
 	}
 	if len(out) == 0 {
-		return defaultChainSteps()
+		return normalizeChainStepsWithCaptchaType(defaultChainSteps(), inherited)
 	}
 	return out
 }
@@ -235,13 +247,20 @@ func normalizeChainCaptchaType(t CaptchaType) CaptchaType {
 }
 
 func (cm *ChainChallengeManager) Reconfigure(steps []ChainStepConfig, difficulty int) {
+	cm.ReconfigureWithCaptchaType(steps, difficulty, CaptchaTypeMath)
+}
+
+// ReconfigureWithCaptchaType 更新链式步骤、PoW 难度和步骤级 CAPTCHA 的全局继承值。
+func (cm *ChainChallengeManager) ReconfigureWithCaptchaType(steps []ChainStepConfig, difficulty int, captchaType CaptchaType) {
 	if difficulty <= 0 {
 		difficulty = 4
 	}
 	difficulty = ClampPoWDifficulty(difficulty)
+	captchaType = normalizeChainCaptchaType(captchaType)
 	cm.mu.Lock()
-	cm.steps = normalizeChainSteps(steps)
+	cm.steps = normalizeChainStepsWithCaptchaType(steps, captchaType)
 	cm.difficulty = difficulty
+	cm.captchaType = captchaType
 	cm.mu.Unlock()
 }
 
@@ -267,8 +286,9 @@ func (cm *ChainChallengeManager) SetRedis(redis *goredis.Client) {
 func (cm *ChainChallengeManager) configuredSteps() []ChainStepConfig {
 	cm.mu.RLock()
 	steps := append([]ChainStepConfig(nil), cm.steps...)
+	captchaType := cm.captchaType
 	cm.mu.RUnlock()
-	return normalizeChainSteps(steps)
+	return normalizeChainStepsWithCaptchaType(steps, captchaType)
 }
 
 func (cm *ChainChallengeManager) difficultyValue() int {

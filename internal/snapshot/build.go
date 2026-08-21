@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"regexp"
 	"sort"
 	"strconv"
@@ -14,8 +13,10 @@ import (
 
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/dynamic"
+	"My-OpenWaf/internal/waf/iprep"
 	"My-OpenWaf/internal/waf/owasp"
 	"My-OpenWaf/internal/waf/pageconfig"
 
@@ -91,7 +92,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		return nil, err
 	}
 	ccRules := compileCCRules(protection)
-	owaspConfigsByPolicy, err := loadPolicyOWASPConfigs(db)
+	owaspConfigsByPolicy, owaspDiagnostics, err := loadPolicyOWASPConfigs(db)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +153,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	}
 
 	// 加载站点级 IP 黑白名单。
-	siteIPLists, err := loadSiteIPLists(db)
+	siteIPLists, ipListDiagnostics, err := loadSiteIPLists(db)
 	if err != nil {
 		return nil, fmt.Errorf("load site IP lists: %w", err)
 	}
@@ -175,6 +176,8 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	blockPage := pageconfig.ParseBlockPageConfig(settingsMap[pageconfig.SettingKeyBlockPage])
 
 	sniCerts := make(map[string]tls.Certificate)
+	sniCertStates := make(map[string]TLSCertificateState)
+	certificateDiagnostics := make([]SnapshotConfigDiagnostic, 0)
 	siteMap := make(map[string]*SiteRuntime)
 
 	for _, s := range sites {
@@ -250,10 +253,55 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 
 			var tlsConfig *tls.Config
 			var cert *store.Certificate
-			if listenerSite.CertID != nil {
-				if c, ok := certByID[*listenerSite.CertID]; ok {
+			certificateState := TLSCertificateState("")
+			certificateDiagnosticSource := DiagnosticSourceListeners
+			if listener.ID == 0 {
+				certificateDiagnosticSource = DiagnosticSourceSites
+			}
+			if listenerSite.CertID == nil {
+				if listenerSite.TLSEnabled {
+					certificateState = TLSCertificateStateUnconfigured
+				}
+			} else if listenerSite.TLSEnabled {
+				certificateID := *listenerSite.CertID
+				c, ok := certByID[certificateID]
+				if !ok {
+					if listenerSite.TLSEnabled {
+						certificateState = TLSCertificateStateInvalid
+						certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+							Source:           certificateDiagnosticSource,
+							Field:            DiagnosticFieldCertificateID,
+							Error:            "certificate_not_found",
+							HandlingStrategy: DiagnosticHandlingRejectInvalidCertificate,
+							Kind:             "tls_certificate",
+							Reason:           "certificate_not_found",
+							CertificateID:    certificateID,
+							ListenerID:       listener.ID,
+							SiteID:           s.ID,
+						})
+					}
+				} else {
 					cert = &c
-					if tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
+					tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM))
+					if err != nil {
+						certificateState = TLSCertificateStateInvalid
+						reason := "invalid_certificate_or_key"
+						if strings.TrimSpace(c.CertPEM) == "" || strings.TrimSpace(c.KeyPEM) == "" {
+							reason = "empty_certificate_or_key"
+						}
+						certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+							Source:           DiagnosticSourceCertificates,
+							Field:            DiagnosticFieldCertificatePair,
+							Error:            reason,
+							HandlingStrategy: DiagnosticHandlingRejectInvalidCertificate,
+							Kind:             "tls_certificate",
+							Reason:           reason,
+							CertificateID:    certificateID,
+							ListenerID:       listener.ID,
+							SiteID:           s.ID,
+						})
+					} else {
+						certificateState = TLSCertificateStateValid
 						if staple, ok := ParseOCSPStaple(c.OCSPStaplePEM); ok {
 							tlsCert.OCSPStaple = staple
 						}
@@ -279,13 +327,19 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 							CurvePreferences:         curves,
 							PreferServerCipherSuites: tlsDefaults.PreferServerCipherSuites,
 						}
-						for _, rawHost := range splitHosts(listenerSite.Host) {
-							h := strings.ToLower(strings.TrimSpace(rawHost))
-							if h != "" {
-								sniCerts[SNICertKey(listenerSite.Bind, h)] = tlsCert
-							}
-						}
 					}
+				}
+			}
+			for _, rawHost := range splitHosts(listenerSite.Host) {
+				h := NormalizeMatchHost(rawHost)
+				if h == "" {
+					continue
+				}
+				if listenerSite.TLSEnabled && certificateState != "" {
+					sniCertStates[SNICertKey(listenerSite.Bind, h)] = certificateState
+				}
+				if certificateState == TLSCertificateStateValid && tlsConfig != nil {
+					sniCerts[SNICertKey(listenerSite.Bind, h)] = tlsConfig.Certificates[0]
 				}
 			}
 
@@ -318,7 +372,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 				MaintenanceStatus:              s.MaintenanceStatus,
 				BlockHTML:                      s.BlockHTML,
 				BlockStatus:                    s.BlockStatus,
-				AntiReplayEnabled:              s.AntiReplayEnabled,
+				AntiReplayEnabled:              protection.AntiReplayEnabled,
 				AntiReplayAction:               s.AntiReplayAction,
 				AppRouteRules:                  appRulesBySite[s.ID],
 				DynamicProtection:              siteDynamicProtection,
@@ -349,6 +403,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		if raw, ok := cveConfigsBySite[rt.Site.ID]; ok {
 			ep.CVERulesConfig = raw
 		}
+		rt.AntiReplayEnabled = ep.AntiReplayEnabled
 		rt.EffectiveProtection = &ep
 	}
 
@@ -358,10 +413,26 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load lua plugins: %w", err)
 	}
+	jsScripts, jsErrs, err := loadJSPlugins(db)
+	if err != nil {
+		return nil, fmt.Errorf("load js plugins: %w", err)
+	}
+
+	configDiagnostics := make(
+		[]SnapshotConfigDiagnostic,
+		0,
+		len(owaspDiagnostics)+len(ipListDiagnostics)+len(certificateDiagnostics),
+	)
+	configDiagnostics = append(configDiagnostics, owaspDiagnostics...)
+	configDiagnostics = append(configDiagnostics, ipListDiagnostics...)
+	configDiagnostics = append(configDiagnostics, certificateDiagnostics...)
 
 	return &Snapshot{
 		LuaPlugins:                     luaScripts,
 		LuaPluginErrors:                luaErrs,
+		JSPlugins:                      jsScripts,
+		JSPluginErrors:                 jsErrs,
+		ConfigDiagnostics:              configDiagnostics,
 		Revision:                       rev,
 		Sites:                          siteMap,
 		NetworkDefaults:                networkDefaults,
@@ -371,6 +442,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		ChallengePage:                  challengePage,
 		BlockPage:                      blockPage,
 		SiteTLSCertBySNI:               sniCerts,
+		SiteTLSCertStateBySNI:          sniCertStates,
 		Protection:                     protection,
 		HTTP2Config:                    http2Config,
 		HSTSEnabled:                    hstsEnabled,
@@ -391,13 +463,15 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 
 // mergeProtection creates a ProtectionConfig for a site by overlaying
 // per-site overrides onto the global config. nil = inherit global.
-func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, error) {
+func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, []SnapshotConfigDiagnostic, error) {
+	result := make(map[uint]string)
+	diagnostics := make([]SnapshotConfigDiagnostic, 0)
 	if !db.Migrator().HasTable(&store.PolicyOWASPRuleConfig{}) {
-		return map[uint]string{}, nil
+		return result, diagnostics, nil
 	}
 	var configs []store.PolicyOWASPRuleConfig
-	if err := db.Find(&configs).Error; err != nil {
-		return nil, fmt.Errorf("load policy OWASP configs: %w", err)
+	if err := db.Order("policy_id ASC, rule_id ASC, id ASC").Find(&configs).Error; err != nil {
+		return nil, nil, fmt.Errorf("load policy OWASP configs: %w", err)
 	}
 	grouped := make(map[uint]map[string]owasp.OWASPRuleOverride)
 	for _, config := range configs {
@@ -418,18 +492,31 @@ func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, error) {
 			override.RedirectTo = *config.RedirectTo
 		}
 		if config.Whitelist != nil && strings.TrimSpace(*config.Whitelist) != "" {
-			_ = json.Unmarshal([]byte(*config.Whitelist), &override.Whitelist)
+			var whitelist []string
+			if err := json.Unmarshal([]byte(*config.Whitelist), &whitelist); err != nil {
+				diagnostics = append(diagnostics, SnapshotConfigDiagnostic{
+					Source:           DiagnosticSourcePolicyOWASP,
+					Field:            DiagnosticFieldWhitelistJSON,
+					Error:            "invalid_json",
+					HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+					Kind:             "owasp_whitelist",
+					Reason:           "invalid_json",
+					PolicyID:         config.PolicyID,
+					RuleID:           config.RuleID,
+				})
+			} else {
+				override.Whitelist = whitelist
+			}
 		}
 		if grouped[config.PolicyID] == nil {
 			grouped[config.PolicyID] = make(map[string]owasp.OWASPRuleOverride)
 		}
 		grouped[config.PolicyID][config.RuleID] = override
 	}
-	result := make(map[uint]string, len(grouped))
 	for policyID, overrides := range grouped {
 		result[policyID] = owasp.SerializeOWASPRulesConfig(overrides)
 	}
-	return result, nil
+	return result, diagnostics, nil
 }
 
 func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (map[uint]string, error) {
@@ -502,6 +589,11 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 		p.BotDetectionEnabled = *site.BotProtectionEnabled
 	}
 
+	// Anti-replay: nil inherits the global switch; non-nil is an explicit override.
+	if site.AntiReplayEnabled != nil {
+		p.AntiReplayEnabled = *site.AntiReplayEnabled
+	}
+
 	// OWASP override
 	if site.OWASPEnabled != nil {
 		p.OWASPEnabled = *site.OWASPEnabled
@@ -537,6 +629,12 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 		if site.RateLimitAction != "" {
 			p.RequestRateLimitAction = site.RateLimitAction
 		}
+	}
+
+	// 按 phase 跳过检测：nil 继承全局，非 nil 整体覆盖。
+	// 不做 per-phase 深合并——否则站点无法关掉全局配置的某个 phase 跳过项。
+	if site.SkipPathByPhase != nil {
+		p.SkipPathByPhase = *site.SkipPathByPhase
 	}
 
 	return p
@@ -678,6 +776,7 @@ func compileRules(rs []store.Rule) []CompiledRule {
 		out = append(out, CompiledRule{
 			ID: r.ID, Phase: r.Phase, Action: r.Action, Priority: r.Priority,
 			Kind: kind, Arg: arg, StatusCode: r.StatusCode, RedirectTo: r.RedirectTo,
+			CaptchaType: r.CaptchaType,
 		})
 	}
 	return out
@@ -686,11 +785,22 @@ func compileRules(rs []store.Rule) []CompiledRule {
 type ccRuleConfig struct {
 	Enabled      *bool             `json:"enabled"`
 	Action       string            `json:"action"`
+	CaptchaType  string            `json:"captcha_type"`
 	Conditions   []ccRuleCondition `json:"conditions"`
 	Window       int               `json:"window"`
 	Threshold    int               `json:"threshold"`
 	Duration     int               `json:"duration"`
 	DurationUnit string            `json:"duration_unit"`
+}
+
+// normalizeRuleCaptchaType keeps rule-level CAPTCHA overrides strict and fail-safe.
+func normalizeRuleCaptchaType(value string) string {
+	switch value {
+	case "", "math", "click", "slide", "rotate":
+		return value
+	default:
+		return ""
+	}
 }
 
 type ccRuleCondition struct {
@@ -799,12 +909,13 @@ func compileCCRulesFromJSON(rulesJSON string) []CompiledRule {
 			arg = string(raw)
 		}
 		out = append(out, CompiledRule{
-			ID:       uint(ccRuleIDCounter.Add(1)),
-			Phase:    store.PhaseCustom,
-			Action:   normalizeCCAction(cfg.Action),
-			Priority: 10_000,
-			Kind:     kind,
-			Arg:      arg,
+			ID:          uint(ccRuleIDCounter.Add(1)),
+			Phase:       store.PhaseCustom,
+			Action:      normalizeCCAction(cfg.Action),
+			Priority:    10_000,
+			Kind:        kind,
+			Arg:         arg,
+			CaptchaType: normalizeRuleCaptchaType(cfg.CaptchaType),
 		})
 	}
 	return out
@@ -858,7 +969,9 @@ func splitCCHeaderValue(value string) (string, string) {
 
 func normalizeCCAction(action string) store.RuleAction {
 	switch strings.ToLower(strings.TrimSpace(action)) {
-	case "captcha", "challenge":
+	case "captcha":
+		return store.ActionCaptchaChallenge
+	case "challenge":
 		return store.ActionChallenge
 	case "captcha_challenge":
 		return store.ActionCaptchaChallenge
@@ -1062,6 +1175,9 @@ func loadProtectionConfig(db *gorm.DB) (store.ProtectionConfig, error) {
 	if err := json.Unmarshal([]byte(setting.Value), &cfg); err != nil {
 		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
 	}
+	if !challenge.IsValidCaptchaType(challenge.CaptchaType(cfg.CaptchaType)) {
+		return store.ProtectionConfig{}, fmt.Errorf("invalid protection captcha_type %q", cfg.CaptchaType)
+	}
 	return cfg, nil
 }
 
@@ -1074,6 +1190,9 @@ func protectionConfigFromMap(m map[string]string) (store.ProtectionConfig, error
 	cfg := store.DefaultProtectionConfig()
 	if err := json.Unmarshal([]byte(v), &cfg); err != nil {
 		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
+	}
+	if !challenge.IsValidCaptchaType(challenge.CaptchaType(cfg.CaptchaType)) {
+		return store.ProtectionConfig{}, fmt.Errorf("invalid protection captcha_type %q", cfg.CaptchaType)
 	}
 	return cfg, nil
 }
@@ -1316,7 +1435,7 @@ func loadAccessControlConfigs(db *gorm.DB) (map[uint]*AccessControlConfig, error
 	providersBySite := make(map[uint][]store.AccessProvider)
 	if db.Migrator().HasTable(&store.AccessProvider{}) {
 		if err := db.Where("enabled = ?", true).
-			Order("site_id ASC, priority ASC").Find(&allProviders).Error; err != nil {
+			Order("site_id ASC, priority ASC, id ASC").Find(&allProviders).Error; err != nil {
 			return nil, err
 		}
 	}
@@ -1329,7 +1448,7 @@ func loadAccessControlConfigs(db *gorm.DB) (map[uint]*AccessControlConfig, error
 	pathRulesBySite := make(map[uint][]store.AccessPathRule)
 	if db.Migrator().HasTable(&store.AccessPathRule{}) {
 		if err := db.Where("enabled = ?", true).
-			Order("site_id ASC, priority ASC").Find(&allPathRules).Error; err != nil {
+			Order("site_id ASC, priority ASC, id ASC").Find(&allPathRules).Error; err != nil {
 			return nil, err
 		}
 	}
@@ -1369,49 +1488,57 @@ func loadAccessControlConfigs(db *gorm.DB) (map[uint]*AccessControlConfig, error
 
 // siteIPListPair 存储一个站点的已解析黑白名单。
 type siteIPListPair struct {
-	whitelist []net.IPNet
-	blacklist []net.IPNet
+	whitelist []iprep.IPListEntry
+	blacklist []iprep.IPListEntry
 }
 
 // loadSiteIPLists 从数据库加载所有站点级 IP 黑白名单（不含全局条目）。
-func loadSiteIPLists(db *gorm.DB) (map[uint]siteIPListPair, error) {
+func loadSiteIPLists(db *gorm.DB) (map[uint]siteIPListPair, []SnapshotConfigDiagnostic, error) {
 	result := make(map[uint]siteIPListPair)
+	diagnostics := make([]SnapshotConfigDiagnostic, 0)
 	if !db.Migrator().HasTable(&store.IPListEntry{}) {
-		return result, nil
+		return result, diagnostics, nil
 	}
 
 	var items []store.IPListEntry
-	if err := db.Where("enabled = ? AND site_id IS NOT NULL", true).Find(&items).Error; err != nil {
-		return nil, err
+	if err := db.Where("enabled = ?", true).Order("id ASC").Find(&items).Error; err != nil {
+		return nil, nil, err
 	}
 	for _, it := range items {
+		entry, ok := iprep.ParseIPListEntry(it.Value, it.Note, it.Action)
+		if !ok {
+			reason := "invalid_ip_or_cidr"
+			if strings.TrimSpace(it.Value) == "" {
+				reason = "empty_value"
+			}
+			diagnostic := SnapshotConfigDiagnostic{
+				Source:           DiagnosticSourceIPList,
+				Field:            DiagnosticFieldValue,
+				Error:            reason,
+				HandlingStrategy: DiagnosticHandlingSkipInvalidEntry,
+				Kind:             "ip_list_entry",
+				Reason:           reason,
+				IPListEntryID:    it.ID,
+				Scope:            "global",
+			}
+			if it.SiteID != nil {
+				diagnostic.Scope = "site"
+				diagnostic.SiteID = *it.SiteID
+			}
+			diagnostics = append(diagnostics, diagnostic)
+			continue
+		}
 		if it.SiteID == nil {
 			continue
 		}
 		siteID := *it.SiteID
 		pair := result[siteID]
-		val := strings.TrimSpace(it.Value)
-		if val == "" {
-			continue
-		}
-		var ipNet net.IPNet
-		if _, cidr, err := net.ParseCIDR(val); err == nil {
-			ipNet = *cidr
-		} else if ip := net.ParseIP(val); ip != nil {
-			if ip4 := ip.To4(); ip4 != nil {
-				ipNet = net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)}
-			} else {
-				ipNet = net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
-			}
-		} else {
-			continue
-		}
 		if it.Kind == store.IPListWhite {
-			pair.whitelist = append(pair.whitelist, ipNet)
+			pair.whitelist = append(pair.whitelist, entry)
 		} else if it.Kind == store.IPListBlack {
-			pair.blacklist = append(pair.blacklist, ipNet)
+			pair.blacklist = append(pair.blacklist, entry)
 		}
 		result[siteID] = pair
 	}
-	return result, nil
+	return result, diagnostics, nil
 }

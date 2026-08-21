@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/rules"
 	"My-OpenWaf/internal/store"
@@ -303,6 +304,16 @@ func normalizePersistedRuleConfig(item *store.Rule) string {
 	item.Action = normalized
 	if action.Normalize(action.Type(item.Action)) == action.Redirect && strings.TrimSpace(item.RedirectTo) == "" {
 		return "redirect_to required"
+	}
+	if item.CaptchaType != "" {
+		if normalizedType, valid := shared.ValidateCaptchaType(item.CaptchaType); !valid {
+			return "invalid captcha_type"
+		} else {
+			item.CaptchaType = normalizedType
+		}
+		if action.Normalize(action.Type(item.Action)) != action.CaptchaChallenge {
+			return "captcha_type requires captcha_challenge action"
+		}
 	}
 	return ""
 }

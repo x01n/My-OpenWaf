@@ -76,6 +76,9 @@ const TRANSLATABLE_ACTIONS = new Set([
   "allow",
   "drop",
   "log_only",
+  "rate_limit",
+  "redirect",
+  "tag",
 ])
 
 /**

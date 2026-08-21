@@ -34,7 +34,7 @@ func LoginHandler(d *AuthDeps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var body loginReq
 		if err := c.BindJSON(&body); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
@@ -252,7 +252,7 @@ func ChangeOwnPasswordHandler(d *AuthDeps) app.HandlerFunc {
 			NewPassword string `json:"new_password"`
 		}
 		if err := c.BindJSON(&body); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if body.OldPassword == "" || body.NewPassword == "" {

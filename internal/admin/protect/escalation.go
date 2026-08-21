@@ -51,7 +51,7 @@ func UpdateEscalationConfig(repo *repository.SystemSettingsRepo, reload func() e
 			EscalationSteps      *[]store.EscalationStepDef `json:"escalation_steps"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if req.EscalationWindowSecs != nil && *req.EscalationWindowSecs <= 0 {

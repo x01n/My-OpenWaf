@@ -37,7 +37,7 @@ func TestPutProtectionSettingsWritesAllActionFields(t *testing.T) {
 		"error_ratelimit_action":"observe",
 		"builtin_owasp_on_hit":"captcha_challenge",
 		"cve_action":"shield_challenge",
-		"auto_ban_action":"chain_challenge"
+		"auto_ban_action":"drop"
 	}`)
 	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 	if ctx.Response.StatusCode() != 200 {
@@ -58,8 +58,26 @@ func TestPutProtectionSettingsWritesAllActionFields(t *testing.T) {
 	if loaded.CVEAction != "shield_challenge" {
 		t.Errorf("CVEAction = %q, want shield_challenge", loaded.CVEAction)
 	}
-	if loaded.AutoBanAction != "chain_challenge" {
-		t.Errorf("AutoBanAction = %q, want chain_challenge", loaded.AutoBanAction)
+	if loaded.AutoBanAction != "drop" {
+		t.Errorf("AutoBanAction = %q, want drop", loaded.AutoBanAction)
+	}
+}
+
+// TestPutProtectionSettingsRejectsUnsupportedAutoBanAction ensures the admin contract
+// does not persist actions that the IP reputation runtime cannot execute.
+func TestPutProtectionSettingsRejectsUnsupportedAutoBanAction(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+
+	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"auto_ban_action":"chain_challenge"}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unsupported auto-ban action should return 400, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	loaded := shared.LoadProtectionConfig(repo)
+	if loaded.AutoBanAction != store.DefaultProtectionConfig().AutoBanAction {
+		t.Fatalf("unsupported action must not be persisted, got %q", loaded.AutoBanAction)
 	}
 }
 
@@ -232,7 +250,7 @@ func TestPutProtectionSettingsValidatesStoredCCRulesWhenCustomEnabled(t *testing
 	}
 }
 
-// TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch 验证部分保存不清空七个 JSON blob 字段。
+// TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch 验证部分保存不清空八个 JSON blob 字段。
 func TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	cfg := store.DefaultProtectionConfig()
@@ -243,6 +261,7 @@ func TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch(t *testing.T
 	cfg.CategorySensitivity = `{"xss":"strict"}`
 	cfg.OWASPRulesConfig = `{"942100":{"enabled":false}}`
 	cfg.CVERulesConfig = `{"CVE-2021-44228":{"enabled":true}}`
+	cfg.SkipPathByPhase = `{"owasp_default":["/healthz"]}`
 	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
@@ -261,6 +280,7 @@ func TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch(t *testing.T
 		"category_sensitivity": {loaded.CategorySensitivity, cfg.CategorySensitivity},
 		"owasp_rules_config":   {loaded.OWASPRulesConfig, cfg.OWASPRulesConfig},
 		"cve_rules_config":     {loaded.CVERulesConfig, cfg.CVERulesConfig},
+		"skip_path_by_phase":   {loaded.SkipPathByPhase, cfg.SkipPathByPhase},
 	}
 	for key, pair := range blobs {
 		if pair[0] != pair[1] {
@@ -311,6 +331,105 @@ func TestPutProtectionSettingsAcceptsJSONBlobsAsObjectsAndStrings(t *testing.T) 
 	steps := loaded.GetEscalationSteps()
 	if len(steps) != 1 || steps[0].Action != "shield_challenge" {
 		t.Errorf("escalation step action was not preserved: %#v", steps)
+	}
+}
+
+func TestPutProtectionSettingsHandlesSkipPathByPhase(t *testing.T) {
+	original := `{"owasp_default":["/old"]}`
+	tests := []struct {
+		name       string
+		body       []byte
+		wantStatus int
+		wantStored string
+		wantReload int
+	}{
+		{
+			name:       "object",
+			body:       []byte(`{"skip_path_by_phase":{"owasp_default":["/healthz"]}}`),
+			wantStatus: 200,
+			wantStored: `{"owasp_default":["/healthz"]}`,
+			wantReload: 1,
+		},
+		{
+			name:       "string",
+			body:       []byte(`{"skip_path_by_phase":"{\"cve_detection\":[\"/readyz\"]}"}`),
+			wantStatus: 200,
+			wantStored: `{"cve_detection":["/readyz"]}`,
+			wantReload: 1,
+		},
+		{
+			name:       "null clears global configuration",
+			body:       []byte(`{"skip_path_by_phase":null}`),
+			wantStatus: 200,
+			wantStored: "",
+			wantReload: 1,
+		},
+		{
+			name:       "empty string is not a clear operation",
+			body:       []byte(`{"skip_path_by_phase":""}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+		{
+			name:       "blank string is not a clear operation",
+			body:       []byte(`{"skip_path_by_phase":"   "}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+		{
+			name:       "invalid JSON string",
+			body:       []byte(`{"skip_path_by_phase":"{not-json}"}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+		{
+			name:       "unknown phase",
+			body:       []byte(`{"skip_path_by_phase":{"unknown_phase":["/healthz"]}}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+		{
+			name:       "empty path list",
+			body:       []byte(`{"skip_path_by_phase":{"owasp_default":[]}}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+		{
+			name:       "blank path",
+			body:       []byte(`{"skip_path_by_phase":{"owasp_default":[" "]}}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newSystemSettingsRepoForTest(t)
+			cfg := store.DefaultProtectionConfig()
+			cfg.SkipPathByPhase = original
+			if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+				t.Fatalf("seed protection: %v", err)
+			}
+			reloads := 0
+			ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error {
+				reloads++
+				return nil
+			}), "POST", "/api/v1/protection-settings", tt.body)
+			if ctx.Response.StatusCode() != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", ctx.Response.StatusCode(), tt.wantStatus, bytes.TrimSpace(ctx.Response.Body()))
+			}
+			if reloads != tt.wantReload {
+				t.Fatalf("reloads = %d, want %d", reloads, tt.wantReload)
+			}
+			if got := shared.LoadProtectionConfig(repo).SkipPathByPhase; got != tt.wantStored {
+				t.Fatalf("skip_path_by_phase = %q, want %q", got, tt.wantStored)
+			}
+		})
 	}
 }
 
@@ -420,6 +539,7 @@ func TestBuildProtectionResponseIgnoresCorruptedBlobs(t *testing.T) {
 	cfg.EscalationSteps = "not-json"
 	cfg.OWASPRulesConfig = "not-json"
 	cfg.CVERulesConfig = "not-json"
+	cfg.SkipPathByPhase = "not-json"
 
 	got := buildProtectionResponse(cfg)
 	for _, key := range []string{"cc_rules", "chain_steps", "escalation_steps"} {
@@ -430,6 +550,9 @@ func TestBuildProtectionResponseIgnoresCorruptedBlobs(t *testing.T) {
 	}
 	if modules, ok := got["owasp_modules"].(map[string]string); !ok || len(modules) != 0 {
 		t.Errorf("owasp_modules should fall back to an empty object, got %#v", got["owasp_modules"])
+	}
+	if paths, ok := got["skip_path_by_phase"].(map[string][]string); !ok || len(paths) != 0 {
+		t.Errorf("skip_path_by_phase should fall back to an empty object, got %#v", got["skip_path_by_phase"])
 	}
 	for _, key := range []string{"owasp_rules_config", "cve_rules_config"} {
 		obj, ok := got[key].(map[string]any)
@@ -448,6 +571,7 @@ func TestBuildProtectionResponseExpandsPopulatedBlobs(t *testing.T) {
 	cfg.EscalationSteps = `[{"threshold":3,"action":"chain_challenge"}]`
 	cfg.OWASPRulesConfig = `{"942100":{"enabled":false}}`
 	cfg.CVERulesConfig = `{"CVE-2021-44228":{"enabled":true}}`
+	cfg.SkipPathByPhase = `{"owasp_default":["/healthz"]}`
 
 	got := buildProtectionResponse(cfg)
 	if items, ok := got["cc_rules"].([]any); !ok || len(items) != 1 {
@@ -467,6 +591,9 @@ func TestBuildProtectionResponseExpandsPopulatedBlobs(t *testing.T) {
 	}
 	if obj, ok := got["cve_rules_config"].(map[string]any); !ok || len(obj) != 1 {
 		t.Errorf("cve_rules_config not expanded: %#v", got["cve_rules_config"])
+	}
+	if paths, ok := got["skip_path_by_phase"].(map[string][]string); !ok || len(paths["owasp_default"]) != 1 || paths["owasp_default"][0] != "/healthz" {
+		t.Errorf("skip_path_by_phase not expanded: %#v", got["skip_path_by_phase"])
 	}
 }
 

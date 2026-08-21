@@ -2,6 +2,7 @@ package luaplugin
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sort"
 	"time"
@@ -225,7 +226,8 @@ func buildDebugFunction(L *lua.LState, debugFn func(string), budget *apiBudget) 
 func buildKVTable(L *lua.LState, runCtx context.Context, kv KVBackend, budget *apiBudget) *lua.LTable {
 	t := L.NewTable()
 
-	available := kv != nil && kv.Available()
+	contextual, supported := kv.(ContextKVBackend)
+	available := supported && contextual.AvailableContext(runCtx)
 	t.RawSetString("available", L.NewFunction(func(l *lua.LState) int {
 		l.Push(lua.LBool(available))
 		return 1
@@ -299,32 +301,33 @@ func buildKVTable(L *lua.LState, runCtx context.Context, kv KVBackend, budget *a
 }
 
 func getKV(ctx context.Context, kv KVBackend, key string) ([]byte, bool) {
-	if contextual, ok := kv.(ContextKVBackend); ok {
-		return contextual.GetContext(ctx, key)
+	contextual, ok := kv.(ContextKVBackend)
+	if !ok {
+		return nil, false
 	}
-	return kv.Get(key)
+	return contextual.GetContext(ctx, key)
 }
 
 func setKV(ctx context.Context, kv KVBackend, key string, value []byte, ttl time.Duration) error {
-	if contextual, ok := kv.(ContextKVBackend); ok {
-		return contextual.SetContext(ctx, key, value, ttl)
+	contextual, ok := kv.(ContextKVBackend)
+	if !ok {
+		return errors.New("luaplugin: KV backend does not support context")
 	}
-	return kv.Set(key, value, ttl)
+	return contextual.SetContext(ctx, key, value, ttl)
 }
 
 func deleteKV(ctx context.Context, kv KVBackend, key string) {
 	if contextual, ok := kv.(ContextKVBackend); ok {
 		contextual.DeleteContext(ctx, key)
-		return
 	}
-	kv.Delete(key)
 }
 
 func incrKV(ctx context.Context, kv KVBackend, key string, ttl time.Duration) (int64, error) {
-	if contextual, ok := kv.(ContextKVBackend); ok {
-		return contextual.IncrContext(ctx, key, ttl)
+	contextual, ok := kv.(ContextKVBackend)
+	if !ok {
+		return 0, errors.New("luaplugin: KV backend does not support context")
 	}
-	return kv.Incr(key, ttl)
+	return contextual.IncrContext(ctx, key, ttl)
 }
 
 // scriptKey 校验并加前缀。

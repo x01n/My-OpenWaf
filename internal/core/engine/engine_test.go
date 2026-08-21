@@ -28,6 +28,23 @@ func newTestHolder(prot store.ProtectionConfig, rules []snapshot.CompiledRule) *
 	return holder
 }
 
+func TestConvertAndCompileCarriesCaptchaType(t *testing.T) {
+	compiled := convertAndCompile([]snapshot.CompiledRule{{
+		ID:          12,
+		Phase:       store.PhaseCustom,
+		Action:      store.ActionCaptchaChallenge,
+		Kind:        "block_path",
+		Arg:         "/guarded",
+		CaptchaType: "click",
+	}})
+	if len(compiled) != 1 {
+		t.Fatalf("compiled rule count = %d, want 1", len(compiled))
+	}
+	if compiled[0].CaptchaType != "click" {
+		t.Fatalf("compiled captcha_type = %q, want click", compiled[0].CaptchaType)
+	}
+}
+
 func TestProcessChecksACLBlacklistBeforeBuiltinDetectors(t *testing.T) {
 	prot := store.DefaultProtectionConfig()
 	prot.OWASPEnabled = true
@@ -74,6 +91,30 @@ func TestProcessHonorsACLPriorityBeforeAllow(t *testing.T) {
 	}
 	if result.Action.RuleID != 10 {
 		t.Fatalf("expected intercept rule id 10, got %d", result.Action.RuleID)
+	}
+}
+
+func TestProcessACLAllowDoesNotSkipLaterCustomRule(t *testing.T) {
+	prot := store.DefaultProtectionConfig()
+	holder := newTestHolder(prot, []snapshot.CompiledRule{
+		{ID: 10, Phase: store.PhaseACL, Kind: "allow_ip", Arg: "1.2.3.4", Action: store.ActionAllow, Priority: 1},
+		{ID: 20, Phase: store.PhaseCustom, Kind: "block_path", Arg: "/admin", Action: store.ActionIntercept, Priority: 1},
+	})
+
+	eng := New(holder, nil, nil, nil)
+	result := eng.Process(&pipeline.RequestCtx{
+		Bind:     ":80",
+		Host:     "example.com",
+		Path:     "/admin",
+		ClientIP: []byte{1, 2, 3, 4},
+		Headers:  map[string]string{},
+	})
+
+	if result.Action.Type != action.Intercept {
+		t.Fatalf("later custom action = %q, want %q", result.Action.Type, action.Intercept)
+	}
+	if result.Action.RuleID != 20 {
+		t.Fatalf("later custom rule id = %d, want 20", result.Action.RuleID)
 	}
 }
 

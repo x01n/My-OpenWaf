@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { SkipPathByPhaseEditor } from "@/components/skip-path-by-phase-editor"
 
 import { Skeleton } from "@/components/ui/skeleton"
 import { toast } from "sonner"
@@ -26,10 +28,15 @@ import {
   useDefaultPolicy,
   useOwaspRules,
   useOwaspBatchUpdate,
-  useSiteMutation,
+  useSiteProtectionMutation,
 } from "@/hooks/use-api"
+import {
+  findEmptySkipPaths,
+  parseSkipPathByPhase,
+  toSkipPathByPhasePayload,
+} from "@/lib/skip-path-by-phase"
 import { cn } from "@/lib/utils"
-import type { Site } from "@/lib/types"
+import type { Site, SkipPathByPhase } from "@/lib/types"
 
 interface OwaspRule {
   id: string
@@ -125,6 +132,7 @@ const MODE_OPTIONS: { value: ModuleMode; labelKey: string }[] = [
 const GLOBAL_DEFAULT_MODE: ModuleMode = "balanced"
 
 type TriState = "inherit" | "on" | "off"
+type SkipPathOverrideMode = "inherit" | "override"
 
 function toTriState(v: boolean | null | undefined): TriState {
   if (v === true) return "on"
@@ -228,7 +236,9 @@ interface ProtectionTabProps {
 }
 
 export function ProtectionTab({ site }: ProtectionTabProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const useChinese = (i18n.resolvedLanguage ?? i18n.language).startsWith("zh")
+  const fallback = (zh: string, en: string) => (useChinese ? zh : en)
   const { data: defaultPolicy } = useDefaultPolicy()
   const effectivePolicyId = site.policy_id ?? defaultPolicy?.id
   const { data, isLoading, mutate } = useOwaspRules(
@@ -239,7 +249,7 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
     mutate: () => void
   }
   const { execute: batchUpdate, loading: isSaving } = useOwaspBatchUpdate()
-  const updateSite = useSiteMutation()
+  const updateSite = useSiteProtectionMutation()
 
   const [owaspState, setOwaspState] = useState<TriState>(() =>
     toTriState(site.owasp_enabled)
@@ -253,6 +263,13 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
   const [moduleModes, setModuleModes] = useState<Record<string, ModuleMode>>({})
   const [hasChanges, setHasChanges] = useState(false)
   const [batchMode, setBatchMode] = useState<ModuleMode>("balanced")
+  const [skipPathMode, setSkipPathMode] = useState<SkipPathOverrideMode>(() =>
+    site.skip_path_by_phase == null ? "inherit" : "override"
+  )
+  const [skipPaths, setSkipPaths] = useState<SkipPathByPhase>(() =>
+    parseSkipPathByPhase(site.skip_path_by_phase)
+  )
+  const [skipPathsDirty, setSkipPathsDirty] = useState(false)
 
   const inferredModes = useMemo(() => {
     if (!data?.grouped) return {}
@@ -310,6 +327,68 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
       toast.success(t("common.saveSuccess"))
     } catch {
       toast.error(t("common.operationFailed"))
+    }
+  }
+
+  const handleSkipPathModeChange = (value: SkipPathOverrideMode) => {
+    setSkipPathMode(value)
+    setSkipPathsDirty(true)
+  }
+
+  const handleSkipPathsChange = (value: SkipPathByPhase) => {
+    setSkipPaths(value)
+    setSkipPathsDirty(true)
+  }
+
+  const handleResetSkipPaths = () => {
+    setSkipPathMode(site.skip_path_by_phase == null ? "inherit" : "override")
+    setSkipPaths(parseSkipPathByPhase(site.skip_path_by_phase))
+    setSkipPathsDirty(false)
+  }
+
+  const handleSaveSkipPaths = async () => {
+    if (
+      skipPathMode === "override" &&
+      findEmptySkipPaths(skipPaths).length > 0
+    ) {
+      toast.error(
+        t("skipPathByPhase.validationFailed", {
+          defaultValue: fallback(
+            "请删除空路径，或为每一项输入非空路径。",
+            "Remove empty paths or enter a non-empty path for every item."
+          ),
+        })
+      )
+      return
+    }
+    try {
+      await updateSite.execute({
+        id: site.id,
+        data: {
+          skip_path_by_phase:
+            skipPathMode === "inherit"
+              ? null
+              : toSkipPathByPhasePayload(skipPaths),
+        },
+      })
+      setSkipPathsDirty(false)
+      toast.success(
+        t("skipPathByPhase.siteSaveSuccess", {
+          defaultValue: fallback(
+            "本站跳过路径配置已保存。",
+            "Site skipped-path configuration saved."
+          ),
+        })
+      )
+    } catch {
+      toast.error(
+        t("skipPathByPhase.saveFailed", {
+          defaultValue: fallback(
+            "跳过路径保存失败。",
+            "Failed to save skipped paths."
+          ),
+        })
+      )
     }
   }
 
@@ -409,6 +488,109 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
               onChange={(v) => handleTriStateChange("bot", v)}
               idPrefix="prot-bot"
             />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">
+            {t("skipPathByPhase.siteTitle", {
+              defaultValue: fallback(
+                "本站按阶段跳过路径",
+                "Site skip paths by phase"
+              ),
+            })}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <RadioGroup
+            value={skipPathMode}
+            onValueChange={(value) =>
+              handleSkipPathModeChange(value as SkipPathOverrideMode)
+            }
+            aria-label={t("skipPathByPhase.overrideMode", {
+              defaultValue: fallback("覆盖模式", "Override mode"),
+            })}
+            className="grid gap-2 sm:grid-cols-2"
+          >
+            <div className="flex items-start gap-3 rounded-lg border p-3">
+              <RadioGroupItem value="inherit" id="skip-path-inherit" />
+              <div className="space-y-1">
+                <Label
+                  htmlFor="skip-path-inherit"
+                  className="cursor-pointer font-medium"
+                >
+                  {t("skipPathByPhase.inherit", {
+                    defaultValue: fallback("继承全局", "Inherit global"),
+                  })}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t("skipPathByPhase.inheritHint", {
+                    defaultValue: fallback(
+                      "保持 null，由本站继承全局映射。",
+                      "Keep null so this site inherits the global mapping."
+                    ),
+                  })}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border p-3">
+              <RadioGroupItem value="override" id="skip-path-override" />
+              <div className="space-y-1">
+                <Label
+                  htmlFor="skip-path-override"
+                  className="cursor-pointer font-medium"
+                >
+                  {t("skipPathByPhase.override", {
+                    defaultValue: fallback("整体覆盖", "Override all"),
+                  })}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t("skipPathByPhase.overrideHint", {
+                    defaultValue: fallback(
+                      "空映射表示本站明确不跳过任何阶段；非空映射整体替代全局配置。",
+                      "An empty map explicitly skips nothing; a non-empty map replaces the global configuration."
+                    ),
+                  })}
+                </p>
+              </div>
+            </div>
+          </RadioGroup>
+
+          {skipPathMode === "override" && (
+            <SkipPathByPhaseEditor
+              value={skipPaths}
+              onChange={handleSkipPathsChange}
+              disabled={updateSite.loading}
+              idPrefix={`site-${site.id}-skip-path`}
+            />
+          )}
+
+          <div className="flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!skipPathsDirty || updateSite.loading}
+              onClick={handleResetSkipPaths}
+            >
+              {t("common.cancel", {
+                defaultValue: fallback("取消", "Cancel"),
+              })}
+            </Button>
+            <Button
+              type="button"
+              disabled={!skipPathsDirty || updateSite.loading}
+              onClick={handleSaveSkipPaths}
+            >
+              {updateSite.loading
+                ? t("common.saving", {
+                    defaultValue: fallback("保存中...", "Saving..."),
+                  })
+                : t("common.save", {
+                    defaultValue: fallback("保存", "Save"),
+                  })}
+            </Button>
           </div>
         </CardContent>
       </Card>

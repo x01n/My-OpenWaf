@@ -185,13 +185,15 @@ func TestSanitizeRecordedBodySnippet(t *testing.T) {
 			t.Error("empty body should return empty")
 		}
 	})
-	t.Run("json body sensitive key redacted", func(t *testing.T) {
-		got := sanitizeRecordedBodySnippet(`{"password":"abc123","user":"alice"}`, "application/json")
-		if strings.Contains(got, "abc123") {
-			t.Errorf("json password should be redacted, got %q", got)
+	t.Run("JSON sensitive keys are redacted", func(t *testing.T) {
+		got := sanitizeRecordedBodySnippet(`{"password":"password-secret","ticket":"ticket-secret","env":{"token":"token-secret"},"user":"alice"}`, "application/json")
+		for _, secret := range []string{"password-secret", "ticket-secret", "token-secret"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("JSON body leaked %q: %q", secret, got)
+			}
 		}
 		if !strings.Contains(got, "alice") {
-			t.Errorf("non-sensitive json value should remain, got %q", got)
+			t.Errorf("non-sensitive JSON value should remain, got %q", got)
 		}
 	})
 	t.Run("form-urlencoded sensitive key redacted", func(t *testing.T) {
@@ -200,14 +202,54 @@ func TestSanitizeRecordedBodySnippet(t *testing.T) {
 			t.Errorf("form password should be redacted, got %q", got)
 		}
 	})
-	t.Run("plain text sanitized", func(t *testing.T) {
-		got := sanitizeRecordedBodySnippet("token=abc", "text/plain")
-		if strings.Contains(got, "abc") && strings.Contains(got, "[redacted]") {
-			// ok - was sanitized
-		} else if got == "token=abc" {
-			// no match in plain text path - also acceptable
-		}
-	})
+
+	body := "Authorization: Bearer auth-secret\r\n continuation-secret\r\n" +
+		"Proxy-Authorization: Basic proxy-secret\r\n" +
+		"Cookie: sid=cookie-secret\r\n" +
+		"Set-Cookie: refresh=response-secret; HttpOnly\r\n"
+	for _, tc := range []struct {
+		name        string
+		body        string
+		contentType string
+	}{
+		{name: "plain text", body: body, contentType: "text/plain"},
+		{name: "malformed JSON", body: "{\"unterminated\":\n" + body, contentType: "application/json"},
+		{name: "truncated sample", body: body + strings.Repeat("x", recordedHeaderValueLimit), contentType: "text/plain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeRecordedBodySnippet(tc.body, tc.contentType)
+			for _, secret := range []string{"auth-secret", "continuation-secret", "proxy-secret", "cookie-secret", "response-secret"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("recorded body snippet leaked %q: %q", secret, got)
+				}
+			}
+			for _, field := range []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie"} {
+				if !strings.Contains(got, field+": [redacted]") {
+					t.Fatalf("recorded body snippet did not retain redacted %s field: %q", field, got)
+				}
+			}
+		})
+	}
+}
+
+func TestSanitizeRecordedBodySnippetRedactsMalformedSecrets(t *testing.T) {
+	headerBody := `{"Authorization":"Bearer auth-secret"`
+	got := sanitizeRecordedBodySnippet(headerBody, "application/json")
+	if strings.Contains(got, "auth-secret") {
+		t.Fatalf("malformed JSON leaked quoted authorization value: %s", got)
+	}
+
+	envBody := `{"env":{"nested":"env-secret"}`
+	got = sanitizeRecordedBodySnippet(envBody, "application/json")
+	if strings.Contains(got, "env-secret") {
+		t.Fatalf("malformed JSON leaked nested env value: %s", got)
+	}
+
+	truncated := `{"env":{"nested":"env-secret"},` + strings.Repeat("x", recordedHeaderValueLimit)
+	got = sanitizeRecordedBodySnippet(truncated, "application/json")
+	if strings.Contains(got, "env-secret") {
+		t.Fatalf("truncated JSON leaked nested env value: %s", got)
+	}
 }
 
 // --- captureRecordedHTTPHeaders ---

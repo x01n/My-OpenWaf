@@ -115,7 +115,7 @@ func TestUpdateSiteErrorPagesRejectsMalformedBody(t *testing.T) {
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	requireErrorMessage(t, ctx.Response.Body(), "invalid request body")
+	requireErrorMessage(t, ctx.Response.Body(), "请求体格式无效")
 }
 
 func TestUpdateSiteErrorPagesReportsReloadFailure(t *testing.T) {
@@ -148,7 +148,7 @@ func TestPreviewErrorPageRejectsMalformedBody(t *testing.T) {
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	requireErrorMessage(t, ctx.Response.Body(), "invalid request body")
+	requireErrorMessage(t, ctx.Response.Body(), "请求体格式无效")
 }
 
 func TestPreviewErrorPageRequiresHTML(t *testing.T) {

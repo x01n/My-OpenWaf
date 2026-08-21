@@ -183,6 +183,55 @@ func TestUpdateChainConfigRejectsUnsupportedStepType(t *testing.T) {
 	}
 }
 
+func TestUpdateChainConfigValidatesCaptchaStepType(t *testing.T) {
+	for _, captchaType := range []challenge.CaptchaType{"", challenge.CaptchaTypeMath, challenge.CaptchaTypeClick, challenge.CaptchaTypeSlide, challenge.CaptchaTypeRotate} {
+		t.Run("accept_"+string(captchaType), func(t *testing.T) {
+			repo := newSystemSettingsRepoForTest(t)
+			body, err := json.Marshal(map[string]any{
+				"chain_steps": []map[string]any{{"type": "captcha", "captcha_type": captchaType}},
+			})
+			if err != nil {
+				t.Fatalf("encode request: %v", err)
+			}
+			ctx := invokeProtectHandler(t, UpdateChainConfig(repo, func() error { return nil }), "POST", "/api/v1/chain/config", body)
+			if ctx.Response.StatusCode() != 200 {
+				t.Fatalf("captcha_type=%q: unexpected status %d: %s", captchaType, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+			}
+			var steps []chainStepPayload
+			if err := json.Unmarshal([]byte(shared.LoadProtectionConfig(repo).ChainSteps), &steps); err != nil {
+				t.Fatalf("decode stored chain steps: %v", err)
+			}
+			if len(steps) != 1 || steps[0].CaptchaType != captchaType {
+				t.Fatalf("captcha_type=%q: stored steps = %#v", captchaType, steps)
+			}
+		})
+	}
+
+	for _, captchaType := range []challenge.CaptchaType{"Math", "image", "pow", " slide "} {
+		t.Run("reject_"+string(captchaType), func(t *testing.T) {
+			repo := newSystemSettingsRepoForTest(t)
+			cfg := store.DefaultProtectionConfig()
+			cfg.ChainSteps = `[{"type":"captcha","condition":"all","captcha_type":"math"}]`
+			if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+				t.Fatalf("seed protection: %v", err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"chain_steps": []map[string]any{{"type": "captcha", "captcha_type": captchaType}},
+			})
+			if err != nil {
+				t.Fatalf("encode request: %v", err)
+			}
+			ctx := invokeProtectHandler(t, UpdateChainConfig(repo, func() error { return nil }), "POST", "/api/v1/chain/config", body)
+			if ctx.Response.StatusCode() != 400 {
+				t.Fatalf("captcha_type=%q: expected 400, got %d: %s", captchaType, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+			}
+			if loaded := shared.LoadProtectionConfig(repo); loaded.ChainSteps != cfg.ChainSteps {
+				t.Fatalf("captcha_type=%q: rejected update changed stored steps to %s", captchaType, loaded.ChainSteps)
+			}
+		})
+	}
+}
+
 // TestUpdateChainConfigStripsCaptchaTypeFromNonCaptchaSteps 验证挑战语义不被混淆：
 // 只有 captcha 步骤保留 captcha_type，env/pow 步骤的该字段被清空。
 func TestUpdateChainConfigStripsCaptchaTypeFromNonCaptchaSteps(t *testing.T) {

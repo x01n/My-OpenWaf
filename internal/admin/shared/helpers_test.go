@@ -220,6 +220,30 @@ func TestSaveAndLoadProtectionConfig(t *testing.T) {
 	}
 }
 
+// TestValidateGlobalCaptchaType checks the shared four-value global CAPTCHA contract.
+func TestValidateGlobalCaptchaType(t *testing.T) {
+	for _, value := range []string{"math", "click", "slide", "rotate"} {
+		if err := ValidateGlobalCaptchaType(value); err != nil {
+			t.Fatalf("ValidateGlobalCaptchaType(%q): %v", value, err)
+		}
+	}
+	for _, value := range []string{"", "Math", " image ", "pow"} {
+		if err := ValidateGlobalCaptchaType(value); err == nil {
+			t.Fatalf("ValidateGlobalCaptchaType(%q) should reject", value)
+		}
+	}
+}
+
+// TestSaveProtectionConfigRejectsInvalidCaptchaType ensures writes cannot persist an unsupported mode.
+func TestSaveProtectionConfigRejectsInvalidCaptchaType(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CaptchaType = "pow"
+	if err := SaveProtectionConfig(repo, cfg); err == nil {
+		t.Fatal("SaveProtectionConfig should reject invalid captcha_type")
+	}
+}
+
 func TestParseUintParam(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Params = param.Params{{Key: "id", Value: "42"}}
@@ -327,6 +351,27 @@ func TestValidateCCRules(t *testing.T) {
 		if err := ValidateCCRules(raw); err == nil {
 			t.Errorf("ValidateCCRules(%q) returned nil error", raw)
 		}
+	}
+}
+
+func TestValidateCCRulesCaptchaTypeContract(t *testing.T) {
+	for _, captchaType := range []string{"math", "click", "slide", "rotate"} {
+		raw := `[{"action":"captcha","captcha_type":"` + captchaType + `","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":60,"threshold":10}]`
+		if err := ValidateCCRules(raw); err != nil {
+			t.Fatalf("captcha_type=%q should be accepted: %v", captchaType, err)
+		}
+	}
+
+	for _, captchaType := range []string{"Math", "image", " slide ", "pow"} {
+		raw := `[{"action":"captcha","captcha_type":"` + captchaType + `","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":60,"threshold":10}]`
+		if err := ValidateCCRules(raw); err == nil {
+			t.Fatalf("captcha_type=%q should be rejected", captchaType)
+		}
+	}
+
+	raw := `[{"action":"intercept","captcha_type":"slide","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":60,"threshold":10}]`
+	if err := ValidateCCRules(raw); err == nil {
+		t.Fatal("non-captcha action must reject captcha_type")
 	}
 }
 
@@ -440,6 +485,36 @@ func TestSyncBrowserSignToProtection(t *testing.T) {
 	}
 	if err := SyncBrowserSignToProtection(repo, true, 600, "intercept"); err != nil {
 		t.Fatalf("SyncBrowserSignToProtection same value: %v", err)
+	}
+}
+
+func TestSyncAntiReplayEnabledToProtectionAndSettings(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	initial := BotSettingsResponse{Enabled: true, ScoreThreshold: 75}
+	data, _ := json.Marshal(initial)
+	if err := repo.Set("bot_settings", string(data)); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+
+	if err := SyncAntiReplayEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncAntiReplayEnabledToProtection: %v", err)
+	}
+	if !LoadProtectionConfig(repo).AntiReplayEnabled {
+		t.Fatal("AntiReplayEnabled should be enabled in protection")
+	}
+	if err := SyncProtectionAntiReplayToSettings(repo, true); err != nil {
+		t.Fatalf("SyncProtectionAntiReplayToSettings: %v", err)
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatalf("load bot settings: %v", err)
+	}
+	var got BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.AntiReplayEnabled || !got.Enabled || got.ScoreThreshold != 75 {
+		t.Fatalf("unexpected anti-replay projection: %#v", got)
 	}
 }
 

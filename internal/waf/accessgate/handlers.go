@@ -105,7 +105,7 @@ func (g *Gate) HandleVerify(authType, username, password string, providerID uint
 			identity = "shared"
 		}
 	case AuthTypeUserPassword:
-		if lookup != nil && username != "" {
+		if g.HasProviderType("password") && lookup != nil && username != "" {
 			if hash, ok := lookup(g.config.SiteID, username); ok && VerifyUserPassword(hash, password) {
 				verified = true
 				identity = username
@@ -227,12 +227,10 @@ func (g *Gate) HandleOAuthCallback(stateParam, code, redirectURI string, stateSt
 		return oauthFailure("回调参数缺失", "/")
 	}
 
-	st, err := stateStore.Get(stateParam)
+	st, err := stateStore.Consume(stateParam)
 	if err != nil || st == nil {
 		return oauthFailure("state 无效或已过期", "/")
 	}
-	// state 一次性消费，防重放。
-	_ = stateStore.Delete(stateParam)
 
 	if st.SiteID != g.config.SiteID {
 		return oauthFailure("state 站点不匹配", "/")

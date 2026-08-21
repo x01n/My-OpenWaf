@@ -44,6 +44,11 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	preflightCfg.RedisDB = 0
 
 	log := logger.New("config")
+	// 队列参数的解析失败与越界钳制只在加载时判定一次，因此在这里单独输出，
+	// 不并入下面会被调用两次的 Validate() 告警。
+	for _, w := range cfg.QueueWarnings {
+		log.Warn(w)
+	}
 	warnings, err := preflightCfg.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -186,6 +191,13 @@ func applyStoredRedisConfig(db *gorm.DB, cfg Config) (Config, error) {
 }
 
 func (r *Runtime) ReloadSnapshot() error {
+	return r.ReloadSnapshotWithPrePublish(nil)
+}
+
+// ReloadSnapshotWithPrePublish rebuilds the immutable snapshot and invokes
+// prePublish before making that generation visible to request handlers. A
+// callback error leaves the currently published snapshot unchanged.
+func (r *Runtime) ReloadSnapshotWithPrePublish(prePublish func(*snapshot.Snapshot) error) error {
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()
 
@@ -205,6 +217,18 @@ func (r *Runtime) ReloadSnapshot() error {
 			if latest != rev {
 				continue
 			}
+			if prePublish != nil {
+				if err := prePublish(sn); err != nil {
+					return fmt.Errorf("prepare snapshot publication: %w", err)
+				}
+			}
+			latest, err = currentRevision(r.DB)
+			if err != nil {
+				return err
+			}
+			if latest != rev {
+				continue
+			}
 			r.Snapshot.StoreIfNewer(sn)
 			return nil
 		}
@@ -213,6 +237,18 @@ func (r *Runtime) ReloadSnapshot() error {
 			return fmt.Errorf("snapshot build: %w", err)
 		}
 		latest, err := currentRevision(r.DB)
+		if err != nil {
+			return err
+		}
+		if latest != rev {
+			continue
+		}
+		if prePublish != nil {
+			if err := prePublish(sn); err != nil {
+				return fmt.Errorf("prepare snapshot publication: %w", err)
+			}
+		}
+		latest, err = currentRevision(r.DB)
 		if err != nil {
 			return err
 		}

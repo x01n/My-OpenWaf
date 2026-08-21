@@ -36,6 +36,7 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 	out["cve_rules_config"] = map[string]any{}
 	out["chain_steps"] = []any{}
 	out["escalation_steps"] = []any{}
+	out["skip_path_by_phase"] = map[string][]string{}
 
 	// Expand legacy owasp_modules string and expose category_sensitivity as the UI source.
 	if cfg.OWASPModules != "" {
@@ -80,6 +81,12 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 			out["escalation_steps"] = steps
 		}
 	}
+	if cfg.SkipPathByPhase != "" {
+		var pathsByPhase map[string][]string
+		if json.Unmarshal([]byte(cfg.SkipPathByPhase), &pathsByPhase) == nil && pathsByPhase != nil {
+			out["skip_path_by_phase"] = pathsByPhase
+		}
+	}
 	return out
 }
 
@@ -89,7 +96,7 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		// into ProtectionConfig (several DB-backed JSON blobs are typed as string in Go).
 		var raw map[string]json.RawMessage
 		if err := c.BindJSON(&raw); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
@@ -108,6 +115,14 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		for key := range raw {
 			present[key] = true
 		}
+
+		// skip_path_by_phase 需要区分 JSON null（清除全局配置）与空字符串
+		// （非法值，与站点端 bindSiteFromRaw 保持一致的 400 拒绝）。
+		// PeelJSONStringBlobs 会把 null 和空字符串都规范化为 ""，丢失原始语义，
+		// 因此在 peel 之前先记录原始 token。
+		skipPathRaw, skipPathPresent := raw["skip_path_by_phase"]
+		skipPathNull := skipPathPresent && strings.TrimSpace(string(skipPathRaw)) == "null"
+
 		preserved := shared.PeelJSONStringBlobs(raw, shared.ProtectionJSONBlobKeys())
 
 		plainBytes, err := json.Marshal(raw)
@@ -146,6 +161,38 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		if s, ok := preserved["cve_rules_config"]; ok {
 			cfg.CVERulesConfig = s
 		}
+		if s, ok := preserved["skip_path_by_phase"]; ok {
+			if !skipPathNull {
+				if err := shared.ValidateSkipPathByPhase(s); err != nil {
+					c.JSON(400, map[string]string{"error": err.Error()})
+					return
+				}
+			}
+			cfg.SkipPathByPhase = s
+		}
+
+		challengePresent := map[string]bool{
+			"captcha_type":            present["captcha_type"],
+			"captcha_timeout":         present["captcha_timeout"],
+			"captcha_pass_ttl":        present["captcha_pass_ttl"],
+			"shield_difficulty":       present["shield_difficulty"],
+			"shield_timeout_secs":     present["shield_timeout_secs"],
+			"shield_auto_start_delay": present["shield_auto_start_delay"],
+			"shield_max_retries":      present["shield_max_retries"],
+			"shield_env_strictness":   present["shield_env_strictness"],
+		}
+		if err := validateChallengeConfig(cfg, challengePresent); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if present["chain_steps"] {
+			steps, ok := normalizeChainStepPayload(json.RawMessage(cfg.ChainSteps))
+			if !ok {
+				c.JSON(400, map[string]string{"error": "chain_steps contains unsupported step type or captcha_type"})
+				return
+			}
+			cfg.ChainSteps = steps
+		}
 
 		actionFields := map[string]struct {
 			value       string
@@ -162,7 +209,15 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			if (!present[field] && !(present[spec.enableField] && spec.enabled)) || spec.value == "" {
 				continue
 			}
-			if normalized, ok := shared.ValidateActionWithoutRedirectTarget(spec.value); ok {
+			normalized, ok := shared.ValidateActionWithoutRedirectTarget(spec.value)
+			if ok && field == "auto_ban_action" {
+				switch normalized {
+				case "intercept", "drop":
+				default:
+					ok = false
+				}
+			}
+			if ok {
 				setProtectionActionField(&cfg, field, normalized)
 			} else {
 				c.JSON(400, map[string]string{"error": "invalid action"})
@@ -195,6 +250,11 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			}
 			if present["captcha_enabled"] {
 				if err := shared.SyncProtectionCaptchaToSettings(txRepo, cfg.CaptchaEnabled); err != nil {
+					return err
+				}
+			}
+			if present["anti_replay_enabled"] {
+				if err := shared.SyncProtectionAntiReplayToSettings(txRepo, cfg.AntiReplayEnabled); err != nil {
 					return err
 				}
 			}

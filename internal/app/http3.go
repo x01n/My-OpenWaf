@@ -1368,7 +1368,14 @@ func resolveHTTP3TCPBind(routeTable http3RouteTable, r *http.Request) (string, b
 
 func (t http3RouteTable) Resolve(host string) (string, bool) {
 	normalized := snapshotpkg.NormalizeMatchHost(host)
-	if normalized != "" {
+	if normalized == "" {
+		if t.defaultTCPBind != "" {
+			return t.defaultTCPBind, true
+		}
+		return "", false
+	}
+
+	if normalized != "*" {
 		if bind, ok := t.exact[normalized]; ok {
 			return bind, true
 		}
@@ -1380,8 +1387,8 @@ func (t http3RouteTable) Resolve(host string) (string, bool) {
 			}
 		}
 	}
-	if t.defaultTCPBind != "" {
-		return t.defaultTCPBind, true
+	if bind, ok := t.exact["*"]; ok {
+		return bind, true
 	}
 	return "", false
 }
@@ -1598,15 +1605,15 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 	}
 
 	allowedTCPBinds := make(map[string]struct{}, len(runtimes))
-	var defaultSiteCert *tls.Certificate
+	defaultSiteCertByBind := make(map[string]*tls.Certificate, len(runtimes))
 	for _, rt := range runtimes {
 		allowedTCPBinds[rt.Bind] = struct{}{}
-		if defaultSiteCert != nil {
+		if _, exists := defaultSiteCertByBind[rt.Bind]; exists {
 			continue
 		}
 		if rt.TLSConfig != nil && len(rt.TLSConfig.Certificates) > 0 {
 			cert := rt.TLSConfig.Certificates[0]
-			defaultSiteCert = &cert
+			defaultSiteCertByBind[rt.Bind] = &cert
 			continue
 		}
 		if rt.Certificate != nil {
@@ -1615,7 +1622,7 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 				if staple, ok := snapshotpkg.ParseOCSPStaple(rt.Certificate.OCSPStaplePEM); ok {
 					cert.OCSPStaple = staple
 				}
-				defaultSiteCert = &cert
+				defaultSiteCertByBind[rt.Bind] = &cert
 			}
 		}
 	}
@@ -1643,12 +1650,8 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		}
 	}
 
-	if defaultSiteCert == nil && len(sniCertMap) == 0 {
-		selfSigned := selfSignedForBind(udpBind)
-		if selfSigned == nil {
-			return nil
-		}
-		defaultSiteCert = selfSigned
+	if len(defaultSiteCertByBind) == 0 && len(sniCertMap) == 0 && selfSignedForBind(udpBind) == nil {
+		return nil
 	}
 
 	curves := snapshotpkg.ParseCurvePreferences(sn.TLSDefaults.CurvePreferences)
@@ -1656,7 +1659,6 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		curves = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}
 	}
 
-	allowedBindCount := len(allowedTCPBinds)
 	return &tls.Config{
 		MinVersion:               tls.VersionTLS13,
 		MaxVersion:               tls.VersionTLS13,
@@ -1667,27 +1669,34 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := strings.ToLower(strings.TrimSpace(hello.ServerName))
 			if sni == "" {
-				if sn.TLSDefaults.SelfSignedOnIP {
+				if len(allowedTCPBinds) > 1 || sn.TLSDefaults.SelfSignedOnIP {
 					return selfSignedForBind(udpBind), nil
 				}
-				if defaultSiteCert != nil {
-					return defaultSiteCert, nil
+				for _, cert := range defaultSiteCertByBind {
+					return cert, nil
 				}
 				return selfSignedForBind(udpBind), nil
 			}
-			routeBind := ""
-			if allowedBindCount > 1 {
-				var ok bool
-				routeBind, ok = routeTable.Resolve(sni)
-				if !ok {
+			routeBind, ok := routeTable.Resolve(sni)
+			if !ok {
+				return selfSignedForBind(udpBind), nil
+			}
+			if _, found := sn.MatchSite(routeBind, sni); !found {
+				return selfSignedForBind(udpBind), nil
+			}
+			if state, found := sn.TLSCertificateStateForSNI(routeBind, sni); found {
+				switch state {
+				case snapshotpkg.TLSCertificateStateInvalid:
+					return nil, fmt.Errorf("configured TLS certificate is unavailable")
+				case snapshotpkg.TLSCertificateStateUnconfigured:
 					return selfSignedForBind(udpBind), nil
 				}
 			}
 			if cert, ok := http3SNICertForRoute(sniCertMap, sni, routeBind); ok {
 				return cert, nil
 			}
-			if allowedBindCount == 1 && defaultSiteCert != nil {
-				return defaultSiteCert, nil
+			if cert := defaultSiteCertByBind[routeBind]; cert != nil {
+				return cert, nil
 			}
 			return selfSignedForBind(udpBind), nil
 		},
@@ -1699,9 +1708,11 @@ func http3SNICertForRoute(sniCertMap map[string]http3SNICertificate, sni string,
 		return cert, true
 	}
 	if idx := strings.Index(sni, "."); idx > 0 {
-		return http3SNICertEntryForRoute(sniCertMap, "*."+sni[idx+1:], routeBind)
+		if cert, ok := http3SNICertEntryForRoute(sniCertMap, "*."+sni[idx+1:], routeBind); ok {
+			return cert, true
+		}
 	}
-	return nil, false
+	return http3SNICertEntryForRoute(sniCertMap, "*", routeBind)
 }
 
 func http3SNICertEntryForRoute(sniCertMap map[string]http3SNICertificate, key string, routeBind string) (*tls.Certificate, bool) {
@@ -1840,6 +1851,19 @@ func http3ListenerFingerprint(udpBind string, runtimes []snapshotpkg.SiteRuntime
 			} else {
 				fmt.Fprintf(h, " sni=%s:material=%s", sniKey, tlsCertificateFingerprintMaterial(cert))
 			}
+		}
+		relevantStateKeys := make([]string, 0)
+		for stateKey := range sn.SiteTLSCertStateBySNI {
+			for _, prefix := range allowedPrefixes {
+				if strings.HasPrefix(stateKey, prefix) {
+					relevantStateKeys = append(relevantStateKeys, stateKey)
+					break
+				}
+			}
+		}
+		sort.Strings(relevantStateKeys)
+		for _, stateKey := range relevantStateKeys {
+			fmt.Fprintf(h, " sni=%s:state=%s", stateKey, sn.SiteTLSCertStateBySNI[stateKey])
 		}
 	}
 

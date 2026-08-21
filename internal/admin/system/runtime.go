@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/proxy"
@@ -19,37 +20,39 @@ import (
 )
 
 type RuntimeConfigResponse struct {
-	DBDriver                       string                `json:"db_driver"`
-	DBDSN                          string                `json:"db_dsn"`
-	LogDBDSN                       string                `json:"log_db_dsn"`
-	DataDir                        string                `json:"data_dir"`
-	RedisAddr                      string                `json:"redis_addr"`
-	RedisEnabled                   bool                  `json:"redis_enabled"`
-	RedisDB                        int                   `json:"redis_db"`
-	AdminBind                      string                `json:"admin_bind"`
-	AdminStaticDir                 string                `json:"admin_static_dir"`
-	GeoIPDBPath                    string                `json:"geoip_db_path"`
-	CVEEnabled                     bool                  `json:"cve_enabled"`
-	CVEFeedEnabled                 bool                  `json:"cve_feed_enabled"`
-	CVEFeedInterval                string                `json:"cve_feed_interval"`
-	DropEnabled                    bool                  `json:"drop_enabled"`
-	HSTSEnabled                    bool                  `json:"hsts_enabled"`
-	XSSProtectionEnabled           bool                  `json:"xss_protection_enabled"`
-	ExpectCTEnabled                bool                  `json:"expect_ct_enabled"`
-	ExpectCTValue                  string                `json:"expect_ct_value"`
-	HPKPEnabled                    bool                  `json:"hpkp_enabled"`
-	HPKPValue                      string                `json:"hpkp_value"`
-	HPKPReportOnlyEnabled          bool                  `json:"hpkp_report_only_enabled"`
-	HPKPReportOnlyValue            string                `json:"hpkp_report_only_value"`
-	BrotliEnabled                  bool                  `json:"brotli_enabled"`
-	ResponseCompressionEnabled     bool                  `json:"response_compression_enabled"`
-	ResponseCompressionGzipEnabled bool                  `json:"response_compression_gzip_enabled"`
-	ResponseCompressionMinBytes    int                   `json:"response_compression_min_bytes"`
-	Source                         string                `json:"source"`
-	Editable                       bool                  `json:"editable"`
-	RestartRequired                bool                  `json:"restart_required"`
-	UpstreamTransportPools         RuntimeTransportPools `json:"upstream_transport_pools"`
-	TLSCapabilities                []TLSCapabilityStatus `json:"tls_capabilities"`
+	Revision                       uint64                              `json:"revision"`
+	ConfigDiagnostics              []snapshot.SnapshotConfigDiagnostic `json:"config_diagnostics"`
+	DBDriver                       string                              `json:"db_driver"`
+	DBDSN                          string                              `json:"db_dsn"`
+	LogDBDSN                       string                              `json:"log_db_dsn"`
+	DataDir                        string                              `json:"data_dir"`
+	RedisAddr                      string                              `json:"redis_addr"`
+	RedisEnabled                   bool                                `json:"redis_enabled"`
+	RedisDB                        int                                 `json:"redis_db"`
+	AdminBind                      string                              `json:"admin_bind"`
+	AdminStaticDir                 string                              `json:"admin_static_dir"`
+	GeoIPDBPath                    string                              `json:"geoip_db_path"`
+	CVEEnabled                     bool                                `json:"cve_enabled"`
+	CVEFeedEnabled                 bool                                `json:"cve_feed_enabled"`
+	CVEFeedInterval                string                              `json:"cve_feed_interval"`
+	DropEnabled                    bool                                `json:"drop_enabled"`
+	HSTSEnabled                    bool                                `json:"hsts_enabled"`
+	XSSProtectionEnabled           bool                                `json:"xss_protection_enabled"`
+	ExpectCTEnabled                bool                                `json:"expect_ct_enabled"`
+	ExpectCTValue                  string                              `json:"expect_ct_value"`
+	HPKPEnabled                    bool                                `json:"hpkp_enabled"`
+	HPKPValue                      string                              `json:"hpkp_value"`
+	HPKPReportOnlyEnabled          bool                                `json:"hpkp_report_only_enabled"`
+	HPKPReportOnlyValue            string                              `json:"hpkp_report_only_value"`
+	BrotliEnabled                  bool                                `json:"brotli_enabled"`
+	ResponseCompressionEnabled     bool                                `json:"response_compression_enabled"`
+	ResponseCompressionGzipEnabled bool                                `json:"response_compression_gzip_enabled"`
+	ResponseCompressionMinBytes    int                                 `json:"response_compression_min_bytes"`
+	Source                         string                              `json:"source"`
+	Editable                       bool                                `json:"editable"`
+	RestartRequired                bool                                `json:"restart_required"`
+	UpstreamTransportPools         RuntimeTransportPools               `json:"upstream_transport_pools"`
+	TLSCapabilities                []TLSCapabilityStatus               `json:"tls_capabilities"`
 }
 
 type RuntimeTransportPools struct {
@@ -102,10 +105,14 @@ func GetRuntimeConfig(load RuntimeStateProvider, holder *snapshot.Holder, settin
 		networkDefaults := snapshot.DefaultNetworkDefaults()
 		tlsDefaults := snapshot.DefaultTLSDefaults()
 		http2Config := snapshot.DefaultHTTP2Config()
+		revision := uint64(0)
+		configDiagnostics := make([]snapshot.SnapshotConfigDiagnostic, 0)
 		var runtimeSnapshot *snapshot.Snapshot
 		if holder != nil {
 			if sn := holder.Load(); sn != nil {
 				runtimeSnapshot = sn
+				revision = sn.Revision
+				configDiagnostics = append(configDiagnostics, sn.ConfigDiagnostics...)
 				networkDefaults = sn.NetworkDefaults
 				tlsDefaults = sn.TLSDefaults
 				http2Config = snapshot.NormalizeHTTP2Config(sn.HTTP2Config)
@@ -138,6 +145,8 @@ func GetRuntimeConfig(load RuntimeStateProvider, holder *snapshot.Holder, settin
 		tlsCapabilities = enrichTLSCapabilitiesWithHTTP3RouteConflicts(tlsCapabilities, runtimeSnapshot)
 		upstreamTransportPools := runtimeTransportPools(proxy.UpstreamTransportPoolStatsSnapshot())
 		c.JSON(200, RuntimeConfigResponse{
+			Revision:                       revision,
+			ConfigDiagnostics:              configDiagnostics,
 			DBDriver:                       cfg.DBDriver,
 			DBDSN:                          maskDSN(cfg.DBDSN),
 			LogDBDSN:                       maskDSN(cfg.LogDBDSN),
@@ -734,28 +743,137 @@ func maskDSN(dsn string) string {
 	if trimmed == "" {
 		return ""
 	}
-	u, err := url.Parse(trimmed)
-	if err == nil && u.User != nil {
-		if username := u.User.Username(); username != "" {
-			u.User = url.UserPassword(username, "******")
-		} else {
-			u.User = url.UserPassword("******", "******")
+	if u, err := url.Parse(trimmed); err == nil {
+		changed := false
+		if u.User != nil {
+			if username := u.User.Username(); username != "" {
+				u.User = url.UserPassword(username, "******")
+			} else {
+				u.User = url.UserPassword("******", "******")
+			}
+			changed = true
 		}
-		return u.String()
+		query := u.Query()
+		for key, values := range query {
+			if !isDSNSecretKey(key) {
+				continue
+			}
+			for index := range values {
+				values[index] = "******"
+			}
+			query[key] = values
+			changed = true
+		}
+		if changed {
+			u.RawQuery = query.Encode()
+			return u.String()
+		}
 	}
-	if strings.Contains(trimmed, "password=") || strings.Contains(trimmed, "passwd=") || strings.Contains(trimmed, "pwd=") {
-		parts := strings.Fields(trimmed)
-		for i, part := range parts {
-			lower := strings.ToLower(part)
-			for _, key := range []string{"password=", "passwd=", "pwd="} {
-				if strings.HasPrefix(lower, key) {
-					parts[i] = part[:len(key)] + "******"
+	if cfg, err := mysqldriver.ParseDSN(trimmed); err == nil && cfg.Passwd != "" {
+		cfg.Passwd = "******"
+		return cfg.FormatDSN()
+	}
+	return maskDSNKeywordValues(trimmed)
+}
+
+func isDSNSecretKey(key string) bool {
+	switch {
+	case strings.EqualFold(key, "password"),
+		strings.EqualFold(key, "passwd"),
+		strings.EqualFold(key, "pwd"),
+		strings.EqualFold(key, "sslpassword"):
+		return true
+	default:
+		return false
+	}
+}
+
+func maskDSNKeywordValues(dsn string) string {
+	var masked strings.Builder
+	last := 0
+	for index := 0; index < len(dsn); {
+		if isDSNWhitespace(dsn[index]) {
+			index++
+			continue
+		}
+
+		keyStart := index
+		for index < len(dsn) && !isDSNWhitespace(dsn[index]) && dsn[index] != '=' {
+			index++
+		}
+		keyEnd := index
+		for index < len(dsn) && isDSNWhitespace(dsn[index]) {
+			index++
+		}
+		if keyStart == keyEnd || index == len(dsn) || dsn[index] != '=' {
+			continue
+		}
+
+		index++
+		for index < len(dsn) && isDSNWhitespace(dsn[index]) {
+			index++
+		}
+		valueStart := index
+		valueEnd, complete := scanDSNKeywordValueEnd(dsn, valueStart)
+		if !complete {
+			return "[redacted]"
+		}
+		if isDSNSecretKey(dsn[keyStart:keyEnd]) {
+			masked.WriteString(dsn[last:valueStart])
+			masked.WriteString("******")
+			last = valueEnd
+		}
+		index = valueEnd
+	}
+	if last == 0 {
+		return dsn
+	}
+	masked.WriteString(dsn[last:])
+	return masked.String()
+}
+
+func scanDSNKeywordValueEnd(dsn string, start int) (int, bool) {
+	if start == len(dsn) {
+		return start, true
+	}
+	quote := dsn[start]
+	if quote != '\'' && quote != '"' {
+		for index := start; index < len(dsn); index++ {
+			if dsn[index] == '\\' {
+				if index+1 == len(dsn) {
+					return len(dsn), false
 				}
+				index++
+				continue
+			}
+			if isDSNWhitespace(dsn[index]) {
+				return index, true
 			}
 		}
-		return strings.Join(parts, " ")
+		return len(dsn), true
 	}
-	return trimmed
+
+	for index := start + 1; index < len(dsn); index++ {
+		if dsn[index] == '\\' {
+			if index+1 == len(dsn) {
+				return len(dsn), false
+			}
+			index++
+			continue
+		}
+		if dsn[index] != quote {
+			continue
+		}
+		if index+1 < len(dsn) && !isDSNWhitespace(dsn[index+1]) {
+			return len(dsn), false
+		}
+		return index + 1, true
+	}
+	return len(dsn), false
+}
+
+func isDSNWhitespace(ch byte) bool {
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
 }
 
 func loadRuntimeDropEnabled(settingsRepo *repository.SystemSettingsRepo, fallback bool) bool {

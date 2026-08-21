@@ -173,3 +173,86 @@ func TestUpdateSingleOWASPRuleRejectsEnabledRedirectWithoutTarget(t *testing.T) 
 		"redirect_to": "",
 	})
 }
+
+func TestShouldSkipRuleBoundary(t *testing.T) {
+	truePtr := true
+	falsePtr := false
+	overrides := map[string]owasp.OWASPRuleOverride{
+		"owasp:upload:001": {Enabled: &falsePtr, Whitelist: []string{"/admin"}},
+		"owasp:upload:003": {Whitelist: []string{"/safe"}},
+		"owasp:sqli:003":   {Enabled: &truePtr},
+	}
+
+	// disabled rule should skip
+	if !owasp.ShouldSkipRule("owasp:upload:001", "/admin", overrides) {
+		t.Error("disabled rule should skip")
+	}
+
+	// whitelisted path should skip
+	if !owasp.ShouldSkipRule("owasp:upload:003", "/safe", overrides) {
+		t.Error("whitelisted path should skip")
+	}
+
+	// non-whitelisted non-disabled should not skip
+	if owasp.ShouldSkipRule("owasp:upload:003", "/admin", overrides) {
+		t.Error("non-whitelisted should not skip")
+	}
+
+	// enabled rule with no whitelist should not skip
+	if owasp.ShouldSkipRule("owasp:sqli:003", "/admin", overrides) {
+		t.Error("enabled rule should not skip")
+	}
+
+	// test wildcard *
+	if !owasp.ShouldSkipRule("owasp:upload:003", "/anything", map[string]owasp.OWASPRuleOverride{"owasp:upload:003": {Whitelist: []string{"*"}}}) {
+		t.Error("wildcard whitelist should skip")
+	}
+
+	// test exact path match
+	exactOverrides := map[string]owasp.OWASPRuleOverride{"owasp:upload:003": {Whitelist: []string{"/exact"}}}
+	if !owasp.ShouldSkipRule("owasp:upload:003", "/exact", exactOverrides) {
+		t.Error("exact path whitelist should skip")
+	}
+	if owasp.ShouldSkipRule("owasp:upload:003", "/exact/sub", exactOverrides) {
+		t.Error("exact path whitelist should not skip subpath")
+	}
+
+	// test prefix match (use /prefix* to indicate wildcard prefix)
+	prefixOverrides := map[string]owasp.OWASPRuleOverride{"owasp:upload:003": {Whitelist: []string{"/prefix*"}}}
+	if !owasp.ShouldSkipRule("owasp:upload:003", "/prefix/sub", prefixOverrides) {
+		t.Error("prefix whitelist should skip subpath")
+	}
+	if !owasp.ShouldSkipRule("owasp:upload:003", "/prefix", prefixOverrides) {
+		t.Error("prefix whitelist should skip exact")
+	}
+
+	// 灵敏度覆盖边界：阈值随灵敏度升高而降低（low=7, mid=4, high=3, very_high=2, strict=1）。
+	// 命中分数需 >= 阈值才放行到后续判定，因此 score=4 能过 high/mid，过不了 low。
+	hit := owasp.OWASPHit{Score: 4, Category: owasp.CatSQLi}
+	catSens := map[string]string{}
+	if !owasp.HitPassesOverrideSensitivity(hit, owasp.OWASPRuleOverride{Sensitivity: "high"}, catSens) {
+		t.Error("score 4 should pass high threshold 3")
+	}
+	if !owasp.HitPassesOverrideSensitivity(hit, owasp.OWASPRuleOverride{Sensitivity: "mid"}, catSens) {
+		t.Error("score 4 should pass mid threshold 4")
+	}
+	if owasp.HitPassesOverrideSensitivity(hit, owasp.OWASPRuleOverride{Sensitivity: "low"}, catSens) {
+		t.Error("score 4 should not pass low threshold 7")
+	}
+	// off 直接禁用该类别，任何分数都不通过。
+	if owasp.HitPassesOverrideSensitivity(hit, owasp.OWASPRuleOverride{Sensitivity: "off"}, catSens) {
+		t.Error("sensitivity off should reject every score")
+	}
+	// 空灵敏度覆盖不参与判定，直接放行。
+	if !owasp.HitPassesOverrideSensitivity(hit, owasp.OWASPRuleOverride{}, catSens) {
+		t.Error("empty sensitivity override should pass through")
+	}
+	// catSens 为 nil 时整个灵敏度覆盖短路放行。
+	if !owasp.HitPassesOverrideSensitivity(hit, owasp.OWASPRuleOverride{Sensitivity: "strict"}, nil) {
+		t.Error("nil category sensitivity map should pass through")
+	}
+	// 类别级灵敏度优先于覆盖里的默认灵敏度：sqli 显式 off 时应拒绝。
+	if owasp.HitPassesOverrideSensitivity(hit, owasp.OWASPRuleOverride{Sensitivity: "strict"}, map[string]string{"sqli": "off"}) {
+		t.Error("category sensitivity off should override rule sensitivity")
+	}
+}

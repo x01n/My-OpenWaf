@@ -68,6 +68,72 @@ func TestCompoundJSONPattern(t *testing.T) {
 	}
 }
 
+func TestCompileInvalidCompoundNeverMatches(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{
+			name:    "unknown operator with leaf",
+			pattern: `{"op":"unknown","kind":"block_path","arg":"/admin"}`,
+		},
+		{
+			name:    "unknown operator with branches",
+			pattern: `{"op":"unknown","if":{"kind":"block_path","arg":"/admin"},"then":{"kind":"block_method","arg":"POST"}}`,
+		},
+		{
+			name:    "not with invalid child",
+			pattern: `{"op":"not","children":[{"op":"unknown","kind":"block_path","arg":"/admin"}]}`,
+		},
+		{
+			name:    "if with invalid condition",
+			pattern: `{"op":"if","if":{"op":"unknown","kind":"block_path","arg":"/admin"},"then":{"kind":"block_path","arg":"/then"},"else":{"kind":"block_path","arg":"/else"}}`,
+		},
+		{
+			name:    "empty and",
+			pattern: `{"op":"and","children":[]}`,
+		},
+		{
+			name:    "not with multiple children",
+			pattern: `{"op":"not","children":[{"kind":"block_path","arg":"/other"},{"kind":"block_path","arg":"/admin"}]}`,
+		},
+		{
+			name:    "cc rate with multiple children",
+			pattern: `{"op":"cc_rate","window":60,"threshold":1,"children":[{"kind":"block_path","arg":"/admin"},{"kind":"block_path","arg":"/other"}]}`,
+		},
+		{
+			name:    "cc rate zero window",
+			pattern: `{"op":"cc_rate","window":0,"threshold":1,"children":[{"kind":"block_path","arg":"/admin"}]}`,
+		},
+		{
+			name:    "cc rate zero threshold",
+			pattern: `{"op":"cc_rate","window":60,"threshold":0,"children":[{"kind":"block_path","arg":"/admin"}]}`,
+		},
+		{
+			name:    "cc rate negative duration",
+			pattern: `{"op":"cc_rate","window":60,"threshold":1,"duration":-1,"children":[{"kind":"block_path","arg":"/admin"}]}`,
+		},
+	}
+	matchCtx := MatchCtx{
+		ClientIP: net.ParseIP("192.0.2.1"),
+		Method:   "POST",
+		Path:     "/admin",
+		Headers:  map[string]string{"Host": "example.test"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rules := Compile([]store.Rule{{Phase: "custom", Pattern: tt.pattern, Action: "intercept", Priority: 1, Enabled: true}})
+			if len(rules) != 1 {
+				t.Fatalf("compiled rules = %d, want 1", len(rules))
+			}
+			if rules[0].Match(matchCtx) {
+				t.Fatalf("invalid persisted pattern matched: %s", tt.pattern)
+			}
+		})
+	}
+}
+
 func TestCompoundOR(t *testing.T) {
 	pattern := `{"op":"or","children":[{"kind":"block_path_exact","arg":"/.env"},{"kind":"block_path_exact","arg":"/.git/config"}]}`
 	rules := Compile([]store.Rule{
@@ -157,6 +223,55 @@ func TestPathContainsMatchers(t *testing.T) {
 	notContains := Compile([]store.Rule{{Phase: "custom", Pattern: "path_not_contains:/health", Action: "intercept", Priority: 1, Enabled: true}})
 	if !notContains[0].Match(MatchCtx{Path: "/v1/api/users"}) || notContains[0].Match(MatchCtx{Path: "/health"}) {
 		t.Fatal("unexpected path_not_contains result")
+	}
+}
+
+func TestExactNotMatchers(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		match   MatchCtx
+		want    bool
+	}{
+		{"full url different suffix", `full_url_not_exact:/admin`, MatchCtx{Path: "/admin/users"}, true},
+		{"full url exact", `full_url_not_exact:/admin`, MatchCtx{Path: "/admin"}, false},
+		{"path different suffix", `path_not_exact:/admin`, MatchCtx{Path: "/admin/users"}, true},
+		{"path exact", `path_not_exact:/admin`, MatchCtx{Path: "/admin"}, false},
+		{"host similar hostname", `host_not_exact:trusted.example.com`, MatchCtx{Host: "trusted.example.com.evil"}, true},
+		{"host exact", `host_not_exact:trusted.example.com`, MatchCtx{Host: "trusted.example.com"}, false},
+		{"header similar value", `block_header_not_exact:X-Role:admin`, MatchCtx{Headers: map[string]string{"X-Role": "administrator"}}, true},
+		{"header exact", `block_header_not_exact:X-Role:admin`, MatchCtx{Headers: map[string]string{"X-Role": "admin"}}, false},
+		{"query similar value", `query_param_not_exact:id:abc`, MatchCtx{Query: "id=xabcx"}, true},
+		{"query exact value", `query_param_not_exact:id:abc`, MatchCtx{Query: "id=abc"}, false},
+		{"body similar value", `body_not_exact:passwd`, MatchCtx{Body: []byte("xpasswdx")}, true},
+		{"body exact value", `body_not_exact:passwd`, MatchCtx{Body: []byte("passwd")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rules := Compile([]store.Rule{{Phase: "custom", Pattern: tc.pattern, Action: "intercept", Priority: 1, Enabled: true}})
+			if len(rules) != 1 {
+				t.Fatalf("Compile(%q) returned %d rules", tc.pattern, len(rules))
+			}
+			if got := rules[0].Match(tc.match); got != tc.want {
+				t.Fatalf("Match(%q) = %v, want %v", tc.pattern, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSrcIPUnsupportedPseudoMethodsAreRejected(t *testing.T) {
+	for _, method := range []string{"contains", "in_ip_group", "not_in_ip_group"} {
+		pattern := `{"kind":"block_ip","arg":"10.0.0.1"}`
+		if method == "contains" {
+			pattern = `{"target":"src_ip","method":"contains","content":"10.0.0.1"}`
+		}
+		_, _, errs := ValidatePattern(pattern)
+		if len(errs) == 0 && method == "contains" {
+			t.Fatal("legacy UI row must not be accepted as a backend leaf")
+		}
+	}
+	if _, _, errs := ValidatePattern(`block_ip:office`); len(errs) == 0 {
+		t.Fatal("IP group name must not be accepted by block_ip validation")
 	}
 }
 

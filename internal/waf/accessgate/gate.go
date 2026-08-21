@@ -154,6 +154,16 @@ func (g *Gate) HasProviders() bool {
 	return len(g.config.Providers) > 0
 }
 
+// HasProviderType 是否配置了指定类型的认证提供方。
+func (g *Gate) HasProviderType(providerType string) bool {
+	for _, provider := range g.config.Providers {
+		if provider.Type == providerType {
+			return true
+		}
+	}
+	return false
+}
+
 // CookieName 返回当前站点的访问控制 cookie 名称（按站点隔离）。
 func (g *Gate) CookieName() string {
 	return fmt.Sprintf("__owaf_access_%d", g.config.SiteID)

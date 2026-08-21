@@ -82,4 +82,6 @@ type Rule struct {
 	Enabled    bool       `gorm:"default:true" json:"enabled"`
 	StatusCode int        `gorm:"default:0" json:"status_code"`
 	RedirectTo string     `gorm:"size:2048" json:"redirect_to"`
+	// CaptchaType 为空时继承全局验证码类型，仅对 captcha_challenge 生效。
+	CaptchaType string `gorm:"size:16" json:"captcha_type,omitempty"`
 }

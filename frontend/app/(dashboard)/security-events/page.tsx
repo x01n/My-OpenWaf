@@ -35,11 +35,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { DataTable } from "@/components/data-table"
 import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog"
 import { DateRangePicker } from "@/components/date-range-picker"
 import { IpHoverPreview } from "@/components/ip-hover-preview"
 import { EmptyState } from "@/components/empty-state"
+import { RequestAggregateView } from "./components/request-aggregate-view"
 import Link from "next/link"
 import {
   IconFilter,
@@ -51,14 +53,23 @@ import {
   IconRoute,
   IconShieldOff,
 } from "@tabler/icons-react"
-import { useSecurityEvents } from "@/hooks/use-api"
+import {
+  invalidateIPListCaches,
+  useSecurityEvents,
+} from "@/hooks/use-api"
 import { ipListApi } from "@/lib/api"
 import type { SecurityEvent } from "@/lib/types"
 import { categoryLabel } from "@/lib/attack-category"
+import { localizeMatchDesc } from "@/lib/match-desc-i18n"
 import { format } from "date-fns"
 
 const FILTER_ALL = "__all__"
 type SelectionState = { scope: string; ids: Set<number> }
+
+/** 列表视图维度：事件级逐条展示，请求级按 request_id 聚合。 */
+const VIEW_EVENTS = "events"
+const VIEW_REQUESTS = "requests"
+type ViewMode = typeof VIEW_EVENTS | typeof VIEW_REQUESTS
 
 function parsePositivePage(raw: string | null): number {
   const value = Number(raw)
@@ -67,8 +78,13 @@ function parsePositivePage(raw: string | null): number {
     : 1
 }
 
+/** 视图参数只接受两个已知值，其余一律回落到事件级，避免 URL 被改写后渲染空白。 */
+function parseViewMode(raw: string | null): ViewMode {
+  return raw === VIEW_REQUESTS ? VIEW_REQUESTS : VIEW_EVENTS
+}
+
 export default function SecurityEventsPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   const actionLabelMap: Record<string, string> = {
     block: t("securityEvents.action.block"),
@@ -81,6 +97,9 @@ export default function SecurityEventsPage() {
     allow: t("securityEvents.action.allow"),
     drop: t("securityEvents.action.drop"),
     log_only: t("securityEvents.action.log_only"),
+    rate_limit: t("securityEvents.action.rate_limit"),
+    redirect: t("securityEvents.action.redirect"),
+    tag: t("securityEvents.action.tag"),
   }
 
   const router = useRouter()
@@ -95,6 +114,7 @@ export default function SecurityEventsPage() {
   })
   const [batchLoading, setBatchLoading] = useState(false)
   const page = parsePositivePage(searchParams.get("page"))
+  const view = parseViewMode(searchParams.get("view"))
   const filters = {
     action: searchParams.get("action") || "",
     category: searchParams.get("category") || "",
@@ -105,6 +125,10 @@ export default function SecurityEventsPage() {
     since: searchParams.get("since") || "",
     until: searchParams.get("until") || "",
   }
+  /** 两个视图共用同一组筛选值，请求级视图直接透传，不再造第二套筛选状态。 */
+  const activeFilterParams = Object.fromEntries(
+    Object.entries(filters).filter(([, v]) => v !== "")
+  ) as Record<string, string>
 
   const updateQuery = (updates: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -119,7 +143,7 @@ export default function SecurityEventsPage() {
   const { data, isLoading, error } = useSecurityEvents({
     page,
     page_size: pageSize,
-    ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "")),
+    ...activeFilterParams,
   })
 
   const items = useMemo(() => data?.items || [], [data?.items])
@@ -179,7 +203,7 @@ export default function SecurityEventsPage() {
       "ID",
       t("securityEvents.csv.time", { defaultValue: "时间" }),
       t("securityEvents.csv.clientIp", { defaultValue: "客户端IP" }),
-      "Host",
+      t("securityEvents.csv.host", { defaultValue: "域名" }),
       t("securityEvents.csv.path", { defaultValue: "路径" }),
       t("securityEvents.csv.method", { defaultValue: "方法" }),
       t("securityEvents.csv.action", { defaultValue: "动作" }),
@@ -195,11 +219,14 @@ export default function SecurityEventsPage() {
       ev.host,
       ev.path,
       ev.method,
-      ev.action,
+      ev.action ? actionLabelMap[ev.action] || ev.action : "",
       categoryLabel(ev.category),
       ev.rule_id_str || ev.rule_id,
       ev.status_code,
-      (ev.match_desc || "").replace(/"/g, '""'),
+      localizeMatchDesc(
+        ev.match_desc,
+        i18n.resolvedLanguage ?? i18n.language
+      ).replace(/"/g, '""'),
     ])
     const csv = [
       headers.join(","),
@@ -260,6 +287,9 @@ export default function SecurityEventsPage() {
         failed++
       }
     }
+    if (success > 0) {
+      await invalidateIPListCaches().catch(() => undefined)
+    }
     setBatchLoading(false)
     clearSelection()
     if (failed === 0) {
@@ -311,8 +341,18 @@ export default function SecurityEventsPage() {
           <span className="text-muted-foreground">-</span>
         ),
     },
-    { key: "host", title: t("securityEvents.host"), width: "180px" },
-    { key: "path", title: t("securityEvents.path"), width: "200px" },
+    {
+      key: "host",
+      title: t("securityEvents.host"),
+      width: "180px",
+      cellClassName: "whitespace-normal break-all align-top",
+    },
+    {
+      key: "path",
+      title: t("securityEvents.path"),
+      width: "200px",
+      cellClassName: "whitespace-normal break-all align-top",
+    },
     { key: "method", title: t("securityEvents.method"), width: "80px" },
     {
       key: "action",
@@ -328,7 +368,12 @@ export default function SecurityEventsPage() {
       width: "120px",
       render: (row: SecurityEvent) => categoryLabel(row.category),
     },
-    { key: "rule_id_str", title: "Rule", width: "120px" },
+    {
+      key: "rule_id_str",
+      title: t("securityEvents.rule", { defaultValue: "规则" }),
+      width: "120px",
+      cellClassName: "whitespace-normal break-all align-top",
+    },
     {
       key: "operations",
       title: t("common.action"),
@@ -368,9 +413,11 @@ export default function SecurityEventsPage() {
         title={t("securityEvents.title")}
         description={t("securityEvents.description")}
         actions={
-          <Badge variant="secondary" className="h-5 px-2 text-xs">
-            {t("securityEvents.total", { count: total })}
-          </Badge>
+          view === VIEW_EVENTS ? (
+            <Badge variant="secondary" className="h-5 px-2 text-xs">
+              {t("securityEvents.total", { count: total })}
+            </Badge>
+          ) : null
         }
       />
 
@@ -385,41 +432,70 @@ export default function SecurityEventsPage() {
 
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-base">
-              {t("securityEvents.eventList")}
-            </CardTitle>
-            <div className="flex items-center gap-2">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-1 text-xs"
-                    disabled={items.length === 0}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <CardTitle className="text-base">
+                {view === VIEW_EVENTS
+                  ? t("securityEvents.eventList")
+                  : t("securityEvents.requests.listTitle")}
+              </CardTitle>
+              <Tabs
+                value={view}
+                onValueChange={(v) =>
+                  updateQuery({ view: v === VIEW_EVENTS ? undefined : v })
+                }
+              >
+                <TabsList className="h-8">
+                  <TabsTrigger
+                    value={VIEW_EVENTS}
+                    className="cursor-pointer text-xs"
                   >
-                    <IconDownload className="h-3.5 w-3.5" />
-                    {t("securityEvents.export.title", { defaultValue: "导出" })}
-                    <IconChevronDown className="h-3 w-3" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={exportCSV}>
-                    {t("securityEvents.export.csv", {
-                      defaultValue: "导出 CSV",
-                    })}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={exportJSON}>
-                    {t("securityEvents.export.json", {
-                      defaultValue: "导出 JSON",
-                    })}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                    {t("securityEvents.view.events")}
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value={VIEW_REQUESTS}
+                    className="cursor-pointer text-xs"
+                  >
+                    {t("securityEvents.view.requests")}
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+            <div className="flex items-center gap-2">
+              {view === VIEW_EVENTS && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 cursor-pointer gap-1 text-xs"
+                      disabled={items.length === 0}
+                    >
+                      <IconDownload className="h-3.5 w-3.5" />
+                      {t("securityEvents.export.title", {
+                        defaultValue: "导出",
+                      })}
+                      <IconChevronDown className="h-3 w-3" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={exportCSV}>
+                      {t("securityEvents.export.csv", {
+                        defaultValue: "导出 CSV",
+                      })}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={exportJSON}>
+                      {t("securityEvents.export.json", {
+                        defaultValue: "导出 JSON",
+                      })}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
               <Button
                 variant="outline"
                 size="sm"
-                className="h-8 gap-1 text-xs"
+                className="h-8 cursor-pointer gap-1 text-xs"
                 onClick={() => setShowFilters(!showFilters)}
               >
                 <IconFilter className="h-3.5 w-3.5" />
@@ -510,7 +586,7 @@ export default function SecurityEventsPage() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-8 text-xs"
+                  className="h-8 cursor-pointer text-xs"
                   onClick={clearFilters}
                 >
                   {t("common.clearFilters")}
@@ -519,26 +595,37 @@ export default function SecurityEventsPage() {
             </div>
           )}
 
-          <DataTable
-            columns={columns}
-            data={items}
-            loading={isLoading}
-            rowKey={(row) => row.id}
-            emptyText={t("securityEvents.empty")}
-            emptyContent={
-              <EmptyState
-                icon={IconShieldOff}
-                title={t("securityEvents.empty")}
-                description={t(
-                  "securityEvents.emptyHint",
-                  "暂未检测到安全事件，当 WAF 拦截或观察到可疑请求时将在此展示"
-                )}
-                className="py-16"
-              />
-            }
-          />
+          {view === VIEW_REQUESTS && (
+            <RequestAggregateView
+              filterParams={activeFilterParams}
+              page={page}
+              pageSize={pageSize}
+              onPageChange={(next) => updateQuery({ page: String(next) })}
+            />
+          )}
 
-          {totalPages > 1 && (
+          {view === VIEW_EVENTS && (
+            <DataTable
+              columns={columns}
+              data={items}
+              loading={isLoading}
+              rowKey={(row) => row.id}
+              emptyText={t("securityEvents.empty")}
+              emptyContent={
+                <EmptyState
+                  icon={IconShieldOff}
+                  title={t("securityEvents.empty")}
+                  description={t(
+                    "securityEvents.emptyHint",
+                    "暂未检测到安全事件，当 WAF 拦截或观察到可疑请求时将在此展示"
+                  )}
+                  className="py-16"
+                />
+              }
+            />
+          )}
+
+          {view === VIEW_EVENTS && totalPages > 1 && (
             <Pagination>
               <PaginationContent>
                 <PaginationItem>
@@ -546,6 +633,7 @@ export default function SecurityEventsPage() {
                     onClick={() =>
                       updateQuery({ page: String(Math.max(1, page - 1)) })
                     }
+                    disabled={page <= 1}
                     className={
                       page <= 1 ? "pointer-events-none opacity-50" : ""
                     }
@@ -576,6 +664,7 @@ export default function SecurityEventsPage() {
                         page: String(Math.min(totalPages, page + 1)),
                       })
                     }
+                    disabled={page >= totalPages}
                     className={
                       page >= totalPages ? "pointer-events-none opacity-50" : ""
                     }
@@ -587,7 +676,7 @@ export default function SecurityEventsPage() {
         </CardContent>
       </Card>
 
-      {selectedCurrentPageCount > 0 && (
+      {view === VIEW_EVENTS && selectedCurrentPageCount > 0 && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
           <div className="flex items-center gap-3 rounded-xl border bg-background/95 px-5 py-3 shadow-lg backdrop-blur-sm">
             <span className="text-sm font-medium text-muted-foreground">

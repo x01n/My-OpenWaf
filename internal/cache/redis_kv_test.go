@@ -1,24 +1,19 @@
 package cache
 
 import (
-	"context"
+	context "context"
 	"net"
 	"os/exec"
 	"strconv"
 	"testing"
 	"time"
 
+	"My-OpenWaf/internal/waf/luaplugin"
+
 	goredis "github.com/redis/go-redis/v9"
 )
 
-type contextKVBackend interface {
-	GetContext(context.Context, string) ([]byte, bool)
-	SetContext(context.Context, string, []byte, time.Duration) error
-	DeleteContext(context.Context, string)
-	IncrContext(context.Context, string, time.Duration) (int64, error)
-}
-
-var _ contextKVBackend = (*RedisKV)(nil)
+var _ luaplugin.ContextKVBackend = (*RedisKV)(nil)
 
 func TestRedisKVUnavailableWithoutClient(t *testing.T) {
 	kv := NewRedisKV(nil)

@@ -3,7 +3,9 @@ package system
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"strconv"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -67,15 +69,18 @@ func CreateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 			c.JSON(400, map[string]string{"error": "kind must be blacklist or whitelist"})
 			return
 		}
-		if body.Value == "" {
-			c.JSON(400, map[string]string{"error": "value required"})
+		if !validIPListValue(body.Value) {
+			c.JSON(400, map[string]string{"error": "value must be a valid IP address or CIDR"})
 			return
 		}
-		if normalized, ok := normalizeIPListAction(body.Action); ok {
-			body.Action = normalized
-		} else {
+		normalized, ok := normalizeIPListAction(body.Action)
+		if !ok {
 			c.JSON(400, map[string]string{"error": "action must be intercept or drop"})
 			return
+		}
+		body.Action = normalized
+		if body.Kind == store.IPListWhite {
+			body.Action = "intercept"
 		}
 		if err := repo.Create(&body); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
@@ -123,8 +128,8 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 		if body.Value != nil {
 			existing.Value = *body.Value
 		}
-		if existing.Value == "" {
-			c.JSON(400, map[string]string{"error": "value required"})
+		if !validIPListValue(existing.Value) {
+			c.JSON(400, map[string]string{"error": "value must be a valid IP address or CIDR"})
 			return
 		}
 		if body.Note != nil {
@@ -140,6 +145,9 @@ func UpdateIPEntry(repo *repository.IPListRepo, reload func() error) app.Handler
 				c.JSON(400, map[string]string{"error": "action must be intercept or drop"})
 				return
 			}
+		}
+		if existing.Kind == store.IPListWhite {
+			existing.Action = "intercept"
 		}
 		if present, siteID, scopeErr := parseSiteScope(body.SiteID); scopeErr != nil {
 			c.JSON(400, map[string]string{"error": scopeErr.Error()})
@@ -168,6 +176,18 @@ func normalizeIPListAction(action string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func validIPListValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if net.ParseIP(value) != nil {
+		return true
+	}
+	_, _, err := net.ParseCIDR(value)
+	return err == nil
 }
 
 func DeleteIPEntry(repo *repository.IPListRepo, reload func() error) app.HandlerFunc {

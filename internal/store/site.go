@@ -57,7 +57,7 @@ type Site struct {
 	BotProtectionLevel    string `gorm:"size:16;default:medium" json:"bot_protection_level"`
 	AttackProtectionLevel string `gorm:"size:16;default:medium" json:"attack_protection_level"`
 
-	AntiReplayEnabled bool   `json:"anti_replay_enabled" gorm:"default:false"`
+	AntiReplayEnabled *bool  `json:"anti_replay_enabled" gorm:"default:null"`
 	AntiReplayTTL     int    `json:"anti_replay_ttl" gorm:"default:300"`
 	AntiReplayAction  string `json:"anti_replay_action" gorm:"default:'shield_challenge'"`
 
@@ -70,6 +70,12 @@ type Site struct {
 	RateLimitWindow  int    `gorm:"default:0" json:"rate_limit_window,omitempty"`
 	RateLimitMax     int    `gorm:"default:0" json:"rate_limit_max,omitempty"`
 	RateLimitAction  string `gorm:"size:32" json:"rate_limit_action,omitempty"`
+
+	// SkipPathByPhase 站点级按 phase 跳过检测的覆盖，语义为三态：
+	// nil = 继承全局；"{}" = 覆盖为"本站不跳过任何路径"；非空 JSON = 覆盖为该配置。
+	// 必须用 *string 而非 string：空串无法区分"继承"与"覆盖为空"，
+	// 后者会把继承态误存成空配置。
+	SkipPathByPhase *string `gorm:"column:skip_path_by_phase;type:text" json:"skip_path_by_phase,omitempty"`
 
 	XFFMode              string `gorm:"size:64;default:strip_all_and_set_remote" json:"xff_mode"`
 	TrustedCIDR          string `gorm:"type:text" json:"trusted_cidr"`

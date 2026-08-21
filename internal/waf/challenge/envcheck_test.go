@@ -34,6 +34,29 @@ func TestParseEnvFingerprintValidJSON(t *testing.T) {
 	}
 }
 
+func TestParseEnvFingerprintAcceptsIntegralFloatValues(t *testing.T) {
+	data := `{"color_depth":24.0,"hardware_concurrency":8.0,"inner_width":780.0,"pixel_ratio":1.0}`
+	got := ParseEnvFingerprint(data)
+	if got == nil {
+		t.Fatal("ParseEnvFingerprint integral float JSON returned nil")
+	}
+	if got.ColorDepth != 24 || got.HardwareConcur != 8 || got.InnerWidth != 780 || got.PixelRatio != 1 {
+		t.Fatalf("parsed fingerprint = %+v", got)
+	}
+}
+
+func TestParseEnvFingerprintRejectsNonIntegralIntegerFields(t *testing.T) {
+	for _, data := range []string{
+		`{"color_depth":24.5}`,
+		`{"color_depth":"24"}`,
+		`{"color_depth":true}`,
+	} {
+		if got := ParseEnvFingerprint(data); got != nil {
+			t.Fatalf("ParseEnvFingerprint(%s) = %+v, want nil", data, got)
+		}
+	}
+}
+
 func TestGenerateEnvSessionKeyLength(t *testing.T) {
 	key := GenerateEnvSessionKey()
 	if len(key) != 32 {

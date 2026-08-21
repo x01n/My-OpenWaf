@@ -178,6 +178,31 @@ func TestRecordViolationTriggersAutoBan(t *testing.T) {
 	}
 }
 
+func TestWhitelistedViolationDoesNotCreateBanAfterWhitelistRemoval(t *testing.T) {
+	r := NewIPReputation()
+	defer r.Close()
+
+	ip := net.ParseIP("6.6.6.6")
+	whitelistEntry, ok := ParseIPListEntry("6.6.6.6", "trusted")
+	if !ok {
+		t.Fatal("whitelist entry should parse")
+	}
+	r.SetLists(nil, []IPListEntry{whitelistEntry})
+	r.ConfigureAutoBan(true, 1, 60, 3600)
+
+	if r.RecordViolation(ip) {
+		t.Fatal("whitelisted violation must not trigger auto-ban")
+	}
+
+	r.SetLists(nil, nil)
+	if decision := r.Check(ip); !decision.Allowed || decision.Matched || decision.Category != "" {
+		t.Fatalf("removed whitelist must not reveal auto-ban: %+v", decision)
+	}
+	if bans := r.ActiveBans(); len(bans) != 0 {
+		t.Fatalf("removed whitelist must not expose active ban: %+v", bans)
+	}
+}
+
 func TestRecordViolationNilIPReturnsFalse(t *testing.T) {
 	r := NewIPReputation()
 	defer r.Close()
@@ -268,5 +293,22 @@ func TestConfigureAutoBanActionInterceptDefault(t *testing.T) {
 	act, _ := r.autoBanAction.Load().(string)
 	if act != "intercept" {
 		t.Fatalf("intercept action: want \"intercept\", got %q", act)
+	}
+}
+
+func TestConfigureAutoBanActionUnsupportedFallsBackToIntercept(t *testing.T) {
+	r := NewIPReputation()
+	defer r.Close()
+
+	r.ConfigureAutoBanAction("chain_challenge")
+	r.ConfigureAutoBan(true, 1, 60, 3600)
+	ip := net.ParseIP("7.7.7.7")
+	if !r.RecordViolation(ip) {
+		t.Fatal("threshold-one violation should trigger auto-ban")
+	}
+
+	d := r.Check(ip)
+	if d.Action != "intercept" {
+		t.Fatalf("unsupported auto-ban action should fall back to intercept, got %q", d.Action)
 	}
 }

@@ -392,6 +392,55 @@ func TestDataServerHTTP2EnabledUsesEffectiveTLSALPN(t *testing.T) {
 	})
 }
 
+func TestBuildListenerTLSRejectsInvalidConfiguredCertificate(t *testing.T) {
+	rt := snapshotpkg.SiteRuntime{
+		Bind:            ":443",
+		Site:            store.Site{ID: 1, Host: "invalid.example.test", Bind: ":443", TLSEnabled: true},
+		NetworkDefaults: snapshotpkg.DefaultNetworkDefaults(),
+		TLSDefaults:     snapshotpkg.DefaultTLSDefaults(),
+	}
+	sn := &snapshotpkg.Snapshot{
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(":443", "invalid.example.test"): &rt,
+		},
+		SiteTLSCertStateBySNI: map[string]snapshotpkg.TLSCertificateState{
+			snapshotpkg.SNICertKey(":443", "invalid.example.test"): snapshotpkg.TLSCertificateStateInvalid,
+		},
+	}
+	cfg := buildListenerTLS(rt, sn)
+	if cfg == nil || cfg.GetCertificate == nil {
+		t.Fatalf("expected TLS config with GetCertificate, got %#v", cfg)
+	}
+	if _, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "invalid.example.test"}); err == nil {
+		t.Fatal("invalid configured certificate must fail the TLS certificate callback")
+	}
+}
+
+func TestBuildListenerTLSUsesSelfSignedForUnconfiguredCertificate(t *testing.T) {
+	rt := snapshotpkg.SiteRuntime{
+		Bind:            ":443",
+		Site:            store.Site{ID: 1, Host: "unconfigured.example.test", Bind: ":443", TLSEnabled: true},
+		NetworkDefaults: snapshotpkg.DefaultNetworkDefaults(),
+		TLSDefaults:     snapshotpkg.DefaultTLSDefaults(),
+	}
+	sn := &snapshotpkg.Snapshot{
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(":443", "unconfigured.example.test"): &rt,
+		},
+		SiteTLSCertStateBySNI: map[string]snapshotpkg.TLSCertificateState{
+			snapshotpkg.SNICertKey(":443", "unconfigured.example.test"): snapshotpkg.TLSCertificateStateUnconfigured,
+		},
+	}
+	cfg := buildListenerTLS(rt, sn)
+	if cfg == nil || cfg.GetCertificate == nil {
+		t.Fatalf("expected TLS config with GetCertificate, got %#v", cfg)
+	}
+	cert, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "unconfigured.example.test"})
+	if err != nil || cert == nil || len(cert.Certificate) == 0 {
+		t.Fatalf("unconfigured certificate should use self-signed fallback: cert=%#v err=%v", cert, err)
+	}
+}
+
 func TestBuildListenerTLSReturnsOCSPStapledCertificate(t *testing.T) {
 	certPEM, keyPEM, err := acmepkg.GenerateSelfSignedPEM("ocsp.example.test", []string{"ocsp.example.test"}, nil, time.Hour)
 	if err != nil {
@@ -9896,24 +9945,21 @@ func TestNeedsTLSClientHelloFingerprint(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "handshake metadata only rule does not require client hello parse",
+			name: "access log fingerprinting requires client hello parse without detection rules",
 			rt: snapshotpkg.SiteRuntime{
 				EffectiveProtection: &baseProtection,
-				Rules: []snapshotpkg.CompiledRule{
-					{Kind: "tls_sni"},
-				},
 			},
-			want: false,
+			want: true,
 		},
 		{
-			name: "tls version rule does not require client hello parse",
+			name: "handshake metadata rule also retains client hello fingerprint",
 			rt: snapshotpkg.SiteRuntime{
 				EffectiveProtection: &baseProtection,
 				Rules: []snapshotpkg.CompiledRule{
 					{Kind: "tls_version"},
 				},
 			},
-			want: false,
+			want: true,
 		},
 		{
 			name: "ja4 rule requires client hello parse",

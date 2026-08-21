@@ -88,16 +88,11 @@ func executeCompiledPhase(ctx *pipeline.RequestCtx, rules []Compiled, allowShort
 			continue
 		}
 		r := hit(rules[i])
-		if allowShortCircuit && r.Type == action.Allow {
-			return r, true
-		}
 		return r, r.IsTerminal()
 	}
 
 	return action.Pass(), false
 }
-
-// ── ACL phase ──
 
 type aclPhase struct {
 	rules               []Compiled
@@ -120,8 +115,6 @@ func (p *aclPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return executeCompiledPhase(ctx, p.rules, true, p.needsDerivedHeaders)
 }
 
-// ── Signature phase ──
-
 type signaturePhase struct {
 	rules               []Compiled
 	needsDerivedHeaders bool
@@ -142,8 +135,6 @@ func (p *signaturePhase) Name() string { return "signature" }
 func (p *signaturePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return executeCompiledPhase(ctx, p.rules, false, p.needsDerivedHeaders)
 }
-
-// ── Custom phase ──
 
 type customPhase struct {
 	rules               []Compiled
@@ -277,8 +268,6 @@ func compoundConditionNeedsDerivedHeaders(cond compoundCondition) bool {
 	}
 }
 
-// ── Request Rate Limit phase ──
-
 type reqRateLimitPhase struct {
 	limiter ratelimit.RateLimiterBackend
 	act     action.Type
@@ -320,20 +309,69 @@ func (p *reqRateLimitPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 	return result, result.IsTerminal()
 }
 
-// ── IP Reputation phase ──
-
 type ipReputationPhase struct {
-	rep *iprep.IPReputation
+	rep           *iprep.IPReputation
+	siteWhitelist []iprep.IPListEntry
+	siteBlacklist []iprep.IPListEntry
 }
 
-func NewIPReputationPhase(rep *iprep.IPReputation) pipeline.Phase {
-	return &ipReputationPhase{rep: rep}
+func NewIPReputationPhase(rep *iprep.IPReputation, siteWhitelist, siteBlacklist []iprep.IPListEntry) pipeline.Phase {
+	return &ipReputationPhase{
+		rep:           rep,
+		siteWhitelist: siteWhitelist,
+		siteBlacklist: siteBlacklist,
+	}
 }
 
 func (p *ipReputationPhase) Name() string { return "ip_reputation" }
 
+func siteIPEntryMatches(entry iprep.IPListEntry, ip net.IP, now int64) bool {
+	if entry.ExpireAt > 0 && now > entry.ExpireAt {
+		return false
+	}
+	if entry.CIDR != nil && entry.CIDR.Contains(ip) {
+		return true
+	}
+	return entry.Single != nil && entry.Single.Equal(ip)
+}
+
 func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	if p.rep == nil || ctx.ClientIP == nil {
+	if ctx.ClientIP == nil {
+		return action.Pass(), false
+	}
+
+	now := time.Now().Unix()
+	for _, entry := range p.siteWhitelist {
+		if siteIPEntryMatches(entry, ctx.ClientIP, now) {
+			return action.Result{
+				Type:      action.Allow,
+				Phase:     "ip_reputation",
+				RuleIDStr: "ip:site_whitelist",
+				MatchDesc: "site whitelist: " + entry.Note,
+				Matched:   true,
+				Category:  "whitelist",
+			}, false
+		}
+	}
+	for _, entry := range p.siteBlacklist {
+		if !siteIPEntryMatches(entry, ctx.ClientIP, now) {
+			continue
+		}
+		act := action.Intercept
+		if entry.Action == "drop" || entry.Action == "block" {
+			act = action.Drop
+		}
+		return action.Result{
+			Type:      act,
+			Phase:     "ip_reputation",
+			RuleIDStr: "ip:site_blacklist",
+			MatchDesc: "site blacklist: " + entry.Note,
+			Matched:   true,
+			Category:  "site_blacklist",
+		}, true
+	}
+
+	if p.rep == nil {
 		return action.Pass(), false
 	}
 	d := p.rep.Check(ctx.ClientIP)
@@ -341,7 +379,6 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 		return action.Pass(), false
 	}
 	if d.Allowed {
-		// Whitelist: pass through but mark.
 		return action.Result{
 			Type:      action.Allow,
 			Phase:     "ip_reputation",
@@ -350,19 +387,20 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 			Category:  "whitelist",
 		}, true
 	}
-	// Blocked.
-	result := action.Result{
-		Type:      action.Intercept,
+
+	act := action.Intercept
+	if d.Action == "drop" || d.Action == "block" {
+		act = action.Drop
+	}
+	return action.Result{
+		Type:      act,
 		Phase:     "ip_reputation",
 		MatchDesc: d.Category + ": " + d.Reason,
 		Matched:   true,
 		Category:  d.Category,
 		RuleIDStr: "iprep:" + d.Category,
-	}
-	return result, true
+	}, true
 }
-
-// ── Bot Detection phase (two-phase: PreScreen → DeepScore) ──
 
 type botPhase struct {
 	rep       *iprep.IPReputation  // optional, for recording violations
@@ -385,11 +423,24 @@ func NewBotPhaseWithGeo(rep *iprep.IPReputation, geo *bot.MaxMindResolver, thres
 	return &botPhase{rep: rep, geo: geo, threshold: threshold}
 }
 
+/**
+ * challengePassIdentity returns the immutable pre-plugin identity when the
+ * dataplane captured it, while preserving direct RequestCtx callers.
+ */
+func challengePassIdentity(ctx *pipeline.RequestCtx) (string, string) {
+	if ctx.ChallengeIdentityCaptured {
+		return ctx.ChallengeIdentityCookie, ctx.ChallengeIdentityUserAgent
+	}
+	cookie, _ := lookupHeaderValue(ctx.Headers, "cookie")
+	return cookie, ctx.UserAgent
+}
+
 func (p *botPhase) Name() string { return "bot_detection" }
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// Skip challenge for requests that already passed a signed verification cookie.
-	if cookie, ok := lookupHeaderValue(ctx.Headers, "cookie"); ok && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: ctx.UserAgent, SiteID: ctx.SiteID, Bind: ctx.Bind}, time.Now()) {
+	cookie, userAgent := challengePassIdentity(ctx)
+	if cookie != "" && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: userAgent, SiteID: ctx.SiteID, Bind: ctx.Bind}, time.Now()) {
 		return action.Pass(), false
 	}
 
@@ -493,8 +544,6 @@ func (p *botPhase) verdictToResult(v bot.BotVerdict, ctx *pipeline.RequestCtx) (
 	return action.Pass(), false
 }
 
-// ── OWASP Default phase ──
-
 type owaspPhase struct {
 	cfg                 *store.ProtectionConfig
 	categorySensitivity map[string]string
@@ -597,8 +646,6 @@ func owaspHitResult(hit owasp.OWASPHit, cfg *store.ProtectionConfig, overrides m
 	}
 	return result
 }
-
-// ── CVE Detection phase ──
 
 type cvePhase struct {
 	cfg                 *store.ProtectionConfig
@@ -1035,8 +1082,6 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 	return vals
 }
 
-// ── Anti-Replay Nonce phase ──
-
 type antiReplayPhase struct {
 	mgr *antireplay.AntiReplayManager
 }
@@ -1055,6 +1100,11 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 	nonce, _ := lookupHeaderValue(ctx.Headers, "x-nonce")
 	if nonce == "" {
 		// No nonce provided — skip replay check.
+		return action.Pass(), false
+	}
+	if ctx.AntiReplayConsumedNonce != "" && nonce == ctx.AntiReplayConsumedNonce {
+		// The handler already consumed this exact Cookie nonce. A different X-Nonce
+		// still reaches ValidateAndRotate below and cannot bypass replay validation.
 		return action.Pass(), false
 	}
 	clientIP := ""
@@ -1079,8 +1129,6 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 	}
 	return action.Pass(), false
 }
-
-// ── Parallel OWASP + CVE Detection phase ──
 
 type parallelOWASPCVEPhase struct {
 	cfg      *store.ProtectionConfig
@@ -1146,8 +1194,6 @@ func (p *parallelOWASPCVEPhase) checkCVE(ctx *pipeline.RequestCtx) (action.Resul
 	return p.cve.Execute(ctx)
 }
 
-// ── helpers ──
-
 func filterPhase(rules []Compiled, phase string) []Compiled {
 	var out []Compiled
 	for _, r := range rules {
@@ -1183,19 +1229,18 @@ func hit(c Compiled) action.Result {
 		desc = compiledMatchDesc(c.Kind, c.Arg)
 	}
 	return action.Result{
-		Type:       act,
-		RuleID:     c.ID,
-		RuleIDStr:  ruleIDStr,
-		Phase:      c.Phase,
-		MatchDesc:  desc,
-		Matched:    true,
-		Category:   c.Kind,
-		StatusCode: c.StatusCode,
-		RedirectTo: c.RedirectTo,
+		Type:        act,
+		RuleID:      c.ID,
+		RuleIDStr:   ruleIDStr,
+		Phase:       c.Phase,
+		MatchDesc:   desc,
+		Matched:     true,
+		Category:    c.Kind,
+		StatusCode:  c.StatusCode,
+		RedirectTo:  c.RedirectTo,
+		CaptchaType: c.CaptchaType,
 	}
 }
-
-// ── Browser Sign phase ──
 
 type browserSignPhase struct {
 	cfg *store.ProtectionConfig
@@ -1217,15 +1262,14 @@ func (p *browserSignPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, boo
 		return action.Pass(), false
 	}
 	// 已通过挑战 cookie 的请求不重复强制签名，避免刷新后误伤。
-	if cookie, ok := lookupHeaderValue(ctx.Headers, "cookie"); ok &&
-		challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{
-			Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: ctx.UserAgent, SiteID: ctx.SiteID, Bind: ctx.Bind,
-		}, time.Now()) {
+	cookie, userAgent := challengePassIdentity(ctx)
+	if cookie != "" && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{
+		Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: userAgent, SiteID: ctx.SiteID, Bind: ctx.Bind,
+	}, time.Now()) {
 		return action.Pass(), false
 	}
 
-	envHardFail := p.cfg.ShieldEnableEnvCheck
-	ok, reason := challenge.VerifyBrowserSignHeaders(ctx.Headers, ctx.Method, ctx.Path, ctx.RawQuery, ctx.Host, ctx.SiteID, time.Now(), envHardFail)
+	ok, reason := challenge.VerifyBrowserSignHeaders(ctx.Headers, ctx.Method, ctx.Path, ctx.RawQuery, ctx.SiteID, time.Now())
 	if ok {
 		return action.Pass(), false
 	}

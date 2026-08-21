@@ -44,6 +44,12 @@ type certificateApplyResponse struct {
 	ListenerCount int64                    `json:"listener_count"`
 }
 
+func redactCertificatePrivateKey(cert *store.Certificate) {
+	if cert != nil {
+		cert.KeyPEM = ""
+	}
+}
+
 func ListCertificates(repo *repository.CertificateRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -124,7 +130,7 @@ func ParseCertificate(siteRepo *repository.SiteRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req certificateParseRequest
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cert, err := parseCertificatePEM(req.CertPEM)

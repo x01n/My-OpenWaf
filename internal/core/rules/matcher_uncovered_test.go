@@ -63,11 +63,43 @@ func TestHostFullMatcher(t *testing.T) {
 	runMatchCases(t, "host_full", "*.example.com", []matchCase{
 		{"通配匹配子域", MatchCtx{Host: "api.example.com"}, true, "*.example.com 应命中子域"},
 		{"通配匹配裸域", MatchCtx{Host: "example.com"}, true,
-			"实现刻意让 *.example.com 也命中主域，否则「拦整个域」会漏掉主域"},
+			"实现刻意让 *.example.com 也命中主域，否则「拦整个域」会漏掉主域本身"},
 		{"通配匹配多级子域", MatchCtx{Host: "a.b.example.com"}, true, "后缀匹配应支持多级"},
 		{"通配不匹配他域", MatchCtx{Host: "example.org"}, false, "不应跨域命中"},
 		{"通配不匹配相似后缀", MatchCtx{Host: "notexample.com"}, false,
 			"必须按 .example.com 后缀匹配，不能只看 example.com 子串"},
+	})
+}
+
+func TestHostMatcherIPv6AndHostnamePortBoundaries(t *testing.T) {
+	runMatchCases(t, "host", "2001:db8::1", []matchCase{
+		{"裸 IPv6 精确匹配", MatchCtx{Host: "2001:db8::1"}, true, "裸 IPv6 不能把末尾数字误判成端口"},
+		{"裸 IPv6 不误配相邻地址", MatchCtx{Host: "2001:db8::2"}, false, "不同的 IPv6 地址不能因末段被剥离而命中"},
+		{"带括号 IPv6 与端口匹配", MatchCtx{Host: "[2001:db8::1]:443"}, true, "Host 头中的括号只属于 IPv6 端口语法"},
+	})
+
+	runMatchCases(t, "host", "api.example.com", []matchCase{
+		{"hostname 带端口", MatchCtx{Host: "api.example.com:8443"}, true, "host 匹配器应忽略纯数字端口"},
+		{"hostname 端口不能改变主机", MatchCtx{Host: "api.example.com:443"}, true, "不同纯数字端口仍应归一化为同一主机"},
+	})
+}
+
+func TestHostFullMatcherIPv6AndWildcardPort(t *testing.T) {
+	runMatchCases(t, "host_full", "2001:db8::1", []matchCase{
+		{"裸 IPv6 精确匹配", MatchCtx{Host: "2001:db8::1"}, true, "host_full 应保留裸 IPv6 的完整地址"},
+		{"裸 IPv6 不误配相邻地址", MatchCtx{Host: "2001:db8::2"}, false, "不同的 IPv6 地址不能被截成相同前缀"},
+		{"裸 IPv6 规则匹配带端口请求", MatchCtx{Host: "[2001:db8::1]:443"}, true, "未指定端口时应沿用 hostname:port 的兼容语义"},
+	})
+
+	runMatchCases(t, "host_full", "[2001:db8::1]:8443", []matchCase{
+		{"IPv6 端口精确匹配", MatchCtx{Host: "[2001:db8::1]:8443"}, true, "显式 IPv6 端口必须精确匹配"},
+		{"IPv6 端口不匹配", MatchCtx{Host: "[2001:db8::1]:443"}, false, "不同端口不能命中 host_full"},
+	})
+
+	runMatchCases(t, "host_full", "*.example.com:8443", []matchCase{
+		{"通配符带端口匹配子域", MatchCtx{Host: "api.example.com:8443"}, true, "通配符只替换主机名，显式端口仍需相等"},
+		{"通配符带端口匹配裸域", MatchCtx{Host: "example.com:8443"}, true, "保持既有 wildcard apex 语义并校验端口"},
+		{"通配符端口不匹配", MatchCtx{Host: "api.example.com:443"}, false, "通配符不能忽略配置中的显式端口"},
 	})
 }
 

@@ -66,7 +66,7 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 		case "captcha":
 			var cfg pageconfig.CaptchaPageConfig
 			if err := json.Unmarshal(body, &cfg); err != nil {
-				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				c.JSON(400, map[string]string{"error": "请求体格式无效: " + err.Error()})
 				return
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
@@ -75,7 +75,7 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 		case "challenge":
 			var cfg pageconfig.ChallengePageConfig
 			if err := json.Unmarshal(body, &cfg); err != nil {
-				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				c.JSON(400, map[string]string{"error": "请求体格式无效: " + err.Error()})
 				return
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
@@ -84,7 +84,7 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 		case "block":
 			var cfg pageconfig.BlockPageConfig
 			if err := json.Unmarshal(body, &cfg); err != nil {
-				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				c.JSON(400, map[string]string{"error": "请求体格式无效: " + err.Error()})
 				return
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
@@ -174,7 +174,7 @@ func PreviewPageTemplateDraft(repo *repository.SystemSettingsRepo) app.HandlerFu
 		case "captcha":
 			var cfg pageconfig.CaptchaPageConfig
 			if err := json.Unmarshal(body, &cfg); err != nil {
-				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				c.JSON(400, map[string]string{"error": "请求体格式无效: " + err.Error()})
 				return
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
@@ -182,7 +182,7 @@ func PreviewPageTemplateDraft(repo *repository.SystemSettingsRepo) app.HandlerFu
 		case "challenge":
 			var cfg pageconfig.ChallengePageConfig
 			if err := json.Unmarshal(body, &cfg); err != nil {
-				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				c.JSON(400, map[string]string{"error": "请求体格式无效: " + err.Error()})
 				return
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)
@@ -190,7 +190,7 @@ func PreviewPageTemplateDraft(repo *repository.SystemSettingsRepo) app.HandlerFu
 		case "block":
 			var cfg pageconfig.BlockPageConfig
 			if err := json.Unmarshal(body, &cfg); err != nil {
-				c.JSON(400, map[string]string{"error": "invalid request body: " + err.Error()})
+				c.JSON(400, map[string]string{"error": "请求体格式无效: " + err.Error()})
 				return
 			}
 			cfg.CustomCSS = sanitizePageCSS(cfg.CustomCSS)

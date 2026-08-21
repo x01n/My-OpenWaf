@@ -95,31 +95,30 @@ func TestUpdateCaptchaConfigAcceptsAllValidCaptchaTypes(t *testing.T) {
 	}
 }
 
-// TestUpdateCaptchaConfigIgnoresNonPositiveNumbers 验证非正数的超时/难度/重试值被忽略而不是清零。
-func TestUpdateCaptchaConfigIgnoresNonPositiveNumbers(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
-	cfg := store.DefaultProtectionConfig()
-	cfg.CaptchaTimeout = 120
-	cfg.CaptchaPassTTL = 600
-	cfg.ShieldDifficulty = 4
-	cfg.ShieldTimeoutSecs = 15
-	cfg.ShieldMaxRetries = 3
-	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
-		t.Fatalf("seed protection: %v", err)
+// TestUpdateCaptchaConfigRejectsNonPositiveNumbers 验证显式提交的非正数不会静默保留旧值。
+func TestUpdateCaptchaConfigRejectsNonPositiveNumbers(t *testing.T) {
+	tests := []string{
+		`{"captcha_timeout":0}`,
+		`{"captcha_pass_ttl":-1}`,
+		`{"shield_timeout_secs":-5}`,
+		`{"shield_auto_start_delay":0}`,
+		`{"shield_max_retries":0}`,
 	}
+	for _, body := range tests {
+		repo := newSystemSettingsRepoForTest(t)
+		cfg := store.DefaultProtectionConfig()
+		if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+			t.Fatalf("seed protection: %v", err)
+		}
 
-	body := []byte(`{"captcha_timeout":0,"captcha_pass_ttl":-1,"shield_timeout_secs":-5,"shield_max_retries":0}`)
-	ctx := invokeProtectHandler(t, UpdateCaptchaConfig(repo, func() error { return nil }), "POST", "/api/v1/captcha/config", body)
-	if ctx.Response.StatusCode() != 200 {
-		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
-	}
-
-	loaded := shared.LoadProtectionConfig(repo)
-	if loaded.CaptchaTimeout != 120 || loaded.CaptchaPassTTL != 600 {
-		t.Fatalf("non-positive captcha numbers should be ignored: %#v", loaded)
-	}
-	if loaded.ShieldDifficulty != 4 || loaded.ShieldTimeoutSecs != 15 || loaded.ShieldMaxRetries != 3 {
-		t.Fatalf("non-positive shield numbers should be ignored: %#v", loaded)
+		ctx := invokeProtectHandler(t, UpdateCaptchaConfig(repo, func() error { return nil }), "POST", "/api/v1/captcha/config", []byte(body))
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("body=%s: expected 400, got %d: %s", body, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+		}
+		loaded := shared.LoadProtectionConfig(repo)
+		if loaded.CaptchaTimeout != cfg.CaptchaTimeout || loaded.CaptchaPassTTL != cfg.CaptchaPassTTL || loaded.ShieldTimeoutSecs != cfg.ShieldTimeoutSecs || loaded.ShieldAutoStartDelay != cfg.ShieldAutoStartDelay || loaded.ShieldMaxRetries != cfg.ShieldMaxRetries {
+			t.Fatalf("body=%s: rejected value changed persisted configuration: %#v", body, loaded)
+		}
 	}
 }
 
@@ -331,9 +330,8 @@ func TestTestCaptchaGeneratesPreview(t *testing.T) {
 // TestTestCaptchaFallsBackToMathWhenTypeUnset 验证未配置类型时回落到内置数学验证码。
 func TestTestCaptchaFallsBackToMathWhenTypeUnset(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
-	cfg := store.DefaultProtectionConfig()
-	cfg.CaptchaType = ""
-	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+	// 直接写入历史空值，验证读取失败时测试接口仍使用 math 运行时默认值。
+	if err := repo.Set("protection", `{"captcha_type":""}`); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 	mgr := challenge.NewCaptchaManager(nil, 30*time.Second)

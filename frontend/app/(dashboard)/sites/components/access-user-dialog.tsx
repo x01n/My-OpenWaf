@@ -16,6 +16,7 @@ import { Switch } from "@/components/ui/switch"
 import { toast } from "sonner"
 import { IconDeviceFloppy } from "@tabler/icons-react"
 import { useAccessUserCreate, useAccessUserUpdate } from "@/hooks/use-api"
+import { ApiError } from "@/lib/api"
 import type { AccessUser } from "@/lib/types"
 
 interface AccessUserDialogProps {
@@ -74,8 +75,12 @@ export function AccessUserDialog({
           toast.success(t("sites.detail.userCreated"))
         }
         onOpenChange(false)
-      } catch {
-        toast.error(t("common.operationFailed"))
+      } catch (error) {
+        toast.error(
+          error instanceof ApiError && error.message
+            ? error.message
+            : t("common.operationFailed")
+        )
       }
     },
     [

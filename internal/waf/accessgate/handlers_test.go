@@ -123,6 +123,23 @@ func TestHandleVerifyUserPassword(t *testing.T) {
 	}
 }
 
+func TestHandleVerifyUserPasswordRequiresPasswordProvider(t *testing.T) {
+	g := newTestGate(t)
+	g.config.Providers = []ProviderConfig{{ID: 2, Type: "oauth2", Name: "GitHub"}}
+	userHash := mustHashForTest(t, "u-secret")
+	lookup := func(siteID uint, username string) (string, bool) {
+		if siteID == 7 && username == "alice" {
+			return userHash, true
+		}
+		return "", false
+	}
+
+	decision := g.HandleVerify(AuthTypeUserPassword, "alice", "u-secret", 1, "/", lookup)
+	if decision.Authenticated || decision.Token != "" {
+		t.Fatalf("没有 enabled 的 password provider 时不应创建会话, got %+v", decision)
+	}
+}
+
 func TestHandleVerifyUnknownType(t *testing.T) {
 	g := newTestGate(t)
 	d := g.HandleVerify("bogus", "", "", 0, "/", nil)

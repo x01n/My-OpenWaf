@@ -58,6 +58,7 @@ import (
 	"My-OpenWaf/internal/waf/drop"
 	"My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/jsplugin"
 	"My-OpenWaf/internal/waf/luaplugin"
 	"My-OpenWaf/internal/waf/owasp"
 	"My-OpenWaf/internal/waf/ratelimit"
@@ -263,13 +264,24 @@ func Run() {
 
 	// Write queue: async write queue that batches all DB mutations through a single
 	// goroutine, merging high-frequency operations to reduce lock contention.
-	writeQueue := observability.NewWriteQueue(rt.LogDB, logger.New("writequeue"))
+	// 容量与批大小从 rt.Config.Queue 注入，与 observability 包内的硬上限对齐。
+	writeQueue := observability.NewWriteQueueWithOptions(rt.LogDB, logger.New("writequeue"), observability.WriteQueueOptions{
+		Capacity:      rt.Config.Queue.WriteQueueCapacity,
+		BatchSize:     rt.Config.Queue.WriteQueueBatchSize,
+		BatchInterval: rt.Config.Queue.WriteQueueInterval,
+	})
 	defer writeQueue.Close()
 	repos.SetWriteQueue(writeQueue)
 
 	// Unified writer: single goroutine drains all observability channels and
 	// flushes them in one DB transaction, eliminating SQLite lock contention.
-	unifiedWriter := observability.NewUnifiedWriter(rt.LogDB, logger.New("writer"))
+	// 容量、批大小、flush 周期全部从 rt.Config.Queue 注入。
+	unifiedWriter := observability.NewUnifiedWriterWithOptions(rt.LogDB, logger.New("writer"), observability.UnifiedWriterOptions{
+		EventBufferSize: rt.Config.Queue.EventBufferSize,
+		DropBufferSize:  rt.Config.Queue.DropBufferSize,
+		BatchSize:       rt.Config.Queue.BatchSize,
+		FlushInterval:   rt.Config.Queue.FlushInterval,
+	})
 	unifiedWriter.SetRedis(rt.Redis)
 	defer unifiedWriter.Close()
 
@@ -321,10 +333,52 @@ func Run() {
 	// 策略降级而非站点不可用。
 	luaEngine := luaplugin.NewEngine(rt.RedisKV, logger.New("lua_plugin"))
 	eng.SetLuaPlugins(luaEngine)
-	// 用初始 snapshot 装载一次，避免首个 reload 之前脚本不生效。
-	if sn := rt.Snapshot.Load(); sn != nil {
-		luaEngine.Reload(sn.LuaPlugins)
+
+	// QuickJS engine 是进程生命周期资源。脚本集合由 immutable snapshot 持有，
+	// reload 到零脚本时仍需保留执行器，避免已取得旧 snapshot 的在途请求失去
+	// 与该代脚本配套的 runtime。默认构建未启用 QuickJS 时，空脚本集合不会触发创建。
+	var jsEngine *jsplugin.Engine
+	var jsEngineMu sync.Mutex
+	ensureJSEngine := func(scripts []*jsplugin.Script) error {
+		jsEngineMu.Lock()
+		defer jsEngineMu.Unlock()
+		current, err := ensureJSPluginEngine(jsEngine, scripts)
+		if err != nil {
+			return err
+		}
+		jsEngine = current
+		return nil
 	}
+	loadJSEngine := func() *jsplugin.Engine {
+		jsEngineMu.Lock()
+		defer jsEngineMu.Unlock()
+		if jsEngine != nil {
+			return jsEngine
+		}
+		current, err := ensureJSPluginEngineForDryRun(nil)
+		if err != nil {
+			return nil
+		}
+		jsEngine = current
+		eng.SetJSPlugins(current)
+		return jsEngine
+	}
+	if sn := rt.Snapshot.Load(); sn != nil {
+		if err := ensureJSEngine(sn.JSPlugins); err != nil {
+			log.Error("create JavaScript plugin engine failed", slog.Any("err", err))
+			os.Exit(1)
+		}
+	}
+	if jsEngine != nil {
+		eng.SetJSPlugins(jsEngine)
+	}
+	defer func() {
+		if jsEngine != nil {
+			if err := jsEngine.Close(); err != nil {
+				log.Warn("close JavaScript plugin engine failed", slog.Any("err", err))
+			}
+		}
+	}()
 	cveFeedInterval, err := time.ParseDuration(rt.Config.CVE.FeedInterval)
 	if err != nil || cveFeedInterval <= 0 {
 		cveFeedInterval = 6 * time.Hour
@@ -466,7 +520,6 @@ func Run() {
 	antiReplayMgr := antireplay.NewAntiReplayManager("", rt.Redis, 5*time.Minute)
 	eng.SetAntiReplayManager(antiReplayMgr)
 
-	// ─── Auth subsystems ───
 	tokenMgr := auth.NewTokenManager(jwtSecret, rt.DB)
 	defer tokenMgr.Close()
 	bruteForce := auth.NewBruteForceDetector(prot.LoginMaxAttempts, time.Duration(prot.LoginLockoutMinutes)*time.Minute)
@@ -493,7 +546,7 @@ func Run() {
 			EnableEnvCheck:       p.ShieldEnableEnvCheck,
 			EnableDevToolsDetect: p.ShieldEnableDevTools,
 		})
-		chainMgr.Reconfigure(parseChainSteps(p.ChainSteps), p.ShieldDifficulty)
+		chainMgr.ReconfigureWithCaptchaType(parseChainSteps(p.ChainSteps), p.ShieldDifficulty, challenge.CaptchaType(p.CaptchaType))
 		bruteForce.Reconfigure(p.LoginMaxAttempts, time.Duration(p.LoginLockoutMinutes)*time.Minute)
 		runtimeCfg, _ := runtimeState()
 		dropPolicy := loadDropPolicy(repos.SystemSettings, runtimeCfg.Drop)
@@ -543,7 +596,7 @@ func Run() {
 		Metrics:               metrics,
 		Writer:                unifiedWriter,
 		ResponseCache:         responseCache,
-		AccessLogSamplingRate: 0,
+		AccessLogSamplingRate: 1,
 		Log:                   dpLog,
 		CaptchaManager:        captchaMgr,
 		ShieldManager:         shieldMgr,
@@ -653,6 +706,7 @@ func Run() {
 				lm.Remove(name)
 				continue
 			}
+			log.Info("hot-started HTTP/3 listener",
 				slog.String("name", name),
 				slog.String("bind", plan.Bind),
 				slog.String("targets", plan.RouteTable.targetSummary()),
@@ -703,18 +757,23 @@ func Run() {
 
 	applySnapshotReload := func() error {
 		previousSnapshot := rt.Snapshot.Load()
-		if err := rt.ReloadSnapshot(); err != nil {
+		if err := rt.ReloadSnapshotWithPrePublish(func(next *snapshotpkg.Snapshot) error {
+			if err := ensureJSEngine(next.JSPlugins); err != nil {
+				return fmt.Errorf("reconcile JS plugin engine: %w", err)
+			}
+			eng.SetJSPlugins(jsEngine)
+			return nil
+		}); err != nil {
 			return err
 		}
 		currentSnapshot := rt.Snapshot.Load()
+		if currentSnapshot != previousSnapshot {
+			responseCache.Clear()
+		}
 		if currentSnapshot != nil {
 			applyProtectionRuntimeConfig(currentSnapshot.Protection)
 			// 热替换 Lua 脚本集合：整体替换是原子的，正在执行的调用继续用旧集合跑完。
 			luaEngine.Reload(currentSnapshot.LuaPlugins)
-			for name, msg := range currentSnapshot.LuaPluginErrors {
-				log.Warn("lua plugin compile failed, skipped",
-					slog.String("script", name), slog.String("err", msg))
-			}
 		}
 		loadIPLists(ipRep, repos.IPList)
 		reconcileListeners()
@@ -880,7 +939,6 @@ func Run() {
 		}
 	}()
 
-	// ─── Admin control-plane server ───
 	adminSrv := server.Default(server.WithHostPorts(rt.Config.AdminBind))
 	adminSrv.NoHijackConnPool = true
 	adminSrv.GET("/healthz", hc.LivenessHandler())
@@ -890,7 +948,7 @@ func Run() {
 	acmeStore := adminsystem.NewACMEManagerStore(repos.SystemSettings, repos.Certificate, reload, logger.New("acme"))
 	dpOpts.ACMEChallengeResponse = acmeStore.GetChallengeResponse
 	go acmeStore.RenewLoop(acmeCtx, 12*time.Hour)
-	realtimeHub := adminsystem.NewRealtimeHub(&adminsystem.DashboardDeps{Metrics: metrics, ConfigDB: rt.DB, LogDB: rt.LogDB, Cache: redisKV}, upstreamPool, hc, repos.AccessLog, repos.SecurityEvent)
+	realtimeHub := adminsystem.NewRealtimeHub(&adminsystem.DashboardDeps{Metrics: metrics, ConfigDB: rt.DB, LogDB: rt.LogDB, Cache: redisKV, AccessRepo: repos.AccessLog}, upstreamPool, hc, repos.AccessLog, repos.SecurityEvent)
 	realtimeHub.Start(ctx)
 
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
@@ -921,10 +979,10 @@ func Run() {
 		Upstreams:     upstreamPool,
 		ThreatIntel:   threatIntelMgr,
 		LuaEngine:     luaEngine,
+		JSEngine:      loadJSEngine,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
-	// ─── Data-plane listener(s) ───
 	if sn != nil {
 		http3Plans := buildHTTP3ServerPlans(sn)
 		for _, siteRT := range listenerRuntimesByBind(sn) {
@@ -960,11 +1018,8 @@ func Run() {
 		slog.String("admin_bind", rt.Config.AdminBind),
 	)
 
-	if err := lm.Start(); err != nil {
-		log.Error("server startup failed", slog.Any("err", err))
-		lm.Shutdown(context.Background())
-		return
-	}
+	lm.Start()
+	lm.WaitForSignal()
 	stopBackground()
 }
 
@@ -1559,6 +1614,16 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 				return selfSignedForBind(bind), nil
 			}
 
+			// 已配置但不可用的站点证书不能被自签或其他站点证书掩盖。
+			if state, found := sn.TLSCertificateStateForSNI(bind, sni); found {
+				switch state {
+				case snapshotpkg.TLSCertificateStateInvalid:
+					return nil, fmt.Errorf("configured TLS certificate is unavailable")
+				case snapshotpkg.TLSCertificateStateUnconfigured:
+					return selfSignedForBind(bind), nil
+				}
+			}
+
 			// 情况 2：SNI 精确匹配已知证书
 			if cert, ok := sniCertMap[sni]; ok {
 				return cert, nil
@@ -1856,6 +1921,16 @@ func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 		if strings.HasPrefix(sniKey, prefix) && len(cert.Certificate) > 0 {
 			fmt.Fprintf(h, " sni=%s:material=%s", sniKey, tlsCertificateFingerprintMaterial(cert))
 		}
+	}
+	stateKeys := make([]string, 0)
+	for stateKey := range sn.SiteTLSCertStateBySNI {
+		if strings.HasPrefix(stateKey, prefix) {
+			stateKeys = append(stateKeys, stateKey)
+		}
+	}
+	sort.Strings(stateKeys)
+	for _, stateKey := range stateKeys {
+		fmt.Fprintf(h, " sni=%s:state=%s", stateKey, sn.SiteTLSCertStateBySNI[stateKey])
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16]

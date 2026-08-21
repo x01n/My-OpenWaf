@@ -16,7 +16,8 @@ import (
 
 type luaPhaseTestKV struct{}
 
-func (luaPhaseTestKV) Available() bool { return true }
+func (luaPhaseTestKV) Available() bool                           { return true }
+func (luaPhaseTestKV) AvailableContext(ctx context.Context) bool { return ctx.Err() == nil }
 
 func (luaPhaseTestKV) Get(string) ([]byte, bool) { return nil, false }
 
@@ -25,6 +26,18 @@ func (luaPhaseTestKV) Set(string, []byte, time.Duration) error { return nil }
 func (luaPhaseTestKV) Delete(string) {}
 
 func (luaPhaseTestKV) Incr(string, time.Duration) (int64, error) { return 1, nil }
+
+func (luaPhaseTestKV) GetContext(context.Context, string) ([]byte, bool) { return nil, false }
+
+func (luaPhaseTestKV) SetContext(context.Context, string, []byte, time.Duration) error {
+	return nil
+}
+
+func (luaPhaseTestKV) DeleteContext(context.Context, string) {}
+
+func (luaPhaseTestKV) IncrContext(context.Context, string, time.Duration) (int64, error) {
+	return 1, nil
+}
 
 func luaPhaseWith(t *testing.T, src string) pipeline.Phase {
 	t.Helper()

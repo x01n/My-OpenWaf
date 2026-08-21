@@ -134,6 +134,7 @@ type Result struct {
 	Category     string             `json:"category,omitempty"`
 	StatusCode   int                `json:"status_code,omitempty"`   // custom HTTP status code (0 = use default)
 	RedirectTo   string             `json:"redirect_to,omitempty"`   // URL for redirect action
+	CaptchaType  string             `json:"captcha_type,omitempty"`  // Rule-level CAPTCHA type; empty inherits global config.
 	SetHeaders   *map[string]string `json:"set_headers,omitempty"`   // Controlled response headers from Lua
 	ResponseBody *string            `json:"response_body,omitempty"` // Controlled response body from Lua
 	Tags         *[]string          `json:"tags,omitempty"`          // Labels for observability

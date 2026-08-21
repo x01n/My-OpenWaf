@@ -27,6 +27,7 @@ import {
   useAccessPathRuleCreate,
   useAccessPathRuleUpdate,
 } from "@/hooks/use-api"
+import { ApiError } from "@/lib/api"
 import type { AccessPathRule } from "@/lib/types"
 
 interface AccessPathRuleDialogProps {
@@ -85,8 +86,12 @@ export function AccessPathRuleDialog({
           toast.success(t("sites.detail.pathRuleCreated"))
         }
         onOpenChange(false)
-      } catch {
-        toast.error(t("common.operationFailed"))
+      } catch (error) {
+        toast.error(
+          error instanceof ApiError && error.message
+            ? error.message
+            : t("common.operationFailed")
+        )
       }
     },
     [

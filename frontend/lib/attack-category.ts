@@ -1,8 +1,7 @@
 /**
  * 命中防护模块（category）到中文标签的映射。
  *
- * 与后端 pipeline phase / 引擎产出的 category 值保持一致：
- * owasp、cve、bot、rate_limit、ip_rep、access、anti_replay、signature、custom。
+ * 与后端 pipeline phase / 引擎产出的 category 值保持一致。
  * 未知值原样返回，避免因新增分类导致 UI 空白。
  */
 const CATEGORY_LABELS_ZH: Record<string, string> = {
@@ -17,14 +16,61 @@ const CATEGORY_LABELS_ZH: Record<string, string> = {
   php: "PHP 漏洞",
   node: "Node.js 漏洞",
   bot: "Bot 检测",
+  bot_malicious: "恶意 Bot 检测",
+  bot_suspicious: "可疑 Bot 检测",
+  bot_detection: "Bot 检测",
   rate_limit: "频率限制",
+  error_rate_limit: "错误率限制",
   ip_rep: "IP 声誉 / 黑名单",
+  blacklist: "黑名单",
+  auto_ban: "自动封禁",
   access: "访问控制",
   anti_replay: "防重放",
+  replay: "重放检测",
+  tls: "TLS 检测",
+  tls_sni: "TLS SNI 检测",
+  browser_sign: "浏览器签名",
+  lua_plugin: "Lua 插件",
+  owasp_default: "OWASP 检测",
+  cve_detection: "CVE 检测",
+  whitelist: "白名单",
+  site_blacklist: "站点黑名单",
   signature: "特征签名",
   custom: "自定义规则",
 }
 
+const PHASE_LABELS_ZH: Record<string, string> = {
+  tls: "TLS",
+  anti_replay: "防重放",
+  rate_limit: "频率限制",
+  ip_reputation: "IP 声誉",
+  bot_detection: "Bot 检测",
+  owasp_default: "OWASP 检测",
+  cve_detection: "CVE 检测",
+  browser_sign: "浏览器签名",
+  error_rate_limit: "错误率限制",
+  lua_pre: "Lua 前置",
+  lua_post: "Lua 后置",
+  maintenance: "维护",
+  acl: "访问控制",
+  signature: "特征签名",
+  custom: "自定义规则",
+}
+
+/**
+ * 将后端返回的阶段代码转换为可读名称。
+ *
+ * @param phase 后端返回的 phase 值
+ * @returns 对应中文标签；未知值原样返回，空值返回"未知"
+ */
+export function phaseLabel(phase: string | undefined | null): string {
+  if (!phase) return "未知"
+  return PHASE_LABELS_ZH[phase] ?? phase
+}
+
+/**
+ * OWASP 类别代码到中文名称的映射。
+ */
 const OWASP_CATEGORY_LABELS_ZH: Record<string, string> = {
   sqli: "SQL 注入检测",
   xss: "XSS 攻击检测",

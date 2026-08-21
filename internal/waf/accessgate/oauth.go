@@ -42,6 +42,7 @@ type OAuthState struct {
 type OAuthStateStore interface {
 	Save(state *OAuthState) error
 	Get(stateParam string) (*OAuthState, error)
+	Consume(stateParam string) (*OAuthState, error)
 	Delete(stateParam string) error
 	CleanExpired() error
 }
@@ -77,6 +78,19 @@ func (s *MemoryOAuthStateStore) Get(stateParam string) (*OAuthState, error) {
 		s.mu.Lock()
 		delete(s.states, stateParam)
 		s.mu.Unlock()
+		return nil, nil
+	}
+	return st, nil
+}
+
+func (s *MemoryOAuthStateStore) Consume(stateParam string) (*OAuthState, error) {
+	s.mu.Lock()
+	st, ok := s.states[stateParam]
+	if ok {
+		delete(s.states, stateParam)
+	}
+	s.mu.Unlock()
+	if !ok || time.Now().After(st.ExpiresAt) {
 		return nil, nil
 	}
 	return st, nil

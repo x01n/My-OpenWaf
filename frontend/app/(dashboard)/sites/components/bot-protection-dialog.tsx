@@ -201,7 +201,7 @@ export function BotProtectionDialog({
           if (!v) handleCancel()
         }}
       >
-        <DialogContent className="max-w-lg p-0">
+        <DialogContent className="max-h-[85vh] max-w-xl overflow-y-auto p-0">
           <DialogHeader className="px-6 pt-6 pb-2">
             <DialogTitle className="flex items-center gap-2 text-base">
               <IconUserCheck className="h-5 w-5 text-primary" />

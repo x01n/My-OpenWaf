@@ -50,6 +50,7 @@ import {
 import { useAuth } from "@/hooks/use-auth"
 import type { FalsePositiveReport } from "@/lib/types"
 import { categoryLabel } from "@/lib/attack-category"
+import { localizeMatchDesc } from "@/lib/match-desc-i18n"
 
 type StatusValue = "" | "pending" | "confirmed" | "rejected"
 
@@ -80,9 +81,10 @@ function formatTime(value: string): string {
 }
 
 export default function FalsePositivesPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { user } = useAuth()
   const isAdmin = user?.role === "admin"
+  const canReview = user?.role === "admin" || user?.role === "operator"
 
   const [page, setPage] = useState(1)
   const pageSize = 20
@@ -241,26 +243,30 @@ export default function FalsePositivesPage() {
             />
             {t("falsePositives.expand", { defaultValue: "详情" })}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1 px-2 text-xs text-emerald-600 hover:text-emerald-700"
-            disabled={row.status === "confirmed" || updateStatus.loading}
-            onClick={() => handleUpdateStatus(row, "confirmed")}
-          >
-            <IconCheck className="h-3.5 w-3.5" />
-            {t("falsePositives.actions.confirm", { defaultValue: "确认" })}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1 px-2 text-xs text-zinc-600 hover:text-zinc-800"
-            disabled={row.status === "rejected" || updateStatus.loading}
-            onClick={() => handleUpdateStatus(row, "rejected")}
-          >
-            <IconX className="h-3.5 w-3.5" />
-            {t("falsePositives.actions.reject", { defaultValue: "拒绝" })}
-          </Button>
+          {canReview && (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs text-emerald-600 hover:text-emerald-700"
+                disabled={row.status === "confirmed" || updateStatus.loading}
+                onClick={() => handleUpdateStatus(row, "confirmed")}
+              >
+                <IconCheck className="h-3.5 w-3.5" />
+                {t("falsePositives.actions.confirm", { defaultValue: "确认" })}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs text-zinc-600 hover:text-zinc-800"
+                disabled={row.status === "rejected" || updateStatus.loading}
+                onClick={() => handleUpdateStatus(row, "rejected")}
+              >
+                <IconX className="h-3.5 w-3.5" />
+                {t("falsePositives.actions.reject", { defaultValue: "拒绝" })}
+              </Button>
+            </>
+          )}
           {isAdmin && (
             <Button
               variant="ghost"
@@ -359,7 +365,10 @@ export default function FalsePositivesPage() {
                     #{row.id}
                   </div>
                   <pre className="max-h-64 overflow-auto font-mono text-xs break-all whitespace-pre-wrap text-foreground/80">
-                    {row.match_desc || t("common.empty")}
+                    {localizeMatchDesc(
+                      row.match_desc,
+                      i18n.resolvedLanguage ?? i18n.language
+                    ) || t("common.empty")}
                   </pre>
                   {row.note && (
                     <div className="mt-3 border-t pt-3">
@@ -379,6 +388,7 @@ export default function FalsePositivesPage() {
                 <PaginationItem>
                   <PaginationPrevious
                     onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1}
                     className={
                       page <= 1 ? "pointer-events-none opacity-50" : ""
                     }
@@ -405,6 +415,7 @@ export default function FalsePositivesPage() {
                 <PaginationItem>
                   <PaginationNext
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages}
                     className={
                       page >= totalPages ? "pointer-events-none opacity-50" : ""
                     }

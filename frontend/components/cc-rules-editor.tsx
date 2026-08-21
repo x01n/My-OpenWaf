@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select"
 import { IconPencil, IconPlus, IconTrash } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
+import type { CaptchaType } from "@/lib/types"
 
 /**
  * CC 规则单条匹配条件。
@@ -33,6 +34,8 @@ export interface CCRule {
   enabled?: boolean
   name?: string
   action: string
+  /** 空值继承全局验证码类型，仅对 captcha/captcha_challenge 生效。 */
+  captcha_type?: CaptchaType | ""
   conditions: CCRuleCondition[]
   window: number
   threshold: number
@@ -100,6 +103,12 @@ export function isCCRule(value: unknown): value is CCRule {
     Number.isFinite(rule.duration) &&
     (rule.enabled === undefined || typeof rule.enabled === "boolean") &&
     (rule.name === undefined || typeof rule.name === "string") &&
+    (rule.captcha_type === undefined ||
+      rule.captcha_type === "" ||
+      rule.captcha_type === "math" ||
+      rule.captcha_type === "click" ||
+      rule.captcha_type === "slide" ||
+      rule.captcha_type === "rotate") &&
     (rule.duration_unit === undefined ||
       rule.duration_unit === "seconds" ||
       rule.duration_unit === "minutes")
@@ -123,6 +132,7 @@ export function emptyCCRule(): CCRule {
     enabled: true,
     name: "",
     action: "intercept",
+    captcha_type: "",
     conditions: [{ target: "url_path", operator: "prefix", value: "" }],
     window: 60,
     threshold: 100,
@@ -267,6 +277,13 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
                   {rule.action}
                 </Badge>
+                {(rule.action === "captcha" ||
+                  rule.action === "captcha_challenge") &&
+                  rule.captcha_type && (
+                    <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
+                      {rule.captcha_type}
+                    </Badge>
+                  )}
               </div>
               <p className="text-xs text-muted-foreground">
                 {rule.conditions
@@ -329,7 +346,14 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
               <Select
                 value={editingRule.action}
                 onValueChange={(v) =>
-                  setEditingRule({ ...editingRule, action: v })
+                  setEditingRule({
+                    ...editingRule,
+                    action: v,
+                    captcha_type:
+                      v === "captcha" || v === "captcha_challenge"
+                        ? editingRule.captcha_type
+                        : "",
+                  })
                 }
               >
                 <SelectTrigger>
@@ -344,9 +368,43 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 </SelectContent>
               </Select>
             </div>
-          </div>
-
-          <div className="space-y-2">
+            {(editingRule.action === "captcha" ||
+              editingRule.action === "captcha_challenge") && (
+              <div className="space-y-1.5">
+                <Label>{t("rules.captchaTypeLabel", "验证码类型")}</Label>
+                <Select
+                  value={editingRule.captcha_type || "inherit"}
+                  onValueChange={(value) =>
+                    setEditingRule({
+                      ...editingRule,
+                      captcha_type:
+                        value === "inherit" ? "" : (value as CaptchaType),
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">
+                      {t("rules.captchaTypeInherit", "继承全局")}
+                    </SelectItem>
+                    <SelectItem value="math">
+                      {t("rules.captchaType.math", "数学")}
+                    </SelectItem>
+                    <SelectItem value="click">
+                      {t("rules.captchaType.click", "点选")}
+                    </SelectItem>
+                    <SelectItem value="slide">
+                      {t("rules.captchaType.slide", "滑块")}
+                    </SelectItem>
+                    <SelectItem value="rotate">
+                      {t("rules.captchaType.rotate", "旋转")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <Label>{t("ccProtection.conditions")}</Label>
               <span className="text-[11px] text-muted-foreground">

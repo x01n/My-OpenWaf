@@ -381,21 +381,21 @@ func prometheusCacheStats(layers []CacheLayerStats) string {
 # TYPE owaf_cache_hits_total counter
 `
 	for _, l := range layers {
-		body += fmt.Sprintf("owaf_cache_hits_total{cache=%q} %d\n", l.Name, l.Hits)
+		body += fmt.Sprintf(`owaf_cache_hits_total{cache="%s"} %d`+"\n", escapePrometheusLabelValue(l.Name), l.Hits)
 	}
 	body += `
 # HELP owaf_cache_misses_total Cache misses by cache layer
 # TYPE owaf_cache_misses_total counter
 `
 	for _, l := range layers {
-		body += fmt.Sprintf("owaf_cache_misses_total{cache=%q} %d\n", l.Name, l.Misses)
+		body += fmt.Sprintf(`owaf_cache_misses_total{cache="%s"} %d`+"\n", escapePrometheusLabelValue(l.Name), l.Misses)
 	}
 	body += `
 # HELP owaf_cache_errors_total Cache backend failures by cache layer (excludes key-not-found)
 # TYPE owaf_cache_errors_total counter
 `
 	for _, l := range layers {
-		body += fmt.Sprintf("owaf_cache_errors_total{cache=%q} %d\n", l.Name, l.Errors)
+		body += fmt.Sprintf(`owaf_cache_errors_total{cache="%s"} %d`+"\n", escapePrometheusLabelValue(l.Name), l.Errors)
 	}
 	return body
 }

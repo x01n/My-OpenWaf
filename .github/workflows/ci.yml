@@ -38,6 +38,34 @@ jobs:
             exit 1
           fi
 
+      - name: Check release workflow contract
+        run: |
+          ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/release.yml")'
+          grep -Fq 'runs-on: $''{{ matrix.runner }}' .github/workflows/release.yml
+          test "$(grep -cE '^[[:space:]]+runner:' .github/workflows/release.yml)" -eq 6
+          ruby -ryaml -e '
+            release = YAML.load_file(".github/workflows/release.yml")
+            steps = release.fetch("jobs").values.flat_map { |job| job["steps"] || [] }
+            verify = steps.find { |step| step["name"] == "Verify native QuickJS backend" } or abort("missing native QuickJS verification step")
+            build = steps.find { |step| step["name"] == "Build binary" } or abort("missing release build step")
+            abort("native QuickJS verification must enable cgo") unless verify.dig("env", "CGO_ENABLED") == "1"
+            abort("native QuickJS verification must select the QuickJS tag") unless verify.fetch("run", "").include?("go list -tags=quickjs")
+            abort("release build must enable cgo") unless build.dig("env", "CGO_ENABLED") == "1"
+            abort("release build must select the QuickJS tag") unless build.fetch("run", "").include?("go build -tags=quickjs")
+          '
+          if grep -Fq "CGO_ENABLED: '0'" .github/workflows/release.yml; then
+            echo "::error::Release workflow disables cgo, so QuickJS is replaced by the stub"
+            exit 1
+          fi
+          if ! grep -Eq -- '-tags(=|[[:space:]])+quickjs([[:space:]]|$)' .github/workflows/release.yml; then
+            echo "::error::Release workflow does not enable the QuickJS build tag"
+            exit 1
+          fi
+          grep -Fq '//go:build cgo && quickjs' internal/waf/jsplugin/quickjs_cgo.go
+          grep -Fq '//go:build !cgo || !quickjs' internal/waf/jsplugin/quickjs_stub.go
+          grep -Fq 'Verify native QuickJS backend' .github/workflows/release.yml
+          grep -Fq 'quickjs_cgo.go' .github/workflows/release.yml
+
       - name: Download frontend export
         uses: actions/download-artifact@v4
         with:
@@ -45,10 +73,10 @@ jobs:
           path: internal/core/adminweb/dist
 
       - name: Run go vet
-        run: go vet ./...
+        run: CGO_ENABLED=1 go vet -tags=quickjs ./...
 
       - name: Run Go tests
-        run: go test -v -timeout=30m ./...
+        run: CGO_ENABLED=1 go test -tags=quickjs -v -timeout=30m ./...
 
   dialect-migration:
     # 在真实 MySQL / PostgreSQL 上跑 AutoMigrate。
@@ -163,7 +191,7 @@ jobs:
       - name: Build application
         run: |
           go mod tidy
-          go build -o bin/my-openwaf ./cmd/...
+          CGO_ENABLED=1 go build -tags=quickjs -o bin/my-openwaf ./cmd/...
 
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4

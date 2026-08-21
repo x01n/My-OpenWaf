@@ -120,7 +120,7 @@ func CreateLuaPlugin(repo *repository.LuaPluginRepo, reload func() error) app.Ha
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req luaPluginRequest
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
@@ -158,7 +158,7 @@ func UpdateLuaPlugin(repo *repository.LuaPluginRepo, reload func() error) app.Ha
 
 		var req luaPluginRequest
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if errMsg := applyLuaPluginRequest(existing, req, false); errMsg != "" {
@@ -250,7 +250,7 @@ func ValidateLuaPlugin() app.HandlerFunc {
 			Source string `json:"source"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		stage := luaplugin.Stage(strings.TrimSpace(req.Stage))
@@ -304,7 +304,7 @@ func DryRunLuaPlugin() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req luaDryRunRequest
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		stage := luaplugin.Stage(strings.TrimSpace(req.Stage))

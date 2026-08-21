@@ -707,6 +707,10 @@ type HTTPResponse struct {
 	decodedBody      bool
 }
 
+func (r *HTTPResponse) HasRemainingBody() bool {
+	return r != nil && r.remainingBody != nil
+}
+
 type identityResponseEntity struct {
 	Path           string
 	ContentType    string
@@ -737,13 +741,11 @@ func responseEntityTransformerForSiteWithClient(rt snapshot.SiteRuntime, clientI
 	dynCfg := rt.DynamicProtection
 	browserSignEnabled := false
 	browserSignTTL := 300
-	envCheck := true
 	if rt.EffectiveProtection != nil {
 		browserSignEnabled = rt.EffectiveProtection.BrowserSignEnabled
 		if rt.EffectiveProtection.BrowserSignTTL > 0 {
 			browserSignTTL = rt.EffectiveProtection.BrowserSignTTL
 		}
-		envCheck = rt.EffectiveProtection.ShieldEnableEnvCheck
 	}
 	dynEnabled := dynCfg.HTMLObfuscationEnabled || dynCfg.JSObfuscationEnabled || dynCfg.ImageWatermarkEnabled
 	if !dynEnabled && !browserSignEnabled {
@@ -751,12 +753,11 @@ func responseEntityTransformerForSiteWithClient(rt snapshot.SiteRuntime, clientI
 	}
 
 	siteID := rt.Site.ID
-	host := rt.Site.Host
 	bind := rt.Bind
 	return identityResponseTransformerFunc(func(entity identityResponseEntity) (identityResponseEntity, error) {
 		body := entity.Body
 		if browserSignEnabled && isHTMLContentType(entity.ContentType) {
-			ticket := challenge.IssueBrowserSignTicket(siteID, firstHostToken(host), browserSignTTL, envCheck)
+			ticket := challenge.IssueBrowserSignTicket(siteID, browserSignTTL)
 			body = challenge.InjectBrowserSignIntoHTML(body, ticket)
 			if ticket.CSPNonce != "" {
 				entity.ScriptNonces = append(entity.ScriptNonces, ticket.CSPNonce)
@@ -1701,14 +1702,10 @@ func ForwardCapturedResponseForSiteWithClientIP(ctx context.Context, c *app.Requ
 	bodyReader := io.MultiReader(bytes.NewReader(resp.Body), resp.remainingBody)
 	effectiveCE := contentEncodingHeaderValue(resp.Header)
 	bodySize := -1
-	if upstreamResp != nil && !resp.decodedBody {
-		bodySize = int(upstreamResp.ContentLength)
-	}
 	if resp.decodedBody {
 		c.Response.Header.Del("Content-Encoding")
 		c.Response.Header.Del("Content-Length")
 		effectiveCE = ""
-		bodySize = -1
 	}
 
 	compOpts := streamCompressionOptions(rt)

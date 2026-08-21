@@ -47,7 +47,8 @@ func newLuaTestKV() *luaTestKV {
 	return &luaTestKV{data: map[string][]byte{}}
 }
 
-func (k *luaTestKV) Available() bool { return true }
+func (k *luaTestKV) Available() bool                           { return true }
+func (k *luaTestKV) AvailableContext(ctx context.Context) bool { return ctx.Err() == nil }
 
 func (k *luaTestKV) Get(key string) ([]byte, bool) {
 	k.mu.Lock()
@@ -80,6 +81,22 @@ func (k *luaTestKV) Incr(key string, _ time.Duration) (int64, error) {
 	}
 	k.data[key] = []byte(strconv.FormatInt(n, 10))
 	return n, nil
+}
+
+func (k *luaTestKV) GetContext(_ context.Context, key string) ([]byte, bool) {
+	return k.Get(key)
+}
+
+func (k *luaTestKV) SetContext(_ context.Context, key string, value []byte, ttl time.Duration) error {
+	return k.Set(key, value, ttl)
+}
+
+func (k *luaTestKV) DeleteContext(_ context.Context, key string) {
+	k.Delete(key)
+}
+
+func (k *luaTestKV) IncrContext(_ context.Context, key string, ttl time.Duration) (int64, error) {
+	return k.Incr(key, ttl)
 }
 
 func idParam(id uint) param.Params {

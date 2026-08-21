@@ -66,7 +66,7 @@ func CreateUser(repo *repository.AccessControlRepo, reload func() error) app.Han
 		}
 		var req CreateUserReq
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		req.Username = strings.TrimSpace(req.Username)
@@ -126,7 +126,7 @@ func UpdateUser(repo *repository.AccessControlRepo, reload func() error) app.Han
 		}
 		var req UpdateUserReq
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		user, err := findSiteUser(repo, siteID, userID)

@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"gorm.io/gorm"
@@ -39,7 +41,7 @@ type ACMEManagerStore struct {
 	certificates *repository.CertificateRepo
 	reload       func() error
 	log          *slog.Logger
-	manager      *acmepkg.Manager
+	manager      acmeManager
 	cacheKey     string
 }
 
@@ -65,12 +67,106 @@ type acmeApplyResponse struct {
 	ListenerCount int64             `json:"listener_count"`
 }
 
+type acmeManager interface {
+	Register(context.Context) error
+	ObtainCertificate(context.Context, string) (*acmepkg.CertificateResult, error)
+	GetChallengeResponse(string) (string, bool)
+}
+
 // NewACMEManagerStore 创建 ACME manager 存储器。
 func NewACMEManagerStore(settings *repository.SystemSettingsRepo, certificates *repository.CertificateRepo, reload func() error, log *slog.Logger) *ACMEManagerStore {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &ACMEManagerStore{settings: settings, certificates: certificates, reload: reload, log: log}
+}
+
+/**
+ * acmeErrorTextLimit 是 ACME 错误文本进入响应体或落库前的字节上限（含截断标记）。
+ *
+ * 取 512 与 store.Certificate.RenewError 的 `gorm:"size:512"` 对齐
+ * （internal/store/certificate.go:38）：该列在 MySQL/PostgreSQL 上是定长约束，
+ * 超长文本会被驱动静默截断或直接报错，先在这里收口可让响应体与落库值一致，
+ * 不会出现「接口返回全文、库里只存前半截」的分歧。
+ * internal/upstream/health.go 的 truncateStateError 对上游探测错误用的也是 512。
+ */
+const acmeErrorTextLimit = 512
+
+// acmeErrorTruncatedSuffix 是截断标记，与 internal/dataplane 日志截断的写法保持一致。
+const acmeErrorTruncatedSuffix = "...[truncated]"
+
+/**
+ * acmeErrorRedactPatterns 按顺序抹除 ACME/上游错误文本中的敏感片段。
+ *
+ * ACME 客户端会把上游的请求/响应片段包进 error，可能夹带账户私钥、证书私钥或
+ * JWS 材料。三条规则分别覆盖：
+ *  1. 完整 PEM 块（跨行，非贪婪，避免一次吞掉多个块之间的正常文本）；
+ *  2. 只剩头部的残缺 PEM（上游自己已截断时，尾部 base64 仍是私钥前缀）；
+ *  3. JWK 私钥参数与私钥/凭据样式的键值对。
+ */
+var acmeErrorRedactPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)-----BEGIN[^-]*-----.*?-----END[^-]*-----`),
+	regexp.MustCompile(`-----BEGIN[^-]*-----[\s\S]*`),
+	regexp.MustCompile(`(?i)"(d|p|q|dp|dq|qi|k)"\s*:\s*"[^"]*"`),
+	regexp.MustCompile(`(?i)(private[_-]?key|key[_-]?pem|account[_-]?key|secret[_-]?key|password|passwd|secret|token|credential)(["'\s:=]+)([^&,"'}\s]+)`),
+}
+
+// acmeErrorRedactReplacements 与 acmeErrorRedactPatterns 一一对应，下标必须同步。
+var acmeErrorRedactReplacements = []string{
+	"[redacted]",
+	"[redacted]",
+	`"${1}":"[redacted]"`,
+	"${1}${2}[redacted]",
+}
+
+/**
+ * sanitizeACMEErrorText 抹除敏感片段并把错误文本收敛到 acmeErrorTextLimit 内。
+ *
+ * 顺序是「先脱敏、再折叠空白、最后截断」，三步都不能换位：先截断会把 PEM 块切成
+ * 半截，残留的 base64 依然是私钥内容；折叠空白放在脱敏之后，才不会先破坏 PEM 的
+ * 行结构导致规则漏匹配，同时让 512 字节容纳更多有效诊断信息。
+ *
+ * @param raw 上游或本地错误的原始文本。
+ * @return 脱敏且长度不超过 acmeErrorTextLimit 的合法 UTF-8 文本。
+ */
+func sanitizeACMEErrorText(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	for i, pattern := range acmeErrorRedactPatterns {
+		raw = pattern.ReplaceAllString(raw, acmeErrorRedactReplacements[i])
+	}
+	raw = strings.Join(strings.Fields(raw), " ")
+	return truncateACMEErrorText(raw, acmeErrorTextLimit)
+}
+
+/**
+ * truncateACMEErrorText 按 rune 边界截断，保证结果长度不超过 limit 且仍是合法 UTF-8。
+ *
+ * 预算里已扣掉截断标记，因此返回值整体（含标记）不会突破 limit，可以直接落到
+ * size:512 的列上。切点落在多字节字符中间时向前回退到最近的 rune 起始字节。
+ *
+ * @param s     待截断文本。
+ * @param limit 输出的字节上限，含截断标记。
+ * @return 不超过 limit 字节的文本。
+ */
+func truncateACMEErrorText(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	if limit <= 0 {
+		return ""
+	}
+	budget := limit - len(acmeErrorTruncatedSuffix)
+	if budget <= 0 {
+		// 预算装不下标记本身时退化为截断标记的前缀，仍不突破 limit。
+		return acmeErrorTruncatedSuffix[:limit]
+	}
+	cut := budget
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + acmeErrorTruncatedSuffix
 }
 
 func defaultACMEConfig() ACMEConfig {
@@ -80,6 +176,16 @@ func defaultACMEConfig() ACMEConfig {
 		RenewBeforeDays:   30,
 		CAAAllowedIssuers: acmepkg.DefaultCAAAllowedIssuer,
 	}
+}
+
+func acmeManagerCacheKey(cfg ACMEConfig) string {
+	return strings.Join([]string{
+		cfg.Email,
+		cfg.DirectoryURL,
+		fmt.Sprintf("%t", cfg.CAACheckEnabled),
+		cfg.CAAAllowedIssuers,
+		cfg.CAADNSServer,
+	}, "\n")
 }
 
 func loadACMEConfig(repo *repository.SystemSettingsRepo) ACMEConfig {
@@ -171,7 +277,7 @@ func matchACMESites(sites []store.Site, domain string) []acmeMatchedSite {
 	return matches
 }
 
-func (s *ACMEManagerStore) Manager() (*acmepkg.Manager, ACMEConfig, error) {
+func (s *ACMEManagerStore) Manager() (acmeManager, ACMEConfig, error) {
 	if s == nil || s.settings == nil {
 		return nil, ACMEConfig{}, errors.New("ACME manager store is not initialized")
 	}
@@ -189,13 +295,7 @@ func (s *ACMEManagerStore) Manager() (*acmepkg.Manager, ACMEConfig, error) {
 			return nil, cfg, fmt.Errorf("save ACME config: %w", err)
 		}
 	}
-	key := strings.Join([]string{
-		cfg.Email,
-		cfg.DirectoryURL,
-		fmt.Sprintf("%t", cfg.CAACheckEnabled),
-		cfg.CAAAllowedIssuers,
-		cfg.CAADNSServer,
-	}, "\n")
+	key := acmeManagerCacheKey(cfg)
 
 	s.mu.RLock()
 	mgr := s.manager
@@ -236,7 +336,8 @@ func (s *ACMEManagerStore) onRenew(domain, certPEM, keyPEM string, expiry time.T
 	}
 	now := time.Now()
 	if renewErr != nil {
-		return s.certificates.UpdateRenewStatus(cert.ID, renewErr.Error(), &now)
+		// 与手动续期同一暴露面：renew_error 会被 ACMEStatus 回显，落库前先脱敏截断。
+		return s.certificates.UpdateRenewStatus(cert.ID, sanitizeACMEErrorText(renewErr.Error()), &now)
 	}
 	if err := s.certificates.UpdateCert(cert.ID, certPEM, keyPEM, &expiry, &now); err != nil {
 		return fmt.Errorf("update renewed certificate %s: %w", domain, err)
@@ -307,7 +408,7 @@ func (s *ACMEManagerStore) renewDue(ctx context.Context) {
 		result, err := mgr.ObtainCertificate(ctx, item.Domain)
 		if err != nil {
 			now := time.Now()
-			_ = s.certificates.UpdateRenewStatus(item.ID, err.Error(), &now)
+			_ = s.certificates.UpdateRenewStatus(item.ID, sanitizeACMEErrorText(err.Error()), &now)
 			continue
 		}
 		now := time.Now()
@@ -344,7 +445,7 @@ func UpdateACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 			CAADNSServer      *string `json:"caa_dns_server"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cfg := loadACMEConfig(repo)
@@ -375,7 +476,7 @@ func UpdateACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 		if cfg.Enabled && cfg.Email == "" {
 			email, err := randomACMEEmail("")
 			if err != nil {
-				c.JSON(500, map[string]string{"error": "generate ACME email failed: " + err.Error()})
+				c.JSON(500, map[string]string{"error": "generate ACME email failed: " + sanitizeACMEErrorText(err.Error())})
 				return
 			}
 			cfg.Email = email
@@ -395,7 +496,7 @@ func UpdateACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 			}
 		}
 		if err := saveACMEConfig(repo, cfg); err != nil {
-			c.JSON(500, map[string]string{"error": err.Error()})
+			c.JSON(500, map[string]string{"error": sanitizeACMEErrorText(err.Error())})
 			return
 		}
 		c.JSON(200, cfg)
@@ -407,7 +508,7 @@ func ACMEApply(repos *repository.Repos, reload func() error, acmeStore *ACMEMana
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req acmeRequest
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
@@ -423,7 +524,7 @@ func ACMEApply(repos *repository.Repos, reload func() error, acmeStore *ACMEMana
 
 		sites, err := repos.Site.FindEnabled()
 		if err != nil {
-			c.JSON(500, map[string]string{"error": "load enabled sites failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "load enabled sites failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 		matches := matchACMESites(sites, domain)
@@ -435,29 +536,29 @@ func ACMEApply(repos *repository.Repos, reload func() error, acmeStore *ACMEMana
 		cfg := loadACMEConfig(repos.SystemSettings)
 		email, err := resolveACMEEmail(domain, req.Email)
 		if err != nil {
-			c.JSON(500, map[string]string{"error": "generate ACME email failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "generate ACME email failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 		cfg.Email = email
 		cfg.Enabled = true
 		if err := saveACMEConfig(repos.SystemSettings, cfg); err != nil {
-			c.JSON(500, map[string]string{"error": "save ACME config failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "save ACME config failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 		acmeMgr, cfg, err := acmeStore.Manager()
 		if err != nil {
-			c.JSON(500, map[string]string{"error": "ACME manager not initialized: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "ACME manager not initialized: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
 		if err := acmeMgr.Register(ctx); err != nil {
-			c.JSON(500, map[string]string{"error": "ACME register failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "ACME register failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
 		result, err := acmeMgr.ObtainCertificate(ctx, domain)
 		if err != nil {
-			c.JSON(500, map[string]string{"error": "certificate obtain failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "certificate obtain failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
@@ -478,16 +579,16 @@ func ACMEApply(repos *repository.Repos, reload func() error, acmeStore *ACMEMana
 		if err == nil {
 			cert.ID = existing.ID
 			if err := repos.Certificate.Update(&cert); err != nil {
-				c.JSON(500, map[string]string{"error": "update certificate failed: " + err.Error()})
+				c.JSON(500, map[string]string{"error": "update certificate failed: " + sanitizeACMEErrorText(err.Error())})
 				return
 			}
 		} else if errors.Is(err, gorm.ErrRecordNotFound) {
 			if err := repos.Certificate.Create(&cert); err != nil {
-				c.JSON(500, map[string]string{"error": "save certificate failed: " + err.Error()})
+				c.JSON(500, map[string]string{"error": "save certificate failed: " + sanitizeACMEErrorText(err.Error())})
 				return
 			}
 		} else {
-			c.JSON(500, map[string]string{"error": "load existing certificate failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "load existing certificate failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
@@ -497,17 +598,19 @@ func ACMEApply(repos *repository.Repos, reload func() error, acmeStore *ACMEMana
 		}
 		siteCount, err := repos.Site.ApplyCertificate(siteIDs, cert.ID)
 		if err != nil {
-			c.JSON(500, map[string]string{"error": "apply certificate to sites failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "apply certificate to sites failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 		listenerCount, err := repos.SiteListener.ApplyCertificateToTLSListeners(siteIDs, cert.ID)
 		if err != nil {
-			c.JSON(500, map[string]string{"error": "apply certificate to listeners failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "apply certificate to listeners failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
+		// 必须先脱敏再 reload：下面的 500 分支会回显 cert，顺序颠倒会漏出私钥。
+		redactCertificatePrivateKey(&cert)
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": cert, "applied_sites": matches})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + sanitizeACMEErrorText(err.Error()), "item": cert, "applied_sites": matches})
 			return
 		}
 		c.JSON(200, acmeApplyResponse{Certificate: cert, AppliedSites: matches, SiteCount: siteCount, ListenerCount: listenerCount})
@@ -541,37 +644,41 @@ func ACMERenew(repos *repository.Repos, reload func() error, acmeStore *ACMEMana
 
 		acmeMgr, _, err := acmeStore.Manager()
 		if err != nil {
-			c.JSON(500, map[string]string{"error": "ACME manager not initialized: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "ACME manager not initialized: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
 		// 注册帐户（幂等）
 		if err := acmeMgr.Register(ctx); err != nil {
-			c.JSON(500, map[string]string{"error": "ACME register failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "ACME register failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
 		result, err := acmeMgr.ObtainCertificate(ctx, cert.Domain)
 		if err != nil {
-			// 记录错误
+			// 记录错误。renew_error 会由 ACMEStatus 与证书 list/get 回显，
+			// 故落库与响应体用同一份脱敏文本，避免库里留下未脱敏的上游片段。
 			now := time.Now()
-			if statusErr := repos.Certificate.UpdateRenewStatus(cert.ID, err.Error(), &now); statusErr != nil {
-				c.JSON(500, map[string]string{"error": "renew failed: " + err.Error() + "; update renew status failed: " + statusErr.Error()})
+			renewErr := sanitizeACMEErrorText(err.Error())
+			if statusErr := repos.Certificate.UpdateRenewStatus(cert.ID, renewErr, &now); statusErr != nil {
+				c.JSON(500, map[string]string{"error": "renew failed: " + renewErr + "; update renew status failed: " + sanitizeACMEErrorText(statusErr.Error())})
 				return
 			}
-			c.JSON(500, map[string]string{"error": "renew failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "renew failed: " + renewErr})
 			return
 		}
 
 		// 更新证书
 		now := time.Now()
 		if err := repos.Certificate.UpdateCert(cert.ID, result.CertPEM, result.KeyPEM, &result.Expiry, &now); err != nil {
-			c.JSON(500, map[string]string{"error": "renewed certificate but save failed: " + err.Error()})
+			c.JSON(500, map[string]string{"error": "renewed certificate but save failed: " + sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
+		// 必须先脱敏再 reload：下面的 500 分支会回显 cert，顺序颠倒会漏出私钥。
+		redactCertificatePrivateKey(cert)
 		if err := reload(); err != nil {
-			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": cert})
+			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + sanitizeACMEErrorText(err.Error()), "item": cert})
 			return
 		}
 		c.JSON(200, map[string]interface{}{
@@ -587,7 +694,7 @@ func ACMEStatus(repos *repository.Repos) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		certs, err := repos.Certificate.ListBySource(store.CertSourceACME)
 		if err != nil {
-			c.JSON(500, map[string]string{"error": err.Error()})
+			c.JSON(500, map[string]string{"error": sanitizeACMEErrorText(err.Error())})
 			return
 		}
 
@@ -608,7 +715,8 @@ func ACMEStatus(repos *repository.Repos) app.HandlerFunc {
 				Domain:    cert.Domain,
 				ExpiresAt: cert.ExpiresAt,
 				AutoRenew: cert.AutoRenew,
-				Error:     cert.RenewError,
+				// 落库前已脱敏；这里再过一次是为了兜住本次改动之前写入的历史 renew_error。
+				Error: sanitizeACMEErrorText(cert.RenewError),
 			})
 		}
 

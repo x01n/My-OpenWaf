@@ -1,4 +1,4 @@
-//go:build !cgo
+//go:build !cgo || !quickjs
 
 package jsplugin
 
@@ -18,6 +18,11 @@ func NewEngine(opts EngineOptions) (*Engine, error) {
 
 // Engine 是当前版本不可执行的占位类型。
 type Engine struct{}
+
+// Execute implements Executor for the unavailable QuickJS backend.
+func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
+	return e.Evaluate(ctx, script, req)
+}
 
 // Evaluate 保留 API 形状并返回不可用错误。
 func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {

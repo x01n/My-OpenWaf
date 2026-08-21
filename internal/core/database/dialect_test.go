@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -92,7 +93,7 @@ func TestPreferSimpleProtocolFromDSN(t *testing.T) {
 
 func TestMaskDSN(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"admin:secret@tcp(127.0.0.1:3306)/waf", "admin:***@tcp(127.0.0.1:3306)/waf"},
+		{"admin:secret@tcp(127.0.0.1:3306)/waf", "admin:******@tcp(127.0.0.1:3306)/waf"},
 		{"nocredentials", "nocredentials"},
 	}
 	for _, tt := range cases {
@@ -103,5 +104,48 @@ func TestMaskDSN(t *testing.T) {
 		if strings.Contains(got, "secret") {
 			t.Errorf("maskDSN 未遮蔽口令：%q", got)
 		}
+	}
+}
+
+// TestMaskDatabaseOpenErrorHidesPostgresCredentials 验证 PostgreSQL 建连错误中的完整 DSN 被再次脱敏。
+func TestMaskDatabaseOpenErrorHidesPostgresCredentials(t *testing.T) {
+	dsn := `host=db.internal user=waf password="pg secret" dbname=waf`
+	err := maskDatabaseOpenError(errors.New("dial failed: "+dsn), dsn)
+	if err == nil {
+		t.Fatal("应返回脱敏后的错误")
+	}
+	message := err.Error()
+	if strings.Contains(message, "pg secret") || strings.Contains(message, dsn) {
+		t.Fatalf("错误信息泄漏 PostgreSQL 凭据：%v", message)
+	}
+	if !strings.Contains(message, "password=******") {
+		t.Fatalf("错误信息未保留脱敏标记：%v", message)
+	}
+}
+
+// TestMaskDSNKeywordValuesHandlesQuotedPostgresCredentials 验证关键字 DSN 的引号值与畸形值边界。
+func TestMaskDSNKeywordValuesHandlesQuotedPostgresCredentials(t *testing.T) {
+	cases := []struct {
+		name string
+		dsn  string
+		want string
+	}{
+		{
+			name: "double quoted password",
+			dsn:  `host=db.internal password="pg secret" dbname=waf`,
+			want: `host=db.internal password=****** dbname=waf`,
+		},
+		{
+			name: "malformed quote",
+			dsn:  `host=db.internal password="pg secret dbname=waf`,
+			want: "[redacted]",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := maskDSNKeywordValues(tt.dsn); got != tt.want {
+				t.Fatalf("maskDSNKeywordValues(%q) = %q, want %q", tt.dsn, got, tt.want)
+			}
+		})
 	}
 }

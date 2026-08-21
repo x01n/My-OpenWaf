@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -37,6 +38,7 @@ import (
 	"My-OpenWaf/internal/waf/bot"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/challenge/powdata"
+	"My-OpenWaf/internal/waf/iprep"
 	"My-OpenWaf/internal/waf/pages"
 	"My-OpenWaf/internal/waf/ratelimit"
 )
@@ -164,6 +166,97 @@ func TestDataPlanePoWAssetsServeCompressedEmbeddedBytes(t *testing.T) {
 				t.Fatalf("GET %s decompressed body differs from embedded bytes", tt.path)
 			}
 		})
+	}
+}
+
+func TestHandleDynamicProtectionKeyRecordsErrorStatuses(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "dynamic-key-logs.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate logs: %v", err)
+	}
+	writer := observability.NewUnifiedWriter(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer writer.Close()
+
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{ID: 7, Host: "dynamic-key.example.test", Bind: ":80"},
+	}
+	siteHolder := &snapshot.Holder{}
+	siteHolder.Store(&snapshot.Snapshot{
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "dynamic-key.example.test"): &rt,
+		},
+	})
+	emptyHolder := &snapshot.Holder{}
+	emptyHolder.Store(&snapshot.Snapshot{Sites: map[string]*snapshot.SiteRuntime{}})
+	notLoadedHolder := &snapshot.Holder{}
+
+	cases := []struct {
+		name       string
+		method     string
+		body       []byte
+		holder     *snapshot.Holder
+		host       string
+		wantStatus int
+		wantAction string
+	}{
+		{name: "method", method: http.MethodGet, host: "dynamic-key.example.test", holder: notLoadedHolder, wantStatus: http.StatusMethodNotAllowed, wantAction: "dynamic_key_error"},
+		{name: "body_too_large", method: http.MethodPost, host: "dynamic-key.example.test", holder: notLoadedHolder, body: bytes.Repeat([]byte("x"), dynamicProtectionKeyRequestBodyMax+1), wantStatus: http.StatusRequestEntityTooLarge, wantAction: "dynamic_key_error"},
+		{name: "invalid_json", method: http.MethodPost, host: "dynamic-key.example.test", holder: notLoadedHolder, body: []byte("{"), wantStatus: http.StatusBadRequest, wantAction: "dynamic_key_error"},
+		{name: "snapshot_not_loaded", method: http.MethodPost, host: "dynamic-key.example.test", holder: notLoadedHolder, body: []byte(`{"ticket":"bad","key":"k"}`), wantStatus: http.StatusServiceUnavailable, wantAction: "dynamic_key_error"},
+		{name: "site_not_found", method: http.MethodPost, host: "missing-dynamic-key.example.test", holder: emptyHolder, body: []byte(`{"ticket":"bad","key":"k"}`), wantStatus: http.StatusNotFound, wantAction: "dynamic_key_error"},
+		{name: "ticket_rejected", method: http.MethodPost, host: "dynamic-key.example.test", holder: siteHolder, body: []byte(`{"ticket":"bad","key":"k"}`), wantStatus: http.StatusForbidden, wantAction: "dynamic_key_error"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := app.NewContext(0)
+			ctx.Request.SetMethod(tt.method)
+			ctx.Request.SetRequestURI(dynamicProtectionKeyPath + "?token=dynamic-key-secret&mode=test")
+			ctx.Request.Header.SetHost(tt.host)
+			if len(tt.body) > 0 {
+				ctx.Request.SetBody(tt.body)
+			}
+			handled := handleDynamicProtectionKey(ctx, Options{
+				Holder: tt.holder,
+				Writer: writer,
+				Bind:   ":80",
+				Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+			if !handled {
+				t.Fatal("dynamic key endpoint was not handled")
+			}
+			if got := ctx.Response.StatusCode(); got != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", got, tt.wantStatus)
+			}
+		})
+	}
+
+	writer.Close()
+	var entries []store.AccessLog
+	if err := db.Where("path = ?", dynamicProtectionKeyPath).Find(&entries).Error; err != nil {
+		t.Fatalf("read dynamic key access logs: %v", err)
+	}
+	if len(entries) != len(cases) {
+		t.Fatalf("dynamic key access logs = %d, want %d", len(entries), len(cases))
+	}
+	seen := make(map[string]int, len(entries))
+	for _, entry := range entries {
+		key := strconv.Itoa(entry.StatusCode) + ":" + entry.WAFAction
+		seen[key]++
+		if entry.RequestBodyPreview != "[redacted]" {
+			t.Fatalf("dynamic key request body = %q, want [redacted]", entry.RequestBodyPreview)
+		}
+		if entry.QueryString != "mode=test&token=%5Bredacted%5D" {
+			t.Fatalf("dynamic key query = %q, want sanitized query", entry.QueryString)
+		}
+	}
+	for _, tt := range cases {
+		key := strconv.Itoa(tt.wantStatus) + ":" + tt.wantAction
+		if seen[key] != 1 {
+			t.Fatalf("access log %s count = %d, want 1", key, seen[key])
+		}
 	}
 }
 
@@ -674,6 +767,204 @@ func TestChallengeTokenCannotBeReplayedOrShared(t *testing.T) {
 	}
 }
 
+func TestHandlerChallengeVerifyFailureRespectsSiteWhitelistAndXFF(t *testing.T) {
+	const (
+		bind        = ":80"
+		host        = "challenge-verify.example.com"
+		proxyIP     = "192.0.2.10"
+		forwardedIP = "198.51.100.7"
+	)
+
+	_, whitelistCIDR, err := net.ParseCIDR(forwardedIP + "/32")
+	if err != nil {
+		t.Fatalf("parse whitelist CIDR: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+		form url.Values
+	}{
+		{
+			name: "captcha",
+			path: "/__owaf/captcha/verify",
+			form: url.Values{
+				"__waf_captcha_session": {"missing"},
+				"__waf_captcha_answer":  {"wrong"},
+			},
+		},
+		{
+			name: "shield",
+			path: "/__owaf/shield/verify",
+			form: url.Values{
+				"__waf_shield_session": {"missing"},
+				"__waf_pow_counter":    {"0"},
+				"__waf_pow_hash":       {"bad"},
+			},
+		},
+		{
+			name: "chain",
+			path: "/__owaf/chain/verify",
+			form: url.Values{
+				"__waf_chain_session": {"missing"},
+			},
+		},
+	}
+
+	newHandler := func(t *testing.T, whitelist bool) (*iprep.IPReputation, app.HandlerFunc) {
+		t.Helper()
+		protection := store.DefaultProtectionConfig()
+		protection.OWASPEnabled = false
+		protection.BotDetectionEnabled = false
+		rt := snapshot.SiteRuntime{
+			Site:                store.Site{ID: 1, Host: host, Bind: bind},
+			Bind:                bind,
+			XFFMode:             store.XFFModeTrustOuter,
+			TrustedCIDR:         "192.0.2.0/24",
+			ClientIPHeaderOrder: []string{store.ClientIPHeaderXForwardedFor},
+			EffectiveProtection: &protection,
+		}
+		if whitelist {
+			rt.SiteIPWhitelist = []iprep.IPListEntry{{CIDR: whitelistCIDR}}
+		}
+		holder := &snapshot.Holder{}
+		holder.Store(&snapshot.Snapshot{
+			Revision:   1,
+			Protection: protection,
+			Sites: map[string]*snapshot.SiteRuntime{
+				snapshot.SiteMapKey(bind, host): &rt,
+			},
+		})
+
+		ipRep := iprep.NewIPReputation()
+		ipRep.ConfigureAutoBan(true, 1, 60, 3600)
+		captchaManager := challenge.NewCaptchaManager(nil, 0)
+		shieldManager := challenge.NewShieldManager(captchaManager, nil, 1)
+		chainManager := challenge.NewChainChallengeManager(captchaManager, nil)
+		t.Cleanup(func() {
+			chainManager.Close()
+			shieldManager.Close()
+			captchaManager.Close()
+			ipRep.Close()
+		})
+
+		return ipRep, Handler(Options{
+			Holder:         holder,
+			Engine:         engine.New(holder, nil, nil, ipRep),
+			Log:            slog.Default(),
+			Bind:           bind,
+			CaptchaManager: captchaManager,
+			ShieldManager:  shieldManager,
+			ChainManager:   chainManager,
+		})
+	}
+
+	makeRequest := func(t *testing.T, path string, form url.Values) *app.RequestContext {
+		t.Helper()
+		client, server := net.Pipe()
+		t.Cleanup(func() {
+			client.Close()
+			server.Close()
+		})
+		ctx := app.NewContext(0)
+		ctx.Request.Header.SetMethod(http.MethodPost)
+		ctx.Request.SetRequestURI(path)
+		ctx.Request.Header.SetHost(host)
+		ctx.Request.Header.Set("X-Forwarded-For", forwardedIP)
+		ctx.Request.SetFormDataFromValues(form)
+		ctx.SetConn(&loopbackHertzConn{
+			Conn:       &testHertzConn{Conn: server},
+			remoteAddr: &net.TCPAddr{IP: net.ParseIP(proxyIP), Port: 8443},
+		})
+		return ctx
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+" whitelist", func(t *testing.T) {
+			ipRep, handler := newHandler(t, true)
+			ctx := makeRequest(t, tc.path, tc.form)
+			handler(context.Background(), ctx)
+			if got := ctx.Response.StatusCode(); got != http.StatusFound {
+				t.Fatalf("status = %d, want %d", got, http.StatusFound)
+			}
+			if got := string(ctx.Response.Header.Peek("Location")); got != "/" {
+				t.Fatalf("location = %q, want %q", got, "/")
+			}
+			if bans := ipRep.ActiveBans(); len(bans) != 0 {
+				t.Fatalf("whitelisted forwarded client unexpectedly auto-banned: %+v", bans)
+			}
+		})
+	}
+
+	t.Run("non-whitelist records forwarded client", func(t *testing.T) {
+		ipRep, handler := newHandler(t, false)
+		ctx := makeRequest(t, cases[0].path, cases[0].form)
+		handler(context.Background(), ctx)
+		if got := ctx.Response.StatusCode(); got != http.StatusFound {
+			t.Fatalf("status = %d, want %d", got, http.StatusFound)
+		}
+		bans := ipRep.ActiveBans()
+		if len(bans) != 1 || bans[0].IP != forwardedIP {
+			t.Fatalf("auto-ban IPs = %+v, want only forwarded client %s", bans, forwardedIP)
+		}
+		if decision := ipRep.Check(net.ParseIP(proxyIP)); decision.Category == "auto_ban" {
+			t.Fatalf("trusted proxy was auto-banned: %+v", decision)
+		}
+	})
+}
+
+func TestHandlerChallengeVerifyFailureWithoutSnapshotUsesDirectIP(t *testing.T) {
+	const (
+		directIP  = "203.0.113.10"
+		spoofedIP = "198.51.100.99"
+	)
+
+	ipRep := iprep.NewIPReputation()
+	ipRep.ConfigureAutoBan(true, 1, 60, 3600)
+	captchaManager := challenge.NewCaptchaManager(nil, 0)
+	t.Cleanup(func() {
+		captchaManager.Close()
+		ipRep.Close()
+	})
+
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		server.Close()
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodPost)
+	ctx.Request.SetRequestURI("/__owaf/captcha/verify")
+	ctx.Request.Header.SetHost("unmatched.example.com")
+	ctx.Request.Header.Set("X-Forwarded-For", spoofedIP)
+	ctx.Request.SetFormDataFromValues(url.Values{
+		"__waf_captcha_session": {"missing"},
+		"__waf_captcha_answer":  {"wrong"},
+	})
+	ctx.SetConn(&loopbackHertzConn{
+		Conn:       &testHertzConn{Conn: server},
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP(directIP), Port: 8443},
+	})
+
+	handler := Handler(Options{
+		Engine:         engine.New(nil, nil, nil, ipRep),
+		Log:            slog.Default(),
+		CaptchaManager: captchaManager,
+	})
+	handler(context.Background(), ctx)
+
+	if got := ctx.Response.StatusCode(); got != http.StatusFound {
+		t.Fatalf("status = %d, want %d", got, http.StatusFound)
+	}
+	bans := ipRep.ActiveBans()
+	if len(bans) != 1 || bans[0].IP != directIP {
+		t.Fatalf("auto-ban IPs = %+v, want only direct IP %s", bans, directIP)
+	}
+	if decision := ipRep.Check(net.ParseIP(spoofedIP)); decision.Category == "auto_ban" {
+		t.Fatalf("spoofed XFF IP was auto-banned: %+v", decision)
+	}
+}
+
 func fixedLengthMultipartBody(t *testing.T, size int, filename, content string) ([]byte, string) {
 	t.Helper()
 	const boundary = "owaf-lifecycle-boundary"
@@ -706,6 +997,107 @@ func TestErrorRateLimitActionKeepsConfiguredIntercept(t *testing.T) {
 	got := errorRateLimitAction("intercept")
 	if got.Type != action.Intercept || got.StatusCode != 0 {
 		t.Fatalf("errorRateLimitAction(intercept) = %#v", got)
+	}
+}
+
+func TestHandlerErrorRateLimitObserveProxiesAndRecordsObserve(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate logs: %v", err)
+	}
+	writer := observability.NewUnifiedWriter(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	var upstreamRequests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if upstreamRequests.Add(1) <= 2 {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("upstream not found"))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	protection.ErrorRateLimitEnabled = true
+	protection.ErrorRateLimitWindow = 60
+	protection.ErrorRateLimitMax = 1
+	protection.ErrorRateLimitCount4xx = true
+	protection.ErrorRateLimitCount5xx = false
+	protection.ErrorRateLimitCountBlock = false
+	protection.ErrorRateLimitAction = "observe"
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "error-ratelimit-observe.example.test", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{upstream.URL},
+		EffectiveProtection: &protection,
+	}
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", rt.Site.Host): &rt,
+		},
+	})
+
+	errorLimiter := ratelimit.NewRateLimiter(protection.ErrorRateLimitWindow, protection.ErrorRateLimitMax, true)
+	defer errorLimiter.Close()
+	metrics := NewMetrics()
+	handler := Handler(Options{
+		Holder:                holder,
+		Engine:                engine.New(holder, nil, errorLimiter, nil),
+		Metrics:               metrics,
+		Writer:                writer,
+		Log:                   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Bind:                  ":80",
+		AccessLogSamplingRate: 0,
+	})
+	request := func() *app.RequestContext {
+		ctx := app.NewContext(0)
+		ctx.Request.Header.SetMethod(http.MethodGet)
+		ctx.Request.SetRequestURI("/error-ratelimit-observe")
+		ctx.Request.Header.SetHost(rt.Site.Host)
+		handler(context.Background(), ctx)
+		return ctx
+	}
+
+	for requestNumber := 1; requestNumber <= 2; requestNumber++ {
+		if got := request().Response.StatusCode(); got != http.StatusNotFound {
+			t.Fatalf("request %d status = %d, want %d", requestNumber, got, http.StatusNotFound)
+		}
+	}
+	observed := request()
+	writer.Close()
+
+	if got := observed.Response.StatusCode(); got != http.StatusNoContent {
+		t.Fatalf("observed request status = %d, want upstream status %d", got, http.StatusNoContent)
+	}
+	if got := upstreamRequests.Load(); got != 3 {
+		t.Fatalf("upstream requests = %d, want 3", got)
+	}
+	if got := metrics.WAFObserves.Load(); got != 1 {
+		t.Fatalf("WAF observe metrics = %d, want 1", got)
+	}
+
+	var securityEvent store.SecurityEvent
+	if err := db.Where("site_id = ? AND action = ?", rt.Site.ID, "observe").First(&securityEvent).Error; err != nil {
+		t.Fatalf("read observe security event: %v", err)
+	}
+	if securityEvent.Phase != "error_rate_limit" || securityEvent.RuleIDStr != "error_rate_limit" {
+		t.Fatalf("observe security event = %#v", securityEvent)
+	}
+
+	var accessLog store.AccessLog
+	if err := db.Where("site_id = ? AND waf_action = ?", rt.Site.ID, "observe").First(&accessLog).Error; err != nil {
+		t.Fatalf("read observe access log: %v", err)
+	}
+	if accessLog.StatusCode != http.StatusNoContent {
+		t.Fatalf("observe access log = %#v", accessLog)
 	}
 }
 
@@ -814,19 +1206,26 @@ func TestAntiReplayChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 
 func TestHandlerRuleChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 	captchaManager := challenge.NewCaptchaManager(nil, 0)
+	captchaManager.SetGoCaptchaProvider(challenge.NewGoCaptchaProvider(challenge.DefaultGoCaptchaConfig(), slog.Default()))
 	defer captchaManager.Close()
 	shieldManager := challenge.NewShieldManager(captchaManager, nil, 1)
 	defer shieldManager.Close()
 	chainManager := challenge.NewChainChallengeManager(captchaManager, nil)
 
 	cases := []struct {
-		name       string
-		actionName store.RuleAction
-		wantParts  []string
+		name            string
+		actionName      store.RuleAction
+		captchaType     string
+		captchaWantPart string
+		captchaNotPart  string
+		wantParts       []string
 	}{
 		{
-			name:       "captcha",
-			actionName: store.ActionCaptchaChallenge,
+			name:            "captcha",
+			actionName:      store.ActionCaptchaChallenge,
+			captchaType:     "slide",
+			captchaWantPart: `id="slide-range"`,
+			captchaNotPart:  `id="rotate-range"`,
 			wantParts: []string{
 				`action="/__owaf/captcha/verify"`,
 				`name="__waf_captcha_session"`,
@@ -873,12 +1272,13 @@ func TestHandlerRuleChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 				PolicyID: 1,
 				Rules: []snapshot.CompiledRule{
 					{
-						ID:       81,
-						Phase:    store.PhaseCustom,
-						Kind:     "block_path_exact",
-						Arg:      "/guarded",
-						Action:   tc.actionName,
-						Priority: 1,
+						ID:          81,
+						Phase:       store.PhaseCustom,
+						Kind:        "block_path_exact",
+						Arg:         "/guarded",
+						Action:      tc.actionName,
+						Priority:    1,
+						CaptchaType: tc.captchaType,
 					},
 				},
 				EffectiveProtection: &protection,
@@ -918,10 +1318,175 @@ func TestHandlerRuleChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 					t.Fatalf("response body missing %q", want)
 				}
 			}
+			if tc.captchaWantPart != "" && !strings.Contains(body, tc.captchaWantPart) {
+				t.Fatalf("response body missing CAPTCHA marker %q", tc.captchaWantPart)
+			}
+			if tc.captchaNotPart != "" && strings.Contains(body, tc.captchaNotPart) {
+				t.Fatalf("response body unexpectedly contains CAPTCHA marker %q", tc.captchaNotPart)
+			}
 			if strings.Contains(body, "__waf_challenge_token") {
 				t.Fatalf("%s response used generic JS challenge token", tc.actionName)
 			}
 		})
+	}
+}
+
+func TestHandlerSiteCCCaptchaActionRendersCaptchaPage(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&store.Site{},
+		&store.SiteListener{},
+		&store.Certificate{},
+		&store.Policy{},
+		&store.Rule{},
+		&store.ApplicationRouteRule{},
+		&store.SystemSettings{},
+	); err != nil {
+		t.Fatalf("migrate snapshot build tables: %v", err)
+	}
+
+	defaultSlot := uint(1)
+	if err := db.Create(&store.Policy{Name: "default", DefaultSlot: &defaultSlot}).Error; err != nil {
+		t.Fatalf("seed default policy: %v", err)
+	}
+	protection := store.DefaultProtectionConfig()
+	protection.CaptchaEnabled = true
+	protection.CaptchaType = "math"
+	protectionJSON, err := json.Marshal(protection)
+	if err != nil {
+		t.Fatalf("marshal protection config: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{Key: "protection", Value: string(protectionJSON)}).Error; err != nil {
+		t.Fatalf("seed protection config: %v", err)
+	}
+
+	useCustomCC := true
+	site := store.Site{
+		Host:         "cc-captcha.example.com",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Bind:         ":80",
+		Network:      "tcp",
+		Enabled:      true,
+		CCUseCustom:  &useCustomCC,
+		CCRules: `[{
+			"enabled":true,
+			"action":"captcha",
+			"captcha_type":"click",
+			"conditions":[{"target":"url_path","operator":"equals","value":"/guarded"}]
+		}]`,
+	}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	sn, err := snapshot.Build(db, 1, bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	rt, ok := sn.MatchSite(":80", site.Host)
+	if !ok {
+		t.Fatal("site was not matched")
+	}
+	if len(rt.Rules) != 1 {
+		t.Fatalf("compiled rules = %d, want 1", len(rt.Rules))
+	}
+	if got := rt.Rules[0].Action; got != store.ActionCaptchaChallenge {
+		t.Fatalf("compiled CC action = %q, want %q", got, store.ActionCaptchaChallenge)
+	}
+
+	holder := &snapshot.Holder{}
+	holder.Store(sn)
+	captchaManager := challenge.NewCaptchaManager(nil, 0)
+	captchaManager.SetGoCaptchaProvider(challenge.NewGoCaptchaProvider(challenge.DefaultGoCaptchaConfig(), slog.Default()))
+	defer captchaManager.Close()
+	handler := Handler(Options{
+		Holder:         holder,
+		Engine:         engine.New(holder, nil, nil, nil),
+		Log:            slog.Default(),
+		Bind:           ":80",
+		CaptchaManager: captchaManager,
+	})
+
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/guarded")
+	ctx.Request.Header.SetHost(site.Host)
+
+	handler(context.Background(), ctx)
+
+	if got := ctx.Response.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+	}
+	body := string(ctx.Response.Body())
+	for _, want := range []string{
+		`action="/__owaf/captcha/verify"`,
+		`name="__waf_captcha_session"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("response body missing %q", want)
+		}
+	}
+	if strings.Contains(body, "__waf_challenge_token") {
+		t.Fatal("response used generic JS challenge token")
+	}
+}
+
+func TestHandlerRuleCaptchaTypeInheritsGlobal(t *testing.T) {
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	protection.CaptchaEnabled = true
+	protection.CaptchaType = "rotate"
+
+	rt := &snapshot.SiteRuntime{
+		Site: store.Site{ID: 1, Host: "rule-captcha-inherit.example.com", Bind: ":80"},
+		Bind: ":80",
+		Rules: []snapshot.CompiledRule{{
+			ID:       83,
+			Phase:    store.PhaseCustom,
+			Kind:     "block_path_exact",
+			Arg:      "/guarded",
+			Action:   store.ActionCaptchaChallenge,
+			Priority: 1,
+		}},
+		EffectiveProtection: &protection,
+	}
+	holder := &snapshot.Holder{}
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", rt.Site.Host): rt,
+		},
+	})
+
+	captchaManager := challenge.NewCaptchaManager(nil, 0)
+	captchaManager.SetGoCaptchaProvider(challenge.NewGoCaptchaProvider(challenge.DefaultGoCaptchaConfig(), slog.Default()))
+	defer captchaManager.Close()
+	handler := Handler(Options{
+		Holder:         holder,
+		Engine:         engine.New(holder, nil, nil, nil),
+		Log:            slog.Default(),
+		Bind:           ":80",
+		CaptchaManager: captchaManager,
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/guarded")
+	ctx.Request.Header.SetHost(rt.Site.Host)
+
+	handler(context.Background(), ctx)
+	if got := ctx.Response.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+	}
+	body := string(ctx.Response.Body())
+	if !strings.Contains(body, `id="rotate-range"`) {
+		t.Fatal("empty rule captcha_type should inherit global rotate CAPTCHA")
+	}
+	if strings.Contains(body, `id="slide-range"`) {
+		t.Fatal("inherited rotate CAPTCHA unexpectedly rendered slide CAPTCHA")
 	}
 }
 
@@ -973,6 +1538,85 @@ func TestBuildAccessLogEntryPersistsTLSShapeMetadata(t *testing.T) {
 	}
 	if entry.TLSPointFormats != "0" {
 		t.Fatalf("TLSPointFormats = %q, want %q", entry.TLSPointFormats, "0")
+	}
+}
+
+func TestBuildAccessLogEntryPersistsVisitorFusionOnlyForReleasedHTTPS(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Request.Header.Set("Sec-CH-UA", `"Chromium";v="123"`)
+	ctx.Request.Header.Set("Accept", "text/html")
+	ctx.Request.Header.Set("Accept-Encoding", "gzip, br")
+	fp := bot.TLSClientFingerprint{
+		JA3:        "771,4865,0,29,0",
+		JA4:        "t13d1516h2_0123456789ab_0123456789ab",
+		TLSVersion: "TLS13",
+		ALPN:       []string{"h2"},
+	}
+
+	entry := buildAccessLogEntry(ctx, accessLogInfo{
+		SiteID:                1,
+		Method:                "GET",
+		UserAgent:             "Mozilla/5.0 Chrome/123.0 Safari/537.36",
+		StatusCode:            200,
+		WAFAction:             "observe",
+		TLSFingerprint:        fp,
+		VisitorFusionEligible: true,
+		VisitorFusionAction:   action.Result{Matched: true, Type: action.Observe},
+	})
+	if entry.VisitorFusionClass != "human" || !entry.VisitorFusionEvidenceSufficient {
+		t.Fatalf("released HTTPS fusion fields = %#v", entry)
+	}
+	if entry.VisitorFusionClientFamily != "chromium_like" || entry.VisitorFusionConsistency != "consistent" {
+		t.Fatalf("unexpected fusion family/consistency: %#v", entry)
+	}
+
+	httpEntry := buildAccessLogEntry(ctx, accessLogInfo{
+		SiteID:                1,
+		TLSFingerprint:        fp,
+		VisitorFusionEligible: false,
+		VisitorFusionAction:   action.Result{Matched: true, Type: action.Observe},
+	})
+	if httpEntry.VisitorFusionClass != "" || httpEntry.VisitorFusionReasons != "" {
+		t.Fatalf("HTTP site must not persist fusion fields: %#v", httpEntry)
+	}
+
+	terminalEntry := buildAccessLogEntry(ctx, accessLogInfo{
+		SiteID:                1,
+		TLSFingerprint:        fp,
+		VisitorFusionEligible: true,
+		VisitorFusionAction:   action.Result{Matched: true, Type: action.Drop},
+	})
+	if terminalEntry.VisitorFusionClass != "" || terminalEntry.VisitorFusionReasons != "" {
+		t.Fatalf("terminal WAF action must not persist fusion fields: %#v", terminalEntry)
+	}
+}
+
+func TestShouldEvaluateVisitorFusionRejectsTerminalActions(t *testing.T) {
+	base := accessLogInfo{
+		VisitorFusionEligible: true,
+		TLSFingerprint:        bot.TLSClientFingerprint{TLSVersion: "TLS13"},
+		VisitorFusionAction:   action.Result{Matched: true, Type: action.Observe},
+	}
+	if !shouldEvaluateVisitorFusion(base) {
+		t.Fatal("released HTTPS request must enter visitor fusion")
+	}
+
+	terminalTypes := []action.Type{
+		action.Drop,
+		action.Intercept,
+		action.RateLimit,
+		action.Challenge,
+		action.CaptchaChallenge,
+		action.ShieldChallenge,
+		action.ChainChallenge,
+		action.Redirect,
+	}
+	for _, actionType := range terminalTypes {
+		info := base
+		info.VisitorFusionAction = action.Result{Matched: true, Type: actionType}
+		if shouldEvaluateVisitorFusion(info) {
+			t.Errorf("terminal action %q must not execute visitor fusion", actionType)
+		}
 	}
 }
 
@@ -1245,9 +1889,9 @@ func TestHandlerSkipsTLSSNIWarningWhenHostMatches(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Request.Header.SetMethod("GET")
 	ctx.Request.SetRequestURI("/sni-ok")
-	ctx.Request.Header.SetHost("app.example.com")
+	ctx.Request.Header.SetHost("APP.EXAMPLE.COM:443")
 
-	handler(ContextWithTLSHandshakeInfo(context.Background(), "TLS13", "app.example.com", "h2"), ctx)
+	handler(ContextWithTLSHandshakeInfo(context.Background(), "TLS13", " app.example.com ", "h2"), ctx)
 	writer.Close()
 
 	if got := ctx.Response.StatusCode(); got != http.StatusNoContent {
@@ -2590,5 +3234,118 @@ func TestShouldLogNoSiteMatchConsoleCount(t *testing.T) {
 		if got := shouldLogNoSiteMatchConsoleCount(count); got != want {
 			t.Fatalf("shouldLogNoSiteMatchConsoleCount(%d) = %v, want %v", count, got, want)
 		}
+	}
+}
+
+func TestHandlerRecordsAccessLogWhenNoUpstreamConfigured(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate log db: %v", err)
+	}
+	writer := observability.NewUnifiedWriter(db, slog.Default())
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "unavailable.example.test", Bind: ":80"},
+		Bind:                ":80",
+		EffectiveProtection: &protection,
+	}
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "unavailable.example.test"): &rt,
+		},
+	})
+
+	handler := Handler(Options{
+		Holder:                holder,
+		Engine:                engine.New(holder, nil, nil, nil),
+		Writer:                writer,
+		Log:                   slog.Default(),
+		Bind:                  ":80",
+		AccessLogSamplingRate: 1,
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/health")
+	ctx.Request.Header.SetHost("unavailable.example.test")
+
+	handler(context.Background(), ctx)
+	writer.Close()
+
+	if got := ctx.Response.StatusCode(); got != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", got, http.StatusBadGateway)
+	}
+	var entry store.AccessLog
+	if err := db.Where("site_id = ?", rt.Site.ID).First(&entry).Error; err != nil {
+		t.Fatalf("read access log: %v", err)
+	}
+	if entry.StatusCode != http.StatusBadGateway || entry.WAFAction != "none" || entry.CacheState != "bypass" {
+		t.Fatalf("access log = %#v", entry)
+	}
+	if entry.Path != "/health" || entry.Upstream != "" {
+		t.Fatalf("access log path/upstream = %#v", entry)
+	}
+}
+
+func TestHandlerRecordsAccessLogForRequestBodyPrefetchError(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate log db: %v", err)
+	}
+	writer := observability.NewUnifiedWriter(db, slog.Default())
+
+	holder := &snapshot.Holder{}
+	protection := store.DefaultProtectionConfig()
+	protection.BotDetectionEnabled = false
+	rt := snapshot.SiteRuntime{
+		Site:                store.Site{ID: 1, Host: "body-error.example.test", Bind: ":80"},
+		Bind:                ":80",
+		UpstreamURLs:        []string{"http://unused.example.test"},
+		EffectiveProtection: &protection,
+	}
+	holder.Store(&snapshot.Snapshot{
+		Revision:   1,
+		Protection: protection,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "body-error.example.test"): &rt,
+		},
+	})
+
+	handler := Handler(Options{
+		Holder:                holder,
+		Engine:                engine.New(holder, nil, nil, nil),
+		Writer:                writer,
+		Log:                   slog.Default(),
+		Bind:                  ":80",
+		AccessLogSamplingRate: 0,
+	})
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodPost)
+	ctx.Request.SetRequestURI("/upload")
+	ctx.Request.Header.SetHost("body-error.example.test")
+	ctx.Request.SetBodyStream(&unexpectedEOFRequestBodyStream{reader: bytes.NewReader([]byte("partial body"))}, -1)
+
+	handler(context.Background(), ctx)
+	writer.Close()
+
+	var entry store.AccessLog
+	if err := db.Where("site_id = ?", rt.Site.ID).First(&entry).Error; err != nil {
+		t.Fatalf("read access log: %v", err)
+	}
+	if entry.StatusCode != 0 || entry.WAFAction != "none" || entry.CacheState != "bypass" {
+		t.Fatalf("access log = %#v", entry)
+	}
+	if entry.Path != "/upload" || entry.Upstream != "" {
+		t.Fatalf("access log path/upstream = %#v", entry)
 	}
 }

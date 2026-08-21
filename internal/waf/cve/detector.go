@@ -754,7 +754,9 @@ func BuildCVERequestInto(dst *CVERequest, path, rawQuery string, headers map[str
 		contentTypeCount = 1
 	}
 
-	targets := make([]string, 0, urlTargetCount+len(headers)+contentTypeCount+bodyTargetCount)
+	maxTargetCount := urlTargetCount + len(headers) + contentTypeCount + bodyTargetCount
+	targetStorage := make([]string, maxTargetCount*2)
+	targets := targetStorage[:0:maxTargetCount]
 	targets = append(targets, path)
 	if decodedPath != path {
 		targets = append(targets, decodedPath)
@@ -808,7 +810,7 @@ func BuildCVERequestInto(dst *CVERequest, path, rawQuery string, headers map[str
 		urlBodyTargets = append(urlBodyTargets, bodyTargets...)
 	}
 
-	targetsLower := make([]string, len(targets))
+	targetsLower := targetStorage[maxTargetCount : maxTargetCount+len(targets) : maxTargetCount+len(targets)]
 	for i, t := range targets {
 		targetsLower[i] = strings.ToLower(t)
 	}

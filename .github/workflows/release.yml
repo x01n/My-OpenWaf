@@ -60,43 +60,15 @@ jobs:
           git tag "$TAG" || true
           git push origin "$TAG" || true
 
-  build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    runs-on: ubuntu-latest
+  frontend:
+    name: Build frontend export
+    runs-on: ubuntu-24.04
     needs: [release-meta]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            ext: ''
-          - goos: linux
-            goarch: arm64
-            ext: ''
-          - goos: darwin
-            goarch: amd64
-            ext: ''
-          - goos: darwin
-            goarch: arm64
-            ext: ''
-          - goos: windows
-            goarch: amd64
-            ext: '.exe'
-          - goos: windows
-            goarch: arm64
-            ext: '.exe'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-meta.outputs.tag }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -111,40 +83,130 @@ jobs:
         working-directory: frontend
         run: bun run build
 
-      - name: Embed frontend export
-        run: |
-          rm -rf internal/core/adminweb/dist
-          cp -r frontend/out internal/core/adminweb/dist
+      - name: Upload frontend export
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-out
+          path: frontend/out
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    needs: [release-meta, frontend]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ''
+            runner: ubuntu-24.04
+          - goos: linux
+            goarch: arm64
+            ext: ''
+            runner: ubuntu-24.04-arm
+          - goos: darwin
+            goarch: amd64
+            ext: ''
+            runner: macos-15-intel
+          - goos: darwin
+            goarch: arm64
+            ext: ''
+            runner: macos-14
+          - goos: windows
+            goarch: amd64
+            ext: '.exe'
+            runner: windows-2022
+          - goos: windows
+            goarch: arm64
+            ext: '.exe'
+            runner: windows-11-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-meta.outputs.tag }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download frontend export
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-out
+          path: internal/core/adminweb/dist
 
       - name: Download Go modules
         run: go mod download
+
+      - name: Verify native QuickJS backend
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'
+        shell: bash
+        run: |
+          go_files="$(go list -tags=quickjs -f '{{join .GoFiles " "}}' ./internal/waf/jsplugin)"
+          case " $go_files " in
+            *" quickjs_cgo.go "*) ;;
+            *)
+              echo "::error::QuickJS native backend was not selected: $go_files"
+              exit 1
+              ;;
+          esac
+          go test -tags=quickjs -count=1 ./internal/waf/jsplugin
 
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: '0'
+          CGO_ENABLED: '1'
+        shell: bash
         run: |
           mkdir -p dist/package
           output="my-openwaf-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -trimpath -ldflags="-s -w" -o "dist/package/$output" ./cmd
+          go build -tags=quickjs -trimpath -ldflags="-s -w" -o "dist/package/$output" ./cmd
           cp README.md LICENSE dist/package/
 
       - name: Package tar.gz
         if: matrix.goos != 'windows'
+        shell: bash
         run: |
           name="my-openwaf-${{ needs.release-meta.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p dist/artifacts
           tar -C dist/package -czf "dist/artifacts/${name}.tar.gz" .
-          sha256sum "dist/artifacts/${name}.tar.gz" > "dist/artifacts/${name}.tar.gz.sha256"
 
       - name: Package zip
         if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $name = "my-openwaf-${{ needs.release-meta.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          New-Item -ItemType Directory -Force -Path dist/artifacts | Out-Null
+          Compress-Archive -Path dist/package/* -DestinationPath "dist/artifacts/${name}.zip" -Force
+
+      - name: Checksum Unix artifact
+        if: matrix.goos != 'windows'
+        shell: bash
         run: |
           name="my-openwaf-${{ needs.release-meta.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          mkdir -p dist/artifacts
-          (cd dist/package && zip -r "../artifacts/${name}.zip" .)
-          sha256sum "dist/artifacts/${name}.zip" > "dist/artifacts/${name}.zip.sha256"
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            shasum -a 256 "dist/artifacts/${name}.tar.gz" > "dist/artifacts/${name}.tar.gz.sha256"
+          else
+            sha256sum "dist/artifacts/${name}.tar.gz" > "dist/artifacts/${name}.tar.gz.sha256"
+          fi
+
+      - name: Checksum Windows artifact
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $name = "my-openwaf-${{ needs.release-meta.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          $artifact = "dist/artifacts/${name}.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $artifact).Hash.ToLowerInvariant()
+          "$hash *$([System.IO.Path]::GetFileName($artifact))" | Set-Content -NoNewline "${artifact}.sha256"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4

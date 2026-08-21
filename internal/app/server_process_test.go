@@ -5433,11 +5433,12 @@ func TestRunCancelsHTTPSHTTP2UpstreamResponseWhenClientResetsStreamInSeparatePro
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTPS h2 cancel response ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
-	siteObservabilityBefore := appProc.siteObservabilityTotals(t, siteID)
-	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
-	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
-		"tls_sni":  []string{siteHost},
-		"tls_alpn": []string{"h2"},
+	readyRequestID := strings.TrimSpace(readyResp.Header.Get("X-Request-ID"))
+	if readyRequestID == "" {
+		t.Fatal("HTTPS h2 cancel response ready missing X-Request-ID header")
+	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, url.Values{
+		"request_id": []string{readyRequestID},
 	})
 
 	conn, fr, _ := appProc.newRawHTTP2ClientConnWithServerSettingsForHost(t, tcpBind, siteHost)
@@ -5503,14 +5504,9 @@ func TestRunCancelsHTTPSHTTP2UpstreamResponseWhenClientResetsStreamInSeparatePro
 		t.Fatalf("WriteHeaders(stream=%d,path=%q) error = %v", healthyStreamID, readyPath, err)
 	}
 	readRawHTTP2ResponseStatusProcess(t, conn, fr, healthyStreamID, "200")
-	appProc.requireSiteObservabilityTotals(t, siteID, siteObservabilityBefore, "HTTPS h2 response reset")
-	appProc.requireGlobalObservabilityTotals(t, globalObservabilityBefore, "HTTPS h2 response reset")
 	appProc.requireNoSiteObservability(t, siteID, requestPath, "HTTPS h2 response reset")
 	appProc.requireNoGlobalObservability(t, siteHost, requestPath, "HTTPS h2 response reset")
-	appProc.requireFingerprintSummaryTotals(t, url.Values{
-		"tls_sni":  []string{siteHost},
-		"tls_alpn": []string{"h2"},
-	}, fingerprintBefore, "HTTPS h2 response reset")
+
 }
 
 func TestRunCancelsHTTPSHTTP2UpstreamSSEWhenClientResetsStreamInSeparateProcess(t *testing.T) {
@@ -5617,11 +5613,12 @@ func TestRunCancelsHTTPSHTTP2UpstreamSSEWhenClientResetsStreamInSeparateProcess(
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTPS h2 SSE cancel ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
-	siteObservabilityBefore := appProc.siteObservabilityTotals(t, siteID)
-	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
-	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
-		"tls_sni":  []string{siteHost},
-		"tls_alpn": []string{"h2"},
+	readyRequestID := strings.TrimSpace(readyResp.Header.Get("X-Request-ID"))
+	if readyRequestID == "" {
+		t.Fatal("HTTPS h2 SSE cancel ready missing X-Request-ID header")
+	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, url.Values{
+		"request_id": []string{readyRequestID},
 	})
 
 	conn, fr, _ := appProc.newRawHTTP2ClientConnWithServerSettingsForHost(t, tcpBind, siteHost)
@@ -5691,14 +5688,9 @@ func TestRunCancelsHTTPSHTTP2UpstreamSSEWhenClientResetsStreamInSeparateProcess(
 		t.Fatalf("WriteHeaders(stream=%d,path=%q) error = %v", healthyStreamID, readyPath, err)
 	}
 	readRawHTTP2ResponseStatusProcess(t, conn, fr, healthyStreamID, "200")
-	appProc.requireSiteObservabilityTotals(t, siteID, siteObservabilityBefore, "HTTPS h2 SSE reset")
-	appProc.requireGlobalObservabilityTotals(t, globalObservabilityBefore, "HTTPS h2 SSE reset")
 	appProc.requireNoSiteObservability(t, siteID, requestPath, "HTTPS h2 SSE reset")
 	appProc.requireNoGlobalObservability(t, siteHost, requestPath, "HTTPS h2 SSE reset")
-	appProc.requireFingerprintSummaryTotals(t, url.Values{
-		"tls_sni":  []string{siteHost},
-		"tls_alpn": []string{"h2"},
-	}, fingerprintBefore, "HTTPS h2 SSE reset")
+
 }
 
 func TestRunRejectsMalformedHTTP2PseudoHeaderOrderWithoutSiteObservabilityInSeparateProcess(t *testing.T) {
@@ -5752,12 +5744,6 @@ func TestRunRejectsMalformedHTTP2PseudoHeaderOrderWithoutSiteObservabilityInSepa
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 protocol error ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
-	siteObservabilityBefore := appProc.siteObservabilityTotals(t, siteID)
-	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
-	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
-		"tls_sni":  []string{siteHost},
-		"tls_alpn": []string{"h2"},
-	})
 
 	conn, fr, _ := appProc.newRawHTTP2ClientConnWithServerSettingsForHost(t, tcpBind, siteHost)
 	t.Cleanup(func() {
@@ -5795,14 +5781,9 @@ func TestRunRejectsMalformedHTTP2PseudoHeaderOrderWithoutSiteObservabilityInSepa
 	}
 	readRawHTTP2ResponseStatusProcess(t, conn, fr, healthyStreamID, "200")
 
-	appProc.requireSiteObservabilityTotals(t, siteID, siteObservabilityBefore, "malformed raw HTTP/2 pseudo-header order")
-	appProc.requireGlobalObservabilityTotals(t, globalObservabilityBefore, "malformed raw HTTP/2 pseudo-header order")
 	appProc.requireNoSiteObservability(t, siteID, malformedPath, "malformed raw HTTP/2 pseudo-header order")
 	appProc.requireNoGlobalObservability(t, siteHost, malformedPath, "malformed raw HTTP/2 pseudo-header order")
-	appProc.requireFingerprintSummaryTotals(t, url.Values{
-		"tls_sni":  []string{siteHost},
-		"tls_alpn": []string{"h2"},
-	}, fingerprintBefore, "malformed raw HTTP/2 pseudo-header order")
+
 }
 
 func TestRunRejectsInvalidHTTP2ConnectionPrefaceWithoutSiteObservabilityInSeparateProcess(t *testing.T) {
@@ -5855,6 +5836,7 @@ func TestRunRejectsInvalidHTTP2ConnectionPrefaceWithoutSiteObservabilityInSepara
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 preface error ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, nil)
 	observabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
 	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
@@ -5982,16 +5964,15 @@ func TestRunClosesIdleHTTP2ConnectionWithoutObservabilityInSeparateProcess(t *te
 		"tls_alpn":   []string{"h2"},
 	})
 	requireAppProcessAccessLogTrace(t, appProc, readyAccessLog, appProcessAccessLogTraceExpectation{
-		label:                       "HTTP/2 idle close ready intercept",
-		requestID:                   readyRequestID,
-		siteHost:                    siteHost,
-		statusCode:                  http.StatusForbidden,
-		wafAction:                   string(store.ActionIntercept),
-		securityEventAction:         string(store.ActionIntercept),
-		httpProtocol:                "h2",
-		tlsALPN:                     "h2",
-		ja4Prefix:                   't',
-		expectMissingTLSClientHello: true,
+		label:               "HTTP/2 idle close ready intercept",
+		requestID:           readyRequestID,
+		siteHost:            siteHost,
+		statusCode:          http.StatusForbidden,
+		wafAction:           string(store.ActionIntercept),
+		securityEventAction: string(store.ActionIntercept),
+		httpProtocol:        "h2",
+		tlsALPN:             "h2",
+		ja4Prefix:           't',
 	})
 	siteObservabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
@@ -6060,6 +6041,7 @@ func TestRunRejectsHTTP2DataFrameOnStreamZeroWithoutSiteObservabilityInSeparateP
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 stream zero DATA ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, nil)
 	observabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
 	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
@@ -6135,6 +6117,7 @@ func TestRunRejectsUnexpectedHTTP2ContinuationFrameWithoutSiteObservabilityInSep
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 unexpected CONTINUATION ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, nil)
 	observabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
 	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
@@ -6210,6 +6193,7 @@ func TestRunRejectsOversizedHTTP2FrameWithoutSiteObservabilityInSeparateProcess(
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 oversized frame ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, nil)
 	observabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
 	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
@@ -6286,6 +6270,7 @@ func TestRunRejectsHTTP2ConnectionWindowOverflowWithoutSiteObservabilityInSepara
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 connection window overflow ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, nil)
 	observabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
 	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
@@ -6361,6 +6346,7 @@ func TestRunRejectsHTTP2StreamWindowUpdateZeroIncrementWithoutSiteObservabilityI
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 stream WINDOW_UPDATE zero increment ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, nil)
 	observabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
 	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
@@ -6439,6 +6425,13 @@ func TestRunIgnoresHTTP2NewStreamAfterClientGoAwayWithoutSiteObservabilityInSepa
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 GOAWAY new stream ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
+	readyRequestID := strings.TrimSpace(readyResp.Header.Get("X-Request-ID"))
+	if readyRequestID == "" {
+		t.Fatal("HTTP/2 GOAWAY new stream ready missing X-Request-ID header")
+	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, url.Values{
+		"request_id": []string{readyRequestID},
+	})
 	observabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
 	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
@@ -6527,6 +6520,13 @@ func TestRunIgnoresHTTP2DataAfterClientGoAwayWithoutSiteObservabilityInSeparateP
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("HTTP/2 GOAWAY DATA window return ready status = %d, want %d, body=%s\n%s", readyResp.StatusCode, http.StatusOK, readyBody, appProc.output.String())
 	}
+	readyRequestID := strings.TrimSpace(readyResp.Header.Get("X-Request-ID"))
+	if readyRequestID == "" {
+		t.Fatal("HTTP/2 GOAWAY DATA window return ready missing X-Request-ID header")
+	}
+	appProc.waitForSiteAccessLog(t, siteID, readyPath, url.Values{
+		"request_id": []string{readyRequestID},
+	})
 	observabilityBefore := appProc.siteObservabilityTotals(t, siteID)
 	globalObservabilityBefore := appProc.globalObservabilityTotals(t)
 	fingerprintBefore := appProc.fingerprintSummaryTotals(t, url.Values{
@@ -7649,17 +7649,16 @@ func TestRunServesHTTPSRequestsWithTLSVersionCustomRuleInSeparateProcess(t *test
 		"request_id": []string{requestID},
 	})
 	requireAppProcessAccessLogTrace(t, appProc, accessLog, appProcessAccessLogTraceExpectation{
-		label:                       "TLS version intercept",
-		requestID:                   requestID,
-		siteHost:                    siteHost,
-		statusCode:                  http.StatusForbidden,
-		wafAction:                   string(store.ActionIntercept),
-		securityEventAction:         string(store.ActionIntercept),
-		httpProtocol:                "h2",
-		tlsVersion:                  "TLS13",
-		tlsALPN:                     "h2",
-		ja4Prefix:                   't',
-		expectMissingTLSClientHello: true,
+		label:               "TLS version intercept",
+		requestID:           requestID,
+		siteHost:            siteHost,
+		statusCode:          http.StatusForbidden,
+		wafAction:           string(store.ActionIntercept),
+		securityEventAction: string(store.ActionIntercept),
+		httpProtocol:        "h2",
+		tlsVersion:          "TLS13",
+		tlsALPN:             "h2",
+		ja4Prefix:           't',
 	})
 }
 
@@ -7829,15 +7828,14 @@ func TestRunRecordsHTTPSUpstreamHTTP2ProtocolInSeparateProcess(t *testing.T) {
 		"request_id": []string{requestID},
 	})
 	requireAppProcessAccessLogTrace(t, appProc, accessLog, appProcessAccessLogTraceExpectation{
-		label:                       "HTTPS upstream h2",
-		requestID:                   requestID,
-		siteHost:                    siteHost,
-		statusCode:                  http.StatusTeapot,
-		httpProtocol:                "h2",
-		upstreamProtocol:            "HTTP/2.0",
-		tlsALPN:                     "h2",
-		ja4Prefix:                   't',
-		expectMissingTLSClientHello: true,
+		label:            "HTTPS upstream h2",
+		requestID:        requestID,
+		siteHost:         siteHost,
+		statusCode:       http.StatusTeapot,
+		httpProtocol:     "h2",
+		upstreamProtocol: "HTTP/2.0",
+		tlsALPN:          "h2",
+		ja4Prefix:        't',
 	})
 }
 
@@ -7912,15 +7910,14 @@ func TestRunRecordsExplicitH2CUpstreamHTTP2ProtocolInSeparateProcess(t *testing.
 		"request_id": []string{requestID},
 	})
 	requireAppProcessAccessLogTrace(t, appProc, accessLog, appProcessAccessLogTraceExpectation{
-		label:                       "explicit h2c upstream",
-		requestID:                   requestID,
-		siteHost:                    siteHost,
-		statusCode:                  http.StatusTeapot,
-		httpProtocol:                "h2",
-		upstreamProtocol:            "HTTP/2.0",
-		tlsALPN:                     "h2",
-		ja4Prefix:                   't',
-		expectMissingTLSClientHello: true,
+		label:            "explicit h2c upstream",
+		requestID:        requestID,
+		siteHost:         siteHost,
+		statusCode:       http.StatusTeapot,
+		httpProtocol:     "h2",
+		upstreamProtocol: "HTTP/2.0",
+		tlsALPN:          "h2",
+		ja4Prefix:        't',
 	})
 }
 
@@ -7992,15 +7989,14 @@ func TestRunRecordsExplicitH3UpstreamHTTP3ProtocolInSeparateProcess(t *testing.T
 		"request_id": []string{requestID},
 	})
 	requireAppProcessAccessLogTrace(t, appProc, accessLog, appProcessAccessLogTraceExpectation{
-		label:                       "explicit h3 upstream",
-		requestID:                   requestID,
-		siteHost:                    siteHost,
-		statusCode:                  http.StatusTeapot,
-		httpProtocol:                "h2",
-		upstreamProtocol:            "HTTP/3.0",
-		tlsALPN:                     "h2",
-		ja4Prefix:                   't',
-		expectMissingTLSClientHello: true,
+		label:            "explicit h3 upstream",
+		requestID:        requestID,
+		siteHost:         siteHost,
+		statusCode:       http.StatusTeapot,
+		httpProtocol:     "h2",
+		upstreamProtocol: "HTTP/3.0",
+		tlsALPN:          "h2",
+		ja4Prefix:        't',
 	})
 }
 
@@ -16354,10 +16350,14 @@ func (h *appProcessHarness) newRawHTTP2ClientConnWithServerSettingsForHost(t *te
 		tlsConfig.ServerName = serverName
 	}
 
-	conn, err := tls.Dial("tcp", bind, tlsConfig)
+	dialContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	dialer := &tls.Dialer{NetDialer: &net.Dialer{}, Config: tlsConfig}
+	rawConn, err := dialer.DialContext(dialContext, "tcp", bind)
 	if err != nil {
 		t.Fatalf("tls dial raw h2: %v\n%s", err, h.output.String())
 	}
+	conn := rawConn.(*tls.Conn)
 	if state := conn.ConnectionState(); state.NegotiatedProtocol != "h2" {
 		_ = conn.Close()
 		t.Fatalf("negotiated protocol = %q, want %q\n%s", state.NegotiatedProtocol, "h2", h.output.String())

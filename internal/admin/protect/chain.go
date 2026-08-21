@@ -72,6 +72,13 @@ func normalizeChainStepPayload(raw json.RawMessage) (string, bool) {
 			if step.Type != challenge.ChainStepCaptcha {
 				captchaType = ""
 			} else {
+				if captchaType != "" {
+					switch captchaType {
+					case challenge.CaptchaTypeMath, challenge.CaptchaTypeClick, challenge.CaptchaTypeSlide, challenge.CaptchaTypeRotate:
+					default:
+						return "", false
+					}
+				}
 				// CAPTCHA 步骤存在时必须执行，不得被客户端环境分数条件跳过。
 				condition = "all"
 			}
@@ -94,7 +101,7 @@ func UpdateChainConfig(repo *repository.SystemSettingsRepo, reload func() error)
 			ChainSteps   *json.RawMessage `json:"chain_steps"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
@@ -104,7 +111,7 @@ func UpdateChainConfig(repo *repository.SystemSettingsRepo, reload func() error)
 		}
 		if req.ChainSteps != nil {
 			if steps, ok := normalizeChainStepPayload(*req.ChainSteps); !ok {
-				c.JSON(400, map[string]string{"error": "chain_steps contains unsupported step type"})
+				c.JSON(400, map[string]string{"error": "chain_steps contains unsupported step type or captcha_type"})
 				return
 			} else if steps != "" {
 				cfg.ChainSteps = steps

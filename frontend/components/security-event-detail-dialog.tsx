@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"
 import {
@@ -39,152 +38,26 @@ import {
 import type { AccessLog, SecurityEvent, IPEntry } from "@/lib/types"
 import { ipListApi, falsePositiveApi, requestTraceApi } from "@/lib/api"
 import { countryFlag, countryName } from "@/lib/country-names"
-import { categoryLabel } from "@/lib/attack-category"
+import { categoryLabel, phaseLabel } from "@/lib/attack-category"
+import { localizeMatchDesc } from "@/lib/match-desc-i18n"
 import { IpHoverPreview } from "@/components/ip-hover-preview"
 import { cn } from "@/lib/utils"
+import { invalidateIPListCaches } from "@/hooks/use-api"
+import {
+  applyEncoding,
+  capMessage,
+  headerDisplayValue,
+  MessageView,
+  parseHeaderEntries,
+  redactBodyPreview,
+  redactQueryString,
+  wireProtocolLabel,
+} from "@/components/http-message-view"
 
 interface SecurityEventDetailDialogProps {
   event: SecurityEvent | null
   open: boolean
   onOpenChange: (open: boolean) => void
-}
-
-/** 报文区渲染字符上限，超出部分截断展示，避免超大报文拖垮渲染 */
-const MAX_MESSAGE_CHARS = 16384
-
-/** 脱敏占位符，与后端 internal/dataplane/handler.go 保持一致 */
-const REDACTED = "[redacted]"
-
-/**
- * 敏感头部名称片段，与后端 isSensitiveLogKey
- * (internal/dataplane/handler.go) 的列表保持一致。
- * 后端写入时已脱敏，此处为前端二次防御：历史数据或非常规写入路径同样不泄露。
- */
-const SENSITIVE_KEY_PARTS = [
-  "authorization",
-  "cookie",
-  "token",
-  "secret",
-  "password",
-  "passwd",
-  "pwd",
-  "session",
-  "api-key",
-  "apikey",
-  "csrf",
-  "credential",
-  "key",
-]
-
-/**
- * 判断头部名称是否命中敏感片段。
- *
- * @param name 头部名称
- * @returns 命中任一敏感片段时返回 true
- */
-function isSensitiveHeaderName(name: string): boolean {
-  const lower = name.toLowerCase()
-  return SENSITIVE_KEY_PARTS.some((part) => lower.includes(part))
-}
-
-/** 单条头部条目 */
-interface HeaderEntry {
-  name: string
-  value: string
-  sensitive: boolean
-}
-
-/**
- * 解析头部字段。
- *
- * 后端 requestHeadersJSON / responseHeadersJSON
- * (internal/dataplane/handler.go) 以 JSON 对象
- * `{"Name":["v1","v2"]}` 形式落库；早期数据可能为换行分隔文本，
- * 因此保留文本回退分支。
- *
- * @param raw 落库的头部字符串
- * @param order `header_order` 字段（逗号分隔），用于还原真实上报顺序
- * @returns 有序头部条目列表
- */
-function parseHeaderEntries(raw?: string, order?: string): HeaderEntry[] {
-  const text = (raw || "").trim()
-  if (!text) return []
-
-  if (text.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(text) as Record<string, unknown>
-      const entries: HeaderEntry[] = []
-      const consumed = new Set<string>()
-
-      const push = (key: string) => {
-        const value = parsed[key]
-        const values = Array.isArray(value) ? value : [value]
-        for (const item of values) {
-          entries.push({
-            name: key,
-            value: item == null ? "" : String(item),
-            sensitive: isSensitiveHeaderName(key),
-          })
-        }
-      }
-
-      // header_order 与 headers 的 key 同源于 Hertz VisitAll 的 string(k)，可直接精确匹配
-      for (const rawName of (order || "").split(",")) {
-        const name = rawName.trim()
-        if (!name || consumed.has(name)) continue
-        if (Object.prototype.hasOwnProperty.call(parsed, name)) {
-          consumed.add(name)
-          push(name)
-        }
-      }
-      for (const key of Object.keys(parsed)) {
-        if (consumed.has(key)) continue
-        consumed.add(key)
-        push(key)
-      }
-      return entries
-    } catch {
-      // JSON 解析失败时按文本格式处理
-    }
-  }
-
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const idx = line.indexOf(":")
-      const name = idx > 0 ? line.slice(0, idx) : line
-      const value = idx > 0 ? line.slice(idx + 1).trim() : ""
-      return { name, value, sensitive: isSensitiveHeaderName(name) }
-    })
-}
-
-/**
- * 取头部展示值：敏感头部一律以占位符替换。
- */
-function headerDisplayValue(entry: HeaderEntry): string {
-  return entry.sensitive ? REDACTED : entry.value
-}
-
-/**
- * 按所选编码转换文本。ASCII 模式下将非 ASCII 字符转义为 \xHH / \uHHHH。
- */
-function applyEncoding(text: string, encoding: "utf8" | "ascii"): string {
-  if (encoding !== "ascii") return text
-  return text.replace(/[^\x00-\x7F]/g, (ch) => {
-    const cp = ch.codePointAt(0) ?? 0
-    if (cp <= 0xff) return `\\x${cp.toString(16).padStart(2, "0")}`
-    return `\\u${cp.toString(16).padStart(4, "0")}`
-  })
-}
-
-/**
- * 截断超长报文并追加提示标记。
- */
-function capMessage(text: string, truncatedLabel: string): string {
-  if (text.length <= MAX_MESSAGE_CHARS) return text
-  return `${text.slice(0, MAX_MESSAGE_CHARS)}\n... [${truncatedLabel}]`
 }
 
 /** 判断动作是否属于拦截/阻断类型 */
@@ -230,34 +103,9 @@ function buildFullUrl(ev: SecurityEvent): string {
   const scheme = ev.tls_version ? "https" : "http"
   const host = ev.host || "unknown"
   const path = ev.path || "/"
-  const qs = ev.query_string ? `?${ev.query_string}` : ""
+  const safeQuery = redactQueryString(ev.query_string)
+  const qs = safeQuery ? `?${safeQuery}` : ""
   return `${scheme}://${host}${path}${qs}`
-}
-
-/**
- * 将访问日志的 `http_protocol` 还原为报文中的协议标识。
- *
- * 后端 normalizeHTTPProtocol (internal/dataplane/handler.go) 把协议归一化为
- * ALPN 风格的 token，此处为其精确逆映射；无法确定对应关系的取值（例如回退到
- * X-Forwarded-Proto 的 `https`）返回空串，不做任何推测。
- *
- * @param token 访问日志中的 `http_protocol`
- * @returns 报文协议标识，未知时为空串
- */
-function wireProtocolLabel(token?: string): string {
-  switch ((token || "").toLowerCase()) {
-    case "http/1.0":
-      return "HTTP/1.0"
-    case "http/1.1":
-      return "HTTP/1.1"
-    case "h2":
-    case "h2c":
-      return "HTTP/2"
-    case "h3":
-      return "HTTP/3"
-    default:
-      return ""
-  }
 }
 
 /**
@@ -275,7 +123,8 @@ function reconstructRequest(
   labels: { bodyTruncated: string; displayTruncated: string }
 ): string {
   const path = ev.path || "/"
-  const qs = ev.query_string ? `?${ev.query_string}` : ""
+  const safeQuery = redactQueryString(ev.query_string)
+  const qs = safeQuery ? `?${safeQuery}` : ""
   const requestLine = [ev.method, `${path}${qs}`, protocol]
     .filter(Boolean)
     .join(" ")
@@ -290,7 +139,10 @@ function reconstructRequest(
 
   let text = lines.join("\n")
   if (ev.request_body_preview) {
-    text += `\n\n${ev.request_body_preview}`
+    text += `\n\n${redactBodyPreview(
+      ev.request_body_preview,
+      ev.request_headers
+    )}`
     if (ev.request_body_truncated) text += `\n... [${labels.bodyTruncated}]`
   }
   return capMessage(applyEncoding(text, encoding), labels.displayTruncated)
@@ -339,65 +191,14 @@ function buildCurlCommand(ev: SecurityEvent): string {
     cmd += ` \\\n  -H '${entry.name}: ${value}'`
   }
   if (ev.request_body_preview) {
-    const escaped = ev.request_body_preview.replace(/'/g, "'\\''")
+    const escaped = redactBodyPreview(
+      ev.request_body_preview,
+      ev.request_headers
+    ).replace(/'/g, "'\\''")
     cmd += ` \\\n  --data '${escaped}'`
   }
   if (ev.tls_version) cmd += " \\\n  --insecure"
   return cmd
-}
-
-/**
- * HTTP 报文语法高亮渲染：首行方法/路径/协议着色，其余按 `名称: 值` 着色。
- */
-function renderHttpSyntax(raw: string): React.ReactNode {
-  return raw.split(/\r?\n/).map((line, i) => {
-    if (i === 0) {
-      const parts = line.match(/^(\S+)\s(.*?)(?:\s(HTTP\/\S+))?$/)
-      if (parts) {
-        return (
-          <span key={i}>
-            <span className="font-semibold text-teal-700 dark:text-emerald-400">
-              {parts[1]}
-            </span>
-            {parts[2] ? (
-              <>
-                {" "}
-                <span className="text-sky-700 dark:text-sky-300">
-                  {parts[2]}
-                </span>
-              </>
-            ) : null}
-            {parts[3] ? (
-              <>
-                {" "}
-                <span className="text-muted-foreground">{parts[3]}</span>
-              </>
-            ) : null}
-            {"\n"}
-          </span>
-        )
-      }
-    }
-    const colonIdx = line.indexOf(":")
-    if (colonIdx > 0 && i > 0 && !/^[\s\t]/.test(line)) {
-      const name = line.slice(0, colonIdx)
-      const value = line.slice(colonIdx + 1)
-      return (
-        <span key={i}>
-          <span className="text-amber-700 dark:text-amber-400">{name}</span>
-          <span className="text-muted-foreground">:</span>
-          <span className="text-foreground/80">{value}</span>
-          {"\n"}
-        </span>
-      )
-    }
-    return (
-      <span key={i}>
-        {line}
-        {"\n"}
-      </span>
-    )
-  })
 }
 
 /**
@@ -412,6 +213,9 @@ function copyToClipboard(text: string, successMsg: string, failMsg: string) {
 
 /**
  * 印章角标：Deny / Allow / Observe，纯视觉装饰。
+ *
+ * 窄屏隐藏：动作语义已由左上角动作徽章完整表达，此处不承载独有信息；
+ * 而窄屏取消 pr-28 预留后印章会压住 URL 与详情行。
  */
 function StampBadge({ variant }: { variant: "deny" | "allow" | "observe" }) {
   const cls =
@@ -420,11 +224,16 @@ function StampBadge({ variant }: { variant: "deny" | "allow" | "observe" }) {
       : variant === "allow"
         ? "border-emerald-500/70 text-emerald-500/85"
         : "border-amber-500/70 text-amber-500/85"
+  const { t } = useTranslation()
   const text =
-    variant === "deny" ? "Deny" : variant === "allow" ? "Allow" : "Observe"
+    variant === "deny"
+      ? t("securityEventDetail.stampDeny")
+      : variant === "allow"
+        ? t("securityEventDetail.stampAllow")
+        : t("securityEventDetail.stampObserve")
   return (
     <div
-      className="pointer-events-none absolute top-1/2 right-5 -translate-y-1/2 -rotate-12 opacity-80 select-none"
+      className="pointer-events-none absolute top-1/2 right-5 hidden -translate-y-1/2 -rotate-12 opacity-80 select-none sm:block"
       aria-hidden
     >
       <div className={cn("rounded-lg border-2 border-dashed p-1", cls)}>
@@ -460,39 +269,6 @@ function DetailRow({
 }
 
 /**
- * 报文展示区：等宽字体 + 语法高亮 + 响应式高度滚动。
- */
-function MessageView({
-  text,
-  empty,
-  fontScale,
-}: {
-  text: string
-  empty: string
-  fontScale: number
-}) {
-  const messageFontSize = `${0.75 * fontScale}rem`
-
-  if (!text) {
-    return (
-      <div className="flex h-[clamp(220px,42dvh,420px)] min-h-0 items-center justify-center rounded-lg border border-dashed bg-muted/20 px-6 text-center text-xs text-muted-foreground">
-        {empty}
-      </div>
-    )
-  }
-  return (
-    <ScrollArea className="h-[clamp(220px,42dvh,420px)] min-h-0 rounded-lg border bg-muted/30 dark:bg-zinc-950/60">
-      <pre
-        className="p-4 font-mono leading-relaxed break-all whitespace-pre-wrap"
-        style={{ fontSize: messageFontSize }}
-      >
-        {renderHttpSyntax(text)}
-      </pre>
-    </ScrollArea>
-  )
-}
-
-/**
  * 安全事件详情弹窗。
  *
  * 顶部信息卡展示动作徽章、请求 URL、Deny 印章与关键字段；
@@ -507,7 +283,7 @@ export function SecurityEventDetailDialog({
   open,
   onOpenChange,
 }: SecurityEventDetailDialogProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [encoding, setEncoding] = useState<"utf8" | "ascii">("utf8")
   const [messageScale, setMessageScale] = useState(1)
   const [fingerprintOpen, setFingerprintOpen] = useState(false)
@@ -537,6 +313,9 @@ export function SecurityEventDetailDialog({
       allow: t("securityEvents.action.allow"),
       drop: t("securityEvents.action.drop"),
       log_only: t("securityEvents.action.log_only"),
+      rate_limit: t("securityEvents.action.rate_limit"),
+      redirect: t("securityEvents.action.redirect"),
+      tag: t("securityEvents.action.tag"),
     }),
     [t]
   )
@@ -544,7 +323,11 @@ export function SecurityEventDetailDialog({
   if (!event) {
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-4xl" />
+        <DialogContent className="max-w-4xl">
+          <span className="sr-only">
+            <DialogTitle>{t("securityEventDetail.dialogTitle")}</DialogTitle>
+          </span>
+        </DialogContent>
       </Dialog>
     )
   }
@@ -607,6 +390,7 @@ export function SecurityEventDetailDialog({
         note: t("securityEventDetail.blocklistNote", { id: ev.id }),
       }
       await ipListApi.create(payload)
+      await invalidateIPListCaches().catch(() => undefined)
       toast.success(t("securityEventDetail.addedToBlocklist"))
     } catch {
       toast.error(t("securityEventDetail.addBlocklistFailed"))
@@ -620,13 +404,6 @@ export function SecurityEventDetailDialog({
     try {
       await falsePositiveApi.create({
         security_event_id: ev.id,
-        request_id: ev.request_id,
-        rule_id_str: ev.rule_id_str || String(ev.rule_id ?? ""),
-        category: ev.category,
-        client_ip: ev.client_ip,
-        host: ev.host,
-        path: ev.path,
-        match_desc: ev.match_desc || "",
         note: fpNote,
       })
       toast.success(t("falsePositives.submitSuccess"))
@@ -640,17 +417,17 @@ export function SecurityEventDetailDialog({
 
   /** 指纹字段清单，仅渲染后端实际返回的项 */
   const fingerprintFields: Array<{ label: string; value?: string }> = [
-    { label: "TLS Version", value: ev.tls_version },
-    { label: "SNI", value: ev.tls_sni },
-    { label: "ALPN", value: ev.tls_alpn },
-    { label: "tls_ja4", value: ev.tls_ja4 },
-    { label: "tls_ja3_hash", value: ev.tls_ja3_hash },
-    { label: "tls_ja3", value: ev.tls_ja3 },
-    { label: "Cipher Suites", value: ev.tls_cipher_suites },
-    { label: "Extensions", value: ev.tls_extensions },
-    { label: "Curves", value: ev.tls_curves },
-    { label: "Point Formats", value: ev.tls_point_formats },
-    { label: "Header Order", value: ev.header_order },
+    { label: t("securityEventDetail.tlsVersion"), value: ev.tls_version },
+    { label: t("securityEventDetail.sni"), value: ev.tls_sni },
+    { label: t("securityEventDetail.alpn"), value: ev.tls_alpn },
+    { label: t("securityEventDetail.tlsJa4"), value: ev.tls_ja4 },
+    { label: t("securityEventDetail.tlsJa3Hash"), value: ev.tls_ja3_hash },
+    { label: t("securityEventDetail.tlsJa3"), value: ev.tls_ja3 },
+    { label: t("securityEventDetail.cipherSuites"), value: ev.tls_cipher_suites },
+    { label: t("securityEventDetail.extensions"), value: ev.tls_extensions },
+    { label: t("securityEventDetail.curves"), value: ev.tls_curves },
+    { label: t("securityEventDetail.pointFormats"), value: ev.tls_point_formats },
+    { label: t("securityEventDetail.headerOrder"), value: ev.header_order },
   ]
 
   return (
@@ -661,10 +438,8 @@ export function SecurityEventDetailDialog({
             <DialogTitle>{t("securityEventDetail.dialogTitle")}</DialogTitle>
             <DialogDescription>{fullUrl}</DialogDescription>
           </div>
-
-          {/* ====== 信息卡 ====== */}
-          <div className="relative overflow-hidden rounded-xl border bg-background px-5 py-4 shadow-sm">
-            <div className="flex items-start gap-2.5 pr-28">
+          <div className="relative overflow-hidden rounded-xl border bg-background px-3 py-3 shadow-sm sm:px-5 sm:py-4">
+            <div className="flex items-start gap-2.5 pr-0 sm:pr-28">
               <Badge
                 className={cn(
                   "mt-0.5 shrink-0 border px-2 py-0.5 text-xs font-semibold",
@@ -749,7 +524,10 @@ export function SecurityEventDetailDialog({
               <DetailRow label={t("securityEventDetail.attackPayload")}>
                 {ev.match_desc ? (
                   <code className="inline-block max-w-full rounded border border-red-500/20 bg-red-500/5 px-2 py-1 font-mono text-xs leading-relaxed break-all text-red-700 dark:text-red-300">
-                    {ev.match_desc}
+                    {localizeMatchDesc(
+                      ev.match_desc,
+                      i18n.resolvedLanguage ?? i18n.language
+                    )}
                   </code>
                 ) : (
                   <span className="text-muted-foreground">-</span>
@@ -765,7 +543,7 @@ export function SecurityEventDetailDialog({
                       variant="secondary"
                       className="h-4 px-1.5 font-mono text-[10px] font-normal"
                     >
-                      {ev.phase}
+                      {phaseLabel(ev.phase)}
                     </Badge>
                   )}
                 </div>
@@ -800,7 +578,7 @@ export function SecurityEventDetailDialog({
                     variant="secondary"
                     className="h-5 px-1.5 text-[10px] font-normal"
                   >
-                    site #{ev.site_id}
+                    {t("securityEventDetail.site")} #{ev.site_id}
                   </Badge>
                 </div>
               </DetailRow>
@@ -870,30 +648,31 @@ export function SecurityEventDetailDialog({
             </div>
           </div>
 
-          {/* ====== 报文区 ====== */}
-          <div className="mt-4 rounded-xl border bg-background px-5 py-4 shadow-sm">
+          <div className="mt-4 rounded-xl border bg-background px-3 py-3 shadow-sm sm:px-5 sm:py-4">
             <Tabs defaultValue="request">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <TabsList>
-                  <TabsTrigger value="request">
-                    {t("securityEventDetail.requestMessage")}
-                  </TabsTrigger>
-                  <TabsTrigger value="response">
-                    {t("securityEventDetail.responseMessage")}
-                  </TabsTrigger>
-                </TabsList>
+                <div className="max-w-full min-w-0 overflow-x-auto">
+                  <TabsList className="w-max">
+                    <TabsTrigger value="request">
+                      {t("securityEventDetail.requestMessage")}
+                    </TabsTrigger>
+                    <TabsTrigger value="response">
+                      {t("securityEventDetail.responseMessage")}
+                    </TabsTrigger>
+                  </TabsList>
+                </div>
                 <div
                   className="flex flex-wrap items-center gap-1.5"
                   role="group"
-                  aria-label="Message text size"
+                  aria-label={t("securityEventDetail.messageTextSize")}
                 >
                   <Button
                     type="button"
                     variant="outline"
                     size="icon-sm"
                     className="h-7 w-7"
-                    aria-label="Decrease message text size"
-                    title="Decrease message text size"
+                    aria-label={t("securityEventDetail.decreaseMessageTextSize")}
+                    title={t("securityEventDetail.decreaseMessageTextSize")}
                     disabled={messageScale <= 0.8}
                     onClick={() =>
                       setMessageScale((value) =>
@@ -914,8 +693,8 @@ export function SecurityEventDetailDialog({
                     variant="outline"
                     size="icon-sm"
                     className="h-7 w-7"
-                    aria-label="Increase message text size"
-                    title="Increase message text size"
+                    aria-label={t("securityEventDetail.increaseMessageTextSize")}
+                    title={t("securityEventDetail.increaseMessageTextSize")}
                     disabled={messageScale >= 1.4}
                     onClick={() =>
                       setMessageScale((value) =>
@@ -930,8 +709,8 @@ export function SecurityEventDetailDialog({
                     variant="ghost"
                     size="icon-sm"
                     className="h-7 w-7"
-                    aria-label="Reset message text size"
-                    title="Reset message text size"
+                    aria-label={t("securityEventDetail.resetMessageTextSize")}
+                    title={t("securityEventDetail.resetMessageTextSize")}
                     onClick={() => setMessageScale(1)}
                   >
                     <IconRefresh className="h-3.5 w-3.5" />
@@ -955,6 +734,7 @@ export function SecurityEventDetailDialog({
                 <MessageView
                   text={requestText}
                   empty={t("securityEventDetail.noRequestData")}
+                  label={t("securityEventDetail.requestMessage")}
                   fontScale={messageScale}
                 />
               </TabsContent>
@@ -968,6 +748,7 @@ export function SecurityEventDetailDialog({
                       : t("securityEventDetail.noResponseData")
                   }
                   fontScale={messageScale}
+                  label={t("securityEventDetail.responseMessage")}
                 />
                 {responseText && (
                   <p className="mt-2 text-[11px] text-muted-foreground">
@@ -1012,8 +793,6 @@ export function SecurityEventDetailDialog({
               {t("securityEventDetail.redactionHint")}
             </p>
           </div>
-
-          {/* ====== 底部操作栏 ====== */}
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-4">
               <Button
@@ -1047,8 +826,6 @@ export function SecurityEventDetailDialog({
           </div>
         </DialogContent>
       </Dialog>
-
-      {/* ====== 误报反馈提交对话框 ====== */}
       <Dialog open={fpDialogOpen} onOpenChange={setFpDialogOpen}>
         <DialogContent className="max-w-md">
           <DialogTitle>{t("falsePositives.reportDialogTitle")}</DialogTitle>

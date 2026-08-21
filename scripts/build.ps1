@@ -14,6 +14,7 @@ Copy-Item -Recurse "$root\frontend\out" $dest
 Push-Location $root
 go mod tidy
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-go build -o bin\my-openwaf.exe ./cmd/...
+$env:CGO_ENABLED = "1"
+go build -tags=quickjs -o bin\my-openwaf.exe ./cmd/...
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Pop-Location

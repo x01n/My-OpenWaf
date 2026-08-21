@@ -88,7 +88,7 @@ window.__owaf_pow_callback=function(c,h){
 {{else if .Captcha.IsSlide}}
 <img src="{{.Captcha.MasterImg}}" alt="CAPTCHA"><img id="slide-thumb" class="thumb slide-thumb" src="{{.Captcha.ThumbImg}}" alt="slider"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="{{.Captcha.SlideWidth}}" value="0" id="slide-range">
 {{else if .Captcha.IsRotate}}
-<img id="cap-img" src="{{.Captcha.MasterImg}}" alt="CAPTCHA"><img class="thumb" src="{{.Captcha.ThumbImg}}" alt="target"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="360" value="0" id="rotate-range">
+<img src="{{.Captcha.MasterImg}}" alt="CAPTCHA"><img id="rotate-thumb" class="thumb" src="{{.Captcha.ThumbImg}}" alt="target"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="360" value="0" id="rotate-range">
 {{else}}
 <img src="{{.Captcha.MasterImg}}" alt="CAPTCHA"><input type="text" class="ci" id="ans" placeholder="{{.Captcha.Prompt}}" autocomplete="off">
 {{end}}
@@ -110,8 +110,8 @@ if(type==='click'&&img){
 }
 var slide=document.getElementById('slide-range');var thumb=document.getElementById('slide-thumb');
 if(type==='slide'&&slide){slide.addEventListener('input',function(){answer.value=JSON.stringify({x:Number(slide.value)});if(thumb){thumb.style.transform='translateX('+slide.value+'px)';}});}
-var rotate=document.getElementById('rotate-range');
-if(type==='rotate'&&rotate&&img){rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});img.style.transform='rotate('+rotate.value+'deg)';});}
+var rotate=document.getElementById('rotate-range');var rotateThumb=document.getElementById('rotate-thumb');
+if(type==='rotate'&&rotate&&rotateThumb){rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});rotateThumb.style.transform='rotate('+rotate.value+'deg)';});}
 })();
 function go(){var a=document.getElementById('ans').value.trim();if(!a)return;
 var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';

@@ -28,17 +28,17 @@ func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
 		}
 	}
 	for i := 1; i <= 7; i++ {
-		add(fmt.Sprintf("owasp:upload:%03d", i), string(CatFileUpload), "File upload validation rule")
+		add(fmt.Sprintf("owasp:upload:%03d", i), string(CatFileUpload), "文件上传校验规则")
 	}
 	for i := 1; i <= 10; i++ {
-		add(fmt.Sprintf("owasp:proto:%03d", i), string(CatProtoViol), "HTTP protocol validation rule")
+		add(fmt.Sprintf("owasp:proto:%03d", i), string(CatProtoViol), "HTTP 协议校验规则")
 	}
 	pathCategories := []OWASPCategory{CatCmdInject, CatDeserial, CatDeserial, CatDeserial, CatExprLang, CatPathTrav, CatWebshell, CatSSRF, CatCmdInject, CatPathTrav, CatPathTrav, CatCmdInject, CatXXE, CatPathTrav, CatPathTrav, CatCmdInject, CatCmdInject}
 	for i, category := range pathCategories {
-		add(fmt.Sprintf("owasp:path:%03d", i+1), string(category), "High-risk request path rule")
+		add(fmt.Sprintf("owasp:path:%03d", i+1), string(category), "高危请求路径规则")
 	}
-	add("owasp:deser:012", string(CatDeserial), "URL-encoded Java serialization magic bytes")
-	add("owasp:crlf:005", string(CatCRLF), "Bare CR/LF in URL path")
+	add("owasp:deser:012", string(CatDeserial), "URL 编码的 Java 反序列化魔术字节")
+	add("owasp:crlf:005", string(CatCRLF), "URL 路径中的裸 CR/LF")
 
 	items := make([]store.OWASPRuleCatalog, 0, len(definitions))
 	for _, item := range definitions {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -34,6 +35,25 @@ func seedBackupData(t *testing.T, db *gorm.DB) {
 	if err := db.Create(&policy).Error; err != nil {
 		t.Fatalf("create policy: %v", err)
 	}
+	enabled := false
+	action := "observe"
+	sensitivity := "strict"
+	statusCode := 429
+	redirectTo := "/verify"
+	whitelist := `["/health","/metrics"]`
+	owaspConfig := PolicyOWASPRuleConfig{
+		PolicyID:    policy.ID,
+		RuleID:      "owasp:test:backup",
+		Enabled:     &enabled,
+		Action:      &action,
+		Sensitivity: &sensitivity,
+		StatusCode:  &statusCode,
+		RedirectTo:  &redirectTo,
+		Whitelist:   &whitelist,
+	}
+	if err := db.Create(&owaspConfig).Error; err != nil {
+		t.Fatalf("create policy OWASP rule config: %v", err)
+	}
 	site := Site{Host: "example.com", Bind: ":8080", CertID: &cert.ID, PolicyID: &policy.ID}
 	if err := db.Create(&site).Error; err != nil {
 		t.Fatalf("create site: %v", err)
@@ -63,6 +83,9 @@ func TestExportBackup(t *testing.T) {
 	}
 	if len(data.Sites) != 1 {
 		t.Errorf("sites = %d, want 1", len(data.Sites))
+	}
+	if len(data.PolicyOWASPRuleConfigs) != 1 {
+		t.Errorf("policy OWASP rule configs = %d, want 1", len(data.PolicyOWASPRuleConfigs))
 	}
 	if len(data.IPListEntries) != 1 {
 		t.Errorf("ip entries = %d, want 1", len(data.IPListEntries))
@@ -104,6 +127,24 @@ func TestImportBackupRoundTrip(t *testing.T) {
 	if len(restored.IPListEntries) != 1 {
 		t.Errorf("restored ip entries = %d, want 1", len(restored.IPListEntries))
 	}
+	if len(restored.PolicyOWASPRuleConfigs) != 1 {
+		t.Fatalf("restored policy OWASP rule configs = %d, want 1", len(restored.PolicyOWASPRuleConfigs))
+	}
+	gotOWASP := restored.PolicyOWASPRuleConfigs[0]
+	wantOWASP := data.PolicyOWASPRuleConfigs[0]
+	if gotOWASP.ID != wantOWASP.ID || gotOWASP.PolicyID != wantOWASP.PolicyID || gotOWASP.RuleID != wantOWASP.RuleID {
+		t.Errorf("restored policy OWASP identity = %#v, want %#v", gotOWASP, wantOWASP)
+	}
+	if gotOWASP.Enabled == nil || wantOWASP.Enabled == nil || *gotOWASP.Enabled != *wantOWASP.Enabled {
+		t.Errorf("restored policy OWASP enabled = %v, want %v", gotOWASP.Enabled, wantOWASP.Enabled)
+	}
+	if gotOWASP.Action == nil || wantOWASP.Action == nil || *gotOWASP.Action != *wantOWASP.Action ||
+		gotOWASP.Sensitivity == nil || wantOWASP.Sensitivity == nil || *gotOWASP.Sensitivity != *wantOWASP.Sensitivity ||
+		gotOWASP.StatusCode == nil || wantOWASP.StatusCode == nil || *gotOWASP.StatusCode != *wantOWASP.StatusCode ||
+		gotOWASP.RedirectTo == nil || wantOWASP.RedirectTo == nil || *gotOWASP.RedirectTo != *wantOWASP.RedirectTo ||
+		gotOWASP.Whitelist == nil || wantOWASP.Whitelist == nil || *gotOWASP.Whitelist != *wantOWASP.Whitelist {
+		t.Errorf("restored policy OWASP values = %#v, want %#v", gotOWASP, wantOWASP)
+	}
 	if len(restored.SystemSettings) != 1 {
 		t.Errorf("restored settings = %d, want 1", len(restored.SystemSettings))
 	}
@@ -115,6 +156,18 @@ func TestImportBackupReplaceMode(t *testing.T) {
 	oldCert := Certificate{Name: "old-cert"}
 	if err := dst.Create(&oldCert).Error; err != nil {
 		t.Fatalf("seed old cert: %v", err)
+	}
+	oldPolicy := Policy{Name: "old-policy"}
+	if err := dst.Create(&oldPolicy).Error; err != nil {
+		t.Fatalf("seed old policy: %v", err)
+	}
+	oldWhitelist := `["/stale"]`
+	if err := dst.Create(&PolicyOWASPRuleConfig{
+		PolicyID:  oldPolicy.ID,
+		RuleID:    "owasp:test:stale",
+		Whitelist: &oldWhitelist,
+	}).Error; err != nil {
+		t.Fatalf("seed old policy OWASP rule config: %v", err)
 	}
 	oldSite := Site{Host: "old.com", Bind: ":9999"}
 	if err := dst.Create(&oldSite).Error; err != nil {
@@ -147,6 +200,12 @@ func TestImportBackupReplaceMode(t *testing.T) {
 	}
 	if len(restored.Certificates) != 1 {
 		t.Errorf("certificates after replace = %d, want 1", len(restored.Certificates))
+	}
+	if len(restored.PolicyOWASPRuleConfigs) != 1 {
+		t.Fatalf("policy OWASP rule configs after replace = %d, want 1", len(restored.PolicyOWASPRuleConfigs))
+	}
+	if restored.PolicyOWASPRuleConfigs[0].RuleID != "owasp:test:backup" {
+		t.Errorf("stale policy OWASP rule config remained after replace: %#v", restored.PolicyOWASPRuleConfigs)
 	}
 }
 
@@ -334,7 +393,7 @@ func TestBackupIncludesJSPlugins(t *testing.T) {
 		Enabled:     true,
 		Priority:    23,
 		SiteID:      &siteID,
-		Stage:       JSStageResponse,
+		Stage:       JSStageRequest,
 		FailureMode: JSFailureModeClosed,
 		TimeoutMS:   275,
 		Description: "响应阶段脚本",
@@ -382,6 +441,91 @@ func TestBackupIncludesJSPlugins(t *testing.T) {
 	}
 	if got.Description != want.Description {
 		t.Errorf("Description = %q, want %q", got.Description, want.Description)
+	}
+}
+
+func TestImportBackupRejectsEnabledResponseJSPluginBeforeReplace(t *testing.T) {
+	db := newBackupTestDB(t)
+	existing := JSPlugin{
+		Name:        "existing-request",
+		Source:      `function handle(ctx) { return null; }`,
+		Enabled:     true,
+		Stage:       JSStageRequest,
+		FailureMode: JSFailureModeOpen,
+	}
+	if err := db.Create(&existing).Error; err != nil {
+		t.Fatalf("create existing JS plugin: %v", err)
+	}
+
+	data := &BackupData{
+		Version: BackupVersion,
+		JSPlugins: []JSPlugin{{
+			Name:        "enabled-response",
+			Source:      `function handle(ctx) { return null; }`,
+			Enabled:     true,
+			Stage:       JSStageResponse,
+			FailureMode: JSFailureModeOpen,
+		}},
+	}
+	if err := ImportBackup(db, data, true); !errors.Is(err, ErrInvalidBackupJSPlugin) {
+		t.Fatalf("ImportBackup() error = %v, want ErrInvalidBackupJSPlugin", err)
+	}
+
+	var got []JSPlugin
+	if err := db.Order("id").Find(&got).Error; err != nil {
+		t.Fatalf("list JS plugins after rejected import: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != existing.ID {
+		t.Fatalf("rejected replace import changed JS plugins: %#v", got)
+	}
+}
+
+func TestImportBackupRejectsInvalidJSPluginFields(t *testing.T) {
+	cases := []struct {
+		name   string
+		plugin JSPlugin
+	}{
+		{
+			name:   "invalid stage",
+			plugin: JSPlugin{Name: "bad-stage", Source: "x", Stage: "pre", FailureMode: JSFailureModeOpen},
+		},
+		{
+			name:   "invalid failure mode",
+			plugin: JSPlugin{Name: "bad-failure-mode", Source: "x", Stage: JSStageRequest, FailureMode: "closed"},
+		},
+		{
+			name:   "negative timeout",
+			plugin: JSPlugin{Name: "negative-timeout", Source: "x", Stage: JSStageRequest, FailureMode: JSFailureModeOpen, TimeoutMS: -1},
+		},
+		{
+			name:   "timeout above maximum",
+			plugin: JSPlugin{Name: "large-timeout", Source: "x", Stage: JSStageRequest, FailureMode: JSFailureModeOpen, TimeoutMS: 1001},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newBackupTestDB(t)
+			data := &BackupData{Version: BackupVersion, JSPlugins: []JSPlugin{tc.plugin}}
+			if err := ImportBackup(db, data, false); !errors.Is(err, ErrInvalidBackupJSPlugin) {
+				t.Fatalf("ImportBackup() error = %v, want ErrInvalidBackupJSPlugin", err)
+			}
+		})
+	}
+}
+
+// TestImportBackupRejectsInvalidProtectionCaptchaType ensures backup restore validates JSON content.
+func TestImportBackupRejectsInvalidProtectionCaptchaType(t *testing.T) {
+	db := newBackupTestDB(t)
+	data := &BackupData{
+		Version: BackupVersion,
+		SystemSettings: []SystemSettings{{
+			Key:   "protection",
+			Value: `{"captcha_type":"pow"}`,
+		}},
+	}
+	if err := ImportBackup(db, data, false); !errors.Is(err, ErrInvalidBackupProtectionConfig) {
+		t.Fatalf("ImportBackup() error = %v, want ErrInvalidBackupProtectionConfig", err)
 	}
 }
 

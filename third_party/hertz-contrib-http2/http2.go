@@ -36,6 +36,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -342,4 +343,13 @@ func validPseudoPath(v string) bool {
 type h2ServerConn struct {
 	network.Conn
 	rw *responseWriter
+}
+
+// NetConn exposes the underlying data-plane connection to callers that need
+// connection-scoped metadata, such as the inbound TLS fingerprint.
+func (c *h2ServerConn) NetConn() net.Conn {
+	if c == nil || c.Conn == nil {
+		return nil
+	}
+	return c.Conn
 }

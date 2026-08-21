@@ -17,6 +17,7 @@ import (
 	"My-OpenWaf/internal/waf/drop"
 	"My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/jsplugin"
 	"My-OpenWaf/internal/waf/luaplugin"
 	"My-OpenWaf/internal/waf/ratelimit"
 )
@@ -49,6 +50,7 @@ type phasesEntry struct {
 	prot        *store.ProtectionConfig
 	lua         *luaplugin.Engine
 	luaRevision uint64
+	deps        *phaseRuntimeConfig
 	phases      []pipeline.Phase
 }
 
@@ -65,18 +67,30 @@ type phasesSnapshot struct {
 	cache    map[phasesCacheKey]*phasesEntry
 }
 
+// phaseRuntimeConfig is the immutable bundle of phase-chain dependencies.
+// It is replaced atomically when runtime setters change so request-path reads
+// always see a consistent snapshot.
+type phaseRuntimeConfig struct {
+	reqRateLimiter ratelimit.RateLimiterBackend
+	antiReplay     *antireplay.AntiReplayManager
+	geoResolver    *bot.MaxMindResolver
+	botThreshold   int
+}
+
 // Engine orchestrates the full WAF processing pipeline for each request.
 type Engine struct {
 	resolver       *sites.Resolver
-	reqRateLimiter ratelimit.RateLimiterBackend
 	errRateLimiter ratelimit.RateLimiterBackend
 	ipRep          *iprep.IPReputation
-	geoResolver    *bot.MaxMindResolver          // nil when GeoIP DB is unavailable
-	botThreshold   int                           // score threshold for bot blocking
-	cveDetector    *cve.CVEDetector              // CVE-specific vulnerability detection
-	dropExecutor   *drop.DropExecutor            // TCP drop executor
-	antiReplay     *antireplay.AntiReplayManager // nonce-based replay prevention
-	escalation     *escalation.EscalationManager // step-up response escalation
+
+	// phaseDeps is the immutable bundle of runtime dependencies folded into
+	// phase-chain construction. Setters replace it atomically so request-path
+	// reads observe a consistent snapshot.
+	phaseDeps atomic.Pointer[phaseRuntimeConfig]
+
+	cveDetector  *cve.CVEDetector              // CVE-specific vulnerability detection
+	dropExecutor *drop.DropExecutor            // TCP drop executor
+	escalation   *escalation.EscalationManager // step-up response escalation
 
 	// Lock-free compiled rules cache. Hot-path reads use atomic.Pointer.Load()
 	// (single atomic load, no cache-line bouncing). Writes are serialized by
@@ -93,33 +107,78 @@ type Engine struct {
 	// 请求路径并发读、reload 路径写，故用 atomic.Pointer 而非裸指针：
 	// 后者在此处会构成数据竞争。引擎内部的脚本集合替换有自己的锁。
 	luaPlugins atomic.Pointer[luaplugin.Engine]
+	// jsPlugins 为自定义 JavaScript 策略引擎，可为 nil（未启用）。
+	//
+	// 请求路径并发读、reload 路径写，故用 atomic.Pointer 而非裸指针：
+	// 后者在此处会构成数据竞争。引擎内部的脚本集合替换有自己的锁。
+	jsPlugins atomic.Pointer[jsplugin.Engine]
 }
 
 // New creates a WAF engine backed by the given snapshot holder and rate limiters.
 func New(holder *snapshot.Holder, reqRL, errRL ratelimit.RateLimiterBackend, ipRep *iprep.IPReputation) *Engine {
 	e := &Engine{
 		resolver:       sites.NewResolver(holder),
-		reqRateLimiter: reqRL,
 		errRateLimiter: errRL,
 		ipRep:          ipRep,
-		botThreshold:   80,
 		cveDetector:    cve.NewCVEDetector(),
 	}
 	e.compiledPtr.Store(&compiledSnapshot{cache: make(map[compiledRulesKey]*compiledRules)})
 	e.phasesPtr.Store(&phasesSnapshot{cache: make(map[phasesCacheKey]*phasesEntry)})
+	e.phaseDeps.Store(&phaseRuntimeConfig{reqRateLimiter: reqRL, botThreshold: 80})
 	return e
+}
+
+func (e *Engine) loadPhaseDeps() *phaseRuntimeConfig {
+	if e == nil {
+		return nil
+	}
+	if deps := e.phaseDeps.Load(); deps != nil {
+		return deps
+	}
+	deps := &phaseRuntimeConfig{botThreshold: 80}
+	if e.phaseDeps.CompareAndSwap(nil, deps) {
+		return deps
+	}
+	if current := e.phaseDeps.Load(); current != nil {
+		return current
+	}
+	return deps
+}
+
+func (e *Engine) updatePhaseDeps(mutator func(*phaseRuntimeConfig)) {
+	if e == nil || mutator == nil {
+		return
+	}
+	for {
+		current := e.loadPhaseDeps()
+		next := *current
+		mutator(&next)
+		if e.phaseDeps.CompareAndSwap(current, &next) {
+			return
+		}
+	}
 }
 
 // SetGeoResolver attaches a MaxMind GeoIP resolver for bot two-phase scoring.
 func (e *Engine) SetGeoResolver(geo *bot.MaxMindResolver, threshold int) {
-	e.geoResolver = geo
-	e.SetBotThreshold(threshold)
+	if e == nil {
+		return
+	}
+	e.updatePhaseDeps(func(deps *phaseRuntimeConfig) {
+		deps.geoResolver = geo
+		if threshold > 0 {
+			deps.botThreshold = threshold
+		}
+	})
 }
 
 func (e *Engine) SetBotThreshold(threshold int) {
-	if threshold > 0 {
-		e.botThreshold = threshold
+	if e == nil || threshold <= 0 {
+		return
 	}
+	e.updatePhaseDeps(func(deps *phaseRuntimeConfig) {
+		deps.botThreshold = threshold
+	})
 }
 
 // IPReputation returns the underlying IP reputation system.
@@ -139,6 +198,22 @@ func (e *Engine) LuaPlugins() *luaplugin.Engine {
 		return nil
 	}
 	return e.luaPlugins.Load()
+}
+
+// SetJSPlugins 设置或热替换自定义 JavaScript 策略引擎。传 nil 即停用插件。
+func (e *Engine) SetJSPlugins(jp *jsplugin.Engine) {
+	if e == nil {
+		return
+	}
+	e.jsPlugins.Store(jp)
+}
+
+// JSPlugins 返回当前的 JavaScript 策略引擎，可能为 nil。
+func (e *Engine) JSPlugins() *jsplugin.Engine {
+	if e == nil {
+		return nil
+	}
+	return e.jsPlugins.Load()
 }
 
 /**
@@ -269,8 +344,8 @@ func (e *Engine) processResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime
 		prot = rt.EffectiveProtection
 	}
 
-	// Pre-allocated capacity: up to ~9 phases (IPReputation, AntiReplay,
-	// ACL, OWASP, CVE, Bot, RateLimit, Signature, Custom).
+	// Pre-allocated capacity: up to 11 phases (IPReputation, AntiReplay, ACL,
+	// LuaPre, OWASP, CVE, Bot, BrowserSign, RateLimit, Signature, Custom).
 	phases := e.getOrBuildPhases(sn, rt, cr, prot)
 
 	runResult := pipeline.Run(phases, reqCtx)
@@ -347,6 +422,9 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 //
 // Hot-path read: single atomic.Pointer.Load() — no lock, no cache-line bouncing.
 func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, cr *compiledRules, prot *store.ProtectionConfig) []pipeline.Phase {
+	if e == nil {
+		return nil
+	}
 	rev := sn.Revision
 	key := phasesCacheKey{
 		policyID:          rt.PolicyID,
@@ -358,56 +436,69 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	if lp != nil {
 		luaRevision = lp.Revision()
 	}
+	deps := e.loadPhaseDeps()
 
 	// Lock-free fast path.
 	snap := e.phasesPtr.Load()
 	if snap.revision == rev {
-		if entry, ok := snap.cache[key]; ok && entry.prot == prot && entry.lua == lp && entry.luaRevision == luaRevision {
+		if entry, ok := snap.cache[key]; ok && entry.prot == prot && entry.lua == lp && entry.luaRevision == luaRevision && entry.deps == deps {
 			return entry.phases
 		}
 	}
 
 	// Build a fresh chain. Pre-allocate capacity for the maximum size.
-	phases := make([]pipeline.Phase, 0, 9)
+	phases := make([]pipeline.Phase, 0, 11)
+
+	// 按 phase 跳过检测：配了跳过路径的 phase 会被包一层按路径短路的装饰器，
+	// 未配置的 phase 原样入链，热路径不引入额外分支。
+	skipMap := prot.GetSkipPathByPhase()
+	addPhase := func(ph pipeline.Phase) {
+		if len(skipMap) > 0 {
+			ph = rules.NewSkipByPathPhase(ph, skipMap[ph.Name()])
+		}
+		phases = append(phases, ph)
+	}
 
 	if e.ipRep != nil {
-		phases = append(phases, rules.NewIPReputationPhase(e.ipRep))
+		addPhase(rules.NewIPReputationPhase(e.ipRep, rt.SiteIPWhitelist, rt.SiteIPBlacklist))
 	}
-	if e.antiReplay != nil && rt.AntiReplayEnabled {
-		phases = append(phases, rules.NewAntiReplayPhase(e.antiReplay))
+	if deps.antiReplay != nil && rt.AntiReplayEnabled {
+		addPhase(rules.NewAntiReplayPhase(deps.antiReplay))
 	}
 
 	if len(cr.ACL) > 0 {
-		phases = append(phases, rules.NewACLPhasePrecompiled(cr.ACL))
+		addPhase(rules.NewACLPhasePrecompiled(cr.ACL))
 	}
 
 	// 前置 Lua 策略：位于 ACL 之后、OWASP 之前，可在昂贵检测前提早判定。
 	// 后置策略不在此处——它需读到内置判定，见 applyPostLuaDecision。
 	if lp := e.luaPlugins.Load(); lp != nil && lp.HasScripts(luaplugin.StagePre) {
-		phases = append(phases, rules.NewLuaPhase(lp, luaplugin.StagePre))
+		addPhase(rules.NewLuaPhase(lp, luaplugin.StagePre))
 	}
 
 	if prot.OWASPEnabled {
-		phases = append(phases, rules.NewOWASPPhase(prot))
+		addPhase(rules.NewOWASPPhase(prot))
 	}
 	if prot.CVEEnabled && e.cveDetector != nil {
-		phases = append(phases, rules.NewCVEPhase(prot, e.cveDetector))
+		addPhase(rules.NewCVEPhase(prot, e.cveDetector))
 	}
 
 	if prot.BotDetectionEnabled {
-		phases = append(phases, rules.NewBotPhaseWithGeo(e.ipRep, e.geoResolver, e.botThreshold))
+		addPhase(rules.NewBotPhaseWithGeo(e.ipRep, deps.geoResolver, deps.botThreshold))
 	}
 
 	// 浏览器签名校验：对 API 特征请求校验页面挂载 JS 写入的短时效签名头。
 	if prot.BrowserSignEnabled {
-		phases = append(phases, rules.NewBrowserSignPhase(prot))
+		addPhase(rules.NewBrowserSignPhase(prot))
 	}
 
-	if prot.RequestRateLimitEnabled && e.reqRateLimiter != nil {
+	if prot.RequestRateLimitEnabled && deps.reqRateLimiter != nil {
 		act := action.Type(prot.RequestRateLimitAction)
-		phases = append(phases, rules.NewReqRateLimitPhase(e.reqRateLimiter, act))
+		addPhase(rules.NewReqRateLimitPhase(deps.reqRateLimiter, act))
 	}
 
+	// signature 与 custom 是用户自建规则，不参与按 phase 跳过（停用规则本身即可），
+	// 故直接 append 而不走 addPhase。
 	if len(cr.Signature) > 0 {
 		phases = append(phases, rules.NewSignaturePhasePrecompiled(cr.Signature))
 	}
@@ -427,7 +518,7 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 			newCache[k] = v
 		}
 	}
-	newCache[key] = &phasesEntry{prot: prot, lua: lp, luaRevision: luaRevision, phases: phases}
+	newCache[key] = &phasesEntry{prot: prot, lua: lp, luaRevision: luaRevision, deps: deps, phases: phases}
 	e.phasesPtr.Store(&phasesSnapshot{revision: rev, cache: newCache})
 	e.phasesWriteMu.Unlock()
 
@@ -475,8 +566,14 @@ func (e *Engine) Resolver() *sites.Resolver                    { return e.resolv
 func (e *Engine) ErrRateLimiter() ratelimit.RateLimiterBackend { return e.errRateLimiter }
 func (e *Engine) CVEDetector() *cve.CVEDetector                { return e.cveDetector }
 func (e *Engine) DropExecutor() *drop.DropExecutor             { return e.dropExecutor }
-func (e *Engine) AntiReplay() *antireplay.AntiReplayManager    { return e.antiReplay }
-func (e *Engine) Escalation() *escalation.EscalationManager    { return e.escalation }
+func (e *Engine) AntiReplay() *antireplay.AntiReplayManager {
+	deps := e.loadPhaseDeps()
+	if deps == nil {
+		return nil
+	}
+	return deps.antiReplay
+}
+func (e *Engine) Escalation() *escalation.EscalationManager { return e.escalation }
 
 // SetDropExecutor attaches a drop executor to the engine.
 func (e *Engine) SetDropExecutor(d *drop.DropExecutor) {
@@ -485,7 +582,12 @@ func (e *Engine) SetDropExecutor(d *drop.DropExecutor) {
 
 // SetAntiReplayManager attaches an anti-replay manager to the engine.
 func (e *Engine) SetAntiReplayManager(m *antireplay.AntiReplayManager) {
-	e.antiReplay = m
+	if e == nil {
+		return
+	}
+	e.updatePhaseDeps(func(deps *phaseRuntimeConfig) {
+		deps.antiReplay = m
+	})
 }
 
 // SetEscalationManager attaches an escalation manager to the engine.
@@ -504,13 +606,14 @@ func convertAndCompile(sr []snapshot.CompiledRule) []rules.Compiled {
 			pattern = r.Arg // compound patterns are raw JSON starting with "{"
 		}
 		storeRules[i] = store.Rule{
-			Phase:      r.Phase,
-			Pattern:    pattern,
-			Action:     r.Action,
-			Priority:   r.Priority,
-			Enabled:    true,
-			StatusCode: r.StatusCode,
-			RedirectTo: r.RedirectTo,
+			Phase:       r.Phase,
+			Pattern:     pattern,
+			Action:      r.Action,
+			Priority:    r.Priority,
+			Enabled:     true,
+			StatusCode:  r.StatusCode,
+			RedirectTo:  r.RedirectTo,
+			CaptchaType: r.CaptchaType,
 		}
 		storeRules[i].ID = r.ID
 	}

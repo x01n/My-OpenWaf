@@ -16,7 +16,9 @@ const (
 	recordedHeaderValuesLimit = 32
 )
 
-var sensitiveRecordedValuePattern = regexp.MustCompile(`(?i)(password|passwd|pwd|token|secret|session|api[_-]?key|auth[_-]?token|csrf|code)(["'\s:=]+)([^&\s,"'}]+)`)
+var sensitiveRecordedHeaderLinePattern = regexp.MustCompile(`(?im)^([ \t]*(proxy-authorization|authorization|set-cookie|cookie)[ \t]*:)[^\r\n]*(\r?\n[ \t]+[^\r\n]*)*`)
+var sensitiveRecordedObjectPattern = regexp.MustCompile(`(?is)(env)(["'\s:=]+)(\{.*)`)
+var sensitiveRecordedValuePattern = regexp.MustCompile(`(?i)(proxy-authorization|authorization|set-cookie|cookie|password|passwd|pwd|token|secret|session|api[_-]?key|auth[_-]?token|csrf|code|ticket|env)(["'\s:=]+)([^&,"'}\r\n]+)`)
 
 type recordedHeaderCaptureMode uint8
 
@@ -244,6 +246,8 @@ func sanitizeRecordedJSONValue(value any) any {
 }
 
 func sanitizeRecordedText(value string) string {
+	value = sensitiveRecordedHeaderLinePattern.ReplaceAllString(value, `${1} [redacted]`)
+	value = sensitiveRecordedObjectPattern.ReplaceAllString(value, `${1}${2}[redacted]`)
 	return sensitiveRecordedValuePattern.ReplaceAllString(value, `${1}${2}[redacted]`)
 }
 
@@ -256,7 +260,7 @@ func truncateRecordedValue(value string, limit int) string {
 
 func isSensitiveRecordedKey(key string) bool {
 	lower := strings.ToLower(key)
-	for _, part := range []string{"authorization", "cookie", "token", "secret", "password", "passwd", "pwd", "session", "api-key", "apikey", "csrf", "credential", "key"} {
+	for _, part := range []string{"authorization", "cookie", "token", "secret", "password", "passwd", "pwd", "session", "api-key", "apikey", "csrf", "credential", "key", "ticket", "env"} {
 		if strings.Contains(lower, part) {
 			return true
 		}

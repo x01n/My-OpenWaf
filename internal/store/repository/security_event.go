@@ -115,6 +115,95 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 	return items, total, nil
 }
 
+// SecurityEventRequest 表示同一 request_id 下所有安全事件聚合后的一行摘要。
+type SecurityEventRequest struct {
+	RequestID  string    `json:"request_id"`
+	EventCount int64     `json:"event_count"`
+	LastSeen   time.Time `json:"last_seen"`
+}
+
+/**
+ * ListRequests 把安全事件按 request_id 聚合成「请求级」列表。
+ *
+ * 与 List 的语义差异：先用 filter 过滤事件，再对剩下的事件分组，因此 total 是
+ * 去重后的 request_id 数量而不是事件条数。空 request_id 的事件无法定位到一次
+ * 具体请求，直接排除在聚合之外。
+ *
+ * 排序键 MAX(created_at) DESC, request_id DESC 只出现在 ORDER BY 里、不作为输出
+ * 别名：SQLite/MySQL 允许 ORDER BY 引用 SELECT 别名，PostgreSQL 仅在别名不与输入
+ * 列名冲突时才解析别名；直接写聚合表达式在三种方言下都是标准 GROUP BY 语义。
+ *
+ * last_seen 走第二趟查询而不是 SELECT MAX(created_at)：聚合表达式没有列声明类型，
+ * glebarez/sqlite 只对 decltype 为 DATE/DATETIME/TIMESTAMP 的 TEXT 列做时间解析，
+ * 聚合列会以字符串返回并在扫描进 time.Time 时报错。第二趟只读 created_at 表列，
+ * 由驱动按声明类型解析，无需在 Go 侧假设任何时间文本格式。
+ *
+ * 该路径不接 countCache/hotCache：secEventCountCacheKey 描述的是 List 的事件条数，
+ * 与去重请求数语义不同，复用会串键。
+ *
+ * @param offset 分页偏移，来自 utils.Paginate。
+ * @param limit  分页大小，来自 utils.Paginate。
+ * @param f      与 List 完全一致的事件过滤条件。
+ * @return 请求级聚合行、去重后的 request_id 总数、错误。
+ */
+func (r *SecurityEventRepo) ListRequests(offset, limit int, f SecurityEventFilter) ([]SecurityEventRequest, int64, error) {
+	f = normalizeSecurityEventFilter(f)
+	filtered := func() *gorm.DB {
+		return applyEventFilters(r.db.Model(&store.SecurityEvent{}), f).Where("request_id != ?", "")
+	}
+
+	var total int64
+	if err := filtered().Distinct("request_id").Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var groups []struct {
+		RequestID  string
+		EventCount int64
+	}
+	if err := filtered().
+		Select("request_id, COUNT(*) AS event_count").
+		Group("request_id").
+		Order("MAX(created_at) DESC, request_id DESC").
+		Offset(offset).
+		Limit(limit).
+		Scan(&groups).Error; err != nil {
+		return nil, 0, err
+	}
+	if len(groups) == 0 {
+		return []SecurityEventRequest{}, total, nil
+	}
+
+	requestIDs := make([]string, 0, len(groups))
+	for _, g := range groups {
+		requestIDs = append(requestIDs, g.RequestID)
+	}
+	// 沿用同一 filter，保证 last_seen 与排序键取自同一批事件。
+	var stamps []store.SecurityEvent
+	if err := filtered().
+		Where("request_id IN ?", requestIDs).
+		Select("request_id", "created_at").
+		Find(&stamps).Error; err != nil {
+		return nil, 0, err
+	}
+	lastSeen := make(map[string]time.Time, len(requestIDs))
+	for _, s := range stamps {
+		if prev, ok := lastSeen[s.RequestID]; !ok || s.CreatedAt.After(prev) {
+			lastSeen[s.RequestID] = s.CreatedAt
+		}
+	}
+
+	items := make([]SecurityEventRequest, 0, len(groups))
+	for _, g := range groups {
+		items = append(items, SecurityEventRequest{
+			RequestID:  g.RequestID,
+			EventCount: g.EventCount,
+			LastSeen:   lastSeen[g.RequestID],
+		})
+	}
+	return items, total, nil
+}
+
 func secEventCountCacheKey(f SecurityEventFilter) string {
 	f = normalizeSecurityEventFilter(f)
 	var b strings.Builder

@@ -19,6 +19,16 @@ func (p *stubPhase) Execute(_ *RequestCtx) (action.Result, bool) {
 	return p.result, p.stop
 }
 
+type countingPhase struct {
+	stubPhase
+	executions *int
+}
+
+func (p *countingPhase) Execute(ctx *RequestCtx) (action.Result, bool) {
+	*p.executions = *p.executions + 1
+	return p.stubPhase.Execute(ctx)
+}
+
 func passPhase(name string) *stubPhase {
 	return &stubPhase{name: name, result: action.Result{Type: action.Allow}, stop: false}
 }
@@ -60,6 +70,26 @@ func TestRunInterceptPhaseShortsCircuit(t *testing.T) {
 	result := Run([]Phase{interceptPhase("waf"), passPhase("log")}, ctx)
 	if result.Action.Type != action.Intercept {
 		t.Errorf("Run([intercept, pass]) = %v, want Intercept", result.Action.Type)
+	}
+}
+
+func TestRunNonTerminalAllowContinuesToLaterPhase(t *testing.T) {
+	ctx := &RequestCtx{}
+	executions := 0
+	later := &countingPhase{
+		stubPhase:  stubPhase{name: "owasp", result: action.Result{Type: action.Intercept, Matched: true}, stop: true},
+		executions: &executions,
+	}
+
+	result := Run([]Phase{
+		&stubPhase{name: "acl", result: action.Result{Type: action.Allow, Matched: true}, stop: false},
+		later,
+	}, ctx)
+	if executions != 1 {
+		t.Fatalf("later phase executions = %d, want 1", executions)
+	}
+	if result.Action.Type != action.Intercept {
+		t.Fatalf("Run([allow, intercept]) = %v, want Intercept", result.Action.Type)
 	}
 }
 
@@ -105,8 +135,6 @@ func TestReleaseCtxClearsRequestContext(t *testing.T) {
 		t.Fatal("ReleaseCtx must clear request Context before reuse")
 	}
 }
-
-// ── RequestCtx method tests ──
 
 func TestCachedMatcherHeadersMissWhenNotReady(t *testing.T) {
 	ctx := &RequestCtx{}

@@ -2,11 +2,15 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"My-OpenWaf/internal/store/migrations"
+	"My-OpenWaf/internal/waf/challenge"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -23,26 +27,33 @@ type BackupData struct {
 	ExportedAt      time.Time `json:"exported_at"`
 	DefaultPolicyID *uint     `json:"default_policy_id,omitempty"`
 
-	Certificates      []Certificate          `json:"certificates"`
-	Policies          []Policy               `json:"policies"`
-	Rules             []Rule                 `json:"rules"`
-	Sites             []Site                 `json:"sites"`
-	SiteListeners     []SiteListener         `json:"site_listeners"`
-	IPListEntries     []IPListEntry          `json:"ip_list_entries"`
-	ThreatIntelFeeds  []ThreatIntelFeed      `json:"threat_intel_feeds"`
-	CVERuleRecords    []CVERuleRecord        `json:"cve_rule_records"`
-	ApplicationRoutes []ApplicationRouteRule `json:"application_routes"`
-	SiteAccessConfigs []SiteAccessConfig     `json:"site_access_configs"`
-	AccessProviders   []AccessProvider       `json:"access_providers"`
-	AccessUsers       []AccessUser           `json:"access_users"`
-	AccessPathRules   []AccessPathRule       `json:"access_path_rules"`
-	LuaPlugins        []LuaPlugin            `json:"lua_plugins"`
-	JSPlugins         []JSPlugin             `json:"js_plugins"`
-	SystemSettings    []SystemSettings       `json:"system_settings"`
+	Certificates           []Certificate           `json:"certificates"`
+	Policies               []Policy                `json:"policies"`
+	PolicyOWASPRuleConfigs []PolicyOWASPRuleConfig `json:"policy_owasp_rule_configs"`
+	Rules                  []Rule                  `json:"rules"`
+	Sites                  []Site                  `json:"sites"`
+	SiteListeners          []SiteListener          `json:"site_listeners"`
+	IPListEntries          []IPListEntry           `json:"ip_list_entries"`
+	ThreatIntelFeeds       []ThreatIntelFeed       `json:"threat_intel_feeds"`
+	CVERuleRecords         []CVERuleRecord         `json:"cve_rule_records"`
+	ApplicationRoutes      []ApplicationRouteRule  `json:"application_routes"`
+	SiteAccessConfigs      []SiteAccessConfig      `json:"site_access_configs"`
+	AccessProviders        []AccessProvider        `json:"access_providers"`
+	AccessUsers            []AccessUser            `json:"access_users"`
+	AccessPathRules        []AccessPathRule        `json:"access_path_rules"`
+	LuaPlugins             []LuaPlugin             `json:"lua_plugins"`
+	JSPlugins              []JSPlugin              `json:"js_plugins"`
+	SystemSettings         []SystemSettings        `json:"system_settings"`
 }
 
 // BackupVersion 是当前备份格式版本号。
 const BackupVersion = 1
+
+// ErrInvalidBackupJSPlugin 表示备份中的 JavaScript 插件不符合控制面契约。
+var ErrInvalidBackupJSPlugin = errors.New("invalid JavaScript plugin backup")
+
+// ErrInvalidBackupProtectionConfig 表示备份中的全局保护配置不符合 CAPTCHA 契约。
+var ErrInvalidBackupProtectionConfig = errors.New("invalid protection config backup")
 
 /**
  * BackupModels 返回 BackupData 覆盖的全部模型，顺序按外键依赖排列（被引用者在前）。
@@ -54,7 +65,7 @@ const BackupVersion = 1
  */
 func BackupModels() []interface{} {
 	return []interface{}{
-		&Certificate{}, &Policy{}, &Rule{}, &Site{}, &SiteListener{},
+		&Certificate{}, &Policy{}, &PolicyOWASPRuleConfig{}, &Rule{}, &Site{}, &SiteListener{},
 		&IPListEntry{}, &ThreatIntelFeed{}, &CVERuleRecord{},
 		&ApplicationRouteRule{}, &SiteAccessConfig{}, &AccessProvider{},
 		&AccessUser{}, &AccessPathRule{}, &LuaPlugin{}, &JSPlugin{}, &SystemSettings{},
@@ -86,6 +97,9 @@ func ExportBackup(db *gorm.DB) (*BackupData, error) {
 			data.DefaultPolicyID = &id
 			break
 		}
+	}
+	if err := db.Find(&data.PolicyOWASPRuleConfigs).Error; err != nil {
+		return nil, err
 	}
 	if err := db.Find(&data.Rules).Error; err != nil {
 		return nil, err
@@ -143,6 +157,12 @@ func ExportBackup(db *gorm.DB) (*BackupData, error) {
  * @return 任一步骤失败则整体回滚并返回错误。
  */
 func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
+	if err := validateBackupProtectionSettings(data.SystemSettings); err != nil {
+		return err
+	}
+	if err := validateBackupJSPlugins(data.JSPlugins); err != nil {
+		return err
+	}
 	sites := normalizeBackupSiteXFFModes(data.Sites)
 
 	return db.Transaction(func(tx *gorm.DB) error {
@@ -169,6 +189,7 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 		ordered := []interface{}{
 			data.Certificates,
 			policies,
+			data.PolicyOWASPRuleConfigs,
 			data.ThreatIntelFeeds,
 			sites,
 			data.SiteListeners,
@@ -226,6 +247,43 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 	})
 }
 
+// validateBackupJSPlugins 拒绝不符合控制面启用契约的 JavaScript 插件备份记录。
+func validateBackupJSPlugins(plugins []JSPlugin) error {
+	for i := range plugins {
+		plugin := plugins[i]
+		if plugin.Stage != JSStageRequest && plugin.Stage != JSStageResponse {
+			return fmt.Errorf("%w: plugin %q stage must be request or response", ErrInvalidBackupJSPlugin, plugin.Name)
+		}
+		if plugin.Enabled && plugin.Stage == JSStageResponse {
+			return fmt.Errorf("%w: plugin %q response stage is unavailable because response execution is not implemented", ErrInvalidBackupJSPlugin, plugin.Name)
+		}
+		if plugin.FailureMode != JSFailureModeOpen && plugin.FailureMode != JSFailureModeClosed {
+			return fmt.Errorf("%w: plugin %q failure_mode must be fail_open or fail_closed", ErrInvalidBackupJSPlugin, plugin.Name)
+		}
+		if plugin.TimeoutMS < 0 || plugin.TimeoutMS > 1000 {
+			return fmt.Errorf("%w: plugin %q timeout_ms must be between 0 and 1000", ErrInvalidBackupJSPlugin, plugin.Name)
+		}
+	}
+	return nil
+}
+
+// validateBackupProtectionSettings validates the persisted global CAPTCHA mode before import.
+func validateBackupProtectionSettings(settings []SystemSettings) error {
+	for _, setting := range settings {
+		if setting.Key != "protection" || strings.TrimSpace(setting.Value) == "" {
+			continue
+		}
+		cfg := DefaultProtectionConfig()
+		if err := json.Unmarshal([]byte(setting.Value), &cfg); err != nil {
+			return fmt.Errorf("%w: invalid protection JSON: %v", ErrInvalidBackupProtectionConfig, err)
+		}
+		if err := challenge.ValidateCaptchaType(challenge.CaptchaType(cfg.CaptchaType)); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidBackupProtectionConfig, err)
+		}
+	}
+	return nil
+}
+
 func normalizeBackupSiteXFFModes(sites []Site) []Site {
 	normalized := make([]Site, len(sites))
 	copy(normalized, sites)
@@ -252,6 +310,11 @@ func upsertSlice(tx *gorm.DB, records interface{}) error {
 		}
 		return upsertBatch(tx, v)
 	case []Policy:
+		if len(v) == 0 {
+			return nil
+		}
+		return upsertBatch(tx, v)
+	case []PolicyOWASPRuleConfig:
 		if len(v) == 0 {
 			return nil
 		}
@@ -426,6 +489,7 @@ func clearConfigTables(tx *gorm.DB) error {
 		&SiteListener{},
 		&Site{},
 		&ThreatIntelFeed{},
+		&PolicyOWASPRuleConfig{},
 		&Policy{},
 		&Certificate{},
 	}

@@ -15,7 +15,8 @@ import (
 
 type luaEngineTestKV struct{}
 
-func (luaEngineTestKV) Available() bool { return true }
+func (luaEngineTestKV) Available() bool                           { return true }
+func (luaEngineTestKV) AvailableContext(ctx context.Context) bool { return ctx.Err() == nil }
 
 func (luaEngineTestKV) Get(string) ([]byte, bool) { return nil, false }
 
@@ -24,6 +25,18 @@ func (luaEngineTestKV) Set(string, []byte, time.Duration) error { return nil }
 func (luaEngineTestKV) Delete(string) {}
 
 func (luaEngineTestKV) Incr(string, time.Duration) (int64, error) { return 1, nil }
+
+func (luaEngineTestKV) GetContext(context.Context, string) ([]byte, bool) { return nil, false }
+
+func (luaEngineTestKV) SetContext(context.Context, string, []byte, time.Duration) error {
+	return nil
+}
+
+func (luaEngineTestKV) DeleteContext(context.Context, string) {}
+
+func (luaEngineTestKV) IncrContext(context.Context, string, time.Duration) (int64, error) {
+	return 1, nil
+}
 
 func luaEngineWith(t *testing.T, stage luaplugin.Stage, src string) *luaplugin.Engine {
 	t.Helper()

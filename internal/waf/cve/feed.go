@@ -211,8 +211,6 @@ func (m *CVEFeedManager) loadRulesIntoDetector() {
 	m.log.Info("cve_feed: loaded rules into detector", slog.Int("count", len(custom)))
 }
 
-// ── NVD API v2.0 ──
-
 type nvdResponse struct {
 	Vulnerabilities []nvdVuln `json:"vulnerabilities"`
 }
@@ -347,8 +345,6 @@ func (m *CVEFeedManager) processNVDCVE(cve nvdCVE) bool {
 
 	return m.db.Create(rule).Error == nil
 }
-
-// ── GitHub Advisory API ──
 
 type ghAdvisory struct {
 	GHSAID          string   `json:"ghsa_id"`

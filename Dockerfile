@@ -16,11 +16,11 @@ COPY third_party/hertz-contrib-http2/go.mod third_party/hertz-contrib-http2/go.s
 RUN go mod download
 COPY . .
 COPY --from=frontend /app/frontend/out ./internal/core/adminweb/dist
-RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o /app/bin/my-openwaf ./cmd/...
+RUN CGO_ENABLED=1 go build -tags=quickjs -ldflags="-s -w" -o /app/bin/my-openwaf ./cmd/...
 
 # Stage 3: Runtime
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata font-dejavu
 WORKDIR /app
 COPY --from=backend /app/bin/my-openwaf /app/my-openwaf
 RUN mkdir -p /app/data

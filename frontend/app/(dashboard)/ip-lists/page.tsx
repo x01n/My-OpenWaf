@@ -278,10 +278,14 @@ export default function IPListsPage() {
       title: t("ipLists.action"),
       width: "110px",
       render: (row: IPEntry) => (
-        <Badge variant="destructive">
-          {row.action === "drop"
-            ? t("ipLists.actionDrop")
-            : t("ipLists.actionIntercept")}
+      <Badge
+          variant={row.kind === "whitelist" ? "secondary" : "destructive"}
+        >
+          {row.kind === "whitelist"
+            ? t("ipLists.actionAllow")
+            : row.action === "drop"
+              ? t("ipLists.actionDrop")
+              : t("ipLists.actionIntercept")}
         </Badge>
       ),
     },
@@ -435,30 +439,37 @@ export default function IPListsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-2">
-              <Label>{t("ipLists.action")}</Label>
-              <Select
-                value={form.action}
-                onValueChange={(v) =>
-                  setForm((f) => ({
-                    ...f,
-                    action: v as "intercept" | "drop",
-                  }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="intercept">
-                    {t("ipLists.actionIntercept")}
-                  </SelectItem>
-                  <SelectItem value="drop">
-                    {t("ipLists.actionDrop")}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            {form.kind === "blacklist" ? (
+              <div className="space-y-2">
+                <Label>{t("ipLists.action")}</Label>
+                <Select
+                  value={form.action}
+                  onValueChange={(v) =>
+                    setForm((f) => ({
+                      ...f,
+                      action: v as "intercept" | "drop",
+                    }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="intercept">
+                      {t("ipLists.actionIntercept")}
+                    </SelectItem>
+                    <SelectItem value="drop">
+                      {t("ipLists.actionDrop")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <Label>{t("ipLists.action")}</Label>
+                <Badge variant="secondary">{t("ipLists.actionAllow")}</Badge>
+              </div>
+            )}
             <div className="space-y-2">
               <Label>{t("ipLists.scope")}</Label>
               <Select

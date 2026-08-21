@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useRef, useState } from "react"
 import useSWR, { mutate, type Key } from "swr"
-import type { CaptchaConfig } from "@/lib/types"
+import type { CaptchaConfig, CaptchaTestResponse } from "@/lib/types"
 import {
   siteApi,
   certificateApi,
@@ -34,6 +34,7 @@ import {
   accessApi,
   fingerprintApi,
   luaPluginApi,
+  jsPluginApi,
 } from "@/lib/api"
 import type {
   Certificate,
@@ -43,12 +44,24 @@ import type {
   LuaPlugin,
   LuaPluginStage,
   LuaDryRunRequest,
+  JSPluginCreateRequest,
+  JSPluginUpdateRequest,
+  JSPluginValidateRequest,
+  JSPluginDryRunRequest,
   NetworkConfig,
   NetworkConfigUpdate,
   TLSConfig,
   TLSConfigUpdate,
   RedisConfigUpdate,
   RedisConfigResponse,
+  ProtectionSettings,
+  ProtectionSettingsUpdate,
+  AccessProviderCreateInput,
+  AccessProviderUpdateInput,
+  AccessUserCreateInput,
+  AccessUserUpdateInput,
+  AccessPathRuleCreateInput,
+  AccessPathRuleUpdateInput,
 } from "@/lib/types"
 
 /**
@@ -89,6 +102,11 @@ async function revalidatePrefixes(prefixes: string[]) {
       })
     )
   )
+}
+
+/** 失效所有 IP 名单作用域缓存；批量写入应在整个批次完成后调用一次。 */
+export async function invalidateIPListCaches() {
+  await revalidatePrefixes(["ip-lists"])
 }
 
 export async function invalidateSiteCaches(id?: string | number) {
@@ -177,10 +195,6 @@ export function useMutation<T, D = any>(
 
   return { execute, loading, error }
 }
-
-// ============================================================
-// 站点相关 Hook
-// ============================================================
 
 export function useSites(params?: { page?: number; page_size?: number }) {
   return useApiQuery(["sites", params], () => siteApi.list(params))
@@ -314,10 +328,6 @@ export function useListenerDelete() {
   )
 }
 
-// ============================================================
-// 证书相关 Hook
-// ============================================================
-
 export function useCertificates() {
   return useApiQuery(["certificates"], () => certificateApi.list())
 }
@@ -327,10 +337,6 @@ export function useCertificate(id: string | number | undefined) {
     certificateApi.get(id!)
   )
 }
-
-// ============================================================
-// 规则相关 Hook
-// ============================================================
 
 export function useRules(params?: any) {
   return useApiQuery(["rules", params], () => ruleApi.list(params))
@@ -343,10 +349,6 @@ export function useRule(id: string | number | undefined) {
 export function useRuleTemplates() {
   return useApiQuery(["rule-templates"], () => ruleApi.getTemplates())
 }
-
-// ============================================================
-// 策略相关 Hook
-// ============================================================
 
 export function usePolicies() {
   return useApiQuery(["policies"], async () => {
@@ -370,10 +372,6 @@ export function usePolicy(id: string | number | undefined) {
   return useApiQuery(id ? ["policy", id] : null, () => policyApi.get(id!))
 }
 
-// ============================================================
-// 防护设置相关 Hook
-// ============================================================
-
 export function useProtectionSettings() {
   return useApiQuery(["protection-settings"], () => protectionApi.getSettings())
 }
@@ -386,13 +384,13 @@ export function useCaptchaConfig() {
   return useApiQuery(["captcha-config"], () => captchaApi.getConfig())
 }
 
+export function useCaptchaTest() {
+  return useMutation<CaptchaTestResponse, void>(async () => captchaApi.test())
+}
+
 export function useChainConfig() {
   return useApiQuery(["chain-config"], () => chainApi.getConfig())
 }
-
-// ============================================================
-// IP 列表相关 Hook
-// ============================================================
 
 /**
  * 查询 IP 名单条目。
@@ -407,10 +405,6 @@ export function useIPLists(
     ipListApi.list(params)
   )
 }
-
-// ============================================================
-// 安全事件相关 Hook
-// ============================================================
 
 export function useSecurityEvents(params?: any) {
   return useApiQuery(["security-events", params], () =>
@@ -438,17 +432,21 @@ export function useSecurityEventTimeline(params?: any) {
   )
 }
 
-// ============================================================
-// 访问日志相关 Hook
-// ============================================================
+/**
+ * 请求级安全事件聚合列表
+ *
+ * 与 useSecurityEvents 共用同一套筛选参数；返回的 total 是按 request_id
+ * 去重后的请求数，不是事件条数。
+ */
+export function useSecurityEventRequests(params?: any) {
+  return useApiQuery(["security-event-requests", params], () =>
+    securityEventApi.listRequests(params)
+  )
+}
 
 export function useAccessLogs(params?: any) {
   return useApiQuery(["access-logs", params], () => accessLogApi.list(params))
 }
-
-// ============================================================
-// 请求追踪相关 Hook
-// ============================================================
 
 /**
  * 通过 request_id 拉取全链路
@@ -460,19 +458,11 @@ export function useRequestTrace(requestId: string | null | undefined) {
   )
 }
 
-// ============================================================
-// Dashboard 相关 Hook
-// ============================================================
-
 export function useDashboard() {
   return useApiQuery(["dashboard"], () => dashboardApi.getSummary(), {
     refreshInterval: 10000,
   })
 }
-
-// ============================================================
-// CVE / OWASP 相关 Hook
-// ============================================================
 
 export function useCveRules(params?: any | null) {
   return useApiQuery(params === null ? null : ["cve-rules", params], () =>
@@ -486,10 +476,6 @@ export function useOwaspRules(params?: any | null) {
   )
 }
 
-// ============================================================
-// 丢弃策略相关 Hook
-// ============================================================
-
 export function useDropPolicy() {
   return useApiQuery(["drop-policy"], () => dropApi.getPolicy())
 }
@@ -497,10 +483,6 @@ export function useDropPolicy() {
 export function useDropEvents(params?: any) {
   return useApiQuery(["drop-events", params], () => dropApi.getEvents(params))
 }
-
-// ============================================================
-// 系统设置相关 Hook
-// ============================================================
 
 export function useSettings() {
   return useApiQuery(["settings"], () => settingsApi.list())
@@ -521,7 +503,10 @@ export function useLogConfig() {
 }
 
 export function useRuntimeConfig() {
-  return useApiQuery(["runtime-config"], () => runtimeApi.getConfig())
+  return useApiQuery<import("@/lib/types").RuntimeConfig>(
+    ["runtime-config"],
+    () => runtimeApi.getConfig()
+  )
 }
 
 export function useUpstreamStatus() {
@@ -532,25 +517,13 @@ export function useUpstreamStatus() {
   )
 }
 
-// ============================================================
-// API 密钥相关 Hook
-// ============================================================
-
 export function useApiKeys() {
   return useApiQuery(["api-keys"], () => apiKeyApi.list())
 }
 
-// ============================================================
-// 错误页面相关 Hook
-// ============================================================
-
 export function useDefaultErrorPages() {
   return useApiQuery(["error-pages-defaults"], () => errorPageApi.getDefaults())
 }
-
-// ============================================================
-// 提交操作 Hook（乐观更新）
-// ============================================================
 
 export function useSiteMutation() {
   return useMutation(
@@ -562,6 +535,18 @@ export function useSiteMutation() {
       return result
     }
   )
+}
+
+/**
+ * 保存站点局部 protection 字段前加载当前站点，以避免在局部配置入口丢失其他字段。
+ */
+export function useSiteProtectionMutation() {
+  return useMutation(async ({ id, data }: { id: number; data: SiteUpdate }) => {
+    const current = await siteApi.get(id)
+    const result = await siteApi.update(id, { ...current, ...data })
+    await invalidateSiteCaches(id).catch(() => undefined)
+    return result
+  })
 }
 
 export function useSiteDelete() {
@@ -664,23 +649,24 @@ export function usePolicyDelete() {
   })
 }
 
+/**
+ * 保存局部 protection 字段前先读取并合并现有配置，避免任意配置页覆盖无关字段。
+ */
 export function useProtectionSettingsUpdate() {
-  return useMutation(async (data: any) => protectionApi.updateSettings(data), {
-    invalidateKeys: [
-      "protection-settings",
-      "captcha-config",
-      "bot-settings",
-    ],
-  })
+  return useMutation<ProtectionSettings, ProtectionSettingsUpdate>(
+    async (data) => {
+      const current = await protectionApi.getSettings()
+      return protectionApi.updateSettings({ ...current, ...data })
+    },
+    {
+      invalidateKeys: ["protection-settings", "captcha-config", "bot-settings"],
+    }
+  )
 }
 
 export function useBotSettingsUpdate() {
   return useMutation(async (data: any) => botApi.updateSettings(data), {
-    invalidateKeys: [
-      "bot-settings",
-      "protection-settings",
-      "captcha-config",
-    ],
+    invalidateKeys: ["bot-settings", "protection-settings", "captcha-config"],
   })
 }
 
@@ -688,11 +674,7 @@ export function useCaptchaConfigUpdate() {
   return useMutation<CaptchaConfig, Partial<CaptchaConfig>>(
     async (data) => captchaApi.updateConfig(data),
     {
-      invalidateKeys: [
-        "captcha-config",
-        "protection-settings",
-        "bot-settings",
-      ],
+      invalidateKeys: ["captcha-config", "protection-settings", "bot-settings"],
     }
   )
 }
@@ -735,10 +717,6 @@ export function usePresetBotWhitelistSeed() {
     invalidateKeys: ["ip-lists"],
   })
 }
-
-// ============================================================
-// 威胁情报订阅相关 Hook
-// ============================================================
 
 /**
  * 查询威胁情报订阅源列表。
@@ -795,10 +773,6 @@ export function useThreatIntelSyncLogs(params?: {
     { refreshInterval: 30000 }
   )
 }
-
-// ============================================================
-// Lua 自定义策略插件相关 Hook
-// ============================================================
 
 /**
  * 查询全部 Lua 策略脚本。
@@ -876,6 +850,83 @@ export function useLuaPluginValidate() {
 export function useLuaPluginDryRun() {
   return useMutation(async (data: LuaDryRunRequest) =>
     luaPluginApi.dryRun(data)
+  )
+}
+
+/**
+ * 查询全部 JavaScript 边缘脚本。
+ */
+export function useJSPlugins() {
+  return useApiQuery(["js-plugins"], () => jsPluginApi.list())
+}
+
+/**
+ * 查询 JavaScript 运行时统计。运行时不可用时由页面单独降级展示。
+ */
+export function useJSPluginStats() {
+  return useApiQuery(["js-plugin-stats"], () => jsPluginApi.stats(), {
+    refreshInterval: 15000,
+  })
+}
+
+const JS_MUTATION_KEYS: Key[] = ["js-plugins", "js-plugin-stats"]
+
+/**
+ * 新建或更新 JavaScript 边缘脚本。
+ */
+export function useJSPluginMutation() {
+  return useMutation(
+    async ({
+      id,
+      data,
+    }: {
+      id?: number
+      data: JSPluginCreateRequest | JSPluginUpdateRequest
+    }) => {
+      if (id !== undefined) {
+        return jsPluginApi.update(id, data)
+      }
+      return jsPluginApi.create(data as JSPluginCreateRequest)
+    },
+    { invalidateKeys: JS_MUTATION_KEYS }
+  )
+}
+
+/**
+ * 删除 JavaScript 边缘脚本。
+ */
+export function useJSPluginDelete() {
+  return useMutation(async (id: number) => jsPluginApi.delete(id), {
+    invalidateKeys: JS_MUTATION_KEYS,
+  })
+}
+
+/**
+ * 切换 JavaScript 边缘脚本启用状态。
+ */
+export function useJSPluginToggle() {
+  return useMutation(
+    async ({ id, enabled }: { id: number; enabled: boolean }) =>
+      jsPluginApi.toggle(id, enabled),
+    { invalidateKeys: JS_MUTATION_KEYS }
+  )
+}
+
+/**
+ * 校验 JavaScript 源码；当前后端可能因运行时不可用返回 503。
+ */
+export function useJSPluginValidate() {
+  return useMutation(async (data: JSPluginValidateRequest) =>
+    jsPluginApi.validate(data)
+  )
+}
+
+/**
+ * 试运行 JavaScript 源码；当前后端可能因运行时不可用返回 503。
+ */
+export function useJSPluginDryRun() {
+  return useMutation(async (data: JSPluginDryRunRequest) =>
+    jsPluginApi.dryRun(data)
   )
 }
 
@@ -962,10 +1013,6 @@ export function useApiKeyCreate() {
   })
 }
 
-// ============================================================
-// 管理员账户相关 Hook
-// ============================================================
-
 export function useAdminUsers() {
   return useApiQuery(["admin-users"], () => adminUserApi.list())
 }
@@ -1011,10 +1058,6 @@ export function useErrorPagesUpdate() {
   )
 }
 
-// ============================================================
-// 误报反馈相关 Hook
-// ============================================================
-
 /**
  * 分页查询误报反馈记录。
  */
@@ -1033,7 +1076,7 @@ export function useFalsePositives(params?: {
  */
 export function useFalsePositiveCreate() {
   return useMutation(
-    async (data: Partial<import("@/lib/types").FalsePositiveReport>) =>
+    async (data: import("@/lib/types").FalsePositiveCreateRequest) =>
       falsePositiveApi.create(data),
     { invalidateKeys: ["false-positives"] }
   )
@@ -1062,8 +1105,6 @@ export function useFalsePositiveDelete() {
 export function useSystemReload() {
   return useMutation(async () => systemApi.reload())
 }
-
-// ── Page Templates ──
 
 export function usePageTemplate(type: string) {
   return useApiQuery(`page-template-${type}`, () => pageTemplateApi.get(type))
@@ -1099,64 +1140,84 @@ export function usePageTemplatePreview(type: string) {
   )
 }
 
-// ── Access Control (per-site) ──
-
 export function useAccessProviderCreate() {
-  return useMutation(
-    async ({ siteId, data }: { siteId: number; data: any }) =>
-      accessApi.createProvider(siteId, data),
-    { invalidateKeys: ["access-providers"] }
-  )
-}
-
-export function useAccessProviderUpdate() {
-  return useMutation(
-    async ({ siteId, pid, data }: { siteId: number; pid: number; data: any }) =>
-      accessApi.updateProvider(siteId, pid, data),
-    { invalidateKeys: ["access-providers"] }
-  )
-}
-
-export function useAccessUserCreate() {
   return useMutation(
     async ({
       siteId,
       data,
     }: {
       siteId: number
-      data: { username: string; password: string; enabled?: boolean }
-    }) => accessApi.createUser(siteId, data),
+      data: AccessProviderCreateInput
+    }) => accessApi.createProvider(siteId, data),
+    { invalidateKeys: ["access-providers"] }
+  )
+}
+
+export function useAccessProviderUpdate() {
+  return useMutation(
+    async ({
+      siteId,
+      pid,
+      data,
+    }: {
+      siteId: number
+      pid: number
+      data: AccessProviderUpdateInput
+    }) => accessApi.updateProvider(siteId, pid, data),
+    { invalidateKeys: ["access-providers"] }
+  )
+}
+
+export function useAccessUserCreate() {
+  return useMutation(
+    async ({ siteId, data }: { siteId: number; data: AccessUserCreateInput }) =>
+      accessApi.createUser(siteId, data),
     { invalidateKeys: ["access-users"] }
   )
 }
 
 export function useAccessUserUpdate() {
   return useMutation(
-    async ({ siteId, uid, data }: { siteId: number; uid: number; data: any }) =>
-      accessApi.updateUser(siteId, uid, data),
+    async ({
+      siteId,
+      uid,
+      data,
+    }: {
+      siteId: number
+      uid: number
+      data: AccessUserUpdateInput
+    }) => accessApi.updateUser(siteId, uid, data),
     { invalidateKeys: ["access-users"] }
   )
 }
 
 export function useAccessPathRuleCreate() {
   return useMutation(
-    async ({ siteId, data }: { siteId: number; data: any }) =>
-      accessApi.createPathRule(siteId, data),
+    async ({
+      siteId,
+      data,
+    }: {
+      siteId: number
+      data: AccessPathRuleCreateInput
+    }) => accessApi.createPathRule(siteId, data),
     { invalidateKeys: ["access-path-rules"] }
   )
 }
 
 export function useAccessPathRuleUpdate() {
   return useMutation(
-    async ({ siteId, rid, data }: { siteId: number; rid: number; data: any }) =>
-      accessApi.updatePathRule(siteId, rid, data),
+    async ({
+      siteId,
+      rid,
+      data,
+    }: {
+      siteId: number
+      rid: number
+      data: AccessPathRuleUpdateInput
+    }) => accessApi.updatePathRule(siteId, rid, data),
     { invalidateKeys: ["access-path-rules"] }
   )
 }
-
-// ============================================================
-// 站点访问控制 Query Hooks
-// ============================================================
 
 export function useAccessConfig(siteId: number | string | undefined) {
   return useApiQuery(siteId ? ["access-config", siteId] : null, () =>
@@ -1182,10 +1243,6 @@ export function useAccessPathRules(siteId: number | string | undefined) {
   )
 }
 
-// ============================================================
-// 证书 ACME 状态 Hook
-// ============================================================
-
 export function useACMEStatus() {
   return useApiQuery(["acme-status"], () => certificateApi.getACMEStatus())
 }
@@ -1193,10 +1250,6 @@ export function useACMEStatus() {
 export function useACMEConfig() {
   return useApiQuery(["acme-config"], () => certificateApi.getACMEConfig())
 }
-
-// ============================================================
-// TLS 指纹 Hook
-// ============================================================
 
 export function useFingerprints(params?: {
   page?: number
@@ -1207,17 +1260,9 @@ export function useFingerprints(params?: {
   )
 }
 
-// ============================================================
-// Drop 统计 Hook
-// ============================================================
-
 export function useDropStats() {
   return useApiQuery(["drop-stats"], () => dropApi.getStats())
 }
-
-// ============================================================
-// Bot 统计 Hook
-// ============================================================
 
 export function useBotStats() {
   return useApiQuery(["bot-stats"], () => botApi.getStats())
@@ -1226,10 +1271,6 @@ export function useBotStats() {
 export function useBotScores() {
   return useApiQuery(["bot-scores"], () => botApi.getScores())
 }
-
-// ============================================================
-// CVE/OWASP 统计 Hook
-// ============================================================
 
 export function useCveStats(params?: any | null) {
   return useApiQuery(params === null ? null : ["cve-stats", params], () =>
@@ -1247,17 +1288,9 @@ export function useOwaspStats(params?: any | null) {
   )
 }
 
-// ============================================================
-// Chain Sessions Hook
-// ============================================================
-
 export function useChainSessions() {
   return useApiQuery(["chain-sessions"], () => chainApi.getSessions())
 }
-
-// ============================================================
-// HTTP2 Config Hook
-// ============================================================
 
 export function useHTTP2Config() {
   return useApiQuery(["http2-config"], () => settingsApi.getHTTP2())
@@ -1268,10 +1301,6 @@ export function useHTTP2ConfigUpdate() {
     invalidateKeys: ["http2-config"],
   })
 }
-
-// ============================================================
-// TLS Cipher Suites Hook
-// ============================================================
 
 export function useCipherSuites() {
   return useApiQuery(["cipher-suites"], () => settingsApi.getCipherSuites())

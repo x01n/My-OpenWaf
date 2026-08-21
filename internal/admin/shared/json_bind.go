@@ -2,6 +2,7 @@ package shared
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"My-OpenWaf/internal/store"
@@ -39,6 +40,28 @@ func PeelJSONStringBlobs(raw map[string]json.RawMessage, keys []string) map[stri
 	return out
 }
 
+// ValidateSkipPathByPhase rejects invalid phase-to-path-list objects before persistence.
+func ValidateSkipPathByPhase(raw string) error {
+	var pathsByPhase map[string][]string
+	if err := json.Unmarshal([]byte(raw), &pathsByPhase); err != nil || pathsByPhase == nil {
+		return errors.New("skip_path_by_phase must be a JSON object")
+	}
+	for phase, paths := range pathsByPhase {
+		if !store.IsSkipPathPhaseKey(phase) {
+			return errors.New("skip_path_by_phase contains an unsupported phase")
+		}
+		if len(paths) == 0 {
+			return errors.New("skip_path_by_phase paths must be non-empty strings")
+		}
+		for _, path := range paths {
+			if strings.TrimSpace(path) == "" {
+				return errors.New("skip_path_by_phase paths must be non-empty strings")
+			}
+		}
+	}
+	return nil
+}
+
 // ProtectionJSONBlobKeys returns the list of protection config fields that are stored
 // as JSON string blobs.
 func ProtectionJSONBlobKeys() []string {
@@ -50,6 +73,7 @@ func ProtectionJSONBlobKeys() []string {
 		"category_sensitivity",
 		"owasp_rules_config",
 		"cve_rules_config",
+		"skip_path_by_phase",
 	}
 }
 
@@ -63,6 +87,7 @@ func SiteJSONBlobKeys() []string {
 		"dynamic_js_paths",
 		"cc_rules",
 		"client_ip_header_order",
+		"skip_path_by_phase",
 	}
 }
 
@@ -78,7 +103,14 @@ func BindSiteFromRequestBody(body []byte, dst *store.Site) error {
 // bindSiteFromRaw unmarshals a site JSON object into dst after lifting JSON-blob fields that
 // are stored as strings in store.Site but are often sent as arrays/objects from the UI.
 func bindSiteFromRaw(raw map[string]json.RawMessage, dst *store.Site) error {
+	skipPathRaw, skipPathPresent := raw["skip_path_by_phase"]
+	skipPathNull := skipPathPresent && strings.TrimSpace(string(skipPathRaw)) == "null"
 	preserved := PeelJSONStringBlobs(raw, SiteJSONBlobKeys())
+	if s, ok := preserved["skip_path_by_phase"]; ok && !skipPathNull {
+		if err := ValidateSkipPathByPhase(s); err != nil {
+			return err
+		}
+	}
 	plain, err := json.Marshal(raw)
 	if err != nil {
 		return err
@@ -106,6 +138,13 @@ func bindSiteFromRaw(raw map[string]json.RawMessage, dst *store.Site) error {
 	}
 	if s, ok := preserved["client_ip_header_order"]; ok {
 		dst.ClientIPHeaderOrder = s
+	}
+	if s, ok := preserved["skip_path_by_phase"]; ok {
+		if skipPathNull {
+			dst.SkipPathByPhase = nil
+		} else {
+			dst.SkipPathByPhase = &s
+		}
 	}
 	return nil
 }

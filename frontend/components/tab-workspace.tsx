@@ -86,14 +86,19 @@ function resolveTab(href: string): WorkspaceTab {
 }
 
 /** 从 sessionStorage 读取已保存标签 */
-function loadTabs(): WorkspaceTab[] {
+function loadTabs(): string[] {
   if (typeof window === "undefined") return []
   try {
     const raw = window.sessionStorage.getItem(STORAGE_KEY)
     if (!raw) return []
-    const parsed = JSON.parse(raw) as WorkspaceTab[]
+    const parsed: unknown = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
-    return parsed.filter((t) => typeof t?.path === "string")
+    return parsed.flatMap((tab: unknown) => {
+      if (typeof tab !== "object" || tab === null || !("path" in tab)) {
+        return []
+      }
+      return typeof tab.path === "string" ? [tab.path] : []
+    })
   } catch {
     return []
   }
@@ -122,12 +127,12 @@ export function TabWorkspaceProvider({
     const restored = loadTabs()
     const deduped: WorkspaceTab[] = []
     const seen = new Set<string>()
-    for (const tab of restored) {
-      const path = normalizePath(tab.path)
+    for (const restoredPath of restored) {
+      const path = normalizePath(restoredPath)
       const key = tabIdentity(path)
       if (seen.has(key)) continue
       seen.add(key)
-      deduped.push({ ...tab, path })
+      deduped.push(resolveTab(path))
     }
     const withPinned = seen.has(tabIdentity(PINNED_PATH))
       ? deduped

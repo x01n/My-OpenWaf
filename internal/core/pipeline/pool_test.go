@@ -14,6 +14,10 @@ func TestReleaseCtxClearsMatcherHeadersCache(t *testing.T) {
 	ctx.AppendHeaderKey("User-Agent")
 	ctx.BodyTargets = []string{"body"}
 	ctx.BodyTargetsDone = true
+	ctx.ChallengeIdentityCaptured = true
+	ctx.ChallengeIdentityUserAgent = "original-agent"
+	ctx.ChallengeIdentityCookie = "original-cookie"
+	ctx.OriginalPath = "/inbound"
 	ctx.StoreMatcherHeaders(map[string]string{"X-OWAF-TLS-SNI": "login.example.com"})
 	ctx.AppendPhaseObserveHits([]action.Result{{RuleID: 7, Matched: true, Type: action.Observe}})
 
@@ -31,8 +35,26 @@ func TestReleaseCtxClearsMatcherHeadersCache(t *testing.T) {
 	if ctx.BodyTargets != nil || ctx.BodyTargetsDone {
 		t.Fatalf("body target cache should be cleared on release, got %#v / %v", ctx.BodyTargets, ctx.BodyTargetsDone)
 	}
+	if ctx.ChallengeIdentityCaptured || ctx.ChallengeIdentityUserAgent != "" || ctx.ChallengeIdentityCookie != "" {
+		t.Fatalf("challenge identity should be cleared on release, got captured=%v ua=%q cookie=%q", ctx.ChallengeIdentityCaptured, ctx.ChallengeIdentityUserAgent, ctx.ChallengeIdentityCookie)
+	}
+	if ctx.OriginalPath != "" {
+		t.Fatalf("original path should be cleared on release, got %q", ctx.OriginalPath)
+	}
 	if len(ctx.DrainPhaseObserveHits()) != 0 {
 		t.Fatal("phase observe hits should be cleared on release")
+	}
+}
+
+func TestReleaseCtxClearsAntiReplayConsumedNonce(t *testing.T) {
+	ctx := AcquireCtx()
+	ctx.AntiReplayConsumedNonce = "nonce-to-clear"
+	ReleaseCtx(ctx)
+
+	next := AcquireCtx()
+	defer ReleaseCtx(next)
+	if next.AntiReplayConsumedNonce != "" {
+		t.Fatalf("reused context AntiReplayConsumedNonce = %q, want empty", next.AntiReplayConsumedNonce)
 	}
 }
 

@@ -169,7 +169,7 @@ docker run -d \
 cd frontend && bun install --frozen-lockfile && bun run build
 
 # 2. 构建后端（前端产物自动嵌入）
-cd .. && CGO_ENABLED=1 go build -ldflags="-s -w" -o bin/my-openwaf ./cmd/...
+cd .. && CGO_ENABLED=1 go build -tags=quickjs -ldflags="-s -w" -o bin/my-openwaf ./cmd/...
 
 # 3. 运行
 ./bin/my-openwaf

@@ -3,9 +3,15 @@
 import { useState, useMemo, useCallback, useEffect } from "react"
 import { useTranslation } from "react-i18next"
 import { PageHeader } from "@/components/page-header"
-import { useOwaspRules, useOwaspBatchUpdate } from "@/hooks/use-api"
+import {
+  useOwaspRules,
+  useOwaspBatchUpdate,
+  useProtectionSettings,
+  useProtectionSettingsUpdate,
+} from "@/hooks/use-api"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
@@ -26,11 +32,14 @@ import {
   IconPackages,
   IconBug,
 } from "@tabler/icons-react"
+import { SkipPathByPhaseEditor } from "@/components/skip-path-by-phase-editor"
+import {
+  findEmptySkipPaths,
+  parseSkipPathByPhase,
+  toSkipPathByPhasePayload,
+} from "@/lib/skip-path-by-phase"
 import { cn } from "@/lib/utils"
-
-// ============================================================
-// 类型定义
-// ============================================================
+import type { ProtectionSettings, SkipPathByPhase } from "@/lib/types"
 
 /**
  * OWASP 规则视图
@@ -74,10 +83,6 @@ interface AttackModule {
   descKey: string
   icon: React.ElementType
 }
-
-// ============================================================
-// 常量定义
-// ============================================================
 
 /** 模块列表 */
 const MODULES: AttackModule[] = [
@@ -164,10 +169,6 @@ const MODE_OPTIONS: { value: ModuleMode; labelKey: string }[] = [
 /** 全局默认模式（平衡防护） */
 const GLOBAL_DEFAULT_MODE: ModuleMode = "balanced"
 
-// ============================================================
-// 辅助函数
-// ============================================================
-
 /**
  * 根据规则列表推断当前模块模式
  * @param rules - 该模块对应的所有规则
@@ -235,12 +236,274 @@ function getModeBadgeVariant(
   }
 }
 
-// ============================================================
-// 主组件
-// ============================================================
+interface GlobalSkipPathByPhaseCardProps {
+  settings: ProtectionSettings
+}
+
+/**
+ * 全局内置 OWASP 开关配置。
+ */
+function GlobalOwaspToggleCard({
+  settings,
+}: {
+  settings: ProtectionSettings
+}) {
+  const { t, i18n } = useTranslation()
+  const useChinese = (i18n.resolvedLanguage ?? i18n.language).startsWith("zh")
+  const fallback = (zh: string, en: string) => (useChinese ? zh : en)
+  const updateSettings = useProtectionSettingsUpdate()
+  const [enabled, setEnabled] = useState(
+    Boolean(settings.builtin_owasp_enabled)
+  )
+  const [sensitivity, setSensitivity] = useState<string>(
+    settings.builtin_owasp_sensitivity || "mid"
+  )
+  const [dirty, setDirty] = useState(false)
+
+  const handleToggle = (next: boolean) => {
+    setEnabled(next)
+    setDirty(true)
+  }
+
+  const handleSensitivityChange = (next: string) => {
+    setSensitivity(next)
+    setDirty(true)
+  }
+
+  const handleSave = async () => {
+    try {
+      await updateSettings.execute({ builtin_owasp_enabled: enabled })
+      setDirty(false)
+      toast.success(
+        t("attacks.globalOwaspSaveSuccess", {
+          defaultValue: fallback(
+            "全局内置 OWASP 已保存。",
+            "Global built-in OWASP saved."
+          ),
+        })
+      )
+    } catch {
+      toast.error(
+        t("attacks.globalOwaspSaveFailed", {
+          defaultValue: fallback(
+            "全局内置 OWASP 保存失败。",
+            "Failed to save global built-in OWASP."
+          ),
+        })
+      )
+    }
+  }
+
+  const handleReset = () => {
+    setEnabled(Boolean(settings.builtin_owasp_enabled))
+    setSensitivity(settings.builtin_owasp_sensitivity || "mid")
+    setDirty(false)
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <IconBug className="h-5 w-5 text-primary" />
+          {t("attacks.globalOwaspTitle", {
+            defaultValue: fallback("全局内置 OWASP", "Global built-in OWASP"),
+          })}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-medium">
+              {t("attacks.globalOwaspEnabled", {
+                defaultValue: fallback(
+                  "启用内置 OWASP 引擎阶段",
+                  "Enable built-in OWASP engine phase"
+                ),
+              })}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {t("attacks.globalOwaspHint", {
+                defaultValue: fallback(
+                  "关闭后任何站点都不会装配 OWASP 阶段；站点级开关保持独立显示。",
+                  "When off, no site assembles the OWASP phase; site-level switches stay independent."
+                ),
+              })}
+            </p>
+          </div>
+          <Switch
+            checked={enabled}
+            onCheckedChange={handleToggle}
+            disabled={updateSettings.loading}
+            aria-label={t("attacks.globalOwaspEnabled")}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="global-owasp-sensitivity">
+            {t("attacks.globalOwaspSensitivity", {
+              defaultValue: fallback("全局敏感度", "Global sensitivity"),
+            })}
+          </Label>
+          <select
+            id="global-owasp-sensitivity"
+            value={sensitivity}
+            onChange={(e) => handleSensitivityChange(e.target.value)}
+            className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+          >
+            <option value="off">{t("attacks.sensitivityValues.off")}</option>
+            <option value="low">{t("attacks.sensitivityValues.low")}</option>
+            <option value="mid">{t("attacks.sensitivityValues.medium")}</option>
+            <option value="high">{t("attacks.sensitivityValues.high")}</option>
+            <option value="very_high">
+              {t("attacks.sensitivityValues.veryHigh")}
+            </option>
+            <option value="strict">
+              {t("attacks.sensitivityValues.strict")}
+            </option>
+          </select>
+        </div>
+        <div className="flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:justify-end">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!dirty || updateSettings.loading}
+            onClick={handleReset}
+          >
+            {t("common.cancel", {
+              defaultValue: fallback("取消", "Cancel"),
+            })}
+          </Button>
+          <Button
+            type="button"
+            disabled={!dirty || updateSettings.loading}
+            onClick={handleSave}
+          >
+            {updateSettings.loading
+              ? t("common.saving", {
+                  defaultValue: fallback("保存中...", "Saving..."),
+                })
+              : t("common.save", {
+                  defaultValue: fallback("保存", "Save"),
+                })}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * 全局按阶段跳过路径配置。
+ */
+function GlobalSkipPathByPhaseCard({
+  settings,
+}: GlobalSkipPathByPhaseCardProps) {
+  const { t, i18n } = useTranslation()
+  const useChinese = (i18n.resolvedLanguage ?? i18n.language).startsWith("zh")
+  const fallback = (zh: string, en: string) => (useChinese ? zh : en)
+  const updateSettings = useProtectionSettingsUpdate()
+  const [skipPaths, setSkipPaths] = useState<SkipPathByPhase>(() =>
+    parseSkipPathByPhase(settings.skip_path_by_phase)
+  )
+  const [dirty, setDirty] = useState(false)
+
+  const handleChange = (value: SkipPathByPhase) => {
+    setSkipPaths(value)
+    setDirty(true)
+  }
+
+  const handleSave = async () => {
+    if (findEmptySkipPaths(skipPaths).length > 0) {
+      toast.error(
+        t("skipPathByPhase.validationFailed", {
+          defaultValue: fallback(
+            "请删除空路径，或为每一项输入非空路径。",
+            "Remove empty paths or enter a non-empty path for every item."
+          ),
+        })
+      )
+      return
+    }
+    try {
+      await updateSettings.execute({
+        skip_path_by_phase: toSkipPathByPhasePayload(skipPaths),
+      })
+      setDirty(false)
+      toast.success(
+        t("skipPathByPhase.globalSaveSuccess", {
+          defaultValue: fallback(
+            "全局跳过路径已保存。",
+            "Global skipped paths saved."
+          ),
+        })
+      )
+    } catch {
+      toast.error(
+        t("skipPathByPhase.saveFailed", {
+          defaultValue: fallback(
+            "跳过路径保存失败。",
+            "Failed to save skipped paths."
+          ),
+        })
+      )
+    }
+  }
+
+  const handleReset = () => {
+    setSkipPaths(parseSkipPathByPhase(settings.skip_path_by_phase))
+    setDirty(false)
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <IconSettings className="h-5 w-5 text-primary" />
+          {t("skipPathByPhase.globalTitle", {
+            defaultValue: fallback("按阶段跳过路径", "Skip paths by phase"),
+          })}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <SkipPathByPhaseEditor
+          value={skipPaths}
+          onChange={handleChange}
+          disabled={updateSettings.loading}
+          idPrefix="global-skip-path"
+        />
+        <div className="flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:justify-end">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!dirty || updateSettings.loading}
+            onClick={handleReset}
+          >
+            {t("common.cancel", {
+              defaultValue: fallback("取消", "Cancel"),
+            })}
+          </Button>
+          <Button
+            type="button"
+            disabled={!dirty || updateSettings.loading}
+            onClick={handleSave}
+          >
+            {updateSettings.loading
+              ? t("common.saving", {
+                  defaultValue: fallback("保存中...", "Saving..."),
+                })
+              : t("common.save", {
+                  defaultValue: fallback("保存", "Save"),
+                })}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
 
 export default function AttacksPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const useChinese = (i18n.resolvedLanguage ?? i18n.language).startsWith("zh")
+  const fallback = (zh: string, en: string) => (useChinese ? zh : en)
   const { data, isLoading, error, mutate } = useOwaspRules({
     page_size: 500,
   }) as {
@@ -250,6 +513,12 @@ export default function AttacksPage() {
     mutate: () => void
   }
   const { execute: batchUpdate, loading: isSaving } = useOwaspBatchUpdate()
+  const {
+    data: protectionSettings,
+    isLoading: skipPathsLoading,
+    error: skipPathsError,
+    mutate: mutateProtectionSettings,
+  } = useProtectionSettings()
 
   const [configMode, setConfigMode] = useState<ConfigMode>("custom")
   const [batchMode, setBatchMode] = useState<ModuleMode>("balanced")
@@ -532,6 +801,48 @@ export default function AttacksPage() {
           </div>
         </CardContent>
       </Card>
+
+      {skipPathsLoading ? (
+        <Skeleton className="h-56 w-full" />
+
+      ) : protectionSettings ? (
+        <>
+          <GlobalOwaspToggleCard settings={protectionSettings} />
+          <GlobalSkipPathByPhaseCard
+            key={JSON.stringify(protectionSettings.skip_path_by_phase)}
+            settings={protectionSettings}
+          />
+        </>
+      ) : (
+        <Card>
+          <CardContent className="flex flex-wrap items-center gap-3 py-5 text-sm text-destructive">
+            <IconAlertTriangle className="h-4 w-4" />
+            <span>
+              {t("skipPathByPhase.loadFailed", {
+                defaultValue: fallback(
+                  "无法加载按阶段跳过路径配置。",
+                  "Unable to load skipped-path configuration."
+                ),
+              })}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => mutateProtectionSettings()}
+            >
+              {t("common.retry", {
+                defaultValue: fallback("重试", "Retry"),
+              })}
+            </Button>
+            {skipPathsError instanceof Error && (
+              <span className="text-xs text-muted-foreground">
+                {skipPathsError.message}
+              </span>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* 模块列表 */}
       <Card>

@@ -225,6 +225,9 @@ func TestBuildCVERequestDeduplicatesOnlyEquivalentTargets(t *testing.T) {
 	if got, want := len(cleanReq.HeaderTargets), 2; got != want {
 		t.Fatalf("deduplicated header targets length = %d, want %d: %#v", got, want, cleanReq.HeaderTargets)
 	}
+	if got, want := cap(cleanReq.AllTargetsLower), len(cleanReq.AllTargetsLower); got != want {
+		t.Fatalf("lower targets capacity = %d, want %d", got, want)
+	}
 
 	encodedReq := BuildCVERequest(
 		"/api/login",

@@ -160,8 +160,6 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
             {t("ccProtection.customRules")}
           </TabsTrigger>
         </TabsList>
-
-        {/* ==================== 频率限制 ==================== */}
         <TabsContent value="rate-limit" className="space-y-4">
           {/* 请求频率限制 */}
           <Card>
@@ -348,8 +346,6 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
             </CardContent>
           </Card>
         </TabsContent>
-
-        {/* ==================== 自定义 CC 规则 ==================== */}
         <TabsContent value="custom-rules">
           <Card>
             <CardHeader className="pb-3">

@@ -29,6 +29,24 @@ const (
 	CaptchaTypeMath   CaptchaType = "math" // Built-in math captcha (no external resources needed)
 )
 
+// IsValidCaptchaType reports whether t is one of the supported CAPTCHA modes.
+func IsValidCaptchaType(t CaptchaType) bool {
+	switch t {
+	case CaptchaTypeMath, CaptchaTypeClick, CaptchaTypeSlide, CaptchaTypeRotate:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateCaptchaType validates a CAPTCHA mode used by persisted global settings.
+func ValidateCaptchaType(t CaptchaType) error {
+	if !IsValidCaptchaType(t) {
+		return fmt.Errorf("unsupported captcha type %q", t)
+	}
+	return nil
+}
+
 // CaptchaSession stores the server-side state for a pending CAPTCHA verification.
 type CaptchaSession struct {
 	ChallengeSessionBinding

@@ -177,7 +177,7 @@ func handleAccessVerify(c *app.RequestContext, opts Options, gate *accessgate.Ga
 
 	case "user_password":
 		username := string(c.FormValue("username"))
-		if username == "" || password == "" || opts.AccessControlRepo == nil {
+		if !gate.HasProviderType(store.AccessProviderPassword) || username == "" || password == "" || opts.AccessControlRepo == nil {
 			renderAccessLoginError(c, host, cfg, "用户名或密码错误")
 			return
 		}
@@ -235,7 +235,7 @@ func handleAccessOAuthCallback(_ context.Context, c *app.RequestContext, opts Op
 		c.String(400, "missing code or state")
 		return
 	}
-	state, err := globalAccessOAuthStateStore.Get(stateParam)
+	state, err := globalAccessOAuthStateStore.Consume(stateParam)
 	if err != nil || state == nil || state.SiteID != rt.Site.ID {
 		c.String(400, "invalid or expired state")
 		return
@@ -256,8 +256,6 @@ func handleAccessOAuthCallback(_ context.Context, c *app.RequestContext, opts Op
 		c.String(502, "oauth userinfo failed")
 		return
 	}
-
-	_ = globalAccessOAuthStateStore.Delete(stateParam)
 
 	token, err := gate.CreateSession(identity, providerName)
 	if err != nil {

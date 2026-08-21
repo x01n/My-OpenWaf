@@ -74,6 +74,12 @@ func takeInternalHTTP3CancelSignal(token string) (<-chan struct{}, bool) {
 // for header-order fingerprinting and logging.
 func populateRequestCtxHeaders(reqCtx *pipeline.RequestCtx, c *app.RequestContext) {
 	reqCtx.HeadersLowercase = true
+	if reqCtx.Headers == nil {
+		reqCtx.Headers = make(map[string]string)
+	} else {
+		clear(reqCtx.Headers)
+	}
+	reqCtx.ClearHeaderKeys()
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := string(k)
 		lower := lowerRequestHeaderName(key)

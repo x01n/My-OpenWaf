@@ -3,6 +3,7 @@ package rules
 import (
 	"sort"
 	"strings"
+	"unicode"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
@@ -18,6 +19,7 @@ type Compiled struct {
 	Arg           string
 	StatusCode    int    // custom HTTP status code (0 = default)
 	RedirectTo    string // URL for redirect action
+	CaptchaType   string // Rule-level CAPTCHA type; empty inherits global protection config.
 	matcher       Matcher
 	runtimeAction action.Type
 	ruleIDStr     string
@@ -43,7 +45,10 @@ func Compile(rs []store.Rule) []Compiled {
 		if kind == "" {
 			continue
 		}
-		matcher := buildMatcher(kind, arg)
+		matcher := Matcher(&neverMatcher{})
+		if len(validateParsedPattern(kind, arg)) == 0 {
+			matcher = buildMatcher(kind, arg)
+		}
 		out = append(out, Compiled{
 			ID:            r.ID,
 			Phase:         string(r.Phase),
@@ -53,6 +58,7 @@ func Compile(rs []store.Rule) []Compiled {
 			Arg:           arg,
 			StatusCode:    r.StatusCode,
 			RedirectTo:    r.RedirectTo,
+			CaptchaType:   r.CaptchaType,
 			matcher:       matcher,
 			runtimeAction: normalizeConfiguredAction(string(r.Action)),
 			ruleIDStr:     "rule:" + string(r.Phase) + ":" + kind,
@@ -114,9 +120,11 @@ var knownPrefixes = func() map[string]struct{} {
 		"block_query_contains", "block_query_regex",
 		"block_header", "block_header_exact", "block_header_prefix", "block_header_regex",
 		"block_method", "block_content_type",
+		"full_url_not_exact", "path_not_exact", "host_not_exact", "block_header_not_exact", "query_param_not_exact", "body_not_exact",
 		"block_user_agent", "block_user_agent_regex",
 		"header_regex", "body_contains", "body_regex", "block_body_contains", "block_body_regex", "block_body_json_path", "query_param", "query_param_regex",
 		"path_contains", "path_not_contains",
+		"path_wildcard", "full_url_wildcard", "host_wildcard", "body_wildcard", "header_wildcard",
 		"host", "host_full", "host_regex", "host_contains", "host_not_contains",
 		"full_url_contains", "full_url_regex",
 		"cookie_contains", "referer_contains",
@@ -133,21 +141,28 @@ var knownPrefixes = func() map[string]struct{} {
 // ParsePattern extracts kind and arg from a DSL string like "block_ip:1.2.3.0/24".
 // Supports both simple patterns and JSON compound conditions.
 func ParsePattern(p string) (kind, arg string) {
-	p = strings.TrimSpace(p)
+	// Leading whitespace is formatting around the expression. For wildcard
+	// matchers, whitespace after the first colon is part of the pattern and
+	// must not be discarded.
+	trimmed := strings.TrimLeftFunc(p, unicode.IsSpace)
 
 	// JSON compound condition: {"op":"and","children":[...]}
-	if len(p) > 0 && p[0] == '{' {
-		return "compound", p
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		return "compound", strings.TrimSpace(trimmed)
 	}
 
 	// Find the first colon and check if the prefix is a known kind.
-	idx := strings.IndexByte(p, ':')
+	idx := strings.IndexByte(trimmed, ':')
 	if idx <= 0 {
 		return "", ""
 	}
-	candidate := p[:idx]
+	candidate := trimmed[:idx]
 	if _, ok := knownPrefixes[candidate]; ok {
-		return candidate, strings.TrimSpace(p[idx+1:])
+		arg := trimmed[idx+1:]
+		if strings.HasSuffix(candidate, "_wildcard") {
+			return candidate, arg
+		}
+		return candidate, strings.TrimSpace(arg)
 	}
 	return "", ""
 }

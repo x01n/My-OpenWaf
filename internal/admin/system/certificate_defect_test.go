@@ -156,3 +156,32 @@ func TestDefectUpdateCertificateEchoesStoredPrivateKey(t *testing.T) {
 		t.Fatalf("stored private key must remain intact after an update")
 	}
 }
+
+/**
+ * 显式提交空私钥时必须拒绝更新，并保留数据库中的原私钥。
+ */
+func TestDefectUpdateWithExplicitEmptyPrivateKeyPreservesStoredKey(t *testing.T) {
+	repos := newCertificateTestRepos(t)
+	cert, _, keyPEM := seedTestCertificate(t, repos.cert, "defect-empty-key.example.test", []string{"defect-empty-key.example.test"})
+	idStr := strconv.FormatUint(uint64(cert.ID), 10)
+
+	ctx := invokeCertificateHandlerForTest(t, UpdateCertificate(repos.cert, func() error { return nil }),
+		"POST", "/api/v1/certificates/"+idStr+"/update", param.Params{{Key: "id", Value: idStr}}, []byte(`{"name":"must-not-apply","key_pem":""}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("explicit empty private key status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if bytes.Contains(ctx.Response.Body(), []byte("PRIVATE KEY")) {
+		t.Fatalf("explicit empty private key error leaked PEM material")
+	}
+
+	stored, err := repos.cert.Get(cert.ID)
+	if err != nil {
+		t.Fatalf("load stored certificate: %v", err)
+	}
+	if stored.Name != cert.Name {
+		t.Fatalf("rejected update changed name to %q", stored.Name)
+	}
+	if strings.TrimSpace(stored.KeyPEM) != strings.TrimSpace(keyPEM) {
+		t.Fatalf("rejected update changed the stored private key")
+	}
+}

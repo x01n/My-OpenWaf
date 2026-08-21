@@ -31,6 +31,29 @@ func TestCaptchaImageURLAllowsGeneratedDataImagesOnly(t *testing.T) {
 	}
 }
 
+func TestCaptchaImageURLRejectsNestedDataURI(t *testing.T) {
+	nested := "data:image/png;base64,data:image/png;base64,ZmFrZQ=="
+	if got := captchaImageURL(nested); got != "" {
+		t.Fatalf("captchaImageURL accepted nested data URI: %q", got)
+	}
+}
+
+func TestRenderCaptchaPageUsesRotateThumbForInteraction(t *testing.T) {
+	image := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("image"))
+	page := string(renderCaptchaPage(&CaptchaChallenge{
+		SessionID: "session",
+		Type:      string(CaptchaTypeRotate),
+		MasterImg: image,
+		ThumbImg:  image,
+	}, "request", "", pageconfig.DefaultCaptchaPageConfig()))
+	if !strings.Contains(page, `id="rotate-thumb"`) || !strings.Contains(page, `rotateThumb.style.transform='rotate('`) {
+		t.Fatalf("rotate page does not bind rotation to thumb image: %s", page)
+	}
+	if strings.Contains(page, `img.style.transform='rotate('`) {
+		t.Fatalf("rotate page still rotates the master image: %s", page)
+	}
+}
+
 func TestRenderCaptchaPageUsesConfigAndRejectsUnsafeValues(t *testing.T) {
 	image := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("image"))
 	cfg := pageconfig.DefaultCaptchaPageConfig()

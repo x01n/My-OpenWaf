@@ -140,6 +140,7 @@ func TestCreateIPEntryRejectsInvalidInput(t *testing.T) {
 		{name: "invalid kind", payload: `{"kind":"greylist","value":"203.0.113.1"}`},
 		{name: "missing kind", payload: `{"value":"203.0.113.1"}`},
 		{name: "missing value", payload: `{"kind":"blacklist","value":""}`},
+		{name: "invalid value", payload: `{"kind":"blacklist","value":"not-an-ip"}`},
 		{name: "invalid action", payload: `{"kind":"blacklist","value":"203.0.113.1","action":"challenge"}`},
 		{name: "malformed json", payload: `{"kind":`},
 	}

@@ -67,7 +67,7 @@ func UpdateSiteErrorPages(repo *repository.SiteRepo, reload func() error) app.Ha
 			ErrorPages *map[string]errorPageConfig `json:"error_pages"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if req.ErrorPages == nil {
@@ -106,7 +106,7 @@ func PreviewErrorPage() app.HandlerFunc {
 			Variables  map[string]any `json:"variables"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if req.HTML == "" {

@@ -53,3 +53,4 @@ wasm-pow-solver/target/
 .cursor/
 internal/waf/cve/testdata/detectfirst_golden.txt
 My-OpenWaf
+.codex/

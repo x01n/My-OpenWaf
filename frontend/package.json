@@ -9,7 +9,10 @@
     "start": "next start",
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:i18n": "bun run scripts/check-skip-path-by-phase.ts",
+    "check:skip-path-contract": "bun run scripts/check-skip-path-by-phase.ts",
+    "check:rule-pattern-roundtrip": "bun run scripts/check-rule-pattern-roundtrip.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",

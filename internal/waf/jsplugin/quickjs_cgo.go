@@ -1,8 +1,9 @@
-//go:build cgo
+//go:build cgo && quickjs
 
 package jsplugin
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -13,25 +14,31 @@ import (
 	"time"
 
 	quickjs "github.com/buke/quickjs-go"
+	"github.com/tdewolff/parse/v2"
+	"github.com/tdewolff/parse/v2/js"
 )
 
 // Compile validates a QuickJS plugin and returns an immutable script descriptor.
 func Compile(name, source string, opts ScriptOptions) (*Script, error) {
+	if opts.Name == "" {
+		opts.Name = name
+	}
 	if len(source) == 0 {
 		return nil, errors.New("jsplugin: script source is empty")
 	}
 	if len(source) > MaxScriptBytes {
 		return nil, fmt.Errorf("jsplugin: script exceeds %d bytes", MaxScriptBytes)
 	}
-	if !strings.Contains(source, "export default") {
-		return nil, errors.New("jsplugin: script must export default")
-	}
 	requestedTimeout := opts.Timeout
 	normalized, err := opts.normalized()
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSource(source, normalized.MemoryLimit, normalized.StackLimit, normalized.Timeout); err != nil {
+	transformed, err := transformedSource(source)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSource(source, transformed, normalized.MemoryLimit, normalized.StackLimit, normalized.Timeout); err != nil {
 		return nil, err
 	}
 	siteIDs := make(map[uint]bool, len(normalized.SiteIDs))
@@ -40,7 +47,7 @@ func Compile(name, source string, opts ScriptOptions) (*Script, error) {
 	}
 	return &Script{
 		name:            normalized.Name,
-		source:          source,
+		source:          transformed,
 		siteIDs:         siteIDs,
 		memoryLimit:     normalized.MemoryLimit,
 		stackLimit:      normalized.StackLimit,
@@ -49,14 +56,16 @@ func Compile(name, source string, opts ScriptOptions) (*Script, error) {
 	}, nil
 }
 
-func validateSource(source string, memoryLimit, stackLimit uint64, timeout time.Duration) error {
+func validateSource(source, transformed string, memoryLimit, stackLimit uint64, timeout time.Duration) error {
 	var result error
 	runOnThread(func() {
+		// runOnThread owns all native handles on one pinned goroutine. The library's
+		// stack-based owner check is redundant here and dominates short executions.
 		rt := quickjs.NewRuntime(
 			quickjs.WithMemoryLimit(memoryLimit),
 			quickjs.WithMaxStackSize(stackLimit),
 			quickjs.WithModuleImport(false),
-			quickjs.WithOwnerGoroutineCheck(true),
+			quickjs.WithOwnerGoroutineCheck(false),
 		)
 		if rt == nil {
 			result = errors.New("jsplugin: failed to create QuickJS runtime")
@@ -69,15 +78,40 @@ func validateSource(source string, memoryLimit, stackLimit uint64, timeout time.
 			return
 		}
 		defer ctx.Close()
-		result = validateInContext(ctx, source)
+		deadline := time.Now().Add(timeout)
+		timedOut := false
+		rt.SetInterruptHandler(func() int {
+			if time.Now().After(deadline) {
+				timedOut = true
+				return 1
+			}
+			return 0
+		})
+		if result = validateModuleSource(ctx, source); result == nil {
+			var plugin *quickjs.Value
+			plugin, result = evaluatePlugin(ctx, transformed)
+			if result == nil {
+				defer plugin.Free()
+				result = validatePlugin(plugin)
+			}
+		}
+		rt.ClearInterruptHandler()
+		if timedOut {
+			result = ErrScriptTimeout
+		}
 	})
 	return result
 }
 
-func validateInContext(ctx *quickjs.Context, source string) error {
-	result := ctx.Eval(transformedSource(source), quickjs.EvalFileName("<js-plugin>"))
+func validateModuleSource(ctx *quickjs.Context, source string) error {
+	result := ctx.Eval(
+		source,
+		quickjs.EvalFileName("<js-plugin>"),
+		quickjs.EvalFlagModule(true),
+		quickjs.EvalFlagCompileOnly(true),
+	)
 	if result == nil {
-		return errors.New("jsplugin: QuickJS evaluation failed")
+		return errors.New("jsplugin: QuickJS module compilation failed")
 	}
 	defer result.Free()
 	if result.IsException() {
@@ -86,11 +120,25 @@ func validateInContext(ctx *quickjs.Context, source string) error {
 		}
 		return errors.New("jsplugin: compile failed")
 	}
-	plugin := ctx.Globals().Get("__owaf_plugin")
+	return nil
+}
+
+func evaluatePlugin(ctx *quickjs.Context, source string) (*quickjs.Value, error) {
+	plugin := ctx.Eval(source, quickjs.EvalFileName("<js-plugin>"))
 	if plugin == nil {
-		return errors.New("jsplugin: default export is missing")
+		return nil, errors.New("jsplugin: QuickJS evaluation failed")
 	}
-	defer plugin.Free()
+	if plugin.IsException() {
+		defer plugin.Free()
+		if err := ctx.Exception(); err != nil {
+			return nil, fmt.Errorf("jsplugin: plugin evaluation failed: %w", err)
+		}
+		return nil, errors.New("jsplugin: plugin evaluation failed")
+	}
+	return plugin, nil
+}
+
+func validatePlugin(plugin *quickjs.Value) error {
 	if !plugin.IsObject() {
 		return errors.New("jsplugin: default export must be an object")
 	}
@@ -105,8 +153,42 @@ func validateInContext(ctx *quickjs.Context, source string) error {
 	return nil
 }
 
-func transformedSource(source string) string {
-	return "globalThis.__owaf_plugin = undefined;\n" + strings.Replace(source, "export default", "globalThis.__owaf_plugin =", 1)
+func transformedSource(source string) (string, error) {
+	ast, err := js.Parse(parse.NewInputString(source), js.Options{})
+	if err != nil {
+		return "", fmt.Errorf("jsplugin: parse module: %w", err)
+	}
+
+	var body strings.Builder
+	var defaultExport *js.ExportStmt
+	for _, statement := range ast.List {
+		switch statement := statement.(type) {
+		case *js.ImportStmt:
+			return "", errors.New("jsplugin: imports are not supported")
+		case *js.ExportStmt:
+			if !statement.Default || statement.Decl == nil || len(statement.List) != 0 || statement.Module != nil {
+				return "", errors.New("jsplugin: only a default export is supported")
+			}
+			if defaultExport != nil {
+				return "", errors.New("jsplugin: script must contain exactly one default export")
+			}
+			defaultExport = statement
+		default:
+			statement.JS(&body)
+			body.WriteByte('\n')
+		}
+	}
+	if defaultExport == nil {
+		return "", errors.New("jsplugin: script must export default")
+	}
+
+	var transformed strings.Builder
+	transformed.WriteString("(function () {\n\"use strict\";\n")
+	transformed.WriteString(body.String())
+	transformed.WriteString("return ")
+	defaultExport.Decl.JS(&transformed)
+	transformed.WriteString(";\n}())")
+	return transformed.String(), nil
 }
 
 // NewEngine creates a bounded pool of owner-goroutine QuickJS execution slots.
@@ -143,10 +225,10 @@ type Engine struct {
 }
 
 type executionRequest struct {
-	ctx    context.Context
-	script *Script
-	req    RequestSnapshot
-	result chan executionResult
+	ctx     context.Context
+	script  *Script
+	reqJSON string
+	result  chan executionResult
 }
 
 type executionResult struct {
@@ -155,24 +237,32 @@ type executionResult struct {
 }
 
 type executionSlot struct {
-	requests chan executionRequest
-	stop     chan struct{}
-	ready    chan error
-	done     chan struct{}
-	rt       *quickjs.Runtime
-	ctx      *quickjs.Context
+	requests      chan executionRequest
+	stop          chan struct{}
+	ready         chan error
+	done          chan struct{}
+	rt            *quickjs.Runtime
+	ctx           *quickjs.Context
+	compiled      map[*Script]compiledScript
+	compiledOrder *list.List
+	compiledLimit int
+}
+
+type compiledScript struct {
+	plugin  *quickjs.Value
+	element *list.Element
 }
 
 func (s *executionSlot) run(opts EngineOptions) {
 	goruntime.LockOSThread()
 	defer goruntime.UnlockOSThread()
-	s.stop = make(chan struct{})
-	s.done = make(chan struct{})
+	// The slot goroutine owns this locked OS thread for its full lifetime, so
+	// native QuickJS access cannot race across goroutines.
 	s.rt = quickjs.NewRuntime(
 		quickjs.WithMemoryLimit(opts.MemoryLimit),
 		quickjs.WithMaxStackSize(opts.StackLimit),
 		quickjs.WithModuleImport(false),
-		quickjs.WithOwnerGoroutineCheck(true),
+		quickjs.WithOwnerGoroutineCheck(false),
 	)
 	if s.rt == nil {
 		s.ready <- errors.New("jsplugin: failed to create QuickJS runtime")
@@ -186,17 +276,50 @@ func (s *executionSlot) run(opts EngineOptions) {
 		close(s.done)
 		return
 	}
+	s.compiled = make(map[*Script]compiledScript)
+	s.compiledOrder = list.New()
+	s.compiledLimit = opts.CompiledCacheSize
 	s.ready <- nil
 	defer func() {
+		for _, entry := range s.compiled {
+			entry.plugin.Free()
+		}
 		s.ctx.Close()
 		s.rt.Close()
 		close(s.done)
 	}()
 	for {
 		select {
+		case <-s.stop:
+			s.rejectQueued(ErrEngineClosed)
+			return
+		default:
+		}
+		select {
 		case request := <-s.requests:
+			// Close may race with receiving a queued request. Never start a
+			// request after the slot has entered its shutdown state.
+			select {
+			case <-s.stop:
+				request.result <- executionResult{err: ErrEngineClosed}
+				s.rejectQueued(ErrEngineClosed)
+				return
+			default:
+			}
 			s.execute(request, opts)
 		case <-s.stop:
+			s.rejectQueued(ErrEngineClosed)
+			return
+		}
+	}
+}
+
+func (s *executionSlot) rejectQueued(err error) {
+	for {
+		select {
+		case request := <-s.requests:
+			request.result <- executionResult{err: err}
+		default:
 			return
 		}
 	}
@@ -240,38 +363,74 @@ func (s *executionSlot) execute(request executionRequest, opts EngineOptions) {
 		return 0
 	})
 	defer s.rt.ClearInterruptHandler()
-	plan, err := s.evaluate(request.script, request.req)
+	plan, err := s.evaluate(request.script, request.reqJSON)
 	if timedOut.Load() {
 		request.script.timeouts.Add(1)
 		err = ErrScriptTimeout
 		plan = MutationPlan{}
-	}
-	if err != nil {
+	} else if err != nil {
 		request.script.failures.Add(1)
 		plan = MutationPlan{}
 	}
 	request.result <- executionResult{plan: plan, err: err}
 }
 
-func (s *executionSlot) evaluate(script *Script, req RequestSnapshot) (MutationPlan, error) {
-	if err := validateInContext(s.ctx, script.source); err != nil {
-		return MutationPlan{}, err
+func (s *executionSlot) loadCompiled(script *Script) (*quickjs.Value, bool) {
+	entry, ok := s.compiled[script]
+	if !ok {
+		return nil, false
 	}
-	plugin := s.ctx.Globals().Get("__owaf_plugin")
-	if plugin == nil {
-		return MutationPlan{}, errors.New("jsplugin: default export is missing")
+	s.compiledOrder.MoveToFront(entry.element)
+	return entry.plugin, true
+}
+
+func (s *executionSlot) storeCompiled(script *Script, plugin *quickjs.Value) {
+	element := s.compiledOrder.PushFront(script)
+	s.compiled[script] = compiledScript{plugin: plugin, element: element}
+	if s.compiledOrder.Len() <= s.compiledLimit {
+		return
 	}
-	defer plugin.Free()
+	oldest := s.compiledOrder.Back()
+	oldestScript, ok := oldest.Value.(*Script)
+	if !ok {
+		panic("jsplugin: invalid compiled cache entry")
+	}
+	entry := s.compiled[oldestScript]
+	delete(s.compiled, oldestScript)
+	s.compiledOrder.Remove(oldest)
+	entry.plugin.Free()
+}
+
+func (s *executionSlot) evaluate(script *Script, reqJSON string) (MutationPlan, error) {
+	plugin, ok := s.loadCompiled(script)
+	if !ok {
+		compiled, err := evaluatePlugin(s.ctx, script.source)
+		if err != nil {
+			return MutationPlan{}, err
+		}
+		if err := validatePlugin(compiled); err != nil {
+			compiled.Free()
+			return MutationPlan{}, err
+		}
+		plugin = compiled
+		s.storeCompiled(script, plugin)
+	}
 	fetch := plugin.Get("fetch")
 	if fetch == nil {
 		return MutationPlan{}, errors.New("jsplugin: default export fetch is missing")
 	}
 	defer fetch.Free()
-	requestValue, err := s.ctx.Marshal(req)
-	if err != nil {
-		return MutationPlan{}, err
+	requestValue := s.ctx.ParseJSON(reqJSON)
+	if requestValue == nil {
+		return MutationPlan{}, errors.New("jsplugin: request snapshot parsing failed")
 	}
 	defer requestValue.Free()
+	if requestValue.IsException() {
+		if err := s.ctx.Exception(); err != nil {
+			return MutationPlan{}, fmt.Errorf("jsplugin: request snapshot parsing failed: %w", err)
+		}
+		return MutationPlan{}, errors.New("jsplugin: request snapshot parsing failed")
+	}
 	env := s.ctx.NewObject()
 	defer env.Free()
 	hostCtx := s.ctx.NewObject()
@@ -281,7 +440,15 @@ func (s *executionSlot) evaluate(script *Script, req RequestSnapshot) (MutationP
 		return MutationPlan{}, errors.New("jsplugin: fetch invocation failed")
 	}
 	if result.IsPromise() {
-		result = s.ctx.Await(result)
+		if result.PromiseState() == quickjs.PromisePending {
+			result.Free()
+			return MutationPlan{}, ErrAsyncPromise
+		}
+		awaited := s.ctx.Await(result)
+		if awaited == nil {
+			return MutationPlan{}, errors.New("jsplugin: failed to await Promise")
+		}
+		result = awaited
 	}
 	defer result.Free()
 	if result.IsException() {
@@ -303,6 +470,11 @@ func (s *executionSlot) evaluate(script *Script, req RequestSnapshot) (MutationP
 	return plan, nil
 }
 
+// Execute implements Executor for the QuickJS engine.
+func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
+	return e.Evaluate(ctx, script, req)
+}
+
 // Evaluate executes one request, returning an empty plan on every error.
 func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
 	if ctx == nil {
@@ -314,23 +486,52 @@ func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapsh
 	if !script.AppliesTo(req.SiteID) {
 		return MutationPlan{}, nil
 	}
+	encodedReq, err := encodeRequestSnapshot(req)
+	if err != nil {
+		return MutationPlan{}, err
+	}
 	e.mu.RLock()
 	if e.closed {
 		e.mu.RUnlock()
 		return MutationPlan{}, ErrEngineClosed
 	}
-	slot := e.slots[e.next.Add(1)%uint64(len(e.slots))]
-	request := executionRequest{ctx: ctx, script: script, req: req, result: make(chan executionResult, 1)}
-	select {
-	case slot.requests <- request:
-		e.mu.RUnlock()
-	case <-ctx.Done():
-		e.mu.RUnlock()
-		return MutationPlan{}, ctx.Err()
-	default:
+	if len(e.slots) == 0 {
 		e.mu.RUnlock()
 		return MutationPlan{}, ErrNoSlot
 	}
+	if err := ctx.Err(); err != nil {
+		e.mu.RUnlock()
+		return MutationPlan{}, err
+	}
+	request := executionRequest{ctx: ctx, script: script, reqJSON: encodedReq, result: make(chan executionResult, 1)}
+	start := int(e.next.Add(1) % uint64(len(e.slots)))
+	queued := false
+	for i := 0; i < len(e.slots); i++ {
+		slot := e.slots[(start+i)%len(e.slots)]
+		select {
+		case <-ctx.Done():
+			e.mu.RUnlock()
+			return MutationPlan{}, ctx.Err()
+		default:
+		}
+		select {
+		case slot.requests <- request:
+			queued = true
+		case <-ctx.Done():
+			e.mu.RUnlock()
+			return MutationPlan{}, ctx.Err()
+		default:
+			continue
+		}
+		if queued {
+			break
+		}
+	}
+	if !queued {
+		e.mu.RUnlock()
+		return MutationPlan{}, ErrNoSlot
+	}
+	e.mu.RUnlock()
 	select {
 	case result := <-request.result:
 		return result.plan, result.err

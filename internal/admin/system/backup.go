@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -76,6 +77,10 @@ func ImportBackup(db *gorm.DB, reload func() error) app.HandlerFunc {
 
 		req.Data.SystemSettings = filterInternalSettingItems(req.Data.SystemSettings)
 		if err := store.ImportBackup(db, &req.Data, req.ReplaceMode); err != nil {
+			if errors.Is(err, store.ErrInvalidBackupJSPlugin) || errors.Is(err, store.ErrInvalidBackupProtectionConfig) {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
 			slog.Error("[admin] backup import failed", "error", err)
 			c.JSON(500, map[string]string{"error": "import failed, check server logs for details"})
 			return

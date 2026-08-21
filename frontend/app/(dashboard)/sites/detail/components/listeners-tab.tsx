@@ -9,6 +9,13 @@ import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -23,6 +30,7 @@ import {
   useListenerCreate,
   useListenerUpdate,
   useListenerDelete,
+  useCertificates,
 } from "@/hooks/use-api"
 import { DataTable } from "@/components/data-table"
 import type { Site, SiteListener } from "@/lib/types"
@@ -34,6 +42,7 @@ interface ListenersTabProps {
 interface ListenerFormData {
   bind: string
   tls_enabled: boolean
+  cert_id?: number
   enabled: boolean
 }
 
@@ -51,9 +60,11 @@ function ListenerDialog({
   const { t } = useTranslation()
   const createListener = useListenerCreate()
   const updateListener = useListenerUpdate()
+  const { data: certificates, isLoading: certificatesLoading } = useCertificates()
   const [form, setForm] = useState<ListenerFormData>({
     bind: listener?.bind || ":80",
     tls_enabled: listener?.tls_enabled || false,
+    cert_id: listener?.cert_id ?? undefined,
     enabled: listener?.enabled ?? true,
   })
 
@@ -62,6 +73,10 @@ function ListenerDialog({
   const handleSubmit = async () => {
     if (!form.bind.trim()) {
       toast.error(t("sites.detail.bindRequired"))
+      return
+    }
+    if (form.tls_enabled && form.cert_id === undefined) {
+      toast.error(t("sites.form.certRequired"))
       return
     }
     try {
@@ -81,7 +96,7 @@ function ListenerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
             {isEdit
@@ -105,9 +120,42 @@ function ListenerDialog({
             <Label>{t("sites.detail.tls")}</Label>
             <Switch
               checked={form.tls_enabled}
-              onCheckedChange={(v) => setForm({ ...form, tls_enabled: v })}
+              onCheckedChange={(v) =>
+                setForm({
+                  ...form,
+                  tls_enabled: v,
+                  cert_id: v ? form.cert_id : undefined,
+                })
+              }
             />
           </div>
+          {form.tls_enabled && (
+            <div className="space-y-2">
+              <Label htmlFor="listener-cert">{t("sites.form.cert")}</Label>
+              <Select
+                value={form.cert_id === undefined ? "" : String(form.cert_id)}
+                onValueChange={(value) =>
+                  setForm({ ...form, cert_id: Number(value) })
+                }
+                disabled={certificatesLoading}
+              >
+                <SelectTrigger id="listener-cert">
+                  <SelectValue placeholder={t("sites.form.certPlaceholder")} />
+                </SelectTrigger>
+                <SelectContent>
+                  {(certificates ?? []).map((certificate) => (
+                    <SelectItem
+                      key={certificate.id}
+                      value={String(certificate.id)}
+                    >
+                      {certificate.name}
+                      {certificate.domain ? ` (${certificate.domain})` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <Label>{t("common.enabled")}</Label>
             <Switch

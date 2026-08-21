@@ -168,9 +168,19 @@ func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Dec
 	if h := e.kv.Load(); h != nil {
 		kv = h.kv
 	}
-	// Lua 策略依赖受控 KV 时，后端不可用必须强制 fail-open。
-	// 不能让脚本绕过 ctx.kv.available() 直接返回终止动作。
-	if kv == nil || !kv.Available() {
+	// 只有支持 context 的 KV 后端才能安全参与请求级 Lua 执行。
+	// legacy 同步接口无法响应取消或脚本超时，按不可用处理并保持 fail-open。
+	contextual, supportsContext := kv.(ContextKVBackend)
+	if !supportsContext || !contextual.AvailableContext(ctx) {
+		return Decision{}
+	}
+
+	log := e.log
+	if log == nil {
+		log = slog.Default()
+	}
+	if e.pool == nil {
+		log.Warn("lua plugin engine is not initialized, skipping scripts", slog.String("stage", string(stage)))
 		return Decision{}
 	}
 
@@ -185,13 +195,16 @@ func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Dec
 		if ctx.Err() != nil {
 			return Decision{}
 		}
-		// KV 操作可能在脚本执行期间失败；健康状态变为不可用后，
-		// 丢弃本次以及后续脚本判定，强制请求继续通过。
-		if !kv.Available() {
+		if ctx.Err() != nil {
+			return Decision{}
+		}
+		// ContextKVBackend 的实现必须在 I/O 失败时维护自身健康状态；
+		// 这里再次读取 context 感知的可用性，避免采纳故障期间的判定。
+		if supportsContext && !contextual.AvailableContext(ctx) {
 			return Decision{}
 		}
 		if err != nil {
-			e.log.Warn("lua plugin failed, skipping",
+			log.Warn("lua plugin failed, skipping",
 				slog.String("script", s.name),
 				slog.String("stage", string(stage)),
 				slog.Any("err", err))

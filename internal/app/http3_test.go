@@ -90,6 +90,23 @@ func TestHTTP3RouteTableResolvesWildcardWithExactPrecedence(t *testing.T) {
 	}
 }
 
+func TestHTTP3RouteTableResolvesCatchAllAcrossBinds(t *testing.T) {
+	routeTable := buildHTTP3RouteTable([]snapshotpkg.SiteRuntime{
+		{
+			Bind: "127.0.0.1:8443",
+			Site: store.Site{ID: 1, Host: "*.example.test"},
+		},
+		{
+			Bind: "127.0.0.1:9443",
+			Site: store.Site{ID: 2, Host: "*"},
+		},
+	})
+
+	if got, ok := routeTable.Resolve("unknown.other.test"); !ok || got != "127.0.0.1:9443" {
+		t.Fatalf("catch-all route = %q, %v, want %q, true", got, ok, "127.0.0.1:9443")
+	}
+}
+
 func TestHTTP3RouteTableDropsConflictingHostsAcrossBinds(t *testing.T) {
 	routeTable := buildHTTP3RouteTable([]snapshotpkg.SiteRuntime{
 		{
@@ -4696,6 +4713,42 @@ func TestApplyHTTP3ProxyTLSHeadersUsesContextFingerprint(t *testing.T) {
 	}
 }
 
+func TestBuildHTTP3ServerTLSConfigRejectsInvalidConfiguredCertificate(t *testing.T) {
+	const (
+		udpBind = "127.0.0.1:18443"
+		bind    = "127.0.0.1:10443"
+		host    = "invalid-h3.example.test"
+	)
+	rt := snapshotpkg.SiteRuntime{
+		Bind: bind,
+		Site: store.Site{ID: 1, Host: host, Bind: bind, TLSEnabled: true, ALPN: "h3,h2,http/1.1"},
+		NetworkDefaults: snapshotpkg.NetworkDefaults{
+			HTTP2Enabled:   true,
+			HTTP3Enabled:   true,
+			HTTP3Bind:      udpBind,
+			DefaultALPN:    "h2,h3,http/1.1",
+			DefaultNetwork: "tcp",
+		},
+		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
+	}
+	sn := &snapshotpkg.Snapshot{
+		TLSDefaults: rt.TLSDefaults,
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, host): &rt,
+		},
+		SiteTLSCertStateBySNI: map[string]snapshotpkg.TLSCertificateState{
+			snapshotpkg.SNICertKey(bind, host): snapshotpkg.TLSCertificateStateInvalid,
+		},
+	}
+	cfg := buildHTTP3ServerTLSConfig(udpBind, []snapshotpkg.SiteRuntime{rt}, sn)
+	if cfg == nil || cfg.GetCertificate == nil {
+		t.Fatalf("expected HTTP/3 TLS config with GetCertificate, got %#v", cfg)
+	}
+	if _, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: host}); err == nil {
+		t.Fatal("invalid configured certificate must fail the HTTP/3 TLS certificate callback")
+	}
+}
+
 func TestBuildHTTP3ServerTLSConfigReturnsOCSPStapledCertificate(t *testing.T) {
 	certPEM, keyPEM, err := acmepkg.GenerateSelfSignedPEM("h3-ocsp.example.test", []string{"h3-ocsp.example.test"}, nil, time.Hour)
 	if err != nil {
@@ -4751,6 +4804,7 @@ func TestBuildHTTP3ServerTLSConfigUsesRouteBindCertificate(t *testing.T) {
 	certAPEM, keyAPEM, certA := mustHTTP3TestCertificate(t, hostA)
 	certBPEM, keyBPEM, certB := mustHTTP3TestCertificate(t, hostB)
 	tlsDefaults := snapshotpkg.DefaultTLSDefaults()
+	tlsDefaults.SelfSignedOnIP = false
 	networkDefaults := snapshotpkg.NetworkDefaults{
 		HTTP2Enabled:   true,
 		HTTP3Enabled:   true,
@@ -4805,6 +4859,90 @@ func TestBuildHTTP3ServerTLSConfigUsesRouteBindCertificate(t *testing.T) {
 	}
 	if got == nil || !bytes.Equal(got.Certificate[0], certB.Certificate[0]) {
 		t.Fatalf("HTTP/3 SNI %s certificate did not match bind B certificate", hostB)
+	}
+
+	emptySNI, err := cfg.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("empty SNI GetCertificate() error: %v", err)
+	}
+	selfSigned := selfSignedForBind(udpBind)
+	if emptySNI == nil || selfSigned == nil || !bytes.Equal(emptySNI.Certificate[0], selfSigned.Certificate[0]) {
+		t.Fatalf("empty SNI certificate = %#v, want shared UDP self-signed certificate", emptySNI)
+	}
+	if bytes.Equal(emptySNI.Certificate[0], certA.Certificate[0]) || bytes.Equal(emptySNI.Certificate[0], certB.Certificate[0]) {
+		t.Fatal("empty SNI exposed a site certificate from another TCP bind")
+	}
+}
+
+func TestBuildHTTP3ServerTLSConfigUsesSelfSignedForUnknownSingleBindSNI(t *testing.T) {
+	const (
+		udpBind = "127.0.0.1:18443"
+		bind    = "127.0.0.1:10443"
+		host    = "known-h3.example.test"
+	)
+	certPEM, keyPEM, cert := mustHTTP3TestCertificate(t, host)
+	rt := snapshotpkg.SiteRuntime{
+		Bind: bind,
+		Site: store.Site{
+			ID: 1, Host: host, Bind: bind, TLSEnabled: true,
+		},
+		Certificate:     &store.Certificate{CertPEM: certPEM, KeyPEM: keyPEM},
+		TLSDefaults:     snapshotpkg.DefaultTLSDefaults(),
+		NetworkDefaults: snapshotpkg.DefaultNetworkDefaults(),
+	}
+	sn := &snapshotpkg.Snapshot{
+		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, host): &rt,
+		},
+		SiteTLSCertBySNI: map[string]tls.Certificate{
+			snapshotpkg.SNICertKey(bind, host): cert,
+		},
+	}
+
+	cfg := buildHTTP3ServerTLSConfig(udpBind, []snapshotpkg.SiteRuntime{rt}, sn)
+	got, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "unknown-h3.example.test"})
+	if err != nil {
+		t.Fatalf("GetCertificate() error: %v", err)
+	}
+	if got == nil || bytes.Equal(got.Certificate[0], cert.Certificate[0]) {
+		t.Fatal("unknown single-bind SNI returned the configured site certificate")
+	}
+}
+
+func TestBuildHTTP3ServerTLSConfigUsesCatchAllCertificate(t *testing.T) {
+	const (
+		udpBind = "127.0.0.1:18443"
+		bind    = "127.0.0.1:10443"
+		host    = "*"
+	)
+	certPEM, keyPEM, cert := mustHTTP3TestCertificate(t, "catchall-h3.example.test")
+	rt := snapshotpkg.SiteRuntime{
+		Bind: bind,
+		Site: store.Site{
+			ID: 1, Host: host, Bind: bind, TLSEnabled: true,
+		},
+		Certificate:     &store.Certificate{CertPEM: certPEM, KeyPEM: keyPEM},
+		TLSDefaults:     snapshotpkg.DefaultTLSDefaults(),
+		NetworkDefaults: snapshotpkg.DefaultNetworkDefaults(),
+	}
+	sn := &snapshotpkg.Snapshot{
+		TLSDefaults: snapshotpkg.DefaultTLSDefaults(),
+		Sites: map[string]*snapshotpkg.SiteRuntime{
+			snapshotpkg.SiteMapKey(bind, host): &rt,
+		},
+		SiteTLSCertBySNI: map[string]tls.Certificate{
+			snapshotpkg.SNICertKey(bind, host): cert,
+		},
+	}
+
+	cfg := buildHTTP3ServerTLSConfig(udpBind, []snapshotpkg.SiteRuntime{rt}, sn)
+	got, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "unknown-h3.example.test"})
+	if err != nil {
+		t.Fatalf("GetCertificate() error: %v", err)
+	}
+	if got == nil || !bytes.Equal(got.Certificate[0], cert.Certificate[0]) {
+		t.Fatal("catch-all SNI did not return the configured certificate")
 	}
 }
 

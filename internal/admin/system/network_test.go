@@ -1299,3 +1299,57 @@ func TestGetRuntimeConfigIncludesBrotliRuntimeState(t *testing.T) {
 		t.Fatalf("brotli_compression capability = %#v, want enabled and not missing", got)
 	}
 }
+
+func TestGetRuntimeConfigIncludesSnapshotConfigDiagnostics(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	holder := &snapshotpkg.Holder{}
+	holder.Store(&snapshotpkg.Snapshot{
+		Revision: 23,
+		ConfigDiagnostics: []snapshotpkg.SnapshotConfigDiagnostic{
+			{
+				Kind:          "ip_list_entry",
+				Reason:        "invalid_ip_or_cidr",
+				IPListEntryID: 41,
+				Scope:         "site",
+				SiteID:        7,
+			},
+		},
+	})
+	dbDSN := "waf:db-secret@tcp(db.example:3306)/waf?parseTime=True"
+	logDBDSN := "host=logdb.example user=waf password=log-secret dbname=waflog"
+
+	handler := GetRuntimeConfig(func() (core.Config, bool) {
+		return core.Config{
+			DBDriver: "mysql",
+			DBDSN:    dbDSN,
+			LogDBDSN: logDBDSN,
+		}, true
+	}, holder, repo)
+	ctx := invokeSystemConfigHandler(t, handler, "GET", "/api/v1/runtime-config", nil)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	var response RuntimeConfigResponse
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("decode runtime config response: %v", err)
+	}
+	if response.Revision != 23 {
+		t.Fatalf("revision = %d, want 23", response.Revision)
+	}
+	if response.DBDSN != maskDSN(dbDSN) || response.LogDBDSN != maskDSN(logDBDSN) {
+		t.Fatalf("masked DSNs = db:%q log:%q", response.DBDSN, response.LogDBDSN)
+	}
+	if len(response.ConfigDiagnostics) != 1 {
+		t.Fatalf("config diagnostics = %#v, want one entry", response.ConfigDiagnostics)
+	}
+	diagnostic := response.ConfigDiagnostics[0]
+	if diagnostic.Kind != "ip_list_entry" || diagnostic.Reason != "invalid_ip_or_cidr" || diagnostic.IPListEntryID != 41 || diagnostic.Scope != "site" || diagnostic.SiteID != 7 {
+		t.Fatalf("config diagnostic = %#v, want snapshot diagnostic identity", diagnostic)
+	}
+	for _, raw := range []string{"db-secret", "log-secret", "raw-invalid-value", "secret-note", "invalid whitelist JSON"} {
+		if bytes.Contains(ctx.Response.Body(), []byte(raw)) {
+			t.Fatalf("runtime config response contains raw sensitive value %q", raw)
+		}
+	}
+}

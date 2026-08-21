@@ -311,10 +311,14 @@ function FeedsTab() {
       title: t("threatIntel.action"),
       width: "100px",
       render: (row: ThreatIntelFeed) => (
-        <Badge variant={row.action === "drop" ? "destructive" : "secondary"}>
-          {row.action === "drop"
-            ? t("threatIntel.actionDrop")
-            : t("threatIntel.actionIntercept")}
+        <Badge
+          variant={row.kind === "whitelist" ? "secondary" : "destructive"}
+        >
+          {row.kind === "whitelist"
+            ? t("threatIntel.actionAllow")
+            : row.action === "drop"
+              ? t("threatIntel.actionDrop")
+              : t("threatIntel.actionIntercept")}
         </Badge>
       ),
     },
@@ -506,27 +510,33 @@ function FeedsTab() {
               </div>
               <div className="space-y-2">
                 <Label>{t("threatIntel.action")}</Label>
-                <Select
-                  value={form.action}
-                  onValueChange={(v) =>
-                    setForm((f) => ({
-                      ...f,
-                      action: v as "intercept" | "drop",
-                    }))
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="intercept">
-                      {t("threatIntel.actionIntercept")}
-                    </SelectItem>
-                    <SelectItem value="drop">
-                      {t("threatIntel.actionDrop")}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                {form.kind === "blacklist" ? (
+                  <Select
+                    value={form.action}
+                    onValueChange={(v) =>
+                      setForm((f) => ({
+                        ...f,
+                        action: v as "intercept" | "drop",
+                      }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="intercept">
+                        {t("threatIntel.actionIntercept")}
+                      </SelectItem>
+                      <SelectItem value="drop">
+                        {t("threatIntel.actionDrop")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Badge variant="secondary">
+                    {t("threatIntel.actionAllow")}
+                  </Badge>
+                )}
               </div>
             </div>
             <div className="space-y-2">
@@ -824,6 +834,7 @@ function SyncHistoryTab() {
             <PaginationItem>
               <PaginationPrevious
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
                 className={page <= 1 ? "pointer-events-none opacity-50" : ""}
               />
             </PaginationItem>
@@ -848,6 +859,7 @@ function SyncHistoryTab() {
             <PaginationItem>
               <PaginationNext
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
                 className={
                   page >= totalPages ? "pointer-events-none opacity-50" : ""
                 }

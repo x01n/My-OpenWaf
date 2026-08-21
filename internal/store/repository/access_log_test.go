@@ -49,6 +49,37 @@ func TestAccessLogRepoListStatusGroup(t *testing.T) {
 	}
 }
 
+func TestAccessLogCountCacheKeyPreservesNanosecondRangeAndInstant(t *testing.T) {
+	instant := time.Date(2026, time.August, 16, 12, 30, 45, 123456789, time.UTC)
+	nextNanosecond := instant.Add(time.Nanosecond)
+
+	sinceKey := accessLogCountCacheKey(AccessLogFilter{Since: &instant})
+	if sinceKey == accessLogCountCacheKey(AccessLogFilter{Since: &nextNanosecond}) {
+		t.Fatal("same-second filters with different Since nanoseconds must not share count cache keys")
+	}
+
+	untilKey := accessLogCountCacheKey(AccessLogFilter{Until: &instant})
+	if untilKey == accessLogCountCacheKey(AccessLogFilter{Until: &nextNanosecond}) {
+		t.Fatal("same-second filters with different Until nanoseconds must not share count cache keys")
+	}
+
+	inUTCPlusEight := instant.In(time.FixedZone("UTC+8", 8*60*60))
+	if sinceKey != accessLogCountCacheKey(AccessLogFilter{Since: &inUTCPlusEight}) {
+		t.Fatal("identical Since instants in different time zones must share count cache keys")
+	}
+	if untilKey != accessLogCountCacheKey(AccessLogFilter{Until: &inUTCPlusEight}) {
+		t.Fatal("identical Until instants in different time zones must share count cache keys")
+	}
+
+	timestamp := instant.UTC().Format(time.RFC3339Nano)
+	if accessLogCountCacheKey(AccessLogFilter{Host: "x:si" + timestamp}) == accessLogCountCacheKey(AccessLogFilter{Host: "x", Since: &instant}) {
+		t.Fatal("host values must not collide with time filter fields")
+	}
+	if accessLogCountCacheKey(AccessLogFilter{Host: "x:p/foo"}) == accessLogCountCacheKey(AccessLogFilter{Host: "x", Path: "/foo"}) {
+		t.Fatal("length-delimited fields must not collide with adjacent fields")
+	}
+}
+
 func TestAccessLogRepoStatsBySiteIncludesCacheStates(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewAccessLogRepo(db)
@@ -76,6 +107,166 @@ func TestAccessLogRepoStatsBySiteIncludesCacheStates(t *testing.T) {
 	}
 	if stats.CacheHits != 2 || stats.CacheMisses != 1 || stats.CacheBypasses != 2 || stats.CacheStales != 1 {
 		t.Fatalf("unexpected cache state stats: %#v", stats)
+	}
+}
+
+// TestAccessLogRepoVisitorKindStatsDistinctRequestIDCounts 验证人工/机器访问聚合：
+// human = 窗口内 AccessLog 中无 BotScoreLog 关联的 request_id；bot = 窗口内
+// BotScoreLog 唯一 request_id。同 request_id 多条 AccessLog 只算一次；空
+// request_id 不计入；外站/超窗请求不计入；BotScoreLog 在 LogDB 共享同一 SQLite，
+// BotScoreLog.request_id 关联到 AccessLog.request_id 上时必须可见。
+func TestAccessLogRepoVisitorKindStatsDistinctRequestIDCounts(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewAccessLogRepo(db)
+	now := time.Now()
+	since := now.Add(-time.Hour)
+
+	// 窗口内：3 条 human（无 BotScoreLog）、2 条 bot（有 BotScoreLog）。
+	// 同 request_id="req-bot-1" 在 AccessLog 中出现两次，但 bot 计数只看 BotScoreLog 唯一性。
+	// 故意加 request_id="" 的 AccessLog 应不计入 human。
+	logs := []store.AccessLog{
+		{SiteID: 1, RequestID: "req-human-1", Host: "example.com", Path: "/a", Method: "GET", StatusCode: 200, CreatedAt: now},
+		{SiteID: 1, RequestID: "req-human-2", Host: "example.com", Path: "/b", Method: "GET", StatusCode: 200, CreatedAt: now},
+		{SiteID: 1, RequestID: "req-human-3", Host: "example.com", Path: "/c", Method: "GET", StatusCode: 200, CreatedAt: now},
+		// bot-1 出现两次（同一 request 多次记录日志）
+		{SiteID: 1, RequestID: "req-bot-1", Host: "example.com", Path: "/x", Method: "GET", StatusCode: 200, CreatedAt: now},
+		{SiteID: 1, RequestID: "req-bot-1", Host: "example.com", Path: "/x", Method: "GET", StatusCode: 200, CreatedAt: now},
+		{SiteID: 1, RequestID: "req-bot-2", Host: "example.com", Path: "/y", Method: "GET", StatusCode: 200, CreatedAt: now},
+		// 空 request_id——必须不计入
+		{SiteID: 1, RequestID: "", Host: "example.com", Path: "/z", Method: "GET", StatusCode: 200, CreatedAt: now},
+		// 外站
+		{SiteID: 2, RequestID: "req-other-site-human", Host: "other.example", Path: "/q", Method: "GET", StatusCode: 200, CreatedAt: now},
+		// 超窗：48 小时前——必须不计入
+		{SiteID: 1, RequestID: "req-old-bot", Host: "example.com", Path: "/old", Method: "GET", StatusCode: 200, CreatedAt: now.Add(-48 * time.Hour)},
+		// 口径二：终止类 waf_action 且无 BotScoreLog 关联——必须落入 UnclassifiedIntercept
+		// 而不是 human（模拟 OWASP/CVE/ACL 短路拦截，未进入 BotDetection）
+		{SiteID: 1, RequestID: "req-owasp-block", Host: "example.com", Path: "/sqli", Method: "GET", StatusCode: 403, WAFAction: "intercept", CreatedAt: now},
+		{SiteID: 1, RequestID: "req-acl-drop", Host: "example.com", Path: "/bad", Method: "GET", StatusCode: 0, WAFAction: "drop", CreatedAt: now},
+		// 边界：既有 BotScoreLog 关联又是终止类 action——优先级须归 bot，不得双计
+		{SiteID: 1, RequestID: "req-bot-terminal", Host: "example.com", Path: "/w", Method: "GET", StatusCode: 403, WAFAction: "intercept", CreatedAt: now},
+		// 其他非安全类：既不计入 human 也不计入拦截，仅体现在 TotalVisits 差额
+		{SiteID: 1, RequestID: "req-maintenance", Host: "example.com", Path: "/m", Method: "GET", StatusCode: 503, WAFAction: "maintenance", CreatedAt: now},
+		// 质询通过：真实浏览器解出质询，须归 human
+		{SiteID: 1, RequestID: "req-challenge-passed", Host: "example.com", Path: "/cp", Method: "GET", StatusCode: 302, WAFAction: "challenge_passed", CreatedAt: now},
+	}
+	if err := repo.BatchCreate(logs); err != nil {
+		t.Fatalf("batch create access logs: %v", err)
+	}
+
+	// BotScoreLog：bot-1、bot-2 关联；req-old-bot 在窗口外；空 request_id 不计入
+	bot := []store.BotScoreLog{
+		{SiteID: 1, RequestID: "req-bot-1", Host: "example.com", Path: "/x", UserAgent: "ua", TotalScore: 90, IsHighRisk: true, Action: "drop", CreatedAt: now},
+		{SiteID: 1, RequestID: "req-bot-2", Host: "example.com", Path: "/y", UserAgent: "ua", TotalScore: 70, IsHighRisk: true, Action: "challenge", CreatedAt: now},
+		// 窗口外——必须不计入
+		{SiteID: 1, RequestID: "req-old-bot", Host: "example.com", Path: "/old", UserAgent: "ua", TotalScore: 80, IsHighRisk: true, Action: "drop", CreatedAt: now.Add(-48 * time.Hour)},
+		// 空 request_id——必须不计入（防御性）
+		{SiteID: 1, RequestID: "", Host: "example.com", Path: "/z", UserAgent: "ua", TotalScore: 90, IsHighRisk: true, Action: "drop", CreatedAt: now},
+		// 边界：与终止类 waf_action 的 AccessLog 同 request_id，锁死 bot 优先级
+		{SiteID: 1, RequestID: "req-bot-terminal", Host: "example.com", Path: "/w", UserAgent: "ua", TotalScore: 85, IsHighRisk: true, Action: "block", CreatedAt: now},
+	}
+	for i := range bot {
+		if err := db.Create(&bot[i]).Error; err != nil {
+			t.Fatalf("create bot score %d: %v", i, err)
+		}
+	}
+
+	// 站点 1（口径二）：
+	// human=4：req-human-1/2/3（waf_action 未设置，落 human 枚举）+ req-challenge-passed
+	// bot=3：req-bot-1、req-bot-2、req-bot-terminal（唯一性去重）
+	// 未判定拦截=2：req-owasp-block、req-acl-drop（终止类且无 bot 关联）
+	// total=10；三类之和 9，差额 1 = req-maintenance（其他非安全类）
+	site1, err := repo.VisitorKindStats(1, since)
+	if err != nil {
+		t.Fatalf("visitor kind stats site=1: %v", err)
+	}
+	if site1.HumanVisits != 4 {
+		t.Fatalf("site1 human visits = %d, want 4 (raw=%+v)", site1.HumanVisits, site1)
+	}
+	if site1.BotVisits != 3 {
+		t.Fatalf("site1 bot visits = %d, want 3 (raw=%+v)", site1.BotVisits, site1)
+	}
+	if site1.UnclassifiedIntercept != 2 {
+		t.Fatalf("site1 unclassified intercept = %d, want 2 (raw=%+v)", site1.UnclassifiedIntercept, site1)
+	}
+	if site1.TotalVisits != 10 {
+		t.Fatalf("site1 total visits = %d, want 10 (raw=%+v)", site1.TotalVisits, site1)
+	}
+	// 锁死优先级：req-bot-terminal 既有 BotScoreLog 又是 waf_action="intercept"，
+	// 必须只计入 bot，不得同时计入未判定拦截（否则 3+2 会变成 3+3）。
+	if site1.BotVisits+site1.UnclassifiedIntercept != 5 {
+		t.Fatalf("bot+intercept = %d, want 5 (no double counting) (raw=%+v)", site1.BotVisits+site1.UnclassifiedIntercept, site1)
+	}
+	// 其他非安全类残差：maintenance 不得落入任何一类。
+	if got := site1.TotalVisits - (site1.HumanVisits + site1.BotVisits + site1.UnclassifiedIntercept); got != 1 {
+		t.Fatalf("site1 residual (other non-security) = %d, want 1 (raw=%+v)", got, site1)
+	}
+
+	// 全局：human=5（站点 1 的 4 + 站点 2 的 1）、bot=3、未判定拦截=2、total=11
+	global, err := repo.VisitorKindStatsGlobal(since)
+	if err != nil {
+		t.Fatalf("visitor kind stats global: %v", err)
+	}
+	if global.HumanVisits != 5 {
+		t.Fatalf("global human visits = %d, want 5 (raw=%+v)", global.HumanVisits, global)
+	}
+	if global.BotVisits != 3 {
+		t.Fatalf("global bot visits = %d, want 3 (raw=%+v)", global.BotVisits, global)
+	}
+	if global.UnclassifiedIntercept != 2 {
+		t.Fatalf("global unclassified intercept = %d, want 2 (raw=%+v)", global.UnclassifiedIntercept, global)
+	}
+	if global.TotalVisits != 11 {
+		t.Fatalf("global total visits = %d, want 11 (raw=%+v)", global.TotalVisits, global)
+	}
+
+	// 站点 2：human=1（无 BotScoreLog）、bot=0、未判定拦截=0、total=1
+	site2, err := repo.VisitorKindStats(2, since)
+	if err != nil {
+		t.Fatalf("visitor kind stats site=2: %v", err)
+	}
+	if site2.HumanVisits != 1 || site2.BotVisits != 0 {
+		t.Fatalf("site2 stats = %+v, want human=1 bot=0", site2)
+	}
+	if site2.UnclassifiedIntercept != 0 || site2.TotalVisits != 1 {
+		t.Fatalf("site2 stats = %+v, want intercept=0 total=1", site2)
+	}
+}
+
+// TestAccessLogRepoVisitorKindStatsNoBotScoreTable 验证 BotScoreLog 表缺失时回退为全 human：
+// 与 ListFingerprints 中的 hasBotScoreTable 回退一致（internal/store/repository/access_log.go:210,254）。
+func TestAccessLogRepoVisitorKindStatsNoBotScoreTable(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessLog{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	repo := NewAccessLogRepo(db)
+	now := time.Now()
+	items := []store.AccessLog{
+		{SiteID: 1, RequestID: "rid-1", Host: "x", Path: "/", Method: "GET", StatusCode: 200, CreatedAt: now},
+		{SiteID: 1, RequestID: "rid-2", Host: "x", Path: "/", Method: "GET", StatusCode: 200, CreatedAt: now},
+		// 缺表时 bot 恒为 0，但终止类 waf_action 仍须落入未判定拦截而非 human——
+		// 这是口径二对「新部署全部误报为人工」的缓解点。
+		{SiteID: 1, RequestID: "rid-blocked", Host: "x", Path: "/sqli", Method: "GET", StatusCode: 403, WAFAction: "intercept", CreatedAt: now},
+	}
+	if err := repo.BatchCreate(items); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	stats, err := repo.VisitorKindStatsGlobal(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.HumanVisits != 2 || stats.BotVisits != 0 {
+		t.Fatalf("without bot_score_log table, want human=2 bot=0, got %+v", stats)
+	}
+	if stats.UnclassifiedIntercept != 1 {
+		t.Fatalf("without bot_score_log table, want unclassified intercept=1, got %+v", stats)
+	}
+	if stats.TotalVisits != 3 {
+		t.Fatalf("without bot_score_log table, want total=3, got %+v", stats)
 	}
 }
 

@@ -229,3 +229,66 @@ func TestPrometheusBodyIncludesUpstreamMetrics(t *testing.T) {
 		}
 	}
 }
+
+// TestPrometheusBodyIncludesCacheStats 验证 cache 指标按 layer 渲染。
+func TestPrometheusBodyIncludesCacheStats(t *testing.T) {
+	m := NewMetrics()
+	m.SetCacheStatsProvider(func() []CacheLayerStats {
+		return []CacheLayerStats{
+			{Name: "query", Hits: 11, Misses: 5},
+			{Name: "hot", Hits: 7, Misses: 3, Errors: 1},
+			{Name: "response", Hits: 4, Misses: 9},
+		}
+	})
+
+	body := PrometheusBody(m)
+	for _, want := range []string{
+		`owaf_cache_hits_total{cache="query"} 11`,
+		`owaf_cache_hits_total{cache="hot"} 7`,
+		`owaf_cache_hits_total{cache="response"} 4`,
+		`owaf_cache_misses_total{cache="query"} 5`,
+		`owaf_cache_misses_total{cache="hot"} 3`,
+		`owaf_cache_misses_total{cache="response"} 9`,
+		`owaf_cache_errors_total{cache="hot"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("PrometheusBody() missing %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
+// TestPrometheusCacheStatsEscapesLabels 是 cache 指标的注入防线。
+//
+// cache 层名理论上由内部注册，但保留与 Lua 脚本一致的转义策略：未来加入
+// 用户可配置层名时不会引入 /metrics 解析失败。
+func TestPrometheusCacheStatsEscapesLabels(t *testing.T) {
+	out := prometheusCacheStats([]CacheLayerStats{
+		{Name: `evil" hack`, Hits: 1},
+		{Name: "line\nbreak", Misses: 0, Hits: 2},
+		{Name: "tab\tname", Errors: 9, Hits: 3},
+	})
+
+	for _, want := range []string{
+		`owaf_cache_hits_total{cache="evil\" hack"} 1`,
+		`owaf_cache_hits_total{cache="line\nbreak"} 2`,
+		// 制表符不在 Prometheus 转义集内，原样保留。
+		"owaf_cache_hits_total{cache=\"tab\tname\"} 3",
+		"owaf_cache_errors_total{cache=\"tab\tname\"} 9",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("缺少已转义的行 %q\n输出:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "line\nbreak") {
+		t.Error("原始换行未转义，会伪造指标行")
+	}
+	// 每一行非空、非注释的样本行都必须以合法指标名开头。
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, "owaf_cache_") {
+			t.Errorf("出现非法样本行 %q，label 转义被绕过", line)
+		}
+	}
+}

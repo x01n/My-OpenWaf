@@ -3,14 +3,17 @@
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { PageHeader } from "@/components/page-header"
+import { CertificateParsePanel } from "@/components/certificate-parse-panel"
 import {
   useCertificate,
   useCertificates,
   useCertificateMutation,
   useCertificateDelete,
+  useRuntimeConfig,
 } from "@/hooks/use-api"
-import { ApiError } from "@/lib/api"
+import { ApiError, certificateApi } from "@/lib/api"
 import { formatDate } from "@/lib/utils"
+import type { CertificateParseResult } from "@/lib/types"
 import { DataTable } from "@/components/data-table"
 import { ConfirmDialog } from "@/components/confirm-dialog"
 import { EmptyState } from "@/components/empty-state"
@@ -44,6 +47,7 @@ import {
   IconEye,
   IconCertificate,
   IconAlertTriangle,
+  IconFileSearch,
 } from "@tabler/icons-react"
 import type { Certificate } from "@/lib/types"
 
@@ -114,12 +118,23 @@ export default function CertificatesPage() {
   const { execute: mutateCert, loading: mutateLoading } =
     useCertificateMutation()
   const { execute: deleteCert, loading: deleteLoading } = useCertificateDelete()
+  const { data: runtimeConfig } = useRuntimeConfig()
+  const certificateDiagnostics = (
+    runtimeConfig?.config_diagnostics ?? []
+  ).filter((diagnostic) => diagnostic.kind === "tls_certificate")
 
   const [dialogMode, setDialogMode] = useState<CertificateDialogMode>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [deleteId, setDeleteId] = useState<number | null>(null)
   const [deleteError, setDeleteError] = useState<DeleteErrorState | null>(null)
   const [form, setForm] = useState<CertificateForm>(EMPTY_FORM)
+  /** 编辑态打开时的原始证书 PEM，用于判断证书是否被改动 */
+  const [originalCertPem, setOriginalCertPem] = useState("")
+  const [parseResult, setParseResult] = useState<CertificateParseResult | null>(
+    null
+  )
+  const [parseError, setParseError] = useState<string | null>(null)
+  const [parseLoading, setParseLoading] = useState(false)
 
   const {
     data: selectedCertificate,
@@ -130,6 +145,17 @@ export default function CertificatesPage() {
   const certificates: Certificate[] = data || []
   const isFormDialog = dialogMode === "create" || dialogMode === "edit"
   const isEdit = dialogMode === "edit"
+
+  /**
+   * 编辑态换了证书 PEM 却没有重新输入私钥。
+   *
+   * 后端 UpdateCertificate 会用留库的旧私钥与新证书做
+   * tls.X509KeyPair 配对校验（internal/admin/system/certificate.go），
+   * 不匹配时返回 400，因此此处必须在提交前拦下并提示。
+   */
+  const certPemChanged =
+    isEdit && form.cert_pem.trim() !== originalCertPem.trim()
+  const needsMatchingKey = certPemChanged && !form.key_pem.trim()
 
   const daysUntilExpiry = (expiresAt?: string): number | null => {
     if (!expiresAt) return null
@@ -143,16 +169,26 @@ export default function CertificatesPage() {
     return t("certificates.sourceManual")
   }
 
+  const resetParseState = () => {
+    setParseResult(null)
+    setParseError(null)
+    setParseLoading(false)
+  }
+
   const closeDialog = () => {
     setDialogMode(null)
     setSelectedId(null)
     setForm(EMPTY_FORM)
+    setOriginalCertPem("")
+    resetParseState()
   }
 
   const openCreate = () => {
     setDeleteError(null)
     setSelectedId(null)
     setForm(EMPTY_FORM)
+    setOriginalCertPem("")
+    resetParseState()
     setDialogMode("create")
   }
 
@@ -160,17 +196,53 @@ export default function CertificatesPage() {
     setDeleteError(null)
     setSelectedId(certificate.id)
     setForm(certificateToForm(certificate))
+    setOriginalCertPem(certificate.cert_pem)
+    resetParseState()
     setDialogMode("edit")
   }
 
   const openView = (certificate: Certificate) => {
     setDeleteError(null)
     setSelectedId(certificate.id)
+    resetParseState()
     setDialogMode("view")
+  }
+
+  /**
+   * 调用后端解析指定的证书 PEM。
+   *
+   * 只发送 cert_pem，不涉及私钥。
+   *
+   * @param rawCertPem 待解析的证书 PEM
+   */
+  const handleParsePem = async (rawCertPem: string) => {
+    const certPem = (rawCertPem || "").trim()
+    if (!certPem) {
+      setParseResult(null)
+      setParseError(t("certificates.parseEmptyCert"))
+      return
+    }
+    setParseLoading(true)
+    setParseError(null)
+    try {
+      const result = await certificateApi.parse(certPem)
+      setParseResult(result)
+    } catch (err: unknown) {
+      setParseResult(null)
+      setParseError(
+        err instanceof Error ? err.message : t("certificates.parseFailed")
+      )
+    } finally {
+      setParseLoading(false)
+    }
   }
 
   const handleSubmit = async () => {
     if (!isFormDialog || (isEdit && !selectedId)) return
+    if (needsMatchingKey) {
+      toast.error(t("certificates.keyPemRequiredWithCertToast"))
+      return
+    }
 
     const payload: Partial<Certificate> = {
       name: form.name.trim(),
@@ -229,9 +301,10 @@ export default function CertificatesPage() {
     {
       key: "name",
       title: t("certificates.name"),
+      cellClassName: "whitespace-normal break-all align-top",
       render: (row: Certificate) => (
         <div className="flex items-center gap-2">
-          <IconCertificate className="h-4 w-4 text-primary" />
+          <IconCertificate className="h-4 w-4 text-primary shrink-0" />
           <span className="font-medium">{row.name}</span>
         </div>
       ),
@@ -239,6 +312,7 @@ export default function CertificatesPage() {
     {
       key: "domain",
       title: t("certificates.domain"),
+      cellClassName: "whitespace-normal break-all align-top",
       render: (row: Certificate) => (
         <span className="text-sm">{row.domain || "-"}</span>
       ),
@@ -359,6 +433,37 @@ export default function CertificatesPage() {
           <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
           <AlertDescription>
             {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {certificateDiagnostics.length > 0 && (
+        <Alert className="border-amber-500/40 bg-amber-500/5">
+          <IconAlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertTitle className="text-amber-800 dark:text-amber-200">
+            {t("certificates.diagnosticsTitle", {
+              count: certificateDiagnostics.length,
+            })}
+          </AlertTitle>
+          <AlertDescription>
+            <p>{t("certificates.diagnosticsDescription")}</p>
+            <ul className="mt-2 space-y-1.5">
+              {certificateDiagnostics.map((diagnostic, index) => (
+                <li
+                  key={`${diagnostic.source}:${diagnostic.field}:${index}`}
+                  className="font-mono text-xs break-all"
+                >
+                  {diagnostic.error || diagnostic.reason}
+                  {diagnostic.certificate_id
+                    ? ` · certificate_id=${diagnostic.certificate_id}`
+                    : ""}
+                  {diagnostic.site_id ? ` · site_id=${diagnostic.site_id}` : ""}
+                  {diagnostic.listener_id
+                    ? ` · listener_id=${diagnostic.listener_id}`
+                    : ""}
+                </li>
+              ))}
+            </ul>
           </AlertDescription>
         </Alert>
       )}
@@ -517,10 +622,35 @@ export default function CertificatesPage() {
                   <div className="space-y-2">
                     <Label>{t("certificates.certPem")}</Label>
                     <pre
-                      className={`${PEM_FIELD_CLASS} rounded-xl border bg-muted/20 p-4`}
+                      className={`${PEM_FIELD_CLASS} max-w-full overflow-auto rounded-xl border bg-muted/20 p-4`}
                     >
                       {detail.cert_pem || "-"}
                     </pre>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleParsePem(detail.cert_pem)}
+                        disabled={parseLoading || !detail.cert_pem?.trim()}
+                      >
+                        <IconFileSearch className="h-4 w-4" />
+                        {parseLoading
+                          ? t("certificates.parsing")
+                          : t("certificates.parse")}
+                      </Button>
+                    </div>
+                    {parseError && (
+                      <Alert variant="destructive">
+                        <AlertTitle>{t("certificates.parseFailed")}</AlertTitle>
+                        <AlertDescription className="break-words">
+                          {parseError}
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                    {parseResult && (
+                      <CertificateParsePanel result={parseResult} />
+                    )}
                   </div>
                 </>
               )}
@@ -634,15 +764,46 @@ export default function CertificatesPage() {
                         <Textarea
                           id="cert-pem"
                           value={form.cert_pem}
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            setParseResult(null)
+                            setParseError(null)
                             setForm((current) => ({
                               ...current,
                               cert_pem: e.target.value,
                             }))
-                          }
+                          }}
                           placeholder={t("certificates.certPemPlaceholder")}
-                          className={PEM_FIELD_CLASS}
+                          className={
+                            PEM_FIELD_CLASS + " max-w-full overflow-auto"
+                          }
                         />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleParsePem(form.cert_pem)}
+                            disabled={parseLoading || !form.cert_pem.trim()}
+                          >
+                            <IconFileSearch className="h-4 w-4" />
+                            {parseLoading
+                              ? t("certificates.parsing")
+                              : t("certificates.parse")}
+                          </Button>
+                        </div>
+                        {parseError && (
+                          <Alert variant="destructive">
+                            <AlertTitle>
+                              {t("certificates.parseFailed")}
+                            </AlertTitle>
+                            <AlertDescription className="break-words">
+                              {parseError}
+                            </AlertDescription>
+                          </Alert>
+                        )}
+                        {parseResult && (
+                          <CertificateParsePanel result={parseResult} />
+                        )}
                       </div>
                       <div className="space-y-2">
                         <Label htmlFor="cert-key">
@@ -664,13 +825,25 @@ export default function CertificatesPage() {
                               ? t("certificates.keyPemReplacePlaceholder")
                               : t("certificates.keyPemPlaceholder")
                           }
-                          className={PEM_FIELD_CLASS}
+                          className={
+                            PEM_FIELD_CLASS + " max-w-full overflow-auto"
+                          }
+                          aria-describedby="cert-key-hint"
+                          aria-invalid={needsMatchingKey || undefined}
                         />
-                        <p className="text-xs text-muted-foreground">
+                        <p
+                          id="cert-key-hint"
+                          className="text-xs text-muted-foreground"
+                        >
                           {isEdit
                             ? t("certificates.keyPemReplaceHint")
                             : t("certificates.keyPemHint")}
                         </p>
+                        {needsMatchingKey && (
+                          <p className="text-xs text-destructive">
+                            {t("certificates.keyPemRequiredWithCert")}
+                          </p>
+                        )}
                       </div>
                     </div>
                   )}
@@ -704,6 +877,7 @@ export default function CertificatesPage() {
                   disabled={
                     mutateLoading ||
                     !form.name.trim() ||
+                    needsMatchingKey ||
                     (isEdit && (!detail || !!selectedError))
                   }
                 >

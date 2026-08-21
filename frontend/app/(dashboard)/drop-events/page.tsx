@@ -159,6 +159,7 @@ export default function DropEventsPage() {
                 <PaginationItem>
                   <PaginationPrevious
                     onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1}
                     className={
                       page <= 1 ? "pointer-events-none opacity-50" : ""
                     }
@@ -185,6 +186,7 @@ export default function DropEventsPage() {
                 <PaginationItem>
                   <PaginationNext
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages}
                     className={
                       page >= totalPages ? "pointer-events-none opacity-50" : ""
                     }

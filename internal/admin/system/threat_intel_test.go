@@ -78,7 +78,7 @@ func TestNormalizeFeedFields(t *testing.T) {
 		wantOK     bool
 	}{
 		{name: "blacklist empty action defaults intercept", kind: string(store.IPListBlack), action: "", wantKind: "blacklist", wantAction: "intercept", wantOK: true},
-		{name: "whitelist drop", kind: string(store.IPListWhite), action: "drop", wantKind: "whitelist", wantAction: "drop", wantOK: true},
+		{name: "whitelist always allows", kind: string(store.IPListWhite), action: "drop", wantKind: "whitelist", wantAction: "intercept", wantOK: true},
 		{name: "legacy block normalizes to drop", kind: string(store.IPListBlack), action: "block", wantKind: "blacklist", wantAction: "drop", wantOK: true},
 		{name: "reject unknown kind", kind: "greylist", action: "intercept", wantOK: false},
 		{name: "reject empty kind", kind: "", action: "intercept", wantOK: false},

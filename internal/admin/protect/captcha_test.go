@@ -147,7 +147,6 @@ func TestUpdateCaptchaConfigPersistsExplicitFalseAndZero(t *testing.T) {
 		"shield_enable_js_challenge": false,
 		"shield_enable_env_check":    false,
 		"shield_enable_devtools":     false,
-		"shield_auto_start_delay":    0,
 		"shield_env_strictness":      0,
 	})
 	if ctx.Response.StatusCode() != 200 {
@@ -158,8 +157,8 @@ func TestUpdateCaptchaConfigPersistsExplicitFalseAndZero(t *testing.T) {
 	if loaded.ShieldEnabled || loaded.ShieldRequireHTTP2 || loaded.ShieldRequireHTTP3 || loaded.ShieldAllowHTTP1 || loaded.ShieldEnableJSChallenge || loaded.ShieldEnableEnvCheck || loaded.ShieldEnableDevTools {
 		t.Fatalf("explicit false shield fields were not persisted: %#v", loaded)
 	}
-	if loaded.ShieldAutoStartDelay != 0 || loaded.ShieldEnvStrictness != 0 {
-		t.Fatalf("explicit zero shield numeric fields were not persisted: %#v", loaded)
+	if loaded.ShieldAutoStartDelay != 800 || loaded.ShieldEnvStrictness != 0 {
+		t.Fatalf("explicit strictness zero or omitted delay was not persisted correctly: %#v", loaded)
 	}
 }
 

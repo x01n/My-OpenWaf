@@ -83,6 +83,14 @@ type AccessLog struct {
 	TLSPointFormats      string `gorm:"type:text" json:"tls_point_formats"`
 	HeaderOrder          string `gorm:"size:1024" json:"header_order"`
 
+	VisitorFusionClass              string `gorm:"size:16;index:idx_al_visitor_fusion_window,priority:2" json:"visitor_fusion_class"`
+	VisitorFusionScore              int    `gorm:"default:0" json:"visitor_fusion_score"`
+	VisitorFusionClientFamily       string `gorm:"size:32" json:"visitor_fusion_client_family"`
+	VisitorFusionUAClaim            string `gorm:"size:32" json:"visitor_fusion_ua_claim"`
+	VisitorFusionConsistency        string `gorm:"size:32" json:"visitor_fusion_consistency"`
+	VisitorFusionEvidenceSufficient bool   `gorm:"default:false;index:idx_al_visitor_fusion_window,priority:1" json:"visitor_fusion_evidence_sufficient"`
+	VisitorFusionReasons            string `gorm:"size:1024" json:"visitor_fusion_reasons"`
+
 	UpstreamLatencyMs int64 `gorm:"default:0" json:"upstream_latency_ms"`
 	ResponseSize      int64 `gorm:"default:0" json:"response_size"`
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -430,6 +431,72 @@ func TestRuntimeReloadSnapshotReusesConfiguredDynamicKeyBase(t *testing.T) {
 	}
 	if !bytes.Equal(second.DynamicProtection.EncryptionKeyBase, expected) {
 		t.Fatalf("reloaded snapshot key base did not match the initial key base (length=%d)", len(second.DynamicProtection.EncryptionKeyBase))
+	}
+}
+
+func TestRuntimeReloadSnapshotPrePublishFailureKeepsCurrentGeneration(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrate(db); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	layer, err := cache.NewLayer()
+	if err != nil {
+		t.Fatalf("create snapshot cache: %v", err)
+	}
+	rt := &Runtime{DB: db, Snapshot: &snapshot.Holder{}, Cache: layer}
+	if err := rt.SetSnapshotDynamicKeyBase(bytes.Repeat([]byte{0x2d}, 32)); err != nil {
+		t.Fatalf("configure dynamic key base: %v", err)
+	}
+	if err := rt.ReloadSnapshot(); err != nil {
+		t.Fatalf("initial snapshot reload: %v", err)
+	}
+	previous := rt.Snapshot.Load()
+	if previous == nil {
+		t.Fatal("initial snapshot was not published")
+	}
+	if err := store.BumpRevision(db); err != nil {
+		t.Fatalf("bump revision: %v", err)
+	}
+
+	prepareErr := errors.New("runtime unavailable")
+	called := false
+	err = rt.ReloadSnapshotWithPrePublish(func(next *snapshot.Snapshot) error {
+		called = true
+		if rt.Snapshot.Load() != previous {
+			t.Fatal("new snapshot became visible before pre-publish completed")
+		}
+		if next.Revision <= previous.Revision {
+			t.Fatalf("prepared revision = %d, previous = %d", next.Revision, previous.Revision)
+		}
+		return prepareErr
+	})
+	if !errors.Is(err, prepareErr) {
+		t.Fatalf("reload error = %v, want %v", err, prepareErr)
+	}
+	if !called {
+		t.Fatal("pre-publish callback was not called")
+	}
+	if rt.Snapshot.Load() != previous {
+		t.Fatal("failed pre-publish replaced the current snapshot")
+	}
+	if _, ok := layer.GetSnapshot(previous.Revision + 1); ok {
+		t.Fatal("failed pre-publish cached an unpublished snapshot")
+	}
+
+	if err := rt.ReloadSnapshotWithPrePublish(func(next *snapshot.Snapshot) error {
+		if rt.Snapshot.Load() != previous {
+			t.Fatal("new snapshot became visible before successful pre-publish completed")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("reload after runtime recovery: %v", err)
+	}
+	current := rt.Snapshot.Load()
+	if current == nil || current.Revision <= previous.Revision {
+		t.Fatalf("published revision = %#v, previous = %d", current, previous.Revision)
 	}
 }
 

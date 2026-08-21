@@ -95,13 +95,49 @@ func TestNormalizePersistedRuleConfigAcceptsExecutableRulePhases(t *testing.T) {
 	}
 }
 
+func TestNormalizePersistedRuleConfigCaptchaTypeContract(t *testing.T) {
+	for _, captchaType := range []string{"math", "click", "slide", "rotate"} {
+		item := store.Rule{
+			Phase:       store.PhaseCustom,
+			Action:      store.ActionCaptchaChallenge,
+			Pattern:     "block_path:/guarded",
+			CaptchaType: captchaType,
+		}
+		if got := normalizePersistedRuleConfig(&item); got != "" {
+			t.Fatalf("captcha_type=%q should be accepted: %q", captchaType, got)
+		}
+	}
+
+	for _, captchaType := range []string{"Math", "image", " slide ", "pow"} {
+		item := store.Rule{
+			Phase:       store.PhaseCustom,
+			Action:      store.ActionCaptchaChallenge,
+			Pattern:     "block_path:/guarded",
+			CaptchaType: captchaType,
+		}
+		if got := normalizePersistedRuleConfig(&item); got != "invalid captcha_type" {
+			t.Fatalf("captcha_type=%q error = %q, want invalid captcha_type", captchaType, got)
+		}
+	}
+
+	item := store.Rule{
+		Phase:       store.PhaseCustom,
+		Action:      store.ActionIntercept,
+		Pattern:     "block_path:/guarded",
+		CaptchaType: "slide",
+	}
+	if got := normalizePersistedRuleConfig(&item); got != "captcha_type requires captcha_challenge action" {
+		t.Fatalf("non-captcha action error = %q", got)
+	}
+}
+
 func TestNormalizePersistedRuleConfigRejectsInvalidTLSPattern(t *testing.T) {
 	item := store.Rule{
 		Phase:   store.PhaseCustom,
 		Action:  store.ActionObserve,
 		Pattern: "tls_version:TLS 1.9",
 	}
-	if got := normalizePersistedRuleConfig(&item); got != "invalid pattern: tls_version requires a supported TLS version token" {
+	if got := normalizePersistedRuleConfig(&item); got != "invalid pattern: tls_version 需要合法的 TLS 版本标识" {
 		t.Fatalf("normalizePersistedRuleConfig() = %q", got)
 	}
 }
@@ -112,7 +148,7 @@ func TestNormalizePersistedRuleConfigRejectsUnsupportedSSL3TLSPattern(t *testing
 		Action:  store.ActionObserve,
 		Pattern: "tls_version:SSL3",
 	}
-	if got := normalizePersistedRuleConfig(&item); got != "invalid pattern: tls_version requires a supported TLS version token" {
+	if got := normalizePersistedRuleConfig(&item); got != "invalid pattern: tls_version 需要合法的 TLS 版本标识" {
 		t.Fatalf("normalizePersistedRuleConfig() = %q", got)
 	}
 }
@@ -126,7 +162,7 @@ func TestNormalizePersistedRuleConfigRejectsInvalidCompoundTLSPattern(t *testing
 			`{"kind":"tls_version","arg":"TLS 1.9"}` +
 			`]}`,
 	}
-	if got := normalizePersistedRuleConfig(&item); got != "invalid pattern: tls_version requires a supported TLS version token" {
+	if got := normalizePersistedRuleConfig(&item); got != "invalid pattern: tls_version 需要合法的 TLS 版本标识" {
 		t.Fatalf("normalizePersistedRuleConfig() = %q", got)
 	}
 }
@@ -282,7 +318,7 @@ func TestCreateRuleRejectsInvalidTLSPattern(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Error != "invalid pattern: tls_version requires a supported TLS version token" {
+	if resp.Error != "invalid pattern: tls_version 需要合法的 TLS 版本标识" {
 		t.Fatalf("error = %q", resp.Error)
 	}
 }
@@ -315,7 +351,7 @@ func TestImportRulesRejectsInvalidCompoundTLSPattern(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Error != "invalid pattern: tls_version requires a supported TLS version token" {
+	if resp.Error != "invalid pattern: tls_version 需要合法的 TLS 版本标识" {
 		t.Fatalf("error = %q", resp.Error)
 	}
 	if resp.Index != 0 {

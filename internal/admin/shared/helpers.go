@@ -14,6 +14,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 )
 
@@ -44,6 +45,9 @@ func LoadProtectionConfigStrict(repo *repository.SystemSettingsRepo) (store.Prot
 	if err := cfg.ValidateBasicAuth(); err != nil {
 		return store.ProtectionConfig{}, err
 	}
+	if err := ValidateGlobalCaptchaType(cfg.CaptchaType); err != nil {
+		return store.ProtectionConfig{}, err
+	}
 	return cfg, nil
 }
 
@@ -61,6 +65,9 @@ func SaveProtectionConfig(repo *repository.SystemSettingsRepo, cfg store.Protect
 		return err
 	}
 	if err := NormalizeAndValidateBasicAuth(&cfg); err != nil {
+		return err
+	}
+	if err := ValidateGlobalCaptchaType(cfg.CaptchaType); err != nil {
 		return err
 	}
 	data, err := json.Marshal(cfg)
@@ -129,16 +136,36 @@ func ValidateActionWithRedirectTarget(value string, redirectTo *string) (string,
 	return normalized, true
 }
 
+// ValidateCaptchaType validates the strict rule-level CAPTCHA override contract.
+func ValidateCaptchaType(value string) (string, bool) {
+	if value == "" {
+		return "", true
+	}
+	if !challenge.IsValidCaptchaType(challenge.CaptchaType(value)) {
+		return "", false
+	}
+	return value, true
+}
+
+// ValidateGlobalCaptchaType validates the persisted global CAPTCHA mode.
+func ValidateGlobalCaptchaType(value string) error {
+	if !challenge.IsValidCaptchaType(challenge.CaptchaType(value)) {
+		return fmt.Errorf("captcha_type must be one of: math, click, slide, rotate")
+	}
+	return nil
+}
+
 // ValidateCCRules validates the shared global/site CC rule JSON contract.
 func ValidateCCRules(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
 	var rules []struct {
-		Enabled    *bool   `json:"enabled"`
-		Name       *string `json:"name"`
-		Action     string  `json:"action"`
-		Conditions []struct {
+		Enabled     *bool   `json:"enabled"`
+		Name        *string `json:"name"`
+		Action      string  `json:"action"`
+		CaptchaType string  `json:"captcha_type"`
+		Conditions  []struct {
 			Target   string `json:"target"`
 			Operator string `json:"operator"`
 			Value    string `json:"value"`
@@ -163,6 +190,16 @@ func ValidateCCRules(raw string) error {
 	for _, rule := range rules {
 		if _, ok := ValidateCCRuleAction(rule.Action); !ok {
 			return errors.New("invalid cc rule action")
+		}
+		if rule.CaptchaType != "" {
+			if _, ok := ValidateCaptchaType(rule.CaptchaType); !ok {
+				return errors.New("invalid cc rule captcha_type")
+			}
+			switch strings.ToLower(strings.TrimSpace(rule.Action)) {
+			case "captcha", "captcha_challenge":
+			default:
+				return errors.New("cc rule captcha_type requires captcha action")
+			}
 		}
 		if len(rule.Conditions) == 0 {
 			return errors.New("cc rule requires conditions")
@@ -259,8 +296,6 @@ func ReloadCVERules(feedMgr *cve.CVEFeedManager) {
 
 // SyncBotEnabledToProtection updates ProtectionConfig.BotDetectionEnabled
 // so the engine stays consistent when the bot settings page toggles the flag.
-// SyncBotEnabledToProtection updates ProtectionConfig.BotDetectionEnabled
-// so the engine stays consistent when the bot settings page toggles the flag.
 func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	cfg, err := LoadProtectionConfigStrict(settingsRepo)
 	if err != nil {
@@ -289,13 +324,24 @@ func SyncCaptchaEnabledToProtection(settingsRepo *repository.SystemSettingsRepo,
 	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
-/**
- * SyncProtectionCaptchaToSettings 将 protection 中的 CAPTCHA 开关同步到 bot_settings 投影。
- *
- * @param settingsRepo 系统设置仓库
- * @param enabled protection 中的 CAPTCHA 开关
- * @return 持久化错误
- */
+// SyncAntiReplayEnabledToProtection updates the global anti-replay flag used by the runtime.
+func SyncAntiReplayEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
+	}
+	if cfg.AntiReplayEnabled == enabled {
+		return nil
+	}
+	cfg.AntiReplayEnabled = enabled
+	return SaveProtectionConfig(settingsRepo, cfg)
+}
+
+// SyncProtectionCaptchaToSettings 将 protection 中的 CAPTCHA 开关同步到 bot_settings 投影。
+//
+// @param settingsRepo 系统设置仓库
+// @param enabled protection 中的 CAPTCHA 开关
+// @return 持久化错误
 func SyncProtectionCaptchaToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	current := BotSettingsResponse{ScoreThreshold: 60}
 	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
@@ -305,6 +351,23 @@ func SyncProtectionCaptchaToSettings(settingsRepo *repository.SystemSettingsRepo
 		return nil
 	}
 	current.CaptchaEnabled = enabled
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
+	return settingsRepo.Set("bot_settings", string(data))
+}
+
+// SyncProtectionAntiReplayToSettings updates bot_settings.AntiReplayEnabled from protection.
+func SyncProtectionAntiReplayToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
+	current := BotSettingsResponse{ScoreThreshold: 60}
+	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
+	}
+	if current.AntiReplayEnabled == enabled {
+		return nil
+	}
+	current.AntiReplayEnabled = enabled
 	data, err := json.Marshal(current)
 	if err != nil {
 		return fmt.Errorf("marshal bot settings: %w", err)

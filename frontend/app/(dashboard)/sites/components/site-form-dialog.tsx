@@ -197,7 +197,7 @@ export function SiteFormDialog({
         bind: `0.0.0.0:${primary.port}`,
         tls_enabled: primary.tls_enabled,
         cert_id: values.cert_id,
-        policy_id: values.policy_id ?? null,
+        policy_id: values.policy_id === null ? undefined : values.policy_id,
         upstream_urls: values.upstreams
           .map((u) => u.url.trim())
           .filter(Boolean)

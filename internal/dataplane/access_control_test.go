@@ -4,9 +4,14 @@ import (
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/glebarez/sqlite"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/accessgate"
 )
 
 func TestBuildGateConfig(t *testing.T) {
@@ -86,6 +91,55 @@ func TestBuildGateConfigEmptyProviders(t *testing.T) {
 	}
 	if cfg.PathRules != nil {
 		t.Fatalf("空 PathRules 应保持 nil: got %v", cfg.PathRules)
+	}
+}
+
+func TestHandleAccessVerifyRejectsUserPasswordWithoutEnabledProvider(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("打开测试数据库失败: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessUser{}); err != nil {
+		t.Fatalf("迁移访问控制用户表失败: %v", err)
+	}
+
+	userHash, err := bcrypt.GenerateFromPassword([]byte("u-secret"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("生成用户密码哈希失败: %v", err)
+	}
+	repo := repository.NewAccessControlRepo(db)
+	if err := repo.CreateAccessUser(&store.AccessUser{
+		SiteID:       1,
+		Username:     "alice",
+		PasswordHash: string(userHash),
+		Enabled:      true,
+	}); err != nil {
+		t.Fatalf("创建测试用户失败: %v", err)
+	}
+
+	cfg := accessgate.Config{
+		Enabled:    true,
+		SiteID:     1,
+		SiteHost:   "site.test",
+		SessionTTL: 3600,
+		Providers: []accessgate.ProviderConfig{
+			{ID: 2, Type: store.AccessProviderOAuth2, Name: "GitHub"},
+		},
+	}
+	gate := accessgate.NewGate(cfg, accessgate.NewMemorySessionStore())
+	c := app.NewContext(0)
+	c.Request.Header.SetMethod("POST")
+	c.Request.Header.SetContentTypeBytes([]byte("application/x-www-form-urlencoded"))
+	c.Request.SetBodyString("auth_type=user_password&username=alice&password=u-secret")
+
+	rt := &snapshot.SiteRuntime{Site: store.Site{ID: 1}}
+	handleAccessVerify(c, Options{AccessControlRepo: repo}, gate, cfg, "site.test", rt)
+
+	if got := c.Response.Header.Peek("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("没有 enabled 的 password provider 时不应下发 session cookie, got %q", got)
+	}
+	if got := c.Response.StatusCode(); got != 401 {
+		t.Fatalf("没有 enabled 的 password provider 时应返回登录错误, got status %d", got)
 	}
 }
 

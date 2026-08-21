@@ -45,6 +45,7 @@ func defaultBotSettingsResponse(settingsRepo *repository.SystemSettingsRepo) sha
 		Enabled:            protectionCfg.BotDetectionEnabled,
 		ScoreThreshold:     60,
 		CaptchaEnabled:     protectionCfg.CaptchaEnabled,
+		AntiReplayEnabled:  protectionCfg.AntiReplayEnabled,
 		BrowserSignEnabled: protectionCfg.BrowserSignEnabled,
 		BrowserSignTTL:     protectionCfg.BrowserSignTTL,
 		BrowserSignAction:  protectionCfg.BrowserSignAction,
@@ -81,6 +82,7 @@ func GetBotSettings(settingsRepo *repository.SystemSettingsRepo) app.HandlerFunc
 		// bot_settings JSON 可能尚未包含保护字段；以 protection 为权威源回填。
 		prot := shared.LoadProtectionConfig(settingsRepo)
 		resp.CaptchaEnabled = prot.CaptchaEnabled
+		resp.AntiReplayEnabled = prot.AntiReplayEnabled
 		resp.BrowserSignEnabled = prot.BrowserSignEnabled
 		if prot.BrowserSignTTL > 0 {
 			resp.BrowserSignTTL = prot.BrowserSignTTL
@@ -210,6 +212,11 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			}
 			if req.CaptchaEnabled != nil {
 				if err := shared.SyncCaptchaEnabledToProtection(txRepo, current.CaptchaEnabled); err != nil {
+					return err
+				}
+			}
+			if req.AntiReplayEnabled != nil {
+				if err := shared.SyncAntiReplayEnabledToProtection(txRepo, current.AntiReplayEnabled); err != nil {
 					return err
 				}
 			}

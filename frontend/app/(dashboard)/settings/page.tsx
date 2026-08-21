@@ -23,6 +23,7 @@ import {
   IconNetwork,
   IconShieldLock,
   IconDatabase,
+  IconAlertTriangle,
 } from "@tabler/icons-react"
 import {
   useLogConfig,
@@ -33,6 +34,7 @@ import {
   useRedisConfigUpdate,
   useTLSConfig,
   useTLSConfigUpdate,
+  useRuntimeConfig,
 } from "@/hooks/use-api"
 import type {
   LogConfigUpdate,
@@ -92,6 +94,8 @@ export default function SettingsPage() {
   const networkUpdate = useNetworkConfigUpdate()
   const tlsUpdate = useTLSConfigUpdate()
   const logUpdate = useLogConfigUpdate()
+  const { data: runtimeConfig } = useRuntimeConfig()
+  const configDiagnostics = runtimeConfig?.config_diagnostics ?? []
   const [localNetwork, setLocalNetwork] = useState<NetworkConfigUpdate>({})
   const [localTLS, setLocalTLS] = useState<TLSConfigUpdate>({})
   const [localLog, setLocalLog] = useState<LogConfigUpdate>({})
@@ -113,7 +117,10 @@ export default function SettingsPage() {
   ) => setLocalTLS((prev) => ({ ...prev, [key]: !tlsValue(key) }))
 
   const saveNetwork = async () => {
-    const payload = pickChangedFields<NetworkConfig>(networkFields, localNetwork)
+    const payload = pickChangedFields<NetworkConfig>(
+      networkFields,
+      localNetwork
+    )
     if (!Object.keys(payload).length) return
     try {
       await networkUpdate.execute(payload)
@@ -181,6 +188,68 @@ export default function SettingsPage() {
         title={t("settings.title")}
         description={t("settings.description")}
       />
+      {configDiagnostics.length > 0 && (
+        <Card className="border-amber-500/40 bg-amber-500/5">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base text-amber-800 dark:text-amber-200">
+              <IconAlertTriangle className="h-5 w-5" />
+              {t("settings.configDiagnosticsTitle", {
+                count: configDiagnostics.length,
+              })}
+            </CardTitle>
+            <p className="text-sm text-muted-foreground">
+              {t("settings.configDiagnosticsDescription", {
+                revision: runtimeConfig?.revision ?? 0,
+              })}
+            </p>
+          </CardHeader>
+          <CardContent className="grid gap-2 lg:grid-cols-2">
+            {configDiagnostics.map((diagnostic, index) => {
+              const identity = [
+                diagnostic.site_id ? `site_id=${diagnostic.site_id}` : "",
+                diagnostic.listener_id
+                  ? `listener_id=${diagnostic.listener_id}`
+                  : "",
+                diagnostic.certificate_id
+                  ? `certificate_id=${diagnostic.certificate_id}`
+                  : "",
+                diagnostic.policy_id ? `policy_id=${diagnostic.policy_id}` : "",
+                diagnostic.rule_id ? `rule_id=${diagnostic.rule_id}` : "",
+                diagnostic.ip_list_entry_id
+                  ? `ip_list_entry_id=${diagnostic.ip_list_entry_id}`
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")
+              return (
+                <div
+                  key={`${diagnostic.source}:${diagnostic.field}:${identity}:${index}`}
+                  className="min-w-0 rounded-lg border bg-background/80 p-3"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <code className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
+                      {diagnostic.source}.{diagnostic.field}
+                    </code>
+                    <span className="text-xs font-medium text-amber-800 dark:text-amber-200">
+                      {diagnostic.error || diagnostic.reason}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t("settings.configDiagnosticHandling", {
+                      strategy: diagnostic.handling_strategy,
+                    })}
+                  </p>
+                  {identity && (
+                    <code className="mt-2 block text-[11px] break-all text-muted-foreground">
+                      {identity}
+                    </code>
+                  )}
+                </div>
+              )
+            })}
+          </CardContent>
+        </Card>
+      )}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-base">

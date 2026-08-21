@@ -18,7 +18,8 @@ type testKV struct {
 	available bool
 }
 
-func (k testKV) Available() bool { return k.available }
+func (k testKV) Available() bool                           { return k.available }
+func (k testKV) AvailableContext(ctx context.Context) bool { return k.available && ctx.Err() == nil }
 
 func (testKV) Get(string) ([]byte, bool) { return nil, false }
 
@@ -27,6 +28,53 @@ func (testKV) Set(string, []byte, time.Duration) error { return nil }
 func (testKV) Delete(string) {}
 
 func (testKV) Incr(string, time.Duration) (int64, error) { return 1, nil }
+
+func (testKV) GetContext(context.Context, string) ([]byte, bool) { return nil, false }
+
+func (testKV) SetContext(context.Context, string, []byte, time.Duration) error { return nil }
+
+func (testKV) DeleteContext(context.Context, string) {}
+
+func (testKV) IncrContext(context.Context, string, time.Duration) (int64, error) {
+	return 1, nil
+}
+
+type blockingLegacyKV struct {
+	called  chan string
+	release chan struct{}
+}
+
+func (b *blockingLegacyKV) block(method string) {
+	select {
+	case b.called <- method:
+	default:
+	}
+	<-b.release
+}
+
+func (b *blockingLegacyKV) Available() bool {
+	b.block("available")
+	return true
+}
+
+func (b *blockingLegacyKV) Get(string) ([]byte, bool) {
+	b.block("get")
+	return nil, false
+}
+
+func (b *blockingLegacyKV) Set(string, []byte, time.Duration) error {
+	b.block("set")
+	return nil
+}
+
+func (b *blockingLegacyKV) Delete(string) {
+	b.block("delete")
+}
+
+func (b *blockingLegacyKV) Incr(string, time.Duration) (int64, error) {
+	b.block("incr")
+	return 0, nil
+}
 
 func newSilentEngine(kv KVBackend) *Engine {
 	return NewEngine(kv, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -39,12 +87,59 @@ func silentEngine(kv KVBackend) *Engine {
 	return newSilentEngine(kv)
 }
 
+func TestLegacyKVBackendIsFailOpen(t *testing.T) {
+	legacy := &blockingLegacyKV{called: make(chan string, 1), release: make(chan struct{})}
+	defer close(legacy.release)
+	e := newSilentEngine(legacy)
+	e.Reload([]*Script{mustCompile(t, StagePre, `
+function handle(ctx)
+  if ctx.kv.available() then return "intercept" end
+  if ctx.kv.get("key") ~= nil then return "intercept" end
+  if ctx.kv.set("key", "value") then return "intercept" end
+  if ctx.kv.incr("key") ~= nil then return "intercept" end
+  ctx.kv.delete("key")
+  return "observe"
+end`)})
+
+	done := make(chan Decision, 1)
+	go func() { done <- e.Evaluate(context.Background(), StagePre, RequestView{}) }()
+	select {
+	case dec := <-done:
+		if dec.HasAction() {
+			t.Fatalf("legacy backend 应按不可用处理，得到 %+v", dec)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("调用 legacy backend 导致 Evaluate 阻塞")
+	}
+	select {
+	case method := <-legacy.called:
+		t.Fatalf("legacy backend 的 %s 方法不应被调用", method)
+	default:
+	}
+}
+
+func TestZeroEngineWithScriptUsesNilSafeLogger(t *testing.T) {
+	script := mustCompile(t, StagePre, `function handle(ctx) error("boom") end`)
+	e := &Engine{pool: newVMPool()}
+	e.kv.Store(&kvHolder{kv: testKV{available: true}})
+	e.Reload([]*Script{script})
+	if dec := e.Evaluate(context.Background(), StagePre, RequestView{}); dec.HasAction() {
+		t.Fatalf("错误脚本不应产生判定，得到 %+v", dec)
+	}
+	if _, failures, _, _ := script.Stats(); failures != 1 {
+		t.Fatalf("错误脚本应计入 failures=%d，得到 %d", 1, failures)
+	}
+}
+
 type recordingKV struct {
 	setTTL  time.Duration
 	incrTTL time.Duration
 }
 
 func (*recordingKV) Available() bool { return true }
+func (k *recordingKV) AvailableContext(ctx context.Context) bool {
+	return ctx == nil || ctx.Err() == nil
+}
 
 func (*recordingKV) Get(string) ([]byte, bool) { return nil, false }
 
@@ -60,10 +155,27 @@ func (k *recordingKV) Incr(_ string, ttl time.Duration) (int64, error) {
 	return 1, nil
 }
 
+func (*recordingKV) GetContext(context.Context, string) ([]byte, bool) { return nil, false }
+
+func (k *recordingKV) SetContext(_ context.Context, _ string, _ []byte, ttl time.Duration) error {
+	k.setTTL = ttl
+	return nil
+}
+
+func (*recordingKV) DeleteContext(context.Context, string) {}
+
+func (k *recordingKV) IncrContext(_ context.Context, _ string, ttl time.Duration) (int64, error) {
+	k.incrTTL = ttl
+	return 1, nil
+}
+
 type contextRecordingKV struct {
 	recordingKV
 	calls chan context.Context
 }
+
+func (k *contextRecordingKV) Available() bool                           { return true }
+func (k *contextRecordingKV) AvailableContext(ctx context.Context) bool { return ctx.Err() == nil }
 
 func (k *contextRecordingKV) GetContext(ctx context.Context, _ string) ([]byte, bool) {
 	k.calls <- ctx
@@ -94,6 +206,7 @@ func (*blockingContextKV) Get(string) ([]byte, bool)                 { return ni
 func (*blockingContextKV) Set(string, []byte, time.Duration) error   { return nil }
 func (*blockingContextKV) Delete(string)                             {}
 func (*blockingContextKV) Incr(string, time.Duration) (int64, error) { return 1, nil }
+func (*blockingContextKV) AvailableContext(ctx context.Context) bool { return ctx.Err() == nil }
 func (k *blockingContextKV) GetContext(ctx context.Context, _ string) ([]byte, bool) {
 	close(k.started)
 	<-ctx.Done()
@@ -917,14 +1030,27 @@ type failingDuringRunKV struct {
 	available bool
 }
 
-func (k *failingDuringRunKV) Available() bool         { return k != nil && k.available }
-func (*failingDuringRunKV) Get(string) ([]byte, bool) { return nil, false }
+func (k *failingDuringRunKV) Available() bool                       { return k != nil && k.available }
+func (k *failingDuringRunKV) AvailableContext(context.Context) bool { return k != nil && k.available }
+
+func (k *failingDuringRunKV) Get(string) ([]byte, bool) { return nil, false }
 func (k *failingDuringRunKV) Set(string, []byte, time.Duration) error {
 	k.available = false
 	return errors.New("kv unavailable")
 }
 func (*failingDuringRunKV) Delete(string)                             {}
 func (*failingDuringRunKV) Incr(string, time.Duration) (int64, error) { return 0, nil }
+func (k *failingDuringRunKV) GetContext(context.Context, string) ([]byte, bool) {
+	return nil, false
+}
+func (k *failingDuringRunKV) SetContext(context.Context, string, []byte, time.Duration) error {
+	k.available = false
+	return errors.New("kv unavailable")
+}
+func (*failingDuringRunKV) DeleteContext(context.Context, string) {}
+func (*failingDuringRunKV) IncrContext(context.Context, string, time.Duration) (int64, error) {
+	return 0, nil
+}
 
 func TestLuaAPIOutputLimits(t *testing.T) {
 	src := `

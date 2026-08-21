@@ -44,6 +44,7 @@ import {
   useSecurityEvents,
 } from "@/hooks/use-api"
 import { GeoAttackDistribution } from "@/components/geo-attack-distribution"
+import { ActionBadge } from "@/components/action-badge"
 import { formatNumber } from "@/lib/utils"
 import { categoryLabel } from "@/lib/attack-category"
 import { countryFlag, countryName } from "@/lib/country-names"
@@ -399,7 +400,14 @@ export default function SecurityDashboardPage() {
                       )}
                       <span className="ml-auto flex items-center gap-2">
                         <span className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-300">
-                          {categoryLabel(ev.category || ev.action)}
+                          {ev.category ? (
+                            categoryLabel(ev.category)
+                          ) : (
+                            <ActionBadge
+                              action={ev.action}
+                              className="border-0 bg-transparent p-0 text-[10px] text-rose-300"
+                            />
+                          )}
                         </span>
                         <span className="font-mono text-slate-400 tabular-nums">
                           {formatTime(ev.created_at)}

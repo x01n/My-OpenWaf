@@ -41,11 +41,26 @@ func TestMaskDSNHidesCredentials(t *testing.T) {
 			},
 		},
 		{
+			name: "mysql native credentials are masked",
+			dsn:  "waf:mysql-secret@tcp(db.internal:3306)/waf?parseTime=True",
+			wantFunc: func(got string) bool {
+				return !strings.Contains(got, "mysql-secret") && strings.Contains(got, "waf:******@tcp(db.internal:3306)") &&
+					strings.Contains(got, "parseTime=true")
+			},
+		},
+		{
 			name: "key value password is masked",
 			dsn:  "host=db.internal user=waf password=pg-secret dbname=waf",
 			wantFunc: func(got string) bool {
 				return !strings.Contains(got, "pg-secret") && strings.Contains(got, "password=******") &&
 					strings.Contains(got, "host=db.internal") && strings.Contains(got, "user=waf")
+			},
+		},
+		{
+			name: "uppercase key value password is masked",
+			dsn:  "host=db.internal PASSWORD=upper-secret dbname=waf",
+			wantFunc: func(got string) bool {
+				return !strings.Contains(got, "upper-secret") && strings.Contains(got, "PASSWORD=******")
 			},
 		},
 		{
@@ -60,6 +75,55 @@ func TestMaskDSNHidesCredentials(t *testing.T) {
 			dsn:  "host=db.internal pwd=short-secret",
 			wantFunc: func(got string) bool {
 				return !strings.Contains(got, "short-secret") && strings.Contains(got, "pwd=******")
+			},
+		},
+		{
+			name: "quoted password with whitespace is masked",
+			dsn:  `host=db.internal user=waf password='pg secret' dbname=waf`,
+			wantFunc: func(got string) bool {
+				return got == `host=db.internal user=waf password=****** dbname=waf`
+			},
+		},
+		{
+			name: "double quoted password with whitespace is masked",
+			dsn:  `host=db.internal user=waf password="pg secret" dbname=waf`,
+			wantFunc: func(got string) bool {
+				return got == `host=db.internal user=waf password=****** dbname=waf`
+			},
+		},
+		{
+			name: "quoted passwd with escaped quote is masked",
+			dsn:  `host=db.internal passwd='quote\' and space' dbname=waf`,
+			wantFunc: func(got string) bool {
+				return got == `host=db.internal passwd=****** dbname=waf`
+			},
+		},
+		{
+			name: "quoted pwd with escaped backslash is masked",
+			dsn:  `host=db.internal pwd='backslash\\ and space' dbname=waf`,
+			wantFunc: func(got string) bool {
+				return got == `host=db.internal pwd=****** dbname=waf`
+			},
+		},
+		{
+			name: "sslpassword with spaces around equals is masked",
+			dsn:  `host=db.internal sslpassword = 'tls secret' dbname=waf`,
+			wantFunc: func(got string) bool {
+				return got == `host=db.internal sslpassword = ****** dbname=waf`
+			},
+		},
+		{
+			name: "malformed quoted value fails closed",
+			dsn:  `host=db.internal password='unclosed secret`,
+			wantFunc: func(got string) bool {
+				return got == "[redacted]"
+			},
+		},
+		{
+			name: "postgres URL query credentials are masked",
+			dsn:  `postgres://db.internal:5432/waf?passwd=passwd-secret&password=password-secret&pwd=pwd-secret&sslmode=require&sslpassword=sslpassword-secret`,
+			wantFunc: func(got string) bool {
+				return got == `postgres://db.internal:5432/waf?passwd=%2A%2A%2A%2A%2A%2A&password=%2A%2A%2A%2A%2A%2A&pwd=%2A%2A%2A%2A%2A%2A&sslmode=require&sslpassword=%2A%2A%2A%2A%2A%2A`
 			},
 		},
 		{

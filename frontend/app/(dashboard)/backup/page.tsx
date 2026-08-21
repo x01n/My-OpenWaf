@@ -146,6 +146,7 @@ export default function BackupPage() {
         { label: t("backup.rules"), value: fileData.rules?.length ?? 0 },
         { label: t("backup.ipEntries"), value: fileData.ip_list_entries?.length ?? 0 },
         { label: t("backup.luaPlugins"), value: fileData.lua_plugins?.length ?? 0 },
+        { label: t("backup.jsPlugins"), value: fileData.js_plugins?.length ?? 0 },
       ]
     : [];
 

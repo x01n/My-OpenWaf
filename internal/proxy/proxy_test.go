@@ -1403,7 +1403,7 @@ func TestFetchHTTPForAppRouteCaptureLimitsDecodedBodyAndKeepsRemainder(t *testin
 	if len(resp.Body) != maxStreamTransformBufferBytes {
 		t.Fatalf("captured prefix length = %d, want %d", len(resp.Body), maxStreamTransformBufferBytes)
 	}
-	if resp.remainingBody == nil {
+	if !resp.HasRemainingBody() {
 		t.Fatal("expected remaining body for oversized capture")
 	}
 	if got := resp.Header.Get("Content-Encoding"); got != "" {
@@ -4376,9 +4376,19 @@ func TestForwardHTTPBrowserSignCSPUsesTrustedNonceForEveryPolicy(t *testing.T) {
 	if len(matches) != 2 {
 		t.Fatalf("expected upstream and proxy browser-sign markers, got %d in %q", len(matches), ctx.Response.Body())
 	}
-	trustedNonce := string(matches[1][1])
-	if trustedNonce == attackerNonce {
-		t.Fatal("proxy-issued nonce must differ from attacker-controlled nonce")
+	trustedNonce := ""
+	for _, match := range matches {
+		nonce := string(match[1])
+		if nonce == attackerNonce {
+			continue
+		}
+		if trustedNonce != "" {
+			t.Fatalf("expected exactly one proxy-issued nonce, got multiple non-attacker values in %q", ctx.Response.Body())
+		}
+		trustedNonce = nonce
+	}
+	if trustedNonce == "" {
+		t.Fatalf("proxy-issued nonce was not found in %q", ctx.Response.Body())
 	}
 	policies := ctx.Response.Header.PeekAll("Content-Security-Policy")
 	if len(policies) != 2 {
@@ -4975,7 +4985,7 @@ func TestBuildUpstreamRequestURLAndHostSemantics(t *testing.T) {
 	ctx.Request.SetRequestURI("/resource/sub?x=1&y=two")
 	ctx.Request.Header.SetHost("client.example")
 
-	req, err := buildUpstreamRequest(context.Background(), ctx, "https://origin.example:9443/base", net.ParseIP("203.0.113.10"), "client.example", true)
+	req, err := buildUpstreamRequest(context.Background(), ctx, "https://upstream-user:upstream-password@origin.example:9443/base", net.ParseIP("203.0.113.10"), "client.example", true)
 	if err != nil {
 		t.Fatalf("buildUpstreamRequest returned error: %v", err)
 	}
@@ -4984,6 +4994,14 @@ func TestBuildUpstreamRequestURLAndHostSemantics(t *testing.T) {
 	}
 	if req.URL.Scheme != "https" {
 		t.Fatalf("URL.Scheme = %q", req.URL.Scheme)
+	}
+	if req.URL.User == nil {
+		t.Fatal("upstream URL userinfo is missing")
+	}
+	username := req.URL.User.Username()
+	password, hasPassword := req.URL.User.Password()
+	if username != "upstream-user" || !hasPassword || password != "upstream-password" {
+		t.Fatalf("upstream URL userinfo = (%q, %q, %t)", username, password, hasPassword)
 	}
 	if req.URL.Host != "origin.example:9443" {
 		t.Fatalf("URL.Host = %q", req.URL.Host)
@@ -5008,6 +5026,28 @@ func TestBuildUpstreamRequestURLAndHostSemantics(t *testing.T) {
 	}
 	if got := req.Header.Get("Host"); got != "" {
 		t.Fatalf("Host header = %q, want empty because net/http uses Request.Host", got)
+	}
+}
+
+func TestForwardHTTPPreservesUpstreamURLUserinfo(t *testing.T) {
+	var gotUsername, gotPassword string
+	var gotBasicAuth bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUsername, gotPassword, gotBasicAuth = r.BasicAuth()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	base := strings.Replace(upstream.URL, "http://", "http://upstream-user:upstream-password@", 1)
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/resource")
+
+	if err := ForwardHTTP(context.Background(), ctx, snapshot.SiteRuntime{}, base, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	if !gotBasicAuth || gotUsername != "upstream-user" || gotPassword != "upstream-password" {
+		t.Fatalf("upstream basic auth = (%q, %q, %t)", gotUsername, gotPassword, gotBasicAuth)
 	}
 }
 

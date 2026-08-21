@@ -2,9 +2,11 @@ package event
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store"
@@ -40,55 +42,66 @@ func ListFalsePositives(repo *repository.FalsePositiveRepo) app.HandlerFunc {
  */
 type CreateFalsePositiveReq struct {
 	SecurityEventID uint   `json:"security_event_id"`
-	RequestID       string `json:"request_id"`
-	RuleIDStr       string `json:"rule_id_str"`
-	Category        string `json:"category"`
-	ClientIP        string `json:"client_ip"`
-	Host            string `json:"host"`
-	Path            string `json:"path"`
-	MatchDesc       string `json:"match_desc"`
 	Note            string `json:"note"`
 }
 
 /**
  * CreateFalsePositive 提交一条误报反馈。
- * 提交者用户名从 auth_user context 读取；请求体只需事件上下文与备注。
+ * 源事件快照由后端从日志库读取，客户端仅能提交事件 ID 和备注。
  */
-func CreateFalsePositive(repo *repository.FalsePositiveRepo) app.HandlerFunc {
+func CreateFalsePositive(repo *repository.FalsePositiveRepo, securityEvents *repository.SecurityEventRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var body CreateFalsePositiveReq
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		if body.SecurityEventID == 0 && body.RequestID == "" {
-			c.JSON(400, map[string]string{"error": "security_event_id or request_id required"})
+		if body.SecurityEventID == 0 {
+			c.JSON(400, map[string]string{"error": "security_event_id required"})
 			return
 		}
+
+		event, err := securityEvents.Get(body.SecurityEventID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, map[string]string{"error": "security event not found"})
+			return
+		}
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+
 		submittedBy := ""
 		if v, ok := c.Get("auth_user"); ok {
 			if s, ok := v.(string); ok {
 				submittedBy = s
 			}
 		}
+		sourceEventKey := "security-event:" + strconv.FormatUint(uint64(event.ID), 10)
 		rec := &store.FalsePositiveReport{
-			SecurityEventID: body.SecurityEventID,
-			RequestID:       body.RequestID,
-			RuleIDStr:       body.RuleIDStr,
-			Category:        body.Category,
-			ClientIP:        body.ClientIP,
-			Host:            body.Host,
-			Path:            body.Path,
-			MatchDesc:       body.MatchDesc,
+			SecurityEventID: event.ID,
+			RequestID:       event.RequestID,
+			SourceEventKey:  &sourceEventKey,
+			RuleIDStr:       event.RuleIDStr,
+			Category:        event.Category,
+			ClientIP:        event.ClientIP,
+			Host:            event.Host,
+			Path:            event.Path,
+			MatchDesc:       event.MatchDesc,
 			SubmittedBy:     submittedBy,
 			Note:            body.Note,
 			Status:          "pending",
 		}
-		if err := repo.Create(rec); err != nil {
+		saved, created, err := repo.CreateOrGetBySourceEvent(rec)
+		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		c.JSON(201, rec)
+		if !created {
+			c.JSON(200, saved)
+			return
+		}
+		c.JSON(201, saved)
 	}
 }
 
@@ -121,7 +134,12 @@ func UpdateFalsePositiveStatus(repo *repository.FalsePositiveRepo) app.HandlerFu
 			c.JSON(400, map[string]string{"error": "status must be pending/confirmed/rejected"})
 			return
 		}
-		if err := repo.UpdateStatus(id, body.Status); err != nil {
+		err = repo.UpdateStatus(id, body.Status)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, map[string]string{"error": "false positive not found"})
+			return
+		}
+		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -139,7 +157,12 @@ func DeleteFalsePositive(repo *repository.FalsePositiveRepo) app.HandlerFunc {
 			c.JSON(400, map[string]string{"error": "invalid id"})
 			return
 		}
-		if err := repo.Delete(id); err != nil {
+		err = repo.Delete(id)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, map[string]string{"error": "false positive not found"})
+			return
+		}
+		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}

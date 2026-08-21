@@ -133,7 +133,7 @@ func CheckOWASP(sensitivity string, path, query string, headers map[string]strin
 }
 
 func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string) []OWASPHit {
-	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets)
+	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets, nil)
 	if multi != nil {
 		return multi
 	}
@@ -146,7 +146,7 @@ func CheckOWASPWithThresholds(thresholds CompiledThresholds, path, query string,
 // FirstOWASPHitWithThresholds 返回首个 OWASP 命中，不在 stop/deep/early 路径分配 []OWASPHit。
 // multi 场景（末尾协议/上传/危险路径软命中列表）取第一个。
 func FirstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string) (OWASPHit, bool) {
-	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets)
+	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets, nil)
 	if multi != nil {
 		if len(multi) == 0 {
 			return OWASPHit{}, false
@@ -157,22 +157,33 @@ func FirstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 }
 
 // FirstAcceptedOWASPHitWithThresholds 返回第一个通过覆盖/白名单过滤的命中。
-// stop/deep/early 路径零 []OWASPHit 分配；仅 multi 软命中列表需要遍历过滤。
+// 过滤器在每个早停候选产生时执行；被跳过的候选会继续扫描其余类别。
 func FirstAcceptedOWASPHitWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string, overrides map[string]OWASPRuleOverride, catSens ...map[string]string) (OWASPHit, bool) {
-	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets)
+	if len(overrides) == 0 {
+		return FirstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets)
+	}
+	var categorySensitivity map[string]string
+	if len(catSens) > 0 {
+		categorySensitivity = catSens[0]
+	}
+	accept := func(hit OWASPHit) bool {
+		return HitPassesFilters(hit, path, overrides, categorySensitivity)
+	}
+	hit, ok, multi := firstOWASPHitWithThresholds(thresholds, path, query, headers, bodyTargets, accept)
 	if multi != nil {
-		return FilterFirstHit(multi, path, overrides, catSens...)
+		if len(multi) == 0 {
+			return OWASPHit{}, false
+		}
+		return multi[0], true
 	}
-	if !ok {
-		return OWASPHit{}, false
-	}
-	if !HitPassesFilters(hit, path, overrides, catSens...) {
-		return OWASPHit{}, false
-	}
-	return hit, true
+	return hit, ok
 }
 
-func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string) (hit OWASPHit, ok bool, multi []OWASPHit) {
+func acceptsOWASPHit(accept func(OWASPHit) bool, hit OWASPHit) bool {
+	return accept == nil || accept(hit)
+}
+
+func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query string, headers map[string]string, bodyTargets []string, accept func(OWASPHit) bool) (hit OWASPHit, ok bool, multi []OWASPHit) {
 	sqliThreshold, sqliEnabled := thresholds.sqli.threshold, thresholds.sqli.enabled
 	xssThreshold, xssEnabled := thresholds.xss.threshold, thresholds.xss.enabled
 	cmdThreshold, cmdEnabled := thresholds.cmd.threshold, thresholds.cmd.enabled
@@ -221,7 +232,10 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		skipBodySQLi = true
 	}
 	if crlfEnabled && (strings.ContainsAny(path, "\r\n") || strings.Contains(lowerPath, "%0d") || strings.Contains(lowerPath, "%0a")) {
-		return OWASPHit{Category: CatCRLF, RuleID: "owasp:crlf:005", Score: 5, Desc: "bare CR/LF in URL path"}, true, nil
+		hit := OWASPHit{Category: CatCRLF, RuleID: "owasp:crlf:005", Score: 5, Desc: "URL 路径中的裸 CR/LF 字符"}
+		if acceptsOWASPHit(accept, hit) {
+			return hit, true, nil
+		}
 	}
 	if protoEnabled && strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") {
 		for _, raw := range bodyTargets {
@@ -230,12 +244,18 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			}
 			normalized := normalizeWithDecode(raw)
 			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
-				return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}, true, nil
+				hit := OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "无 content-type 的不透明编码请求体"}
+				if acceptsOWASPHit(accept, hit) {
+					return hit, true, nil
+				}
 			}
 		}
 	}
 	if pathTravEnabled && strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+")) {
-		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5, Desc: "Cisco translation-table path traversal pattern"}, true, nil
+		hit := OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5, Desc: "Cisco translation-table 路径遍历模式"}
+		if acceptsOWASPHit(accept, hit) {
+			return hit, true, nil
+		}
 	}
 
 	// proto check on body targets is merged into the main loop below
@@ -280,15 +300,21 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		// Folded into the main loop so we don't recompute normalizeWithDecode.
 		if protoEnabled && isBodyTarget {
 			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
-				stopHit, hasStop = OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "opaque encoded body without content-type"}, true
-				return false
+				hit := OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "无 content-type 的不透明编码请求体"}
+				if acceptsOWASPHit(accept, hit) {
+					stopHit, hasStop = hit, true
+					return false
+				}
 			}
 		}
 
 		if deserialEnabled && (strings.Contains(raw, "%ac%ed") || strings.Contains(raw, "%AC%ED") ||
 			strings.Contains(raw, "aced0005") || strings.Contains(raw, "ACED0005")) {
-			stopHit, hasStop = OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java serialization magic bytes (URL-encoded)"}, true
-			return false
+			hit := OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java 序列化魔数（URL 编码）"}
+			if acceptsOWASPHit(accept, hit) {
+				stopHit, hasStop = hit, true
+				return false
+			}
 		}
 
 		if crlfEnabled && (strings.Contains(raw, "%0d") || strings.Contains(raw, "%0D") ||
@@ -301,8 +327,10 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			lower := strings.ToLower(urlDec)
 			if hit, ok := checkCRLF(lower, crlfThreshold); ok {
 				if !isCRLFFalsePositive(lower, hit.RuleID) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 		}
@@ -312,21 +340,27 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		}
 		if sqliEnabled && !(isBodyTarget && skipBodySQLi) {
 			if hit, ok := nextSQLiHit(normalized, sqliThreshold); ok {
-				stopHit, hasStop = hit, true
-				return false
+				if acceptsOWASPHit(accept, hit) {
+					stopHit, hasStop = hit, true
+					return false
+				}
 			}
 		}
 		if xssEnabled {
 			if hit, ok := nextXSSHit(normalized, xssThreshold); ok {
 				if !isKnownTelemetryXSSFalsePositive(path, normalized, hit.RuleID, isBodyTarget) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 			if hit, decodedTarget, ok := nextDecodedXSSHit(raw, queryPlusAsSpace, xssThreshold); ok {
 				if !isKnownTelemetryXSSFalsePositive(path, decodedTarget, hit.RuleID, isBodyTarget) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 		}
@@ -336,23 +370,29 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 					return true
 				}
 				if !isCmdInjectionFalsePositive(normalized, hit.RuleID) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 		}
 		if webshellEnabled && !(isBodyTarget && skipBodyWebshell) {
 			if hit, ok := checkWebshell(normalized, webshellThreshold); ok {
 				if !isWebshellFalsePositive(normalized, hit.RuleID) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 		}
 		if revShellEnabled {
 			if hit, ok := checkRevShell(normalized, revShellThreshold); ok {
-				stopHit, hasStop = hit, true
-				return false
+				if acceptsOWASPHit(accept, hit) {
+					stopHit, hasStop = hit, true
+					return false
+				}
 			}
 		}
 		if pathTravEnabled {
@@ -361,76 +401,98 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 					return true
 				}
 				if pathTravThreshold <= 2 || !isPathTravFalsePositive(normalized, hit.RuleID) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 		}
 		if ssrfEnabled && !(isBodyTarget && skipBodySSRF) {
 			if hit, ok := checkSSRF(normalized, ssrfThreshold); ok {
 				if !isSSRFFalsePositive(normalized, hit.RuleID) {
-					hits = append(hits, hit)
+					if acceptsOWASPHit(accept, hit) {
+						hits = append(hits, hit)
+					}
 				}
 			}
 		}
 		if xxeEnabled {
 			if hit, ok := checkXXE(normalized, xxeThreshold); ok {
-				stopHit, hasStop = hit, true
-				return false
+				if acceptsOWASPHit(accept, hit) {
+					stopHit, hasStop = hit, true
+					return false
+				}
 			}
 		}
 		if ldapEnabled {
 			if hit, ok := checkLDAPInjection(normalized, ldapThreshold); ok {
-				hits = append(hits, hit)
+				if acceptsOWASPHit(accept, hit) {
+					hits = append(hits, hit)
+				}
 			}
 		}
 		if nosqliEnabled {
 			if hit, ok := checkNoSQLi(normalized, nosqliThreshold); ok {
 				if !isNoSQLiFalsePositive(normalized, hit.RuleID) {
-					hits = append(hits, hit)
+					if acceptsOWASPHit(accept, hit) {
+						hits = append(hits, hit)
+					}
 				}
 			}
 		}
 		if templateEnabled {
 			if hit, ok := checkTemplateInjection(normalized, templateThreshold); ok {
-				stopHit, hasStop = hit, true
-				return false
+				if acceptsOWASPHit(accept, hit) {
+					stopHit, hasStop = hit, true
+					return false
+				}
 			}
 		}
 		if jndiEnabled {
 			if hit, ok := checkJNDI(normalized, jndiThreshold); ok {
-				stopHit, hasStop = hit, true
-				return false
+				if acceptsOWASPHit(accept, hit) {
+					stopHit, hasStop = hit, true
+					return false
+				}
 			}
 		}
 		if crlfEnabled {
 			if hit, ok := checkCRLF(normalized, crlfThreshold); ok {
 				if !isCRLFFalsePositive(normalized, hit.RuleID) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 		}
 		if exprLangEnabled {
 			if hit, ok := checkExprLang(normalized, exprLangThreshold); ok {
 				if !isELFalsePositive(normalized, hit.RuleID) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 		}
 		if deserialEnabled {
 			if hit, ok := checkDeserialization(normalized, deserialThreshold); ok {
 				if !isDeserFalsePositive(normalized, hit.RuleID) {
-					stopHit, hasStop = hit, true
-					return false
+					if acceptsOWASPHit(accept, hit) {
+						stopHit, hasStop = hit, true
+						return false
+					}
 				}
 			}
 		}
 		if graphqlEnabled {
 			if hit, ok := checkGraphQLi(normalized, graphqlThreshold); ok {
-				stopHit, hasStop = hit, true
-				return false
+				if acceptsOWASPHit(accept, hit) {
+					stopHit, hasStop = hit, true
+					return false
+				}
 			}
 		}
 		if len(hits) > 0 {
@@ -470,15 +532,19 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 				decodedNorm := normalize(decoded)
 				if sqliEnabled {
 					if hit, ok := nextSQLiHit(decodedNorm, sqliThreshold); ok {
-						deepHit, hasDeep = hit, true
-						return false
+						if acceptsOWASPHit(accept, hit) {
+							deepHit, hasDeep = hit, true
+							return false
+						}
 					}
 				}
 				if xssEnabled {
 					if hit, ok := nextXSSHit(decodedNorm, xssThreshold); ok {
 						if !isKnownTelemetryXSSFalsePositive(path, decodedNorm, hit.RuleID, true) {
-							deepHit, hasDeep = hit, true
-							return false
+							if acceptsOWASPHit(accept, hit) {
+								deepHit, hasDeep = hit, true
+								return false
+							}
 						}
 					}
 				}
@@ -488,8 +554,10 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 							return true
 						}
 						if !isCmdInjectionFalsePositive(decodedNorm, hit.RuleID) {
-							deepHit, hasDeep = hit, true
-							return false
+							if acceptsOWASPHit(accept, hit) {
+								deepHit, hasDeep = hit, true
+								return false
+							}
 						}
 					}
 				}
@@ -506,17 +574,23 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 
 	if protoEnabled {
 		if hit, ok := checkProtocolViolation(headers, protoThreshold); ok {
-			hits = append(hits, hit)
+			if acceptsOWASPHit(accept, hit) {
+				hits = append(hits, hit)
+			}
 		}
 	}
 	if fileUploadEnabled {
 		if hit, ok := checkPathFileUpload(path); ok {
-			hits = append(hits, hit)
+			if acceptsOWASPHit(accept, hit) {
+				hits = append(hits, hit)
+			}
 		}
 	}
 	if pathTravEnabled {
 		if hit, ok := checkDangerousPath(path); ok {
-			hits = append(hits, hit)
+			if acceptsOWASPHit(accept, hit) {
+				hits = append(hits, hit)
+			}
 		}
 	}
 	if len(hits) == 0 {
@@ -570,12 +644,12 @@ func checkRawMultipartFilenames(body []byte) (OWASPHit, bool) {
 		// Null byte injection in filename (e.g. shell.php\x00.jpg)
 		if strings.Contains(filename, "\x00") || strings.Contains(lower, "%00") {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:001", Score: 6,
-				Desc: "null byte in filename"}, true
+				Desc: "文件名中包含空字节"}, true
 		}
 		// Path traversal in filename
 		if strings.Contains(lower, "../") || strings.Contains(lower, "..\\") {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:006", Score: 6,
-				Desc: "path traversal in filename"}, true
+				Desc: "文件名中包含路径遍历"}, true
 		}
 		// Normalize spaces and suffix separators used to disguise executable extensions.
 		normalized := normalizeUploadFilename(lower)
@@ -585,12 +659,12 @@ func checkRawMultipartFilenames(body []byte) (OWASPHit, bool) {
 			secondExt := filepath.Ext(withoutExt)
 			if secondExt != "" && dangerousExtensions[secondExt] {
 				return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:002", Score: 5,
-					Desc: "double extension upload: " + secondExt + ext}, true
+					Desc: "双扩展名上传：" + secondExt + ext}, true
 			}
 		}
 		if dangerousExtensions[ext] {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:003", Score: 5,
-				Desc: "dangerous file extension: " + ext}, true
+				Desc: "危险文件扩展名：" + ext}, true
 		}
 	}
 	return OWASPHit{}, false
@@ -633,11 +707,11 @@ func checkPathFileUpload(path string) (OWASPHit, bool) {
 	secondExt := filepath.Ext(withoutExt)
 	if secondExt != "" && dangerousExtensions[secondExt] && webExecutableExtensions[secondExt] {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:002", Score: 5,
-			Desc: "double extension in path: " + secondExt + ext}, true
+			Desc: "路径中的双扩展名：" + secondExt + ext}, true
 	}
 	if strings.Contains(lower, "\x00") || strings.Contains(lower, "%00") {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:001", Score: 6,
-			Desc: "null byte in path filename"}, true
+			Desc: "路径文件名中包含空字节"}, true
 	}
 	return OWASPHit{}, false
 }
@@ -648,83 +722,83 @@ func checkDangerousPath(path string) (OWASPHit, bool) {
 	// F5 BIG-IP RCE (CVE-2020-5902, CVE-2022-1388)
 	if containsASCIIFold(path, "/mgmt/tm/util/bash") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:001", Score: 6,
-			Desc: "F5 BIG-IP RCE endpoint"}, true
+			Desc: "F5 BIG-IP 远程代码执行端点"}, true
 	}
 	// Liferay JSONWS deserialization (CVE-2020-7961)
 	if containsASCIIFold(path, "/api/jsonws/invoke") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:path:002", Score: 6,
-			Desc: "Liferay JSONWS deserialization endpoint"}, true
+			Desc: "Liferay JSONWS 反序列化端点"}, true
 	}
 	// Apache OFBiz webtools RCE (CVE-2023-49070, CVE-2023-51467)
 	if containsASCIIFold(path, "/webtools/control/xmlrpc") ||
 		containsASCIIFold(path, "/webtools/control/soapservice") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:path:004", Score: 6,
-			Desc: "Apache OFBiz webtools RCE endpoint"}, true
+			Desc: "Apache OFBiz webtools 远程代码执行端点"}, true
 	}
 	// Atlassian Confluence OGNL injection (CVE-2021-26084, CVE-2022-26134)
 	if containsASCIIFold(path, "/rest/tinymce/1/macro/preview") {
 		return OWASPHit{Category: CatExprLang, RuleID: "owasp:path:005", Score: 6,
-			Desc: "Confluence OGNL injection endpoint"}, true
+			Desc: "Confluence OGNL 注入端点"}, true
 	}
 	// Cisco ASA path traversal (CVE-2020-3452)
 	if containsASCIIFold(path, "+cscot+/") || containsASCIIFold(path, "+cscoe+/") || containsASCIIFold(path, "%2bcscot%2b/") || containsASCIIFold(path, "%2bcscoe%2b/") {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:006", Score: 5,
-			Desc: "Cisco ASA path traversal"}, true
+			Desc: "Cisco ASA 路径遍历"}, true
 	}
 	// ThinkPHP RCE (invokefunction)
 	if containsASCIIFold(path, "/think") && containsASCIIFold(path, "invokefunction") {
 		return OWASPHit{Category: CatWebshell, RuleID: "owasp:path:007", Score: 6,
-			Desc: "ThinkPHP invokefunction RCE"}, true
+			Desc: "ThinkPHP invokefunction 远程代码执行"}, true
 	}
 	// Atlassian gadgets makeRequest SSRF (CVE-2019-3396 and similar)
 	if containsASCIIFold(path, "/gadgets/makerequest") {
 		return OWASPHit{Category: CatSSRF, RuleID: "owasp:path:008", Score: 5,
-			Desc: "Atlassian gadgets SSRF endpoint"}, true
+			Desc: "Atlassian gadgets SSRF 端点"}, true
 	}
 	// Nexus Repository Manager RCE
 	if containsASCIIFold(path, "coreui_user") || containsASCIIFold(path, "coreui_component") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:009", Score: 5,
-			Desc: "Nexus Repository Manager RCE"}, true
+			Desc: "Nexus Repository Manager 远程代码执行"}, true
 	}
 	// Coremail config leak
 	if containsASCIIFold(path, "/mailsms/") {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:010", Score: 5,
-			Desc: "Coremail config leak"}, true
+			Desc: "Coremail 配置泄露"}, true
 	}
 	if containsASCIIFold(path, "/.git/") || (len(path) >= 5 && equalASCIIFold(path[len(path)-5:], "/.git")) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:011", Score: 5,
-			Desc: ".git directory access"}, true
+			Desc: ".git 目录访问"}, true
 	}
 	if containsASCIIFold(path, "/securityrealm/") && containsASCIIFold(path, "descriptorbyname") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:012", Score: 5,
-			Desc: "Jenkins Script Security RCE"}, true
+			Desc: "Jenkins Script Security 远程代码执行"}, true
 	}
 	if containsASCIIFold(path, "deleteusername") || containsASCIIFold(path, "deleteuserrequestinfobyxml") {
 		return OWASPHit{Category: CatXXE, RuleID: "owasp:path:013", Score: 5,
-			Desc: "OFS XXE endpoint"}, true
+			Desc: "OFS XML 外部实体端点"}, true
 	}
 	// Semicolon path parameter bypass (Tomcat/Spring)
 	if strings.Contains(path, ";") && (containsASCIIFold(path, "swagger") ||
 		containsASCIIFold(path, "actuator") || containsASCIIFold(path, "admin") ||
 		containsASCIIFold(path, "console") || containsASCIIFold(path, "manager")) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:014", Score: 5,
-			Desc: "Semicolon path parameter bypass"}, true
+			Desc: "分号路径参数绕过"}, true
 	}
 	// Joomla API config leak (CVE-2023-23752)
 	if containsASCIIFold(path, "/api/index.php/v1/config/") ||
 		(containsASCIIFold(path, "/api/") && containsASCIIFold(path, "/v1/config/application")) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5,
-			Desc: "Joomla API config information leak"}, true
+			Desc: "Joomla API 配置信息泄露"}, true
 	}
 	// Nexus Repository Manager RCE
 	if containsASCIIFold(path, "/service/rest/") && containsASCIIFold(path, "/repositories/") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:016", Score: 5,
-			Desc: "Nexus Repository Manager API"}, true
+			Desc: "Nexus Repository Manager API 访问"}, true
 	}
 	// Service extdirect RCE
 	if containsASCIIFold(path, "/service/extdirect") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:017", Score: 5,
-			Desc: "ExtDirect RCE endpoint"}, true
+			Desc: "ExtDirect 远程代码执行端点"}, true
 	}
 	return OWASPHit{}, false
 }
@@ -2591,8 +2665,6 @@ func isBase64AlphaNum(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
-// ── Performance: fast pre-filter ──
-
 func needsDecoding(s string) bool {
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
@@ -2835,7 +2907,6 @@ func hasSuspiciousKeywords(s string) bool {
 		strings.Contains(s, "benchmark")
 }
 
-// ── Category-level fast keyword pre-filters ──
 // These run BEFORE the regex battery to skip entire categories when the
 // normalized string contains no plausible indicator for that attack type.
 // The normalized string is already lowercase, so all keywords are lowercase.
@@ -3139,8 +3210,6 @@ func hasPathTravIndicator(s string) bool {
 		strings.Contains(s, "web-inf") ||
 		strings.Contains(s, "meta-inf")
 }
-
-// ── Context-aware false positive suppression ──
 
 // isSQLiFalsePositive checks if a SQLi hit is actually a benign pattern.
 // This reduces noise from common URL parameters, natural language, and framework artifacts.
@@ -4401,8 +4470,6 @@ var sqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`%25(27|22|3[bB]|2[dD]2[dD])`), 5, "owasp:sqli:054", "%25"},
 }
 
-// ── Webshell ──
-
 var webshellPatterns = []owaspPattern{
 	{regexp.MustCompile(`(eval|assert|system|exec|shell_exec|passthru|popen|proc_open)\s*\(`), 4, "owasp:webshell:001", ""},
 	{regexp.MustCompile(`base64_decode\s*\(`), 3, "owasp:webshell:002", "base64_decode"},
@@ -4467,14 +4534,12 @@ func checkWebshell(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatWebshell, RuleID: best, Score: total, Desc: "webshell/code execution signals"}, true
+				return OWASPHit{Category: CatWebshell, RuleID: best, Score: total, Desc: "WebShell/代码执行特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── Reverse Shell ──
 
 var revshellPatterns = []owaspPattern{
 	{regexp.MustCompile(`bash\s+-i\s+>&?\s*/dev/tcp`), 6, "owasp:revshell:001", "/dev/tcp"},
@@ -4511,14 +4576,12 @@ func checkRevShell(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatRevShell, RuleID: best, Score: total, Desc: "reverse shell / remote execution signals"}, true
+				return OWASPHit{Category: CatRevShell, RuleID: best, Score: total, Desc: "反弹 Shell / 远程执行特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── XSS ──
 
 var xssPatterns = []owaspPattern{
 	{regexp.MustCompile(`<script[\s>]`), 5, "owasp:xss:001", "<script"},
@@ -4615,7 +4678,7 @@ func checkXSS(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatXSS, RuleID: best, Score: total, Desc: "XSS signals"}, true
+				return OWASPHit{Category: CatXSS, RuleID: best, Score: total, Desc: "XSS 特征"}, true
 			}
 		}
 	}
@@ -4994,10 +5057,10 @@ func isASCIIDigitByte(b byte) bool {
 
 func nextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
 	if strings.Contains(normalized, "unionselect") {
-		return OWASPHit{Category: CatSQLi, RuleID: "owasp:sqli:001", Score: 5, Desc: "SQL injection signals"}, true
+		return OWASPHit{Category: CatSQLi, RuleID: "owasp:sqli:001", Score: 5, Desc: "SQL 注入特征"}, true
 	}
 	if strings.Contains(normalized, "and1=1") || strings.Contains(normalized, "or1=1") {
-		return OWASPHit{Category: CatSQLi, RuleID: "owasp:sqli:010", Score: 5, Desc: "SQL injection signals"}, true
+		return OWASPHit{Category: CatSQLi, RuleID: "owasp:sqli:010", Score: 5, Desc: "SQL 注入特征"}, true
 	}
 	if !hasSQLiIndicator(normalized) {
 		return OWASPHit{}, false
@@ -5031,7 +5094,7 @@ func nextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
 		if total < threshold {
 			continue
 		}
-		hit := OWASPHit{Category: CatSQLi, RuleID: p.id, Score: total, Desc: "SQL injection signals"}
+		hit := OWASPHit{Category: CatSQLi, RuleID: p.id, Score: total, Desc: "SQL 注入特征"}
 		if isSQLiFalsePositive(normalized, hit.RuleID) {
 			continue
 		}
@@ -5104,7 +5167,7 @@ func nextXSSHit(normalized string, threshold int) (OWASPHit, bool) {
 		if total < threshold {
 			continue
 		}
-		hit := OWASPHit{Category: CatXSS, RuleID: p.id, Score: total, Desc: "XSS signals"}
+		hit := OWASPHit{Category: CatXSS, RuleID: p.id, Score: total, Desc: "XSS 特征"}
 		if hit.RuleID == "owasp:xss:002" && isXSSHandlerFunctionRef(normalized) {
 			continue
 		}
@@ -5186,7 +5249,7 @@ func checkPathTraversal(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatPathTrav, RuleID: best, Score: total, Desc: "path traversal signals"}, true
+				return OWASPHit{Category: CatPathTrav, RuleID: best, Score: total, Desc: "路径遍历特征"}, true
 			}
 		}
 	}

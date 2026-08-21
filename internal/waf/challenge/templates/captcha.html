@@ -38,7 +38,7 @@ input[type=text]:focus{border-color:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166
 {{else if .IsSlide}}
 <div class="captcha-stack"><img src="{{.MasterImg}}" alt="CAPTCHA"><img id="slide-thumb" class="thumb slide-thumb" src="{{.ThumbImg}}" alt="slider"><input type="range" min="0" max="{{.SlideWidth}}" value="0" id="slide-range"></div>
 {{else if .IsRotate}}
-<div class="captcha-stack rotate-captcha"><img id="cap-img" src="{{.MasterImg}}" alt="CAPTCHA"><img class="thumb" src="{{.ThumbImg}}" alt="target"><input type="range" min="0" max="360" value="0" id="rotate-range"></div>
+<div class="captcha-stack rotate-captcha"><img src="{{.MasterImg}}" alt="CAPTCHA"><img id="rotate-thumb" class="thumb" src="{{.ThumbImg}}" alt="target"><input type="range" min="0" max="360" value="0" id="rotate-range"></div>
 {{else}}
 <img src="{{.MasterImg}}" alt="CAPTCHA">
 {{end}}
@@ -82,9 +82,10 @@ if(type==='slide'&&slide){
   slide.addEventListener('input',function(){answer.value=JSON.stringify({x:Number(slide.value)});if(thumb){thumb.style.transform='translateX('+slide.value+'px)';}});
 }
 var rotate=document.getElementById('rotate-range');
-if(type==='rotate'&&rotate&&img){
+var rotateThumb=document.getElementById('rotate-thumb');
+if(type==='rotate'&&rotate&&rotateThumb){
   answer.type='hidden';
-  rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});img.style.transform='rotate('+rotate.value+'deg)';});
+  rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});rotateThumb.style.transform='rotate('+rotate.value+'deg)';});
 }
 var capEnv=document.getElementById('cap-env');
 var capForm=answer&&answer.form;

@@ -80,6 +80,9 @@ func (r *IPReputation) ConfigureAutoBanAction(action string) {
 		r.autoBanAction.Store("drop")
 	case "intercept", "":
 		r.autoBanAction.Store("intercept")
+	default:
+		// 不支持的持久化动作不能沿用旧动作，统一回退到安全的拦截。
+		r.autoBanAction.Store("intercept")
 	}
 }
 
@@ -125,8 +128,13 @@ func (r *IPReputation) Check(ip net.IP) IPDecision {
 	return IPDecision{Allowed: true}
 }
 
+// IsWhitelisted reports whether the IP matches an active global whitelist entry.
+func (r *IPReputation) IsWhitelisted(ip net.IP) bool {
+	return ip != nil && r.Check(ip).Category == "whitelist"
+}
+
 func (r *IPReputation) RecordViolation(ip net.IP) bool {
-	if ip == nil || !r.autoBanEnabled.Load() {
+	if ip == nil || !r.autoBanEnabled.Load() || r.IsWhitelisted(ip) {
 		return false
 	}
 	key := ip.String()

@@ -17,11 +17,19 @@ type RequestCtx struct {
 	ClientIP  net.IP
 	Method    string
 	Path      string
-	RawQuery  string
-	Host      string
-	UserAgent string
-	SiteID    uint
-	Headers   map[string]string
+	// OriginalPath retains the immutable inbound path for phase skip matching after request-stage plugins mutate Path.
+	OriginalPath string
+	RawQuery     string
+	Host         string
+	UserAgent    string
+
+	// ChallengeIdentity* retain the pre-mutation identity used to validate
+	// challenge pass cookies after request-stage plugins mutate the request view.
+	ChallengeIdentityCaptured  bool
+	ChallengeIdentityUserAgent string
+	ChallengeIdentityCookie    string
+	SiteID                     uint
+	Headers                    map[string]string
 	// HeadersLowercase reports that every key in Headers is already lowercase.
 	HeadersLowercase bool
 	HeaderKeys       []string // Ordered header keys for fingerprinting
@@ -31,6 +39,9 @@ type RequestCtx struct {
 
 	// AntiReplayTTL is per-site nonce window in seconds (0 = engine default).
 	AntiReplayTTL int
+	// AntiReplayConsumedNonce records a Cookie nonce already validated by the handler.
+	// The pipeline skips only the same X-Nonce value; a different header nonce is still checked.
+	AntiReplayConsumedNonce string
 
 	QueryParams map[string]string
 	QueryValues map[string][]string
@@ -65,6 +76,24 @@ type RequestCtx struct {
 	derivedHeaderDone   bool
 	derivedCipherSuites string
 	derivedCipherDone   bool
+}
+
+/**
+ * ResetMutationCaches clears request-derived values after a pre-pipeline mutation.
+ *
+ * @return void
+ */
+func (ctx *RequestCtx) ResetMutationCaches() {
+	if ctx == nil {
+		return
+	}
+	ctx.BodyTargets = nil
+	ctx.BodyTargetsDone = false
+	ctx.matcherHeaders = nil
+	ctx.matcherHeadersReady = false
+	ctx.matcherHeadersAliased = false
+	ctx.derivedHeaderOrder = ""
+	ctx.derivedHeaderDone = false
 }
 
 // ContextOrBackground 返回请求上下文；对直接构造 RequestCtx 的调用方回退到 Background。

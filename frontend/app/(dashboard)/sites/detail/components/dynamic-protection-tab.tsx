@@ -179,7 +179,7 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
       dynamic_js_enabled: fromTriState(js),
       dynamic_js_mode: js === "on" ? jsMode : "",
       dynamic_js_paths:
-        js === "on" && jsMode === "paths" ? jsPaths : "",
+        js === "on" && jsMode === "paths" ? JSON.stringify(jsPaths) : "",
       dynamic_decrypt_cache_ttl: ttlValue,
     }
     try {

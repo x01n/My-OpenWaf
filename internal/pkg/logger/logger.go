@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-// ── color codes ──
-
 const (
 	reset   = "\033[0m"
 	red     = "\033[31m"
@@ -25,8 +23,6 @@ const (
 	white   = "\033[97m"
 	bold    = "\033[1m"
 )
-
-// ── global singleton ──
 
 var (
 	initOnce      sync.Once
@@ -187,8 +183,6 @@ func useColor() bool {
 	}
 	return false
 }
-
-// ── pretty handler ──
 
 type prettyHandler struct {
 	level slog.Level

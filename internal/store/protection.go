@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 )
 
@@ -57,6 +58,11 @@ type ProtectionConfig struct {
 
 	OWASPRulesConfig string `json:"owasp_rules_config" gorm:"type:text"`
 
+	// SkipPathByPhase 按 pipeline phase 名映射到跳过路径列表，以 JSON 文本存储。
+	// 键必须是 phase 的 Name() 返回值，合法键集合见 SkipPathPhaseKeys。
+	// 与上面两个 TEXT 字段同理不设 DB 默认值（MySQL Error 1101）。
+	SkipPathByPhase string `json:"skip_path_by_phase,omitempty" gorm:"column:skip_path_by_phase;type:text"`
+
 	LoginMinPasswordLength int `json:"login_min_password_length"`
 	LoginMaxAttempts       int `json:"login_max_attempts"`
 	LoginLockoutMinutes    int `json:"login_lockout_minutes"`
@@ -65,6 +71,8 @@ type ProtectionConfig struct {
 	CaptchaType    string `json:"captcha_type"`
 	CaptchaTimeout int    `json:"captcha_timeout"`
 	CaptchaPassTTL int    `json:"captcha_pass_ttl"`
+
+	AntiReplayEnabled bool `json:"anti_replay_enabled"`
 
 	ShieldEnabled           bool `json:"shield_enabled"`
 	ShieldDifficulty        int  `json:"shield_difficulty"`
@@ -153,6 +161,9 @@ func DefaultProtectionConfig() ProtectionConfig {
 	}
 }
 
+// ValidateProtectionCaptchaType rejects unsupported global CAPTCHA values.
+// IsValidCaptchaType reports whether a persisted global or rule-level CAPTCHA type is supported.
+// An empty value means use the runtime default.
 func normalizeProtectionSensitivityLevel(level string) string {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "off", "none":
@@ -268,6 +279,95 @@ func (p *ProtectionConfig) SetOWASPRulesConfig(config map[string]interface{}) {
 		return
 	}
 	p.OWASPRulesConfig = string(b)
+}
+
+// skipPathPhaseKeys 是允许配置路径跳过的 phase 名集合。
+// 每个键逐字符取自对应 phase 的 Name() 返回值；signature 与 custom 不在其中，
+// 因为它们是用户自建规则，直接停用规则本身即可，无需再加一层跳过。
+var skipPathPhaseKeys = map[string]struct{}{
+	"ip_reputation": {},
+	"anti_replay":   {},
+	"acl":           {},
+	"lua_pre":       {},
+	"owasp_default": {},
+	"cve_detection": {},
+	"bot_detection": {},
+	"browser_sign":  {},
+	"rate_limit":    {},
+}
+
+// SkipPathPhaseKeys 返回允许配置路径跳过的 phase 名，按字典序排列，供校验与前端枚举使用。
+func SkipPathPhaseKeys() []string {
+	out := make([]string, 0, len(skipPathPhaseKeys))
+	for key := range skipPathPhaseKeys {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// IsSkipPathPhaseKey 报告给定 phase 名是否允许配置路径跳过。
+func IsSkipPathPhaseKey(phase string) bool {
+	_, ok := skipPathPhaseKeys[phase]
+	return ok
+}
+
+/**
+ * normalizeSkipPathByPhase 丢弃未知 phase 键与空路径条目。
+ *
+ * 未知键静默丢弃而非报错：跨版本降级时旧进程读到新版本写入的键不应整体失效。
+ * 空条目必须剔除，否则会被 MatchPathList 忽略却仍占据键位，让 UI 误显示"已配置"。
+ */
+func normalizeSkipPathByPhase(m map[string][]string) map[string][]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(m))
+	for phase, paths := range m {
+		if !IsSkipPathPhaseKey(phase) {
+			continue
+		}
+		cleaned := make([]string, 0, len(paths))
+		for _, p := range paths {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				cleaned = append(cleaned, trimmed)
+			}
+		}
+		if len(cleaned) > 0 {
+			out[phase] = cleaned
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// GetSkipPathByPhase parses the SkipPathByPhase JSON field into a map.
+func (p *ProtectionConfig) GetSkipPathByPhase() map[string][]string {
+	if p.SkipPathByPhase == "" || p.SkipPathByPhase == "{}" {
+		return nil
+	}
+	var m map[string][]string
+	if err := json.Unmarshal([]byte(p.SkipPathByPhase), &m); err != nil {
+		return nil
+	}
+	return normalizeSkipPathByPhase(m)
+}
+
+// SetSkipPathByPhase serialises the map into the SkipPathByPhase JSON field.
+func (p *ProtectionConfig) SetSkipPathByPhase(m map[string][]string) {
+	m = normalizeSkipPathByPhase(m)
+	if len(m) == 0 {
+		p.SkipPathByPhase = "{}"
+		return
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		p.SkipPathByPhase = "{}"
+		return
+	}
+	p.SkipPathByPhase = string(b)
 }
 
 // EscalationStepDef is the JSON-friendly step definition stored in ProtectionConfig.

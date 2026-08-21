@@ -23,12 +23,12 @@ const bcryptCost = 10
 
 // SaveAccessConfigReq 保存站点访问控制配置的请求体。
 type SaveAccessConfigReq struct {
-	Enabled bool `json:"enabled"`
+	Enabled *bool `json:"enabled,omitempty"`
 	// SharedPassword 共享密码明文，非空时以 bcrypt 哈希后覆盖存储；空字符串表示保持原密码不变。
 	SharedPassword string `json:"shared_password,omitempty"`
 	// ClearSharedPassword 为 true 时清空已保存的共享密码。
 	ClearSharedPassword bool `json:"clear_shared_password,omitempty"`
-	SessionTTL          int  `json:"session_ttl"`
+	SessionTTL          *int `json:"session_ttl,omitempty"`
 }
 
 // accessConfigResp 站点访问控制配置的脱敏响应体，不返回共享密码哈希。
@@ -98,7 +98,7 @@ func SaveAccessConfig(repo *repository.AccessControlRepo, reload func() error) a
 		}
 		var req SaveAccessConfigReq
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
@@ -112,8 +112,12 @@ func SaveAccessConfig(repo *repository.AccessControlRepo, reload func() error) a
 			cfg = &store.SiteAccessConfig{SiteID: siteID}
 		}
 
-		cfg.Enabled = req.Enabled
-		cfg.SessionTTL = req.SessionTTL
+		if req.Enabled != nil {
+			cfg.Enabled = *req.Enabled
+		}
+		if req.SessionTTL != nil {
+			cfg.SessionTTL = *req.SessionTTL
+		}
 		if cfg.SessionTTL <= 0 {
 			cfg.SessionTTL = defaultSessionTTL
 		}

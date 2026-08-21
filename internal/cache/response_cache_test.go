@@ -45,6 +45,63 @@ func TestResponseCacheBasic(t *testing.T) {
 	}
 }
 
+func TestResponseCacheClear(t *testing.T) {
+	rc := NewResponseCache(10, 60)
+	defer rc.Close()
+
+	key := CacheKey("GET", "example.com", "/", "")
+	rc.Set(key, 200, "text/plain", []byte("body"), 60, nil)
+	rc.Clear()
+
+	if entry := rc.Lookup(key); entry != nil {
+		t.Fatal("expected Lookup miss after Clear")
+	}
+	if entries, size := rc.Stats(); entries != 0 || size != 0 {
+		t.Fatalf("stats after Clear = entries %d size %d", entries, size)
+	}
+}
+
+func TestResponseCacheClearConcurrentSet(t *testing.T) {
+	rc := NewResponseCache(10, 60)
+	defer rc.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			rc.Set(CacheKey("GET", "example.com", "/", strconv.Itoa(i)), 200, "text/plain", []byte("body"), 60, nil)
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		rc.Clear()
+	}
+	<-done
+}
+
+func TestResponseCacheClearRejectsOldGeneration(t *testing.T) {
+	rc := NewResponseCache(10, 60)
+	defer rc.Close()
+
+	key := CacheKey("GET", "example.com", "/epoch", "")
+	oldGeneration := rc.Generation()
+	rc.Set(key, 200, "text/plain", []byte("old"), 60, nil)
+	rc.Clear()
+
+	if ok := rc.SetIfGeneration(oldGeneration, key, 200, "text/plain", []byte("stale"), 60, nil); ok {
+		t.Fatal("expected stale generation write to be rejected")
+	}
+	if entry := rc.Lookup(key); entry != nil {
+		t.Fatalf("stale entry repopulated cache: %q", entry.Body)
+	}
+
+	if ok := rc.SetIfGeneration(rc.Generation(), key, 200, "text/plain", []byte("current"), 60, nil); !ok {
+		t.Fatal("expected current generation write to succeed")
+	}
+	if entry := rc.Get(key); entry == nil || string(entry.Body) != "current" {
+		t.Fatalf("current generation entry = %#v", entry)
+	}
+}
+
 func TestResponseCacheExpiry(t *testing.T) {
 	rc := NewResponseCache(10, 1)
 	defer rc.Close()

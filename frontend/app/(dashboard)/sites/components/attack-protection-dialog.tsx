@@ -31,10 +31,6 @@ import {
 import { useOwaspRules, useOwaspBatchUpdate } from "@/hooks/use-api"
 import { cn } from "@/lib/utils"
 
-// ============================================================
-// 类型定义
-// ============================================================
-
 interface OwaspRule {
   id: string
   category: string
@@ -61,10 +57,6 @@ interface AttackModule {
   descKey: string
   icon: React.ElementType
 }
-
-// ============================================================
-// 常量
-// ============================================================
 
 const MODULES: AttackModule[] = [
   {
@@ -148,9 +140,6 @@ const MODE_OPTIONS: { value: ModuleMode; labelKey: string }[] = [
 
 const GLOBAL_DEFAULT_MODE: ModuleMode = "balanced"
 
-// ============================================================
-// 辅助函数
-// ============================================================
 
 function inferMode(rules: OwaspRule[] | undefined): ModuleMode {
   if (!rules || rules.length === 0) return GLOBAL_DEFAULT_MODE
@@ -200,9 +189,6 @@ function getModeBadgeVariant(
   }
 }
 
-// ============================================================
-// 组件
-// ============================================================
 
 interface AttackProtectionDialogProps {
   open: boolean

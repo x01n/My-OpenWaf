@@ -2,6 +2,7 @@ package protect
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -58,6 +59,37 @@ func GetCaptchaConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	}
 }
 
+// validateChallengeConfig validates challenge fields that are part of an update payload.
+func validateChallengeConfig(cfg store.ProtectionConfig, present map[string]bool) error {
+	if present["captcha_type"] {
+		if err := shared.ValidateGlobalCaptchaType(cfg.CaptchaType); err != nil {
+			return err
+		}
+	}
+	if present["captcha_timeout"] && cfg.CaptchaTimeout <= 0 {
+		return fmt.Errorf("captcha_timeout must be greater than 0")
+	}
+	if present["captcha_pass_ttl"] && cfg.CaptchaPassTTL <= 0 {
+		return fmt.Errorf("captcha_pass_ttl must be greater than 0")
+	}
+	if present["shield_difficulty"] && (cfg.ShieldDifficulty < 1 || cfg.ShieldDifficulty > 7) {
+		return fmt.Errorf("shield_difficulty must be between 1 and 7")
+	}
+	if present["shield_timeout_secs"] && cfg.ShieldTimeoutSecs <= 0 {
+		return fmt.Errorf("shield_timeout_secs must be greater than 0")
+	}
+	if present["shield_auto_start_delay"] && cfg.ShieldAutoStartDelay <= 0 {
+		return fmt.Errorf("shield_auto_start_delay must be greater than 0")
+	}
+	if present["shield_max_retries"] && cfg.ShieldMaxRetries <= 0 {
+		return fmt.Errorf("shield_max_retries must be greater than 0")
+	}
+	if present["shield_env_strictness"] && (cfg.ShieldEnvStrictness < 0 || cfg.ShieldEnvStrictness > 2) {
+		return fmt.Errorf("shield_env_strictness must be one of: 0, 1, 2")
+	}
+	return nil
+}
+
 func buildCaptchaConfigResponse(cfg store.ProtectionConfig) captchaConfigResponse {
 	return captchaConfigResponse{
 		CaptchaEnabled:          cfg.CaptchaEnabled,
@@ -84,18 +116,19 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req captchaConfigRequest
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
-		validTypes := map[string]bool{"math": true, "click": true, "slide": true, "rotate": true}
-		if req.CaptchaType != "" && !validTypes[req.CaptchaType] {
-			c.JSON(400, map[string]string{"error": "captcha_type must be one of: math, click, slide, rotate"})
-			return
-		}
-		if req.ShieldEnvStrictness != nil && (*req.ShieldEnvStrictness < 0 || *req.ShieldEnvStrictness > 2) {
-			c.JSON(400, map[string]string{"error": "shield_env_strictness must be one of: 0, 1, 2"})
-			return
+		present := map[string]bool{
+			"captcha_type":            req.CaptchaType != "",
+			"captcha_timeout":         req.CaptchaTimeout != nil,
+			"captcha_pass_ttl":        req.CaptchaPassTTL != nil,
+			"shield_difficulty":       req.ShieldDifficulty != nil,
+			"shield_timeout_secs":     req.ShieldTimeoutSecs != nil,
+			"shield_auto_start_delay": req.ShieldAutoStartDelay != nil,
+			"shield_max_retries":      req.ShieldMaxRetries != nil,
+			"shield_env_strictness":   req.ShieldEnvStrictness != nil,
 		}
 
 		cfg := shared.LoadProtectionConfig(repo)
@@ -105,29 +138,25 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 		if req.CaptchaType != "" {
 			cfg.CaptchaType = req.CaptchaType
 		}
-		if req.CaptchaTimeout != nil && *req.CaptchaTimeout > 0 {
+		if req.CaptchaTimeout != nil {
 			cfg.CaptchaTimeout = *req.CaptchaTimeout
 		}
-		if req.CaptchaPassTTL != nil && *req.CaptchaPassTTL > 0 {
+		if req.CaptchaPassTTL != nil {
 			cfg.CaptchaPassTTL = *req.CaptchaPassTTL
 		}
 		if req.ShieldEnabled != nil {
 			cfg.ShieldEnabled = *req.ShieldEnabled
 		}
 		if req.ShieldDifficulty != nil {
-			if *req.ShieldDifficulty < 1 || *req.ShieldDifficulty > 7 {
-				c.JSON(400, map[string]string{"error": "shield_difficulty must be between 1 and 7"})
-				return
-			}
 			cfg.ShieldDifficulty = *req.ShieldDifficulty
 		}
-		if req.ShieldTimeoutSecs != nil && *req.ShieldTimeoutSecs > 0 {
+		if req.ShieldTimeoutSecs != nil {
 			cfg.ShieldTimeoutSecs = *req.ShieldTimeoutSecs
 		}
-		if req.ShieldAutoStartDelay != nil && *req.ShieldAutoStartDelay >= 0 {
+		if req.ShieldAutoStartDelay != nil {
 			cfg.ShieldAutoStartDelay = *req.ShieldAutoStartDelay
 		}
-		if req.ShieldMaxRetries != nil && *req.ShieldMaxRetries > 0 {
+		if req.ShieldMaxRetries != nil {
 			cfg.ShieldMaxRetries = *req.ShieldMaxRetries
 		}
 		if req.ShieldEnvStrictness != nil {
@@ -150,6 +179,10 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 		}
 		if req.ShieldEnableDevTools != nil {
 			cfg.ShieldEnableDevTools = *req.ShieldEnableDevTools
+		}
+		if err := validateChallengeConfig(cfg, present); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
 		}
 
 		if err := repo.Transaction(func(txRepo *repository.SystemSettingsRepo) error {

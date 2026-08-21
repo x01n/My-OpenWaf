@@ -5,7 +5,14 @@ import (
 	"time"
 )
 
-// DryRunResult 是试运行的结果。
+func dryRunKVAvailable(ctx context.Context, kv KVBackend) bool {
+	if kv == nil {
+		return false
+	}
+	contextual, ok := kv.(ContextKVBackend)
+	return ok && contextual.AvailableContext(ctx)
+}
+
 type DryRunResult struct {
 	// CompileError 非空表示脚本未通过编译，此时其余字段无意义。
 	CompileError string `json:"compile_error,omitempty"`
@@ -67,14 +74,14 @@ func DryRunNContext(ctx context.Context, stage Stage, source string, req Request
 	}
 	script, err := Compile("dryrun", stage, source)
 	if err != nil {
-		return DryRunBatchResult{CompileError: err.Error(), Iterations: iterations, KVAvailable: kv != nil && kv.Available()}
+		return DryRunBatchResult{CompileError: err.Error(), Iterations: iterations, KVAvailable: dryRunKVAvailable(ctx, kv)}
 	}
 	script.SetTimeout(timeout)
 
 	pool := newVMPool()
 	out := DryRunBatchResult{
 		Iterations:  iterations,
-		KVAvailable: kv != nil && kv.Available(),
+		KVAvailable: dryRunKVAvailable(ctx, kv),
 		Runs:        make([]DryRunResult, 0, iterations),
 	}
 	for i := 0; i < iterations; i++ {

@@ -31,15 +31,19 @@ type BrowserSignTicket struct {
 	ExpiresAt int64
 	TicketMAC string
 	SignKey   string // hex，客户端用于请求 HMAC；由 challengeSecret 派生，短时效
-	EnvKeyHex string // 可选环境指纹加密密钥
+	// EnvKeyHex 是环境指纹 AES-256-GCM 密钥的十六进制编码，由 nonce+siteID 派生。
+	// 非可选：IssueBrowserSignTicket 始终填充，且 VerifyBrowserSignHeaders 在
+	// X-OWAF-BS-Env 缺失时直接判定 "missing browser env fingerprint"。
+	EnvKeyHex string
+	EnvAAD    string // 环境指纹加密的 AAD，绑定 nonce 与 siteID，防跨会话重放
 	TTL       int
 	CSPNonce  string // 注入脚本的 CSP nonce
 }
 
 // IssueBrowserSignTicket 签发短时效 nonce+HMAC 票据。
 // siteID 参与 ticket MAC，避免跨站复用（不绑定 Host，兼容站点多域名）。
-// envCheck 仅标记页面是否采集环境指纹；站点签名链路为无状态，环境指纹使用明文 JSON。
-func IssueBrowserSignTicket(siteID uint, host string, ttlSecs int, envCheck bool) BrowserSignTicket {
+// 浏览器签名始终携带以当前 nonce 和 siteID 派生的 AES-256-GCM 环境指纹密文。
+func IssueBrowserSignTicket(siteID uint, ttlSecs int) BrowserSignTicket {
 	if ttlSecs <= 0 {
 		ttlSecs = defaultBrowserSignTTL
 	}
@@ -50,31 +54,24 @@ func IssueBrowserSignTicket(siteID uint, host string, ttlSecs int, envCheck bool
 	_, _ = rand.Read(cspNonceBytes)
 	cspNonce := base64.RawURLEncoding.EncodeToString(cspNonceBytes)
 	exp := time.Now().Add(time.Duration(ttlSecs) * time.Second).Unix()
-	// host 参数保留以兼容调用方；ticket 仅绑定 siteID，避免多 Host 站点注入/校验不一致。
-	_ = host
 	ticketMAC := browserSignTicketMAC(nonce, exp, siteID)
 	signKey := browserSignRequestKey(nonce)
-	envKeyHex := ""
-	if envCheck {
-		// 占位标记：Inject 侧看到非空则启用环境采集（明文）。
-		envKeyHex = "1"
-	}
+	envKey := browserSignEnvKey(nonce, siteID)
 	return BrowserSignTicket{
 		Nonce:     nonce,
 		ExpiresAt: exp,
 		TicketMAC: ticketMAC,
 		SignKey:   hex.EncodeToString(signKey),
-		EnvKeyHex: envKeyHex,
+		EnvKeyHex: EnvSessionKeyHex(envKey),
+		EnvAAD:    browserSignEnvAAD(nonce, siteID),
 		TTL:       ttlSecs,
 		CSPNonce:  cspNonce,
 	}
 }
 
-// VerifyBrowserSignHeaders 校验请求头中的浏览器签名。
-// 返回 ok 与原因（失败时）。host 保留兼容调用方，不参与 ticket 校验。
-// query 参与请求 MAC，防止在固定 path 上篡改查询参数绕过。
-func VerifyBrowserSignHeaders(headers map[string]string, method, path, query, host string, siteID uint, now time.Time, envHardFail bool) (bool, string) {
-	_ = host
+// VerifyBrowserSignHeaders 校验请求头中的浏览器签名与加密环境指纹。
+// query 参与请求 MAC，环境密文同样参与 MAC，防止在固定 path 上替换任一值。
+func VerifyBrowserSignHeaders(headers map[string]string, method, path, query string, siteID uint, now time.Time) (bool, string) {
 	nonce, _ := lookupBrowserSignHeader(headers, BrowserSignHeaderNonce)
 	expRaw, _ := lookupBrowserSignHeader(headers, BrowserSignHeaderExp)
 	ticketMAC, _ := lookupBrowserSignHeader(headers, BrowserSignHeaderMAC)
@@ -83,54 +80,47 @@ func VerifyBrowserSignHeaders(headers map[string]string, method, path, query, ho
 	envFP, _ := lookupBrowserSignHeader(headers, BrowserSignHeaderEnv)
 
 	if nonce == "" || expRaw == "" || ticketMAC == "" || tsRaw == "" || reqSig == "" {
-		return false, "missing browser sign headers"
+		return false, "缺少浏览器签名请求头"
+	}
+	if envFP == "" {
+		return false, "缺少浏览器环境指纹"
 	}
 	exp, err := strconv.ParseInt(expRaw, 10, 64)
 	if err != nil || exp <= 0 {
-		return false, "invalid browser sign exp"
+		return false, "浏览器签名有效期字段无效"
 	}
 	ts, err := strconv.ParseInt(tsRaw, 10, 64)
 	if err != nil || ts <= 0 {
-		return false, "invalid browser sign ts"
+		return false, "浏览器签名时间戳字段无效"
 	}
 	nowUnix := now.Unix()
 	if nowUnix > exp {
-		return false, "browser sign ticket expired"
+		return false, "浏览器签名票据已过期"
 	}
 	if abs64(nowUnix-ts) > browserSignSkewSecs {
-		return false, "browser sign timestamp skew"
+		return false, "浏览器签名时间戳偏移超限"
 	}
 	expectedTicket := browserSignTicketMAC(nonce, exp, siteID)
 	if !hmac.Equal([]byte(ticketMAC), []byte(expectedTicket)) {
-		return false, "browser sign ticket mac mismatch"
+		return false, "浏览器签名票据 MAC 校验失败"
 	}
-	expectedReq := browserSignRequestMAC(nonce, method, path, query, ts)
+	expectedReq := browserSignRequestMAC(nonce, method, path, query, ts, envFP)
 	if !hmac.Equal([]byte(reqSig), []byte(expectedReq)) {
-		return false, "browser sign request mac mismatch"
+		return false, "浏览器签名请求 MAC 校验失败"
 	}
-	if envHardFail {
-		if envFP == "" {
-			return false, "missing browser env fingerprint"
-		}
-		// 站点签名链路无会话密钥，环境指纹使用明文 JSON。
-		fp := ParseEnvFingerprint(envFP)
-		if fp == nil {
-			return false, "invalid browser env fingerprint"
-		}
-		if ValidateEnvFingerprint(fp).Score >= 100 {
-			return false, "browser env hard-fail"
-		}
+	fp := DecryptEnvFingerprintWithAAD(envFP, browserSignEnvKey(nonce, siteID), browserSignEnvAAD(nonce, siteID))
+	if fp == nil {
+		return false, "invalid browser env fingerprint"
+	}
+	if ValidateEnvFingerprint(fp).Score >= 100 {
+		return false, "browser env hard-fail"
 	}
 	return true, ""
 }
 
 // BrowserSignInjectScript 生成注入到 HTML 的混淆签名/环境采集脚本。
 func BrowserSignInjectScript(ticket BrowserSignTicket) string {
-	// 站点签名链路不签发服务端会话，环境数据仅作不可信风险信号，不参与授权。
-	envJS := ""
-	if ticket.EnvKeyHex != "" {
-		envJS = EnvCheckJSPlain()
-	}
+	envJS := EnvCheckJSEncrypted(ticket.EnvKeyHex, ticket.EnvAAD)
 	raw := fmt.Sprintf(browserSignJSTemplate,
 		ticket.Nonce,
 		ticket.ExpiresAt,
@@ -151,14 +141,32 @@ func BrowserSignInjectScript(ticket BrowserSignTicket) string {
 	return "<script" + attr + ">" + obfuscateBrowserSignJS(combined) + "</script>"
 }
 
-// InjectBrowserSignIntoHTML 将签名脚本注入 HTML 响应体。
-// 优先插入 </body> 前；否则追加到末尾。
+// InjectBrowserSignIntoHTML 将签名脚本优先注入文档 head，其次 body，最后追加。
 func InjectBrowserSignIntoHTML(html []byte, ticket BrowserSignTicket) []byte {
 	if len(html) == 0 {
 		return html
 	}
 	script := BrowserSignInjectScript(ticket)
 	lower := strings.ToLower(string(html))
+	if idx := strings.LastIndex(lower, "</head>"); idx >= 0 {
+		var b strings.Builder
+		b.Grow(len(html) + len(script) + 1)
+		b.Write(html[:idx])
+		b.WriteString(script)
+		b.Write(html[idx:])
+		return []byte(b.String())
+	}
+	if idx := strings.Index(lower, "<body"); idx >= 0 {
+		if end := strings.IndexByte(lower[idx:], '>'); end >= 0 {
+			end += idx + 1
+			var b strings.Builder
+			b.Grow(len(html) + len(script) + 1)
+			b.Write(html[:end])
+			b.WriteString(script)
+			b.Write(html[end:])
+			return []byte(b.String())
+		}
+	}
 	if idx := strings.LastIndex(lower, "</body>"); idx >= 0 {
 		var b strings.Builder
 		b.Grow(len(html) + len(script) + 1)
@@ -198,21 +206,11 @@ func IsLikelyAPIRequest(method, path string, headers map[string]string) bool {
 		}
 	}
 
-	if ct, ok := lookupBrowserSignHeader(headers, "content-type"); ok {
-		ct = strings.ToLower(ct)
-		if strings.Contains(ct, "application/json") ||
-			strings.Contains(ct, "application/xml") ||
-			strings.Contains(ct, "application/grpc") ||
-			strings.Contains(ct, "application/x-www-form-urlencoded") ||
-			strings.Contains(ct, "multipart/form-data") {
-			return true
-		}
-	}
-	if accept, ok := lookupBrowserSignHeader(headers, "accept"); ok {
-		al := strings.ToLower(accept)
-		if strings.Contains(al, "application/json") && !strings.Contains(al, "text/html") {
-			return true
-		}
+	if strings.Contains(lp, "/api/") ||
+		strings.HasSuffix(lp, "/api") ||
+		strings.HasSuffix(lp, ".json") ||
+		strings.Contains(lp, "/graphql") {
+		return true
 	}
 	if xrw, ok := lookupBrowserSignHeader(headers, "x-requested-with"); ok {
 		if strings.EqualFold(strings.TrimSpace(xrw), "XMLHttpRequest") {
@@ -224,11 +222,23 @@ func IsLikelyAPIRequest(method, path string, headers map[string]string) bool {
 			return true
 		}
 	}
-	if strings.Contains(lp, "/api/") ||
-		strings.HasSuffix(lp, "/api") ||
-		strings.HasSuffix(lp, ".json") ||
-		strings.Contains(lp, "/graphql") {
-		return true
+	if ct, ok := lookupBrowserSignHeader(headers, "content-type"); ok {
+		ct = strings.ToLower(ct)
+		if strings.Contains(ct, "application/json") ||
+			strings.Contains(ct, "application/xml") ||
+			strings.Contains(ct, "application/grpc") {
+			return true
+		}
+		if strings.Contains(ct, "application/x-www-form-urlencoded") ||
+			strings.Contains(ct, "multipart/form-data") {
+			return false
+		}
+	}
+	if accept, ok := lookupBrowserSignHeader(headers, "accept"); ok {
+		al := strings.ToLower(accept)
+		if strings.Contains(al, "application/json") && !strings.Contains(al, "text/html") {
+			return true
+		}
 	}
 	// 非 GET/HEAD 且 Accept 不含 html，倾向 API。
 	m := strings.ToUpper(method)
@@ -259,7 +269,17 @@ func browserSignRequestKey(nonce string) []byte {
 	return sum[:16]
 }
 
-func browserSignRequestMAC(nonce, method, path, query string, ts int64) string {
+func browserSignEnvKey(nonce string, siteID uint) []byte {
+	mac := hmac.New(sha256.New, loadChallengeSecret())
+	fmt.Fprintf(mac, "%s|envkey|%d|%s", browserSignTicketVersion, siteID, nonce)
+	return mac.Sum(nil)
+}
+
+func browserSignEnvAAD(nonce string, siteID uint) string {
+	return fmt.Sprintf("owaf-env:%s|browser-sign|%d|%s", EnvFingerprintProtocolVersion, siteID, nonce)
+}
+
+func browserSignRequestMAC(nonce, method, path, query string, ts int64, env string) string {
 	key := browserSignRequestKey(nonce)
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if method == "" {
@@ -274,8 +294,8 @@ func browserSignRequestMAC(nonce, method, path, query string, ts int64) string {
 		path = path[:i]
 	}
 	query = strings.TrimPrefix(query, "?")
-	// query 参与签名，防止在固定 path 上篡改查询参数绕过；使用原始串直接比对，两端保持一致。
-	payload := method + "|" + path + "|" + query + "|" + strconv.FormatInt(ts, 10) + "|" + nonce
+	// query 与环境密文参与签名，防止在固定 path 上篡改查询参数或替换已验证的环境指纹。
+	payload := method + "|" + path + "|" + query + "|" + strconv.FormatInt(ts, 10) + "|" + nonce + "|" + env
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
@@ -358,9 +378,16 @@ var __owaf_bs_hm="%s";
 var __owaf_bs_hts="%s";
 var __owaf_bs_hs="%s";
 var __owaf_bs_henv="%s";
+var __owaf_bs_csp_nonce=(document.currentScript&&document.currentScript.nonce)||"";
 function loadWasm(){
-if(typeof wasm_bindgen!=="undefined")return wasm_bindgen("/__owaf/pow.wasm?v=f54bf002");
-return new Promise(function(ok,err){var sc=document.createElement("script");sc.src="/__owaf/pow_glue.js?v=7ad1dbac";sc.onload=function(){wasm_bindgen("/__owaf/pow.wasm?v=f54bf002").then(ok).catch(err)};sc.onerror=function(){err(new Error("browser sign wasm glue load failed"))};document.head.appendChild(sc)})
+if(window.__owaf_wasm_ready)return window.__owaf_wasm_ready;
+window.__owaf_wasm_ready=new Promise(function(ok,err){
+ function initialize(){wasm_bindgen("/__owaf/pow.wasm?v=f54bf002").then(ok).catch(err)}
+ if(typeof WebAssembly==="undefined"){err(new Error("WebAssembly is unavailable"));return}
+ if(typeof wasm_bindgen!=="undefined"){initialize();return}
+ var sc=document.createElement("script");sc.src="/__owaf/pow_glue.js?v=7ad1dbac";if(__owaf_bs_csp_nonce)sc.nonce=__owaf_bs_csp_nonce;sc.async=true;sc.onload=initialize;sc.onerror=function(){err(new Error("browser sign wasm glue load failed"))};(document.head||document.documentElement).appendChild(sc)
+});
+return window.__owaf_wasm_ready
 }
 var __owaf_bs_wasm=loadWasm();
 function pathOnly(u){try{var x=new URL(u,location.href);return x.pathname||"/"}catch(e){var p=String(u||"");var i=p.indexOf("?");return i>=0?p.slice(0,i):p}}
@@ -376,61 +403,137 @@ return true;
 }catch(e){return false}
 }
 async function signHeaders(method,url){
-var ts=Math.floor(Date.now()/1000);
-var path=pathOnly(url);
-var query=queryOnly(url);
-var m=(method||"GET").toUpperCase();
-var payload=m+"|"+path+"|"+query+"|"+String(ts)+"|"+__owaf_bs_nonce;
-await __owaf_bs_wasm;
-var sig=wasm_bindgen.hmac_sha256(__owaf_bs_key,payload);
-var h={};
-h[__owaf_bs_hn]=__owaf_bs_nonce;
-h[__owaf_bs_he]=String(__owaf_bs_exp);
-h[__owaf_bs_hm]=__owaf_bs_mac;
-h[__owaf_bs_hts]=String(ts);
-h[__owaf_bs_hs]=sig;
-try{if(window.__owaf_env_encrypted)h[__owaf_bs_henv]=window.__owaf_env_encrypted}catch(e){}
-return h;
+ var ts=Math.floor(Date.now()/1000);
+ var path=pathOnly(url);
+ var query=queryOnly(url);
+ var m=(method||"GET").toUpperCase();
+ await __owaf_bs_wasm;
+ if(!window.__owaf_env_ready||typeof window.__owaf_env_ready.then!=="function")throw new Error("browser environment fingerprint is unavailable");
+ var env=await window.__owaf_env_ready;
+ if(!env||typeof env!=="string"||env.indexOf("v1.")!==0)throw new Error("browser environment fingerprint is unavailable");
+ var payload=m+"|"+path+"|"+query+"|"+String(ts)+"|"+__owaf_bs_nonce+"|"+env;
+ var sig=wasm_bindgen.hmac_sha256(__owaf_bs_key,payload);
+ var h={};
+ h[__owaf_bs_hn]=__owaf_bs_nonce;
+ h[__owaf_bs_he]=String(__owaf_bs_exp);
+ h[__owaf_bs_hm]=__owaf_bs_mac;
+ h[__owaf_bs_hts]=String(ts);
+ h[__owaf_bs_hs]=sig;
+ h[__owaf_bs_henv]=env;
+ return h;
 }
 function mergeHeaders(base,extra){
 if(!extra)return base;
 if(!base){var o={};for(var k in extra)o[k]=extra[k];return o}
 if(typeof Headers!=="undefined"&&base instanceof Headers){for(var k in extra)base.set(k,extra[k]);return base}
-if(Array.isArray(base)){for(var k in extra)base.push([k,extra[k]]);return base}
+if(Array.isArray(base)){var pairs=base.slice();for(var k in extra)pairs.push([k,extra[k]]);return pairs}
 var out={};for(var k in base)out[k]=base[k];for(var k2 in extra)out[k2]=extra[k2];return out;
+}
+function isChallengeHTML(response,html){
+if(!response||response.status!==403||!html)return false;
+var contentType=(response.headers&&response.headers.get("content-type"))||"";
+if(contentType.toLowerCase().indexOf("text/html")<0)return false;
+return html.indexOf("/__owaf/captcha/verify")>=0||html.indexOf("/__owaf/shield/verify")>=0||html.indexOf("/__owaf/chain/verify")>=0||html.indexOf("__waf_challenge_token")>=0;
+}
+function showChallengeResponse(response){
+try{
+ var copy=response.clone();
+ copy.text().then(function(html){
+  if(!isChallengeHTML(response,html))return;
+  document.open();document.write(html);document.close();
+ }).catch(function(){});
+}catch(e){}
+}
+function xhrBodyText(xhr){
+var rt="";
+try{rt=xhr.responseType||""}catch(e){rt=""}
+if(rt===""||rt==="text"){try{return xhr.responseText||""}catch(e){}}
+var raw=null;
+try{raw=xhr.response}catch(e){return ""}
+if(raw==null)return "";
+if(typeof raw==="string")return raw;
+if(rt==="json"){try{return JSON.stringify(raw)}catch(e){return ""}}
+if(typeof ArrayBuffer!=="undefined"&&raw instanceof ArrayBuffer){
+ try{
+  if(typeof TextDecoder!=="undefined")return new TextDecoder("utf-8").decode(raw);
+  return String.fromCharCode.apply(null,new Uint8Array(raw));
+ }catch(e){return ""}
+}
+if(typeof Document!=="undefined"&&raw instanceof Document){
+ try{return (raw.documentElement&&raw.documentElement.outerHTML)||""}catch(e){return ""}
+}
+return "";
+}
+function showChallengeXHRHTML(xhr,html){
+try{
+ if(!html)return;
+ if(isChallengeHTML({status:xhr.status,headers:{get:function(name){return xhr.getResponseHeader(name)||""}}},html)){
+  document.open();document.write(html);document.close();
+ }
+}catch(e){}
+}
+function showChallengeXHR(xhr){
+try{
+ var rt="";
+ try{rt=xhr.responseType||""}catch(e){}
+ if(rt==="blob"){
+  var raw=null;
+  try{raw=xhr.response}catch(e){return}
+  if(typeof Blob!=="undefined"&&raw instanceof Blob){
+   if(typeof raw.text==="function"){
+    raw.text().then(function(html){showChallengeXHRHTML(xhr,html)}).catch(function(){});
+   }else if(typeof FileReader!=="undefined"){
+    var reader=new FileReader();
+    reader.onload=function(){showChallengeXHRHTML(xhr,String(reader.result||""))};
+    reader.readAsText(raw);
+   }
+   return;
+  }
+ }
+ showChallengeXHRHTML(xhr,xhrBodyText(xhr));
+}catch(e){}
+}
+function signedFetchResponse(response){showChallengeResponse(response);return response}
+function requestURL(input){
+if(typeof input==="string")return input;
+if(typeof URL!=="undefined"&&input instanceof URL)return input.href;
+if(input&&typeof input.url==="string")return input.url;
+return location.href;
 }
 if(window.fetch){
 var ofetch=window.fetch;
 window.fetch=function(input,init){
 var fetchThis=this,fetchArgs=arguments;
-try{
-var url=(typeof input==="string")?input:(input&&input.url)||location.href;
+var url=requestURL(input);
 var method=(init&&init.method)||(input&&input.method)||"GET";
 if(!shouldSign(url,method))return ofetch.apply(fetchThis,fetchArgs);
 return signHeaders(method,url).then(function(h){
 init=init?Object.assign({},init):{};
 init.headers=mergeHeaders(init.headers||(input&&input.headers),h);
 return ofetch.call(fetchThis,input,init);
-}).catch(function(){return ofetch.apply(fetchThis,fetchArgs)});
-}catch(e){return ofetch.apply(fetchThis,fetchArgs)}
+	},function(){return ofetch.apply(fetchThis,fetchArgs)}).then(signedFetchResponse);
 };
 }
 if(window.XMLHttpRequest){
 var XO=window.XMLHttpRequest;
 function P(){
 var xhr=new XO(),open=xhr.open,send=xhr.send,_m="GET",_u=location.href;
+try{xhr.addEventListener("load",function(){showChallengeXHR(xhr)})}catch(e){}
 xhr.open=function(method,url){_m=method||"GET";_u=url||location.href;return open.apply(xhr,arguments)};
 xhr.send=function(body){
 if(!shouldSign(_u,_m))return send.apply(xhr,arguments);
 var args=arguments;
-signHeaders(_m,_u).then(function(h){
-try{for(var k in h)xhr.setRequestHeader(k,h[k])}catch(e){}
+	signHeaders(_m,_u).then(function(h){
+try{for(var k in h)xhr.setRequestHeader(k,h[k])}catch(e){return Promise.reject(e)}
 send.apply(xhr,args);
-}).catch(function(){send.apply(xhr,args)});
+}).catch(function(e){
+try{xhr.abort()}catch(_e){}
+});
 };
 return xhr;
 }
 P.prototype=XO.prototype;
+Object.setPrototypeOf(P,XO);
 window.XMLHttpRequest=P;
 }
 })();

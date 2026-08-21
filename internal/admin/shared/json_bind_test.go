@@ -59,10 +59,12 @@ func TestBindSiteFromRequestBody_JSONArraysBecomeStrings(t *testing.T) {
 
 func TestBindSiteFromRequestBodyPreservesMissingNullableOverrides(t *testing.T) {
 	disabled := false
+	skipPathByPhase := `{"owasp_default":["/healthz"]}`
 	existing := store.Site{
 		Host:                 "old.example",
 		BotProtectionEnabled: &disabled,
 		OWASPEnabled:         &disabled,
+		SkipPathByPhase:      &skipPathByPhase,
 		CacheRules:           `[{"type":"suffix","value":".js","ttl":60}]`,
 	}
 
@@ -78,6 +80,9 @@ func TestBindSiteFromRequestBodyPreservesMissingNullableOverrides(t *testing.T) 
 	}
 	if existing.OWASPEnabled == nil || *existing.OWASPEnabled {
 		t.Fatalf("owasp override should be preserved as false, got %#v", existing.OWASPEnabled)
+	}
+	if existing.SkipPathByPhase == nil || *existing.SkipPathByPhase != skipPathByPhase {
+		t.Fatalf("skip path override should be preserved, got %#v", existing.SkipPathByPhase)
 	}
 	if existing.CacheRules != `[{"type":"suffix","value":".js","ttl":60}]` {
 		t.Fatalf("cache rules changed: %s", existing.CacheRules)
@@ -110,6 +115,85 @@ func TestBindSiteFromRequestBodyPreservesMissingJSONBlobFields(t *testing.T) {
 	}
 	if existing.CipherSuites != `["TLS_AES_128_GCM_SHA256"]` {
 		t.Fatalf("cipher suites changed: %s", existing.CipherSuites)
+	}
+}
+
+func TestBindSiteFromRequestBodyHandlesSkipPathByPhase(t *testing.T) {
+	inherited := `{"owasp_default":["/old"]}`
+	tests := []struct {
+		name       string
+		body       []byte
+		wantNil    bool
+		wantErr    bool
+		wantStored string
+	}{
+		{
+			name:       "object",
+			body:       []byte(`{"skip_path_by_phase":{"owasp_default":["/healthz"]}}`),
+			wantStored: `{"owasp_default":["/healthz"]}`,
+		},
+		{
+			name:       "string",
+			body:       []byte(`{"skip_path_by_phase":"{\"cve_detection\":[\"/readyz\"]}"}`),
+			wantStored: `{"cve_detection":["/readyz"]}`,
+		},
+		{
+			name:    "null inherits global configuration",
+			body:    []byte(`{"skip_path_by_phase":null}`),
+			wantNil: true,
+		},
+		{
+			name:    "invalid JSON string",
+			body:    []byte(`{"skip_path_by_phase":"{not-json}"}`),
+			wantErr: true,
+		},
+		{
+			name:    "unknown phase",
+			body:    []byte(`{"skip_path_by_phase":{"unknown_phase":["/healthz"]}}`),
+			wantErr: true,
+		},
+		{
+			name:    "empty path list",
+			body:    []byte(`{"skip_path_by_phase":{"owasp_default":[]}}`),
+			wantErr: true,
+		},
+		{
+			name:    "blank path",
+			body:    []byte(`{"skip_path_by_phase":{"owasp_default":[" "]}}`),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := store.Site{SkipPathByPhase: &inherited}
+			err := BindSiteFromRequestBody(tt.body, &item)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BindSiteFromRequestBody() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if item.SkipPathByPhase == nil || *item.SkipPathByPhase != inherited {
+					t.Fatalf("invalid value changed override: %#v", item.SkipPathByPhase)
+				}
+				return
+			}
+			if tt.wantNil && item.SkipPathByPhase != nil {
+				t.Fatalf("skip_path_by_phase = %#v, want nil", item.SkipPathByPhase)
+			}
+			if tt.wantStored != "" && (item.SkipPathByPhase == nil || *item.SkipPathByPhase != tt.wantStored) {
+				t.Fatalf("skip_path_by_phase = %#v, want %q", item.SkipPathByPhase, tt.wantStored)
+			}
+		})
+	}
+}
+
+func TestBindSiteFromRequestBodySkipPathByPhaseEmptyObjectOverridesGlobal(t *testing.T) {
+	inherited := `{"owasp_default":["/old"]}`
+	item := store.Site{SkipPathByPhase: &inherited}
+	if err := BindSiteFromRequestBody([]byte(`{"skip_path_by_phase":{}}`), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.SkipPathByPhase == nil || *item.SkipPathByPhase != "{}" {
+		t.Fatalf("skip_path_by_phase = %#v, want non-nil empty-object override", item.SkipPathByPhase)
 	}
 }
 

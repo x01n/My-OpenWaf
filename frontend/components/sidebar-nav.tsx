@@ -33,6 +33,7 @@ import {
   IconServer,
   IconTemplate,
   IconCode,
+  IconBraces,
 } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 import {
@@ -95,9 +96,23 @@ function isChildActive(item: NavItem, pathname: string): boolean {
   return false
 }
 
+/** 返回最长匹配的导航路径，避免父级前缀与子级同时高亮。 */
+function isExactOrLongestActive(href: string, pathname: string, items: NavItem[]) {
+  if (!(pathname === href || pathname.startsWith(href + "/"))) return false
+  const matches = items
+    .flatMap((item) => [item, ...(item.children ?? [])])
+    .filter((item) => pathname === item.href || pathname.startsWith(item.href + "/"))
+  const longest = matches.reduce(
+    (current, item) => (item.href.length > current.length ? item.href : current),
+    ""
+  )
+  return longest === href
+}
+
 /** 单个可展开的导航项（带 children） */
 function CollapsibleNavItem({ item }: { item: NavItem }) {
   const pathname = usePathname()
+  const { setOpenMobile } = useSidebar()
   const Icon = item.icon
   const groupActive = item.children!.some((child) =>
     isChildActive(child, pathname)
@@ -120,8 +135,11 @@ function CollapsibleNavItem({ item }: { item: NavItem }) {
         <CollapsibleContent>
           <SidebarMenuSub>
             {item.children!.map((child) => {
-              const childActive =
-                pathname === child.href || pathname.startsWith(child.href + "/")
+              const childActive = isExactOrLongestActive(
+                child.href,
+                pathname,
+                item.children!
+              )
               const ChildIcon = child.icon
               return (
                 <SidebarMenuSubItem key={child.href}>
@@ -130,7 +148,7 @@ function CollapsibleNavItem({ item }: { item: NavItem }) {
                     isActive={childActive}
                     className={ACTIVE_SUB_ITEM_CLASS}
                   >
-                    <Link href={child.href}>
+                    <Link href={child.href} onClick={() => setOpenMobile(false)}>
                       <ChildIcon />
                       <span>{child.label}</span>
                     </Link>
@@ -148,8 +166,9 @@ function CollapsibleNavItem({ item }: { item: NavItem }) {
 /** 单个普通导航项（无 children） */
 function SimpleNavItem({ item }: { item: NavItem }) {
   const pathname = usePathname()
+  const { setOpenMobile } = useSidebar()
   const Icon = item.icon
-  const active = pathname === item.href || pathname.startsWith(item.href + "/")
+  const active = isExactOrLongestActive(item.href, pathname, [item])
 
   return (
     <SidebarMenuItem>
@@ -159,7 +178,7 @@ function SimpleNavItem({ item }: { item: NavItem }) {
         isActive={active}
         className={ACTIVE_ITEM_CLASS}
       >
-        <Link href={item.href}>
+        <Link href={item.href} onClick={() => setOpenMobile(false)}>
           <Icon />
           <span>{item.label}</span>
         </Link>
@@ -182,7 +201,6 @@ function useNavGroups(): NavGroup[] {
       items: [{ label: t("nav.sites"), href: "/sites", icon: IconShield }],
     },
     {
-      labelKey: "nav.security",
       items: [
         {
           label: t("nav.security"),
@@ -236,16 +254,32 @@ function useNavGroups(): NavGroup[] {
           href: "/policies",
           icon: IconShieldCheck,
         },
-        { label: t("nav.rules"), href: "/rules", icon: IconListCheck },
         {
-          label: t("nav.owaspRules", { defaultValue: "OWASP 规则" }),
-          href: "/rules/owasp",
-          icon: IconFlame,
+          label: t("nav.rulesGroup"),
+          href: "/rules",
+          icon: IconListCheck,
+          children: [
+            { label: t("nav.rules"), href: "/rules", icon: IconListCheck },
+            {
+              label: t("nav.owaspRules", { defaultValue: "OWASP 规则" }),
+              href: "/rules/owasp",
+              icon: IconFlame,
+            },
+            {
+              label: t("nav.cveRules", { defaultValue: "CVE 规则" }),
+              href: "/rules/cve",
+              icon: IconAlertHexagon,
+            },
+          ],
         },
         {
-          label: t("nav.cveRules", { defaultValue: "CVE 规则" }),
-          href: "/rules/cve",
-          icon: IconAlertHexagon,
+          label: t("nav.plugins"),
+          href: "/lua-plugins",
+          icon: IconCode,
+          children: [
+            { label: t("nav.luaPlugins"), href: "/lua-plugins", icon: IconCode },
+            { label: t("nav.jsPlugins"), href: "/js-plugins", icon: IconBraces },
+          ],
         },
         {
           label: t("nav.ccProtection"),
@@ -254,11 +288,6 @@ function useNavGroups(): NavGroup[] {
         },
         { label: t("nav.captcha"), href: "/captcha", icon: IconUserCheck },
         { label: t("nav.authConfig"), href: "/auth-config", icon: IconKey },
-        {
-          label: t("nav.luaPlugins"),
-          href: "/lua-plugins",
-          icon: IconCode,
-        },
       ],
     },
     {

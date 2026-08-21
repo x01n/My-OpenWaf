@@ -99,6 +99,109 @@ func TestUpdateSiteClearsProtectionFieldsWhenNullableOverrideInherits(t *testing
 	}
 }
 
+func TestUpdateSiteHandlesSkipPathByPhase(t *testing.T) {
+	original := `{"owasp_default":["/old"]}`
+	tests := []struct {
+		name       string
+		body       []byte
+		wantStatus int
+		wantNil    bool
+		wantStored string
+		wantReload int
+	}{
+		{
+			name:       "object",
+			body:       []byte(`{"skip_path_by_phase":{"owasp_default":["/healthz"]}}`),
+			wantStatus: 200,
+			wantStored: `{"owasp_default":["/healthz"]}`,
+			wantReload: 1,
+		},
+		{
+			name:       "string",
+			body:       []byte(`{"skip_path_by_phase":"{\"cve_detection\":[\"/readyz\"]}"}`),
+			wantStatus: 200,
+			wantStored: `{"cve_detection":["/readyz"]}`,
+			wantReload: 1,
+		},
+		{
+			name:       "null inherits global configuration",
+			body:       []byte(`{"skip_path_by_phase":null}`),
+			wantStatus: 200,
+			wantNil:    true,
+			wantReload: 1,
+		},
+		{
+			name:       "invalid JSON string",
+			body:       []byte(`{"skip_path_by_phase":"{not-json}"}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+		{
+			name:       "unknown phase",
+			body:       []byte(`{"skip_path_by_phase":{"unknown_phase":["/healthz"]}}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+		{
+			name:       "empty path list",
+			body:       []byte(`{"skip_path_by_phase":{"owasp_default":[]}}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+		{
+			name:       "blank path",
+			body:       []byte(`{"skip_path_by_phase":{"owasp_default":[" "]}}`),
+			wantStatus: 400,
+			wantStored: original,
+			wantReload: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newSiteRepoForTest(t)
+			value := original
+			item := store.Site{
+				Host:            "skip-path-by-phase.example",
+				UpstreamURLs:    "http://127.0.0.1:8080",
+				Bind:            ":8080",
+				Network:         "tcp",
+				Enabled:         true,
+				SkipPathByPhase: &value,
+			}
+			if err := repo.Create(&item); err != nil {
+				t.Fatalf("seed site: %v", err)
+			}
+			reloads := 0
+			ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error {
+				reloads++
+				return nil
+			}), item.ID, tt.body)
+			if ctx.Response.StatusCode() != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", ctx.Response.StatusCode(), tt.wantStatus)
+			}
+			if reloads != tt.wantReload {
+				t.Fatalf("reloads = %d, want %d", reloads, tt.wantReload)
+			}
+			loaded, err := repo.Get(item.ID)
+			if err != nil {
+				t.Fatalf("load site: %v", err)
+			}
+			if tt.wantNil {
+				if loaded.SkipPathByPhase != nil {
+					t.Fatalf("skip_path_by_phase = %#v, want nil", loaded.SkipPathByPhase)
+				}
+				return
+			}
+			if loaded.SkipPathByPhase == nil || *loaded.SkipPathByPhase != tt.wantStored {
+				t.Fatalf("skip_path_by_phase = %#v, want %q", loaded.SkipPathByPhase, tt.wantStored)
+			}
+		})
+	}
+}
+
 func TestUpdateSiteSavesOWASPCVEOverrideActions(t *testing.T) {
 	repo := newSiteRepoForTest(t)
 	item := store.Site{

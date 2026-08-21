@@ -424,10 +424,13 @@ func TestCaptchaAdvancedSessionRedeemedOnlyOnce(t *testing.T) {
 	defer cm.Close()
 
 	sessionID := "captcha-advanced-once"
+	// stored answer 必须带 dx/dy：它们是滑块初始绘制位置，slide.Validate 的 sx/sy
+	// 契约是绝对坐标，而前端提交的是相对位移量，校验时需要 dx+offset 换算。
+	// 用户提交 x=90 对应绝对坐标 30+90=120，正好命中目标 x=120。
 	cm.sessions[sessionID] = &CaptchaSession{
 		ID:        sessionID,
 		Type:      CaptchaTypeSlide,
-		Answer:    `{"x":120}`,
+		Answer:    `{"x":120,"y":60,"dx":30,"dy":60}`,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(time.Minute),
 	}
@@ -441,7 +444,7 @@ func TestCaptchaAdvancedSessionRedeemedOnlyOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if ok, _ := cm.VerifyAdvancedSession(sessionID, `{"x":120}`); ok {
+			if ok, _ := cm.VerifyAdvancedSession(sessionID, `{"x":90}`); ok {
 				passed.Add(1)
 			}
 		}()
@@ -801,7 +804,7 @@ func TestSetChallengeSecretIsRaceFree(t *testing.T) {
 }
 
 /**
- * TestVerifyRotateAnswerRejectsOutOfRangeAngles 验证旋转验证码拒绝超出 0 到 360 度范围的输入。
+ * TestVerifyRotateAnswerRejectsOutOfRangeAngles 验证旋转验证码拒绝超出 0 到 360 度范围的输入，并遵循 go-captcha 的补偿角契约。
  */
 func TestVerifyRotateAnswerRejectsOutOfRangeAngles(t *testing.T) {
 	stored := `{"angle":90}`
@@ -814,7 +817,21 @@ func TestVerifyRotateAnswerRejectsOutOfRangeAngles(t *testing.T) {
 			t.Fatalf("verifyRotateAnswer accepted out-of-range answer %s", answer)
 		}
 	}
-	if !verifyRotateAnswer(stored, `{"angle":95}`, 10) {
-		t.Fatal("verifyRotateAnswer rejected an in-range answer within tolerance")
+	for _, test := range []struct {
+		name   string
+		answer string
+		want   bool
+	}{
+		{name: "exact compensation", answer: `{"angle":270}`, want: true},
+		{name: "within compensation tolerance", answer: `{"angle":265}`, want: true},
+		{name: "same angle is not compensation", answer: `{"angle":90}`, want: false},
+		{name: "missing angle", answer: `{}`, want: false},
+		{name: "wrong angle type", answer: `{"angle":"270"}`, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := verifyRotateAnswer(stored, test.answer, 10); got != test.want {
+				t.Fatalf("verifyRotateAnswer(%s) = %v, want %v", test.answer, got, test.want)
+			}
+		})
 	}
 }

@@ -117,7 +117,7 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			RedirectTo  *string `json:"redirect_to,omitempty"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if len(req.IDs) == 0 {

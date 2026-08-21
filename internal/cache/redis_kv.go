@@ -62,6 +62,16 @@ func (r *RedisKV) SetClient(client *goredis.Client) {
 	r.mu.Unlock()
 }
 
+// AvailableContext reports whether Redis is configured, healthy, and the caller context is active.
+func (r *RedisKV) AvailableContext(ctx context.Context) bool {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return false
+		}
+	}
+	return r.Available()
+}
+
 func (r *RedisKV) Available() bool {
 	return r != nil && r.clientValue() != nil && r.health.Load()
 }

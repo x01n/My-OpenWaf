@@ -6,8 +6,6 @@ import (
 	"strings"
 )
 
-// ── SSRF (Server-Side Request Forgery) ──
-
 // hasSSRFIndicator returns true when the string contains URL schemes or known
 // private/cloud-internal addresses that may indicate an SSRF payload.
 // Avoids running 13 SSRF regexes on every clean request.
@@ -120,14 +118,12 @@ func checkSSRF(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatSSRF, RuleID: best, Score: total, Desc: "SSRF signals"}, true
+				return OWASPHit{Category: CatSSRF, RuleID: best, Score: total, Desc: "SSRF 特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── Command Injection ──
 
 var cmdInjectPatterns = []owaspPattern{
 	// Pipe / semicolon / backtick / $() command chaining.
@@ -417,7 +413,7 @@ func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatCmdInject, RuleID: best, Score: total, Desc: "command injection signals"}, true
+				return OWASPHit{Category: CatCmdInject, RuleID: best, Score: total, Desc: "命令注入特征"}, true
 			}
 		}
 	}
@@ -480,14 +476,12 @@ func checkXXE(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatXXE, RuleID: best, Score: total, Desc: "XML external entity signals"}, true
+				return OWASPHit{Category: CatXXE, RuleID: best, Score: total, Desc: "XML 外部实体特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── LDAP Injection ──
 
 // hasLDAPInjectionIndicator returns true when the string contains LDAP filter
 // structure characters specific to LDAP injection payloads.
@@ -525,14 +519,12 @@ func checkLDAPInjection(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatLDAPI, RuleID: best, Score: total, Desc: "LDAP injection signals"}, true
+				return OWASPHit{Category: CatLDAPI, RuleID: best, Score: total, Desc: "LDAP 注入特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── NoSQL Injection ──
 
 var nosqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`\$where\b`), 5, "owasp:nosql:001", ""},
@@ -601,14 +593,12 @@ func checkNoSQLi(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatNoSQLi, RuleID: best, Score: total, Desc: "NoSQL injection signals"}, true
+				return OWASPHit{Category: CatNoSQLi, RuleID: best, Score: total, Desc: "NoSQL 注入特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── Template Injection (SSTI) ──
 
 var tmplInjectPatterns = []owaspPattern{
 	// Jinja2 / Django / Twig
@@ -683,14 +673,12 @@ func checkTemplateInjection(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatTmplInject, RuleID: best, Score: total, Desc: "template injection signals"}, true
+				return OWASPHit{Category: CatTmplInject, RuleID: best, Score: total, Desc: "模板注入特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── File Upload Validation ──
 
 var dangerousExtensions = map[string]bool{
 	".php":      true,
@@ -748,13 +736,13 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 	// Null byte injection in filename.
 	if strings.Contains(lower, "\x00") || strings.Contains(lower, "%00") {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:001", Score: 6,
-			Desc: "null byte in filename"}, true
+			Desc: "文件名中包含空字节"}, true
 	}
 
 	// Path traversal in filename (e.g. ../../tmp/shell.php)
 	if strings.Contains(lower, "../") || strings.Contains(lower, "..\\") {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:006", Score: 6,
-			Desc: "path traversal in filename"}, true
+			Desc: "文件名中包含路径遍历"}, true
 	}
 
 	// Normalize spaces and suffix separators used to disguise executable extensions.
@@ -767,33 +755,33 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 		secondExt := filepath.Ext(withoutExt)
 		if secondExt != "" && dangerousExtensions[secondExt] {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:002", Score: 5,
-				Desc: "double extension upload: " + secondExt + ext}, true
+				Desc: "双扩展名上传：" + secondExt + ext}, true
 		}
 	}
 
 	if dangerousExtensions[ext] {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:003", Score: 5,
-			Desc: "dangerous file extension: " + ext}, true
+			Desc: "危险文件扩展名：" + ext}, true
 	}
 
 	// Also check the original extension without normalization.
 	origExt := filepath.Ext(lower)
 	if origExt != ext && dangerousExtensions[origExt] {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:003", Score: 5,
-			Desc: "dangerous file extension: " + origExt}, true
+			Desc: "危险文件扩展名：" + origExt}, true
 	}
 
 	// .htaccess override attempt
 	if strings.HasSuffix(lower, ".htaccess") || lower == ".htaccess" {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:004", Score: 5,
-			Desc: "htaccess override attempt"}, true
+			Desc: "htaccess 覆写尝试"}, true
 	}
 
 	// Content-Type mismatch with image extension
 	if (origExt == ".jpg" || origExt == ".jpeg" || origExt == ".png" || origExt == ".gif") &&
 		contentType != "" && !strings.HasPrefix(strings.ToLower(contentType), "image/") {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:005", Score: 3,
-			Desc: "content-type mismatch for image"}, true
+			Desc: "图片文件的 content-type 不匹配"}, true
 	}
 
 	// Content-Type mismatch: executable extension with image content-type (bypass attempt).
@@ -806,14 +794,12 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 		}
 		if execExts[origExt] || execExts[ext] {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:007", Score: 5,
-				Desc: "executable extension with image content-type"}, true
+				Desc: "可执行扩展名伪装为图片 content-type"}, true
 		}
 	}
 
 	return OWASPHit{}, false
 }
-
-// ── JNDI / Log4Shell Injection ──
 
 // hasJNDIIndicator returns true when the string contains JNDI/Log4Shell-style
 // injection markers.
@@ -857,14 +843,12 @@ func checkJNDI(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatJNDI, RuleID: best, Score: total, Desc: "JNDI/Log4Shell injection signals"}, true
+				return OWASPHit{Category: CatJNDI, RuleID: best, Score: total, Desc: "JNDI/Log4Shell 注入特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── CRLF Injection ──
 
 var crlfPatterns = []owaspPattern{
 	{regexp.MustCompile(`\r\n\s*(set-cookie|location|content-type|x-[\w-]+)\s*:`), 6, "owasp:crlf:001", ""},
@@ -981,14 +965,12 @@ func checkCRLF(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatCRLF, RuleID: best, Score: total, Desc: "CRLF injection / HTTP response splitting"}, true
+				return OWASPHit{Category: CatCRLF, RuleID: best, Score: total, Desc: "CRLF 注入 / HTTP 响应拆分"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── Expression Language Injection (Spring EL, OGNL, SpEL) ──
 
 // hasELIndicator returns true when the string contains expression language
 // injection markers (Spring EL, OGNL, SpEL) specific enough to justify
@@ -1051,14 +1033,12 @@ func checkExprLang(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatExprLang, RuleID: best, Score: total, Desc: "expression language injection signals"}, true
+				return OWASPHit{Category: CatExprLang, RuleID: best, Score: total, Desc: "表达式语言注入特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── Deserialization Attacks ──
 
 var deserialPatterns = []owaspPattern{
 	// Java serialization magic bytes
@@ -1100,7 +1080,7 @@ var deserialPatterns = []owaspPattern{
 func checkDeserialization(s string, threshold int) (OWASPHit, bool) {
 	// Direct binary Java serialization magic byte check
 	if strings.Contains(s, "\xac\xed\x00\x05") {
-		return OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:001", Score: 5, Desc: "Java serialization magic bytes"}, true
+		return OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:001", Score: 5, Desc: "Java 序列化魔数"}, true
 	}
 	if !hasDeserializationIndicator(s) {
 		return OWASPHit{}, false
@@ -1117,14 +1097,12 @@ func checkDeserialization(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatDeserial, RuleID: best, Score: total, Desc: "deserialization attack signals"}, true
+				return OWASPHit{Category: CatDeserial, RuleID: best, Score: total, Desc: "反序列化攻击特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
-
-// ── HTTP Protocol Violation ──
 
 func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 	if len(headers) == 0 {
@@ -1150,7 +1128,7 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 	if cl != "" && te != "" && containsASCIIFold(te, "chunked") {
 		return OWASPHit{
 			Category: CatProtoViol, RuleID: "owasp:proto:001", Score: 6,
-			Desc: "request smuggling: CL+TE conflict",
+			Desc: "请求走私：CL+TE 冲突",
 		}, true
 	}
 
@@ -1158,7 +1136,7 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 	if strings.Contains(cl, ",") {
 		return OWASPHit{
 			Category: CatProtoViol, RuleID: "owasp:proto:002", Score: 5,
-			Desc: "duplicate content-length header",
+			Desc: "重复的 content-length 头",
 		}, true
 	}
 
@@ -1166,7 +1144,7 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 	if oversizedHeader != "" {
 		return OWASPHit{
 			Category: CatProtoViol, RuleID: "owasp:proto:003", Score: 4,
-			Desc: "oversized header: " + oversizedHeader,
+			Desc: "超长请求头：" + oversizedHeader,
 		}, true
 	}
 
@@ -1180,19 +1158,19 @@ func checkMethodViolation(method string, headers map[string]string) (OWASPHit, b
 	switch strings.ToUpper(method) {
 	case "TRACE", "TRACK":
 		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:004", Score: 5,
-			Desc: "dangerous HTTP method: " + method}, true
+			Desc: "危险 HTTP 方法：" + method}, true
 	case "CONNECT":
 		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:005", Score: 5,
-			Desc: "CONNECT method (tunneling)"}, true
+			Desc: "CONNECT 方法（隧道）"}, true
 	case "DEBUG":
 		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:006", Score: 5,
-			Desc: "DEBUG method (ASP.NET diagnostics)"}, true
+			Desc: "DEBUG 方法（ASP.NET 诊断）"}, true
 	case "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK":
 		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:007", Score: 4,
-			Desc: "WebDAV method: " + method}, true
+			Desc: "WebDAV 方法：" + method}, true
 	case "PATCH":
 		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:008", Score: 3,
-			Desc: "PATCH method (uncommon)"}, true
+			Desc: "PATCH 方法（不常见）"}, true
 	case "OPTIONS":
 		// Allow CORS preflight requests (have Origin + Access-Control-Request-Method).
 		origin := ""
@@ -1211,12 +1189,10 @@ func checkMethodViolation(method string, headers map[string]string) (OWASPHit, b
 			return OWASPHit{}, false
 		}
 		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:009", Score: 3,
-			Desc: "OPTIONS method (non-CORS)"}, true
+			Desc: "OPTIONS 方法（非 CORS 预检）"}, true
 	}
 	return OWASPHit{}, false
 }
-
-// ── GraphQL Injection ──
 
 // hasGraphQLIndicator returns true when the string contains GraphQL
 // introspection or injection markers.
@@ -1260,7 +1236,7 @@ func checkGraphQLi(s string, threshold int) (OWASPHit, bool) {
 				best = p.id
 			}
 			if total >= threshold {
-				return OWASPHit{Category: CatGraphQLi, RuleID: best, Score: total, Desc: "GraphQL introspection/injection signals"}, true
+				return OWASPHit{Category: CatGraphQLi, RuleID: best, Score: total, Desc: "GraphQL 内省/注入特征"}, true
 			}
 		}
 	}

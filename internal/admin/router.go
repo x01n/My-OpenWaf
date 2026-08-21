@@ -26,6 +26,7 @@ import (
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/escalation"
+	"My-OpenWaf/internal/waf/jsplugin"
 	"My-OpenWaf/internal/waf/luaplugin"
 
 	"gorm.io/gorm"
@@ -54,6 +55,8 @@ type Dependencies struct {
 	Cache         *cache.RedisKV
 	Upstreams     *upstream.Pool
 	ThreatIntel   system.ThreatIntelSyncer
+	// JSEngine 在每次 dry-run 请求时读取当前 QuickJS runtime，避免 handler 捕获 reload 前的旧指针。
+	JSEngine func() *jsplugin.Engine
 	// LuaEngine 只用于读取运行时统计；可为 nil，此时统计端点返回空列表。
 	LuaEngine *luaplugin.Engine
 }
@@ -126,23 +129,26 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		// 排列同 /security-events/stats（见 TestLuaPluginStatsRouteBeatsIDParam）。
 		readGroup.GET("/lua-plugins/stats", system.GetLuaPluginStats(deps.LuaEngine))
 		readGroup.GET("/lua-plugins/:id", system.GetLuaPlugin(deps.Repos.LuaPlugin))
-		readGroup.GET("/js-plugins", system.ListJSPlugins(deps.Repos.JSPlugin))
-		readGroup.GET("/js-plugins/stats", system.GetJSPluginStats())
-		readGroup.GET("/js-plugins/:id", system.GetJSPlugin(deps.Repos.JSPlugin))
+		readGroup.GET("/js-plugins", system.ListJSPlugins(deps.Repos.JSPlugin, deps.Snapshot))
+		readGroup.GET("/js-plugins/stats", system.GetJSPluginStats(deps.Snapshot))
+		readGroup.GET("/js-plugins/:id", system.GetJSPlugin(deps.Repos.JSPlugin, deps.Snapshot))
 
 		readGroup.GET("/security-events", event.ListSecurityEvents(r.SecurityEvent))
 		readGroup.GET("/security-events/stats", event.SecurityEventStats(r.SecurityEvent))
 		readGroup.GET("/security-events/timeline", event.SecurityEventTimeline(r.SecurityEvent))
+		// requests 是请求级聚合视图（按 request_id 分组），与 :id 的单事件详情语义不同；
+		// 静态段必须排在 :id 之前，见 TestSecurityEventRequestsRouteBeatsIDParam。
+		readGroup.GET("/security-events/requests", event.ListSecurityEventRequests(r.SecurityEvent))
 		readGroup.GET("/security-events/:id", event.GetSecurityEvent(r.SecurityEvent))
 		readGroup.GET("/access-logs", event.ListAccessLogs(r.AccessLog))
 		readGroup.GET("/access-logs/:id", event.GetAccessLog(r.AccessLog))
 		readGroup.GET("/fingerprints", event.ListTLSFingerprints(r.AccessLog))
-		readGroup.GET("/request/:request_id", event.GetRequestTrace(r.AccessLog, r.SecurityEvent))
+		readGroup.GET("/request/:request_id", event.GetRequestTrace(r.AccessLog, r.SecurityEvent, r.BotScore))
 		readGroup.GET("/sites/:id/security-events", event.ListSiteSecurityEvents(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events/stats", event.SiteSecurityEventStats(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events/timeline", event.SiteSecurityEventTimeline(r.Site, r.SecurityEvent))
 
-		// 误报反馈：任意登录用户可提交与查看。
+		// 误报反馈只读列表：readonly 也可查看；提交与改状态在 opsGroup，删除在 adminGroup。
 		readGroup.GET("/false-positives", event.ListFalsePositives(r.FalsePositive))
 
 		// 预置爬虫白名单预览（读端点）。
@@ -160,7 +166,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites/:id/access/users", access.ListUsers(r.AccessControl))
 		readGroup.GET("/sites/:id/access/rules", access.ListPathRules(r.AccessControl))
 
-		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, ConfigDB: deps.DB, LogDB: deps.LogDB, Cache: deps.Cache}
+		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, ConfigDB: deps.DB, LogDB: deps.LogDB, Cache: deps.Cache, AccessRepo: r.AccessLog}
 		readGroup.GET("/dashboard/summary", system.DashboardSummary(dashDeps))
 
 		readGroup.GET("/api-keys", system.ListAPIKeys(r.AdminAPIKey))
@@ -257,12 +263,12 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/lua-plugins/:id/toggle", system.ToggleLuaPlugin(deps.Repos.LuaPlugin, reload))
 		opsGroup.POST("/lua-plugins/validate", system.ValidateLuaPlugin())
 		opsGroup.POST("/lua-plugins/dry-run", system.DryRunLuaPlugin())
-		opsGroup.POST("/js-plugins", system.CreateJSPlugin(deps.Repos.JSPlugin, reload))
-		opsGroup.POST("/js-plugins/:id/update", system.UpdateJSPlugin(deps.Repos.JSPlugin, reload))
+		opsGroup.POST("/js-plugins", system.CreateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload))
+		opsGroup.POST("/js-plugins/:id/update", system.UpdateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload))
 		opsGroup.POST("/js-plugins/:id/delete", system.DeleteJSPlugin(deps.Repos.JSPlugin, reload))
 		opsGroup.POST("/js-plugins/:id/toggle", system.ToggleJSPlugin(deps.Repos.JSPlugin, reload))
 		opsGroup.POST("/js-plugins/validate", system.ValidateJSPlugin())
-		opsGroup.POST("/js-plugins/dry-run", system.DryRunJSPlugin())
+		opsGroup.POST("/js-plugins/dry-run", system.DryRunJSPlugin(deps.JSEngine))
 
 		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
 
@@ -315,8 +321,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites/:id/access/rules/:rid/update", access.UpdatePathRule(r.AccessControl, reload))
 		opsGroup.POST("/sites/:id/access/rules/:rid/delete", access.DeletePathRule(r.AccessControl, reload))
 
-		// 误报反馈：任意登录用户可提交、更新状态；删除仅 admin。
-		opsGroup.POST("/false-positives", event.CreateFalsePositive(r.FalsePositive))
+		// 误报反馈：admin/operator 可提交与更新状态（readonly 不可写）；删除仅 admin。
+		opsGroup.POST("/false-positives", event.CreateFalsePositive(r.FalsePositive, r.SecurityEvent))
 		opsGroup.POST("/false-positives/:id/status", event.UpdateFalsePositiveStatus(r.FalsePositive))
 
 		// 预置爬虫白名单（Google/Bing/Baidu/360/Yandex 等）。

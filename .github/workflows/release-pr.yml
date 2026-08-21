@@ -62,10 +62,10 @@ jobs:
           cp -r frontend/out internal/core/adminweb/dist
 
       - name: Run go vet
-        run: go vet ./...
+        run: CGO_ENABLED=1 go vet -tags=quickjs ./...
 
       - name: Run Go tests
-        run: go test -v ./...
+        run: CGO_ENABLED=1 go test -tags=quickjs -v ./...
 
       - name: Typecheck frontend
         working-directory: frontend
@@ -78,7 +78,7 @@ jobs:
       - name: Build application
         run: |
           go mod tidy
-          go build -o bin/my-openwaf ./cmd/...
+          CGO_ENABLED=1 go build -tags=quickjs -o bin/my-openwaf ./cmd/...
 
   release-pr:
     name: Create or update release PR

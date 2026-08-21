@@ -9,20 +9,23 @@ import (
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/dynamic"
+	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/jsplugin"
 	"My-OpenWaf/internal/waf/luaplugin"
 	"My-OpenWaf/internal/waf/pageconfig"
 )
 
 // CompiledRule is a lightweight runtime rule (MVP ACL parser).
 type CompiledRule struct {
-	ID         uint
-	Phase      store.RulePhase
-	Action     store.RuleAction
-	Priority   int
-	Kind       string
-	Arg        string
-	StatusCode int    // custom HTTP status code (0 = default)
-	RedirectTo string // URL for redirect action
+	ID          uint
+	Phase       store.RulePhase
+	Action      store.RuleAction
+	Priority    int
+	Kind        string
+	Arg         string
+	StatusCode  int    // custom HTTP status code (0 = default)
+	RedirectTo  string // URL for redirect action
+	CaptchaType string // Rule-level CAPTCHA type; empty inherits global protection config.
 }
 
 // SiteRuntime holds resolved site for routing.
@@ -91,8 +94,8 @@ type SiteRuntime struct {
 	UpstreamHostHeader string
 
 	// 站点级 IP 黑白名单（仅对该站点生效）。
-	SiteIPWhitelist []net.IPNet
-	SiteIPBlacklist []net.IPNet
+	SiteIPWhitelist []iprep.IPListEntry
+	SiteIPBlacklist []iprep.IPListEntry
 }
 
 // AccessControlConfig 站点访问控制运行时配置。
@@ -120,7 +123,53 @@ type AccessControlPathRule struct {
 	Priority int
 }
 
+// TLSCertificateState describes whether an SNI route has a usable configured certificate.
+type TLSCertificateState string
+
+const (
+	TLSCertificateStateValid        TLSCertificateState = "valid"
+	TLSCertificateStateUnconfigured TLSCertificateState = "unconfigured"
+	TLSCertificateStateInvalid      TLSCertificateState = "invalid"
+)
+
+// SnapshotConfigDiagnostic 描述当前快照中被跳过的无效配置。
+//
+// 该结构只保留管理端定位记录所需的稳定标识，不包含原始配置值、备注或解析错误文本。
+type SnapshotConfigDiagnostic struct {
+	Source           string `json:"source"`
+	Field            string `json:"field"`
+	Error            string `json:"error"`
+	HandlingStrategy string `json:"handling_strategy"`
+	Kind             string `json:"kind"`
+	Reason           string `json:"reason"`
+	PolicyID         uint   `json:"policy_id,omitempty"`
+	RuleID           string `json:"rule_id,omitempty"`
+	IPListEntryID    uint   `json:"ip_list_entry_id,omitempty"`
+	CertificateID    uint   `json:"certificate_id,omitempty"`
+	ListenerID       uint   `json:"listener_id,omitempty"`
+	Scope            string `json:"scope,omitempty"`
+	SiteID           uint   `json:"site_id,omitempty"`
+}
+
+const (
+	DiagnosticSourcePolicyOWASP  = "policy_owasp_rule_configs"
+	DiagnosticSourceIPList       = "ip_list_entries"
+	DiagnosticSourceSites        = "sites"
+	DiagnosticSourceListeners    = "site_listeners"
+	DiagnosticSourceCertificates = "certificates"
+
+	DiagnosticFieldWhitelistJSON   = "whitelist_json"
+	DiagnosticFieldValue           = "value"
+	DiagnosticFieldCertificateID   = "cert_id"
+	DiagnosticFieldCertificatePair = "certificate_key_pair"
+
+	DiagnosticHandlingSkipInvalidField         = "skip_invalid_field"
+	DiagnosticHandlingSkipInvalidEntry         = "skip_invalid_entry"
+	DiagnosticHandlingRejectInvalidCertificate = "reject_invalid_certificate"
+)
+
 // Snapshot is an immutable view for the dataplane (atomic pointer swap).
+
 type Snapshot struct {
 	Revision uint64
 
@@ -134,7 +183,8 @@ type Snapshot struct {
 	ChallengePage    pageconfig.ChallengePageConfig
 	BlockPage        pageconfig.BlockPageConfig
 
-	SiteTLSCertBySNI map[string]tls.Certificate
+	SiteTLSCertBySNI      map[string]tls.Certificate
+	SiteTLSCertStateBySNI map[string]TLSCertificateState
 
 	// Protection settings loaded from SystemSettings.
 	Protection store.ProtectionConfig
@@ -148,6 +198,14 @@ type Snapshot struct {
 	LuaPlugins []*luaplugin.Script
 	// LuaPluginErrors 按脚本名记录编译错误。
 	LuaPluginErrors map[string]string
+
+	// JSPlugins 是已编译的 JavaScript 边缘脚本。
+	JSPlugins []*jsplugin.Script
+	// JSPluginErrors 按 JSPluginErrorKey 返回的稳定脚本标识记录编译或元数据错误。
+	JSPluginErrors map[string]string
+
+	// ConfigDiagnostics 记录构建期跳过的无效配置，随快照原子发布。
+	ConfigDiagnostics []SnapshotConfigDiagnostic
 
 	// HTTP2 configuration
 	HTTP2Config HTTP2Config
@@ -190,7 +248,34 @@ func siteMapKeyNorm(bind string, host string) string {
 }
 
 func SNICertKey(bind string, sni string) string {
-	return "sni:" + bind + "\x00" + strings.ToLower(strings.TrimSpace(sni))
+	return "sni:" + bind + "\x00" + NormalizeMatchHost(sni)
+}
+
+// TLSCertificateStateForSNI resolves an SNI certificate state using the same
+// exact, wildcard, and catch-all host precedence as site matching.
+func (sn *Snapshot) TLSCertificateStateForSNI(bind string, sni string) (TLSCertificateState, bool) {
+	if sn == nil || sn.SiteTLSCertStateBySNI == nil {
+		return "", false
+	}
+	host := NormalizeMatchHost(sni)
+	if host == "" {
+		return "", false
+	}
+	lookup := func(candidate string) (TLSCertificateState, bool) {
+		state, ok := sn.SiteTLSCertStateBySNI[SNICertKey(bind, candidate)]
+		return state, ok
+	}
+	if state, ok := lookup(host); ok {
+		return state, true
+	}
+	if !isIPAddress(host) {
+		if idx := strings.Index(host, "."); idx > 0 {
+			if state, ok := lookup("*." + host[idx+1:]); ok {
+				return state, true
+			}
+		}
+	}
+	return lookup("*")
 }
 
 func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool) {

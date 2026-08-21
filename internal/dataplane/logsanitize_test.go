@@ -76,6 +76,22 @@ func TestSanitizeLogTextRedactsOnlyValue(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogTextRedactsWhitespaceDelimitedOpaqueValue(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		want  string
+	}{
+		{input: "password=alpha beta", want: "password=[redacted]"},
+		{input: "password=alpha beta&user=alice", want: "password=[redacted]&user=alice"},
+		{input: "password=alpha beta, user=alice", want: "password=[redacted], user=alice"},
+		{input: "password=alpha beta\nnext=value", want: "password=[redacted]\nnext=value"},
+	} {
+		if got := sanitizeLogText(tt.input); got != tt.want {
+			t.Errorf("sanitizeLogText(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 // TestIsSensitiveLogKeyLoweredMatchesWrapper 验证两个版本判定一致，
 // 且 Lowered 版对已小写输入免去重复转换。
 func TestIsSensitiveLogKeyLoweredMatchesWrapper(t *testing.T) {

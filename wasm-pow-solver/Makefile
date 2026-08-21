@@ -10,13 +10,21 @@ build:
 	cp pkg/pow.js $(GLUE_FILE)
 
 optimize: build
-	wasm-opt -Oz --enable-bulk-memory --enable-mutable-globals \
-		--strip-debug --strip-producers \
-		$(WASM_FILE) -o $(WASM_FILE)
+	wasm-pack build --target no-modules --release --out-dir pkg --out-name pow
 	npx terser $(GLUE_FILE) \
 		--compress passes=3,pure_getters=true,unsafe=true,unsafe_math=true,unsafe_comps=true \
 		--mangle toplevel=true,reserved='["wasm_bindgen"]' \
 		--output $(GLUE_FILE)
+
+	npx javascript-obfuscator $(GLUE_FILE) --output $(GLUE_FILE)  \
+		--compact true \
+		--control-flow-flattening true \
+		--dead-code-injection true \
+		--string-array true \
+		--string-array-encoding rc4 \
+		--self-defending true
+
+
 	@echo "WASM: $$(wc -c < $(WASM_FILE)) bytes"
 	@echo "Glue: $$(wc -c < $(GLUE_FILE)) bytes"
 

@@ -99,7 +99,7 @@ func UpdateNetworkConfig(repo *repository.SystemSettingsRepo, reload func() erro
 			DefaultNetwork *string `json:"default_network"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cfg := loadNetworkConfig(repo)
@@ -185,7 +185,7 @@ func UpdateHTTP2Config(repo *repository.SystemSettingsRepo, reload func() error)
 			MaxQueuedControlFrames       *int    `json:"max_queued_control_frames"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
@@ -263,7 +263,7 @@ func UpdateLogConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 			AlsoStdout *bool   `json:"also_stdout"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cfg := loadLogConfig(repo)
@@ -309,7 +309,7 @@ func UpdateTLSDefaultConfig(repo *repository.SystemSettingsRepo, reload func() e
 			SelfSignedOnIP           *bool   `json:"self_signed_on_ip"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cfg := loadTLSDefaultConfig(repo)
@@ -399,7 +399,7 @@ func UpdateRedisConfig(repo *repository.SystemSettingsRepo, reload func() error)
 			RedisDB       *int    `json:"redis_db"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cfg, err := LoadRedisConfig(repo)

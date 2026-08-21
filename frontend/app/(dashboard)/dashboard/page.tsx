@@ -348,6 +348,29 @@ export default function DashboardPage() {
     },
   ]
 
+  const visitorFusionItems: MetricStripItem[] = [
+    {
+      label: t("dashboard.total"),
+      value: formatNumber(d.visitor_fusion_https_released_total_24h),
+      rawValue: d.visitor_fusion_https_released_total_24h,
+    },
+    {
+      label: t("dashboard.visitorFusionHuman"),
+      value: formatNumber(d.visitor_fusion_human_24h),
+      rawValue: d.visitor_fusion_human_24h,
+    },
+    {
+      label: t("dashboard.visitorFusionBot"),
+      value: formatNumber(d.visitor_fusion_bot_24h),
+      rawValue: d.visitor_fusion_bot_24h,
+    },
+    {
+      label: t("dashboard.visitorFusionUnknown"),
+      value: formatNumber(d.visitor_fusion_unknown_24h),
+      rawValue: d.visitor_fusion_unknown_24h,
+    },
+  ]
+
   return (
     <div className="space-y-3">
       <Tabs defaultValue="traffic">
@@ -457,6 +480,17 @@ export default function DashboardPage() {
             items={runtimeItems}
           />
 
+          <MetricStrip
+            title={t("dashboard.visitorFusionTitle")}
+            caption={t("dashboard.visitorFusionCaption")}
+            action={
+              <Badge variant="outline" className="h-5 shrink-0 text-[10px]">
+                24h
+              </Badge>
+            }
+            items={visitorFusionItems}
+          />
+
           {/* 第三层：趋势图 */}
           <div className="grid gap-3 lg:grid-cols-2">
             <Card className="py-0">
@@ -549,6 +583,173 @@ export default function DashboardPage() {
 
         {/* Tab: 安全态势 */}
         <TabsContent value="security" className="space-y-3">
+          {/* 访问构成 —— 人工 vs 机器 24h 真实聚合（与 Bot 24h 同源不同维度） */}
+          <Card>
+            <CardHeader className="flex-row items-center justify-between px-4 py-2.5">
+              <CardTitle className="text-sm font-medium">
+                {t("dashboard.visitorMix24h")}
+              </CardTitle>
+              <Badge variant="outline" className="h-5 text-[10px]">
+                24h
+              </Badge>
+            </CardHeader>
+            <CardContent className="px-4 pt-0 pb-3">
+              {(() => {
+                const humanVisits = d.human_visits_24h ?? 0
+                const botVisits = d.bot_visits_24h ?? 0
+                const interceptVisits = d.unclassified_intercept_24h ?? 0
+                // 分母用后端真实聚合的窗口唯一 request_id 总数，而非三类之和，
+                // 否则「其他非安全类」动作会被挤出分母，比例被放大。
+                // 后端未返回该字段时退回三类之和，避免除零与比例失真。
+                const kindSum = humanVisits + botVisits + interceptVisits
+                const total = d.visit_kind_total_24h ?? kindSum
+                const otherVisits = Math.max(0, total - kindSum)
+                const pct = (v: number) => (total > 0 ? (v / total) * 100 : 0)
+                const humanRatio = pct(humanVisits)
+                const botRatio = pct(botVisits)
+                const interceptRatio = pct(interceptVisits)
+                const otherRatio = pct(otherVisits)
+                const pieData =
+                  total > 0
+                    ? [
+                        { name: t("dashboard.visitorHuman"), value: humanVisits },
+                        { name: t("dashboard.visitorBot"), value: botVisits },
+                        {
+                          name: t("dashboard.visitorUnclassifiedIntercept", {
+                            defaultValue: "未判定拦截",
+                          }),
+                          value: interceptVisits,
+                        },
+                        {
+                          name: t("dashboard.visitorOther", {
+                            defaultValue: "其他非安全类",
+                          }),
+                          value: otherVisits,
+                        },
+                      ].filter((slice) => slice.value > 0)
+                    : []
+                const VISITOR_KIND_COLORS: Record<string, string> = {
+                  [t("dashboard.visitorHuman")]: CHART_ACCENT,
+                  [t("dashboard.visitorBot")]: CHART_DANGER,
+                  [t("dashboard.visitorUnclassifiedIntercept", {
+                    defaultValue: "未判定拦截",
+                  })]: "var(--chart-3)",
+                  [t("dashboard.visitorOther", {
+                    defaultValue: "其他非安全类",
+                  })]: "var(--muted-foreground)",
+                }
+                return (
+                  <div className="grid items-center gap-4 md:grid-cols-[140px_1fr]">
+                    <div className="h-32">
+                      {pieData.length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie
+                              data={pieData}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={32}
+                              outerRadius={56}
+                              paddingAngle={2}
+                              dataKey="value"
+                            >
+                              {pieData.map((slice) => (
+                                <Cell
+                                  key={slice.name}
+                                  fill={VISITOR_KIND_COLORS[slice.name] ?? CHART_ACCENT}
+                                />
+                              ))}
+                            </Pie>
+                            <Tooltip />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                          {t("dashboard.noData")}
+                        </div>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="flex items-center gap-2 text-muted-foreground">
+                          <span
+                            className="h-2 w-2 rounded-full"
+                            style={{ background: CHART_ACCENT }}
+                          />
+                          {t("dashboard.visitorHuman")}
+                        </span>
+                        <span className="font-semibold">
+                          {formatNumber(humanVisits)}
+                        </span>
+                        <span className="w-16 text-right text-xs text-muted-foreground tabular-nums">
+                          {humanRatio.toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="flex items-center gap-2 text-muted-foreground">
+                          <span
+                            className="h-2 w-2 rounded-full"
+                            style={{ background: CHART_DANGER }}
+                          />
+                          {t("dashboard.visitorBot")}
+                        </span>
+                        <span className="font-semibold">
+                          {formatNumber(botVisits)}
+                        </span>
+                        <span className="w-16 text-right text-xs text-muted-foreground tabular-nums">
+                          {botRatio.toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="flex items-center gap-2 text-muted-foreground">
+                          <span
+                            className="h-2 w-2 rounded-full"
+                            style={{ background: "var(--chart-3)" }}
+                          />
+                          {t("dashboard.visitorUnclassifiedIntercept", {
+                            defaultValue: "未判定拦截",
+                          })}
+                        </span>
+                        <span className="font-semibold">
+                          {formatNumber(interceptVisits)}
+                        </span>
+                        <span className="w-16 text-right text-xs text-muted-foreground tabular-nums">
+                          {interceptRatio.toFixed(1)}%
+                        </span>
+                      </div>
+                      {otherVisits > 0 && (
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="flex items-center gap-2 text-muted-foreground">
+                            <span
+                              className="h-2 w-2 rounded-full"
+                              style={{ background: "var(--muted-foreground)" }}
+                            />
+                            {t("dashboard.visitorOther", {
+                              defaultValue: "其他非安全类",
+                            })}
+                          </span>
+                          <span className="font-semibold">
+                            {formatNumber(otherVisits)}
+                          </span>
+                          <span className="w-16 text-right text-xs text-muted-foreground tabular-nums">
+                            {otherRatio.toFixed(1)}%
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
+              {/* AGENTS.md 硬约束：统计卡片必须标注口径与误差来源 */}
+              <p className="mt-3 border-t pt-2 text-[11px] leading-relaxed text-muted-foreground">
+                {t("dashboard.visitorMixCaveat", {
+                  defaultValue:
+                    "口径：按 24h 内唯一 request_id 计，分母为后端全局聚合。「机器访问」仅含 bot 引擎判为恶意或可疑的请求，已知良性爬虫（如搜索引擎）计入人工访问。「未判定拦截」是被 OWASP/CVE/ACL 等在 bot 检测前短路拦截的请求，无 bot 评分，故单独成类而不计入人工。四类之和等于总数；若 bot 检测未启用，机器访问将恒为 0。",
+                })}
+              </p>
+            </CardContent>
+          </Card>
+
           {/* Bot / CVE / Drop 统计 */}
           <div className="grid gap-3 lg:grid-cols-3">
             <Card>

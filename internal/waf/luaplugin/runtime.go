@@ -106,11 +106,12 @@ type KVBackend interface {
 	Incr(key string, ttl time.Duration) (int64, error)
 }
 
-// ContextKVBackend 是可选的 KVBackend 扩展。实现它的后端会收到脚本执行的
-// runCtx，使调用方取消、脚本超时和请求作用域值传递到 KV I/O；未实现时仍调用
-// KVBackend 的兼容方法。
+// ContextKVBackend 是支持请求取消的 KVBackend 扩展。实现该接口的后端会收到脚本执行的
+// runCtx，使调用方取消、脚本超时和请求作用域值传递到 KV I/O；未实现时按不可用处理，
+// 防止无法响应取消的同步 I/O 阻塞数据面请求。
 type ContextKVBackend interface {
 	KVBackend
+	AvailableContext(ctx context.Context) bool
 	GetContext(ctx context.Context, key string) ([]byte, bool)
 	SetContext(ctx context.Context, key string, value []byte, ttl time.Duration) error
 	DeleteContext(ctx context.Context, key string)

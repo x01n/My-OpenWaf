@@ -41,7 +41,7 @@ func CreateAdminUser(repo *repository.AdminAccountRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var body createAdminUserReq
 		if err := c.BindJSON(&body); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		body.Username = strings.TrimSpace(body.Username)
@@ -101,7 +101,7 @@ func UpdateAdminRole(repo *repository.AdminAccountRepo, revoker ...func(string, 
 		}
 		var body updateRoleReq
 		if err := c.BindJSON(&body); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if !validRoles[body.Role] {
@@ -155,7 +155,7 @@ func UpdateAdminPassword(repo *repository.AdminAccountRepo, revoker ...func(stri
 		}
 		var body updatePasswordReq
 		if err := c.BindJSON(&body); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if body.Password == "" {

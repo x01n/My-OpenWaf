@@ -332,7 +332,7 @@ export default function SitesPage() {
       {/* 内容区 */}
       {isLoading ? (
         view === "grid" ? (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[repeat(auto-fill,minmax(320px,1fr))]">
             {Array.from({ length: 4 }).map((_, i) => (
               <Skeleton key={i} className="h-48 rounded-xl" />
             ))}
@@ -372,7 +372,7 @@ export default function SitesPage() {
           className="py-12"
         />
       ) : view === "grid" ? (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-[repeat(auto-fill,minmax(320px,1fr))]">
           {items.map((site) => (
             <SiteCard key={site.id} site={site} {...actionHandlers} />
           ))}

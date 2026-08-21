@@ -234,3 +234,45 @@ func formatUID(n uint) string {
 	}
 	return string(buf)
 }
+
+// TestSaveAccessConfigPartialUpdatePreservesUnspecifiedFields 验证部分保存不会覆盖未提交的开关、TTL 或密码字段。
+func TestSaveAccessConfigPartialUpdatePreservesUnspecifiedFields(t *testing.T) {
+	repo := newAccessControlRepoForTest(t)
+	handler := SaveAccessConfig(repo, func() error { return nil })
+
+	invokeAccessHandler(t, handler, "1", []byte(`{"enabled":true,"session_ttl":3600,"shared_password":"initial"}`))
+
+	ctx := invokeAccessHandler(t, handler, "1", []byte(`{"shared_password":"rotated"}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("partial password update returned %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var resp accessConfigResp
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode password update response: %v", err)
+	}
+	if !resp.Enabled || resp.SessionTTL != 3600 || !resp.SharedPasswordSet {
+		t.Fatalf("password-only update overwrote unrelated fields: %+v", resp)
+	}
+
+	ctx = invokeAccessHandler(t, handler, "1", []byte(`{"session_ttl":7200}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("partial TTL update returned %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode TTL update response: %v", err)
+	}
+	if !resp.Enabled || resp.SessionTTL != 7200 || !resp.SharedPasswordSet {
+		t.Fatalf("TTL-only update overwrote unrelated fields: %+v", resp)
+	}
+
+	ctx = invokeAccessHandler(t, handler, "1", []byte(`{"enabled":false}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("partial enabled update returned %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode enabled update response: %v", err)
+	}
+	if resp.Enabled || resp.SessionTTL != 7200 || !resp.SharedPasswordSet {
+		t.Fatalf("enabled-only update overwrote unrelated fields: %+v", resp)
+	}
+}
