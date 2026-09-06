@@ -1,6 +1,6 @@
 module My-OpenWaf
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/andybalholm/brotli v1.2.2
@@ -25,7 +25,7 @@ require (
 	github.com/wenlng/go-captcha/v2 v2.0.5
 	github.com/wu238121-a11y/go-ja4 v1.0.0
 	github.com/yuin/gopher-lua v1.1.2
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/image v0.45.0
 	golang.org/x/net v0.58.0
 	golang.org/x/sync v0.22.0
