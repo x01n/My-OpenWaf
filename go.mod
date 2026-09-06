@@ -1,6 +1,6 @@
 module My-OpenWaf
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/andybalholm/brotli v1.2.2
@@ -17,7 +17,7 @@ require (
 	github.com/hertz-contrib/websocket v0.2.0
 	github.com/klauspost/compress v1.19.2
 	github.com/oschwald/maxminddb-golang v1.13.1
-	github.com/quic-go/quic-go v0.61.0
+	github.com/quic-go/quic-go v0.62.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/tdewolff/parse/v2 v2.8.16
