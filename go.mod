@@ -3,7 +3,7 @@ module My-OpenWaf
 go 1.25.5
 
 require (
-	github.com/andybalholm/brotli v1.2.2
+	github.com/andybalholm/brotli v1.2.3
 	github.com/buke/quickjs-go v0.7.7
 	github.com/cloudwego/gopkg v0.2.0
 	github.com/cloudwego/hertz v0.10.6
