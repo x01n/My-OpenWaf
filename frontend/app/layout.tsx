@@ -3,6 +3,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { I18nProvider } from "@/components/i18n-provider"
+import { AuthProvider } from "@/components/auth-provider"
 
 export default function RootLayout({
   children,
@@ -14,10 +15,12 @@ export default function RootLayout({
       <body className="font-sans">
         <ThemeProvider>
           <I18nProvider>
-            <TooltipProvider>
-              {children}
-              <Toaster position="top-center" />
-            </TooltipProvider>
+            <AuthProvider>
+              <TooltipProvider>
+                {children}
+                <Toaster position="top-center" />
+              </TooltipProvider>
+            </AuthProvider>
           </I18nProvider>
         </ThemeProvider>
       </body>

@@ -1,9 +1,11 @@
 package cache
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -115,13 +117,105 @@ func TestHotCacheErrorLogThrottled(t *testing.T) {
 
 	h := newSilentHotCache(client)
 	var dest string
-	for i := 0; i < 3; i++ {
-		h.Get("k", &dest)
-	}
+	h.Get("k", &dest)
 	if !h.errLogging.Load() {
 		t.Error("故障期间 errLogging 应保持置位以抑制重复日志")
 	}
-	if h.ErrorCount() != 3 {
-		t.Errorf("ErrorCount = %d, want 3 —— 日志抑制不应影响计数", h.ErrorCount())
+	if h.Available() {
+		t.Fatal("首次 Redis 故障后 HotCache 应进入短时熔断")
 	}
+
+	started := time.Now()
+	h.Get("k", &dest)
+	if elapsed := time.Since(started); elapsed >= 50*time.Millisecond {
+		t.Fatalf("熔断期间 Get 耗时 %s，未快速回源", elapsed)
+	}
+	if h.ErrorCount() != 1 {
+		t.Errorf("ErrorCount = %d, want 1 —— 熔断期间不应重复访问故障 Redis", h.ErrorCount())
+	}
+
+	h.unavailableUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	h.Get("k", &dest)
+	if h.ErrorCount() != 2 {
+		t.Errorf("ErrorCount = %d, want 2 —— 熔断到期后应重新探测 Redis", h.ErrorCount())
+	}
+}
+
+func TestHotCacheIgnoresResultsFromReplacedClient(t *testing.T) {
+	newClient := func(t *testing.T, addr string) *goredis.Client {
+		t.Helper()
+		client := goredis.NewClient(&goredis.Options{Addr: addr})
+		t.Cleanup(func() { _ = client.Close() })
+		return client
+	}
+
+	t.Run("stale failure does not alter counters or breaker", func(t *testing.T) {
+		oldClient := newClient(t, "127.0.0.1:1")
+		replacement := newClient(t, "127.0.0.1:2")
+		h := newSilentHotCache(oldClient)
+		started := make(chan struct{})
+		release := make(chan struct{})
+		done := make(chan struct{})
+
+		go func() {
+			close(started)
+			<-release
+			h.recordReadErr(oldClient, "old-error", errors.New("stale redis failure"))
+			h.recordReadErr(oldClient, "old-miss", goredis.Nil)
+			close(done)
+		}()
+
+		<-started
+		h.SetRedis(replacement)
+		close(release)
+		<-done
+
+		if h.ErrorCount() != 0 {
+			t.Fatalf("ErrorCount = %d, want 0 for a stale client failure", h.ErrorCount())
+		}
+		if hits, misses := h.HitStats(); hits != 0 || misses != 0 {
+			t.Fatalf("stale client changed hit stats: hits=%d misses=%d", hits, misses)
+		}
+		if h.unavailableUntil.Load() != 0 || h.errLogging.Load() {
+			t.Fatal("stale client failure must not trip the replacement client's breaker")
+		}
+	})
+
+	t.Run("stale success does not heal replacement failure or add hits", func(t *testing.T) {
+		oldClient := newClient(t, "127.0.0.1:3")
+		replacement := newClient(t, "127.0.0.1:4")
+		h := newSilentHotCache(oldClient)
+		started := make(chan struct{})
+		release := make(chan struct{})
+		accepted := make(chan bool, 1)
+
+		go func() {
+			close(started)
+			<-release
+			current := h.noteHealthy(oldClient)
+			if current {
+				h.hits.Add(1)
+			}
+			accepted <- current
+		}()
+
+		<-started
+		h.SetRedis(replacement)
+		h.recordReadErr(replacement, "new-error", errors.New("replacement redis failure"))
+		breakerUntil := h.unavailableUntil.Load()
+		close(release)
+		if <-accepted {
+			t.Fatal("a stale client's successful result must be rejected")
+		}
+
+		if h.ErrorCount() != 1 {
+			t.Fatalf("ErrorCount = %d, want only the replacement client's failure", h.ErrorCount())
+		}
+		if hits, misses := h.HitStats(); hits != 0 || misses != 0 {
+			t.Fatalf("stale success changed hit stats: hits=%d misses=%d", hits, misses)
+		}
+		if h.unavailableUntil.Load() != breakerUntil || !h.errLogging.Load() {
+			t.Fatal("stale success must not heal the replacement client's breaker")
+		}
+	})
 }

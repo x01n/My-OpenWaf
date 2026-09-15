@@ -170,9 +170,7 @@ export function OverviewTab({ site, rulesCount }: OverviewTabProps) {
               <Button
                 variant="outline"
                 className="h-10 gap-2"
-                onClick={() =>
-                  router.push(`/security-events?site_id=${site.id}`)
-                }
+                onClick={() => router.push(`/access-logs?site_id=${site.id}`)}
               >
                 <IconChartLine className="h-4 w-4" />
                 {t("dashboard.requestTrend")}
@@ -211,7 +209,9 @@ export function OverviewTab({ site, rulesCount }: OverviewTabProps) {
                 variant="outline"
                 className="h-10 gap-2"
                 onClick={() =>
-                  router.push(`/security-events?site_id=${site.id}`)
+                  router.push(
+                    `/access-logs?site_id=${site.id}&status_group=5xx`
+                  )
                 }
               >
                 <IconAlertCircle className="h-4 w-4" />

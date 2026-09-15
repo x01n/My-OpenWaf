@@ -312,3 +312,11 @@ func TestConfigureAutoBanActionUnsupportedFallsBackToIntercept(t *testing.T) {
 		t.Fatalf("unsupported auto-ban action should fall back to intercept, got %q", d.Action)
 	}
 }
+
+func TestIPReputationCloseIsIdempotent(t *testing.T) {
+	r := NewIPReputation()
+	r.Close()
+	r.Close()
+	var zero IPReputation
+	zero.Close()
+}

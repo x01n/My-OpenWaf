@@ -2,12 +2,13 @@
 
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
 import { PageHeader } from "@/components/page-header"
 import {
   useIPLists,
   useIPListMutation,
   useIPListDelete,
-  useSites,
+  useAllSites,
   usePresetBotWhitelist,
   usePresetBotWhitelistSeed,
 } from "@/hooks/use-api"
@@ -49,13 +50,15 @@ const SCOPE_GLOBAL = "global"
 
 export default function IPListsPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
 
   // 作用域：全局或某站点 ID（字符串形式，SCOPE_GLOBAL 表示全局）
   const [scope, setScope] = useState<string>(SCOPE_GLOBAL)
   const scopeSiteId = scope === SCOPE_GLOBAL ? undefined : Number(scope)
 
   // 站点列表用于作用域下拉与站点名映射
-  const { data: sitesData } = useSites({ page_size: 500 })
+  const { data: sitesData } = useAllSites()
   const sites = useMemo(() => sitesData?.items || [], [sitesData])
   const siteNameMap = useMemo(() => {
     const map = new Map<number, string>()
@@ -143,6 +146,7 @@ export default function IPListsPage() {
   }
 
   const handleCreate = async () => {
+    if (!canManage) return
     try {
       const payload: Partial<IPEntry> = {
         value: form.value.trim(),
@@ -162,6 +166,7 @@ export default function IPListsPage() {
   }
 
   const handleBulkImport = async () => {
+    if (!canManage) return
     const lines = bulkText
       .split("\n")
       .map((l) => l.trim())
@@ -196,7 +201,7 @@ export default function IPListsPage() {
   }
 
   const confirmDelete = async () => {
-    if (!deleteId) return
+    if (!canManage || !deleteId) return
     try {
       await deleteIP(deleteId)
       toast.success(t("common.deleteSuccess"))
@@ -209,6 +214,7 @@ export default function IPListsPage() {
 
   /** 应用预置爬虫白名单：调用 seed 后按返回统计给出提示并刷新列表 */
   const handleApplyPresetBots = async () => {
+    if (!canManage) return
     try {
       const res = await seedPreset(undefined)
       toast.success(
@@ -239,7 +245,12 @@ export default function IPListsPage() {
       key: "value",
       title: t("ipLists.ipCidr"),
       render: (row: IPEntry) => (
-        <span className="font-mono text-sm">{row.value || "-"}</span>
+        <span
+          className="block max-w-[220px] truncate font-mono text-sm"
+          title={row.value || "-"}
+        >
+          {row.value || "-"}
+        </span>
       ),
     },
     {
@@ -278,9 +289,7 @@ export default function IPListsPage() {
       title: t("ipLists.action"),
       width: "110px",
       render: (row: IPEntry) => (
-      <Badge
-          variant={row.kind === "whitelist" ? "secondary" : "destructive"}
-        >
+        <Badge variant={row.kind === "whitelist" ? "secondary" : "destructive"}>
           {row.kind === "whitelist"
             ? t("ipLists.actionAllow")
             : row.action === "drop"
@@ -293,7 +302,12 @@ export default function IPListsPage() {
       key: "note",
       title: t("ipLists.reason"),
       render: (row: IPEntry) => (
-        <span className="text-sm text-muted-foreground">{row.note || "-"}</span>
+        <span
+          className="block max-w-[260px] truncate text-sm text-muted-foreground"
+          title={row.note || "-"}
+        >
+          {row.note || "-"}
+        </span>
       ),
     },
     {
@@ -306,6 +320,7 @@ export default function IPListsPage() {
           size="icon-sm"
           onClick={() => setDeleteId(row.id)}
           title={t("common.delete")}
+          disabled={!canManage}
         >
           <IconTrash className="h-4 w-4 text-destructive" />
         </Button>
@@ -320,15 +335,23 @@ export default function IPListsPage() {
         description={t("ipLists.description")}
         actions={
           <>
-            <Button variant="outline" onClick={() => setPresetDialogOpen(true)}>
+            <Button
+              variant="outline"
+              onClick={() => setPresetDialogOpen(true)}
+              disabled={!canManage}
+            >
               <IconRobot className="h-4 w-4" />
               {t("ipLists.presetBots.button")}
             </Button>
-            <Button variant="outline" onClick={() => setBulkDialogOpen(true)}>
+            <Button
+              variant="outline"
+              onClick={() => setBulkDialogOpen(true)}
+              disabled={!canManage}
+            >
               <IconUpload className="h-4 w-4" />
               {t("ipLists.bulkImport")}
             </Button>
-            <Button onClick={() => setDialogOpen(true)}>
+            <Button onClick={() => setDialogOpen(true)} disabled={!canManage}>
               <IconPlus className="h-4 w-4" />
               {t("ipLists.add")}
             </Button>
@@ -343,6 +366,12 @@ export default function IPListsPage() {
             {((globalError || siteError) as Error)?.message ||
               t("error.unexpectedError")}
           </AlertDescription>
+        </Alert>
+      )}
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
         </Alert>
       )}
 
@@ -404,50 +433,31 @@ export default function IPListsPage() {
           <DialogHeader>
             <DialogTitle>{t("ipLists.addTitle")}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>{t("ipLists.ipOrCidr")}</Label>
-              <Input
-                value={form.value}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, value: e.target.value }))
-                }
-                placeholder={t("ipLists.ipOrCidrPlaceholder")}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("common.type")}</Label>
-              <Select
-                value={form.kind}
-                onValueChange={(v) =>
-                  setForm((f) => ({
-                    ...f,
-                    kind: v as "blacklist" | "whitelist",
-                  }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="whitelist">
-                    {t("ipLists.whitelist")}
-                  </SelectItem>
-                  <SelectItem value="blacklist">
-                    {t("ipLists.blacklist")}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {form.kind === "blacklist" ? (
+          <fieldset
+            disabled={!canManage}
+            className="m-0 space-y-4 border-0 p-0"
+          >
+            <div className="space-y-4">
               <div className="space-y-2">
-                <Label>{t("ipLists.action")}</Label>
+                <Label>{t("ipLists.ipOrCidr")}</Label>
+                <Input
+                  value={form.value}
+                  maxLength={64}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, value: e.target.value }))
+                  }
+                  placeholder={t("ipLists.ipOrCidrPlaceholder")}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t("common.type")}</Label>
                 <Select
-                  value={form.action}
+                  value={form.kind}
+                  disabled={!canManage}
                   onValueChange={(v) =>
                     setForm((f) => ({
                       ...f,
-                      action: v as "intercept" | "drop",
+                      kind: v as "blacklist" | "whitelist",
                     }))
                   }
                 >
@@ -455,63 +465,92 @@ export default function IPListsPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="intercept">
-                      {t("ipLists.actionIntercept")}
+                    <SelectItem value="whitelist">
+                      {t("ipLists.whitelist")}
                     </SelectItem>
-                    <SelectItem value="drop">
-                      {t("ipLists.actionDrop")}
+                    <SelectItem value="blacklist">
+                      {t("ipLists.blacklist")}
                     </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-            ) : (
+              {form.kind === "blacklist" ? (
+                <div className="space-y-2">
+                  <Label>{t("ipLists.action")}</Label>
+                  <Select
+                    value={form.action}
+                    disabled={!canManage}
+                    onValueChange={(v) =>
+                      setForm((f) => ({
+                        ...f,
+                        action: v as "intercept" | "drop",
+                      }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="intercept">
+                        {t("ipLists.actionIntercept")}
+                      </SelectItem>
+                      <SelectItem value="drop">
+                        {t("ipLists.actionDrop")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <Label>{t("ipLists.action")}</Label>
+                  <Badge variant="secondary">{t("ipLists.actionAllow")}</Badge>
+                </div>
+              )}
               <div className="space-y-2">
-                <Label>{t("ipLists.action")}</Label>
-                <Badge variant="secondary">{t("ipLists.actionAllow")}</Badge>
-              </div>
-            )}
-            <div className="space-y-2">
-              <Label>{t("ipLists.scope")}</Label>
-              <Select
-                value={form.scope}
-                onValueChange={(v) => setForm((f) => ({ ...f, scope: v }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={SCOPE_GLOBAL}>
-                    {t("ipLists.scopeGlobal")}
-                  </SelectItem>
-                  {sites.map((s) => (
-                    <SelectItem key={s.id} value={String(s.id)}>
-                      {s.host}
+                <Label>{t("ipLists.scope")}</Label>
+                <Select
+                  value={form.scope}
+                  disabled={!canManage}
+                  onValueChange={(v) => setForm((f) => ({ ...f, scope: v }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={SCOPE_GLOBAL}>
+                      {t("ipLists.scopeGlobal")}
                     </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {t("ipLists.scopeHint")}
-              </p>
+                    {sites.map((s) => (
+                      <SelectItem key={s.id} value={String(s.id)}>
+                        {s.host}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t("ipLists.scopeHint")}
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("ipLists.reason")}</Label>
+                <Input
+                  value={form.note}
+                  maxLength={255}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, note: e.target.value }))
+                  }
+                  placeholder={t("ipLists.reasonPlaceholder")}
+                />
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label>{t("ipLists.reason")}</Label>
-              <Input
-                value={form.note}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, note: e.target.value }))
-                }
-                placeholder={t("ipLists.reasonPlaceholder")}
-              />
-            </div>
-          </div>
+          </fieldset>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
               {t("common.cancel")}
             </Button>
             <Button
               onClick={handleCreate}
-              disabled={mutateLoading || !form.value.trim()}
+              disabled={!canManage || mutateLoading || !form.value.trim()}
             >
               {mutateLoading ? t("common.submitting") : t("common.create")}
             </Button>
@@ -524,67 +563,77 @@ export default function IPListsPage() {
           <DialogHeader>
             <DialogTitle>{t("ipLists.bulkImportTitle")}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>{t("common.type")}</Label>
-              <Select
-                value={bulkKind}
-                onValueChange={(v) =>
-                  setBulkKind(v as "blacklist" | "whitelist")
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="whitelist">
-                    {t("ipLists.whitelist")}
-                  </SelectItem>
-                  <SelectItem value="blacklist">
-                    {t("ipLists.blacklist")}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("ipLists.scope")}</Label>
-              <Select value={bulkScope} onValueChange={setBulkScope}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={SCOPE_GLOBAL}>
-                    {t("ipLists.scopeGlobal")}
-                  </SelectItem>
-                  {sites.map((s) => (
-                    <SelectItem key={s.id} value={String(s.id)}>
-                      {s.host}
+          <fieldset
+            disabled={!canManage}
+            className="m-0 space-y-4 border-0 p-0"
+          >
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label>{t("common.type")}</Label>
+                <Select
+                  value={bulkKind}
+                  disabled={!canManage}
+                  onValueChange={(v) =>
+                    setBulkKind(v as "blacklist" | "whitelist")
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="whitelist">
+                      {t("ipLists.whitelist")}
                     </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                    <SelectItem value="blacklist">
+                      {t("ipLists.blacklist")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("ipLists.scope")}</Label>
+                <Select
+                  value={bulkScope}
+                  disabled={!canManage}
+                  onValueChange={setBulkScope}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={SCOPE_GLOBAL}>
+                      {t("ipLists.scopeGlobal")}
+                    </SelectItem>
+                    {sites.map((s) => (
+                      <SelectItem key={s.id} value={String(s.id)}>
+                        {s.host}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("ipLists.bulkInput")}</Label>
+                <Textarea
+                  value={bulkText}
+                  onChange={(e) => setBulkText(e.target.value)}
+                  placeholder={t("ipLists.bulkInputPlaceholder")}
+                  rows={8}
+                  className="font-mono text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("ipLists.bulkInputHint")}
+                </p>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label>{t("ipLists.bulkInput")}</Label>
-              <Textarea
-                value={bulkText}
-                onChange={(e) => setBulkText(e.target.value)}
-                placeholder={t("ipLists.bulkInputPlaceholder")}
-                rows={8}
-                className="font-mono text-sm"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t("ipLists.bulkInputHint")}
-              </p>
-            </div>
-          </div>
+          </fieldset>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBulkDialogOpen(false)}>
               {t("common.cancel")}
             </Button>
             <Button
               onClick={handleBulkImport}
-              disabled={mutateLoading || !bulkText.trim()}
+              disabled={!canManage || mutateLoading || !bulkText.trim()}
             >
               {mutateLoading ? t("common.submitting") : t("ipLists.importBtn")}
             </Button>
@@ -650,7 +699,7 @@ export default function IPListsPage() {
             </Button>
             <Button
               onClick={handleApplyPresetBots}
-              disabled={presetSeeding || presetLoading}
+              disabled={!canManage || presetSeeding || presetLoading}
             >
               {presetSeeding
                 ? t("common.submitting")

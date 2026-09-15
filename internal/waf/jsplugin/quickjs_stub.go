@@ -6,6 +6,12 @@ import (
 	"context"
 )
 
+// RuntimeBackend reports that this binary has no executable JavaScript backend.
+func RuntimeBackend() string { return BackendUnavailable }
+
+// RuntimeAvailable reports whether this build can create a JavaScript executor.
+func RuntimeAvailable() bool { return false }
+
 // Compile 在禁用 cgo 的构建中保留同一接口，但明确返回不可用错误。
 func Compile(name, source string, opts ScriptOptions) (*Script, error) {
 	return nil, ErrCGODisabled
@@ -26,6 +32,17 @@ func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapsho
 
 // Evaluate 保留 API 形状并返回不可用错误。
 func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
+	if err := validateExecutionStage(script); err != nil {
+		return MutationPlan{}, err
+	}
+	return MutationPlan{}, ErrCGODisabled
+}
+
+// Validate reports the same unavailable runtime without changing statistics.
+func (e *Engine) Validate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
+	if err := validateExecutionStage(script); err != nil {
+		return MutationPlan{}, err
+	}
 	return MutationPlan{}, ErrCGODisabled
 }
 

@@ -37,6 +37,8 @@ interface DataTableProps<T = unknown> {
   emptyText?: string
   emptyContent?: ReactNode
   className?: string
+  onRowClick?: (row: T) => void
+  getRowAriaLabel?: (row: T) => string
 }
 
 export function DataTable<T = unknown>({
@@ -47,6 +49,8 @@ export function DataTable<T = unknown>({
   emptyText = "",
   emptyContent,
   className,
+  onRowClick,
+  getRowAriaLabel,
 }: DataTableProps<T>) {
   const { t } = useTranslation()
 
@@ -130,7 +134,25 @@ export function DataTable<T = unknown>({
           {data.map((row, index) => (
             <TableRow
               key={rowKey ? rowKey(row) : index}
-              className="hover:bg-primary/[0.06] dark:hover:bg-primary/[0.12]"
+              tabIndex={onRowClick ? 0 : undefined}
+              aria-label={getRowAriaLabel?.(row)}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              onKeyDown={
+                onRowClick
+                  ? (event) => {
+                      if (event.target !== event.currentTarget) return
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault()
+                        onRowClick(row)
+                      }
+                    }
+                  : undefined
+              }
+              className={cn(
+                "hover:bg-primary/[0.06] dark:hover:bg-primary/[0.12]",
+                onRowClick &&
+                  "cursor-pointer focus-visible:bg-primary/[0.06] focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset dark:focus-visible:bg-primary/[0.12]"
+              )}
             >
               {columns.map((col) => (
                 <TableCell key={col.key} className={col.cellClassName}>

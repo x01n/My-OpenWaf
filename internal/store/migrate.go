@@ -99,12 +99,15 @@ func AutoMigrate(db *gorm.DB) error {
 }
 
 func AutoMigrateLogs(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&SecurityEvent{},
 		&AccessLog{},
 		&DropEvent{},
 		&BotScoreLog{},
-	)
+	); err != nil {
+		return err
+	}
+	return migrations.V12MigrateAccessLogFingerprintKey(db)
 }
 
 func BumpRevision(db *gorm.DB) error {

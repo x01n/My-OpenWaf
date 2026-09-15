@@ -31,11 +31,13 @@ function getPageTitle(pathname: string): string {
 
 export function TopBar() {
   const pathname = usePathname()
-  const { user, logout } = useAuth()
+  const { user, loading: authLoading, logout } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const reload = useSystemReload()
   const { t } = useTranslation()
 
   const handleReload = async () => {
+    if (!canManage) return
     try {
       await reload.execute({})
       toast.success(t("common.saveSuccess"))
@@ -55,7 +57,10 @@ export function TopBar() {
           variant="outline"
           size="sm"
           onClick={handleReload}
-          disabled={reload.loading}
+          disabled={authLoading || !canManage || reload.loading}
+          title={
+            !authLoading && !canManage ? t("common.readOnlyHint") : undefined
+          }
           className="hidden sm:flex"
         >
           <IconReload

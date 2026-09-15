@@ -24,6 +24,7 @@ func newTestDetector(maxFailures int, lockoutDur time.Duration) *BruteForceDetec
 // TestNewBruteForceDetectorAppliesDefaults 非正参数应回落到 5 次 / 15 分钟。
 func TestNewBruteForceDetectorAppliesDefaults(t *testing.T) {
 	bf := NewBruteForceDetector(0, 0)
+	defer bf.Close()
 	if bf.maxFailures != 5 {
 		t.Errorf("maxFailures = %d, want 5", bf.maxFailures)
 	}
@@ -35,6 +36,15 @@ func TestNewBruteForceDetectorAppliesDefaults(t *testing.T) {
 	if neg.maxFailures != 5 || neg.lockoutDur != 15*time.Minute {
 		t.Errorf("负数参数未回落到默认值: maxFailures=%d lockoutDur=%v", neg.maxFailures, neg.lockoutDur)
 	}
+	neg.Close()
+}
+
+func TestBruteForceDetectorCloseIsIdempotent(t *testing.T) {
+	bf := NewBruteForceDetector(5, time.Minute)
+	bf.Close()
+	bf.Close()
+	var zero BruteForceDetector
+	zero.Close()
 }
 
 // TestReconfigureAppliesDefaults Reconfigure 传入非正参数同样应回落默认值。

@@ -56,14 +56,55 @@ func TestAutoMigrateOnExternalDialect(t *testing.T) {
 			if err := AutoMigrateLogs(db); err != nil {
 				t.Fatalf("%s AutoMigrateLogs 失败：%v", c.name, err)
 			}
+			if err := AutoMigrateLogs(db); err != nil {
+				t.Fatalf("%s AutoMigrateLogs 重复执行失败（应幂等）：%v", c.name, err)
+			}
 
 			assertDedupKeyIndexUsable(t, db, c.name)
 			assertHourBucketFormat(t, db, c.name)
+			assertLogPaginationIndexes(t, db, c.name)
 		})
 	}
 
 	if ran == 0 {
 		t.Skip("未配置任何外部数据库 DSN，跳过多方言迁移验证")
+	}
+}
+
+func assertLogPaginationIndexes(t *testing.T, db *gorm.DB, dialect string) {
+	t.Helper()
+	tests := []struct {
+		model     any
+		indexName string
+	}{
+		{model: &AccessLog{}, indexName: "idx_al_site_created_id"},
+		{model: &SecurityEvent{}, indexName: "idx_se_site_created_id"},
+	}
+	want := []string{"site_id", "created_at", "id"}
+	for _, tt := range tests {
+		indexes, err := db.Migrator().GetIndexes(tt.model)
+		if err != nil {
+			t.Fatalf("%s: 读取索引 %s 失败：%v", dialect, tt.indexName, err)
+		}
+		found := false
+		for _, index := range indexes {
+			if index.Name() != tt.indexName {
+				continue
+			}
+			found = true
+			columns := index.Columns()
+			if len(columns) != len(want) {
+				t.Fatalf("%s: 索引 %s 列=%v，期望=%v", dialect, tt.indexName, columns, want)
+			}
+			for i := range want {
+				if columns[i] != want[i] {
+					t.Fatalf("%s: 索引 %s 第 %d 列=%q，期望=%q", dialect, tt.indexName, i, columns[i], want[i])
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s: 缺少日志分页索引 %s", dialect, tt.indexName)
+		}
 	}
 }
 

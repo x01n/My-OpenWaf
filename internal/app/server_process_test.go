@@ -1363,7 +1363,6 @@ func TestRunHotReloadsSharedHTTP3RouteTableAfterSiteALPNUpdateInSeparateProcess(
 
 	disabledPath := requestPath + "/disabled-h3-route"
 	siteAObservabilityBeforeDisabled := appProc.siteObservabilityTotals(t, siteAID)
-	globalObservabilityBeforeDisabled := appProc.globalObservabilityTotals(t)
 	fingerprintBeforeDisabled := appProc.fingerprintSummaryTotals(t, url.Values{
 		"tls_sni":  []string{hostA},
 		"tls_alpn": []string{"h3"},
@@ -1378,10 +1377,13 @@ func TestRunHotReloadsSharedHTTP3RouteTableAfterSiteALPNUpdateInSeparateProcess(
 		t.Fatalf("disabled HTTP/3 route A body still reached upstream A: %s\n%s", bodyDisabled, appProc.output.String())
 	}
 	appProc.requireSiteObservabilityTotals(t, siteAID, siteAObservabilityBeforeDisabled, "disabled shared HTTP/3 route A")
-	appProc.requireGlobalObservabilityTotals(t, globalObservabilityBeforeDisabled, "disabled shared HTTP/3 route A")
 	appProc.requireNoSiteObservability(t, siteAID, disabledPath, "disabled shared HTTP/3 route A")
-	appProc.requireNoGlobalObservability(t, hostA, disabledPath, "disabled shared HTTP/3 route A")
-	appProc.requireFingerprintSummaryTotals(t, url.Values{
+	globalEntry := appProc.waitForGlobalAccessLog(t, hostA, disabledPath, http.StatusOK, "routing_error")
+	if globalEntry.TLSJA3Hash == "" || globalEntry.TLSJA4 == "" {
+		t.Fatalf("disabled shared HTTP/3 route A global log lost TLS fingerprint: %+v", globalEntry)
+	}
+	fingerprintBeforeDisabled.count++
+	appProc.waitForFingerprintSummaryTotals(t, url.Values{
 		"tls_sni":  []string{hostA},
 		"tls_alpn": []string{"h3"},
 	}, fingerprintBeforeDisabled, "disabled shared HTTP/3 route A")
@@ -5505,7 +5507,7 @@ func TestRunCancelsHTTPSHTTP2UpstreamResponseWhenClientResetsStreamInSeparatePro
 	}
 	readRawHTTP2ResponseStatusProcess(t, conn, fr, healthyStreamID, "200")
 	appProc.requireNoSiteObservability(t, siteID, requestPath, "HTTPS h2 response reset")
-	appProc.requireNoGlobalObservability(t, siteHost, requestPath, "HTTPS h2 response reset")
+	appProc.waitForGlobalAccessLog(t, siteHost, requestPath, 0, "none")
 
 }
 
@@ -5689,7 +5691,7 @@ func TestRunCancelsHTTPSHTTP2UpstreamSSEWhenClientResetsStreamInSeparateProcess(
 	}
 	readRawHTTP2ResponseStatusProcess(t, conn, fr, healthyStreamID, "200")
 	appProc.requireNoSiteObservability(t, siteID, requestPath, "HTTPS h2 SSE reset")
-	appProc.requireNoGlobalObservability(t, siteHost, requestPath, "HTTPS h2 SSE reset")
+	appProc.waitForGlobalAccessLog(t, siteHost, requestPath, 0, "none")
 
 }
 
@@ -15743,6 +15745,33 @@ func (h *appProcessHarness) requireNoGlobalObservability(t *testing.T, host stri
 	}
 }
 
+func (h *appProcessHarness) waitForGlobalAccessLog(t *testing.T, host, path string, status int, wafAction string) store.AccessLog {
+	t.Helper()
+
+	type accessLogListResponse struct {
+		Items []store.AccessLog `json:"items"`
+	}
+	query := url.Values{}
+	query.Set("page", "1")
+	query.Set("page_size", "20")
+	query.Set("host", host)
+	query.Set("path", path)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var resp accessLogListResponse
+		h.getJSON(t, "/api/v1/access-logs?"+query.Encode(), &resp)
+		for _, item := range resp.Items {
+			if item.Host == host && item.Path == path && item.StatusCode == status && item.WAFAction == wafAction {
+				return item
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("global access log was not recorded for host=%q path=%q status=%d action=%q: items=%+v", host, path, status, wafAction, resp.Items)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func (h *appProcessHarness) requireNoFingerprintSummary(t *testing.T, params url.Values, label string) {
 	t.Helper()
 
@@ -15927,6 +15956,22 @@ func (h *appProcessHarness) requireFingerprintSummaryTotals(t *testing.T, params
 		}
 		if time.Now().After(deadline) {
 			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (h *appProcessHarness) waitForFingerprintSummaryTotals(t *testing.T, params url.Values, want appProcessFingerprintSummaryTotals, label string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := h.fingerprintSummaryTotals(t, params)
+		if got.groups >= want.groups && got.count >= want.count {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s fingerprint summary did not reach minimum totals: got=%+v want_at_least=%+v", label, got, want)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

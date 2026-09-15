@@ -13,7 +13,11 @@ import {
   IconDeviceFloppy,
 } from "@tabler/icons-react"
 import { useSiteMutation } from "@/hooks/use-api"
-import { CCRulesEditor, type CCRule } from "@/components/cc-rules-editor"
+import {
+  CCRulesEditor,
+  toCCRules,
+  type CCRule,
+} from "@/components/cc-rules-editor"
 import type { Site } from "@/lib/types"
 
 /**
@@ -58,9 +62,7 @@ function parseCCRules(raw: string | undefined): CCRule[] {
   if (!raw) return []
   try {
     const parsed = JSON.parse(raw)
-    if (Array.isArray(parsed)) {
-      return parsed as CCRule[]
-    }
+    return toCCRules(parsed)
   } catch {
     // 忽略非法 JSON，返回空数组
   }
@@ -69,6 +71,7 @@ function parseCCRules(raw: string | undefined): CCRule[] {
 
 interface CCProtectionTabProps {
   site: Site
+  canManage: boolean
 }
 
 /**
@@ -77,7 +80,7 @@ interface CCProtectionTabProps {
  * 全局 CC 防护在 CC 防护页维护；本 Tab 仅配置当前站点对全局 CC 防护的覆盖。
  * 采用三态：继承全局 / 站点自定义规则 / 站点关闭 CC。cc_use_custom 为 null 时表示继承全局。
  */
-export function CCProtectionTab({ site }: CCProtectionTabProps) {
+export function CCProtectionTab({ site, canManage }: CCProtectionTabProps) {
   const { t } = useTranslation()
   const updateSite = useSiteMutation()
 
@@ -93,26 +96,31 @@ export function CCProtectionTab({ site }: CCProtectionTabProps) {
 
   const handleModeChange = useCallback(
     (value: string) => {
+      if (!canManage) return
       setMode(value as CCTriState)
       markDirty()
     },
-    [markDirty]
+    [canManage, markDirty]
   )
 
   const handleRulesChange = useCallback(
     (next: CCRule[]) => {
+      if (!canManage) return
       setRules(next)
       markDirty()
     },
-    [markDirty]
+    [canManage, markDirty]
   )
 
   const handleSave = useCallback(async () => {
+    if (!canManage) return
     const payload: Partial<Site> = {
       cc_use_custom: fromCCTriState(mode),
     }
     if (mode === "custom") {
-      payload.cc_rules = rules as unknown as string
+      // Site.cc_rules 的持久化契约是 JSON 数组字符串；显式序列化，
+      // 避免依赖后端对数组请求体的兼容归一化。
+      payload.cc_rules = JSON.stringify(rules)
     }
     try {
       await updateSite.execute({ id: site.id, data: payload })
@@ -121,7 +129,7 @@ export function CCProtectionTab({ site }: CCProtectionTabProps) {
     } catch {
       toast.error(t("common.operationFailed"))
     }
-  }, [mode, rules, site.id, updateSite, t])
+  }, [canManage, mode, rules, site.id, updateSite, t])
 
   const options = useMemo(
     () => [
@@ -133,7 +141,10 @@ export function CCProtectionTab({ site }: CCProtectionTabProps) {
   )
 
   return (
-    <div className="space-y-4">
+    <fieldset
+      disabled={!canManage}
+      className="m-0 min-w-0 space-y-4 border-0 p-0"
+    >
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">
@@ -179,7 +190,11 @@ export function CCProtectionTab({ site }: CCProtectionTabProps) {
           {/* 站点自定义规则编辑器 */}
           {mode === "custom" && (
             <div className="rounded-lg border p-4">
-              <CCRulesEditor rules={rules} onChange={handleRulesChange} />
+              <CCRulesEditor
+                rules={rules}
+                onChange={handleRulesChange}
+                disabled={!canManage}
+              />
             </div>
           )}
         </CardContent>
@@ -202,6 +217,6 @@ export function CCProtectionTab({ site }: CCProtectionTabProps) {
           </Button>
         </div>
       )}
-    </div>
+    </fieldset>
   )
 }

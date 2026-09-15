@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -106,6 +107,23 @@ func TestUpdateSingleOWASPRuleClearsActionOverride(t *testing.T) {
 	}
 }
 
+func TestUpdateSingleOWASPRuleRejectsRetiredNumericCatalogID(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	ruleID := firstOWASPRuleID(t)
+	var catalog store.OWASPRuleCatalog
+	if err := repo.DB().Where("rule_id = ?", ruleID).First(&catalog).Error; err != nil {
+		t.Fatalf("load catalog: %v", err)
+	}
+	if err := repo.DB().Model(&catalog).Update("active", false).Error; err != nil {
+		t.Fatalf("retire catalog: %v", err)
+	}
+	handler := UpdateSingleOWASPRule(repo, func() error { return nil })
+	ctx := invokeOWASPPost(t, handler, "/api/v1/owasp-rules/"+strconv.FormatUint(uint64(catalog.ID), 10)+"/update", strconv.FormatUint(uint64(catalog.ID), 10), []byte(`{"enabled":false}`))
+	if ctx.Response.StatusCode() != 404 {
+		t.Fatalf("retired numeric catalog id: want 404, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+}
+
 func TestUpdateSingleOWASPRuleSavesSensitivityOverride(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	ruleID := firstOWASPRuleID(t)
@@ -172,6 +190,47 @@ func TestUpdateSingleOWASPRuleRejectsEnabledRedirectWithoutTarget(t *testing.T) 
 		"action":      "redirect",
 		"redirect_to": "",
 	})
+}
+
+func TestUpdateSingleOWASPRuleRejectsPartialUpdateThatLeavesInvalidEffectiveConfig(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	ruleID := firstOWASPRuleID(t)
+	handler := UpdateSingleOWASPRule(repo, func() error { return nil })
+
+	redirect := "redirect"
+	disabled := false
+	if err := repo.DB().Create(&store.PolicyOWASPRuleConfig{
+		PolicyID: 1,
+		RuleID:   ruleID,
+		Enabled:  &disabled,
+		Action:   &redirect,
+	}).Error; err != nil {
+		t.Fatalf("seed invalid redirect override: %v", err)
+	}
+	ctx := invokeOWASPPost(t, handler, "/api/v1/owasp-rules/"+ruleID+"/update", ruleID, []byte(`{"enabled":true}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("enabling redirect without target: want 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+
+	var config store.PolicyOWASPRuleConfig
+	if err := repo.DB().Where("policy_id = ? AND rule_id = ?", 1, ruleID).First(&config).Error; err != nil {
+		t.Fatalf("load redirect override: %v", err)
+	}
+	if config.Enabled == nil || *config.Enabled {
+		t.Fatalf("rejected partial update changed enabled state: %#v", config.Enabled)
+	}
+
+	intercept := "intercept"
+	if err := repo.DB().Model(&config).Updates(map[string]any{
+		"enabled": true,
+		"action":  intercept,
+	}).Error; err != nil {
+		t.Fatalf("seed non-captcha override: %v", err)
+	}
+	ctx = invokeOWASPPost(t, handler, "/api/v1/owasp-rules/"+ruleID+"/update", ruleID, []byte(`{"captcha_type":"slide"}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("captcha type on non-captcha action: want 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
 }
 
 func TestShouldSkipRuleBoundary(t *testing.T) {

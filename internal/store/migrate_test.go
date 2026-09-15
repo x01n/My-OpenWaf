@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +10,124 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestAutoMigrateLogsCreatesSiteTimePaginationIndexes(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := AutoMigrateLogs(db); err != nil {
+		t.Fatalf("auto migrate logs: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		indexName string
+		tableName string
+	}{
+		{name: "access logs", indexName: "idx_al_site_created_id", tableName: "access_logs"},
+		{name: "security events", indexName: "idx_se_site_created_id", tableName: "security_events"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var columns []struct {
+				Seqno int
+				Name  string
+			}
+			if err := db.Raw("PRAGMA index_info(" + tt.indexName + ")").Scan(&columns).Error; err != nil {
+				t.Fatalf("read index %s: %v", tt.indexName, err)
+			}
+			want := []string{"site_id", "created_at", "id"}
+			if len(columns) != len(want) {
+				t.Fatalf("index %s columns=%v want=%v", tt.indexName, columns, want)
+			}
+			for i := range want {
+				if columns[i].Name != want[i] {
+					t.Fatalf("index %s column[%d]=%q want=%q", tt.indexName, i, columns[i].Name, want[i])
+				}
+			}
+
+			var plan []struct{ Detail string }
+			query := "EXPLAIN QUERY PLAN SELECT id, created_at, site_id FROM " + tt.tableName + " WHERE site_id = ? AND created_at >= ? ORDER BY created_at DESC, id DESC LIMIT 20"
+			if err := db.Raw(query, 1, time.Now().Add(-time.Hour)).Scan(&plan).Error; err != nil {
+				t.Fatalf("explain %s pagination: %v", tt.tableName, err)
+			}
+			var joined strings.Builder
+			for _, row := range plan {
+				joined.WriteString(row.Detail)
+				joined.WriteByte('\n')
+			}
+			if !strings.Contains(joined.String(), tt.indexName) {
+				t.Fatalf("pagination plan does not use %s:\n%s", tt.indexName, joined.String())
+			}
+		})
+	}
+}
+
+func TestAutoMigrateLogsBackfillsAndIndexesAccessLogFingerprintKey(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := AutoMigrateLogs(db); err != nil {
+		t.Fatalf("auto migrate logs: %v", err)
+	}
+
+	legacy := AccessLog{
+		RequestID:       "legacy-fingerprint",
+		TLSJA3Hash:      "legacy-ja3",
+		TLSJA4:          "legacy-ja4",
+		TLSVersion:      "TLS13",
+		TLSALPN:         "h2",
+		TLSSNI:          "legacy.example.test",
+		TLSCipherSuites: "TLS_AES_128_GCM_SHA256",
+		TLSExtensions:   "0,16,43",
+		TLSCurves:       "29,23",
+		TLSPointFormats: "0",
+	}
+	if err := db.Create(&legacy).Error; err != nil {
+		t.Fatalf("create legacy access log: %v", err)
+	}
+	if legacy.FingerprintKey == "" {
+		t.Fatal("BeforeSave did not populate fingerprint key")
+	}
+	if err := db.Model(&AccessLog{}).Where("id = ?", legacy.ID).UpdateColumn("fingerprint_key", "").Error; err != nil {
+		t.Fatalf("clear fingerprint key: %v", err)
+	}
+	if err := AutoMigrateLogs(db); err != nil {
+		t.Fatalf("repeat auto migrate logs: %v", err)
+	}
+
+	var got AccessLog
+	if err := db.First(&got, legacy.ID).Error; err != nil {
+		t.Fatalf("load backfilled access log: %v", err)
+	}
+	want := ComputeAccessLogFingerprintKey(
+		legacy.TLSJA3Hash,
+		legacy.TLSJA4,
+		legacy.TLSVersion,
+		legacy.TLSALPN,
+		legacy.TLSSNI,
+		legacy.TLSCipherSuites,
+		legacy.TLSExtensions,
+		legacy.TLSCurves,
+		legacy.TLSPointFormats,
+	)
+	if got.FingerprintKey != want {
+		t.Fatalf("backfilled fingerprint key=%q want=%q", got.FingerprintKey, want)
+	}
+
+	var columns []struct {
+		Seqno int
+		Name  string
+	}
+	if err := db.Raw("PRAGMA index_info(idx_al_fingerprint_key)").Scan(&columns).Error; err != nil {
+		t.Fatalf("read fingerprint key index: %v", err)
+	}
+	if len(columns) != 1 || columns[0].Name != "fingerprint_key" {
+		t.Fatalf("fingerprint key index columns=%v", columns)
+	}
+}
 
 func TestAutoMigrateMigratesLegacyRulePhasesToCustom(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})

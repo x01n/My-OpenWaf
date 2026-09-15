@@ -33,6 +33,7 @@ const ACTION_TONE: Record<string, ActionTone> = {
   log_only: "observe",
   tag: "observe",
   allow: "allow",
+  none: "unknown",
 }
 
 /** 语义类别 -> 徽章类名（浅/深色双向可读，边框 + 半透明底色） */
@@ -79,6 +80,7 @@ const TRANSLATABLE_ACTIONS = new Set([
   "rate_limit",
   "redirect",
   "tag",
+  "none",
 ])
 
 /**
@@ -89,6 +91,18 @@ const TRANSLATABLE_ACTIONS = new Set([
 export function actionTone(action?: string | null): ActionTone {
   if (!action) return "unknown"
   return ACTION_TONE[action.toLowerCase()] ?? "unknown"
+}
+
+/**
+ * 将后端动作值转换为规则编辑器使用的规范名称；兼容历史 block/log_only。
+ * @param {string | null | undefined} action 后端动作名
+ * @returns {string} 规范化动作名，未知值仅做空白与大小写归一化
+ */
+export function normalizeActionValue(action?: string | null): string {
+  const value = action?.trim().toLowerCase() || ""
+  if (value === "block") return "intercept"
+  if (value === "log_only") return "observe"
+  return value
 }
 
 /**

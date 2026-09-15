@@ -487,8 +487,11 @@ func TestBuildAccessLogEntrySkipsDetailedFieldsForSampledPass(t *testing.T) {
 	ctx.Response.Header.Set("Set-Cookie", "sid=secret")
 
 	entry := buildAccessLogEntry(ctx, accessLogInfo{SiteID: 1, WAFAction: "none", StatusCode: 200})
-	if entry.RequestHeaders != "" || entry.RequestBodyPreview != "" || entry.ResponseHeaders != "" || entry.RequestSize != 0 {
-		t.Fatalf("sampled pass access log should skip detailed fields: %+v", entry)
+	if entry.RequestHeaders != "" || entry.RequestBodyPreview != "" || entry.ResponseHeaders != "" {
+		t.Fatalf("sampled pass access log should skip detailed payloads: %+v", entry)
+	}
+	if entry.RequestSize != int64(len(`{"password":"secret"}`)) || entry.RequestBodyTruncated {
+		t.Fatalf("sampled pass access log request metadata = size:%d truncated:%t", entry.RequestSize, entry.RequestBodyTruncated)
 	}
 }
 

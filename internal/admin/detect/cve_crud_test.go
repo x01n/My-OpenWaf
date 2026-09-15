@@ -11,6 +11,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/route/param"
 
+	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/cve"
 )
 
@@ -57,13 +58,14 @@ func seedOneCVERule(t *testing.T, repo interface{ Create(*cve.CVERuleModel) erro
 func TestCreateCVERulePersists(t *testing.T) {
 	repo := newCVERuleRepoForTest(t)
 	body, _ := json.Marshal(map[string]any{
-		"cve_id":   "CVE-2025-0001",
-		"category": "sqli",
-		"pattern":  `(?i)union\s+select`,
-		"target":   "query",
-		"severity": "high",
-		"action":   "intercept",
-		"enabled":  true,
+		"cve_id":       "CVE-2025-0001",
+		"category":     "sqli",
+		"pattern":      `(?i)union\s+select`,
+		"target":       "url",
+		"severity":     "high",
+		"action":       "captcha_challenge",
+		"captcha_type": "slide",
+		"enabled":      true,
 	})
 	ctx := invokeCVEHandler(t, CreateCVERule(repo, nil), "POST", "/api/v1/cve-rules", "", body)
 	if ctx.Response.StatusCode() != 201 {
@@ -76,8 +78,20 @@ func TestCreateCVERulePersists(t *testing.T) {
 	if item.Source != "custom" {
 		t.Fatalf("source must be forced to \"custom\", got %q", item.Source)
 	}
+	if item.CaptchaType != "slide" {
+		t.Fatalf("captcha_type = %q, want slide", item.CaptchaType)
+	}
 	if !item.Approved {
 		t.Fatal("approved must be forced to true")
+	}
+}
+
+func TestCreateCVERuleAcceptsURLBodyTarget(t *testing.T) {
+	repo := newCVERuleRepoForTest(t)
+	body := []byte(`{"cve_id":"CVE-2025-0001-URL-BODY","category":"general","pattern":"url-body-marker","target":"url_body","severity":"high","action":"intercept","enabled":true}`)
+	ctx := invokeCVEHandler(t, CreateCVERule(repo, nil), "POST", "/api/v1/cve-rules", "", body)
+	if ctx.Response.StatusCode() != 201 {
+		t.Fatalf("url_body target: want 201, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 }
 
@@ -104,6 +118,20 @@ func TestCreateCVERuleRejectsInvalidAction(t *testing.T) {
 	ctx := invokeCVEHandler(t, CreateCVERule(repo, nil), "POST", "/api/v1/cve-rules", "", body)
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("invalid action: want 400, got %d", ctx.Response.StatusCode())
+	}
+}
+
+func TestCreateCVERuleRejectsUnsupportedTarget(t *testing.T) {
+	repo := newCVERuleRepoForTest(t)
+	body, _ := json.Marshal(map[string]any{
+		"cve_id":  "CVE-2025-0004",
+		"pattern": `test`,
+		"target":  "query",
+		"action":  "intercept",
+	})
+	ctx := invokeCVEHandler(t, CreateCVERule(repo, nil), "POST", "/api/v1/cve-rules", "", body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unsupported target: want 400, got %d", ctx.Response.StatusCode())
 	}
 }
 
@@ -148,6 +176,93 @@ func TestUpdateCVERulePatchesFields(t *testing.T) {
 	// Approved 必须被强制为 true
 	if !updated.Approved {
 		t.Fatal("approved must be forced to true on update")
+	}
+}
+
+func TestUpdateCVERuleOmittedEnabledPreservesValue(t *testing.T) {
+	repo := newCVERuleRepoForTest(t)
+	rule := seedOneCVERule(t, repo)
+	idStr := strconv.FormatUint(uint64(rule.ID), 10)
+	body, _ := json.Marshal(map[string]any{"description": "description-only"})
+	ctx := invokeCVEHandler(t, UpdateCVERule(repo, nil), "POST", "/api/v1/cve-rules/"+idStr+"/update", idStr, body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	updated, err := repo.Get(rule.ID)
+	if err != nil {
+		t.Fatalf("read updated rule: %v", err)
+	}
+	if !updated.Enabled {
+		t.Fatal("omitted enabled must preserve the existing enabled value")
+	}
+}
+
+func TestUpdateCVERuleExplicitEmptyDescriptionAndCVEIDAreApplied(t *testing.T) {
+	repo := newCVERuleRepoForTest(t)
+	rule := seedOneCVERule(t, repo)
+	idStr := strconv.FormatUint(uint64(rule.ID), 10)
+	body, _ := json.Marshal(map[string]any{"description": "", "cve_id": ""})
+	ctx := invokeCVEHandler(t, UpdateCVERule(repo, nil), "POST", "/api/v1/cve-rules/"+idStr+"/update", idStr, body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	updated, err := repo.Get(rule.ID)
+	if err != nil {
+		t.Fatalf("read updated rule: %v", err)
+	}
+	if updated.Description != "" || updated.CVEID != "" {
+		t.Fatalf("explicit empty fields were not applied: %+v", updated)
+	}
+}
+
+func TestUpdateCVERuleRejectsBuiltinRule(t *testing.T) {
+	repo := newCVERuleRepoForTest(t)
+	rule := &cve.CVERuleModel{
+		CVEID: "CVE-2024-BUILTIN", Pattern: "builtin-pattern", Action: "intercept",
+		Source: "catalog", Approved: true, Enabled: true,
+	}
+	if err := repo.Create(rule); err != nil {
+		t.Fatalf("seed builtin: %v", err)
+	}
+	idStr := strconv.FormatUint(uint64(rule.ID), 10)
+	body, _ := json.Marshal(map[string]any{"description": "must-not-change"})
+	ctx := invokeCVEHandler(t, UpdateCVERule(repo, nil), "POST", "/api/v1/cve-rules/"+idStr+"/update", idStr, body)
+	if ctx.Response.StatusCode() != 403 {
+		t.Fatalf("builtin update: want 403, got %d", ctx.Response.StatusCode())
+	}
+}
+
+func TestResetCVERuleOverrideUsesBodyScope(t *testing.T) {
+	repo := newCVERuleRepoForTest(t)
+	if err := repo.DB().AutoMigrate(&store.Policy{}); err != nil {
+		t.Fatalf("migrate policies: %v", err)
+	}
+	defaultSlot := uint(1)
+	policy := store.Policy{Name: "policy-reset", DefaultSlot: &defaultSlot}
+	if err := repo.DB().Create(&policy).Error; err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	rule := seedOneCVERule(t, repo)
+	globalEnabled := false
+	policyEnabled := false
+	if err := repo.DB().Create(&store.CVERuleScopeOverride{RuleID: rule.ID, ScopeType: store.CVEScopeGlobal, ScopeID: 0, Enabled: &globalEnabled}).Error; err != nil {
+		t.Fatalf("create global override: %v", err)
+	}
+	if err := repo.DB().Create(&store.CVERuleScopeOverride{RuleID: rule.ID, ScopeType: store.CVEScopePolicy, ScopeID: policy.ID, Enabled: &policyEnabled}).Error; err != nil {
+		t.Fatalf("create policy override: %v", err)
+	}
+	idStr := strconv.FormatUint(uint64(rule.ID), 10)
+	body, _ := json.Marshal(map[string]any{"scope": "policy", "policy_id": policy.ID})
+	ctx := invokeCVEHandler(t, ResetCVERuleOverride(repo, nil), "POST", "/api/v1/cve-rules/"+idStr+"/reset", idStr, body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("reset status=%d body=%s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	var remaining []store.CVERuleScopeOverride
+	if err := repo.DB().Where("rule_id = ?", rule.ID).Find(&remaining).Error; err != nil {
+		t.Fatalf("load remaining overrides: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ScopeType != store.CVEScopeGlobal {
+		t.Fatalf("body scope reset removed wrong overrides: %#v", remaining)
 	}
 }
 

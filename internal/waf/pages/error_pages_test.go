@@ -166,6 +166,27 @@ func TestWriteErrorPageCustomConfig(t *testing.T) {
 	}
 }
 
+func TestWriteErrorPageHonorsSafeCustomContentType(t *testing.T) {
+	custom := &ErrorPageConfig{HTML: "{\"error\":{{.StatusCode}}}", ContentType: "application/json"}
+	var c app.RequestContext
+	WriteErrorPage(context.Background(), &c, 502, custom)
+	if got := string(c.Response.Header.ContentType()); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if got := string(c.Response.Body()); !strings.Contains(got, "502") {
+		t.Fatalf("custom JSON body = %q", got)
+	}
+}
+
+func TestWriteErrorPageRejectsUnsafeCustomContentType(t *testing.T) {
+	custom := &ErrorPageConfig{ContentType: "text/html\r\nX-Leak: yes"}
+	var c app.RequestContext
+	WriteErrorPage(context.Background(), &c, 500, custom)
+	if got := string(c.Response.Header.ContentType()); !strings.Contains(got, "text/html") || strings.Contains(got, "X-Leak") {
+		t.Fatalf("unsafe custom Content-Type was accepted: %q", got)
+	}
+}
+
 func TestWriteErrorPageRemovesServerHeader(t *testing.T) {
 	var c app.RequestContext
 	c.Response.Header.Set("Server", "secret-server/1.0")

@@ -33,6 +33,7 @@ type CVEMatch struct {
 	MatchedPart string
 	Pattern     string
 	Action      string // drop, block, log
+	CaptchaType string // rule-level CAPTCHA type; empty inherits global
 }
 
 // CustomCVERule is a user/auto-generated CVE rule loaded from the database.
@@ -41,9 +42,10 @@ type CustomCVERule struct {
 	CVEID       string
 	Category    string
 	Pattern     string // regex pattern
-	Target      string // url, body, header, cookie
+	Target      string // all, url, url_body, body, header, cookie
 	Severity    string
 	Action      string
+	CaptchaType string // rule-level CAPTCHA type; empty inherits global
 	Enabled     bool
 	Description string
 }
@@ -73,6 +75,7 @@ type CVERuleOverride struct {
 	Action      string `json:"action,omitempty"`
 	StatusCode  int    `json:"status_code,omitempty"`
 	RedirectTo  string `json:"redirect_to,omitempty"`
+	CaptchaType string `json:"captcha_type,omitempty"`
 }
 
 // CVERuleRegistry 线程安全的规则注册表
@@ -1767,6 +1770,7 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 				MatchedPart: cr.rule.Target,
 				Pattern:     cr.rule.Pattern,
 				Action:      cr.rule.Action,
+				CaptchaType: cr.rule.CaptchaType,
 			})
 		}
 	}
@@ -1844,6 +1848,7 @@ func (d *CVEDetector) DetectFirst(req *CVERequest, categorySensitivity ...map[st
 				MatchedPart: cr.rule.Target,
 				Pattern:     cr.rule.Pattern,
 				Action:      cr.rule.Action,
+				CaptchaType: cr.rule.CaptchaType,
 			}, true
 		}
 	}
@@ -2190,6 +2195,8 @@ func pickTarget(req *CVERequest, target string) string {
 	switch target {
 	case "url":
 		return req.DecodedPath + "?" + req.DecodedQuery
+	case "url_body":
+		return req.DecodedPath + "?" + req.DecodedQuery + "\n" + req.DecodedBody
 	case "body":
 		return req.DecodedBody
 	case "header":

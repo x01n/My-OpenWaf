@@ -377,7 +377,11 @@ func releaseHertzUpstreamResourcesWhenDone(req *hertzprotocol.Request, resp *her
 func hertzHeaderToHTTPHeader(src interface{ VisitAll(func(key, value []byte)) }) http.Header {
 	dst := make(http.Header)
 	src.VisitAll(func(key, value []byte) {
-		dst.Add(string(key), string(value))
+		name := http.CanonicalHeaderKey(string(key))
+		if name == "" {
+			name = string(key)
+		}
+		dst.Add(name, string(value))
 	})
 	return dst
 }
@@ -388,7 +392,11 @@ func hertzTrailerToHTTPHeader(src *hertzprotocol.Trailer) http.Header {
 		return dst
 	}
 	src.VisitAll(func(key, value []byte) {
-		dst.Add(string(key), string(value))
+		name := http.CanonicalHeaderKey(string(key))
+		if name == "" {
+			name = string(key)
+		}
+		dst.Add(name, string(value))
 	})
 	return dst
 }
@@ -858,6 +866,9 @@ func firstHostToken(raw string) string {
 
 func shouldTransformIdentityResponse(c *app.RequestContext, statusCode int) bool {
 	if c == nil || statusCode != http.StatusOK {
+		return false
+	}
+	if requestCacheControlHasNoTransform(c.Request.Header.PeekAll("Cache-Control")) {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(string(c.Request.Method())), http.MethodHead) {
@@ -1512,16 +1523,25 @@ func AddResponseTrailerHeaders(dst *app.RequestContext, trailers http.Header) {
 }
 
 func responseConnectionTokens(h http.Header) map[string]bool {
-	conn := h.Get("Connection")
-	if conn == "" {
+	if len(h) == 0 {
 		return nil
 	}
 	tokens := make(map[string]bool)
-	for _, tok := range strings.Split(conn, ",") {
-		tok = strings.TrimSpace(tok)
-		if tok != "" {
-			tokens[strings.ToLower(tok)] = true
+	for key, values := range h {
+		if !strings.EqualFold(key, "Connection") {
+			continue
 		}
+		for _, value := range values {
+			for _, tok := range strings.Split(value, ",") {
+				tok = strings.TrimSpace(tok)
+				if tok != "" {
+					tokens[strings.ToLower(tok)] = true
+				}
+			}
+		}
+	}
+	if len(tokens) == 0 {
+		return nil
 	}
 	return tokens
 }
@@ -1597,10 +1617,20 @@ func FetchHTTPLimited(ctx context.Context, c *app.RequestContext, rt snapshot.Si
 	if err != nil {
 		return nil, err
 	}
-	return bufferedHTTPResponseFromUpstream(resp, method, maxBodyBytes)
+	return bufferedHTTPResponseFromUpstream(resp, method, maxBodyBytes, false)
 }
 
-func bufferedHTTPResponseFromUpstream(resp *http.Response, method string, maxBodyBytes int64) (*HTTPResponse, error) {
+// FetchHTTPForCache avoids buffering a known-oversized response before falling
+// back to the streaming path.
+func FetchHTTPForCache(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string, maxBodyBytes int64) (*HTTPResponse, error) {
+	resp, method, err := fetchHTTPResponse(ctx, c, rt, base, clientIP, origHost)
+	if err != nil {
+		return nil, err
+	}
+	return bufferedHTTPResponseFromUpstream(resp, method, maxBodyBytes, true)
+}
+
+func bufferedHTTPResponseFromUpstream(resp *http.Response, method string, maxBodyBytes int64, skipKnownOversize bool) (*HTTPResponse, error) {
 	if resp == nil {
 		return nil, nil
 	}
@@ -1618,7 +1648,11 @@ func bufferedHTTPResponseFromUpstream(resp *http.Response, method string, maxBod
 		headers = resp.Header.Clone()
 	} else if maxBodyBytes > 0 {
 		var err error
-		body, headers, remaining, closeFn, decoded, truncated, err = readUpstreamResponseBodyLimitedForCapture(resp, maxBodyBytes)
+		if skipKnownOversize {
+			body, headers, remaining, closeFn, decoded, truncated, err = readUpstreamResponseBodyLimited(resp, maxBodyBytes)
+		} else {
+			body, headers, remaining, closeFn, decoded, truncated, err = readUpstreamResponseBodyLimitedForCapture(resp, maxBodyBytes)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1710,7 +1744,7 @@ func ForwardCapturedResponseForSiteWithClientIP(ctx context.Context, c *app.Requ
 
 	compOpts := streamCompressionOptions(rt)
 	encoding := responseEncodingIdentity
-	if compOpts.Enabled && shouldTransformStreamingResponseBody(
+	if compOpts.Enabled && !requestCacheControlHasNoTransform(c.Request.Header.PeekAll("Cache-Control")) && shouldTransformStreamingResponseBody(
 		resp.StatusCode,
 		resp.Header.Get("Content-Type"),
 		effectiveCE,
@@ -1830,14 +1864,29 @@ func SanitizeHeadersForEdgeCache(src http.Header) http.Header {
 	for k := range dst {
 		lk := strings.ToLower(k)
 		if isHopByHop(lk) || connTokens[lk] {
-			dst.Del(k)
+			delete(dst, k)
 		}
 	}
-	dst.Del("Content-Length")
+	deleteHeaderValuesFold(dst, "Content-Length")
+	// 防御历史调用方绕过 ShouldCacheHTTPResponse：共享缓存永远不应
+	// 回放会建立会话的 Set-Cookie。
+	deleteHeaderValuesFold(dst, "Set-Cookie")
+	deleteHeaderValuesFold(dst, "Set-Cookie2")
+	// Age 由本层回放时按 CachedAt 重新计算（RFC 9111 §5.1）；上游旧值
+	// 若在 ShouldCacheHTTPResponse 之前进入存储，回放时会与本层 Age 重复。
+	deleteHeaderValuesFold(dst, "Age")
 	if len(dst) == 0 {
 		return nil
 	}
 	return dst
+}
+
+func deleteHeaderValuesFold(header http.Header, name string) {
+	for key := range header {
+		if strings.EqualFold(key, name) {
+			delete(header, key)
+		}
+	}
 }
 
 // WriteCachedResponse replays a cache.ResponseEntry, including stored headers when present.
@@ -1860,7 +1909,22 @@ func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cac
 	isHead := strings.EqualFold(strings.TrimSpace(method), "HEAD")
 
 	if e.Header != nil && len(e.Header) > 0 {
-		copyResponseHeaders(c, e.Header)
+		// Treat cache entries as untrusted state. Older entries and tests may have
+		// been constructed before the storage gate stripped Set-Cookie and
+		// hop-by-hop headers; never replay those headers to a shared-cache client.
+		copyResponseHeaders(c, SanitizeHeadersForEdgeCache(e.Header))
+	}
+	// RFC 9111 §5.1: Age is the response age accumulated in this shared cache.
+	// The upstream's own Age was already folded into the entry TTL by
+	// EffectiveCacheTTL, so replay must replace it with our dwell time instead
+	// of letting downstreams see a stale or duplicated value.
+	c.Response.Header.Del("Age")
+	if e.CachedAt > 0 {
+		age := time.Now().Unix() - e.CachedAt
+		if age < 0 {
+			age = 0
+		}
+		c.Response.Header.Set("Age", strconv.FormatInt(age, 10))
 	}
 	if e.ContentType != "" {
 		c.SetContentType(e.ContentType)
@@ -1888,47 +1952,199 @@ func ShouldCacheResponse(method string, statusCode int, body []byte) bool {
 	return strings.EqualFold(method, "GET") && statusCode == 200 && len(body) > 0
 }
 
-// varyDisallowsCaching reports true when Vary implies dimensions we do not key on.
-// Many origins send only "Accept-Encoding"; Go's http.Client already decodes gzip bodies,
-// so a single buffered variant is safe for our in-process cache.
-func varyDisallowsCaching(vary string) bool {
-	vary = strings.TrimSpace(vary)
-	if vary == "" {
-		return false
-	}
-	for _, p := range strings.Split(vary, ",") {
-		t := strings.ToLower(strings.TrimSpace(p))
-		if t == "" {
-			continue
+// varyDisallowsCaching reports true when any Vary field contains a dimension
+// that the cache does not normalize into its identity representation.
+func varyDisallowsCaching(values ...string) bool {
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			token := strings.ToLower(strings.TrimSpace(part))
+			if token != "" && token != "accept-encoding" {
+				return true
+			}
 		}
-		if t != "accept-encoding" {
+	}
+	return false
+}
+
+func cacheControlDisallowsStorage(values []string) bool {
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			directive := strings.ToLower(strings.TrimSpace(part))
+			directiveValue := ""
+			if index := strings.IndexByte(directive, '='); index >= 0 {
+				directiveValue = strings.Trim(strings.TrimSpace(directive[index+1:]), "\"")
+				directive = strings.TrimSpace(directive[:index])
+			}
+			switch directive {
+			case "private", "no-store", "no-cache", "must-revalidate", "proxy-revalidate", "no-transform":
+				return true
+			case "max-age", "s-maxage":
+				// A zero/negative freshness lifetime explicitly requires
+				// revalidation; do not let the site TTL turn it into a
+				// shared-cache hit.
+				seconds, err := strconv.ParseInt(directiveValue, 10, 64)
+				if err != nil || seconds <= 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func expiresDisallowsStorage(values []string, now time.Time) bool {
+	for _, value := range values {
+		expiresAt, err := http.ParseTime(strings.TrimSpace(value))
+		if err != nil {
+			return true
+		}
+		if !expiresAt.After(now) {
 			return true
 		}
 	}
 	return false
 }
 
-// ShouldCacheHTTPResponse decides whether to store the upstream response in the edge cache.
-// When ignoreUpstreamCacheControl is true (path matched an explicit site cache rule), upstream
-// Cache-Control private/no-store is ignored so CDNs/framework defaults do not disable caching;
-// Set-Cookie and unsafe Vary are still respected.
-func ShouldCacheHTTPResponse(method string, resp *HTTPResponse, ignoreUpstreamCacheControl bool) bool {
+func pragmaDisallowsStorage(values []string) bool {
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "no-cache") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// responseHeaderValues returns all values for a header name, including values
+// held under a non-canonical map key. http.Header normally canonicalizes keys,
+// but upstream adapters and legacy callers may construct the map directly.
+// Security decisions must not depend on that representation detail.
+func responseHeaderValues(header http.Header, name string) []string {
+	if len(header) == 0 {
+		return nil
+	}
+	var values []string
+	for key, entries := range header {
+		if strings.EqualFold(key, name) {
+			values = append(values, entries...)
+		}
+	}
+	return values
+}
+
+func contentEncodingDisallowsCaching(values []string) bool {
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			encoding := strings.ToLower(strings.TrimSpace(part))
+			if encoding != "" && encoding != "identity" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ShouldCacheHTTPResponse decides whether to store the upstream response in the
+// shared edge cache. The optional legacy argument is ignored deliberately:
+// origin privacy directives are never overridden by a site path rule.
+func ShouldCacheHTTPResponse(method string, resp *HTTPResponse, _ ...bool) bool {
 	if resp == nil || !ShouldCacheResponse(method, resp.StatusCode, resp.Body) {
 		return false
 	}
-	if resp.Header.Get("Set-Cookie") != "" {
+	if len(responseHeaderValues(resp.Header, "Set-Cookie")) > 0 ||
+		len(responseHeaderValues(resp.Header, "Set-Cookie2")) > 0 {
 		return false
 	}
-	if !ignoreUpstreamCacheControl {
-		cacheControl := strings.ToLower(resp.Header.Get("Cache-Control"))
-		if strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private") {
+	if cacheControlDisallowsStorage(responseHeaderValues(resp.Header, "Cache-Control")) {
+		return false
+	}
+	if expiresDisallowsStorage(responseHeaderValues(resp.Header, "Expires"), time.Now()) {
+		return false
+	}
+	if pragmaDisallowsStorage(responseHeaderValues(resp.Header, "Pragma")) {
+		return false
+	}
+	if varyDisallowsCaching(responseHeaderValues(resp.Header, "Vary")...) {
+		return false
+	}
+	// Supported upstream encodings are decoded before this decision. A remaining
+	// encoding is unknown and cannot share a key across Accept-Encoding variants.
+	if contentEncodingDisallowsCaching(responseHeaderValues(resp.Header, "Content-Encoding")) {
+		return false
+	}
+	// Age is a singleton response field. Any malformed or repeated value makes
+	// the freshness lifetime ambiguous, so do not turn it into a shared hit.
+	ages := responseHeaderValues(resp.Header, "Age")
+	if len(ages) > 1 {
+		return false
+	}
+	if len(ages) == 1 {
+		age, err := strconv.ParseInt(strings.TrimSpace(ages[0]), 10, 64)
+		if err != nil || age < 0 {
 			return false
 		}
 	}
-	if varyDisallowsCaching(resp.Header.Get("Vary")) {
-		return false
-	}
 	return true
+}
+
+// EffectiveCacheTTL caps the site rule TTL by the freshness lifetime explicitly
+// supplied by the origin. A site allowlist may opt a path into caching, but it
+// cannot extend an origin's shorter max-age/s-maxage or an Expires deadline.
+func EffectiveCacheTTL(configured int64, resp *HTTPResponse) int64 {
+	if configured <= 0 || resp == nil {
+		return 0
+	}
+	effective := configured
+	for _, value := range responseHeaderValues(resp.Header, "Cache-Control") {
+		for _, part := range strings.Split(value, ",") {
+			directive := strings.TrimSpace(strings.ToLower(part))
+			index := strings.IndexByte(directive, '=')
+			if index < 0 {
+				continue
+			}
+			name := strings.TrimSpace(directive[:index])
+			if name != "max-age" && name != "s-maxage" {
+				continue
+			}
+			seconds, err := strconv.ParseInt(strings.Trim(strings.TrimSpace(directive[index+1:]), "\""), 10, 64)
+			if err != nil || seconds <= 0 {
+				return 0
+			}
+			if seconds < effective {
+				effective = seconds
+			}
+		}
+	}
+	if values := responseHeaderValues(resp.Header, "Expires"); len(values) > 0 {
+		for _, value := range values {
+			expiresAt, err := http.ParseTime(strings.TrimSpace(value))
+			if err != nil {
+				return 0
+			}
+			remaining := int64(time.Until(expiresAt).Seconds())
+			if remaining <= 0 {
+				return 0
+			}
+			if remaining < effective {
+				effective = remaining
+			}
+		}
+	}
+	if values := responseHeaderValues(resp.Header, "Age"); len(values) > 0 {
+		age, err := strconv.ParseInt(strings.TrimSpace(values[0]), 10, 64)
+		if err != nil || age < 0 {
+			return 0
+		}
+		if age >= effective {
+			return 0
+		}
+		effective -= age
+	}
+	if effective <= 0 {
+		return 0
+	}
+	return effective
 }
 
 // SiteCacheTTL returns the configured TTL in seconds for the given rule match key (path with optional "?query").
@@ -1937,12 +2153,17 @@ func SiteCacheTTL(rt snapshot.SiteRuntime, matchKey string) int64 {
 	return ttl
 }
 
-// siteCacheFirstMatch returns the first matching cache rule's TTL and key-shaping flags.
-func siteCacheFirstMatch(rt snapshot.SiteRuntime, matchKey string) (ttl int64, stripQueryKey bool, lowerPathKey bool, matched bool) {
+// siteCacheFirstMatch returns the first matching cache rule's TTL, query-key
+// policy, and stale-if-error window. Case-insensitive matching never changes the
+// origin path stored in the cache key.
+func siteCacheFirstMatch(rt snapshot.SiteRuntime, matchKey string) (ttl int64, stripQueryKey bool, staleIfError int64, matched bool) {
 	if !rt.CacheEnabled {
-		return 0, false, false, false
+		return 0, false, 0, false
 	}
 	for _, rule := range rt.CacheRules {
+		if rule.Disabled {
+			continue
+		}
 		pat := cacheRulePattern(rule)
 		if pat == "" {
 			continue
@@ -1986,10 +2207,10 @@ func siteCacheFirstMatch(rt snapshot.SiteRuntime, matchKey string) (ttl int64, s
 			t = int64(rt.CacheDefaultTTL)
 		}
 		if t > 0 {
-			return t, rule.IgnoreQuery, rule.CaseInsensitive, true
+			return t, rule.IgnoreQuery, int64(rule.StaleIfError), true
 		}
 	}
-	return 0, false, false, false
+	return 0, false, 0, false
 }
 
 // SiteCacheTTLDetails returns TTL and whether a cache_rules row matched (pattern hit).
@@ -2088,31 +2309,91 @@ func SiteCacheKey(rt snapshot.SiteRuntime, c *app.RequestContext) string {
 	return BuildSiteCacheStorageKey(rt, c, false, false)
 }
 
-// SiteCacheEligible reports whether this request may use the edge response cache.
-// The third return is true when a cache_rules row matched: upstream Cache-Control private/no-store
-// may be ignored for storing (still never caches Set-Cookie responses).
-func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (key string, ttl int64, ignoreUpstreamCacheControl bool) {
+// SiteCacheEligible reports whether this request may use the shared response
+// cache. The third result preserves the historical "matched rule" boolean.
+func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (key string, ttl int64, matched bool) {
+	key, ttl, _ = SiteCacheEligibleWithStale(rt, c)
+	matched = key != ""
+	return key, ttl, matched
+}
+
+// SiteCacheEligibleWithStale is the extended cache eligibility contract used by
+// the data plane; it also returns the configured stale-if-error window.
+func SiteCacheEligibleWithStale(rt snapshot.SiteRuntime, c *app.RequestContext) (key string, ttl int64, staleIfError int64) {
 	if !rt.CacheEnabled {
-		return "", 0, false
+		return "", 0, 0
 	}
 	if !isCacheableRequestMethod(c.Method()) {
-		return "", 0, false
+		return "", 0, 0
 	}
-	if c.Request.Header.Get("Authorization") != "" {
-		return "", 0, false
+	if requestHeaderHasValue(c.Request.Header.PeekAll("Authorization")) ||
+		requestHeaderHasValue(c.Request.Header.PeekAll("Proxy-Authorization")) ||
+		requestHeaderHasValue(c.Request.Header.PeekAll("Cookie")) {
+		return "", 0, 0
 	}
-	// Do not disable edge caching based on the client's Cache-Control/Pragma. Browsers and
-	// devtools often send no-cache while operators still want stale shielding when upstream
-	// is down. Storage eligibility remains governed by ShouldCacheHTTPResponse (upstream CC,
-	// Set-Cookie, Vary, etc.).
+	if requestCacheControlDisallowsCaching(c.Request.Header.PeekAll("Cache-Control")) ||
+		requestPragmaDisallowsCaching(c.Request.Header.PeekAll("Pragma")) {
+		return "", 0, 0
+	}
 	path := requestPath(c)
 	query := c.URI().QueryString()
 	full := ruleMatchKeyFromPathQuery(path, query)
-	ttlVal, stripQ, lowerP, ok := siteCacheFirstMatch(rt, full)
+	ttlVal, stripQ, stale, ok := siteCacheFirstMatch(rt, full)
 	if !ok || ttlVal <= 0 {
-		return "", 0, false
+		return "", 0, 0
 	}
-	return buildSiteCacheStorageKeyFromParts(rt, c, path, query, stripQ, lowerP), ttlVal, true
+	return buildSiteCacheStorageKeyFromParts(rt, c, path, query, stripQ, false), ttlVal, stale
+}
+
+func requestHeaderHasValue(values [][]byte) bool {
+	for _, value := range values {
+		if len(value) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func requestCacheControlDisallowsCaching(values [][]byte) bool {
+	for _, value := range values {
+		for _, part := range strings.Split(string(value), ",") {
+			directive := strings.ToLower(strings.TrimSpace(part))
+			name := directive
+			if index := strings.IndexByte(directive, '='); index >= 0 {
+				name = strings.TrimSpace(directive[:index])
+			}
+			if name == "no-store" || name == "no-cache" || name == "no-transform" || name == "max-age" || name == "min-fresh" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func requestCacheControlHasNoTransform(values [][]byte) bool {
+	for _, value := range values {
+		for _, part := range strings.Split(string(value), ",") {
+			directive := strings.ToLower(strings.TrimSpace(part))
+			if index := strings.IndexByte(directive, '='); index >= 0 {
+				directive = strings.TrimSpace(directive[:index])
+			}
+			if directive == "no-transform" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func requestPragmaDisallowsCaching(values [][]byte) bool {
+	for _, value := range values {
+		for _, part := range strings.Split(string(value), ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "no-cache") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isCacheableRequestMethod(method []byte) bool {
@@ -2310,6 +2591,9 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 			resp.Header.Get("Cache-Control"),
 			resp.Header.Get("Content-Range"),
 		)
+	}
+	if requestCacheControlHasNoTransform(c.Request.Header.PeekAll("Cache-Control")) {
+		canCompress = false
 	}
 
 	if canCompress && compOpts.Enabled {

@@ -144,6 +144,8 @@ export function emptyCCRule(): CCRule {
 interface CCRulesEditorProps {
   rules: CCRule[]
   onChange: (rules: CCRule[]) => void
+  /** 禁用所有规则编辑控件；只读角色仍可查看规则内容。 */
+  disabled?: boolean
 }
 
 /**
@@ -152,13 +154,17 @@ interface CCRulesEditorProps {
  * 组件自身仅管理编辑面板的临时状态，规则数组通过受控 props（rules/onChange）向上同步。
  * 全局 CC 防护页与站点级 CC 防护 Tab 共用本组件以保证行为一致。
  */
-export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
+export function CCRulesEditor({
+  rules,
+  onChange,
+  disabled = false,
+}: CCRulesEditorProps) {
   const { t } = useTranslation()
   const [editingRuleIndex, setEditingRuleIndex] = useState<number | null>(null)
   const [editingRule, setEditingRule] = useState<CCRule | null>(null)
 
   const toggleRule = (index: number) => {
-    if (editingRuleIndex !== null) return
+    if (disabled || editingRuleIndex !== null) return
     onChange(
       rules.map((rule, i) =>
         i === index ? { ...rule, enabled: !(rule.enabled ?? true) } : rule
@@ -167,17 +173,18 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
   }
 
   const deleteRule = (index: number) => {
-    if (editingRuleIndex !== null) return
+    if (disabled || editingRuleIndex !== null) return
     onChange(rules.filter((_, i) => i !== index))
   }
 
   const startAddRule = () => {
+    if (disabled) return
     setEditingRuleIndex(-1)
     setEditingRule(emptyCCRule())
   }
 
   const startEditRule = (index: number) => {
-    if (editingRuleIndex !== null) return
+    if (disabled || editingRuleIndex !== null) return
     setEditingRuleIndex(index)
     setEditingRule({ ...rules[index] })
   }
@@ -188,7 +195,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
   }
 
   const saveEditRule = () => {
-    if (!editingRule) return
+    if (disabled || !editingRule) return
     if (editingRuleIndex === -1) {
       onChange([...rules, editingRule])
     } else if (editingRuleIndex !== null) {
@@ -205,7 +212,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
     field: keyof CCRuleCondition,
     value: string
   ) => {
-    if (!editingRule) return
+    if (disabled || !editingRule) return
     const newConditions = editingRule.conditions.map((cond, i) =>
       i === condIndex ? { ...cond, [field]: value } : cond
     )
@@ -219,7 +226,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
   }
 
   const addEditingCondition = () => {
-    if (!editingRule) return
+    if (disabled || !editingRule) return
     setEditingRule({
       ...editingRule,
       conditions: [
@@ -230,7 +237,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
   }
 
   const removeEditingCondition = (condIndex: number) => {
-    if (!editingRule || editingRule.conditions.length <= 1) return
+    if (disabled || !editingRule || editingRule.conditions.length <= 1) return
     setEditingRule({
       ...editingRule,
       conditions: editingRule.conditions.filter((_, i) => i !== condIndex),
@@ -258,7 +265,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
           >
             <Switch
               checked={rule.enabled ?? true}
-              disabled={editingRuleIndex !== null}
+              disabled={disabled || editingRuleIndex !== null}
               onCheckedChange={() => toggleRule(index)}
             />
             <div className="flex-1 space-y-0.5">
@@ -303,7 +310,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 size="icon"
                 className="h-8 w-8 shrink-0"
                 onClick={() => startEditRule(index)}
-                disabled={editingRuleIndex !== null}
+                disabled={disabled || editingRuleIndex !== null}
               >
                 <IconPencil className="h-4 w-4" />
               </Button>
@@ -312,7 +319,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 size="icon"
                 className="h-8 w-8 shrink-0 text-destructive hover:text-destructive"
                 onClick={() => deleteRule(index)}
-                disabled={editingRuleIndex !== null}
+                disabled={disabled || editingRuleIndex !== null}
               >
                 <IconTrash className="h-4 w-4" />
               </Button>
@@ -335,6 +342,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
               <Label>{t("ccProtection.ruleName")}</Label>
               <Input
                 value={editingRule.name ?? ""}
+                disabled={disabled}
                 onChange={(e) =>
                   setEditingRule({ ...editingRule, name: e.target.value })
                 }
@@ -345,6 +353,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
               <Label>{t("ccProtection.action")}</Label>
               <Select
                 value={editingRule.action}
+                disabled={disabled}
                 onValueChange={(v) =>
                   setEditingRule({
                     ...editingRule,
@@ -374,6 +383,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 <Label>{t("rules.captchaTypeLabel", "验证码类型")}</Label>
                 <Select
                   value={editingRule.captcha_type || "inherit"}
+                  disabled={disabled}
                   onValueChange={(value) =>
                     setEditingRule({
                       ...editingRule,
@@ -434,6 +444,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                         </Label>
                         <Select
                           value={cond.target}
+                          disabled={disabled}
                           onValueChange={(v) =>
                             updateEditingCondition(condIndex, "target", v)
                           }
@@ -456,6 +467,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                         </Label>
                         <Select
                           value={cond.operator}
+                          disabled={disabled}
                           onValueChange={(v) =>
                             updateEditingCondition(condIndex, "operator", v)
                           }
@@ -480,6 +492,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                         </Label>
                         <Input
                           value={cond.value}
+                          disabled={disabled}
                           onChange={(e) =>
                             updateEditingCondition(
                               condIndex,
@@ -503,6 +516,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                             size="icon"
                             className="h-8 w-8 shrink-0 text-destructive hover:text-destructive"
                             onClick={() => removeEditingCondition(condIndex)}
+                            disabled={disabled}
                             aria-label={t("ccRulesEditor.deleteCondition")}
                           >
                             <IconTrash className="h-4 w-4" />
@@ -522,6 +536,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
               size="sm"
               className="h-8 w-full gap-1 border-dashed border-teal-400/60 text-xs text-teal-700 hover:bg-teal-50 hover:text-teal-800 dark:border-teal-600/60 dark:text-teal-300 dark:hover:bg-teal-950/30"
               onClick={addEditingCondition}
+              disabled={disabled}
             >
               <IconPlus className="h-3.5 w-3.5" />
               {t("ccRulesEditor.addAndCondition")}
@@ -536,6 +551,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                   type="number"
                   min={0}
                   value={editingRule.window}
+                  disabled={disabled}
                   onChange={(e) =>
                     setEditingRule({
                       ...editingRule,
@@ -554,6 +570,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 type="number"
                 min={0}
                 value={editingRule.threshold}
+                disabled={disabled}
                 onChange={(e) =>
                   setEditingRule({
                     ...editingRule,
@@ -569,6 +586,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                   type="number"
                   min={0}
                   value={editingRule.duration}
+                  disabled={disabled}
                   onChange={(e) =>
                     setEditingRule({
                       ...editingRule,
@@ -578,6 +596,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
                 />
                 <Select
                   value={editingRule.duration_unit ?? "minutes"}
+                  disabled={disabled}
                   onValueChange={(v) =>
                     setEditingRule({
                       ...editingRule,
@@ -605,7 +624,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
             <Button variant="outline" size="sm" onClick={cancelEditRule}>
               {t("common.cancel")}
             </Button>
-            <Button size="sm" onClick={saveEditRule}>
+            <Button size="sm" onClick={saveEditRule} disabled={disabled}>
               {t("common.confirm")}
             </Button>
           </div>
@@ -618,6 +637,7 @@ export function CCRulesEditor({ rules, onChange }: CCRulesEditorProps) {
           size="sm"
           className="gap-1"
           onClick={startAddRule}
+          disabled={disabled}
         >
           <IconPlus className="h-3.5 w-3.5" />
           {t("ccProtection.addRule")}

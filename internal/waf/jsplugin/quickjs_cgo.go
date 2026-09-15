@@ -18,6 +18,12 @@ import (
 	"github.com/tdewolff/parse/v2/js"
 )
 
+// RuntimeBackend reports the JavaScript executor compiled into this binary.
+func RuntimeBackend() string { return BackendQuickJS }
+
+// RuntimeAvailable reports whether this build can create a JavaScript executor.
+func RuntimeAvailable() bool { return true }
+
 // Compile validates a QuickJS plugin and returns an immutable script descriptor.
 func Compile(name, source string, opts ScriptOptions) (*Script, error) {
 	if opts.Name == "" {
@@ -38,7 +44,7 @@ func Compile(name, source string, opts ScriptOptions) (*Script, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSource(source, transformed, normalized.MemoryLimit, normalized.StackLimit, normalized.Timeout); err != nil {
+	if err := validateSource(source, transformed, normalized.MemoryLimit, normalized.StackLimit, normalized.ValidationTimeout); err != nil {
 		return nil, err
 	}
 	siteIDs := make(map[uint]bool, len(normalized.SiteIDs))
@@ -56,7 +62,7 @@ func Compile(name, source string, opts ScriptOptions) (*Script, error) {
 	}, nil
 }
 
-func validateSource(source, transformed string, memoryLimit, stackLimit uint64, timeout time.Duration) error {
+func validateSource(source, transformed string, memoryLimit, stackLimit uint64, validationTimeout time.Duration) error {
 	var result error
 	runOnThread(func() {
 		// runOnThread owns all native handles on one pinned goroutine. The library's
@@ -78,7 +84,7 @@ func validateSource(source, transformed string, memoryLimit, stackLimit uint64, 
 			return
 		}
 		defer ctx.Close()
-		deadline := time.Now().Add(timeout)
+		deadline := time.Now().Add(validationTimeout)
 		timedOut := false
 		rt.SetInterruptHandler(func() int {
 			if time.Now().After(deadline) {
@@ -225,10 +231,11 @@ type Engine struct {
 }
 
 type executionRequest struct {
-	ctx     context.Context
-	script  *Script
-	reqJSON string
-	result  chan executionResult
+	ctx         context.Context
+	script      *Script
+	reqJSON     string
+	recordStats bool
+	result      chan executionResult
 }
 
 type executionResult struct {
@@ -334,9 +341,10 @@ func (s *executionSlot) execute(request executionRequest, opts EngineOptions) {
 		default:
 		}
 	}
-	request.script.runs.Add(1)
+	if request.recordStats {
+		request.script.runs.Add(1)
+	}
 	started := time.Now()
-	defer func() { request.script.totalNanos.Add(time.Since(started).Nanoseconds()) }()
 	timeout := opts.Timeout
 	if request.script.timeoutOverride {
 		timeout = request.script.timeout
@@ -365,12 +373,19 @@ func (s *executionSlot) execute(request executionRequest, opts EngineOptions) {
 	defer s.rt.ClearInterruptHandler()
 	plan, err := s.evaluate(request.script, request.reqJSON)
 	if timedOut.Load() {
-		request.script.timeouts.Add(1)
+		if request.recordStats {
+			request.script.timeouts.Add(1)
+		}
 		err = ErrScriptTimeout
 		plan = MutationPlan{}
 	} else if err != nil {
-		request.script.failures.Add(1)
+		if request.recordStats {
+			request.script.failures.Add(1)
+		}
 		plan = MutationPlan{}
+	}
+	if request.recordStats {
+		request.script.totalNanos.Add(time.Since(started).Nanoseconds())
 	}
 	request.result <- executionResult{plan: plan, err: err}
 }
@@ -460,6 +475,9 @@ func (s *executionSlot) evaluate(script *Script, reqJSON string) (MutationPlan, 
 	if result.IsNull() || result.IsUndefined() {
 		return MutationPlan{}, nil
 	}
+	if err := validateMutationPlanResultShape(result); err != nil {
+		return MutationPlan{}, err
+	}
 	var plan MutationPlan
 	if err := s.ctx.Unmarshal(result, &plan); err != nil {
 		return MutationPlan{}, fmt.Errorf("jsplugin: invalid mutation plan: %w", err)
@@ -470,6 +488,25 @@ func (s *executionSlot) evaluate(script *Script, reqJSON string) (MutationPlan, 
 	return plan, nil
 }
 
+func validateMutationPlanResultShape(result *quickjs.Value) error {
+	if result == nil || !result.IsObject() || result.IsArray() || result.IsFunction() {
+		return errors.New("jsplugin: fetch result must be a MutationPlan object, null, or undefined")
+	}
+	propertyNames, err := result.PropertyNames()
+	if err != nil {
+		return fmt.Errorf("jsplugin: inspect mutation plan fields: %w", err)
+	}
+	for _, name := range propertyNames {
+		switch name {
+		case "method", "path", "raw_query", "body", "set_headers", "delete_headers":
+			continue
+		default:
+			return fmt.Errorf("jsplugin: mutation plan contains unknown field %q", name)
+		}
+	}
+	return nil
+}
+
 // Execute implements Executor for the QuickJS engine.
 func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
 	return e.Evaluate(ctx, script, req)
@@ -477,11 +514,24 @@ func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapsho
 
 // Evaluate executes one request, returning an empty plan on every error.
 func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
+	return e.evaluate(ctx, script, req, true)
+}
+
+// Validate executes a compiled script with production limits without changing
+// request-runtime counters. Snapshot and admin validation use this path.
+func (e *Engine) Validate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
+	return e.evaluate(ctx, script, req, false)
+}
+
+func (e *Engine) evaluate(ctx context.Context, script *Script, req RequestSnapshot, recordStats bool) (MutationPlan, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if e == nil || script == nil {
 		return MutationPlan{}, errors.New("jsplugin: script is nil")
+	}
+	if err := validateExecutionStage(script); err != nil {
+		return MutationPlan{}, err
 	}
 	if !script.AppliesTo(req.SiteID) {
 		return MutationPlan{}, nil
@@ -503,7 +553,7 @@ func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapsh
 		e.mu.RUnlock()
 		return MutationPlan{}, err
 	}
-	request := executionRequest{ctx: ctx, script: script, reqJSON: encodedReq, result: make(chan executionResult, 1)}
+	request := executionRequest{ctx: ctx, script: script, reqJSON: encodedReq, recordStats: recordStats, result: make(chan executionResult, 1)}
 	start := int(e.next.Add(1) % uint64(len(e.slots)))
 	queued := false
 	for i := 0; i < len(e.slots); i++ {

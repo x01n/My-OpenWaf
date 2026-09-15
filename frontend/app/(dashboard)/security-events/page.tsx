@@ -1,6 +1,7 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
+import dynamic from "next/dynamic"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { useTranslation } from "react-i18next"
 import { PageHeader } from "@/components/page-header"
@@ -16,15 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import {
-  Pagination,
-  PaginationContent,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-  PaginationEllipsis,
-} from "@/components/ui/pagination"
+import { TablePagination } from "@/components/table-pagination"
 import { Badge } from "@/components/ui/badge"
 import { ActionBadge } from "@/components/action-badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -37,7 +30,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { DataTable } from "@/components/data-table"
-import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog"
 import { DateRangePicker } from "@/components/date-range-picker"
 import { IpHoverPreview } from "@/components/ip-hover-preview"
 import { EmptyState } from "@/components/empty-state"
@@ -53,18 +45,37 @@ import {
   IconRoute,
   IconShieldOff,
 } from "@tabler/icons-react"
-import {
-  invalidateIPListCaches,
-  useSecurityEvents,
-} from "@/hooks/use-api"
-import { ipListApi } from "@/lib/api"
+import { invalidateIPListCaches, useSecurityEvents } from "@/hooks/use-api"
+import { ipListApi, securityEventApi } from "@/lib/api"
 import type { SecurityEvent } from "@/lib/types"
 import { categoryLabel } from "@/lib/attack-category"
 import { localizeMatchDesc } from "@/lib/match-desc-i18n"
 import { format } from "date-fns"
 
+const SecurityEventDetailDialog = dynamic(() =>
+  import("@/components/security-event-detail-dialog").then(
+    (module) => module.SecurityEventDetailDialog
+  )
+)
+
 const FILTER_ALL = "__all__"
 type SelectionState = { scope: string; ids: Set<number> }
+
+interface SecurityEventFilters {
+  action: string
+  category: string
+  client_ip: string
+  host: string
+  path: string
+  site_id: string
+  since: string
+  until: string
+}
+
+interface FilterDraftState {
+  source: string
+  value: SecurityEventFilters
+}
 
 /** 列表视图维度：事件级逐条展示，请求级按 request_id 聚合。 */
 const VIEW_EVENTS = "events"
@@ -108,29 +119,65 @@ export default function SecurityEventsPage() {
   const [pageSize] = useState(20)
   const [showFilters, setShowFilters] = useState(false)
   const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null)
+  const detailRequestRef = useRef(0)
   const [selection, setSelection] = useState<SelectionState>({
     scope: "",
     ids: new Set(),
   })
   const [batchLoading, setBatchLoading] = useState(false)
+
+  /** 列表只返回轻量字段；打开详情时按 ID 获取完整脱敏报文。 */
+  const openEventDetail = useCallback(
+    async (row: SecurityEvent) => {
+      const requestSequence = ++detailRequestRef.current
+      try {
+        const detail = await securityEventApi.get(row.id)
+        if (detailRequestRef.current === requestSequence) {
+          setSelectedEvent(detail)
+        }
+      } catch (detailLoadError) {
+        if (detailRequestRef.current === requestSequence) {
+          toast.error(
+            detailLoadError instanceof Error
+              ? detailLoadError.message
+              : t("common.operationFailed")
+          )
+        }
+      }
+    },
+    [t]
+  )
   const page = parsePositivePage(searchParams.get("page"))
   const view = parseViewMode(searchParams.get("view"))
-  const filters = {
-    action: searchParams.get("action") || "",
-    category: searchParams.get("category") || "",
-    client_ip: searchParams.get("client_ip") || "",
-    host: searchParams.get("host") || "",
-    path: searchParams.get("path") || "",
-    site_id: searchParams.get("site_id") || "",
-    since: searchParams.get("since") || "",
-    until: searchParams.get("until") || "",
-  }
+  const queryString = searchParams.toString()
+  const filters = useMemo<SecurityEventFilters>(
+    () => ({
+      action: searchParams.get("action") || "",
+      category: searchParams.get("category") || "",
+      client_ip: searchParams.get("client_ip") || "",
+      host: searchParams.get("host") || "",
+      path: searchParams.get("path") || "",
+      site_id: searchParams.get("site_id") || "",
+      since: searchParams.get("since") || "",
+      until: searchParams.get("until") || "",
+    }),
+    [searchParams]
+  )
+  const [draftState, setDraftState] = useState<FilterDraftState>({
+    source: queryString,
+    value: filters,
+  })
+  const draft = draftState.source === queryString ? draftState.value : filters
   /** 两个视图共用同一组筛选值，请求级视图直接透传，不再造第二套筛选状态。 */
   const activeFilterParams = Object.fromEntries(
     Object.entries(filters).filter(([, v]) => v !== "")
   ) as Record<string, string>
 
-  const updateQuery = (updates: Record<string, string | undefined>) => {
+  const updateQuery = (
+    updates:
+      | Partial<SecurityEventFilters>
+      | Record<string, string | undefined>
+  ) => {
     const params = new URLSearchParams(searchParams.toString())
     for (const [key, value] of Object.entries(updates)) {
       if (value) params.set(key, value)
@@ -140,15 +187,18 @@ export default function SecurityEventsPage() {
     router.replace(`${pathname}?${params.toString()}`)
   }
 
-  const { data, isLoading, error } = useSecurityEvents({
-    page,
-    page_size: pageSize,
-    ...activeFilterParams,
-  })
+  const eventQueryParams =
+    view === VIEW_EVENTS
+      ? {
+          page,
+          page_size: pageSize,
+          ...activeFilterParams,
+        }
+      : null
+  const { data, isLoading, error } = useSecurityEvents(eventQueryParams)
 
   const items = useMemo(() => data?.items || [], [data?.items])
   const total = data?.total || 0
-  const totalPages = Math.ceil(total / pageSize) || 1
   const selectionScope = `${page}:${JSON.stringify(filters)}`
   const scopedSelectedIds =
     selection.scope === selectionScope ? selection.ids : new Set<number>()
@@ -160,11 +210,18 @@ export default function SecurityEventsPage() {
     items.length > 0 && selectedCurrentPageCount === items.length
 
   const handleFilterChange = (key: string, value: string) => {
-    updateQuery({ [key]: value })
+    if (!(key in filters)) return
+    setDraftState((current) => ({
+      source: queryString,
+      value: {
+        ...(current.source === queryString ? current.value : filters),
+        [key]: value,
+      },
+    }))
   }
 
   const clearFilters = () => {
-    updateQuery({
+    const emptyFilters: Record<string, undefined> = {
       action: undefined,
       category: undefined,
       client_ip: undefined,
@@ -173,7 +230,21 @@ export default function SecurityEventsPage() {
       site_id: undefined,
       since: undefined,
       until: undefined,
+    }
+    setDraftState({
+      source: queryString,
+      value: {
+        action: "",
+        category: "",
+        client_ip: "",
+        host: "",
+        path: "",
+        site_id: "",
+        since: "",
+        until: "",
+      },
     })
+    updateQuery(emptyFilters)
   }
 
   const toggleSelect = (id: number) => {
@@ -383,7 +454,7 @@ export default function SecurityEventsPage() {
           <Button
             variant="ghost"
             size="icon-sm"
-            onClick={() => setSelectedEvent(row)}
+            onClick={() => openEventDetail(row)}
             title={t("common.viewDetail")}
           >
             <IconEye className="h-4 w-4" />
@@ -508,13 +579,19 @@ export default function SecurityEventsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           {showFilters && (
-            <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-3">
+            <form
+              className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-3"
+              onSubmit={(event) => {
+                event.preventDefault()
+                updateQuery({ ...draft })
+              }}
+            >
               <div className="space-y-1.5">
                 <Label className="text-xs">
                   {t("securityEvents.actionLabel")}
                 </Label>
                 <Select
-                  value={filters.action || FILTER_ALL}
+                  value={draft.action || FILTER_ALL}
                   onValueChange={(v) =>
                     handleFilterChange("action", v === FILTER_ALL ? "" : v)
                   }
@@ -541,7 +618,7 @@ export default function SecurityEventsPage() {
                 <Input
                   className="h-8 text-xs"
                   placeholder={t("securityEvents.categoryPlaceholder")}
-                  value={filters.category}
+                  value={draft.category}
                   onChange={(e) =>
                     handleFilterChange("category", e.target.value)
                   }
@@ -554,7 +631,7 @@ export default function SecurityEventsPage() {
                 <Input
                   className="h-8 text-xs"
                   placeholder={t("securityEvents.ipPlaceholder")}
-                  value={filters.client_ip}
+                  value={draft.client_ip}
                   onChange={(e) =>
                     handleFilterChange("client_ip", e.target.value)
                   }
@@ -565,7 +642,7 @@ export default function SecurityEventsPage() {
                 <Input
                   className="h-8 text-xs"
                   placeholder={t("securityEvents.domainPlaceholder")}
-                  value={filters.host}
+                  value={draft.host}
                   onChange={(e) => handleFilterChange("host", e.target.value)}
                 />
               </div>
@@ -576,14 +653,21 @@ export default function SecurityEventsPage() {
                   })}
                 </Label>
                 <DateRangePicker
-                  value={{ since: filters.since, until: filters.until }}
-                  onChange={(v) =>
-                    updateQuery({ since: v.since, until: v.until })
-                  }
+                  value={{ since: draft.since, until: draft.until }}
+                  onChange={(v) => {
+                    handleFilterChange("since", v.since)
+                    handleFilterChange("until", v.until)
+                  }}
                 />
               </div>
-              <div className="flex items-end sm:col-span-2 lg:col-span-3">
+              <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3">
+                <Button type="submit" size="sm" className="h-8 text-xs">
+                  {t("securityEvents.applyFilters", {
+                    defaultValue: "应用筛选",
+                  })}
+                </Button>
                 <Button
+                  type="button"
                   variant="ghost"
                   size="sm"
                   className="h-8 cursor-pointer text-xs"
@@ -592,7 +676,7 @@ export default function SecurityEventsPage() {
                   {t("common.clearFilters")}
                 </Button>
               </div>
-            </div>
+            </form>
           )}
 
           {view === VIEW_REQUESTS && (
@@ -625,53 +709,13 @@ export default function SecurityEventsPage() {
             />
           )}
 
-          {view === VIEW_EVENTS && totalPages > 1 && (
-            <Pagination>
-              <PaginationContent>
-                <PaginationItem>
-                  <PaginationPrevious
-                    onClick={() =>
-                      updateQuery({ page: String(Math.max(1, page - 1)) })
-                    }
-                    disabled={page <= 1}
-                    className={
-                      page <= 1 ? "pointer-events-none opacity-50" : ""
-                    }
-                  />
-                </PaginationItem>
-                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                  const pageNum = i + 1
-                  return (
-                    <PaginationItem key={pageNum}>
-                      <PaginationLink
-                        isActive={page === pageNum}
-                        onClick={() => updateQuery({ page: String(pageNum) })}
-                      >
-                        {pageNum}
-                      </PaginationLink>
-                    </PaginationItem>
-                  )
-                })}
-                {totalPages > 5 && (
-                  <PaginationItem>
-                    <PaginationEllipsis />
-                  </PaginationItem>
-                )}
-                <PaginationItem>
-                  <PaginationNext
-                    onClick={() =>
-                      updateQuery({
-                        page: String(Math.min(totalPages, page + 1)),
-                      })
-                    }
-                    disabled={page >= totalPages}
-                    className={
-                      page >= totalPages ? "pointer-events-none opacity-50" : ""
-                    }
-                  />
-                </PaginationItem>
-              </PaginationContent>
-            </Pagination>
+          {view === VIEW_EVENTS && (
+            <TablePagination
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              onPageChange={(next) => updateQuery({ page: String(next) })}
+            />
           )}
         </CardContent>
       </Card>
@@ -714,7 +758,10 @@ export default function SecurityEventsPage() {
         event={selectedEvent}
         open={!!selectedEvent}
         onOpenChange={(open) => {
-          if (!open) setSelectedEvent(null)
+          if (!open) {
+            detailRequestRef.current += 1
+            setSelectedEvent(null)
+          }
         }}
       />
     </div>

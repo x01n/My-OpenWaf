@@ -32,6 +32,10 @@ func ListRules(repo *repository.RuleRepo) app.HandlerFunc {
 			pid := uint(id)
 			filter.PolicyID = &pid
 		}
+		if actionValue := strings.TrimSpace(c.DefaultQuery("action", "")); actionValue != "" {
+			ruleAction := store.NormalizeAction(store.RuleAction(actionValue))
+			filter.Action = &ruleAction
+		}
 		items, total, err := repo.ListFiltered(offset, limit, filter)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
@@ -185,6 +189,10 @@ func DeleteRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 		id, err := utils.ParseUint(c.Param("id"))
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid id"})
+			return
+		}
+		if _, err := repo.Get(id); err != nil {
+			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
 		if err := repo.Delete(id); err != nil {

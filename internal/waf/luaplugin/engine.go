@@ -211,6 +211,8 @@ func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Dec
 			continue
 		}
 		if dec.HasAction() {
+			dec.ScriptID = s.id
+			dec.ScriptName = s.name
 			return dec
 		}
 	}

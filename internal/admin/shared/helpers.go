@@ -269,6 +269,31 @@ func splitCCHeaderValueForValidation(value string) (string, string) {
 }
 
 // ValidateAntiReplayAction validates the actions preserved by the anti-replay dataplane path.
+// ValidateChallengeAction 校验质询动作白名单并归一化。
+// 合法集合：challenge / captcha_challenge / shield_challenge / chain_challenge。
+// 空串表示「继承」，返回 ("", true)；非法值返回 ("", false)。
+func ValidateChallengeAction(value string) (string, bool) {
+	if value == "" {
+		return "", true
+	}
+	normalized := action.Normalize(action.Type(value))
+	switch normalized {
+	case action.Challenge, action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge:
+		return string(normalized), true
+	default:
+		return "", false
+	}
+}
+
+// ValidateGlobalChallengeAction 校验全局质询动作；空串视为默认 challenge，合法。
+func ValidateGlobalChallengeAction(value string) bool {
+	if value == "" {
+		return true
+	}
+	_, ok := ValidateChallengeAction(value)
+	return ok
+}
+
 func ValidateAntiReplayAction(value string) (string, bool) {
 	if value == "" {
 		return "", true

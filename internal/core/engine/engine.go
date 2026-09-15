@@ -286,7 +286,7 @@ func applyPostLuaDecision(lp *luaplugin.Engine, reqCtx *pipeline.RequestCtx, bui
 
 	if act == action.Allow {
 		// 放行：清空内置判定，请求继续走向上游。
-		return makeResult(action.Result{Phase: "lua_post", Category: "lua_plugin", MatchDesc: dec.Message})
+		return makeResult(action.Result{RuleID: dec.ScriptID, RuleIDStr: dec.ScriptName, Phase: "lua_post", Category: "lua_plugin", MatchDesc: dec.Message})
 	}
 	if builtin.IsTerminal() {
 		// 内置已判终止且脚本未要求放行：保留内置判定。
@@ -295,6 +295,8 @@ func applyPostLuaDecision(lp *luaplugin.Engine, reqCtx *pipeline.RequestCtx, bui
 
 	res := makeResult(action.Result{
 		Type:      act,
+		RuleID:    dec.ScriptID,
+		RuleIDStr: dec.ScriptName,
 		Matched:   true,
 		Phase:     "lua_post",
 		Category:  "lua_plugin",

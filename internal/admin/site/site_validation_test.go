@@ -28,6 +28,61 @@ func TestCreateSiteRejectsMalformedBody(t *testing.T) {
 	}
 }
 
+func TestSiteHandlersValidateCacheRulesBeforePersistence(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	reloadCalls := 0
+	reload := func() error {
+		reloadCalls++
+		return nil
+	}
+	invalidBody := []byte(`{
+		"host":"cache-invalid.example",
+		"upstream_urls":"http://127.0.0.1:8080",
+		"bind":":8080",
+		"enabled":true,
+		"cache_enabled":true,
+		"cache_default_ttl":60,
+		"cache_rules":[{"type":"prefex","value":"/assets","ttl":0}]
+	}`)
+	invalid := invokeCreateSiteHandler(t, CreateSite(repo, nil, reload), invalidBody)
+	if invalid.Response.StatusCode() != 400 {
+		t.Fatalf("invalid create status %d: %s", invalid.Response.StatusCode(), invalid.Response.Body())
+	}
+	if reloadCalls != 0 {
+		t.Fatalf("reload calls after rejected cache config = %d", reloadCalls)
+	}
+
+	validBody := []byte(`{
+		"host":"cache-valid.example",
+		"upstream_urls":"http://127.0.0.1:8080",
+		"bind":":8080",
+		"enabled":true,
+		"cache_enabled":true,
+		"cache_default_ttl":60,
+		"cache_rules":[{"type":"prefix","value":"/assets","ttl":0,"note":"static"}]
+	}`)
+	createdContext := invokeCreateSiteHandler(t, CreateSite(repo, nil, reload), validBody)
+	if createdContext.Response.StatusCode() != 201 {
+		t.Fatalf("valid create status %d: %s", createdContext.Response.StatusCode(), createdContext.Response.Body())
+	}
+	var created store.Site
+	if err := json.Unmarshal(createdContext.Response.Body(), &created); err != nil {
+		t.Fatal(err)
+	}
+	beforeRules := created.CacheRules
+	updated := invokeSiteHandler(t, UpdateSite(repo, nil, reload), created.ID, []byte(`{"cache_rules":[{"type":"regex","value":"(","ttl":1}]}`))
+	if updated.Response.StatusCode() != 400 {
+		t.Fatalf("invalid update status %d: %s", updated.Response.StatusCode(), updated.Response.Body())
+	}
+	loaded, err := repo.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CacheRules != beforeRules {
+		t.Fatalf("invalid update changed cache rules: %s", loaded.CacheRules)
+	}
+}
+
 // TestCreateSiteAppliesProtectionModeOverrides 覆盖创建路径上的 attack_protection_level 同步分支。
 func TestCreateSiteAppliesProtectionModeOverrides(t *testing.T) {
 	repo := newSiteRepoForTest(t)
@@ -138,6 +193,8 @@ func TestCreateSiteRejectsInvalidRuntimeActions(t *testing.T) {
 		{name: "cve action", payload: `"cve_enabled":true,"cve_action":"not-an-action"`},
 		{name: "rate limit action", payload: `"rate_limit_enabled":true,"rate_limit_action":"not-an-action"`},
 		{name: "anti replay action", payload: `"anti_replay_enabled":true,"anti_replay_action":"not-an-action"`},
+		{name: "challenge action", payload: `"challenge_action":"not-an-action"`},
+		{name: "captcha type", payload: `"captcha_type":"drag"`},
 	}
 
 	for _, tt := range tests {
@@ -461,6 +518,63 @@ func TestValidateSiteDynamicProtection(t *testing.T) {
 				t.Fatalf("validateSiteDynamicProtection() error = %v, want %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+/**
+ * TestUpdateSiteProtectionLevelForcesRuntimeActionValidation 覆盖 Update 路径上
+ * shouldValidateAction 的 attack_protection_level 分支：
+ * 只要请求体带了 attack_protection_level，即对持久化前的
+ * owasp_action / cve_action / rate_limit_action 强制校验——即使本次请求
+ * 没有携带任何一个从属动作字段（值来自 ApplyProtectionModeOverrides
+ * 融媒体写入的先前状态，或 siteRequestHasField 触发的强校验）。
+ *
+ * ApplyProtectionModeOverrides 是两个合法枚举，永不产出非法动作，
+ * 因此这里必须用非法枚举绕过覆写、保留脏动作，再以合法的
+ * attack_protection_level 触发强校验——这同时验证了「非法枚举不覆写」
+ * 与「合法枚举在场时强校验」两条语义。
+ */
+func TestUpdateSiteProtectionLevelForcesRuntimeActionValidation(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	enabled := true
+	item := store.Site{
+		Host:                 "protection-level-validation.example",
+		UpstreamURLs:         "http://127.0.0.1:8080",
+		Bind:                 ":8080",
+		Network:              "tcp",
+		Enabled:              true,
+		BotProtectionEnabled: &enabled,
+		OWASPEnabled:         &enabled,
+		OWASPAction:          "not-an-action",
+		CVEEnabled:           &enabled,
+		CVEAction:            "not-an-action",
+		RateLimitEnabled:     &enabled,
+		RateLimitAction:      "not-an-action",
+	}
+	if err := repo.Create(&item); err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+
+	body := []byte(`{"attack_protection_level":"ultra"}`)
+	ctx := invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), item.ID, body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("unexpected status %d, want 400: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	requireErrorMessage(t, ctx.Response.Body(), errInvalidSiteAction.Error())
+
+	// 非法枚举不产生任何覆写，动作保持脏值；被拒绝的更新不能改库。
+	loaded, err := repo.Get(item.ID)
+	if err != nil {
+		t.Fatalf("load site: %v", err)
+	}
+	if loaded.OWASPAction != "not-an-action" || loaded.CVEAction != "not-an-action" || loaded.RateLimitAction != "not-an-action" {
+		t.Fatalf("rejected update must preserve persisted actions, got %#v", loaded)
+	}
+
+	// 强校验只挡非法动作：修好动作后，同一合法枚举应正常通过。
+	ctx = invokeSiteHandler(t, UpdateSite(repo, nil, func() error { return nil }), item.ID, []byte(`{"owasp_action":"intercept","cve_action":"intercept","rate_limit_action":"rate_limit","attack_protection_level":"protect"}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("cleanup update status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 }
 

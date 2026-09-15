@@ -22,6 +22,7 @@ type CVEFeedManager struct {
 	autoApprove  bool
 	feedEnabled  bool
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	log          *slog.Logger
 	mu           sync.Mutex
 	lastSync     time.Time
@@ -41,6 +42,7 @@ type CVERuleModel struct {
 	Target      string         `gorm:"size:32" json:"target"` // url, body, header, cookie
 	Severity    string         `gorm:"size:16" json:"severity"`
 	Action      string         `gorm:"size:32;default:drop" json:"action"`
+	CaptchaType string         `gorm:"size:16" json:"captcha_type,omitempty"`
 	Enabled     bool           `gorm:"default:false" json:"enabled"`
 	Description string         `gorm:"type:text" json:"description"`
 	Source      string         `gorm:"size:32" json:"source"` // auto_generated, manual, nvd, github
@@ -101,9 +103,14 @@ func (m *CVEFeedManager) Start() {
 
 // Stop signals the background loop to exit.
 func (m *CVEFeedManager) Stop() {
-	if m.feedEnabled {
-		close(m.stopCh)
+	if m == nil || !m.feedEnabled {
+		return
 	}
+	m.stopOnce.Do(func() {
+		if m.stopCh != nil {
+			close(m.stopCh)
+		}
+	})
 }
 
 // SyncNow triggers an immediate sync (blocking).
@@ -203,7 +210,8 @@ func (m *CVEFeedManager) loadRulesIntoDetector() {
 			Target:      r.Target,
 			Severity:    r.Severity,
 			Action:      r.Action,
-			Enabled:     true,
+			CaptchaType: r.CaptchaType,
+			Enabled:     r.Enabled,
 			Description: r.Description,
 		}
 	}

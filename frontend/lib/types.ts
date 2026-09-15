@@ -56,9 +56,15 @@ export interface Site {
   bot_protection_level?: string
   attack_protection_level?: string
 
-  anti_replay_enabled: boolean
+  /** null = 继承全局。 */
+  anti_replay_enabled: boolean | null
   anti_replay_ttl: number
   anti_replay_action: string
+
+  /** 站点级质询动作覆盖；null = 继承全局。 */
+  challenge_action: string | null
+  /** 站点级 CAPTCHA 类型覆盖；null = 继承全局。 */
+  captcha_type: string | null
 
   owasp_enabled?: boolean | null
   owasp_sensitivity?: string
@@ -75,7 +81,8 @@ export interface Site {
 
   xff_mode: SiteXFFMode
   trusted_cidr: string
-  client_ip_header_order?: string[]
+  /** 后端 GET 以 JSON 字符串返回；更新接口也兼容直接提交字符串数组。 */
+  client_ip_header_order?: string | string[]
   preserve_original_host: boolean
 
   max_body_bytes: number
@@ -146,6 +153,9 @@ export interface SiteCacheRule {
   ttl: number
   case_insensitive?: boolean
   ignore_query?: boolean
+  disabled?: boolean
+  note?: string
+  stale_if_error_seconds?: number
 }
 
 export interface SiteForwardingRule {
@@ -257,8 +267,18 @@ export interface OWASPRuleItem {
   sensitivity?: string
   status_code?: number
   redirect_to?: string
+  captcha_type?: CaptchaType
   whitelist?: string[]
+  note?: string
   overridden?: boolean
+}
+
+export interface OWASPRuleListResponse {
+  items: OWASPRuleItem[]
+  grouped?: Record<string, OWASPRuleItem[]>
+  total: number
+  policy_id: number
+  stats: OWASPStats
 }
 
 export interface OWASPStats {
@@ -277,6 +297,7 @@ export interface CVEEffectiveConfig {
   sensitivity?: string
   status_code?: number
   redirect_to?: string
+  captcha_type?: CaptchaType
 }
 
 export interface CVERuleItem {
@@ -284,16 +305,37 @@ export interface CVERuleItem {
   cve_id?: string
   cve?: string
   name?: string
+  pattern?: string
+  target?: string
   description?: string
   category?: string
   severity?: string
   source?: string
   enabled: boolean
+  captcha_type?: CaptchaType | ""
   action?: string
   effective?: CVEEffectiveConfig
   override?: Record<string, unknown> | null
   overridden?: boolean
   inherited_from?: string
+}
+
+/**
+ * 自定义 CVE 规则的写入字段。
+ * 与 internal/waf/cve.CVERuleModel 的管理 API 字段保持一致，避免在页面
+ * 中把内置规则作用域覆盖和全局自定义规则写入混用。
+ */
+export interface CVERuleWriteInput {
+  cve_id: string
+  category: string
+  pattern: string
+  /** 后端模型允许字符串目标；内置选项为 all/url/body/header/cookie。 */
+  target: string
+  severity: string
+  action: string
+  description: string
+  enabled: boolean
+  captcha_type?: CaptchaType | ""
 }
 
 export interface CVEStats {
@@ -302,6 +344,16 @@ export interface CVEStats {
   disabled_count: number
   by_category?: Record<string, number>
   by_severity?: Record<string, number>
+  scope?: CVEScopeType
+  scope_id?: number
+}
+
+export interface CVERuleListResponse {
+  items: CVERuleItem[]
+  total: number
+  scope: CVEScopeType
+  scope_id: number
+  stats: CVEStats
 }
 
 export interface Rule {
@@ -319,6 +371,21 @@ export interface Rule {
   redirect_to?: string
   /** 空值继承全局验证码类型，仅对 captcha_challenge 生效。 */
   captcha_type?: CaptchaType
+}
+
+/** 普通规则列表的服务端分页与精确筛选参数。 */
+export interface RuleListParams {
+  page?: number
+  page_size?: number
+  policy_id?: number
+  q?: string
+  action?: RuleAction
+}
+
+/** 普通规则列表响应；total 是当前筛选条件下的完整记录数。 */
+export interface RuleListResponse {
+  items: Rule[]
+  total: number
 }
 
 export interface SecurityEvent {
@@ -468,6 +535,19 @@ export interface DropEvent {
   created_at: string
 }
 
+/**
+ * TCP 丢弃事件 24 小时聚合统计。
+ * 后端契约：GET /api/v1/drop-stats，
+ * internal/store/repository/drop_event.go DropStatsSummary。
+ */
+export interface DropStatsSummary {
+  total_24h: number
+  by_bot: number
+  by_cve: number
+  by_rule: number
+  by_ip_reputation: number
+}
+
 export interface BotScoreLog {
   id: number
   site_id: number
@@ -527,25 +607,66 @@ export interface DashboardSummary {
   drop_by_source_24h: Record<string, number>
 }
 
+/**
+ * 站点应用路由规则；字段严格对齐 store.ApplicationRouteRule。
+ * 管理接口使用 target/op/pattern 描述匹配范围，不是资源的 path/method 记录。
+ */
 export interface AppRouteRule {
   id: number
-  site_id: number
-  path: string
-  method: string
-  resource_type?: string
   created_at: string
   updated_at: string
+  site_id: number
+  name: string
+  enabled: boolean
+  priority: number
+  target: string
+  op: string
+  pattern: string
+  header_key?: string
 }
 
+/** POST /sites/:id/application-route-rules 的创建/更新载荷。 */
+export interface AppRouteRuleWriteInput {
+  name: string
+  enabled?: boolean
+  priority: number
+  target: string
+  op: string
+  pattern: string
+  header_key?: string
+}
+
+/**
+ * 站点记录资源；字段严格对齐 store.RecordedResource。
+ * 该接口是访问观测聚合，不包含 visit_count_24h/last_visit_at 这类未由后端返回的字段。
+ */
 export interface RecordedResource {
   id: number
-  site_id: number
-  path: string
-  method: string
-  content_type?: string
-  visit_count_24h: number
-  last_visit_at?: string
   created_at: string
+  updated_at: string
+  site_id: number
+  method: string
+  host: string
+  path: string
+  query_string?: string
+  client_ip?: string
+  status_code: number
+  content_type?: string
+  tls_version?: string
+  tls_sni?: string
+  tls_alpn?: string
+  ja3_hash?: string
+  ja4?: string
+  user_agent?: string
+  matched_rule_ids?: string
+  primary_rule_id?: number
+  request_headers_json?: string
+  response_headers_json?: string
+  request_body_snippet?: string
+  response_body_snippet?: string
+  first_seen: string
+  last_seen: string
+  hit_count: number
 }
 
 export interface IPEntry {
@@ -819,13 +940,45 @@ export interface ProtectionSettings {
   chain_steps: unknown[]
   escalation_enabled: boolean
   escalation_window_secs: number
-  escalation_steps: unknown[]
+  escalation_steps: EscalationStepDef[]
   basic_auth_enabled: boolean
   basic_auth_username: string
   basic_auth_password: string
   browser_sign_enabled: boolean
   browser_sign_ttl: number
   browser_sign_action: string
+}
+
+/**
+ * 全局升级阶梯的单个阶梯（internal/store/protection.go EscalationStepDef）。
+ * 动作白名单与 POST /protection/:id/escalation 校验一致：
+ * intercept / drop / challenge / captcha_challenge / shield_challenge / chain_challenge。
+ * 历史数据里可能出现旧值 block（action.Normalize 归一化），只读展示时不得对未知值抛错。
+ */
+export interface EscalationStepDef {
+  threshold: number
+  action: string
+}
+
+export interface SensitivityConfig {
+  category_sensitivity: Record<string, string>
+}
+
+/** 后端归一化后的灵敏度等级（off/low/mid/high/very_high/strict）。 */
+export type SensitivityLevel =
+  "off" | "low" | "mid" | "high" | "very_high" | "strict"
+
+export interface EscalationConfig {
+  escalation_enabled: boolean
+  escalation_window_secs: number
+  escalation_steps: EscalationStepDef[]
+}
+
+/** 升级配置局部更新载荷：字段全部可选，与后端指针字段语义一致。 */
+export interface EscalationConfigUpdate {
+  escalation_enabled?: boolean
+  escalation_window_secs?: number
+  escalation_steps?: EscalationStepDef[]
 }
 
 /** protection-settings 局部更新载荷；skip_path_by_phase 兼容后端 object/string/null 输入。 */
@@ -837,6 +990,8 @@ export type ProtectionSettingsUpdate = Partial<
 
 export interface BotSettings {
   enabled: boolean
+  /** bot/drop 判定的分数阈值，1-100。 */
+  score_threshold?: number
   captcha_enabled: boolean
   dynamic_protection_enabled: boolean
   html_obfuscation: boolean
@@ -853,11 +1008,62 @@ export interface BotSettings {
   image_watermark_paths?: string[]
   watermark_text?: string
   exclude_record_headers?: string[]
+  /**
+   * 高风险国家代码，ISO 3166-1 alpha-2 大写（如 "US"）。
+   * 对应后端 BotSettingsResponse.high_risk_countries（internal/admin/shared/helpers.go）。
+   */
+  high_risk_countries?: string[]
+  /** 数据中心 ASN 列表，uint32；后端 JSON 反序列化按数字处理。 */
+  datacenter_asns?: number[]
+  /** VPN/代理出口 ASN 列表，uint32；后端 JSON 反序列化按数字处理。 */
+  vpn_proxy_asns?: number[]
+  /**
+   * MaxMind GeoIP2 数据库文件路径。
+   * 留空表示沿用环境变量 MY_OPENWAF_GEOIP_DB 配置的库
+   * （internal/app/server.go loadBotGeoConfig 的语义）。
+   */
+  geoip_db_path?: string
+}
+
+/**
+ * Bot 评分 24 小时聚合统计。
+ * 后端契约：GET /api/v1/bot-stats，internal/store/repository/bot_score.go BotScoreStats。
+ */
+export interface BotScoreStats {
+  total_24h: number
+  blocked_24h: number
+  high_risk_24h: number
+  avg_score_24h: number
+}
+
+/**
+ * Bot 评分记录列表响应。
+ * 后端契约：GET /api/v1/bot-scores -> { items: BotScoreLog[], total: number }。
+ */
+export interface BotScoreListResponse {
+  items: BotScoreLog[]
+  total: number
 }
 
 export type ShieldEnvStrictness = 0 | 1 | 2
 
 export type CaptchaType = "math" | "click" | "slide" | "rotate"
+
+export type ChainStepType = "env" | "pow" | "captcha"
+
+export type ChainStepCondition =
+  "" | "all" | "env_score>30" | "env_score<30" | "score>50" | "score>80"
+
+export interface ChainStepConfig {
+  type: ChainStepType
+  condition?: ChainStepCondition
+  captcha_type?: CaptchaType | ""
+}
+
+export interface ChainConfig {
+  chain_enabled: boolean
+  chain_steps: ChainStepConfig[]
+}
 
 export interface CaptchaConfig {
   captcha_enabled: boolean
@@ -894,35 +1100,39 @@ export interface CaptchaTestResponse {
   fallback: boolean
 }
 
-export interface ChainConfig {
-  enabled: boolean
-  steps: number
-  timeout: number
-}
-
-export interface SensitivityConfig {
-  level: "low" | "mid" | "high"
-  custom_rules?: string
-}
-
-export interface EscalationConfig {
-  enabled: boolean
-  threshold: number
-  window: number
-  action: string
-}
-
 export interface ErrorPageConfig {
   status_code: number
-  title?: string
-  message?: string
-  html?: string
+  title: string
+  html: string
+  content_type: string
 }
 
+/**
+ * 站点错误页接口响应。
+ * 后端以状态码字符串作为对象键保存自定义页面，而不是数组。
+ */
 export interface SiteErrorPages {
   site_id: number
-  pages: ErrorPageConfig[]
-  default_template?: string
+  error_pages: Record<string, ErrorPageConfig>
+}
+
+/** 全局内置错误页模板响应。 */
+export interface DefaultErrorPagesResponse {
+  defaults: Record<string, ErrorPageConfig>
+}
+
+/** 错误页预览接口请求与响应。 */
+export interface ErrorPagePreviewRequest {
+  html: string
+  status_code: number
+  variables?: Record<string, unknown>
+}
+
+export interface ErrorPagePreviewResponse {
+  rendered: string
+  status_code: number
+  parse_error?: string
+  execute_error?: string
 }
 
 /**
@@ -1143,6 +1353,8 @@ export interface LuaPlugin {
   timeout_ms: number
   /** 运维备注 */
   description: string
+  /** 当前快照编译或运行时契约诊断；存在时脚本未进入执行引擎。 */
+  compile_error?: string
 }
 
 /** LuaValidateResult 是语法校验结果，对齐 POST /lua-plugins/validate 的响应。 */
@@ -1373,6 +1585,18 @@ export interface JSPluginStatsItem {
 export interface JSPluginStatsResponse {
   items: JSPluginStatsItem[]
   total: number
+}
+
+/** JavaScript 运行时状态，对齐 GET /js-plugins/runtime。 */
+export interface JSPluginRuntimeStatus {
+  backend: string
+  available: boolean
+  engine_ready: boolean
+  enabled: number
+  compiled: number
+  compile_errors: number
+  request_supported: boolean
+  response_supported: boolean
 }
 
 /** JavaScript 插件可返回的请求变更计划。 */

@@ -338,6 +338,21 @@ func TestDefaultProtectionConfig(t *testing.T) {
 	}
 }
 
+func TestProtectionConfigValidateRateLimitsRejectsZeroQuota(t *testing.T) {
+	cfg := DefaultProtectionConfig()
+	cfg.RequestRateLimitEnabled = true
+	cfg.RequestRateLimitMax = 0
+	if err := cfg.ValidateRateLimits(); err == nil {
+		t.Fatal("enabled request limiter with zero quota must be rejected")
+	}
+	cfg = DefaultProtectionConfig()
+	cfg.ErrorRateLimitEnabled = true
+	cfg.ErrorRateLimitWindow = 0
+	if err := cfg.ValidateRateLimits(); err == nil {
+		t.Fatal("enabled error limiter with zero window must be rejected")
+	}
+}
+
 // --- DefaultBotProtectionConfig ---
 
 func TestDefaultBotProtectionConfig(t *testing.T) {
@@ -371,5 +386,30 @@ func TestDefaultAttackProtectionConfig(t *testing.T) {
 	}
 	if cfg.SignatureAction != "intercept" {
 		t.Errorf("SignatureAction = %q, want intercept", cfg.SignatureAction)
+	}
+}
+
+// --- ChallengeAction / CaptchaType 默认值与校验 ---
+
+func TestDefaultProtectionConfigChallengeAction(t *testing.T) {
+	cfg := DefaultProtectionConfig()
+	if cfg.ChallengeAction != "challenge" {
+		t.Errorf("ChallengeAction = %q, want challenge", cfg.ChallengeAction)
+	}
+}
+
+func TestValidateProtectionChallengeAction(t *testing.T) {
+	if !ValidateProtectionChallengeAction("") {
+		t.Error("empty ChallengeAction should be valid (inherits default challenge)")
+	}
+	for _, v := range []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"} {
+		if !ValidateProtectionChallengeAction(v) {
+			t.Errorf("ValidateProtectionChallengeAction(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"intercept", "drop", "block", "rate_limit", "unknown"} {
+		if ValidateProtectionChallengeAction(v) {
+			t.Errorf("ValidateProtectionChallengeAction(%q) = true, want false", v)
+		}
 	}
 }

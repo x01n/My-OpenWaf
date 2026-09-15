@@ -7,18 +7,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import {
-  Pagination,
-  PaginationContent,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-  PaginationEllipsis,
-} from "@/components/ui/pagination"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { DataTable } from "@/components/data-table"
+import { TablePagination } from "@/components/table-pagination"
 import { IconFilter } from "@tabler/icons-react"
 import { useDropEvents } from "@/hooks/use-api"
 import type { DropEvent } from "@/lib/types"
@@ -42,7 +34,6 @@ export default function DropEventsPage() {
 
   const items = data?.items || []
   const total = data?.total || 0
-  const totalPages = Math.ceil(total / pageSize) || 1
 
   const handleFilterChange = (key: string, value: string) => {
     setFilters((prev) => ({ ...prev, [key]: value }))
@@ -58,8 +49,34 @@ export default function DropEventsPage() {
     { key: "created_at", title: t("dropEvents.time"), width: "180px" },
     { key: "client_ip", title: t("dropEvents.ip"), width: "140px" },
     { key: "source", title: t("dropEvents.source"), width: "120px" },
-    { key: "host", title: t("dropEvents.host"), width: "180px" },
-    { key: "path", title: t("dropEvents.path"), width: "200px" },
+    {
+      key: "host",
+      title: t("dropEvents.host"),
+      width: "180px",
+      cellClassName: "max-w-[180px] whitespace-normal align-top",
+      render: (row: DropEvent) => (
+        <span
+          className="block truncate font-mono text-xs"
+          title={row.host || undefined}
+        >
+          {row.host || "-"}
+        </span>
+      ),
+    },
+    {
+      key: "path",
+      title: t("dropEvents.path"),
+      width: "200px",
+      cellClassName: "max-w-[200px] whitespace-normal align-top",
+      render: (row: DropEvent) => (
+        <span
+          className="line-clamp-2 font-mono text-xs leading-relaxed break-all"
+          title={row.path || undefined}
+        >
+          {row.path || "-"}
+        </span>
+      ),
+    },
   ]
 
   return (
@@ -153,48 +170,12 @@ export default function DropEventsPage() {
             emptyText={t("dropEvents.empty")}
           />
 
-          {totalPages > 1 && (
-            <Pagination>
-              <PaginationContent>
-                <PaginationItem>
-                  <PaginationPrevious
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    disabled={page <= 1}
-                    className={
-                      page <= 1 ? "pointer-events-none opacity-50" : ""
-                    }
-                  />
-                </PaginationItem>
-                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                  const pageNum = i + 1
-                  return (
-                    <PaginationItem key={pageNum}>
-                      <PaginationLink
-                        isActive={page === pageNum}
-                        onClick={() => setPage(pageNum)}
-                      >
-                        {pageNum}
-                      </PaginationLink>
-                    </PaginationItem>
-                  )
-                })}
-                {totalPages > 5 && (
-                  <PaginationItem>
-                    <PaginationEllipsis />
-                  </PaginationItem>
-                )}
-                <PaginationItem>
-                  <PaginationNext
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    disabled={page >= totalPages}
-                    className={
-                      page >= totalPages ? "pointer-events-none opacity-50" : ""
-                    }
-                  />
-                </PaginationItem>
-              </PaginationContent>
-            </Pagination>
-          )}
+          <TablePagination
+            page={page}
+            pageSize={pageSize}
+            total={total}
+            onPageChange={setPage}
+          />
         </CardContent>
       </Card>
     </div>

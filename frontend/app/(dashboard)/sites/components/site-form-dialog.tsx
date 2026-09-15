@@ -131,8 +131,9 @@ export function SiteFormDialog({
 }: SiteFormDialogProps) {
   const { t } = useTranslation()
   const isEdit = !!site
-  const { data: certificates } = useCertificates()
-  const { data: policies = [] } = usePolicies()
+  // 站点编辑器常驻于页面但默认关闭；仅在真正打开时加载低频引用数据。
+  const { data: certificates } = useCertificates(open)
+  const { data: policies = [] } = usePolicies(open)
 
   const form = useForm<SiteFormValues>({
     resolver: zodResolver(siteFormSchema),

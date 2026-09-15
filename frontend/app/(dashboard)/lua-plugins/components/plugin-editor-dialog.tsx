@@ -28,7 +28,7 @@ import {
 } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
-  useSites,
+  useAllSites,
   useLuaPluginMutation,
   useLuaPluginValidate,
 } from "@/hooks/use-api"
@@ -49,7 +49,7 @@ import { LuaHelpPanel } from "./lua-help-panel"
 const SCOPE_GLOBAL = "global"
 
 /** 超时上限（毫秒），与后端 luaMaxTimeoutMS 一致。 */
-const MAX_TIMEOUT_MS = 1200
+const MAX_TIMEOUT_MS = 1000
 
 /**
  * @typedef {object} PluginForm
@@ -151,7 +151,8 @@ export function PluginEditorDialog({
   const [tab, setTab] = useState("script")
   const [validation, setValidation] = useState<LuaValidateResult | null>(null)
 
-  const { data: sitesData } = useSites({ page_size: 500 })
+  // 对话框未打开时不加载站点选择器；打开后复用有界引用缓存。
+  const { data: sitesData } = useAllSites(open)
   const sites = useMemo(() => sitesData?.items || [], [sitesData])
 
   const { execute: save, loading: saving } = useLuaPluginMutation()
@@ -211,6 +212,17 @@ export function PluginEditorDialog({
     }
 
     try {
+      if (form.enabled) {
+        const result = await validate({
+          stage: form.stage,
+          source: form.source,
+        })
+        setValidation(result)
+        if (!result.valid) {
+          toast.error(result.error || t("luaPlugins.runtimeError"))
+          return
+        }
+      }
       await save({ id: editing?.id, data: payload })
       toast.success(
         editing ? t("common.updateSuccess") : t("common.createSuccess")
@@ -231,18 +243,23 @@ export function PluginEditorDialog({
   }
 
   const canSubmit = form.name.trim() !== "" && form.source.trim() !== ""
+  const submitting = saving || validating
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
-        <DialogHeader>
+      <DialogContent className="grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:max-w-4xl">
+        <DialogHeader className="border-b px-4 py-4 pe-14 sm:px-6 sm:py-5 sm:pe-14">
           <DialogTitle>
             {editing ? t("luaPlugins.editTitle") : t("luaPlugins.addTitle")}
           </DialogTitle>
           <DialogDescription>{t("luaPlugins.dialogHint")}</DialogDescription>
         </DialogHeader>
 
-        <Tabs value={tab} onValueChange={setTab} className="space-y-4">
+        <Tabs
+          value={tab}
+          onValueChange={setTab}
+          className="min-h-0 space-y-4 overflow-y-auto px-4 py-4 sm:px-6"
+        >
           <TabsList>
             <TabsTrigger value="script">
               <IconFileCode className="mr-1 h-4 w-4" />
@@ -405,12 +422,12 @@ export function PluginEditorDialog({
           </TabsContent>
         </Tabs>
 
-        <DialogFooter>
+        <DialogFooter className="border-t bg-popover px-4 py-4 sm:px-6">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={handleSubmit} disabled={saving || !canSubmit}>
-            {saving
+          <Button onClick={handleSubmit} disabled={submitting || !canSubmit}>
+            {submitting
               ? t("common.submitting")
               : editing
                 ? t("common.save")

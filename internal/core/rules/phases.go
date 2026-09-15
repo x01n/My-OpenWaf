@@ -635,14 +635,18 @@ func owaspHitResult(hit owasp.OWASPHit, cfg *store.ProtectionConfig, overrides m
 		act = normalizeConfiguredAction(override.Action)
 	}
 	result := action.Result{
-		Type:       action.Normalize(act),
-		RuleIDStr:  hit.RuleID,
-		Phase:      "owasp_default",
-		MatchDesc:  hit.Desc,
-		Matched:    true,
-		Category:   string(hit.Category),
-		StatusCode: override.StatusCode,
-		RedirectTo: override.RedirectTo,
+		Type:        action.Normalize(act),
+		RuleIDStr:   hit.RuleID,
+		Phase:       "owasp_default",
+		MatchDesc:   hit.Desc,
+		Matched:     true,
+		Category:    string(hit.Category),
+		StatusCode:  override.StatusCode,
+		RedirectTo:  override.RedirectTo,
+		CaptchaType: override.CaptchaType,
+	}
+	if result.Type != action.CaptchaChallenge {
+		result.CaptchaType = ""
 	}
 	return result
 }
@@ -724,10 +728,14 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	act := normalizeConfiguredAction(cveAction)
 	statusCode := 0
 	redirectTo := ""
+	captchaType := ""
 	explicitAction := false
 	if best.Action != "" {
 		act = normalizeConfiguredAction(best.Action)
 		explicitAction = true
+	}
+	if best.CaptchaType != "" {
+		captchaType = best.CaptchaType
 	}
 	if len(overrides) > 0 {
 		for _, key := range []string{best.Pattern, "cve:" + best.Pattern, best.CVEID, "cve:" + best.CVEID} {
@@ -736,8 +744,15 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 					act = normalizeConfiguredAction(ov.Action)
 					explicitAction = true
 				}
-				statusCode = ov.StatusCode
-				redirectTo = ov.RedirectTo
+				if ov.StatusCode != 0 {
+					statusCode = ov.StatusCode
+				}
+				if ov.RedirectTo != "" {
+					redirectTo = ov.RedirectTo
+				}
+				if ov.CaptchaType != "" {
+					captchaType = ov.CaptchaType
+				}
 				break
 			}
 		}
@@ -756,16 +771,20 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 			}
 		}
 	}
+	if action.Normalize(act) != action.CaptchaChallenge {
+		captchaType = ""
+	}
 
 	result := action.Result{
-		Type:       action.Normalize(act),
-		RuleIDStr:  "cve:" + best.CVEID,
-		Phase:      "cve_detection",
-		MatchDesc:  best.Description + " [" + best.Pattern + "]",
-		Matched:    true,
-		Category:   "cve_" + best.Category,
-		StatusCode: statusCode,
-		RedirectTo: redirectTo,
+		Type:        action.Normalize(act),
+		RuleIDStr:   "cve:" + best.CVEID,
+		Phase:       "cve_detection",
+		MatchDesc:   best.Description + " [" + best.Pattern + "]",
+		Matched:     true,
+		Category:    "cve_" + best.Category,
+		StatusCode:  statusCode,
+		RedirectTo:  redirectTo,
+		CaptchaType: captchaType,
 	}
 	return result, result.IsTerminal()
 }

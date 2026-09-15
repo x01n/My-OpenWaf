@@ -410,6 +410,55 @@ func TestListRulesReturns200OnEmptyDB(t *testing.T) {
 	}
 }
 
+func TestListRulesSupportsActionFilterAndServerPagination(t *testing.T) {
+	repo, db := newRuleRepoAndDBForHandlerTest(t)
+	items := make([]store.Rule, 0, 56)
+	for i := 0; i < 55; i++ {
+		items = append(items, store.Rule{
+			Name:     fmt.Sprintf("intercept-%02d", i),
+			PolicyID: 1,
+			Phase:    store.PhaseCustom,
+			Pattern:  fmt.Sprintf("block_path:/blocked/%02d", i),
+			Action:   store.ActionIntercept,
+			Priority: i + 1,
+			Enabled:  true,
+		})
+	}
+	items = append(items, store.Rule{
+		Name: "allow-rule", PolicyID: 1, Phase: store.PhaseACL,
+		Pattern: "allow_ip:192.0.2.1", Action: store.ActionAllow,
+		Priority: 1, Enabled: true,
+	})
+	if err := db.Create(&items).Error; err != nil {
+		t.Fatalf("seed rules: %v", err)
+	}
+
+	ctx := invokeRuleGetHandler(
+		t,
+		ListRules(repo),
+		"/api/v1/rules?policy_id=1&action=intercept&page=2&page_size=50",
+		nil,
+	)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	var resp struct {
+		Items []store.Rule `json:"items"`
+		Total int64        `json:"total"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 55 || len(resp.Items) != 5 {
+		t.Fatalf("expected total=55 and second page size=5, got total=%d items=%d", resp.Total, len(resp.Items))
+	}
+	for _, item := range resp.Items {
+		if item.PolicyID != 1 || item.Action != store.ActionIntercept {
+			t.Fatalf("unexpected filtered item: %+v", item)
+		}
+	}
+}
+
 func TestGetRuleInvalidIDReturns400(t *testing.T) {
 	repo := newRuleRepoForHandlerTest(t)
 	ctx := invokeRuleGetHandler(t, GetRule(repo), "/api/v1/rules/abc",

@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/store"
 
 	"github.com/glebarez/sqlite"
@@ -298,8 +300,9 @@ func TestAbandonRemainingCountsEveryType(t *testing.T) {
 func TestUnifiedWriterCloseIsIdempotent(t *testing.T) {
 	db := newLogTestDB(t)
 
-	writer := NewUnifiedWriter(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	writer.flushInterval = time.Hour
+	opts := DefaultUnifiedWriterOptions()
+	opts.FlushInterval = time.Hour
+	writer := NewUnifiedWriterWithOptions(db, slog.New(slog.NewTextHandler(io.Discard, nil)), opts)
 	writer.RecordAccessLog(store.AccessLog{
 		RequestID: "idempotent-close",
 		Host:      "idempotent.example.test",
@@ -376,9 +379,16 @@ func TestUnifiedWriterFlushIsolatesFailingRecordType(t *testing.T) {
 		t.Fatalf("bot scores persisted = %d, want 1 (types after the failing one must still be written)", bots)
 	}
 
-	// 失败必须计入 flush_errors_total，不能被 SAVEPOINT 静默吞掉。
-	if got := writer.Stats().FlushErrorsTotal; got != 1 {
-		t.Fatalf("FlushErrorsTotal = %d, want 1", got)
+	// 失败必须计入 flush_errors_total，且只能把实际提交的三条记录计为 persisted。
+	stats := writer.Stats()
+	if stats.FlushErrorsTotal != 1 {
+		t.Fatalf("FlushErrorsTotal = %d, want 1", stats.FlushErrorsTotal)
+	}
+	if stats.TotalFlushedRecords != 3 || stats.LastFlushRecords != 3 {
+		t.Fatalf("persisted records = total:%d last:%d, want 3/3", stats.TotalFlushedRecords, stats.LastFlushRecords)
+	}
+	if stats.FailedRecordsTotal != 1 || stats.LastFlushFailedRecords != 1 {
+		t.Fatalf("failed records = total:%d last:%d, want 1/1", stats.FailedRecordsTotal, stats.LastFlushFailedRecords)
 	}
 }
 
@@ -397,8 +407,9 @@ func TestUnifiedWriterFlushesAccessLogsWhenBatchIsFull(t *testing.T) {
 		t.Fatalf("migrate logs: %v", err)
 	}
 
-	writer := NewUnifiedWriter(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	writer.flushInterval = time.Hour
+	opts := DefaultUnifiedWriterOptions()
+	opts.FlushInterval = time.Hour
+	writer := NewUnifiedWriterWithOptions(db, slog.New(slog.NewTextHandler(io.Discard, nil)), opts)
 	t.Cleanup(func() {
 		writer.Close()
 		_ = sqlDB.Close()
@@ -414,10 +425,10 @@ func TestUnifiedWriterFlushesAccessLogsWhenBatchIsFull(t *testing.T) {
 		})
 	}
 
-	// 截止时间需留足余量：单独运行约 1s（512 条 SQLite 批量写），整包并发跑时
-	// 其他用例竞争 CPU 与 SQLite 写锁会成倍拉长，2s 只有 1 倍余量必然偶发失败。
-	// 本用例断言的是「批满即刷」这一行为，不是刷新耗时。
-	deadline := time.After(20 * time.Second)
+	// 截止时间需留足余量：单独运行约 1s（512 条 SQLite 批量写），race 插桩与
+	// 整包并发会成倍拉长调度和写入时间。本用例断言的是「批满即刷」行为，
+	// 不是刷新耗时；性能由独立 benchmark/压测约束。
+	deadline := time.After(60 * time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -438,5 +449,72 @@ func TestUnifiedWriterFlushesAccessLogsWhenBatchIsFull(t *testing.T) {
 			t.Fatalf("access logs flushed after batch full = %d, want %d", count, batchSize)
 		case <-ticker.C:
 		}
+	}
+}
+
+type countCacheInvalidationProbe struct {
+	count atomic.Int64
+}
+
+func (p *countCacheInvalidationProbe) InvalidateAll() {
+	p.count.Add(1)
+}
+
+func TestUnifiedWriterInvalidatesCountCacheAfterCommittedBatch(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "logs.db")), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate logs: %v", err)
+	}
+
+	opts := DefaultUnifiedWriterOptions()
+	opts.FlushInterval = time.Hour
+	writer := NewUnifiedWriterWithOptions(db, slog.New(slog.NewTextHandler(io.Discard, nil)), opts)
+	probe := &countCacheInvalidationProbe{}
+	writer.SetCountCacheInvalidator(probe)
+	writer.RecordAccessLog(store.AccessLog{RequestID: "count-cache-writer", Host: "count-cache.example.test"})
+	writer.Close()
+
+	if got := probe.count.Load(); got != 1 {
+		t.Fatalf("count cache invalidations = %d, want 1 after committed batch", got)
+	}
+}
+
+func TestUnifiedWriterInvalidatesOnlyCommittedAccessNamespaces(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "logs.db")), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate logs: %v", err)
+	}
+
+	queryCache := cache.NewQueryCache(time.Minute)
+	defer queryCache.Close()
+	queryCache.Set("al_count:v2|filter:a", int64(1))
+	queryCache.Set("al_list:v1|filter:a", "access")
+	queryCache.Set("se_count:v2|filter:a", int64(2))
+
+	opts := DefaultUnifiedWriterOptions()
+	opts.FlushInterval = time.Hour
+	writer := NewUnifiedWriterWithOptions(db, slog.New(slog.NewTextHandler(io.Discard, nil)), opts)
+	writer.SetCountCacheInvalidator(queryCache)
+	writer.RecordAccessLog(store.AccessLog{RequestID: "namespace-access", Host: "namespace.example.test"})
+	writer.Close()
+
+	if _, ok := queryCache.Get("al_count:v2|filter:a"); ok {
+		t.Fatal("access count cache should be invalidated after committed access log")
+	}
+	if _, ok := queryCache.Get("al_list:v1|filter:a"); ok {
+		t.Fatal("access list cache should be invalidated after committed access log")
+	}
+	if _, ok := queryCache.Get("se_count:v2|filter:a"); !ok {
+		t.Fatal("security event cache should remain after access log commit")
 	}
 }

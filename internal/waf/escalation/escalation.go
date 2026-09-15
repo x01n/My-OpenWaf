@@ -39,6 +39,7 @@ type EscalationManager struct {
 	localCache  sync.Map
 	defaultCfg  atomic.Value
 	cleanupDone chan struct{}
+	closeOnce   sync.Once
 }
 
 func NewEscalationManager(redisClient *goredis.Client) *EscalationManager {
@@ -60,7 +61,16 @@ func (m *EscalationManager) SetRedis(redisClient *goredis.Client) {
 func (m *EscalationManager) DefaultConfig() EscalationConfig {
 	return m.defaultCfg.Load().(EscalationConfig)
 }
-func (m *EscalationManager) Close() { close(m.cleanupDone) }
+func (m *EscalationManager) Close() {
+	if m == nil {
+		return
+	}
+	m.closeOnce.Do(func() {
+		if m.cleanupDone != nil {
+			close(m.cleanupDone)
+		}
+	})
+}
 func (m *EscalationManager) redisClient() *goredis.Client {
 	if m == nil {
 		return nil

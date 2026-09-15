@@ -22,6 +22,16 @@ func (r *SiteListenerRepo) AllEnabled() ([]store.SiteListener, error) {
 	return items, r.db.Where("enabled = ?", true).Order("site_id ASC, bind ASC").Find(&items).Error
 }
 
+// ListEnabledBySites 仅返回指定站点页的启用监听器，避免管理端渲染一页站点时扫描全表。
+func (r *SiteListenerRepo) ListEnabledBySites(siteIDs []uint) ([]store.SiteListener, error) {
+	if len(siteIDs) == 0 {
+		return []store.SiteListener{}, nil
+	}
+	var items []store.SiteListener
+	return items, r.db.Where("enabled = ? AND site_id IN ?", true, siteIDs).
+		Order("site_id ASC, bind ASC").Find(&items).Error
+}
+
 // ListBySite returns listeners for a specific site ordered by bind.
 func (r *SiteListenerRepo) ListBySite(siteID uint) ([]store.SiteListener, error) {
 	var items []store.SiteListener

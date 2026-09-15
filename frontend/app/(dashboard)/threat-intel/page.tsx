@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
 import { PageHeader } from "@/components/page-header"
 import {
   useThreatIntelFeeds,
@@ -9,7 +10,7 @@ import {
   useThreatIntelDelete,
   useThreatIntelSync,
   useThreatIntelSyncLogs,
-  useSites,
+  useAllSites,
 } from "@/hooks/use-api"
 import { DataTable } from "@/components/data-table"
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -40,15 +41,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import {
-  Pagination,
-  PaginationContent,
-  PaginationEllipsis,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-} from "@/components/ui/pagination"
+import { TablePagination } from "@/components/table-pagination"
 import { toast } from "sonner"
 import { formatDate } from "@/lib/utils"
 import {
@@ -139,12 +132,14 @@ export default function ThreatIntelPage() {
  */
 function FeedsTab() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
 
   const { data, isLoading, error, mutate: refresh } = useThreatIntelFeeds()
   const feeds = useMemo(() => data?.items || [], [data])
 
   // 站点列表用于作用域下拉与站点名映射（显示名用 host）
-  const { data: sitesData } = useSites({ page_size: 500 })
+  const { data: sitesData } = useAllSites()
   const sites = useMemo(() => sitesData?.items || [], [sitesData])
   const siteNameMap = useMemo(() => {
     const map = new Map<number, string>()
@@ -183,12 +178,14 @@ function FeedsTab() {
   }
 
   const openCreate = () => {
+    if (!canManage) return
     setEditId(null)
     setForm(emptyForm)
     setDialogOpen(true)
   }
 
   const openEdit = (feed: ThreatIntelFeed) => {
+    if (!canManage) return
     setEditId(feed.id)
     setForm({
       name: feed.name,
@@ -206,6 +203,7 @@ function FeedsTab() {
   }
 
   const handleSubmit = async () => {
+    if (!canManage) return
     try {
       const payload: Partial<ThreatIntelFeed> = {
         name: form.name.trim(),
@@ -232,6 +230,7 @@ function FeedsTab() {
     feed: ThreatIntelFeed,
     enabled: boolean
   ) => {
+    if (!canManage) return
     try {
       await mutateFeed({ id: feed.id, data: { enabled } })
       refresh()
@@ -241,6 +240,7 @@ function FeedsTab() {
   }
 
   const handleSync = async (id: number) => {
+    if (!canManage) return
     setSyncingIds((prev) => new Set(prev).add(id))
     try {
       await syncFeed(id)
@@ -258,7 +258,7 @@ function FeedsTab() {
   }
 
   const confirmDelete = async () => {
-    if (deleteId === null) return
+    if (!canManage || deleteId === null) return
     try {
       await deleteFeed(deleteId)
       toast.success(t("common.deleteSuccess"))
@@ -274,7 +274,12 @@ function FeedsTab() {
       key: "name",
       title: t("threatIntel.name"),
       render: (row: ThreatIntelFeed) => (
-        <span className="font-medium">{row.name}</span>
+        <span
+          className="block max-w-[180px] truncate font-medium"
+          title={row.name}
+        >
+          {row.name}
+        </span>
       ),
     },
     {
@@ -311,9 +316,7 @@ function FeedsTab() {
       title: t("threatIntel.action"),
       width: "100px",
       render: (row: ThreatIntelFeed) => (
-        <Badge
-          variant={row.kind === "whitelist" ? "secondary" : "destructive"}
-        >
+        <Badge variant={row.kind === "whitelist" ? "secondary" : "destructive"}>
           {row.kind === "whitelist"
             ? t("threatIntel.actionAllow")
             : row.action === "drop"
@@ -386,6 +389,7 @@ function FeedsTab() {
         <Switch
           checked={row.enabled}
           onCheckedChange={(v) => handleToggleEnabled(row, v)}
+          disabled={!canManage}
         />
       ),
     },
@@ -399,7 +403,7 @@ function FeedsTab() {
             variant="ghost"
             size="icon-sm"
             onClick={() => handleSync(row.id)}
-            disabled={syncingIds.has(row.id)}
+            disabled={!canManage || syncingIds.has(row.id)}
             title={t("threatIntel.sync")}
           >
             <IconRefresh
@@ -413,6 +417,7 @@ function FeedsTab() {
             size="icon-sm"
             onClick={() => openEdit(row)}
             title={t("common.edit")}
+            disabled={!canManage}
           >
             <IconEdit className="h-4 w-4" />
           </Button>
@@ -421,6 +426,7 @@ function FeedsTab() {
             size="icon-sm"
             onClick={() => setDeleteId(row.id)}
             title={t("common.delete")}
+            disabled={!canManage}
           >
             <IconTrash className="h-4 w-4 text-destructive" />
           </Button>
@@ -439,8 +445,13 @@ function FeedsTab() {
           </AlertDescription>
         </Alert>
       )}
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
+        </Alert>
+      )}
       <div className="flex justify-end">
-        <Button onClick={openCreate}>
+        <Button onClick={openCreate} disabled={!canManage}>
           <IconPlus className="h-4 w-4" />
           {t("threatIntel.add")}
         </Button>
@@ -461,62 +472,44 @@ function FeedsTab() {
               {editId ? t("threatIntel.editTitle") : t("threatIntel.addTitle")}
             </DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>{t("threatIntel.name")}</Label>
-              <Input
-                value={form.name}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, name: e.target.value }))
-                }
-                placeholder={t("threatIntel.namePlaceholder")}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("threatIntel.url")}</Label>
-              <Input
-                value={form.url}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, url: e.target.value }))
-                }
-                placeholder={t("threatIntel.urlPlaceholder")}
-                className="font-mono text-sm"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
+          <fieldset
+            disabled={!canManage}
+            className="m-0 space-y-4 border-0 p-0"
+          >
+            <div className="space-y-4">
               <div className="space-y-2">
-                <Label>{t("threatIntel.kind")}</Label>
-                <Select
-                  value={form.kind}
-                  onValueChange={(v) =>
-                    setForm((f) => ({
-                      ...f,
-                      kind: v as "blacklist" | "whitelist",
-                    }))
+                <Label>{t("threatIntel.name")}</Label>
+                <Input
+                  value={form.name}
+                  maxLength={100}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, name: e.target.value }))
                   }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="blacklist">
-                      {t("threatIntel.blacklist")}
-                    </SelectItem>
-                    <SelectItem value="whitelist">
-                      {t("threatIntel.whitelist")}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                  placeholder={t("threatIntel.namePlaceholder")}
+                />
               </div>
               <div className="space-y-2">
-                <Label>{t("threatIntel.action")}</Label>
-                {form.kind === "blacklist" ? (
+                <Label>{t("threatIntel.url")}</Label>
+                <Input
+                  value={form.url}
+                  maxLength={500}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, url: e.target.value }))
+                  }
+                  placeholder={t("threatIntel.urlPlaceholder")}
+                  className="font-mono text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>{t("threatIntel.kind")}</Label>
                   <Select
-                    value={form.action}
+                    value={form.kind}
+                    disabled={!canManage}
                     onValueChange={(v) =>
                       setForm((f) => ({
                         ...f,
-                        action: v as "intercept" | "drop",
+                        kind: v as "blacklist" | "whitelist",
                       }))
                     }
                   >
@@ -524,83 +517,120 @@ function FeedsTab() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="intercept">
-                        {t("threatIntel.actionIntercept")}
+                      <SelectItem value="blacklist">
+                        {t("threatIntel.blacklist")}
                       </SelectItem>
-                      <SelectItem value="drop">
-                        {t("threatIntel.actionDrop")}
+                      <SelectItem value="whitelist">
+                        {t("threatIntel.whitelist")}
                       </SelectItem>
                     </SelectContent>
                   </Select>
-                ) : (
-                  <Badge variant="secondary">
-                    {t("threatIntel.actionAllow")}
-                  </Badge>
-                )}
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("threatIntel.action")}</Label>
+                  {form.kind === "blacklist" ? (
+                    <Select
+                      value={form.action}
+                      disabled={!canManage}
+                      onValueChange={(v) =>
+                        setForm((f) => ({
+                          ...f,
+                          action: v as "intercept" | "drop",
+                        }))
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="intercept">
+                          {t("threatIntel.actionIntercept")}
+                        </SelectItem>
+                        <SelectItem value="drop">
+                          {t("threatIntel.actionDrop")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Badge variant="secondary">
+                      {t("threatIntel.actionAllow")}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("threatIntel.syncInterval")}</Label>
+                <Select
+                  value={String(form.sync_interval)}
+                  disabled={!canManage}
+                  onValueChange={(v) =>
+                    setForm((f) => ({ ...f, sync_interval: Number(v) }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {INTERVAL_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={String(opt.value)}>
+                        {t(`threatIntel.${opt.key}`)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t("threatIntel.syncIntervalHint")}
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("threatIntel.scope")}</Label>
+                <Select
+                  value={form.scope}
+                  disabled={!canManage}
+                  onValueChange={(v) => setForm((f) => ({ ...f, scope: v }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={SCOPE_GLOBAL}>
+                      {t("threatIntel.scopeGlobal")}
+                    </SelectItem>
+                    {sites.map((s) => (
+                      <SelectItem key={s.id} value={String(s.id)}>
+                        {s.host}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t("threatIntel.scopeHint")}
+                </p>
+              </div>
+              <div className="flex items-center justify-between">
+                <Label>{t("threatIntel.enabled")}</Label>
+                <Switch
+                  checked={form.enabled}
+                  disabled={!canManage}
+                  onCheckedChange={(v) =>
+                    setForm((f) => ({ ...f, enabled: v }))
+                  }
+                />
               </div>
             </div>
-            <div className="space-y-2">
-              <Label>{t("threatIntel.syncInterval")}</Label>
-              <Select
-                value={String(form.sync_interval)}
-                onValueChange={(v) =>
-                  setForm((f) => ({ ...f, sync_interval: Number(v) }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {INTERVAL_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={String(opt.value)}>
-                      {t(`threatIntel.${opt.key}`)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {t("threatIntel.syncIntervalHint")}
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("threatIntel.scope")}</Label>
-              <Select
-                value={form.scope}
-                onValueChange={(v) => setForm((f) => ({ ...f, scope: v }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={SCOPE_GLOBAL}>
-                    {t("threatIntel.scopeGlobal")}
-                  </SelectItem>
-                  {sites.map((s) => (
-                    <SelectItem key={s.id} value={String(s.id)}>
-                      {s.host}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {t("threatIntel.scopeHint")}
-              </p>
-            </div>
-            <div className="flex items-center justify-between">
-              <Label>{t("threatIntel.enabled")}</Label>
-              <Switch
-                checked={form.enabled}
-                onCheckedChange={(v) => setForm((f) => ({ ...f, enabled: v }))}
-              />
-            </div>
-          </div>
+          </fieldset>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
               {t("common.cancel")}
             </Button>
             <Button
               onClick={handleSubmit}
-              disabled={mutateLoading || !form.name.trim() || !form.url.trim()}
+              disabled={
+                !canManage ||
+                mutateLoading ||
+                !form.name.trim() ||
+                !form.url.trim()
+              }
             >
               {mutateLoading
                 ? t("common.submitting")
@@ -664,7 +694,6 @@ function SyncHistoryTab() {
   const { data, isLoading, error } = useThreatIntelSyncLogs(queryParams)
   const items = data?.items || []
   const total = data?.total || 0
-  const totalPages = Math.ceil(total / pageSize) || 1
 
   const handleFeedChange = (v: string) => {
     setFeedFilter(v)
@@ -690,8 +719,13 @@ function SyncHistoryTab() {
       key: "feed",
       title: t("threatIntel.syncHistory.columns.feed"),
       render: (row: ThreatIntelSyncLog) => (
-        <div className="flex flex-col">
-          <span className="font-medium">{row.feed_name || "-"}</span>
+        <div className="flex max-w-[220px] min-w-0 flex-col">
+          <span
+            className="block truncate font-medium"
+            title={row.feed_name || "-"}
+          >
+            {row.feed_name || "-"}
+          </span>
           <span className="text-xs text-muted-foreground">#{row.feed_id}</span>
         </div>
       ),
@@ -828,46 +862,12 @@ function SyncHistoryTab() {
         emptyText={t("threatIntel.syncHistory.empty")}
       />
 
-      {totalPages > 1 && (
-        <Pagination>
-          <PaginationContent>
-            <PaginationItem>
-              <PaginationPrevious
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-                className={page <= 1 ? "pointer-events-none opacity-50" : ""}
-              />
-            </PaginationItem>
-            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-              const pageNum = i + 1
-              return (
-                <PaginationItem key={pageNum}>
-                  <PaginationLink
-                    isActive={page === pageNum}
-                    onClick={() => setPage(pageNum)}
-                  >
-                    {pageNum}
-                  </PaginationLink>
-                </PaginationItem>
-              )
-            })}
-            {totalPages > 5 && (
-              <PaginationItem>
-                <PaginationEllipsis />
-              </PaginationItem>
-            )}
-            <PaginationItem>
-              <PaginationNext
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-                className={
-                  page >= totalPages ? "pointer-events-none opacity-50" : ""
-                }
-              />
-            </PaginationItem>
-          </PaginationContent>
-        </Pagination>
-      )}
+      <TablePagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+      />
     </div>
   )
 }

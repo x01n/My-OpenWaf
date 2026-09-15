@@ -2,10 +2,13 @@ package admin
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/snapshot"
@@ -112,6 +115,24 @@ func TestAuthMiddlewareRejectsNonBearerFormat(t *testing.T) {
 	}
 }
 
+func TestAuthMiddlewareReturns503WhenBlacklistIsUnavailable(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "blacklist.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	tm := auth.NewTokenManager([]byte("middleware-blacklist-secret"), db)
+	defer tm.Close()
+	token, _, _, err := tm.SignAccessToken("alice", auth.RoleAdmin, "", "")
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	ctx := newMiddlewareCtx("/api/v1/sites", map[string]string{"Authorization": "Bearer " + token})
+	AuthMiddleware(nil, tm, nil)(context.Background(), ctx)
+	if ctx.Response.StatusCode() != 503 {
+		t.Fatalf("blacklist unavailable: want 503, got %d", ctx.Response.StatusCode())
+	}
+}
+
 // ---- adminRequestProtocol ----
 
 func TestAdminRequestProtocol(t *testing.T) {
@@ -119,16 +140,21 @@ func TestAdminRequestProtocol(t *testing.T) {
 		name    string
 		uri     string
 		headers map[string]string
+		remote  string
 		want    string
 	}{
-		{"forwarded proto wins", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "https"}, "https"},
-		{"forwarded proto lowercased", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "HTTPS"}, "https"},
-		{"forwarded h3", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "h3"}, "h3"},
-		{"scheme fallback https", "https://example.com/x", nil, "https"},
-		{"scheme fallback http", "http://example.com/x", nil, "http"},
+		{"loopback forwarded proto wins", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "https"}, "127.0.0.1", "https"},
+		{"loopback forwarded proto lowercased", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "HTTPS"}, "::1", "https"},
+		{"loopback forwarded h3", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "h3"}, "127.0.0.1", "h3"},
+		{"untrusted forwarded proto ignored", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "https"}, "198.51.100.10", "http"},
+		{"scheme fallback https", "https://example.com/x", nil, "", "https"},
+		{"scheme fallback http", "http://example.com/x", nil, "", "http"},
 	}
 	for _, tt := range tests {
 		ctx := newMiddlewareCtx(tt.uri, tt.headers)
+		if tt.remote != "" {
+			setAdminProtocolTestConn(ctx, tt.remote, 0)
+		}
 		if got := adminRequestProtocol(ctx); got != tt.want {
 			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
 		}
@@ -153,6 +179,9 @@ func TestSecurityHeadersAlwaysSetsBaselineHeaders(t *testing.T) {
 	}
 	if csp := string(ctx.Response.Header.Peek("Content-Security-Policy")); csp == "" {
 		t.Error("Content-Security-Policy must be set")
+	}
+	if got := string(ctx.Response.Header.Peek("Cache-Control")); got != "no-store" {
+		t.Errorf("admin API Cache-Control = %q, want no-store", got)
 	}
 }
 
@@ -209,16 +238,21 @@ func TestHSTSHeaderWrittenOnlyOverSecureProtocols(t *testing.T) {
 		name    string
 		uri     string
 		headers map[string]string
+		remote  string
 		want    bool
 	}{
-		{"https scheme", "https://example.com/x", nil, true},
-		{"forwarded https", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "https"}, true},
-		{"forwarded h3", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "h3"}, true},
-		{"plain http", "http://example.com/x", nil, false},
-		{"forwarded http", "https://example.com/x", map[string]string{"X-Forwarded-Proto": "http"}, false},
+		{"https scheme", "https://example.com/x", nil, "", true},
+		{"loopback forwarded https", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "https"}, "127.0.0.1", true},
+		{"loopback forwarded h3", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "h3"}, "127.0.0.1", true},
+		{"plain http", "http://example.com/x", nil, "", false},
+		{"loopback forwarded http", "https://example.com/x", map[string]string{"X-Forwarded-Proto": "http"}, "127.0.0.1", false},
+		{"untrusted forwarded https", "http://example.com/x", map[string]string{"X-Forwarded-Proto": "https"}, "198.51.100.10", false},
 	}
 	for _, tt := range tests {
 		ctx := newMiddlewareCtx(tt.uri, tt.headers)
+		if tt.remote != "" {
+			setAdminProtocolTestConn(ctx, tt.remote, 0)
+		}
 		SecurityHeaders(holderWith(&snapshot.Snapshot{HSTSEnabled: true}))(context.Background(), ctx)
 		got := string(ctx.Response.Header.Peek(adminHSTSHeaderName))
 		if tt.want && got != adminHSTSHeaderValue {

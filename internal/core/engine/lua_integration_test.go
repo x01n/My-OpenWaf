@@ -44,6 +44,7 @@ func luaEngineWith(t *testing.T, stage luaplugin.Stage, src string) *luaplugin.E
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
+	script.SetID(42)
 	e := luaplugin.NewEngine(luaEngineTestKV{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.Reload([]*luaplugin.Script{script})
 	return e
@@ -177,6 +178,9 @@ end`)
 	}
 	if got.MatchDesc != "blocked by custom policy" {
 		t.Errorf("MatchDesc = %q", got.MatchDesc)
+	}
+	if got.RuleID != 42 || got.RuleIDStr != "t" {
+		t.Errorf("Lua identity = %d/%q", got.RuleID, got.RuleIDStr)
 	}
 }
 

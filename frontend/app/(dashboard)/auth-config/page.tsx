@@ -5,13 +5,6 @@ import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { toast } from "sonner"
@@ -27,6 +20,7 @@ import {
   useAdminSessions,
   useForceLogout,
 } from "@/hooks/use-api"
+import { useAuth } from "@/hooks/use-auth"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { PageHeader } from "@/components/page-header"
@@ -39,6 +33,9 @@ type BasicAuthSettings = Pick<
 
 export default function AuthConfigPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
+  const canForceLogout = user?.role === "admin"
   const { data: settings, isLoading, error } = useProtectionSettings()
   const updateSettings = useProtectionSettingsUpdate()
 
@@ -50,14 +47,19 @@ export default function AuthConfigPage() {
   const currentUsername = username ?? settings?.basic_auth_username ?? ""
 
   const handleToggle = () => {
+    if (!canManage) return
     setLocalSettings((prev) => ({
       ...prev,
-      basic_auth_enabled:
-        !(prev.basic_auth_enabled ?? settings?.basic_auth_enabled ?? false),
+      basic_auth_enabled: !(
+        prev.basic_auth_enabled ??
+        settings?.basic_auth_enabled ??
+        false
+      ),
     }))
   }
 
   const handleSave = async () => {
+    if (!canManage) return
     try {
       const payload: Partial<BasicAuthSettings> = { ...localSettings }
       if (username !== null) payload.basic_auth_username = username
@@ -73,7 +75,7 @@ export default function AuthConfigPage() {
 
   if (isLoading) {
     return (
-      <div className="space-y-4">
+      <div className="min-w-0 space-y-4">
         <div>
           <Skeleton className="h-8 w-48" />
           <Skeleton className="mt-1 h-4 w-64" />
@@ -101,17 +103,26 @@ export default function AuthConfigPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       <PageHeader
         title={t("authConfig.title")}
         description={t("authConfig.description")}
         actions={
-          <Button onClick={handleSave}>
+          <Button
+            onClick={handleSave}
+            disabled={!canManage || updateSettings.loading}
+          >
             <IconRefresh className="mr-1 h-4 w-4" />
             {t("authConfig.saveConfig")}
           </Button>
         }
       />
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertDescription>{t("common.readOnlyHint")}</AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader className="pb-3">
@@ -129,6 +140,7 @@ export default function AuthConfigPage() {
                 false
               }
               onCheckedChange={handleToggle}
+              disabled={!canManage}
               id="basic_auth"
             />
             <div>
@@ -147,6 +159,7 @@ export default function AuthConfigPage() {
               <Input
                 value={currentUsername}
                 onChange={(e) => setUsername(e.target.value)}
+                disabled={!canManage}
                 placeholder={t("authConfig.usernamePlaceholder")}
               />
             </div>
@@ -156,6 +169,7 @@ export default function AuthConfigPage() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                disabled={!canManage}
                 placeholder={t("authConfig.passwordPlaceholder")}
               />
             </div>
@@ -171,43 +185,31 @@ export default function AuthConfigPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label>{t("authConfig.sessionTimeout")}</Label>
-            <Select defaultValue="3600">
-              <SelectTrigger className="w-64">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="300">{t("authConfig.minutes5")}</SelectItem>
-                <SelectItem value="900">{t("authConfig.minutes15")}</SelectItem>
-                <SelectItem value="1800">
-                  {t("authConfig.minutes30")}
-                </SelectItem>
-                <SelectItem value="3600">{t("authConfig.hour1")}</SelectItem>
-                <SelectItem value="7200">{t("authConfig.hours2")}</SelectItem>
-                <SelectItem value="86400">{t("authConfig.hours24")}</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              {t("authConfig.sessionTimeoutDesc")}
+          <div className="rounded-lg border bg-muted/30 p-4">
+            <p className="text-sm font-medium">
+              {t("authConfig.sessionTimeout")}
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {t("authConfig.sessionTimeoutFixed")}
             </p>
           </div>
         </CardContent>
       </Card>
 
-      <ActiveSessionsCard />
+      <ActiveSessionsCard canForceLogout={canForceLogout} />
     </div>
   )
 }
 
-function ActiveSessionsCard() {
+function ActiveSessionsCard({ canForceLogout }: { canForceLogout: boolean }) {
   const { t } = useTranslation()
   const { data, isLoading, error } = useAdminSessions()
   const forceLogout = useForceLogout()
 
-  const handleForceLogout = async (sessionId: number) => {
+  const handleForceLogout = async (jti: string) => {
+    if (!canForceLogout) return
     try {
-      await forceLogout.execute(sessionId)
+      await forceLogout.execute(jti)
       toast.success(t("authConfig.forceLogoutSuccess"))
     } catch {
       toast.error(t("authConfig.forceLogoutFailed"))
@@ -229,10 +231,10 @@ function ActiveSessionsCard() {
     )
   }
 
-  const sessions = data?.items ?? []
+  const sessions = data?.sessions ?? []
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
           <IconUser className="h-5 w-5 text-primary" />
@@ -245,18 +247,18 @@ function ActiveSessionsCard() {
             {t("authConfig.noActiveSessions")}
           </p>
         ) : (
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             {sessions.map((session) => (
               <div
-                key={session.id}
-                className="flex items-center justify-between rounded-lg border p-3"
+                key={session.jti}
+                className="flex min-w-0 flex-wrap items-start justify-between gap-3 rounded-lg border p-3"
               >
-                <div className="space-y-1">
+                <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium">
+                    <span className="min-w-0 truncate text-sm font-medium">
                       {session.username}
                     </span>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="min-w-0 truncate text-xs text-muted-foreground">
                       {session.ip}
                     </span>
                   </div>
@@ -266,12 +268,12 @@ function ActiveSessionsCard() {
                   >
                     {session.user_agent}
                   </p>
-                  <div className="flex gap-4 text-xs text-muted-foreground">
-                    <span>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span className="break-words">
                       {t("authConfig.loginAt")}:{" "}
                       {new Date(session.login_at).toLocaleString()}
                     </span>
-                    <span>
+                    <span className="break-words">
                       {t("authConfig.lastActive")}:{" "}
                       {new Date(session.last_active_at).toLocaleString()}
                     </span>
@@ -280,8 +282,14 @@ function ActiveSessionsCard() {
                 <Button
                   variant="destructive"
                   size="sm"
-                  onClick={() => handleForceLogout(session.id)}
-                  disabled={forceLogout.loading}
+                  className="shrink-0"
+                  onClick={() => handleForceLogout(session.jti)}
+                  disabled={!canForceLogout || forceLogout.loading}
+                  title={
+                    canForceLogout
+                      ? t("authConfig.forceLogout")
+                      : t("authConfig.forceLogoutAdminOnly")
+                  }
                 >
                   <IconLogout className="mr-1 h-4 w-4" />
                   {t("authConfig.forceLogout")}

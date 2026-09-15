@@ -45,12 +45,14 @@ type UnifiedWriter struct {
 	dropEventDropped     atomic.Int64
 	botScoreDropped      atomic.Int64
 
-	flushesTotal        atomic.Int64
-	flushErrorsTotal    atomic.Int64
-	lastFlushUnixNano   atomic.Int64
-	lastFlushDurationNs atomic.Int64
-	lastFlushRecords    atomic.Int64
-	totalFlushedRecords atomic.Int64
+	flushesTotal           atomic.Int64
+	flushErrorsTotal       atomic.Int64
+	lastFlushUnixNano      atomic.Int64
+	lastFlushDurationNs    atomic.Int64
+	lastFlushRecords       atomic.Int64
+	lastFlushFailedRecords atomic.Int64
+	totalFlushedRecords    atomic.Int64
+	failedRecordsTotal     atomic.Int64
 
 	// lastDropWarnUnixNano 记录上一次丢弃告警的时间，用于限流。
 	// 队列满通常是持续性背压，逐条告警会让日志本身成为故障放大器。
@@ -61,6 +63,16 @@ type UnifiedWriter struct {
 	// 置位后它们改走 dropped 计数路径，丢失量对 /metrics 可见。
 	closed    atomic.Bool
 	closeOnce sync.Once
+
+	// submitMu 把 closed 检查与发送操作组成一个不可分割的临界区。
+	// Close 先取得写锁再关闭 stopCh，保证已取得读锁的记录完成发送后才开始排空，
+	// 不会出现“检查时未关闭、发送时 loop 已退出”的悬空记录。
+	submitMu sync.RWMutex
+
+	// countCacheInvalidator 在日志事务提交后失效控制面的 COUNT 缓存。
+	// 使用窄接口避免 observability 依赖 store/repository，且允许测试注入轻量替身。
+	countCacheMu          sync.RWMutex
+	countCacheInvalidator interface{ InvalidateAll() }
 }
 
 // 队列容量上限（与 internal/core/config.go QueueConfig 注释保持一致）。
@@ -227,12 +239,14 @@ type UnifiedWriterStats struct {
 	DropEventDropped     int64 `json:"drop_event_dropped"`
 	BotScoreDropped      int64 `json:"bot_score_dropped"`
 
-	FlushesTotal        int64 `json:"flushes_total"`
-	FlushErrorsTotal    int64 `json:"flush_errors_total"`
-	LastFlushRecords    int64 `json:"last_flush_records"`
-	LastFlushDurationMs int64 `json:"last_flush_duration_ms"`
-	LastFlushUnixNano   int64 `json:"last_flush_unix_nano"`
-	TotalFlushedRecords int64 `json:"total_flushed_records"`
+	FlushesTotal           int64 `json:"flushes_total"`
+	FlushErrorsTotal       int64 `json:"flush_errors_total"`
+	LastFlushRecords       int64 `json:"last_flush_records"`
+	LastFlushFailedRecords int64 `json:"last_flush_failed_records"`
+	LastFlushDurationMs    int64 `json:"last_flush_duration_ms"`
+	LastFlushUnixNano      int64 `json:"last_flush_unix_nano"`
+	TotalFlushedRecords    int64 `json:"total_flushed_records"`
+	FailedRecordsTotal     int64 `json:"failed_records_total"`
 }
 
 // NewUnifiedWriter creates a unified writer with large channel buffers.
@@ -247,6 +261,9 @@ func NewUnifiedWriter(db *gorm.DB, log *slog.Logger) *UnifiedWriter {
 // 任何超出安全上限的字段会被钳制到上限（通道 ≤ 1M、批 ≤ 10K、flush ≤ 60s）。
 // 入口钳制的好处是后续代码不需要再重复条件判断，所有内部调用均按 opt 行事。
 func NewUnifiedWriterWithOptions(db *gorm.DB, log *slog.Logger, opt UnifiedWriterOptions) *UnifiedWriter {
+	if log == nil {
+		log = slog.Default()
+	}
 	opt, clampWarns := clampUnifiedWriterOptions(opt)
 	logClampWarnings(log, clampWarns)
 	w := &UnifiedWriter{
@@ -273,6 +290,39 @@ func (w *UnifiedWriter) SetRedis(client *goredis.Client) {
 	w.redis.Store(client)
 }
 
+// SetCountCacheInvalidator attaches an optional COUNT-cache invalidator.
+// Invalidation happens only after a transaction has committed at least one
+// observability record, so failed or dropped batches do not perturb cache state.
+func (w *UnifiedWriter) SetCountCacheInvalidator(invalidator interface{ InvalidateAll() }) {
+	if w == nil {
+		return
+	}
+	w.countCacheMu.Lock()
+	w.countCacheInvalidator = invalidator
+	w.countCacheMu.Unlock()
+}
+
+func (w *UnifiedWriter) invalidateCountCache(prefixes ...string) {
+	if w == nil {
+		return
+	}
+	w.countCacheMu.RLock()
+	invalidator := w.countCacheInvalidator
+	w.countCacheMu.RUnlock()
+	if invalidator == nil {
+		return
+	}
+	if prefixInvalidator, ok := invalidator.(interface{ InvalidatePrefix(string) }); ok {
+		for _, prefix := range prefixes {
+			if prefix != "" {
+				prefixInvalidator.InvalidatePrefix(prefix)
+			}
+		}
+		return
+	}
+	invalidator.InvalidateAll()
+}
+
 // Stats returns queue, drop and flush counters for runtime diagnostics.
 func (w *UnifiedWriter) Stats() UnifiedWriterStats {
 	return UnifiedWriterStats{
@@ -286,12 +336,14 @@ func (w *UnifiedWriter) Stats() UnifiedWriterStats {
 		DropEventDropped:     w.dropEventDropped.Load(),
 		BotScoreDropped:      w.botScoreDropped.Load(),
 
-		FlushesTotal:        w.flushesTotal.Load(),
-		FlushErrorsTotal:    w.flushErrorsTotal.Load(),
-		LastFlushRecords:    w.lastFlushRecords.Load(),
-		LastFlushDurationMs: w.lastFlushDurationNs.Load() / int64(time.Millisecond),
-		LastFlushUnixNano:   w.lastFlushUnixNano.Load(),
-		TotalFlushedRecords: w.totalFlushedRecords.Load(),
+		FlushesTotal:           w.flushesTotal.Load(),
+		FlushErrorsTotal:       w.flushErrorsTotal.Load(),
+		LastFlushRecords:       w.lastFlushRecords.Load(),
+		LastFlushFailedRecords: w.lastFlushFailedRecords.Load(),
+		LastFlushDurationMs:    w.lastFlushDurationNs.Load() / int64(time.Millisecond),
+		LastFlushUnixNano:      w.lastFlushUnixNano.Load(),
+		TotalFlushedRecords:    w.totalFlushedRecords.Load(),
+		FailedRecordsTotal:     w.failedRecordsTotal.Load(),
 	}
 }
 
@@ -343,11 +395,25 @@ func (w *UnifiedWriter) dropAfterClose(kind string, counter *atomic.Int64) bool 
 	return true
 }
 
+// beginRecord 取得关停闸门的读锁并判定调用方能否发送；返回 true 时调用方必须释放 submitMu。
+func (w *UnifiedWriter) beginRecord(kind string, counter *atomic.Int64) bool {
+	if w == nil {
+		return false
+	}
+	w.submitMu.RLock()
+	if w.dropAfterClose(kind, counter) {
+		w.submitMu.RUnlock()
+		return false
+	}
+	return true
+}
+
 // RecordEvent enqueues a security event. Non-blocking.
 func (w *UnifiedWriter) RecordEvent(ev store.SecurityEvent) {
-	if w.dropAfterClose("security_event", &w.securityEventDropped) {
+	if !w.beginRecord("security_event", &w.securityEventDropped) {
 		return
 	}
+	defer w.submitMu.RUnlock()
 	select {
 	case w.eventCh <- ev:
 	default:
@@ -357,9 +423,10 @@ func (w *UnifiedWriter) RecordEvent(ev store.SecurityEvent) {
 
 // RecordAccessLog enqueues an access log. Non-blocking.
 func (w *UnifiedWriter) RecordAccessLog(al store.AccessLog) {
-	if w.dropAfterClose("access_log", &w.accessLogDropped) {
+	if !w.beginRecord("access_log", &w.accessLogDropped) {
 		return
 	}
+	defer w.submitMu.RUnlock()
 	select {
 	case w.accessCh <- al:
 	default:
@@ -369,9 +436,10 @@ func (w *UnifiedWriter) RecordAccessLog(al store.AccessLog) {
 
 // RecordDropEvent enqueues a drop event. Non-blocking.
 func (w *UnifiedWriter) RecordDropEvent(ev store.DropEvent) {
-	if w.dropAfterClose("drop_event", &w.dropEventDropped) {
+	if !w.beginRecord("drop_event", &w.dropEventDropped) {
 		return
 	}
+	defer w.submitMu.RUnlock()
 	select {
 	case w.dropCh <- ev:
 	default:
@@ -381,9 +449,10 @@ func (w *UnifiedWriter) RecordDropEvent(ev store.DropEvent) {
 
 // RecordBotScore enqueues a bot score log. Non-blocking.
 func (w *UnifiedWriter) RecordBotScore(bs store.BotScoreLog) {
-	if w.dropAfterClose("bot_score", &w.botScoreDropped) {
+	if !w.beginRecord("bot_score", &w.botScoreDropped) {
 		return
 	}
+	defer w.submitMu.RUnlock()
 	select {
 	case w.botScoreCh <- bs:
 	default:
@@ -401,10 +470,17 @@ func (w *UnifiedWriter) RecordBotScore(bs store.BotScoreLog) {
  * 这比进程无法退出可接受。closeOnce 保证重复调用不会 panic on closed channel。
  */
 func (w *UnifiedWriter) Close() {
+	if w == nil {
+		return
+	}
+	w.submitMu.Lock()
 	w.closeOnce.Do(func() {
 		w.closed.Store(true)
-		close(w.stopCh)
+		if w.stopCh != nil {
+			close(w.stopCh)
+		}
 	})
+	w.submitMu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -588,9 +664,20 @@ func (w *UnifiedWriter) flushBuffered(
 
 	start := time.Now()
 	failed := false
+	persistedRecords := 0
+	failedRecords := 0
+	var invalidationPrefixes []string
 	defer func() {
-		w.recordFlushStats(records, time.Since(start), failed)
+		w.recordFlushStats(persistedRecords, failedRecords, time.Since(start), failed)
 	}()
+	if w.db == nil {
+		failed = true
+		failedRecords = records
+		if w.log != nil {
+			w.log.Error("unified flush skipped: database is nil", slog.Int("records", records))
+		}
+		return
+	}
 
 	// Push to Redis first (low-latency path for real-time consumers).
 	if rc := w.redis.Load(); rc != nil {
@@ -602,23 +689,54 @@ func (w *UnifiedWriter) flushBuffered(
 	// Single DB transaction for all types, with one SAVEPOINT per record type so a
 	// failing type cannot take the others down with it.
 	err := w.db.Transaction(func(tx *gorm.DB) error {
-		w.flushType(tx, "security_events", len(events), func() error {
+		if w.flushType(tx, "security_events", len(events), func() error {
 			return tx.CreateInBatches(events, w.batchSize).Error
-		}, &failed)
-		w.flushType(tx, "access_logs", len(accessLogs), func() error {
+		}, &failed) {
+			persistedRecords += len(events)
+			if len(events) > 0 {
+				invalidationPrefixes = append(invalidationPrefixes, "se_count:v2")
+			}
+		} else {
+			failedRecords += len(events)
+		}
+		if w.flushType(tx, "access_logs", len(accessLogs), func() error {
 			return tx.CreateInBatches(accessLogs, w.batchSize).Error
-		}, &failed)
-		w.flushType(tx, "drop_events", len(dropEvents), func() error {
+		}, &failed) {
+			persistedRecords += len(accessLogs)
+			if len(accessLogs) > 0 {
+				invalidationPrefixes = append(invalidationPrefixes, "al_count:v2", "al_list:v1")
+			}
+		} else {
+			failedRecords += len(accessLogs)
+		}
+		if w.flushType(tx, "drop_events", len(dropEvents), func() error {
 			return tx.CreateInBatches(dropEvents, w.batchSize).Error
-		}, &failed)
-		w.flushType(tx, "bot_scores", len(botScores), func() error {
+		}, &failed) {
+			persistedRecords += len(dropEvents)
+			if len(dropEvents) > 0 {
+				invalidationPrefixes = append(invalidationPrefixes, "de_count")
+			}
+		} else {
+			failedRecords += len(dropEvents)
+		}
+		if w.flushType(tx, "bot_scores", len(botScores), func() error {
 			return tx.CreateInBatches(botScores, w.batchSize).Error
-		}, &failed)
+		}, &failed) {
+			persistedRecords += len(botScores)
+		} else {
+			failedRecords += len(botScores)
+		}
 		return nil
 	})
 	if err != nil {
 		failed = true
+		persistedRecords = 0
+		failedRecords = records
 		w.log.Error("unified flush transaction failed", slog.Any("err", err))
+		return
+	}
+	if persistedRecords > 0 {
+		w.invalidateCountCache(invalidationPrefixes...)
 	}
 }
 
@@ -640,10 +758,11 @@ func (w *UnifiedWriter) flushBuffered(
  * @param n      待写入记录数，为 0 时直接跳过。
  * @param write  实际的批量写入动作。
  * @param failed 指向本次 flush 的失败标记，用于累加 flush_errors_total。
+ * @return 该类型的全部记录是否已成功写入当前事务。
  */
-func (w *UnifiedWriter) flushType(tx *gorm.DB, name string, n int, write func() error, failed *bool) {
+func (w *UnifiedWriter) flushType(tx *gorm.DB, name string, n int, write func() error, failed *bool) bool {
 	if n == 0 {
-		return
+		return true
 	}
 
 	savepointed := tx.SavePoint(name).Error == nil
@@ -663,13 +782,17 @@ func (w *UnifiedWriter) flushType(tx *gorm.DB, name string, n int, write func() 
 				)
 			}
 		}
+		return false
 	}
+	return true
 }
 
-func (w *UnifiedWriter) recordFlushStats(records int, duration time.Duration, failed bool) {
+func (w *UnifiedWriter) recordFlushStats(persistedRecords, failedRecords int, duration time.Duration, failed bool) {
 	w.flushesTotal.Add(1)
-	w.totalFlushedRecords.Add(int64(records))
-	w.lastFlushRecords.Store(int64(records))
+	w.totalFlushedRecords.Add(int64(persistedRecords))
+	w.failedRecordsTotal.Add(int64(failedRecords))
+	w.lastFlushRecords.Store(int64(persistedRecords))
+	w.lastFlushFailedRecords.Store(int64(failedRecords))
 	w.lastFlushDurationNs.Store(duration.Nanoseconds())
 	w.lastFlushUnixNano.Store(time.Now().UnixNano())
 	if failed {

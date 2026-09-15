@@ -1,7 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useRef, useState } from "react"
-import useSWR, { mutate, type Key } from "swr"
-import type { CaptchaConfig, CaptchaTestResponse } from "@/lib/types"
+import useSWR, { mutate, type Key, type SWRConfiguration } from "swr"
+import type {
+  ChainConfig,
+  CaptchaConfig,
+  CaptchaTestResponse,
+  EscalationConfig,
+  EscalationConfigUpdate,
+  RuleListParams,
+  SensitivityConfig,
+} from "@/lib/types"
 import {
   siteApi,
   certificateApi,
@@ -38,6 +46,8 @@ import {
 } from "@/lib/api"
 import type {
   Certificate,
+  DefaultErrorPagesResponse,
+  SiteErrorPages,
   SiteUpdate,
   LogConfig,
   LogConfigUpdate,
@@ -62,6 +72,9 @@ import type {
   AccessUserUpdateInput,
   AccessPathRuleCreateInput,
   AccessPathRuleUpdateInput,
+  BotScoreListResponse,
+  BotScoreStats,
+  BotSettings,
 } from "@/lib/types"
 
 /**
@@ -71,11 +84,79 @@ function fetcher<T>(fn: () => Promise<T>) {
   return fn()
 }
 
+/** 低频变化的选择器元数据在工作区内复用五分钟。 */
+const REFERENCE_QUERY_OPTIONS = {
+  dedupingInterval: 5 * 60 * 1000,
+  keepPreviousData: true,
+}
+
+const REFERENCE_PAGE_SIZE = 200
+const MAX_REFERENCE_PAGES = 10
+
+type ReferencePage<T> = { items: T[]; total: number }
+
+/**
+ * 聚合站点/策略选择器数据时限制请求页数，并行读取剩余页。
+ * 后端分页上限为 200；异常 total 不得让浏览器无限请求或持续占用内存。
+ */
+async function getReferencePages<T>(
+  fetchPage: (page: number, pageSize: number) => Promise<ReferencePage<T>>
+): Promise<{ items: T[]; total: number }> {
+  const first = await fetchPage(1, REFERENCE_PAGE_SIZE)
+  const firstItems = Array.isArray(first.items) ? first.items : []
+  const total = Number.isFinite(first.total)
+    ? Math.max(0, Math.floor(first.total))
+    : firstItems.length
+
+  // 短页已经是最后一页；同时避免因不一致的 total 触发无意义请求。
+  if (firstItems.length < REFERENCE_PAGE_SIZE || total <= firstItems.length) {
+    return { items: firstItems, total }
+  }
+
+  const pageCount = Math.min(
+    MAX_REFERENCE_PAGES,
+    Math.max(1, Math.ceil(total / REFERENCE_PAGE_SIZE))
+  )
+  const pages = await Promise.all(
+    Array.from({ length: pageCount - 1 }, (_, index) =>
+      fetchPage(index + 2, REFERENCE_PAGE_SIZE)
+    )
+  )
+  const items = [...firstItems]
+  for (const page of pages) {
+    if (Array.isArray(page.items)) items.push(...page.items)
+  }
+  return {
+    items: items.slice(
+      0,
+      Math.min(total, REFERENCE_PAGE_SIZE * MAX_REFERENCE_PAGES)
+    ),
+    total,
+  }
+}
+
+/** 可写规则数据短时复用；写操作和手动刷新仍会主动触发重验证。 */
+const RULE_QUERY_OPTIONS = {
+  dedupingInterval: 30 * 1000,
+  keepPreviousData: true,
+  errorRetryCount: 1,
+}
+
+/** 无作用域标识的响应不能安全展示上一作用域数据。 */
+const STRICT_RULE_QUERY_OPTIONS = {
+  ...RULE_QUERY_OPTIONS,
+  keepPreviousData: false,
+}
+
 /**
  * 通用 SWR Hook 工厂
  */
-function useApiQuery<T>(key: Key, fetchFn: () => Promise<T>, options?: any) {
-  return useSWR<T>(key, () => fetcher(fetchFn), {
+function useApiQuery<T>(
+  key: Key,
+  fetchFn: () => Promise<T>,
+  options?: SWRConfiguration<T, Error>
+) {
+  return useSWR<T, Error>(key, () => fetcher(fetchFn), {
     revalidateOnFocus: false,
     ...options,
   })
@@ -104,6 +185,11 @@ async function revalidatePrefixes(prefixes: string[]) {
   )
 }
 
+/** 备份恢复会替换多类配置，需清空全部 API 快照并只重验当前挂载视图。 */
+export async function invalidateAllAPICaches() {
+  await mutate(() => true, undefined, { revalidate: true })
+}
+
 /** 失效所有 IP 名单作用域缓存；批量写入应在整个批次完成后调用一次。 */
 export async function invalidateIPListCaches() {
   await revalidatePrefixes(["ip-lists"])
@@ -126,6 +212,7 @@ export async function invalidateSiteCaches(id?: string | number) {
           "site-stats",
           "site-timeline",
           "site-access-stats",
+          "site-error-pages",
         ].includes(String(prefix))
       }
       return (
@@ -137,6 +224,7 @@ export async function invalidateSiteCaches(id?: string | number) {
           "site-stats",
           "site-timeline",
           "site-access-stats",
+          "site-error-pages",
         ].includes(String(prefix)) &&
         cacheId(cachedKey[1] as string | number) === normalized
       )
@@ -144,6 +232,16 @@ export async function invalidateSiteCaches(id?: string | number) {
     undefined,
     { revalidate: true }
   )
+}
+
+/** 清除全部 CVE 规则视图；全局覆盖会影响策略和站点的有效配置。 */
+export async function invalidateCVERuleCaches() {
+  await revalidatePrefixes(["cve-rules", "cve-stats"])
+}
+
+/** 清除全部 OWASP 规则视图；未挂载的分页/筛选缓存同时置空。 */
+export async function invalidateOWASPRuleCaches() {
+  await revalidatePrefixes(["owasp-rules", "owasp-stats"])
 }
 
 /**
@@ -200,19 +298,15 @@ export function useSites(params?: { page?: number; page_size?: number }) {
   return useApiQuery(["sites", params], () => siteApi.list(params))
 }
 
-export function useAllSites() {
-  return useApiQuery(["sites-all"], async () => {
-    const pageSize = 200
-    const firstPage = await siteApi.list({ page: 1, page_size: pageSize })
-    const items = [...firstPage.items]
-    const total = firstPage.total
-    for (let page = 2; items.length < total; page++) {
-      const nextPage = await siteApi.list({ page, page_size: pageSize })
-      if (nextPage.items.length === 0) break
-      items.push(...nextPage.items)
-    }
-    return { items, total }
-  })
+export function useAllSites(enabled = true) {
+  return useApiQuery(
+    enabled ? ["sites-all"] : null,
+    () =>
+      getReferencePages((page, pageSize) =>
+        siteApi.list({ page, page_size: pageSize })
+      ),
+    REFERENCE_QUERY_OPTIONS
+  )
 }
 
 export function useSite(id: string | number | undefined) {
@@ -328,8 +422,12 @@ export function useListenerDelete() {
   )
 }
 
-export function useCertificates() {
-  return useApiQuery(["certificates"], () => certificateApi.list())
+export function useCertificates(enabled = true) {
+  return useApiQuery(
+    enabled ? ["certificates"] : null,
+    () => certificateApi.list(),
+    REFERENCE_QUERY_OPTIONS
+  )
 }
 
 export function useCertificate(id: string | number | undefined) {
@@ -338,8 +436,12 @@ export function useCertificate(id: string | number | undefined) {
   )
 }
 
-export function useRules(params?: any) {
-  return useApiQuery(["rules", params], () => ruleApi.list(params))
+export function useRules(params?: RuleListParams | null) {
+  return useApiQuery(
+    params === null ? null : ["rules", params],
+    () => ruleApi.list(params ?? undefined),
+    STRICT_RULE_QUERY_OPTIONS
+  )
 }
 
 export function useRule(id: string | number | undefined) {
@@ -350,22 +452,25 @@ export function useRuleTemplates() {
   return useApiQuery(["rule-templates"], () => ruleApi.getTemplates())
 }
 
-export function usePolicies() {
-  return useApiQuery(["policies"], async () => {
-    const pageSize = 200
-    const firstPage = await policyApi.list({ page: 1, page_size: pageSize })
-    const items = [...firstPage.items]
-    for (let page = 2; items.length < firstPage.total; page++) {
-      const nextPage = await policyApi.list({ page, page_size: pageSize })
-      if (nextPage.items.length === 0) break
-      items.push(...nextPage.items)
-    }
-    return items
-  })
+export function usePolicies(enabled = true) {
+  return useApiQuery(
+    enabled ? ["policies"] : null,
+    async () =>
+      (
+        await getReferencePages((page, pageSize) =>
+          policyApi.list({ page, page_size: pageSize })
+        )
+      ).items,
+    REFERENCE_QUERY_OPTIONS
+  )
 }
 
 export function useDefaultPolicy() {
-  return useApiQuery(["policy-default"], () => policyApi.getDefault())
+  return useApiQuery(
+    ["policy-default"],
+    () => policyApi.getDefault(),
+    REFERENCE_QUERY_OPTIONS
+  )
 }
 
 export function usePolicy(id: string | number | undefined) {
@@ -385,11 +490,17 @@ export function useCaptchaConfig() {
 }
 
 export function useCaptchaTest() {
-  return useMutation<CaptchaTestResponse, void>(async () => captchaApi.test())
+  return useMutation<CaptchaTestResponse, string | undefined>(async (type) =>
+    captchaApi.test(type)
+  )
 }
 
 export function useChainConfig() {
-  return useApiQuery(["chain-config"], () => chainApi.getConfig())
+  return useApiQuery<ChainConfig>(
+    ["chain-config"],
+    () => chainApi.getConfig(),
+    REFERENCE_QUERY_OPTIONS
+  )
 }
 
 /**
@@ -406,9 +517,9 @@ export function useIPLists(
   )
 }
 
-export function useSecurityEvents(params?: any) {
-  return useApiQuery(["security-events", params], () =>
-    securityEventApi.list(params)
+export function useSecurityEvents(params?: any | null) {
+  return useApiQuery(params === null ? null : ["security-events", params], () =>
+    securityEventApi.list(params ?? undefined)
   )
 }
 
@@ -465,14 +576,18 @@ export function useDashboard() {
 }
 
 export function useCveRules(params?: any | null) {
-  return useApiQuery(params === null ? null : ["cve-rules", params], () =>
-    cveApi.list(params)
+  return useApiQuery(
+    params === null ? null : ["cve-rules", params],
+    () => cveApi.list(params),
+    RULE_QUERY_OPTIONS
   )
 }
 
 export function useOwaspRules(params?: any | null) {
-  return useApiQuery(params === null ? null : ["owasp-rules", params], () =>
-    owaspApi.list(params)
+  return useApiQuery(
+    params === null ? null : ["owasp-rules", params],
+    () => owaspApi.list(params),
+    RULE_QUERY_OPTIONS
   )
 }
 
@@ -488,23 +603,27 @@ export function useSettings() {
   return useApiQuery(["settings"], () => settingsApi.list())
 }
 
-export function useNetworkConfig() {
-  return useApiQuery<NetworkConfig>(["network-config"], () =>
+export function useNetworkConfig(enabled = true) {
+  return useApiQuery<NetworkConfig>(enabled ? ["network-config"] : null, () =>
     settingsApi.getNetwork()
   )
 }
 
-export function useTLSConfig() {
-  return useApiQuery<TLSConfig>(["tls-config"], () => settingsApi.getTLS())
+export function useTLSConfig(enabled = true) {
+  return useApiQuery<TLSConfig>(enabled ? ["tls-config"] : null, () =>
+    settingsApi.getTLS()
+  )
 }
 
-export function useLogConfig() {
-  return useApiQuery<LogConfig>(["log-config"], () => settingsApi.getLog())
+export function useLogConfig(enabled = true) {
+  return useApiQuery<LogConfig>(enabled ? ["log-config"] : null, () =>
+    settingsApi.getLog()
+  )
 }
 
-export function useRuntimeConfig() {
+export function useRuntimeConfig(enabled = true) {
   return useApiQuery<import("@/lib/types").RuntimeConfig>(
-    ["runtime-config"],
+    enabled ? ["runtime-config"] : null,
     () => runtimeApi.getConfig()
   )
 }
@@ -522,7 +641,24 @@ export function useApiKeys() {
 }
 
 export function useDefaultErrorPages() {
-  return useApiQuery(["error-pages-defaults"], () => errorPageApi.getDefaults())
+  return useApiQuery<DefaultErrorPagesResponse>(
+    ["error-pages-defaults"],
+    () => errorPageApi.getDefaults(),
+    REFERENCE_QUERY_OPTIONS
+  )
+}
+
+/** 读取站点错误页覆盖；仅在站点标识有效时发起请求。 */
+export function useSiteErrorPages(id: string | number | undefined) {
+  const normalized = cacheId(id)
+  return useApiQuery<SiteErrorPages>(
+    normalized ? ["site-error-pages", normalized] : null,
+    () => siteApi.getErrorPages(normalized!),
+    {
+      ...RULE_QUERY_OPTIONS,
+      keepPreviousData: false,
+    }
+  )
 }
 
 export function useSiteMutation() {
@@ -625,6 +761,10 @@ export function usePolicyMutation() {
         "rules",
         "site-rules",
         "sites",
+        "cve-rules",
+        "cve-stats",
+        "owasp-rules",
+        "owasp-stats",
       ],
     }
   )
@@ -639,14 +779,78 @@ export function usePolicySetDefault() {
       "rules",
       "site-rules",
       "sites",
+      "cve-rules",
+      "cve-stats",
+      "owasp-rules",
+      "owasp-stats",
     ],
   })
 }
 
 export function usePolicyDelete() {
   return useMutation(async (id: number) => policyApi.delete(id), {
-    invalidateKeys: ["policies"],
+    invalidateKeys: [
+      "policies",
+      "policy",
+      "policy-default",
+      "rules",
+      "site-rules",
+      "sites",
+      "cve-rules",
+      "cve-stats",
+      "owasp-rules",
+      "owasp-stats",
+    ],
   })
+}
+
+/**
+ * 全局保护-类别灵敏度配置（GET /protection/:id/sensitivity）。
+ * id 传 "global" 读取全局保护配置；站点级用法传站点 ID。
+ */
+export function useProtectionSensitivity(id: string | number = "global") {
+  return useApiQuery<SensitivityConfig>(["protection-sensitivity", id], () =>
+    protectionApi.getSensitivity(id)
+  )
+}
+
+/**
+ * 保存类别灵敏度（POST /protection/:id/sensitivity）。
+ * 后端以此 map 为规范来源，并清空旧字段 owasp_modules。
+ */
+export function useProtectionSensitivityUpdate(id: string | number = "global") {
+  return useMutation<SensitivityConfig, SensitivityConfig>(
+    (data) => protectionApi.updateSensitivity(id, data),
+    {
+      invalidateKeys: [
+        "protection-sensitivity",
+        "protection-settings",
+        "owasp-rules",
+        "owasp-stats",
+      ],
+    }
+  )
+}
+
+/**
+ * 全局保护-升级配置（GET /protection/:id/escalation）。
+ */
+export function useProtectionEscalation(id: string | number = "global") {
+  return useApiQuery<EscalationConfig>(["protection-escalation", id], () =>
+    protectionApi.getEscalation(id)
+  )
+}
+
+/**
+ * 保存升级配置（POST /protection/:id/escalation）。
+ */
+export function useProtectionEscalationUpdate(id: string | number = "global") {
+  return useMutation<EscalationConfig, EscalationConfigUpdate>(
+    (data) => protectionApi.updateEscalation(id, data),
+    {
+      invalidateKeys: ["protection-escalation", "protection-settings"],
+    }
+  )
 }
 
 /**
@@ -664,10 +868,19 @@ export function useProtectionSettingsUpdate() {
   )
 }
 
+/**
+ * bot 设置局部更新。
+ * 载荷为 BotSettingsUpdate 的子集（bot.go 的 BindJSON 语义）：
+ * 头部列表字段（high_risk_countries 等）以数组整体提交，
+ * 本页的合并载荷已包含全部 geoip 字段，不接受后端对遗漏字段的兜底改造。
+ */
 export function useBotSettingsUpdate() {
-  return useMutation(async (data: any) => botApi.updateSettings(data), {
-    invalidateKeys: ["bot-settings", "protection-settings", "captcha-config"],
-  })
+  return useMutation<BotSettings, Partial<BotSettings>>(
+    async (data) => botApi.updateSettings(data),
+    {
+      invalidateKeys: ["bot-settings", "protection-settings", "captcha-config"],
+    }
+  )
 }
 
 export function useCaptchaConfigUpdate() {
@@ -680,18 +893,22 @@ export function useCaptchaConfigUpdate() {
 }
 
 export function useChainConfigUpdate() {
-  return useMutation(async (data: any) => chainApi.updateConfig(data), {
-    invalidateKeys: ["chain-config"],
-  })
+  return useMutation<ChainConfig, Partial<ChainConfig>>(
+    async (data) => chainApi.updateConfig(data),
+    { invalidateKeys: ["chain-config"] }
+  )
 }
 
 export function useIPListMutation() {
-  return useMutation(async ({ id, data }: { id?: number; data: any }) => {
-    if (id) {
-      return ipListApi.update(id, data)
-    }
-    return ipListApi.create(data)
-  })
+  return useMutation(
+    async ({ id, data }: { id?: number; data: any }) => {
+      if (id) {
+        return ipListApi.update(id, data)
+      }
+      return ipListApi.create(data)
+    },
+    { invalidateKeys: ["ip-lists"] }
+  )
 }
 
 export function useIPListDelete() {
@@ -736,7 +953,7 @@ export function useThreatIntelMutation() {
       }
       return threatIntelApi.create(data)
     },
-    { invalidateKeys: ["threat-intel-feeds"] }
+    { invalidateKeys: ["threat-intel-feeds", "ip-lists"] }
   )
 }
 
@@ -745,7 +962,7 @@ export function useThreatIntelMutation() {
  */
 export function useThreatIntelDelete() {
   return useMutation(async (id: number) => threatIntelApi.delete(id), {
-    invalidateKeys: ["threat-intel-feeds"],
+    invalidateKeys: ["threat-intel-feeds", "ip-lists"],
   })
 }
 
@@ -754,7 +971,7 @@ export function useThreatIntelDelete() {
  */
 export function useThreatIntelSync() {
   return useMutation(async (id: number) => threatIntelApi.sync(id), {
-    invalidateKeys: ["threat-intel-feeds"],
+    invalidateKeys: ["threat-intel-feeds", "ip-lists"],
   })
 }
 
@@ -835,9 +1052,7 @@ export function useLuaPluginToggle() {
   )
 }
 
-/**
- * 语法校验：只编译，不保存也不执行，因此无需失效任何缓存。
- */
+/** 使用隔离 KV 编译并执行标准样例，不保存配置。 */
 export function useLuaPluginValidate() {
   return useMutation(async (data: { stage: LuaPluginStage; source: string }) =>
     luaPluginApi.validate(data)
@@ -869,7 +1084,18 @@ export function useJSPluginStats() {
   })
 }
 
-const JS_MUTATION_KEYS: Key[] = ["js-plugins", "js-plugin-stats"]
+/** 查询后端真实 QuickJS 构建、引擎与 snapshot 装载状态。 */
+export function useJSPluginRuntime() {
+  return useApiQuery(["js-plugin-runtime"], () => jsPluginApi.runtime(), {
+    refreshInterval: 15000,
+  })
+}
+
+const JS_MUTATION_KEYS: Key[] = [
+  "js-plugins",
+  "js-plugin-stats",
+  "js-plugin-runtime",
+]
 
 /**
  * 新建或更新 JavaScript 边缘脚本。
@@ -959,9 +1185,10 @@ export function useLogConfigUpdate() {
   )
 }
 
-export function useRedisConfig() {
-  return useApiQuery<RedisConfigResponse>(["redis-config"], () =>
-    settingsApi.getRedis()
+export function useRedisConfig(enabled = true) {
+  return useApiQuery<RedisConfigResponse>(
+    enabled ? ["redis-config"] : null,
+    () => settingsApi.getRedis()
   )
 }
 
@@ -977,10 +1204,9 @@ export function useAdminSessions() {
 }
 
 export function useForceLogout() {
-  return useMutation(
-    async (sessionId: number) => authApi.forceLogout(sessionId),
-    { invalidateKeys: ["admin-sessions"] }
-  )
+  return useMutation(async (jti: string) => authApi.forceLogout(jti), {
+    invalidateKeys: ["admin-sessions"],
+  })
 }
 
 export function useDropPolicyUpdate() {
@@ -991,13 +1217,13 @@ export function useDropPolicyUpdate() {
 
 export function useCveBatchUpdate() {
   return useMutation(async (data: any) => cveApi.batch(data), {
-    invalidateKeys: ["cve-rules"],
+    invalidateKeys: ["cve-rules", "cve-stats"],
   })
 }
 
 export function useOwaspBatchUpdate() {
   return useMutation(async (data: any) => owaspApi.batch(data), {
-    invalidateKeys: ["owasp-rules"],
+    invalidateKeys: ["owasp-rules", "owasp-stats"],
   })
 }
 
@@ -1049,7 +1275,13 @@ export function useAdminUserDelete() {
 
 export function useErrorPagesUpdate() {
   return useMutation(
-    async ({ siteId, data }: { siteId: number; data: any }) => {
+    async ({
+      siteId,
+      data,
+    }: {
+      siteId: number
+      data: Parameters<typeof siteApi.updateErrorPages>[1]
+    }) => {
       const result = await siteApi.updateErrorPages(siteId, data)
       await invalidateSiteCaches(siteId).catch(() => undefined)
       return result
@@ -1261,20 +1493,37 @@ export function useFingerprints(params?: {
 }
 
 export function useDropStats() {
-  return useApiQuery(["drop-stats"], () => dropApi.getStats())
+  return useApiQuery<import("@/lib/types").DropStatsSummary>(
+    ["drop-stats"],
+    () => dropApi.getStats()
+  )
 }
 
 export function useBotStats() {
-  return useApiQuery(["bot-stats"], () => botApi.getStats())
+  return useApiQuery<BotScoreStats>(["bot-stats"], () => botApi.getStats(), {
+    refreshInterval: 30000,
+  })
 }
 
-export function useBotScores() {
-  return useApiQuery(["bot-scores"], () => botApi.getScores())
+/**
+ * 最近 Bot 评分记录列表；默认取最新 10 条。
+ * 后端按 id DESC 排序（bot_score.go List 的 Order("id DESC")）。
+ */
+export function useBotScores(
+  params?: Record<string, string | number | boolean | undefined>
+) {
+  return useApiQuery<BotScoreListResponse>(
+    ["bot-scores", params],
+    () => botApi.getScores(params),
+    { refreshInterval: 30000 }
+  )
 }
 
 export function useCveStats(params?: any | null) {
-  return useApiQuery(params === null ? null : ["cve-stats", params], () =>
-    cveApi.getStats(params)
+  return useApiQuery(
+    params === null ? null : ["cve-stats", params],
+    () => cveApi.getStats(params),
+    RULE_QUERY_OPTIONS
   )
 }
 
@@ -1283,8 +1532,10 @@ export function useCveFeedStatus() {
 }
 
 export function useOwaspStats(params?: any | null) {
-  return useApiQuery(params === null ? null : ["owasp-stats", params], () =>
-    owaspApi.getStats(params)
+  return useApiQuery(
+    params === null ? null : ["owasp-stats", params],
+    () => owaspApi.getStats(params),
+    RULE_QUERY_OPTIONS
   )
 }
 

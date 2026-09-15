@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync/atomic"
 	"time"
+
+	"My-OpenWaf/internal/store"
 )
 
 // Script 是已校验的 JavaScript 策略脚本。
@@ -140,6 +142,16 @@ func (s *Script) Stats() (runs, failures, timeouts int64, average time.Duration)
 		average = time.Duration(s.totalNanos.Load() / runs)
 	}
 	return
+}
+
+// validateExecutionStage 在脚本进入执行器前拒绝持久化的 response 阶段脚本。
+// 当前唯一可执行的 JavaScript 阶段是 request；没有元数据的脚本仍可用于
+// dry-run 和接口级测试。
+func validateExecutionStage(script *Script) error {
+	if script != nil && script.Stage() == store.JSStageResponse {
+		return ErrResponseStageUnavailable
+	}
+	return nil
 }
 
 // Executor 描述脚本执行器的最小接口，便于未来接入其他后端。

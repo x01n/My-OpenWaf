@@ -12,6 +12,8 @@ type BruteForceDetector struct {
 	attempts    map[string]*attemptRecord
 	maxFailures int
 	lockoutDur  time.Duration
+	stopCh      chan struct{}
+	closeOnce   sync.Once
 }
 
 type attemptRecord struct {
@@ -33,6 +35,7 @@ func NewBruteForceDetector(maxFailures int, lockoutDuration time.Duration) *Brut
 		attempts:    make(map[string]*attemptRecord),
 		maxFailures: maxFailures,
 		lockoutDur:  lockoutDuration,
+		stopCh:      make(chan struct{}),
 	}
 	go bf.cleanupLoop()
 	return bf
@@ -169,18 +172,35 @@ func (bf *BruteForceDetector) LockoutRemaining(ip, username string) time.Duratio
 	return remaining
 }
 
+// Close stops the periodic cleanup goroutine and is safe to call repeatedly.
+func (bf *BruteForceDetector) Close() {
+	if bf == nil {
+		return
+	}
+	bf.closeOnce.Do(func() {
+		if bf.stopCh != nil {
+			close(bf.stopCh)
+		}
+	})
+}
+
 func (bf *BruteForceDetector) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		bf.mu.Lock()
-		now := time.Now()
-		for key, rec := range bf.attempts {
-			// Remove entries that have been idle for longer than lockout duration.
-			if now.Sub(rec.lastFail) > bf.lockoutDur*2 {
-				delete(bf.attempts, key)
+	for {
+		select {
+		case <-bf.stopCh:
+			return
+		case <-ticker.C:
+			bf.mu.Lock()
+			now := time.Now()
+			for key, rec := range bf.attempts {
+				// Remove entries that have been idle for longer than lockout duration.
+				if now.Sub(rec.lastFail) > bf.lockoutDur*2 {
+					delete(bf.attempts, key)
+				}
 			}
+			bf.mu.Unlock()
 		}
-		bf.mu.Unlock()
 	}
 }

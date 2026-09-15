@@ -192,6 +192,10 @@ func Run() {
 		log.Error("reconcile OWASP catalog failed", slog.Any("err", err))
 		os.Exit(1)
 	}
+	if err := cve.ReconcileBuiltinCatalog(rt.DB); err != nil {
+		log.Error("reconcile CVE catalog failed", slog.Any("err", err))
+		os.Exit(1)
+	}
 	if err := store.AutoMigrateLogs(rt.LogDB); err != nil {
 		log.Error("log auto migrate failed", slog.Any("err", err))
 		os.Exit(1)
@@ -238,6 +242,7 @@ func Run() {
 	challenge.SetChallengeSecret(jwtSecret)
 
 	repos := repository.NewWithLogDB(rt.DB, rt.LogDB)
+	repos.CVERule.MarkBuiltinCatalogReady()
 	applyLogConfig(repos.SystemSettings)
 	redisKV := cache.NewRedisKV(rt.Redis)
 	rt.RedisKV = redisKV
@@ -283,10 +288,11 @@ func Run() {
 		FlushInterval:   rt.Config.Queue.FlushInterval,
 	})
 	unifiedWriter.SetRedis(rt.Redis)
+	unifiedWriter.SetCountCacheInvalidator(queryCache)
 	defer unifiedWriter.Close()
 
 	// Event archiver (auto-delete security events, access logs and drop events based on retention config).
-	// Also performs database optimization (VACUUM/OPTIMIZE) after each cleanup cycle.
+	// Also performs lightweight SQLite planner/WAL maintenance or native server-DB optimization after each cycle.
 	archiver := observability.NewArchiver(rt.LogDB, repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
 	archiver.SetSettingsRepo(repos.SystemSettings)
 	archiver.SetSyncLogRepo(repos.ThreatIntelSyncLog)
@@ -414,6 +420,7 @@ func Run() {
 	// Prometheus-compatible metrics collector.
 	promMetrics := observability.NewMetrics()
 	promMetrics.SetUnifiedWriterStatsProvider(unifiedWriter)
+	promMetrics.SetWriteQueueStatsProvider(writeQueue)
 	promMetrics.SetDataPlaneMetricsProvider(func() observability.DataPlaneMetricsSnapshot {
 		s := metrics.Summary()
 		return observability.DataPlaneMetricsSnapshot{
@@ -522,8 +529,14 @@ func Run() {
 
 	tokenMgr := auth.NewTokenManager(jwtSecret, rt.DB)
 	defer tokenMgr.Close()
+	// Readiness must include the persistent JWT blacklist. If the blacklist
+	// cannot be loaded, middleware fails closed and the instance must not report
+	// itself ready to receive authenticated traffic.
+	hc.SetReadyFunc(func() bool { return lm.Ready() && tokenMgr.Ready() })
 	bruteForce := auth.NewBruteForceDetector(prot.LoginMaxAttempts, time.Duration(prot.LoginLockoutMinutes)*time.Minute)
+	defer bruteForce.Close()
 	sessionMgr := auth.NewSessionManager(rt.DB)
+	defer sessionMgr.Close()
 
 	// Escalation (step-up response) manager.
 	escalationMgr := escalation.NewEscalationManager(rt.Redis)

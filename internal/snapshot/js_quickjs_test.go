@@ -49,6 +49,31 @@ func TestLoadJSPluginsSkipsFailOpenCompileError(t *testing.T) {
 	}
 }
 
+func TestLoadJSPluginsSkipsFailOpenExecutableContractError(t *testing.T) {
+	db := newJSPluginSnapshotTestDB(t)
+	row := store.JSPlugin{
+		Name:        "legacy-return-request",
+		Source:      `export default { async fetch(request) { return request; } }`,
+		Enabled:     true,
+		Stage:       store.JSStageRequest,
+		FailureMode: store.JSFailureModeOpen,
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create legacy JS plugin: %v", err)
+	}
+
+	scripts, errs, err := loadJSPlugins(db)
+	if err != nil {
+		t.Fatalf("loadJSPlugins() error = %v", err)
+	}
+	if len(scripts) != 0 {
+		t.Fatalf("runtime scripts = %d, want 0 for invalid executable contract", len(scripts))
+	}
+	if got := errs[JSPluginErrorKey(row.ID)]; got == "" {
+		t.Fatalf("missing executable-contract diagnostic: %#v", errs)
+	}
+}
+
 func TestLoadJSPluginsValidatesTimeoutMS(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -132,6 +157,38 @@ func TestLoadJSPluginsInstallsFailClosedGuardForInvalidTimeout(t *testing.T) {
 	defer engine.Close()
 	if _, err := engine.Execute(t.Context(), guard, jsplugin.RequestSnapshot{}); err == nil {
 		t.Fatal("fail-closed invalid-timeout guard execution error = nil; request stage would silently allow")
+	}
+}
+
+func TestLoadJSPluginsInstallsFailClosedGuardForExecutableContractError(t *testing.T) {
+	db := newJSPluginSnapshotTestDB(t)
+	row := store.JSPlugin{
+		Name:        "legacy-closed-return-request",
+		Source:      `export default { fetch(request) { return request; } }`,
+		Enabled:     true,
+		Stage:       store.JSStageRequest,
+		FailureMode: store.JSFailureModeClosed,
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create fail-closed JS plugin: %v", err)
+	}
+	scripts, errs, err := loadJSPlugins(db)
+	if err != nil {
+		t.Fatalf("loadJSPlugins() error = %v", err)
+	}
+	if len(scripts) != 1 || scripts[0].ID() != row.ID {
+		t.Fatalf("fail-closed guard scripts = %#v", scripts)
+	}
+	if errs[JSPluginErrorKey(row.ID)] == "" {
+		t.Fatalf("missing executable-contract diagnostic: %#v", errs)
+	}
+	engine, err := jsplugin.NewEngine(jsplugin.EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Execute(t.Context(), scripts[0], jsplugin.CanonicalValidationRequest(0)); err == nil {
+		t.Fatal("fail-closed executable-contract guard did not fail")
 	}
 }
 

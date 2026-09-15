@@ -306,7 +306,7 @@ func TestContextKVBackendObservesCancellation(t *testing.T) {
 	}
 }
 
-func TestKVTTLAlwaysExpires(t *testing.T) {
+func TestKVSetTTLAlwaysExpires(t *testing.T) {
 	cases := []struct {
 		name string
 		src  string
@@ -316,8 +316,6 @@ func TestKVTTLAlwaysExpires(t *testing.T) {
 		{"巨大有限数", `function handle(ctx) ctx.kv.set("key", "value", 1e12) return nil end`, kvMaxTTL},
 		{"Lua 最大数", `function handle(ctx) ctx.kv.set("key", "value", math.huge) return nil end`, kvMaxTTL},
 		{"NaN", `function handle(ctx) ctx.kv.set("key", "value", 0 / 0) return nil end`, kvDefaultTTL},
-		{"负无穷", `function handle(ctx) ctx.kv.incr("key", -math.huge) return nil end`, kvDefaultTTL},
-		{"亚秒截断", `function handle(ctx) ctx.kv.incr("key", 0.5) return nil end`, kvDefaultTTL},
 	}
 
 	for _, tt := range cases {
@@ -325,9 +323,6 @@ func TestKVTTLAlwaysExpires(t *testing.T) {
 			kv := &recordingKV{}
 			evalOne(t, tt.src, RequestView{}, kv)
 			got := kv.setTTL
-			if strings.Contains(tt.src, "ctx.kv.incr") {
-				got = kv.incrTTL
-			}
 			if got != tt.want {
 				t.Fatalf("TTL = %s, want %s", got, tt.want)
 			}
@@ -335,6 +330,74 @@ func TestKVTTLAlwaysExpires(t *testing.T) {
 				t.Fatal("KV TTL must always expire")
 			}
 		})
+	}
+}
+
+func TestKVIncrTTLUsesStrictSeconds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arg  string
+		want time.Duration
+	}{
+		{name: "omitted", want: kvDefaultTTL},
+		{name: "minimum", arg: ", 1", want: time.Second},
+		{name: "normal", arg: ", 60", want: time.Minute},
+		{name: "maximum", arg: ", 86400", want: kvMaxTTL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kv := &recordingKV{}
+			evalOne(t, `function handle(ctx) ctx.kv.incr("key"`+tc.arg+`) return nil end`, RequestView{}, kv)
+			if kv.incrTTL != tc.want {
+				t.Fatalf("incr TTL = %s, want %s", kv.incrTTL, tc.want)
+			}
+		})
+	}
+}
+
+func TestKVIncrRejectsInvalidExplicitTTL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arg  string
+	}{
+		{name: "non-number", arg: `"60"`},
+		{name: "nan", arg: `0 / 0`},
+		{name: "positive infinity", arg: `math.huge`},
+		{name: "negative infinity", arg: `-math.huge`},
+		{name: "zero", arg: `0`},
+		{name: "negative", arg: `-1`},
+		{name: "fraction", arg: `60.5`},
+		{name: "above maximum", arg: `86401`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kv := &recordingKV{}
+			script := mustCompile(t, StagePre, `function handle(ctx) ctx.kv.incr("key", `+tc.arg+`) return nil end`)
+			_, err := script.Run(context.Background(), newVMPool(), RequestView{}, kv)
+			if err == nil || !strings.Contains(err.Error(), "ctx.kv.incr ttl must be an integer between 1 and 86400 seconds") {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if kv.incrTTL != 0 {
+				t.Fatalf("invalid TTL reached KV backend: %s", kv.incrTTL)
+			}
+		})
+	}
+}
+
+func TestKVIncrRejectsInvalidTTLBeforeBackendAvailabilityCheck(t *testing.T) {
+	script := mustCompile(t, StagePre, `function handle(ctx) ctx.kv.incr("key", 86401) return nil end`)
+	_, err := script.Run(context.Background(), newVMPool(), RequestView{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "ctx.kv.incr ttl must be an integer between 1 and 86400 seconds") {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestEngineDecisionCarriesPluginIdentity(t *testing.T) {
+	script := mustCompile(t, StagePre, `function handle(ctx) return "rate_limit" end`)
+	script.SetID(73)
+	e := newSilentEngine(testKV{available: true})
+	e.Reload([]*Script{script})
+	dec := e.Evaluate(context.Background(), StagePre, RequestView{})
+	if dec.ScriptID != 73 || dec.ScriptName != "test" || dec.Action != "rate_limit" {
+		t.Fatalf("decision identity = %+v", dec)
 	}
 }
 

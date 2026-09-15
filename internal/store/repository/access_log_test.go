@@ -1,13 +1,258 @@
 package repository
 
 import (
+	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/store"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
+
+type testListHotCache struct {
+	entries map[string]struct {
+		items []byte
+		total int64
+	}
+	sets int
+}
+
+type invalidatingCountCache struct {
+	invalidations atomic.Int64
+}
+
+type fixedCountCache struct {
+	value any
+}
+
+type immediateWriteQueue struct {
+	db *gorm.DB
+}
+
+func (q immediateWriteQueue) Submit(fn func(*gorm.DB) error) {
+	_ = fn(q.db)
+}
+
+func (q immediateWriteQueue) SubmitWait(fn func(*gorm.DB) error) error {
+	return fn(q.db)
+}
+
+func (c *invalidatingCountCache) Get(string) (any, bool) { return nil, false }
+func (c *invalidatingCountCache) Set(string, any)        {}
+func (c *invalidatingCountCache) InvalidateAll()         { c.invalidations.Add(1) }
+
+func (c fixedCountCache) Get(string) (any, bool) { return c.value, true }
+func (fixedCountCache) Set(string, any)          {}
+
+func TestListRepositoriesIgnoreInvalidCountCacheValue(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.AutoMigrate(&store.DropEvent{}); err != nil {
+		t.Fatalf("migrate drop events: %v", err)
+	}
+	if err := db.Create(&store.AccessLog{RequestID: "typed-access"}).Error; err != nil {
+		t.Fatalf("create access log: %v", err)
+	}
+	if err := db.Create(&store.SecurityEvent{RequestID: "typed-security"}).Error; err != nil {
+		t.Fatalf("create security event: %v", err)
+	}
+	if err := db.Create(&store.DropEvent{Source: "typed-drop"}).Error; err != nil {
+		t.Fatalf("create drop event: %v", err)
+	}
+
+	accessRepo := NewAccessLogRepo(db)
+	accessRepo.SetCountCache(fixedCountCache{value: "not-an-int64"})
+	if _, total, err := accessRepo.List(0, 20, AccessLogFilter{RequestID: "typed-access"}); err != nil || total != 1 {
+		t.Fatalf("access list with invalid cached value: total=%d err=%v", total, err)
+	}
+
+	securityRepo := NewSecurityEventRepo(db)
+	securityRepo.SetCountCache(fixedCountCache{value: struct{}{}})
+	if _, total, err := securityRepo.List(0, 20, SecurityEventFilter{RequestID: "typed-security"}); err != nil || total != 1 {
+		t.Fatalf("security list with invalid cached value: total=%d err=%v", total, err)
+	}
+
+	dropRepo := NewDropEventRepo(db)
+	dropRepo.SetCountCache(fixedCountCache{value: true})
+	if _, total, err := dropRepo.List(0, 20, DropEventFilter{Source: "typed-drop"}); err != nil || total != 1 {
+		t.Fatalf("drop list with invalid cached value: total=%d err=%v", total, err)
+	}
+}
+
+func TestAccessLogWritesInvalidateCountCache(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewAccessLogRepo(db)
+	cache := &invalidatingCountCache{}
+	repo.SetCountCache(cache)
+	if err := repo.Create(&store.AccessLog{RequestID: "count-cache-invalidate"}); err != nil {
+		t.Fatalf("create access log: %v", err)
+	}
+	if got := cache.invalidations.Load(); got != 1 {
+		t.Fatalf("count cache invalidations after create = %d, want 1", got)
+	}
+}
+
+func TestSecurityEventWritesInvalidateCountCache(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.AutoMigrate(&store.SecurityEvent{}); err != nil {
+		t.Fatalf("migrate security events: %v", err)
+	}
+	repo := NewSecurityEventRepo(db)
+	cache := &invalidatingCountCache{}
+	repo.SetCountCache(cache)
+	if err := repo.Create(&store.SecurityEvent{RequestID: "security-count-cache-invalidate"}); err != nil {
+		t.Fatalf("create security event: %v", err)
+	}
+	if got := cache.invalidations.Load(); got != 1 {
+		t.Fatalf("count cache invalidations after security create = %d, want 1", got)
+	}
+	if err := repo.BatchCreate([]store.SecurityEvent{{RequestID: "security-batch-a"}, {RequestID: "security-batch-b"}}); err != nil {
+		t.Fatalf("batch create security events: %v", err)
+	}
+	if got := cache.invalidations.Load(); got != 2 {
+		t.Fatalf("count cache invalidations after security batch = %d, want 2", got)
+	}
+	old := time.Now().UTC().Add(-time.Hour)
+	if err := db.Create(&store.SecurityEvent{RequestID: "security-old", CreatedAt: old}).Error; err != nil {
+		t.Fatalf("seed old security event: %v", err)
+	}
+	if _, err := repo.DeleteOlderThan(time.Now().UTC().Add(-30 * time.Minute)); err != nil {
+		t.Fatalf("delete old security events: %v", err)
+	}
+	if got := cache.invalidations.Load(); got != 3 {
+		t.Fatalf("count cache invalidations after security delete = %d, want 3", got)
+	}
+}
+
+func TestDropEventWritesInvalidateCountCache(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.AutoMigrate(&store.DropEvent{}); err != nil {
+		t.Fatalf("migrate drop events: %v", err)
+	}
+	repo := NewDropEventRepo(db)
+	cache := &invalidatingCountCache{}
+	repo.SetCountCache(cache)
+	if err := repo.Create(&store.DropEvent{Source: "rule"}); err != nil {
+		t.Fatalf("create drop event: %v", err)
+	}
+	if got := cache.invalidations.Load(); got != 1 {
+		t.Fatalf("count cache invalidations after drop create = %d, want 1", got)
+	}
+	if err := repo.BatchCreate([]store.DropEvent{{Source: "bot"}, {Source: "cve"}}); err != nil {
+		t.Fatalf("batch create drop events: %v", err)
+	}
+	if got := cache.invalidations.Load(); got != 2 {
+		t.Fatalf("count cache invalidations after drop batch = %d, want 2", got)
+	}
+	old := time.Now().UTC().Add(-time.Hour)
+	if err := db.Create(&store.DropEvent{Source: "old", CreatedAt: old}).Error; err != nil {
+		t.Fatalf("seed old drop event: %v", err)
+	}
+	if _, err := repo.DeleteOlderThan(time.Now().UTC().Add(-30 * time.Minute)); err != nil {
+		t.Fatalf("delete old drop events: %v", err)
+	}
+	if got := cache.invalidations.Load(); got != 3 {
+		t.Fatalf("count cache invalidations after drop delete = %d, want 3", got)
+	}
+}
+
+func TestQueuedEventWritesInvalidateCountCacheAfterCommit(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.AutoMigrate(&store.DropEvent{}); err != nil {
+		t.Fatalf("migrate drop events: %v", err)
+	}
+	securityRepo := NewSecurityEventRepo(db)
+	securityCache := &invalidatingCountCache{}
+	securityRepo.SetCountCache(securityCache)
+	securityRepo.SetWriteQueue(immediateWriteQueue{db: db})
+	if err := securityRepo.BatchCreate([]store.SecurityEvent{{RequestID: "queued-security"}}); err != nil {
+		t.Fatalf("queued security batch: %v", err)
+	}
+	if got := securityCache.invalidations.Load(); got != 1 {
+		t.Fatalf("security count cache invalidations after queued commit = %d, want 1", got)
+	}
+
+	dropRepo := NewDropEventRepo(db)
+	dropCache := &invalidatingCountCache{}
+	dropRepo.SetCountCache(dropCache)
+	dropRepo.SetWriteQueue(immediateWriteQueue{db: db})
+	if err := dropRepo.BatchCreate([]store.DropEvent{{Source: "queued"}}); err != nil {
+		t.Fatalf("queued drop batch: %v", err)
+	}
+	if got := dropCache.invalidations.Load(); got != 1 {
+		t.Fatalf("drop count cache invalidations after queued commit = %d, want 1", got)
+	}
+}
+
+func newTestListHotCache() *testListHotCache {
+	return &testListHotCache{entries: make(map[string]struct {
+		items []byte
+		total int64
+	})}
+}
+
+func (c *testListHotCache) Get(string, any) bool           { return false }
+func (c *testListHotCache) Set(string, any, time.Duration) {}
+func (c *testListHotCache) Invalidate(string)              {}
+func (c *testListHotCache) InvalidatePattern(string)       {}
+func (c *testListHotCache) Available() bool                { return true }
+func (c *testListHotCache) GetListRaw(key string) ([]byte, int64, bool) {
+	entry, ok := c.entries[key]
+	return entry.items, entry.total, ok
+}
+func (c *testListHotCache) SetList(key string, items any, total int64, _ time.Duration) {
+	raw, _ := json.Marshal(items)
+	c.entries[key] = struct {
+		items []byte
+		total int64
+	}{items: raw, total: total}
+	c.sets++
+}
+
+type countingSQLLogger struct {
+	delegate gormlogger.Interface
+	queries  atomic.Int64
+}
+
+func newCountingSQLLogger() *countingSQLLogger {
+	return &countingSQLLogger{delegate: gormlogger.Default.LogMode(gormlogger.Silent)}
+}
+
+func (l *countingSQLLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
+	l.delegate = l.delegate.LogMode(level)
+	return l
+}
+
+func (l *countingSQLLogger) Info(ctx context.Context, msg string, data ...interface{}) {
+	l.delegate.Info(ctx, msg, data...)
+}
+
+func (l *countingSQLLogger) Warn(ctx context.Context, msg string, data ...interface{}) {
+	l.delegate.Warn(ctx, msg, data...)
+}
+
+func (l *countingSQLLogger) Error(ctx context.Context, msg string, data ...interface{}) {
+	l.delegate.Error(ctx, msg, data...)
+}
+
+func (l *countingSQLLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	l.queries.Add(1)
+	l.delegate.Trace(ctx, begin, fc, err)
+}
+
+func (l *countingSQLLogger) reset() {
+	l.queries.Store(0)
+}
+
+func (l *countingSQLLogger) count() int64 {
+	return l.queries.Load()
+}
 
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -19,6 +264,225 @@ func newTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate db: %v", err)
 	}
 	return db
+}
+
+func TestListRepositoriesCacheEmptyResults(t *testing.T) {
+	log := newCountingSQLLogger()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: log})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessLog{}, &store.SecurityEvent{}); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+
+	cache := newTestListHotCache()
+	accessRepo := NewAccessLogRepo(db)
+	accessRepo.SetHotCache(cache)
+	securityRepo := NewSecurityEventRepo(db)
+	securityRepo.SetHotCache(cache)
+
+	if items, total, err := accessRepo.List(0, 20, AccessLogFilter{RequestID: "missing-access"}); err != nil || len(items) != 0 || total != 0 {
+		t.Fatalf("first access list = len:%d total:%d err:%v", len(items), total, err)
+	}
+	log.reset()
+	if items, total, err := accessRepo.List(0, 20, AccessLogFilter{RequestID: "missing-access"}); err != nil || len(items) != 0 || total != 0 {
+		t.Fatalf("cached access list = len:%d total:%d err:%v", len(items), total, err)
+	}
+	if got := log.count(); got != 0 {
+		t.Fatalf("cached empty access list executed %d SQL statements, want 0", got)
+	}
+
+	if items, total, err := securityRepo.List(0, 20, SecurityEventFilter{RequestID: "missing-security"}); err != nil || len(items) != 0 || total != 0 {
+		t.Fatalf("first security list = len:%d total:%d err:%v", len(items), total, err)
+	}
+	log.reset()
+	if items, total, err := securityRepo.List(0, 20, SecurityEventFilter{RequestID: "missing-security"}); err != nil || len(items) != 0 || total != 0 {
+		t.Fatalf("cached security list = len:%d total:%d err:%v", len(items), total, err)
+	}
+	if got := log.count(); got != 0 {
+		t.Fatalf("cached empty security list executed %d SQL statements, want 0", got)
+	}
+	if cache.sets != 2 {
+		t.Fatalf("empty list cache writes = %d, want 2", cache.sets)
+	}
+}
+
+func TestAccessLogRepoListSkipsPageQueryWhenCountIsZero(t *testing.T) {
+	log := newCountingSQLLogger()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: log})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessLog{}); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	repo := NewAccessLogRepo(db)
+
+	log.reset()
+	items, total, err := repo.List(0, 20, AccessLogFilter{Query: "definitely-missing"})
+	if err != nil {
+		t.Fatalf("list empty access logs: %v", err)
+	}
+	if total != 0 || len(items) != 0 || items == nil {
+		t.Fatalf("empty access log result = items:%#v total:%d, want non-nil empty items and zero total", items, total)
+	}
+	if got := log.count(); got != 1 {
+		t.Fatalf("empty access log list executed %d SQL statements, want only the count query", got)
+	}
+}
+
+func TestAccessLogRepoListCachesSmallSearchPageAndPreservesFilters(t *testing.T) {
+	log := newCountingSQLLogger()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: log})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessLog{}); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	if err := db.Create(&store.AccessLog{
+		RequestID:   "cached-search-request",
+		Host:        "cache.example.test",
+		Path:        "/api/cacheable",
+		QueryString: "needle=1",
+		Method:      "GET",
+		StatusCode:  200,
+	}).Error; err != nil {
+		t.Fatalf("create access log: %v", err)
+	}
+
+	queryCache := cache.NewQueryCache(5 * time.Second)
+	defer queryCache.Close()
+	repo := NewAccessLogRepo(db)
+	repo.SetCountCache(queryCache)
+
+	items, total, err := repo.List(0, 20, AccessLogFilter{Query: "needle"})
+	if err != nil || total != 1 || len(items) != 1 || items[0].RequestID != "cached-search-request" {
+		t.Fatalf("first cached search = items:%#v total:%d err:%v", items, total, err)
+	}
+	log.reset()
+	items, total, err = repo.List(0, 20, AccessLogFilter{Query: "needle"})
+	if err != nil || total != 1 || len(items) != 1 || items[0].RequestID != "cached-search-request" {
+		t.Fatalf("cached search = items:%#v total:%d err:%v", items, total, err)
+	}
+	if got := log.count(); got != 0 {
+		t.Fatalf("cached search executed %d SQL statements, want 0", got)
+	}
+
+	// The page key contains the complete filter and pagination tuple. A different
+	// leading-wildcard filter must not reuse the previous result.
+	items, total, err = repo.List(0, 20, AccessLogFilter{Host: "other.example.test"})
+	if err != nil || total != 0 || len(items) != 0 {
+		t.Fatalf("different host search = items:%#v total:%d err:%v", items, total, err)
+	}
+}
+
+func TestAccessLogRepoListCacheInvalidatesAfterCreate(t *testing.T) {
+	db := newTestDB(t)
+	queryCache := cache.NewQueryCache(5 * time.Second)
+	defer queryCache.Close()
+	repo := NewAccessLogRepo(db)
+	repo.SetCountCache(queryCache)
+
+	filter := AccessLogFilter{Host: "invalidate.example.test"}
+	if items, total, err := repo.List(0, 20, filter); err != nil || total != 0 || len(items) != 0 {
+		t.Fatalf("initial empty search = items:%#v total:%d err:%v", items, total, err)
+	}
+	if err := repo.Create(&store.AccessLog{Host: filter.Host, RequestID: "after-cache-create"}); err != nil {
+		t.Fatalf("create matching access log: %v", err)
+	}
+	items, total, err := repo.List(0, 20, filter)
+	if err != nil || total != 1 || len(items) != 1 || items[0].RequestID != "after-cache-create" {
+		t.Fatalf("post-create search = items:%#v total:%d err:%v", items, total, err)
+	}
+}
+
+func TestAccessLogRepoListUsesLightProjectionAndDetailReadsStayComplete(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewAccessLogRepo(db)
+	row := store.AccessLog{
+		SiteID:               7,
+		RequestID:            "projection-access-log",
+		Host:                 "projection.example.test",
+		Path:                 "/detail",
+		Method:               "POST",
+		StatusCode:           403,
+		RequestHeaders:       `{"X-Test":"request-header"}`,
+		RequestBodyPreview:   `{"payload":"request-body"}`,
+		RequestBodyTruncated: true,
+		RequestSize:          27,
+		ResponseHeaders:      `{"X-Test":"response-header"}`,
+		TLSJA3Hash:           "projection-ja3",
+		TLSJA4:               "projection-ja4",
+		TLSCipherSuites:      "TLS_AES_128_GCM_SHA256",
+		UpstreamLatencyMs:    12,
+		ResponseSize:         34,
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create access log: %v", err)
+	}
+
+	items, total, err := repo.List(0, 20, AccessLogFilter{RequestID: row.RequestID})
+	if err != nil {
+		t.Fatalf("list access logs: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("list access logs total=%d len=%d, want 1", total, len(items))
+	}
+	got := items[0]
+	if got.RequestHeaders != "" || got.RequestBodyPreview != "" || got.ResponseHeaders != "" {
+		t.Fatalf("list projection leaked detailed payload columns: %#v", got)
+	}
+	if got.RequestSize != row.RequestSize || !got.RequestBodyTruncated || got.TLSJA3Hash != row.TLSJA3Hash || got.TLSCipherSuites != row.TLSCipherSuites {
+		t.Fatalf("list projection lost lightweight metadata: %#v", got)
+	}
+
+	detail, err := repo.Get(row.ID)
+	if err != nil {
+		t.Fatalf("get access log: %v", err)
+	}
+	if detail.RequestHeaders != row.RequestHeaders || detail.RequestBodyPreview != row.RequestBodyPreview || detail.ResponseHeaders != row.ResponseHeaders {
+		t.Fatalf("Get lost detailed payload columns: %#v", detail)
+	}
+
+	byRequest, err := repo.FindByRequestID(row.RequestID)
+	if err != nil {
+		t.Fatalf("find access logs by request id: %v", err)
+	}
+	if len(byRequest) != 1 || byRequest[0].RequestBodyPreview != row.RequestBodyPreview || byRequest[0].ResponseHeaders != row.ResponseHeaders {
+		t.Fatalf("FindByRequestID lost detailed payload columns: %#v", byRequest)
+	}
+}
+
+func TestAccessLogRepoListOrdersByCreatedAtThenID(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewAccessLogRepo(db)
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []store.AccessLog{
+		{SiteID: 9, RequestID: "newer-low-id", Host: "order.example.test", CreatedAt: now},
+		{SiteID: 9, RequestID: "older-high-id", Host: "order.example.test", CreatedAt: now.Add(-time.Hour)},
+		{SiteID: 9, RequestID: "newer-high-id", Host: "order.example.test", CreatedAt: now},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatalf("create access log %d: %v", i, err)
+		}
+	}
+
+	items, _, err := repo.List(0, 20, AccessLogFilter{SiteID: 9})
+	if err != nil {
+		t.Fatalf("list access logs: %v", err)
+	}
+	want := []string{"newer-high-id", "newer-low-id", "older-high-id"}
+	if len(items) != len(want) {
+		t.Fatalf("items=%d want=%d", len(items), len(want))
+	}
+	for i := range want {
+		if items[i].RequestID != want[i] {
+			t.Fatalf("items[%d].request_id=%q want=%q", i, items[i].RequestID, want[i])
+		}
+	}
 }
 
 func TestAccessLogRepoListStatusGroup(t *testing.T) {
@@ -600,6 +1064,122 @@ func TestAccessLogRepoListFingerprintsSQLite(t *testing.T) {
 	}
 }
 
+func TestAccessLogRepoListFingerprintsUsesFixedQueryCount(t *testing.T) {
+	log := newCountingSQLLogger()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: log})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessLog{}, &store.BotScoreLog{}); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	now := time.Now().UTC()
+	for i := 0; i < 8; i++ {
+		requestID := "fixed-query-" + strconv.Itoa(i)
+		access := store.AccessLog{
+			RequestID:       requestID,
+			TLSJA3Hash:      "ja3-" + requestID,
+			TLSJA4:          "ja4-" + requestID,
+			TLSVersion:      "TLS13",
+			TLSALPN:         "h2",
+			TLSSNI:          "fixed.example.test",
+			TLSCipherSuites: "TLS_AES_128_GCM_SHA256",
+			CreatedAt:       now.Add(time.Duration(i) * time.Second),
+		}
+		if err := db.Create(&access).Error; err != nil {
+			t.Fatalf("create access log %d: %v", i, err)
+		}
+		if err := db.Create(&store.BotScoreLog{RequestID: requestID, TotalScore: 50 + i, IsHighRisk: i%2 == 0, CreatedAt: now}).Error; err != nil {
+			t.Fatalf("create bot score %d: %v", i, err)
+		}
+	}
+	repo := NewAccessLogRepo(db)
+
+	log.reset()
+	if _, _, err := repo.ListFingerprints(0, 1, FingerprintFilter{}); err != nil {
+		t.Fatalf("list one fingerprint: %v", err)
+	}
+	oneGroupQueries := log.count()
+
+	log.reset()
+	if _, _, err := repo.ListFingerprints(0, 8, FingerprintFilter{}); err != nil {
+		t.Fatalf("list eight fingerprints: %v", err)
+	}
+	manyGroupQueries := log.count()
+	t.Logf("ListFingerprints query count: one_group=%d eight_groups=%d", oneGroupQueries, manyGroupQueries)
+
+	if manyGroupQueries != oneGroupQueries {
+		t.Fatalf("fingerprint query count scales with page groups: one=%d many=%d", oneGroupQueries, manyGroupQueries)
+	}
+	if manyGroupQueries > 5 {
+		t.Fatalf("fingerprint query count=%d, want at most 5 fixed queries", manyGroupQueries)
+	}
+}
+
+func TestAccessLogRepoFingerprintGroupUsesDigestIndex(t *testing.T) {
+	db := newTestDB(t)
+	var plan []struct{ Detail string }
+	if err := db.Raw("EXPLAIN QUERY PLAN SELECT fingerprint_key, COUNT(*) FROM access_logs WHERE fingerprint_key <> ? GROUP BY fingerprint_key ORDER BY MAX(created_at) DESC, fingerprint_key LIMIT ?", "", 20).Scan(&plan).Error; err != nil {
+		t.Fatalf("explain fingerprint aggregation: %v", err)
+	}
+	var joined strings.Builder
+	for _, row := range plan {
+		joined.WriteString(row.Detail)
+		joined.WriteByte('\n')
+	}
+	if !strings.Contains(joined.String(), "idx_al_fingerprint_key") {
+		t.Fatalf("fingerprint aggregation did not use digest index:\n%s", joined.String())
+	}
+}
+
+func TestAccessLogRepoListFingerprintsChoosesLatestCreatedAtInsteadOfHighestID(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewAccessLogRepo(db)
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []store.AccessLog{
+		{
+			RequestID:   "newer-low-id",
+			UserAgent:   "latest-user-agent",
+			ClientIP:    "203.0.113.10",
+			HeaderOrder: "host,user-agent",
+			TLSJA3Hash:  "latest-ja3",
+			TLSJA4:      "latest-ja4",
+			TLSVersion:  "TLS13",
+			TLSALPN:     "h2",
+			TLSSNI:      "latest.example.test",
+			CreatedAt:   now,
+		},
+		{
+			RequestID:   "older-high-id",
+			UserAgent:   "older-user-agent",
+			ClientIP:    "203.0.113.20",
+			HeaderOrder: "user-agent,host",
+			TLSJA3Hash:  "latest-ja3",
+			TLSJA4:      "latest-ja4",
+			TLSVersion:  "TLS13",
+			TLSALPN:     "h2",
+			TLSSNI:      "latest.example.test",
+			CreatedAt:   now.Add(-time.Hour),
+		},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatalf("create access log %d: %v", i, err)
+		}
+	}
+
+	items, total, err := repo.ListFingerprints(0, 20, FingerprintFilter{TLSJA3Hash: "latest-ja3"})
+	if err != nil {
+		t.Fatalf("list fingerprints: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("fingerprints total=%d len=%d, want 1", total, len(items))
+	}
+	if items[0].LastUserAgent != "latest-user-agent" || items[0].LastClientIP != "203.0.113.10" || items[0].LastHeaderOrder != "host,user-agent" {
+		t.Fatalf("latest fingerprint metadata came from highest id instead of latest created_at: %#v", items[0])
+	}
+}
+
 func TestAccessLogRepoListFingerprintsAppliesFiltersBeforePagination(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewAccessLogRepo(db)
@@ -763,6 +1343,30 @@ func TestSecurityEventRepoListHostAndPathFilters(t *testing.T) {
 	}
 	if secEventCountCacheKey(SecurityEventFilter{Path: "/a"}) == secEventCountCacheKey(SecurityEventFilter{Path: "/b"}) {
 		t.Fatal("path filters must not share security event count cache keys")
+	}
+}
+
+func TestSecurityEventCountCacheKeyIsUnambiguousAndKeepsTimePrecision(t *testing.T) {
+	if secEventCountCacheKey(SecurityEventFilter{Query: "x:rid1"}) ==
+		secEventCountCacheKey(SecurityEventFilter{Query: "x", RequestID: "1"}) {
+		t.Fatal("query content must not collide with a request_id field boundary")
+	}
+
+	instant := time.Date(2026, 8, 31, 1, 2, 3, 4, time.UTC)
+	nextNanosecond := instant.Add(time.Nanosecond)
+	if secEventCountCacheKey(SecurityEventFilter{Since: &instant}) ==
+		secEventCountCacheKey(SecurityEventFilter{Since: &nextNanosecond}) {
+		t.Fatal("since cache key must preserve nanosecond precision")
+	}
+	if secEventCountCacheKey(SecurityEventFilter{Until: &instant}) ==
+		secEventCountCacheKey(SecurityEventFilter{Until: &nextNanosecond}) {
+		t.Fatal("until cache key must preserve nanosecond precision")
+	}
+
+	sameInstantInUTCPlusEight := instant.In(time.FixedZone("UTC+8", 8*60*60))
+	if secEventCountCacheKey(SecurityEventFilter{Since: &instant}) !=
+		secEventCountCacheKey(SecurityEventFilter{Since: &sameInstantInUTCPlusEight}) {
+		t.Fatal("equal instants in different time zones must share the same cache key")
 	}
 }
 

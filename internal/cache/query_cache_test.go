@@ -42,6 +42,28 @@ func TestQueryCacheGetExpiredEntryReturnsMiss(t *testing.T) {
 	if ok {
 		t.Fatal("expired entry should be a miss")
 	}
+	qc.mu.RLock()
+	_, stillStored := qc.entries["exp-key"]
+	qc.mu.RUnlock()
+	if stillStored {
+		t.Fatal("expired entry should be removed on read")
+	}
+}
+
+func TestQueryCacheConstructorUsesDefaultTTLForNonPositiveValue(t *testing.T) {
+	qc := NewQueryCache(0)
+	defer qc.Close()
+
+	qc.Set("default-ttl", "value")
+	if _, ok := qc.Get("default-ttl"); !ok {
+		t.Fatal("non-positive constructor TTL must produce a usable cache")
+	}
+}
+
+func TestQueryCacheCloseIsIdempotent(t *testing.T) {
+	qc := NewQueryCache(time.Second)
+	qc.Close()
+	qc.Close()
 }
 
 func TestQueryCacheSetWithTTLCustomDuration(t *testing.T) {
@@ -108,6 +130,26 @@ func TestQueryCacheInvalidateNonexistentKeyNoPanic(t *testing.T) {
 	defer qc.Close()
 
 	qc.Invalidate("never-set") // 不应 panic
+}
+
+func TestQueryCacheInvalidatePrefixPreservesOtherNamespaces(t *testing.T) {
+	qc := NewQueryCache(5 * time.Second)
+	defer qc.Close()
+
+	qc.Set("al_count:v2|filter:a", int64(1))
+	qc.Set("al_list:v1|filter:a", "access")
+	qc.Set("se_count:v2|filter:a", int64(2))
+
+	qc.InvalidatePrefix("al_count:v2")
+	if _, ok := qc.Get("al_count:v2|filter:a"); ok {
+		t.Fatal("access count namespace should be invalidated")
+	}
+	if _, ok := qc.Get("al_list:v1|filter:a"); !ok {
+		t.Fatal("access list namespace should remain cached")
+	}
+	if _, ok := qc.Get("se_count:v2|filter:a"); !ok {
+		t.Fatal("security event namespace should remain cached")
+	}
 }
 
 func TestQueryCacheInvalidateAllClearsEverything(t *testing.T) {
@@ -183,5 +225,22 @@ func TestQueryCacheSetOverwritesExistingKey(t *testing.T) {
 	v, ok := qc.Get("ow")
 	if !ok || v.(string) != "second" {
 		t.Fatalf("overwrite: want (second, true), got (%v, %v)", v, ok)
+	}
+}
+
+func TestQueryCacheRejectsOversizedKeys(t *testing.T) {
+	qc := NewQueryCache(time.Second)
+	defer qc.Close()
+
+	key := string(make([]byte, defaultQueryCacheMaxKeyBytes+1))
+	qc.Set(key, "must-not-be-stored")
+	if _, ok := qc.Get(key); ok {
+		t.Fatal("oversized query-cache key was stored")
+	}
+	qc.mu.RLock()
+	entries := len(qc.entries)
+	qc.mu.RUnlock()
+	if entries != 0 {
+		t.Fatalf("oversized key changed cache size to %d", entries)
 	}
 }

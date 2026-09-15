@@ -25,6 +25,8 @@ const (
 	jsResponseStageUnavailableMessage = "response stage is unavailable because response execution is not implemented"
 )
 
+var errJSRuntimeUnavailable = errors.New(jsRuntimeUnavailableMessage)
+
 // jsQuickJSDisabledMessage 说明当前二进制没有编入 QuickJS 后端。
 //
 // 构建条件逐字来自 internal/waf/jsplugin/quickjs_cgo.go 的 //go:build 约束，
@@ -53,6 +55,18 @@ type jsPluginStatsItem struct {
 	Failures int64   `json:"failures"`
 	Timeouts int64   `json:"timeouts"`
 	AvgMS    float64 `json:"avg_ms"`
+}
+
+// jsPluginRuntimeStatus 是 JavaScript 运行时只读状态，不包含脚本源码。
+type jsPluginRuntimeStatus struct {
+	Backend           string `json:"backend"`
+	Available         bool   `json:"available"`
+	EngineReady       bool   `json:"engine_ready"`
+	Enabled           int    `json:"enabled"`
+	Compiled          int    `json:"compiled"`
+	CompileErrors     int    `json:"compile_errors"`
+	RequestSupported  bool   `json:"request_supported"`
+	ResponseSupported bool   `json:"response_supported"`
 }
 
 // ListJSPlugins returns all configured JavaScript edge scripts.
@@ -101,6 +115,52 @@ func currentJSPluginSnapshot(holder *snapshotpkg.Holder) *snapshotpkg.Snapshot {
 	return holder.Load()
 }
 
+// validateEnabledJSPlugin performs the same compile and fetch execution used by the data plane.
+func validateEnabledJSPlugin(ctx context.Context, item *store.JSPlugin, loadEngine func() *jsplugin.Engine) error {
+	if item == nil || !item.Enabled {
+		return nil
+	}
+	if loadEngine == nil {
+		return errJSRuntimeUnavailable
+	}
+	engine := loadEngine()
+	if engine == nil {
+		return errJSRuntimeUnavailable
+	}
+	opts := jsplugin.ScriptOptions{Name: item.Name}
+	if item.SiteID != nil {
+		opts.SiteIDs = []uint{*item.SiteID}
+	}
+	if item.TimeoutMS > 0 {
+		opts.Timeout = time.Duration(item.TimeoutMS) * time.Millisecond
+	}
+	script, err := jsplugin.Compile(item.Name, item.Source, opts)
+	if err != nil {
+		return err
+	}
+	siteID := uint(0)
+	if item.SiteID != nil {
+		siteID = *item.SiteID
+	}
+	plan, err := engine.Validate(ctx, script, jsplugin.CanonicalValidationRequest(siteID))
+	if err != nil {
+		return err
+	}
+	return jsplugin.ValidateMutationPlan(plan)
+}
+
+func writeJSPluginPersistenceValidationError(c *app.RequestContext, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errJSRuntimeUnavailable) || errors.Is(err, jsplugin.ErrCGODisabled) {
+		c.JSON(503, map[string]string{"error": jsRuntimeUnavailableMessage})
+		return true
+	}
+	c.JSON(400, map[string]string{"error": err.Error()})
+	return true
+}
+
 func ListJSPlugins(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		items, err := repo.List()
@@ -142,8 +202,12 @@ func GetJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder) app.
 }
 
 // CreateJSPlugin creates an edge script and reloads the immutable configuration.
-func CreateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, reload func() error) app.HandlerFunc {
+func CreateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, reload func() error, loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
+		var loadEngine func() *jsplugin.Engine
+		if len(loadEngines) > 0 {
+			loadEngine = loadEngines[0]
+		}
 		var req jsPluginRequest
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "请求体格式无效"})
@@ -153,6 +217,9 @@ func CreateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, r
 		item := store.JSPlugin{Enabled: true, Priority: 100, FailureMode: store.JSFailureModeOpen}
 		if errMsg := applyJSPluginRequest(&item, req, true); errMsg != "" {
 			c.JSON(400, map[string]string{"error": errMsg})
+			return
+		}
+		if writeJSPluginPersistenceValidationError(c, validateEnabledJSPlugin(ctx, &item, loadEngine)) {
 			return
 		}
 		if err := repo.Create(&item); err != nil {
@@ -172,8 +239,12 @@ func CreateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, r
 }
 
 // UpdateJSPlugin updates only fields present in the request body.
-func UpdateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, reload func() error) app.HandlerFunc {
+func UpdateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, reload func() error, loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
+		var loadEngine func() *jsplugin.Engine
+		if len(loadEngines) > 0 {
+			loadEngine = loadEngines[0]
+		}
 		id, err := shared.ParseUintParam(c, "id")
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid id"})
@@ -191,6 +262,9 @@ func UpdateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, r
 		}
 		if errMsg := applyJSPluginRequest(item, req, false); errMsg != "" {
 			c.JSON(400, map[string]string{"error": errMsg})
+			return
+		}
+		if writeJSPluginPersistenceValidationError(c, validateEnabledJSPlugin(ctx, item, loadEngine)) {
 			return
 		}
 		if err := repo.Update(item); err != nil {
@@ -234,8 +308,12 @@ func DeleteJSPlugin(repo *repository.JSPluginRepo, reload func() error) app.Hand
 }
 
 // ToggleJSPlugin explicitly sets enabled or flips the current state.
-func ToggleJSPlugin(repo *repository.JSPluginRepo, reload func() error) app.HandlerFunc {
+func ToggleJSPlugin(repo *repository.JSPluginRepo, reload func() error, loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
+		var loadEngine func() *jsplugin.Engine
+		if len(loadEngines) > 0 {
+			loadEngine = loadEngines[0]
+		}
 		id, err := shared.ParseUintParam(c, "id")
 		if err != nil {
 			c.JSON(400, map[string]string{"error": "invalid id"})
@@ -263,6 +341,13 @@ func ToggleJSPlugin(repo *repository.JSPluginRepo, reload func() error) app.Hand
 			c.JSON(400, map[string]string{"error": jsResponseStageUnavailableMessage})
 			return
 		}
+		if enabled {
+			updated := *item
+			updated.Enabled = true
+			if writeJSPluginPersistenceValidationError(c, validateEnabledJSPlugin(ctx, &updated, loadEngine)) {
+				return
+			}
+		}
 		if err := repo.Toggle(id, enabled); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -275,9 +360,13 @@ func ToggleJSPlugin(repo *repository.JSPluginRepo, reload func() error) app.Hand
 	}
 }
 
-// ValidateJSPlugin reports that the JavaScript runtime is not installed yet.
-func ValidateJSPlugin() app.HandlerFunc {
+// ValidateJSPlugin compiles and executes the source against the canonical request snapshot.
+func ValidateJSPlugin(loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
+		var loadEngine func() *jsplugin.Engine
+		if len(loadEngines) > 0 {
+			loadEngine = loadEngines[0]
+		}
 		var req struct {
 			Stage     string `json:"stage"`
 			Source    string `json:"source"`
@@ -299,13 +388,23 @@ func ValidateJSPlugin() app.HandlerFunc {
 			c.JSON(400, map[string]string{"error": "timeout_ms must be between 0 and 1000"})
 			return
 		}
-		opts := jsplugin.ScriptOptions{Name: "<js-plugin-validate>"}
-		if req.TimeoutMS != nil && *req.TimeoutMS > 0 {
-			opts.Timeout = time.Duration(*req.TimeoutMS) * time.Millisecond
+		item := store.JSPlugin{
+			Name:        "<js-plugin-validate>",
+			Source:      req.Source,
+			Stage:       req.Stage,
+			FailureMode: store.JSFailureModeOpen,
+			Enabled:     true,
 		}
-		if err := jsplugin.ValidateWithOptions(req.Stage, req.Source, opts); err != nil {
-			if errors.Is(err, jsplugin.ErrCGODisabled) {
-				c.JSON(503, map[string]any{"valid": false, "error": jsQuickJSDisabledMessage})
+		if req.TimeoutMS != nil {
+			item.TimeoutMS = *req.TimeoutMS
+		}
+		if err := validateEnabledJSPlugin(ctx, &item, loadEngine); err != nil {
+			if errors.Is(err, errJSRuntimeUnavailable) || errors.Is(err, jsplugin.ErrCGODisabled) {
+				message := jsRuntimeUnavailableMessage
+				if !jsplugin.RuntimeAvailable() || errors.Is(err, jsplugin.ErrCGODisabled) {
+					message = jsQuickJSDisabledMessage
+				}
+				c.JSON(503, map[string]any{"valid": false, "error": message})
 				return
 			}
 			c.JSON(200, map[string]any{"valid": false, "error": err.Error()})
@@ -458,16 +557,44 @@ func jsStringMapFromSample(raw any) map[string]string {
 	return result
 }
 
+// GetJSPluginRuntime returns the exact executable backend and current snapshot state.
+func GetJSPluginRuntime(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, loadEngine func() *jsplugin.Engine) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		enabled, err := repo.ListEnabled()
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		compiled := 0
+		compileErrors := 0
+		if sn := currentJSPluginSnapshot(holder); sn != nil {
+			compiled = len(sn.JSPlugins)
+			compileErrors = len(sn.JSPluginErrors)
+		}
+		engineReady := false
+		if loadEngine != nil {
+			engineReady = loadEngine() != nil
+		}
+		c.JSON(200, jsPluginRuntimeStatus{
+			Backend:           jsplugin.RuntimeBackend(),
+			Available:         jsplugin.RuntimeAvailable() && engineReady,
+			EngineReady:       engineReady,
+			Enabled:           len(enabled),
+			Compiled:          compiled,
+			CompileErrors:     compileErrors,
+			RequestSupported:  true,
+			ResponseSupported: false,
+		})
+	}
+}
+
 /**
  * GetJSPluginStats 返回 JS 脚本的运行时统计。
  *
- * 当前返回空列表：单脚本计数器只存在于 *jsplugin.Script（script.go:120 的
- * Stats）上，而 jsplugin.Engine 是纯执行器，两个构建分支都只有 Execute/
- * Evaluate/Close，不持有脚本集合；已编译脚本集合只存在于
- * snapshot.Snapshot.JSPlugins，尚未接入本端点。端点保持 200 而非 503，因为
- * router 已把它注册为常规读端点，空集合不等于运行时故障。
+ * 计数器来自当前 snapshot 中实际加载的脚本；配置重载会替换脚本对象并重置计数。
+ * 空集合仍返回 200，因为它表示当前没有可执行脚本，不代表统计接口自身故障。
  *
- * @param engine QuickJS 执行引擎，可为 nil；当前实现不读取它。
+ * @param holder 当前不可变配置快照。
  * @return Hertz handler。
  */
 func GetJSPluginStats(holder *snapshotpkg.Holder) app.HandlerFunc {

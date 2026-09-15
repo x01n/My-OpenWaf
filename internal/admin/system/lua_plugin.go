@@ -3,14 +3,18 @@ package system
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
+	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/luaplugin"
@@ -35,22 +39,142 @@ type luaPluginRequest struct {
 // luaMaxTimeoutMS 限制单脚本超时上限。
 //
 // 脚本在数据面同步执行，允许过长会让单个慢脚本拖垮 P99 延迟。
-const luaMaxTimeoutMS = 1200
+const luaMaxTimeoutMS = 1000
+
+// luaValidationKV is an isolated in-memory backend used only for enablement checks.
+type luaValidationKV struct {
+	mu     sync.Mutex
+	values map[string][]byte
+}
+
+func newLuaValidationKV() *luaValidationKV {
+	return &luaValidationKV{values: make(map[string][]byte)}
+}
+
+func (k *luaValidationKV) Available() bool { return k != nil }
+
+func (k *luaValidationKV) AvailableContext(ctx context.Context) bool {
+	return k != nil && (ctx == nil || ctx.Err() == nil)
+}
+
+func (k *luaValidationKV) Get(key string) ([]byte, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	value, ok := k.values[key]
+	return append([]byte(nil), value...), ok
+}
+
+func (k *luaValidationKV) Set(key string, value []byte, _ time.Duration) error {
+	k.mu.Lock()
+	k.values[key] = append([]byte(nil), value...)
+	k.mu.Unlock()
+	return nil
+}
+
+func (k *luaValidationKV) Delete(key string) {
+	k.mu.Lock()
+	delete(k.values, key)
+	k.mu.Unlock()
+}
+
+func (k *luaValidationKV) Incr(key string, _ time.Duration) (int64, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	value := int64(1)
+	if raw, ok := k.values[key]; ok {
+		parsed, err := strconv.ParseInt(string(raw), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		value = parsed + 1
+	}
+	k.values[key] = []byte(strconv.FormatInt(value, 10))
+	return value, nil
+}
+
+func (k *luaValidationKV) GetContext(_ context.Context, key string) ([]byte, bool) {
+	return k.Get(key)
+}
+
+func (k *luaValidationKV) SetContext(_ context.Context, key string, value []byte, ttl time.Duration) error {
+	return k.Set(key, value, ttl)
+}
+
+func (k *luaValidationKV) DeleteContext(_ context.Context, key string) { k.Delete(key) }
+
+func (k *luaValidationKV) IncrContext(_ context.Context, key string, ttl time.Duration) (int64, error) {
+	return k.Incr(key, ttl)
+}
+
+func validateEnabledLuaPlugin(ctx context.Context, item *store.LuaPlugin) error {
+	if item == nil || !item.Enabled {
+		return nil
+	}
+	siteID := uint(0)
+	if item.SiteID != nil {
+		siteID = *item.SiteID
+	}
+	result := luaplugin.DryRunNContext(ctx, luaplugin.Stage(item.Stage), item.Source, luaplugin.RequestView{
+		RequestID: "lua-plugin-validation",
+		ClientIP:  "192.0.2.1",
+		Method:    "GET",
+		Path:      "/",
+		Host:      "validation.invalid",
+		UserAgent: "My-OpenWaf validation",
+		SiteID:    siteID,
+	}, newLuaValidationKV(), time.Duration(item.TimeoutMS)*time.Millisecond, 1)
+	if result.CompileError != "" {
+		return errors.New(result.CompileError)
+	}
+	if result.RuntimeError != "" {
+		return errors.New(result.RuntimeError)
+	}
+	return nil
+}
 
 // ListLuaPlugins 返回全部自定义 Lua 策略脚本。
-func ListLuaPlugins(repo *repository.LuaPluginRepo) app.HandlerFunc {
+type luaPluginItemResponse struct {
+	store.LuaPlugin
+	CompileError string `json:"compile_error,omitempty"`
+}
+
+func newLuaPluginItemResponse(item store.LuaPlugin, sn *snapshotpkg.Snapshot) luaPluginItemResponse {
+	response := luaPluginItemResponse{LuaPlugin: item}
+	if sn != nil && sn.LuaPluginErrors != nil {
+		response.CompileError = sn.LuaPluginErrors[item.Name]
+	}
+	return response
+}
+
+func currentLuaPluginSnapshot(holder *snapshotpkg.Holder) *snapshotpkg.Snapshot {
+	if holder == nil {
+		return nil
+	}
+	return holder.Load()
+}
+
+func ListLuaPlugins(repo *repository.LuaPluginRepo, holders ...*snapshotpkg.Holder) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		items, err := repo.List()
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		c.JSON(200, map[string]any{"items": items, "total": len(items)})
+		var holder *snapshotpkg.Holder
+		if len(holders) > 0 {
+			holder = holders[0]
+		}
+		sn := currentLuaPluginSnapshot(holder)
+		responseItems := make([]luaPluginItemResponse, 0, len(items))
+		for i := range items {
+			responseItems = append(responseItems, newLuaPluginItemResponse(items[i], sn))
+		}
+		c.JSON(200, map[string]any{"items": responseItems, "total": len(responseItems)})
 	}
 }
 
 // GetLuaPlugin 返回单个脚本。
-func GetLuaPlugin(repo *repository.LuaPluginRepo) app.HandlerFunc {
+func GetLuaPlugin(repo *repository.LuaPluginRepo, holders ...*snapshotpkg.Holder) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")
 		if err != nil {
@@ -62,7 +186,11 @@ func GetLuaPlugin(repo *repository.LuaPluginRepo) app.HandlerFunc {
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
-		c.JSON(200, item)
+		var holder *snapshotpkg.Holder
+		if len(holders) > 0 {
+			holder = holders[0]
+		}
+		c.JSON(200, newLuaPluginItemResponse(*item, currentLuaPluginSnapshot(holder)))
 	}
 }
 
@@ -129,6 +257,10 @@ func CreateLuaPlugin(repo *repository.LuaPluginRepo, reload func() error) app.Ha
 			c.JSON(400, map[string]string{"error": errMsg})
 			return
 		}
+		if err := validateEnabledLuaPlugin(ctx, &item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 
 		if err := repo.Create(&item); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
@@ -163,6 +295,10 @@ func UpdateLuaPlugin(repo *repository.LuaPluginRepo, reload func() error) app.Ha
 		}
 		if errMsg := applyLuaPluginRequest(existing, req, false); errMsg != "" {
 			c.JSON(400, map[string]string{"error": errMsg})
+			return
+		}
+		if err := validateEnabledLuaPlugin(ctx, existing); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -229,6 +365,14 @@ func ToggleLuaPlugin(repo *repository.LuaPluginRepo, reload func() error) app.Ha
 		if body.Enabled != nil {
 			enabled = *body.Enabled
 		}
+		if enabled {
+			updated := *existing
+			updated.Enabled = true
+			if err := validateEnabledLuaPlugin(ctx, &updated); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 
 		if err := repo.Toggle(id, enabled); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
@@ -258,7 +402,8 @@ func ValidateLuaPlugin() app.HandlerFunc {
 			c.JSON(400, map[string]string{"error": "stage must be pre or post"})
 			return
 		}
-		if err := luaplugin.Validate(stage, req.Source); err != nil {
+		item := store.LuaPlugin{Name: "<lua-plugin-validate>", Stage: string(stage), Source: req.Source, Enabled: true}
+		if err := validateEnabledLuaPlugin(ctx, &item); err != nil {
 			c.JSON(200, map[string]any{"valid": false, "error": err.Error()})
 			return
 		}
@@ -314,7 +459,7 @@ func DryRunLuaPlugin() app.HandlerFunc {
 		}
 
 		if req.TimeoutMS < 0 || req.TimeoutMS > luaMaxTimeoutMS {
-			c.JSON(400, map[string]string{"error": "timeout_ms must be between 0 and 1200"})
+			c.JSON(400, map[string]string{"error": "timeout_ms must be between 0 and 1000"})
 			return
 		}
 		timeout := time.Duration(req.TimeoutMS) * time.Millisecond
@@ -424,7 +569,7 @@ func applyLuaPluginRequest(item *store.LuaPlugin, req luaPluginRequest, creating
 	}
 	if req.TimeoutMS != nil {
 		if *req.TimeoutMS < 0 || *req.TimeoutMS > luaMaxTimeoutMS {
-			return "timeout_ms must be between 0 and 1200"
+			return "timeout_ms must be between 0 and 1000"
 		}
 		item.TimeoutMS = *req.TimeoutMS
 	}

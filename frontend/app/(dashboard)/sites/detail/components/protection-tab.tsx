@@ -6,6 +6,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SkipPathByPhaseEditor } from "@/components/skip-path-by-phase-editor"
 
@@ -36,7 +44,7 @@ import {
   toSkipPathByPhasePayload,
 } from "@/lib/skip-path-by-phase"
 import { cn } from "@/lib/utils"
-import type { Site, SkipPathByPhase } from "@/lib/types"
+import type { Site, SiteUpdate, SkipPathByPhase } from "@/lib/types"
 
 interface OwaspRule {
   id: string
@@ -133,6 +141,71 @@ const GLOBAL_DEFAULT_MODE: ModuleMode = "balanced"
 
 type TriState = "inherit" | "on" | "off"
 type SkipPathOverrideMode = "inherit" | "override"
+
+/**
+ * 站点防护动作可选集合。
+ * 与后端 internal/admin/shared.ValidateRuleAction 的白名单一致
+ * （IsValid 减去 allow/tag），并排除 redirect。
+ * `rl_`/`ow_`/`cv_`（rate_limit_action / owasp_action / cve_action）
+ * 共用同一集合：后端均为 ValidateActionWithoutRedirectTarget 校验。
+ * challenge 会转换为全局配置的质询类型渲染，可选。
+ */
+const ACTION_OPTIONS = [
+  "intercept",
+  "observe",
+  "drop",
+  "challenge",
+  "rate_limit",
+  "captcha_challenge",
+  "shield_challenge",
+  "chain_challenge",
+] as const
+
+/**
+ * OWASP 灵敏度可选集合。
+ * 与后端 owasp.normalizeSensitivityLevel 的合法值一致（mid 与 medium 等价），
+ * 前端统一提交 `mid`。
+ */
+const SENSITIVITY_OPTIONS = [
+  "low",
+  "mid",
+  "high",
+  "very_high",
+  "strict",
+  "off",
+] as const
+
+/** 攻击保护级别。与后端 store.SiteProtectionModeProtect / Observe 常量一致。 */
+const PROTECTION_LEVEL_OPTIONS = ["protect", "observe"] as const
+
+const ACTION_LABEL_KEYS: Record<string, string> = {
+  intercept: "securityEvents.action.intercept",
+  observe: "securityEvents.action.observe",
+  drop: "securityEvents.action.drop",
+  challenge: "securityEvents.action.challenge",
+  rate_limit: "securityEvents.action.rate_limit",
+  captcha_challenge: "securityEvents.action.captcha_challenge",
+  shield_challenge: "securityEvents.action.shield_challenge",
+  chain_challenge: "securityEvents.action.chain_challenge",
+}
+
+/** 站点动作空串/缺失 = 继承全局，等价于「继承全局」选项。 */
+function actionToOption(value: string | undefined): string {
+  return value && ACTION_OPTIONS.includes(value as never) ? value : "inherit"
+}
+
+function optionToAction(option: string): string {
+  return option === "inherit" ? "" : option
+}
+
+/** 后端 OWASPSensitivity 历史值可能是 medium；两档归一化显示为 mid。 */
+function sensitivityToOption(value: string | undefined): string {
+  const normalized =
+    value === "medium" ? "mid" : (value ?? "")
+  return (SENSITIVITY_OPTIONS as readonly string[]).includes(normalized)
+    ? normalized
+    : "mid"
+}
 
 function toTriState(v: boolean | null | undefined): TriState {
   if (v === true) return "on"
@@ -233,20 +306,20 @@ function getModeBadgeVariant(
 
 interface ProtectionTabProps {
   site: Site
+  canManage: boolean
 }
 
-export function ProtectionTab({ site }: ProtectionTabProps) {
+export function ProtectionTab({ site, canManage }: ProtectionTabProps) {
   const { t, i18n } = useTranslation()
   const useChinese = (i18n.resolvedLanguage ?? i18n.language).startsWith("zh")
   const fallback = (zh: string, en: string) => (useChinese ? zh : en)
   const { data: defaultPolicy } = useDefaultPolicy()
   const effectivePolicyId = site.policy_id ?? defaultPolicy?.id
-  const { data, isLoading, mutate } = useOwaspRules(
+  const { data, isLoading } = useOwaspRules(
     effectivePolicyId ? { policy_id: effectivePolicyId, page_size: 500 } : null
   ) as {
     data: OwaspRulesResponse | undefined
     isLoading: boolean
-    mutate: () => void
   }
   const { execute: batchUpdate, loading: isSaving } = useOwaspBatchUpdate()
   const updateSite = useSiteProtectionMutation()
@@ -260,6 +333,43 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
   const [botState, setBotState] = useState<TriState>(() =>
     toTriState(site.bot_protection_enabled)
   )
+  // 攻击保护级别只有 protect / observe 两档是合法输入；
+  // default:medium 是历史遗留默认值，不进入下拉选项时回退显示 protect。
+  const [protectionMode, setProtectionMode] = useState<string>(() =>
+    site.attack_protection_level === "observe" ? "observe" : "protect"
+  )
+  // OWASP 灵敏度的合法展示值；inherit 仅在 owasp_enabled 为 null 且值为空时出现。
+  const [owaspSensitivity, setOwaspSensitivity] = useState<string>(() =>
+    site.owasp_sensitivity ? sensitivityToOption(site.owasp_sensitivity) : "inherit"
+  )
+  // 动作下拉的 inherit 表示「留空、继承全局」。
+  const [owaspAction, setOwaspAction] = useState<string>(() =>
+    actionToOption(site.owasp_action)
+  )
+  const [cveAction, setCveAction] = useState<string>(() =>
+    actionToOption(site.cve_action)
+  )
+  const [rateState, setRateState] = useState<TriState>(() =>
+    toTriState(site.rate_limit_enabled)
+  )
+  const [rateWindow, setRateWindow] = useState<number>(() =>
+    site.rate_limit_window > 0 ? site.rate_limit_window : 60
+  )
+  const [rateWindowValid, setRateWindowValid] = useState<boolean>(() =>
+    site.rate_limit_window > 0
+  )
+  const [rateMax, setRateMax] = useState<number>(() =>
+    site.rate_limit_max > 0 ? site.rate_limit_max : 300
+  )
+  const [rateMaxValid, setRateMaxValid] = useState<boolean>(() =>
+    site.rate_limit_max > 0
+  )
+  const [rateAction, setRateAction] = useState<string>(() =>
+    actionToOption(site.rate_limit_action)
+  )
+  const [owaspDirty, setOwaspDirty] = useState(false)
+  const [cveDirty, setCveDirty] = useState(false)
+  const [rateDirty, setRateDirty] = useState(false)
   const [moduleModes, setModuleModes] = useState<Record<string, ModuleMode>>({})
   const [hasChanges, setHasChanges] = useState(false)
   const [batchMode, setBatchMode] = useState<ModuleMode>("balanced")
@@ -289,12 +399,17 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
     return result
   }, [inferredModes, moduleModes])
 
-  const handleModeChange = useCallback((key: string, mode: ModuleMode) => {
-    setModuleModes((prev) => ({ ...prev, [key]: mode }))
-    setHasChanges(true)
-  }, [])
+  const handleModeChange = useCallback(
+    (key: string, mode: ModuleMode) => {
+      if (!canManage) return
+      setModuleModes((prev) => ({ ...prev, [key]: mode }))
+      setHasChanges(true)
+    },
+    [canManage]
+  )
 
   const handleBatchApply = useCallback(() => {
+    if (!canManage) return
     const updates: Record<string, ModuleMode> = {}
     for (const mod of MODULES) {
       const rules = data?.grouped?.[mod.category]
@@ -305,37 +420,140 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
     setModuleModes(updates)
     setHasChanges(true)
     toast.success(t("attacks.batchApplied"))
-  }, [batchMode, data, t])
+  }, [batchMode, canManage, data, t])
 
-  const handleTriStateChange = async (
-    key: "owasp" | "cve" | "bot",
+  const handleTriStateChange = (
+    key: "owasp" | "cve" | "bot" | "rate",
     value: TriState
   ) => {
-    try {
-      const payload: Record<string, unknown> = {}
-      if (key === "owasp") {
-        setOwaspState(value)
-        payload.owasp_enabled = fromTriState(value)
-      } else if (key === "cve") {
-        setCveState(value)
-        payload.cve_enabled = fromTriState(value)
-      } else if (key === "bot") {
-        setBotState(value)
-        payload.bot_protection_enabled = fromTriState(value)
+    if (!canManage) return
+    const payload: SiteUpdate = {}
+    if (key === "owasp") {
+      const opt = owaspSensitivity === "inherit" ? "" : owaspSensitivity
+      const action = optionToAction(owaspAction)
+      setOwaspState(value)
+      payload.owasp_enabled = fromTriState(value)
+      // 与后端 clearInheritedProtectionOverrides 对齐：
+      // 继承(null)时从属字段一并清空，启用时提交当前面板值。
+      payload.owasp_sensitivity = value === "on" ? opt : ""
+      payload.owasp_action = value === "on" ? action : ""
+      if (value === "on") {
+        setOwaspSensitivity("")
+        setOwaspDirty(false)
       }
-      await updateSite.execute({ id: site.id, data: payload })
+    } else if (key === "cve") {
+      const action = optionToAction(cveAction)
+      setCveState(value)
+      payload.cve_enabled = fromTriState(value)
+      payload.cve_action = value === "on" ? action : ""
+      if (value === "on") {
+        setCveAction("")
+        setCveDirty(false)
+      }
+    } else if (key === "bot") {
+      setBotState(value)
+      payload.bot_protection_enabled = fromTriState(value)
+    } else if (key === "rate") {
+      setRateState(value)
+      payload.rate_limit_enabled = fromTriState(value)
+      // 继承(null)时后端清零 window/max/action，前端同样不携带赋值字段。
+      if (value === "on") {
+        payload.rate_limit_window = rateWindow
+        payload.rate_limit_max = rateMax
+        payload.rate_limit_action = optionToAction(rateAction)
+        setRateDirty(false)
+      }
+    }
+    updateSite
+      .execute({ id: site.id, data: payload })
+      .then(() => toast.success(t("common.saveSuccess")))
+      .catch(() => toast.error(t("common.operationFailed")))
+  }
+
+  /** OWASP 灵敏度 + 动作局部保存：owasp_enabled 为 null（继承）时后端会清空两者。 */
+  const handleSaveOwaspDetail = async () => {
+    if (!canManage || owaspState === "off") return
+    try {
+      await updateSite.execute({
+        id: site.id,
+        data: {
+          owasp_sensitivity:
+            owaspSensitivity === "inherit" ? "" : owaspSensitivity,
+          owasp_action: optionToAction(owaspAction),
+        },
+      })
+      setOwaspDirty(false)
       toast.success(t("common.saveSuccess"))
     } catch {
       toast.error(t("common.operationFailed"))
     }
   }
 
+  /** CVE 动作局部保存：cve_enabled 为 null（继承）时后端会清空 cve_action。 */
+  const handleSaveCveDetail = async () => {
+    if (!canManage || cveState === "off") return
+    try {
+      await updateSite.execute({
+        id: site.id,
+        data: { cve_action: optionToAction(cveAction) },
+      })
+      setCveDirty(false)
+      toast.success(t("common.saveSuccess"))
+    } catch {
+      toast.error(t("common.operationFailed"))
+    }
+  }
+
+  /** 限流窗口/最大值/动作局部保存；enabled 为继承时后端自动清空三个字段。 */
+  const handleSaveRateDetail = async () => {
+    if (!canManage || rateState === "off" || !rateWindowValid || !rateMaxValid)
+      return
+    try {
+      await updateSite.execute({
+        id: site.id,
+        data: {
+          rate_limit_window: rateWindow,
+          rate_limit_max: rateMax,
+          rate_limit_action: optionToAction(rateAction),
+        },
+      })
+      setRateDirty(false)
+      toast.success(t("common.saveSuccess"))
+    } catch {
+      toast.error(t("common.operationFailed"))
+    }
+  }
+
+  /** 攻击保护级别切换：携带字段保存 + 前端四组开关即时回落。 */
+  const handleProtectionModeChange = (value: string) => {
+    if (!canManage) return
+    setProtectionMode(value)
+    updateSite
+      .execute({ id: site.id, data: { attack_protection_level: value } })
+      .then(() => {
+        setOwaspState("on")
+        if (value === "observe") setOwaspAction("observe")
+        setCveState("on")
+        if (value === "observe") setCveAction("observe")
+        setRateState("on")
+        setRateAction(value === "observe" ? "observe" : "rate_limit")
+        setBotState(value === "observe" ? "off" : "on")
+        setOwaspDirty(false)
+        setCveDirty(false)
+        setRateDirty(false)
+        toast.success(t("common.saveSuccess"))
+      })
+      .catch(() => toast.error(t("common.operationFailed")))
+  }
+
   const handleSkipPathModeChange = (value: SkipPathOverrideMode) => {
+    if (!canManage) return
     setSkipPathMode(value)
     setSkipPathsDirty(true)
   }
 
   const handleSkipPathsChange = (value: SkipPathByPhase) => {
+    if (!canManage) return
     setSkipPaths(value)
     setSkipPathsDirty(true)
   }
@@ -347,6 +565,7 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
   }
 
   const handleSaveSkipPaths = async () => {
+    if (!canManage) return
     if (
       skipPathMode === "override" &&
       findEmptySkipPaths(skipPaths).length > 0
@@ -393,7 +612,7 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
   }
 
   const handleSaveModules = async () => {
-    if (!effectivePolicyId || !data?.grouped) return
+    if (!canManage || !effectivePolicyId || !data?.grouped) return
 
     const updates: {
       id: string
@@ -422,7 +641,6 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
       await batchUpdate({ policy_id: effectivePolicyId, rules: updates })
       toast.success(t("attacks.saveSuccess"))
       setHasChanges(false)
-      mutate()
     } catch (err) {
       toast.error(
         t("attacks.saveFailed", {
@@ -433,7 +651,10 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
   }
 
   return (
-    <div className="space-y-4">
+    <fieldset
+      disabled={!canManage}
+      className="m-0 min-w-0 space-y-4 border-0 p-0"
+    >
       {/* 全局防护开关 */}
       <Card>
         <CardHeader className="pb-3">
@@ -443,7 +664,38 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between rounded-lg border p-3">
-            <div className="space-y-0.5">
+            <div className="min-w-0 space-y-0.5">
+              <Label className="text-sm font-medium">
+                {t("sites.detail.attackLevel")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.attackLevelDesc")}
+              </p>
+            </div>
+            <Select
+              value={protectionMode}
+              onValueChange={handleProtectionModeChange}
+              disabled={!canManage}
+            >
+              <SelectTrigger className="h-7 w-28 shrink-0 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PROTECTION_LEVEL_OPTIONS.map((level) => (
+                  <SelectItem key={level} value={level}>
+                    {t(
+                      level === "protect"
+                        ? "sites.detail.attackLevelProtect"
+                        : "sites.detail.attackLevelObserve"
+                    )}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div className="min-w-0 space-y-0.5">
               <Label className="text-sm font-medium">
                 OWASP {t("sites.detail.protection")}
               </Label>
@@ -458,8 +710,101 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
             />
           </div>
 
+          {owaspState !== "off" && (
+            <div className="grid items-center gap-4 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+              <div className="min-w-0 space-y-0.5">
+                <Label className="text-sm font-medium">
+                  {t("sites.detail.owaspSensitivity")}{" "}
+                  <span className="text-xs font-normal text-muted-foreground">
+                    ({t("attacks.sensitivityValues.medium")})
+                  </span>
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t("sites.detail.owaspSensitivityDesc")}
+                </p>
+              </div>
+              <Select
+                value={owaspSensitivity}
+                onValueChange={(v) => setOwaspSensitivity(v)}
+                disabled={owaspState === "inherit"}
+              >
+                <SelectTrigger className="w-36">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {owaspState === "inherit" && (
+                    <SelectItem value="inherit">
+                      {t("sites.detail.owaspSensitivityInherit")}
+                    </SelectItem>
+                  )}
+                  {SENSITIVITY_OPTIONS.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {t(`attacks.sensitivityValues.${s}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={
+                  owaspState === "inherit" || !owaspDirty || updateSite.loading
+                }
+                onClick={handleSaveOwaspDetail}
+              >
+                {t("common.save")}
+              </Button>
+            </div>
+          )}
+
+          {owaspState !== "off" && (
+            <div className="grid items-center gap-4 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+              <div className="min-w-0 space-y-0.5">
+                <Label className="text-sm font-medium">
+                  OWASP {t("sites.detail.actionLabel")}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t("sites.detail.owaspActionDesc")}
+                </p>
+              </div>
+              <Select
+                value={owaspAction}
+                onValueChange={(v) => setOwaspAction(v)}
+                disabled={owaspState === "inherit"}
+              >
+                <SelectTrigger className="w-36">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {owaspState === "inherit" && (
+                    <SelectItem value="inherit">
+                      {t("sites.detail.actionInherit")}
+                    </SelectItem>
+                  )}
+                  {ACTION_OPTIONS.map((action) => (
+                    <SelectItem key={action} value={action}>
+                      {t(ACTION_LABEL_KEYS[action])}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={
+                  owaspState === "inherit" || !owaspDirty || updateSite.loading
+                }
+                onClick={handleSaveOwaspDetail}
+              >
+                {t("common.save")}
+              </Button>
+            </div>
+          )}
+
           <div className="flex items-center justify-between rounded-lg border p-3">
-            <div className="space-y-0.5">
+            <div className="min-w-0 space-y-0.5">
               <Label className="text-sm font-medium">
                 CVE {t("sites.detail.protection")}
               </Label>
@@ -474,8 +819,53 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
             />
           </div>
 
+          {cveState !== "off" && (
+            <div className="grid items-center gap-4 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+              <div className="min-w-0 space-y-0.5">
+                <Label className="text-sm font-medium">
+                  CVE {t("sites.detail.actionLabel")}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t("sites.detail.cveActionDesc")}
+                </p>
+              </div>
+              <Select
+                value={cveAction}
+                onValueChange={(v) => setCveAction(v)}
+                disabled={cveState === "inherit"}
+              >
+                <SelectTrigger className="w-36">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {cveState === "inherit" && (
+                    <SelectItem value="inherit">
+                      {t("sites.detail.actionInherit")}
+                    </SelectItem>
+                  )}
+                  {ACTION_OPTIONS.map((action) => (
+                    <SelectItem key={action} value={action}>
+                      {t(ACTION_LABEL_KEYS[action])}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={
+                  cveState === "inherit" || !cveDirty || updateSite.loading
+                }
+                onClick={handleSaveCveDetail}
+              >
+                {t("common.save")}
+              </Button>
+            </div>
+          )}
+
           <div className="flex items-center justify-between rounded-lg border p-3">
-            <div className="space-y-0.5">
+            <div className="min-w-0 space-y-0.5">
               <Label className="text-sm font-medium">
                 Bot {t("sites.detail.protection")}
               </Label>
@@ -488,6 +878,142 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
               onChange={(v) => handleTriStateChange("bot", v)}
               idPrefix="prot-bot"
             />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 站点级请求频率限制 */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">
+            {t("sites.detail.rateLimitTitle")}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div className="min-w-0 space-y-0.5">
+              <Label className="text-sm font-medium">
+                {t("sites.detail.rateLimitEnabled")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.rateLimitDesc")}
+              </p>
+            </div>
+            <TriStateToggle
+              value={rateState}
+              onChange={(v) => handleTriStateChange("rate", v)}
+              idPrefix="prot-rate"
+            />
+          </div>
+
+          <div
+            className={cn(
+              "space-y-4 rounded-lg border p-3",
+              rateState === "inherit"
+                ? "pointer-events-none opacity-60"
+                : rateState === "off"
+                  ? "pointer-events-none opacity-40"
+                  : ""
+            )}
+          >
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-[auto_auto_auto_minmax(0,1fr)]">
+              <div className="space-y-1.5">
+                <Label>{t("sites.detail.rateLimitWindow")}</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={1}
+                    className="w-24"
+                    inputMode="numeric"
+                    value={
+                      Number.isFinite(rateWindow) ? rateWindow.toString() : ""
+                    }
+                    onChange={(e) => {
+                      const raw = e.target.value.trim()
+                      const parsed = raw === "" ? NaN : Number(raw)
+                      setRateWindow(parsed)
+                      setRateWindowValid(Number.isInteger(parsed) && parsed > 0)
+                      setRateDirty(true)
+                    }}
+                  />
+                  <span className="text-sm text-muted-foreground">
+                    {t("ccProtection.seconds")}
+                  </span>
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>{t("sites.detail.rateLimitMax")}</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  className="w-24"
+                  inputMode="numeric"
+                  value={Number.isFinite(rateMax) ? rateMax.toString() : ""}
+                  onChange={(e) => {
+                    const raw = e.target.value.trim()
+                    const parsed = raw === "" ? NaN : Number(raw)
+                    setRateMax(parsed)
+                    setRateMaxValid(Number.isInteger(parsed) && parsed > 0)
+                    setRateDirty(true)
+                  }}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>{t("sites.detail.actionLabel")}</Label>
+                <Select
+                  value={rateAction}
+                  onValueChange={(v) => {
+                    setRateAction(v)
+                    setRateDirty(true)
+                  }}
+                >
+                  <SelectTrigger className="w-36">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {rateState === "inherit" && (
+                      <SelectItem value="inherit">
+                        {t("sites.detail.actionInherit")}
+                      </SelectItem>
+                    )}
+                    {ACTION_OPTIONS.map((action) => (
+                      <SelectItem key={action} value={action}>
+                        {t(ACTION_LABEL_KEYS[action])}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {rateState === "inherit" && (
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.rateLimitInheritHint")}
+              </p>
+            )}
+            {!rateWindowValid && (
+              <p className="text-xs text-destructive">
+                {t("sites.detail.rateLimitWindowInvalid")}
+              </p>
+            )}
+            {!rateMaxValid && (
+              <p className="text-xs text-destructive">
+                {t("sites.detail.rateLimitMaxInvalid")}
+              </p>
+            )}
+            {rateState === "on" && rateDirty && (
+              <div className="flex justify-end border-t pt-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!rateWindowValid || !rateMaxValid || updateSite.loading}
+                  onClick={handleSaveRateDetail}
+                >
+                  {t("common.save")}
+                </Button>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -562,7 +1088,7 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
             <SkipPathByPhaseEditor
               value={skipPaths}
               onChange={handleSkipPathsChange}
-              disabled={updateSite.loading}
+              disabled={!canManage || updateSite.loading}
               idPrefix={`site-${site.id}-skip-path`}
             />
           )}
@@ -746,6 +1272,6 @@ export function ProtectionTab({ site }: ProtectionTabProps) {
           )}
         </CardContent>
       </Card>
-    </div>
+    </fieldset>
   )
 }

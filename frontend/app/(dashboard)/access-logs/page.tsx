@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useCallback, useMemo, useState } from "react"
+import { Suspense, useCallback, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic"
 import Link from "next/link"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
@@ -29,11 +29,13 @@ import {
 } from "@/components/ui/pagination"
 import { Badge } from "@/components/ui/badge"
 import { ActionBadge } from "@/components/action-badge"
+import { AccessLogOriginBadge } from "@/components/access-log-origin-badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { DataTable } from "@/components/data-table"
 import { Skeleton } from "@/components/ui/skeleton"
 import { IconEye, IconFilter, IconRoute } from "@tabler/icons-react"
 import { useAccessLogs } from "@/hooks/use-api"
+import { accessLogApi } from "@/lib/api"
 import type { AccessLog } from "@/lib/types"
 import { cn, formatBytes, formatLatencyMs } from "@/lib/utils"
 
@@ -96,7 +98,13 @@ function buildPaginationTokens(
     return Array.from({ length: totalPages }, (_, index) => index + 1)
   }
 
-  const pages = new Set([1, totalPages, currentPage - 1, currentPage, currentPage + 1])
+  const pages = new Set([
+    1,
+    totalPages,
+    currentPage - 1,
+    currentPage,
+    currentPage + 1,
+  ])
   const visible = Array.from(pages)
     .filter((page) => page >= 1 && page <= totalPages)
     .sort((left, right) => left - right)
@@ -160,7 +168,11 @@ function AccessLogsContent() {
   )
   const activeFilterCount = Object.keys(activeFilterParams).length
   const [showFilters, setShowFilters] = useState(activeFilterCount > 0)
+  const [selectedLogId, setSelectedLogId] = useState<number | null>(null)
   const [selectedLog, setSelectedLog] = useState<AccessLog | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const detailRequestRef = useRef(0)
   const [draftState, setDraftState] = useState<FilterDraftState>({
     source: queryString,
     value: filters,
@@ -229,6 +241,45 @@ function AccessLogsContent() {
     updateQuery(emptyFilters)
   }, [queryString, updateQuery])
 
+  /** 点击轻量列表项后按 ID 拉取完整日志，避免列表响应承载大字段。 */
+  const openLogDetail = useCallback(
+    async (row: AccessLog) => {
+      const requestSequence = ++detailRequestRef.current
+      setSelectedLogId(row.id)
+      setSelectedLog(null)
+      setDetailError(null)
+      setDetailLoading(true)
+      try {
+        const detail = await accessLogApi.get(row.id)
+        if (detailRequestRef.current === requestSequence) {
+          setSelectedLog(detail)
+        }
+      } catch (detailLoadError) {
+        if (detailRequestRef.current === requestSequence) {
+          setDetailError(
+            detailLoadError instanceof Error
+              ? detailLoadError.message
+              : t("accessLogs.detailLoadFailed")
+          )
+        }
+      } finally {
+        if (detailRequestRef.current === requestSequence) {
+          setDetailLoading(false)
+        }
+      }
+    },
+    [t]
+  )
+
+  const handleDetailOpenChange = useCallback((open: boolean) => {
+    if (open) return
+    detailRequestRef.current += 1
+    setSelectedLogId(null)
+    setSelectedLog(null)
+    setDetailError(null)
+    setDetailLoading(false)
+  }, [])
+
   const columns = useMemo(
     () => [
       {
@@ -260,7 +311,10 @@ function AccessLogsContent() {
             <div className="font-mono text-xs font-medium break-all">
               {row.client_ip || "-"}
             </div>
-            <div className="truncate text-xs text-muted-foreground" title={row.host}>
+            <div
+              className="truncate text-xs text-muted-foreground"
+              title={row.host}
+            >
               {row.host || "-"}
             </div>
           </div>
@@ -308,6 +362,7 @@ function AccessLogsContent() {
               action={row.waf_action}
               className="h-5 px-1.5 text-[10px]"
             />
+            <AccessLogOriginBadge log={row} />
           </div>
         ),
       },
@@ -322,7 +377,8 @@ function AccessLogsContent() {
               {formatLatencyMs(row.upstream_latency_ms)}
             </div>
             <div className="text-muted-foreground">
-              req {formatBytes(row.request_size)} · res {formatBytes(row.response_size)}
+              req {formatBytes(row.request_size)} · res{" "}
+              {formatBytes(row.response_size)}
             </div>
           </div>
         ),
@@ -343,7 +399,8 @@ function AccessLogsContent() {
             <div className="flex flex-wrap gap-1 text-[10px] text-muted-foreground">
               {row.upstream_http_protocol || row.http_protocol ? (
                 <span>
-                  {row.http_protocol || "-"} → {row.upstream_http_protocol || "-"}
+                  {row.http_protocol || "-"} →{" "}
+                  {row.upstream_http_protocol || "-"}
                 </span>
               ) : null}
               {row.cache_state ? <span>· {row.cache_state}</span> : null}
@@ -357,14 +414,17 @@ function AccessLogsContent() {
         width: "84px",
         cellClassName: "align-top",
         render: (row: AccessLog) => (
-          <div className="flex items-center gap-0.5">
+          <div
+            className="flex items-center gap-0.5"
+            onClick={(event) => event.stopPropagation()}
+          >
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
               className="cursor-pointer"
               title={t("common.viewDetail")}
-              onClick={() => setSelectedLog(row)}
+              onClick={() => openLogDetail(row)}
             >
               <IconEye className="h-4 w-4" />
             </Button>
@@ -387,7 +447,7 @@ function AccessLogsContent() {
         ),
       },
     ],
-    [t]
+    [openLogDetail, t]
   )
 
   return (
@@ -419,7 +479,10 @@ function AccessLogsContent() {
                 {t("accessLogs.listTitle")}
               </CardTitle>
               {activeFilterCount > 0 && (
-                <Badge variant="outline" className="h-5 px-1.5 font-mono text-[10px]">
+                <Badge
+                  variant="outline"
+                  className="h-5 px-1.5 font-mono text-[10px]"
+                >
                   {activeFilterCount}
                 </Badge>
               )}
@@ -453,17 +516,16 @@ function AccessLogsContent() {
                 <Select
                   value={draft.waf_action || FILTER_ALL}
                   onValueChange={(value) =>
-                    updateDraft(
-                      "waf_action",
-                      value === FILTER_ALL ? "" : value
-                    )
+                    updateDraft("waf_action", value === FILTER_ALL ? "" : value)
                   }
                 >
                   <SelectTrigger className="h-8 text-xs">
                     <SelectValue placeholder={t("common.all")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value={FILTER_ALL}>{t("common.all")}</SelectItem>
+                    <SelectItem value={FILTER_ALL}>
+                      {t("common.all")}
+                    </SelectItem>
                     <SelectItem value="allow">
                       {t("securityEvents.action.allow")}
                     </SelectItem>
@@ -481,6 +543,9 @@ function AccessLogsContent() {
                     </SelectItem>
                     <SelectItem value="log_only">
                       {t("securityEvents.action.log_only")}
+                    </SelectItem>
+                    <SelectItem value="rate_limit">
+                      {t("securityEvents.action.rate_limit")}
                     </SelectItem>
                   </SelectContent>
                 </Select>
@@ -500,7 +565,9 @@ function AccessLogsContent() {
                     <SelectValue placeholder={t("common.all")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value={FILTER_ALL}>{t("common.all")}</SelectItem>
+                    <SelectItem value={FILTER_ALL}>
+                      {t("common.all")}
+                    </SelectItem>
                     <SelectItem value="2xx">2xx</SelectItem>
                     <SelectItem value="3xx">3xx</SelectItem>
                     <SelectItem value="4xx">4xx</SelectItem>
@@ -556,7 +623,9 @@ function AccessLogsContent() {
                   className="h-8 font-mono text-xs"
                   placeholder="#"
                   value={draft.site_id}
-                  onChange={(event) => updateDraft("site_id", event.target.value)}
+                  onChange={(event) =>
+                    updateDraft("site_id", event.target.value)
+                  }
                 />
               </div>
               <div className="flex flex-wrap items-center justify-end gap-2 sm:col-span-2 lg:col-span-3 xl:col-span-6">
@@ -569,7 +638,11 @@ function AccessLogsContent() {
                 >
                   {t("common.clearFilters")}
                 </Button>
-                <Button type="submit" size="sm" className="h-8 cursor-pointer text-xs">
+                <Button
+                  type="submit"
+                  size="sm"
+                  className="h-8 cursor-pointer text-xs"
+                >
                   {t("timeRange.apply")}
                 </Button>
               </div>
@@ -581,6 +654,10 @@ function AccessLogsContent() {
             data={items}
             loading={isLoading}
             rowKey={accessLogRowKey}
+            onRowClick={openLogDetail}
+            getRowAriaLabel={(row) =>
+              t("accessLogs.openDetail", { id: row.id })
+            }
             emptyText={t("accessLogs.empty")}
           />
 
@@ -597,7 +674,9 @@ function AccessLogsContent() {
                         updateQuery({ page: String(Math.max(1, page - 1)) })
                       }
                       className={
-                        page <= 1 ? "pointer-events-none opacity-50" : "cursor-pointer"
+                        page <= 1
+                          ? "pointer-events-none opacity-50"
+                          : "cursor-pointer"
                       }
                     />
                   </PaginationItem>
@@ -642,13 +721,13 @@ function AccessLogsContent() {
         </CardContent>
       </Card>
 
-      {selectedLog && (
+      {selectedLogId !== null && (
         <AccessLogDetailDialog
           log={selectedLog}
+          loading={detailLoading}
+          error={detailError}
           open
-          onOpenChange={(open) => {
-            if (!open) setSelectedLog(null)
-          }}
+          onOpenChange={handleDetailOpenChange}
         />
       )}
     </div>

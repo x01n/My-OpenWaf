@@ -19,6 +19,7 @@ import {
   IconAlertTriangle,
 } from "@tabler/icons-react";
 import { backupApi } from "@/lib/api";
+import { invalidateAllAPICaches } from "@/hooks/use-api";
 import { formatDate } from "@/lib/utils";
 import type { BackupData } from "@/lib/types";
 
@@ -119,6 +120,7 @@ export default function BackupPage() {
     setRestoring(true);
     try {
       const result = await backupApi.import(fileData, replaceMode);
+      await invalidateAllAPICaches().catch(() => undefined);
       toast.success(
         t("backup.restoreSuccess", {
           sites: result.sites,

@@ -8,13 +8,27 @@ import {
   useOwaspBatchUpdate,
   useProtectionSettings,
   useProtectionSettingsUpdate,
+  useProtectionSensitivity,
+  useProtectionSensitivityUpdate,
+  useProtectionEscalation,
+  useProtectionEscalationUpdate,
 } from "@/hooks/use-api"
+import { useAuth } from "@/hooks/use-auth"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { toast } from "sonner"
 import {
@@ -31,6 +45,8 @@ import {
   IconCoffee,
   IconPackages,
   IconBug,
+  IconPlus,
+  IconTrash,
 } from "@tabler/icons-react"
 import { SkipPathByPhaseEditor } from "@/components/skip-path-by-phase-editor"
 import {
@@ -39,7 +55,12 @@ import {
   toSkipPathByPhasePayload,
 } from "@/lib/skip-path-by-phase"
 import { cn } from "@/lib/utils"
-import type { ProtectionSettings, SkipPathByPhase } from "@/lib/types"
+import type {
+  EscalationStepDef,
+  ProtectionSettings,
+  SensitivityLevel,
+  SkipPathByPhase,
+} from "@/lib/types"
 
 /**
  * OWASP 规则视图
@@ -61,6 +82,7 @@ interface OwaspRulesResponse {
   items: OwaspRule[]
   grouped: Record<string, OwaspRule[]>
   total: number
+  policy_id: number
 }
 
 /**
@@ -238,15 +260,76 @@ function getModeBadgeVariant(
 
 interface GlobalSkipPathByPhaseCardProps {
   settings: ProtectionSettings
+  canManage: boolean
 }
 
 /**
  * 全局内置 OWASP 开关配置。
  */
+
+/**
+ * 升级阶梯允许的动作白名单；与后端
+ * POST /protection/:id/escalation 的校验（internal/admin/protect/escalation.go）
+ * 保持一致。
+ */
+const ESCALATION_ACTION_OPTIONS = [
+  "intercept",
+  "drop",
+  "challenge",
+  "captcha_challenge",
+  "shield_challenge",
+  "chain_challenge",
+] as const
+
+/**
+ * 全局按类别灵敏度配置（POST /protection/:id/sensitivity）。
+ *
+ * 类别清单与后端 OWASP 检测类别一致（internal/waf/owasp/owasp.go 的
+ * OWASPCategory 常量全集）。
+ */
+const SENSITIVITY_CATEGORIES: {
+  category: string
+  nameKey: string
+  descKey: string
+}[] = [
+  { category: "sqli", nameKey: "globalSensitivity.categories.sqli", descKey: "globalSensitivity.categories.sqliDesc" },
+  { category: "xss", nameKey: "globalSensitivity.categories.xss", descKey: "globalSensitivity.categories.xssDesc" },
+  { category: "cmd_injection", nameKey: "globalSensitivity.categories.cmdInjection", descKey: "globalSensitivity.categories.cmdInjectionDesc" },
+  { category: "webshell", nameKey: "globalSensitivity.categories.webshell", descKey: "globalSensitivity.categories.webshellDesc" },
+  { category: "revshell", nameKey: "globalSensitivity.categories.revshell", descKey: "globalSensitivity.categories.revshellDesc" },
+  { category: "path_traversal", nameKey: "globalSensitivity.categories.pathTraversal", descKey: "globalSensitivity.categories.pathTraversalDesc" },
+  { category: "ssrf", nameKey: "globalSensitivity.categories.ssrf", descKey: "globalSensitivity.categories.ssrfDesc" },
+  { category: "xxe", nameKey: "globalSensitivity.categories.xxe", descKey: "globalSensitivity.categories.xxeDesc" },
+  { category: "ldap_injection", nameKey: "globalSensitivity.categories.ldapInjection", descKey: "globalSensitivity.categories.ldapInjectionDesc" },
+  { category: "file_upload", nameKey: "globalSensitivity.categories.fileUpload", descKey: "globalSensitivity.categories.fileUploadDesc" },
+  { category: "protocol_violation", nameKey: "globalSensitivity.categories.protocolViolation", descKey: "globalSensitivity.categories.protocolViolationDesc" },
+  { category: "nosql_injection", nameKey: "globalSensitivity.categories.nosqlInjection", descKey: "globalSensitivity.categories.nosqlInjectionDesc" },
+  { category: "template_injection", nameKey: "globalSensitivity.categories.templateInjection", descKey: "globalSensitivity.categories.templateInjectionDesc" },
+  { category: "jndi_injection", nameKey: "globalSensitivity.categories.jndiInjection", descKey: "globalSensitivity.categories.jndiInjectionDesc" },
+  { category: "crlf_injection", nameKey: "globalSensitivity.categories.crlfInjection", descKey: "globalSensitivity.categories.crlfInjectionDesc" },
+  { category: "expression_language", nameKey: "globalSensitivity.categories.expressionLanguage", descKey: "globalSensitivity.categories.expressionLanguageDesc" },
+  { category: "deserialization", nameKey: "globalSensitivity.categories.deserialization", descKey: "globalSensitivity.categories.deserializationDesc" },
+  { category: "graphql_injection", nameKey: "globalSensitivity.categories.graphqlInjection", descKey: "globalSensitivity.categories.graphqlInjectionDesc" },
+]
+
+/**
+ * 等级 -> i18n 展示键；value 与后端归一化值一致。
+ */
+const SENSITIVITY_LEVEL_OPTIONS: { value: SensitivityLevel; labelKey: string }[] = [
+  { value: "low", labelKey: "globalSensitivity.levels.low" },
+  { value: "mid", labelKey: "globalSensitivity.levels.mid" },
+  { value: "high", labelKey: "globalSensitivity.levels.high" },
+  { value: "very_high", labelKey: "globalSensitivity.levels.very_high" },
+  { value: "strict", labelKey: "globalSensitivity.levels.strict" },
+  { value: "off", labelKey: "globalSensitivity.levels.off" },
+]
+
 function GlobalOwaspToggleCard({
   settings,
+  canManage,
 }: {
   settings: ProtectionSettings
+  canManage: boolean
 }) {
   const { t, i18n } = useTranslation()
   const useChinese = (i18n.resolvedLanguage ?? i18n.language).startsWith("zh")
@@ -261,18 +344,24 @@ function GlobalOwaspToggleCard({
   const [dirty, setDirty] = useState(false)
 
   const handleToggle = (next: boolean) => {
+    if (!canManage) return
     setEnabled(next)
     setDirty(true)
   }
 
   const handleSensitivityChange = (next: string) => {
+    if (!canManage) return
     setSensitivity(next)
     setDirty(true)
   }
 
   const handleSave = async () => {
+    if (!canManage) return
     try {
-      await updateSettings.execute({ builtin_owasp_enabled: enabled })
+      await updateSettings.execute({
+        builtin_owasp_enabled: enabled,
+        builtin_owasp_sensitivity: sensitivity,
+      })
       setDirty(false)
       toast.success(
         t("attacks.globalOwaspSaveSuccess", {
@@ -333,7 +422,7 @@ function GlobalOwaspToggleCard({
           <Switch
             checked={enabled}
             onCheckedChange={handleToggle}
-            disabled={updateSettings.loading}
+            disabled={!canManage || updateSettings.loading}
             aria-label={t("attacks.globalOwaspEnabled")}
           />
         </div>
@@ -346,6 +435,7 @@ function GlobalOwaspToggleCard({
           <select
             id="global-owasp-sensitivity"
             value={sensitivity}
+            disabled={!canManage}
             onChange={(e) => handleSensitivityChange(e.target.value)}
             className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus:ring-2 focus:ring-ring"
           >
@@ -354,7 +444,7 @@ function GlobalOwaspToggleCard({
             <option value="mid">{t("attacks.sensitivityValues.medium")}</option>
             <option value="high">{t("attacks.sensitivityValues.high")}</option>
             <option value="very_high">
-              {t("attacks.sensitivityValues.veryHigh")}
+              {t("attacks.sensitivityValues.very_high")}
             </option>
             <option value="strict">
               {t("attacks.sensitivityValues.strict")}
@@ -365,7 +455,7 @@ function GlobalOwaspToggleCard({
           <Button
             type="button"
             variant="outline"
-            disabled={!dirty || updateSettings.loading}
+            disabled={!canManage || !dirty || updateSettings.loading}
             onClick={handleReset}
           >
             {t("common.cancel", {
@@ -374,7 +464,7 @@ function GlobalOwaspToggleCard({
           </Button>
           <Button
             type="button"
-            disabled={!dirty || updateSettings.loading}
+            disabled={!canManage || !dirty || updateSettings.loading}
             onClick={handleSave}
           >
             {updateSettings.loading
@@ -392,10 +482,435 @@ function GlobalOwaspToggleCard({
 }
 
 /**
+ * 全局按类别灵敏度配置（后端 POST /protection/:id/sensitivity）。
+ *
+ * id 依据后端 handler 校验规则（internal/admin/protect/sensitivity.go），
+ * "global" 为全局保护配置；类别灵敏度是 UI 的规范来源，保存时后端会清空旧字段
+ * owasp_modules。
+ */
+function GlobalSensitivityCard({ canManage }: { canManage: boolean }) {
+  const { t } = useTranslation()
+  const mutation = useProtectionSensitivityUpdate("global")
+  const { data, isLoading, error } = useProtectionSensitivity("global")
+  const [draft, setDraft] = useState<Record<string, string> | null>(null)
+  const categories = useMemo(
+    () =>
+      Object.fromEntries(
+        SENSITIVITY_CATEGORIES.map((entry) => [
+          entry.category,
+          data?.category_sensitivity?.[entry.category] ?? "mid",
+        ])
+      ),
+    [data]
+  )
+
+  const handleReset = () => {
+    setDraft(null)
+  }
+
+  const handleSave = async () => {
+    if (!canManage || !draft) return
+    try {
+      await mutation.execute({
+        category_sensitivity: {
+          ...Object.fromEntries(
+            SENSITIVITY_CATEGORIES.map((entry) => [entry.category, categories[entry.category]])
+          ),
+          ...draft,
+        },
+      })
+      setDraft(null)
+      toast.success(t("globalSensitivity.saveSuccess"))
+    } catch {
+      toast.error(t("globalSensitivity.saveFailed"))
+    }
+  }
+
+  if (isLoading) {
+    return <Skeleton className="h-48 w-full" />
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <IconSettings className="h-5 w-5 text-primary" />
+          {t("globalSensitivity.title")}
+        </CardTitle>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {t("globalSensitivity.hint")}
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>
+              {error instanceof Error
+                ? error.message
+                : t("globalSensitivity.loadFailed")}
+            </AlertDescription>
+          </Alert>
+        )}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {SENSITIVITY_CATEGORIES.map((entry) => {
+            const level = draft?.[entry.category] ?? categories[entry.category] ?? "mid"
+            return (
+              <div key={entry.category} className="space-y-1.5">
+                <Label htmlFor={`global-sensitivity-${entry.category}`}>
+                  {t(entry.nameKey)}
+                </Label>
+                <Select
+                  value={level}
+                  disabled={!canManage || mutation.loading}
+                  onValueChange={(value) =>
+                    setDraft((current) => ({
+                      ...(current ?? {}),
+                      [entry.category]: value,
+                    }))
+                  }
+                >
+                  <SelectTrigger id={`global-sensitivity-${entry.category}`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SENSITIVITY_LEVEL_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {t(option.labelKey)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t(entry.descKey)}
+                </p>
+              </div>
+            )
+          })}
+        </div>
+        <div className="flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:justify-end">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!canManage || !draft || mutation.loading}
+            onClick={handleReset}
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button
+            type="button"
+            disabled={!canManage || !draft || mutation.loading}
+            onClick={handleSave}
+          >
+            {mutation.loading ? t("common.saving") : t("common.save")}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * 全局升级（escalation）配置（后端 POST /protection/:id/escalation）。
+ */
+function GlobalEscalationCard({ canManage }: { canManage: boolean }) {
+  const { t } = useTranslation()
+  const { data, isLoading, error } = useProtectionEscalation("global")
+
+  if (isLoading) {
+    return <Skeleton className="h-48 w-full" />
+  }
+
+  if (error || !data) {
+    return (
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <IconAlertTriangle className="h-5 w-5 text-primary" />
+            {t("globalEscalation.title")}
+          </CardTitle>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t("globalEscalation.hint")}
+          </p>
+        </CardHeader>
+        <CardContent>
+          <Alert variant="destructive">
+            <AlertDescription>
+              {error instanceof Error
+                ? error.message
+                : t("globalEscalation.loadFailed")}
+            </AlertDescription>
+          </Alert>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <GlobalEscalationForm
+      key={JSON.stringify(data)}
+      initial={{
+        enabled: Boolean(data.escalation_enabled),
+        windowSecs: data.escalation_window_secs || 60,
+        steps: data.escalation_steps ?? [],
+      }}
+      canManage={canManage}
+    />
+  )
+}
+
+/**
+ * 升级表单子组件：挂载时以服务端初值懒初始化，取消/重载由父级 key 重挂载还原。
+ */
+function GlobalEscalationForm({
+  initial,
+  canManage,
+}: {
+  initial: {
+    enabled: boolean
+    windowSecs: number
+    steps: EscalationStepDef[]
+  }
+  canManage: boolean
+}) {
+  const { t } = useTranslation()
+  const mutation = useProtectionEscalationUpdate("global")
+  const [enabled, setEnabled] = useState(initial.enabled)
+  const [windowSecs, setWindowSecs] = useState(initial.windowSecs)
+  const [steps, setSteps] = useState<EscalationStepDef[]>(initial.steps)
+
+  const updateStep = (index: number, patch: Partial<EscalationStepDef>) => {
+    setSteps((current) =>
+      current.map((step, stepIndex) =>
+        stepIndex === index ? { ...step, ...patch } : step
+      )
+    )
+  }
+
+  const addStep = () => {
+    const lastThreshold =
+      steps.length > 0 ? steps[steps.length - 1].threshold : 0
+    setSteps((current) => [
+      ...current,
+      { threshold: lastThreshold + 5, action: "intercept" },
+    ])
+  }
+
+  const removeStep = (index: number) => {
+    setSteps((current) => current.filter((_, stepIndex) => stepIndex !== index))
+  }
+
+  const handleReset = () => {
+    setEnabled(initial.enabled)
+    setWindowSecs(initial.windowSecs)
+    setSteps(initial.steps)
+  }
+
+  const handleSave = async () => {
+    if (!canManage) return
+    if (windowSecs <= 0) {
+      toast.error(t("globalEscalation.windowInvalid"))
+      return
+    }
+    let previous = 0
+    for (const step of steps) {
+      if (step.threshold <= 0) {
+        toast.error(t("globalEscalation.thresholdInvalid"))
+        return
+      }
+      if (step.threshold <= previous) {
+        toast.error(t("globalEscalation.orderingInvalid"))
+        return
+      }
+      previous = step.threshold
+    }
+    try {
+      await mutation.execute({
+        escalation_enabled: enabled,
+        escalation_window_secs: windowSecs,
+        escalation_steps: steps,
+      })
+      toast.success(t("globalEscalation.saveSuccess"))
+    } catch {
+      toast.error(t("globalEscalation.saveFailed"))
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <IconAlertTriangle className="h-5 w-5 text-primary" />
+          {t("globalEscalation.title")}
+        </CardTitle>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {t("globalEscalation.hint")}
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+
+        <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+          <div className="min-w-0 space-y-0.5">
+            <Label className="text-sm font-medium">
+              {t("globalEscalation.enabled")}
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {t("globalEscalation.enabledHint")}
+            </p>
+          </div>
+          <Switch
+            checked={enabled}
+            disabled={!canManage || mutation.loading}
+            onCheckedChange={(checked) => {
+              if (canManage) setEnabled(checked)
+            }}
+          />
+        </div>
+
+        {enabled && (
+          <div className="space-y-4">
+            <div className="max-w-xs space-y-1.5">
+              <Label htmlFor="global-escalation-window">
+                {t("globalEscalation.window")}
+              </Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="global-escalation-window"
+                  type="number"
+                  min={1}
+                  value={windowSecs}
+                  disabled={!canManage || mutation.loading}
+                  onChange={(event) =>
+                    setWindowSecs(Math.max(0, Number(event.target.value) || 0))
+                  }
+                />
+                <span className="shrink-0 text-sm text-muted-foreground">
+                  {t("common.seconds")}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t("globalEscalation.windowHint")}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Label>{t("globalEscalation.steps")}</Label>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!canManage || mutation.loading}
+                  onClick={() => {
+                    if (canManage) addStep()
+                  }}
+                >
+                  <IconPlus className="size-4" />
+                  {t("globalEscalation.addStep")}
+                </Button>
+              </div>
+              {steps.length === 0 ? (
+                <div className="rounded-lg border border-dashed p-4 text-center text-sm text-muted-foreground">
+                  {t("globalEscalation.noSteps")}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {steps.map((step, index) => (
+                    <div
+                      key={index}
+                      className="flex flex-wrap items-center gap-3 rounded-lg border p-3"
+                    >
+                      <div className="flex min-w-0 flex-1 items-center gap-3">
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {t("globalEscalation.stepNumber", {
+                            number: index + 1,
+                          })}
+                        </span>
+                        <Input
+                          type="number"
+                          min={1}
+                          className="w-28 shrink-0 font-mono"
+                          value={step.threshold}
+                          disabled={!canManage || mutation.loading}
+                          onChange={(event) =>
+                            updateStep(index, {
+                              threshold: Math.max(
+                                0,
+                                Number(event.target.value) || 0
+                              ),
+                            })
+                          }
+                          aria-label={t("globalEscalation.threshold")}
+                        />
+                        <Select
+                          value={step.action}
+                          disabled={!canManage || mutation.loading}
+                          onValueChange={(value) =>
+                            updateStep(index, { action: value })
+                          }
+                        >
+                          <SelectTrigger className="min-w-0 flex-1">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {ESCALATION_ACTION_OPTIONS.map((action) => (
+                              <SelectItem key={action} value={action}>
+                                {t(
+                                  `securityEvents.action.${action}`
+                                )}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button
+                        type="button"
+                        size="icon-sm"
+                        variant="ghost"
+                        className="shrink-0 text-muted-foreground hover:text-destructive"
+                        aria-label={t("common.delete")}
+                        disabled={!canManage || mutation.loading}
+                        onClick={() => {
+                          if (canManage) removeStep(index)
+                        }}
+                      >
+                        <IconTrash />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:justify-end">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!canManage || mutation.loading}
+            onClick={handleReset}
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button
+            type="button"
+            disabled={!canManage || mutation.loading}
+            onClick={handleSave}
+          >
+            {mutation.loading ? t("common.saving") : t("common.save")}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
  * 全局按阶段跳过路径配置。
  */
 function GlobalSkipPathByPhaseCard({
   settings,
+  canManage,
 }: GlobalSkipPathByPhaseCardProps) {
   const { t, i18n } = useTranslation()
   const useChinese = (i18n.resolvedLanguage ?? i18n.language).startsWith("zh")
@@ -407,11 +922,13 @@ function GlobalSkipPathByPhaseCard({
   const [dirty, setDirty] = useState(false)
 
   const handleChange = (value: SkipPathByPhase) => {
+    if (!canManage) return
     setSkipPaths(value)
     setDirty(true)
   }
 
   const handleSave = async () => {
+    if (!canManage) return
     if (findEmptySkipPaths(skipPaths).length > 0) {
       toast.error(
         t("skipPathByPhase.validationFailed", {
@@ -467,14 +984,14 @@ function GlobalSkipPathByPhaseCard({
         <SkipPathByPhaseEditor
           value={skipPaths}
           onChange={handleChange}
-          disabled={updateSettings.loading}
+          disabled={!canManage || updateSettings.loading}
           idPrefix="global-skip-path"
         />
         <div className="flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:justify-end">
           <Button
             type="button"
             variant="outline"
-            disabled={!dirty || updateSettings.loading}
+            disabled={!canManage || !dirty || updateSettings.loading}
             onClick={handleReset}
           >
             {t("common.cancel", {
@@ -483,7 +1000,7 @@ function GlobalSkipPathByPhaseCard({
           </Button>
           <Button
             type="button"
-            disabled={!dirty || updateSettings.loading}
+            disabled={!canManage || !dirty || updateSettings.loading}
             onClick={handleSave}
           >
             {updateSettings.loading
@@ -502,6 +1019,8 @@ function GlobalSkipPathByPhaseCard({
 
 export default function AttacksPage() {
   const { t, i18n } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const useChinese = (i18n.resolvedLanguage ?? i18n.language).startsWith("zh")
   const fallback = (zh: string, en: string) => (useChinese ? zh : en)
   const { data, isLoading, error, mutate } = useOwaspRules({
@@ -574,23 +1093,32 @@ export default function AttacksPage() {
   /**
    * 切换单个模块模式
    */
-  const handleModeChange = useCallback((key: string, mode: ModuleMode) => {
-    setModuleModes((prev) => ({ ...prev, [key]: mode }))
-    setHasChanges(true)
-  }, [])
+  const handleModeChange = useCallback(
+    (key: string, mode: ModuleMode) => {
+      if (!canManage) return
+      setModuleModes((prev) => ({ ...prev, [key]: mode }))
+      setHasChanges(true)
+    },
+    [canManage]
+  )
 
   /**
    * 切换全局配置模式
    */
-  const handleConfigModeChange = useCallback((mode: ConfigMode) => {
-    setConfigMode(mode)
-    setHasChanges(true)
-  }, [])
+  const handleConfigModeChange = useCallback(
+    (mode: ConfigMode) => {
+      if (!canManage) return
+      setConfigMode(mode)
+      setHasChanges(true)
+    },
+    [canManage]
+  )
 
   /**
    * 批量应用模式到所有模块
    */
   const handleBatchApply = useCallback(() => {
+    if (!canManage) return
     const updates: Record<string, ModuleMode> = {}
     for (const mod of MODULES) {
       const rules = data?.grouped?.[mod.category]
@@ -601,20 +1129,31 @@ export default function AttacksPage() {
     setModuleModes(updates)
     setHasChanges(true)
     toast.success(t("attacks.batchApplied"))
-  }, [batchMode, data, t])
+  }, [batchMode, canManage, data, t])
 
   /**
    * 保存配置
    */
   const handleSave = useCallback(async () => {
+    if (!canManage) return
     if (!data?.grouped) {
       toast.error(t("attacks.dataNotLoaded"))
       return
     }
 
     if (configMode === "global") {
-      toast.success(t("attacks.followGlobal"))
-      setHasChanges(false)
+      try {
+        await batchUpdate({ policy_id: data.policy_id, reset_all: true })
+        toast.success(t("attacks.followGlobal"))
+        setModuleModes({})
+        setHasChanges(false)
+      } catch (err) {
+        toast.error(
+          t("attacks.saveFailed", {
+            message: err instanceof Error ? err.message : String(err),
+          })
+        )
+      }
       return
     }
 
@@ -648,10 +1187,9 @@ export default function AttacksPage() {
     }
 
     try {
-      await batchUpdate({ rules: updates })
+      await batchUpdate({ policy_id: data.policy_id, rules: updates })
       toast.success(t("attacks.saveSuccess"))
       setHasChanges(false)
-      mutate()
     } catch (err) {
       toast.error(
         t("attacks.saveFailed", {
@@ -659,7 +1197,7 @@ export default function AttacksPage() {
         })
       )
     }
-  }, [data, currentModes, configMode, batchUpdate, mutate, t])
+  }, [canManage, data, currentModes, configMode, batchUpdate, t])
 
   /**
    * 取消修改，重置状态
@@ -716,6 +1254,12 @@ export default function AttacksPage() {
         description={t("attacks.description")}
       />
 
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertDescription>{t("common.readOnlyHint")}</AlertDescription>
+        </Alert>
+      )}
+
       {/* 防护模式配置 */}
       <Card>
         <CardHeader className="pb-3">
@@ -729,6 +1273,7 @@ export default function AttacksPage() {
             {/* 配置模式切换 */}
             <RadioGroup
               value={configMode}
+              disabled={!canManage}
               onValueChange={(v) => handleConfigModeChange(v as ConfigMode)}
               className="flex items-center gap-0 rounded-lg border p-1"
             >
@@ -778,6 +1323,7 @@ export default function AttacksPage() {
                 </span>
                 <select
                   value={batchMode}
+                  disabled={!canManage}
                   onChange={(e) => setBatchMode(e.target.value as ModuleMode)}
                   className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring"
                 >
@@ -791,6 +1337,7 @@ export default function AttacksPage() {
                   variant="default"
                   size="sm"
                   onClick={handleBatchApply}
+                  disabled={!canManage}
                   className="h-8"
                 >
                   <IconCopy className="mr-1 h-3.5 w-3.5" />
@@ -804,13 +1351,18 @@ export default function AttacksPage() {
 
       {skipPathsLoading ? (
         <Skeleton className="h-56 w-full" />
-
       ) : protectionSettings ? (
         <>
-          <GlobalOwaspToggleCard settings={protectionSettings} />
+          <GlobalOwaspToggleCard
+            settings={protectionSettings}
+            canManage={canManage}
+          />
+          <GlobalSensitivityCard canManage={canManage} />
+          <GlobalEscalationCard canManage={canManage} />
           <GlobalSkipPathByPhaseCard
             key={JSON.stringify(protectionSettings.skip_path_by_phase)}
             settings={protectionSettings}
+            canManage={canManage}
           />
         </>
       ) : (
@@ -873,7 +1425,7 @@ export default function AttacksPage() {
                 const rules = data?.grouped?.[mod.category]
                 const hasRules = rules && rules.length > 0
                 const isDisabled =
-                  configMode === "global" || !hasRules || isSaving
+                  !canManage || configMode === "global" || !hasRules || isSaving
                 const ModIcon = mod.icon
                 const modeLabel =
                   MODE_OPTIONS.find((o) => o.value === mode)?.labelKey || ""
@@ -946,11 +1498,14 @@ export default function AttacksPage() {
           <Button
             variant="outline"
             onClick={handleCancel}
-            disabled={!hasChanges || isSaving || isLoading}
+            disabled={!canManage || !hasChanges || isSaving || isLoading}
           >
             {t("common.cancel")}
           </Button>
-          <Button onClick={handleSave} disabled={isLoading || isSaving}>
+          <Button
+            onClick={handleSave}
+            disabled={!canManage || isLoading || isSaving}
+          >
             {isSaving ? (
               <>
                 <IconSettings className="mr-2 h-4 w-4 animate-spin" />

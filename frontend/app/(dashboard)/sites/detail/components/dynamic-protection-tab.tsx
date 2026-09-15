@@ -113,6 +113,7 @@ function TriStateSelect({ value, onChange, idPrefix }: TriStateSelectProps) {
 
 interface DynamicProtectionTabProps {
   site: Site
+  canManage: boolean
 }
 
 /**
@@ -121,7 +122,10 @@ interface DynamicProtectionTabProps {
  * 全局动态防护在人机验证配置页维护；本 Tab 仅配置当前站点对全局动态防护的覆盖。
  * 每个可覆盖开关采用三态（继承全局 / 强制开启 / 强制关闭），nil 语义为继承全局。
  */
-export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
+export function DynamicProtectionTab({
+  site,
+  canManage,
+}: DynamicProtectionTabProps) {
   const { t } = useTranslation()
   const { data: recordedResourcesData } = useSiteRecordedResources(site.id)
   const updateSite = useSiteMutation()
@@ -158,6 +162,7 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
 
   const handleJsPathSelect = useCallback(
     (path: string, checked: boolean) => {
+      if (!canManage) return
       setJsPaths((prev) => {
         if (checked) {
           return prev.includes(path) ? prev : [...prev, path]
@@ -166,10 +171,11 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
       })
       markDirty()
     },
-    [markDirty]
+    [canManage, markDirty]
   )
 
   const handleSave = useCallback(async () => {
+    if (!canManage) return
     const trimmedTtl = ttl.trim()
     const ttlValue =
       trimmedTtl === "" ? null : Math.max(0, Number(trimmedTtl) || 0)
@@ -189,12 +195,26 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
     } catch {
       toast.error(t("common.operationFailed"))
     }
-  }, [master, html, js, jsMode, jsPaths, ttl, site.id, updateSite, t])
+  }, [
+    canManage,
+    master,
+    html,
+    js,
+    jsMode,
+    jsPaths,
+    ttl,
+    site.id,
+    updateSite,
+    t,
+  ])
 
   const childActive = master !== "off"
 
   return (
-    <div className="space-y-4">
+    <fieldset
+      disabled={!canManage}
+      className="m-0 min-w-0 space-y-4 border-0 p-0"
+    >
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">
@@ -386,6 +406,6 @@ export function DynamicProtectionTab({ site }: DynamicProtectionTabProps) {
           </Button>
         </div>
       )}
-    </div>
+    </fieldset>
   )
 }

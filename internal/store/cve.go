@@ -18,6 +18,7 @@ type CVERuleRecord struct {
 	Target      string         `gorm:"size:32" json:"target"`
 	Severity    string         `gorm:"size:16" json:"severity"`
 	Action      string         `gorm:"size:32;default:drop" json:"action"`
+	CaptchaType string         `gorm:"size:16" json:"captcha_type,omitempty"`
 	Enabled     bool           `gorm:"default:false" json:"enabled"`
 	Description string         `gorm:"type:text" json:"description"`
 	Source      string         `gorm:"size:32" json:"source"`

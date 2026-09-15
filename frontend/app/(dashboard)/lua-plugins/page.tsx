@@ -21,14 +21,16 @@ import {
   useLuaPluginDelete,
   useLuaPluginToggle,
   useLuaPluginStats,
-  useSites,
+  useAllSites,
 } from "@/hooks/use-api"
+import { useAuth } from "@/hooks/use-auth"
 import {
   IconPlus,
   IconTrash,
   IconEdit,
   IconCode,
   IconInfoCircle,
+  IconAlertTriangle,
 } from "@tabler/icons-react"
 import type { LuaPlugin, LuaPluginStage } from "@/lib/types"
 import { PluginEditorDialog } from "./components/plugin-editor-dialog"
@@ -53,6 +55,14 @@ const STAGE_CLASS: Record<LuaPluginStage, string> = {
  */
 export default function LuaPluginsPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editing, setEditing] = useState<LuaPlugin | null>(null)
+  const [deleteId, setDeleteId] = useState<number | null>(null)
+  // 每次打开都递增，作为编辑器的 key 强制重挂载，使表单态从 editing 重新初始化。
+  // 只在打开时变化，因此不会打断对话框的关闭动画。
+  const [dialogSeq, setDialogSeq] = useState(0)
 
   const { data, isLoading, error, mutate: refresh } = useLuaPlugins()
   const plugins = useMemo(() => data?.items || [], [data])
@@ -69,7 +79,9 @@ export default function LuaPluginsPage() {
   // 此时继续展示上一轮的真实计数，只有从未拿到过数据才降级为「不可用」。
   const statsUnavailable = Boolean(statsError) && statsItems === undefined
 
-  const { data: sitesData } = useSites({ page_size: 500 })
+  const needsSiteReferences =
+    dialogOpen || plugins.some((plugin) => plugin.site_id != null)
+  const { data: sitesData } = useAllSites(needsSiteReferences)
   const siteNameMap = useMemo(() => {
     const map = new Map<number, string>()
     for (const s of sitesData?.items || []) map.set(s.id, s.host)
@@ -78,13 +90,6 @@ export default function LuaPluginsPage() {
 
   const { execute: deletePlugin, loading: deleteLoading } = useLuaPluginDelete()
   const { execute: togglePlugin } = useLuaPluginToggle()
-
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [editing, setEditing] = useState<LuaPlugin | null>(null)
-  const [deleteId, setDeleteId] = useState<number | null>(null)
-  // 每次打开都递增，作为编辑器的 key 强制重挂载，使表单态从 editing 重新初始化。
-  // 只在打开时变化，因此不会打断对话框的关闭动画。
-  const [dialogSeq, setDialogSeq] = useState(0)
 
   const openCreate = () => {
     setEditing(null)
@@ -99,16 +104,19 @@ export default function LuaPluginsPage() {
   }
 
   const handleToggle = async (plugin: LuaPlugin, enabled: boolean) => {
+    if (!canManage) return
     try {
       await togglePlugin({ id: plugin.id, enabled })
       refresh()
-    } catch {
-      toast.error(t("common.updateFailed"))
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t("common.updateFailed")
+      )
     }
   }
 
   const confirmDelete = async () => {
-    if (deleteId === null) return
+    if (!canManage || deleteId === null) return
     try {
       await deletePlugin(deleteId)
       toast.success(t("common.deleteSuccess"))
@@ -202,9 +210,36 @@ export default function LuaPluginsPage() {
       render: (row: LuaPlugin) => (
         <Switch
           checked={row.enabled}
+          disabled={!canManage}
           onCheckedChange={(v) => handleToggle(row, v)}
         />
       ),
+    },
+    {
+      key: "status",
+      title: t("common.status"),
+      width: "170px",
+      render: (row: LuaPlugin) =>
+        row.compile_error ? (
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Badge
+                  variant="destructive"
+                  className="max-w-[160px] cursor-help gap-1"
+                >
+                  <IconAlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{t("luaPlugins.compileError")}</span>
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-lg break-all whitespace-pre-wrap">
+                {row.compile_error}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : (
+          <span className="text-muted-foreground">-</span>
+        ),
     },
     {
       key: "runtime",
@@ -228,6 +263,7 @@ export default function LuaPluginsPage() {
           <Button
             variant="ghost"
             size="icon-sm"
+            disabled={!canManage}
             onClick={() => openEdit(row)}
             title={t("common.edit")}
           >
@@ -236,6 +272,7 @@ export default function LuaPluginsPage() {
           <Button
             variant="ghost"
             size="icon-sm"
+            disabled={!canManage || deleteLoading}
             onClick={() => setDeleteId(row.id)}
             title={t("common.delete")}
           >
@@ -253,12 +290,18 @@ export default function LuaPluginsPage() {
         title={t("luaPlugins.title")}
         description={t("luaPlugins.description")}
         actions={
-          <Button onClick={openCreate}>
+          <Button onClick={openCreate} disabled={!canManage}>
             <IconPlus className="h-4 w-4" />
             {t("luaPlugins.add")}
           </Button>
         }
       />
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertDescription>{t("common.readOnlyHint")}</AlertDescription>
+        </Alert>
+      )}
 
       {error && (
         <Alert variant="destructive">

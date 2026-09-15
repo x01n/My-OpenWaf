@@ -92,6 +92,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 	r := deps.Repos
 	reload := deps.Reload
+	revokeCredentials := func(username, reason string) error {
+		return revokeUserCredentials(authDeps, username, reason)
+	}
 
 	readGroup := api.Group("")
 	readGroup.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator, auth.RoleReadonly))
@@ -124,13 +127,14 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		readGroup.GET("/threat-intel-feeds", system.ListThreatIntelFeeds(r.ThreatIntel))
 		readGroup.GET("/threat-intel-sync-logs", system.ListThreatIntelSyncLogs(r.ThreatIntelSyncLog))
-		readGroup.GET("/lua-plugins", system.ListLuaPlugins(deps.Repos.LuaPlugin))
+		readGroup.GET("/lua-plugins", system.ListLuaPlugins(deps.Repos.LuaPlugin, deps.Snapshot))
 		// stats 是静态段，须与下面的 :id 共存；Hertz 路由树静态优先，
 		// 排列同 /security-events/stats（见 TestLuaPluginStatsRouteBeatsIDParam）。
 		readGroup.GET("/lua-plugins/stats", system.GetLuaPluginStats(deps.LuaEngine))
-		readGroup.GET("/lua-plugins/:id", system.GetLuaPlugin(deps.Repos.LuaPlugin))
+		readGroup.GET("/lua-plugins/:id", system.GetLuaPlugin(deps.Repos.LuaPlugin, deps.Snapshot))
 		readGroup.GET("/js-plugins", system.ListJSPlugins(deps.Repos.JSPlugin, deps.Snapshot))
 		readGroup.GET("/js-plugins/stats", system.GetJSPluginStats(deps.Snapshot))
+		readGroup.GET("/js-plugins/runtime", system.GetJSPluginRuntime(deps.Repos.JSPlugin, deps.Snapshot, deps.JSEngine))
 		readGroup.GET("/js-plugins/:id", system.GetJSPlugin(deps.Repos.JSPlugin, deps.Snapshot))
 
 		readGroup.GET("/security-events", event.ListSecurityEvents(r.SecurityEvent))
@@ -263,11 +267,11 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/lua-plugins/:id/toggle", system.ToggleLuaPlugin(deps.Repos.LuaPlugin, reload))
 		opsGroup.POST("/lua-plugins/validate", system.ValidateLuaPlugin())
 		opsGroup.POST("/lua-plugins/dry-run", system.DryRunLuaPlugin())
-		opsGroup.POST("/js-plugins", system.CreateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload))
-		opsGroup.POST("/js-plugins/:id/update", system.UpdateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload))
+		opsGroup.POST("/js-plugins", system.CreateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload, deps.JSEngine))
+		opsGroup.POST("/js-plugins/:id/update", system.UpdateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload, deps.JSEngine))
 		opsGroup.POST("/js-plugins/:id/delete", system.DeleteJSPlugin(deps.Repos.JSPlugin, reload))
-		opsGroup.POST("/js-plugins/:id/toggle", system.ToggleJSPlugin(deps.Repos.JSPlugin, reload))
-		opsGroup.POST("/js-plugins/validate", system.ValidateJSPlugin())
+		opsGroup.POST("/js-plugins/:id/toggle", system.ToggleJSPlugin(deps.Repos.JSPlugin, reload, deps.JSEngine))
+		opsGroup.POST("/js-plugins/validate", system.ValidateJSPlugin(deps.JSEngine))
 		opsGroup.POST("/js-plugins/dry-run", system.DryRunJSPlugin(deps.JSEngine))
 
 		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
@@ -278,7 +282,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/cve-rules/:id/patch", detect.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
 		opsGroup.POST("/cve-rules/:id/reset", detect.ResetCVERuleOverride(r.CVERule, reload))
 		opsGroup.POST("/cve-rules/batch", detect.BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr, reload))
-		opsGroup.POST("/cve-rules/sync", detect.SyncCVERules(deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/sync", detect.SyncCVERules(deps.CVEFeedMgr, r.CVERule))
 
 		opsGroup.POST("/owasp-rules/:id/update", detect.UpdateSingleOWASPRule(r.SystemSettings, reload))
 		opsGroup.POST("/owasp-rules/:id/reset", detect.ResetOWASPRuleOverride(r.SystemSettings, reload))
@@ -339,7 +343,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		// 配置备份/恢复（高危，仅 admin）。
 		adminGroup.GET("/backup/export", system.ExportBackup(deps.DB))
-		adminGroup.POST("/backup/import", system.ImportBackup(deps.DB, reload))
+		adminGroup.POST("/backup/import", system.ImportBackup(deps.DB, reload, func() {
+			r.CVERule.InvalidateCanonicalSnapshot()
+			detect.InvalidateOWASPReadSnapshots(deps.DB)
+		}))
 
 		adminGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
 		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
@@ -359,9 +366,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/api-keys/:id/delete", system.DeleteAPIKey(r.AdminAPIKey))
 
 		adminGroup.POST("/admin-users", CreateAdminUser(r.AdminAccount))
-		adminGroup.POST("/admin-users/:id/update-password", UpdateAdminPassword(r.AdminAccount))
-		adminGroup.POST("/admin-users/:id/update-role", UpdateAdminRole(r.AdminAccount))
-		adminGroup.POST("/admin-users/:id/delete", DeleteAdminUser(r.AdminAccount))
+		adminGroup.POST("/admin-users/:id/update-password", UpdateAdminPassword(r.AdminAccount, revokeCredentials))
+		adminGroup.POST("/admin-users/:id/update-role", UpdateAdminRole(r.AdminAccount, revokeCredentials))
+		adminGroup.POST("/admin-users/:id/delete", DeleteAdminUser(r.AdminAccount, revokeCredentials))
 
 		adminGroup.POST("/drop-policy/update", protect.UpdateDropPolicy(r.SystemSettings, reload))
 

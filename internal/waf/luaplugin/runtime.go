@@ -75,6 +75,9 @@ var ErrScriptTooLarge = errors.New("luaplugin: script exceeds size limit")
 
 // Decision 是脚本返回的判定结果。
 type Decision struct {
+	// ScriptID/ScriptName 标识产生该判定的持久化插件。
+	ScriptID   uint
+	ScriptName string
 	// Action 为空表示脚本未做判定（继续后续阶段）。
 	Action string
 	// Message 供日志与拦截页展示，不参与判定。

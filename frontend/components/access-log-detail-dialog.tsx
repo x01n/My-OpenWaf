@@ -38,6 +38,8 @@ import {
   IconWorld,
 } from "@tabler/icons-react"
 import { ActionBadge } from "@/components/action-badge"
+import { AccessLogOriginBadge } from "@/components/access-log-origin-badge"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   applyEncoding,
   capMessage,
@@ -53,6 +55,8 @@ import { cn, formatBytes, formatLatencyMs } from "@/lib/utils"
 
 interface AccessLogDetailDialogProps {
   log: AccessLog | null
+  loading?: boolean
+  error?: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
 }
@@ -83,7 +87,10 @@ function reconstructRequest(
   const entries = parseHeaderEntries(log.request_headers, log.header_order)
   const lines = [requestLine]
 
-  if (!entries.some((entry) => entry.name.toLowerCase() === "host") && log.host) {
+  if (
+    !entries.some((entry) => entry.name.toLowerCase() === "host") &&
+    log.host
+  ) {
     lines.push(`Host: ${log.host}`)
   }
   for (const entry of entries) {
@@ -122,10 +129,7 @@ function reconstructResponse(
   for (const entry of entries) {
     lines.push(`${entry.name}: ${headerDisplayValue(entry)}`)
   }
-  return capMessage(
-    applyEncoding(lines.join("\n"), encoding),
-    displayTruncated
-  )
+  return capMessage(applyEncoding(lines.join("\n"), encoding), displayTruncated)
 }
 
 /** 复制已脱敏文本并反馈结果。 */
@@ -189,6 +193,8 @@ function DetailItem({
  */
 export function AccessLogDetailDialog({
   log,
+  loading = false,
+  error,
   open,
   onOpenChange,
 }: AccessLogDetailDialogProps) {
@@ -211,19 +217,29 @@ export function AccessLogDetailDialog({
   )
   const responseText = useMemo(
     () =>
-      log
-        ? reconstructResponse(log, encoding, labels.displayTruncated)
-        : "",
+      log ? reconstructResponse(log, encoding, labels.displayTruncated) : "",
     [encoding, labels.displayTruncated, log]
   )
 
   if (!log) {
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-5xl">
-          <span className="sr-only">
-            <DialogTitle>{t("accessLogs.title")}</DialogTitle>
-          </span>
+        <DialogContent className="max-w-lg">
+          <DialogTitle>{t("accessLogs.title")}</DialogTitle>
+          <DialogDescription>
+            {loading
+              ? t("common.loading")
+              : error || t("accessLogs.detailLoadFailed")}
+          </DialogDescription>
+          {loading ? (
+            <div className="space-y-3" aria-busy="true">
+              <Skeleton className="h-6 w-2/3" />
+              <Skeleton className="h-20 w-full" />
+              <Skeleton className="h-40 w-full" />
+            </div>
+          ) : error ? (
+            <p className="text-sm break-words text-destructive">{error}</p>
+          ) : null}
         </DialogContent>
       </Dialog>
     )
@@ -241,10 +257,16 @@ export function AccessLogDetailDialog({
     { label: t("securityEventDetail.tlsJa4"), value: log.tls_ja4 },
     { label: t("securityEventDetail.tlsJa3Hash"), value: log.tls_ja3_hash },
     { label: t("securityEventDetail.tlsJa3"), value: log.tls_ja3 },
-    { label: t("securityEventDetail.cipherSuites"), value: log.tls_cipher_suites },
+    {
+      label: t("securityEventDetail.cipherSuites"),
+      value: log.tls_cipher_suites,
+    },
     { label: t("securityEventDetail.extensions"), value: log.tls_extensions },
     { label: t("securityEventDetail.curves"), value: log.tls_curves },
-    { label: t("securityEventDetail.pointFormats"), value: log.tls_point_formats },
+    {
+      label: t("securityEventDetail.pointFormats"),
+      value: log.tls_point_formats,
+    },
     { label: t("securityEventDetail.headerOrder"), value: log.header_order },
   ].filter((field) => field.value)
 
@@ -260,19 +282,23 @@ export function AccessLogDetailDialog({
       <DialogContent className="max-h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-5xl overflow-x-hidden overflow-y-auto p-0 sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)]">
         <div className="border-b bg-muted/20 px-4 py-4 sm:px-6">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <Badge variant="outline" className="font-mono text-xs font-semibold">
+            <Badge
+              variant="outline"
+              className="font-mono text-xs font-semibold"
+            >
               {log.method || "-"}
             </Badge>
             <Badge
               variant="outline"
-              className={cn("font-mono text-xs", statusBadgeClass(log.status_code))}
+              className={cn(
+                "font-mono text-xs",
+                statusBadgeClass(log.status_code)
+              )}
             >
               {log.status_code || "-"}
             </Badge>
-            <ActionBadge
-              action={log.waf_action}
-              className="h-6 px-2 text-xs"
-            />
+            <ActionBadge action={log.waf_action} className="h-6 px-2 text-xs" />
+            <AccessLogOriginBadge log={log} className="h-6 px-2 text-xs" />
           </div>
           <DialogTitle className="mt-3 font-mono text-base leading-relaxed break-all sm:text-lg">
             {fullUrl}
@@ -343,7 +369,9 @@ export function AccessLogDetailDialog({
                     variant="outline"
                     size="icon-sm"
                     className="h-7 w-7"
-                    aria-label={t("securityEventDetail.decreaseMessageTextSize")}
+                    aria-label={t(
+                      "securityEventDetail.decreaseMessageTextSize"
+                    )}
                     disabled={messageScale <= 0.8}
                     onClick={() =>
                       setMessageScale((value) =>
@@ -364,7 +392,9 @@ export function AccessLogDetailDialog({
                     variant="outline"
                     size="icon-sm"
                     className="h-7 w-7"
-                    aria-label={t("securityEventDetail.increaseMessageTextSize")}
+                    aria-label={t(
+                      "securityEventDetail.increaseMessageTextSize"
+                    )}
                     disabled={messageScale >= 1.4}
                     onClick={() =>
                       setMessageScale((value) =>
@@ -445,19 +475,23 @@ export function AccessLogDetailDialog({
               {requestSizeLabel}: {formatBytes(log.request_size)}
             </span>
             <span>
-              {t("securityEventDetail.responseSize")}: {formatBytes(log.response_size)}
+              {t("securityEventDetail.responseSize")}:{" "}
+              {formatBytes(log.response_size)}
             </span>
             {log.cache_state && (
               <span>
                 {t("securityEventDetail.cacheState")}: {log.cache_state}
               </span>
             )}
-            {log.http_protocol && <span>
+            {log.http_protocol && (
+              <span>
                 {t("securityEventDetail.httpProtocol")}: {log.http_protocol}
-              </span>}
+              </span>
+            )}
             {log.upstream_http_protocol && (
               <span>
-                {t("securityEventDetail.upstreamHttpProtocol")}: {log.upstream_http_protocol}
+                {t("securityEventDetail.upstreamHttpProtocol")}:{" "}
+                {log.upstream_http_protocol}
               </span>
             )}
           </div>

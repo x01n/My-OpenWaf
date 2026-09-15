@@ -39,6 +39,7 @@ import type { Site } from "@/lib/types"
 import { SiteFormDialog } from "./components/site-form-dialog"
 import { SiteCard } from "./components/site-card"
 import { SiteTable } from "./components/site-table"
+import { useAuth } from "@/hooks/use-auth"
 
 /** 列表展现形式 */
 type ViewMode = "table" | "grid"
@@ -95,6 +96,8 @@ function setStoredView(next: ViewMode): void {
 
 export default function SitesPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
   const view = useSyncExternalStore(
@@ -147,7 +150,7 @@ export default function SitesPage() {
   const isFiltering = search.trim() !== "" || statusFilter !== "all"
 
   const handleDelete = async () => {
-    if (!deletingSite) return
+    if (!deletingSite || !canManage) return
     try {
       await deleteSite.execute(deletingSite.id)
       toast.success(t("sites.deleteSuccess"))
@@ -159,6 +162,7 @@ export default function SitesPage() {
   }
 
   const handleToggle = async (site: Site) => {
+    if (!canManage) return
     try {
       if (site.enabled) {
         await stopSite.execute(site.id)
@@ -173,16 +177,19 @@ export default function SitesPage() {
   }
 
   const handleEdit = (site: Site) => {
+    if (!canManage) return
     setEditingSite(site)
     setShowForm(true)
   }
 
   const openCreate = () => {
+    if (!canManage) return
     setEditingSite(null)
     setShowForm(true)
   }
 
   const actionHandlers = {
+    canManage,
     onEdit: handleEdit,
     onToggle: handleToggle,
     onDelete: setDeletingSite,
@@ -199,12 +206,20 @@ export default function SitesPage() {
           </Badge>
         }
         actions={
-          <Button className="h-9" onClick={openCreate}>
-            <IconPlus className="size-4" />
-            {t("sites.add")}
-          </Button>
+          canManage ? (
+            <Button className="h-9" onClick={openCreate}>
+              <IconPlus className="size-4" />
+              {t("sites.add")}
+            </Button>
+          ) : undefined
         }
       />
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertDescription>{t("common.readOnlyHint")}</AlertDescription>
+        </Alert>
+      )}
 
       {error && (
         <Alert variant="destructive">
@@ -346,10 +361,12 @@ export default function SitesPage() {
           title={t("sites.empty")}
           description={t("sites.emptyHint")}
           action={
-            <Button onClick={openCreate}>
-              <IconPlus className="size-4" />
-              {t("sites.add")}
-            </Button>
+            canManage ? (
+              <Button onClick={openCreate}>
+                <IconPlus className="size-4" />
+                {t("sites.add")}
+              </Button>
+            ) : undefined
           }
           className="py-16"
         />
@@ -390,21 +407,25 @@ export default function SitesPage() {
         </p>
       )}
 
-      <SiteFormDialog
-        open={showForm}
-        onOpenChange={setShowForm}
-        site={editingSite}
-      />
+      {canManage && (
+        <SiteFormDialog
+          open={showForm}
+          onOpenChange={setShowForm}
+          site={editingSite}
+        />
+      )}
 
-      <ConfirmDialog
-        open={!!deletingSite}
-        onOpenChange={() => setDeletingSite(null)}
-        title={t("sites.deleteTitle")}
-        description={t("sites.deleteConfirm")}
-        confirmText={t("common.delete")}
-        onConfirm={handleDelete}
-        loading={deleteSite.loading}
-      />
+      {canManage && (
+        <ConfirmDialog
+          open={!!deletingSite}
+          onOpenChange={() => setDeletingSite(null)}
+          title={t("sites.deleteTitle")}
+          description={t("sites.deleteConfirm")}
+          confirmText={t("common.delete")}
+          onConfirm={handleDelete}
+          loading={deleteSite.loading}
+        />
+      )}
     </div>
   )
 }

@@ -2,6 +2,7 @@ package cache
 
 import (
 	context "context"
+	"errors"
 	"net"
 	"os/exec"
 	"strconv"
@@ -66,6 +67,44 @@ func TestRedisKVCommandFailureMarksUnavailableAndSetClientRecovers(t *testing.T)
 	}
 	if !kv.Available() {
 		t.Fatal("redis.Nil must not mark RedisKV unhealthy")
+	}
+}
+
+func TestRedisKVFailureBackoffAllowsProbeAndSuccessfulResultsRecover(t *testing.T) {
+	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = client.Close() })
+	kv := NewRedisKV(client)
+
+	kv.noteCommandResult(client, errors.New("temporary redis failure"))
+	if kv.Available() {
+		t.Fatal("RedisKV must reject commands during the failure backoff")
+	}
+	if until := kv.unavailableUntil.Load(); until <= time.Now().UnixNano() {
+		t.Fatalf("unavailableUntil = %d, want a future retry time", until)
+	}
+
+	kv.unavailableUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	if !kv.Available() {
+		t.Fatal("RedisKV must become half-open after the failure backoff")
+	}
+	kv.noteCommandResult(client, nil)
+	if !kv.Available() || kv.unavailableUntil.Load() != 0 {
+		t.Fatal("a successful probe must fully restore RedisKV health")
+	}
+
+	kv.noteCommandResult(client, errors.New("temporary redis failure"))
+	kv.unavailableUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	kv.noteCommandResult(client, goredis.Nil)
+	if !kv.Available() || kv.unavailableUntil.Load() != 0 {
+		t.Fatal("redis.Nil must restore health because it is a successful Redis response")
+	}
+
+	kv.noteCommandResult(client, errors.New("temporary redis failure"))
+	replacement := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:2"})
+	t.Cleanup(func() { _ = replacement.Close() })
+	kv.SetClient(replacement)
+	if !kv.Available() || kv.unavailableUntil.Load() != 0 {
+		t.Fatal("SetClient must immediately clear the previous client's backoff")
 	}
 }
 

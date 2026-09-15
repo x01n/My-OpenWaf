@@ -529,6 +529,20 @@ func TestImportBackupRejectsInvalidProtectionCaptchaType(t *testing.T) {
 	}
 }
 
+func TestImportBackupRejectsInvalidRuleCaptchaType(t *testing.T) {
+	db := newBackupTestDB(t)
+	invalid := "drag"
+	data := &BackupData{
+		Version: BackupVersion,
+		PolicyOWASPRuleConfigs: []PolicyOWASPRuleConfig{{
+			PolicyID: 1, RuleID: "owasp:sqli:001", CaptchaType: &invalid,
+		}},
+	}
+	if err := ImportBackup(db, data, false); !errors.Is(err, ErrInvalidBackupRuleConfig) {
+		t.Fatalf("ImportBackup() error = %v, want ErrInvalidBackupRuleConfig", err)
+	}
+}
+
 // TestImportBackupReplaceModeClearsJSPlugins 验证整体替换模式会清掉旧 JS 脚本。
 func TestImportBackupReplaceModeClearsJSPlugins(t *testing.T) {
 	dst := newBackupTestDB(t)

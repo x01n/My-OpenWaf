@@ -55,11 +55,12 @@ type ImportBackupReq struct {
  * 高危操作，仅 admin 角色可用。整体在事务中执行，失败回滚。恢复成功后触发
  * reload 重建 snapshot。replace_mode=true 时先清空配置表再导入（整体替换）。
  *
- * @param db     数据库句柄。
- * @param reload snapshot 重建回调。
+ * @param db          数据库句柄。
+ * @param reload      snapshot 重建回调。
+ * @param invalidates 备份写入后需要立即失效的进程内只读缓存。
  * @return Hertz 处理器。
  */
-func ImportBackup(db *gorm.DB, reload func() error) app.HandlerFunc {
+func ImportBackup(db *gorm.DB, reload func() error, invalidates ...func()) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req ImportBackupReq
 		if err := c.BindJSON(&req); err != nil {
@@ -77,13 +78,20 @@ func ImportBackup(db *gorm.DB, reload func() error) app.HandlerFunc {
 
 		req.Data.SystemSettings = filterInternalSettingItems(req.Data.SystemSettings)
 		if err := store.ImportBackup(db, &req.Data, req.ReplaceMode); err != nil {
-			if errors.Is(err, store.ErrInvalidBackupJSPlugin) || errors.Is(err, store.ErrInvalidBackupProtectionConfig) {
+			if errors.Is(err, store.ErrInvalidBackupJSPlugin) ||
+				errors.Is(err, store.ErrInvalidBackupProtectionConfig) ||
+				errors.Is(err, store.ErrInvalidBackupRuleConfig) {
 				c.JSON(400, map[string]string{"error": err.Error()})
 				return
 			}
 			slog.Error("[admin] backup import failed", "error", err)
 			c.JSON(500, map[string]string{"error": "import failed, check server logs for details"})
 			return
+		}
+		for i := range invalidates {
+			if invalidates[i] != nil {
+				invalidates[i]()
+			}
 		}
 
 		if err := reload(); err != nil {

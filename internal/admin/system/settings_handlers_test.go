@@ -256,6 +256,30 @@ func TestListSettingsRedactsRedisPassword(t *testing.T) {
 	}
 }
 
+func TestAPIKeySeedMarkerIsHiddenAndImmutable(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := repo.Set(store.SettingKeyAPIKeySeedMarker, "true"); err != nil {
+		t.Fatalf("seed marker: %v", err)
+	}
+	list := invokeSettingsHandler(t, ListSettings(repo), "GET", "/api/v1/settings", nil, nil)
+	if list.Response.StatusCode() != 200 || bytes.Contains(list.Response.Body(), []byte(store.SettingKeyAPIKeySeedMarker)) {
+		t.Fatalf("marker leaked from settings list: status=%d body=%s", list.Response.StatusCode(), bytes.TrimSpace(list.Response.Body()))
+	}
+	params := param.Params{{Key: "key", Value: store.SettingKeyAPIKeySeedMarker}}
+	get := invokeSettingsHandler(t, GetSetting(repo), "GET", "/api/v1/settings/"+store.SettingKeyAPIKeySeedMarker, params, nil)
+	if get.Response.StatusCode() != 404 {
+		t.Fatalf("marker get status=%d, want 404", get.Response.StatusCode())
+	}
+	set := invokeSettingsHandler(t, SetSetting(repo, func() error { return nil }), "POST", "/api/v1/settings/"+store.SettingKeyAPIKeySeedMarker, params, []byte(`{"value":"false"}`))
+	if set.Response.StatusCode() != 400 {
+		t.Fatalf("marker set status=%d, want 400", set.Response.StatusCode())
+	}
+	deleteCtx := invokeSettingsHandler(t, DeleteSetting(repo, func() error { return nil }), "POST", "/api/v1/settings/"+store.SettingKeyAPIKeySeedMarker+"/delete", params, nil)
+	if deleteCtx.Response.StatusCode() != 400 {
+		t.Fatalf("marker delete status=%d, want 400", deleteCtx.Response.StatusCode())
+	}
+}
+
 func TestRedactSettingValue(t *testing.T) {
 	tests := []struct {
 		name     string

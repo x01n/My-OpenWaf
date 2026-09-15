@@ -143,6 +143,22 @@ func TestUpdateSiteErrorPagesReportsReloadFailure(t *testing.T) {
 	}
 }
 
+func TestUpdateSiteErrorPagesValidatesStatusAndContentType(t *testing.T) {
+	repo := newSiteRepoForTest(t)
+	item := seedSiteWithErrorPages(t, repo, `{}`)
+	handler := UpdateSiteErrorPages(repo, func() error { return nil })
+	for _, body := range [][]byte{
+		[]byte(`{"error_pages":{"700":{"status_code":700,"html":"bad"}}}`),
+		[]byte(`{"error_pages":{"404":{"status_code":500,"html":"bad"}}}`),
+		[]byte(`{"error_pages":{"404":{"status_code":404,"content_type":"text/html\r\nX-Leak: yes"}}}`),
+	} {
+		ctx := invokeSiteErrorPagesHandler(t, handler, item.ID, body)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("invalid error page payload status = %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+		}
+	}
+}
+
 func TestPreviewErrorPageRejectsMalformedBody(t *testing.T) {
 	ctx := invokeSiteRouteHandler(t, PreviewErrorPage(), "POST", "/api/v1/error-pages/preview", nil, []byte(`{"html":`))
 	if ctx.Response.StatusCode() != 400 {

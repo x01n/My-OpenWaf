@@ -18,6 +18,11 @@ import (
 var (
 	// ErrCGODisabled 表示当前原型未启用 QuickJS cgo 执行后端。
 	ErrCGODisabled = errors.New("jsplugin: cgo is required for QuickJS execution")
+	// ErrResponseStageUnavailable 表示响应阶段尚未接入数据面执行入口。
+	//
+	// response-stage 记录可以继续保留在持久化层，但任何执行器都必须拒绝
+	// 将它当作 request-stage 脚本运行，避免未来接线绕过 snapshot 过滤。
+	ErrResponseStageUnavailable = errors.New("response stage is unavailable because response execution is not implemented")
 	// ErrEngineClosed 表示引擎已经关闭。
 	ErrEngineClosed = errors.New("jsplugin: engine is closed")
 	// ErrNoSlot 表示有界执行槽池无法再接受请求。
@@ -26,6 +31,13 @@ var (
 	ErrScriptTimeout = errors.New("jsplugin: script execution timed out")
 	// ErrAsyncPromise 表示脚本返回了尚未完成的 Promise。
 	ErrAsyncPromise = errors.New("jsplugin: asynchronous Promise is not supported")
+)
+
+const (
+	// BackendQuickJS identifies binaries that include the native QuickJS executor.
+	BackendQuickJS = "quickjs"
+	// BackendUnavailable identifies builds without an executable JavaScript backend.
+	BackendUnavailable = "unavailable"
 )
 
 const (
@@ -39,6 +51,8 @@ const (
 	DefaultStackLimit uint64 = 512 << 10
 	// DefaultTimeout 是单次脚本执行的默认挂钟上限。
 	DefaultTimeout = 10 * time.Millisecond
+	// DefaultValidationTimeout 是模块编译、顶层求值和导出校验的独立挂钟上限。
+	DefaultValidationTimeout = time.Second
 	// MaxScriptBytes 限制脚本源码体积。
 	MaxScriptBytes = 256 << 10
 	// MaxMutationStringBytes 限制单个请求变更字符串字段体积。
@@ -77,6 +91,21 @@ type RequestSnapshot struct {
 	QueryParams map[string]string `json:"query_params,omitempty"`
 }
 
+// CanonicalValidationRequest returns the deterministic request used by both
+// persistence-time and snapshot-time executable contract checks.
+func CanonicalValidationRequest(siteID uint) RequestSnapshot {
+	return RequestSnapshot{
+		RequestID:   "js-plugin-validation",
+		SiteID:      siteID,
+		Method:      "GET",
+		Path:        "/",
+		Host:        "validation.invalid",
+		ClientIP:    "192.0.2.1",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	}
+}
+
 // MutationPlan 是脚本返回的请求变更计划。
 //
 // 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
@@ -97,10 +126,12 @@ type ScriptOptions struct {
 	Name string
 	// SiteIDs 为 nil 或空切片时表示全局脚本，否则只匹配列出的站点。
 	SiteIDs []uint
-	// MemoryLimit、StackLimit、Timeout 为零时分别使用默认值。
+	// MemoryLimit、StackLimit、Timeout、ValidationTimeout 为零时分别使用默认值。
 	MemoryLimit uint64
 	StackLimit  uint64
 	Timeout     time.Duration
+	// ValidationTimeout 只限制编译校验，不改变生产请求执行超时。
+	ValidationTimeout time.Duration
 }
 
 // EngineOptions 配置有界的 QuickJS 槽池。
@@ -127,6 +158,12 @@ func (o ScriptOptions) normalized() (ScriptOptions, error) {
 	}
 	if o.Timeout < 0 {
 		return ScriptOptions{}, errors.New("jsplugin: timeout must not be negative")
+	}
+	if o.ValidationTimeout == 0 {
+		o.ValidationTimeout = DefaultValidationTimeout
+	}
+	if o.ValidationTimeout < 0 {
+		return ScriptOptions{}, errors.New("jsplugin: validation timeout must not be negative")
 	}
 	if len(o.SiteIDs) > 0 {
 		ids := make([]uint, len(o.SiteIDs))
@@ -380,7 +417,10 @@ func Validate(stage, source string) error {
 
 // ValidateWithOptions 使用指定的运行选项编译校验 JavaScript 插件。
 func ValidateWithOptions(stage, source string, options ScriptOptions) error {
-	if stage != store.JSStageRequest && stage != store.JSStageResponse {
+	if stage == store.JSStageResponse {
+		return ErrResponseStageUnavailable
+	}
+	if stage != store.JSStageRequest {
 		return errors.New("stage must be request or response")
 	}
 	if options.Name == "" {

@@ -184,6 +184,18 @@ func TestSecurityEventStatsReturns200(t *testing.T) {
 	}
 }
 
+func TestSecurityEventStatsReturns500WhenAggregateQueryFails(t *testing.T) {
+	db := newEventDB(t)
+	if err := db.Migrator().DropTable(&store.SecurityEvent{}); err != nil {
+		t.Fatalf("drop security event table: %v", err)
+	}
+	repo := repository.NewSecurityEventRepo(db)
+	ctx := invokeHandler(SecurityEventStats(repo), "GET", "/api/v1/security-events/stats", nil, nil)
+	if ctx.Response.StatusCode() != 500 {
+		t.Fatalf("expected 500, got %d", ctx.Response.StatusCode())
+	}
+}
+
 func TestSecurityEventStatsCustomHours(t *testing.T) {
 	db := newEventDB(t)
 	repo := repository.NewSecurityEventRepo(db)
@@ -195,6 +207,18 @@ func TestSecurityEventStatsCustomHours(t *testing.T) {
 	json.Unmarshal(ctx.Response.Body(), &resp)
 	if resp["hours"].(float64) != 48 {
 		t.Errorf("hours = %v, want 48", resp["hours"])
+	}
+}
+
+func TestSecurityEventAggregateHoursRejectInvalidExplicitWindows(t *testing.T) {
+	db := newEventDB(t)
+	repo := repository.NewSecurityEventRepo(db)
+
+	for _, raw := range []string{"0", "-1", "721", "999999999999999999999", "invalid"} {
+		ctx := invokeHandler(SecurityEventStats(repo), "GET", "/api/v1/security-events/stats?hours="+raw, nil, nil)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("hours=%q status=%d want=400", raw, ctx.Response.StatusCode())
+		}
 	}
 }
 

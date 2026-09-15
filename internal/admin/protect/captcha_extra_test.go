@@ -349,3 +349,36 @@ func TestTestCaptchaFallsBackToMathWhenTypeUnset(t *testing.T) {
 		t.Fatalf("empty captcha_type should fall back to math, got %#v", got["type"])
 	}
 }
+
+func TestTestCaptchaUsesExplicitPreviewTypeWithoutSaving(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CaptchaType = "math"
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	mgr := challenge.NewCaptchaManager(nil, 30*time.Second)
+	defer mgr.Close()
+
+	ctx := invokeProtectHandler(t, TestCaptcha(repo, mgr), "POST", "/api/v1/captcha/test", []byte(`{"captcha_type":"click"}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("explicit preview type status = %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var got map[string]any
+	if err := json.Unmarshal(ctx.Response.Body(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["captcha_type"] != "click" {
+		t.Fatalf("preview captcha_type = %#v, want click", got["captcha_type"])
+	}
+}
+
+func TestTestCaptchaRejectsInvalidExplicitPreviewType(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	mgr := challenge.NewCaptchaManager(nil, 30*time.Second)
+	defer mgr.Close()
+	ctx := invokeProtectHandler(t, TestCaptcha(repo, mgr), "POST", "/api/v1/captcha/test", []byte(`{"captcha_type":"unknown"}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("invalid preview type status = %d, want 400", ctx.Response.StatusCode())
+	}
+}

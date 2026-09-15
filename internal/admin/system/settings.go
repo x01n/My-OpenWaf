@@ -11,7 +11,8 @@ import (
 )
 
 var internalSettingKeys = map[string]struct{}{
-	store.SettingKeyJWTSecret: {},
+	store.SettingKeyJWTSecret:        {},
+	store.SettingKeyAPIKeySeedMarker: {},
 }
 
 var protectedSettingKeys = map[string]string{

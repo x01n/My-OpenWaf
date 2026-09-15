@@ -405,7 +405,7 @@ return {
 超时相关的数值：
 
 - 默认超时 **50 ms**（`runtime.go` 的 `defaultTimeout`）。取这个值是因为脚本在数据面每请求同步执行，再长会显著拉高 P99；而正常脚本（读几个字段 + 少量字符串判断）耗时在微秒级，50 ms 足以覆盖含一次 KV 往返的场景。
-- 单脚本可用 `timeout_ms` 覆盖，管理 API 限制在 **0 ~ 1200 ms**（`luaMaxTimeoutMS`），`0` 表示用默认值。
+- 单脚本可用 `timeout_ms` 覆盖，管理 API 限制在 **0 ~ 1000 ms**（`luaMaxTimeoutMS`），`0` 表示用默认值。
 - 除了挂钟超时，调用方 context 取消（客户端断开）也会中断脚本执行。
 - `while true do end` 这类死循环会被可靠中断——这是沙箱最关键的一条保证，有专门的测试覆盖（`TestInfiniteLoopIsInterrupted`）。
 
@@ -450,7 +450,7 @@ return {
 | `source` | Lua 源码。新建必填，上限 256 KiB |
 | `enabled` | 省略时新建默认 `true`、更新时保持原值 |
 | `priority` | 同阶段执行顺序，小者先执行。默认 `100` |
-| `timeout_ms` | 0 ~ 1200，`0` 表示用 50 ms 默认值 |
+| `timeout_ms` | 0 ~ 1000，`0` 表示用 50 ms 默认值 |
 | `description` | 备注，上限 512 字符 |
 | `site_id` | 三态：**字段缺失**保持原值；**显式 `null`** 改为全站；**正整数**绑定站点（`0` 与非数字会报错）。非空值由宿主强制隔离，仅对应站点的请求会执行该脚本；全站脚本才会对所有站点执行 |
 
@@ -483,7 +483,7 @@ return {
 }
 ```
 
-`request.phase` / `request.action` 用来模拟内置判定，是验证 post 脚本分支的关键。`timeout_ms` 超过 1200 或非正数时回落到默认超时。
+`request.phase` / `request.action` 用来模拟内置判定，是验证 post 脚本分支的关键。`timeout_ms` 必须为 0~1000 的整数；0 使用默认超时，超出范围的请求会被拒绝。
 
 响应：
 
@@ -615,7 +615,7 @@ lua plugin failed, skipping   script=<脚本名> stage=<pre|post> err=<错误>
 | --- | --- | --- |
 | 入口函数名 | `handle` | `exec.go` `handlerName` |
 | 默认执行超时 | 50 ms | `runtime.go` `defaultTimeout` |
-| 单脚本超时可配范围 | 0 ~ 1200 ms | `admin/system/lua_plugin.go` `luaMaxTimeoutMS` |
+| 单脚本超时可配范围 | 0 ~ 1000 ms | `admin/system/lua_plugin.go` `luaMaxTimeoutMS` |
 | 脚本源码上限 | 256 KiB | `runtime.go` `maxScriptBytes` |
 | 请求体可见上限 | 48 KiB | `dataplane/handler.go` `maxWAFBody` |
 | Lua 响应体上限 | 16 KiB | `runtime.go` `maxResponseBody` |

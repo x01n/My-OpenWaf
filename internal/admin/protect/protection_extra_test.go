@@ -25,6 +25,23 @@ func TestPutProtectionSettingsRejectsInvalidBody(t *testing.T) {
 	}
 }
 
+func TestPutProtectionSettingsRejectsInvalidEnabledRateLimit(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	for _, body := range [][]byte{
+		[]byte(`{"request_ratelimit_enabled":true,"request_ratelimit_window":0,"request_ratelimit_max":10}`),
+		[]byte(`{"request_ratelimit_enabled":true,"request_ratelimit_window":60,"request_ratelimit_max":0}`),
+		[]byte(`{"error_ratelimit_enabled":true,"error_ratelimit_window":-1}`),
+	} {
+		ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("invalid enabled rate-limit payload status = %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+		}
+	}
+}
+
 // TestPutProtectionSettingsWritesAllActionFields 验证五个动作字段都被 setProtectionActionField 正确写回。
 func TestPutProtectionSettingsWritesAllActionFields(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)

@@ -2,6 +2,7 @@ package owasp
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -24,6 +25,7 @@ type OWASPRuleOverride struct {
 	Action      string   `json:"action,omitempty"`
 	StatusCode  int      `json:"status_code,omitempty"`
 	RedirectTo  string   `json:"redirect_to,omitempty"`
+	CaptchaType string   `json:"captcha_type,omitempty"`
 	Sensitivity string   `json:"sensitivity,omitempty"` // per-rule OWASP level (e.g. strict, high, medium)
 }
 
@@ -442,193 +444,92 @@ func init() {
 }
 
 func registerSQLiRules() {
-	for _, p := range sqliPatterns {
-		meta := builtinRuleMeta[p.id]
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatSQLi),
-			Name:        meta.name,
-			Description: meta.desc,
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(sqliPatterns, CatSQLi, "SQL 注入", "检测 SQL 注入攻击载荷")
 }
 
 func registerXSSRules() {
-	for _, p := range xssPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatXSS),
-			Name:        "XSS 跨站脚本攻击 - " + p.id,
-			Description: "检测跨站脚本（XSS）攻击载荷，包括事件处理器、伪协议、内联事件与富文本注入等向量",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(xssPatterns, CatXSS, "XSS 跨站脚本", "检测跨站脚本（XSS）攻击载荷，包括事件处理器、伪协议、内联事件与富文本注入等向量")
 }
 
 func registerCmdInjectionRules() {
-	for _, p := range cmdInjectPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatCmdInject),
-			Name:        "命令注入 - " + p.id,
-			Description: "检测操作系统命令注入载荷，包括管道符、反引号、子命令执行与 Shell 脚本片段",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(cmdInjectPatterns, CatCmdInject, "命令注入", "检测操作系统命令注入载荷，包括管道符、反引号、子命令执行与 Shell 脚本片段")
 }
 
 func registerSSRFRules() {
-	for _, p := range ssrfPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatSSRF),
-			Name:        "服务端请求伪造 - " + p.id,
-			Description: "检测服务端请求伪造（SSRF）攻击载荷，包括内网/回环地址、非标准编码与协议混淆",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(ssrfPatterns, CatSSRF, "服务端请求伪造", "检测服务端请求伪造（SSRF）攻击载荷，包括内网/回环地址、非标准编码与协议混淆")
 }
 
 func registerXXERules() {
-	for _, p := range xxePatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatXXE),
-			Name:        "XML 外部实体注入 - " + p.id,
-			Description: "检测 XML 外部实体注入（XXE）攻击，包括 SYSTEM 实体、参数实体与外部 DTD 引用",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(xxePatterns, CatXXE, "XML 外部实体注入", "检测 XML 外部实体注入（XXE）攻击，包括 SYSTEM 实体、参数实体与外部 DTD 引用")
 }
 
 func registerLDAPRules() {
-	for _, p := range ldapiPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatLDAPI),
-			Name:        "LDAP 注入 - " + p.id,
-			Description: "检测 LDAP 注入攻击载荷，包括闭合括号、通配符与逻辑运算符滥用",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(ldapiPatterns, CatLDAPI, "LDAP 注入", "检测 LDAP 注入攻击载荷，包括闭合括号、通配符与逻辑运算符滥用")
 }
 
 func registerNoSQLiRules() {
-	for _, p := range nosqliPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatNoSQLi),
-			Name:        "NoSQL 注入 - " + p.id,
-			Description: "检测 NoSQL 数据库注入攻击，包括 MongoDB 操作符替换、$where 与 JavaScript 表达式滥用",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(nosqliPatterns, CatNoSQLi, "NoSQL 注入", "检测 NoSQL 数据库注入攻击，包括 MongoDB 操作符替换、$where 与 JavaScript 表达式滥用")
 }
 
 func registerSSTIRules() {
-	for _, p := range tmplInjectPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatTmplInject),
-			Name:        "模板注入 - " + p.id,
-			Description: "检测服务端模板注入（SSTI）攻击载荷，覆盖 Jinja2、Twig、Freemarker、Smarty 等模板引擎",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(tmplInjectPatterns, CatTmplInject, "模板注入", "检测服务端模板注入（SSTI）攻击载荷，覆盖 Jinja2、Twig、Freemarker、Smarty 等模板引擎")
 }
 
 func registerJNDIRules() {
-	for _, p := range jndiPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatJNDI),
-			Name:        "JNDI 注入 - " + p.id,
-			Description: "检测 JNDI 注入攻击载荷，包括 LDAP/RMI 远程引用与 Log4Shell 类反序列化链",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(jndiPatterns, CatJNDI, "JNDI 注入", "检测 JNDI 注入攻击载荷，包括 LDAP/RMI 远程引用与 Log4Shell 类反序列化链")
 }
 
 func registerCRLFRules() {
-	for _, p := range crlfPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatCRLF),
-			Name:        "CRLF 注入 - " + p.id,
-			Description: "检测回车换行注入（CRLF）攻击载荷，可用于响应头拆分、HTTP 响应走私与 XSS",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(crlfPatterns, CatCRLF, "CRLF 注入", "检测回车换行注入（CRLF）攻击载荷，可用于响应头拆分、HTTP 响应走私与 XSS")
 }
 
 func registerExprLangRules() {
-	for _, p := range exprLangPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatExprLang),
-			Name:        "表达式语言注入 - " + p.id,
-			Description: "检测表达式语言（EL/OGNL/SpEL）注入攻击载荷，可绕过沙箱执行任意代码",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(exprLangPatterns, CatExprLang, "表达式语言注入", "检测表达式语言（EL/OGNL/SpEL）注入攻击载荷，可绕过沙箱执行任意代码")
 }
 
 func registerDeserializationRules() {
-	for _, p := range deserialPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatDeserial),
-			Name:        "反序列化攻击 - " + p.id,
-			Description: "检测 Java/PHP/Python 反序列化攻击载荷，覆盖 ObjectInputStream、PHP serialize、pickle 协议",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(deserialPatterns, CatDeserial, "反序列化攻击", "检测 Java/PHP/Python 反序列化攻击载荷，覆盖 ObjectInputStream、PHP serialize、pickle 协议")
 }
 
 func registerGraphQLRules() {
-	for _, p := range graphqlPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatGraphQLi),
-			Name:        "GraphQL 注入 - " + p.id,
-			Description: "检测 GraphQL 注入与内省滥用攻击，可绕过字段级授权与暴露全 schema",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(graphqlPatterns, CatGraphQLi, "GraphQL 注入", "检测 GraphQL 注入与内省滥用攻击，可绕过字段级授权与暴露全 schema")
 }
 
 func registerWebshellRules() {
-	for _, p := range webshellPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatWebshell),
-			Name:        "WebShell 上传/通信 - " + p.id,
-			Description: "检测 WebShell 上传或通信载荷，包括一句话木马、混淆 PHP/JSP/ASPX 与远程命令执行函数",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(webshellPatterns, CatWebshell, "WebShell 上传/通信", "检测 WebShell 上传或通信载荷，包括一句话木马、混淆 PHP/JSP/ASPX 与远程命令执行函数")
 }
 
 func registerRevShellRules() {
-	for _, p := range revshellPatterns {
-		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatRevShell),
-			Name:        "反弹 Shell 通信 - " + p.id,
-			Description: "检测反弹 Shell 通信载荷，包括 bash -i、nc mkfifo、python/c/perl/powershell 反向连接",
-			Enabled:     true,
-		})
-	}
+	registerPatternRules(revshellPatterns, CatRevShell, "反弹 Shell 通信", "检测反弹 Shell 通信载荷，包括 bash -i、nc mkfifo、python/c/perl/powershell 反向连接")
 }
 
 func registerPathTraversalRules() {
-	for _, p := range pathTravPatterns {
+	registerPatternRules(pathTravPatterns, CatPathTrav, "路径穿越", "检测路径穿越（Path Traversal）攻击载荷，包括 ../、URL 编码、双重编码与空字节绕过")
+}
+
+/**
+ * registerPatternRules 使用检测器真实的分值与快速特征生成逐规则备注。
+ * builtinRuleMeta 中的人工说明优先；未登记规则也不会退化成完全相同的类别说明。
+ */
+func registerPatternRules(patterns []owaspPattern, category OWASPCategory, label, categoryDescription string) {
+	for _, pattern := range patterns {
+		name := label + " - " + pattern.id
+		description := categoryDescription
+		if meta, ok := builtinRuleMeta[pattern.id]; ok {
+			name = meta.name
+			description = meta.desc
+		}
+		hint := strings.TrimSpace(pattern.hint)
+		if hint == "" {
+			description = fmt.Sprintf("%s；规则编号 %s；风险分值 %d；使用复合特征匹配", description, pattern.id, pattern.score)
+		} else {
+			description = fmt.Sprintf("%s；规则编号 %s；风险分值 %d；快速匹配特征 %q", description, pattern.id, pattern.score, hint)
+		}
 		DefaultOWASPRegistry.Register(&OWASPRule{
-			ID:          p.id,
-			Category:    string(CatPathTrav),
-			Name:        "路径穿越 - " + p.id,
-			Description: "检测路径穿越（Path Traversal）攻击载荷，包括 ../、URL 编码、双重编码与空字节绕过",
+			ID:          pattern.id,
+			Category:    string(category),
+			Name:        name,
+			Description: description,
 			Enabled:     true,
 		})
 	}

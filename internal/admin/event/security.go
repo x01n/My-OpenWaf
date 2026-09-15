@@ -2,7 +2,9 @@ package event
 
 import (
 	"context"
+	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -11,6 +13,28 @@ import (
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 )
+
+const (
+	defaultSecurityEventAggregateHours = 24
+	maxSecurityEventAggregateHours     = 24 * 30
+)
+
+/**
+ * securityEventAggregateHours 解析统计窗口并限制为站点观测接口既有的 30 天上限。
+ * 未提供参数时使用 24 小时；显式非法值返回错误，避免把 24 小时数据误报为调用方
+ * 请求的更大窗口。
+ */
+func securityEventAggregateHours(c *app.RequestContext) (int, error) {
+	raw := strings.TrimSpace(string(c.Query("hours")))
+	if raw == "" {
+		return defaultSecurityEventAggregateHours, nil
+	}
+	hours, err := strconv.Atoi(raw)
+	if err != nil || hours <= 0 || hours > maxSecurityEventAggregateHours {
+		return 0, errors.New("hours must be between 1 and 720")
+	}
+	return hours, nil
+}
 
 func ListSecurityEvents(repo *repository.SecurityEventRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -194,36 +218,17 @@ func SiteSecurityEventStats(siteRepo *repository.SiteRepo, repo *repository.Secu
 			c.JSON(404, map[string]string{"error": "site not found"})
 			return
 		}
-		hours := 24
-		if h := string(c.Query("hours")); h != "" {
-			if v, err := strconv.Atoi(h); err == nil && v > 0 {
-				hours = v
-			}
+		hours, err := securityEventAggregateHours(c)
+		if err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
 		}
-		since := time.Now().Add(-time.Duration(hours) * time.Hour)
-		categories, _ := repo.CategoryStatsBySite(siteID, since)
-		topIPs, _ := repo.TopIPsBySite(siteID, since, 10)
-		topPaths, _ := repo.TopPathsBySite(siteID, since, 10)
-		topRules, _ := repo.TopRulesBySite(siteID, since, 10)
-		topCountries, _ := repo.TopCountriesBySite(siteID, since, 10)
-		total, _ := repo.CountBySite(siteID, repository.SecurityEventFilter{Since: &since})
-		intercepts, _ := repo.CountTerminalBySite(siteID, since)
-		observes, _ := repo.CountObserveBySite(siteID, since)
-		requestCount, _ := repo.DistinctRequestCountBySite(siteID, since)
-		challenges, _ := repo.CountChallengeBySite(siteID, since)
-		c.JSON(200, map[string]any{
-			"total":         total,
-			"hours":         hours,
-			"categories":    categories,
-			"top_ips":       topIPs,
-			"top_paths":     topPaths,
-			"top_rules":     topRules,
-			"top_countries": topCountries,
-			"intercepts":    intercepts,
-			"observes":      observes,
-			"requests":      requestCount,
-			"challenges":    challenges,
-		})
+		snapshot, err := repo.StatsSnapshotBySite(siteID, hours)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		c.JSON(200, snapshot)
 	}
 }
 
@@ -238,15 +243,12 @@ func SiteSecurityEventTimeline(siteRepo *repository.SiteRepo, repo *repository.S
 			c.JSON(404, map[string]string{"error": "site not found"})
 			return
 		}
-		hours := 24
-		if h := string(c.Query("hours")); h != "" {
-			if v, err := strconv.Atoi(h); err == nil && v > 0 {
-				hours = v
-			}
+		hours, err := securityEventAggregateHours(c)
+		if err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
 		}
-		until := time.Now()
-		since := until.Add(-time.Duration(hours) * time.Hour)
-		buckets, err := repo.TimelineBySite(siteID, since, until)
+		buckets, err := repo.TimelineSnapshotBySite(siteID, hours)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -257,54 +259,28 @@ func SiteSecurityEventTimeline(siteRepo *repository.SiteRepo, repo *repository.S
 
 func SecurityEventStats(repo *repository.SecurityEventRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		hours := 24
-		if h := string(c.Query("hours")); h != "" {
-			if v, err := strconv.Atoi(h); err == nil && v > 0 {
-				hours = v
-			}
+		hours, err := securityEventAggregateHours(c)
+		if err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
 		}
-		since := time.Now().Add(-time.Duration(hours) * time.Hour)
-
-		categories, _ := repo.CategoryStats(since)
-		topIPs, _ := repo.TopIPs(since, 10)
-		topPaths, _ := repo.TopPaths(since, 10)
-		topRules, _ := repo.TopRules(since, 10)
-		topCountries, _ := repo.TopCountries(since, 10)
-
-		total, _ := repo.Count(repository.SecurityEventFilter{Since: &since})
-		intercepts, _ := repo.CountTerminal(since)
-		observes, _ := repo.CountObserve(since)
-		requestCount, _ := repo.DistinctRequestCount(since)
-		challenges, _ := repo.CountChallenge(since)
-
-		c.JSON(200, map[string]any{
-			"total":         total,
-			"hours":         hours,
-			"categories":    categories,
-			"top_ips":       topIPs,
-			"top_paths":     topPaths,
-			"top_rules":     topRules,
-			"top_countries": topCountries,
-			"intercepts":    intercepts,
-			"observes":      observes,
-			"requests":      requestCount,
-			"challenges":    challenges,
-		})
+		snapshot, err := repo.StatsSnapshot(hours)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
+		c.JSON(200, snapshot)
 	}
 }
 
 func SecurityEventTimeline(repo *repository.SecurityEventRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		hours := 24
-		if h := string(c.Query("hours")); h != "" {
-			if v, err := strconv.Atoi(h); err == nil && v > 0 {
-				hours = v
-			}
+		hours, err := securityEventAggregateHours(c)
+		if err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
 		}
-		until := time.Now()
-		since := until.Add(-time.Duration(hours) * time.Hour)
-
-		buckets, err := repo.Timeline(since, until)
+		buckets, err := repo.TimelineSnapshot(hours)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return

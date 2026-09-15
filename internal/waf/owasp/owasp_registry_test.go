@@ -79,27 +79,49 @@ func TestRegistryRuleNamesAreLocalized(t *testing.T) {
 	}
 }
 
-// TestBuiltinRuleMetaCoversSQLiPatterns 校验 SQL 注入规则的中文元信息表
-// 与检测 pattern 切片一一对应，既不缺失也不残留失效条目。
-func TestBuiltinRuleMetaCoversSQLiPatterns(t *testing.T) {
-	ids := make(map[string]struct{}, len(sqliPatterns))
-	for _, p := range sqliPatterns {
-		ids[p.id] = struct{}{}
-		meta, ok := builtinRuleMeta[p.id]
-		if !ok {
-			t.Errorf("builtinRuleMeta 缺少 sqliPatterns 中的规则 %q", p.id)
+// TestBuiltinRuleMetaCoversAllPatterns 校验全部检测 pattern 切片与
+// builtinRuleMeta 双向一一对应：每个切片的每条 id 必须在元信息表中登记，
+// 表中的每个键必须属于某个切片，且同一 id 不得同时属于两个切片。
+//
+// 排除依据：以下稳定 RuleID 是硬编码发射点而非 *Patterns 切片成员，其
+// 备注由 catalog.go 逐条维护、不得进入 builtinRuleMeta，因此反向检查
+// 会直接拦截任何把发射点误登记进本表的行为：
+//   - owasp:path:001-017（owasp.go:724-800，emitPathRule 系列；无 003 发射路径）
+//   - owasp:upload:001-007（owasp_extended.go:730-802 checkFileUpload 发射点）
+//   - owasp:proto:001-010（owasp_extended.go:1107-1195 协议/方法检查发射点）
+//   - owasp:crlf:005（owasp.go:234-239 路径裸 CR/LF 发射点）
+//
+// 反例：owasp:deser:012 虽在 owasp.go:311-318 有硬编码发射点，但同时是
+// deserialPatterns 切片成员（owasp_extended.go:1067），必须在此登记。
+func TestBuiltinRuleMetaCoversAllPatterns(t *testing.T) {
+	// idOwner 记录每个 id 所属切片名，同时检出跨切片重复 id。
+	idOwner := make(map[string]string)
+	for _, g := range allPatternGroups() {
+		if len(g.patterns) == 0 {
+			t.Errorf("%s 为空，注册完整性校验失去意义", g.name)
 			continue
 		}
-		if strings.TrimSpace(meta.name) == "" || strings.TrimSpace(meta.desc) == "" {
-			t.Errorf("builtinRuleMeta[%q] 的名称或说明为空", p.id)
+		for _, p := range g.patterns {
+			meta, ok := builtinRuleMeta[p.id]
+			if !ok {
+				t.Errorf("builtinRuleMeta 缺少 %s 中的规则 %q", g.name, p.id)
+				continue
+			}
+			if strings.TrimSpace(meta.name) == "" || strings.TrimSpace(meta.desc) == "" {
+				t.Errorf("builtinRuleMeta[%q] 的名称或说明为空", p.id)
+			}
+			if prev, dup := idOwner[p.id]; dup {
+				t.Errorf("规则 %q 同时出现在切片 %s 与 %s 中", p.id, prev, g.name)
+			} else {
+				idOwner[p.id] = g.name
+			}
 		}
 	}
 	for id := range builtinRuleMeta {
-		if !strings.HasPrefix(id, "owasp:sqli:") {
-			continue
-		}
-		if _, ok := ids[id]; !ok {
-			t.Errorf("builtinRuleMeta 残留失效条目 %q，sqliPatterns 中已无对应 pattern", id)
+		if _, ok := idOwner[id]; !ok {
+			// path/upload/proto/crlf:005 等硬编码发射点由 catalog.go 维护，
+			// 出现于此说明被误登记进本表。
+			t.Errorf("builtinRuleMeta 残留失效条目 %q，无任何 pattern 切片使用；硬编码发射点的备注应由 catalog.go 维护", id)
 		}
 	}
 }

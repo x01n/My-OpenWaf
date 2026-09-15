@@ -140,7 +140,6 @@ const MODE_OPTIONS: { value: ModuleMode; labelKey: string }[] = [
 
 const GLOBAL_DEFAULT_MODE: ModuleMode = "balanced"
 
-
 function inferMode(rules: OwaspRule[] | undefined): ModuleMode {
   if (!rules || rules.length === 0) return GLOBAL_DEFAULT_MODE
   const allDisabled = rules.every((r) => !r.enabled)
@@ -189,7 +188,6 @@ function getModeBadgeVariant(
   }
 }
 
-
 interface AttackProtectionDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -200,10 +198,12 @@ export function AttackProtectionDialog({
   onOpenChange,
 }: AttackProtectionDialogProps) {
   const { t } = useTranslation()
-  const { data, isLoading, mutate } = useOwaspRules({ page_size: 500 }) as {
+  // 对话框通常随站点卡片一起挂载但处于关闭态；避免提前拉取完整 OWASP 目录。
+  const { data, isLoading } = useOwaspRules(
+    open ? { page_size: 500 } : null
+  ) as {
     data: OwaspRulesResponse | undefined
     isLoading: boolean
-    mutate: () => void
   }
   const { execute: batchUpdate, loading: isSaving } = useOwaspBatchUpdate()
 
@@ -343,7 +343,6 @@ export function AttackProtectionDialog({
       await batchUpdate({ rules: updates })
       toast.success(t("attacks.saveSuccess"))
       setHasChanges(false)
-      mutate()
       onOpenChange(false)
     } catch (err) {
       toast.error(
@@ -352,7 +351,7 @@ export function AttackProtectionDialog({
         })
       )
     }
-  }, [data, currentModes, configMode, batchUpdate, mutate, t, onOpenChange])
+  }, [data, currentModes, configMode, batchUpdate, t, onOpenChange])
 
   const handleCancel = useCallback(() => {
     setModuleModes({})

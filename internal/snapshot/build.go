@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -223,7 +222,10 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		if xffMode == "" {
 			xffMode = store.XFFModeStrip
 		}
-		cacheRules := parseSiteCacheRules(s.CacheRules)
+		cacheRules, err := store.ValidateAndCompileSiteCacheRules(s.CacheRules, s.CacheDefaultTTL)
+		if err != nil {
+			return nil, fmt.Errorf("site %d cache_rules: %w", s.ID, err)
+		}
 		clientIPHeaderOrder := parseClientIPHeaderOrder(s.ClientIPHeaderOrder)
 
 		siteListeners := enabledListenersBySite[s.ID]
@@ -349,27 +351,30 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 			}
 
 			rt := SiteRuntime{
-				Site:                           listenerSite,
-				PolicyID:                       policyID,
-				Rules:                          compiled,
-				UpstreamURLs:                   urls,
-				Certificate:                    cert,
-				NetworkDefaults:                networkDefaults,
-				TLSDefaults:                    tlsDefaults,
-				Bind:                           listenerSite.Bind,
-				TLSConfig:                      tlsConfig,
-				BotProtection:                  botProtection,
-				AttackProtection:               attackProtection,
-				XFFMode:                        xffMode,
-				TrustedCIDR:                    s.TrustedCIDR,
-				ClientIPHeaderOrder:            clientIPHeaderOrder,
-				PreserveOriginalHost:           s.PreserveOriginalHost,
-				CacheEnabled:                   s.CacheEnabled,
-				CacheDefaultTTL:                s.CacheDefaultTTL,
-				CacheRules:                     cacheRules,
-				MaintenanceEnabled:             s.MaintenanceEnabled,
-				MaintenanceHTML:                s.MaintenanceHTML,
-				MaintenanceStatus:              s.MaintenanceStatus,
+				Site:                 listenerSite,
+				PolicyID:             policyID,
+				Rules:                compiled,
+				UpstreamURLs:         urls,
+				Certificate:          cert,
+				NetworkDefaults:      networkDefaults,
+				TLSDefaults:          tlsDefaults,
+				Bind:                 listenerSite.Bind,
+				TLSConfig:            tlsConfig,
+				BotProtection:        botProtection,
+				AttackProtection:     attackProtection,
+				XFFMode:              xffMode,
+				TrustedCIDR:          s.TrustedCIDR,
+				ClientIPHeaderOrder:  clientIPHeaderOrder,
+				PreserveOriginalHost: s.PreserveOriginalHost,
+				CacheEnabled:         s.CacheEnabled,
+				CacheDefaultTTL:      s.CacheDefaultTTL,
+				CacheRules:           cacheRules,
+				MaintenanceEnabled:   s.MaintenanceEnabled,
+				MaintenanceHTML:      s.MaintenanceHTML,
+				MaintenanceStatus:    s.MaintenanceStatus,
+				// 站点级质询策略（nil = 继承全局，数据面渲染时再回退）。
+				ChallengeAction:                maybeSiteString(s.ChallengeAction),
+				ChallengeCaptchaType:           maybeSiteString(s.SiteCaptchaType),
 				BlockHTML:                      s.BlockHTML,
 				BlockStatus:                    s.BlockStatus,
 				AntiReplayEnabled:              protection.AntiReplayEnabled,
@@ -491,6 +496,9 @@ func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, []SnapshotConfigDiagn
 		if config.RedirectTo != nil {
 			override.RedirectTo = *config.RedirectTo
 		}
+		if config.CaptchaType != nil {
+			override.CaptchaType = normalizeRuleCaptchaType(*config.CaptchaType)
+		}
 		if config.Whitelist != nil && strings.TrimSpace(*config.Whitelist) != "" {
 			var whitelist []string
 			if err := json.Unmarshal([]byte(*config.Whitelist), &whitelist); err != nil {
@@ -536,6 +544,12 @@ func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (
 		byRule[item.RuleID] = append(byRule[item.RuleID], item)
 	}
 	result := make(map[uint]string, len(sites))
+	cveIDCounts := make(map[string]int, len(rules))
+	for _, rule := range rules {
+		if id := strings.TrimSpace(rule.CVEID); id != "" {
+			cveIDCounts[id]++
+		}
+	}
 	for _, site := range sites {
 		policyID := defaultPolicyID
 		if site.PolicyID != nil && *site.PolicyID != 0 {
@@ -544,7 +558,7 @@ func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (
 		profile := make(map[string]cve.CVERuleOverride, len(rules))
 		for _, rule := range rules {
 			enabled := rule.Enabled
-			override := cve.CVERuleOverride{Enabled: &enabled, Action: rule.Action}
+			override := cve.CVERuleOverride{Enabled: &enabled, Action: rule.Action, CaptchaType: normalizeRuleCaptchaType(rule.CaptchaType)}
 			apply := func(scopeType string, scopeID uint) {
 				for _, item := range byRule[rule.ID] {
 					if item.ScopeType != scopeType || item.ScopeID != scopeID {
@@ -553,24 +567,35 @@ func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (
 					if item.Enabled != nil {
 						override.Enabled = item.Enabled
 					}
-					if item.Action != nil {
+					if item.Action != nil && strings.TrimSpace(*item.Action) != "" {
 						override.Action = *item.Action
 					}
-					if item.Sensitivity != nil {
+					if item.Sensitivity != nil && strings.TrimSpace(*item.Sensitivity) != "" {
 						override.Sensitivity = *item.Sensitivity
 					}
-					if item.StatusCode != nil {
+					if item.StatusCode != nil && *item.StatusCode != 0 {
 						override.StatusCode = *item.StatusCode
 					}
-					if item.RedirectTo != nil {
+					if item.RedirectTo != nil && strings.TrimSpace(*item.RedirectTo) != "" {
 						override.RedirectTo = *item.RedirectTo
+					}
+					if item.CaptchaType != nil && strings.TrimSpace(*item.CaptchaType) != "" {
+						override.CaptchaType = normalizeRuleCaptchaType(*item.CaptchaType)
 					}
 				}
 			}
 			apply(store.CVEScopeGlobal, 0)
 			apply(store.CVEScopePolicy, policyID)
 			apply(store.CVEScopeSite, site.ID)
-			profile[rule.CVEID] = override
+			// 运行时先按 Pattern 查找覆盖；必须保留规则级键，否则两个
+			// 自定义规则使用同一 CVE 编号时会互相覆盖。编号键仅在唯一
+			// 时保留，用于兼容旧快照和内置规则配置。
+			if pattern := strings.TrimSpace(rule.Pattern); pattern != "" {
+				profile[pattern] = override
+			}
+			if cveID := strings.TrimSpace(rule.CVEID); cveID != "" && cveIDCounts[cveID] == 1 {
+				profile[cveID] = override
+			}
 		}
 		raw, err := json.Marshal(profile)
 		if err != nil {
@@ -639,6 +664,17 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 
 	return p
 }
+
+// maybeSiteString 把站点级可空覆盖字段解析为快照运行时值：
+// nil = 未覆盖（返回空串），非 nil = 覆盖值（原样返回）。
+func maybeSiteString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+// splitHosts splits a host field by comma, supporting multi-host per site.
 
 func registerSiteKeys(m map[string]*SiteRuntime, rt *SiteRuntime) error {
 	bind := rt.Bind
@@ -1018,104 +1054,6 @@ func ParsePattern(p string) (kind, arg string) {
 		}
 	}
 	return "", ""
-}
-
-func parseSiteCacheRules(raw string) []store.SiteCacheRule {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	var inbound []store.SiteCacheRule
-	if err := json.Unmarshal([]byte(raw), &inbound); err != nil {
-		return nil
-	}
-	filtered := make([]store.SiteCacheRule, 0, len(inbound))
-	for _, rule := range inbound {
-		if rule.TTL <= 0 {
-			continue
-		}
-		ruleType := strings.ToLower(strings.TrimSpace(rule.Type))
-		val := strings.TrimSpace(rule.Value)
-		path := strings.TrimSpace(rule.Path)
-
-		// Legacy JSON: path + ttl only (prefix match).
-		if ruleType == "" && val == "" && path != "" {
-			p := path
-			if !strings.HasPrefix(p, "/") {
-				p = "/" + p
-			}
-			filtered = append(filtered, store.SiteCacheRule{
-				Type:            "prefix",
-				Path:            p,
-				TTL:             rule.TTL,
-				IgnoreQuery:     rule.IgnoreQuery,
-				CaseInsensitive: rule.CaseInsensitive,
-			})
-			continue
-		}
-		if val == "" {
-			continue
-		}
-		for _, tok := range strings.Split(val, ",") {
-			tok = strings.TrimSpace(tok)
-			if tok == "" {
-				continue
-			}
-			nr := store.SiteCacheRule{
-				TTL:             rule.TTL,
-				IgnoreQuery:     rule.IgnoreQuery,
-				CaseInsensitive: rule.CaseInsensitive,
-			}
-			switch ruleType {
-			case "suffix":
-				nr.Type = "suffix"
-				if strings.Contains(tok, ".") {
-					nr.Path = tok
-				} else {
-					nr.Path = "." + tok
-				}
-			case "contains":
-				nr.Type = "contains"
-				nr.Path = tok
-			case "regex":
-				nr.Type = "regex"
-				pat := tok
-				if rule.CaseInsensitive {
-					pat = "(?i)" + pat
-				}
-				re, err := regexp.Compile(pat)
-				if err != nil {
-					continue
-				}
-				nr.Regex = re
-				nr.Value = tok
-			case "exact":
-				nr.Type = "exact"
-				if !strings.HasPrefix(tok, "/") {
-					tok = "/" + tok
-				}
-				nr.Path = tok
-			default:
-				nr.Type = "prefix"
-				if !strings.HasPrefix(tok, "/") {
-					tok = "/" + tok
-				}
-				nr.Path = tok
-			}
-			filtered = append(filtered, nr)
-		}
-	}
-	sort.Slice(filtered, func(i, j int) bool {
-		li := len(strings.TrimSpace(filtered[i].Path))
-		if strings.TrimSpace(filtered[i].Value) != "" {
-			li = len(strings.TrimSpace(filtered[i].Value))
-		}
-		lj := len(strings.TrimSpace(filtered[j].Path))
-		if strings.TrimSpace(filtered[j].Value) != "" {
-			lj = len(strings.TrimSpace(filtered[j].Value))
-		}
-		return li > lj
-	})
-	return filtered
 }
 
 func parseClientIPHeaderOrder(raw string) []string {

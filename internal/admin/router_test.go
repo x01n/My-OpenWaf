@@ -57,6 +57,38 @@ func TestLuaPluginStatsRouteBeatsIDParam(t *testing.T) {
 	}
 }
 
+// TestJSPluginRuntimeRouteBeatsIDParam 守护 runtime/stats 静态端点不被 :id 吞掉。
+func TestJSPluginRuntimeRouteBeatsIDParam(t *testing.T) {
+	e := route.NewEngine(config.NewOptions(nil))
+	var hit string
+	e.GET("/api/v1/js-plugins/stats", func(_ context.Context, c *app.RequestContext) {
+		hit = "stats"
+	})
+	e.GET("/api/v1/js-plugins/runtime", func(_ context.Context, c *app.RequestContext) {
+		hit = "runtime"
+	})
+	e.GET("/api/v1/js-plugins/:id", func(_ context.Context, c *app.RequestContext) {
+		hit = "id=" + c.Param("id")
+	})
+
+	for _, tt := range []struct{ uri, want string }{
+		{"/api/v1/js-plugins/stats", "stats"},
+		{"/api/v1/js-plugins/runtime", "runtime"},
+		{"/api/v1/js-plugins/7", "id=7"},
+	} {
+		hit = ""
+		var req protocol.Request
+		req.SetMethod("GET")
+		req.SetRequestURI(tt.uri)
+		ctx := app.NewContext(0)
+		req.CopyTo(&ctx.Request)
+		e.ServeHTTP(context.Background(), ctx)
+		if hit != tt.want {
+			t.Errorf("GET %s 命中 %q，want %q（status=%d）", tt.uri, hit, tt.want, ctx.Response.StatusCode())
+		}
+	}
+}
+
 // TestSecurityEventRequestsRouteBeatsIDParam 守护 /security-events/requests 不被 :id 吞掉。
 //
 // requests 是按 request_id 聚合的请求级列表，:id 是单条事件详情。若参数段抢先匹配，

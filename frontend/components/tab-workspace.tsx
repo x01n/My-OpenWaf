@@ -19,7 +19,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { useTranslation } from "react-i18next"
 import { IconX } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
-import { routeTitleKeyMap } from "@/lib/route-titles"
+import { getPageTitleKey } from "@/lib/route-titles"
 
 /** 固定标签，不可关闭。next.config.ts 开启了 trailingSlash，故带尾斜杠 */
 const PINNED_PATH = "/dashboard/"
@@ -72,16 +72,13 @@ const TabWorkspaceContext = createContext<TabWorkspaceContextValue | null>(null)
 function resolveTab(href: string): WorkspaceTab {
   const path = normalizePath(href)
   const pathname = path.split("?", 1)[0]
-  const segments = pathname.split("/").filter(Boolean)
-  // 取首段（顶层路由）作为标题依据，与 top-bar getPageTitle 的前缀语义一致
-  const key = "/" + (segments[0] ?? "")
-  const titleKey = routeTitleKeyMap[key]
+  const titleKey = getPageTitleKey(pathname)
+  const fallbackLabel =
+    pathname.slice(pathname.lastIndexOf("/") + 1) || pathname
   return {
     path,
     titleKey,
-    rawLabel: titleKey
-      ? undefined
-      : decodeURIComponent(segments[segments.length - 1] ?? pathname),
+    rawLabel: titleKey ? undefined : decodeURIComponent(fallbackLabel),
   }
 }
 
@@ -120,6 +117,8 @@ export function TabWorkspaceProvider({
   }, [pathname, searchParams])
   const [tabs, setTabs] = useState<WorkspaceTab[]>([])
   const hydrated = useRef(false)
+  const tabListRef = useRef<HTMLDivElement>(null)
+  const activeTabRef = useRef<HTMLDivElement>(null)
 
   // 首次挂载：恢复 sessionStorage，并确保固定标签存在。
   // 恢复时按归一化路径去重，清理历史遗留的尾斜杠不一致条目。
@@ -166,6 +165,32 @@ export function TabWorkspaceProvider({
     }
   }, [tabs])
 
+  /** 将活动标签限制在标签栏的横向可视范围内，不改变页面纵向滚动位置。 */
+  const ensureActiveTabVisible = useCallback(() => {
+    const tabList = tabListRef.current
+    const activeTab = activeTabRef.current
+    if (!tabList || !activeTab) return
+
+    const listRect = tabList.getBoundingClientRect()
+    const activeRect = activeTab.getBoundingClientRect()
+    if (activeRect.left < listRect.left) {
+      tabList.scrollLeft -= listRect.left - activeRect.left
+    } else if (activeRect.right > listRect.right) {
+      tabList.scrollLeft += activeRect.right - listRect.right
+    }
+  }, [])
+
+  // 路由切换、标签增删或容器缩放后保持活动标签可见。
+  useEffect(() => {
+    ensureActiveTabVisible()
+    const tabList = tabListRef.current
+    if (!tabList || typeof ResizeObserver === "undefined") return
+
+    const observer = new ResizeObserver(ensureActiveTabVisible)
+    observer.observe(tabList)
+    return () => observer.disconnect()
+  }, [currentPath, ensureActiveTabVisible, tabs])
+
   const closeTab = useCallback(
     (path: string) => {
       const identity = tabIdentity(path)
@@ -198,13 +223,20 @@ export function TabWorkspaceProvider({
 
   return (
     <TabWorkspaceContext.Provider value={ctxValue}>
-      <div className="flex h-10 items-stretch gap-1 overflow-x-auto border-b bg-card px-2">
+      <div
+        ref={tabListRef}
+        role="tablist"
+        aria-label={t("common.openTabs")}
+        className="flex h-10 items-stretch gap-1 overflow-x-auto border-b bg-card px-2"
+      >
         {tabs.map((tab) => {
           const active = tabIdentity(tab.path) === tabIdentity(currentPath)
           const pinned = tabIdentity(tab.path) === tabIdentity(PINNED_PATH)
           return (
             <div
+              ref={active ? activeTabRef : undefined}
               key={tabIdentity(tab.path)}
+              role="presentation"
               className={cn(
                 "group relative flex shrink-0 items-center gap-1.5 self-end overflow-hidden rounded-t-md border border-b-0 px-3 py-1.5 text-sm transition-colors",
                 // 活动标签：主色文字 + 顶部指示条，与非活动态的悬停高亮拉开区分
@@ -215,6 +247,10 @@ export function TabWorkspaceProvider({
             >
               <button
                 type="button"
+                role="tab"
+                aria-selected={active}
+                aria-current={active ? "page" : undefined}
+                tabIndex={active ? 0 : -1}
                 onClick={() => router.push(tab.path)}
                 className="max-w-[12rem] truncate"
               >

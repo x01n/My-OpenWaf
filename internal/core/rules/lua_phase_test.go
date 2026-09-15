@@ -45,6 +45,7 @@ func luaPhaseWith(t *testing.T, src string) pipeline.Phase {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
+	script.SetID(42)
 	e := luaplugin.NewEngine(luaPhaseTestKV{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.Reload([]*luaplugin.Script{script})
 	return NewLuaPhase(e, luaplugin.StagePre)
@@ -99,6 +100,9 @@ func TestLuaPhaseTerminalActions(t *testing.T) {
 		}
 		if res.Phase != "lua_pre" || res.Category != "lua_plugin" {
 			t.Errorf("action %q: Phase/Category = %q/%q", tt.act, res.Phase, res.Category)
+		}
+		if res.RuleID != 42 || res.RuleIDStr != "t" {
+			t.Errorf("action %q: Lua identity = %d/%q", tt.act, res.RuleID, res.RuleIDStr)
 		}
 	}
 }

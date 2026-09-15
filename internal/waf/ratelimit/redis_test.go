@@ -63,6 +63,21 @@ func TestRedisRateLimiterReconfigure(t *testing.T) {
 	}
 }
 
+func TestRedisRateLimiterInvalidEnabledConfigFailsOpen(t *testing.T) {
+	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:19999"})
+	defer client.Close()
+	rl := NewRedisRateLimiter(client, "pfx", 60, 0, true)
+	if rl == nil {
+		t.Fatal("expected non-nil")
+	}
+	if rl.Enabled() {
+		t.Fatal("invalid configuration must disable Redis limiter")
+	}
+	if !rl.Allow("key") {
+		t.Fatal("invalid configuration must not synthesize HTTP 429")
+	}
+}
+
 func TestRedisRateLimiterAllowDisabledAlwaysTrue(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
 	defer client.Close()

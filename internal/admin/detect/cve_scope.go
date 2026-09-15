@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"My-OpenWaf/internal/admin/shared"
+	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
@@ -23,6 +24,7 @@ type cveEffectiveConfig struct {
 	Sensitivity string `json:"sensitivity,omitempty"`
 	StatusCode  int    `json:"status_code,omitempty"`
 	RedirectTo  string `json:"redirect_to,omitempty"`
+	CaptchaType string `json:"captcha_type,omitempty"`
 }
 
 type cveScopedRuleView struct {
@@ -104,23 +106,8 @@ func resolveCVEScope(db *gorm.DB, c *app.RequestContext, bodyScope string, bodyP
 	return result, nil
 }
 
-func loadCVEOverrides(db *gorm.DB, ruleIDs []uint) (map[uint][]store.CVERuleScopeOverride, error) {
-	result := make(map[uint][]store.CVERuleScopeOverride)
-	if len(ruleIDs) == 0 {
-		return result, nil
-	}
-	var items []store.CVERuleScopeOverride
-	if err := db.Where("rule_id IN ?", ruleIDs).Find(&items).Error; err != nil {
-		return nil, err
-	}
-	for _, item := range items {
-		result[item.RuleID] = append(result[item.RuleID], item)
-	}
-	return result, nil
-}
-
 func effectiveCVERule(rule cve.CVERuleModel, scope cveScopeContext, overrides []store.CVERuleScopeOverride) cveScopedRuleView {
-	effective := cveEffectiveConfig{Enabled: rule.Enabled, Action: rule.Action}
+	effective := cveEffectiveConfig{Enabled: rule.Enabled, Action: rule.Action, CaptchaType: rule.CaptchaType}
 	view := cveScopedRuleView{CVERuleModel: rule, Effective: effective, InheritedFrom: "catalog"}
 	apply := func(scopeType string, scopeID uint) {
 		for i := range overrides {
@@ -131,17 +118,20 @@ func effectiveCVERule(rule cve.CVERuleModel, scope cveScopeContext, overrides []
 			if item.Enabled != nil {
 				view.Effective.Enabled = *item.Enabled
 			}
-			if item.Action != nil {
+			if item.Action != nil && strings.TrimSpace(*item.Action) != "" {
 				view.Effective.Action = *item.Action
 			}
-			if item.Sensitivity != nil {
+			if item.Sensitivity != nil && strings.TrimSpace(*item.Sensitivity) != "" {
 				view.Effective.Sensitivity = *item.Sensitivity
 			}
-			if item.StatusCode != nil {
+			if item.StatusCode != nil && *item.StatusCode != 0 {
 				view.Effective.StatusCode = *item.StatusCode
 			}
-			if item.RedirectTo != nil {
+			if item.RedirectTo != nil && strings.TrimSpace(*item.RedirectTo) != "" {
 				view.Effective.RedirectTo = *item.RedirectTo
+			}
+			if item.CaptchaType != nil && strings.TrimSpace(*item.CaptchaType) != "" {
+				view.Effective.CaptchaType = *item.CaptchaType
 			}
 			view.InheritedFrom = scopeType
 			if scope.ScopeType == scopeType && scope.ScopeID == scopeID {
@@ -158,92 +148,58 @@ func effectiveCVERule(rule cve.CVERuleModel, scope cveScopeContext, overrides []
 	if scope.ScopeType == store.CVEScopeSite {
 		apply(store.CVEScopeSite, scope.SiteID)
 	}
+	// 非 CAPTCHA 动作下的验证码类型没有语义；从有效视图清除历史脏值，
+	// 避免前端展示运行时不会渲染的挑战类型。
+	if action.Normalize(action.Type(view.Effective.Action)) != action.CaptchaChallenge {
+		view.Effective.CaptchaType = ""
+		view.CVERuleModel.CaptchaType = ""
+	}
 	return view
 }
 
 func ensureCatalogCVERules(repo *repository.CVERuleRepo) error {
-	registry := cve.GetGlobalCVERuleRegistry()
-	if registry == nil {
-		return nil
-	}
-	for _, rule := range registry.All() {
-		if strings.TrimSpace(rule.CVE) == "" || strings.TrimSpace(rule.ID) == "" {
-			continue
-		}
-		var existing cve.CVERuleModel
-		res := repo.DB().Where("source = ? AND pattern = ?", "catalog", rule.ID).Limit(1).Find(&existing)
-		if res.Error != nil {
-			return res.Error
-		}
-		model := cve.CVERuleModel{
-			CVEID:       rule.CVE,
-			Category:    rule.Category,
-			Pattern:     rule.ID,
-			Target:      "all",
-			Severity:    rule.Severity,
-			Enabled:     rule.Enabled,
-			Description: rule.Description,
-			Source:      "catalog",
-			Approved:    true,
-		}
-		if strings.TrimSpace(model.Description) == "" {
-			model.Description = rule.Name
-		}
-		if strings.TrimSpace(model.Category) == "" {
-			model.Category = "cve_general"
-		}
-		if strings.TrimSpace(model.Severity) == "" {
-			model.Severity = "medium"
-		}
-		if res.RowsAffected == 0 {
-			if err := repo.DB().Create(&model).Error; err != nil {
-				return err
-			}
-			continue
-		}
-		updates := map[string]any{
-			"cve_id":      model.CVEID,
-			"category":    model.Category,
-			"target":      model.Target,
-			"severity":    model.Severity,
-			"enabled":     model.Enabled,
-			"description": model.Description,
-			"approved":    true,
-		}
-		if err := repo.DB().Model(&existing).Updates(updates).Error; err != nil {
-			return err
-		}
-	}
-	return nil
+	return repo.EnsureBuiltinCatalog()
 }
 
 func listEffectiveCVERules(repo *repository.CVERuleRepo, scope cveScopeContext, filter repository.CVERuleFilter) ([]cveScopedRuleView, error) {
 	if err := ensureCatalogCVERules(repo); err != nil {
 		return nil, err
 	}
-	dbFilter := filter
-	dbFilter.Enabled = nil
-	items, _, err := repo.List(0, 10000, dbFilter)
+	snapshot, err := repo.CanonicalSnapshot()
 	if err != nil {
 		return nil, err
 	}
-	ruleIDs := make([]uint, 0, len(items))
-	for _, item := range items {
-		ruleIDs = append(ruleIDs, item.ID)
-	}
-	overrides, err := loadCVEOverrides(repo.DB(), ruleIDs)
-	if err != nil {
-		return nil, err
-	}
-	views := make([]cveScopedRuleView, 0, len(items))
-	for _, item := range items {
-		view := effectiveCVERule(item, scope, overrides[item.ID])
-		if filter.Enabled != nil && view.Effective.Enabled != *filter.Enabled {
+	views := make([]cveScopedRuleView, 0, len(snapshot.Rules))
+	for i := range snapshot.Rules {
+		rule := snapshot.Rules[i]
+		view := effectiveCVERule(rule, scope, snapshot.OverridesByRule[rule.ID])
+		if !cveRuleMatchesFilter(view, filter) {
 			continue
 		}
 		views = append(views, view)
 	}
 	return views, nil
+}
+
+func cveRuleMatchesFilter(view cveScopedRuleView, filter repository.CVERuleFilter) bool {
+	if filter.Category != "" && view.Category != filter.Category {
+		return false
+	}
+	if filter.Severity != "" && view.Severity != filter.Severity {
+		return false
+	}
+	if filter.Source != "" && view.Source != filter.Source {
+		return false
+	}
+	if filter.Enabled != nil && view.Effective.Enabled != *filter.Enabled {
+		return false
+	}
+	query := strings.ToLower(strings.TrimSpace(filter.Query))
+	if query == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(view.CVEID), query) ||
+		strings.Contains(strings.ToLower(view.Description), query)
 }
 
 func validateCVEScopePatch(patch *store.CVERuleScopeOverride) error {
@@ -254,8 +210,74 @@ func validateCVEScopePatch(patch *store.CVERuleScopeOverride) error {
 		}
 		patch.Action = &normalized
 	}
-	if patch.StatusCode != nil && (*patch.StatusCode < 100 || *patch.StatusCode > 599) {
+	if patch.StatusCode != nil && *patch.StatusCode != 0 && (*patch.StatusCode < 100 || *patch.StatusCode > 599) {
 		return errors.New("status_code must be between 100 and 599")
+	}
+	if patch.CaptchaType != nil {
+		normalized, ok := shared.ValidateCaptchaType(*patch.CaptchaType)
+		if !ok {
+			return errors.New("invalid captcha_type")
+		}
+		patch.CaptchaType = &normalized
+		// 作用域覆盖中的验证码类型只能与同一请求明确选择的
+		// captcha_challenge 动作一起提交；动作为空表示继承，留给
+		// 作用域合并逻辑决定是否实际使用该类型。
+		if normalized != "" && patch.Action != nil {
+			actionValue := strings.TrimSpace(*patch.Action)
+			if actionValue != "" {
+				actionValue = strings.ToLower(actionValue)
+				if actionValue == "block" {
+					actionValue = "intercept"
+				}
+				if actionValue != string(store.ActionCaptchaChallenge) {
+					return errors.New("captcha_type requires captcha_challenge action")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+/**
+ * validateStoredCVEScopeOverride 校验合并后的 CVE 作用域覆盖。
+ *
+ * 作用域 API 支持部分更新；仅校验本次请求字段会让已有的 redirect 或
+ * captcha_type 在后续更新中留下不可执行组合，因此必须对合并结果再校验。
+ */
+func validateStoredCVEScopeOverride(patch *store.CVERuleScopeOverride) error {
+	if patch == nil {
+		return errors.New("override is required")
+	}
+	if patch.Action != nil && strings.TrimSpace(*patch.Action) != "" {
+		normalized, ok := shared.ValidateActionWithRedirectTarget(*patch.Action, patch.RedirectTo)
+		if !ok {
+			return errors.New("invalid action")
+		}
+		patch.Action = &normalized
+	}
+	if patch.StatusCode != nil && *patch.StatusCode != 0 && (*patch.StatusCode < 100 || *patch.StatusCode > 599) {
+		return errors.New("status_code must be between 100 and 599")
+	}
+	if patch.Sensitivity != nil && strings.TrimSpace(*patch.Sensitivity) != "" {
+		switch strings.TrimSpace(*patch.Sensitivity) {
+		case "low", "mid", "medium", "high", "very_high", "strict", "off":
+		default:
+			return errors.New("invalid sensitivity")
+		}
+	}
+	if patch.CaptchaType != nil && strings.TrimSpace(*patch.CaptchaType) != "" {
+		normalized, ok := shared.ValidateCaptchaType(*patch.CaptchaType)
+		if !ok {
+			return errors.New("invalid captcha_type")
+		}
+		patch.CaptchaType = &normalized
+		if patch.Action == nil || action.Normalize(action.Type(strings.TrimSpace(*patch.Action))) != action.CaptchaChallenge {
+			return errors.New("captcha_type requires captcha_challenge action")
+		}
+	}
+	if patch.Action != nil && action.Normalize(action.Type(strings.TrimSpace(*patch.Action))) == action.Redirect &&
+		(patch.RedirectTo == nil || strings.TrimSpace(*patch.RedirectTo) == "") {
+		return errors.New("redirect_to required")
 	}
 	return nil
 }
@@ -282,6 +304,12 @@ func saveCVEScopeOverride(db *gorm.DB, ruleID uint, scope cveScopeContext, patch
 		if patch.RedirectTo == nil {
 			patch.RedirectTo = existing.RedirectTo
 		}
+		if patch.CaptchaType == nil {
+			patch.CaptchaType = existing.CaptchaType
+		}
+	}
+	if err := validateStoredCVEScopeOverride(&patch); err != nil {
+		return err
 	}
 	patch.ID = 0
 	patch.RuleID = ruleID
@@ -289,7 +317,7 @@ func saveCVEScopeOverride(db *gorm.DB, ruleID uint, scope cveScopeContext, patch
 	patch.ScopeID = scope.ScopeID
 	return db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "rule_id"}, {Name: "scope_type"}, {Name: "scope_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"enabled", "action", "sensitivity", "status_code", "redirect_to", "updated_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"enabled", "action", "sensitivity", "status_code", "redirect_to", "captcha_type", "updated_at"}),
 	}).Create(&patch).Error
 }
 
@@ -300,7 +328,24 @@ func ResetCVERuleOverride(repo *repository.CVERuleRepo, reload func() error) app
 			c.JSON(400, map[string]string{"error": "invalid id"})
 			return
 		}
-		scope, err := resolveCVEScope(repo.DB(), c, "", 0, 0)
+		if _, err := repo.Get(id); err != nil {
+			c.JSON(404, map[string]string{"error": "not found"})
+			return
+		}
+		// 兼容旧版前端把作用域放在 JSON body 的请求；路径/查询参数仍由
+		// resolveCVEScope 按既定优先级处理，避免 body 覆盖显式路由作用域。
+		var body struct {
+			Scope    string `json:"scope"`
+			PolicyID uint   `json:"policy_id"`
+			SiteID   uint   `json:"site_id"`
+		}
+		if len(c.Request.Body()) > 0 {
+			if err := c.BindJSON(&body); err != nil {
+				c.JSON(400, map[string]string{"error": "请求体格式无效"})
+				return
+			}
+		}
+		scope, err := resolveCVEScope(repo.DB(), c, body.Scope, body.PolicyID, body.SiteID)
 		if err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -309,6 +354,7 @@ func ResetCVERuleOverride(repo *repository.CVERuleRepo, reload func() error) app
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		repo.InvalidateCanonicalSnapshot()
 		if reload != nil {
 			if err := reload(); err != nil {
 				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})

@@ -255,7 +255,6 @@ func TestCheckRawMultipartFilenames_SemicolonDoubleExtension(t *testing.T) {
 	}
 }
 
-
 func TestCheckRawMultipartFilenames_NullByteSamples(t *testing.T) {
 	for _, filename := range []string{"info.php\x00.jpg", "111.php\x00.png"} {
 		body := []byte("Content-Disposition: form-data; name=\"uploaded\"; filename=\"" + filename + "\"\r\n")

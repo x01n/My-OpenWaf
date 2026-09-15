@@ -29,6 +29,7 @@ type IPReputation struct {
 	autoBanAction    atomic.Value
 	stopCh           chan struct{}
 	wg               sync.WaitGroup
+	closeOnce        sync.Once
 }
 
 type violationCounter struct {
@@ -50,7 +51,14 @@ func NewIPReputation() *IPReputation {
 }
 
 func (r *IPReputation) Close() {
-	close(r.stopCh)
+	if r == nil {
+		return
+	}
+	r.closeOnce.Do(func() {
+		if r.stopCh != nil {
+			close(r.stopCh)
+		}
+	})
 	r.wg.Wait()
 }
 

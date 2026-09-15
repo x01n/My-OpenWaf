@@ -3,6 +3,7 @@ package protect
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -185,6 +186,10 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := validateRateLimitConfig(cfg, present); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if present["chain_steps"] {
 			steps, ok := normalizeChainStepPayload(json.RawMessage(cfg.ChainSteps))
 			if !ok {
@@ -229,6 +234,12 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 				c.JSON(400, map[string]string{"error": err.Error()})
 				return
 			}
+		}
+		// 全局质询动作：空串合法（继承语义 = 默认 challenge 渲染），
+		// 非空必须是合法质询动作之一，防旧数据/手工写入的非法值带入快照。
+		if !shared.ValidateGlobalChallengeAction(cfg.ChallengeAction) {
+			c.JSON(400, map[string]string{"error": "invalid action"})
+			return
 		}
 
 		data, err := json.Marshal(cfg)
@@ -275,6 +286,25 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		}
 		c.JSON(200, buildProtectionResponse(cfg))
 	}
+}
+
+// validateRateLimitConfig prevents an enabled limiter with a zero window or
+// zero quota from turning every request into a synthetic 429. Negative values
+// are rejected even while disabled so a later toggle cannot activate a broken
+// configuration.
+func validateRateLimitConfig(cfg store.ProtectionConfig, present map[string]bool) error {
+	if (present["request_ratelimit_window"] && cfg.RequestRateLimitWindow < 0) ||
+		(present["request_ratelimit_max"] && cfg.RequestRateLimitMax < 0) {
+		return errors.New("request rate limit window and max must not be negative")
+	}
+	if (present["error_ratelimit_window"] && cfg.ErrorRateLimitWindow < 0) ||
+		(present["error_ratelimit_max"] && cfg.ErrorRateLimitMax < 0) {
+		return errors.New("error rate limit window and max must not be negative")
+	}
+	if err := cfg.ValidateRateLimits(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func setProtectionActionField(cfg *store.ProtectionConfig, field string, value string) {

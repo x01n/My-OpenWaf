@@ -2646,6 +2646,34 @@ func TestForwardBufferedResponseSkipsCompressionForSmallBody(t *testing.T) {
 	}
 }
 
+func TestForwardBufferedResponseHonorsRequestNoTransform(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.Header.Set("Accept-Encoding", "gzip, br")
+	ctx.Request.Header.Set("Cache-Control", "public, no-transform")
+
+	body := []byte(strings.Repeat("request no-transform body ", 256))
+	resp := &HTTPResponse{
+		StatusCode:  http.StatusOK,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        body,
+		Header: http.Header{
+			"Content-Type": []string{"text/plain; charset=utf-8"},
+		},
+	}
+
+	ForwardBufferedResponse(ctx, resp)
+	if got := string(ctx.Response.Header.Peek("Content-Encoding")); got != "" {
+		t.Fatalf("request no-transform response Content-Encoding = %q, want empty", got)
+	}
+	if got := string(ctx.Response.Header.Peek("Vary")); got != "" {
+		t.Fatalf("request no-transform response Vary = %q, want empty", got)
+	}
+	if !bytes.Equal(ctx.Response.Body(), body) {
+		t.Fatal("request no-transform response body was transformed")
+	}
+}
+
 func TestForwardBufferedResponseHEADWritesCompressedMetadataOnly(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Request.SetMethod("HEAD")
@@ -3347,28 +3375,135 @@ func TestShouldCacheHTTPResponse_VaryAcceptEncoding(t *testing.T) {
 	h := http.Header{}
 	h.Set("Vary", "Accept-Encoding")
 	resp := &HTTPResponse{StatusCode: 200, Body: []byte("ok"), Header: h}
-	if !ShouldCacheHTTPResponse("GET", resp, false) {
+	if !ShouldCacheHTTPResponse("GET", resp) {
 		t.Fatal("expected cacheable with Vary: Accept-Encoding")
 	}
 	h.Set("Vary", "User-Agent")
-	if ShouldCacheHTTPResponse("GET", resp, false) {
+	if ShouldCacheHTTPResponse("GET", resp) {
 		t.Fatal("should not cache with Vary: User-Agent")
 	}
 }
 
-func TestShouldCacheHTTPResponse_BypassUpstreamPrivate(t *testing.T) {
+func TestShouldCacheHTTPResponse_NeverBypassesUpstreamPrivacy(t *testing.T) {
 	h := http.Header{}
 	h.Set("Cache-Control", "private, no-cache, no-store, max-age=0, must-revalidate")
 	resp := &HTTPResponse{StatusCode: 200, Body: []byte("x"), Header: h}
-	if ShouldCacheHTTPResponse("GET", resp, false) {
-		t.Fatal("should block without bypass")
-	}
-	if !ShouldCacheHTTPResponse("GET", resp, true) {
-		t.Fatal("expected cacheable with bypass")
+	if ShouldCacheHTTPResponse("GET", resp) {
+		t.Fatal("private/no-store response entered the shared cache")
 	}
 	h.Set("Set-Cookie", "a=b")
-	if ShouldCacheHTTPResponse("GET", resp, true) {
+	if ShouldCacheHTTPResponse("GET", resp) {
 		t.Fatal("set-cookie must still block")
+	}
+}
+
+func TestShouldCacheHTTPResponseRejectsRepeatedPrivacyHeaders(t *testing.T) {
+	for name, values := range map[string][]string{
+		"Cache-Control": {"public, max-age=60", "no-store"},
+		"Set-Cookie":    {"a=1", "b=2"},
+		"Vary":          {"Accept-Encoding", "Cookie"},
+	} {
+		h := http.Header{}
+		for _, value := range values {
+			h.Add(name, value)
+		}
+		resp := &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+		if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+			t.Fatalf("repeated %s values were not honored: %#v", name, values)
+		}
+	}
+}
+
+func TestShouldCacheHTTPResponseHonorsImmediateFreshnessDirectives(t *testing.T) {
+	for name, value := range map[string]string{
+		"max-age=0":    "max-age=0",
+		"s-maxage=0":   "s-maxage=0",
+		"invalid":      "max-age=invalid",
+		"no-transform": "public, max-age=60, no-transform",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := http.Header{}
+			h.Set("Cache-Control", value)
+			resp := &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+			if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+				t.Fatalf("response with Cache-Control %q entered shared cache", value)
+			}
+		})
+	}
+	h := http.Header{}
+	h.Set("Expires", time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat))
+	resp := &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+	if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+		t.Fatal("expired Expires response entered shared cache")
+	}
+	h = http.Header{"Pragma": {"public", "no-cache"}}
+	resp = &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+	if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+		t.Fatal("response Pragma: no-cache entered shared cache")
+	}
+	h = http.Header{"Set-Cookie2": {"session=secret"}}
+	resp = &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+	if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+		t.Fatal("response Set-Cookie2 entered shared cache")
+	}
+}
+
+func TestShouldCacheHTTPResponseTreatsNonCanonicalPrivacyHeadersAsUnsafe(t *testing.T) {
+	for name, values := range map[string][]string{
+		"set-cookie":    {"session=secret"},
+		"cache-control": {"private, max-age=60"},
+		"expires":       {time.Now().Add(time.Minute).UTC().Format(http.TimeFormat), "invalid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := &HTTPResponse{
+				StatusCode: http.StatusOK,
+				Body:       []byte("body"),
+				Header:     http.Header{name: values},
+			}
+			if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+				t.Fatalf("non-canonical %s header bypassed the shared-cache safety gate", name)
+			}
+		})
+	}
+}
+
+func TestShouldCacheHTTPResponseRejectsAmbiguousAge(t *testing.T) {
+	for name, values := range map[string][]string{
+		"repeated": {"1", "2"},
+		"invalid":  {"invalid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := &HTTPResponse{
+				StatusCode: http.StatusOK,
+				Body:       []byte("body"),
+				Header:     http.Header{"Age": values},
+			}
+			if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+				t.Fatalf("ambiguous Age header entered the shared cache: %#v", values)
+			}
+		})
+	}
+}
+
+func TestEffectiveCacheTTLCannotExtendOriginFreshness(t *testing.T) {
+	h := http.Header{}
+	h.Set("Cache-Control", "public, max-age=12")
+	resp := &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+	if got := EffectiveCacheTTL(60, resp); got != 12 {
+		t.Fatalf("effective ttl = %d, want 12", got)
+	}
+	h.Set("Cache-Control", "public, s-maxage=4")
+	if got := EffectiveCacheTTL(60, resp); got != 4 {
+		t.Fatalf("shared effective ttl = %d, want 4", got)
+	}
+	h.Set("Cache-Control", "public, max-age=0")
+	if got := EffectiveCacheTTL(60, resp); got != 0 {
+		t.Fatalf("zero origin freshness ttl = %d, want 0", got)
+	}
+	h.Set("Cache-Control", "public, max-age=60")
+	h.Set("Age", "10")
+	if got := EffectiveCacheTTL(60, resp); got != 50 {
+		t.Fatalf("aged origin freshness ttl = %d, want 50", got)
 	}
 }
 
@@ -3426,6 +3561,8 @@ func TestSanitizeHeadersForEdgeCache(t *testing.T) {
 	h.Set("Transfer-Encoding", "chunked")
 	h.Set("Content-Length", "999")
 	h.Set("Cache-Control", "public")
+	h.Set("Set-Cookie", "session=secret")
+	h.Set("Age", "12")
 	out := SanitizeHeadersForEdgeCache(h)
 	if out.Get("Content-Encoding") != "br" {
 		t.Fatalf("want br, got %q", out.Get("Content-Encoding"))
@@ -3435,6 +3572,12 @@ func TestSanitizeHeadersForEdgeCache(t *testing.T) {
 	}
 	if out.Get("Content-Length") != "" {
 		t.Fatal("expected Content-Length removed")
+	}
+	if out.Get("Set-Cookie") != "" {
+		t.Fatal("expected Set-Cookie removed")
+	}
+	if out.Get("Age") != "" {
+		t.Fatal("expected Age removed; replay recomputes it from CachedAt")
 	}
 }
 
@@ -3454,6 +3597,79 @@ func TestSanitizeHeadersForEdgeCacheStripsConnectionTokenHeaders(t *testing.T) {
 	}
 	if out.Get("X-Keep") != "kept" {
 		t.Fatalf("expected X-Keep kept, got %q", out.Get("X-Keep"))
+	}
+}
+
+func TestWriteCachedResponseDoesNotReplayUnsafeHeaders(t *testing.T) {
+	ctx := app.NewContext(0)
+	entry := &cache.ResponseEntry{
+		StatusCode:  http.StatusOK,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        []byte("cached"),
+		Header: http.Header{
+			"set-cookie":  {"session=secret"},
+			"set-cookie2": {"legacy=secret"},
+			"connection":  {"X-Cache-Hop"},
+			"x-cache-hop": {"must-not-replay"},
+			"x-safe":      {"kept"},
+		},
+	}
+
+	WriteCachedResponse(ctx, http.MethodGet, entry)
+	if got := ctx.Response.Header.Peek("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("cached Set-Cookie was replayed: %q", got)
+	}
+	if got := ctx.Response.Header.Peek("Set-Cookie2"); len(got) != 0 {
+		t.Fatalf("cached Set-Cookie2 was replayed: %q", got)
+	}
+	if got := ctx.Response.Header.Peek("X-Cache-Hop"); len(got) != 0 {
+		t.Fatalf("cached Connection token header was replayed: %q", got)
+	}
+	if got := string(ctx.Response.Header.Peek("X-Safe")); got != "kept" {
+		t.Fatalf("safe cached header = %q, want kept", got)
+	}
+}
+
+// TestWriteCachedResponseSetsAgeFromCachedAt 验证缓存回放按 RFC 9111 §5.1
+// 输出本层 Age：取条目 CachedAt 以来的驻留秒数，并替换上游可能残留的旧值。
+func TestWriteCachedResponseSetsAgeFromCachedAt(t *testing.T) {
+	ctx := app.NewContext(0)
+	// 上游 Age 已经被 EffectiveCacheTTL 折算进 TTL，回放时必须丢弃旧值。
+	ctx.Response.Header.Set("Age", "77")
+	entry := &cache.ResponseEntry{
+		StatusCode:  http.StatusOK,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        []byte("cached"),
+		Header:      http.Header{"X-Safe": {"kept"}},
+		CachedAt:    time.Now().Unix() - 5,
+		TTL:         60,
+	}
+
+	WriteCachedResponse(ctx, http.MethodGet, entry)
+
+	age, err := strconv.ParseInt(string(ctx.Response.Header.Peek("Age")), 10, 64)
+	if err != nil {
+		t.Fatalf("Age header = %q, want integer", ctx.Response.Header.Peek("Age"))
+	}
+	if age < 0 || age > 5 {
+		t.Fatalf("Age = %d, want dwell seconds within [0, 5]", age)
+	}
+}
+
+// TestWriteCachedResponseOmitsAgeWithoutCachedAt 覆盖旧条目（CachedAt 为零值）
+// 的回放：无法计算驻留时间时不应输出猜测性的 Age。
+func TestWriteCachedResponseOmitsAgeWithoutCachedAt(t *testing.T) {
+	ctx := app.NewContext(0)
+	entry := &cache.ResponseEntry{
+		StatusCode:  http.StatusOK,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        []byte("cached"),
+	}
+
+	WriteCachedResponse(ctx, http.MethodGet, entry)
+
+	if got := ctx.Response.Header.Peek("Age"); len(got) != 0 {
+		t.Fatalf("Age = %q, want absent for zero CachedAt", got)
 	}
 }
 
@@ -5784,7 +6000,7 @@ func TestSiteCacheTTLDetails_Regex(t *testing.T) {
 	}
 }
 
-func TestSiteCacheEligible_AllowedWithClientNoCache(t *testing.T) {
+func TestSiteCacheEligibleRejectsClientNoCache(t *testing.T) {
 	var req protocol.Request
 	req.SetMethod("GET")
 	req.SetRequestURI("/favicon.ico")
@@ -5803,8 +6019,40 @@ func TestSiteCacheEligible_AllowedWithClientNoCache(t *testing.T) {
 		},
 	}
 	key, ttl, _ := SiteCacheEligible(rt, ctx)
-	if key == "" || ttl != 60 {
-		t.Fatalf("expected cache eligible with client no-cache, got key=%q ttl=%d", key, ttl)
+	if key != "" || ttl != 0 {
+		t.Fatalf("client no-cache request entered cache path: key=%q ttl=%d", key, ttl)
+	}
+}
+
+func TestSiteCacheEligibleRejectsFreshnessAndTransformRequests(t *testing.T) {
+	rt := snapshot.SiteRuntime{
+		CacheEnabled: true,
+		Site:         store.Site{ID: 1, Bind: ":80"},
+		Bind:         ":80",
+		CacheRules: []store.SiteCacheRule{
+			{Type: "suffix", Value: ".json", TTL: 60},
+		},
+	}
+	for name, value := range map[string]string{
+		"max-age-zero":     "max-age=0",
+		"max-age-positive": "max-age=30",
+		"min-fresh":        "min-fresh=10",
+		"no-transform":     "no-transform",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var req protocol.Request
+			req.SetMethod(http.MethodGet)
+			req.SetRequestURI("/data.json")
+			req.SetHost("cache.example.test")
+			req.Header.Set("Cache-Control", value)
+			ctx := app.NewContext(0)
+			req.CopyTo(&ctx.Request)
+
+			key, ttl, _ := SiteCacheEligible(rt, ctx)
+			if key != "" || ttl != 0 {
+				t.Fatalf("request Cache-Control %q entered shared cache: key=%q ttl=%d", value, key, ttl)
+			}
+		})
 	}
 }
 
@@ -5910,6 +6158,28 @@ func TestSiteCacheEligibleRejectsAuthorizationRequests(t *testing.T) {
 				t.Fatalf("Authorization request entered cache path: key=%q ttl=%d", key, ttl)
 			}
 		})
+	}
+}
+
+func TestSiteCacheEligibleRejectsCookieAndProxyAuthorization(t *testing.T) {
+	rt := snapshot.SiteRuntime{
+		CacheEnabled: true,
+		Site:         store.Site{ID: 1, Bind: ":80"},
+		Bind:         ":80",
+		CacheRules:   []store.SiteCacheRule{{Type: "prefix", Value: "/", TTL: 60}},
+	}
+	for name := range map[string]struct{}{"Cookie": {}, "Proxy-Authorization": {}} {
+		var req protocol.Request
+		req.SetMethod(http.MethodGet)
+		req.SetRequestURI("/account")
+		req.SetHost("cache.example.test")
+		req.Header.Set(name, "session=private")
+		ctx := app.NewContext(0)
+		req.CopyTo(&ctx.Request)
+		key, ttl, _ := SiteCacheEligible(rt, ctx)
+		if key != "" || ttl != 0 {
+			t.Fatalf("%s request entered shared cache: key=%q ttl=%d", name, key, ttl)
+		}
 	}
 }
 

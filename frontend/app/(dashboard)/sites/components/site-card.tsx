@@ -28,6 +28,7 @@ import {
  */
 export function SiteCard({
   site,
+  canManage,
   onEdit,
   onToggle,
   onDelete,
@@ -77,6 +78,7 @@ export function SiteCard({
           <SiteModeBadge site={site} />
           <SiteActionsMenu
             site={site}
+            canManage={canManage}
             onEdit={onEdit}
             onToggle={onToggle}
             onDelete={onDelete}

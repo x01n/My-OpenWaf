@@ -36,6 +36,7 @@ type BackupData struct {
 	IPListEntries          []IPListEntry           `json:"ip_list_entries"`
 	ThreatIntelFeeds       []ThreatIntelFeed       `json:"threat_intel_feeds"`
 	CVERuleRecords         []CVERuleRecord         `json:"cve_rule_records"`
+	CVERuleScopeOverrides  []CVERuleScopeOverride  `json:"cve_rule_scope_overrides"`
 	ApplicationRoutes      []ApplicationRouteRule  `json:"application_routes"`
 	SiteAccessConfigs      []SiteAccessConfig      `json:"site_access_configs"`
 	AccessProviders        []AccessProvider        `json:"access_providers"`
@@ -55,6 +56,9 @@ var ErrInvalidBackupJSPlugin = errors.New("invalid JavaScript plugin backup")
 // ErrInvalidBackupProtectionConfig 表示备份中的全局保护配置不符合 CAPTCHA 契约。
 var ErrInvalidBackupProtectionConfig = errors.New("invalid protection config backup")
 
+// ErrInvalidBackupRuleConfig 表示备份中的规则级 CAPTCHA 或备注配置无效。
+var ErrInvalidBackupRuleConfig = errors.New("invalid rule config backup")
+
 /**
  * BackupModels 返回 BackupData 覆盖的全部模型，顺序按外键依赖排列（被引用者在前）。
  *
@@ -66,7 +70,7 @@ var ErrInvalidBackupProtectionConfig = errors.New("invalid protection config bac
 func BackupModels() []interface{} {
 	return []interface{}{
 		&Certificate{}, &Policy{}, &PolicyOWASPRuleConfig{}, &Rule{}, &Site{}, &SiteListener{},
-		&IPListEntry{}, &ThreatIntelFeed{}, &CVERuleRecord{},
+		&IPListEntry{}, &ThreatIntelFeed{}, &CVERuleRecord{}, &CVERuleScopeOverride{},
 		&ApplicationRouteRule{}, &SiteAccessConfig{}, &AccessProvider{},
 		&AccessUser{}, &AccessPathRule{}, &LuaPlugin{}, &JSPlugin{}, &SystemSettings{},
 	}
@@ -119,6 +123,9 @@ func ExportBackup(db *gorm.DB) (*BackupData, error) {
 	if err := db.Find(&data.CVERuleRecords).Error; err != nil {
 		return nil, err
 	}
+	if err := db.Find(&data.CVERuleScopeOverrides).Error; err != nil {
+		return nil, err
+	}
 	if err := db.Find(&data.ApplicationRoutes).Error; err != nil {
 		return nil, err
 	}
@@ -163,6 +170,9 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 	if err := validateBackupJSPlugins(data.JSPlugins); err != nil {
 		return err
 	}
+	if err := validateBackupRuleCaptchaTypes(data); err != nil {
+		return err
+	}
 	sites := normalizeBackupSiteXFFModes(data.Sites)
 
 	return db.Transaction(func(tx *gorm.DB) error {
@@ -197,6 +207,7 @@ func ImportBackup(db *gorm.DB, data *BackupData, replaceMode bool) error {
 			data.IPListEntries,
 			data.ApplicationRoutes,
 			data.CVERuleRecords,
+			data.CVERuleScopeOverrides,
 			data.SiteAccessConfigs,
 			data.AccessProviders,
 			data.AccessUsers,
@@ -284,6 +295,48 @@ func validateBackupProtectionSettings(settings []SystemSettings) error {
 	return nil
 }
 
+func validateBackupRuleCaptchaTypes(data *BackupData) error {
+	validate := func(source, value string) error {
+		if value == "" {
+			return nil
+		}
+		if !challenge.IsValidCaptchaType(challenge.CaptchaType(value)) {
+			return fmt.Errorf("%w: %s captcha_type %q", ErrInvalidBackupRuleConfig, source, value)
+		}
+		return nil
+	}
+	for i := range data.Rules {
+		if err := validate("rule", data.Rules[i].CaptchaType); err != nil {
+			return err
+		}
+	}
+	for i := range data.CVERuleRecords {
+		if err := validate("CVE rule", data.CVERuleRecords[i].CaptchaType); err != nil {
+			return err
+		}
+	}
+	for i := range data.PolicyOWASPRuleConfigs {
+		config := data.PolicyOWASPRuleConfigs[i]
+		if config.CaptchaType != nil {
+			if err := validate("policy OWASP rule", *config.CaptchaType); err != nil {
+				return err
+			}
+		}
+		if config.Note != nil && len(*config.Note) > 4096 {
+			return fmt.Errorf("%w: policy OWASP rule note exceeds 4096 bytes", ErrInvalidBackupRuleConfig)
+		}
+	}
+	for i := range data.CVERuleScopeOverrides {
+		config := data.CVERuleScopeOverrides[i]
+		if config.CaptchaType != nil {
+			if err := validate("CVE scope override", *config.CaptchaType); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func normalizeBackupSiteXFFModes(sites []Site) []Site {
 	normalized := make([]Site, len(sites))
 	copy(normalized, sites)
@@ -345,6 +398,11 @@ func upsertSlice(tx *gorm.DB, records interface{}) error {
 		}
 		return upsertBatch(tx, v)
 	case []CVERuleRecord:
+		if len(v) == 0 {
+			return nil
+		}
+		return upsertBatch(tx, v)
+	case []CVERuleScopeOverride:
 		if len(v) == 0 {
 			return nil
 		}
@@ -483,6 +541,7 @@ func clearConfigTables(tx *gorm.DB) error {
 		&AccessProvider{},
 		&SiteAccessConfig{},
 		&ApplicationRouteRule{},
+		&CVERuleScopeOverride{},
 		&CVERuleRecord{},
 		&IPListEntry{},
 		&Rule{},

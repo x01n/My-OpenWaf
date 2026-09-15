@@ -146,5 +146,13 @@ func bindSiteFromRaw(raw map[string]json.RawMessage, dst *store.Site) error {
 			dst.SkipPathByPhase = &s
 		}
 	}
+	// challenge_action / captcha_type 是独立三态标量字段：JSON null 表示
+	// 「取消站点覆盖、回到继承全局」；不传时保留原值（Update 场景）。
+	if v, ok := raw["challenge_action"]; ok && strings.TrimSpace(string(v)) == "null" {
+		dst.ChallengeAction = nil
+	}
+	if v, ok := raw["captcha_type"]; ok && strings.TrimSpace(string(v)) == "null" {
+		dst.SiteCaptchaType = nil
+	}
 	return nil
 }

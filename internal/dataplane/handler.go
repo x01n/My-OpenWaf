@@ -76,6 +76,8 @@ type Options struct {
 const (
 	bindContextKey                     = "dataplane_bind"
 	tlsFingerprintContextKey           = "dataplane_tls_fingerprint"
+	dataplaneAccessRecordedContextKey  = "dataplane_access_recorded"
+	dataplaneAccessSiteIDContextKey    = "dataplane_access_site_id"
 	dynamicProtectionKeyRequestBodyMax = 20 * 1024
 	dynamicProtectionKeyPath           = "/__owaf/dynamic/key"
 )
@@ -197,6 +199,9 @@ func applyLuaResponse(c *app.RequestContext, result action.Result, statusCode in
 
 // Handler returns a Hertz middleware: maintenance → WAF → block fuse or reverse proxy.
 func Handler(opts Options) app.HandlerFunc {
+	if opts.Log == nil {
+		opts.Log = slog.Default()
+	}
 	var rr atomic.Uint32
 	secLog := opts.Log.With(slog.String("section", "security"))
 	accessLog := opts.Log
@@ -204,7 +209,11 @@ func Handler(opts Options) app.HandlerFunc {
 
 	return func(ctx context.Context, c *app.RequestContext) {
 		ctx, closeNotifyCancel := bindStreamCloseNotifyContext(ctx, c)
+		requestID := fastRequestID()
+		c.Response.Header.Set("X-Request-ID", requestID)
+		c.Response.Header.Del("Server")
 		defer func() {
+			finalizeUnrecordedAccessLog(ctx, c, opts, requestID)
 			restoreOriginalRequestBodyStream(c)
 			if c.Response.GetHijackWriter() == nil && !c.Response.IsBodyStream() {
 				closeNotifyCancel()
@@ -241,6 +250,7 @@ func Handler(opts Options) app.HandlerFunc {
 
 		// Handle challenge verification endpoints
 		if handleChallengeVerify(c, opts) {
+			recordChallengeVerifyAccessLog(c, opts)
 			return
 		}
 
@@ -257,21 +267,25 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
-		reqID := fastRequestID()
-		c.Response.Header.Set("X-Request-ID", reqID)
-		c.Response.Header.Del("Server")
+		reqID := requestID
 		if opts.Metrics != nil {
 			opts.Metrics.RecordRequest()
 		}
 
-		sn := opts.Holder.Load()
+		var sn *snapshot.Snapshot
+		if opts.Holder != nil {
+			sn = opts.Holder.Load()
+		}
 		if sn == nil {
-			c.String(503, "configuration snapshot not loaded")
+			c.String(http.StatusServiceUnavailable, "configuration snapshot not loaded")
+			recordEarlyAccessLog(c, opts, requestID, http.StatusServiceUnavailable, "configuration_error")
 			return
 		}
 
 		if maxH := sn.HTTP2Config.MaxHeaderFields; maxH > 0 && c.Request.Header.Len() > maxH {
-			pages.WriteErrorPage(ctx, c, 431, nil)
+			// 头字段超限仍要留下协议层审计行；早期身份解析只用于日志归属，不能驱动 WAF。
+			pages.WriteErrorPage(ctx, c, http.StatusRequestHeaderFieldsTooLarge, nil)
+			recordEarlyAccessLog(c, opts, requestID, http.StatusRequestHeaderFieldsTooLarge, "protocol_error")
 			return
 		}
 
@@ -296,7 +310,14 @@ func Handler(opts Options) app.HandlerFunc {
 					slog.Int("sites", len(sn.Sites)),
 				)
 			}
+			// 无站点匹配仍要留下路由层审计行；SiteID 保持为 0，避免伪造站点归属。
 			pages.WriteWelcomePage(ctx, c)
+			recordEarlyAccessLog(c, opts, requestID, http.StatusOK, "routing_error")
+			return
+		}
+		if opts.Engine == nil {
+			c.String(http.StatusServiceUnavailable, "waf engine unavailable")
+			recordEarlyAccessLog(c, opts, requestID, http.StatusServiceUnavailable, "configuration_error")
 			return
 		}
 
@@ -893,22 +914,43 @@ func Handler(opts Options) app.HandlerFunc {
 					})
 				}
 				// Route to appropriate challenge handler
-				switch {
-				case result.Action.IsCaptchaChallenge() && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil:
-					captchaType := challenge.CaptchaType(sn.Protection.CaptchaType)
-					if result.Action.CaptchaType != "" {
-						captchaType = challenge.CaptchaType(result.Action.CaptchaType)
+				// 质询动作覆盖只作用于「泛化 challenge」终态：站点/全局的
+				// challenge_action 决定具体渲染哪一页；规则显式选择的
+				// captcha/shield/chain 保持原样，不被站点/全局默认值顶替。
+				renderAct := actStr
+				if actType == action.Challenge {
+					if covered := siteChallengeAction(&rt, sn); covered != "" {
+						renderAct = covered
 					}
-					binding := challengeSessionBindingForSite(rt.Site.ID, host, bind)
-					challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, binding, statusCode, sn.CaptchaPage)
-				case result.Action.IsShieldChallenge() && sn.Protection.ShieldEnabled && opts.ShieldManager != nil:
-					origURL := string(c.Request.URI().RequestURI())
-					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, requestProtocol(c), challengeSessionBindingForSite(rt.Site.ID, host, bind), statusCode)
-				case result.Action.IsChainChallenge() && sn.Protection.ChainEnabled && opts.ChainManager != nil:
-					challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, challengeSessionBindingForSite(rt.Site.ID, host, bind), statusCode)
-				default:
+				}
+				renderChallengeFallback := func() {
 					pages.WriteChallengeResponse(c, reqID, result.Site, sn.Protection.ShieldEnableEnvCheck, statusCode, sn.ChallengePage,
 						challenge.ChallengeTokenClaims{ClientIP: cipStr, UserAgent: challengeIdentityUA, Host: host, SiteID: rt.Site.ID})
+				}
+				switch renderAct {
+				case string(action.CaptchaChallenge):
+					if opts.CaptchaManager != nil {
+						captchaType := effectiveCaptchaType(result.Action, &rt, sn)
+						binding := challengeSessionBindingForSite(rt.Site.ID, host, bind)
+						challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, binding, statusCode, sn.CaptchaPage)
+						break
+					}
+					renderChallengeFallback()
+				case string(action.ShieldChallenge):
+					if opts.ShieldManager != nil {
+						origURL := string(c.Request.URI().RequestURI())
+						opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, requestProtocol(c), challengeSessionBindingForSite(rt.Site.ID, host, bind), statusCode)
+						break
+					}
+					renderChallengeFallback()
+				case string(action.ChainChallenge):
+					if opts.ChainManager != nil {
+						challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, challengeSessionBindingForSite(rt.Site.ID, host, bind), statusCode)
+						break
+					}
+					renderChallengeFallback()
+				default:
+					renderChallengeFallback()
 				}
 				logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
 				scrubResponseHopByHopHeaders(c)
@@ -1070,9 +1112,9 @@ func Handler(opts Options) app.HandlerFunc {
 				upstreamErr = proxy.ForwardCapturedResponseForSiteWithClientIP(ctx, c, bufferedResp, *result.Site, clientIP)
 			}
 		default:
-			cacheKey, ttl, ignoreUpstreamCC := "", int64(0), false
+			cacheKey, ttl, staleIfError := "", int64(0), int64(0)
 			if opts.ResponseCache != nil {
-				cacheKey, ttl, ignoreUpstreamCC = proxy.SiteCacheEligible(*result.Site, c)
+				cacheKey, ttl, staleIfError = proxy.SiteCacheEligibleWithStale(*result.Site, c)
 			}
 			if cacheKey == "" || hasConditionalOrRangeHeaders(c) {
 				if isInternalHTTP3Request(c) && !c.Request.IsBodyStream() {
@@ -1082,18 +1124,43 @@ func Handler(opts Options) app.HandlerFunc {
 				}
 				break
 			}
+			// 只记录开始回源时的 generation；真正回退到 stale 响应时必须
+			// 再次按同一代读取。并发的 unsafe 请求或配置清理可能在等待填充
+			// 期间使旧条目失效，不能把此前拿到的指针继续回放。
 			staleGeneration := opts.ResponseCache.Generation()
-			staleEntry := opts.ResponseCache.LookupIfGeneration(staleGeneration, cacheKey)
-			if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
-				proxy.WriteCachedResponseForSiteWithClientIP(c, method, entry, *result.Site, clientIP)
-				cacheState = "hit"
-				break
+			staleEntry := opts.ResponseCache.LookupStaleIfGeneration(staleGeneration, cacheKey, staleIfError)
+			// Get 会在发现过期条目时将其删除；已经捕获到 stale 条目时
+			// 保留它到回源失败分支，再由 generation 重查决定是否可回放。
+			if staleEntry == nil {
+				if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
+					proxy.WriteCachedResponseForSiteWithClientIP(c, method, entry, *result.Site, clientIP)
+					cacheState = "hit"
+					break
+				}
 			}
 			cacheState = "miss"
+			leader, releaseFill, fillErr := opts.ResponseCache.BeginFill(ctx, cacheKey)
+			if fillErr != nil {
+				upstreamErr = fillErr
+				break
+			}
+			if leader {
+				defer releaseFill()
+			} else {
+				// 等待 leader 后只查新鲜条目。不能调用 Get：它会删除
+				// 过期备份，导致 leader 的 stale-if-error 回退失效。
+				if entry := opts.ResponseCache.LookupFreshIfGeneration(opts.ResponseCache.Generation(), cacheKey); entry != nil {
+					proxy.WriteCachedResponseForSiteWithClientIP(c, method, entry, *result.Site, clientIP)
+					cacheState = "hit"
+					break
+				}
+			}
 			cacheGeneration := opts.ResponseCache.Generation()
-			bufferedResp, err := proxy.FetchHTTPLimited(ctx, c, *result.Site, base, clientIP, host, opts.ResponseCache.MaxEntryBodySize())
+			bufferedResp, err := proxy.FetchHTTPForCache(ctx, c, *result.Site, base, clientIP, host, opts.ResponseCache.MaxEntryBodySize())
 			if err != nil {
-				if staleEntry != nil {
+				// 重新检查 generation，避免缓存清理/unsafe 失效发生在
+				// BeginFill 等待或上游请求期间后仍然回放旧内容。
+				if staleEntry := opts.ResponseCache.LookupStaleIfGeneration(staleGeneration, cacheKey, staleIfError); staleEntry != nil {
 					proxy.WriteCachedResponseForSiteWithClientIP(c, method, staleEntry, *result.Site, clientIP)
 					cacheState = "stale"
 					break
@@ -1105,8 +1172,11 @@ func Handler(opts Options) app.HandlerFunc {
 				upstreamErr = proxy.ForwardCapturedResponseForSiteWithClientIP(ctx, c, bufferedResp, *result.Site, clientIP)
 				break
 			}
-			if proxy.ShouldCacheHTTPResponse(method, bufferedResp, ignoreUpstreamCC) {
-				opts.ResponseCache.SetIfGeneration(cacheGeneration, cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, ttl, proxy.SanitizeHeadersForEdgeCache(bufferedResp.Header))
+			if proxy.ShouldCacheHTTPResponse(method, bufferedResp) {
+				cacheTTL := proxy.EffectiveCacheTTL(ttl, bufferedResp)
+				if cacheTTL > 0 {
+					opts.ResponseCache.SetForSiteIfGeneration(cacheGeneration, rt.Site.ID, proxy.RuleMatchKey(c), cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, cacheTTL, proxy.SanitizeHeadersForEdgeCache(bufferedResp.Header))
+				}
 			}
 			proxy.ForwardBufferedResponseForSiteWithClientIP(c, bufferedResp, *result.Site, clientIP)
 		}
@@ -1116,8 +1186,10 @@ func Handler(opts Options) app.HandlerFunc {
 			opts.Upstreams.Mark(base, upstreamErr)
 		}
 
-		if upstreamErr == nil && opts.ResponseCache != nil && isResponseCacheInvalidatingMethod(method) {
-			opts.ResponseCache.Clear()
+		// 任何已发出的非安全方法都可能在上游产生副作用，即使上游返回
+		// 4xx/5xx 或连接中途失败；按路径清理缓存，避免继续提供旧内容。
+		if opts.ResponseCache != nil && isUnsafeRequestMethod(method) {
+			opts.ResponseCache.PurgeSiteTarget(rt.Site.ID, proxy.RuleMatchKey(c))
 		}
 		if upstreamErr != nil {
 			errCode := 502
@@ -1178,11 +1250,13 @@ func Handler(opts Options) app.HandlerFunc {
 	}
 }
 
-func isResponseCacheInvalidatingMethod(method string) bool {
-	return strings.EqualFold(method, "POST") ||
-		strings.EqualFold(method, "PUT") ||
-		strings.EqualFold(method, "PATCH") ||
-		strings.EqualFold(method, "DELETE")
+func isUnsafeRequestMethod(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return false
+	default:
+		return true
+	}
 }
 
 func pickUpstream(urls []string, pool *upstream.Pool, next func(uint32) uint32) (string, bool) {
@@ -1460,9 +1534,11 @@ type accessLogInfo struct {
 	RequestBodyTruncated bool
 	RequestSize          int64
 	ResponseHeaders      string
-	// ForceRecord 保留请求体预取期间客户端连接中断的审计记录，但不启用详细审计。
+	// ForceRecord 保留请求体预取期间客户端连接中断的审计记录。
 	ForceRecord bool
-	Detailed    bool
+	// Minimal 仅记录状态、路由身份和指纹，早退时不得读取请求体或响应体。
+	Minimal  bool
+	Detailed bool
 
 	VisitorFusionEligible bool
 	VisitorFusionAction   action.Result
@@ -1555,7 +1631,7 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 			info.TLSFingerprint = mergeTLSFingerprint(info.TLSFingerprint, fp)
 		}
 	}
-	if info.HeaderOrder == "" {
+	if !info.Minimal && info.HeaderOrder == "" {
 		info.HeaderOrder = strings.Join(requestHeaderOrder(c), ",")
 	}
 	requestBody := info.RequestBodyPreview
@@ -1564,7 +1640,12 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	requestHeaders := info.RequestHeaders
 	responseHeaders := info.ResponseHeaders
 	responseSize := info.ResponseSize
-	if !info.ResponseSizeKnown && responseSize == 0 && c.Response.Header.Get("Trailer") == "" && string(c.Request.Method()) != "HEAD" {
+	if !info.Minimal && requestSize == 0 {
+		_, sampledBodyTruncated, sampledRequestSize := requestBodySample(c)
+		requestSize = sampledRequestSize
+		requestBodyTruncated = requestBodyTruncated || sampledBodyTruncated
+	}
+	if !info.Minimal && !info.ResponseSizeKnown && responseSize == 0 && c.Response.Header.Get("Trailer") == "" && string(c.Request.Method()) != "HEAD" {
 		if cl := int64(c.Response.Header.ContentLength()); cl > 0 {
 			responseSize = cl
 		} else if !c.Response.IsBodyStream() {
@@ -2063,11 +2144,162 @@ func enqueueAccessLog(writer accessLogRecorder, al store.AccessLog) {
 }
 
 func recordAccessLog(c *app.RequestContext, opts Options, info accessLogInfo) {
+	if c != nil {
+		// Mark the request before sampling/writer checks so the finalizer does not
+		// duplicate an intentionally sampled-out record.
+		c.Set(dataplaneAccessRecordedContextKey, true)
+	}
 	if opts.Writer == nil || !shouldRecordAccessLog(info, opts.AccessLogSamplingRate) {
 		return
 	}
-	info.Detailed = shouldRecordDetailedAccessLog(info)
+	if !info.Minimal {
+		info.Detailed = shouldRecordDetailedAccessLog(info)
+	}
 	enqueueAccessLog(opts.Writer, buildAccessLogEntry(c, info))
+}
+
+// finalizeUnrecordedAccessLog writes a minimal audit row for early exits that
+// happen before the normal site/WAF flow (static assets, challenge endpoints,
+// and missing snapshots). Protocol/routing rejects mark themselves explicitly;
+// normal paths mark themselves through
+// recordAccessLog, so this does not alter their sampling or create duplicates.
+// A client-cancelled plain proxy request is recorded with status 0 instead of a
+// synthetic 200 row after RST_STREAM; explicit 4xx/5xx early failures retain their status.
+func finalizeUnrecordedAccessLog(ctx context.Context, c *app.RequestContext, opts Options, fallbackRequestID string) {
+	if c == nil || opts.Writer == nil {
+		return
+	}
+	if value, ok := c.Get(dataplaneAccessRecordedContextKey); ok {
+		if recorded, ok := value.(bool); ok && recorded {
+			return
+		}
+	}
+	requestID := strings.TrimSpace(string(c.Response.Header.Peek("X-Request-ID")))
+	if requestID == "" {
+		requestID = fallbackRequestID
+	}
+	statusCode := c.Response.StatusCode()
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	// 客户端在响应交付前断开时不伪造一个成功的 200；使用状态 0 保留
+	// 协议层中断事实，同时继续携带请求指纹。明确的 4xx/5xx 保持原状态。
+	if statusCode < http.StatusBadRequest && isClientGoneForPlainAccessLog(ctx, "none") {
+		statusCode = 0
+	}
+	fingerprint, _ := tlsFingerprintFromRequestContext(c)
+	siteID, clientIP := earlyAccessIdentity(c, opts)
+	recordAccessLog(c, opts, accessLogInfo{
+		SiteID:            siteID,
+		RequestID:         requestID,
+		ClientIP:          clientIPStr(clientIP),
+		Host:              string(c.Host()),
+		Path:              accessPath(c),
+		QueryString:       string(c.URI().QueryString()),
+		Method:            string(c.Method()),
+		UserAgent:         string(c.UserAgent()),
+		StatusCode:        statusCode,
+		WAFAction:         "none",
+		CacheState:        "bypass",
+		TLSFingerprint:    fingerprint,
+		ResponseSizeKnown: false,
+		ForceRecord:       true,
+		Minimal:           true,
+	})
+}
+
+/**
+ * recordEarlyAccessLog 为尚未解析站点或尚未进入 WAF 流程的请求写入最小审计行。
+ *
+ * @param c 请求上下文。
+ * @param opts 数据面选项。
+ * @param requestID 当前请求标识。
+ * @param statusCode 已发送的响应状态。
+ * @param wafAction 早退原因分类。
+ */
+func recordEarlyAccessLog(c *app.RequestContext, opts Options, requestID string, statusCode int, wafAction string) {
+	if c == nil {
+		return
+	}
+	fingerprint, _ := tlsFingerprintFromRequestContext(c)
+	siteID, clientIP := earlyAccessIdentity(c, opts)
+	recordAccessLog(c, opts, accessLogInfo{
+		SiteID:            siteID,
+		RequestID:         requestID,
+		ClientIP:          clientIPStr(clientIP),
+		Host:              string(c.Host()),
+		Path:              accessPath(c),
+		QueryString:       string(c.URI().QueryString()),
+		Method:            string(c.Method()),
+		UserAgent:         string(c.UserAgent()),
+		StatusCode:        statusCode,
+		WAFAction:         wafAction,
+		CacheState:        "bypass",
+		TLSFingerprint:    fingerprint,
+		ResponseSizeKnown: false,
+		ForceRecord:       true,
+		Minimal:           true,
+	})
+}
+
+/**
+ * recordChallengeVerifyAccessLog 为挑战验证端点写入独立的内部审计动作。
+ *
+ * 验证端点在站点匹配前处理，不能进入常规 WAF 访问日志路径；统一在端点返回后
+ * 记录当前响应状态、站点归属、可信客户端地址和 TLS 指纹，并阻止外层兜底再次写入
+ * waf_action=none 的误导性行。
+ *
+ * @param c 当前请求上下文。
+ * @param opts 数据面选项。
+ */
+func recordChallengeVerifyAccessLog(c *app.RequestContext, opts Options) {
+	if c == nil {
+		return
+	}
+	requestID := strings.TrimSpace(string(c.Response.Header.Peek("X-Request-ID")))
+	if requestID == "" {
+		requestID = fastRequestID()
+		c.Response.Header.Set("X-Request-ID", requestID)
+	}
+	statusCode := c.Response.StatusCode()
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	actionName := "challenge_verify"
+	if statusCode >= http.StatusBadRequest {
+		actionName = "challenge_verify_error"
+	}
+	recordEarlyAccessLog(c, opts, requestID, statusCode, actionName)
+}
+
+/**
+ * earlyAccessIdentity 为早期端点日志解析站点归属和可信客户端地址。
+ *
+ * @param c 请求上下文。
+ * @param opts 数据面选项。
+ * @return 站点 ID（未命中时为 0）和按站点代理配置解析的客户端地址。
+ */
+func earlyAccessIdentity(c *app.RequestContext, opts Options) (uint, net.IP) {
+	if c == nil {
+		return 0, nil
+	}
+	if opts.Holder == nil {
+		return 0, security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
+	}
+	host := string(c.Host())
+	bind := listenerBind(c)
+	if bind == "" {
+		bind = opts.Bind
+	}
+	sn := opts.Holder.Load()
+	if sn == nil {
+		return 0, security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
+	}
+	rt, ok := sn.MatchSite(bind, host)
+	if !ok {
+		return 0, security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
+	}
+	return rt.Site.ID, security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
 }
 
 func shouldRecordDetailedAccessLog(info accessLogInfo) bool {
@@ -2186,11 +2418,21 @@ func rateLimitKey(clientIP net.IP, host string) string {
 }
 
 func shouldApplyErrorRateLimit(eng *engine.Engine, prot store.ProtectionConfig, key string) bool {
-	if eng == nil {
+	if eng == nil || !errorRateLimitConfigEnabled(prot) {
 		return false
 	}
 	errRL := eng.ErrRateLimiter()
 	return errRL != nil && errRL.Enabled() && errRL.IsOverLimit(key)
+}
+
+/**
+ * errorRateLimitConfigEnabled 判断当前快照是否提供了可执行的错误限流配置。
+ *
+ * 运行时 backend 可能在热重载期间暂时保留上一代状态，因此不能只依据
+ * backend.Enabled()；快照开关、窗口和配额必须同时有效，才能产生或累加 429。
+ */
+func errorRateLimitConfigEnabled(prot store.ProtectionConfig) bool {
+	return prot.ErrorRateLimitEnabled && prot.ErrorRateLimitWindow > 0 && prot.ErrorRateLimitMax > 0
 }
 
 func errorRateLimitAction(configured string) action.Result {
@@ -2213,23 +2455,26 @@ func errorRateLimitAction(configured string) action.Result {
 }
 
 func incrementErrorRateLimitBlock(eng *engine.Engine, prot store.ProtectionConfig, key string) {
-	if !prot.ErrorRateLimitCountBlock {
+	if !prot.ErrorRateLimitCountBlock || !errorRateLimitConfigEnabled(prot) {
 		return
 	}
-	incrementErrorRateLimit(eng, key)
+	incrementErrorRateLimit(eng, prot, key)
 }
 
 func incrementErrorRateLimitStatus(eng *engine.Engine, prot store.ProtectionConfig, key string, statusCode int) {
+	if !errorRateLimitConfigEnabled(prot) {
+		return
+	}
 	switch {
 	case prot.ErrorRateLimitCount4xx && statusCode >= 400 && statusCode < 500:
-		incrementErrorRateLimit(eng, key)
+		incrementErrorRateLimit(eng, prot, key)
 	case prot.ErrorRateLimitCount5xx && statusCode >= 500:
-		incrementErrorRateLimit(eng, key)
+		incrementErrorRateLimit(eng, prot, key)
 	}
 }
 
-func incrementErrorRateLimit(eng *engine.Engine, key string) {
-	if eng == nil {
+func incrementErrorRateLimit(eng *engine.Engine, prot store.ProtectionConfig, key string) {
+	if eng == nil || !errorRateLimitConfigEnabled(prot) {
 		return
 	}
 	errRL := eng.ErrRateLimiter()
@@ -2413,6 +2658,48 @@ func normalizeAntiReplayAction(raw string) string {
 	}
 }
 
+// siteChallengeAction 按「站点 → 全局」顺序解析质询动作覆盖：
+// 站点 rt.ChallengeAction 非空则优先；否则全局 ProtectionConfig.ChallengeAction
+// 非空且合法时使用；两者都不可用时返回空串，由调用方按原 result.Action.Type 分发。
+func siteChallengeAction(rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) string {
+	if rt != nil && rt.ChallengeAction != "" {
+		act := action.Normalize(action.Type(rt.ChallengeAction))
+		if act == action.Challenge || act == action.CaptchaChallenge || act == action.ShieldChallenge || act == action.ChainChallenge {
+			return string(act)
+		}
+	}
+	if sn != nil {
+		global := sn.Protection.ChallengeAction
+		if global != "" {
+			act := action.Normalize(action.Type(global))
+			if act == action.Challenge || act == action.CaptchaChallenge || act == action.ShieldChallenge || act == action.ChainChallenge {
+				return string(act)
+			}
+		}
+	}
+	return ""
+}
+
+// effectiveCaptchaType 计算验证码渲染分支使用的验证码类型：
+// 规则级 result.Action.CaptchaType 合法则优先；否则站点 rt.ChallengeCaptchaType；
+// 再否则全局 sn.Protection.CaptchaType。
+func effectiveCaptchaType(result action.Result, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) challenge.CaptchaType {
+	if challenge.IsValidCaptchaType(challenge.CaptchaType(result.CaptchaType)) {
+		return challenge.CaptchaType(result.CaptchaType)
+	}
+	if rt != nil {
+		if t := challenge.CaptchaType(rt.ChallengeCaptchaType); challenge.IsValidCaptchaType(t) {
+			return t
+		}
+	}
+	if sn != nil {
+		if t := challenge.CaptchaType(sn.Protection.CaptchaType); challenge.IsValidCaptchaType(t) {
+			return t
+		}
+	}
+	return "math"
+}
+
 // challengeTokenClaims 组装 JS 挑战 token 的客户端绑定信息。
 // 客户端 IP 按站点的 XFF 策略解析，与通行 cookie 使用同一套身份字段，
 // 保证挑战页与其换取的通行凭证绑定到同一个客户端。
@@ -2460,19 +2747,19 @@ func writeAntiReplayActionResponse(c *app.RequestContext, opts Options, sn *snap
 	binding := challengeSessionBindingForSite(rt.Site.ID, string(c.Host()), bind)
 	switch action.Type(antiReplayAct) {
 	case action.CaptchaChallenge:
-		if sn != nil && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil {
-			captchaType := challenge.CaptchaType(sn.Protection.CaptchaType)
+		if sn != nil && opts.CaptchaManager != nil {
+			captchaType := effectiveCaptchaType(action.Result{}, rt, sn)
 			challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, binding, statusCode, sn.CaptchaPage)
 			return
 		}
 	case action.ShieldChallenge:
-		if sn != nil && sn.Protection.ShieldEnabled && opts.ShieldManager != nil {
+		if sn != nil && opts.ShieldManager != nil {
 			origURL := string(c.Request.URI().RequestURI())
 			opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, requestProtocol(c), binding, statusCode)
 			return
 		}
 	case action.ChainChallenge:
-		if sn != nil && sn.Protection.ChainEnabled && opts.ChainManager != nil {
+		if sn != nil && opts.ChainManager != nil {
 			challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, binding, statusCode)
 			return
 		}

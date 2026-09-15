@@ -2,6 +2,8 @@ package auth
 
 import (
 	"encoding/base64"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -394,6 +396,109 @@ func TestBlacklistTokenPersistsToDB(t *testing.T) {
 	if row.Reason != "manual-revoke" {
 		t.Errorf("Reason = %q, want manual-revoke", row.Reason)
 	}
+}
+
+/** TestBlacklistTokenCheckedIsIdempotent verifies repeated revocation keeps one persistent row and returns no error. */
+func TestBlacklistTokenCheckedIsIdempotent(t *testing.T) {
+	db := newAuthTestDB(t)
+	tm := NewTokenManager([]byte("primary-secret-key"), db)
+	defer tm.Close()
+
+	exp := time.Now().Add(time.Hour)
+	if err := tm.BlacklistTokenChecked("repeat-jti", exp, "logout"); err != nil {
+		t.Fatalf("first blacklist: %v", err)
+	}
+	newExp := time.Now().Add(2 * time.Hour)
+	if err := tm.BlacklistTokenChecked("repeat-jti", newExp, "force-logout"); err != nil {
+		t.Fatalf("repeated blacklist: %v", err)
+	}
+	if !tm.IsBlacklisted("repeat-jti") {
+		t.Fatal("repeatedly blacklisted token must remain rejected")
+	}
+
+	var rows int64
+	if err := db.Model(&store.TokenBlacklist{}).Where("jti = ?", "repeat-jti").Count(&rows).Error; err != nil {
+		t.Fatalf("count blacklist rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("blacklist rows = %d, want 1", rows)
+	}
+	var row store.TokenBlacklist
+	if err := db.Where("jti = ?", "repeat-jti").First(&row).Error; err != nil {
+		t.Fatalf("load repeated blacklist row: %v", err)
+	}
+	if row.Reason != "force-logout" || row.ExpiresAt.Sub(newExp) > time.Second || newExp.Sub(row.ExpiresAt) > time.Second {
+		t.Fatalf("updated blacklist row = %#v, want reason/expiry from latest revoke", row)
+	}
+}
+
+func TestTokenManagerFailsClosedWhenBlacklistCannotLoad(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "blacklist-unavailable.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close sql db: %v", err)
+	}
+
+	secret := []byte("blacklist-unavailable-secret")
+	signer := NewTokenManager(secret, nil)
+	token, _, _, err := signer.SignAccessToken("alice", RoleAdmin, "", "")
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	signer.Close()
+
+	tm := NewTokenManager(secret, db)
+	defer tm.Close()
+	if tm.Ready() {
+		t.Fatal("token manager must not be ready while blacklist storage is unavailable")
+	}
+	if _, err := tm.VerifyAccessToken(token); !errors.Is(err, ErrTokenBlacklistUnavailable) {
+		t.Fatalf("VerifyAccessToken error = %v, want ErrTokenBlacklistUnavailable", err)
+	}
+}
+
+func TestTokenManagerRetriesBlacklistLoadAfterStoreRecovery(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "blacklist-retry.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	secret := []byte("blacklist-retry-secret")
+	signer := NewTokenManager(secret, nil)
+	token, _, _, err := signer.SignAccessToken("alice", RoleAdmin, "", "")
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	signer.Close()
+
+	tm := NewTokenManager(secret, db)
+	defer tm.Close()
+	if _, err := tm.VerifyAccessToken(token); !errors.Is(err, ErrTokenBlacklistUnavailable) {
+		t.Fatalf("initial VerifyAccessToken error = %v, want unavailable", err)
+	}
+	if err := db.AutoMigrate(&store.TokenBlacklist{}); err != nil {
+		t.Fatalf("recover blacklist table: %v", err)
+	}
+	tm.blacklistRetryAt.Store(0)
+	if _, err := tm.VerifyAccessToken(token); err != nil {
+		t.Fatalf("VerifyAccessToken after store recovery = %v", err)
+	}
+	if !tm.Ready() {
+		t.Fatal("token manager should become ready after blacklist reload succeeds")
+	}
+}
+
+func TestTokenManagerCloseIsIdempotent(t *testing.T) {
+	tm := NewTokenManager([]byte("close-idempotent-secret"), nil)
+	tm.Close()
+	tm.Close()
+	var zero TokenManager
+	zero.Close()
 }
 
 // TestNewTokenManagerLoadsBlacklistFromDB 重启场景：未过期条目应恢复，过期条目不应恢复。

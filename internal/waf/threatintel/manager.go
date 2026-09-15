@@ -41,7 +41,8 @@ type Manager struct {
 	reload  func() error
 	client  *http.Client
 
-	stopCh chan struct{}
+	stopCh   chan struct{}
+	stopOnce sync.Once
 
 	mu      sync.Mutex
 	syncing map[uint]bool // 正在同步的 feedID 集合
@@ -79,7 +80,14 @@ func (m *Manager) Start() {
 
 // Stop 通知后台循环退出。
 func (m *Manager) Stop() {
-	close(m.stopCh)
+	if m == nil {
+		return
+	}
+	m.stopOnce.Do(func() {
+		if m.stopCh != nil {
+			close(m.stopCh)
+		}
+	})
 }
 
 // loop 每分钟检查一次，触发所有到达同步时间的启用订阅源。

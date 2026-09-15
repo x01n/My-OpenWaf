@@ -12,19 +12,31 @@ import (
 )
 
 type SecurityEventRepo struct {
-	db         *gorm.DB
-	countCache CountCache
-	hotCache   HotCacheBackend
-	writeQueue WriteQueueBackend
+	db             *gorm.DB
+	countCache     CountCache
+	hotCache       HotCacheBackend
+	writeQueue     WriteQueueBackend
+	aggregateCache *securityEventAggregateCache
 }
 
 func NewSecurityEventRepo(db *gorm.DB) *SecurityEventRepo {
-	return &SecurityEventRepo{db: db}
+	return &SecurityEventRepo{
+		db:             db,
+		aggregateCache: newSecurityEventAggregateCache(),
+	}
 }
 
 // SetCountCache configures an optional count cache for list queries.
 func (r *SecurityEventRepo) SetCountCache(c CountCache) {
 	r.countCache = c
+}
+
+// invalidateCountCache 丢弃安全事件列表的 COUNT 缓存，确保直接仓储写入与异步写入提交后总数一致。
+func (r *SecurityEventRepo) invalidateCountCache() {
+	if r == nil || r.countCache == nil {
+		return
+	}
+	invalidateCountCachePrefixes(r.countCache, securityEventCountCachePrefix)
 }
 
 // SetHotCache configures Redis-backed hot cache for large query results.
@@ -66,6 +78,15 @@ type SecurityEventFilter struct {
 	Until           *time.Time
 }
 
+// securityEventListColumns excludes the large request audit payloads from list
+// and realtime polling queries. Get and FindByRequestID keep full-detail reads.
+var securityEventListColumns = []string{
+	"id", "created_at", "site_id", "request_id", "client_ip", "host", "path", "query_string", "method", "user_agent",
+	"rule_id", "rule_id_str", "phase", "action", "category", "match_desc", "request_body_truncated", "request_size",
+	"tls_version", "tls_sni", "tls_alpn", "tls_ja3", "tls_ja3_hash", "tls_ja4", "tls_cipher_suites", "tls_extensions",
+	"tls_curves", "tls_point_formats", "header_order", "geo_country", "geo_city", "status_code",
+}
+
 func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
 	f = normalizeSecurityEventFilter(f)
 	cacheKey := secEventCountCacheKey(f)
@@ -88,8 +109,10 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 	cached := false
 	if r.countCache != nil {
 		if value, ok := r.countCache.Get(cacheKey); ok {
-			total = value.(int64)
-			cached = true
+			if cachedTotal, ok := value.(int64); ok {
+				total = cachedTotal
+				cached = true
+			}
 		}
 	}
 	if !cached {
@@ -102,12 +125,12 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 	}
 
 	var items []store.SecurityEvent
-	if err := q.Offset(offset).Limit(limit).Order("id DESC").Find(&items).Error; err != nil {
+	if err := q.Select(securityEventListColumns).Offset(offset).Limit(limit).Order("created_at DESC, id DESC").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 
 	// Cache results in Redis.
-	if r.hotCache != nil && r.hotCache.Available() && len(items) > 0 {
+	if r.hotCache != nil && r.hotCache.Available() {
 		hcKey := "se_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
 		r.hotCache.SetList(hcKey, items, total, 5*time.Second)
 	}
@@ -209,106 +232,92 @@ func secEventCountCacheKey(f SecurityEventFilter) string {
 	var b strings.Builder
 	var ibuf [20]byte
 	b.Grow(64)
-	b.WriteString("se_count")
+	b.WriteString(securityEventCountCachePrefix)
+	appendPart := func(tag, value string) {
+		b.WriteByte('|')
+		b.WriteString(tag)
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(len(value)))
+		b.WriteByte(':')
+		b.WriteString(value)
+	}
+	appendUint := func(tag string, value uint64) {
+		appendPart(tag, string(strconv.AppendUint(ibuf[:0], value, 10)))
+	}
 	if f.ID > 0 {
-		b.WriteString(":id")
-		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.ID), 10))
+		appendUint("id", uint64(f.ID))
 	}
 	if f.SiteID > 0 {
-		b.WriteString(":s")
-		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.SiteID), 10))
+		appendUint("s", uint64(f.SiteID))
 	}
 	if f.Query != "" {
-		b.WriteString(":q")
-		b.WriteString(f.Query)
+		appendPart("q", f.Query)
 	}
 	if f.RequestID != "" {
-		b.WriteString(":rid")
-		b.WriteString(f.RequestID)
+		appendPart("rid", f.RequestID)
 	}
 	if f.Action != "" {
-		b.WriteString(":a")
-		b.WriteString(f.Action)
+		appendPart("a", f.Action)
 	}
 	if f.Phase != "" {
-		b.WriteString(":ph")
-		b.WriteString(f.Phase)
+		appendPart("ph", f.Phase)
 	}
 	if f.Category != "" {
-		b.WriteString(":c")
-		b.WriteString(f.Category)
+		appendPart("c", f.Category)
 	}
 	if f.ClientIP != "" {
-		b.WriteString(":ip")
-		b.WriteString(f.ClientIP)
+		appendPart("ip", f.ClientIP)
 	}
 	if f.Host != "" {
-		b.WriteString(":h")
-		b.WriteString(f.Host)
+		appendPart("h", f.Host)
 	}
 	if f.Path != "" {
-		b.WriteString(":p")
-		b.WriteString(f.Path)
+		appendPart("p", f.Path)
 	}
 	if f.QueryString != "" {
-		b.WriteString(":qs")
-		b.WriteString(f.QueryString)
+		appendPart("qs", f.QueryString)
 	}
 	if f.RuleID > 0 {
-		b.WriteString(":r")
-		b.Write(strconv.AppendUint(ibuf[:0], uint64(f.RuleID), 10))
+		appendUint("r", uint64(f.RuleID))
 	}
 	if f.RuleIDStr != "" {
-		b.WriteString(":rs")
-		b.WriteString(f.RuleIDStr)
+		appendPart("rs", f.RuleIDStr)
 	}
 	if f.TLSVersion != "" {
-		b.WriteString(":tv")
-		b.WriteString(f.TLSVersion)
+		appendPart("tv", f.TLSVersion)
 	}
 	if f.TLSSNI != "" {
-		b.WriteString(":sni")
-		b.WriteString(f.TLSSNI)
+		appendPart("sni", f.TLSSNI)
 	}
 	if f.TLSALPN != "" {
-		b.WriteString(":alpn")
-		b.WriteString(f.TLSALPN)
+		appendPart("alpn", f.TLSALPN)
 	}
 	if f.TLSJA3Hash != "" {
-		b.WriteString(":j3h")
-		b.WriteString(f.TLSJA3Hash)
+		appendPart("j3h", f.TLSJA3Hash)
 	}
 	if f.TLSJA4 != "" {
-		b.WriteString(":j4")
-		b.WriteString(f.TLSJA4)
+		appendPart("j4", f.TLSJA4)
 	}
 	if f.TLSCipherSuites != "" {
-		b.WriteString(":tcs")
-		b.WriteString(f.TLSCipherSuites)
+		appendPart("tcs", f.TLSCipherSuites)
 	}
 	if f.TLSExtensions != "" {
-		b.WriteString(":tex")
-		b.WriteString(f.TLSExtensions)
+		appendPart("tex", f.TLSExtensions)
 	}
 	if f.TLSCurves != "" {
-		b.WriteString(":tcu")
-		b.WriteString(f.TLSCurves)
+		appendPart("tcu", f.TLSCurves)
 	}
 	if f.TLSPointFormats != "" {
-		b.WriteString(":tpf")
-		b.WriteString(f.TLSPointFormats)
+		appendPart("tpf", f.TLSPointFormats)
 	}
 	if f.HeaderOrder != "" {
-		b.WriteString(":ho")
-		b.WriteString(f.HeaderOrder)
+		appendPart("ho", f.HeaderOrder)
 	}
 	if f.Since != nil {
-		b.WriteString(":si")
-		b.WriteString(f.Since.Format("0601021504"))
+		appendPart("si", f.Since.UTC().Format(time.RFC3339Nano))
 	}
 	if f.Until != nil {
-		b.WriteString(":un")
-		b.WriteString(f.Until.Format("0601021504"))
+		appendPart("un", f.Until.UTC().Format(time.RFC3339Nano))
 	}
 	return b.String()
 }
@@ -326,11 +335,21 @@ func (r *SecurityEventRepo) Get(id uint) (*store.SecurityEvent, error) {
 func (r *SecurityEventRepo) Create(item *store.SecurityEvent) error {
 	if r.writeQueue != nil {
 		r.writeQueue.Submit(func(tx *gorm.DB) error {
-			return tx.Create(item).Error
+			err := tx.Create(item).Error
+			if err == nil {
+				r.invalidateCountCache()
+				r.aggregateCache.invalidate()
+			}
+			return err
 		})
 		return nil
 	}
-	return r.db.Create(item).Error
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.invalidateCountCache()
+		r.aggregateCache.invalidate()
+	}
+	return err
 }
 
 func (r *SecurityEventRepo) FindByRequestID(requestID string) ([]store.SecurityEvent, error) {
@@ -347,13 +366,23 @@ func (r *SecurityEventRepo) BatchCreate(items []store.SecurityEvent) error {
 		batch := make([]store.SecurityEvent, len(items))
 		copy(batch, items)
 		r.writeQueue.Submit(func(tx *gorm.DB) error {
-			return tx.CreateInBatches(batch, 100).Error
+			err := tx.CreateInBatches(batch, 100).Error
+			if err == nil {
+				r.invalidateCountCache()
+				r.aggregateCache.invalidate()
+			}
+			return err
 		})
 		return nil
 	}
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		return tx.CreateInBatches(items, 100).Error
 	})
+	if err == nil {
+		r.invalidateCountCache()
+		r.aggregateCache.invalidate()
+	}
+	return err
 }
 
 func (r *SecurityEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
@@ -368,6 +397,10 @@ func (r *SecurityEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
 			return totalDeleted, tx.Error
 		}
 		totalDeleted += tx.RowsAffected
+		if tx.RowsAffected > 0 {
+			r.invalidateCountCache()
+			r.aggregateCache.invalidate()
+		}
 		if tx.RowsAffected < batchSize {
 			break
 		}
@@ -563,7 +596,10 @@ func hourBucketExpr(db *gorm.DB) string {
 	}
 }
 
-var terminalSecurityEventActions = []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}
+var (
+	terminalSecurityEventActions  = []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}
+	challengeSecurityEventActions = []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"}
+)
 
 func (r *SecurityEventRepo) Timeline(since, until time.Time) ([]TimelineBucket, error) {
 	var buckets []TimelineBucket
@@ -609,17 +645,17 @@ func (r *SecurityEventRepo) CountObserve(since time.Time) (int64, error) {
 
 func (r *SecurityEventRepo) CountChallenge(since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, challengeSecurityEventActions).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) CountChallengeBySite(siteID uint, since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, challengeSecurityEventActions).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) GetLatestBySite(siteID uint, limit int) ([]store.SecurityEvent, error) {
 	var items []store.SecurityEvent
-	return items, r.db.Where("site_id = ?", siteID).Order("id DESC").Limit(limit).Find(&items).Error
+	return items, r.db.Select(securityEventListColumns).Where("site_id = ?", siteID).Order("created_at DESC, id DESC").Limit(limit).Find(&items).Error
 }
 
 func (r *SecurityEventRepo) CountTerminalBySite(siteID uint, since time.Time) (int64, error) {

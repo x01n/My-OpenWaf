@@ -218,6 +218,64 @@ func TestBuildDashboardSnapshotCountsVisitorFusionWindow(t *testing.T) {
 	}
 }
 
+func TestBuildDashboardSnapshotAggregatesBotAndDropClassifications(t *testing.T) {
+	configDB := newDashboardConfigDBForTest(t)
+	logDB := newDashboardLogDBForTest(t)
+	now := time.Now()
+
+	botItems := []store.BotScoreLog{
+		{RequestID: "bot-block-high", SiteID: 1, Action: "block", IsHighRisk: true, CreatedAt: now},
+		{RequestID: "bot-drop-normal", SiteID: 1, Action: "drop", IsHighRisk: false, CreatedAt: now.Add(-time.Minute)},
+		{RequestID: "bot-observe-high", SiteID: 1, Action: "observe", IsHighRisk: true, CreatedAt: now.Add(-2 * time.Minute)},
+		{RequestID: "bot-challenge-normal", SiteID: 1, Action: "challenge", IsHighRisk: false, CreatedAt: now.Add(-3 * time.Minute)},
+		{RequestID: "bot-outside-window", SiteID: 1, Action: "block", IsHighRisk: true, CreatedAt: now.Add(-25 * time.Hour)},
+	}
+	if err := logDB.Create(&botItems).Error; err != nil {
+		t.Fatalf("seed bot score logs: %v", err)
+	}
+	dropItems := []store.DropEvent{
+		{Source: "bot", CreatedAt: now},
+		{Source: "bot", CreatedAt: now.Add(-time.Minute)},
+		{Source: "cve", CreatedAt: now.Add(-2 * time.Minute)},
+		{Source: "rule", CreatedAt: now.Add(-3 * time.Minute)},
+		{Source: "ip_reputation", CreatedAt: now.Add(-4 * time.Minute)},
+		{Source: "bot", CreatedAt: now.Add(-25 * time.Hour)},
+	}
+	if err := logDB.Create(&dropItems).Error; err != nil {
+		t.Fatalf("seed drop events: %v", err)
+	}
+
+	result := BuildDashboardSnapshot(&DashboardDeps{
+		Metrics:  dataplane.NewMetrics(),
+		ConfigDB: configDB,
+		LogDB:    logDB,
+		Cache:    nil,
+	})
+
+	assertInt64 := func(key string, want int64) {
+		t.Helper()
+		got, ok := result[key].(int64)
+		if !ok || got != want {
+			t.Fatalf("%s = %#v, want %d", key, result[key], want)
+		}
+	}
+	assertInt64("bot_total_24h", 4)
+	assertInt64("bot_blocked_24h", 2)
+	assertInt64("bot_high_risk_24h", 2)
+	assertInt64("drop_total_24h", 5)
+
+	bySource, ok := result["drop_by_source_24h"].(map[string]int64)
+	if !ok {
+		t.Fatalf("drop_by_source_24h missing or wrong type: %#v", result["drop_by_source_24h"])
+	}
+	wantBySource := map[string]int64{"bot": 2, "cve": 1, "rule": 1, "ip_reputation": 1}
+	for source, want := range wantBySource {
+		if bySource[source] != want {
+			t.Fatalf("drop_by_source_24h[%s] = %d, want %d", source, bySource[source], want)
+		}
+	}
+}
+
 // TestBuildDashboardSnapshotIncludesVisitorKindStats 验证 BuildDashboardSnapshot
 // 注入 AccessRepo 后能在返回结构中输出 human_visits_24h / bot_visits_24h 字段。
 func TestBuildDashboardSnapshotIncludesVisitorKindStats(t *testing.T) {
@@ -289,5 +347,165 @@ func TestBuildDashboardSnapshotIncludesVisitorKindStats(t *testing.T) {
 	// 本组 fixture 无「其他非安全类」动作，故三类之和恰等于总数。
 	if human+bot+intercepted != total {
 		t.Fatalf("human+bot+intercepted = %d, want %d", human+bot+intercepted, total)
+	}
+}
+
+func TestBuildDashboardSnapshotCachesDBStatsWithoutRedis(t *testing.T) {
+	configDB := newDashboardConfigDBForTest(t)
+	logDB := newDashboardLogDBForTest(t)
+	now := time.Now()
+	if err := logDB.Create(&store.AccessLog{
+		ClientIP:  "192.0.2.1",
+		RequestID: "cache-first",
+		CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed first access log: %v", err)
+	}
+
+	deps := &DashboardDeps{
+		Metrics:    dataplane.NewMetrics(),
+		ConfigDB:   configDB,
+		LogDB:      logDB,
+		AccessRepo: repository.NewAccessLogRepo(logDB),
+	}
+	first := BuildDashboardSnapshot(deps)
+	if got := first["unique_visitors_24h"]; got != int64(1) {
+		t.Fatalf("first unique_visitors_24h = %#v, want 1", got)
+	}
+
+	if err := logDB.Create(&store.AccessLog{
+		ClientIP:  "192.0.2.2",
+		RequestID: "cache-second",
+		CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed second access log: %v", err)
+	}
+	cached := BuildDashboardSnapshot(deps)
+	if got := cached["unique_visitors_24h"]; got != int64(1) {
+		t.Fatalf("cached unique_visitors_24h = %#v, want 1", got)
+	}
+
+	deps.localCacheMu.Lock()
+	deps.localCacheExpiresAt = time.Now().Add(-time.Second)
+	deps.localCacheMu.Unlock()
+	refreshed := BuildDashboardSnapshot(deps)
+	if got := refreshed["unique_visitors_24h"]; got != int64(2) {
+		t.Fatalf("refreshed unique_visitors_24h = %#v, want 2", got)
+	}
+}
+
+func TestBuildDashboardSnapshotDoesNotCacheFailedLoadAndRetries(t *testing.T) {
+	configDB := newDashboardConfigDBForTest(t)
+	logDB := newDashboardLogDBForTest(t)
+	if err := logDB.Create(&store.AccessLog{
+		ClientIP:  "192.0.2.10",
+		RequestID: "retry-after-failure",
+		CreatedAt: time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed access log: %v", err)
+	}
+
+	brokenRepoDB := newDashboardLogDBForTest(t)
+	sqlDB, err := brokenRepoDB.DB()
+	if err != nil {
+		t.Fatalf("get broken repository sql db: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close broken repository sql db: %v", err)
+	}
+
+	deps := &DashboardDeps{
+		Metrics:    dataplane.NewMetrics(),
+		ConfigDB:   configDB,
+		LogDB:      logDB,
+		AccessRepo: repository.NewAccessLogRepo(brokenRepoDB),
+	}
+	failed := BuildDashboardSnapshot(deps)
+	if got := failed["unique_visitors_24h"]; got != int64(0) {
+		t.Fatalf("failed load exposed partial unique_visitors_24h = %#v, want 0", got)
+	}
+	if deps.localCacheValid {
+		t.Fatal("failed first load must not populate local cache")
+	}
+	if !deps.localCacheExpiresAt.IsZero() || !deps.localCacheRetryAt.IsZero() {
+		t.Fatalf("failed first load changed cache deadlines: expires=%v retry=%v", deps.localCacheExpiresAt, deps.localCacheRetryAt)
+	}
+	for _, key := range []string{"human_visits_24h", "bot_total_24h", "cve_by_type_24h", "drop_by_source_24h"} {
+		if _, ok := failed[key]; !ok {
+			t.Fatalf("failed load response missing key %q", key)
+		}
+	}
+
+	deps.AccessRepo = repository.NewAccessLogRepo(logDB)
+	recovered := BuildDashboardSnapshot(deps)
+	if got := recovered["unique_visitors_24h"]; got != int64(1) {
+		t.Fatalf("recovered unique_visitors_24h = %#v, want 1", got)
+	}
+	if !deps.localCacheValid {
+		t.Fatal("successful retry must populate local cache")
+	}
+}
+
+func TestBuildDashboardSnapshotReturnsLastGoodAfterFailure(t *testing.T) {
+	configDB := newDashboardConfigDBForTest(t)
+	logDB := newDashboardLogDBForTest(t)
+	now := time.Now()
+	if err := logDB.Create(&store.AccessLog{
+		ClientIP:  "192.0.2.20",
+		RequestID: "last-good-first",
+		CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed first access log: %v", err)
+	}
+
+	deps := &DashboardDeps{
+		Metrics:    dataplane.NewMetrics(),
+		ConfigDB:   configDB,
+		LogDB:      logDB,
+		AccessRepo: repository.NewAccessLogRepo(logDB),
+	}
+	first := BuildDashboardSnapshot(deps)
+	if got := first["unique_visitors_24h"]; got != int64(1) {
+		t.Fatalf("first unique_visitors_24h = %#v, want 1", got)
+	}
+
+	if err := logDB.Create(&store.AccessLog{
+		ClientIP:  "192.0.2.21",
+		RequestID: "last-good-second",
+		CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed second access log: %v", err)
+	}
+	if err := logDB.Migrator().DropTable(&store.DropEvent{}); err != nil {
+		t.Fatalf("drop drop_events: %v", err)
+	}
+
+	deps.localCacheMu.Lock()
+	expiredAt := time.Now().Add(-time.Second)
+	deps.localCacheExpiresAt = expiredAt
+	deps.localCacheMu.Unlock()
+	stale := BuildDashboardSnapshot(deps)
+	if got := stale["unique_visitors_24h"]; got != int64(1) {
+		t.Fatalf("failed refresh unique_visitors_24h = %#v, want last-good 1", got)
+	}
+	if deps.localCacheStats.UniqueVisitors24h != 1 {
+		t.Fatalf("failed refresh replaced last-good stats: %+v", deps.localCacheStats)
+	}
+	if !deps.localCacheExpiresAt.Equal(expiredAt) {
+		t.Fatalf("failed refresh extended cache expiry to %v, want %v", deps.localCacheExpiresAt, expiredAt)
+	}
+	if !deps.localCacheRetryAt.After(time.Now()) {
+		t.Fatalf("failed refresh retry deadline = %v, want a short future backoff", deps.localCacheRetryAt)
+	}
+
+	if err := logDB.AutoMigrate(&store.DropEvent{}); err != nil {
+		t.Fatalf("restore drop_events: %v", err)
+	}
+	deps.localCacheMu.Lock()
+	deps.localCacheRetryAt = time.Now().Add(-time.Second)
+	deps.localCacheMu.Unlock()
+	recovered := BuildDashboardSnapshot(deps)
+	if got := recovered["unique_visitors_24h"]; got != int64(2) {
+		t.Fatalf("recovered unique_visitors_24h = %#v, want 2", got)
 	}
 }

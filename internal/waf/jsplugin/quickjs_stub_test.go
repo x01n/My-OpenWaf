@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"My-OpenWaf/internal/store"
 )
 
 func TestStubReportsUnavailable(t *testing.T) {
@@ -35,5 +37,16 @@ func TestPublicTypesAndSiteMatching(t *testing.T) {
 	}
 	if err := validateMutationPlan(MutationPlan{}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStubRejectsResponseStageBeforeRuntimeError(t *testing.T) {
+	engine := &Engine{}
+	script := &Script{stage: store.JSStageResponse}
+	if _, err := engine.Evaluate(context.Background(), script, RequestSnapshot{}); !errors.Is(err, ErrResponseStageUnavailable) {
+		t.Fatalf("Evaluate error = %v, want %v", err, ErrResponseStageUnavailable)
+	}
+	if _, err := engine.Validate(context.Background(), script, RequestSnapshot{}); !errors.Is(err, ErrResponseStageUnavailable) {
+		t.Fatalf("Validate error = %v, want %v", err, ErrResponseStageUnavailable)
 	}
 }

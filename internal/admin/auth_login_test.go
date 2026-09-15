@@ -99,6 +99,9 @@ func TestLoginSuccessIssuesTokenAndCookie(t *testing.T) {
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
+	if got := string(ctx.Response.Header.Peek("Cache-Control")); got != "no-store" {
+		t.Fatalf("login Cache-Control = %q, want no-store", got)
+	}
 	var resp struct {
 		AccessToken string `json:"access_token"`
 		ExpiresAt   int64  `json:"expires_at"`
@@ -294,6 +297,9 @@ func TestRefreshSucceedsWithValidCookie(t *testing.T) {
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
+	if got := string(ctx.Response.Header.Peek("Cache-Control")); got != "no-store" {
+		t.Fatalf("refresh Cache-Control = %q, want no-store", got)
+	}
 	var resp struct {
 		AccessToken string `json:"access_token"`
 		Username    string `json:"username"`
@@ -329,5 +335,134 @@ func TestRefreshRotatesToken(t *testing.T) {
 	replay := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":"+raw)
 	if replay.Response.StatusCode() == 200 {
 		t.Fatal("replaying a consumed refresh token must not succeed")
+	}
+	if got := string(replay.Response.Header.Peek("Set-Cookie")); got != "" {
+		t.Fatalf("replayed refresh must not clear a newer shared cookie: %q", got)
+	}
+}
+
+// TestLogoutRevokesRotatedRefreshChain 验证轮换完成后使用旧 cookie 登出仍会撤销后继 refresh token。
+func TestLogoutRevokesRotatedRefreshChain(t *testing.T) {
+	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
+	expiresAt := time.Now().Add(auth.RefreshTTL)
+	if _, err := d.RTRepo.Create("logout-old", "old-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
+		t.Fatalf("create old refresh token: %v", err)
+	}
+	if _, err := d.RTRepo.Create("logout-unrelated", "other-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
+		t.Fatalf("create unrelated refresh token: %v", err)
+	}
+	if _, err := d.RTRepo.Rotate("logout-old", "logout-new", "new-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
+		t.Fatalf("rotate refresh token: %v", err)
+	}
+
+	ctx := invokeAuthHandler(LogoutHandler(d), "/api/v1/auth/logout", nil, "logout-old:old-raw")
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("logout: want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if _, err := d.RTRepo.FindByJTI("logout-new"); err == nil {
+		t.Fatal("rotated refresh token remains active after logout")
+	}
+	if _, err := d.RTRepo.FindByJTI("logout-unrelated"); err != nil {
+		t.Fatalf("unrelated refresh token was revoked: %v", err)
+	}
+}
+
+// TestAuthFailuresAreNotCacheable 验证认证失败响应同样禁止被浏览器或代理缓存。
+func TestAuthFailuresAreNotCacheable(t *testing.T) {
+	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
+	for name, ctx := range map[string]*app.RequestContext{
+		"login":   invokeAuthHandler(LoginHandler(d), "/api/v1/auth/login", []byte(`not json`), ""),
+		"refresh": invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, ""),
+	} {
+		if got := string(ctx.Response.Header.Peek("Cache-Control")); got != "no-store" {
+			t.Errorf("%s Cache-Control = %q, want no-store", name, got)
+		}
+	}
+}
+
+// TestRefreshUsesCurrentAccountRole 验证刷新时以账号表当前角色为准，不沿用旧令牌角色。
+func TestRefreshUsesCurrentAccountRole(t *testing.T) {
+	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
+	acct, err := d.AccountRepo.GetByUsername("alice")
+	if err != nil {
+		t.Fatalf("load account: %v", err)
+	}
+	if err := d.AccountRepo.UpdateRole(acct.ID, auth.RoleReadonly); err != nil {
+		t.Fatalf("demote account: %v", err)
+	}
+	jti, raw, hash, err := auth.GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("generate refresh token: %v", err)
+	}
+	if _, err := d.RTRepo.Create(jti, hash, "alice", auth.RoleAdmin, time.Now().Add(auth.RefreshTTL)); err != nil {
+		t.Fatalf("store refresh token: %v", err)
+	}
+
+	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":"+raw)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("refresh: want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var resp struct {
+		AccessToken string `json:"access_token"`
+		Role        string `json:"role"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Role != auth.RoleReadonly {
+		t.Fatalf("response role = %q, want %q", resp.Role, auth.RoleReadonly)
+	}
+	claims, err := auth.VerifyAccessToken(resp.AccessToken, d.JWTSecret)
+	if err != nil {
+		t.Fatalf("verify access token: %v", err)
+	}
+	if claims.Role != auth.RoleReadonly {
+		t.Fatalf("access token role = %q, want %q", claims.Role, auth.RoleReadonly)
+	}
+}
+
+// TestRefreshRejectsDeletedAccount 验证账号不存在时拒绝刷新并撤销旧令牌。
+func TestRefreshRejectsDeletedAccount(t *testing.T) {
+	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
+	jti, raw, hash, err := auth.GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("generate refresh token: %v", err)
+	}
+	if _, err := d.RTRepo.Create(jti, hash, "deleted-user", auth.RoleAdmin, time.Now().Add(auth.RefreshTTL)); err != nil {
+		t.Fatalf("store refresh token: %v", err)
+	}
+
+	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":"+raw)
+	if ctx.Response.StatusCode() != 401 {
+		t.Fatalf("deleted account refresh: want 401, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if _, err := d.RTRepo.FindByJTI(jti); err == nil {
+		t.Fatal("deleted account refresh token must be revoked")
+	}
+}
+
+// TestRefreshKeepsSessionWhenRefreshStoreUnavailable verifies transient storage errors do not become credential expiry.
+func TestRefreshKeepsSessionWhenRefreshStoreUnavailable(t *testing.T) {
+	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
+	sqlDB, err := d.DB.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close sql db: %v", err)
+	}
+
+	ctx := invokeAuthHandler(
+		RefreshHandler(d),
+		"/api/v1/auth/refresh",
+		nil,
+		"unavailable-jti:raw-token",
+	)
+	if ctx.Response.StatusCode() != 503 {
+		t.Fatalf("unavailable refresh store: want 503, got %d: %s",
+			ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if got := string(ctx.Response.Header.Peek("Set-Cookie")); got != "" {
+		t.Fatalf("unavailable refresh store must not clear the shared cookie: %q", got)
 	}
 }

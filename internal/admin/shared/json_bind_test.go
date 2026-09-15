@@ -30,6 +30,44 @@ func TestProtectionConfigUnmarshalWithCCRulesArray(t *testing.T) {
 	}
 }
 
+// TestBindSiteFromRequestBodyChallengeActionNullInherits 覆盖站点质询策略
+// 三态语义：显式 JSON null 置 nil（回到继承全局），不传时保留原值。
+func TestBindSiteFromRequestBodyChallengeActionNullInherits(t *testing.T) {
+	oldAction := "shield_challenge"
+	oldCaptcha := "rotate"
+	existing := store.Site{
+		Host:            "old.example",
+		ChallengeAction: &oldAction,
+		SiteCaptchaType: &oldCaptcha,
+	}
+
+	// 显式 null：清除站点覆盖。
+	if err := BindSiteFromRequestBody([]byte(`{"challenge_action":null,"captcha_type":null}`), &existing); err != nil {
+		t.Fatal(err)
+	}
+	if existing.ChallengeAction != nil {
+		t.Fatalf("challenge_action = %#v, want nil", existing.ChallengeAction)
+	}
+	if existing.SiteCaptchaType != nil {
+		t.Fatalf("captcha_type = %#v, want nil", existing.SiteCaptchaType)
+	}
+
+	// 不传：保留原值（Update 场景）。
+	newAction := "captcha_challenge"
+	newCaptcha := "slide"
+	existing.ChallengeAction = &newAction
+	existing.SiteCaptchaType = &newCaptcha
+	if err := BindSiteFromRequestBody([]byte(`{"host":"new.example"}`), &existing); err != nil {
+		t.Fatal(err)
+	}
+	if existing.ChallengeAction == nil || *existing.ChallengeAction != newAction {
+		t.Fatalf("challenge_action should be preserved, got %#v", existing.ChallengeAction)
+	}
+	if existing.SiteCaptchaType == nil || *existing.SiteCaptchaType != newCaptcha {
+		t.Fatalf("captcha_type should be preserved, got %#v", existing.SiteCaptchaType)
+	}
+}
+
 func TestBindSiteFromRequestBody_JSONArraysBecomeStrings(t *testing.T) {
 	body := []byte(`{
 		"host": "a.example",

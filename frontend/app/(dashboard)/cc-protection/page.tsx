@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
 import { PageHeader } from "@/components/page-header"
 import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -40,6 +41,8 @@ type ProtectionSettingsData = NonNullable<
 
 interface CCProtectionFormProps {
   settings: ProtectionSettingsData
+  canManage: boolean
+  authLoading: boolean
   /** 请求父组件重挂载本表单以还原为服务端初值 */
   onReset: () => void
 }
@@ -50,7 +53,12 @@ interface CCProtectionFormProps {
  * 表单本地状态在挂载时通过 lazy 初始化从 settings 派生（不在 effect 中同步），
  * 因此取消操作由父组件通过 bump key 重挂载来还原初值，避免 effect 内 setState 的级联渲染。
  */
-function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
+function CCProtectionForm({
+  settings,
+  canManage,
+  authLoading,
+  onReset,
+}: CCProtectionFormProps) {
   const { t } = useTranslation()
   const updateSettings = useProtectionSettingsUpdate()
 
@@ -97,34 +105,55 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
   )
 
   const handleSave = async () => {
+    if (!canManage) return
     const payload: Record<string, unknown> = {}
-    const initialRequestRateLimitEnabled = settings.request_ratelimit_enabled ?? false
-    const initialRequestRateLimitWindow = settings.request_ratelimit_window ?? 60
+    const initialRequestRateLimitEnabled =
+      settings.request_ratelimit_enabled ?? false
+    const initialRequestRateLimitWindow =
+      settings.request_ratelimit_window ?? 60
     const initialRequestRateLimitMax = settings.request_ratelimit_max ?? 300
-    const initialRequestRateLimitAction = settings.request_ratelimit_action ?? "rate_limit"
-    const initialErrorRateLimitEnabled = settings.error_ratelimit_enabled ?? false
+    const initialRequestRateLimitAction =
+      settings.request_ratelimit_action ?? "rate_limit"
+    const initialErrorRateLimitEnabled =
+      settings.error_ratelimit_enabled ?? false
     const initialErrorRateLimitWindow = settings.error_ratelimit_window ?? 300
     const initialErrorRateLimitMax = settings.error_ratelimit_max ?? 30
-    const initialErrorRateLimitCount4xx = settings.error_ratelimit_count_4xx ?? true
-    const initialErrorRateLimitCount5xx = settings.error_ratelimit_count_5xx ?? true
-    const initialErrorRateLimitCountBlock = settings.error_ratelimit_count_block ?? false
-    const initialErrorRateLimitAction = settings.error_ratelimit_action ?? "rate_limit"
+    const initialErrorRateLimitCount4xx =
+      settings.error_ratelimit_count_4xx ?? true
+    const initialErrorRateLimitCount5xx =
+      settings.error_ratelimit_count_5xx ?? true
+    const initialErrorRateLimitCountBlock =
+      settings.error_ratelimit_count_block ?? false
+    const initialErrorRateLimitAction =
+      settings.error_ratelimit_action ?? "rate_limit"
     const initialCCUseCustom = settings.cc_use_custom ?? false
     const initialCCRules = toCCRules(settings.cc_rules)
 
-    if (requestRateLimitEnabled !== initialRequestRateLimitEnabled) payload.request_ratelimit_enabled = requestRateLimitEnabled
-    if (requestRateLimitWindow !== initialRequestRateLimitWindow) payload.request_ratelimit_window = requestRateLimitWindow
-    if (requestRateLimitMax !== initialRequestRateLimitMax) payload.request_ratelimit_max = requestRateLimitMax
-    if (requestRateLimitAction !== initialRequestRateLimitAction) payload.request_ratelimit_action = requestRateLimitAction
-    if (errorRateLimitEnabled !== initialErrorRateLimitEnabled) payload.error_ratelimit_enabled = errorRateLimitEnabled
-    if (errorRateLimitWindow !== initialErrorRateLimitWindow) payload.error_ratelimit_window = errorRateLimitWindow
-    if (errorRateLimitMax !== initialErrorRateLimitMax) payload.error_ratelimit_max = errorRateLimitMax
-    if (errorRateLimitCount4xx !== initialErrorRateLimitCount4xx) payload.error_ratelimit_count_4xx = errorRateLimitCount4xx
-    if (errorRateLimitCount5xx !== initialErrorRateLimitCount5xx) payload.error_ratelimit_count_5xx = errorRateLimitCount5xx
-    if (errorRateLimitCountBlock !== initialErrorRateLimitCountBlock) payload.error_ratelimit_count_block = errorRateLimitCountBlock
-    if (errorRateLimitAction !== initialErrorRateLimitAction) payload.error_ratelimit_action = errorRateLimitAction
+    if (requestRateLimitEnabled !== initialRequestRateLimitEnabled)
+      payload.request_ratelimit_enabled = requestRateLimitEnabled
+    if (requestRateLimitWindow !== initialRequestRateLimitWindow)
+      payload.request_ratelimit_window = requestRateLimitWindow
+    if (requestRateLimitMax !== initialRequestRateLimitMax)
+      payload.request_ratelimit_max = requestRateLimitMax
+    if (requestRateLimitAction !== initialRequestRateLimitAction)
+      payload.request_ratelimit_action = requestRateLimitAction
+    if (errorRateLimitEnabled !== initialErrorRateLimitEnabled)
+      payload.error_ratelimit_enabled = errorRateLimitEnabled
+    if (errorRateLimitWindow !== initialErrorRateLimitWindow)
+      payload.error_ratelimit_window = errorRateLimitWindow
+    if (errorRateLimitMax !== initialErrorRateLimitMax)
+      payload.error_ratelimit_max = errorRateLimitMax
+    if (errorRateLimitCount4xx !== initialErrorRateLimitCount4xx)
+      payload.error_ratelimit_count_4xx = errorRateLimitCount4xx
+    if (errorRateLimitCount5xx !== initialErrorRateLimitCount5xx)
+      payload.error_ratelimit_count_5xx = errorRateLimitCount5xx
+    if (errorRateLimitCountBlock !== initialErrorRateLimitCountBlock)
+      payload.error_ratelimit_count_block = errorRateLimitCountBlock
+    if (errorRateLimitAction !== initialErrorRateLimitAction)
+      payload.error_ratelimit_action = errorRateLimitAction
     if (ccUseCustom !== initialCCUseCustom) payload.cc_use_custom = ccUseCustom
-    if (JSON.stringify(ccRules) !== JSON.stringify(initialCCRules)) payload.cc_rules = ccRules
+    if (JSON.stringify(ccRules) !== JSON.stringify(initialCCRules))
+      payload.cc_rules = ccRules
 
     if (Object.keys(payload).length === 0) {
       return
@@ -148,6 +177,12 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
         title={t("ccProtection.title")}
         description={t("ccProtection.description")}
       />
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
+        </Alert>
+      )}
 
       <Tabs defaultValue="rate-limit">
         <TabsList>
@@ -173,6 +208,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
               <div className="flex items-center gap-4">
                 <Switch
                   checked={requestRateLimitEnabled}
+                  disabled={!canManage}
                   onCheckedChange={setRequestRateLimitEnabled}
                   id="req-rate-limit"
                 />
@@ -189,6 +225,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                         type="number"
                         min={1}
                         value={requestRateLimitWindow}
+                        disabled={!canManage}
                         onChange={(e) =>
                           setRequestRateLimitWindow(Number(e.target.value))
                         }
@@ -204,6 +241,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                       type="number"
                       min={1}
                       value={requestRateLimitMax}
+                      disabled={!canManage}
                       onChange={(e) =>
                         setRequestRateLimitMax(Number(e.target.value))
                       }
@@ -213,6 +251,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                     <Label>{t("ccProtection.action")}</Label>
                     <Select
                       value={requestRateLimitAction}
+                      disabled={!canManage}
                       onValueChange={setRequestRateLimitAction}
                     >
                       <SelectTrigger>
@@ -244,6 +283,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
               <div className="flex items-center gap-4">
                 <Switch
                   checked={errorRateLimitEnabled}
+                  disabled={!canManage}
                   onCheckedChange={setErrorRateLimitEnabled}
                   id="err-rate-limit"
                 />
@@ -261,6 +301,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                           type="number"
                           min={1}
                           value={errorRateLimitWindow}
+                          disabled={!canManage}
                           onChange={(e) =>
                             setErrorRateLimitWindow(Number(e.target.value))
                           }
@@ -276,6 +317,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                         type="number"
                         min={1}
                         value={errorRateLimitMax}
+                        disabled={!canManage}
                         onChange={(e) =>
                           setErrorRateLimitMax(Number(e.target.value))
                         }
@@ -285,6 +327,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                       <Label>{t("ccProtection.action")}</Label>
                       <Select
                         value={errorRateLimitAction}
+                        disabled={!canManage}
                         onValueChange={setErrorRateLimitAction}
                       >
                         <SelectTrigger>
@@ -304,6 +347,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                     <div className="flex items-center gap-2">
                       <Switch
                         checked={errorRateLimitCount4xx}
+                        disabled={!canManage}
                         onCheckedChange={setErrorRateLimitCount4xx}
                         id="count-4xx"
                       />
@@ -317,6 +361,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                     <div className="flex items-center gap-2">
                       <Switch
                         checked={errorRateLimitCount5xx}
+                        disabled={!canManage}
                         onCheckedChange={setErrorRateLimitCount5xx}
                         id="count-5xx"
                       />
@@ -330,6 +375,7 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                     <div className="flex items-center gap-2">
                       <Switch
                         checked={errorRateLimitCountBlock}
+                        disabled={!canManage}
                         onCheckedChange={setErrorRateLimitCountBlock}
                         id="count-block"
                       />
@@ -357,8 +403,11 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
                 <div className="flex items-center gap-3">
                   <Switch
                     checked={ccUseCustom}
-                    onCheckedChange={setCCUseCustom}
+                    onCheckedChange={(checked) => {
+                      if (canManage) setCCUseCustom(checked)
+                    }}
                     id="cc-use-custom"
+                    disabled={!canManage}
                   />
                   <Label
                     htmlFor="cc-use-custom"
@@ -377,7 +426,13 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
               )}
 
               {ccUseCustom && (
-                <CCRulesEditor rules={ccRules} onChange={setCCRules} />
+                <CCRulesEditor
+                  rules={ccRules}
+                  onChange={(next) => {
+                    if (canManage) setCCRules(next)
+                  }}
+                  disabled={!canManage}
+                />
               )}
             </CardContent>
           </Card>
@@ -389,7 +444,10 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
         <Button variant="outline" onClick={handleCancel}>
           {t("common.cancel")}
         </Button>
-        <Button onClick={handleSave} disabled={updateSettings.loading}>
+        <Button
+          onClick={handleSave}
+          disabled={!canManage || updateSettings.loading}
+        >
           {updateSettings.loading && (
             <IconLoader2 className="mr-1.5 h-4 w-4 animate-spin" />
           )}
@@ -402,6 +460,8 @@ function CCProtectionForm({ settings, onReset }: CCProtectionFormProps) {
 
 export default function CCProtectionPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const { data: settings, isLoading, error } = useProtectionSettings()
   // 用于“取消”时重挂载表单以还原为服务端初值
   const [formKey, setFormKey] = useState(0)
@@ -441,6 +501,8 @@ export default function CCProtectionPage() {
     <CCProtectionForm
       key={formKey}
       settings={settings}
+      canManage={canManage}
+      authLoading={authLoading}
       onReset={() => setFormKey((k) => k + 1)}
     />
   )

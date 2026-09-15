@@ -7,8 +7,10 @@ import { useTranslation } from "react-i18next"
 import { useSite, useSiteRules, useSiteMutation } from "@/hooks/use-api"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Skeleton } from "@/components/ui/skeleton"
+import { useAuth } from "@/hooks/use-auth"
 import { toast } from "sonner"
 import {
   IconArrowLeft,
@@ -23,6 +25,7 @@ import {
   IconBolt,
   IconFlame,
   IconDatabase,
+  IconFileDescription,
   IconSettings,
   IconRoute,
   IconList,
@@ -36,6 +39,7 @@ import { DynamicProtectionTab } from "./components/dynamic-protection-tab"
 import { CCProtectionTab } from "./components/cc-protection-tab"
 import { AccessControlTab } from "./components/access-control-tab"
 import { CacheTab } from "./components/cache-tab"
+import { ErrorPagesTab } from "./components/error-pages-tab"
 import { AdvancedTab } from "./components/advanced-tab"
 import { ListenersTab } from "./components/listeners-tab"
 import { RulesTab } from "./components/rules-tab"
@@ -62,11 +66,14 @@ const ALLOWED_TABS = [
   "cc",
   "access",
   "cache",
+  "error-pages",
   "advanced",
 ] as const
 
 function SiteDetailContent() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -84,13 +91,15 @@ function SiteDetailContent() {
   }
 
   const { data: site, isLoading: siteLoading } = useSite(siteId)
-  const { data: rules } = useSiteRules(siteId)
+  // 规则列表只服务于概览计数和规则页；切换到其他详情页签时不提前扫描策略。
+  const shouldLoadRules = activeTab === "overview" || activeTab === "rules"
+  const { data: rules } = useSiteRules(shouldLoadRules ? siteId : undefined)
   const updateSite = useSiteMutation()
 
   const [showEdit, setShowEdit] = useState(false)
 
   const handleToggle = async () => {
-    if (!site) return
+    if (!site || !canManage) return
     try {
       await updateSite.execute({
         id: site.id,
@@ -137,31 +146,39 @@ function SiteDetailContent() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant={site.enabled ? "destructive" : "outline"}
-            size="sm"
-            className="h-8"
-            onClick={handleToggle}
-          >
-            {site.enabled ? (
-              <IconPlayerPause className="mr-1 h-4 w-4" />
-            ) : (
-              <IconPlayerPlay className="mr-1 h-4 w-4" />
-            )}
-            {site.enabled ? t("common.stop") : t("common.start")}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8"
-            onClick={() => setShowEdit(true)}
-          >
-            <IconEdit className="mr-1 h-4 w-4" />
-            {t("common.edit")}
-          </Button>
-        </div>
+        {canManage && (
+          <div className="flex items-center gap-2">
+            <Button
+              variant={site.enabled ? "destructive" : "outline"}
+              size="sm"
+              className="h-8"
+              onClick={handleToggle}
+            >
+              {site.enabled ? (
+                <IconPlayerPause className="mr-1 h-4 w-4" />
+              ) : (
+                <IconPlayerPlay className="mr-1 h-4 w-4" />
+              )}
+              {site.enabled ? t("common.stop") : t("common.start")}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8"
+              onClick={() => setShowEdit(true)}
+            >
+              <IconEdit className="mr-1 h-4 w-4" />
+              {t("common.edit")}
+            </Button>
+          </div>
+        )}
       </div>
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertDescription>{t("common.readOnlyHint")}</AlertDescription>
+        </Alert>
+      )}
 
       {/* Tab 内容 */}
       <Tabs
@@ -210,6 +227,10 @@ function SiteDetailContent() {
             <IconDatabase className="mr-1 h-4 w-4" />
             {t("sites.detail.cache")}
           </TabsTrigger>
+          <TabsTrigger value="error-pages">
+            <IconFileDescription className="mr-1 h-4 w-4" />
+            {t("sites.detail.errorPages.tab")}
+          </TabsTrigger>
           <TabsTrigger value="advanced">
             <IconSettings className="mr-1 h-4 w-4" />
             {t("sites.detail.advanced")}
@@ -225,27 +246,35 @@ function SiteDetailContent() {
         </TabsContent>
 
         <TabsContent value="listeners">
-          <ListenersTab site={site} />
+          <ListenersTab site={site} canManage={canManage} />
         </TabsContent>
 
         <TabsContent value="rules">
-          <RulesTab site={site} />
+          <RulesTab site={site} canManage={canManage} />
         </TabsContent>
 
         <TabsContent value="upstream">
-          <UpstreamTab site={site} />
+          <UpstreamTab site={site} canManage={canManage} />
         </TabsContent>
 
         <TabsContent value="protection">
-          <ProtectionTab site={site} />
+          <ProtectionTab site={site} canManage={canManage} />
         </TabsContent>
 
         <TabsContent value="dynamic">
-          <DynamicProtectionTab key={`${site.id}-${site.updated_at}`} site={site} />
+          <DynamicProtectionTab
+            key={`${site.id}-${site.updated_at}`}
+            site={site}
+            canManage={canManage}
+          />
         </TabsContent>
 
         <TabsContent value="cc">
-          <CCProtectionTab key={`${site.id}-${site.updated_at}`} site={site} />
+          <CCProtectionTab
+            key={`${site.id}-${site.updated_at}`}
+            site={site}
+            canManage={canManage}
+          />
         </TabsContent>
 
         <TabsContent value="access">
@@ -253,15 +282,29 @@ function SiteDetailContent() {
         </TabsContent>
 
         <TabsContent value="cache">
-          <CacheTab site={site} />
+          <CacheTab key={`${site.id}-${site.updated_at}`} site={site} />
+        </TabsContent>
+
+        <TabsContent value="error-pages">
+          <ErrorPagesTab key={`${site.id}-${site.updated_at}`} site={site} />
         </TabsContent>
 
         <TabsContent value="advanced">
-          <AdvancedTab key={`${site.id}-${site.updated_at}`} site={site} />
+          <AdvancedTab
+            key={`${site.id}-${site.updated_at}`}
+            site={site}
+            canManage={canManage}
+          />
         </TabsContent>
       </Tabs>
 
-      <SiteFormDialog open={showEdit} onOpenChange={setShowEdit} site={site} />
+      {canManage && (
+        <SiteFormDialog
+          open={showEdit}
+          onOpenChange={setShowEdit}
+          site={site}
+        />
+      )}
     </div>
   )
 }

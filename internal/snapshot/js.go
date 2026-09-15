@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"time"
@@ -40,6 +41,15 @@ func loadJSPlugins(db *gorm.DB) ([]*jsplugin.Script, map[string]string, error) {
 	}
 	if len(rows) == 0 {
 		return nil, nil, nil
+	}
+	var validationEngine *jsplugin.Engine
+	if jsplugin.RuntimeAvailable() {
+		var err error
+		validationEngine, err = jsplugin.NewEngine(jsplugin.EngineOptions{PoolSize: 1})
+		if err != nil {
+			return nil, nil, fmt.Errorf("create JavaScript snapshot validation engine: %w", err)
+		}
+		defer validationEngine.Close()
 	}
 
 	scripts := make([]*jsplugin.Script, 0, len(rows))
@@ -90,6 +100,17 @@ func loadJSPlugins(db *gorm.DB) ([]*jsplugin.Script, map[string]string, error) {
 			options.Timeout = time.Duration(row.TimeoutMS) * time.Millisecond
 		}
 		script, err := jsplugin.CompileWithMetadata(row.Name, row.Source, options, metadata)
+		if err == nil && validationEngine != nil {
+			siteID := uint(0)
+			if row.SiteID != nil {
+				siteID = *row.SiteID
+			}
+			var plan jsplugin.MutationPlan
+			plan, err = validationEngine.Validate(context.Background(), script, jsplugin.CanonicalValidationRequest(siteID))
+			if err == nil {
+				err = jsplugin.ValidateMutationPlan(plan)
+			}
+		}
 		if err != nil {
 			addError(row.ID, err.Error())
 			if row.Stage == store.JSStageRequest && row.FailureMode == store.JSFailureModeClosed {

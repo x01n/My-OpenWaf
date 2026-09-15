@@ -4,7 +4,110 @@
  * 统一 fetch 调用，处理 JWT 认证、Token 刷新、错误处理
  */
 
+import type {
+  BotScoreListResponse,
+  BotScoreStats,
+  BotSettings,
+  ChainConfig,
+  DefaultErrorPagesResponse,
+  ErrorPagePreviewRequest,
+  ErrorPagePreviewResponse,
+  SiteErrorPages,
+} from "@/lib/types"
+
 const API_BASE = "/api/v1"
+const ACCESS_TOKEN_KEY = "token"
+const ACCESS_TOKEN_EXPIRES_AT_KEY = "token_expires_at"
+const FRONTEND_PAGE_SIZE = 200
+const MAX_SITE_RESOURCE_PAGES = 10
+
+/** 供跨标签页认证状态同步使用的存储键；不暴露 refresh cookie 内容。 */
+export const AUTH_TOKEN_STORAGE_KEY = ACCESS_TOKEN_KEY
+export const AUTH_TOKEN_EXPIRES_AT_STORAGE_KEY = ACCESS_TOKEN_EXPIRES_AT_KEY
+
+// 认证凭据代次用于隔离登出/重新登录与在途 refresh 请求。浏览器无法
+// 可靠取消已经发出的 fetch；旧响应到达时必须确认它仍属于当前会话。
+let authEpoch = 0
+const REFRESH_RESULT_CACHE_MS = 500
+let refreshPromise: Promise<RefreshOutcome> | null = null
+let refreshResultCache: {
+  epoch: number
+  token: string | null
+  outcome: RefreshOutcome
+  expiresAt: number
+} | null = null
+
+const REFRESH_LOCK_NAME = "my-openwaf-refresh"
+const REFRESH_LOCK_STORAGE_KEY = "my_openwaf_refresh_lock"
+const REFRESH_LOCK_INTENT_PREFIX = `${REFRESH_LOCK_STORAGE_KEY}.intent.`
+const REFRESH_LOCK_TTL_MS = 15_000
+const REFRESH_LOCK_WAIT_MS = 20_000
+const REFRESH_LOCK_POLL_MS = 50
+const REFRESH_LOCK_RENEW_MS = Math.floor(REFRESH_LOCK_TTL_MS / 3)
+
+type RefreshLockManager = {
+  request<T>(
+    name: string,
+    options: { mode: "exclusive" },
+    callback: () => Promise<T>
+  ): Promise<T>
+}
+
+type RefreshLockRecord = {
+  owner: string
+  expires_at: number
+}
+
+const refreshLockOwner =
+  typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+export type AuthRole = "admin" | "operator" | "readonly"
+
+export interface AuthTokenResponse {
+  access_token: string
+  expires_at?: number
+  username: string
+  role: AuthRole
+}
+
+function isAuthRole(value: unknown): value is AuthRole {
+  return value === "admin" || value === "operator" || value === "readonly"
+}
+
+function isAuthTokenResponse(value: unknown): value is AuthTokenResponse {
+  if (!value || typeof value !== "object") return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.access_token === "string" &&
+    record.access_token.length > 0 &&
+    typeof record.username === "string" &&
+    record.username.length > 0 &&
+    isAuthRole(record.role)
+  )
+}
+
+export interface AuthSessionInfo {
+  id: number
+  jti: string
+  username: string
+  ip: string
+  user_agent: string
+  device_info: string
+  login_at: string
+  last_active_at: string
+  expires_at: string
+}
+
+export type RefreshOutcome =
+  | {
+      ok: true
+      accessToken: string
+      expiresAt: number | null
+      data: AuthTokenResponse
+    }
+  | { ok: false; reason: "unauthorized" | "unavailable"; status?: number }
 
 export class ApiError extends Error {
   constructor(
@@ -22,15 +125,74 @@ export class ApiError extends Error {
  */
 function getToken(): string | null {
   if (typeof window === "undefined") return null
-  return localStorage.getItem("token")
+  return localStorage.getItem(ACCESS_TOKEN_KEY)
+}
+
+/** 获取当前保存的 access token，供认证状态钩子复用。 */
+export function getAccessToken(): string | null {
+  return getToken()
+}
+
+function parseExpiresAt(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1_000_000_000_000 ? value : value * 1000
+  }
+  if (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim())) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) {
+      return parsed > 1_000_000_000_000 ? parsed : parsed * 1000
+    }
+  }
+  return null
+}
+
+function decodeTokenExpiry(token: string): number | null {
+  if (typeof window === "undefined" || typeof window.atob !== "function") {
+    return null
+  }
+  try {
+    const encoded = token.split(".")[1]
+    if (!encoded) return null
+    const normalized = encoded.replace(/-/g, "+").replace(/_/g, "/")
+    const padded = normalized.padEnd(
+      normalized.length + ((4 - (normalized.length % 4)) % 4),
+      "="
+    )
+    const payload = JSON.parse(window.atob(padded)) as { exp?: unknown }
+    return parseExpiresAt(payload.exp)
+  } catch {
+    return null
+  }
+}
+
+/** 获取后端返回的 access token 到期时间（毫秒时间戳）。 */
+export function getAccessTokenExpiry(): number | null {
+  if (typeof window === "undefined") return null
+  const stored = parseExpiresAt(
+    localStorage.getItem(ACCESS_TOKEN_EXPIRES_AT_KEY)
+  )
+  return stored ?? decodeTokenExpiry(getToken() || "")
 }
 
 /**
  * 设置 access token
  */
-function setToken(token: string): void {
+function setToken(token: string, expiresAt?: unknown): void {
   if (typeof window === "undefined") return
-  localStorage.setItem("token", token)
+  localStorage.setItem(ACCESS_TOKEN_KEY, token)
+  const normalized = parseExpiresAt(expiresAt) ?? decodeTokenExpiry(token)
+  if (normalized !== null) {
+    localStorage.setItem(ACCESS_TOKEN_EXPIRES_AT_KEY, String(normalized))
+  } else {
+    localStorage.removeItem(ACCESS_TOKEN_EXPIRES_AT_KEY)
+  }
+}
+
+/** 保存登录或刷新响应中的 access token 与 expires_at。 */
+export function storeAuthToken(token: string, expiresAt?: unknown): void {
+  refreshResultCache = null
+  authEpoch += 1
+  setToken(token, expiresAt)
 }
 
 /**
@@ -38,17 +200,265 @@ function setToken(token: string): void {
  */
 function clearToken(): void {
   if (typeof window === "undefined") return
-  localStorage.removeItem("token")
+  refreshResultCache = null
+  authEpoch += 1
+  localStorage.removeItem(ACCESS_TOKEN_KEY)
+  localStorage.removeItem(ACCESS_TOKEN_EXPIRES_AT_KEY)
+}
+
+function staleRefreshOutcome(status?: number): RefreshOutcome {
+  return { ok: false, reason: "unavailable", status }
+}
+
+function parseRefreshLockRecord(raw: string | null): RefreshLockRecord | null {
+  if (!raw) return null
+  try {
+    const record = JSON.parse(raw) as Partial<RefreshLockRecord>
+    if (
+      typeof record.owner !== "string" ||
+      record.owner.length === 0 ||
+      typeof record.expires_at !== "number" ||
+      !Number.isFinite(record.expires_at)
+    ) {
+      return null
+    }
+    return { owner: record.owner, expires_at: record.expires_at }
+  } catch {
+    return null
+  }
+}
+
+function readRefreshLock(): RefreshLockRecord | null {
+  if (typeof window === "undefined") return null
+  try {
+    return parseRefreshLockRecord(
+      localStorage.getItem(REFRESH_LOCK_STORAGE_KEY)
+    )
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 读取所有仍有效的刷新意图。
+ *
+ * localStorage 没有 compare-and-set；每个标签页先登记独立意图，再以
+ * 可见意图中的确定性最小 owner 竞争租约。这样一个标签页在读到空锁后，
+ * 另一个标签页即使随后完成登记，也只能观察到已存在的租约并等待，不能
+ * 依靠覆盖单一锁值取得第二个刷新请求。
+ */
+function readRefreshLockIntents(): RefreshLockRecord[] {
+  if (typeof window === "undefined") return []
+  const intents: RefreshLockRecord[] = []
+  const now = Date.now()
+  try {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (!key?.startsWith(REFRESH_LOCK_INTENT_PREFIX)) continue
+      const record = parseRefreshLockRecord(localStorage.getItem(key))
+      if (record && record.expires_at > now) intents.push(record)
+    }
+  } catch {
+    return []
+  }
+  return intents
+}
+
+function isRefreshLockTurn(): boolean {
+  const intents = readRefreshLockIntents()
+  if (intents.length === 0) return true
+  let winner = intents[0].owner
+  for (const intent of intents.slice(1)) {
+    // 使用代码单元顺序，避免 localeCompare 受浏览器语言环境影响。
+    if (intent.owner < winner) winner = intent.owner
+  }
+  return winner === refreshLockOwner
+}
+
+function removeRefreshLockIntent(): void {
+  if (typeof window === "undefined") return
+  try {
+    const record = parseRefreshLockRecord(
+      localStorage.getItem(`${REFRESH_LOCK_INTENT_PREFIX}${refreshLockOwner}`)
+    )
+    if (record?.owner === refreshLockOwner) {
+      localStorage.removeItem(
+        `${REFRESH_LOCK_INTENT_PREFIX}${refreshLockOwner}`
+      )
+    }
+  } catch {
+    // Storage can become unavailable while a page is being torn down.
+  }
+}
+
+function sleepForRefreshLock(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+async function withLocalStorageRefreshLock(
+  requestEpoch: number,
+  requestToken: string | null
+): Promise<RefreshOutcome> {
+  if (typeof window === "undefined") return doRefreshToken()
+  const deadline = Date.now() + REFRESH_LOCK_WAIT_MS
+  let claimed = false
+  let intentRegistered = false
+  let leaseTimer: number | null = null
+  try {
+    const intentKey = `${REFRESH_LOCK_INTENT_PREFIX}${refreshLockOwner}`
+    localStorage.setItem(
+      intentKey,
+      JSON.stringify({
+        owner: refreshLockOwner,
+        expires_at: Date.now() + REFRESH_LOCK_TTL_MS,
+      } satisfies RefreshLockRecord)
+    )
+    intentRegistered = true
+    while (Date.now() < deadline) {
+      if (requestEpoch !== authEpoch || getToken() !== requestToken) {
+        return staleRefreshOutcome()
+      }
+      const current = readRefreshLock()
+      if (
+        current &&
+        current.owner !== refreshLockOwner &&
+        current.expires_at > Date.now()
+      ) {
+        await sleepForRefreshLock(REFRESH_LOCK_POLL_MS)
+        continue
+      }
+      if (!isRefreshLockTurn()) {
+        await sleepForRefreshLock(REFRESH_LOCK_POLL_MS)
+        continue
+      }
+      const record: RefreshLockRecord = {
+        owner: refreshLockOwner,
+        expires_at: Date.now() + REFRESH_LOCK_TTL_MS,
+      }
+      localStorage.setItem(REFRESH_LOCK_STORAGE_KEY, JSON.stringify(record))
+      const confirmed = readRefreshLock()
+      if (
+        confirmed?.owner === refreshLockOwner &&
+        confirmed.expires_at > Date.now() &&
+        isRefreshLockTurn()
+      ) {
+        claimed = true
+        if (typeof window.setInterval === "function") {
+          leaseTimer = window.setInterval(() => {
+            try {
+              const currentLease = readRefreshLock()
+              if (currentLease?.owner !== refreshLockOwner) return
+              const renewed: RefreshLockRecord = {
+                owner: refreshLockOwner,
+                expires_at: Date.now() + REFRESH_LOCK_TTL_MS,
+              }
+              localStorage.setItem(
+                REFRESH_LOCK_STORAGE_KEY,
+                JSON.stringify(renewed)
+              )
+              localStorage.setItem(intentKey, JSON.stringify(renewed))
+            } catch {
+              // The lease still has a bounded expiry if storage is interrupted.
+            }
+          }, REFRESH_LOCK_RENEW_MS)
+        }
+        break
+      }
+      await sleepForRefreshLock(REFRESH_LOCK_POLL_MS)
+    }
+    if (!claimed) return staleRefreshOutcome()
+    if (requestEpoch !== authEpoch || getToken() !== requestToken) {
+      return staleRefreshOutcome()
+    }
+    return await doRefreshToken()
+  } catch {
+    // Storage can be unavailable in privacy-restricted contexts. Preserve the
+    // existing in-tab epoch checks instead of failing an otherwise valid session.
+    return doRefreshToken()
+  } finally {
+    if (leaseTimer !== null) window.clearInterval(leaseTimer)
+    if (claimed) {
+      try {
+        if (readRefreshLock()?.owner === refreshLockOwner) {
+          localStorage.removeItem(REFRESH_LOCK_STORAGE_KEY)
+        }
+      } catch {
+        // Ignore storage cleanup failures; the lease expires automatically.
+      }
+    }
+    if (intentRegistered) removeRefreshLockIntent()
+  }
+}
+
+async function refreshWithCrossTabLock(
+  requestEpoch: number,
+  requestToken: string | null
+): Promise<RefreshOutcome> {
+  if (typeof navigator !== "undefined") {
+    const lockManager = (
+      navigator as Navigator & { locks?: RefreshLockManager }
+    ).locks
+    if (lockManager?.request) {
+      try {
+        return await lockManager.request(
+          REFRESH_LOCK_NAME,
+          { mode: "exclusive" },
+          async () => {
+            if (requestEpoch !== authEpoch || getToken() !== requestToken) {
+              return staleRefreshOutcome()
+            }
+            return doRefreshToken()
+          }
+        )
+      } catch {
+        // Fall through to the lease-based fallback for browsers with a partial
+        // or unavailable Web Locks implementation.
+      }
+    }
+  }
+  return withLocalStorageRefreshLock(requestEpoch, requestToken)
+}
+
+/** 清除 access token 及其到期元数据。 */
+export function clearAuthToken(): void {
+  clearToken()
 }
 
 /**
  * 刷新 token（并发去重：多个 401 只触发一次 refresh）
  */
-let refreshPromise: Promise<string | null> | null = null
-
-async function refreshToken(): Promise<string | null> {
+async function refreshToken(): Promise<RefreshOutcome> {
   if (refreshPromise) return refreshPromise
-  refreshPromise = doRefreshToken()
+  const now = Date.now()
+  const token = getToken()
+  const cachedNoSessionFailure =
+    token === null &&
+    refreshResultCache?.token === null &&
+    refreshResultCache?.outcome.ok === false
+  if (
+    refreshResultCache &&
+    (refreshResultCache.epoch === authEpoch || cachedNoSessionFailure) &&
+    refreshResultCache.token === token &&
+    now < refreshResultCache.expiresAt
+  ) {
+    return refreshResultCache.outcome
+  }
+  const requestEpoch = authEpoch
+  refreshPromise = refreshWithCrossTabLock(requestEpoch, token).then(
+    (outcome) => {
+      // 只缓存仍属于当前会话的结果；登录、登出或跨标签页轮换会使旧结果
+      // 失效，避免短暂去重窗口覆盖新凭据。
+      if (requestEpoch === authEpoch) {
+        refreshResultCache = {
+          epoch: authEpoch,
+          token: getToken(),
+          outcome,
+          expiresAt: Date.now() + REFRESH_RESULT_CACHE_MS,
+        }
+      }
+      return outcome
+    }
+  )
   try {
     return await refreshPromise
   } finally {
@@ -56,22 +466,54 @@ async function refreshToken(): Promise<string | null> {
   }
 }
 
-async function doRefreshToken(): Promise<string | null> {
+async function doRefreshToken(): Promise<RefreshOutcome> {
+  const requestEpoch = authEpoch
+  const requestToken = getToken()
   try {
     const resp = await fetch(`${API_BASE}/auth/refresh`, {
       method: "POST",
       credentials: "include",
     })
-    if (!resp.ok) return null
-    const data = await resp.json()
-    if (data.access_token) {
-      setToken(data.access_token)
-      return data.access_token
+    // 登出或重新登录已经改变了认证代次；此响应属于旧会话，
+    // 不能覆盖当前 token，也不能触发旧会话的登出跳转。
+    if (requestEpoch !== authEpoch || getToken() !== requestToken) {
+      return { ok: false, reason: "unavailable", status: resp.status }
     }
-    return null
+    if (resp.status === 401) {
+      return { ok: false, reason: "unauthorized", status: resp.status }
+    }
+    if (!resp.ok) {
+      return { ok: false, reason: "unavailable", status: resp.status }
+    }
+    const data: unknown = await resp.json()
+    if (!isAuthTokenResponse(data)) {
+      return { ok: false, reason: "unavailable", status: resp.status }
+    }
+    if (requestEpoch !== authEpoch || getToken() !== requestToken) {
+      return { ok: false, reason: "unavailable", status: resp.status }
+    }
+    const expiresAt = parseExpiresAt(data.expires_at)
+    setToken(data.access_token, data.expires_at)
+    return { ok: true, accessToken: data.access_token, expiresAt, data }
   } catch {
-    return null
+    return { ok: false, reason: "unavailable" }
   }
+}
+
+/**
+ * 使用 HttpOnly refresh cookie 获取新的 access token。
+ * 网络错误和 5xx 只返回 unavailable，不会清理当前 access token。
+ */
+export function refreshAuthSession(): Promise<RefreshOutcome> {
+  return refreshToken()
+}
+
+function isAuthEndpoint(path: string): boolean {
+  return (
+    path === "/auth/login" ||
+    path === "/auth/refresh" ||
+    path === "/auth/logout"
+  )
 }
 
 /**
@@ -105,20 +547,53 @@ export async function apiRequest<T = any>(
   }
 
   let response = await fetch(url, config)
+  let refreshUnavailable = false
 
   // 401 时尝试刷新 token
-  if (response.status === 401) {
-    const newToken = await refreshToken()
-    if (newToken) {
-      headers["Authorization"] = `Bearer ${newToken}`
+  if (response.status === 401 && !isAuthEndpoint(path)) {
+    const tokenChangedBeforeRefresh = getToken()
+    if (tokenChangedBeforeRefresh && tokenChangedBeforeRefresh !== token) {
+      // 另一标签页可能已经完成轮换并写入 localStorage，但 storage 事件
+      // 尚未让当前 JS 上下文重新执行。直接复用新 token，避免重复消费
+      // 一次性 refresh token。
+      headers["Authorization"] = `Bearer ${tokenChangedBeforeRefresh}`
       config.headers = headers
       response = await fetch(url, config)
     } else {
-      clearToken()
-      if (typeof window !== "undefined") {
-        window.location.href = "/login"
+      const refresh = await refreshToken()
+      if (refresh.ok && getToken() === refresh.accessToken) {
+        headers["Authorization"] = `Bearer ${refresh.accessToken}`
+        config.headers = headers
+        response = await fetch(url, config)
+      } else if (refresh.ok) {
+        // 登出/重新登录已经替换了当前 token；不要用旧 refresh
+        // 结果重试业务请求。
+        throw new ApiError(401, "会话已变更，请重试")
+      } else if (refresh.reason === "unauthorized") {
+        clearToken()
+        if (
+          typeof window !== "undefined" &&
+          window.location.pathname !== "/login"
+        ) {
+          window.location.href = "/login"
+        }
+        throw new ApiError(401, "会话已过期，请重新登录", {
+          refresh_status: "unauthorized",
+        })
+      } else {
+        // refresh 等待期间另一标签页可能刚好写入了新 token；确认变化后
+        // 再重试一次原请求。token 未变化时保留原始 401 与可区分的原因。
+        const currentToken = getToken()
+        if (currentToken && currentToken !== token) {
+          headers["Authorization"] = `Bearer ${currentToken}`
+          config.headers = headers
+          response = await fetch(url, config)
+        } else {
+          // Refresh 服务暂时不可达时保留原始 401 语义，但附带可区分的原因；
+          // 路由守卫不能把一次网络/5xx 故障误判为凭据失效并清空 token。
+          refreshUnavailable = true
+        }
       }
-      throw new ApiError(401, "会话已过期，请重新登录")
     }
   }
 
@@ -138,7 +613,15 @@ export async function apiRequest<T = any>(
 
   if (!response.ok) {
     const message = data?.error || `请求失败: ${response.status}`
-    throw new ApiError(response.status, message, data)
+    const errorData = refreshUnavailable
+      ? {
+          ...(data && typeof data === "object" && !Array.isArray(data)
+            ? data
+            : {}),
+          refresh_status: "unavailable",
+        }
+      : data
+    throw new ApiError(response.status, message, errorData)
   }
 
   return data as T
@@ -192,39 +675,53 @@ export function del<T = any>(path: string): Promise<T> {
 }
 
 /**
+ * 拉取站点资源型列表的全部分页；后端单页上限为 200，最多聚合 10 页，
+ * 防止异常 total 让浏览器无限请求或一次性占用不可控内存。
+ */
+async function getAllSitePages<T>(
+  path: string,
+  first: { items: T[]; total: number }
+): Promise<T[]> {
+  const items = [...(first.items ?? [])]
+  const total = Number.isFinite(first.total)
+    ? Math.max(0, first.total)
+    : items.length
+  const pageCount = Math.min(
+    MAX_SITE_RESOURCE_PAGES,
+    Math.max(1, Math.ceil(total / FRONTEND_PAGE_SIZE))
+  )
+  if (pageCount <= 1) return items
+  const pages = await Promise.all(
+    Array.from({ length: pageCount - 1 }, (_, index) =>
+      get<{ items: T[]; total: number }>(path, {
+        page: index + 2,
+        page_size: FRONTEND_PAGE_SIZE,
+      })
+    )
+  )
+  for (const page of pages) items.push(...(page.items ?? []))
+  return items.slice(
+    0,
+    Math.min(total, FRONTEND_PAGE_SIZE * MAX_SITE_RESOURCE_PAGES)
+  )
+}
+
+/**
  * 认证相关 API
  */
 export const authApi = {
   login: (username: string, password: string) =>
-    post<{
-      access_token: string
-      username: string
-      role: "admin" | "operator" | "readonly"
-    }>("/auth/login", { username, password }),
+    post<AuthTokenResponse>("/auth/login", { username, password }),
+  refresh: () => refreshAuthSession(),
   logout: () => post("/auth/logout"),
-  me: () =>
-    get<{ username: string; role: "admin" | "operator" | "readonly" }>(
-      "/auth/me"
-    ),
+  me: () => get<{ username: string; role: AuthRole }>("/auth/me"),
   changePassword: (oldPassword: string, newPassword: string) =>
     post<{ status: string }>("/auth/change-password", {
       old_password: oldPassword,
       new_password: newPassword,
     }),
-  listSessions: () =>
-    get<{
-      items: Array<{
-        id: number
-        username: string
-        ip: string
-        user_agent: string
-        login_at: string
-        last_active_at: string
-        expires_at: string
-      }>
-    }>("/auth/sessions"),
-  forceLogout: (sessionId: number) =>
-    post("/auth/sessions/force-logout", { session_id: sessionId }),
+  listSessions: () => get<{ sessions: AuthSessionInfo[] }>("/auth/sessions"),
+  forceLogout: (jti: string) => post("/auth/sessions/force-logout", { jti }),
 }
 
 /**
@@ -263,15 +760,39 @@ export const siteApi = {
     ),
   getRouteRules: (id: string | number) =>
     get<{ items: AppRouteRule[]; total: number }>(
-      `/sites/${id}/application-route-rules`
-    ).then((r) => r.items ?? []),
+      `/sites/${id}/application-route-rules`,
+      { page: 1, page_size: FRONTEND_PAGE_SIZE }
+    ).then((first) =>
+      getAllSitePages(`/sites/${id}/application-route-rules`, first)
+    ),
   getRecordedResources: (id: string | number) =>
     get<{ items: RecordedResource[]; total: number }>(
-      `/sites/${id}/recorded-resources`
-    ).then((r) => r.items ?? []),
-  getErrorPages: (id: string | number) => get(`/sites/${id}/error-pages`),
-  updateErrorPages: (id: string | number, data: any) =>
-    post(`/sites/${id}/error-pages`, data),
+      `/sites/${id}/recorded-resources`,
+      { page: 1, page_size: FRONTEND_PAGE_SIZE }
+    ).then((first) =>
+      getAllSitePages(`/sites/${id}/recorded-resources`, first)
+    ),
+  createRouteRule: (id: string | number, data: AppRouteRuleWriteInput) =>
+    post<AppRouteRule>(`/sites/${id}/application-route-rules`, data),
+  updateRouteRule: (
+    id: string | number,
+    rid: string | number,
+    data: AppRouteRuleWriteInput
+  ) =>
+    post<AppRouteRule>(
+      `/sites/${id}/application-route-rules/${rid}/update`,
+      data
+    ),
+  deleteRouteRule: (id: string | number, rid: string | number) =>
+    post(`/sites/${id}/application-route-rules/${rid}/delete`),
+  clearRecordedResources: (id: string | number) =>
+    post<{ status: string }>(`/sites/${id}/recorded-resources/clear`),
+  getErrorPages: (id: string | number) =>
+    get<SiteErrorPages>(`/sites/${id}/error-pages`),
+  updateErrorPages: (
+    id: string | number,
+    data: { error_pages: Record<string, import("@/lib/types").ErrorPageConfig> }
+  ) => post<SiteErrorPages>(`/sites/${id}/error-pages`, data),
 }
 
 /**
@@ -304,8 +825,8 @@ export const certificateApi = {
  * 规则相关 API
  */
 export const ruleApi = {
-  list: (params?: any) =>
-    get<{ items: Rule[]; total: number }>("/rules", params),
+  list: (params?: RuleListParams) =>
+    get<RuleListResponse>("/rules", params ? { ...params } : undefined),
   get: (id: string | number) => get<Rule>(`/rules/${id}`),
   create: (data: Partial<Rule>) => post<Rule>("/rules", data),
   update: (id: string | number, data: Partial<Rule>) =>
@@ -341,12 +862,14 @@ export const protectionApi = {
   getSettings: () => get<ProtectionSettings>("/protection-settings"),
   updateSettings: (data: ProtectionSettingsUpdate) =>
     post<ProtectionSettings>("/protection-settings", data),
-  getSensitivity: (id: string | number) => get(`/protection/${id}/sensitivity`),
-  updateSensitivity: (id: string | number, data: any) =>
-    post(`/protection/${id}/sensitivity`, data),
-  getEscalation: (id: string | number) => get(`/protection/${id}/escalation`),
-  updateEscalation: (id: string | number, data: any) =>
-    post(`/protection/${id}/escalation`, data),
+  getSensitivity: (id: string | number) =>
+    get<SensitivityConfig>(`/protection/${id}/sensitivity`),
+  updateSensitivity: (id: string | number, data: SensitivityConfig) =>
+    post<SensitivityConfig>(`/protection/${id}/sensitivity`, data),
+  getEscalation: (id: string | number) =>
+    get<EscalationConfig>(`/protection/${id}/escalation`),
+  updateEscalation: (id: string | number, data: EscalationConfigUpdate) =>
+    post<EscalationConfig>(`/protection/${id}/escalation`, data),
   getEscalationStatus: (ip: string) => get(`/escalation/status/${ip}`),
   resetEscalation: (ip: string) => post(`/escalation/status/${ip}/reset`),
 }
@@ -421,10 +944,13 @@ export const dashboardApi = {
  * Bot 相关 API
  */
 export const botApi = {
-  getSettings: () => get("/bot-settings"),
-  updateSettings: (data: any) => post("/bot-settings/update", data),
-  getStats: () => get("/bot-stats"),
-  getScores: () => get("/bot-scores"),
+  getSettings: () => get<BotSettings>("/bot-settings"),
+  updateSettings: (data: Partial<BotSettings>) =>
+    post<BotSettings>("/bot-settings/update", data),
+  getStats: () => get<BotScoreStats>("/bot-stats"),
+  getScores: (
+    params?: Record<string, string | number | boolean | undefined>
+  ) => get<BotScoreListResponse>("/bot-scores", params),
 }
 
 /**
@@ -434,15 +960,20 @@ export const captchaApi = {
   getConfig: () => get<CaptchaConfig>("/captcha/config"),
   updateConfig: (data: Partial<CaptchaConfig>) =>
     post<CaptchaConfig>("/captcha/config", data),
-  test: () => post<CaptchaTestResponse>("/captcha/test"),
+  test: (captchaType?: string) =>
+    post<CaptchaTestResponse>(
+      "/captcha/test",
+      captchaType ? { captcha_type: captchaType } : undefined
+    ),
 }
 
 /**
  * 链式验证相关 API
  */
 export const chainApi = {
-  getConfig: () => get("/chain/config"),
-  updateConfig: (data: any) => post("/chain/config", data),
+  getConfig: () => get<ChainConfig>("/chain/config"),
+  updateConfig: (data: Partial<ChainConfig>) =>
+    post<ChainConfig>("/chain/config", data),
   getSessions: () => get("/chain/sessions"),
   deleteSession: (id: string | number) => post(`/chain/sessions/${id}/delete`),
 }
@@ -452,15 +983,35 @@ export const chainApi = {
  */
 export const cveApi = {
   list: (params?: Record<string, string | number | boolean | undefined>) =>
-    get<{ items: CVERuleItem[]; total: number }>("/cve-rules", params),
+    get<CVERuleListResponse>("/cve-rules", params),
   getStats: (params?: Record<string, string | number | boolean | undefined>) =>
     get<CVEStats>("/cve-rules/stats", params),
   getFeedStatus: () => get("/cve-feed/status"),
-  toggle: (id: string | number) => post(`/cve-rules/${id}/toggle`),
+  toggle: (id: string | number, enabled?: boolean) =>
+    post(
+      `/cve-rules/${id}/toggle`,
+      enabled === undefined ? undefined : { enabled }
+    ),
   patch: (id: string | number, data: Record<string, unknown>) =>
     post(`/cve-rules/${id}/patch`, data),
-  reset: (id: string | number, data: Record<string, unknown>) =>
-    post(`/cve-rules/${id}/reset`, data),
+  /** 创建全局自定义 CVE 规则。 */
+  create: (data: CVERuleWriteInput) => post<CVERuleItem>("/cve-rules", data),
+  /** 更新全局自定义 CVE 规则；内置规则不得调用此端点。 */
+  update: (id: string | number, data: Partial<CVERuleWriteInput>) =>
+    post<CVERuleItem>(`/cve-rules/${id}/update`, data),
+  /** 删除全局自定义 CVE 规则；后端会拒绝目录规则。 */
+  delete: (id: string | number) =>
+    post<{ message: string }>(`/cve-rules/${id}/delete`),
+  reset: (id: string | number, data: Record<string, unknown>) => {
+    const query = Object.entries(data)
+      .filter(([, value]) => value !== undefined && value !== "")
+      .map(
+        ([key, value]) =>
+          `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`
+      )
+      .join("&")
+    return post(`/cve-rules/${id}/reset${query ? `?${query}` : ""}`)
+  },
   batch: (data: Record<string, unknown>) => post("/cve-rules/batch", data),
   sync: () => post("/cve-rules/sync"),
 }
@@ -470,18 +1021,15 @@ export const cveApi = {
  */
 export const owaspApi = {
   list: (params?: Record<string, string | number | boolean | undefined>) =>
-    get<{
-      items: OWASPRuleItem[]
-      grouped: Record<string, OWASPRuleItem[]>
-      total: number
-      policy_id: number
-    }>("/owasp-rules", params),
+    get<OWASPRuleListResponse>("/owasp-rules", params),
   getStats: (params?: Record<string, string | number | boolean | undefined>) =>
     get<OWASPStats>("/owasp-rules/stats", params),
   update: (id: string | number, data: Record<string, unknown>) =>
     post(`/owasp-rules/${id}/update`, data),
   reset: (id: string | number, policyId: number) =>
-    post(`/owasp-rules/${id}/reset`, { policy_id: policyId }),
+    post(
+      `/owasp-rules/${id}/reset?policy_id=${encodeURIComponent(String(policyId))}`
+    ),
   batch: (data: Record<string, unknown>) => post("/owasp-rules/batch", data),
 }
 
@@ -538,7 +1086,7 @@ export const apiKeyApi = {
   list: () =>
     get<{ items: AdminAPIKey[] }>("/api-keys").then((r) => r.items ?? []),
   create: (data: { name: string }) =>
-    post<{ key: AdminAPIKey; token: string }>("/api-keys", data),
+    post<{ token: string; id: number; name: string }>("/api-keys", data),
   delete: (id: string | number) => post(`/api-keys/${id}/delete`),
 }
 
@@ -561,8 +1109,9 @@ export const adminUserApi = {
  * 错误页面相关 API
  */
 export const errorPageApi = {
-  getDefaults: () => get("/error-pages/defaults"),
-  preview: (data: any) => post("/error-pages/preview", data),
+  getDefaults: () => get<DefaultErrorPagesResponse>("/error-pages/defaults"),
+  preview: (data: ErrorPagePreviewRequest) =>
+    post<ErrorPagePreviewResponse>("/error-pages/preview", data),
 }
 
 /**
@@ -574,9 +1123,26 @@ export const pageTemplateApi = {
   update: (type: string, data: Record<string, string>) =>
     post(`/page-templates/${type}`, data),
   reset: (type: string) => post(`/page-templates/${type}/reset`),
-  preview: (type: string) => get(`/page-templates/${type}/preview`),
+  preview: (type: string) =>
+    get<unknown>(`/page-templates/${type}/preview`).then(unwrapTextResponse),
   previewDraft: (type: string, data: Record<string, string>) =>
-    post<string>(`/page-templates/${type}/preview`, data),
+    post<unknown>(`/page-templates/${type}/preview`, data).then(
+      unwrapTextResponse
+    ),
+}
+
+/**
+ * 解包返回 text/html 的管理端预览响应。
+ * apiRequest 对非 JSON 响应统一包装为 { text }，而预览调用方需要原始 HTML
+ * 字符串写入 sandbox iframe；仅在页面模板 API 边界转换，避免改变其他调用方契约。
+ */
+function unwrapTextResponse(value: unknown): string {
+  if (typeof value === "string") return value
+  if (value && typeof value === "object" && "text" in value) {
+    const text = (value as { text?: unknown }).text
+    return typeof text === "string" ? text : ""
+  }
+  return ""
 }
 
 /**
@@ -761,6 +1327,7 @@ export const jsPluginApi = {
   dryRun: (data: JSPluginDryRunRequest) =>
     post<JSPluginDryRunResponse>("/js-plugins/dry-run", data),
   stats: () => get<JSPluginStatsResponse>("/js-plugins/stats"),
+  runtime: () => get<JSPluginRuntimeStatus>("/js-plugins/runtime"),
 }
 
 /**
@@ -778,12 +1345,15 @@ import type {
   Certificate,
   CertificateParseResult,
   Rule,
+  RuleListParams,
+  RuleListResponse,
   Policy,
   SecurityEvent,
   SecurityEventRequest,
   AccessLog,
   DashboardSummary,
   AppRouteRule,
+  AppRouteRuleWriteInput,
   RecordedResource,
   SiteAccessConfig,
   AccessProvider,
@@ -822,15 +1392,21 @@ import type {
   JSPluginDryRunRequest,
   JSPluginDryRunResponse,
   JSPluginStatsResponse,
+  JSPluginRuntimeStatus,
   CaptchaConfig,
   CaptchaTestResponse,
+  CVERuleListResponse,
   CVERuleItem,
+  CVERuleWriteInput,
   CVEStats,
-  OWASPRuleItem,
+  OWASPRuleListResponse,
   OWASPStats,
   RedisConfigUpdate,
   RedisConfigResponse,
   ProtectionSettings,
   ProtectionSettingsUpdate,
+  SensitivityConfig,
+  EscalationConfig,
+  EscalationConfigUpdate,
   RuntimeConfig,
 } from "./types"

@@ -395,3 +395,11 @@ func TestRecordHitWindowExpiredResets(t *testing.T) {
 		t.Fatalf("after RecordHit over expired entry: want count=1, got %d", c)
 	}
 }
+
+func TestEscalationManagerCloseIsIdempotent(t *testing.T) {
+	m := NewEscalationManager(nil)
+	m.Close()
+	m.Close()
+	var zero EscalationManager
+	zero.Close()
+}

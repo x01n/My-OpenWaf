@@ -96,3 +96,77 @@ func TestRateLimiterDifferentKeyIsolated(t *testing.T) {
 		t.Fatal("different key should be independent")
 	}
 }
+
+func TestRateLimiterInvalidEnabledConfigFailsOpen(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		window int
+		max    int
+	}{
+		{name: "zero window", window: 0, max: 10},
+		{name: "zero max", window: 60, max: 0},
+		{name: "negative window", window: -1, max: 10},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rl := NewRateLimiter(tt.window, tt.max, true)
+			defer rl.Close()
+			if rl.Enabled() {
+				t.Fatal("invalid configuration must disable the limiter")
+			}
+			if !rl.Allow("client") {
+				t.Fatal("invalid configuration must not synthesize HTTP 429")
+			}
+		})
+	}
+}
+
+func TestRateLimiterReconfigureInvalidConfigFailsOpen(t *testing.T) {
+	rl := NewRateLimiter(60, 10, true)
+	defer rl.Close()
+	rl.Reconfigure(60, 0, true)
+	if rl.Enabled() {
+		t.Fatal("invalid reconfiguration must disable the limiter")
+	}
+	if !rl.Allow("client") {
+		t.Fatal("invalid reconfiguration must allow requests")
+	}
+}
+
+func TestRateLimiterCloseIsIdempotent(t *testing.T) {
+	rl := NewRateLimiter(60, 10, true)
+	rl.Close()
+	rl.Close()
+	var zero RateLimiter
+	zero.Close()
+}
+
+func TestRateLimiterReconfigureAndAllowDoNotExposePartialConfig(t *testing.T) {
+	rl := NewRateLimiter(60, 10, true)
+	defer rl.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			rl.Reconfigure(0, 0, true)
+			rl.Reconfigure(60, 10, true)
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		_ = rl.Allow("atomic-config")
+	}
+	<-done
+}
+
+func TestRateLimiterSetEnabledCannotActivateInvalidConfig(t *testing.T) {
+	rl := NewRateLimiter(60, 1, false)
+	defer rl.Close()
+	rl.Reconfigure(0, 0, false)
+	rl.SetEnabled(true)
+	if rl.Enabled() {
+		t.Fatal("SetEnabled(true) must not activate an invalid configuration")
+	}
+	if !rl.Allow("client") {
+		t.Fatal("invalid configuration must remain fail-open")
+	}
+}

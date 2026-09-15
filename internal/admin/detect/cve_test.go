@@ -209,6 +209,35 @@ func TestSaveCVEScopeOverrideMergesPartialPatch(t *testing.T) {
 	}
 }
 
+func TestSaveCVEScopeOverrideRejectsPartialUpdateLeavingInvalidAction(t *testing.T) {
+	repo := newCVERuleRepoForTest(t)
+	rule := cve.CVERuleModel{
+		CVEID: "CVE-2026-50006", Category: "general", Pattern: "merge-invalid",
+		Target: "url", Severity: "high", Action: "intercept", Enabled: true,
+		Source: "custom", Approved: true,
+	}
+	if err := repo.Create(&rule); err != nil {
+		t.Fatalf("seed cve rule: %v", err)
+	}
+	actionValue := "redirect"
+	redirectTo := "https://example.com/blocked"
+	scope := cveScopeContext{ScopeType: store.CVEScopeGlobal, ScopeID: 0}
+	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, store.CVERuleScopeOverride{
+		Action: &actionValue, RedirectTo: &redirectTo,
+	}); err != nil {
+		t.Fatalf("save valid redirect override: %v", err)
+	}
+	if err := repo.DB().Model(&store.CVERuleScopeOverride{}).
+		Where("rule_id = ? AND scope_type = ? AND scope_id = ?", rule.ID, store.CVEScopeGlobal, 0).
+		Update("redirect_to", "").Error; err != nil {
+		t.Fatalf("seed invalid persisted override: %v", err)
+	}
+	enabled := false
+	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, store.CVERuleScopeOverride{Enabled: &enabled}); err == nil {
+		t.Fatal("partial update accepted redirect action without redirect target")
+	}
+}
+
 func TestCVERuleStatsUseEffectiveScopeOverrides(t *testing.T) {
 	repo := newCVERuleRepoForTest(t)
 	rules := []cve.CVERuleModel{

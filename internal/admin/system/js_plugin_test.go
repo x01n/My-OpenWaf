@@ -107,9 +107,9 @@ func TestCreateJSPluginPersistsAndReloads(t *testing.T) {
 	reloaded := 0
 	body, _ := json.Marshal(map[string]any{
 		"name": "edge-request", "source": "return 1", "stage": "request",
-		"failure_mode": "fail_closed", "priority": 7, "timeout_ms": 35,
+		"failure_mode": "fail_closed", "priority": 7, "timeout_ms": 35, "enabled": false,
 	})
-	ctx := invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, func() error { reloaded++; return nil }), "POST", "/api/v1/js-plugins", nil, body)
+	ctx := invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, func() error { reloaded++; return nil }, nil), "POST", "/api/v1/js-plugins", nil, body)
 	if ctx.Response.StatusCode() != 201 {
 		t.Fatalf("want 201, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -122,6 +122,23 @@ func TestCreateJSPluginPersistsAndReloads(t *testing.T) {
 	}
 	if items[0].Stage != store.JSStageRequest || items[0].FailureMode != store.JSFailureModeClosed || items[0].TimeoutMS != 35 {
 		t.Fatalf("persisted fields = %+v", items[0])
+	}
+}
+
+func TestCreateEnabledJSPluginRequiresRuntimeBeforePersistence(t *testing.T) {
+	repo := newJSPluginRepoForTest(t)
+	reloaded := 0
+	body := []byte(`{"name":"enabled","source":"export default { fetch() { return {}; } }","stage":"request","failure_mode":"fail_open"}`)
+	ctx := invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, func() error { reloaded++; return nil }, nil), "POST", "/x", nil, body)
+	if ctx.Response.StatusCode() != 503 || !bytes.Contains(ctx.Response.Body(), []byte(jsRuntimeUnavailableMessage)) {
+		t.Fatalf("status = %d; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if reloaded != 0 {
+		t.Fatalf("reload count = %d, want 0", reloaded)
+	}
+	items, err := repo.List()
+	if err != nil || len(items) != 0 {
+		t.Fatalf("items = %d, err=%v", len(items), err)
 	}
 }
 
@@ -212,8 +229,8 @@ func TestCreateJSPluginReloadFailureIncludesCurrentCompileDiagnostic(t *testing.
 			snapshotpkg.JSPluginErrorKey(items[0].ID): compileError,
 		}})
 		return errors.New(reloadError)
-	})
-	body := []byte(`{"name":"broken","source":"export default { fetch() { return {}; } }","stage":"request","failure_mode":"fail_closed"}`)
+	}, nil)
+	body := []byte(`{"name":"broken","source":"export default { fetch() { return {}; } }","stage":"request","failure_mode":"fail_closed","enabled":false}`)
 	ctx := invokeThreatIntelHandler(t, handler, "POST", "/x", nil, body)
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("status = %d; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
@@ -242,7 +259,7 @@ func TestCreateJSPluginRejectsInvalidContract(t *testing.T) {
 		`{"name":"x","source":"x","stage":"response","failure_mode":"fail_open","timeout_ms":1001}`,
 	}
 	for _, raw := range cases {
-		ctx := invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, func() error { return nil }), "POST", "/x", nil, []byte(raw))
+		ctx := invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, func() error { return nil }, nil), "POST", "/x", nil, []byte(raw))
 		if ctx.Response.StatusCode() != 400 {
 			t.Errorf("invalid body %s: status=%d", raw, ctx.Response.StatusCode())
 		}
@@ -256,11 +273,11 @@ func TestCreateJSPluginRejectsInvalidContract(t *testing.T) {
 func TestUpdateJSPluginPreservesFieldsAndParsesSiteScope(t *testing.T) {
 	repo := newJSPluginRepoForTest(t)
 	siteID := uint(9)
-	item := store.JSPlugin{Name: "edge", Source: "x", Stage: store.JSStageRequest, Enabled: true, Priority: 10, SiteID: &siteID, FailureMode: store.JSFailureModeOpen}
+	item := store.JSPlugin{Name: "edge", Source: "x", Stage: store.JSStageRequest, Enabled: false, Priority: 10, SiteID: &siteID, FailureMode: store.JSFailureModeOpen}
 	if err := repo.Create(&item); err != nil {
 		t.Fatal(err)
 	}
-	handler := UpdateJSPlugin(repo, nil, func() error { return nil })
+	handler := UpdateJSPlugin(repo, nil, func() error { return nil }, nil)
 	invokeThreatIntelHandler(t, handler, "POST", "/x", idParam(item.ID), []byte(`{"priority":2}`))
 	got, _ := repo.Get(item.ID)
 	if got.Priority != 2 || got.SiteID == nil || *got.SiteID != 9 {
@@ -281,7 +298,7 @@ func TestJSPluginResponseStageCannotBeConfigured(t *testing.T) {
 		return nil
 	}
 
-	ctx := invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, reload), "POST", "/x", nil, []byte(`{"name":"response","source":"x","stage":"response","failure_mode":"fail_open"}`))
+	ctx := invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, reload, nil), "POST", "/x", nil, []byte(`{"name":"response","source":"x","stage":"response","failure_mode":"fail_open"}`))
 	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
 		t.Fatalf("create response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
@@ -294,7 +311,7 @@ func TestJSPluginResponseStageCannotBeConfigured(t *testing.T) {
 	if err := repo.Create(&requestPlugin); err != nil {
 		t.Fatal(err)
 	}
-	ctx = invokeThreatIntelHandler(t, UpdateJSPlugin(repo, nil, reload), "POST", "/x", idParam(requestPlugin.ID), []byte(`{"stage":"response"}`))
+	ctx = invokeThreatIntelHandler(t, UpdateJSPlugin(repo, nil, reload, nil), "POST", "/x", idParam(requestPlugin.ID), []byte(`{"stage":"response"}`))
 	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
 		t.Fatalf("update to response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
@@ -307,7 +324,7 @@ func TestJSPluginResponseStageCannotBeConfigured(t *testing.T) {
 	if err := repo.Create(&legacyResponsePlugin); err != nil {
 		t.Fatal(err)
 	}
-	ctx = invokeThreatIntelHandler(t, UpdateJSPlugin(repo, nil, reload), "POST", "/x", idParam(legacyResponsePlugin.ID), []byte(`{"priority":2}`))
+	ctx = invokeThreatIntelHandler(t, UpdateJSPlugin(repo, nil, reload, nil), "POST", "/x", idParam(legacyResponsePlugin.ID), []byte(`{"priority":2}`))
 	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
 		t.Fatalf("update legacy response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
@@ -316,7 +333,7 @@ func TestJSPluginResponseStageCannotBeConfigured(t *testing.T) {
 		t.Fatalf("legacy response plugin changed after rejected update: %+v, err=%v", got, err)
 	}
 
-	ctx = invokeThreatIntelHandler(t, ToggleJSPlugin(repo, reload), "POST", "/x", idParam(legacyResponsePlugin.ID), []byte(`{"enabled":true}`))
+	ctx = invokeThreatIntelHandler(t, ToggleJSPlugin(repo, reload, nil), "POST", "/x", idParam(legacyResponsePlugin.ID), []byte(`{"enabled":true}`))
 	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
 		t.Fatalf("enable response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
@@ -333,7 +350,7 @@ func TestJSPluginResponseStageCannotBeConfigured(t *testing.T) {
 //
 // 空请求体在两个端点都必须停在 400，否则未装配运行时会掩盖入参错误。
 func TestJSPluginRuntimeEndpointsRejectInvalidStage(t *testing.T) {
-	validate := invokeThreatIntelHandler(t, ValidateJSPlugin(), "POST", "/x", nil, []byte(`{}`))
+	validate := invokeThreatIntelHandler(t, ValidateJSPlugin(nil), "POST", "/x", nil, []byte(`{}`))
 	if validate.Response.StatusCode() != 400 || !bytes.Contains(validate.Response.Body(), []byte("stage must be request")) {
 		t.Fatalf("validate response = %d %s", validate.Response.StatusCode(), validate.Response.Body())
 	}
@@ -368,7 +385,7 @@ func TestValidateJSPluginRejectsUnavailableStageAndTimeout(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := invokeThreatIntelHandler(t, ValidateJSPlugin(), "POST", "/x", nil, tc.body)
+			ctx := invokeThreatIntelHandler(t, ValidateJSPlugin(nil), "POST", "/x", nil, tc.body)
 			if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(tc.want)) {
 				t.Fatalf("validate response = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 			}
@@ -402,6 +419,25 @@ func TestGetJSPluginStatsReturnsEmptyList(t *testing.T) {
 	stats := invokeThreatIntelHandler(t, GetJSPluginStats(nil), "GET", "/x", nil, nil)
 	if stats.Response.StatusCode() != 200 || !bytes.Contains(stats.Response.Body(), []byte(`"items":[]`)) {
 		t.Fatalf("stats response = %d %s", stats.Response.StatusCode(), stats.Response.Body())
+	}
+}
+
+func TestGetJSPluginRuntimeReportsUnavailableBackend(t *testing.T) {
+	repo := newJSPluginRepoForTest(t)
+	item := store.JSPlugin{Name: "draft", Source: "broken", Stage: store.JSStageRequest, Enabled: false, FailureMode: store.JSFailureModeOpen}
+	if err := repo.Create(&item); err != nil {
+		t.Fatal(err)
+	}
+	ctx := invokeThreatIntelHandler(t, GetJSPluginRuntime(repo, nil, nil), "GET", "/x", nil, nil)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("status = %d; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var status jsPluginRuntimeStatus
+	if err := json.Unmarshal(ctx.Response.Body(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Backend != jsplugin.RuntimeBackend() || status.Available || status.EngineReady || status.Enabled != 0 || status.Compiled != 0 || status.CompileErrors != 0 || !status.RequestSupported || status.ResponseSupported {
+		t.Fatalf("runtime status = %+v", status)
 	}
 }
 

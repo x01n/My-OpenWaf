@@ -61,6 +61,38 @@ func ListCVERulesFromRegistry(repo *repository.SystemSettingsRepo) app.HandlerFu
 	}
 }
 
+// cveRuleStats summarizes effective CVE state for one resolved scope.
+type cveRuleStats struct {
+	Total         int64          `json:"total"`
+	EnabledCount  int            `json:"enabled_count"`
+	DisabledCount int            `json:"disabled_count"`
+	ByCategory    map[string]int `json:"by_category"`
+	BySeverity    map[string]int `json:"by_severity"`
+	Scope         string         `json:"scope"`
+	ScopeID       uint           `json:"scope_id"`
+}
+
+func summarizeCVERules(views []cveScopedRuleView, scope cveScopeContext) cveRuleStats {
+	stats := cveRuleStats{
+		Total:      int64(len(views)),
+		ByCategory: make(map[string]int),
+		BySeverity: make(map[string]int),
+		Scope:      scope.ScopeType,
+		ScopeID:    scope.ScopeID,
+	}
+	for i := range views {
+		item := views[i]
+		stats.ByCategory[item.Category]++
+		stats.BySeverity[item.Severity]++
+		if item.Effective.Enabled {
+			stats.EnabledCount++
+		} else {
+			stats.DisabledCount++
+		}
+	}
+	return stats
+}
+
 // GetCVERuleStats returns statistics about CVE rules.
 func GetCVERuleStats(repo *repository.CVERuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -74,31 +106,7 @@ func GetCVERuleStats(repo *repository.CVERuleRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-
-		categoryCount := make(map[string]int)
-		severityCount := make(map[string]int)
-		enabledCount := 0
-		disabledCount := 0
-
-		for _, item := range views {
-			categoryCount[item.Category]++
-			severityCount[item.Severity]++
-			if item.Effective.Enabled {
-				enabledCount++
-			} else {
-				disabledCount++
-			}
-		}
-
-		c.JSON(200, map[string]any{
-			"total":          int64(len(views)),
-			"enabled_count":  enabledCount,
-			"disabled_count": disabledCount,
-			"by_category":    categoryCount,
-			"by_severity":    severityCount,
-			"scope":          scope.ScopeType,
-			"scope_id":       scope.ScopeID,
-		})
+		c.JSON(200, summarizeCVERules(views, scope))
 	}
 }
 
@@ -115,6 +123,7 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			Sensitivity *string `json:"sensitivity,omitempty"`
 			StatusCode  *int    `json:"status_code,omitempty"`
 			RedirectTo  *string `json:"redirect_to,omitempty"`
+			CaptchaType *string `json:"captcha_type,omitempty"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "请求体格式无效"})
@@ -129,7 +138,7 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		patch := store.CVERuleScopeOverride{Enabled: req.Enabled, Action: req.Action, Sensitivity: req.Sensitivity, StatusCode: req.StatusCode, RedirectTo: req.RedirectTo}
+		patch := store.CVERuleScopeOverride{Enabled: req.Enabled, Action: req.Action, Sensitivity: req.Sensitivity, StatusCode: req.StatusCode, RedirectTo: req.RedirectTo, CaptchaType: req.CaptchaType}
 		if err := validateCVEScopePatch(&patch); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -153,6 +162,7 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		repo.InvalidateCanonicalSnapshot()
 		if len(reload) > 0 && reload[0] != nil {
 			if err := reload[0](); err != nil {
 				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
@@ -184,6 +194,7 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			Sensitivity *string `json:"sensitivity,omitempty"`
 			StatusCode  *int    `json:"status_code,omitempty"`
 			RedirectTo  *string `json:"redirect_to,omitempty"`
+			CaptchaType *string `json:"captcha_type,omitempty"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -194,7 +205,7 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		patch := store.CVERuleScopeOverride{Enabled: req.Enabled, Action: req.Action, Sensitivity: req.Sensitivity, StatusCode: req.StatusCode, RedirectTo: req.RedirectTo}
+		patch := store.CVERuleScopeOverride{Enabled: req.Enabled, Action: req.Action, Sensitivity: req.Sensitivity, StatusCode: req.StatusCode, RedirectTo: req.RedirectTo, CaptchaType: req.CaptchaType}
 		if err := validateCVEScopePatch(&patch); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -203,6 +214,7 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		repo.InvalidateCanonicalSnapshot()
 		if len(reload) > 0 && reload[0] != nil {
 			if err := reload[0](); err != nil {
 				c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})

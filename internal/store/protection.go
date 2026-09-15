@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sort"
 	"strings"
+
+	"My-OpenWaf/internal/core/action"
 )
 
 // ProtectionConfig is the global protection configuration stored as JSON in SystemSettings.
@@ -72,6 +74,11 @@ type ProtectionConfig struct {
 	CaptchaTimeout int    `json:"captcha_timeout"`
 	CaptchaPassTTL int    `json:"captcha_pass_ttl"`
 
+	// ChallengeAction 是全局默认质询动作（challenge / captcha_challenge /
+	// shield_challenge / chain_challenge）。空串语义为「默认 challenge 动作」，
+	// 由数据面渲染时回退到兜底 challenge 分支，避免旧配置缺字段时无动作可渲染。
+	ChallengeAction string `json:"challenge_action"`
+
 	AntiReplayEnabled bool `json:"anti_replay_enabled"`
 
 	ShieldEnabled           bool `json:"shield_enabled"`
@@ -119,6 +126,33 @@ func (p ProtectionConfig) ValidateBasicAuth() error {
 	return nil
 }
 
+// ValidateRateLimits rejects enabled limiters without a positive window and
+// quota. Keeping this invariant in the persisted model prevents a zero quota
+// from being interpreted as "block every request" by any runtime backend.
+func (p ProtectionConfig) ValidateRateLimits() error {
+	if p.RequestRateLimitEnabled && (p.RequestRateLimitWindow <= 0 || p.RequestRateLimitMax <= 0) {
+		return errors.New("request rate limit requires a positive window and max")
+	}
+	if p.ErrorRateLimitEnabled && (p.ErrorRateLimitWindow <= 0 || p.ErrorRateLimitMax <= 0) {
+		return errors.New("error rate limit requires a positive window and max")
+	}
+	return nil
+}
+
+// ValidateProtectionChallengeAction 校验全局质询动作白名单。
+// 空串视为「继承默认 challenge 渲染」，返回合法（旧配置缺字段的兼容路径）。
+func ValidateProtectionChallengeAction(value string) bool {
+	if value == "" {
+		return true
+	}
+	switch action.Normalize(action.Type(value)) {
+	case action.Challenge, action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge:
+		return true
+	default:
+		return false
+	}
+}
+
 func DefaultProtectionConfig() ProtectionConfig {
 	return ProtectionConfig{
 		RequestRateLimitWindow:  60,
@@ -158,6 +192,8 @@ func DefaultProtectionConfig() ProtectionConfig {
 		BrowserSignEnabled:      false,
 		BrowserSignTTL:          300,
 		BrowserSignAction:       "challenge",
+		// 全局默认质询动作：连接旧配置（空串）时数据面回退到 challenge 兜底渲染。
+		ChallengeAction: "challenge",
 	}
 }
 

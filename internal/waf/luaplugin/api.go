@@ -3,6 +3,7 @@ package luaplugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -279,6 +280,11 @@ func buildKVTable(L *lua.LState, runCtx context.Context, kv KVBackend, budget *a
 
 	// incr 是自定义限速的基础：原子自增并在首次写入时设置过期。
 	t.RawSetString("incr", L.NewFunction(func(l *lua.LState) int {
+		ttl, err := strictIncrTTLFromArg(l, 2)
+		if err != nil {
+			l.RaiseError("%s", err.Error())
+			return 0
+		}
 		if !available || !budget.allow() {
 			l.Push(lua.LNil)
 			return 1
@@ -288,7 +294,7 @@ func buildKVTable(L *lua.LState, runCtx context.Context, kv KVBackend, budget *a
 			l.Push(lua.LNil)
 			return 1
 		}
-		n, err := incrKV(runCtx, kv, key, ttlFromArg(l, 2))
+		n, err := incrKV(runCtx, kv, key, ttl)
 		if err != nil {
 			l.Push(lua.LNil)
 			return 1
@@ -360,4 +366,22 @@ func ttlFromArg(l *lua.LState, idx int) time.Duration {
 		return kvDefaultTTL
 	}
 	return ttl
+}
+
+// strictIncrTTLFromArg 读取 ctx.kv.incr 的可选 TTL 秒数。
+// 省略参数沿用默认值；显式参数必须是 1..86400 的有限整数。
+func strictIncrTTLFromArg(l *lua.LState, idx int) (time.Duration, error) {
+	if l.GetTop() < idx {
+		return kvDefaultTTL, nil
+	}
+	num, ok := l.Get(idx).(lua.LNumber)
+	if !ok {
+		return 0, fmt.Errorf("luaplugin: ctx.kv.incr ttl must be an integer between 1 and %d seconds", kvMaxTTL/time.Second)
+	}
+	seconds := float64(num)
+	maxSeconds := float64(kvMaxTTL / time.Second)
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 1 || seconds > maxSeconds || math.Trunc(seconds) != seconds {
+		return 0, fmt.Errorf("luaplugin: ctx.kv.incr ttl must be an integer between 1 and %d seconds", kvMaxTTL/time.Second)
+	}
+	return time.Duration(seconds) * time.Second, nil
 }

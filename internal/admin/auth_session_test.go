@@ -13,6 +13,7 @@ import (
 
 	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
 )
 
 // newSessionMgrForTest 基于内存库构造会话管理器。
@@ -72,6 +73,14 @@ func TestListSessionsNilManagerReturnsEmpty(t *testing.T) {
 	if len(resp.Sessions) != 0 {
 		t.Fatalf("want empty sessions, got %d", len(resp.Sessions))
 	}
+}
+
+func TestSessionManagerCloseIsIdempotent(t *testing.T) {
+	sm := newSessionMgrForTest(t)
+	sm.Close()
+	sm.Close()
+	var zero auth.SessionManager
+	zero.Close()
 }
 
 // TestListSessionsScopedToCurrentUser 验证默认只返回当前用户的会话。
@@ -182,5 +191,63 @@ func TestForceLogoutRemovesExistingSession(t *testing.T) {
 	}
 	if len(sm.ListUserSessions("alice")) != 0 {
 		t.Fatal("alice should have no remaining sessions")
+	}
+}
+
+// TestForceLogoutRevokesLinkedRefreshToken 防止强退后浏览器仍凭 refresh cookie
+// 重新换取访问令牌。
+func TestForceLogoutRevokesLinkedRefreshToken(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.ActiveSession{}, &store.RefreshToken{}); err != nil {
+		t.Fatalf("migrate auth tables: %v", err)
+	}
+	sm := auth.NewSessionManager(db)
+	rtRepo := repository.NewRefreshTokenRepo(db)
+	if _, err := rtRepo.Create("refresh-linked", "hash", "alice", auth.RoleAdmin, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("create refresh token: %v", err)
+	}
+	sm.CreateSessionWithRefresh("alice", "access-linked", "refresh-linked", "1.1.1.1", "curl", "", time.Now().Add(time.Hour))
+
+	ctx := invokeSessionHandler(ForceLogoutSessionHandler(&AuthDeps{SessionMgr: sm, RTRepo: rtRepo}),
+		"POST", "/api/v1/auth/sessions/force-logout", []byte(`{"jti":"access-linked"}`), auth.RoleAdmin, "alice")
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	if _, err := rtRepo.FindByJTI("refresh-linked"); err == nil {
+		t.Fatal("linked refresh token remains active after force logout")
+	}
+}
+
+// TestForceLogoutRevokesRotatedRefreshFamily 防止强退旧会话关联的 JTI 后，
+// 已经轮换出来的后继 refresh token 仍可恢复登录。
+func TestForceLogoutRevokesRotatedRefreshFamily(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.ActiveSession{}, &store.RefreshToken{}); err != nil {
+		t.Fatalf("migrate auth tables: %v", err)
+	}
+	sm := auth.NewSessionManager(db)
+	rtRepo := repository.NewRefreshTokenRepo(db)
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := rtRepo.Create("refresh-family-old", "old-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
+		t.Fatalf("create old refresh token: %v", err)
+	}
+	if _, err := rtRepo.Rotate("refresh-family-old", "refresh-family-new", "new-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
+		t.Fatalf("rotate refresh token: %v", err)
+	}
+	sm.CreateSessionWithRefresh("alice", "access-family", "refresh-family-old", "1.1.1.1", "curl", "", expiresAt)
+
+	ctx := invokeSessionHandler(ForceLogoutSessionHandler(&AuthDeps{SessionMgr: sm, RTRepo: rtRepo}),
+		"POST", "/api/v1/auth/sessions/force-logout", []byte(`{"jti":"access-family"}`), auth.RoleAdmin, "alice")
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	if _, err := rtRepo.FindByJTI("refresh-family-new"); err == nil {
+		t.Fatal("rotated refresh successor remains active after force logout")
 	}
 }

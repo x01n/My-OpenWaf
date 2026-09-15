@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Tooltip,
   TooltipContent,
@@ -19,16 +20,18 @@ import {
 import {
   useJSPluginDelete,
   useJSPluginStats,
+  useJSPluginRuntime,
   useJSPluginToggle,
   useJSPlugins,
   useAllSites,
 } from "@/hooks/use-api"
+import { useAuth } from "@/hooks/use-auth"
 import {
   IconAlertTriangle,
   IconBraces,
   IconEdit,
-  IconInfoCircle,
   IconPlus,
+  IconServer,
   IconTrash,
 } from "@tabler/icons-react"
 import type { JSPlugin, JSPluginStage } from "@/lib/types"
@@ -46,8 +49,15 @@ const STAGE_CLASS: Record<JSPluginStage, string> = {
  */
 export default function JSPluginsPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const { data, isLoading, error, mutate: refresh } = useJSPlugins()
   const { data: stats, error: statsError } = useJSPluginStats()
+  const {
+    data: runtime,
+    error: runtimeError,
+    isLoading: runtimeLoading,
+  } = useJSPluginRuntime()
   const { data: sitesData } = useAllSites()
   const sites = useMemo(() => sitesData?.items ?? [], [sitesData])
   const siteNames = useMemo(
@@ -79,6 +89,7 @@ export default function JSPluginsPage() {
   }
 
   const handleToggle = async (plugin: JSPlugin, enabled: boolean) => {
+    if (!canManage) return
     if (plugin.stage === "response" && enabled) {
       toast.error(t("jsPlugins.responseStageUnavailable"))
       return
@@ -94,7 +105,7 @@ export default function JSPluginsPage() {
   }
 
   const confirmDelete = async () => {
-    if (deleteId === null) return
+    if (!canManage || deleteId === null) return
     try {
       await deletePlugin(deleteId)
       toast.success(t("common.deleteSuccess"))
@@ -264,7 +275,7 @@ export default function JSPluginsPage() {
       render: (row: JSPlugin) => (
         <Switch
           checked={row.enabled}
-          disabled={row.stage === "response" && !row.enabled}
+          disabled={!canManage || (row.stage === "response" && !row.enabled)}
           onCheckedChange={(value) => handleToggle(row, value)}
         />
       ),
@@ -278,6 +289,7 @@ export default function JSPluginsPage() {
           <Button
             variant="ghost"
             size="icon-sm"
+            disabled={!canManage}
             onClick={() => openEdit(row)}
             title={t("common.edit")}
           >
@@ -286,6 +298,7 @@ export default function JSPluginsPage() {
           <Button
             variant="ghost"
             size="icon-sm"
+            disabled={!canManage || deleteLoading}
             onClick={() => setDeleteId(row.id)}
             title={t("common.delete")}
           >
@@ -303,18 +316,98 @@ export default function JSPluginsPage() {
         title={t("jsPlugins.title")}
         description={t("jsPlugins.description")}
         actions={
-          <Button onClick={openCreate}>
+          <Button onClick={openCreate} disabled={!canManage}>
             <IconPlus className="h-4 w-4" />
             {t("jsPlugins.add")}
           </Button>
         }
       />
 
-      <Alert>
-        <IconInfoCircle className="h-4 w-4" />
-        <AlertTitle>{t("jsPlugins.runtimeTitle")}</AlertTitle>
-        <AlertDescription>{t("jsPlugins.runtimeDescription")}</AlertDescription>
-      </Alert>
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertDescription>{t("common.readOnlyHint")}</AlertDescription>
+        </Alert>
+      )}
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0 pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <IconServer className="h-4 w-4" />
+            {t("jsPlugins.runtimeTitle")}
+          </CardTitle>
+          <Badge
+            variant="outline"
+            className={
+              runtime?.available
+                ? "border-emerald-500/30 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                : "border-destructive/30 bg-destructive/10 text-destructive"
+            }
+          >
+            {runtimeLoading
+              ? t("common.loading")
+              : runtime?.available
+                ? t("jsPlugins.runtimeAvailable")
+                : t("jsPlugins.runtimeUnavailable")}
+          </Badge>
+        </CardHeader>
+        <CardContent>
+          {runtimeError ? (
+            <p className="text-sm text-destructive">
+              {runtimeError instanceof Error
+                ? runtimeError.message
+                : String(runtimeError)}
+            </p>
+          ) : (
+            <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-md border bg-muted/20 p-3">
+                <p className="text-xs text-muted-foreground">
+                  {t("jsPlugins.runtimeBackend")}
+                </p>
+                <p className="mt-1 font-mono font-medium">
+                  {runtime?.backend ?? "-"}
+                </p>
+              </div>
+              <div className="rounded-md border bg-muted/20 p-3">
+                <p className="text-xs text-muted-foreground">
+                  {t("jsPlugins.runtimeEngine")}
+                </p>
+                <p className="mt-1 font-medium">
+                  {runtime?.engine_ready
+                    ? t("jsPlugins.runtimeReady")
+                    : t("jsPlugins.runtimeNotReady")}
+                </p>
+              </div>
+              <div className="rounded-md border bg-muted/20 p-3">
+                <p className="text-xs text-muted-foreground">
+                  {t("jsPlugins.runtimeScripts")}
+                </p>
+                <p className="mt-1 font-mono font-medium">
+                  {runtime ? `${runtime.compiled}/${runtime.enabled}` : "-"}
+                </p>
+              </div>
+              <div className="rounded-md border bg-muted/20 p-3">
+                <p className="text-xs text-muted-foreground">
+                  {t("jsPlugins.runtimeStages")}
+                </p>
+                <p className="mt-1 font-medium">
+                  {runtime?.request_supported && runtime.response_supported
+                    ? t("jsPlugins.runtimeRequestAndResponse")
+                    : runtime?.request_supported
+                      ? t("jsPlugins.runtimeRequestOnly")
+                      : t("jsPlugins.runtimeUnavailable")}
+                </p>
+              </div>
+            </div>
+          )}
+          {runtime && runtime.compile_errors > 0 && (
+            <p className="mt-3 text-sm text-destructive">
+              {t("jsPlugins.runtimeCompileErrors", {
+                count: runtime.compile_errors,
+              })}
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {error && (
         <Alert variant="destructive">

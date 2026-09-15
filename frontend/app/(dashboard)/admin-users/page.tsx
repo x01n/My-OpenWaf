@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
 import { PageHeader } from "@/components/page-header"
 import {
   useAdminUsers,
@@ -54,6 +55,8 @@ function roleBadgeVariant(role: string): "default" | "secondary" | "outline" {
 
 export default function AdminUsersPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin"
   const { data, isLoading, error, mutate } = useAdminUsers()
   const { execute: createUser, loading: createLoading } = useAdminUserCreate()
   const { execute: updateRole } = useAdminUserUpdateRole()
@@ -74,20 +77,10 @@ export default function AdminUsersPage() {
 
   const users: AdminUser[] = data || []
 
-  const currentUser = (() => {
-    if (typeof window === "undefined") return null
-    try {
-      const token = localStorage.getItem("token")
-      if (!token) return null
-      const payload = JSON.parse(atob(token.split(".")[1]))
-      return payload.username || payload.sub
-    } catch {
-      return null
-    }
-  })()
+  const currentUser = user?.username ?? null
 
   const handleCreate = async () => {
-    if (!form.username.trim() || !form.password.trim()) return
+    if (!canManage || !form.username.trim() || !form.password.trim()) return
     try {
       await createUser({
         username: form.username.trim(),
@@ -104,6 +97,7 @@ export default function AdminUsersPage() {
   }
 
   const handleRoleChange = async (user: AdminUser, newRole: string) => {
+    if (!canManage) return
     try {
       await updateRole({ id: user.id, role: newRole })
       toast.success(t("adminUsers.updateRoleSuccess"))
@@ -114,7 +108,7 @@ export default function AdminUsersPage() {
   }
 
   const handlePasswordChange = async () => {
-    if (!passwordTarget || !newPassword.trim()) return
+    if (!canManage || !passwordTarget || !newPassword.trim()) return
     try {
       await updatePassword({
         id: passwordTarget.id,
@@ -130,6 +124,7 @@ export default function AdminUsersPage() {
   }
 
   const handleDeleteClick = (user: AdminUser) => {
+    if (!canManage) return
     if (user.username === currentUser) {
       toast.error(t("adminUsers.cannotDeleteSelf"))
       return
@@ -138,7 +133,7 @@ export default function AdminUsersPage() {
   }
 
   const confirmDelete = async () => {
-    if (!deleteId) return
+    if (!canManage || !deleteId) return
     try {
       await deleteUser(deleteId)
       toast.success(t("common.deleteSuccess"))
@@ -167,7 +162,12 @@ export default function AdminUsersPage() {
       key: "username",
       title: t("adminUsers.username"),
       render: (row: AdminUser) => (
-        <span className="font-medium">{row.username}</span>
+        <span
+          className="block max-w-[180px] truncate font-medium"
+          title={row.username}
+        >
+          {row.username}
+        </span>
       ),
     },
     {
@@ -177,7 +177,7 @@ export default function AdminUsersPage() {
         <Select
           value={row.role}
           onValueChange={(val) => handleRoleChange(row, val)}
-          disabled={row.username === currentUser}
+          disabled={!canManage || row.username === currentUser}
         >
           <SelectTrigger className="h-8 w-28">
             <SelectValue>
@@ -230,6 +230,7 @@ export default function AdminUsersPage() {
               setPasswordOpen(true)
             }}
             title={t("adminUsers.changePassword")}
+            disabled={!canManage}
           >
             <IconLock className="h-4 w-4" />
           </Button>
@@ -238,7 +239,7 @@ export default function AdminUsersPage() {
             size="icon-sm"
             onClick={() => handleDeleteClick(row)}
             className="text-destructive hover:text-destructive"
-            disabled={row.username === currentUser}
+            disabled={!canManage || row.username === currentUser}
           >
             <IconTrash className="h-4 w-4" />
           </Button>
@@ -253,7 +254,7 @@ export default function AdminUsersPage() {
         title={t("adminUsers.title")}
         description={t("adminUsers.description")}
         actions={
-          <Button onClick={() => setCreateOpen(true)}>
+          <Button onClick={() => setCreateOpen(true)} disabled={!canManage}>
             <IconPlus className="mr-2 h-4 w-4" />
             {t("adminUsers.create")}
           </Button>
@@ -266,6 +267,12 @@ export default function AdminUsersPage() {
           <AlertDescription>
             {error.message || t("error.unexpectedError")}
           </AlertDescription>
+        </Alert>
+      )}
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.adminOnlyHint")}</AlertTitle>
         </Alert>
       )}
 
@@ -284,49 +291,64 @@ export default function AdminUsersPage() {
             <DialogTitle>{t("adminUsers.create")}</DialogTitle>
             <DialogDescription>{t("adminUsers.description")}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="admin-username">{t("adminUsers.username")}</Label>
-              <Input
-                id="admin-username"
-                value={form.username}
-                onChange={(e) => setForm({ ...form, username: e.target.value })}
-                placeholder={t("adminUsers.usernamePlaceholder")}
-              />
+          <fieldset
+            disabled={!canManage}
+            className="m-0 space-y-4 border-0 p-0"
+          >
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="admin-username">
+                  {t("adminUsers.username")}
+                </Label>
+                <Input
+                  id="admin-username"
+                  value={form.username}
+                  maxLength={64}
+                  onChange={(e) =>
+                    setForm({ ...form, username: e.target.value })
+                  }
+                  placeholder={t("adminUsers.usernamePlaceholder")}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="admin-password">
+                  {t("adminUsers.password")}
+                </Label>
+                <Input
+                  id="admin-password"
+                  type="password"
+                  value={form.password}
+                  onChange={(e) =>
+                    setForm({ ...form, password: e.target.value })
+                  }
+                  placeholder={t("adminUsers.passwordPlaceholder")}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="admin-role">{t("adminUsers.role")}</Label>
+                <Select
+                  value={form.role}
+                  disabled={!canManage}
+                  onValueChange={(val) => setForm({ ...form, role: val })}
+                >
+                  <SelectTrigger id="admin-role">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="admin">
+                      {t("adminUsers.roleAdmin")}
+                    </SelectItem>
+                    <SelectItem value="operator">
+                      {t("adminUsers.roleOperator")}
+                    </SelectItem>
+                    <SelectItem value="readonly">
+                      {t("adminUsers.roleReadonly")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="admin-password">{t("adminUsers.password")}</Label>
-              <Input
-                id="admin-password"
-                type="password"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                placeholder={t("adminUsers.passwordPlaceholder")}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="admin-role">{t("adminUsers.role")}</Label>
-              <Select
-                value={form.role}
-                onValueChange={(val) => setForm({ ...form, role: val })}
-              >
-                <SelectTrigger id="admin-role">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="admin">
-                    {t("adminUsers.roleAdmin")}
-                  </SelectItem>
-                  <SelectItem value="operator">
-                    {t("adminUsers.roleOperator")}
-                  </SelectItem>
-                  <SelectItem value="readonly">
-                    {t("adminUsers.roleReadonly")}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
+          </fieldset>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               {t("common.cancel")}
@@ -334,7 +356,10 @@ export default function AdminUsersPage() {
             <Button
               onClick={handleCreate}
               disabled={
-                createLoading || !form.username.trim() || !form.password.trim()
+                !canManage ||
+                createLoading ||
+                !form.username.trim() ||
+                !form.password.trim()
               }
             >
               {createLoading ? t("common.submitting") : t("common.create")}
@@ -352,30 +377,35 @@ export default function AdminUsersPage() {
             </DialogTitle>
             <DialogDescription>{t("adminUsers.description")}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="admin-new-password">
-                {t("adminUsers.newPassword")}
-              </Label>
-              <Input
-                id="admin-new-password"
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder={t("adminUsers.newPasswordPlaceholder")}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handlePasswordChange()
-                }}
-              />
+          <fieldset
+            disabled={!canManage}
+            className="m-0 space-y-4 border-0 p-0"
+          >
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="admin-new-password">
+                  {t("adminUsers.newPassword")}
+                </Label>
+                <Input
+                  id="admin-new-password"
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder={t("adminUsers.newPasswordPlaceholder")}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handlePasswordChange()
+                  }}
+                />
+              </div>
             </div>
-          </div>
+          </fieldset>
           <DialogFooter>
             <Button variant="outline" onClick={() => setPasswordOpen(false)}>
               {t("common.cancel")}
             </Button>
             <Button
               onClick={handlePasswordChange}
-              disabled={pwdLoading || !newPassword.trim()}
+              disabled={!canManage || pwdLoading || !newPassword.trim()}
             >
               {pwdLoading ? t("common.submitting") : t("common.confirm")}
             </Button>

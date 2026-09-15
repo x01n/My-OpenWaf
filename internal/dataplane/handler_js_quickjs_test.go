@@ -222,7 +222,7 @@ func TestHandlerJSRequestStageHonorsInvalidMutationFailureModes(t *testing.T) {
 			defer upstream.Close()
 
 			script := compileRequestScript(t, "invalid-mutation", `export default {
-				fetch() { return {path: "relative-path"}; }
+				fetch(request) { return request; }
 			}`, jsplugin.ScriptOptions{}, jsplugin.ScriptMetadata{
 				ID: 1, Stage: store.JSStageRequest, Priority: 1, FailureMode: tt.failureMode,
 			})
@@ -238,8 +238,15 @@ func TestHandlerJSRequestStageHonorsInvalidMutationFailureModes(t *testing.T) {
 			if got := ctx.Response.StatusCode(); got != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", got, tt.wantStatus)
 			}
+			if got := ctx.Response.StatusCode(); got == http.StatusTooManyRequests {
+				t.Fatal("JavaScript contract failure must never be attributed as HTTP 429")
+			}
 			if got := upstreamCalls.Load(); got != tt.wantUpstreamCall {
 				t.Fatalf("upstream calls = %d, want %d", got, tt.wantUpstreamCall)
+			}
+			runs, failures, timeouts, _ := script.Stats()
+			if runs != 1 || failures != 1 || timeouts != 0 {
+				t.Fatalf("script stats = runs:%d failures:%d timeouts:%d", runs, failures, timeouts)
 			}
 		})
 	}

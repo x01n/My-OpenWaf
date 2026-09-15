@@ -17,6 +17,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/luaplugin"
@@ -129,6 +130,46 @@ func TestCreateLuaPluginRejectsSyntaxError(t *testing.T) {
 	items, _ := repo.List()
 	if len(items) != 0 {
 		t.Error("校验失败的脚本不应入库")
+	}
+}
+
+const invalidLuaIncrTTLSource = `
+function handle(ctx)
+  if not ctx.kv.available() then
+    return nil
+  end
+  ctx.kv.incr("rl:" .. ctx.client_ip, 600000000)
+  return nil
+end`
+
+func TestEnabledLuaPluginRejectsInvalidIncrTTLBeforePersistence(t *testing.T) {
+	repo := newLuaPluginRepoForTest(t)
+	reloaded := 0
+	body, _ := json.Marshal(map[string]any{
+		"name": "invalid-window", "stage": "pre", "source": invalidLuaIncrTTLSource,
+	})
+	ctx := invokeThreatIntelHandler(t, CreateLuaPlugin(repo, func() error { reloaded++; return nil }), "POST", "/x", nil, body)
+	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte("ctx.kv.incr ttl must be an integer between 1 and 86400 seconds")) {
+		t.Fatalf("status = %d; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	items, err := repo.List()
+	if err != nil || len(items) != 0 || reloaded != 0 {
+		t.Fatalf("items=%d reloads=%d err=%v", len(items), reloaded, err)
+	}
+}
+
+func TestDisabledLuaDraftMayPersistBeforeExecutionValidation(t *testing.T) {
+	repo := newLuaPluginRepoForTest(t)
+	body, _ := json.Marshal(map[string]any{
+		"name": "disabled-invalid-window", "stage": "pre", "source": invalidLuaIncrTTLSource, "enabled": false,
+	})
+	ctx := invokeThreatIntelHandler(t, CreateLuaPlugin(repo, func() error { return nil }), "POST", "/x", nil, body)
+	if ctx.Response.StatusCode() != 201 {
+		t.Fatalf("status = %d; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	items, err := repo.List()
+	if err != nil || len(items) != 1 || items[0].Enabled {
+		t.Fatalf("items=%+v err=%v", items, err)
 	}
 }
 
@@ -250,6 +291,18 @@ func TestCreateLuaPluginRejectsExcessiveTimeout(t *testing.T) {
 	}
 }
 
+func TestCreateLuaPluginRejectsRuntimeTimeoutUpperBound(t *testing.T) {
+	repo := newLuaPluginRepoForTest(t)
+	body, _ := json.Marshal(map[string]any{
+		"name": "runtime-upper-bound", "stage": "pre", "source": validLuaSource, "timeout_ms": 1001,
+	})
+	ctx := invokeThreatIntelHandler(t, CreateLuaPlugin(repo, func() error { return nil }),
+		"POST", "/api/v1/lua-plugins", nil, body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("runtime timeout upper bound should return 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+}
+
 // ---- 更新 ----
 
 func TestUpdateLuaPluginPartialFields(t *testing.T) {
@@ -326,6 +379,24 @@ func TestUpdateLuaPluginRejectsBadSourceAndMissingID(t *testing.T) {
 	}
 }
 
+func TestUpdateEnabledLuaPluginRejectsRuntimeErrorWithoutChangingDatabase(t *testing.T) {
+	repo := newLuaPluginRepoForTest(t)
+	seed := store.LuaPlugin{Name: "valid", Stage: "pre", Source: validLuaSource, Enabled: true, Priority: 100}
+	if err := repo.Create(&seed); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := 0
+	body, _ := json.Marshal(map[string]any{"source": invalidLuaIncrTTLSource, "priority": 1})
+	ctx := invokeThreatIntelHandler(t, UpdateLuaPlugin(repo, func() error { reloaded++; return nil }), "POST", "/x", idParam(seed.ID), body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("status = %d; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	stored, err := repo.Get(seed.ID)
+	if err != nil || stored.Source != validLuaSource || stored.Priority != 100 || reloaded != 0 {
+		t.Fatalf("stored=%+v reloads=%d err=%v", stored, reloaded, err)
+	}
+}
+
 // ---- 删除与切换 ----
 
 func TestDeleteLuaPlugin(t *testing.T) {
@@ -373,6 +444,23 @@ func TestToggleLuaPlugin(t *testing.T) {
 	}
 }
 
+func TestEnableLuaPluginRejectsRuntimeErrorWithoutChangingDatabase(t *testing.T) {
+	repo := newLuaPluginRepoForTest(t)
+	seed := store.LuaPlugin{Name: "invalid-window", Stage: "pre", Source: invalidLuaIncrTTLSource, Enabled: false}
+	if err := repo.Create(&seed); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := 0
+	ctx := invokeThreatIntelHandler(t, ToggleLuaPlugin(repo, func() error { reloaded++; return nil }), "POST", "/x", idParam(seed.ID), []byte(`{"enabled":true}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("status = %d; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	stored, err := repo.Get(seed.ID)
+	if err != nil || stored.Enabled || reloaded != 0 {
+		t.Fatalf("stored=%+v reloads=%d err=%v", stored, reloaded, err)
+	}
+}
+
 // ---- 校验与试运行 ----
 
 func TestValidateLuaPluginEndpoint(t *testing.T) {
@@ -397,6 +485,19 @@ func TestValidateLuaPluginEndpoint(t *testing.T) {
 	json.Unmarshal(ctx2.Response.Body(), &badResp)
 	if badResp.Valid || badResp.Error == "" {
 		t.Errorf("语法错误应返回 valid=false 与错误信息: %s", ctx2.Response.Body())
+	}
+
+	runtimeBody, _ := json.Marshal(map[string]any{"stage": "pre", "source": invalidLuaIncrTTLSource})
+	runtimeCtx := invokeThreatIntelHandler(t, handler, "POST", "/x", nil, runtimeBody)
+	var runtimeResp struct {
+		Valid bool   `json:"valid"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(runtimeCtx.Response.Body(), &runtimeResp); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeResp.Valid || !strings.Contains(runtimeResp.Error, "ctx.kv.incr ttl must be an integer between 1 and 86400 seconds") {
+		t.Fatalf("运行期 TTL 错误未被校验端点拒绝: %s", runtimeCtx.Response.Body())
 	}
 }
 
@@ -616,6 +717,37 @@ func TestListAndGetLuaPlugin(t *testing.T) {
 	miss := invokeThreatIntelHandler(t, GetLuaPlugin(repo), "GET", "/x", idParam(9999), nil)
 	if miss.Response.StatusCode() != 404 {
 		t.Errorf("不存在 want 404, got %d", miss.Response.StatusCode())
+	}
+}
+
+func TestListLuaPluginIncludesSnapshotRuntimeDiagnostic(t *testing.T) {
+	repo := newLuaPluginRepoForTest(t)
+	item := store.LuaPlugin{Name: "invalid-runtime", Stage: "pre", Source: validLuaSource, Enabled: true}
+	if err := repo.Create(&item); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	holder := &snapshotpkg.Holder{}
+	holder.Store(&snapshotpkg.Snapshot{LuaPluginErrors: map[string]string{
+		item.Name: "lua runtime validation failed",
+	}})
+	ctx := invokeThreatIntelHandler(t, ListLuaPlugins(repo, holder), "GET", "/x", nil, nil)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d", ctx.Response.StatusCode())
+	}
+	var response struct {
+		Items []struct {
+			Name         string `json:"name"`
+			CompileError string `json:"compile_error"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(response.Items) != 1 || response.Items[0].Name != item.Name {
+		t.Fatalf("list items = %#v", response.Items)
+	}
+	if response.Items[0].CompileError == "" {
+		t.Fatalf("list response omitted runtime diagnostic: %#v", response.Items[0])
 	}
 }
 

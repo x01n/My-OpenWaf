@@ -1,8 +1,11 @@
 package jsplugin
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"My-OpenWaf/internal/store"
 )
 
 func TestScriptMetadataCopiesSiteScope(t *testing.T) {
@@ -48,6 +51,17 @@ func TestNormalizeRequestSnapshotRejectsOversizedFields(t *testing.T) {
 	}
 	if _, err := normalizeRequestSnapshot(RequestSnapshot{Headers: map[string]string{"X-Test": strings.Repeat("x", MaxRequestSnapshotStringBytes)}, QueryParams: map[string]string{"q": strings.Repeat("x", MaxRequestSnapshotStringBytes)}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateWithOptionsRejectsUnavailableResponseStage(t *testing.T) {
+	err := ValidateWithOptions(
+		store.JSStageResponse,
+		`export default { fetch() { return {}; } }`,
+		ScriptOptions{},
+	)
+	if !errors.Is(err, ErrResponseStageUnavailable) {
+		t.Fatalf("ValidateWithOptions() error = %v, want %v", err, ErrResponseStageUnavailable)
 	}
 }
 

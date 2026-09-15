@@ -11,6 +11,7 @@ const (
 	SettingKeyACMEConfig          = "acme_config"
 	SettingKeyRedisConfig         = "redis_config"
 	SettingKeyJWTSecret           = "jwt_secret"
+	SettingKeyAPIKeySeedMarker    = "seed.api_key_initialized"
 	SettingKeyHPKP                = "hpkp_enabled"
 	SettingKeyHPKPValue           = "hpkp_value"
 	SettingKeyHPKPReportOnly      = "hpkp_report_only_enabled"

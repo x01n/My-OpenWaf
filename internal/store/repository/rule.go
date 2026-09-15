@@ -12,6 +12,7 @@ import (
 type RuleFilter struct {
 	PolicyID *uint
 	Query    string
+	Action   *store.RuleAction
 }
 
 const ruleExecutionOrderClause = "CASE phase WHEN 'acl' THEN 1 WHEN 'signature' THEN 2 WHEN 'custom' THEN 3 ELSE 99 END ASC, priority ASC, id ASC"
@@ -36,6 +37,16 @@ func (r *RuleRepo) ListFiltered(offset, limit int, f RuleFilter) ([]store.Rule, 
 	q := r.db.Model(&store.Rule{})
 	if f.PolicyID != nil {
 		q = q.Where("policy_id = ?", *f.PolicyID)
+	}
+	if f.Action != nil {
+		switch store.NormalizeAction(*f.Action) {
+		case store.ActionIntercept:
+			q = q.Where("action IN ?", []store.RuleAction{store.ActionIntercept, store.ActionBlock})
+		case store.ActionObserve:
+			q = q.Where("action IN ?", []store.RuleAction{store.ActionObserve, store.ActionLogOnly})
+		default:
+			q = q.Where("action = ?", *f.Action)
+		}
 	}
 	if strings.TrimSpace(f.Query) != "" {
 		like := "%" + strings.TrimSpace(f.Query) + "%"

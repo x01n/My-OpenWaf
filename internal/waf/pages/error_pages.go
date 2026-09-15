@@ -3,6 +3,7 @@ package pages
 import (
 	"context"
 	"html/template"
+	"mime"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -119,10 +120,19 @@ func renderErrorTemplate(html string, statusCode int, title string) string {
 // WriteErrorPage writes an error page response directly to the Hertz context.
 func WriteErrorPage(_ context.Context, c *app.RequestContext, statusCode int, customConfig *ErrorPageConfig) {
 	c.Response.Header.Del("Server")
-	c.Response.Header.Set("Content-Type", "text/html; charset=utf-8")
+	contentType := "text/html; charset=utf-8"
+	if customConfig != nil {
+		candidate := strings.TrimSpace(customConfig.ContentType)
+		if candidate != "" && !strings.ContainsAny(candidate, "\r\n") {
+			if _, _, err := mime.ParseMediaType(candidate); err == nil {
+				contentType = candidate
+			}
+		}
+	}
+	c.Response.Header.Set("Content-Type", contentType)
 	c.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	page := RenderErrorPage(statusCode, customConfig)
-	c.Data(statusCode, "text/html; charset=utf-8", page)
+	c.Data(statusCode, contentType, page)
 }
 
 // WriteWelcomePage renders the OpenWAF welcome page when no site matches the request.

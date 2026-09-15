@@ -68,6 +68,8 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 
 	res := action.Result{
 		Type:      act,
+		RuleID:    dec.ScriptID,
+		RuleIDStr: dec.ScriptName,
 		Matched:   true,
 		Phase:     p.Name(),
 		Category:  "lua_plugin",

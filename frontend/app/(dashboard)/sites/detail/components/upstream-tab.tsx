@@ -14,9 +14,10 @@ import type { Site } from "@/lib/types"
 
 interface UpstreamTabProps {
   site: Site
+  canManage: boolean
 }
 
-export function UpstreamTab({ site }: UpstreamTabProps) {
+export function UpstreamTab({ site, canManage }: UpstreamTabProps) {
   const { t } = useTranslation()
   const updateSite = useSiteMutation()
 
@@ -29,6 +30,7 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
   const [saving, setSaving] = useState(false)
 
   const handleSave = async () => {
+    if (!canManage) return
     setSaving(true)
     try {
       await updateSite.execute({
@@ -49,7 +51,10 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
   }
 
   return (
-    <div className="space-y-4">
+    <fieldset
+      disabled={!canManage}
+      className="m-0 min-w-0 space-y-4 border-0 p-0"
+    >
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">
@@ -111,6 +116,6 @@ export function UpstreamTab({ site }: UpstreamTabProps) {
           </div>
         </CardContent>
       </Card>
-    </div>
+    </fieldset>
   )
 }

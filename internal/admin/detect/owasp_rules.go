@@ -6,11 +6,13 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
@@ -22,7 +24,9 @@ type owaspRulePatch struct {
 	Action      *string   `json:"action,omitempty"`
 	StatusCode  *int      `json:"status_code,omitempty"`
 	RedirectTo  *string   `json:"redirect_to,omitempty"`
+	CaptchaType *string   `json:"captcha_type,omitempty"`
 	Sensitivity *string   `json:"sensitivity,omitempty"`
+	Note        *string   `json:"note,omitempty"`
 }
 
 type owaspRuleView struct {
@@ -41,9 +45,18 @@ type owaspRuleView struct {
 	Action             string   `json:"action"`
 	StatusCode         int      `json:"status_code,omitempty"`
 	RedirectTo         string   `json:"redirect_to,omitempty"`
+	CaptchaType        string   `json:"captcha_type,omitempty"`
 	Sensitivity        string   `json:"sensitivity,omitempty"`
+	Note               string   `json:"note,omitempty"`
 	Overridden         bool     `json:"overridden"`
 }
+
+const owaspRuleNoteMaxBytes = 4096
+const (
+	owaspRuleWhitelistMaxEntries = 64
+	owaspRuleWhitelistMaxBytes   = 512
+	owaspRuleBatchMaxEntries     = 1000
+)
 
 func resolveOWASPPolicyID(db *gorm.DB, c *app.RequestContext, bodyPolicyID uint) (uint, error) {
 	policyID := bodyPolicyID
@@ -78,72 +91,6 @@ func resolveOWASPPolicyID(db *gorm.DB, c *app.RequestContext, bodyPolicyID uint)
 	return policyID, nil
 }
 
-func loadOWASPViews(db *gorm.DB, policyID uint, c *app.RequestContext, paginate bool) ([]owaspRuleView, int64, error) {
-	query := db.Model(&store.OWASPRuleCatalog{}).Where("active = ?", true)
-	if category := strings.TrimSpace(string(c.Query("category"))); category != "" {
-		query = query.Where("category = ?", category)
-	}
-	if q := strings.TrimSpace(string(c.Query("q"))); q != "" {
-		like := "%" + q + "%"
-		query = query.Where("rule_id LIKE ? OR name LIKE ? OR description LIKE ?", like, like, like)
-	}
-	var total int64
-	if err := query.Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-	var catalog []store.OWASPRuleCatalog
-	query = query.Order("rule_id ASC")
-	if paginate {
-		page, _ := strconv.Atoi(string(c.Query("page")))
-		pageSize, _ := strconv.Atoi(string(c.Query("page_size")))
-		if page <= 0 {
-			page = 1
-		}
-		if pageSize <= 0 || pageSize > 500 {
-			pageSize = 100
-		}
-		query = query.Offset((page - 1) * pageSize).Limit(pageSize)
-	}
-	if err := query.Find(&catalog).Error; err != nil {
-		return nil, 0, err
-	}
-	var configs []store.PolicyOWASPRuleConfig
-	if err := db.Where("policy_id = ?", policyID).Find(&configs).Error; err != nil {
-		return nil, 0, err
-	}
-	byRule := make(map[string]store.PolicyOWASPRuleConfig, len(configs))
-	for _, cfg := range configs {
-		byRule[cfg.RuleID] = cfg
-	}
-	views := make([]owaspRuleView, 0, len(catalog))
-	for _, item := range catalog {
-		view := owaspRuleView{ID: item.RuleID, CatalogID: item.ID, BuiltinID: item.RuleID, PolicyID: policyID, Category: item.Category, Name: item.Name, Description: item.Description, DefaultEnabled: item.DefaultEnabled, DefaultAction: item.DefaultAction, DefaultSensitivity: item.DefaultSensitivity, Enabled: item.DefaultEnabled, Action: item.DefaultAction, Sensitivity: item.DefaultSensitivity}
-		if cfg, ok := byRule[item.RuleID]; ok {
-			view.Overridden = true
-			if cfg.Enabled != nil {
-				view.Enabled = *cfg.Enabled
-			}
-			if cfg.Action != nil {
-				view.Action = *cfg.Action
-			}
-			if cfg.Sensitivity != nil {
-				view.Sensitivity = *cfg.Sensitivity
-			}
-			if cfg.StatusCode != nil {
-				view.StatusCode = *cfg.StatusCode
-			}
-			if cfg.RedirectTo != nil {
-				view.RedirectTo = *cfg.RedirectTo
-			}
-			if cfg.Whitelist != nil && strings.TrimSpace(*cfg.Whitelist) != "" {
-				_ = json.Unmarshal([]byte(*cfg.Whitelist), &view.Whitelist)
-			}
-		}
-		views = append(views, view)
-	}
-	return views, total, nil
-}
-
 func ListOWASPRulesFromRegistry(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		policyID, err := resolveOWASPPolicyID(repo.DB(), c, 0)
@@ -151,23 +98,34 @@ func ListOWASPRulesFromRegistry(repo *repository.SystemSettingsRepo) app.Handler
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		views, total, err := loadOWASPViews(repo.DB(), policyID, c, true)
+		filteredViews, err := loadOWASPViews(repo.DB(), policyID, c)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		grouped := make(map[string][]owaspRuleView)
-		for _, view := range views {
-			grouped[view.Category] = append(grouped[view.Category], view)
+		views := paginateOWASPViews(c, filteredViews)
+		response := map[string]any{
+			"items":     views,
+			"total":     len(filteredViews),
+			"policy_id": policyID,
+			"stats":     buildOWASPRuleStats(policyID, filteredViews),
 		}
-		c.JSON(200, map[string]any{"items": views, "grouped": grouped, "total": total, "policy_id": policyID})
+		if strings.TrimSpace(string(c.Query("include_grouped"))) != "false" {
+			grouped := make(map[string][]owaspRuleView)
+			for i := range views {
+				view := views[i]
+				grouped[view.Category] = append(grouped[view.Category], view)
+			}
+			response["grouped"] = grouped
+		}
+		c.JSON(200, response)
 	}
 }
 
 func findOWASPCatalog(db *gorm.DB, rawID string) (*store.OWASPRuleCatalog, error) {
 	var item store.OWASPRuleCatalog
 	if numericID, err := strconv.ParseUint(rawID, 10, 64); err == nil && numericID > 0 {
-		return &item, db.First(&item, uint(numericID)).Error
+		return &item, db.Where("id = ? AND active = ?", uint(numericID), true).First(&item).Error
 	}
 	return &item, db.Where("rule_id = ? AND active = ?", rawID, true).First(&item).Error
 }
@@ -191,9 +149,87 @@ func validateOWASPPatch(patch *owaspRulePatch) error {
 			return errors.New("invalid sensitivity")
 		}
 	}
+	if patch.CaptchaType != nil {
+		normalized, ok := shared.ValidateCaptchaType(*patch.CaptchaType)
+		if !ok {
+			return errors.New("invalid captcha_type")
+		}
+		patch.CaptchaType = &normalized
+		// 非空验证码类型必须和同一覆盖请求中的 CAPTCHA 动作配对。
+		// action 为空表示继承，运行时会根据最终有效动作决定是否使用。
+		if normalized != "" && patch.Action != nil {
+			actionValue := strings.ToLower(strings.TrimSpace(*patch.Action))
+			switch actionValue {
+			case "block":
+				actionValue = string(store.ActionIntercept)
+			case "captcha":
+				actionValue = string(store.ActionCaptchaChallenge)
+			}
+			if actionValue != "" && actionValue != string(store.ActionCaptchaChallenge) {
+				return errors.New("captcha_type requires captcha_challenge action")
+			}
+		}
+	}
+	if patch.Note != nil && len(*patch.Note) > owaspRuleNoteMaxBytes {
+		return errors.New("note exceeds 4096 bytes")
+	}
+	if patch.Whitelist != nil {
+		if len(*patch.Whitelist) > owaspRuleWhitelistMaxEntries {
+			return errors.New("whitelist exceeds 64 entries")
+		}
+		normalized := make([]string, 0, len(*patch.Whitelist))
+		seen := make(map[string]struct{}, len(*patch.Whitelist))
+		for _, raw := range *patch.Whitelist {
+			value := strings.TrimSpace(raw)
+			if value == "" {
+				continue
+			}
+			if len(value) > owaspRuleWhitelistMaxBytes || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+				return errors.New("whitelist entry is too long or contains control characters")
+			}
+			if value != "*" && !strings.HasPrefix(value, "/") {
+				return errors.New("whitelist entry must be * or start with /")
+			}
+			if strings.Contains(value, "*") && value != "*" && (!strings.HasSuffix(value, "*") || strings.Count(value, "*") != 1) {
+				return errors.New("whitelist wildcard is only allowed as the final character")
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			normalized = append(normalized, value)
+		}
+		patch.Whitelist = &normalized
+	}
 	if patch.Action != nil && action.Normalize(action.Type(*patch.Action)) == action.Redirect &&
 		(patch.Enabled == nil || *patch.Enabled) && (patch.RedirectTo == nil || strings.TrimSpace(*patch.RedirectTo) == "") {
 		return errors.New("redirect_to required")
+	}
+	return nil
+}
+
+/**
+ * validateOWASPStoredConfig 校验合并后的规则覆盖，防止部分更新留下
+ * 可执行动作与其附属字段不一致的配置。
+ */
+func validateOWASPStoredConfig(config *store.PolicyOWASPRuleConfig, fallbackAction string) error {
+	effectiveAction := strings.TrimSpace(fallbackAction)
+	if config.Action != nil && strings.TrimSpace(*config.Action) != "" {
+		effectiveAction = strings.TrimSpace(*config.Action)
+	}
+	if effectiveAction == "" {
+		effectiveAction = string(action.Intercept)
+	}
+	normalized := action.Normalize(action.Type(effectiveAction))
+	if !action.IsValid(action.Type(effectiveAction)) || normalized == action.Allow || normalized == action.Tag {
+		return errors.New("invalid action")
+	}
+	if normalized == action.Redirect && (config.Enabled == nil || *config.Enabled) &&
+		(config.RedirectTo == nil || strings.TrimSpace(*config.RedirectTo) == "") {
+		return errors.New("redirect_to required")
+	}
+	if config.CaptchaType != nil && strings.TrimSpace(*config.CaptchaType) != "" && normalized != action.CaptchaChallenge {
+		return errors.New("captcha_type requires captcha_challenge action")
 	}
 	return nil
 }
@@ -224,16 +260,32 @@ func applyOWASPPatch(config *store.PolicyOWASPRuleConfig, patch owaspRulePatch) 
 		}
 	}
 	if patch.RedirectTo != nil {
-		if strings.TrimSpace(*patch.RedirectTo) == "" {
+		value := strings.TrimSpace(*patch.RedirectTo)
+		if value == "" {
 			config.RedirectTo = nil
 		} else {
-			config.RedirectTo = patch.RedirectTo
+			config.RedirectTo = &value
+		}
+	}
+	if patch.CaptchaType != nil {
+		if strings.TrimSpace(*patch.CaptchaType) == "" {
+			config.CaptchaType = nil
+		} else {
+			config.CaptchaType = patch.CaptchaType
 		}
 	}
 	if patch.Whitelist != nil {
 		raw, _ := json.Marshal(*patch.Whitelist)
 		value := string(raw)
 		config.Whitelist = &value
+	}
+	if patch.Note != nil {
+		value := strings.TrimSpace(*patch.Note)
+		if value == "" {
+			config.Note = nil
+		} else {
+			config.Note = &value
+		}
 	}
 }
 
@@ -282,10 +334,15 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 		config.PolicyID = policyID
 		config.RuleID = catalog.RuleID
 		applyOWASPPatch(&config, req.owaspRulePatch)
-		if err := repo.DB().Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "policy_id"}, {Name: "rule_id"}}, DoUpdates: clause.AssignmentColumns([]string{"enabled", "action", "sensitivity", "status_code", "redirect_to", "whitelist", "updated_at"})}).Create(&config).Error; err != nil {
+		if err := validateOWASPStoredConfig(&config, shared.LoadProtectionConfig(repo).OWASPAction); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := repo.DB().Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "policy_id"}, {Name: "rule_id"}}, DoUpdates: clause.AssignmentColumns([]string{"enabled", "action", "sensitivity", "status_code", "redirect_to", "captcha_type", "whitelist", "note", "updated_at"})}).Create(&config).Error; err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		invalidateOWASPReadSnapshot(repo.DB(), policyID)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
@@ -296,7 +353,18 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 
 func ResetOWASPRuleOverride(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		policyID, err := resolveOWASPPolicyID(repo.DB(), c, 0)
+		// 兼容旧版前端把 policy_id 放在 JSON body 的请求，同时优先使用
+		// 路径和查询参数（resolveOWASPPolicyID 会按既定优先级覆盖 body）。
+		var body struct {
+			PolicyID uint `json:"policy_id"`
+		}
+		if len(c.Request.Body()) > 0 {
+			if err := c.BindJSON(&body); err != nil {
+				c.JSON(400, map[string]string{"error": "请求体格式无效"})
+				return
+			}
+		}
+		policyID, err := resolveOWASPPolicyID(repo.DB(), c, body.PolicyID)
 		if err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -310,6 +378,7 @@ func ResetOWASPRuleOverride(repo *repository.SystemSettingsRepo, reload func() e
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		invalidateOWASPReadSnapshot(repo.DB(), policyID)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
@@ -323,6 +392,7 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 		var req struct {
 			PolicyID uint           `json:"policy_id"`
 			IDs      []uint         `json:"ids"`
+			ResetAll bool           `json:"reset_all"`
 			Patch    owaspRulePatch `json:"patch"`
 			Rules    []struct {
 				ID string `json:"id"`
@@ -338,16 +408,34 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		if len(req.IDs) == 0 && len(req.Rules) == 0 {
+		if len(req.IDs) == 0 && len(req.Rules) == 0 && !req.ResetAll {
 			c.JSON(400, map[string]string{"error": "rules required"})
+			return
+		}
+		if req.ResetAll && (len(req.IDs) > 0 || len(req.Rules) > 0) {
+			c.JSON(400, map[string]string{"error": "reset_all cannot be combined with rule updates"})
+			return
+		}
+		if len(req.IDs)+len(req.Rules) > owaspRuleBatchMaxEntries {
+			c.JSON(400, map[string]string{"error": "batch exceeds 1000 rules"})
 			return
 		}
 		if len(req.IDs) > 0 && validateOWASPPatch(&req.Patch) != nil {
 			c.JSON(400, map[string]string{"error": validateOWASPPatch(&req.Patch).Error()})
 			return
 		}
+		fallbackAction := shared.LoadProtectionConfig(repo).OWASPAction
 		updated := 0
 		err = repo.DB().Transaction(func(tx *gorm.DB) error {
+			if req.ResetAll {
+				result := tx.Where("policy_id = ?", policyID).
+					Delete(&store.PolicyOWASPRuleConfig{})
+				if result.Error != nil {
+					return result.Error
+				}
+				updated = int(result.RowsAffected)
+				return nil
+			}
 			for _, id := range req.IDs {
 				catalog, err := findOWASPCatalog(tx, strconv.FormatUint(uint64(id), 10))
 				if err != nil {
@@ -356,7 +444,10 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 				config := store.PolicyOWASPRuleConfig{PolicyID: policyID, RuleID: catalog.RuleID}
 				_ = tx.Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error
 				applyOWASPPatch(&config, req.Patch)
-				if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "policy_id"}, {Name: "rule_id"}}, DoUpdates: clause.AssignmentColumns([]string{"enabled", "action", "sensitivity", "status_code", "redirect_to", "whitelist", "updated_at"})}).Create(&config).Error; err != nil {
+				if err := validateOWASPStoredConfig(&config, fallbackAction); err != nil {
+					return err
+				}
+				if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "policy_id"}, {Name: "rule_id"}}, DoUpdates: clause.AssignmentColumns([]string{"enabled", "action", "sensitivity", "status_code", "redirect_to", "captcha_type", "whitelist", "note", "updated_at"})}).Create(&config).Error; err != nil {
 					return err
 				}
 				updated++
@@ -372,7 +463,10 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 				config := store.PolicyOWASPRuleConfig{PolicyID: policyID, RuleID: catalog.RuleID}
 				_ = tx.Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error
 				applyOWASPPatch(&config, item.owaspRulePatch)
-				if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "policy_id"}, {Name: "rule_id"}}, DoUpdates: clause.AssignmentColumns([]string{"enabled", "action", "sensitivity", "status_code", "redirect_to", "whitelist", "updated_at"})}).Create(&config).Error; err != nil {
+				if err := validateOWASPStoredConfig(&config, fallbackAction); err != nil {
+					return err
+				}
+				if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "policy_id"}, {Name: "rule_id"}}, DoUpdates: clause.AssignmentColumns([]string{"enabled", "action", "sensitivity", "status_code", "redirect_to", "captcha_type", "whitelist", "note", "updated_at"})}).Create(&config).Error; err != nil {
 					return err
 				}
 				updated++
@@ -383,6 +477,7 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		invalidateOWASPReadSnapshot(repo.DB(), policyID)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]string{"error": "config applied but reload failed: " + err.Error()})
 			return
@@ -398,19 +493,11 @@ func GetOWASPRuleStats(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		views, total, err := loadOWASPViews(repo.DB(), policyID, c, false)
+		views, err := loadOWASPViews(repo.DB(), policyID, c)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		categoryCount := make(map[string]int)
-		enabledCount := 0
-		for _, view := range views {
-			categoryCount[view.Category]++
-			if view.Enabled {
-				enabledCount++
-			}
-		}
-		c.JSON(200, map[string]any{"total": total, "enabled_count": enabledCount, "disabled_count": int(total) - enabledCount, "by_category": categoryCount, "policy_id": policyID})
+		c.JSON(200, buildOWASPRuleStats(policyID, views))
 	}
 }

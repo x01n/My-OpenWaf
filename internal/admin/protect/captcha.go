@@ -212,8 +212,25 @@ func TestCaptcha(repo *repository.SystemSettingsRepo, mgr *challenge.CaptchaMana
 			c.JSON(503, map[string]string{"error": "captcha manager not initialized"})
 			return
 		}
+		var req struct {
+			CaptchaType string `json:"captcha_type"`
+		}
+		if len(c.Request.Body()) > 0 {
+			if err := c.BindJSON(&req); err != nil {
+				c.JSON(400, map[string]string{"error": "请求体格式无效"})
+				return
+			}
+		}
 		cfg := shared.LoadProtectionConfig(repo)
 		captchaType := challenge.CaptchaType(cfg.CaptchaType)
+		if req.CaptchaType != "" {
+			if normalized, ok := shared.ValidateCaptchaType(req.CaptchaType); !ok {
+				c.JSON(400, map[string]string{"error": "invalid captcha_type"})
+				return
+			} else {
+				captchaType = challenge.CaptchaType(normalized)
+			}
+		}
 		if captchaType == "" {
 			captchaType = challenge.CaptchaTypeMath
 		}
@@ -224,7 +241,7 @@ func TestCaptcha(repo *repository.SystemSettingsRepo, mgr *challenge.CaptchaMana
 		}
 		c.JSON(200, map[string]any{
 			"session_id":   captchaChallenge.SessionID,
-			"captcha_type": cfg.CaptchaType,
+			"captcha_type": string(captchaType),
 			"type":         captchaChallenge.Type,
 			"master_img":   captchaChallenge.MasterImg,
 			"thumb_img":    captchaChallenge.ThumbImg,

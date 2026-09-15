@@ -47,7 +47,11 @@ func ListSites(repo *repository.SiteRepo, listenerRepo *repository.SiteListenerR
 			return
 		}
 
-		listeners, err := listenerRepo.AllEnabled()
+		siteIDs := make([]uint, 0, len(items))
+		for i := range items {
+			siteIDs = append(siteIDs, items[i].ID)
+		}
+		listeners, err := listenerRepo.ListEnabledBySites(siteIDs)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -158,6 +162,10 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := validateSiteCache(&item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := shared.ValidateSiteUpstreamURLs(item.UpstreamURLs); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -246,6 +254,10 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := validateSiteCache(existing); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if siteRequestHasField(body, "upstream_urls") {
 			if err := shared.ValidateSiteUpstreamURLs(existing.UpstreamURLs); err != nil {
 				c.JSON(400, map[string]string{"error": err.Error()})
@@ -268,6 +280,10 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 				return siteRequestHasField(body, field) || (siteRequestHasField(body, "rate_limit_enabled") && existing.RateLimitEnabled != nil && *existing.RateLimitEnabled) || siteRequestHasField(body, "attack_protection_level")
 			case "anti_replay_action":
 				return siteRequestHasField(body, field) || (siteRequestHasField(body, "anti_replay_enabled") && existing.AntiReplayEnabled != nil && *existing.AntiReplayEnabled)
+			case "challenge_action":
+				return siteRequestHasField(body, field)
+			case "captcha_type":
+				return siteRequestHasField(body, field)
 			default:
 				return false
 			}
@@ -309,6 +325,14 @@ func siteRequestHasField(body []byte, field string) bool {
 	}
 	_, ok := raw[field]
 	return ok
+}
+
+func validateSiteCache(item *store.Site) error {
+	if item == nil {
+		return nil
+	}
+	_, err := store.ValidateAndCompileSiteCacheRules(item.CacheRules, item.CacheDefaultTTL)
+	return err
 }
 
 // validateSiteDynamicProtection 校验站点级动态保护的枚举和 TTL 覆盖。
@@ -424,8 +448,12 @@ func clearInheritedProtectionOverrides(item *store.Site) {
 		item.RateLimitMax = 0
 		item.RateLimitAction = ""
 	}
+	// ChallengeAction / SiteCaptchaType 是独立三态指针，无父开关可循，
+	// 不需要从属清理：nil = 继承全局，非 nil = 站点覆盖。
 }
 
+// ValidateChallengeAction 校验质询动作白名单并归一化，
+// 与 shared.ValidateChallengeAction 保持同一动作集合与归一化口径。
 func validateSiteActions(item *store.Site, shouldValidate func(string) bool) error {
 	if shouldValidate("owasp_action") && item.OWASPAction != "" {
 		normalized, ok := shared.ValidateActionWithoutRedirectTarget(item.OWASPAction)
@@ -454,6 +482,29 @@ func validateSiteActions(item *store.Site, shouldValidate func(string) bool) err
 			return errInvalidSiteAction
 		}
 		item.AntiReplayAction = normalized
+	}
+	if shouldValidate("challenge_action") && item.ChallengeAction != nil {
+		if *item.ChallengeAction == "" {
+			// 显式传空串与 JSON null 等价：清除站点覆盖、回到继承全局。
+			item.ChallengeAction = nil
+		} else {
+			normalized, ok := shared.ValidateChallengeAction(*item.ChallengeAction)
+			if !ok {
+				return errInvalidSiteAction
+			}
+			item.ChallengeAction = &normalized
+		}
+	}
+	if shouldValidate("captcha_type") && item.SiteCaptchaType != nil {
+		if *item.SiteCaptchaType == "" {
+			item.SiteCaptchaType = nil
+		} else {
+			normalizedCaptcha, ok := shared.ValidateCaptchaType(*item.SiteCaptchaType)
+			if !ok {
+				return errInvalidSiteAction
+			}
+			item.SiteCaptchaType = &normalizedCaptcha
+		}
 	}
 	return nil
 }

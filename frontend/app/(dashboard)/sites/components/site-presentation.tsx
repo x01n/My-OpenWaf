@@ -48,6 +48,7 @@ import {
  * 站点行/卡片共用的操作回调。
  */
 export interface SiteActionHandlers {
+  canManage: boolean
   onEdit: (site: Site) => void
   onToggle: (site: Site) => void
   onDelete: (site: Site) => void
@@ -416,6 +417,7 @@ export function SiteQuickLinks({
  */
 export function SiteActionsMenu({
   site,
+  canManage,
   onEdit,
   onToggle,
   onDelete,
@@ -440,28 +442,35 @@ export function SiteActionsMenu({
             {t("common.viewDetail")}
           </Link>
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onEdit(site)}>
-          <IconEdit className="mr-2 size-4" />
-          {t("common.edit")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onToggle(site)}>
-          {site.enabled ? (
-            <>
-              <IconPlayerPause className="mr-2 size-4" />
-              {t("common.stop")}
-            </>
-          ) : (
-            <>
-              <IconPlayerPlay className="mr-2 size-4" />
-              {t("common.start")}
-            </>
-          )}
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onClick={() => onDelete(site)}>
-          <IconTrash className="mr-2 size-4" />
-          {t("common.delete")}
-        </DropdownMenuItem>
+        {canManage && (
+          <>
+            <DropdownMenuItem onClick={() => onEdit(site)}>
+              <IconEdit className="mr-2 size-4" />
+              {t("common.edit")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onToggle(site)}>
+              {site.enabled ? (
+                <>
+                  <IconPlayerPause className="mr-2 size-4" />
+                  {t("common.stop")}
+                </>
+              ) : (
+                <>
+                  <IconPlayerPlay className="mr-2 size-4" />
+                  {t("common.start")}
+                </>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => onDelete(site)}
+            >
+              <IconTrash className="mr-2 size-4" />
+              {t("common.delete")}
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   )

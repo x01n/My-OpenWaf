@@ -13,19 +13,11 @@
 import { useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { useTranslation } from "react-i18next"
-import {
-  Pagination,
-  PaginationContent,
-  PaginationEllipsis,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-} from "@/components/ui/pagination"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { DataTable } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
+import { TablePagination } from "@/components/table-pagination"
 import { IconRoute, IconShieldOff } from "@tabler/icons-react"
 import { useSecurityEventRequests } from "@/hooks/use-api"
 import type { SecurityEventRequest } from "@/lib/types"
@@ -71,7 +63,6 @@ export function RequestAggregateView({
     [data?.items]
   )
   const total = data?.total || 0
-  const totalPages = Math.ceil(total / pageSize) || 1
 
   const openTrace = (requestId: string) => {
     router.push(traceHref(requestId))
@@ -163,44 +154,12 @@ export function RequestAggregateView({
         }
       />
 
-      {totalPages > 1 && (
-        <Pagination>
-          <PaginationContent>
-            <PaginationItem>
-              <PaginationPrevious
-                onClick={() => onPageChange(Math.max(1, page - 1))}
-                className={page <= 1 ? "pointer-events-none opacity-50" : ""}
-              />
-            </PaginationItem>
-            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-              const pageNum = i + 1
-              return (
-                <PaginationItem key={pageNum}>
-                  <PaginationLink
-                    isActive={page === pageNum}
-                    onClick={() => onPageChange(pageNum)}
-                  >
-                    {pageNum}
-                  </PaginationLink>
-                </PaginationItem>
-              )
-            })}
-            {totalPages > 5 && (
-              <PaginationItem>
-                <PaginationEllipsis />
-              </PaginationItem>
-            )}
-            <PaginationItem>
-              <PaginationNext
-                onClick={() => onPageChange(Math.min(totalPages, page + 1))}
-                className={
-                  page >= totalPages ? "pointer-events-none opacity-50" : ""
-                }
-              />
-            </PaginationItem>
-          </PaginationContent>
-        </Pagination>
-      )}
+      <TablePagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={onPageChange}
+      />
     </div>
   )
 }

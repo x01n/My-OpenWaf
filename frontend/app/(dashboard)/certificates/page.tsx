@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
 import { PageHeader } from "@/components/page-header"
 import { CertificateParsePanel } from "@/components/certificate-parse-panel"
 import {
@@ -114,6 +115,8 @@ function getDeleteError(error: unknown, fallback: string): DeleteErrorState {
 
 export default function CertificatesPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const { data, isLoading, error, mutate } = useCertificates()
   const { execute: mutateCert, loading: mutateLoading } =
     useCertificateMutation()
@@ -184,6 +187,7 @@ export default function CertificatesPage() {
   }
 
   const openCreate = () => {
+    if (!canManage) return
     setDeleteError(null)
     setSelectedId(null)
     setForm(EMPTY_FORM)
@@ -193,6 +197,7 @@ export default function CertificatesPage() {
   }
 
   const openEdit = (certificate: Certificate) => {
+    if (!canManage) return
     setDeleteError(null)
     setSelectedId(certificate.id)
     setForm(certificateToForm(certificate))
@@ -216,6 +221,7 @@ export default function CertificatesPage() {
    * @param rawCertPem 待解析的证书 PEM
    */
   const handleParsePem = async (rawCertPem: string) => {
+    if (!canManage) return
     const certPem = (rawCertPem || "").trim()
     if (!certPem) {
       setParseResult(null)
@@ -238,7 +244,7 @@ export default function CertificatesPage() {
   }
 
   const handleSubmit = async () => {
-    if (!isFormDialog || (isEdit && !selectedId)) return
+    if (!canManage || !isFormDialog || (isEdit && !selectedId)) return
     if (needsMatchingKey) {
       toast.error(t("certificates.keyPemRequiredWithCertToast"))
       return
@@ -276,7 +282,7 @@ export default function CertificatesPage() {
   }
 
   const confirmDelete = async () => {
-    if (deleteId === null) return
+    if (!canManage || deleteId === null) return
     try {
       await deleteCert(deleteId)
       toast.success(t("common.deleteSuccess"))
@@ -303,9 +309,9 @@ export default function CertificatesPage() {
       title: t("certificates.name"),
       cellClassName: "whitespace-normal break-all align-top",
       render: (row: Certificate) => (
-        <div className="flex items-center gap-2">
-          <IconCertificate className="h-4 w-4 text-primary shrink-0" />
-          <span className="font-medium">{row.name}</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <IconCertificate className="h-4 w-4 shrink-0 text-primary" />
+          <span className="min-w-0 font-medium break-all">{row.name}</span>
         </div>
       ),
     },
@@ -314,7 +320,9 @@ export default function CertificatesPage() {
       title: t("certificates.domain"),
       cellClassName: "whitespace-normal break-all align-top",
       render: (row: Certificate) => (
-        <span className="text-sm">{row.domain || "-"}</span>
+        <span className="block min-w-0 text-sm break-all">
+          {row.domain || "-"}
+        </span>
       ),
     },
     {
@@ -380,6 +388,7 @@ export default function CertificatesPage() {
             onClick={() => openEdit(row)}
             title={t("common.edit")}
             aria-label={t("common.edit")}
+            disabled={!canManage}
           >
             <IconEdit className="h-4 w-4" />
           </Button>
@@ -392,6 +401,7 @@ export default function CertificatesPage() {
             }}
             title={t("common.delete")}
             aria-label={t("common.delete")}
+            disabled={!canManage}
           >
             <IconTrash className="h-4 w-4 text-destructive" />
           </Button>
@@ -421,7 +431,7 @@ export default function CertificatesPage() {
         title={t("certificates.title")}
         description={t("certificates.description")}
         actions={
-          <Button onClick={openCreate}>
+          <Button onClick={openCreate} disabled={!canManage}>
             <IconPlus className="h-4 w-4" />
             {t("certificates.add")}
           </Button>
@@ -434,6 +444,12 @@ export default function CertificatesPage() {
           <AlertDescription>
             {error.message || t("error.unexpectedError")}
           </AlertDescription>
+        </Alert>
+      )}
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
         </Alert>
       )}
 
@@ -483,7 +499,7 @@ export default function CertificatesPage() {
               "上传 TLS 证书以启用站点 HTTPS 加密，支持手动上传和 ACME 自动签发"
             )}
             action={
-              <Button onClick={openCreate}>
+              <Button onClick={openCreate} disabled={!canManage}>
                 <IconPlus className="mr-1.5 h-4 w-4" />
                 {t("certificates.add")}
               </Button>
@@ -632,7 +648,9 @@ export default function CertificatesPage() {
                         variant="outline"
                         size="sm"
                         onClick={() => handleParsePem(detail.cert_pem)}
-                        disabled={parseLoading || !detail.cert_pem?.trim()}
+                        disabled={
+                          !canManage || parseLoading || !detail.cert_pem?.trim()
+                        }
                       >
                         <IconFileSearch className="h-4 w-4" />
                         {parseLoading
@@ -667,7 +685,10 @@ export default function CertificatesPage() {
                   <AlertDescription>{detailError}</AlertDescription>
                 </Alert>
               ) : (
-                <div className="space-y-5">
+                <fieldset
+                  disabled={!canManage}
+                  className="m-0 space-y-5 border-0 p-0"
+                >
                   <div className="space-y-2">
                     <Label htmlFor="cert-name">{t("certificates.name")}</Label>
                     <Input
@@ -690,6 +711,7 @@ export default function CertificatesPage() {
                       </Label>
                       <Select
                         value={form.source}
+                        disabled={!canManage}
                         onValueChange={(value) =>
                           setForm((current) => ({
                             ...current,
@@ -746,6 +768,7 @@ export default function CertificatesPage() {
                     <Switch
                       id="cert-auto-renew"
                       checked={form.auto_renew}
+                      disabled={!canManage}
                       onCheckedChange={(checked) =>
                         setForm((current) => ({
                           ...current,
@@ -783,7 +806,11 @@ export default function CertificatesPage() {
                             variant="outline"
                             size="sm"
                             onClick={() => handleParsePem(form.cert_pem)}
-                            disabled={parseLoading || !form.cert_pem.trim()}
+                            disabled={
+                              !canManage ||
+                              parseLoading ||
+                              !form.cert_pem.trim()
+                            }
                           >
                             <IconFileSearch className="h-4 w-4" />
                             {parseLoading
@@ -866,7 +893,7 @@ export default function CertificatesPage() {
                       />
                     </div>
                   )}
-                </div>
+                </fieldset>
               )}
               <DialogFooter>
                 <Button variant="outline" onClick={closeDialog}>
@@ -875,6 +902,7 @@ export default function CertificatesPage() {
                 <Button
                   onClick={handleSubmit}
                   disabled={
+                    !canManage ||
                     mutateLoading ||
                     !form.name.trim() ||
                     needsMatchingKey ||

@@ -16,19 +16,141 @@ import {
 } from "@tabler/icons-react"
 import { useSiteMutation } from "@/hooks/use-api"
 import { SiteXFFMode, type Site } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
 interface AdvancedTabProps {
   site: Site
+  canManage: boolean
 }
 
-export function AdvancedTab({ site }: AdvancedTabProps) {
+/**
+ * 三态取值：
+ * - "inherit" 继承全局（提交 null）
+ * - "on"      站点强制开启（提交 true）
+ * - "off"     站点强制关闭（提交 false）
+ */
+type TriState = "inherit" | "on" | "off"
+
+/** 反重放校验失败动作白名单，见 internal/admin/shared/helpers.go 的 ValidateAntiReplayAction。 */
+const ANTI_REPLAY_ACTIONS = [
+  "challenge",
+  "captcha_challenge",
+  "shield_challenge",
+  "chain_challenge",
+  "intercept",
+] as const
+
+/** 站点级默认质询动作白名单，null=继承全局。 */
+const CHALLENGE_ACTIONS = [
+  "challenge",
+  "captcha_challenge",
+  "shield_challenge",
+  "chain_challenge",
+] as const
+
+/** 站点级 CAPTCHA 类型白名单，见 internal/waf/challenge/captcha.go 的 IsValidCaptchaType。 */
+const CAPTCHA_TYPES = ["math", "click", "slide", "rotate"] as const
+
+function normalizeClientIPHeaderOrder(
+  value: string | string[] | undefined
+): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string")
+  }
+  if (!value) return ["x_forwarded_for"]
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (Array.isArray(parsed)) {
+      const headers = parsed.filter(
+        (item): item is string => typeof item === "string"
+      )
+      if (headers.length > 0) return headers
+    }
+  } catch {
+    // 历史配置损坏时回退到安全的默认来源头。
+  }
+  return ["x_forwarded_for"]
+}
+
+/**
+ * 将站点级 *bool 覆盖字段归一化为三态取值。
+ *
+ * @param value 站点字段原始值
+ * @returns 三态取值
+ */
+function toTriState(value: boolean | null | undefined): TriState {
+  if (value === true) return "on"
+  if (value === false) return "off"
+  return "inherit"
+}
+
+/**
+ * 将三态取值转换回站点级 *bool 覆盖字段的提交值。
+ *
+ * @param value 三态取值
+ * @returns null（继承）/ true / false
+ */
+function fromTriState(value: TriState): boolean | null {
+  if (value === "on") return true
+  if (value === "off") return false
+  return null
+}
+
+/**
+ * 三态覆盖选择器：继承全局 / 强制开启 / 强制关闭。
+ */
+function TriStateToggle({
+  value,
+  onChange,
+  idPrefix,
+}: {
+  value: TriState
+  onChange: (value: TriState) => void
+  idPrefix: string
+}) {
+  const { t } = useTranslation()
+  const options: { value: TriState; labelKey: string }[] = [
+    { value: "inherit", labelKey: "sites.detail.dynOverride.inherit" },
+    { value: "on", labelKey: "sites.detail.dynOverride.on" },
+    { value: "off", labelKey: "sites.detail.dynOverride.off" },
+  ]
+  return (
+    <div className="inline-flex items-center gap-1 rounded-md border p-0.5">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          id={`${idPrefix}-${option.value}`}
+          onClick={() => onChange(option.value)}
+          className={cn(
+            "rounded px-2.5 py-1 text-xs transition-colors",
+            value === option.value
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-muted"
+          )}
+        >
+          {t(option.labelKey)}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+export function AdvancedTab({ site, canManage }: AdvancedTabProps) {
   const { t } = useTranslation()
   const updateSite = useSiteMutation()
 
-  const [antiReplayEnabled, setAntiReplayEnabled] = useState(
-    site.anti_replay_enabled
+  const [antiReplayState, setAntiReplayState] = useState<TriState>(() =>
+    toTriState(site.anti_replay_enabled)
   )
   const [antiReplayTtl, setAntiReplayTtl] = useState(site.anti_replay_ttl)
+  const [antiReplayAction, setAntiReplayAction] = useState(
+    site.anti_replay_action || "shield_challenge"
+  )
+  const [challengeAction, setChallengeAction] = useState(
+    site.challenge_action ?? ""
+  )
+  const [captchaType, setCaptchaType] = useState(site.captcha_type ?? "")
   const [maintenanceEnabled, setMaintenanceEnabled] = useState(
     site.maintenance_enabled
   )
@@ -37,8 +159,8 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
   )
   const [xffMode, setXffMode] = useState(site.xff_mode)
   const [trustedCidr, setTrustedCidr] = useState(site.trusted_cidr)
-  const [clientIPHeaderOrder, setClientIPHeaderOrder] = useState(
-    site.client_ip_header_order || ["x_forwarded_for"]
+  const [clientIPHeaderOrder, setClientIPHeaderOrder] = useState<string[]>(() =>
+    normalizeClientIPHeaderOrder(site.client_ip_header_order)
   )
   const [preserveHost, setPreserveHost] = useState(site.preserve_original_host)
   const [saving, setSaving] = useState(false)
@@ -60,21 +182,28 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
     })
   }
 
-  const handleToggleAntiReplay = async (enabled: boolean) => {
-    setAntiReplayEnabled(enabled)
+  /**
+   * 反重放三态切换即时保存单字段。
+   *
+   * @param value 三态取值
+   */
+  const handleAntiReplayStateChange = async (value: TriState) => {
+    if (!canManage) return
+    setAntiReplayState(value)
     try {
       await updateSite.execute({
         id: site.id,
-        data: { anti_replay_enabled: enabled },
+        data: { anti_replay_enabled: fromTriState(value) },
       })
       toast.success(t("common.saveSuccess"))
     } catch {
       toast.error(t("common.operationFailed"))
-      setAntiReplayEnabled(!enabled)
+      setAntiReplayState(toTriState(site.anti_replay_enabled))
     }
   }
 
   const handleToggleMaintenance = async (enabled: boolean) => {
+    if (!canManage) return
     setMaintenanceEnabled(enabled)
     try {
       await updateSite.execute({
@@ -89,13 +218,17 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
   }
 
   const handleSave = async () => {
+    if (!canManage) return
     setSaving(true)
     try {
       await updateSite.execute({
         id: site.id,
         data: {
-          anti_replay_enabled: antiReplayEnabled,
+          anti_replay_enabled: fromTriState(antiReplayState),
           anti_replay_ttl: antiReplayTtl,
+          anti_replay_action: antiReplayAction,
+          challenge_action: challengeAction === "" ? null : challengeAction,
+          captcha_type: captchaType === "" ? null : captchaType,
           maintenance_enabled: maintenanceEnabled,
           maintenance_status: maintenanceStatus,
           xff_mode: xffMode,
@@ -113,7 +246,10 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
   }
 
   return (
-    <div className="space-y-4">
+    <fieldset
+      disabled={!canManage}
+      className="m-0 min-w-0 space-y-4 border-0 p-0"
+    >
       {/* TLS 配置 */}
       <Card>
         <CardHeader className="pb-3">
@@ -158,6 +294,64 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
         </CardContent>
       </Card>
 
+      {/* 站点级质询策略 */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">
+            {t("sites.detail.challengeStrategy.title")}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            {t("sites.detail.challengeStrategy.desc")}
+          </p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label>
+                {t("sites.detail.challengeStrategy.challengeAction")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.challengeStrategy.challengeActionHint")}
+              </p>
+              <select
+                value={challengeAction}
+                onChange={(e) => setChallengeAction(e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              >
+                <option value="">
+                  {t("sites.detail.challengeStrategy.actionInherit")}
+                </option>
+                {CHALLENGE_ACTIONS.map((action) => (
+                  <option key={action} value={action}>
+                    {t(`sites.detail.challengeStrategy.actions.${action}`)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label>{t("sites.detail.challengeStrategy.captchaType")}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.challengeStrategy.captchaTypeHint")}
+              </p>
+              <select
+                value={captchaType}
+                onChange={(e) => setCaptchaType(e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              >
+                <option value="">
+                  {t("sites.detail.challengeStrategy.actionInherit")}
+                </option>
+                {CAPTCHA_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {t(`sites.detail.challengeStrategy.captchaTypes.${type}`)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Anti-Replay */}
       <Card>
         <CardHeader className="pb-3">
@@ -171,15 +365,19 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
                 {t("sites.detail.antiReplayDesc")}
               </p>
             </div>
-            <Switch
-              checked={antiReplayEnabled}
-              onCheckedChange={handleToggleAntiReplay}
+            <TriStateToggle
+              value={antiReplayState}
+              onChange={handleAntiReplayStateChange}
+              idPrefix="adv-antireplay"
             />
           </div>
 
-          {antiReplayEnabled && (
+          <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label>TTL</Label>
+              <Label>{t("sites.detail.antiReplayTtl")}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.antiReplayTtlHint")}
+              </p>
               <div className="flex items-center gap-2">
                 <Input
                   type="number"
@@ -195,7 +393,24 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
                 </span>
               </div>
             </div>
-          )}
+            <div className="space-y-2">
+              <Label>{t("sites.detail.antiReplayAction")}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.antiReplayActionHint")}
+              </p>
+              <select
+                value={antiReplayAction}
+                onChange={(e) => setAntiReplayAction(e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              >
+                {ANTI_REPLAY_ACTIONS.map((action) => (
+                  <option key={action} value={action}>
+                    {t(`sites.detail.antiReplayActions.${action}`)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -261,9 +476,7 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
               }}
               className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
             >
-              <option value={SiteXFFMode.Strip}>
-                Use direct peer IP
-              </option>
+              <option value={SiteXFFMode.Strip}>Use direct peer IP</option>
               <option value={SiteXFFMode.TrustOuter}>
                 Trust outer WAF CIDR and use leftmost configured header
               </option>
@@ -350,6 +563,6 @@ export function AdvancedTab({ site }: AdvancedTabProps) {
           {saving ? t("common.saving") : t("common.save")}
         </Button>
       </div>
-    </div>
+    </fieldset>
   )
 }

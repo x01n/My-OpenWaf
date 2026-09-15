@@ -37,6 +37,7 @@ import type { Site, SiteListener } from "@/lib/types"
 
 interface ListenersTabProps {
   site: Site
+  canManage: boolean
 }
 
 interface ListenerFormData {
@@ -60,7 +61,8 @@ function ListenerDialog({
   const { t } = useTranslation()
   const createListener = useListenerCreate()
   const updateListener = useListenerUpdate()
-  const { data: certificates, isLoading: certificatesLoading } = useCertificates()
+  const { data: certificates, isLoading: certificatesLoading } =
+    useCertificates(open)
   const [form, setForm] = useState<ListenerFormData>({
     bind: listener?.bind || ":80",
     tls_enabled: listener?.tls_enabled || false,
@@ -180,7 +182,7 @@ function ListenerDialog({
   )
 }
 
-export function ListenersTab({ site }: ListenersTabProps) {
+export function ListenersTab({ site, canManage }: ListenersTabProps) {
   const { t } = useTranslation()
   const { data: listeners } = useSiteListeners(site.id)
   const deleteListener = useListenerDelete()
@@ -191,6 +193,7 @@ export function ListenersTab({ site }: ListenersTabProps) {
   )
 
   const handleDelete = async (lid: number) => {
+    if (!canManage) return
     try {
       await deleteListener.execute({ siteId: site.id, lid })
       toast.success(t("common.deleteSuccess"))
@@ -233,25 +236,29 @@ export function ListenersTab({ site }: ListenersTabProps) {
       title: t("common.actions"),
       render: (row: SiteListener) => (
         <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => {
-              setEditingListener(row)
-              setShowDlg(true)
-            }}
-          >
-            <IconPencil className="h-3.5 w-3.5" />
-          </Button>
-          {row.id !== 0 && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="text-destructive"
-              onClick={() => handleDelete(row.id)}
-            >
-              <IconTrash className="h-3.5 w-3.5" />
-            </Button>
+          {canManage && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => {
+                  setEditingListener(row)
+                  setShowDlg(true)
+                }}
+              >
+                <IconPencil className="h-3.5 w-3.5" />
+              </Button>
+              {row.id !== 0 && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="text-destructive"
+                  onClick={() => handleDelete(row.id)}
+                >
+                  <IconTrash className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </>
           )}
         </div>
       ),
@@ -265,17 +272,19 @@ export function ListenersTab({ site }: ListenersTabProps) {
           <CardTitle className="text-base">
             {t("sites.detail.listeners")}
           </CardTitle>
-          <Button
-            size="sm"
-            className="h-8"
-            onClick={() => {
-              setEditingListener(null)
-              setShowDlg(true)
-            }}
-          >
-            <IconPlus className="mr-1 h-4 w-4" />
-            {t("sites.detail.addListener")}
-          </Button>
+          {canManage && (
+            <Button
+              size="sm"
+              className="h-8"
+              onClick={() => {
+                setEditingListener(null)
+                setShowDlg(true)
+              }}
+            >
+              <IconPlus className="mr-1 h-4 w-4" />
+              {t("sites.detail.addListener")}
+            </Button>
+          )}
         </CardHeader>
         <CardContent>
           <DataTable<SiteListener>
@@ -288,7 +297,7 @@ export function ListenersTab({ site }: ListenersTabProps) {
         </CardContent>
       </Card>
 
-      {showDlg && (
+      {showDlg && canManage && (
         <ListenerDialog
           open={showDlg}
           onOpenChange={setShowDlg}

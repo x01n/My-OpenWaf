@@ -16,6 +16,14 @@ type UnifiedWriterStatsProvider interface {
 	Stats() UnifiedWriterStats
 }
 
+// WriteQueueStatsProvider exposes the generic repository write queue's
+// submission and persistence outcomes to /metrics. It is deliberately
+// separate from UnifiedWriterStatsProvider: the two queues have different
+// lifecycles and loss semantics.
+type WriteQueueStatsProvider interface {
+	Stats() WriteQueueStats
+}
+
 // DataPlaneMetricsSnapshot is a point-in-time view of request-path counters.
 type DataPlaneMetricsSnapshot struct {
 	QPS1s         float64
@@ -97,6 +105,7 @@ type Metrics struct {
 	Uptime         time.Time
 
 	unifiedWriterStatsProvider atomic.Value
+	writeQueueStatsProvider    atomic.Value
 	dataPlaneMetricsProvider   atomic.Value
 	upstreamMetricsProvider    atomic.Value
 	cacheStatsProvider         atomic.Value
@@ -135,6 +144,15 @@ func (m *Metrics) SetUnifiedWriterStatsProvider(provider UnifiedWriterStatsProvi
 		return
 	}
 	m.unifiedWriterStatsProvider.Store(provider)
+}
+
+// SetWriteQueueStatsProvider attaches generic repository queue diagnostics to
+// /metrics.
+func (m *Metrics) SetWriteQueueStatsProvider(provider WriteQueueStatsProvider) {
+	if provider == nil {
+		return
+	}
+	m.writeQueueStatsProvider.Store(provider)
 }
 
 // SetDataPlaneMetricsProvider attaches request-path counters to /metrics.
@@ -256,6 +274,11 @@ openwaf_gc_pause_total_ns %d
 	if v := m.unifiedWriterStatsProvider.Load(); v != nil {
 		if provider, ok := v.(UnifiedWriterStatsProvider); ok {
 			body += prometheusUnifiedWriterStats(provider.Stats())
+		}
+	}
+	if v := m.writeQueueStatsProvider.Load(); v != nil {
+		if provider, ok := v.(WriteQueueStatsProvider); ok {
+			body += prometheusWriteQueueStats(provider.Stats())
 		}
 	}
 	if v := m.dataPlaneMetricsProvider.Load(); v != nil {
@@ -507,9 +530,17 @@ openwaf_writer_flushes_total %d
 # TYPE openwaf_writer_flush_errors_total counter
 openwaf_writer_flush_errors_total %d
 
-# HELP openwaf_writer_last_flush_records Records in the latest async writer flush
+# HELP openwaf_writer_failed_records_total Total observability records not persisted because a database flush failed
+# TYPE openwaf_writer_failed_records_total counter
+openwaf_writer_failed_records_total %d
+
+# HELP openwaf_writer_last_flush_records Records persisted by the latest async writer flush
 # TYPE openwaf_writer_last_flush_records gauge
 openwaf_writer_last_flush_records %d
+
+# HELP openwaf_writer_last_flush_failed_records Records not persisted by the latest async writer flush
+# TYPE openwaf_writer_last_flush_failed_records gauge
+openwaf_writer_last_flush_failed_records %d
 
 # HELP openwaf_writer_last_flush_duration_ms Duration of the latest async writer flush in milliseconds
 # TYPE openwaf_writer_last_flush_duration_ms gauge
@@ -519,7 +550,7 @@ openwaf_writer_last_flush_duration_ms %d
 # TYPE openwaf_writer_last_flush_unix_nano gauge
 openwaf_writer_last_flush_unix_nano %d
 
-# HELP openwaf_writer_total_flushed_records Total records handled by async writer flushes
+# HELP openwaf_writer_total_flushed_records Total observability records persisted by async writer flushes
 # TYPE openwaf_writer_total_flushed_records counter
 openwaf_writer_total_flushed_records %d
 `,
@@ -533,9 +564,110 @@ openwaf_writer_total_flushed_records %d
 		stats.BotScoreDropped,
 		stats.FlushesTotal,
 		stats.FlushErrorsTotal,
+		stats.FailedRecordsTotal,
 		stats.LastFlushRecords,
+		stats.LastFlushFailedRecords,
 		stats.LastFlushDurationMs,
 		stats.LastFlushUnixNano,
 		stats.TotalFlushedRecords,
+	)
+}
+
+func prometheusWriteQueueStats(stats WriteQueueStats) string {
+	closed := 0
+	if stats.Closed {
+		closed = 1
+	}
+	return fmt.Sprintf(`
+# HELP openwaf_write_queue_len Current generic repository write queue depth
+# TYPE openwaf_write_queue_len gauge
+openwaf_write_queue_len %d
+
+# HELP openwaf_write_queue_capacity Configured generic repository write queue capacity
+# TYPE openwaf_write_queue_capacity gauge
+openwaf_write_queue_capacity %d
+
+# HELP openwaf_write_queue_closed Whether the generic repository write queue has begun shutdown
+# TYPE openwaf_write_queue_closed gauge
+openwaf_write_queue_closed %d
+
+# HELP openwaf_write_queue_submitted_total Total repository write jobs submitted
+# TYPE openwaf_write_queue_submitted_total counter
+openwaf_write_queue_submitted_total %d
+
+# HELP openwaf_write_queue_enqueued_total Total repository write jobs enqueued asynchronously
+# TYPE openwaf_write_queue_enqueued_total counter
+openwaf_write_queue_enqueued_total %d
+
+# HELP openwaf_write_queue_dropped_full_total Jobs rejected because the repository write queue was full
+# TYPE openwaf_write_queue_dropped_full_total counter
+openwaf_write_queue_dropped_full_total %d
+
+# HELP openwaf_write_queue_dropped_closed_total Jobs rejected after repository write queue shutdown began
+# TYPE openwaf_write_queue_dropped_closed_total counter
+openwaf_write_queue_dropped_closed_total %d
+
+# HELP openwaf_write_queue_sync_fallback_total Synchronous fallbacks used when waitable queue submissions found a full queue
+# TYPE openwaf_write_queue_sync_fallback_total counter
+openwaf_write_queue_sync_fallback_total %d
+
+# HELP openwaf_write_queue_executed_total Jobs whose callbacks were invoked
+# TYPE openwaf_write_queue_executed_total counter
+openwaf_write_queue_executed_total %d
+
+# HELP openwaf_write_queue_succeeded_total Jobs persisted successfully
+# TYPE openwaf_write_queue_succeeded_total counter
+openwaf_write_queue_succeeded_total %d
+
+# HELP openwaf_write_queue_failed_total Jobs whose callbacks or transaction failed
+# TYPE openwaf_write_queue_failed_total counter
+openwaf_write_queue_failed_total %d
+
+# HELP openwaf_write_queue_transaction_errors_total Transactions that failed to commit
+# TYPE openwaf_write_queue_transaction_errors_total counter
+openwaf_write_queue_transaction_errors_total %d
+
+# HELP openwaf_write_queue_batches_total Completed queue flush batches
+# TYPE openwaf_write_queue_batches_total counter
+openwaf_write_queue_batches_total %d
+
+# HELP openwaf_write_queue_last_batch_jobs Jobs in the latest flush batch
+# TYPE openwaf_write_queue_last_batch_jobs gauge
+openwaf_write_queue_last_batch_jobs %d
+
+# HELP openwaf_write_queue_last_batch_succeeded Jobs succeeded in the latest flush batch
+# TYPE openwaf_write_queue_last_batch_succeeded gauge
+openwaf_write_queue_last_batch_succeeded %d
+
+# HELP openwaf_write_queue_last_batch_failed Jobs failed in the latest flush batch
+# TYPE openwaf_write_queue_last_batch_failed gauge
+openwaf_write_queue_last_batch_failed %d
+
+# HELP openwaf_write_queue_last_batch_duration_ms Duration of the latest flush batch in milliseconds
+# TYPE openwaf_write_queue_last_batch_duration_ms gauge
+openwaf_write_queue_last_batch_duration_ms %d
+
+# HELP openwaf_write_queue_last_batch_unix_nano Unix timestamp of the latest flush batch
+# TYPE openwaf_write_queue_last_batch_unix_nano gauge
+openwaf_write_queue_last_batch_unix_nano %d
+`,
+		stats.QueueLen,
+		stats.QueueCapacity,
+		closed,
+		stats.SubmittedTotal,
+		stats.EnqueuedTotal,
+		stats.DroppedFullTotal,
+		stats.DroppedClosedTotal,
+		stats.SyncFallbackTotal,
+		stats.ExecutedTotal,
+		stats.SucceededTotal,
+		stats.FailedJobsTotal,
+		stats.TransactionErrorsTotal,
+		stats.BatchesTotal,
+		stats.LastBatchJobs,
+		stats.LastBatchSucceeded,
+		stats.LastBatchFailed,
+		stats.LastBatchDurationMs,
+		stats.LastBatchUnixNano,
 	)
 }

@@ -13,24 +13,84 @@ func (f fakeUnifiedWriterStatsProvider) Stats() UnifiedWriterStats {
 	return f.stats
 }
 
+type fakeWriteQueueStatsProvider struct {
+	stats WriteQueueStats
+}
+
+func (f fakeWriteQueueStatsProvider) Stats() WriteQueueStats {
+	return f.stats
+}
+
+func TestPrometheusBodyIncludesWriteQueueStats(t *testing.T) {
+	m := NewMetrics()
+	m.SetWriteQueueStatsProvider(fakeWriteQueueStatsProvider{stats: WriteQueueStats{
+		QueueLen:               2,
+		QueueCapacity:          256,
+		Closed:                 true,
+		SubmittedTotal:         11,
+		EnqueuedTotal:          10,
+		DroppedFullTotal:       1,
+		DroppedClosedTotal:     2,
+		SyncFallbackTotal:      3,
+		ExecutedTotal:          9,
+		SucceededTotal:         8,
+		FailedJobsTotal:        1,
+		TransactionErrorsTotal: 1,
+		BatchesTotal:           4,
+		LastBatchJobs:          5,
+		LastBatchSucceeded:     4,
+		LastBatchFailed:        1,
+		LastBatchDurationMs:    7,
+		LastBatchUnixNano:      8,
+	}})
+
+	body := PrometheusBody(m)
+	for _, want := range []string{
+		"openwaf_write_queue_len 2",
+		"openwaf_write_queue_capacity 256",
+		"openwaf_write_queue_closed 1",
+		"openwaf_write_queue_submitted_total 11",
+		"openwaf_write_queue_enqueued_total 10",
+		"openwaf_write_queue_dropped_full_total 1",
+		"openwaf_write_queue_dropped_closed_total 2",
+		"openwaf_write_queue_sync_fallback_total 3",
+		"openwaf_write_queue_executed_total 9",
+		"openwaf_write_queue_succeeded_total 8",
+		"openwaf_write_queue_failed_total 1",
+		"openwaf_write_queue_transaction_errors_total 1",
+		"openwaf_write_queue_batches_total 4",
+		"openwaf_write_queue_last_batch_jobs 5",
+		"openwaf_write_queue_last_batch_succeeded 4",
+		"openwaf_write_queue_last_batch_failed 1",
+		"openwaf_write_queue_last_batch_duration_ms 7",
+		"openwaf_write_queue_last_batch_unix_nano 8",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("PrometheusBody() missing %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
 func TestPrometheusBodyIncludesUnifiedWriterStats(t *testing.T) {
 	m := NewMetrics()
 	m.SetUnifiedWriterStatsProvider(fakeUnifiedWriterStatsProvider{
 		stats: UnifiedWriterStats{
-			SecurityEventQueueLen: 3,
-			AccessLogQueueLen:     5,
-			DropEventQueueLen:     7,
-			BotScoreQueueLen:      11,
-			SecurityEventDropped:  13,
-			AccessLogDropped:      17,
-			DropEventDropped:      19,
-			BotScoreDropped:       23,
-			FlushesTotal:          29,
-			FlushErrorsTotal:      31,
-			LastFlushRecords:      37,
-			LastFlushDurationMs:   41,
-			LastFlushUnixNano:     43,
-			TotalFlushedRecords:   47,
+			SecurityEventQueueLen:  3,
+			AccessLogQueueLen:      5,
+			DropEventQueueLen:      7,
+			BotScoreQueueLen:       11,
+			SecurityEventDropped:   13,
+			AccessLogDropped:       17,
+			DropEventDropped:       19,
+			BotScoreDropped:        23,
+			FlushesTotal:           29,
+			FlushErrorsTotal:       31,
+			FailedRecordsTotal:     33,
+			LastFlushRecords:       37,
+			LastFlushFailedRecords: 39,
+			LastFlushDurationMs:    41,
+			LastFlushUnixNano:      43,
+			TotalFlushedRecords:    47,
 		},
 	})
 
@@ -46,7 +106,9 @@ func TestPrometheusBodyIncludesUnifiedWriterStats(t *testing.T) {
 		`openwaf_writer_dropped_total{type="bot_score"} 23`,
 		"openwaf_writer_flushes_total 29",
 		"openwaf_writer_flush_errors_total 31",
+		"openwaf_writer_failed_records_total 33",
 		"openwaf_writer_last_flush_records 37",
+		"openwaf_writer_last_flush_failed_records 39",
 		"openwaf_writer_last_flush_duration_ms 41",
 		"openwaf_writer_last_flush_unix_nano 43",
 		"openwaf_writer_total_flushed_records 47",

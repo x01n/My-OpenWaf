@@ -446,6 +446,9 @@ func applyClientResponseCompressionWithOptions(c *app.RequestContext, statusCode
 	if c == nil {
 		return body
 	}
+	if requestCacheControlHasNoTransform(c.Request.Header.PeekAll("Cache-Control")) {
+		return body
+	}
 	opts = normalizeResponseCompressionOptions(opts)
 	if !opts.Enabled {
 		return body

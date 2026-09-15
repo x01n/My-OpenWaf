@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"My-OpenWaf/internal/store"
 )
 
 func TestQuickJSCompileUsesName(t *testing.T) {
@@ -17,6 +20,41 @@ func TestQuickJSCompileUsesName(t *testing.T) {
 	}
 	if script.Name() != "named-script" {
 		t.Fatalf("script name = %q, want named-script", script.Name())
+	}
+}
+
+func TestQuickJSCompileValidationDeadlineIsIndependentFromRuntimeTimeout(t *testing.T) {
+	const workers = 16
+	const iterations = 4
+	var wg sync.WaitGroup
+	errs := make(chan error, workers*iterations)
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				_, err := Compile("validation-pressure", `export default {fetch() { return {}; }}`, ScriptOptions{Timeout: time.Nanosecond})
+				if err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("valid script failed compile validation under pressure: %v", err)
+	}
+}
+
+func TestQuickJSCompileValidationInterruptsTopLevelLoop(t *testing.T) {
+	started := time.Now()
+	_, err := Compile("validation-loop", `export default (() => { for (;;) {} })()`, ScriptOptions{ValidationTimeout: 20 * time.Millisecond})
+	if !errors.Is(err, ErrScriptTimeout) {
+		t.Fatalf("top-level loop validation error = %v, want %v", err, ErrScriptTimeout)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("top-level loop validation took %s, want less than 1s", elapsed)
 	}
 }
 
@@ -43,6 +81,114 @@ func TestQuickJSEngineExecutesMutationPlan(t *testing.T) {
 	}
 	if plan.SetHeaders["X-JS"] != "GET" || len(plan.DeleteHeaders) != 1 || plan.DeleteHeaders[0] != "X-Delete" {
 		t.Fatalf("unexpected headers: %+v", plan)
+	}
+}
+
+// TestQuickJSEngineRejectsResponseStage 确保调用方绕过 snapshot 过滤时，
+// response 阶段描述仍不能进入执行路径。
+func TestQuickJSEngineRejectsResponseStage(t *testing.T) {
+	script, err := CompileWithMetadata(
+		"response-stage",
+		`export default {fetch() { return {path: "/must-not-run"}; }}`,
+		ScriptOptions{},
+		ScriptMetadata{Stage: store.JSStageResponse},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	for _, run := range []struct {
+		name string
+		fn   func() error
+	}{
+		{name: "execute", fn: func() error {
+			_, err := engine.Execute(context.Background(), script, RequestSnapshot{Method: "GET", Path: "/"})
+			return err
+		}},
+		{name: "validate", fn: func() error {
+			_, err := engine.Validate(context.Background(), script, CanonicalValidationRequest(0))
+			return err
+		}},
+	} {
+		t.Run(run.name, func(t *testing.T) {
+			if err := run.fn(); !errors.Is(err, ErrResponseStageUnavailable) {
+				t.Fatalf("error = %v, want %v", err, ErrResponseStageUnavailable)
+			}
+		})
+	}
+	if runs, failures, timeouts, average := script.Stats(); runs != 0 || failures != 0 || timeouts != 0 || average != 0 {
+		t.Fatalf("response-stage execution changed stats: runs=%d failures=%d timeouts=%d average=%s", runs, failures, timeouts, average)
+	}
+}
+
+func TestQuickJSValidateDoesNotChangeRuntimeStats(t *testing.T) {
+	script, err := Compile("validation-stats", `export default {fetch() { return {}; }}`, ScriptOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Validate(context.Background(), script, CanonicalValidationRequest(0)); err != nil {
+		t.Fatal(err)
+	}
+	runs, failures, timeouts, avg := script.Stats()
+	if runs != 0 || failures != 0 || timeouts != 0 || avg != 0 {
+		t.Fatalf("validation changed stats: runs=%d failures=%d timeouts=%d avg=%s", runs, failures, timeouts, avg)
+	}
+}
+
+func TestQuickJSRejectsNonMutationPlanReturnShapes(t *testing.T) {
+	tests := []struct {
+		name       string
+		returnExpr string
+		wantError  string
+	}{
+		{name: "request snapshot", returnExpr: "request", wantError: "unknown field"},
+		{name: "unknown field", returnExpr: `{path: "/ok", headers: {"x-test": "value"}}`, wantError: `unknown field "headers"`},
+		{name: "array", returnExpr: `[]`, wantError: "must be a MutationPlan object"},
+		{name: "string", returnExpr: `"/not-a-plan"`, wantError: "must be a MutationPlan object"},
+	}
+	engine, err := NewEngine(EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			script, err := Compile(tc.name, `export default {fetch(request) { return `+tc.returnExpr+`; }}`, ScriptOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := engine.Evaluate(context.Background(), script, RequestSnapshot{Method: "GET", Path: "/original"})
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("result = %#v, error = %v, want error containing %q", plan, err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestQuickJSAcceptsEmptyMutationPlanReturns(t *testing.T) {
+	engine, err := NewEngine(EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	for _, returnExpr := range []string{"null", "undefined", "{}"} {
+		script, err := Compile("empty-plan", `export default {fetch() { return `+returnExpr+`; }}`, ScriptOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := engine.Evaluate(context.Background(), script, RequestSnapshot{})
+		if err != nil || plan.Method != nil || plan.Path != nil || plan.RawQuery != nil || plan.Body != nil || len(plan.SetHeaders) != 0 || len(plan.DeleteHeaders) != 0 {
+			t.Fatalf("return %s result = %#v, %v", returnExpr, plan, err)
+		}
 	}
 }
 

@@ -35,6 +35,7 @@ import {
  */
 export function SiteTable({
   sites,
+  canManage,
   onEdit,
   onToggle,
   onDelete,
@@ -116,6 +117,7 @@ export function SiteTable({
                 <TableCell className="pe-4 text-end">
                   <SiteActionsMenu
                     site={site}
+                    canManage={canManage}
                     onEdit={onEdit}
                     onToggle={onToggle}
                     onDelete={onDelete}

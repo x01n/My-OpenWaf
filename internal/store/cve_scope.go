@@ -19,6 +19,7 @@ type CVERuleScopeOverride struct {
 	Sensitivity *string   `gorm:"size:32" json:"sensitivity,omitempty"`
 	StatusCode  *int      `json:"status_code,omitempty"`
 	RedirectTo  *string   `gorm:"type:text" json:"redirect_to,omitempty"`
+	CaptchaType *string   `gorm:"size:16" json:"captcha_type,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

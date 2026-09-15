@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -105,6 +106,15 @@ func TestCreateAPIKeyDefaultsUnnamedAndRejectsMalformedBody(t *testing.T) {
 	}
 }
 
+func TestCreateAPIKeyRejectsNamesOverStorageLimit(t *testing.T) {
+	repo := newAdminAPIKeyRepoForTest(t)
+	tooLong := strings.Repeat("名", 65)
+	ctx := invokeAPIKeyHandler(t, CreateAPIKey(repo), "POST", "/api/v1/api-keys", nil, []byte(`{"name":"`+tooLong+`"}`))
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("oversized name status = %d, want 400: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+}
+
 func TestListAPIKeysNeverExposesTokenHashOrPrefix(t *testing.T) {
 	repo := newAdminAPIKeyRepoForTest(t)
 	token, key, err := repo.Create("deploy-bot")
@@ -167,5 +177,13 @@ func TestDeleteAPIKeyRemovesKeyAndValidatesID(t *testing.T) {
 	bad := invokeAPIKeyHandler(t, DeleteAPIKey(repo), "POST", "/api/v1/api-keys/abc/delete", param.Params{{Key: "id", Value: "abc"}}, nil)
 	if bad.Response.StatusCode() != 400 {
 		t.Fatalf("invalid id status = %d, want 400", bad.Response.StatusCode())
+	}
+}
+
+func TestDeleteAPIKeyReturnsNotFoundForMissingKey(t *testing.T) {
+	repo := newAdminAPIKeyRepoForTest(t)
+	ctx := invokeAPIKeyHandler(t, DeleteAPIKey(repo), "POST", "/api/v1/api-keys/999/delete", param.Params{{Key: "id", Value: "999"}}, nil)
+	if ctx.Response.StatusCode() != 404 {
+		t.Fatalf("missing key status = %d, want 404", ctx.Response.StatusCode())
 	}
 }

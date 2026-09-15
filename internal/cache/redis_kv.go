@@ -12,7 +12,10 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-const redisPrefix = "openwaf:"
+const (
+	redisPrefix           = "openwaf:"
+	redisKVFailureBackoff = 5 * time.Second
+)
 
 const incrFixedWindowScript = `
 local value = redis.call("INCR", KEYS[1])
@@ -29,9 +32,10 @@ return value
 // This is intentionally separate from the snapshot Layer — snapshots are
 // process-local objects that should never be serialized to Redis.
 type RedisKV struct {
-	mu     sync.RWMutex
-	client *goredis.Client
-	health atomic.Bool
+	mu               sync.RWMutex
+	client           *goredis.Client
+	health           atomic.Bool
+	unavailableUntil atomic.Int64
 }
 
 // NewRedisKV creates a Redis KV cache. The wrapper stays usable even when the
@@ -59,6 +63,7 @@ func (r *RedisKV) SetClient(client *goredis.Client) {
 	r.mu.Lock()
 	r.client = client
 	r.health.Store(client != nil)
+	r.unavailableUntil.Store(0)
 	r.mu.Unlock()
 }
 
@@ -73,7 +78,14 @@ func (r *RedisKV) AvailableContext(ctx context.Context) bool {
 }
 
 func (r *RedisKV) Available() bool {
-	return r != nil && r.clientValue() != nil && r.health.Load()
+	if r == nil || r.clientValue() == nil {
+		return false
+	}
+	if r.health.Load() {
+		return true
+	}
+	until := r.unavailableUntil.Load()
+	return until > 0 && time.Now().UnixNano() >= until
 }
 
 // noteCommandResult updates health only when client is still the active client.
@@ -87,8 +99,10 @@ func (r *RedisKV) noteCommandResult(client *goredis.Client, err error) {
 	if r.client == client {
 		if err == nil || errors.Is(err, goredis.Nil) {
 			r.health.Store(true)
+			r.unavailableUntil.Store(0)
 		} else {
 			r.health.Store(false)
+			r.unavailableUntil.Store(time.Now().Add(redisKVFailureBackoff).UnixNano())
 		}
 	}
 	r.mu.RUnlock()

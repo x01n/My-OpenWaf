@@ -61,8 +61,9 @@ type recordedResourceAggregator struct {
 	flushInterval time.Duration
 	maxKeys       int
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // NewRecordedResourceAggregator 构造聚合器并启动后台 flush 循环。repo 为 nil 时
@@ -304,6 +305,10 @@ func (a *recordedResourceAggregator) Close() {
 	if a == nil {
 		return
 	}
-	close(a.stopCh)
+	a.closeOnce.Do(func() {
+		if a.stopCh != nil {
+			close(a.stopCh)
+		}
+	})
 	a.wg.Wait()
 }

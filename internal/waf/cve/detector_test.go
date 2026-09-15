@@ -45,6 +45,17 @@ func TestRequestTargetContainsAnyAllDoesNotCrossTargetBoundaries(t *testing.T) {
 	}
 }
 
+func TestPickTargetURLBodyCombinesOnlyURLAndBody(t *testing.T) {
+	req := BuildCVERequest("/api/target", "q=url-marker", nil, []byte("body-marker"), "text/plain")
+	got := pickTarget(req, "url_body")
+	if !strings.Contains(got, "url-marker") || !strings.Contains(got, "body-marker") {
+		t.Fatalf("url_body target = %q, want URL and body content", got)
+	}
+	if strings.Contains(got, "Host") {
+		t.Fatalf("url_body target unexpectedly included unrelated headers: %q", got)
+	}
+}
+
 func TestRequestTargetContainsAnyAllUsesLowerTargetsSafely(t *testing.T) {
 	req := BuildCVERequest("/ab", "", nil, []byte("cd"), "text/plain")
 	if requestTargetContainsAny(req, "all", "/abcd") {
@@ -920,6 +931,33 @@ func TestCVEDetector_DetectFirstMatchesDetectFirstResult(t *testing.T) {
 		})
 	}
 }
+
+// TestCVEDetectorDetectFirstPreservesCustomCaptchaType 保证管理端配置的规则级验证码
+// 在快速首个命中路径中与完整 Detect 路径保持一致。
+func TestCVEDetectorDetectFirstPreservesCustomCaptchaType(t *testing.T) {
+	d := NewCVEDetector()
+	d.ReloadCustomRules([]CustomCVERule{{
+		ID:          9001,
+		CVEID:       "CVE-2026-CUSTOM-CAPTCHA",
+		Category:    "general",
+		Pattern:     `captcha-marker`,
+		Target:      "body",
+		Severity:    "high",
+		Action:      "captcha_challenge",
+		CaptchaType: "rotate",
+		Enabled:     true,
+		Description: "custom captcha rule",
+	}})
+	req := BuildCVERequest("/", "", nil, []byte("jndi:captcha-marker"), "text/plain")
+	match, ok := d.DetectFirst(req)
+	if !ok {
+		t.Fatal("expected custom CVE match")
+	}
+	if match.CaptchaType != "rotate" {
+		t.Fatalf("DetectFirst captcha_type = %q, want rotate", match.CaptchaType)
+	}
+}
+
 func TestCVEDetector_GraphQLTypenameDoesNotTriggerIntrospection(t *testing.T) {
 	d := NewCVEDetector()
 	body := `[{"operationName":"CurrentContextPrivateByDefault","query":"query CurrentContextPrivateByDefault { sessionUser { id currentContext { id privateByDefault __typename } __typename } }","variables":{}}]`

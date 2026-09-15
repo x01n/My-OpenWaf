@@ -38,15 +38,22 @@ type HotCache struct {
 	// 若把两者都计入 misses，Redis 整体故障时命中率会显示为 0%，看起来像
 	// 缓存未生效而非依赖不可用，排障方向会被引偏。
 	errs atomic.Int64
-	// errLogOnce 限制故障日志频率：Redis 故障期间每个请求都会走到这里，
-	// 无节制打日志会淹没其他信息。恢复后重新允许打印一次。
-	errLogging atomic.Bool
+	// errLogging 限制故障日志频率；unavailableUntil 在 Redis 故障后短暂熔断，
+	// 避免每个接口请求都先等待 Redis 超时再回源数据库。
+	errLogging       atomic.Bool
+	unavailableUntil atomic.Int64
 }
 
-const hotCachePrefix = "openwaf:hot:"
+const (
+	hotCachePrefix         = "openwaf:hot:"
+	hotCacheFailureBackoff = 5 * time.Second
+)
 
 // NewHotCache creates a Redis-backed hot data cache. Returns a no-op instance if redis is nil.
 func NewHotCache(redis *goredis.Client, log *slog.Logger) *HotCache {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &HotCache{
 		redis:  redis,
 		log:    log,
@@ -70,11 +77,16 @@ func (h *HotCache) SetRedis(redis *goredis.Client) {
 	}
 	h.mu.Lock()
 	h.redis = redis
+	h.unavailableUntil.Store(0)
+	h.errLogging.Store(false)
 	h.mu.Unlock()
 }
 
 // Get retrieves a cached JSON value. Returns false on miss or when Redis is unavailable.
 func (h *HotCache) Get(key string, dest any) bool {
+	if !h.Available() {
+		return false
+	}
 	client := h.redisClient()
 	if client == nil {
 		return false
@@ -84,7 +96,10 @@ func (h *HotCache) Get(key string, dest any) bool {
 
 	data, err := client.Get(ctx, h.prefix+key).Bytes()
 	if err != nil {
-		h.recordReadErr(key, err)
+		h.recordReadErr(client, key, err)
+		return false
+	}
+	if !h.noteHealthy(client) {
 		return false
 	}
 	if err := json.Unmarshal(data, dest); err != nil {
@@ -92,7 +107,6 @@ func (h *HotCache) Get(key string, dest any) bool {
 		h.log.Warn("hot cache unmarshal failed", slog.String("key", key), slog.Any("err", err))
 		return false
 	}
-	h.noteHealthy()
 	h.hits.Add(1)
 	return true
 }
@@ -103,27 +117,46 @@ func (h *HotCache) Get(key string, dest any) bool {
  * goredis.Nil 是正常的未命中；其余（拨号失败、超时、连接池耗尽等）属于依赖故障，
  * 计入 errs 并打印一次告警，避免故障期间每个请求都刷日志。
  *
+ * @param client 发起命令时使用的 Redis 客户端。
  * @param key 缓存键（仅用于日志，不含敏感内容）。
  * @param err client.Get 返回的错误。
  */
-func (h *HotCache) recordReadErr(key string, err error) {
+func (h *HotCache) recordReadErr(client *goredis.Client, key string, err error) {
+	if h == nil || client == nil {
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.redis != client {
+		return
+	}
 	if errors.Is(err, goredis.Nil) {
 		h.misses.Add(1)
 		return
 	}
 	h.errs.Add(1)
-	// 仅在「上一次是健康状态」时打印，故障持续期间静默。
+	h.unavailableUntil.Store(time.Now().Add(hotCacheFailureBackoff).UnixNano())
 	if h.errLogging.CompareAndSwap(false, true) {
 		h.log.Warn("hot cache redis unavailable, falling back to database",
 			slog.String("key", key), slog.Any("err", err))
 	}
 }
 
-// noteHealthy 在一次成功读取后复位故障日志开关，使下次故障能重新告警一次。
-func (h *HotCache) noteHealthy() {
+// noteHealthy 仅接受当前客户端的成功结果，并复位故障状态。
+func (h *HotCache) noteHealthy(client *goredis.Client) bool {
+	if h == nil || client == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.redis != client {
+		return false
+	}
+	h.unavailableUntil.Store(0)
 	if h.errLogging.Load() {
 		h.errLogging.Store(false)
 	}
+	return true
 }
 
 // HitStats 返回累计的命中与未命中次数，供 /metrics 暴露命中率。
@@ -146,6 +179,9 @@ func (h *HotCache) ErrorCount() int64 {
 
 // Set stores a value as JSON with the given TTL.
 func (h *HotCache) Set(key string, value any, ttl time.Duration) {
+	if !h.Available() {
+		return
+	}
 	client := h.redisClient()
 	if client == nil {
 		return
@@ -157,23 +193,35 @@ func (h *HotCache) Set(key string, value any, ttl time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := client.Set(ctx, h.prefix+key, data, ttl).Err(); err != nil {
-		h.log.Warn("hot cache set failed", slog.String("key", key), slog.Any("err", err))
+		h.recordReadErr(client, key, err)
+		return
 	}
+	h.noteHealthy(client)
 }
 
 // SetBytes stores raw bytes with the given TTL (for pre-serialized data).
 func (h *HotCache) SetBytes(key string, data []byte, ttl time.Duration) {
+	if !h.Available() {
+		return
+	}
 	client := h.redisClient()
 	if client == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	client.Set(ctx, h.prefix+key, data, ttl)
+	if err := client.Set(ctx, h.prefix+key, data, ttl).Err(); err != nil {
+		h.recordReadErr(client, key, err)
+		return
+	}
+	h.noteHealthy(client)
 }
 
 // GetBytes retrieves raw bytes. Returns nil on miss.
 func (h *HotCache) GetBytes(key string) []byte {
+	if !h.Available() {
+		return nil
+	}
 	client := h.redisClient()
 	if client == nil {
 		return nil
@@ -182,10 +230,12 @@ func (h *HotCache) GetBytes(key string) []byte {
 	defer cancel()
 	data, err := client.Get(ctx, h.prefix+key).Bytes()
 	if err != nil {
-		h.recordReadErr(key, err)
+		h.recordReadErr(client, key, err)
 		return nil
 	}
-	h.noteHealthy()
+	if !h.noteHealthy(client) {
+		return nil
+	}
 	h.hits.Add(1)
 	return data
 }
@@ -229,7 +279,11 @@ func (h *HotCache) InvalidatePattern(pattern string) {
 
 // Available returns true if Redis is connected.
 func (h *HotCache) Available() bool {
-	return h.redisClient() != nil
+	if h.redisClient() == nil {
+		return false
+	}
+	until := h.unavailableUntil.Load()
+	return until == 0 || time.Now().UnixNano() >= until
 }
 
 // GetOrLoad implements the read-through pattern: try cache first, on miss call loader,

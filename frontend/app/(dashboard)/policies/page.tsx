@@ -24,10 +24,13 @@ import {
   usePolicyMutation,
   usePolicySetDefault,
 } from "@/hooks/use-api"
+import { useAuth } from "@/hooks/use-auth"
 import type { Policy } from "@/lib/types"
 
 export default function PoliciesPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const { data: policies = [], isLoading, error, mutate } = usePolicies()
   const policyMutation = usePolicyMutation()
   const setDefault = usePolicySetDefault()
@@ -36,11 +39,10 @@ export default function PoliciesPage() {
   const [description, setDescription] = useState("")
 
   const createPolicy = async () => {
+    if (!canManage) return
     const trimmed = name.trim()
     if (!trimmed) {
-      toast.error(
-        t("policies.nameRequired")
-      )
+      toast.error(t("policies.nameRequired"))
       return
     }
     try {
@@ -59,13 +61,11 @@ export default function PoliciesPage() {
   }
 
   const makeDefault = async (policy: Policy) => {
-    if (policy.is_default) return
+    if (!canManage || policy.is_default) return
     try {
       await setDefault.execute(policy.id)
       await mutate()
-      toast.success(
-        t("policies.defaultUpdated")
-      )
+      toast.success(t("policies.defaultUpdated"))
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : t("common.operationFailed")
@@ -74,10 +74,9 @@ export default function PoliciesPage() {
   }
 
   const removePolicy = async (policy: Policy) => {
+    if (!canManage) return
     if (policy.is_default) {
-      toast.error(
-        t("policies.defaultDeleteBlocked")
-      )
+      toast.error(t("policies.defaultDeleteBlocked"))
       return
     }
     try {
@@ -95,15 +94,19 @@ export default function PoliciesPage() {
     {
       key: "name",
       title: t("common.name"),
+      cellClassName: "max-w-[420px] whitespace-normal align-top",
       render: (row: Policy) => (
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 font-medium">
-            {row.name}
-            {row.is_default && (
-              <Badge>{t("common.default")}</Badge>
-            )}
+        <div className="min-w-0 space-y-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 font-medium">
+            <span className="min-w-0 break-all" title={row.name}>
+              {row.name}
+            </span>
+            {row.is_default && <Badge>{t("common.default")}</Badge>}
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p
+            className="line-clamp-2 text-xs leading-relaxed break-all text-muted-foreground"
+            title={row.description || undefined}
+          >
             {row.description || "-"}
           </p>
         </div>
@@ -115,10 +118,8 @@ export default function PoliciesPage() {
       width: "180px",
       render: (row: Policy) => (
         <div className="text-xs text-muted-foreground">
-          {t("policies.siteRefs")}:{" "}
-          {row.site_count ?? 0} ·{" "}
-          {t("policies.ruleRefs")}:{" "}
-          {row.rule_count ?? 0}
+          {t("policies.siteRefs")}: {row.site_count ?? 0} ·{" "}
+          {t("policies.ruleRefs")}: {row.rule_count ?? 0}
         </div>
       ),
     },
@@ -131,7 +132,7 @@ export default function PoliciesPage() {
           <Button
             size="sm"
             variant="outline"
-            disabled={row.is_default}
+            disabled={!canManage || row.is_default || setDefault.loading}
             onClick={() => makeDefault(row)}
           >
             <IconShieldCheck className="mr-1 h-4 w-4" />
@@ -140,7 +141,7 @@ export default function PoliciesPage() {
           <Button
             size="sm"
             variant="ghost"
-            disabled={row.is_default}
+            disabled={!canManage || row.is_default || deletePolicy.loading}
             onClick={() => removePolicy(row)}
           >
             <IconTrash className="h-4 w-4 text-destructive" />
@@ -156,12 +157,22 @@ export default function PoliciesPage() {
         title={t("policies.title")}
         description={t("policies.description")}
         actions={
-          <Button variant="outline" onClick={() => mutate()}>
+          <Button
+            variant="outline"
+            onClick={() => mutate()}
+            disabled={isLoading || policyMutation.loading}
+          >
             <IconRefresh className="mr-1 h-4 w-4" />
             {t("common.refresh")}
           </Button>
         }
       />
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertDescription>{t("common.readOnlyHint")}</AlertDescription>
+        </Alert>
+      )}
 
       {error && (
         <Alert variant="destructive">
@@ -174,9 +185,7 @@ export default function PoliciesPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>
-            {t("policies.create")}
-          </CardTitle>
+          <CardTitle>{t("policies.create")}</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] md:items-end">
           <div className="space-y-1.5">
@@ -184,6 +193,7 @@ export default function PoliciesPage() {
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
+              disabled={!canManage}
               placeholder={t("policies.namePlaceholder")}
             />
           </div>
@@ -192,10 +202,14 @@ export default function PoliciesPage() {
             <Textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              disabled={!canManage}
               rows={1}
             />
           </div>
-          <Button onClick={createPolicy} disabled={policyMutation.loading}>
+          <Button
+            onClick={createPolicy}
+            disabled={!canManage || policyMutation.loading || !name.trim()}
+          >
             <IconPlus className="mr-1 h-4 w-4" />
             {t("common.add")}
           </Button>

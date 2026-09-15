@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
 import { PageHeader } from "@/components/page-header"
 import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -76,25 +77,27 @@ function pickChangedFields<T extends object>(
 
 export default function SettingsPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
   const {
     data: networkConfig,
     isLoading: networkLoading,
     error: networkError,
-  } = useNetworkConfig()
+  } = useNetworkConfig(canManage)
   const {
     data: tlsConfig,
     isLoading: tlsLoading,
     error: tlsError,
-  } = useTLSConfig()
+  } = useTLSConfig(canManage)
   const {
     data: logConfig,
     isLoading: logLoading,
     error: logError,
-  } = useLogConfig()
+  } = useLogConfig(canManage)
   const networkUpdate = useNetworkConfigUpdate()
   const tlsUpdate = useTLSConfigUpdate()
   const logUpdate = useLogConfigUpdate()
-  const { data: runtimeConfig } = useRuntimeConfig()
+  const { data: runtimeConfig } = useRuntimeConfig(canManage)
   const configDiagnostics = runtimeConfig?.config_diagnostics ?? []
   const [localNetwork, setLocalNetwork] = useState<NetworkConfigUpdate>({})
   const [localTLS, setLocalTLS] = useState<TLSConfigUpdate>({})
@@ -108,15 +111,22 @@ export default function SettingsPage() {
     localLog[key] ?? logConfig?.[key]
   const toggleNetwork = (
     key: "ipv6_enabled" | "http2_enabled" | "http3_enabled"
-  ) => setLocalNetwork((prev) => ({ ...prev, [key]: !networkValue(key) }))
+  ) => {
+    if (!canManage) return
+    setLocalNetwork((prev) => ({ ...prev, [key]: !networkValue(key) }))
+  }
   const toggleTLS = (
     key:
       | "prefer_server_cipher_suites"
       | "session_tickets_enabled"
       | "self_signed_on_ip"
-  ) => setLocalTLS((prev) => ({ ...prev, [key]: !tlsValue(key) }))
+  ) => {
+    if (!canManage) return
+    setLocalTLS((prev) => ({ ...prev, [key]: !tlsValue(key) }))
+  }
 
   const saveNetwork = async () => {
+    if (!canManage) return
     const payload = pickChangedFields<NetworkConfig>(
       networkFields,
       localNetwork
@@ -131,6 +141,7 @@ export default function SettingsPage() {
     }
   }
   const saveTLS = async () => {
+    if (!canManage) return
     const payload = pickChangedFields<TLSConfigUpdate>(tlsFields, localTLS)
     if (!Object.keys(payload).length) return
     try {
@@ -142,6 +153,7 @@ export default function SettingsPage() {
     }
   }
   const saveLog = async () => {
+    if (!canManage) return
     const payload = pickChangedFields<LogConfigUpdate>(logFields, localLog)
     if (!Object.keys(payload).length) return
     try {
@@ -188,6 +200,11 @@ export default function SettingsPage() {
         title={t("settings.title")}
         description={t("settings.description")}
       />
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
+        </Alert>
+      )}
       {configDiagnostics.length > 0 && (
         <Card className="border-amber-500/40 bg-amber-500/5">
           <CardHeader className="pb-3">
@@ -250,295 +267,320 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
       )}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <IconNetwork className="h-5 w-5 text-primary" />
-            {t("settings.network")}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-3">
-            {(
-              [
+      <fieldset
+        disabled={!canManage}
+        className="m-0 min-w-0 space-y-6 border-0 p-0"
+      >
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <IconNetwork className="h-5 w-5 text-primary" />
+              {t("settings.network")}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-3">
+              {(
                 [
-                  "ipv6_enabled",
-                  "settings.listenIpv6",
-                  "settings.listenIpv6Desc",
-                ],
-                [
-                  "http2_enabled",
-                  "settings.enableHttp2",
-                  "settings.enableHttp2Desc",
-                ],
-                [
-                  "http3_enabled",
-                  "settings.http3.enableLabel",
-                  "settings.http3.description",
-                ],
-              ] as const
-            ).map(([key, label, desc]) => (
-              <div
-                key={key}
-                className="flex items-start gap-3 rounded-lg border p-3"
-              >
-                <Switch
-                  id={key}
-                  checked={Boolean(networkValue(key))}
-                  onCheckedChange={() => toggleNetwork(key)}
-                />
-                <div className="space-y-0.5">
-                  <Label htmlFor={key} className="cursor-pointer text-sm">
-                    {t(label)}
-                  </Label>
-                  <p className="text-xs text-muted-foreground">{t(desc)}</p>
+                  [
+                    "ipv6_enabled",
+                    "settings.listenIpv6",
+                    "settings.listenIpv6Desc",
+                  ],
+                  [
+                    "http2_enabled",
+                    "settings.enableHttp2",
+                    "settings.enableHttp2Desc",
+                  ],
+                  [
+                    "http3_enabled",
+                    "settings.http3.enableLabel",
+                    "settings.http3.description",
+                  ],
+                ] as const
+              ).map(([key, label, desc]) => (
+                <div
+                  key={key}
+                  className="flex items-start gap-3 rounded-lg border p-3"
+                >
+                  <Switch
+                    id={key}
+                    checked={Boolean(networkValue(key))}
+                    disabled={!canManage}
+                    onCheckedChange={() => toggleNetwork(key)}
+                  />
+                  <div className="space-y-0.5">
+                    <Label htmlFor={key} className="cursor-pointer text-sm">
+                      {t(label)}
+                    </Label>
+                    <p className="text-xs text-muted-foreground">{t(desc)}</p>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div className="space-y-2">
-              <Label>{t("settings.defaultNetwork")}</Label>
-              <Select
-                value={networkValue("default_network") ?? "tcp"}
-                onValueChange={(value: NetworkConfig["default_network"]) =>
-                  setLocalNetwork((prev) => ({
-                    ...prev,
-                    default_network: value,
-                  }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="tcp">tcp</SelectItem>
-                  <SelectItem value="tcp4">tcp4</SelectItem>
-                  <SelectItem value="tcp6">tcp6</SelectItem>
-                </SelectContent>
-              </Select>
+              ))}
             </div>
-            <div className="space-y-2">
-              <Label>{t("settings.defaultAlpn")}</Label>
-              <Input
-                value={networkValue("default_alpn") ?? ""}
-                onChange={(event) =>
-                  setLocalNetwork((prev) => ({
-                    ...prev,
-                    default_alpn: event.target.value,
-                  }))
-                }
-                placeholder="h3,h2,http/1.1"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("settings.http3.bindLabel")}</Label>
-              <Input
-                value={networkValue("http3_bind") ?? ""}
-                onChange={(event) =>
-                  setLocalNetwork((prev) => ({
-                    ...prev,
-                    http3_bind: event.target.value,
-                  }))
-                }
-                placeholder={t("settings.http3.bindPlaceholder")}
-                disabled={!networkValue("http3_enabled")}
-              />
-            </div>
-          </div>
-          <div className="flex justify-end">
-            <Button onClick={saveNetwork} disabled={networkUpdate.loading}>
-              {networkUpdate.loading ? t("common.saving") : t("common.save")}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <IconShieldLock className="h-5 w-5 text-primary" />
-            {t("settings.sslCompliance")}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            {(["min_version", "max_version"] as const).map((key) => (
-              <div key={key} className="space-y-2">
-                <Label>
-                  {t(
-                    key === "min_version"
-                      ? "settings.tlsMinVersion"
-                      : "settings.tlsMaxVersion"
-                  )}
-                </Label>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <Label>{t("settings.defaultNetwork")}</Label>
                 <Select
-                  value={String(tlsValue(key) ?? "TLS13")}
-                  onValueChange={(value) =>
-                    setLocalTLS((prev) => ({ ...prev, [key]: value }))
+                  value={networkValue("default_network") ?? "tcp"}
+                  disabled={!canManage}
+                  onValueChange={(value: NetworkConfig["default_network"]) =>
+                    setLocalNetwork((prev) => ({
+                      ...prev,
+                      default_network: value,
+                    }))
                   }
                 >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {["TLS10", "TLS11", "TLS12", "TLS13"].map((version) => (
-                      <SelectItem key={version} value={version}>
-                        {version}
+                    <SelectItem value="tcp">tcp</SelectItem>
+                    <SelectItem value="tcp4">tcp4</SelectItem>
+                    <SelectItem value="tcp6">tcp6</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("settings.defaultAlpn")}</Label>
+                <Input
+                  value={networkValue("default_alpn") ?? ""}
+                  disabled={!canManage}
+                  onChange={(event) =>
+                    setLocalNetwork((prev) => ({
+                      ...prev,
+                      default_alpn: event.target.value,
+                    }))
+                  }
+                  placeholder="h3,h2,http/1.1"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t("settings.http3.bindLabel")}</Label>
+                <Input
+                  value={networkValue("http3_bind") ?? ""}
+                  disabled={!canManage || !networkValue("http3_enabled")}
+                  onChange={(event) =>
+                    setLocalNetwork((prev) => ({
+                      ...prev,
+                      http3_bind: event.target.value,
+                    }))
+                  }
+                  placeholder={t("settings.http3.bindPlaceholder")}
+                />
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button
+                onClick={saveNetwork}
+                disabled={!canManage || networkUpdate.loading}
+              >
+                {networkUpdate.loading ? t("common.saving") : t("common.save")}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <IconShieldLock className="h-5 w-5 text-primary" />
+              {t("settings.sslCompliance")}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              {(["min_version", "max_version"] as const).map((key) => (
+                <div key={key} className="space-y-2">
+                  <Label>
+                    {t(
+                      key === "min_version"
+                        ? "settings.tlsMinVersion"
+                        : "settings.tlsMaxVersion"
+                    )}
+                  </Label>
+                  <Select
+                    value={String(tlsValue(key) ?? "TLS13")}
+                    disabled={!canManage}
+                    onValueChange={(value) =>
+                      setLocalTLS((prev) => ({ ...prev, [key]: value }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {["TLS10", "TLS11", "TLS12", "TLS13"].map((version) => (
+                        <SelectItem key={version} value={version}>
+                          {version}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ))}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>{t("settings.cipherSuites")}</Label>
+                <Input
+                  value={String(tlsValue("cipher_suites") ?? "")}
+                  disabled={!canManage}
+                  onChange={(event) =>
+                    setLocalTLS((prev) => ({
+                      ...prev,
+                      cipher_suites: event.target.value,
+                    }))
+                  }
+                  placeholder={t("settings.tlsCipherPlaceholder")}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t("settings.tlsDefaultAlpn")}</Label>
+                <Input
+                  value={String(tlsValue("default_alpn") ?? "")}
+                  disabled={!canManage}
+                  onChange={(event) =>
+                    setLocalTLS((prev) => ({
+                      ...prev,
+                      default_alpn: event.target.value,
+                    }))
+                  }
+                  placeholder="h2,h3,http/1.1"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t("settings.curvePreferences")}</Label>
+                <Input
+                  value={String(tlsValue("curve_preferences") ?? "")}
+                  disabled={!canManage}
+                  onChange={(event) =>
+                    setLocalTLS((prev) => ({
+                      ...prev,
+                      curve_preferences: event.target.value,
+                    }))
+                  }
+                  placeholder="X25519,CurveP256,CurveP384"
+                />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              {(
+                [
+                  [
+                    "prefer_server_cipher_suites",
+                    "settings.preferServerCipherSuites",
+                  ],
+                  ["session_tickets_enabled", "settings.sessionTickets"],
+                  ["self_signed_on_ip", "settings.selfSignedOnIp"],
+                ] as const
+              ).map(([key, label]) => (
+                <div
+                  key={key}
+                  className="flex items-center gap-3 rounded-lg border p-3"
+                >
+                  <Switch
+                    id={key}
+                    checked={Boolean(tlsValue(key))}
+                    disabled={!canManage}
+                    onCheckedChange={() => toggleTLS(key)}
+                  />
+                  <Label htmlFor={key} className="cursor-pointer text-sm">
+                    {t(label)}
+                  </Label>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end">
+              <Button
+                onClick={saveTLS}
+                disabled={!canManage || tlsUpdate.loading}
+              >
+                {tlsUpdate.loading ? t("common.saving") : t("common.save")}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <IconFileText className="h-5 w-5 text-primary" />
+              {t("settings.logging")}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>{t("settings.logLevel")}</Label>
+                <Select
+                  value={String(logValue("level") ?? "INFO")}
+                  disabled={!canManage}
+                  onValueChange={(value) =>
+                    setLocalLog((prev) => ({ ...prev, level: value }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {["DEBUG", "INFO", "WARN", "ERROR"].map((level) => (
+                      <SelectItem key={level} value={level}>
+                        {level}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
-            ))}
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label>{t("settings.cipherSuites")}</Label>
-              <Input
-                value={String(tlsValue("cipher_suites") ?? "")}
-                onChange={(event) =>
-                  setLocalTLS((prev) => ({
-                    ...prev,
-                    cipher_suites: event.target.value,
-                  }))
-                }
-                placeholder={t("settings.tlsCipherPlaceholder")}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("settings.tlsDefaultAlpn")}</Label>
-              <Input
-                value={String(tlsValue("default_alpn") ?? "")}
-                onChange={(event) =>
-                  setLocalTLS((prev) => ({
-                    ...prev,
-                    default_alpn: event.target.value,
-                  }))
-                }
-                placeholder="h2,h3,http/1.1"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("settings.curvePreferences")}</Label>
-              <Input
-                value={String(tlsValue("curve_preferences") ?? "")}
-                onChange={(event) =>
-                  setLocalTLS((prev) => ({
-                    ...prev,
-                    curve_preferences: event.target.value,
-                  }))
-                }
-                placeholder="X25519,CurveP256,CurveP384"
-              />
-            </div>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-3">
-            {(
-              [
-                [
-                  "prefer_server_cipher_suites",
-                  "settings.preferServerCipherSuites",
-                ],
-                ["session_tickets_enabled", "settings.sessionTickets"],
-                ["self_signed_on_ip", "settings.selfSignedOnIp"],
-              ] as const
-            ).map(([key, label]) => (
-              <div
-                key={key}
-                className="flex items-center gap-3 rounded-lg border p-3"
-              >
-                <Switch
-                  id={key}
-                  checked={Boolean(tlsValue(key))}
-                  onCheckedChange={() => toggleTLS(key)}
+              <div className="space-y-2">
+                <Label>{t("settings.logFilePath")}</Label>
+                <Input
+                  value={String(logValue("file_path") ?? "")}
+                  disabled={!canManage}
+                  onChange={(event) =>
+                    setLocalLog((prev) => ({
+                      ...prev,
+                      file_path: event.target.value,
+                    }))
+                  }
                 />
-                <Label htmlFor={key} className="cursor-pointer text-sm">
-                  {t(label)}
-                </Label>
               </div>
-            ))}
-          </div>
-          <div className="flex justify-end">
-            <Button onClick={saveTLS} disabled={tlsUpdate.loading}>
-              {tlsUpdate.loading ? t("common.saving") : t("common.save")}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <IconFileText className="h-5 w-5 text-primary" />
-            {t("settings.logging")}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label>{t("settings.logLevel")}</Label>
-              <Select
-                value={String(logValue("level") ?? "INFO")}
-                onValueChange={(value) =>
-                  setLocalLog((prev) => ({ ...prev, level: value }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {["DEBUG", "INFO", "WARN", "ERROR"].map((level) => (
-                    <SelectItem key={level} value={level}>
-                      {level}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
             </div>
-            <div className="space-y-2">
-              <Label>{t("settings.logFilePath")}</Label>
-              <Input
-                value={String(logValue("file_path") ?? "")}
-                onChange={(event) =>
+            <div className="flex items-center gap-3 rounded-lg border p-3">
+              <Switch
+                id="also_stdout"
+                checked={Boolean(logValue("also_stdout"))}
+                disabled={!canManage}
+                onCheckedChange={() =>
                   setLocalLog((prev) => ({
                     ...prev,
-                    file_path: event.target.value,
+                    also_stdout: !logValue("also_stdout"),
                   }))
                 }
               />
+              <Label htmlFor="also_stdout" className="cursor-pointer text-sm">
+                {t("settings.logAlsoStdout")}
+              </Label>
             </div>
-          </div>
-          <div className="flex items-center gap-3 rounded-lg border p-3">
-            <Switch
-              id="also_stdout"
-              checked={Boolean(logValue("also_stdout"))}
-              onCheckedChange={() =>
-                setLocalLog((prev) => ({
-                  ...prev,
-                  also_stdout: !logValue("also_stdout"),
-                }))
-              }
-            />
-            <Label htmlFor="also_stdout" className="cursor-pointer text-sm">
-              {t("settings.logAlsoStdout")}
-            </Label>
-          </div>
-          <div className="flex justify-end">
-            <Button onClick={saveLog} disabled={logUpdate.loading}>
-              {logUpdate.loading ? t("common.saving") : t("common.save")}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      <RedisConfigCard />
+            <div className="flex justify-end">
+              <Button
+                onClick={saveLog}
+                disabled={!canManage || logUpdate.loading}
+              >
+                {logUpdate.loading ? t("common.saving") : t("common.save")}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+        <RedisConfigCard canManage={canManage} />
+      </fieldset>
     </div>
   )
 }
 
-function RedisConfigCard() {
+function RedisConfigCard({ canManage }: { canManage: boolean }) {
   const { t } = useTranslation()
-  const { data: redisConfig, isLoading, error } = useRedisConfig()
+  const { data: redisConfig, isLoading, error } = useRedisConfig(canManage)
   const redisUpdate = useRedisConfigUpdate()
   const [draft, setDraft] = useState<Partial<RedisConfigUpdate>>({})
   const [passwordTouched, setPasswordTouched] = useState(false)
@@ -549,6 +591,7 @@ function RedisConfigCard() {
   const db = String(draft.redis_db ?? redisConfig?.redis_db ?? 0)
 
   const handleSave = async () => {
+    if (!canManage) return
     const payload: RedisConfigUpdate = {}
     if (draft.enabled !== undefined) {
       payload.enabled = draft.enabled
@@ -603,6 +646,7 @@ function RedisConfigCard() {
           <Switch
             id="redis_enabled"
             checked={enabled}
+            disabled={!canManage}
             onCheckedChange={(checked) =>
               setDraft((prev) => ({ ...prev, enabled: checked }))
             }
@@ -621,6 +665,7 @@ function RedisConfigCard() {
             <Label>{t("settings.redisAddr")}</Label>
             <Input
               value={addr}
+              disabled={!canManage}
               onChange={(e) =>
                 setDraft((prev) => ({ ...prev, redis_addr: e.target.value }))
               }
@@ -635,6 +680,7 @@ function RedisConfigCard() {
             <Input
               type="password"
               value={password}
+              disabled={!canManage}
               onChange={(e) => {
                 setPasswordTouched(true)
                 setDraft((prev) => ({
@@ -658,6 +704,7 @@ function RedisConfigCard() {
             min={0}
             max={15}
             value={db}
+            disabled={!canManage}
             onChange={(e) =>
               setDraft((prev) => ({
                 ...prev,
@@ -671,7 +718,10 @@ function RedisConfigCard() {
           </p>
         </div>
         <div className="flex justify-end">
-          <Button onClick={handleSave} disabled={redisUpdate.loading}>
+          <Button
+            onClick={handleSave}
+            disabled={!canManage || redisUpdate.loading}
+          >
             {redisUpdate.loading ? t("common.saving") : t("common.save")}
           </Button>
         </div>

@@ -291,6 +291,61 @@ func TestBatchUpdateOWASPRulesAppliesOverrides(t *testing.T) {
 	}
 }
 
+func TestBatchUpdateOWASPRulesResetsOverridesAtomically(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	rules := owasp.BuiltinRuleDefinitions()
+	if len(rules) < 2 {
+		t.Skip("registry needs at least 2 rules for batch reset test")
+	}
+	id1, id2 := rules[0].RuleID, rules[1].RuleID
+	for _, ruleID := range []string{id1, id2} {
+		enabled := false
+		if err := repo.DB().Create(&store.PolicyOWASPRuleConfig{
+			PolicyID: 1,
+			RuleID:   ruleID,
+			Enabled:  &enabled,
+		}).Error; err != nil {
+			t.Fatalf("seed override %s: %v", ruleID, err)
+		}
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"policy_id": 1,
+		"reset_all": true,
+	})
+	reloads := 0
+	ctx := invokeOWASPPost(t, BatchUpdateOWASPRules(repo, func() error {
+		reloads++
+		return nil
+	}), "/api/v1/owasp-rules/batch", "", body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("batch reset: want 200, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	var count int64
+	if err := repo.DB().Model(&store.PolicyOWASPRuleConfig{}).
+		Where("policy_id = ? AND rule_id IN ?", 1, []string{id1, id2}).
+		Count(&count).Error; err != nil {
+		t.Fatalf("count reset overrides: %v", err)
+	}
+	if count != 0 || reloads != 1 {
+		t.Fatalf("batch reset left %d overrides and reloaded %d times", count, reloads)
+	}
+}
+
+func TestBatchUpdateOWASPRulesRejectsMixedResetAndUpdate(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	ruleID := firstOWASPRuleID(t)
+	body, _ := json.Marshal(map[string]any{
+		"reset_all": true,
+		"rules":     []map[string]any{{"id": ruleID, "enabled": false}},
+	})
+	ctx := invokeOWASPPost(t, BatchUpdateOWASPRules(repo, func() error { return nil }),
+		"/api/v1/owasp-rules/batch", "", body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("mixed reset/update: want 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+}
+
 // TestBatchUpdateOWASPRulesSkipsUnknownIDs 验证未知规则 ID 被跳过而非计入 updated。
 func TestBatchUpdateOWASPRulesRejectsUnknownIDsAtomically(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)

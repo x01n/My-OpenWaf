@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -188,12 +189,26 @@ func TestListSitesSummarizesManagedListeners(t *testing.T) {
 }
 
 func TestListSitesAppliesPagination(t *testing.T) {
-	siteRepo, listenerRepo := newSiteAndListenerReposForTest(t)
+	siteRepo, listenerRepo, db := newSiteAndListenerReposWithDB(t)
 	for i := 0; i < 3; i++ {
 		item := store.Site{Host: "page-" + strconv.Itoa(i) + ".example", UpstreamURLs: "http://127.0.0.1:8080", Bind: ":8080", Network: "tcp", Enabled: true}
 		if err := siteRepo.Create(&item); err != nil {
 			t.Fatalf("seed site %d: %v", i, err)
 		}
+		if err := listenerRepo.Create(&store.SiteListener{SiteID: item.ID, Bind: ":" + strconv.Itoa(9000+i), Enabled: true}); err != nil {
+			t.Fatalf("seed listener %d: %v", i, err)
+		}
+	}
+	listenerQueries := 0
+	listenerSQL := ""
+	callbackName := "test:list-sites-page-listeners"
+	if err := db.Callback().Query().After("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement != nil && tx.Statement.Schema != nil && tx.Statement.Schema.Table == "site_listeners" {
+			listenerQueries++
+			listenerSQL = tx.Statement.SQL.String()
+		}
+	}); err != nil {
+		t.Fatalf("register listener query callback: %v", err)
 	}
 
 	ctx := invokeSiteRouteHandler(t, ListSites(siteRepo, listenerRepo), "GET", "/api/v1/sites?page=2&page_size=2", nil, nil)
@@ -206,6 +221,16 @@ func TestListSitesAppliesPagination(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Host != "page-2.example" {
 		t.Fatalf("unexpected second page: %#v", items)
+	}
+	if items[0].ListenerSummary != ":9002" || items[0].ManagedListenerCount != 1 {
+		t.Fatalf("unexpected second-page listener summary: %#v", items[0])
+	}
+	if listenerQueries != 1 {
+		t.Fatalf("listener queries = %d, want 1", listenerQueries)
+	}
+	lowerSQL := strings.ToLower(listenerSQL)
+	if !strings.Contains(lowerSQL, "site_id") || !strings.Contains(lowerSQL, " in ") {
+		t.Fatalf("listener query is not page-bounded: %s", listenerSQL)
 	}
 }
 

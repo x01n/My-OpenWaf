@@ -1,16 +1,17 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useSearchParams } from "next/navigation"
+import dynamic from "next/dynamic"
 import { PageHeader } from "@/components/page-header"
 import {
-  useDefaultPolicy,
   usePolicies,
   useRules,
   useRuleMutation,
   useRuleDelete,
 } from "@/hooks/use-api"
+import { useAuth } from "@/hooks/use-auth"
 import { DataTable } from "@/components/data-table"
 import { ConfirmDialog } from "@/components/confirm-dialog"
 import { Button } from "@/components/ui/button"
@@ -33,9 +34,39 @@ import {
   IconListDetails,
 } from "@tabler/icons-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { RuleFormDialog } from "./components/rule-form-dialog"
 import { EmptyState } from "@/components/empty-state"
-import type { Rule } from "@/lib/types"
+import { Skeleton } from "@/components/ui/skeleton"
+import { TablePagination } from "@/components/table-pagination"
+import type { Rule, RuleAction } from "@/lib/types"
+
+const PAGE_SIZE = 50
+type RuleActionFilter = "all" | Extract<RuleAction, "allow" | "intercept">
+
+/** 规则编辑器依赖表单与校验库，仅在用户真正打开弹窗时加载。 */
+const RuleFormDialog = dynamic(
+  () =>
+    import("./components/rule-form-dialog").then(
+      (module) => module.RuleFormDialog
+    ),
+  {
+    loading: function RuleDialogLoading() {
+      const { t } = useTranslation()
+      return (
+        <div
+          role="status"
+          aria-label={t("common.loading")}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-4 backdrop-blur-[1px]"
+        >
+          <div className="w-full max-w-2xl space-y-4 rounded-lg border bg-background p-6 shadow-xl">
+            <Skeleton className="h-6 w-48" />
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-36 w-full" />
+          </div>
+        </div>
+      )
+    },
+  }
+)
 
 /**
  * 黑白名单（自定义规则）列表页面
@@ -44,14 +75,21 @@ import type { Rule } from "@/lib/types"
 export default function RulesPage() {
   const { t } = useTranslation()
   const searchParams = useSearchParams()
-  const [filterType, setFilterType] = useState<"all" | "allow" | "block">("all")
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
+  const [filterType, setFilterType] = useState<RuleActionFilter>("all")
   const [policyId, setPolicyId] = useState<number | undefined>(undefined)
+  const [page, setPage] = useState(1)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingRule, setEditingRule] = useState<Rule | null>(null)
   const [deleteId, setDeleteId] = useState<number | null>(null)
+  const createRequestConsumed = useRef(false)
 
-  const { data: policies = [] } = usePolicies()
-  const { data: defaultPolicy } = useDefaultPolicy()
+  const {
+    data: policies = [],
+    isLoading: policiesLoading,
+    error: policiesError,
+  } = usePolicies()
 
   const initialPolicyId = useMemo(() => {
     const rawPolicyId = searchParams.get("policy_id")
@@ -60,20 +98,59 @@ export default function RulesPage() {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
   }, [searchParams])
 
-  const effectivePolicyId = policyId ?? initialPolicyId ?? defaultPolicy?.id
-
-  const { data, isLoading, error, mutate } = useRules(
-    effectivePolicyId ? { policy_id: effectivePolicyId } : undefined
+  const defaultPolicyId = useMemo(
+    () => policies.find((policy) => policy.is_default)?.id,
+    [policies]
   )
-  const { execute: mutateRule } = useRuleMutation()
+  const effectivePolicyId = useMemo(() => {
+    const requestedPolicyId = policyId ?? initialPolicyId
+    if (
+      requestedPolicyId &&
+      policies.some((policy) => policy.id === requestedPolicyId)
+    ) {
+      return requestedPolicyId
+    }
+    return defaultPolicyId
+  }, [defaultPolicyId, initialPolicyId, policies, policyId])
+
+  useEffect(() => {
+    // Auth resolves after the first render. Consume the deep-link only once
+    // role and policy are known, otherwise ?create=1 is lost permanently.
+    if (
+      createRequestConsumed.current ||
+      authLoading ||
+      searchParams.get("create") !== "1" ||
+      !canManage ||
+      !effectivePolicyId
+    ) {
+      return
+    }
+    createRequestConsumed.current = true
+    setEditingRule(null)
+    setDialogOpen(true)
+  }, [authLoading, canManage, effectivePolicyId, searchParams])
+
+  const { data, isLoading, error } = useRules(
+    effectivePolicyId
+      ? {
+          policy_id: effectivePolicyId,
+          page,
+          page_size: PAGE_SIZE,
+          ...(filterType === "all" ? {} : { action: filterType }),
+        }
+      : null
+  )
+  const { execute: mutateRule, loading: ruleMutationLoading } =
+    useRuleMutation()
   const { execute: deleteRule, loading: deleteLoading } = useRuleDelete()
+  const pageError = error ?? policiesError
 
   const rules = data?.items || []
-  const filteredRules =
-    filterType === "all" ? rules : rules.filter((r) => r.action === filterType)
+  const total = data?.total ?? 0
 
   /** 切换规则启用状态 */
   const handleToggle = async (rule: Rule) => {
+    if (!canManage) return
     try {
       await mutateRule({ id: rule.id, data: { enabled: !rule.enabled } })
       toast.success(
@@ -81,7 +158,6 @@ export default function RulesPage() {
           action: rule.enabled ? t("common.disable") : t("common.enable"),
         })
       )
-      mutate()
     } catch {
       toast.error(t("rules.toggleFailed"))
     }
@@ -89,23 +165,25 @@ export default function RulesPage() {
 
   /** 打开编辑弹窗 */
   const handleEdit = (rule: Rule) => {
+    if (!canManage) return
     setEditingRule(rule)
     setDialogOpen(true)
   }
 
   /** 打开删除确认 */
   const handleDelete = (id: number) => {
+    if (!canManage) return
     setDeleteId(id)
   }
 
   /** 确认删除 */
   const confirmDelete = async () => {
-    if (!deleteId) return
+    if (!deleteId || !canManage) return
     try {
       await deleteRule(deleteId)
       toast.success(t("rules.deleteSuccess"))
       setDeleteId(null)
-      mutate()
+      if (rules.length === 1 && page > 1) setPage(page - 1)
     } catch {
       toast.error(t("rules.deleteFailed"))
     }
@@ -119,6 +197,7 @@ export default function RulesPage() {
       render: (row: Rule) => (
         <Switch
           checked={row.enabled}
+          disabled={ruleMutationLoading || !canManage}
           onCheckedChange={() => handleToggle(row)}
         />
       ),
@@ -153,17 +232,12 @@ export default function RulesPage() {
     {
       key: "detail",
       title: t("rules.detail"),
+      cellClassName: "max-w-md whitespace-normal",
       render: (row: Rule) => (
-        <span className="truncate text-xs text-muted-foreground">
+        <span className="block truncate text-xs text-muted-foreground">
           {row.pattern || t("rules.compositeCondition")}
         </span>
       ),
-    },
-    {
-      key: "hits",
-      title: t("rules.hits"),
-      width: "100px",
-      render: () => "-",
     },
     {
       key: "updated_at",
@@ -182,6 +256,7 @@ export default function RulesPage() {
             variant="ghost"
             size="icon-sm"
             onClick={() => handleEdit(row)}
+            disabled={!canManage || ruleMutationLoading || deleteLoading}
             title={t("common.edit")}
           >
             <IconPencil className="h-4 w-4" />
@@ -190,6 +265,7 @@ export default function RulesPage() {
             variant="ghost"
             size="icon-sm"
             onClick={() => handleDelete(row.id)}
+            disabled={!canManage || ruleMutationLoading || deleteLoading}
             title={t("common.delete")}
           >
             <IconTrash className="h-4 w-4 text-destructive" />
@@ -206,7 +282,7 @@ export default function RulesPage() {
         description={t("rules.description")}
         actions={
           <Button
-            disabled={!effectivePolicyId}
+            disabled={!effectivePolicyId || !canManage}
             onClick={() => {
               setEditingRule(null)
               setDialogOpen(true)
@@ -218,19 +294,31 @@ export default function RulesPage() {
         }
       />
 
-      {error && (
+      {pageError && (
         <Alert variant="destructive">
           <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
           <AlertDescription>
-            {error.message || t("error.unexpectedError")}
+            {pageError instanceof Error
+              ? pageError.message
+              : t("error.unexpectedError")}
           </AlertDescription>
+        </Alert>
+      )}
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
+          <AlertDescription>{t("rules.readOnlyHint")}</AlertDescription>
         </Alert>
       )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Select
           value={effectivePolicyId ? String(effectivePolicyId) : ""}
-          onValueChange={(v) => setPolicyId(Number(v))}
+          onValueChange={(v) => {
+            setPolicyId(Number(v))
+            setPage(1)
+          }}
         >
           <SelectTrigger className="w-64">
             <SelectValue
@@ -252,7 +340,10 @@ export default function RulesPage() {
         </Select>
         <Select
           value={filterType}
-          onValueChange={(v) => setFilterType(v as "all" | "allow" | "block")}
+          onValueChange={(v) => {
+            setFilterType(v as RuleActionFilter)
+            setPage(1)
+          }}
         >
           <SelectTrigger className="w-32">
             <SelectValue placeholder={t("rules.allTypes")} />
@@ -260,15 +351,15 @@ export default function RulesPage() {
           <SelectContent>
             <SelectItem value="all">{t("common.all")}</SelectItem>
             <SelectItem value="allow">{t("rules.allow")}</SelectItem>
-            <SelectItem value="block">{t("rules.block")}</SelectItem>
+            <SelectItem value="intercept">{t("rules.block")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
       <DataTable
         columns={columns}
-        data={filteredRules}
-        loading={isLoading}
+        data={rules}
+        loading={(isLoading || policiesLoading) && rules.length === 0}
         rowKey={(row) => row.id}
         emptyText={t("rules.empty")}
         emptyContent={
@@ -281,6 +372,7 @@ export default function RulesPage() {
             )}
             action={
               <Button
+                disabled={!effectivePolicyId || !canManage}
                 onClick={() => {
                   setEditingRule(null)
                   setDialogOpen(true)
@@ -295,15 +387,25 @@ export default function RulesPage() {
         }
       />
 
-      <RuleFormDialog
-        open={dialogOpen}
-        onOpenChange={(open) => {
-          setDialogOpen(open)
-          if (!open) setEditingRule(null)
-        }}
-        rule={editingRule}
-        policyId={effectivePolicyId}
+      <TablePagination
+        page={page}
+        pageSize={PAGE_SIZE}
+        total={total}
+        disabled={isLoading}
+        onPageChange={setPage}
       />
+
+      {dialogOpen && (
+        <RuleFormDialog
+          open={dialogOpen}
+          onOpenChange={(open) => {
+            setDialogOpen(open)
+            if (!open) setEditingRule(null)
+          }}
+          rule={editingRule}
+          policyId={effectivePolicyId}
+        />
+      )}
 
       <ConfirmDialog
         open={!!deleteId}

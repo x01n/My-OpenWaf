@@ -58,6 +58,11 @@ type SiteRuntime struct {
 	MaintenanceHTML    string
 	MaintenanceStatus  int
 
+	// Per-site challenge policy overrides (site-level challenge_action / captcha_type).
+	// 空串 = 站点未覆盖，数据面回退到全局 ProtectionConfig；非空 = 站点覆盖值。
+	ChallengeAction      string
+	ChallengeCaptchaType string
+
 	// Per-site block page
 	BlockHTML   string
 	BlockStatus int

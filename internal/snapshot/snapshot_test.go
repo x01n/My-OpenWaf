@@ -1001,6 +1001,34 @@ func TestLoadLuaPluginsKeepsCompileErrorsNonFatal(t *testing.T) {
 	}
 }
 
+func TestLoadLuaPluginsRejectsRuntimeContractErrorsBeforePublishing(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.LuaPlugin{}); err != nil {
+		t.Fatalf("migrate lua plugins: %v", err)
+	}
+	if err := db.Create(&store.LuaPlugin{
+		Name:    "invalid-kv-ttl",
+		Stage:   store.LuaStagePre,
+		Source:  `function handle(ctx) ctx.kv.incr("validation", 600000000) end`,
+		Enabled: true,
+	}).Error; err != nil {
+		t.Fatalf("seed invalid runtime plugin: %v", err)
+	}
+	scripts, diagnostics, err := loadLuaPlugins(db)
+	if err != nil {
+		t.Fatalf("loadLuaPlugins query failed: %v", err)
+	}
+	if len(scripts) != 0 {
+		t.Fatalf("runtime-invalid plugin must not enter snapshot execution list: %d", len(scripts))
+	}
+	if diagnostics["invalid-kv-ttl"] == "" {
+		t.Fatalf("missing runtime-contract diagnostic: %#v", diagnostics)
+	}
+}
+
 func TestSnapshotLoadersPropagateExistingTableQueryErrors(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -1362,6 +1390,60 @@ func TestTLSCertificateStateForSNIPrecedence(t *testing.T) {
 				t.Fatalf("state = %q, found=%v, want %q, found=%v", got, found, tt.want, tt.found)
 			}
 		})
+	}
+}
+
+// TestBuildCopiesSiteChallengePolicyOverrides 覆盖站点级质询策略快照解析：
+// 未配置时 SiteRuntime 字段为空串；配置后按站点覆盖值填充。
+func TestBuildCopiesSiteChallengePolicyOverrides(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	inheritedSite := store.Site{
+		Host:         "challenge-inherit.example.test",
+		Bind:         ":80",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Enabled:      true,
+	}
+	if err := db.Create(&inheritedSite).Error; err != nil {
+		t.Fatalf("seed inherited site: %v", err)
+	}
+
+	challengeAction := "captcha_challenge"
+	captchaType := "slide"
+	coveredSite := store.Site{
+		Host:            "challenge-covered.example.test",
+		Bind:            ":80",
+		Network:         "tcp",
+		UpstreamURLs:    "http://127.0.0.1:8080",
+		Enabled:         true,
+		ChallengeAction: &challengeAction,
+		SiteCaptchaType: &captchaType,
+	}
+	if err := db.Create(&coveredSite).Error; err != nil {
+		t.Fatalf("seed covered site: %v", err)
+	}
+
+	sn, err := Build(db, 1, testDynamicKeyBase)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	inheritedRT, ok := sn.MatchSite(":80", inheritedSite.Host)
+	if !ok {
+		t.Fatal("inherited site was not matched")
+	}
+	if inheritedRT.ChallengeAction != "" || inheritedRT.ChallengeCaptchaType != "" {
+		t.Fatalf("unconfigured site runtime overrides = %q/%q, want empty", inheritedRT.ChallengeAction, inheritedRT.ChallengeCaptchaType)
+	}
+	coveredRT, ok := sn.MatchSite(":80", coveredSite.Host)
+	if !ok {
+		t.Fatal("covered site was not matched")
+	}
+	if coveredRT.ChallengeAction != challengeAction {
+		t.Fatalf("runtime challenge_action = %q, want %q", coveredRT.ChallengeAction, challengeAction)
+	}
+	if coveredRT.ChallengeCaptchaType != captchaType {
+		t.Fatalf("runtime challenge captcha_type = %q, want %q", coveredRT.ChallengeCaptchaType, captchaType)
 	}
 }
 
@@ -2489,7 +2571,10 @@ func BenchmarkResolveOutboundHostStaticPrecomputed(b *testing.B) {
 
 func TestParseSiteCacheRulesSuffixNoLeadingSlash(t *testing.T) {
 	raw := `[{"type":"suffix","value":"config","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Bare token without ".", "/", "?" is treated as a file extension → ".config"
 	if len(rules) != 1 || rules[0].Path != ".config" {
 		t.Fatalf("got %#v", rules)
@@ -2498,7 +2583,10 @@ func TestParseSiteCacheRulesSuffixNoLeadingSlash(t *testing.T) {
 
 func TestParseSiteCacheRulesCommaSeparatedSuffixes(t *testing.T) {
 	raw := `[{"type":"suffix","value":".js,.mjs","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 2 {
 		t.Fatalf("want 2 rules, got %d %#v", len(rules), rules)
 	}
@@ -2506,7 +2594,10 @@ func TestParseSiteCacheRulesCommaSeparatedSuffixes(t *testing.T) {
 
 func TestParseSiteCacheRulesSuffixBareExtensions(t *testing.T) {
 	raw := `[{"type":"suffix","value":"js,html,css","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 3 {
 		t.Fatalf("want 3 rules, got %d %#v", len(rules), rules)
 	}
@@ -2520,7 +2611,10 @@ func TestParseSiteCacheRulesSuffixBareExtensions(t *testing.T) {
 
 func TestParseSiteCacheRulesSuffixMultiDotPreserved(t *testing.T) {
 	raw := `[{"type":"suffix","value":"min.js,tar.gz","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 2 {
 		t.Fatalf("want 2 rules, got %d %#v", len(rules), rules)
 	}
@@ -2532,7 +2626,10 @@ func TestParseSiteCacheRulesSuffixMultiDotPreserved(t *testing.T) {
 
 func TestParseSiteCacheRulesContainsNoForcedSlash(t *testing.T) {
 	raw := `[{"type":"contains","value":"v=1","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 1 || rules[0].Path != "v=1" {
 		t.Fatalf("got %#v", rules)
 	}
@@ -2540,7 +2637,10 @@ func TestParseSiteCacheRulesContainsNoForcedSlash(t *testing.T) {
 
 func TestParseSiteCacheRulesRegexCompiled(t *testing.T) {
 	raw := `[{"type":"regex","value":"\\.(js|css)$","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 1 || rules[0].Regex == nil {
 		t.Fatalf("got %#v", rules)
 	}
@@ -2551,7 +2651,10 @@ func TestParseSiteCacheRulesRegexCompiled(t *testing.T) {
 
 func TestParseSiteCacheRulesRegexCaseInsensitive(t *testing.T) {
 	raw := `[{"type":"regex","value":"\\.js$","ttl":10,"case_insensitive":true}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 1 || rules[0].Regex == nil {
 		t.Fatalf("got %#v", rules)
 	}

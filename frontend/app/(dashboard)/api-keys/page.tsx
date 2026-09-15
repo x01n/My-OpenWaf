@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
 import { PageHeader } from "@/components/page-header"
 import { useApiKeys, useApiKeyCreate, useApiKeyDelete } from "@/hooks/use-api"
 import { DataTable } from "@/components/data-table"
@@ -22,11 +23,6 @@ import { toast } from "sonner"
 import { IconPlus, IconTrash, IconCopy, IconKey } from "@tabler/icons-react"
 import type { AdminAPIKey } from "@/lib/types"
 
-function maskKey(name: string): string {
-  if (name.length <= 8) return name
-  return `${name.slice(0, 4)}****${name.slice(-4)}`
-}
-
 function formatTime(t: string | undefined | null): string {
   if (!t) return "-"
   return new Date(t).toLocaleString()
@@ -34,6 +30,8 @@ function formatTime(t: string | undefined | null): string {
 
 export default function ApiKeysPage() {
   const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin"
   const { data, isLoading, error, mutate } = useApiKeys()
   const { execute: createKey, loading: createLoading } = useApiKeyCreate()
   const { execute: deleteKey, loading: deleteLoading } = useApiKeyDelete()
@@ -44,17 +42,24 @@ export default function ApiKeysPage() {
   const [name, setName] = useState("")
   const [createdToken, setCreatedToken] = useState("")
 
+  const closeResult = () => {
+    setResultOpen(false)
+    setCreatedToken("")
+  }
+
   const keys: AdminAPIKey[] = data || []
 
   const handleCreate = async () => {
-    if (!name.trim()) return
+    if (!canManage || !name.trim()) return
     try {
       const result = await createKey({ name: name.trim() })
       setCreatedToken(result.token)
       setCreateOpen(false)
       setResultOpen(true)
       setName("")
-      mutate()
+      await mutate().catch(() => {
+        toast.error(t("apiKeys.refreshFailed"))
+      })
     } catch {
       toast.error(t("apiKeys.createFailed"))
     }
@@ -77,12 +82,14 @@ export default function ApiKeysPage() {
   }
 
   const confirmDelete = async () => {
-    if (!deleteId) return
+    if (!canManage || !deleteId) return
     try {
       await deleteKey(deleteId)
       toast.success(t("common.deleteSuccess"))
       setDeleteId(null)
-      mutate()
+      await mutate().catch(() => {
+        toast.error(t("apiKeys.refreshFailed"))
+      })
     } catch {
       toast.error(t("common.deleteFailed"))
     }
@@ -102,9 +109,9 @@ export default function ApiKeysPage() {
     {
       key: "key_preview",
       title: t("apiKeys.key"),
-      render: (row: AdminAPIKey) => (
+      render: () => (
         <code className="rounded bg-muted px-2 py-0.5 text-xs">
-          owaf_{maskKey(String(row.id))}
+          {t("apiKeys.hidden")}
         </code>
       ),
     },
@@ -135,6 +142,7 @@ export default function ApiKeysPage() {
           variant="ghost"
           size="icon-sm"
           onClick={() => setDeleteId(row.id)}
+          disabled={!canManage || deleteLoading}
           className="text-destructive hover:text-destructive"
         >
           <IconTrash className="h-4 w-4" />
@@ -149,7 +157,7 @@ export default function ApiKeysPage() {
         title={t("apiKeys.title")}
         description={t("apiKeys.description")}
         actions={
-          <Button onClick={() => setCreateOpen(true)}>
+          <Button onClick={() => setCreateOpen(true)} disabled={!canManage}>
             <IconPlus className="mr-2 h-4 w-4" />
             {t("apiKeys.create")}
           </Button>
@@ -162,6 +170,13 @@ export default function ApiKeysPage() {
           <AlertDescription>
             {error.message || t("error.unexpectedError")}
           </AlertDescription>
+        </Alert>
+      )}
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
+          <AlertDescription>{t("apiKeys.adminOnlyHint")}</AlertDescription>
         </Alert>
       )}
 
@@ -186,6 +201,7 @@ export default function ApiKeysPage() {
               <Input
                 id="apikey-name"
                 value={name}
+                maxLength={128}
                 onChange={(e) => setName(e.target.value)}
                 placeholder={t("apiKeys.namePlaceholder")}
                 onKeyDown={(e) => {
@@ -209,7 +225,13 @@ export default function ApiKeysPage() {
       </Dialog>
 
       {/* 密钥展示对话框（仅显示一次） */}
-      <Dialog open={resultOpen} onOpenChange={setResultOpen}>
+      <Dialog
+        open={resultOpen}
+        onOpenChange={(open) => {
+          setResultOpen(open)
+          if (!open) setCreatedToken("")
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("apiKeys.createSuccess")}</DialogTitle>
@@ -226,9 +248,7 @@ export default function ApiKeysPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button onClick={() => setResultOpen(false)}>
-              {t("common.close")}
-            </Button>
+            <Button onClick={closeResult}>{t("common.close")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

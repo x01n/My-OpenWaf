@@ -22,6 +22,83 @@ func newSecurityEventRepoForTest(t *testing.T) *SecurityEventRepo {
 	return NewSecurityEventRepo(db)
 }
 
+func TestSecurityEventRepoListUsesLightProjectionAndDetailReadsStayComplete(t *testing.T) {
+	repo := newSecurityEventRepoForTest(t)
+	row := store.SecurityEvent{
+		SiteID:               3,
+		RequestID:            "projection-security-event",
+		Host:                 "projection.example.test",
+		Path:                 "/blocked",
+		Method:               "POST",
+		Action:               "intercept",
+		RequestHeaders:       `{"X-Test":"request-header"}`,
+		RequestBodyPreview:   `{"payload":"request-body"}`,
+		RequestBodyTruncated: true,
+		RequestSize:          27,
+		TLSJA3Hash:           "projection-ja3",
+		TLSCipherSuites:      "TLS_AES_128_GCM_SHA256",
+	}
+	if err := repo.db.Create(&row).Error; err != nil {
+		t.Fatalf("create security event: %v", err)
+	}
+
+	items, total, err := repo.List(0, 20, SecurityEventFilter{RequestID: row.RequestID})
+	if err != nil {
+		t.Fatalf("list security events: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("list security events total=%d len=%d, want 1", total, len(items))
+	}
+	got := items[0]
+	if got.RequestHeaders != "" || got.RequestBodyPreview != "" {
+		t.Fatalf("list projection leaked detailed payload columns: %#v", got)
+	}
+	if got.RequestSize != row.RequestSize || !got.RequestBodyTruncated || got.TLSJA3Hash != row.TLSJA3Hash || got.TLSCipherSuites != row.TLSCipherSuites {
+		t.Fatalf("list projection lost lightweight metadata: %#v", got)
+	}
+
+	detail, err := repo.Get(row.ID)
+	if err != nil {
+		t.Fatalf("get security event: %v", err)
+	}
+	if detail.RequestHeaders != row.RequestHeaders || detail.RequestBodyPreview != row.RequestBodyPreview {
+		t.Fatalf("Get lost detailed payload columns: %#v", detail)
+	}
+
+	byRequest, err := repo.FindByRequestID(row.RequestID)
+	if err != nil {
+		t.Fatalf("find security events by request id: %v", err)
+	}
+	if len(byRequest) != 1 || byRequest[0].RequestHeaders != row.RequestHeaders || byRequest[0].RequestBodyPreview != row.RequestBodyPreview {
+		t.Fatalf("FindByRequestID lost detailed payload columns: %#v", byRequest)
+	}
+}
+
+func TestSecurityEventRepoListOrdersByCreatedAtThenID(t *testing.T) {
+	repo := newSecurityEventRepoForTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []store.SecurityEvent{
+		{SiteID: 5, RequestID: "newer-low-id", CreatedAt: now},
+		{SiteID: 5, RequestID: "older-high-id", CreatedAt: now.Add(-time.Hour)},
+		{SiteID: 5, RequestID: "newer-high-id", CreatedAt: now},
+	}
+	seedSecurityEvents(t, repo, rows)
+
+	items, _, err := repo.List(0, 20, SecurityEventFilter{SiteID: 5})
+	if err != nil {
+		t.Fatalf("list security events: %v", err)
+	}
+	want := []string{"newer-high-id", "newer-low-id", "older-high-id"}
+	if len(items) != len(want) {
+		t.Fatalf("items=%d want=%d", len(items), len(want))
+	}
+	for i := range want {
+		if items[i].RequestID != want[i] {
+			t.Fatalf("items[%d].request_id=%q want=%q", i, items[i].RequestID, want[i])
+		}
+	}
+}
+
 func TestTopCountriesAggregatesByGeoCountry(t *testing.T) {
 	repo := newSecurityEventRepoForTest(t)
 	now := time.Now()

@@ -61,6 +61,12 @@ type Site struct {
 	AntiReplayTTL     int    `json:"anti_replay_ttl" gorm:"default:300"`
 	AntiReplayAction  string `json:"anti_replay_action" gorm:"default:'shield_challenge'"`
 
+	// 站点级质询策略覆盖（nil = 继承全局 ProtectionConfig）。
+	// ChallengeAction 指定命中质询类动作时实际渲染的质询页类型；
+	// SiteCaptchaType 指定验证码渲染分支使用的验证码类型（math/click/slide/rotate）。
+	ChallengeAction *string `gorm:"default:null" json:"challenge_action,omitempty"`
+	SiteCaptchaType *string `gorm:"default:null" json:"captcha_type,omitempty"`
+
 	OWASPEnabled     *bool  `gorm:"default:null" json:"owasp_enabled,omitempty"`
 	OWASPSensitivity string `gorm:"size:16" json:"owasp_sensitivity,omitempty"`
 	OWASPAction      string `gorm:"size:32" json:"owasp_action,omitempty"`
@@ -202,6 +208,9 @@ type SiteCacheRule struct {
 	TTL             int    `json:"ttl"`
 	CaseInsensitive bool   `json:"case_insensitive,omitempty"`
 	IgnoreQuery     bool   `json:"ignore_query,omitempty"`
+	Disabled        bool   `json:"disabled,omitempty"`
+	Note            string `json:"note,omitempty"`
+	StaleIfError    int    `json:"stale_if_error_seconds,omitempty"`
 	// Regex is compiled at snapshot build for type "regex" only; not persisted or exposed in JSON.
 	Regex *regexp.Regexp `json:"-" gorm:"-"`
 }

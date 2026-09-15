@@ -38,8 +38,8 @@ import {
   IconShieldExclamation,
   IconWorld,
 } from "@tabler/icons-react"
-import { useRequestTrace, useSites } from "@/hooks/use-api"
-import type { AccessLog, BotScoreLog, SecurityEvent, Site } from "@/lib/types"
+import { useRequestTrace, useSite } from "@/hooks/use-api"
+import type { AccessLog, BotScoreLog, SecurityEvent } from "@/lib/types"
 import { formatBytes, formatLatencyMs, cn } from "@/lib/utils"
 import { localizeMatchDesc } from "@/lib/match-desc-i18n"
 import { categoryLabel, phaseLabel } from "@/lib/attack-category"
@@ -126,13 +126,17 @@ function RequestTraceContent() {
   const inputValue = inputState.source === queryId ? inputState.value : queryId
 
   const { data, isLoading, error } = useRequestTrace(queryId || undefined)
-  const { data: sitesData } = useSites({ page: 1, page_size: 500 })
-
-  const siteMap = useMemo(() => {
-    const map = new Map<number, Site>()
-    ;(sitesData?.items || []).forEach((site) => map.set(site.id, site))
-    return map
-  }, [sitesData])
+  // 请求链路已携带 site_id；按 ID 查询单站点，避免为展示一个站点名分页读取最多
+  // 2000 个站点。详情未返回时 summary 会回退到日志中的 host。
+  const traceSiteId = useMemo(() => {
+    const siteIds = [
+      ...(data?.access_logs ?? []).map((item) => item.site_id),
+      ...(data?.security_events ?? []).map((item) => item.site_id),
+      ...(data?.bot_scores ?? []).map((item) => item.site_id),
+    ]
+    return siteIds.find((siteId) => siteId > 0)
+  }, [data?.access_logs, data?.bot_scores, data?.security_events])
+  const { data: traceSite } = useSite(traceSiteId)
 
   const accessLogs = useMemo<AccessLog[]>(
     () => data?.access_logs || [],
@@ -169,13 +173,11 @@ function RequestTraceContent() {
     const botScore = botScores[0]
     const first = accessLog || securityEvent || botScore
     if (!first) return null
-    const site = siteMap.get(first.site_id)
-    const statusCode =
-      accessLog?.status_code ?? securityEvent?.status_code ?? 0
+    const statusCode = accessLog?.status_code ?? securityEvent?.status_code ?? 0
     const wafAction =
       accessLog?.waf_action ||
-      securityEvents.find((event) =>
-        event.action !== "observe" && event.action !== "allow"
+      securityEvents.find(
+        (event) => event.action !== "observe" && event.action !== "allow"
       )?.action ||
       securityEvent?.action ||
       "-"
@@ -184,7 +186,11 @@ function RequestTraceContent() {
       requestId: data?.request_id || queryId,
       time: first.created_at,
       siteId: first.site_id,
-      siteHost: site?.host,
+      siteHost:
+        traceSite?.host ||
+        accessLog?.host ||
+        securityEvent?.host ||
+        botScore?.host,
       clientIp: first.client_ip,
       host: first.host,
       path: first.path,
@@ -195,15 +201,27 @@ function RequestTraceContent() {
       latency: accessLog?.upstream_latency_ms,
       responseSize: accessLog?.response_size,
       tlsVersion:
-        accessLog?.tls_version || securityEvent?.tls_version || botScore?.tls_version,
+        accessLog?.tls_version ||
+        securityEvent?.tls_version ||
+        botScore?.tls_version,
       tlsSni: accessLog?.tls_sni || securityEvent?.tls_sni || botScore?.tls_sni,
-      tlsAlpn: accessLog?.tls_alpn || securityEvent?.tls_alpn || botScore?.tls_alpn,
+      tlsAlpn:
+        accessLog?.tls_alpn || securityEvent?.tls_alpn || botScore?.tls_alpn,
       tlsJa3: accessLog?.tls_ja3 || securityEvent?.tls_ja3,
       tlsJa3Hash:
-        accessLog?.tls_ja3_hash || securityEvent?.tls_ja3_hash || botScore?.tls_ja3_hash,
+        accessLog?.tls_ja3_hash ||
+        securityEvent?.tls_ja3_hash ||
+        botScore?.tls_ja3_hash,
       tlsJa4: accessLog?.tls_ja4 || securityEvent?.tls_ja4 || botScore?.tls_ja4,
     }
-  }, [accessLogs, botScores, data?.request_id, queryId, securityEvents, siteMap])
+  }, [
+    accessLogs,
+    botScores,
+    data?.request_id,
+    queryId,
+    securityEvents,
+    traceSite?.host,
+  ])
 
   const accessLogColumns = useMemo(
     () => [
@@ -253,7 +271,10 @@ function RequestTraceContent() {
         render: (row: AccessLog) => (
           <Badge
             variant="outline"
-            className={cn("font-mono text-xs", statusBadgeClass(row.status_code))}
+            className={cn(
+              "font-mono text-xs",
+              statusBadgeClass(row.status_code)
+            )}
           >
             {row.status_code || "-"}
           </Badge>
@@ -265,7 +286,10 @@ function RequestTraceContent() {
         width: "116px",
         cellClassName: "align-top",
         render: (row: AccessLog) => (
-          <ActionBadge action={row.waf_action} className="h-5 px-1.5 text-[10px]" />
+          <ActionBadge
+            action={row.waf_action}
+            className="h-5 px-1.5 text-[10px]"
+          />
         ),
       },
       {
@@ -289,7 +313,10 @@ function RequestTraceContent() {
         cellClassName: "align-top whitespace-normal",
         render: (row: AccessLog) => (
           <div className="min-w-0 space-y-1">
-            <div className="truncate font-mono text-xs" title={row.upstream || undefined}>
+            <div
+              className="truncate font-mono text-xs"
+              title={row.upstream || undefined}
+            >
               {row.upstream || "-"}
             </div>
             <div className="text-[10px] text-muted-foreground">
@@ -355,7 +382,10 @@ function RequestTraceContent() {
         width: "116px",
         cellClassName: "align-top",
         render: (row: SecurityEvent) => (
-          <Badge variant="secondary" className="h-5 px-1.5 font-mono text-[10px]">
+          <Badge
+            variant="secondary"
+            className="h-5 px-1.5 font-mono text-[10px]"
+          >
             {phaseLabel(row.phase)}
           </Badge>
         ),
@@ -434,8 +464,11 @@ function RequestTraceContent() {
                 </Badge>
               )}
             </div>
-            <div className="text-[10px] text-muted-foreground break-all">
-              {t("requestTrace.geoipScore")}: {row.geoip_score} · {t("requestTrace.fingerprintScore")}: {row.fingerprint_score} · {t("requestTrace.behaviorScore")}: {row.behavior_score} · {t("requestTrace.ipRepScore")}: {row.ip_rep_score}
+            <div className="text-[10px] break-all text-muted-foreground">
+              {t("requestTrace.geoipScore")}: {row.geoip_score} ·{" "}
+              {t("requestTrace.fingerprintScore")}: {row.fingerprint_score} ·{" "}
+              {t("requestTrace.behaviorScore")}: {row.behavior_score} ·{" "}
+              {t("requestTrace.ipRepScore")}: {row.ip_rep_score}
             </div>
           </div>
         ),
@@ -456,11 +489,17 @@ function RequestTraceContent() {
         cellClassName: "align-top whitespace-normal",
         render: (row: BotScoreLog) => (
           <div className="min-w-0 space-y-1">
-            <code className="block font-mono text-xs break-all">{row.client_ip || "-"}</code>
-            <code className="block text-[11px] leading-relaxed break-all text-muted-foreground">
-              {row.host || "-"}{row.path || "/"}
+            <code className="block font-mono text-xs break-all">
+              {row.client_ip || "-"}
             </code>
-            <span className="line-clamp-2 block text-[10px] break-words text-muted-foreground" title={row.user_agent || undefined}>
+            <code className="block text-[11px] leading-relaxed break-all text-muted-foreground">
+              {row.host || "-"}
+              {row.path || "/"}
+            </code>
+            <span
+              className="line-clamp-2 block text-[10px] break-words text-muted-foreground"
+              title={row.user_agent || undefined}
+            >
               {row.user_agent || "-"}
             </span>
           </div>
@@ -473,11 +512,21 @@ function RequestTraceContent() {
         cellClassName: "align-top whitespace-normal",
         render: (row: BotScoreLog) => (
           <div className="space-y-1 text-[10px] leading-relaxed break-all">
-            <div>{t("requestTrace.tlsVersion")}: {row.tls_version || "-"}</div>
-            <div>{t("requestTrace.tlsSni")}: {row.tls_sni || "-"}</div>
-            <div>{t("requestTrace.tlsAlpn")}: {row.tls_alpn || "-"}</div>
-            <div className="font-mono">{t("requestTrace.tlsJa4")}: {row.tls_ja4 || "-"}</div>
-            <div className="font-mono">{t("requestTrace.tlsJa3Hash")}: {row.tls_ja3_hash || "-"}</div>
+            <div>
+              {t("requestTrace.tlsVersion")}: {row.tls_version || "-"}
+            </div>
+            <div>
+              {t("requestTrace.tlsSni")}: {row.tls_sni || "-"}
+            </div>
+            <div>
+              {t("requestTrace.tlsAlpn")}: {row.tls_alpn || "-"}
+            </div>
+            <div className="font-mono">
+              {t("requestTrace.tlsJa4")}: {row.tls_ja4 || "-"}
+            </div>
+            <div className="font-mono">
+              {t("requestTrace.tlsJa3Hash")}: {row.tls_ja3_hash || "-"}
+            </div>
           </div>
         ),
       },
@@ -487,7 +536,7 @@ function RequestTraceContent() {
         width: "min(30vw, 320px)",
         cellClassName: "align-top whitespace-normal",
         render: (row: BotScoreLog) => (
-          <code className="line-clamp-3 block max-w-full whitespace-pre-wrap break-all text-[10px] text-muted-foreground">
+          <code className="line-clamp-3 block max-w-full text-[10px] break-all whitespace-pre-wrap text-muted-foreground">
             {row.details || "-"}
           </code>
         ),
@@ -543,15 +592,24 @@ function RequestTraceContent() {
       </div>
 
       {summary && (
-        <section className="overflow-hidden rounded-lg border bg-card" aria-label={t("requestTrace.summary")}>
+        <section
+          className="overflow-hidden rounded-lg border bg-card"
+          aria-label={t("requestTrace.summary")}
+        >
           <div className="border-b bg-muted/10 px-4 py-3">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <Badge variant="outline" className="font-mono text-xs font-semibold">
+              <Badge
+                variant="outline"
+                className="font-mono text-xs font-semibold"
+              >
                 {summary.method || "-"}
               </Badge>
               <Badge
                 variant="outline"
-                className={cn("font-mono text-xs", statusBadgeClass(summary.statusCode))}
+                className={cn(
+                  "font-mono text-xs",
+                  statusBadgeClass(summary.statusCode)
+                )}
               >
                 {summary.statusCode || "-"}
               </Badge>
@@ -559,8 +617,12 @@ function RequestTraceContent() {
                 action={summary.wafAction}
                 className="h-6 px-2 text-xs"
               />
-              <code className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground" title={`${summary.host || ""}${summary.path || ""}`}>
-                {summary.host || "-"}{summary.path || "/"}
+              <code
+                className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+                title={`${summary.host || ""}${summary.path || ""}`}
+              >
+                {summary.host || "-"}
+                {summary.path || "/"}
               </code>
             </div>
           </div>
@@ -603,9 +665,7 @@ function RequestTraceContent() {
             <SummaryItem
               label={t("requestTrace.upstreamLatency")}
               value={
-                summary.latency == null
-                  ? "-"
-                  : formatLatencyMs(summary.latency)
+                summary.latency == null ? "-" : formatLatencyMs(summary.latency)
               }
               mono
             />
@@ -658,19 +718,32 @@ function RequestTraceContent() {
             <Tabs defaultValue="access_logs">
               <div className="max-w-full min-w-0 overflow-x-auto">
                 <TabsList className="w-max">
-                  <TabsTrigger value="access_logs" className="cursor-pointer gap-1.5">
+                  <TabsTrigger
+                    value="access_logs"
+                    className="cursor-pointer gap-1.5"
+                  >
                     <IconFileText className="h-4 w-4" />
-                    {t("requestTrace.accessLogsCount", { count: accessLogs.length })}
+                    {t("requestTrace.accessLogsCount", {
+                      count: accessLogs.length,
+                    })}
                   </TabsTrigger>
-                  <TabsTrigger value="security_events" className="cursor-pointer gap-1.5">
+                  <TabsTrigger
+                    value="security_events"
+                    className="cursor-pointer gap-1.5"
+                  >
                     <IconShieldExclamation className="h-4 w-4" />
                     {t("requestTrace.securityEventsCount", {
                       count: securityEvents.length,
                     })}
                   </TabsTrigger>
-                  <TabsTrigger value="bot_scores" className="cursor-pointer gap-1.5">
+                  <TabsTrigger
+                    value="bot_scores"
+                    className="cursor-pointer gap-1.5"
+                  >
                     <IconShieldExclamation className="h-4 w-4" />
-                    {t("requestTrace.botScoresCount", { count: botScores.length })}
+                    {t("requestTrace.botScoresCount", {
+                      count: botScores.length,
+                    })}
                   </TabsTrigger>
                 </TabsList>
               </div>

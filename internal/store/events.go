@@ -1,13 +1,20 @@
 package store
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"time"
+
+	"gorm.io/gorm"
+)
 
 // SecurityEvent records every matched WAF event (block/observe/challenge/drop).
 type SecurityEvent struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	CreatedAt time.Time `gorm:"index:idx_se_created;index:idx_se_site_created" json:"created_at"`
+	ID        uint      `gorm:"primaryKey;index:idx_se_site_created_id,priority:3" json:"id"`
+	CreatedAt time.Time `gorm:"index:idx_se_created;index:idx_se_site_created;index:idx_se_site_created_id,priority:2" json:"created_at"`
 
-	SiteID      uint   `gorm:"index:idx_se_site_created" json:"site_id"`
+	SiteID      uint   `gorm:"index:idx_se_site_created;index:idx_se_site_created_id,priority:1" json:"site_id"`
 	RequestID   string `gorm:"size:64;index:idx_se_request_id" json:"request_id"`
 	ClientIP    string `gorm:"size:45;index:idx_se_client_ip" json:"client_ip"`
 	Host        string `gorm:"size:255;index:idx_se_host" json:"host"`
@@ -48,9 +55,9 @@ type SecurityEvent struct {
 
 // AccessLog records every inbound request outcome for querying and auditing.
 type AccessLog struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	CreatedAt   time.Time `gorm:"index:idx_al_created;index:idx_al_site_created" json:"created_at"`
-	SiteID      uint      `gorm:"index:idx_al_site_created" json:"site_id"`
+	ID          uint      `gorm:"primaryKey;index:idx_al_site_created_id,priority:3" json:"id"`
+	CreatedAt   time.Time `gorm:"index:idx_al_created;index:idx_al_site_created;index:idx_al_site_created_id,priority:2" json:"created_at"`
+	SiteID      uint      `gorm:"index:idx_al_site_created;index:idx_al_site_created_id,priority:1" json:"site_id"`
 	RequestID   string    `gorm:"size:64;index:idx_al_request_id" json:"request_id"`
 	ClientIP    string    `gorm:"size:45;index:idx_al_client_ip" json:"client_ip"`
 	Host        string    `gorm:"size:255;index:idx_al_host" json:"host"`
@@ -77,11 +84,14 @@ type AccessLog struct {
 	TLSJA3               string `gorm:"size:1024" json:"tls_ja3"`
 	TLSJA3Hash           string `gorm:"size:32;index:idx_al_tls_ja3_hash" json:"tls_ja3_hash"`
 	TLSJA4               string `gorm:"size:255;index:idx_al_tls_ja4" json:"tls_ja4"`
-	TLSCipherSuites      string `gorm:"type:text" json:"tls_cipher_suites"`
-	TLSExtensions        string `gorm:"type:text" json:"tls_extensions"`
-	TLSCurves            string `gorm:"type:text" json:"tls_curves"`
-	TLSPointFormats      string `gorm:"type:text" json:"tls_point_formats"`
-	HeaderOrder          string `gorm:"size:1024" json:"header_order"`
+	// FingerprintKey 是九个 TLS 指纹字段的定长摘要，用于避免每次列表查询都对宽文本列做分组。
+	// 它不对外暴露；原始字段仍是返回和过滤的权威数据。
+	FingerprintKey  string `gorm:"column:fingerprint_key;type:char(64);index:idx_al_fingerprint_key" json:"-"`
+	TLSCipherSuites string `gorm:"type:text" json:"tls_cipher_suites"`
+	TLSExtensions   string `gorm:"type:text" json:"tls_extensions"`
+	TLSCurves       string `gorm:"type:text" json:"tls_curves"`
+	TLSPointFormats string `gorm:"type:text" json:"tls_point_formats"`
+	HeaderOrder     string `gorm:"size:1024" json:"header_order"`
 
 	VisitorFusionClass              string `gorm:"size:16;index:idx_al_visitor_fusion_window,priority:2" json:"visitor_fusion_class"`
 	VisitorFusionScore              int    `gorm:"default:0" json:"visitor_fusion_score"`
@@ -93,6 +103,71 @@ type AccessLog struct {
 
 	UpstreamLatencyMs int64 `gorm:"default:0" json:"upstream_latency_ms"`
 	ResponseSize      int64 `gorm:"default:0" json:"response_size"`
+}
+
+/**
+ * ComputeAccessLogFingerprintKey 生成访问日志九字段指纹的 SHA-256 摘要。
+ *
+ * 每个字段先写入无符号变长长度，再写入字段字节，避免字段边界或内容导致
+ * 拼接歧义。JA3 与 JA4 同时为空时表示没有可聚合的指纹，返回空字符串。
+ *
+ * @param tlsJA3Hash JA3 哈希。
+ * @param tlsJA4 JA4 指纹。
+ * @param tlsVersion TLS 版本。
+ * @param tlsALPN TLS ALPN。
+ * @param tlsSNI TLS SNI。
+ * @param tlsCipherSuites TLS cipher suites。
+ * @param tlsExtensions TLS extensions。
+ * @param tlsCurves TLS curves。
+ * @param tlsPointFormats TLS point formats。
+ * @return 64 位十六进制摘要，或没有指纹时的空字符串。
+ */
+func ComputeAccessLogFingerprintKey(tlsJA3Hash, tlsJA4, tlsVersion, tlsALPN, tlsSNI, tlsCipherSuites, tlsExtensions, tlsCurves, tlsPointFormats string) string {
+	if tlsJA3Hash == "" && tlsJA4 == "" {
+		return ""
+	}
+	h := sha256.New()
+	var encodedLength [binary.MaxVarintLen64]byte
+	for _, value := range []string{
+		tlsJA3Hash,
+		tlsJA4,
+		tlsVersion,
+		tlsALPN,
+		tlsSNI,
+		tlsCipherSuites,
+		tlsExtensions,
+		tlsCurves,
+		tlsPointFormats,
+	} {
+		n := binary.PutUvarint(encodedLength[:], uint64(len(value)))
+		_, _ = h.Write(encodedLength[:n])
+		_, _ = h.Write([]byte(value))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+/**
+ * BeforeSave 在访问日志写入或更新前维护指纹摘要。
+ *
+ * 该钩子覆盖仓储、UnifiedWriter 和直接 GORM CreateInBatches 写入，避免不同
+ * 写入路径产生无法参与聚合的空摘要。
+ */
+func (a *AccessLog) BeforeSave(*gorm.DB) error {
+	if a == nil {
+		return nil
+	}
+	a.FingerprintKey = ComputeAccessLogFingerprintKey(
+		a.TLSJA3Hash,
+		a.TLSJA4,
+		a.TLSVersion,
+		a.TLSALPN,
+		a.TLSSNI,
+		a.TLSCipherSuites,
+		a.TLSExtensions,
+		a.TLSCurves,
+		a.TLSPointFormats,
+	)
+	return nil
 }
 
 // DropEvent records a TCP connection drop (no HTTP response sent).

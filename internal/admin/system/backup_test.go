@@ -82,18 +82,22 @@ func TestImportBackupRejectsVersionTooHigh(t *testing.T) {
 func TestImportBackupCallsReloadOnSuccess(t *testing.T) {
 	db := newBackupDBForTest(t)
 	reloadCount := 0
+	invalidateCount := 0
 	reload := func() error { reloadCount++; return nil }
 
 	body, _ := json.Marshal(map[string]any{
 		"data":         map[string]any{"version": store.BackupVersion},
 		"replace_mode": false,
 	})
-	ctx := invokeBackupHandler(t, ImportBackup(db, reload), body)
+	ctx := invokeBackupHandler(t, ImportBackup(db, reload, func() { invalidateCount++ }), body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("import status = %d, want 200; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 	if reloadCount != 1 {
 		t.Fatalf("reload called %d times, want 1", reloadCount)
+	}
+	if invalidateCount != 1 {
+		t.Fatalf("cache invalidation called %d times, want 1", invalidateCount)
 	}
 }
 

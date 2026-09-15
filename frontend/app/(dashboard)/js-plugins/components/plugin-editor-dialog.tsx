@@ -99,6 +99,15 @@ const EMPTY_DRY_RUN_SAMPLE: DryRunSampleForm = {
   query_params_json: "{}",
 }
 
+const ENABLEMENT_SAMPLE: JSPluginSampleRequest = {
+  method: "GET",
+  path: "/",
+  host: "validation.invalid",
+  client_ip: "192.0.2.1",
+  headers: {},
+  query_params: {},
+}
+
 function parseStringRecord(value: string, errorMessage: string) {
   let parsed: unknown
   try {
@@ -301,7 +310,36 @@ export function JSPluginEditorDialog({
       site_id: form.site_id === GLOBAL_SCOPE ? null : Number(form.site_id),
     }
     setSaveError(null)
+    setRuntimeMessage(null)
     try {
+      if (form.enabled) {
+        const validationResult = await validate({
+          stage,
+          source: form.source,
+          timeout_ms: form.timeout_ms || undefined,
+        })
+        setValidation(validationResult)
+        if (!validationResult.valid) {
+          const message =
+            validationResult.error || t("jsPlugins.validateFailed")
+          setSaveError(message)
+          toast.error(message)
+          return
+        }
+        const dryRunResult = await dryRun({
+          stage,
+          source: form.source,
+          timeout_ms: form.timeout_ms || undefined,
+          sample_request: ENABLEMENT_SAMPLE,
+        })
+        setDryRunResponse(dryRunResult)
+        setDryRunError(dryRunResult.error ?? null)
+        if (dryRunResult.error) {
+          setSaveError(dryRunResult.error)
+          toast.error(dryRunResult.error)
+          return
+        }
+      }
       await save({ id: editing?.id, data })
       toast.success(
         editing ? t("common.updateSuccess") : t("common.createSuccess")
@@ -309,6 +347,13 @@ export function JSPluginEditorDialog({
       onOpenChange(false)
       onSaved()
     } catch (error) {
+      if (isRuntimeUnavailable(error)) {
+        const message = t("jsPlugins.runtimeUnavailable")
+        setRuntimeMessage(message)
+        setSaveError(message)
+        toast.error(message)
+        return
+      }
       const data = (error as { data?: JSPluginReloadFailureResponse })?.data
       const compileError = data?.item?.compile_error
       const reloadError = data?.reload_error
@@ -329,11 +374,12 @@ export function JSPluginEditorDialog({
     form.stage === "request" &&
     form.name.trim().length > 0 &&
     form.source.trim().length > 0
+  const submitting = saving || validating || dryRunning
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-5xl">
-        <DialogHeader>
+      <DialogContent className="grid max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:max-w-5xl">
+        <DialogHeader className="max-h-[35dvh] overflow-y-auto border-b px-4 py-4 pe-14 sm:px-6 sm:py-5 sm:pe-14">
           <DialogTitle>
             {editing ? t("jsPlugins.editTitle") : t("jsPlugins.addTitle")}
           </DialogTitle>
@@ -360,7 +406,11 @@ export function JSPluginEditorDialog({
           )}
         </DialogHeader>
 
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <Tabs
+          value={activeTab}
+          onValueChange={setActiveTab}
+          className="min-h-0 overflow-y-auto px-4 py-4 sm:px-6"
+        >
           <TabsList>
             <TabsTrigger value="script">
               {t("jsPlugins.tabs.script")}
@@ -672,21 +722,23 @@ export function JSPluginEditorDialog({
                   <AlertTitle>{t("jsPlugins.dryRunFailed")}</AlertTitle>
                   <AlertDescription className="space-y-2 break-all whitespace-pre-wrap">
                     <p>{dryRunError}</p>
-                    {dryRunResponse !== null && dryRunResponse.result !== null && (
-                      <div className="space-y-2">
-                        <p>{t("jsPlugins.dryRunResult")}</p>
-                        <pre className="max-h-56 overflow-auto rounded bg-muted p-2 text-xs break-all whitespace-pre-wrap">
-                          {JSON.stringify(dryRunResponse.result, null, 2)}
-                        </pre>
-                        {dryRunResponse.execution_time_ms !== undefined && (
-                          <p>
-                            {t("jsPlugins.dryRunExecutionTime", {
-                              value: dryRunResponse.execution_time_ms.toFixed(2),
-                            })}
-                          </p>
-                        )}
-                      </div>
-                    )}
+                    {dryRunResponse !== null &&
+                      dryRunResponse.result !== null && (
+                        <div className="space-y-2">
+                          <p>{t("jsPlugins.dryRunResult")}</p>
+                          <pre className="max-h-56 overflow-auto rounded bg-muted p-2 text-xs break-all whitespace-pre-wrap">
+                            {JSON.stringify(dryRunResponse.result, null, 2)}
+                          </pre>
+                          {dryRunResponse.execution_time_ms !== undefined && (
+                            <p>
+                              {t("jsPlugins.dryRunExecutionTime", {
+                                value:
+                                  dryRunResponse.execution_time_ms.toFixed(2),
+                              })}
+                            </p>
+                          )}
+                        </div>
+                      )}
                   </AlertDescription>
                 </Alert>
               )}
@@ -739,12 +791,12 @@ export function JSPluginEditorDialog({
           </TabsContent>
         </Tabs>
 
-        <DialogFooter>
+        <DialogFooter className="border-t bg-popover px-4 py-4 sm:px-6">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={handleSave} disabled={saving || !canSave}>
-            {saving
+          <Button onClick={handleSave} disabled={submitting || !canSave}>
+            {submitting
               ? t("common.saving")
               : editing
                 ? t("common.save")
