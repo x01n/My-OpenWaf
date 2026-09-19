@@ -120,11 +120,15 @@ func HTTPTransport(rt snapshot.SiteRuntime) *http.Transport {
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
-	if len(rt.UpstreamURLs) > 0 && hasSchemePrefixFold(rt.UpstreamURLs[0], "https://") {
-		tr.TLSClientConfig = HTTPSClientTLSConfig(rt.Site.UpstreamTLSServerName, rt.Site.UpstreamTLSSkipVerify)
-	} else if len(rt.UpstreamURLs) > 0 && hasSchemePrefixFold(rt.UpstreamURLs[0], "h2c://") {
-		tr.Protocols = new(http.Protocols)
-		tr.Protocols.SetUnencryptedHTTP2(true)
+	if len(rt.UpstreamURLs) > 0 {
+		// 归一结果使 tls/grpcs/grpc+tls/grpc+https 与 https、grpc 与 h2c 使用同一 transport 形态。
+		first := NormalizeUpstreamURLPrefix(rt.UpstreamURLs[0])
+		if hasSchemePrefixFold(first, "https://") {
+			tr.TLSClientConfig = HTTPSClientTLSConfig(rt.Site.UpstreamTLSServerName, rt.Site.UpstreamTLSSkipVerify)
+		} else if hasSchemePrefixFold(first, "h2c://") {
+			tr.Protocols = new(http.Protocols)
+			tr.Protocols.SetUnencryptedHTTP2(true)
+		}
 	}
 	return tr
 }

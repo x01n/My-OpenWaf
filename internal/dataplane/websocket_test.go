@@ -263,6 +263,44 @@ func TestBuildWebSocketHandshakeHeadersPreservesRepeatedSubprotocolValues(t *tes
 	}
 }
 
+func TestNormalizeWebSocketUpstreamTarget(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "http://svc:80/ws", want: "ws://svc:80/ws"},
+		{raw: "https://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "h2c://svc:9000/ws", want: "ws://svc:9000/ws"},
+		{raw: "grpc://svc:9000/ws", want: "ws://svc:9000/ws"},
+		{raw: "GRPC://svc:9000/ws", want: "ws://svc:9000/ws"},
+		{raw: "tls://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "grpcs://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "grpc+tls://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "grpc+https://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "NOTASSCHEME://svc:1/ws", want: "NOTASSCHEME://svc:1/ws"},
+		// h3 不参与归一（QUIC 二进制帧无法承载 WS 握手），保持原串。
+		{raw: "h3://svc:443/ws", want: "h3://svc:443/ws"},
+	}
+	for _, tt := range tests {
+		if got := normalizeWebSocketUpstreamTarget(tt.raw); got != tt.want {
+			t.Fatalf("normalizeWebSocketUpstreamTarget(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
+	}
+}
+
+func TestForwardWebSocketResolvesRPCUpstreamAliases(t *testing.T) {
+	// grpcs 与 https 同语义：应优先 wss:// 前缀（此处只验证前缀替换后
+	// wss 兜底端口选择路径，实际拨号不做网络连接）。
+	grpcsTarget := normalizeWebSocketUpstreamTarget("grpcs://127.0.0.1:9443/ws")
+	if !strings.HasPrefix(strings.ToLower(grpcsTarget), "wss://") {
+		t.Fatalf("grpcs target = %q, want wss prefix", grpcsTarget)
+	}
+	host := hostFromURL(strings.ToLower(grpcsTarget))
+	if !strings.Contains(host, "127.0.0.1:9443") {
+		t.Fatalf("grpcs host = %q, want 127.0.0.1:9443", host)
+	}
+}
+
 func TestForwardWebSocketReturnsWhenClientClosesAfterHandshake(t *testing.T) {
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -23,7 +23,7 @@ type Options struct {
 	Driver  string // sqlite | mysql | postgres
 	DSN     string
 	DataDir string // used when sqlite DSN is empty
-	LogDB bool
+	LogDB   bool
 }
 
 // Open returns a GORM handle for the configured SQL dialect with tuned connection pool.

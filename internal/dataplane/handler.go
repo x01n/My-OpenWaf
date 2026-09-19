@@ -377,8 +377,7 @@ func Handler(opts Options) app.HandlerFunc {
 
 		// 站点白名单需要在挑战失败计数前确定；实际名单决策由引擎 IP 声誉阶段统一执行。
 		siteIPWhitelisted := siteIPWhitelistContains(rt.SiteIPWhitelist, clientIP)
-
-		body, _, _ := requestBodySample(c)
+		body, _, _ := requestBodySampleBeforePipeline(c)
 		challengePassed := false
 		if method == "POST" {
 			sub, ok := challengeSubmissionValues(body, string(c.Request.Header.ContentType()))
@@ -500,6 +499,13 @@ func Handler(opts Options) app.HandlerFunc {
 		reqCtx.ChallengeIdentityUserAgent = challengeIdentityUA
 		reqCtx.ChallengeIdentityCookie = challengeIdentityCookie
 		reqCtx.SiteID = rt.Site.ID
+
+		// 请求走私协议违规审计：五类走私头在 hertz 协议解析层已被拒绝，
+		// 此处把可观察到的字节层旁路信号与解析层残留形态转成审计/指标，
+		// 不改变现有协议层拒绝行为，只做兜底审计与告警。
+		if opts.Writer != nil {
+			requestSmugglingSniff(c, opts, rt.Site.ID, reqID, host, cipStr)
+		}
 		reqCtx.AntiReplayTTL = rt.Site.AntiReplayTTL
 		tlsFingerprint, ok := tlsFingerprintFromRequestContext(c)
 		if !ok {
@@ -1098,7 +1104,14 @@ func Handler(opts Options) app.HandlerFunc {
 		cacheState := "bypass"
 		upstreamStart := time.Now()
 		recordResponseBody := shouldRecordAppRouteResponseBody(result.Site)
+		// 扩展 CONNECT 桥接（RFC 8441）在进入 switch 前注册入站流端点；
+		// 本函数对非扩展 CONNECT 请求为空操作。
+		registerH2WSInboundStream(c)
 		switch {
+		case IsH2ExtendedWebSocketConnect(c):
+			// RFC 8441 扩展 CONNECT（CONNECT + :protocol 伪头）：
+			// h2c 上游走帧层直通，其余走 h1 握手桥。
+			upstreamErr = ForwardH2ExtendedConnectWebSocket(ctx, reqID, c, *result.Site, base, clientIP, opts.Engine)
 		case IsWebSocketUpgrade(c):
 			upstreamErr = ForwardWebSocket(ctx, reqID, c, *result.Site, base, clientIP, opts.Engine)
 		case IsSSERequest(c):

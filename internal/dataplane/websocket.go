@@ -35,6 +35,24 @@ func IsWebSocketUpgrade(c *app.RequestContext) bool {
 		headerContainsToken(c.GetHeader("Connection"), []byte("upgrade"))
 }
 
+// IsH2ExtendedWebSocketConnect 报告入站请求是否为 RFC 8441 扩展 CONNECT
+// WebSocket 流（CONNECT 方法且携带 ":protocol" 伪头）。":protocol" 由
+// third_party/hertz-contrib-http2 补丁写成普通请求头，此处按头读取。
+func IsH2ExtendedWebSocketConnect(c *app.RequestContext) bool {
+	if c == nil || !bytes.Equal(c.Method(), []byte(http.MethodConnect)) {
+		return false
+	}
+	return h2ProtoHeaderValue(c) != ""
+}
+
+// h2ProtoHeaderValue 返回 ":protocol" 伪头值；空串表示并非扩展 CONNECT。
+func h2ProtoHeaderValue(c *app.RequestContext) string {
+	if c == nil {
+		return ""
+	}
+	return string(c.GetHeader(":protocol"))
+}
+
 // headerContainsToken checks whether comma-separated header value contains token.
 func headerContainsToken(value []byte, token []byte) bool {
 	for len(value) > 0 {
@@ -51,6 +69,36 @@ func headerContainsToken(value []byte, token []byte) bool {
 		}
 	}
 	return false
+}
+
+// normalizeWebSocketUpstreamTarget rewrites the upstream base scheme to its
+// WebSocket form:
+//
+//   - http     -> ws
+//   - https    -> wss
+//   - h2c      -> ws（明文 h2 prior knowledge，WebSocket 握手仍为 HTTP/1.1 明文）
+//   - tls/grpcs/grpc+tls/grpc+https -> wss（与 https 同语义，走 TLS 拨号）
+//   - grpc     -> ws（与 h2c 同语义）
+//
+// h3 不在此归一：QUIC 使用二进制帧而非 HTTP/1.1 明文握手，无法承载本函数
+// 之后的 WebSocket 握手；h3 upstream 应在调用方被排除出 WS 转发路径，
+// 不做静默重写。
+func normalizeWebSocketUpstreamTarget(target string) string {
+	// RPC 别名必须优先于通用前缀替换：
+	// grpc+https:// 这类别名包含 "https://" 子串，若先做通用替换会得到
+	// "grpc+wss://"，别名此后永远无法匹配；tls/grpcs 同理。
+	if transport, rest, ok := upstream.RPCUpstreamAliasForURL(target); ok {
+		switch transport {
+		case "https":
+			return "wss://" + rest
+		case "h2c":
+			return "ws://" + rest
+		}
+	}
+	target = strings.Replace(target, "http://", "ws://", 1)
+	target = strings.Replace(target, "https://", "wss://", 1)
+	target = strings.Replace(target, "h2c://", "ws://", 1)
+	return target
 }
 
 // asciiEqualFoldBytes compares a byte slice with a string case-insensitively for ASCII.
@@ -76,8 +124,7 @@ func ForwardWebSocket(ctx context.Context, reqID string, c *app.RequestContext, 
 	if len(q) > 0 {
 		target += "?" + string(q)
 	}
-	target = strings.Replace(target, "http://", "ws://", 1)
-	target = strings.Replace(target, "https://", "wss://", 1)
+	target = normalizeWebSocketUpstreamTarget(target)
 
 	dialer := net.Dialer{Timeout: 10 * time.Second}
 	host := hostFromURL(target)

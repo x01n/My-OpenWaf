@@ -258,7 +258,7 @@ func TestValidateSiteUpstreamURLsRejectsInvalidValues(t *testing.T) {
 		{name: "empty", input: "", want: "upstream_urls is required"},
 		{name: "invalid json array", input: `["http://127.0.0.1:9000", 1]`, want: "upstream_urls must be a string array or comma-separated string"},
 		{name: "missing scheme", input: "127.0.0.1:9000", want: "upstream_urls contains invalid URL"},
-		{name: "unsupported scheme", input: "ftp://127.0.0.1:21", want: "upstream_urls supports only http, https, h2c, h3"},
+		{name: "unsupported scheme", input: "ftp://127.0.0.1:21", want: "upstream_urls supports only http, https, h2c, h3, tls, grpc, grpcs, grpc+tls, grpc+https"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -49,7 +49,17 @@ const CERT_NONE = "none"
 const POLICY_INHERIT = "inherit-default"
 
 /** 后端 `internal/admin/shared/site_upstreams.go` 允许的上游 scheme */
-const UPSTREAM_SCHEMES = ["http://", "https://", "h2c://", "h3://"]
+const UPSTREAM_SCHEMES = [
+  "http://",
+  "https://",
+  "h2c://",
+  "h3://",
+  "tls://",
+  "grpc://",
+  "grpcs://",
+  "grpc+tls://",
+  "grpc+https://",
+]
 
 const siteFormSchema = z
   .object({

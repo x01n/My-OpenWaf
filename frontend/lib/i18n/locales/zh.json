@@ -579,7 +579,7 @@
       "portRange": "端口需在 1-65535 之间",
       "manageListeners": "管理全部监听端口",
       "primaryListener": "主监听",
-      "upstreamScheme": "上游地址需以 http://、https://、h2c:// 或 h3:// 开头",
+      "upstreamScheme": "上游地址需以 http://、https://、h2c://、h3://、tls://、grpc:// 或 grpcs:// 等开头",
       "certRequiredHint": "已启用 HTTPS，必须选择证书后才能保存。",
       "certRequired": "启用 HTTPS 的监听端口必须选择证书",
       "policy": "策略",

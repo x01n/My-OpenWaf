@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"My-OpenWaf/internal/appresource"
+	"My-OpenWaf/internal/pkg/schemealias"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
@@ -720,7 +721,7 @@ func parseUpstreamURLs(raw string) []string {
 			for _, p := range values {
 				p = strings.TrimSpace(p)
 				if p != "" {
-					out = append(out, p)
+					out = append(out, schemealias.NormalizeURLPrefix(p))
 				}
 			}
 			return out
@@ -731,7 +732,9 @@ func parseUpstreamURLs(raw string) []string {
 	for _, p := range strings.Split(raw, ",") {
 		p = strings.TrimSpace(p)
 		if p != "" {
-			out = append(out, p)
+			// RPC 别名归一（大小写折叠 + tls/grpc 前缀展开）后进入站点快照，
+			// 保证下游按 https/h2c 的既有语义处理。
+			out = append(out, schemealias.NormalizeURLPrefix(p))
 		}
 	}
 	return out

@@ -1048,7 +1048,10 @@ func siteListenerName(bind string) string {
 }
 
 func dataServerHTTP2Enabled(siteRT snapshotpkg.SiteRuntime, tlsCfg *tls.Config) bool {
-	return siteRT.Site.TLSEnabled && tlsCfg != nil && alpnSliceIncludes(tlsCfg.NextProtos, "h2")
+	if siteRT.Site.TLSEnabled && tlsCfg != nil && alpnSliceIncludes(tlsCfg.NextProtos, "h2") {
+		return true
+	}
+	return false
 }
 
 type redisRuntimeReloadDeps struct {

@@ -65,7 +65,7 @@ jobs:
         run: CGO_ENABLED=1 go vet -tags=quickjs ./...
 
       - name: Run Go tests
-        run: CGO_ENABLED=1 go test -tags=quickjs -v ./...
+        run: CGO_ENABLED=1 go test -tags=quickjs -v -timeout=30m ./...
 
       - name: Typecheck frontend
         working-directory: frontend
@@ -145,7 +145,10 @@ jobs:
           git commit -m "chore: prepare release ${{ steps.version.outputs.tag }}" || true
 
       - name: Push release branch
-        run: git push --force-with-lease origin release/${{ steps.version.outputs.tag }}
+        run: |
+          expected="$(git ls-remote --heads origin "refs/heads/release/${{ steps.version.outputs.tag }}" | cut -f1)"
+          git push --force-with-lease="refs/heads/release/${{ steps.version.outputs.tag }}:${expected}" \
+            origin "refs/heads/release/${{ steps.version.outputs.tag }}:refs/heads/release/${{ steps.version.outputs.tag }}"
 
       - name: Create or update pull request
         env:

@@ -30,6 +30,7 @@ import (
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/dynamic"
 )
@@ -145,6 +146,12 @@ func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Tran
 }
 
 func isHTTPSUpstreamBase(base string) bool {
+	// RPC 别名（tls/grpcs/grpc+tls/grpc+https）归一后与 https 同语义，
+	// 与 https/h2c 复用同一 transport 池键。
+	target, _, ok := upstream.RPCUpstreamAliasForURL(base)
+	if ok {
+		return target == "https"
+	}
 	const scheme = "https://"
 	if len(base) < len(scheme) {
 		return false
@@ -279,8 +286,12 @@ func sharedHertzH2CClient() (*hertzclient.Client, error) {
 }
 
 func shouldUseHertzUpstream(base string) bool {
-	lower := strings.ToLower(base)
-	return strings.HasPrefix(lower, "h2c://")
+	// grpc:// 归一为 h2c，与 h2c:// 共用 Hertz h2 prior knowledge 路径。
+	target, _, ok := upstream.RPCUpstreamAliasForURL(base)
+	if ok {
+		return target == "h2c"
+	}
+	return strings.HasPrefix(strings.ToLower(base), "h2c://")
 }
 
 const upstreamHTTPProtocolContextKey = "owaf.upstream_http_protocol"
@@ -512,6 +523,13 @@ func (b *hertzResponseBody) syncTrailerLocked() {
 }
 
 func httpProtoForBase(base string) string {
+	// RPC 别名与对应传输 scheme 同语义：tls/grpcs 同 https，grpc 同 h2c。
+	if target, _, ok := upstream.RPCUpstreamAliasForURL(base); ok {
+		if target == "h2c" || target == "https" {
+			return "HTTP/2.0"
+		}
+		return "HTTP/1.1"
+	}
 	lower := strings.ToLower(base)
 	switch {
 	case strings.HasPrefix(lower, "h2c://"):
@@ -591,8 +609,9 @@ func doHertzUpstream(ctx context.Context, rt snapshot.SiteRuntime, base string, 
 	return resp, hreq, requestDone, cancel, nil
 }
 
-// NormalizeUpstreamURL converts h2c:// and h3:// URLs to http:// and https://
-// so standard Go http.Client can process them.
+// NormalizeUpstreamURL converts h2c:// and h3:// URLs to http:// and https://,
+// and RPC alias URLs (grpc:// -> http://, tls:// / grpcs:// / grpc+tls:// /
+// grpc+https:// -> https://), so standard Go http.Client can process them.
 func NormalizeUpstreamURL(raw string) string {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "h2c://") {
@@ -600,6 +619,14 @@ func NormalizeUpstreamURL(raw string) string {
 	}
 	if strings.HasPrefix(lower, "h3://") {
 		return "https://" + raw[5:]
+	}
+	if target, rest, ok := upstream.RPCUpstreamAliasForURL(raw); ok {
+		if target == "https" {
+			return "https://" + rest
+		}
+		if target == "h2c" {
+			return "http://" + rest
+		}
 	}
 	return raw
 }
@@ -621,6 +648,14 @@ func UpstreamRoundTripperForBase(rt snapshot.SiteRuntime, base string) (http.Rou
 		}
 		tr := http3TransportForUpstream(rt, h3Host)
 		return tr, normalizedBase
+	}
+	if target, rest, ok := upstream.RPCUpstreamAliasForURL(base); ok {
+		// RPC 别名与对应传输 scheme 完全同语义：https 走共享 transport，
+		// h2c(grpc) 走 h2 prior knowledge transport。
+		if target == "h2c" {
+			return h2cTransportForUpstream(), "http://" + rest
+		}
+		return SharedTransportForUpstream(rt, base), "https://" + rest
 	}
 	return SharedTransportForUpstream(rt, base), base
 }
@@ -3439,8 +3474,11 @@ func CloseIdleUpstreamTransports() (int, int, int) {
 func transportKeyForUpstream(base string, rt snapshot.SiteRuntime) transportKey {
 	key := transportKey{}
 	if base != "" {
-		u, err := url.Parse(base)
-		if err == nil {
+		// RPC 别名先做归一，保证 tls/grpcs 与 https、grpc 与 h2c 在 transport 池中同键。
+		if target, _, ok := upstream.RPCUpstreamAliasForURL(base); ok {
+			key.isHTTPS = target == "https"
+			key.h2cPrior = target == "h2c"
+		} else if u, err := url.Parse(base); err == nil {
 			key.isHTTPS = u.Scheme == "https" || u.Scheme == "wss"
 			key.h2cPrior = u.Scheme == "h2c"
 		}

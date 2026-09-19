@@ -133,12 +133,25 @@ func parseUpstreamURL(raw string) upstreamURLInfo {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" {
+		// RPC 别名（grpc+tls 含 '+'、grpc/grpcs/tls 非标准 scheme）标准
+		// url.Parse 无法识别出 Host，这里用归一结果兜底，使其后续走与
+		// https/h2c 完全一致的传输路径。
+		normalized := normalizeUpstreamBase(raw)
+		if normalized != raw {
+			if u2, err2 := url.Parse(normalized); err2 == nil && u2.Scheme != "" && u2.Host != "" {
+				return upstreamURLInfo{
+					raw:    raw,
+					url:    u2,
+					scheme: normalizeUpstreamScheme(u2.Scheme),
+				}
+			}
+		}
 		return upstreamURLInfo{raw: raw}
 	}
 	return upstreamURLInfo{
 		raw:    raw,
 		url:    u,
-		scheme: strings.ToLower(u.Scheme),
+		scheme: normalizeUpstreamScheme(u.Scheme),
 	}
 }
 
@@ -169,7 +182,7 @@ func (i upstreamURLInfo) configuredProtocol() string {
 }
 
 func (i upstreamURLInfo) isHTTPS() bool {
-	return i.valid() && i.scheme == "https"
+	return i.valid() && normalizeUpstreamScheme(i.url.Scheme) == "https"
 }
 
 func (i upstreamURLInfo) isExplicitH2C() bool {
@@ -185,6 +198,10 @@ func (i upstreamURLInfo) probeTarget() string {
 		return i.raw
 	}
 	u := *i.url
+	// i.scheme 在 parseUpstreamURL 中已完成归一（RPC 别名展开 + 大小写折叠），
+	// 先写回 URL 对象，再按归一后的传输 scheme 替换，RPC 别名与 https/h2c
+	// 走完全相同的探针分支。
+	u.Scheme = i.scheme
 	switch i.scheme {
 	case "h2c":
 		u.Scheme = "http"
@@ -348,16 +365,25 @@ func pickByProtocolPreferenceWithPool(urls []string, pool *Pool, start int) (str
 
 func protocolPreference(raw string) int {
 	raw = strings.TrimSpace(raw)
-	switch {
-	case hasSchemePrefixFold(raw, "h3://"):
-		return 3
-	case hasSchemePrefixFold(raw, "h2c://"):
-		return 2
-	case hasSchemePrefixFold(raw, "https://"):
-		return 1
-	default:
-		return 0
+	if idx := strings.Index(raw, "://"); idx > 0 {
+		scheme := raw[:idx]
+		if target, ok := rpcSchemeAliases[strings.ToLower(scheme+"://")]; ok {
+			scheme = target
+		} else {
+			scheme = strings.ToLower(scheme)
+		}
+		switch scheme {
+		case "h3":
+			return 3
+		case "h2c":
+			return 2
+		case "https":
+			return 1
+		default:
+			return 0
+		}
 	}
+	return 0
 }
 
 func pickAvailableUpstream(urls []string, pool *Pool, start int) (string, bool) {
@@ -798,14 +824,14 @@ func parseUpstreamStateKey(raw string) upstreamStateKey {
 }
 
 func parseUpstreamStateScheme(raw string) upstreamStateScheme {
-	switch {
-	case asciiEqualFoldAnyString(raw, "http"):
+	switch normalizeUpstreamScheme(raw) {
+	case "http":
 		return upstreamStateSchemeHTTP
-	case asciiEqualFoldAnyString(raw, "https"):
+	case "https":
 		return upstreamStateSchemeHTTPS
-	case asciiEqualFoldAnyString(raw, "h2c"):
+	case "h2c":
 		return upstreamStateSchemeH2C
-	case asciiEqualFoldAnyString(raw, "h3"):
+	case "h3":
 		return upstreamStateSchemeH3
 	default:
 		return upstreamStateSchemeInvalid
@@ -837,6 +863,8 @@ func normalizeUpstreamBase(raw string) string {
 	if !isValidUpstreamScheme(scheme) {
 		return raw
 	}
+	// RPC 别名（grpc+tls 含 '+'）同样满足上面校验；归一后再区分是否需要重写。
+	normalizedScheme := normalizeUpstreamScheme(scheme)
 	authorityStart := schemeEnd + len("://")
 	if authorityStart >= len(raw) {
 		return raw
@@ -856,23 +884,20 @@ func normalizeUpstreamBase(raw string) string {
 	if containsInvalidUpstreamAuthority(authority) {
 		return raw
 	}
+	schemeChanged := normalizedScheme != scheme
 	schemeHasUpper := containsUpperASCII(scheme)
-	if authorityEnd == len(raw) && !schemeHasUpper {
+	if authorityEnd == len(raw) && !schemeHasUpper && !schemeChanged {
 		return raw
 	}
-	if authorityEnd < len(raw) && !schemeHasUpper {
+	if authorityEnd < len(raw) && !schemeHasUpper && !schemeChanged {
 		return raw[:authorityEnd]
 	}
 
 	var b strings.Builder
-	b.Grow(authorityEnd)
-	for i := 0; i < len(scheme); i++ {
-		ch := scheme[i]
-		if 'A' <= ch && ch <= 'Z' {
-			ch += 'a' - 'A'
-		}
-		_ = b.WriteByte(ch)
-	}
+	b.Grow(authorityEnd + len("://"))
+	// 归一后的 scheme 可能比原 scheme 更长（grpc+tls -> https 等），
+	// 因此 Grow 按归一结果长度预留。
+	b.WriteString(normalizedScheme)
 	b.WriteString("://")
 	b.WriteString(authority)
 	return b.String()

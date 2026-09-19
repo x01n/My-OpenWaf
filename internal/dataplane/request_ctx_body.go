@@ -48,6 +48,13 @@ func (s *prefetchedRequestBodyStream) Close() error {
 	return nil
 }
 
+func requestBodySampleBeforePipeline(c *app.RequestContext) ([]byte, bool, int64) {
+	if IsH2ExtendedWebSocketConnect(c) {
+		return nil, false, 0
+	}
+	return requestBodySample(c)
+}
+
 func requestBodySample(c *app.RequestContext) ([]byte, bool, int64) {
 	if c == nil {
 		return nil, false, 0

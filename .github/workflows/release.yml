@@ -57,8 +57,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG" || true
-          git push origin "$TAG" || true
+          # 推 tag 已天然 fail-fast：目标 ref 已存在（评分重合标签等）时应当停摆，不应吞掉推送失败。
+          # 本地打标签失败同样停摆，避免空 tag 直接走 light-weight tag 绕过（fingerprint 要求以附注 tag 签名）。
+          git tag -a -m "Release $TAG" "$TAG"
+          git push origin "refs/tags/$TAG:refs/tags/$TAG"
 
   frontend:
     name: Build frontend export

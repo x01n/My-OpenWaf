@@ -80,6 +80,39 @@ func TestValidateSiteUpstreamURLsSchemesCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestValidateSiteUpstreamURLsRPCUpstreamAliases(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantErr error
+	}{
+		{raw: "tls://backend:443", wantErr: nil},
+		{raw: "TLS://backend:443", wantErr: nil},
+		{raw: "grpc://backend:9000", wantErr: nil},
+		{raw: "GRPC://backend:9000/rpc", wantErr: nil},
+		{raw: "grpcs://backend:443", wantErr: nil},
+		{raw: "grpc+tls://backend:443", wantErr: nil},
+		{raw: "grpc+https://backend:443", wantErr: nil},
+		{raw: "GRPC+HTTPS://backend:443", wantErr: nil},
+		// 缺少主机名的别名输入与 http:// 一样被拒绝。
+		{raw: "tls://", wantErr: errSiteUpstreamsInvalidURL},
+		{raw: "grpc://", wantErr: errSiteUpstreamsInvalidURL},
+		// 非白名单 scheme 依旧报 unsupported。
+		{raw: "ftp://backend:21", wantErr: errSiteUpstreamsUnsupportedScheme},
+	}
+	for _, tt := range cases {
+		err := ValidateSiteUpstreamURLs(tt.raw)
+		if tt.wantErr == nil {
+			if err != nil {
+				t.Errorf("ValidateSiteUpstreamURLs(%q) returned error: %v", tt.raw, err)
+			}
+			continue
+		}
+		if err != tt.wantErr {
+			t.Errorf("ValidateSiteUpstreamURLs(%q) = %v, want %v", tt.raw, err, tt.wantErr)
+		}
+	}
+}
+
 // --- ValidateSiteUpstreamHost ---
 
 func TestValidateSiteUpstreamHostEmpty(t *testing.T) {

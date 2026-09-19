@@ -699,7 +699,7 @@ func TestCreateSiteRejectsUnsupportedUpstreamScheme(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp["error"] != "upstream_urls supports only http, https, h2c, h3" {
+	if resp["error"] != "upstream_urls supports only http, https, h2c, h3, tls, grpc, grpcs, grpc+tls, grpc+https" {
 		t.Fatalf("error = %q", resp["error"])
 	}
 }

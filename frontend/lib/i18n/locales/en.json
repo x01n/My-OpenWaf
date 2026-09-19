@@ -576,7 +576,7 @@
       "portRange": "Port must be between 1 and 65535",
       "manageListeners": "Manage all listeners",
       "primaryListener": "Primary",
-      "upstreamScheme": "Upstream must start with http://, https://, h2c:// or h3://",
+      "upstreamScheme": "Upstream must start with http://, https://, h2c://, h3://, tls://, grpc:// or grpcs://",
       "certRequiredHint": "HTTPS is enabled — a certificate must be selected before saving.",
       "certRequired": "A certificate is required when any listener uses HTTPS",
       "policy": "Policy",
