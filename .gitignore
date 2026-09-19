@@ -54,3 +54,4 @@ wasm-pow-solver/target/
 internal/waf/cve/testdata/detectfirst_golden.txt
 My-OpenWaf
 .codex/
+.lsp-mcp/

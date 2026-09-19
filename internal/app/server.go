@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -601,6 +602,12 @@ func Run() {
 	resourceAggregator := dataplane.NewRecordedResourceAggregator(repos.RecordedResource, logger.New("resource-agg"))
 	resourceAggregator.SetRedis(redisKV)
 	defer resourceAggregator.Close()
+	samplingRate := 1
+	if v := os.Getenv("MY_OPENWAF_ACCESSLOG_SAMPLING"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n >= 1 {
+			samplingRate = int(n)
+		}
+	}
 
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
 	dpOpts := dataplane.Options{
@@ -609,7 +616,7 @@ func Run() {
 		Metrics:               metrics,
 		Writer:                unifiedWriter,
 		ResponseCache:         responseCache,
-		AccessLogSamplingRate: 1,
+		AccessLogSamplingRate: uint32(samplingRate),
 		Log:                   dpLog,
 		CaptchaManager:        captchaMgr,
 		ShieldManager:         shieldMgr,

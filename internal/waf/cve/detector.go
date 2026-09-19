@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // CVEDetector orchestrates CVE-specific vulnerability detection across
@@ -21,8 +22,21 @@ type CVEDetector struct {
 	nodeDetector    *NodeCVEDetector
 	generalDetector *GeneralCVEDetector
 	customRules     []CustomCVERule
-	compiledCustom  []compiledCustomRule
+	compiledCustom  atomic.Pointer[[]compiledCustomRule]
 	mu              sync.RWMutex
+}
+
+/**
+ * compiledCustomRules 返回当前已编译自定义规则的共享只读切片。
+ *
+ * 写侧（重载/新增/删除）在持有 d.mu 时构建新切片并 Store；读侧仅一次原子 Load，
+ * 与被替换的历史切片完全解耦，热路径不再参与读写锁竞争。
+ */
+func (d *CVEDetector) compiledCustomRules() []compiledCustomRule {
+	if p := d.compiledCustom.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 type CVEMatch struct {
@@ -1752,9 +1766,7 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 	}
 
 	// Custom rules.
-	d.mu.RLock()
-	customs := d.compiledCustom
-	d.mu.RUnlock()
+	customs := d.compiledCustomRules()
 
 	for _, cr := range customs {
 		if !cr.rule.Enabled {
@@ -1830,9 +1842,7 @@ func (d *CVEDetector) DetectFirst(req *CVERequest, categorySensitivity ...map[st
 		}
 	}
 
-	d.mu.RLock()
-	customs := d.compiledCustom
-	d.mu.RUnlock()
+	customs := d.compiledCustomRules()
 
 	for _, cr := range customs {
 		if !cr.rule.Enabled {
@@ -2156,7 +2166,8 @@ func (d *CVEDetector) ReloadCustomRules(rules []CustomCVERule) {
 	}
 	d.mu.Lock()
 	d.customRules = rules
-	d.compiledCustom = compiled
+	snapshot := compiled
+	d.compiledCustom.Store(&snapshot)
 	d.mu.Unlock()
 }
 
@@ -2168,7 +2179,8 @@ func (d *CVEDetector) AddCustomRule(rule CustomCVERule) {
 	}
 	d.mu.Lock()
 	d.customRules = append(d.customRules, rule)
-	d.compiledCustom = append(d.compiledCustom, compiledCustomRule{rule: rule, re: re})
+	snapshot := append(append([]compiledCustomRule(nil), d.compiledCustomRules()...), compiledCustomRule{rule: rule, re: re})
+	d.compiledCustom.Store(&snapshot)
 	d.mu.Unlock()
 }
 
@@ -2176,12 +2188,14 @@ func (d *CVEDetector) AddCustomRule(rule CustomCVERule) {
 func (d *CVEDetector) RemoveCustomRule(id uint) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for i, cr := range d.compiledCustom {
-		if cr.rule.ID == id {
-			d.compiledCustom = append(d.compiledCustom[:i], d.compiledCustom[i+1:]...)
-			break
+	var kept []compiledCustomRule
+	for _, cr := range d.compiledCustomRules() {
+		if cr.rule.ID != id {
+			kept = append(kept, cr)
 		}
 	}
+	snapshot := kept
+	d.compiledCustom.Store(&snapshot)
 	for i, r := range d.customRules {
 		if r.ID == id {
 			d.customRules = append(d.customRules[:i], d.customRules[i+1:]...)

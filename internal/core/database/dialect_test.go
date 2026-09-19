@@ -2,6 +2,7 @@ package database
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,39 @@ func TestOpenUnsupportedDriver(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("错误信息不明确：%v", err)
+	}
+}
+
+// TestOpenSQLiteLogDBPragmas 验证 LogDB 标记切换日志库专属 PRAGMA 组合。
+//
+// 主库必须保持 foreign_keys=ON 与较激进的检查点；
+// 日志库为高写入率关闭外键校验、扩大页缓存并后移检查点。
+func TestOpenSQLiteLogDBPragmas(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "waf.db")
+	logDB := filepath.Join(dir, "waf_logs.db")
+
+	mh, err := Open(Options{Driver: "sqlite", DSN: mainDB})
+	if err != nil {
+		t.Fatalf("打开主库失败：%v", err)
+	}
+	lh, err := Open(Options{Driver: "sqlite", DSN: logDB, LogDB: true})
+	if err != nil {
+		t.Fatalf("打开日志库失败：%v", err)
+	}
+
+	var mainFK, logFK int
+	if err := mh.Raw("PRAGMA foreign_keys").Scan(&mainFK).Error; err != nil {
+		t.Fatalf("读主库 foreign_keys 失败：%v", err)
+	}
+	if err := lh.Raw("PRAGMA foreign_keys").Scan(&logFK).Error; err != nil {
+		t.Fatalf("读日志库 foreign_keys 失败：%v", err)
+	}
+	if mainFK != 1 {
+		t.Fatalf("主库 foreign_keys=%d，应为 1", mainFK)
+	}
+	if logFK != 0 {
+		t.Fatalf("日志库 foreign_keys=%d，应为 0", logFK)
 	}
 }
 

@@ -72,7 +72,11 @@ export function SiteHoverPreview({
   const { data: upstreamData, isLoading: upstreamLoading } = useSWR(
     enabled ? ["upstream-status-all"] : null,
     async () => upstreamApi.getStatus(),
-    { revalidateOnFocus: false, refreshInterval: 15000 }
+    {
+      revalidateOnFocus: false,
+      refreshInterval: 15000,
+      dedupingInterval: 30000,
+    }
   )
 
   const relatedUpstreams: UpstreamStatus[] = React.useMemo(() => {

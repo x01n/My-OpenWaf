@@ -82,6 +82,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		Driver:  cfg.DBDriver,
 		DSN:     cfg.LogDBDSN,
 		DataDir: cfg.DataDir,
+		LogDB:   true,
 	})
 	if err != nil {
 		closeRuntimeDB(db)

@@ -204,7 +204,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 	fileUploadEnabled := thresholds.fileUpload.enabled
 
 	var hits []OWASPHit
-	lowerPath := strings.ToLower(path)
+	lowerPath := toLowerASCII(path)
 
 	// Path-aware body-scan suppression: known telemetry/API endpoints that produce
 	// false positives from binary/base64-decoded body content should skip certain
@@ -3476,7 +3476,7 @@ func hasActiveXSSContext(normalized string) bool {
 // single-page application navigation code commonly includes these patterns.
 // At high sensitivity (threshold ≤ 2), this check is bypassed by the caller.
 func isKnownTelemetryXSSFalsePositive(path, normalized, ruleID string, isBodyTarget bool) bool {
-	lowerPath := strings.ToLower(path)
+	lowerPath := toLowerASCII(path)
 	if !isBodyTarget {
 		if ruleID == "owasp:xss:003" && strings.Contains(lowerPath, "/fd/ls/glinkpingpost.aspx") {
 			return isBenignJavaScriptVoid(normalized) || isBingPingPostBenignNavigation(normalized)

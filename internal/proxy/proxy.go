@@ -2052,6 +2052,9 @@ func ShouldCacheHTTPResponse(method string, resp *HTTPResponse, _ ...bool) bool 
 	if resp == nil || !ShouldCacheResponse(method, resp.StatusCode, resp.Body) {
 		return false
 	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(resp.ContentType)), "application/grpc") {
+		return false
+	}
 	if len(responseHeaderValues(resp.Header, "Set-Cookie")) > 0 ||
 		len(responseHeaderValues(resp.Header, "Set-Cookie2")) > 0 {
 		return false

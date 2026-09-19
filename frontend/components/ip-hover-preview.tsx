@@ -43,7 +43,12 @@ export function IpHoverPreview({
       })) as { items: SecurityEvent[]; total: number }
       return res
     },
-    { revalidateOnFocus: false }
+    {
+      revalidateOnFocus: false,
+      // 相同 IP 在同一页多处出现时共享一次请求；
+      // 悬停关闭后短期重开复用缓存，切页/筛选后的旧视图不重复打接口。
+      dedupingInterval: 30000,
+    }
   )
 
   return (

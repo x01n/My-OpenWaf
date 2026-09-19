@@ -298,7 +298,11 @@ export function SecurityEventDetailDialog({
   const { data: trace, isLoading: traceLoading } = useSWR(
     open && requestId ? ["security-event-trace", requestId] : null,
     () => requestTraceApi.get(requestId),
-    { revalidateOnFocus: false }
+    {
+      revalidateOnFocus: false,
+      // 关闭后短期重开复用已有追踪数据；不同事件互不串扰。
+      dedupingInterval: 30000,
+    }
   )
 
   const actionLabelMap: Record<string, string> = useMemo(

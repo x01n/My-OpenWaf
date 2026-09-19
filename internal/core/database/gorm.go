@@ -23,6 +23,7 @@ type Options struct {
 	Driver  string // sqlite | mysql | postgres
 	DSN     string
 	DataDir string // used when sqlite DSN is empty
+	LogDB bool
 }
 
 // Open returns a GORM handle for the configured SQL dialect with tuned connection pool.
@@ -86,6 +87,9 @@ func openSQLite(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 	//   foreign_keys=ON        — enforce FK constraints
 	//   wal_autocheckpoint=1000 — checkpoint every 1000 pages to avoid long WAL stalls
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(1000)"
+	if opt.LogDB {
+		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=foreign_keys(OFF)&_pragma=wal_autocheckpoint(64000)"
+	}
 
 	db, err := gorm.Open(sqlite.Open(dsn), gcfg)
 	if err != nil {
