@@ -353,17 +353,17 @@ type serverConn struct {
 	maxFrameSize                int32
 	headerTableSize             uint32
 	peerMaxHeaderListSize       uint32 // zero means unknown (default)
-	peerEnableConnectProtocol bool
-	canonHeader               map[string]string // http2-lower-case -> Go-Canonical-Case
-	writingFrame              bool              // started writing a frame (on serve goroutine or separate)
-	writingFrameAsync         bool              // started a frame on its own goroutine but haven't heard back on wroteFrameCh
-	needsFrameFlush           bool              // last frame write wasn't a flush
-	inGoAway                  bool              // we've started to or sent GOAWAY
-	inFrameScheduleLoop       bool              // whether we're in the scheduleFrameWrite loop
-	needToSendGoAway          bool              // we need to schedule a GOAWAY frame write
-	goAwayCode                ErrCode
-	shutdownTimer             *time.Timer // nil until used
-	idleTimer                 *time.Timer // nil if unused
+	peerEnableConnectProtocol   bool
+	canonHeader                 map[string]string // http2-lower-case -> Go-Canonical-Case
+	writingFrame                bool              // started writing a frame (on serve goroutine or separate)
+	writingFrameAsync           bool              // started a frame on its own goroutine but haven't heard back on wroteFrameCh
+	needsFrameFlush             bool              // last frame write wasn't a flush
+	inGoAway                    bool              // we've started to or sent GOAWAY
+	inFrameScheduleLoop         bool              // whether we're in the scheduleFrameWrite loop
+	needToSendGoAway            bool              // we need to schedule a GOAWAY frame write
+	goAwayCode                  ErrCode
+	shutdownTimer               *time.Timer // nil until used
+	idleTimer                   *time.Timer // nil if unused
 
 	// Owned by the writeFrameAsync goroutine:
 	headerWriteBuf bytes.Buffer

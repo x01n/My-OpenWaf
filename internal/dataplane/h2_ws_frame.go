@@ -16,7 +16,6 @@ import (
 	"github.com/hertz-contrib/http2/hpack"
 )
 
-
 // h2c 帧类型（RFC 9113）。
 const (
 	h2FrameData         = 0x0
