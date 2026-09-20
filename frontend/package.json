@@ -5,14 +5,24 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build && rm -rf ../internal/core/adminweb/dist && cp -R dist ../internal/core/adminweb/dist",
+    "build": "next build && rm -rf ../internal/core/adminweb/dist && cp -R out ../internal/core/adminweb/dist",
     "start": "next start",
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:i18n": "bun run scripts/check-skip-path-by-phase.ts",
+    "check:skip-path-contract": "bun run scripts/check-skip-path-by-phase.ts",
+    "check:auth-refresh-contract": "bun run scripts/check-auth-refresh-contract.ts",
+    "check:login-form-contract": "bun run scripts/check-login-form-contract.ts",
+    "check:rule-pattern-roundtrip": "bun run scripts/check-rule-pattern-roundtrip.ts",
+    "check:site-cache-contract": "bun run scripts/check-site-cache-contract.ts",
+    "check:site-challenge-contract": "bun run scripts/check-site-challenge-contract.ts",
+    "check:site-protection-contract": "bun run scripts/check-site-protection-contract.ts",
+    "check:api-route-contract": "bun run scripts/check-api-route-contract.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",
+    "@next/bundle-analyzer": "^16.3.5",
     "@tabler/icons-react": "^3.44.0",
     "@types/lodash-es": "^4.17.12",
     "class-variance-authority": "^0.7.1",
@@ -26,7 +36,8 @@
     "next-themes": "^0.4.6",
     "radix-ui": "^1.6.0",
     "react": "19.2.4",
-    "react-dom": "19.2.4",
+    "react-day-picker": "^10.0.1",
+    "react-dom": "19.2.7",
     "react-hook-form": "^7.80.0",
     "react-i18next": "^17.0.8",
     "recharts": "^3.9.1",
@@ -43,10 +54,10 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.6",
+    "eslint-config-next": "16.2.10",
     "prettier": "^3.8.3",
     "prettier-plugin-tailwindcss": "^0.8.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^6"
   }
 }

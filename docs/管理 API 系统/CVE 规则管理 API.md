@@ -1,7 +1,9 @@
 # CVE 规则管理 API
 
+> [返回 管理 API 系统](管理 API 系统.md)
+
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [cve.go](file://internal/admin/detect/cve.go)
 - [cve_rules.go](file://internal/admin/detect/cve_rules.go)
 - [router.go](file://internal/admin/router.go)

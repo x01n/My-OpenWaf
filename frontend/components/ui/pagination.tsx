@@ -2,7 +2,11 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import { IconChevronLeft, IconChevronRight, IconDots } from "@tabler/icons-react"
+import {
+  IconChevronLeft,
+  IconChevronRight,
+  IconDots,
+} from "@tabler/icons-react"
 
 function Pagination({ className, ...props }: React.ComponentProps<"nav">) {
   return (
@@ -33,31 +37,55 @@ function PaginationItem({ ...props }: React.ComponentProps<"li">) {
   return <li data-slot="pagination-item" {...props} />
 }
 
-type PaginationLinkProps = {
+type PaginationLinkSharedProps = {
   isActive?: boolean
-} & Pick<React.ComponentProps<typeof Button>, "size"> &
-  React.ComponentProps<"a">
+} & Pick<React.ComponentProps<typeof Button>, "size">
 
-function PaginationLink({
-  className,
-  isActive,
-  size = "icon",
-  ...props
-}: PaginationLinkProps) {
+type PaginationLinkProps = PaginationLinkSharedProps &
+  (
+    | React.ComponentProps<"a">
+    | (Omit<React.ComponentProps<"button">, "type"> & {
+        href?: undefined
+        type?: "button"
+      })
+  )
+
+function hasHref(
+  props: PaginationLinkProps
+): props is PaginationLinkSharedProps & React.ComponentProps<"a"> {
+  return "href" in props && props.href !== undefined
+}
+
+function PaginationLink(props: PaginationLinkProps) {
+  const variant = props.isActive ? "outline" : "ghost"
+  if (hasHref(props)) {
+    const { className, isActive, size = "icon", ...anchorProps } = props
+
+    return (
+      <Button asChild variant={variant} size={size} className={cn(className)}>
+        <a
+          aria-current={isActive ? "page" : undefined}
+          data-slot="pagination-link"
+          data-active={isActive}
+          {...anchorProps}
+        />
+      </Button>
+    )
+  }
+
+  const { className, isActive, size = "icon", ...buttonProps } = props
+
   return (
     <Button
-      asChild
-      variant={isActive ? "outline" : "ghost"}
+      variant={variant}
       size={size}
       className={cn(className)}
-    >
-      <a
-        aria-current={isActive ? "page" : undefined}
-        data-slot="pagination-link"
-        data-active={isActive}
-        {...props}
-      />
-    </Button>
+      aria-current={isActive ? "page" : undefined}
+      data-slot="pagination-link"
+      data-active={isActive}
+      {...buttonProps}
+      type="button"
+    />
   )
 }
 
@@ -111,8 +139,7 @@ function PaginationEllipsis({
       )}
       {...props}
     >
-      <IconDots
-      />
+      <IconDots />
       <span className="sr-only">More pages</span>
     </span>
   )

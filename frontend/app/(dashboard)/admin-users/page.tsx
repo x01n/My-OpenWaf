@@ -1,0 +1,427 @@
+"use client"
+
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
+import { PageHeader } from "@/components/page-header"
+import {
+  useAdminUsers,
+  useAdminUserCreate,
+  useAdminUserUpdateRole,
+  useAdminUserUpdatePassword,
+  useAdminUserDelete,
+} from "@/hooks/use-api"
+import { DataTable } from "@/components/data-table"
+import { ConfirmDialog } from "@/components/confirm-dialog"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { toast } from "sonner"
+import { IconPlus, IconTrash, IconLock } from "@tabler/icons-react"
+import type { AdminUser } from "@/lib/types"
+
+function formatTime(t: string | undefined | null): string {
+  if (!t) return "-"
+  return new Date(t).toLocaleString()
+}
+
+function roleBadgeVariant(role: string): "default" | "secondary" | "outline" {
+  switch (role) {
+    case "admin":
+      return "default"
+    case "operator":
+      return "secondary"
+    default:
+      return "outline"
+  }
+}
+
+export default function AdminUsersPage() {
+  const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin"
+  const { data, isLoading, error, mutate } = useAdminUsers()
+  const { execute: createUser, loading: createLoading } = useAdminUserCreate()
+  const { execute: updateRole } = useAdminUserUpdateRole()
+  const { execute: updatePassword, loading: pwdLoading } =
+    useAdminUserUpdatePassword()
+  const { execute: deleteUser, loading: deleteLoading } = useAdminUserDelete()
+
+  const [createOpen, setCreateOpen] = useState(false)
+  const [passwordOpen, setPasswordOpen] = useState(false)
+  const [deleteId, setDeleteId] = useState<number | null>(null)
+  const [passwordTarget, setPasswordTarget] = useState<AdminUser | null>(null)
+  const [newPassword, setNewPassword] = useState("")
+  const [form, setForm] = useState({
+    username: "",
+    password: "",
+    role: "operator",
+  })
+
+  const users: AdminUser[] = data || []
+
+  const currentUser = user?.username ?? null
+
+  const handleCreate = async () => {
+    if (!canManage || !form.username.trim() || !form.password.trim()) return
+    try {
+      await createUser({
+        username: form.username.trim(),
+        password: form.password.trim(),
+        role: form.role,
+      })
+      toast.success(t("adminUsers.createSuccess"))
+      setCreateOpen(false)
+      setForm({ username: "", password: "", role: "operator" })
+      mutate()
+    } catch {
+      toast.error(t("adminUsers.createFailed"))
+    }
+  }
+
+  const handleRoleChange = async (user: AdminUser, newRole: string) => {
+    if (!canManage) return
+    try {
+      await updateRole({ id: user.id, role: newRole })
+      toast.success(t("adminUsers.updateRoleSuccess"))
+      mutate()
+    } catch {
+      toast.error(t("adminUsers.updateRoleFailed"))
+    }
+  }
+
+  const handlePasswordChange = async () => {
+    if (!canManage || !passwordTarget || !newPassword.trim()) return
+    try {
+      await updatePassword({
+        id: passwordTarget.id,
+        password: newPassword.trim(),
+      })
+      toast.success(t("adminUsers.updatePasswordSuccess"))
+      setPasswordOpen(false)
+      setPasswordTarget(null)
+      setNewPassword("")
+    } catch {
+      toast.error(t("adminUsers.updatePasswordFailed"))
+    }
+  }
+
+  const handleDeleteClick = (user: AdminUser) => {
+    if (!canManage) return
+    if (user.username === currentUser) {
+      toast.error(t("adminUsers.cannotDeleteSelf"))
+      return
+    }
+    setDeleteId(user.id)
+  }
+
+  const confirmDelete = async () => {
+    if (!canManage || !deleteId) return
+    try {
+      await deleteUser(deleteId)
+      toast.success(t("common.deleteSuccess"))
+      setDeleteId(null)
+      mutate()
+    } catch {
+      toast.error(t("common.deleteFailed"))
+    }
+  }
+
+  const roleLabel = (role: string) => {
+    switch (role) {
+      case "admin":
+        return t("adminUsers.roleAdmin")
+      case "operator":
+        return t("adminUsers.roleOperator")
+      case "readonly":
+        return t("adminUsers.roleReadonly")
+      default:
+        return role
+    }
+  }
+
+  const columns = [
+    {
+      key: "username",
+      title: t("adminUsers.username"),
+      render: (row: AdminUser) => (
+        <span
+          className="block max-w-[180px] truncate font-medium"
+          title={row.username}
+        >
+          {row.username}
+        </span>
+      ),
+    },
+    {
+      key: "role",
+      title: t("adminUsers.role"),
+      render: (row: AdminUser) => (
+        <Select
+          value={row.role}
+          onValueChange={(val) => handleRoleChange(row, val)}
+          disabled={!canManage || row.username === currentUser}
+        >
+          <SelectTrigger className="h-8 w-28">
+            <SelectValue>
+              <Badge variant={roleBadgeVariant(row.role)}>
+                {roleLabel(row.role)}
+              </Badge>
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="admin">{t("adminUsers.roleAdmin")}</SelectItem>
+            <SelectItem value="operator">
+              {t("adminUsers.roleOperator")}
+            </SelectItem>
+            <SelectItem value="readonly">
+              {t("adminUsers.roleReadonly")}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      ),
+    },
+    {
+      key: "created_at",
+      title: t("adminUsers.createdAt"),
+      render: (row: AdminUser) => (
+        <span className="text-sm text-muted-foreground">
+          {formatTime(row.created_at)}
+        </span>
+      ),
+    },
+    {
+      key: "last_login",
+      title: t("adminUsers.lastLogin"),
+      render: (row: AdminUser) => (
+        <span className="text-sm text-muted-foreground">
+          {row.last_login ? formatTime(row.last_login) : t("adminUsers.never")}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      title: t("common.action"),
+      width: "120px",
+      render: (row: AdminUser) => (
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => {
+              setPasswordTarget(row)
+              setPasswordOpen(true)
+            }}
+            title={t("adminUsers.changePassword")}
+            disabled={!canManage}
+          >
+            <IconLock className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => handleDeleteClick(row)}
+            className="text-destructive hover:text-destructive"
+            disabled={!canManage || row.username === currentUser}
+          >
+            <IconTrash className="h-4 w-4" />
+          </Button>
+        </div>
+      ),
+    },
+  ]
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title={t("adminUsers.title")}
+        description={t("adminUsers.description")}
+        actions={
+          <Button onClick={() => setCreateOpen(true)} disabled={!canManage}>
+            <IconPlus className="mr-2 h-4 w-4" />
+            {t("adminUsers.create")}
+          </Button>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.adminOnlyHint")}</AlertTitle>
+        </Alert>
+      )}
+
+      <DataTable
+        columns={columns}
+        data={users}
+        loading={isLoading}
+        rowKey={(row) => row.id}
+        emptyText={t("adminUsers.empty")}
+      />
+
+      {/* 创建管理员对话框 */}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("adminUsers.create")}</DialogTitle>
+            <DialogDescription>{t("adminUsers.description")}</DialogDescription>
+          </DialogHeader>
+          <fieldset
+            disabled={!canManage}
+            className="m-0 space-y-4 border-0 p-0"
+          >
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="admin-username">
+                  {t("adminUsers.username")}
+                </Label>
+                <Input
+                  id="admin-username"
+                  value={form.username}
+                  maxLength={64}
+                  onChange={(e) =>
+                    setForm({ ...form, username: e.target.value })
+                  }
+                  placeholder={t("adminUsers.usernamePlaceholder")}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="admin-password">
+                  {t("adminUsers.password")}
+                </Label>
+                <Input
+                  id="admin-password"
+                  type="password"
+                  value={form.password}
+                  onChange={(e) =>
+                    setForm({ ...form, password: e.target.value })
+                  }
+                  placeholder={t("adminUsers.passwordPlaceholder")}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="admin-role">{t("adminUsers.role")}</Label>
+                <Select
+                  value={form.role}
+                  disabled={!canManage}
+                  onValueChange={(val) => setForm({ ...form, role: val })}
+                >
+                  <SelectTrigger id="admin-role">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="admin">
+                      {t("adminUsers.roleAdmin")}
+                    </SelectItem>
+                    <SelectItem value="operator">
+                      {t("adminUsers.roleOperator")}
+                    </SelectItem>
+                    <SelectItem value="readonly">
+                      {t("adminUsers.roleReadonly")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </fieldset>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              onClick={handleCreate}
+              disabled={
+                !canManage ||
+                createLoading ||
+                !form.username.trim() ||
+                !form.password.trim()
+              }
+            >
+              {createLoading ? t("common.submitting") : t("common.create")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 修改密码对话框 */}
+      <Dialog open={passwordOpen} onOpenChange={setPasswordOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {t("adminUsers.changePassword")} - {passwordTarget?.username}
+            </DialogTitle>
+            <DialogDescription>{t("adminUsers.description")}</DialogDescription>
+          </DialogHeader>
+          <fieldset
+            disabled={!canManage}
+            className="m-0 space-y-4 border-0 p-0"
+          >
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="admin-new-password">
+                  {t("adminUsers.newPassword")}
+                </Label>
+                <Input
+                  id="admin-new-password"
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder={t("adminUsers.newPasswordPlaceholder")}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handlePasswordChange()
+                  }}
+                />
+              </div>
+            </div>
+          </fieldset>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPasswordOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              onClick={handlePasswordChange}
+              disabled={!canManage || pwdLoading || !newPassword.trim()}
+            >
+              {pwdLoading ? t("common.submitting") : t("common.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 删除确认 */}
+      <ConfirmDialog
+        open={deleteId !== null}
+        onOpenChange={(open) => !open && setDeleteId(null)}
+        title={t("common.confirm")}
+        description={t("adminUsers.deleteConfirm")}
+        onConfirm={confirmDelete}
+        loading={deleteLoading}
+      />
+    </div>
+  )
+}

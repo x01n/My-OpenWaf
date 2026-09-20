@@ -1,0 +1,52 @@
+//go:build !cgo || !quickjs
+
+package jsplugin
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"My-OpenWaf/internal/store"
+)
+
+func TestStubReportsUnavailable(t *testing.T) {
+	if _, err := Compile("test", "function handle() {}", ScriptOptions{}); !errors.Is(err, ErrCGODisabled) {
+		t.Fatalf("Compile error = %v, want ErrCGODisabled", err)
+	}
+	if _, err := NewEngine(EngineOptions{}); !errors.Is(err, ErrCGODisabled) {
+		t.Fatalf("NewEngine error = %v, want ErrCGODisabled", err)
+	}
+	var engine Engine
+	if _, err := engine.Evaluate(context.Background(), nil, RequestSnapshot{}); !errors.Is(err, ErrCGODisabled) {
+		t.Fatalf("Evaluate error = %v, want ErrCGODisabled", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+}
+
+func TestPublicTypesAndSiteMatching(t *testing.T) {
+	script := &Script{}
+	if !script.AppliesTo(1) {
+		t.Fatal("zero-value script should be global for interface-level checks")
+	}
+	invalid := MutationPlan{SetHeaders: map[string]string{"X-Test": "bad\r\nvalue"}}
+	if err := validateMutationPlan(invalid); err == nil {
+		t.Fatal("CR/LF mutation header should be rejected")
+	}
+	if err := validateMutationPlan(MutationPlan{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStubRejectsResponseStageBeforeRuntimeError(t *testing.T) {
+	engine := &Engine{}
+	script := &Script{stage: store.JSStageResponse}
+	if _, err := engine.Evaluate(context.Background(), script, RequestSnapshot{}); !errors.Is(err, ErrResponseStageUnavailable) {
+		t.Fatalf("Evaluate error = %v, want %v", err, ErrResponseStageUnavailable)
+	}
+	if _, err := engine.Validate(context.Background(), script, RequestSnapshot{}); !errors.Is(err, ErrResponseStageUnavailable) {
+		t.Fatalf("Validate error = %v, want %v", err, ErrResponseStageUnavailable)
+	}
+}

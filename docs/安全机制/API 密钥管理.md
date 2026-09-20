@@ -1,5 +1,7 @@
 # API 密钥管理
 
+> [返回 安全机制](安全机制.md)
+
 <cite>
 **本文档引用的文件**
 - [cmd/main.go](file://cmd/main.go)

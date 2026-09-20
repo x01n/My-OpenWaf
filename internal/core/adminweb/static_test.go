@@ -3,6 +3,9 @@ package adminweb
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -131,5 +134,135 @@ func TestReadRouteFileResolvesNextRSCSegmentData(t *testing.T) {
 	}
 	if string(data) != "ip-lists-rsc" {
 		t.Fatalf("expected ip-lists-rsc, got %q", string(data))
+	}
+}
+
+func TestContentTypeAllSuffixes(t *testing.T) {
+	cases := []struct {
+		name     string
+		expected string
+	}{
+		{"page.html", "text/html; charset=utf-8"},
+		{"app.js", "application/javascript"},
+		{"style.css", "text/css"},
+		{"data.json", "application/json"},
+		{"icon.svg", "image/svg+xml"},
+		{"logo.png", "image/png"},
+		{"favicon.ico", "image/x-icon"},
+		{"font.woff2", "font/woff2"},
+		{"binary.bin", "application/octet-stream"},
+		{"noextension", "application/octet-stream"},
+	}
+	for _, tc := range cases {
+		got := ContentType(tc.name)
+		if got != tc.expected {
+			t.Errorf("ContentType(%q) = %q, want %q", tc.name, got, tc.expected)
+		}
+	}
+}
+
+func TestResolveFSDiskDirReturnsOsDir(t *testing.T) {
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "test.html")
+	if err := os.WriteFile(testFile, []byte("<html></html>"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fsys, err := ResolveFS(dir)
+	if err != nil {
+		t.Fatalf("ResolveFS(%q) error: %v", dir, err)
+	}
+	data, err := fs.ReadFile(fsys, "test.html")
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if string(data) != "<html></html>" {
+		t.Errorf("unexpected content: %q", string(data))
+	}
+}
+
+func TestResolveFSWhitespaceDiskDirIsTrimmed(t *testing.T) {
+	dir := t.TempDir()
+	fsys, err := ResolveFS("  " + dir + "  ")
+	if err != nil {
+		t.Fatalf("ResolveFS with whitespace error: %v", err)
+	}
+	if fsys == nil {
+		t.Fatal("expected non-nil fs.FS")
+	}
+}
+
+func TestRouteCandidatesEmptyAndRoot(t *testing.T) {
+	for _, p := range []string{"", "/", "   "} {
+		got := routeCandidates(p)
+		if len(got) == 0 || got[0] != "index.html" {
+			t.Errorf("routeCandidates(%q) = %v, want [index.html ...]", p, got)
+		}
+	}
+}
+
+func TestRouteCandidatesTrailingSlashGeneratesIndexHTML(t *testing.T) {
+	got := routeCandidates("/dashboard/")
+	found := false
+	for _, c := range got {
+		if c == "dashboard/index.html" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected dashboard/index.html in candidates, got %v", got)
+	}
+}
+
+// 单段路径带扩展名时不产生 .html 候选（无动态变体）。
+func TestRouteCandidatesSingleSegmentWithExtensionSkipsHTMLVariants(t *testing.T) {
+	got := routeCandidates("/data.json")
+	for _, c := range got {
+		if strings.HasSuffix(c, ".html") {
+			t.Errorf("single-segment path with extension should not produce .html candidates, got %v", got)
+		}
+	}
+}
+
+func TestUniqueStringsDeduplicatesAndPreservesOrder(t *testing.T) {
+	input := []string{"a", "b", "a", "", "c", "b"}
+	got := uniqueStrings(input)
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("uniqueStrings = %v, want %v", got, want)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("uniqueStrings[%d] = %q, want %q", i, got[i], v)
+		}
+	}
+}
+
+func TestDynamicRouteVariantsReplacesSegments(t *testing.T) {
+	variants := dynamicRouteVariants("sites/123")
+	found := false
+	for _, v := range variants {
+		if v == "sites/_" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected sites/_ in variants, got %v", variants)
+	}
+}
+
+func TestDynamicRouteVariantsSingleSegmentReturnsNil(t *testing.T) {
+	got := dynamicRouteVariants("index")
+	if len(got) != 0 {
+		t.Errorf("expected no variants for single segment, got %v", got)
+	}
+}
+
+func TestOsDirOpenMissingFileReturnsError(t *testing.T) {
+	dir := osDir(t.TempDir())
+	_, err := dir.Open("nonexistent.html")
+	if err == nil {
+		t.Fatal("expected error opening nonexistent file, got nil")
 	}
 }

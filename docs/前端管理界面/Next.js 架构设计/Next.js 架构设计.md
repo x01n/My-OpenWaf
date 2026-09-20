@@ -1,5 +1,7 @@
 # Next.js 架构设计
 
+> [返回 前端管理界面](../前端管理界面.md)
+
 <cite>
 **本文档引用的文件**
 - [frontend/app/layout.tsx](file://frontend/app/layout.tsx)

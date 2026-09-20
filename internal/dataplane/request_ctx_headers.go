@@ -1,18 +1,23 @@
 package dataplane
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/waf/bot"
 )
 
 const (
 	InternalHTTP3ProtoHeader           = "X-OpenWaf-Internal-Proto"
+	InternalHTTP3CancelTokenHeader     = "X-OpenWaf-Internal-Cancel-Token"
 	InternalHTTP3TLSVersionHeader      = "X-OpenWaf-Internal-TLS-Version"
 	InternalHTTP3TLSSNIHeader          = "X-OpenWaf-Internal-TLS-SNI"
 	InternalHTTP3TLSALPNHeader         = "X-OpenWaf-Internal-TLS-ALPN"
@@ -27,11 +32,54 @@ const (
 	internalHTTP3ContextKey = "dataplane_internal_http3"
 )
 
+var internalHTTP3CancelSignals = struct {
+	sync.Mutex
+	items map[string]<-chan struct{}
+}{items: make(map[string]<-chan struct{})}
+
+func RegisterInternalHTTP3CancelSignal(done <-chan struct{}) (string, func()) {
+	if done == nil {
+		return "", func() {}
+	}
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", func() {}
+	}
+	token := hex.EncodeToString(raw[:])
+	internalHTTP3CancelSignals.Lock()
+	internalHTTP3CancelSignals.items[token] = done
+	internalHTTP3CancelSignals.Unlock()
+
+	unregister := func() {
+		internalHTTP3CancelSignals.Lock()
+		delete(internalHTTP3CancelSignals.items, token)
+		internalHTTP3CancelSignals.Unlock()
+	}
+	return token, unregister
+}
+
+func takeInternalHTTP3CancelSignal(token string) (<-chan struct{}, bool) {
+	if token == "" {
+		return nil, false
+	}
+	internalHTTP3CancelSignals.Lock()
+	done, ok := internalHTTP3CancelSignals.items[token]
+	delete(internalHTTP3CancelSignals.items, token)
+	internalHTTP3CancelSignals.Unlock()
+	return done, ok && done != nil
+}
+
 // populateRequestCtxHeaders copies request headers into RequestCtx using
 // lowercase keys only. HeaderKeys still preserves the original order and case
 // for header-order fingerprinting and logging.
 func populateRequestCtxHeaders(reqCtx *pipeline.RequestCtx, c *app.RequestContext) {
 	reqCtx.HeadersLowercase = true
+	if reqCtx.Headers == nil {
+		reqCtx.Headers = make(map[string]string)
+	} else {
+		clear(reqCtx.Headers)
+	}
+	reqCtx.ClearHeaderKeys()
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := string(k)
 		lower := lowerRequestHeaderName(key)
@@ -158,8 +206,13 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	curves := parseInternalHTTP3Uint16List(trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSCurvesHeader)))
 	pointFormats := parseInternalHTTP3Uint8List(trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSPointFormatsHeader)))
 
+	cancelToken := trimRequestHeaderValue(c.GetHeader(InternalHTTP3CancelTokenHeader))
+	if done, ok := takeInternalHTTP3CancelSignal(cancelToken); ok {
+		c.Set(InternalHTTP3CancelTokenHeader, done)
+	}
 	clearInternalHTTP3RequestMetadataHeaders(c)
 	c.Set(internalHTTP3ContextKey, true)
+	security.MarkTrustedInboundHTTP3(c)
 
 	if version == "" && sni == "" && alpn == "" && ja3 == "" && ja3Hash == "" && ja4 == "" &&
 		len(cipherSuites) == 0 && len(extensions) == 0 && len(curves) == 0 && len(pointFormats) == 0 {
@@ -205,6 +258,7 @@ func clearInternalHTTP3RequestMetadataHeaders(c *app.RequestContext) {
 		return
 	}
 	c.Request.Header.Del(InternalHTTP3ProtoHeader)
+	c.Request.Header.Del(InternalHTTP3CancelTokenHeader)
 	c.Request.Header.Del(InternalHTTP3TLSVersionHeader)
 	c.Request.Header.Del(InternalHTTP3TLSSNIHeader)
 	c.Request.Header.Del(InternalHTTP3TLSALPNHeader)
@@ -311,4 +365,14 @@ func hasInternalHTTP3Marker(c *app.RequestContext) bool {
 	}
 	return strings.EqualFold(trimRequestHeaderValue(c.GetHeader(InternalHTTP3ProtoHeader)), "h3") &&
 		strings.EqualFold(trimRequestHeaderValue(c.GetHeader("X-Forwarded-Proto")), "h3")
+}
+
+// TrustedInboundForwardedProto reports the authenticated inbound protocol.
+// HTTP/3 loopback metadata is accepted only after applyInternalHTTP3RequestMetadata
+// has verified both the marker and the loopback peer.
+func TrustedInboundForwardedProto(c *app.RequestContext) string {
+	if hasInternalHTTP3Marker(c) {
+		return "h3"
+	}
+	return security.TrustedInboundForwardedProto(c)
 }

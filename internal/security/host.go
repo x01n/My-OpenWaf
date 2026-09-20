@@ -25,4 +25,3 @@ func NormalizeHostHeaderValue(raw string) (string, error) {
 	}
 	return normalized, nil
 }
-

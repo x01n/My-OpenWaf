@@ -30,6 +30,44 @@ func TestProtectionConfigUnmarshalWithCCRulesArray(t *testing.T) {
 	}
 }
 
+// TestBindSiteFromRequestBodyChallengeActionNullInherits 覆盖站点质询策略
+// 三态语义：显式 JSON null 置 nil（回到继承全局），不传时保留原值。
+func TestBindSiteFromRequestBodyChallengeActionNullInherits(t *testing.T) {
+	oldAction := "shield_challenge"
+	oldCaptcha := "rotate"
+	existing := store.Site{
+		Host:            "old.example",
+		ChallengeAction: &oldAction,
+		SiteCaptchaType: &oldCaptcha,
+	}
+
+	// 显式 null：清除站点覆盖。
+	if err := BindSiteFromRequestBody([]byte(`{"challenge_action":null,"captcha_type":null}`), &existing); err != nil {
+		t.Fatal(err)
+	}
+	if existing.ChallengeAction != nil {
+		t.Fatalf("challenge_action = %#v, want nil", existing.ChallengeAction)
+	}
+	if existing.SiteCaptchaType != nil {
+		t.Fatalf("captcha_type = %#v, want nil", existing.SiteCaptchaType)
+	}
+
+	// 不传：保留原值（Update 场景）。
+	newAction := "captcha_challenge"
+	newCaptcha := "slide"
+	existing.ChallengeAction = &newAction
+	existing.SiteCaptchaType = &newCaptcha
+	if err := BindSiteFromRequestBody([]byte(`{"host":"new.example"}`), &existing); err != nil {
+		t.Fatal(err)
+	}
+	if existing.ChallengeAction == nil || *existing.ChallengeAction != newAction {
+		t.Fatalf("challenge_action should be preserved, got %#v", existing.ChallengeAction)
+	}
+	if existing.SiteCaptchaType == nil || *existing.SiteCaptchaType != newCaptcha {
+		t.Fatalf("captcha_type should be preserved, got %#v", existing.SiteCaptchaType)
+	}
+}
+
 func TestBindSiteFromRequestBody_JSONArraysBecomeStrings(t *testing.T) {
 	body := []byte(`{
 		"host": "a.example",
@@ -59,10 +97,12 @@ func TestBindSiteFromRequestBody_JSONArraysBecomeStrings(t *testing.T) {
 
 func TestBindSiteFromRequestBodyPreservesMissingNullableOverrides(t *testing.T) {
 	disabled := false
+	skipPathByPhase := `{"owasp_default":["/healthz"]}`
 	existing := store.Site{
 		Host:                 "old.example",
 		BotProtectionEnabled: &disabled,
 		OWASPEnabled:         &disabled,
+		SkipPathByPhase:      &skipPathByPhase,
 		CacheRules:           `[{"type":"suffix","value":".js","ttl":60}]`,
 	}
 
@@ -78,6 +118,9 @@ func TestBindSiteFromRequestBodyPreservesMissingNullableOverrides(t *testing.T) 
 	}
 	if existing.OWASPEnabled == nil || *existing.OWASPEnabled {
 		t.Fatalf("owasp override should be preserved as false, got %#v", existing.OWASPEnabled)
+	}
+	if existing.SkipPathByPhase == nil || *existing.SkipPathByPhase != skipPathByPhase {
+		t.Fatalf("skip path override should be preserved, got %#v", existing.SkipPathByPhase)
 	}
 	if existing.CacheRules != `[{"type":"suffix","value":".js","ttl":60}]` {
 		t.Fatalf("cache rules changed: %s", existing.CacheRules)
@@ -113,6 +156,85 @@ func TestBindSiteFromRequestBodyPreservesMissingJSONBlobFields(t *testing.T) {
 	}
 }
 
+func TestBindSiteFromRequestBodyHandlesSkipPathByPhase(t *testing.T) {
+	inherited := `{"owasp_default":["/old"]}`
+	tests := []struct {
+		name       string
+		body       []byte
+		wantNil    bool
+		wantErr    bool
+		wantStored string
+	}{
+		{
+			name:       "object",
+			body:       []byte(`{"skip_path_by_phase":{"owasp_default":["/healthz"]}}`),
+			wantStored: `{"owasp_default":["/healthz"]}`,
+		},
+		{
+			name:       "string",
+			body:       []byte(`{"skip_path_by_phase":"{\"cve_detection\":[\"/readyz\"]}"}`),
+			wantStored: `{"cve_detection":["/readyz"]}`,
+		},
+		{
+			name:    "null inherits global configuration",
+			body:    []byte(`{"skip_path_by_phase":null}`),
+			wantNil: true,
+		},
+		{
+			name:    "invalid JSON string",
+			body:    []byte(`{"skip_path_by_phase":"{not-json}"}`),
+			wantErr: true,
+		},
+		{
+			name:    "unknown phase",
+			body:    []byte(`{"skip_path_by_phase":{"unknown_phase":["/healthz"]}}`),
+			wantErr: true,
+		},
+		{
+			name:    "empty path list",
+			body:    []byte(`{"skip_path_by_phase":{"owasp_default":[]}}`),
+			wantErr: true,
+		},
+		{
+			name:    "blank path",
+			body:    []byte(`{"skip_path_by_phase":{"owasp_default":[" "]}}`),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := store.Site{SkipPathByPhase: &inherited}
+			err := BindSiteFromRequestBody(tt.body, &item)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("BindSiteFromRequestBody() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if item.SkipPathByPhase == nil || *item.SkipPathByPhase != inherited {
+					t.Fatalf("invalid value changed override: %#v", item.SkipPathByPhase)
+				}
+				return
+			}
+			if tt.wantNil && item.SkipPathByPhase != nil {
+				t.Fatalf("skip_path_by_phase = %#v, want nil", item.SkipPathByPhase)
+			}
+			if tt.wantStored != "" && (item.SkipPathByPhase == nil || *item.SkipPathByPhase != tt.wantStored) {
+				t.Fatalf("skip_path_by_phase = %#v, want %q", item.SkipPathByPhase, tt.wantStored)
+			}
+		})
+	}
+}
+
+func TestBindSiteFromRequestBodySkipPathByPhaseEmptyObjectOverridesGlobal(t *testing.T) {
+	inherited := `{"owasp_default":["/old"]}`
+	item := store.Site{SkipPathByPhase: &inherited}
+	if err := BindSiteFromRequestBody([]byte(`{"skip_path_by_phase":{}}`), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.SkipPathByPhase == nil || *item.SkipPathByPhase != "{}" {
+		t.Fatalf("skip_path_by_phase = %#v, want non-nil empty-object override", item.SkipPathByPhase)
+	}
+}
+
 func TestValidateSiteUpstreamURLsAcceptsSupportedSchemes(t *testing.T) {
 	input := `["http://127.0.0.1:9000","https://origin.example/base","h2c://127.0.0.1:9001","h3://127.0.0.1:9443"]`
 	if err := ValidateSiteUpstreamURLs(input); err != nil {
@@ -136,7 +258,7 @@ func TestValidateSiteUpstreamURLsRejectsInvalidValues(t *testing.T) {
 		{name: "empty", input: "", want: "upstream_urls is required"},
 		{name: "invalid json array", input: `["http://127.0.0.1:9000", 1]`, want: "upstream_urls must be a string array or comma-separated string"},
 		{name: "missing scheme", input: "127.0.0.1:9000", want: "upstream_urls contains invalid URL"},
-		{name: "unsupported scheme", input: "ftp://127.0.0.1:21", want: "upstream_urls supports only http, https, h2c, h3"},
+		{name: "unsupported scheme", input: "ftp://127.0.0.1:21", want: "upstream_urls supports only http, https, h2c, h3, tls, grpc, grpcs, grpc+tls, grpc+https"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

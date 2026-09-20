@@ -9,18 +9,23 @@ import (
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/dynamic"
+	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/jsplugin"
+	"My-OpenWaf/internal/waf/luaplugin"
+	"My-OpenWaf/internal/waf/pageconfig"
 )
 
 // CompiledRule is a lightweight runtime rule (MVP ACL parser).
 type CompiledRule struct {
-	ID         uint
-	Phase      store.RulePhase
-	Action     store.RuleAction
-	Priority   int
-	Kind       string
-	Arg        string
-	StatusCode int    // custom HTTP status code (0 = default)
-	RedirectTo string // URL for redirect action
+	ID          uint
+	Phase       store.RulePhase
+	Action      store.RuleAction
+	Priority    int
+	Kind        string
+	Arg         string
+	StatusCode  int    // custom HTTP status code (0 = default)
+	RedirectTo  string // URL for redirect action
+	CaptchaType string // Rule-level CAPTCHA type; empty inherits global protection config.
 }
 
 // SiteRuntime holds resolved site for routing.
@@ -45,12 +50,18 @@ type SiteRuntime struct {
 	// Forwarding settings (now in Site model)
 	XFFMode              string
 	TrustedCIDR          string
+	ClientIPHeaderOrder  []string
 	PreserveOriginalHost bool
 
 	// Per-site maintenance
 	MaintenanceEnabled bool
 	MaintenanceHTML    string
 	MaintenanceStatus  int
+
+	// Per-site challenge policy overrides (site-level challenge_action / captcha_type).
+	// 空串 = 站点未覆盖，数据面回退到全局 ProtectionConfig；非空 = 站点覆盖值。
+	ChallengeAction      string
+	ChallengeCaptchaType string
 
 	// Per-site block page
 	BlockHTML   string
@@ -75,25 +86,132 @@ type SiteRuntime struct {
 	// DynamicProtection holds the dynamic protection config (HTML obfuscation, JS obfuscation, watermark).
 	DynamicProtection dynamic.ProtectionConfig
 
+	// AccessControl holds the site access control gate config (nil = disabled).
+	AccessControl *AccessControlConfig
+
+	ResponseCompressionConfigured  bool
+	ResponseCompressionEnabled     bool
+	ResponseCompressionGzipEnabled bool
+	ResponseCompressionMinBytes    int
+	BrotliEnabled                  bool
+
 	// Upstream host header override (for explicit upstream host resolution).
 	UpstreamHostHeader string
+
+	// 站点级 IP 黑白名单（仅对该站点生效）。
+	SiteIPWhitelist []iprep.IPListEntry
+	SiteIPBlacklist []iprep.IPListEntry
 }
 
+// AccessControlConfig 站点访问控制运行时配置。
+type AccessControlConfig struct {
+	Enabled            bool
+	SharedPasswordHash string
+	SessionTTL         int
+	Providers          []AccessControlProvider
+	PathRules          []AccessControlPathRule
+}
+
+// AccessControlProvider 认证提供方运行时配置。
+type AccessControlProvider struct {
+	ID       uint
+	Type     string
+	Name     string
+	Priority int
+	Config   string // OAuth/OIDC 配置 JSON（密文形式，数据面解密后使用）
+}
+
+// AccessControlPathRule 路径访问控制规则。
+type AccessControlPathRule struct {
+	Path     string
+	Action   string
+	Priority int
+}
+
+// TLSCertificateState describes whether an SNI route has a usable configured certificate.
+type TLSCertificateState string
+
+const (
+	TLSCertificateStateValid        TLSCertificateState = "valid"
+	TLSCertificateStateUnconfigured TLSCertificateState = "unconfigured"
+	TLSCertificateStateInvalid      TLSCertificateState = "invalid"
+)
+
+// SnapshotConfigDiagnostic 描述当前快照中被跳过的无效配置。
+//
+// 该结构只保留管理端定位记录所需的稳定标识，不包含原始配置值、备注或解析错误文本。
+type SnapshotConfigDiagnostic struct {
+	Source           string `json:"source"`
+	Field            string `json:"field"`
+	Error            string `json:"error"`
+	HandlingStrategy string `json:"handling_strategy"`
+	Kind             string `json:"kind"`
+	Reason           string `json:"reason"`
+	PolicyID         uint   `json:"policy_id,omitempty"`
+	RuleID           string `json:"rule_id,omitempty"`
+	IPListEntryID    uint   `json:"ip_list_entry_id,omitempty"`
+	CertificateID    uint   `json:"certificate_id,omitempty"`
+	ListenerID       uint   `json:"listener_id,omitempty"`
+	Scope            string `json:"scope,omitempty"`
+	SiteID           uint   `json:"site_id,omitempty"`
+}
+
+const (
+	DiagnosticSourcePolicyOWASP  = "policy_owasp_rule_configs"
+	DiagnosticSourceIPList       = "ip_list_entries"
+	DiagnosticSourceSites        = "sites"
+	DiagnosticSourceListeners    = "site_listeners"
+	DiagnosticSourceCertificates = "certificates"
+
+	DiagnosticFieldWhitelistJSON   = "whitelist_json"
+	DiagnosticFieldValue           = "value"
+	DiagnosticFieldCertificateID   = "cert_id"
+	DiagnosticFieldCertificatePair = "certificate_key_pair"
+	DiagnosticFieldUpstreamMTLS    = "upstream_tls_client_cert"
+
+	DiagnosticHandlingSkipInvalidField         = "skip_invalid_field"
+	DiagnosticHandlingSkipInvalidEntry         = "skip_invalid_entry"
+	DiagnosticHandlingRejectInvalidCertificate = "reject_invalid_certificate"
+)
+
 // Snapshot is an immutable view for the dataplane (atomic pointer swap).
+
 type Snapshot struct {
 	Revision uint64
 
-	Sites map[string]SiteRuntime
+	Sites map[string]*SiteRuntime
 
 	NetworkDefaults NetworkDefaults
 	TLSDefaults     TLSDefaults
 
 	DefaultBlockHTML string
+	CaptchaPage      pageconfig.CaptchaPageConfig
+	ChallengePage    pageconfig.ChallengePageConfig
+	BlockPage        pageconfig.BlockPageConfig
 
-	SiteTLSCertBySNI map[string]tls.Certificate
+	SiteTLSCertBySNI      map[string]tls.Certificate
+	SiteTLSCertStateBySNI map[string]TLSCertificateState
 
 	// Protection settings loaded from SystemSettings.
 	Protection store.ProtectionConfig
+
+	// LuaPlugins 是已编译的自定义 Lua 策略脚本。
+	//
+	// 在 snapshot 构建期编译而非请求期：编译有成本，且语法错误应在 reload 时
+	// 就被发现。单个脚本编译失败不会使整个 snapshot 构建失败——错误记入
+	// LuaPluginErrors 供管理端展示，其余脚本照常生效，避免一处语法错误
+	// 导致整次配置重载失败。
+	LuaPlugins []*luaplugin.Script
+	// LuaPluginErrors 按脚本名记录编译错误。
+	LuaPluginErrors map[string]string
+
+	// JSPlugins 是已编译的 JavaScript 边缘脚本。
+	JSPlugins []*jsplugin.Script
+	// JSPluginErrors 按 JSPluginErrorKey 返回的稳定脚本标识记录编译或元数据错误。
+	JSPluginErrors map[string]string
+
+	// ConfigDiagnostics 记录构建期跳过的无效配置，随快照原子发布。
+	ConfigDiagnostics []SnapshotConfigDiagnostic
 
 	// HTTP2 configuration
 	HTTP2Config HTTP2Config
@@ -130,8 +248,40 @@ func SiteMapKey(bind string, host string) string {
 	return bind + "\x00" + strings.ToLower(strings.TrimSpace(host))
 }
 
+// siteMapKeyNorm builds a map key assuming host is already normalized (lowercase, trimmed, port-stripped).
+func siteMapKeyNorm(bind string, host string) string {
+	return bind + "\x00" + host
+}
+
 func SNICertKey(bind string, sni string) string {
-	return "sni:" + bind + "\x00" + strings.ToLower(strings.TrimSpace(sni))
+	return "sni:" + bind + "\x00" + NormalizeMatchHost(sni)
+}
+
+// TLSCertificateStateForSNI resolves an SNI certificate state using the same
+// exact, wildcard, and catch-all host precedence as site matching.
+func (sn *Snapshot) TLSCertificateStateForSNI(bind string, sni string) (TLSCertificateState, bool) {
+	if sn == nil || sn.SiteTLSCertStateBySNI == nil {
+		return "", false
+	}
+	host := NormalizeMatchHost(sni)
+	if host == "" {
+		return "", false
+	}
+	lookup := func(candidate string) (TLSCertificateState, bool) {
+		state, ok := sn.SiteTLSCertStateBySNI[SNICertKey(bind, candidate)]
+		return state, ok
+	}
+	if state, ok := lookup(host); ok {
+		return state, true
+	}
+	if !isIPAddress(host) {
+		if idx := strings.Index(host, "."); idx > 0 {
+			if state, ok := lookup("*." + host[idx+1:]); ok {
+				return state, true
+			}
+		}
+	}
+	return lookup("*")
 }
 
 func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool) {
@@ -140,54 +290,72 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 		return SiteRuntime{}, false
 	}
 
-	// 1. Exact match on bind+host
-	key := SiteMapKey(bind, host)
+	key := siteMapKeyNorm(bind, host)
+	if rt, ok := sn.Sites[key]; ok {
+		return *rt, true
+	}
+
+	if !isIPAddress(host) {
+		if idx := strings.Index(host, "."); idx > 0 {
+			wild := "*." + host[idx+1:]
+			if rt, ok := sn.Sites[siteMapKeyNorm(bind, wild)]; ok {
+				return *rt, true
+			}
+		}
+	}
+
+	if rt, ok := sn.Sites[siteMapKeyNorm(bind, "*")]; ok {
+		return *rt, true
+	}
+
+	return SiteRuntime{}, false
+}
+
+// MatchSitePtr finds the SiteRuntime pointer for a bind address + host combination.
+// Zero-copy: returns the pointer stored directly in the Sites map.
+func (sn *Snapshot) MatchSitePtr(bind string, hostHeader string) (*SiteRuntime, bool) {
+	host := NormalizeMatchHost(hostHeader)
+	if host == "" {
+		return nil, false
+	}
+
+	key := siteMapKeyNorm(bind, host)
 	if rt, ok := sn.Sites[key]; ok {
 		return rt, true
 	}
 
-	// 2. Wildcard match (only for domain names, not IP addresses)
 	if !isIPAddress(host) {
 		if idx := strings.Index(host, "."); idx > 0 {
 			wild := "*." + host[idx+1:]
-			if rt, ok := sn.Sites[SiteMapKey(bind, wild)]; ok {
+			if rt, ok := sn.Sites[siteMapKeyNorm(bind, wild)]; ok {
 				return rt, true
 			}
 		}
 	}
 
-	// 3. No match — return false. Caller shows "site not found".
-	return SiteRuntime{}, false
-}
+	if rt, ok := sn.Sites[siteMapKeyNorm(bind, "*")]; ok {
+		return rt, true
+	}
 
-// MatchSitePtr finds the SiteRuntime pointer for a bind address + host combination.
-func (sn *Snapshot) MatchSitePtr(bind string, hostHeader string) (*SiteRuntime, bool) {
-	_, ok := sn.MatchSite(bind, hostHeader)
-	if !ok {
-		return nil, false
-	}
-	// Look up the actual map entry to return its address.
-	host := NormalizeMatchHost(hostHeader)
-	if host == "" {
-		return nil, false
-	}
-	key := SiteMapKey(bind, host)
-	if rtPtr, ok := sn.Sites[key]; ok {
-		return &rtPtr, true
-	}
-	if !isIPAddress(host) {
-		if idx := strings.Index(host, "."); idx > 0 {
-			wild := "*." + host[idx+1:]
-			if rtPtr, ok := sn.Sites[SiteMapKey(bind, wild)]; ok {
-				return &rtPtr, true
-			}
-		}
-	}
 	return nil, false
 }
 
 // NormalizeMatchHost lowercases, trims, and strips the port from a host header.
+// Fast path: if the host is already lowercase ASCII with no whitespace or port, returns it without allocation.
 func NormalizeMatchHost(host string) string {
+	// Fast path: check if already normalized (common case for well-behaved clients).
+	needsWork := false
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		if c >= 'A' && c <= 'Z' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ':' {
+			needsWork = true
+			break
+		}
+	}
+	if !needsWork {
+		return host
+	}
+
 	host = strings.ToLower(strings.TrimSpace(host))
 	// Strip port: find last colon and verify everything after is digits.
 	if i := strings.LastIndex(host, ":"); i >= 0 {
@@ -222,14 +390,42 @@ type Holder struct {
 	ptr atomic.Pointer[Snapshot]
 }
 
+// Store publishes a snapshot unconditionally. Use StoreIfNewer for runtime reloads.
 func (h *Holder) Store(s *Snapshot) { h.ptr.Store(s) }
-func (h *Holder) Load() *Snapshot   { return h.ptr.Load() }
+
+// StoreIfNewer publishes s unless a newer revision is already active.
+func (h *Holder) StoreIfNewer(s *Snapshot) bool {
+	if s == nil {
+		return false
+	}
+	for {
+		current := h.ptr.Load()
+		if current != nil && current.Revision >= s.Revision {
+			return false
+		}
+		if h.ptr.CompareAndSwap(current, s) {
+			return true
+		}
+	}
+}
+
+func (h *Holder) Load() *Snapshot { return h.ptr.Load() }
+
+// Shared runtime limits.
+const (
+	WAFBodyScanLimit = 48 * 1024 // 48 KB
+)
+
+// Time constants (seconds).
+const (
+	OneDaySeconds = 86400
+)
 
 // Default security header values.
 const (
-	DefaultExpectCTValue         = "max-age=86400, enforce"
-	DefaultHPKPValue             = ""
-	DefaultHPKPReportOnlyValue   = ""
+	DefaultExpectCTValue       = "max-age=86400, enforce"
+	DefaultHPKPValue           = ""
+	DefaultHPKPReportOnlyValue = ""
 )
 
 // Default response compression settings.

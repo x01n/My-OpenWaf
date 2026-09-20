@@ -15,7 +15,7 @@ func newTestHolder(prot store.ProtectionConfig, rules []snapshot.CompiledRule) *
 	holder := &snapshot.Holder{}
 	holder.Store(&snapshot.Snapshot{
 		Revision: 1,
-		Sites: map[string]snapshot.SiteRuntime{
+		Sites: map[string]*snapshot.SiteRuntime{
 			snapshot.SiteMapKey(":80", "example.com"): {
 				Site:     store.Site{ID: 1, Host: "example.com", Bind: ":80"},
 				Bind:     ":80",
@@ -26,6 +26,23 @@ func newTestHolder(prot store.ProtectionConfig, rules []snapshot.CompiledRule) *
 		Protection: prot,
 	})
 	return holder
+}
+
+func TestConvertAndCompileCarriesCaptchaType(t *testing.T) {
+	compiled := convertAndCompile([]snapshot.CompiledRule{{
+		ID:          12,
+		Phase:       store.PhaseCustom,
+		Action:      store.ActionCaptchaChallenge,
+		Kind:        "block_path",
+		Arg:         "/guarded",
+		CaptchaType: "click",
+	}})
+	if len(compiled) != 1 {
+		t.Fatalf("compiled rule count = %d, want 1", len(compiled))
+	}
+	if compiled[0].CaptchaType != "click" {
+		t.Fatalf("compiled captcha_type = %q, want click", compiled[0].CaptchaType)
+	}
 }
 
 func TestProcessChecksACLBlacklistBeforeBuiltinDetectors(t *testing.T) {
@@ -77,6 +94,30 @@ func TestProcessHonorsACLPriorityBeforeAllow(t *testing.T) {
 	}
 }
 
+func TestProcessACLAllowDoesNotSkipLaterCustomRule(t *testing.T) {
+	prot := store.DefaultProtectionConfig()
+	holder := newTestHolder(prot, []snapshot.CompiledRule{
+		{ID: 10, Phase: store.PhaseACL, Kind: "allow_ip", Arg: "1.2.3.4", Action: store.ActionAllow, Priority: 1},
+		{ID: 20, Phase: store.PhaseCustom, Kind: "block_path", Arg: "/admin", Action: store.ActionIntercept, Priority: 1},
+	})
+
+	eng := New(holder, nil, nil, nil)
+	result := eng.Process(&pipeline.RequestCtx{
+		Bind:     ":80",
+		Host:     "example.com",
+		Path:     "/admin",
+		ClientIP: []byte{1, 2, 3, 4},
+		Headers:  map[string]string{},
+	})
+
+	if result.Action.Type != action.Intercept {
+		t.Fatalf("later custom action = %q, want %q", result.Action.Type, action.Intercept)
+	}
+	if result.Action.RuleID != 20 {
+		t.Fatalf("later custom rule id = %d, want 20", result.Action.RuleID)
+	}
+}
+
 func TestProcessKeepsHigherPriorityCustomObserveAuditBeforeLaterIntercept(t *testing.T) {
 	prot := store.DefaultProtectionConfig()
 	holder := newTestHolder(prot, []snapshot.CompiledRule{
@@ -114,7 +155,7 @@ func TestProcessDoesNotReuseAntiReplayPhaseAcrossSitesWithSamePolicy(t *testing.
 	holder := &snapshot.Holder{}
 	holder.Store(&snapshot.Snapshot{
 		Revision: 1,
-		Sites: map[string]snapshot.SiteRuntime{
+		Sites: map[string]*snapshot.SiteRuntime{
 			snapshot.SiteMapKey(":80", "disabled.example.com"): {
 				Site:              store.Site{ID: 1, Host: "disabled.example.com", Bind: ":80"},
 				Bind:              ":80",

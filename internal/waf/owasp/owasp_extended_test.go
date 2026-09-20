@@ -232,6 +232,39 @@ func TestCheckFileUpload_NullByte(t *testing.T) {
 	}
 }
 
+func TestCheckFileUpload_SemicolonDoubleExtension(t *testing.T) {
+	hit, ok := CheckFileUpload("shell.php;.jpg", "image/jpeg")
+	if !ok || hit.RuleID != "owasp:upload:002" {
+		t.Fatalf("semicolon double extension hit = %#v, want owasp:upload:002", hit)
+	}
+}
+
+func TestCheckFileUpload_DoesNotCollapseInternalSpaces(t *testing.T) {
+	for _, filename := range []string{"report.p h p.jpg", "manual.phpunit.jpg", "manual.php-docs.jpg", "notes;draft.txt", "report: Q1.jpg"} {
+		if hit, ok := CheckFileUpload(filename, "image/jpeg"); ok {
+			t.Fatalf("clean filename %q matched %#v", filename, hit)
+		}
+	}
+}
+
+func TestCheckRawMultipartFilenames_SemicolonDoubleExtension(t *testing.T) {
+	body := []byte("Content-Disposition: form-data; name=\"uploaded\"; filename=\"shell.php;.jpg\"\r\n")
+	hit, ok := CheckRawMultipartFilenames(body)
+	if !ok || hit.RuleID != "owasp:upload:002" {
+		t.Fatalf("raw semicolon double extension hit = %#v, want owasp:upload:002", hit)
+	}
+}
+
+func TestCheckRawMultipartFilenames_NullByteSamples(t *testing.T) {
+	for _, filename := range []string{"info.php\x00.jpg", "111.php\x00.png"} {
+		body := []byte("Content-Disposition: form-data; name=\"uploaded\"; filename=\"" + filename + "\"\r\n")
+		hit, ok := CheckRawMultipartFilenames(body)
+		if !ok || hit.RuleID != "owasp:upload:001" {
+			t.Fatalf("raw null-byte filename %q hit = %#v, want owasp:upload:001", filename, hit)
+		}
+	}
+}
+
 // Enhanced SQLi patterns
 func TestCheckOWASP_SQLi_Boolean(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=1 or 1=1", nil, nil)
@@ -282,8 +315,6 @@ func TestCheckOWASP_SSRF_LocalhostInPayload(t *testing.T) {
 		t.Fatal("expected SSRF hit for localhost in query payload")
 	}
 }
-
-// ── New tests: body scanning, base64 decoding, cookie scanning ──
 
 func TestCheckOWASP_CmdInjection_InBody(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "", nil, []string{"test|whoami"})
@@ -488,8 +519,6 @@ func TestNormalize_Base64Decode(t *testing.T) {
 		t.Fatalf("expected base64 decoded content, got %q", result)
 	}
 }
-
-// ── New variant detection tests ──
 
 // SQLi: ORDER BY enumeration with comment
 func TestCheckOWASP_SQLi_OrderBy(t *testing.T) {
@@ -704,8 +733,6 @@ func TestCheckOWASP_NoSQLi_ThisPassword(t *testing.T) {
 		t.Fatal("expected NoSQL injection hit for this.password comparison")
 	}
 }
-
-// ── 新增误报抑制验证测试 ──
 
 // SSTI：Handlebars {{each}} 助手不应触发（合法模板语法）
 func TestCheckOWASP_Clean_HandlebarsHelpers(t *testing.T) {

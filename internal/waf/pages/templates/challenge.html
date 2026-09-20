@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.PageTitle}}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:{{.Background}};color:#1e293b}
+.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);max-width:460px;width:92%;padding:48px 40px;text-align:center}
+.icon{font-size:48px;margin-bottom:16px;line-height:1.2}
+.spinner{width:40px;height:40px;border:3px solid #e2e8f0;border-top-color:{{.PrimaryColor}};border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 20px}
+@keyframes spin{to{transform:rotate(360deg)}}
+h2{font-size:1.15rem;font-weight:600;color:#334155;margin-bottom:6px}
+.sub{font-size:.875rem;color:#64748b;margin-bottom:4px}
+.bar{width:100%;height:4px;background:#e2e8f0;border-radius:2px;margin:20px 0;overflow:hidden}
+.bar-fill{height:100%;width:30%;background:{{.PrimaryColor}};border-radius:2px;animation:loading 2s ease-in-out infinite}
+@keyframes loading{0%{width:10%}50%{width:70%}100%{width:95%}}
+#msg{margin-top:12px;color:#ef4444;font-size:.8rem;display:none}
+.rid{font-size:.7rem;color:#94a3b8;margin-top:20px}
+.footer{margin-top:20px;padding-top:14px;border-top:1px solid #f1f5f9;font-size:.7rem;color:#94a3b8}.brand-logo{display:block;max-width:64px;max-height:64px;object-fit:contain;margin:0 auto 16px}.brand{font-size:.75rem;color:#94a3b8;margin-bottom:10px}
+{{.CustomCSS}}
+</style>
+</head>
+<body><div class="card">
+{{if .LogoURL}}<img class="brand-logo" src="{{.LogoURL}}" alt="">{{else}}<div class="icon">&#128737;</div>{{end}}
+<div class="brand">{{.BrandName}}</div>
+<div class="spinner"></div>
+<h2>{{.CheckingText}} / {{.CheckingTextZh}}</h2>
+<p class="sub">{{.WaitText}}</p>
+<p class="sub">{{.WaitTextZh}}</p>
+<div class="bar"><div class="bar-fill"></div></div>
+<p id="msg"></p>
+<p class="rid">Request ID: {{.RequestID}}</p>
+<div class="footer">{{.FooterText}}</div>
+</div>
+<script>
+{{.EnvJS}}
+{{.PowScript}}
+(function(){
+var ts={{.TimestampJS}},tk={{.TokenJS}},rid={{.RequestIDJS}};
+var submitted=false;
+function fail(m){
+var el=document.getElementById("msg");
+if(el){el.textContent=m;el.style.display="block"}
+}
+function submit(counter,hash,res){
+if(submitted)return;submitted=true;
+var d=document.createElement("form");d.method="POST";d.style.display="none";
+function af(n,v){var i=document.createElement("input");i.type="hidden";i.name=n;i.value=v;d.appendChild(i)}
+af("__waf_challenge_ts",ts);af("__waf_challenge_token",tk);af("__waf_challenge_rid",rid);
+af("__waf_challenge_proof",hash);af("__waf_challenge_counter",String(counter));
+try{
+if(res){
+if(res.env_score!==undefined&&res.env_score!==null)af("__waf_env_score",String(res.env_score));
+if(res.markers)af("__waf_env_markers",String(res.markers));
+if(res.sig)af("__waf_pow_sig",String(res.sig));
+}
+if(window.__owaf_env_encrypted)af("__waf_env_fp",window.__owaf_env_encrypted);
+}catch(e){}
+document.body.appendChild(d);d.submit();
+}
+// WASM 求解完成后回调；无 JS 降级，WASM 不可用即无法通过挑战。
+window.__owaf_pow_callback=function(c,h,res){submit(c,h,res)};
+setTimeout(function(){
+if(!submitted)fail("Verification is taking longer than expected. Please refresh. / 验证超时，请刷新页面。")
+},30000);
+})();
+</script></body>
+</html>

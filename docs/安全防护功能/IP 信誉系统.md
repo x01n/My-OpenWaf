@@ -1,7 +1,9 @@
+> [返回 安全防护功能](安全防护功能.md)
+
 # IP 信誉系统
 
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [iprep.go](file://internal/waf/iprep/iprep.go)
 - [iprep_test.go](file://internal/waf/iprep/iprep_test.go)
 - [ip_list.go](file://internal/store/ip_list.go)

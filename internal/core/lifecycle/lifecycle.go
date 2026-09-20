@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -27,11 +28,35 @@ type Server interface {
 	Shutdown(ctx context.Context) error
 }
 
-// hertzServer adapts *server.Hertz to the Server interface.
-type hertzServer struct{ h *server.Hertz }
+// Readiness reports whether a server has completed listener startup.
+type Readiness interface {
+	Ready() bool
+	Err() error
+}
 
-func (s *hertzServer) Spin()                              { s.h.Spin() }
+// hertzServer adapts *server.Hertz to the Server interface.
+type hertzServer struct {
+	h    *server.Hertz
+	done chan struct{}
+}
+
+func (s *hertzServer) Spin() {
+	defer close(s.done)
+	s.h.Spin()
+}
 func (s *hertzServer) Shutdown(ctx context.Context) error { return s.h.Shutdown(ctx) }
+func (s *hertzServer) Ready() bool                        { return s.h.IsRunning() }
+func (s *hertzServer) Err() error {
+	if s.Ready() {
+		return nil
+	}
+	select {
+	case <-s.done:
+		return fmt.Errorf("hertz server stopped before becoming ready")
+	default:
+		return nil
+	}
+}
 
 func serverAlreadyStopped(err error) bool {
 	return err != nil && strings.TrimSpace(err.Error()) == hertzEngineNotRunningError
@@ -62,7 +87,7 @@ func New(log *slog.Logger) *Manager {
 func (m *Manager) AddHertz(name string, h *server.Hertz) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[name] = entry{name: name, srv: &hertzServer{h: h}}
+	m.entries[name] = entry{name: name, srv: &hertzServer{h: h, done: make(chan struct{})}}
 }
 
 // AddHertzWithTag registers a Hertz server with a configuration tag.
@@ -70,7 +95,7 @@ func (m *Manager) AddHertz(name string, h *server.Hertz) {
 func (m *Manager) AddHertzWithTag(name string, h *server.Hertz, tag string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[name] = entry{name: name, srv: &hertzServer{h: h}, tag: tag}
+	m.entries[name] = entry{name: name, srv: &hertzServer{h: h, done: make(chan struct{})}, tag: tag}
 }
 
 // Add registers a generic server.
@@ -142,43 +167,103 @@ func (m *Manager) Remove(name string) {
 }
 
 // StartOne starts a single named server in a background goroutine.
-func (m *Manager) StartOne(name string) {
+func (m *Manager) StartOne(name string) error {
 	m.mu.Lock()
 	ent, ok := m.entries[name]
 	m.mu.Unlock()
 	if !ok {
-		return
+		return fmt.Errorf("server %q is not registered", name)
 	}
 	go func() {
 		m.log.Info("server starting", slog.String("name", ent.name))
 		ent.srv.Spin()
 		m.log.Info("server stopped", slog.String("name", ent.name))
 	}()
+	return waitReady(name, ent.srv)
 }
 
 // Start spins up all registered servers in background goroutines.
-func (m *Manager) Start() {
+func (m *Manager) Start() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	entries := make([]entry, 0, len(m.entries))
 	for _, e := range m.entries {
+		entries = append(entries, e)
 		go func(ent entry) {
 			m.log.Info("server starting", slog.String("name", ent.name))
 			ent.srv.Spin()
 			m.log.Info("server stopped", slog.String("name", ent.name))
 		}(e)
 	}
+	m.mu.Unlock()
+	for _, e := range entries {
+		if err := waitReady(e.name, e.srv); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func waitReady(name string, srv Server) error {
+	status, ok := srv.(Readiness)
+	if !ok {
+		return nil
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if status.Ready() {
+			return nil
+		}
+		if err := status.Err(); err != nil {
+			return fmt.Errorf("server %q failed to become ready: %w", name, err)
+		}
+		select {
+		case <-deadline.C:
+			return fmt.Errorf("server %q did not become ready", name)
+		case <-ticker.C:
+		}
+	}
+}
+
+// Ready returns true only when every registered server reports a ready listener.
+func (m *Manager) Ready() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.entries) == 0 {
+		return false
+	}
+	for _, ent := range m.entries {
+		status, ok := ent.srv.(Readiness)
+		if !ok || !status.Ready() {
+			return false
+		}
+	}
+	return true
 }
 
 // Shutdown gracefully stops all servers with the given context deadline.
 func (m *Manager) Shutdown(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	shutdownCtx, cancel := context.WithTimeout(ctx, defaultShutdownTimeout)
+	defer cancel()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	var wg sync.WaitGroup
+	entries := make([]entry, 0, len(m.entries))
 	for _, e := range m.entries {
+		entries = append(entries, e)
+	}
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, e := range entries {
 		wg.Add(1)
 		go func(ent entry) {
 			defer wg.Done()
-			if err := ent.srv.Shutdown(ctx); err != nil {
+			if err := ent.srv.Shutdown(shutdownCtx); err != nil {
 				if serverAlreadyStopped(err) {
 					m.log.Info("server shutdown complete", slog.String("name", ent.name))
 					return
@@ -189,7 +274,17 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			}
 		}(e)
 	}
-	wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-shutdownCtx.Done():
+		m.log.Warn("shutdown deadline exceeded", slog.Any("err", shutdownCtx.Err()))
+	}
 }
 
 // WaitForSignal blocks until SIGINT or SIGTERM, then calls Shutdown.
@@ -198,5 +293,7 @@ func (m *Manager) WaitForSignal() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sig
 	m.log.Info("received signal, shutting down", slog.String("signal", s.String()))
-	m.Shutdown(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+	defer cancel()
+	m.Shutdown(ctx)
 }

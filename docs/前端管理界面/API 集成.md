@@ -1,5 +1,7 @@
 # API 集成
 
+> [返回 前端管理界面](./前端管理界面.md)
+
 <cite>
 **本文引用的文件**
 - [frontend/lib/api.ts](file://frontend/lib/api.ts)

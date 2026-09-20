@@ -7,11 +7,14 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +27,10 @@ import (
 	"github.com/cloudwego/hertz/pkg/network/standard"
 	shconfig "github.com/hertz-contrib/http2/config"
 	shfactory "github.com/hertz-contrib/http2/factory"
+	goredis "github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/hkdf"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	acmepkg "My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/admin"
@@ -38,6 +45,7 @@ import (
 	"My-OpenWaf/internal/dataplane"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/pkg/logger"
+	"My-OpenWaf/internal/pkg/memreclaim"
 	"My-OpenWaf/internal/proxy"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
@@ -51,9 +59,11 @@ import (
 	"My-OpenWaf/internal/waf/drop"
 	"My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/jsplugin"
+	"My-OpenWaf/internal/waf/luaplugin"
+	"My-OpenWaf/internal/waf/owasp"
 	"My-OpenWaf/internal/waf/ratelimit"
-	goredis "github.com/redis/go-redis/v9"
-	"gorm.io/gorm/clause"
+	"My-OpenWaf/internal/waf/threatintel"
 )
 
 var selfSignedCache = acmepkg.NewSelfSignedCache()
@@ -68,6 +78,8 @@ func http2ServerFactoryOptions(cfg snapshotpkg.HTTP2Config) []shconfig.Option {
 		shconfig.WithIdleTimeout(time.Duration(cfg.IdleTimeoutSeconds) * time.Second),
 		shconfig.WithMaxUploadBufferPerConnection(cfg.MaxUploadBufferPerConnection),
 		shconfig.WithMaxUploadBufferPerStream(cfg.MaxUploadBufferPerStream),
+		shconfig.WithServerMaxHeaderListSize(uint32(cfg.MaxHeaderBytes + cfg.MaxHeaderFields*32)),
+		shconfig.WithServerMaxHeaderFields(cfg.MaxHeaderFields),
 	}
 }
 
@@ -161,7 +173,8 @@ func ResetAdminPassword(args []string) error {
 func Run() {
 	hlog.SetLevel(hlog.LevelFatal)
 	log := logger.New("app")
-	ctx := context.Background()
+	ctx, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
 	acmeCtx, cancelACME := context.WithCancel(ctx)
 	defer cancelACME()
 
@@ -174,6 +187,14 @@ func Run() {
 
 	if err := store.AutoMigrate(rt.DB); err != nil {
 		log.Error("auto migrate failed", slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := owasp.ReconcileBuiltinCatalog(rt.DB); err != nil {
+		log.Error("reconcile OWASP catalog failed", slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := cve.ReconcileBuiltinCatalog(rt.DB); err != nil {
+		log.Error("reconcile CVE catalog failed", slog.Any("err", err))
 		os.Exit(1)
 	}
 	if err := store.AutoMigrateLogs(rt.LogDB); err != nil {
@@ -202,18 +223,27 @@ func Run() {
 		logger.Banner(bannerLines...)
 	}
 
+	// Resolve the persistent process secret before building snapshots so dynamic
+	// protection never falls back to its deterministic public key material.
+	jwtSecret, err := resolveJWTSecret(rt)
+	if err != nil {
+		log.Error("resolve persistent JWT secret failed", slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := rt.SetSnapshotDynamicKeyBase(deriveDynamicProtectionKeyBase(jwtSecret)); err != nil {
+		log.Error("configure snapshot dynamic protection key failed", slog.Any("err", err))
+		os.Exit(1)
+	}
 	if err := rt.ReloadSnapshot(); err != nil {
 		log.Error("initial snapshot build failed", slog.Any("err", err))
 		os.Exit(1)
 	}
 
-	// Resolve JWT secret from env or DB.
-	jwtSecret := resolveJWTSecret(rt)
-
 	// Derive challenge cookie secret from JWT secret for persistence across restarts.
 	challenge.SetChallengeSecret(jwtSecret)
 
 	repos := repository.NewWithLogDB(rt.DB, rt.LogDB)
+	repos.CVERule.MarkBuiltinCatalogReady()
 	applyLogConfig(repos.SystemSettings)
 	redisKV := cache.NewRedisKV(rt.Redis)
 	rt.RedisKV = redisKV
@@ -232,6 +262,7 @@ func Run() {
 	defer queryCache.Close()
 	repos.AccessLog.SetCountCache(queryCache)
 	repos.SecurityEvent.SetCountCache(queryCache)
+	repos.DropEvent.SetCountCache(queryCache)
 
 	// Hot cache: Redis-backed read-through cache for hot data and large query results.
 	hotCache := cache.NewHotCache(rt.Redis, logger.New("hotcache"))
@@ -239,24 +270,40 @@ func Run() {
 
 	// Write queue: async write queue that batches all DB mutations through a single
 	// goroutine, merging high-frequency operations to reduce lock contention.
-	writeQueue := observability.NewWriteQueue(rt.LogDB, logger.New("writequeue"))
+	// 容量与批大小从 rt.Config.Queue 注入，与 observability 包内的硬上限对齐。
+	writeQueue := observability.NewWriteQueueWithOptions(rt.LogDB, logger.New("writequeue"), observability.WriteQueueOptions{
+		Capacity:      rt.Config.Queue.WriteQueueCapacity,
+		BatchSize:     rt.Config.Queue.WriteQueueBatchSize,
+		BatchInterval: rt.Config.Queue.WriteQueueInterval,
+	})
 	defer writeQueue.Close()
 	repos.SetWriteQueue(writeQueue)
 
 	// Unified writer: single goroutine drains all observability channels and
 	// flushes them in one DB transaction, eliminating SQLite lock contention.
-	unifiedWriter := observability.NewUnifiedWriter(rt.LogDB, logger.New("writer"))
+	// 容量、批大小、flush 周期全部从 rt.Config.Queue 注入。
+	unifiedWriter := observability.NewUnifiedWriterWithOptions(rt.LogDB, logger.New("writer"), observability.UnifiedWriterOptions{
+		EventBufferSize: rt.Config.Queue.EventBufferSize,
+		DropBufferSize:  rt.Config.Queue.DropBufferSize,
+		BatchSize:       rt.Config.Queue.BatchSize,
+		FlushInterval:   rt.Config.Queue.FlushInterval,
+	})
 	unifiedWriter.SetRedis(rt.Redis)
+	unifiedWriter.SetCountCacheInvalidator(queryCache)
 	defer unifiedWriter.Close()
 
 	// Event archiver (auto-delete security events, access logs and drop events based on retention config).
-	// Also performs database optimization (VACUUM/OPTIMIZE) after each cleanup cycle.
+	// Also performs lightweight SQLite planner/WAL maintenance or native server-DB optimization after each cycle.
 	archiver := observability.NewArchiver(rt.LogDB, repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
 	archiver.SetSettingsRepo(repos.SystemSettings)
+	archiver.SetSyncLogRepo(repos.ThreatIntelSyncLog)
 	defer archiver.Close()
 
-	responseCache := cache.NewResponseCache(64, 60)
+	responseCache := cache.NewResponseCache(rt.Config.ResponseCacheMB, rt.Config.ResponseCacheTTLSec)
 	defer responseCache.Close()
+	// 高并发峰值后周期性将空闲 heap 归还 OS，降低 RSS 粘滞。
+	stopMemReclaim := memreclaim.Start(memreclaim.Config{Logger: logger.New("memreclaim")})
+	defer stopMemReclaim()
 
 	// Data-plane metrics (shared across all data listeners).
 	metrics := dataplane.NewMetrics()
@@ -287,6 +334,58 @@ func Run() {
 	ipRep.ConfigureAutoBanAction(prot.AutoBanAction)
 
 	eng := engine.New(rt.Snapshot, reqRL, errRL, ipRep)
+
+	// 自定义 Lua 策略引擎：脚本由 snapshot 在构建期编译，此处只负责持有与热替换。
+	// KV 复用 RedisKV，Redis 不可用时脚本侧 kv.available() 返回 false，
+	// 策略降级而非站点不可用。
+	luaEngine := luaplugin.NewEngine(rt.RedisKV, logger.New("lua_plugin"))
+	eng.SetLuaPlugins(luaEngine)
+
+	// QuickJS engine 是进程生命周期资源。脚本集合由 immutable snapshot 持有，
+	// reload 到零脚本时仍需保留执行器，避免已取得旧 snapshot 的在途请求失去
+	// 与该代脚本配套的 runtime。默认构建未启用 QuickJS 时，空脚本集合不会触发创建。
+	var jsEngine *jsplugin.Engine
+	var jsEngineMu sync.Mutex
+	ensureJSEngine := func(scripts []*jsplugin.Script) error {
+		jsEngineMu.Lock()
+		defer jsEngineMu.Unlock()
+		current, err := ensureJSPluginEngine(jsEngine, scripts)
+		if err != nil {
+			return err
+		}
+		jsEngine = current
+		return nil
+	}
+	loadJSEngine := func() *jsplugin.Engine {
+		jsEngineMu.Lock()
+		defer jsEngineMu.Unlock()
+		if jsEngine != nil {
+			return jsEngine
+		}
+		current, err := ensureJSPluginEngineForDryRun(nil)
+		if err != nil {
+			return nil
+		}
+		jsEngine = current
+		eng.SetJSPlugins(current)
+		return jsEngine
+	}
+	if sn := rt.Snapshot.Load(); sn != nil {
+		if err := ensureJSEngine(sn.JSPlugins); err != nil {
+			log.Error("create JavaScript plugin engine failed", slog.Any("err", err))
+			os.Exit(1)
+		}
+	}
+	if jsEngine != nil {
+		eng.SetJSPlugins(jsEngine)
+	}
+	defer func() {
+		if jsEngine != nil {
+			if err := jsEngine.Close(); err != nil {
+				log.Warn("close JavaScript plugin engine failed", slog.Any("err", err))
+			}
+		}
+	}()
 	cveFeedInterval, err := time.ParseDuration(rt.Config.CVE.FeedInterval)
 	if err != nil || cveFeedInterval <= 0 {
 		cveFeedInterval = 6 * time.Hour
@@ -303,8 +402,13 @@ func Run() {
 	// GeoIP resolver for bot two-phase scoring (graceful degradation if DB missing).
 	var geoResolver *bot.MaxMindResolver
 	botCfg := rt.Config.Bot
+	// loadedGeoIPPath 记录 resolver 当前打开的库路径，供 reload 时判断是否需要换库。
+	loadedGeoIPPath := botCfg.GeoIPDBPath
 	if botCfg.Enabled {
 		geoResolver = bot.NewMaxMindResolver(botCfg.GeoIPDBPath, botCfg.GeoIPDBPath, botCfg)
+		// 持有 city/asn 两个 maxminddb 文件句柄，与本函数里其余资源一样在退出时释放。
+		// 放在这里而不是函数开头：Close 会取锁，nil 接收者会 panic。
+		defer geoResolver.Close()
 		eng.SetGeoResolver(geoResolver, botCfg.ScoreThreshold)
 		// Also set the global GeoResolver so LookupGeo works everywhere.
 		bot.SetGeoResolver(geoResolver)
@@ -317,6 +421,7 @@ func Run() {
 	// Prometheus-compatible metrics collector.
 	promMetrics := observability.NewMetrics()
 	promMetrics.SetUnifiedWriterStatsProvider(unifiedWriter)
+	promMetrics.SetWriteQueueStatsProvider(writeQueue)
 	promMetrics.SetDataPlaneMetricsProvider(func() observability.DataPlaneMetricsSnapshot {
 		s := metrics.Summary()
 		return observability.DataPlaneMetricsSnapshot{
@@ -364,14 +469,47 @@ func Run() {
 		}
 		return snapshot
 	})
+	// 缓存命中率指标：汇总各缓存层的 hits/misses，通过 /metrics 暴露。
+	promMetrics.SetCacheStatsProvider(func() []observability.CacheLayerStats {
+		qcHits, qcMisses := queryCache.HitStats()
+		hcHits, hcMisses := hotCache.HitStats()
+		rcHits, rcMisses := responseCache.HitStats()
+		return []observability.CacheLayerStats{
+			{Name: "query", Hits: qcHits, Misses: qcMisses},
+			// hot 层走 Redis，故障（不可达/超时）与「键不存在」分开计数，
+			// 便于区分「缓存未命中」与「依赖不可用导致穿透」。
+			{Name: "hot", Hits: hcHits, Misses: hcMisses, Errors: hotCache.ErrorCount()},
+			{Name: "response", Hits: rcHits, Misses: rcMisses},
+		}
+	})
+	// Lua 策略脚本指标：脚本失败/超时只写日志就静默跳过，没有指标就无法告警。
+	// 这里做单位换算与结构适配，observability 不反向依赖 luaplugin。
+	promMetrics.SetLuaScriptStatsProvider(func() []observability.LuaScriptStats {
+		stats := luaEngine.Stats()
+		out := make([]observability.LuaScriptStats, 0, len(stats))
+		for _, s := range stats {
+			out = append(out, observability.LuaScriptStats{
+				Name:          s.Name,
+				Stage:         s.Stage,
+				Runs:          s.Runs,
+				Failures:      s.Failures,
+				Timeouts:      s.Timeouts,
+				AvgDurationMs: float64(s.AvgTime.Nanoseconds()) / 1e6,
+			})
+		}
+		return out
+	})
 
 	hc := health.New(rt.DB, rt.Snapshot)
 	lm := lifecycle.New(log)
+	hc.SetReadyFunc(lm.Ready)
 
 	dpLog := logger.New("dataplane")
 
 	// Challenge managers: CAPTCHA, Shield (5-second), Chain.
+	// 三者都会启动内存态会话清理协程，必须随进程优雅关闭一并停止。
 	captchaMgr := challenge.NewCaptchaManager(rt.Redis, time.Duration(prot.CaptchaTimeout)*time.Second)
+	defer captchaMgr.Close()
 
 	// 初始化 go-captcha 高级验证码（点击/滑动/旋转）
 	goCaptchaCfg := challenge.DefaultGoCaptchaConfig()
@@ -382,16 +520,24 @@ func Run() {
 	captchaMgr.SetGoCaptchaProvider(goCaptchaProvider)
 
 	shieldMgr := challenge.NewShieldManager(captchaMgr, rt.Redis, prot.ShieldDifficulty)
+	defer shieldMgr.Close()
 	chainMgr := challenge.NewChainChallengeManager(captchaMgr, rt.Redis)
+	defer chainMgr.Close()
 
 	// Anti-replay nonce protection manager.
 	antiReplayMgr := antireplay.NewAntiReplayManager("", rt.Redis, 5*time.Minute)
 	eng.SetAntiReplayManager(antiReplayMgr)
 
-	// ─── Auth subsystems ───
 	tokenMgr := auth.NewTokenManager(jwtSecret, rt.DB)
+	defer tokenMgr.Close()
+	// Readiness must include the persistent JWT blacklist. If the blacklist
+	// cannot be loaded, middleware fails closed and the instance must not report
+	// itself ready to receive authenticated traffic.
+	hc.SetReadyFunc(func() bool { return lm.Ready() && tokenMgr.Ready() })
 	bruteForce := auth.NewBruteForceDetector(prot.LoginMaxAttempts, time.Duration(prot.LoginLockoutMinutes)*time.Minute)
+	defer bruteForce.Close()
 	sessionMgr := auth.NewSessionManager(rt.DB)
+	defer sessionMgr.Close()
 
 	// Escalation (step-up response) manager.
 	escalationMgr := escalation.NewEscalationManager(rt.Redis)
@@ -411,16 +557,27 @@ func Run() {
 			RequireHTTP3:         p.ShieldRequireHTTP3,
 			AllowHTTP1:           p.ShieldAllowHTTP1,
 			EnableJSChallenge:    p.ShieldEnableJSChallenge,
-			EnableWASM:           p.ShieldEnableWASM,
 			EnableEnvCheck:       p.ShieldEnableEnvCheck,
 			EnableDevToolsDetect: p.ShieldEnableDevTools,
 		})
-		chainMgr.Reconfigure(parseChainSteps(p.ChainSteps), p.ShieldDifficulty)
+		chainMgr.ReconfigureWithCaptchaType(parseChainSteps(p.ChainSteps), p.ShieldDifficulty, challenge.CaptchaType(p.CaptchaType))
 		bruteForce.Reconfigure(p.LoginMaxAttempts, time.Duration(p.LoginLockoutMinutes)*time.Minute)
 		runtimeCfg, _ := runtimeState()
 		dropPolicy := loadDropPolicy(repos.SystemSettings, runtimeCfg.Drop)
 		dropExec.Reconfigure(dropPolicy.Enabled)
 		eng.SetBotThreshold(dropPolicy.BotScoreThreshold)
+
+		// 把管理界面保存的 GeoIP 配置同步给 resolver。不做这一步的话，
+		// UI 上的高风险国家 / 机房 ASN / VPN ASN 保存成功却永远不生效。
+		if geoResolver != nil {
+			geoCfg := loadBotGeoConfig(repos.SystemSettings, runtimeCfg.Bot)
+			// 换库要重新打开 mmap 文件，只在路径真的变了时做。
+			if geoCfg.GeoIPDBPath != loadedGeoIPPath {
+				geoResolver.Reload(geoCfg.GeoIPDBPath, geoCfg.GeoIPDBPath)
+				loadedGeoIPPath = geoCfg.GeoIPDBPath
+			}
+			geoResolver.UpdateConfig(geoCfg)
+		}
 		if p.EscalationEnabled {
 			steps := p.GetEscalationSteps()
 			wafSteps := make([]escalation.EscalationStep, len(steps))
@@ -440,6 +597,18 @@ func Run() {
 	eng.SetEscalationManager(escalationMgr)
 	defer escalationMgr.Close()
 
+	// resourceAggregator 将 AppRoute 命中在内存中按资源唯一键聚合后批量落库，
+	// 替代每命中一次 spawn goroutine + 同步 Upsert，显著降低高频写放大与 CPU 占用。
+	resourceAggregator := dataplane.NewRecordedResourceAggregator(repos.RecordedResource, logger.New("resource-agg"))
+	resourceAggregator.SetRedis(redisKV)
+	defer resourceAggregator.Close()
+	samplingRate := 1
+	if v := os.Getenv("MY_OPENWAF_ACCESSLOG_SAMPLING"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n >= 1 {
+			samplingRate = int(n)
+		}
+	}
+
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
 	dpOpts := dataplane.Options{
 		Holder:                rt.Snapshot,
@@ -447,13 +616,15 @@ func Run() {
 		Metrics:               metrics,
 		Writer:                unifiedWriter,
 		ResponseCache:         responseCache,
-		AccessLogSamplingRate: 0,
+		AccessLogSamplingRate: uint32(samplingRate),
 		Log:                   dpLog,
 		CaptchaManager:        captchaMgr,
 		ShieldManager:         shieldMgr,
 		ChainManager:          chainMgr,
-		RecordedResourceRepo:  repos.RecordedResource,
+		ResourceAggregator:    resourceAggregator,
 		Upstreams:             upstreamPool,
+		AccessControlRepo:     repos.AccessControl,
+		JWTSecret:             jwtSecret,
 	}
 
 	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
@@ -527,7 +698,11 @@ func Run() {
 				continue
 			}
 			lm.AddHertzWithTag(name, srv, de.tag)
-			lm.StartOne(name)
+			if err := lm.StartOne(name); err != nil {
+				log.Error("hot-started site listener failed", slog.String("name", name), slog.Any("err", err))
+				lm.Remove(name)
+				continue
+			}
 			log.Info("hot-started site listener",
 				slog.String("name", name),
 				slog.String("bind", de.siteRT.Bind),
@@ -543,10 +718,15 @@ func Run() {
 				RouteTable: plan.RouteTable,
 				TLSConfig:  plan.TLSConfig,
 				Log:        log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)),
+				Allow0RTT:  newSn.TLSDefaults.SessionTicketsEnabled,
 			})
 			lm.AddWithTag(name, h3Srv, plan.Tag)
-			lm.StartOne(name)
-			log.Info("hot-started HTTP/3 QUIC listener",
+			if err := lm.StartOne(name); err != nil {
+				log.Error("hot-started HTTP/3 listener failed", slog.String("name", name), slog.Any("err", err))
+				lm.Remove(name)
+				continue
+			}
+			log.Info("hot-started HTTP/3 listener",
 				slog.String("name", name),
 				slog.String("bind", plan.Bind),
 				slog.String("targets", plan.RouteTable.targetSummary()),
@@ -576,6 +756,16 @@ func Run() {
 		}
 	}
 
+	// replaceConfigSync 只关掉被替换下来的那个，最后一个实例得在退出时收尾——
+	// 否则它的 Subscribe goroutine 会在优雅关闭期间继续消费 reload 通知。
+	// Close 用 sync.Once 且 nil 安全，与上面的 old.Close() 重复调用也无妨。
+	defer func() {
+		configSyncMu.RLock()
+		current := configSync
+		configSyncMu.RUnlock()
+		current.Close()
+	}()
+
 	publishConfigReload := func() {
 		configSyncMu.RLock()
 		current := configSync
@@ -587,12 +777,23 @@ func Run() {
 
 	applySnapshotReload := func() error {
 		previousSnapshot := rt.Snapshot.Load()
-		if err := rt.ReloadSnapshot(); err != nil {
+		if err := rt.ReloadSnapshotWithPrePublish(func(next *snapshotpkg.Snapshot) error {
+			if err := ensureJSEngine(next.JSPlugins); err != nil {
+				return fmt.Errorf("reconcile JS plugin engine: %w", err)
+			}
+			eng.SetJSPlugins(jsEngine)
+			return nil
+		}); err != nil {
 			return err
 		}
 		currentSnapshot := rt.Snapshot.Load()
+		if currentSnapshot != previousSnapshot {
+			responseCache.Clear()
+		}
 		if currentSnapshot != nil {
 			applyProtectionRuntimeConfig(currentSnapshot.Protection)
+			// 热替换 Lua 脚本集合：整体替换是原子的，正在执行的调用继续用旧集合跑完。
+			luaEngine.Reload(currentSnapshot.LuaPlugins)
 		}
 		loadIPLists(ipRep, repos.IPList)
 		reconcileListeners()
@@ -628,10 +829,15 @@ func Run() {
 		return nil
 	}
 
+	var runtimeReloadMu sync.Mutex
 	var reloadRuntime func(propagate bool) error
 
-	reloadRedisRuntime := func() error {
-		stored := adminsystem.LoadRedisConfig(repos.SystemSettings)
+	var reloadRedisRuntimeInternal func() error
+	reloadRedisRuntimeInternal = func() error {
+		stored, err := adminsystem.LoadRedisConfig(repos.SystemSettings)
+		if err != nil {
+			return err
+		}
 		var nextClient *goredis.Client
 		if stored.Enabled {
 			nextClient = coreredis.OptionalClient(coreredis.RedisOptions{
@@ -682,36 +888,50 @@ func Run() {
 		return nil
 	}
 
-	ensureRedisRuntime := func() {
+	ensureRedisRuntime := func() error {
 		runtimeCfg, runtimeRedisEnabled := runtimeState()
-		stored := adminsystem.LoadRedisConfig(repos.SystemSettings)
-		if !redisRuntimeSyncNeeded(stored, runtimeCfg, runtimeRedisEnabled) {
-			return
+		stored, err := adminsystem.LoadRedisConfig(repos.SystemSettings)
+		if err != nil {
+			return err
 		}
-		if err := reloadRedisRuntime(); err != nil {
+		if !redisRuntimeSyncNeeded(stored, runtimeCfg, runtimeRedisEnabled) {
+			return nil
+		}
+		if err := reloadRedisRuntimeInternal(); err != nil {
 			log.Warn("redis runtime sync failed during reload",
 				slog.Bool("stored_enabled", stored.Enabled),
 				slog.String("stored_addr", strings.TrimSpace(stored.Addr)),
 				slog.Int("stored_db", stored.DB),
 				slog.Any("err", err),
 			)
+			return fmt.Errorf("redis runtime sync: %w", err)
 		}
+		return nil
 	}
 
 	reloadRuntime = func(propagate bool) error {
-		if err := store.BumpRevision(rt.DB); err != nil {
-			return err
+		runtimeReloadMu.Lock()
+		defer runtimeReloadMu.Unlock()
+		if propagate {
+			if err := store.BumpRevision(rt.DB); err != nil {
+				return err
+			}
 		}
 		if err := applySnapshotReload(); err != nil {
 			return err
 		}
-		stored := adminsystem.LoadRedisConfig(repos.SystemSettings)
+		stored, err := adminsystem.LoadRedisConfig(repos.SystemSettings)
+		if err != nil {
+			return err
+		}
 		runtimeCfg, runtimeRedisEnabled := runtimeState()
 		prePublish := shouldPublishConfigReloadBeforeRedisSwitch(propagate, stored, runtimeCfg, runtimeRedisEnabled)
 		if prePublish {
 			publishConfigReload()
 		}
-		ensureRedisRuntime()
+		if err := ensureRedisRuntime(); err != nil {
+			return err
+		}
 		if propagate && !prePublish {
 			publishConfigReload()
 		}
@@ -721,6 +941,11 @@ func Run() {
 	reload := func() error {
 		return reloadRuntime(true)
 	}
+
+	// 威胁情报 IP 订阅：后台定时从各订阅源拉取 IP/CIDR 列表并全量替换其派生条目。
+	threatIntelMgr := threatintel.NewManager(rt.DB, logger.New("threatintel"), reload)
+	threatIntelMgr.Start()
+	defer threatIntelMgr.Stop()
 
 	replaceConfigSync(rt.Redis, func() error {
 		return reloadRuntime(false)
@@ -734,7 +959,6 @@ func Run() {
 		}
 	}()
 
-	// ─── Admin control-plane server ───
 	adminSrv := server.Default(server.WithHostPorts(rt.Config.AdminBind))
 	adminSrv.NoHijackConnPool = true
 	adminSrv.GET("/healthz", hc.LivenessHandler())
@@ -744,13 +968,17 @@ func Run() {
 	acmeStore := adminsystem.NewACMEManagerStore(repos.SystemSettings, repos.Certificate, reload, logger.New("acme"))
 	dpOpts.ACMEChallengeResponse = acmeStore.GetChallengeResponse
 	go acmeStore.RenewLoop(acmeCtx, 12*time.Hour)
-	realtimeHub := adminsystem.NewRealtimeHub(&adminsystem.DashboardDeps{Metrics: metrics, ConfigDB: rt.DB, LogDB: rt.LogDB, Cache: redisKV}, upstreamPool, hc, repos.AccessLog, repos.SecurityEvent)
+	realtimeHub := adminsystem.NewRealtimeHub(&adminsystem.DashboardDeps{Metrics: metrics, ConfigDB: rt.DB, LogDB: rt.LogDB, Cache: redisKV, AccessRepo: repos.AccessLog}, upstreamPool, hc, repos.AccessLog, repos.SecurityEvent)
 	realtimeHub.Start(ctx)
 
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
-		Repos:         repos,
-		Reload:        reload,
-		ReloadRedis:   reloadRedisRuntime,
+		Repos:  repos,
+		Reload: reload,
+		ReloadRedis: func() error {
+			runtimeReloadMu.Lock()
+			defer runtimeReloadMu.Unlock()
+			return reloadRedisRuntimeInternal()
+		},
 		RuntimeState:  runtimeState,
 		Snapshot:      rt.Snapshot,
 		StaticFS:      rt.Config.AdminStaticDir,
@@ -769,10 +997,12 @@ func Run() {
 		Realtime:      realtimeHub,
 		Cache:         redisKV,
 		Upstreams:     upstreamPool,
+		ThreatIntel:   threatIntelMgr,
+		LuaEngine:     luaEngine,
+		JSEngine:      loadJSEngine,
 	})
 	lm.AddHertz("admin:"+rt.Config.AdminBind, adminSrv)
 
-	// ─── Data-plane listener(s) ───
 	if sn != nil {
 		http3Plans := buildHTTP3ServerPlans(sn)
 		for _, siteRT := range listenerRuntimesByBind(sn) {
@@ -791,6 +1021,7 @@ func Run() {
 				RouteTable: plan.RouteTable,
 				TLSConfig:  plan.TLSConfig,
 				Log:        log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)),
+				Allow0RTT:  sn.TLSDefaults.SessionTicketsEnabled,
 			})
 			lm.AddWithTag(name, h3Srv, plan.Tag)
 			log.Info("HTTP/3 QUIC listener registered",
@@ -809,6 +1040,7 @@ func Run() {
 
 	lm.Start()
 	lm.WaitForSignal()
+	stopBackground()
 }
 
 func siteListenerName(bind string) string {
@@ -816,7 +1048,10 @@ func siteListenerName(bind string) string {
 }
 
 func dataServerHTTP2Enabled(siteRT snapshotpkg.SiteRuntime, tlsCfg *tls.Config) bool {
-	return siteRT.Site.TLSEnabled && tlsCfg != nil && alpnSliceIncludes(tlsCfg.NextProtos, "h2")
+	if siteRT.Site.TLSEnabled && tlsCfg != nil && alpnSliceIncludes(tlsCfg.NextProtos, "h2") {
+		return true
+	}
+	return false
 }
 
 type redisRuntimeReloadDeps struct {
@@ -974,7 +1209,7 @@ func listenerRuntimesByBind(sn *snapshotpkg.Snapshot) []snapshotpkg.SiteRuntime 
 	for _, rt := range sn.Sites {
 		current, exists := byBind[rt.Bind]
 		if !exists || (!current.Site.TLSEnabled && rt.Site.TLSEnabled) {
-			byBind[rt.Bind] = rt
+			byBind[rt.Bind] = *rt
 		}
 	}
 	items := make([]snapshotpkg.SiteRuntime, 0, len(byBind))
@@ -988,7 +1223,7 @@ func loadIPLists(rep *iprep.IPReputation, repo *repository.IPListRepo) {
 	if repo == nil {
 		return
 	}
-	items, err := repo.AllEnabled()
+	items, err := repo.AllEnabledGlobal()
 	if err != nil {
 		return
 	}
@@ -1005,6 +1240,68 @@ func loadIPLists(rep *iprep.IPReputation, repo *repository.IPListRepo) {
 		}
 	}
 	rep.SetLists(blacks, whites)
+}
+
+/**
+ * loadBotGeoConfig 把管理界面保存的 bot_settings 合并进启动时的 BotConfig。
+ *
+ * 管理端把高风险国家、机房 ASN、VPN/代理 ASN 与 GeoIP 库路径写进 SystemSettings 的
+ * `bot_settings`，但 `core.BotConfig` 只来自硬编码默认值加两个环境变量，两条线原先
+ * 没有交汇——UI 上保存成功，评分时用的却仍是默认值（`HighRiskCountries` 默认为 nil，
+ * 意味着高风险国家评分从未生效）。这里补上缺的那一环。
+ *
+ * 只覆盖请求里出现过的字段：nil 切片表示「没配过」，保留 fallback；空切片是用户
+ * 主动清空，如实生效。
+ *
+ * @param repo     系统设置仓储，nil 时原样返回 fallback。
+ * @param fallback 启动时的 BotConfig（默认值 + 环境变量）。
+ * @return 合并后的配置；读取或解析失败时返回 fallback，不让坏数据打断 reload。
+ */
+func loadBotGeoConfig(repo *repository.SystemSettingsRepo, fallback core.BotConfig) core.BotConfig {
+	if repo == nil {
+		return fallback
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil || strings.TrimSpace(val) == "" {
+		return fallback
+	}
+	// 字段名对齐管理端的 BotSettingsResponse：注意那边是 DatacenterASNs（小写 c）、
+	// 这边 core.BotConfig 是 DataCenterASNs，靠 json tag 对应而非字段名。
+	type botGeoSettings struct {
+		HighRiskCountries []string `json:"high_risk_countries"`
+		DatacenterASNs    []uint32 `json:"datacenter_asns"`
+		VPNProxyASNs      []uint32 `json:"vpn_proxy_asns"`
+		GeoIPDBPath       *string  `json:"geoip_db_path"`
+	}
+	var stored botGeoSettings
+	if err := json.Unmarshal([]byte(val), &stored); err != nil {
+		return fallback
+	}
+
+	cfg := fallback
+	if stored.HighRiskCountries != nil {
+		cfg.HighRiskCountries = stored.HighRiskCountries
+	}
+	if stored.DatacenterASNs != nil {
+		cfg.DataCenterASNs = uint32SliceToUint(stored.DatacenterASNs)
+	}
+	if stored.VPNProxyASNs != nil {
+		cfg.VPNProxyASNs = uint32SliceToUint(stored.VPNProxyASNs)
+	}
+	// 路径留空表示沿用环境变量配置的库，不要用空串把已加载的库顶掉。
+	if stored.GeoIPDBPath != nil && strings.TrimSpace(*stored.GeoIPDBPath) != "" {
+		cfg.GeoIPDBPath = strings.TrimSpace(*stored.GeoIPDBPath)
+	}
+	return cfg
+}
+
+// uint32SliceToUint 转换 ASN 列表：管理端用 uint32，core.BotConfig 用 uint。
+func uint32SliceToUint(in []uint32) []uint {
+	out := make([]uint, len(in))
+	for i, v := range in {
+		out[i] = uint(v)
+	}
+	return out
 }
 
 func loadDropPolicy(repo *repository.SystemSettingsRepo, fallback core.DropConfig) core.DropConfig {
@@ -1041,19 +1338,46 @@ func loadDropPolicy(repo *repository.SystemSettingsRepo, fallback core.DropConfi
 	return cfg
 }
 
-func resolveJWTSecret(rt *core.Runtime) []byte {
+func resolveJWTSecret(rt *core.Runtime) ([]byte, error) {
+	return resolveJWTSecretWithRandomRead(rt, rand.Read)
+}
+
+func resolveJWTSecretWithRandomRead(rt *core.Runtime, randomRead func([]byte) (int, error)) ([]byte, error) {
 	if s := strings.TrimSpace(os.Getenv("MY_OPENWAF_JWT_SECRET")); s != "" {
-		return []byte(s)
+		return []byte(s), nil
 	}
 	var setting store.SystemSettings
-	if err := rt.DB.Where(clause.Eq{Column: clause.Column{Name: "key"}, Value: "jwt_secret"}).First(&setting).Error; err == nil && setting.Value != "" {
-		return []byte(setting.Value)
+	err := rt.DB.Where(clause.Eq{Column: clause.Column{Name: "key"}, Value: store.SettingKeyJWTSecret}).First(&setting).Error
+	if err == nil {
+		if setting.Value != "" {
+			return []byte(setting.Value), nil
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("load JWT secret from database: %w", err)
 	}
+
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := randomRead(b); err != nil {
+		return nil, fmt.Errorf("generate JWT secret: %w", err)
+	}
 	secret := hex.EncodeToString(b)
-	rt.DB.Create(&store.SystemSettings{Key: "jwt_secret", Value: secret})
-	return []byte(secret)
+	if err := rt.DB.Create(&store.SystemSettings{Key: store.SettingKeyJWTSecret, Value: secret}).Error; err != nil {
+		return nil, fmt.Errorf("persist generated JWT secret: %w", err)
+	}
+	return []byte(secret), nil
+}
+
+const dynamicProtectionKeyInfo = "my-openwaf/dynamic-protection/encryption-key-base/v1"
+
+// deriveDynamicProtectionKeyBase derives a dedicated 32-byte dynamic-protection
+// key base from the existing persistent JWT secret without reusing the JWT key directly.
+func deriveDynamicProtectionKeyBase(jwtSecret []byte) []byte {
+	reader := hkdf.New(sha256.New, jwtSecret, nil, []byte(dynamicProtectionKeyInfo))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(reader, key); err != nil {
+		panic("dynamic protection key derivation failed: " + err.Error())
+	}
+	return key
 }
 
 // buildDataServer creates a Hertz server for a data-plane listener,
@@ -1131,6 +1455,10 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 		server.WithMaxHeaderBytes(http2cfg.MaxHeaderBytes),
 		server.WithMaxRequestBodySize(32 << 20),
 		server.WithMaxKeepBodySize(64 << 10),
+		server.WithSenseClientDisconnection(true),
+		// 将连接读缓冲从默认 4KB 提升到 16KB，减少读取请求头/体时的
+		// read 系统调用次数，属于保守的读路径吞吐优化，不影响超时与保活语义。
+		server.WithReadBufferSize(16 << 10),
 	}
 	if siteRT.Site.TLSEnabled {
 		opts = append(opts,
@@ -1179,6 +1507,7 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 	}
 
 	srv.NoRoute(dataplane.HandlerForBind(siteRT.Bind, handler))
+	srv.Handle("CONNECT", "/*any", dataplane.HandlerForBind(siteRT.Bind, handler))
 	return srv
 }
 
@@ -1282,16 +1611,21 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := strings.ToLower(strings.TrimSpace(hello.ServerName))
 
-			clientTLSMin := uint16(0)
-			if len(hello.SupportedVersions) > 0 {
-				clientTLSMin = hello.SupportedVersions[0]
+			// 该回调在每次 TLS 握手时执行。slog 的可变参数在调用点即求值并装箱，
+			// 因此必须先判级别再构造属性，否则默认 info 级别下每次握手都会产生
+			// 一批立刻被丢弃的堆分配。
+			if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+				clientTLSMin := uint16(0)
+				if len(hello.SupportedVersions) > 0 {
+					clientTLSMin = hello.SupportedVersions[0]
+				}
+				slog.Debug("TLS ClientHello received",
+					slog.String("bind", bind),
+					slog.String("sni", sni),
+					slog.Any("client_alpn", hello.SupportedProtos),
+					slog.Int("client_tls_first", int(clientTLSMin)),
+				)
 			}
-			slog.Debug("TLS ClientHello received",
-				slog.String("bind", bind),
-				slog.String("sni", sni),
-				slog.Any("client_alpn", hello.SupportedProtos),
-				slog.Int("client_tls_first", int(clientTLSMin)),
-			)
 
 			// 情况 1：SNI 为空 → IP 直接访问
 			if sni == "" {
@@ -1302,6 +1636,16 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 					return defaultSiteCert, nil
 				}
 				return selfSignedForBind(bind), nil
+			}
+
+			// 已配置但不可用的站点证书不能被自签或其他站点证书掩盖。
+			if state, found := sn.TLSCertificateStateForSNI(bind, sni); found {
+				switch state {
+				case snapshotpkg.TLSCertificateStateInvalid:
+					return nil, fmt.Errorf("configured TLS certificate is unavailable")
+				case snapshotpkg.TLSCertificateStateUnconfigured:
+					return selfSignedForBind(bind), nil
+				}
 			}
 
 			// 情况 2：SNI 精确匹配已知证书
@@ -1319,11 +1663,14 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 
 			// 情况 4：SNI 不匹配任何已知站点 → 检查 snapshot 是否有此站点
 			if _, found := sn.MatchSite(bind, sni); !found {
-				// 站点不存在：返回自签证书，防止证书泄露真实域名
-				slog.Debug("未知 SNI，返回自签证书",
-					slog.String("sni", sni),
-					slog.String("bind", bind),
-				)
+				// 站点不存在：返回自签证书，防止证书泄露真实域名。
+				// IP 扫描与随机 SNI 探测会把这条路径打热，同样需要先判级别。
+				if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+					slog.Debug("未知 SNI，返回自签证书",
+						slog.String("sni", sni),
+						slog.String("bind", bind),
+					)
+				}
 				return selfSignedForBind(bind), nil
 			}
 
@@ -1535,7 +1882,7 @@ func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 			continue
 		}
 		seenSites[rt.Site.ID] = struct{}{}
-		runtimes = append(runtimes, rt)
+		runtimes = append(runtimes, *rt)
 	}
 	sort.Slice(runtimes, func(i, j int) bool {
 		if runtimes[i].Site.ID != runtimes[j].Site.ID {
@@ -1598,6 +1945,16 @@ func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 		if strings.HasPrefix(sniKey, prefix) && len(cert.Certificate) > 0 {
 			fmt.Fprintf(h, " sni=%s:material=%s", sniKey, tlsCertificateFingerprintMaterial(cert))
 		}
+	}
+	stateKeys := make([]string, 0)
+	for stateKey := range sn.SiteTLSCertStateBySNI {
+		if strings.HasPrefix(stateKey, prefix) {
+			stateKeys = append(stateKeys, stateKey)
+		}
+	}
+	sort.Strings(stateKeys)
+	for _, stateKey := range stateKeys {
+		fmt.Fprintf(h, " sni=%s:state=%s", stateKey, sn.SiteTLSCertStateBySNI[stateKey])
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16]

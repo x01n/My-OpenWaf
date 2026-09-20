@@ -8,7 +8,7 @@ import (
 func init() {
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-php-cgi-softyhphen",
-		Name:     "PHP-CGI Soft-Hyphen Argument Injection",
+		Name:     "PHP-CGI 软连字符参数注入",
 		CVE:      "CVE-2024-4577",
 		Severity: "critical",
 		Category: "cve_php",
@@ -21,7 +21,7 @@ func init() {
 					CVEID:       "CVE-2024-4577",
 					Category:    "cve_php",
 					Severity:    "critical",
-					Description: "PHP-CGI argument injection via soft-hyphen with auto_prepend/allow_url_include",
+					Description: "PHP-CGI 通过软连字符以及 auto_prepend/allow_url_include 进行参数注入",
 					MatchedPart: "all",
 					Pattern:     "php-cgi-softhyphen",
 					Action:      "drop",
@@ -32,7 +32,7 @@ func init() {
 	})
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-wordpress-file-read",
-		Name:     "WordPress Arbitrary File Read",
+		Name:     "WordPress 任意文件读取",
 		CVE:      "CVE-2024-2961",
 		Severity: "high",
 		Category: "cve_php",
@@ -43,7 +43,7 @@ func init() {
 					CVEID:       "CVE-2024-2961",
 					Category:    "cve_php",
 					Severity:    "high",
-					Description: "WordPress arbitrary file read via admin-ajax.php",
+					Description: "通过 admin-ajax.php 进行 WordPress 任意文件读取",
 					MatchedPart: "url",
 					Pattern:     "wp-file-read",
 					Action:      "drop",
@@ -128,61 +128,61 @@ func NewPHPCVEDetector() *PHPCVEDetector {
 	d.rules = []phpCVERule{
 		{
 			cveID: "CVE-2015-6835", severity: "high",
-			description: "PHP object deserialization via serialized object pattern",
+			description: "通过序列化对象模式进行 PHP 对象反序列化",
 			patterns:    []*regexp.Regexp{rePHPSerObj, rePHPSerArray, rePHPUnserialize},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2018-14884", severity: "high",
-			description: "PHP stream wrapper file inclusion (php://filter, php://input, data://, expect://, phar://)",
+			description: "PHP 流包装器文件包含（php://filter、php://input、data://、expect://、phar://）",
 			patterns:    []*regexp.Regexp{rePHPFilterStream, rePHPInputStream, rePHPDataStream, rePHPExpect, rePHPPhar},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2018-20062", severity: "critical",
-			description: "ThinkPHP remote code execution via invokefunction",
+			description: "通过 invokefunction 进行 ThinkPHP 远程代码执行",
 			patterns:    []*regexp.Regexp{reThinkPHP1, reThinkPHP2, reThinkPHP3, reThinkPHP4, reThinkPHP5},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2021-3129", severity: "critical",
-			description: "Laravel Ignition RCE via _ignition/execute-solution",
+			description: "通过 _ignition/execute-solution 进行 Laravel Ignition RCE",
 			patterns:    []*regexp.Regexp{reLaravel1, reLaravel2, reLaravel3, reLaravel4},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2016-WEBSHELL", severity: "critical",
-			description: "PHP webshell upload detected (eval/system/exec in uploaded PHP file)",
+			description: "检测到 PHP WebShell 上传（上传的 PHP 文件中包含 eval/system/exec）",
 			patterns:    []*regexp.Regexp{rePHPTag, rePHPEval, rePHPSystem, rePHPExec, rePHPPassthru, rePHPShellExec},
 			target:      "body",
 		},
 		{
 			cveID: "CVE-2016-WEBSHELL-EXT", severity: "high",
-			description: "Suspicious PHP extension in file upload",
+			description: "文件上传中的可疑 PHP 扩展名",
 			patterns:    []*regexp.Regexp{rePHPExtUpload},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2018-7600", severity: "critical",
-			description: "Drupal Drupalgeddon2 RCE via render API",
+			description: "通过 render API 进行 Drupal Drupalgeddon2 RCE",
 			patterns:    []*regexp.Regexp{reDrupal1, reDrupal2},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2017-9841", severity: "high",
-			description: "PHPUnit RCE via eval-stdin.php",
+			description: "通过 eval-stdin.php 进行 PHPUnit RCE",
 			patterns:    []*regexp.Regexp{rePHPUnit},
 			target:      "url",
 		},
 		{
 			cveID: "CVE-2024-4577", severity: "critical",
-			description: "PHP-CGI argument injection via Windows soft-hyphen Best-Fit mapping",
+			description: "通过 Windows 软连字符 Best-Fit 映射进行 PHP-CGI 参数注入",
 			patterns:    []*regexp.Regexp{rePHPCGI_SoftHyphenArg, rePHPCGI_AutoPrepend, rePHPCGI_AllowInclude},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2023-41892", severity: "critical",
-			description: "Craft CMS RCE via conditions/render endpoint",
+			description: "通过 conditions/render 端点进行 Craft CMS RCE",
 			patterns:    []*regexp.Regexp{reCraftCMS},
 			target:      "url",
 		},
@@ -190,42 +190,21 @@ func NewPHPCVEDetector() *PHPCVEDetector {
 	return d
 }
 
-// Detect scans the request for PHP CVE exploitation attempts.
-func phpRequestContainsAny(req *CVERequest, rule phpCVERule, needles ...string) bool {
-	return requestTargetContainsAny(req, rule.target, needles...)
-}
-
-func shouldScanPHPRule(req *CVERequest, rule phpCVERule) bool {
+func shouldScanPHPRule(req *CVERequest, rule phpCVERule, hits *subDetectorHits) bool {
 	switch rule.cveID {
-	case "CVE-2015-6835":
-		return phpRequestContainsAny(req, rule, "unserialize", "o:", "a:")
-	case "CVE-2018-14884":
-		return phpRequestContainsAny(req, rule, "php://", "data://", "expect://", "phar://")
-	case "CVE-2018-20062":
-		return phpRequestContainsAny(req, rule, "invokefunction", "thinkphp", "think\\app", "filter[]=", "filter%5b%5d=", "call_user_func", "_method=__construct", "c=runtime", "a=getcontent")
-	case "CVE-2021-3129":
-		return phpRequestContainsAny(req, rule, "_ignition/execute-solution", "_ignition/health-check", "laravel", "facade/ignition", "illuminate\\")
-	case "CVE-2016-WEBSHELL":
-		return phpRequestContainsAny(req, rule, "<?php", "eval(", "system(", "exec(", "passthru(", "shell_exec")
-	case "CVE-2016-WEBSHELL-EXT":
-		return phpRequestContainsAny(req, rule, ".php", ".phtml", ".phar", "filename=")
-	case "CVE-2018-7600":
-		return phpRequestContainsAny(req, rule, "drupal", "form_id=", "#post_render", "#markup", "#type")
-	case "CVE-2017-9841":
-		return phpRequestContainsAny(req, rule, "eval-stdin", "phpunit")
-	case "CVE-2024-4577":
-		return phpRequestContainsAny(req, rule, "%ad", "auto_prepend_file", "allow_url_include", "cgi.force_redirect")
-	case "CVE-2023-41892":
-		return phpRequestContainsAny(req, rule, "conditions/render", "actions/conditions", "configobject", "craftcms", "craft cms")
+	case "CVE-2015-6835", "CVE-2018-14884", "CVE-2018-20062", "CVE-2021-3129",
+		"CVE-2016-WEBSHELL", "CVE-2016-WEBSHELL-EXT", "CVE-2018-7600",
+		"CVE-2017-9841", "CVE-2024-4577", "CVE-2023-41892":
+		return subDetectorACGate(rule.cveID, rule.target, hits)
 	default:
 		return true
 	}
 }
 
-func (d *PHPCVEDetector) Detect(req *CVERequest) []CVEMatch {
+func (d *PHPCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMatch {
 	var matches []CVEMatch
 	for _, rule := range d.rules {
-		if !shouldScanPHPRule(req, rule) {
+		if !shouldScanPHPRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)
@@ -254,9 +233,9 @@ func (d *PHPCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	return matches
 }
 
-func (d *PHPCVEDetector) DetectFirst(req *CVERequest) (CVEMatch, bool) {
+func (d *PHPCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (CVEMatch, bool) {
 	for _, rule := range d.rules {
-		if !shouldScanPHPRule(req, rule) {
+		if !shouldScanPHPRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)

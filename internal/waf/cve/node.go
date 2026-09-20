@@ -8,7 +8,7 @@ import (
 func init() {
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-rsc-flight-rce",
-		Name:     "React Server Components Flight Protocol RCE",
+		Name:     "React Server Components Flight 协议 RCE",
 		CVE:      "CVE-2025-55182",
 		Severity: "critical",
 		Category: "cve_node",
@@ -21,7 +21,7 @@ func init() {
 					CVEID:       "CVE-2025-55182",
 					Category:    "cve_node",
 					Severity:    "critical",
-					Description: "React2Shell: RSC Flight protocol with prototype chain attack",
+					Description: "React2Shell：RSC Flight 协议原型链攻击",
 					MatchedPart: "body",
 					Pattern:     "rsc-flight-rce",
 					Action:      "drop",
@@ -32,7 +32,7 @@ func init() {
 	})
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-nextjs-middleware-bypass",
-		Name:     "Next.js Middleware Authorization Bypass",
+		Name:     "Next.js 中间件授权绕过",
 		CVE:      "CVE-2025-29927",
 		Severity: "critical",
 		Category: "cve_node",
@@ -44,7 +44,7 @@ func init() {
 						CVEID:       "CVE-2025-29927",
 						Category:    "cve_node",
 						Severity:    "critical",
-						Description: "Next.js middleware authorization bypass via x-middleware-subrequest header",
+						Description: "Next.js 通过 x-middleware-subrequest 请求头的中间件授权绕过",
 						MatchedPart: "header",
 						Pattern:     "nextjs-middleware-bypass",
 						Action:      "drop",
@@ -130,49 +130,49 @@ func NewNodeCVEDetector() *NodeCVEDetector {
 	d.rules = []nodeCVERule{
 		{
 			cveID: "CVE-2019-10744", severity: "critical",
-			description: "Prototype Pollution via __proto__ or constructor.prototype manipulation",
+			description: "通过 __proto__ 或 constructor.prototype 操作进行原型污染",
 			patterns:    []*regexp.Regexp{reProtoPollution1, reProtoPollution2, reProtoPollution3, reProtoPollution4, reProtoPollution5},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2020-REACT-SSR", severity: "high",
-			description: "React SSR injection via dangerouslySetInnerHTML or __NEXT_DATA__ manipulation",
+			description: "通过 dangerouslySetInnerHTML 或 __NEXT_DATA__ 操作进行 React SSR 注入",
 			patterns:    []*regexp.Regexp{reReactSSR1, reReactSSR2, reReactSSR3},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2019-NODE-CMD", severity: "critical",
-			description: "Node.js command injection via child_process or shell metacharacters",
+			description: "通过 child_process 或 Shell 元字符进行 Node.js 命令注入",
 			patterns:    []*regexp.Regexp{reNodeCmd1, reNodeCmd2, reNodeCmd3, reNodeCmd4, reNodeCmd5},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2017-14849", severity: "high",
-			description: "Express/Koa path traversal via encoded dot-dot-slash",
+			description: "通过编码后的点点斜杠进行 Express/Koa 路径遍历",
 			patterns:    []*regexp.Regexp{reNodePathTrav1, reNodePathTrav2, reNodePathTrav3, reNodePathTrav4},
 			target:      "url",
 		},
 		{
 			cveID: "CVE-2022-29078", severity: "high",
-			description: "EJS server-side template injection",
+			description: "EJS 服务端模板注入",
 			patterns:    []*regexp.Regexp{reEJS1, reEJS2},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2023-32314", severity: "critical",
-			description: "vm2 sandbox escape via constructor chain",
+			description: "通过构造器链进行 vm2 沙箱逃逸",
 			patterns:    []*regexp.Regexp{reVM2_1, reVM2_2},
 			target:      "all",
 		},
 		{
 			cveID: "CVE-2024-34351", severity: "high",
-			description: "Next.js SSRF via x-middleware-subrequest header",
+			description: "通过 x-middleware-subrequest 请求头进行 Next.js SSRF",
 			patterns:    []*regexp.Regexp{reNextSSRF1},
 			target:      "header",
 		},
 		{
 			cveID: "CVE-2025-55182", severity: "critical",
-			description: "React2Shell: RSC Flight protocol prototype chain traversal to Function constructor RCE",
+			description: "React2Shell：RSC Flight 协议引用通过原型链遍历至 Function 构造函数 RCE",
 			patterns: []*regexp.Regexp{
 				reRSCProtoConstructor, reRSCConstructorChain, reRSCFunctionNew,
 				reRSCBlobHandler, reRSCChildProcess, reRSCPromiseExec, reRSCDynamicImport,
@@ -181,19 +181,19 @@ func NewNodeCVEDetector() *NodeCVEDetector {
 		},
 		{
 			cveID: "CVE-2025-55182", severity: "critical",
-			description: "React2Shell: Flight wire format reference with prototype pollution indicators",
+			description: "React2Shell：Flight 协议线格式引用包含原型污染指示",
 			patterns:    []*regexp.Regexp{reRSCFlightRef},
 			target:      "body",
 		},
 		{
 			cveID: "CVE-2025-29927", severity: "critical",
-			description: "Next.js middleware authorization bypass via x-middleware-subrequest",
+			description: "通过 x-middleware-subrequest 进行 Next.js 中间件授权绕过",
 			patterns:    []*regexp.Regexp{reNextMiddlewareBypass},
 			target:      "header",
 		},
 		{
 			cveID: "CVE-2025-55184", severity: "high",
-			description: "Next.js Server Actions path confusion",
+			description: "Next.js Server Actions 路径混淆",
 			patterns:    []*regexp.Regexp{reNextServerAction},
 			target:      "url",
 		},
@@ -201,40 +201,21 @@ func NewNodeCVEDetector() *NodeCVEDetector {
 	return d
 }
 
-// Detect scans the request for Node.js CVE exploitation attempts.
-func nodeRequestContainsAny(req *CVERequest, rule nodeCVERule, needles ...string) bool {
-	return requestTargetContainsAny(req, rule.target, needles...)
-}
-
-func shouldScanNodeRule(req *CVERequest, rule nodeCVERule) bool {
+func shouldScanNodeRule(req *CVERequest, rule nodeCVERule, hits *subDetectorHits) bool {
 	switch rule.cveID {
-	case "CVE-2019-10744":
-		return nodeRequestContainsAny(req, rule, "__proto__", "constructor.prototype", "prototype[")
-	case "CVE-2020-REACT-SSR":
-		return nodeRequestContainsAny(req, rule, "dangerouslysetinnerhtml", "__next_data__", "react")
-	case "CVE-2019-NODE-CMD":
-		return nodeRequestContainsAny(req, rule, "child_process", "exec(", "spawn(", "process.env", "require(", "whoami", "uname", "wget", "curl", "|", "`")
-	case "CVE-2017-14849":
-		return nodeRequestContainsAny(req, rule, "../", "%2e", "%5c", "..\\")
-	case "CVE-2022-29078":
-		return nodeRequestContainsAny(req, rule, "ejs", "<%", "template")
-	case "CVE-2023-32314":
-		return nodeRequestContainsAny(req, rule, "vm2", "constructor", "globalthis")
-	case "CVE-2024-34351", "CVE-2025-29927":
-		return nodeRequestContainsAny(req, rule, "x-middleware", "middleware-subrequest")
-	case "CVE-2025-55182":
-		return nodeRequestContainsAny(req, rule, "react.server", "rsc", "$@", "$1:", "__proto__", "child_process", "constructor", "function(", "new blob", "new response", "dynamic import")
-	case "CVE-2025-55184":
-		return nodeRequestContainsAny(req, rule, "server-action", "server action", "next-action", "/_next/data/", "__nextdatareq")
+	case "CVE-2019-10744", "CVE-2020-REACT-SSR", "CVE-2019-NODE-CMD",
+		"CVE-2017-14849", "CVE-2022-29078", "CVE-2023-32314",
+		"CVE-2024-34351", "CVE-2025-29927", "CVE-2025-55182", "CVE-2025-55184":
+		return subDetectorACGate(rule.cveID, rule.target, hits)
 	default:
 		return true
 	}
 }
 
-func (d *NodeCVEDetector) Detect(req *CVERequest) []CVEMatch {
+func (d *NodeCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMatch {
 	var matches []CVEMatch
 	for _, rule := range d.rules {
-		if !shouldScanNodeRule(req, rule) {
+		if !shouldScanNodeRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)
@@ -263,9 +244,9 @@ func (d *NodeCVEDetector) Detect(req *CVERequest) []CVEMatch {
 	return matches
 }
 
-func (d *NodeCVEDetector) DetectFirst(req *CVERequest) (CVEMatch, bool) {
+func (d *NodeCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (CVEMatch, bool) {
 	for _, rule := range d.rules {
-		if !shouldScanNodeRule(req, rule) {
+		if !shouldScanNodeRule(req, rule, hits) {
 			continue
 		}
 		targets := resolveTargets(req, rule.target)

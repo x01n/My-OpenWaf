@@ -22,6 +22,7 @@ type CVEFeedManager struct {
 	autoApprove  bool
 	feedEnabled  bool
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	log          *slog.Logger
 	mu           sync.Mutex
 	lastSync     time.Time
@@ -41,6 +42,7 @@ type CVERuleModel struct {
 	Target      string         `gorm:"size:32" json:"target"` // url, body, header, cookie
 	Severity    string         `gorm:"size:16" json:"severity"`
 	Action      string         `gorm:"size:32;default:drop" json:"action"`
+	CaptchaType string         `gorm:"size:16" json:"captcha_type,omitempty"`
 	Enabled     bool           `gorm:"default:false" json:"enabled"`
 	Description string         `gorm:"type:text" json:"description"`
 	Source      string         `gorm:"size:32" json:"source"` // auto_generated, manual, nvd, github
@@ -101,9 +103,14 @@ func (m *CVEFeedManager) Start() {
 
 // Stop signals the background loop to exit.
 func (m *CVEFeedManager) Stop() {
-	if m.feedEnabled {
-		close(m.stopCh)
+	if m == nil || !m.feedEnabled {
+		return
 	}
+	m.stopOnce.Do(func() {
+		if m.stopCh != nil {
+			close(m.stopCh)
+		}
+	})
 }
 
 // SyncNow triggers an immediate sync (blocking).
@@ -189,7 +196,7 @@ func (m *CVEFeedManager) doSync() error {
 
 func (m *CVEFeedManager) loadRulesIntoDetector() {
 	var rules []CVERuleModel
-	if err := m.db.Where("enabled = ? AND approved = ?", true, true).Find(&rules).Error; err != nil {
+	if err := m.db.Where("approved = ? AND source <> ?", true, "catalog").Find(&rules).Error; err != nil {
 		m.log.Error("cve_feed: failed to load rules", slog.String("error", err.Error()))
 		return
 	}
@@ -203,6 +210,7 @@ func (m *CVEFeedManager) loadRulesIntoDetector() {
 			Target:      r.Target,
 			Severity:    r.Severity,
 			Action:      r.Action,
+			CaptchaType: r.CaptchaType,
 			Enabled:     r.Enabled,
 			Description: r.Description,
 		}
@@ -210,8 +218,6 @@ func (m *CVEFeedManager) loadRulesIntoDetector() {
 	m.detector.ReloadCustomRules(custom)
 	m.log.Info("cve_feed: loaded rules into detector", slog.Int("count", len(custom)))
 }
-
-// ── NVD API v2.0 ──
 
 type nvdResponse struct {
 	Vulnerabilities []nvdVuln `json:"vulnerabilities"`
@@ -347,8 +353,6 @@ func (m *CVEFeedManager) processNVDCVE(cve nvdCVE) bool {
 
 	return m.db.Create(rule).Error == nil
 }
-
-// ── GitHub Advisory API ──
 
 type ghAdvisory struct {
 	GHSAID          string   `json:"ghsa_id"`

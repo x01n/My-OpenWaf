@@ -3,31 +3,73 @@ package shared
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strconv"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 )
 
 // LoadProtectionConfig reads the protection settings from the system settings repository.
+// It retains the legacy default-on-missing behavior for callers that cannot return an error.
 func LoadProtectionConfig(repo *repository.SystemSettingsRepo) store.ProtectionConfig {
-	val, err := repo.Get("protection")
+	cfg, err := LoadProtectionConfigStrict(repo)
 	if err != nil {
-		return store.DefaultProtectionConfig()
-	}
-	cfg := store.DefaultProtectionConfig()
-	if json.Unmarshal([]byte(val), &cfg) != nil {
 		return store.DefaultProtectionConfig()
 	}
 	return cfg
 }
 
-// SaveProtectionConfig writes the protection settings to the system settings repository.
+// LoadProtectionConfigStrict reads and validates persisted protection settings.
+// Missing settings use defaults; database and JSON errors are returned to the caller.
+func LoadProtectionConfigStrict(repo *repository.SystemSettingsRepo) (store.ProtectionConfig, error) {
+	val, err := repo.Get("protection")
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return store.DefaultProtectionConfig(), nil
+		}
+		return store.ProtectionConfig{}, fmt.Errorf("load protection config: %w", err)
+	}
+	cfg := store.DefaultProtectionConfig()
+	if err := json.Unmarshal([]byte(val), &cfg); err != nil {
+		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
+	}
+	if err := cfg.ValidateBasicAuth(); err != nil {
+		return store.ProtectionConfig{}, err
+	}
+	if err := ValidateGlobalCaptchaType(cfg.CaptchaType); err != nil {
+		return store.ProtectionConfig{}, err
+	}
+	return cfg, nil
+}
+
+// NormalizeAndValidateBasicAuth trims configured credentials and rejects enabled Basic Auth
+// unless both credentials are non-empty.
+func NormalizeAndValidateBasicAuth(cfg *store.ProtectionConfig) error {
+	cfg.BasicAuthUsername = strings.TrimSpace(cfg.BasicAuthUsername)
+	cfg.BasicAuthPassword = strings.TrimSpace(cfg.BasicAuthPassword)
+	return cfg.ValidateBasicAuth()
+}
+
+// SaveProtectionConfig writes validated protection settings to the system settings repository.
 func SaveProtectionConfig(repo *repository.SystemSettingsRepo, cfg store.ProtectionConfig) error {
+	if _, err := LoadProtectionConfigStrict(repo); err != nil {
+		return err
+	}
+	if err := NormalizeAndValidateBasicAuth(&cfg); err != nil {
+		return err
+	}
+	if err := ValidateGlobalCaptchaType(cfg.CaptchaType); err != nil {
+		return err
+	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -83,7 +125,175 @@ func ValidateActionWithoutRedirectTarget(value string) (string, bool) {
 	return normalized, true
 }
 
+func ValidateActionWithRedirectTarget(value string, redirectTo *string) (string, bool) {
+	normalized, ok := ValidateRuleAction(value)
+	if !ok {
+		return "", false
+	}
+	if action.Normalize(action.Type(normalized)) == action.Redirect && (redirectTo == nil || strings.TrimSpace(*redirectTo) == "") {
+		return "", false
+	}
+	return normalized, true
+}
+
+// ValidateCaptchaType validates the strict rule-level CAPTCHA override contract.
+func ValidateCaptchaType(value string) (string, bool) {
+	if value == "" {
+		return "", true
+	}
+	if !challenge.IsValidCaptchaType(challenge.CaptchaType(value)) {
+		return "", false
+	}
+	return value, true
+}
+
+// ValidateGlobalCaptchaType validates the persisted global CAPTCHA mode.
+func ValidateGlobalCaptchaType(value string) error {
+	if !challenge.IsValidCaptchaType(challenge.CaptchaType(value)) {
+		return fmt.Errorf("captcha_type must be one of: math, click, slide, rotate")
+	}
+	return nil
+}
+
+// ValidateCCRules validates the shared global/site CC rule JSON contract.
+func ValidateCCRules(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var rules []struct {
+		Enabled     *bool   `json:"enabled"`
+		Name        *string `json:"name"`
+		Action      string  `json:"action"`
+		CaptchaType string  `json:"captcha_type"`
+		Conditions  []struct {
+			Target   string `json:"target"`
+			Operator string `json:"operator"`
+			Value    string `json:"value"`
+		} `json:"conditions"`
+		Window       int    `json:"window"`
+		Threshold    int    `json:"threshold"`
+		Duration     int    `json:"duration"`
+		DurationUnit string `json:"duration_unit"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&rules); err != nil {
+		return fmt.Errorf("invalid cc rules: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return errors.New("invalid cc rules: multiple JSON values")
+	}
+	if rules == nil {
+		return errors.New("cc rules must be an array")
+	}
+	for _, rule := range rules {
+		if _, ok := ValidateCCRuleAction(rule.Action); !ok {
+			return errors.New("invalid cc rule action")
+		}
+		if rule.CaptchaType != "" {
+			if _, ok := ValidateCaptchaType(rule.CaptchaType); !ok {
+				return errors.New("invalid cc rule captcha_type")
+			}
+			switch strings.ToLower(strings.TrimSpace(rule.Action)) {
+			case "captcha", "captcha_challenge":
+			default:
+				return errors.New("cc rule captcha_type requires captcha action")
+			}
+		}
+		if len(rule.Conditions) == 0 {
+			return errors.New("cc rule requires conditions")
+		}
+		if rule.Window <= 0 || rule.Threshold <= 0 {
+			return errors.New("cc rule window and threshold must be positive")
+		}
+		if rule.Duration < 0 {
+			return errors.New("cc rule duration must be non-negative")
+		}
+		if !validCCDurationUnit(rule.DurationUnit) {
+			return errors.New("invalid cc rule duration unit")
+		}
+		for _, condition := range rule.Conditions {
+			target := strings.ToLower(strings.TrimSpace(condition.Target))
+			op := strings.ToLower(strings.TrimSpace(condition.Operator))
+			if strings.TrimSpace(condition.Value) == "" {
+				return errors.New("cc rule condition value is required")
+			}
+			valid := false
+			switch target {
+			case "url_path":
+				valid = op == "equals" || op == "prefix" || op == "contains"
+			case "method":
+				valid = op == "equals"
+			case "header":
+				valid = op == "equals" || op == "contains" || op == "prefix"
+				if valid {
+					name, value := splitCCHeaderValueForValidation(condition.Value)
+					valid = name != "" && value != ""
+				}
+			}
+			if !valid {
+				return errors.New("invalid cc rule condition")
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateCCRuleAction validates supported CC actions and legacy aliases.
+func ValidateCCRuleAction(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "intercept", "rate_limit", "captcha", "captcha_challenge", "shield_challenge", "chain_challenge", "drop", "observe", "challenge", "block", "log_only":
+		return strings.ToLower(strings.TrimSpace(value)), true
+	default:
+		return "", false
+	}
+}
+
+func validCCDurationUnit(unit string) bool {
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "", "seconds", "minutes":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitCCHeaderValueForValidation(value string) (string, string) {
+	for _, separator := range []string{":", "="} {
+		if name, headerValue, ok := strings.Cut(value, separator); ok {
+			return strings.TrimSpace(name), strings.TrimSpace(headerValue)
+		}
+	}
+	return "", ""
+}
+
 // ValidateAntiReplayAction validates the actions preserved by the anti-replay dataplane path.
+// ValidateChallengeAction 校验质询动作白名单并归一化。
+// 合法集合：challenge / captcha_challenge / shield_challenge / chain_challenge。
+// 空串表示「继承」，返回 ("", true)；非法值返回 ("", false)。
+func ValidateChallengeAction(value string) (string, bool) {
+	if value == "" {
+		return "", true
+	}
+	normalized := action.Normalize(action.Type(value))
+	switch normalized {
+	case action.Challenge, action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge:
+		return string(normalized), true
+	default:
+		return "", false
+	}
+}
+
+// ValidateGlobalChallengeAction 校验全局质询动作；空串视为默认 challenge，合法。
+func ValidateGlobalChallengeAction(value string) bool {
+	if value == "" {
+		return true
+	}
+	_, ok := ValidateChallengeAction(value)
+	return ok
+}
+
 func ValidateAntiReplayAction(value string) (string, bool) {
 	if value == "" {
 		return "", true
@@ -112,31 +322,110 @@ func ReloadCVERules(feedMgr *cve.CVEFeedManager) {
 // SyncBotEnabledToProtection updates ProtectionConfig.BotDetectionEnabled
 // so the engine stays consistent when the bot settings page toggles the flag.
 func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
-	cfg := store.DefaultProtectionConfig()
-	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &cfg)
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
 	}
 	if cfg.BotDetectionEnabled == enabled {
 		return nil
 	}
 	cfg.BotDetectionEnabled = enabled
-	data, _ := json.Marshal(cfg)
-	return settingsRepo.Set("protection", string(data))
+	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
 // SyncCaptchaEnabledToProtection updates ProtectionConfig.CaptchaEnabled
 // so the engine stays consistent when the bot settings page toggles the captcha flag.
+// SyncCaptchaEnabledToProtection updates ProtectionConfig.CaptchaEnabled
+// so the engine stays consistent when the bot settings page toggles the captcha flag.
 func SyncCaptchaEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
-	cfg := store.DefaultProtectionConfig()
-	if val, err := settingsRepo.Get("protection"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &cfg)
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
 	}
 	if cfg.CaptchaEnabled == enabled {
 		return nil
 	}
 	cfg.CaptchaEnabled = enabled
-	data, _ := json.Marshal(cfg)
-	return settingsRepo.Set("protection", string(data))
+	return SaveProtectionConfig(settingsRepo, cfg)
+}
+
+// SyncAntiReplayEnabledToProtection updates the global anti-replay flag used by the runtime.
+func SyncAntiReplayEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
+	}
+	if cfg.AntiReplayEnabled == enabled {
+		return nil
+	}
+	cfg.AntiReplayEnabled = enabled
+	return SaveProtectionConfig(settingsRepo, cfg)
+}
+
+// SyncProtectionCaptchaToSettings 将 protection 中的 CAPTCHA 开关同步到 bot_settings 投影。
+//
+// @param settingsRepo 系统设置仓库
+// @param enabled protection 中的 CAPTCHA 开关
+// @return 持久化错误
+func SyncProtectionCaptchaToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
+	current := BotSettingsResponse{ScoreThreshold: 60}
+	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
+	}
+	if current.CaptchaEnabled == enabled {
+		return nil
+	}
+	current.CaptchaEnabled = enabled
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
+	return settingsRepo.Set("bot_settings", string(data))
+}
+
+// SyncProtectionAntiReplayToSettings updates bot_settings.AntiReplayEnabled from protection.
+func SyncProtectionAntiReplayToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
+	current := BotSettingsResponse{ScoreThreshold: 60}
+	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
+	}
+	if current.AntiReplayEnabled == enabled {
+		return nil
+	}
+	current.AntiReplayEnabled = enabled
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
+	return settingsRepo.Set("bot_settings", string(data))
+}
+
+// SyncBrowserSignToProtection 将 bot_settings 中的浏览器签名配置同步到 protection，
+// 供引擎 phase 与 proxy HTML 注入读取。
+// SyncBrowserSignToProtection synchronizes browser signature settings from
+// bot_settings to protection for the engine phase and proxy HTML injection.
+func SyncBrowserSignToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool, ttl int, action string) error {
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
+	}
+	changed := false
+	if cfg.BrowserSignEnabled != enabled {
+		cfg.BrowserSignEnabled = enabled
+		changed = true
+	}
+	if ttl > 0 && cfg.BrowserSignTTL != ttl {
+		cfg.BrowserSignTTL = ttl
+		changed = true
+	}
+	if action != "" && cfg.BrowserSignAction != action {
+		cfg.BrowserSignAction = action
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
 // SyncBotThresholdToDropPolicy keeps the runtime bot threshold aligned with the bot settings page.
@@ -162,7 +451,10 @@ func SyncBotThresholdToDropPolicy(settingsRepo *repository.SystemSettingsRepo, t
 		return nil
 	}
 	current.BotScoreThreshold = threshold
-	data, _ := json.Marshal(current)
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal drop policy: %w", err)
+	}
 	return settingsRepo.Set("drop_policy", string(data))
 }
 
@@ -181,7 +473,10 @@ func SyncDropThresholdToBotSettings(settingsRepo *repository.SystemSettingsRepo,
 		return nil
 	}
 	current.ScoreThreshold = threshold
-	data, _ := json.Marshal(current)
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
@@ -205,7 +500,10 @@ func SyncCVEAutoDropToDropPolicy(settingsRepo *repository.SystemSettingsRepo, cr
 	}
 	current.CVEAutoDropCritical = critical
 	current.CVEAutoDropHigh = high
-	data, _ := json.Marshal(current)
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal drop policy: %w", err)
+	}
 	return settingsRepo.Set("drop_policy", string(data))
 }
 
@@ -220,7 +518,10 @@ func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, en
 		return nil
 	}
 	current.Enabled = enabled
-	data, _ := json.Marshal(current)
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
@@ -238,7 +539,12 @@ type BotSettingsResponse struct {
 	JSObfuscation            bool     `json:"js_obfuscation"`
 	ImageWatermark           bool     `json:"image_watermark"`
 	AntiReplayEnabled        bool     `json:"anti_replay_enabled"`
+	BrowserSignEnabled       bool     `json:"browser_sign_enabled"`
+	BrowserSignTTL           int      `json:"browser_sign_ttl"`
+	BrowserSignAction        string   `json:"browser_sign_action"`
 	JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
+	JSProtectionMode         string   `json:"js_protection_mode,omitempty"`
+	DecryptCacheTTLSeconds   int      `json:"decrypt_cache_ttl_seconds,omitempty"`
 	ImageWatermarkPaths      []string `json:"image_watermark_paths,omitempty"`
 	WatermarkText            string   `json:"watermark_text,omitempty"`
 	ExcludeRecordHeaders     []string `json:"exclude_record_headers,omitempty"`

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -13,6 +14,14 @@ import (
 // UnifiedWriterStatsProvider exposes async writer diagnostics to /metrics.
 type UnifiedWriterStatsProvider interface {
 	Stats() UnifiedWriterStats
+}
+
+// WriteQueueStatsProvider exposes the generic repository write queue's
+// submission and persistence outcomes to /metrics. It is deliberately
+// separate from UnifiedWriterStatsProvider: the two queues have different
+// lifecycles and loss semantics.
+type WriteQueueStatsProvider interface {
+	Stats() WriteQueueStats
 }
 
 // DataPlaneMetricsSnapshot is a point-in-time view of request-path counters.
@@ -42,6 +51,42 @@ type UpstreamMetricsSnapshot struct {
 	LatencySamples   int64
 }
 
+// CacheLayerStats holds cumulative hit/miss counters for a single named cache layer.
+type CacheLayerStats struct {
+	Name   string
+	Hits   int64
+	Misses int64
+	// Errors 是后端故障次数（如 Redis 不可达），与「键不存在」的 Misses 区分。
+	// 该值增长说明请求正在穿透到数据库，而非缓存策略失效。
+	Errors int64
+}
+
+// LuaScriptStats holds cumulative execution counters for a single Lua policy script.
+//
+// 脚本失败/超时后只写一条 warn 日志就静默跳过，请求判定不受影响——这对可用性
+// 是对的，但也意味着策略长期失效不会有任何外部信号。把这些计数器暴露出来，
+// 运维才能对 Failures/Timeouts 的占比告警。
+type LuaScriptStats struct {
+	// Name 是脚本名，来自用户输入，作为 label 输出前必须转义。
+	Name  string
+	Stage string
+	// Runs 是总执行次数，含失败与超时的那几次。
+	Runs int64
+	// Failures 是不含超时的失败：handle 报错、panic、入口缺失、状态机获取失败。
+	Failures int64
+	// Timeouts 与 Failures 互斥——超时分支直接返回、不再累加 Failures
+	// （internal/waf/luaplugin/exec.go），故成功次数是 Runs-Failures-Timeouts。
+	Timeouts int64
+	// AvgDurationMs 的分母是 Runs，超时的执行也会把它拉高。
+	AvgDurationMs float64
+}
+
+// CacheStatsSnapshotProvider returns per-layer cache hit/miss counters.
+type CacheStatsSnapshotProvider func() []CacheLayerStats
+
+// LuaScriptStatsProvider returns per-script Lua policy plugin counters.
+type LuaScriptStatsProvider func() []LuaScriptStats
+
 // DataPlaneMetricsSnapshotProvider returns a current data-plane metrics snapshot.
 type DataPlaneMetricsSnapshotProvider func() DataPlaneMetricsSnapshot
 
@@ -60,8 +105,11 @@ type Metrics struct {
 	Uptime         time.Time
 
 	unifiedWriterStatsProvider atomic.Value
+	writeQueueStatsProvider    atomic.Value
 	dataPlaneMetricsProvider   atomic.Value
 	upstreamMetricsProvider    atomic.Value
+	cacheStatsProvider         atomic.Value
+	luaScriptStatsProvider     atomic.Value
 }
 
 // NewMetrics creates a new metrics collector.
@@ -98,6 +146,15 @@ func (m *Metrics) SetUnifiedWriterStatsProvider(provider UnifiedWriterStatsProvi
 	m.unifiedWriterStatsProvider.Store(provider)
 }
 
+// SetWriteQueueStatsProvider attaches generic repository queue diagnostics to
+// /metrics.
+func (m *Metrics) SetWriteQueueStatsProvider(provider WriteQueueStatsProvider) {
+	if provider == nil {
+		return
+	}
+	m.writeQueueStatsProvider.Store(provider)
+}
+
 // SetDataPlaneMetricsProvider attaches request-path counters to /metrics.
 func (m *Metrics) SetDataPlaneMetricsProvider(provider DataPlaneMetricsSnapshotProvider) {
 	if provider == nil {
@@ -112,6 +169,22 @@ func (m *Metrics) SetUpstreamMetricsProvider(provider UpstreamMetricsSnapshotPro
 		return
 	}
 	m.upstreamMetricsProvider.Store(provider)
+}
+
+// SetCacheStatsProvider attaches per-layer cache hit/miss metrics to /metrics.
+func (m *Metrics) SetCacheStatsProvider(provider CacheStatsSnapshotProvider) {
+	if provider == nil {
+		return
+	}
+	m.cacheStatsProvider.Store(provider)
+}
+
+// SetLuaScriptStatsProvider attaches per-script Lua policy plugin metrics to /metrics.
+func (m *Metrics) SetLuaScriptStatsProvider(provider LuaScriptStatsProvider) {
+	if provider == nil {
+		return
+	}
+	m.luaScriptStatsProvider.Store(provider)
 }
 
 // PrometheusHandler returns a Hertz handler that serves /metrics in Prometheus text format.
@@ -203,6 +276,11 @@ openwaf_gc_pause_total_ns %d
 			body += prometheusUnifiedWriterStats(provider.Stats())
 		}
 	}
+	if v := m.writeQueueStatsProvider.Load(); v != nil {
+		if provider, ok := v.(WriteQueueStatsProvider); ok {
+			body += prometheusWriteQueueStats(provider.Stats())
+		}
+	}
 	if v := m.dataPlaneMetricsProvider.Load(); v != nil {
 		if provider, ok := v.(DataPlaneMetricsSnapshotProvider); ok {
 			body += prometheusDataPlaneMetrics(provider())
@@ -211,6 +289,16 @@ openwaf_gc_pause_total_ns %d
 	if v := m.upstreamMetricsProvider.Load(); v != nil {
 		if provider, ok := v.(UpstreamMetricsSnapshotProvider); ok {
 			body += prometheusUpstreamMetrics(provider())
+		}
+	}
+	if v := m.cacheStatsProvider.Load(); v != nil {
+		if provider, ok := v.(CacheStatsSnapshotProvider); ok {
+			body += prometheusCacheStats(provider())
+		}
+	}
+	if v := m.luaScriptStatsProvider.Load(); v != nil {
+		if provider, ok := v.(LuaScriptStatsProvider); ok {
+			body += prometheusLuaScriptStats(provider())
 		}
 	}
 
@@ -310,6 +398,114 @@ openwaf_upstream_latency_samples_total %d
 	)
 }
 
+func prometheusCacheStats(layers []CacheLayerStats) string {
+	body := `
+# HELP owaf_cache_hits_total Cache hits by cache layer
+# TYPE owaf_cache_hits_total counter
+`
+	for _, l := range layers {
+		body += fmt.Sprintf(`owaf_cache_hits_total{cache="%s"} %d`+"\n", escapePrometheusLabelValue(l.Name), l.Hits)
+	}
+	body += `
+# HELP owaf_cache_misses_total Cache misses by cache layer
+# TYPE owaf_cache_misses_total counter
+`
+	for _, l := range layers {
+		body += fmt.Sprintf(`owaf_cache_misses_total{cache="%s"} %d`+"\n", escapePrometheusLabelValue(l.Name), l.Misses)
+	}
+	body += `
+# HELP owaf_cache_errors_total Cache backend failures by cache layer (excludes key-not-found)
+# TYPE owaf_cache_errors_total counter
+`
+	for _, l := range layers {
+		body += fmt.Sprintf(`owaf_cache_errors_total{cache="%s"} %d`+"\n", escapePrometheusLabelValue(l.Name), l.Errors)
+	}
+	return body
+}
+
+/**
+ * escapePrometheusLabelValue 转义 label 值中的特殊字符。
+ *
+ * Prometheus 文本格式只定义三种转义：反斜杠、双引号、换行，分别写作 \\ 、\" 、\n。
+ * 未转义的双引号会提前闭合 label，未转义的换行会被解析成新的一行样本——脚本名
+ * 由用户自由填写，不转义就等于把整份 /metrics 的格式交给用户控制。
+ *
+ * 不用 %q：Go 的引号语法还会把制表符、控制字符写成 \t 、\x01，这些在 Prometheus
+ * 里是**非法**转义序列，解析器会直接报错，比不转义更糟。
+ *
+ * @param v 原始 label 值。
+ * @return 已转义的值，不含外层引号。
+ */
+func escapePrometheusLabelValue(v string) string {
+	if !strings.ContainsAny(v, "\\\"\n") {
+		return v
+	}
+	var b strings.Builder
+	b.Grow(len(v) + 8)
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; c {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+/**
+ * prometheusLuaScriptStats 渲染每个 Lua 策略脚本的运行统计。
+ *
+ * 无脚本时返回空串而不是空的 HELP/TYPE 头：label 组合本就随配置变化，
+ * 没有脚本就没有系列。
+ *
+ * @param scripts 脚本统计快照。
+ * @return Prometheus 文本片段，以空行开头以便直接拼接。
+ */
+func prometheusLuaScriptStats(scripts []LuaScriptStats) string {
+	if len(scripts) == 0 {
+		return ""
+	}
+
+	// label 部分四组指标共用，先转义一次避免重复开销。
+	labels := make([]string, len(scripts))
+	for i, s := range scripts {
+		labels[i] = fmt.Sprintf(`{script="%s",stage="%s"}`,
+			escapePrometheusLabelValue(s.Name), escapePrometheusLabelValue(s.Stage))
+	}
+
+	var b strings.Builder
+	b.WriteString("\n# HELP openwaf_lua_script_runs_total Lua policy script executions by script and stage\n")
+	b.WriteString("# TYPE openwaf_lua_script_runs_total counter\n")
+	for i, s := range scripts {
+		fmt.Fprintf(&b, "openwaf_lua_script_runs_total%s %d\n", labels[i], s.Runs)
+	}
+
+	b.WriteString("\n# HELP openwaf_lua_script_failures_total Lua policy script failures excluding timeouts: handle errors, panics and missing entrypoint\n")
+	b.WriteString("# TYPE openwaf_lua_script_failures_total counter\n")
+	for i, s := range scripts {
+		fmt.Fprintf(&b, "openwaf_lua_script_failures_total%s %d\n", labels[i], s.Failures)
+	}
+
+	b.WriteString("\n# HELP openwaf_lua_script_timeouts_total Lua policy script executions aborted by the per-script timeout\n")
+	b.WriteString("# TYPE openwaf_lua_script_timeouts_total counter\n")
+	for i, s := range scripts {
+		fmt.Fprintf(&b, "openwaf_lua_script_timeouts_total%s %d\n", labels[i], s.Timeouts)
+	}
+
+	b.WriteString("\n# HELP openwaf_lua_script_avg_duration_ms Average Lua policy script execution time in milliseconds\n")
+	b.WriteString("# TYPE openwaf_lua_script_avg_duration_ms gauge\n")
+	for i, s := range scripts {
+		fmt.Fprintf(&b, "openwaf_lua_script_avg_duration_ms%s %.6f\n", labels[i], s.AvgDurationMs)
+	}
+
+	return b.String()
+}
+
 func prometheusUnifiedWriterStats(stats UnifiedWriterStats) string {
 	return fmt.Sprintf(`
 # HELP openwaf_writer_queue_len Current queued observability records
@@ -334,9 +530,17 @@ openwaf_writer_flushes_total %d
 # TYPE openwaf_writer_flush_errors_total counter
 openwaf_writer_flush_errors_total %d
 
-# HELP openwaf_writer_last_flush_records Records in the latest async writer flush
+# HELP openwaf_writer_failed_records_total Total observability records not persisted because a database flush failed
+# TYPE openwaf_writer_failed_records_total counter
+openwaf_writer_failed_records_total %d
+
+# HELP openwaf_writer_last_flush_records Records persisted by the latest async writer flush
 # TYPE openwaf_writer_last_flush_records gauge
 openwaf_writer_last_flush_records %d
+
+# HELP openwaf_writer_last_flush_failed_records Records not persisted by the latest async writer flush
+# TYPE openwaf_writer_last_flush_failed_records gauge
+openwaf_writer_last_flush_failed_records %d
 
 # HELP openwaf_writer_last_flush_duration_ms Duration of the latest async writer flush in milliseconds
 # TYPE openwaf_writer_last_flush_duration_ms gauge
@@ -346,7 +550,7 @@ openwaf_writer_last_flush_duration_ms %d
 # TYPE openwaf_writer_last_flush_unix_nano gauge
 openwaf_writer_last_flush_unix_nano %d
 
-# HELP openwaf_writer_total_flushed_records Total records handled by async writer flushes
+# HELP openwaf_writer_total_flushed_records Total observability records persisted by async writer flushes
 # TYPE openwaf_writer_total_flushed_records counter
 openwaf_writer_total_flushed_records %d
 `,
@@ -360,9 +564,110 @@ openwaf_writer_total_flushed_records %d
 		stats.BotScoreDropped,
 		stats.FlushesTotal,
 		stats.FlushErrorsTotal,
+		stats.FailedRecordsTotal,
 		stats.LastFlushRecords,
+		stats.LastFlushFailedRecords,
 		stats.LastFlushDurationMs,
 		stats.LastFlushUnixNano,
 		stats.TotalFlushedRecords,
+	)
+}
+
+func prometheusWriteQueueStats(stats WriteQueueStats) string {
+	closed := 0
+	if stats.Closed {
+		closed = 1
+	}
+	return fmt.Sprintf(`
+# HELP openwaf_write_queue_len Current generic repository write queue depth
+# TYPE openwaf_write_queue_len gauge
+openwaf_write_queue_len %d
+
+# HELP openwaf_write_queue_capacity Configured generic repository write queue capacity
+# TYPE openwaf_write_queue_capacity gauge
+openwaf_write_queue_capacity %d
+
+# HELP openwaf_write_queue_closed Whether the generic repository write queue has begun shutdown
+# TYPE openwaf_write_queue_closed gauge
+openwaf_write_queue_closed %d
+
+# HELP openwaf_write_queue_submitted_total Total repository write jobs submitted
+# TYPE openwaf_write_queue_submitted_total counter
+openwaf_write_queue_submitted_total %d
+
+# HELP openwaf_write_queue_enqueued_total Total repository write jobs enqueued asynchronously
+# TYPE openwaf_write_queue_enqueued_total counter
+openwaf_write_queue_enqueued_total %d
+
+# HELP openwaf_write_queue_dropped_full_total Jobs rejected because the repository write queue was full
+# TYPE openwaf_write_queue_dropped_full_total counter
+openwaf_write_queue_dropped_full_total %d
+
+# HELP openwaf_write_queue_dropped_closed_total Jobs rejected after repository write queue shutdown began
+# TYPE openwaf_write_queue_dropped_closed_total counter
+openwaf_write_queue_dropped_closed_total %d
+
+# HELP openwaf_write_queue_sync_fallback_total Synchronous fallbacks used when waitable queue submissions found a full queue
+# TYPE openwaf_write_queue_sync_fallback_total counter
+openwaf_write_queue_sync_fallback_total %d
+
+# HELP openwaf_write_queue_executed_total Jobs whose callbacks were invoked
+# TYPE openwaf_write_queue_executed_total counter
+openwaf_write_queue_executed_total %d
+
+# HELP openwaf_write_queue_succeeded_total Jobs persisted successfully
+# TYPE openwaf_write_queue_succeeded_total counter
+openwaf_write_queue_succeeded_total %d
+
+# HELP openwaf_write_queue_failed_total Jobs whose callbacks or transaction failed
+# TYPE openwaf_write_queue_failed_total counter
+openwaf_write_queue_failed_total %d
+
+# HELP openwaf_write_queue_transaction_errors_total Transactions that failed to commit
+# TYPE openwaf_write_queue_transaction_errors_total counter
+openwaf_write_queue_transaction_errors_total %d
+
+# HELP openwaf_write_queue_batches_total Completed queue flush batches
+# TYPE openwaf_write_queue_batches_total counter
+openwaf_write_queue_batches_total %d
+
+# HELP openwaf_write_queue_last_batch_jobs Jobs in the latest flush batch
+# TYPE openwaf_write_queue_last_batch_jobs gauge
+openwaf_write_queue_last_batch_jobs %d
+
+# HELP openwaf_write_queue_last_batch_succeeded Jobs succeeded in the latest flush batch
+# TYPE openwaf_write_queue_last_batch_succeeded gauge
+openwaf_write_queue_last_batch_succeeded %d
+
+# HELP openwaf_write_queue_last_batch_failed Jobs failed in the latest flush batch
+# TYPE openwaf_write_queue_last_batch_failed gauge
+openwaf_write_queue_last_batch_failed %d
+
+# HELP openwaf_write_queue_last_batch_duration_ms Duration of the latest flush batch in milliseconds
+# TYPE openwaf_write_queue_last_batch_duration_ms gauge
+openwaf_write_queue_last_batch_duration_ms %d
+
+# HELP openwaf_write_queue_last_batch_unix_nano Unix timestamp of the latest flush batch
+# TYPE openwaf_write_queue_last_batch_unix_nano gauge
+openwaf_write_queue_last_batch_unix_nano %d
+`,
+		stats.QueueLen,
+		stats.QueueCapacity,
+		closed,
+		stats.SubmittedTotal,
+		stats.EnqueuedTotal,
+		stats.DroppedFullTotal,
+		stats.DroppedClosedTotal,
+		stats.SyncFallbackTotal,
+		stats.ExecutedTotal,
+		stats.SucceededTotal,
+		stats.FailedJobsTotal,
+		stats.TransactionErrorsTotal,
+		stats.BatchesTotal,
+		stats.LastBatchJobs,
+		stats.LastBatchSucceeded,
+		stats.LastBatchFailed,
+		stats.LastBatchDurationMs,
+		stats.LastBatchUnixNano,
 	)
 }

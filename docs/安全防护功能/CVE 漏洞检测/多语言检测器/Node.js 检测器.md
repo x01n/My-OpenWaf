@@ -1,7 +1,9 @@
+> [返回 安全防护功能](../../安全防护功能.md)
+
 # Node.js 检测器
 
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [node.go](file://internal/waf/cve/node.go)
 - [detector.go](file://internal/waf/cve/detector.go)
 - [general.go](file://internal/waf/cve/general.go)

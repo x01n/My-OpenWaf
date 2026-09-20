@@ -1,11 +1,14 @@
 package challenge
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,7 +28,6 @@ type ShieldConfig struct {
 	RequireHTTP3         bool `json:"require_http3"`          // 要求客户端支持 HTTP/3 (QUIC)
 	AllowHTTP1           bool `json:"allow_http1"`            // 是否允许 HTTP/1.x
 	EnableJSChallenge    bool `json:"enable_js_challenge"`    // 启用 JS 挑战验证
-	EnableWASM           bool `json:"enable_wasm"`            // 启用 WASM PoW（否则使用纯 JS）
 	EnableEnvCheck       bool `json:"enable_env_check"`       // 启用环境指纹检测
 	EnableDevToolsDetect bool `json:"enable_devtools_detect"` // 启用开发者工具检测
 }
@@ -42,7 +44,6 @@ func DefaultShieldConfig() ShieldConfig {
 		RequireHTTP3:         false,
 		AllowHTTP1:           true,
 		EnableJSChallenge:    true,
-		EnableWASM:           true,
 		EnableEnvCheck:       true,
 		EnableDevToolsDetect: true,
 	}
@@ -66,7 +67,7 @@ func normalizeShieldProtocol(raw string) string {
 	case "http/1.0", "http/1.1", "http", "https":
 		return "http/1.1"
 	default:
-		return protocol
+		return ""
 	}
 }
 
@@ -93,13 +94,73 @@ func shieldProtocolAllowed(cfg ShieldConfig, requestProtocol string) bool {
 
 // ShieldSession stores the server-side state for a pending shield challenge.
 type ShieldSession struct {
-	ID              string    `json:"id"`
-	Nonce           string    `json:"nonce"`
-	Difficulty      int       `json:"difficulty"`
-	OriginalURL     string    `json:"original_url"`
-	RequestProtocol string    `json:"request_protocol"`
-	EnvKey          []byte    `json:"env_key"` // AES key for env fingerprint encryption
-	CreatedAt       time.Time `json:"created_at"`
+	ChallengeSessionBinding
+	ID                   string    `json:"id"`
+	Nonce                string    `json:"nonce"`
+	Difficulty           int       `json:"difficulty"`
+	TimeoutSecs          int       `json:"timeout_secs"`
+	EnvStrictness        int       `json:"env_strictness"`
+	EnableEnvCheck       bool      `json:"enable_env_check"`
+	EnvConfigFrozen      bool      `json:"env_config_frozen"`
+	RequireHTTP2         bool      `json:"require_http2"`
+	RequireHTTP3         bool      `json:"require_http3"`
+	AllowHTTP1           bool      `json:"allow_http1"`
+	ProtocolConfigFrozen bool      `json:"protocol_config_frozen"`
+	OriginalURL          string    `json:"original_url"`
+	RequestProtocol      string    `json:"request_protocol"`
+	EnvKey               []byte    `json:"env_key"` // AES key for env fingerprint encryption
+	CreatedAt            time.Time `json:"created_at"`
+}
+
+func (s *ShieldSession) sessionTTL() time.Duration {
+	if s.TimeoutSecs > 0 {
+		return time.Duration(s.TimeoutSecs) * time.Second
+	}
+	return legacyShieldSessionTTL
+}
+
+func (s *ShieldSession) expiredAt(now time.Time) bool {
+	return now.Sub(s.CreatedAt) >= s.sessionTTL()
+}
+
+func (s *ShieldSession) hasFrozenConfig() bool {
+	if s == nil || !s.EnvConfigFrozen || !s.ProtocolConfigFrozen {
+		return false
+	}
+	if s.EnvStrictness < 0 || s.EnvStrictness > 2 {
+		return false
+	}
+	if normalizeShieldProtocol(s.RequestProtocol) == "" {
+		return false
+	}
+	return !s.EnableEnvCheck || len(s.EnvKey) == envSessionKeySize
+}
+
+func decodeShieldSession(data []byte) *ShieldSession {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return nil
+	}
+	for _, field := range []string{
+		"env_strictness",
+		"enable_env_check",
+		"env_config_frozen",
+		"require_http2",
+		"require_http3",
+		"allow_http1",
+		"protocol_config_frozen",
+		"request_protocol",
+	} {
+		raw, ok := fields[field]
+		if !ok || string(raw) == "null" {
+			return nil
+		}
+	}
+	var session ShieldSession
+	if json.Unmarshal(data, &session) != nil || !session.hasFrozenConfig() {
+		return nil
+	}
+	return &session
 }
 
 // ShieldManager orchestrates 5-second shield challenges (PoW + env fingerprint).
@@ -119,7 +180,7 @@ type ShieldManager struct {
 func NewShieldManager(captcha *CaptchaManager, redis *goredis.Client, difficulty int) *ShieldManager {
 	cfg := DefaultShieldConfig()
 	if difficulty > 0 {
-		cfg.Difficulty = difficulty
+		cfg.Difficulty = ClampPoWDifficulty(difficulty)
 	}
 	sm := &ShieldManager{
 		captcha:  captcha,
@@ -157,10 +218,12 @@ func (sm *ShieldManager) SetRedis(redis *goredis.Client) {
 }
 
 // SetConfig 更新 Shield 配置。
+// 难度会被钳制到 VerifyPoW 支持的区间，否则超出上限的配置会让挑战永远无法通过。
 func (sm *ShieldManager) SetConfig(cfg ShieldConfig) {
 	if cfg.Difficulty <= 0 {
 		cfg.Difficulty = 4
 	}
+	cfg.Difficulty = ClampPoWDifficulty(cfg.Difficulty)
 	if cfg.TimeoutSecs <= 0 {
 		cfg.TimeoutSecs = 30
 	}
@@ -170,17 +233,11 @@ func (sm *ShieldManager) SetConfig(cfg ShieldConfig) {
 	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 3
 	}
-	sm.mu.Lock()
-	sm.config = cfg
-	sm.mu.Unlock()
-}
-
-func (sm *ShieldManager) SetDifficulty(difficulty int) {
-	if difficulty <= 0 {
-		difficulty = 4
+	if cfg.EnvStrictness < 0 || cfg.EnvStrictness > 2 {
+		cfg.EnvStrictness = 1
 	}
 	sm.mu.Lock()
-	sm.config.Difficulty = difficulty
+	sm.config = cfg
 	sm.mu.Unlock()
 }
 
@@ -191,7 +248,7 @@ func (sm *ShieldManager) difficultyValue() int {
 	if difficulty <= 0 {
 		return 4
 	}
-	return difficulty
+	return ClampPoWDifficulty(difficulty)
 }
 
 // Config 返回当前配置的副本。
@@ -202,304 +259,261 @@ func (sm *ShieldManager) Config() ShieldConfig {
 	return cfg
 }
 
+func (sm *ShieldManager) shieldPageConfig(session *ShieldSession) ShieldConfig {
+	cfg := sm.Config()
+	cfg.TimeoutSecs = int(session.sessionTTL() / time.Second)
+	cfg.EnvStrictness = session.EnvStrictness
+	cfg.EnableEnvCheck = session.EnableEnvCheck
+	cfg.RequireHTTP2 = session.RequireHTTP2
+	cfg.RequireHTTP3 = session.RequireHTTP3
+	cfg.AllowHTTP1 = session.AllowHTTP1
+	return cfg
+}
+
 // GenerateChallenge creates a new shield challenge session (no captcha needed).
 func (sm *ShieldManager) GenerateChallenge(originalURL string, requestProtocol string) (*ShieldSession, error) {
+	return sm.GenerateChallengeWithBinding(originalURL, requestProtocol, ChallengeSessionBinding{})
+}
+
+// GenerateChallengeWithBinding creates a shield session bound to the matched site.
+func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, requestProtocol string, binding ChallengeSessionBinding) (*ShieldSession, error) {
+	cfg := sm.Config()
 	nonce := GeneratePoWNonce()
 	sessionID := shieldGenSessionID()
-	envKey := GenerateEnvSessionKey()
-	session := &ShieldSession{
-		ID:              sessionID,
-		Nonce:           nonce,
-		Difficulty:      sm.difficultyValue(),
-		OriginalURL:     originalURL,
-		RequestProtocol: shieldProtocolValue(requestProtocol),
-		EnvKey:          envKey,
-		CreatedAt:       time.Now(),
+	var envKey []byte
+	if cfg.EnableEnvCheck {
+		envKey = GenerateEnvSessionKey()
+		if len(envKey) != envSessionKeySize {
+			return nil, fmt.Errorf("environment session key generation failed")
+		}
 	}
-	sm.saveShieldSession(session)
+	session := &ShieldSession{
+		ChallengeSessionBinding: binding.normalized(),
+		ID:                      sessionID,
+		Nonce:                   nonce,
+		Difficulty:              cfg.Difficulty,
+		TimeoutSecs:             cfg.TimeoutSecs,
+		EnvStrictness:           cfg.EnvStrictness,
+		EnableEnvCheck:          cfg.EnableEnvCheck,
+		EnvConfigFrozen:         true,
+		RequireHTTP2:            cfg.RequireHTTP2,
+		RequireHTTP3:            cfg.RequireHTTP3,
+		AllowHTTP1:              cfg.AllowHTTP1,
+		ProtocolConfigFrozen:    true,
+		OriginalURL:             originalURL,
+		RequestProtocol:         shieldProtocolValue(requestProtocol),
+		EnvKey:                  envKey,
+		CreatedAt:               time.Now(),
+	}
+	if err := sm.saveShieldSession(session); err != nil {
+		return nil, err
+	}
 	return session, nil
 }
 
 // VerifyChallenge checks PoW + env fingerprint.
+// 会话通过原子“取出即删除”获得，保证一份 PoW 解只能被兑换一次；
+// 过期会话直接拒绝，不依赖清理协程的调度间隔。
 func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, requestProtocol string) (bool, string) {
-	session := sm.loadShieldSession(sessionID)
+	return sm.VerifyChallengeWithBinding(
+		sessionID,
+		captchaAnswer,
+		powCounter,
+		powHash,
+		envFPJSON,
+		requestProtocol,
+		ChallengeSessionBinding{},
+	)
+}
+
+// VerifyChallengeWithBinding compares the matched-site binding before atomically
+// consuming the shield session.
+func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, requestProtocol string, binding ChallengeSessionBinding) (bool, string) {
+	session := sm.takeShieldSessionWithBinding(sessionID, binding)
 	if session == nil {
 		return false, ""
 	}
-	sm.deleteShieldSession(sessionID)
-	if !shieldProtocolAllowed(sm.Config(), requestProtocol) {
+	if session.expiredAt(time.Now()) {
 		return false, session.OriginalURL
 	}
-	if session.RequestProtocol != "" && shieldProtocolValue(requestProtocol) != session.RequestProtocol {
+	if !session.hasFrozenConfig() {
 		return false, session.OriginalURL
 	}
-	// PoW verification is the primary challenge.
+	if shieldProtocolValue(requestProtocol) != session.RequestProtocol {
+		return false, session.OriginalURL
+	}
+	if !shieldProtocolAllowed(sm.shieldPageConfig(session), requestProtocol) {
+		return false, session.OriginalURL
+	}
 	if !VerifyPoW(session.Nonce, powCounter, powHash, session.Difficulty) {
 		return false, session.OriginalURL
 	}
-	// Env fingerprint: decrypt using session-bound key then validate.
-	if envFPJSON != "" {
-		var fp *EnvFingerprint
-		if len(session.EnvKey) > 0 {
-			fp = DecryptEnvFingerprint(envFPJSON, session.EnvKey)
-		} else {
-			fp = ParseEnvFingerprint(envFPJSON)
-		}
-		if fp != nil {
-			result := ValidateEnvFingerprint(fp)
-			if !result.Pass {
-				return false, session.OriginalURL
-			}
-		}
+	if !session.EnableEnvCheck {
+		return true, session.OriginalURL
 	}
-	return true, session.OriginalURL
+
+	fp := DecryptEnvFingerprintWithAAD(
+		envFPJSON,
+		session.EnvKey,
+		EnvFingerprintAAD("shield", session.ID, session.ChallengeSessionBinding),
+	)
+	if fp == nil {
+		return false, session.OriginalURL
+	}
+
+	result := ValidateEnvFingerprint(fp)
+	if session.EnvStrictness == 0 {
+		return result.Score < 100, session.OriginalURL
+	}
+	return result.Score <= 50, session.OriginalURL
 }
 
 // WriteShieldChallengeResponse renders the Cloudflare-style shield HTML page.
-func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, reqID, originalURL, requestProtocol string, statusCode int) {
+func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, reqID, originalURL, requestProtocol string, binding ChallengeSessionBinding, statusCode int) {
 	prepareChallengeResponseHeaders(c, reqID)
-	session, err := sm.GenerateChallenge(originalURL, requestProtocol)
+	session, err := sm.GenerateChallengeWithBinding(originalURL, requestProtocol, binding)
 	if err != nil {
 		c.String(500, "shield challenge generation failed")
 		return
 	}
-	cfg := sm.Config()
-	powScript := GeneratePoWScript(session.Difficulty, session.Nonce)
-	if cfg.EnableWASM {
-		powScript = GeneratePoWWASMScript(session.Difficulty, session.Nonce)
-	}
+	cfg := sm.shieldPageConfig(session)
+	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce)
 	envJS := ""
 	if cfg.EnableEnvCheck {
-		envJS = EnvCheckJSEncrypted(EnvSessionKeyHex(session.EnvKey))
+		aad := EnvFingerprintAAD("shield", session.ID, binding)
+		envJS = EnvCheckJSEncrypted(EnvSessionKeyHex(session.EnvKey), aad)
+		if envJS == "" {
+			c.String(500, "shield environment initialization failed")
+			return
+		}
 	}
 
 	html := shieldPageHTMLWithConfig(session.ID, cfg, session.RequestProtocol, envJS, powScript)
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
+var shieldPageTmpl = template.Must(template.ParseFS(challengePageFS, "templates/shield.html"))
+
+type shieldPageData struct {
+	SessionID            string
+	AutoStartDelay       template.JS
+	TimeoutMS            template.JS
+	MaxRetries           template.JS
+	EnableEnvCheck       template.JS
+	EnableDevToolsDetect template.JS
+	RequireHTTP2         template.JS
+	RequireHTTP3         template.JS
+	AllowHTTP1           template.JS
+	RequestProtocol      string
+	EnvJS                template.JS
+	PowScript            template.JS
+}
+
 func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, requestProtocol, envJS, powScript string) string {
-	return fmt.Sprintf(shieldPageHTML, sessionID, cfg.AutoStartDelay, cfg.TimeoutSecs*1000, cfg.MaxRetries, cfg.EnableEnvCheck, cfg.EnableDevToolsDetect, cfg.RequireHTTP2, cfg.RequireHTTP3, cfg.AllowHTTP1, shieldProtocolValue(requestProtocol), envJS, powScript)
+	data := shieldPageData{
+		SessionID:            sessionID,
+		AutoStartDelay:       template.JS(strconv.Itoa(cfg.AutoStartDelay)),
+		TimeoutMS:            template.JS(strconv.Itoa(cfg.TimeoutSecs * 1000)),
+		MaxRetries:           template.JS(strconv.Itoa(cfg.MaxRetries)),
+		EnableEnvCheck:       template.JS(strconv.FormatBool(cfg.EnableEnvCheck)),
+		EnableDevToolsDetect: template.JS(strconv.FormatBool(cfg.EnableDevToolsDetect)),
+		RequireHTTP2:         template.JS(strconv.FormatBool(cfg.RequireHTTP2)),
+		RequireHTTP3:         template.JS(strconv.FormatBool(cfg.RequireHTTP3)),
+		AllowHTTP1:           template.JS(strconv.FormatBool(cfg.AllowHTTP1)),
+		RequestProtocol:      shieldProtocolValue(requestProtocol),
+		EnvJS:                template.JS(envJS),
+		PowScript:            template.JS(powScript),
+	}
+	var buf bytes.Buffer
+	if err := shieldPageTmpl.ExecuteTemplate(&buf, "shield.html", data); err != nil {
+		return "<!DOCTYPE html><html><body><p>Unable to render security check.</p></body></html>"
+	}
+	return obfuscateShieldJS(buf.String())
 }
 
-const shieldPageHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Security Check</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"Helvetica Neue",sans-serif;background:linear-gradient(160deg,#f0fdfa 0%%,#f8fafc 40%%,#f1f5f9 100%%);display:flex;justify-content:center;align-items:center;min-height:100vh}
-.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);padding:48px 40px;max-width:440px;width:92%%;text-align:center}
-.shield-icon{font-size:48px;margin-bottom:16px;line-height:1.2}
-h1{font-size:1.15rem;font-weight:600;color:#334155;margin-bottom:4px}
-.sub{color:#64748b;font-size:.875rem;margin-bottom:8px}
-.divider{width:48px;height:3px;background:#14b8a6;border-radius:2px;margin:16px auto 24px}
-.cb-wrap{display:flex;align-items:center;gap:14px;padding:18px 20px;border:2px solid #e2e8f0;border-radius:12px;margin-bottom:20px;cursor:pointer;transition:border-color .2s,background .2s;user-select:none}
-.cb-wrap:hover{border-color:#14b8a6;background:#f0fdfa}
-.cb-wrap.checking{border-color:#14b8a6;background:#f0fdfa;cursor:default}
-.cb-wrap.done{border-color:#22c55e;background:#f0fdf4}
-.cb-wrap.fail{border-color:#ef4444;background:#fef2f2}
-.cb{width:24px;height:24px;border:2px solid #cbd5e1;border-radius:6px;display:flex;align-items:center;justify-content:center;transition:all .3s;flex-shrink:0}
-.cb-wrap.checking .cb{border-color:#14b8a6;animation:spin 1s linear infinite}
-.cb-wrap.done .cb{border-color:#22c55e;background:#22c55e}
-.cb-wrap.fail .cb{border-color:#ef4444;background:#ef4444}
-@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
-.cb svg{width:14px;height:14px;opacity:0;transition:opacity .2s}
-.cb-wrap.done .cb svg{opacity:1}
-.cb-label{font-size:.95rem;color:#334155;font-weight:500}
-.cb-wrap.checking .cb-label{color:#0d9488}
-.cb-wrap.done .cb-label{color:#16a34a}
-.cb-wrap.fail .cb-label{color:#ef4444}
-.status{color:#64748b;font-size:.8rem;margin-top:12px;min-height:1.2em}
-.footer{margin-top:24px;padding-top:14px;border-top:1px solid #f1f5f9;font-size:.7rem;color:#94a3b8}
-.spinner{width:18px;height:18px;border:2px solid #14b8a6;border-top-color:transparent;border-radius:50%%;animation:spin .8s linear infinite;display:none}
-.cb-wrap.checking .spinner{display:block}
-.cb-wrap.checking .cb-box{display:none}
-.retry{display:none;margin-top:12px;padding:10px 20px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:.85rem;color:#334155;cursor:pointer}
-.retry:hover{background:#f0fdfa;border-color:#14b8a6}
-</style>
-</head>
-<body>
-<div class="card">
-<div class="shield-icon">&#128737;</div>
-<h1>Checking your browser / 正在验证您的浏览器</h1>
-<p class="sub">This process is automatic. Please wait...</p>
-<p class="sub">此过程自动完成，请稍候...</p>
-<div class="divider"></div>
-<div class="cb-wrap" id="cbw">
-<div class="cb" id="cb"><span class="cb-box">&#9744;</span><span class="spinner"></span><svg viewBox="0 0 14 14" fill="none"><path d="M2 7l3.5 3.5L12 4" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-<span class="cb-label" id="cbl">Verify you are human / 验证您是真人</span>
-</div>
-<p class="status" id="st"></p>
-<button class="retry" id="retry" onclick="location.reload()">Retry / 重试</button>
-<div class="footer">Protected by My-OpenWAF</div>
-</div>
-<script>
-(function(){
-var sid="%s",autoDelay=%d,timeoutMs=%d,maxRetries=%d,retryCount=0,enableEnv=%t,detectDev=%t,requireH2=%t,requireH3=%t,allowH1=%t,requestProto="%s",pc=0,ph="",env="",solving=false,solved=false;
-%s
-var cbw=document.getElementById('cbw'),cbl=document.getElementById('cbl'),st=document.getElementById('st'),retry=document.getElementById('retry');
-
-function detectDevTools(){
-var w=window.outerWidth-window.innerWidth>160;
-var h=window.outerHeight-window.innerHeight>160;
-if(w||h)return true;
-var dt=false;
-try{var el=new Image();Object.defineProperty(el,'id',{get:function(){dt=true}});console.log(el);console.clear()}catch(e){}
-if(dt)return true;
-if(window.__owaf_env&&window.__owaf_env.devtools_open)return true;
-if(window.__owaf_env&&window.__owaf_env.devtools_timing>50)return true;
-return false;
+func obfuscateShieldJS(html string) string {
+	v := randomVarNames(12)
+	r := strings.NewReplacer(
+		"var sid=", "var "+v[0]+"=",
+		",sid,", ","+v[0]+",",
+		"'__waf_shield_session':sid", "'__waf_shield_session':"+v[0],
+		"autoDelay", v[1],
+		"timeoutMs", v[2],
+		"maxRetries", v[3],
+		"retryCount", v[4],
+		"enableEnv", v[5],
+		"detectDev,", v[6]+",",
+		"detectDev&&", v[6]+"&&",
+		"detectDev=", v[6]+"=",
+		"requireH2", v[7],
+		"requireH3", v[8],
+		"allowH1", v[9],
+		"requestProto", v[10],
+		"envMonitor", v[11],
+	)
+	return r.Replace(html)
 }
 
-function detectAutomation(){
-if(navigator.webdriver)return 'webdriver';
-if(!window.chrome&&/Chrome/.test(navigator.userAgent))return 'chrome_mismatch';
-if(window.__nightmare)return 'nightmare';
-if(window.callPhantom||window._phantom)return 'phantomjs';
-if(window.__selenium_unwrapped||window.__webdriver_evaluate||document.__selenium_unwrapped)return 'selenium';
-if(navigator.plugins&&navigator.plugins.length===0&&navigator.userAgent.indexOf('HeadlessChrome')!==-1)return 'headless';
-return null;
-}
+// shieldSessionTTL 是 shield 会话的有效期，Redis 与内存两条路径共用。
+const legacyShieldSessionTTL = 5 * time.Minute
 
-function blockEnv(msg){
-solving=false;solved=true;
-cbw.className='cb-wrap fail';
-cbl.textContent='Environment error / 环境异常';
-st.textContent=msg;
-retry.style.display='inline-block';
-}
-
-function detectDevToolsEnabled(){return detectDev&&detectDevTools()}
-function normalizeProtocolToken(raw){var p=(raw||'').toLowerCase().trim();if(p.endsWith(':'))p=p.slice(0,-1);if(p==='http/2.0'||p==='h2')return'h2';if(p==='http/3.0'||p==='h3')return'h3';if(p==='http'||p==='http/1.0'||p==='http/1.1'||p==='https')return'http/1.1';return p}
-function protocolAllowed(){var p=normalizeProtocolToken(requestProto||location.protocol||'');if(requireH2&&requireH3){if(p!=='h2'&&p!=='h3')return false}else if(requireH2){if(p!=='h2')return false}else if(requireH3){if(p!=='h3')return false}if(!allowH1&&p==='http/1.1')return false;return true}
-function failVerify(msg){solving=false;solved=false;cbw.className='cb-wrap fail';cbl.textContent='Verification failed / 验证失败';st.textContent=msg;if(retryCount>=maxRetries){solved=true;retry.style.display='inline-block'}}
-
-// Continuous environment monitoring — check every 2 seconds during solving.
-var envMonitor=setInterval(function(){
-if(solved)return clearInterval(envMonitor);
-if(detectDevToolsEnabled()){
-clearInterval(envMonitor);
-blockEnv('Developer tools detected. Please close DevTools and refresh. / 检测到开发者工具，请关闭后刷新页面。');
-}
-},2000);
-
-// Auto-start verification after page loads (Cloudflare-style).
-// Wait a short delay for env fingerprint collection to complete.
-setTimeout(function(){
-if(solving||solved)return;
-if(!protocolAllowed()){blockEnv('Protocol requirements were not met. / 当前协议不满足验证要求。');return;}
-var autoReason=detectAutomation();
-if(autoReason){blockEnv('Automated browser detected ('+autoReason+'). / 检测到自动化浏览器环境。');return;}
-if(detectDevToolsEnabled()){blockEnv('Developer tools detected. Please close DevTools and refresh. / 检测到开发者工具，请关闭后刷新页面。');return;}
-startVerify();
-},autoDelay);
-
-// Also allow manual click to restart if auto-start didn't trigger
-cbw.addEventListener('click',function(){
-if(solving||solved)return;
-if(!protocolAllowed()){blockEnv('Protocol requirements were not met. / 当前协议不满足验证要求。');return;}
-var autoReason=detectAutomation();
-if(autoReason){blockEnv('Automated browser detected ('+autoReason+'). / 检测到自动化浏览器环境。');return;}
-if(detectDevToolsEnabled()){blockEnv('Developer tools detected. Please close DevTools and refresh. / 检测到开发者工具，请关闭后刷新页面。');return;}
-startVerify();
-});
-
-function startVerify(){
-retryCount++;
-solving=true;
-cbw.className='cb-wrap checking';
-cbl.textContent='Verifying... / 验证中...';
-st.textContent='Computing challenge...';
-setTimeout(function(){if(enableEnv&&window.__owaf_env_encrypted)env=window.__owaf_env_encrypted},300);
-%s
-}
-
-window.__owaf_pow_callback=function(c,h){
-// Final env check before submitting
-if(detectDevToolsEnabled()){
-blockEnv('Developer tools opened during verification. / 验证过程中检测到开发者工具。');
-return;
-}
-var autoReason=detectAutomation();
-if(autoReason){blockEnv('Automated browser detected ('+autoReason+'). / 检测到自动化浏览器环境。');return;}
-pc=c;ph=h;solved=true;
-clearInterval(envMonitor);
-cbw.className='cb-wrap done';
-cbl.textContent='Verified / 验证通过';
-st.textContent='Redirecting...';
-setTimeout(function(){if(enableEnv&&window.__owaf_env_encrypted)env=window.__owaf_env_encrypted;submitResult()},200);
-};
-
-window.__owaf_pow_error=function(msg){
-solved=true;
-cbw.className='cb-wrap fail';
-cbl.textContent='Verification failed / 验证失败';
-st.textContent='Error: '+(msg||'unknown');
-retry.style.display='inline-block';
-};
-
-setTimeout(function(){
-if(!solved&&solving){
-if(window.__powWorker)window.__powWorker.terminate();
-failVerify('Verification took too long. Please retry.');
-}
-},timeoutMs);
-
-function submitResult(){
-if(enableEnv&&!env&&window.__owaf_env_encrypted)env=window.__owaf_env_encrypted;
-var f=document.createElement('form');f.method='POST';f.action='/__owaf/shield/verify';
-var d={'__waf_shield_session':sid,'__waf_captcha_answer':'','__waf_pow_counter':String(pc),'__waf_pow_hash':ph,'__waf_env_fp':env};
-for(var k in d){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=d[k];f.appendChild(i)}
-document.body.appendChild(f);f.submit();
-}
-})();
-</script>
-</body>
-</html>`
-
-func (sm *ShieldManager) saveShieldSession(s *ShieldSession) {
+func (sm *ShieldManager) saveShieldSession(s *ShieldSession) error {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
 	if redis := sm.redisClient(); redis != nil {
-		data, _ := json.Marshal(s)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if redis.Set(ctx, sm.prefix+s.ID, data, 5*time.Minute).Err() == nil {
-			return
+		if err := redis.Set(ctx, sm.prefix+s.ID, data, s.sessionTTL()).Err(); err != nil {
+			return fmt.Errorf("store Shield session in Redis: %w", err)
 		}
+		return nil
 	}
 	sm.mu.Lock()
 	sm.sessions[s.ID] = s
 	sm.mu.Unlock()
+	return nil
 }
 
-func (sm *ShieldManager) loadShieldSession(id string) *ShieldSession {
-	if redis := sm.redisClient(); redis != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		data, err := redis.Get(ctx, sm.prefix+id).Bytes()
-		if err == nil {
-			var s ShieldSession
-			if json.Unmarshal(data, &s) == nil {
-				return &s
-			}
-		}
+// takeShieldSession 原子地取出并删除一个 shield 会话。
+// 返回 nil 表示会话不存在或已被其他请求兑换，从而保证 PoW 解的一次性。
+func (sm *ShieldManager) takeShieldSessionWithBinding(id string, binding ChallengeSessionBinding) *ShieldSession {
+	if id == "" {
+		return nil
 	}
-	sm.mu.RLock()
-	s := sm.sessions[id]
-	sm.mu.RUnlock()
-	return s
-}
-
-func (sm *ShieldManager) deleteShieldSession(id string) {
+	binding = binding.normalized()
 	if redis := sm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		redis.Del(ctx, sm.prefix+id)
+		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{sm.prefix + id}, binding.SiteID, binding.Host, binding.Bind).Text()
+		data := []byte(raw)
+		if err != nil {
+			return nil
+		}
+		if len(data) == 0 {
+			return nil
+		}
+		if session := decodeShieldSession(data); session != nil {
+			sm.mu.Lock()
+			delete(sm.sessions, id)
+			sm.mu.Unlock()
+			return session
+		}
+		return nil
 	}
 	sm.mu.Lock()
-	delete(sm.sessions, id)
+	s, ok := sm.sessions[id]
+	if ok && s != nil && s.ChallengeSessionBinding.matches(binding) {
+		delete(sm.sessions, id)
+	} else {
+		ok = false
+	}
 	sm.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return s
 }
 
 func (sm *ShieldManager) cleanupLoop() {
@@ -511,9 +525,12 @@ func (sm *ShieldManager) cleanupLoop() {
 			sm.mu.Lock()
 			now := time.Now()
 			for id, s := range sm.sessions {
-				if now.Sub(s.CreatedAt) > 5*time.Minute {
+				if s.expiredAt(now) {
 					delete(sm.sessions, id)
 				}
+			}
+			if len(sm.sessions) == 0 {
+				sm.sessions = make(map[string]*ShieldSession)
 			}
 			sm.mu.Unlock()
 		case <-sm.done:

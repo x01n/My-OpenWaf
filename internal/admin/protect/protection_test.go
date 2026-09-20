@@ -128,6 +128,33 @@ func TestProtectionResponseDefaultsJSONFields(t *testing.T) {
 	}
 }
 
+func TestPutProtectionSettingsSyncsAntiReplayToBotSettings(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Set("bot_settings", `{"enabled":true,"score_threshold":77}`); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"anti_replay_enabled":true}`))
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got shared.BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.AntiReplayEnabled || !got.Enabled || got.ScoreThreshold != 77 {
+		t.Fatalf("unexpected bot settings projection: %#v", got)
+	}
+}
+
 func TestPutProtectionSettingsPartialBodyPreservesChallengeFields(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	cfg := store.DefaultProtectionConfig()
@@ -480,5 +507,52 @@ func TestUpdateDropPolicyRejectsInvalidBotScoreThreshold(t *testing.T) {
 	}
 	if val, err := repo.Get("drop_policy"); err == nil && val != "" {
 		t.Fatalf("invalid bot_score_threshold should not create drop_policy, got %s", val)
+	}
+}
+
+func TestPutProtectionSettingsRejectsInvalidChallengeNumbers(t *testing.T) {
+	for _, body := range []string{
+		`{"captcha_timeout":0}`,
+		`{"captcha_pass_ttl":-1}`,
+		`{"shield_timeout_secs":0}`,
+		`{"shield_auto_start_delay":0}`,
+		`{"shield_max_retries":0}`,
+		`{"shield_difficulty":8}`,
+		`{"shield_env_strictness":3}`,
+		`{"captcha_type":"drag"}`,
+	} {
+		repo := newSystemSettingsRepoForTest(t)
+		if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
+			t.Fatalf("seed protection: %v", err)
+		}
+		ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(body))
+		if ctx.Response.StatusCode() != 400 {
+			t.Fatalf("body=%s: expected 400, got %d: %s", body, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+		}
+	}
+}
+
+func TestPutProtectionSettingsRejectsInvalidChainCaptchaType(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	body := []byte(`{"chain_steps":[{"type":"captcha","condition":"all","captcha_type":"drag"}]}`)
+	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("expected 400 for invalid chain captcha_type, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+}
+
+// TestPutProtectionSettingsRejectsInvalidGlobalCaptchaType ensures the generic protection endpoint validates CAPTCHA mode.
+func TestPutProtectionSettingsRejectsInvalidGlobalCaptchaType(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	body := []byte(`{"captcha_type":"pow"}`)
+	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("expected 400 for invalid captcha_type, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 }

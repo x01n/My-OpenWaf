@@ -548,9 +548,9 @@ func TestEnrichTLSCapabilitiesWithHTTP3RouteConflictsReportsHostConflicts(t *tes
 	left := runtimeHTTP3RouteConflictTestRuntime(1, "127.0.0.1:9443", "same.example.test, *.conflict.example.test", networkDefaults, tlsDefaults)
 	right := runtimeHTTP3RouteConflictTestRuntime(2, "127.0.0.1:9444", "same.example.test, *.conflict.example.test", networkDefaults, tlsDefaults)
 	sn := &snapshot.Snapshot{
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(left.Bind, "same.example.test"):  left,
-			snapshot.SiteMapKey(right.Bind, "same.example.test"): right,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(left.Bind, "same.example.test"):  &left,
+			snapshot.SiteMapKey(right.Bind, "same.example.test"): &right,
 		},
 		NetworkDefaults: networkDefaults,
 		TLSDefaults:     tlsDefaults,
@@ -587,9 +587,9 @@ func TestEnrichTLSCapabilitiesWithHTTP3RouteConflictsIgnoresNonHTTP3Sites(t *tes
 	left := runtimeHTTP3RouteConflictTestRuntime(1, "127.0.0.1:9443", "same.example.test", networkDefaults, tlsDefaults)
 	right := runtimeHTTP3RouteConflictTestRuntime(2, "127.0.0.1:9444", "same.example.test", networkDefaults, tlsDefaults)
 	sn := &snapshot.Snapshot{
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(left.Bind, "same.example.test"):  left,
-			snapshot.SiteMapKey(right.Bind, "same.example.test"): right,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(left.Bind, "same.example.test"):  &left,
+			snapshot.SiteMapKey(right.Bind, "same.example.test"): &right,
 		},
 		NetworkDefaults: networkDefaults,
 		TLSDefaults:     tlsDefaults,
