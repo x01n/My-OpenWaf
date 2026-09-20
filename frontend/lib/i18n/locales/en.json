@@ -1103,6 +1103,7 @@
   "settings": {
     "title": "Settings",
     "description": "Configure network listeners, TLS compliance, and log retention",
+    "adminOnlyHint": "Network, TLS, Redis, and log settings can only be modified by administrators. Your account has view-only access.",
     "network": "Network Config",
     "networkSaveSuccess": "Network config saved",
     "networkSaveFailed": "Save failed",

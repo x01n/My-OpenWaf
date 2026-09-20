@@ -1103,6 +1103,7 @@
   "settings": {
     "title": "通用设置",
     "description": "配置网络监听、TLS 合规策略与日志清理",
+    "adminOnlyHint": "网络、TLS、Redis 与日志配置仅管理员可修改；当前账号仅可查看。",
     "network": "网络配置",
     "networkSaveSuccess": "网络配置已保存",
     "networkSaveFailed": "保存失败",

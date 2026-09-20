@@ -221,7 +221,6 @@ export default function CertificatesPage() {
    * @param rawCertPem 待解析的证书 PEM
    */
   const handleParsePem = async (rawCertPem: string) => {
-    if (!canManage) return
     const certPem = (rawCertPem || "").trim()
     if (!certPem) {
       setParseResult(null)
@@ -648,9 +647,7 @@ export default function CertificatesPage() {
                         variant="outline"
                         size="sm"
                         onClick={() => handleParsePem(detail.cert_pem)}
-                        disabled={
-                          !canManage || parseLoading || !detail.cert_pem?.trim()
-                        }
+                        disabled={parseLoading || !detail.cert_pem?.trim()}
                       >
                         <IconFileSearch className="h-4 w-4" />
                         {parseLoading
@@ -806,11 +803,7 @@ export default function CertificatesPage() {
                             variant="outline"
                             size="sm"
                             onClick={() => handleParsePem(form.cert_pem)}
-                            disabled={
-                              !canManage ||
-                              parseLoading ||
-                              !form.cert_pem.trim()
-                            }
+                            disabled={parseLoading || !form.cert_pem.trim()}
                           >
                             <IconFileSearch className="h-4 w-4" />
                             {parseLoading

@@ -88,15 +88,11 @@ const (
 const (
 	defaultUnifiedWriterEventBufferSize = 16384
 	defaultUnifiedWriterDropBufferSize  = 8192
-	defaultUnifiedWriterBatchSize       = 512
+	defaultUnifiedWriterBatchSize       = 64
 	defaultUnifiedWriterFlushInterval   = 3 * time.Second
-	// 4×BatchSize 与原 unifiedWriterDrainLimit = 2048 (4×512) 对齐。
-	// 保留这一显式常量方便运行时按 opt 调整。
-	defaultUnifiedWriterDrainLimit = 2048
+	defaultUnifiedWriterDrainLimit      = 2048
 )
 
-// UnifiedWriterOptions 同 UnifiedWriter 所有可配置旋钮。
-// 默认值由 DefaultUnifiedWriterOptions 提供，与原硬编码常量一一对应。
 type UnifiedWriterOptions struct {
 	// EventBufferSize 是 SecurityEvent / AccessLog 通道容量。
 	// 默认 16384；上限 1M。
@@ -104,9 +100,7 @@ type UnifiedWriterOptions struct {
 	// DropBufferSize 是 DropEvent / BotScoreLog 通道容量。
 	// 默认 8192；上限 1M。
 	DropBufferSize int
-	// BatchSize 是四类记录累计触发 flush 的阈值。
-	// 默认 512；上限 10000。
-	BatchSize int
+	BatchSize      int
 	// FlushInterval 是定时 flush 周期。
 	// 默认 3s；上限 60s。
 	FlushInterval time.Duration

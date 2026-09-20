@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -193,7 +195,29 @@ func ForwardWebSocket(ctx context.Context, reqID string, c *app.RequestContext, 
 	return nil
 }
 
+// wsUpstreamTLSConfig 返回 wss 上游拨号用的 TLS 配置。
+//
+// 站点配置了客户端证书时返回注入证书链与私钥的配置；未配置或证书无效时
+// 返回 nil——调用方回落到无客户端证书的共享配置拨号路径，降级语义与
+// HTTP/h3 出口一致：由上游服务端决定最终拒绝与否。
+func wsUpstreamTLSConfig(rt snapshot.SiteRuntime) *tls.Config {
+	cert, hasCert, err := upstream.UpstreamClientCertificate(rt)
+	if err != nil {
+		// 证书解析失败时仅记录告警并继续无客户端证书握手，
+		// 避免单个坏证书拖垮整个站点的 WebSocket 流量。
+		slog.Warn("ws upstream dial skipped client cert", slog.String("site_host", rt.Site.Host), slog.String("error", err.Error()))
+		return nil
+	}
+	if !hasCert {
+		return nil
+	}
+	return upstream.HTTPSClientTLSConfigWithClientCert(rt.Site.UpstreamTLSServerName, rt.Site.UpstreamTLSSkipVerify, cert, true)
+}
+
 var tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, rt snapshot.SiteRuntime) (net.Conn, error) {
+	if cfg := wsUpstreamTLSConfig(rt); cfg != nil {
+		return tls.DialWithDialer(dialer, "tcp", host, cfg)
+	}
 	return upstream.TLSDialWithDialer(dialer, host, rt.Site.UpstreamTLSServerName, rt.Site.UpstreamTLSSkipVerify)
 }
 

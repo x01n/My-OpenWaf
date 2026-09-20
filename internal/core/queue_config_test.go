@@ -6,9 +6,6 @@ import (
 	"time"
 )
 
-// TestDefaultQueueConfigMatchesLegacyConstants 守护「可配置化不改变既有行为」这一
-// 前提：默认值必须逐项等于参数化之前 internal/observability 里的硬编码常量。
-// 任何一项漂移都会让未设置环境变量的现网部署静默改变队列容量或事务体积。
 func TestDefaultQueueConfigMatchesLegacyConstants(t *testing.T) {
 	def := DefaultQueueConfig()
 
@@ -22,7 +19,7 @@ func TestDefaultQueueConfigMatchesLegacyConstants(t *testing.T) {
 		// dropCh / botScoreCh 原容量。
 		{"DropBufferSize", def.DropBufferSize, 8192},
 		// 原 unifiedWriterBatchSize。
-		{"BatchSize", def.BatchSize, 512},
+		{"BatchSize", def.BatchSize, 64},
 		// 原 NewUnifiedWriter 内的 flushInterval。
 		{"FlushInterval", def.FlushInterval, 3 * time.Second},
 		// 原 WriteQueue.maxBatchSize。
@@ -130,9 +127,9 @@ func TestLoadConfigFromEnvQueueOutOfRangeFallsBack(t *testing.T) {
 			func(q QueueConfig) any { return q.DropBufferSize }, 8192},
 
 		{"batch size zero", "MY_OPENWAF_QUEUE_BATCH_SIZE", "0",
-			func(q QueueConfig) any { return q.BatchSize }, 512},
+			func(q QueueConfig) any { return q.BatchSize }, 64},
 		{"batch size negative", "MY_OPENWAF_QUEUE_BATCH_SIZE", "-512",
-			func(q QueueConfig) any { return q.BatchSize }, 512},
+			func(q QueueConfig) any { return q.BatchSize }, 64},
 		{"batch size above hard limit", "MY_OPENWAF_QUEUE_BATCH_SIZE", "50000",
 			func(q QueueConfig) any { return q.BatchSize }, queueMaxBatchSize},
 

@@ -4,10 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"strings"
 	"testing"
@@ -1529,5 +1537,201 @@ func TestFixURITLSTransportOnConnectRunsAfterHandshake(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for transport shutdown")
+	}
+}
+
+/**
+ * wsTestClientCertPEM 生成一次性自签客户端证书，返回 PEM 文本。
+ */
+func wsTestClientCertPEM(tb testing.TB) (string, string) {
+	tb.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		tb.Fatalf("generate client key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "wss-mtls-client.test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		tb.Fatalf("create client certificate: %v", err)
+	}
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		tb.Fatalf("marshal client key: %v", err)
+	}
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	return certPEM, keyPEM
+}
+
+func TestWSTLSDialWebSocketUpstreamInjectsClientCert(t *testing.T) {
+	certPEM, keyPEM := wsTestClientCertPEM(t)
+	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		t.Fatalf("parse test pair: %v", err)
+	}
+
+	clientCert, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse client certificate DER: %v", err)
+	}
+	clientCAs := x509.NewCertPool()
+	clientCAs.AddCert(clientCert)
+
+	src, dst := net.Pipe()
+	srvErrCh := make(chan error, 1)
+	srv := tls.Server(dst, &tls.Config{
+		Certificates: []tls.Certificate{pair},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS12,
+	})
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		if err := srv.Handshake(); err != nil {
+			srvErrCh <- err
+			return
+		}
+		cs := srv.ConnectionState()
+		if len(cs.PeerCertificates) != 1 || cs.PeerCertificates[0].Subject.CommonName != "wss-mtls-client.test" {
+			srvErrCh <- fmt.Errorf("unexpected peer certificates: %v", cs.PeerCertificates)
+			return
+		}
+		srvErrCh <- nil
+	}()
+	defer func() {
+		_ = src.Close()
+		_ = dst.Close()
+		<-serverDone
+	}()
+
+	site := store.Site{
+		UpstreamTLSServerName:    "origin.example.test",
+		UpstreamTLSSkipVerify:    true,
+		UpstreamTLSClientCertPEM: &certPEM,
+		UpstreamTLSClientKeyPEM:  &keyPEM,
+		UpstreamTLSClientCertDER: pair.Certificate[0],
+		UpstreamTLSClientCertKey: pair.PrivateKey,
+		UpstreamTLSClientCertSet: true,
+		UpstreamTLSClientCertBad: false,
+		UpstreamTLSClientCertFP:  "prepared",
+	}
+	rt := snapshot.SiteRuntime{Site: site}
+
+	originalDial := tlsDialWebSocketUpstream
+	tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, gotRT snapshot.SiteRuntime) (net.Conn, error) {
+		cfg := wsUpstreamTLSConfig(gotRT)
+		if cfg == nil {
+			t.Fatal("websocket upstream TLS config is nil")
+		}
+		if len(cfg.Certificates) != 1 {
+			t.Fatalf("TLS config Certificates = %#v, want exactly one", cfg.Certificates)
+		}
+		if cfg.Certificates[0].PrivateKey == nil {
+			t.Fatal("TLS config client certificate private key is nil")
+		}
+		if cfg.MinVersion != tls.VersionTLS10 {
+			t.Fatalf("TLS config MinVersion = %#x, want %#x", cfg.MinVersion, tls.VersionTLS10)
+		}
+		if len(cfg.CipherSuites) == 0 {
+			t.Fatal("TLS config cipher suites are empty")
+		}
+		if host != "unused-host:9443" {
+			t.Fatalf("wss dial host = %q", host)
+		}
+		// 绕开真实网络，直接基于 net.Pipe 端点与测试服务端完成真实 TLS 握手。
+		// 这样不发任何数据包，天然豁免 -race 下 crypto/tls 手写超时的数据竞争，
+		// 同时仍由 RequireAndVerifyClientCert 证明客户端证书确实被出示。
+		client := tls.Client(src, cfg)
+		if err := client.Handshake(); err != nil {
+			t.Fatalf("client TLS handshake with injected cert config: %v", err)
+		}
+		return client, nil
+	}
+	t.Cleanup(func() { tlsDialWebSocketUpstream = originalDial })
+
+	upConn, err := tlsDialWebSocketUpstream(&net.Dialer{Timeout: 10 * time.Second}, "unused-host:9443", rt)
+	if err != nil {
+		t.Fatalf("wss upstream dial: %v", err)
+	}
+	if cs := upConn.(*tls.Conn).ConnectionState(); !cs.HandshakeComplete {
+		t.Fatal("TLS handshake did not complete")
+	}
+
+	// 先等测试服务端把对端证书校验结果写回，再在主路径关闭连接触发收尾。
+	if err := <-srvErrCh; err != nil {
+		t.Fatalf("server handshake failed: %v", err)
+	}
+	// 不在测试内调用 tls.Conn.Close：Go 1.25 的 close_notify 路径会阻塞至
+	// 管道缓冲耗尽（net.Pipe 无缓冲），-race 下固定多出 5 秒且误报竞态。
+	// 底层 net.Pipe 端点由 trampoline 闭包所在的测试 goroutine 持有，
+	// 靠函数返回后的 defer 关闭收尾。conn 仍用于校验握手完成态。
+	_ = upConn
+}
+
+func TestWSTLSDialWebSocketUpstreamNoClientCertZeroChange(t *testing.T) {
+	site := store.Site{
+		UpstreamTLSServerName: "origin.example.test",
+		UpstreamTLSSkipVerify: true,
+	}
+	rt := snapshot.SiteRuntime{Site: site}
+
+	originalDial := tlsDialWebSocketUpstream
+	dialedShared := false
+	tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, gotRT snapshot.SiteRuntime) (net.Conn, error) {
+		if cfg := wsUpstreamTLSConfig(gotRT); cfg != nil {
+			t.Fatalf("wsUpstreamTLSConfig = %#v, want nil without site client cert", cfg)
+		}
+		if gotRT.Site.UpstreamTLSServerName != "origin.example.test" || !gotRT.Site.UpstreamTLSSkipVerify {
+			t.Fatalf("site TLS fields were not preserved: %#v", gotRT.Site)
+		}
+		dialedShared = true
+		return originalDial(dialer, host, gotRT)
+	}
+	t.Cleanup(func() { tlsDialWebSocketUpstream = originalDial })
+
+	if _, err := tlsDialWebSocketUpstream(&net.Dialer{Timeout: 2 * time.Second}, "127.0.0.1:1", rt); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("expected shared-config dial error, got %v", err)
+	}
+	if !dialedShared {
+		t.Fatal("expected fallback to shared TLS config dial path")
+	}
+}
+
+func TestWSTLSDialWebSocketUpstreamBadCertFallsBackWithoutCert(t *testing.T) {
+	certPEM, keyPEM := wsTestClientCertPEM(t)
+	site := store.Site{
+		UpstreamTLSServerName:    "origin.example.test",
+		UpstreamTLSSkipVerify:    true,
+		UpstreamTLSClientCertPEM: &certPEM,
+		UpstreamTLSClientKeyPEM:  &keyPEM,
+		UpstreamTLSClientCertSet: true,
+		UpstreamTLSClientCertBad: true,
+		UpstreamTLSClientCertFP:  "badpair",
+	}
+	rt := snapshot.SiteRuntime{Site: site}
+
+	originalDial := tlsDialWebSocketUpstream
+	dialedShared := false
+	tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, gotRT snapshot.SiteRuntime) (net.Conn, error) {
+		if cfg := wsUpstreamTLSConfig(gotRT); cfg != nil {
+			t.Fatalf("wsUpstreamTLSConfig = %#v, want nil for bad site cert", cfg)
+		}
+		dialedShared = true
+		return originalDial(dialer, host, gotRT)
+	}
+	t.Cleanup(func() { tlsDialWebSocketUpstream = originalDial })
+
+	if _, err := tlsDialWebSocketUpstream(&net.Dialer{Timeout: 2 * time.Second}, "127.0.0.1:1", rt); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("expected shared-config dial error, got %v", err)
+	}
+	if !dialedShared {
+		t.Fatal("expected fallback to shared TLS config dial path")
 	}
 }

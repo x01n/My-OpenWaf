@@ -108,6 +108,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/certificates/:id", system.GetCertificate(r.Certificate))
 		readGroup.GET("/certificates/acme/config", system.GetACMEConfig(r.SystemSettings))
 
+		// 证书 PEM 解析仅解析用户提交的文本并读取站点列表做匹配展示，
+		// 无副作用、不接触库存私钥，属只读操作，故置于 readGroup。
+		readGroup.POST("/certificates/parse", system.ParseCertificate(r.Site))
+
 		readGroup.GET("/policies", system.ListPolicies(r.Policy))
 		readGroup.GET("/policies/default", system.GetDefaultPolicy(r.Policy))
 		readGroup.GET("/policies/:id", system.GetPolicy(r.Policy))
@@ -176,6 +180,12 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/api-keys", system.ListAPIKeys(r.AdminAPIKey))
 
 		readGroup.GET("/admin-users", ListAdminUsers(r.AdminAccount))
+		readGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
+		readGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))
+		readGroup.GET("/tls-cipher-suites", system.ListCipherSuites())
+		readGroup.GET("/http2-config", system.GetHTTP2Config(r.SystemSettings))
+		readGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))
+		readGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
 
 		readGroup.GET("/bot-settings", protect.GetBotSettings(r.SystemSettings))
 		readGroup.GET("/bot-stats", protect.GetBotStats(r.BotScore))
@@ -228,7 +238,6 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites/:id/listeners/:lid/delete", site.DeleteSiteListener(r.Site, r.SiteListener, reload))
 
 		opsGroup.POST("/certificates", system.CreateCertificate(r.Certificate, reload))
-		opsGroup.POST("/certificates/parse", system.ParseCertificate(r.Site))
 		opsGroup.POST("/certificates/:id/update", system.UpdateCertificate(r.Certificate, reload))
 		opsGroup.POST("/certificates/:id/apply-to-sites", system.ApplyCertificateToSites(r.Certificate, r.Site, r.SiteListener, reload))
 		opsGroup.POST("/certificates/:id/delete", system.DeleteCertificate(r.Certificate, r.Site, r.SiteListener, reload))
@@ -348,17 +357,11 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 			detect.InvalidateOWASPReadSnapshots(deps.DB)
 		}))
 
-		adminGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
 		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
-		adminGroup.GET("/http2-config", system.GetHTTP2Config(r.SystemSettings))
 		adminGroup.POST("/http2-config", system.UpdateHTTP2Config(r.SystemSettings, reload))
-		adminGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))
 		adminGroup.POST("/redis-config", system.UpdateRedisConfig(r.SystemSettings, deps.ReloadRedis))
-		adminGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
 		adminGroup.POST("/log-config", system.UpdateLogConfig(r.SystemSettings))
-		adminGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))
 		adminGroup.POST("/tls-config", system.UpdateTLSDefaultConfig(r.SystemSettings, reload))
-		adminGroup.GET("/tls-cipher-suites", system.ListCipherSuites())
 		adminGroup.POST("/certificates/acme/config", system.UpdateACMEConfig(r.SystemSettings))
 		adminGroup.GET("/certificates/acme/status", system.ACMEStatus(deps.Repos))
 

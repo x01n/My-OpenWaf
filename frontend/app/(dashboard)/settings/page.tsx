@@ -78,26 +78,31 @@ function pickChangedFields<T extends object>(
 export default function SettingsPage() {
   const { t } = useTranslation()
   const { user, loading: authLoading } = useAuth()
-  const canManage = user?.role === "admin" || user?.role === "operator"
+  const isAdmin = user?.role === "admin"
+  /** 后端本页全部写端点位于 adminGroup（仅 admin），故「可改」收敛为仅 admin。 */
+  const canManage = isAdmin
+  /** 读端点已下沉 readGroup，三角色均可查看当前配置。 */
+  const canView = Boolean(user?.role)
+  const isNonAdminViewer = Boolean(canView) && !isAdmin
   const {
     data: networkConfig,
     isLoading: networkLoading,
     error: networkError,
-  } = useNetworkConfig(canManage)
+  } = useNetworkConfig(canView)
   const {
     data: tlsConfig,
     isLoading: tlsLoading,
     error: tlsError,
-  } = useTLSConfig(canManage)
+  } = useTLSConfig(canView)
   const {
     data: logConfig,
     isLoading: logLoading,
     error: logError,
-  } = useLogConfig(canManage)
+  } = useLogConfig(canView)
   const networkUpdate = useNetworkConfigUpdate()
   const tlsUpdate = useTLSConfigUpdate()
   const logUpdate = useLogConfigUpdate()
-  const { data: runtimeConfig } = useRuntimeConfig(canManage)
+  const { data: runtimeConfig } = useRuntimeConfig(canView)
   const configDiagnostics = runtimeConfig?.config_diagnostics ?? []
   const [localNetwork, setLocalNetwork] = useState<NetworkConfigUpdate>({})
   const [localTLS, setLocalTLS] = useState<TLSConfigUpdate>({})
@@ -200,9 +205,9 @@ export default function SettingsPage() {
         title={t("settings.title")}
         description={t("settings.description")}
       />
-      {!authLoading && !canManage && (
+      {!authLoading && isNonAdminViewer && (
         <Alert>
-          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
+          <AlertTitle>{t("settings.adminOnlyHint")}</AlertTitle>
         </Alert>
       )}
       {configDiagnostics.length > 0 && (
@@ -572,15 +577,21 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
-        <RedisConfigCard canManage={canManage} />
+        <RedisConfigCard canManage={canManage} canView={canView} />
       </fieldset>
     </div>
   )
 }
 
-function RedisConfigCard({ canManage }: { canManage: boolean }) {
+function RedisConfigCard({
+  canManage,
+  canView,
+}: {
+  canManage: boolean
+  canView: boolean
+}) {
   const { t } = useTranslation()
-  const { data: redisConfig, isLoading, error } = useRedisConfig(canManage)
+  const { data: redisConfig, isLoading, error } = useRedisConfig(canView)
   const redisUpdate = useRedisConfigUpdate()
   const [draft, setDraft] = useState<Partial<RedisConfigUpdate>>({})
   const [passwordTouched, setPasswordTouched] = useState(false)

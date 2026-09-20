@@ -83,6 +83,9 @@ func ensureRequestBodySnapshot(c *app.RequestContext) requestBodySnapshot {
 	if c == nil {
 		return requestBodySnapshot{}
 	}
+	if IsH2ExtendedWebSocketConnect(c) {
+		return requestBodySnapshot{}
+	}
 
 	stream := c.Request.BodyStream()
 	contentLength := c.Request.Header.ContentLength()

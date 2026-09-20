@@ -425,9 +425,9 @@ func TestUnifiedWriterFlushesAccessLogsWhenBatchIsFull(t *testing.T) {
 		})
 	}
 
-	// 截止时间需留足余量：单独运行约 1s（512 条 SQLite 批量写），race 插桩与
-	// 整包并发会成倍拉长调度和写入时间。本用例断言的是「批满即刷」行为，
-	// 不是刷新耗时；性能由独立 benchmark/压测约束。
+	// 截止时间需留足余量：单独运行约 1s（批量为 threshold 条 SQLite 写），
+	// race 插桩与整包并发会成倍拉长调度和写入时间。本用例断言的是
+	// 「批满即刷」行为，不是刷新耗时；性能由独立 benchmark/压测约束。
 	deadline := time.After(60 * time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()

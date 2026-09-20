@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"regexp"
@@ -140,5 +141,106 @@ func TestRouterRegistersSecurityEventRequestsRoute(t *testing.T) {
 	}
 	if !regexp.MustCompile(`GET\("/security-events/requests",\s*event\.ListSecurityEventRequests\(`).Match(src) {
 		t.Fatal("router.go 未注册 GET /security-events/requests -> event.ListSecurityEventRequests")
+	}
+}
+
+// extractGroupBlock 返回 src 中 marker 行之后第一个花括号块的内部内容。
+//
+// marker 是各权限分组的 Use 调用签名，src 中三组该签名互不相同，
+// 因此可以唯一定位 readGroup / opsGroup / adminGroup 的注册块。
+// 块内可能嵌套闭包花括号（如 backup/import 的刷新回调），
+// 故用深度计数找到匹配的闭合括号。
+func extractGroupBlock(t *testing.T, src []byte, marker string) []byte {
+	t.Helper()
+	idx := bytes.Index(src, []byte(marker))
+	if idx < 0 {
+		t.Fatalf("router.go 缺少分组标记 %q", marker)
+	}
+	open := bytes.IndexByte(src[idx:], '{')
+	if open < 0 {
+		t.Fatalf("分组标记 %q 后缺少 '{'", marker)
+	}
+	start := idx + open
+	depth := 0
+	for i := start; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start+1 : i]
+			}
+		}
+	}
+	t.Fatalf("分组标记 %q 的块未闭合", marker)
+	return nil
+}
+
+// TestRouterReadonlyConvergenceGroupGates 守护权限收敛后的路由分组位置。
+//
+// 后端 RBAC 收敛约定：
+//   - 配置读端点（network/tls/cipher-suites/http2/redis/log）与证书 PEM 解析
+//     必须在 readGroup，三角色可读；
+//   - 对应配置写端点必须在 adminGroup（仅 admin），不允许滞留于 opsGroup 或
+//     意外降级；
+//   - /certificates/parse 不得同时残留在 opsGroup。
+//
+// 采用与 TestRouterRegistersSecurityEventRequestsRoute 相同的源码扫描策略：
+// 按分组标记切出三个注册块后做包含/排除断言，出现分组错位时 CI 立即可见。
+func TestRouterReadonlyConvergenceGroupGates(t *testing.T) {
+	src, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+
+	readBlock := extractGroupBlock(t, src, `readGroup.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator, auth.RoleReadonly))`)
+	opsBlock := extractGroupBlock(t, src, `opsGroup.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator))`)
+	adminBlock := extractGroupBlock(t, src, `adminGroup.Use(RequireRole(auth.RoleAdmin))`)
+
+	// 配置读端点与证书解析位于 readGroup。
+	for _, line := range []string{
+		`readGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))`,
+		`readGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))`,
+		`readGroup.GET("/tls-cipher-suites", system.ListCipherSuites())`,
+		`readGroup.GET("/http2-config", system.GetHTTP2Config(r.SystemSettings))`,
+		`readGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))`,
+		`readGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))`,
+		`readGroup.POST("/certificates/parse", system.ParseCertificate(r.Site))`,
+	} {
+		if !bytes.Contains(readBlock, []byte(line)) {
+			t.Errorf("readGroup 缺少注册: %s", line)
+		}
+	}
+
+	// opsGroup 不得残留 parse（应已收敛到 readGroup）。
+	if bytes.Contains(opsBlock, []byte(`/certificates/parse`)) {
+		t.Error("opsGroup 残留 /certificates/parse 注册，应已移至 readGroup")
+	}
+
+	// 配置写端点仍在 adminGroup，且 adminGroup 不得残留对应读端点。
+	for _, line := range []string{
+		`adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))`,
+		`adminGroup.POST("/http2-config", system.UpdateHTTP2Config(r.SystemSettings, reload))`,
+		`adminGroup.POST("/redis-config", system.UpdateRedisConfig(r.SystemSettings, deps.ReloadRedis))`,
+		`adminGroup.POST("/log-config", system.UpdateLogConfig(r.SystemSettings))`,
+		`adminGroup.POST("/tls-config", system.UpdateTLSDefaultConfig(r.SystemSettings, reload))`,
+	} {
+		if !bytes.Contains(adminBlock, []byte(line)) {
+			t.Errorf("adminGroup 缺少注册: %s", line)
+		}
+	}
+	for _, residue := range []string{
+		`GET("/network-config"`,
+		`GET("/tls-config"`,
+		`GET("/tls-cipher-suites"`,
+		`GET("/http2-config"`,
+		`GET("/redis-config"`,
+		`GET("/log-config"`,
+		`POST("/certificates/parse"`,
+	} {
+		if bytes.Contains(adminBlock, []byte(residue)) {
+			t.Errorf("adminGroup 残留只读路由 %s，应已移至 readGroup", residue)
+		}
 	}
 }

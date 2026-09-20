@@ -73,23 +73,12 @@ func DefaultDropConfig() DropConfig {
 	}
 }
 
-// QueueConfig holds the tunable parameters that bound the request-path
-// observability queues and the generic async write queue.
-//
-// 关键约束（see UnifiedWriter / WriteQueue 顶部注释）：
-//   - 所有可观测写入仍由单个 goroutine 串行完成，这是消除 SQLite 写锁竞争
-//     的刻意设计，本配置只调整容量与批大小，不改变线程模型。
-//   - 单队列容量上限 1M、单批上限 10K、flush 间隔上限 60s 是经过上限保护
-//     的硬阈值，避免误调把内存吃光或把事务体积拉到驱动上限。
-//
-// 所有字段必须被 observability 包消费；新增字段时务必同步在
-// internal/observability/unified_writer.go 与 write_queue.go 接线。
 type QueueConfig struct {
 	// EventBufferSize 是安全事件/访问日志两类高频通道的容量。默认 16384；上限 1M。
 	EventBufferSize int
 	// DropBufferSize 是 DropEvent / BotScoreLog 两类低频通道的容量。默认 8192；上限 1M。
 	DropBufferSize int
-	// BatchSize 是 UnifiedWriter 触发 flush 的批次阈值（按四类合计）。默认 512；上限 10K。
+	// BatchSize 是 UnifiedWriter 触发 flush 的批次阈值（按四类合计）。默认 64；上限 10K。
 	BatchSize int
 	// FlushInterval 是 UnifiedWriter 的定时 flush 周期。默认 3s；上限 60s。
 	FlushInterval time.Duration
@@ -116,7 +105,7 @@ func DefaultQueueConfig() QueueConfig {
 	return QueueConfig{
 		EventBufferSize:     16384,
 		DropBufferSize:      8192,
-		BatchSize:           512,
+		BatchSize:           64,
 		FlushInterval:       3 * time.Second,
 		WriteQueueBatchSize: 64,
 		WriteQueueCapacity:  256,

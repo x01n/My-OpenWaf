@@ -1507,6 +1507,7 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 	}
 
 	srv.NoRoute(dataplane.HandlerForBind(siteRT.Bind, handler))
+	srv.Handle("CONNECT", "/*any", dataplane.HandlerForBind(siteRT.Bind, handler))
 	return srv
 }
 
