@@ -1,7 +1,9 @@
 # 站点管理 API
 
+> [返回 管理 API 系统](管理 API 系统.md)
+
 <cite>
-**本文档引用的文件**
+**本文引用的文件**
 - [main.go](file://cmd/main.go)
 - [server.go](file://internal/app/server.go)
 - [router.go](file://internal/admin/router.go)

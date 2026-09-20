@@ -1,5 +1,7 @@
 # JWT 认证机制
 
+> [返回 安全机制](安全机制.md)
+
 <cite>
 **本文档引用的文件**
 - [jwt.go](file://internal/admin/auth/jwt.go)

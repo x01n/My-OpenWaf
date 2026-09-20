@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"gorm.io/gorm"
 
 	coreredis "My-OpenWaf/internal/core/redis"
 	"My-OpenWaf/internal/pkg/logger"
@@ -59,12 +61,15 @@ type RedisConfig struct {
 
 // RedisConfigResponse Redis 配置响应，不回显密码。
 type RedisConfigResponse struct {
-	Enabled         bool   `json:"enabled"`
-	Addr            string `json:"addr"`
-	DB              int    `json:"db"`
-	PasswordSet     bool   `json:"password_set"`
-	Source          string `json:"source"`
-	RestartRequired bool   `json:"restart_required"`
+	Enabled          bool   `json:"enabled"`
+	Addr             string `json:"addr"`
+	DB               int    `json:"db"`
+	RedisAddr        string `json:"redis_addr"`
+	RedisDB          int    `json:"redis_db"`
+	PasswordSet      bool   `json:"password_set"`
+	RedisPasswordSet bool   `json:"redis_password_set"`
+	Source           string `json:"source"`
+	RestartRequired  bool   `json:"restart_required"`
 }
 
 const (
@@ -94,7 +99,7 @@ func UpdateNetworkConfig(repo *repository.SystemSettingsRepo, reload func() erro
 			DefaultNetwork *string `json:"default_network"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cfg := loadNetworkConfig(repo)
@@ -180,7 +185,7 @@ func UpdateHTTP2Config(repo *repository.SystemSettingsRepo, reload func() error)
 			MaxQueuedControlFrames       *int    `json:"max_queued_control_frames"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 
@@ -258,7 +263,7 @@ func UpdateLogConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 			AlsoStdout *bool   `json:"also_stdout"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cfg := loadLogConfig(repo)
@@ -304,7 +309,7 @@ func UpdateTLSDefaultConfig(repo *repository.SystemSettingsRepo, reload func() e
 			SelfSignedOnIP           *bool   `json:"self_signed_on_ip"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		cfg := loadTLSDefaultConfig(repo)
@@ -372,7 +377,11 @@ func UpdateTLSDefaultConfig(repo *repository.SystemSettingsRepo, reload func() e
 // GetRedisConfig 获取 Redis 连接配置。
 func GetRedisConfig(repo *repository.SystemSettingsRepo, restartRequired bool) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		cfg := LoadRedisConfig(repo)
+		cfg, err := LoadRedisConfig(repo)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
 		c.JSON(200, redisConfigResponse(cfg, restartRequired))
 	}
 }
@@ -381,27 +390,46 @@ func GetRedisConfig(repo *repository.SystemSettingsRepo, restartRequired bool) a
 func UpdateRedisConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
-			Enabled  *bool   `json:"enabled"`
-			Addr     *string `json:"addr"`
-			Password *string `json:"password"`
-			DB       *int    `json:"db"`
+			Enabled       *bool   `json:"enabled"`
+			Addr          *string `json:"addr"`
+			Password      *string `json:"password"`
+			DB            *int    `json:"db"`
+			RedisAddr     *string `json:"redis_addr"`
+			RedisPassword *string `json:"redis_password"`
+			RedisDB       *int    `json:"redis_db"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
-		cfg := LoadRedisConfig(repo)
+		cfg, err := LoadRedisConfig(repo)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": err.Error()})
+			return
+		}
 		if req.Enabled != nil {
 			cfg.Enabled = *req.Enabled
 		}
+		addrProvided := false
 		if req.Addr != nil {
+			addrProvided = true
 			cfg.Addr = strings.TrimSpace(*req.Addr)
+		} else if req.RedisAddr != nil {
+			addrProvided = true
+			cfg.Addr = strings.TrimSpace(*req.RedisAddr)
 		}
 		if req.Password != nil {
 			cfg.Password = *req.Password
+		} else if req.RedisPassword != nil {
+			cfg.Password = *req.RedisPassword
 		}
 		if req.DB != nil {
 			cfg.DB = *req.DB
+		} else if req.RedisDB != nil {
+			cfg.DB = *req.RedisDB
+		}
+		if req.Enabled == nil && addrProvided {
+			cfg.Enabled = strings.TrimSpace(cfg.Addr) != ""
 		}
 		if err := validateRedisConfig(cfg); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -442,28 +470,45 @@ func ListCipherSuites() app.HandlerFunc {
 	}
 }
 
-func LoadRedisConfig(repo *repository.SystemSettingsRepo) RedisConfig {
-	cfg := RedisConfig{}
-	val, err := repo.Get(store.SettingKeyRedisConfig)
-	if err != nil || val == "" {
-		return cfg
+func LoadRedisConfig(repo *repository.SystemSettingsRepo) (RedisConfig, error) {
+	if repo == nil {
+		return RedisConfig{}, errors.New("redis config repository is nil")
 	}
-	_ = json.Unmarshal([]byte(val), &cfg)
+	val, err := repo.Get(store.SettingKeyRedisConfig)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return RedisConfig{}, nil
+	}
+	if err != nil {
+		return RedisConfig{}, fmt.Errorf("load redis config: %w", err)
+	}
+	if val == "" {
+		return RedisConfig{}, nil
+	}
+	var cfg RedisConfig
+	if err := json.Unmarshal([]byte(val), &cfg); err != nil {
+		return RedisConfig{}, fmt.Errorf("decode redis config: %w", err)
+	}
 	cfg.Addr = strings.TrimSpace(cfg.Addr)
 	if cfg.DB < 0 {
-		cfg.DB = 0
+		return RedisConfig{}, fmt.Errorf("redis db must be >= 0")
 	}
-	return cfg
+	if cfg.Enabled && cfg.Addr == "" {
+		return RedisConfig{}, fmt.Errorf("redis addr is required when enabled")
+	}
+	return cfg, nil
 }
 
 func redisConfigResponse(cfg RedisConfig, restartRequired bool) RedisConfigResponse {
 	return RedisConfigResponse{
-		Enabled:         cfg.Enabled,
-		Addr:            cfg.Addr,
-		DB:              cfg.DB,
-		PasswordSet:     cfg.Password != "",
-		Source:          "database",
-		RestartRequired: restartRequired,
+		Enabled:          cfg.Enabled,
+		Addr:             cfg.Addr,
+		DB:               cfg.DB,
+		RedisAddr:        cfg.Addr,
+		RedisDB:          cfg.DB,
+		PasswordSet:      cfg.Password != "",
+		RedisPasswordSet: cfg.Password != "",
+		Source:           "database",
+		RestartRequired:  restartRequired,
 	}
 }
 

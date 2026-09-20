@@ -3,10 +3,13 @@ package dataplane
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -18,6 +21,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/core/rules"
 	"My-OpenWaf/internal/proxy"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
@@ -31,6 +35,24 @@ const websocketUpstreamResponseHeaderLimit = 1 << 20
 func IsWebSocketUpgrade(c *app.RequestContext) bool {
 	return strings.EqualFold(string(c.GetHeader("Upgrade")), "websocket") &&
 		headerContainsToken(c.GetHeader("Connection"), []byte("upgrade"))
+}
+
+// IsH2ExtendedWebSocketConnect 报告入站请求是否为 RFC 8441 扩展 CONNECT
+// WebSocket 流（CONNECT 方法且携带 ":protocol" 伪头）。":protocol" 由
+// third_party/hertz-contrib-http2 补丁写成普通请求头，此处按头读取。
+func IsH2ExtendedWebSocketConnect(c *app.RequestContext) bool {
+	if c == nil || !bytes.Equal(c.Method(), []byte(http.MethodConnect)) {
+		return false
+	}
+	return h2ProtoHeaderValue(c) != ""
+}
+
+// h2ProtoHeaderValue 返回 ":protocol" 伪头值；空串表示并非扩展 CONNECT。
+func h2ProtoHeaderValue(c *app.RequestContext) string {
+	if c == nil {
+		return ""
+	}
+	return string(c.GetHeader(":protocol"))
 }
 
 // headerContainsToken checks whether comma-separated header value contains token.
@@ -51,6 +73,36 @@ func headerContainsToken(value []byte, token []byte) bool {
 	return false
 }
 
+// normalizeWebSocketUpstreamTarget rewrites the upstream base scheme to its
+// WebSocket form:
+//
+//   - http     -> ws
+//   - https    -> wss
+//   - h2c      -> ws（明文 h2 prior knowledge，WebSocket 握手仍为 HTTP/1.1 明文）
+//   - tls/grpcs/grpc+tls/grpc+https -> wss（与 https 同语义，走 TLS 拨号）
+//   - grpc     -> ws（与 h2c 同语义）
+//
+// h3 不在此归一：QUIC 使用二进制帧而非 HTTP/1.1 明文握手，无法承载本函数
+// 之后的 WebSocket 握手；h3 upstream 应在调用方被排除出 WS 转发路径，
+// 不做静默重写。
+func normalizeWebSocketUpstreamTarget(target string) string {
+	// RPC 别名必须优先于通用前缀替换：
+	// grpc+https:// 这类别名包含 "https://" 子串，若先做通用替换会得到
+	// "grpc+wss://"，别名此后永远无法匹配；tls/grpcs 同理。
+	if transport, rest, ok := upstream.RPCUpstreamAliasForURL(target); ok {
+		switch transport {
+		case "https":
+			return "wss://" + rest
+		case "h2c":
+			return "ws://" + rest
+		}
+	}
+	target = strings.Replace(target, "http://", "ws://", 1)
+	target = strings.Replace(target, "https://", "wss://", 1)
+	target = strings.Replace(target, "h2c://", "ws://", 1)
+	return target
+}
+
 // asciiEqualFoldBytes compares a byte slice with a string case-insensitively for ASCII.
 func asciiEqualFoldBytes(got []byte, want string) bool {
 	if len(got) != len(want) {
@@ -68,14 +120,13 @@ func asciiEqualFoldBytes(got []byte, want string) bool {
 }
 
 // ForwardWebSocket forwards the WS handshake and inspects text/binary frames.
-func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, eng *engine.Engine) error {
+func ForwardWebSocket(ctx context.Context, reqID string, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, eng *engine.Engine) error {
 	target := strings.TrimRight(base, "/") + string(c.Path())
 	q := c.URI().QueryString()
 	if len(q) > 0 {
 		target += "?" + string(q)
 	}
-	target = strings.Replace(target, "http://", "ws://", 1)
-	target = strings.Replace(target, "https://", "wss://", 1)
+	target = normalizeWebSocketUpstreamTarget(target)
 
 	dialer := net.Dialer{Timeout: 10 * time.Second}
 	host := hostFromURL(target)
@@ -134,7 +185,7 @@ func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base strin
 		_ = pipeUpstream.Close()
 		copyErr <- e
 	}()
-	go inspectWebSocketClientFrames(pipeClient, upConn, c, rt, eng, copyErr)
+	go inspectWebSocketClientFrames(ctx, reqID, clientIP, pipeClient, upConn, c, rt, eng, copyErr)
 
 	for range 3 {
 		if err := <-copyErr; err != nil && !errors.Is(err, io.EOF) && !isNetClosed(err) {
@@ -144,7 +195,29 @@ func ForwardWebSocket(c *app.RequestContext, rt snapshot.SiteRuntime, base strin
 	return nil
 }
 
+// wsUpstreamTLSConfig 返回 wss 上游拨号用的 TLS 配置。
+//
+// 站点配置了客户端证书时返回注入证书链与私钥的配置；未配置或证书无效时
+// 返回 nil——调用方回落到无客户端证书的共享配置拨号路径，降级语义与
+// HTTP/h3 出口一致：由上游服务端决定最终拒绝与否。
+func wsUpstreamTLSConfig(rt snapshot.SiteRuntime) *tls.Config {
+	cert, hasCert, err := upstream.UpstreamClientCertificate(rt)
+	if err != nil {
+		// 证书解析失败时仅记录告警并继续无客户端证书握手，
+		// 避免单个坏证书拖垮整个站点的 WebSocket 流量。
+		slog.Warn("ws upstream dial skipped client cert", slog.String("site_host", rt.Site.Host), slog.String("error", err.Error()))
+		return nil
+	}
+	if !hasCert {
+		return nil
+	}
+	return upstream.HTTPSClientTLSConfigWithClientCert(rt.Site.UpstreamTLSServerName, rt.Site.UpstreamTLSSkipVerify, cert, true)
+}
+
 var tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, rt snapshot.SiteRuntime) (net.Conn, error) {
+	if cfg := wsUpstreamTLSConfig(rt); cfg != nil {
+		return tls.DialWithDialer(dialer, "tcp", host, cfg)
+	}
 	return upstream.TLSDialWithDialer(dialer, host, rt.Site.UpstreamTLSServerName, rt.Site.UpstreamTLSSkipVerify)
 }
 
@@ -163,7 +236,7 @@ func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string,
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := strings.ToLower(string(k))
 		switch key {
-		case "host", "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto":
+		case "host", "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto":
 			return
 		}
 		if connectionHeaderStripper.ShouldStrip(k) {
@@ -184,23 +257,16 @@ func buildWebSocketHandshakeHeaders(c *app.RequestContext, requestTarget string,
 	hdr.WriteString(host)
 	hdr.WriteString("\r\n")
 	hdr.WriteString("Connection: Upgrade\r\n")
-	if clientIP != nil {
-		hdr.WriteString("X-Forwarded-For: ")
-		if prior := security.ForwardedForHeaderValueBytes(c.Request.Header.PeekAll("X-Forwarded-For")); prior != "" {
-			hdr.WriteString(prior)
-			hdr.WriteString(", ")
+	forwardingHeaders := make(http.Header)
+	security.RebuildOutboundForwardingHeaders(forwardingHeaders, clientIP, origHost, rt.PreserveOriginalHost, security.TrustedInboundForwardedProto(c))
+	for _, name := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+		if value := forwardingHeaders.Get(name); value != "" {
+			hdr.WriteString(name)
+			hdr.WriteString(": ")
+			hdr.WriteString(value)
+			hdr.WriteString("\r\n")
 		}
-		hdr.WriteString(clientIP.String())
-		hdr.WriteString("\r\n")
 	}
-	if rt.PreserveOriginalHost && origHost != "" {
-		hdr.WriteString("X-Forwarded-Host: ")
-		hdr.WriteString(origHost)
-		hdr.WriteString("\r\n")
-	}
-	hdr.WriteString("X-Forwarded-Proto: ")
-	hdr.WriteString(webSocketForwardedProto(c, upstreamProto))
-	hdr.WriteString("\r\n")
 	hdr.WriteString("\r\n")
 	return hdr.String(), nil
 }
@@ -331,7 +397,7 @@ func splitHTTPHeaderLine(line string) (string, string, bool) {
 	return strings.TrimSpace(line[:idx]), strings.TrimSpace(line[idx+1:]), true
 }
 
-func inspectWebSocketClientFrames(src net.Conn, dst net.Conn, c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, done chan<- error) {
+func inspectWebSocketClientFrames(ctx context.Context, reqID string, clientIP net.IP, src net.Conn, dst net.Conn, c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, done chan<- error) {
 	var result error
 	defer func() { done <- result }()
 	for {
@@ -343,7 +409,7 @@ func inspectWebSocketClientFrames(src net.Conn, dst net.Conn, c *app.RequestCont
 			return
 		}
 		if eng != nil && len(frame.Payload) > 0 && (frame.Opcode == 0x1 || frame.Opcode == 0x2) {
-			if hit := inspectWebSocketPayload(c, rt, eng, frame.Payload); hit.IsTerminal() {
+			if hit := inspectWebSocketPayload(ctx, reqID, clientIP, c, rt, eng, frame.Payload); hit.IsTerminal() {
 				_ = dst.Close()
 				_ = src.Close()
 				return
@@ -363,13 +429,19 @@ func inspectWebSocketClientFrames(src net.Conn, dst net.Conn, c *app.RequestCont
 	}
 }
 
-func inspectWebSocketPayload(c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, payload []byte) action.Result {
+func inspectWebSocketPayload(ctx context.Context, reqID string, clientIP net.IP, c *app.RequestContext, rt snapshot.SiteRuntime, eng *engine.Engine, payload []byte) action.Result {
 	reqCtx := pipeline.AcquireCtx()
+	reqCtx.Context = ctx
+	reqCtx.RequestID = reqID
 	reqCtx.Bind = rt.Bind
+	reqCtx.ClientIP = clientIP
 	reqCtx.Method = string(c.Method())
 	reqCtx.Path = string(c.Path())
 	reqCtx.RawQuery = string(c.URI().QueryString())
 	reqCtx.Host = string(c.Host())
+	reqCtx.UserAgent = string(c.UserAgent())
+	reqCtx.SiteID = rt.Site.ID
+	rules.PopulateLuaQueryParams(reqCtx)
 	reqCtx.AntiReplayTTL = rt.Site.AntiReplayTTL
 	reqCtx.Body = payload
 	reqCtx.ContentType = "application/octet-stream"

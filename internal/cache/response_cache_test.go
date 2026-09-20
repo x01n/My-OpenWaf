@@ -40,8 +40,83 @@ func TestResponseCacheBasic(t *testing.T) {
 	if entries != 1 {
 		t.Errorf("expected 1 entry, got %d", entries)
 	}
-	if size != int64(len(body)) {
-		t.Errorf("expected size %d, got %d", len(body), size)
+	if size <= int64(len(body)) || size > 10*1024*1024 {
+		t.Errorf("estimated cache size %d does not include bounded entry metadata", size)
+	}
+}
+
+func TestResponseCacheConstructorUsesDocumentedDefaults(t *testing.T) {
+	rc := NewResponseCache(0, 0)
+	defer rc.Close()
+
+	key := CacheKey("GET", "defaults.example.test", "/", "")
+	rc.Set(key, http.StatusOK, "text/plain", []byte("default"), 0)
+	entry := rc.Get(key)
+	if entry == nil {
+		t.Fatal("zero constructor values must use a usable cache")
+	}
+	if entry.TTL != defaultResponseCacheTTLSec {
+		t.Fatalf("default TTL=%d, want %d", entry.TTL, defaultResponseCacheTTLSec)
+	}
+	if entries, _ := rc.Stats(); entries != 1 {
+		t.Fatalf("default cache entries=%d, want 1", entries)
+	}
+}
+
+func TestResponseCacheClear(t *testing.T) {
+	rc := NewResponseCache(10, 60)
+	defer rc.Close()
+
+	key := CacheKey("GET", "example.com", "/", "")
+	rc.Set(key, 200, "text/plain", []byte("body"), 60, nil)
+	rc.Clear()
+
+	if entry := rc.Lookup(key); entry != nil {
+		t.Fatal("expected Lookup miss after Clear")
+	}
+	if entries, size := rc.Stats(); entries != 0 || size != 0 {
+		t.Fatalf("stats after Clear = entries %d size %d", entries, size)
+	}
+}
+
+func TestResponseCacheClearConcurrentSet(t *testing.T) {
+	rc := NewResponseCache(10, 60)
+	defer rc.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			rc.Set(CacheKey("GET", "example.com", "/", strconv.Itoa(i)), 200, "text/plain", []byte("body"), 60, nil)
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		rc.Clear()
+	}
+	<-done
+}
+
+func TestResponseCacheClearRejectsOldGeneration(t *testing.T) {
+	rc := NewResponseCache(10, 60)
+	defer rc.Close()
+
+	key := CacheKey("GET", "example.com", "/epoch", "")
+	oldGeneration := rc.Generation()
+	rc.Set(key, 200, "text/plain", []byte("old"), 60, nil)
+	rc.Clear()
+
+	if ok := rc.SetIfGeneration(oldGeneration, key, 200, "text/plain", []byte("stale"), 60, nil); ok {
+		t.Fatal("expected stale generation write to be rejected")
+	}
+	if entry := rc.Lookup(key); entry != nil {
+		t.Fatalf("stale entry repopulated cache: %q", entry.Body)
+	}
+
+	if ok := rc.SetIfGeneration(rc.Generation(), key, 200, "text/plain", []byte("current"), 60, nil); !ok {
+		t.Fatal("expected current generation write to succeed")
+	}
+	if entry := rc.Get(key); entry == nil || string(entry.Body) != "current" {
+		t.Fatalf("current generation entry = %#v", entry)
 	}
 }
 
@@ -72,9 +147,42 @@ func TestResponseCacheDisabled(t *testing.T) {
 	}
 }
 
+func TestResponseCacheDisableClearsStoredEntries(t *testing.T) {
+	rc := NewResponseCache(1, 60)
+	defer rc.Close()
+	key := CacheKey("GET", "example.com", "/private", "")
+	rc.Set(key, 200, "text/plain", []byte("body"), 60)
+	rc.SetEnabled(false)
+	if entry := rc.Lookup(key); entry != nil {
+		t.Fatal("disabling cache must clear existing entries")
+	}
+	rc.SetEnabled(true)
+	if entry := rc.Lookup(key); entry != nil {
+		t.Fatal("re-enabling cache must not restore cleared entries")
+	}
+}
+
 func TestResponseCacheCloseIsIdempotent(t *testing.T) {
 	rc := NewResponseCache(10, 60)
 	rc.Close()
+	rc.Close()
+}
+
+func TestResponseCacheNilReceiverIsSafe(t *testing.T) {
+	var rc *ResponseCache
+
+	if rc.Lookup("missing") != nil {
+		t.Fatal("nil cache Lookup must miss")
+	}
+	if rc.LookupIfGeneration(0, "missing") != nil {
+		t.Fatal("nil cache LookupIfGeneration must miss")
+	}
+	if rc.LookupFreshIfGeneration(0, "missing") != nil {
+		t.Fatal("nil cache LookupFreshIfGeneration must miss")
+	}
+	if rc.LookupStaleIfGeneration(0, "missing", 60) != nil {
+		t.Fatal("nil cache LookupStaleIfGeneration must miss")
+	}
 	rc.Close()
 }
 
@@ -275,7 +383,7 @@ func TestResponseCacheMaxEntryBodySizeMatchesSetLimit(t *testing.T) {
 		t.Fatalf("MaxEntryBodySize = %d, want %d", limit, 1024*1024/10)
 	}
 
-	rc.Set("within", 200, "text/plain", make([]byte, limit), 60, nil)
+	rc.Set("within", 200, "text/plain", make([]byte, limit-512), 60, nil)
 	if rc.Get("within") == nil {
 		t.Fatal("expected body at max entry size to be cached")
 	}
@@ -283,5 +391,126 @@ func TestResponseCacheMaxEntryBodySizeMatchesSetLimit(t *testing.T) {
 	rc.Set("too-large", 200, "text/plain", make([]byte, limit+1), 60, nil)
 	if rc.Get("too-large") != nil {
 		t.Fatal("expected body above max entry size to be rejected")
+	}
+}
+
+func TestResponseCacheSetForSiteClonesBodyAndPurgesTarget(t *testing.T) {
+	rc := NewResponseCache(1, 60)
+	defer rc.Close()
+	body := []byte("immutable")
+	generation := rc.Generation()
+	if !rc.SetForSiteIfGeneration(generation, 7, "/asset.js?v=1", "site-key", 200, "text/plain", body, 60, nil) {
+		t.Fatal("site-scoped cache write was rejected")
+	}
+	body[0] = 'X'
+	entry := rc.Get("site-key")
+	if entry == nil || string(entry.Body) != "immutable" {
+		t.Fatalf("cached body aliases caller memory: %#v", entry)
+	}
+	rc.PurgeSiteTarget(7, "/asset.js?v=2")
+	if rc.Get("site-key") != nil {
+		t.Fatal("site target purge did not remove query variants")
+	}
+}
+
+func TestResponseCachePurgeSiteTargetKeepsUnrelatedEntries(t *testing.T) {
+	rc := NewResponseCache(1, 60)
+	defer rc.Close()
+
+	set := func(key string, siteID uint, target string) {
+		t.Helper()
+		if !rc.SetForSiteIfGeneration(rc.Generation(), siteID, target, key, 200, "text/plain", []byte(key), 60, nil) {
+			t.Fatalf("cache write %q was rejected", key)
+		}
+	}
+	set("site7-asset-query1", 7, "/asset.js?v=1")
+	set("site7-asset-query2", 7, "/asset.js?v=2")
+	set("site7-other", 7, "/other.js")
+	set("site8-asset", 8, "/asset.js?v=1")
+
+	if got := len(rc.targetIndex); got != 3 {
+		t.Fatalf("target index groups = %d, want 3", got)
+	}
+	rc.PurgeSiteTarget(7, "/asset.js?v=3")
+
+	for _, key := range []string{"site7-asset-query1", "site7-asset-query2"} {
+		if rc.Get(key) != nil {
+			t.Fatalf("purged cache entry %q remained", key)
+		}
+	}
+	for _, key := range []string{"site7-other", "site8-asset"} {
+		if rc.Get(key) == nil {
+			t.Fatalf("unrelated cache entry %q was purged", key)
+		}
+	}
+	if got := len(rc.targetIndex); got != 2 {
+		t.Fatalf("target index groups after purge = %d, want 2", got)
+	}
+
+	// Replacing a key must move it between target groups so a later purge cannot
+	// remove an entry using stale reverse-index state.
+	set("site7-asset-query1", 7, "/other.js")
+	rc.PurgeSiteTarget(7, "/asset.js")
+	if rc.Get("site7-asset-query1") == nil {
+		t.Fatal("replacement entry was removed through stale target index")
+	}
+}
+
+func TestResponseCacheCleanerRemovesReverseTargetIndex(t *testing.T) {
+	rc := NewResponseCache(1, 1)
+	defer rc.Close()
+
+	if !rc.SetForSiteIfGeneration(rc.Generation(), 7, "/expired.js?v=1", "expired", 200, "text/plain", []byte("body"), 1, nil) {
+		t.Fatal("cache write was rejected")
+	}
+	if len(rc.targetIndex) != 1 {
+		t.Fatalf("target index groups before expiry = %d, want 1", len(rc.targetIndex))
+	}
+	time.Sleep(2100 * time.Millisecond)
+	rc.cleanExpiredEntries()
+
+	if entry := rc.Lookup("expired"); entry != nil {
+		t.Fatal("expired entry remained after cleaner")
+	}
+	if entries, size := rc.Stats(); entries != 0 || size != 0 {
+		t.Fatalf("stats after cleaner = entries %d size %d", entries, size)
+	}
+	if len(rc.targetIndex) != 0 {
+		t.Fatalf("target index groups after cleaner = %d, want 0", len(rc.targetIndex))
+	}
+}
+
+func TestResponseCacheBoundsOneByteEntries(t *testing.T) {
+	rc := NewResponseCache(1, 60)
+	defer rc.Close()
+	for i := int64(0); i < rc.maxEntries+100; i++ {
+		rc.Set(strconv.FormatInt(i, 10), 200, "text/plain", []byte{'x'}, 60, nil)
+	}
+	entries, size := rc.Stats()
+	if int64(entries) > rc.maxEntries {
+		t.Fatalf("entries = %d, max = %d", entries, rc.maxEntries)
+	}
+	if size > rc.maxSize {
+		t.Fatalf("estimated size = %d, max = %d", size, rc.maxSize)
+	}
+}
+
+func TestResponseCacheLargeTTLIsNotEvictedByOverflow(t *testing.T) {
+	rc := NewResponseCache(1, 60)
+	defer rc.Close()
+
+	key := "large-ttl"
+	rc.Set(key, http.StatusOK, "text/plain", []byte("body"), int64(^uint64(0)>>1), nil)
+	body := make([]byte, 120*1024)
+	for i := 0; i < 7; i++ {
+		rc.Set("regular-"+strconv.Itoa(i), http.StatusOK, "text/plain", body, 60, nil)
+	}
+	// Keep the large-TTL entry newest, then force a size eviction. A wrapped
+	// CachedAt+TTL check would treat it as expired before the LRU pass.
+	rc.Set(key, http.StatusOK, "text/plain", []byte("body"), int64(^uint64(0)>>1), nil)
+	rc.Set("regular-final-1", http.StatusOK, "text/plain", body, 60, nil)
+	rc.Set("regular-final-2", http.StatusOK, "text/plain", body, 60, nil)
+	if rc.Get(key) == nil {
+		t.Fatal("entry with a large positive TTL was evicted as expired")
 	}
 }

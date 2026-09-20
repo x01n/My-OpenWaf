@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenWAF Security Gateway</title>
+</head>
+<body>
+<script nonce="{{.CSPNonce}}" data-owaf-dp="2" data-owaf-data="{{.Data}}" data-owaf-iv="{{.IV}}" data-owaf-wrap="{{.Wrap}}"{{if .Ticket}} data-owaf-ticket="{{.Ticket}}"{{else}} data-owaf-kek="{{.KEK}}"{{end}} data-owaf-key="{{.Key}}" data-owaf-ttl="{{.TTL}}">{{.Bootstrap}}</script>
+</body>
+</html>

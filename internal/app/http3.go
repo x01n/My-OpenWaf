@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,11 +14,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"My-OpenWaf/internal/dataplane"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
@@ -28,21 +32,181 @@ import (
 )
 
 type HTTP3Server struct {
-	server         *http3.Server
-	proxyTransport *http.Transport
-	bind           string
-	routeTable     http3RouteTable
-	log            *slog.Logger
-	stopChan       chan struct{}
-	stopOnce       sync.Once
-	listenMu       sync.Mutex
-	packetConn     net.PacketConn
-	spinStarted    bool
-	spinDone       chan struct{}
-	spinDoneOnce   sync.Once
+	server                  *http3.Server
+	proxyTransport          *http.Transport
+	proxyHTTP11Transport    *http.Transport
+	bind                    string
+	routeTable              http3RouteTable
+	log                     *slog.Logger
+	stopChan                chan struct{}
+	stopOnce                sync.Once
+	listenMu                sync.Mutex
+	packetConn              net.PacketConn
+	spinStarted             bool
+	spinDone                chan struct{}
+	spinDoneOnce            sync.Once
+	startErrMu              sync.Mutex
+	startErr                error
+	activeLoopbackBodiesMu  sync.Mutex
+	activeLoopbackBodies    map[*cancelableBody]struct{}
+	activeLoopbackCancelsMu sync.Mutex
+	activeLoopbackCancelSeq uint64
+	activeLoopbackCancels   map[uint64]context.CancelFunc
+}
+
+type http3LoopbackRequestState struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	body   *cancelableBody
+}
+
+func (s *http3LoopbackRequestState) SetCancel(cancel context.CancelFunc) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.cancel = cancel
+	s.mu.Unlock()
+}
+
+func (s *http3LoopbackRequestState) SetBody(body *cancelableBody) {
+	if s == nil || body == nil {
+		return
+	}
+	s.mu.Lock()
+	s.body = body
+	s.mu.Unlock()
+}
+
+func (s *http3LoopbackRequestState) Cancel() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	cancel := s.cancel
+	body := s.body
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if body != nil {
+		return body.Cancel()
+	}
+	return nil
+}
+
+func (s *HTTP3Server) registerLoopbackBody(body *cancelableBody) {
+	if s == nil || body == nil {
+		return
+	}
+	body.mu.Lock()
+	defer body.mu.Unlock()
+	if body.closed {
+		return
+	}
+	s.activeLoopbackBodiesMu.Lock()
+	if s.activeLoopbackBodies == nil {
+		s.activeLoopbackBodies = make(map[*cancelableBody]struct{})
+	}
+	s.activeLoopbackBodies[body] = struct{}{}
+	s.activeLoopbackBodiesMu.Unlock()
+}
+
+func (s *HTTP3Server) unregisterLoopbackBody(body *cancelableBody) {
+	if s == nil || body == nil {
+		return
+	}
+	s.activeLoopbackBodiesMu.Lock()
+	delete(s.activeLoopbackBodies, body)
+	s.activeLoopbackBodiesMu.Unlock()
+}
+
+func (s *HTTP3Server) registerLoopbackCancel(cancel context.CancelFunc) func() {
+	if s == nil || cancel == nil {
+		return func() {}
+	}
+	s.activeLoopbackCancelsMu.Lock()
+	if s.activeLoopbackCancels == nil {
+		s.activeLoopbackCancels = make(map[uint64]context.CancelFunc)
+	}
+	s.activeLoopbackCancelSeq++
+	id := s.activeLoopbackCancelSeq
+	s.activeLoopbackCancels[id] = cancel
+	s.activeLoopbackCancelsMu.Unlock()
+
+	return func() {
+		s.activeLoopbackCancelsMu.Lock()
+		delete(s.activeLoopbackCancels, id)
+		s.activeLoopbackCancelsMu.Unlock()
+	}
+}
+
+func (s *HTTP3Server) cancelActiveLoopbackRequests() {
+	if s == nil {
+		return
+	}
+	s.activeLoopbackCancelsMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.activeLoopbackCancels))
+	for _, cancel := range s.activeLoopbackCancels {
+		cancels = append(cancels, cancel)
+	}
+	s.activeLoopbackCancelsMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (s *HTTP3Server) closeActiveLoopbackBodies() error {
+	if s == nil {
+		return nil
+	}
+	s.activeLoopbackBodiesMu.Lock()
+	bodies := make([]*cancelableBody, 0, len(s.activeLoopbackBodies))
+	for body := range s.activeLoopbackBodies {
+		bodies = append(bodies, body)
+	}
+	s.activeLoopbackBodiesMu.Unlock()
+
+	var closeErr error
+	for _, body := range bodies {
+		closeErr = errors.Join(closeErr, body.Cancel())
+	}
+	return closeErr
 }
 
 type http3TLSFingerprintContextKey struct{}
+
+type http3LoopbackCancelContextKey struct{}
+
+type http3LoopbackRequestStateContextKey struct{}
+
+type http3OriginalRequestContextKey struct{}
+
+type http3LoopbackTransportSelector struct {
+	h2     http.RoundTripper
+	http11 http.RoundTripper
+}
+
+func (t *http3LoopbackTransportSelector) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.h2.RoundTrip(req)
+}
+
+func http3LoopbackCancelFromContext(ctx context.Context) (context.CancelFunc, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	cancel, ok := ctx.Value(http3LoopbackCancelContextKey{}).(context.CancelFunc)
+	return cancel, ok && cancel != nil
+}
+
+func http3LoopbackRequestStateFromContext(ctx context.Context) (*http3LoopbackRequestState, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	state, ok := ctx.Value(http3LoopbackRequestStateContextKey{}).(*http3LoopbackRequestState)
+	return state, ok && state != nil
+}
 
 type http3HandshakeFingerprintStore struct {
 	mu    sync.Mutex
@@ -95,6 +259,242 @@ func (d http3RouteConflictDiagnostics) Summary() string {
 	return strings.Join(parts, ";")
 }
 
+type cancelableBody struct {
+	ctx       context.Context
+	body      io.ReadCloser
+	onCleanup func()
+	cancelReq context.CancelFunc
+	closed    bool
+	mu        sync.Mutex
+	stop      func() bool
+}
+
+// newCancelableBody closes the upstream body when the request context is canceled.
+func newCancelableBody(ctx context.Context, body io.ReadCloser, onCleanup func(), cancelReq context.CancelFunc) *cancelableBody {
+	b := &cancelableBody{ctx: ctx, body: body, onCleanup: onCleanup, cancelReq: cancelReq}
+	if ctx != nil && ctx.Done() != nil {
+		b.stop = context.AfterFunc(ctx, func() {
+			_ = b.Cancel()
+		})
+	}
+	return b
+}
+
+func (b *cancelableBody) Cancel() error {
+	return b.close(true)
+}
+
+func (b *cancelableBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, io.ErrClosedPipe
+	}
+	ctx := b.ctx
+	body := b.body
+	b.mu.Unlock()
+
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+
+	n, err := body.Read(p)
+	if err != nil && err != io.EOF && ctx != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return n, ctxErr
+		}
+	}
+	return n, err
+}
+
+func (b *cancelableBody) Close() error {
+	return b.close(false)
+}
+
+func (b *cancelableBody) close(cancel bool) error {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil
+	}
+	b.closed = true
+	stop := b.stop
+	body := b.body
+	onCleanup := b.onCleanup
+	cancelReq := b.cancelReq
+	b.mu.Unlock()
+
+	if stop != nil {
+		stop()
+	}
+	if onCleanup != nil {
+		onCleanup()
+	}
+	var closeErr error
+	if cancel && cancelReq != nil {
+		cancelReq()
+	}
+	if body != nil {
+		closeErr = errors.Join(closeErr, body.Close())
+	}
+	return closeErr
+}
+
+type http3FlushErrorer interface {
+	FlushError() error
+}
+
+type http3CancelAwareResponseWriter struct {
+	http.ResponseWriter
+	cancel         context.CancelFunc
+	cancelLoopback func() error
+	started        chan struct{}
+	done           chan struct{}
+	startedOnce    sync.Once
+	doneOnce       sync.Once
+	mu             sync.Mutex
+}
+
+func newHTTP3CancelAwareResponseWriter(w http.ResponseWriter, cancel context.CancelFunc, cancelLoopback func() error) *http3CancelAwareResponseWriter {
+	return &http3CancelAwareResponseWriter{
+		ResponseWriter: w,
+		cancel:         cancel,
+		cancelLoopback: cancelLoopback,
+		started:        make(chan struct{}),
+		done:           make(chan struct{}),
+	}
+}
+
+func (w *http3CancelAwareResponseWriter) WriteHeader(statusCode int) {
+	w.markStarted()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *http3CancelAwareResponseWriter) Write(p []byte) (int, error) {
+	w.markStarted()
+	w.mu.Lock()
+	n, err := w.ResponseWriter.Write(p)
+	w.mu.Unlock()
+	if err != nil {
+		w.cancelRequest()
+	}
+	return n, err
+}
+
+func (w *http3CancelAwareResponseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *http3CancelAwareResponseWriter) FlushError() error {
+	w.markStarted()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if flusher, ok := w.ResponseWriter.(http3FlushErrorer); ok {
+		err := flusher.FlushError()
+		if err != nil {
+			w.cancelRequest()
+		}
+		return err
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
+func (w *http3CancelAwareResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *http3CancelAwareResponseWriter) startStreamCancelWatch(ctx context.Context) {
+	if w == nil || w.ResponseWriter == nil {
+		return
+	}
+	value := reflect.ValueOf(w.ResponseWriter)
+	if value.Kind() != reflect.Ptr || value.IsNil() {
+		return
+	}
+	elem := value.Elem()
+	if !elem.IsValid() || elem.Kind() != reflect.Struct {
+		return
+	}
+	field := elem.FieldByName("str")
+	if !field.IsValid() || field.IsNil() {
+		return
+	}
+	field = reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	stream, ok := field.Interface().(interface{ Context() context.Context })
+	if !ok {
+		return
+	}
+	streamCtx := stream.Context()
+	if streamCtx == nil {
+		return
+	}
+	go func() {
+		select {
+		case <-streamCtx.Done():
+			w.cancelRequest()
+		case <-w.done:
+		case <-ctx.Done():
+			w.cancelRequest()
+		}
+	}()
+}
+
+func (w *http3CancelAwareResponseWriter) Close() {
+	w.doneOnce.Do(func() {
+		close(w.done)
+	})
+}
+
+func (w *http3CancelAwareResponseWriter) startFlushWatch(ctx context.Context) {
+	go func() {
+		select {
+		case <-w.started:
+		case <-w.done:
+			return
+		case <-ctx.Done():
+			return
+		}
+
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := w.FlushError(); err != nil {
+					w.cancelRequest()
+					return
+				}
+			case <-w.done:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func (w *http3CancelAwareResponseWriter) markStarted() {
+	w.startedOnce.Do(func() {
+		close(w.started)
+	})
+}
+
+func (w *http3CancelAwareResponseWriter) cancelRequest() {
+	if w.cancel != nil {
+		w.cancel()
+	}
+	if w.cancelLoopback != nil {
+		_ = w.cancelLoopback()
+	}
+}
+
 type http3ServerPlan struct {
 	Bind       string
 	Tag        string
@@ -116,7 +516,7 @@ type http3RequestTrailerSyncReadCloser struct {
 
 func (r *http3RequestTrailerSyncReadCloser) Read(p []byte) (int, error) {
 	n, err := r.body.Read(p)
-	if err == io.EOF {
+	if err == io.EOF || (r.source != nil && httpHeaderHasValues(r.source.Trailer)) {
 		r.once.Do(r.syncTrailers)
 	}
 	return n, err
@@ -131,6 +531,15 @@ func (r *http3RequestTrailerSyncReadCloser) syncTrailers() {
 		return
 	}
 	copyHTTPHeaderInto(r.target, r.source.Trailer)
+}
+
+func httpHeaderHasValues(header http.Header) bool {
+	for _, values := range header {
+		if len(values) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func copyHTTPHeaderInto(dst http.Header, src http.Header) {
@@ -163,10 +572,47 @@ type HTTP3ServerConfig struct {
 	RouteTable http3RouteTable
 	TLSConfig  *tls.Config
 	Log        *slog.Logger
+	Allow0RTT  bool
 }
 
 func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
+	var h3ServerState *HTTP3Server
 	proxy := &httputil.ReverseProxy{}
+	proxy.FlushInterval = -1
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		if resp != nil && resp.Body != nil && resp.Request != nil {
+			var body *cancelableBody
+			var cancelReq context.CancelFunc
+			if cancel, ok := http3LoopbackCancelFromContext(resp.Request.Context()); ok {
+				cancelReq = cancel
+			}
+			body = newCancelableBody(resp.Request.Context(), resp.Body, func() {
+				if cancelReq != nil {
+					cancelReq()
+				}
+				if h3ServerState != nil {
+					h3ServerState.unregisterLoopbackBody(body)
+				}
+			}, cancelReq)
+			if state, ok := http3LoopbackRequestStateFromContext(resp.Request.Context()); ok {
+				state.SetBody(body)
+			}
+			if h3ServerState != nil {
+				h3ServerState.registerLoopbackBody(body)
+			}
+			resp.Body = body
+		}
+		contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+		contentEncoding := resp.Header.Get("Content-Encoding")
+		if strings.Contains(contentType, "text/event-stream") || contentEncoding != "" {
+			if resp.Request != nil && strings.EqualFold(resp.Request.Method, http.MethodHead) {
+				return nil
+			}
+			resp.Header.Del("Content-Length")
+			resp.ContentLength = -1
+		}
+		return nil
+	}
 	handshakeFingerprints := newHTTP3HandshakeFingerprintStore()
 	proxyTransport := &http.Transport{
 		TLSClientConfig:       http3LoopbackTLSConfig(),
@@ -182,7 +628,24 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 			KeepAlive: http3LoopbackTCPKeepAlive,
 		}).DialContext,
 	}
-	proxy.Transport = proxyTransport
+	proxyHTTP11TLSConfig := http3LoopbackTLSConfig()
+	proxyHTTP11TLSConfig.NextProtos = []string{"http/1.1"}
+	proxyHTTP11Transport := &http.Transport{
+		TLSClientConfig:       proxyHTTP11TLSConfig,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       http3LoopbackIdleConnTimeout,
+		TLSHandshakeTimeout:   http3LoopbackTLSHandshakeTimeout,
+		ExpectContinueTimeout: http3LoopbackExpectContinueTimeout,
+		DisableCompression:    true,
+		DialContext: (&net.Dialer{
+			Timeout:   http3LoopbackDialTimeout,
+			KeepAlive: http3LoopbackTCPKeepAlive,
+		}).DialContext,
+	}
+	proxy.Transport = &http3LoopbackTransportSelector{h2: proxyTransport, http11: proxyHTTP11Transport}
 	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
 		if pr == nil || pr.Out == nil {
 			return
@@ -215,6 +678,21 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 			pr.Out.TransferEncoding = nil
 			pr.Out.Header.Del("Content-Length")
 		}
+		outCtx, cancelOut := context.WithCancel(pr.Out.Context())
+		if state, ok := http3LoopbackRequestStateFromContext(pr.In.Context()); ok {
+			state.SetCancel(cancelOut)
+		}
+		if h3ServerState != nil {
+			unregisterCancel := h3ServerState.registerLoopbackCancel(cancelOut)
+			context.AfterFunc(outCtx, unregisterCancel)
+		}
+		if token, unregister := dataplane.RegisterInternalHTTP3CancelSignal(outCtx.Done()); token != "" {
+			pr.Out.Header.Set(dataplane.InternalHTTP3CancelTokenHeader, token)
+			context.AfterFunc(outCtx, unregister)
+		}
+		outCtx = context.WithValue(outCtx, http3LoopbackCancelContextKey{}, cancelOut)
+		pr.Out = pr.Out.WithContext(outCtx)
+
 		if len(pr.In.Trailer) > 0 || len(pr.Out.Trailer) > 0 {
 			pr.Out.Header.Set("TE", "trailers")
 			if pr.Out.Body != nil {
@@ -224,9 +702,13 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 						pr.Out.Trailer[key] = nil
 					}
 				}
+				source := pr.In
+				if original, ok := pr.In.Context().Value(http3OriginalRequestContextKey{}).(*http.Request); ok && original != nil {
+					source = original
+				}
 				pr.Out.Body = &http3RequestTrailerSyncReadCloser{
 					body:   pr.Out.Body,
-					source: pr.In,
+					source: source,
 					target: pr.Out.Trailer,
 				}
 			}
@@ -235,12 +717,32 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := resolveHTTP3TCPBind(cfg.RouteTable, r); !ok {
+		targetBind, ok := resolveHTTP3TCPBind(cfg.RouteTable, r)
+		if !ok {
 			http.Error(w, "no HTTP/3 route target", http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=86400`, extractPort(cfg.Bind)))
-		proxy.ServeHTTP(w, r)
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		state := &http3LoopbackRequestState{}
+		ctx = context.WithValue(ctx, http3OriginalRequestContextKey{}, r)
+		ctx = context.WithValue(ctx, http3LoopbackRequestStateContextKey{}, state)
+		context.AfterFunc(ctx, func() {
+			_ = state.Cancel()
+		})
+		cancelAware := newHTTP3CancelAwareResponseWriter(w, cancel, state.Cancel)
+		cancelAware.startStreamCancelWatch(ctx)
+		cancelAware.startFlushWatch(ctx)
+		defer cancelAware.Close()
+		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(cfg.Bind), snapshotpkg.OneDaySeconds))
+		request := r.WithContext(ctx)
+		if isHTTP3WebSocketConnect(request) {
+			if err := serveHTTP3WebSocketBridge(cancelAware, request, targetBind, h3ServerState, state); err != nil {
+				http.Error(w, "HTTP/3 WebSocket bridge failed", http.StatusBadGateway)
+			}
+			return
+		}
+		proxy.ServeHTTP(cancelAware, request)
 	})
 
 	tlsCfg := cfg.TLSConfig.Clone()
@@ -257,6 +759,24 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		Addr:      cfg.Bind,
 		Handler:   handler,
 		TLSConfig: tlsCfg,
+		QUICConfig: &quic.Config{
+			// Allow0RTT 沿用站点会话票据开关，不强制开启：0-RTT 数据存在重放风险，
+			// 是否接受由上层配置决定，此处仅透传。
+			Allow0RTT: cfg.Allow0RTT,
+			// 显式设为 30s（与 quic-go 默认一致），无活动连接超时回收，避免空闲 QUIC 连接长期占用。
+			MaxIdleTimeout: 30 * time.Second,
+			// 周期性保活包（取 MaxIdleTimeout 一半），维持长连接不被 NAT/对端超时断开，
+			// 从而复用已建立的 QUIC 连接、减少重复握手。
+			KeepAlivePeriod: 15 * time.Second,
+			// 单连接并发双向流上限，默认 100，反代高并发下适度上调到 256 以提升多路复用能力。
+			MaxIncomingStreams: 256,
+			// 流接收窗口：初始 2MB，最大 6MB（quic-go 默认 512KB/6MB），
+			// 反代场景大响应体受益于更大初始窗口避免流控暂停。
+			InitialStreamReceiveWindow:     2 << 20,
+			MaxStreamReceiveWindow:         6 << 20,
+			InitialConnectionReceiveWindow: 4 << 20,
+			MaxConnectionReceiveWindow:     15 << 20,
+		},
 		ConnContext: func(ctx context.Context, conn *quic.Conn) context.Context {
 			if conn == nil {
 				return ctx
@@ -268,15 +788,200 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		},
 	}
 
-	return &HTTP3Server{
-		server:         h3Server,
-		proxyTransport: proxyTransport,
-		bind:           cfg.Bind,
-		routeTable:     cfg.RouteTable,
-		log:            cfg.Log,
-		stopChan:       make(chan struct{}),
-		spinDone:       make(chan struct{}),
+	h3ServerState = &HTTP3Server{
+		server:                h3Server,
+		proxyTransport:        proxyTransport,
+		proxyHTTP11Transport:  proxyHTTP11Transport,
+		bind:                  cfg.Bind,
+		routeTable:            cfg.RouteTable,
+		log:                   cfg.Log,
+		stopChan:              make(chan struct{}),
+		spinDone:              make(chan struct{}),
+		activeLoopbackBodies:  make(map[*cancelableBody]struct{}),
+		activeLoopbackCancels: make(map[uint64]context.CancelFunc),
 	}
+	return h3ServerState
+}
+
+func isHTTP3WebSocketConnect(r *http.Request) bool {
+	return r != nil && r.Method == http.MethodConnect && r.Proto == "websocket"
+}
+
+func newHTTP3WebSocketLoopbackRequest(ctx context.Context, r *http.Request, targetBind string) (*http.Request, error) {
+	if r == nil || r.URL == nil {
+		return nil, errors.New("HTTP/3 WebSocket request is missing URL")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestURI := r.URL.RequestURI()
+	if requestURI == "" {
+		requestURI = "/"
+	}
+	out, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+loopbackTargetHost(targetBind)+requestURI, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build HTTP/1.1 WebSocket loopback request: %w", err)
+	}
+	copyHTTP3WebSocketRequestHeaders(out.Header, r.Header)
+	clearInternalHTTP3TLSHeaders(out.Header)
+	out.Header.Del("X-Forwarded-For")
+	out.Header.Del("X-Forwarded-Host")
+	out.Header.Del("X-Forwarded-Proto")
+	proxyRequest := &httputil.ProxyRequest{In: r, Out: out}
+	proxyRequest.SetXForwarded()
+	out.Host = r.Host
+	if out.Host == "" {
+		out.Host = r.URL.Host
+	}
+	if out.Host != "" {
+		out.Header.Set("X-Forwarded-Host", out.Host)
+	} else {
+		out.Header.Del("X-Forwarded-Host")
+	}
+	out.Header.Set("X-Forwarded-Proto", "h3")
+	out.Header.Set(dataplane.InternalHTTP3ProtoHeader, "h3")
+	applyHTTP3ProxyTLSHeaders(out)
+
+	var key [16]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return nil, fmt.Errorf("generate HTTP/1.1 WebSocket key: %w", err)
+	}
+	out.Header.Set("Connection", "Upgrade")
+	out.Header.Set("Upgrade", "websocket")
+	out.Header.Set("Sec-WebSocket-Key", base64.StdEncoding.EncodeToString(key[:]))
+	out.Header.Set("Sec-WebSocket-Version", "13")
+	return out, nil
+}
+
+func copyHTTP3WebSocketRequestHeaders(dst http.Header, src http.Header) {
+	for key, values := range src {
+		if isHTTP3WebSocketHopByHopHeader(key, src) ||
+			strings.EqualFold(key, "Host") ||
+			strings.EqualFold(key, "Content-Length") ||
+			strings.EqualFold(key, "Sec-WebSocket-Key") ||
+			strings.EqualFold(key, "Sec-WebSocket-Version") {
+			continue
+		}
+		dst[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+	}
+}
+
+func copyHTTP3WebSocketResponseHeaders(dst http.Header, src http.Header, upgraded bool) {
+	for key, values := range src {
+		if isHTTP3WebSocketHopByHopHeader(key, src) ||
+			(upgraded && strings.EqualFold(key, "Sec-WebSocket-Accept")) {
+			continue
+		}
+		dst[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+	}
+}
+
+func isHTTP3WebSocketHopByHopHeader(key string, headers http.Header) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	}
+	for _, value := range headers.Values("Connection") {
+		for token := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), key) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func serveHTTP3WebSocketBridge(w *http3CancelAwareResponseWriter, r *http.Request, targetBind string, server *HTTP3Server, state *http3LoopbackRequestState) error {
+	if w == nil || r == nil || server == nil || server.proxyHTTP11Transport == nil {
+		return errors.New("HTTP/3 WebSocket bridge is unavailable")
+	}
+	streamer, ok := w.Unwrap().(http3.HTTPStreamer)
+	if !ok {
+		return errors.New("HTTP/3 response writer does not expose its stream")
+	}
+
+	bridgeCtx, cancelBridge := context.WithCancel(r.Context())
+	defer cancelBridge()
+	if state != nil {
+		state.SetCancel(cancelBridge)
+	}
+	unregisterLoopbackCancel := server.registerLoopbackCancel(cancelBridge)
+	defer unregisterLoopbackCancel()
+
+	out, err := newHTTP3WebSocketLoopbackRequest(bridgeCtx, r, targetBind)
+	if err != nil {
+		return err
+	}
+	if token, unregister := dataplane.RegisterInternalHTTP3CancelSignal(bridgeCtx.Done()); token != "" {
+		out.Header.Set(dataplane.InternalHTTP3CancelTokenHeader, token)
+		defer unregister()
+	}
+
+	resp, err := server.proxyHTTP11Transport.RoundTrip(out)
+	if err != nil {
+		return fmt.Errorf("round trip HTTP/1.1 WebSocket loopback request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		copyHTTP3WebSocketResponseHeaders(w.Header(), resp.Header, false)
+		w.WriteHeader(resp.StatusCode)
+		if resp.Body != nil {
+			_, _ = io.Copy(w, resp.Body)
+		}
+		return nil
+	}
+
+	loopbackStream, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		return errors.New("HTTP/1.1 WebSocket upgrade response is not bidirectional")
+	}
+	copyHTTP3WebSocketResponseHeaders(w.Header(), resp.Header, true)
+	w.WriteHeader(http.StatusOK)
+	h3Stream := streamer.HTTPStream()
+	if h3Stream == nil {
+		return errors.New("HTTP/3 response stream is unavailable")
+	}
+	defer h3Stream.Close()
+
+	requestBody := r.Body
+	if requestBody == nil {
+		requestBody = http.NoBody
+	}
+	_ = bridgeHTTP3WebSocketStreams(bridgeCtx, requestBody, h3Stream, loopbackStream)
+	return nil
+}
+
+func bridgeHTTP3WebSocketStreams(ctx context.Context, requestBody io.ReadCloser, h3Stream io.ReadWriteCloser, loopbackStream io.ReadWriteCloser) error {
+	if requestBody == nil || h3Stream == nil || loopbackStream == nil {
+		return errors.New("HTTP/3 WebSocket bridge stream is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stopCancelWatch := context.AfterFunc(ctx, func() {
+		_ = requestBody.Close()
+		_ = h3Stream.Close()
+		_ = loopbackStream.Close()
+	})
+	defer stopCancelWatch()
+
+	copyDone := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(loopbackStream, requestBody)
+		copyDone <- err
+	}()
+	go func() {
+		_, err := io.Copy(h3Stream, loopbackStream)
+		copyDone <- err
+	}()
+
+	firstErr := <-copyDone
+	_ = requestBody.Close()
+	_ = h3Stream.Close()
+	_ = loopbackStream.Close()
+	secondErr := <-copyDone
+	return errors.Join(firstErr, secondErr)
 }
 
 func http3LoopbackTLSConfig() *tls.Config {
@@ -291,6 +996,30 @@ func http3LoopbackTLSCipherSuites() []uint16 {
 		return nil
 	}
 	return cfg.CipherSuites
+}
+
+func (s *HTTP3Server) Ready() bool {
+	if s == nil {
+		return false
+	}
+	s.listenMu.Lock()
+	defer s.listenMu.Unlock()
+	return s.packetConn != nil
+}
+
+func (s *HTTP3Server) Err() error {
+	if s == nil {
+		return errors.New("HTTP/3 server is nil")
+	}
+	s.startErrMu.Lock()
+	defer s.startErrMu.Unlock()
+	return s.startErr
+}
+
+func (s *HTTP3Server) setStartErr(err error) {
+	s.startErrMu.Lock()
+	s.startErr = err
+	s.startErrMu.Unlock()
 }
 
 func (s *HTTP3Server) Spin() {
@@ -314,6 +1043,8 @@ func (s *HTTP3Server) Spin() {
 		case <-s.stopChan:
 			return
 		default:
+			err := fmt.Errorf("HTTP/3 listener bind %s: %w", s.bind, err)
+			s.setStartErr(err)
 			s.log.Error("HTTP/3 server error", slog.Any("err", err))
 			return
 		}
@@ -329,8 +1060,8 @@ func (s *HTTP3Server) Spin() {
 	if err := s.server.Serve(packetConn); err != nil && err != http.ErrServerClosed {
 		select {
 		case <-s.stopChan:
-			// 正常关闭
 		default:
+			s.setStartErr(fmt.Errorf("HTTP/3 server: %w", err))
 			s.log.Error("HTTP/3 server error", slog.Any("err", err))
 		}
 	}
@@ -343,10 +1074,15 @@ func (s *HTTP3Server) Shutdown(ctx context.Context) error {
 	var shutdownErr error
 	s.stopOnce.Do(func() {
 		close(s.stopChan)
+		s.cancelActiveLoopbackRequests()
+		shutdownErr = errors.Join(shutdownErr, s.closeActiveLoopbackBodies())
 		if s.proxyTransport != nil {
 			s.proxyTransport.CloseIdleConnections()
 		}
-		shutdownErr = s.server.Shutdown(ctx)
+		if s.proxyHTTP11Transport != nil {
+			s.proxyHTTP11Transport.CloseIdleConnections()
+		}
+		shutdownErr = errors.Join(shutdownErr, s.server.Shutdown(ctx))
 		if err := s.closePacketConn(); err != nil && !errors.Is(err, net.ErrClosed) {
 			shutdownErr = errors.Join(shutdownErr, err)
 		}
@@ -459,6 +1195,7 @@ func instrumentHTTP3TLSConfig(tlsCfg *tls.Config, fingerprints *http3HandshakeFi
 
 func clearInternalHTTP3TLSHeaders(headers http.Header) {
 	headers.Del(dataplane.InternalHTTP3ProtoHeader)
+	headers.Del(dataplane.InternalHTTP3CancelTokenHeader)
 	headers.Del(dataplane.InternalHTTP3TLSVersionHeader)
 	headers.Del(dataplane.InternalHTTP3TLSSNIHeader)
 	headers.Del(dataplane.InternalHTTP3TLSALPNHeader)
@@ -631,7 +1368,14 @@ func resolveHTTP3TCPBind(routeTable http3RouteTable, r *http.Request) (string, b
 
 func (t http3RouteTable) Resolve(host string) (string, bool) {
 	normalized := snapshotpkg.NormalizeMatchHost(host)
-	if normalized != "" {
+	if normalized == "" {
+		if t.defaultTCPBind != "" {
+			return t.defaultTCPBind, true
+		}
+		return "", false
+	}
+
+	if normalized != "*" {
 		if bind, ok := t.exact[normalized]; ok {
 			return bind, true
 		}
@@ -643,8 +1387,8 @@ func (t http3RouteTable) Resolve(host string) (string, bool) {
 			}
 		}
 	}
-	if t.defaultTCPBind != "" {
-		return t.defaultTCPBind, true
+	if bind, ok := t.exact["*"]; ok {
+		return bind, true
 	}
 	return "", false
 }
@@ -751,7 +1495,7 @@ func buildHTTP3AltSvcAdvertisementWithPlans(siteRT snapshotpkg.SiteRuntime, sn *
 		return http3AltSvcAdvertisement{}, false
 	}
 	return http3AltSvcAdvertisement{
-		value:      fmt.Sprintf(`h3=":%s"; ma=86400`, extractPort(plan.Bind)),
+		value:      fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(plan.Bind), snapshotpkg.OneDaySeconds),
 		tcpBind:    siteRT.Bind,
 		udpBind:    plan.Bind,
 		routeTable: plan.RouteTable,
@@ -861,15 +1605,15 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 	}
 
 	allowedTCPBinds := make(map[string]struct{}, len(runtimes))
-	var defaultSiteCert *tls.Certificate
+	defaultSiteCertByBind := make(map[string]*tls.Certificate, len(runtimes))
 	for _, rt := range runtimes {
 		allowedTCPBinds[rt.Bind] = struct{}{}
-		if defaultSiteCert != nil {
+		if _, exists := defaultSiteCertByBind[rt.Bind]; exists {
 			continue
 		}
 		if rt.TLSConfig != nil && len(rt.TLSConfig.Certificates) > 0 {
 			cert := rt.TLSConfig.Certificates[0]
-			defaultSiteCert = &cert
+			defaultSiteCertByBind[rt.Bind] = &cert
 			continue
 		}
 		if rt.Certificate != nil {
@@ -878,7 +1622,7 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 				if staple, ok := snapshotpkg.ParseOCSPStaple(rt.Certificate.OCSPStaplePEM); ok {
 					cert.OCSPStaple = staple
 				}
-				defaultSiteCert = &cert
+				defaultSiteCertByBind[rt.Bind] = &cert
 			}
 		}
 	}
@@ -906,12 +1650,8 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		}
 	}
 
-	if defaultSiteCert == nil && len(sniCertMap) == 0 {
-		selfSigned := selfSignedForBind(udpBind)
-		if selfSigned == nil {
-			return nil
-		}
-		defaultSiteCert = selfSigned
+	if len(defaultSiteCertByBind) == 0 && len(sniCertMap) == 0 && selfSignedForBind(udpBind) == nil {
+		return nil
 	}
 
 	curves := snapshotpkg.ParseCurvePreferences(sn.TLSDefaults.CurvePreferences)
@@ -919,7 +1659,6 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		curves = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}
 	}
 
-	allowedBindCount := len(allowedTCPBinds)
 	return &tls.Config{
 		MinVersion:               tls.VersionTLS13,
 		MaxVersion:               tls.VersionTLS13,
@@ -930,27 +1669,34 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := strings.ToLower(strings.TrimSpace(hello.ServerName))
 			if sni == "" {
-				if sn.TLSDefaults.SelfSignedOnIP {
+				if len(allowedTCPBinds) > 1 || sn.TLSDefaults.SelfSignedOnIP {
 					return selfSignedForBind(udpBind), nil
 				}
-				if defaultSiteCert != nil {
-					return defaultSiteCert, nil
+				for _, cert := range defaultSiteCertByBind {
+					return cert, nil
 				}
 				return selfSignedForBind(udpBind), nil
 			}
-			routeBind := ""
-			if allowedBindCount > 1 {
-				var ok bool
-				routeBind, ok = routeTable.Resolve(sni)
-				if !ok {
+			routeBind, ok := routeTable.Resolve(sni)
+			if !ok {
+				return selfSignedForBind(udpBind), nil
+			}
+			if _, found := sn.MatchSite(routeBind, sni); !found {
+				return selfSignedForBind(udpBind), nil
+			}
+			if state, found := sn.TLSCertificateStateForSNI(routeBind, sni); found {
+				switch state {
+				case snapshotpkg.TLSCertificateStateInvalid:
+					return nil, fmt.Errorf("configured TLS certificate is unavailable")
+				case snapshotpkg.TLSCertificateStateUnconfigured:
 					return selfSignedForBind(udpBind), nil
 				}
 			}
 			if cert, ok := http3SNICertForRoute(sniCertMap, sni, routeBind); ok {
 				return cert, nil
 			}
-			if allowedBindCount == 1 && defaultSiteCert != nil {
-				return defaultSiteCert, nil
+			if cert := defaultSiteCertByBind[routeBind]; cert != nil {
+				return cert, nil
 			}
 			return selfSignedForBind(udpBind), nil
 		},
@@ -962,9 +1708,11 @@ func http3SNICertForRoute(sniCertMap map[string]http3SNICertificate, sni string,
 		return cert, true
 	}
 	if idx := strings.Index(sni, "."); idx > 0 {
-		return http3SNICertEntryForRoute(sniCertMap, "*."+sni[idx+1:], routeBind)
+		if cert, ok := http3SNICertEntryForRoute(sniCertMap, "*."+sni[idx+1:], routeBind); ok {
+			return cert, true
+		}
 	}
-	return nil, false
+	return http3SNICertEntryForRoute(sniCertMap, "*", routeBind)
 }
 
 func http3SNICertEntryForRoute(sniCertMap map[string]http3SNICertificate, key string, routeBind string) (*tls.Certificate, bool) {
@@ -990,7 +1738,7 @@ func uniqueHTTP3SiteRuntimes(sn *snapshotpkg.Snapshot) []snapshotpkg.SiteRuntime
 			continue
 		}
 		seen[key] = struct{}{}
-		items = append(items, rt)
+		items = append(items, *rt)
 	}
 	return items
 }
@@ -1103,6 +1851,19 @@ func http3ListenerFingerprint(udpBind string, runtimes []snapshotpkg.SiteRuntime
 			} else {
 				fmt.Fprintf(h, " sni=%s:material=%s", sniKey, tlsCertificateFingerprintMaterial(cert))
 			}
+		}
+		relevantStateKeys := make([]string, 0)
+		for stateKey := range sn.SiteTLSCertStateBySNI {
+			for _, prefix := range allowedPrefixes {
+				if strings.HasPrefix(stateKey, prefix) {
+					relevantStateKeys = append(relevantStateKeys, stateKey)
+					break
+				}
+			}
+		}
+		sort.Strings(relevantStateKeys)
+		for _, stateKey := range relevantStateKeys {
+			fmt.Fprintf(h, " sni=%s:state=%s", stateKey, sn.SiteTLSCertStateBySNI[stateKey])
 		}
 	}
 

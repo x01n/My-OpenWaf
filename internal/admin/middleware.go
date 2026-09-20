@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -10,7 +11,9 @@ import (
 	"github.com/google/uuid"
 
 	"My-OpenWaf/internal/admin/auth"
+	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
+	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -31,7 +34,9 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 
 		// Whitelist: health + auth endpoints (login/refresh/logout).
 		if path == "/api/v1/health" ||
-			strings.HasPrefix(path, "/api/v1/auth/") {
+			path == "/api/v1/auth/login" ||
+			path == "/api/v1/auth/refresh" ||
+			path == "/api/v1/auth/logout" {
 			c.Next(ctx)
 			return
 		}
@@ -51,23 +56,33 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 		}
 
 		// Try JWT first (via TokenManager with key rotation + blacklist support).
-		if claims, err := tm.VerifyAccessToken(token); err == nil {
-			c.Set("auth_user", claims.Username)
-			c.Set("auth_method", "jwt")
-			c.Set("auth_role", claims.Role)
-			c.Set("auth_jti", claims.ID)
+		if tm != nil {
+			if claims, err := tm.VerifyAccessToken(token); err == nil {
+				c.Set("auth_user", claims.Username)
+				c.Set("auth_method", "jwt")
+				c.Set("auth_role", claims.Role)
+				c.Set("auth_jti", claims.ID)
 
-			// Update session last active time.
-			if claims.ID != "" && sessionMgr != nil {
-				sessionMgr.UpdateLastActive(claims.ID)
+				// Update session last active time.
+				if claims.ID != "" && sessionMgr != nil {
+					sessionMgr.UpdateLastActive(claims.ID)
+				}
+
+				c.Next(ctx)
+				return
+			} else if errors.Is(err, auth.ErrTokenBlacklistUnavailable) {
+				c.JSON(503, map[string]string{"error": "authentication service unavailable"})
+				c.Abort()
+				return
 			}
-
-			c.Next(ctx)
-			return
 		}
 
 		// Fallback: API Key.
-		key, ok := keyRepo.Verify(token)
+		var key *store.AdminAPIKey
+		ok := false
+		if keyRepo != nil {
+			key, ok = keyRepo.Verify(token)
+		}
 		if !ok {
 			c.JSON(401, map[string]string{"error": "invalid or expired token"})
 			c.Abort()
@@ -134,7 +149,15 @@ func SecurityHeaders(holder *snapshot.Holder) app.HandlerFunc {
 		c.Response.Header.Set("X-Frame-Options", "DENY")
 		c.Response.Header.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Response.Header.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
+		// 管理 API 的响应可能包含策略、日志和账号元数据，禁止浏览器及中间
+		// 代理复用，认证接口也因此不会因遗漏单个 handler 而被缓存。
+		if strings.HasPrefix(string(c.Path()), "/api/v1/") {
+			c.Response.Header.Set("Cache-Control", "no-store")
+		}
 		c.Next(ctx)
+		if strings.HasPrefix(string(c.Path()), "/api/v1/") {
+			c.Response.Header.Set("Cache-Control", "no-store")
+		}
 		ensureAdminXSSProtection(c, holder)
 		ensureAdminHPKP(c, holder)
 		ensureAdminHPKPReportOnly(c, holder)
@@ -264,8 +287,19 @@ func shouldWriteAdminHPKPReportOnly(c *app.RequestContext, holder *snapshot.Hold
 }
 
 func adminRequestProtocol(c *app.RequestContext) string {
-	if proto := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); proto != "" {
-		return strings.ToLower(proto)
+	if proto := security.TrustedInboundForwardedProto(c); proto == "https" || proto == "h3" {
+		return proto
+	}
+	directIP := security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
+	if directIP != nil && directIP.IsLoopback() {
+		switch strings.ToLower(strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto")))) {
+		case "https":
+			return "https"
+		case "h3":
+			return "h3"
+		case "http":
+			return "http"
+		}
 	}
 	if scheme := strings.TrimSpace(string(c.URI().Scheme())); scheme != "" {
 		return strings.ToLower(scheme)

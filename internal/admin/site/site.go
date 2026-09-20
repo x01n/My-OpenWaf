@@ -6,28 +6,64 @@ import (
 	"errors"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/admin/shared"
+	"My-OpenWaf/internal/security"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/utils"
-)
-
-// siteStatusMap tracks runtime status of sites (running/stopped).
-var (
-	siteStatusMap   = make(map[uint]string)
-	siteStatusMutex sync.RWMutex
+	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
 )
 
 var (
-	errInvalidSiteAction  = errors.New("invalid action")
-	errInvalidSiteNetwork = errors.New("invalid network")
+	errInvalidSiteAction        = errors.New("invalid action")
+	errInvalidSiteNetwork       = errors.New("invalid network")
+	errInvalidSiteXFFMode       = errors.New("invalid xff_mode")
+	errInvalidSiteTrustedCIDR   = errors.New("invalid trusted_cidr")
+	errInvalidSiteHeaderOrder   = errors.New("invalid client_ip_header_order")
+	errInvalidSiteDynamicJSMode = errors.New("dynamic_js_mode must be one of: all, paths")
+	errInvalidSiteDynamicTTL    = errors.New("dynamic_decrypt_cache_ttl must be between 0 and 1800 seconds")
+	errInvalidSiteUpstreamCert  = errors.New("upstream_tls_client_cert_pem and upstream_tls_client_key_pem must be provided together")
 )
+
+// validateSiteUpstreamMTLS 校验站点级上游 mTLS 客户端证书（store 层单一真源）：
+//
+//   - 证书与私钥必须成对出现；成对非空白时 tls.X509KeyPair 必须解析成功；
+//   - 单个字段超过 store.MaxUpstreamMTLSPEMBytes 拒绝；
+//   - 通过后预计算运行时值（数据面与写库共用同一份解析结果）。
+//     字段落库保持用户提交的原始 PEM 文本（TrimSpace 只用于空白判定与解析，
+//     不回写，避免改写 PEM 尾部换行等合法字节）。
+func validateSiteUpstreamMTLS(item *store.Site) error {
+	certPEM := ""
+	keyPEM := ""
+	if item.UpstreamTLSClientCertPEM != nil {
+		certPEM = *item.UpstreamTLSClientCertPEM
+	}
+	if item.UpstreamTLSClientKeyPEM != nil {
+		keyPEM = *item.UpstreamTLSClientKeyPEM
+	}
+	if _, _, _, _, _, exceeded, err := store.NormalizeSiteUpstreamMTLS(certPEM, keyPEM); exceeded {
+		return errors.New("upstream_tls_client_cert_pem/upstream_tls_client_key_pem exceeds the 256 KiB limit")
+	} else if err != nil {
+		if errors.Is(err, store.ErrSiteUpstreamMTLSUnpaired) {
+			return errInvalidSiteUpstreamCert
+		}
+		return errors.New("invalid upstream_tls_client_cert_pem/upstream_tls_client_key_pem pair: " + err.Error())
+	}
+	item.PrepareUpstreamMTLSRuntime()
+	return nil
+}
+
+// redactUpstreamClientKey 清空站点级上游客户端私钥，确保任何 API 响应都不回显明文私钥。
+func redactUpstreamClientKey(site *store.Site) {
+	if site != nil {
+		site.UpstreamTLSClientKeyPEM = nil
+	}
+}
 
 type siteListItem struct {
 	store.Site
@@ -47,7 +83,11 @@ func ListSites(repo *repository.SiteRepo, listenerRepo *repository.SiteListenerR
 			return
 		}
 
-		listeners, err := listenerRepo.AllEnabled()
+		siteIDs := make([]uint, 0, len(items))
+		for i := range items {
+			siteIDs = append(siteIDs, items[i].ID)
+		}
+		listeners, err := listenerRepo.ListEnabledBySites(siteIDs)
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -87,6 +127,7 @@ func ListSites(repo *repository.SiteRepo, listenerRepo *repository.SiteListenerR
 				}
 			}
 
+			redactUpstreamClientKey(&item)
 			respItems = append(respItems, siteListItem{
 				Site:                 item,
 				ListenerSummary:      listenerSummary,
@@ -111,6 +152,7 @@ func GetSite(repo *repository.SiteRepo) app.HandlerFunc {
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
+		redactUpstreamClientKey(item)
 		c.JSON(200, item)
 	}
 }
@@ -118,6 +160,9 @@ func GetSite(repo *repository.SiteRepo) app.HandlerFunc {
 func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var item store.Site
+		// 先填模型声明的默认值，再让请求体覆盖：json 只写出现过的字段，
+		// 这样「未提供」保留默认值，「显式传 false/0」才能如实落库。
+		_ = store.ApplyModelDefaults(&item)
 		body := c.Request.Body()
 		if err := shared.BindSiteFromRequestBody(body, &item); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -127,6 +172,10 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			item.ApplyProtectionModeOverrides()
 		}
 		clearInheritedProtectionOverrides(&item)
+		if err := repo.NormalizePolicyID(&item.PolicyID); err != nil {
+			c.JSON(400, map[string]string{"error": "policy_id must reference an existing policy"})
+			return
+		}
 		if err := validateSiteRuntimeTLSVersions(&item, body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -143,6 +192,18 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := validateSiteClientIP(&item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteDynamicProtection(&item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteCache(&item); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if err := shared.ValidateSiteUpstreamURLs(item.UpstreamURLs); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -151,7 +212,23 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if siteRequestHasField(body, "upstream_tls_client_cert_pem") || siteRequestHasField(body, "upstream_tls_client_key_pem") {
+			if err := validateSiteUpstreamMTLS(&item); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 		if err := validateSiteActions(&item, func(string) bool { return true }); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if siteRequestHasField(body, "cc_rules") || (item.CCUseCustom != nil && *item.CCUseCustom) {
+			if err := shared.ValidateCCRules(item.CCRules); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if err := shared.ValidateCCRules(item.CCRules); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
@@ -163,6 +240,8 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 在 reload（可能回显 item）与任何响应分支之前脱敏，私钥绝不进入响应体。
+		redactUpstreamClientKey(&item)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": item})
 			return
@@ -193,6 +272,10 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			existing.ApplyProtectionModeOverrides()
 		}
 		clearInheritedProtectionOverrides(existing)
+		if err := repo.NormalizePolicyID(&existing.PolicyID); err != nil {
+			c.JSON(400, map[string]string{"error": "policy_id must reference an existing policy"})
+			return
+		}
 		if err := validateSiteRuntimeTLSVersions(existing, body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -209,6 +292,18 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if err := validateSiteClientIP(existing); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteDynamicProtection(existing); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateSiteCache(existing); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
 		if siteRequestHasField(body, "upstream_urls") {
 			if err := shared.ValidateSiteUpstreamURLs(existing.UpstreamURLs); err != nil {
 				c.JSON(400, map[string]string{"error": err.Error()})
@@ -217,6 +312,12 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 		}
 		if siteRequestHasField(body, "upstream_host") {
 			if err := shared.ValidateSiteUpstreamHost(existing.UpstreamHost); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if siteRequestHasField(body, "upstream_tls_client_cert_pem") || siteRequestHasField(body, "upstream_tls_client_key_pem") {
+			if err := validateSiteUpstreamMTLS(existing); err != nil {
 				c.JSON(400, map[string]string{"error": err.Error()})
 				return
 			}
@@ -230,12 +331,26 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			case "rate_limit_action":
 				return siteRequestHasField(body, field) || (siteRequestHasField(body, "rate_limit_enabled") && existing.RateLimitEnabled != nil && *existing.RateLimitEnabled) || siteRequestHasField(body, "attack_protection_level")
 			case "anti_replay_action":
-				return siteRequestHasField(body, field) || (siteRequestHasField(body, "anti_replay_enabled") && existing.AntiReplayEnabled)
+				return siteRequestHasField(body, field) || (siteRequestHasField(body, "anti_replay_enabled") && existing.AntiReplayEnabled != nil && *existing.AntiReplayEnabled)
+			case "challenge_action":
+				return siteRequestHasField(body, field)
+			case "captcha_type":
+				return siteRequestHasField(body, field)
 			default:
 				return false
 			}
 		}
 		if err := validateSiteActions(existing, shouldValidateAction); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if siteRequestHasField(body, "cc_rules") || (siteRequestHasField(body, "cc_use_custom") && existing.CCUseCustom != nil && *existing.CCUseCustom) {
+			if err := shared.ValidateCCRules(existing.CCRules); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		if err := shared.ValidateCCRules(existing.CCRules); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
@@ -247,6 +362,8 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 在 reload（可能回显 item）与任何响应分支之前脱敏，私钥绝不进入响应体。
+		redactUpstreamClientKey(existing)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": existing})
 			return
@@ -262,6 +379,25 @@ func siteRequestHasField(body []byte, field string) bool {
 	}
 	_, ok := raw[field]
 	return ok
+}
+
+func validateSiteCache(item *store.Site) error {
+	if item == nil {
+		return nil
+	}
+	_, err := store.ValidateAndCompileSiteCacheRules(item.CacheRules, item.CacheDefaultTTL)
+	return err
+}
+
+// validateSiteDynamicProtection 校验站点级动态保护的枚举和 TTL 覆盖。
+func validateSiteDynamicProtection(item *store.Site) error {
+	if !dynamicpkg.IsValidJSProtectionMode(item.DynamicJSMode) {
+		return errInvalidSiteDynamicJSMode
+	}
+	if item.DynamicDecryptCacheTTL != nil && (*item.DynamicDecryptCacheTTL < 0 || *item.DynamicDecryptCacheTTL > dynamicpkg.MaxDecryptCacheTTLSeconds) {
+		return errInvalidSiteDynamicTTL
+	}
+	return nil
 }
 
 func validateSiteRuntimeTLSVersions(item *store.Site, body []byte) error {
@@ -320,6 +456,24 @@ func validateSiteNetwork(item *store.Site, body []byte) error {
 	return nil
 }
 
+func validateSiteClientIP(item *store.Site) error {
+	if item.XFFMode == "" {
+		item.XFFMode = store.XFFModeStrip
+	}
+	switch item.XFFMode {
+	case store.XFFModeStrip, store.XFFModeTrustOuter:
+	default:
+		return errInvalidSiteXFFMode
+	}
+	if !security.ValidateTrustedCIDR(item.TrustedCIDR) {
+		return errInvalidSiteTrustedCIDR
+	}
+	if !security.ValidateClientIPHeaderOrder(item.ClientIPHeaderOrder) {
+		return errInvalidSiteHeaderOrder
+	}
+	return nil
+}
+
 func normalizeSiteRuntimeTLSVersion(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -348,8 +502,12 @@ func clearInheritedProtectionOverrides(item *store.Site) {
 		item.RateLimitMax = 0
 		item.RateLimitAction = ""
 	}
+	// ChallengeAction / SiteCaptchaType 是独立三态指针，无父开关可循，
+	// 不需要从属清理：nil = 继承全局，非 nil = 站点覆盖。
 }
 
+// ValidateChallengeAction 校验质询动作白名单并归一化，
+// 与 shared.ValidateChallengeAction 保持同一动作集合与归一化口径。
 func validateSiteActions(item *store.Site, shouldValidate func(string) bool) error {
 	if shouldValidate("owasp_action") && item.OWASPAction != "" {
 		normalized, ok := shared.ValidateActionWithoutRedirectTarget(item.OWASPAction)
@@ -378,6 +536,29 @@ func validateSiteActions(item *store.Site, shouldValidate func(string) bool) err
 			return errInvalidSiteAction
 		}
 		item.AntiReplayAction = normalized
+	}
+	if shouldValidate("challenge_action") && item.ChallengeAction != nil {
+		if *item.ChallengeAction == "" {
+			// 显式传空串与 JSON null 等价：清除站点覆盖、回到继承全局。
+			item.ChallengeAction = nil
+		} else {
+			normalized, ok := shared.ValidateChallengeAction(*item.ChallengeAction)
+			if !ok {
+				return errInvalidSiteAction
+			}
+			item.ChallengeAction = &normalized
+		}
+	}
+	if shouldValidate("captcha_type") && item.SiteCaptchaType != nil {
+		if *item.SiteCaptchaType == "" {
+			item.SiteCaptchaType = nil
+		} else {
+			normalizedCaptcha, ok := shared.ValidateCaptchaType(*item.SiteCaptchaType)
+			if !ok {
+				return errInvalidSiteAction
+			}
+			item.SiteCaptchaType = &normalizedCaptcha
+		}
 	}
 	return nil
 }
@@ -419,14 +600,12 @@ func StartSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 在 reload（可能回显 item）之前脱敏，私钥绝不进入响应体。
+		redactUpstreamClientKey(site)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": site})
 			return
 		}
-
-		siteStatusMutex.Lock()
-		siteStatusMap[id] = "running"
-		siteStatusMutex.Unlock()
 
 		c.JSON(200, map[string]string{"status": "running", "message": "site started"})
 	}
@@ -450,14 +629,12 @@ func StopSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 在 reload（可能回显 item）之前脱敏，私钥绝不进入响应体。
+		redactUpstreamClientKey(site)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": site})
 			return
 		}
-
-		siteStatusMutex.Lock()
-		siteStatusMap[id] = "stopped"
-		siteStatusMutex.Unlock()
 
 		c.JSON(200, map[string]string{"status": "stopped", "message": "site stopped"})
 	}
@@ -476,16 +653,12 @@ func GetSiteStatus(repo *repository.SiteRepo) app.HandlerFunc {
 			return
 		}
 
-		siteStatusMutex.RLock()
-		status, exists := siteStatusMap[id]
-		siteStatusMutex.RUnlock()
-
-		if !exists {
-			if site.Enabled {
-				status = "running"
-			} else {
-				status = "stopped"
-			}
+		// 站点运行状态的唯一真相源是 site.Enabled：StartSite/StopSite 正是通过写该
+		// 字段实现的，UpdateSite 也能改它。此处不再维护额外的进程级状态缓存，
+		// 否则常规站点编辑改动 enabled 后状态接口会返回陈旧值。
+		status := "stopped"
+		if site.Enabled {
+			status = "running"
 		}
 
 		c.JSON(200, map[string]any{

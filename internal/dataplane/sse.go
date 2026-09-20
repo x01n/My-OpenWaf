@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -27,8 +28,10 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 		rdr = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, string(c.Method()), full, rdr)
+	upstreamCtx, cancelUpstream := context.WithCancel(ctx)
+	req, err := http.NewRequestWithContext(upstreamCtx, string(c.Method()), full, rdr)
 	if err != nil {
+		cancelUpstream()
 		return err
 	}
 
@@ -45,9 +48,10 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	})
 	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.PreserveOriginalHost, rt.Site.UpstreamHost, inboundProto(c, rt.Site.TLSEnabled))
 
-	hc := &http.Client{Transport: transport, Timeout: 0}
+	hc := proxy.SharedNoTimeoutClientForRoundTripper(transport)
 	resp, err := hc.Do(req)
 	if err != nil {
+		cancelUpstream()
 		return err
 	}
 	proxy.SetUpstreamHTTPProtocol(c, resp.Proto)
@@ -61,6 +65,9 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 			c.Response.Header.Add(k, v)
 		}
 	}
+	if len(resp.Trailer) > 0 {
+		proxy.AddResponseTrailerHeaders(c, resp.Trailer)
+	}
 	if resp.Header.Get("Server") == "" {
 		c.Response.Header.Del("Server")
 	}
@@ -69,20 +76,25 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	c.Response.Header.Set("Cache-Control", "no-cache")
 	c.Response.Header.Del("Connection")
 	c.Response.Header.Del("Content-Length")
+	c.Response.Header.SetContentLength(-1)
 	c.Response.ImmediateHeaderFlush = true
-	c.Response.SetBodyStream(&sseBodyStream{rc: resp.Body, resp: resp, hertzCtx: c}, -1)
+	stream := newSSEBodyStream(ctx, resp.Body, resp, c, cancelUpstream)
+	if proxy.StreamResponseViaHijack(ctx, c, stream, func() { _ = stream.cleanup() }) {
+		return nil
+	}
+	c.Response.SetBodyStream(stream, -1)
 
 	return nil
 }
 
 func inboundProto(c *app.RequestContext, tlsEnabled bool) string {
-	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
-		return strings.ToLower(v)
+	if hasInternalHTTP3Marker(c) {
+		return "h3"
 	}
 	if tlsEnabled {
 		return "https"
 	}
-	return "http"
+	return security.TrustedInboundForwardedProto(c)
 }
 
 func parseConnectionTokens(conn string) map[string]bool {
@@ -126,29 +138,112 @@ func (r *autoCloseReader) Close() error {
 }
 
 type sseBodyStream struct {
-	rc       io.ReadCloser
-	resp     *http.Response
-	hertzCtx *app.RequestContext
-	closed   bool
+	rc            io.ReadCloser
+	resp          *http.Response
+	hertzCtx      *app.RequestContext
+	cancel        context.CancelFunc
+	done          chan struct{}
+	mu            sync.Mutex
+	cond          *sync.Cond
+	activeReaders int
+	closing       bool
+	closed        bool
+	closeErr      error
+}
+
+func newSSEBodyStream(ctx context.Context, rc io.ReadCloser, resp *http.Response, hertzCtx *app.RequestContext, cancel context.CancelFunc) *sseBodyStream {
+	stream := &sseBodyStream{
+		rc:       rc,
+		resp:     resp,
+		hertzCtx: hertzCtx,
+		cancel:   cancel,
+		done:     make(chan struct{}),
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			stream.cleanup()
+		case <-stream.done:
+		}
+	}()
+	return stream
+}
+
+func (r *sseBodyStream) cleanup() error {
+	r.mu.Lock()
+	if r.closed {
+		err := r.closeErr
+		r.mu.Unlock()
+		return err
+	}
+	if r.closing {
+		r.initCondLocked()
+		for !r.closed {
+			r.cond.Wait()
+		}
+		err := r.closeErr
+		r.mu.Unlock()
+		return err
+	}
+	r.closing = true
+	close(r.done)
+	cancel := r.cancel
+	r.cancel = nil
+	r.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+
+	r.mu.Lock()
+	r.initCondLocked()
+	for r.activeReaders > 0 {
+		r.cond.Wait()
+	}
+	r.mu.Unlock()
+
+	copySSETrailers(r.hertzCtx, r.resp.Trailer)
+	closeErr := r.rc.Close()
+
+	r.mu.Lock()
+	r.closeErr = closeErr
+	r.closed = true
+	r.cond.Broadcast()
+	r.mu.Unlock()
+	return closeErr
 }
 
 func (r *sseBodyStream) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	if r.closing || r.closed {
+		r.mu.Unlock()
+		return 0, io.EOF
+	}
+	r.activeReaders++
+	r.mu.Unlock()
+
 	n, err := r.rc.Read(p)
-	if err != nil && !r.closed {
-		r.closed = true
-		_ = r.rc.Close()
-		copySSETrailers(r.hertzCtx, r.resp.Trailer)
+
+	r.mu.Lock()
+	r.activeReaders--
+	if r.activeReaders == 0 && r.cond != nil {
+		r.cond.Broadcast()
+	}
+	r.mu.Unlock()
+	if err != nil {
+		_ = r.cleanup()
 	}
 	return n, err
 }
 
 func (r *sseBodyStream) Close() error {
-	if r.closed {
-		return nil
+	return r.cleanup()
+}
+
+func (r *sseBodyStream) initCondLocked() {
+	if r.cond == nil {
+		r.cond = sync.NewCond(&r.mu)
 	}
-	r.closed = true
-	copySSETrailers(r.hertzCtx, r.resp.Trailer)
-	return r.rc.Close()
 }
 
 func copySSETrailers(c *app.RequestContext, trailers http.Header) {

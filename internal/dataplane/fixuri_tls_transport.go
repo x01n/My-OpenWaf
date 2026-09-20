@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cloudwego/gopkg/net/connstate"
 	"github.com/cloudwego/hertz/pkg/common/config"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/cloudwego/hertz/pkg/network"
@@ -132,6 +133,19 @@ func (t *fixURITLSTransport) serve() error {
 			}
 			if t.OnConnect != nil {
 				ctx = t.OnConnect(ctx, c)
+			}
+			if t.senseClientDisconnection {
+				var cancelCtx context.CancelFunc
+				ctx, cancelCtx = context.WithCancel(ctx)
+				defer cancelCtx()
+				stater, err := connstate.ListenConnState(conn,
+					connstate.WithOnRemoteClosed(connstate.OnRemoteClosed(cancelCtx)),
+				)
+				if err != nil {
+					hlog.SystemLogger().Errorf("ListenConnState failed: %v, connection close detection disabled", err)
+				} else {
+					defer stater.Close()
+				}
 			}
 			t.handler(ctx, c)
 		}(ctx, conn)

@@ -2,12 +2,18 @@ package dataplane
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"mime"
 	"net"
+	"net/http"
 	"net/url"
+	pathpkg "path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,6 +28,7 @@ import (
 	"My-OpenWaf/internal/core/adminweb"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/core/rules"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/proxy"
 	"My-OpenWaf/internal/security"
@@ -30,10 +37,14 @@ import (
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/upstream"
+	"My-OpenWaf/internal/visitorfusion"
 	"My-OpenWaf/internal/waf/bot"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/drop"
+	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
 	wafescalation "My-OpenWaf/internal/waf/escalation"
+	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/jsplugin"
 	"My-OpenWaf/internal/waf/owasp"
 	"My-OpenWaf/internal/waf/pages"
 )
@@ -51,14 +62,24 @@ type Options struct {
 	ShieldManager         *challenge.ShieldManager
 	ChainManager          *challenge.ChainChallengeManager
 	ACMEChallengeResponse func(token string) (string, bool)
-	RecordedResourceRepo  *repository.RecordedResourceRepo
+	// ResourceAggregator 将 AppRoute 命中在内存中按资源唯一键聚合后批量落库，
+	// 替代每命中一次 spawn goroutine + 同步 Upsert 的写放大。为 nil 时回退为不记录。
+	ResourceAggregator    *recordedResourceAggregator
 	Upstreams             *upstream.Pool
 	AccessLogSamplingRate uint32
+	// AccessControlRepo 用于访问控制网关的用户密码校验与 OAuth 提供方配置读取。
+	AccessControlRepo *repository.AccessControlRepo
+	// JWTSecret 用于解密 OAuth client_secret（与 Admin 层加密保持一致）。
+	JWTSecret []byte
 }
 
 const (
-	bindContextKey           = "dataplane_bind"
-	tlsFingerprintContextKey = "dataplane_tls_fingerprint"
+	bindContextKey                     = "dataplane_bind"
+	tlsFingerprintContextKey           = "dataplane_tls_fingerprint"
+	dataplaneAccessRecordedContextKey  = "dataplane_access_recorded"
+	dataplaneAccessSiteIDContextKey    = "dataplane_access_site_id"
+	dynamicProtectionKeyRequestBodyMax = 20 * 1024
+	dynamicProtectionKeyPath           = "/__owaf/dynamic/key"
 )
 
 type tlsFingerprintContextValueKey struct{}
@@ -91,6 +112,47 @@ func tlsFingerprintFromContext(ctx context.Context) (bot.TLSClientFingerprint, b
 	return fp, ok && fp.HasValue()
 }
 
+// challengeSubmission 是 JS 挑战页回传的表单内容。
+type challengeSubmission struct {
+	TS        string
+	Token     string
+	RequestID string
+	EnvFP     string
+	// Proof/Counter 为工作量证明：SHA-256(Token+Counter) 需满足前导零难度。
+	Proof   string
+	Counter string
+	// WASM 附带的环境评分及其签名。sig 用编译期盐计算，只能证明这些值未被
+	// WASM 之外的脚本改写，不能证明 WASM 本身未被替换，故仅作附加信号。
+	EnvScore   string
+	EnvMarkers string
+	PoWSig     string
+}
+
+func challengeSubmissionValues(body []byte, contentType string) (challengeSubmission, bool) {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.EqualFold(mediaType, "application/x-www-form-urlencoded") {
+		return challengeSubmission{}, false
+	}
+
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		return challengeSubmission{}, false
+	}
+
+	sub := challengeSubmission{
+		TS:         values.Get("__waf_challenge_ts"),
+		Token:      values.Get("__waf_challenge_token"),
+		RequestID:  values.Get("__waf_challenge_rid"),
+		EnvFP:      values.Get("__waf_env_fp"),
+		Proof:      values.Get("__waf_challenge_proof"),
+		Counter:    values.Get("__waf_challenge_counter"),
+		EnvScore:   values.Get("__waf_env_score"),
+		EnvMarkers: values.Get("__waf_env_markers"),
+		PoWSig:     values.Get("__waf_pow_sig"),
+	}
+	return sub, sub.TS != "" && sub.Token != "" && sub.RequestID != ""
+}
+
 func HandlerForBind(bind string, handler app.HandlerFunc) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		c.Set(bindContextKey, bind)
@@ -108,23 +170,74 @@ func listenerBind(c *app.RequestContext) string {
 }
 
 func scrubResponseHopByHopHeaders(c *app.RequestContext) {
-	for _, key := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
+	for _, key := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "TE", "Transfer-Encoding", "Upgrade"} {
 		c.Response.Header.Del(key)
 	}
 }
 
+// applyLuaResponse 应用 Lua 已通过运行时校验的响应控制字段。
+// 仅普通 Lua 终止拦截响应调用；挑战、重定向、丢弃和上游响应不允许被 Lua 改写。
+func applyLuaResponse(c *app.RequestContext, result action.Result, statusCode int) bool {
+	if c == nil || result.SetHeaders == nil && result.ResponseBody == nil {
+		return false
+	}
+	if result.SetHeaders != nil {
+		for key, value := range *result.SetHeaders {
+			c.Response.Header.Set(key, value)
+		}
+	}
+	if result.ResponseBody == nil {
+		return false
+	}
+	c.SetStatusCode(statusCode)
+	if len(c.Response.Header.ContentType()) == 0 {
+		c.Response.Header.SetContentType("text/plain; charset=utf-8")
+	}
+	c.SetBodyString(*result.ResponseBody)
+	return true
+}
+
 // Handler returns a Hertz middleware: maintenance → WAF → block fuse or reverse proxy.
 func Handler(opts Options) app.HandlerFunc {
+	if opts.Log == nil {
+		opts.Log = slog.Default()
+	}
 	var rr atomic.Uint32
 	secLog := opts.Log.With(slog.String("section", "security"))
 	accessLog := opts.Log
 	staticFS, _ := adminweb.ResolveFS("")
 
 	return func(ctx context.Context, c *app.RequestContext) {
+		ctx, closeNotifyCancel := bindStreamCloseNotifyContext(ctx, c)
+		requestID := fastRequestID()
+		c.Response.Header.Set("X-Request-ID", requestID)
+		c.Response.Header.Del("Server")
+		defer func() {
+			finalizeUnrecordedAccessLog(ctx, c, opts, requestID)
+			restoreOriginalRequestBodyStream(c)
+			if c.Response.GetHijackWriter() == nil && !c.Response.IsBodyStream() {
+				closeNotifyCancel()
+			}
+		}()
 		if fp, ok := tlsFingerprintFromContext(ctx); ok {
 			c.Set(tlsFingerprintContextKey, fp)
 		}
 		applyInternalHTTP3RequestMetadata(c)
+		if doneValue, ok := c.Get(InternalHTTP3CancelTokenHeader); ok {
+			if done, ok := doneValue.(<-chan struct{}); ok && done != nil {
+				parentCtx := ctx
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(parentCtx)
+				go func() {
+					select {
+					case <-done:
+						cancel()
+					case <-parentCtx.Done():
+						cancel()
+					}
+				}()
+			}
+		}
 		// WASM PoW assets must be checked before the generic static handler
 		// because serveOWAFStatic returns true (with 404) for unknown /__owaf/ paths.
 		if handleWASMAssets(c) {
@@ -137,6 +250,16 @@ func Handler(opts Options) app.HandlerFunc {
 
 		// Handle challenge verification endpoints
 		if handleChallengeVerify(c, opts) {
+			recordChallengeVerifyAccessLog(c, opts)
+			return
+		}
+
+		if handleDynamicProtectionKey(c, opts) {
+			return
+		}
+
+		// 站点访问控制端点（登录/验证/OAuth/注销），须在静态处理器之前拦截。
+		if handleAccessControlEndpoints(ctx, c, opts) {
 			return
 		}
 
@@ -144,21 +267,25 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
-		reqID := fastRequestID()
-		c.Response.Header.Set("X-Request-ID", reqID)
-		c.Response.Header.Del("Server")
+		reqID := requestID
 		if opts.Metrics != nil {
 			opts.Metrics.RecordRequest()
 		}
 
-		sn := opts.Holder.Load()
+		var sn *snapshot.Snapshot
+		if opts.Holder != nil {
+			sn = opts.Holder.Load()
+		}
 		if sn == nil {
-			c.String(503, "configuration snapshot not loaded")
+			c.String(http.StatusServiceUnavailable, "configuration snapshot not loaded")
+			recordEarlyAccessLog(c, opts, requestID, http.StatusServiceUnavailable, "configuration_error")
 			return
 		}
 
 		if maxH := sn.HTTP2Config.MaxHeaderFields; maxH > 0 && c.Request.Header.Len() > maxH {
-			c.String(431, "too many request header fields")
+			// 头字段超限仍要留下协议层审计行；早期身份解析只用于日志归属，不能驱动 WAF。
+			pages.WriteErrorPage(ctx, c, http.StatusRequestHeaderFieldsTooLarge, nil)
+			recordEarlyAccessLog(c, opts, requestID, http.StatusRequestHeaderFieldsTooLarge, "protocol_error")
 			return
 		}
 
@@ -168,6 +295,13 @@ func Handler(opts Options) app.HandlerFunc {
 			bind = opts.Bind
 		}
 		rt, ok := sn.MatchSite(bind, host)
+		if ok && sn.ResponseCompressionMinBytes > 0 {
+			rt.ResponseCompressionConfigured = true
+			rt.ResponseCompressionEnabled = sn.ResponseCompressionEnabled
+			rt.ResponseCompressionGzipEnabled = sn.ResponseCompressionGzipEnabled
+			rt.ResponseCompressionMinBytes = sn.ResponseCompressionMinBytes
+			rt.BrotliEnabled = sn.BrotliEnabled
+		}
 		if !ok {
 			if shouldLogNoSiteMatchConsole() {
 				opts.Log.Warn("no site match",
@@ -176,11 +310,18 @@ func Handler(opts Options) app.HandlerFunc {
 					slog.Int("sites", len(sn.Sites)),
 				)
 			}
+			// 无站点匹配仍要留下路由层审计行；SiteID 保持为 0，避免伪造站点归属。
 			pages.WriteWelcomePage(ctx, c)
+			recordEarlyAccessLog(c, opts, requestID, http.StatusOK, "routing_error")
+			return
+		}
+		if opts.Engine == nil {
+			c.String(http.StatusServiceUnavailable, "waf engine unavailable")
+			recordEarlyAccessLog(c, opts, requestID, http.StatusServiceUnavailable, "configuration_error")
 			return
 		}
 
-		clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR)
+		clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
 		cipStr := clientIPStr(clientIP)
 		if clientIP != nil && opts.Metrics != nil {
 			opts.Metrics.RecordClientIP(cipStr)
@@ -206,139 +347,72 @@ func Handler(opts Options) app.HandlerFunc {
 
 		method := string(c.Method())
 		ua := string(c.UserAgent())
+		challengeIdentityUA := ua
+		challengeIdentityCookie := string(c.GetHeader("Cookie"))
 		pathCached := string(c.Path())
 		errorRateLimitKey := rateLimitKey(clientIP, host)
 
 		if rt.Site.TLSEnabled && opts.Writer != nil {
-			if fp, ok := tlsFingerprintFromRequestContext(c); ok && fp.SNI != "" && fp.SNI != host {
-				recordSecurityEvent(c, opts, store.SecurityEvent{
-					SiteID:    rt.Site.ID,
-					RequestID: reqID,
-					ClientIP:  cipStr,
-					Host:      host,
-					Path:      string(c.Path()),
-					Method:    method,
-					UserAgent: ua,
-					RuleIDStr: "tls:unknown_sni",
-					Phase:     "tls",
-					Action:    "observe",
-					Category:  "tls_sni",
-					MatchDesc: "tls_sni=" + fp.SNI + " host=" + host,
-				})
-			}
-		}
-
-		if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil {
-			decision := ipRep.Check(clientIP)
-			if decision.Matched && !decision.Allowed {
-				if opts.Metrics != nil {
-					opts.Metrics.RecordWAFBlock()
-					opts.Metrics.RecordAttackIP(cipStr)
-				}
-
-				// Determine action: "block" → TCP RST (drop), default → HTTP 403 (intercept)
-				ipAction := decision.Action
-				if ipAction == "" {
-					ipAction = "intercept"
-				}
-				useDropAction := ipAction == "block" && dropEnabled(opts.Engine)
-
-				var actType action.Type
-				var actStr string
-				if useDropAction {
-					actType = action.Drop
-					actStr = "drop"
-				} else {
-					actType = action.Intercept
-					actStr = "intercept"
-				}
-
-				blockAction := action.Result{
-					Type:      actType,
-					Phase:     "ip_reputation",
-					RuleIDStr: "ip:" + decision.Category,
-					MatchDesc: decision.Reason,
-					Matched:   true,
-					Category:  decision.Category,
-				}
-				if opts.Writer != nil {
+			if fp, ok := tlsFingerprintFromRequestContext(c); ok {
+				normalizedSNI := snapshot.NormalizeMatchHost(fp.SNI)
+				normalizedHost := snapshot.NormalizeMatchHost(host)
+				if normalizedSNI != "" && normalizedSNI != normalizedHost {
 					recordSecurityEvent(c, opts, store.SecurityEvent{
 						SiteID:    rt.Site.ID,
 						RequestID: reqID,
 						ClientIP:  cipStr,
 						Host:      host,
-						Path:      pathCached,
+						Path:      string(c.Path()),
 						Method:    method,
 						UserAgent: ua,
-						RuleIDStr: blockAction.RuleIDStr,
-						Phase:     blockAction.Phase,
-						Action:    actStr,
-						Category:  blockAction.Category,
-						MatchDesc: blockAction.MatchDesc,
-						StatusCode: func() int {
-							if useDropAction {
-								return 0
-							}
-							return 403
-						}(),
+						RuleIDStr: "tls:unknown_sni",
+						Phase:     "tls",
+						Action:    "observe",
+						Category:  "tls_sni",
+						MatchDesc: "tls_sni=" + fp.SNI + " host=" + host,
 					})
 				}
-
-				if useDropAction {
-					// TCP RST — close connection immediately, no HTTP response
-					logAccess(accessLog, reqID, method, pathCached, host, 0, "drop")
-					recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, Method: method, UserAgent: ua, StatusCode: 0, WAFAction: "drop", CacheState: "bypass"})
-					recordDropEvent(opts, rt.Site.ID, clientIP, drop.DropReason{
-						Source:    "ip_reputation",
-						RuleID:    blockAction.RuleIDStr,
-						Detail:    blockAction.MatchDesc,
-						Host:      host,
-						Path:      pathCached,
-						Timestamp: time.Now(),
-					})
-					dropExec := opts.Engine.DropExecutor()
-					if dropExec != nil && dropExec.Enabled() {
-						dropExec.Execute(c.GetConn(), drop.DropReason{
-							Source:    "ip_reputation",
-							RuleID:    blockAction.RuleIDStr,
-							Detail:    blockAction.MatchDesc,
-							ClientIP:  cipStr,
-							Host:      host,
-							Path:      pathCached,
-							Timestamp: time.Now(),
-						})
-					} else if conn := c.GetConn(); conn != nil {
-						conn.Close()
-					}
-				} else {
-					// HTTP 403 — return block page
-					pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
-					logAccess(accessLog, reqID, method, pathCached, host, 403, "intercept")
-					recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
-				}
-				return
 			}
 		}
 
+		// 站点白名单需要在挑战失败计数前确定；实际名单决策由引擎 IP 声誉阶段统一执行。
+		siteIPWhitelisted := siteIPWhitelistContains(rt.SiteIPWhitelist, clientIP)
+		body, _, _ := requestBodySampleBeforePipeline(c)
+		challengePassed := false
 		if method == "POST" {
-			challengeTS := string(c.FormValue("__waf_challenge_ts"))
-			challengeToken := string(c.FormValue("__waf_challenge_token"))
-			challengeRID := string(c.FormValue("__waf_challenge_rid"))
-			if challengeTS != "" && challengeToken != "" && challengeRID != "" {
-				if challenge.VerifyChallengeToken(challengeRID, challengeTS, challengeToken, 5*time.Minute) {
-					cookie := challenge.BuildChallengePassCookieWithClaims(challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: ua, SiteID: rt.Site.ID, Bind: bind}, rt.Site.TLSEnabled, time.Now(), challengePassTTL(sn.Protection))
-					c.Response.Header.Set("Set-Cookie", cookie)
-					referer := string(c.GetHeader("Referer"))
-					if referer == "" {
-						referer = "/"
+			sub, ok := challengeSubmissionValues(body, string(c.Request.Header.ContentType()))
+			// token 必须由同一客户端（IP/UA/Host/站点）换取，且只能兑换一次。
+			challengePassed = ok &&
+				challenge.VerifyChallengeTokenWithClaims(sub.RequestID, sub.TS, sub.Token,
+					challenge.ChallengeTokenClaims{ClientIP: cipStr, UserAgent: challengeIdentityUA, Host: host, SiteID: rt.Site.ID},
+					5*time.Minute)
+			// 工作量证明：以 token 为 nonce 重算 SHA-256(token+counter)，
+			// 确保客户端确实付出了算力，且该工作量无法跨挑战复用。
+			if challengePassed && !challenge.VerifyChallengeProof(sub.Token, sub.Counter, sub.Proof) {
+				challengePassed = false
+			}
+			// WASM 环境评分：签名有效时才采信，且仅在命中确定性自动化硬信号
+			// （score>=100）时否决，与下方明文指纹检查保持同一判定口径。
+			// 客户端 WASM 输出、score、markers 和编译期盐均不是授权根。
+			// 环境检查只接受带服务端挑战上下文 AAD 的 WASM v1 密文。
+			if challengePassed && sn.Protection.ShieldEnableEnvCheck {
+				key := challenge.EnvSessionKeyFromChallengeToken(sub.Token)
+				aad := challenge.EnvFingerprintAAD("challenge", sub.RequestID, challenge.ChallengeSessionBinding{
+					SiteID: rt.Site.ID,
+					Host:   host,
+				})
+				if !challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprintWithAAD(sub.EnvFP, key, aad)).Pass {
+					challengePassed = false
+				}
+			}
+			// 失败计入 IP 信誉，限制无限重试。
+			// 仅统计「确实是挑战提交格式（ok）但未通过」的请求：普通业务 POST 的
+			// ok 为 false，不能算作挑战失败，否则正常流量会被误封。
+			if ok && !challengePassed && !siteIPWhitelisted {
+				if ipRep := opts.Engine.IPReputation(); ipRep != nil && clientIP != nil {
+					if ipRep.RecordViolation(clientIP) && opts.Metrics != nil {
+						opts.Metrics.RecordWAFBlock()
 					}
-					c.Redirect(302, []byte(referer))
-					accessLog.Info("challenge_passed",
-						slog.String("request_id", reqID),
-						slog.String("client_ip", cipStr),
-					)
-					recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, Method: method, UserAgent: ua, StatusCode: 302, WAFAction: "challenge_passed", CacheState: "bypass", Upstream: referer})
-					return
 				}
 			}
 		}
@@ -348,208 +422,271 @@ func Handler(opts Options) app.HandlerFunc {
 			path = string(rawPath)
 		}
 		rawQ := string(c.URI().QueryString())
-
-		// ── Anti-replay nonce check (per-site, before pipeline) ──────
-		if rt.AntiReplayEnabled {
-			lp := strings.ToLower(path)
-			skipNonce := strings.HasPrefix(lp, "/__owaf/") || isStaticAsset(lp)
-			if !skipNonce {
-				if ar := opts.Engine.AntiReplay(); ar != nil {
-					nonceCookie := string(c.Cookie(challenge.NonceKey))
-					if nonceCookie == "" {
-						// First visit — issue nonce cookie and let through.
-						newNonce := ar.GenerateNonce(cipStr)
-						setNonceCookie(c, newNonce, rt.Site.TLSEnabled)
-					} else {
-						ttl := time.Duration(0)
-						if rt.Site.AntiReplayTTL > 0 {
-							ttl = time.Duration(rt.Site.AntiReplayTTL) * time.Second
-						}
-						valid, isReplay, newNonce := ar.ValidateAndRotate(nonceCookie, cipStr, ttl)
-						switch {
-						case valid:
-							// Good nonce — rotate cookie.
-							setNonceCookie(c, newNonce, rt.Site.TLSEnabled)
-						case isReplay:
-							// Replay attack — intercept immediately.
-							blockAction := action.Result{
-								Type:      action.Intercept,
-								Phase:     "anti_replay",
-								RuleIDStr: "antireplay:nonce_reuse",
-								MatchDesc: "replayed nonce detected",
-								Matched:   true,
-								Category:  "replay",
-							}
-							if opts.Metrics != nil {
-								opts.Metrics.RecordWAFBlock()
-							}
-							if opts.Writer != nil {
-								recordSecurityEvent(c, opts, store.SecurityEvent{
-									SiteID:     rt.Site.ID,
-									RequestID:  reqID,
-									ClientIP:   cipStr,
-									Host:       host,
-									Path:       path,
-									Method:     method,
-									UserAgent:  ua,
-									RuleIDStr:  blockAction.RuleIDStr,
-									Phase:      blockAction.Phase,
-									Action:     "intercept",
-									Category:   blockAction.Category,
-									MatchDesc:  blockAction.MatchDesc,
-									StatusCode: 403,
-								})
-							}
-							pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
-							logAccess(accessLog, reqID, method, path, host, 403, "intercept")
-							recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
-							return
-						default:
-							// Expired or invalid nonce — trigger configured action (default: challenge).
-							antiReplayAct := normalizeAntiReplayAction(rt.AntiReplayAction)
-							challengeResult := action.Result{
-								Type:      action.Type(antiReplayAct),
-								Phase:     "anti_replay",
-								RuleIDStr: "antireplay:invalid_nonce",
-								MatchDesc: "expired or invalid nonce",
-								Matched:   true,
-								Category:  "replay",
-							}
-							if opts.Metrics != nil {
-								opts.Metrics.RecordWAFBlock()
-							}
-							if opts.Writer != nil {
-								recordSecurityEvent(c, opts, store.SecurityEvent{
-									SiteID:     rt.Site.ID,
-									RequestID:  reqID,
-									ClientIP:   cipStr,
-									Host:       host,
-									Path:       path,
-									Method:     method,
-									UserAgent:  ua,
-									RuleIDStr:  challengeResult.RuleIDStr,
-									Phase:      challengeResult.Phase,
-									Action:     antiReplayAct,
-									Category:   challengeResult.Category,
-									MatchDesc:  challengeResult.MatchDesc,
-									StatusCode: 403,
-								})
-							}
-							writeAntiReplayActionResponse(c, opts, sn, &rt, reqID, antiReplayAct, challengeResult, 403)
-							logAccess(accessLog, reqID, method, path, host, accessStatusCode(c, antiReplayAct), antiReplayAct)
-							recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: accessStatusCode(c, antiReplayAct), WAFAction: antiReplayAct, CacheState: "bypass"})
-							return
-						}
-					}
-				}
+		effectiveProtection := &sn.Protection
+		if rt.EffectiveProtection != nil {
+			effectiveProtection = rt.EffectiveProtection
+		}
+		skipPathByPhase := effectiveProtection.GetSkipPathByPhase()
+		originalAntiReplaySkipped := owasp.MatchPathList(
+			path,
+			skipPathByPhase["anti_replay"],
+		) || antiReplayCookieSkipPath(path)
+		var antiReplayConsumedNonce string
+		if rt.AntiReplayEnabled && !originalAntiReplaySkipped {
+			handled, consumedNonce := handleAntiReplayCookie(
+				c,
+				opts,
+				sn,
+				&rt,
+				reqID,
+				cipStr,
+				host,
+				path,
+				method,
+				ua,
+				rawQ,
+				accessLog,
+			)
+			if handled {
+				return
 			}
+			antiReplayConsumedNonce = consumedNonce
 		}
 
-		lowerPath := strings.ToLower(path)
-		if strings.Contains(lowerPath, "/translation-table") && (strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+") || strings.Contains(lowerPath, "%2bcscot%2b") || strings.Contains(lowerPath, "%2bcscoe%2b")) {
-			blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:path:015", MatchDesc: "Cisco translation-table path traversal pattern", Matched: true, Category: string(owasp.CatPathTrav)}
-			pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
-			logAccess(accessLog, reqID, method, path, host, 403, "intercept")
-			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
+		if enforceAccessControl(c, &rt, host, path) {
+			statusCode := c.Response.StatusCode()
+			wafAction := "intercept"
+			if statusCode == 302 {
+				wafAction = "redirect"
+			}
+			logAccess(accessLog, reqID, method, path, host, statusCode, wafAction)
+			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: "bypass"})
 			return
+		}
+		if sn.Protection.BasicAuthEnabled && sn.Protection.BasicAuthUsername != "" {
+			if !validateBasicAuth(string(c.Request.Header.Peek("Authorization")), sn.Protection.BasicAuthUsername, sn.Protection.BasicAuthPassword) {
+				c.Response.Header.Set("WWW-Authenticate", `Basic realm="WAF Protected"`)
+				c.String(401, "Unauthorized")
+				logAccess(accessLog, reqID, method, pathCached, host, 401, "basic_auth")
+				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 401, WAFAction: "basic_auth", CacheState: "bypass"})
+				return
+			}
 		}
 
 		contentType := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
-		if strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") && contentType == "" {
-			body := c.Request.Body()
-			if len(body) == 0 {
-				body = c.Request.BodyBytes()
-			}
-			if len(body) > 0 {
-				rawBody := strings.TrimSpace(string(body))
-				if len(rawBody) > 48*1024 {
-					rawBody = rawBody[:48*1024]
-				}
-				normalized := owasp.NormalizeForDebug(rawBody)
-				if owasp.IsOpaqueEncodedAttackBodyForDebug(rawBody, normalized, map[string]string{"Host": host}, 3) {
-					blockAction := action.Result{Type: action.Intercept, Phase: "owasp_default", RuleIDStr: "owasp:proto:010", MatchDesc: "opaque encoded body without content-type", Matched: true, Category: string(owasp.CatProtoViol)}
-					pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
-					logAccess(accessLog, reqID, method, path, host, 403, "intercept")
-					recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
-					return
-				}
+		if !owasp.MatchPathList(path, skipPathByPhase["owasp_default"]) {
+			if blockAction, blocked := matchInlineOWASPGuards(path, body, contentType, host); blocked {
+				pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+				logAccess(accessLog, reqID, method, path, host, 403, "intercept")
+				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 403, WAFAction: "intercept", CacheState: "bypass"})
+				return
 			}
 		}
 
 		reqCtx := pipeline.AcquireCtx()
+		reqCtx.Context = ctx
 		reqCtx.RequestID = reqID
 		reqCtx.Bind = bind
 		reqCtx.ClientIP = clientIP
 		reqCtx.Method = method
 		reqCtx.Path = path
+		reqCtx.OriginalPath = path
 		reqCtx.RawQuery = rawQ
+		rules.PopulateLuaQueryParams(reqCtx)
 		reqCtx.Host = host
 		reqCtx.UserAgent = ua
+		reqCtx.ChallengeIdentityCaptured = true
+		reqCtx.ChallengeIdentityUserAgent = challengeIdentityUA
+		reqCtx.ChallengeIdentityCookie = challengeIdentityCookie
 		reqCtx.SiteID = rt.Site.ID
+
+		// 请求走私协议违规审计：五类走私头在 hertz 协议解析层已被拒绝，
+		// 此处把可观察到的字节层旁路信号与解析层残留形态转成审计/指标，
+		// 不改变现有协议层拒绝行为，只做兜底审计与告警。
+		if opts.Writer != nil {
+			requestSmugglingSniff(c, opts, rt.Site.ID, reqID, host, cipStr)
+		}
+		reqCtx.AntiReplayTTL = rt.Site.AntiReplayTTL
 		tlsFingerprint, ok := tlsFingerprintFromRequestContext(c)
 		if !ok {
 			tlsFingerprint, _ = tlsFingerprintFromContext(ctx)
 		}
 		reqCtx.TLS = tlsFingerprint
-		c.Request.Header.VisitAll(func(k, v []byte) {
-			key := string(k)
-			value := string(v)
-			reqCtx.Headers[key] = value
-			if lower := strings.ToLower(key); lower != key {
-				reqCtx.Headers[lower] = value
-			}
-			reqCtx.HeaderKeys = append(reqCtx.HeaderKeys, key)
-		})
+		populateRequestCtxHeaders(reqCtx, c)
 
 		const maxWAFBody = 48 * 1024
-		if body := c.Request.Body(); len(body) > 0 {
+		reqCtx.ContentType = string(c.Request.Header.ContentType())
+		if len(body) > 0 {
 			if len(body) > maxWAFBody {
 				reqCtx.Body = body[:maxWAFBody]
 			} else {
 				reqCtx.Body = body
 			}
-			reqCtx.ContentType = string(c.Request.Header.ContentType())
 		}
 
 		defer pipeline.ReleaseCtx(reqCtx)
 
+		var jsExecutor jsplugin.Executor
+		if current := opts.Engine.JSPlugins(); current != nil {
+			jsExecutor = current
+		}
+		initialMethod, initialPath, initialRawQuery := method, path, rawQ
+		initialContentType := string(c.Request.Header.ContentType())
+		jsState, failedJSScript, jsErr := executeJSRequestStage(ctx, c, reqCtx, sn.JSPlugins, jsExecutor)
+		jsRequestMutated := jsState.bodySet || jsState.method != initialMethod ||
+			jsState.path != initialPath || jsState.rawQuery != initialRawQuery ||
+			jsState.contentType != initialContentType
+		method = jsState.method
+		path = jsState.path
+		pathCached = path
+		rawQ = jsState.rawQuery
+		if jsState.bodySet {
+			body = []byte(jsState.body)
+		}
+		ua = jsState.userAgent
+		contentType = jsState.contentType
+		if jsErr != nil {
+			scriptName := ""
+			if failedJSScript != nil {
+				scriptName = failedJSScript.Name()
+			}
+			opts.Log.Error("JavaScript request plugin failed closed",
+				slog.String("request_id", reqID),
+				slog.Uint64("site_id", uint64(rt.Site.ID)),
+				slog.String("script", scriptName),
+				slog.Any("err", jsErr),
+			)
+			pages.WriteErrorPage(ctx, c, http.StatusServiceUnavailable, siteErrorPage(&rt, http.StatusServiceUnavailable))
+			if opts.Metrics != nil {
+				opts.Metrics.RecordStatus(http.StatusServiceUnavailable)
+			}
+			logAccess(accessLog, reqID, method, path, host, http.StatusServiceUnavailable, "js_plugin_fail_closed")
+			recordAccessLog(c, opts, accessLogInfo{
+				SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host,
+				Path: path, QueryString: rawQ, Method: method, UserAgent: ua,
+				StatusCode: http.StatusServiceUnavailable, WAFAction: "js_plugin_fail_closed", CacheState: "bypass",
+				HeaderOrder: reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }), TLSFingerprint: reqCtx.TLS,
+			})
+			return
+		}
+
+		// Request-stage JavaScript may move a request into a different access-gated path.
+		// Re-check the final path before entering the WAF pipeline; the earlier check is
+		// retained to prevent protected original paths from reaching the script stage.
+		// Internal OWAF endpoints are dispatched only for the original request;
+		// a script-created internal path must never be proxied to an upstream.
+		if isScriptCreatedOWAFPath(path) {
+			c.SetStatusCode(http.StatusNotFound)
+			c.SetBodyString("not found")
+			c.Abort()
+			logAccess(accessLog, reqID, method, path, host, http.StatusNotFound, "intercept")
+			recordAccessLog(c, opts, accessLogInfo{
+				SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host,
+				Path: path, QueryString: rawQ, Method: method, UserAgent: ua,
+				StatusCode: http.StatusNotFound, WAFAction: "intercept", CacheState: "bypass",
+				HeaderOrder:    reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }),
+				TLSFingerprint: reqCtx.TLS,
+			})
+			return
+		}
+		finalAntiReplaySkipped := owasp.MatchPathList(
+			path,
+			skipPathByPhase["anti_replay"],
+		) || antiReplayCookieSkipPath(path)
+		if rt.AntiReplayEnabled && originalAntiReplaySkipped && !finalAntiReplaySkipped {
+			handled, consumedNonce := handleAntiReplayCookie(
+				c,
+				opts,
+				sn,
+				&rt,
+				reqID,
+				cipStr,
+				host,
+				path,
+				method,
+				ua,
+				rawQ,
+				accessLog,
+			)
+			if handled {
+				return
+			}
+			antiReplayConsumedNonce = consumedNonce
+		}
+		reqCtx.AntiReplayConsumedNonce = antiReplayConsumedNonce
+
+		if enforceAccessControl(c, &rt, host, path) {
+			statusCode := c.Response.StatusCode()
+			wafAction := "intercept"
+			if statusCode == http.StatusFound {
+				wafAction = "redirect"
+			}
+			logAccess(accessLog, reqID, method, path, host, statusCode, wafAction)
+			recordAccessLog(c, opts, accessLogInfo{
+				SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host,
+				Path: path, QueryString: rawQ, Method: method, UserAgent: ua,
+				StatusCode: statusCode, WAFAction: wafAction, CacheState: "bypass",
+				HeaderOrder:    reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }),
+				TLSFingerprint: reqCtx.TLS,
+			})
+			return
+		}
+
+		skipInlineOWASP := owasp.MatchPathList(reqCtx.OriginalPath, skipPathByPhase["owasp_default"]) &&
+			owasp.MatchPathList(path, skipPathByPhase["owasp_default"])
+		if jsRequestMutated && !skipInlineOWASP {
+			if blockAction, blocked := matchInlineOWASPGuards(path, body, contentType, host); blocked {
+				pages.WriteBlockResponse(c, reqID, &rt, sn, blockAction)
+				logAccess(accessLog, reqID, method, path, host, http.StatusForbidden, "intercept")
+				recordAccessLog(c, opts, accessLogInfo{
+					SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host,
+					Path: path, QueryString: rawQ, Method: method, UserAgent: ua,
+					StatusCode: http.StatusForbidden, WAFAction: "intercept", CacheState: "bypass",
+					HeaderOrder:    reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }),
+					TLSFingerprint: reqCtx.TLS,
+				})
+				return
+			}
+		}
+
 		var result engine.ProcessResult
 		if shouldApplyErrorRateLimit(opts.Engine, sn.Protection, errorRateLimitKey) {
-			result = engine.ProcessResult{Site: &rt, Action: errorRateLimitAction(sn.Protection.ErrorRateLimitAction)}
+			errorRateLimitResult := errorRateLimitAction(sn.Protection.ErrorRateLimitAction)
+			result = engine.ProcessResult{Site: &rt, Action: errorRateLimitResult}
+			if errorRateLimitResult.Type == action.Observe {
+				result.Action = action.Pass()
+				result.ObserveHits = []action.Result{errorRateLimitResult}
+			}
 		} else {
-			result = opts.Engine.Process(reqCtx)
+			result = opts.Engine.ProcessResolved(sn, &rt, reqCtx)
 		}
 
 		// Bot score logging via buffered writer.
 		if reqCtx.BotScoreResult != nil && opts.Writer != nil {
 			bsi := reqCtx.BotScoreResult
-			if bsi.Details != "" {
-				var details map[string]any
-				if err := json.Unmarshal([]byte(bsi.Details), &details); err == nil {
-					changed := false
-					if reqCtx.TLS.TLSVersion != "" {
-						if _, ok := details["tls_version"]; !ok {
-							details["tls_version"] = reqCtx.TLS.TLSVersion
-							changed = true
-						}
+			if bsi.Details != nil {
+				if reqCtx.TLS.TLSVersion != "" {
+					if _, ok := bsi.Details["tls_version"]; !ok {
+						bsi.Details["tls_version"] = reqCtx.TLS.TLSVersion
 					}
-					if reqCtx.TLS.SNI != "" {
-						if _, ok := details["tls_sni"]; !ok {
-							details["tls_sni"] = reqCtx.TLS.SNI
-							changed = true
-						}
+				}
+				if reqCtx.TLS.SNI != "" {
+					if _, ok := bsi.Details["tls_sni"]; !ok {
+						bsi.Details["tls_sni"] = reqCtx.TLS.SNI
 					}
-					if len(reqCtx.TLS.ALPN) > 0 {
-						if _, ok := details["tls_alpn"]; !ok {
-							details["tls_alpn"] = strings.Join(reqCtx.TLS.ALPN, ",")
-							changed = true
-						}
+				}
+				if len(reqCtx.TLS.ALPN) > 0 {
+					if _, ok := bsi.Details["tls_alpn"]; !ok {
+						bsi.Details["tls_alpn"] = reqCtx.DerivedALPN(func() string {
+							return strings.Join(reqCtx.TLS.ALPN, ",")
+						})
 					}
-					if changed {
-						if encoded, err := json.Marshal(details); err == nil {
-							bsi.Details = string(encoded)
-						}
-					}
+				}
+			}
+			var detailStr string
+			if len(bsi.Details) > 0 {
+				if encoded, err := json.Marshal(bsi.Details); err == nil {
+					detailStr = string(encoded)
 				}
 			}
 			opts.Writer.RecordBotScore(store.BotScoreLog{
@@ -563,8 +700,8 @@ func Handler(opts Options) app.HandlerFunc {
 				TLSJA4:           reqCtx.TLS.JA4,
 				TLSVersion:       reqCtx.TLS.TLSVersion,
 				TLSSNI:           reqCtx.TLS.SNI,
-				TLSALPN:          strings.Join(reqCtx.TLS.ALPN, ","),
-				HeaderOrder:      strings.Join(reqCtx.HeaderKeys, ","),
+				TLSALPN:          reqCtx.DerivedALPN(func() string { return strings.Join(reqCtx.TLS.ALPN, ",") }),
+				HeaderOrder:      reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }),
 				TotalScore:       bsi.TotalScore,
 				GeoIPScore:       bsi.GeoIPScore,
 				FingerprintScore: bsi.FingerprintScore,
@@ -572,7 +709,7 @@ func Handler(opts Options) app.HandlerFunc {
 				IPRepScore:       bsi.IPRepScore,
 				IsHighRisk:       bsi.IsHighRisk,
 				Action:           bsi.Action,
-				Details:          bsi.Details,
+				Details:          detailStr,
 			})
 		}
 
@@ -623,16 +760,18 @@ func Handler(opts Options) app.HandlerFunc {
 			)
 			pages.WriteMaintenanceResponse(c, reqID, result.Site, sn)
 			logAccess(accessLog, reqID, method, path, host, accessStatusCode(c, "maintenance"), "maintenance")
-			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: accessStatusCode(c, "maintenance"), WAFAction: "maintenance", CacheState: "bypass"})
+			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: accessStatusCode(c, "maintenance"), WAFAction: "maintenance", CacheState: "bypass", HeaderOrder: reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }), TLSFingerprint: reqCtx.TLS})
 			return
 		}
 
 		if result.Action.IsTerminal() {
+			if challengePassed && result.Action.IsChallenge() {
+				result.Action = action.Pass()
+			}
 			// Challenge cookie bypass: if action is a challenge type but client has a
 			// valid signed pass cookie, downgrade to pass and skip the challenge.
 			if result.Action.IsChallenge() {
-				cookieHeader := string(c.GetHeader("Cookie"))
-				if cookieHeader != "" && challenge.VerifyChallengePassCookieWithClaims(cookieHeader, challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: ua, SiteID: rt.Site.ID, Bind: bind}, time.Now()) {
+				if challengeIdentityCookie != "" && challenge.VerifyChallengePassCookieWithClaims(challengeIdentityCookie, challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: challengeIdentityUA, SiteID: rt.Site.ID, Bind: bind}, time.Now()) {
 					result.Action = action.Pass()
 				}
 			}
@@ -643,6 +782,11 @@ func Handler(opts Options) app.HandlerFunc {
 
 			actType := action.Normalize(result.Action.Type)
 			actStr := string(actType)
+			if result.Action.IsDrop() && !dropEnabled(opts.Engine) {
+				result.Action.Type = action.Intercept
+				actType = action.Intercept
+				actStr = string(actType)
+			}
 			if secLog.Enabled(ctx, slog.LevelDebug) {
 				secLog.Debug("terminal WAF action selected",
 					slog.String("request_id", reqID),
@@ -653,7 +797,6 @@ func Handler(opts Options) app.HandlerFunc {
 				)
 			}
 
-			// ── Escalation: record hit and potentially upgrade action ──
 			if em := opts.Engine.Escalation(); em != nil && clientIP != nil {
 				em.RecordHit(cipStr, rt.Site.ID, nil)
 				if upgraded := em.Evaluate(cipStr, rt.Site.ID, nil); upgraded != "" {
@@ -665,6 +808,12 @@ func Handler(opts Options) app.HandlerFunc {
 							result.Action.Type = action.Intercept
 						case "challenge":
 							result.Action.Type = action.Challenge
+						case "captcha_challenge":
+							result.Action.Type = action.CaptchaChallenge
+						case "shield_challenge":
+							result.Action.Type = action.ShieldChallenge
+						case "chain_challenge":
+							result.Action.Type = action.ChainChallenge
 						}
 						actType = action.Normalize(result.Action.Type)
 						actStr = string(actType)
@@ -713,7 +862,7 @@ func Handler(opts Options) app.HandlerFunc {
 					})
 				}
 				logAccess(accessLog, reqID, method, pathCached, host, 0, "drop")
-				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 0, WAFAction: "drop", CacheState: "bypass"})
+				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 0, WAFAction: "drop", CacheState: "bypass", HeaderOrder: reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }), TLSFingerprint: reqCtx.TLS})
 				recordDropEvent(opts, rt.Site.ID, clientIP, drop.DropReason{
 					Source:    result.Action.Phase,
 					RuleID:    result.Action.RuleIDStr,
@@ -771,22 +920,47 @@ func Handler(opts Options) app.HandlerFunc {
 					})
 				}
 				// Route to appropriate challenge handler
-				switch {
-				case result.Action.IsCaptchaChallenge() && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil:
-					captchaType := challenge.CaptchaType(sn.Protection.CaptchaType)
-					challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, statusCode)
-				case result.Action.IsShieldChallenge() && sn.Protection.ShieldEnabled && opts.ShieldManager != nil:
-					origURL := string(c.Request.URI().RequestURI())
-					proto := inboundProto(c, rt.Site.TLSEnabled)
-					opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, proto, statusCode)
-				case result.Action.IsChainChallenge() && sn.Protection.ChainEnabled && opts.ChainManager != nil:
-					challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
+				// 质询动作覆盖只作用于「泛化 challenge」终态：站点/全局的
+				// challenge_action 决定具体渲染哪一页；规则显式选择的
+				// captcha/shield/chain 保持原样，不被站点/全局默认值顶替。
+				renderAct := actStr
+				if actType == action.Challenge {
+					if covered := siteChallengeAction(&rt, sn); covered != "" {
+						renderAct = covered
+					}
+				}
+				renderChallengeFallback := func() {
+					pages.WriteChallengeResponse(c, reqID, result.Site, sn.Protection.ShieldEnableEnvCheck, statusCode, sn.ChallengePage,
+						challenge.ChallengeTokenClaims{ClientIP: cipStr, UserAgent: challengeIdentityUA, Host: host, SiteID: rt.Site.ID})
+				}
+				switch renderAct {
+				case string(action.CaptchaChallenge):
+					if opts.CaptchaManager != nil {
+						captchaType := effectiveCaptchaType(result.Action, &rt, sn)
+						binding := challengeSessionBindingForSite(rt.Site.ID, host, bind)
+						challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, binding, statusCode, sn.CaptchaPage)
+						break
+					}
+					renderChallengeFallback()
+				case string(action.ShieldChallenge):
+					if opts.ShieldManager != nil {
+						origURL := string(c.Request.URI().RequestURI())
+						opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, requestProtocol(c), challengeSessionBindingForSite(rt.Site.ID, host, bind), statusCode)
+						break
+					}
+					renderChallengeFallback()
+				case string(action.ChainChallenge):
+					if opts.ChainManager != nil {
+						challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, challengeSessionBindingForSite(rt.Site.ID, host, bind), statusCode)
+						break
+					}
+					renderChallengeFallback()
 				default:
-					pages.WriteChallengeResponse(c, reqID, result.Site, statusCode)
+					renderChallengeFallback()
 				}
 				logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
 				scrubResponseHopByHopHeaders(c)
-				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass"})
+				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass", HeaderOrder: reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }), TLSFingerprint: reqCtx.TLS})
 				return
 			}
 
@@ -818,7 +992,7 @@ func Handler(opts Options) app.HandlerFunc {
 				c.Redirect(statusCode, []byte(result.Action.RedirectTo))
 				scrubResponseHopByHopHeaders(c)
 				logAccess(accessLog, reqID, method, path, host, statusCode, "redirect")
-				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: "redirect", CacheState: "bypass", Upstream: result.Action.RedirectTo})
+				recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: "redirect", CacheState: "bypass", Upstream: result.Action.RedirectTo, HeaderOrder: reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }), TLSFingerprint: reqCtx.TLS})
 				return
 			}
 
@@ -838,10 +1012,10 @@ func Handler(opts Options) app.HandlerFunc {
 				recordSecurityEvent(c, opts, store.SecurityEvent{
 					SiteID:     rt.Site.ID,
 					RequestID:  reqID,
-					ClientIP:   clientIPStr(clientIP),
+					ClientIP:   cipStr,
 					Host:       host,
 					Path:       path,
-					Method:     string(c.Method()),
+					Method:     method,
 					UserAgent:  ua,
 					RuleID:     result.Action.RuleID,
 					RuleIDStr:  result.Action.RuleIDStr,
@@ -852,69 +1026,172 @@ func Handler(opts Options) app.HandlerFunc {
 					StatusCode: statusCode,
 				})
 			}
-			pages.WriteBlockResponse(c, reqID, result.Site, sn, result.Action)
+			if !applyLuaResponse(c, result.Action, statusCode) {
+				pages.WriteBlockResponse(c, reqID, result.Site, sn, result.Action)
+			}
 			scrubResponseHopByHopHeaders(c)
 			logAccess(accessLog, reqID, method, path, host, statusCode, actStr)
-			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass"})
-			tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, true)
+			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: actStr, CacheState: "bypass", HeaderOrder: reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }), TLSFingerprint: reqCtx.TLS})
+			tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, clientIP, statusCode, true, c.Response.BodyBytes(), nil)
+			return
+		}
+
+		if challengePassed {
+			cookie := challenge.BuildChallengePassCookieWithClaims(challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: challengeIdentityUA, SiteID: rt.Site.ID, Bind: bind}, rt.Site.TLSEnabled, time.Now(), challengePassTTL(sn.Protection))
+			c.Response.Header.Add("Set-Cookie", cookie)
+			referer := safeRefererRedirect(c)
+			c.Redirect(302, []byte(referer))
+			accessLog.Info("challenge_passed",
+				slog.String("request_id", reqID),
+				slog.String("client_ip", cipStr),
+			)
+			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: pathCached, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: 302, WAFAction: "challenge_passed", CacheState: "bypass", Upstream: referer})
 			return
 		}
 
 		if result.Site == nil || len(result.Site.UpstreamURLs) == 0 {
-			c.String(502, "no upstream configured")
+			c.String(http.StatusBadGateway, "no upstream configured")
+			recordAccessLog(c, opts, accessLogInfo{
+				SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host,
+				Path: path, QueryString: rawQ, Method: method, UserAgent: ua,
+				StatusCode: http.StatusBadGateway, WAFAction: "none", CacheState: "bypass",
+				HeaderOrder:    reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }),
+				TLSFingerprint: reqCtx.TLS,
+			})
 			return
+		}
+
+		// Abort proxying if the client body stream ended prematurely before the
+		// request body snapshot could be fully prefetched. This prevents starting
+		// upstream requests for clients that closed the connection (or sent an
+		// HTTP/2 RST_STREAM) while the WAF body prefetch is still reading.
+		if c.Request.IsBodyStream() {
+			if err := requestBodySnapshotError(c); err != nil && !errors.Is(err, io.EOF) {
+				if secLog.Enabled(ctx, slog.LevelDebug) {
+					secLog.Debug("aborting upstream proxy due to client body read error",
+						slog.String("request_id", reqID),
+						slog.String("error", err.Error()),
+					)
+				}
+				recordAccessLog(c, opts, accessLogInfo{
+					SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host,
+					Path: path, QueryString: rawQ, Method: method, UserAgent: ua,
+					StatusCode: 0, WAFAction: "none", CacheState: "bypass", ForceRecord: true,
+					HeaderOrder:    reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }),
+					TLSFingerprint: reqCtx.TLS,
+				})
+				return
+			}
 		}
 
 		base, ok := pickUpstream(result.Site.UpstreamURLs, opts.Upstreams, func(n uint32) uint32 {
 			return (rr.Add(1) - 1) % n
 		})
 		if !ok {
-			c.String(502, "no upstream configured")
+			c.String(http.StatusBadGateway, "no upstream configured")
+			recordAccessLog(c, opts, accessLogInfo{
+				SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host,
+				Path: path, QueryString: rawQ, Method: method, UserAgent: ua,
+				StatusCode: http.StatusBadGateway, WAFAction: "none", CacheState: "bypass",
+				HeaderOrder:    reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }),
+				TLSFingerprint: reqCtx.TLS,
+			})
 			return
 		}
 
 		var upstreamErr error
+		var bufferedResp *proxy.HTTPResponse
 		cacheState := "bypass"
 		upstreamStart := time.Now()
+		recordResponseBody := shouldRecordAppRouteResponseBody(result.Site)
+		// 扩展 CONNECT 桥接（RFC 8441）在进入 switch 前注册入站流端点；
+		// 本函数对非扩展 CONNECT 请求为空操作。
+		registerH2WSInboundStream(c)
 		switch {
+		case IsH2ExtendedWebSocketConnect(c):
+			// RFC 8441 扩展 CONNECT（CONNECT + :protocol 伪头）：
+			// h2c 上游走帧层直通，其余走 h1 握手桥。
+			upstreamErr = ForwardH2ExtendedConnectWebSocket(ctx, reqID, c, *result.Site, base, clientIP, opts.Engine)
 		case IsWebSocketUpgrade(c):
-			upstreamErr = ForwardWebSocket(c, *result.Site, base, clientIP, opts.Engine)
+			upstreamErr = ForwardWebSocket(ctx, reqID, c, *result.Site, base, clientIP, opts.Engine)
 		case IsSSERequest(c):
 			upstreamErr = ForwardSSE(ctx, c, *result.Site, base, clientIP, host)
+		case recordResponseBody:
+			// Cap post-decode buffering to the same limit used by dynamic transform so a
+			// compressed upstream body cannot force unlimited memory growth. Oversized
+			// responses keep a readable remainder and stream without transformation.
+			bufferedResp, upstreamErr = proxy.FetchHTTPForAppRouteCapture(ctx, c, *result.Site, base, clientIP, host)
+			if upstreamErr == nil {
+				upstreamErr = proxy.ForwardCapturedResponseForSiteWithClientIP(ctx, c, bufferedResp, *result.Site, clientIP)
+			}
 		default:
-			cacheKey, ttl, ignoreUpstreamCC := "", int64(0), false
+			cacheKey, ttl, staleIfError := "", int64(0), int64(0)
 			if opts.ResponseCache != nil {
-				cacheKey, ttl, ignoreUpstreamCC = proxy.SiteCacheEligible(*result.Site, c)
+				cacheKey, ttl, staleIfError = proxy.SiteCacheEligibleWithStale(*result.Site, c)
 			}
 			if cacheKey == "" || hasConditionalOrRangeHeaders(c) {
-				upstreamErr = proxy.ForwardHTTP(ctx, c, *result.Site, base, clientIP, host)
+				if isInternalHTTP3Request(c) && !c.Request.IsBodyStream() {
+					upstreamErr = proxy.ForwardHTTPPreserveRequestBodyOnCancel(ctx, c, *result.Site, base, clientIP, host)
+				} else {
+					upstreamErr = proxy.ForwardHTTP(ctx, c, *result.Site, base, clientIP, host)
+				}
 				break
 			}
-			staleEntry := opts.ResponseCache.Lookup(cacheKey)
-			if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
-				proxy.WriteCachedResponse(c, method, entry)
-				cacheState = "hit"
-				break
+			// 只记录开始回源时的 generation；真正回退到 stale 响应时必须
+			// 再次按同一代读取。并发的 unsafe 请求或配置清理可能在等待填充
+			// 期间使旧条目失效，不能把此前拿到的指针继续回放。
+			staleGeneration := opts.ResponseCache.Generation()
+			staleEntry := opts.ResponseCache.LookupStaleIfGeneration(staleGeneration, cacheKey, staleIfError)
+			// Get 会在发现过期条目时将其删除；已经捕获到 stale 条目时
+			// 保留它到回源失败分支，再由 generation 重查决定是否可回放。
+			if staleEntry == nil {
+				if entry := opts.ResponseCache.Get(cacheKey); entry != nil {
+					proxy.WriteCachedResponseForSiteWithClientIP(c, method, entry, *result.Site, clientIP)
+					cacheState = "hit"
+					break
+				}
 			}
 			cacheState = "miss"
-			bufferedResp, err := proxy.FetchHTTP(ctx, c, *result.Site, base, clientIP, host)
+			leader, releaseFill, fillErr := opts.ResponseCache.BeginFill(ctx, cacheKey)
+			if fillErr != nil {
+				upstreamErr = fillErr
+				break
+			}
+			if leader {
+				defer releaseFill()
+			} else {
+				// 等待 leader 后只查新鲜条目。不能调用 Get：它会删除
+				// 过期备份，导致 leader 的 stale-if-error 回退失效。
+				if entry := opts.ResponseCache.LookupFreshIfGeneration(opts.ResponseCache.Generation(), cacheKey); entry != nil {
+					proxy.WriteCachedResponseForSiteWithClientIP(c, method, entry, *result.Site, clientIP)
+					cacheState = "hit"
+					break
+				}
+			}
+			cacheGeneration := opts.ResponseCache.Generation()
+			bufferedResp, err := proxy.FetchHTTPForCache(ctx, c, *result.Site, base, clientIP, host, opts.ResponseCache.MaxEntryBodySize())
 			if err != nil {
-				if staleEntry != nil {
-					proxy.WriteCachedResponse(c, method, staleEntry)
+				// 重新检查 generation，避免缓存清理/unsafe 失效发生在
+				// BeginFill 等待或上游请求期间后仍然回放旧内容。
+				if staleEntry := opts.ResponseCache.LookupStaleIfGeneration(staleGeneration, cacheKey, staleIfError); staleEntry != nil {
+					proxy.WriteCachedResponseForSiteWithClientIP(c, method, staleEntry, *result.Site, clientIP)
 					cacheState = "stale"
 					break
 				}
 				upstreamErr = err
 				break
 			}
-			if int64(len(bufferedResp.Body)) > opts.ResponseCache.MaxEntryBodySize() {
-				proxy.ForwardBufferedResponseAsStream(c, bufferedResp)
+			if bufferedResp.HasRemainingBody() {
+				upstreamErr = proxy.ForwardCapturedResponseForSiteWithClientIP(ctx, c, bufferedResp, *result.Site, clientIP)
 				break
 			}
-			if proxy.ShouldCacheHTTPResponse(method, bufferedResp, ignoreUpstreamCC) {
-				opts.ResponseCache.Set(cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, ttl, proxy.SanitizeHeadersForEdgeCache(bufferedResp.Header))
+			if proxy.ShouldCacheHTTPResponse(method, bufferedResp) {
+				cacheTTL := proxy.EffectiveCacheTTL(ttl, bufferedResp)
+				if cacheTTL > 0 {
+					opts.ResponseCache.SetForSiteIfGeneration(cacheGeneration, rt.Site.ID, proxy.RuleMatchKey(c), cacheKey, bufferedResp.StatusCode, bufferedResp.ContentType, bufferedResp.Body, cacheTTL, proxy.SanitizeHeadersForEdgeCache(bufferedResp.Header))
+				}
 			}
-			proxy.ForwardBufferedResponse(c, bufferedResp)
+			proxy.ForwardBufferedResponseForSiteWithClientIP(c, bufferedResp, *result.Site, clientIP)
 		}
 		upstreamLatencyMs := time.Since(upstreamStart).Milliseconds()
 		responseSize := int64(0)
@@ -922,6 +1199,11 @@ func Handler(opts Options) app.HandlerFunc {
 			opts.Upstreams.Mark(base, upstreamErr)
 		}
 
+		// 任何已发出的非安全方法都可能在上游产生副作用，即使上游返回
+		// 4xx/5xx 或连接中途失败；按路径清理缓存，避免继续提供旧内容。
+		if opts.ResponseCache != nil && isUnsafeRequestMethod(method) {
+			opts.ResponseCache.PurgeSiteTarget(rt.Site.ID, proxy.RuleMatchKey(c))
+		}
 		if upstreamErr != nil {
 			errCode := 502
 			if isTimeoutError(upstreamErr) {
@@ -929,14 +1211,27 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 			pages.WriteErrorPage(ctx, c, errCode, siteErrorPage(result.Site, errCode))
 		} else if !IsWebSocketUpgrade(c) && !IsSSERequest(c) {
-			// Upstream empty body fallback: if upstream returns empty body
-			// with a non-204/304 status, render a friendly error page.
-			respStatus := c.Response.StatusCode()
-			respBodyLen := len(c.Response.Body())
-			responseSize = int64(respBodyLen)
-			if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
-				pages.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
-				responseSize = int64(len(c.Response.Body()))
+			if proxy.ResponseSizeUnknown(c) {
+				responseSize = 0
+			} else if c.Response.IsBodyStream() || c.Response.GetHijackWriter() != nil {
+				if c.Response.Header.Get("Trailer") == "" {
+					if cl := int64(c.Response.Header.ContentLength()); cl > 0 {
+						responseSize = cl
+					}
+				}
+			} else {
+				// Upstream empty body fallback: if upstream returns empty body
+				// with a non-204/304 status, render a friendly error page.
+				respStatus := c.Response.StatusCode()
+				respBodyLen := len(c.Response.Body())
+				responseSize = int64(respBodyLen)
+				if c.Response.Header.Get("Trailer") != "" {
+					responseSize = 0
+				}
+				if respBodyLen == 0 && respStatus >= 400 && respStatus != 404 {
+					pages.WriteErrorPage(ctx, c, respStatus, siteErrorPage(result.Site, respStatus))
+					responseSize = int64(len(c.Response.Body()))
+				}
 			}
 		}
 		if c.Response.Header.Get("Server") != "" && !hasUpstreamServerHeader(c) {
@@ -956,15 +1251,24 @@ func Handler(opts Options) app.HandlerFunc {
 		if len(result.ObserveHits) > 0 {
 			wafAction = "observe"
 		}
-		aPath := accessPath(c)
-		logAccess(accessLog, reqID, method, aPath, host, statusCode, wafAction)
-		recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: aPath, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: cacheState, Upstream: base, UpstreamLatencyMs: upstreamLatencyMs, ResponseSize: responseSize})
+		logAccess(accessLog, reqID, method, path, host, statusCode, wafAction)
+		if !isClientGoneForPlainAccessLog(ctx, wafAction) {
+			recordAccessLog(c, opts, accessLogInfo{SiteID: rt.Site.ID, RequestID: reqID, ClientIP: cipStr, Host: host, Path: path, QueryString: rawQ, Method: method, UserAgent: ua, StatusCode: statusCode, WAFAction: wafAction, CacheState: cacheState, Upstream: base, UpstreamLatencyMs: upstreamLatencyMs, ResponseSize: responseSize, ResponseSizeKnown: true, HeaderOrder: reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") }), TLSFingerprint: reqCtx.TLS, VisitorFusionEligible: rt.Site.TLSEnabled, VisitorFusionAction: result.Action, VisitorFusionBotScore: reqCtx.BotScoreResult})
+		}
+		var upstreamHeader http.Header
+		if bufferedResp != nil {
+			upstreamHeader = bufferedResp.Header
+		}
+		tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, clientIP, statusCode, false, bufferedResponseBody(bufferedResp), upstreamHeader)
+	}
+}
 
-		// Async application route resource recording.
-		// Match rules before launching the goroutine so unmatched requests avoid
-		// map copies and background DB work on the hot path.
-		// Skip recording if the request contains any excluded header.
-		tryRecordAppRouteResource(c, opts, &rt, sn, reqCtx, method, host, path, rawQ, cipStr, ua, statusCode, false)
+func isUnsafeRequestMethod(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -972,17 +1276,25 @@ func pickUpstream(urls []string, pool *upstream.Pool, next func(uint32) uint32) 
 	return upstream.PickByProtocolPreference(urls, pool, next)
 }
 
-func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, reqCtx *pipeline.RequestCtx, method, host, path, rawQ, cipStr, ua string, statusCode int, isLocalResponse bool) {
-	if opts.RecordedResourceRepo == nil || hasExcludedHeader(c, sn.ExcludeRecordHeaders) {
+func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, reqCtx *pipeline.RequestCtx, clientIP net.IP, statusCode int, isLocalResponse bool, responseBody []byte, upstreamHeader http.Header) {
+	if opts.ResourceAggregator == nil || len(rt.AppRouteRules) == 0 || hasExcludedHeader(c, sn.ExcludeRecordHeaders) {
 		return
 	}
-	reqBody := string(c.Request.Body())
-	if len(reqBody) > logBodyPreviewLimit {
-		reqBody = reqBody[:logBodyPreviewLimit]
+	var reqBody []byte
+	if reqCtx != nil {
+		reqBody = reqCtx.Body
 	}
-	respBody := string(c.Response.Body())
-	if len(respBody) > logBodyPreviewLimit {
-		respBody = respBody[:logBodyPreviewLimit]
+	matchRespBody := responseBody
+	if len(matchRespBody) == 0 && !c.Response.IsBodyStream() {
+		matchRespBody = c.Response.Body()
+	}
+	recordRespBody := matchRespBody
+	if isLocalResponse {
+		matchRespBody = nil
+		if statusCode == http.StatusForbidden {
+			recordRespBody = append([]byte("访问被拒绝\n"), recordRespBody...)
+		}
+		upstreamHeader = nil
 	}
 	var matTLS appresource.TLSMetadata
 	if fp, ok := tlsFingerprintFromRequestContext(c); ok {
@@ -994,32 +1306,11 @@ func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot
 			JA4:        fp.JA4,
 		}
 	}
-	reqCT := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
-	matchRespBody := respBody
-	if isLocalResponse {
-		matchRespBody = ""
+	mat := appresource.BuildMaterialFromRequestBody(c, clientIP, matTLS, reqBody, recordRespBody, upstreamHeader, !isLocalResponse)
+	if mat == nil {
+		return
 	}
-	mat := &appresource.Material{
-		Method:              method,
-		Host:                host,
-		Path:                path,
-		QueryString:         sanitizeQueryString(rawQ),
-		ClientIP:            cipStr,
-		StatusCode:          statusCode,
-		ContentType:         string(c.Response.Header.ContentType()),
-		UserAgent:           ua,
-		RequestBody:         reqBody,
-		ResponseBody:        matchRespBody,
-		TLSVersion:          matTLS.TLSVersion,
-		TLSSNI:              matTLS.TLSSNI,
-		TLSALPN:             matTLS.TLSALPN,
-		JA3Hash:             matTLS.JA3Hash,
-		JA4:                 matTLS.JA4,
-		RequestHeadersJSON:  requestHeadersJSON(c),
-		ResponseHeadersJSON: responseHeadersJSON(c),
-		RequestBodySnippet:  sanitizeBodyPreview(reqBody, reqCT),
-		ResponseBodySnippet: sanitizeBodyPreview(respBody, strings.ToLower(strings.TrimSpace(string(c.Response.Header.ContentType())))),
-	}
+	mat.StatusCode = statusCode
 	var headerFn func(string) string
 	if reqCtx != nil {
 		headerFn = func(key string) string { return reqCtx.Headers[key] }
@@ -1027,20 +1318,32 @@ func tryRecordAppRouteResource(c *app.RequestContext, opts Options, rt *snapshot
 		headerFn = appresource.RequestHeaderLookup(c)
 	}
 	ids := appresource.MatchedRuleIDs(rt.AppRouteRules, mat, headerFn)
-	if len(ids) > 0 || len(rt.AppRouteRules) == 0 {
-		go recordAppRouteResourceSafe(opts.RecordedResourceRepo, rt.Site.ID, mat, ids)
+	// 命中站点资源规则才记录：未命中的请求不代表任何被管理资源，记录会稀释数据。
+	if len(ids) > 0 {
+		recordMat := *mat
+		recordMat.QueryString = sanitizeQueryString(string(c.URI().QueryString()))
+		opts.ResourceAggregator.Record(rt.Site.ID, ids, &recordMat)
 	}
 }
 
-func recordAppRouteResourceSafe(repo *repository.RecordedResourceRepo, siteID uint, m *appresource.Material, ids []uint) {
-	rec := appresource.BuildRecordedResource(siteID, ids, m)
-	if rec == nil {
-		return
+func shouldRecordAppRouteResponseBody(rt *snapshot.SiteRuntime) bool {
+	if rt == nil || len(rt.AppRouteRules) == 0 {
+		return false
 	}
-	rec.HitCount = 1
-	rec.FirstSeen = time.Now()
-	rec.LastSeen = rec.FirstSeen
-	_ = repo.Upsert(rec)
+	for _, rule := range rt.AppRouteRules {
+		switch rule.Target {
+		case store.AppRouteTargetResponseBody, store.AppRouteTargetFullHTTPResponse:
+			return true
+		}
+	}
+	return false
+}
+
+func bufferedResponseBody(resp *proxy.HTTPResponse) []byte {
+	if resp == nil || len(resp.Body) == 0 {
+		return nil
+	}
+	return resp.Body
 }
 
 // hasExcludedHeader checks whether the request carries any header configured
@@ -1069,6 +1372,65 @@ func hasConditionalOrRangeHeaders(c *app.RequestContext) bool {
 		len(c.GetHeader("If-Match")) > 0 ||
 		len(c.GetHeader("If-Unmodified-Since")) > 0 ||
 		len(c.GetHeader("If-Range")) > 0
+}
+
+/**
+ * isScriptCreatedOWAFPath reports whether a JavaScript-mutated path targets the
+ * internal OWAF namespace. A single URL-path decode also closes encoded forms
+ * that an upstream router may decode before route matching.
+ */
+func isScriptCreatedOWAFPath(rawPath string) bool {
+	isInternal := func(value string) bool {
+		lowerValue := strings.ToLower(value)
+		if lowerValue == "/__owaf" || strings.HasPrefix(lowerValue, "/__owaf/") {
+			return true
+		}
+		cleanValue := strings.ToLower(pathpkg.Clean(value))
+		return cleanValue == "/__owaf" || strings.HasPrefix(cleanValue, "/__owaf/")
+	}
+	if isInternal(rawPath) {
+		return true
+	}
+	decodedPath, err := url.PathUnescape(rawPath)
+	return err == nil && decodedPath != rawPath && isInternal(decodedPath)
+}
+
+/**
+ * matchInlineOWASPGuards checks the request shortcuts that must run before
+ * the general pipeline and again after a request-stage path or body mutation.
+ */
+func matchInlineOWASPGuards(path string, body []byte, contentType, host string) (action.Result, bool) {
+	lowerPath := toLowerASCII(path)
+	if strings.Contains(lowerPath, "/translation-table") &&
+		(strings.Contains(lowerPath, "+cscot+") || strings.Contains(lowerPath, "+cscoe+") ||
+			strings.Contains(lowerPath, "%2bcscot%2b") || strings.Contains(lowerPath, "%2bcscoe%2b")) {
+		return action.Result{
+			Type:      action.Intercept,
+			Phase:     "owasp_default",
+			RuleIDStr: "owasp:path:015",
+			MatchDesc: "Cisco translation-table path traversal pattern",
+			Matched:   true,
+			Category:  string(owasp.CatPathTrav),
+		}, true
+	}
+	if strings.EqualFold(path, "/uc/feedback/api/v1/pc/feedback/add") && contentType == "" && len(body) > 0 {
+		rawBody := strings.TrimSpace(string(body))
+		if len(rawBody) > 48*1024 {
+			rawBody = rawBody[:48*1024]
+		}
+		normalized := owasp.NormalizeForDebug(rawBody)
+		if owasp.IsOpaqueEncodedAttackBodyForDebug(rawBody, normalized, map[string]string{"Host": host}, 3) {
+			return action.Result{
+				Type:      action.Intercept,
+				Phase:     "owasp_default",
+				RuleIDStr: "owasp:proto:010",
+				MatchDesc: "opaque encoded body without content-type",
+				Matched:   true,
+				Category:  string(owasp.CatProtoViol),
+			}, true
+		}
+	}
+	return action.Pass(), false
 }
 
 func serveOWAFStatic(c *app.RequestContext, webFS fs.FS) bool {
@@ -1175,15 +1537,25 @@ type accessLogInfo struct {
 	HTTPProtocol         string
 	UpstreamHTTPProtocol string
 	TLSFingerprint       bot.TLSClientFingerprint
-	HeaderOrder          []string
+	// HeaderOrder 是已 join 的请求头顺序字符串，主路径直接复用 DerivedHeaderOrder，避免再次 Join。
+	HeaderOrder          string
 	UpstreamLatencyMs    int64
 	ResponseSize         int64
+	ResponseSizeKnown    bool
 	RequestHeaders       string
 	RequestBodyPreview   string
 	RequestBodyTruncated bool
 	RequestSize          int64
 	ResponseHeaders      string
-	Detailed             bool
+	// ForceRecord 保留请求体预取期间客户端连接中断的审计记录。
+	ForceRecord bool
+	// Minimal 仅记录状态、路由身份和指纹，早退时不得读取请求体或响应体。
+	Minimal  bool
+	Detailed bool
+
+	VisitorFusionEligible bool
+	VisitorFusionAction   action.Result
+	VisitorFusionBotScore *pipeline.BotScoreInfo
 }
 
 func shouldRecordDetailedSecurityEvent(ev store.SecurityEvent) bool {
@@ -1245,6 +1617,8 @@ func recordSecurityEvent(c *app.RequestContext, opts Options, ev store.SecurityE
 		ev.RequestBodyTruncated = ev.RequestBodyTruncated || truncated
 		ev.RequestSize = firstPositive(ev.RequestSize, size)
 	}
+	ev.RequestHeaders = sanitizeLogText(ev.RequestHeaders)
+	ev.RequestBodyPreview = sanitizeLogText(ev.RequestBodyPreview)
 	opts.Writer.RecordEvent(ev)
 }
 
@@ -1270,8 +1644,8 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 			info.TLSFingerprint = mergeTLSFingerprint(info.TLSFingerprint, fp)
 		}
 	}
-	if len(info.HeaderOrder) == 0 {
-		info.HeaderOrder = requestHeaderOrder(c)
+	if !info.Minimal && info.HeaderOrder == "" {
+		info.HeaderOrder = strings.Join(requestHeaderOrder(c), ",")
 	}
 	requestBody := info.RequestBodyPreview
 	requestBodyTruncated := info.RequestBodyTruncated
@@ -1279,7 +1653,12 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	requestHeaders := info.RequestHeaders
 	responseHeaders := info.ResponseHeaders
 	responseSize := info.ResponseSize
-	if responseSize == 0 {
+	if !info.Minimal && requestSize == 0 {
+		_, sampledBodyTruncated, sampledRequestSize := requestBodySample(c)
+		requestSize = sampledRequestSize
+		requestBodyTruncated = requestBodyTruncated || sampledBodyTruncated
+	}
+	if !info.Minimal && !info.ResponseSizeKnown && responseSize == 0 && c.Response.Header.Get("Trailer") == "" && string(c.Request.Method()) != "HEAD" {
 		if cl := int64(c.Response.Header.ContentLength()); cl > 0 {
 			responseSize = cl
 		} else if !c.Response.IsBodyStream() {
@@ -1295,7 +1674,18 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 		requestHeaders = valueOrFallback(requestHeaders, requestHeadersJSON(c))
 		responseHeaders = valueOrFallback(responseHeaders, responseHeadersJSON(c))
 	}
-	return store.AccessLog{
+	if isDynamicProtectionKeyPath(c, info.Path) {
+		requestBody = "[redacted]"
+	}
+	requestBody = sanitizeLogText(requestBody)
+	requestHeaders = sanitizeLogText(requestHeaders)
+	responseHeaders = sanitizeLogText(responseHeaders)
+
+	var fusion visitorfusion.Result
+	if shouldEvaluateVisitorFusion(info) {
+		fusion = buildVisitorFusionResult(c, info)
+	}
+	entry := store.AccessLog{
 		SiteID:               info.SiteID,
 		RequestID:            info.RequestID,
 		ClientIP:             info.ClientIP,
@@ -1306,7 +1696,7 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 		StatusCode:           info.StatusCode,
 		WAFAction:            info.WAFAction,
 		CacheState:           info.CacheState,
-		Upstream:             info.Upstream,
+		Upstream:             sanitizeUpstreamURL(info.Upstream),
 		UserAgent:            info.UserAgent,
 		RequestHeaders:       requestHeaders,
 		RequestBodyPreview:   requestBody,
@@ -1325,10 +1715,60 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 		TLSExtensions:        formatUint16Slice(info.TLSFingerprint.Extensions),
 		TLSCurves:            formatUint16Slice(info.TLSFingerprint.Curves),
 		TLSPointFormats:      formatUint8Slice(info.TLSFingerprint.PointFormats),
-		HeaderOrder:          strings.Join(info.HeaderOrder, ","),
+		HeaderOrder:          info.HeaderOrder,
 		UpstreamLatencyMs:    info.UpstreamLatencyMs,
 		ResponseSize:         responseSize,
 	}
+	if fusion.IsPersistable() {
+		entry.VisitorFusionClass = string(fusion.Classification)
+		entry.VisitorFusionScore = fusion.Score
+		entry.VisitorFusionClientFamily = string(fusion.ClientFamily)
+		entry.VisitorFusionUAClaim = string(fusion.UAClaim)
+		entry.VisitorFusionConsistency = string(fusion.Consistency)
+		entry.VisitorFusionEvidenceSufficient = fusion.EvidenceSufficient
+		entry.VisitorFusionReasons = strings.Join(fusion.Reasons, ",")
+	}
+	return entry
+}
+
+func shouldEvaluateVisitorFusion(info accessLogInfo) bool {
+	return info.VisitorFusionEligible && info.TLSFingerprint.TLSVersion != "" && !info.VisitorFusionAction.IsTerminal()
+}
+
+func buildVisitorFusionResult(c *app.RequestContext, info accessLogInfo) visitorfusion.Result {
+	botScores := visitorfusion.ExistingBotScores{}
+	if info.VisitorFusionBotScore != nil {
+		botScores = visitorfusion.ExistingBotScores{
+			Available:        true,
+			GeoIPScore:       info.VisitorFusionBotScore.GeoIPScore,
+			FingerprintScore: info.VisitorFusionBotScore.FingerprintScore,
+			BehaviorScore:    info.VisitorFusionBotScore.BehaviorScore,
+			IPRepScore:       info.VisitorFusionBotScore.IPRepScore,
+		}
+	}
+	accept := strings.ToLower(string(c.GetHeader("Accept")))
+	acceptEncoding := strings.ToLower(string(c.GetHeader("Accept-Encoding")))
+	return visitorfusion.Evaluate(visitorfusion.Input{
+		HTTPS:            info.VisitorFusionEligible && info.TLSFingerprint.TLSVersion != "",
+		WAFAction:        info.VisitorFusionAction,
+		UserAgent:        info.UserAgent,
+		Method:           info.Method,
+		HasClientHints:   len(c.GetHeader("Sec-CH-UA")) > 0,
+		HasFetchMetadata: len(c.GetHeader("Sec-Fetch-Site")) > 0 || len(c.GetHeader("Sec-Fetch-Mode")) > 0 || len(c.GetHeader("Sec-Fetch-Dest")) > 0,
+		AcceptsHTML:      strings.Contains(accept, "text/html"),
+		AcceptsBrotli:    strings.Contains(acceptEncoding, "br"),
+		HeaderOrder:      info.HeaderOrder,
+		TLS: visitorfusion.TLSFeatures{
+			JA3:          info.TLSFingerprint.JA3,
+			JA4:          info.TLSFingerprint.JA4,
+			TLSVersion:   info.TLSFingerprint.TLSVersion,
+			ALPN:         info.TLSFingerprint.ALPN,
+			CipherSuites: len(info.TLSFingerprint.CipherSuites),
+			Extensions:   len(info.TLSFingerprint.Extensions),
+			Curves:       len(info.TLSFingerprint.Curves),
+		},
+		ExistingBotScores: botScores,
+	})
 }
 
 func mergeTLSFingerprint(base bot.TLSClientFingerprint, extra bot.TLSClientFingerprint) bot.TLSClientFingerprint {
@@ -1370,6 +1810,7 @@ func formatUint16Slice(s []uint16) string {
 		return ""
 	}
 	var b strings.Builder
+	b.Grow(len(s) * 6)
 	for i, v := range s {
 		if i > 0 {
 			b.WriteByte(',')
@@ -1384,6 +1825,7 @@ func formatUint8Slice(s []uint8) string {
 		return ""
 	}
 	var b strings.Builder
+	b.Grow(len(s) * 4)
 	for i, v := range s {
 		if i > 0 {
 			b.WriteByte(',')
@@ -1399,14 +1841,17 @@ const (
 	logHeaderValuesLimit = 32
 )
 
-var sensitiveLogValuePattern = regexp.MustCompile(`(?i)(password|passwd|pwd|token|secret|session|api[_-]?key|auth[_-]?token|csrf|code)(["'\s:=]+)([^&\s,"'}]+)`)
+var sensitiveLogHeaderLinePattern = regexp.MustCompile(`(?im)^([ \t]*(proxy-authorization|authorization|set-cookie|cookie)[ \t]*:)[^\r\n]*(\r?\n[ \t]+[^\r\n]*)*`)
+var sensitiveLogObjectPattern = regexp.MustCompile(`(?is)(env)(["'\s:=]+)(\{.*)`)
+var sensitiveLogValuePattern = regexp.MustCompile(`(?i)(proxy-authorization|authorization|set-cookie|cookie|password|passwd|pwd|token|secret|session|api[_-]?key|auth[_-]?token|csrf|code|ticket|env)(["'\s:=]+)([^&,"'}\r\n]+)`)
 
 func requestHeadersJSON(c *app.RequestContext) string {
 	headers := make(map[string][]string)
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := string(k)
-		lower := strings.ToLower(key)
-		if isSensitiveLogKey(lower) {
+		// toLowerASCII 对已是小写的输入零分配直接返回原串，header 名绝大多数如此。
+		lower := toLowerASCII(key)
+		if isSensitiveLogKeyLowered(lower) {
 			headers[key] = []string{"[redacted]"}
 			return
 		}
@@ -1427,8 +1872,9 @@ func responseHeadersJSON(c *app.RequestContext) string {
 	headers := make(map[string][]string)
 	c.Response.Header.VisitAll(func(k, v []byte) {
 		key := string(k)
-		lower := strings.ToLower(key)
-		if isSensitiveLogKey(lower) {
+		// toLowerASCII 对已是小写的输入零分配直接返回原串，header 名绝大多数如此。
+		lower := toLowerASCII(key)
+		if isSensitiveLogKeyLowered(lower) {
 			headers[key] = []string{"[redacted]"}
 			return
 		}
@@ -1446,39 +1892,105 @@ func responseHeadersJSON(c *app.RequestContext) string {
 }
 
 func requestBodyPreview(c *app.RequestContext) (string, bool, int64) {
-	body := c.Request.Body()
-	size := int64(len(body))
-	if len(body) == 0 {
-		return "", false, size
-	}
-	truncated := len(body) > logBodyPreviewLimit
-	if truncated {
+	body, truncated, size := requestBodySample(c)
+	if len(body) > logBodyPreviewLimit {
 		body = body[:logBodyPreviewLimit]
+		truncated = true
+	}
+	if isDynamicProtectionKeyPath(c, "") {
+		return "[redacted]", truncated, size
+	}
+	if len(body) == 0 {
+		return "", truncated, size
 	}
 	contentType := strings.ToLower(strings.TrimSpace(string(c.Request.Header.ContentType())))
 	return sanitizeBodyPreview(string(body), contentType), truncated, size
 }
 
+func isDynamicProtectionKeyPath(c *app.RequestContext, loggedPath string) bool {
+	if loggedPath == dynamicProtectionKeyPath {
+		return true
+	}
+	return c != nil && string(c.Path()) == dynamicProtectionKeyPath
+}
+
+/**
+ * sanitizeUpstreamURL removes URL userinfo before an upstream endpoint is persisted in logs.
+ *
+ * @param raw Configured upstream URL.
+ * @returns Upstream URL without userinfo, or a redaction marker when parsing fails.
+ */
+func sanitizeUpstreamURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "[redacted]"
+	}
+	if parsed.User == nil {
+		return raw
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
+/**
+ * sanitizeQueryString 对查询串做结构化脱敏，敏感键的取值整体遮蔽。
+ *
+ * 不再走 url.ParseQuery：Go 1.17 起它遇到分号就直接报错并丢弃该片段（实测
+ * "keep=1;semi=2&encoded=a%2Fb" 报 invalid semicolon separator，返回值里只剩
+ * encoded），把「分号是合法取值字符」与「百分号转义畸形」压成同一种失败，
+ * 调用方无从分别处置。这里按 & 逐对切分再单独解码，分号自然落进取值。
+ *
+ * 任一键或取值解码失败时整体遮蔽：解码前的字面量不足以判定敏感性
+ * （pass%77ord 只有解码后才是 password），逐字段放行会让编码过的敏感键
+ * 绕过脱敏。
+ *
+ * 无字段需要改写时原样返回，避免 url.Values.Encode 的键排序与重编码把查询串
+ * 改成与实际请求不一致的形式，那会让访问日志失去排查价值。
+ *
+ * @param raw 原始查询串，不含前导 '?'。
+ * @return 脱敏后的查询串；无法可靠解析时返回 "[redacted]"。
+ */
 func sanitizeQueryString(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	values, err := url.ParseQuery(raw)
-	if err != nil {
-		return sanitizeLogText(raw)
-	}
-	for key := range values {
-		if isSensitiveLogKey(key) {
-			values[key] = []string{"[redacted]"}
-		} else {
-			for i, value := range values[key] {
-				values[key][i] = sanitizeLogText(value)
-			}
+	values := make(url.Values)
+	changed := false
+	for _, pair := range strings.Split(raw, "&") {
+		if pair == "" {
+			continue
 		}
+		rawKey, rawValue := pair, ""
+		if i := strings.IndexByte(pair, '='); i >= 0 {
+			rawKey, rawValue = pair[:i], pair[i+1:]
+		}
+		key, err := url.QueryUnescape(rawKey)
+		if err != nil {
+			return "[redacted]"
+		}
+		value, err := url.QueryUnescape(rawValue)
+		if err != nil {
+			return "[redacted]"
+		}
+		if isSensitiveLogKey(key) {
+			values.Add(key, "[redacted]")
+			changed = true
+			continue
+		}
+		sanitized := sanitizeLogText(value)
+		if sanitized != value {
+			changed = true
+		}
+		values.Add(key, sanitized)
+	}
+	if !changed {
+		return raw
 	}
 	return values.Encode()
 }
 
+// queryParams 以与 net/url 相同的解码规则生成 Lua 可见的查询参数。
+// 重复键保留第一个值，与 dry-run 的 map 契约一致；解析失败时返回 nil。
 func sanitizeBodyPreview(body, contentType string) string {
 	if body == "" {
 		return ""
@@ -1529,8 +2041,51 @@ func sanitizeJSONValue(value any) any {
 	}
 }
 
+// sensitiveLogValueHints 是 sensitiveLogValuePattern 首个捕获组的字面量集合。
+//
+// 正则含 (?i)，故这里全部为小写，判定前先把输入转为小写比较。任何一项都不出现时，
+// 正则必然无法匹配，可直接跳过 ReplaceAllString。
+//
+// 与正则保持同步：新增关键字时两处都要改，由 TestSensitiveLogValueHintsCoverPattern
+// 兜住漏改。
+var sensitiveLogValueHints = []string{
+	"password", "passwd", "pwd", "token", "secret", "session",
+	"api_key", "api-key", "apikey", "auth_token", "auth-token", "authtoken",
+	"authorization", "proxy-authorization", "cookie", "set-cookie",
+	"csrf", "code", "ticket", "env",
+}
+
+/**
+ * sanitizeLogText 遮蔽文本中形如 key=value 的敏感取值。
+ *
+ * 绝大多数 header value 不含任何敏感关键字，而正则即使无匹配也要扫完整串。
+ * 因此先做一次廉价的字面量预筛，命中才跑正则。
+ *
+ * @param value 待脱敏的原始文本。
+ * @return 敏感取值已替换为 [redacted] 的文本；无敏感内容时原样返回。
+ */
 func sanitizeLogText(value string) string {
+	if !containsSensitiveLogHint(value) {
+		return value
+	}
+	value = sensitiveLogHeaderLinePattern.ReplaceAllString(value, `${1} [redacted]`)
+	value = sensitiveLogObjectPattern.ReplaceAllString(value, `${1}${2}[redacted]`)
 	return sensitiveLogValuePattern.ReplaceAllString(value, `${1}${2}[redacted]`)
+}
+
+// containsSensitiveLogHint 判断文本是否可能含敏感取值。
+// 命中即需要跑正则；未命中则正则必然不匹配。
+func containsSensitiveLogHint(value string) bool {
+	if value == "" {
+		return false
+	}
+	lower := toLowerASCII(value)
+	for _, hint := range sensitiveLogValueHints {
+		if strings.Contains(lower, hint) {
+			return true
+		}
+	}
+	return false
 }
 
 func truncateLogValue(value string, limit int) string {
@@ -1540,9 +2095,27 @@ func truncateLogValue(value string, limit int) string {
 	return value[:limit] + "...[truncated]"
 }
 
+// sensitiveLogKeyParts 是需要整体遮蔽取值的 header 名片段（全小写）。
+var sensitiveLogKeyParts = []string{
+	"authorization", "cookie", "token", "secret", "password", "passwd", "pwd",
+	"session", "api-key", "apikey", "csrf", "credential", "key", "ticket", "env",
+}
+
+// isSensitiveLogKey 判断 header 名是否属于敏感项。接受任意大小写。
 func isSensitiveLogKey(key string) bool {
-	lower := strings.ToLower(key)
-	for _, part := range []string{"authorization", "cookie", "token", "secret", "password", "passwd", "pwd", "session", "api-key", "apikey", "csrf", "credential", "key"} {
+	return isSensitiveLogKeyLowered(toLowerASCII(key))
+}
+
+/**
+ * isSensitiveLogKeyLowered 与 isSensitiveLogKey 相同，但要求入参已是小写。
+ *
+ * 调用方通常已为别处算过一次小写形式，再在函数内重复转换是白做一遍 O(n) 扫描。
+ *
+ * @param lower 已转为小写的 header 名。
+ * @return 属于敏感项则为 true。
+ */
+func isSensitiveLogKeyLowered(lower string) bool {
+	for _, part := range sensitiveLogKeyParts {
 		if strings.Contains(lower, part) {
 			return true
 		}
@@ -1584,19 +2157,191 @@ func enqueueAccessLog(writer accessLogRecorder, al store.AccessLog) {
 }
 
 func recordAccessLog(c *app.RequestContext, opts Options, info accessLogInfo) {
+	if c != nil {
+		// Mark the request before sampling/writer checks so the finalizer does not
+		// duplicate an intentionally sampled-out record.
+		c.Set(dataplaneAccessRecordedContextKey, true)
+	}
 	if opts.Writer == nil || !shouldRecordAccessLog(info, opts.AccessLogSamplingRate) {
 		return
 	}
-	info.Detailed = shouldRecordDetailedAccessLog(info)
+	if !info.Minimal {
+		info.Detailed = shouldRecordDetailedAccessLog(info)
+	}
 	enqueueAccessLog(opts.Writer, buildAccessLogEntry(c, info))
+}
+
+// finalizeUnrecordedAccessLog writes a minimal audit row for early exits that
+// happen before the normal site/WAF flow (static assets, challenge endpoints,
+// and missing snapshots). Protocol/routing rejects mark themselves explicitly;
+// normal paths mark themselves through
+// recordAccessLog, so this does not alter their sampling or create duplicates.
+// A client-cancelled plain proxy request is recorded with status 0 instead of a
+// synthetic 200 row after RST_STREAM; explicit 4xx/5xx early failures retain their status.
+func finalizeUnrecordedAccessLog(ctx context.Context, c *app.RequestContext, opts Options, fallbackRequestID string) {
+	if c == nil || opts.Writer == nil {
+		return
+	}
+	if value, ok := c.Get(dataplaneAccessRecordedContextKey); ok {
+		if recorded, ok := value.(bool); ok && recorded {
+			return
+		}
+	}
+	requestID := strings.TrimSpace(string(c.Response.Header.Peek("X-Request-ID")))
+	if requestID == "" {
+		requestID = fallbackRequestID
+	}
+	statusCode := c.Response.StatusCode()
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	// 客户端在响应交付前断开时不伪造一个成功的 200；使用状态 0 保留
+	// 协议层中断事实，同时继续携带请求指纹。明确的 4xx/5xx 保持原状态。
+	if statusCode < http.StatusBadRequest && isClientGoneForPlainAccessLog(ctx, "none") {
+		statusCode = 0
+	}
+	fingerprint, _ := tlsFingerprintFromRequestContext(c)
+	siteID, clientIP := earlyAccessIdentity(c, opts)
+	recordAccessLog(c, opts, accessLogInfo{
+		SiteID:            siteID,
+		RequestID:         requestID,
+		ClientIP:          clientIPStr(clientIP),
+		Host:              string(c.Host()),
+		Path:              accessPath(c),
+		QueryString:       string(c.URI().QueryString()),
+		Method:            string(c.Method()),
+		UserAgent:         string(c.UserAgent()),
+		StatusCode:        statusCode,
+		WAFAction:         "none",
+		CacheState:        "bypass",
+		TLSFingerprint:    fingerprint,
+		ResponseSizeKnown: false,
+		ForceRecord:       true,
+		Minimal:           true,
+	})
+}
+
+/**
+ * recordEarlyAccessLog 为尚未解析站点或尚未进入 WAF 流程的请求写入最小审计行。
+ *
+ * @param c 请求上下文。
+ * @param opts 数据面选项。
+ * @param requestID 当前请求标识。
+ * @param statusCode 已发送的响应状态。
+ * @param wafAction 早退原因分类。
+ */
+func recordEarlyAccessLog(c *app.RequestContext, opts Options, requestID string, statusCode int, wafAction string) {
+	if c == nil {
+		return
+	}
+	fingerprint, _ := tlsFingerprintFromRequestContext(c)
+	siteID, clientIP := earlyAccessIdentity(c, opts)
+	recordAccessLog(c, opts, accessLogInfo{
+		SiteID:            siteID,
+		RequestID:         requestID,
+		ClientIP:          clientIPStr(clientIP),
+		Host:              string(c.Host()),
+		Path:              accessPath(c),
+		QueryString:       string(c.URI().QueryString()),
+		Method:            string(c.Method()),
+		UserAgent:         string(c.UserAgent()),
+		StatusCode:        statusCode,
+		WAFAction:         wafAction,
+		CacheState:        "bypass",
+		TLSFingerprint:    fingerprint,
+		ResponseSizeKnown: false,
+		ForceRecord:       true,
+		Minimal:           true,
+	})
+}
+
+/**
+ * recordChallengeVerifyAccessLog 为挑战验证端点写入独立的内部审计动作。
+ *
+ * 验证端点在站点匹配前处理，不能进入常规 WAF 访问日志路径；统一在端点返回后
+ * 记录当前响应状态、站点归属、可信客户端地址和 TLS 指纹，并阻止外层兜底再次写入
+ * waf_action=none 的误导性行。
+ *
+ * @param c 当前请求上下文。
+ * @param opts 数据面选项。
+ */
+func recordChallengeVerifyAccessLog(c *app.RequestContext, opts Options) {
+	if c == nil {
+		return
+	}
+	requestID := strings.TrimSpace(string(c.Response.Header.Peek("X-Request-ID")))
+	if requestID == "" {
+		requestID = fastRequestID()
+		c.Response.Header.Set("X-Request-ID", requestID)
+	}
+	statusCode := c.Response.StatusCode()
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	actionName := "challenge_verify"
+	if statusCode >= http.StatusBadRequest {
+		actionName = "challenge_verify_error"
+	}
+	recordEarlyAccessLog(c, opts, requestID, statusCode, actionName)
+}
+
+/**
+ * earlyAccessIdentity 为早期端点日志解析站点归属和可信客户端地址。
+ *
+ * @param c 请求上下文。
+ * @param opts 数据面选项。
+ * @return 站点 ID（未命中时为 0）和按站点代理配置解析的客户端地址。
+ */
+func earlyAccessIdentity(c *app.RequestContext, opts Options) (uint, net.IP) {
+	if c == nil {
+		return 0, nil
+	}
+	if opts.Holder == nil {
+		return 0, security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
+	}
+	host := string(c.Host())
+	bind := listenerBind(c)
+	if bind == "" {
+		bind = opts.Bind
+	}
+	sn := opts.Holder.Load()
+	if sn == nil {
+		return 0, security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
+	}
+	rt, ok := sn.MatchSite(bind, host)
+	if !ok {
+		return 0, security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
+	}
+	return rt.Site.ID, security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
 }
 
 func shouldRecordDetailedAccessLog(info accessLogInfo) bool {
 	return info.WAFAction != "none" || info.StatusCode >= 400
 }
 
+/**
+ * isClientGoneForPlainAccessLog 判定这条「纯正常访问」是否因客户端提前断开而不应记录。
+ *
+ * ctx 来自 bindStreamCloseNotifyContext：它把连接/流的 CloseNotify 通道绑到派生
+ * context 上，客户端发出 HTTP/2 RST_STREAM 或关闭连接时该 context 即被取消。上游取消
+ * 也走同一个 context，所以此处判定与「上游响应被取消」是同一事实的两面。
+ *
+ * 仅对 wafAction=="none" 生效。observe 命中即使响应未送达也要留档，否则误报排查会
+ * 丢失证据；其余动作（intercept/challenge/drop/redirect 等）在别处记录，不经过这里。
+ *
+ * @param ctx       请求派生 context，已绑定客户端断开信号。
+ * @param wafAction 本次请求的 WAF 结论。
+ * @return 应跳过记录时为 true。
+ */
+func isClientGoneForPlainAccessLog(ctx context.Context, wafAction string) bool {
+	if wafAction != "none" {
+		return false
+	}
+	return ctx != nil && ctx.Err() != nil
+}
+
 func shouldRecordAccessLog(info accessLogInfo, rate uint32) bool {
-	if info.WAFAction != "none" || info.StatusCode >= 400 {
+	if info.ForceRecord || info.WAFAction != "none" || info.StatusCode >= 400 {
 		return true
 	}
 	if rate == 0 {
@@ -1622,8 +2367,7 @@ func isInternalHTTP3Request(c *app.RequestContext) bool {
 			return true
 		}
 	}
-	return strings.TrimSpace(string(c.GetHeader("X-OpenWaf-Internal-Proto"))) == "h3" &&
-		strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))) == "h3"
+	return false
 }
 
 func requestProtocol(c *app.RequestContext) string {
@@ -1638,9 +2382,6 @@ func requestProtocol(c *app.RequestContext) string {
 			return strings.ToLower(fp.ALPN[0])
 		}
 		return "https"
-	}
-	if proto := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); proto != "" {
-		return strings.ToLower(proto)
 	}
 	return "http"
 }
@@ -1685,20 +2426,26 @@ func dropEnabled(eng *engine.Engine) bool {
 	return dropExec != nil && dropExec.Enabled()
 }
 
-func ShouldBlock(res action.Result) bool {
-	return res.IsTerminal()
-}
-
 func rateLimitKey(clientIP net.IP, host string) string {
 	return clientIPStr(clientIP) + "|" + host
 }
 
 func shouldApplyErrorRateLimit(eng *engine.Engine, prot store.ProtectionConfig, key string) bool {
-	if eng == nil {
+	if eng == nil || !errorRateLimitConfigEnabled(prot) {
 		return false
 	}
 	errRL := eng.ErrRateLimiter()
 	return errRL != nil && errRL.Enabled() && errRL.IsOverLimit(key)
+}
+
+/**
+ * errorRateLimitConfigEnabled 判断当前快照是否提供了可执行的错误限流配置。
+ *
+ * 运行时 backend 可能在热重载期间暂时保留上一代状态，因此不能只依据
+ * backend.Enabled()；快照开关、窗口和配额必须同时有效，才能产生或累加 429。
+ */
+func errorRateLimitConfigEnabled(prot store.ProtectionConfig) bool {
+	return prot.ErrorRateLimitEnabled && prot.ErrorRateLimitWindow > 0 && prot.ErrorRateLimitMax > 0
 }
 
 func errorRateLimitAction(configured string) action.Result {
@@ -1721,23 +2468,26 @@ func errorRateLimitAction(configured string) action.Result {
 }
 
 func incrementErrorRateLimitBlock(eng *engine.Engine, prot store.ProtectionConfig, key string) {
-	if !prot.ErrorRateLimitCountBlock {
+	if !prot.ErrorRateLimitCountBlock || !errorRateLimitConfigEnabled(prot) {
 		return
 	}
-	incrementErrorRateLimit(eng, key)
+	incrementErrorRateLimit(eng, prot, key)
 }
 
 func incrementErrorRateLimitStatus(eng *engine.Engine, prot store.ProtectionConfig, key string, statusCode int) {
+	if !errorRateLimitConfigEnabled(prot) {
+		return
+	}
 	switch {
 	case prot.ErrorRateLimitCount4xx && statusCode >= 400 && statusCode < 500:
-		incrementErrorRateLimit(eng, key)
+		incrementErrorRateLimit(eng, prot, key)
 	case prot.ErrorRateLimitCount5xx && statusCode >= 500:
-		incrementErrorRateLimit(eng, key)
+		incrementErrorRateLimit(eng, prot, key)
 	}
 }
 
-func incrementErrorRateLimit(eng *engine.Engine, key string) {
-	if eng == nil {
+func incrementErrorRateLimit(eng *engine.Engine, prot store.ProtectionConfig, key string) {
+	if eng == nil || !errorRateLimitConfigEnabled(prot) {
 		return
 	}
 	errRL := eng.ErrRateLimiter()
@@ -1767,6 +2517,143 @@ func accessStatusCode(c *app.RequestContext, wafAction string) int {
 	return c.Response.StatusCode()
 }
 
+/**
+ * antiReplayCookieSkipPath 判断 Cookie AntiReplay 内建跳过路径。
+ *
+ * @param requestPath 请求路径。
+ * @return 静态资源或内部 OWAF 资源返回 true。
+ */
+func antiReplayCookieSkipPath(requestPath string) bool {
+	lowerPath := toLowerASCII(requestPath)
+	return strings.HasPrefix(lowerPath, "/__owaf/") || isStaticAsset(lowerPath)
+}
+
+/**
+ * handleAntiReplayCookie 执行 Cookie nonce 的签发、校验和轮换。
+ *
+ * @param c Hertz 请求上下文。
+ * @param opts 数据面处理器配置。
+ * @param sn 当前配置快照。
+ * @param rt 当前站点运行时。
+ * @return handled 表示响应已完成；consumedNonce 表示本请求已消费的 Cookie nonce。
+ */
+func handleAntiReplayCookie(
+	c *app.RequestContext,
+	opts Options,
+	sn *snapshot.Snapshot,
+	rt *snapshot.SiteRuntime,
+	reqID string,
+	clientIP string,
+	host string,
+	requestPath string,
+	method string,
+	userAgent string,
+	rawQuery string,
+	accessLog *slog.Logger,
+) (handled bool, consumedNonce string) {
+	if c == nil || rt == nil || opts.Engine == nil || antiReplayCookieSkipPath(requestPath) {
+		return false, ""
+	}
+	manager := opts.Engine.AntiReplay()
+	if manager == nil {
+		return false, ""
+	}
+
+	nonceCookie := string(c.Cookie(challenge.NonceKey))
+	if nonceCookie == "" {
+		setNonceCookie(c, manager.GenerateNonce(clientIP), rt.Site.TLSEnabled)
+		return false, ""
+	}
+
+	ttl := time.Duration(0)
+	if rt.Site.AntiReplayTTL > 0 {
+		ttl = time.Duration(rt.Site.AntiReplayTTL) * time.Second
+	}
+	valid, isReplay, newNonce := manager.ValidateAndRotate(nonceCookie, clientIP, ttl)
+	switch {
+	case valid:
+		setNonceCookie(c, newNonce, rt.Site.TLSEnabled)
+		return false, nonceCookie
+	case isReplay:
+		blockAction := action.Result{
+			Type:      action.Intercept,
+			Phase:     "anti_replay",
+			RuleIDStr: "antireplay:nonce_reuse",
+			MatchDesc: "replayed nonce detected",
+			Matched:   true,
+			Category:  "replay",
+		}
+		if opts.Metrics != nil {
+			opts.Metrics.RecordWAFBlock()
+		}
+		if opts.Writer != nil {
+			recordSecurityEvent(c, opts, store.SecurityEvent{
+				SiteID:     rt.Site.ID,
+				RequestID:  reqID,
+				ClientIP:   clientIP,
+				Host:       host,
+				Path:       requestPath,
+				Method:     method,
+				UserAgent:  userAgent,
+				RuleIDStr:  blockAction.RuleIDStr,
+				Phase:      blockAction.Phase,
+				Action:     string(action.Intercept),
+				Category:   blockAction.Category,
+				MatchDesc:  blockAction.MatchDesc,
+				StatusCode: http.StatusForbidden,
+			})
+		}
+		pages.WriteBlockResponse(c, reqID, rt, sn, blockAction)
+		logAccess(accessLog, reqID, method, requestPath, host, http.StatusForbidden, string(action.Intercept))
+		recordAccessLog(c, opts, accessLogInfo{
+			SiteID: rt.Site.ID, RequestID: reqID, ClientIP: clientIP, Host: host,
+			Path: requestPath, QueryString: rawQuery, Method: method, UserAgent: userAgent,
+			StatusCode: http.StatusForbidden, WAFAction: string(action.Intercept), CacheState: "bypass",
+		})
+		return true, ""
+	default:
+		setNonceCookie(c, manager.GenerateNonce(clientIP), rt.Site.TLSEnabled)
+		antiReplayAct := normalizeAntiReplayAction(rt.AntiReplayAction)
+		challengeResult := action.Result{
+			Type:      action.Type(antiReplayAct),
+			Phase:     "anti_replay",
+			RuleIDStr: "antireplay:invalid_nonce",
+			MatchDesc: "expired or invalid nonce",
+			Matched:   true,
+			Category:  "replay",
+		}
+		if opts.Metrics != nil {
+			opts.Metrics.RecordWAFBlock()
+		}
+		if opts.Writer != nil {
+			recordSecurityEvent(c, opts, store.SecurityEvent{
+				SiteID:     rt.Site.ID,
+				RequestID:  reqID,
+				ClientIP:   clientIP,
+				Host:       host,
+				Path:       requestPath,
+				Method:     method,
+				UserAgent:  userAgent,
+				RuleIDStr:  challengeResult.RuleIDStr,
+				Phase:      challengeResult.Phase,
+				Action:     antiReplayAct,
+				Category:   challengeResult.Category,
+				MatchDesc:  challengeResult.MatchDesc,
+				StatusCode: http.StatusForbidden,
+			})
+		}
+		writeAntiReplayActionResponse(c, opts, sn, rt, reqID, antiReplayAct, challengeResult, http.StatusForbidden)
+		statusCode := accessStatusCode(c, antiReplayAct)
+		logAccess(accessLog, reqID, method, requestPath, host, statusCode, antiReplayAct)
+		recordAccessLog(c, opts, accessLogInfo{
+			SiteID: rt.Site.ID, RequestID: reqID, ClientIP: clientIP, Host: host,
+			Path: requestPath, QueryString: rawQuery, Method: method, UserAgent: userAgent,
+			StatusCode: statusCode, WAFAction: antiReplayAct, CacheState: "bypass",
+		})
+		return true, ""
+	}
+}
+
 func normalizeAntiReplayAction(raw string) string {
 	switch action.Normalize(action.Type(raw)) {
 	case action.CaptchaChallenge:
@@ -1784,27 +2671,114 @@ func normalizeAntiReplayAction(raw string) string {
 	}
 }
 
+// siteChallengeAction 按「站点 → 全局」顺序解析质询动作覆盖：
+// 站点 rt.ChallengeAction 非空则优先；否则全局 ProtectionConfig.ChallengeAction
+// 非空且合法时使用；两者都不可用时返回空串，由调用方按原 result.Action.Type 分发。
+func siteChallengeAction(rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) string {
+	if rt != nil && rt.ChallengeAction != "" {
+		act := action.Normalize(action.Type(rt.ChallengeAction))
+		if act == action.Challenge || act == action.CaptchaChallenge || act == action.ShieldChallenge || act == action.ChainChallenge {
+			return string(act)
+		}
+	}
+	if sn != nil {
+		global := sn.Protection.ChallengeAction
+		if global != "" {
+			act := action.Normalize(action.Type(global))
+			if act == action.Challenge || act == action.CaptchaChallenge || act == action.ShieldChallenge || act == action.ChainChallenge {
+				return string(act)
+			}
+		}
+	}
+	return ""
+}
+
+// effectiveCaptchaType 计算验证码渲染分支使用的验证码类型：
+// 规则级 result.Action.CaptchaType 合法则优先；否则站点 rt.ChallengeCaptchaType；
+// 再否则全局 sn.Protection.CaptchaType。
+func effectiveCaptchaType(result action.Result, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) challenge.CaptchaType {
+	if challenge.IsValidCaptchaType(challenge.CaptchaType(result.CaptchaType)) {
+		return challenge.CaptchaType(result.CaptchaType)
+	}
+	if rt != nil {
+		if t := challenge.CaptchaType(rt.ChallengeCaptchaType); challenge.IsValidCaptchaType(t) {
+			return t
+		}
+	}
+	if sn != nil {
+		if t := challenge.CaptchaType(sn.Protection.CaptchaType); challenge.IsValidCaptchaType(t) {
+			return t
+		}
+	}
+	return "math"
+}
+
+// challengeTokenClaims 组装 JS 挑战 token 的客户端绑定信息。
+// 客户端 IP 按站点的 XFF 策略解析，与通行 cookie 使用同一套身份字段，
+// 保证挑战页与其换取的通行凭证绑定到同一个客户端。
+func challengeSessionBinding(c *app.RequestContext, opts Options) (challenge.ChallengeSessionBinding, bool) {
+	if opts.Holder == nil {
+		return challenge.ChallengeSessionBinding{}, false
+	}
+	sn := opts.Holder.Load()
+	if sn == nil {
+		return challenge.ChallengeSessionBinding{}, false
+	}
+	host := string(c.Host())
+	bind := listenerBind(c)
+	if bind == "" {
+		bind = opts.Bind
+	}
+	rt, ok := sn.MatchSite(bind, host)
+	if !ok {
+		return challenge.ChallengeSessionBinding{}, false
+	}
+	return challengeSessionBindingForSite(rt.Site.ID, host, bind), true
+}
+
+func challengeSessionBindingForSite(siteID uint, host, bind string) challenge.ChallengeSessionBinding {
+	return challenge.ChallengeSessionBinding{SiteID: siteID, Host: snapshot.NormalizeMatchHost(host), Bind: bind}
+}
+
+func challengeTokenClaims(c *app.RequestContext, rt *snapshot.SiteRuntime) challenge.ChallengeTokenClaims {
+	claims := challenge.ChallengeTokenClaims{
+		UserAgent: string(c.UserAgent()),
+		Host:      string(c.Host()),
+	}
+	if rt != nil {
+		claims.ClientIP = clientIPStr(security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder))
+		claims.SiteID = rt.Site.ID
+	}
+	return claims
+}
+
 func writeAntiReplayActionResponse(c *app.RequestContext, opts Options, sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, reqID, antiReplayAct string, result action.Result, statusCode int) {
+	bind := listenerBind(c)
+	if bind == "" {
+		bind = opts.Bind
+	}
+	binding := challengeSessionBindingForSite(rt.Site.ID, string(c.Host()), bind)
 	switch action.Type(antiReplayAct) {
 	case action.CaptchaChallenge:
-		if sn != nil && sn.Protection.CaptchaEnabled && opts.CaptchaManager != nil {
-			captchaType := challenge.CaptchaType(sn.Protection.CaptchaType)
-			challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, statusCode)
+		if sn != nil && opts.CaptchaManager != nil {
+			captchaType := effectiveCaptchaType(action.Result{}, rt, sn)
+			challenge.WriteCaptchaChallengeResponse(c, reqID, opts.CaptchaManager, captchaType, sn.Protection.ShieldEnableEnvCheck, binding, statusCode, sn.CaptchaPage)
 			return
 		}
 	case action.ShieldChallenge:
-		if sn != nil && sn.Protection.ShieldEnabled && opts.ShieldManager != nil {
+		if sn != nil && opts.ShieldManager != nil {
 			origURL := string(c.Request.URI().RequestURI())
-			opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, inboundProto(c, rt.Site.TLSEnabled), statusCode)
+			opts.ShieldManager.WriteShieldChallengeResponse(c, reqID, origURL, requestProtocol(c), binding, statusCode)
 			return
 		}
 	case action.ChainChallenge:
-		if sn != nil && sn.Protection.ChainEnabled && opts.ChainManager != nil {
-			challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, statusCode)
+		if sn != nil && opts.ChainManager != nil {
+			challenge.WriteChainChallengeResponse(c, reqID, opts.ChainManager, binding, statusCode)
 			return
 		}
 	case action.Challenge:
-		pages.WriteChallengeResponse(c, reqID, rt, statusCode)
+		envCheck := sn != nil && sn.Protection.ShieldEnableEnvCheck
+		pages.WriteChallengeResponse(c, reqID, rt, envCheck, statusCode, sn.ChallengePage, challengeTokenClaims(c, rt))
 		return
 	}
 	pages.WriteBlockResponse(c, reqID, rt, sn, result)
@@ -1846,15 +2820,15 @@ func isTimeoutError(err error) bool {
 	return false
 }
 
-// handleWASMAssets serves the PoW WASM binary and wasm_exec.js glue.
+// handleWASMAssets serves the PoW WASM binary and JS glue.
 func handleWASMAssets(c *app.RequestContext) bool {
 	path := string(c.Path())
 	switch path {
 	case "/__owaf/pow.wasm":
 		challenge.ServePoWWASM(c)
 		return true
-	case "/__owaf/wasm_exec.js":
-		challenge.ServeWasmExecJS(c)
+	case "/__owaf/pow_glue.js":
+		challenge.ServePowGlueJS(c)
 		return true
 	}
 	return false
@@ -1879,6 +2853,179 @@ func handleChallengeVerify(c *app.RequestContext, opts Options) bool {
 	return false
 }
 
+type dynamicProtectionKeyRequest struct {
+	Ticket string `json:"ticket"`
+	Key    string `json:"key"`
+}
+
+// parseDynamicProtectionKeyRequest 仅解析服务端签发票据所需的字段。
+// 浏览器环境信号可由客户端任意构造，不能作为 KEK 兑换授权条件。
+func parseDynamicProtectionKeyRequest(body []byte) (dynamicProtectionKeyRequest, bool) {
+	if len(body) == 0 {
+		return dynamicProtectionKeyRequest{}, false
+	}
+	var req dynamicProtectionKeyRequest
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	if err := dec.Decode(&req); err != nil {
+		return dynamicProtectionKeyRequest{}, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return dynamicProtectionKeyRequest{}, false
+	}
+	if req.Ticket == "" || req.Key == "" {
+		return dynamicProtectionKeyRequest{}, false
+	}
+	return req, true
+}
+
+func handleDynamicProtectionKey(c *app.RequestContext, opts Options) bool {
+	if string(c.Path()) != dynamicProtectionKeyPath {
+		return false
+	}
+	statusCode := http.StatusOK
+	wafAction := "dynamic_key"
+	requestID := fastRequestID()
+	c.Response.Header.Set("X-Request-ID", requestID)
+	c.Response.Header.Set("Cache-Control", "no-store")
+	c.Response.Header.Set("Pragma", "no-cache")
+	if opts.Metrics != nil {
+		opts.Metrics.RecordRequest()
+	}
+	host := string(c.Host())
+	bind := listenerBind(c)
+	if bind == "" {
+		bind = opts.Bind
+	}
+	var siteID uint
+	var logClientIP net.IP
+	defer func() {
+		if opts.Metrics != nil {
+			opts.Metrics.RecordStatus(statusCode)
+		}
+		if logClientIP == nil {
+			logClientIP = security.ResolveClientIP(c, "", "", nil)
+		}
+		recordAccessLog(c, opts, accessLogInfo{SiteID: siteID, RequestID: requestID, ClientIP: clientIPStr(logClientIP), Host: host, Path: string(c.Path()), QueryString: string(c.URI().QueryString()), Method: string(c.Method()), UserAgent: string(c.UserAgent()), StatusCode: statusCode, WAFAction: wafAction, CacheState: "bypass"})
+	}()
+	if string(c.Method()) != http.MethodPost {
+		statusCode = http.StatusMethodNotAllowed
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return true
+	}
+	body := c.Request.Body()
+	if len(body) > dynamicProtectionKeyRequestBodyMax {
+		statusCode = http.StatusRequestEntityTooLarge
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "dynamic key request body too large"})
+		return true
+	}
+	req, ok := parseDynamicProtectionKeyRequest(body)
+	if !ok {
+		statusCode = http.StatusBadRequest
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid dynamic key request"})
+		return true
+	}
+	sn := opts.Holder.Load()
+	if sn == nil {
+		statusCode = http.StatusServiceUnavailable
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "configuration snapshot not loaded"})
+		return true
+	}
+	rt, ok := sn.MatchSite(bind, host)
+	if !ok {
+		statusCode = http.StatusNotFound
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusNotFound, map[string]string{"error": "site not found"})
+		return true
+	}
+	siteID = rt.Site.ID
+	clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
+	logClientIP = clientIP
+	ttl := dynamicpkg.NormalizeDecryptCacheTTLSeconds(rt.DynamicProtection.DecryptCacheTTLSeconds)
+	claims := challenge.DynamicProtectionClaims{Host: host, ClientIP: clientIP, UserAgent: string(c.UserAgent()), SiteID: rt.Site.ID, Bind: bind}
+	kek, ok := challenge.VerifyDynamicProtectionKeyTicket(req.Ticket, challenge.DynamicProtectionKeyClaims{DynamicProtectionClaims: claims, Key: req.Key}, time.Now())
+	if !ok {
+		statusCode = http.StatusForbidden
+		wafAction = "dynamic_key_error"
+		c.JSON(http.StatusForbidden, map[string]string{"error": "invalid dynamic key ticket"})
+		return true
+	}
+	cookie := challenge.BuildDynamicProtectionSessionCookieWithClaims(claims, rt.Site.TLSEnabled, time.Now(), time.Duration(ttl)*time.Second)
+	c.Response.Header.Add("Set-Cookie", cookie)
+	c.JSON(http.StatusOK, map[string]any{"kek": kek, "ttl": ttl})
+	return true
+}
+
+/**
+ * recordChallengeFailure 在服务端记录一次挑战验证失败。
+ *
+ * 三个 verify 端点原先失败即裸 redirect，服务端不留任何计数，客户端可无限重试。
+ * ShieldMaxRetries 只在挑战页 JS 内判断，脚本化客户端重新 POST 即可绕过，
+ * 因此必须由服务端把失败计入 IP 信誉。
+ *
+ * 复用既有的 iprep 违规计数（含滑动窗口、阈值与自动封禁 TTL），而不是新造一套
+ * 计数器——避免对同一事实产生第二数据源，也让运维只需调一处阈值。
+ *
+ * 已匹配站点时，客户端 IP 按站点 XFF 配置解析；命中站点白名单时，只跳过自动封禁
+ * 的违规计数，不影响 challenge verify 原有的成功、失败或重定向语义。快照缺失或站点
+ * 不匹配时回退 strip 模式，避免伪造 XFF 影响信誉计数。
+ *
+ * @param c    请求上下文。
+ * @param opts 数据面选项，用于取 IP 信誉运行时与指标。
+ */
+func recordChallengeFailure(c *app.RequestContext, opts Options) {
+	if opts.Engine == nil {
+		return
+	}
+	ipRep := opts.Engine.IPReputation()
+	if ipRep == nil {
+		return
+	}
+	clientIP := security.ResolveClientIP(c, store.XFFModeStrip, "", nil)
+	if opts.Holder != nil {
+		sn := opts.Holder.Load()
+		if sn != nil {
+			host := string(c.Host())
+			bind := listenerBind(c)
+			if bind == "" {
+				bind = opts.Bind
+			}
+			if rt, ok := sn.MatchSite(bind, host); ok {
+				clientIP = security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
+				if siteIPWhitelistContains(rt.SiteIPWhitelist, clientIP) {
+					return
+				}
+			}
+		}
+	}
+	if clientIP == nil {
+		return
+	}
+	if ipRep.RecordViolation(clientIP) && opts.Metrics != nil {
+		opts.Metrics.RecordWAFBlock()
+	}
+}
+
+// siteIPWhitelistContains applies the same expiration-aware entry semantics as the IP reputation phase.
+func siteIPWhitelistContains(entries []iprep.IPListEntry, clientIP net.IP) bool {
+	if clientIP == nil {
+		return false
+	}
+	now := time.Now().Unix()
+	for _, entry := range entries {
+		if entry.ExpireAt > 0 && now > entry.ExpireAt {
+			continue
+		}
+		if entry.CIDR != nil && entry.CIDR.Contains(clientIP) || entry.Single != nil && entry.Single.Equal(clientIP) {
+			return true
+		}
+	}
+	return false
+}
+
 // requestProtoFromContext extracts the request protocol from headers or TLS context.
 func requestProtoFromContext(c *app.RequestContext) string {
 	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
@@ -1895,24 +3042,37 @@ func handleCaptchaVerify(c *app.RequestContext, opts Options) bool {
 		c.String(503, "captcha not configured")
 		return true
 	}
+	binding, ok := challengeSessionBinding(c, opts)
+	if !ok {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
+	}
 
 	sessionID := string(c.FormValue("__waf_captcha_session"))
 	answer := string(c.FormValue("__waf_captcha_answer"))
 
 	if sessionID == "" || answer == "" {
-		c.Redirect(302, []byte("/"))
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
 		return true
 	}
 
-	if opts.CaptchaManager.VerifyAdvanced(sessionID, answer) {
-		setChallengeCookie(c, opts)
-		referer := string(c.GetHeader("Referer"))
-		if referer == "" {
-			referer = "/"
+	ok, session := opts.CaptchaManager.VerifyAdvancedSessionWithBinding(sessionID, answer, binding)
+	if ok && session != nil && len(session.EnvKey) > 0 {
+		aad := challenge.EnvFingerprintAAD("captcha", session.ID, session.ChallengeSessionBinding)
+		result := challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprintWithAAD(string(c.FormValue("__waf_env_fp")), session.EnvKey, aad))
+		if !result.Pass {
+			ok = false
 		}
-		c.Redirect(302, []byte(referer))
+	}
+
+	if ok {
+		setChallengeCookie(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
 	} else {
-		c.Redirect(302, []byte(string(c.GetHeader("Referer"))))
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
 	}
 	return true
 }
@@ -1922,6 +3082,12 @@ func handleShieldVerify(c *app.RequestContext, opts Options) bool {
 		c.String(503, "shield not configured")
 		return true
 	}
+	binding, ok := challengeSessionBinding(c, opts)
+	if !ok {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
+	}
 
 	sessionID := string(c.FormValue("__waf_shield_session"))
 	captchaAnswer := string(c.FormValue("__waf_captcha_answer"))
@@ -1929,12 +3095,20 @@ func handleShieldVerify(c *app.RequestContext, opts Options) bool {
 	hash := string(c.FormValue("__waf_pow_hash"))
 	envFP := string(c.FormValue("__waf_env_fp"))
 
-	var counter int64
-	if counterStr != "" {
-		counter, _ = strconv.ParseInt(counterStr, 10, 64)
+	counterText := strings.TrimSpace(counterStr)
+	if counterText == "" {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
+	}
+	counter, err := strconv.ParseInt(counterText, 10, 64)
+	if err != nil || counter < 0 {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
+		return true
 	}
 
-	passed, originalURL := opts.ShieldManager.VerifyChallenge(sessionID, captchaAnswer, counter, hash, envFP, requestProtoFromContext(c))
+	passed, originalURL := opts.ShieldManager.VerifyChallengeWithBinding(sessionID, captchaAnswer, counter, hash, envFP, requestProtocol(c), binding)
 	if passed {
 		setChallengeCookie(c, opts)
 		if originalURL == "" {
@@ -1942,8 +3116,10 @@ func handleShieldVerify(c *app.RequestContext, opts Options) bool {
 		}
 		c.Redirect(302, []byte(originalURL))
 	} else {
-		// Re-challenge
-		c.Redirect(302, []byte(string(c.GetHeader("Referer"))))
+		// Re-challenge。失败计入 IP 信誉：ShieldMaxRetries 只在页面 JS 内生效，
+		// 脚本化客户端重新 POST 即可绕过，必须由服务端侧限制重试。
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
 	}
 	return true
 }
@@ -1951,6 +3127,12 @@ func handleShieldVerify(c *app.RequestContext, opts Options) bool {
 func handleChainVerify(c *app.RequestContext, opts Options) bool {
 	if opts.ChainManager == nil {
 		c.String(503, "chain challenge not configured")
+		return true
+	}
+	binding, ok := challengeSessionBinding(c, opts)
+	if !ok {
+		recordChallengeFailure(c, opts)
+		c.Redirect(302, []byte(safeRefererRedirect(c)))
 		return true
 	}
 
@@ -1965,16 +3147,23 @@ func handleChainVerify(c *app.RequestContext, opts Options) bool {
 		"step_type":      stepType,
 	}
 
-	passed, redirectURL, nextHTML := opts.ChainManager.ProcessStep(sessionID, formData)
-	if passed {
+	// 用 Detailed 版本：链内「正常推进到下一步」与「步内校验失败重渲染当前步」
+	// 的三元返回值完全相同，只有 Failed 能区分，否则会把正常访客计为失败。
+	outcome := opts.ChainManager.ProcessStepDetailedWithBinding(sessionID, formData, binding)
+	if outcome.Failed {
+		recordChallengeFailure(c, opts)
+	}
+	switch {
+	case outcome.Passed:
 		setChallengeCookie(c, opts)
+		redirectURL := outcome.RedirectURL
 		if redirectURL == "" {
 			redirectURL = "/"
 		}
 		c.Redirect(302, []byte(redirectURL))
-	} else if nextHTML != "" {
-		c.Data(403, "text/html; charset=utf-8", []byte(nextHTML))
-	} else {
+	case outcome.NextHTML != "":
+		c.Data(403, "text/html; charset=utf-8", []byte(outcome.NextHTML))
+	default:
 		c.Redirect(302, []byte("/"))
 	}
 	return true
@@ -1994,9 +3183,9 @@ func setChallengeCookie(c *app.RequestContext, opts Options) {
 	if !ok {
 		return
 	}
-	clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR)
+	clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
 	cookie := challenge.BuildChallengePassCookieWithClaims(challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: string(c.UserAgent()), SiteID: rt.Site.ID, Bind: bind}, rt.Site.TLSEnabled, time.Now(), challengePassTTL(sn.Protection))
-	c.Response.Header.Set("Set-Cookie", cookie)
+	c.Response.Header.Add("Set-Cookie", cookie)
 }
 
 func challengePassTTL(prot store.ProtectionConfig) time.Duration {
@@ -2007,4 +3196,22 @@ func challengePassTTL(prot store.ProtectionConfig) time.Duration {
 		return time.Duration(prot.CaptchaTimeout) * time.Second
 	}
 	return time.Hour
+}
+
+// validateBasicAuth 校验 HTTP Basic Auth 凭据，使用常量时间比较防止时序攻击。
+func validateBasicAuth(authHeader, expectedUser, expectedPass string) bool {
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Basic ") {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(authHeader[6:])
+	if err != nil {
+		return false
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	userMatch := subtle.ConstantTimeCompare([]byte(parts[0]), []byte(expectedUser)) == 1
+	passMatch := subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expectedPass)) == 1
+	return userMatch && passMatch
 }

@@ -983,7 +983,7 @@ func headerOrderScore(r BotRequest) (int, []string) {
 	}
 	score := 0
 	var reasons []string
-	if sort.StringsAreSorted(append([]string(nil), lower...)) && len(lower) >= 5 {
+	if sort.StringsAreSorted(lower) && len(lower) >= 5 {
 		score += 8
 		reasons = append(reasons, "alphabetic_header_order")
 	}

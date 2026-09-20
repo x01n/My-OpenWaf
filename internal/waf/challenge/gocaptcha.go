@@ -5,15 +5,20 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	_ "image/jpeg"
 	_ "image/png"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/golang/freetype/truetype"
+	"github.com/wenlng/go-captcha-assets/resources/fonts/fzshengsksjw"
+	"github.com/wenlng/go-captcha-assets/resources/imagesv2"
+	assetsTiles "github.com/wenlng/go-captcha-assets/resources/tiles"
 	gocaptcha "github.com/wenlng/go-captcha/v2"
 	"github.com/wenlng/go-captcha/v2/base/option"
 	"github.com/wenlng/go-captcha/v2/click"
@@ -152,6 +157,7 @@ func (p *GoCaptchaProvider) init() {
 	slideBuilder := gocaptcha.NewSlideBuilder()
 	slideBuilder.SetResources(
 		slide.WithBackgrounds(bgImages),
+		slide.WithGraphImages(loadSlideGraphImages()),
 	)
 	p.slideCapt = slideBuilder.Make()
 
@@ -244,28 +250,28 @@ func (p *GoCaptchaProvider) GenerateRotate() (masterB64, thumbB64 string, data *
 	return
 }
 
-// ── CaptchaManager 集成方法 ──
-
 // generateClick 使用 go-captcha 生成点击验证码。
-func (cm *CaptchaManager) generateClick() (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateClick(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath()
+		return cm.generateMath(envKey, binding)
 	}
 
 	masterB64, thumbB64, data, err := cm.goCaptcha.GenerateClick()
 	if err != nil {
-		return cm.generateMath()
+		return cm.generateMath(envKey, binding)
 	}
 
 	// 序列化答案坐标
 	answerJSON, _ := json.Marshal(data)
 	sessionID := generateSessionID()
 	session := &CaptchaSession{
-		ID:        sessionID,
-		Type:      CaptchaTypeClick,
-		Answer:    string(answerJSON),
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(cm.timeoutValue()),
+		ChallengeSessionBinding: binding,
+		ID:                      sessionID,
+		Type:                    CaptchaTypeClick,
+		Answer:                  string(answerJSON),
+		CreatedAt:               time.Now(),
+		ExpiresAt:               time.Now().Add(cm.timeoutValue()),
+		EnvKey:                  envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -274,33 +280,36 @@ func (cm *CaptchaManager) generateClick() (*CaptchaChallenge, error) {
 	return &CaptchaChallenge{
 		SessionID: sessionID,
 		Type:      string(CaptchaTypeClick),
-		MasterImg: "data:image/jpeg;base64," + masterB64,
-		ThumbImg:  "data:image/png;base64," + thumbB64,
+		MasterImg: masterB64,
+		ThumbImg:  thumbB64,
 		Prompt:    "请按顺序点击图中对应的文字",
 		Width:     300,
-		Height:    240,
+		Height:    220,
+		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
 
 // generateSlide 使用 go-captcha 生成滑动验证码。
-func (cm *CaptchaManager) generateSlide() (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateSlide(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath()
+		return cm.generateMath(envKey, binding)
 	}
 
 	masterB64, tileB64, data, err := cm.goCaptcha.GenerateSlide()
 	if err != nil {
-		return cm.generateMath()
+		return cm.generateMath(envKey, binding)
 	}
 
 	answerJSON, _ := json.Marshal(data)
 	sessionID := generateSessionID()
 	session := &CaptchaSession{
-		ID:        sessionID,
-		Type:      CaptchaTypeSlide,
-		Answer:    string(answerJSON),
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(cm.timeoutValue()),
+		ChallengeSessionBinding: binding,
+		ID:                      sessionID,
+		Type:                    CaptchaTypeSlide,
+		Answer:                  string(answerJSON),
+		CreatedAt:               time.Now(),
+		ExpiresAt:               time.Now().Add(cm.timeoutValue()),
+		EnvKey:                  envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -309,33 +318,36 @@ func (cm *CaptchaManager) generateSlide() (*CaptchaChallenge, error) {
 	return &CaptchaChallenge{
 		SessionID: sessionID,
 		Type:      string(CaptchaTypeSlide),
-		MasterImg: "data:image/jpeg;base64," + masterB64,
-		ThumbImg:  "data:image/png;base64," + tileB64,
+		MasterImg: masterB64,
+		ThumbImg:  tileB64,
 		Prompt:    "请将滑块拖动到正确位置",
 		Width:     300,
-		Height:    180,
+		Height:    220,
+		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
 
 // generateRotate 使用 go-captcha 生成旋转验证码。
-func (cm *CaptchaManager) generateRotate() (*CaptchaChallenge, error) {
+func (cm *CaptchaManager) generateRotate(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath()
+		return cm.generateMath(envKey, binding)
 	}
 
 	masterB64, thumbB64, data, err := cm.goCaptcha.GenerateRotate()
 	if err != nil {
-		return cm.generateMath()
+		return cm.generateMath(envKey, binding)
 	}
 
 	answerJSON, _ := json.Marshal(data)
 	sessionID := generateSessionID()
 	session := &CaptchaSession{
-		ID:        sessionID,
-		Type:      CaptchaTypeRotate,
-		Answer:    string(answerJSON),
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(cm.timeoutValue()),
+		ChallengeSessionBinding: binding,
+		ID:                      sessionID,
+		Type:                    CaptchaTypeRotate,
+		Answer:                  string(answerJSON),
+		CreatedAt:               time.Now(),
+		ExpiresAt:               time.Now().Add(cm.timeoutValue()),
+		EnvKey:                  envKey,
 	}
 	if err := cm.storeSession(session); err != nil {
 		return nil, err
@@ -344,39 +356,59 @@ func (cm *CaptchaManager) generateRotate() (*CaptchaChallenge, error) {
 	return &CaptchaChallenge{
 		SessionID: sessionID,
 		Type:      string(CaptchaTypeRotate),
-		MasterImg: "data:image/png;base64," + masterB64,
-		ThumbImg:  "data:image/png;base64," + thumbB64,
+		MasterImg: masterB64,
+		ThumbImg:  thumbB64,
 		Prompt:    "请旋转图片至正确方向",
-		Width:     200,
-		Height:    200,
+		Width:     220,
+		Height:    220,
+		EnvKeyHex: EnvSessionKeyHex(envKey),
 	}, nil
 }
 
 // VerifyAdvanced 验证高级验证码答案（点击/滑动/旋转），支持容差。
 func (cm *CaptchaManager) VerifyAdvanced(sessionID, answer string) bool {
-	session, err := cm.loadSession(sessionID)
-	if err != nil || session == nil {
-		return false
+	return cm.VerifyAdvancedWithBinding(sessionID, answer, ChallengeSessionBinding{})
+}
+
+// VerifyAdvancedWithBinding verifies a CAPTCHA response for the matched site.
+func (cm *CaptchaManager) VerifyAdvancedWithBinding(sessionID, answer string, binding ChallengeSessionBinding) bool {
+	ok, _ := cm.VerifyAdvancedSessionWithBinding(sessionID, answer, binding)
+	return ok
+}
+
+// VerifyAdvancedSession 与 VerifyAdvanced 等价，但额外返回被校验的会话，
+// 供调用方读取会话绑定的环境指纹密钥（EnvKey）执行浏览器/环境检查。
+// 会话为一次性使用，无论校验成败都会在加载后立即删除。
+// 返回的 *CaptchaSession 在会话不存在时为 nil。
+func (cm *CaptchaManager) VerifyAdvancedSession(sessionID, answer string) (bool, *CaptchaSession) {
+	return cm.VerifyAdvancedSessionWithBinding(sessionID, answer, ChallengeSessionBinding{})
+}
+
+// VerifyAdvancedSessionWithBinding atomically consumes the session only when
+// its persisted site binding matches the current matched-site context.
+func (cm *CaptchaManager) VerifyAdvancedSessionWithBinding(sessionID, answer string, binding ChallengeSessionBinding) (bool, *CaptchaSession) {
+	session := cm.takeSessionWithBinding(sessionID, binding)
+	if session == nil {
+		return false, nil
 	}
-	cm.deleteSession(sessionID)
 
 	if time.Now().After(session.ExpiresAt) {
-		return false
+		return false, session
 	}
 
 	tolerance := cm.getGoCaptchaTolerance(session.Type)
 
 	switch session.Type {
 	case CaptchaTypeClick:
-		return verifyClickAnswer(session.Answer, answer, tolerance)
+		return verifyClickAnswer(session.Answer, answer, tolerance), session
 	case CaptchaTypeSlide:
-		return verifySlideAnswer(session.Answer, answer, tolerance)
+		return verifySlideAnswer(session.Answer, answer, tolerance), session
 	case CaptchaTypeRotate:
-		return verifyRotateAnswer(session.Answer, answer, tolerance)
+		return verifyRotateAnswer(session.Answer, answer, tolerance), session
 	case CaptchaTypeMath:
-		return session.Answer == answer
+		return constantTimeEqualString(session.Answer, answer), session
 	default:
-		return session.Answer == answer
+		return constantTimeEqualString(session.Answer, answer), session
 	}
 }
 
@@ -396,112 +428,133 @@ func (cm *CaptchaManager) getGoCaptchaTolerance(t CaptchaType) int {
 	}
 }
 
-// ── 验证辅助函数 ──
-
 // ClickPoint 表示一个点击坐标点。
 type ClickPoint struct {
 	X int `json:"x"`
 	Y int `json:"y"`
 }
 
+type clickPointAnswer struct {
+	X *int `json:"x"`
+	Y *int `json:"y"`
+}
+
 func verifyClickAnswer(storedAnswer, userAnswer string, tolerance int) bool {
-	// 尝试解析 go-captcha 格式的点数据
-	var storedDots map[string]interface{}
+	if tolerance < 0 {
+		return false
+	}
+
+	var storedDots map[string]*struct {
+		Index  *int `json:"index"`
+		X      *int `json:"x"`
+		Y      *int `json:"y"`
+		Width  *int `json:"width"`
+		Height *int `json:"height"`
+	}
 	if err := json.Unmarshal([]byte(storedAnswer), &storedDots); err != nil {
 		return false
 	}
 
-	var userPoints []ClickPoint
+	var userPoints []clickPointAnswer
 	if err := json.Unmarshal([]byte(userAnswer), &userPoints); err != nil {
 		return false
 	}
-
-	// 简化验证：检查用户点击数是否匹配
-	if len(userPoints) != len(storedDots) {
+	if len(userPoints) == 0 || len(userPoints) != len(storedDots) {
 		return false
 	}
 
-	// 对 go-captcha 生成的点数据进行坐标验证
-	i := 0
-	for _, dotRaw := range storedDots {
-		if i >= len(userPoints) {
+	type clickDot struct {
+		index      int
+		x, y, w, h int
+	}
+	dots := make([]clickDot, 0, len(storedDots))
+	seenIndexes := make(map[int]struct{}, len(storedDots))
+	for _, dot := range storedDots {
+		if dot == nil || dot.Index == nil || dot.X == nil || dot.Y == nil || dot.Width == nil || dot.Height == nil {
 			return false
 		}
-		dotMap, ok := dotRaw.(map[string]interface{})
-		if !ok {
-			i++
-			continue
-		}
-		expectedX := int(getFloat(dotMap, "x"))
-		expectedY := int(getFloat(dotMap, "y"))
-		dx := abs(userPoints[i].X - expectedX)
-		dy := abs(userPoints[i].Y - expectedY)
-		if dx > tolerance || dy > tolerance {
+		if *dot.Index < 0 || *dot.Index >= len(storedDots) || *dot.X < 0 || *dot.Y < 0 || *dot.Width <= 0 || *dot.Height <= 0 {
 			return false
 		}
-		i++
+		if _, exists := seenIndexes[*dot.Index]; exists {
+			return false
+		}
+		seenIndexes[*dot.Index] = struct{}{}
+		dots = append(dots, clickDot{index: *dot.Index, x: *dot.X, y: *dot.Y, w: *dot.Width, h: *dot.Height})
+	}
+	sort.Slice(dots, func(i, j int) bool { return dots[i].index < dots[j].index })
+
+	for i, dot := range dots {
+		point := userPoints[i]
+		if point.X == nil || point.Y == nil || *point.X < 0 || *point.Y < 0 {
+			return false
+		}
+		if !click.Validate(*point.X, *point.Y, dot.x, dot.y, dot.w, dot.h, tolerance) {
+			return false
+		}
 	}
 	return true
 }
 
 func verifySlideAnswer(storedAnswer, userAnswer string, tolerance int) bool {
-	var stored map[string]interface{}
-	var provided map[string]interface{}
+	var stored struct {
+		X  *int `json:"x"`
+		Y  *int `json:"y"`
+		DX *int `json:"dx"`
+		DY *int `json:"dy"`
+	}
+	var provided struct {
+		X *int `json:"x"`
+		Y *int `json:"y"`
+	}
 	if err := json.Unmarshal([]byte(storedAnswer), &stored); err != nil {
 		return false
 	}
 	if err := json.Unmarshal([]byte(userAnswer), &provided); err != nil {
 		return false
 	}
-	expectedX := int(getFloat(stored, "x"))
-	providedX := int(getFloat(provided, "x"))
-	return abs(providedX-expectedX) <= tolerance
+	if stored.X == nil || stored.Y == nil || stored.DX == nil || stored.DY == nil || provided.X == nil {
+		return false
+	}
+	if *stored.X < 0 || *stored.Y < 0 || *stored.DX < 0 || *stored.DY < 0 || *provided.X < 0 {
+		return false
+	}
+
+	providedY := 0
+	if provided.Y != nil {
+		if *provided.Y < 0 {
+			return false
+		}
+		providedY = *provided.Y
+	}
+	absoluteX := *stored.DX + *provided.X
+	absoluteY := *stored.DY + providedY
+	return slide.Validate(absoluteX, absoluteY, *stored.X, *stored.Y, tolerance)
 }
 
 func verifyRotateAnswer(storedAnswer, userAnswer string, tolerance int) bool {
-	var stored map[string]interface{}
-	var provided map[string]interface{}
+	var stored struct {
+		Angle *int `json:"angle"`
+	}
+	var provided struct {
+		Angle *int `json:"angle"`
+	}
 	if err := json.Unmarshal([]byte(storedAnswer), &stored); err != nil {
 		return false
 	}
 	if err := json.Unmarshal([]byte(userAnswer), &provided); err != nil {
 		return false
 	}
-	expectedAngle := int(getFloat(stored, "angle"))
-	providedAngle := int(getFloat(provided, "angle"))
-	diff := abs(providedAngle - expectedAngle)
-	if diff > 180 {
-		diff = 360 - diff
+	if stored.Angle == nil || provided.Angle == nil {
+		return false
 	}
-	return diff <= tolerance
+	if *stored.Angle < 0 || *stored.Angle > 360 || *provided.Angle < 0 || *provided.Angle > 360 {
+		return false
+	}
+	return rotate.Validate(*provided.Angle, *stored.Angle, tolerance)
 }
-
-func getFloat(m map[string]interface{}, key string) float64 {
-	v, ok := m[key]
-	if !ok {
-		return 0
-	}
-	switch val := v.(type) {
-	case float64:
-		return val
-	case int:
-		return float64(val)
-	default:
-		return 0
-	}
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
-// ── 资源辅助函数 ──
 
 func (p *GoCaptchaProvider) loadFont() (*truetype.Font, error) {
-	// 尝试加载自定义字体
 	fontPath := p.config.FontPath
 	if fontPath == "" && p.config.ResourceDir != "" {
 		fontPath = filepath.Join(p.config.ResourceDir, "fonts", "default.ttf")
@@ -520,6 +573,7 @@ func (p *GoCaptchaProvider) loadFont() (*truetype.Font, error) {
 	// 尝试系统字体路径
 	systemFonts := []string{
 		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/dejavu/DejaVuSans.ttf",
 		"/usr/share/fonts/TTF/DejaVuSans.ttf",
 		"C:\\Windows\\Fonts\\msyh.ttc",
 		"C:\\Windows\\Fonts\\simhei.ttf",
@@ -534,6 +588,11 @@ func (p *GoCaptchaProvider) loadFont() (*truetype.Font, error) {
 		if err == nil {
 			return font, nil
 		}
+	}
+
+	// 使用官方内置字体作为最后回退，保证默认中文字符池在没有系统字体时仍可渲染。
+	if font, err := fzshengsksjw.GetFont(); err == nil && font != nil {
+		return font, nil
 	}
 
 	return nil, fmt.Errorf("no font available")
@@ -566,6 +625,10 @@ func (p *GoCaptchaProvider) generateBackgrounds() []image.Image {
 				return imgs
 			}
 		}
+	}
+
+	if official, err := imagesv2.GetImages(); err == nil && len(official) > 0 {
+		return official
 	}
 
 	// 生成程序化背景图
@@ -601,6 +664,48 @@ func generateDefaultBackgrounds() []image.Image {
 		imgs[idx] = img
 	}
 	return imgs
+}
+
+// loadSlideGraphImages 优先加载官方图块资源，失败时使用程序化资源。
+func loadSlideGraphImages() []*slide.GraphImage {
+	if official, err := assetsTiles.GetTiles(); err == nil && len(official) > 0 {
+		graphs := make([]*slide.GraphImage, 0, len(official))
+		for _, graph := range official {
+			if graph == nil || graph.OverlayImage == nil || graph.ShadowImage == nil || graph.MaskImage == nil {
+				continue
+			}
+			graphs = append(graphs, &slide.GraphImage{
+				OverlayImage: graph.OverlayImage,
+				ShadowImage:  graph.ShadowImage,
+				MaskImage:    graph.MaskImage,
+			})
+		}
+		if len(graphs) > 0 {
+			return graphs
+		}
+	}
+	return generateSlideGraphImages()
+}
+
+// generateSlideGraphImages 生成滑动验证码所需的图块、阴影和遮罩资源。
+// go-captcha v2.0.5 不会为滑动验证码自动创建图块资源；缺少这些资源时
+// Generate 会返回 graph image is invalid，调用方随后回退到数学验证码。
+func generateSlideGraphImages() []*slide.GraphImage {
+	const size = 70
+	bounds := image.Rect(0, 0, size, size)
+
+	overlay := image.NewNRGBA(bounds)
+	shadow := image.NewNRGBA(bounds)
+	mask := image.NewNRGBA(bounds)
+	draw.Draw(overlay, bounds, &image.Uniform{C: color.NRGBA{R: 38, G: 99, B: 235, A: 255}}, image.Point{}, draw.Src)
+	draw.Draw(shadow, bounds, &image.Uniform{C: color.NRGBA{R: 15, G: 23, B: 42, A: 180}}, image.Point{}, draw.Src)
+	draw.Draw(mask, bounds, &image.Uniform{C: color.NRGBA{R: 255, G: 255, B: 255, A: 255}}, image.Point{}, draw.Src)
+
+	return []*slide.GraphImage{{
+		OverlayImage: overlay,
+		ShadowImage:  shadow,
+		MaskImage:    mask,
+	}}
 }
 
 // randomSelectChars 从字符池中随机选取指定数量的字符，确保每次验证码字符不同。

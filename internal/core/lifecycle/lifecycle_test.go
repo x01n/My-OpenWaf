@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -84,5 +85,69 @@ func TestRemoveUsesShortTimeoutForBlockedServer(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Remove did not return within 2s")
+	}
+}
+
+func TestShutdownUsesBoundedDeadlineForBlockedServer(t *testing.T) {
+	var buf bytes.Buffer
+	m := New(testLogger(&buf))
+	m.Add("site:127.0.0.1:19444", blockingShutdownServer{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	m.Shutdown(ctx)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Shutdown blocked for %s after context deadline", elapsed)
+	}
+}
+
+type ignoringContextShutdownServer struct {
+	started  chan struct{}
+	release  chan struct{}
+	finished chan struct{}
+	once     sync.Once
+}
+
+func (s *ignoringContextShutdownServer) Spin() {}
+
+func (s *ignoringContextShutdownServer) Shutdown(context.Context) error {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	close(s.finished)
+	return nil
+}
+
+func TestShutdownReturnsWhenServerIgnoresContext(t *testing.T) {
+	var buf bytes.Buffer
+	m := New(testLogger(&buf))
+	srv := &ignoringContextShutdownServer{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		finished: make(chan struct{}),
+	}
+	m.Add("site:127.0.0.1:19445", srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	m.Shutdown(ctx)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Shutdown blocked for %s when server ignored context", elapsed)
+	}
+	select {
+	case <-srv.started:
+	default:
+		t.Fatal("expected server shutdown to start")
+	}
+	if !m.Has("site:127.0.0.1:19445") {
+		t.Fatal("manager lock remained unavailable after bounded shutdown")
+	}
+
+	close(srv.release)
+	select {
+	case <-srv.finished:
+	case <-time.After(time.Second):
+		t.Fatal("ignoring server did not finish after release")
 	}
 }

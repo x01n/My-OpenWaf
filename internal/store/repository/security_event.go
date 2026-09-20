@@ -2,7 +2,8 @@ package repository
 
 import (
 	"encoding/json"
-	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"My-OpenWaf/internal/store"
@@ -11,19 +12,31 @@ import (
 )
 
 type SecurityEventRepo struct {
-	db         *gorm.DB
-	countCache CountCache
-	hotCache   HotCacheBackend
-	writeQueue WriteQueueBackend
+	db             *gorm.DB
+	countCache     CountCache
+	hotCache       HotCacheBackend
+	writeQueue     WriteQueueBackend
+	aggregateCache *securityEventAggregateCache
 }
 
 func NewSecurityEventRepo(db *gorm.DB) *SecurityEventRepo {
-	return &SecurityEventRepo{db: db}
+	return &SecurityEventRepo{
+		db:             db,
+		aggregateCache: newSecurityEventAggregateCache(),
+	}
 }
 
 // SetCountCache configures an optional count cache for list queries.
 func (r *SecurityEventRepo) SetCountCache(c CountCache) {
 	r.countCache = c
+}
+
+// invalidateCountCache 丢弃安全事件列表的 COUNT 缓存，确保直接仓储写入与异步写入提交后总数一致。
+func (r *SecurityEventRepo) invalidateCountCache() {
+	if r == nil || r.countCache == nil {
+		return
+	}
+	invalidateCountCachePrefixes(r.countCache, securityEventCountCachePrefix)
 }
 
 // SetHotCache configures Redis-backed hot cache for large query results.
@@ -65,12 +78,23 @@ type SecurityEventFilter struct {
 	Until           *time.Time
 }
 
+// securityEventListColumns excludes the large request audit payloads from list
+// and realtime polling queries. Get and FindByRequestID keep full-detail reads.
+var securityEventListColumns = []string{
+	"id", "created_at", "site_id", "request_id", "client_ip", "host", "path", "query_string", "method", "user_agent",
+	"rule_id", "rule_id_str", "phase", "action", "category", "match_desc", "request_body_truncated", "request_size",
+	"tls_version", "tls_sni", "tls_alpn", "tls_ja3", "tls_ja3_hash", "tls_ja4", "tls_cipher_suites", "tls_extensions",
+	"tls_curves", "tls_point_formats", "header_order", "geo_country", "geo_city", "status_code",
+}
+
 func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
 	f = normalizeSecurityEventFilter(f)
+	cacheKey := secEventCountCacheKey(f)
+
 	// Try Redis hot cache for large query results.
 	if r.hotCache != nil && r.hotCache.Available() {
-		cacheKey := "se_list:" + secEventCountCacheKey(f) + fmt.Sprintf(":o%d:l%d", offset, limit)
-		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(cacheKey); ok {
+		hcKey := "se_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
+		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(hcKey); ok {
 			var items []store.SecurityEvent
 			if json.Unmarshal(rawItems, &items) == nil {
 				return items, cachedTotal, nil
@@ -82,12 +106,13 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 	q = applyEventFilters(q, f)
 
 	var total int64
-	cacheKey := secEventCountCacheKey(f)
 	cached := false
 	if r.countCache != nil {
 		if value, ok := r.countCache.Get(cacheKey); ok {
-			total = value.(int64)
-			cached = true
+			if cachedTotal, ok := value.(int64); ok {
+				total = cachedTotal
+				cached = true
+			}
 		}
 	}
 	if !cached {
@@ -100,98 +125,201 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 	}
 
 	var items []store.SecurityEvent
-	if err := q.Offset(offset).Limit(limit).Order("id DESC").Find(&items).Error; err != nil {
+	if err := q.Select(securityEventListColumns).Offset(offset).Limit(limit).Order("created_at DESC, id DESC").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 
 	// Cache results in Redis.
-	if r.hotCache != nil && r.hotCache.Available() && len(items) > 0 {
-		hcKey := "se_list:" + cacheKey + fmt.Sprintf(":o%d:l%d", offset, limit)
+	if r.hotCache != nil && r.hotCache.Available() {
+		hcKey := "se_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
 		r.hotCache.SetList(hcKey, items, total, 5*time.Second)
 	}
 
 	return items, total, nil
 }
 
+// SecurityEventRequest 表示同一 request_id 下所有安全事件聚合后的一行摘要。
+type SecurityEventRequest struct {
+	RequestID  string    `json:"request_id"`
+	EventCount int64     `json:"event_count"`
+	LastSeen   time.Time `json:"last_seen"`
+}
+
+/**
+ * ListRequests 把安全事件按 request_id 聚合成「请求级」列表。
+ *
+ * 与 List 的语义差异：先用 filter 过滤事件，再对剩下的事件分组，因此 total 是
+ * 去重后的 request_id 数量而不是事件条数。空 request_id 的事件无法定位到一次
+ * 具体请求，直接排除在聚合之外。
+ *
+ * 排序键 MAX(created_at) DESC, request_id DESC 只出现在 ORDER BY 里、不作为输出
+ * 别名：SQLite/MySQL 允许 ORDER BY 引用 SELECT 别名，PostgreSQL 仅在别名不与输入
+ * 列名冲突时才解析别名；直接写聚合表达式在三种方言下都是标准 GROUP BY 语义。
+ *
+ * last_seen 走第二趟查询而不是 SELECT MAX(created_at)：聚合表达式没有列声明类型，
+ * glebarez/sqlite 只对 decltype 为 DATE/DATETIME/TIMESTAMP 的 TEXT 列做时间解析，
+ * 聚合列会以字符串返回并在扫描进 time.Time 时报错。第二趟只读 created_at 表列，
+ * 由驱动按声明类型解析，无需在 Go 侧假设任何时间文本格式。
+ *
+ * 该路径不接 countCache/hotCache：secEventCountCacheKey 描述的是 List 的事件条数，
+ * 与去重请求数语义不同，复用会串键。
+ *
+ * @param offset 分页偏移，来自 utils.Paginate。
+ * @param limit  分页大小，来自 utils.Paginate。
+ * @param f      与 List 完全一致的事件过滤条件。
+ * @return 请求级聚合行、去重后的 request_id 总数、错误。
+ */
+func (r *SecurityEventRepo) ListRequests(offset, limit int, f SecurityEventFilter) ([]SecurityEventRequest, int64, error) {
+	f = normalizeSecurityEventFilter(f)
+	filtered := func() *gorm.DB {
+		return applyEventFilters(r.db.Model(&store.SecurityEvent{}), f).Where("request_id != ?", "")
+	}
+
+	var total int64
+	if err := filtered().Distinct("request_id").Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var groups []struct {
+		RequestID  string
+		EventCount int64
+	}
+	if err := filtered().
+		Select("request_id, COUNT(*) AS event_count").
+		Group("request_id").
+		Order("MAX(created_at) DESC, request_id DESC").
+		Offset(offset).
+		Limit(limit).
+		Scan(&groups).Error; err != nil {
+		return nil, 0, err
+	}
+	if len(groups) == 0 {
+		return []SecurityEventRequest{}, total, nil
+	}
+
+	requestIDs := make([]string, 0, len(groups))
+	for _, g := range groups {
+		requestIDs = append(requestIDs, g.RequestID)
+	}
+	// 沿用同一 filter，保证 last_seen 与排序键取自同一批事件。
+	var stamps []store.SecurityEvent
+	if err := filtered().
+		Where("request_id IN ?", requestIDs).
+		Select("request_id", "created_at").
+		Find(&stamps).Error; err != nil {
+		return nil, 0, err
+	}
+	lastSeen := make(map[string]time.Time, len(requestIDs))
+	for _, s := range stamps {
+		if prev, ok := lastSeen[s.RequestID]; !ok || s.CreatedAt.After(prev) {
+			lastSeen[s.RequestID] = s.CreatedAt
+		}
+	}
+
+	items := make([]SecurityEventRequest, 0, len(groups))
+	for _, g := range groups {
+		items = append(items, SecurityEventRequest{
+			RequestID:  g.RequestID,
+			EventCount: g.EventCount,
+			LastSeen:   lastSeen[g.RequestID],
+		})
+	}
+	return items, total, nil
+}
+
 func secEventCountCacheKey(f SecurityEventFilter) string {
 	f = normalizeSecurityEventFilter(f)
-	key := "se_count"
+	var b strings.Builder
+	var ibuf [20]byte
+	b.Grow(64)
+	b.WriteString(securityEventCountCachePrefix)
+	appendPart := func(tag, value string) {
+		b.WriteByte('|')
+		b.WriteString(tag)
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(len(value)))
+		b.WriteByte(':')
+		b.WriteString(value)
+	}
+	appendUint := func(tag string, value uint64) {
+		appendPart(tag, string(strconv.AppendUint(ibuf[:0], value, 10)))
+	}
 	if f.ID > 0 {
-		key += ":id" + fmt.Sprint(f.ID)
+		appendUint("id", uint64(f.ID))
 	}
 	if f.SiteID > 0 {
-		key += ":s" + fmt.Sprint(f.SiteID)
+		appendUint("s", uint64(f.SiteID))
 	}
 	if f.Query != "" {
-		key += ":q" + f.Query
+		appendPart("q", f.Query)
 	}
 	if f.RequestID != "" {
-		key += ":rid" + f.RequestID
+		appendPart("rid", f.RequestID)
 	}
 	if f.Action != "" {
-		key += ":a" + f.Action
+		appendPart("a", f.Action)
 	}
 	if f.Phase != "" {
-		key += ":ph" + f.Phase
+		appendPart("ph", f.Phase)
 	}
 	if f.Category != "" {
-		key += ":c" + f.Category
+		appendPart("c", f.Category)
 	}
 	if f.ClientIP != "" {
-		key += ":ip" + f.ClientIP
+		appendPart("ip", f.ClientIP)
 	}
 	if f.Host != "" {
-		key += ":h" + f.Host
+		appendPart("h", f.Host)
 	}
 	if f.Path != "" {
-		key += ":p" + f.Path
+		appendPart("p", f.Path)
 	}
 	if f.QueryString != "" {
-		key += ":qs" + f.QueryString
+		appendPart("qs", f.QueryString)
 	}
 	if f.RuleID > 0 {
-		key += ":r" + fmt.Sprint(f.RuleID)
+		appendUint("r", uint64(f.RuleID))
 	}
 	if f.RuleIDStr != "" {
-		key += ":rs" + f.RuleIDStr
+		appendPart("rs", f.RuleIDStr)
 	}
 	if f.TLSVersion != "" {
-		key += ":tv" + f.TLSVersion
+		appendPart("tv", f.TLSVersion)
 	}
 	if f.TLSSNI != "" {
-		key += ":sni" + f.TLSSNI
+		appendPart("sni", f.TLSSNI)
 	}
 	if f.TLSALPN != "" {
-		key += ":alpn" + f.TLSALPN
+		appendPart("alpn", f.TLSALPN)
 	}
 	if f.TLSJA3Hash != "" {
-		key += ":j3h" + f.TLSJA3Hash
+		appendPart("j3h", f.TLSJA3Hash)
 	}
 	if f.TLSJA4 != "" {
-		key += ":j4" + f.TLSJA4
+		appendPart("j4", f.TLSJA4)
 	}
 	if f.TLSCipherSuites != "" {
-		key += ":tcs" + f.TLSCipherSuites
+		appendPart("tcs", f.TLSCipherSuites)
 	}
 	if f.TLSExtensions != "" {
-		key += ":tex" + f.TLSExtensions
+		appendPart("tex", f.TLSExtensions)
 	}
 	if f.TLSCurves != "" {
-		key += ":tcu" + f.TLSCurves
+		appendPart("tcu", f.TLSCurves)
 	}
 	if f.TLSPointFormats != "" {
-		key += ":tpf" + f.TLSPointFormats
+		appendPart("tpf", f.TLSPointFormats)
 	}
 	if f.HeaderOrder != "" {
-		key += ":ho" + f.HeaderOrder
+		appendPart("ho", f.HeaderOrder)
 	}
 	if f.Since != nil {
-		key += ":si" + f.Since.Format("0601021504")
+		appendPart("si", f.Since.UTC().Format(time.RFC3339Nano))
 	}
 	if f.Until != nil {
-		key += ":un" + f.Until.Format("0601021504")
+		appendPart("un", f.Until.UTC().Format(time.RFC3339Nano))
 	}
-	return key
+	return b.String()
 }
 
 func (r *SecurityEventRepo) ListBySite(siteID uint, offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
@@ -207,11 +335,21 @@ func (r *SecurityEventRepo) Get(id uint) (*store.SecurityEvent, error) {
 func (r *SecurityEventRepo) Create(item *store.SecurityEvent) error {
 	if r.writeQueue != nil {
 		r.writeQueue.Submit(func(tx *gorm.DB) error {
-			return tx.Create(item).Error
+			err := tx.Create(item).Error
+			if err == nil {
+				r.invalidateCountCache()
+				r.aggregateCache.invalidate()
+			}
+			return err
 		})
 		return nil
 	}
-	return r.db.Create(item).Error
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.invalidateCountCache()
+		r.aggregateCache.invalidate()
+	}
+	return err
 }
 
 func (r *SecurityEventRepo) FindByRequestID(requestID string) ([]store.SecurityEvent, error) {
@@ -228,13 +366,23 @@ func (r *SecurityEventRepo) BatchCreate(items []store.SecurityEvent) error {
 		batch := make([]store.SecurityEvent, len(items))
 		copy(batch, items)
 		r.writeQueue.Submit(func(tx *gorm.DB) error {
-			return tx.CreateInBatches(batch, 100).Error
+			err := tx.CreateInBatches(batch, 100).Error
+			if err == nil {
+				r.invalidateCountCache()
+				r.aggregateCache.invalidate()
+			}
+			return err
 		})
 		return nil
 	}
-	return r.db.Transaction(func(tx *gorm.DB) error {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
 		return tx.CreateInBatches(items, 100).Error
 	})
+	if err == nil {
+		r.invalidateCountCache()
+		r.aggregateCache.invalidate()
+	}
+	return err
 }
 
 func (r *SecurityEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
@@ -249,6 +397,10 @@ func (r *SecurityEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
 			return totalDeleted, tx.Error
 		}
 		totalDeleted += tx.RowsAffected
+		if tx.RowsAffected > 0 {
+			r.invalidateCountCache()
+			r.aggregateCache.invalidate()
+		}
 		if tx.RowsAffected < batchSize {
 			break
 		}
@@ -384,16 +536,76 @@ func (r *SecurityEventRepo) TopRulesBySite(siteID uint, since time.Time, limit i
 	return stats, err
 }
 
+// CountryStat 表示一个国家/地区的攻击计数（用于地理攻击分布可视化）。
+type CountryStat struct {
+	Country string `json:"country"` // ISO 3166-1 alpha-2 国家代码
+	Count   int64  `json:"count"`
+}
+
+// TopCountries 按国家聚合攻击事件数，用于仪表盘地理分布图。
+// 仅统计有地理信息（geo_country 非空）的拦截/观察事件。
+func (r *SecurityEventRepo) TopCountries(since time.Time, limit int) ([]CountryStat, error) {
+	var stats []CountryStat
+	err := r.db.Model(&store.SecurityEvent{}).
+		Select("geo_country as country, COUNT(*) as count").
+		Where("created_at >= ? AND geo_country != ''", since).
+		Group("geo_country").
+		Order("count DESC").
+		Limit(limit).
+		Scan(&stats).Error
+	return stats, err
+}
+
+// TopCountriesBySite 站点级国家攻击排行，用于站点实时监控面板。
+// 仅统计指定站点且 geo_country 非空的事件。
+func (r *SecurityEventRepo) TopCountriesBySite(siteID uint, since time.Time, limit int) ([]CountryStat, error) {
+	var stats []CountryStat
+	err := r.db.Model(&store.SecurityEvent{}).
+		Select("geo_country as country, COUNT(*) as count").
+		Where("site_id = ? AND created_at >= ? AND geo_country != ''", siteID, since).
+		Group("geo_country").
+		Order("count DESC").
+		Limit(limit).
+		Scan(&stats).Error
+	return stats, err
+}
+
 type TimelineBucket struct {
 	Bucket string `json:"bucket"`
 	Count  int64  `json:"count"`
 }
 
+/**
+ * hourBucketExpr 返回把 created_at 截断到「小时」的方言相关 SQL 表达式。
+ *
+ * strftime 是 SQLite 专有函数，在 MySQL/PostgreSQL 上会直接报错。三种方言必须
+ * 产出**完全一致**的 `YYYY-MM-DD HH:00` 文本，因为前端按该格式（空格分隔、
+ * 非 ISO）切分出 HH:mm 作为图表轴标签。
+ *
+ * @param db 用于识别方言的 GORM 句柄。
+ * @return 可直接嵌入 Select 的表达式，别名为 bucket。
+ */
+func hourBucketExpr(db *gorm.DB) string {
+	switch strings.ToLower(db.Dialector.Name()) {
+	case "mysql":
+		return "DATE_FORMAT(created_at, '%Y-%m-%d %H:00') as bucket"
+	case "postgres", "postgresql":
+		return "to_char(date_trunc('hour', created_at), 'YYYY-MM-DD HH24:00') as bucket"
+	default: // sqlite
+		return "strftime('%Y-%m-%d %H:00', created_at) as bucket"
+	}
+}
+
+var (
+	terminalSecurityEventActions  = []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}
+	challengeSecurityEventActions = []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"}
+)
+
 func (r *SecurityEventRepo) Timeline(since, until time.Time) ([]TimelineBucket, error) {
 	var buckets []TimelineBucket
 	err := r.db.Model(&store.SecurityEvent{}).
-		Select("strftime('%Y-%m-%d %H:00', created_at) as bucket, COUNT(*) as count").
-		Where("created_at >= ? AND created_at <= ?", since, until).
+		Select(hourBucketExpr(r.db)+", COUNT(*) as count").
+		Where("created_at >= ? AND created_at <= ? AND action IN ?", since, until, terminalSecurityEventActions).
 		Group("bucket").
 		Order("bucket ASC").
 		Scan(&buckets).Error
@@ -403,8 +615,8 @@ func (r *SecurityEventRepo) Timeline(since, until time.Time) ([]TimelineBucket, 
 func (r *SecurityEventRepo) TimelineBySite(siteID uint, since, until time.Time) ([]TimelineBucket, error) {
 	var buckets []TimelineBucket
 	err := r.db.Model(&store.SecurityEvent{}).
-		Select("strftime('%Y-%m-%d %H:00', created_at) as bucket, COUNT(*) as count").
-		Where("site_id = ? AND created_at >= ? AND created_at <= ?", siteID, since, until).
+		Select(hourBucketExpr(r.db)+", COUNT(*) as count").
+		Where("site_id = ? AND created_at >= ? AND created_at <= ? AND action IN ?", siteID, since, until, terminalSecurityEventActions).
 		Group("bucket").
 		Order("bucket ASC").
 		Scan(&buckets).Error
@@ -423,7 +635,7 @@ func (r *SecurityEventRepo) DistinctRequestCount(since time.Time) (int64, error)
 
 func (r *SecurityEventRepo) CountTerminal(since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, terminalSecurityEventActions).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) CountObserve(since time.Time) (int64, error) {
@@ -433,22 +645,22 @@ func (r *SecurityEventRepo) CountObserve(since time.Time) (int64, error) {
 
 func (r *SecurityEventRepo) CountChallenge(since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, challengeSecurityEventActions).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) CountChallengeBySite(siteID uint, since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, []string{"challenge", "captcha_challenge", "shield_challenge", "chain_challenge"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, challengeSecurityEventActions).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) GetLatestBySite(siteID uint, limit int) ([]store.SecurityEvent, error) {
 	var items []store.SecurityEvent
-	return items, r.db.Where("site_id = ?", siteID).Order("id DESC").Limit(limit).Find(&items).Error
+	return items, r.db.Select(securityEventListColumns).Where("site_id = ?", siteID).Order("created_at DESC, id DESC").Limit(limit).Find(&items).Error
 }
 
 func (r *SecurityEventRepo) CountTerminalBySite(siteID uint, since time.Time) (int64, error) {
 	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, []string{"intercept", "drop", "rate_limit", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "redirect"}).Count(&total).Error
+	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, terminalSecurityEventActions).Count(&total).Error
 }
 
 func (r *SecurityEventRepo) CountObserveBySite(siteID uint, since time.Time) (int64, error) {

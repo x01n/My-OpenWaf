@@ -1,12 +1,36 @@
 package dataplane
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/waf/challenge"
 )
+
+// toLowerASCII 是 strings.ToLower 的零分配快路径。
+// 当字符串已全部为小写 ASCII 时直接返回原 string，无需分配。
+func toLowerASCII(s string) string {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			buf := make([]byte, len(s))
+			copy(buf[:i], s[:i])
+			for j := i; j < len(s); j++ {
+				c := s[j]
+				if c >= 'A' && c <= 'Z' {
+					buf[j] = c + 0x20
+				} else {
+					buf[j] = c
+				}
+			}
+			return string(buf)
+		}
+	}
+	return s
+}
 
 // isStaticAsset returns true for common static asset paths that should skip nonce validation.
 func isStaticAsset(lowerPath string) bool {
@@ -27,7 +51,7 @@ func isStaticAsset(lowerPath string) bool {
 
 // setNonceCookie sets the anti-replay nonce cookie on the response.
 func setNonceCookie(c *app.RequestContext, nonce string, secure bool) {
-	cookie := challenge.NonceKey + "=" + nonce + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
+	cookie := challenge.NonceKey + "=" + nonce + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + strconv.Itoa(snapshot.OneDaySeconds)
 	if secure {
 		cookie += "; Secure"
 	}

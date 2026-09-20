@@ -45,6 +45,13 @@ AGENTS.md
 .mcp.json
 *.png
 rule.md
-third_party/
-third_party/**
 *.test
+blazehttp
+.next/
+wasm-pow-solver/target/
+wasm-pow-solver/target/
+.cursor/
+internal/waf/cve/testdata/detectfirst_golden.txt
+My-OpenWaf
+.codex/
+.lsp-mcp/

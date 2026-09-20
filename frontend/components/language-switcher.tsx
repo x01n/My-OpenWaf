@@ -1,24 +1,24 @@
-"use client";
+"use client"
 
-import { useTranslation } from "react-i18next";
-import { Button } from "@/components/ui/button";
+import { useTranslation } from "react-i18next"
+import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { IconLanguage } from "@tabler/icons-react";
+} from "@/components/ui/dropdown-menu"
+import { IconLanguage } from "@tabler/icons-react"
 
 /**
  * 语言切换器组件
  */
 export function LanguageSwitcher() {
-  const { i18n } = useTranslation();
+  const { i18n } = useTranslation()
 
   const changeLang = (lang: string) => {
-    i18n.changeLanguage(lang);
-  };
+    i18n.changeLanguage(lang)
+  }
 
   return (
     <DropdownMenu>
@@ -36,5 +36,5 @@ export function LanguageSwitcher() {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-  );
+  )
 }

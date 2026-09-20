@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"testing"
 
-	"My-OpenWaf/internal/store"
-	"My-OpenWaf/internal/store/repository"
-
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/route/param"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+
+	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
 )
 
 func newSystemSettingsRepoForTest(t *testing.T) *repository.SystemSettingsRepo {
@@ -191,5 +193,352 @@ func TestSyncCVEAutoDropToDropPolicyPreservesBotFields(t *testing.T) {
 	}
 	if got.CVEAutoDropCritical || got.CVEAutoDropHigh {
 		t.Fatalf("cve auto drop was not synced: %+v", got)
+	}
+}
+
+func TestLoadProtectionConfigDefaultOnMissingKey(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := LoadProtectionConfig(repo)
+	def := store.DefaultProtectionConfig()
+	data1, _ := json.Marshal(cfg)
+	data2, _ := json.Marshal(def)
+	if string(data1) != string(data2) {
+		t.Fatalf("expected default config on missing key, got %s", data1)
+	}
+}
+
+func TestSaveAndLoadProtectionConfig(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	def := store.DefaultProtectionConfig()
+	def.BotDetectionEnabled = !def.BotDetectionEnabled
+	if err := SaveProtectionConfig(repo, def); err != nil {
+		t.Fatalf("SaveProtectionConfig: %v", err)
+	}
+	got := LoadProtectionConfig(repo)
+	if got.BotDetectionEnabled != def.BotDetectionEnabled {
+		t.Fatalf("expected BotDetectionEnabled %v, got %v", def.BotDetectionEnabled, got.BotDetectionEnabled)
+	}
+}
+
+// TestValidateGlobalCaptchaType checks the shared four-value global CAPTCHA contract.
+func TestValidateGlobalCaptchaType(t *testing.T) {
+	for _, value := range []string{"math", "click", "slide", "rotate"} {
+		if err := ValidateGlobalCaptchaType(value); err != nil {
+			t.Fatalf("ValidateGlobalCaptchaType(%q): %v", value, err)
+		}
+	}
+	for _, value := range []string{"", "Math", " image ", "pow"} {
+		if err := ValidateGlobalCaptchaType(value); err == nil {
+			t.Fatalf("ValidateGlobalCaptchaType(%q) should reject", value)
+		}
+	}
+}
+
+// TestSaveProtectionConfigRejectsInvalidCaptchaType ensures writes cannot persist an unsupported mode.
+func TestSaveProtectionConfigRejectsInvalidCaptchaType(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CaptchaType = "pow"
+	if err := SaveProtectionConfig(repo, cfg); err == nil {
+		t.Fatal("SaveProtectionConfig should reject invalid captcha_type")
+	}
+}
+
+func TestParseUintParam(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Params = param.Params{{Key: "id", Value: "42"}}
+	v, err := ParseUintParam(ctx, "id")
+	if err != nil || v != 42 {
+		t.Fatalf("ParseUintParam(42) = (%d, %v), want (42, nil)", v, err)
+	}
+	ctx.Params = param.Params{{Key: "id", Value: "notanumber"}}
+	_, err = ParseUintParam(ctx, "id")
+	if err == nil {
+		t.Fatal("expected error for non-numeric id")
+	}
+}
+
+func TestValidateRuleAction(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"", "", true},
+		{"intercept", "intercept", true},
+		{"block", "intercept", true},
+		{"observe", "observe", true},
+		{"allow", "", false},
+		{"tag", "", false},
+		{"unknown_xyz", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := ValidateRuleAction(tt.in)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("ValidateRuleAction(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestValidateActionWithoutRedirectTarget(t *testing.T) {
+	_, ok := ValidateActionWithoutRedirectTarget("redirect")
+	if ok {
+		t.Fatal("redirect action should be rejected when no redirect target is present")
+	}
+	got, ok := ValidateActionWithoutRedirectTarget("intercept")
+	if !ok || got != "intercept" {
+		t.Fatalf("intercept should be valid: got (%q, %v)", got, ok)
+	}
+	_, ok = ValidateActionWithoutRedirectTarget("")
+	if !ok {
+		t.Fatal("empty action should be valid (inherits default)")
+	}
+}
+
+func TestValidateActionWithRedirectTarget(t *testing.T) {
+	target := "https://example.com/blocked"
+	got, ok := ValidateActionWithRedirectTarget("redirect", &target)
+	if !ok || got != "redirect" {
+		t.Fatalf("redirect with target should be valid: got (%q, %v)", got, ok)
+	}
+	blank := "   "
+	if _, ok := ValidateActionWithRedirectTarget("redirect", &blank); ok {
+		t.Fatal("redirect with blank target should be rejected")
+	}
+	if got, ok := ValidateActionWithRedirectTarget("intercept", nil); !ok || got != "intercept" {
+		t.Fatalf("intercept without target should be valid: got (%q, %v)", got, ok)
+	}
+}
+
+func TestValidateCCRules(t *testing.T) {
+	valid := []string{
+		`[]`,
+		`[{
+			"enabled":true,
+			"name":"api",
+			"action":"intercept",
+			"conditions":[{"target":"url_path","operator":"equals","value":"/api"}],
+			"window":60,
+			"threshold":10,
+			"duration":0,
+			"duration_unit":"seconds"
+		}]`,
+		`[{"action":"challenge","conditions":[{"target":"method","operator":"equals","value":"GET"}],"window":60,"threshold":10}]`,
+		`[{"action":"log_only","conditions":[{"target":"header","operator":"prefix","value":"User-Agent=curl"}],"window":60,"threshold":10}]`,
+	}
+	for _, raw := range valid {
+		if err := ValidateCCRules(raw); err != nil {
+			t.Errorf("ValidateCCRules(%q) returned error: %v", raw, err)
+		}
+	}
+
+	invalid := []string{
+		`null`,
+		`{"action":"drop"}`,
+		`[{"action":"redirect","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"equals","value":""}],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"method","operator":"contains","value":"GET"}],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"header","operator":"equals","value":"User-Agent"}],"window":60,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":0,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":0}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":-1,"threshold":10}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":1.5}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":10,"duration_unit":"hours"}]`,
+		`[{"action":"drop","conditions":[{"target":"url_path","operator":"prefix","value":"/"}],"window":60,"threshold":10,"extra":true}]`,
+	}
+	for _, raw := range invalid {
+		if err := ValidateCCRules(raw); err == nil {
+			t.Errorf("ValidateCCRules(%q) returned nil error", raw)
+		}
+	}
+}
+
+func TestValidateCCRulesCaptchaTypeContract(t *testing.T) {
+	for _, captchaType := range []string{"math", "click", "slide", "rotate"} {
+		raw := `[{"action":"captcha","captcha_type":"` + captchaType + `","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":60,"threshold":10}]`
+		if err := ValidateCCRules(raw); err != nil {
+			t.Fatalf("captcha_type=%q should be accepted: %v", captchaType, err)
+		}
+	}
+
+	for _, captchaType := range []string{"Math", "image", " slide ", "pow"} {
+		raw := `[{"action":"captcha","captcha_type":"` + captchaType + `","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":60,"threshold":10}]`
+		if err := ValidateCCRules(raw); err == nil {
+			t.Fatalf("captcha_type=%q should be rejected", captchaType)
+		}
+	}
+
+	raw := `[{"action":"intercept","captcha_type":"slide","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":60,"threshold":10}]`
+	if err := ValidateCCRules(raw); err == nil {
+		t.Fatal("non-captcha action must reject captcha_type")
+	}
+}
+
+func TestValidateAntiReplayAction(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"", "", true},
+		{"intercept", "intercept", true},
+		{"challenge", "challenge", true},
+		{"captcha_challenge", "captcha_challenge", true},
+		{"shield_challenge", "shield_challenge", true},
+		{"chain_challenge", "chain_challenge", true},
+		{"drop", "", false},
+		{"observe", "", false},
+		{"allow", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := ValidateAntiReplayAction(tt.in)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("ValidateAntiReplayAction(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestValidateBotScoreThreshold(t *testing.T) {
+	for _, v := range []int{1, 50, 100} {
+		if !ValidateBotScoreThreshold(v) {
+			t.Errorf("ValidateBotScoreThreshold(%d) should be true", v)
+		}
+	}
+	for _, v := range []int{0, -1, 101, 200} {
+		if ValidateBotScoreThreshold(v) {
+			t.Errorf("ValidateBotScoreThreshold(%d) should be false", v)
+		}
+	}
+}
+
+func TestReloadCVERulesNilDoesNotPanic(t *testing.T) {
+	ReloadCVERules(nil)
+}
+
+func TestSyncBotEnabledToProtection(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := SyncBotEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncBotEnabledToProtection(true): %v", err)
+	}
+	cfg := LoadProtectionConfig(repo)
+	if !cfg.BotDetectionEnabled {
+		t.Fatal("BotDetectionEnabled should be true after sync")
+	}
+	if err := SyncBotEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncBotEnabledToProtection same value: %v", err)
+	}
+	if err := SyncBotEnabledToProtection(repo, false); err != nil {
+		t.Fatalf("SyncBotEnabledToProtection(false): %v", err)
+	}
+	cfg = LoadProtectionConfig(repo)
+	if cfg.BotDetectionEnabled {
+		t.Fatal("BotDetectionEnabled should be false after disabling")
+	}
+}
+
+func TestSyncCaptchaEnabledToProtection(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := SyncCaptchaEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncCaptchaEnabledToProtection(true): %v", err)
+	}
+	cfg := LoadProtectionConfig(repo)
+	if !cfg.CaptchaEnabled {
+		t.Fatal("CaptchaEnabled should be true after sync")
+	}
+	if err := SyncCaptchaEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncCaptchaEnabledToProtection same value: %v", err)
+	}
+}
+
+// TestSyncProtectionCaptchaToSettingsPreservesStoredBotFields 验证 protection 反向同步只更新 CAPTCHA 投影字段。
+func TestSyncProtectionCaptchaToSettingsPreservesStoredBotFields(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := repo.Set("bot_settings", `{"enabled":true,"captcha_enabled":false,"score_threshold":77}`); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+	if err := SyncProtectionCaptchaToSettings(repo, true); err != nil {
+		t.Fatalf("SyncProtectionCaptchaToSettings: %v", err)
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatalf("load bot settings: %v", err)
+	}
+	var got BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.Enabled || !got.CaptchaEnabled || got.ScoreThreshold != 77 {
+		t.Fatalf("reverse CAPTCHA sync lost unrelated fields: %#v", got)
+	}
+}
+
+func TestSyncBrowserSignToProtection(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := SyncBrowserSignToProtection(repo, true, 600, "intercept"); err != nil {
+		t.Fatalf("SyncBrowserSignToProtection: %v", err)
+	}
+	cfg := LoadProtectionConfig(repo)
+	if !cfg.BrowserSignEnabled || cfg.BrowserSignTTL != 600 || cfg.BrowserSignAction != "intercept" {
+		t.Fatalf("unexpected BrowserSign state: enabled=%v ttl=%d action=%q",
+			cfg.BrowserSignEnabled, cfg.BrowserSignTTL, cfg.BrowserSignAction)
+	}
+	if err := SyncBrowserSignToProtection(repo, true, 600, "intercept"); err != nil {
+		t.Fatalf("SyncBrowserSignToProtection same value: %v", err)
+	}
+}
+
+func TestSyncAntiReplayEnabledToProtectionAndSettings(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	initial := BotSettingsResponse{Enabled: true, ScoreThreshold: 75}
+	data, _ := json.Marshal(initial)
+	if err := repo.Set("bot_settings", string(data)); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+
+	if err := SyncAntiReplayEnabledToProtection(repo, true); err != nil {
+		t.Fatalf("SyncAntiReplayEnabledToProtection: %v", err)
+	}
+	if !LoadProtectionConfig(repo).AntiReplayEnabled {
+		t.Fatal("AntiReplayEnabled should be enabled in protection")
+	}
+	if err := SyncProtectionAntiReplayToSettings(repo, true); err != nil {
+		t.Fatalf("SyncProtectionAntiReplayToSettings: %v", err)
+	}
+	val, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatalf("load bot settings: %v", err)
+	}
+	var got BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.AntiReplayEnabled || !got.Enabled || got.ScoreThreshold != 75 {
+		t.Fatalf("unexpected anti-replay projection: %#v", got)
+	}
+}
+
+func TestSyncProtectionBotToSettings(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	initial := BotSettingsResponse{Enabled: false, ScoreThreshold: 75}
+	data, _ := json.Marshal(initial)
+	_ = repo.Set("bot_settings", string(data))
+
+	if err := SyncProtectionBotToSettings(repo, true); err != nil {
+		t.Fatalf("SyncProtectionBotToSettings(true): %v", err)
+	}
+	val, _ := repo.Get("bot_settings")
+	var got BotSettingsResponse
+	if err := json.Unmarshal([]byte(val), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("Enabled should be true after sync")
+	}
+	if got.ScoreThreshold != 75 {
+		t.Fatalf("unrelated ScoreThreshold changed: got %d", got.ScoreThreshold)
+	}
+	if err := SyncProtectionBotToSettings(repo, true); err != nil {
+		t.Fatalf("SyncProtectionBotToSettings same value: %v", err)
 	}
 }

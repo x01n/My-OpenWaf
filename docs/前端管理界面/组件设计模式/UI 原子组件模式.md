@@ -1,5 +1,7 @@
 # UI 原子组件模式
 
+> [返回 前端管理界面](../前端管理界面.md)
+
 <cite>
 **本文引用的文件**
 - [frontend/components/ui/button.tsx](file://frontend/components/ui/button.tsx)

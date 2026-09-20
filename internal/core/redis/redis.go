@@ -23,6 +23,8 @@ func OptionalClient(opt RedisOptions) *goredis.Client {
 		Addr:         opt.Addr,
 		Password:     opt.Password,
 		DB:           opt.DB,
+		PoolSize:     64,
+		MinIdleConns: 8,
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,

@@ -1,6 +1,9 @@
 package owasp
 
 import (
+	"bytes"
+	"encoding/base64"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -22,6 +25,23 @@ func BenchmarkCheckOWASPCleanTraffic(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		benchmarkOWASPHitsSink = CheckOWASP("mid", "/api/login", "page=1&sort=name", headers, bodyTargets)
+	}
+}
+
+func BenchmarkCheckOWASPWithCompiledThresholdsCleanTraffic(b *testing.B) {
+	headers := map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Host":            "example.com",
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+	}
+	bodyTargets := []string{"username", "admin", "password", "test123"}
+	thresholds := CompileThresholds("mid")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkOWASPHitsSink = CheckOWASPWithThresholds(thresholds, "/api/login", "page=1&sort=name", headers, bodyTargets)
 	}
 }
 
@@ -746,6 +766,26 @@ func TestCheckOWASP_XSS(t *testing.T) {
 	}
 }
 
+func TestIsPathWhitelistedRequiresDirectoryBoundary(t *testing.T) {
+	overrides := map[string]OWASPRuleOverride{
+		"owasp:test:001": {Whitelist: []string{"/public/*", "", " \t\n"}},
+	}
+	if !IsPathWhitelisted("owasp:test:001", "/public", overrides) {
+		t.Fatal("expected exact whitelist path to match")
+	}
+	if !IsPathWhitelisted("owasp:test:001", "/public/assets/app.js", overrides) {
+		t.Fatal("expected whitelist directory descendant to match")
+	}
+	if IsPathWhitelisted("owasp:test:001", "/publicity", overrides) {
+		t.Fatal("whitelist path must not match a same-prefix sibling")
+	}
+	if IsPathWhitelisted("owasp:test:001", "/admin", map[string]OWASPRuleOverride{
+		"owasp:test:001": {Whitelist: []string{"", " \t\n"}},
+	}) {
+		t.Fatal("blank whitelist entries must not match every path")
+	}
+}
+
 func TestCheckOWASP_Clean(t *testing.T) {
 	hits := CheckOWASP("mid", "/api/v1/users", "page=1&limit=10", nil, nil)
 	if len(hits) > 0 {
@@ -765,6 +805,35 @@ func TestNormalize(t *testing.T) {
 	result := normalize(input)
 	if result != "' or 1=1 " {
 		t.Fatalf("unexpected normalize result: %q", result)
+	}
+}
+
+func TestNormalizeURLSchemeControls(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "tab carriage return and line feed", input: "java\tscri\rpt\n:alert(1)", want: "javascript:alert(1)"},
+		{name: "ordinary space remains", input: "java script:alert(1)", want: "java script:alert(1)"},
+		{name: "non scheme text remains", input: "first\nsecond", want: "first\nsecond"},
+		{name: "documentation text remains", input: "java\nscript: documentation and examples", want: "java\nscript: documentation and examples"},
+		{name: "documentation dotted text remains", input: "java\nscript: see foo.bar for details", want: "java\nscript: see foo.bar for details"},
+		{name: "documentation quoted text remains", input: `java
+script: see "example" for details`, want: `java
+script: see "example" for details`},
+		{name: "documentation parenthesized text remains", input: "java\nscript: see the example (draft)", want: "java\nscript: see the example (draft)"},
+		{name: "documentation assignment text remains", input: "java\nscript: the value is key=value", want: "java\nscript: the value is key=value"},
+		{name: "attribute value folds", input: `<a href="java
+script:alert(1)">`, want: `<a href="javascript:alert(1)">`},
+		{name: "css url folds", input: "background:url(java\nscript:alert(1))", want: "background:url(javascript:alert(1))"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeURLSchemeControls(tt.input); got != tt.want {
+				t.Fatalf("normalizeURLSchemeControls(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -861,8 +930,6 @@ func TestStripSQLCommentsRemovesStrippableComments(t *testing.T) {
 		}
 	}
 }
-
-// ── False Positive Tests: clean requests that must NOT trigger ──
 
 func TestCheckOWASP_Clean_URLFragment(t *testing.T) {
 	hits := CheckOWASP("mid", "/page", "id=1#section", nil, nil)
@@ -969,6 +1036,69 @@ func TestCheckOWASP_BlazeBase64PathXSSStillDetected(t *testing.T) {
 	}
 }
 
+func TestCheckOWASPScansAllBase64TokensWithinByteBudget(t *testing.T) {
+	benignToken := base64.StdEncoding.EncodeToString([]byte("ABCDEFGH"))
+	attackToken := base64.StdEncoding.EncodeToString([]byte(`<script>alert(1)</script>`))
+	body := strings.Repeat(benignToken+" ", 128) + attackToken
+
+	hits := CheckOWASP("high", "/submit", "", nil, []string{body})
+	if !hasCategory(hits, CatXSS) {
+		t.Fatalf("expected XSS after preceding base64 tokens to be detected, got %+v", hits)
+	}
+}
+
+func TestCheckOWASPDetectsURLSafeBase64TokenWithInternalSymbols(t *testing.T) {
+	payload := append([]byte(`<script>alert(1)</script>`), 0x0f, 0x80)
+	token := base64.RawURLEncoding.EncodeToString(payload)
+	if !strings.ContainsAny(token, "-_") {
+		t.Fatalf("test token %q does not contain URL-safe base64 symbols", token)
+	}
+
+	hits := CheckOWASP("high", "/submit", "", nil, []string{token})
+	if !hasCategory(hits, CatXSS) {
+		t.Fatalf("expected URL-safe base64 XSS to be detected, got %+v", hits)
+	}
+}
+
+func TestCheckOWASPDetectsPaddedURLSafeBase64(t *testing.T) {
+	payload := append([]byte(`<script>alert(1)</script>`), 0xfb, 0xff, 0xff, 0xfb)
+	token := base64.URLEncoding.EncodeToString(payload)
+	if !strings.ContainsAny(token, "-_") || !strings.HasSuffix(token, "=") {
+		t.Fatalf("test token %q does not contain URL-safe symbols and padding", token)
+	}
+
+	hits := CheckOWASP("high", "/submit", "", nil, []string{token})
+	if !hasCategory(hits, CatXSS) {
+		t.Fatalf("expected padded URL-safe base64 XSS to be detected, got %+v", hits)
+	}
+}
+
+func TestDecodeBase64StringAcceptsPaddedURLSafeInput(t *testing.T) {
+	payload := append([]byte(`<script>alert(1)</script>`), bytes.Repeat([]byte{0xfb, 0xff, 0xff}, 96)...)
+	token := base64.URLEncoding.EncodeToString(payload)
+	if len(token) <= 256 || !strings.ContainsAny(token, "-_") || !strings.HasSuffix(token, "=") {
+		t.Fatalf("test token does not exercise padded URL-safe heap decode: length=%d", len(token))
+	}
+
+	decoded, err := decodeBase64String(token)
+	if err != nil {
+		t.Fatalf("decode padded URL-safe input: %v", err)
+	}
+	if !bytes.Equal(decoded, payload) {
+		t.Fatal("decoded padded URL-safe payload differs from input")
+	}
+}
+
+func TestNormalizeWithDecodeScansOversizedDecodedPrefix(t *testing.T) {
+	decoded := "1 union select password from users-- " + strings.Repeat("A", 33*1024)
+	outer := base64.StdEncoding.EncodeToString([]byte(decoded))
+
+	normalized := normalizeWithDecode(outer)
+	if !strings.Contains(normalized, "union select password from users") {
+		t.Fatalf("expected oversized decoded prefix to remain scannable, got prefix %q", normalized[:min(len(normalized), 256)])
+	}
+}
+
 func TestCheckOWASP_Clean_JWTAuth(t *testing.T) {
 	headers := map[string]string{
 		"Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ",
@@ -1045,8 +1175,6 @@ func TestCheckOWASP_Clean_SearchQuery(t *testing.T) {
 		t.Fatalf("normal search query should not trigger, got %+v", hits)
 	}
 }
-
-// ── 新增检测能力测试 ──
 
 // GROUP BY 注入 — 之前因 hasSQLiIndicator 缺少 "group by" 而漏报
 func TestCheckOWASP_SQLi_GroupBy(t *testing.T) {
@@ -1260,8 +1388,6 @@ func TestCheckOWASP_Clean_PipeEqualsParam(t *testing.T) {
 	}
 }
 
-// ── 新增误报抑制验证测试 ──
-
 // XSS：SVG图标 + iframe嵌入（常见于CMS富文本）不应触发
 func TestCheckOWASP_Clean_SVGAndIframe(t *testing.T) {
 	body := `<svg xmlns="http://www.w3.org/2000/svg" width="24"><path d="M10 20"/></svg>` +
@@ -1306,8 +1432,6 @@ func TestCheckOWASP_SQLi_GroupByWithComment(t *testing.T) {
 		t.Fatal("GROUP BY with SQL comment should still trigger SQLi")
 	}
 }
-
-// ── sqli:022 和 sqli:003 误报抑制测试 ──
 
 // sqli:022: if(length) 作为 JavaScript 变量检查不触发
 func TestCheckOWASP_Clean_JSIfLength(t *testing.T) {
@@ -1375,8 +1499,6 @@ func TestCheckOWASP_PathTrav_EtcPasswdStillDetected(t *testing.T) {
 	}
 }
 
-// ── sqli:001 suppressor tests ──
-
 // 搜索引擎查询中含 "union select" 不触发（FP 场景：开发者在 segmentfault 搜索 SQL 语法）
 func TestCheckOWASP_Clean_UnionSelectSearchQuery(t *testing.T) {
 	hits := CheckOWASP("mid", "/search", "q=union+select+%E5%85%B3%E9%94%AE%E5%AD%97%E6%80%8E%E4%B9%88%E7%94%A8", nil, nil)
@@ -1417,8 +1539,6 @@ func TestCheckOWASP_SQLi_UnionSelectNull(t *testing.T) {
 	}
 }
 
-// ── sqli:017 suppressor tests ──
-
 // AWS Aurora 文档 "INTO OUTFILE S3" 不触发（无引号路径）
 func TestCheckOWASP_Clean_IntoOutfileS3(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "", nil, []string{"SELECT INTO OUTFILE S3 the following statement exports"})
@@ -1434,8 +1554,6 @@ func TestCheckOWASP_SQLi_IntoOutfileWithPath(t *testing.T) {
 		t.Fatal("INTO OUTFILE with quoted path should still trigger")
 	}
 }
-
-// ── xss:002 suppressor tests ──
 
 // CDN onload 回调参数不触发（Cloudflare Turnstile 模式）
 func TestCheckOWASP_Clean_CDNOnloadCallback(t *testing.T) {
@@ -1494,8 +1612,6 @@ func TestCheckOWASP_XSS_OnloadAlert(t *testing.T) {
 	}
 }
 
-// ── sqli:006 suppressor tests ──
-
 // CSP 报告中 'use strict'; concat(...) 不触发
 func TestCheckOWASP_Clean_CSPReportUseStrict(t *testing.T) {
 	hits := CheckOWASP("mid", "/api/report", "", nil, []string{
@@ -1531,8 +1647,6 @@ func TestCheckOWASP_SQLi_006WithDropTable(t *testing.T) {
 		t.Fatal("sqli:006 with DROP TABLE context should still trigger")
 	}
 }
-
-// ── Sec-Ch-Ua 扩展请求头不触发测试 ──
 
 // Sec-Ch-Ua-Full-Version-List 含引号和分号不触发
 func TestCheckOWASP_Clean_SecChUaFullVersionList(t *testing.T) {
@@ -1572,10 +1686,76 @@ func TestCheckOWASP_CategorySensitivityOverridesGlobalLevel(t *testing.T) {
 	}
 }
 
+func TestCheckOWASPWithCompiledThresholdsMatchesPublicPath(t *testing.T) {
+	tests := []struct {
+		name                string
+		sensitivity         string
+		path                string
+		query               string
+		categorySensitivity map[string]string
+	}{
+		{name: "global mid SQLi", sensitivity: "mid", path: "/search", query: "q=1%20union%20select%20username%20from%20users--"},
+		{name: "category off", sensitivity: "high", path: "/", query: `q=<base href="https://evil.com/">`, categorySensitivity: map[string]string{string(CatXSS): "off"}},
+		{name: "category strict", sensitivity: "mid", path: "/", query: `q=<base href="https://evil.com/">`, categorySensitivity: map[string]string{string(CatXSS): "strict"}},
+		{name: "global off category enabled", sensitivity: "off", path: "/", query: `q=<base href="https://evil.com/">`, categorySensitivity: map[string]string{string(CatXSS): "strict"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := CheckOWASP(tt.sensitivity, tt.path, tt.query, nil, nil, tt.categorySensitivity)
+			got := CheckOWASPWithThresholds(CompileThresholds(tt.sensitivity, tt.categorySensitivity), tt.path, tt.query, nil, nil)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("compiled thresholds returned %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestCheckOWASP_Debug_BingCSPReport(t *testing.T) {
 	body := `[{"age":9694,"body":{"blockedURL":"https://r.bing.com/rp/ICf9X-WMafiZOnS_3M9RpM8994E.gz.js","disposition":"report","documentURL":"https://cn.bing.com/","effectiveDirective":"script-src-elem","lineNumber":1,"originalPolicy":"script-src https: 'strict-dynamic' 'report-sample' 'nonce-z35bKtCXz88W1OJrsFFgnLdDdiySmR6T76aMSP6v1Ec='; base-uri 'self';report-to csp-endpoint","referrer":"","sample":"","sourceFile":"https://cn.bing.com/","statusCode":200},"type":"csp-violation","url":"https://cn.bing.com/","user_agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"}]`
 	hits := CheckOWASP("mid", "/api/report", "cat=bingcsp", nil, []string{body})
 	if hasCategory(hits, CatSQLi) {
 		t.Fatalf("Bing CSP report body should not trigger SQLi, got %+v", hits)
+	}
+}
+
+func BenchmarkFirstOWASPSQLiTraffic(b *testing.B) {
+	headers := map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Host":            "example.com",
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+	}
+	thresholds := CompileThresholds("mid")
+	hit, ok := FirstOWASPHitWithThresholds(thresholds, "/search", "q=1%20union%20select%20username,password%20from%20users--", headers, nil)
+	if !ok {
+		b.Fatal("expected SQLi hit")
+	}
+	benchmarkOWASPHitSink = hit
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hit, ok = FirstOWASPHitWithThresholds(thresholds, "/search", "q=1%20union%20select%20username,password%20from%20users--", headers, nil)
+		if ok {
+			benchmarkOWASPHitSink = hit
+		}
+	}
+}
+
+func BenchmarkFirstOWASPXSSBareEventHandlerTraffic(b *testing.B) {
+	thresholds := CompileThresholds("mid")
+	hit, ok := FirstOWASPHitWithThresholds(thresholds, "/", `name=" onmouseover="alert(1)`, nil, nil)
+	if !ok {
+		b.Fatal("expected XSS hit")
+	}
+	benchmarkOWASPHitSink = hit
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hit, ok = FirstOWASPHitWithThresholds(thresholds, "/", `name=" onmouseover="alert(1)`, nil, nil)
+		if ok {
+			benchmarkOWASPHitSink = hit
+		}
 	}
 }

@@ -1,5 +1,9 @@
 # NoSQL 存储适配
 
+> [返回 扩展与插件系统](../扩展与插件系统.md)
+
+<cite>
+
 <cite>
 **本文引用的文件**
 - [internal/core/redis/redis.go](file://internal/core/redis/redis.go)
@@ -10,11 +14,11 @@
 - [internal/core/runtime.go](file://internal/core/runtime.go)
 - [internal/core/config.go](file://internal/core/config.go)
 - [internal/waf/antireplay/antireplay.go](file://internal/waf/antireplay/antireplay.go)
-- [docs/扩展与插件/存储后端扩展/NoSQL 存储适配.md](file://docs/扩展与插件/存储后端扩展/NoSQL 存储适配.md)
+- [docs/扩展与插件系统/存储后端扩展/NoSQL 存储适配.md](file://docs/扩展与插件系统/存储后端扩展/NoSQL 存储适配.md)
 - [docs/数据存储层/Redis 集成.md](file://docs/数据存储层/Redis 集成.md)
 - [docs/缓存与性能优化/Redis 集成与分布式缓存.md](file://docs/缓存与性能优化/Redis 集成与分布式缓存.md)
 - [docs/配置管理系统/分布式同步机制.md](file://docs/配置管理系统/分布式同步机制.md)
-- [docs/扩展与插件/存储后端扩展/连接池管理.md](file://docs/扩展与插件/存储后端扩展/连接池管理.md)
+- [docs/扩展与插件系统/存储后端扩展/连接池管理.md](file://docs/扩展与插件系统/存储后端扩展/连接池管理.md)
 </cite>
 
 ## 目录

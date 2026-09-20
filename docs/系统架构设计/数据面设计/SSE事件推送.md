@@ -1,5 +1,7 @@
 # SSE事件推送
 
+> [返回 系统架构设计](../系统架构设计.md)
+
 <cite>
 **本文引用的文件**
 - [internal/dataplane/sse.go](file://internal/dataplane/sse.go)

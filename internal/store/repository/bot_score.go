@@ -69,22 +69,30 @@ type BotScoreStats struct {
 
 func (r *BotScoreRepo) Stats24h() (*BotScoreStats, error) {
 	since := time.Now().Add(-24 * time.Hour)
-	var stats BotScoreStats
 
-	if err := r.db.Model(&store.BotScoreLog{}).Where("created_at >= ?", since).Count(&stats.Total24h).Error; err != nil {
-		return nil, err
+	var result struct {
+		Total    int64   `gorm:"column:total"`
+		Blocked  int64   `gorm:"column:blocked"`
+		HighRisk int64   `gorm:"column:high_risk"`
+		AvgScore float64 `gorm:"column:avg_score"`
 	}
-	if err := r.db.Model(&store.BotScoreLog{}).Where("created_at >= ? AND action IN ('block','drop')", since).Count(&stats.Blocked24h).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&store.BotScoreLog{}).Where("created_at >= ? AND is_high_risk = ?", since, true).Count(&stats.HighRisk24h).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&store.BotScoreLog{}).Select("COALESCE(AVG(total_score), 0)").Where("created_at >= ?", since).Scan(&stats.AvgScore24h).Error; err != nil {
+	err := r.db.Model(&store.BotScoreLog{}).
+		Select("COUNT(*) as total, "+
+			"SUM(CASE WHEN action IN ('block','drop') THEN 1 ELSE 0 END) as blocked, "+
+			"SUM(CASE WHEN is_high_risk = 1 THEN 1 ELSE 0 END) as high_risk, "+
+			"COALESCE(AVG(total_score), 0) as avg_score").
+		Where("created_at >= ?", since).
+		Scan(&result).Error
+	if err != nil {
 		return nil, err
 	}
 
-	return &stats, nil
+	return &BotScoreStats{
+		Total24h:    result.Total,
+		Blocked24h:  result.Blocked,
+		HighRisk24h: result.HighRisk,
+		AvgScore24h: result.AvgScore,
+	}, nil
 }
 
 func applyBotScoreFilters(q *gorm.DB, f BotScoreFilter) *gorm.DB {

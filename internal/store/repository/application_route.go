@@ -120,14 +120,13 @@ func (r *RecordedResourceRepo) Upsert(rec *store.RecordedResource) error {
 	if rec.HitCount <= 0 {
 		rec.HitCount = 1
 	}
+	// 唯一索引建在定长摘要列上（原五列组合在 MySQL 会超出索引键上限），
+	// 因此冲突判定也必须用该列。
+	rec.EnsureDedupKey()
 
 	return r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
-			{Name: "site_id"},
-			{Name: "method"},
-			{Name: "host"},
-			{Name: "path"},
-			{Name: "query_string"},
+			{Name: "dedup_key"},
 		},
 		DoUpdates: clause.Assignments(map[string]interface{}{
 			"last_seen":    rec.LastSeen,

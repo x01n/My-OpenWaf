@@ -2,7 +2,9 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,9 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/database"
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 
+	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -204,7 +209,10 @@ func TestApplyStoredRedisConfigOverridesEnvValues(t *testing.T) {
 		RedisPassword: "env-pass",
 		RedisDB:       1,
 	}
-	got := applyStoredRedisConfig(db, cfg)
+	got, err := applyStoredRedisConfig(db, cfg)
+	if err != nil {
+		t.Fatalf("apply stored redis config: %v", err)
+	}
 
 	if got.RedisAddr != "127.0.0.1:6380" {
 		t.Fatalf("redis addr = %q, want %q", got.RedisAddr, "127.0.0.1:6380")
@@ -235,6 +243,37 @@ func TestRuntimeStoredRedisConfigQueryUsesDialectQuotedKeyColumn(t *testing.T) {
 	}
 }
 
+func TestApplyStoredRedisConfigRejectsInvalidStoredValues(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "invalid json", raw: "{"},
+		{name: "negative db", raw: `{"enabled":false,"db":-1}`},
+		{name: "enabled without address", raw: `{"enabled":true}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "waf.db")
+			seedRedisConfigDBAndOpen(t, dbPath, tt.raw)
+			db, err := database.Open(database.Options{
+				Driver:  "sqlite",
+				DSN:     dbPath,
+				DataDir: filepath.Dir(dbPath),
+			})
+			if err != nil {
+				t.Fatalf("reopen sqlite db: %v", err)
+			}
+			defer closeRuntimeDB(db)
+
+			_, err = applyStoredRedisConfig(db, Config{})
+			if err == nil {
+				t.Fatal("applyStoredRedisConfig() error = nil, want validation error")
+			}
+		})
+	}
+}
+
 func TestApplyStoredRedisConfigDisablesEnvRedisWhenStoredConfigDisabled(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "waf.db")
 	seedRedisConfigDBAndOpen(t, dbPath, `{"enabled":false,"addr":"127.0.0.1:6380","password":"db-pass","db":5}`)
@@ -254,7 +293,10 @@ func TestApplyStoredRedisConfigDisablesEnvRedisWhenStoredConfigDisabled(t *testi
 		RedisPassword: "env-pass",
 		RedisDB:       1,
 	}
-	got := applyStoredRedisConfig(db, cfg)
+	got, err := applyStoredRedisConfig(db, cfg)
+	if err != nil {
+		t.Fatalf("apply stored redis config: %v", err)
+	}
 
 	if got.RedisAddr != "" {
 		t.Fatalf("redis addr = %q, want empty", got.RedisAddr)
@@ -330,6 +372,131 @@ func TestNewRuntimeUsesStoredRedisConfigOnStartup(t *testing.T) {
 	}
 	if !sawSelect {
 		t.Fatalf("expected SELECT 7 in commands, got %v", commands)
+	}
+}
+
+func TestRuntimeReloadSnapshotReusesConfiguredDynamicKeyBase(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrate(db); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	if err := db.Create(&store.Site{
+		Host:         "runtime-dynamic-key.example.test",
+		Bind:         ":80",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Enabled:      true,
+	}).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{
+		Key:   "bot_settings",
+		Value: `{"dynamic_protection_enabled":true,"html_obfuscation":true}`,
+	}).Error; err != nil {
+		t.Fatalf("seed dynamic protection settings: %v", err)
+	}
+	layer, err := cache.NewLayer()
+	if err != nil {
+		t.Fatalf("create snapshot cache: %v", err)
+	}
+	rt := &Runtime{DB: db, Snapshot: &snapshot.Holder{}, Cache: layer}
+	keyBase := bytes.Repeat([]byte{0x4c}, 32)
+	expected := append([]byte(nil), keyBase...)
+	if err := rt.SetSnapshotDynamicKeyBase(keyBase); err != nil {
+		t.Fatalf("configure dynamic key base: %v", err)
+	}
+	keyBase[0] = 0
+	if err := rt.ReloadSnapshot(); err != nil {
+		t.Fatalf("initial snapshot reload: %v", err)
+	}
+	first, ok := rt.Snapshot.Load().MatchSite(":80", "runtime-dynamic-key.example.test")
+	if !ok {
+		t.Fatal("runtime dynamic protection site was not matched")
+	}
+	if !bytes.Equal(first.DynamicProtection.EncryptionKeyBase, expected) {
+		t.Fatalf("initial snapshot key base did not match the configured key base (length=%d)", len(first.DynamicProtection.EncryptionKeyBase))
+	}
+	if err := store.BumpRevision(db); err != nil {
+		t.Fatalf("bump revision: %v", err)
+	}
+	if err := rt.ReloadSnapshot(); err != nil {
+		t.Fatalf("reloaded snapshot: %v", err)
+	}
+	second, ok := rt.Snapshot.Load().MatchSite(":80", "runtime-dynamic-key.example.test")
+	if !ok {
+		t.Fatal("reloaded dynamic protection site was not matched")
+	}
+	if !bytes.Equal(second.DynamicProtection.EncryptionKeyBase, expected) {
+		t.Fatalf("reloaded snapshot key base did not match the initial key base (length=%d)", len(second.DynamicProtection.EncryptionKeyBase))
+	}
+}
+
+func TestRuntimeReloadSnapshotPrePublishFailureKeepsCurrentGeneration(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrate(db); err != nil {
+		t.Fatalf("migrate database: %v", err)
+	}
+	layer, err := cache.NewLayer()
+	if err != nil {
+		t.Fatalf("create snapshot cache: %v", err)
+	}
+	rt := &Runtime{DB: db, Snapshot: &snapshot.Holder{}, Cache: layer}
+	if err := rt.SetSnapshotDynamicKeyBase(bytes.Repeat([]byte{0x2d}, 32)); err != nil {
+		t.Fatalf("configure dynamic key base: %v", err)
+	}
+	if err := rt.ReloadSnapshot(); err != nil {
+		t.Fatalf("initial snapshot reload: %v", err)
+	}
+	previous := rt.Snapshot.Load()
+	if previous == nil {
+		t.Fatal("initial snapshot was not published")
+	}
+	if err := store.BumpRevision(db); err != nil {
+		t.Fatalf("bump revision: %v", err)
+	}
+
+	prepareErr := errors.New("runtime unavailable")
+	called := false
+	err = rt.ReloadSnapshotWithPrePublish(func(next *snapshot.Snapshot) error {
+		called = true
+		if rt.Snapshot.Load() != previous {
+			t.Fatal("new snapshot became visible before pre-publish completed")
+		}
+		if next.Revision <= previous.Revision {
+			t.Fatalf("prepared revision = %d, previous = %d", next.Revision, previous.Revision)
+		}
+		return prepareErr
+	})
+	if !errors.Is(err, prepareErr) {
+		t.Fatalf("reload error = %v, want %v", err, prepareErr)
+	}
+	if !called {
+		t.Fatal("pre-publish callback was not called")
+	}
+	if rt.Snapshot.Load() != previous {
+		t.Fatal("failed pre-publish replaced the current snapshot")
+	}
+	if _, ok := layer.GetSnapshot(previous.Revision + 1); ok {
+		t.Fatal("failed pre-publish cached an unpublished snapshot")
+	}
+
+	if err := rt.ReloadSnapshotWithPrePublish(func(next *snapshot.Snapshot) error {
+		if rt.Snapshot.Load() != previous {
+			t.Fatal("new snapshot became visible before successful pre-publish completed")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("reload after runtime recovery: %v", err)
+	}
+	current := rt.Snapshot.Load()
+	if current == nil || current.Revision <= previous.Revision {
+		t.Fatalf("published revision = %#v, previous = %d", current, previous.Revision)
 	}
 }
 

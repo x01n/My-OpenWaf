@@ -9,7 +9,6 @@ package cache
 
 import (
 	"fmt"
-	"sync/atomic"
 
 	"github.com/dgraph-io/ristretto"
 
@@ -20,7 +19,6 @@ import (
 // Each WAF node holds its own copy; cross-node sync is handled by Redis pub/sub
 // (config_sync) which triggers a DB reload, not by sharing cached snapshots.
 type Layer struct {
-	rev   atomic.Uint64
 	inner *ristretto.Cache
 }
 
@@ -41,7 +39,9 @@ const snapKey = "snapshot"
 
 // SetSnapshot caches the immutable snapshot under the given revision.
 func (l *Layer) SetSnapshot(rev uint64, sn *snapshot.Snapshot) {
-	l.rev.Store(rev)
+	if sn == nil || sn.Revision != rev {
+		return
+	}
 	k := fmt.Sprintf("%s:%d", snapKey, rev)
 	l.inner.Set(k, sn, 1)
 	l.inner.Wait()
@@ -60,5 +60,8 @@ func (l *Layer) GetSnapshot(rev uint64) (*snapshot.Snapshot, bool) {
 
 // InvalidateAll clears the entire local cache.
 func (l *Layer) InvalidateAll() {
+	if l == nil || l.inner == nil {
+		return
+	}
 	l.inner.Clear()
 }

@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-// ── color codes ──
-
 const (
 	reset   = "\033[0m"
 	red     = "\033[31m"
@@ -25,8 +23,6 @@ const (
 	white   = "\033[97m"
 	bold    = "\033[1m"
 )
-
-// ── global singleton ──
 
 var (
 	initOnce      sync.Once
@@ -137,9 +133,12 @@ func buildConfiguredOutput(filePath string, alsoStdout bool) io.Writer {
 	}
 
 	// 创建日志目录
-	dir := filePath[:max(strings.LastIndex(filePath, "/"), strings.LastIndex(filePath, "\\"))]
-	if dir != "" {
-		os.MkdirAll(dir, 0755)
+	separator := max(strings.LastIndex(filePath, "/"), strings.LastIndex(filePath, "\\"))
+	if separator >= 0 {
+		dir := filePath[:separator]
+		if dir != "" {
+			_ = os.MkdirAll(dir, 0755)
+		}
 	}
 
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -184,8 +183,6 @@ func useColor() bool {
 	}
 	return false
 }
-
-// ── pretty handler ──
 
 type prettyHandler struct {
 	level slog.Level

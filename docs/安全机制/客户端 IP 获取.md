@@ -1,5 +1,7 @@
 # 客户端 IP 获取
 
+> [返回 安全机制](安全机制.md)
+
 <cite>
 **本文档引用的文件**
 - [clientip.go](file://internal/security/clientip.go)

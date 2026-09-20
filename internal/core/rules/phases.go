@@ -13,6 +13,7 @@ import (
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/antireplay"
 	"My-OpenWaf/internal/waf/bot"
@@ -51,13 +52,19 @@ func fillMatchCtxFromPipeline(ctx *pipeline.RequestCtx, needsDerivedHeaders bool
 	mc.Body = ctx.Body
 	if needsDerivedHeaders {
 		if len(ctx.TLS.ALPN) > 0 {
-			mc.TLSALPN = strings.Join(ctx.TLS.ALPN, ",")
+			mc.TLSALPN = ctx.DerivedALPN(func() string {
+				return strings.Join(ctx.TLS.ALPN, ",")
+			})
 		}
 		if len(ctx.TLS.CipherSuites) > 0 {
-			mc.TLSCipherSuites = formatTLSCipherSuitesHeaderValue(ctx.TLS.CipherSuites)
+			mc.TLSCipherSuites = ctx.DerivedCipherSuites(func() string {
+				return formatTLSCipherSuitesHeaderValue(ctx.TLS.CipherSuites)
+			})
 		}
 		if len(ctx.HeaderKeys) > 0 {
-			mc.HeaderOrder = strings.Join(ctx.HeaderKeys, ",")
+			mc.HeaderOrder = ctx.DerivedHeaderOrder(func() string {
+				return strings.Join(ctx.HeaderKeys, ",")
+			})
 		}
 	}
 }
@@ -81,16 +88,11 @@ func executeCompiledPhase(ctx *pipeline.RequestCtx, rules []Compiled, allowShort
 			continue
 		}
 		r := hit(rules[i])
-		if allowShortCircuit && r.Type == action.Allow {
-			return r, true
-		}
 		return r, r.IsTerminal()
 	}
 
 	return action.Pass(), false
 }
-
-// ── ACL phase ──
 
 type aclPhase struct {
 	rules               []Compiled
@@ -113,34 +115,6 @@ func (p *aclPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return executeCompiledPhase(ctx, p.rules, true, p.needsDerivedHeaders)
 }
 
-// ── ACL allow precheck phase ──
-
-type aclAllowPrecheckPhase struct {
-	rules               []Compiled
-	needsDerivedHeaders bool
-}
-
-func NewACLAllowPrecheckPhasePrecompiled(rules []Compiled) pipeline.Phase {
-	return &aclAllowPrecheckPhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
-}
-
-func (p *aclAllowPrecheckPhase) Name() string { return "acl_allow_precheck" }
-
-func (p *aclAllowPrecheckPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	mc := ctxFromPipeline(ctx, p.needsDerivedHeaders)
-	for i := range p.rules {
-		if p.rules[i].runtimeAction != action.Allow {
-			continue
-		}
-		if p.rules[i].Match(mc) {
-			return hit(p.rules[i]), true
-		}
-	}
-	return action.Pass(), false
-}
-
-// ── Signature phase ──
-
 type signaturePhase struct {
 	rules               []Compiled
 	needsDerivedHeaders bool
@@ -161,8 +135,6 @@ func (p *signaturePhase) Name() string { return "signature" }
 func (p *signaturePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return executeCompiledPhase(ctx, p.rules, false, p.needsDerivedHeaders)
 }
-
-// ── Custom phase ──
 
 type customPhase struct {
 	rules               []Compiled
@@ -296,8 +268,6 @@ func compoundConditionNeedsDerivedHeaders(cond compoundCondition) bool {
 	}
 }
 
-// ── Request Rate Limit phase ──
-
 type reqRateLimitPhase struct {
 	limiter ratelimit.RateLimiterBackend
 	act     action.Type
@@ -339,20 +309,69 @@ func (p *reqRateLimitPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 	return result, result.IsTerminal()
 }
 
-// ── IP Reputation phase ──
-
 type ipReputationPhase struct {
-	rep *iprep.IPReputation
+	rep           *iprep.IPReputation
+	siteWhitelist []iprep.IPListEntry
+	siteBlacklist []iprep.IPListEntry
 }
 
-func NewIPReputationPhase(rep *iprep.IPReputation) pipeline.Phase {
-	return &ipReputationPhase{rep: rep}
+func NewIPReputationPhase(rep *iprep.IPReputation, siteWhitelist, siteBlacklist []iprep.IPListEntry) pipeline.Phase {
+	return &ipReputationPhase{
+		rep:           rep,
+		siteWhitelist: siteWhitelist,
+		siteBlacklist: siteBlacklist,
+	}
 }
 
 func (p *ipReputationPhase) Name() string { return "ip_reputation" }
 
+func siteIPEntryMatches(entry iprep.IPListEntry, ip net.IP, now int64) bool {
+	if entry.ExpireAt > 0 && now > entry.ExpireAt {
+		return false
+	}
+	if entry.CIDR != nil && entry.CIDR.Contains(ip) {
+		return true
+	}
+	return entry.Single != nil && entry.Single.Equal(ip)
+}
+
 func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	if p.rep == nil || ctx.ClientIP == nil {
+	if ctx.ClientIP == nil {
+		return action.Pass(), false
+	}
+
+	now := time.Now().Unix()
+	for _, entry := range p.siteWhitelist {
+		if siteIPEntryMatches(entry, ctx.ClientIP, now) {
+			return action.Result{
+				Type:      action.Allow,
+				Phase:     "ip_reputation",
+				RuleIDStr: "ip:site_whitelist",
+				MatchDesc: "site whitelist: " + entry.Note,
+				Matched:   true,
+				Category:  "whitelist",
+			}, false
+		}
+	}
+	for _, entry := range p.siteBlacklist {
+		if !siteIPEntryMatches(entry, ctx.ClientIP, now) {
+			continue
+		}
+		act := action.Intercept
+		if entry.Action == "drop" || entry.Action == "block" {
+			act = action.Drop
+		}
+		return action.Result{
+			Type:      act,
+			Phase:     "ip_reputation",
+			RuleIDStr: "ip:site_blacklist",
+			MatchDesc: "site blacklist: " + entry.Note,
+			Matched:   true,
+			Category:  "site_blacklist",
+		}, true
+	}
+
+	if p.rep == nil {
 		return action.Pass(), false
 	}
 	d := p.rep.Check(ctx.ClientIP)
@@ -360,7 +379,6 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 		return action.Pass(), false
 	}
 	if d.Allowed {
-		// Whitelist: pass through but mark.
 		return action.Result{
 			Type:      action.Allow,
 			Phase:     "ip_reputation",
@@ -369,19 +387,20 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 			Category:  "whitelist",
 		}, true
 	}
-	// Blocked.
-	result := action.Result{
-		Type:      action.Intercept,
+
+	act := action.Intercept
+	if d.Action == "drop" || d.Action == "block" {
+		act = action.Drop
+	}
+	return action.Result{
+		Type:      act,
 		Phase:     "ip_reputation",
 		MatchDesc: d.Category + ": " + d.Reason,
 		Matched:   true,
 		Category:  d.Category,
 		RuleIDStr: "iprep:" + d.Category,
-	}
-	return result, true
+	}, true
 }
-
-// ── Bot Detection phase (two-phase: PreScreen → DeepScore) ──
 
 type botPhase struct {
 	rep       *iprep.IPReputation  // optional, for recording violations
@@ -404,11 +423,24 @@ func NewBotPhaseWithGeo(rep *iprep.IPReputation, geo *bot.MaxMindResolver, thres
 	return &botPhase{rep: rep, geo: geo, threshold: threshold}
 }
 
+/**
+ * challengePassIdentity returns the immutable pre-plugin identity when the
+ * dataplane captured it, while preserving direct RequestCtx callers.
+ */
+func challengePassIdentity(ctx *pipeline.RequestCtx) (string, string) {
+	if ctx.ChallengeIdentityCaptured {
+		return ctx.ChallengeIdentityCookie, ctx.ChallengeIdentityUserAgent
+	}
+	cookie, _ := lookupHeaderValue(ctx.Headers, "cookie")
+	return cookie, ctx.UserAgent
+}
+
 func (p *botPhase) Name() string { return "bot_detection" }
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// Skip challenge for requests that already passed a signed verification cookie.
-	if cookie, ok := lookupHeaderValue(ctx.Headers, "cookie"); ok && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: ctx.UserAgent, SiteID: ctx.SiteID, Bind: ctx.Bind}, time.Now()) {
+	cookie, userAgent := challengePassIdentity(ctx)
+	if cookie != "" && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: userAgent, SiteID: ctx.SiteID, Bind: ctx.Bind}, time.Now()) {
 		return action.Pass(), false
 	}
 
@@ -450,11 +482,9 @@ func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs 
 			actionStr = "observe"
 		}
 	}
-	detailStr := ""
+	var details map[string]string
 	if bs.IsHighRisk && len(bs.Details) > 0 {
-		if data, err := json.Marshal(bs.Details); err == nil {
-			detailStr = string(data)
-		}
+		details = bs.Details
 	}
 	ctx.BotScoreResult = &pipeline.BotScoreInfo{
 		TotalScore:       bs.Total,
@@ -464,7 +494,7 @@ func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs 
 		IPRepScore:       bs.IPRepScore,
 		IsHighRisk:       bs.IsHighRisk,
 		Action:           actionStr,
-		Details:          detailStr,
+		Details:          details,
 	}
 }
 
@@ -514,12 +544,11 @@ func (p *botPhase) verdictToResult(v bot.BotVerdict, ctx *pipeline.RequestCtx) (
 	return action.Pass(), false
 }
 
-// ── OWASP Default phase ──
-
 type owaspPhase struct {
 	cfg                 *store.ProtectionConfig
 	categorySensitivity map[string]string
 	overrides           map[string]owasp.OWASPRuleOverride
+	thresholds          owasp.CompiledThresholds
 	fileUploadEnabled   bool
 	protoEnabled        bool
 }
@@ -529,6 +558,7 @@ func NewOWASPPhase(cfg *store.ProtectionConfig) pipeline.Phase {
 	if cfg != nil {
 		phase.categorySensitivity = cfg.EffectiveCategorySensitivity()
 		phase.overrides = owasp.ParseOWASPRulesConfig(cfg.OWASPRulesConfig)
+		phase.thresholds = owasp.CompileThresholds(cfg.OWASPSensitivity, phase.categorySensitivity)
 		_, phase.fileUploadEnabled = owasp.CategoryThreshold(cfg.OWASPSensitivity, owasp.CatFileUpload, phase.categorySensitivity)
 		_, phase.protoEnabled = owasp.CategoryThreshold(cfg.OWASPSensitivity, owasp.CatProtoViol, phase.categorySensitivity)
 	}
@@ -590,17 +620,11 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		}
 	}
 
-	hits := owasp.CheckOWASP(p.cfg.OWASPSensitivity, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, categorySensitivity)
-
-	// Apply per-rule overrides and path whitelists.
-	if len(hits) > 0 {
-		hits = owasp.FilterHits(hits, ctx.Path, overrides, categorySensitivity)
-	}
-
-	if len(hits) == 0 {
+	hit, ok := owasp.FirstAcceptedOWASPHitWithThresholds(p.thresholds, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, overrides, categorySensitivity)
+	if !ok {
 		return action.Pass(), false
 	}
-	result := owaspHitResult(hits[0], p.cfg, overrides)
+	result := owaspHitResult(hit, p.cfg, overrides)
 	return result, result.IsTerminal()
 }
 
@@ -611,19 +635,21 @@ func owaspHitResult(hit owasp.OWASPHit, cfg *store.ProtectionConfig, overrides m
 		act = normalizeConfiguredAction(override.Action)
 	}
 	result := action.Result{
-		Type:       action.Normalize(act),
-		RuleIDStr:  hit.RuleID,
-		Phase:      "owasp_default",
-		MatchDesc:  hit.Desc,
-		Matched:    true,
-		Category:   string(hit.Category),
-		StatusCode: override.StatusCode,
-		RedirectTo: override.RedirectTo,
+		Type:        action.Normalize(act),
+		RuleIDStr:   hit.RuleID,
+		Phase:       "owasp_default",
+		MatchDesc:   hit.Desc,
+		Matched:     true,
+		Category:    string(hit.Category),
+		StatusCode:  override.StatusCode,
+		RedirectTo:  override.RedirectTo,
+		CaptchaType: override.CaptchaType,
+	}
+	if result.Type != action.CaptchaChallenge {
+		result.CaptchaType = ""
 	}
 	return result
 }
-
-// ── CVE Detection phase ──
 
 type cvePhase struct {
 	cfg                 *store.ProtectionConfig
@@ -665,8 +691,32 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 
 	var req cve.CVERequest
 	cve.BuildCVERequestInto(&req, ctx.Path, ctx.RawQuery, ctx.Headers, ctx.Body, ctx.ContentType)
-	best, ok := p.detector.DetectFirst(&req, categorySensitivity)
-	if !ok {
+	matches := p.detector.Detect(&req, categorySensitivity)
+	if len(matches) == 0 {
+		return action.Pass(), false
+	}
+	var best cve.CVEMatch
+	overrides := p.ruleOverrides
+	if !p.cachedConfig {
+		overrides = cve.ParseCVERuleOverrides(p.cfg.CVERulesConfig)
+	}
+	found := false
+	for _, match := range matches {
+		disabled := false
+		for _, key := range []string{match.Pattern, "cve:" + match.Pattern, match.CVEID, "cve:" + match.CVEID} {
+			if ov, ok := overrides[key]; ok {
+				disabled = ov.Enabled != nil && !*ov.Enabled
+				break
+			}
+		}
+		if disabled {
+			continue
+		}
+		best = match
+		found = true
+		break
+	}
+	if !found {
 		return action.Pass(), false
 	}
 
@@ -678,24 +728,31 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	act := normalizeConfiguredAction(cveAction)
 	statusCode := 0
 	redirectTo := ""
+	captchaType := ""
 	explicitAction := false
 	if best.Action != "" {
 		act = normalizeConfiguredAction(best.Action)
 		explicitAction = true
 	}
-	overrides := p.ruleOverrides
-	if !p.cachedConfig {
-		overrides = cve.ParseCVERuleOverrides(p.cfg.CVERulesConfig)
+	if best.CaptchaType != "" {
+		captchaType = best.CaptchaType
 	}
 	if len(overrides) > 0 {
-		for _, key := range []string{best.CVEID, "cve:" + best.CVEID} {
+		for _, key := range []string{best.Pattern, "cve:" + best.Pattern, best.CVEID, "cve:" + best.CVEID} {
 			if ov, ok := overrides[key]; ok {
 				if ov.Action != "" {
 					act = normalizeConfiguredAction(ov.Action)
 					explicitAction = true
 				}
-				statusCode = ov.StatusCode
-				redirectTo = ov.RedirectTo
+				if ov.StatusCode != 0 {
+					statusCode = ov.StatusCode
+				}
+				if ov.RedirectTo != "" {
+					redirectTo = ov.RedirectTo
+				}
+				if ov.CaptchaType != "" {
+					captchaType = ov.CaptchaType
+				}
 				break
 			}
 		}
@@ -714,16 +771,20 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 			}
 		}
 	}
+	if action.Normalize(act) != action.CaptchaChallenge {
+		captchaType = ""
+	}
 
 	result := action.Result{
-		Type:       action.Normalize(act),
-		RuleIDStr:  "cve:" + best.CVEID,
-		Phase:      "cve_detection",
-		MatchDesc:  best.Description + " [" + best.Pattern + "]",
-		Matched:    true,
-		Category:   "cve_" + best.Category,
-		StatusCode: statusCode,
-		RedirectTo: redirectTo,
+		Type:        action.Normalize(act),
+		RuleIDStr:   "cve:" + best.CVEID,
+		Phase:       "cve_detection",
+		MatchDesc:   best.Description + " [" + best.Pattern + "]",
+		Matched:     true,
+		Category:    "cve_" + best.Category,
+		StatusCode:  statusCode,
+		RedirectTo:  redirectTo,
+		CaptchaType: captchaType,
 	}
 	return result, result.IsTerminal()
 }
@@ -767,36 +828,35 @@ func shouldScanOpaqueBodyTarget(body []byte) bool {
 			return true
 		}
 	}
-	s := string(body)
-	return containsFoldASCII(s, "%0d") ||
-		containsFoldASCII(s, "%0a") ||
-		containsFoldASCII(s, "%3c") ||
-		containsFoldASCII(s, "%3e") ||
-		containsFoldASCII(s, "%27") ||
-		containsFoldASCII(s, "%22") ||
-		containsFoldASCII(s, "javascript:") ||
-		containsFoldASCII(s, "vbscript:") ||
-		containsFoldASCII(s, "document.") ||
-		containsFoldASCII(s, "onerror") ||
-		containsFoldASCII(s, "onload") ||
-		containsFoldASCII(s, "onmouse") ||
-		containsFoldASCII(s, "onfocus") ||
-		containsFoldASCII(s, "alert(") ||
-		containsFoldASCII(s, " union ") ||
-		containsFoldASCII(s, " select ") ||
-		containsFoldASCII(s, " or ") ||
-		containsFoldASCII(s, " and ") ||
-		containsFoldASCII(s, "sleep(") ||
-		containsFoldASCII(s, "benchmark(") ||
-		containsFoldASCII(s, "../") ||
-		containsFoldASCII(s, "127.0.") ||
-		containsFoldASCII(s, "localhost") ||
-		containsFoldASCII(s, "169.254.169.254") ||
-		containsFoldASCII(s, "metadata.google") ||
-		containsFoldASCII(s, "aced0005") ||
-		containsFoldASCII(s, "ro0ab") ||
-		containsFoldASCII(s, "objectinputstream") ||
-		containsFoldASCII(s, "deserializ")
+	return containsFoldASCIIBytes(body, "%0d") ||
+		containsFoldASCIIBytes(body, "%0a") ||
+		containsFoldASCIIBytes(body, "%3c") ||
+		containsFoldASCIIBytes(body, "%3e") ||
+		containsFoldASCIIBytes(body, "%27") ||
+		containsFoldASCIIBytes(body, "%22") ||
+		containsFoldASCIIBytes(body, "javascript:") ||
+		containsFoldASCIIBytes(body, "vbscript:") ||
+		containsFoldASCIIBytes(body, "document.") ||
+		containsFoldASCIIBytes(body, "onerror") ||
+		containsFoldASCIIBytes(body, "onload") ||
+		containsFoldASCIIBytes(body, "onmouse") ||
+		containsFoldASCIIBytes(body, "onfocus") ||
+		containsFoldASCIIBytes(body, "alert(") ||
+		containsFoldASCIIBytes(body, " union ") ||
+		containsFoldASCIIBytes(body, " select ") ||
+		containsFoldASCIIBytes(body, " or ") ||
+		containsFoldASCIIBytes(body, " and ") ||
+		containsFoldASCIIBytes(body, "sleep(") ||
+		containsFoldASCIIBytes(body, "benchmark(") ||
+		containsFoldASCIIBytes(body, "../") ||
+		containsFoldASCIIBytes(body, "127.0.") ||
+		containsFoldASCIIBytes(body, "localhost") ||
+		containsFoldASCIIBytes(body, "169.254.169.254") ||
+		containsFoldASCIIBytes(body, "metadata.google") ||
+		containsFoldASCIIBytes(body, "aced0005") ||
+		containsFoldASCIIBytes(body, "ro0ab") ||
+		containsFoldASCIIBytes(body, "objectinputstream") ||
+		containsFoldASCIIBytes(body, "deserializ")
 }
 
 // extractBodyTargets parses the request body based on content type and returns
@@ -831,7 +891,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 		primary = []string{string(body[:limit])}
 		parsedOK = true
 	default:
-		limit := 48 * 1024
+		limit := snapshot.WAFBodyScanLimit
 		if len(body) < limit {
 			limit = len(body)
 		}
@@ -862,7 +922,7 @@ func extractBodyTargets(body []byte, contentType string) []string {
 	// is base64-wrapped but Content-Type says application/json), always scan the
 	// raw body so normalizeWithDecode can peel the base64 layer.
 	if !parsedOK && !skipRawFallback && len(body) > 0 {
-		limit := 48 * 1024
+		limit := snapshot.WAFBodyScanLimit
 		if len(body) < limit {
 			limit = len(body)
 		}
@@ -890,20 +950,7 @@ func dedupeBodyTargets(targets []string) []string {
 		return targets
 	}
 
-	duplicate := false
 	seen := make(map[string]struct{}, len(targets))
-	for _, target := range targets {
-		if _, ok := seen[target]; ok {
-			duplicate = true
-			break
-		}
-		seen[target] = struct{}{}
-	}
-	if !duplicate {
-		return targets
-	}
-
-	seen = make(map[string]struct{}, len(targets))
 	out := targets[:0]
 	for _, target := range targets {
 		if _, ok := seen[target]; ok {
@@ -919,7 +966,7 @@ func dedupeBodyTargets(targets []string) []string {
 // Both parameter names (keys) and values are scanned — attackers may inject
 // payloads via key names (e.g. `1 UNION SELECT--=x`).
 func extractFormValues(body string) []string {
-	var vals []string
+	vals := make([]string, 0, (strings.Count(body, "&")+1)*2)
 	for body != "" {
 		pair := body
 		if i := strings.IndexByte(pair, '&'); i >= 0 {
@@ -932,18 +979,22 @@ func extractFormValues(body string) []string {
 		}
 		paramKey, value, hasEq := strings.Cut(pair, "=")
 		if hasEq {
-			dv, err := url.QueryUnescape(value)
-			if err != nil {
-				dv = value
+			dv := value
+			if strings.IndexByte(value, '%') >= 0 || strings.IndexByte(value, '+') >= 0 {
+				if decoded, err := url.QueryUnescape(value); err == nil {
+					dv = decoded
+				}
 			}
 			if dv != "" {
 				vals = append(vals, dv)
 			}
 		}
 		// Also scan the parameter name for injected payloads.
-		dk, err := url.QueryUnescape(paramKey)
-		if err != nil {
-			dk = paramKey
+		dk := paramKey
+		if strings.IndexByte(paramKey, '%') >= 0 || strings.IndexByte(paramKey, '+') >= 0 {
+			if decoded, err := url.QueryUnescape(paramKey); err == nil {
+				dk = decoded
+			}
 		}
 		if dk != "" {
 			vals = append(vals, dk)
@@ -1050,8 +1101,6 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 	return vals
 }
 
-// ── Anti-Replay Nonce phase ──
-
 type antiReplayPhase struct {
 	mgr *antireplay.AntiReplayManager
 }
@@ -1070,6 +1119,11 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 	nonce, _ := lookupHeaderValue(ctx.Headers, "x-nonce")
 	if nonce == "" {
 		// No nonce provided — skip replay check.
+		return action.Pass(), false
+	}
+	if ctx.AntiReplayConsumedNonce != "" && nonce == ctx.AntiReplayConsumedNonce {
+		// The handler already consumed this exact Cookie nonce. A different X-Nonce
+		// still reaches ValidateAndRotate below and cannot bypass replay validation.
 		return action.Pass(), false
 	}
 	clientIP := ""
@@ -1094,8 +1148,6 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 	}
 	return action.Pass(), false
 }
-
-// ── Parallel OWASP + CVE Detection phase ──
 
 type parallelOWASPCVEPhase struct {
 	cfg      *store.ProtectionConfig
@@ -1161,8 +1213,6 @@ func (p *parallelOWASPCVEPhase) checkCVE(ctx *pipeline.RequestCtx) (action.Resul
 	return p.cve.Execute(ctx)
 }
 
-// ── helpers ──
-
 func filterPhase(rules []Compiled, phase string) []Compiled {
 	var out []Compiled
 	for _, r := range rules {
@@ -1198,14 +1248,67 @@ func hit(c Compiled) action.Result {
 		desc = compiledMatchDesc(c.Kind, c.Arg)
 	}
 	return action.Result{
-		Type:       act,
-		RuleID:     c.ID,
-		RuleIDStr:  ruleIDStr,
-		Phase:      c.Phase,
-		MatchDesc:  desc,
-		Matched:    true,
-		Category:   c.Kind,
-		StatusCode: c.StatusCode,
-		RedirectTo: c.RedirectTo,
+		Type:        act,
+		RuleID:      c.ID,
+		RuleIDStr:   ruleIDStr,
+		Phase:       c.Phase,
+		MatchDesc:   desc,
+		Matched:     true,
+		Category:    c.Kind,
+		StatusCode:  c.StatusCode,
+		RedirectTo:  c.RedirectTo,
+		CaptchaType: c.CaptchaType,
 	}
+}
+
+type browserSignPhase struct {
+	cfg *store.ProtectionConfig
+}
+
+// NewBrowserSignPhase 创建浏览器请求签名校验 phase。
+// 仅对 IsLikelyAPIRequest 识别为 API 的请求强制校验请求头签名。
+func NewBrowserSignPhase(cfg *store.ProtectionConfig) pipeline.Phase {
+	return &browserSignPhase{cfg: cfg}
+}
+
+func (p *browserSignPhase) Name() string { return "browser_sign" }
+
+func (p *browserSignPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
+	if p.cfg == nil || !p.cfg.BrowserSignEnabled {
+		return action.Pass(), false
+	}
+	if !challenge.IsLikelyAPIRequest(ctx.Method, ctx.Path, ctx.Headers) {
+		return action.Pass(), false
+	}
+	// 已通过挑战 cookie 的请求不重复强制签名，避免刷新后误伤。
+	cookie, userAgent := challengePassIdentity(ctx)
+	if cookie != "" && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{
+		Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: userAgent, SiteID: ctx.SiteID, Bind: ctx.Bind,
+	}, time.Now()) {
+		return action.Pass(), false
+	}
+
+	ok, reason := challenge.VerifyBrowserSignHeaders(ctx.Headers, ctx.Method, ctx.Path, ctx.RawQuery, ctx.SiteID, time.Now())
+	if ok {
+		return action.Pass(), false
+	}
+
+	act := action.Normalize(action.Type(p.cfg.BrowserSignAction))
+	switch act {
+	case action.Intercept, action.Challenge, action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge, action.Observe, action.Drop:
+	default:
+		act = action.Challenge
+	}
+	result := action.Result{
+		Type:      act,
+		Phase:     "browser_sign",
+		MatchDesc: reason,
+		Matched:   true,
+		Category:  "browser_sign",
+		RuleIDStr: "browser_sign",
+	}
+	if act == action.Observe {
+		return result, false
+	}
+	return result, true
 }

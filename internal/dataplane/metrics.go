@@ -1,12 +1,13 @@
 package dataplane
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// Metrics tracks data-plane counters (thread-safe).
-// Uses atomic counters only — no sync.Map to avoid unbounded memory growth.
+// Metrics tracks data-plane counters and distinct resolved client IPs (thread-safe).
+// The IP sets back the distinct counters and are intentionally scoped to this process lifetime.
 type Metrics struct {
 	RequestsTotal atomic.Int64
 	Status2xx     atomic.Int64
@@ -22,6 +23,9 @@ type Metrics struct {
 
 	uniqueIPCnt atomic.Int64
 	attackIPCnt atomic.Int64
+	ipMu        sync.Mutex
+	clientIPs   map[string]struct{}
+	attackIPs   map[string]struct{}
 }
 
 const qpsRingSize = 10 // 10 × 1s buckets
@@ -32,7 +36,11 @@ type ringEntry struct {
 }
 
 func NewMetrics() *Metrics {
-	return &Metrics{startTime: time.Now()}
+	return &Metrics{
+		startTime: time.Now(),
+		clientIPs: make(map[string]struct{}),
+		attackIPs: make(map[string]struct{}),
+	}
 }
 
 func (m *Metrics) RecordRequest() {
@@ -66,16 +74,36 @@ func (m *Metrics) RecordWAFBlock()   { m.WAFBlocks.Add(1) }
 func (m *Metrics) RecordWAFObserve() { m.WAFObserves.Add(1) }
 func (m *Metrics) RecordBuiltinHit() { m.BuiltinHits.Add(1) }
 
-// RecordClientIP increments the unique IP counter.
-// Uses a simple atomic counter instead of storing individual IPs.
-func (m *Metrics) RecordClientIP(_ string) {
-	m.uniqueIPCnt.Add(1)
+// RecordClientIP records one unique resolved client IP.
+func (m *Metrics) RecordClientIP(ip string) {
+	if ip == "" {
+		return
+	}
+	m.ipMu.Lock()
+	if m.clientIPs == nil {
+		m.clientIPs = make(map[string]struct{})
+	}
+	if _, exists := m.clientIPs[ip]; !exists {
+		m.clientIPs[ip] = struct{}{}
+		m.uniqueIPCnt.Add(1)
+	}
+	m.ipMu.Unlock()
 }
 
-// RecordAttackIP increments the attack IP counter.
-// Uses a simple atomic counter instead of storing individual IPs.
-func (m *Metrics) RecordAttackIP(_ string) {
-	m.attackIPCnt.Add(1)
+// RecordAttackIP records one unique resolved client IP that triggered a WAF action.
+func (m *Metrics) RecordAttackIP(ip string) {
+	if ip == "" {
+		return
+	}
+	m.ipMu.Lock()
+	if m.attackIPs == nil {
+		m.attackIPs = make(map[string]struct{})
+	}
+	if _, exists := m.attackIPs[ip]; !exists {
+		m.attackIPs[ip] = struct{}{}
+		m.attackIPCnt.Add(1)
+	}
+	m.ipMu.Unlock()
 }
 
 // QPS returns approximate queries-per-second over the last windowSec seconds.

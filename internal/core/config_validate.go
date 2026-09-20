@@ -10,8 +10,10 @@ import (
 // Returns a list of non-fatal warnings and a fatal error (if any).
 func (c Config) Validate() (warnings []string, err error) {
 	// DB driver must be recognized.
+	// 与 database.Open 的分支保持一致：那里同时接受 postgresql 别名与空值（默认
+	// sqlite）。若此处不认，配置成 postgresql 会在校验阶段就启动失败，别名形同虚设。
 	switch c.DBDriver {
-	case "sqlite", "mysql", "postgres":
+	case "", "sqlite", "mysql", "postgres", "postgresql":
 		// ok
 	default:
 		return nil, fmt.Errorf("unsupported db driver %q (want sqlite|mysql|postgres)", c.DBDriver)
