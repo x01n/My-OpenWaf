@@ -1,8 +1,13 @@
 package store
 
 import (
+	"crypto"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -92,6 +97,19 @@ type Site struct {
 	UpstreamTLSSkipVerify bool   `gorm:"default:false" json:"upstream_tls_skip_verify"`
 	UpstreamTLSServerName string `gorm:"size:255" json:"upstream_tls_server_name"`
 
+	// 上游 mTLS 客户端证书（PEM 文本，成对配置）：
+	// 两者同时 nil/空白 = 不使用客户端证书；同时非空 = TLS 握手时出示客户端证书。
+	// 私钥在管理面 API 输出前脱敏（见 internal/admin/site 的 redactUpstreamClientKey）。
+	UpstreamTLSClientCertPEM *string           `gorm:"type:text" json:"upstream_tls_client_cert_pem,omitempty"`
+	UpstreamTLSClientKeyPEM  *string           `gorm:"type:text" json:"upstream_tls_client_key_pem,omitempty"`
+	UpstreamTLSClientCertDER []byte            `gorm:"-" json:"-"`
+	UpstreamTLSClientCertKey crypto.PrivateKey `gorm:"-" json:"-"`
+	UpstreamTLSClientCertSet bool              `gorm:"-" json:"-"`
+	UpstreamTLSClientCertBad bool              `gorm:"-" json:"-"`
+	// UpstreamTLSClientCertFP 是证书链 DER 的前 16 字节 SHA-256 十六进制指纹，
+	// 构建期与 DER/Key 一并预计算；"badpair" 为不可解析占位，空串为未配置。
+	UpstreamTLSClientCertFP string `gorm:"-" json:"-"`
+
 	CacheEnabled    bool   `gorm:"default:false" json:"cache_enabled"`
 	CacheDefaultTTL int    `gorm:"default:0" json:"cache_default_ttl"`
 	CacheRules      string `gorm:"type:text" json:"cache_rules"`
@@ -158,7 +176,48 @@ func (s *Site) ApplyProtectionModeOverrides() {
 	}
 }
 
-// GetCustomErrorPages parses the CustomErrorPages JSON field.
+func (s *Site) PrepareUpstreamMTLSRuntime() {
+	s.UpstreamTLSClientCertFP = ""
+	if s.UpstreamTLSClientCertPEM == nil && s.UpstreamTLSClientKeyPEM == nil {
+		s.UpstreamTLSClientCertSet = true
+		return
+	}
+	certPEM := ""
+	keyPEM := ""
+	if s.UpstreamTLSClientCertPEM != nil {
+		certPEM = strings.TrimSpace(*s.UpstreamTLSClientCertPEM)
+	}
+	if s.UpstreamTLSClientKeyPEM != nil {
+		keyPEM = strings.TrimSpace(*s.UpstreamTLSClientKeyPEM)
+	}
+	if certPEM == "" && keyPEM == "" {
+		s.UpstreamTLSClientCertSet = true
+		s.UpstreamTLSClientCertBad = false
+		return
+	}
+	if certPEM == "" || keyPEM == "" {
+		s.UpstreamTLSClientCertBad = true
+		s.UpstreamTLSClientCertSet = true
+		s.UpstreamTLSClientCertFP = "badpair"
+		return
+	}
+	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		s.UpstreamTLSClientCertBad = true
+		s.UpstreamTLSClientCertSet = true
+		s.UpstreamTLSClientCertFP = "badpair"
+		return
+	}
+	if len(pair.Certificate) > 0 {
+		s.UpstreamTLSClientCertDER = pair.Certificate[0]
+		sum := sha256.Sum256(pair.Certificate[0])
+		s.UpstreamTLSClientCertFP = hex.EncodeToString(sum[0:16])
+	}
+	s.UpstreamTLSClientCertKey = pair.PrivateKey
+	s.UpstreamTLSClientCertBad = false
+	s.UpstreamTLSClientCertSet = true
+}
+
 func (s *Site) GetCustomErrorPages() map[int]interface{} {
 	if s.CustomErrorPages == "" || s.CustomErrorPages == "{}" {
 		return nil

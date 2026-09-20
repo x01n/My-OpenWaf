@@ -167,6 +167,7 @@ const (
 	DiagnosticFieldValue           = "value"
 	DiagnosticFieldCertificateID   = "cert_id"
 	DiagnosticFieldCertificatePair = "certificate_key_pair"
+	DiagnosticFieldUpstreamMTLS    = "upstream_tls_client_cert"
 
 	DiagnosticHandlingSkipInvalidField         = "skip_invalid_field"
 	DiagnosticHandlingSkipInvalidEntry         = "skip_invalid_entry"

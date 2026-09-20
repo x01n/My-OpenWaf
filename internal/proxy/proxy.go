@@ -74,8 +74,20 @@ func (r *finishOnCanceledReadCloser) Close() error {
 type transportKey struct {
 	tlsServerName string
 	tlsSkipVerify bool
-	isHTTPS       bool
-	h2cPrior      bool
+	// clientCertFingerprint 只存储证书链 DER 的 SHA-256 摘要（十六进制下采样）：
+	// 未经编码的完整 PEM 不得进入 map 键（日志/pprof 可倾泻键内容）。
+	// 证书内容变化时摘要变化，传输池旧键自然失效，旧连接随后被 Prune/超时回收。
+	clientCertFingerprint string
+	isHTTPS               bool
+	h2cPrior              bool
+}
+
+// upstreamClientCertFingerprint 计算站点级上游客户端证书的检索指纹。
+//
+// 已配置时返回空串以外的前 16 字节 SHA-256 十六进制摘要。输入取快照预计算
+// 好的证书链 DER（snapshot 构建期完成 PEM 解析），零 PEM 解析 / 零私钥触碰。
+func upstreamClientCertFingerprint(rt snapshot.SiteRuntime) string {
+	return upstream.UpstreamClientCertFingerprint(rt)
 }
 
 var (
@@ -102,6 +114,7 @@ func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Tran
 	if isHTTPS {
 		key.tlsServerName = rt.Site.UpstreamTLSServerName
 		key.tlsSkipVerify = rt.Site.UpstreamTLSSkipVerify
+		key.clientCertFingerprint = upstreamClientCertFingerprint(rt)
 	}
 
 	transportMu.RLock()
@@ -132,6 +145,13 @@ func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Tran
 			// 避免每条新连接都做完整握手。每个上游 transport 独享一份缓存，
 			// 容量与 MaxIdleConnsPerHost 对齐。
 			ClientSessionCache: tls.NewLRUClientSessionCache(32),
+		}
+		if cert, hasCert, err := upstream.UpstreamClientCertificate(rt); err != nil {
+			// 取证书内容失败时仅记录告警并继续无客户端证书握手：
+			// 由上游服务端决定最终拒绝与否，避免站点整体不可用。
+			slog.Warn("shared upstream transport skipped client cert", slog.String("site_host", rt.Site.Host), slog.String("error", err.Error()))
+		} else if hasCert {
+			tr.TLSClientConfig.Certificates = []tls.Certificate{cert}
 		}
 	}
 
@@ -695,9 +715,10 @@ func h2cTransportForUpstream() *http.Transport {
 
 func http3TransportForUpstream(rt snapshot.SiteRuntime, upstreamHost string) *http3.Transport {
 	key := http3TransportKey{
-		upstreamHost:  upstreamHost,
-		tlsServerName: rt.Site.UpstreamTLSServerName,
-		tlsSkipVerify: rt.Site.UpstreamTLSSkipVerify,
+		upstreamHost:          upstreamHost,
+		tlsServerName:         rt.Site.UpstreamTLSServerName,
+		tlsSkipVerify:         rt.Site.UpstreamTLSSkipVerify,
+		clientCertFingerprint: upstreamClientCertFingerprint(rt),
 	}
 	http3TransportMu.RLock()
 	if tr, ok := http3TransportPool[key]; ok {
@@ -706,15 +727,22 @@ func http3TransportForUpstream(rt snapshot.SiteRuntime, upstreamHost string) *ht
 	}
 	http3TransportMu.RUnlock()
 
+	tlsCfg := &tls.Config{
+		ServerName:         rt.Site.UpstreamTLSServerName,
+		InsecureSkipVerify: rt.Site.UpstreamTLSSkipVerify,
+		MinVersion:         tls.VersionTLS13,
+		NextProtos:         []string{http3.NextProtoH3},
+		// 复用 QUIC/TLS1.3 会话，命中后可走 1-RTT 恢复握手，降低上游 QUIC 连接建立开销。
+		ClientSessionCache: tls.NewLRUClientSessionCache(32),
+	}
+	if cert, hasCert, err := upstream.UpstreamClientCertificate(rt); err != nil {
+		slog.Warn("h3 upstream transport skipped client cert", slog.String("site_host", rt.Site.Host), slog.String("error", err.Error()))
+	} else if hasCert {
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
 	tr := &http3.Transport{
-		TLSClientConfig: &tls.Config{
-			ServerName:         rt.Site.UpstreamTLSServerName,
-			InsecureSkipVerify: rt.Site.UpstreamTLSSkipVerify,
-			MinVersion:         tls.VersionTLS13,
-			NextProtos:         []string{http3.NextProtoH3},
-			// 复用 QUIC/TLS1.3 会话，命中后可走 1-RTT 恢复握手，降低上游 QUIC 连接建立开销。
-			ClientSessionCache: tls.NewLRUClientSessionCache(32),
-		},
+		TLSClientConfig:    tlsCfg,
 		DisableCompression: true,
 		QUICConfig: &quic.Config{
 			MaxIdleTimeout:                 30 * time.Second,
@@ -3485,14 +3513,16 @@ func transportKeyForUpstream(base string, rt snapshot.SiteRuntime) transportKey 
 	}
 	key.tlsServerName = rt.Site.UpstreamTLSServerName
 	key.tlsSkipVerify = rt.Site.UpstreamTLSSkipVerify
+	key.clientCertFingerprint = upstreamClientCertFingerprint(rt)
 	return key
 }
 
 // HTTP/3 transport pool for upstream connections.
 type http3TransportKey struct {
-	upstreamHost  string
-	tlsServerName string
-	tlsSkipVerify bool
+	upstreamHost          string
+	tlsServerName         string
+	tlsSkipVerify         bool
+	clientCertFingerprint string
 }
 
 var (

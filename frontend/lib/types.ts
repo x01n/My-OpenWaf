@@ -88,6 +88,9 @@ export interface Site {
   max_body_bytes: number
   upstream_tls_skip_verify: boolean
   upstream_tls_server_name?: string
+  /** 上游 mTLS 客户端证书 PEM；为空/缺省表示不使用客户端证书。 */
+  upstream_tls_client_cert_pem?: string | null
+  upstream_tls_client_key_pem?: string | null
 
   cache_enabled: boolean
   cache_default_ttl: number

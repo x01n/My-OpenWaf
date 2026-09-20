@@ -582,7 +582,12 @@
       "policy": "Policy",
       "policyPlaceholder": "Select policy",
       "policyInheritDefault": "Inherit default policy",
-      "policyHint": "Specify detection policy for this site, leave empty to inherit global default"
+      "policyHint": "Specify detection policy for this site, leave empty to inherit global default",
+      "clientCert": "Upstream Client Certificate (PEM)",
+      "clientKey": "Upstream Client Key (PEM)",
+      "clientCertHint": "Leave both empty to not use a client certificate. Paste the certificate and private key together; the private key is stored encrypted and never returned by the API.",
+      "clientCertPlaceholder": "-----BEGIN CERTIFICATE-----...",
+      "clientKeyPlaceholder": "-----BEGIN PRIVATE KEY-----..."
     },
     "deleteTitle": "Delete Site",
     "deleteConfirm": "Are you sure you want to delete this site? This action cannot be undone.",

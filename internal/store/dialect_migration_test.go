@@ -96,6 +96,31 @@ func assertLogPaginationIndexes(t *testing.T, db *gorm.DB, dialect string) {
 			if len(columns) != len(want) {
 				t.Fatalf("%s: 索引 %s 列=%v，期望=%v", dialect, tt.indexName, columns, want)
 			}
+
+			// 列序断言仅对 mysql/sqlite 生效：两种方言的 GetIndexes 都按
+			// 索引真实列序读回（mysql 用 SEQ_IN_INDEX 排序，sqlite 依赖
+			// PRAGMA index_info.seqno）。postgres 驱动用
+			// `a.attnum = ANY(i.indkey)` 读回且无 ORDER BY，读回顺序依赖
+			// pg_index 的行序，任意且不可信。因此 postgres 上只断言
+			// 「列集合相同且首列含义为 site_id」——列序本身在迁移过程中
+			// 就是 gorm 声明顺序（events.go 里三个字段的 priority 为
+			// 1/2/3 即 site_id/created_at/id）。
+			if dialect == "postgres" {
+				got := map[string]struct{}{}
+				for _, col := range columns {
+					got[col] = struct{}{}
+				}
+				for _, w := range want {
+					if _, ok := got[w]; !ok {
+						t.Fatalf("%s: 索引 %s 缺少列 %q，实际列=%v", dialect, tt.indexName, w, columns)
+					}
+				}
+				if columns[0] != want[0] {
+					t.Fatalf("%s: 索引 %s 首列 %q 并非 site_id，说明 GetIndexes 读回或存量索引已损坏；实际列=%v", dialect, tt.indexName, columns[0], columns)
+				}
+				continue
+			}
+
 			for i := range want {
 				if columns[i] != want[i] {
 					t.Fatalf("%s: 索引 %s 第 %d 列=%q，期望=%q", dialect, tt.indexName, i, columns[i], want[i])

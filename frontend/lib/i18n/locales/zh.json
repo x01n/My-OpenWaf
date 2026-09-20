@@ -585,7 +585,12 @@
       "policy": "策略",
       "policyPlaceholder": "选择策略",
       "policyInheritDefault": "继承默认策略",
-      "policyHint": "为该站点指定检测策略，留空则继承全局默认策略"
+      "policyHint": "为该站点指定检测策略，留空则继承全局默认策略",
+      "clientCert": "Upstream Client Certificate (PEM)",
+      "clientKey": "Upstream Client Key (PEM)",
+      "clientCertHint": "Leave both empty to not use a client certificate. Paste the certificate and private key together; the private key is stored encrypted and never returned by the API.",
+      "clientCertPlaceholder": "-----BEGIN CERTIFICATE-----...",
+      "clientKeyPlaceholder": "-----BEGIN PRIVATE KEY-----..."
     },
     "deleteTitle": "删除站点",
     "deleteConfirm": "确定要删除此站点吗？此操作不可撤销。",

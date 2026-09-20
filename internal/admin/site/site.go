@@ -27,7 +27,43 @@ var (
 	errInvalidSiteHeaderOrder   = errors.New("invalid client_ip_header_order")
 	errInvalidSiteDynamicJSMode = errors.New("dynamic_js_mode must be one of: all, paths")
 	errInvalidSiteDynamicTTL    = errors.New("dynamic_decrypt_cache_ttl must be between 0 and 1800 seconds")
+	errInvalidSiteUpstreamCert  = errors.New("upstream_tls_client_cert_pem and upstream_tls_client_key_pem must be provided together")
 )
+
+// validateSiteUpstreamMTLS 校验站点级上游 mTLS 客户端证书（store 层单一真源）：
+//
+//   - 证书与私钥必须成对出现；成对非空白时 tls.X509KeyPair 必须解析成功；
+//   - 单个字段超过 store.MaxUpstreamMTLSPEMBytes 拒绝；
+//   - 通过后预计算运行时值（数据面与写库共用同一份解析结果）。
+//     字段落库保持用户提交的原始 PEM 文本（TrimSpace 只用于空白判定与解析，
+//     不回写，避免改写 PEM 尾部换行等合法字节）。
+func validateSiteUpstreamMTLS(item *store.Site) error {
+	certPEM := ""
+	keyPEM := ""
+	if item.UpstreamTLSClientCertPEM != nil {
+		certPEM = *item.UpstreamTLSClientCertPEM
+	}
+	if item.UpstreamTLSClientKeyPEM != nil {
+		keyPEM = *item.UpstreamTLSClientKeyPEM
+	}
+	if _, _, _, _, _, exceeded, err := store.NormalizeSiteUpstreamMTLS(certPEM, keyPEM); exceeded {
+		return errors.New("upstream_tls_client_cert_pem/upstream_tls_client_key_pem exceeds the 256 KiB limit")
+	} else if err != nil {
+		if errors.Is(err, store.ErrSiteUpstreamMTLSUnpaired) {
+			return errInvalidSiteUpstreamCert
+		}
+		return errors.New("invalid upstream_tls_client_cert_pem/upstream_tls_client_key_pem pair: " + err.Error())
+	}
+	item.PrepareUpstreamMTLSRuntime()
+	return nil
+}
+
+// redactUpstreamClientKey 清空站点级上游客户端私钥，确保任何 API 响应都不回显明文私钥。
+func redactUpstreamClientKey(site *store.Site) {
+	if site != nil {
+		site.UpstreamTLSClientKeyPEM = nil
+	}
+}
 
 type siteListItem struct {
 	store.Site
@@ -91,6 +127,7 @@ func ListSites(repo *repository.SiteRepo, listenerRepo *repository.SiteListenerR
 				}
 			}
 
+			redactUpstreamClientKey(&item)
 			respItems = append(respItems, siteListItem{
 				Site:                 item,
 				ListenerSummary:      listenerSummary,
@@ -115,6 +152,7 @@ func GetSite(repo *repository.SiteRepo) app.HandlerFunc {
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
+		redactUpstreamClientKey(item)
 		c.JSON(200, item)
 	}
 }
@@ -174,6 +212,12 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
+		if siteRequestHasField(body, "upstream_tls_client_cert_pem") || siteRequestHasField(body, "upstream_tls_client_key_pem") {
+			if err := validateSiteUpstreamMTLS(&item); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 		if err := validateSiteActions(&item, func(string) bool { return true }); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -196,6 +240,8 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 在 reload（可能回显 item）与任何响应分支之前脱敏，私钥绝不进入响应体。
+		redactUpstreamClientKey(&item)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": item})
 			return
@@ -270,6 +316,12 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 				return
 			}
 		}
+		if siteRequestHasField(body, "upstream_tls_client_cert_pem") || siteRequestHasField(body, "upstream_tls_client_key_pem") {
+			if err := validateSiteUpstreamMTLS(existing); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 		shouldValidateAction := func(field string) bool {
 			switch field {
 			case "owasp_action":
@@ -310,6 +362,8 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 在 reload（可能回显 item）与任何响应分支之前脱敏，私钥绝不进入响应体。
+		redactUpstreamClientKey(existing)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": existing})
 			return
@@ -546,6 +600,8 @@ func StartSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 在 reload（可能回显 item）之前脱敏，私钥绝不进入响应体。
+		redactUpstreamClientKey(site)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": site})
 			return
@@ -573,6 +629,8 @@ func StopSite(repo *repository.SiteRepo, reload func() error) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		// 在 reload（可能回显 item）之前脱敏，私钥绝不进入响应体。
+		redactUpstreamClientKey(site)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + err.Error(), "item": site})
 			return

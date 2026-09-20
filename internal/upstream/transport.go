@@ -2,24 +2,39 @@ package upstream
 
 import (
 	"crypto/tls"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
 	"time"
 
 	"My-OpenWaf/internal/snapshot"
+	"My-OpenWaf/internal/store"
 )
 
 var legacyHTTPSClientCipherSuiteIDs = buildLegacyHTTPSClientCipherSuites()
 
 // HTTPSClientTLSConfig returns TLS settings for regular HTTPS upstreams.
 func HTTPSClientTLSConfig(serverName string, skipVerify bool) *tls.Config {
-	return &tls.Config{
+	return HTTPSClientTLSConfigWithClientCert(serverName, skipVerify, tls.Certificate{}, false)
+}
+
+// HTTPSClientTLSConfigWithClientCert 返回带可选客户端证书的 HTTPS 上游 TLS 配置。
+//
+// hasCert 为 false 时与 HTTPSClientTLSConfig 完全等价；true 时启用 mTLS：
+// 握手阶段若服务端要求客户端证书，则出示 cert 中的证书链与私钥。
+func HTTPSClientTLSConfigWithClientCert(serverName string, skipVerify bool, cert tls.Certificate, hasCert bool) *tls.Config {
+	cfg := &tls.Config{
 		ServerName:         serverName,
 		InsecureSkipVerify: skipVerify,
 		MinVersion:         tls.VersionTLS10,
 		CipherSuites:       legacyHTTPSClientCipherSuites(),
 	}
+	if hasCert {
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+	return cfg
 }
 
 func legacyHTTPSClientCipherSuites() []uint16 {
@@ -147,4 +162,46 @@ func hasSchemePrefixFold(raw string, scheme string) bool {
 		}
 	}
 	return true
+}
+
+// UpstreamClientCertificate loads the site's upstream mTLS client certificate,
+// or returns hasCert=false when none is configured.
+//
+// Prefer this path for request-time reads. 快照构建期已把 PEM 解析完：
+//   - UpstreamTLSClientCertSet 为 true 且 Bad 为 false 时，直接回放解析好的证书；
+//   - Bad 为 true 时按配置错误处理，调用点决定丢弃策略；
+//   - 仅当快照字段遗漏（目测不会发生）时才回退做一次 PEM 解析兼容旧快照。
+func UpstreamClientCertificate(rt snapshot.SiteRuntime) (cert tls.Certificate, hasCert bool, err error) {
+	if !rt.Site.UpstreamTLSClientCertSet {
+		pair, _, _, _, _, _, err := store.NormalizeSiteUpstreamMTLS(sitePtrString(rt.Site.UpstreamTLSClientCertPEM), sitePtrString(rt.Site.UpstreamTLSClientKeyPEM))
+		if err != nil {
+			return tls.Certificate{}, false, fmt.Errorf("invalid upstream tls client cert/key pair: %w", err)
+		}
+		return pair, pair.PrivateKey != nil, nil
+	}
+	if rt.Site.UpstreamTLSClientCertBad {
+		return tls.Certificate{}, true, errors.New("invalid upstream tls client cert/key pair (rejected at snapshot build)")
+	}
+	if len(rt.Site.UpstreamTLSClientCertDER) == 0 {
+		return tls.Certificate{}, false, nil
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{rt.Site.UpstreamTLSClientCertDER},
+		PrivateKey:  rt.Site.UpstreamTLSClientCertKey,
+	}, true, nil
+}
+
+// UpstreamClientCertFingerprint 直接回放快照构建期预计算的证书指纹：
+//
+//	未配置 -> ""；不可解析 -> "badpair"；否则为证书链 DER 前 16 字节 SHA-256 hex。
+//	热路径零计算：只读一个 string 字段。
+func UpstreamClientCertFingerprint(rt snapshot.SiteRuntime) string {
+	return rt.Site.UpstreamTLSClientCertFP
+}
+
+func sitePtrString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }

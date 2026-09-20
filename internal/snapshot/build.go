@@ -180,6 +180,42 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	certificateDiagnostics := make([]SnapshotConfigDiagnostic, 0)
 	siteMap := make(map[string]*SiteRuntime)
 
+	// 上游 mTLS 的构建期认定：用下标预计算一次并写入切片元素，主循环的 s 取
+	// 同一份已算好的 DER/Key/Bad，构建全程只做一次 PEM 解析。
+	for i := range sites {
+		pre := &sites[i]
+		pre.PrepareUpstreamMTLSRuntime()
+		if pre.UpstreamTLSClientCertPEM != nil && len(*pre.UpstreamTLSClientCertPEM) > store.MaxUpstreamMTLSPEMBytes {
+			certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+				Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
+				Error: "upstream_mtls_pem_overflow", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+				Kind: "upstream_mtls", Reason: "upstream_mtls_pem_overflow", SiteID: pre.ID,
+			})
+		} else if pre.UpstreamTLSClientKeyPEM != nil && len(*pre.UpstreamTLSClientKeyPEM) > store.MaxUpstreamMTLSPEMBytes {
+			certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+				Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
+				Error: "upstream_mtls_pem_overflow", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+				Kind: "upstream_mtls", Reason: "upstream_mtls_pem_overflow", SiteID: pre.ID,
+			})
+		} else {
+			hasCert := pre.UpstreamTLSClientCertPEM != nil && strings.TrimSpace(*pre.UpstreamTLSClientCertPEM) != ""
+			hasKey := pre.UpstreamTLSClientKeyPEM != nil && strings.TrimSpace(*pre.UpstreamTLSClientKeyPEM) != ""
+			if hasCert != hasKey {
+				certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+					Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
+					Error: "upstream_mtls_unpaired", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+					Kind: "upstream_mtls", Reason: "upstream_mtls_unpaired", SiteID: pre.ID,
+				})
+			} else if pre.UpstreamTLSClientCertBad {
+				certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+					Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
+					Error: "upstream_mtls_unparseable_pair", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+					Kind: "upstream_mtls", Reason: "upstream_mtls_unparseable_pair", SiteID: pre.ID,
+				})
+			}
+		}
+	}
+
 	for _, s := range sites {
 		urls := parseUpstreamURLs(s.UpstreamURLs)
 		if len(urls) == 0 {
@@ -352,7 +388,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 			}
 
 			rt := SiteRuntime{
-				Site:                 listenerSite,
+				Site:                 listenerSite, // 含预计算的 UpstreamTLSClientCertDER/Key/Bad
 				PolicyID:             policyID,
 				Rules:                compiled,
 				UpstreamURLs:         urls,
