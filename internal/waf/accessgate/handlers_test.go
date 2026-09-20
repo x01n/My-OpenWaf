@@ -52,8 +52,8 @@ func TestSanitizeReturnURL(t *testing.T) {
 		{"javascript:alert(1)", "/"},
 	}
 	for _, tt := range tests {
-		if got := sanitizeReturnURL(tt.in); got != tt.want {
-			t.Errorf("sanitizeReturnURL(%q) = %q, want %q", tt.in, got, tt.want)
+		if got := SanitizeReturnURL(tt.in); got != tt.want {
+			t.Errorf("SanitizeReturnURL(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }
@@ -120,6 +120,23 @@ func TestHandleVerifyUserPassword(t *testing.T) {
 	nilLookup := g.HandleVerify(AuthTypeUserPassword, "alice", "u-secret", 1, "/", nil)
 	if nilLookup.Authenticated {
 		t.Fatal("无查询函数时 user_password 应一律失败")
+	}
+}
+
+func TestHandleVerifyUserPasswordRequiresPasswordProvider(t *testing.T) {
+	g := newTestGate(t)
+	g.config.Providers = []ProviderConfig{{ID: 2, Type: "oauth2", Name: "GitHub"}}
+	userHash := mustHashForTest(t, "u-secret")
+	lookup := func(siteID uint, username string) (string, bool) {
+		if siteID == 7 && username == "alice" {
+			return userHash, true
+		}
+		return "", false
+	}
+
+	decision := g.HandleVerify(AuthTypeUserPassword, "alice", "u-secret", 1, "/", lookup)
+	if decision.Authenticated || decision.Token != "" {
+		t.Fatalf("没有 enabled 的 password provider 时不应创建会话, got %+v", decision)
 	}
 }
 

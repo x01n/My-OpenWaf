@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -43,6 +45,8 @@ type HTTP3Server struct {
 	spinStarted             bool
 	spinDone                chan struct{}
 	spinDoneOnce            sync.Once
+	startErrMu              sync.Mutex
+	startErr                error
 	activeLoopbackBodiesMu  sync.Mutex
 	activeLoopbackBodies    map[*cancelableBody]struct{}
 	activeLoopbackCancelsMu sync.Mutex
@@ -713,7 +717,8 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := resolveHTTP3TCPBind(cfg.RouteTable, r); !ok {
+		targetBind, ok := resolveHTTP3TCPBind(cfg.RouteTable, r)
+		if !ok {
 			http.Error(w, "no HTTP/3 route target", http.StatusBadGateway)
 			return
 		}
@@ -730,7 +735,14 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		cancelAware.startFlushWatch(ctx)
 		defer cancelAware.Close()
 		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(cfg.Bind), snapshotpkg.OneDaySeconds))
-		proxy.ServeHTTP(cancelAware, r.WithContext(ctx))
+		request := r.WithContext(ctx)
+		if isHTTP3WebSocketConnect(request) {
+			if err := serveHTTP3WebSocketBridge(cancelAware, request, targetBind, h3ServerState, state); err != nil {
+				http.Error(w, "HTTP/3 WebSocket bridge failed", http.StatusBadGateway)
+			}
+			return
+		}
+		proxy.ServeHTTP(cancelAware, request)
 	})
 
 	tlsCfg := cfg.TLSConfig.Clone()
@@ -748,7 +760,22 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		Handler:   handler,
 		TLSConfig: tlsCfg,
 		QUICConfig: &quic.Config{
+			// Allow0RTT 沿用站点会话票据开关，不强制开启：0-RTT 数据存在重放风险，
+			// 是否接受由上层配置决定，此处仅透传。
 			Allow0RTT: cfg.Allow0RTT,
+			// 显式设为 30s（与 quic-go 默认一致），无活动连接超时回收，避免空闲 QUIC 连接长期占用。
+			MaxIdleTimeout: 30 * time.Second,
+			// 周期性保活包（取 MaxIdleTimeout 一半），维持长连接不被 NAT/对端超时断开，
+			// 从而复用已建立的 QUIC 连接、减少重复握手。
+			KeepAlivePeriod: 15 * time.Second,
+			// 单连接并发双向流上限，默认 100，反代高并发下适度上调到 256 以提升多路复用能力。
+			MaxIncomingStreams: 256,
+			// 流接收窗口：初始 2MB，最大 6MB（quic-go 默认 512KB/6MB），
+			// 反代场景大响应体受益于更大初始窗口避免流控暂停。
+			InitialStreamReceiveWindow:     2 << 20,
+			MaxStreamReceiveWindow:         6 << 20,
+			InitialConnectionReceiveWindow: 4 << 20,
+			MaxConnectionReceiveWindow:     15 << 20,
 		},
 		ConnContext: func(ctx context.Context, conn *quic.Conn) context.Context {
 			if conn == nil {
@@ -776,6 +803,187 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 	return h3ServerState
 }
 
+func isHTTP3WebSocketConnect(r *http.Request) bool {
+	return r != nil && r.Method == http.MethodConnect && r.Proto == "websocket"
+}
+
+func newHTTP3WebSocketLoopbackRequest(ctx context.Context, r *http.Request, targetBind string) (*http.Request, error) {
+	if r == nil || r.URL == nil {
+		return nil, errors.New("HTTP/3 WebSocket request is missing URL")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestURI := r.URL.RequestURI()
+	if requestURI == "" {
+		requestURI = "/"
+	}
+	out, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+loopbackTargetHost(targetBind)+requestURI, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build HTTP/1.1 WebSocket loopback request: %w", err)
+	}
+	copyHTTP3WebSocketRequestHeaders(out.Header, r.Header)
+	clearInternalHTTP3TLSHeaders(out.Header)
+	out.Header.Del("X-Forwarded-For")
+	out.Header.Del("X-Forwarded-Host")
+	out.Header.Del("X-Forwarded-Proto")
+	proxyRequest := &httputil.ProxyRequest{In: r, Out: out}
+	proxyRequest.SetXForwarded()
+	out.Host = r.Host
+	if out.Host == "" {
+		out.Host = r.URL.Host
+	}
+	if out.Host != "" {
+		out.Header.Set("X-Forwarded-Host", out.Host)
+	} else {
+		out.Header.Del("X-Forwarded-Host")
+	}
+	out.Header.Set("X-Forwarded-Proto", "h3")
+	out.Header.Set(dataplane.InternalHTTP3ProtoHeader, "h3")
+	applyHTTP3ProxyTLSHeaders(out)
+
+	var key [16]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return nil, fmt.Errorf("generate HTTP/1.1 WebSocket key: %w", err)
+	}
+	out.Header.Set("Connection", "Upgrade")
+	out.Header.Set("Upgrade", "websocket")
+	out.Header.Set("Sec-WebSocket-Key", base64.StdEncoding.EncodeToString(key[:]))
+	out.Header.Set("Sec-WebSocket-Version", "13")
+	return out, nil
+}
+
+func copyHTTP3WebSocketRequestHeaders(dst http.Header, src http.Header) {
+	for key, values := range src {
+		if isHTTP3WebSocketHopByHopHeader(key, src) ||
+			strings.EqualFold(key, "Host") ||
+			strings.EqualFold(key, "Content-Length") ||
+			strings.EqualFold(key, "Sec-WebSocket-Key") ||
+			strings.EqualFold(key, "Sec-WebSocket-Version") {
+			continue
+		}
+		dst[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+	}
+}
+
+func copyHTTP3WebSocketResponseHeaders(dst http.Header, src http.Header, upgraded bool) {
+	for key, values := range src {
+		if isHTTP3WebSocketHopByHopHeader(key, src) ||
+			(upgraded && strings.EqualFold(key, "Sec-WebSocket-Accept")) {
+			continue
+		}
+		dst[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+	}
+}
+
+func isHTTP3WebSocketHopByHopHeader(key string, headers http.Header) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	}
+	for _, value := range headers.Values("Connection") {
+		for token := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), key) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func serveHTTP3WebSocketBridge(w *http3CancelAwareResponseWriter, r *http.Request, targetBind string, server *HTTP3Server, state *http3LoopbackRequestState) error {
+	if w == nil || r == nil || server == nil || server.proxyHTTP11Transport == nil {
+		return errors.New("HTTP/3 WebSocket bridge is unavailable")
+	}
+	streamer, ok := w.Unwrap().(http3.HTTPStreamer)
+	if !ok {
+		return errors.New("HTTP/3 response writer does not expose its stream")
+	}
+
+	bridgeCtx, cancelBridge := context.WithCancel(r.Context())
+	defer cancelBridge()
+	if state != nil {
+		state.SetCancel(cancelBridge)
+	}
+	unregisterLoopbackCancel := server.registerLoopbackCancel(cancelBridge)
+	defer unregisterLoopbackCancel()
+
+	out, err := newHTTP3WebSocketLoopbackRequest(bridgeCtx, r, targetBind)
+	if err != nil {
+		return err
+	}
+	if token, unregister := dataplane.RegisterInternalHTTP3CancelSignal(bridgeCtx.Done()); token != "" {
+		out.Header.Set(dataplane.InternalHTTP3CancelTokenHeader, token)
+		defer unregister()
+	}
+
+	resp, err := server.proxyHTTP11Transport.RoundTrip(out)
+	if err != nil {
+		return fmt.Errorf("round trip HTTP/1.1 WebSocket loopback request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		copyHTTP3WebSocketResponseHeaders(w.Header(), resp.Header, false)
+		w.WriteHeader(resp.StatusCode)
+		if resp.Body != nil {
+			_, _ = io.Copy(w, resp.Body)
+		}
+		return nil
+	}
+
+	loopbackStream, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		return errors.New("HTTP/1.1 WebSocket upgrade response is not bidirectional")
+	}
+	copyHTTP3WebSocketResponseHeaders(w.Header(), resp.Header, true)
+	w.WriteHeader(http.StatusOK)
+	h3Stream := streamer.HTTPStream()
+	if h3Stream == nil {
+		return errors.New("HTTP/3 response stream is unavailable")
+	}
+	defer h3Stream.Close()
+
+	requestBody := r.Body
+	if requestBody == nil {
+		requestBody = http.NoBody
+	}
+	_ = bridgeHTTP3WebSocketStreams(bridgeCtx, requestBody, h3Stream, loopbackStream)
+	return nil
+}
+
+func bridgeHTTP3WebSocketStreams(ctx context.Context, requestBody io.ReadCloser, h3Stream io.ReadWriteCloser, loopbackStream io.ReadWriteCloser) error {
+	if requestBody == nil || h3Stream == nil || loopbackStream == nil {
+		return errors.New("HTTP/3 WebSocket bridge stream is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stopCancelWatch := context.AfterFunc(ctx, func() {
+		_ = requestBody.Close()
+		_ = h3Stream.Close()
+		_ = loopbackStream.Close()
+	})
+	defer stopCancelWatch()
+
+	copyDone := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(loopbackStream, requestBody)
+		copyDone <- err
+	}()
+	go func() {
+		_, err := io.Copy(h3Stream, loopbackStream)
+		copyDone <- err
+	}()
+
+	firstErr := <-copyDone
+	_ = requestBody.Close()
+	_ = h3Stream.Close()
+	_ = loopbackStream.Close()
+	secondErr := <-copyDone
+	return errors.Join(firstErr, secondErr)
+}
+
 func http3LoopbackTLSConfig() *tls.Config {
 	cfg := upstream.HTTPSClientTLSConfig("", true)
 	cfg.NextProtos = []string{"h2", "http/1.1"}
@@ -788,6 +996,30 @@ func http3LoopbackTLSCipherSuites() []uint16 {
 		return nil
 	}
 	return cfg.CipherSuites
+}
+
+func (s *HTTP3Server) Ready() bool {
+	if s == nil {
+		return false
+	}
+	s.listenMu.Lock()
+	defer s.listenMu.Unlock()
+	return s.packetConn != nil
+}
+
+func (s *HTTP3Server) Err() error {
+	if s == nil {
+		return errors.New("HTTP/3 server is nil")
+	}
+	s.startErrMu.Lock()
+	defer s.startErrMu.Unlock()
+	return s.startErr
+}
+
+func (s *HTTP3Server) setStartErr(err error) {
+	s.startErrMu.Lock()
+	s.startErr = err
+	s.startErrMu.Unlock()
 }
 
 func (s *HTTP3Server) Spin() {
@@ -811,6 +1043,8 @@ func (s *HTTP3Server) Spin() {
 		case <-s.stopChan:
 			return
 		default:
+			err := fmt.Errorf("HTTP/3 listener bind %s: %w", s.bind, err)
+			s.setStartErr(err)
 			s.log.Error("HTTP/3 server error", slog.Any("err", err))
 			return
 		}
@@ -827,6 +1061,7 @@ func (s *HTTP3Server) Spin() {
 		select {
 		case <-s.stopChan:
 		default:
+			s.setStartErr(fmt.Errorf("HTTP/3 server: %w", err))
 			s.log.Error("HTTP/3 server error", slog.Any("err", err))
 		}
 	}
@@ -1133,7 +1368,14 @@ func resolveHTTP3TCPBind(routeTable http3RouteTable, r *http.Request) (string, b
 
 func (t http3RouteTable) Resolve(host string) (string, bool) {
 	normalized := snapshotpkg.NormalizeMatchHost(host)
-	if normalized != "" {
+	if normalized == "" {
+		if t.defaultTCPBind != "" {
+			return t.defaultTCPBind, true
+		}
+		return "", false
+	}
+
+	if normalized != "*" {
 		if bind, ok := t.exact[normalized]; ok {
 			return bind, true
 		}
@@ -1145,8 +1387,8 @@ func (t http3RouteTable) Resolve(host string) (string, bool) {
 			}
 		}
 	}
-	if t.defaultTCPBind != "" {
-		return t.defaultTCPBind, true
+	if bind, ok := t.exact["*"]; ok {
+		return bind, true
 	}
 	return "", false
 }
@@ -1363,15 +1605,15 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 	}
 
 	allowedTCPBinds := make(map[string]struct{}, len(runtimes))
-	var defaultSiteCert *tls.Certificate
+	defaultSiteCertByBind := make(map[string]*tls.Certificate, len(runtimes))
 	for _, rt := range runtimes {
 		allowedTCPBinds[rt.Bind] = struct{}{}
-		if defaultSiteCert != nil {
+		if _, exists := defaultSiteCertByBind[rt.Bind]; exists {
 			continue
 		}
 		if rt.TLSConfig != nil && len(rt.TLSConfig.Certificates) > 0 {
 			cert := rt.TLSConfig.Certificates[0]
-			defaultSiteCert = &cert
+			defaultSiteCertByBind[rt.Bind] = &cert
 			continue
 		}
 		if rt.Certificate != nil {
@@ -1380,7 +1622,7 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 				if staple, ok := snapshotpkg.ParseOCSPStaple(rt.Certificate.OCSPStaplePEM); ok {
 					cert.OCSPStaple = staple
 				}
-				defaultSiteCert = &cert
+				defaultSiteCertByBind[rt.Bind] = &cert
 			}
 		}
 	}
@@ -1408,12 +1650,8 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		}
 	}
 
-	if defaultSiteCert == nil && len(sniCertMap) == 0 {
-		selfSigned := selfSignedForBind(udpBind)
-		if selfSigned == nil {
-			return nil
-		}
-		defaultSiteCert = selfSigned
+	if len(defaultSiteCertByBind) == 0 && len(sniCertMap) == 0 && selfSignedForBind(udpBind) == nil {
+		return nil
 	}
 
 	curves := snapshotpkg.ParseCurvePreferences(sn.TLSDefaults.CurvePreferences)
@@ -1421,7 +1659,6 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		curves = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}
 	}
 
-	allowedBindCount := len(allowedTCPBinds)
 	return &tls.Config{
 		MinVersion:               tls.VersionTLS13,
 		MaxVersion:               tls.VersionTLS13,
@@ -1432,27 +1669,34 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := strings.ToLower(strings.TrimSpace(hello.ServerName))
 			if sni == "" {
-				if sn.TLSDefaults.SelfSignedOnIP {
+				if len(allowedTCPBinds) > 1 || sn.TLSDefaults.SelfSignedOnIP {
 					return selfSignedForBind(udpBind), nil
 				}
-				if defaultSiteCert != nil {
-					return defaultSiteCert, nil
+				for _, cert := range defaultSiteCertByBind {
+					return cert, nil
 				}
 				return selfSignedForBind(udpBind), nil
 			}
-			routeBind := ""
-			if allowedBindCount > 1 {
-				var ok bool
-				routeBind, ok = routeTable.Resolve(sni)
-				if !ok {
+			routeBind, ok := routeTable.Resolve(sni)
+			if !ok {
+				return selfSignedForBind(udpBind), nil
+			}
+			if _, found := sn.MatchSite(routeBind, sni); !found {
+				return selfSignedForBind(udpBind), nil
+			}
+			if state, found := sn.TLSCertificateStateForSNI(routeBind, sni); found {
+				switch state {
+				case snapshotpkg.TLSCertificateStateInvalid:
+					return nil, fmt.Errorf("configured TLS certificate is unavailable")
+				case snapshotpkg.TLSCertificateStateUnconfigured:
 					return selfSignedForBind(udpBind), nil
 				}
 			}
 			if cert, ok := http3SNICertForRoute(sniCertMap, sni, routeBind); ok {
 				return cert, nil
 			}
-			if allowedBindCount == 1 && defaultSiteCert != nil {
-				return defaultSiteCert, nil
+			if cert := defaultSiteCertByBind[routeBind]; cert != nil {
+				return cert, nil
 			}
 			return selfSignedForBind(udpBind), nil
 		},
@@ -1464,9 +1708,11 @@ func http3SNICertForRoute(sniCertMap map[string]http3SNICertificate, sni string,
 		return cert, true
 	}
 	if idx := strings.Index(sni, "."); idx > 0 {
-		return http3SNICertEntryForRoute(sniCertMap, "*."+sni[idx+1:], routeBind)
+		if cert, ok := http3SNICertEntryForRoute(sniCertMap, "*."+sni[idx+1:], routeBind); ok {
+			return cert, true
+		}
 	}
-	return nil, false
+	return http3SNICertEntryForRoute(sniCertMap, "*", routeBind)
 }
 
 func http3SNICertEntryForRoute(sniCertMap map[string]http3SNICertificate, key string, routeBind string) (*tls.Certificate, bool) {
@@ -1492,7 +1738,7 @@ func uniqueHTTP3SiteRuntimes(sn *snapshotpkg.Snapshot) []snapshotpkg.SiteRuntime
 			continue
 		}
 		seen[key] = struct{}{}
-		items = append(items, rt)
+		items = append(items, *rt)
 	}
 	return items
 }
@@ -1605,6 +1851,19 @@ func http3ListenerFingerprint(udpBind string, runtimes []snapshotpkg.SiteRuntime
 			} else {
 				fmt.Fprintf(h, " sni=%s:material=%s", sniKey, tlsCertificateFingerprintMaterial(cert))
 			}
+		}
+		relevantStateKeys := make([]string, 0)
+		for stateKey := range sn.SiteTLSCertStateBySNI {
+			for _, prefix := range allowedPrefixes {
+				if strings.HasPrefix(stateKey, prefix) {
+					relevantStateKeys = append(relevantStateKeys, stateKey)
+					break
+				}
+			}
+		}
+		sort.Strings(relevantStateKeys)
+		for _, stateKey := range relevantStateKeys {
+			fmt.Fprintf(h, " sni=%s:state=%s", stateKey, sn.SiteTLSCertStateBySNI[stateKey])
 		}
 	}
 

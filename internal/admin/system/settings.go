@@ -10,6 +10,11 @@ import (
 	"My-OpenWaf/internal/store/repository"
 )
 
+var internalSettingKeys = map[string]struct{}{
+	store.SettingKeyJWTSecret:        {},
+	store.SettingKeyAPIKeySeedMarker: {},
+}
+
 var protectedSettingKeys = map[string]string{
 	"protection":                        "/api/v1/protection-settings",
 	"bot_settings":                      "/api/v1/bot-settings/update",
@@ -26,7 +31,19 @@ var protectedSettingKeys = map[string]string{
 	store.SettingKeyACMEConfig:          "/api/v1/certificates/acme/config",
 }
 
+func isInternalSettingKey(key string) bool {
+	_, ok := internalSettingKeys[key]
+	return ok
+}
+
 func rejectProtectedSettingWrite(c *app.RequestContext, key string) bool {
+	if isInternalSettingKey(key) {
+		c.JSON(400, map[string]string{
+			"error": "internal setting cannot be managed via this endpoint",
+			"key":   key,
+		})
+		return true
+	}
 	if endpoint, ok := protectedSettingKeys[key]; ok {
 		c.JSON(400, map[string]string{
 			"error":    "setting is managed by a dedicated endpoint",
@@ -61,6 +78,17 @@ func redactSettingItem(item store.SystemSettings) store.SystemSettings {
 	return item
 }
 
+func filterInternalSettingItems(items []store.SystemSettings) []store.SystemSettings {
+	filtered := make([]store.SystemSettings, 0, len(items))
+	for _, item := range items {
+		if isInternalSettingKey(item.Key) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
 func ListSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		items, err := repo.All()
@@ -68,6 +96,7 @@ func ListSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		items = filterInternalSettingItems(items)
 		for i := range items {
 			items[i] = redactSettingItem(items[i])
 		}
@@ -109,6 +138,10 @@ func CreateSetting(repo *repository.SystemSettingsRepo, reload func() error) app
 func GetSetting(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		key := c.Param("key")
+		if isInternalSettingKey(key) {
+			c.JSON(404, map[string]string{"error": "setting not found"})
+			return
+		}
 		val, err := repo.Get(key)
 		if err != nil {
 			c.JSON(404, map[string]string{"error": "setting not found"})

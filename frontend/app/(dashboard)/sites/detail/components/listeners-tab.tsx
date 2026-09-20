@@ -1,13 +1,20 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Switch } from "@/components/ui/switch"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Dialog,
   DialogContent,
@@ -15,26 +22,29 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { toast } from "sonner";
-import { IconPlus, IconPencil, IconTrash } from "@tabler/icons-react";
+} from "@/components/ui/dialog"
+import { toast } from "sonner"
+import { IconPlus, IconPencil, IconTrash } from "@tabler/icons-react"
 import {
   useSiteListeners,
   useListenerCreate,
   useListenerUpdate,
   useListenerDelete,
-} from "@/hooks/use-api";
-import { DataTable } from "@/components/data-table";
-import type { Site } from "@/lib/types";
+  useCertificates,
+} from "@/hooks/use-api"
+import { DataTable } from "@/components/data-table"
+import type { Site, SiteListener } from "@/lib/types"
 
 interface ListenersTabProps {
-  site: Site;
+  site: Site
+  canManage: boolean
 }
 
 interface ListenerFormData {
-  bind: string;
-  tls_enabled: boolean;
-  enabled: boolean;
+  bind: string
+  tls_enabled: boolean
+  cert_id?: number
+  enabled: boolean
 }
 
 function ListenerDialog({
@@ -43,46 +53,57 @@ function ListenerDialog({
   siteId,
   listener,
 }: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  siteId: number;
-  listener?: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  siteId: number
+  listener?: SiteListener | null
 }) {
-  const { t } = useTranslation();
-  const createListener = useListenerCreate();
-  const updateListener = useListenerUpdate();
+  const { t } = useTranslation()
+  const createListener = useListenerCreate()
+  const updateListener = useListenerUpdate()
+  const { data: certificates, isLoading: certificatesLoading } =
+    useCertificates(open)
   const [form, setForm] = useState<ListenerFormData>({
     bind: listener?.bind || ":80",
     tls_enabled: listener?.tls_enabled || false,
+    cert_id: listener?.cert_id ?? undefined,
     enabled: listener?.enabled ?? true,
-  });
+  })
 
-  const isEdit = !!listener;
+  const isEdit = !!listener
 
   const handleSubmit = async () => {
     if (!form.bind.trim()) {
-      toast.error(t("sites.detail.bindRequired"));
-      return;
+      toast.error(t("sites.detail.bindRequired"))
+      return
+    }
+    if (form.tls_enabled && form.cert_id === undefined) {
+      toast.error(t("sites.form.certRequired"))
+      return
     }
     try {
       if (isEdit) {
-        await updateListener.execute({ siteId, lid: listener.id, data: form });
+        await updateListener.execute({ siteId, lid: listener.id, data: form })
       } else {
-        await createListener.execute({ siteId, data: form });
+        await createListener.execute({ siteId, data: form })
       }
-      toast.success(isEdit ? t("common.updateSuccess") : t("common.createSuccess"));
-      onOpenChange(false);
+      toast.success(
+        isEdit ? t("common.updateSuccess") : t("common.createSuccess")
+      )
+      onOpenChange(false)
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {isEdit ? t("sites.detail.editListener") : t("sites.detail.addListener")}
+            {isEdit
+              ? t("sites.detail.editListener")
+              : t("sites.detail.addListener")}
           </DialogTitle>
           <DialogDescription>
             {t("sites.detail.listenerDialogDesc")}
@@ -101,9 +122,42 @@ function ListenerDialog({
             <Label>{t("sites.detail.tls")}</Label>
             <Switch
               checked={form.tls_enabled}
-              onCheckedChange={(v) => setForm({ ...form, tls_enabled: v })}
+              onCheckedChange={(v) =>
+                setForm({
+                  ...form,
+                  tls_enabled: v,
+                  cert_id: v ? form.cert_id : undefined,
+                })
+              }
             />
           </div>
+          {form.tls_enabled && (
+            <div className="space-y-2">
+              <Label htmlFor="listener-cert">{t("sites.form.cert")}</Label>
+              <Select
+                value={form.cert_id === undefined ? "" : String(form.cert_id)}
+                onValueChange={(value) =>
+                  setForm({ ...form, cert_id: Number(value) })
+                }
+                disabled={certificatesLoading}
+              >
+                <SelectTrigger id="listener-cert">
+                  <SelectValue placeholder={t("sites.form.certPlaceholder")} />
+                </SelectTrigger>
+                <SelectContent>
+                  {(certificates ?? []).map((certificate) => (
+                    <SelectItem
+                      key={certificate.id}
+                      value={String(certificate.id)}
+                    >
+                      {certificate.name}
+                      {certificate.domain ? ` (${certificate.domain})` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <Label>{t("common.enabled")}</Label>
             <Switch
@@ -125,25 +179,28 @@ function ListenerDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+  )
 }
 
-export function ListenersTab({ site }: ListenersTabProps) {
-  const { t } = useTranslation();
-  const { data: listeners } = useSiteListeners(site.id);
-  const deleteListener = useListenerDelete();
+export function ListenersTab({ site, canManage }: ListenersTabProps) {
+  const { t } = useTranslation()
+  const { data: listeners } = useSiteListeners(site.id)
+  const deleteListener = useListenerDelete()
 
-  const [showDlg, setShowDlg] = useState(false);
-  const [editingListener, setEditingListener] = useState<any>(null); // eslint-disable-line @typescript-eslint/no-explicit-any
+  const [showDlg, setShowDlg] = useState(false)
+  const [editingListener, setEditingListener] = useState<SiteListener | null>(
+    null
+  )
 
   const handleDelete = async (lid: number) => {
+    if (!canManage) return
     try {
-      await deleteListener.execute({ siteId: site.id, lid });
-      toast.success(t("common.deleteSuccess"));
+      await deleteListener.execute({ siteId: site.id, lid })
+      toast.success(t("common.deleteSuccess"))
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   const columns = [
     { key: "bind", title: t("sites.detail.bindAddress") },
@@ -151,8 +208,11 @@ export function ListenersTab({ site }: ListenersTabProps) {
     {
       key: "tls_enabled",
       title: t("sites.detail.tls"),
-      render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
-        <Badge variant={row.tls_enabled ? "default" : "outline"} className="h-5 text-[10px]">
+      render: (row: SiteListener) => (
+        <Badge
+          variant={row.tls_enabled ? "default" : "outline"}
+          className="h-5 text-[10px]"
+        >
           {row.tls_enabled ? "HTTPS" : "HTTP"}
         </Badge>
       ),
@@ -160,59 +220,74 @@ export function ListenersTab({ site }: ListenersTabProps) {
     {
       key: "enabled",
       title: t("common.status"),
-      render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
-        <Badge variant={row.enabled ? "default" : "secondary"} className="h-5 text-[10px]">
-          {row.enabled ? t("sites.detail.listenerEnabled") : t("sites.detail.listenerDisabled")}
+      render: (row: SiteListener) => (
+        <Badge
+          variant={row.enabled ? "default" : "secondary"}
+          className="h-5 text-[10px]"
+        >
+          {row.enabled
+            ? t("sites.detail.listenerEnabled")
+            : t("sites.detail.listenerDisabled")}
         </Badge>
       ),
     },
     {
       key: "_actions",
       title: t("common.actions"),
-      render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
+      render: (row: SiteListener) => (
         <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => {
-              setEditingListener(row);
-              setShowDlg(true);
-            }}
-          >
-            <IconPencil className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-destructive"
-            onClick={() => handleDelete(row.id)}
-          >
-            <IconTrash className="h-3.5 w-3.5" />
-          </Button>
+          {canManage && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => {
+                  setEditingListener(row)
+                  setShowDlg(true)
+                }}
+              >
+                <IconPencil className="h-3.5 w-3.5" />
+              </Button>
+              {row.id !== 0 && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="text-destructive"
+                  onClick={() => handleDelete(row.id)}
+                >
+                  <IconTrash className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </>
+          )}
         </div>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-3">
-          <CardTitle className="text-base">{t("sites.detail.listeners")}</CardTitle>
-          <Button
-            size="sm"
-            className="h-8"
-            onClick={() => {
-              setEditingListener(null);
-              setShowDlg(true);
-            }}
-          >
-            <IconPlus className="mr-1 h-4 w-4" />
-            {t("sites.detail.addListener")}
-          </Button>
+          <CardTitle className="text-base">
+            {t("sites.detail.listeners")}
+          </CardTitle>
+          {canManage && (
+            <Button
+              size="sm"
+              className="h-8"
+              onClick={() => {
+                setEditingListener(null)
+                setShowDlg(true)
+              }}
+            >
+              <IconPlus className="mr-1 h-4 w-4" />
+              {t("sites.detail.addListener")}
+            </Button>
+          )}
         </CardHeader>
         <CardContent>
-          <DataTable
+          <DataTable<SiteListener>
             columns={columns}
             data={listeners?.items || []}
             loading={!listeners}
@@ -222,7 +297,7 @@ export function ListenersTab({ site }: ListenersTabProps) {
         </CardContent>
       </Card>
 
-      {showDlg && (
+      {showDlg && canManage && (
         <ListenerDialog
           open={showDlg}
           onOpenChange={setShowDlg}
@@ -231,5 +306,5 @@ export function ListenersTab({ site }: ListenersTabProps) {
         />
       )}
     </div>
-  );
+  )
 }

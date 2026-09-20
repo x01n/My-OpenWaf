@@ -1,8 +1,13 @@
 package store
 
 import (
+	"crypto"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -12,11 +17,25 @@ const (
 	XFFModeStrip      = "strip_all_and_set_remote"
 	XFFModeTrustOuter = "trust_outer_waf_cidr_then_take_leftmost"
 
+	ClientIPHeaderXForwardedFor = "x_forwarded_for"
+	ClientIPHeaderXRealIP       = "x_real_ip"
+	ClientIPHeaderForwarded     = "forwarded"
+
 	SiteProtectionModeProtect = "protect"
 	SiteProtectionModeObserve = "observe"
 )
 
 // Site holds a virtual host configuration: listener, TLS, protection, forwarding.
+// IsClientIPHeader reports whether header is supported for trusted client IP extraction.
+func IsClientIPHeader(header string) bool {
+	switch header {
+	case ClientIPHeaderXForwardedFor, ClientIPHeaderXRealIP, ClientIPHeaderForwarded:
+		return true
+	default:
+		return false
+	}
+}
+
 type Site struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -43,9 +62,15 @@ type Site struct {
 	BotProtectionLevel    string `gorm:"size:16;default:medium" json:"bot_protection_level"`
 	AttackProtectionLevel string `gorm:"size:16;default:medium" json:"attack_protection_level"`
 
-	AntiReplayEnabled bool   `json:"anti_replay_enabled" gorm:"default:false"`
+	AntiReplayEnabled *bool  `json:"anti_replay_enabled" gorm:"default:null"`
 	AntiReplayTTL     int    `json:"anti_replay_ttl" gorm:"default:300"`
 	AntiReplayAction  string `json:"anti_replay_action" gorm:"default:'shield_challenge'"`
+
+	// 站点级质询策略覆盖（nil = 继承全局 ProtectionConfig）。
+	// ChallengeAction 指定命中质询类动作时实际渲染的质询页类型；
+	// SiteCaptchaType 指定验证码渲染分支使用的验证码类型（math/click/slide/rotate）。
+	ChallengeAction *string `gorm:"default:null" json:"challenge_action,omitempty"`
+	SiteCaptchaType *string `gorm:"default:null" json:"captcha_type,omitempty"`
 
 	OWASPEnabled     *bool  `gorm:"default:null" json:"owasp_enabled,omitempty"`
 	OWASPSensitivity string `gorm:"size:16" json:"owasp_sensitivity,omitempty"`
@@ -57,13 +82,33 @@ type Site struct {
 	RateLimitMax     int    `gorm:"default:0" json:"rate_limit_max,omitempty"`
 	RateLimitAction  string `gorm:"size:32" json:"rate_limit_action,omitempty"`
 
+	// SkipPathByPhase 站点级按 phase 跳过检测的覆盖，语义为三态：
+	// nil = 继承全局；"{}" = 覆盖为"本站不跳过任何路径"；非空 JSON = 覆盖为该配置。
+	// 必须用 *string 而非 string：空串无法区分"继承"与"覆盖为空"，
+	// 后者会把继承态误存成空配置。
+	SkipPathByPhase *string `gorm:"column:skip_path_by_phase;type:text" json:"skip_path_by_phase,omitempty"`
+
 	XFFMode              string `gorm:"size:64;default:strip_all_and_set_remote" json:"xff_mode"`
 	TrustedCIDR          string `gorm:"type:text" json:"trusted_cidr"`
+	ClientIPHeaderOrder  string `gorm:"type:text" json:"client_ip_header_order"`
 	PreserveOriginalHost bool   `gorm:"default:false" json:"preserve_original_host"`
 
 	MaxBodyBytes          int64  `gorm:"default:10485760" json:"max_body_bytes"`
 	UpstreamTLSSkipVerify bool   `gorm:"default:false" json:"upstream_tls_skip_verify"`
 	UpstreamTLSServerName string `gorm:"size:255" json:"upstream_tls_server_name"`
+
+	// 上游 mTLS 客户端证书（PEM 文本，成对配置）：
+	// 两者同时 nil/空白 = 不使用客户端证书；同时非空 = TLS 握手时出示客户端证书。
+	// 私钥在管理面 API 输出前脱敏（见 internal/admin/site 的 redactUpstreamClientKey）。
+	UpstreamTLSClientCertPEM *string           `gorm:"type:text" json:"upstream_tls_client_cert_pem,omitempty"`
+	UpstreamTLSClientKeyPEM  *string           `gorm:"type:text" json:"upstream_tls_client_key_pem,omitempty"`
+	UpstreamTLSClientCertDER []byte            `gorm:"-" json:"-"`
+	UpstreamTLSClientCertKey crypto.PrivateKey `gorm:"-" json:"-"`
+	UpstreamTLSClientCertSet bool              `gorm:"-" json:"-"`
+	UpstreamTLSClientCertBad bool              `gorm:"-" json:"-"`
+	// UpstreamTLSClientCertFP 是证书链 DER 的前 16 字节 SHA-256 十六进制指纹，
+	// 构建期与 DER/Key 一并预计算；"badpair" 为不可解析占位，空串为未配置。
+	UpstreamTLSClientCertFP string `gorm:"-" json:"-"`
 
 	CacheEnabled    bool   `gorm:"default:false" json:"cache_enabled"`
 	CacheDefaultTTL int    `gorm:"default:0" json:"cache_default_ttl"`
@@ -76,7 +121,10 @@ type Site struct {
 	BlockHTML   string `gorm:"type:text" json:"block_html"`
 	BlockStatus int    `gorm:"default:403" json:"block_status"`
 
-	CustomErrorPages string `json:"custom_error_pages" gorm:"type:text;default:'{}'"`
+	// 不设 DB 默认值：MySQL 禁止 BLOB/TEXT 列带 DEFAULT（Error 1101），
+	// 带上会让 AutoMigrate 直接失败。空串与 "{}" 由读取方等价处理
+	// （见 GetCustomErrorPages 与 dataplane 的错误页解析）。
+	CustomErrorPages string `json:"custom_error_pages" gorm:"type:text"`
 
 	// 动态保护站点级覆盖（nil = 继承全局）
 	DynamicProtectionEnabled *bool  `gorm:"column:dynamic_protection_enabled" json:"dynamic_protection_enabled,omitempty"`
@@ -128,7 +176,48 @@ func (s *Site) ApplyProtectionModeOverrides() {
 	}
 }
 
-// GetCustomErrorPages parses the CustomErrorPages JSON field.
+func (s *Site) PrepareUpstreamMTLSRuntime() {
+	s.UpstreamTLSClientCertFP = ""
+	if s.UpstreamTLSClientCertPEM == nil && s.UpstreamTLSClientKeyPEM == nil {
+		s.UpstreamTLSClientCertSet = true
+		return
+	}
+	certPEM := ""
+	keyPEM := ""
+	if s.UpstreamTLSClientCertPEM != nil {
+		certPEM = strings.TrimSpace(*s.UpstreamTLSClientCertPEM)
+	}
+	if s.UpstreamTLSClientKeyPEM != nil {
+		keyPEM = strings.TrimSpace(*s.UpstreamTLSClientKeyPEM)
+	}
+	if certPEM == "" && keyPEM == "" {
+		s.UpstreamTLSClientCertSet = true
+		s.UpstreamTLSClientCertBad = false
+		return
+	}
+	if certPEM == "" || keyPEM == "" {
+		s.UpstreamTLSClientCertBad = true
+		s.UpstreamTLSClientCertSet = true
+		s.UpstreamTLSClientCertFP = "badpair"
+		return
+	}
+	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		s.UpstreamTLSClientCertBad = true
+		s.UpstreamTLSClientCertSet = true
+		s.UpstreamTLSClientCertFP = "badpair"
+		return
+	}
+	if len(pair.Certificate) > 0 {
+		s.UpstreamTLSClientCertDER = pair.Certificate[0]
+		sum := sha256.Sum256(pair.Certificate[0])
+		s.UpstreamTLSClientCertFP = hex.EncodeToString(sum[0:16])
+	}
+	s.UpstreamTLSClientCertKey = pair.PrivateKey
+	s.UpstreamTLSClientCertBad = false
+	s.UpstreamTLSClientCertSet = true
+}
+
 func (s *Site) GetCustomErrorPages() map[int]interface{} {
 	if s.CustomErrorPages == "" || s.CustomErrorPages == "{}" {
 		return nil
@@ -178,6 +267,9 @@ type SiteCacheRule struct {
 	TTL             int    `json:"ttl"`
 	CaseInsensitive bool   `json:"case_insensitive,omitempty"`
 	IgnoreQuery     bool   `json:"ignore_query,omitempty"`
+	Disabled        bool   `json:"disabled,omitempty"`
+	Note            string `json:"note,omitempty"`
+	StaleIfError    int    `json:"stale_if_error_seconds,omitempty"`
 	// Regex is compiled at snapshot build for type "regex" only; not persisted or exposed in JSON.
 	Regex *regexp.Regexp `json:"-" gorm:"-"`
 }

@@ -9,11 +9,11 @@
 export default function SecurityDashboardLayout({
   children,
 }: {
-  children: React.ReactNode;
+  children: React.ReactNode
 }) {
   return (
     <div className="dark min-h-svh bg-slate-950 text-slate-100 antialiased">
       {children}
     </div>
-  );
+  )
 }

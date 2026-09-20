@@ -766,6 +766,26 @@ func TestCheckOWASP_XSS(t *testing.T) {
 	}
 }
 
+func TestIsPathWhitelistedRequiresDirectoryBoundary(t *testing.T) {
+	overrides := map[string]OWASPRuleOverride{
+		"owasp:test:001": {Whitelist: []string{"/public/*", "", " \t\n"}},
+	}
+	if !IsPathWhitelisted("owasp:test:001", "/public", overrides) {
+		t.Fatal("expected exact whitelist path to match")
+	}
+	if !IsPathWhitelisted("owasp:test:001", "/public/assets/app.js", overrides) {
+		t.Fatal("expected whitelist directory descendant to match")
+	}
+	if IsPathWhitelisted("owasp:test:001", "/publicity", overrides) {
+		t.Fatal("whitelist path must not match a same-prefix sibling")
+	}
+	if IsPathWhitelisted("owasp:test:001", "/admin", map[string]OWASPRuleOverride{
+		"owasp:test:001": {Whitelist: []string{"", " \t\n"}},
+	}) {
+		t.Fatal("blank whitelist entries must not match every path")
+	}
+}
+
 func TestCheckOWASP_Clean(t *testing.T) {
 	hits := CheckOWASP("mid", "/api/v1/users", "page=1&limit=10", nil, nil)
 	if len(hits) > 0 {
@@ -910,8 +930,6 @@ func TestStripSQLCommentsRemovesStrippableComments(t *testing.T) {
 		}
 	}
 }
-
-// ── False Positive Tests: clean requests that must NOT trigger ──
 
 func TestCheckOWASP_Clean_URLFragment(t *testing.T) {
 	hits := CheckOWASP("mid", "/page", "id=1#section", nil, nil)
@@ -1158,8 +1176,6 @@ func TestCheckOWASP_Clean_SearchQuery(t *testing.T) {
 	}
 }
 
-// ── 新增检测能力测试 ──
-
 // GROUP BY 注入 — 之前因 hasSQLiIndicator 缺少 "group by" 而漏报
 func TestCheckOWASP_SQLi_GroupBy(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=1 GROUP BY 1--", nil, nil)
@@ -1372,8 +1388,6 @@ func TestCheckOWASP_Clean_PipeEqualsParam(t *testing.T) {
 	}
 }
 
-// ── 新增误报抑制验证测试 ──
-
 // XSS：SVG图标 + iframe嵌入（常见于CMS富文本）不应触发
 func TestCheckOWASP_Clean_SVGAndIframe(t *testing.T) {
 	body := `<svg xmlns="http://www.w3.org/2000/svg" width="24"><path d="M10 20"/></svg>` +
@@ -1418,8 +1432,6 @@ func TestCheckOWASP_SQLi_GroupByWithComment(t *testing.T) {
 		t.Fatal("GROUP BY with SQL comment should still trigger SQLi")
 	}
 }
-
-// ── sqli:022 和 sqli:003 误报抑制测试 ──
 
 // sqli:022: if(length) 作为 JavaScript 变量检查不触发
 func TestCheckOWASP_Clean_JSIfLength(t *testing.T) {
@@ -1487,8 +1499,6 @@ func TestCheckOWASP_PathTrav_EtcPasswdStillDetected(t *testing.T) {
 	}
 }
 
-// ── sqli:001 suppressor tests ──
-
 // 搜索引擎查询中含 "union select" 不触发（FP 场景：开发者在 segmentfault 搜索 SQL 语法）
 func TestCheckOWASP_Clean_UnionSelectSearchQuery(t *testing.T) {
 	hits := CheckOWASP("mid", "/search", "q=union+select+%E5%85%B3%E9%94%AE%E5%AD%97%E6%80%8E%E4%B9%88%E7%94%A8", nil, nil)
@@ -1529,8 +1539,6 @@ func TestCheckOWASP_SQLi_UnionSelectNull(t *testing.T) {
 	}
 }
 
-// ── sqli:017 suppressor tests ──
-
 // AWS Aurora 文档 "INTO OUTFILE S3" 不触发（无引号路径）
 func TestCheckOWASP_Clean_IntoOutfileS3(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "", nil, []string{"SELECT INTO OUTFILE S3 the following statement exports"})
@@ -1546,8 +1554,6 @@ func TestCheckOWASP_SQLi_IntoOutfileWithPath(t *testing.T) {
 		t.Fatal("INTO OUTFILE with quoted path should still trigger")
 	}
 }
-
-// ── xss:002 suppressor tests ──
 
 // CDN onload 回调参数不触发（Cloudflare Turnstile 模式）
 func TestCheckOWASP_Clean_CDNOnloadCallback(t *testing.T) {
@@ -1606,8 +1612,6 @@ func TestCheckOWASP_XSS_OnloadAlert(t *testing.T) {
 	}
 }
 
-// ── sqli:006 suppressor tests ──
-
 // CSP 报告中 'use strict'; concat(...) 不触发
 func TestCheckOWASP_Clean_CSPReportUseStrict(t *testing.T) {
 	hits := CheckOWASP("mid", "/api/report", "", nil, []string{
@@ -1643,8 +1647,6 @@ func TestCheckOWASP_SQLi_006WithDropTable(t *testing.T) {
 		t.Fatal("sqli:006 with DROP TABLE context should still trigger")
 	}
 }
-
-// ── Sec-Ch-Ua 扩展请求头不触发测试 ──
 
 // Sec-Ch-Ua-Full-Version-List 含引号和分号不触发
 func TestCheckOWASP_Clean_SecChUaFullVersionList(t *testing.T) {
@@ -1714,5 +1716,46 @@ func TestCheckOWASP_Debug_BingCSPReport(t *testing.T) {
 	hits := CheckOWASP("mid", "/api/report", "cat=bingcsp", nil, []string{body})
 	if hasCategory(hits, CatSQLi) {
 		t.Fatalf("Bing CSP report body should not trigger SQLi, got %+v", hits)
+	}
+}
+
+func BenchmarkFirstOWASPSQLiTraffic(b *testing.B) {
+	headers := map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Host":            "example.com",
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+	}
+	thresholds := CompileThresholds("mid")
+	hit, ok := FirstOWASPHitWithThresholds(thresholds, "/search", "q=1%20union%20select%20username,password%20from%20users--", headers, nil)
+	if !ok {
+		b.Fatal("expected SQLi hit")
+	}
+	benchmarkOWASPHitSink = hit
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hit, ok = FirstOWASPHitWithThresholds(thresholds, "/search", "q=1%20union%20select%20username,password%20from%20users--", headers, nil)
+		if ok {
+			benchmarkOWASPHitSink = hit
+		}
+	}
+}
+
+func BenchmarkFirstOWASPXSSBareEventHandlerTraffic(b *testing.B) {
+	thresholds := CompileThresholds("mid")
+	hit, ok := FirstOWASPHitWithThresholds(thresholds, "/", `name=" onmouseover="alert(1)`, nil, nil)
+	if !ok {
+		b.Fatal("expected XSS hit")
+	}
+	benchmarkOWASPHitSink = hit
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hit, ok = FirstOWASPHitWithThresholds(thresholds, "/", `name=" onmouseover="alert(1)`, nil, nil)
+		if ok {
+			benchmarkOWASPHitSink = hit
+		}
 	}
 }

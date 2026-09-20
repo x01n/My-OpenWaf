@@ -1,23 +1,20 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import { useTranslation } from "react-i18next";
-import { format } from "date-fns";
-import type { DateRange } from "react-day-picker";
-import {
-  IconCalendarStats,
-  IconChevronDown,
-} from "@tabler/icons-react";
+import * as React from "react"
+import { useTranslation } from "react-i18next"
+import { format } from "date-fns"
+import type { DateRange } from "react-day-picker"
+import { IconCalendarStats, IconChevronDown } from "@tabler/icons-react"
 
-import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
-import { Calendar } from "@/components/ui/calendar";
+import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import { Calendar } from "@/components/ui/calendar"
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from "@/components/ui/popover";
-import { Separator } from "@/components/ui/separator";
+} from "@/components/ui/popover"
+import { Separator } from "@/components/ui/separator"
 
 /**
  * @typedef {object} TimeRangeValue
@@ -25,45 +22,45 @@ import { Separator } from "@/components/ui/separator";
  * @property {string} until ISO/RFC3339 结束（可能为空字符串）
  */
 export interface TimeRangeValue {
-  since: string;
-  until: string;
+  since: string
+  until: string
 }
 
 interface DateRangePickerProps {
-  value: TimeRangeValue;
-  onChange: (value: TimeRangeValue) => void;
-  className?: string;
-  align?: "start" | "center" | "end";
+  value: TimeRangeValue
+  onChange: (value: TimeRangeValue) => void
+  className?: string
+  align?: "start" | "center" | "end"
 }
 
-type PresetKey = "1h" | "6h" | "24h" | "7d" | "custom";
+type PresetKey = "1h" | "6h" | "24h" | "7d" | "custom"
 
 const PRESET_MS: Record<Exclude<PresetKey, "custom">, number> = {
   "1h": 60 * 60 * 1000,
   "6h": 6 * 60 * 60 * 1000,
   "24h": 24 * 60 * 60 * 1000,
   "7d": 7 * 24 * 60 * 60 * 1000,
-};
+}
 
 /**
  * 尝试把外部 since/until 反推为预设 key。
  * 只有 until 未指定（表示"到现在"）且 since = now - preset 时视为预设。
  */
 function detectPreset(value: TimeRangeValue): PresetKey | null {
-  if (!value.since) return null;
-  const now = Date.now();
-  const since = new Date(value.since).getTime();
-  if (isNaN(since)) return null;
-  if (value.until) return null;
-  const delta = now - since;
-  const tolerance = 60 * 1000; // 1 分钟容差
+  if (!value.since) return null
+  const now = Date.now()
+  const since = new Date(value.since).getTime()
+  if (isNaN(since)) return null
+  if (value.until) return null
+  const delta = now - since
+  const tolerance = 60 * 1000 // 1 分钟容差
   for (const [key, ms] of Object.entries(PRESET_MS) as [
     Exclude<PresetKey, "custom">,
     number,
   ][]) {
-    if (Math.abs(delta - ms) < tolerance) return key;
+    if (Math.abs(delta - ms) < tolerance) return key
   }
-  return null;
+  return null
 }
 
 /**
@@ -76,54 +73,56 @@ export function DateRangePicker({
   className,
   align = "start",
 }: DateRangePickerProps) {
-  const { t } = useTranslation();
-  const [open, setOpen] = React.useState(false);
+  const { t } = useTranslation()
+  const [open, setOpen] = React.useState(false)
   const [tempRange, setTempRange] = React.useState<DateRange | undefined>(
     () => {
-      const from = value.since ? new Date(value.since) : undefined;
-      const to = value.until ? new Date(value.until) : undefined;
-      return from || to ? { from, to } : undefined;
-    },
-  );
+      const from = value.since ? new Date(value.since) : undefined
+      const to = value.until ? new Date(value.until) : undefined
+      return from || to ? { from, to } : undefined
+    }
+  )
 
-  const preset = detectPreset(value);
+  const preset = detectPreset(value)
 
   const label = React.useMemo<string>(() => {
-    if (preset === "1h") return t("timeRange.last1h");
-    if (preset === "6h") return t("timeRange.last6h");
-    if (preset === "24h") return t("timeRange.last24h");
-    if (preset === "7d") return t("timeRange.last7d");
-    if (!value.since && !value.until) return t("timeRange.allTime");
-    const parts: string[] = [];
-    if (value.since) parts.push(format(new Date(value.since), "yyyy-MM-dd HH:mm"));
-    else parts.push(t("timeRange.anyStart"));
-    parts.push("~");
-    if (value.until) parts.push(format(new Date(value.until), "yyyy-MM-dd HH:mm"));
-    else parts.push(t("timeRange.anyEnd"));
-    return parts.join(" ");
-  }, [preset, value, t]);
+    if (preset === "1h") return t("timeRange.last1h")
+    if (preset === "6h") return t("timeRange.last6h")
+    if (preset === "24h") return t("timeRange.last24h")
+    if (preset === "7d") return t("timeRange.last7d")
+    if (!value.since && !value.until) return t("timeRange.allTime")
+    const parts: string[] = []
+    if (value.since)
+      parts.push(format(new Date(value.since), "yyyy-MM-dd HH:mm"))
+    else parts.push(t("timeRange.anyStart"))
+    parts.push("~")
+    if (value.until)
+      parts.push(format(new Date(value.until), "yyyy-MM-dd HH:mm"))
+    else parts.push(t("timeRange.anyEnd"))
+    return parts.join(" ")
+  }, [preset, value, t])
 
   const applyPreset = (key: Exclude<PresetKey, "custom">) => {
-    const now = new Date();
-    const since = new Date(now.getTime() - PRESET_MS[key]);
-    onChange({ since: since.toISOString(), until: "" });
-    setTempRange({ from: since, to: now });
-    setOpen(false);
-  };
+    const now = new Date()
+    const since = new Date(now.getTime() - PRESET_MS[key])
+    onChange({ since: since.toISOString(), until: "" })
+    setTempRange({ from: since, to: now })
+    setOpen(false)
+  }
 
   const applyCustom = () => {
     onChange({
       since: tempRange?.from ? tempRange.from.toISOString() : "",
       until: tempRange?.to ? tempRange.to.toISOString() : "",
-    });
-    setOpen(false);
-  };
+    })
+    setOpen(false)
+  }
 
   const clearAll = () => {
-    onChange({ since: "", until: "" });
-    setTempRange(undefined);
-    setOpen(false);
-  };
+    onChange({ since: "", until: "" })
+    setTempRange(undefined)
+    setOpen(false)
+  }
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -133,7 +132,7 @@ export function DateRangePicker({
           size="sm"
           className={cn(
             "h-8 justify-start gap-1.5 text-xs font-normal",
-            className,
+            className
           )}
         >
           <IconCalendarStats className="h-3.5 w-3.5" />
@@ -207,7 +206,7 @@ export function DateRangePicker({
         </div>
       </PopoverContent>
     </Popover>
-  );
+  )
 }
 
 function PresetButton({
@@ -215,9 +214,9 @@ function PresetButton({
   active,
   onClick,
 }: {
-  children: React.ReactNode;
-  active?: boolean;
-  onClick: () => void;
+  children: React.ReactNode
+  active?: boolean
+  onClick: () => void
 }) {
   return (
     <button
@@ -225,10 +224,10 @@ function PresetButton({
       onClick={onClick}
       className={cn(
         "w-full rounded-md px-3 py-1.5 text-left text-xs transition-colors hover:bg-muted",
-        active && "bg-primary/10 font-medium text-primary hover:bg-primary/15",
+        active && "bg-primary/10 font-medium text-primary hover:bg-primary/15"
       )}
     >
       {children}
     </button>
-  );
+  )
 }

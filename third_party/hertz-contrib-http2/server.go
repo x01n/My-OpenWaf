@@ -352,7 +352,8 @@ type serverConn struct {
 	initialStreamSendWindowSize int32
 	maxFrameSize                int32
 	headerTableSize             uint32
-	peerMaxHeaderListSize       uint32            // zero means unknown (default)
+	peerMaxHeaderListSize       uint32 // zero means unknown (default)
+	peerEnableConnectProtocol   bool
 	canonHeader                 map[string]string // http2-lower-case -> Go-Canonical-Case
 	writingFrame                bool              // started writing a frame (on serve goroutine or separate)
 	writingFrameAsync           bool              // started a frame on its own goroutine but haven't heard back on wroteFrameCh
@@ -614,6 +615,9 @@ func (sc *serverConn) serve() {
 			{SettingMaxConcurrentStreams, sc.advMaxStreams},
 			{SettingMaxHeaderListSize, sc.maxHeaderListSize()},
 			{SettingInitialWindowSize, uint32(sc.srv.initialStreamRecvWindowSize())},
+			// 广告支持 RFC 8441 扩展 CONNECT（SETTINGS_ENABLE_CONNECT_PROTOCOL），
+			// 否则客户端不得发送带 ":protocol" 的 CONNECT。
+			{SettingEnableConnectProtocol, 1},
 		},
 	})
 	sc.unackedSettings++
@@ -1107,6 +1111,58 @@ func (sc *serverConn) startGracefulShutdownInternal() {
 	sc.goAway(ErrCodeNo)
 }
 
+func h2ExtendedConnectProtocolIsValid(protocol string) bool {
+	if protocol == "" {
+		return false
+	}
+	for i := 0; i < len(protocol); i++ {
+		switch c := protocol[i]; {
+		case 'a' <= c && c <= 'z', c == '.', c == '+', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func h2IdleKeepaliveWhileOpen(st *stream, idleTimeout time.Duration) func() {
+	if st == nil || st.sc == nil || idleTimeout <= 0 {
+		return func() {}
+	}
+	sc := st.sc
+	interval := idleTimeout / 2
+	if interval <= 0 {
+		interval = idleTimeout
+	}
+	ticker := time.NewTicker(interval)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				select {
+				case sc.serveMsgCh <- idleTimerMsg:
+				case <-done:
+					return
+				case <-sc.doneServing:
+					return
+				}
+			case <-done:
+				return
+			case <-sc.doneServing:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			ticker.Stop()
+		})
+	}
+}
+
 func (sc *serverConn) goAway(code ErrCode) {
 	sc.serveG.check()
 	if sc.inGoAway {
@@ -1200,6 +1256,20 @@ func (sc *serverConn) processFrame(f Frame) error {
 			return ConnectionError(ErrCodeProtocol)
 		}
 		sc.sawFirstSettings = true
+	}
+
+	// Discard frames for streams initiated after the last stream received
+	// before GOAWAY, or all frames after sending an error. DATA still needs
+	// connection-level flow control credit returned.
+	if sc.inGoAway && (sc.goAwayCode != ErrCodeNo || f.Header().StreamID > sc.maxClientStreamID) {
+		if data, ok := f.(*DataFrame); ok {
+			if sc.inflow.available() < int32(data.Length) {
+				return streamError(data.Header().StreamID, ErrCodeFlowControl)
+			}
+			sc.inflow.take(int32(data.Length))
+			sc.sendWindowUpdate(nil, int(data.Length))
+		}
+		return nil
 	}
 
 	switch f := f.(type) {
@@ -1399,6 +1469,10 @@ func (sc *serverConn) processSetting(s Setting) error {
 		sc.maxFrameSize = int32(s.Val) // the maximum valid s.Val is < 2^31
 	case SettingMaxHeaderListSize:
 		sc.peerMaxHeaderListSize = s.Val
+	case SettingEnableConnectProtocol:
+		// 记录对端是否支持 RFC 8441 扩展 CONNECT；本实现当前
+		// 仅用于诊断信息，不影响任何行为分支。
+		sc.peerEnableConnectProtocol = s.Val != 0
 	default:
 		// Unknown setting: "An endpoint that receives a SETTINGS
 		// frame with any unknown or unsupported identifier MUST
@@ -1479,6 +1553,12 @@ func (sc *serverConn) processData(f *DataFrame) error {
 
 		if st != nil && st.resetQueued {
 			// Already have a stream error in flight. Don't send another.
+			return nil
+		}
+		// RFC 8441 扩展 CONNECT 的流在 hijack 桥接收尾阶段仍可能
+		// 顺延少量 DATA，handler 已返回属正常半关本地，不应对此
+		// 发 RST_STREAM。
+		if st != nil && st.isH2ExtendedConnect {
 			return nil
 		}
 		return streamError(id, ErrCodeStreamClosed)
@@ -1766,10 +1846,17 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 		scheme:    f.PseudoValue("scheme"),
 		authority: f.PseudoValue("authority"),
 		path:      f.PseudoValue("path"),
+		protocol:  f.PseudoValue("protocol"),
 	}
 
+	// RFC 8441: ":protocol" 仅允许出现在扩展 CONNECT 上，且必须携带
+	// :scheme 与 :path；普通 CONNECT 维持 RFC 7540 形态校验不变。
 	isConnect := rp.method == "CONNECT"
-	if isConnect {
+	if isConnect && rp.protocol != "" {
+		if rp.path == "" || rp.scheme == "" || rp.authority == "" {
+			return nil, streamError(f.StreamID, ErrCodeProtocol)
+		}
+	} else if isConnect {
 		if rp.path != "" || rp.scheme != "" || rp.authority == "" {
 			return nil, streamError(f.StreamID, ErrCodeProtocol)
 		}
@@ -1800,16 +1887,31 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 	//  `${rp.scheme}://${rp.authority}${rp.path}`
 	strBuilder.Grow(len(rp.scheme) + len(rp.authority) + len(rp.path) + 3)
 
+	// 与既有测试锚定的基线字节形态一致：无论是否有 :scheme，
+	// 都拼出 "://authority(path)" 的 URI 形态；:authority 的语义地址
+	// 单独镜像进 Host 供上游路由与安全校验使用。
 	strBuilder.WriteString(rp.scheme)
 	strBuilder.WriteString("://")
 	strBuilder.WriteString(rp.authority)
 	strBuilder.WriteString(rp.path)
 	reqCtx.Request.SetRequestURI(strBuilder.String())
+	if rp.scheme == "" {
+		reqCtx.Request.SetHost(rp.authority)
+	}
 
 	for _, hf := range f.RegularFields() {
 		key := sc.canonicalHeader(hf.Name)
 		reqCtx.Request.Header.SetCanonical(bytesconv.S2b(key), bytesconv.S2b(hf.Value))
 	}
+	if rp.protocol != "" {
+		if !h2ExtendedConnectProtocolIsValid(rp.protocol) {
+			return nil, streamError(f.StreamID, ErrCodeProtocol)
+		}
+		reqCtx.Request.Header.Set(":protocol", rp.protocol)
+		st.isH2ExtendedConnect = true
+	}
+	// 普通 CONNECT（RFC 7540，无 ":protocol"）不做头注入：业务侧
+	// 按 Method + Upgrade/Connection 语义自行判定，与补丁前行为一致。
 
 	if len(reqCtx.Request.Header.ContentLengthBytes()) > 0 {
 		st.declBodyBytes = int64(reqCtx.Request.Header.ContentLength())
@@ -1834,6 +1936,7 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 type requestParam struct {
 	method                  string
 	scheme, authority, path string
+	protocol                string
 }
 
 func (sc *serverConn) newWriterAndRequestNoBody(st *stream) (*responseWriter, error) {
@@ -1930,6 +2033,14 @@ func (sc *serverConn) runHandler(rw *responseWriter, reqCtx *app.RequestContext,
 				hlog.SystemLogger().Error(err.Error())
 			}
 			return
+		}
+
+		// RFC 8441 扩展 CONNECT 桥接属于常连接隧道：隧道存活期间可能
+		// 长时间无帧活动，周期发送保活消息重置连接空闲计时器，
+		// 防止 serve 循环把连接 GOAWAY 掉。
+		if st := rw.rws.stream; st != nil && st.isH2ExtendedConnect && sc.srv.IdleTimeout > 0 {
+			stopIdleKeepalive := h2IdleKeepaliveWhileOpen(st, sc.srv.IdleTimeout)
+			defer stopIdleKeepalive()
 		}
 
 		if writer := reqCtx.Response.GetHijackWriter(); writer != nil {
@@ -2258,5 +2369,3 @@ func new400Handler(err error) app.HandlerFunc {
 func h1ServerKeepAlivesDisabled(hs *BaseEngine) bool {
 	return hs.DisableKeepalive || !hs.Core.IsRunning()
 }
-
-

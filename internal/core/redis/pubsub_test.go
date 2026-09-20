@@ -291,3 +291,105 @@ func TestConfigSyncSkipsOwnPublishAndAcceptsForeignPublish(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestNewConfigSyncNilClientReturnsNil 验证 nil client 时返回 nil
+func TestNewConfigSyncNilClientReturnsNil(t *testing.T) {
+	cs := NewConfigSync(nil, nil, "node-x")
+	if cs != nil {
+		t.Error("NewConfigSync(nil client) should return nil")
+	}
+}
+
+// TestNewConfigSyncAutoGeneratesSourceID 验证空 sourceID 时自动生成
+func TestNewConfigSyncAutoGeneratesSourceID(t *testing.T) {
+	srv := startTestConfigSyncRedisServer(t)
+	t.Cleanup(srv.Close)
+
+	client := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	cs := NewConfigSync(client, nil, "")
+	if cs == nil {
+		t.Fatal("NewConfigSync with empty sourceID should succeed")
+	}
+	t.Cleanup(cs.Close)
+	if cs.sourceID == "" {
+		t.Error("auto-generated sourceID should not be empty")
+	}
+}
+
+// TestNewConfigSyncNilLoggerUsesDefault 验证 nil logger 时使用默认 logger
+func TestNewConfigSyncNilLoggerUsesDefault(t *testing.T) {
+	srv := startTestConfigSyncRedisServer(t)
+	t.Cleanup(srv.Close)
+
+	client := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	cs := NewConfigSync(client, nil, "node-default-log")
+	if cs == nil {
+		t.Fatal("NewConfigSync(nil log) should succeed")
+	}
+	t.Cleanup(cs.Close)
+	if cs.log == nil {
+		t.Error("log field should not be nil after NewConfigSync with nil logger")
+	}
+}
+
+// TestPublishReloadNilReceiverSafe 验证 nil receiver 不 panic
+func TestPublishReloadNilReceiverSafe(t *testing.T) {
+	var cs *ConfigSync
+	cs.PublishReload() // 不应 panic
+}
+
+// TestCloseNilReceiverSafe 验证 nil receiver 的 Close 不 panic
+func TestCloseNilReceiverSafe(t *testing.T) {
+	var cs *ConfigSync
+	cs.Close() // 不应 panic
+}
+
+// TestSubscribeNilClientSafe 验证 nil client 的 Subscribe 不 panic
+func TestSubscribeNilClientSafe(t *testing.T) {
+	var cs *ConfigSync
+	cs.Subscribe(func() error { return nil }) // 不应 panic
+}
+
+// TestCloseIdempotent 验证多次 Close 不 panic
+func TestCloseIdempotent(t *testing.T) {
+	srv := startTestConfigSyncRedisServer(t)
+	t.Cleanup(srv.Close)
+
+	client := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	cs := NewConfigSync(client, nil, "idempotent")
+	if cs == nil {
+		t.Fatal("expected ConfigSync")
+	}
+	cs.Close()
+	cs.Close() // 第二次不应 panic
+}
+
+// TestOptionalClientNilWhenAddrEmpty 验证地址为空时返回 nil
+func TestOptionalClientNilWhenAddrEmpty(t *testing.T) {
+	c := OptionalClient(RedisOptions{Addr: ""})
+	if c != nil {
+		t.Error("OptionalClient with empty addr should return nil")
+	}
+}
+
+// TestOptionalClientNonNilWhenAddrSet 验证地址非空时返回非 nil client
+func TestOptionalClientNonNilWhenAddrSet(t *testing.T) {
+	c := OptionalClient(RedisOptions{Addr: "127.0.0.1:6379"})
+	if c == nil {
+		t.Error("OptionalClient with non-empty addr should return non-nil")
+	}
+	_ = c.Close()
+}
+
+// TestPingNilClientReturnsNil 验证 nil client 时 Ping 返回 nil
+func TestPingNilClientReturnsNil(t *testing.T) {
+	if err := Ping(nil, nil); err != nil {
+		t.Errorf("Ping(nil, nil) = %v, want nil", err)
+	}
+}

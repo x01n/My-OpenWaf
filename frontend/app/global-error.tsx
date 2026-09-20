@@ -1,20 +1,20 @@
-"use client";
+"use client"
 
-import { useEffect } from "react";
-import { Button } from "@/components/ui/button";
+import { useEffect } from "react"
+import { Button } from "@/components/ui/button"
 
 export default function GlobalError({
   error,
   reset,
 }: {
-  error: Error & { digest?: string };
-  reset: () => void;
+  error: Error & { digest?: string }
+  reset: () => void
 }) {
   useEffect(() => {
     if (process.env.NODE_ENV === "development") {
-      console.error("[GlobalError]", error);
+      console.error("[GlobalError]", error)
     }
-  }, [error]);
+  }, [error])
 
   return (
     <html lang="zh-CN">
@@ -30,5 +30,5 @@ export default function GlobalError({
         </div>
       </body>
     </html>
-  );
+  )
 }

@@ -63,7 +63,7 @@ func UpdateSensitivityConfig(repo *repository.SystemSettingsRepo, reload func() 
 		}
 		var req sensitivityRequest
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		normalized := make(map[string]string, len(req.CategorySensitivity))

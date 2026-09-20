@@ -167,17 +167,17 @@ func TestValidateRuleRejectsInvalidTLSPatterns(t *testing.T) {
 		{
 			name:      "invalid tls version",
 			pattern:   "tls_version:TLS 1.9",
-			wantError: "tls_version requires a supported TLS version token",
+			wantError: "tls_version 需要合法的 TLS 版本标识",
 		},
 		{
 			name:      "unsupported ssl3 tls version",
 			pattern:   "tls_version:SSL3",
-			wantError: "tls_version requires a supported TLS version token",
+			wantError: "tls_version 需要合法的 TLS 版本标识",
 		},
 		{
 			name:      "invalid compound tls version",
 			pattern:   `{"op":"and","children":[{"kind":"block_path","arg":"/admin"},{"kind":"tls_version","arg":"TLS 1.9"}]}`,
-			wantError: "tls_version requires a supported TLS version token",
+			wantError: "tls_version 需要合法的 TLS 版本标识",
 		},
 	}
 

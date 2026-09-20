@@ -119,3 +119,117 @@ func TestPolicyDescriptionPersistsAcrossCreateUpdateGetList(t *testing.T) {
 		t.Fatalf("list policy description = %q, want %q", listResp.Items[0].Description, "updated detail")
 	}
 }
+
+func TestDefaultPolicyHandlersAndDeleteIntegrity(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.Policy{}, &store.Site{}, &store.Rule{}); err != nil {
+		t.Fatalf("migrate policy references: %v", err)
+	}
+	policyRepo := repository.NewPolicyRepo(db)
+	siteRepo := repository.NewSiteRepo(db)
+	one := uint(1)
+	defaultPolicy := store.Policy{Name: "default", DefaultSlot: &one}
+	otherPolicy := store.Policy{Name: "other"}
+	if err := db.Create(&defaultPolicy).Error; err != nil {
+		t.Fatalf("seed default policy: %v", err)
+	}
+	if err := db.Create(&otherPolicy).Error; err != nil {
+		t.Fatalf("seed other policy: %v", err)
+	}
+	getCtx := invokePolicyHandler(t, GetDefaultPolicy(policyRepo), "GET", "/api/v1/policies/default", nil, nil)
+	if getCtx.Response.StatusCode() != 200 {
+		t.Fatalf("get default status %d: %s", getCtx.Response.StatusCode(), getCtx.Response.Body())
+	}
+	var got store.Policy
+	if err := json.Unmarshal(getCtx.Response.Body(), &got); err != nil {
+		t.Fatalf("decode default policy: %v", err)
+	}
+	if got.ID != defaultPolicy.ID || !got.IsDefault {
+		t.Fatalf("default policy response = %+v", got)
+	}
+
+	defaultID := strconv.FormatUint(uint64(defaultPolicy.ID), 10)
+	deleteDefault := invokePolicyHandler(t, DeletePolicy(policyRepo, siteRepo, func() error { return nil }), "POST", "/api/v1/policies/"+defaultID+"/delete", param.Params{{Key: "id", Value: defaultID}}, nil)
+	if deleteDefault.Response.StatusCode() != 409 {
+		t.Fatalf("delete default status %d: %s", deleteDefault.Response.StatusCode(), deleteDefault.Response.Body())
+	}
+
+	rule := store.Rule{Name: "reference", PolicyID: otherPolicy.ID, Phase: store.PhaseCustom, Pattern: "block_path:/blocked", Action: store.ActionIntercept, Enabled: true}
+	if err := db.Create(&rule).Error; err != nil {
+		t.Fatalf("seed rule reference: %v", err)
+	}
+	otherID := strconv.FormatUint(uint64(otherPolicy.ID), 10)
+	deleteReferenced := invokePolicyHandler(t, DeletePolicy(policyRepo, siteRepo, func() error { return nil }), "POST", "/api/v1/policies/"+otherID+"/delete", param.Params{{Key: "id", Value: otherID}}, nil)
+	if deleteReferenced.Response.StatusCode() != 400 {
+		t.Fatalf("delete referenced status %d: %s", deleteReferenced.Response.StatusCode(), deleteReferenced.Response.Body())
+	}
+	var refs struct {
+		RuleRefs int64 `json:"rule_refs"`
+	}
+	if err := json.Unmarshal(deleteReferenced.Response.Body(), &refs); err != nil {
+		t.Fatalf("decode references: %v", err)
+	}
+	if refs.RuleRefs != 1 {
+		t.Fatalf("rule_refs = %d, want 1", refs.RuleRefs)
+	}
+
+	if err := db.Delete(&rule).Error; err != nil {
+		t.Fatalf("delete rule reference: %v", err)
+	}
+	reloads := 0
+	setCtx := invokePolicyHandler(t, SetDefaultPolicy(policyRepo, func() error {
+		reloads++
+		return nil
+	}), "POST", "/api/v1/policies/"+otherID+"/set-default", param.Params{{Key: "id", Value: otherID}}, nil)
+	if setCtx.Response.StatusCode() != 200 || reloads != 1 {
+		t.Fatalf("set default status %d reloads %d: %s", setCtx.Response.StatusCode(), reloads, setCtx.Response.Body())
+	}
+	newDefault, err := policyRepo.GetDefault()
+	if err != nil {
+		t.Fatalf("load switched default: %v", err)
+	}
+	if newDefault.ID != otherPolicy.ID || !newDefault.IsDefault {
+		t.Fatalf("switched default = %+v", newDefault)
+	}
+}
+
+func TestSetDefaultReleasesSoftDeletedDefaultSlot(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.Policy{}); err != nil {
+		t.Fatalf("migrate policies: %v", err)
+	}
+	one := uint(1)
+	deletedDefault := store.Policy{Name: "deleted default", DefaultSlot: &one}
+	nextDefault := store.Policy{Name: "next default"}
+	if err := db.Create(&deletedDefault).Error; err != nil {
+		t.Fatalf("seed deleted default: %v", err)
+	}
+	if err := db.Create(&nextDefault).Error; err != nil {
+		t.Fatalf("seed next default: %v", err)
+	}
+	if err := db.Delete(&deletedDefault).Error; err != nil {
+		t.Fatalf("soft delete default: %v", err)
+	}
+
+	repo := repository.NewPolicyRepo(db)
+	item, err := repo.SetDefault(nextDefault.ID)
+	if err != nil {
+		t.Fatalf("set default: %v", err)
+	}
+	if item.ID != nextDefault.ID || !item.IsDefault {
+		t.Fatalf("set default result = %+v", item)
+	}
+	var deleted store.Policy
+	if err := db.Unscoped().First(&deleted, deletedDefault.ID).Error; err != nil {
+		t.Fatalf("load deleted policy: %v", err)
+	}
+	if deleted.DefaultSlot != nil {
+		t.Fatalf("deleted default slot = %v, want nil", deleted.DefaultSlot)
+	}
+}

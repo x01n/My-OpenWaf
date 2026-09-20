@@ -2,7 +2,11 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"sort"
 	"strings"
+
+	"My-OpenWaf/internal/core/action"
 )
 
 // ProtectionConfig is the global protection configuration stored as JSON in SystemSettings.
@@ -49,9 +53,17 @@ type ProtectionConfig struct {
 
 	AutoBanAction string `json:"auto_ban_action" gorm:"default:'intercept'"`
 
-	CategorySensitivity string `json:"category_sensitivity,omitempty" gorm:"column:category_sensitivity;type:text;default:'{}'"`
+	// 以下两个 TEXT 字段不设 DB 默认值：MySQL 禁止 BLOB/TEXT 列带 DEFAULT
+	// （Error 1101），带上会让 AutoMigrate 直接失败。空串与 "{}" 由
+	// GetCategorySensitivity / GetOWASPRulesConfig 等价处理。
+	CategorySensitivity string `json:"category_sensitivity,omitempty" gorm:"column:category_sensitivity;type:text"`
 
-	OWASPRulesConfig string `json:"owasp_rules_config" gorm:"type:text;default:'{}'"`
+	OWASPRulesConfig string `json:"owasp_rules_config" gorm:"type:text"`
+
+	// SkipPathByPhase 按 pipeline phase 名映射到跳过路径列表，以 JSON 文本存储。
+	// 键必须是 phase 的 Name() 返回值，合法键集合见 SkipPathPhaseKeys。
+	// 与上面两个 TEXT 字段同理不设 DB 默认值（MySQL Error 1101）。
+	SkipPathByPhase string `json:"skip_path_by_phase,omitempty" gorm:"column:skip_path_by_phase;type:text"`
 
 	LoginMinPasswordLength int `json:"login_min_password_length"`
 	LoginMaxAttempts       int `json:"login_max_attempts"`
@@ -62,6 +74,13 @@ type ProtectionConfig struct {
 	CaptchaTimeout int    `json:"captcha_timeout"`
 	CaptchaPassTTL int    `json:"captcha_pass_ttl"`
 
+	// ChallengeAction 是全局默认质询动作（challenge / captcha_challenge /
+	// shield_challenge / chain_challenge）。空串语义为「默认 challenge 动作」，
+	// 由数据面渲染时回退到兜底 challenge 分支，避免旧配置缺字段时无动作可渲染。
+	ChallengeAction string `json:"challenge_action"`
+
+	AntiReplayEnabled bool `json:"anti_replay_enabled"`
+
 	ShieldEnabled           bool `json:"shield_enabled"`
 	ShieldDifficulty        int  `json:"shield_difficulty"`
 	ShieldTimeoutSecs       int  `json:"shield_timeout_secs"`        // 验证超时（秒）
@@ -71,7 +90,6 @@ type ProtectionConfig struct {
 	ShieldRequireHTTP2      bool `json:"shield_require_http2"`       // 要求 HTTP/2
 	ShieldRequireHTTP3      bool `json:"shield_require_http3"`       // 要求 HTTP/3
 	ShieldAllowHTTP1        bool `json:"shield_allow_http1"`         // 允许 HTTP/1.x
-	ShieldEnableWASM        bool `json:"shield_enable_wasm"`         // 启用 WASM PoW
 	ShieldEnableJSChallenge bool `json:"shield_enable_js_challenge"` // 启用 JS 挑战
 	ShieldEnableEnvCheck    bool `json:"shield_enable_env_check"`    // 启用环境指纹
 	ShieldEnableDevTools    bool `json:"shield_enable_devtools"`     // 启用 DevTools 检测
@@ -82,6 +100,57 @@ type ProtectionConfig struct {
 	EscalationEnabled    bool   `json:"escalation_enabled"`
 	EscalationWindowSecs int    `json:"escalation_window_secs"`
 	EscalationSteps      string `json:"escalation_steps,omitempty"`
+
+	BasicAuthEnabled  bool   `json:"basic_auth_enabled"`
+	BasicAuthUsername string `json:"basic_auth_username"`
+	BasicAuthPassword string `json:"basic_auth_password"`
+
+	// BrowserSignEnabled 启用站点 HTML 挂载混淆签名 JS，并对识别为 API 的请求校验请求头签名。
+	BrowserSignEnabled bool `json:"browser_sign_enabled"`
+	// BrowserSignTTL 签名票据有效期（秒）。
+	BrowserSignTTL int `json:"browser_sign_ttl"`
+	// BrowserSignAction 签名校验失败动作：observe / challenge / intercept。
+	BrowserSignAction string `json:"browser_sign_action"`
+}
+
+// BasicAuthCredentialsConfigured reports whether normalized Basic Auth credentials are complete.
+func (p ProtectionConfig) BasicAuthCredentialsConfigured() bool {
+	return strings.TrimSpace(p.BasicAuthUsername) != "" && strings.TrimSpace(p.BasicAuthPassword) != ""
+}
+
+// ValidateBasicAuth rejects enabled Basic Auth without complete normalized credentials.
+func (p ProtectionConfig) ValidateBasicAuth() error {
+	if p.BasicAuthEnabled && !p.BasicAuthCredentialsConfigured() {
+		return errors.New("basic auth requires non-empty username and password")
+	}
+	return nil
+}
+
+// ValidateRateLimits rejects enabled limiters without a positive window and
+// quota. Keeping this invariant in the persisted model prevents a zero quota
+// from being interpreted as "block every request" by any runtime backend.
+func (p ProtectionConfig) ValidateRateLimits() error {
+	if p.RequestRateLimitEnabled && (p.RequestRateLimitWindow <= 0 || p.RequestRateLimitMax <= 0) {
+		return errors.New("request rate limit requires a positive window and max")
+	}
+	if p.ErrorRateLimitEnabled && (p.ErrorRateLimitWindow <= 0 || p.ErrorRateLimitMax <= 0) {
+		return errors.New("error rate limit requires a positive window and max")
+	}
+	return nil
+}
+
+// ValidateProtectionChallengeAction 校验全局质询动作白名单。
+// 空串视为「继承默认 challenge 渲染」，返回合法（旧配置缺字段的兼容路径）。
+func ValidateProtectionChallengeAction(value string) bool {
+	if value == "" {
+		return true
+	}
+	switch action.Normalize(action.Type(value)) {
+	case action.Challenge, action.CaptchaChallenge, action.ShieldChallenge, action.ChainChallenge:
+		return true
+	default:
+		return false
+	}
 }
 
 func DefaultProtectionConfig() ProtectionConfig {
@@ -116,14 +185,21 @@ func DefaultProtectionConfig() ProtectionConfig {
 		ShieldMaxRetries:        3,
 		ShieldEnvStrictness:     1,
 		ShieldAllowHTTP1:        true,
-		ShieldEnableWASM:        true,
 		ShieldEnableJSChallenge: true,
 		ShieldEnableEnvCheck:    true,
 		ShieldEnableDevTools:    true,
 		EscalationWindowSecs:    60,
+		BrowserSignEnabled:      false,
+		BrowserSignTTL:          300,
+		BrowserSignAction:       "challenge",
+		// 全局默认质询动作：连接旧配置（空串）时数据面回退到 challenge 兜底渲染。
+		ChallengeAction: "challenge",
 	}
 }
 
+// ValidateProtectionCaptchaType rejects unsupported global CAPTCHA values.
+// IsValidCaptchaType reports whether a persisted global or rule-level CAPTCHA type is supported.
+// An empty value means use the runtime default.
 func normalizeProtectionSensitivityLevel(level string) string {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "off", "none":
@@ -239,6 +315,95 @@ func (p *ProtectionConfig) SetOWASPRulesConfig(config map[string]interface{}) {
 		return
 	}
 	p.OWASPRulesConfig = string(b)
+}
+
+// skipPathPhaseKeys 是允许配置路径跳过的 phase 名集合。
+// 每个键逐字符取自对应 phase 的 Name() 返回值；signature 与 custom 不在其中，
+// 因为它们是用户自建规则，直接停用规则本身即可，无需再加一层跳过。
+var skipPathPhaseKeys = map[string]struct{}{
+	"ip_reputation": {},
+	"anti_replay":   {},
+	"acl":           {},
+	"lua_pre":       {},
+	"owasp_default": {},
+	"cve_detection": {},
+	"bot_detection": {},
+	"browser_sign":  {},
+	"rate_limit":    {},
+}
+
+// SkipPathPhaseKeys 返回允许配置路径跳过的 phase 名，按字典序排列，供校验与前端枚举使用。
+func SkipPathPhaseKeys() []string {
+	out := make([]string, 0, len(skipPathPhaseKeys))
+	for key := range skipPathPhaseKeys {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// IsSkipPathPhaseKey 报告给定 phase 名是否允许配置路径跳过。
+func IsSkipPathPhaseKey(phase string) bool {
+	_, ok := skipPathPhaseKeys[phase]
+	return ok
+}
+
+/**
+ * normalizeSkipPathByPhase 丢弃未知 phase 键与空路径条目。
+ *
+ * 未知键静默丢弃而非报错：跨版本降级时旧进程读到新版本写入的键不应整体失效。
+ * 空条目必须剔除，否则会被 MatchPathList 忽略却仍占据键位，让 UI 误显示"已配置"。
+ */
+func normalizeSkipPathByPhase(m map[string][]string) map[string][]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(m))
+	for phase, paths := range m {
+		if !IsSkipPathPhaseKey(phase) {
+			continue
+		}
+		cleaned := make([]string, 0, len(paths))
+		for _, p := range paths {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				cleaned = append(cleaned, trimmed)
+			}
+		}
+		if len(cleaned) > 0 {
+			out[phase] = cleaned
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// GetSkipPathByPhase parses the SkipPathByPhase JSON field into a map.
+func (p *ProtectionConfig) GetSkipPathByPhase() map[string][]string {
+	if p.SkipPathByPhase == "" || p.SkipPathByPhase == "{}" {
+		return nil
+	}
+	var m map[string][]string
+	if err := json.Unmarshal([]byte(p.SkipPathByPhase), &m); err != nil {
+		return nil
+	}
+	return normalizeSkipPathByPhase(m)
+}
+
+// SetSkipPathByPhase serialises the map into the SkipPathByPhase JSON field.
+func (p *ProtectionConfig) SetSkipPathByPhase(m map[string][]string) {
+	m = normalizeSkipPathByPhase(m)
+	if len(m) == 0 {
+		p.SkipPathByPhase = "{}"
+		return
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		p.SkipPathByPhase = "{}"
+		return
+	}
+	p.SkipPathByPhase = string(b)
 }
 
 // EscalationStepDef is the JSON-friendly step definition stored in ProtectionConfig.

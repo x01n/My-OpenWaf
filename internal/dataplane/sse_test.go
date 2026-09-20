@@ -34,6 +34,7 @@ func TestForwardSSEUsesUnifiedUpstreamRequestSemantics(t *testing.T) {
 		forwardedFor    string
 		forwardedHost   string
 		forwardedProto  string
+		forwarded       string
 		internalProto   string
 		internalVersion string
 		te              string
@@ -57,6 +58,7 @@ func TestForwardSSEUsesUnifiedUpstreamRequestSemantics(t *testing.T) {
 			forwardedFor:    r.Header.Get("X-Forwarded-For"),
 			forwardedHost:   r.Header.Get("X-Forwarded-Host"),
 			forwardedProto:  r.Header.Get("X-Forwarded-Proto"),
+			forwarded:       r.Header.Get("Forwarded"),
 			internalProto:   r.Header.Get(InternalHTTP3ProtoHeader),
 			internalVersion: r.Header.Get(InternalHTTP3TLSVersionHeader),
 			te:              r.Header.Get("TE"),
@@ -83,6 +85,9 @@ func TestForwardSSEUsesUnifiedUpstreamRequestSemantics(t *testing.T) {
 	ctx.Request.Header.Set("TE", "gzip")
 	ctx.Request.Header.Set("Trailer", "X-Late")
 	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
+	ctx.Request.Header.Set("X-Forwarded-For", "198.51.100.7")
+	ctx.Request.Header.Set("X-Forwarded-Host", "spoofed.example")
+	ctx.Request.Header.Set("Forwarded", "for=198.51.100.7;host=spoofed.example;proto=https")
 	ctx.Request.Header.Set(InternalHTTP3ProtoHeader, "h3")
 	ctx.Request.Header.Set(InternalHTTP3TLSVersionHeader, "TLS13")
 	ctx.Request.SetBody([]byte("payload"))
@@ -130,8 +135,11 @@ func TestForwardSSEUsesUnifiedUpstreamRequestSemantics(t *testing.T) {
 	if got.forwardedHost != "client.example" {
 		t.Fatalf("upstream X-Forwarded-Host = %q", got.forwardedHost)
 	}
-	if got.forwardedProto != "h3" {
-		t.Fatalf("upstream X-Forwarded-Proto = %q, want h3", got.forwardedProto)
+	if got.forwardedProto != "http" {
+		t.Fatalf("upstream X-Forwarded-Proto = %q, want http", got.forwardedProto)
+	}
+	if got.forwarded != "" {
+		t.Fatalf("upstream Forwarded = %q, want removed", got.forwarded)
 	}
 	if got.internalProto != "" || got.internalVersion != "" {
 		t.Fatalf("upstream leaked internal HTTP/3 headers: proto=%q version=%q", got.internalProto, got.internalVersion)

@@ -12,6 +12,7 @@ import (
 type RuleFilter struct {
 	PolicyID *uint
 	Query    string
+	Action   *store.RuleAction
 }
 
 const ruleExecutionOrderClause = "CASE phase WHEN 'acl' THEN 1 WHEN 'signature' THEN 2 WHEN 'custom' THEN 3 ELSE 99 END ASC, priority ASC, id ASC"
@@ -36,6 +37,16 @@ func (r *RuleRepo) ListFiltered(offset, limit int, f RuleFilter) ([]store.Rule, 
 	q := r.db.Model(&store.Rule{})
 	if f.PolicyID != nil {
 		q = q.Where("policy_id = ?", *f.PolicyID)
+	}
+	if f.Action != nil {
+		switch store.NormalizeAction(*f.Action) {
+		case store.ActionIntercept:
+			q = q.Where("action IN ?", []store.RuleAction{store.ActionIntercept, store.ActionBlock})
+		case store.ActionObserve:
+			q = q.Where("action IN ?", []store.RuleAction{store.ActionObserve, store.ActionLogOnly})
+		default:
+			q = q.Where("action = ?", *f.Action)
+		}
 	}
 	if strings.TrimSpace(f.Query) != "" {
 		like := "%" + strings.TrimSpace(f.Query) + "%"
@@ -77,8 +88,32 @@ func (r *RuleRepo) Get(id uint) (*store.Rule, error) {
 	return &item, r.db.First(&item, id).Error
 }
 
-func (r *RuleRepo) Create(item *store.Rule) error { return r.db.Create(item).Error }
+// Create 新建规则。
+//
+// Enabled 带 default:true、Priority 带 default:100。后者尤其关键：规则按
+// priority ASC, ID ASC 排序执行，priority=0 被改成 100 会让本该抢先生效的
+// 规则排到所有默认优先级规则之后。
+func (r *RuleRepo) Create(item *store.Rule) error {
+	return store.CreateWithZeroDefaults(r.db, item)
+}
 
 func (r *RuleRepo) Update(item *store.Rule) error { return r.db.Save(item).Error }
 
 func (r *RuleRepo) Delete(id uint) error { return r.db.Delete(&store.Rule{}, id).Error }
+
+func (r *RuleRepo) PolicyExists(policyID uint) (bool, error) {
+	if policyID == 0 {
+		return false, nil
+	}
+	var count int64
+	err := r.db.Model(&store.Policy{}).Where("id = ?", policyID).Count(&count).Error
+	return count == 1, err
+}
+
+func (r *RuleRepo) DefaultPolicyID() (uint, error) {
+	var item store.Policy
+	if err := r.db.Where("default_slot = ?", 1).First(&item).Error; err != nil {
+		return 0, err
+	}
+	return item.ID, nil
+}

@@ -1,78 +1,104 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Pagination,
-  PaginationContent,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-  PaginationEllipsis,
-} from "@/components/ui/pagination";
-import { Badge } from "@/components/ui/badge";
-import { DataTable } from "@/components/data-table";
-import { IconFilter } from "@tabler/icons-react";
-import { useDropEvents } from "@/hooks/use-api";
-import type { DropEvent } from "@/lib/types";
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { DataTable } from "@/components/data-table"
+import { TablePagination } from "@/components/table-pagination"
+import { IconFilter } from "@tabler/icons-react"
+import { useDropEvents } from "@/hooks/use-api"
+import type { DropEvent } from "@/lib/types"
 
 export default function DropEventsPage() {
-  const { t } = useTranslation();
-  const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
+  const { t } = useTranslation()
+  const [page, setPage] = useState(1)
+  const [pageSize] = useState(20)
   const [filters, setFilters] = useState({
     source: "",
     client_ip: "",
     host: "",
-  });
-  const [showFilters, setShowFilters] = useState(false);
+  })
+  const [showFilters, setShowFilters] = useState(false)
 
-  const { data, isLoading } = useDropEvents({
+  const { data, isLoading, error } = useDropEvents({
     page,
     page_size: pageSize,
     ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "")),
-  });
+  })
 
-  const items = data?.items || [];
-  const total = data?.total || 0;
-  const totalPages = Math.ceil(total / pageSize) || 1;
+  const items = data?.items || []
+  const total = data?.total || 0
 
   const handleFilterChange = (key: string, value: string) => {
-    setFilters((prev) => ({ ...prev, [key]: value }));
-    setPage(1);
-  };
+    setFilters((prev) => ({ ...prev, [key]: value }))
+    setPage(1)
+  }
 
   const clearFilters = () => {
-    setFilters({ source: "", client_ip: "", host: "" });
-    setPage(1);
-  };
+    setFilters({ source: "", client_ip: "", host: "" })
+    setPage(1)
+  }
 
   const columns = [
     { key: "created_at", title: t("dropEvents.time"), width: "180px" },
-    { key: "client_ip", title: "IP", width: "140px" },
-    { key: "source", title: "Source", width: "120px" },
-    { key: "host", title: "Host", width: "180px" },
-    { key: "path", title: "Path", width: "200px" },
-  ];
+    { key: "client_ip", title: t("dropEvents.ip"), width: "140px" },
+    { key: "source", title: t("dropEvents.source"), width: "120px" },
+    {
+      key: "host",
+      title: t("dropEvents.host"),
+      width: "180px",
+      cellClassName: "max-w-[180px] whitespace-normal align-top",
+      render: (row: DropEvent) => (
+        <span
+          className="block truncate font-mono text-xs"
+          title={row.host || undefined}
+        >
+          {row.host || "-"}
+        </span>
+      ),
+    },
+    {
+      key: "path",
+      title: t("dropEvents.path"),
+      width: "200px",
+      cellClassName: "max-w-[200px] whitespace-normal align-top",
+      render: (row: DropEvent) => (
+        <span
+          className="line-clamp-2 font-mono text-xs leading-relaxed break-all"
+          title={row.path || undefined}
+        >
+          {row.path || "-"}
+        </span>
+      ),
+    },
+  ]
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("dropEvents.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("dropEvents.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t("dropEvents.title")}
+        description={t("dropEvents.description")}
+        actions={
           <Badge variant="secondary" className="h-5 px-2 text-xs">
             {t("dropEvents.total", { count: total })}
           </Badge>
-        </div>
-      </div>
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader className="pb-3">
@@ -85,7 +111,9 @@ export default function DropEventsPage() {
               onClick={() => setShowFilters(!showFilters)}
             >
               <IconFilter className="h-3.5 w-3.5" />
-              {showFilters ? t("common.collapseFilter") : t("common.advancedFilter")}
+              {showFilters
+                ? t("common.collapseFilter")
+                : t("common.advancedFilter")}
             </Button>
           </div>
         </CardHeader>
@@ -107,7 +135,9 @@ export default function DropEventsPage() {
                   className="h-8 text-xs"
                   placeholder={t("dropEvents.ipPlaceholder")}
                   value={filters.client_ip}
-                  onChange={(e) => handleFilterChange("client_ip", e.target.value)}
+                  onChange={(e) =>
+                    handleFilterChange("client_ip", e.target.value)
+                  }
                 />
               </div>
               <div className="space-y-1.5">
@@ -120,7 +150,12 @@ export default function DropEventsPage() {
                 />
               </div>
               <div className="flex items-end sm:col-span-2 lg:col-span-3">
-                <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={clearFilters}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs"
+                  onClick={clearFilters}
+                >
                   {t("common.clearFilter")}
                 </Button>
               </div>
@@ -135,41 +170,14 @@ export default function DropEventsPage() {
             emptyText={t("dropEvents.empty")}
           />
 
-          {totalPages > 1 && (
-            <Pagination>
-              <PaginationContent>
-                <PaginationItem>
-                  <PaginationPrevious
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    className={page <= 1 ? "pointer-events-none opacity-50" : ""}
-                  />
-                </PaginationItem>
-                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                  const pageNum = i + 1;
-                  return (
-                    <PaginationItem key={pageNum}>
-                      <PaginationLink isActive={page === pageNum} onClick={() => setPage(pageNum)}>
-                        {pageNum}
-                      </PaginationLink>
-                    </PaginationItem>
-                  );
-                })}
-                {totalPages > 5 && (
-                  <PaginationItem>
-                    <PaginationEllipsis />
-                  </PaginationItem>
-                )}
-                <PaginationItem>
-                  <PaginationNext
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    className={page >= totalPages ? "pointer-events-none opacity-50" : ""}
-                  />
-                </PaginationItem>
-              </PaginationContent>
-            </Pagination>
-          )}
+          <TablePagination
+            page={page}
+            pageSize={pageSize}
+            total={total}
+            onPageChange={setPage}
+          />
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

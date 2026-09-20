@@ -1,25 +1,25 @@
-"use client";
+"use client"
 
-import { useState, useCallback, useMemo } from "react";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
-import { IconChevronRight, IconChevronDown } from "@tabler/icons-react";
-import { cn } from "@/lib/utils";
+import { useState, useCallback, useMemo } from "react"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
+import { IconChevronRight, IconChevronDown } from "@tabler/icons-react"
+import { cn } from "@/lib/utils"
 
 export interface RecordedResource {
-  id: number;
-  site_id: number;
-  path: string;
-  method: string;
-  content_type?: string;
+  id: number
+  site_id: number
+  path: string
+  method: string
+  content_type?: string
 }
 
 interface TreeNode {
-  segment: string;
-  fullPath: string | null;
-  children: TreeNode[];
-  resources: RecordedResource[];
-  depth: number;
+  segment: string
+  fullPath: string | null
+  children: TreeNode[]
+  resources: RecordedResource[]
+  depth: number
 }
 
 /**
@@ -29,16 +29,16 @@ interface TreeNode {
  * @returns 树形节点列表
  */
 function buildResourceTree(resources: RecordedResource[]): TreeNode[] {
-  const root: { children: Map<string, TreeNode> } = { children: new Map() };
+  const root: { children: Map<string, TreeNode> } = { children: new Map() }
 
   for (const res of resources) {
-    const segments = res.path.split("/").filter((s) => s.length > 0);
-    let current = root as unknown as { children: Map<string, TreeNode> };
-    let currentPath = "";
+    const segments = res.path.split("/").filter((s) => s.length > 0)
+    let current = root as unknown as { children: Map<string, TreeNode> }
+    let currentPath = ""
 
     for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
-      currentPath = currentPath + "/" + seg;
+      const seg = segments[i]
+      currentPath = currentPath + "/" + seg
 
       if (!current.children.has(seg)) {
         const node: TreeNode = {
@@ -47,15 +47,15 @@ function buildResourceTree(resources: RecordedResource[]): TreeNode[] {
           children: [],
           resources: [],
           depth: i,
-        };
-        current.children.set(seg, node);
+        }
+        current.children.set(seg, node)
       }
 
-      const node = current.children.get(seg)!;
+      const node = current.children.get(seg)!
       if (i === segments.length - 1) {
-        node.resources.push(res);
+        node.resources.push(res)
       }
-      current = node as unknown as { children: Map<string, TreeNode> };
+      current = node as unknown as { children: Map<string, TreeNode> }
     }
 
     // 处理根路径 "/" 的情况
@@ -67,23 +67,23 @@ function buildResourceTree(resources: RecordedResource[]): TreeNode[] {
           children: [],
           resources: [res],
           depth: 0,
-        };
-        current.children.set("/", node);
+        }
+        current.children.set("/", node)
       } else {
-        current.children.get("/")!.resources.push(res);
+        current.children.get("/")!.resources.push(res)
       }
     }
   }
 
   return Array.from(root.children.values()).sort((a, b) =>
     a.segment.localeCompare(b.segment)
-  );
+  )
 }
 
 interface ResourcePathTreeProps {
-  resources: RecordedResource[];
-  selectedPaths: string[];
-  onSelect: (path: string, checked: boolean) => void;
+  resources: RecordedResource[]
+  selectedPaths: string[]
+  onSelect: (path: string, checked: boolean) => void
 }
 
 /**
@@ -96,27 +96,27 @@ export function ResourcePathTree({
   selectedPaths,
   onSelect,
 }: ResourcePathTreeProps) {
-  const tree = useMemo(() => buildResourceTree(resources), [resources]);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const tree = useMemo(() => buildResourceTree(resources), [resources])
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const toggleExpanded = useCallback((path: string) => {
     setExpanded((prev) => {
-      const next = new Set(prev);
+      const next = new Set(prev)
       if (next.has(path)) {
-        next.delete(path);
+        next.delete(path)
       } else {
-        next.add(path);
+        next.add(path)
       }
-      return next;
-    });
-  }, []);
+      return next
+    })
+  }, [])
 
   if (tree.length === 0) {
-    return null;
+    return null
   }
 
   return (
-    <div className="rounded-md border p-2 max-h-48 overflow-y-auto">
+    <div className="max-h-48 overflow-y-auto rounded-md border p-2">
       <TreeNodeList
         nodes={tree}
         expanded={expanded}
@@ -125,15 +125,15 @@ export function ResourcePathTree({
         onSelect={onSelect}
       />
     </div>
-  );
+  )
 }
 
 interface TreeNodeListProps {
-  nodes: TreeNode[];
-  expanded: Set<string>;
-  toggleExpanded: (path: string) => void;
-  selectedPaths: string[];
-  onSelect: (path: string, checked: boolean) => void;
+  nodes: TreeNode[]
+  expanded: Set<string>
+  toggleExpanded: (path: string) => void
+  selectedPaths: string[]
+  onSelect: (path: string, checked: boolean) => void
 }
 
 function TreeNodeList({
@@ -156,15 +156,15 @@ function TreeNodeList({
         />
       ))}
     </div>
-  );
+  )
 }
 
 interface TreeNodeItemProps {
-  node: TreeNode;
-  expanded: Set<string>;
-  toggleExpanded: (path: string) => void;
-  selectedPaths: string[];
-  onSelect: (path: string, checked: boolean) => void;
+  node: TreeNode
+  expanded: Set<string>
+  toggleExpanded: (path: string) => void
+  selectedPaths: string[]
+  onSelect: (path: string, checked: boolean) => void
 }
 
 function TreeNodeItem({
@@ -174,22 +174,23 @@ function TreeNodeItem({
   selectedPaths,
   onSelect,
 }: TreeNodeItemProps) {
-  const hasChildren = node.children.length > 0;
-  const isLeaf = node.fullPath !== null;
-  const pathKey = node.fullPath || node.segment + "-" + node.depth;
-  const isExpanded = expanded.has(pathKey);
+  const hasChildren = node.children.length > 0
+  const isLeaf = node.fullPath !== null
+  const pathKey = node.fullPath || node.segment + "-" + node.depth
+  const isExpanded = expanded.has(pathKey)
 
-  const checked = isLeaf && node.fullPath ? selectedPaths.includes(node.fullPath) : false;
+  const checked =
+    isLeaf && node.fullPath ? selectedPaths.includes(node.fullPath) : false
 
   const handleToggle = useCallback(() => {
     if (isLeaf && node.fullPath) {
-      onSelect(node.fullPath, !checked);
+      onSelect(node.fullPath, !checked)
     }
-  }, [isLeaf, node.fullPath, checked, onSelect]);
+  }, [isLeaf, node.fullPath, checked, onSelect])
 
   const handleExpand = useCallback(() => {
-    toggleExpanded(pathKey);
-  }, [toggleExpanded, pathKey]);
+    toggleExpanded(pathKey)
+  }, [toggleExpanded, pathKey])
 
   return (
     <div>
@@ -204,7 +205,7 @@ function TreeNodeItem({
           <button
             type="button"
             onClick={handleExpand}
-            className="flex items-center justify-center h-4 w-4 text-muted-foreground hover:text-foreground shrink-0"
+            className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground"
           >
             {isExpanded ? (
               <IconChevronDown className="h-3.5 w-3.5" />
@@ -226,7 +227,7 @@ function TreeNodeItem({
             />
             <Label
               htmlFor={`tree-check-${pathKey}`}
-              className="cursor-pointer text-xs font-normal truncate"
+              className="cursor-pointer truncate text-xs font-normal"
               title={node.fullPath || undefined}
             >
               {node.segment}
@@ -243,7 +244,7 @@ function TreeNodeItem({
             <button
               type="button"
               onClick={handleExpand}
-              className="text-xs font-normal truncate hover:text-foreground text-left"
+              className="truncate text-left text-xs font-normal hover:text-foreground"
             >
               {node.segment}
             </button>
@@ -263,5 +264,5 @@ function TreeNodeItem({
         </div>
       )}
     </div>
-  );
+  )
 }

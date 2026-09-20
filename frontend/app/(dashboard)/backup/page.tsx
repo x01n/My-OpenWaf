@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PageHeader } from "@/components/page-header";
 import { toast } from "sonner";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import {
   IconAlertTriangle,
 } from "@tabler/icons-react";
 import { backupApi } from "@/lib/api";
+import { invalidateAllAPICaches } from "@/hooks/use-api";
 import { formatDate } from "@/lib/utils";
 import type { BackupData } from "@/lib/types";
 
@@ -34,7 +36,8 @@ function isBackupData(obj: unknown): obj is BackupData {
     typeof b.version === "number" &&
     b.version > 0 &&
     Array.isArray(b.sites) &&
-    Array.isArray(b.rules)
+    Array.isArray(b.rules) &&
+    (b.js_plugins === undefined || Array.isArray(b.js_plugins))
   );
 }
 
@@ -117,6 +120,7 @@ export default function BackupPage() {
     setRestoring(true);
     try {
       const result = await backupApi.import(fileData, replaceMode);
+      await invalidateAllAPICaches().catch(() => undefined);
       toast.success(
         t("backup.restoreSuccess", {
           sites: result.sites,
@@ -143,18 +147,18 @@ export default function BackupPage() {
         { label: t("backup.certificates"), value: fileData.certificates?.length ?? 0 },
         { label: t("backup.rules"), value: fileData.rules?.length ?? 0 },
         { label: t("backup.ipEntries"), value: fileData.ip_list_entries?.length ?? 0 },
+        { label: t("backup.luaPlugins"), value: fileData.lua_plugins?.length ?? 0 },
+        { label: t("backup.jsPlugins"), value: fileData.js_plugins?.length ?? 0 },
       ]
     : [];
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-2">
-        <IconDatabaseExport className="h-6 w-6 text-primary" />
-        <div>
-          <h1 className="text-xl font-semibold">{t("backup.title")}</h1>
-          <p className="text-sm text-muted-foreground">{t("backup.description")}</p>
-        </div>
-      </div>
+      <PageHeader
+        icon={<IconDatabaseExport className="h-6 w-6 text-primary" />}
+        title={t("backup.title")}
+        description={t("backup.description")}
+      />
 
       {/* 导出备份 */}
       <Card>

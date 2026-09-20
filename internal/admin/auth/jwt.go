@@ -4,12 +4,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"My-OpenWaf/internal/store"
 )
@@ -48,7 +51,21 @@ type TokenManager struct {
 	// In-memory blacklist (jti -> expiry)
 	blacklist sync.Map
 
-	stopCh chan struct{} // signals cleanupLoop to exit
+	stopCh           chan struct{} // signals cleanupLoop to exit
+	closeOnce        sync.Once
+	blacklistReady   atomic.Bool
+	blacklistLoadMu  sync.Mutex
+	blacklistRetryAt atomic.Int64
+}
+
+// ErrTokenBlacklistUnavailable indicates that the persistent blacklist could
+// not be loaded. Authentication must fail closed until the store is healthy.
+var ErrTokenBlacklistUnavailable = errors.New("token blacklist unavailable")
+
+// Ready reports whether the persistent blacklist has been loaded successfully.
+// A nil database is used by lightweight callers that do not persist revocations.
+func (tm *TokenManager) Ready() bool {
+	return tm != nil && (tm.db == nil || tm.blacklistReady.Load())
 }
 
 // NewTokenManager creates a TokenManager with the given primary secret.
@@ -59,7 +76,9 @@ func NewTokenManager(primarySecret []byte, db *gorm.DB) *TokenManager {
 		stopCh:  make(chan struct{}),
 	}
 	// Load persisted blacklist into memory.
-	tm.loadBlacklistFromDB()
+	if err := tm.loadBlacklistFromDB(); err == nil {
+		tm.blacklistReady.Store(true)
+	}
 	// Start cleanup goroutine.
 	go tm.cleanupLoop()
 	return tm
@@ -124,6 +143,9 @@ func (tm *TokenManager) VerifyAccessToken(tokenStr string) (*Claims, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := tm.ensureBlacklistReady(); err != nil {
+		return nil, err
+	}
 
 	// Check blacklist.
 	if claims.ID != "" && tm.IsBlacklisted(claims.ID) {
@@ -131,6 +153,32 @@ func (tm *TokenManager) VerifyAccessToken(tokenStr string) (*Claims, error) {
 	}
 
 	return claims, nil
+}
+
+// ensureBlacklistReady retries a failed startup load with a short backoff.
+// This keeps startup fail-closed without permanently locking out authentication
+// after a transient database outage.
+func (tm *TokenManager) ensureBlacklistReady() error {
+	if tm == nil || tm.db == nil || tm.blacklistReady.Load() {
+		return nil
+	}
+	now := time.Now().UnixNano()
+	next := tm.blacklistRetryAt.Load()
+	if next > now || !tm.blacklistRetryAt.CompareAndSwap(next, now+time.Second.Nanoseconds()) {
+		return ErrTokenBlacklistUnavailable
+	}
+	tm.blacklistLoadMu.Lock()
+	defer tm.blacklistLoadMu.Unlock()
+	if tm.blacklistReady.Load() {
+		tm.blacklistRetryAt.Store(0)
+		return nil
+	}
+	if err := tm.loadBlacklistFromDB(); err != nil {
+		return fmt.Errorf("%w: %v", ErrTokenBlacklistUnavailable, err)
+	}
+	tm.blacklistReady.Store(true)
+	tm.blacklistRetryAt.Store(0)
+	return nil
 }
 
 func verifyWithKey(tokenStr string, secret []byte) (*Claims, error) {
@@ -154,6 +202,11 @@ func verifyWithKey(tokenStr string, secret []byte) (*Claims, error) {
 
 // SignAccessToken is the backward-compatible package-level function.
 func SignAccessToken(username string, secret []byte) (string, time.Time, error) {
+	return SignAccessTokenWithRole(username, RoleAdmin, secret)
+}
+
+// SignAccessTokenWithRole signs a compatibility access token with the supplied current role.
+func SignAccessTokenWithRole(username, role string, secret []byte) (string, time.Time, error) {
 	jti := generateJTI()
 	exp := time.Now().Add(AccessTTL)
 	claims := Claims{
@@ -166,7 +219,7 @@ func SignAccessToken(username string, secret []byte) (string, time.Time, error) 
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 		Username: username,
-		Role:     RoleAdmin,
+		Role:     role,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	str, err := token.SignedString(secret)
@@ -192,16 +245,30 @@ func VerifyAccessToken(tokenStr string, secret []byte) (*Claims, error) {
 
 // BlacklistToken adds a JTI to the blacklist with the given expiry and reason.
 func (tm *TokenManager) BlacklistToken(jti string, expiresAt time.Time, reason string) {
+	_ = tm.BlacklistTokenChecked(jti, expiresAt, reason)
+}
+
+// BlacklistTokenChecked blacklists a token and reports persistent-storage failures.
+func (tm *TokenManager) BlacklistTokenChecked(jti string, expiresAt time.Time, reason string) error {
+	if jti == "" {
+		return nil
+	}
 	tm.blacklist.Store(jti, expiresAt)
-	// Persist to database.
+	// Persist to database. Repeated revocation is intentionally idempotent: a
+	// unique JTI row is updated with the newest expiry/reason so a later restart
+	// cannot resurrect a token using an older, already-expired blacklist row.
 	if tm.db != nil {
-		tm.db.Create(&store.TokenBlacklist{
+		return tm.db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "jti"}},
+			DoUpdates: clause.AssignmentColumns([]string{"expires_at", "reason"}),
+		}).Create(&store.TokenBlacklist{
 			JTI:       jti,
 			ExpiresAt: expiresAt,
 			Reason:    reason,
 			CreatedAt: time.Now(),
-		})
+		}).Error
 	}
+	return nil
 }
 
 // IsBlacklisted checks if a JTI is in the blacklist.
@@ -218,15 +285,18 @@ func (tm *TokenManager) IsBlacklisted(jti string) bool {
 	return true
 }
 
-func (tm *TokenManager) loadBlacklistFromDB() {
+func (tm *TokenManager) loadBlacklistFromDB() error {
 	if tm.db == nil {
-		return
+		return nil
 	}
 	var items []store.TokenBlacklist
-	tm.db.Where("expires_at > ?", time.Now()).Find(&items)
+	if err := tm.db.Where("expires_at > ?", time.Now()).Find(&items).Error; err != nil {
+		return err
+	}
 	for _, item := range items {
 		tm.blacklist.Store(item.JTI, item.ExpiresAt)
 	}
+	return nil
 }
 
 func (tm *TokenManager) cleanupLoop() {
@@ -254,7 +324,14 @@ func (tm *TokenManager) cleanupLoop() {
 
 // Close stops the background cleanup goroutine.
 func (tm *TokenManager) Close() {
-	close(tm.stopCh)
+	if tm == nil {
+		return
+	}
+	tm.closeOnce.Do(func() {
+		if tm.stopCh != nil {
+			close(tm.stopCh)
+		}
+	})
 }
 
 // GenerateRefreshToken returns a new JTI, the raw token string, and its SHA-256 hash.

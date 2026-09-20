@@ -24,6 +24,14 @@ func (r *DropEventRepo) SetCountCache(c CountCache) {
 	r.countCache = c
 }
 
+// invalidateCountCache 丢弃事件列表的 COUNT 缓存，确保直接仓储写入与异步写入提交后总数一致。
+func (r *DropEventRepo) invalidateCountCache() {
+	if r == nil || r.countCache == nil {
+		return
+	}
+	invalidateCountCachePrefixes(r.countCache, dropEventCountCachePrefix)
+}
+
 // SetWriteQueue configures async write queue for batch writes.
 func (r *DropEventRepo) SetWriteQueue(wq WriteQueueBackend) {
 	r.writeQueue = wq
@@ -41,11 +49,19 @@ type DropEventFilter struct {
 func (r *DropEventRepo) Create(item *store.DropEvent) error {
 	if r.writeQueue != nil {
 		r.writeQueue.Submit(func(tx *gorm.DB) error {
-			return tx.Create(item).Error
+			err := tx.Create(item).Error
+			if err == nil {
+				r.invalidateCountCache()
+			}
+			return err
 		})
 		return nil
 	}
-	return r.db.Create(item).Error
+	err := r.db.Create(item).Error
+	if err == nil {
+		r.invalidateCountCache()
+	}
+	return err
 }
 
 // BatchCreate inserts multiple drop events in a single transaction.
@@ -57,11 +73,19 @@ func (r *DropEventRepo) BatchCreate(items []store.DropEvent) error {
 		batch := make([]store.DropEvent, len(items))
 		copy(batch, items)
 		r.writeQueue.Submit(func(tx *gorm.DB) error {
-			return tx.CreateInBatches(batch, 100).Error
+			err := tx.CreateInBatches(batch, 100).Error
+			if err == nil {
+				r.invalidateCountCache()
+			}
+			return err
 		})
 		return nil
 	}
-	return r.db.CreateInBatches(items, 100).Error
+	err := r.db.CreateInBatches(items, 100).Error
+	if err == nil {
+		r.invalidateCountCache()
+	}
+	return err
 }
 
 func (r *DropEventRepo) List(offset, limit int, f DropEventFilter) ([]store.DropEvent, int64, error) {
@@ -87,8 +111,10 @@ func (r *DropEventRepo) List(offset, limit int, f DropEventFilter) ([]store.Drop
 	cached := false
 	if r.countCache != nil {
 		if value, ok := r.countCache.Get(cacheKey); ok {
-			total = value.(int64)
-			cached = true
+			if cachedTotal, ok := value.(int64); ok {
+				total = cachedTotal
+				cached = true
+			}
 		}
 	}
 	if !cached {
@@ -108,7 +134,7 @@ func (r *DropEventRepo) List(offset, limit int, f DropEventFilter) ([]store.Drop
 }
 
 func dropEventCountCacheKey(f DropEventFilter) string {
-	key := "de_count"
+	key := dropEventCountCachePrefix
 	if f.SiteID > 0 {
 		key += ":s" + fmt.Sprint(f.SiteID)
 	}
@@ -150,6 +176,9 @@ func (r *DropEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
 			return totalDeleted, tx.Error
 		}
 		totalDeleted += tx.RowsAffected
+		if tx.RowsAffected > 0 {
+			r.invalidateCountCache()
+		}
 		if tx.RowsAffected < batchSize {
 			break
 		}

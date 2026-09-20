@@ -176,3 +176,11 @@ func TestIsDue(t *testing.T) {
 		t.Errorf("120 秒前同步、间隔 60 秒的 feed 应到期")
 	}
 }
+
+func TestThreatIntelManagerStopIsIdempotent(t *testing.T) {
+	m := &Manager{stopCh: make(chan struct{})}
+	m.Stop()
+	m.Stop()
+	var zero Manager
+	zero.Stop()
+}

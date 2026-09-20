@@ -59,13 +59,16 @@ type VerifyDecision struct {
 }
 
 /**
- * sanitizeReturnURL 归一化登录后回跳地址，仅允许站内绝对路径，
+ * SanitizeReturnURL 归一化登录后回跳地址，仅允许站内绝对路径，
  * 防止开放重定向（如 //evil.com 或 https://evil.com）。
+ *
+ * 导出是为了让数据面的并行登录路径复用同一套规则——两处各写一份判断，
+ * 正是「一处修好、另一处仍可被绕过」的由来。
  *
  * @param raw 表单或查询参数传入的原始 return 值。
  * @return 安全的站内路径；非法输入回退为 "/"。
  */
-func sanitizeReturnURL(raw string) string {
+func SanitizeReturnURL(raw string) string {
 	if raw == "" {
 		return "/"
 	}
@@ -90,7 +93,7 @@ func sanitizeReturnURL(raw string) string {
  * @return 处理决策；调用方据此落地响应。
  */
 func (g *Gate) HandleVerify(authType, username, password string, providerID uint, returnURL string, lookup UserLookupFunc) VerifyDecision {
-	safeReturn := sanitizeReturnURL(returnURL)
+	safeReturn := SanitizeReturnURL(returnURL)
 
 	var identity string
 	var verified bool
@@ -102,7 +105,7 @@ func (g *Gate) HandleVerify(authType, username, password string, providerID uint
 			identity = "shared"
 		}
 	case AuthTypeUserPassword:
-		if lookup != nil && username != "" {
+		if g.HasProviderType("password") && lookup != nil && username != "" {
 			if hash, ok := lookup(g.config.SiteID, username); ok && VerifyUserPassword(hash, password) {
 				verified = true
 				identity = username
@@ -206,7 +209,7 @@ func (g *Gate) HandleOAuthStart(providerID uint, redirectURI, returnURL string, 
 		return "", fmt.Errorf("accessgate: provider %d is not an OAuth provider", providerID)
 	}
 	flow := NewOAuthFlow(*p, redirectURI)
-	return flow.StartAuthFlow(stateStore, g.config.SiteID, sanitizeReturnURL(returnURL))
+	return flow.StartAuthFlow(stateStore, g.config.SiteID, SanitizeReturnURL(returnURL))
 }
 
 /**
@@ -224,18 +227,16 @@ func (g *Gate) HandleOAuthCallback(stateParam, code, redirectURI string, stateSt
 		return oauthFailure("回调参数缺失", "/")
 	}
 
-	st, err := stateStore.Get(stateParam)
+	st, err := stateStore.Consume(stateParam)
 	if err != nil || st == nil {
 		return oauthFailure("state 无效或已过期", "/")
 	}
-	// state 一次性消费，防重放。
-	_ = stateStore.Delete(stateParam)
 
 	if st.SiteID != g.config.SiteID {
 		return oauthFailure("state 站点不匹配", "/")
 	}
 
-	returnURL := sanitizeReturnURL(st.ReturnURL)
+	returnURL := SanitizeReturnURL(st.ReturnURL)
 
 	p, err := g.findProvider(st.ProviderID)
 	if err != nil {
@@ -272,7 +273,7 @@ func (g *Gate) HandleOAuthCallback(stateParam, code, redirectURI string, stateSt
 func oauthFailure(msg, returnURL string) VerifyDecision {
 	return VerifyDecision{
 		Authenticated: false,
-		RedirectURL:   loginRedirectWithReturn(msg, sanitizeReturnURL(returnURL)),
+		RedirectURL:   loginRedirectWithReturn(msg, SanitizeReturnURL(returnURL)),
 		ErrorMessage:  msg,
 	}
 }

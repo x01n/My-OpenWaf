@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"html"
 	"io"
 	"log/slog"
 	"math"
@@ -32,6 +33,7 @@ import (
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/challenge"
 )
 
 var benchmarkProxyBoolSink bool
@@ -246,6 +248,54 @@ func TestReadUpstreamResponseBodyDecodesMultipleContentEncodings(t *testing.T) {
 	}
 	if got := headers.Get("Content-Length"); got != "" {
 		t.Fatalf("Content-Length after decode = %q, want empty", got)
+	}
+}
+
+func TestReadUpstreamResponseBodyDecodesRepeatedContentEncodingFields(t *testing.T) {
+	original := []byte(strings.Repeat("decoded-repeated-content-encoding-", 128))
+	encoded := mustEncodeBodyWithContentEncodings(t, original, "gzip", "br")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Encoding": []string{"gzip", "br"},
+			"Content-Type":     []string{"text/plain; charset=utf-8"},
+			"Content-Length":   []string{strconv.Itoa(len(encoded))},
+		},
+		Body: io.NopCloser(bytes.NewReader(encoded)),
+	}
+
+	body, headers, err := readUpstreamResponseBody(resp)
+	if err != nil {
+		t.Fatalf("readUpstreamResponseBody returned error: %v", err)
+	}
+	if !bytes.Equal(body, original) {
+		t.Fatalf("decoded body mismatch: got %d bytes want %d bytes", len(body), len(original))
+	}
+	if got := headers.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding after decode = %q, want empty", got)
+	}
+}
+
+func TestReadUpstreamResponseBodyPreservesRepeatedUnknownContentEncodingFields(t *testing.T) {
+	original := []byte("repeated-unknown-content-encoding-body")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Encoding": []string{"gzip", "custom"},
+			"Content-Length":   []string{strconv.Itoa(len(original))},
+		},
+		Body: io.NopCloser(bytes.NewReader(original)),
+	}
+
+	body, headers, err := readUpstreamResponseBody(resp)
+	if err != nil {
+		t.Fatalf("readUpstreamResponseBody returned error: %v", err)
+	}
+	if !bytes.Equal(body, original) {
+		t.Fatalf("body = %q, want unchanged %q", body, original)
+	}
+	if got := contentEncodingHeaderValue(headers); got != "gzip, custom" {
+		t.Fatalf("Content-Encoding = %q, want gzip, custom", got)
 	}
 }
 
@@ -522,14 +572,14 @@ func TestSharedTransportForUpstreamEnablesExpectContinueTimeout(t *testing.T) {
 func TestSharedTransportForUpstreamUsesBoundedDialAndTLSHandshake(t *testing.T) {
 	rt := snapshot.SiteRuntime{}
 	tr := SharedTransportForUpstream(rt, "https://127.0.0.1:8443")
-	if tr.IdleConnTimeout != 90*time.Second {
-		t.Fatalf("IdleConnTimeout = %s, want %s", tr.IdleConnTimeout, 90*time.Second)
+	if tr.IdleConnTimeout != 30*time.Second {
+		t.Fatalf("IdleConnTimeout = %s, want %s", tr.IdleConnTimeout, 30*time.Second)
 	}
-	if tr.MaxIdleConns != 512 {
-		t.Fatalf("MaxIdleConns = %d, want 512", tr.MaxIdleConns)
+	if tr.MaxIdleConns != 256 {
+		t.Fatalf("MaxIdleConns = %d, want 256", tr.MaxIdleConns)
 	}
-	if tr.MaxIdleConnsPerHost != 128 {
-		t.Fatalf("MaxIdleConnsPerHost = %d, want 128", tr.MaxIdleConnsPerHost)
+	if tr.MaxIdleConnsPerHost != 32 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want 32", tr.MaxIdleConnsPerHost)
 	}
 	if !tr.ForceAttemptHTTP2 {
 		t.Fatal("ForceAttemptHTTP2 should be enabled")
@@ -1320,6 +1370,54 @@ func TestFetchHTTPDecodesCompressedBufferedResponse(t *testing.T) {
 	}
 	if got := resp.Header.Get("Content-Length"); got != "" {
 		t.Fatalf("buffered Content-Length = %q, want empty", got)
+	}
+}
+
+func TestFetchHTTPForAppRouteCaptureLimitsDecodedBodyAndKeepsRemainder(t *testing.T) {
+	// Highly compressible body so the compressed payload stays small while the
+	// decoded body exceeds the dynamic transform buffer. The capture path must
+	// stop at the limit instead of ReadAll'ing the full decoded stream.
+	decoded := append(bytes.Repeat([]byte("z"), maxStreamTransformBufferBytes+4096), []byte("capture-tail-sentinel")...)
+	encoded := mustGzipBytes(t, decoded)
+	if len(encoded) >= maxStreamTransformBufferBytes {
+		t.Fatalf("encoded body too large for bomb fixture: %d", len(encoded))
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
+		_, _ = w.Write(encoded)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/capture-limit")
+	ctx.Request.Header.SetHost("example.test")
+
+	resp, err := FetchHTTPForAppRouteCapture(context.Background(), ctx, snapshot.SiteRuntime{}, upstream.URL, nil, "example.test")
+	if err != nil {
+		t.Fatalf("FetchHTTPForAppRouteCapture returned error: %v", err)
+	}
+	if len(resp.Body) != maxStreamTransformBufferBytes {
+		t.Fatalf("captured prefix length = %d, want %d", len(resp.Body), maxStreamTransformBufferBytes)
+	}
+	if !resp.HasRemainingBody() {
+		t.Fatal("expected remaining body for oversized capture")
+	}
+	if got := resp.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("decoded capture Content-Encoding = %q, want empty", got)
+	}
+
+	if err := ForwardCapturedResponseForSite(context.Background(), ctx, resp, snapshot.SiteRuntime{}); err != nil {
+		t.Fatalf("ForwardCapturedResponseForSite returned error: %v", err)
+	}
+	if !bytes.Equal(ctx.Response.Body(), decoded) {
+		t.Fatalf("streamed capture body mismatch: got %d bytes, want %d", len(ctx.Response.Body()), len(decoded))
+	}
+	if !bytes.HasSuffix(ctx.Response.Body(), []byte("capture-tail-sentinel")) {
+		t.Fatal("streamed capture body missing tail sentinel")
 	}
 }
 
@@ -2548,6 +2646,34 @@ func TestForwardBufferedResponseSkipsCompressionForSmallBody(t *testing.T) {
 	}
 }
 
+func TestForwardBufferedResponseHonorsRequestNoTransform(t *testing.T) {
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.Header.Set("Accept-Encoding", "gzip, br")
+	ctx.Request.Header.Set("Cache-Control", "public, no-transform")
+
+	body := []byte(strings.Repeat("request no-transform body ", 256))
+	resp := &HTTPResponse{
+		StatusCode:  http.StatusOK,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        body,
+		Header: http.Header{
+			"Content-Type": []string{"text/plain; charset=utf-8"},
+		},
+	}
+
+	ForwardBufferedResponse(ctx, resp)
+	if got := string(ctx.Response.Header.Peek("Content-Encoding")); got != "" {
+		t.Fatalf("request no-transform response Content-Encoding = %q, want empty", got)
+	}
+	if got := string(ctx.Response.Header.Peek("Vary")); got != "" {
+		t.Fatalf("request no-transform response Vary = %q, want empty", got)
+	}
+	if !bytes.Equal(ctx.Response.Body(), body) {
+		t.Fatal("request no-transform response body was transformed")
+	}
+}
+
 func TestForwardBufferedResponseHEADWritesCompressedMetadataOnly(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Request.SetMethod("HEAD")
@@ -3249,28 +3375,135 @@ func TestShouldCacheHTTPResponse_VaryAcceptEncoding(t *testing.T) {
 	h := http.Header{}
 	h.Set("Vary", "Accept-Encoding")
 	resp := &HTTPResponse{StatusCode: 200, Body: []byte("ok"), Header: h}
-	if !ShouldCacheHTTPResponse("GET", resp, false) {
+	if !ShouldCacheHTTPResponse("GET", resp) {
 		t.Fatal("expected cacheable with Vary: Accept-Encoding")
 	}
 	h.Set("Vary", "User-Agent")
-	if ShouldCacheHTTPResponse("GET", resp, false) {
+	if ShouldCacheHTTPResponse("GET", resp) {
 		t.Fatal("should not cache with Vary: User-Agent")
 	}
 }
 
-func TestShouldCacheHTTPResponse_BypassUpstreamPrivate(t *testing.T) {
+func TestShouldCacheHTTPResponse_NeverBypassesUpstreamPrivacy(t *testing.T) {
 	h := http.Header{}
 	h.Set("Cache-Control", "private, no-cache, no-store, max-age=0, must-revalidate")
 	resp := &HTTPResponse{StatusCode: 200, Body: []byte("x"), Header: h}
-	if ShouldCacheHTTPResponse("GET", resp, false) {
-		t.Fatal("should block without bypass")
-	}
-	if !ShouldCacheHTTPResponse("GET", resp, true) {
-		t.Fatal("expected cacheable with bypass")
+	if ShouldCacheHTTPResponse("GET", resp) {
+		t.Fatal("private/no-store response entered the shared cache")
 	}
 	h.Set("Set-Cookie", "a=b")
-	if ShouldCacheHTTPResponse("GET", resp, true) {
+	if ShouldCacheHTTPResponse("GET", resp) {
 		t.Fatal("set-cookie must still block")
+	}
+}
+
+func TestShouldCacheHTTPResponseRejectsRepeatedPrivacyHeaders(t *testing.T) {
+	for name, values := range map[string][]string{
+		"Cache-Control": {"public, max-age=60", "no-store"},
+		"Set-Cookie":    {"a=1", "b=2"},
+		"Vary":          {"Accept-Encoding", "Cookie"},
+	} {
+		h := http.Header{}
+		for _, value := range values {
+			h.Add(name, value)
+		}
+		resp := &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+		if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+			t.Fatalf("repeated %s values were not honored: %#v", name, values)
+		}
+	}
+}
+
+func TestShouldCacheHTTPResponseHonorsImmediateFreshnessDirectives(t *testing.T) {
+	for name, value := range map[string]string{
+		"max-age=0":    "max-age=0",
+		"s-maxage=0":   "s-maxage=0",
+		"invalid":      "max-age=invalid",
+		"no-transform": "public, max-age=60, no-transform",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := http.Header{}
+			h.Set("Cache-Control", value)
+			resp := &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+			if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+				t.Fatalf("response with Cache-Control %q entered shared cache", value)
+			}
+		})
+	}
+	h := http.Header{}
+	h.Set("Expires", time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat))
+	resp := &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+	if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+		t.Fatal("expired Expires response entered shared cache")
+	}
+	h = http.Header{"Pragma": {"public", "no-cache"}}
+	resp = &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+	if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+		t.Fatal("response Pragma: no-cache entered shared cache")
+	}
+	h = http.Header{"Set-Cookie2": {"session=secret"}}
+	resp = &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+	if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+		t.Fatal("response Set-Cookie2 entered shared cache")
+	}
+}
+
+func TestShouldCacheHTTPResponseTreatsNonCanonicalPrivacyHeadersAsUnsafe(t *testing.T) {
+	for name, values := range map[string][]string{
+		"set-cookie":    {"session=secret"},
+		"cache-control": {"private, max-age=60"},
+		"expires":       {time.Now().Add(time.Minute).UTC().Format(http.TimeFormat), "invalid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := &HTTPResponse{
+				StatusCode: http.StatusOK,
+				Body:       []byte("body"),
+				Header:     http.Header{name: values},
+			}
+			if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+				t.Fatalf("non-canonical %s header bypassed the shared-cache safety gate", name)
+			}
+		})
+	}
+}
+
+func TestShouldCacheHTTPResponseRejectsAmbiguousAge(t *testing.T) {
+	for name, values := range map[string][]string{
+		"repeated": {"1", "2"},
+		"invalid":  {"invalid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := &HTTPResponse{
+				StatusCode: http.StatusOK,
+				Body:       []byte("body"),
+				Header:     http.Header{"Age": values},
+			}
+			if ShouldCacheHTTPResponse(http.MethodGet, resp) {
+				t.Fatalf("ambiguous Age header entered the shared cache: %#v", values)
+			}
+		})
+	}
+}
+
+func TestEffectiveCacheTTLCannotExtendOriginFreshness(t *testing.T) {
+	h := http.Header{}
+	h.Set("Cache-Control", "public, max-age=12")
+	resp := &HTTPResponse{StatusCode: http.StatusOK, Body: []byte("body"), Header: h}
+	if got := EffectiveCacheTTL(60, resp); got != 12 {
+		t.Fatalf("effective ttl = %d, want 12", got)
+	}
+	h.Set("Cache-Control", "public, s-maxage=4")
+	if got := EffectiveCacheTTL(60, resp); got != 4 {
+		t.Fatalf("shared effective ttl = %d, want 4", got)
+	}
+	h.Set("Cache-Control", "public, max-age=0")
+	if got := EffectiveCacheTTL(60, resp); got != 0 {
+		t.Fatalf("zero origin freshness ttl = %d, want 0", got)
+	}
+	h.Set("Cache-Control", "public, max-age=60")
+	h.Set("Age", "10")
+	if got := EffectiveCacheTTL(60, resp); got != 50 {
+		t.Fatalf("aged origin freshness ttl = %d, want 50", got)
 	}
 }
 
@@ -3328,6 +3561,8 @@ func TestSanitizeHeadersForEdgeCache(t *testing.T) {
 	h.Set("Transfer-Encoding", "chunked")
 	h.Set("Content-Length", "999")
 	h.Set("Cache-Control", "public")
+	h.Set("Set-Cookie", "session=secret")
+	h.Set("Age", "12")
 	out := SanitizeHeadersForEdgeCache(h)
 	if out.Get("Content-Encoding") != "br" {
 		t.Fatalf("want br, got %q", out.Get("Content-Encoding"))
@@ -3337,6 +3572,12 @@ func TestSanitizeHeadersForEdgeCache(t *testing.T) {
 	}
 	if out.Get("Content-Length") != "" {
 		t.Fatal("expected Content-Length removed")
+	}
+	if out.Get("Set-Cookie") != "" {
+		t.Fatal("expected Set-Cookie removed")
+	}
+	if out.Get("Age") != "" {
+		t.Fatal("expected Age removed; replay recomputes it from CachedAt")
 	}
 }
 
@@ -3356,6 +3597,79 @@ func TestSanitizeHeadersForEdgeCacheStripsConnectionTokenHeaders(t *testing.T) {
 	}
 	if out.Get("X-Keep") != "kept" {
 		t.Fatalf("expected X-Keep kept, got %q", out.Get("X-Keep"))
+	}
+}
+
+func TestWriteCachedResponseDoesNotReplayUnsafeHeaders(t *testing.T) {
+	ctx := app.NewContext(0)
+	entry := &cache.ResponseEntry{
+		StatusCode:  http.StatusOK,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        []byte("cached"),
+		Header: http.Header{
+			"set-cookie":  {"session=secret"},
+			"set-cookie2": {"legacy=secret"},
+			"connection":  {"X-Cache-Hop"},
+			"x-cache-hop": {"must-not-replay"},
+			"x-safe":      {"kept"},
+		},
+	}
+
+	WriteCachedResponse(ctx, http.MethodGet, entry)
+	if got := ctx.Response.Header.Peek("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("cached Set-Cookie was replayed: %q", got)
+	}
+	if got := ctx.Response.Header.Peek("Set-Cookie2"); len(got) != 0 {
+		t.Fatalf("cached Set-Cookie2 was replayed: %q", got)
+	}
+	if got := ctx.Response.Header.Peek("X-Cache-Hop"); len(got) != 0 {
+		t.Fatalf("cached Connection token header was replayed: %q", got)
+	}
+	if got := string(ctx.Response.Header.Peek("X-Safe")); got != "kept" {
+		t.Fatalf("safe cached header = %q, want kept", got)
+	}
+}
+
+// TestWriteCachedResponseSetsAgeFromCachedAt 验证缓存回放按 RFC 9111 §5.1
+// 输出本层 Age：取条目 CachedAt 以来的驻留秒数，并替换上游可能残留的旧值。
+func TestWriteCachedResponseSetsAgeFromCachedAt(t *testing.T) {
+	ctx := app.NewContext(0)
+	// 上游 Age 已经被 EffectiveCacheTTL 折算进 TTL，回放时必须丢弃旧值。
+	ctx.Response.Header.Set("Age", "77")
+	entry := &cache.ResponseEntry{
+		StatusCode:  http.StatusOK,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        []byte("cached"),
+		Header:      http.Header{"X-Safe": {"kept"}},
+		CachedAt:    time.Now().Unix() - 5,
+		TTL:         60,
+	}
+
+	WriteCachedResponse(ctx, http.MethodGet, entry)
+
+	age, err := strconv.ParseInt(string(ctx.Response.Header.Peek("Age")), 10, 64)
+	if err != nil {
+		t.Fatalf("Age header = %q, want integer", ctx.Response.Header.Peek("Age"))
+	}
+	if age < 0 || age > 5 {
+		t.Fatalf("Age = %d, want dwell seconds within [0, 5]", age)
+	}
+}
+
+// TestWriteCachedResponseOmitsAgeWithoutCachedAt 覆盖旧条目（CachedAt 为零值）
+// 的回放：无法计算驻留时间时不应输出猜测性的 Age。
+func TestWriteCachedResponseOmitsAgeWithoutCachedAt(t *testing.T) {
+	ctx := app.NewContext(0)
+	entry := &cache.ResponseEntry{
+		StatusCode:  http.StatusOK,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        []byte("cached"),
+	}
+
+	WriteCachedResponse(ctx, http.MethodGet, entry)
+
+	if got := ctx.Response.Header.Peek("Age"); len(got) != 0 {
+		t.Fatalf("Age = %q, want absent for zero CachedAt", got)
 	}
 }
 
@@ -3436,20 +3750,32 @@ func TestBuildUpstreamRequestPreservesRepeatedCanonicalHeaders(t *testing.T) {
 	}
 }
 
-func TestBuildUpstreamRequestPreservesRepeatedForwardedForValues(t *testing.T) {
+func TestBuildUpstreamRequestRebuildsForwardingIdentity(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Request.SetMethod("GET")
 	ctx.Request.SetRequestURI("/resource?x=1")
 	ctx.Request.Header.Add("X-Forwarded-For", " 198.51.100.7 ")
 	ctx.Request.Header.Add("X-Forwarded-For", "")
 	ctx.Request.Header.Add("X-Forwarded-For", " 198.51.100.8, 198.51.100.9 ")
+	ctx.Request.Header.Set("X-Forwarded-Host", "spoofed.example")
+	ctx.Request.Header.Set("X-Forwarded-Proto", "https")
+	ctx.Request.Header.Set("Forwarded", "for=198.51.100.7;host=spoofed.example;proto=https")
 
 	req, err := buildUpstreamRequest(context.Background(), ctx, "http://127.0.0.1:8800", net.ParseIP("203.0.113.10"), "example.test", false)
 	if err != nil {
 		t.Fatalf("buildUpstreamRequest returned error: %v", err)
 	}
-	if got := req.Header.Get("X-Forwarded-For"); got != "198.51.100.7, 198.51.100.8, 198.51.100.9, 203.0.113.10" {
+	if got := req.Header.Get("X-Forwarded-For"); got != "203.0.113.10" {
 		t.Fatalf("X-Forwarded-For = %q", got)
+	}
+	if got := req.Header.Get("X-Forwarded-Host"); got != "" {
+		t.Fatalf("X-Forwarded-Host = %q", got)
+	}
+	if got := req.Header.Get("X-Forwarded-Proto"); got != "http" {
+		t.Fatalf("X-Forwarded-Proto = %q", got)
+	}
+	if got := req.Header.Get("Forwarded"); got != "" {
+		t.Fatalf("Forwarded = %q", got)
 	}
 }
 
@@ -4091,6 +4417,88 @@ func TestForwardHTTPRecompressesDecodedUpstreamGzipResponse(t *testing.T) {
 	}
 }
 
+func TestSiteResponsePathsBindDynamicTicketToClientIP(t *testing.T) {
+	const (
+		host      = "proxy.example.com"
+		userAgent = "dynamic-client-ip-test"
+		bind      = ":80"
+	)
+	clientIP := net.ParseIP("203.0.113.45")
+	rt := snapshot.SiteRuntime{
+		Site: store.Site{ID: 27, Host: host, Bind: bind},
+		Bind: bind,
+	}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	body := []byte("<!doctype html><html><body>protected</body></html>")
+	header := http.Header{"Content-Type": {"text/html; charset=utf-8"}}
+
+	tests := []struct {
+		name    string
+		forward func(*app.RequestContext) error
+	}{
+		{
+			name: "buffered",
+			forward: func(ctx *app.RequestContext) error {
+				ForwardBufferedResponseForSiteWithClientIP(ctx, &HTTPResponse{StatusCode: http.StatusOK, ContentType: header.Get("Content-Type"), Body: body, Header: header.Clone()}, rt, clientIP)
+				return nil
+			},
+		},
+		{
+			name: "cached",
+			forward: func(ctx *app.RequestContext) error {
+				WriteCachedResponseForSiteWithClientIP(ctx, http.MethodGet, &cache.ResponseEntry{StatusCode: http.StatusOK, ContentType: header.Get("Content-Type"), Body: body, Header: header.Clone()}, rt, clientIP)
+				return nil
+			},
+		},
+		{
+			name: "captured",
+			forward: func(ctx *app.RequestContext) error {
+				return ForwardCapturedResponseForSiteWithClientIP(context.Background(), ctx, &HTTPResponse{StatusCode: http.StatusOK, ContentType: header.Get("Content-Type"), Body: body, Header: header.Clone()}, rt, clientIP)
+			},
+		},
+		{
+			name: "oversized cache entry stream",
+			forward: func(ctx *app.RequestContext) error {
+				ForwardBufferedResponseAsStreamForSiteWithClientIP(ctx, &HTTPResponse{StatusCode: http.StatusOK, ContentType: header.Get("Content-Type"), Body: body, Header: header.Clone()}, rt, clientIP)
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := app.NewContext(0)
+			ctx.Request.SetMethod(http.MethodGet)
+			ctx.Request.SetRequestURI("/dynamic-client-ip")
+			ctx.Request.Header.SetHost(host)
+			ctx.Request.Header.Set("User-Agent", userAgent)
+			if err := tt.forward(ctx); err != nil {
+				t.Fatalf("forward response: %v", err)
+			}
+
+			output := string(ctx.Response.Body())
+			ticketMatch := regexp.MustCompile(`data-owaf-ticket="([^"]+)"`).FindStringSubmatch(output)
+			keyMatch := regexp.MustCompile(`data-owaf-key="([^"]+)"`).FindStringSubmatch(output)
+			if len(ticketMatch) != 2 || len(keyMatch) != 2 {
+				t.Fatalf("dynamic response missing signed ticket or key: %q", output[:min(len(output), 300)])
+			}
+			claims := challenge.DynamicProtectionKeyClaims{
+				DynamicProtectionClaims: challenge.DynamicProtectionClaims{
+					Host: host, ClientIP: clientIP, UserAgent: userAgent, SiteID: rt.Site.ID, Bind: bind,
+				},
+				Key: html.UnescapeString(keyMatch[1]),
+			}
+			if kek, ok := challenge.VerifyDynamicProtectionKeyTicket(ticketMatch[1], claims, time.Now()); !ok || kek == "" {
+				t.Fatal("dynamic ticket was not bound to the resolved client IP claims")
+			}
+			claims.ClientIP = net.ParseIP("203.0.113.46")
+			if _, ok := challenge.VerifyDynamicProtectionKeyTicket(ticketMatch[1], claims, time.Now()); ok {
+				t.Fatal("dynamic ticket accepted a different client IP")
+			}
+		})
+	}
+}
+
 func TestForwardHTTPAppliesDynamicProtectionWhenEnabled(t *testing.T) {
 	originalBody := []byte("<!doctype html><html><body><script>const value = 1;</script></body></html>")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4117,6 +4525,398 @@ func TestForwardHTTPAppliesDynamicProtectionWhenEnabled(t *testing.T) {
 	}
 	if !bytes.Contains(got, []byte("owaf")) {
 		t.Fatalf("transformed body does not contain expected owaf marker: %q", got[:min(len(got), 200)])
+	}
+}
+
+func TestForwardHTTPEncryptsBrowserSignBeforeDynamicProtection(t *testing.T) {
+	originalBody := []byte("<!doctype html><html><body><h1>ok</h1></body></html>")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/dynamic-protected")
+	ctx.Request.Header.SetHost("proxy.example.com")
+
+	rt := snapshot.SiteRuntime{}
+	rt.Site.ID = 7
+	rt.Site.Host = "proxy.example.com"
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	rt.EffectiveProtection = &store.ProtectionConfig{BrowserSignEnabled: true, BrowserSignTTL: 300, ShieldEnableEnvCheck: true}
+
+	if err := ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	got := ctx.Response.Body()
+	if !bytes.Contains(got, []byte("data-owaf-dp=\"2\"")) {
+		t.Fatalf("transformed body does not contain dynamic protection envelope: %q", got[:min(len(got), 200)])
+	}
+	if bytes.Contains(got, []byte("owaf_bs")) || bytes.Contains(got, []byte("X-OWAF-Browser")) {
+		t.Fatalf("browser-sign script leaked outside encrypted HTML envelope: %q", got[:min(len(got), 400)])
+	}
+	csp := string(ctx.Response.Header.Peek("Content-Security-Policy"))
+	if !strings.Contains(csp, "script-src 'self' 'nonce-") {
+		t.Fatalf("dynamic protection nonce was not added to CSP: %q", csp)
+	}
+}
+
+func TestForwardHTTPBrowserSignCSPUsesTrustedNonceForEveryPolicy(t *testing.T) {
+	const attackerNonce = "attacker-controlled"
+	originalBody := []byte(`<html><body><script nonce="` + attackerNonce + `" data-owaf-bs="1">window.injected=true</script></body></html>`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Add("Content-Security-Policy", "default-src 'none'; script-src 'self'")
+		w.Header().Add("Content-Security-Policy", "script-src 'self' https://cdn.example")
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/browser-sign")
+	ctx.Request.Header.SetHost("proxy.example.com")
+
+	rt := snapshot.SiteRuntime{}
+	rt.Site.ID = 7
+	rt.Site.Host = "proxy.example.com"
+	rt.EffectiveProtection = &store.ProtectionConfig{BrowserSignEnabled: true, BrowserSignTTL: 300}
+
+	if err := ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	matches := regexp.MustCompile(`nonce="([^"]+)" data-owaf-bs="1"`).FindAllSubmatch(ctx.Response.Body(), -1)
+	if len(matches) != 2 {
+		t.Fatalf("expected upstream and proxy browser-sign markers, got %d in %q", len(matches), ctx.Response.Body())
+	}
+	trustedNonce := ""
+	for _, match := range matches {
+		nonce := string(match[1])
+		if nonce == attackerNonce {
+			continue
+		}
+		if trustedNonce != "" {
+			t.Fatalf("expected exactly one proxy-issued nonce, got multiple non-attacker values in %q", ctx.Response.Body())
+		}
+		trustedNonce = nonce
+	}
+	if trustedNonce == "" {
+		t.Fatalf("proxy-issued nonce was not found in %q", ctx.Response.Body())
+	}
+	policies := ctx.Response.Header.PeekAll("Content-Security-Policy")
+	if len(policies) != 2 {
+		t.Fatalf("expected both CSP policies to be preserved, got %d: %q", len(policies), policies)
+	}
+	for _, policyBytes := range policies {
+		policy := string(policyBytes)
+		if strings.Contains(policy, "'nonce-"+attackerNonce+"'") {
+			t.Fatalf("attacker-controlled nonce entered CSP: %q", policy)
+		}
+		if !strings.Contains(policy, "'nonce-"+trustedNonce+"'") {
+			t.Fatalf("proxy-issued nonce missing from CSP: %q", policy)
+		}
+	}
+}
+
+func TestForwardHTTPAppliesDynamicProtectionToSupportedUpstreamEncodings(t *testing.T) {
+	originalBody := []byte("<!doctype html><html><body><script>const compressed = true;</script></body></html>")
+	tests := []struct {
+		name      string
+		encodings []string
+	}{
+		{name: "gzip", encodings: []string{"gzip"}},
+		{name: "x-gzip", encodings: []string{"x-gzip"}},
+		{name: "brotli", encodings: []string{"br"}},
+		{name: "deflate", encodings: []string{"deflate"}},
+		{name: "zstd", encodings: []string{"zstd"}},
+		{name: "multiple", encodings: []string{"gzip", "br"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encodedBody := mustEncodeBodyWithContentEncodings(t, originalBody, tt.encodings...)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Content-Encoding", strings.Join(tt.encodings, ", "))
+				w.Header().Set("Content-Length", strconv.Itoa(len(encodedBody)))
+				_, _ = w.Write(encodedBody)
+			}))
+			defer upstream.Close()
+
+			ctx := app.NewContext(0)
+			ctx.Request.SetMethod(http.MethodGet)
+			ctx.Request.SetRequestURI("/dynamic-protected-compressed")
+			ctx.Request.Header.SetHost("proxy.example.com")
+			ctx.Request.Header.Set("Accept-Encoding", "gzip")
+
+			rt := snapshot.SiteRuntime{}
+			rt.DynamicProtection.HTMLObfuscationEnabled = true
+			rt.DynamicProtection.JSObfuscationEnabled = true
+
+			if err := ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com"); err != nil {
+				t.Fatalf("ForwardHTTP returned error: %v", err)
+			}
+			if got := string(ctx.Response.Header.Peek("Content-Encoding")); got != "gzip" {
+				t.Fatalf("Content-Encoding = %q, want gzip", got)
+			}
+			reader, err := gzip.NewReader(bytes.NewReader(ctx.Response.Body()))
+			if err != nil {
+				t.Fatalf("create gzip reader: %v", err)
+			}
+			decoded, err := io.ReadAll(reader)
+			_ = reader.Close()
+			if err != nil {
+				t.Fatalf("decode gzip response: %v", err)
+			}
+			if bytes.Equal(decoded, originalBody) {
+				t.Fatalf("expected dynamic protection to transform the decoded body")
+			}
+			if !bytes.Contains(decoded, []byte("owaf")) {
+				t.Fatalf("transformed body does not contain expected owaf marker: %q", decoded[:min(len(decoded), 200)])
+			}
+			if got := string(ctx.Response.Header.Peek("Vary")); !strings.Contains(strings.ToLower(got), "accept-encoding") {
+				t.Fatalf("Vary = %q, want Accept-Encoding", got)
+			}
+		})
+	}
+}
+
+func TestForwardHTTPAppliesDynamicProtectionToRepeatedContentEncodingFields(t *testing.T) {
+	originalBody := []byte("<!doctype html><html><body><script>const repeated = true;</script></body></html>")
+	encodedBody := mustEncodeBodyWithContentEncodings(t, originalBody, "gzip", "br")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Add("Content-Encoding", "gzip")
+		w.Header().Add("Content-Encoding", "br")
+		w.Header().Set("Content-Length", strconv.Itoa(len(encodedBody)))
+		_, _ = w.Write(encodedBody)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/dynamic-protected-repeated-content-encoding")
+	ctx.Request.Header.SetHost("proxy.example.com")
+	ctx.Request.Header.Set("Accept-Encoding", "gzip")
+
+	rt := snapshot.SiteRuntime{}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+	rt.DynamicProtection.JSObfuscationEnabled = true
+
+	if err := ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(ctx.Response.Body()))
+	if err != nil {
+		t.Fatalf("create gzip reader: %v", err)
+	}
+	decoded, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatalf("decode gzip response: %v", err)
+	}
+	if bytes.Equal(decoded, originalBody) || !bytes.Contains(decoded, []byte("owaf")) {
+		t.Fatalf("expected repeated Content-Encoding response to be dynamically transformed")
+	}
+}
+
+func TestForwardHTTPDynamicProtectionStreamsOversizedIdentityResponseWithoutTruncation(t *testing.T) {
+	first := append([]byte("<!doctype html><html><body>"), bytes.Repeat([]byte("a"), maxStreamTransformBufferBytes+1)...)
+	tail := []byte("oversized-identity-tail-sentinel</body></html>")
+	release := make(chan struct{})
+	firstFlushed := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseUpstream)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write(first)
+		flusher.Flush()
+		close(firstFlushed)
+		<-release
+		_, _ = w.Write(tail)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/oversized-identity")
+	ctx.Request.Header.SetHost("proxy.example.com")
+	rt := snapshot.SiteRuntime{}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+
+	done := make(chan error, 1)
+	go func() { done <- ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com") }()
+	select {
+	case <-firstFlushed:
+	case <-time.After(2 * time.Second):
+		releaseUpstream()
+		t.Fatal("timed out waiting for oversized identity prefix")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			releaseUpstream()
+			t.Fatalf("ForwardHTTP returned error: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		releaseUpstream()
+		t.Fatal("ForwardHTTP blocked waiting for oversized identity tail")
+	}
+	if got := string(ctx.Response.Header.Peek("Content-Length")); got != "" {
+		releaseUpstream()
+		t.Fatalf("Content-Length = %q, want empty for streamed response", got)
+	}
+
+	releaseUpstream()
+	got := ctx.Response.Body()
+	want := append(append([]byte(nil), first...), tail...)
+	if !bytes.Equal(got, want) || !bytes.HasSuffix(got, tail) {
+		t.Fatalf("oversized identity response mismatch: got %d bytes, want %d", len(got), len(want))
+	}
+	if bytes.Contains(got, []byte("owaf")) {
+		t.Fatalf("oversized identity response must bypass dynamic transformation")
+	}
+}
+
+func TestForwardHTTPDynamicProtectionStreamsOversizedCompressedResponseWithoutTruncation(t *testing.T) {
+	first := append([]byte("<!doctype html><html><body>"), bytes.Repeat([]byte("b"), maxStreamTransformBufferBytes+1)...)
+	tail := []byte("oversized-compressed-tail-sentinel</body></html>")
+	release := make(chan struct{})
+	firstFlushed := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseUpstream)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		flusher := w.(http.Flusher)
+		writer := gzip.NewWriter(w)
+		_, _ = writer.Write(first)
+		_ = writer.Flush()
+		flusher.Flush()
+		close(firstFlushed)
+		<-release
+		_, _ = writer.Write(tail)
+		_ = writer.Close()
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/oversized-compressed")
+	ctx.Request.Header.SetHost("proxy.example.com")
+	ctx.Request.Header.Set("Accept-Encoding", "gzip")
+	rt := snapshot.SiteRuntime{}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+
+	done := make(chan error, 1)
+	go func() { done <- ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com") }()
+	select {
+	case <-firstFlushed:
+	case <-time.After(2 * time.Second):
+		releaseUpstream()
+		t.Fatal("timed out waiting for oversized compressed prefix")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			releaseUpstream()
+			t.Fatalf("ForwardHTTP returned error: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		releaseUpstream()
+		t.Fatal("ForwardHTTP blocked waiting for oversized compressed tail")
+	}
+	if got := string(ctx.Response.Header.Peek("Content-Encoding")); got != "gzip" {
+		releaseUpstream()
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	if got := string(ctx.Response.Header.Peek("Content-Length")); got != "" {
+		releaseUpstream()
+		t.Fatalf("Content-Length = %q, want empty for recompressed stream", got)
+	}
+
+	releaseUpstream()
+	reader, err := gzip.NewReader(bytes.NewReader(ctx.Response.Body()))
+	if err != nil {
+		t.Fatalf("create gzip reader: %v", err)
+	}
+	decoded, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatalf("decode gzip response: %v", err)
+	}
+	want := append(append([]byte(nil), first...), tail...)
+	if !bytes.Equal(decoded, want) || !bytes.HasSuffix(decoded, tail) {
+		t.Fatalf("oversized compressed response mismatch: got %d bytes, want %d", len(decoded), len(want))
+	}
+	if bytes.Contains(decoded, []byte("owaf")) {
+		t.Fatalf("oversized compressed response must bypass dynamic transformation")
+	}
+}
+
+func TestForwardHTTPDynamicProtectionPassesThroughUnsupportedContentEncoding(t *testing.T) {
+	originalBody := []byte("unsupported-encoding-body")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Encoding", "custom")
+		w.Header().Set("Content-Length", strconv.Itoa(len(originalBody)))
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/unsupported-encoding")
+	ctx.Request.Header.SetHost("proxy.example.com")
+
+	rt := snapshot.SiteRuntime{}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+
+	if err := ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	if got := string(ctx.Response.Header.Peek("Content-Encoding")); got != "custom" {
+		t.Fatalf("Content-Encoding = %q, want custom", got)
+	}
+	if got := ctx.Response.Body(); !bytes.Equal(got, originalBody) {
+		t.Fatalf("unsupported encoding body = %q, want %q", got, originalBody)
+	}
+}
+
+func TestForwardHTTPDynamicProtectionPassesThroughRepeatedUnknownContentEncoding(t *testing.T) {
+	originalBody := []byte("repeated-unsupported-encoding-body")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Add("Content-Encoding", "gzip")
+		w.Header().Add("Content-Encoding", "custom")
+		w.Header().Set("Content-Length", strconv.Itoa(len(originalBody)))
+		_, _ = w.Write(originalBody)
+	}))
+	defer upstream.Close()
+
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/unsupported-repeated-content-encoding")
+	ctx.Request.Header.SetHost("proxy.example.com")
+	rt := snapshot.SiteRuntime{}
+	rt.DynamicProtection.HTMLObfuscationEnabled = true
+
+	if err := ForwardHTTP(context.Background(), ctx, rt, upstream.URL, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	if got := string(ctx.Response.Header.Peek("Content-Encoding")); got != "gzip, custom" {
+		t.Fatalf("Content-Encoding = %q, want gzip, custom", got)
+	}
+	if got := ctx.Response.Body(); !bytes.Equal(got, originalBody) {
+		t.Fatalf("unsupported repeated encoding body = %q, want %q", got, originalBody)
 	}
 }
 
@@ -4401,7 +5201,7 @@ func TestBuildUpstreamRequestURLAndHostSemantics(t *testing.T) {
 	ctx.Request.SetRequestURI("/resource/sub?x=1&y=two")
 	ctx.Request.Header.SetHost("client.example")
 
-	req, err := buildUpstreamRequest(context.Background(), ctx, "https://origin.example:9443/base", net.ParseIP("203.0.113.10"), "client.example", true)
+	req, err := buildUpstreamRequest(context.Background(), ctx, "https://upstream-user:upstream-password@origin.example:9443/base", net.ParseIP("203.0.113.10"), "client.example", true)
 	if err != nil {
 		t.Fatalf("buildUpstreamRequest returned error: %v", err)
 	}
@@ -4410,6 +5210,14 @@ func TestBuildUpstreamRequestURLAndHostSemantics(t *testing.T) {
 	}
 	if req.URL.Scheme != "https" {
 		t.Fatalf("URL.Scheme = %q", req.URL.Scheme)
+	}
+	if req.URL.User == nil {
+		t.Fatal("upstream URL userinfo is missing")
+	}
+	username := req.URL.User.Username()
+	password, hasPassword := req.URL.User.Password()
+	if username != "upstream-user" || !hasPassword || password != "upstream-password" {
+		t.Fatalf("upstream URL userinfo = (%q, %q, %t)", username, password, hasPassword)
 	}
 	if req.URL.Host != "origin.example:9443" {
 		t.Fatalf("URL.Host = %q", req.URL.Host)
@@ -4434,6 +5242,28 @@ func TestBuildUpstreamRequestURLAndHostSemantics(t *testing.T) {
 	}
 	if got := req.Header.Get("Host"); got != "" {
 		t.Fatalf("Host header = %q, want empty because net/http uses Request.Host", got)
+	}
+}
+
+func TestForwardHTTPPreservesUpstreamURLUserinfo(t *testing.T) {
+	var gotUsername, gotPassword string
+	var gotBasicAuth bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUsername, gotPassword, gotBasicAuth = r.BasicAuth()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	base := strings.Replace(upstream.URL, "http://", "http://upstream-user:upstream-password@", 1)
+	ctx := app.NewContext(0)
+	ctx.Request.SetMethod(http.MethodGet)
+	ctx.Request.SetRequestURI("/resource")
+
+	if err := ForwardHTTP(context.Background(), ctx, snapshot.SiteRuntime{}, base, nil, "proxy.example.com"); err != nil {
+		t.Fatalf("ForwardHTTP returned error: %v", err)
+	}
+	if !gotBasicAuth || gotUsername != "upstream-user" || gotPassword != "upstream-password" {
+		t.Fatalf("upstream basic auth = (%q, %q, %t)", gotUsername, gotPassword, gotBasicAuth)
 	}
 }
 
@@ -5170,7 +6000,7 @@ func TestSiteCacheTTLDetails_Regex(t *testing.T) {
 	}
 }
 
-func TestSiteCacheEligible_AllowedWithClientNoCache(t *testing.T) {
+func TestSiteCacheEligibleRejectsClientNoCache(t *testing.T) {
 	var req protocol.Request
 	req.SetMethod("GET")
 	req.SetRequestURI("/favicon.ico")
@@ -5189,8 +6019,40 @@ func TestSiteCacheEligible_AllowedWithClientNoCache(t *testing.T) {
 		},
 	}
 	key, ttl, _ := SiteCacheEligible(rt, ctx)
-	if key == "" || ttl != 60 {
-		t.Fatalf("expected cache eligible with client no-cache, got key=%q ttl=%d", key, ttl)
+	if key != "" || ttl != 0 {
+		t.Fatalf("client no-cache request entered cache path: key=%q ttl=%d", key, ttl)
+	}
+}
+
+func TestSiteCacheEligibleRejectsFreshnessAndTransformRequests(t *testing.T) {
+	rt := snapshot.SiteRuntime{
+		CacheEnabled: true,
+		Site:         store.Site{ID: 1, Bind: ":80"},
+		Bind:         ":80",
+		CacheRules: []store.SiteCacheRule{
+			{Type: "suffix", Value: ".json", TTL: 60},
+		},
+	}
+	for name, value := range map[string]string{
+		"max-age-zero":     "max-age=0",
+		"max-age-positive": "max-age=30",
+		"min-fresh":        "min-fresh=10",
+		"no-transform":     "no-transform",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var req protocol.Request
+			req.SetMethod(http.MethodGet)
+			req.SetRequestURI("/data.json")
+			req.SetHost("cache.example.test")
+			req.Header.Set("Cache-Control", value)
+			ctx := app.NewContext(0)
+			req.CopyTo(&ctx.Request)
+
+			key, ttl, _ := SiteCacheEligible(rt, ctx)
+			if key != "" || ttl != 0 {
+				t.Fatalf("request Cache-Control %q entered shared cache: key=%q ttl=%d", value, key, ttl)
+			}
+		})
 	}
 }
 
@@ -5296,6 +6158,28 @@ func TestSiteCacheEligibleRejectsAuthorizationRequests(t *testing.T) {
 				t.Fatalf("Authorization request entered cache path: key=%q ttl=%d", key, ttl)
 			}
 		})
+	}
+}
+
+func TestSiteCacheEligibleRejectsCookieAndProxyAuthorization(t *testing.T) {
+	rt := snapshot.SiteRuntime{
+		CacheEnabled: true,
+		Site:         store.Site{ID: 1, Bind: ":80"},
+		Bind:         ":80",
+		CacheRules:   []store.SiteCacheRule{{Type: "prefix", Value: "/", TTL: 60}},
+	}
+	for name := range map[string]struct{}{"Cookie": {}, "Proxy-Authorization": {}} {
+		var req protocol.Request
+		req.SetMethod(http.MethodGet)
+		req.SetRequestURI("/account")
+		req.SetHost("cache.example.test")
+		req.Header.Set(name, "session=private")
+		ctx := app.NewContext(0)
+		req.CopyTo(&ctx.Request)
+		key, ttl, _ := SiteCacheEligible(rt, ctx)
+		if key != "" || ttl != 0 {
+			t.Fatalf("%s request entered shared cache: key=%q ttl=%d", name, key, ttl)
+		}
 	}
 }
 

@@ -1,8 +1,7 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import * as React from "react"
+import { cn } from "@/lib/utils"
 
 /**
  * @typedef {object} EmptyStateProps
@@ -14,12 +13,12 @@ import { Button } from "@/components/ui/button";
  * @property {string} [className] 外层容器 className
  */
 export interface EmptyStateProps {
-  icon?: React.ComponentType<{ className?: string }>;
-  title: React.ReactNode;
-  description?: React.ReactNode;
-  action?: React.ReactNode;
-  secondaryAction?: React.ReactNode;
-  className?: string;
+  icon?: React.ComponentType<{ className?: string }>
+  title: React.ReactNode
+  description?: React.ReactNode
+  action?: React.ReactNode
+  secondaryAction?: React.ReactNode
+  className?: string
 }
 
 /**
@@ -37,8 +36,8 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center rounded-xl border border-dashed py-16 px-6 text-center",
-        className,
+        "flex flex-col items-center justify-center rounded-xl border border-dashed px-6 py-16 text-center",
+        className
       )}
     >
       {Icon ? (
@@ -46,7 +45,9 @@ export function EmptyState({
           <Icon className="h-10 w-10 text-primary/50" />
         </div>
       ) : null}
-      <h3 className="mb-1.5 text-base font-semibold text-foreground">{title}</h3>
+      <h3 className="mb-1.5 text-base font-semibold text-foreground">
+        {title}
+      </h3>
       {description ? (
         <p className="mb-5 max-w-sm text-sm leading-relaxed text-muted-foreground">
           {description}
@@ -61,24 +62,5 @@ export function EmptyState({
         </div>
       )}
     </div>
-  );
-}
-
-/**
- * 便捷版：当外部只想传一个"主按钮"文案+回调时用。
- */
-export function EmptyStateButton({
-  onClick,
-  children,
-  variant = "default",
-}: {
-  onClick: () => void;
-  children: React.ReactNode;
-  variant?: React.ComponentProps<typeof Button>["variant"];
-}) {
-  return (
-    <Button size="sm" variant={variant} onClick={onClick}>
-      {children}
-    </Button>
-  );
+  )
 }

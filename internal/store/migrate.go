@@ -1,15 +1,21 @@
 package store
 
 import (
+	"fmt"
+
 	"My-OpenWaf/internal/store/migrations"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // AutoMigrate applies schema for all domain models.
 func AutoMigrate(db *gorm.DB) error {
 	// Run data migrations first
 	if err := migrations.V2MigrateSingleSite(db); err != nil {
+		return err
+	}
+	if err := migrations.V10MigrateSiteXFFModes(db); err != nil {
 		return err
 	}
 	if err := migrations.V3MigrateLegacyRulePhases(db); err != nil {
@@ -22,6 +28,14 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 	if err := migrations.V6MigrateSiteTLSMinVersionInheritance(db); err != nil {
+		return err
+	}
+	if err := migrations.V11MigrateSiteAntiReplayInheritance(db); err != nil {
+		return err
+	}
+	// 必须在 AutoMigrate 之前：AutoMigrate 会创建 ux_recorded_res_dedup 唯一索引，
+	// 而旧库的 dedup_key 尚未回填，先建索引会因重复值冲突而失败。
+	if err := migrations.V8MigrateRecordedResourceDedupKey(db); err != nil {
 		return err
 	}
 
@@ -43,7 +57,10 @@ func AutoMigrate(db *gorm.DB) error {
 		&LoginAttempt{},
 		&ActiveSession{},
 
+		&OWASPRuleCatalog{},
+		&PolicyOWASPRuleConfig{},
 		&CVERuleRecord{},
+		&CVERuleScopeOverride{},
 		&CVESyncLog{},
 		&ApplicationRouteRule{},
 		&RecordedResource{},
@@ -57,7 +74,13 @@ func AutoMigrate(db *gorm.DB) error {
 		&ThreatIntelFeed{},
 		&ThreatIntelSyncLog{},
 		&FalsePositiveReport{},
+
+		&LuaPlugin{},
+		&JSPlugin{},
 	); err != nil {
+		return err
+	}
+	if err := migrations.V9EnsureDefaultPolicy(db); err != nil {
 		return err
 	}
 
@@ -66,29 +89,46 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 
-	// V6 needs both legacy sites and the system_settings marker table. Running
-	// it again after schema migration handles older databases that did not yet
-	// have system_settings when the pre-schema data migrations ran.
-	return migrations.V6MigrateSiteTLSMinVersionInheritance(db)
+	// V6 and V11 need both legacy sites and the system_settings marker table.
+	// Running them again after schema migration handles older databases that did
+	// not yet have system_settings when the pre-schema data migrations ran.
+	if err := migrations.V6MigrateSiteTLSMinVersionInheritance(db); err != nil {
+		return err
+	}
+	return migrations.V11MigrateSiteAntiReplayInheritance(db)
 }
 
 func AutoMigrateLogs(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&SecurityEvent{},
 		&AccessLog{},
 		&DropEvent{},
 		&BotScoreLog{},
-	)
+	); err != nil {
+		return err
+	}
+	return migrations.V12MigrateAccessLogFingerprintKey(db)
 }
 
 func BumpRevision(db *gorm.DB) error {
-	var cr ConfigRevision
-	tx := db.FirstOrCreate(&cr, ConfigRevision{ID: 1})
-	if tx.Error != nil {
-		return tx.Error
+	seed := ConfigRevision{ID: 1, Revision: 0}
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoNothing: true,
+	}).Create(&seed).Error; err != nil {
+		return err
 	}
-	cr.Revision++
-	return db.Save(&cr).Error
+
+	result := db.Model(&ConfigRevision{}).
+		Where("id = ?", seed.ID).
+		UpdateColumn("revision", gorm.Expr("revision + ?", 1))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("config revision row %d was not updated", seed.ID)
+	}
+	return nil
 }
 
 func CurrentRevision(db *gorm.DB) (uint64, error) {

@@ -62,9 +62,11 @@ type LoginAttempt struct {
 
 // ActiveSession records an active admin session by JTI.
 type ActiveSession struct {
-	ID           uint      `gorm:"primarykey" json:"id"`
-	Username     string    `gorm:"index;size:64" json:"username"`
-	JTI          string    `gorm:"uniqueIndex;size:64" json:"jti"`
+	ID       uint   `gorm:"primarykey" json:"id"`
+	Username string `gorm:"index;size:64" json:"username"`
+	JTI      string `gorm:"uniqueIndex;size:64" json:"jti"`
+	// RefreshJTI 仅用于服务端精确撤销对应的轮换令牌，不向管理端响应暴露。
+	RefreshJTI   string    `gorm:"index;size:128" json:"-"`
 	IP           string    `gorm:"size:45" json:"ip"`
 	UserAgent    string    `gorm:"size:256" json:"user_agent"`
 	DeviceInfo   string    `gorm:"size:128" json:"device_info"`

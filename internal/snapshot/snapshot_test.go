@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/dynamic"
 )
 
 func TestLoadDefaultsFallbackOnInvalidJSON(t *testing.T) {
@@ -386,7 +388,7 @@ func TestBuildPreservesExplicitSiteALPNWithoutH3(t *testing.T) {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -423,7 +425,7 @@ func TestBuildUsesTLSDefaultMaxVersionWhenSiteInherits(t *testing.T) {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -474,7 +476,7 @@ func TestBuildFallsBackFromUnsupportedRuntimeTLSVersions(t *testing.T) {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -557,8 +559,8 @@ func TestParseCurvePreferencesAliasesAndDeduplicates(t *testing.T) {
 	}
 }
 
-func testSiteRuntime(id uint, bind, host string) SiteRuntime {
-	return SiteRuntime{
+func testSiteRuntime(id uint, bind, host string) *SiteRuntime {
+	return &SiteRuntime{
 		Site: store.Site{
 			ID:   id,
 			Host: host,
@@ -569,7 +571,7 @@ func testSiteRuntime(id uint, bind, host string) SiteRuntime {
 
 func TestMatchSiteMatchesWithinCurrentBind(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "app.example.com"): testSiteRuntime(1, ":443", "app.example.com"),
 			SiteMapKey(":443", "*.example.com"):   testSiteRuntime(2, ":443", "*.example.com"),
 		},
@@ -601,7 +603,7 @@ func TestMatchSiteMatchesWithinCurrentBind(t *testing.T) {
 
 func TestMatchSitePrefersExactThenWildcardThenCatchAll(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "app.example.com"): testSiteRuntime(1, ":443", "app.example.com"),
 			SiteMapKey(":443", "*.example.com"):   testSiteRuntime(2, ":443", "*.example.com"),
 			SiteMapKey(":443", "*"):               testSiteRuntime(3, ":443", "*"),
@@ -646,7 +648,7 @@ func TestMatchSitePrefersExactThenWildcardThenCatchAll(t *testing.T) {
 
 func TestMatchSiteCatchAllDoesNotCrossBinds(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "*"): testSiteRuntime(1, ":443", "*"),
 		},
 	}
@@ -661,7 +663,7 @@ func TestMatchSiteCatchAllDoesNotCrossBinds(t *testing.T) {
 
 func TestMatchSiteIPDetectionAvoidsWildcardForAddresses(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "*.0.0.1"):       testSiteRuntime(1, ":443", "*.0.0.1"),
 			SiteMapKey(":443", "*.example.com"): testSiteRuntime(2, ":443", "*.example.com"),
 		},
@@ -695,7 +697,7 @@ func TestMatchSiteIPDetectionAvoidsWildcardForAddresses(t *testing.T) {
 
 func BenchmarkMatchSiteNoMatchDomainHost(b *testing.B) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":443", "app.example.com"): testSiteRuntime(1, ":443", "app.example.com"),
 		},
 	}
@@ -710,7 +712,7 @@ func BenchmarkMatchSiteNoMatchDomainHost(b *testing.B) {
 
 func TestMatchSiteDoesNotFallbackAcrossBinds(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":80", "public.example.com"):                testSiteRuntime(1, ":80", "public.example.com"),
 			SiteMapKey(":80", "other.example.com"):                 testSiteRuntime(2, ":80", "other.example.com"),
 			SiteMapKey("127.0.0.1:8081", "admin.internal.example"): testSiteRuntime(3, "127.0.0.1:8081", "admin.internal.example"),
@@ -724,7 +726,7 @@ func TestMatchSiteDoesNotFallbackAcrossBinds(t *testing.T) {
 
 func TestMatchSiteNoMatchReturnsFalse(t *testing.T) {
 	sn := &Snapshot{
-		Sites: map[string]SiteRuntime{
+		Sites: map[string]*SiteRuntime{
 			SiteMapKey(":8800", "a.example.com"): testSiteRuntime(1, ":8800", "a.example.com"),
 			SiteMapKey(":8800", "b.example.com"): testSiteRuntime(2, ":8800", "b.example.com"),
 			SiteMapKey(":8800", "*.example.com"): testSiteRuntime(3, ":8800", "*.example.com"),
@@ -759,7 +761,7 @@ func TestMatchSiteNoMatchReturnsFalse(t *testing.T) {
 }
 
 func TestRegisterSiteKeysRejectsDuplicateBindHostAcrossSites(t *testing.T) {
-	sites := make(map[string]SiteRuntime)
+	sites := make(map[string]*SiteRuntime)
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com")); err != nil {
 		t.Fatalf("register first site: %v", err)
 	}
@@ -776,7 +778,7 @@ func TestRegisterSiteKeysRejectsDuplicateBindHostAcrossSites(t *testing.T) {
 }
 
 func TestRegisterSiteKeysAllowsDuplicateHostWithinSameSite(t *testing.T) {
-	sites := make(map[string]SiteRuntime)
+	sites := make(map[string]*SiteRuntime)
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "example.com, EXAMPLE.COM:80")); err != nil {
 		t.Fatalf("register duplicate host within same site: %v", err)
 	}
@@ -786,7 +788,7 @@ func TestRegisterSiteKeysAllowsDuplicateHostWithinSameSite(t *testing.T) {
 }
 
 func TestRegisterSiteKeysMultiHost(t *testing.T) {
-	sites := make(map[string]SiteRuntime)
+	sites := make(map[string]*SiteRuntime)
 	// Site with comma-separated hosts including a wildcard
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "a.example.com, b.example.com, *.example.com")); err != nil {
 		t.Fatalf("register site keys: %v", err)
@@ -808,7 +810,7 @@ func TestRegisterSiteKeysMultiHost(t *testing.T) {
 }
 
 func TestMatchSiteMultiHost(t *testing.T) {
-	sites := make(map[string]SiteRuntime)
+	sites := make(map[string]*SiteRuntime)
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":8800", "app.example.com, *.example.org")); err != nil {
 		t.Fatalf("register site keys: %v", err)
 	}
@@ -948,6 +950,544 @@ func TestMergeProtectionDisablesCVEAutoDropForSiteObserveAction(t *testing.T) {
 	}
 }
 
+func TestLoadAllSettingsPropagatesQueryError(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := loadAllSettings(db); err == nil {
+		t.Fatal("loadAllSettings should report a missing-table query error")
+	}
+}
+
+func TestLoadOptionalSnapshotTablesAllowMissingTables(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if got, err := loadAccessControlConfigs(db); err != nil || len(got) != 0 {
+		t.Fatalf("missing access-control tables should be empty without error: got=%v err=%v", got, err)
+	}
+	if got, diagnostics, err := loadSiteIPLists(db); err != nil || len(got) != 0 || len(diagnostics) != 0 {
+		t.Fatalf("missing IP-list table should be empty without error: got=%v err=%v", got, err)
+	}
+	if got, errs, err := loadLuaPlugins(db); err != nil || got != nil || errs != nil {
+		t.Fatalf("missing Lua table should be empty without error: scripts=%v errs=%v err=%v", got, errs, err)
+	}
+}
+
+func TestLoadLuaPluginsKeepsCompileErrorsNonFatal(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.LuaPlugin{}); err != nil {
+		t.Fatalf("migrate lua plugins: %v", err)
+	}
+	if err := db.Create(&store.LuaPlugin{
+		Name:    "broken",
+		Stage:   store.LuaStagePre,
+		Source:  "function handle(ctx) local",
+		Enabled: true,
+	}).Error; err != nil {
+		t.Fatalf("seed broken plugin: %v", err)
+	}
+	scripts, compileErrors, err := loadLuaPlugins(db)
+	if err != nil {
+		t.Fatalf("loadLuaPlugins query failed: %v", err)
+	}
+	if len(scripts) != 0 || compileErrors["broken"] == "" {
+		t.Fatalf("compile error should be non-fatal: scripts=%v errors=%v", scripts, compileErrors)
+	}
+}
+
+func TestLoadLuaPluginsRejectsRuntimeContractErrorsBeforePublishing(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.LuaPlugin{}); err != nil {
+		t.Fatalf("migrate lua plugins: %v", err)
+	}
+	if err := db.Create(&store.LuaPlugin{
+		Name:    "invalid-kv-ttl",
+		Stage:   store.LuaStagePre,
+		Source:  `function handle(ctx) ctx.kv.incr("validation", 600000000) end`,
+		Enabled: true,
+	}).Error; err != nil {
+		t.Fatalf("seed invalid runtime plugin: %v", err)
+	}
+	scripts, diagnostics, err := loadLuaPlugins(db)
+	if err != nil {
+		t.Fatalf("loadLuaPlugins query failed: %v", err)
+	}
+	if len(scripts) != 0 {
+		t.Fatalf("runtime-invalid plugin must not enter snapshot execution list: %d", len(scripts))
+	}
+	if diagnostics["invalid-kv-ttl"] == "" {
+		t.Fatalf("missing runtime-contract diagnostic: %#v", diagnostics)
+	}
+}
+
+func TestSnapshotLoadersPropagateExistingTableQueryErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		table string
+		load  func(*gorm.DB) error
+	}{
+		{
+			name:  "access control",
+			table: "site_access_configs",
+			load: func(db *gorm.DB) error {
+				_, err := loadAccessControlConfigs(db)
+				return err
+			},
+		},
+		{
+			name:  "IP lists",
+			table: "ip_list_entries",
+			load: func(db *gorm.DB) error {
+				_, _, err := loadSiteIPLists(db)
+				return err
+			},
+		},
+		{
+			name:  "Lua plugins",
+			table: "lua_plugins",
+			load: func(db *gorm.DB) error {
+				_, _, err := loadLuaPlugins(db)
+				return err
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+			if err != nil {
+				t.Fatalf("open sqlite: %v", err)
+			}
+			if err := db.Exec("CREATE TABLE " + tc.table + " (id INTEGER)").Error; err != nil {
+				t.Fatalf("create malformed %s table: %v", tc.table, err)
+			}
+			if err := tc.load(db); err == nil {
+				t.Fatalf("%s loader should report query error", tc.name)
+			}
+		})
+	}
+}
+
+func TestLoadPolicyOWASPConfigsReportsInvalidWhitelistDiagnostic(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.PolicyOWASPRuleConfig{}); err != nil {
+		t.Fatalf("migrate OWASP config: %v", err)
+	}
+	badWhitelist := `["/safe",`
+	goodWhitelist := `["/admin"]`
+	if err := db.Create([]store.PolicyOWASPRuleConfig{
+		{PolicyID: 1, RuleID: "owasp:test:invalid", Whitelist: &badWhitelist},
+		{PolicyID: 1, RuleID: "owasp:test:valid", Whitelist: &goodWhitelist},
+	}).Error; err != nil {
+		t.Fatalf("seed OWASP configs: %v", err)
+	}
+
+	configs, diagnostics, err := loadPolicyOWASPConfigs(db)
+	if err != nil {
+		t.Fatalf("load OWASP configs: %v", err)
+	}
+	if len(diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one invalid whitelist diagnostic", diagnostics)
+	}
+	got := diagnostics[0]
+	if got.Source != DiagnosticSourcePolicyOWASP || got.Field != DiagnosticFieldWhitelistJSON || got.Error != "invalid_json" || got.HandlingStrategy != DiagnosticHandlingSkipInvalidField || got.Kind != "owasp_whitelist" || got.Reason != "invalid_json" || got.PolicyID != 1 || got.RuleID != "owasp:test:invalid" {
+		t.Fatalf("diagnostic = %#v, want invalid OWASP whitelist identity and handling contract", got)
+	}
+	encoded, err := json.Marshal(diagnostics)
+	if err != nil {
+		t.Fatalf("marshal diagnostics: %v", err)
+	}
+	if bytes.Contains(encoded, []byte(badWhitelist)) {
+		t.Fatal("diagnostics must not contain the raw invalid whitelist")
+	}
+	if len(configs) != 1 || !bytes.Contains([]byte(configs[1]), []byte("/admin")) || bytes.Contains([]byte(configs[1]), []byte("/safe")) {
+		t.Fatalf("valid whitelist config was not preserved or invalid partial data leaked: %#v", configs)
+	}
+}
+
+func TestLoadSiteIPListsReportsInvalidEntryDiagnostics(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.IPListEntry{}); err != nil {
+		t.Fatalf("migrate IP list: %v", err)
+	}
+	siteID := uint(7)
+	entries := []store.IPListEntry{
+		{Kind: store.IPListBlack, Value: "   ", Note: "empty-global-secret-note", Enabled: true, Action: "intercept"},
+		{Kind: store.IPListBlack, Value: "global-sensitive-invalid-value", Note: "invalid-global-secret-note", Enabled: true, Action: "intercept"},
+		{Kind: store.IPListWhite, Value: "192.0.2.10", Note: "valid-global", Enabled: true, Action: "intercept"},
+		{Kind: store.IPListBlack, Value: "\t", Note: "empty-site-secret-note", Enabled: true, Action: "intercept", SiteID: &siteID},
+		{Kind: store.IPListBlack, Value: "site-sensitive-invalid-value", Note: "invalid-site-secret-note", Enabled: true, Action: "intercept", SiteID: &siteID},
+		{Kind: store.IPListWhite, Value: "198.51.100.0/24", Note: "valid-site", Enabled: true, Action: "intercept", SiteID: &siteID},
+	}
+	if err := db.Create(&entries).Error; err != nil {
+		t.Fatalf("seed IP list: %v", err)
+	}
+
+	lists, diagnostics, err := loadSiteIPLists(db)
+	if err != nil {
+		t.Fatalf("load IP list: %v", err)
+	}
+	if len(diagnostics) != 4 {
+		t.Fatalf("diagnostics = %#v, want four invalid global/site entries", diagnostics)
+	}
+	expected := map[uint]struct {
+		scope  string
+		reason string
+	}{
+		entries[0].ID: {scope: "global", reason: "empty_value"},
+		entries[1].ID: {scope: "global", reason: "invalid_ip_or_cidr"},
+		entries[3].ID: {scope: "site", reason: "empty_value"},
+		entries[4].ID: {scope: "site", reason: "invalid_ip_or_cidr"},
+	}
+	seen := make(map[uint]bool, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Kind != "ip_list_entry" {
+			t.Fatalf("diagnostic kind = %q, want ip_list_entry", diagnostic.Kind)
+		}
+		want, ok := expected[diagnostic.IPListEntryID]
+		if !ok {
+			t.Fatalf("unexpected IP diagnostic = %#v", diagnostic)
+		}
+		if diagnostic.Source != DiagnosticSourceIPList || diagnostic.Field != DiagnosticFieldValue || diagnostic.Error != want.reason || diagnostic.HandlingStrategy != DiagnosticHandlingSkipInvalidEntry || diagnostic.Scope != want.scope || diagnostic.Reason != want.reason || (want.scope == "site" && diagnostic.SiteID != siteID) {
+			t.Fatalf("IP diagnostic = %#v, want scope=%q reason=%q site_id=%d", diagnostic, want.scope, want.reason, siteID)
+		}
+		seen[diagnostic.IPListEntryID] = true
+	}
+	if len(seen) != len(expected) {
+		t.Fatalf("diagnostic identities = %#v, want %#v", seen, expected)
+	}
+	encoded, err := json.Marshal(diagnostics)
+	if err != nil {
+		t.Fatalf("marshal diagnostics: %v", err)
+	}
+	for _, raw := range []string{
+		"global-sensitive-invalid-value",
+		"site-sensitive-invalid-value",
+		"empty-global-secret-note",
+		"invalid-global-secret-note",
+		"empty-site-secret-note",
+		"invalid-site-secret-note",
+	} {
+		if bytes.Contains(encoded, []byte(raw)) {
+			t.Fatalf("diagnostics contain sensitive raw value %q", raw)
+		}
+	}
+	pair := lists[siteID]
+	if len(pair.whitelist) != 1 || pair.whitelist[0].CIDR == nil || pair.whitelist[0].CIDR.String() != "198.51.100.0/24" {
+		t.Fatalf("valid site whitelist was not preserved: %#v", pair.whitelist)
+	}
+	if len(lists) != 1 {
+		t.Fatalf("global entries should not create site list entries: %#v", lists)
+	}
+}
+
+func TestBuildPublishesTLSCertificateStateAndDiagnostic(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	certificateID := uint(4242)
+	site := store.Site{
+		Host:         "bad.example.test",
+		UpstreamURLs: "http://127.0.0.1:18080",
+		Bind:         ":443",
+		Enabled:      true,
+		TLSEnabled:   true,
+		CertID:       &certificateID,
+	}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+	if err := db.Create(&store.SiteListener{
+		SiteID:     site.ID,
+		Bind:       ":443",
+		TLSEnabled: true,
+		CertID:     &certificateID,
+		Enabled:    true,
+	}).Error; err != nil {
+		t.Fatalf("seed listener: %v", err)
+	}
+	unconfigured := store.Site{
+		Host:         "unconfigured.example.test",
+		UpstreamURLs: "http://127.0.0.1:18081",
+		Bind:         ":443",
+		Enabled:      true,
+		TLSEnabled:   true,
+	}
+	if err := db.Create(&unconfigured).Error; err != nil {
+		t.Fatalf("seed unconfigured site: %v", err)
+	}
+	if err := db.Create(&store.SiteListener{
+		SiteID:     unconfigured.ID,
+		Bind:       ":443",
+		TLSEnabled: true,
+		Enabled:    true,
+	}).Error; err != nil {
+		t.Fatalf("seed unconfigured listener: %v", err)
+	}
+	certPEM, keyPEM, err := acme.GenerateSelfSignedPEM("valid.example.test", []string{"valid.example.test"}, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("generate valid certificate: %v", err)
+	}
+	validCertificate := store.Certificate{Name: "valid", CertPEM: certPEM, KeyPEM: keyPEM}
+	if err := db.Create(&validCertificate).Error; err != nil {
+		t.Fatalf("seed valid certificate: %v", err)
+	}
+	valid := store.Site{
+		Host:         "valid.example.test",
+		UpstreamURLs: "http://127.0.0.1:18082",
+		Bind:         ":443",
+		Enabled:      true,
+		TLSEnabled:   true,
+		CertID:       &validCertificate.ID,
+	}
+	if err := db.Create(&valid).Error; err != nil {
+		t.Fatalf("seed valid site: %v", err)
+	}
+	if err := db.Create(&store.SiteListener{
+		SiteID:     valid.ID,
+		Bind:       ":443",
+		TLSEnabled: true,
+		CertID:     &validCertificate.ID,
+		Enabled:    true,
+	}).Error; err != nil {
+		t.Fatalf("seed valid listener: %v", err)
+	}
+
+	sn, err := Build(db, 19, testDynamicKeyBase)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	state, found := sn.TLSCertificateStateForSNI(":443", "BAD.EXAMPLE.TEST")
+	if !found || state != TLSCertificateStateInvalid {
+		t.Fatalf("certificate state = %q, found=%v, want invalid", state, found)
+	}
+	state, found = sn.TLSCertificateStateForSNI(":443", "unconfigured.example.test")
+	if !found || state != TLSCertificateStateUnconfigured {
+		t.Fatalf("unconfigured certificate state = %q, found=%v, want unconfigured", state, found)
+	}
+	state, found = sn.TLSCertificateStateForSNI(":443", "valid.example.test")
+	if !found || state != TLSCertificateStateValid {
+		t.Fatalf("valid certificate state = %q, found=%v, want valid", state, found)
+	}
+	if _, ok := sn.SiteTLSCertBySNI[SNICertKey(":443", "valid.example.test")]; !ok {
+		t.Fatal("valid certificate must populate certificate map")
+	}
+	if len(sn.SiteTLSCertBySNI) != 1 {
+		t.Fatalf("invalid certificate must not populate certificate map: %#v", sn.SiteTLSCertBySNI)
+	}
+	if len(sn.ConfigDiagnostics) != 1 {
+		t.Fatalf("config diagnostics = %#v, want one certificate diagnostic", sn.ConfigDiagnostics)
+	}
+	diagnostic := sn.ConfigDiagnostics[0]
+	if diagnostic.Source != DiagnosticSourceListeners || diagnostic.Field != DiagnosticFieldCertificateID || diagnostic.Error != "certificate_not_found" || diagnostic.HandlingStrategy != DiagnosticHandlingRejectInvalidCertificate || diagnostic.Kind != "tls_certificate" || diagnostic.Reason != "certificate_not_found" || diagnostic.CertificateID != certificateID || diagnostic.ListenerID == 0 || diagnostic.SiteID != site.ID {
+		t.Fatalf("certificate diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestBuildReportsCertificateMaterialDiagnosticsWithoutLeakingSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		certPEM string
+		keyPEM  string
+		reason  string
+	}{
+		{name: "empty pair", reason: "empty_certificate_or_key"},
+		{
+			name:    "invalid pair",
+			certPEM: "-----BEGIN CERTIFICATE-----\nSENSITIVE-MALFORMED-CERTIFICATE\n-----END CERTIFICATE-----",
+			keyPEM:  "-----BEGIN PRIVATE KEY-----\nSENSITIVE-MALFORMED-PRIVATE-KEY\n-----END PRIVATE KEY-----",
+			reason:  "invalid_certificate_or_key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _ := newSnapshotBuildDBForTest(t)
+			certificate := store.Certificate{Name: tt.name, CertPEM: tt.certPEM, KeyPEM: tt.keyPEM}
+			if err := db.Create(&certificate).Error; err != nil {
+				t.Fatalf("seed certificate: %v", err)
+			}
+			site := store.Site{
+				Host:         "material.example.test",
+				UpstreamURLs: "http://127.0.0.1:18080",
+				Bind:         ":443",
+				Enabled:      true,
+				TLSEnabled:   true,
+				CertID:       &certificate.ID,
+			}
+			if err := db.Create(&site).Error; err != nil {
+				t.Fatalf("seed site: %v", err)
+			}
+			if err := db.Create(&store.SiteListener{
+				SiteID:     site.ID,
+				Bind:       ":443",
+				TLSEnabled: true,
+				CertID:     &certificate.ID,
+				Enabled:    true,
+			}).Error; err != nil {
+				t.Fatalf("seed listener: %v", err)
+			}
+
+			sn, err := Build(db, 1, testDynamicKeyBase)
+			if err != nil {
+				t.Fatalf("build snapshot: %v", err)
+			}
+			if len(sn.ConfigDiagnostics) != 1 {
+				t.Fatalf("diagnostics = %#v, want one certificate material diagnostic", sn.ConfigDiagnostics)
+			}
+			got := sn.ConfigDiagnostics[0]
+			if got.Source != DiagnosticSourceCertificates || got.Field != DiagnosticFieldCertificatePair || got.Error != tt.reason || got.HandlingStrategy != DiagnosticHandlingRejectInvalidCertificate || got.Kind != "tls_certificate" || got.Reason != tt.reason || got.CertificateID != certificate.ID || got.SiteID != site.ID {
+				t.Fatalf("certificate material diagnostic = %#v", got)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal diagnostic: %v", err)
+			}
+			for _, sensitive := range []string{tt.certPEM, tt.keyPEM, "SENSITIVE-MALFORMED", "PRIVATE KEY"} {
+				if sensitive != "" && bytes.Contains(encoded, []byte(sensitive)) {
+					t.Fatalf("diagnostic leaked certificate material %q", sensitive)
+				}
+			}
+		})
+	}
+}
+
+func TestTLSCertificateStateForSNIPrecedence(t *testing.T) {
+	sn := &Snapshot{SiteTLSCertStateBySNI: map[string]TLSCertificateState{
+		SNICertKey(":443", "app.example.test"): TLSCertificateStateValid,
+		SNICertKey(":443", "*.example.test"):   TLSCertificateStateInvalid,
+		SNICertKey(":443", "*"):                TLSCertificateStateUnconfigured,
+	}}
+
+	tests := []struct {
+		name  string
+		sni   string
+		want  TLSCertificateState
+		found bool
+	}{
+		{name: "exact", sni: "APP.EXAMPLE.TEST", want: TLSCertificateStateValid, found: true},
+		{name: "wildcard", sni: "api.example.test", want: TLSCertificateStateInvalid, found: true},
+		{name: "catch all", sni: "other.test", want: TLSCertificateStateUnconfigured, found: true},
+		{name: "empty", sni: "", found: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, found := sn.TLSCertificateStateForSNI(":443", tt.sni)
+			if found != tt.found || got != tt.want {
+				t.Fatalf("state = %q, found=%v, want %q, found=%v", got, found, tt.want, tt.found)
+			}
+		})
+	}
+}
+
+// TestBuildCopiesSiteChallengePolicyOverrides 覆盖站点级质询策略快照解析：
+// 未配置时 SiteRuntime 字段为空串；配置后按站点覆盖值填充。
+func TestBuildCopiesSiteChallengePolicyOverrides(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+
+	inheritedSite := store.Site{
+		Host:         "challenge-inherit.example.test",
+		Bind:         ":80",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Enabled:      true,
+	}
+	if err := db.Create(&inheritedSite).Error; err != nil {
+		t.Fatalf("seed inherited site: %v", err)
+	}
+
+	challengeAction := "captcha_challenge"
+	captchaType := "slide"
+	coveredSite := store.Site{
+		Host:            "challenge-covered.example.test",
+		Bind:            ":80",
+		Network:         "tcp",
+		UpstreamURLs:    "http://127.0.0.1:8080",
+		Enabled:         true,
+		ChallengeAction: &challengeAction,
+		SiteCaptchaType: &captchaType,
+	}
+	if err := db.Create(&coveredSite).Error; err != nil {
+		t.Fatalf("seed covered site: %v", err)
+	}
+
+	sn, err := Build(db, 1, testDynamicKeyBase)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	inheritedRT, ok := sn.MatchSite(":80", inheritedSite.Host)
+	if !ok {
+		t.Fatal("inherited site was not matched")
+	}
+	if inheritedRT.ChallengeAction != "" || inheritedRT.ChallengeCaptchaType != "" {
+		t.Fatalf("unconfigured site runtime overrides = %q/%q, want empty", inheritedRT.ChallengeAction, inheritedRT.ChallengeCaptchaType)
+	}
+	coveredRT, ok := sn.MatchSite(":80", coveredSite.Host)
+	if !ok {
+		t.Fatal("covered site was not matched")
+	}
+	if coveredRT.ChallengeAction != challengeAction {
+		t.Fatalf("runtime challenge_action = %q, want %q", coveredRT.ChallengeAction, challengeAction)
+	}
+	if coveredRT.ChallengeCaptchaType != captchaType {
+		t.Fatalf("runtime challenge captcha_type = %q, want %q", coveredRT.ChallengeCaptchaType, captchaType)
+	}
+}
+
+func TestBuildPublishesConfigDiagnostics(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.AutoMigrate(&store.PolicyOWASPRuleConfig{}, &store.IPListEntry{}); err != nil {
+		t.Fatalf("migrate diagnostic tables: %v", err)
+	}
+	badWhitelist := `["/sensitive",`
+	invalidIP := "build-sensitive-invalid-value"
+	if err := db.Create(&store.PolicyOWASPRuleConfig{
+		PolicyID:  1,
+		RuleID:    "owasp:test:build",
+		Whitelist: &badWhitelist,
+	}).Error; err != nil {
+		t.Fatalf("seed OWASP config: %v", err)
+	}
+	if err := db.Create(&store.IPListEntry{
+		Kind:    store.IPListBlack,
+		Value:   invalidIP,
+		Enabled: true,
+		Action:  "intercept",
+	}).Error; err != nil {
+		t.Fatalf("seed IP list entry: %v", err)
+	}
+
+	sn, err := Build(db, 17, testDynamicKeyBase)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if len(sn.ConfigDiagnostics) != 2 {
+		t.Fatalf("snapshot diagnostics = %#v, want OWASP and IP diagnostics", sn.ConfigDiagnostics)
+	}
+	encoded, err := json.Marshal(sn.ConfigDiagnostics)
+	if err != nil {
+		t.Fatalf("marshal snapshot diagnostics: %v", err)
+	}
+	for _, raw := range []string{badWhitelist, invalidIP} {
+		if bytes.Contains(encoded, []byte(raw)) {
+			t.Fatalf("snapshot diagnostics contain raw invalid value %q", raw)
+		}
+	}
+}
+
 func newSnapshotBuildDBForTest(t *testing.T) (*gorm.DB, *repository.ApplicationRouteRuleRepo) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -958,13 +1498,143 @@ func newSnapshotBuildDBForTest(t *testing.T) (*gorm.DB, *repository.ApplicationR
 		&store.Site{},
 		&store.SiteListener{},
 		&store.Certificate{},
+		&store.Policy{},
 		&store.Rule{},
 		&store.ApplicationRouteRule{},
 		&store.SystemSettings{},
 	); err != nil {
 		t.Fatalf("migrate snapshot build tables: %v", err)
 	}
+	defaultSlot := uint(1)
+	if err := db.Create(&store.Policy{Name: "default", DefaultSlot: &defaultSlot}).Error; err != nil {
+		t.Fatalf("seed default policy: %v", err)
+	}
 	return db, repository.NewApplicationRouteRuleRepo(db)
+}
+
+var testDynamicKeyBase = bytes.Repeat([]byte{0x5a}, 32)
+
+func TestBuildSiteWithoutPolicyInheritsExplicitDefaultPolicyRules(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	site := store.Site{Host: "default-policy.example.test", Bind: ":80", Network: "tcp", UpstreamURLs: "http://127.0.0.1:8080", Enabled: true}
+	if err := db.Create(&site).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+	rule := store.Rule{Name: "default rule", PolicyID: 1, Phase: store.PhaseCustom, Pattern: "block_path:/blocked", Action: store.ActionIntercept, Priority: 1, Enabled: true}
+	if err := db.Create(&rule).Error; err != nil {
+		t.Fatalf("seed default rule: %v", err)
+	}
+
+	sn, err := Build(db, 1, testDynamicKeyBase)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	rt, ok := sn.MatchSite(":80", site.Host)
+	if !ok {
+		t.Fatal("site was not matched")
+	}
+	if rt.PolicyID != 1 {
+		t.Fatalf("runtime policy_id = %d, want 1", rt.PolicyID)
+	}
+	if len(rt.Rules) != 1 || rt.Rules[0].ID != rule.ID {
+		t.Fatalf("runtime rules = %+v, want default rule %d", rt.Rules, rule.ID)
+	}
+}
+
+func TestBuildInjectsDynamicProtectionKeyBase(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.Site{
+		Host:         "dynamic-key.example.test",
+		Bind:         ":80",
+		Network:      "tcp",
+		UpstreamURLs: "http://127.0.0.1:8080",
+		Enabled:      true,
+	}).Error; err != nil {
+		t.Fatalf("seed site: %v", err)
+	}
+	if err := db.Create(&store.SystemSettings{
+		Key:   "bot_settings",
+		Value: `{"dynamic_protection_enabled":true,"html_obfuscation":true}`,
+	}).Error; err != nil {
+		t.Fatalf("seed dynamic protection settings: %v", err)
+	}
+
+	keyBase := bytes.Repeat([]byte{0xa7}, 32)
+	expected := append([]byte(nil), keyBase...)
+	sn, err := Build(db, 1, keyBase)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	keyBase[0] = 0
+	rt, ok := sn.MatchSite(":80", "dynamic-key.example.test")
+	if !ok {
+		t.Fatal("dynamic protection site was not matched")
+	}
+	if !rt.DynamicProtection.HTMLObfuscationEnabled {
+		t.Fatal("dynamic protection was not enabled")
+	}
+	if !bytes.Equal(rt.DynamicProtection.EncryptionKeyBase, expected) {
+		t.Fatalf("snapshot key base changed or was not injected (length=%d)", len(rt.DynamicProtection.EncryptionKeyBase))
+	}
+	encoded, err := json.Marshal(rt.DynamicProtection)
+	if err != nil {
+		t.Fatalf("marshal dynamic protection config: %v", err)
+	}
+	if bytes.Contains(encoded, []byte("encryption_key_base")) {
+		t.Fatal("dynamic protection key base must not be serialized")
+	}
+}
+
+func TestBuildSiteDynamicProtectionHonorsSiteOverrides(t *testing.T) {
+	global := dynamic.ProtectionConfig{
+		HTMLObfuscationEnabled:    false,
+		JSObfuscationEnabled:      false,
+		ImageWatermarkEnabled:     false,
+		GlobalHTMLConfigured:      true,
+		GlobalJSConfigured:        true,
+		GlobalWatermarkConfigured: true,
+		JSProtectionMode:          "all",
+		JSObfuscationPaths:        []string{"/global/*"},
+		DecryptCacheTTLSeconds:    dynamic.DefaultDecryptCacheTTLSeconds,
+	}
+	enabled := true
+	disabled := false
+	paths, err := json.Marshal([]string{})
+	if err != nil {
+		t.Fatalf("marshal paths: %v", err)
+	}
+
+	t.Run("master on restores globally configured features", func(t *testing.T) {
+		cfg := buildSiteDynamicProtection(global, store.Site{ID: 1, DynamicProtectionEnabled: &enabled})
+		if !cfg.HTMLObfuscationEnabled || !cfg.JSObfuscationEnabled || !cfg.ImageWatermarkEnabled {
+			t.Fatalf("master on did not restore configured features: %#v", cfg)
+		}
+	})
+	t.Run("master off disables image watermark too", func(t *testing.T) {
+		cfg := buildSiteDynamicProtection(global, store.Site{ID: 1, DynamicProtectionEnabled: &disabled})
+		if cfg.HTMLObfuscationEnabled || cfg.JSObfuscationEnabled || cfg.ImageWatermarkEnabled {
+			t.Fatalf("master off left dynamic processing enabled: %#v", cfg)
+		}
+	})
+	t.Run("empty path override clears global paths", func(t *testing.T) {
+		cfg := buildSiteDynamicProtection(global, store.Site{ID: 1, DynamicJSEnabled: &enabled, DynamicJSMode: "paths", DynamicJSPaths: string(paths)})
+		if len(cfg.JSObfuscationPaths) != 0 {
+			t.Fatalf("empty site paths did not clear global paths: %#v", cfg.JSObfuscationPaths)
+		}
+	})
+	t.Run("invalid stored mode fails closed", func(t *testing.T) {
+		cfg := buildSiteDynamicProtection(global, store.Site{ID: 1, DynamicJSMode: "invalid"})
+		if cfg.JSProtectionMode != "" {
+			t.Fatalf("invalid site mode = %q, want empty", cfg.JSProtectionMode)
+		}
+	})
+}
+
+func TestBuildRejectsMissingDynamicProtectionKeyBase(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if _, err := Build(db, 1, nil); err == nil {
+		t.Fatal("Build should reject a missing dynamic protection key base")
+	}
 }
 
 func TestBuildRejectsDuplicateNormalizedRouteAcrossSites(t *testing.T) {
@@ -989,7 +1659,7 @@ func TestBuildRejectsDuplicateNormalizedRouteAcrossSites(t *testing.T) {
 		t.Fatalf("seed sites: %v", err)
 	}
 
-	if _, err := Build(db, 1); err == nil {
+	if _, err := Build(db, 1, testDynamicKeyBase); err == nil {
 		t.Fatal("expected Build to reject duplicate normalized site route")
 	}
 }
@@ -1032,7 +1702,7 @@ func TestBuildExcludesDisabledApplicationRouteRules(t *testing.T) {
 		t.Fatalf("seed disabled rule: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1051,14 +1721,70 @@ func TestBuildExcludesDisabledApplicationRouteRules(t *testing.T) {
 	}
 }
 
+func TestBuildLoadsPageTemplateConfigsFromSystemSettings(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	settings := []store.SystemSettings{
+		{Key: "page_template_captcha", Value: `{"brand_name":"Captcha Brand","submit_text":"Continue"}`},
+		{Key: "page_template_challenge", Value: `{"checking_text":"Inspecting"}`},
+		{Key: "page_template_block", Value: `{"block_title":"Denied"}`},
+	}
+	if err := db.Create(&settings).Error; err != nil {
+		t.Fatalf("seed page template settings: %v", err)
+	}
+
+	sn, err := Build(db, 1, testDynamicKeyBase)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.CaptchaPage.BrandName != "Captcha Brand" || sn.CaptchaPage.SubmitText != "Continue" {
+		t.Fatalf("captcha page config was not loaded: %#v", sn.CaptchaPage)
+	}
+	if sn.CaptchaPage.Subtitle == "" {
+		t.Fatalf("captcha page defaults were not preserved: %#v", sn.CaptchaPage)
+	}
+	if sn.ChallengePage.CheckingText != "Inspecting" || sn.ChallengePage.WaitText == "" {
+		t.Fatalf("challenge page config was not merged: %#v", sn.ChallengePage)
+	}
+	if sn.BlockPage.BlockTitle != "Denied" || sn.BlockPage.RateLimitTitle == "" {
+		t.Fatalf("block page config was not merged: %#v", sn.BlockPage)
+	}
+}
+
+func TestBuildFallsBackFromInvalidPageTemplateJSON(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{Key: "page_template_block", Value: `not-json`}).Error; err != nil {
+		t.Fatalf("seed invalid block page config: %v", err)
+	}
+
+	sn, err := Build(db, 1, testDynamicKeyBase)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	if sn.BlockPage.BlockTitle == "" || sn.BlockPage.RateLimitTitle == "" {
+		t.Fatalf("invalid block page config did not fall back to defaults: %#v", sn.BlockPage)
+	}
+}
+
 func TestBuildRejectsInvalidProtectionJSON(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 	if err := db.Create(&store.SystemSettings{Key: "protection", Value: `{"cve_enabled":`}).Error; err != nil {
 		t.Fatalf("seed invalid protection config: %v", err)
 	}
 
-	if _, err := Build(db, 1); err == nil || !strings.Contains(err.Error(), "invalid protection config JSON") {
+	if _, err := Build(db, 1, testDynamicKeyBase); err == nil || !strings.Contains(err.Error(), "invalid protection config JSON") {
 		t.Fatalf("Build should reject invalid protection JSON, got %v", err)
+	}
+}
+
+// TestBuildRejectsInvalidProtectionCaptchaType ensures valid JSON cannot bypass the CAPTCHA contract.
+func TestBuildRejectsInvalidProtectionCaptchaType(t *testing.T) {
+	db, _ := newSnapshotBuildDBForTest(t)
+	if err := db.Create(&store.SystemSettings{Key: "protection", Value: `{"captcha_type":"pow"}`}).Error; err != nil {
+		t.Fatalf("seed invalid protection config: %v", err)
+	}
+
+	if _, err := Build(db, 1, testDynamicKeyBase); err == nil || !strings.Contains(err.Error(), "invalid protection captcha_type") {
+		t.Fatalf("Build should reject invalid protection captcha_type, got %v", err)
 	}
 }
 
@@ -1079,7 +1805,7 @@ func TestBuildLoadsHSTSEnabledFromSystemSettings(t *testing.T) {
 				t.Fatalf("seed hsts setting: %v", err)
 			}
 
-			sn, err := Build(db, 1)
+			sn, err := Build(db, 1, testDynamicKeyBase)
 			if err != nil {
 				t.Fatalf("build snapshot: %v", err)
 			}
@@ -1093,7 +1819,7 @@ func TestBuildLoadsHSTSEnabledFromSystemSettings(t *testing.T) {
 func TestBuildDefaultsHSTSDisabledWhenSettingMissing(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1119,7 +1845,7 @@ func TestBuildLoadsXSSProtectionEnabledFromSystemSettings(t *testing.T) {
 				t.Fatalf("seed xss protection setting: %v", err)
 			}
 
-			sn, err := Build(db, 1)
+			sn, err := Build(db, 1, testDynamicKeyBase)
 			if err != nil {
 				t.Fatalf("build snapshot: %v", err)
 			}
@@ -1133,7 +1859,7 @@ func TestBuildLoadsXSSProtectionEnabledFromSystemSettings(t *testing.T) {
 func TestBuildDefaultsXSSProtectionDisabledWhenSettingMissing(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1151,7 +1877,7 @@ func TestBuildLoadsExpectCTSettingsFromSystemSettings(t *testing.T) {
 		t.Fatalf("seed expect ct value setting: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1166,7 +1892,7 @@ func TestBuildLoadsExpectCTSettingsFromSystemSettings(t *testing.T) {
 func TestBuildDefaultsExpectCTSettingsWhenMissing(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1193,7 +1919,7 @@ func TestBuildLoadsHPKPSettingsFromSystemSettings(t *testing.T) {
 		t.Fatalf("seed hpkp report only value setting: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1208,7 +1934,7 @@ func TestBuildLoadsHPKPSettingsFromSystemSettings(t *testing.T) {
 func TestBuildDefaultsHPKPSettingsWhenMissing(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1237,7 +1963,7 @@ func TestBuildLoadsBrotliEnabledFromSystemSettings(t *testing.T) {
 				t.Fatalf("seed brotli setting: %v", err)
 			}
 
-			sn, err := Build(db, 1)
+			sn, err := Build(db, 1, testDynamicKeyBase)
 			if err != nil {
 				t.Fatalf("build snapshot: %v", err)
 			}
@@ -1260,7 +1986,7 @@ func TestBuildLoadsResponseCompressionSettingsFromSystemSettings(t *testing.T) {
 		t.Fatalf("seed response compression min bytes setting: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1278,7 +2004,7 @@ func TestBuildLoadsResponseCompressionSettingsFromSystemSettings(t *testing.T) {
 func TestBuildDefaultsResponseCompressionSettingsWhenMissing(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1301,7 +2027,7 @@ func TestBuildLoadsHTTP2ConfigFromSystemSettings(t *testing.T) {
 		t.Fatalf("seed http2 config: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1327,7 +2053,7 @@ func TestBuildNormalizesUnsafeHTTP2ConfigFromSystemSettings(t *testing.T) {
 		t.Fatalf("seed http2 config: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1349,7 +2075,7 @@ func TestBuildNormalizesUnsafeHTTP2ConfigFromSystemSettings(t *testing.T) {
 func TestBuildDefaultsHTTP2ConfigWhenSettingMissing(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1361,7 +2087,7 @@ func TestBuildDefaultsHTTP2ConfigWhenSettingMissing(t *testing.T) {
 func TestBuildDefaultsBrotliDisabledWhenSettingMissing(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
@@ -1396,8 +2122,8 @@ func TestCompileCCRulesBuildsCompoundCustomRule(t *testing.T) {
 	if rules[0].Phase != store.PhaseCustom {
 		t.Fatalf("phase = %q, want %q", rules[0].Phase, store.PhaseCustom)
 	}
-	if rules[0].Action != store.ActionChallenge {
-		t.Fatalf("action = %q, want %q", rules[0].Action, store.ActionChallenge)
+	if rules[0].Action != store.ActionCaptchaChallenge {
+		t.Fatalf("action = %q, want %q", rules[0].Action, store.ActionCaptchaChallenge)
 	}
 	if rules[0].Kind != "compound" {
 		t.Fatalf("kind = %q, want compound", rules[0].Kind)
@@ -1425,6 +2151,61 @@ func TestCompileCCRulesBuildsCompoundCustomRule(t *testing.T) {
 	}
 	if !strings.Contains(rules[0].Arg, `"arg":"POST"`) {
 		t.Fatalf("compound arg missing normalized method: %s", rules[0].Arg)
+	}
+}
+
+func TestCompileCCRulesDurationUnitSeconds(t *testing.T) {
+	protection := store.ProtectionConfig{
+		CCUseCustom: true,
+		CCRules: `[
+			{
+				"enabled":true,
+				"action":"challenge",
+				"conditions":[{"target":"url_path","operator":"prefix","value":"/seconds"}],
+				"window":60,
+				"threshold":10,
+				"duration":5,
+				"duration_unit":"seconds"
+			}
+		]`,
+	}
+
+	rules := compileCCRules(protection)
+	if len(rules) != 1 {
+		t.Fatalf("compileCCRules() returned %d rules, want 1", len(rules))
+	}
+	if !strings.Contains(rules[0].Arg, `"duration_unit":"seconds"`) {
+		t.Fatalf("compound arg missing seconds duration unit: %s", rules[0].Arg)
+	}
+	if !strings.Contains(rules[0].Arg, `"duration_seconds":5`) {
+		t.Fatalf("compound arg missing seconds duration value: %s", rules[0].Arg)
+	}
+}
+
+func TestCompileCCRulesDurationUnitLegacyMinutes(t *testing.T) {
+	protection := store.ProtectionConfig{
+		CCUseCustom: true,
+		CCRules: `[
+			{
+				"enabled":true,
+				"action":"challenge",
+				"conditions":[{"target":"url_path","operator":"prefix","value":"/minutes"}],
+				"window":60,
+				"threshold":10,
+				"duration":5
+			}
+		]`,
+	}
+
+	rules := compileCCRules(protection)
+	if len(rules) != 1 {
+		t.Fatalf("compileCCRules() returned %d rules, want 1", len(rules))
+	}
+	if !strings.Contains(rules[0].Arg, `"duration_unit":"minutes"`) {
+		t.Fatalf("compound arg missing legacy minutes unit: %s", rules[0].Arg)
+	}
+	if !strings.Contains(rules[0].Arg, `"duration_seconds":300`) {
+		t.Fatalf("compound arg missing legacy minutes duration value: %s", rules[0].Arg)
 	}
 }
 
@@ -1574,12 +2355,42 @@ func TestCompileCCRulesBuildsSinglePathRule(t *testing.T) {
 	}
 }
 
+func TestCompileCCConditionOperatorSemantics(t *testing.T) {
+	tests := []struct {
+		name      string
+		condition ccRuleCondition
+		wantKind  string
+		wantArg   string
+	}{
+		{"path equals", ccRuleCondition{Target: "url_path", Operator: "equals", Value: "/admin"}, "block_path_exact", "/admin"},
+		{"path prefix", ccRuleCondition{Target: "url_path", Operator: "prefix", Value: "/admin"}, "block_path", "/admin"},
+		{"path contains", ccRuleCondition{Target: "url_path", Operator: "contains", Value: "/admin"}, "path_contains", "/admin"},
+		{"method equals", ccRuleCondition{Target: "method", Operator: "equals", Value: "get"}, "block_method", "GET"},
+		{"header equals", ccRuleCondition{Target: "header", Operator: "equals", Value: "X-Test:value"}, "block_header_exact", "X-Test:value"},
+		{"header contains", ccRuleCondition{Target: "header", Operator: "contains", Value: "X-Test:value"}, "block_header", "X-Test:value"},
+		{"header prefix", ccRuleCondition{Target: "header", Operator: "prefix", Value: "X-Test=value"}, "block_header_prefix", "X-Test:value"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kind, arg, ok := compileCCCondition(tt.condition)
+			if !ok {
+				t.Fatal("compileCCCondition() returned ok=false")
+			}
+			if kind != tt.wantKind || arg != tt.wantArg {
+				t.Fatalf("compileCCCondition() = (%q, %q), want (%q, %q)", kind, arg, tt.wantKind, tt.wantArg)
+			}
+		})
+	}
+}
+
 func TestCompileCCRulesKeepsSpecificChallengeAndRateLimitActions(t *testing.T) {
 	tests := []struct {
 		name string
 		raw  string
 		want store.RuleAction
 	}{
+		{name: "historical captcha alias", raw: "captcha", want: store.ActionCaptchaChallenge},
+		{name: "generic challenge", raw: "challenge", want: store.ActionChallenge},
 		{name: "captcha challenge", raw: "captcha_challenge", want: store.ActionCaptchaChallenge},
 		{name: "shield challenge", raw: "shield_challenge", want: store.ActionShieldChallenge},
 		{name: "chain challenge", raw: "chain_challenge", want: store.ActionChainChallenge},
@@ -1604,6 +2415,48 @@ func TestCompileCCRulesKeepsSpecificChallengeAndRateLimitActions(t *testing.T) {
 				t.Fatalf("action = %q, want %q", rules[0].Action, tt.want)
 			}
 		})
+	}
+}
+
+func TestCompileCCRulesCarriesCaptchaTypeOverride(t *testing.T) {
+	for _, captchaType := range []string{"math", "click", "slide", "rotate"} {
+		protection := store.ProtectionConfig{
+			CCUseCustom: true,
+			CCRules:     `[{"action":"captcha","captcha_type":"` + captchaType + `","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":60,"threshold":10}]`,
+		}
+		rules := compileCCRules(protection)
+		if len(rules) != 1 {
+			t.Fatalf("captcha_type=%q compiled rule count = %d, want 1", captchaType, len(rules))
+		}
+		if rules[0].CaptchaType != captchaType {
+			t.Fatalf("captcha_type=%q compiled as %q", captchaType, rules[0].CaptchaType)
+		}
+	}
+
+	protection := store.ProtectionConfig{
+		CCUseCustom: true,
+		CCRules:     `[{"action":"captcha","conditions":[{"target":"url_path","operator":"equals","value":"/login"}],"window":60,"threshold":10}]`,
+	}
+	rules := compileCCRules(protection)
+	if len(rules) != 1 || rules[0].CaptchaType != "" {
+		t.Fatalf("empty captcha_type should inherit global config, rules = %#v", rules)
+	}
+}
+
+func TestCompileRulesCarriesCaptchaTypeOverride(t *testing.T) {
+	rules := compileRules([]store.Rule{{
+		ID:          7,
+		Phase:       store.PhaseCustom,
+		Action:      store.ActionCaptchaChallenge,
+		Pattern:     "block_path:/guarded",
+		CaptchaType: "slide",
+		Enabled:     true,
+	}})
+	if len(rules) != 1 {
+		t.Fatalf("compiled rule count = %d, want 1", len(rules))
+	}
+	if rules[0].CaptchaType != "slide" {
+		t.Fatalf("compiled captcha_type = %q, want slide", rules[0].CaptchaType)
 	}
 }
 
@@ -1647,7 +2500,7 @@ func TestBuildCompilesAndResolvesUpstreamHostTemplate(t *testing.T) {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
 	}
@@ -1680,7 +2533,7 @@ func TestBuildPrecomputesStaticUpstreamHost(t *testing.T) {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	sn, err := Build(db, 1)
+	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
 	}
@@ -1718,7 +2571,10 @@ func BenchmarkResolveOutboundHostStaticPrecomputed(b *testing.B) {
 
 func TestParseSiteCacheRulesSuffixNoLeadingSlash(t *testing.T) {
 	raw := `[{"type":"suffix","value":"config","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Bare token without ".", "/", "?" is treated as a file extension → ".config"
 	if len(rules) != 1 || rules[0].Path != ".config" {
 		t.Fatalf("got %#v", rules)
@@ -1727,7 +2583,10 @@ func TestParseSiteCacheRulesSuffixNoLeadingSlash(t *testing.T) {
 
 func TestParseSiteCacheRulesCommaSeparatedSuffixes(t *testing.T) {
 	raw := `[{"type":"suffix","value":".js,.mjs","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 2 {
 		t.Fatalf("want 2 rules, got %d %#v", len(rules), rules)
 	}
@@ -1735,7 +2594,10 @@ func TestParseSiteCacheRulesCommaSeparatedSuffixes(t *testing.T) {
 
 func TestParseSiteCacheRulesSuffixBareExtensions(t *testing.T) {
 	raw := `[{"type":"suffix","value":"js,html,css","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 3 {
 		t.Fatalf("want 3 rules, got %d %#v", len(rules), rules)
 	}
@@ -1749,7 +2611,10 @@ func TestParseSiteCacheRulesSuffixBareExtensions(t *testing.T) {
 
 func TestParseSiteCacheRulesSuffixMultiDotPreserved(t *testing.T) {
 	raw := `[{"type":"suffix","value":"min.js,tar.gz","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 2 {
 		t.Fatalf("want 2 rules, got %d %#v", len(rules), rules)
 	}
@@ -1761,7 +2626,10 @@ func TestParseSiteCacheRulesSuffixMultiDotPreserved(t *testing.T) {
 
 func TestParseSiteCacheRulesContainsNoForcedSlash(t *testing.T) {
 	raw := `[{"type":"contains","value":"v=1","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 1 || rules[0].Path != "v=1" {
 		t.Fatalf("got %#v", rules)
 	}
@@ -1769,7 +2637,10 @@ func TestParseSiteCacheRulesContainsNoForcedSlash(t *testing.T) {
 
 func TestParseSiteCacheRulesRegexCompiled(t *testing.T) {
 	raw := `[{"type":"regex","value":"\\.(js|css)$","ttl":10}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 1 || rules[0].Regex == nil {
 		t.Fatalf("got %#v", rules)
 	}
@@ -1780,11 +2651,30 @@ func TestParseSiteCacheRulesRegexCompiled(t *testing.T) {
 
 func TestParseSiteCacheRulesRegexCaseInsensitive(t *testing.T) {
 	raw := `[{"type":"regex","value":"\\.js$","ttl":10,"case_insensitive":true}]`
-	rules := parseSiteCacheRules(raw)
+	rules, err := store.ValidateAndCompileSiteCacheRules(raw, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 1 || rules[0].Regex == nil {
 		t.Fatalf("got %#v", rules)
 	}
 	if !rules[0].Regex.MatchString("/a/b.JS") {
 		t.Fatal("expected case-insensitive regex match")
+	}
+}
+
+func TestHolderStoreIfNewerRejectsOlderRevision(t *testing.T) {
+	h := &Holder{}
+	if !h.StoreIfNewer(&Snapshot{Revision: 2}) {
+		t.Fatal("StoreIfNewer should publish the first snapshot")
+	}
+	if h.StoreIfNewer(&Snapshot{Revision: 1}) {
+		t.Fatal("StoreIfNewer should reject an older snapshot")
+	}
+	if h.StoreIfNewer(&Snapshot{Revision: 2}) {
+		t.Fatal("StoreIfNewer should reject an equal revision")
+	}
+	if got := h.Load(); got == nil || got.Revision != 2 {
+		t.Fatalf("active snapshot revision = %v, want 2", got)
 	}
 }

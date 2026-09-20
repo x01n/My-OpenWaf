@@ -12,17 +12,23 @@ import (
 
 // setRefreshCookie writes the rotating refresh-token cookie.
 // Path is "/" to ensure the cookie is sent on all requests including refresh.
-// Secure flag only when request came over TLS; otherwise browsers reject the cookie on HTTP.
+// Secure flag follows the authenticated connection protocol or a loopback reverse proxy.
 func setRefreshCookie(c *app.RequestContext, value string, ttl time.Duration) {
-	isSecure := string(c.URI().Scheme()) == "https"
+	proto := adminRequestProtocol(c)
+	isSecure := proto == "https" || proto == "h3"
 	c.SetCookie("my_openwaf_rt", value, int(ttl.Seconds()), "/", "",
 		protocol.CookieSameSiteLaxMode, isSecure, true)
 }
 
 func clearRefreshCookie(c *app.RequestContext) {
-	isSecure := string(c.URI().Scheme()) == "https"
+	proto := adminRequestProtocol(c)
+	isSecure := proto == "https" || proto == "h3"
 	c.SetCookie("my_openwaf_rt", "", -1, "/", "",
 		protocol.CookieSameSiteLaxMode, isSecure, true)
+}
+
+func setAuthNoStore(c *app.RequestContext) {
+	c.Response.Header.Set("Cache-Control", "no-store")
 }
 
 func splitRefreshCookie(val string) (jti, raw string, ok bool) {

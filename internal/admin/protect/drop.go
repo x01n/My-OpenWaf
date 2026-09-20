@@ -97,25 +97,29 @@ func UpdateDropPolicy(settingsRepo *repository.SystemSettingsRepo, reload func()
 			current.CVEAutoDropHigh = *req.CVEAutoDropHigh
 		}
 
-		data, _ := json.Marshal(current)
-		if err := settingsRepo.Set("drop_policy", string(data)); err != nil {
+		data, err := json.Marshal(current)
+		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		protection := shared.LoadProtectionConfig(settingsRepo)
-		if req.CVEAutoDropCritical != nil {
-			protection.CVEAutoDropCritical = current.CVEAutoDropCritical
-		}
-		if req.CVEAutoDropHigh != nil {
-			protection.CVEAutoDropHigh = current.CVEAutoDropHigh
-		}
-		if req.BotScoreThreshold != nil {
-			if err := shared.SyncDropThresholdToBotSettings(settingsRepo, current.BotScoreThreshold); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
+		if err := settingsRepo.Transaction(func(txRepo *repository.SystemSettingsRepo) error {
+			if err := txRepo.Set("drop_policy", string(data)); err != nil {
+				return err
 			}
-		}
-		if err := shared.SaveProtectionConfig(settingsRepo, protection); err != nil {
+			protection := shared.LoadProtectionConfig(txRepo)
+			if req.CVEAutoDropCritical != nil {
+				protection.CVEAutoDropCritical = current.CVEAutoDropCritical
+			}
+			if req.CVEAutoDropHigh != nil {
+				protection.CVEAutoDropHigh = current.CVEAutoDropHigh
+			}
+			if req.BotScoreThreshold != nil {
+				if err := shared.SyncDropThresholdToBotSettings(txRepo, current.BotScoreThreshold); err != nil {
+					return err
+				}
+			}
+			return shared.SaveProtectionConfig(txRepo, protection)
+		}); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}

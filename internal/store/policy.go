@@ -15,6 +15,13 @@ type Policy struct {
 
 	Name        string `gorm:"size:128;not null" json:"name"`
 	Description string `gorm:"type:text" json:"description"`
+	DefaultSlot *uint  `gorm:"uniqueIndex:ux_policies_default_slot" json:"-"`
+	IsDefault   bool   `gorm:"-" json:"is_default"`
+}
+
+func (p *Policy) AfterFind(_ *gorm.DB) error {
+	p.IsDefault = p.DefaultSlot != nil && *p.DefaultSlot == 1
+	return nil
 }
 
 type RulePhase string
@@ -75,4 +82,6 @@ type Rule struct {
 	Enabled    bool       `gorm:"default:true" json:"enabled"`
 	StatusCode int        `gorm:"default:0" json:"status_code"`
 	RedirectTo string     `gorm:"size:2048" json:"redirect_to"`
+	// CaptchaType 为空时继承全局验证码类型，仅对 captcha_challenge 生效。
+	CaptchaType string `gorm:"size:16" json:"captcha_type,omitempty"`
 }

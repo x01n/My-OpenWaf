@@ -15,7 +15,7 @@ import (
 var validRoles = map[string]bool{
 	auth.RoleAdmin:    true,
 	auth.RoleOperator: true,
-	auth.RoleReadonly:  true,
+	auth.RoleReadonly: true,
 }
 
 // ListAdminUsers returns all admin accounts (password hash excluded via json:"-").
@@ -41,7 +41,7 @@ func CreateAdminUser(repo *repository.AdminAccountRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var body createAdminUserReq
 		if err := c.BindJSON(&body); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		body.Username = strings.TrimSpace(body.Username)
@@ -92,7 +92,7 @@ type updateRoleReq struct {
 }
 
 // UpdateAdminRole updates the role of an admin account.
-func UpdateAdminRole(repo *repository.AdminAccountRepo) app.HandlerFunc {
+func UpdateAdminRole(repo *repository.AdminAccountRepo, revoker ...func(string, string) error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")
 		if err != nil {
@@ -101,7 +101,7 @@ func UpdateAdminRole(repo *repository.AdminAccountRepo) app.HandlerFunc {
 		}
 		var body updateRoleReq
 		if err := c.BindJSON(&body); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if !validRoles[body.Role] {
@@ -131,6 +131,12 @@ func UpdateAdminRole(repo *repository.AdminAccountRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		if acct.Role != body.Role && len(revoker) > 0 && revoker[0] != nil {
+			if err := revoker[0](acct.Username, "role_changed"); err != nil {
+				c.JSON(500, map[string]string{"error": "role changed but credential revocation failed"})
+				return
+			}
+		}
 		c.JSON(200, map[string]string{"status": "ok"})
 	}
 }
@@ -140,7 +146,7 @@ type updatePasswordReq struct {
 }
 
 // UpdateAdminPassword updates the password of an admin account.
-func UpdateAdminPassword(repo *repository.AdminAccountRepo) app.HandlerFunc {
+func UpdateAdminPassword(repo *repository.AdminAccountRepo, revoker ...func(string, string) error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")
 		if err != nil {
@@ -149,7 +155,7 @@ func UpdateAdminPassword(repo *repository.AdminAccountRepo) app.HandlerFunc {
 		}
 		var body updatePasswordReq
 		if err := c.BindJSON(&body); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
 		if body.Password == "" {
@@ -181,12 +187,18 @@ func UpdateAdminPassword(repo *repository.AdminAccountRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
+		if len(revoker) > 0 && revoker[0] != nil {
+			if err := revoker[0](target.Username, "password_changed"); err != nil {
+				c.JSON(500, map[string]string{"error": "password changed but credential revocation failed"})
+				return
+			}
+		}
 		c.JSON(200, map[string]string{"status": "ok"})
 	}
 }
 
 // DeleteAdminUser deletes an admin account.
-func DeleteAdminUser(repo *repository.AdminAccountRepo) app.HandlerFunc {
+func DeleteAdminUser(repo *repository.AdminAccountRepo, revoker ...func(string, string) error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")
 		if err != nil {
@@ -222,6 +234,12 @@ func DeleteAdminUser(repo *repository.AdminAccountRepo) app.HandlerFunc {
 		if err := repo.Delete(id); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
+		}
+		if len(revoker) > 0 && revoker[0] != nil {
+			if err := revoker[0](acct.Username, "account_deleted"); err != nil {
+				c.JSON(500, map[string]string{"error": "account deleted but credential revocation failed"})
+				return
+			}
 		}
 		c.JSON(200, map[string]string{"status": "ok"})
 	}

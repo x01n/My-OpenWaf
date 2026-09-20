@@ -2,18 +2,27 @@
 package dynamic
 
 import (
-	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"sync"
 )
+
+// KeyTicketSigner 为每个动态保护信封签发密钥兑换票据。
+type KeyTicketSigner func(key string, ttl int, kekB64 string) string
 
 // ProtectionConfig 是动态防护的运行时配置。
 type ProtectionConfig struct {
-	HTMLObfuscationEnabled bool   `json:"html_obfuscation_enabled"`
-	JSObfuscationEnabled   bool   `json:"js_obfuscation_enabled"`
-	ImageWatermarkEnabled  bool   `json:"image_watermark_enabled"`
-	JSProtectionMode       string `json:"js_protection_mode,omitempty"` // "all" 或 "paths"
+	HTMLObfuscationEnabled bool `json:"html_obfuscation_enabled"`
+	JSObfuscationEnabled   bool `json:"js_obfuscation_enabled"`
+	ImageWatermarkEnabled  bool `json:"image_watermark_enabled"`
+	// 下列 configured 字段保留全局原始子开关，
+	// 使站点强制开启时不会因全局总开关折叠而丢失子项配置。
+	GlobalHTMLConfigured      bool   `json:"-"`
+	GlobalJSConfigured        bool   `json:"-"`
+	GlobalWatermarkConfigured bool   `json:"-"`
+	JSProtectionMode          string `json:"js_protection_mode,omitempty"` // "all" 或 "paths"
 	// JSObfuscationPaths 是需要进行 JS 加密的资源路径模式
 	JSObfuscationPaths []string `json:"js_obfuscation_paths,omitempty"`
 	// ImageWatermarkPaths 是需要添加水印的图片路径模式
@@ -21,29 +30,116 @@ type ProtectionConfig struct {
 	// WatermarkText 是水印文字内容
 	WatermarkText string `json:"watermark_text,omitempty"`
 	// EncryptionKeyBase 基础密钥材料（32 字节，由 snapshot 管理）
-	EncryptionKeyBase []byte `json:"encryption_key_base,omitempty"`
+	EncryptionKeyBase []byte `json:"-"`
 	// DecryptCacheTTLSeconds 客户端解密缓存时间（秒）
 	DecryptCacheTTLSeconds int `json:"decrypt_cache_ttl_seconds,omitempty"`
 	// SiteID 站点标识（用于密钥派生隔离）
 	SiteID uint `json:"site_id,omitempty"`
 }
 
+const (
+	// DefaultDecryptCacheTTLSeconds 是动态保护客户端密钥缓存与兑换票据的默认有效期。
+	DefaultDecryptCacheTTLSeconds = 300
+	// MaxDecryptCacheTTLSeconds 是动态保护客户端密钥缓存与兑换票据允许的最大有效期。
+	MaxDecryptCacheTTLSeconds = 1800
+)
+
+// NormalizeDecryptCacheTTLSeconds 将动态保护 TTL 约束到服务端允许的范围。
+func NormalizeDecryptCacheTTLSeconds(ttl int) int {
+	if ttl <= 0 {
+		return DefaultDecryptCacheTTLSeconds
+	}
+	if ttl > MaxDecryptCacheTTLSeconds {
+		return MaxDecryptCacheTTLSeconds
+	}
+	return ttl
+}
+
+// IsValidJSProtectionMode 判断 JS 动态保护模式是否为支持的枚举值。
+func IsValidJSProtectionMode(mode string) bool {
+	return mode == "" || mode == "all" || mode == "paths"
+}
+
 // Processor 是动态防护处理器。
 type Processor struct {
-	cfg ProtectionConfig
-	cek []byte // Content Encryption Key (AES-256)
-	kek []byte // Key Encryption Key（用于包装 CEK 交付给客户端）
+	cfg        ProtectionConfig
+	cek        []byte // Content Encryption Key (AES-256)
+	kek        []byte // Key Encryption Key（用于包装 CEK 交付给客户端）
+	signTicket KeyTicketSigner
+}
+
+// derivedKeys 是一组站点密钥。缓存后按值共享，故内容不可修改。
+type derivedKeys struct {
+	cek []byte
+	kek []byte
+}
+
+// keyCacheKey 标识一组站点密钥。
+//
+// EncryptionKeyBase 以 string 承载（Go 中 string 可比较且 []byte→string 只是一次
+// 小额复制，比再算一次摘要便宜）。
+type keyCacheKey struct {
+	base   string
+	siteID uint
+}
+
+// keyCacheMaxEntries 是密钥缓存的条目上限。
+//
+// 键的数量约等于「站点数 × 配置变体数」，本身有界；设上限只为防御异常场景
+// （例如快照反复重建导致 base 不断变化）下的无界增长。超限即整体清空重建，
+// 代价仅是下一批请求重新派生一次。
+const keyCacheMaxEntries = 1024
+
+var (
+	keyCacheMu sync.RWMutex
+	keyCache   = make(map[keyCacheKey]derivedKeys, 16)
+)
+
+/**
+ * lookupDerivedKeys 返回站点密钥，命中缓存时跳过 HKDF 派生。
+ *
+ * 密钥派生要跑两次 HKDF-SHA256，而响应转换器对每个响应都会构造一次
+ * Processor，该开销在 pprof 中是最大的单点分配来源。配置在快照周期内不变，故可缓存。
+ *
+ * @param cfg 动态防护配置，调用方必须先验证 EncryptionKeyBase 为 32 字节。
+ * @return 该配置对应的 CEK/KEK。
+ */
+func lookupDerivedKeys(cfg ProtectionConfig) derivedKeys {
+	k := keyCacheKey{
+		base:   string(cfg.EncryptionKeyBase),
+		siteID: cfg.SiteID,
+	}
+
+	keyCacheMu.RLock()
+	keys, ok := keyCache[k]
+	keyCacheMu.RUnlock()
+	if ok {
+		return keys
+	}
+
+	keys = derivedKeys{
+		cek: deriveKey(cfg.EncryptionKeyBase, fmt.Sprintf("owaf-brp/1:cek:site:%d", cfg.SiteID), 32),
+		kek: deriveKey(cfg.EncryptionKeyBase, fmt.Sprintf("owaf-brp/1:kek:site:%d", cfg.SiteID), 32),
+	}
+
+	keyCacheMu.Lock()
+	if len(keyCache) >= keyCacheMaxEntries {
+		keyCache = make(map[keyCacheKey]derivedKeys, 16)
+	}
+	keyCache[k] = keys
+	keyCacheMu.Unlock()
+	return keys
 }
 
 // NewProcessor 创建一个新的动态防护处理器。
+// 密钥经进程内缓存复用，避免每个响应都重跑 HKDF 派生。
 func NewProcessor(cfg ProtectionConfig) *Processor {
-	base := cfg.EncryptionKeyBase
-	if len(base) == 0 {
-		base = defaultKeyBase(cfg)
-	}
-	cek := deriveKey(base, fmt.Sprintf("owaf-brp/1:cek:site:%d", cfg.SiteID), 32)
-	kek := deriveKey(base, fmt.Sprintf("owaf-brp/1:kek:site:%d", cfg.SiteID), 32)
-	return &Processor{cfg: cfg, cek: cek, kek: kek}
+	return NewProcessorWithKeyTicketSigner(cfg, nil)
+}
+
+func NewProcessorWithKeyTicketSigner(cfg ProtectionConfig, signer KeyTicketSigner) *Processor {
+	keys := lookupDerivedKeys(cfg)
+	return &Processor{cfg: cfg, cek: keys.cek, kek: keys.kek, signTicket: signer}
 }
 
 // ProcessHTML 对 HTML 响应进行 AES-256-GCM 加密保护。
@@ -52,6 +148,23 @@ func (p *Processor) ProcessHTML(html []byte) ([]byte, error) {
 		return html, nil
 	}
 	return p.encryptHTML(html)
+}
+
+// ProcessHTMLWithScriptNonce encrypts HTML and returns the nonce used by the bootstrap script.
+func (p *Processor) ProcessHTMLWithScriptNonce(html []byte) ([]byte, string, error) {
+	if !p.cfg.HTMLObfuscationEnabled {
+		return html, "", nil
+	}
+	env, err := p.makeEnvelope(html)
+	if err != nil {
+		return html, "", err
+	}
+	nonce := randomNonceB64()
+	result, err := renderHTMLBootstrap(env, nonce)
+	if err != nil {
+		return html, "", err
+	}
+	return result, nonce, nil
 }
 
 // ProcessJS 对 JS 响应进行 AES-256-GCM 加密保护。
@@ -63,8 +176,11 @@ func (p *Processor) ProcessJS(path string, js []byte) ([]byte, error) {
 	if mode == "" {
 		mode = "all"
 	}
-	if mode == "paths" && !matchPathPatterns(path, p.cfg.JSObfuscationPaths) {
-		return js, nil
+	if mode == "paths" {
+		// paths 模式的空集合表示没有任何 JS 路径覆盖，不能退化为全量加密。
+		if len(p.cfg.JSObfuscationPaths) == 0 || !matchPathPatterns(path, p.cfg.JSObfuscationPaths) {
+			return js, nil
+		}
 	}
 	return p.encryptJS(js)
 }
@@ -116,64 +232,31 @@ func (p *Processor) makeEnvelope(plaintext []byte) (envelope, error) {
 	if err != nil {
 		return envelope{}, err
 	}
-	ttl := p.cfg.DecryptCacheTTLSeconds
-	if ttl <= 0 {
-		ttl = 300
+	ttl := NormalizeDecryptCacheTTLSeconds(p.cfg.DecryptCacheTTLSeconds)
+	keyHash := sha256.New()
+	keyHash.Write(p.kek)
+	keyHash.Write(wrapped)
+	key := base64.StdEncoding.EncodeToString(keyHash.Sum(nil))
+	kek := base64.StdEncoding.EncodeToString(p.kek)
+	ticket := ""
+	if p.signTicket != nil {
+		ticket = p.signTicket(key, ttl, kek)
+		kek = ""
 	}
 	return envelope{
-		data: base64.StdEncoding.EncodeToString(ct),
-		iv:   base64.StdEncoding.EncodeToString(iv),
-		wrap: base64.StdEncoding.EncodeToString(wrapped),
-		kek:  base64.StdEncoding.EncodeToString(p.kek),
-		ttl:  ttl,
+		data:   base64.StdEncoding.EncodeToString(ct),
+		iv:     base64.StdEncoding.EncodeToString(iv),
+		wrap:   base64.StdEncoding.EncodeToString(wrapped),
+		kek:    kek,
+		ticket: ticket,
+		key:    key,
+		ttl:    ttl,
 	}, nil
 }
 
 // encryptHTML 加密 HTML body 内容并注入 Web Crypto 解密引导。
 func (p *Processor) encryptHTML(html []byte) ([]byte, error) {
-	bodyStart := bytes.Index(html, []byte("<body"))
-	if bodyStart < 0 {
-		bodyStart = bytes.Index(html, []byte("<BODY"))
-	}
-	if bodyStart < 0 {
-		return p.wrapFullHTML(html)
-	}
-
-	bodyTagEnd := bytes.IndexByte(html[bodyStart:], '>')
-	if bodyTagEnd < 0 {
-		return html, nil
-	}
-	bodyTagEnd += bodyStart + 1
-
-	bodyEnd := bytes.Index(html[bodyTagEnd:], []byte("</body>"))
-	if bodyEnd < 0 {
-		bodyEnd = bytes.Index(html[bodyTagEnd:], []byte("</BODY>"))
-	}
-
-	var bodyContent, afterBody []byte
-	if bodyEnd < 0 {
-		bodyContent = html[bodyTagEnd:]
-	} else {
-		bodyEnd += bodyTagEnd
-		bodyContent = html[bodyTagEnd:bodyEnd]
-		afterBody = html[bodyEnd:]
-	}
-
-	env, err := p.makeEnvelope(bodyContent)
-	if err != nil {
-		return html, err
-	}
-
-	nonce := randomNonceB64()
-	tag := buildHTMLScriptTag(env, nonce)
-
-	result := make([]byte, 0, len(html)+len(tag)+64)
-	result = append(result, html[:bodyTagEnd]...)
-	result = append(result, tag...)
-	if afterBody != nil {
-		result = append(result, afterBody...)
-	}
-	return result, nil
+	return p.wrapFullHTML(html)
 }
 
 // wrapFullHTML 对无 body 标签的 HTML 进行完整加密包装。
@@ -182,35 +265,7 @@ func (p *Processor) wrapFullHTML(html []byte) ([]byte, error) {
 	if err != nil {
 		return html, err
 	}
-	nonce := randomNonceB64()
-	tag := buildHTMLScriptTag(env, nonce)
-
-	var buf bytes.Buffer
-	buf.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>`)
-	buf.Write(tag)
-	buf.WriteString(`</body></html>`)
-	return buf.Bytes(), nil
-}
-
-// buildHTMLScriptTag 构建包含解密引导的 script 标签。
-func buildHTMLScriptTag(env envelope, cspNonce string) []byte {
-	var buf bytes.Buffer
-	buf.WriteString(`<script nonce="`)
-	buf.WriteString(cspNonce)
-	buf.WriteString(`" data-owaf-dp="2" data-owaf-data="`)
-	buf.WriteString(env.data)
-	buf.WriteString(`" data-owaf-iv="`)
-	buf.WriteString(env.iv)
-	buf.WriteString(`" data-owaf-wrap="`)
-	buf.WriteString(env.wrap)
-	buf.WriteString(`" data-owaf-kek="`)
-	buf.WriteString(env.kek)
-	buf.WriteString(`" data-owaf-ttl="`)
-	buf.WriteString(fmt.Sprintf("%d", env.ttl))
-	buf.WriteString(`">`)
-	buf.WriteString(htmlBootstrapScript)
-	buf.WriteString(`</script>`)
-	return buf.Bytes()
+	return renderHTMLBootstrap(env, randomNonceB64())
 }
 
 // encryptJS 加密 JS 内容，返回自解密包装脚本。

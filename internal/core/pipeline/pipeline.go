@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"net"
 
 	"My-OpenWaf/internal/core/action"
@@ -9,16 +10,26 @@ import (
 
 // RequestCtx carries all decoded request data through the pipeline.
 type RequestCtx struct {
+	// Context 是请求生命周期上下文；为 nil 时保持测试和外部调用方的兼容行为。
+	Context   context.Context
 	RequestID string
 	Bind      string // Listener bind address (e.g., ":443")
 	ClientIP  net.IP
 	Method    string
 	Path      string
-	RawQuery  string
-	Host      string
-	UserAgent string
-	SiteID    uint
-	Headers   map[string]string
+	// OriginalPath retains the immutable inbound path for phase skip matching after request-stage plugins mutate Path.
+	OriginalPath string
+	RawQuery     string
+	Host         string
+	UserAgent    string
+
+	// ChallengeIdentity* retain the pre-mutation identity used to validate
+	// challenge pass cookies after request-stage plugins mutate the request view.
+	ChallengeIdentityCaptured  bool
+	ChallengeIdentityUserAgent string
+	ChallengeIdentityCookie    string
+	SiteID                     uint
+	Headers                    map[string]string
 	// HeadersLowercase reports that every key in Headers is already lowercase.
 	HeadersLowercase bool
 	HeaderKeys       []string // Ordered header keys for fingerprinting
@@ -28,8 +39,12 @@ type RequestCtx struct {
 
 	// AntiReplayTTL is per-site nonce window in seconds (0 = engine default).
 	AntiReplayTTL int
+	// AntiReplayConsumedNonce records a Cookie nonce already validated by the handler.
+	// The pipeline skips only the same X-Nonce value; a different header nonce is still checked.
+	AntiReplayConsumedNonce string
 
 	QueryParams map[string]string
+	QueryValues map[string][]string
 
 	// BodyTargets caches extracted body targets to avoid re-parsing in
 	// multiple phases (OWASP + CVE both need the same targets).
@@ -49,6 +64,44 @@ type RequestCtx struct {
 	// phaseObserveHits stores observe-only hits emitted inside a phase before that
 	// phase later returns a stronger terminal action.
 	phaseObserveHits []action.Result
+
+	// observeHitsBuf is a reusable buffer for collecting observe hits during
+	// pipeline.Run, avoiding per-request slice allocation.
+	observeHitsBuf []action.Result
+
+	// Derived header string cache: computed once per request, reused across phases.
+	derivedALPN         string
+	derivedALPNDone     bool
+	derivedHeaderOrder  string
+	derivedHeaderDone   bool
+	derivedCipherSuites string
+	derivedCipherDone   bool
+}
+
+/**
+ * ResetMutationCaches clears request-derived values after a pre-pipeline mutation.
+ *
+ * @return void
+ */
+func (ctx *RequestCtx) ResetMutationCaches() {
+	if ctx == nil {
+		return
+	}
+	ctx.BodyTargets = nil
+	ctx.BodyTargetsDone = false
+	ctx.matcherHeaders = nil
+	ctx.matcherHeadersReady = false
+	ctx.matcherHeadersAliased = false
+	ctx.derivedHeaderOrder = ""
+	ctx.derivedHeaderDone = false
+}
+
+// ContextOrBackground 返回请求上下文；对直接构造 RequestCtx 的调用方回退到 Background。
+func (ctx *RequestCtx) ContextOrBackground() context.Context {
+	if ctx == nil || ctx.Context == nil {
+		return context.Background()
+	}
+	return ctx.Context
 }
 
 // CachedMatcherHeaders returns the per-request matcher header cache when ready.
@@ -128,6 +181,33 @@ func (ctx *RequestCtx) DrainPhaseObserveHits() []action.Result {
 	return hits
 }
 
+// DerivedALPN returns the cached ALPN join string, computing it on first call.
+func (ctx *RequestCtx) DerivedALPN(compute func() string) string {
+	if !ctx.derivedALPNDone {
+		ctx.derivedALPN = compute()
+		ctx.derivedALPNDone = true
+	}
+	return ctx.derivedALPN
+}
+
+// DerivedHeaderOrder returns the cached header order join string, computing it on first call.
+func (ctx *RequestCtx) DerivedHeaderOrder(compute func() string) string {
+	if !ctx.derivedHeaderDone {
+		ctx.derivedHeaderOrder = compute()
+		ctx.derivedHeaderDone = true
+	}
+	return ctx.derivedHeaderOrder
+}
+
+// DerivedCipherSuites returns the cached cipher suites format string, computing it on first call.
+func (ctx *RequestCtx) DerivedCipherSuites(compute func() string) string {
+	if !ctx.derivedCipherDone {
+		ctx.derivedCipherSuites = compute()
+		ctx.derivedCipherDone = true
+	}
+	return ctx.derivedCipherSuites
+}
+
 // BotScoreInfo stores bot detection scoring details for logging purposes.
 type BotScoreInfo struct {
 	TotalScore       int
@@ -137,7 +217,7 @@ type BotScoreInfo struct {
 	IPRepScore       int
 	IsHighRisk       bool
 	Action           string
-	Details          string
+	Details          map[string]string
 }
 
 // Phase is one stage in the WAF processing pipeline.
@@ -169,7 +249,7 @@ func New(phases ...Phase) *Pipeline {
 // (OWASP, CVE, etc.) still run. If a higher-priority terminal action appears later,
 // it overrides the challenge. Otherwise the challenge is returned at the end.
 func Run(phases []Phase, ctx *RequestCtx) RunResult {
-	var observeHits []action.Result
+	observeHits := ctx.observeHitsBuf[:0]
 	var pendingChallenge *action.Result
 
 	for _, ph := range phases {

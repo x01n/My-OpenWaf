@@ -51,12 +51,15 @@ type stream struct {
 	flow             flow  // limits writing from Handler to client
 	inflow           flow  // what the client is allowed to POST/etc to us
 	state            streamState
-	resetQueued      bool        // RST_STREAM queued for write; set by sc.resetStream
-	gotTrailerHeader bool        // HEADER frame for trailers was seen
-	wroteHeaders     bool        // whether we wrote headers (not status 100)
-	writeDeadline    *time.Timer // nil if unused
-	rw               *responseWriter
-	handler          app.HandlerFunc
+	resetQueued      bool // RST_STREAM queued for write; set by sc.resetStream
+	gotTrailerHeader bool // HEADER frame for trailers was seen
+	wroteHeaders     bool // whether we wrote headers (not status 100)
+	// isH2ExtendedConnect 标记 RFC 8441 扩展 CONNECT（":protocol" 已出现），
+	// 供空闲超时延迟逻辑区分普通 CONNECT 与普通请求。
+	isH2ExtendedConnect bool
+	writeDeadline       *time.Timer // nil if unused
+	rw                  *responseWriter
+	handler             app.HandlerFunc
 
 	trailer []trailerKV
 }

@@ -261,3 +261,29 @@ func TestOAuthStateStoreGetNonexistent(t *testing.T) {
 		t.Fatal("不存在的 key 应返回 nil")
 	}
 }
+
+func TestOAuthStateStoreConsumeExpired(t *testing.T) {
+	store := NewMemoryOAuthStateStore()
+	if err := store.Save(&OAuthState{State: "expired-consume", SiteID: 1, ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Consume("expired-consume")
+	if err != nil || got != nil {
+		t.Fatalf("过期 state 不应被消费: %#v, %v", got, err)
+	}
+}
+
+func TestOAuthStateStoreConsumeIsAtomic(t *testing.T) {
+	store := NewMemoryOAuthStateStore()
+	if err := store.Save(&OAuthState{State: "consume-once", SiteID: 1, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Consume("consume-once")
+	if err != nil || first == nil {
+		t.Fatalf("第一次 Consume 应返回 state: %#v, %v", first, err)
+	}
+	second, err := store.Consume("consume-once")
+	if err != nil || second != nil {
+		t.Fatalf("第二次 Consume 应返回 nil: %#v, %v", second, err)
+	}
+}

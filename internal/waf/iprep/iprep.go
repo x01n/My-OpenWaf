@@ -29,6 +29,7 @@ type IPReputation struct {
 	autoBanAction    atomic.Value
 	stopCh           chan struct{}
 	wg               sync.WaitGroup
+	closeOnce        sync.Once
 }
 
 type violationCounter struct {
@@ -50,7 +51,14 @@ func NewIPReputation() *IPReputation {
 }
 
 func (r *IPReputation) Close() {
-	close(r.stopCh)
+	if r == nil {
+		return
+	}
+	r.closeOnce.Do(func() {
+		if r.stopCh != nil {
+			close(r.stopCh)
+		}
+	})
 	r.wg.Wait()
 }
 
@@ -80,6 +88,9 @@ func (r *IPReputation) ConfigureAutoBanAction(action string) {
 		r.autoBanAction.Store("drop")
 	case "intercept", "":
 		r.autoBanAction.Store("intercept")
+	default:
+		// 不支持的持久化动作不能沿用旧动作，统一回退到安全的拦截。
+		r.autoBanAction.Store("intercept")
 	}
 }
 
@@ -95,15 +106,16 @@ func (r *IPReputation) Check(ip net.IP) IPDecision {
 	if ip == nil {
 		return IPDecision{Allowed: true}
 	}
+	now := time.Now().Unix()
 	r.mu.RLock()
 	for _, e := range r.whitelist {
-		if entryMatches(e, ip) {
+		if entryMatchesAt(e, ip, now) {
 			r.mu.RUnlock()
 			return IPDecision{Allowed: true, Matched: true, Reason: e.Note, Category: "whitelist"}
 		}
 	}
 	for _, e := range r.blacklist {
-		if entryMatches(e, ip) {
+		if entryMatchesAt(e, ip, now) {
 			r.mu.RUnlock()
 			return IPDecision{Allowed: false, Matched: true, Reason: e.Note, Category: "blacklist", Action: e.Action}
 		}
@@ -124,8 +136,13 @@ func (r *IPReputation) Check(ip net.IP) IPDecision {
 	return IPDecision{Allowed: true}
 }
 
+// IsWhitelisted reports whether the IP matches an active global whitelist entry.
+func (r *IPReputation) IsWhitelisted(ip net.IP) bool {
+	return ip != nil && r.Check(ip).Category == "whitelist"
+}
+
 func (r *IPReputation) RecordViolation(ip net.IP) bool {
-	if ip == nil || !r.autoBanEnabled.Load() {
+	if ip == nil || !r.autoBanEnabled.Load() || r.IsWhitelisted(ip) {
 		return false
 	}
 	key := ip.String()
@@ -171,7 +188,11 @@ func (r *IPReputation) ActiveBans() []BanEntry {
 }
 
 func entryMatches(e IPListEntry, ip net.IP) bool {
-	if e.ExpireAt > 0 && time.Now().Unix() > e.ExpireAt {
+	return entryMatchesAt(e, ip, time.Now().Unix())
+}
+
+func entryMatchesAt(e IPListEntry, ip net.IP, now int64) bool {
+	if e.ExpireAt > 0 && now > e.ExpireAt {
 		return false
 	}
 	if e.CIDR != nil && e.CIDR.Contains(ip) {

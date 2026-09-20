@@ -1,54 +1,49 @@
-"use client";
+"use client"
 
-import { useMemo, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { useMemo, useState } from "react"
+import { useTranslation } from "react-i18next"
+import { useAuth } from "@/hooks/use-auth"
+import { PageHeader } from "@/components/page-header"
 import {
   useThreatIntelFeeds,
   useThreatIntelMutation,
   useThreatIntelDelete,
   useThreatIntelSync,
   useThreatIntelSyncLogs,
-  useSites,
-} from "@/hooks/use-api";
-import { DataTable } from "@/components/data-table";
-import { ConfirmDialog } from "@/components/confirm-dialog";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
+  useAllSites,
+} from "@/hooks/use-api"
+import { DataTable } from "@/components/data-table"
+import { ConfirmDialog } from "@/components/confirm-dialog"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from "@/components/ui/dialog";
+} from "@/components/ui/dialog"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+} from "@/components/ui/select"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
-import {
-  Pagination,
-  PaginationContent,
-  PaginationEllipsis,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-} from "@/components/ui/pagination";
-import { toast } from "sonner";
-import { formatDate } from "@/lib/utils";
+} from "@/components/ui/tooltip"
+import { TablePagination } from "@/components/table-pagination"
+import { toast } from "sonner"
+import { formatDate } from "@/lib/utils"
 import {
   IconPlus,
   IconTrash,
@@ -59,14 +54,14 @@ import {
   IconWorldBolt,
   IconHistory,
   IconList,
-} from "@tabler/icons-react";
-import type { ThreatIntelFeed, ThreatIntelSyncLog } from "@/lib/types";
+} from "@tabler/icons-react"
+import type { ThreatIntelFeed, ThreatIntelSyncLog } from "@/lib/types"
 
 /** 作用域下拉的全局选项标识值（Select 不接受空字符串作为 value） */
-const SCOPE_GLOBAL = "global";
+const SCOPE_GLOBAL = "global"
 
 /** 同步历史筛选的“全部”选项标识值 */
-const FILTER_ALL = "all";
+const FILTER_ALL = "all"
 
 /** 常用同步间隔（秒） */
 const INTERVAL_OPTIONS = [
@@ -75,16 +70,16 @@ const INTERVAL_OPTIONS = [
   { value: 3600, key: "interval1h" },
   { value: 21600, key: "interval6h" },
   { value: 86400, key: "interval24h" },
-] as const;
+] as const
 
 interface FeedForm {
-  name: string;
-  url: string;
-  kind: "blacklist" | "whitelist";
-  action: "intercept" | "drop";
-  sync_interval: number;
-  scope: string;
-  enabled: boolean;
+  name: string
+  url: string
+  kind: "blacklist" | "whitelist"
+  action: "intercept" | "drop"
+  sync_interval: number
+  scope: string
+  enabled: boolean
 }
 
 const emptyForm: FeedForm = {
@@ -95,22 +90,18 @@ const emptyForm: FeedForm = {
   sync_interval: 3600,
   scope: SCOPE_GLOBAL,
   enabled: true,
-};
+}
 
 export default function ThreatIntelPage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
-          <IconWorldBolt className="h-6 w-6" />
-          {t("threatIntel.title")}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {t("threatIntel.description")}
-        </p>
-      </div>
+      <PageHeader
+        icon={<IconWorldBolt className="h-6 w-6" />}
+        title={t("threatIntel.title")}
+        description={t("threatIntel.description")}
+      />
 
       <Tabs defaultValue="feeds" className="space-y-4">
         <TabsList>
@@ -133,63 +124,69 @@ export default function ThreatIntelPage() {
         </TabsContent>
       </Tabs>
     </div>
-  );
+  )
 }
 
 /**
  * 订阅源 Tab：完整保留原有 CRUD 与手动同步逻辑。
  */
 function FeedsTab() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
+  const { user, loading: authLoading } = useAuth()
+  const canManage = user?.role === "admin" || user?.role === "operator"
 
-  const { data, isLoading, mutate: refresh } = useThreatIntelFeeds();
-  const feeds = useMemo(() => data?.items || [], [data]);
+  const { data, isLoading, error, mutate: refresh } = useThreatIntelFeeds()
+  const feeds = useMemo(() => data?.items || [], [data])
 
   // 站点列表用于作用域下拉与站点名映射（显示名用 host）
-  const { data: sitesData } = useSites({ page_size: 500 });
-  const sites = useMemo(() => sitesData?.items || [], [sitesData]);
+  const { data: sitesData } = useAllSites()
+  const sites = useMemo(() => sitesData?.items || [], [sitesData])
   const siteNameMap = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const s of sites) map.set(s.id, s.host);
-    return map;
-  }, [sites]);
+    const map = new Map<number, string>()
+    for (const s of sites) map.set(s.id, s.host)
+    return map
+  }, [sites])
 
-  const { execute: mutateFeed, loading: mutateLoading } = useThreatIntelMutation();
-  const { execute: deleteFeed, loading: deleteLoading } = useThreatIntelDelete();
-  const { execute: syncFeed } = useThreatIntelSync();
+  const { execute: mutateFeed, loading: mutateLoading } =
+    useThreatIntelMutation()
+  const { execute: deleteFeed, loading: deleteLoading } = useThreatIntelDelete()
+  const { execute: syncFeed } = useThreatIntelSync()
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editId, setEditId] = useState<number | null>(null);
-  const [form, setForm] = useState<FeedForm>(emptyForm);
-  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editId, setEditId] = useState<number | null>(null)
+  const [form, setForm] = useState<FeedForm>(emptyForm)
+  const [deleteId, setDeleteId] = useState<number | null>(null)
   // 单行同步中的 ID 集合，用于按钮 loading
-  const [syncingIds, setSyncingIds] = useState<Set<number>>(new Set());
+  const [syncingIds, setSyncingIds] = useState<Set<number>>(new Set())
 
   /** 将站点 ID 映射为可读作用域名称 */
   const scopeLabel = (siteId?: number | null) => {
-    if (siteId === undefined || siteId === null) return t("threatIntel.scopeGlobal");
-    return siteNameMap.get(siteId) || `#${siteId}`;
-  };
+    if (siteId === undefined || siteId === null)
+      return t("threatIntel.scopeGlobal")
+    return siteNameMap.get(siteId) || `#${siteId}`
+  }
 
   /** 将秒数格式化为友好的间隔文案 */
   const formatInterval = (seconds: number) => {
     if (seconds > 0 && seconds % 3600 === 0) {
-      return t("threatIntel.hours", { count: seconds / 3600 });
+      return t("threatIntel.hours", { count: seconds / 3600 })
     }
     if (seconds > 0 && seconds % 60 === 0) {
-      return t("threatIntel.minutes", { count: seconds / 60 });
+      return t("threatIntel.minutes", { count: seconds / 60 })
     }
-    return t("threatIntel.seconds", { count: seconds });
-  };
+    return t("threatIntel.seconds", { count: seconds })
+  }
 
   const openCreate = () => {
-    setEditId(null);
-    setForm(emptyForm);
-    setDialogOpen(true);
-  };
+    if (!canManage) return
+    setEditId(null)
+    setForm(emptyForm)
+    setDialogOpen(true)
+  }
 
   const openEdit = (feed: ThreatIntelFeed) => {
-    setEditId(feed.id);
+    if (!canManage) return
+    setEditId(feed.id)
     setForm({
       name: feed.name,
       url: feed.url,
@@ -201,11 +198,12 @@ function FeedsTab() {
           ? SCOPE_GLOBAL
           : String(feed.site_id),
       enabled: feed.enabled,
-    });
-    setDialogOpen(true);
-  };
+    })
+    setDialogOpen(true)
+  }
 
   const handleSubmit = async () => {
+    if (!canManage) return
     try {
       const payload: Partial<ThreatIntelFeed> = {
         name: form.name.trim(),
@@ -215,63 +213,73 @@ function FeedsTab() {
         sync_interval: form.sync_interval,
         enabled: form.enabled,
         site_id: form.scope === SCOPE_GLOBAL ? null : Number(form.scope),
-      };
-      await mutateFeed({ id: editId ?? undefined, data: payload });
+      }
+      await mutateFeed({ id: editId ?? undefined, data: payload })
       toast.success(
         editId ? t("common.updateSuccess") : t("common.createSuccess")
-      );
-      setDialogOpen(false);
-      refresh();
+      )
+      setDialogOpen(false)
+      refresh()
     } catch {
-      toast.error(editId ? t("common.updateFailed") : t("common.createFailed"));
+      toast.error(editId ? t("common.updateFailed") : t("common.createFailed"))
     }
-  };
+  }
 
   /** 行内启用开关：合并现有字段避免覆盖，仅切换 enabled */
-  const handleToggleEnabled = async (feed: ThreatIntelFeed, enabled: boolean) => {
+  const handleToggleEnabled = async (
+    feed: ThreatIntelFeed,
+    enabled: boolean
+  ) => {
+    if (!canManage) return
     try {
-      await mutateFeed({ id: feed.id, data: { enabled } });
-      refresh();
+      await mutateFeed({ id: feed.id, data: { enabled } })
+      refresh()
     } catch {
-      toast.error(t("common.updateFailed"));
+      toast.error(t("common.updateFailed"))
     }
-  };
+  }
 
   const handleSync = async (id: number) => {
-    setSyncingIds((prev) => new Set(prev).add(id));
+    if (!canManage) return
+    setSyncingIds((prev) => new Set(prev).add(id))
     try {
-      await syncFeed(id);
-      toast.success(t("threatIntel.syncSuccess"));
-      refresh();
+      await syncFeed(id)
+      toast.success(t("threatIntel.syncSuccess"))
+      refresh()
     } catch {
-      toast.error(t("threatIntel.syncFailed"));
+      toast.error(t("threatIntel.syncFailed"))
     } finally {
       setSyncingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
-  };
+  }
 
   const confirmDelete = async () => {
-    if (deleteId === null) return;
+    if (!canManage || deleteId === null) return
     try {
-      await deleteFeed(deleteId);
-      toast.success(t("common.deleteSuccess"));
-      setDeleteId(null);
-      refresh();
+      await deleteFeed(deleteId)
+      toast.success(t("common.deleteSuccess"))
+      setDeleteId(null)
+      refresh()
     } catch {
-      toast.error(t("common.deleteFailed"));
+      toast.error(t("common.deleteFailed"))
     }
-  };
+  }
 
   const columns = [
     {
       key: "name",
       title: t("threatIntel.name"),
       render: (row: ThreatIntelFeed) => (
-        <span className="font-medium">{row.name}</span>
+        <span
+          className="block max-w-[180px] truncate font-medium"
+          title={row.name}
+        >
+          {row.name}
+        </span>
       ),
     },
     {
@@ -308,10 +316,12 @@ function FeedsTab() {
       title: t("threatIntel.action"),
       width: "100px",
       render: (row: ThreatIntelFeed) => (
-        <Badge variant={row.action === "drop" ? "destructive" : "secondary"}>
-          {row.action === "drop"
-            ? t("threatIntel.actionDrop")
-            : t("threatIntel.actionIntercept")}
+        <Badge variant={row.kind === "whitelist" ? "secondary" : "destructive"}>
+          {row.kind === "whitelist"
+            ? t("threatIntel.actionAllow")
+            : row.action === "drop"
+              ? t("threatIntel.actionDrop")
+              : t("threatIntel.actionIntercept")}
         </Badge>
       ),
     },
@@ -331,7 +341,9 @@ function FeedsTab() {
       title: t("threatIntel.entryCount"),
       width: "90px",
       render: (row: ThreatIntelFeed) => (
-        <span className="font-mono text-sm">{row.entry_count}</span>
+        <span className="font-mono text-sm">
+          {row.entry_count?.toLocaleString() ?? "-"}
+        </span>
       ),
     },
     {
@@ -377,6 +389,7 @@ function FeedsTab() {
         <Switch
           checked={row.enabled}
           onCheckedChange={(v) => handleToggleEnabled(row, v)}
+          disabled={!canManage}
         />
       ),
     },
@@ -390,7 +403,7 @@ function FeedsTab() {
             variant="ghost"
             size="icon-sm"
             onClick={() => handleSync(row.id)}
-            disabled={syncingIds.has(row.id)}
+            disabled={!canManage || syncingIds.has(row.id)}
             title={t("threatIntel.sync")}
           >
             <IconRefresh
@@ -404,6 +417,7 @@ function FeedsTab() {
             size="icon-sm"
             onClick={() => openEdit(row)}
             title={t("common.edit")}
+            disabled={!canManage}
           >
             <IconEdit className="h-4 w-4" />
           </Button>
@@ -412,18 +426,32 @@ function FeedsTab() {
             size="icon-sm"
             onClick={() => setDeleteId(row.id)}
             title={t("common.delete")}
+            disabled={!canManage}
           >
             <IconTrash className="h-4 w-4 text-destructive" />
           </Button>
         </div>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {(error as Error)?.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
+      {!authLoading && !canManage && (
+        <Alert>
+          <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
+        </Alert>
+      )}
       <div className="flex justify-end">
-        <Button onClick={openCreate}>
+        <Button onClick={openCreate} disabled={!canManage}>
           <IconPlus className="h-4 w-4" />
           {t("threatIntel.add")}
         </Button>
@@ -444,133 +472,153 @@ function FeedsTab() {
               {editId ? t("threatIntel.editTitle") : t("threatIntel.addTitle")}
             </DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>{t("threatIntel.name")}</Label>
-              <Input
-                value={form.name}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, name: e.target.value }))
-                }
-                placeholder={t("threatIntel.namePlaceholder")}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("threatIntel.url")}</Label>
-              <Input
-                value={form.url}
-                onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
-                placeholder={t("threatIntel.urlPlaceholder")}
-                className="font-mono text-sm"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
+          <fieldset
+            disabled={!canManage}
+            className="m-0 space-y-4 border-0 p-0"
+          >
+            <div className="space-y-4">
               <div className="space-y-2">
-                <Label>{t("threatIntel.kind")}</Label>
+                <Label>{t("threatIntel.name")}</Label>
+                <Input
+                  value={form.name}
+                  maxLength={100}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, name: e.target.value }))
+                  }
+                  placeholder={t("threatIntel.namePlaceholder")}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t("threatIntel.url")}</Label>
+                <Input
+                  value={form.url}
+                  maxLength={500}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, url: e.target.value }))
+                  }
+                  placeholder={t("threatIntel.urlPlaceholder")}
+                  className="font-mono text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>{t("threatIntel.kind")}</Label>
+                  <Select
+                    value={form.kind}
+                    disabled={!canManage}
+                    onValueChange={(v) =>
+                      setForm((f) => ({
+                        ...f,
+                        kind: v as "blacklist" | "whitelist",
+                      }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="blacklist">
+                        {t("threatIntel.blacklist")}
+                      </SelectItem>
+                      <SelectItem value="whitelist">
+                        {t("threatIntel.whitelist")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("threatIntel.action")}</Label>
+                  {form.kind === "blacklist" ? (
+                    <Select
+                      value={form.action}
+                      disabled={!canManage}
+                      onValueChange={(v) =>
+                        setForm((f) => ({
+                          ...f,
+                          action: v as "intercept" | "drop",
+                        }))
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="intercept">
+                          {t("threatIntel.actionIntercept")}
+                        </SelectItem>
+                        <SelectItem value="drop">
+                          {t("threatIntel.actionDrop")}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Badge variant="secondary">
+                      {t("threatIntel.actionAllow")}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("threatIntel.syncInterval")}</Label>
                 <Select
-                  value={form.kind}
+                  value={String(form.sync_interval)}
+                  disabled={!canManage}
                   onValueChange={(v) =>
-                    setForm((f) => ({
-                      ...f,
-                      kind: v as "blacklist" | "whitelist",
-                    }))
+                    setForm((f) => ({ ...f, sync_interval: Number(v) }))
                   }
                 >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="blacklist">
-                      {t("threatIntel.blacklist")}
-                    </SelectItem>
-                    <SelectItem value="whitelist">
-                      {t("threatIntel.whitelist")}
-                    </SelectItem>
+                    {INTERVAL_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={String(opt.value)}>
+                        {t(`threatIntel.${opt.key}`)}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t("threatIntel.syncIntervalHint")}
+                </p>
               </div>
               <div className="space-y-2">
-                <Label>{t("threatIntel.action")}</Label>
+                <Label>{t("threatIntel.scope")}</Label>
                 <Select
-                  value={form.action}
-                  onValueChange={(v) =>
-                    setForm((f) => ({
-                      ...f,
-                      action: v as "intercept" | "drop",
-                    }))
-                  }
+                  value={form.scope}
+                  disabled={!canManage}
+                  onValueChange={(v) => setForm((f) => ({ ...f, scope: v }))}
                 >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="intercept">
-                      {t("threatIntel.actionIntercept")}
+                    <SelectItem value={SCOPE_GLOBAL}>
+                      {t("threatIntel.scopeGlobal")}
                     </SelectItem>
-                    <SelectItem value="drop">
-                      {t("threatIntel.actionDrop")}
-                    </SelectItem>
+                    {sites.map((s) => (
+                      <SelectItem key={s.id} value={String(s.id)}>
+                        {s.host}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t("threatIntel.scopeHint")}
+                </p>
+              </div>
+              <div className="flex items-center justify-between">
+                <Label>{t("threatIntel.enabled")}</Label>
+                <Switch
+                  checked={form.enabled}
+                  disabled={!canManage}
+                  onCheckedChange={(v) =>
+                    setForm((f) => ({ ...f, enabled: v }))
+                  }
+                />
               </div>
             </div>
-            <div className="space-y-2">
-              <Label>{t("threatIntel.syncInterval")}</Label>
-              <Select
-                value={String(form.sync_interval)}
-                onValueChange={(v) =>
-                  setForm((f) => ({ ...f, sync_interval: Number(v) }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {INTERVAL_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={String(opt.value)}>
-                      {t(`threatIntel.${opt.key}`)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {t("threatIntel.syncIntervalHint")}
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("threatIntel.scope")}</Label>
-              <Select
-                value={form.scope}
-                onValueChange={(v) => setForm((f) => ({ ...f, scope: v }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={SCOPE_GLOBAL}>
-                    {t("threatIntel.scopeGlobal")}
-                  </SelectItem>
-                  {sites.map((s) => (
-                    <SelectItem key={s.id} value={String(s.id)}>
-                      {s.host}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {t("threatIntel.scopeHint")}
-              </p>
-            </div>
-            <div className="flex items-center justify-between">
-              <Label>{t("threatIntel.enabled")}</Label>
-              <Switch
-                checked={form.enabled}
-                onCheckedChange={(v) =>
-                  setForm((f) => ({ ...f, enabled: v }))
-                }
-              />
-            </div>
-          </div>
+          </fieldset>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
               {t("common.cancel")}
@@ -578,7 +626,10 @@ function FeedsTab() {
             <Button
               onClick={handleSubmit}
               disabled={
-                mutateLoading || !form.name.trim() || !form.url.trim()
+                !canManage ||
+                mutateLoading ||
+                !form.name.trim() ||
+                !form.url.trim()
               }
             >
               {mutateLoading
@@ -601,59 +652,57 @@ function FeedsTab() {
         loading={deleteLoading}
       />
     </div>
-  );
+  )
 }
 
 /**
  * 将毫秒数格式化为可读的耗时字符串（>=1s 用 "X.Xs"，否则 "Xms"）。
  */
 function formatDurationMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "-";
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${ms}ms`;
+  if (!Number.isFinite(ms) || ms < 0) return "-"
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
+  return `${ms}ms`
 }
 
 /**
  * 同步历史 Tab：分页展示订阅源每次同步的结果，30 秒自动刷新。
  */
 function SyncHistoryTab() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
-  const [page, setPage] = useState(1);
-  const pageSize = 20;
-  const [feedFilter, setFeedFilter] = useState<string>(FILTER_ALL);
-  const [statusFilter, setStatusFilter] = useState<string>(FILTER_ALL);
+  const [page, setPage] = useState(1)
+  const pageSize = 20
+  const [feedFilter, setFeedFilter] = useState<string>(FILTER_ALL)
+  const [statusFilter, setStatusFilter] = useState<string>(FILTER_ALL)
 
-  const { data: feedsData } = useThreatIntelFeeds();
-  const feeds = useMemo(() => feedsData?.items || [], [feedsData]);
+  const { data: feedsData } = useThreatIntelFeeds()
+  const feeds = useMemo(() => feedsData?.items || [], [feedsData])
 
   const queryParams = useMemo(
     () => ({
       page,
       page_size: pageSize,
-      feed_id:
-        feedFilter === FILTER_ALL ? undefined : Number(feedFilter),
+      feed_id: feedFilter === FILTER_ALL ? undefined : Number(feedFilter),
       status:
         statusFilter === FILTER_ALL
           ? undefined
           : (statusFilter as "success" | "failed"),
     }),
-    [page, feedFilter, statusFilter],
-  );
+    [page, feedFilter, statusFilter]
+  )
 
-  const { data, isLoading } = useThreatIntelSyncLogs(queryParams);
-  const items = data?.items || [];
-  const total = data?.total || 0;
-  const totalPages = Math.ceil(total / pageSize) || 1;
+  const { data, isLoading, error } = useThreatIntelSyncLogs(queryParams)
+  const items = data?.items || []
+  const total = data?.total || 0
 
   const handleFeedChange = (v: string) => {
-    setFeedFilter(v);
-    setPage(1);
-  };
+    setFeedFilter(v)
+    setPage(1)
+  }
   const handleStatusChange = (v: string) => {
-    setStatusFilter(v);
-    setPage(1);
-  };
+    setStatusFilter(v)
+    setPage(1)
+  }
 
   const columns = [
     {
@@ -670,8 +719,13 @@ function SyncHistoryTab() {
       key: "feed",
       title: t("threatIntel.syncHistory.columns.feed"),
       render: (row: ThreatIntelSyncLog) => (
-        <div className="flex flex-col">
-          <span className="font-medium">{row.feed_name || "-"}</span>
+        <div className="flex max-w-[220px] min-w-0 flex-col">
+          <span
+            className="block truncate font-medium"
+            title={row.feed_name || "-"}
+          >
+            {row.feed_name || "-"}
+          </span>
           <span className="text-xs text-muted-foreground">#{row.feed_id}</span>
         </div>
       ),
@@ -719,7 +773,7 @@ function SyncHistoryTab() {
       width: "90px",
       render: (row: ThreatIntelSyncLog) => (
         <span className="font-mono text-sm">
-          {row.success ? row.entries_added : "-"}
+          {row.success ? (row.entries_added?.toLocaleString() ?? "0") : "-"}
         </span>
       ),
     },
@@ -727,7 +781,7 @@ function SyncHistoryTab() {
       key: "error",
       title: t("threatIntel.syncHistory.columns.error"),
       render: (row: ThreatIntelSyncLog) => {
-        if (!row.error) return <span className="text-muted-foreground">-</span>;
+        if (!row.error) return <span className="text-muted-foreground">-</span>
         return (
           <TooltipProvider delayDuration={200}>
             <Tooltip>
@@ -736,18 +790,26 @@ function SyncHistoryTab() {
                   {row.error}
                 </span>
               </TooltipTrigger>
-              <TooltipContent className="max-w-md whitespace-pre-wrap break-all">
+              <TooltipContent className="max-w-md break-all whitespace-pre-wrap">
                 {row.error}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-        );
+        )
       },
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {(error as Error)?.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
       <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="space-y-1.5">
           <Label className="text-xs">
@@ -800,48 +862,12 @@ function SyncHistoryTab() {
         emptyText={t("threatIntel.syncHistory.empty")}
       />
 
-      {totalPages > 1 && (
-        <Pagination>
-          <PaginationContent>
-            <PaginationItem>
-              <PaginationPrevious
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                className={
-                  page <= 1 ? "pointer-events-none opacity-50" : ""
-                }
-              />
-            </PaginationItem>
-            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-              const pageNum = i + 1;
-              return (
-                <PaginationItem key={pageNum}>
-                  <PaginationLink
-                    isActive={page === pageNum}
-                    onClick={() => setPage(pageNum)}
-                  >
-                    {pageNum}
-                  </PaginationLink>
-                </PaginationItem>
-              );
-            })}
-            {totalPages > 5 && (
-              <PaginationItem>
-                <PaginationEllipsis />
-              </PaginationItem>
-            )}
-            <PaginationItem>
-              <PaginationNext
-                onClick={() =>
-                  setPage((p) => Math.min(totalPages, p + 1))
-                }
-                className={
-                  page >= totalPages ? "pointer-events-none opacity-50" : ""
-                }
-              />
-            </PaginationItem>
-          </PaginationContent>
-        </Pagination>
-      )}
+      <TablePagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+      />
     </div>
-  );
+  )
 }

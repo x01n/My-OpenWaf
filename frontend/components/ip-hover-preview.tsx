@@ -1,20 +1,21 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import { useTranslation } from "react-i18next";
-import { format } from "date-fns";
-import useSWR from "swr";
+import * as React from "react"
+import { useTranslation } from "react-i18next"
+import { format } from "date-fns"
+import useSWR from "swr"
 
-import { cn } from "@/lib/utils";
-import { securityEventApi } from "@/lib/api";
-import type { SecurityEvent } from "@/lib/types";
+import { cn } from "@/lib/utils"
+import { securityEventApi } from "@/lib/api"
+import type { SecurityEvent } from "@/lib/types"
 import {
   HoverCard,
   HoverCardContent,
   HoverCardTrigger,
-} from "@/components/ui/hover-card";
-import { Badge } from "@/components/ui/badge";
-import { IconClock, IconRoute, IconWorld } from "@tabler/icons-react";
+} from "@/components/ui/hover-card"
+import { Badge } from "@/components/ui/badge"
+import { ActionBadge } from "@/components/action-badge"
+import { IconClock, IconRoute, IconWorld } from "@tabler/icons-react"
 
 /**
  * 悬停时展示该 IP 最近 5 次安全事件的预览卡片。
@@ -25,12 +26,12 @@ export function IpHoverPreview({
   className,
   children,
 }: {
-  ip: string;
-  className?: string;
-  children?: React.ReactNode;
+  ip: string
+  className?: string
+  children?: React.ReactNode
 }) {
-  const { t } = useTranslation();
-  const [enabled, setEnabled] = React.useState(false);
+  const { t } = useTranslation()
+  const [enabled, setEnabled] = React.useState(false)
 
   const { data, isLoading } = useSWR(
     enabled && ip ? ["ip-hover-preview", ip] : null,
@@ -39,25 +40,30 @@ export function IpHoverPreview({
         client_ip: ip,
         page: 1,
         page_size: 5,
-      })) as { items: SecurityEvent[]; total: number };
-      return res;
+      })) as { items: SecurityEvent[]; total: number }
+      return res
     },
-    { revalidateOnFocus: false },
-  );
+    {
+      revalidateOnFocus: false,
+      // 相同 IP 在同一页多处出现时共享一次请求；
+      // 悬停关闭后短期重开复用缓存，切页/筛选后的旧视图不重复打接口。
+      dedupingInterval: 30000,
+    }
+  )
 
   return (
     <HoverCard
       openDelay={200}
       closeDelay={100}
       onOpenChange={(o) => {
-        if (o) setEnabled(true);
+        if (o) setEnabled(true)
       }}
     >
       <HoverCardTrigger asChild>
         <span
           className={cn(
             "cursor-help font-mono decoration-dotted underline-offset-2 hover:underline",
-            className,
+            className
           )}
         >
           {children ?? ip}
@@ -67,9 +73,7 @@ export function IpHoverPreview({
         <div className="mb-2 flex items-center justify-between">
           <span className="font-mono text-sm font-semibold">{ip}</span>
           <span className="text-[10px] text-muted-foreground">
-            {t("securityEvents.ipHover.recentTitle", {
-              defaultValue: "最近 5 次事件",
-            })}
+            {t("securityEvents.ipHover.recentTitle")}
           </span>
         </div>
         {isLoading ? (
@@ -78,16 +82,13 @@ export function IpHoverPreview({
           </p>
         ) : !data || data.items.length === 0 ? (
           <p className="py-3 text-center text-xs text-muted-foreground">
-            {t("securityEvents.ipHover.noEvent", {
-              defaultValue: "该 IP 暂无历史事件",
-            })}
+            {t("securityEvents.ipHover.noEvent")}
           </p>
         ) : (
           <>
             <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
               <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
                 {t("securityEvents.ipHover.totalCount", {
-                  defaultValue: "共 {{count}} 条",
                   count: data.total,
                 })}
               </Badge>
@@ -103,20 +104,10 @@ export function IpHoverPreview({
                       <IconClock className="h-3 w-3" />
                       {formatShortTime(ev.created_at)}
                     </span>
-                    <Badge
-                      variant={
-                        ev.action === "intercept" ||
-                        ev.action === "block" ||
-                        ev.action === "drop"
-                          ? "destructive"
-                          : ev.action === "observe" || ev.action === "log_only"
-                            ? "secondary"
-                            : "outline"
-                      }
+                    <ActionBadge
+                      action={ev.action}
                       className="h-4 px-1 text-[9px]"
-                    >
-                      {ev.action}
-                    </Badge>
+                    />
                   </div>
                   <div className="mt-1 flex items-center gap-1 truncate text-foreground/80">
                     <span className="rounded bg-muted px-1 font-mono text-[10px]">
@@ -145,13 +136,13 @@ export function IpHoverPreview({
         )}
       </HoverCardContent>
     </HoverCard>
-  );
+  )
 }
 
 function formatShortTime(iso: string): string {
   try {
-    return format(new Date(iso), "MM-dd HH:mm:ss");
+    return format(new Date(iso), "MM-dd HH:mm:ss")
   } catch {
-    return iso;
+    return iso
   }
 }

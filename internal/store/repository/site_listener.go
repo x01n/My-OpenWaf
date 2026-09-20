@@ -22,6 +22,16 @@ func (r *SiteListenerRepo) AllEnabled() ([]store.SiteListener, error) {
 	return items, r.db.Where("enabled = ?", true).Order("site_id ASC, bind ASC").Find(&items).Error
 }
 
+// ListEnabledBySites 仅返回指定站点页的启用监听器，避免管理端渲染一页站点时扫描全表。
+func (r *SiteListenerRepo) ListEnabledBySites(siteIDs []uint) ([]store.SiteListener, error) {
+	if len(siteIDs) == 0 {
+		return []store.SiteListener{}, nil
+	}
+	var items []store.SiteListener
+	return items, r.db.Where("enabled = ? AND site_id IN ?", true, siteIDs).
+		Order("site_id ASC, bind ASC").Find(&items).Error
+}
+
 // ListBySite returns listeners for a specific site ordered by bind.
 func (r *SiteListenerRepo) ListBySite(siteID uint) ([]store.SiteListener, error) {
 	var items []store.SiteListener
@@ -33,8 +43,9 @@ func (r *SiteListenerRepo) Get(id uint) (*store.SiteListener, error) {
 	return &item, r.db.First(&item, id).Error
 }
 
+// Create 新建监听器。Enabled 带 gorm default:true，见 CreateWithZeroDefaults。
 func (r *SiteListenerRepo) Create(item *store.SiteListener) error {
-	return r.db.Create(item).Error
+	return store.CreateWithZeroDefaults(r.db, item)
 }
 
 func (r *SiteListenerRepo) Update(item *store.SiteListener) error {
@@ -74,4 +85,23 @@ func (r *SiteListenerRepo) CreateWithLegacyPromotion(item *store.SiteListener, l
 		}
 		return tx.Create(item).Error
 	})
+}
+
+func (r *SiteListenerRepo) CreateLegacyReplacement(item *store.SiteListener) (bool, error) {
+	created := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&store.SiteListener{}).Where("site_id = ?", item.SiteID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 0 {
+			return nil
+		}
+		if err := store.CreateWithZeroDefaults(tx, item); err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	return created, err
 }

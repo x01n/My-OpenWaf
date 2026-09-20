@@ -4,10 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"strings"
 	"testing"
@@ -65,7 +73,7 @@ func TestForwardWebSocketUsesTLS10ConfigForWSSUpstream(t *testing.T) {
 	}
 	t.Cleanup(func() { tlsDialWebSocketUpstream = originalDial })
 
-	err := ForwardWebSocket(ctx, rt, "https://127.0.0.1:9443", nil, nil)
+	err := ForwardWebSocket(context.Background(), "", ctx, rt, "https://127.0.0.1:9443", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "stop after tls config check") {
 		t.Fatalf("ForwardWebSocket error = %v", err)
 	}
@@ -112,6 +120,10 @@ func TestBuildWebSocketHandshakeHeadersAppliesForwarding(t *testing.T) {
 	req.Header.Set("Sec-WebSocket-Key", "abc")
 	req.Header.Set("X-Custom", "yes")
 	req.Header.Set("X-Hop", "drop")
+	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	req.Header.Set("X-Forwarded-Host", "spoofed.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Forwarded", "for=198.51.100.7;host=spoofed.example;proto=https")
 	ctx := app.NewContext(0)
 	req.CopyTo(&ctx.Request)
 
@@ -126,7 +138,7 @@ func TestBuildWebSocketHandshakeHeadersAppliesForwarding(t *testing.T) {
 		"Host: client.example\r\n",
 		"X-Forwarded-For: 203.0.113.10\r\n",
 		"X-Forwarded-Host: client.example\r\n",
-		"X-Forwarded-Proto: https\r\n",
+		"X-Forwarded-Proto: http\r\n",
 		"Sec-Websocket-Key: abc\r\n",
 		"Connection: Upgrade\r\n",
 		"X-Custom: yes\r\n",
@@ -141,9 +153,12 @@ func TestBuildWebSocketHandshakeHeadersAppliesForwarding(t *testing.T) {
 	if strings.Contains(got, "X-Hop:") {
 		t.Fatalf("dynamic Connection token header leaked into upstream handshake: %q", got)
 	}
+	if strings.Contains(got, "\r\nForwarded:") {
+		t.Fatalf("RFC Forwarded header leaked into upstream handshake: %q", got)
+	}
 }
 
-func TestBuildWebSocketHandshakeHeadersPreservesRepeatedForwardedForValues(t *testing.T) {
+func TestBuildWebSocketHandshakeHeadersRebuildsRepeatedForwardedForValues(t *testing.T) {
 	var req protocol.Request
 	req.SetMethod("GET")
 	req.SetHost("client.example")
@@ -159,9 +174,9 @@ func TestBuildWebSocketHandshakeHeadersPreservesRepeatedForwardedForValues(t *te
 	if err != nil {
 		t.Fatalf("buildWebSocketHandshakeHeaders returned error: %v", err)
 	}
-	want := "X-Forwarded-For: 198.51.100.7, 198.51.100.8, 198.51.100.9, 203.0.113.10\r\n"
+	want := "X-Forwarded-For: 203.0.113.10\r\n"
 	if !strings.Contains(got, want) {
-		t.Fatalf("handshake headers missing preserved X-Forwarded-For chain %q in %q", want, got)
+		t.Fatalf("handshake headers missing rebuilt X-Forwarded-For %q in %q", want, got)
 	}
 	if strings.Count(got, "X-Forwarded-For:") != 1 {
 		t.Fatalf("X-Forwarded-For should be rebuilt exactly once, got %q", got)
@@ -210,7 +225,7 @@ func TestBuildWebSocketHandshakeHeadersUsesConfiguredUpstreamHost(t *testing.T) 
 	}
 }
 
-func TestBuildWebSocketHandshakeHeadersInfersHTTPSForwardedProtoFromOrigin(t *testing.T) {
+func TestBuildWebSocketHandshakeHeadersIgnoresOriginForForwardedProto(t *testing.T) {
 	var req protocol.Request
 	req.SetMethod("GET")
 	req.SetHost("client.example")
@@ -224,11 +239,11 @@ func TestBuildWebSocketHandshakeHeadersInfersHTTPSForwardedProtoFromOrigin(t *te
 	if err != nil {
 		t.Fatalf("buildWebSocketHandshakeHeaders returned error: %v", err)
 	}
-	if !strings.Contains(got, "X-Forwarded-Proto: https\r\n") {
-		t.Fatalf("expected HTTPS forwarded proto inferred from websocket Origin, got %q", got)
+	if !strings.Contains(got, "X-Forwarded-Proto: http\r\n") {
+		t.Fatalf("expected HTTP forwarded proto from the connection, got %q", got)
 	}
-	if strings.Contains(got, "X-Forwarded-Proto: http\r\n") {
-		t.Fatalf("websocket HTTPS Origin must not be downgraded to http, got %q", got)
+	if strings.Contains(got, "X-Forwarded-Proto: https\r\n") {
+		t.Fatalf("websocket Origin must not control forwarded proto, got %q", got)
 	}
 }
 
@@ -253,6 +268,44 @@ func TestBuildWebSocketHandshakeHeadersPreservesRepeatedSubprotocolValues(t *tes
 	}
 	if strings.Count(got, "Sec-Websocket-Protocol:") != 2 {
 		t.Fatalf("expected two subprotocol header lines, got %q", got)
+	}
+}
+
+func TestNormalizeWebSocketUpstreamTarget(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "http://svc:80/ws", want: "ws://svc:80/ws"},
+		{raw: "https://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "h2c://svc:9000/ws", want: "ws://svc:9000/ws"},
+		{raw: "grpc://svc:9000/ws", want: "ws://svc:9000/ws"},
+		{raw: "GRPC://svc:9000/ws", want: "ws://svc:9000/ws"},
+		{raw: "tls://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "grpcs://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "grpc+tls://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "grpc+https://svc:443/ws", want: "wss://svc:443/ws"},
+		{raw: "NOTASSCHEME://svc:1/ws", want: "NOTASSCHEME://svc:1/ws"},
+		// h3 不参与归一（QUIC 二进制帧无法承载 WS 握手），保持原串。
+		{raw: "h3://svc:443/ws", want: "h3://svc:443/ws"},
+	}
+	for _, tt := range tests {
+		if got := normalizeWebSocketUpstreamTarget(tt.raw); got != tt.want {
+			t.Fatalf("normalizeWebSocketUpstreamTarget(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
+	}
+}
+
+func TestForwardWebSocketResolvesRPCUpstreamAliases(t *testing.T) {
+	// grpcs 与 https 同语义：应优先 wss:// 前缀（此处只验证前缀替换后
+	// wss 兜底端口选择路径，实际拨号不做网络连接）。
+	grpcsTarget := normalizeWebSocketUpstreamTarget("grpcs://127.0.0.1:9443/ws")
+	if !strings.HasPrefix(strings.ToLower(grpcsTarget), "wss://") {
+		t.Fatalf("grpcs target = %q, want wss prefix", grpcsTarget)
+	}
+	host := hostFromURL(strings.ToLower(grpcsTarget))
+	if !strings.Contains(host, "127.0.0.1:9443") {
+		t.Fatalf("grpcs host = %q, want 127.0.0.1:9443", host)
 	}
 }
 
@@ -316,7 +369,7 @@ func TestForwardWebSocketReturnsWhenClientClosesAfterHandshake(t *testing.T) {
 
 	forwardDone := make(chan error, 1)
 	go func() {
-		forwardDone <- ForwardWebSocket(ctx, snapshot.SiteRuntime{}, "http://"+upstreamListener.Addr().String(), nil, nil)
+		forwardDone <- ForwardWebSocket(context.Background(), "", ctx, snapshot.SiteRuntime{}, "http://"+upstreamListener.Addr().String(), nil, nil)
 	}()
 
 	clientReader := bufio.NewReader(client)
@@ -427,8 +480,8 @@ func TestForwardWebSocketReturnsWhenWAFInterceptsClientFrame(t *testing.T) {
 	holder.Store(&snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":80", "client.example"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":80", "client.example"): &rt,
 		},
 	})
 	eng := engine.New(holder, nil, nil, nil)
@@ -450,7 +503,7 @@ func TestForwardWebSocketReturnsWhenWAFInterceptsClientFrame(t *testing.T) {
 
 	forwardDone := make(chan error, 1)
 	go func() {
-		forwardDone <- ForwardWebSocket(ctx, rt, "http://"+upstreamListener.Addr().String(), nil, eng)
+		forwardDone <- ForwardWebSocket(context.Background(), "", ctx, rt, "http://"+upstreamListener.Addr().String(), nil, eng)
 	}()
 
 	clientReader := bufio.NewReader(client)
@@ -718,7 +771,7 @@ func TestInspectWebSocketClientFramesStreamsRemainingPayload(t *testing.T) {
 
 	done := make(chan error, 2)
 	ctx := app.NewContext(0)
-	go inspectWebSocketClientFrames(proxyClientConn, proxyUpstreamConn, ctx, snapshot.SiteRuntime{}, nil, done)
+	go inspectWebSocketClientFrames(context.Background(), "", nil, proxyClientConn, proxyUpstreamConn, ctx, snapshot.SiteRuntime{}, nil, done)
 
 	writeErr := make(chan error, 1)
 	go func() {
@@ -781,7 +834,7 @@ func TestInspectWebSocketClientFramesSendsSingleError(t *testing.T) {
 
 	wantErr := errors.New("upstream write failed")
 	done := make(chan error, 2)
-	inspectWebSocketClientFrames(proxyClientConn, &failingWriteConn{err: wantErr}, app.NewContext(0), snapshot.SiteRuntime{}, nil, done)
+	inspectWebSocketClientFrames(context.Background(), "", nil, proxyClientConn, &failingWriteConn{err: wantErr}, app.NewContext(0), snapshot.SiteRuntime{}, nil, done)
 
 	got := <-done
 	if !errors.Is(got, wantErr) {
@@ -930,6 +983,7 @@ func TestBuildAccessLogEntryDoesNotRecordProxyTLSFingerprintForHTTP3(t *testing.
 		localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443},
 		remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
 	})
+	applyInternalHTTP3RequestMetadata(ctx)
 
 	entry := buildAccessLogEntry(ctx, accessLogInfo{SiteID: 1})
 	if entry.HTTPProtocol != "h3" {
@@ -1147,7 +1201,7 @@ func TestInspectWebSocketPayloadAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *te
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: store.DefaultProtectionConfig(),
-		Sites:      make(map[string]snapshot.SiteRuntime),
+		Sites:      make(map[string]*snapshot.SiteRuntime),
 	}
 	rt := snapshot.SiteRuntime{
 		Site: store.Site{
@@ -1159,7 +1213,7 @@ func TestInspectWebSocketPayloadAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *te
 		Bind:              ":80",
 		AntiReplayEnabled: true,
 	}
-	sn.Sites[snapshot.SiteMapKey(":80", "ws-ttl.example.com")] = rt
+	sn.Sites[snapshot.SiteMapKey(":80", "ws-ttl.example.com")] = &rt
 	holder.Store(sn)
 
 	eng := engine.New(holder, nil, nil, nil)
@@ -1175,7 +1229,7 @@ func TestInspectWebSocketPayloadAppliesSiteAntiReplayTTLToNonceHeaderPhase(t *te
 	ctx.Request.Header.SetHost("ws-ttl.example.com")
 	ctx.Request.Header.Set("X-Nonce", nonce)
 
-	got := inspectWebSocketPayload(ctx, rt, eng, []byte("hello"))
+	got := inspectWebSocketPayload(context.Background(), "", nil, ctx, rt, eng, []byte("hello"))
 	if got.Type != action.Intercept {
 		t.Fatalf("inspectWebSocketPayload action = %#v, want intercept", got)
 	}
@@ -1212,8 +1266,8 @@ func TestInspectWebSocketPayloadUsesCachedTLSHandshakeMetadata(t *testing.T) {
 	sn := &snapshot.Snapshot{
 		Revision:   1,
 		Protection: protection,
-		Sites: map[string]snapshot.SiteRuntime{
-			snapshot.SiteMapKey(":443", "ws-tls.example.com"): rt,
+		Sites: map[string]*snapshot.SiteRuntime{
+			snapshot.SiteMapKey(":443", "ws-tls.example.com"): &rt,
 		},
 	}
 	holder.Store(sn)
@@ -1229,7 +1283,7 @@ func TestInspectWebSocketPayloadUsesCachedTLSHandshakeMetadata(t *testing.T) {
 		ALPN:       []string{"h2"},
 	})
 
-	got := inspectWebSocketPayload(ctx, rt, eng, []byte("hello"))
+	got := inspectWebSocketPayload(context.Background(), "", nil, ctx, rt, eng, []byte("hello"))
 	if got.Type != action.Intercept {
 		t.Fatalf("inspectWebSocketPayload action = %#v, want intercept", got)
 	}
@@ -1483,5 +1537,201 @@ func TestFixURITLSTransportOnConnectRunsAfterHandshake(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for transport shutdown")
+	}
+}
+
+/**
+ * wsTestClientCertPEM 生成一次性自签客户端证书，返回 PEM 文本。
+ */
+func wsTestClientCertPEM(tb testing.TB) (string, string) {
+	tb.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		tb.Fatalf("generate client key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "wss-mtls-client.test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		tb.Fatalf("create client certificate: %v", err)
+	}
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		tb.Fatalf("marshal client key: %v", err)
+	}
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	return certPEM, keyPEM
+}
+
+func TestWSTLSDialWebSocketUpstreamInjectsClientCert(t *testing.T) {
+	certPEM, keyPEM := wsTestClientCertPEM(t)
+	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		t.Fatalf("parse test pair: %v", err)
+	}
+
+	clientCert, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse client certificate DER: %v", err)
+	}
+	clientCAs := x509.NewCertPool()
+	clientCAs.AddCert(clientCert)
+
+	src, dst := net.Pipe()
+	srvErrCh := make(chan error, 1)
+	srv := tls.Server(dst, &tls.Config{
+		Certificates: []tls.Certificate{pair},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS12,
+	})
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		if err := srv.Handshake(); err != nil {
+			srvErrCh <- err
+			return
+		}
+		cs := srv.ConnectionState()
+		if len(cs.PeerCertificates) != 1 || cs.PeerCertificates[0].Subject.CommonName != "wss-mtls-client.test" {
+			srvErrCh <- fmt.Errorf("unexpected peer certificates: %v", cs.PeerCertificates)
+			return
+		}
+		srvErrCh <- nil
+	}()
+	defer func() {
+		_ = src.Close()
+		_ = dst.Close()
+		<-serverDone
+	}()
+
+	site := store.Site{
+		UpstreamTLSServerName:    "origin.example.test",
+		UpstreamTLSSkipVerify:    true,
+		UpstreamTLSClientCertPEM: &certPEM,
+		UpstreamTLSClientKeyPEM:  &keyPEM,
+		UpstreamTLSClientCertDER: pair.Certificate[0],
+		UpstreamTLSClientCertKey: pair.PrivateKey,
+		UpstreamTLSClientCertSet: true,
+		UpstreamTLSClientCertBad: false,
+		UpstreamTLSClientCertFP:  "prepared",
+	}
+	rt := snapshot.SiteRuntime{Site: site}
+
+	originalDial := tlsDialWebSocketUpstream
+	tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, gotRT snapshot.SiteRuntime) (net.Conn, error) {
+		cfg := wsUpstreamTLSConfig(gotRT)
+		if cfg == nil {
+			t.Fatal("websocket upstream TLS config is nil")
+		}
+		if len(cfg.Certificates) != 1 {
+			t.Fatalf("TLS config Certificates = %#v, want exactly one", cfg.Certificates)
+		}
+		if cfg.Certificates[0].PrivateKey == nil {
+			t.Fatal("TLS config client certificate private key is nil")
+		}
+		if cfg.MinVersion != tls.VersionTLS10 {
+			t.Fatalf("TLS config MinVersion = %#x, want %#x", cfg.MinVersion, tls.VersionTLS10)
+		}
+		if len(cfg.CipherSuites) == 0 {
+			t.Fatal("TLS config cipher suites are empty")
+		}
+		if host != "unused-host:9443" {
+			t.Fatalf("wss dial host = %q", host)
+		}
+		// 绕开真实网络，直接基于 net.Pipe 端点与测试服务端完成真实 TLS 握手。
+		// 这样不发任何数据包，天然豁免 -race 下 crypto/tls 手写超时的数据竞争，
+		// 同时仍由 RequireAndVerifyClientCert 证明客户端证书确实被出示。
+		client := tls.Client(src, cfg)
+		if err := client.Handshake(); err != nil {
+			t.Fatalf("client TLS handshake with injected cert config: %v", err)
+		}
+		return client, nil
+	}
+	t.Cleanup(func() { tlsDialWebSocketUpstream = originalDial })
+
+	upConn, err := tlsDialWebSocketUpstream(&net.Dialer{Timeout: 10 * time.Second}, "unused-host:9443", rt)
+	if err != nil {
+		t.Fatalf("wss upstream dial: %v", err)
+	}
+	if cs := upConn.(*tls.Conn).ConnectionState(); !cs.HandshakeComplete {
+		t.Fatal("TLS handshake did not complete")
+	}
+
+	// 先等测试服务端把对端证书校验结果写回，再在主路径关闭连接触发收尾。
+	if err := <-srvErrCh; err != nil {
+		t.Fatalf("server handshake failed: %v", err)
+	}
+	// 不在测试内调用 tls.Conn.Close：Go 1.25 的 close_notify 路径会阻塞至
+	// 管道缓冲耗尽（net.Pipe 无缓冲），-race 下固定多出 5 秒且误报竞态。
+	// 底层 net.Pipe 端点由 trampoline 闭包所在的测试 goroutine 持有，
+	// 靠函数返回后的 defer 关闭收尾。conn 仍用于校验握手完成态。
+	_ = upConn
+}
+
+func TestWSTLSDialWebSocketUpstreamNoClientCertZeroChange(t *testing.T) {
+	site := store.Site{
+		UpstreamTLSServerName: "origin.example.test",
+		UpstreamTLSSkipVerify: true,
+	}
+	rt := snapshot.SiteRuntime{Site: site}
+
+	originalDial := tlsDialWebSocketUpstream
+	dialedShared := false
+	tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, gotRT snapshot.SiteRuntime) (net.Conn, error) {
+		if cfg := wsUpstreamTLSConfig(gotRT); cfg != nil {
+			t.Fatalf("wsUpstreamTLSConfig = %#v, want nil without site client cert", cfg)
+		}
+		if gotRT.Site.UpstreamTLSServerName != "origin.example.test" || !gotRT.Site.UpstreamTLSSkipVerify {
+			t.Fatalf("site TLS fields were not preserved: %#v", gotRT.Site)
+		}
+		dialedShared = true
+		return originalDial(dialer, host, gotRT)
+	}
+	t.Cleanup(func() { tlsDialWebSocketUpstream = originalDial })
+
+	if _, err := tlsDialWebSocketUpstream(&net.Dialer{Timeout: 2 * time.Second}, "127.0.0.1:1", rt); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("expected shared-config dial error, got %v", err)
+	}
+	if !dialedShared {
+		t.Fatal("expected fallback to shared TLS config dial path")
+	}
+}
+
+func TestWSTLSDialWebSocketUpstreamBadCertFallsBackWithoutCert(t *testing.T) {
+	certPEM, keyPEM := wsTestClientCertPEM(t)
+	site := store.Site{
+		UpstreamTLSServerName:    "origin.example.test",
+		UpstreamTLSSkipVerify:    true,
+		UpstreamTLSClientCertPEM: &certPEM,
+		UpstreamTLSClientKeyPEM:  &keyPEM,
+		UpstreamTLSClientCertSet: true,
+		UpstreamTLSClientCertBad: true,
+		UpstreamTLSClientCertFP:  "badpair",
+	}
+	rt := snapshot.SiteRuntime{Site: site}
+
+	originalDial := tlsDialWebSocketUpstream
+	dialedShared := false
+	tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, gotRT snapshot.SiteRuntime) (net.Conn, error) {
+		if cfg := wsUpstreamTLSConfig(gotRT); cfg != nil {
+			t.Fatalf("wsUpstreamTLSConfig = %#v, want nil for bad site cert", cfg)
+		}
+		dialedShared = true
+		return originalDial(dialer, host, gotRT)
+	}
+	t.Cleanup(func() { tlsDialWebSocketUpstream = originalDial })
+
+	if _, err := tlsDialWebSocketUpstream(&net.Dialer{Timeout: 2 * time.Second}, "127.0.0.1:1", rt); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("expected shared-config dial error, got %v", err)
+	}
+	if !dialedShared {
+		t.Fatal("expected fallback to shared TLS config dial path")
 	}
 }

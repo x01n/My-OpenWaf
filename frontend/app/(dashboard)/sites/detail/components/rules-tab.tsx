@@ -1,46 +1,50 @@
-"use client";
+"use client"
 
-import { useTranslation } from "react-i18next";
-import { useRouter } from "next/navigation";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { toast } from "sonner";
-import { IconPlus, IconTrash } from "@tabler/icons-react";
-import { useSiteRules, useRuleDelete } from "@/hooks/use-api";
-import { ruleApi } from "@/lib/api";
-import { DataTable } from "@/components/data-table";
-import type { Site } from "@/lib/types";
+import { useTranslation } from "react-i18next"
+import { useRouter } from "next/navigation"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { toast } from "sonner"
+import { IconPlus, IconTrash } from "@tabler/icons-react"
+import { useSiteRules, useRuleDelete, useRuleMutation } from "@/hooks/use-api"
+import { DataTable } from "@/components/data-table"
+import type { Rule, Site } from "@/lib/types"
 
 interface RulesTabProps {
-  site: Site;
+  site: Site
+  canManage: boolean
 }
 
-export function RulesTab({ site }: RulesTabProps) {
-  const { t } = useTranslation();
-  const router = useRouter();
-  const { data: rules, mutate } = useSiteRules(site.id);
-  const deleteRule = useRuleDelete();
+export function RulesTab({ site, canManage }: RulesTabProps) {
+  const { t } = useTranslation()
+  const router = useRouter()
+  const { data: rules } = useSiteRules(site.id)
+  const deleteRule = useRuleDelete()
+  const updateRule = useRuleMutation()
 
-  const handleToggle = async (rule: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const handleToggle = async (rule: Rule) => {
+    if (!canManage) return
     try {
-      await ruleApi.update(rule.id, { enabled: !rule.enabled });
-      toast.success(t("common.updateSuccess"));
-      mutate();
+      await updateRule.execute({
+        id: rule.id,
+        data: { enabled: !rule.enabled },
+      })
+      toast.success(t("common.updateSuccess"))
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   const handleDelete = async (id: number) => {
+    if (!canManage) return
     try {
-      await deleteRule.execute(id);
-      toast.success(t("common.deleteSuccess"));
-      mutate();
+      await deleteRule.execute(id)
+      toast.success(t("common.deleteSuccess"))
     } catch {
-      toast.error(t("common.operationFailed"));
+      toast.error(t("common.operationFailed"))
     }
-  };
+  }
 
   const columns = [
     { key: "name", title: t("common.name") },
@@ -51,9 +55,10 @@ export function RulesTab({ site }: RulesTabProps) {
     {
       key: "_enabled",
       title: t("common.enabled"),
-      render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
+      render: (row: Rule) => (
         <Switch
           checked={row.enabled}
+          disabled={!canManage || updateRule.loading}
           onCheckedChange={() => handleToggle(row)}
           className="scale-75"
         />
@@ -62,32 +67,41 @@ export function RulesTab({ site }: RulesTabProps) {
     {
       key: "_actions",
       title: "",
-      render: (row: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="text-destructive"
-          onClick={() => handleDelete(row.id)}
-        >
-          <IconTrash className="h-3.5 w-3.5" />
-        </Button>
-      ),
+      render: (row: Rule) =>
+        canManage ? (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-destructive"
+            disabled={deleteRule.loading}
+            onClick={() => handleDelete(row.id)}
+          >
+            <IconTrash className="h-3.5 w-3.5" />
+          </Button>
+        ) : null,
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-3">
           <CardTitle className="text-base">{t("sites.detail.rules")}</CardTitle>
-          <Button
-            size="sm"
-            className="h-8"
-            onClick={() => router.push("/rules")}
-          >
-            <IconPlus className="mr-1 h-4 w-4" />
-            {t("sites.detail.addRule")}
-          </Button>
+          {canManage && (
+            <Button
+              size="sm"
+              className="h-8"
+              onClick={() => {
+                const policyId = rules?.policy_id
+                router.push(
+                  policyId ? `/rules?policy_id=${policyId}` : "/rules"
+                )
+              }}
+            >
+              <IconPlus className="mr-1 h-4 w-4" />
+              {t("sites.detail.addRule")}
+            </Button>
+          )}
         </CardHeader>
         <CardContent>
           <DataTable
@@ -100,5 +114,5 @@ export function RulesTab({ site }: RulesTabProps) {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

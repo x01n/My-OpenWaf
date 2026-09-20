@@ -53,6 +53,9 @@ func (r *IPListRepo) Get(id uint) (*store.IPListEntry, error) {
 	return &item, r.db.First(&item, id).Error
 }
 
-func (r *IPListRepo) Create(item *store.IPListEntry) error { return r.db.Create(item).Error }
+// Create 新建名单条目。Enabled 带 gorm default:true，见 CreateWithZeroDefaults。
+func (r *IPListRepo) Create(item *store.IPListEntry) error {
+	return store.CreateWithZeroDefaults(r.db, item)
+}
 func (r *IPListRepo) Update(item *store.IPListEntry) error { return r.db.Save(item).Error }
 func (r *IPListRepo) Delete(id uint) error                 { return r.db.Delete(&store.IPListEntry{}, id).Error }

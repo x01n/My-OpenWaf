@@ -36,6 +36,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -160,21 +161,23 @@ func (s Setting) Valid() error {
 type SettingID uint16
 
 const (
-	SettingHeaderTableSize      SettingID = 0x1
-	SettingEnablePush           SettingID = 0x2
-	SettingMaxConcurrentStreams SettingID = 0x3
-	SettingInitialWindowSize    SettingID = 0x4
-	SettingMaxFrameSize         SettingID = 0x5
-	SettingMaxHeaderListSize    SettingID = 0x6
+	SettingHeaderTableSize       SettingID = 0x1
+	SettingEnablePush            SettingID = 0x2
+	SettingMaxConcurrentStreams  SettingID = 0x3
+	SettingInitialWindowSize     SettingID = 0x4
+	SettingMaxFrameSize          SettingID = 0x5
+	SettingMaxHeaderListSize     SettingID = 0x6
+	SettingEnableConnectProtocol SettingID = 0x8
 )
 
 var settingName = map[SettingID]string{
-	SettingHeaderTableSize:      "HEADER_TABLE_SIZE",
-	SettingEnablePush:           "ENABLE_PUSH",
-	SettingMaxConcurrentStreams: "MAX_CONCURRENT_STREAMS",
-	SettingInitialWindowSize:    "INITIAL_WINDOW_SIZE",
-	SettingMaxFrameSize:         "MAX_FRAME_SIZE",
-	SettingMaxHeaderListSize:    "MAX_HEADER_LIST_SIZE",
+	SettingHeaderTableSize:       "HEADER_TABLE_SIZE",
+	SettingEnablePush:            "ENABLE_PUSH",
+	SettingMaxConcurrentStreams:  "MAX_CONCURRENT_STREAMS",
+	SettingInitialWindowSize:     "INITIAL_WINDOW_SIZE",
+	SettingMaxFrameSize:          "MAX_FRAME_SIZE",
+	SettingMaxHeaderListSize:     "MAX_HEADER_LIST_SIZE",
+	SettingEnableConnectProtocol: "ENABLE_CONNECT_PROTOCOL",
 }
 
 func (s SettingID) String() string {
@@ -342,4 +345,13 @@ func validPseudoPath(v string) bool {
 type h2ServerConn struct {
 	network.Conn
 	rw *responseWriter
+}
+
+// NetConn exposes the underlying data-plane connection to callers that need
+// connection-scoped metadata, such as the inbound TLS fingerprint.
+func (c *h2ServerConn) NetConn() net.Conn {
+	if c == nil || c.Conn == nil {
+		return nil
+	}
+	return c.Conn
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/waf/bot"
 )
 
@@ -73,6 +74,12 @@ func takeInternalHTTP3CancelSignal(token string) (<-chan struct{}, bool) {
 // for header-order fingerprinting and logging.
 func populateRequestCtxHeaders(reqCtx *pipeline.RequestCtx, c *app.RequestContext) {
 	reqCtx.HeadersLowercase = true
+	if reqCtx.Headers == nil {
+		reqCtx.Headers = make(map[string]string)
+	} else {
+		clear(reqCtx.Headers)
+	}
+	reqCtx.ClearHeaderKeys()
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		key := string(k)
 		lower := lowerRequestHeaderName(key)
@@ -205,6 +212,7 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	}
 	clearInternalHTTP3RequestMetadataHeaders(c)
 	c.Set(internalHTTP3ContextKey, true)
+	security.MarkTrustedInboundHTTP3(c)
 
 	if version == "" && sni == "" && alpn == "" && ja3 == "" && ja3Hash == "" && ja4 == "" &&
 		len(cipherSuites) == 0 && len(extensions) == 0 && len(curves) == 0 && len(pointFormats) == 0 {
@@ -357,4 +365,14 @@ func hasInternalHTTP3Marker(c *app.RequestContext) bool {
 	}
 	return strings.EqualFold(trimRequestHeaderValue(c.GetHeader(InternalHTTP3ProtoHeader)), "h3") &&
 		strings.EqualFold(trimRequestHeaderValue(c.GetHeader("X-Forwarded-Proto")), "h3")
+}
+
+// TrustedInboundForwardedProto reports the authenticated inbound protocol.
+// HTTP/3 loopback metadata is accepted only after applyInternalHTTP3RequestMetadata
+// has verified both the marker and the loopback peer.
+func TrustedInboundForwardedProto(c *app.RequestContext) string {
+	if hasInternalHTTP3Marker(c) {
+		return "h3"
+	}
+	return security.TrustedInboundForwardedProto(c)
 }

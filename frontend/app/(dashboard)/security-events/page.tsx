@@ -1,42 +1,40 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useCallback, useMemo, useRef, useState } from "react"
+import dynamic from "next/dynamic"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { useTranslation } from "react-i18next"
+import { PageHeader } from "@/components/page-header"
+import { toast } from "sonner"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import {
-  Pagination,
-  PaginationContent,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-  PaginationEllipsis,
-} from "@/components/ui/pagination";
-import { Badge } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
+} from "@/components/ui/select"
+import { TablePagination } from "@/components/table-pagination"
+import { Badge } from "@/components/ui/badge"
+import { ActionBadge } from "@/components/action-badge"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { DataTable } from "@/components/data-table";
-import { SecurityEventDetailDialog } from "@/components/security-event-detail-dialog";
-import { DateRangePicker } from "@/components/date-range-picker";
-import { IpHoverPreview } from "@/components/ip-hover-preview";
-import { EmptyState } from "@/components/empty-state";
-import Link from "next/link";
+} from "@/components/ui/dropdown-menu"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { DataTable } from "@/components/data-table"
+import { DateRangePicker } from "@/components/date-range-picker"
+import { IpHoverPreview } from "@/components/ip-hover-preview"
+import { EmptyState } from "@/components/empty-state"
+import { RequestAggregateView } from "./components/request-aggregate-view"
+import Link from "next/link"
 import {
   IconFilter,
   IconEye,
@@ -46,27 +44,58 @@ import {
   IconX,
   IconRoute,
   IconShieldOff,
-} from "@tabler/icons-react";
-import { useSecurityEvents } from "@/hooks/use-api";
-import { ipListApi } from "@/lib/api";
-import type { SecurityEvent } from "@/lib/types";
-import { format } from "date-fns";
+} from "@tabler/icons-react"
+import { invalidateIPListCaches, useSecurityEvents } from "@/hooks/use-api"
+import { ipListApi, securityEventApi } from "@/lib/api"
+import type { SecurityEvent } from "@/lib/types"
+import { categoryLabel } from "@/lib/attack-category"
+import { localizeMatchDesc } from "@/lib/match-desc-i18n"
+import { format } from "date-fns"
 
-const actionColorMap: Record<string, string> = {
-  block: "destructive",
-  intercept: "destructive",
-  observe: "secondary",
-  challenge: "outline",
-  captcha_challenge: "outline",
-  shield_challenge: "outline",
-  chain_challenge: "outline",
-  allow: "default",
-  drop: "destructive",
-  log_only: "secondary",
-};
+const SecurityEventDetailDialog = dynamic(() =>
+  import("@/components/security-event-detail-dialog").then(
+    (module) => module.SecurityEventDetailDialog
+  )
+)
+
+const FILTER_ALL = "__all__"
+type SelectionState = { scope: string; ids: Set<number> }
+
+interface SecurityEventFilters {
+  action: string
+  category: string
+  client_ip: string
+  host: string
+  path: string
+  site_id: string
+  since: string
+  until: string
+}
+
+interface FilterDraftState {
+  source: string
+  value: SecurityEventFilters
+}
+
+/** 列表视图维度：事件级逐条展示，请求级按 request_id 聚合。 */
+const VIEW_EVENTS = "events"
+const VIEW_REQUESTS = "requests"
+type ViewMode = typeof VIEW_EVENTS | typeof VIEW_REQUESTS
+
+function parsePositivePage(raw: string | null): number {
+  const value = Number(raw)
+  return Number.isFinite(value) && Number.isInteger(value) && value >= 1
+    ? value
+    : 1
+}
+
+/** 视图参数只接受两个已知值，其余一律回落到事件级，避免 URL 被改写后渲染空白。 */
+function parseViewMode(raw: string | null): ViewMode {
+  return raw === VIEW_REQUESTS ? VIEW_REQUESTS : VIEW_EVENTS
+}
 
 export default function SecurityEventsPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation()
 
   const actionLabelMap: Record<string, string> = {
     block: t("securityEvents.action.block"),
@@ -79,76 +108,173 @@ export default function SecurityEventsPage() {
     allow: t("securityEvents.action.allow"),
     drop: t("securityEvents.action.drop"),
     log_only: t("securityEvents.action.log_only"),
-  };
+    rate_limit: t("securityEvents.action.rate_limit"),
+    redirect: t("securityEvents.action.redirect"),
+    tag: t("securityEvents.action.tag"),
+  }
 
-  const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
-  const [filters, setFilters] = useState({
-    action: "",
-    category: "",
-    client_ip: "",
-    host: "",
-    since: "",
-    until: "",
-  });
-  const [showFilters, setShowFilters] = useState(false);
-  const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [batchLoading, setBatchLoading] = useState(false);
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const [pageSize] = useState(20)
+  const [showFilters, setShowFilters] = useState(false)
+  const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null)
+  const detailRequestRef = useRef(0)
+  const [selection, setSelection] = useState<SelectionState>({
+    scope: "",
+    ids: new Set(),
+  })
+  const [batchLoading, setBatchLoading] = useState(false)
 
-  const { data, isLoading } = useSecurityEvents({
-    page,
-    page_size: pageSize,
-    ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== "")),
-  });
+  /** 列表只返回轻量字段；打开详情时按 ID 获取完整脱敏报文。 */
+  const openEventDetail = useCallback(
+    async (row: SecurityEvent) => {
+      const requestSequence = ++detailRequestRef.current
+      try {
+        const detail = await securityEventApi.get(row.id)
+        if (detailRequestRef.current === requestSequence) {
+          setSelectedEvent(detail)
+        }
+      } catch (detailLoadError) {
+        if (detailRequestRef.current === requestSequence) {
+          toast.error(
+            detailLoadError instanceof Error
+              ? detailLoadError.message
+              : t("common.operationFailed")
+          )
+        }
+      }
+    },
+    [t]
+  )
+  const page = parsePositivePage(searchParams.get("page"))
+  const view = parseViewMode(searchParams.get("view"))
+  const queryString = searchParams.toString()
+  const filters = useMemo<SecurityEventFilters>(
+    () => ({
+      action: searchParams.get("action") || "",
+      category: searchParams.get("category") || "",
+      client_ip: searchParams.get("client_ip") || "",
+      host: searchParams.get("host") || "",
+      path: searchParams.get("path") || "",
+      site_id: searchParams.get("site_id") || "",
+      since: searchParams.get("since") || "",
+      until: searchParams.get("until") || "",
+    }),
+    [searchParams]
+  )
+  const [draftState, setDraftState] = useState<FilterDraftState>({
+    source: queryString,
+    value: filters,
+  })
+  const draft = draftState.source === queryString ? draftState.value : filters
+  /** 两个视图共用同一组筛选值，请求级视图直接透传，不再造第二套筛选状态。 */
+  const activeFilterParams = Object.fromEntries(
+    Object.entries(filters).filter(([, v]) => v !== "")
+  ) as Record<string, string>
 
-  const items = data?.items || [];
-  const total = data?.total || 0;
-  const totalPages = Math.ceil(total / pageSize) || 1;
+  const updateQuery = (
+    updates:
+      | Partial<SecurityEventFilters>
+      | Record<string, string | undefined>
+  ) => {
+    const params = new URLSearchParams(searchParams.toString())
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) params.set(key, value)
+      else params.delete(key)
+    }
+    if (!("page" in updates)) params.set("page", "1")
+    router.replace(`${pathname}?${params.toString()}`)
+  }
+
+  const eventQueryParams =
+    view === VIEW_EVENTS
+      ? {
+          page,
+          page_size: pageSize,
+          ...activeFilterParams,
+        }
+      : null
+  const { data, isLoading, error } = useSecurityEvents(eventQueryParams)
+
+  const items = useMemo(() => data?.items || [], [data?.items])
+  const total = data?.total || 0
+  const selectionScope = `${page}:${JSON.stringify(filters)}`
+  const scopedSelectedIds =
+    selection.scope === selectionScope ? selection.ids : new Set<number>()
+  const selectedCurrentPageCount = items.reduce(
+    (count, item) => count + (scopedSelectedIds.has(item.id) ? 1 : 0),
+    0
+  )
+  const allCurrentPageSelected =
+    items.length > 0 && selectedCurrentPageCount === items.length
 
   const handleFilterChange = (key: string, value: string) => {
-    setFilters((prev) => ({ ...prev, [key]: value }));
-    setPage(1);
-  };
+    if (!(key in filters)) return
+    setDraftState((current) => ({
+      source: queryString,
+      value: {
+        ...(current.source === queryString ? current.value : filters),
+        [key]: value,
+      },
+    }))
+  }
 
   const clearFilters = () => {
-    setFilters({
-      action: "",
-      category: "",
-      client_ip: "",
-      host: "",
-      since: "",
-      until: "",
-    });
-    setPage(1);
-  };
+    const emptyFilters: Record<string, undefined> = {
+      action: undefined,
+      category: undefined,
+      client_ip: undefined,
+      host: undefined,
+      path: undefined,
+      site_id: undefined,
+      since: undefined,
+      until: undefined,
+    }
+    setDraftState({
+      source: queryString,
+      value: {
+        action: "",
+        category: "",
+        client_ip: "",
+        host: "",
+        path: "",
+        site_id: "",
+        since: "",
+        until: "",
+      },
+    })
+    updateQuery(emptyFilters)
+  }
 
   const toggleSelect = (id: number) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+    setSelection((prev) => {
+      const next = new Set(prev.scope === selectionScope ? prev.ids : [])
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return { scope: selectionScope, ids: next }
+    })
+  }
 
   const toggleSelectAll = () => {
-    if (selectedIds.size === items.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(items.map((item) => item.id)));
-    }
-  };
+    setSelection({
+      scope: selectionScope,
+      ids: allCurrentPageSelected
+        ? new Set()
+        : new Set(items.map((item) => item.id)),
+    })
+  }
 
-  const clearSelection = () => setSelectedIds(new Set());
+  const clearSelection = () =>
+    setSelection({ scope: selectionScope, ids: new Set() })
 
   const exportCSV = () => {
-    if (items.length === 0) return;
+    if (items.length === 0) return
     const headers = [
       "ID",
       t("securityEvents.csv.time", { defaultValue: "时间" }),
       t("securityEvents.csv.clientIp", { defaultValue: "客户端IP" }),
-      "Host",
+      t("securityEvents.csv.host", { defaultValue: "域名" }),
       t("securityEvents.csv.path", { defaultValue: "路径" }),
       t("securityEvents.csv.method", { defaultValue: "方法" }),
       t("securityEvents.csv.action", { defaultValue: "动作" }),
@@ -156,7 +282,7 @@ export default function SecurityEventsPage() {
       t("securityEvents.csv.rule", { defaultValue: "规则" }),
       t("securityEvents.csv.statusCode", { defaultValue: "状态码" }),
       t("securityEvents.csv.matchDesc", { defaultValue: "匹配描述" }),
-    ];
+    ]
     const rows = items.map((ev) => [
       ev.id,
       ev.created_at,
@@ -164,52 +290,59 @@ export default function SecurityEventsPage() {
       ev.host,
       ev.path,
       ev.method,
-      ev.action,
-      ev.category,
+      ev.action ? actionLabelMap[ev.action] || ev.action : "",
+      categoryLabel(ev.category),
       ev.rule_id_str || ev.rule_id,
       ev.status_code,
-      (ev.match_desc || "").replace(/"/g, '""'),
-    ]);
+      localizeMatchDesc(
+        ev.match_desc,
+        i18n.resolvedLanguage ?? i18n.language
+      ).replace(/"/g, '""'),
+    ])
     const csv = [
       headers.join(","),
       ...rows.map((r) => r.map((v) => `"${v}"`).join(",")),
-    ].join("\n");
-    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
-    downloadBlob(blob, `security-events-${formatFileDate()}.csv`);
-    toast.success(t("securityEvents.export.csvSuccess", { defaultValue: "CSV 导出成功" }));
-  };
+    ].join("\n")
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" })
+    downloadBlob(blob, `security-events-${formatFileDate()}.csv`)
+    toast.success(
+      t("securityEvents.export.csvSuccess", { defaultValue: "CSV 导出成功" })
+    )
+  }
 
   const exportJSON = () => {
-    if (items.length === 0) return;
-    const json = JSON.stringify(items, null, 2);
-    const blob = new Blob([json], { type: "application/json;charset=utf-8;" });
-    downloadBlob(blob, `security-events-${formatFileDate()}.json`);
-    toast.success(t("securityEvents.export.jsonSuccess", { defaultValue: "JSON 导出成功" }));
-  };
+    if (items.length === 0) return
+    const json = JSON.stringify(items, null, 2)
+    const blob = new Blob([json], { type: "application/json;charset=utf-8;" })
+    downloadBlob(blob, `security-events-${formatFileDate()}.json`)
+    toast.success(
+      t("securityEvents.export.jsonSuccess", { defaultValue: "JSON 导出成功" })
+    )
+  }
 
   const formatFileDate = () => {
-    return format(new Date(), "yyyyMMdd-HHmmss");
-  };
+    return format(new Date(), "yyyyMMdd-HHmmss")
+  }
 
   const downloadBlob = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
 
   const batchAddToBlocklist = async () => {
-    const selectedItems = items.filter((item) => selectedIds.has(item.id));
-    const uniqueIPs = [...new Set(selectedItems.map((item) => item.client_ip))];
-    if (uniqueIPs.length === 0) return;
+    const selectedItems = items.filter((item) => scopedSelectedIds.has(item.id))
+    const uniqueIPs = [...new Set(selectedItems.map((item) => item.client_ip))]
+    if (uniqueIPs.length === 0) return
 
-    setBatchLoading(true);
-    let success = 0;
-    let failed = 0;
+    setBatchLoading(true)
+    let success = 0
+    let failed = 0
     for (const ip of uniqueIPs) {
       try {
         await ipListApi.create({
@@ -219,21 +352,24 @@ export default function SecurityEventsPage() {
           note: t("securityEvents.batch.blocklistNote", {
             defaultValue: "批量加入黑名单 - 安全事件",
           }),
-        });
-        success++;
+        })
+        success++
       } catch {
-        failed++;
+        failed++
       }
     }
-    setBatchLoading(false);
-    clearSelection();
+    if (success > 0) {
+      await invalidateIPListCaches().catch(() => undefined)
+    }
+    setBatchLoading(false)
+    clearSelection()
     if (failed === 0) {
       toast.success(
         t("securityEvents.batch.blocklistSuccess", {
           defaultValue: `已将 ${success} 个 IP 加入黑名单`,
           success,
         })
-      );
+      )
     } else {
       toast.warning(
         t("securityEvents.batch.blocklistPartial", {
@@ -241,16 +377,16 @@ export default function SecurityEventsPage() {
           success,
           failed,
         })
-      );
+      )
     }
-  };
+  }
 
   const columns = [
     {
       key: "select",
       title: (
         <Checkbox
-          checked={items.length > 0 && selectedIds.size === items.length}
+          checked={allCurrentPageSelected}
           onCheckedChange={toggleSelectAll}
           aria-label={t("common.selectAll", { defaultValue: "全选" })}
         />
@@ -258,7 +394,7 @@ export default function SecurityEventsPage() {
       width: "40px",
       render: (row: SecurityEvent) => (
         <Checkbox
-          checked={selectedIds.has(row.id)}
+          checked={scopedSelectedIds.has(row.id)}
           onCheckedChange={() => toggleSelect(row.id)}
           aria-label={`选择事件 ${row.id}`}
         />
@@ -276,24 +412,39 @@ export default function SecurityEventsPage() {
           <span className="text-muted-foreground">-</span>
         ),
     },
-    { key: "host", title: "Host", width: "180px" },
-    { key: "path", title: "Path", width: "200px" },
-    { key: "method", title: "Method", width: "80px" },
+    {
+      key: "host",
+      title: t("securityEvents.host"),
+      width: "180px",
+      cellClassName: "whitespace-normal break-all align-top",
+    },
+    {
+      key: "path",
+      title: t("securityEvents.path"),
+      width: "200px",
+      cellClassName: "whitespace-normal break-all align-top",
+    },
+    { key: "method", title: t("securityEvents.method"), width: "80px" },
     {
       key: "action",
-      title: "Action",
+      title: t("securityEvents.actionLabel"),
       width: "100px",
       render: (row: SecurityEvent) => (
-        <Badge
-          variant={(actionColorMap[row.action] || "secondary") as React.ComponentProps<typeof Badge>["variant"]}
-          className="h-5 px-1.5 text-[10px]"
-        >
-          {actionLabelMap[row.action] || row.action}
-        </Badge>
+        <ActionBadge action={row.action} className="h-5 px-1.5 text-[10px]" />
       ),
     },
-    { key: "category", title: "Category", width: "120px" },
-    { key: "rule_id_str", title: "Rule", width: "120px" },
+    {
+      key: "category",
+      title: t("securityEvents.category", { defaultValue: "类别" }),
+      width: "120px",
+      render: (row: SecurityEvent) => categoryLabel(row.category),
+    },
+    {
+      key: "rule_id_str",
+      title: t("securityEvents.rule", { defaultValue: "规则" }),
+      width: "120px",
+      cellClassName: "whitespace-normal break-all align-top",
+    },
     {
       key: "operations",
       title: t("common.action"),
@@ -303,7 +454,7 @@ export default function SecurityEventsPage() {
           <Button
             variant="ghost"
             size="icon-sm"
-            onClick={() => setSelectedEvent(row)}
+            onClick={() => openEventDetail(row)}
             title={t("common.viewDetail")}
           >
             <IconEye className="h-4 w-4" />
@@ -325,75 +476,133 @@ export default function SecurityEventsPage() {
         </div>
       ),
     },
-  ];
+  ]
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("securityEvents.title")}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t("securityEvents.description")}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge variant="secondary" className="h-5 px-2 text-xs">
-            {t("securityEvents.total", { count: total })}
-          </Badge>
-        </div>
-      </div>
+      <PageHeader
+        title={t("securityEvents.title")}
+        description={t("securityEvents.description")}
+        actions={
+          view === VIEW_EVENTS ? (
+            <Badge variant="secondary" className="h-5 px-2 text-xs">
+              {t("securityEvents.total", { count: total })}
+            </Badge>
+          ) : null
+        }
+      />
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("error.pageLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            {error.message || t("error.unexpectedError")}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-base">{t("securityEvents.eventList")}</CardTitle>
-            <div className="flex items-center gap-2">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-1 text-xs"
-                    disabled={items.length === 0}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <CardTitle className="text-base">
+                {view === VIEW_EVENTS
+                  ? t("securityEvents.eventList")
+                  : t("securityEvents.requests.listTitle")}
+              </CardTitle>
+              <Tabs
+                value={view}
+                onValueChange={(v) =>
+                  updateQuery({ view: v === VIEW_EVENTS ? undefined : v })
+                }
+              >
+                <TabsList className="h-8">
+                  <TabsTrigger
+                    value={VIEW_EVENTS}
+                    className="cursor-pointer text-xs"
                   >
-                    <IconDownload className="h-3.5 w-3.5" />
-                    {t("securityEvents.export.title", { defaultValue: "导出" })}
-                    <IconChevronDown className="h-3 w-3" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={exportCSV}>
-                    {t("securityEvents.export.csv", { defaultValue: "导出 CSV" })}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={exportJSON}>
-                    {t("securityEvents.export.json", { defaultValue: "导出 JSON" })}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                    {t("securityEvents.view.events")}
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value={VIEW_REQUESTS}
+                    className="cursor-pointer text-xs"
+                  >
+                    {t("securityEvents.view.requests")}
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+            <div className="flex items-center gap-2">
+              {view === VIEW_EVENTS && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 cursor-pointer gap-1 text-xs"
+                      disabled={items.length === 0}
+                    >
+                      <IconDownload className="h-3.5 w-3.5" />
+                      {t("securityEvents.export.title", {
+                        defaultValue: "导出",
+                      })}
+                      <IconChevronDown className="h-3 w-3" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={exportCSV}>
+                      {t("securityEvents.export.csv", {
+                        defaultValue: "导出 CSV",
+                      })}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={exportJSON}>
+                      {t("securityEvents.export.json", {
+                        defaultValue: "导出 JSON",
+                      })}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
               <Button
                 variant="outline"
                 size="sm"
-                className="h-8 gap-1 text-xs"
+                className="h-8 cursor-pointer gap-1 text-xs"
                 onClick={() => setShowFilters(!showFilters)}
               >
                 <IconFilter className="h-3.5 w-3.5" />
-                {showFilters ? t("common.collapseFilter") : t("common.advancedFilter")}
+                {showFilters
+                  ? t("common.collapseFilter")
+                  : t("common.advancedFilter")}
               </Button>
             </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
           {showFilters && (
-            <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-3">
+            <form
+              className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2 lg:grid-cols-3"
+              onSubmit={(event) => {
+                event.preventDefault()
+                updateQuery({ ...draft })
+              }}
+            >
               <div className="space-y-1.5">
-                <Label className="text-xs">Action</Label>
+                <Label className="text-xs">
+                  {t("securityEvents.actionLabel")}
+                </Label>
                 <Select
-                  value={filters.action}
-                  onValueChange={(v) => handleFilterChange("action", v)}
+                  value={draft.action || FILTER_ALL}
+                  onValueChange={(v) =>
+                    handleFilterChange("action", v === FILTER_ALL ? "" : v)
+                  }
                 >
                   <SelectTrigger className="h-8 text-xs">
                     <SelectValue placeholder={t("securityEvents.allActions")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">{t("common.all")}</SelectItem>
+                    <SelectItem value={FILTER_ALL}>
+                      {t("common.all")}
+                    </SelectItem>
                     {Object.entries(actionLabelMap).map(([key, label]) => (
                       <SelectItem key={key} value={key}>
                         {label}
@@ -403,21 +612,29 @@ export default function SecurityEventsPage() {
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs">Category</Label>
+                <Label className="text-xs">
+                  {t("securityEvents.category", { defaultValue: "类别" })}
+                </Label>
                 <Input
                   className="h-8 text-xs"
                   placeholder={t("securityEvents.categoryPlaceholder")}
-                  value={filters.category}
-                  onChange={(e) => handleFilterChange("category", e.target.value)}
+                  value={draft.category}
+                  onChange={(e) =>
+                    handleFilterChange("category", e.target.value)
+                  }
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs">{t("securityEvents.clientIp")}</Label>
+                <Label className="text-xs">
+                  {t("securityEvents.clientIp")}
+                </Label>
                 <Input
                   className="h-8 text-xs"
                   placeholder={t("securityEvents.ipPlaceholder")}
-                  value={filters.client_ip}
-                  onChange={(e) => handleFilterChange("client_ip", e.target.value)}
+                  value={draft.client_ip}
+                  onChange={(e) =>
+                    handleFilterChange("client_ip", e.target.value)
+                  }
                 />
               </div>
               <div className="space-y-1.5">
@@ -425,7 +642,7 @@ export default function SecurityEventsPage() {
                 <Input
                   className="h-8 text-xs"
                   placeholder={t("securityEvents.domainPlaceholder")}
-                  value={filters.host}
+                  value={draft.host}
                   onChange={(e) => handleFilterChange("host", e.target.value)}
                 />
               </div>
@@ -436,92 +653,80 @@ export default function SecurityEventsPage() {
                   })}
                 </Label>
                 <DateRangePicker
-                  value={{ since: filters.since, until: filters.until }}
+                  value={{ since: draft.since, until: draft.until }}
                   onChange={(v) => {
-                    setFilters((prev) => ({
-                      ...prev,
-                      since: v.since,
-                      until: v.until,
-                    }));
-                    setPage(1);
+                    handleFilterChange("since", v.since)
+                    handleFilterChange("until", v.until)
                   }}
                 />
               </div>
-              <div className="flex items-end sm:col-span-2 lg:col-span-3">
+              <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3">
+                <Button type="submit" size="sm" className="h-8 text-xs">
+                  {t("securityEvents.applyFilters", {
+                    defaultValue: "应用筛选",
+                  })}
+                </Button>
                 <Button
+                  type="button"
                   variant="ghost"
                   size="sm"
-                  className="h-8 text-xs"
+                  className="h-8 cursor-pointer text-xs"
                   onClick={clearFilters}
                 >
                   {t("common.clearFilters")}
                 </Button>
               </div>
-            </div>
+            </form>
           )}
 
-          <DataTable
-            columns={columns}
-            data={items}
-            loading={isLoading}
-            rowKey={(row) => row.id}
-            emptyText={t("securityEvents.empty")}
-            emptyContent={
-              <EmptyState
-                icon={IconShieldOff}
-                title={t("securityEvents.empty")}
-                description={t("securityEvents.emptyHint", "暂未检测到安全事件，当 WAF 拦截或观察到可疑请求时将在此展示")}
-                className="py-16"
-              />
-            }
-          />
+          {view === VIEW_REQUESTS && (
+            <RequestAggregateView
+              filterParams={activeFilterParams}
+              page={page}
+              pageSize={pageSize}
+              onPageChange={(next) => updateQuery({ page: String(next) })}
+            />
+          )}
 
-          {totalPages > 1 && (
-            <Pagination>
-              <PaginationContent>
-                <PaginationItem>
-                  <PaginationPrevious
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    className={page <= 1 ? "pointer-events-none opacity-50" : ""}
-                  />
-                </PaginationItem>
-                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                  const pageNum = i + 1;
-                  return (
-                    <PaginationItem key={pageNum}>
-                      <PaginationLink
-                        isActive={page === pageNum}
-                        onClick={() => setPage(pageNum)}
-                      >
-                        {pageNum}
-                      </PaginationLink>
-                    </PaginationItem>
-                  );
-                })}
-                {totalPages > 5 && (
-                  <PaginationItem>
-                    <PaginationEllipsis />
-                  </PaginationItem>
-                )}
-                <PaginationItem>
-                  <PaginationNext
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    className={page >= totalPages ? "pointer-events-none opacity-50" : ""}
-                  />
-                </PaginationItem>
-              </PaginationContent>
-            </Pagination>
+          {view === VIEW_EVENTS && (
+            <DataTable
+              columns={columns}
+              data={items}
+              loading={isLoading}
+              rowKey={(row) => row.id}
+              emptyText={t("securityEvents.empty")}
+              emptyContent={
+                <EmptyState
+                  icon={IconShieldOff}
+                  title={t("securityEvents.empty")}
+                  description={t(
+                    "securityEvents.emptyHint",
+                    "暂未检测到安全事件，当 WAF 拦截或观察到可疑请求时将在此展示"
+                  )}
+                  className="py-16"
+                />
+              }
+            />
+          )}
+
+          {view === VIEW_EVENTS && (
+            <TablePagination
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              onPageChange={(next) => updateQuery({ page: String(next) })}
+            />
           )}
         </CardContent>
       </Card>
 
-      {selectedIds.size > 0 && (
+      {view === VIEW_EVENTS && selectedCurrentPageCount > 0 && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
           <div className="flex items-center gap-3 rounded-xl border bg-background/95 px-5 py-3 shadow-lg backdrop-blur-sm">
             <span className="text-sm font-medium text-muted-foreground">
               {t("securityEvents.batch.selected", {
-                defaultValue: `已选择 ${selectedIds.size} 条`,
-                count: selectedIds.size,
+                defaultValue: `已选择 ${selectedCurrentPageCount} 条`,
+                count: selectedCurrentPageCount,
               })}
             </span>
             <Button
@@ -532,7 +737,9 @@ export default function SecurityEventsPage() {
               onClick={batchAddToBlocklist}
             >
               <IconShieldLock className="h-3.5 w-3.5" />
-              {t("securityEvents.batch.addToBlocklist", { defaultValue: "批量加入黑名单" })}
+              {t("securityEvents.batch.addToBlocklist", {
+                defaultValue: "批量加入黑名单",
+              })}
             </Button>
             <Button
               variant="ghost"
@@ -551,9 +758,12 @@ export default function SecurityEventsPage() {
         event={selectedEvent}
         open={!!selectedEvent}
         onOpenChange={(open) => {
-          if (!open) setSelectedEvent(null);
+          if (!open) {
+            detailRequestRef.current += 1
+            setSelectedEvent(null)
+          }
         }}
       />
     </div>
-  );
+  )
 }

@@ -22,6 +22,9 @@ type FalsePositiveReport struct {
 	// 关联的安全事件（仅记录 ID，事件本身可能已过期归档）。
 	SecurityEventID uint   `gorm:"index" json:"security_event_id"`
 	RequestID       string `gorm:"size:64;index" json:"request_id"`
+	// SourceEventKey 仅用于按源安全事件原子去重，不对 API 暴露。
+	// 删除反馈时会清空该字段，以允许同一安全事件重新提交反馈。
+	SourceEventKey *string `gorm:"size:96;uniqueIndex:idx_false_positive_source_event_key" json:"-"`
 
 	// 冗余字段：即使原事件已归档，反馈记录仍可查询完整上下文。
 	RuleIDStr string `gorm:"size:100;index" json:"rule_id_str"`

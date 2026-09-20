@@ -5,26 +5,53 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 
 	"My-OpenWaf/internal/appresource"
+	"My-OpenWaf/internal/pkg/schemealias"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/dynamic"
+	"My-OpenWaf/internal/waf/iprep"
+	"My-OpenWaf/internal/waf/owasp"
+	"My-OpenWaf/internal/waf/pageconfig"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // Build loads DB into an immutable Snapshot.
-func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
+func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	var sites []store.Site
 	if err := db.Where("enabled = ?", true).Find(&sites).Error; err != nil {
 		return nil, err
+	}
+
+	hasPolicyTable := db.Migrator().HasTable(&store.Policy{})
+	policyByID := make(map[uint]store.Policy)
+	defaultPolicyID := uint(0)
+	if hasPolicyTable {
+		var policies []store.Policy
+		if err := db.Find(&policies).Error; err != nil {
+			return nil, fmt.Errorf("load policies: %w", err)
+		}
+		policyByID = make(map[uint]store.Policy, len(policies))
+		for _, policy := range policies {
+			policyByID[policy.ID] = policy
+			if policy.DefaultSlot != nil && *policy.DefaultSlot == 1 {
+				if defaultPolicyID != 0 {
+					return nil, fmt.Errorf("multiple default policies configured")
+				}
+				defaultPolicyID = policy.ID
+			}
+		}
+		if defaultPolicyID == 0 {
+			return nil, fmt.Errorf("default policy not configured")
+		}
 	}
 
 	var listeners []store.SiteListener
@@ -53,8 +80,10 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	if err := db.Where("enabled = ?", true).Find(&rules).Error; err != nil {
 		return nil, err
 	}
-	// 一次性加载所有 system_settings 到 map，避免多次独立 DB 查询。
-	settingsMap := loadAllSettings(db)
+	settingsMap, err := loadAllSettings(db)
+	if err != nil {
+		return nil, fmt.Errorf("load system settings: %w", err)
+	}
 
 	networkDefaults := networkDefaultsFromMap(settingsMap)
 	tlsDefaults := tlsDefaultsFromMap(settingsMap)
@@ -63,8 +92,24 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		return nil, err
 	}
 	ccRules := compileCCRules(protection)
+	owaspConfigsByPolicy, owaspDiagnostics, err := loadPolicyOWASPConfigs(db)
+	if err != nil {
+		return nil, err
+	}
+	cveConfigsBySite, err := loadSiteCVEConfigs(db, sites, defaultPolicyID)
+	if err != nil {
+		return nil, err
+	}
 	rulesByPolicy := make(map[uint][]store.Rule)
 	for _, r := range rules {
+		if hasPolicyTable && r.PolicyID == 0 {
+			return nil, fmt.Errorf("rule %d has invalid policy_id 0", r.ID)
+		}
+		if hasPolicyTable {
+			if _, ok := policyByID[r.PolicyID]; !ok {
+				return nil, fmt.Errorf("rule %d references missing policy %d", r.ID, r.PolicyID)
+			}
+		}
 		rulesByPolicy[r.PolicyID] = append(rulesByPolicy[r.PolicyID], r)
 	}
 	for pid := range rulesByPolicy {
@@ -95,13 +140,23 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	// 从预加载的 settingsMap 中读取动态保护和排除记录头（共用 bot_settings 数据）。
 	botSettingsJSON := settingsMap["bot_settings"]
 	dynamicProtection := parseDynamicProtection(botSettingsJSON)
+	if len(dynamicKeyBase) != 32 {
+		return nil, fmt.Errorf("dynamic protection key base must be 32 bytes")
+	}
+	dynamicProtection.EncryptionKeyBase = append([]byte(nil), dynamicKeyBase...)
 	excludeRecordHeaders := parseExcludeRecordHeaders(botSettingsJSON)
 
 	// Load access control configs per site.
-	accessControlBySite := loadAccessControlConfigs(db)
+	accessControlBySite, err := loadAccessControlConfigs(db)
+	if err != nil {
+		return nil, fmt.Errorf("load access control configs: %w", err)
+	}
 
 	// 加载站点级 IP 黑白名单。
-	siteIPLists := loadSiteIPLists(db)
+	siteIPLists, ipListDiagnostics, err := loadSiteIPLists(db)
+	if err != nil {
+		return nil, fmt.Errorf("load site IP lists: %w", err)
+	}
 
 	http2Config := http2ConfigFromMap(settingsMap)
 	hstsEnabled := settingBool(settingsMap, "hsts_enabled")
@@ -116,9 +171,50 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	responseCompressionEnabled := settingBool(settingsMap, "response_compression_enabled")
 	responseCompressionGzipEnabled := settingBool(settingsMap, "response_compression_gzip_enabled")
 	responseCompressionMinBytes := settingInt(settingsMap, "response_compression_min_bytes", DefaultResponseCompressionMinBytes)
+	captchaPage := pageconfig.ParseCaptchaPageConfig(settingsMap[pageconfig.SettingKeyCaptchaPage])
+	challengePage := pageconfig.ParseChallengePageConfig(settingsMap[pageconfig.SettingKeyChallengePage])
+	blockPage := pageconfig.ParseBlockPageConfig(settingsMap[pageconfig.SettingKeyBlockPage])
 
 	sniCerts := make(map[string]tls.Certificate)
-	siteMap := make(map[string]SiteRuntime)
+	sniCertStates := make(map[string]TLSCertificateState)
+	certificateDiagnostics := make([]SnapshotConfigDiagnostic, 0)
+	siteMap := make(map[string]*SiteRuntime)
+
+	// 上游 mTLS 的构建期认定：用下标预计算一次并写入切片元素，主循环的 s 取
+	// 同一份已算好的 DER/Key/Bad，构建全程只做一次 PEM 解析。
+	for i := range sites {
+		pre := &sites[i]
+		pre.PrepareUpstreamMTLSRuntime()
+		if pre.UpstreamTLSClientCertPEM != nil && len(*pre.UpstreamTLSClientCertPEM) > store.MaxUpstreamMTLSPEMBytes {
+			certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+				Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
+				Error: "upstream_mtls_pem_overflow", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+				Kind: "upstream_mtls", Reason: "upstream_mtls_pem_overflow", SiteID: pre.ID,
+			})
+		} else if pre.UpstreamTLSClientKeyPEM != nil && len(*pre.UpstreamTLSClientKeyPEM) > store.MaxUpstreamMTLSPEMBytes {
+			certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+				Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
+				Error: "upstream_mtls_pem_overflow", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+				Kind: "upstream_mtls", Reason: "upstream_mtls_pem_overflow", SiteID: pre.ID,
+			})
+		} else {
+			hasCert := pre.UpstreamTLSClientCertPEM != nil && strings.TrimSpace(*pre.UpstreamTLSClientCertPEM) != ""
+			hasKey := pre.UpstreamTLSClientKeyPEM != nil && strings.TrimSpace(*pre.UpstreamTLSClientKeyPEM) != ""
+			if hasCert != hasKey {
+				certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+					Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
+					Error: "upstream_mtls_unpaired", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+					Kind: "upstream_mtls", Reason: "upstream_mtls_unpaired", SiteID: pre.ID,
+				})
+			} else if pre.UpstreamTLSClientCertBad {
+				certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+					Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
+					Error: "upstream_mtls_unparseable_pair", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+					Kind: "upstream_mtls", Reason: "upstream_mtls_unparseable_pair", SiteID: pre.ID,
+				})
+			}
+		}
+	}
 
 	for _, s := range sites {
 		urls := parseUpstreamURLs(s.UpstreamURLs)
@@ -126,8 +222,13 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 			continue
 		}
 
-		policyID := uint(0)
-		if s.PolicyID != nil {
+		policyID := defaultPolicyID
+		if s.PolicyID != nil && *s.PolicyID != 0 {
+			if hasPolicyTable {
+				if _, ok := policyByID[*s.PolicyID]; !ok {
+					return nil, fmt.Errorf("site %d references missing policy %d", s.ID, *s.PolicyID)
+				}
+			}
 			policyID = *s.PolicyID
 		}
 		compiled := append(compileRules(rulesByPolicy[policyID]), siteCCRules(s, ccRules)...)
@@ -158,7 +259,11 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 		if xffMode == "" {
 			xffMode = store.XFFModeStrip
 		}
-		cacheRules := parseSiteCacheRules(s.CacheRules)
+		cacheRules, err := store.ValidateAndCompileSiteCacheRules(s.CacheRules, s.CacheDefaultTTL)
+		if err != nil {
+			return nil, fmt.Errorf("site %d cache_rules: %w", s.ID, err)
+		}
+		clientIPHeaderOrder := parseClientIPHeaderOrder(s.ClientIPHeaderOrder)
 
 		siteListeners := enabledListenersBySite[s.ID]
 		if len(siteListeners) == 0 && !hasListenerRowsBySite[s.ID] && s.Bind != "" {
@@ -187,10 +292,55 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 
 			var tlsConfig *tls.Config
 			var cert *store.Certificate
-			if listenerSite.CertID != nil {
-				if c, ok := certByID[*listenerSite.CertID]; ok {
+			certificateState := TLSCertificateState("")
+			certificateDiagnosticSource := DiagnosticSourceListeners
+			if listener.ID == 0 {
+				certificateDiagnosticSource = DiagnosticSourceSites
+			}
+			if listenerSite.CertID == nil {
+				if listenerSite.TLSEnabled {
+					certificateState = TLSCertificateStateUnconfigured
+				}
+			} else if listenerSite.TLSEnabled {
+				certificateID := *listenerSite.CertID
+				c, ok := certByID[certificateID]
+				if !ok {
+					if listenerSite.TLSEnabled {
+						certificateState = TLSCertificateStateInvalid
+						certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+							Source:           certificateDiagnosticSource,
+							Field:            DiagnosticFieldCertificateID,
+							Error:            "certificate_not_found",
+							HandlingStrategy: DiagnosticHandlingRejectInvalidCertificate,
+							Kind:             "tls_certificate",
+							Reason:           "certificate_not_found",
+							CertificateID:    certificateID,
+							ListenerID:       listener.ID,
+							SiteID:           s.ID,
+						})
+					}
+				} else {
 					cert = &c
-					if tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM)); err == nil {
+					tlsCert, err := tls.X509KeyPair([]byte(c.CertPEM), []byte(c.KeyPEM))
+					if err != nil {
+						certificateState = TLSCertificateStateInvalid
+						reason := "invalid_certificate_or_key"
+						if strings.TrimSpace(c.CertPEM) == "" || strings.TrimSpace(c.KeyPEM) == "" {
+							reason = "empty_certificate_or_key"
+						}
+						certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
+							Source:           DiagnosticSourceCertificates,
+							Field:            DiagnosticFieldCertificatePair,
+							Error:            reason,
+							HandlingStrategy: DiagnosticHandlingRejectInvalidCertificate,
+							Kind:             "tls_certificate",
+							Reason:           reason,
+							CertificateID:    certificateID,
+							ListenerID:       listener.ID,
+							SiteID:           s.ID,
+						})
+					} else {
+						certificateState = TLSCertificateStateValid
 						if staple, ok := ParseOCSPStaple(c.OCSPStaplePEM); ok {
 							tlsCert.OCSPStaple = staple
 						}
@@ -216,43 +366,58 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 							CurvePreferences:         curves,
 							PreferServerCipherSuites: tlsDefaults.PreferServerCipherSuites,
 						}
-						for _, rawHost := range splitHosts(listenerSite.Host) {
-							h := strings.ToLower(strings.TrimSpace(rawHost))
-							if h != "" {
-								sniCerts[SNICertKey(listenerSite.Bind, h)] = tlsCert
-							}
-						}
 					}
 				}
 			}
+			for _, rawHost := range splitHosts(listenerSite.Host) {
+				h := NormalizeMatchHost(rawHost)
+				if h == "" {
+					continue
+				}
+				if listenerSite.TLSEnabled && certificateState != "" {
+					sniCertStates[SNICertKey(listenerSite.Bind, h)] = certificateState
+				}
+				if certificateState == TLSCertificateStateValid && tlsConfig != nil {
+					sniCerts[SNICertKey(listenerSite.Bind, h)] = tlsConfig.Certificates[0]
+				}
+			}
+
+			siteDynamicProtection := buildSiteDynamicProtection(dynamicProtection, s)
+			if (siteDynamicProtection.HTMLObfuscationEnabled || siteDynamicProtection.JSObfuscationEnabled) && len(siteDynamicProtection.EncryptionKeyBase) != 32 {
+				return nil, fmt.Errorf("site %d dynamic protection requires a 32-byte encryption key base", s.ID)
+			}
 
 			rt := SiteRuntime{
-				Site:                           listenerSite,
-				PolicyID:                       policyID,
-				Rules:                          compiled,
-				UpstreamURLs:                   urls,
-				Certificate:                    cert,
-				NetworkDefaults:                networkDefaults,
-				TLSDefaults:                    tlsDefaults,
-				Bind:                           listenerSite.Bind,
-				TLSConfig:                      tlsConfig,
-				BotProtection:                  botProtection,
-				AttackProtection:               attackProtection,
-				XFFMode:                        xffMode,
-				TrustedCIDR:                    s.TrustedCIDR,
-				PreserveOriginalHost:           s.PreserveOriginalHost,
-				CacheEnabled:                   s.CacheEnabled,
-				CacheDefaultTTL:                s.CacheDefaultTTL,
-				CacheRules:                     cacheRules,
-				MaintenanceEnabled:             s.MaintenanceEnabled,
-				MaintenanceHTML:                s.MaintenanceHTML,
-				MaintenanceStatus:              s.MaintenanceStatus,
+				Site:                 listenerSite, // 含预计算的 UpstreamTLSClientCertDER/Key/Bad
+				PolicyID:             policyID,
+				Rules:                compiled,
+				UpstreamURLs:         urls,
+				Certificate:          cert,
+				NetworkDefaults:      networkDefaults,
+				TLSDefaults:          tlsDefaults,
+				Bind:                 listenerSite.Bind,
+				TLSConfig:            tlsConfig,
+				BotProtection:        botProtection,
+				AttackProtection:     attackProtection,
+				XFFMode:              xffMode,
+				TrustedCIDR:          s.TrustedCIDR,
+				ClientIPHeaderOrder:  clientIPHeaderOrder,
+				PreserveOriginalHost: s.PreserveOriginalHost,
+				CacheEnabled:         s.CacheEnabled,
+				CacheDefaultTTL:      s.CacheDefaultTTL,
+				CacheRules:           cacheRules,
+				MaintenanceEnabled:   s.MaintenanceEnabled,
+				MaintenanceHTML:      s.MaintenanceHTML,
+				MaintenanceStatus:    s.MaintenanceStatus,
+				// 站点级质询策略（nil = 继承全局，数据面渲染时再回退）。
+				ChallengeAction:                maybeSiteString(s.ChallengeAction),
+				ChallengeCaptchaType:           maybeSiteString(s.SiteCaptchaType),
 				BlockHTML:                      s.BlockHTML,
 				BlockStatus:                    s.BlockStatus,
-				AntiReplayEnabled:              s.AntiReplayEnabled,
+				AntiReplayEnabled:              protection.AntiReplayEnabled,
 				AntiReplayAction:               s.AntiReplayAction,
 				AppRouteRules:                  appRulesBySite[s.ID],
-				DynamicProtection:              buildSiteDynamicProtection(dynamicProtection, s),
+				DynamicProtection:              siteDynamicProtection,
 				AccessControl:                  accessControlBySite[s.ID],
 				SiteIPWhitelist:                siteIPLists[s.ID].whitelist,
 				SiteIPBlacklist:                siteIPLists[s.ID].blacklist,
@@ -262,7 +427,7 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 				ResponseCompressionMinBytes:    responseCompressionMinBytes,
 				BrotliEnabled:                  brotliEnabled,
 			}
-			if err := registerSiteKeys(siteMap, rt); err != nil {
+			if err := registerSiteKeys(siteMap, &rt); err != nil {
 				return nil, err
 			}
 		}
@@ -270,19 +435,56 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 	}
 
 	// Compute effective per-site protection by merging site overrides onto global config.
-	for key, rt := range siteMap {
+	for _, rt := range siteMap {
 		ep := mergeProtection(protection, rt.Site)
+		if raw, ok := owaspConfigsByPolicy[rt.PolicyID]; ok {
+			ep.OWASPRulesConfig = raw
+		} else if rt.PolicyID != defaultPolicyID {
+			ep.OWASPRulesConfig = "{}"
+		}
+		if raw, ok := cveConfigsBySite[rt.Site.ID]; ok {
+			ep.CVERulesConfig = raw
+		}
+		rt.AntiReplayEnabled = ep.AntiReplayEnabled
 		rt.EffectiveProtection = &ep
-		siteMap[key] = rt
 	}
 
+	// 自定义 Lua 策略：在此编译，语法错误在 reload 时即暴露。
+	// 单脚本编译失败只记错误、不中断构建（见 loadLuaPlugins）。
+	luaScripts, luaErrs, err := loadLuaPlugins(db)
+	if err != nil {
+		return nil, fmt.Errorf("load lua plugins: %w", err)
+	}
+	jsScripts, jsErrs, err := loadJSPlugins(db)
+	if err != nil {
+		return nil, fmt.Errorf("load js plugins: %w", err)
+	}
+
+	configDiagnostics := make(
+		[]SnapshotConfigDiagnostic,
+		0,
+		len(owaspDiagnostics)+len(ipListDiagnostics)+len(certificateDiagnostics),
+	)
+	configDiagnostics = append(configDiagnostics, owaspDiagnostics...)
+	configDiagnostics = append(configDiagnostics, ipListDiagnostics...)
+	configDiagnostics = append(configDiagnostics, certificateDiagnostics...)
+
 	return &Snapshot{
+		LuaPlugins:                     luaScripts,
+		LuaPluginErrors:                luaErrs,
+		JSPlugins:                      jsScripts,
+		JSPluginErrors:                 jsErrs,
+		ConfigDiagnostics:              configDiagnostics,
 		Revision:                       rev,
 		Sites:                          siteMap,
 		NetworkDefaults:                networkDefaults,
 		TLSDefaults:                    tlsDefaults,
 		DefaultBlockHTML:               "",
+		CaptchaPage:                    captchaPage,
+		ChallengePage:                  challengePage,
+		BlockPage:                      blockPage,
 		SiteTLSCertBySNI:               sniCerts,
+		SiteTLSCertStateBySNI:          sniCertStates,
 		Protection:                     protection,
 		HTTP2Config:                    http2Config,
 		HSTSEnabled:                    hstsEnabled,
@@ -303,12 +505,155 @@ func Build(db *gorm.DB, rev uint64) (*Snapshot, error) {
 
 // mergeProtection creates a ProtectionConfig for a site by overlaying
 // per-site overrides onto the global config. nil = inherit global.
+func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, []SnapshotConfigDiagnostic, error) {
+	result := make(map[uint]string)
+	diagnostics := make([]SnapshotConfigDiagnostic, 0)
+	if !db.Migrator().HasTable(&store.PolicyOWASPRuleConfig{}) {
+		return result, diagnostics, nil
+	}
+	var configs []store.PolicyOWASPRuleConfig
+	if err := db.Order("policy_id ASC, rule_id ASC, id ASC").Find(&configs).Error; err != nil {
+		return nil, nil, fmt.Errorf("load policy OWASP configs: %w", err)
+	}
+	grouped := make(map[uint]map[string]owasp.OWASPRuleOverride)
+	for _, config := range configs {
+		override := owasp.OWASPRuleOverride{}
+		if config.Enabled != nil {
+			override.Enabled = config.Enabled
+		}
+		if config.Action != nil {
+			override.Action = *config.Action
+		}
+		if config.Sensitivity != nil {
+			override.Sensitivity = *config.Sensitivity
+		}
+		if config.StatusCode != nil {
+			override.StatusCode = *config.StatusCode
+		}
+		if config.RedirectTo != nil {
+			override.RedirectTo = *config.RedirectTo
+		}
+		if config.CaptchaType != nil {
+			override.CaptchaType = normalizeRuleCaptchaType(*config.CaptchaType)
+		}
+		if config.Whitelist != nil && strings.TrimSpace(*config.Whitelist) != "" {
+			var whitelist []string
+			if err := json.Unmarshal([]byte(*config.Whitelist), &whitelist); err != nil {
+				diagnostics = append(diagnostics, SnapshotConfigDiagnostic{
+					Source:           DiagnosticSourcePolicyOWASP,
+					Field:            DiagnosticFieldWhitelistJSON,
+					Error:            "invalid_json",
+					HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+					Kind:             "owasp_whitelist",
+					Reason:           "invalid_json",
+					PolicyID:         config.PolicyID,
+					RuleID:           config.RuleID,
+				})
+			} else {
+				override.Whitelist = whitelist
+			}
+		}
+		if grouped[config.PolicyID] == nil {
+			grouped[config.PolicyID] = make(map[string]owasp.OWASPRuleOverride)
+		}
+		grouped[config.PolicyID][config.RuleID] = override
+	}
+	for policyID, overrides := range grouped {
+		result[policyID] = owasp.SerializeOWASPRulesConfig(overrides)
+	}
+	return result, diagnostics, nil
+}
+
+func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (map[uint]string, error) {
+	if !db.Migrator().HasTable(&store.CVERuleRecord{}) || !db.Migrator().HasTable(&store.CVERuleScopeOverride{}) {
+		return map[uint]string{}, nil
+	}
+	var rules []store.CVERuleRecord
+	if err := db.Where("approved = ?", true).Find(&rules).Error; err != nil {
+		return nil, fmt.Errorf("load CVE catalog: %w", err)
+	}
+	var scoped []store.CVERuleScopeOverride
+	if err := db.Find(&scoped).Error; err != nil {
+		return nil, fmt.Errorf("load CVE scope overrides: %w", err)
+	}
+	byRule := make(map[uint][]store.CVERuleScopeOverride)
+	for _, item := range scoped {
+		byRule[item.RuleID] = append(byRule[item.RuleID], item)
+	}
+	result := make(map[uint]string, len(sites))
+	cveIDCounts := make(map[string]int, len(rules))
+	for _, rule := range rules {
+		if id := strings.TrimSpace(rule.CVEID); id != "" {
+			cveIDCounts[id]++
+		}
+	}
+	for _, site := range sites {
+		policyID := defaultPolicyID
+		if site.PolicyID != nil && *site.PolicyID != 0 {
+			policyID = *site.PolicyID
+		}
+		profile := make(map[string]cve.CVERuleOverride, len(rules))
+		for _, rule := range rules {
+			enabled := rule.Enabled
+			override := cve.CVERuleOverride{Enabled: &enabled, Action: rule.Action, CaptchaType: normalizeRuleCaptchaType(rule.CaptchaType)}
+			apply := func(scopeType string, scopeID uint) {
+				for _, item := range byRule[rule.ID] {
+					if item.ScopeType != scopeType || item.ScopeID != scopeID {
+						continue
+					}
+					if item.Enabled != nil {
+						override.Enabled = item.Enabled
+					}
+					if item.Action != nil && strings.TrimSpace(*item.Action) != "" {
+						override.Action = *item.Action
+					}
+					if item.Sensitivity != nil && strings.TrimSpace(*item.Sensitivity) != "" {
+						override.Sensitivity = *item.Sensitivity
+					}
+					if item.StatusCode != nil && *item.StatusCode != 0 {
+						override.StatusCode = *item.StatusCode
+					}
+					if item.RedirectTo != nil && strings.TrimSpace(*item.RedirectTo) != "" {
+						override.RedirectTo = *item.RedirectTo
+					}
+					if item.CaptchaType != nil && strings.TrimSpace(*item.CaptchaType) != "" {
+						override.CaptchaType = normalizeRuleCaptchaType(*item.CaptchaType)
+					}
+				}
+			}
+			apply(store.CVEScopeGlobal, 0)
+			apply(store.CVEScopePolicy, policyID)
+			apply(store.CVEScopeSite, site.ID)
+			// 运行时先按 Pattern 查找覆盖；必须保留规则级键，否则两个
+			// 自定义规则使用同一 CVE 编号时会互相覆盖。编号键仅在唯一
+			// 时保留，用于兼容旧快照和内置规则配置。
+			if pattern := strings.TrimSpace(rule.Pattern); pattern != "" {
+				profile[pattern] = override
+			}
+			if cveID := strings.TrimSpace(rule.CVEID); cveID != "" && cveIDCounts[cveID] == 1 {
+				profile[cveID] = override
+			}
+		}
+		raw, err := json.Marshal(profile)
+		if err != nil {
+			return nil, err
+		}
+		result[site.ID] = string(raw)
+	}
+	return result, nil
+}
+
 func mergeProtection(global store.ProtectionConfig, site store.Site) store.ProtectionConfig {
 	p := global // shallow copy
 
 	// Bot detection: per-site override
 	if site.BotProtectionEnabled != nil {
 		p.BotDetectionEnabled = *site.BotProtectionEnabled
+	}
+
+	// Anti-replay: nil inherits the global switch; non-nil is an explicit override.
+	if site.AntiReplayEnabled != nil {
+		p.AntiReplayEnabled = *site.AntiReplayEnabled
 	}
 
 	// OWASP override
@@ -348,17 +693,34 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 		}
 	}
 
+	// 按 phase 跳过检测：nil 继承全局，非 nil 整体覆盖。
+	// 不做 per-phase 深合并——否则站点无法关掉全局配置的某个 phase 跳过项。
+	if site.SkipPathByPhase != nil {
+		p.SkipPathByPhase = *site.SkipPathByPhase
+	}
+
 	return p
 }
 
-func registerSiteKeys(m map[string]SiteRuntime, rt SiteRuntime) error {
+// maybeSiteString 把站点级可空覆盖字段解析为快照运行时值：
+// nil = 未覆盖（返回空串），非 nil = 覆盖值（原样返回）。
+func maybeSiteString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+// splitHosts splits a host field by comma, supporting multi-host per site.
+
+func registerSiteKeys(m map[string]*SiteRuntime, rt *SiteRuntime) error {
 	bind := rt.Bind
 	for _, host := range splitHosts(rt.Site.Host) {
 		h := NormalizeMatchHost(host)
 		if h == "" {
 			continue
 		}
-		k := SiteMapKey(bind, h)
+		k := siteMapKeyNorm(bind, h)
 		if existing, exists := m[k]; exists {
 			if existing.Site.ID == rt.Site.ID {
 				continue
@@ -395,7 +757,7 @@ func parseUpstreamURLs(raw string) []string {
 			for _, p := range values {
 				p = strings.TrimSpace(p)
 				if p != "" {
-					out = append(out, p)
+					out = append(out, schemealias.NormalizeURLPrefix(p))
 				}
 			}
 			return out
@@ -406,7 +768,9 @@ func parseUpstreamURLs(raw string) []string {
 	for _, p := range strings.Split(raw, ",") {
 		p = strings.TrimSpace(p)
 		if p != "" {
-			out = append(out, p)
+			// RPC 别名归一（大小写折叠 + tls/grpc 前缀展开）后进入站点快照，
+			// 保证下游按 https/h2c 的既有语义处理。
+			out = append(out, schemealias.NormalizeURLPrefix(p))
 		}
 	}
 	return out
@@ -487,18 +851,31 @@ func compileRules(rs []store.Rule) []CompiledRule {
 		out = append(out, CompiledRule{
 			ID: r.ID, Phase: r.Phase, Action: r.Action, Priority: r.Priority,
 			Kind: kind, Arg: arg, StatusCode: r.StatusCode, RedirectTo: r.RedirectTo,
+			CaptchaType: r.CaptchaType,
 		})
 	}
 	return out
 }
 
 type ccRuleConfig struct {
-	Enabled    *bool             `json:"enabled"`
-	Action     string            `json:"action"`
-	Conditions []ccRuleCondition `json:"conditions"`
-	Window     int               `json:"window"`
-	Threshold  int               `json:"threshold"`
-	Duration   int               `json:"duration"`
+	Enabled      *bool             `json:"enabled"`
+	Action       string            `json:"action"`
+	CaptchaType  string            `json:"captcha_type"`
+	Conditions   []ccRuleCondition `json:"conditions"`
+	Window       int               `json:"window"`
+	Threshold    int               `json:"threshold"`
+	Duration     int               `json:"duration"`
+	DurationUnit string            `json:"duration_unit"`
+}
+
+// normalizeRuleCaptchaType keeps rule-level CAPTCHA overrides strict and fail-safe.
+func normalizeRuleCaptchaType(value string) string {
+	switch value {
+	case "", "math", "click", "slide", "rotate":
+		return value
+	default:
+		return ""
+	}
 }
 
 type ccRuleCondition struct {
@@ -514,6 +891,27 @@ func compileCCRules(protection store.ProtectionConfig) []CompiledRule {
 		return nil
 	}
 	return compileCCRulesFromJSON(protection.CCRules)
+}
+
+func normalizedCCDurationUnit(unit string) string {
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "seconds", "second", "sec", "s":
+		return "seconds"
+	case "minutes", "minute", "min", "m":
+		return "minutes"
+	default:
+		return "minutes"
+	}
+}
+
+func ccDurationSeconds(duration int, unit string) int {
+	if duration <= 0 {
+		return 0
+	}
+	if normalizedCCDurationUnit(unit) == "seconds" {
+		return duration
+	}
+	return duration * 60
 }
 
 // siteCCRules 返回站点生效的 CC 规则。
@@ -564,11 +962,13 @@ func compileCCRulesFromJSON(rulesJSON string) []CompiledRule {
 		}
 		if cfg.Window > 0 && cfg.Threshold > 0 {
 			raw, err := json.Marshal(map[string]any{
-				"op":        "cc_rate",
-				"children":  []any{compiled},
-				"window":    cfg.Window,
-				"threshold": cfg.Threshold,
-				"duration":  cfg.Duration,
+				"op":               "cc_rate",
+				"children":         []any{compiled},
+				"window":           cfg.Window,
+				"threshold":        cfg.Threshold,
+				"duration":         cfg.Duration,
+				"duration_unit":    normalizedCCDurationUnit(cfg.DurationUnit),
+				"duration_seconds": ccDurationSeconds(cfg.Duration, cfg.DurationUnit),
 			})
 			if err != nil {
 				continue
@@ -584,12 +984,13 @@ func compileCCRulesFromJSON(rulesJSON string) []CompiledRule {
 			arg = string(raw)
 		}
 		out = append(out, CompiledRule{
-			ID:       uint(ccRuleIDCounter.Add(1)),
-			Phase:    store.PhaseCustom,
-			Action:   normalizeCCAction(cfg.Action),
-			Priority: 10_000,
-			Kind:     kind,
-			Arg:      arg,
+			ID:          uint(ccRuleIDCounter.Add(1)),
+			Phase:       store.PhaseCustom,
+			Action:      normalizeCCAction(cfg.Action),
+			Priority:    10_000,
+			Kind:        kind,
+			Arg:         arg,
+			CaptchaType: normalizeRuleCaptchaType(cfg.CaptchaType),
 		})
 	}
 	return out
@@ -606,8 +1007,10 @@ func compileCCCondition(cond ccRuleCondition) (string, string, bool) {
 		switch operator {
 		case "equals":
 			return "block_path_exact", value, true
-		case "prefix", "contains":
+		case "prefix":
 			return "block_path", value, true
+		case "contains":
+			return "path_contains", value, true
 		}
 	case "method":
 		if operator == "equals" {
@@ -619,8 +1022,12 @@ func compileCCCondition(cond ccRuleCondition) (string, string, bool) {
 			return "", "", false
 		}
 		switch operator {
-		case "equals", "contains", "prefix":
+		case "equals":
+			return "block_header_exact", name + ":" + headerValue, true
+		case "contains":
 			return "block_header", name + ":" + headerValue, true
+		case "prefix":
+			return "block_header_prefix", name + ":" + headerValue, true
 		}
 	}
 	return "", "", false
@@ -637,7 +1044,9 @@ func splitCCHeaderValue(value string) (string, string) {
 
 func normalizeCCAction(action string) store.RuleAction {
 	switch strings.ToLower(strings.TrimSpace(action)) {
-	case "captcha", "challenge":
+	case "captcha":
+		return store.ActionCaptchaChallenge
+	case "challenge":
 		return store.ActionChallenge
 	case "captcha_challenge":
 		return store.ActionCaptchaChallenge
@@ -686,102 +1095,15 @@ func ParsePattern(p string) (kind, arg string) {
 	return "", ""
 }
 
-func parseSiteCacheRules(raw string) []store.SiteCacheRule {
+func parseClientIPHeaderOrder(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	var inbound []store.SiteCacheRule
+	var inbound []string
 	if err := json.Unmarshal([]byte(raw), &inbound); err != nil {
 		return nil
 	}
-	filtered := make([]store.SiteCacheRule, 0, len(inbound))
-	for _, rule := range inbound {
-		if rule.TTL <= 0 {
-			continue
-		}
-		ruleType := strings.ToLower(strings.TrimSpace(rule.Type))
-		val := strings.TrimSpace(rule.Value)
-		path := strings.TrimSpace(rule.Path)
-
-		// Legacy JSON: path + ttl only (prefix match).
-		if ruleType == "" && val == "" && path != "" {
-			p := path
-			if !strings.HasPrefix(p, "/") {
-				p = "/" + p
-			}
-			filtered = append(filtered, store.SiteCacheRule{
-				Type:            "prefix",
-				Path:            p,
-				TTL:             rule.TTL,
-				IgnoreQuery:     rule.IgnoreQuery,
-				CaseInsensitive: rule.CaseInsensitive,
-			})
-			continue
-		}
-		if val == "" {
-			continue
-		}
-		for _, tok := range strings.Split(val, ",") {
-			tok = strings.TrimSpace(tok)
-			if tok == "" {
-				continue
-			}
-			nr := store.SiteCacheRule{
-				TTL:             rule.TTL,
-				IgnoreQuery:     rule.IgnoreQuery,
-				CaseInsensitive: rule.CaseInsensitive,
-			}
-			switch ruleType {
-			case "suffix":
-				nr.Type = "suffix"
-				if strings.Contains(tok, ".") {
-					nr.Path = tok
-				} else {
-					nr.Path = "." + tok
-				}
-			case "contains":
-				nr.Type = "contains"
-				nr.Path = tok
-			case "regex":
-				nr.Type = "regex"
-				pat := tok
-				if rule.CaseInsensitive {
-					pat = "(?i)" + pat
-				}
-				re, err := regexp.Compile(pat)
-				if err != nil {
-					continue
-				}
-				nr.Regex = re
-				nr.Value = tok
-			case "exact":
-				nr.Type = "exact"
-				if !strings.HasPrefix(tok, "/") {
-					tok = "/" + tok
-				}
-				nr.Path = tok
-			default:
-				nr.Type = "prefix"
-				if !strings.HasPrefix(tok, "/") {
-					tok = "/" + tok
-				}
-				nr.Path = tok
-			}
-			filtered = append(filtered, nr)
-		}
-	}
-	sort.Slice(filtered, func(i, j int) bool {
-		li := len(strings.TrimSpace(filtered[i].Path))
-		if strings.TrimSpace(filtered[i].Value) != "" {
-			li = len(strings.TrimSpace(filtered[i].Value))
-		}
-		lj := len(strings.TrimSpace(filtered[j].Path))
-		if strings.TrimSpace(filtered[j].Value) != "" {
-			lj = len(strings.TrimSpace(filtered[j].Value))
-		}
-		return li > lj
-	})
-	return filtered
+	return append([]string(nil), inbound...)
 }
 
 func loadNetworkDefaults(db *gorm.DB) NetworkDefaults {
@@ -830,6 +1152,9 @@ func loadProtectionConfig(db *gorm.DB) (store.ProtectionConfig, error) {
 	if err := json.Unmarshal([]byte(setting.Value), &cfg); err != nil {
 		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
 	}
+	if !challenge.IsValidCaptchaType(challenge.CaptchaType(cfg.CaptchaType)) {
+		return store.ProtectionConfig{}, fmt.Errorf("invalid protection captcha_type %q", cfg.CaptchaType)
+	}
 	return cfg, nil
 }
 
@@ -842,6 +1167,9 @@ func protectionConfigFromMap(m map[string]string) (store.ProtectionConfig, error
 	cfg := store.DefaultProtectionConfig()
 	if err := json.Unmarshal([]byte(v), &cfg); err != nil {
 		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
+	}
+	if !challenge.IsValidCaptchaType(challenge.CaptchaType(cfg.CaptchaType)) {
+		return store.ProtectionConfig{}, fmt.Errorf("invalid protection captcha_type %q", cfg.CaptchaType)
 	}
 	return cfg, nil
 }
@@ -873,16 +1201,23 @@ func parseDynamicProtection(raw string) dynamic.ProtectionConfig {
 	if err := json.Unmarshal([]byte(raw), &bs); err != nil {
 		return dynamic.ProtectionConfig{}
 	}
+	mode := bs.JSProtectionMode
+	if !dynamic.IsValidJSProtectionMode(mode) {
+		mode = ""
+	}
 
 	return dynamic.ProtectionConfig{
-		HTMLObfuscationEnabled: bs.DynamicProtectionEnabled && bs.HTMLObfuscation,
-		JSObfuscationEnabled:   bs.DynamicProtectionEnabled && bs.JSObfuscation,
-		ImageWatermarkEnabled:  bs.DynamicProtectionEnabled && bs.ImageWatermark,
-		JSProtectionMode:       bs.JSProtectionMode,
-		DecryptCacheTTLSeconds: bs.DecryptCacheTTLSeconds,
-		JSObfuscationPaths:     bs.JSObfuscationPaths,
-		ImageWatermarkPaths:    bs.ImageWatermarkPaths,
-		WatermarkText:          bs.WatermarkText,
+		HTMLObfuscationEnabled:    bs.DynamicProtectionEnabled && bs.HTMLObfuscation,
+		JSObfuscationEnabled:      bs.DynamicProtectionEnabled && bs.JSObfuscation,
+		ImageWatermarkEnabled:     bs.DynamicProtectionEnabled && bs.ImageWatermark,
+		GlobalHTMLConfigured:      bs.HTMLObfuscation,
+		GlobalJSConfigured:        bs.JSObfuscation,
+		GlobalWatermarkConfigured: bs.ImageWatermark,
+		JSProtectionMode:          mode,
+		DecryptCacheTTLSeconds:    dynamic.NormalizeDecryptCacheTTLSeconds(bs.DecryptCacheTTLSeconds),
+		JSObfuscationPaths:        bs.JSObfuscationPaths,
+		ImageWatermarkPaths:       bs.ImageWatermarkPaths,
+		WatermarkText:             bs.WatermarkText,
 	}
 }
 
@@ -891,10 +1226,16 @@ func buildSiteDynamicProtection(global dynamic.ProtectionConfig, site store.Site
 	cfg := global
 	cfg.SiteID = site.ID
 
-	if site.DynamicProtectionEnabled != nil && !*site.DynamicProtectionEnabled {
-		cfg.HTMLObfuscationEnabled = false
-		cfg.JSObfuscationEnabled = false
-		return cfg
+	if site.DynamicProtectionEnabled != nil {
+		if !*site.DynamicProtectionEnabled {
+			cfg.HTMLObfuscationEnabled = false
+			cfg.JSObfuscationEnabled = false
+			cfg.ImageWatermarkEnabled = false
+			return cfg
+		}
+		cfg.HTMLObfuscationEnabled = cfg.GlobalHTMLConfigured
+		cfg.JSObfuscationEnabled = cfg.GlobalJSConfigured
+		cfg.ImageWatermarkEnabled = cfg.GlobalWatermarkConfigured
 	}
 	if site.DynamicHTMLEnabled != nil {
 		cfg.HTMLObfuscationEnabled = *site.DynamicHTMLEnabled
@@ -903,16 +1244,21 @@ func buildSiteDynamicProtection(global dynamic.ProtectionConfig, site store.Site
 		cfg.JSObfuscationEnabled = *site.DynamicJSEnabled
 	}
 	if site.DynamicJSMode != "" {
-		cfg.JSProtectionMode = site.DynamicJSMode
+		if dynamic.IsValidJSProtectionMode(site.DynamicJSMode) {
+			cfg.JSProtectionMode = site.DynamicJSMode
+		} else {
+			cfg.JSProtectionMode = ""
+		}
 	}
 	if site.DynamicJSPaths != "" {
 		var paths []string
-		if err := json.Unmarshal([]byte(site.DynamicJSPaths), &paths); err == nil && len(paths) > 0 {
+		if err := json.Unmarshal([]byte(site.DynamicJSPaths), &paths); err == nil {
+			// 显式空数组是站点覆盖，不应继续继承全局路径。
 			cfg.JSObfuscationPaths = paths
 		}
 	}
 	if site.DynamicDecryptCacheTTL != nil {
-		cfg.DecryptCacheTTLSeconds = *site.DynamicDecryptCacheTTL
+		cfg.DecryptCacheTTLSeconds = dynamic.NormalizeDecryptCacheTTLSeconds(*site.DynamicDecryptCacheTTL)
 	}
 	return cfg
 }
@@ -989,14 +1335,16 @@ func loadIntSetting(db *gorm.DB, key string, defaultValue int) int {
 }
 
 // loadAllSettings 一次性加载所有 system_settings 到 map，避免多次独立查询。
-func loadAllSettings(db *gorm.DB) map[string]string {
+func loadAllSettings(db *gorm.DB) (map[string]string, error) {
 	var all []store.SystemSettings
-	db.Find(&all)
+	if err := db.Find(&all).Error; err != nil {
+		return nil, err
+	}
 	m := make(map[string]string, len(all))
 	for _, s := range all {
 		m[s.Key] = s.Value
 	}
-	return m
+	return m, nil
 }
 
 // settingBool 从预加载的 settings map 中读取布尔值。
@@ -1048,26 +1396,39 @@ func ResolveOutboundHost(rt SiteRuntime, upstreamHost string, incomingHost strin
 }
 
 // loadAccessControlConfigs 从数据库批量加载所有站点的访问控制配置，避免 N+1 查询。
-func loadAccessControlConfigs(db *gorm.DB) map[uint]*AccessControlConfig {
+func loadAccessControlConfigs(db *gorm.DB) (map[uint]*AccessControlConfig, error) {
 	result := make(map[uint]*AccessControlConfig)
+	if !db.Migrator().HasTable(&store.SiteAccessConfig{}) {
+		return result, nil
+	}
 
 	var configs []store.SiteAccessConfig
 	if err := db.Where("enabled = ?", true).Find(&configs).Error; err != nil {
-		return result
+		return nil, err
 	}
 
 	// 批量加载所有启用的 provider，按 site_id 分组。
 	var allProviders []store.AccessProvider
-	db.Where("enabled = ?", true).Order("site_id ASC, priority ASC").Find(&allProviders)
 	providersBySite := make(map[uint][]store.AccessProvider)
+	if db.Migrator().HasTable(&store.AccessProvider{}) {
+		if err := db.Where("enabled = ?", true).
+			Order("site_id ASC, priority ASC, id ASC").Find(&allProviders).Error; err != nil {
+			return nil, err
+		}
+	}
 	for _, p := range allProviders {
 		providersBySite[p.SiteID] = append(providersBySite[p.SiteID], p)
 	}
 
 	// 批量加载所有启用的路径规则，按 site_id 分组。
 	var allPathRules []store.AccessPathRule
-	db.Where("enabled = ?", true).Order("site_id ASC, priority ASC").Find(&allPathRules)
 	pathRulesBySite := make(map[uint][]store.AccessPathRule)
+	if db.Migrator().HasTable(&store.AccessPathRule{}) {
+		if err := db.Where("enabled = ?", true).
+			Order("site_id ASC, priority ASC, id ASC").Find(&allPathRules).Error; err != nil {
+			return nil, err
+		}
+	}
 	for _, r := range allPathRules {
 		pathRulesBySite[r.SiteID] = append(pathRulesBySite[r.SiteID], r)
 	}
@@ -1099,50 +1460,62 @@ func loadAccessControlConfigs(db *gorm.DB) map[uint]*AccessControlConfig {
 
 		result[cfg.SiteID] = ac
 	}
-	return result
+	return result, nil
 }
 
 // siteIPListPair 存储一个站点的已解析黑白名单。
 type siteIPListPair struct {
-	whitelist []net.IPNet
-	blacklist []net.IPNet
+	whitelist []iprep.IPListEntry
+	blacklist []iprep.IPListEntry
 }
 
 // loadSiteIPLists 从数据库加载所有站点级 IP 黑白名单（不含全局条目）。
-func loadSiteIPLists(db *gorm.DB) map[uint]siteIPListPair {
+func loadSiteIPLists(db *gorm.DB) (map[uint]siteIPListPair, []SnapshotConfigDiagnostic, error) {
 	result := make(map[uint]siteIPListPair)
+	diagnostics := make([]SnapshotConfigDiagnostic, 0)
+	if !db.Migrator().HasTable(&store.IPListEntry{}) {
+		return result, diagnostics, nil
+	}
+
 	var items []store.IPListEntry
-	if err := db.Where("enabled = ? AND site_id IS NOT NULL", true).Find(&items).Error; err != nil {
-		return result
+	if err := db.Where("enabled = ?", true).Order("id ASC").Find(&items).Error; err != nil {
+		return nil, nil, err
 	}
 	for _, it := range items {
+		entry, ok := iprep.ParseIPListEntry(it.Value, it.Note, it.Action)
+		if !ok {
+			reason := "invalid_ip_or_cidr"
+			if strings.TrimSpace(it.Value) == "" {
+				reason = "empty_value"
+			}
+			diagnostic := SnapshotConfigDiagnostic{
+				Source:           DiagnosticSourceIPList,
+				Field:            DiagnosticFieldValue,
+				Error:            reason,
+				HandlingStrategy: DiagnosticHandlingSkipInvalidEntry,
+				Kind:             "ip_list_entry",
+				Reason:           reason,
+				IPListEntryID:    it.ID,
+				Scope:            "global",
+			}
+			if it.SiteID != nil {
+				diagnostic.Scope = "site"
+				diagnostic.SiteID = *it.SiteID
+			}
+			diagnostics = append(diagnostics, diagnostic)
+			continue
+		}
 		if it.SiteID == nil {
 			continue
 		}
 		siteID := *it.SiteID
 		pair := result[siteID]
-		val := strings.TrimSpace(it.Value)
-		if val == "" {
-			continue
-		}
-		var ipNet net.IPNet
-		if _, cidr, err := net.ParseCIDR(val); err == nil {
-			ipNet = *cidr
-		} else if ip := net.ParseIP(val); ip != nil {
-			if ip4 := ip.To4(); ip4 != nil {
-				ipNet = net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)}
-			} else {
-				ipNet = net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
-			}
-		} else {
-			continue
-		}
 		if it.Kind == store.IPListWhite {
-			pair.whitelist = append(pair.whitelist, ipNet)
+			pair.whitelist = append(pair.whitelist, entry)
 		} else if it.Kind == store.IPListBlack {
-			pair.blacklist = append(pair.blacklist, ipNet)
+			pair.blacklist = append(pair.blacklist, entry)
 		}
 		result[siteID] = pair
 	}
-	return result
+	return result, diagnostics, nil
 }

@@ -1,13 +1,17 @@
 package dataplane
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/glebarez/sqlite"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/accessgate"
 )
 
 func TestBuildGateConfig(t *testing.T) {
@@ -90,6 +94,55 @@ func TestBuildGateConfigEmptyProviders(t *testing.T) {
 	}
 }
 
+func TestHandleAccessVerifyRejectsUserPasswordWithoutEnabledProvider(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("打开测试数据库失败: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessUser{}); err != nil {
+		t.Fatalf("迁移访问控制用户表失败: %v", err)
+	}
+
+	userHash, err := bcrypt.GenerateFromPassword([]byte("u-secret"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("生成用户密码哈希失败: %v", err)
+	}
+	repo := repository.NewAccessControlRepo(db)
+	if err := repo.CreateAccessUser(&store.AccessUser{
+		SiteID:       1,
+		Username:     "alice",
+		PasswordHash: string(userHash),
+		Enabled:      true,
+	}); err != nil {
+		t.Fatalf("创建测试用户失败: %v", err)
+	}
+
+	cfg := accessgate.Config{
+		Enabled:    true,
+		SiteID:     1,
+		SiteHost:   "site.test",
+		SessionTTL: 3600,
+		Providers: []accessgate.ProviderConfig{
+			{ID: 2, Type: store.AccessProviderOAuth2, Name: "GitHub"},
+		},
+	}
+	gate := accessgate.NewGate(cfg, accessgate.NewMemorySessionStore())
+	c := app.NewContext(0)
+	c.Request.Header.SetMethod("POST")
+	c.Request.Header.SetContentTypeBytes([]byte("application/x-www-form-urlencoded"))
+	c.Request.SetBodyString("auth_type=user_password&username=alice&password=u-secret")
+
+	rt := &snapshot.SiteRuntime{Site: store.Site{ID: 1}}
+	handleAccessVerify(c, Options{AccessControlRepo: repo}, gate, cfg, "site.test", rt)
+
+	if got := c.Response.Header.Peek("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("没有 enabled 的 password provider 时不应下发 session cookie, got %q", got)
+	}
+	if got := c.Response.StatusCode(); got != 401 {
+		t.Fatalf("没有 enabled 的 password provider 时应返回登录错误, got status %d", got)
+	}
+}
+
 func TestAccessReturnURL(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -98,7 +151,10 @@ func TestAccessReturnURL(t *testing.T) {
 		want      string
 	}{
 		{"表单 return_url 优先", "/dashboard", "https://site.test/other", "/dashboard"},
-		{"无表单时回退 Referer", "", "https://site.test/page", "https://site.test/page"},
+		{"同源 Referer 取其路径", "", "https://site.test/page", "/page"},
+		{"跨站 Referer 被丢弃", "", "https://evil.com/phish", "/"},
+		{"协议相对 return_url 被拒", "//evil.com", "", "/"},
+		{"反斜杠变形被拒", "/\\evil.com", "", "/"},
 		{"两者都为空时回退根路径", "", "", "/"},
 		{"return_url 空格前后", "  /app  ", "", "/app"},
 		{"非路径 return_url 被跳过", "https://evil.com", "", "/"}, // accessReturnURL 仅接受 "/" 开头的路径
@@ -117,7 +173,7 @@ func TestAccessReturnURL(t *testing.T) {
 			if tt.referer != "" {
 				c.Request.Header.Set("Referer", tt.referer)
 			}
-			got := accessReturnURL(c)
+			got := accessReturnURL(c, "site.test")
 			if got != tt.want {
 				t.Errorf("accessReturnURL() = %q, want %q", got, tt.want)
 			}
@@ -126,23 +182,25 @@ func TestAccessReturnURL(t *testing.T) {
 }
 
 func TestAccessReturnURLRejectsNonPathFormValue(t *testing.T) {
-	c := app.NewContext(0)
-	c.Request.Header.SetMethod("POST")
-	c.Request.Header.SetContentTypeBytes([]byte("application/x-www-form-urlencoded"))
-	c.Request.SetBodyString("return_url=https://evil.com/steal")
+	// 这几种形态都曾能穿过旧实现的 HasPrefix(v, "/") 判断，
+	// 或经由未校验的 Referer 直接成为登录后的跳转目标。
+	for _, raw := range []string{
+		"https://evil.com/steal",
+		"//evil.com",
+		"/\\evil.com",
+		"javascript:alert(1)",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			c := app.NewContext(0)
+			c.Request.Header.SetMethod("POST")
+			c.Request.Header.SetContentTypeBytes([]byte("application/x-www-form-urlencoded"))
+			c.Request.Header.SetHost("site.test")
+			c.Request.SetBodyString("return_url=" + raw)
 
-	got := accessReturnURL(c)
-	// accessReturnURL 只检查以 "/" 开头，非 "/" 开头的值会回退
-	if strings.HasPrefix(got, "https://evil.com") {
-		// accessReturnURL 确实不做安全过滤（那是 sanitizeReturnURL 的职责），
-		// 只检查 HasPrefix(v, "/")，https:// 不以 "/" 开头，会 fallback。
-		// 由于实现是 HasPrefix(v, "/")，"https://..." 不匹配，进入 referer 路径
-	}
-	// 只要不返回攻击者控制的外部 URL 即可
-	if got == "https://evil.com/steal" {
-		// return_url 不以 "/" 开头时应被跳过
-		// 但实际上 accessReturnURL 的实现是 strings.HasPrefix(v, "/") 才使用
-		// 所以 https://evil.com/steal 不会被采用
+			if got := accessReturnURL(c, "site.test"); got != "/" {
+				t.Errorf("accessReturnURL() = %q, want \"/\"——该值会成为登录后的重定向目标", got)
+			}
+		})
 	}
 }
 

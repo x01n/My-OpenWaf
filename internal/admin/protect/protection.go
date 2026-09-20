@@ -3,6 +3,7 @@ package protect
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -14,7 +15,11 @@ import (
 
 func GetProtectionSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		cfg := shared.LoadProtectionConfig(repo)
+		cfg, err := shared.LoadProtectionConfigStrict(repo)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": "invalid protection configuration"})
+			return
+		}
 		c.JSON(200, buildProtectionResponse(cfg))
 	}
 }
@@ -24,6 +29,7 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 	out := make(map[string]any)
 	raw, _ := json.Marshal(cfg)
 	_ = json.Unmarshal(raw, &out)
+	delete(out, "basic_auth_password")
 
 	out["cc_rules"] = []any{}
 	out["owasp_modules"] = map[string]string{}
@@ -31,6 +37,7 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 	out["cve_rules_config"] = map[string]any{}
 	out["chain_steps"] = []any{}
 	out["escalation_steps"] = []any{}
+	out["skip_path_by_phase"] = map[string][]string{}
 
 	// Expand legacy owasp_modules string and expose category_sensitivity as the UI source.
 	if cfg.OWASPModules != "" {
@@ -75,6 +82,12 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 			out["escalation_steps"] = steps
 		}
 	}
+	if cfg.SkipPathByPhase != "" {
+		var pathsByPhase map[string][]string
+		if json.Unmarshal([]byte(cfg.SkipPathByPhase), &pathsByPhase) == nil && pathsByPhase != nil {
+			out["skip_path_by_phase"] = pathsByPhase
+		}
+	}
 	return out
 }
 
@@ -84,14 +97,33 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		// into ProtectionConfig (several DB-backed JSON blobs are typed as string in Go).
 		var raw map[string]json.RawMessage
 		if err := c.BindJSON(&raw); err != nil {
-			c.JSON(400, map[string]string{"error": "invalid request body"})
+			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
+		}
+
+		if passwordRaw, ok := raw["basic_auth_password"]; ok {
+			var password string
+			if err := json.Unmarshal(passwordRaw, &password); err != nil {
+				c.JSON(400, map[string]string{"error": "invalid basic auth password"})
+				return
+			}
+			if strings.TrimSpace(password) == "" {
+				delete(raw, "basic_auth_password")
+			}
 		}
 
 		present := make(map[string]bool, len(raw))
 		for key := range raw {
 			present[key] = true
 		}
+
+		// skip_path_by_phase 需要区分 JSON null（清除全局配置）与空字符串
+		// （非法值，与站点端 bindSiteFromRaw 保持一致的 400 拒绝）。
+		// PeelJSONStringBlobs 会把 null 和空字符串都规范化为 ""，丢失原始语义，
+		// 因此在 peel 之前先记录原始 token。
+		skipPathRaw, skipPathPresent := raw["skip_path_by_phase"]
+		skipPathNull := skipPathPresent && strings.TrimSpace(string(skipPathRaw)) == "null"
+
 		preserved := shared.PeelJSONStringBlobs(raw, shared.ProtectionJSONBlobKeys())
 
 		plainBytes, err := json.Marshal(raw)
@@ -99,7 +131,11 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(400, map[string]string{"error": "invalid config"})
 			return
 		}
-		cfg := shared.LoadProtectionConfig(repo)
+		cfg, err := shared.LoadProtectionConfigStrict(repo)
+		if err != nil {
+			c.JSON(500, map[string]string{"error": "invalid protection configuration"})
+			return
+		}
 		if err := json.Unmarshal(plainBytes, &cfg); err != nil {
 			c.JSON(400, map[string]string{"error": "invalid config"})
 			return
@@ -126,6 +162,42 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		if s, ok := preserved["cve_rules_config"]; ok {
 			cfg.CVERulesConfig = s
 		}
+		if s, ok := preserved["skip_path_by_phase"]; ok {
+			if !skipPathNull {
+				if err := shared.ValidateSkipPathByPhase(s); err != nil {
+					c.JSON(400, map[string]string{"error": err.Error()})
+					return
+				}
+			}
+			cfg.SkipPathByPhase = s
+		}
+
+		challengePresent := map[string]bool{
+			"captcha_type":            present["captcha_type"],
+			"captcha_timeout":         present["captcha_timeout"],
+			"captcha_pass_ttl":        present["captcha_pass_ttl"],
+			"shield_difficulty":       present["shield_difficulty"],
+			"shield_timeout_secs":     present["shield_timeout_secs"],
+			"shield_auto_start_delay": present["shield_auto_start_delay"],
+			"shield_max_retries":      present["shield_max_retries"],
+			"shield_env_strictness":   present["shield_env_strictness"],
+		}
+		if err := validateChallengeConfig(cfg, challengePresent); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateRateLimitConfig(cfg, present); err != nil {
+			c.JSON(400, map[string]string{"error": err.Error()})
+			return
+		}
+		if present["chain_steps"] {
+			steps, ok := normalizeChainStepPayload(json.RawMessage(cfg.ChainSteps))
+			if !ok {
+				c.JSON(400, map[string]string{"error": "chain_steps contains unsupported step type or captcha_type"})
+				return
+			}
+			cfg.ChainSteps = steps
+		}
 
 		actionFields := map[string]struct {
 			value       string
@@ -142,15 +214,31 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			if (!present[field] && !(present[spec.enableField] && spec.enabled)) || spec.value == "" {
 				continue
 			}
-			if normalized, ok := shared.ValidateActionWithoutRedirectTarget(spec.value); ok {
+			normalized, ok := shared.ValidateActionWithoutRedirectTarget(spec.value)
+			if ok && field == "auto_ban_action" {
+				switch normalized {
+				case "intercept", "drop":
+				default:
+					ok = false
+				}
+			}
+			if ok {
 				setProtectionActionField(&cfg, field, normalized)
 			} else {
 				c.JSON(400, map[string]string{"error": "invalid action"})
 				return
 			}
 		}
-		if (present["cc_rules"] || (present["cc_use_custom"] && cfg.CCUseCustom)) && !validateCCRuleActions(cfg.CCRules) {
-			c.JSON(400, map[string]string{"error": "invalid cc rule action"})
+		if present["cc_rules"] || (present["cc_use_custom"] && cfg.CCUseCustom) {
+			if err := shared.ValidateCCRules(cfg.CCRules); err != nil {
+				c.JSON(400, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		// 全局质询动作：空串合法（继承语义 = 默认 challenge 渲染），
+		// 非空必须是合法质询动作之一，防旧数据/手工写入的非法值带入快照。
+		if !shared.ValidateGlobalChallengeAction(cfg.ChallengeAction) {
+			c.JSON(400, map[string]string{"error": "invalid action"})
 			return
 		}
 
@@ -159,24 +247,37 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := repo.Set("protection", string(data)); err != nil {
+		if err := repo.Transaction(func(txRepo *repository.SystemSettingsRepo) error {
+			if err := txRepo.Set("protection", string(data)); err != nil {
+				return err
+			}
+
+			// Sync bot_detection_enabled to bot_settings.Enabled so the bot page
+			// reflects changes made on the protection page.
+			if present["bot_detection_enabled"] {
+				if err := shared.SyncProtectionBotToSettings(txRepo, cfg.BotDetectionEnabled); err != nil {
+					return err
+				}
+			}
+			if present["captcha_enabled"] {
+				if err := shared.SyncProtectionCaptchaToSettings(txRepo, cfg.CaptchaEnabled); err != nil {
+					return err
+				}
+			}
+			if present["anti_replay_enabled"] {
+				if err := shared.SyncProtectionAntiReplayToSettings(txRepo, cfg.AntiReplayEnabled); err != nil {
+					return err
+				}
+			}
+			if present["cve_auto_drop_critical"] || present["cve_auto_drop_high"] {
+				if err := shared.SyncCVEAutoDropToDropPolicy(txRepo, cfg.CVEAutoDropCritical, cfg.CVEAutoDropHigh); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
-		}
-
-		// Sync bot_detection_enabled to bot_settings.Enabled so the bot page
-		// reflects changes made on the protection page.
-		if present["bot_detection_enabled"] {
-			if err := shared.SyncProtectionBotToSettings(repo, cfg.BotDetectionEnabled); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
-			}
-		}
-		if present["cve_auto_drop_critical"] || present["cve_auto_drop_high"] {
-			if err := shared.SyncCVEAutoDropToDropPolicy(repo, cfg.CVEAutoDropCritical, cfg.CVEAutoDropHigh); err != nil {
-				c.JSON(500, map[string]string{"error": err.Error()})
-				return
-			}
 		}
 
 		if err := reload(); err != nil {
@@ -185,6 +286,25 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 		}
 		c.JSON(200, buildProtectionResponse(cfg))
 	}
+}
+
+// validateRateLimitConfig prevents an enabled limiter with a zero window or
+// zero quota from turning every request into a synthetic 429. Negative values
+// are rejected even while disabled so a later toggle cannot activate a broken
+// configuration.
+func validateRateLimitConfig(cfg store.ProtectionConfig, present map[string]bool) error {
+	if (present["request_ratelimit_window"] && cfg.RequestRateLimitWindow < 0) ||
+		(present["request_ratelimit_max"] && cfg.RequestRateLimitMax < 0) {
+		return errors.New("request rate limit window and max must not be negative")
+	}
+	if (present["error_ratelimit_window"] && cfg.ErrorRateLimitWindow < 0) ||
+		(present["error_ratelimit_max"] && cfg.ErrorRateLimitMax < 0) {
+		return errors.New("error rate limit window and max must not be negative")
+	}
+	if err := cfg.ValidateRateLimits(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func setProtectionActionField(cfg *store.ProtectionConfig, field string, value string) {
@@ -213,11 +333,7 @@ func validateCCRuleActions(raw string) bool {
 		return false
 	}
 	for _, rule := range rules {
-		actionValue := strings.ToLower(strings.TrimSpace(rule.Action))
-		if actionValue == "" || actionValue == "captcha" {
-			continue
-		}
-		if _, ok := shared.ValidateActionWithoutRedirectTarget(actionValue); !ok {
+		if _, ok := shared.ValidateCCRuleAction(rule.Action); !ok && strings.TrimSpace(rule.Action) != "" {
 			return false
 		}
 	}

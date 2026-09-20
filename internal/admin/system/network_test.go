@@ -156,6 +156,77 @@ func readRESPArgsForTest(r *bufio.Reader) ([]string, error) {
 	return args, nil
 }
 
+func TestLoadRedisConfigRejectsNilRepository(t *testing.T) {
+	if _, err := LoadRedisConfig(nil); err == nil || err.Error() != "redis config repository is nil" {
+		t.Fatalf("LoadRedisConfig(nil) error = %v, want nil repository error", err)
+	}
+}
+
+func TestLoadRedisConfigReturnsZeroForMissingAndEmptyValues(t *testing.T) {
+	tests := []struct {
+		name string
+		seed *string
+	}{
+		{name: "missing", seed: nil},
+		{name: "empty", seed: func() *string { value := ""; return &value }()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newSystemSettingsRepoForTest(t)
+			if tt.seed != nil {
+				if err := repo.Set(store.SettingKeyRedisConfig, *tt.seed); err != nil {
+					t.Fatalf("seed redis config: %v", err)
+				}
+			}
+			got, err := LoadRedisConfig(repo)
+			if err != nil {
+				t.Fatalf("LoadRedisConfig() error = %v", err)
+			}
+			if got != (RedisConfig{}) {
+				t.Fatalf("LoadRedisConfig() = %#v, want zero config", got)
+			}
+		})
+	}
+}
+
+func TestLoadRedisConfigValidatesStoredValues(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "invalid json", raw: "{", want: "decode redis config:"},
+		{name: "negative db", raw: `{"enabled":false,"db":-1}`, want: "redis db must be >= 0"},
+		{name: "enabled without address", raw: `{"enabled":true}`, want: "redis addr is required when enabled"},
+		{name: "whitespace value", raw: "  ", want: "decode redis config:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newSystemSettingsRepoForTest(t)
+			if err := repo.Set(store.SettingKeyRedisConfig, tt.raw); err != nil {
+				t.Fatalf("seed redis config: %v", err)
+			}
+			if _, err := LoadRedisConfig(repo); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("LoadRedisConfig() error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadRedisConfigTrimsValidAddress(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	if err := repo.Set(store.SettingKeyRedisConfig, `{"enabled":true,"addr":" 127.0.0.1:6379 ","db":0}`); err != nil {
+		t.Fatalf("seed redis config: %v", err)
+	}
+	got, err := LoadRedisConfig(repo)
+	if err != nil {
+		t.Fatalf("LoadRedisConfig() error = %v", err)
+	}
+	if got.Addr != "127.0.0.1:6379" {
+		t.Fatalf("redis addr = %q, want trimmed address", got.Addr)
+	}
+}
+
 func TestUpdateNetworkConfigPreservesOmittedHTTP3Bind(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	if err := repo.Set(settingKeyNetwork, `{"ipv6_enabled":false,"http2_enabled":true,"http3_enabled":true,"http3_bind":":8443","default_alpn":"h3,h2,http/1.1","default_network":"tcp"}`); err != nil {
@@ -932,6 +1003,42 @@ func TestUpdateRedisConfigPreservesStoredPasswordWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestUpdateRedisConfigAcceptsFrontendFieldNames(t *testing.T) {
+	redisSrv := startTestRedisServer(t)
+	defer redisSrv.Close()
+
+	repo := newSystemSettingsRepoForTest(t)
+	payload := []byte(fmt.Sprintf(`{"redis_addr":%q,"redis_db":0}`, redisSrv.Addr()))
+	reloaded := 0
+	ctx := invokeSystemConfigHandler(t, UpdateRedisConfig(repo, func() error { reloaded++; return nil }), "POST", "/api/v1/redis-config", payload)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if reloaded != 1 {
+		t.Fatalf("reload count = %d, want 1", reloaded)
+	}
+
+	val, err := repo.Get(store.SettingKeyRedisConfig)
+	if err != nil {
+		t.Fatalf("load redis config: %v", err)
+	}
+	var stored RedisConfig
+	if err := json.Unmarshal([]byte(val), &stored); err != nil {
+		t.Fatalf("decode stored redis config: %v", err)
+	}
+	if !stored.Enabled || stored.Addr != redisSrv.Addr() || stored.DB != 0 {
+		t.Fatalf("frontend redis fields were not saved/enabled: %#v", stored)
+	}
+
+	var resp RedisConfigResponse
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode redis response: %v", err)
+	}
+	if !resp.Enabled || resp.RedisAddr != redisSrv.Addr() || resp.RedisDB != 0 {
+		t.Fatalf("response should expose redis_* aliases for frontend, got %#v", resp)
+	}
+}
+
 func TestListCipherSuitesIncludesCanonicalMetadata(t *testing.T) {
 	ctx := invokeSystemConfigHandler(t, ListCipherSuites(), "GET", "/api/v1/tls-cipher-suites", nil)
 	if ctx.Response.StatusCode() != 200 {
@@ -1017,7 +1124,7 @@ func TestGetRuntimeConfigIncludesBrotliRuntimeState(t *testing.T) {
 	}
 	holder := &snapshotpkg.Holder{}
 	holder.Store(&snapshotpkg.Snapshot{
-		Sites: map[string]snapshotpkg.SiteRuntime{
+		Sites: map[string]*snapshotpkg.SiteRuntime{
 			snapshotpkg.SiteMapKey(":443", "example.com"): {
 				TLSConfig: &tls.Config{
 					Certificates: []tls.Certificate{{OCSPStaple: []byte("ocsp")}},
@@ -1190,5 +1297,59 @@ func TestGetRuntimeConfigIncludesBrotliRuntimeState(t *testing.T) {
 	}
 	if got := capabilities["brotli_compression"]; got.Status != "enabled" || got.Missing {
 		t.Fatalf("brotli_compression capability = %#v, want enabled and not missing", got)
+	}
+}
+
+func TestGetRuntimeConfigIncludesSnapshotConfigDiagnostics(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	holder := &snapshotpkg.Holder{}
+	holder.Store(&snapshotpkg.Snapshot{
+		Revision: 23,
+		ConfigDiagnostics: []snapshotpkg.SnapshotConfigDiagnostic{
+			{
+				Kind:          "ip_list_entry",
+				Reason:        "invalid_ip_or_cidr",
+				IPListEntryID: 41,
+				Scope:         "site",
+				SiteID:        7,
+			},
+		},
+	})
+	dbDSN := "waf:db-secret@tcp(db.example:3306)/waf?parseTime=True"
+	logDBDSN := "host=logdb.example user=waf password=log-secret dbname=waflog"
+
+	handler := GetRuntimeConfig(func() (core.Config, bool) {
+		return core.Config{
+			DBDriver: "mysql",
+			DBDSN:    dbDSN,
+			LogDBDSN: logDBDSN,
+		}, true
+	}, holder, repo)
+	ctx := invokeSystemConfigHandler(t, handler, "GET", "/api/v1/runtime-config", nil)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	var response RuntimeConfigResponse
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("decode runtime config response: %v", err)
+	}
+	if response.Revision != 23 {
+		t.Fatalf("revision = %d, want 23", response.Revision)
+	}
+	if response.DBDSN != maskDSN(dbDSN) || response.LogDBDSN != maskDSN(logDBDSN) {
+		t.Fatalf("masked DSNs = db:%q log:%q", response.DBDSN, response.LogDBDSN)
+	}
+	if len(response.ConfigDiagnostics) != 1 {
+		t.Fatalf("config diagnostics = %#v, want one entry", response.ConfigDiagnostics)
+	}
+	diagnostic := response.ConfigDiagnostics[0]
+	if diagnostic.Kind != "ip_list_entry" || diagnostic.Reason != "invalid_ip_or_cidr" || diagnostic.IPListEntryID != 41 || diagnostic.Scope != "site" || diagnostic.SiteID != 7 {
+		t.Fatalf("config diagnostic = %#v, want snapshot diagnostic identity", diagnostic)
+	}
+	for _, raw := range []string{"db-secret", "log-secret", "raw-invalid-value", "secret-note", "invalid whitelist JSON"} {
+		if bytes.Contains(ctx.Response.Body(), []byte(raw)) {
+			t.Fatalf("runtime config response contains raw sensitive value %q", raw)
+		}
 	}
 }

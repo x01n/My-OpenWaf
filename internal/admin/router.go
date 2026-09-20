@@ -26,6 +26,8 @@ import (
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/escalation"
+	"My-OpenWaf/internal/waf/jsplugin"
+	"My-OpenWaf/internal/waf/luaplugin"
 
 	"gorm.io/gorm"
 )
@@ -53,6 +55,10 @@ type Dependencies struct {
 	Cache         *cache.RedisKV
 	Upstreams     *upstream.Pool
 	ThreatIntel   system.ThreatIntelSyncer
+	// JSEngine 在每次 dry-run 请求时读取当前 QuickJS runtime，避免 handler 捕获 reload 前的旧指针。
+	JSEngine func() *jsplugin.Engine
+	// LuaEngine 只用于读取运行时统计；可为 nil，此时统计端点返回空列表。
+	LuaEngine *luaplugin.Engine
 }
 
 func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
@@ -79,12 +85,16 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	api.Use(AuthMiddleware(deps.Repos.AdminAPIKey, deps.TokenMgr, deps.SessionMgr))
 
 	api.GET("/auth/me", MeHandler(authDeps))
+	api.POST("/auth/change-password", ChangeOwnPasswordHandler(authDeps))
 
 	api.GET("/auth/sessions", ListSessionsHandler(authDeps))
 	api.POST("/auth/sessions/force-logout", RequireRole(auth.RoleAdmin), ForceLogoutSessionHandler(authDeps))
 
 	r := deps.Repos
 	reload := deps.Reload
+	revokeCredentials := func(username, reason string) error {
+		return revokeUserCredentials(authDeps, username, reason)
+	}
 
 	readGroup := api.Group("")
 	readGroup.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator, auth.RoleReadonly))
@@ -98,7 +108,12 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/certificates/:id", system.GetCertificate(r.Certificate))
 		readGroup.GET("/certificates/acme/config", system.GetACMEConfig(r.SystemSettings))
 
+		// 证书 PEM 解析仅解析用户提交的文本并读取站点列表做匹配展示，
+		// 无副作用、不接触库存私钥，属只读操作，故置于 readGroup。
+		readGroup.POST("/certificates/parse", system.ParseCertificate(r.Site))
+
 		readGroup.GET("/policies", system.ListPolicies(r.Policy))
+		readGroup.GET("/policies/default", system.GetDefaultPolicy(r.Policy))
 		readGroup.GET("/policies/:id", system.GetPolicy(r.Policy))
 
 		readGroup.GET("/rules", rule.ListRules(r.Rule))
@@ -116,20 +131,32 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		readGroup.GET("/threat-intel-feeds", system.ListThreatIntelFeeds(r.ThreatIntel))
 		readGroup.GET("/threat-intel-sync-logs", system.ListThreatIntelSyncLogs(r.ThreatIntelSyncLog))
+		readGroup.GET("/lua-plugins", system.ListLuaPlugins(deps.Repos.LuaPlugin, deps.Snapshot))
+		// stats 是静态段，须与下面的 :id 共存；Hertz 路由树静态优先，
+		// 排列同 /security-events/stats（见 TestLuaPluginStatsRouteBeatsIDParam）。
+		readGroup.GET("/lua-plugins/stats", system.GetLuaPluginStats(deps.LuaEngine))
+		readGroup.GET("/lua-plugins/:id", system.GetLuaPlugin(deps.Repos.LuaPlugin, deps.Snapshot))
+		readGroup.GET("/js-plugins", system.ListJSPlugins(deps.Repos.JSPlugin, deps.Snapshot))
+		readGroup.GET("/js-plugins/stats", system.GetJSPluginStats(deps.Snapshot))
+		readGroup.GET("/js-plugins/runtime", system.GetJSPluginRuntime(deps.Repos.JSPlugin, deps.Snapshot, deps.JSEngine))
+		readGroup.GET("/js-plugins/:id", system.GetJSPlugin(deps.Repos.JSPlugin, deps.Snapshot))
 
 		readGroup.GET("/security-events", event.ListSecurityEvents(r.SecurityEvent))
 		readGroup.GET("/security-events/stats", event.SecurityEventStats(r.SecurityEvent))
 		readGroup.GET("/security-events/timeline", event.SecurityEventTimeline(r.SecurityEvent))
+		// requests 是请求级聚合视图（按 request_id 分组），与 :id 的单事件详情语义不同；
+		// 静态段必须排在 :id 之前，见 TestSecurityEventRequestsRouteBeatsIDParam。
+		readGroup.GET("/security-events/requests", event.ListSecurityEventRequests(r.SecurityEvent))
 		readGroup.GET("/security-events/:id", event.GetSecurityEvent(r.SecurityEvent))
 		readGroup.GET("/access-logs", event.ListAccessLogs(r.AccessLog))
 		readGroup.GET("/access-logs/:id", event.GetAccessLog(r.AccessLog))
 		readGroup.GET("/fingerprints", event.ListTLSFingerprints(r.AccessLog))
-		readGroup.GET("/request/:request_id", event.GetRequestTrace(r.AccessLog, r.SecurityEvent))
+		readGroup.GET("/request/:request_id", event.GetRequestTrace(r.AccessLog, r.SecurityEvent, r.BotScore))
 		readGroup.GET("/sites/:id/security-events", event.ListSiteSecurityEvents(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events/stats", event.SiteSecurityEventStats(r.Site, r.SecurityEvent))
 		readGroup.GET("/sites/:id/security-events/timeline", event.SiteSecurityEventTimeline(r.Site, r.SecurityEvent))
 
-		// 误报反馈：任意登录用户可提交与查看。
+		// 误报反馈只读列表：readonly 也可查看；提交与改状态在 opsGroup，删除在 adminGroup。
 		readGroup.GET("/false-positives", event.ListFalsePositives(r.FalsePositive))
 
 		// 预置爬虫白名单预览（读端点）。
@@ -147,12 +174,18 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites/:id/access/users", access.ListUsers(r.AccessControl))
 		readGroup.GET("/sites/:id/access/rules", access.ListPathRules(r.AccessControl))
 
-		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, ConfigDB: deps.DB, LogDB: deps.LogDB, Cache: deps.Cache}
+		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, ConfigDB: deps.DB, LogDB: deps.LogDB, Cache: deps.Cache, AccessRepo: r.AccessLog}
 		readGroup.GET("/dashboard/summary", system.DashboardSummary(dashDeps))
 
 		readGroup.GET("/api-keys", system.ListAPIKeys(r.AdminAPIKey))
 
 		readGroup.GET("/admin-users", ListAdminUsers(r.AdminAccount))
+		readGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
+		readGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))
+		readGroup.GET("/tls-cipher-suites", system.ListCipherSuites())
+		readGroup.GET("/http2-config", system.GetHTTP2Config(r.SystemSettings))
+		readGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))
+		readGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
 
 		readGroup.GET("/bot-settings", protect.GetBotSettings(r.SystemSettings))
 		readGroup.GET("/bot-stats", protect.GetBotStats(r.BotScore))
@@ -164,6 +197,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		readGroup.GET("/owasp-rules", detect.ListOWASPRulesFromRegistry(r.SystemSettings))
 		readGroup.GET("/owasp-rules/stats", detect.GetOWASPRuleStats(r.SystemSettings))
+		readGroup.GET("/policies/:policyId/owasp-rules", detect.ListOWASPRulesFromRegistry(r.SystemSettings))
+		readGroup.GET("/policies/:policyId/owasp-rules/stats", detect.GetOWASPRuleStats(r.SystemSettings))
 
 		readGroup.GET("/captcha/config", protect.GetCaptchaConfig(r.SystemSettings))
 
@@ -184,6 +219,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/upstreams/status", system.UpstreamStatus(deps.Upstreams))
 		readGroup.GET("/runtime-config", system.GetRuntimeConfig(deps.RuntimeState, deps.Snapshot, deps.Repos.SystemSettings))
 		readGroup.GET("/realtime/ticket", deps.Realtime.TicketHandler())
+
+		readGroup.GET("/page-templates", protect.GetPageTemplates(r.SystemSettings))
+		readGroup.GET("/page-templates/:type", protect.GetPageTemplate(r.SystemSettings))
+		readGroup.GET("/page-templates/:type/preview", protect.PreviewPageTemplate(r.SystemSettings))
 	}
 
 	opsGroup := api.Group("")
@@ -199,7 +238,6 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites/:id/listeners/:lid/delete", site.DeleteSiteListener(r.Site, r.SiteListener, reload))
 
 		opsGroup.POST("/certificates", system.CreateCertificate(r.Certificate, reload))
-		opsGroup.POST("/certificates/parse", system.ParseCertificate(r.Site))
 		opsGroup.POST("/certificates/:id/update", system.UpdateCertificate(r.Certificate, reload))
 		opsGroup.POST("/certificates/:id/apply-to-sites", system.ApplyCertificateToSites(r.Certificate, r.Site, r.SiteListener, reload))
 		opsGroup.POST("/certificates/:id/delete", system.DeleteCertificate(r.Certificate, r.Site, r.SiteListener, reload))
@@ -207,6 +245,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/certificates/acme/:id/renew", system.ACMERenew(deps.Repos, reload, deps.ACMEStore))
 
 		opsGroup.POST("/policies", system.CreatePolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/set-default", system.SetDefaultPolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/default", system.SetDefaultPolicy(r.Policy, reload))
 		opsGroup.POST("/policies/:id/update", system.UpdatePolicy(r.Policy, reload))
 		opsGroup.POST("/policies/:id/delete", system.DeletePolicy(r.Policy, r.Site, reload))
 
@@ -228,20 +268,44 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/threat-intel-feeds/:id/delete", system.DeleteThreatIntelFeed(r.ThreatIntel, reload))
 		opsGroup.POST("/threat-intel-feeds/:id/sync", system.SyncThreatIntelFeed(r.ThreatIntel, deps.ThreatIntel))
 
+		// 自定义 Lua 策略脚本。校验与试运行虽不改配置，但会编译/执行用户代码，
+		// 故一并置于 opsGroup（需要写权限）而非只读组。
+		opsGroup.POST("/lua-plugins", system.CreateLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/update", system.UpdateLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/delete", system.DeleteLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/toggle", system.ToggleLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/validate", system.ValidateLuaPlugin())
+		opsGroup.POST("/lua-plugins/dry-run", system.DryRunLuaPlugin())
+		opsGroup.POST("/js-plugins", system.CreateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload, deps.JSEngine))
+		opsGroup.POST("/js-plugins/:id/update", system.UpdateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload, deps.JSEngine))
+		opsGroup.POST("/js-plugins/:id/delete", system.DeleteJSPlugin(deps.Repos.JSPlugin, reload))
+		opsGroup.POST("/js-plugins/:id/toggle", system.ToggleJSPlugin(deps.Repos.JSPlugin, reload, deps.JSEngine))
+		opsGroup.POST("/js-plugins/validate", system.ValidateJSPlugin(deps.JSEngine))
+		opsGroup.POST("/js-plugins/dry-run", system.DryRunJSPlugin(deps.JSEngine))
+
 		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
 
 		opsGroup.POST("/bot-settings/update", protect.UpdateBotSettings(r.SystemSettings, reload))
 
-		opsGroup.POST("/cve-rules/:id/toggle", detect.ToggleCVERule(r.CVERule, deps.CVEFeedMgr))
-		opsGroup.POST("/cve-rules/:id/patch", detect.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr))
-		opsGroup.POST("/cve-rules/batch", detect.BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr))
-		opsGroup.POST("/cve-rules/sync", detect.SyncCVERules(deps.CVEFeedMgr))
+		opsGroup.POST("/cve-rules/:id/toggle", detect.ToggleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		opsGroup.POST("/cve-rules/:id/patch", detect.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		opsGroup.POST("/cve-rules/:id/reset", detect.ResetCVERuleOverride(r.CVERule, reload))
+		opsGroup.POST("/cve-rules/batch", detect.BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr, reload))
+		opsGroup.POST("/cve-rules/sync", detect.SyncCVERules(deps.CVEFeedMgr, r.CVERule))
 
 		opsGroup.POST("/owasp-rules/:id/update", detect.UpdateSingleOWASPRule(r.SystemSettings, reload))
+		opsGroup.POST("/owasp-rules/:id/reset", detect.ResetOWASPRuleOverride(r.SystemSettings, reload))
 		opsGroup.POST("/owasp-rules/batch", detect.BatchUpdateOWASPRules(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/:id", detect.UpdateSingleOWASPRule(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/:id/reset", detect.ResetOWASPRuleOverride(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/batch", detect.BatchUpdateOWASPRules(r.SystemSettings, reload))
 
 		opsGroup.POST("/captcha/config", protect.UpdateCaptchaConfig(r.SystemSettings, reload))
 		opsGroup.POST("/captcha/test", protect.TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
+
+		opsGroup.POST("/page-templates/:type", protect.UpdatePageTemplate(r.SystemSettings, reload))
+		opsGroup.POST("/page-templates/:type/reset", protect.ResetPageTemplate(r.SystemSettings, reload))
+		opsGroup.POST("/page-templates/:type/preview", protect.PreviewPageTemplateDraft(r.SystemSettings))
 
 		opsGroup.POST("/chain/config", protect.UpdateChainConfig(r.SystemSettings, reload))
 		opsGroup.POST("/chain/sessions/:id/delete", protect.DeleteChainSession(deps.ChainMgr))
@@ -270,8 +334,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites/:id/access/rules/:rid/update", access.UpdatePathRule(r.AccessControl, reload))
 		opsGroup.POST("/sites/:id/access/rules/:rid/delete", access.DeletePathRule(r.AccessControl, reload))
 
-		// 误报反馈：任意登录用户可提交、更新状态；删除仅 admin。
-		opsGroup.POST("/false-positives", event.CreateFalsePositive(r.FalsePositive))
+		// 误报反馈：admin/operator 可提交与更新状态（readonly 不可写）；删除仅 admin。
+		opsGroup.POST("/false-positives", event.CreateFalsePositive(r.FalsePositive, r.SecurityEvent))
 		opsGroup.POST("/false-positives/:id/status", event.UpdateFalsePositiveStatus(r.FalsePositive))
 
 		// 预置爬虫白名单（Google/Bing/Baidu/360/Yandex 等）。
@@ -288,19 +352,16 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		// 配置备份/恢复（高危，仅 admin）。
 		adminGroup.GET("/backup/export", system.ExportBackup(deps.DB))
-		adminGroup.POST("/backup/import", system.ImportBackup(deps.DB, reload))
+		adminGroup.POST("/backup/import", system.ImportBackup(deps.DB, reload, func() {
+			r.CVERule.InvalidateCanonicalSnapshot()
+			detect.InvalidateOWASPReadSnapshots(deps.DB)
+		}))
 
-		adminGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
 		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
-		adminGroup.GET("/http2-config", system.GetHTTP2Config(r.SystemSettings))
 		adminGroup.POST("/http2-config", system.UpdateHTTP2Config(r.SystemSettings, reload))
-		adminGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))
 		adminGroup.POST("/redis-config", system.UpdateRedisConfig(r.SystemSettings, deps.ReloadRedis))
-		adminGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
 		adminGroup.POST("/log-config", system.UpdateLogConfig(r.SystemSettings))
-		adminGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))
 		adminGroup.POST("/tls-config", system.UpdateTLSDefaultConfig(r.SystemSettings, reload))
-		adminGroup.GET("/tls-cipher-suites", system.ListCipherSuites())
 		adminGroup.POST("/certificates/acme/config", system.UpdateACMEConfig(r.SystemSettings))
 		adminGroup.GET("/certificates/acme/status", system.ACMEStatus(deps.Repos))
 
@@ -308,15 +369,15 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/api-keys/:id/delete", system.DeleteAPIKey(r.AdminAPIKey))
 
 		adminGroup.POST("/admin-users", CreateAdminUser(r.AdminAccount))
-		adminGroup.POST("/admin-users/:id/update-password", UpdateAdminPassword(r.AdminAccount))
-		adminGroup.POST("/admin-users/:id/update-role", UpdateAdminRole(r.AdminAccount))
-		adminGroup.POST("/admin-users/:id/delete", DeleteAdminUser(r.AdminAccount))
+		adminGroup.POST("/admin-users/:id/update-password", UpdateAdminPassword(r.AdminAccount, revokeCredentials))
+		adminGroup.POST("/admin-users/:id/update-role", UpdateAdminRole(r.AdminAccount, revokeCredentials))
+		adminGroup.POST("/admin-users/:id/delete", DeleteAdminUser(r.AdminAccount, revokeCredentials))
 
 		adminGroup.POST("/drop-policy/update", protect.UpdateDropPolicy(r.SystemSettings, reload))
 
-		adminGroup.POST("/cve-rules", detect.CreateCVERule(r.CVERule, deps.CVEFeedMgr))
-		adminGroup.POST("/cve-rules/:id/update", detect.UpdateCVERule(r.CVERule, deps.CVEFeedMgr))
-		adminGroup.POST("/cve-rules/:id/delete", detect.DeleteCVERule(r.CVERule, deps.CVEFeedMgr))
+		adminGroup.POST("/cve-rules", detect.CreateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		adminGroup.POST("/cve-rules/:id/update", detect.UpdateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		adminGroup.POST("/cve-rules/:id/delete", detect.DeleteCVERule(r.CVERule, deps.CVEFeedMgr, reload))
 
 		// 删除误报反馈仅 admin。
 		adminGroup.POST("/false-positives/:id/delete", event.DeleteFalsePositive(r.FalsePositive))
@@ -325,8 +386,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	h.GET("/__owaf/pow.wasm", func(ctx context.Context, c *app.RequestContext) {
 		challenge.ServePoWWASM(c)
 	})
-	h.GET("/__owaf/wasm_exec.js", func(ctx context.Context, c *app.RequestContext) {
-		challenge.ServeWasmExecJS(c)
+	h.GET("/__owaf/pow_glue.js", func(ctx context.Context, c *app.RequestContext) {
+		challenge.ServePowGlueJS(c)
 	})
 	h.GET("/api/v1/realtime/ws", deps.Realtime.WebSocketHandler())
 	h.GET("/.well-known/acme-challenge/:token", func(ctx context.Context, c *app.RequestContext) {

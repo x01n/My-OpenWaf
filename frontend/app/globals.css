@@ -72,6 +72,13 @@
     --chart-3: oklch(0.681 0.162 75.834);
     --chart-4: oklch(0.554 0.135 66.442);
     --chart-5: oklch(0.476 0.114 61.907);
+    /**
+     * 图表专用语义色。与 --primary/--destructive 分开，因为图表色必须对「卡片背景」
+     * 达到 3:1 对比度；深色模式下 --primary 只有 2.64:1，直接复用会导致折线发暗看不清。
+     * 取值经 OKLab 校验（亮度带 / 彩度下限 / 对比度），浅色卡面 #ffffff、深色卡面 #1d1816。
+     */
+    --chart-accent: oklch(0.527 0.154 178.0); /* #00856b — 4.55:1 on #ffffff */
+    --chart-danger: #ef4444; /* 两种模式均通过，保持红=风险的语义恒定 */
     --radius: 0.625rem;
     --sidebar: oklch(0.986 0.002 67.8);
     --sidebar-foreground: oklch(0.147 0.004 49.3);
@@ -115,6 +122,9 @@
     --chart-3: oklch(0.681 0.162 75.834);
     --chart-4: oklch(0.554 0.135 66.442);
     --chart-5: oklch(0.476 0.114 61.907);
+    /* 深色卡面 #1d1816 上校验通过：#0d9488 = 3.61:1（--primary 仅 2.64:1，不可用） */
+    --chart-accent: var(--teal-600);
+    --chart-danger: #ef4444;
     --sidebar: oklch(0.214 0.009 43.1);
     --sidebar-foreground: oklch(0.986 0.002 67.8);
     --sidebar-primary: oklch(0.723 0.219 178.0);
@@ -123,6 +133,42 @@
     --sidebar-accent-foreground: oklch(0.986 0.002 67.8);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.547 0.021 43.1);
+}
+
+/**
+ * 蓝色强调主题（与 next-themes 的 light/dark 正交）
+ * 通过 documentElement 上的 data-accent="blue" 承载，默认（无该属性）为青绿主题。
+ * 浅色蓝：[data-accent="blue"] 覆盖 :root 的 primary/ring/chart/sidebar-primary。
+ */
+[data-accent="blue"] {
+    --primary: oklch(0.546 0.215 262.9);
+    --primary-foreground: oklch(0.985 0.013 262.9);
+    --ring: oklch(0.623 0.164 262.9);
+    --chart-1: oklch(0.546 0.215 262.9);
+    --chart-2: oklch(0.646 0.162 258.3);
+    --chart-3: oklch(0.716 0.134 245.8);
+    --chart-4: oklch(0.786 0.108 234.5);
+    --chart-5: oklch(0.848 0.086 224.3);
+    --chart-accent: oklch(0.546 0.215 262.9); /* #2563eb — 5.17:1 on #ffffff */
+    --sidebar-primary: oklch(0.546 0.215 262.9);
+    --sidebar-primary-foreground: oklch(0.985 0.013 262.9);
+    --sidebar-ring: oklch(0.623 0.164 262.9);
+}
+
+/** 深色蓝：以更高特异性覆盖 .dark，避免被浅色蓝规则误伤 */
+.dark[data-accent="blue"] {
+    --primary: oklch(0.623 0.194 262.9);
+    --primary-foreground: oklch(0.985 0.013 262.9);
+    --ring: oklch(0.546 0.164 262.9);
+    --chart-1: oklch(0.707 0.165 262.9);
+    --chart-2: oklch(0.646 0.162 258.3);
+    --chart-3: oklch(0.588 0.148 250.1);
+    --chart-4: oklch(0.516 0.128 242.4);
+    --chart-5: oklch(0.451 0.108 236.2);
+    --chart-accent: oklch(0.623 0.194 262.9); /* #447ffa — 5.28:1 on #1d1816 */
+    --sidebar-primary: oklch(0.707 0.165 262.9);
+    --sidebar-primary-foreground: oklch(0.985 0.013 262.9);
+    --sidebar-ring: oklch(0.546 0.164 262.9);
 }
 
 @layer base {

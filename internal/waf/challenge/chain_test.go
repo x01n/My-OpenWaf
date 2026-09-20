@@ -1,7 +1,9 @@
 package challenge
 
 import (
+	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +41,58 @@ func TestChainReconfigureUpdatesSteps(t *testing.T) {
 	}
 }
 
+func TestChainCaptchaTypeInheritsGlobalAndFallsBackSafely(t *testing.T) {
+	tests := []struct {
+		name       string
+		stepType   CaptchaType
+		globalType CaptchaType
+		want       CaptchaType
+	}{
+		{name: "inherit_global", globalType: CaptchaTypeSlide, want: CaptchaTypeSlide},
+		{name: "empty_global_falls_back", globalType: "", want: CaptchaTypeMath},
+		{name: "invalid_global_falls_back", globalType: "invalid", want: CaptchaTypeMath},
+		{name: "explicit_step_wins", stepType: CaptchaTypeRotate, globalType: CaptchaTypeClick, want: CaptchaTypeRotate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			captcha := NewCaptchaManager(nil, 0)
+			defer captcha.Close()
+			mgr := NewChainChallengeManager(captcha, nil)
+			defer mgr.Close()
+			mgr.ReconfigureWithCaptchaType([]ChainStepConfig{{Type: ChainStepCaptcha, CaptchaType: tt.stepType}}, 1, tt.globalType)
+			sessionID, _ := mgr.StartChain("/")
+			state := chainStateOf(t, mgr, sessionID)
+			if got := state.Steps[0].CaptchaType; got != tt.want {
+				t.Fatalf("captcha_type = %q, want %q; steps = %#v", got, tt.want, state.Steps)
+			}
+		})
+	}
+}
+
+// TestChainCaptchaTypeClearsFromEnvironmentAndPoW 验证 env/pow 步骤始终清空 captcha_type。
+func TestChainCaptchaTypeClearsFromEnvironmentAndPoW(t *testing.T) {
+	captcha := NewCaptchaManager(nil, 0)
+	defer captcha.Close()
+	mgr := NewChainChallengeManager(captcha, nil)
+	defer mgr.Close()
+	mgr.ReconfigureWithCaptchaType([]ChainStepConfig{
+		{Type: ChainStepEnv, CaptchaType: CaptchaTypeClick},
+		{Type: ChainStepPoW, CaptchaType: CaptchaTypeRotate},
+		{Type: ChainStepCaptcha},
+	}, 1, CaptchaTypeSlide)
+	sessionID, _ := mgr.StartChain("/")
+	state := chainStateOf(t, mgr, sessionID)
+	if got := state.Steps[0].CaptchaType; got != "" {
+		t.Fatalf("env captcha_type = %q, want empty", got)
+	}
+	if got := state.Steps[1].CaptchaType; got != "" {
+		t.Fatalf("pow captcha_type = %q, want empty", got)
+	}
+	if got := state.Steps[2].CaptchaType; got != CaptchaTypeSlide {
+		t.Fatalf("captcha inherited type = %q, want %q", got, CaptchaTypeSlide)
+	}
+}
+
 func TestChainReconfigureFallbacksToDefaults(t *testing.T) {
 	mgr := NewChainChallengeManager(NewCaptchaManager(nil, 0), nil)
 	mgr.Reconfigure([]ChainStepConfig{{Type: ChainStepType("unsupported"), Condition: "all"}}, 0)
@@ -55,7 +109,7 @@ func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
 	captchaManager.sessions[sessionID] = &CaptchaSession{
 		ID:        sessionID,
 		Type:      CaptchaTypeClick,
-		Answer:    `{"target":{"x":10,"y":20}}`,
+		Answer:    `{"0":{"index":0,"x":10,"y":20,"width":1,"height":1}}`,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(time.Minute),
 	}
@@ -72,9 +126,41 @@ func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	ok, redirect, nextHTML := mgr.ProcessStep(chainSession, map[string]string{"captcha_answer": `[{"x":12,"y":19}]`})
+	ok, redirect, nextHTML := mgr.ProcessStep(chainSession, map[string]string{"captcha_answer": `[{"x":12,"y":20}]`})
 	if !ok || redirect != "/protected" || nextHTML != "" {
 		t.Fatalf("advanced chain captcha answer was not verified: ok=%v redirect=%q html=%q", ok, redirect, nextHTML)
+	}
+}
+
+// TestChainCaptchaConditionCannotSkip 验证 CAPTCHA 步骤不会被环境分数条件跳过。
+func TestChainCaptchaConditionCannotSkip(t *testing.T) {
+	captchaManager := NewCaptchaManager(nil, 0)
+	defer captchaManager.Close()
+	mgr := NewChainChallengeManager(captchaManager, nil)
+	defer mgr.Close()
+	mgr.Reconfigure([]ChainStepConfig{
+		{Type: ChainStepPoW, Condition: "all"},
+		{Type: ChainStepCaptcha, Condition: "env_score>30", CaptchaType: CaptchaTypeMath},
+	}, 1)
+
+	sessionID, _ := mgr.StartChain("/protected")
+	state := chainStateOf(t, mgr, sessionID)
+	if got := state.Steps[1].Condition; got != "all" {
+		t.Fatalf("CAPTCHA condition = %q, want all", got)
+	}
+	counter, hash := solveChainPoW(t, state.Nonce, state.powDifficulty(mgr.difficultyValue()))
+	got := mgr.ProcessStepDetailed(sessionID, map[string]string{
+		"pow_counter": counter,
+		"pow_hash":    hash,
+	})
+	if got.Passed {
+		t.Fatal("a configured CAPTCHA step must not be skipped by env_score condition")
+	}
+	if got.Failed {
+		t.Fatal("valid PoW advancement must not be marked as failed")
+	}
+	if got.NextHTML == "" || !strings.Contains(got.NextHTML, "CAPTCHA Verification") {
+		t.Fatalf("PoW advancement did not render the mandatory CAPTCHA step: %q", got.NextHTML)
 	}
 }
 
@@ -89,7 +175,6 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 		RequireHTTP2:         true,
 		RequireHTTP3:         false,
 		AllowHTTP1:           false,
-		EnableWASM:           false,
 		EnableEnvCheck:       false,
 		EnableDevToolsDetect: false,
 	}
@@ -99,25 +184,45 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	powScript := GeneratePoWScript(session.Difficulty, session.Nonce)
+	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce)
 	runtimeCfg := mgr.Config()
 	html := shieldPageHTMLWithConfig(session.ID, runtimeCfg, "h2", "", powScript)
 
 	checks := []string{
-		`autoDelay=1234`,
-		`timeoutMs=7000`,
-		`maxRetries=5`,
-		`enableEnv=false`,
-		`detectDev=false`,
-		`requireH2=true`,
-		`allowH1=false`,
-		`requestProto="h2"`,
-		`window.__powWorker=w`,
+		`=1234`,
+		`=7000`,
+		`=5,`,
+		`=false`,
+		`=true`,
+		`="h2"`,
+		`pow_glue.js`,
 	}
 	for _, want := range checks {
 		if !strings.Contains(html, want) {
 			t.Fatalf("shield page did not include %q: %s", want, html)
 		}
+	}
+}
+
+func TestShieldPageNormalizesUnsafeProtocolBeforeRendering(t *testing.T) {
+	cfg := DefaultShieldConfig()
+	unsafeProtocol := `";alert(document.domain);//`
+	html := shieldPageHTMLWithConfig("session", cfg, unsafeProtocol, "", "")
+
+	if strings.Contains(html, unsafeProtocol) || strings.Contains(html, "alert(document.domain)") {
+		t.Fatalf("shield page reflected unsafe protocol into inline script: %s", html)
+	}
+	if !strings.Contains(html, `="http/1.1"`) {
+		t.Fatalf("shield page did not fall back to HTTP/1.1: %s", html)
+	}
+}
+
+func TestNormalizeShieldProtocolRejectsUnknownValues(t *testing.T) {
+	if got := normalizeShieldProtocol(`";alert(document.domain);//`); got != "" {
+		t.Fatalf("normalizeShieldProtocol() = %q, want empty value for unknown protocol", got)
+	}
+	if got := shieldProtocolValue(`";alert(document.domain);//`); got != "http/1.1" {
+		t.Fatalf("shieldProtocolValue() = %q, want %q", got, "http/1.1")
 	}
 }
 
@@ -133,7 +238,6 @@ func TestShieldVerifyEnforcesProtocolRequirements(t *testing.T) {
 		cfg.RequireHTTP2 = requireH2
 		cfg.RequireHTTP3 = requireH3
 		cfg.AllowHTTP1 = allowH1
-		cfg.EnableWASM = false
 		cfg.EnableEnvCheck = false
 		cfg.EnableDevToolsDetect = false
 		return cfg
@@ -204,22 +308,117 @@ func findShieldPoWSolution(t *testing.T, nonce string, difficulty int) (int64, s
 }
 
 func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
-	script := GeneratePoWScript(1, "nonce")
+	script := GeneratePoWWASMScript(1, "nonce")
 	if !strings.Contains(script, "__owaf_pow_callback") {
-		t.Fatalf("GeneratePoWScript() did not expose shield/chain callback: %s", script)
+		t.Fatalf("GeneratePoWWASMScript() did not expose shield/chain callback: %s", script)
 	}
 	if !strings.Contains(script, "__onPoWComplete") {
-		t.Fatalf("GeneratePoWScript() dropped legacy callback: %s", script)
+		t.Fatalf("GeneratePoWWASMScript() dropped legacy callback: %s", script)
+	}
+	markers := []string{
+		"BigInt(self.__off)",
+		"BigInt(self.__bs*self.__nc)",
+		"wasm_bindgen({module_or_path:",
+		"self.__p=",
+		"solve_pow_batched(self.__n,self.__d,self.__p,self.__bs,off)",
+		"__owaf_pow_error",
+		"__owaf_pow_cancel",
+	}
+	for _, marker := range markers {
+		if !strings.Contains(script, marker) {
+			t.Fatalf("GeneratePoWWASMScript() missing marker %q: %s", marker, script)
+		}
+	}
+	if strings.Contains(script, "var off=self.__off") || strings.Contains(script, "off+=self.__bs*self.__nc") {
+		t.Fatalf("GeneratePoWWASMScript() still uses numeric start_counter: %s", script)
 	}
 }
 
-func TestEnvCheckJSExportsOwafEnv(t *testing.T) {
-	script := EnvCheckJS()
-	if !strings.Contains(script, "window.__owaf_env=fp") {
-		t.Fatalf("EnvCheckJS() did not expose __owaf_env: %s", script)
+func TestGeneratedPoWScriptEmbedsValidVMProgram(t *testing.T) {
+	const (
+		programMarker = "self.__p="
+		programEnd    = ";self.__off="
+	)
+	wantOps := []byte{
+		vmOpLoadNonce,
+		vmOpLoadCounter,
+		vmOpConcat,
+		vmOpSHA256,
+		vmOpCheckPrefix,
 	}
-	if !strings.Contains(script, "__owaf_env_encrypted") {
-		t.Fatalf("EnvCheckJS() dropped encrypted fingerprint export: %s", script)
+
+	for i := 0; i < 100; i++ {
+		script := GeneratePoWWASMScript(1, "nonce")
+		start := strings.Index(script, programMarker)
+		if start < 0 {
+			t.Fatalf("generated script is missing %q: %s", programMarker, script)
+		}
+		start += len(programMarker)
+		relEnd := strings.Index(script[start:], programEnd)
+		if relEnd < 0 {
+			t.Fatalf("generated script has no program terminator %q: %s", programEnd, script)
+		}
+		quoted := script[start : start+relEnd]
+		program, err := strconv.Unquote(quoted)
+		if err != nil {
+			t.Fatalf("decode quoted VM program %q: %v", quoted, err)
+		}
+		bytecode, err := hex.DecodeString(program)
+		if err != nil {
+			t.Fatalf("decode VM program %q: %v", program, err)
+		}
+		if len(bytecode) < len(wantOps)+2 || len(bytecode) > len(wantOps)+5 {
+			t.Fatalf("unexpected VM program length %d: %x", len(bytecode), bytecode)
+		}
+
+		nonNops := make([]byte, 0, len(wantOps))
+		nopCount := 0
+		for _, op := range bytecode {
+			if op == vmOpNop {
+				nopCount++
+				continue
+			}
+			nonNops = append(nonNops, op)
+		}
+		if nopCount < 2 || nopCount > 5 {
+			t.Fatalf("unexpected NOP count %d: %x", nopCount, bytecode)
+		}
+		if len(nonNops) != len(wantOps) {
+			t.Fatalf("unexpected non-NOP opcodes %x, want %x", nonNops, wantOps)
+		}
+		for j := range wantOps {
+			if nonNops[j] != wantOps[j] {
+				t.Fatalf("non-NOP opcode order %x, want %x", nonNops, wantOps)
+			}
+		}
+	}
+}
+
+func TestEnvCheckJSUsesWASMOnly(t *testing.T) {
+	script := EnvCheckJSPlain()
+	for _, forbidden := range []string{"navigator.webdriver", "JSON.stringify(fp)", "window.__owaf_env=fp"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("EnvCheckJSPlain() retained JavaScript security calculation %q: %s", forbidden, script)
+		}
+	}
+	if !strings.Contains(script, "wasm_bindgen.collect_fingerprint") {
+		t.Fatalf("EnvCheckJSPlain() did not call the WASM collector: %s", script)
+	}
+
+	encrypted := EnvCheckJSEncrypted(
+		"aabbccdd112233445566778899001122aabbccdd112233445566778899001122",
+		"owaf-env:v1|challenge|1|example.test|:443|request",
+	)
+	if encrypted == "" {
+		t.Fatal("encrypted envcheck loader was not generated")
+	}
+	for _, forbidden := range []string{"navigator.webdriver", "JSON.stringify(fp)", "crypto.subtle"} {
+		if strings.Contains(encrypted, forbidden) {
+			t.Fatalf("encrypted envcheck retained JavaScript security calculation %q: %s", forbidden, encrypted)
+		}
+	}
+	if !strings.Contains(encrypted, "wasm_bindgen.collect_and_encrypt_fingerprint") {
+		t.Fatalf("encrypted envcheck must call the WASM collector: %s", encrypted)
 	}
 }
 

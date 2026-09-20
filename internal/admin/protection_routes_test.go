@@ -3,6 +3,7 @@ package admin
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/waf/challenge/powdata"
 
 	"github.com/cloudwego/hertz/pkg/app/client"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -235,6 +237,51 @@ func (s *adminRouteTestServer) getJSONWithHeaders(t *testing.T, path string, hea
 		t.Fatalf("GET %s: %v", path, err)
 	}
 	return resp
+}
+
+/**
+ * TestAdminPoWAssetsServeCompressedEmbeddedBytes 验证管理端为 PoW 运行时资源提供
+ * 正确的响应元数据，并且 gzip 解压后与嵌入的原始资源严格一致。
+ */
+func TestAdminPoWAssetsServeCompressedEmbeddedBytes(t *testing.T) {
+	srv := newAdminRouteTestServer(t)
+
+	for _, tt := range []struct {
+		path        string
+		contentType string
+		want        []byte
+	}{
+		{path: "/__owaf/pow.wasm", contentType: "application/wasm", want: powdata.WASMBinary},
+		{path: "/__owaf/pow_glue.js", contentType: "application/javascript", want: powdata.PowGlueJS},
+	} {
+		t.Run(tt.path, func(t *testing.T) {
+			resp := srv.getJSON(t, tt.path)
+			if resp.StatusCode() != 200 {
+				t.Fatalf("GET %s status = %d, want 200", tt.path, resp.StatusCode())
+			}
+			if got := string(resp.Header.ContentType()); got != tt.contentType {
+				t.Fatalf("GET %s Content-Type = %q, want %q", tt.path, got, tt.contentType)
+			}
+			if got := string(resp.Header.Peek("Content-Encoding")); got != "gzip" {
+				t.Fatalf("GET %s Content-Encoding = %q, want gzip", tt.path, got)
+			}
+
+			gz, err := gzip.NewReader(bytes.NewReader(resp.Body()))
+			if err != nil {
+				t.Fatalf("GET %s gzip reader: %v", tt.path, err)
+			}
+			got, err := io.ReadAll(gz)
+			if closeErr := gz.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				t.Fatalf("GET %s decompress: %v", tt.path, err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("GET %s decompressed body differs from embedded bytes", tt.path)
+			}
+		})
+	}
 }
 
 type adminRouteTestRedisServer struct {
@@ -1203,7 +1250,10 @@ func TestRedisConfigPostRouteHotReloadsRuntimeStateWithoutRestart(t *testing.T) 
 		t.Fatalf("redis config response restart_required = %v, want false", gotRedis.RestartRequired)
 	}
 
-	stored := system.LoadRedisConfig(srv.repos.SystemSettings)
+	stored, err := system.LoadRedisConfig(srv.repos.SystemSettings)
+	if err != nil {
+		t.Fatalf("load redis config: %v", err)
+	}
 	if !stored.Enabled || stored.Addr != redisSrv.Addr() || stored.Password != "route-secret" || stored.DB != 9 {
 		t.Fatalf("stored redis config = %#v, want enabled runtime target", stored)
 	}
@@ -1266,7 +1316,10 @@ func TestRedisConfigPostRouteHotReloadCanDisableRuntimeState(t *testing.T) {
 		t.Fatalf("redis config response restart_required = %v, want false", gotRedis.RestartRequired)
 	}
 
-	stored := system.LoadRedisConfig(srv.repos.SystemSettings)
+	stored, err := system.LoadRedisConfig(srv.repos.SystemSettings)
+	if err != nil {
+		t.Fatalf("load redis config: %v", err)
+	}
 	if stored.Enabled {
 		t.Fatalf("stored redis config enabled = %v, want false", stored.Enabled)
 	}
