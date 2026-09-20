@@ -106,17 +106,22 @@ func assertLogPaginationIndexes(t *testing.T, db *gorm.DB, dialect string) {
 			// 就是 gorm 声明顺序（events.go 里三个字段的 priority 为
 			// 1/2/3 即 site_id/created_at/id）。
 			if dialect == "postgres" {
+				// gorm postgres 驱动 GetIndexes 用 `a.attnum = ANY(i.indkey)` 读回且
+				// 无 ORDER BY，ColumnList 顺序依赖 pg_index 行序，任意（CI 实测为
+				// [id created_at site_id]）。索引真实列序由迁移期 gorm 声明 priority
+				// 保证——这里无法从读回面断言顺序，只能断言列集合完全相等，防止
+				// 三列中任何一列被漏建或重建为含其他列。
 				got := map[string]struct{}{}
 				for _, col := range columns {
 					got[col] = struct{}{}
+				}
+				if len(got) != len(want) {
+					t.Fatalf("%s: 索引 %s 列数=%d，期望=%d，实际列=%v", dialect, tt.indexName, len(got), len(want), columns)
 				}
 				for _, w := range want {
 					if _, ok := got[w]; !ok {
 						t.Fatalf("%s: 索引 %s 缺少列 %q，实际列=%v", dialect, tt.indexName, w, columns)
 					}
-				}
-				if columns[0] != want[0] {
-					t.Fatalf("%s: 索引 %s 首列 %q 并非 site_id，说明 GetIndexes 读回或存量索引已损坏；实际列=%v", dialect, tt.indexName, columns[0], columns)
 				}
 				continue
 			}
