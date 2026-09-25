@@ -1884,7 +1884,8 @@ func hasCVEHighRiskPunctuation(raw, lower string) bool {
 		return strings.Contains(lower, "${") || strings.Contains(lower, "#{") || strings.Contains(lower, "{{") || strings.Contains(lower, "expression=") || strings.Contains(lower, "groovy") || strings.Contains(lower, "async=false") || strings.Contains(lower, "addresponseheader") || strings.Contains(lower, "unserialize") || strings.Contains(lower, "o:") || strings.Contains(lower, "a:")
 	}
 	if strings.Contains(raw, ";") {
-		return strings.Contains(lower, "select") || strings.Contains(lower, "union") || strings.Contains(lower, "drop") || strings.Contains(lower, "insert") || strings.Contains(lower, "update") || strings.Contains(lower, "delete") || strings.Contains(lower, "exec") || strings.Contains(lower, "system") || strings.Contains(lower, "whoami") || strings.Contains(lower, "uname") || strings.Contains(lower, "ifconfig") || strings.Contains(lower, "ipconfig")
+		return strings.Contains(lower, "select") || strings.Contains(lower, "union") || strings.Contains(lower, "drop") || strings.Contains(lower, "insert") || strings.Contains(lower, "update") || strings.Contains(lower, "delete") || strings.Contains(lower, "exec") || strings.Contains(lower, "system") || strings.Contains(lower, "whoami") || strings.Contains(lower, "uname") || strings.Contains(lower, "ifconfig") || strings.Contains(lower, "ipconfig") ||
+			strings.Contains(lower, "users;.jsp") || strings.Contains(lower, "/hax?")
 	}
 	if strings.Contains(raw, "<") || strings.Contains(raw, ">") {
 		return strings.Contains(lower, "<!") || strings.Contains(lower, "<script") || strings.Contains(lower, "<sorted-set") || strings.Contains(lower, "<dynamic-proxy") || strings.Contains(lower, "</")
@@ -1978,7 +1979,10 @@ func hasCVEKnownIndicator(lower string) bool {
 				hasPrefixAt(lower, i, "/etc/passwd") ||
 				hasPrefixAt(lower, i, "/etc/shadow") ||
 				hasPrefixAt(lower, i, "/.ds_store") ||
-				hasPrefixAt(lower, i, "/.svn/entries") {
+				hasPrefixAt(lower, i, "/.svn/entries") ||
+				hasPrefixAt(lower, i, "/hax?") ||
+				hasPrefixAt(lower, i, "/app/rest/users;.jsp") ||
+				hasPrefixAt(lower, i, "/jnlpjars/") {
 				return true
 			}
 		case '0':

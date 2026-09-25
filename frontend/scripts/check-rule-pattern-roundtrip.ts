@@ -67,6 +67,18 @@ function assertUneditableRaw(pattern: string): void {
   )
 }
 
+// 后端 matcher 支持的 TLS 指纹 DSL kind：表单尚无对应 target，
+// 回显必须为只读行，避免误编辑破坏规则。
+const dslReferenceKinds = [
+  "tls_ja3:771,4865-4866-4867,0-11-10,29-23,0",
+  "tls_ja3_hash:0123456789abcdef",
+  "tls_version:TLS13",
+  "tls_sni:checkout.example.com",
+  "tls_alpn:h2",
+  "tls_cipher_suite:TLS_AES_128_GCM_SHA256",
+  "tls_cipher_suites:TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
+]
+
 const roundTripCases: RoundTripCase[] = [
   { name: "block IP DSL", pattern: "block_ip:10.0.0.0/8" },
   {
@@ -123,6 +135,15 @@ const roundTripCases: RoundTripCase[] = [
 
 for (const testCase of roundTripCases) assertRoundTrip(testCase)
 
+for (const pattern of dslReferenceKinds) {
+  const groups = parsePatternToRows(pattern)
+  assert.equal(groups.length, 1, `${pattern}: must produce one group`)
+  assert.ok(
+    groups[0]?.[0]?.uneditable,
+    `${pattern}: expected readonly row without form mapping`
+  )
+}
+
 for (const pattern of [
   "block_query_contains:token=admin",
   "block_query_regex:(?i)union\\s+select",
@@ -131,13 +152,6 @@ for (const pattern of [
   "block_body_json_path:$.credentials.password",
   "block_multipart:filename=payload.php",
   "block_content_type:application/x-php",
-  "tls_ja3:771,4865-4866-4867,0-11-10,29-23,0",
-  "tls_ja3_hash:0123456789abcdef",
-  "tls_version:TLS13",
-  "tls_sni:checkout.example.com",
-  "tls_alpn:h2",
-  "tls_cipher_suite:TLS_AES_128_GCM_SHA256",
-  "tls_cipher_suites:TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
   "geo_block:CN,US",
 ]) {
   assertUneditableRaw(pattern)

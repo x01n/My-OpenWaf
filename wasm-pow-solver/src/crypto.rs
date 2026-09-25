@@ -1,20 +1,16 @@
-use aes_gcm::aead::{Aead, Payload};
+use aes_gcm::aead::Aead;
 use aes_gcm::aes::cipher::{BlockCipherDecrypt, KeyInit as BlockKeyInit};
 use aes_gcm::aes::{Aes256, Block};
 use aes_gcm::{Aes256Gcm, Nonce};
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 use wasm_bindgen::prelude::*;
-
-type HmacSha256 = Hmac<Sha256>;
 
 const BASE64_URL_CHARS: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const BASE64_STD_CHARS: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const AES_KW_DEFAULT_IV: [u8; 8] = [0xA6; 8];
-const ENV_ENVELOPE_PREFIX: &str = "v1.";
-const ENV_DEFAULT_AAD: &str = "owaf-env:v1|legacy";
 
-fn base64url_encode(data: &[u8]) -> String {
+pub(crate) fn base64url_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     let chunks = data.chunks(3);
     for chunk in chunks {
@@ -34,44 +30,88 @@ fn base64url_encode(data: &[u8]) -> String {
     out
 }
 
-#[wasm_bindgen]
-pub fn encrypt_env_data(json_data: &str, key_hex: &str) -> String {
-    encrypt_env_data_with_aad(json_data, key_hex, ENV_DEFAULT_AAD)
+/// [`base64_encode`] 标准 base64 编码（含 `=` 填充，SM2 DER 签名用）。
+
+pub(crate) fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let mut buf = [0u8; 4];
+    let mut n = 0usize;
+    for b in input.bytes() {
+        if b == b'=' {
+            break;
+        }
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'\r' | b'\n' | b'\t' | b' ' => continue,
+            _ => return None,
+        };
+        buf[n] = v;
+        n += 1;
+        if n == 4 {
+            out.push((buf[0] << 2) | (buf[1] >> 4));
+            out.push((buf[1] << 4) | (buf[2] >> 2));
+            out.push((buf[2] << 6) | buf[3]);
+            n = 0;
+        }
+    }
+    if n == 1 {
+        return None;
+    }
+    if n == 2 {
+        out.push((buf[0] << 2) | (buf[1] >> 4));
+    } else if n == 3 {
+        out.push((buf[0] << 2) | (buf[1] >> 4));
+        out.push((buf[1] << 4) | (buf[2] >> 2));
+    }
+    Some(out)
 }
 
-#[wasm_bindgen]
-pub fn encrypt_env_data_with_aad(json_data: &str, key_hex: &str, aad: &str) -> String {
-    let key_bytes = match hex_decode(key_hex) {
-        Some(key) if key.len() == 32 => key,
-        _ => return String::new(),
-    };
-    if json_data.len() > 64 * 1024 || aad.is_empty() || aad.len() > 512 {
-        return String::new();
+pub(crate) fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
     }
-    let cipher = match Aes256Gcm::new_from_slice(&key_bytes) {
-        Ok(cipher) => cipher,
-        Err(_) => return String::new(),
-    };
-    let mut iv = [0u8; 12];
-    if getrandom::getrandom(&mut iv).is_err() {
-        return String::new();
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    let mut chars = hex.chars();
+    while let (Some(high), Some(low)) = (chars.next(), chars.next()) {
+        bytes.push(hex_val(high)? << 4 | hex_val(low)?);
     }
-    let nonce = Nonce::from(iv);
-    match cipher.encrypt(
-        &nonce,
-        Payload {
-            msg: json_data.as_bytes(),
-            aad: aad.as_bytes(),
-        },
-    ) {
-        Ok(ciphertext) => {
-            let mut envelope = Vec::with_capacity(12 + ciphertext.len());
-            envelope.extend_from_slice(&iv);
-            envelope.extend_from_slice(&ciphertext);
-            format!("{}{}", ENV_ENVELOPE_PREFIX, base64url_encode(&envelope))
-        }
-        Err(_) => String::new(),
+    Some(bytes)
+}
+
+fn hex_val(c: char) -> Option<u8> {
+    match c {
+        '0'..='9' => Some(c as u8 - b'0'),
+        'a'..='f' => Some(c as u8 - b'a' + 10),
+        'A'..='F' => Some(c as u8 - b'A' + 10),
+        _ => None,
     }
+}
+
+pub(crate) fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let a = chunk[0] as u32;
+        let b = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let c = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let t = (a << 16) | (b << 8) | c;
+        out.push(BASE64_STD_CHARS[((t >> 18) & 63) as usize] as char);
+        out.push(BASE64_STD_CHARS[((t >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_STD_CHARS[((t >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_STD_CHARS[(t & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 #[wasm_bindgen]
@@ -106,67 +146,6 @@ pub fn decrypt_dynamic_with_cek(
     let data = base64_decode(data_b64).ok_or_else(|| JsValue::from_str("invalid data base64"))?;
     let iv = base64_decode(iv_b64).ok_or_else(|| JsValue::from_str("invalid iv base64"))?;
     aes_gcm_decrypt_256(cek, &iv, &data).ok_or_else(|| JsValue::from_str("AES-GCM decrypt failed"))
-}
-
-#[wasm_bindgen]
-pub fn hmac_sha256(key_hex: &str, message: &str) -> String {
-    let key_bytes = match hex_decode(key_hex) {
-        Some(key) if !key.is_empty() => key,
-        _ => return String::new(),
-    };
-    let mut mac = match HmacSha256::new_from_slice(&key_bytes) {
-        Ok(m) => m,
-        Err(_) => return String::new(),
-    };
-    mac.update(message.as_bytes());
-    let result = mac.finalize().into_bytes();
-    crate::hex_encode(&result)
-}
-
-#[wasm_bindgen]
-pub fn sha256_hash(data: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data.as_bytes());
-    let result = hasher.finalize();
-    crate::hex_encode(&result)
-}
-
-#[wasm_bindgen]
-pub fn sha256_hash_bytes(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    crate::hex_encode(&result)
-}
-
-#[wasm_bindgen]
-pub fn compute_canvas_hash(image_data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(image_data);
-    let result = hasher.finalize();
-    crate::hex_encode(&result[..16])
-}
-
-#[wasm_bindgen]
-pub fn compute_audio_hash(samples: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(samples);
-    let result = hasher.finalize();
-    crate::hex_encode(&result[..16])
-}
-
-#[wasm_bindgen]
-pub fn encode_and_encrypt_fingerprint(
-    json_data: &str,
-    key_hex: &str,
-    hmac_key_hex: &str,
-) -> String {
-    let encrypted = encrypt_env_data_with_aad(json_data, key_hex, ENV_DEFAULT_AAD);
-    if encrypted.is_empty() {
-        return String::new();
-    }
-    let sig = hmac_sha256(hmac_key_hex, &encrypted);
-    format!("{}|{}", encrypted, sig)
 }
 
 fn aes_gcm_decrypt_256(key: &[u8], iv: &[u8], data: &[u8]) -> Option<Vec<u8>> {
@@ -212,63 +191,4 @@ fn aes_key_unwrap_256(kek: &[u8], wrapped: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(&chunk);
     }
     Some(out)
-}
-
-fn base64_decode(input: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(input.len() / 4 * 3);
-    let mut buf = [0u8; 4];
-    let mut n = 0usize;
-    for b in input.bytes() {
-        if b == b'=' {
-            break;
-        }
-        let v = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'\r' | b'\n' | b'\t' | b' ' => continue,
-            _ => return None,
-        };
-        buf[n] = v;
-        n += 1;
-        if n == 4 {
-            out.push((buf[0] << 2) | (buf[1] >> 4));
-            out.push((buf[1] << 4) | (buf[2] >> 2));
-            out.push((buf[2] << 6) | buf[3]);
-            n = 0;
-        }
-    }
-    if n == 1 {
-        return None;
-    }
-    if n == 2 {
-        out.push((buf[0] << 2) | (buf[1] >> 4));
-    } else if n == 3 {
-        out.push((buf[0] << 2) | (buf[1] >> 4));
-        out.push((buf[1] << 4) | (buf[2] >> 2));
-    }
-    Some(out)
-}
-
-fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let mut chars = hex.chars();
-    while let (Some(high), Some(low)) = (chars.next(), chars.next()) {
-        bytes.push(hex_val(high)? << 4 | hex_val(low)?);
-    }
-    Some(bytes)
-}
-
-fn hex_val(c: char) -> Option<u8> {
-    match c {
-        '0'..='9' => Some(c as u8 - b'0'),
-        'a'..='f' => Some(c as u8 - b'a' + 10),
-        'A'..='F' => Some(c as u8 - b'A' + 10),
-        _ => None,
-    }
 }

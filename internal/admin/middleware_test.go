@@ -34,8 +34,6 @@ func holderWith(sn *snapshot.Snapshot) *snapshot.Holder {
 	return h
 }
 
-// ---- RequireRole ----
-
 func TestRequireRoleDeniesWhenNoRoleSet(t *testing.T) {
 	ctx := newMiddlewareCtx("/api/v1/sites", nil)
 	RequireRole(auth.RoleAdmin)(context.Background(), ctx)
@@ -73,8 +71,6 @@ func TestRequireRoleDeniesNonStringRoleValue(t *testing.T) {
 		t.Fatalf("non-string role: want 403, got %d", ctx.Response.StatusCode())
 	}
 }
-
-// ---- AuthMiddleware 白名单与请求头校验 ----
 
 // TestAuthMiddlewareSkipsWhitelistedPaths 验证健康检查与认证端点不需要 Authorization。
 func TestAuthMiddlewareSkipsWhitelistedPaths(t *testing.T) {
@@ -132,8 +128,6 @@ func TestAuthMiddlewareReturns503WhenBlacklistIsUnavailable(t *testing.T) {
 		t.Fatalf("blacklist unavailable: want 503, got %d", ctx.Response.StatusCode())
 	}
 }
-
-// ---- adminRequestProtocol ----
 
 func TestAdminRequestProtocol(t *testing.T) {
 	tests := []struct {
@@ -201,8 +195,6 @@ func TestSecurityHeadersNilHolderSkipsConditionalHeaders(t *testing.T) {
 		}
 	}
 }
-
-// ---- X-XSS-Protection ----
 
 func TestXSSProtectionHeaderWrittenWhenEnabled(t *testing.T) {
 	ctx := newMiddlewareCtx("http://example.com/api/v1/sites", nil)

@@ -2,13 +2,12 @@ package rules
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+
+	"github.com/emmansun/gmsm/sm3"
+
+	"My-OpenWaf/internal/waf/challenge/gm"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -686,20 +685,11 @@ func encryptBrowserSignEnv(t *testing.T, keyHex, aad string, plaintext []byte) s
 	if err != nil || len(key) != 32 {
 		t.Fatalf("decode browser sign environment key: %v", err)
 	}
-	block, err := aes.NewCipher(key)
+	raw, err := gm.Seal(key[:16], gm.DomainEnv, plaintext, []byte(aad))
 	if err != nil {
-		t.Fatalf("new aes cipher: %v", err)
+		t.Fatalf("seal GM environment envelope: %v", err)
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatalf("new gcm: %v", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		t.Fatalf("read environment nonce: %v", err)
-	}
-	ciphertext := gcm.Seal(nil, nonce, plaintext, []byte(aad))
-	return "v1." + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
+	return gm.Encode(raw)
 }
 
 func TestBrowserSignPhaseRequiresAPISignature(t *testing.T) {
@@ -752,8 +742,7 @@ func TestBrowserSignPhaseRequiresAPISignature(t *testing.T) {
 		t.Fatalf("decode browser sign key: %v", err)
 	}
 	payload := "POST|/api/v1/items|" + rawQuery + "|" + strconv.FormatInt(ts, 10) + "|" + ticket.Nonce + "|" + env
-	mac := hmac.New(sha256.New, signKey)
-	_, _ = mac.Write([]byte(payload))
+	sig := sm3.Sum(append(append([]byte(nil), signKey...), payload...))
 	headers := map[string]string{
 		"content-type":                   "application/json",
 		"accept":                         "application/json",
@@ -761,7 +750,7 @@ func TestBrowserSignPhaseRequiresAPISignature(t *testing.T) {
 		challenge.BrowserSignHeaderExp:   strconv.FormatInt(ticket.ExpiresAt, 10),
 		challenge.BrowserSignHeaderMAC:   ticket.TicketMAC,
 		challenge.BrowserSignHeaderTS:    strconv.FormatInt(ts, 10),
-		challenge.BrowserSignHeaderSig:   hex.EncodeToString(mac.Sum(nil)),
+		challenge.BrowserSignHeaderSig:   hex.EncodeToString(sig[:]),
 		challenge.BrowserSignHeaderEnv:   env,
 	}
 

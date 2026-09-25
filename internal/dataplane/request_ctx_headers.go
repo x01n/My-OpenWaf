@@ -75,7 +75,7 @@ func takeInternalHTTP3CancelSignal(token string) (<-chan struct{}, bool) {
 func populateRequestCtxHeaders(reqCtx *pipeline.RequestCtx, c *app.RequestContext) {
 	reqCtx.HeadersLowercase = true
 	if reqCtx.Headers == nil {
-		reqCtx.Headers = make(map[string]string)
+		reqCtx.Headers = make(map[string]string, 24)
 	} else {
 		clear(reqCtx.Headers)
 	}
@@ -188,9 +188,12 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	if c == nil {
 		return
 	}
-	proto := trimRequestHeaderValue(c.GetHeader(InternalHTTP3ProtoHeader))
+	if raw := c.GetHeader(InternalHTTP3ProtoHeader); len(raw) == 0 || !strings.EqualFold(trimRequestHeaderValue(raw), "h3") {
+		clearInternalHTTP3RequestMetadataHeaders(c)
+		return
+	}
 	forwardedProto := trimRequestHeaderValue(c.GetHeader("X-Forwarded-Proto"))
-	if !strings.EqualFold(proto, "h3") || !strings.EqualFold(forwardedProto, "h3") || !isLoopbackRemoteAddr(c) {
+	if !strings.EqualFold(forwardedProto, "h3") || !isLoopbackRemoteAddr(c) {
 		clearInternalHTTP3RequestMetadataHeaders(c)
 		return
 	}

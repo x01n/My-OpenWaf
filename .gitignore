@@ -55,3 +55,5 @@ internal/waf/cve/testdata/detectfirst_golden.txt
 My-OpenWaf
 .codex/
 .lsp-mcp/
+*.r6bak
+main

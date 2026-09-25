@@ -798,6 +798,62 @@ func TestCheckOWASP_Clean_BacktickVersionString(t *testing.T) {
 	}
 }
 
+// TestCmdInjectionNewPatterns 覆盖 cmd:025-034 每条新增规则的 1 正 1 负用例。
+// 正向用 "mid" 敏感度保证总分越过阈值；负向覆盖同形态的良性上下文（表不变量）。
+func TestCmdInjectionNewPatterns(t *testing.T) {
+	tests := []struct {
+		id  string
+		pos string
+		neg string
+	}{
+		{id: "owasp:cmd:025", pos: "x=who$@ami", neg: "email=user$@example.com"},
+		{id: "owasp:cmd:026", pos: "cmd=ls${IFS}-la", neg: "a=b&&c=d"},
+		{id: "owasp:cmd:027", pos: "cmd=export -f whoami;whoami", neg: "export-market-careers"},
+		{id: "owasp:cmd:028", pos: "cmd=env -i python -c 'import os'", neg: "env-ios-device"},
+		{id: "owasp:cmd:029", pos: "cmd=w'h'o'a'm'i", neg: "v=1;id=123"},
+		{id: "owasp:cmd:030", pos: "cmd=curl -s localhost:8000/x.sh", neg: "url=localhost:8000"},
+		{id: "owasp:cmd:031", pos: "cmd=$(/bin/cat /etc/passwd)", neg: "$(document).ready()"},
+		{id: "owasp:cmd:032", pos: `cmd=$'\x63\x61\x74\x20/etc/passwd'`, neg: `s='\x6'`},
+		{id: "owasp:cmd:033", pos: "cmd=xargs sh -c 'id'", neg: "q=xargs -n1"},
+		{id: "owasp:cmd:034", pos: "cmd=powershell -enc JABzAA==", neg: "v=cmd.exe.version"},
+	}
+	for _, tt := range tests {
+		// 正例必须至少命中一次 cmd_injection 类别（阈值已由单条分值越过）
+		posHit := CheckOWASP("mid", "/cmd", tt.pos, nil, nil)
+		if !hasCategory(posHit, CatCmdInject) {
+			t.Errorf("%s: positive %q should contain cmd_injection hit, got=%+v", tt.id, tt.pos, posHit)
+		}
+		// 负例必须不触发 cmd 注入
+		negHit := CheckOWASP("mid", "/api", tt.neg, nil, nil)
+		if hasCategory(negHit, CatCmdInject) {
+			t.Errorf("%s: negative %q false positive, hits=%+v", tt.id, tt.neg, negHit)
+		}
+	}
+}
+
+// WebShell：Python `__import__` 反射导入执行族（Jinja2/SSTI 载荷同样命中）。
+// 否定例确认纯 Python 文件名、常规 import 语句与哨兵词本身不产生误报。
+func TestCheckOWASP_Webshell_PythonDunderImport(t *testing.T) {
+	positive := `cmd=__import__('os').system('id')`
+	if hits := CheckOWASP("mid", "/", positive, nil, nil); !hasCategory(hits, CatWebshell) {
+		t.Fatal("expected webshell hit for __import__('os') payload")
+	}
+
+	negatives := []string{
+		"file=python_file.py",
+		"code=import os; print(123)",
+		"code=from os import path",
+		"flag=export IMPORT_DB=1",
+		"name=__import__",
+	}
+	for _, neg := range negatives {
+		// CheckOWASP 只返回首个命中/软命中类别；此处仅断言负样本不落入 WebShell 类别。
+		if hits := CheckOWASP("mid", "/", neg, nil, nil); hasCategory(hits, CatWebshell) {
+			t.Fatalf("unexpected webshell hit for negative sample %q: %+v", neg, hits)
+		}
+	}
+}
+
 func hasCategory(hits []OWASPHit, cat OWASPCategory) bool {
 	for _, h := range hits {
 		if h.Category == cat {

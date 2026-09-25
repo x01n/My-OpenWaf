@@ -55,8 +55,6 @@ func invokeSessionHandler(
 	return ctx
 }
 
-// ---- ListSessionsHandler ----
-
 // TestListSessionsNilManagerReturnsEmpty 验证未启用会话管理时返回空列表而非报错。
 func TestListSessionsNilManagerReturnsEmpty(t *testing.T) {
 	ctx := invokeSessionHandler(ListSessionsHandler(&AuthDeps{}),
@@ -138,8 +136,6 @@ func TestListSessionsAllRequiresAdminRole(t *testing.T) {
 		t.Fatalf("operator with all=true must stay scoped to own sessions, got %#v", opResp.Sessions)
 	}
 }
-
-// ---- ForceLogoutSessionHandler ----
 
 func TestForceLogoutRejectsMissingJTI(t *testing.T) {
 	sm := newSessionMgrForTest(t)

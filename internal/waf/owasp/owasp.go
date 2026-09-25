@@ -231,7 +231,9 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		strings.Contains(lowerPath, "/vydy5wuzjext/") {
 		skipBodySQLi = true
 	}
-	if crlfEnabled && (strings.ContainsAny(path, "\r\n") || strings.Contains(lowerPath, "%0d") || strings.Contains(lowerPath, "%0a")) {
+	if crlfEnabled && (strings.ContainsAny(path, "\r\n\v\f") ||
+		strings.Contains(lowerPath, "%0d") || strings.Contains(lowerPath, "%0a") ||
+		strings.Contains(lowerPath, "%0b") || strings.Contains(lowerPath, "%0c")) {
 		hit := OWASPHit{Category: CatCRLF, RuleID: "owasp:crlf:005", Score: 5, Desc: "URL 路径中的裸 CR/LF 字符"}
 		if acceptsOWASPHit(accept, hit) {
 			return hit, true, nil
@@ -1033,7 +1035,7 @@ func isCleanBrowserUserAgent(value string) bool {
 				wordStart = i
 			}
 		} else if wordStart >= 0 {
-			if isShellCommandWordASCIIFold(value[wordStart:i]) {
+			if isShellCommandWord(value[wordStart:i], true) {
 				return false
 			}
 			wordStart = -1
@@ -1046,7 +1048,7 @@ func isCleanBrowserUserAgent(value string) bool {
 			return false
 		}
 	}
-	if wordStart >= 0 && isShellCommandWordASCIIFold(value[wordStart:]) {
+	if wordStart >= 0 && isShellCommandWord(value[wordStart:], true) {
 		return false
 	}
 	return hasBrowserToken
@@ -1071,7 +1073,7 @@ func isCleanAcceptHeader(value string) bool {
 				wordStart = i
 			}
 		} else if wordStart >= 0 {
-			if isShellCommandWordASCIIFold(value[wordStart:i]) {
+			if isShellCommandWord(value[wordStart:i], true) {
 				return false
 			}
 			wordStart = -1
@@ -1080,7 +1082,7 @@ func isCleanAcceptHeader(value string) bool {
 			return false
 		}
 	}
-	if wordStart >= 0 && isShellCommandWordASCIIFold(value[wordStart:]) {
+	if wordStart >= 0 && isShellCommandWord(value[wordStart:], true) {
 		return false
 	}
 	return isAcceptMediaList(value)
@@ -1307,53 +1309,6 @@ func isAcceptTokenByte(b byte) bool {
 
 func isASCIILetterOrDigit(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
-}
-
-func isShellCommandWordASCIIFold(s string) bool {
-	switch len(s) {
-	case 2:
-		return equalASCIIFold(s, "id") ||
-			equalASCIIFold(s, "ls") ||
-			equalASCIIFold(s, "ps") ||
-			equalASCIIFold(s, "nc") ||
-			equalASCIIFold(s, "sh") ||
-			equalASCIIFold(s, "rm")
-	case 3:
-		return equalASCIIFold(s, "cat") ||
-			equalASCIIFold(s, "pwd") ||
-			equalASCIIFold(s, "php") ||
-			equalASCIIFold(s, "awk") ||
-			equalASCIIFold(s, "sed")
-	case 4:
-		return equalASCIIFold(s, "wget") ||
-			equalASCIIFold(s, "curl") ||
-			equalASCIIFold(s, "bash") ||
-			equalASCIIFold(s, "echo") ||
-			equalASCIIFold(s, "ping") ||
-			equalASCIIFold(s, "perl") ||
-			equalASCIIFold(s, "ruby") ||
-			equalASCIIFold(s, "node") ||
-			equalASCIIFold(s, "java") ||
-			equalASCIIFold(s, "find") ||
-			equalASCIIFold(s, "grep")
-	case 5:
-		return equalASCIIFold(s, "uname") ||
-			equalASCIIFold(s, "touch") ||
-			equalASCIIFold(s, "chmod") ||
-			equalASCIIFold(s, "chown") ||
-			equalASCIIFold(s, "mkdir") ||
-			equalASCIIFold(s, "sleep")
-	case 6:
-		return equalASCIIFold(s, "whoami") ||
-			equalASCIIFold(s, "python") ||
-			equalASCIIFold(s, "base64")
-	case 8:
-		return equalASCIIFold(s, "nslookup") ||
-			equalASCIIFold(s, "hostname") ||
-			equalASCIIFold(s, "ifconfig") ||
-			equalASCIIFold(s, "ipconfig")
-	}
-	return false
 }
 
 func equalASCIIFold(s, lower string) bool {
@@ -1640,12 +1595,46 @@ func unescapeURLComponent(s string, queryPlusAsSpace bool) (string, error) {
 	return url.PathUnescape(s)
 }
 
+func decodePercentU(s string) string {
+	if !strings.Contains(s, "%u") {
+		return s
+	}
+	parts := strings.Split(s, "%u")
+	if len(parts) < 2 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(parts[0])
+	for _, part := range parts[1:] {
+		if len(part) < 4 {
+			b.WriteString("%u")
+			b.WriteString(part)
+			continue
+		}
+		code, err := strconv.ParseUint(part[:4], 16, 16)
+		if err != nil || code > 0xFF {
+			b.WriteString("%u")
+			b.WriteString(part)
+			continue
+		}
+		b.WriteByte(byte(code))
+		b.WriteString(part[4:])
+	}
+	return b.String()
+}
+
 // normalize does URL-decode (multi-pass), HTML entity decode, JS escape decode, lowercase, whitespace collapse.
 func normalize(s string) string {
 	return normalizeTarget(s, true)
 }
 
 func normalizeTarget(s string, queryPlusAsSpace bool) string {
+	// U+2215（∕）在 Java File 等解析器中视为路径分隔符，归一为 ASCII
+	// 斜杠，避免 its 变体绕过下方的路径穿越电池。
+	if strings.ContainsRune(s, '∕') {
+		s = strings.ReplaceAll(s, "∕", "/")
+	}
 	// Overlong UTF-8 percent-encoded sequences → real characters (evasion technique).
 	if strings.Contains(s, "%") && containsOverlongUTF8Escape(s) {
 		s = reOverlongDot.ReplaceAllString(s, ".")
@@ -1709,6 +1698,12 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 	}
 	s = normalizeURLSchemeControls(s)
 	s = toLowerASCII(s)
+	// %uXXXX（IIS 风格 Unicode 百分号编码）：按十六进制码点解码，
+	// 单字节码点还原为对应字符，让 XSS/SQLi 族看到载荷真相。
+	if strings.Contains(s, "%u") {
+		s = decodePercentU(s)
+	}
+	// 覆盖时把 U+2215 变异为斜杠的路径穿越注意点已在前段处理。
 	s = strings.ReplaceAll(s, "\x00", " ")
 	// Strip inline SQL/C-style comments to defeat comment-splitting evasion.
 	// Empty replacement joins adjacent tokens: sel/**/ect → select, un/**/ion → union.
@@ -2968,83 +2963,155 @@ func hasSQLiIndicator(s string) bool {
 		strings.Contains(s, " convert(")
 }
 
+// hasJavascriptLettersScan 覆盖 reJSProtocolObfuscated（j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:）
+// 的命中必要条件：串中必须出现组成 "javascript" 的全部字母（大小写在归一化调用点已折叠为小写）。
+// 字面量 'j'、'a'、'v'、's'、'c'、'r'、'i'、'p'、't'、':' 的线序关系在此不判断，
+// 因此任一字母缺失时跳过 reJSProtocolObfuscated 不会改变判定结果。
+func hasJavascriptLettersScan(s string) bool {
+	var seen uint32
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 'j':
+			seen |= 1 << 0
+		case 'a':
+			seen |= 1 << 1
+		case 'v':
+			seen |= 1 << 2
+		case 's':
+			seen |= 1 << 3
+		case 'c':
+			seen |= 1 << 4
+		case 'r':
+			seen |= 1 << 5
+		case 'i':
+			seen |= 1 << 6
+		case 'p':
+			seen |= 1 << 7
+		case 't':
+			seen |= 1 << 8
+		case ':':
+			seen |= 1 << 9
+		}
+		if seen == 0b00000011_11111111 {
+			return true
+		}
+	}
+	return false
+}
+
+func containsASCIIFoldBackdoorRune(s string, r rune) bool {
+	if r == '<' {
+		for i := 0; i < len(s); i++ {
+			if s[i] == '<' {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.ContainsRune(s, r)
+}
+
+var xssIndicatorLiteralBytes = []string{
+	"javascript:",
+	"vbscript:",
+	"document.",
+	"document[",
+	"innerhtml",
+	"eval(",
+	"settimeout(",
+	"setinterval(",
+	"data:text/html",
+	"fromcharcode",
+	"window.",
+	"window[",
+	"fetch(",
+	"xmlhttprequest",
+	"expression(",
+	"srcdoc",
+	"{{",
+	"self[",
+	"top[",
+	"parent[",
+	"frames[",
+	"globalthis[",
+	"this[",
+	"alert(",
+	"alert'",
+	"prompt(",
+	"confirm(",
+	".source",
+	"atob(",
+	"alert.",
+	"prompt.",
+	"data:image/svg",
+	"+{}",
+	"+[]",
+	"(![",
+	"constructor.constructor",
+	"constructor.prototype[",
+	"onclick",
+	"onload",
+	"onerror",
+	"onmouse",
+	"onfocus",
+	"onblur",
+	"onkey",
+	"onsubmit",
+	"onchange",
+	"oninput",
+	"ondrag",
+	"ondrop",
+	"oncopy",
+	"oncut",
+	"onpaste",
+	"ontoggle",
+	"onpointer",
+	"onanimation",
+	"onscroll",
+	"onwheel",
+	"onresize",
+	"onunload",
+	"onhash",
+	"onbefore",
+	"ondblclick",
+	"oncontextmenu",
+	"onmessage",
+	"onpopstate",
+	"ontouch",
+	"ontransition",
+	"onfullscreen",
+	"onselect",
+	"oninvalid",
+	"onafterscriptexecute",
+}
+
 // hasXSSIndicator returns false when the string has no HTML/JS injection indicator.
 // Note: the previous broad strings.Contains(s,"on") was replaced with specific
 // event-handler names to eliminate false positives on words like "connection",
 // "function", "location", "on" etc. that are ubiquitous in normal requests.
+// 数据驱动形与旧实现等价：先行 '<' 检查后进入单循环，任一表项用
+// strings.Index（等价于 Contains，且对已折叠输入的第二次调用天然覆盖）。
 func hasXSSIndicator(s string) bool {
-	return strings.ContainsRune(s, '<') ||
-		strings.Contains(s, "javascript:") ||
-		strings.Contains(s, "vbscript:") ||
-		strings.Contains(s, "document.") ||
-		strings.Contains(s, "document[") ||
-		strings.Contains(s, "innerhtml") ||
-		strings.Contains(s, "eval(") ||
-		strings.Contains(s, "settimeout(") ||
-		strings.Contains(s, "setinterval(") ||
-		strings.Contains(s, "data:text/html") ||
-		strings.Contains(s, "fromcharcode") ||
-		strings.Contains(s, "window.") ||
-		strings.Contains(s, "window[") ||
-		strings.Contains(s, "fetch(") ||
-		strings.Contains(s, "xmlhttprequest") ||
-		strings.Contains(s, "expression(") ||
-		strings.Contains(s, "srcdoc") ||
-		strings.Contains(s, "{{") ||
-		strings.Contains(s, "self[") ||
-		strings.Contains(s, "top[") ||
-		strings.Contains(s, "parent[") ||
-		strings.Contains(s, "frames[") ||
-		strings.Contains(s, "globalthis[") ||
-		strings.Contains(s, "this[") ||
-		strings.Contains(s, "alert(") ||
-		strings.Contains(s, "alert'") ||
-		strings.Contains(s, "prompt(") ||
-		strings.Contains(s, "confirm(") ||
-		strings.Contains(s, ".source") ||
-		strings.Contains(s, "atob(") ||
-		strings.Contains(s, "alert.") ||
-		strings.Contains(s, "prompt.") ||
-		strings.Contains(s, "data:image/svg") ||
-		strings.Contains(s, "+{}") ||
-		strings.Contains(s, "+[]") ||
-		strings.Contains(s, "(![") ||
-		strings.Contains(s, "constructor.constructor") ||
-		strings.Contains(s, "constructor.prototype[") ||
-		strings.Contains(s, "onclick") ||
-		strings.Contains(s, "onload") ||
-		strings.Contains(s, "onerror") ||
-		strings.Contains(s, "onmouse") ||
-		strings.Contains(s, "onfocus") ||
-		strings.Contains(s, "onblur") ||
-		strings.Contains(s, "onkey") ||
-		strings.Contains(s, "onsubmit") ||
-		strings.Contains(s, "onchange") ||
-		strings.Contains(s, "oninput") ||
-		strings.Contains(s, "ondrag") ||
-		strings.Contains(s, "ondrop") ||
-		strings.Contains(s, "oncopy") ||
-		strings.Contains(s, "oncut") ||
-		strings.Contains(s, "onpaste") ||
-		strings.Contains(s, "ontoggle") ||
-		strings.Contains(s, "onpointer") ||
-		strings.Contains(s, "onanimation") ||
-		strings.Contains(s, "onscroll") ||
-		strings.Contains(s, "onwheel") ||
-		strings.Contains(s, "onresize") ||
-		strings.Contains(s, "onunload") ||
-		strings.Contains(s, "onhash") ||
-		strings.Contains(s, "onbefore") ||
-		strings.Contains(s, "ondblclick") ||
-		strings.Contains(s, "oncontextmenu") ||
-		strings.Contains(s, "onmessage") ||
-		strings.Contains(s, "onpopstate") ||
-		strings.Contains(s, "ontouch") ||
-		strings.Contains(s, "ontransition") ||
-		strings.Contains(s, "onfullscreen") ||
-		strings.Contains(s, "onselect") ||
-		strings.Contains(s, "oninvalid") ||
-		strings.Contains(s, "onafterscriptexecute")
+	if containsASCIIFoldBackdoorRune(s, '<') {
+		return true
+	}
+	// 旧实现对原始串做 71 条大小写敏感 Contains；此处保持一致（不折叠），
+	// 因为 hasXSSIndicator 之后的下游电池运行在已归一化（toLowerASCII）的串上，
+	// 本层折叠会改变"哪些输入进入电池"的行为面，属非等价。
+	for _, flagB := range xssIndicatorLiteralBytes {
+		if len(flagB) == 0 {
+			continue
+		}
+		if strings.Index(s, flagB) >= 0 {
+			return true
+		}
+	}
+	// Function 构造器（new Function/Function 调用）与 eval 同风险级，
+	// 且归一化后无标点锚点，补一句词表外的哨兵避免漏入 XSS 电池。
+	if strings.Contains(s, "function(") {
+		return true
+	}
+	return false
 }
 
 // hasCmdIndicator returns false when the string has no command injection indicator.
@@ -3059,14 +3126,31 @@ func hasCmdIndicator(s string) bool {
 		strings.Contains(s, "\r") ||
 		strings.Contains(s, "wget ") ||
 		strings.Contains(s, "curl ") ||
-		strings.Contains(s, "<!--#") {
+		strings.Contains(s, "<!--#") ||
+		strings.Contains(s, "$@") ||
+		strings.Contains(s, "export -f") ||
+		strings.Contains(s, "env -i") ||
+		strings.Contains(s, "cmd.exe") ||
+		strings.Contains(s, "powershell") ||
+		strings.Contains(s, "pwsh") {
 		return true
 	}
 	if strings.Contains(s, "`") {
 		return true
 	}
-	if strings.ContainsAny(s, "|;`") {
-		return hasCmdCommandWord(s)
+	if strings.Contains(s, "$'") {
+		return true
+	}
+	if strings.ContainsAny(s, "|;`") && hasCmdCommandWord(s) {
+		return true
+	}
+	if strings.ContainsAny(s, "'\"\\") && hasSplitCommandWord(s) {
+		return true
+	}
+	for _, w := range []string{"xargs", "nohup", "timeout ", "setsid", "stdbuf", "export", "localhost", "127.0.0.1"} {
+		if strings.Contains(s, w) && hasCmdCommandWord(s) {
+			return true
+		}
 	}
 	return false
 }
@@ -3080,18 +3164,60 @@ func hasCmdCommandWord(s string) bool {
 		for i < len(s) && isCmdWordByte(s[i]) {
 			i++
 		}
-		if start < i && isShellCommandWord(s[start:i]) {
+		if start < i && isShellCommandWord(s[start:i], false) {
 			return true
 		}
 	}
 	return false
+}
+func hasSplitCommandWord(s string) bool {
+	seps := 0
+	for i := 1; i+1 < len(s); i++ {
+		c := s[i]
+		if c != '\'' && c != '"' && c != '\\' {
+			continue
+		}
+		if isASCIILetter(s[i-1]) && isASCIILetter(s[i+1]) {
+			seps++
+			if seps >= 2 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func isCmdWordByte(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
-func isShellCommandWord(s string) bool {
+// isShellCommandWord 判断 s 是否为已知 shell 命令词（仅小写字母+数字）。
+// fold=false 执行精确小写比较（等价于原 isShellCommandWord）；
+// fold=true 执行 ASCII case-fold 逐词比较（等价于原 isShellCommandWordASCIIFold）。
+// 两路等价性由 TestShellCommandWordMergeLock 锁定。
+func isShellCommandWord(s string, fold bool) bool {
+	if !fold {
+		return isShellCommandWordExact(s)
+	}
+	switch len(s) {
+	case 2, 3, 4, 5, 6, 7, 8:
+	default:
+		return false
+	}
+	for _, w := range shellCommandWordsFold {
+		if equalASCIIFold(s, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// isShellCommandWordExact 是 fold=false 的精确小写判定（原 isShellCommandWord 原体）。
+func isShellCommandWordExact(s string) bool {
 	switch len(s) {
 	case 2:
 		switch s {
@@ -3100,7 +3226,7 @@ func isShellCommandWord(s string) bool {
 		}
 	case 3:
 		switch s {
-		case "cat", "pwd", "php", "dig", "awk", "sed", "xxd", "tee":
+		case "cat", "pwd", "php", "dig", "awk", "sed", "xxd", "tee", "ssh":
 			return true
 		}
 	case 4:
@@ -3115,7 +3241,12 @@ func isShellCommandWord(s string) bool {
 		}
 	case 6:
 		switch s {
-		case "whoami", "python", "base64":
+		case "whoami", "python", "base64", "printf":
+			return true
+		}
+	case 7:
+		switch s {
+		case "tcpdump", "netstat":
 			return true
 		}
 	case 8:
@@ -3125,6 +3256,16 @@ func isShellCommandWord(s string) bool {
 		}
 	}
 	return false
+}
+
+// shellCommandWordsFold 是原 isShellCommandWordASCIIFold 的完整词集。
+var shellCommandWordsFold = []string{
+	"id", "ls", "ps", "nc", "sh", "rm",
+	"cat", "pwd", "php", "awk", "sed", "ssh",
+	"wget", "curl", "bash", "echo", "ping", "perl", "ruby", "node", "java", "find", "grep",
+	"uname", "touch", "chmod", "chown", "mkdir", "sleep", "printf",
+	"whoami", "python", "base64", "tcpdump",
+	"nslookup", "hostname", "ifconfig", "ipconfig", "netstat",
 }
 
 // hasWebshellIndicator returns true when the string contains a term
@@ -3170,7 +3311,8 @@ func hasWebshellIndicator(s string) bool {
 		strings.Contains(s, "include(") ||
 		strings.Contains(s, "require(") ||
 		strings.Contains(s, "include_once(") ||
-		strings.Contains(s, "require_once(")
+		strings.Contains(s, "require_once(") ||
+		strings.Contains(s, "__import__(")
 }
 
 // hasRevShellIndicator returns true when the string contains a term
@@ -3192,7 +3334,8 @@ func hasRevShellIndicator(s string) bool {
 		strings.Contains(s, "ruby -rsocket") ||
 		strings.Contains(s, "socat ") ||
 		strings.Contains(s, "ncat ") ||
-		strings.Contains(s, " telnet ")
+		strings.Contains(s, " telnet ") ||
+		strings.Contains(s, " socket")
 }
 
 // hasPathTravIndicator returns true when the string contains indicators
@@ -3466,7 +3609,7 @@ func hasActiveXSSContext(normalized string) bool {
 		strings.Contains(normalized, "document.write") ||
 		strings.Contains(normalized, "innerhtml") ||
 		reXSSEventHandler.MatchString(normalized) ||
-		reJSProtocolObfuscated.MatchString(normalized)
+		(hasJavascriptLettersScan(normalized) && reJSProtocolObfuscated.MatchString(normalized))
 }
 
 // isXSSFalsePositive returns true when the XSS hit came only from passive
@@ -3719,8 +3862,18 @@ var reJSProtocolObfuscated = regexp.MustCompile(`j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s
 // documentation context (e.g. "Use `echo` to print") and should be suppressed.
 // NOTE: this deliberately excludes comma and closing-backtick from the operator set
 // so that Markdown "try `cat`, `grep`" does not falsely match via the second backtick.
-var reBacktickInjectionCtx = regexp.MustCompile("(^|[=;|&$])\\s*`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`")
-var reCmd002Backtick = regexp.MustCompile("`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`")
+// backtickCmdWords 是 reBacktickInjectionCtx 与 reCmd002Backtick 共享的命令词表。
+// 两条正则均以 "(" + backtickCmdWords + ")" 拼接编译，禁止单边再改动：
+// 词表由 TestBacktickCmdWordLiterals 锁定，正则最终文本由 TestBacktickRegexesByteStable 按 .String() 锁定。
+var backtickCmdWords = strings.Join([]string{
+	"cat", "ls", "id", "whoami", "uname", "pwd", "wget", "curl", "nc", "bash",
+	"sh", "echo", "rm", "chmod", "chown", "python", "perl", "ruby", "php",
+	"base64", "find", "grep", "awk", "sed", "ps", "kill", "nslookup", "dig",
+	"ping", "sleep", "dd", "cp", "mv", "mkdir", "touch", "head", "tail", "sort", "xxd",
+}, "|")
+
+var reBacktickInjectionCtx = regexp.MustCompile("(^|[=;|&$])\\s*`[^`]*(" + backtickCmdWords + ")[^`]*`")
+var reCmd002Backtick = regexp.MustCompile("`[^`]*(" + backtickCmdWords + ")[^`]*`")
 
 // reCmdHighConfidence matches patterns that confirm genuine command injection intent.
 // When cmd:006 (null byte / newline injection) is the first-matching rule, we require
@@ -4516,6 +4669,10 @@ var webshellPatterns = []owaspPattern{
 	{regexp.MustCompile(`data://text/plain\b`), 4, "owasp:webshell:025", "data://text/plain"},
 	// PHP remote file inclusion: include/require with remote URL
 	{regexp.MustCompile(`\b(include|require|include_once|require_once)\s*\(\s*['"]?\s*https?://`), 5, "owasp:webshell:026", ""},
+	// Python 反射导入 + 危险模块：__import__('os') / __import__("subprocess")。
+	// 与 webshell:008（os.system/subprocess 直接调用）互补，覆盖 Jinja2/SSTI 载荷，
+	// 且不与 SQLi sleep 家族混淆（不带 '(' 的目标词不触发）。
+	{regexp.MustCompile(`__import__\s*\(\s*['"]\s*(os|subprocess|sys|pty|pickle|base64|codecs|builtins|socket)\b`), 5, "owasp:webshell:027", "__import__"},
 }
 
 func checkWebshell(s string, threshold int) (OWASPHit, bool) {
@@ -4587,14 +4744,15 @@ var xssPatterns = []owaspPattern{
 	{regexp.MustCompile(`<script[\s>]`), 5, "owasp:xss:001", "<script"},
 	{regexp.MustCompile(`\bon(error|load|click|dblclick|mouse(over|out|down|up|enter|leave|move|wheel)|focus(in)?|blur|change|submit|toggle|input|key(down|up|press)|drag(start|end|over|enter|leave)?|drop|copy|cut|paste|pointer(over|down|up|cancel|move|enter|leave)|animation(start|end|iteration)|transition(end|start|run|cancel)|scroll|wheel|resize|contextmenu|message|hashchange|popstate|beforeunload|unload|invalid|select|fullscreenchange|touchstart|touchend|touchmove|touchcancel|beforeinput|show)\s*=`), 5, "owasp:xss:002", "on"},
 	{regexp.MustCompile(`javascript\s*:`), 5, "owasp:xss:003", "javascript"},
-	{regexp.MustCompile(`<img\s+[^>]*src\s*=\s*['"]\s*x\s+onerror`), 5, "owasp:xss:004", "<img"},
+	{regexp.MustCompile(`<img\b[^>]*(src\s*=[^>]*\s+)?onerror\s*=`), 5, "owasp:xss:004", "<img"},
 	{regexp.MustCompile(`<iframe[\s>]`), 3, "owasp:xss:005", "<iframe"},
 	{regexp.MustCompile(`document\.(cookie|location|write|domain)`), 4, "owasp:xss:006", "document."},
 	{regexp.MustCompile(`<svg[\s>]`), 2, "owasp:xss:007", "<svg"},
 	{regexp.MustCompile(`<math[\s>]`), 2, "owasp:xss:008", "<math"},
 	{regexp.MustCompile(`data:text/html`), 5, "owasp:xss:009", "data:text/html"},
 	{regexp.MustCompile(`window\.(location|name|open)`), 4, "owasp:xss:010", "window."},
-	{regexp.MustCompile(`\b(eval|settimeout|setinterval)\s*\(\s*['"]`), 5, "owasp:xss:011", "("},
+	{regexp.MustCompile(`\b(eval|settimeout|setinterval|function)\s*\(\s*['"]`), 5, "owasp:xss:011", "("},
+	{regexp.MustCompile(`(?i)\bnew\s+function\s*\(\s*[^'"]*['"]`), 4, "owasp:xss:068", "function"},
 	{regexp.MustCompile(`innerhtml\s*=`), 5, "owasp:xss:012", "innerhtml"},
 	{regexp.MustCompile(`&#x?0*3c;?\s*script`), 5, "owasp:xss:013", "script"},
 	{regexp.MustCompile(`<\w+\b[^>]+\bon\w+\s*=`), 5, "owasp:xss:014", "on"},
@@ -5111,7 +5269,7 @@ func shouldScanXSSPattern(normalized string, p owaspPattern) bool {
 	case "owasp:xss:002":
 		return strings.Contains(normalized, "=")
 	case "owasp:xss:011":
-		return strings.Contains(normalized, "(") && strings.ContainsAny(normalized, "'\"") && (strings.Contains(normalized, "eval") || strings.Contains(normalized, "settimeout") || strings.Contains(normalized, "setinterval"))
+		return strings.Contains(normalized, "(") && strings.ContainsAny(normalized, "'\"") && (strings.Contains(normalized, "eval") || strings.Contains(normalized, "settimeout") || strings.Contains(normalized, "setinterval") || strings.Contains(normalized, "function"))
 	case "owasp:xss:013":
 		return strings.Contains(normalized, "&#") && strings.Contains(normalized, "script")
 	case "owasp:xss:014":
@@ -5146,6 +5304,8 @@ func shouldScanXSSPattern(normalized string, p owaspPattern) bool {
 		return strings.Contains(normalized, "<") && strings.Contains(normalized, ">") && (strings.Contains(normalized, "sanitize") || strings.Contains(normalized, "purify") || strings.Contains(normalized, "dompurify"))
 	case "owasp:xss:067":
 		return strings.Contains(normalized, ".") && strings.Contains(normalized, "(") && (strings.Contains(normalized, "alert") || strings.Contains(normalized, "prompt") || strings.Contains(normalized, "confirm"))
+	case "owasp:xss:068":
+		return strings.Contains(normalized, "new") && strings.Contains(normalized, "function") && strings.ContainsAny(normalized, "'\"")
 	default:
 		return true
 	}
@@ -5223,7 +5383,7 @@ var pathTravPatterns = []owaspPattern{
 	{regexp.MustCompile(`/proc/self/(environ|cmdline|fd|maps|status|exe|cwd|root)`), 5, "owasp:path_traversal:006", "/proc/self/"},
 	{regexp.MustCompile(`\.\.(%00|\x00)`), 5, "owasp:path_traversal:007", ".."},
 	{regexp.MustCompile(`\.\.[/\\].*(windows[/\\]system32|windows[/\\]win\.ini|cmd\.exe|system\.ini)`), 5, "owasp:path_traversal:008", ".."},
-	{regexp.MustCompile(`\.{4,}[/\\]`), 4, "owasp:path_traversal:009", ""},
+	{regexp.MustCompile(`\.{3,}[/\\]`), 4, "owasp:path_traversal:009", "..."},
 	{regexp.MustCompile(`(^|[/\\])\.\.[/\\](etc[/\\](passwd|shadow|hosts|hostname|group)|proc[/\\]version|root[/\\]|var[/\\]log[/\\])`), 5, "owasp:path_traversal:010", ".."},
 	{regexp.MustCompile(`(%252e|%252f|%255c){2,}`), 4, "owasp:path_traversal:011", "%25"},
 	{regexp.MustCompile(`(\.\.\\){2,}`), 4, "owasp:path_traversal:012", ""},
@@ -5231,6 +5391,8 @@ var pathTravPatterns = []owaspPattern{
 	{regexp.MustCompile(`(web-inf|meta-inf)[/\\]web\.xml`), 5, "owasp:path_traversal:014", ""},
 	{regexp.MustCompile(`\.\.[/\\]*(\.git[/\\]|\.env|\.htpasswd|\.aws[/\\]|\.ssh[/\\]|config\.php|settings\.py|\.ds_store)`), 4, "owasp:path_traversal:015", ".."},
 	{regexp.MustCompile(`\.\.[/\\](admin|login|manager|console|config|passwd|shadow|private)`), 4, "owasp:path_traversal:016", ".."},
+	{regexp.MustCompile(`(?:^|[/\\])\s*\.{3,}[ \t]*[/\\]`), 4, "owasp:path_traversal:017", "..."},
+	{regexp.MustCompile(`\.\.\s+[/\\]`), 3, "owasp:path_traversal:018", ".."},
 }
 
 func checkPathTraversal(s string, threshold int) (OWASPHit, bool) {

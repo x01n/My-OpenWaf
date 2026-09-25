@@ -119,6 +119,8 @@ type realtimeSecurityEvent struct {
 	TLSCurves       string    `json:"tls_curves"`
 	TLSPointFormats string    `json:"tls_point_formats"`
 	HeaderOrder     string    `json:"header_order"`
+	GeoCountry      string    `json:"geo_country"`
+	GeoCity         string    `json:"geo_city"`
 	StatusCode      int       `json:"status_code"`
 }
 
@@ -148,9 +150,22 @@ func NewRealtimeHub(dashboard *DashboardDeps, upstreams *upstream.Pool, healthCh
 		health:         healthChecker,
 		accessLogs:     accessLogs,
 		securityEvents: securityEvents,
-		upgrader:       websocket.HertzUpgrader{},
-		tickets:        make(map[string]time.Time),
-		clients:        make(map[*realtimeClient]struct{}),
+		// CheckOrigin 双保险防 CSWSH 与 URL 携带 ticket 的第三方代理留存：
+		// 控制面浏览器总是携带与 host 对应的 Origin，夹带请求要么无 Origin
+		// （被拒）、要么 Origin 与 host 不一致（被拒）。票据本来就是
+		// 一次性 + 60 秒有效，这里再兜住不受 Security-JWT 保护的升级通道。
+		upgrader: websocket.HertzUpgrader{
+			CheckOrigin: func(c *app.RequestContext) bool {
+				origin := c.Request.Header.Peek("Origin")
+				if len(origin) == 0 {
+					return false
+				}
+				return string(origin) == "http://"+string(c.Request.Host()) ||
+					string(origin) == "https://"+string(c.Request.Host())
+			},
+		},
+		tickets: make(map[string]time.Time),
+		clients: make(map[*realtimeClient]struct{}),
 	}
 }
 
@@ -361,6 +376,8 @@ func mapSecurityEventSnapshot(items []store.SecurityEvent) []realtimeSecurityEve
 			TLSCurves:       item.TLSCurves,
 			TLSPointFormats: item.TLSPointFormats,
 			HeaderOrder:     item.HeaderOrder,
+			GeoCountry:      item.GeoCountry,
+			GeoCity:         item.GeoCity,
 			StatusCode:      item.StatusCode,
 		})
 	}

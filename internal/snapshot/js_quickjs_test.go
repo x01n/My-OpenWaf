@@ -293,17 +293,61 @@ func TestLoadJSPluginsPreservesStableOrderAndMetadata(t *testing.T) {
 	}
 }
 
-func TestLoadJSPluginsSkipsEnabledResponseStage(t *testing.T) {
+func TestLoadJSPluginsCompilesEnabledResponseStage(t *testing.T) {
 	db := newJSPluginSnapshotTestDB(t)
 	row := store.JSPlugin{
-		Name:        "legacy-response",
-		Source:      `export default { fetch() { return {}; } }`,
+		Name:        "response-contract",
+		Source:      `export default { fetch(response) { return {set_headers: {"X-Response": response.path}}; } }`,
 		Enabled:     true,
 		Stage:       store.JSStageResponse,
-		FailureMode: store.JSFailureModeClosed,
+		FailureMode: store.JSFailureModeOpen,
 	}
 	if err := db.Create(&row).Error; err != nil {
-		t.Fatalf("create legacy response JS plugin: %v", err)
+		t.Fatalf("create response JS plugin: %v", err)
+	}
+
+	scripts, errs, err := loadJSPlugins(db)
+	if err != nil {
+		t.Fatalf("loadJSPlugins() error = %v", err)
+	}
+	if len(scripts) != 1 {
+		t.Fatalf("compiled scripts = %d, want 1", len(scripts))
+	}
+	if len(errs) != 0 {
+		t.Fatalf("compile diagnostics = %#v", errs)
+	}
+	script := scripts[0]
+	if script.Stage() != store.JSStageResponse || script.ID() != row.ID {
+		t.Fatalf("response script metadata = %#v", script.Metadata())
+	}
+
+	engine, err := jsplugin.NewEngine(jsplugin.EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	plan, err := engine.ExecuteResponse(t.Context(), script, jsplugin.ResponseSnapshot{SiteID: 0, Path: "/response-ok"})
+	if err != nil {
+		t.Fatalf("response script execution error = %v", err)
+	}
+	if plan.SetHeaders["X-Response"] != "/response-ok" {
+		t.Fatalf("response mutation plan = %#v", plan)
+	}
+}
+
+// TestLoadJSPluginsRejectsResponseExecutableContractError 样本契约失败的处理
+// 必须与 request 阶段一致：记诊断、fail-open 不装载。
+func TestLoadJSPluginsRejectsResponseExecutableContractError(t *testing.T) {
+	db := newJSPluginSnapshotTestDB(t)
+	row := store.JSPlugin{
+		Name:        "response-echo",
+		Source:      `export default { fetch(response) { return response; } }`,
+		Enabled:     true,
+		Stage:       store.JSStageResponse,
+		FailureMode: store.JSFailureModeOpen,
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create response echo JS plugin: %v", err)
 	}
 
 	scripts, errs, err := loadJSPlugins(db)
@@ -313,7 +357,47 @@ func TestLoadJSPluginsSkipsEnabledResponseStage(t *testing.T) {
 	if len(scripts) != 0 {
 		t.Fatalf("compiled scripts = %d, want 0", len(scripts))
 	}
-	if got := errs[JSPluginErrorKey(row.ID)]; got != "response stage is unavailable because response execution is not implemented" {
-		t.Fatalf("response-stage diagnostic = %q", got)
+	if errs[JSPluginErrorKey(row.ID)] == "" {
+		t.Fatalf("missing response executable-contract diagnostic: %#v", errs)
+	}
+}
+
+// TestLoadJSPluginsInstallsFailClosedResponseGuard 响应阶段 fail-closed
+// 守卫仍可装载并保持元数据。
+func TestLoadJSPluginsInstallsFailClosedResponseGuard(t *testing.T) {
+	db := newJSPluginSnapshotTestDB(t)
+	row := store.JSPlugin{
+		Name:        "response-broken-closed",
+		Source:      `export default { fetch() {`,
+		Enabled:     true,
+		Stage:       store.JSStageResponse,
+		FailureMode: store.JSFailureModeClosed,
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create broken fail-closed response JS plugin: %v", err)
+	}
+
+	scripts, errs, err := loadJSPlugins(db)
+	if err != nil {
+		t.Fatalf("loadJSPlugins() error = %v", err)
+	}
+	if len(scripts) != 1 {
+		t.Fatalf("compiled scripts = %d, want 1 fail-closed guard", len(scripts))
+	}
+	guard := scripts[0]
+	if guard.ID() != row.ID || guard.FailureMode() != store.JSFailureModeClosed || guard.Stage() != store.JSStageResponse {
+		t.Fatalf("fail-closed response guard metadata = %#v", guard.Metadata())
+	}
+	if errs[JSPluginErrorKey(row.ID)] == "" {
+		t.Fatalf("compile diagnostics = %#v", errs)
+	}
+
+	engine, err := jsplugin.NewEngine(jsplugin.EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.ExecuteResponse(t.Context(), guard, jsplugin.ResponseSnapshot{SiteID: 0}); err == nil {
+		t.Fatal("fail-closed response guard execution error = nil; response stage would silently skip")
 	}
 }

@@ -2,10 +2,7 @@ package challenge
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,15 +11,15 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	"My-OpenWaf/internal/waf/challenge/gm"
 )
 
-const (
-	// EnvFingerprintProtocolVersion 是环境指纹 AES-256-GCM 密文封装的唯一协议版本。
-	EnvFingerprintProtocolVersion = "v1"
-	envSessionKeySize             = 32
-	envNonceSize                  = 12
-	envCiphertextPrefix           = EnvFingerprintProtocolVersion + "."
-)
+const envSessionKeySize = 32
+
+// EnvFingerprintProtocolVersion 是环境指纹信封版本标签（"v2"），
+// 由标签生成器从 GMEnvelopeVersion 派生产出，无 v1 并存分支。
+var EnvFingerprintProtocolVersion = "v" + gm.ProtocolVersionString()
 
 /**
  * EnvFingerprint 表示通过 JavaScript 收集的客户端环境指纹数据。
@@ -30,101 +27,118 @@ const (
  * 权限/安全、自动化检测、环境一致性、DOM/CSS 等多维度检测点。
  */
 type EnvFingerprint struct {
-	WebDriver            bool    `json:"webdriver"`
-	ChromePresent        bool    `json:"chrome_present"`
-	PluginsCount         int     `json:"plugins_count"`
-	Languages            string  `json:"languages"`
-	DevtoolsOpen         bool    `json:"devtools_open"`
-	CanvasHash           string  `json:"canvas_hash"`
-	WebGLRenderer        string  `json:"webgl_renderer"`
-	ScreenWidth          int     `json:"screen_width"`
-	ScreenHeight         int     `json:"screen_height"`
-	TimezoneOffset       int     `json:"timezone_offset"`
-	TouchSupport         bool    `json:"touch_support"`
-	HardwareConcur       int     `json:"hardware_concurrency"`
-	ColorDepth           int     `json:"color_depth"`
-	PixelRatio           float64 `json:"pixel_ratio"`
-	AudioHash            string  `json:"audio_hash"`
-	FontCount            int     `json:"font_count"`
-	SessionStorage       bool    `json:"session_storage"`
-	IndexedDB            bool    `json:"indexed_db"`
-	PDFViewer            bool    `json:"pdf_viewer"`
-	DoNotTrack           string  `json:"do_not_track"`
-	MaxTouchPoints       int     `json:"max_touch_points"`
-	ConnectionType       string  `json:"connection_type"`
-	DevtoolsTiming       float64 `json:"devtools_timing"`
-	PlatformStr          string  `json:"platform"`
-	CookieEnabled        bool    `json:"cookie_enabled"`
-	MemoryGB             float64 `json:"device_memory"`
-	UserAgent            string  `json:"user_agent"`
-	Vendor               string  `json:"vendor"`
-	Product              string  `json:"product"`
-	AppVersion           string  `json:"app_version"`
-	Language             string  `json:"language"`
-	ViewportWidth        int     `json:"viewport_width"`
-	ViewportHeight       int     `json:"viewport_height"`
-	OuterWidth           int     `json:"outer_width"`
-	OuterHeight          int     `json:"outer_height"`
-	InnerWidth           int     `json:"inner_width"`
-	InnerHeight          int     `json:"inner_height"`
-	ScreenX              int     `json:"screen_x"`
-	ScreenY              int     `json:"screen_y"`
-	NotificationAPI      bool    `json:"notification_api"`
-	PushAPI              bool    `json:"push_api"`
-	ClipboardAPI         bool    `json:"clipboard_api"`
-	GeolocationAPI       bool    `json:"geolocation_api"`
-	WebRTCAPI            bool    `json:"webrtc_api"`
-	FetchAPI             bool    `json:"fetch_api"`
-	WebSocketAPI         bool    `json:"websocket_api"`
-	CryptoAPI            bool    `json:"crypto_api"`
-	BatteryAPI           bool    `json:"battery_api"`
-	GamepadAPI           bool    `json:"gamepad_api"`
-	VibrateAPI           bool    `json:"vibrate_api"`
-	AutomationSign       string  `json:"automation_sign"`
-	Phantom              bool    `json:"phantom"`
-	Nightmare            bool    `json:"nightmare"`
-	SeleniumSign         bool    `json:"selenium_sign"`
-	HeadlessUA           bool    `json:"headless_ua"`
-	ChromeCDC            bool    `json:"chrome_cdc"`
-	PermNotif            string  `json:"perm_notif"`
-	UserAgentData        string  `json:"user_agent_data"`       // navigator.userAgentData JSON 序列化
-	BrowserBrand         string  `json:"browser_brand"`         // 从 userAgentData 中提取的主要品牌
-	BrowserVersion       string  `json:"browser_version"`       // 从 userAgentData 中提取的版本号
-	IsMobile             bool    `json:"is_mobile"`             // navigator.userAgentData.mobile
-	UAMismatch           bool    `json:"ua_mismatch"`           // user-agent 字符串与 userAgentData brands 不匹配
-	NavigatorProto       bool    `json:"navigator_proto"`       // navigator 原型链是否标准
-	WebGLVendor          string  `json:"webgl_vendor"`          // WEBGL_debug_renderer_info UNMASKED_VENDOR
-	CanvasToBlob         bool    `json:"canvas_to_blob"`        // canvas.toBlob 是否可用
-	WebGL2Support        bool    `json:"webgl2_support"`        // WebGL2RenderingContext 是否可用
-	SVGSupport           bool    `json:"svg_support"`           // SVGElement 是否可用
-	MediaDevices         bool    `json:"media_devices"`         // navigator.mediaDevices 是否可用
-	SpeechSynthesis      bool    `json:"speech_synthesis"`      // window.speechSynthesis 是否可用
-	ServiceWorker        bool    `json:"service_worker"`        // navigator.serviceWorker 是否可用
-	CacheAPI             bool    `json:"cache_api"`             // window.caches 是否可用
-	WebAssembly          bool    `json:"web_assembly"`          // WebAssembly 是否可用
-	SharedWorker         bool    `json:"shared_worker"`         // SharedWorker 是否可用
-	BroadcastChannel     bool    `json:"broadcast_channel"`     // BroadcastChannel 是否可用
-	PerformanceObserver  bool    `json:"performance_observer"`  // PerformanceObserver 是否可用
-	PerformanceMark      bool    `json:"performance_mark"`      // performance.mark 是否可用
-	TimingAPIDepth       int     `json:"timing_api_depth"`      // performance.getEntries 条目数量
-	PermissionAPI        bool    `json:"permission_api"`        // navigator.permissions 是否可用
-	CredentialAPI        bool    `json:"credential_api"`        // navigator.credentials 是否可用
-	CSPViolation         bool    `json:"csp_violation"`         // 指纹采集过程中是否发生 CSP 违规
-	WebDriverAdvanced    bool    `json:"webdriver_advanced"`    // 多重 webdriver 指标检测
-	CDPRuntime           bool    `json:"cdp_runtime"`           // Chrome DevTools Protocol Runtime.evaluate 痕迹
-	PuppeteerSign        bool    `json:"puppeteer_sign"`        // Puppeteer 特有痕迹
-	PlaywrightSign       bool    `json:"playwright_sign"`       // Playwright 特有痕迹
-	ElectronSign         bool    `json:"electron_sign"`         // 是否运行在 Electron 中
-	CypressSign          bool    `json:"cypress_sign"`          // Cypress 测试框架痕迹
-	ScreenConsistency    bool    `json:"screen_consistency"`    // screen 属性与 window.screen 一致性
-	TimezoneConsistency  bool    `json:"timezone_consistency"`  // Intl 时区与 getTimezoneOffset 一致性
-	LanguageConsistency  bool    `json:"language_consistency"`  // navigator.language 与 Intl 区域设置一致性
-	MathConsistency      bool    `json:"math_consistency"`      // Math 函数特定值跨次一致性
-	CSSSupportsCheck     bool    `json:"css_supports_check"`    // CSS.supports 是否可用
-	IntersectionObserver bool    `json:"intersection_observer"` // IntersectionObserver 是否可用
-	MutationObserver     bool    `json:"mutation_observer"`     // MutationObserver 是否可用
-	ResizeObserver       bool    `json:"resize_observer"`       // ResizeObserver 是否可用
-	HistoryAPI           bool    `json:"history_api"`           // history.pushState 是否可用
+	WebDriver            bool           `json:"webdriver"`
+	ChromePresent        bool           `json:"chrome_present"`
+	PluginsCount         int            `json:"plugins_count"`
+	Languages            string         `json:"languages"`
+	DevtoolsOpen         bool           `json:"devtools_open"`
+	CanvasHash           string         `json:"canvas_hash"`
+	WebGLRenderer        string         `json:"webgl_renderer"`
+	ScreenWidth          int            `json:"screen_width"`
+	ScreenHeight         int            `json:"screen_height"`
+	TimezoneOffset       int            `json:"timezone_offset"`
+	TouchSupport         bool           `json:"touch_support"`
+	HardwareConcur       int            `json:"hardware_concurrency"`
+	ColorDepth           int            `json:"color_depth"`
+	PixelRatio           float64        `json:"pixel_ratio"`
+	AudioHash            string         `json:"audio_hash"`
+	FontCount            int            `json:"font_count"`
+	SessionStorage       bool           `json:"session_storage"`
+	IndexedDB            bool           `json:"indexed_db"`
+	PDFViewer            bool           `json:"pdf_viewer"`
+	DoNotTrack           string         `json:"do_not_track"`
+	MaxTouchPoints       int            `json:"max_touch_points"`
+	ConnectionType       string         `json:"connection_type"`
+	DevtoolsTiming       float64        `json:"devtools_timing"`
+	PlatformStr          string         `json:"platform"`
+	CookieEnabled        bool           `json:"cookie_enabled"`
+	MemoryGB             float64        `json:"device_memory"`
+	UserAgent            string         `json:"user_agent"`
+	Vendor               string         `json:"vendor"`
+	Product              string         `json:"product"`
+	AppVersion           string         `json:"app_version"`
+	Language             string         `json:"language"`
+	ViewportWidth        int            `json:"viewport_width"`
+	ViewportHeight       int            `json:"viewport_height"`
+	OuterWidth           int            `json:"outer_width"`
+	OuterHeight          int            `json:"outer_height"`
+	InnerWidth           int            `json:"inner_width"`
+	InnerHeight          int            `json:"inner_height"`
+	ScreenX              int            `json:"screen_x"`
+	ScreenY              int            `json:"screen_y"`
+	NotificationAPI      bool           `json:"notification_api"`
+	PushAPI              bool           `json:"push_api"`
+	ClipboardAPI         bool           `json:"clipboard_api"`
+	GeolocationAPI       bool           `json:"geolocation_api"`
+	WebRTCAPI            bool           `json:"webrtc_api"`
+	FetchAPI             bool           `json:"fetch_api"`
+	WebSocketAPI         bool           `json:"websocket_api"`
+	CryptoAPI            bool           `json:"crypto_api"`
+	BatteryAPI           bool           `json:"battery_api"`
+	GamepadAPI           bool           `json:"gamepad_api"`
+	VibrateAPI           bool           `json:"vibrate_api"`
+	AutomationSign       string         `json:"automation_sign"`
+	Phantom              bool           `json:"phantom"`
+	Nightmare            bool           `json:"nightmare"`
+	SeleniumSign         bool           `json:"selenium_sign"`
+	HeadlessUA           bool           `json:"headless_ua"`
+	ChromeCDC            bool           `json:"chrome_cdc"`
+	PermNotif            string         `json:"perm_notif"`
+	UserAgentData        string         `json:"user_agent_data"`       // navigator.userAgentData JSON 序列化
+	BrowserBrand         string         `json:"browser_brand"`         // 从 userAgentData 中提取的主要品牌
+	BrowserVersion       string         `json:"browser_version"`       // 从 userAgentData 中提取的版本号
+	IsMobile             bool           `json:"is_mobile"`             // navigator.userAgentData.mobile
+	UAMismatch           bool           `json:"ua_mismatch"`           // user-agent 字符串与 userAgentData brands 不匹配
+	NavigatorProto       bool           `json:"navigator_proto"`       // navigator 原型链是否标准
+	WebGLVendor          string         `json:"webgl_vendor"`          // WEBGL_debug_renderer_info UNMASKED_VENDOR
+	CanvasToBlob         bool           `json:"canvas_to_blob"`        // canvas.toBlob 是否可用
+	WebGL2Support        bool           `json:"webgl2_support"`        // WebGL2RenderingContext 是否可用
+	SVGSupport           bool           `json:"svg_support"`           // SVGElement 是否可用
+	MediaDevices         bool           `json:"media_devices"`         // navigator.mediaDevices 是否可用
+	SpeechSynthesis      bool           `json:"speech_synthesis"`      // window.speechSynthesis 是否可用
+	ServiceWorker        bool           `json:"service_worker"`        // navigator.serviceWorker 是否可用
+	CacheAPI             bool           `json:"cache_api"`             // window.caches 是否可用
+	WebAssembly          bool           `json:"web_assembly"`          // WebAssembly 是否可用
+	SharedWorker         bool           `json:"shared_worker"`         // SharedWorker 是否可用
+	BroadcastChannel     bool           `json:"broadcast_channel"`     // BroadcastChannel 是否可用
+	PerformanceObserver  bool           `json:"performance_observer"`  // PerformanceObserver 是否可用
+	PerformanceMark      bool           `json:"performance_mark"`      // performance.mark 是否可用
+	TimingAPIDepth       int            `json:"timing_api_depth"`      // performance.getEntries 条目数量
+	PermissionAPI        bool           `json:"permission_api"`        // navigator.permissions 是否可用
+	CredentialAPI        bool           `json:"credential_api"`        // navigator.credentials 是否可用
+	CSPViolation         bool           `json:"csp_violation"`         // 指纹采集过程中是否发生 CSP 违规
+	WebDriverAdvanced    bool           `json:"webdriver_advanced"`    // 多重 webdriver 指标检测
+	CDPRuntime           bool           `json:"cdp_runtime"`           // Chrome DevTools Protocol Runtime.evaluate 痕迹
+	PuppeteerSign        bool           `json:"puppeteer_sign"`        // Puppeteer 特有痕迹
+	PlaywrightSign       bool           `json:"playwright_sign"`       // Playwright 特有痕迹
+	ElectronSign         bool           `json:"electron_sign"`         // 是否运行在 Electron 中
+	CypressSign          bool           `json:"cypress_sign"`          // Cypress 测试框架痕迹
+	ScreenConsistency    bool           `json:"screen_consistency"`    // screen 属性与 window.screen 一致性
+	TimezoneConsistency  bool           `json:"timezone_consistency"`  // Intl 时区与 getTimezoneOffset 一致性
+	LanguageConsistency  bool           `json:"language_consistency"`  // navigator.language 与 Intl 区域设置一致性
+	MathConsistency      bool           `json:"math_consistency"`      // Math 函数特定值跨次一致性
+	CSSSupportsCheck     bool           `json:"css_supports_check"`    // CSS.supports 是否可用
+	IntersectionObserver bool           `json:"intersection_observer"` // IntersectionObserver 是否可用
+	MutationObserver     bool           `json:"mutation_observer"`     // MutationObserver 是否可用
+	ResizeObserver       bool           `json:"resize_observer"`       // ResizeObserver 是否可用
+	HistoryAPI           bool           `json:"history_api"`           // history.pushState 是否可用
+	Behavior             *BehaviorStats `json:"behavior,omitempty"`    // 键鼠行为采样统计（盾页前端统计后随信封提交）
+}
+
+/**
+ * BehaviorStats 汇总盾挑战页收集的键鼠行为采样原始统计。
+ * 前端只发送聚合量（不发送单条事件、轨迹或按键值），
+ * 由服务端根据统计量判定其是否接近真实人类的操作节奏。
+ * 超人类最大速度、事件间隔熵、重复间隔率、全静止抖动率、
+ * 敏感动作键占比都是服务端评分的输入。
+ */
+type BehaviorStats struct {
+	Events    int     `json:"events"`     // 观察到的输入事件数量（pointermove/keydown/keypress）
+	Entropy   float64 `json:"entropy"`    // 移动事件间隔的香农熵；无事件或单事件时为 0
+	ZeroRatio float64 `json:"zero_ratio"` // 移动间隔中相邻间隔完全重复的比例（0~1）
+	Jitter    float64 `json:"jitter"`     // 有位移的移动事件比例（0~1，0 表示全部为零位移合成帧）
+	MaxSpeed  float64 `json:"max_speed"`  // 单事件最大位移（像素每事件，含合成事件的位移）
+	ActionKey int     `json:"action_key"` // 敏感键（Enter/Tab/Esc 等）触发次数
 }
 
 /**
@@ -336,6 +350,10 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 		reasons = append(reasons, "no WebGL2 support and no WebGL renderer (+12)")
 	}
 
+	if fp.Behavior != nil {
+		score += validateBehaviorStats(fp.Behavior, &reasons)
+	}
+
 	if score > 100 {
 		score = 100
 	}
@@ -347,9 +365,70 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 	}
 }
 
-/**
- * ParseEnvFingerprint 将 JSON 字符串解析为 EnvFingerprint。
- */
+func validateBehaviorStats(b *BehaviorStats, reasons *[]string) int {
+	if b == nil {
+		return 0
+	}
+	added := 0
+	c := *b
+	if c.Events <= 0 {
+		added += 15
+		*reasons = append(*reasons, "behavior: empty behavior sample (+15)")
+		return added
+	}
+	if c.Events > shieldEnvMaxEvents ||
+		math.IsNaN(c.Entropy) || math.IsInf(c.Entropy, 0) || c.Entropy < 0 ||
+		math.IsNaN(c.ZeroRatio) || math.IsInf(c.ZeroRatio, 0) || c.ZeroRatio < 0 ||
+		math.IsNaN(c.Jitter) || math.IsInf(c.Jitter, 0) || c.Jitter < 0 {
+		added += 65
+		*reasons = append(*reasons, "behavior: synthetic event flood (+65)")
+		return added
+	}
+	if math.IsNaN(c.MaxSpeed) || math.IsInf(c.MaxSpeed, 0) || c.MaxSpeed < 0 || c.ActionKey < 0 {
+		added += 40
+		*reasons = append(*reasons, "behavior: invalid speed or action count (+40)")
+		return added
+	}
+	if c.MaxSpeed > 0 && c.Events < shieldEnvMinEvents {
+		added += 40
+		*reasons = append(*reasons, "behavior: synthetic click without movement (+40)")
+		return added
+	}
+	if c.Jitter <= 0 {
+		added += 35
+		*reasons = append(*reasons, "behavior: zero-jitter input frames (+35)")
+	}
+	if c.ZeroRatio >= 0.5 {
+		added += 25
+		*reasons = append(*reasons, "behavior: metronomic interval repetition (+25)")
+	} else if c.Entropy < 1.5 {
+		added += 15
+		*reasons = append(*reasons, "behavior: low interval entropy (+15)")
+	}
+	if c.MaxSpeed > shieldEnvMaxHumanSpeed {
+		added += 20
+		*reasons = append(*reasons, "behavior: superhuman pointer speed (+20)")
+	}
+	if c.Events < shieldEnvMinEvents && c.MaxSpeed == 0 {
+		added += 15
+		*reasons = append(*reasons, "behavior: no interaction before submit (+15)")
+	}
+	if c.ActionKey > 8 {
+		added += 10
+		*reasons = append(*reasons, "behavior: action key spam (+10)")
+	}
+
+	if added > 100 {
+		added = 100
+	}
+	return added
+}
+
+const shieldEnvMaxEvents = 2048
+const shieldEnvMinEvents = 5
+const shieldEnvMinPixPerEvent = 1.0
+const shieldEnvMaxHumanSpeed = 200.0
+
 func ParseEnvFingerprint(data string) *EnvFingerprint {
 	if data == "" {
 		return nil
@@ -383,7 +462,20 @@ func ParseEnvFingerprint(data string) *EnvFingerprint {
 	if err != nil || json.Unmarshal(normalized, &fp) != nil {
 		return nil
 	}
+	if !validBehaviorRange(&fp) {
+		return nil
+	}
 	return &fp
+}
+
+func validBehaviorRange(fp *EnvFingerprint) bool {
+	if fp == nil || fp.Behavior == nil {
+		return true
+	}
+	b := fp.Behavior
+	return b.Events >= 0 && b.ActionKey >= 0 &&
+		b.Entropy >= 0 && b.ZeroRatio >= 0 && b.Jitter >= 0 &&
+		b.MaxSpeed >= 0
 }
 
 // parseJSONInteger 接受 JSON 整数以及数值上等价的浮点表示，例如 24.0。
@@ -430,14 +522,14 @@ func parseJSONInteger(raw []byte, bits int) (int64, error) {
  * parsing it. AAD binds the ciphertext to its server-issued challenge scope.
  */
 func DecryptEnvFingerprintWithAAD(encrypted string, sessionKey []byte, aad string) *EnvFingerprint {
-	if !strings.HasPrefix(encrypted, envCiphertextPrefix) || len(sessionKey) != envSessionKeySize || aad == "" {
+	if len(sessionKey) != envSessionKeySize || aad == "" {
 		return nil
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(encrypted, envCiphertextPrefix))
+	raw, err := gm.Decode(encrypted)
 	if err != nil {
 		return nil
 	}
-	plaintext, err := envDecrypt(raw, sessionKey, []byte(aad))
+	plaintext, err := gm.Open(sessionKey[:16], raw, []byte(aad), gm.DomainEnv, false)
 	if err != nil || len(plaintext) == 0 || len(plaintext) > 64*1024 {
 		return nil
 	}
@@ -445,7 +537,8 @@ func DecryptEnvFingerprintWithAAD(encrypted string, sessionKey []byte, aad strin
 }
 
 /**
- * GenerateEnvSessionKey 创建一个 32 字节的随机 AES-256-GCM 会话密钥。
+ * GenerateEnvSessionKey 创建一个 32 字节的随机会话主密钥，
+ * 其前 16 字节作为 SM4-GCM 密钥使用（页面下发为 hex 64 字符）。
  */
 func GenerateEnvSessionKey() []byte {
 	key := make([]byte, envSessionKeySize)
@@ -465,7 +558,7 @@ func EnvSessionKeyHex(key []byte) string {
 	return hex.EncodeToString(key)
 }
 
-// EnvSessionKeyFromChallengeToken 将 HMAC-SHA256 挑战令牌解码为 AES-256-GCM 密钥。
+// EnvSessionKeyFromChallengeToken 将挑战令牌解码为 32 字节会话密钥材料。
 func EnvSessionKeyFromChallengeToken(token string) []byte {
 	key, err := hex.DecodeString(token)
 	if err != nil || len(key) != envSessionKeySize {
@@ -474,26 +567,26 @@ func EnvSessionKeyFromChallengeToken(token string) []byte {
 	return key
 }
 
-func envDecrypt(ciphertext, key, aad []byte) ([]byte, error) {
+// envEncrypt 用会话主密钥前 16 字节（SM4-128）封装明文并返回 raw 信封字节。
+func envEncrypt(plaintext, key []byte, aad []byte, domain byte) ([]byte, error) {
 	if len(key) != envSessionKeySize {
 		return nil, fmt.Errorf("invalid session key length")
 	}
 	if len(aad) == 0 || len(aad) > 512 {
 		return nil, fmt.Errorf("invalid environment AAD")
 	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
+	return gm.Seal(key[:16], domain, plaintext, aad)
+}
+
+// envDecrypt 校验并打开 GM 信封。
+func envDecrypt(ciphertext, key, aad []byte, domain byte) ([]byte, error) {
+	if len(key) != envSessionKeySize {
+		return nil, fmt.Errorf("invalid session key length")
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
+	if len(aad) == 0 || len(aad) > 512 {
+		return nil, fmt.Errorf("invalid environment AAD")
 	}
-	if gcm.NonceSize() != envNonceSize || len(ciphertext) < envNonceSize+gcm.Overhead() {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	nonce, ct := ciphertext[:envNonceSize], ciphertext[envNonceSize:]
-	return gcm.Open(nil, nonce, ct, aad)
+	return gm.Open(key[:16], ciphertext, aad, domain, false)
 }
 
 func isSuspiciousRenderer(renderer string) bool {
@@ -551,42 +644,34 @@ func envContainsCI(s, substr string) bool {
  */
 func EnvFingerprintAAD(scope, sessionID string, binding ChallengeSessionBinding) string {
 	binding = binding.normalized()
-	return fmt.Sprintf("owaf-env:%s|%s|%d|%s|%s", EnvFingerprintProtocolVersion, scope, binding.SiteID, binding.Host, binding.Bind) + "|" + sessionID
+	// 统一拼接模型：label(env, v2) | scope | siteID | host | bind | sessionID。
+	label := gm.EnvelopeLabel("env", gm.GMEnvelopeVersion)
+	return gm.EnvelopeAAD(label, scope) + fmt.Sprintf("|%d|%s|%s", binding.SiteID, binding.Host, binding.Bind) + "|" + sessionID
 }
 
 /**
  * EnvCheckJSEncrypted returns a loader which only initializes WASM and carries
  * its opaque encrypted result. Fingerprint collection, canonical JSON encoding,
- * hashing, and AES-256-GCM encryption execute in Rust WASM.
+ * hashing, and SM4-GCM/SM2 信封封装 execute in Rust WASM.
  */
 func EnvCheckJSEncrypted(keyHex, aad string) string {
+	return envCheckJSEncryptedWithBehavior(keyHex, aad, false)
+}
+
+func EnvCheckJSEncryptedWithBehavior(keyHex, aad string) string {
+	return envCheckJSEncryptedWithBehavior(keyHex, aad, true)
+}
+
+func envCheckJSEncryptedWithBehavior(keyHex, aad string, withBehavior bool) string {
 	key, err := hex.DecodeString(keyHex)
 	if err != nil || len(key) != envSessionKeySize || aad == "" {
 		return ""
 	}
-	return fmt.Sprintf(envCheckJSTemplate, strconv.Quote(keyHex), strconv.Quote(aad))
-}
-
-/**
- * EnvCheckJSPlain emits a non-authorizing WASM collector. It is retained only
- * for BrowserSign telemetry, whose headers cannot establish client identity.
- */
-func EnvCheckJSPlain() string {
-	return `(function(){
-function reportEnvError(err){window.__owaf_env_error=(err&&err.message)||String(err||"environment WASM initialization failed")}
-function loadWasm(){
- var cspNonce=(document.currentScript&&document.currentScript.nonce)||"";
- if(window.__owaf_wasm_ready)return window.__owaf_wasm_ready;
- window.__owaf_wasm_ready=new Promise(function(resolve,reject){
-  if(typeof WebAssembly==="undefined"){reject(new Error("WebAssembly is unavailable"));return}
-  function initialize(){wasm_bindgen({module_or_path:"/__owaf/pow.wasm"}).then(resolve).catch(reject)}
-  if(typeof wasm_bindgen!=="undefined"){initialize();return}
-  var script=document.createElement("script");script.src="/__owaf/pow_glue.js";if(cspNonce)script.nonce=cspNonce;script.async=true;script.onload=initialize;script.onerror=function(){reject(new Error("WASM glue load failed"))};(document.head||document.documentElement).appendChild(script);
- });
- return window.__owaf_wasm_ready;
-}
-window.__owaf_env_ready=loadWasm().then(function(){var value=wasm_bindgen.collect_fingerprint();if(!value)throw new Error("WASM fingerprint collection failed");window.__owaf_env=value;return value}).catch(function(err){reportEnvError(err);return ""});
-})();`
+	template := envCheckJSTemplate
+	if withBehavior {
+		template = envCheckJSWithBehaviorTemplate
+	}
+	return fmt.Sprintf(template, strconv.Quote(keyHex), strconv.Quote(aad))
 }
 
 const envCheckJSTemplate = `(function(){
@@ -617,7 +702,58 @@ function loadWasm(){
 }
 window.__owaf_env_required=true;
 window.__owaf_env_ready=loadWasm().then(function(){
-  var encrypted=wasm_bindgen.collect_and_encrypt_fingerprint(keyHex,aad);
+  var encrypted=wasm_bindgen.gm_encrypt_fingerprint(keyHex,aad);
+  if(!encrypted)throw new Error("WASM fingerprint envelope failed");
+  window.__owaf_env_encrypted=encrypted;
+  return encrypted;
+}).catch(function(err){reportEnvError(err);return ""});
+})();`
+
+/**
+ * envCheckJSWithBehaviorTemplate 与 envCheckJSTemplate 相同，但加密前把
+ * window.__owaf_behavior_sample() 的统计 JSON 并入同一 GM 信封
+ * （Rust 侧 gm_encrypt_fingerprint_with_behavior 负责合并与加密）。
+ * 强制化语义：采样缺失或返回空直接置错误（fail-closed），不产无行为信封。
+ */
+const envCheckJSWithBehaviorTemplate = `(function(){
+var keyHex=%s,aad=%s,cspNonce=(document.currentScript&&document.currentScript.nonce)||"";
+function reportEnvError(err){
+  var msg=(err&&err.message)||String(err||"environment WASM initialization failed");
+  window.__owaf_env_encrypted="";
+  window.__owaf_env_error=msg;
+  if(typeof window.__owaf_env_error_callback==="function"){window.__owaf_env_error_callback(msg)}
+}
+function loadWasm(){
+  if(window.__owaf_wasm_ready)return window.__owaf_wasm_ready;
+  window.__owaf_wasm_ready=new Promise(function(resolve,reject){
+    if(typeof WebAssembly==="undefined"){reject(new Error("WebAssembly is unavailable"));return}
+    function initialize(){
+      wasm_bindgen({module_or_path:"/__owaf/pow.wasm"}).then(resolve).catch(reject)
+    }
+    if(typeof wasm_bindgen!=="undefined"){initialize();return}
+    var script=document.createElement("script");
+    script.src="/__owaf/pow_glue.js";
+    if(cspNonce)script.nonce=cspNonce;
+    script.async=true;
+    script.onload=initialize;
+    script.onerror=function(){reject(new Error("WASM glue load failed"))};
+    (document.head||document.documentElement).appendChild(script);
+  });
+  return window.__owaf_wasm_ready;
+}
+window.__owaf_env_required=true;
+window.__owaf_env_ready=loadWasm().then(function(){
+  var behavior=null;
+  try{
+    if(typeof window.__owaf_behavior_sample==="function"){
+      var s=window.__owaf_behavior_sample();
+      if(s&&typeof s==="object"){behavior=JSON.stringify(s)}
+    }
+  }catch(e){behavior=null}
+  // b0 强制化（B6）：行为采样缺失/异常直接失败，与后端 fail-closed 对齐，
+  // 不再产出无行为信封。
+  if(!behavior)throw new Error("behavior sample unavailable");
+  var encrypted=wasm_bindgen.gm_encrypt_fingerprint_with_behavior(keyHex,aad,behavior);
   if(!encrypted)throw new Error("WASM fingerprint envelope failed");
   window.__owaf_env_encrypted=encrypted;
   return encrypted;

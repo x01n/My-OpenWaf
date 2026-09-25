@@ -281,7 +281,7 @@ func TestImportBackupSkipsReloadWhenStoreFails(t *testing.T) {
 	}
 }
 
-func TestImportBackupRejectsEnabledResponseJSPluginWithoutReload(t *testing.T) {
+func TestImportBackupAcceptsEnabledResponseJSPlugin(t *testing.T) {
 	db := newBackupDBForTest(t)
 	reloadCount := 0
 	reload := func() error { reloadCount++; return nil }
@@ -291,7 +291,7 @@ func TestImportBackupRejectsEnabledResponseJSPluginWithoutReload(t *testing.T) {
 			"version": store.BackupVersion,
 			"js_plugins": []map[string]any{{
 				"name":         "enabled-response",
-				"source":       "function handle(ctx) { return null; }",
+				"source":       "export default { fetch() { return {}; } }",
 				"enabled":      true,
 				"stage":        store.JSStageResponse,
 				"failure_mode": store.JSFailureModeOpen,
@@ -304,10 +304,18 @@ func TestImportBackupRejectsEnabledResponseJSPluginWithoutReload(t *testing.T) {
 	}
 
 	ctx := invokeBackupHandler(t, ImportBackup(db, reload), body)
-	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte("response stage is unavailable because response execution is not implemented")) {
+	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("response = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
-	if reloadCount != 0 {
-		t.Fatalf("reload called %d times after rejected JavaScript plugin backup", reloadCount)
+	if reloadCount != 1 {
+		t.Fatalf("reload called %d times after accepted JavaScript plugin backup, want 1", reloadCount)
+	}
+
+	var stored []store.JSPlugin
+	if err := db.Find(&stored).Error; err != nil {
+		t.Fatalf("list stored JS plugins: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Stage != store.JSStageResponse || !stored[0].Enabled {
+		t.Fatalf("stored JS plugins = %#v", stored)
 	}
 }

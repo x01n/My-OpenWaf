@@ -45,6 +45,7 @@ import (
 	wafescalation "My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/iprep"
 	"My-OpenWaf/internal/waf/jsplugin"
+	"My-OpenWaf/internal/waf/luaplugin"
 	"My-OpenWaf/internal/waf/owasp"
 	"My-OpenWaf/internal/waf/pages"
 )
@@ -67,6 +68,10 @@ type Options struct {
 	ResourceAggregator    *recordedResourceAggregator
 	Upstreams             *upstream.Pool
 	AccessLogSamplingRate uint32
+	// StreamCloseNotifyDisabled 置 true 时跳过每请求的 CloseNotify reflect 探测。
+	// 仅当数据面 listener 未注册 HTTP/2 协议栈时启用：h1/h3 的 hertz conn 与
+	// quic 流永不含 CloseNotify，探测只会完整空跑递归扫描。
+	StreamCloseNotifyDisabled bool
 	// AccessControlRepo 用于访问控制网关的用户密码校验与 OAuth 提供方配置读取。
 	AccessControlRepo *repository.AccessControlRepo
 	// JWTSecret 用于解密 OAuth client_secret（与 Admin 层加密保持一致）。
@@ -202,13 +207,17 @@ func Handler(opts Options) app.HandlerFunc {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
+	// 注入响应阶段 JS 运行时的查找函数：proxy 无法导入 dataplane，查找
+	// 函数把执行器与脚本从 hertz 请求上下文传递过去（见 js_response_runtime.go）。
+	proxy.SetJSResponseRuntimeLookup(JSResponseRuntimeFromRequestContext)
 	var rr atomic.Uint32
 	secLog := opts.Log.With(slog.String("section", "security"))
 	accessLog := opts.Log
 	staticFS, _ := adminweb.ResolveFS("")
+	bindCloseNotify := selectStreamCloseNotifyBinding(opts.StreamCloseNotifyDisabled)
 
 	return func(ctx context.Context, c *app.RequestContext) {
-		ctx, closeNotifyCancel := bindStreamCloseNotifyContext(ctx, c)
+		ctx, closeNotifyCancel := bindCloseNotify(ctx, c)
 		requestID := fastRequestID()
 		c.Response.Header.Set("X-Request-ID", requestID)
 		c.Response.Header.Del("Server")
@@ -492,7 +501,9 @@ func Handler(opts Options) app.HandlerFunc {
 		reqCtx.Path = path
 		reqCtx.OriginalPath = path
 		reqCtx.RawQuery = rawQ
-		rules.PopulateLuaQueryParams(reqCtx)
+		if lp := opts.Engine.LuaPlugins(); lp != nil && lp.HasScripts(luaplugin.StagePre) {
+			rules.PopulateLuaQueryParams(reqCtx)
+		}
 		reqCtx.Host = host
 		reqCtx.UserAgent = ua
 		reqCtx.ChallengeIdentityCaptured = true
@@ -513,6 +524,8 @@ func Handler(opts Options) app.HandlerFunc {
 		}
 		reqCtx.TLS = tlsFingerprint
 		populateRequestCtxHeaders(reqCtx, c)
+		headerOrderJoin := reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") })
+		c.Set(wafReqCtxHeaderOrderCacheKey, &headerOrderJoin)
 
 		const maxWAFBody = 48 * 1024
 		reqCtx.ContentType = string(c.Request.Header.ContentType())
@@ -530,6 +543,9 @@ func Handler(opts Options) app.HandlerFunc {
 		if current := opts.Engine.JSPlugins(); current != nil {
 			jsExecutor = current
 		}
+		// 响应阶段执行器与脚本挂在 hertz 请求上下文上，由 internal/proxy 的响应
+		// 变换链读取；请求阶段执行器保持原样走显式实参。
+		ContextWithJSResponseRuntime(c, jspluginEngineAsResponseExecutor(jsExecutor), sn.JSPlugins)
 		initialMethod, initialPath, initialRawQuery := method, path, rawQ
 		initialContentType := string(c.Request.Header.ContentType())
 		jsState, failedJSScript, jsErr := executeJSRequestStage(ctx, c, reqCtx, sn.JSPlugins, jsExecutor)
@@ -1608,6 +1624,11 @@ func recordSecurityEvent(c *app.RequestContext, opts Options, ev store.SecurityE
 		}
 	}
 	if ev.HeaderOrder == "" {
+		if reqCtxCache, ok := headerOrderFromContext(c); ok {
+			ev.HeaderOrder = reqCtxCache
+		}
+	}
+	if ev.HeaderOrder == "" {
 		ev.HeaderOrder = strings.Join(requestHeaderOrder(c), ",")
 	}
 	if shouldRecordDetailedSecurityEvent(ev) {
@@ -1642,6 +1663,11 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 	} else {
 		if fp, ok := tlsFingerprintFromRequestContext(c); ok {
 			info.TLSFingerprint = mergeTLSFingerprint(info.TLSFingerprint, fp)
+		}
+	}
+	if !info.Minimal && info.HeaderOrder == "" {
+		if reqCtxCache, ok := headerOrderFromContext(c); ok {
+			info.HeaderOrder = reqCtxCache
 		}
 	}
 	if !info.Minimal && info.HeaderOrder == "" {
@@ -1954,31 +1980,32 @@ func sanitizeQueryString(raw string) string {
 	if raw == "" {
 		return ""
 	}
+	if !strings.ContainsAny(raw, "&=%") && !isSensitiveLogKey(raw) {
+		return raw
+	}
+	if strings.IndexByte(raw, '&') < 0 {
+		key, sanitized, changed, malformed := sanitizeQueryPair(raw)
+		if malformed {
+			return "[redacted]"
+		}
+		if !changed {
+			return raw
+		}
+		values := make(url.Values, 1)
+		values.Add(key, sanitized)
+		return values.Encode()
+	}
 	values := make(url.Values)
 	changed := false
 	for _, pair := range strings.Split(raw, "&") {
 		if pair == "" {
 			continue
 		}
-		rawKey, rawValue := pair, ""
-		if i := strings.IndexByte(pair, '='); i >= 0 {
-			rawKey, rawValue = pair[:i], pair[i+1:]
-		}
-		key, err := url.QueryUnescape(rawKey)
-		if err != nil {
+		key, sanitized, pairChanged, malformed := sanitizeQueryPair(pair)
+		if malformed {
 			return "[redacted]"
 		}
-		value, err := url.QueryUnescape(rawValue)
-		if err != nil {
-			return "[redacted]"
-		}
-		if isSensitiveLogKey(key) {
-			values.Add(key, "[redacted]")
-			changed = true
-			continue
-		}
-		sanitized := sanitizeLogText(value)
-		if sanitized != value {
+		if pairChanged {
 			changed = true
 		}
 		values.Add(key, sanitized)
@@ -1987,6 +2014,33 @@ func sanitizeQueryString(raw string) string {
 		return raw
 	}
 	return values.Encode()
+}
+
+/**
+ * sanitizeQueryPair 处理单个非空查询片段：按 '=' 拆分、解码、键遮蔽判定与取值脱敏。
+ *
+ * @param pair 已确认非空的查询片段。
+ * @return key 解码后的键；sanitized 可安全写入日志的取值；changed 本片段是否被改写；
+ *         malformed 为 true 表示键或取值解码失败，调用方应整体遮蔽。
+ */
+func sanitizeQueryPair(pair string) (key, sanitized string, changed, malformed bool) {
+	rawKey, rawValue := pair, ""
+	if i := strings.IndexByte(pair, '='); i >= 0 {
+		rawKey, rawValue = pair[:i], pair[i+1:]
+	}
+	decodedKey, err := url.QueryUnescape(rawKey)
+	if err != nil {
+		return "", "", false, true
+	}
+	value, err := url.QueryUnescape(rawValue)
+	if err != nil {
+		return "", "", false, true
+	}
+	if isSensitiveLogKey(decodedKey) {
+		return decodedKey, "[redacted]", true, false
+	}
+	sanitized = sanitizeLogText(value)
+	return decodedKey, sanitized, sanitized != value, false
 }
 
 // queryParams 以与 net/url 相同的解码规则生成 Lua 可见的查询参数。
@@ -2341,24 +2395,49 @@ func isClientGoneForPlainAccessLog(ctx context.Context, wafAction string) bool {
 }
 
 func shouldRecordAccessLog(info accessLogInfo, rate uint32) bool {
-	if info.ForceRecord || info.WAFAction != "none" || info.StatusCode >= 400 {
-		return true
-	}
 	if rate == 0 {
-		return false
+		// 取样关闭（禁用记录）时例外路径仍须留档：强记、WAF 动作或 4xx/5xx。
+		return info.ForceRecord || info.WAFAction != "none" || info.StatusCode >= 400
 	}
-	if rate <= 1 {
+	if info.ForceRecord || info.WAFAction != "none" || info.StatusCode >= 400 || rate <= 1 {
+		// rate<=1（默认全量）与例外三条件并列后恒为真，等价折叠为快速路径，
+		// 不改变任何判定结果；rate>1 时才落入采样取模。
 		return true
 	}
 	return accessLogSampleCounter.Add(1)%rate == 0
 }
 
+// wafReqCtxHeaderOrderCacheKey 主路径把「populate 记录序一次 Join」的结果
+// 寄存在请求上下文，后续 WAF/访问记录复用，避免每行日志重复 VisitAll。
+const wafReqCtxHeaderOrderCacheKey = "owaf.dataplane.header_order_cache"
+
+// requestHeaderOrder 返回原字面顺序的请求头键列表。
+//
+// 与 populateRequestCtxHeaders 的同一次顺序记录对齐：该列表与内部顺序头槽的
+// 差异仅无关头聚合（Cookie 折叠、Connection 合成行），对 HeaderOrder 语义
+// 无影响。性能上把每请求 1 次遍历的次数控制为 1（有 reqCtx 时）或 0，
+// 未进入 WAF 流程的记录路径仍按原有方式枚举。
 func requestHeaderOrder(c *app.RequestContext) []string {
 	keys := make([]string, 0, 16)
 	c.Request.Header.VisitAll(func(k, _ []byte) {
 		keys = append(keys, string(k))
 	})
 	return keys
+}
+
+func headerOrderFromContext(c *app.RequestContext) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	v, ok := c.Get(wafReqCtxHeaderOrderCacheKey)
+	if !ok {
+		return "", false
+	}
+	sp, _ := v.(*string)
+	if sp == nil {
+		return "", false
+	}
+	return *sp, true
 }
 
 func isInternalHTTP3Request(c *app.RequestContext) bool {
@@ -2583,6 +2662,24 @@ func handleAntiReplayCookie(
 			Matched:   true,
 			Category:  "replay",
 		}
+		// 防重放命中意味着该用户的会话已被重放攻击滥用：连带吊销其访问控制
+		// 登录会话与挑战免验态（雷池语义，双吊销）。两个吊销只读全局会话
+		// 存储、最多在响应上追加 Set-Cookie 清除头，拦截主流程不受影响；
+		// 吊销失败仅记 WARN。
+		revoked, warnMsg := revokeAccessSessionIfPresent(c, rt)
+		if warnMsg != "" && opts.Log != nil {
+			opts.Log.Warn("revoke access session on replay failed",
+				slog.String("request_id", reqID),
+				slog.Uint64("site_id", uint64(rt.Site.ID)),
+				slog.String("err", warnMsg),
+			)
+		} else if revoked && opts.Log != nil {
+			opts.Log.Warn("access session revoked on replay",
+				slog.String("request_id", reqID),
+				slog.Uint64("site_id", uint64(rt.Site.ID)),
+			)
+		}
+		clearChallengePassCookie(c, rt.Site.TLSEnabled)
 		if opts.Metrics != nil {
 			opts.Metrics.RecordWAFBlock()
 		}
@@ -3051,20 +3148,16 @@ func handleCaptchaVerify(c *app.RequestContext, opts Options) bool {
 
 	sessionID := string(c.FormValue("__waf_captcha_session"))
 	answer := string(c.FormValue("__waf_captcha_answer"))
+	envFP := string(c.FormValue("__waf_env_fp"))
 
 	if sessionID == "" || answer == "" {
 		recordChallengeFailure(c, opts)
 		c.Redirect(302, []byte(safeRefererRedirect(c)))
 		return true
 	}
-
 	ok, session := opts.CaptchaManager.VerifyAdvancedSessionWithBinding(sessionID, answer, binding)
-	if ok && session != nil && len(session.EnvKey) > 0 {
-		aad := challenge.EnvFingerprintAAD("captcha", session.ID, session.ChallengeSessionBinding)
-		result := challenge.ValidateEnvFingerprint(challenge.DecryptEnvFingerprintWithAAD(string(c.FormValue("__waf_env_fp")), session.EnvKey, aad))
-		if !result.Pass {
-			ok = false
-		}
+	if ok && !challenge.VerifyCaptchaEnvEnvelope(envFP, session) {
+		ok = false
 	}
 
 	if ok {
@@ -3185,6 +3278,19 @@ func setChallengeCookie(c *app.RequestContext, opts Options) {
 	}
 	clientIP := security.ResolveClientIP(c, rt.XFFMode, rt.TrustedCIDR, rt.ClientIPHeaderOrder)
 	cookie := challenge.BuildChallengePassCookieWithClaims(challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: string(c.UserAgent()), SiteID: rt.Site.ID, Bind: bind}, rt.Site.TLSEnabled, time.Now(), challengePassTTL(sn.Protection))
+	c.Response.Header.Add("Set-Cookie", cookie)
+}
+
+// clearChallengePassCookie 在防重放命中等安全场景下吊销挑战免验态。
+// __waf_passed 是无状态签名（服务端无存储），吊销语义即响应追加该 cookie
+// 的清除头。属性必须与签发侧 BuildChallengePassCookieWithClaims 一致
+// （Path=/、HttpOnly、SameSite=Strict、Secure 随站点 TLS），否则浏览器会
+// 视作不同 cookie 而清不掉。
+func clearChallengePassCookie(c *app.RequestContext, secure bool) {
+	cookie := challenge.ChallengePassCookieName + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+	if secure {
+		cookie += "; Secure"
+	}
 	c.Response.Header.Add("Set-Cookie", cookie)
 }
 

@@ -90,10 +90,6 @@ export default function JSPluginsPage() {
 
   const handleToggle = async (plugin: JSPlugin, enabled: boolean) => {
     if (!canManage) return
-    if (plugin.stage === "response" && enabled) {
-      toast.error(t("jsPlugins.responseStageUnavailable"))
-      return
-    }
     try {
       await togglePlugin({ id: plugin.id, enabled })
       refresh()
@@ -119,9 +115,7 @@ export default function JSPluginsPage() {
   }
 
   const plugins = data?.items ?? []
-  const compileFailures = plugins.filter(
-    (plugin) => plugin.stage === "request" && plugin.compile_error
-  )
+  const compileFailures = plugins.filter((plugin) => plugin.compile_error)
   const columns = [
     {
       key: "name",
@@ -240,12 +234,7 @@ export default function JSPluginsPage() {
       title: t("common.status"),
       width: "150px",
       render: (row: JSPlugin) =>
-        row.stage === "response" ? (
-          <Badge variant="destructive" className="gap-1">
-            <IconAlertTriangle className="h-3.5 w-3.5" />
-            {t("jsPlugins.stageResponseUnavailable")}
-          </Badge>
-        ) : row.compile_error ? (
+        row.compile_error ? (
           <TooltipProvider delayDuration={200}>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -275,7 +264,7 @@ export default function JSPluginsPage() {
       render: (row: JSPlugin) => (
         <Switch
           checked={row.enabled}
-          disabled={!canManage || (row.stage === "response" && !row.enabled)}
+          disabled={!canManage}
           onCheckedChange={(value) => handleToggle(row, value)}
         />
       ),

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -38,8 +39,8 @@ func IsWebSocketUpgrade(c *app.RequestContext) bool {
 }
 
 // IsH2ExtendedWebSocketConnect 报告入站请求是否为 RFC 8441 扩展 CONNECT
-// WebSocket 流（CONNECT 方法且携带 ":protocol" 伪头）。":protocol" 由
-// third_party/hertz-contrib-http2 补丁写成普通请求头，此处按头读取。
+// WebSocket 流（CONNECT 方法且携带 ":protocol" 伪头）。":protocol" 
+// 伪头值不为空表示扩展 CONNECT，空串表示非扩展 CONNECT。
 func IsH2ExtendedWebSocketConnect(c *app.RequestContext) bool {
 	if c == nil || !bytes.Equal(c.Method(), []byte(http.MethodConnect)) {
 		return false
@@ -195,23 +196,49 @@ func ForwardWebSocket(ctx context.Context, reqID string, c *app.RequestContext, 
 	return nil
 }
 
-// wsUpstreamTLSConfig 返回 wss 上游拨号用的 TLS 配置。
-//
-// 站点配置了客户端证书时返回注入证书链与私钥的配置；未配置或证书无效时
-// 返回 nil——调用方回落到无客户端证书的共享配置拨号路径，降级语义与
-// HTTP/h3 出口一致：由上游服务端决定最终拒绝与否。
+type wsUpstreamTLSConfigKey struct {
+	serverName   string
+	skipVerify   bool
+	clientCertFP string
+}
+
+var (
+	wsUpstreamTLSConfigMu  sync.RWMutex
+	wsUpstreamTLSConfigMap = make(map[wsUpstreamTLSConfigKey]*tls.Config)
+)
+
 func wsUpstreamTLSConfig(rt snapshot.SiteRuntime) *tls.Config {
 	cert, hasCert, err := upstream.UpstreamClientCertificate(rt)
 	if err != nil {
-		// 证书解析失败时仅记录告警并继续无客户端证书握手，
-		// 避免单个坏证书拖垮整个站点的 WebSocket 流量。
 		slog.Warn("ws upstream dial skipped client cert", slog.String("site_host", rt.Site.Host), slog.String("error", err.Error()))
 		return nil
 	}
 	if !hasCert {
 		return nil
 	}
-	return upstream.HTTPSClientTLSConfigWithClientCert(rt.Site.UpstreamTLSServerName, rt.Site.UpstreamTLSSkipVerify, cert, true)
+
+	key := wsUpstreamTLSConfigKey{
+		serverName:   rt.Site.UpstreamTLSServerName,
+		skipVerify:   rt.Site.UpstreamTLSSkipVerify,
+		clientCertFP: upstream.UpstreamClientCertFingerprint(rt),
+	}
+	wsUpstreamTLSConfigMu.RLock()
+	if cfg, ok := wsUpstreamTLSConfigMap[key]; ok {
+		wsUpstreamTLSConfigMu.RUnlock()
+		return cfg
+	}
+	wsUpstreamTLSConfigMu.RUnlock()
+
+	cfg := upstream.HTTPSClientTLSConfigWithClientCert(key.serverName, key.skipVerify, cert, true)
+	cfg.ClientSessionCache = tls.NewLRUClientSessionCache(32)
+
+	wsUpstreamTLSConfigMu.Lock()
+	defer wsUpstreamTLSConfigMu.Unlock()
+	if existing, ok := wsUpstreamTLSConfigMap[key]; ok {
+		return existing
+	}
+	wsUpstreamTLSConfigMap[key] = cfg
+	return cfg
 }
 
 var tlsDialWebSocketUpstream = func(dialer *net.Dialer, host string, rt snapshot.SiteRuntime) (net.Conn, error) {

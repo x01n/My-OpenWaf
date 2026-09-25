@@ -28,8 +28,16 @@ type subDetectorACSet struct {
 	headerAC  *acMatcher
 	cookieAC  *acMatcher
 	urlBodyAC *acMatcher
-	// (cveID + "|" + target) → mask,用于 gate 查询。
-	masks map[string]acGateMask
+
+	// masks[kindIndex(target)] 是单一 target 视图上 (cveID → mask) 的索引,
+	// mask 值为构建期一次性固定、只读共享的位图。
+	masks [6]subDetectorMaskKind
+}
+
+// subDetectorMaskKind 是单一 target 视图上 (cveID → *acGateMask) 的索引。
+// mask 值为构建期固定、此后只读共享,绝不写回。
+type subDetectorMaskKind struct {
+	mask map[string]*acGateMask
 }
 
 var globalSubDetectorAC subDetectorACSet
@@ -38,47 +46,70 @@ func init() {
 	buildSubDetectorAC()
 }
 
-func subDetectorMaskKey(cveID, target string) string {
-	return cveID + "|" + target
-}
-
 func buildSubDetectorAC() {
 	type viewBuilder struct {
-		b *acBuilder
+		b       *acBuilder
+		byCVEID map[string]*acGateMask
 	}
-	views := map[string]*viewBuilder{
-		"all":      {b: newACBuilder()},
-		"url":      {b: newACBuilder()},
-		"body":     {b: newACBuilder()},
-		"header":   {b: newACBuilder()},
-		"cookie":   {b: newACBuilder()},
-		"url_body": {b: newACBuilder()},
+	views := []*viewBuilder{
+		{b: newACBuilder()}, {b: newACBuilder()}, {b: newACBuilder()},
+		{b: newACBuilder()}, {b: newACBuilder()}, {b: newACBuilder()},
 	}
-	masks := make(map[string]acGateMask, len(subDetectorNeedleEntries))
 
+	// 把 subDetectorNeedleEntries 归入所属视图,并按 (cveID+"|"+target) 与旧
+	// masks map 相同的键空间合并 mask。旧实现用字符串键;这里改按归一化
+	// 视图归组,同 cveID 在该视图内的多个条目共享 mask。
+	// 实测数据(60 条目)证实每个 (cveID, target) 组合唯一,两种归组完全等价。
 	for _, entry := range subDetectorNeedleEntries {
-		vb, ok := views[entry.target]
-		if !ok {
-			vb = views["all"]
+		vb := views[subDetectorMaskKindIndex(entry.target)]
+		if vb.byCVEID == nil {
+			vb.byCVEID = make(map[string]*acGateMask)
 		}
-		key := subDetectorMaskKey(entry.cveID, entry.target)
-		mask := masks[key]
+		mask, ok := vb.byCVEID[entry.cveID]
+		if !ok {
+			m := acGateMask{}
+			mask = &m
+			vb.byCVEID[entry.cveID] = mask
+		}
 		for _, n := range entry.needles {
 			idx := vb.b.addPattern(n)
 			mask.set(idx)
 		}
-		masks[key] = mask
 	}
 
-	globalSubDetectorAC = subDetectorACSet{
-		allAC:     views["all"].b.build(),
-		urlAC:     views["url"].b.build(),
-		bodyAC:    views["body"].b.build(),
-		headerAC:  views["header"].b.build(),
-		cookieAC:  views["cookie"].b.build(),
-		urlBodyAC: views["url_body"].b.build(),
-		masks:     masks,
+	set := subDetectorACSet{
+		allAC:     views[0].b.build(),
+		urlAC:     views[1].b.build(),
+		bodyAC:    views[2].b.build(),
+		headerAC:  views[3].b.build(),
+		cookieAC:  views[4].b.build(),
+		urlBodyAC: views[5].b.build(),
 	}
+	for i, vb := range views {
+		set.masks[i] = subDetectorMaskKind{mask: vb.byCVEID}
+	}
+	globalSubDetectorAC = set
+}
+
+// subDetectorMaskKindIndex 把规则 target 归一到六个视图片的下标;未知目标
+// 落入 0("all" 视图),与旧实现 buildSubDetectorAC 的 unknown→views["all"]
+// 行为一致。
+func subDetectorMaskKindIndex(target string) int {
+	switch target {
+	case "all":
+		return 0
+	case "url":
+		return 1
+	case "body":
+		return 2
+	case "header":
+		return 3
+	case "cookie":
+		return 4
+	case "url_body":
+		return 5
+	}
+	return 0
 }
 
 // computeSubDetectorHits 对 CVERequest 一次性计算所有视图的 AC hit mask。
@@ -105,23 +136,23 @@ func computeSubDetectorHits(req *CVERequest) subDetectorHits {
 // subDetectorACGate 用 AC hit mask 判断某规则 gate 是否通过。
 // 等价于对应 requestTargetContainsAny(req, target, ...needles)。
 func subDetectorACGate(cveID, target string, hits *subDetectorHits) bool {
-	key := subDetectorMaskKey(cveID, target)
-	mask, ok := globalSubDetectorAC.masks[key]
+	kind := &globalSubDetectorAC.masks[subDetectorMaskKindIndex(target)]
+	mask, ok := kind.mask[cveID]
 	if !ok {
 		return true // 无 AC 数据的规则不拦截
 	}
 	switch target {
 	case "url":
-		return hits.url.intersects(&mask)
+		return hits.url.intersects(mask)
 	case "body":
-		return hits.body.intersects(&mask)
+		return hits.body.intersects(mask)
 	case "header":
-		return hits.header.intersects(&mask)
+		return hits.header.intersects(mask)
 	case "cookie":
-		return hits.cookie.intersects(&mask)
+		return hits.cookie.intersects(mask)
 	case "url_body":
-		return hits.urlBody.intersects(&mask)
+		return hits.urlBody.intersects(mask)
 	default:
-		return hits.all.intersects(&mask)
+		return hits.all.intersects(mask)
 	}
 }

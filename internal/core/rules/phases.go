@@ -38,9 +38,14 @@ type MatchCtx struct {
 	TLSCipherSuites  string
 	TLS              *bot.TLSClientFingerprint
 	Body             []byte
+	// reqCtx 指向共享 RequestCtx，供 bodyJSONPath/queryParam 匹配器挂
+	// per-request 懒解析缓存。未填充（纯值构造）时为 nil，匹配器会直接
+	// 解析且不缓存，行为与原实现一致。
+	reqCtx *pipeline.RequestCtx
 }
 
 func fillMatchCtxFromPipeline(ctx *pipeline.RequestCtx, needsDerivedHeaders bool, mc *MatchCtx) {
+	mc.reqCtx = ctx
 	mc.ClientIP = ctx.ClientIP
 	mc.Method = ctx.Method
 	mc.Path = ctx.Path
@@ -447,6 +452,9 @@ func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	br := bot.NewBotRequest(ctx.Method, ctx.Path, ctx.Headers)
 	br.ClientIP = ctx.ClientIP
 	br.HeaderKeys = ctx.HeaderKeys
+	if len(br.HeaderKeys) > 0 {
+		br.HeaderOrder = ctx.DerivedHeaderOrder(func() string { return strings.Join(ctx.HeaderKeys, ",") })
+	}
 	br.TLS = ctx.TLS
 
 	// If GeoIP resolver is available, use the two-phase flow.
@@ -1147,70 +1155,6 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 		return result, true
 	}
 	return action.Pass(), false
-}
-
-type parallelOWASPCVEPhase struct {
-	cfg      *store.ProtectionConfig
-	detector *cve.CVEDetector
-	owasp    *owaspPhase
-	cve      *cvePhase
-}
-
-// NewParallelOWASPCVEPhase creates a phase that runs OWASP and CVE detection
-func NewParallelOWASPCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDetector) pipeline.Phase {
-	phase := &parallelOWASPCVEPhase{cfg: cfg, detector: detector}
-	if cfg != nil {
-		phase.owasp = NewOWASPPhase(cfg).(*owaspPhase)
-		phase.cve = newCVEPhase(cfg, detector)
-	}
-	return phase
-}
-
-func (p *parallelOWASPCVEPhase) Name() string { return "owasp_cve_parallel" }
-
-func (p *parallelOWASPCVEPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	owaspEnabled := p.cfg.OWASPEnabled
-	cveEnabled := p.cfg.CVEEnabled && p.detector != nil
-
-	if !owaspEnabled && !cveEnabled {
-		return action.Pass(), false
-	}
-	if !owaspEnabled {
-		return p.checkCVE(ctx)
-	}
-
-	owaspResult, owaspStop := p.checkOWASP(ctx)
-	if !cveEnabled {
-		return owaspResult, owaspStop
-	}
-
-	cveResult, cveStop := p.checkCVE(ctx)
-	if owaspStop && cveStop {
-		if action.MoreSevere(cveResult.Type, owaspResult.Type) {
-			return cveResult, true
-		}
-		return owaspResult, true
-	}
-	if owaspStop {
-		return owaspResult, true
-	}
-	if cveStop {
-		return cveResult, true
-	}
-	return action.Pass(), false
-}
-func (p *parallelOWASPCVEPhase) checkOWASP(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	if p.owasp == nil {
-		return action.Pass(), false
-	}
-	return p.owasp.Execute(ctx)
-}
-
-func (p *parallelOWASPCVEPhase) checkCVE(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	if p.cve == nil {
-		return action.Pass(), false
-	}
-	return p.cve.Execute(ctx)
 }
 
 func filterPhase(rules []Compiled, phase string) []Compiled {

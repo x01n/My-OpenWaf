@@ -1642,6 +1642,44 @@ func TestWSTLSDialWebSocketUpstreamInjectsClientCert(t *testing.T) {
 		if len(cfg.CipherSuites) == 0 {
 			t.Fatal("TLS config cipher suites are empty")
 		}
+		// 池化断言语义：同一 (serverName, skipVerify, FP) 键必须复用同一 *tls.Config。
+		wsUpstreamTLSConfigMu.RLock()
+		entries := len(wsUpstreamTLSConfigMap)
+		pooledCfg, pooled := wsUpstreamTLSConfigMap[wsUpstreamTLSConfigKey{
+			serverName:   "origin.example.test",
+			skipVerify:   true,
+			clientCertFP: "prepared",
+		}]
+		wsUpstreamTLSConfigMu.RUnlock()
+		if !pooled || pooledCfg == nil {
+			t.Fatal("expected wss upstream config pool entry after config build")
+		}
+		if pooledCfg.ClientSessionCache == nil {
+			t.Fatal("wss upstream pooled config is missing a client session cache")
+		}
+		if pooledCfg.Certificates[0].PrivateKey == nil {
+			t.Fatal("wss upstream pooled config client certificate private key is nil")
+		}
+		if entries != 1 {
+			t.Fatalf("wss upstream config pool entries = %d, want 1", entries)
+		}
+
+		// 第二次构建必须返回同一实例；若站点同时换了一张证书，指纹变化后
+		// 必须走新键、得到独立配置（防止旧证书会话串到新证书连接）。
+		second := wsUpstreamTLSConfig(gotRT)
+		if second != pooledCfg {
+			t.Fatal("second wss upstream TLS config did not reuse the pooled instance")
+		}
+		rotatedRT := gotRT
+		rotatedRT.Site.UpstreamTLSClientCertFP = "rotated-fingerprint"
+		rotated := wsUpstreamTLSConfig(rotatedRT)
+		if rotated == nil {
+			t.Fatal("rotated wss upstream TLS config is nil")
+		}
+		if rotated == pooledCfg {
+			t.Fatal("rotated client certificate reused the old pooled TLS config")
+		}
+
 		if host != "unused-host:9443" {
 			t.Fatalf("wss dial host = %q", host)
 		}

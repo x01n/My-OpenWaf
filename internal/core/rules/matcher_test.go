@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/store"
 )
 
@@ -272,6 +273,80 @@ func TestSrcIPUnsupportedPseudoMethodsAreRejected(t *testing.T) {
 	}
 	if _, _, errs := ValidatePattern(`block_ip:office`); len(errs) == 0 {
 		t.Fatal("IP group name must not be accepted by block_ip validation")
+	}
+}
+
+func TestQueryParamMatcherCachesDecodedValuesAcrossRules(t *testing.T) {
+	ctx := pipeline.AcquireCtx()
+	defer pipeline.ReleaseCtx(ctx)
+	ctx.RawQuery = "tag=first&tag=second"
+
+	rules := Compile([]store.Rule{
+		{Phase: "custom", Pattern: "query_param:tag:second", Action: "intercept", Priority: 1, Enabled: true},
+		{Phase: "custom", Pattern: "query_param:tag:first", Action: "intercept", Priority: 2, Enabled: true},
+	})
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 compiled rules, got %d", len(rules))
+	}
+
+	mc := ctxFromPipeline(ctx, false)
+	if mc.reqCtx == nil {
+		t.Fatal("phase derive should attach the shared RequestCtx")
+	}
+	// 单请求共享解析：同参第一规则匹配后，第二规则复用缓存值。
+	for i := range rules {
+		if !rules[i].Match(mc) {
+			t.Errorf("rule %d (%q) should match on multi-value query param", i, rules[i].Arg)
+		}
+	}
+	if values, ok := ctx.CachedMatcherQueryValues(); !ok || len(values["tag"]) != 2 {
+		t.Errorf("query values should be cached once with both entries, values=%#v cached=%v", values, ok)
+	}
+
+	// 请求结束归还池后缓存必须清零，防止下个请求读出陈旧语义值。
+	pipeline.ReleaseCtx(ctx)
+	next := pipeline.AcquireCtx()
+	if _, ok := next.CachedMatcherQueryValues(); ok {
+		t.Fatal("pooled RequestCtx must not carry stale matcher query values")
+	}
+	if _, recovered := next.CachedJSONBodyObject(); recovered {
+		t.Fatal("pooled RequestCtx must not carry stale matcher JSON body")
+	}
+	pipeline.ReleaseCtx(next)
+}
+
+func TestQueryParamMatcherSemicolonParsesAsSeparator(t *testing.T) {
+	// "; " 分隔符与 "&" 等价——url.ParseQuery 对两种分隔都做拆分。
+	// 本断言钉住的是缓存路径的预处理行为：ReplaceAll(";", "&") 后解析结果
+	// 与直接 url.ParseQuery 一致。
+	ctx := pipeline.AcquireCtx()
+	defer pipeline.ReleaseCtx(ctx)
+	ctx.RawQuery = "id=abc;id=2"
+
+	m := &queryParamExactMatcher{param: "id", value: "2"}
+	if !m.Match(ctxFromPipeline(ctx, false)) {
+		t.Fatal("semicolon separator in raw query should parse as &, same as url.ParseQuery legacy semantics")
+	}
+}
+
+func TestBodyJSONPathMatcherReusesParsedObjectAcrossRules(t *testing.T) {
+	ctx := pipeline.AcquireCtx()
+	defer pipeline.ReleaseCtx(ctx)
+	ctx.Body = []byte(`{"user":{"role":"admin"},"flags":{"x":1}}`)
+
+	rules := Compile([]store.Rule{
+		{Phase: "custom", Pattern: `block_body_json_path:$.user.role:^admin$`, Action: "intercept", Priority: 1, Enabled: true},
+		{Phase: "custom", Pattern: `block_body_json_path:$.flags.x`, Action: "intercept", Priority: 2, Enabled: true},
+	})
+	mc := ctxFromPipeline(ctx, false)
+	for i := range rules {
+		if !rules[i].Match(mc) {
+			t.Errorf("rule %d (%q) should match after single JSON parse", i, rules[i].Arg)
+		}
+	}
+	obj, done := ctx.CachedJSONBodyObject()
+	if !done || obj == nil {
+		t.Fatal("JSON body parse should be cached on the RequestCtx")
 	}
 }
 

@@ -265,9 +265,6 @@ func validateBackupJSPlugins(plugins []JSPlugin) error {
 		if plugin.Stage != JSStageRequest && plugin.Stage != JSStageResponse {
 			return fmt.Errorf("%w: plugin %q stage must be request or response", ErrInvalidBackupJSPlugin, plugin.Name)
 		}
-		if plugin.Enabled && plugin.Stage == JSStageResponse {
-			return fmt.Errorf("%w: plugin %q response stage is unavailable because response execution is not implemented", ErrInvalidBackupJSPlugin, plugin.Name)
-		}
 		if plugin.FailureMode != JSFailureModeOpen && plugin.FailureMode != JSFailureModeClosed {
 			return fmt.Errorf("%w: plugin %q failure_mode must be fail_open or fail_closed", ErrInvalidBackupJSPlugin, plugin.Name)
 		}

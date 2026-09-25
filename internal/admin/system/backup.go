@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,9 +36,50 @@ func ExportBackup(db *gorm.DB) app.HandlerFunc {
 		for i := range data.SystemSettings {
 			data.SystemSettings[i] = redactSettingItem(data.SystemSettings[i])
 		}
+		backupMaskThreatIntelFeeds(data.ThreatIntelFeeds)
+		backupMaskOAuthClientSecrets(data.AccessProviders)
 		filename := fmt.Sprintf("owaf-backup-%s.json", time.Now().Format("20060102-150405"))
 		c.Response.Header.Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
 		c.JSON(200, data)
+	}
+}
+
+// backupMaskThreatIntelFeeds 遮蔽备份中的威胁情报认证头值：订阅源拉取令牌
+// 属于敏感凭据，不应随备份文件明文导出。maskAuthHeaderValue 返回的是掩码值而非
+// 空串（长度 >= 5 的保留前 4 位加 "***"，更短的非空值整体替换为 "***"，空值保持
+// 为空），该掩码值随导入侧 upsertBatch 的 OnConflict{UpdateAll} 覆盖目标库原凭据
+// （字段无 default 标签，不触发 restoreZeroValuedDefaults 回写），语义是
+// "凭据不随备份走、导入后需重新录入"，故无需在导入侧再做特殊处理。
+func backupMaskThreatIntelFeeds(feeds []store.ThreatIntelFeed) {
+	for i := range feeds {
+		feeds[i].AuthHeaderValue = maskAuthHeaderValue(feeds[i].AuthHeaderValue)
+	}
+}
+
+// backupMaskOAuthClientSecrets 遮蔽备份中 OAuth/OIDC 提供方的 client_secret。
+// 落库形态 Config 是 JSON 字符串，其中 client_secret 为 AES-256-GCM 密文
+// （internal/admin/access 的 encryptClientSecret 用 JWT 主密钥经 HKDF 派生密钥），
+// 换机导入不可解密，随备份导出既无用处又扩大泄密面。
+// 这里把 client_secret 替换为掩码值（非空值保留前 4 位 + "***"，空值保持为空），
+// 掩码针对 base64 密文，取前 4 位不泄露任何明文内容；形态与威胁情报认证头遮蔽
+// 保持一致。掩码值随导入侧 upsertBatch 的 OnConflict{UpdateAll} 写入目标库，
+// 成为无法解密的坏密文，任何后续 OAuth 令牌换取都会失败，管理员在 UI 重新录入
+// 密钥后恢复——凭据不随备份走。解析失败的 Config 保持原样，不改变既有导出行为。
+func backupMaskOAuthClientSecrets(providers []store.AccessProvider) {
+	for i := range providers {
+		if providers[i].Config == "" {
+			continue
+		}
+		var cfg store.OAuthProviderConfig
+		if json.Unmarshal([]byte(providers[i].Config), &cfg) != nil {
+			continue // 配置 JSON 解析失败时保持原样，避免破坏既有备份行为
+		}
+		cfg.ClientSecret = maskAuthHeaderValue(cfg.ClientSecret)
+		masked, err := json.Marshal(&cfg)
+		if err != nil {
+			continue
+		}
+		providers[i].Config = string(masked)
 	}
 }
 
@@ -57,7 +99,19 @@ type ImportBackupReq struct {
  *
  * @param db          数据库句柄。
  * @param reload      snapshot 重建回调。
- * @param invalidates 备份写入后需要立即失效的进程内只读缓存。
+ * @param invalidates 备份写入后需要立即失效的进程内只读缓存。备份导入可能改写
+ *                    SiteAccessConfig / AccessProvider / AccessUser / AccessPathRule，
+ *                    而已登录用户持有的访问控制会话存放在数据面的
+ *                    dataplane.globalAccessSessionStore（内存/Redis，与库表无关）。
+ *                    接入点经核实的接线方式为：在 router.go 现有 invalidates 回调
+ *                    （r.CVERule.InvalidateCanonicalSnapshot /
+ *                    detect.InvalidateOWASPReadSnapshots，router.go:356-358）之后
+ *                    追加一个会话吊销回调。当前 dataplane 包没有暴露"清空/吊销
+ *                    全部会话"的入口（仅 CleanExpired，access_control.go:43，只清
+ *                    过期不吊销；accessgate.SessionStore 接口 gate.go:65 无
+ *                    ClearAll 方法），因此本文件无法在不新造会话管理逻辑的前提
+ *                    下完成该接线，待 dataplane/accessgate 侧补一个全量吊销入口后
+ *                    在此回调内调用。
  * @return Hertz 处理器。
  */
 func ImportBackup(db *gorm.DB, reload func() error, invalidates ...func()) app.HandlerFunc {

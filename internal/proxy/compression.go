@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
 	"io"
@@ -10,9 +11,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/andybalholm/brotli"
 	"github.com/cloudwego/hertz/pkg/app"
+	kgzip "github.com/klauspost/compress/gzip"
+	kzlib "github.com/klauspost/compress/zlib"
 	"github.com/klauspost/compress/zstd"
 
 	"My-OpenWaf/internal/snapshot"
@@ -408,11 +412,19 @@ func newContentDecoderReader(reader io.Reader, encoding string) (io.Reader, io.C
 	case "br":
 		return brotli.NewReader(reader), nil, true, nil
 	case "deflate":
-		zlibReader, err := zlib.NewReader(reader)
-		if err != nil {
-			return nil, nil, false, err
+		// 兼容探测：旧 HTTP 实现的 Content-Encoding: deflate 常指向无
+		// zlib 封装头的裸 deflate 流。前两个字节满足 RFC 1950 头约束
+		// （CM=8、CINFO<=7、首 2 字节可被 31 整除）时按 zlib 解；否则
+		// 把已探测字节无缝塞回，按裸 flate 解。
+		head := make([]byte, 2)
+		if n, err := io.ReadFull(reader, head); err == nil && n == 2 && looksLikeZlibHeader(head) {
+			zr, zc := newZlibReader(reader, head)
+			return zr, zc, true, nil
+		} else if n > 0 {
+			reader = io.MultiReader(bytes.NewReader(head[:n]), reader)
 		}
-		return zlibReader, zlibReader, true, nil
+		flateReader := flate.NewReader(reader)
+		return flateReader, flateReader, true, nil
 	case "zstd":
 		zstdReader, err := zstd.NewReader(reader)
 		if err != nil {
@@ -423,6 +435,38 @@ func newContentDecoderReader(reader io.Reader, encoding string) (io.Reader, io.C
 	default:
 		return nil, nil, false, nil
 	}
+}
+
+// looksLikeZlibHeader 按 RFC 1950 第 2.2 节头部规则判定前两字节是否为
+// 合法 zlib 头，判定口径与 compress/zlib 的 readHeader 完全一致。
+func looksLikeZlibHeader(head []byte) bool {
+	if len(head) != 2 {
+		return false
+	}
+	if head[0]&0x0f != 8 || head[0]>>4 > 7 {
+		return false
+	}
+	return (uint16(head[0])<<8|uint16(head[1]))%31 == 0
+}
+
+// newZlibReader 从头两字节 + 剩余流构造 zlib reader，供探测逻辑复用。
+func newZlibReader(reader io.Reader, head []byte) (io.Reader, io.Closer) {
+	zlibReader, err := zlib.NewReader(io.MultiReader(bytes.NewReader(head), reader))
+	if err != nil {
+		// 头已通过校验，此处失败仅剩 FDICT 字典场景，上游凡带字典头者
+		// 一律不可能解出，返回一个立即报错的 reader 保持错误可见性。
+		return errorReader{err: err}, nil
+	}
+	return zlibReader, zlibReader
+}
+
+// errorReader 在首次 Read 时返回构造错误，配合 newZlibReader 兜底。
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read(p []byte) (int, error) {
+	return 0, r.err
 }
 
 func closeContentDecoderClosers(closers []io.Closer) error {
@@ -1007,6 +1051,43 @@ func isHTTPTokenByte(b byte) bool {
 	}
 }
 
+// applyGzipUnit 是 apply/static 路径 gzip 压缩器与输出缓冲的池化单元。
+//
+// gzip.Writer.Reset 等价于重建 Writer（gzip.go 的 init 语义），
+// 且 flate 侧 compressor.reset 对 level 1-6 只重置 fast encoder 状态
+// （fastGen.reset 保留 hist 底层数组）而不重分配窗口，故 Reset 是零分配路径。
+type applyGzipUnit struct {
+	gz  *gzip.Writer
+	buf *bytes.Buffer
+}
+
+// applyZlibUnit 同 applyGzipUnit，用于 zlib（deflate）编码。
+type applyZlibUnit struct {
+	zw  *zlib.Writer
+	buf *bytes.Buffer
+}
+
+var (
+	applyGzipUnitPool = &sync.Pool{New: func() any {
+		return newApplyGzipUnit()
+	}}
+	applyZlibUnitPool = &sync.Pool{New: func() any {
+		return newApplyZlibUnit()
+	}}
+)
+
+func newApplyGzipUnit() *applyGzipUnit {
+	buf := bytes.NewBuffer(make([]byte, 0, 256<<10))
+	gz, _ := gzip.NewWriterLevel(buf, gzip.BestSpeed)
+	return &applyGzipUnit{gz: gz, buf: buf}
+}
+
+func newApplyZlibUnit() *applyZlibUnit {
+	buf := bytes.NewBuffer(make([]byte, 0, 64<<10))
+	zw, _ := zlib.NewWriterLevel(buf, zlib.BestSpeed)
+	return &applyZlibUnit{zw: zw, buf: buf}
+}
+
 func compressResponseBody(body []byte, encoding responseEncoding) ([]byte, error) {
 	var buf bytes.Buffer
 	switch encoding {
@@ -1020,29 +1101,37 @@ func compressResponseBody(body []byte, encoding responseEncoding) ([]byte, error
 			return nil, err
 		}
 	case responseEncodingGzip:
-		writer, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
-		if err != nil {
-			return nil, err
+		u := applyGzipUnitPool.Get().(*applyGzipUnit)
+		u.buf.Reset()
+		u.gz.Reset(u.buf)
+		_, writeErr := u.gz.Write(body)
+		closeErr := u.gz.Close()
+		if writeErr != nil || closeErr != nil {
+			applyGzipUnitPool.Put(u)
+			if writeErr != nil {
+				return nil, writeErr
+			}
+			return nil, closeErr
 		}
-		if _, err := writer.Write(body); err != nil {
-			_ = writer.Close()
-			return nil, err
-		}
-		if err := writer.Close(); err != nil {
-			return nil, err
-		}
+		out := append([]byte(nil), u.buf.Bytes()...)
+		applyGzipUnitPool.Put(u)
+		return out, nil
 	case responseEncodingDeflate:
-		writer, err := zlib.NewWriterLevel(&buf, zlib.BestSpeed)
-		if err != nil {
-			return nil, err
+		u := applyZlibUnitPool.Get().(*applyZlibUnit)
+		u.buf.Reset()
+		u.zw.Reset(u.buf)
+		_, writeErr := u.zw.Write(body)
+		closeErr := u.zw.Close()
+		if writeErr != nil || closeErr != nil {
+			applyZlibUnitPool.Put(u)
+			if writeErr != nil {
+				return nil, writeErr
+			}
+			return nil, closeErr
 		}
-		if _, err := writer.Write(body); err != nil {
-			_ = writer.Close()
-			return nil, err
-		}
-		if err := writer.Close(); err != nil {
-			return nil, err
-		}
+		out := append([]byte(nil), u.buf.Bytes()...)
+		applyZlibUnitPool.Put(u)
+		return out, nil
 	case responseEncodingZstd:
 		writer, err := zstd.NewWriter(&buf)
 		if err != nil {
@@ -1097,17 +1186,36 @@ func normalizedContentEncoding(raw string) string {
 	return normalizedContentEncodingBytes([]byte(raw))
 }
 
+var (
+	streamGzipWriterPool = &sync.Pool{New: func() any {
+		w, _ := kgzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+		return w
+	}}
+	streamZlibWriterPool = &sync.Pool{New: func() any {
+		w, _ := kzlib.NewWriterLevel(io.Discard, zlib.BestSpeed)
+		return w
+	}}
+)
+
 func newStreamCompressWriter(w io.Writer, encoding responseEncoding) (io.Writer, func()) {
 	switch encoding {
 	case responseEncodingGzip:
-		gw, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
-		return gw, func() { _ = gw.Close() }
+		gw := streamGzipWriterPool.Get().(*kgzip.Writer)
+		gw.Reset(w)
+		return gw, func() {
+			_ = gw.Close()
+			streamGzipWriterPool.Put(gw)
+		}
 	case responseEncodingBrotli:
 		bw := brotli.NewWriterLevel(w, brotliCompressionLevel)
 		return bw, func() { _ = bw.Close() }
 	case responseEncodingDeflate:
-		dw, _ := zlib.NewWriterLevel(w, zlib.BestSpeed)
-		return dw, func() { _ = dw.Close() }
+		dw := streamZlibWriterPool.Get().(*kzlib.Writer)
+		dw.Reset(w)
+		return dw, func() {
+			_ = dw.Close()
+			streamZlibWriterPool.Put(dw)
+		}
 	case responseEncodingZstd:
 		zw, _ := zstd.NewWriter(w)
 		return zw, func() { _ = zw.Close() }

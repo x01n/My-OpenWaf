@@ -442,7 +442,9 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 					return errors.New("unknown OWASP rule id")
 				}
 				config := store.PolicyOWASPRuleConfig{PolicyID: policyID, RuleID: catalog.RuleID}
-				_ = tx.Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error
+				if err := tx.Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
 				applyOWASPPatch(&config, req.Patch)
 				if err := validateOWASPStoredConfig(&config, fallbackAction); err != nil {
 					return err
@@ -461,7 +463,9 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 					return errors.New("unknown OWASP rule id")
 				}
 				config := store.PolicyOWASPRuleConfig{PolicyID: policyID, RuleID: catalog.RuleID}
-				_ = tx.Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error
+				if err := tx.Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
 				applyOWASPPatch(&config, item.owaspRulePatch)
 				if err := validateOWASPStoredConfig(&config, fallbackAction); err != nil {
 					return err

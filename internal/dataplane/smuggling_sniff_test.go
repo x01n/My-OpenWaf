@@ -149,3 +149,79 @@ func TestRequestSmugglingSniffNoWriterNoPanic(t *testing.T) {
 	ctx.Request.Header.SetHost("example.test")
 	requestSmugglingSniff(ctx, Options{Writer: nil}, 1, "rid-none", "example.test", "1.2.3.4")
 }
+
+func TestRequestHasSmugglingRelevantHeadersMatchesReplay(t *testing.T) {
+	factories := []struct {
+		name        string
+		build       func(c *app.RequestContext)
+		wantHasCLTE bool
+	}{
+		{name: "empty", build: func(c *app.RequestContext) {}},
+		{name: "host_only", build: func(c *app.RequestContext) { c.Request.Header.SetHost("example.test") }},
+		{name: "valid_cl_header", build: func(c *app.RequestContext) { c.Request.Header.Set("Content-Length", "4") }},
+		{name: "invalid_cl_header", build: func(c *app.RequestContext) { c.Request.Header.Set("Content-Length", "abc") }},
+		{name: "connection_close_synthesized_line", build: func(c *app.RequestContext) { c.Request.Header.Set("Connection", "close") }, wantHasCLTE: true},
+		{name: "connection_keepalive", build: func(c *app.RequestContext) { c.Request.Header.Set("Connection", "keep-alive") }},
+		{name: "te_chunked_via_argbytes", build: func(c *app.RequestContext) {
+			c.Request.Header.SetArgBytes([]byte("Transfer-Encoding"), []byte("chunked"), false)
+		}},
+		{name: "te_gzip_via_argbytes", build: func(c *app.RequestContext) {
+			c.Request.Header.SetArgBytes([]byte("Transfer-Encoding"), []byte("gzip"), false)
+		}},
+		{name: "te_swallowed_by_set", build: func(c *app.RequestContext) { c.Request.Header.Set("Transfer-Encoding", "gzip") }},
+		{name: "te_swallowed_by_add", build: func(c *app.RequestContext) { c.Request.Header.Add("Transfer-Encoding", "gzip") }},
+		{name: "trailer_te", build: func(c *app.RequestContext) {
+			_ = c.Request.Header.Trailer().Set("Transfer-Encoding", "chunked")
+		}},
+		{name: "trailer_cl", build: func(c *app.RequestContext) {
+			_ = c.Request.Header.Trailer().Set("Content-Length", "4")
+		}},
+		{name: "trailer_other", build: func(c *app.RequestContext) {
+			_ = c.Request.Header.Trailer().Set("X-Note", "1")
+		}},
+		{name: "browser_like_no_cl_te", build: func(c *app.RequestContext) {
+			c.Request.Header.SetHost("example.test")
+			c.Request.Header.Set("User-Agent", "agent")
+			c.Request.Header.Set("Cookie", "a=1")
+			c.Request.Header.Set("Accept", "*/*")
+		}},
+	}
+	for _, tt := range factories {
+		t.Run(tt.name, func(t *testing.T) {
+			c := app.NewContext(0)
+			tt.build(c)
+			lines := string(requestHeaderLines(c))
+			want := replayedLinesContainCLTE(lines)
+			// 重演含 CL/TE 时预检必须为正；重演不含时，预检按结构校准值
+			// （默认须为负；Connection 合成行等保守正判定走 wantHasCLTE）。
+			if want && !tt.wantHasCLTE {
+				if got := requestHasSmugglingRelevantHeaders(c); !got {
+					t.Fatalf("preflight = false, want true (replayed lines contain CL/TE: %q)", lines)
+				}
+			} else if got := requestHasSmugglingRelevantHeaders(c); got != tt.wantHasCLTE {
+				t.Fatalf("preflight = %v, want %v (replayed lines: %q)", got, tt.wantHasCLTE, lines)
+			}
+			if !want {
+				if res := SmugglingSniff([]byte(lines)); res.Detected {
+					t.Fatalf("preflight negative but full sniff detected: %+v", res)
+				}
+			}
+		})
+	}
+}
+
+// replayedLinesContainCLTE 逐行判断重演结果是否含 Content-Length 或
+// Transfer-Encoding 行，是走私类型覆盖分析的独立实现。
+func replayedLinesContainCLTE(lines string) bool {
+	for _, line := range strings.Split(lines, "\n") {
+		colon := strings.IndexByte(line, ':')
+		if colon <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:colon])
+		if strings.EqualFold(key, "Content-Length") || strings.EqualFold(key, "Transfer-Encoding") {
+			return true
+		}
+	}
+	return false
+}

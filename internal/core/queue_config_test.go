@@ -18,8 +18,8 @@ func TestDefaultQueueConfigMatchesLegacyConstants(t *testing.T) {
 		{"EventBufferSize", def.EventBufferSize, 16384},
 		// dropCh / botScoreCh 原容量。
 		{"DropBufferSize", def.DropBufferSize, 8192},
-		// 原 unifiedWriterBatchSize。
-		{"BatchSize", def.BatchSize, 64},
+		// unifiedWriterBatchSize（64→256，SQLite 写径审计上调）。
+		{"BatchSize", def.BatchSize, 256},
 		// 原 NewUnifiedWriter 内的 flushInterval。
 		{"FlushInterval", def.FlushInterval, 3 * time.Second},
 		// 原 WriteQueue.maxBatchSize。
@@ -127,9 +127,9 @@ func TestLoadConfigFromEnvQueueOutOfRangeFallsBack(t *testing.T) {
 			func(q QueueConfig) any { return q.DropBufferSize }, 8192},
 
 		{"batch size zero", "MY_OPENWAF_QUEUE_BATCH_SIZE", "0",
-			func(q QueueConfig) any { return q.BatchSize }, 64},
+			func(q QueueConfig) any { return q.BatchSize }, 256},
 		{"batch size negative", "MY_OPENWAF_QUEUE_BATCH_SIZE", "-512",
-			func(q QueueConfig) any { return q.BatchSize }, 64},
+			func(q QueueConfig) any { return q.BatchSize }, 256},
 		{"batch size above hard limit", "MY_OPENWAF_QUEUE_BATCH_SIZE", "50000",
 			func(q QueueConfig) any { return q.BatchSize }, queueMaxBatchSize},
 

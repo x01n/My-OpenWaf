@@ -1,11 +1,7 @@
 package challenge
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -17,6 +13,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/emmansun/gmsm/sm3"
+
+	"My-OpenWaf/internal/waf/challenge/gm"
 )
 
 // NonceKey is the cookie name used for anti-replay nonces.
@@ -28,17 +28,13 @@ const ChallengePassCookieName = "__waf_passed"
 // DynamicProtectionSessionCookieName is the cookie name for dynamic protection bypass sessions.
 const DynamicProtectionSessionCookieName = "__owaf_dp_session"
 
-// challengeSecret is used to sign JS challenge tokens and pass cookies.
-// Generated at startup so it cannot be extracted from the binary.
-// This means cookies are invalidated on restart, which is acceptable for security.
-// 使用 atomic.Pointer 保存：SetChallengeSecret 可能在启动接线之外被调用，
-// 而签名/校验发生在请求处理协程中，普通全局变量会构成数据竞争。
 var challengeSecret atomic.Pointer[[]byte]
-
 var challengeNonceReader io.Reader = rand.Reader
 
 func init() {
-	challengeSecret.Store(generateChallengeSecret())
+	p := generateChallengeSecret()
+	challengeSecret.Store(p)
+	gm.LoadIdentity(*p)
 }
 
 func generateChallengeSecret() *[]byte {
@@ -56,10 +52,14 @@ func loadChallengeSecret() []byte {
 }
 
 // SetChallengeSecret allows overriding the secret (e.g. from JWT secret for consistency across restarts).
+// 同时装载 gm 包 SM2 签名身份：公钥随挑战页下发，由浏览器侧验签（b2）使用。
 func SetChallengeSecret(secret []byte) {
 	if len(secret) >= 16 {
 		clone := append([]byte(nil), secret...)
 		challengeSecret.Store(&clone)
+		if len(secret) == 32 {
+			gm.LoadIdentity(secret)
+		}
 	}
 }
 
@@ -76,10 +76,14 @@ type ChallengeTokenClaims struct {
 // challenge session. The fields are persisted with every captcha, shield, and
 // chain session and are checked before the session is consumed or advanced.
 type ChallengeSessionBinding struct {
-	SiteID uint   `json:"site_id"`
-	Host   string `json:"host"`
-	Bind   string `json:"bind"`
+	SiteID   uint   `json:"site_id"`
+	Host     string `json:"host"`
+	Bind     string `json:"bind"`
+	ClientIP string `json:"-"`
 }
+
+// clientIPValue 返回签发 IP，供 ShieldSession 使用独立 client_ip 字段持久化。
+func (b ChallengeSessionBinding) clientIPValue() string { return b.ClientIP }
 
 func (b ChallengeSessionBinding) normalized() ChallengeSessionBinding {
 	b.Host = strings.ToLower(strings.TrimSpace(b.Host))
@@ -92,10 +96,9 @@ func (b ChallengeSessionBinding) matches(other ChallengeSessionBinding) bool {
 	return b.SiteID == other.SiteID && b.Host == other.Host && b.Bind == other.Bind
 }
 
-// signChallengeToken 用挑战密钥对 (reqID, ts, 客户端身份) 做 HMAC 签名。
+// signChallengeToken 用挑战密钥对 (reqID, ts, 客户端身份) 做 SM3-HMAC 签名。
 func signChallengeToken(reqID, ts string, claims ChallengeTokenClaims) string {
-	mac := hmac.New(sha256.New, loadChallengeSecret())
-	fmt.Fprintf(mac, "v2|%s|%s|%s|%s|%s|%d",
+	payload := fmt.Sprintf("v2|%s|%s|%s|%s|%s|%d",
 		reqID,
 		ts,
 		claims.ClientIP,
@@ -103,7 +106,12 @@ func signChallengeToken(reqID, ts string, claims ChallengeTokenClaims) string {
 		strings.ToLower(claims.Host),
 		claims.SiteID,
 	)
-	return hex.EncodeToString(mac.Sum(nil))
+	secret := loadChallengeSecret()
+	sk := make([]byte, 0, len(secret)+len(payload))
+	sk = append(sk, secret...)
+	sk = append(sk, payload...)
+	sum := sm3.Sum(sk)
+	return hex.EncodeToString(sum[:])
 }
 
 // GenerateChallengeTokenPairWithClaims creates a timestamp and HMAC token bound to the
@@ -112,22 +120,6 @@ func signChallengeToken(reqID, ts string, claims ChallengeTokenClaims) string {
 func GenerateChallengeTokenPairWithClaims(reqID string, claims ChallengeTokenClaims) (ts, token string) {
 	ts = strconv.FormatInt(time.Now().Unix(), 10)
 	return ts, signChallengeToken(reqID, ts, claims)
-}
-
-// GenerateChallengeTokenPair 生成不绑定客户端身份的挑战 token。
-//
-// Deprecated: 数据面必须使用 GenerateChallengeTokenPairWithClaims。
-// 未绑定的 token 可被任意客户端复用，仅保留给不掌握客户端身份的调用方。
-func GenerateChallengeTokenPair(reqID string) (ts, token string) {
-	return GenerateChallengeTokenPairWithClaims(reqID, ChallengeTokenClaims{})
-}
-
-// VerifyChallengeToken checks if a JS challenge response token is valid.
-//
-// Deprecated: 数据面必须使用 VerifyChallengeTokenWithClaims，
-// 否则 token 不与提交它的客户端绑定。
-func VerifyChallengeToken(reqID, ts, token string, maxAge time.Duration) bool {
-	return VerifyChallengeTokenWithClaims(reqID, ts, token, ChallengeTokenClaims{}, maxAge)
 }
 
 // VerifyChallengeTokenWithClaims 校验 JS 挑战应答 token。
@@ -141,7 +133,7 @@ func VerifyChallengeToken(reqID, ts, token string, maxAge time.Duration) bool {
 // 因此攻击者无法用伪造 token 撑爆守卫的内存。
 func VerifyChallengeTokenWithClaims(reqID, ts, token string, claims ChallengeTokenClaims, maxAge time.Duration) bool {
 	expected := signChallengeToken(reqID, ts, claims)
-	if !hmac.Equal([]byte(token), []byte(expected)) {
+	if !gm.ConstTimeEqual([]byte(token), []byte(expected)) {
 		return false
 	}
 	tsInt, err := strconv.ParseInt(ts, 10, 64)
@@ -262,7 +254,7 @@ func SignChallengePassValueWithClaims(claims ChallengePassClaims, now time.Time,
 	if _, err := rand.Read(sessionNonce); err != nil {
 		return ""
 	}
-	payload := fmt.Sprintf("v3|%s|%s|%d|%x|shield|%s|%d|%s",
+	payload := fmt.Sprintf("v4|%s|%s|%d|%x|shield|%s|%d|%s",
 		strings.ToLower(claims.Host),
 		challengeIPString(claims.ClientIP),
 		expires,
@@ -321,7 +313,7 @@ func VerifyChallengePassValueWithClaims(value string, claims ChallengePassClaims
 		return false
 	}
 	parts := strings.Split(string(plaintext), "|")
-	if len(parts) >= 9 && parts[0] == "v3" {
+	if len(parts) >= 9 && parts[0] == "v4" {
 		expires, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil || now.Unix() > expires {
 			return false
@@ -479,48 +471,31 @@ func VerifyDynamicProtectionSessionValueWithClaims(value string, claims DynamicP
 }
 
 func challengeUserAgentHash(userAgent string) string {
-	sum := sha256.Sum256([]byte(userAgent))
+	sum := sm3.Sum([]byte(userAgent))
 	return hex.EncodeToString(sum[:16])
 }
 
+// challengeEncrypt 用 SM4-GCM(GM/T 0002-2012) + SM3 密钥派生装载服务端单向通行载荷。
+// 信封内嵌采集侧公钥签名，由 Go 服务端自签自验；SM4 密钥取会话密钥前 16 字节。
 func challengeEncrypt(plaintext []byte) ([]byte, error) {
-	key := challengeDeriveAESKey()
-	block, err := aes.NewCipher(key)
+	key := challengeDeriveSM4Key()
+	sealed, err := gm.Seal(key, gm.DomainToken, plaintext, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("seal challenge envelope: %w", err)
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(challengeNonceReader, nonce); err != nil {
-		return nil, fmt.Errorf("generate challenge nonce: %w", err)
-	}
-	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+	return sealed, nil
 }
 
+// challengeDecrypt 校验并打开服务端单向通行信封；任何不符（含篡改）都不可区分拒绝。
 func challengeDecrypt(ciphertext []byte) ([]byte, error) {
-	key := challengeDeriveAESKey()
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonceSize := gcm.NonceSize()
-	if len(ciphertext) < nonceSize+1 {
-		return nil, fmt.Errorf("too short")
-	}
-	nonce, ct := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	return gcm.Open(nil, nonce, ct, nil)
+	key := challengeDeriveSM4Key()
+	return gm.Open(key, ciphertext, nil, gm.DomainToken, true)
 }
 
-func challengeDeriveAESKey() []byte {
-	h := sha256.Sum256(append([]byte("owaf-challenge-aes256:"), loadChallengeSecret()...))
-	return h[:]
+// challengeDeriveSM4Key 用标签生成函数派生通行信封的 SM4 密钥（前 16 字节）。
+func challengeDeriveSM4Key() []byte {
+	d := gm.KDF(loadChallengeSecret(), []byte(gm.EnvelopeLabel(gm.CategoryPassToken, gm.GMEnvelopeVersion)))
+	return d[:16]
 }
 
 func challengeIPString(ip net.IP) string {

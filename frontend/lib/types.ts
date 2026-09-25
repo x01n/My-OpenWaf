@@ -9,6 +9,28 @@ export interface PaginationResponse<T> {
   page?: number
 }
 
+/**
+ * TLS 指纹聚合摘要行
+ */
+export interface TLSFingerprintSummary {
+  tls_ja3_hash?: string
+  tls_ja4?: string
+  tls_version?: string
+  tls_alpn?: string
+  tls_sni?: string
+  tls_cipher_suites?: string
+  tls_extensions?: string
+  tls_curves?: string
+  tls_point_formats?: string
+  count?: number
+  high_risk_count?: number
+  avg_bot_score?: number
+  last_seen?: string
+  last_user_agent?: string
+  last_client_ip?: string
+  last_header_order?: string
+}
+
 export const SiteXFFMode = {
   Strip: "strip_all_and_set_remote",
   TrustOuter: "trust_outer_waf_cidr_then_take_leftmost",
@@ -391,6 +413,26 @@ export interface RuleListResponse {
   total: number
 }
 
+/** 规则模板条目 */
+export interface RuleTemplate {
+  name: string
+  description: string
+  pattern: string
+  category: string
+  phase: string
+  action: string
+}
+
+/** 规则导出/导入载荷 */
+export interface RuleExportPayload {
+  rules: Rule[]
+}
+
+export interface RuleImportResponse {
+  imported: number
+  total: number
+}
+
 export interface SecurityEvent {
   id: number
   created_at: string
@@ -431,6 +473,32 @@ export interface SecurityEvent {
   geo_country?: string
   geo_city?: string
   status_code: number
+}
+
+/**
+ * 控制面实时推送通道的消息信封。
+ */
+export interface RealtimeMessage<T = unknown> {
+  schema: string
+  type: string
+  seq: number
+  sent_at: string
+  payload: T
+}
+
+/**
+ * 实时推送 ticket 响应
+ */
+export interface RealtimeTicketResponse {
+  ticket: string
+  expires_at: string
+}
+
+/**
+ * security_event_snapshot 推送的载荷形态。
+ */
+export interface RealtimeSecurityEventPayload {
+  security_events: { items: SecurityEvent[]; total: number; page: number }
 }
 
 export interface SecurityEventStats {
@@ -708,6 +776,10 @@ export interface ThreatIntelFeed {
   enabled: boolean
   /** 同步间隔（秒） */
   sync_interval: number
+  /** 可选认证头名（如 Authorization），与 auth_header_value 同时非空才生效 */
+  auth_header_name?: string | null
+  /** 可选认证头值（如 "Bearer xxx"），与 auth_header_name 同时非空才生效 */
+  auth_header_value?: string | null
   /** 作用域站点 ID；null/undefined 表示全局 */
   site_id?: number | null
   /** 上次同步时间 */
@@ -1066,6 +1138,20 @@ export interface ChainStepConfig {
 export interface ChainConfig {
   chain_enabled: boolean
   chain_steps: ChainStepConfig[]
+}
+
+/** 链式验证进行中会话的列表条目，契约来自后端 ChainSessionInfo。 */
+export interface ChainSessionInfo {
+  id: string
+  current_step: number
+  step_count: number
+  original_url: string
+  started_at: string
+}
+
+export interface ChainSessionsResponse {
+  items: ChainSessionInfo[]
+  total: number
 }
 
 export interface CaptchaConfig {
@@ -1480,11 +1566,11 @@ export interface LuaDryRunRun {
   iteration: number
 }
 
-/** JavaScript 边缘插件持久化阶段；列表接口仍可返回历史 response 记录。 */
+/** JavaScript 边缘插件持久化阶段；请求与响应阶段均可写。 */
 export type JSPluginStage = "request" | "response"
 
-/** 当前管理 API 允许写入的 JavaScript 插件阶段。 */
-export type JSPluginWritableStage = "request"
+/** 管理 API 允许写入的 JavaScript 插件阶段。 */
+export type JSPluginWritableStage = "request" | "response"
 
 /** JavaScript 插件执行失败时的处理模式。 */
 export type JSPluginFailureMode = "fail_open" | "fail_closed"
@@ -1576,8 +1662,8 @@ export interface JSPluginValidateResult {
 export interface JSPluginStatsItem {
   id: number
   name: string
-  /** stats 只返回当前 snapshot 中实际可执行的 request-stage 脚本。 */
-  stage: JSPluginWritableStage
+  /** stats 只返回当前 snapshot 中实际可执行脚本的阶段。 */
+  stage: JSPluginStage
   runs: number
   failures: number
   timeouts: number
@@ -1626,17 +1712,59 @@ export interface JSPluginSampleRequest {
   query_params?: Record<string, string>
 }
 
+/** JavaScript 插件 dry-run 样例响应。 */
+export interface JSPluginSampleResponse {
+  status?: number
+  path?: string
+  content_type?: string
+  body?: string
+  headers?: Record<string, string>
+  method?: string
+  raw_query?: string
+  client_ip?: string
+  request_headers?: Record<string, string>
+}
+
 /** JS 插件 dry-run 请求。 */
 export interface JSPluginDryRunRequest {
   source: string
   stage: JSPluginWritableStage
   timeout_ms?: number
   sample_request?: JSPluginSampleRequest
+  sample_response?: JSPluginSampleResponse
+}
+
+/** JS 插件响应阶段可返回的响应变更计划。 */
+export interface JSPluginResponseMutationPlan {
+  status?: number
+  body?: string
+  set_headers?: Record<string, string>
+  delete_headers?: string[]
 }
 
 /** JS 插件 dry-run 响应。 */
 export interface JSPluginDryRunResponse {
   error?: string
-  result: JSPluginMutationPlan | null
+  result: JSPluginMutationPlan | JSPluginResponseMutationPlan | null
   execution_time_ms?: number
+}
+
+/**
+ * upstream_snapshot 推送的载荷形态。
+ *
+ * items 条目复用 REST 上/下游状态接口的 UpstreamStatus
+ * 仅消费 url / healthy 等可选字段，未知字段不在此声明。
+ */
+export interface RealtimeUpstreamPayload {
+  upstreams: { items: UpstreamStatus[]; total: number }
+}
+
+/**
+ * access_log_snapshot 推送的载荷形态。
+ *
+ * items 与 REST 列表响应结构相同，此处仅消费 total / page 计数，
+ * 条目按 unknown[] 声明避免重复定义日志字段。
+ */
+export interface RealtimeAccessLogPayload {
+  access_logs: { items: unknown[]; total: number; page: number }
 }

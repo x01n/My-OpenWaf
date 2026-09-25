@@ -11,6 +11,7 @@ import {
   useCertificateMutation,
   useCertificateDelete,
   useRuntimeConfig,
+  useACMEStatus,
 } from "@/hooks/use-api"
 import { ApiError, certificateApi } from "@/lib/api"
 import { formatDate } from "@/lib/utils"
@@ -125,6 +126,7 @@ export default function CertificatesPage() {
   const certificateDiagnostics = (
     runtimeConfig?.config_diagnostics ?? []
   ).filter((diagnostic) => diagnostic.kind === "tls_certificate")
+  const { data: acmeStatusData } = useACMEStatus()
 
   const [dialogMode, setDialogMode] = useState<CertificateDialogMode>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -450,6 +452,10 @@ export default function CertificatesPage() {
         <Alert>
           <AlertTitle>{t("common.readOnlyHint")}</AlertTitle>
         </Alert>
+      )}
+
+      {typeof user?.role === "string" && user.role === "admin" && (
+        <ACMEStatusCards items={acmeStatusData?.items ?? []} />
       )}
 
       {certificateDiagnostics.length > 0 && (
@@ -936,6 +942,60 @@ export default function CertificatesPage() {
         onConfirm={confirmDelete}
         loading={deleteLoading}
       />
+    </div>
+  )
+}
+
+/** ACME 证书聚合状态行（GET /certificates/acme/status 的 certStatus 摘要）。 */
+interface ACMECertStatus {
+  id?: number
+  name?: string
+  domain?: string
+  expires_at?: string
+  auto_renew?: boolean
+  error?: string
+}
+
+/**
+ * ACME 聚合状态卡：列出全部 ACME 来源证书的续期状态摘要。
+ * 仅 admin 可见——接口挂在 adminGroup 且包含历史 renew error（已脱敏）。
+ * 无 ACME 证书时不渲染。
+ */
+function ACMEStatusCards({ items }: { items: ACMECertStatus[] }) {
+  const { t } = useTranslation()
+
+  if (items.length === 0) return null
+
+  const cardTitle = t("certificates.acmeStatus")
+  return (
+    <div
+      role="region"
+      aria-label={cardTitle}
+      className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
+    >
+      {items.map((item, index) => (
+        <div
+          key={`${item.id ?? "acme"}-${item.domain ?? item.name ?? index}`}
+          className="rounded-lg border bg-background p-4"
+        >
+          <div className="flex flex-col gap-1">
+            <span className="text-sm font-medium">{cardTitle}</span>
+            <span className="text-sm">{item.name ?? item.domain ?? "-"}</span>
+            <div className="text-xs text-muted-foreground">
+              <p>{t("certificates.expiresAt")}: {formatDate(item.expires_at)}</p>
+              <p>
+                {t("certificates.autoRenew")}:{" "}
+                {item.auto_renew ? t("common.enabled") : t("common.disabled")}
+              </p>
+            </div>
+            {item.error && (
+              <p className="mt-1 text-xs break-words text-destructive">
+                {item.error}
+              </p>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

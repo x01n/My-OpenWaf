@@ -33,14 +33,15 @@ func TestCaptchaSessionBindingRejectsOtherSiteWithoutConsumption(t *testing.T) {
 		Answer:                  "42",
 		CreatedAt:               time.Now(),
 		ExpiresAt:               time.Now().Add(time.Minute),
+		EnvKey:                  testSessionKey,
 	}
 
 	for _, binding := range mismatches {
-		if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, "42", binding); ok {
+		if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, mustEnvelope(t, "42", testSessionKey), binding); ok {
 			t.Fatalf("mismatched binding %#v must not redeem the CAPTCHA session", binding)
 		}
 	}
-	if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, "42", issuer); !ok {
+	if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, mustEnvelope(t, "42", testSessionKey), issuer); !ok {
 		t.Fatal("issuing site must retain the CAPTCHA session after cross-site rejection")
 	}
 }
@@ -241,18 +242,19 @@ func TestCaptchaRedisBindingRejectsMismatchAndConsumesOnce(t *testing.T) {
 		Answer:                  "42",
 		CreatedAt:               time.Now(),
 		ExpiresAt:               time.Now().Add(time.Minute),
+		EnvKey:                  testSessionKey,
 	}); err != nil {
 		t.Fatalf("storeSession(): %v", err)
 	}
 
 	wrongSite := ChallengeSessionBinding{SiteID: 2, Host: issuer.Host, Bind: issuer.Bind}
-	if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, "42", wrongSite); ok {
+	if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, mustEnvelope(t, "42", testSessionKey), wrongSite); ok {
 		t.Fatal("wrong binding must not redeem Redis-backed CAPTCHA session")
 	}
-	if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, "42", issuer); !ok {
+	if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, mustEnvelope(t, "42", testSessionKey), issuer); !ok {
 		t.Fatal("correct binding must redeem session retained after mismatch")
 	}
-	if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, "42", issuer); ok {
+	if ok, _ := manager.VerifyAdvancedSessionWithBinding(sessionID, mustEnvelope(t, "42", testSessionKey), issuer); ok {
 		t.Fatal("correct binding must redeem a Redis-backed session only once")
 	}
 }

@@ -13,6 +13,7 @@ const (
 	maxPooledHeaderMapLen   = 128
 	maxPooledHeaderKeysCap  = 64
 	maxPooledObserveHitsCap = 32
+	pooledHeaderKeysBaseCap = 24
 )
 
 // ctxPool reuses RequestCtx allocations to reduce GC pressure on the hot path.
@@ -20,7 +21,7 @@ var ctxPool = sync.Pool{
 	New: func() any {
 		return &RequestCtx{
 			Headers:        make(map[string]string, 32),
-			HeaderKeys:     make([]string, 0, 16),
+			HeaderKeys:     make([]string, 0, pooledHeaderKeysBaseCap),
 			observeHitsBuf: make([]action.Result, 0, 4),
 		}
 	},
@@ -58,6 +59,10 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.QueryValues = nil
 	ctx.BodyTargets = nil
 	ctx.BodyTargetsDone = false
+	ctx.matcherJSONBody = nil
+	ctx.matcherJSONBodyDone = false
+	ctx.matcherQueryValues = nil
+	ctx.matcherQueryValuesOK = false
 	ctx.ClearMatcherHeadersCache()
 	// 非 alias 的 matcherHeaders 若曾装入大量键，直接丢弃，避免 map bucket 残留。
 	if ctx.matcherHeaders != nil && !ctx.matcherHeadersAliased && len(ctx.matcherHeaders) > maxPooledHeaderMapLen {
@@ -98,7 +103,7 @@ func ReleaseCtx(ctx *RequestCtx) {
 
 	// HeaderKeys：超限缩回默认 cap，否则只截断长度。
 	if ctx.HeaderKeys != nil && cap(ctx.HeaderKeys) > maxPooledHeaderKeysCap {
-		ctx.HeaderKeys = make([]string, 0, 16)
+		ctx.HeaderKeys = make([]string, 0, pooledHeaderKeysBaseCap)
 	} else {
 		ctx.ClearHeaderKeys()
 	}

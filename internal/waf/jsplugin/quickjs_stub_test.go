@@ -5,6 +5,7 @@ package jsplugin
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"My-OpenWaf/internal/store"
@@ -40,13 +41,25 @@ func TestPublicTypesAndSiteMatching(t *testing.T) {
 	}
 }
 
-func TestStubRejectsResponseStageBeforeRuntimeError(t *testing.T) {
+func TestStubRejectsCrossStageBeforeRuntimeError(t *testing.T) {
+	engine := &Engine{}
+	responseScript := &Script{stage: store.JSStageResponse}
+	if _, err := engine.Evaluate(context.Background(), responseScript, RequestSnapshot{}); err == nil || !strings.Contains(err.Error(), "cannot use") {
+		t.Fatalf("Evaluate error = %v, want cross-stage error", err)
+	}
+	requestScript := &Script{stage: store.JSStageRequest}
+	if _, err := engine.EvaluateResponse(context.Background(), requestScript, ResponseSnapshot{}); err == nil || !strings.Contains(err.Error(), "cannot use") {
+		t.Fatalf("EvaluateResponse error = %v, want cross-stage error", err)
+	}
+}
+
+func TestStubReportsUnavailableForResponseExecution(t *testing.T) {
 	engine := &Engine{}
 	script := &Script{stage: store.JSStageResponse}
-	if _, err := engine.Evaluate(context.Background(), script, RequestSnapshot{}); !errors.Is(err, ErrResponseStageUnavailable) {
-		t.Fatalf("Evaluate error = %v, want %v", err, ErrResponseStageUnavailable)
+	if _, err := engine.ExecuteResponse(context.Background(), script, ResponseSnapshot{SiteID: 1}); !errors.Is(err, ErrCGODisabled) {
+		t.Fatalf("ExecuteResponse error = %v, want ErrCGODisabled", err)
 	}
-	if _, err := engine.Validate(context.Background(), script, RequestSnapshot{}); !errors.Is(err, ErrResponseStageUnavailable) {
-		t.Fatalf("Validate error = %v, want %v", err, ErrResponseStageUnavailable)
+	if _, err := engine.ValidateResponse(context.Background(), script, ResponseSnapshot{SiteID: 1}); !errors.Is(err, ErrCGODisabled) {
+		t.Fatalf("ValidateResponse error = %v, want ErrCGODisabled", err)
 	}
 }

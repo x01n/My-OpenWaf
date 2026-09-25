@@ -1281,3 +1281,127 @@ func TestTLSFingerprintFromTLSConnWrappedBaseConn(t *testing.T) {
 		t.Fatalf("unexpected fingerprint: %+v", actual)
 	}
 }
+
+// alpnRawDataForTest 按 ALPN 扩展 wire 格式（2 字节大端列表长度 + 逐项 1 字节长度前缀）组装数据。
+func alpnRawDataForTest(protocols ...string) []byte {
+	total := 0
+	for _, p := range protocols {
+		total += 1 + len(p)
+	}
+	data := make([]byte, 0, 2+total)
+	data = append(data, byte(total>>8), byte(total))
+	for _, p := range protocols {
+		data = append(data, byte(len(p)))
+		data = append(data, p...)
+	}
+	return data
+}
+
+func TestParseRawALPNGeneralWireFormat(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		initial []string
+		want    []string
+	}{
+		{
+			name: "h2_only",
+			data: alpnRawDataForTest("h2"),
+			want: []string{"h2"},
+		},
+		{
+			name: "http11_only",
+			data: alpnRawDataForTest("http/1.1"),
+			want: []string{"http/1.1"},
+		},
+		{
+			name: "h2_then_http11",
+			data: alpnRawDataForTest("h2", "http/1.1"),
+			want: []string{"h2", "http/1.1"},
+		},
+		{
+			name: "five_protocols",
+			data: alpnRawDataForTest("h2", "http/1.1", "acme-tls/1", "grpc-exp", "customproto"),
+			want: []string{"h2", "http/1.1", "acme-tls/1", "grpc-exp", "customproto"},
+		},
+		{
+			name: "list_containing_h3",
+			data: alpnRawDataForTest("h3", "grpc-exp", "doq", "acme-tls/1"),
+			want: []string{"h3", "grpc-exp", "doq", "acme-tls/1"},
+		},
+		{
+			name: "empty_data",
+			data: []byte{},
+			want: nil,
+		},
+		{
+			name: "list_len_header_only",
+			data: []byte{0x00, 0x03},
+			want: nil,
+		},
+		{
+			name: "zero_list_len_with_extra_byte",
+			data: []byte{0x00, 0x00, 0xff},
+			want: nil,
+		},
+		{
+			name: "data_shorter_than_list_len",
+			data: []byte{0x00, 0x0c, 0x02, 'h', '2'},
+			want: nil,
+		},
+		{
+			name: "name_len_overruns_list_end",
+			data: []byte{0x00, 0x03, 0x09, 'h', '2'},
+			want: nil,
+		},
+		{
+			name: "zero_name_len_after_valid_item",
+			data: []byte{0x00, 0x05, 0x02, 'h', '2', 0x00},
+			want: nil,
+		},
+		{
+			name:    "prefilled_alpn_kept_on_bad_item",
+			data:    []byte{0x00, 0x05, 0x02, 'h', '2', 0x00},
+			initial: []string{"h2"},
+			want:    []string{"h2"},
+		},
+		{
+			name: "trailing_bytes_outside_list_ignored",
+			data: []byte{0x00, 0x03, 0x02, 'h', '2', 0xff, 0xff},
+			want: []string{"h2"},
+		},
+	}
+
+	for i := range tests {
+		tt := &tests[i]
+		t.Run(tt.name, func(t *testing.T) {
+			raw := rawClientHello{alpn: tt.initial}
+			parseRawALPN(tt.data, &raw)
+			if !reflect.DeepEqual(raw.alpn, tt.want) {
+				t.Fatalf("ALPN = %+v, want %+v", raw.alpn, tt.want)
+			}
+		})
+	}
+}
+
+func TestALPNProtocolStringCanonicalNames(t *testing.T) {
+	tests := []struct {
+		data []byte
+		want string
+	}{
+		{data: []byte{'h', '2'}, want: "h2"},
+		{data: []byte("http/1.1"), want: "http/1.1"},
+		{data: []byte("h3"), want: "h3"},
+		{data: []byte("doq"), want: "doq"},
+		{data: []byte("grpc-exp"), want: "grpc-exp"},
+		{data: []byte("acme-tls/1"), want: "acme-tls/1"},
+		{data: []byte("customproto"), want: "customproto"},
+	}
+
+	for i := range tests {
+		tt := &tests[i]
+		if got := alpnProtocolString(tt.data); got != tt.want {
+			t.Fatalf("alpnProtocolString(%q) = %q, want %q", tt.data, got, tt.want)
+		}
+	}
+}

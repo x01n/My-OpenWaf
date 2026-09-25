@@ -14,8 +14,9 @@ import (
 
 // loadJSPlugins 读取启用的 JavaScript 脚本并编译。
 //
-// fail-open 脚本的编译错误只记录诊断；request-stage fail-closed 脚本编译失败时载入固定失败守卫，
+// fail-open 脚本的编译错误只记录诊断；fail-closed 脚本编译失败时载入固定失败守卫，
 // 使其他脚本仍可随 snapshot 原子发布，同时确保该脚本命中的请求不会静默放行。
+// 两个阶段使用同一守卫源码：执行期仍按阶段过滤脚本，错误的阶段永远不会被宿主调用。
 const jsFailClosedBuildGuardSource = `export default {
   fetch() {
     throw new Error("jsplugin: fail-closed build guard")
@@ -62,12 +63,8 @@ func loadJSPlugins(db *gorm.DB) ([]*jsplugin.Script, map[string]string, error) {
 	}
 	for i := range rows {
 		row := &rows[i]
-		if row.Stage == store.JSStageResponse {
-			addError(row.ID, "response stage is unavailable because response execution is not implemented")
-			continue
-		}
-		if row.Stage != store.JSStageRequest {
-			addError(row.ID, fmt.Sprintf("unsupported stage %s (want %s)", row.Stage, store.JSStageRequest))
+		if row.Stage != store.JSStageRequest && row.Stage != store.JSStageResponse {
+			addError(row.ID, fmt.Sprintf("unsupported stage %s (want %s or %s)", row.Stage, store.JSStageRequest, store.JSStageResponse))
 			continue
 		}
 		if row.FailureMode != store.JSFailureModeOpen && row.FailureMode != store.JSFailureModeClosed {
@@ -87,10 +84,10 @@ func loadJSPlugins(db *gorm.DB) ([]*jsplugin.Script, map[string]string, error) {
 		}
 		if row.TimeoutMS < 0 || row.TimeoutMS > jsMaxTimeoutMS {
 			addError(row.ID, fmt.Sprintf("timeout_ms must be between 0 and %d", jsMaxTimeoutMS))
-			if row.Stage == store.JSStageRequest && row.FailureMode == store.JSFailureModeClosed {
+			if row.FailureMode == store.JSFailureModeClosed {
 				guard, guardErr := jsplugin.CompileWithMetadata(row.Name, jsFailClosedBuildGuardSource, options, metadata)
 				if guardErr != nil {
-					return nil, errs, fmt.Errorf("compile fail-closed request JavaScript plugin guard %d (%s): %w", row.ID, row.Name, guardErr)
+					return nil, errs, fmt.Errorf("compile fail-closed JavaScript plugin guard %d (%s): %w", row.ID, row.Name, guardErr)
 				}
 				scripts = append(scripts, guard)
 			}
@@ -105,18 +102,28 @@ func loadJSPlugins(db *gorm.DB) ([]*jsplugin.Script, map[string]string, error) {
 			if row.SiteID != nil {
 				siteID = *row.SiteID
 			}
-			var plan jsplugin.MutationPlan
-			plan, err = validationEngine.Validate(context.Background(), script, jsplugin.CanonicalValidationRequest(siteID))
-			if err == nil {
-				err = jsplugin.ValidateMutationPlan(plan)
+			var requirementErr error
+			if row.Stage == store.JSStageResponse {
+				var respPlan jsplugin.ResponseMutationPlan
+				respPlan, requirementErr = validationEngine.ValidateResponse(context.Background(), script, jsplugin.CanonicalValidationResponse(siteID))
+				if requirementErr == nil {
+					requirementErr = jsplugin.ValidateResponseMutationPlan(respPlan)
+				}
+			} else {
+				var plan jsplugin.MutationPlan
+				plan, requirementErr = validationEngine.Validate(context.Background(), script, jsplugin.CanonicalValidationRequest(siteID))
+				if requirementErr == nil {
+					requirementErr = jsplugin.ValidateMutationPlan(plan)
+				}
 			}
+			err = requirementErr
 		}
 		if err != nil {
 			addError(row.ID, err.Error())
-			if row.Stage == store.JSStageRequest && row.FailureMode == store.JSFailureModeClosed {
+			if row.FailureMode == store.JSFailureModeClosed {
 				guard, guardErr := jsplugin.CompileWithMetadata(row.Name, jsFailClosedBuildGuardSource, options, metadata)
 				if guardErr != nil {
-					return nil, errs, fmt.Errorf("compile fail-closed request JavaScript plugin guard %d (%s): %w", row.ID, row.Name, guardErr)
+					return nil, errs, fmt.Errorf("compile fail-closed JavaScript plugin guard %d (%s): %w", row.ID, row.Name, guardErr)
 				}
 				scripts = append(scripts, guard)
 			}

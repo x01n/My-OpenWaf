@@ -1,10 +1,6 @@
 package challenge
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -137,18 +133,16 @@ func TestShieldSessionTimeoutIsFrozen(t *testing.T) {
 		t.Fatalf("expired shield session = (%t, %q), want (false, %q)", ok, redirect, "/protected")
 	}
 
-	var legacy ShieldSession
-	if err := json.Unmarshal([]byte(`{"id":"legacy","created_at":"2026-08-05T00:00:00Z"}`), &legacy); err != nil {
-		t.Fatalf("decode legacy Redis session: %v", err)
+	// b0 强制化（B4）：缺 TimeoutSecs 的旧会话按立即过期处置。
+	var stale ShieldSession
+	if err := json.Unmarshal([]byte(`{"id":"stale","created_at":"2026-08-05T00:00:00Z"}`), &stale); err != nil {
+		t.Fatalf("decode stale Redis session: %v", err)
 	}
-	if got := legacy.sessionTTL(); got != legacyShieldSessionTTL {
-		t.Fatalf("legacy session TTL = %s, want %s", got, legacyShieldSessionTTL)
+	if got := stale.sessionTTL(); got != 0 {
+		t.Fatalf("stale session TTL = %s, want 0 (immediate expiry)", got)
 	}
-	if legacy.expiredAt(time.Date(2026, time.August, 5, 0, 4, 0, 0, time.UTC)) {
-		t.Fatal("legacy session expired before its five-minute fallback TTL")
-	}
-	if !legacy.expiredAt(time.Date(2026, time.August, 5, 0, 6, 0, 0, time.UTC)) {
-		t.Fatal("legacy session must expire after its five-minute fallback TTL")
+	if !stale.expiredAt(time.Date(2026, time.August, 5, 0, 0, 1, 0, time.UTC)) {
+		t.Fatal("stale session without timeout field must be treated as expired")
 	}
 
 	legacySession := &ShieldSession{
@@ -341,20 +335,7 @@ func marshalShieldEnvFingerprint(t *testing.T, fp *EnvFingerprint) string {
 
 func encryptShieldEnvFingerprint(t *testing.T, plaintext string, key []byte, aad string) string {
 	t.Helper()
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatalf("new AES cipher: %v", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatalf("new GCM: %v", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		t.Fatalf("generate nonce: %v", err)
-	}
-	ciphertext := gcm.Seal(nil, nonce, []byte(plaintext), []byte(aad))
-	return envCiphertextPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
+	return encryptGMEnvFingerprint(t, []byte(plaintext), key, aad)
 }
 
 /**
@@ -391,18 +372,20 @@ func TestCaptchaSessionRedeemedOnlyOnceUnderConcurrency(t *testing.T) {
 		Answer:    "42",
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(time.Minute),
+		EnvKey:    testSessionKey,
 	}
 
 	const workers = 32
 	var passed atomic.Int64
 	var wg sync.WaitGroup
 	start := make(chan struct{})
+	envelope := mustEnvelope(t, "42", testSessionKey)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			if cm.Verify(sessionID, "42") {
+			if cm.Verify(sessionID, envelope) {
 				passed.Add(1)
 			}
 		}()
@@ -433,6 +416,7 @@ func TestCaptchaAdvancedSessionRedeemedOnlyOnce(t *testing.T) {
 		Answer:    `{"x":120,"y":60,"dx":30,"dy":60}`,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(time.Minute),
+		EnvKey:    testSessionKey,
 	}
 
 	const workers = 16
@@ -444,7 +428,7 @@ func TestCaptchaAdvancedSessionRedeemedOnlyOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if ok, _ := cm.VerifyAdvancedSession(sessionID, `{"x":90}`); ok {
+			if ok, _ := cm.VerifyAdvancedSession(sessionID, mustEnvelope(t, `{"x":90}`, testSessionKey)); ok {
 				passed.Add(1)
 			}
 		}()
@@ -489,7 +473,7 @@ func TestChainProcessStepConcurrentSameSession(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if ok, _, _ := mgr.ProcessStep(sessionID, map[string]string{"env_fp": envFP}); ok {
+			if out := mgr.ProcessStepDetailedWithBinding(sessionID, map[string]string{"env_fp": envFP}, ChallengeSessionBinding{}); out.Passed {
 				completed.Add(1)
 			}
 		}()
@@ -526,8 +510,8 @@ func TestChainStateExpires(t *testing.T) {
 	state.CreatedAt = time.Now().Add(-2 * chainStateTTL)
 	mgr.mu.Unlock()
 
-	if ok, _, html := mgr.ProcessStep(sessionID, map[string]string{"env_fp": "{}"}); ok || html != "" {
-		t.Fatalf("expired chain state must not be processable: ok=%v html=%q", ok, html)
+	if out := mgr.ProcessStepDetailedWithBinding(sessionID, map[string]string{"env_fp": "{}"}, ChallengeSessionBinding{}); out.Passed || out.NextHTML != "" {
+		t.Fatalf("expired chain state must not be processable: %+v", out)
 	}
 	if got := mgr.ListSessions(); len(got) != 0 {
 		t.Fatalf("expired chain state must not be listed, got %+v", got)
@@ -710,6 +694,11 @@ func TestMathCaptchaExpressionMatchesAnswer(t *testing.T) {
 			got = a + b
 		case "-":
 			got = a - b
+		case "÷":
+			if b == 0 || a%b != 0 {
+				t.Fatalf("division problem must be exact, got %q", expr)
+			}
+			got = a / b
 		default:
 			t.Fatalf("unexpected operator %q in %q", op, expr)
 		}

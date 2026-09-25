@@ -19,8 +19,11 @@ input[type=text]{width:100%;padding:14px 16px;border:2px solid #e2e8f0;border-ra
 input[type=text]:focus{border-color:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166,.12);background:#fff}
 .btn{width:100%;padding:14px;background:linear-gradient(135deg,#14b8a6,#0d9488);color:#fff;border:none;border-radius:10px;font-size:1rem;font-weight:500;cursor:pointer;margin-top:16px;transition:opacity .2s,transform .1s}
 .btn:hover{opacity:.92}.btn:active{transform:scale(.98)}
+.btn:disabled{background:#cbd5e1;cursor:not-allowed;opacity:.7}
 .rid{color:#94a3b8;font-size:.7rem;margin-top:20px}
 .footer{margin-top:20px;padding-top:14px;border-top:1px solid #f1f5f9;font-size:.7rem;color:#94a3b8}.brand-logo{display:block;max-width:64px;max-height:64px;object-fit:contain;margin:0 auto 12px}.brand-name{color:#64748b;font-size:.75rem;margin-bottom:8px}
+#captcha-root{min-height:80px;display:flex;align-items:center;justify-content:center}
+#captcha-error{display:none;color:#ef4444;font-size:.85rem;padding:12px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2}
 {{.CustomCSS}}
 </style>
 </head>
@@ -32,91 +35,192 @@ input[type=text]:focus{border-color:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166
 <p class="sub">{{.Subtitle}}</p>
 <p class="sub">{{.SubtitleZh}}</p>
 <div class="divider"></div>
-<div class="captcha-box">
-{{if .IsClick}}
-<div class="captcha-stack"><div class="img-wrap"><img id="cap-img" src="{{.MasterImg}}" alt="CAPTCHA"></div><img class="thumb" src="{{.ThumbImg}}" alt="target"><button type="button" class="mini" id="clear-clicks">Clear clicks / 清空点击</button></div>
-{{else if .IsSlide}}
-<div class="captcha-stack"><img src="{{.MasterImg}}" alt="CAPTCHA"><img id="slide-thumb" class="thumb slide-thumb" src="{{.ThumbImg}}" alt="slider"><input type="range" min="0" max="{{.SlideWidth}}" value="0" id="slide-range"></div>
-{{else if .IsRotate}}
-<div class="captcha-stack rotate-captcha"><img src="{{.MasterImg}}" alt="CAPTCHA"><img id="rotate-thumb" class="thumb" src="{{.ThumbImg}}" alt="target"><input type="range" min="0" max="360" value="0" id="rotate-range"></div>
-{{else}}
-<img src="{{.MasterImg}}" alt="CAPTCHA">
-{{end}}
-</div>
-<form method="POST" action="/__owaf/captcha/verify">
+<div class="captcha-box" id="captcha-box"><div id="captcha-root">Loading... / 正在载入验证码</div><div id="captcha-error"></div></div>
+{{if .KeyHex}}<input type="hidden" id="cap-key" value="{{.KeyHex}}">{{end}}
+{{if .CaptchaData}}<input type="hidden" id="cap-data" value="{{.CaptchaData}}">{{end}}
+<form method="POST" action="/__owaf/captcha/verify" id="cap-form">
 <input type="hidden" name="__waf_captcha_session" value="{{.SessionID}}">
-<input type="hidden" id="cap-type" value="{{.Type}}">
 <input type="hidden" id="cap-env" name="__waf_env_fp" value="">
-<input type="text" id="cap-answer" name="__waf_captcha_answer" placeholder="{{.Prompt}}" aria-label="{{.InputMode}}" autocomplete="off" autofocus>
-<button type="submit" class="btn">{{.SubmitText}}</button>
+<input type="hidden" name="__waf_captcha_answer" id="cap-answer">
+<button type="submit" class="btn" id="cap-submit">{{.SubmitText}}</button>
 </form>
 <p class="rid">Request ID: {{.RequestID}}</p>
 <p id="cap-env-status" style="display:none;color:#ef4444;font-size:.8rem;margin-top:10px"></p>
 <script>
 (function(){
-var type=document.getElementById('cap-type').value;
-var answer=document.getElementById('cap-answer');
-var img=document.getElementById('cap-img');
-if(type==='click'&&img){
-  var points=[];
-  answer.type='hidden';
-  img.addEventListener('click',function(e){
-    var r=img.getBoundingClientRect();
-    var x=Math.round(((e.clientX-r.left)/r.width)*(img.naturalWidth||r.width));
-    var y=Math.round(((e.clientY-r.top)/r.height)*(img.naturalHeight||r.height));
-    points.push({x:x,y:y});
-    answer.value=JSON.stringify(points);
-    var d=document.createElement('span');
-    d.className='dot';d.textContent=String(points.length);
-    d.style.left=((x/(img.naturalWidth||r.width))*100)+'%';
-    d.style.top=((y/(img.naturalHeight||r.height))*100)+'%';
-    img.parentNode.appendChild(d);
-  });
-  var clear=document.getElementById('clear-clicks');
-  if(clear){clear.addEventListener('click',function(){points=[];answer.value='';document.querySelectorAll('.dot').forEach(function(n){n.remove();});});}
-}
-var slide=document.getElementById('slide-range');
-var thumb=document.getElementById('slide-thumb');
-if(type==='slide'&&slide){
-  answer.type='hidden';
-  slide.addEventListener('input',function(){answer.value=JSON.stringify({x:Number(slide.value)});if(thumb){thumb.style.transform='translateX('+slide.value+'px)';}});
-}
-var rotate=document.getElementById('rotate-range');
-var rotateThumb=document.getElementById('rotate-thumb');
-if(type==='rotate'&&rotate&&rotateThumb){
-  answer.type='hidden';
-  rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});rotateThumb.style.transform='rotate('+rotate.value+'deg)';});
-}
-var capEnv=document.getElementById('cap-env');
-var capForm=answer&&answer.form;
-var capStatus=document.getElementById('cap-env-status');
+var keyEl=document.getElementById('cap-key');
+var dataEl=document.getElementById('cap-data');
+var KEYHEX=keyEl?keyEl.value:"";
+var DATA=dataEl?dataEl.value:"";
+var capForm=document.getElementById('cap-form');
+var capSubmit=document.getElementById('cap-submit');
+var capAnswer=document.getElementById('cap-answer');
+var rootEl=document.getElementById('captcha-root');
+var errEl=document.getElementById('captcha-error');
+var statusEl=document.getElementById('cap-env-status');
 var submitting=false;
-function showEnvError(message){
- if(capStatus){capStatus.textContent=message||'Environment verification failed. / 环境验证失败。';capStatus.style.display='block';}
+function showFatal(msg){
+ capSubmit.disabled=true;
+ rootEl.innerHTML='';
+ errEl.style.display='block';
+ errEl.textContent=msg;
 }
-window.__owaf_env_error_callback=function(message){showEnvError(message);};
-if(capEnv&&capForm){
- capForm.addEventListener('submit',function(event){
-  if(submitting||window.__owaf_env_required!==true)return;
-  event.preventDefault();
-  if(!window.__owaf_env_ready||typeof window.__owaf_env_ready.then!=='function'){
-   showEnvError('Environment WASM is unavailable. / 环境 WASM 不可用。');
+function showStatus(msg){
+ statusEl.style.display='block';
+ statusEl.textContent=msg;
+}
+window.__owaf_env_error_callback=function(message){showStatus(message||'Environment verification failed. / 环境验证失败。');};
+if(!KEYHEX||!DATA){
+ showFatal('验证码初始化失败，请刷新重试。');
+} else {
+ load();
+}
+function loadWasm(){
+ if(window.__owaf_wasm_ready)return window.__owaf_wasm_ready;
+ window.__owaf_wasm_ready=new Promise(function(resolve,reject){
+  if(typeof WebAssembly==="undefined"){reject(new Error('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证'));return}
+  function init(){
+   wasm_bindgen({module_or_path:"/__owaf/pow.wasm"}).then(resolve).catch(reject);
+  }
+  if(typeof wasm_bindgen!=="undefined"){init();return}
+  var cspNonce=(document.currentScript&&document.currentScript.nonce)||"";
+  var s=document.createElement('script');
+  s.src="/__owaf/pow_glue.js";
+  if(cspNonce)s.nonce=cspNonce;
+  s.async=true;
+  s.onload=init;
+  s.onerror=function(){reject(new Error('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证'))};
+  (document.head||document.documentElement).appendChild(s);
+ });
+ return window.__owaf_wasm_ready;
+}
+function load(){
+ loadWasm().then(function(){
+  if(typeof wasm_bindgen.gm_decrypt_challenge_data!=="function"){
+   showFatal('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证');
    return;
   }
-  submitting=true;
-  var submitButton=capForm.querySelector('button[type=submit]');
-  if(submitButton)submitButton.disabled=true;
-  window.__owaf_env_ready.then(function(envelope){
-   if(!envelope)throw new Error('Environment verification failed');
-   capEnv.value=envelope;
-   HTMLFormElement.prototype.submit.call(capForm);
-  }).catch(function(error){
-   submitting=false;
-   if(submitButton)submitButton.disabled=false;
-   showEnvError((error&&error.message)||'Environment verification failed. / 环境验证失败。');
-  });
- });
+  var plain=wasm_bindgen.gm_decrypt_challenge_data(DATA,KEYHEX);
+  if(!plain){showFatal('Challenge decryption failed. / 验证码解密失败，请刷新重试。');return;}
+  var parsed=null;
+  try{parsed=JSON.parse(plain);}catch(e){parsed=null;}
+  if(!parsed||!parsed.type){showFatal('Challenge format invalid. / 验证码数据格式无效，请刷新重试。');return;}
+  build(parsed);
+ }).catch(function(err){showFatal(err.message||'验证码载入失败，请刷新重试。');});
 }
+function build(p){
+ rootEl.innerHTML='';
+ function stateInput(id){
+  var i=document.createElement('input');
+  i.type='hidden';
+  i.id=id;
+  capAnswer.parentNode.insertBefore(i,capAnswer);
+  return i;
+ }
+ if(p.type==='click'&&p.master_img){
+  var stack=document.createElement('div');stack.className='captcha-stack';
+  var wrap=document.createElement('div');wrap.className='img-wrap';
+  var img=document.createElement('img');img.id='cap-img';img.src=p.master_img;img.alt='CAPTCHA';
+  wrap.appendChild(img);stack.appendChild(wrap);
+  if(p.thumb_img){var th=document.createElement('img');th.className='thumb';th.src=p.thumb_img;th.alt='target';stack.appendChild(th);}
+  var clear=document.createElement('button');clear.type='button';clear.className='mini';clear.textContent='Clear clicks / 清空点击';stack.appendChild(clear);
+  rootEl.appendChild(stack);
+  var points=[];
+  var clickState=stateInput('cap-click-state');
+  img.addEventListener('click',function(e){
+   var r=img.getBoundingClientRect();
+   var x=Math.round(((e.clientX-r.left)/r.width)*(img.naturalWidth||r.width));
+   var y=Math.round(((e.clientY-r.top)/r.height)*(img.naturalHeight||r.height));
+   points.push({x:x,y:y});
+   clickState.value=JSON.stringify(points);
+   var d=document.createElement('span');
+   d.className='dot';d.textContent=String(points.length);
+   d.style.left=((x/(img.naturalWidth||r.width))*100)+'%';
+   d.style.top=((y/(img.naturalHeight||r.height))*100)+'%';
+   wrap.appendChild(d);
+  });
+  clear.addEventListener('click',function(){
+   points=[];clickState.value='';
+   document.querySelectorAll('.dot').forEach(function(n){n.remove();});
+  });
+ }else if(p.type==='slide'&&p.master_img){
+  var sst=document.createElement('div');sst.className='captcha-stack';
+  var mi=document.createElement('img');mi.id='cap-img';mi.src=p.master_img;mi.alt='CAPTCHA';
+  sst.appendChild(mi);
+  var thumb=null;
+  if(p.thumb_img){thumb=document.createElement('img');thumb.id='slide-thumb';thumb.className='thumb slide-thumb';thumb.src=p.thumb_img;thumb.alt='slider';sst.appendChild(thumb);}
+  var rangeW=Math.max(200,(p.width||300));
+  var rng=document.createElement('input');rng.type='range';rng.min='0';rng.max=String(rangeW);rng.value='0';rng.id='slide-range';
+  sst.appendChild(rng);rootEl.appendChild(sst);
+  var slideState=stateInput('cap-slide-state');
+  rng.addEventListener('input',function(){
+   slideState.value=JSON.stringify({x:Number(rng.value)});
+   if(thumb)thumb.style.transform='translateX('+rng.value+'px)';
+  });
+ }else if(p.type==='rotate'&&p.master_img){
+  var rst=document.createElement('div');rst.className='captcha-stack rotate-captcha';
+  var rmi=document.createElement('img');rmi.id='cap-img';rmi.src=p.master_img;rmi.alt='CAPTCHA';
+  rst.appendChild(rmi);
+  var rth=null;
+  if(p.thumb_img){rth=document.createElement('img');rth.id='rotate-thumb';rth.className='thumb';rth.src=p.thumb_img;rth.alt='target';rst.appendChild(rth);}
+  var rrng=document.createElement('input');rrng.type='range';rrng.min='0';rrng.max='360';rrng.value='0';rrng.id='rotate-range';
+  rst.appendChild(rrng);rootEl.appendChild(rst);
+  var rotateState=stateInput('cap-rotate-state');
+  rrng.addEventListener('input',function(){
+   rotateState.value=JSON.stringify({angle:Number(rrng.value)});
+   if(rth)rth.style.transform='rotate('+rrng.value+'deg)';
+  });
+ }else{
+  if(p.master_img){
+   var mi2=document.createElement('img');mi2.id='cap-img';mi2.src=p.master_img;mi2.alt='CAPTCHA';
+   rootEl.appendChild(mi2);
+  }
+  var box=document.createElement('div');box.style.width='100%';
+  var input=document.createElement('input');input.type='text';input.id='cap-answer-plain';
+  input.placeholder=(p.prompt||'输入计算结果');
+  input.setAttribute('aria-label',(p.input_mode||'输入计算结果'));
+  input.autocomplete='off';input.autofocus=true;
+  box.appendChild(input);rootEl.appendChild(box);
+ }
+}
+function currentPlain(){
+ var el=document.getElementById('cap-answer-plain');
+ if(el)return el.value.trim();
+ var c=document.getElementById('cap-click-state');
+ if(c&&c.value)return c.value;
+ var s=document.getElementById('cap-slide-state');
+ if(s&&s.value)return s.value;
+ var r=document.getElementById('cap-rotate-state');
+ if(r&&r.value)return r.value;
+ return '';
+}
+capForm.addEventListener('submit',function(event){
+ if(submitting)return;
+ event.preventDefault();
+ var plain=currentPlain();
+ if(!plain){showStatus('请先完成验证。');return;}
+ loadWasm().then(function(){
+  if(typeof wasm_bindgen.gm_encrypt_challenge_answer!=="function")throw new Error('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证');
+  var ct=wasm_bindgen.gm_encrypt_challenge_answer(plain,KEYHEX);
+  if(!ct)throw new Error('Answer encryption failed. / 答案加密失败');
+  return ct;
+ }).then(function(ct){
+  submitting=true;
+  capSubmit.disabled=true;
+  capAnswer.value=ct;
+  if(window.__owaf_env_ready&&typeof window.__owaf_env_ready.then==='function'){
+   return window.__owaf_env_ready.then(function(env){
+    if(env)document.getElementById('cap-env').value=env;
+    HTMLFormElement.prototype.submit.call(capForm);
+   });
+  }
+  var env=window.__owaf_env_encrypted;
+  if(env)document.getElementById('cap-env').value=env;
+  HTMLFormElement.prototype.submit.call(capForm);
+ }).catch(function(err){
+  showStatus((err&&err.message)||'验证失败，请刷新重试。');
+ });
+});
 })();
 </script>
 {{if .EnvJS}}<script>

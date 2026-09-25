@@ -90,7 +90,6 @@ func TestACMatcherMatchMaskSliceNoCrossBoundary(t *testing.T) {
 	}
 }
 
-// TestACMatcherFuzzEquivalence 用真实 CVE needle 集做密集对拍:
 // AC matchAny vs 逐 needle strings.Contains,确保每个 target 判定一致。
 func TestACMatcherFuzzEquivalence(t *testing.T) {
 	needles := []string{

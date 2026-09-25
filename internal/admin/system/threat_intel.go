@@ -3,9 +3,11 @@ package system
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
@@ -16,6 +18,35 @@ type ThreatIntelSyncer interface {
 	SyncNow(feedID uint) error
 }
 
+// maskedThreatIntelItems 遮蔽列表项的认证头值，避免订阅令牌明文落入
+// 低权限（operator/readonly）用户的列表响应。admin 角色与 API key
+// （同为 admin 角色）保持明文，便于管理面回显。
+func maskedThreatIntelItems(c *app.RequestContext, items []store.ThreatIntelFeed) []store.ThreatIntelFeed {
+	if role, _ := c.Get("auth_role"); role == auth.RoleAdmin {
+		return items
+	}
+	masked := make([]store.ThreatIntelFeed, len(items))
+	copy(masked, items)
+	for i := range masked {
+		if masked[i].AuthHeaderValue == "" {
+			continue
+		}
+		masked[i].AuthHeaderValue = maskAuthHeaderValue(masked[i].AuthHeaderValue)
+	}
+	return masked
+}
+
+// maskAuthHeaderValue 遮蔽认证头值：长度不足 5 的全部标星，否则保留前 4 位加 ***。
+func maskAuthHeaderValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	if len(value) < 5 {
+		return "***"
+	}
+	return value[:4] + "***"
+}
+
 // ListThreatIntelFeeds 列出全部威胁情报订阅源。
 func ListThreatIntelFeeds(repo *repository.ThreatIntelRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -24,7 +55,7 @@ func ListThreatIntelFeeds(repo *repository.ThreatIntelRepo) app.HandlerFunc {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
-		c.JSON(200, map[string]any{"items": items, "total": len(items)})
+		c.JSON(200, map[string]any{"items": maskedThreatIntelItems(c, items), "total": len(items)})
 	}
 }
 
@@ -72,6 +103,13 @@ func CreateThreatIntelFeed(repo *repository.ThreatIntelRepo, reload func() error
 		if body.SyncInterval <= 0 {
 			body.SyncInterval = 3600
 		}
+		// 可选认证头：trim 掉两侧空白，避免无意义地发送纯空格头。
+		body.AuthHeaderName = strings.TrimSpace(body.AuthHeaderName)
+		body.AuthHeaderValue = strings.TrimSpace(body.AuthHeaderValue)
+		if len(body.AuthHeaderName) > 100 || len(body.AuthHeaderValue) > 512 {
+			c.JSON(400, map[string]string{"error": "auth header name/value too long"})
+			return
+		}
 		// 忽略客户端传入的运行态字段。
 		body.LastSyncAt = nil
 		body.LastError = ""
@@ -103,13 +141,15 @@ func UpdateThreatIntelFeed(repo *repository.ThreatIntelRepo, reload func() error
 			return
 		}
 		var body struct {
-			Name         *string         `json:"name"`
-			URL          *string         `json:"url"`
-			Kind         *string         `json:"kind"`
-			Action       *string         `json:"action"`
-			Enabled      *bool           `json:"enabled"`
-			SyncInterval *int            `json:"sync_interval"`
-			SiteID       json.RawMessage `json:"site_id"`
+			Name            *string         `json:"name"`
+			URL             *string         `json:"url"`
+			Kind            *string         `json:"kind"`
+			Action          *string         `json:"action"`
+			Enabled         *bool           `json:"enabled"`
+			SyncInterval    *int            `json:"sync_interval"`
+			SiteID          json.RawMessage `json:"site_id"`
+			AuthHeaderName  *string         `json:"auth_header_name"`
+			AuthHeaderValue *string         `json:"auth_header_value"`
 		}
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -151,6 +191,16 @@ func UpdateThreatIntelFeed(repo *repository.ThreatIntelRepo, reload func() error
 				return
 			}
 			existing.SyncInterval = *body.SyncInterval
+		}
+		if body.AuthHeaderName != nil {
+			existing.AuthHeaderName = strings.TrimSpace(*body.AuthHeaderName)
+		}
+		if body.AuthHeaderValue != nil {
+			existing.AuthHeaderValue = strings.TrimSpace(*body.AuthHeaderValue)
+		}
+		if len(existing.AuthHeaderName) > 100 || len(existing.AuthHeaderValue) > 512 {
+			c.JSON(400, map[string]string{"error": "auth header name/value too long"})
+			return
 		}
 		if present, siteID, scopeErr := parseSiteScope(body.SiteID); scopeErr != nil {
 			c.JSON(400, map[string]string{"error": scopeErr.Error()})
@@ -203,7 +253,10 @@ func SyncThreatIntelFeed(repo *repository.ThreatIntelRepo, syncer ThreatIntelSyn
 			return
 		}
 		if err := syncer.SyncNow(id); err != nil {
-			c.JSON(500, map[string]string{"error": err.Error()})
+			// SyncNow 失败时完整错误已落入该 feed 的 LastError 列（recordResult），
+			// 同步日志表保留 1000 字节明细；HTTP 层只回错误摘要，避免把拉取
+			// 超时/响应采样等长文本整体透传给 500 客户端页面。
+			c.JSON(500, map[string]string{"error": "同步失败，详情见该订阅源的 last_error 与同步日志"})
 			return
 		}
 		item, err := repo.Get(id)

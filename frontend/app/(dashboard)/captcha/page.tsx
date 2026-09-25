@@ -55,11 +55,15 @@ import {
   useCaptchaTest,
   useChainConfig,
   useChainConfigUpdate,
+  useChainSessions,
+  useChainSessionDelete,
 } from "@/hooks/use-api"
 import { useAuth } from "@/hooks/use-auth"
+import { ConfirmDialog } from "@/components/confirm-dialog"
 import type {
   BotSettings,
   ChainConfig,
+  ChainSessionInfo,
   ChainStepCondition,
   ChainStepConfig,
   ChainStepType,
@@ -583,6 +587,106 @@ function PreviewValue({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
+/**
+ * 链式验证进行中会话列表：契约来自 GET /api/v1/chain/sessions 与
+ * POST /api/v1/chain/sessions/:id/delete，删除后清除该访客的半途挑战状态。
+ */
+function ChainSessionsCard({ canManage }: { canManage: boolean }) {
+  const { t } = useTranslation()
+  const { data, isLoading, error, mutate } = useChainSessions()
+  const deleteSession = useChainSessionDelete()
+  const [pendingId, setPendingId] = useState<string | null>(null)
+
+  const sessions = data?.items ?? []
+  const deleting = deleteSession.loading && pendingId !== null
+
+  const handleDelete = async () => {
+    if (!canManage || !pendingId) return
+    try {
+      await deleteSession.execute(pendingId)
+      toast.success(t("captcha.chain.sessionDeleteSuccess"))
+      await mutate().catch(() => {
+        toast.error(t("captcha.refreshFailed"))
+      })
+    } catch {
+      toast.error(t("captcha.chain.sessionDeleteFailed"))
+    } finally {
+      setPendingId(null)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <SectionHeading
+          title={t("captcha.chain.sessions")}
+          description={t("captcha.chain.sessionsDesc")}
+          help={t("captcha.chain.sessionsDesc")}
+        />
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isLoading ? (
+          <Skeleton className="h-24 w-full rounded-2xl" />
+        ) : error ? (
+          <Alert variant="destructive">
+            <AlertTitle>{t("captcha.chain.sessionLoadFailed")}</AlertTitle>
+          </Alert>
+        ) : sessions.length === 0 ? (
+          <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">
+            {t("captcha.chain.noSessions")}
+          </p>
+        ) : (
+          <div className="divide-y rounded-2xl border border-border/70 bg-muted/10">
+            {sessions.map((session: ChainSessionInfo) => (
+              <div
+                key={session.id}
+                className="flex flex-wrap items-center justify-between gap-2 px-4 py-3"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-xs text-foreground">
+                    {session.id}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {session.original_url &&
+                      decodeURIComponent(session.original_url)}
+                    {session.original_url ? " · " : ""}
+                    {t("captcha.chain.sessionStep", {
+                      current: session.current_step,
+                      total: session.step_count,
+                    })}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="text-destructive"
+                  disabled={!canManage || deleteSession.loading}
+                  onClick={() => setPendingId(session.id)}
+                >
+                  <IconTrash className="mr-1 size-4" aria-hidden="true" />
+                  {deleteSession.loading && pendingId === session.id
+                    ? t("common.processing")
+                    : t("common.delete")}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+      <ConfirmDialog
+        open={pendingId !== null}
+        onOpenChange={(open) => !open && setPendingId(null)}
+        title={t("captcha.chain.sessionDeleteTitle")}
+        description={t("captcha.chain.sessionDeleteDesc")}
+        confirmText={t("common.delete")}
+        loading={deleting}
+        onConfirm={handleDelete}
+      />
+    </Card>
+  )
+}
+
 export default function CaptchaPage() {
   const { t } = useTranslation()
   const { user, loading: authLoading } = useAuth()
@@ -1031,11 +1135,14 @@ export default function CaptchaPage() {
               {chainIsLoading ? (
                 <Skeleton className="h-72 w-full rounded-3xl" />
               ) : chainConfig ? (
-                <ChainConfigCard
-                  key={JSON.stringify(chainConfig)}
-                  config={chainConfig}
-                  canManage={canManage}
-                />
+                <>
+                  <ChainConfigCard
+                    key={JSON.stringify(chainConfig)}
+                    config={chainConfig}
+                    canManage={canManage}
+                  />
+                  <ChainSessionsCard canManage={canManage} />
+                </>
               ) : (
                 <Alert variant="destructive">
                   <AlertTitle>{t("captcha.chain.loadFailed")}</AlertTitle>

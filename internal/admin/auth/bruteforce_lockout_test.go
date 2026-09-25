@@ -19,8 +19,6 @@ func newTestDetector(maxFailures int, lockoutDur time.Duration) *BruteForceDetec
 	}
 }
 
-// ---------- 构造与默认值 ----------
-
 // TestNewBruteForceDetectorAppliesDefaults 非正参数应回落到 5 次 / 15 分钟。
 func TestNewBruteForceDetectorAppliesDefaults(t *testing.T) {
 	bf := NewBruteForceDetector(0, 0)

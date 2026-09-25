@@ -359,17 +359,33 @@ func TestUpdateAndResetPageTemplateWithNilReload(t *testing.T) {
 func TestPreviewPageTemplate(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 
+	// captcha 预览走骨架墙模板（B5 强制化后 RenderCaptchaPreview 只渲染骨架），
+	// 特征为四题型骨架区块与双语预览标题；challenge/block 模板输出 "preview-request" 固定请求 ID。
+	previewMarkers := map[string][]string{
+		"captcha":   {"Click / 点击", "Slide / 滑动", "Rotate / 旋转", "Math / 算式", "Security Verification Preview"},
+		"challenge": {"preview-request"},
+		"block":     {"preview-request"},
+	}
 	for _, pageType := range []string{"captcha", "challenge", "block"} {
 		ctx := invokePageTemplateHandler(t, PreviewPageTemplate(repo), "GET", pageType, nil)
 		if ctx.Response.StatusCode() != 200 {
 			t.Fatalf("%s: unexpected status %d: %s", pageType, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
-		if got := string(ctx.Response.Header.ContentType()); got != "text/html; charset=utf-8" {
-			t.Fatalf("%s: content type = %q", pageType, got)
+		if ct := string(ctx.Response.Header.ContentType()); ct != "text/html; charset=utf-8" {
+			t.Fatalf("%s: content type = %q", pageType, ct)
 		}
 		body := string(ctx.Response.Body())
-		if !strings.Contains(body, "<!DOCTYPE html>") || !strings.Contains(body, "preview-request") {
+		if !strings.Contains(body, "<!DOCTYPE html>") {
 			t.Fatalf("%s: preview response is not rendered HTML: %s", pageType, body)
+		}
+		missing := make([]string, 0, len(previewMarkers[pageType]))
+		for _, marker := range previewMarkers[pageType] {
+			if !strings.Contains(body, marker) {
+				missing = append(missing, marker)
+			}
+		}
+		if len(missing) > 0 {
+			t.Fatalf("%s: preview missing markers %v: %s", pageType, missing, body)
 		}
 	}
 
@@ -392,7 +408,7 @@ func TestPreviewPageTemplateDraftUsesBodyAndDoesNotPersist(t *testing.T) {
 		if !strings.Contains(preview, "DraftBrand") || !strings.Contains(preview, "Draft Title") {
 			t.Fatalf("%s: draft preview did not use submitted body: %s", pageType, preview)
 		}
-		if strings.Contains(preview, "expression(") {
+		if indexCaseInsensitive(preview, "expression(") != -1 || indexCaseInsensitive(preview, "javascript:") != -1 {
 			t.Fatalf("%s: draft preview did not sanitize custom CSS: %s", pageType, preview)
 		}
 		for _, key := range []string{settingKeyCaptchaPage, settingKeyChallengePage, settingKeyBlockPage} {

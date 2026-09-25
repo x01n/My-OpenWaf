@@ -215,13 +215,6 @@ func (p *Processor) Process(path string, contentType string, body []byte) ([]byt
 	}
 }
 
-// defaultKeyBase 当未配置 EncryptionKeyBase 时生成确定性密钥种子。
-func defaultKeyBase(cfg ProtectionConfig) []byte {
-	seed := fmt.Sprintf("owaf-dp-default-key-site-%d-html-%v-js-%v",
-		cfg.SiteID, cfg.HTMLObfuscationEnabled, cfg.JSObfuscationEnabled)
-	return deriveKey([]byte(seed), "owaf-brp/1:default-base", 32)
-}
-
 // makeEnvelope 构建加密信封。
 func (p *Processor) makeEnvelope(plaintext []byte) (envelope, error) {
 	iv, ct, err := aesGCMEncrypt(p.cek, plaintext)

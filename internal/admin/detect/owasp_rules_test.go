@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -313,5 +314,88 @@ func TestShouldSkipRuleBoundary(t *testing.T) {
 	// 类别级灵敏度优先于覆盖里的默认灵敏度：sqli 显式 off 时应拒绝。
 	if owasp.HitPassesOverrideSensitivity(hit, owasp.OWASPRuleOverride{Sensitivity: "strict"}, map[string]string{"sqli": "off"}) {
 		t.Error("category sensitivity off should override rule sensitivity")
+	}
+}
+
+// newBrokenBatchRepo 构建覆盖配置表缺失的内存库：Policy 与
+// OWASPRuleCatalog 正常迁移并回过内建目录（目录查询不触碰覆盖配置表），
+// 覆盖配置表则完全不迁移。探针实测：该库上 First 返回的错误为
+// "SQL logic error: no such table: policy_owasp_rule_configs"（不见于
+// 内置路径，故 gorm 不归为 ErrRecordNotFound）——正是 B3 要区分的
+// 非 not-found 错误面。
+func newBrokenBatchRepo(t *testing.T) *repository.SystemSettingsRepo {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.Policy{}, &store.OWASPRuleCatalog{}); err != nil {
+		t.Fatalf("migrate catalog: %v", err)
+	}
+	defaultSlot := uint(1)
+	if err := db.Create(&store.Policy{Name: "Default", DefaultSlot: &defaultSlot}).Error; err != nil {
+		t.Fatalf("create default policy: %v", err)
+	}
+	if err := owasp.ReconcileBuiltinCatalog(db); err != nil {
+		t.Fatalf("reconcile OWASP catalog: %v", err)
+	}
+	return repository.NewSystemSettingsRepo(db)
+}
+
+// TestBatchUpdateOWASPRulesDBReadErrorAbortsBeforeWrite 验证批量更新中
+// 事务内读取覆盖配置的 First 查询遇到非 not-found 错误（覆盖配置表缺失，
+// SQLite 返回 no such table 实错，等价 DB 抖动/BUSY 的错误面）时，handler
+// 以 400 直返该错误且不触碰 reload（"config applied" 不出现）。注入对
+// B3 回归态（吞错继续写，Create 仍弹同源 no such table）无差异，本测试
+// 定位为分支状态回归覆盖而不足差分判定。
+func TestBatchUpdateOWASPRulesDBReadErrorAbortsBeforeWrite(t *testing.T) {
+	repo := newBrokenBatchRepo(t)
+	ruleID := firstOWASPRuleID(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"rules": []map[string]any{{"id": ruleID, "enabled": false}},
+	})
+	ctx := invokeOWASPPost(t, BatchUpdateOWASPRules(repo, func() error { return nil }),
+		"/api/v1/owasp-rules/batch-update", "", body)
+	if ctx.Response.StatusCode() != 400 {
+		t.Fatalf("db read error: want 400, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if !strings.Contains(string(ctx.Response.Body()), "no such table") {
+		t.Fatalf("response %q does not carry the sqlite read error", string(ctx.Response.Body()))
+	}
+	if strings.Contains(string(ctx.Response.Body()), "config applied") {
+		t.Fatalf("read error must not reach reload, got %s", string(ctx.Response.Body()))
+	}
+}
+
+// TestBatchUpdateOWASPRulesExistingRowUpdateSemanticsUnchanged 验证吞错修正
+// 不改变既有行（First 命中）的覆盖写语义：既有覆盖仍被 patch 合并更新。
+func TestBatchUpdateOWASPRulesExistingRowUpdateSemanticsUnchanged(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	ruleID := firstOWASPRuleID(t)
+	disabled := false
+	if err := repo.DB().Create(&store.PolicyOWASPRuleConfig{
+		PolicyID: 1,
+		RuleID:   ruleID,
+		Enabled:  &disabled,
+	}).Error; err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"rules": []map[string]any{{"id": ruleID, "enabled": true}},
+	})
+	ctx := invokeOWASPPost(t, BatchUpdateOWASPRules(repo, func() error { return nil }),
+		"/api/v1/owasp-rules/batch-update", "", body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+
+	var config store.PolicyOWASPRuleConfig
+	if err := repo.DB().Where("rule_id = ?", ruleID).First(&config).Error; err != nil {
+		t.Fatalf("load override: %v", err)
+	}
+	if config.Enabled == nil || !*config.Enabled {
+		t.Fatalf("enabled override = %#v, want true", config.Enabled)
 	}
 }

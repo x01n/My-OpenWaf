@@ -5,14 +5,12 @@ use wasm_bindgen::prelude::*;
 mod crypto;
 mod env;
 mod fingerprint;
+mod gm;
+mod label;
 mod obfuscate;
+mod sm3;
 mod vmp;
 
-/**
- * solve_pow_batched performs only the deterministic proof-of-work calculation
- * in a Worker-safe WASM context. Browser environment collection is performed
- * by collect_and_encrypt_fingerprint on the main thread, where DOM APIs exist.
- */
 #[wasm_bindgen]
 pub fn solve_pow_batched(
     nonce: &str,

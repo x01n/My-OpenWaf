@@ -14,11 +14,15 @@ type ThreatIntelFeed struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	Name    string `gorm:"size:100;not null" json:"name"`
-	URL     string `gorm:"size:500;not null" json:"url"`
-	Kind    string `gorm:"size:16;not null" json:"kind"`              // "blacklist" / "whitelist"
-	Action  string `gorm:"size:16;default:'intercept'" json:"action"` // "intercept" / "drop"
-	Enabled bool   `gorm:"default:true" json:"enabled"`
+	Name   string `gorm:"size:100;not null" json:"name"`
+	URL    string `gorm:"size:500;not null" json:"url"`
+	Kind   string `gorm:"size:16;not null" json:"kind"`              // "blacklist" / "whitelist"
+	Action string `gorm:"size:16;default:'intercept'" json:"action"` // "intercept" / "drop"
+	// AuthHeaderName 可选认证头名（如 Authorization），与 AuthHeaderValue 同时非空时拉取才附带。
+	AuthHeaderName string `gorm:"size:100" json:"auth_header_name,omitempty"`
+	// AuthHeaderValue 可选认证头值（如 "Bearer xxx"），与 AuthHeaderName 同时非空才生效；明文存储。
+	AuthHeaderValue string `gorm:"size:512" json:"auth_header_value,omitempty"`
+	Enabled         bool   `gorm:"default:true" json:"enabled"`
 
 	SyncInterval int   `gorm:"default:3600" json:"sync_interval"` // 同步间隔（秒）
 	SiteID       *uint `gorm:"index" json:"site_id,omitempty"`    // nil = 全局

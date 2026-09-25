@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"net"
+	"net/url"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/waf/bot"
@@ -51,6 +52,15 @@ type RequestCtx struct {
 	BodyTargets     []string
 	BodyTargetsDone bool
 
+	// matcherJSONBody / matcherQueryValues 是编译后规则匹配器的懒解析缓存：
+	// bodyJSONPath 类规则复用同一份 JSON 对象解析，queryParam 类规则复用
+	// 同一份 query values 解析。字段非导出，仅经 Cached*/Store* 访问，
+	// 由 ReleaseCtx 与 ResetMutationCaches 清零。
+	matcherJSONBody      map[string]any
+	matcherJSONBodyDone  bool
+	matcherQueryValues   url.Values
+	matcherQueryValuesOK bool
+
 	// matcherHeaders caches the matcher-visible header map derived from the
 	// request headers plus Host/TLS/header-order aliases.
 	matcherHeaders        map[string]string
@@ -89,6 +99,10 @@ func (ctx *RequestCtx) ResetMutationCaches() {
 	}
 	ctx.BodyTargets = nil
 	ctx.BodyTargetsDone = false
+	ctx.matcherJSONBody = nil
+	ctx.matcherJSONBodyDone = false
+	ctx.matcherQueryValues = nil
+	ctx.matcherQueryValuesOK = false
 	ctx.matcherHeaders = nil
 	ctx.matcherHeadersReady = false
 	ctx.matcherHeadersAliased = false
@@ -116,6 +130,32 @@ func (ctx *RequestCtx) CachedMatcherHeaders() (map[string]string, bool) {
 // alias the live request header map.
 func (ctx *RequestCtx) CachedMatcherHeadersAliased() bool {
 	return ctx.matcherHeadersReady && ctx.matcherHeadersAliased
+}
+
+// CachedJSONBodyObject returns the lazily parsed JSON object for the request
+// body, computed and stored once per request by bodyJSONPath-style matchers.
+// 解析失败也计入 Done，避免同一请求重复尝试。
+func (ctx *RequestCtx) CachedJSONBodyObject() (map[string]any, bool) {
+	return ctx.matcherJSONBody, ctx.matcherJSONBodyDone
+}
+
+// StoreJSONBodyObject saves the parsed JSON object of the request body.
+func (ctx *RequestCtx) StoreJSONBodyObject(obj map[string]any) {
+	ctx.matcherJSONBody = obj
+	ctx.matcherJSONBodyDone = true
+}
+
+// CachedMatcherQueryValues returns the lazily parsed query values shared by
+// queryParam-style matchers. ok 为 false 表示尚未解析。
+func (ctx *RequestCtx) CachedMatcherQueryValues() (url.Values, bool) {
+	return ctx.matcherQueryValues, ctx.matcherQueryValuesOK
+}
+
+// StoreMatcherQueryValues saves the parsed query values for queryParam-style
+// matchers. values 保持 nil-safe：nil 时以 Done 语义跳过重复解析。
+func (ctx *RequestCtx) StoreMatcherQueryValues(values url.Values) {
+	ctx.matcherQueryValues = values
+	ctx.matcherQueryValuesOK = true
 }
 
 // StoreMatcherHeaders saves the per-request matcher header cache.

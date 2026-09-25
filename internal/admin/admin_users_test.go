@@ -71,8 +71,6 @@ func seedAdminAccount(t *testing.T, repo *repository.AdminAccountRepo, username,
 	return strconv.FormatUint(uint64(acct.ID), 10)
 }
 
-// ---- ListAdminUsers ----
-
 // TestListAdminUsersHidesPasswordHash 验证列表响应不泄漏密码哈希。
 func TestListAdminUsersHidesPasswordHash(t *testing.T) {
 	repo := newAdminAccountRepoForTest(t)
@@ -98,8 +96,6 @@ func TestListAdminUsersHidesPasswordHash(t *testing.T) {
 		t.Fatalf("unexpected items: %#v", resp.Items)
 	}
 }
-
-// ---- CreateAdminUser ----
 
 func TestCreateAdminUserValidationErrors(t *testing.T) {
 	repo := newAdminAccountRepoForTest(t)
@@ -191,8 +187,6 @@ func TestCreateAdminUserResponseOmitsPassword(t *testing.T) {
 	}
 }
 
-// ---- UpdateAdminRole ----
-
 func TestUpdateAdminRoleValidationErrors(t *testing.T) {
 	repo := newAdminAccountRepoForTest(t)
 	id := seedAdminAccount(t, repo, "bob", auth.RoleOperator)
@@ -251,8 +245,6 @@ func TestUpdateAdminRoleAllowsDemotionWhenAnotherAdminExists(t *testing.T) {
 		t.Fatalf("role = %q, want operator", acct.Role)
 	}
 }
-
-// ---- UpdateAdminPassword ----
 
 func TestUpdateAdminPasswordValidationErrors(t *testing.T) {
 	repo := newAdminAccountRepoForTest(t)
@@ -330,8 +322,6 @@ func TestUpdateAdminPasswordAdminCanChangeOthers(t *testing.T) {
 		t.Fatal("admin-initiated password reset must take effect")
 	}
 }
-
-// ---- DeleteAdminUser ----
 
 func TestDeleteAdminUserValidationErrors(t *testing.T) {
 	repo := newAdminAccountRepoForTest(t)

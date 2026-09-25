@@ -1,11 +1,8 @@
 package jsplugin
 
 import (
-	"errors"
 	"strings"
 	"testing"
-
-	"My-OpenWaf/internal/store"
 )
 
 func TestScriptMetadataCopiesSiteScope(t *testing.T) {
@@ -54,14 +51,13 @@ func TestNormalizeRequestSnapshotRejectsOversizedFields(t *testing.T) {
 	}
 }
 
-func TestValidateWithOptionsRejectsUnavailableResponseStage(t *testing.T) {
-	err := ValidateWithOptions(
-		store.JSStageResponse,
+func TestValidateWithOptionsRejectsUnknownStage(t *testing.T) {
+	if err := ValidateWithOptions(
+		"pre",
 		`export default { fetch() { return {}; } }`,
 		ScriptOptions{},
-	)
-	if !errors.Is(err, ErrResponseStageUnavailable) {
-		t.Fatalf("ValidateWithOptions() error = %v, want %v", err, ErrResponseStageUnavailable)
+	); err == nil {
+		t.Fatal("ValidateWithOptions(pre) error = nil, want unknown-stage error")
 	}
 }
 
@@ -126,5 +122,84 @@ func TestValidateMutationPlanAcceptsSafeRequestChanges(t *testing.T) {
 	}
 	if err := ValidateMutationPlan(plan); err != nil {
 		t.Fatalf("ValidateMutationPlan() error = %v", err)
+	}
+}
+
+func TestValidateResponseMutationPlanRejectsUnsafeChanges(t *testing.T) {
+	intValue := func(value int) *int { return &value }
+	stringValue := func(value string) *string { return &value }
+	cases := []struct {
+		name string
+		plan ResponseMutationPlan
+	}{
+		{name: "status below range", plan: ResponseMutationPlan{Status: intValue(99)}},
+		{name: "status above range", plan: ResponseMutationPlan{Status: intValue(1000)}},
+		{name: "body too large", plan: ResponseMutationPlan{Body: stringValue(strings.Repeat("x", MaxMutationStringBytes+1))}},
+		{name: "content length set", plan: ResponseMutationPlan{SetHeaders: map[string]string{"Content-Length": "1"}}},
+		{name: "content length deletion", plan: ResponseMutationPlan{DeleteHeaders: []string{"CONTENT-LENGTH"}}},
+		{name: "connection set", plan: ResponseMutationPlan{SetHeaders: map[string]string{"Connection": "close"}}},
+		{name: "header control byte", plan: ResponseMutationPlan{SetHeaders: map[string]string{"X-Test": "before\x00after"}}},
+		{name: "duplicate normalized header", plan: ResponseMutationPlan{SetHeaders: map[string]string{"X-Test": "1", "x-test": "2"}}},
+		{name: "header conflict", plan: ResponseMutationPlan{SetHeaders: map[string]string{"X-Test": "1"}, DeleteHeaders: []string{"x-test"}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateResponseMutationPlan(tc.plan); err == nil {
+				t.Fatal("ValidateResponseMutationPlan() error = nil")
+			}
+		})
+	}
+
+	status := 418
+	body := "replaced"
+	ok := ResponseMutationPlan{
+		Status:        &status,
+		Body:          &body,
+		SetHeaders:    map[string]string{"X-Response-Mode": "preview"},
+		DeleteHeaders: []string{"X-Legacy-Mode"},
+	}
+	if err := ValidateResponseMutationPlan(ok); err != nil {
+		t.Fatalf("ValidateResponseMutationPlan() error = %v", err)
+	}
+}
+
+func TestNormalizeAndEncodeResponseSnapshot(t *testing.T) {
+	snapshot := ResponseSnapshot{
+		RequestID:      "req-1",
+		SiteID:         7,
+		Status:         200,
+		Path:           "/",
+		ContentType:    "text/html",
+		Body:           "ok",
+		Headers:        map[string]string{"content-type": "text/html"},
+		Method:         "GET",
+		RawQuery:       "a=1",
+		ClientIP:       "192.0.2.1",
+		RequestHeaders: map[string]string{"accept": "*/*"},
+	}
+	normalized, err := normalizeResponseSnapshot(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Headers["content-type"] = "changed"
+	snapshot.RequestHeaders["accept"] = "changed"
+	if normalized.Headers["content-type"] != "text/html" || normalized.RequestHeaders["accept"] != "*/*" {
+		t.Fatalf("snapshot maps were not copied: %#v", normalized)
+	}
+	if _, err := encodeResponseSnapshot(snapshot); err != nil {
+		t.Fatalf("encodeResponseSnapshot() error = %v", err)
+	}
+}
+
+func TestEncodeResponseSnapshotRejectsOversizedFields(t *testing.T) {
+	if _, err := encodeResponseSnapshot(ResponseSnapshot{Body: strings.Repeat("x", MaxResponseSnapshotBodyBytes+1)}); err == nil {
+		t.Fatal("oversized body was accepted")
+	}
+	if _, err := encodeResponseSnapshot(ResponseSnapshot{Headers: map[string]string{"X-Test": strings.Repeat("x", MaxResponseSnapshotStringBytes+1)}}); err == nil {
+		t.Fatal("oversized header value was accepted")
+	}
+	if _, err := encodeResponseSnapshot(ResponseSnapshot{RequestHeaders: map[string]string{"X-Test": strings.Repeat("x", MaxResponseSnapshotStringBytes+1)}}); err == nil {
+		t.Fatal("oversized request header value was accepted")
 	}
 }

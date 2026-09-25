@@ -756,6 +756,16 @@ export function backendToRow(leaf: {
     case "header_order_contains":
     case "header_order_regex":
       return null
+    case "tls_ja3":
+    case "tls_ja3_hash":
+    case "tls_version":
+    case "tls_sni":
+    case "tls_alpn":
+    case "tls_cipher_suite":
+    case "tls_cipher_suites":
+      // 后端已支持这些 TLS 指纹 kind，但表单尚无对应 target 选项，
+      // 编辑会破坏原规则，回显时降级只读展示原文。
+      return null
     case "tls_ja4":
       return { target: "ja4", method: "eq", content: leaf.arg }
     default:

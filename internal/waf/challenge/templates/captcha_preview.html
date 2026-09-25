@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.Title}} Preview</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"Helvetica Neue",sans-serif;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 40%,#f1f5f9 100%);padding:24px}
+.wrap{max-width:880px;margin:0 auto}
+.brand{font-size:.75rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#0d9488;margin-bottom:2px}
+h1{font-size:1.1rem;font-weight:600;color:#334155;margin:0 0 16px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+@media (max-width:640px){.grid{grid-template-columns:1fr}}
+.card{background:#fff;border-radius:16px;box-shadow:0 4px 32px rgba(0,0,0,.08),0 1px 4px rgba(0,0,0,.04);padding:20px;text-align:center}
+.card h2{font-size:.95rem;font-weight:600;color:#334155;margin-bottom:12px}
+.box{background:#f8fafc;border-radius:12px;padding:14px;border:1px solid #e2e8f0}
+.box img{max-width:100%;border-radius:8px;display:block;margin:0 auto}
+.thumb{max-height:84px;object-fit:contain;background:#e2e8f0;padding:6px;margin-top:8px}
+.mini{border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:6px 10px;color:#64748b;cursor:pointer;margin-top:8px}
+input[type=range]{width:100%;accent-color:#14b8a6;margin-top:8px}
+input[type=text]{width:100%;padding:12px 14px;border:2px solid #e2e8f0;border-radius:10px;font-size:1rem;margin-top:12px;outline:none;background:#f8fafc}
+.btn{width:100%;padding:12px;background:linear-gradient(135deg,#14b8a6,#0d9488);color:#fff;border:none;border-radius:10px;font-size:.95rem;font-weight:500;cursor:pointer;margin-top:12px}
+.footer{margin-top:20px;text-align:center;font-size:.7rem;color:#94a3b8}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="brand">{{.BrandName}}</div>
+<h1>{{.Title}} Preview / 安全验证预览</h1>
+<div class="grid">
+<div class="card">
+<h2>Click / 点击</h2>
+<div class="box">
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ2bHsPwAEyAJyKnolIgAAAABJRU5ErkJggg==" alt="CAPTCHA">
+<img class="thumb" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ2bHsPwAEyAJyKnolIgAAAABJRU5ErkJggg==" alt="target">
+<button type="button" class="mini">Clear clicks / 清空点击</button>
+</div>
+<button class="btn">{{.SubmitText}}</button>
+</div>
+<div class="card">
+<h2>Slide / 滑动</h2>
+<div class="box">
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ2bHsPwAEyAJyKnolIgAAAABJRU5ErkJggg==" alt="CAPTCHA">
+<img class="thumb" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ2bHsPwAEyAJyKnolIgAAAABJRU5ErkJggg==" alt="slider">
+<input type="range" min="0" max="300" value="0">
+</div>
+<button class="btn">{{.SubmitText}}</button>
+</div>
+<div class="card">
+<h2>Rotate / 旋转</h2>
+<div class="box">
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ2bHsPwAEyAJyKnolIgAAAABJRU5ErkJggg==" alt="CAPTCHA">
+<img class="thumb" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ2bHsPwAEyAJyKnolIgAAAABJRU5ErkJggg==" alt="target">
+<input type="range" min="0" max="360" value="0">
+</div>
+<button class="btn">{{.SubmitText}}</button>
+</div>
+<div class="card">
+<h2>Math / 算式</h2>
+<div class="box">
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ2bHsPwAEyAJyKnolIgAAAABJRU5ErkJggg==" alt="CAPTCHA">
+</div>
+<input type="text" placeholder="输入计算结果" autocomplete="off">
+<button class="btn">{{.SubmitText}}</button>
+</div>
+</div>
+<div class="footer">{{.FooterText}}</div>
+</div>
+</body>
+</html>

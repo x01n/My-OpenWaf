@@ -454,7 +454,20 @@ function AccessLogsContent() {
     <div className="max-w-full min-w-0 space-y-4 overflow-x-hidden">
       <PageHeader
         title={t("accessLogs.title")}
-        description={t("accessLogs.description")}
+        description={
+          <span className="inline-flex flex-wrap items-center gap-2">
+            {t("accessLogs.description")}
+            {total > 0 && (
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <span className="inline-block h-1 w-1 rounded-full bg-teal-500" />
+                {t("accessLogs.realtimeTotal")}: {total.toLocaleString()}
+                <Badge className="gap-1 bg-teal-500/15 text-teal-700 hover:bg-teal-500/20 dark:text-teal-300">
+                  {t("accessLogs.liveBadge")}
+                </Badge>
+              </span>
+            )}
+          </span>
+        }
         actions={
           <Badge variant="secondary" className="h-6 px-2.5 font-mono text-xs">
             {t("accessLogs.total", { count: total })}

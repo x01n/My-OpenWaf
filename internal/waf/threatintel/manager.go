@@ -3,6 +3,9 @@ package threatintel
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"fmt"
 	"io"
 	"log/slog"
@@ -227,6 +230,12 @@ func (m *Manager) fetchAndParse(feed *store.ThreatIntelFeed) ([]store.IPListEntr
 	if err != nil {
 		return nil, fmt.Errorf("构建请求: %w", err)
 	}
+	// 可选认证头：仅当名称与值都非空时才附加，避免发出空头。
+	if feed.AuthHeaderName != "" && feed.AuthHeaderValue != "" {
+		req.Header.Set(feed.AuthHeaderName, feed.AuthHeaderValue)
+	}
+	// 声明支持 gzip，部分订阅源仅在收到该头时才返回压缩响应。
+	req.Header.Set("Accept-Encoding", "gzip")
 	resp, err := m.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("拉取失败: %w", err)
@@ -237,11 +246,80 @@ func (m *Manager) fetchAndParse(feed *store.ThreatIntelFeed) ([]store.IPListEntr
 		return nil, fmt.Errorf("订阅源返回状态 %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应: %w", err)
 	}
+	body, err := decompressBody(raw, resp.Header.Get("Content-Encoding"))
+	if err != nil {
+		return nil, err
+	}
 	return parseEntries(body, feed), nil
+}
+
+/**
+ * decompressBody 按 Content-Encoding 解压响应正文。
+ *
+ * 支持 gzip（含 zlib 头包裹的 gzip 流，兼容某些不规范的订阅源）与
+ * deflate/zlib（标准 zlib 流）。无编码声明或 x-gzip/其他未知编码时原样返回；
+ * 声明了 gzip/deflate 但解压失败时如实返回错误，保证错误进入 LastError 而非
+ * 静默吞掉并解析出空列表。
+ */
+func decompressBody(data []byte, encoding string) ([]byte, error) {
+	encoding = strings.TrimSpace(strings.ToLower(encoding))
+	switch {
+	case encoding == "", encoding == "identity":
+		return data, nil
+	case encoding == "x-gzip":
+		encoding = "gzip"
+	}
+	readAll := func(r io.Reader) ([]byte, error) {
+		out, err := io.ReadAll(io.LimitReader(r, maxBodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	switch encoding {
+	case "gzip":
+		// 标准 gzip：gzip 头 + deflate。部分源会错误地用 zlib（2 字节头 + deflate）
+		// 包裹 gzip 流；先按 zlib 探测首部，命中则走 zlib 路径。
+		zr, zerr := zlib.NewReader(bytes.NewReader(data))
+		if zerr == nil {
+			if out, err := readAll(zr); err == nil {
+				zr.Close()
+				return out, nil
+			}
+			zr.Close()
+		}
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("解压 gzip 响应失败: %w", err)
+		}
+		defer gr.Close()
+		return readAll(gr)
+	case "deflate", "zlib":
+		// 先按标准 zlib 流（RFC 1950）解析；个别源会发裸 deflate（RFC 1951），
+		// 标准流解析失败时回退到原始 deflate。
+		zr, err := zlib.NewReader(bytes.NewReader(data))
+		if err == nil {
+			if out, rerr := readAll(zr); rerr == nil {
+				zr.Close()
+				return out, nil
+			}
+			zr.Close()
+		}
+		fr := flate.NewReader(bytes.NewReader(data))
+		defer fr.Close()
+		out, err := readAll(fr)
+		if err != nil {
+			return nil, fmt.Errorf("解压 deflate 响应失败: %w", err)
+		}
+		return out, nil
+	default:
+		// 未知编码（如 br）不尝试猜测，原样交给解析器。
+		return data, nil
+	}
 }
 
 // recordResult 回写单次同步结果（时间、条目数、错误信息）。
@@ -259,7 +337,8 @@ func (m *Manager) recordResult(feed *store.ThreatIntelFeed, count int, errMsg st
 
 /**
  * parseEntries 按行解析订阅源正文，逐行 trim，跳过空行与 # 注释，
- * 严格用 net.ParseIP / net.ParseCIDR 校验，非法行跳过不整体失败。
+ * 支持行级切列（tab/空白分隔，取第一列），严格用 net.ParseIP / net.ParseCIDR
+ * 校验，非法行跳过不整体失败。既有「每行一个 IP/CIDR」语义保持不变。
  * 每个合法条目继承 feed 的 Kind/Action/SiteID，并标记 FeedID 与来源备注。
  * 同一正文内的重复值会被去重。
  */
@@ -275,12 +354,17 @@ func parseEntries(body []byte, feed *store.ThreatIntelFeed) []store.IPListEntry 
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// 支持行内注释，如 "1.2.3.4 # some comment"。
-		if idx := strings.IndexAny(line, " \t#"); idx >= 0 {
-			line = strings.TrimSpace(line[:idx])
+		// 支持行内注释：从 trim 后的行首取第一列，无需手工逐字符切分。
+		if hash := strings.IndexByte(line, '#'); hash >= 0 {
+			line = strings.TrimSpace(line[:hash])
 			if line == "" {
 				continue
 			}
+		}
+		// 行级切列：按空白（空格/tab）切分后取第一列。既兼容「每行一个 IP/CIDR」，
+		// 也兼容 "1.2.3.4/tab/备注" 的列式订阅源格式。
+		if fields := strings.Fields(line); len(fields) > 0 {
+			line = fields[0]
 		}
 		if !isValidIPOrCIDR(line) {
 			continue
@@ -315,10 +399,16 @@ func isValidIPOrCIDR(s string) bool {
 	return false
 }
 
-// truncate 将字符串按字节截断到 maxLen 以内。
+// truncate 将字符串按字节截断到 maxLen 以内，切点落在多字节字符中间时
+// 回退到最近的 rune 起始字节，保证截断结果始终是合法 UTF-8。
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
+	}
+	// UTF-8 续字节形如 0b10xxxxxx（(b & 0xC0) == 0x80）；回退越过所在 rune，
+	// 直到切点处字节是某 rune 的起始字节。无需引入 unicode/utf8 依赖。
+	for maxLen > 0 && s[maxLen]&0xC0 == 0x80 {
+		maxLen--
 	}
 	return s[:maxLen]
 }

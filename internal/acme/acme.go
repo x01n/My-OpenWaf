@@ -276,6 +276,22 @@ func (m *Manager) GetChallengeResponse(token string) (string, bool) {
 	return response, ok
 }
 
+// RenewCandidate 供续期窗口判定所需的证书最小信息。
+type RenewCandidate struct {
+	Domain    string
+	ExpiresAt time.Time // 零值表示过期时间未知，续期循环保留全量尝试。
+}
+
+// ShouldRenewAt 判定证书在 now 时刻是否需要续期：
+// 到期时间位于 now+renewBefore 之前（窗口内或已过期）返回 true。
+// renewBefore<=0 视为未配置窗口、过期时间为零值（未知）时均返回 true
+func ShouldRenewAt(expiresAt, now time.Time, renewBefore time.Duration) bool {
+	if renewBefore <= 0 || expiresAt.IsZero() {
+		return true
+	}
+	return !expiresAt.After(now.Add(renewBefore))
+}
+
 // RenewLoop 启动证书续期循环。
 func (m *Manager) RenewLoop(ctx context.Context, domains []string, checkInterval time.Duration) {
 	m.RenewLoopFunc(ctx, checkInterval, func(context.Context) ([]string, error) {
@@ -284,7 +300,26 @@ func (m *Manager) RenewLoop(ctx context.Context, domains []string, checkInterval
 }
 
 // RenewLoopFunc 启动证书续期循环，并在每次 tick 时动态获取域名列表。
+// 域名无过期时间信息，续期窗口按「未知即尝试」处理（与旧版全量语义一致）；
+// 需要窗口跳过的调用方应使用 RenewLoopWithCertificates。
 func (m *Manager) RenewLoopFunc(ctx context.Context, checkInterval time.Duration, domains func(context.Context) ([]string, error)) {
+	m.RenewLoopWithCertificates(ctx, checkInterval, 0, func(ctx context.Context) ([]RenewCandidate, error) {
+		items, err := domains(ctx)
+		if err != nil {
+			return nil, err
+		}
+		candidates := make([]RenewCandidate, 0, len(items))
+		for _, domain := range items {
+			candidates = append(candidates, RenewCandidate{Domain: domain})
+		}
+		return candidates, nil
+	})
+}
+
+// RenewLoopWithCertificates 启动证书续期循环，并在每次 tick 时动态获取候选证书
+// （域名 + 过期时间）。仅对进入续期窗口（到期前 renewBefore 内）或已过期的
+// 证书发起续期；过期时间未知的候选保留全量尝试，不误跳过。
+func (m *Manager) RenewLoopWithCertificates(ctx context.Context, checkInterval, renewBefore time.Duration, certs func(context.Context) ([]RenewCandidate, error)) {
 	if checkInterval <= 0 {
 		checkInterval = 12 * time.Hour
 	}
@@ -292,7 +327,7 @@ func (m *Manager) RenewLoopFunc(ctx context.Context, checkInterval time.Duration
 	if err := m.Register(ctx); err != nil {
 		m.log.Warn("ACME 帐户注册失败，续期循环将继续重试", slog.Any("err", err))
 	}
-	m.runRenewTick(ctx, domains)
+	m.runRenewTick(ctx, renewBefore, certs)
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
@@ -302,22 +337,26 @@ func (m *Manager) RenewLoopFunc(ctx context.Context, checkInterval time.Duration
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.runRenewTick(ctx, domains)
+			m.runRenewTick(ctx, renewBefore, certs)
 		}
 	}
 }
 
-func (m *Manager) runRenewTick(ctx context.Context, domains func(context.Context) ([]string, error)) {
-	items, err := domains(ctx)
+func (m *Manager) runRenewTick(ctx context.Context, renewBefore time.Duration, certs func(context.Context) ([]RenewCandidate, error)) {
+	items, err := certs(ctx)
 	if err != nil {
 		m.log.Error("加载待续期证书失败", slog.Any("err", err))
 		return
 	}
-	for _, domain := range items {
-		if domain == "" {
+	now := time.Now()
+	for _, item := range items {
+		if item.Domain == "" {
 			continue
 		}
-		m.tryRenew(ctx, domain)
+		if !ShouldRenewAt(item.ExpiresAt, now, renewBefore) {
+			continue
+		}
+		m.tryRenew(ctx, item.Domain)
 	}
 }
 

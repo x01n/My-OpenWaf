@@ -403,6 +403,96 @@ func TestCVEDetector_PHPDeserialization(t *testing.T) {
 	}
 }
 
+// TestCVEDetector_NewStaticSignatures 覆盖本轮新增静态 CVE 签名：
+// TeamCity 未认证建号（CVE-2024-27198）、Jenkins 任意文件读取（CVE-2024-23897）、
+// Spark doAs 命令注入（CVE-2022-33891）、Spring4Shell URL 参数变体（CVE-2022-22965）。
+func TestCVEDetector_NewStaticSignatures(t *testing.T) {
+	d := NewCVEDetector()
+
+	tests := []struct {
+		name     string
+		path     string
+		query    string
+		body     string
+		headers  map[string]string
+		wantCVEs []string
+	}{
+		{
+			name:     "teamcity hax user creation",
+			path:     "/hax",
+			query:    "jsp=/app/rest/users;.jsp",
+			wantCVEs: []string{"CVE-2024-27198"},
+		},
+		{
+			name:     "teamcity rest users path segment",
+			path:     "/app/rest/users;.jsp",
+			wantCVEs: []string{"CVE-2024-27198"},
+		},
+		{
+			name:     "jenkins jnlpjars traversal",
+			path:     "/jnlpJars/a/../config.xml",
+			wantCVEs: []string{"CVE-2024-23897"},
+		},
+		{
+			name:     "spark doas command injection",
+			path:     "/",
+			query:    "doAs=`id`",
+			wantCVEs: []string{"CVE-2022-33891"},
+		},
+		{
+			name:     "spring4shell class param chain",
+			path:     "/index",
+			query:    "class.module.classLoader.resources.context.parent.pipeline.first.pattern=cmd",
+			wantCVEs: []string{"CVE-2022-22965"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var bodyBytes []byte
+			if tt.body != "" {
+				bodyBytes = []byte(tt.body)
+			}
+			req := BuildCVERequest(tt.path, tt.query, tt.headers, bodyBytes, "")
+			matches := d.Detect(req)
+			found := make(map[string]bool)
+			for _, m := range matches {
+				found[m.CVEID] = true
+			}
+			for _, want := range tt.wantCVEs {
+				if !found[want] {
+					t.Errorf("expected CVE %s for %s, matches=%v", want, tt.name, matches)
+				}
+			}
+		})
+	}
+
+	// 负向：捷径应保持良性不命中四条新签名
+	negatives := []struct {
+		name  string
+		path  string
+		query string
+	}{
+		{"normal teamcity page", "/repository", "path=~%252Fresources"},
+		{"plain jenkins jar", "/jnlpJars/remoting.jar", ""},
+		{"normal spark params", "/jobs", "doAs=nobody"},
+		{"plain class query", "/api", "class=user"},
+	}
+	for _, tt := range negatives {
+		t.Run("negative_"+tt.name, func(t *testing.T) {
+			req := BuildCVERequest(tt.path, tt.query, nil, nil, "")
+			matches := d.Detect(req)
+			for _, m := range matches {
+				for _, wantNew := range []string{"CVE-2024-27198", "CVE-2024-23897", "CVE-2022-33891", "CVE-2022-22965"} {
+					if m.CVEID == wantNew {
+						t.Errorf("false positive %s for %s", wantNew, tt.name)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestCVEDetector_Log4Shell(t *testing.T) {
 	d := NewCVEDetector()
 

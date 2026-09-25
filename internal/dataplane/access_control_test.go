@@ -133,7 +133,7 @@ func TestHandleAccessVerifyRejectsUserPasswordWithoutEnabledProvider(t *testing.
 	c.Request.SetBodyString("auth_type=user_password&username=alice&password=u-secret")
 
 	rt := &snapshot.SiteRuntime{Site: store.Site{ID: 1}}
-	handleAccessVerify(c, Options{AccessControlRepo: repo}, gate, cfg, "site.test", rt)
+	handleAccessVerify(c, Options{AccessControlRepo: repo}, gate, cfg, "site.test", rt, nil)
 
 	if got := c.Response.Header.Peek("Set-Cookie"); len(got) != 0 {
 		t.Fatalf("没有 enabled 的 password provider 时不应下发 session cookie, got %q", got)

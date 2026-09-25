@@ -80,45 +80,170 @@ window.__owaf_pow_callback=function(c,h){
 	document.body.appendChild(f);f.submit()};
 </script>
 {{else}}
-<div class="captcha-box">
+<div class="captcha-box" id="captcha-box">
 {{if .Captcha}}
-<input type="hidden" id="cap-type" value="{{.Captcha.Type}}">
-{{if .Captcha.IsClick}}
-<div class="img-wrap"><img id="cap-img" src="{{.Captcha.MasterImg}}" alt="CAPTCHA"></div><img class="thumb" src="{{.Captcha.ThumbImg}}" alt="target"><input type="hidden" class="ci" id="ans"><button type="button" class="mini" id="clear-clicks">Clear clicks / 清空点击</button>
-{{else if .Captcha.IsSlide}}
-<img src="{{.Captcha.MasterImg}}" alt="CAPTCHA"><img id="slide-thumb" class="thumb slide-thumb" src="{{.Captcha.ThumbImg}}" alt="slider"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="{{.Captcha.SlideWidth}}" value="0" id="slide-range">
-{{else if .Captcha.IsRotate}}
-<img src="{{.Captcha.MasterImg}}" alt="CAPTCHA"><img id="rotate-thumb" class="thumb" src="{{.Captcha.ThumbImg}}" alt="target"><input type="hidden" class="ci" id="ans"><input type="range" min="0" max="360" value="0" id="rotate-range">
+<div id="captcha-root">Loading... / 正在载入验证码</div><div id="captcha-error" style="display:none;color:#ef4444;font-size:.85rem;padding:12px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2"></div>
+<input type="hidden" id="cap-key" value="{{.Captcha.KeyHex}}">
+<input type="hidden" id="cap-data" value="{{.Captcha.CaptchaData}}">
 {{else}}
-<img src="{{.Captcha.MasterImg}}" alt="CAPTCHA"><input type="text" class="ci" id="ans" placeholder="{{.Captcha.Prompt}}" autocomplete="off">
-{{end}}
-{{else}}
-<input type="text" class="ci" id="ans" autocomplete="off">
+<div style="color:#64748b">CAPTCHA unavailable / 验证码不可用</div>
 {{end}}
 </div>
 <button class="btn" onclick="go()">Submit / 提交</button>
 <div class="footer">Protected by My-OpenWAF</div>
 <script>
 (function(){
-var type=(document.getElementById('cap-type')||{}).value||'math';
-var answer=document.getElementById('ans');
-var img=document.getElementById('cap-img');
-if(type==='click'&&img){
-  var points=[];
-  img.addEventListener('click',function(e){var r=img.getBoundingClientRect();var x=Math.round(((e.clientX-r.left)/r.width)*(img.naturalWidth||r.width));var y=Math.round(((e.clientY-r.top)/r.height)*(img.naturalHeight||r.height));points.push({x:x,y:y});answer.value=JSON.stringify(points);var d=document.createElement('span');d.className='dot';d.textContent=String(points.length);d.style.left=((x/(img.naturalWidth||r.width))*100)+'%';d.style.top=((y/(img.naturalHeight||r.height))*100)+'%';img.parentNode.appendChild(d);});
-  var clear=document.getElementById('clear-clicks');if(clear){clear.addEventListener('click',function(){points=[];answer.value='';document.querySelectorAll('.dot').forEach(function(n){n.remove();});});}
+var keyEl=document.getElementById('cap-key');
+var dataEl=document.getElementById('cap-data');
+var KEYHEX=keyEl?keyEl.value:"";
+var DATA=dataEl?dataEl.value:"";
+var rootEl=document.getElementById('captcha-root');
+var errEl=document.getElementById('captcha-error');
+var stEl=document.getElementById('st');
+var submitting=false;
+function showFatal(msg){
+ if(rootEl)rootEl.innerHTML='';
+ if(errEl){errEl.style.display='block';errEl.textContent=msg;}
 }
-var slide=document.getElementById('slide-range');var thumb=document.getElementById('slide-thumb');
-if(type==='slide'&&slide){slide.addEventListener('input',function(){answer.value=JSON.stringify({x:Number(slide.value)});if(thumb){thumb.style.transform='translateX('+slide.value+'px)';}});}
-var rotate=document.getElementById('rotate-range');var rotateThumb=document.getElementById('rotate-thumb');
-if(type==='rotate'&&rotate&&rotateThumb){rotate.addEventListener('input',function(){answer.value=JSON.stringify({angle:Number(rotate.value)});rotateThumb.style.transform='rotate('+rotate.value+'deg)';});}
+function loadWasm(){
+ if(window.__owaf_wasm_ready)return window.__owaf_wasm_ready;
+ window.__owaf_wasm_ready=new Promise(function(resolve,reject){
+  if(typeof WebAssembly==="undefined"){reject(new Error('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证'));return}
+  function init(){
+   wasm_bindgen({module_or_path:"/__owaf/pow.wasm"}).then(resolve).catch(reject);
+  }
+  if(typeof wasm_bindgen!=="undefined"){init();return}
+  var cspNonce=(document.currentScript&&document.currentScript.nonce)||"";
+  var s=document.createElement('script');
+  s.src="/__owaf/pow_glue.js";
+  if(cspNonce)s.nonce=cspNonce;
+  s.async=true;
+  s.onload=init;
+  s.onerror=function(){reject(new Error('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证'))};
+  (document.head||document.documentElement).appendChild(s);
+ });
+ return window.__owaf_wasm_ready;
+}
+function currentPlain(){
+ var el=document.getElementById('cap-answer-plain');
+ if(el)return el.value.trim();
+ var c=document.getElementById('cap-click-state');
+ if(c&&c.value)return c.value;
+ var s=document.getElementById('cap-slide-state');
+ if(s&&s.value)return s.value;
+ var r=document.getElementById('cap-rotate-state');
+ if(r&&r.value)return r.value;
+ return '';
+}
+if(!KEYHEX||!DATA){
+ showFatal('验证码初始化失败，请刷新重试。');
+} else {
+ loadWasm().then(function(){
+  if(typeof wasm_bindgen.gm_decrypt_challenge_data!=="function"){
+   showFatal('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证');
+   return;
+  }
+  var plain=wasm_bindgen.gm_decrypt_challenge_data(DATA,KEYHEX);
+  if(!plain){showFatal('Challenge decryption failed. / 验证码解密失败，请刷新重试。');return;}
+  var parsed=null;
+  try{parsed=JSON.parse(plain);}catch(e){parsed=null;}
+  if(!parsed||!parsed.type){showFatal('Challenge format invalid. / 验证码数据格式无效，请刷新重试。');return;}
+  build(parsed);
+ }).catch(function(err){showFatal(err.message||'验证码载入失败，请刷新重试。');});
+}
+function build(p){
+ if(!rootEl)return;
+ rootEl.innerHTML='';
+ function stateInput(id){
+  var i=document.createElement('input');
+  i.type='hidden';
+  i.id=id;
+  i.className='ci';
+  rootEl.parentNode.insertBefore(i,rootEl);
+  return i;
+ }
+ if(p.type==='click'&&p.master_img){
+  var stack=document.createElement('div');
+  var wrap=document.createElement('div');wrap.className='img-wrap';
+  var img=document.createElement('img');img.id='cap-img';img.src=p.master_img;img.alt='CAPTCHA';
+  wrap.appendChild(img);stack.appendChild(wrap);
+  if(p.thumb_img){var th=document.createElement('img');th.className='thumb';th.src=p.thumb_img;th.alt='target';stack.appendChild(th);}
+  var clear=document.createElement('button');clear.type='button';clear.className='mini';clear.textContent='Clear clicks / 清空点击';stack.appendChild(clear);
+  rootEl.appendChild(stack);
+  var points=[];
+  var clickState=stateInput('cap-click-state');
+  img.addEventListener('click',function(e){
+   var r=img.getBoundingClientRect();
+   var x=Math.round(((e.clientX-r.left)/r.width)*(img.naturalWidth||r.width));
+   var y=Math.round(((e.clientY-r.top)/r.height)*(img.naturalHeight||r.height));
+   points.push({x:x,y:y});
+   clickState.value=JSON.stringify(points);
+   var d=document.createElement('span');
+   d.className='dot';d.textContent=String(points.length);
+   d.style.left=((x/(img.naturalWidth||r.width))*100)+'%';
+   d.style.top=((y/(img.naturalHeight||r.height))*100)+'%';
+   wrap.appendChild(d);
+  });
+  clear.addEventListener('click',function(){
+   points=[];clickState.value='';
+   document.querySelectorAll('.dot').forEach(function(n){n.remove();});
+  });
+ }else if(p.type==='slide'&&p.master_img){
+  var mi=document.createElement('img');mi.id='cap-img';mi.src=p.master_img;mi.alt='CAPTCHA';
+  rootEl.appendChild(mi);
+  var thumb=null;
+  if(p.thumb_img){thumb=document.createElement('img');thumb.id='slide-thumb';thumb.className='thumb slide-thumb';thumb.src=p.thumb_img;thumb.alt='slider';rootEl.appendChild(thumb);}
+  var rangeW=Math.max(200,(p.width||300));
+  var rng=document.createElement('input');rng.type='range';rng.min='0';rng.max=String(rangeW);rng.value='0';rng.id='slide-range';
+  rootEl.appendChild(rng);
+  var slideState=stateInput('cap-slide-state');
+  rng.addEventListener('input',function(){
+   slideState.value=JSON.stringify({x:Number(rng.value)});
+   if(thumb)thumb.style.transform='translateX('+rng.value+'px)';
+  });
+ }else if(p.type==='rotate'&&p.master_img){
+  var rmi=document.createElement('img');rmi.id='cap-img';rmi.src=p.master_img;rmi.alt='CAPTCHA';
+  rootEl.appendChild(rmi);
+  var rth=null;
+  if(p.thumb_img){rth=document.createElement('img');rth.id='rotate-thumb';rth.className='thumb';rth.src=p.thumb_img;rth.alt='target';rootEl.appendChild(rth);}
+  var rrng=document.createElement('input');rrng.type='range';rrng.min='0';rrng.max='360';rrng.value='0';rrng.id='rotate-range';
+  rootEl.appendChild(rrng);
+  var rotateState=stateInput('cap-rotate-state');
+  rrng.addEventListener('input',function(){
+   rotateState.value=JSON.stringify({angle:Number(rrng.value)});
+   if(rth)rth.style.transform='rotate('+rrng.value+'deg)';
+  });
+ }else{
+  if(p.master_img){
+   var mi2=document.createElement('img');mi2.id='cap-img';mi2.src=p.master_img;mi2.alt='CAPTCHA';
+   rootEl.appendChild(mi2);
+  }
+  var box=document.createElement('div');box.style.width='100%';
+  var input=document.createElement('input');input.type='text';input.id='cap-answer-plain';input.className='ci';
+  input.placeholder=(p.prompt||'输入计算结果');
+  input.autocomplete='off';input.autofocus=true;
+  box.appendChild(input);rootEl.appendChild(box);
+ }
+}
+function go(){
+ if(submitting)return;
+ var plain=currentPlain();
+ if(!plain){if(stEl)stEl.textContent='请先完成验证。';return;}
+ loadWasm().then(function(){
+  if(typeof wasm_bindgen.gm_encrypt_challenge_answer!=="function")throw new Error('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证');
+  var ct=wasm_bindgen.gm_encrypt_challenge_answer(plain,KEYHEX);
+  if(!ct)throw new Error('Answer encryption failed. / 答案加密失败');
+  return ct;
+ }).then(function(ct){
+  submitting=true;
+  var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
+  var fl={'__waf_chain_session':{{.SessionID}},'__waf_chain_step':'captcha','__waf_captcha_answer':ct};
+  for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
+  document.body.appendChild(f);f.submit();
+ }).catch(function(err){if(stEl)stEl.textContent=(err&&err.message)||'验证失败，请刷新重试。';});
+}
+document.addEventListener('keypress',function(e){if(e.key==='Enter'&&document.getElementById('cap-answer-plain')===document.activeElement)go();});
 })();
-function go(){var a=document.getElementById('ans').value.trim();if(!a)return;
-var f=document.createElement('form');f.method='POST';f.action='/__owaf/chain/verify';
-var fl={'__waf_chain_session':{{.SessionID}},'__waf_chain_step':'captcha','__waf_captcha_answer':a};
-for(var k in fl){var i=document.createElement('input');i.type='hidden';i.name=k;i.value=fl[k];f.appendChild(i)}
-document.body.appendChild(f);f.submit()}
-document.getElementById('ans').addEventListener('keypress',function(e){if(e.key==='Enter')go()});
 </script>
 {{end}}
 </div></body>

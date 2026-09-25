@@ -1,8 +1,6 @@
 package challenge
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os/exec"
@@ -33,7 +31,7 @@ func encryptBrowserSignTestEnv(t *testing.T, ticket BrowserSignTicket, siteID ui
 }
 
 func TestIssueAndVerifyBrowserSignHeaders(t *testing.T) {
-	SetChallengeSecret([]byte("test-browser-sign-secret"))
+	SetChallengeSecret([]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
 	ticket := IssueBrowserSignTicket(7, 120)
 	if ticket.Nonce == "" || ticket.TicketMAC == "" || ticket.SignKey == "" {
 		t.Fatalf("ticket incomplete: %+v", ticket)
@@ -70,7 +68,7 @@ func TestIssueAndVerifyBrowserSignHeaders(t *testing.T) {
 }
 
 func TestVerifyBrowserSignHeadersRejectsInvalidOrHardFailEnv(t *testing.T) {
-	SetChallengeSecret([]byte("test-browser-sign-secret-2"))
+	SetChallengeSecret([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
 	ticket := IssueBrowserSignTicket(1, 60)
 	now := time.Now()
 	ts := now.Unix()
@@ -105,18 +103,20 @@ func TestVerifyBrowserSignHeadersRejectsInvalidOrHardFailEnv(t *testing.T) {
 }
 
 func TestVerifyBrowserSignHeadersRejectsMismatchedEnvironmentScope(t *testing.T) {
-	SetChallengeSecret([]byte("test-browser-sign-secret-3"))
+	SetChallengeSecret([]byte("cccccccccccccccccccccccccccccccc"))
 	ticket := IssueBrowserSignTicket(3, 60)
 	now := time.Now()
 	ts := now.Unix()
 	method := "POST"
 	path := "/api/resource"
-	env := encryptVersionedEnvFingerprint(t, []byte(browserSignTestEnv), browserSignEnvKey(ticket.Nonce, 3), browserSignEnvAAD(ticket.Nonce, 3)+"-other")
+	// 签名环境指纹必须由签发 siteID 派生的密钥封装：用其他 siteID 派生的
+	// 密钥加密的信封必须解不开（AAD 不再入 GCM，绑定由派生密钥承担）。
+	env := encryptVersionedEnvFingerprint(t, []byte(browserSignTestEnv), browserSignEnvKey(ticket.Nonce, 99), browserSignEnvAAD(ticket.Nonce, 99))
 	headers := browserSignTestHeaders(t, ticket, method, path, "", env, ts)
 
 	ok, reason := VerifyBrowserSignHeaders(headers, method, path, "", 3, now)
 	if ok || reason != "invalid browser env fingerprint" {
-		t.Fatalf("wrong AAD must fail, ok=%v reason=%q", ok, reason)
+		t.Fatalf("cross-site environment key must fail, ok=%v reason=%q", ok, reason)
 	}
 
 	env = encryptBrowserSignTestEnv(t, ticket, 3, browserSignTestEnv)
@@ -173,14 +173,14 @@ func TestInjectBrowserSignIntoHTML(t *testing.T) {
 	if !strings.Contains(s, "function queryOnly") || !strings.Contains(s, `var payload=m+"|"+path+"|"+query+"|"+String(ts)+"|"+`) {
 		t.Fatal("expected injected browser signer to bind raw query")
 	}
-	if !strings.Contains(s, "wasm_bindgen.collect_and_encrypt_fingerprint") || !strings.Contains(s, "window.__owaf_env_encrypted=encrypted") {
+	if !strings.Contains(s, "wasm_bindgen.gm_encrypt_fingerprint") || !strings.Contains(s, "window.__owaf_env_encrypted=encrypted") {
 		t.Fatal("expected encrypted WASM environment fingerprint collection")
 	}
 	if strings.Contains(s, "wasm_bindgen.collect_fingerprint()") || strings.Contains(s, "window.__owaf_env=") {
 		t.Fatal("browser signer must not use plain environment collection")
 	}
-	if !strings.Contains(s, "window.__owaf_env_ready") || !strings.Contains(s, `env.indexOf("v1.")`) {
-		t.Fatal("expected browser signer to await a versioned environment envelope")
+	if !strings.Contains(s, "window.__owaf_env_ready") || !strings.Contains(s, `env.length<32`) {
+		t.Fatal("expected browser signer to await a GM environment envelope")
 	}
 	for _, marker := range []string{
 		"document.currentScript&&document.currentScript.nonce",
@@ -270,8 +270,8 @@ global.document={currentScript:{nonce:""},createElement:function(){return {};},h
 global.WebAssembly={};
 var signFails=false;
 function wasm_bindgen(){return Promise.resolve();}
-wasm_bindgen.collect_and_encrypt_fingerprint=function(){return "v1.test";};
-wasm_bindgen.hmac_sha256=function(){if(signFails)throw new Error("sign failed");return "signed";};
+wasm_bindgen.gm_encrypt_fingerprint=function(){return "T1dWRQICAEBMLRg4CH_vR-9qqIKeujT3V4ekNp7FCQndrZ-HEJp0T2bDu1tFknRgIPYpkRf4VfxhhpvvnLTR0eNQOXfTQsHKMCJxGN01eVAtMbppyIS8fMG-XS2yUmmUQ8ejUuACiyIKYMuzBTjwKPyo-lPFee7yRT_SGkE0LNQSEhWuKM8FWLxVC0fDSCmAshyRRUp-A6H8xuJAAW6dGSvOyoqcDQiL59lVE1-tOucxfcIXINJH1aX8c0apDEcIgV-pX2hqo35TdiwOimUB2REwA2ocr9zw1nW7Vi4pjfoN429HYZZtllOWgG1zcLnN0rWLuMT0Q4FsGrcRmmFaSLaUPxibmhyzGboGldZmr8A21hur4trKGhhvZ6w9WlLLGh5lHHnKPAf-EamW5ZFxaPzjO6N2C_r4U9tV3JJnarsR2lPgYosCF3i6bXloyF2UCGXH4f8Q9sre2-sTDaylo-o0_6y4Jia7-d0DGGxiIgKSYev6vVItRD2zTfGz_-5vtLASj6Lzg3hc6s7vBO3SPv37PpUbQpwEYQiYgkt_VTMpnXaEhapiizHEpDSRg3taNtDVTwh6_tA0ta8f2lwSkvNu4KogS3IUEKL9p53NuEpWzIw0IolEdiuhjinWb23pMz0kZ4myrIZuF-h0vr5mNZxszkzTO2j2Jrm_7RdmQqjUYoaD9HfhywgB1vcdFEJkSNILyE88TrlTJyOydIidCCzRvtn2UplmjOI4G-Q_dudZP0RbMi0bDUiXR4hCtmaWx6bLAkwz-oVO-DswYx-L1D81ktqAcxBRM-hbp__nRGEjhYYlKyCOweQ0Ayivm8RYTKacVjCVUmTBMXsR-YvFxE8Fs0qJ_xiQKlypqBtcoOSfJXvKDiwqmSiSz4vlAu2usJh5UE58fQMcmcgARqCFpyoIe2OIGiVyejly2bwGFmLAfTX1tS19lF7Rrcu2nZo2i3pjAN902KFKkgTMsUNVlQYeZAEooaFNdmPWpqHss8pdLt4pKAX_8VW_rW8EPVwRqLUt91RKUHu8h0NBz9FUIT9yxD_6sSjK_DjDzBLsX--ZEsRiS43xSkc8Oy05vVbYmzd0zFZltFeKrV35awg4ZdFvZyRcHi109nxIwOqcuCawk_WAuJmDScevJkgDj1WCJbzn4uiL_vkBP3QnIGyvYROhEzTF_nx51VCimmBVeORd-0MtNLgTboz-hGVP_AjXEYa75wuAFY"};
+wasm_bindgen.gm_sm3_hmac=function(){if(signFails)throw new Error("sign failed");return "signed";};
 global.wasm_bindgen=wasm_bindgen;
 var mode="network-fail";
 var calls=[];
@@ -310,7 +310,7 @@ func TestBrowserSignRequestMACDeterministic(t *testing.T) {
 	SetChallengeSecret([]byte("fixed-secret"))
 	nonce := "abc"
 	ts := int64(1700000000)
-	env := "v1.envelope"
+	env := "T1dWRQICAEBMLRg4CH_vR-9qqIKeujT3V4ekNp7FCQndrZ-HEJp0T2bDu1tFknRgIPYpkRf4VfxhhpvvnLTR0eNQOXfTQsHKMCJxGN01eVAtMbppyIS8fMG-XS2yUmmUQ8ejUuACiyIKYMuzBTjwKPyo-lPFee7yRT_SGkE0LNQSEhWuKM8FWLxVC0fDSCmAshyRRUp"
 	a := browserSignRequestMAC(nonce, "get", "/api/x", "q=1", ts, env)
 	b := browserSignRequestMAC(nonce, "GET", "/api/x", "q=1", ts, env)
 	if a != b {
@@ -319,7 +319,7 @@ func TestBrowserSignRequestMACDeterministic(t *testing.T) {
 	if a == browserSignRequestMAC(nonce, "GET", "/api/x", "q=2", ts, env) {
 		t.Fatal("mac should bind raw query")
 	}
-	if a == browserSignRequestMAC(nonce, "GET", "/api/x", "q=1", ts, "v1.other") {
+	if a == browserSignRequestMAC(nonce, "GET", "/api/x", "q=1", ts, env+"mutated") {
 		t.Fatal("mac should bind environment envelope")
 	}
 	if got := browserSignRequestMAC(nonce, "GET", "/api/x?q=1", "", ts, env); got != a {
@@ -329,9 +329,8 @@ func TestBrowserSignRequestMACDeterministic(t *testing.T) {
 		t.Fatalf("query prefix normalization mismatch got=%s want=%s", got, a)
 	}
 	key := browserSignRequestKey(nonce)
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte("GET|/api/x|q=1|1700000000|abc|v1.envelope"))
-	want := hex.EncodeToString(mac.Sum(nil))
+	sum := sm3HMAC(key, "GET|/api/x|q=1|1700000000|abc|"+env)
+	want := hex.EncodeToString(sum)
 	if a != want {
 		t.Fatalf("mac mismatch got=%s want=%s", a, want)
 	}

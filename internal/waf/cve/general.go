@@ -820,6 +820,20 @@ var (
 	reFortinetHostcheck     = regexp.MustCompile(`(?i)/remote/hostcheck_validate`)
 	reFortinetAuthHash      = regexp.MustCompile(`(?i)AuthHash=[^;]*(?:enc=|%65%6e%63%3d)?[A-Za-z0-9+/=%]{80,}`)
 
+	// JetBrains TeamCity 2024.03 之前未认证管理员创建（CVE-2024-27198）
+	// 公开 PoC 形态：POST /hax?jsp=/app/rest/users;.jsp 新建用户后再更新角色。
+	reTeamCityHax     = regexp.MustCompile(`(?i)/hax\?(?:jsp|pathSegment)=`)
+	reTeamCityRestJSP = regexp.MustCompile(`(?i)/app/rest/users;\.jsp`)
+
+	// Jenkins 2.441/2.426.2 及 LTS 之前的任意文件读取（CVE-2024-23897）
+	reJenkinsTraversal = regexp.MustCompile(`(?i)/jnlpJars/[^?\s]*\.\./`)
+
+	// Apache Spark 表达式语言注入（CVE-2022-33891）：未启用 ACL 时执行任意命令
+	reSparkDoAs = regexp.MustCompile("(?i)(?:^|[&?])doAs=`[^`]{1,64}`")
+
+	// Spring CoreJDK >= 9 数据绑定 RCE（CVE-2022-22965，Spring4Shell）
+	reSpring4ShellParam = regexp.MustCompile(`(?i)(?:^|&)(?:class|Class)[^=&]{0,256}\.(?:module|classLoader)`)
+
 	// --- New rules ---
 
 	// Spring Data REST RCE (CVE-2017-8046): JSON Patch with SpEL
@@ -1061,6 +1075,36 @@ func NewGeneralCVEDetector() *GeneralCVEDetector {
 			target:      "all",
 			matchAll:    true,
 		},
+		{
+			cveID: "CVE-2024-27198", severity: "critical",
+			description: "JetBrains TeamCity 未认证管理员用户创建与角色提权 RCE",
+			patterns:    []*regexp.Regexp{reTeamCityHax},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2024-27198", severity: "critical",
+			description: "JetBrains TeamCity PathSegment 伪造体携带 /app/rest/users;.jsp 用户创建",
+			patterns:    []*regexp.Regexp{reTeamCityRestJSP},
+			target:      "all",
+		},
+		{
+			cveID: "CVE-2024-23897", severity: "high",
+			description: "Jenkins CLI WebSocket 端点路径遍历任意文件读取",
+			patterns:    []*regexp.Regexp{reJenkinsTraversal},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2022-33891", severity: "critical",
+			description: "Apache Spark 启用 ACL 前 doAs 参数命令注入",
+			patterns:    []*regexp.Regexp{reSparkDoAs},
+			target:      "url",
+		},
+		{
+			cveID: "CVE-2022-22965", severity: "critical",
+			description: "Spring4Shell class 属性赋值链数据绑定 RCE（URL 参数变体）",
+			patterns:    []*regexp.Regexp{reSpring4ShellParam},
+			target:      "url",
+		},
 	}
 	return d
 }
@@ -1092,7 +1136,8 @@ func shouldScanGeneralRule(req *CVERequest, rule generalCVERule, hits *subDetect
 		"CVE-2025-10035", "CVE-2025-41243", "CVE-2025-47916", "CVE-2025-31161",
 		"CVE-2025-32756", "CVE-2024-SENSFILE", "CVE-2017-8046", "CVE-2023-1454",
 		"CVE-2021-21351", "CVE-2019-3929", "CVE-2024-REMOTECALL", "CVE-2024-XXEUTF7",
-		"CVE-2024-LDAPI", "CVE-2024-LOWCMD":
+		"CVE-2024-LDAPI", "CVE-2024-LOWCMD", "CVE-2024-27198", "CVE-2024-23897",
+		"CVE-2022-33891", "CVE-2022-22965":
 		return subDetectorACGate(rule.cveID, rule.target, hits)
 	default:
 		return true

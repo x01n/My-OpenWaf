@@ -73,6 +73,8 @@ type UnifiedWriter struct {
 	// 使用窄接口避免 observability 依赖 store/repository，且允许测试注入轻量替身。
 	countCacheMu          sync.RWMutex
 	countCacheInvalidator interface{ InvalidateAll() }
+	sqliteFlusher         *sqliteBulkFlusher
+	sqliteFlusherInitOnce sync.Once
 }
 
 // 队列容量上限（与 internal/core/config.go QueueConfig 注释保持一致）。
@@ -83,14 +85,13 @@ const (
 	unifiedWriterMaxFlushInterval   = 60 * time.Second
 )
 
-// 管道项的默认容量。DefaultUnifiedWriterOptions 返回这些值；
-// 切换到 DefaultQueueConfig 的语义不会改变运行时行为。
+// 管道项的默认容量。DefaultUnifiedWriterOptions 返回这些值。
+// BatchSize 经 SQLite 写径审计由 64 上调至 256，其余取值与 DefaultQueueConfig 严格同步。
 const (
 	defaultUnifiedWriterEventBufferSize = 16384
 	defaultUnifiedWriterDropBufferSize  = 8192
-	defaultUnifiedWriterBatchSize       = 64
+	defaultUnifiedWriterBatchSize       = 256
 	defaultUnifiedWriterFlushInterval   = 3 * time.Second
-	defaultUnifiedWriterDrainLimit      = 2048
 )
 
 type UnifiedWriterOptions struct {
@@ -106,8 +107,8 @@ type UnifiedWriterOptions struct {
 	FlushInterval time.Duration
 }
 
-// DefaultUnifiedWriterOptions 返回与原硬编码常量一一对应的默认值。
-// 切换后不改变任何运行时行为。
+// DefaultUnifiedWriterOptions 返回生产默认值；除 BatchSize 外均与参数化前
+// 的硬编码常量一致。BatchSize 经 SQLite 写径审计由 64 上调至 256。
 func DefaultUnifiedWriterOptions() UnifiedWriterOptions {
 	return UnifiedWriterOptions{
 		EventBufferSize: defaultUnifiedWriterEventBufferSize,
@@ -270,8 +271,8 @@ func NewUnifiedWriterWithOptions(db *gorm.DB, log *slog.Logger, opt UnifiedWrite
 		stopCh:        make(chan struct{}),
 		flushInterval: opt.FlushInterval,
 		batchSize:     opt.BatchSize,
-		// 4×BatchSize 与原 unifiedWriterDrainLimit = 2048 (4×512) 对齐；
-		// BatchSize 收紧时 drainLimit 跟着收，避免单批事务超出整体阈值。
+		// drainLimit 取 4×BatchSize，避免单批事务超出批阈值的整体规模；
+		// BatchSize 收紧时 drainLimit 跟着收，放宽时跟着放。
 		drainLimit: 4 * opt.BatchSize,
 	}
 	w.wg.Add(1)
@@ -484,6 +485,11 @@ func (w *UnifiedWriter) Close() {
 
 	select {
 	case <-done:
+		// writer goroutine 已随 wg.Wait 退出，此后不再有 ensureStmtFor 的
+		// 并发写入，可安全释放长期语句（幂等；未初始化时为 nil 空操作）。
+		if w.sqliteFlusher != nil {
+			w.sqliteFlusher.closeAll()
+		}
 	case <-time.After(unifiedWriterCloseTimeout + unifiedWriterCloseGrace):
 		if w.log != nil {
 			w.log.Error("unified writer close timed out, abandoning drain",
@@ -552,10 +558,10 @@ func (w *UnifiedWriter) loop() {
 /**
  * drainAllAndFlush 在关停时把四个缓冲区全部排空落库。
  *
- * 稳态路径复用 drainChanInto 的 2048 上限是为了限制单次事务体积，但关停只有一次
- * 机会：沿用该上限会让缓冲区里超出 2048 的部分随进程静默消失，且不计入任何丢弃
- * 计数器（事件与访问日志缓冲区容量各 16384，最坏一类丢 14336 条）。这里改为循环
- * 排空到通道空，每轮仍按 2048 分批以保持事务体积可控。
+ * 稳态路径复用 drainChanInto 的 drainLimit 上限是为了限制单次事务体积，但关停只有一次
+ * 机会：沿用该上限会让缓冲区里超出 drainLimit 的部分随进程静默消失，且不计入任何丢弃
+ * 计数器（事件与访问日志缓冲区容量各 16384，最坏一类丢 16384-drainLimit 条）。这里改为循环
+ * 排空到通道空，每轮仍按 drainLimit 分批以保持事务体积可控。
  *
  * 时间预算是必需的：DB 已经不可用时每批 flush 都会失败重试，无限循环会让进程无法
  * 退出。超出 unifiedWriterCloseTimeout 后放弃剩余记录，并把它们计入对应类型的丢弃
@@ -681,11 +687,40 @@ func (w *UnifiedWriter) flushBuffered(
 	}
 
 	// Single DB transaction for all types, with one SAVEPOINT per record type so a
-	// failing type cannot take the others down with it.
+	// failing type cannot take the others down with it. On the sqlite dialect the
+	// long-lived statement path replaces CreateInBatches per type; everything else
+	// (transaction, per-type SAVEPOINT, failure accounting) stays byte-identical.
+	bf := w.sqliteFlusherFor()
 	err := w.db.Transaction(func(tx *gorm.DB) error {
-		if w.flushType(tx, "security_events", len(events), func() error {
+		var writeSecurity = func() error {
+			if bf != nil {
+				_, err := bf.execRowsInTx(tx, "security_events", rowsToAny(events))
+				return err
+			}
 			return tx.CreateInBatches(events, w.batchSize).Error
-		}, &failed) {
+		}
+		var writeAccess = func() error {
+			if bf != nil {
+				_, err := bf.execRowsInTx(tx, "access_logs", rowsToAny(accessLogs))
+				return err
+			}
+			return tx.CreateInBatches(accessLogs, w.batchSize).Error
+		}
+		var writeDrop = func() error {
+			if bf != nil {
+				_, err := bf.execRowsInTx(tx, "drop_events", rowsToAny(dropEvents))
+				return err
+			}
+			return tx.CreateInBatches(dropEvents, w.batchSize).Error
+		}
+		var writeBot = func() error {
+			if bf != nil {
+				_, err := bf.execRowsInTx(tx, "bot_score_logs", rowsToAny(botScores))
+				return err
+			}
+			return tx.CreateInBatches(botScores, w.batchSize).Error
+		}
+		if w.flushType(tx, "security_events", len(events), writeSecurity, &failed) {
 			persistedRecords += len(events)
 			if len(events) > 0 {
 				invalidationPrefixes = append(invalidationPrefixes, "se_count:v2")
@@ -693,9 +728,7 @@ func (w *UnifiedWriter) flushBuffered(
 		} else {
 			failedRecords += len(events)
 		}
-		if w.flushType(tx, "access_logs", len(accessLogs), func() error {
-			return tx.CreateInBatches(accessLogs, w.batchSize).Error
-		}, &failed) {
+		if w.flushType(tx, "access_logs", len(accessLogs), writeAccess, &failed) {
 			persistedRecords += len(accessLogs)
 			if len(accessLogs) > 0 {
 				invalidationPrefixes = append(invalidationPrefixes, "al_count:v2", "al_list:v1")
@@ -703,9 +736,7 @@ func (w *UnifiedWriter) flushBuffered(
 		} else {
 			failedRecords += len(accessLogs)
 		}
-		if w.flushType(tx, "drop_events", len(dropEvents), func() error {
-			return tx.CreateInBatches(dropEvents, w.batchSize).Error
-		}, &failed) {
+		if w.flushType(tx, "drop_events", len(dropEvents), writeDrop, &failed) {
 			persistedRecords += len(dropEvents)
 			if len(dropEvents) > 0 {
 				invalidationPrefixes = append(invalidationPrefixes, "de_count")
@@ -713,9 +744,7 @@ func (w *UnifiedWriter) flushBuffered(
 		} else {
 			failedRecords += len(dropEvents)
 		}
-		if w.flushType(tx, "bot_scores", len(botScores), func() error {
-			return tx.CreateInBatches(botScores, w.batchSize).Error
-		}, &failed) {
+		if w.flushType(tx, "bot_scores", len(botScores), writeBot, &failed) {
 			persistedRecords += len(botScores)
 		} else {
 			failedRecords += len(botScores)
@@ -732,6 +761,33 @@ func (w *UnifiedWriter) flushBuffered(
 	if persistedRecords > 0 {
 		w.invalidateCountCache(invalidationPrefixes...)
 	}
+}
+
+// sqliteFlusherFor 惰性判断当前 LogDB 是否为 sqlite 方言并初始化长期语句
+// 快路径。非 sqlite（或初始化失败）返回 nil，调用方落回 GORM 原路径。
+// 判断依据：db.Config.Dialector.Name() == "sqlite"（与 internal/core/database
+// 的引擎判定同源；探针阶段另有独立 DTFORM 检测，此处以方言名收敛）。
+func (w *UnifiedWriter) sqliteFlusherFor() *sqliteBulkFlusher {
+	if w.sqliteFlusher != nil {
+		return w.sqliteFlusher
+	}
+	if w.db == nil || w.db.Dialector == nil || w.db.Dialector.Name() != "sqlite" {
+		return nil
+	}
+	w.sqliteFlusherInitOnce.Do(func() {
+		bf := newSQLiteBulkFlusher(w.log)
+		if bf == nil {
+			return
+		}
+		if err := bf.attachSQLDB(w.db); err != nil {
+			if w.log != nil {
+				w.log.Warn("sqlite bulk flusher disabled", slog.Any("err", err))
+			}
+			return
+		}
+		w.sqliteFlusher = bf
+	})
+	return w.sqliteFlusher
 }
 
 /**

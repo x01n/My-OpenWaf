@@ -80,6 +80,8 @@ interface FeedForm {
   sync_interval: number
   scope: string
   enabled: boolean
+  authHeaderName: string
+  authHeaderValue: string
 }
 
 const emptyForm: FeedForm = {
@@ -90,6 +92,8 @@ const emptyForm: FeedForm = {
   sync_interval: 3600,
   scope: SCOPE_GLOBAL,
   enabled: true,
+  authHeaderName: "",
+  authHeaderValue: "",
 }
 
 export default function ThreatIntelPage() {
@@ -198,6 +202,8 @@ function FeedsTab() {
           ? SCOPE_GLOBAL
           : String(feed.site_id),
       enabled: feed.enabled,
+      authHeaderName: feed.auth_header_name ?? "",
+      authHeaderValue: feed.auth_header_value ?? "",
     })
     setDialogOpen(true)
   }
@@ -213,6 +219,8 @@ function FeedsTab() {
         sync_interval: form.sync_interval,
         enabled: form.enabled,
         site_id: form.scope === SCOPE_GLOBAL ? null : Number(form.scope),
+        auth_header_name: form.authHeaderName.trim() || null,
+        auth_header_value: form.authHeaderValue.trim() || null,
       }
       await mutateFeed({ id: editId ?? undefined, data: payload })
       toast.success(
@@ -500,6 +508,35 @@ function FeedsTab() {
                   className="font-mono text-sm"
                 />
               </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>{t("threatIntel.authHeaderName")}</Label>
+                  <Input
+                    value={form.authHeaderName}
+                    maxLength={100}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, authHeaderName: e.target.value }))
+                    }
+                    placeholder={t("threatIntel.authHeaderNamePlaceholder")}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("threatIntel.authHeaderValue")}</Label>
+                  <Input
+                    type="password"
+                    value={form.authHeaderValue}
+                    maxLength={512}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, authHeaderValue: e.target.value }))
+                    }
+                    placeholder={t("threatIntel.authHeaderValuePlaceholder")}
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t("threatIntel.authHeaderHint")}
+              </p>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label>{t("threatIntel.kind")}</Label>

@@ -46,21 +46,36 @@ func TestCaptchaManagerGeneratesSlideWhenGoCaptchaAvailable(t *testing.T) {
 	if challenge.Type != string(CaptchaTypeSlide) {
 		t.Fatalf("generated captcha type = %q, want %q", challenge.Type, CaptchaTypeSlide)
 	}
-	if challenge.Fallback {
-		t.Fatal("available go-captcha provider unexpectedly marked slide challenge as fallback")
+	if challenge.CaptchaData == "" {
+		t.Fatal("slide challenge did not include an encrypted challenge data envelope")
 	}
-	if challenge.MasterImg == "" || challenge.ThumbImg == "" {
-		t.Fatal("slide challenge did not include both generated images")
+	if challenge.MasterImg != "" || challenge.ThumbImg != "" {
+		t.Fatal("slide challenge still carries plaintext image fields")
 	}
-	if !strings.HasPrefix(challenge.MasterImg, "data:image/jpeg;base64,") {
+	payload := DecryptChallengeData(challenge.CaptchaData, slideChallengeSessionKey(t, manager, challenge.SessionID))
+	if payload == nil {
+		key := slideChallengeSessionKey(t, manager, challenge.SessionID)
+		t.Fatalf("challenge envelope did not decrypt (key=%x data=%q)", key, challenge.CaptchaData)
+	}
+	if !strings.HasPrefix(payload.MasterImg, "data:image/jpeg;base64,") {
 		t.Fatal("slide master image is not a JPEG data URI")
 	}
-	if !strings.HasPrefix(challenge.ThumbImg, "data:image/png;base64,") {
+	if !strings.HasPrefix(payload.ThumbImg, "data:image/png;base64,") {
 		t.Fatal("slide tile image is not a PNG data URI")
 	}
-	if strings.HasPrefix(challenge.MasterImg, "data:image/jpeg;base64,data:") || strings.HasPrefix(challenge.ThumbImg, "data:image/png;base64,data:") {
+	if strings.HasPrefix(payload.MasterImg, "data:image/jpeg;base64,data:") || strings.HasPrefix(payload.ThumbImg, "data:image/png;base64,data:") {
 		t.Fatal("slide challenge contains a nested data URI prefix")
 	}
+}
+
+// slideChallengeSessionKey 从内存会话中取出签发时使用的 EnvKey，供测试解密信封。
+func slideChallengeSessionKey(t *testing.T, cm *CaptchaManager, sessionID string) []byte {
+	t.Helper()
+	_, envKey, _, found := CaptchaManagerPendingForTest(cm, sessionID)
+	if !found || len(envKey) != envSessionKeySize {
+		t.Fatalf("pending session %q env key missing", sessionID)
+	}
+	return envKey
 }
 
 /**

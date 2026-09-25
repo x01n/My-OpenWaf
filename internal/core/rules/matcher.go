@@ -521,23 +521,25 @@ func (m *bodyRegexMatcher) Match(ctx MatchCtx) bool {
 
 // bodyJSONPathMatcher checks if a dot-notation JSON path exists and optionally matches a pattern.
 type bodyJSONPathMatcher struct {
-	jsonPath string // e.g. "$.user.role"
+	jsonPath string   // e.g. "$.user.role"
+	parts    []string // jsonPath split by "." at compile time, "$." prefix removed
 	pattern  *regexp.Regexp
 }
 
 func (m *bodyJSONPathMatcher) Match(ctx MatchCtx) bool {
-	if len(ctx.Body) == 0 {
+	if len(ctx.Body) == 0 || len(m.parts) == 0 {
 		return false
 	}
-	var raw map[string]any
-	if json.Unmarshal(ctx.Body, &raw) != nil {
-		return false
+	raw, cached := cachedJSONBodyObject(ctx)
+	if !cached {
+		if json.Unmarshal(ctx.Body, &raw) != nil {
+			storeJSONBodyObject(ctx, nil)
+			return false
+		}
+		storeJSONBodyObject(ctx, raw)
 	}
-	// Strip leading "$." if present.
-	path := strings.TrimPrefix(m.jsonPath, "$.")
-	parts := strings.Split(path, ".")
 	var current any = raw
-	for _, part := range parts {
+	for _, part := range m.parts {
 		obj, ok := current.(map[string]any)
 		if !ok {
 			return false
@@ -561,6 +563,32 @@ func (m *bodyJSONPathMatcher) Match(ctx MatchCtx) bool {
 		val = string(b)
 	}
 	return m.pattern.MatchString(val)
+}
+
+// cachedJSONBodyObject returns the lazily parsed JSON object for the request
+// body carried on the shared RequestCtx, so N block_body_json_path rules
+// unmarshal the body at most once per request. done 为 true 时 loaded 可能为
+// nil（解析失败已缓存）。
+func cachedJSONBodyObject(ctx MatchCtx) (loaded map[string]any, done bool) {
+	if ctx.reqCtx == nil {
+		return nil, false
+	}
+	return ctx.reqCtx.CachedJSONBodyObject()
+}
+
+// storeJSONBodyObject writes the parse result (success 或失败) 回共享 RequestCtx。
+func storeJSONBodyObject(ctx MatchCtx, obj map[string]any) {
+	if ctx.reqCtx != nil {
+		ctx.reqCtx.StoreJSONBodyObject(obj)
+	}
+}
+
+// splitJSONPathParts pre-splits a dot-notation JSON path at compile time,
+// removing the optional "$." prefix. 空段原样保留：与原实现的
+// strings.Split 结果逐 token 一致，"" 段会按字面查找对应键（与旧行为相同）。
+func splitJSONPathParts(jsonPath string) []string {
+	path := strings.TrimPrefix(jsonPath, "$.")
+	return strings.Split(path, ".")
 }
 
 // multipartMatcher checks multipart upload filenames for suspicious extensions.
@@ -686,7 +714,7 @@ func (m *queryParamMatcher) Match(ctx MatchCtx) bool {
 	if ctx.Query == "" || !rawQueryMayContainParam(ctx.Query, m.param) {
 		return false
 	}
-	values, err := url.ParseQuery(ctx.Query)
+	values, err := cachedQueryValues(ctx)
 	if err != nil {
 		return false
 	}
@@ -709,7 +737,7 @@ func (m *queryParamExactMatcher) Match(ctx MatchCtx) bool {
 	if ctx.Query == "" || !rawQueryMayContainParam(ctx.Query, m.param) {
 		return false
 	}
-	values, err := url.ParseQuery(ctx.Query)
+	values, err := cachedQueryValues(ctx)
 	if err != nil {
 		return false
 	}
@@ -729,7 +757,7 @@ func (m *queryParamRegexMatcher) Match(ctx MatchCtx) bool {
 	if ctx.Query == "" || !rawQueryMayContainParam(ctx.Query, m.param) {
 		return false
 	}
-	values, err := url.ParseQuery(ctx.Query)
+	values, err := cachedQueryValues(ctx)
 	if err != nil {
 		return false
 	}
@@ -743,6 +771,31 @@ func (m *queryParamRegexMatcher) Match(ctx MatchCtx) bool {
 		}
 	}
 	return false
+}
+
+// cachedQueryValues returns the lazily parsed query values carried on the
+// shared RequestCtx. 与 Lua 语义的 RequestCtx.QueryValues 不同：这里以
+// net/url.QueryUnescape 规则解析 raw query 的完整值列表，只服务编译后
+// query_param 类匹配器。MatchCtx 缺 RequestCtx（纯值测试）时回退为
+// url.ParseQuery，保持与原实现一致。
+var errQueryParseFailed = errors.New("query parse failed")
+
+func cachedQueryValues(ctx MatchCtx) (url.Values, error) {
+	const normalize = ';'
+	if ctx.reqCtx != nil {
+		if values, cached := ctx.reqCtx.CachedMatcherQueryValues(); cached {
+			return values, nil
+		}
+	}
+	raw := strings.ReplaceAll(ctx.Query, ";", "&")
+	values, perr := url.ParseQuery(raw)
+	if perr != nil {
+		return nil, errQueryParseFailed
+	}
+	if ctx.reqCtx != nil {
+		ctx.reqCtx.StoreMatcherQueryValues(values)
+	}
+	return values, nil
 }
 
 func (m *pathContainsMatcher) Match(ctx MatchCtx) bool {
@@ -1682,7 +1735,7 @@ func buildMatcher(kind, arg string) Matcher {
 				return &neverMatcher{}
 			}
 		}
-		return &bodyJSONPathMatcher{jsonPath: jsonPath, pattern: re}
+		return &bodyJSONPathMatcher{jsonPath: jsonPath, parts: splitJSONPathParts(jsonPath), pattern: re}
 
 	case "block_multipart":
 		// arg is a regex pattern to match against uploaded filenames

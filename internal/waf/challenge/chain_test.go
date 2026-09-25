@@ -112,6 +112,7 @@ func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
 		Answer:    `{"0":{"index":0,"x":10,"y":20,"width":1,"height":1}}`,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(time.Minute),
+		EnvKey:    testSessionKey,
 	}
 
 	mgr := NewChainChallengeManager(captchaManager, nil)
@@ -126,9 +127,9 @@ func TestChainCaptchaUsesAdvancedVerification(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	ok, redirect, nextHTML := mgr.ProcessStep(chainSession, map[string]string{"captcha_answer": `[{"x":12,"y":20}]`})
-	if !ok || redirect != "/protected" || nextHTML != "" {
-		t.Fatalf("advanced chain captcha answer was not verified: ok=%v redirect=%q html=%q", ok, redirect, nextHTML)
+	outcome := mgr.ProcessStepDetailedWithBinding(chainSession, map[string]string{"captcha_answer": mustEnvelope(t, `[{"x":12,"y":20}]`, testSessionKey)}, ChallengeSessionBinding{})
+	if !outcome.Passed || outcome.RedirectURL != "/protected" || outcome.NextHTML != "" {
+		t.Fatalf("advanced chain captcha answer was not verified: %+v", outcome)
 	}
 }
 
@@ -186,7 +187,7 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 	}
 	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce)
 	runtimeCfg := mgr.Config()
-	html := shieldPageHTMLWithConfig(session.ID, runtimeCfg, "h2", "", powScript)
+	html := shieldPageHTMLWithConfig(session.ID, runtimeCfg, "h2", "", "", powScript)
 
 	checks := []string{
 		`=1234`,
@@ -207,7 +208,7 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 func TestShieldPageNormalizesUnsafeProtocolBeforeRendering(t *testing.T) {
 	cfg := DefaultShieldConfig()
 	unsafeProtocol := `";alert(document.domain);//`
-	html := shieldPageHTMLWithConfig("session", cfg, unsafeProtocol, "", "")
+	html := shieldPageHTMLWithConfig("session", cfg, unsafeProtocol, "", "", "")
 
 	if strings.Contains(html, unsafeProtocol) || strings.Contains(html, "alert(document.domain)") {
 		t.Fatalf("shield page reflected unsafe protocol into inline script: %s", html)
@@ -395,19 +396,10 @@ func TestGeneratedPoWScriptEmbedsValidVMProgram(t *testing.T) {
 }
 
 func TestEnvCheckJSUsesWASMOnly(t *testing.T) {
-	script := EnvCheckJSPlain()
-	for _, forbidden := range []string{"navigator.webdriver", "JSON.stringify(fp)", "window.__owaf_env=fp"} {
-		if strings.Contains(script, forbidden) {
-			t.Fatalf("EnvCheckJSPlain() retained JavaScript security calculation %q: %s", forbidden, script)
-		}
-	}
-	if !strings.Contains(script, "wasm_bindgen.collect_fingerprint") {
-		t.Fatalf("EnvCheckJSPlain() did not call the WASM collector: %s", script)
-	}
-
+	// b0 强制化（A3）：EnvCheckJSPlain 已删除，只剩加密采集模板；禁止任何明文采集痕迹。
 	encrypted := EnvCheckJSEncrypted(
 		"aabbccdd112233445566778899001122aabbccdd112233445566778899001122",
-		"owaf-env:v1|challenge|1|example.test|:443|request",
+		"owaf-env:v2|challenge|1|example.test|:443|request",
 	)
 	if encrypted == "" {
 		t.Fatal("encrypted envcheck loader was not generated")
@@ -417,8 +409,8 @@ func TestEnvCheckJSUsesWASMOnly(t *testing.T) {
 			t.Fatalf("encrypted envcheck retained JavaScript security calculation %q: %s", forbidden, encrypted)
 		}
 	}
-	if !strings.Contains(encrypted, "wasm_bindgen.collect_and_encrypt_fingerprint") {
-		t.Fatalf("encrypted envcheck must call the WASM collector: %s", encrypted)
+	if !strings.Contains(encrypted, "wasm_bindgen.gm_encrypt_fingerprint") {
+		t.Fatalf("encrypted envcheck must call the GM WASM collector: %s", encrypted)
 	}
 }
 

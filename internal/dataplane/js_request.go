@@ -25,6 +25,15 @@ type jsRequestState struct {
 	contentType string
 }
 
+func ensureLuaQueryParams(reqCtx *pipeline.RequestCtx) {
+	if reqCtx == nil {
+		return
+	}
+	if reqCtx.QueryParams == nil && reqCtx.QueryValues == nil {
+		rules.PopulateLuaQueryParams(reqCtx)
+	}
+}
+
 // executeJSRequestStage executes request-stage scripts in snapshot order. A fail-open
 // script is skipped on execution or mutation failure; fail-closed returns the script
 // and error so the caller can terminate the request without exposing internals.
@@ -46,6 +55,8 @@ func executeJSRequestStage(
 		if script == nil || script.Stage() != store.JSStageRequest || !script.AppliesTo(reqCtx.SiteID) {
 			continue
 		}
+
+		ensureLuaQueryParams(reqCtx)
 
 		if !state.bodyLoaded {
 			state.body = string(reqCtx.Body)
@@ -187,6 +198,10 @@ func applyJSMutationPlan(
 	reqCtx.QueryParams = nil
 	reqCtx.QueryValues = nil
 	rules.PopulateLuaQueryParams(reqCtx)
+	if c != nil {
+		join := reqCtx.DerivedHeaderOrder(func() string { return strings.Join(reqCtx.HeaderKeys, ",") })
+		c.Set(wafReqCtxHeaderOrderCacheKey, &join)
+	}
 	return next, nil
 }
 
@@ -206,4 +221,44 @@ func clientIPString(reqCtx *pipeline.RequestCtx) string {
 		return ""
 	}
 	return reqCtx.ClientIP.String()
+}
+
+const dataplaneJSResponseRuntimeKey = "dataplane_js_response_runtime"
+
+// ContextWithJSResponseRuntime 把响应阶段执行器与脚本挂到 hertz 请求上下文，
+// 供 internal/proxy 的响应变换链读取。executor 为 nil 等价于运行时不可用，
+// 变换链按 fail-open 跳过。
+func ContextWithJSResponseRuntime(c *app.RequestContext, executor jsplugin.ResponseExecutor, scripts []*jsplugin.Script) {
+	if c == nil {
+		return
+	}
+	c.Set(dataplaneJSResponseRuntimeKey, jsResponseRuntime{Executor: executor, Scripts: scripts})
+}
+
+// jsResponseRuntime 是响应阶段执行编排所需的两件套（请求上下文值）。
+type jsResponseRuntime struct {
+	Executor jsplugin.ResponseExecutor
+	Scripts  []*jsplugin.Script
+}
+
+// JSResponseRuntimeFromRequestContext 取回数据面附着在请求上的响应运行时。
+func JSResponseRuntimeFromRequestContext(c *app.RequestContext) (jsplugin.ResponseExecutor, []*jsplugin.Script) {
+	if c == nil {
+		return nil, nil
+	}
+	value, ok := c.Get(dataplaneJSResponseRuntimeKey)
+	if !ok {
+		return nil, nil
+	}
+	runtimeValue, _ := value.(jsResponseRuntime)
+	return runtimeValue.Executor, runtimeValue.Scripts
+}
+
+// jspluginEngineAsResponseExecutor 把请求执行器转为响应执行器视图。
+//
+// jsplugin.Engine 同时实现 Executor 与 ResponseExecutor；此处仅做类型断言，
+// 避免在 handler 中重复。executor 为 nil 或未实现 ResponseExecutor 时返回 nil。
+func jspluginEngineAsResponseExecutor(executor jsplugin.Executor) jsplugin.ResponseExecutor {
+	responseExecutor, _ := executor.(jsplugin.ResponseExecutor)
+	return responseExecutor
 }

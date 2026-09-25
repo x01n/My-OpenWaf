@@ -78,7 +78,7 @@ type QueueConfig struct {
 	EventBufferSize int
 	// DropBufferSize 是 DropEvent / BotScoreLog 两类低频通道的容量。默认 8192；上限 1M。
 	DropBufferSize int
-	// BatchSize 是 UnifiedWriter 触发 flush 的批次阈值（按四类合计）。默认 64；上限 10K。
+	// BatchSize 是 UnifiedWriter 触发 flush 的批次阈值（按四类合计）。默认 256；上限 10K。
 	BatchSize int
 	// FlushInterval 是 UnifiedWriter 的定时 flush 周期。默认 3s；上限 60s。
 	FlushInterval time.Duration
@@ -98,14 +98,14 @@ const (
 	queueMaxFlushInterval   = 60 * time.Second
 )
 
-// DefaultQueueConfig returns the production defaults that match the previous
-// hard-coded constants in observability package. 通过配置项切换不会改变
-// 任何运行时行为——默认值与原常量一一对应。
+// DefaultQueueConfig returns the production defaults. 除 BatchSize 外均与
+// observability 包参数化前的硬编码常量一致；BatchSize 经 SQLite 写径审计由
+// 64 上调至 256。WriteQueue 各默认不变。
 func DefaultQueueConfig() QueueConfig {
 	return QueueConfig{
 		EventBufferSize:     16384,
 		DropBufferSize:      8192,
-		BatchSize:           64,
+		BatchSize:           256,
 		FlushInterval:       3 * time.Second,
 		WriteQueueBatchSize: 64,
 		WriteQueueCapacity:  256,

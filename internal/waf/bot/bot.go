@@ -35,6 +35,7 @@ type BotRequest struct {
 	Path           string
 	Headers        map[string]string
 	HeaderKeys     []string
+	HeaderOrder    string
 	AcceptHeader   string
 	AcceptLanguage string
 	AcceptEncoding string
@@ -396,16 +397,18 @@ func toASCIILower(b byte) byte {
 }
 
 func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver) BotScore {
-	bs := BotScore{Details: make(map[string]string)}
+	// Details 保持 nil 直到首个 detail 写入：干净流量不产生 map 分配。
+	// 写入统一走 setDetail，nil map 时提前分配，天然保持旧行为。
+	var bs BotScore
 	if geo != nil && r.ClientIP != nil {
 		bs.GeoIPScore = geo.ScoreIP(r.ClientIP)
 		if bs.GeoIPScore > 0 {
 			info := geo.Lookup(r.ClientIP)
 			if info.ASN != 0 {
-				bs.Details["geoip_asn"] = info.ASNOrg
+				bs.setDetail("geoip_asn", info.ASNOrg)
 			}
 			if info.Country != "" {
-				bs.Details["geoip_country"] = info.Country
+				bs.setDetail("geoip_country", info.Country)
 			}
 		}
 	}
@@ -415,7 +418,7 @@ func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver)
 	fpReasons = append(fpReasons, hoReasons...)
 	bs.FingerprintScore = fpScore
 	if len(fpReasons) > 0 {
-		bs.Details["fingerprint"] = strings.Join(fpReasons, ",")
+		bs.setDetail("fingerprint", strings.Join(fpReasons, ","))
 	}
 	if ipRepSvc != nil && r.ClientIP != nil {
 		dec := ipRepSvc.Check(r.ClientIP)
@@ -428,30 +431,48 @@ func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver)
 			default:
 				bs.IPRepScore = 15
 			}
-			bs.Details["iprep"] = dec.Category + ": " + dec.Reason
+			bs.setDetail("iprep", dec.Category+": "+dec.Reason)
 		}
 	}
 	if r.TLS.JA4 != "" {
-		bs.Details["tls_ja4"] = r.TLS.JA4
+		bs.setDetail("tls_ja4", r.TLS.JA4)
 	}
 	if r.TLS.JA3Hash != "" {
-		bs.Details["tls_ja3"] = r.TLS.JA3Hash
+		bs.setDetail("tls_ja3", r.TLS.JA3Hash)
 	}
 	if r.TLS.TLSVersion != "" {
-		bs.Details["tls_version"] = r.TLS.TLSVersion
+		bs.setDetail("tls_version", r.TLS.TLSVersion)
 	}
 	if r.TLS.SNI != "" {
-		bs.Details["tls_sni"] = r.TLS.SNI
+		bs.setDetail("tls_sni", r.TLS.SNI)
 	}
 	if len(r.TLS.ALPN) > 0 {
-		bs.Details["tls_alpn"] = strings.Join(r.TLS.ALPN, ",")
+		bs.setDetail("tls_alpn", strings.Join(r.TLS.ALPN, ","))
 	}
 	if len(r.HeaderKeys) > 0 {
-		bs.Details["header_order"] = strings.Join(r.HeaderKeys, ",")
+		order := r.HeaderOrder
+		if order == "" {
+			order = strings.Join(r.HeaderKeys, ",")
+		}
+		bs.setDetail("header_order", order)
 	}
 	bs.Total = bs.GeoIPScore + bs.FingerprintScore + bs.BehaviorScore + bs.IPRepScore
 	bs.IsHighRisk = bs.Total >= 80 || bs.GeoIPScore >= 40 || bs.IPRepScore >= 25
 	return bs
+}
+
+/**
+ * setDetail 写入一条 bot 详情。Details 为 nil 时先分配，
+ * 使 DeepScore 在干净流量（无任何 detail）下保持零 map 分配。
+ *
+ * @param key 详情字段名。
+ * @param value 详情字段值。
+ */
+func (bs *BotScore) setDetail(key, value string) {
+	if bs.Details == nil {
+		bs.Details = make(map[string]string)
+	}
+	bs.Details[key] = value
 }
 
 func fingerprintScore(r BotRequest) (score int, reasons []string) {

@@ -56,6 +56,7 @@ h1{font-size:1.15rem;font-weight:600;color:#334155;margin-bottom:4px}
 (function(){
 var sid={{.SessionID}},autoDelay={{.AutoStartDelay}},timeoutMs={{.TimeoutMS}},maxRetries={{.MaxRetries}},retryCount=0,enableEnv={{.EnableEnvCheck}},detectDev={{.EnableDevToolsDetect}},requireH2={{.RequireHTTP2}},requireH3={{.RequireHTTP3}},allowH1={{.AllowHTTP1}},requestProto={{.RequestProtocol}},pc=0,ph="",env="",solving=false,solved=false;
 {{.EnvJS}}
+{{.BehaviorJS}}
 var cbw=document.getElementById('cbw'),cbl=document.getElementById('cbl'),st=document.getElementById('st'),retry=document.getElementById('retry');
 
 function detectDevTools(){
@@ -65,8 +66,6 @@ if(w||h)return true;
 var dt=false;
 try{var el=new Image();Object.defineProperty(el,'id',{get:function(){dt=true}});console.log(el);console.clear()}catch(e){}
 if(dt)return true;
-if(window.__owaf_env&&window.__owaf_env.devtools_open)return true;
-if(window.__owaf_env&&window.__owaf_env.devtools_timing>50)return true;
 return false;
 }
 

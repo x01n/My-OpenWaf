@@ -23,6 +23,25 @@ func TestQuickJSCompileUsesName(t *testing.T) {
 	}
 }
 
+// TestQuickJSValidateWithOptionsAcceptsResponseStage 验证快速编译路径对
+// response 阶段的语法校验与 request 同轨。
+func TestQuickJSValidateWithOptionsAcceptsResponseStage(t *testing.T) {
+	if err := ValidateWithOptions(
+		store.JSStageResponse,
+		`export default {fetch() { return {}; }}`,
+		ScriptOptions{},
+	); err != nil {
+		t.Fatalf("ValidateWithOptions(response) error = %v", err)
+	}
+	if err := ValidateWithOptions(
+		"pre",
+		`export default {fetch() { return {}; }}`,
+		ScriptOptions{},
+	); err == nil {
+		t.Fatal("ValidateWithOptions(pre) error = nil, want unknown-stage error")
+	}
+}
+
 func TestQuickJSCompileValidationDeadlineIsIndependentFromRuntimeTimeout(t *testing.T) {
 	const workers = 16
 	const iterations = 4
@@ -84,14 +103,80 @@ func TestQuickJSEngineExecutesMutationPlan(t *testing.T) {
 	}
 }
 
-// TestQuickJSEngineRejectsResponseStage 确保调用方绕过 snapshot 过滤时，
-// response 阶段描述仍不能进入执行路径。
-func TestQuickJSEngineRejectsResponseStage(t *testing.T) {
+// TestQuickJSEngineExecutesResponseMutationPlan 通过真实 QuickJS 执行验证
+// response 阶段契约：fetch(response, env, ctx) 的响应快照字段与
+// ResponseMutationPlan 提取（body/set_headers/delete_headers）两条路径。
+func TestQuickJSEngineExecutesResponseMutationPlan(t *testing.T) {
 	script, err := CompileWithMetadata(
 		"response-stage",
-		`export default {fetch() { return {path: "/must-not-run"}; }}`,
+		`export default {
+			fetch(response) {
+				if (response.request_id !== "resp-1" || response.site_id !== 9 ||
+					response.status !== 200 || response.path !== "/api" ||
+					response.content_type !== "application/json" ||
+					response.body !== "{\"ok\":true}" ||
+					response.headers["x-upstream"] !== "u" ||
+					response.method !== "POST" || response.raw_query !== "q=1" ||
+					response.client_ip !== "192.0.2.10" ||
+					response.request_headers["x-client"] !== "c") {
+					throw new Error("response snapshot contract mismatch");
+				}
+				return {status: 201, body: response.body + "-done", set_headers: {"X-JS": String(response.status)}, delete_headers: ["X-Upstream"]};
+			}
+		}`,
+		ScriptOptions{},
+		ScriptMetadata{ID: 1, Stage: store.JSStageResponse, Priority: 10, FailureMode: store.JSFailureModeOpen},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	plan, err := engine.ExecuteResponse(context.Background(), script, ResponseSnapshot{
+		RequestID:      "resp-1",
+		SiteID:         9,
+		Status:         200,
+		Path:           "/api",
+		ContentType:    "application/json",
+		Body:           `{"ok":true}`,
+		Headers:        map[string]string{"x-upstream": "u"},
+		Method:         "POST",
+		RawQuery:       "q=1",
+		ClientIP:       "192.0.2.10",
+		RequestHeaders: map[string]string{"x-client": "c"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status == nil || *plan.Status != 201 || plan.Body == nil || *plan.Body != `{"ok":true}-done` {
+		t.Fatalf("unexpected response plan: %+v", plan)
+	}
+	if plan.SetHeaders["X-JS"] != "200" || len(plan.DeleteHeaders) != 1 || plan.DeleteHeaders[0] != "X-Upstream" {
+		t.Fatalf("unexpected response headers: %+v", plan)
+	}
+}
+
+// TestQuickJSEngineRejectsResponseStageOnRequestExecutor 确保 response 阶段
+// 脚本不得通过 request 执行入口运行，反之亦然。
+func TestQuickJSEngineRejectsCrossStageExecution(t *testing.T) {
+	responseScript, err := CompileWithMetadata(
+		"response-stage",
+		`export default {fetch() { return {status: 201}; }}`,
 		ScriptOptions{},
 		ScriptMetadata{Stage: store.JSStageResponse},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestScript, err := CompileWithMetadata(
+		"request-stage",
+		`export default {fetch() { return {path: "/must-not-run"}; }}`,
+		ScriptOptions{},
+		ScriptMetadata{Stage: store.JSStageRequest},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -105,23 +190,66 @@ func TestQuickJSEngineRejectsResponseStage(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{name: "execute", fn: func() error {
-			_, err := engine.Execute(context.Background(), script, RequestSnapshot{Method: "GET", Path: "/"})
+		{name: "response script via execute", fn: func() error {
+			_, err := engine.Execute(context.Background(), responseScript, RequestSnapshot{Method: "GET", Path: "/"})
 			return err
 		}},
-		{name: "validate", fn: func() error {
-			_, err := engine.Validate(context.Background(), script, CanonicalValidationRequest(0))
+		{name: "response script via validate", fn: func() error {
+			_, err := engine.Validate(context.Background(), responseScript, CanonicalValidationRequest(0))
+			return err
+		}},
+		{name: "request script via execute response", fn: func() error {
+			_, err := engine.ExecuteResponse(context.Background(), requestScript, CanonicalValidationResponse(0))
+			return err
+		}},
+		{name: "request script via validate response", fn: func() error {
+			_, err := engine.ValidateResponse(context.Background(), requestScript, CanonicalValidationResponse(0))
 			return err
 		}},
 	} {
 		t.Run(run.name, func(t *testing.T) {
-			if err := run.fn(); !errors.Is(err, ErrResponseStageUnavailable) {
-				t.Fatalf("error = %v, want %v", err, ErrResponseStageUnavailable)
+			if err := run.fn(); err == nil || !strings.Contains(err.Error(), "cannot use") {
+				t.Fatalf("error = %v, want cross-stage error", err)
 			}
 		})
 	}
-	if runs, failures, timeouts, average := script.Stats(); runs != 0 || failures != 0 || timeouts != 0 || average != 0 {
-		t.Fatalf("response-stage execution changed stats: runs=%d failures=%d timeouts=%d average=%s", runs, failures, timeouts, average)
+	if runs, failures, timeouts, average := responseScript.Stats(); runs != 0 || failures != 0 || timeouts != 0 || average != 0 {
+		t.Fatalf("cross-stage rejection changed stats: runs=%d failures=%d timeouts=%d average=%s", runs, failures, timeouts, average)
+	}
+}
+
+// TestQuickJSEngineRejectsResponseMutationPlanUnsafeChanges 验证响应计划在
+// host 应用前就被拒绝：越界状态码、保留头、请求侧未知字段。
+func TestQuickJSEngineRejectsResponseMutationPlanUnsafeChanges(t *testing.T) {
+	engine, err := NewEngine(EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	cases := []struct {
+		name       string
+		returnExpr string
+	}{
+		{name: "status below range", returnExpr: `{status: 99}`},
+		{name: "content length set", returnExpr: `{body: "fine", set_headers: {"Content-Length": "1"}}`},
+		{name: "request-only field", returnExpr: `{status: 200, method: "GET"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script, err := CompileWithMetadata(
+				tc.name,
+				`export default {fetch() { return `+tc.returnExpr+`; }}`,
+				ScriptOptions{},
+				ScriptMetadata{Stage: store.JSStageResponse},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := engine.EvaluateResponse(context.Background(), script, ResponseSnapshot{SiteID: 1})
+			if err == nil || plan.Status != nil || plan.Body != nil || plan.SetHeaders != nil {
+				t.Fatalf("%s result = %#v, %v, want rejection", tc.returnExpr, plan, err)
+			}
+		})
 	}
 }
 

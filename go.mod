@@ -1,29 +1,30 @@
 module My-OpenWaf
 
-go 1.26.0
+go 1.27.1
 
 require (
 	github.com/andybalholm/brotli v1.2.4
 	github.com/buke/quickjs-go v0.7.7
-	github.com/cloudwego/gopkg v0.2.0
+	github.com/cloudwego/gopkg v0.2.1
 	github.com/cloudwego/hertz v0.10.6
 	github.com/dgraph-io/ristretto v0.2.0
+	github.com/emmansun/gmsm v0.44.1
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0
 	github.com/google/uuid v1.6.0
-	github.com/hertz-contrib/http2 v0.1.8
 	github.com/hertz-contrib/websocket v0.2.0
 	github.com/klauspost/compress v1.20.0
 	github.com/oschwald/maxminddb-golang v1.13.1
-	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/quic-go v0.63.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/tdewolff/parse/v2 v2.8.16
 	github.com/wenlng/go-captcha-assets v1.0.7
 	github.com/wenlng/go-captcha/v2 v2.0.5
 	github.com/wu238121-a11y/go-ja4 v1.0.0
+	github.com/x01n/http2 v0.2.0
 	github.com/yuin/gopher-lua v1.1.2
 	golang.org/x/crypto v0.57.0
 	golang.org/x/image v0.46.0
@@ -66,10 +67,8 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
-	modernc.org/libc v1.77.0 // indirect
+	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 	modernc.org/sqlite v1.59.0 // indirect
 )
-
-replace github.com/hertz-contrib/http2 => ./third_party/hertz-contrib-http2

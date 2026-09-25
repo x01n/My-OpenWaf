@@ -12,6 +12,7 @@ type DropStats struct {
 	DroppedByBot  atomic.Int64
 	DroppedByCVE  atomic.Int64
 	DroppedByRule atomic.Int64
+	DroppedOther  atomic.Int64
 	LastDropTime  atomic.Value
 }
 
@@ -80,7 +81,7 @@ func (d *DropExecutor) recordStats(reason DropReason) {
 	case "rule", "ip_reputation":
 		d.stats.DroppedByRule.Add(1)
 	default:
-		d.stats.DroppedByRule.Add(1)
+		d.stats.DroppedOther.Add(1)
 	}
 }
 
@@ -90,6 +91,7 @@ func (d *DropExecutor) GetStats() *DropStats {
 	s.DroppedByBot.Store(d.stats.DroppedByBot.Load())
 	s.DroppedByCVE.Store(d.stats.DroppedByCVE.Load())
 	s.DroppedByRule.Store(d.stats.DroppedByRule.Load())
+	s.DroppedOther.Store(d.stats.DroppedOther.Load())
 	if v := d.stats.LastDropTime.Load(); v != nil {
 		s.LastDropTime.Store(v)
 	}
@@ -101,5 +103,6 @@ func (d *DropExecutor) ResetStats() {
 	d.stats.DroppedByBot.Store(0)
 	d.stats.DroppedByCVE.Store(0)
 	d.stats.DroppedByRule.Store(0)
+	d.stats.DroppedOther.Store(0)
 	d.stats.LastDropTime.Store(time.Time{})
 }

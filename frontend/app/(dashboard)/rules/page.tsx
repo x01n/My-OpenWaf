@@ -32,12 +32,15 @@ import {
   IconShieldCheck,
   IconBan,
   IconListDetails,
+  IconDownload,
+  IconUpload,
 } from "@tabler/icons-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { EmptyState } from "@/components/empty-state"
 import { Skeleton } from "@/components/ui/skeleton"
 import { TablePagination } from "@/components/table-pagination"
-import type { Rule, RuleAction } from "@/lib/types"
+import type { Rule, RuleAction, RuleExportPayload } from "@/lib/types"
+import { ruleApi } from "@/lib/api"
 
 const PAGE_SIZE = 50
 type RuleActionFilter = "all" | Extract<RuleAction, "allow" | "intercept">
@@ -83,7 +86,100 @@ export default function RulesPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingRule, setEditingRule] = useState<Rule | null>(null)
   const [deleteId, setDeleteId] = useState<number | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const createRequestConsumed = useRef(false)
+
+  const {
+    data: policies = [],
+    isLoading: policiesLoading,
+    error: policiesError,
+  } = usePolicies()
+
+  const initialPolicyId = useMemo(() => {
+    const rawPolicyId = searchParams.get("policy_id")
+    if (!rawPolicyId) return undefined
+    const parsed = Number(rawPolicyId)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+  }, [searchParams])
+
+  const defaultPolicyId = useMemo(
+    () => policies.find((policy) => policy.is_default)?.id,
+    [policies]
+  )
+  const effectivePolicyId = useMemo(() => {
+    const requestedPolicyId = policyId ?? initialPolicyId
+    if (
+      requestedPolicyId &&
+      policies.some((policy) => policy.id === requestedPolicyId)
+    ) {
+      return requestedPolicyId
+    }
+    return defaultPolicyId
+  }, [defaultPolicyId, initialPolicyId, policies, policyId])
+
+  /** 导出当前策略全部规则为 JSON 文件。 */
+  const handleExport = async () => {
+    if (!canManage || !effectivePolicyId) return
+    if (exporting) return
+    setExporting(true)
+    try {
+      const payload = await ruleApi.export()
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement("a")
+      anchor.href = url
+      anchor.download = `owaf-rules-${effectivePolicyId}.json`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      toast.success(t("rules.exportSuccess"))
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : t("rules.exportFailed")
+      )
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  /** 导入 JSON 规则导出文件；后端会忽略其中的 ID，按当前策略重建。 */
+  const handleImport = async (file: File | null) => {
+    if (!file || !canManage || !effectivePolicyId) return
+    if (importing) return
+    try {
+      const payload = (await file.text()) as string
+      const parsed: Partial<RuleExportPayload> = JSON.parse(
+        payload
+      ) as Partial<RuleExportPayload>
+      if (!Array.isArray(parsed.rules) || parsed.rules.length === 0) {
+        toast.error(t("rules.importEmpty"))
+        return
+      }
+      // 导出文件可能是全局规则集合；导入目标锁定为当前所选策略。
+      const imported = parsed.rules.map((rule) => ({
+        ...rule,
+        id: 0,
+        policy_id: effectivePolicyId,
+        created_at: "",
+        updated_at: "",
+      }))
+      setImporting(true)
+      await ruleApi.import({ rules: imported })
+      toast.success(t("rules.importSuccess"))
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : t("rules.importFailed")
+      )
+    } finally {
+      setImporting(false)
+      if (fileInputRef.current) fileInputRef.current.value = ""
+    }
+  }
 
   const {
     data: policies = [],
@@ -281,16 +377,55 @@ export default function RulesPage() {
         title={t("rules.title")}
         description={t("rules.description")}
         actions={
-          <Button
-            disabled={!effectivePolicyId || !canManage}
-            onClick={() => {
-              setEditingRule(null)
-              setDialogOpen(true)
-            }}
-          >
-            <IconPlus className="h-4 w-4" />
-            {t("rules.addTitle")}
-          </Button>
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => handleImport(event.target.files?.[0] ?? null)}
+            />
+            <Button
+              variant="outline"
+              disabled={!effectivePolicyId || !canManage || exporting}
+              title={t("rules.exportTitle")}
+              onClick={handleExport}
+            >
+              {exporting ? (
+                t("common.processing")
+              ) : (
+                <>
+                  <IconDownload className="mr-1 h-4 w-4" />
+                  {t("rules.export")}
+                </>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={!effectivePolicyId || !canManage || importing}
+              title={t("rules.importTitle")}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {importing ? (
+                t("common.processing")
+              ) : (
+                <>
+                  <IconUpload className="mr-1 h-4 w-4" />
+                  {t("rules.import")}
+                </>
+              )}
+            </Button>
+            <Button
+              disabled={!effectivePolicyId || !canManage}
+              onClick={() => {
+                setEditingRule(null)
+                setDialogOpen(true)
+              }}
+            >
+              <IconPlus className="h-4 w-4" />
+              {t("rules.addTitle")}
+            </Button>
+          </>
         }
       />
 

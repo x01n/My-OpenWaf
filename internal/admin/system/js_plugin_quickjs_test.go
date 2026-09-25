@@ -45,10 +45,54 @@ func TestDryRunJSPluginLoadsCurrentEnginePerRequest(t *testing.T) {
 	}
 }
 
-func TestDryRunJSPluginRejectsResponseStage(t *testing.T) {
-	ctx := invokeThreatIntelHandler(t, DryRunJSPlugin(nil), "POST", "/x", nil, []byte(`{"stage":"response","source":"export default {fetch() { return {}; }}"}`))
-	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
-		t.Fatalf("response-stage dry-run = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
+func TestDryRunJSPluginExecutesResponseStage(t *testing.T) {
+	engine, err := jsplugin.NewEngine(jsplugin.EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	handler := DryRunJSPlugin(func() *jsplugin.Engine { return engine })
+
+	body := []byte(`{"stage":"response","source":"export default {fetch(response) { return {status: 201, body: response.body + '-done', set_headers: {\"X-Dry\": String(response.status)}}; }}","sample_response":{"status":200,"path":"/api","body":"hello","request_headers":{"x-client":"c"}}}`)
+	ctx := invokeThreatIntelHandler(t, handler, "POST", "/x", nil, body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("response dry-run status = %d, want 200; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var response struct {
+		Error  string                        `json:"error"`
+		Result jsplugin.ResponseMutationPlan `json:"result"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("decode response dry-run: %v", err)
+	}
+	if response.Error != "" || response.Result.Status == nil || *response.Result.Status != 201 ||
+		response.Result.Body == nil || *response.Result.Body != "hello-done" ||
+		response.Result.SetHeaders["X-Dry"] != "200" {
+		t.Fatalf("response dry-run = %#v", response)
+	}
+}
+
+func TestDryRunJSPluginRejectsResponseUnsafePlan(t *testing.T) {
+	engine, err := jsplugin.NewEngine(jsplugin.EngineOptions{PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	handler := DryRunJSPlugin(func() *jsplugin.Engine { return engine })
+	body := []byte(`{"stage":"response","source":"export default {fetch() { return {status: 99}; }}"}`)
+	ctx := invokeThreatIntelHandler(t, handler, "POST", "/x", nil, body)
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("status = %d; body=%s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var response struct {
+		Error  string          `json:"error"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("decode response dry-run: %v", err)
+	}
+	if response.Error != "jsplugin: invalid status mutation" || string(response.Result) != "null" {
+		t.Fatalf("response dry-run = %#v", response)
 	}
 }
 
@@ -214,7 +258,7 @@ func TestGetJSPluginRuntimeReportsReadyQuickJS(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if ctx.Response.StatusCode() != 200 || status.Backend != jsplugin.BackendQuickJS || !status.Available || !status.EngineReady || status.Enabled != 1 || status.Compiled != 1 || status.CompileErrors != 0 || !status.RequestSupported || status.ResponseSupported {
+	if ctx.Response.StatusCode() != 200 || status.Backend != jsplugin.BackendQuickJS || !status.Available || !status.EngineReady || status.Enabled != 1 || status.Compiled != 1 || status.CompileErrors != 0 || !status.RequestSupported || !status.ResponseSupported {
 		t.Fatalf("status=%d runtime=%+v", ctx.Response.StatusCode(), status)
 	}
 }

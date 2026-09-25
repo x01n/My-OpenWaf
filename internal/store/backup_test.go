@@ -24,6 +24,76 @@ func newBackupTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// TestBackupRoundTripThreatIntelAuthHeaders 验证备份导出/导入会保留
+// ThreatIntelFeed 的新增认证头字段。
+func TestBackupRoundTripThreatIntelAuthHeaders(t *testing.T) {
+	src := newBackupTestDB(t)
+	if err := src.AutoMigrate(&ThreatIntelFeed{}, &IPListEntry{}); err != nil {
+		t.Fatalf("migrate src: %v", err)
+	}
+	feed := &ThreatIntelFeed{
+		Name: "affiliate", URL: "https://intel.example.test/auth.gz", Kind: "blacklist",
+		Action: "intercept", Enabled: true, SyncInterval: 7200,
+		AuthHeaderName: "Authorization", AuthHeaderValue: "Bearer legacy-token",
+	}
+	if err := src.Create(feed).Error; err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	snapshot, err := ExportBackup(src)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(snapshot.ThreatIntelFeeds) != 1 ||
+		snapshot.ThreatIntelFeeds[0].AuthHeaderName != "Authorization" ||
+		snapshot.ThreatIntelFeeds[0].AuthHeaderValue != "Bearer legacy-token" {
+		t.Fatalf("exported threat intel feed lost auth headers: %#v", snapshot.ThreatIntelFeeds)
+	}
+
+	dst := newBackupTestDB(t)
+	if err := dst.AutoMigrate(&ThreatIntelFeed{}, &IPListEntry{}); err != nil {
+		t.Fatalf("migrate dst: %v", err)
+	}
+	if err := ImportBackup(dst, snapshot, false); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	var restored ThreatIntelFeed
+	if err := dst.First(&restored).Error; err != nil {
+		t.Fatalf("load restored feed: %v", err)
+	}
+	if restored.AuthHeaderName != "Authorization" || restored.AuthHeaderValue != "Bearer legacy-token" {
+		t.Fatalf("restored auth headers = (%q, %q)", restored.AuthHeaderName, restored.AuthHeaderValue)
+	}
+}
+
+/**
+ * TestExportBackupPreservesThreatIntelAuthHeaders 锁定存储层导出契约：
+ * 认证头字段按库内原值导出，遮蔽由 admin 处理层（ExportBackup handler）
+ * 统一负责。任何把遮蔽下沉到存储层、或破坏往返的改动都会在此失败。
+ */
+func TestExportBackupPreservesThreatIntelAuthHeaders(t *testing.T) {
+	db := newBackupTestDB(t)
+	feed := &ThreatIntelFeed{
+		Name: "contract", URL: "https://intel.example.test/auth.gz", Kind: "blacklist",
+		Action: "intercept", Enabled: true, SyncInterval: 7200,
+		AuthHeaderName: "Authorization", AuthHeaderValue: "Bearer contract-token",
+	}
+	if err := db.Create(feed).Error; err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	data, err := ExportBackup(db)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(data.ThreatIntelFeeds) != 1 {
+		t.Fatalf("feeds = %d, want 1", len(data.ThreatIntelFeeds))
+	}
+	if got := data.ThreatIntelFeeds[0].AuthHeaderValue; got != "Bearer contract-token" {
+		t.Fatalf("存储层导出 AuthHeaderValue = %q, want 原文（遮蔽在 admin 处理层）", got)
+	}
+}
+
 // seedBackupData 填充一组有外键关联的配置数据。
 func seedBackupData(t *testing.T, db *gorm.DB) {
 	t.Helper()
@@ -444,39 +514,31 @@ func TestBackupIncludesJSPlugins(t *testing.T) {
 	}
 }
 
-func TestImportBackupRejectsEnabledResponseJSPluginBeforeReplace(t *testing.T) {
+// TestImportBackupAcceptsEnabledResponseJSPlugin 响应阶段已接入执行入口，
+// 启用记录可正常导入，不再被替换模式前的校验拒绝。
+func TestImportBackupAcceptsEnabledResponseJSPlugin(t *testing.T) {
 	db := newBackupTestDB(t)
-	existing := JSPlugin{
-		Name:        "existing-request",
-		Source:      `function handle(ctx) { return null; }`,
-		Enabled:     true,
-		Stage:       JSStageRequest,
-		FailureMode: JSFailureModeOpen,
-	}
-	if err := db.Create(&existing).Error; err != nil {
-		t.Fatalf("create existing JS plugin: %v", err)
-	}
 
 	data := &BackupData{
 		Version: BackupVersion,
 		JSPlugins: []JSPlugin{{
 			Name:        "enabled-response",
-			Source:      `function handle(ctx) { return null; }`,
+			Source:      `export default { fetch() { return {}; } }`,
 			Enabled:     true,
 			Stage:       JSStageResponse,
 			FailureMode: JSFailureModeOpen,
 		}},
 	}
-	if err := ImportBackup(db, data, true); !errors.Is(err, ErrInvalidBackupJSPlugin) {
-		t.Fatalf("ImportBackup() error = %v, want ErrInvalidBackupJSPlugin", err)
+	if err := ImportBackup(db, data, true); err != nil {
+		t.Fatalf("ImportBackup() error = %v, want nil", err)
 	}
 
 	var got []JSPlugin
 	if err := db.Order("id").Find(&got).Error; err != nil {
-		t.Fatalf("list JS plugins after rejected import: %v", err)
+		t.Fatalf("list JS plugins after import: %v", err)
 	}
-	if len(got) != 1 || got[0].ID != existing.ID {
-		t.Fatalf("rejected replace import changed JS plugins: %#v", got)
+	if len(got) != 1 || got[0].Stage != JSStageResponse || !got[0].Enabled {
+		t.Fatalf("imported JS plugins = %#v", got)
 	}
 }
 

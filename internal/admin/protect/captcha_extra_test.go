@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/image/font/gofont/goregular"
 
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store"
@@ -350,6 +354,25 @@ func TestTestCaptchaFallsBackToMathWhenTypeUnset(t *testing.T) {
 	}
 }
 
+// newAvailableGoCaptchaProviderForTest 在临时资源目录中初始化一个可用的 go-captcha 提供器，
+// 供 TestCaptcha 预览接口测试注入管理器，验证显式预览类型真实走高级验证码生成路径。
+func newAvailableGoCaptchaProviderForTest(t *testing.T) *challenge.GoCaptchaProvider {
+	t.Helper()
+	resourceDir := t.TempDir()
+	fontPath := filepath.Join(resourceDir, "default.ttf")
+	if err := os.WriteFile(fontPath, goregular.TTF, 0o600); err != nil {
+		t.Fatalf("write test font: %v", err)
+	}
+	cfg := challenge.DefaultGoCaptchaConfig()
+	cfg.ResourceDir = resourceDir
+	cfg.FontPath = fontPath
+	provider := challenge.NewGoCaptchaProvider(cfg, nil)
+	if !provider.IsAvailable() {
+		t.Fatalf("go-captcha provider is unavailable: %v", provider.InitError())
+	}
+	return provider
+}
+
 func TestTestCaptchaUsesExplicitPreviewTypeWithoutSaving(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	cfg := store.DefaultProtectionConfig()
@@ -359,6 +382,9 @@ func TestTestCaptchaUsesExplicitPreviewTypeWithoutSaving(t *testing.T) {
 	}
 	mgr := challenge.NewCaptchaManager(nil, 30*time.Second)
 	defer mgr.Close()
+	// 强制化语义禁止生成失败时降级换题：click 题型生成需要注入 go-captcha 提供器，
+	// 否则应显式返回 500，而不是静默改发 math。
+	mgr.SetGoCaptchaProvider(newAvailableGoCaptchaProviderForTest(t))
 
 	ctx := invokeProtectHandler(t, TestCaptcha(repo, mgr), "POST", "/api/v1/captcha/test", []byte(`{"captcha_type":"click"}`))
 	if ctx.Response.StatusCode() != 200 {
@@ -370,6 +396,36 @@ func TestTestCaptchaUsesExplicitPreviewTypeWithoutSaving(t *testing.T) {
 	}
 	if got["captcha_type"] != "click" {
 		t.Fatalf("preview captcha_type = %#v, want click", got["captcha_type"])
+	}
+	if got["type"] != string(challenge.CaptchaTypeClick) {
+		t.Fatalf("generated challenge type = %#v, want click", got["type"])
+	}
+	if loaded := shared.LoadProtectionConfig(repo); loaded.CaptchaType != "math" {
+		t.Fatalf("explicit preview type must not be saved, persisted type = %q", loaded.CaptchaType)
+	}
+}
+
+// TestTestCaptchaExplicitTypeFailsExplicitlyWithoutProvider 验证强制化语义：
+// go-captcha 提供器缺失时显式 click 预览返回 500，绝不静默降级成 math。
+func TestTestCaptchaExplicitTypeFailsExplicitlyWithoutProvider(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	cfg := store.DefaultProtectionConfig()
+	cfg.CaptchaType = "math"
+	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
+		t.Fatalf("seed protection: %v", err)
+	}
+	mgr := challenge.NewCaptchaManager(nil, 30*time.Second)
+	defer mgr.Close()
+
+	ctx := invokeProtectHandler(t, TestCaptcha(repo, mgr), "POST", "/api/v1/captcha/test", []byte(`{"captcha_type":"click"}`))
+	if ctx.Response.StatusCode() != 500 {
+		t.Fatalf("explicit preview type without provider: expected 500, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if !bytes.Contains(ctx.Response.Body(), []byte("go-captcha unavailable")) {
+		t.Fatalf("500 response must report the go-captcha unavailability, got: %s", bytes.TrimSpace(ctx.Response.Body()))
+	}
+	if loaded := shared.LoadProtectionConfig(repo); loaded.CaptchaType != "math" {
+		t.Fatalf("failed preview must not mutate persisted type, got %q", loaded.CaptchaType)
 	}
 }
 

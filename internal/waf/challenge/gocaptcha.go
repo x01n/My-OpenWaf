@@ -97,6 +97,14 @@ func NewGoCaptchaProvider(cfg GoCaptchaConfig, log *slog.Logger) *GoCaptchaProvi
 	return p
 }
 
+// InitError 返回提供器初始化失败的原因；可用时返回 nil。
+// 供其他包（如 admin/protect 测试辅助函数）在不依赖未导出字段的情况下报告失败原因。
+func (p *GoCaptchaProvider) InitError() error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.initErr
+}
+
 // IsAvailable 返回 GoCaptcha 是否成功初始化。
 func (p *GoCaptchaProvider) IsAvailable() bool {
 	p.mu.RLock()
@@ -253,12 +261,12 @@ func (p *GoCaptchaProvider) GenerateRotate() (masterB64, thumbB64 string, data *
 // generateClick 使用 go-captcha 生成点击验证码。
 func (cm *CaptchaManager) generateClick(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath(envKey, binding)
+		return nil, fmt.Errorf("go-captcha unavailable for captcha type click")
 	}
 
 	masterB64, thumbB64, data, err := cm.goCaptcha.GenerateClick()
 	if err != nil {
-		return cm.generateMath(envKey, binding)
+		return nil, fmt.Errorf("generate click captcha: %w", err)
 	}
 
 	// 序列化答案坐标
@@ -277,27 +285,26 @@ func (cm *CaptchaManager) generateClick(envKey []byte, binding ChallengeSessionB
 		return nil, err
 	}
 
-	return &CaptchaChallenge{
-		SessionID: sessionID,
-		Type:      string(CaptchaTypeClick),
+	return newCaptchaChallenge(sessionID, envKey, &CaptchaItems{
+		Type:      CaptchaTypeClick,
+		Prompt:    "请按顺序点击图中对应的文字",
 		MasterImg: masterB64,
 		ThumbImg:  thumbB64,
-		Prompt:    "请按顺序点击图中对应的文字",
 		Width:     300,
 		Height:    220,
-		EnvKeyHex: EnvSessionKeyHex(envKey),
-	}, nil
+	})
 }
 
 // generateSlide 使用 go-captcha 生成滑动验证码。
+// 强制化语义：go-captcha 不可用或生成失败一律返回错误，不降级换 math 题型。
 func (cm *CaptchaManager) generateSlide(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath(envKey, binding)
+		return nil, fmt.Errorf("go-captcha unavailable for captcha type slide")
 	}
 
 	masterB64, tileB64, data, err := cm.goCaptcha.GenerateSlide()
 	if err != nil {
-		return cm.generateMath(envKey, binding)
+		return nil, fmt.Errorf("generate slide captcha: %w", err)
 	}
 
 	answerJSON, _ := json.Marshal(data)
@@ -315,27 +322,25 @@ func (cm *CaptchaManager) generateSlide(envKey []byte, binding ChallengeSessionB
 		return nil, err
 	}
 
-	return &CaptchaChallenge{
-		SessionID: sessionID,
-		Type:      string(CaptchaTypeSlide),
+	return newCaptchaChallenge(sessionID, envKey, &CaptchaItems{
+		Type:      CaptchaTypeSlide,
+		Prompt:    "请将滑块拖动到正确位置",
 		MasterImg: masterB64,
 		ThumbImg:  tileB64,
-		Prompt:    "请将滑块拖动到正确位置",
 		Width:     300,
 		Height:    220,
-		EnvKeyHex: EnvSessionKeyHex(envKey),
-	}, nil
+	})
 }
 
 // generateRotate 使用 go-captcha 生成旋转验证码。
 func (cm *CaptchaManager) generateRotate(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	if cm.goCaptcha == nil || !cm.goCaptcha.IsAvailable() {
-		return cm.generateMath(envKey, binding)
+		return nil, fmt.Errorf("go-captcha unavailable for captcha type rotate")
 	}
 
 	masterB64, thumbB64, data, err := cm.goCaptcha.GenerateRotate()
 	if err != nil {
-		return cm.generateMath(envKey, binding)
+		return nil, fmt.Errorf("generate rotate captcha: %w", err)
 	}
 
 	answerJSON, _ := json.Marshal(data)
@@ -353,16 +358,14 @@ func (cm *CaptchaManager) generateRotate(envKey []byte, binding ChallengeSession
 		return nil, err
 	}
 
-	return &CaptchaChallenge{
-		SessionID: sessionID,
-		Type:      string(CaptchaTypeRotate),
+	return newCaptchaChallenge(sessionID, envKey, &CaptchaItems{
+		Type:      CaptchaTypeRotate,
+		Prompt:    "请旋转图片至正确方向",
 		MasterImg: masterB64,
 		ThumbImg:  thumbB64,
-		Prompt:    "请旋转图片至正确方向",
 		Width:     220,
 		Height:    220,
-		EnvKeyHex: EnvSessionKeyHex(envKey),
-	}, nil
+	})
 }
 
 // VerifyAdvanced 验证高级验证码答案（点击/滑动/旋转），支持容差。
@@ -384,8 +387,6 @@ func (cm *CaptchaManager) VerifyAdvancedSession(sessionID, answer string) (bool,
 	return cm.VerifyAdvancedSessionWithBinding(sessionID, answer, ChallengeSessionBinding{})
 }
 
-// VerifyAdvancedSessionWithBinding atomically consumes the session only when
-// its persisted site binding matches the current matched-site context.
 func (cm *CaptchaManager) VerifyAdvancedSessionWithBinding(sessionID, answer string, binding ChallengeSessionBinding) (bool, *CaptchaSession) {
 	session := cm.takeSessionWithBinding(sessionID, binding)
 	if session == nil {
@@ -396,6 +397,7 @@ func (cm *CaptchaManager) VerifyAdvancedSessionWithBinding(sessionID, answer str
 		return false, session
 	}
 
+	answer = decryptAnswerEnvelope(answer, session)
 	tolerance := cm.getGoCaptchaTolerance(session.Type)
 
 	switch session.Type {

@@ -39,6 +39,7 @@ import type {
   JSPluginFailureMode,
   JSPluginReloadFailureResponse,
   JSPluginSampleRequest,
+  JSPluginSampleResponse,
   JSPluginStage,
   JSPluginDryRunResponse,
   JSPluginUpdateRequest,
@@ -108,6 +109,17 @@ const ENABLEMENT_SAMPLE: JSPluginSampleRequest = {
   query_params: {},
 }
 
+const ENABLEMENT_SAMPLE_RESPONSE: JSPluginSampleResponse = {
+  status: 200,
+  path: "/",
+  content_type: "text/html; charset=utf-8",
+  body: "<!doctype html><html><body>ok</body></html>",
+  headers: {},
+  request_headers: {},
+  method: "GET",
+  client_ip: "192.0.2.1",
+}
+
 function parseStringRecord(value: string, errorMessage: string) {
   let parsed: unknown
   try {
@@ -151,6 +163,23 @@ function buildSampleRequest(
     form.query_params_json,
     invalidJSON("query_params")
   )
+  return sample
+}
+
+function buildSampleResponse(
+  form: DryRunSampleForm,
+  invalidJSON: (field: string) => string
+): JSPluginSampleResponse {
+  const sample: JSPluginSampleResponse = {
+    status: 200,
+    path: form.path || "/",
+  }
+  if (form.content_type) sample.content_type = form.content_type
+  if (form.body) sample.body = form.body
+  if (form.method) sample.method = form.method
+  if (form.raw_query) sample.raw_query = form.raw_query
+  if (form.client_ip) sample.client_ip = form.client_ip
+  sample.headers = parseStringRecord(form.headers_json, invalidJSON("headers"))
   return sample
 }
 
@@ -208,7 +237,6 @@ export function JSPluginEditorDialog({
   const { execute: save, loading: saving } = useJSPluginMutation()
   const { execute: validate, loading: validating } = useJSPluginValidate()
   const { execute: dryRun, loading: dryRunning } = useJSPluginDryRun()
-  const responseStageLocked = form.stage === "response"
 
   const update = <K extends keyof PluginForm>(key: K, value: PluginForm[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
@@ -233,13 +261,6 @@ export function JSPluginEditorDialog({
   const handleValidate = async () => {
     setRuntimeMessage(null)
     const stage = form.stage
-    if (stage !== "request") {
-      setValidation({
-        valid: false,
-        error: t("jsPlugins.responseStageUnavailable"),
-      })
-      return
-    }
     try {
       const result = await validate({
         stage,
@@ -264,19 +285,22 @@ export function JSPluginEditorDialog({
     setDryRunResponse(null)
     setDryRunError(null)
     const stage = form.stage
-    if (stage !== "request") {
-      setDryRunError(t("jsPlugins.responseStageUnavailable"))
-      return
-    }
     try {
-      const sample = buildSampleRequest(sampleRequest, (field) =>
-        t("jsPlugins.dryRunJsonInvalid", { field })
-      )
+      const sample =
+        stage === "response"
+          ? buildSampleResponse(sampleRequest, (field) =>
+              t("jsPlugins.dryRunJsonInvalid", { field })
+            )
+          : buildSampleRequest(sampleRequest, (field) =>
+              t("jsPlugins.dryRunJsonInvalid", { field })
+            )
       const response = await dryRun({
         source: form.source,
         stage,
         timeout_ms: form.timeout_ms || undefined,
-        sample_request: sample,
+        ...(stage === "response"
+          ? { sample_response: sample }
+          : { sample_request: sample }),
       })
       setDryRunResponse(response)
       setDryRunError(response.error ?? null)
@@ -291,10 +315,6 @@ export function JSPluginEditorDialog({
 
   const handleSave = async () => {
     const stage = form.stage
-    if (stage !== "request") {
-      setSaveError(t("jsPlugins.responseStageUnavailable"))
-      return
-    }
     const base = {
       name: form.name.trim(),
       source: form.source,
@@ -330,7 +350,9 @@ export function JSPluginEditorDialog({
           stage,
           source: form.source,
           timeout_ms: form.timeout_ms || undefined,
-          sample_request: ENABLEMENT_SAMPLE,
+          ...(stage === "response"
+            ? { sample_response: ENABLEMENT_SAMPLE_RESPONSE }
+            : { sample_request: ENABLEMENT_SAMPLE }),
         })
         setDryRunResponse(dryRunResult)
         setDryRunError(dryRunResult.error ?? null)
@@ -370,10 +392,7 @@ export function JSPluginEditorDialog({
     }
   }
 
-  const canSave =
-    form.stage === "request" &&
-    form.name.trim().length > 0 &&
-    form.source.trim().length > 0
+  const canSave = form.name.trim().length > 0 && form.source.trim().length > 0
   const submitting = saving || validating || dryRunning
 
   return (
@@ -392,15 +411,6 @@ export function JSPluginEditorDialog({
               <AlertTitle>{t("luaPlugins.compileError")}</AlertTitle>
               <AlertDescription className="break-all whitespace-pre-wrap">
                 {editing.compile_error}
-              </AlertDescription>
-            </Alert>
-          )}
-          {responseStageLocked && (
-            <Alert className="mt-3">
-              <IconAlertTriangle className="h-4 w-4" />
-              <AlertTitle>{t("jsPlugins.responseStageReadOnly")}</AlertTitle>
-              <AlertDescription>
-                {t("jsPlugins.responseStageMigrationHint")}
               </AlertDescription>
             </Alert>
           )}
@@ -423,7 +433,6 @@ export function JSPluginEditorDialog({
                 <Label>{t("jsPlugins.name")}</Label>
                 <Input
                   value={form.name}
-                  disabled={responseStageLocked}
                   onChange={(event) => update("name", event.target.value)}
                 />
               </div>
@@ -442,11 +451,9 @@ export function JSPluginEditorDialog({
                     <SelectItem value="request">
                       {t("jsPlugins.stageRequest")}
                     </SelectItem>
-                    {editing?.stage === "response" && (
-                      <SelectItem value="response" disabled>
-                        {t("jsPlugins.stageResponse")}
-                      </SelectItem>
-                    )}
+                    <SelectItem value="response">
+                      {t("jsPlugins.stageResponse")}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -454,7 +461,6 @@ export function JSPluginEditorDialog({
                 <Label>{t("jsPlugins.failureMode")}</Label>
                 <Select
                   value={form.failure_mode}
-                  disabled={responseStageLocked}
                   onValueChange={(value) =>
                     update("failure_mode", value as JSPluginFailureMode)
                   }
@@ -477,7 +483,6 @@ export function JSPluginEditorDialog({
                 <Input
                   type="number"
                   value={form.priority}
-                  disabled={responseStageLocked}
                   onChange={(event) =>
                     update("priority", Number(event.target.value) || 0)
                   }
@@ -490,7 +495,6 @@ export function JSPluginEditorDialog({
                   min={0}
                   max={MAX_TIMEOUT_MS}
                   value={form.timeout_ms}
-                  disabled={responseStageLocked}
                   onChange={(event) =>
                     update(
                       "timeout_ms",
@@ -512,7 +516,6 @@ export function JSPluginEditorDialog({
                 <Label>{t("jsPlugins.scope")}</Label>
                 <Select
                   value={form.site_id}
-                  disabled={responseStageLocked}
                   onValueChange={(value) => update("site_id", value)}
                 >
                   <SelectTrigger>
@@ -541,7 +544,6 @@ export function JSPluginEditorDialog({
               </div>
               <Switch
                 checked={form.enabled}
-                disabled={responseStageLocked}
                 onCheckedChange={(value) => update("enabled", value)}
               />
             </div>
@@ -550,7 +552,6 @@ export function JSPluginEditorDialog({
               <Label>{t("common.description")}</Label>
               <Textarea
                 value={form.description}
-                disabled={responseStageLocked}
                 onChange={(event) => update("description", event.target.value)}
               />
             </div>
@@ -671,9 +672,7 @@ export function JSPluginEditorDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleValidate}
-                    disabled={
-                      responseStageLocked || validating || !form.source.trim()
-                    }
+                    disabled={validating || !form.source.trim()}
                   >
                     {validating
                       ? t("jsPlugins.validating")
@@ -683,7 +682,7 @@ export function JSPluginEditorDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleDryRun}
-                    disabled={responseStageLocked || dryRunning}
+                    disabled={dryRunning}
                   >
                     {dryRunning
                       ? t("jsPlugins.running")
@@ -694,7 +693,6 @@ export function JSPluginEditorDialog({
               <LuaCodeEditor
                 value={form.source}
                 onChange={(value) => update("source", value)}
-                readOnly={responseStageLocked}
                 rows={16}
                 ariaLabel={t("jsPlugins.source")}
               />

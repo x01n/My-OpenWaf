@@ -1,13 +1,10 @@
-// Package jsplugin 提供受限的 QuickJS 请求策略执行原型。
-//
-// 该包只负责脚本编译、请求快照输入和请求变更计划输出，不注册管理 API、
-// 数据面钩子或响应处理器。
 package jsplugin
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -18,11 +15,6 @@ import (
 var (
 	// ErrCGODisabled 表示当前原型未启用 QuickJS cgo 执行后端。
 	ErrCGODisabled = errors.New("jsplugin: cgo is required for QuickJS execution")
-	// ErrResponseStageUnavailable 表示响应阶段尚未接入数据面执行入口。
-	//
-	// response-stage 记录可以继续保留在持久化层，但任何执行器都必须拒绝
-	// 将它当作 request-stage 脚本运行，避免未来接线绕过 snapshot 过滤。
-	ErrResponseStageUnavailable = errors.New("response stage is unavailable because response execution is not implemented")
 	// ErrEngineClosed 表示引擎已经关闭。
 	ErrEngineClosed = errors.New("jsplugin: engine is closed")
 	// ErrNoSlot 表示有界执行槽池无法再接受请求。
@@ -71,6 +63,15 @@ const (
 	MaxRequestSnapshotQueryParams = 256
 	// MaxRequestSnapshotBytes 限制 JSON 序列化后快照的体积，避免 Go/JS 双重放大。
 	MaxRequestSnapshotBytes = 128 << 10
+	// MaxResponseSnapshotBodyBytes 限制传入脚本的响应体样本体积，与数据面
+	// 48 KiB 的 WAF 检查上限无关；控制面 dry-run 无需放大。
+	MaxResponseSnapshotBodyBytes = 48 << 10
+	// MaxResponseSnapshotStringBytes 限制响应快照中单个标量字段和 map 键值体积。
+	MaxResponseSnapshotStringBytes = 16 << 10
+	// MaxResponseSnapshotHeaders 限制传入脚本的响应头数量。
+	MaxResponseSnapshotHeaders = 256
+	// MaxResponseSnapshotBytes 限制 JSON 序列化后响应快照的体积。
+	MaxResponseSnapshotBytes = 128 << 10
 )
 
 // RequestSnapshot 是传给 JavaScript 脚本的只读请求快照。
@@ -106,6 +107,22 @@ func CanonicalValidationRequest(siteID uint) RequestSnapshot {
 	}
 }
 
+// CanonicalValidationResponse 返回持久化校验可执行契约使用的确定性响应。
+//
+// 与 CanonicalValidationRequest 对称：request_id/site_id 固定，path 与
+// content type 取全站最通用的示例形态，脚本可对其做有意义的可执行断言。
+func CanonicalValidationResponse(siteID uint) ResponseSnapshot {
+	return ResponseSnapshot{
+		RequestID:   "js-plugin-validation",
+		SiteID:      siteID,
+		Status:      http.StatusOK,
+		Path:        "/",
+		ContentType: "text/html; charset=utf-8",
+		Body:        `<!doctype html><html><body>ok</body></html>`,
+		Headers:     map[string]string{},
+	}
+}
+
 // MutationPlan 是脚本返回的请求变更计划。
 //
 // 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
@@ -118,6 +135,38 @@ type MutationPlan struct {
 	Body          *string           `json:"body,omitempty"`
 	SetHeaders    map[string]string `json:"set_headers,omitempty"`
 	DeleteHeaders []string          `json:"delete_headers,omitempty"`
+}
+
+// ResponseMutationPlan 是 response 阶段脚本返回的响应变更计划。
+//
+// 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
+// SetHeaders 用于新增或覆盖响应头，DeleteHeaders 用于删除响应头。该计划
+// 与 MutationPlan 一样只描述意图，由 proxy 变换链消费；response 阶段
+// 不引入裁决语义，计划中没有 action 概念。
+type ResponseMutationPlan struct {
+	Status        *int              `json:"status,omitempty"`
+	Body          *string           `json:"body,omitempty"`
+	SetHeaders    map[string]string `json:"set_headers,omitempty"`
+	DeleteHeaders []string          `json:"delete_headers,omitempty"`
+}
+
+// ResponseSnapshot 是传给 JavaScript 脚本的只读响应快照。
+//
+// 所有 map 在进入引擎前都会深拷贝并序列化，脚本无法直接修改调用方数据；
+// 除额外注入的 request 侧标量（method/raw_query/client_ip/request_headers）
+// 外，字段与 RequestSnapshot 的 key 风格一致。
+type ResponseSnapshot struct {
+	RequestID      string            `json:"request_id,omitempty"`
+	SiteID         uint              `json:"site_id"`
+	Status         int               `json:"status"`
+	Path           string            `json:"path"`
+	ContentType    string            `json:"content_type,omitempty"`
+	Body           string            `json:"body,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Method         string            `json:"method,omitempty"`
+	RawQuery       string            `json:"raw_query,omitempty"`
+	ClientIP       string            `json:"client_ip,omitempty"`
+	RequestHeaders map[string]string `json:"request_headers,omitempty"`
 }
 
 // ScriptOptions 配置脚本元数据和资源限制。
@@ -282,6 +331,79 @@ func validateRequestSnapshot(snapshot RequestSnapshot) error {
 	return nil
 }
 
+// normalizeResponseSnapshot 校验并深拷贝响应快照的可变 map 视图。
+func normalizeResponseSnapshot(snapshot ResponseSnapshot) (ResponseSnapshot, error) {
+	if _, err := encodeResponseSnapshot(snapshot); err != nil {
+		return ResponseSnapshot{}, err
+	}
+
+	normalized := snapshot
+	if snapshot.Headers != nil {
+		normalized.Headers = make(map[string]string, len(snapshot.Headers))
+		for name, value := range snapshot.Headers {
+			normalized.Headers[name] = value
+		}
+	}
+	if snapshot.RequestHeaders != nil {
+		normalized.RequestHeaders = make(map[string]string, len(snapshot.RequestHeaders))
+		for name, value := range snapshot.RequestHeaders {
+			normalized.RequestHeaders[name] = value
+		}
+	}
+	return normalized, nil
+}
+
+// encodeResponseSnapshot 校验并将响应快照一次性编码为 QuickJS 输入。
+// 与 encodeRequestSnapshot 的结构完全对称。
+func encodeResponseSnapshot(snapshot ResponseSnapshot) (string, error) {
+	if err := validateResponseSnapshot(snapshot); err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return "", fmt.Errorf("jsplugin: response snapshot encoding failed: %w", err)
+	}
+	if len(encoded) > MaxResponseSnapshotBytes {
+		return "", fmt.Errorf("jsplugin: response snapshot exceeds %d bytes", MaxResponseSnapshotBytes)
+	}
+	return string(encoded), nil
+}
+
+func validateResponseSnapshot(snapshot ResponseSnapshot) error {
+	for field, value := range map[string]string{
+		"request_id":   snapshot.RequestID,
+		"path":         snapshot.Path,
+		"content_type": snapshot.ContentType,
+		"method":       snapshot.Method,
+		"raw_query":    snapshot.RawQuery,
+		"client_ip":    snapshot.ClientIP,
+	} {
+		if len(value) > MaxResponseSnapshotStringBytes {
+			return fmt.Errorf("jsplugin: response snapshot %s exceeds %d bytes", field, MaxResponseSnapshotStringBytes)
+		}
+	}
+	if len(snapshot.Body) > MaxResponseSnapshotBodyBytes {
+		return fmt.Errorf("jsplugin: response snapshot body exceeds %d bytes", MaxResponseSnapshotBodyBytes)
+	}
+	if len(snapshot.Headers) > MaxResponseSnapshotHeaders {
+		return fmt.Errorf("jsplugin: response snapshot headers exceed %d entries", MaxResponseSnapshotHeaders)
+	}
+	if len(snapshot.RequestHeaders) > MaxResponseSnapshotHeaders {
+		return fmt.Errorf("jsplugin: response snapshot request headers exceed %d entries", MaxResponseSnapshotHeaders)
+	}
+	for name, value := range snapshot.Headers {
+		if len(name) > MaxResponseSnapshotStringBytes || len(value) > MaxResponseSnapshotStringBytes {
+			return errors.New("jsplugin: response snapshot header exceeds size limit")
+		}
+	}
+	for name, value := range snapshot.RequestHeaders {
+		if len(name) > MaxResponseSnapshotStringBytes || len(value) > MaxResponseSnapshotStringBytes {
+			return errors.New("jsplugin: response snapshot request header exceeds size limit")
+		}
+	}
+	return nil
+}
+
 // ValidateMutationPlan 在 host 应用前校验请求变更计划。
 //
 // 此处承载 request-stage 的完整安全边界，dry-run 与数据面必须使用同一校验，
@@ -306,8 +428,37 @@ func ValidateMutationPlan(plan MutationPlan) error {
 			return fmt.Errorf("jsplugin: invalid raw query mutation: %w", err)
 		}
 	}
-	set := make(map[string]struct{}, len(plan.SetHeaders))
-	for name, value := range plan.SetHeaders {
+	if err := validateMutationPlanHeaderEdits(plan.SetHeaders, plan.DeleteHeaders); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateResponseMutationPlan 在 host 应用前校验响应变更计划。
+//
+// response 阶段不改变请求走向；此校验只履行状态码取值、体积上限、头名称
+// token、保留头与 set/delete 一致性检查，供 dry-run 与数据面复用。
+func ValidateResponseMutationPlan(plan ResponseMutationPlan) error {
+	for field, value := range map[string]*string{
+		"body": plan.Body,
+	} {
+		if value != nil && len(*value) > MaxMutationStringBytes {
+			return fmt.Errorf("jsplugin: %s exceeds %d bytes", field, MaxMutationStringBytes)
+		}
+	}
+	if plan.Status != nil && (*plan.Status < 100 || *plan.Status > 999) {
+		return errors.New("jsplugin: invalid status mutation")
+	}
+	if err := validateMutationPlanHeaderEdits(plan.SetHeaders, plan.DeleteHeaders); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateMutationPlanHeaderEdits 承载请求/响应两阶段共享的头变更校验。
+func validateMutationPlanHeaderEdits(setHeaders map[string]string, deleteHeaders []string) error {
+	set := make(map[string]struct{}, len(setHeaders))
+	for name, value := range setHeaders {
 		lower := strings.ToLower(name)
 		if !isJSHTTPToken(name) || isForbiddenJSHeader(lower) || !isValidJSHeaderValue(value) {
 			return errors.New("jsplugin: forbidden or invalid header mutation")
@@ -317,7 +468,7 @@ func ValidateMutationPlan(plan MutationPlan) error {
 		}
 		set[lower] = struct{}{}
 	}
-	for _, name := range plan.DeleteHeaders {
+	for _, name := range deleteHeaders {
 		lower := strings.ToLower(name)
 		if !isJSHTTPToken(name) || isForbiddenJSHeader(lower) {
 			return errors.New("jsplugin: forbidden or invalid header deletion")
@@ -416,11 +567,9 @@ func Validate(stage, source string) error {
 }
 
 // ValidateWithOptions 使用指定的运行选项编译校验 JavaScript 插件。
+// stage 允许 request 与 response；两者的编译路径完全一致，仅执行期入口不同。
 func ValidateWithOptions(stage, source string, options ScriptOptions) error {
-	if stage == store.JSStageResponse {
-		return ErrResponseStageUnavailable
-	}
-	if stage != store.JSStageRequest {
+	if stage != store.JSStageRequest && stage != store.JSStageResponse {
 		return errors.New("stage must be request or response")
 	}
 	if options.Name == "" {

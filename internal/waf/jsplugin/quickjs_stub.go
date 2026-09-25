@@ -4,6 +4,8 @@ package jsplugin
 
 import (
 	"context"
+
+	"My-OpenWaf/internal/store"
 )
 
 // RuntimeBackend reports that this binary has no executable JavaScript backend.
@@ -32,7 +34,7 @@ func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapsho
 
 // Evaluate 保留 API 形状并返回不可用错误。
 func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
-	if err := validateExecutionStage(script); err != nil {
+	if err := validateExecutionStage(script, store.JSStageRequest); err != nil {
 		return MutationPlan{}, err
 	}
 	return MutationPlan{}, ErrCGODisabled
@@ -40,10 +42,31 @@ func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapsh
 
 // Validate reports the same unavailable runtime without changing statistics.
 func (e *Engine) Validate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
-	if err := validateExecutionStage(script); err != nil {
+	if err := validateExecutionStage(script, store.JSStageRequest); err != nil {
 		return MutationPlan{}, err
 	}
 	return MutationPlan{}, ErrCGODisabled
+}
+
+// ExecuteResponse implements ResponseExecutor for the unavailable QuickJS backend.
+func (e *Engine) ExecuteResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
+	return e.EvaluateResponse(ctx, script, resp)
+}
+
+// EvaluateResponse 保留响应阶段 API 形状并返回不可用错误。
+func (e *Engine) EvaluateResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
+	if err := validateExecutionStage(script, store.JSStageResponse); err != nil {
+		return ResponseMutationPlan{}, err
+	}
+	return ResponseMutationPlan{}, ErrCGODisabled
+}
+
+// ValidateResponse reports the same unavailable runtime without changing statistics.
+func (e *Engine) ValidateResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
+	if err := validateExecutionStage(script, store.JSStageResponse); err != nil {
+		return ResponseMutationPlan{}, err
+	}
+	return ResponseMutationPlan{}, ErrCGODisabled
 }
 
 // Close 使调用方可以统一清理未来的真实实现和当前 stub。

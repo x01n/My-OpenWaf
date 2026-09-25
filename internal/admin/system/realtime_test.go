@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/network/standard"
 	"github.com/cloudwego/hertz/pkg/protocol"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/glebarez/sqlite"
 	"github.com/hertz-contrib/websocket"
 	"gorm.io/gorm"
@@ -80,6 +81,8 @@ func dialRealtimeTestWebSocket(t *testing.T, addr string, values url.Values) *we
 	req, resp := protocol.AcquireRequest(), protocol.AcquireResponse()
 	req.SetRequestURI(realtimeTestURL(addr, values))
 	req.SetMethod("GET")
+	// 模拟真实浏览器升级：Origin 固定为请求 host 同源，配合 CheckOrigin 同源校验。
+	req.Header.Set("Origin", "http://"+addr)
 	upgrader := &websocket.ClientUpgrader{}
 	upgrader.PrepareRequest(req)
 	if err := c.Do(context.Background(), req, resp); err != nil {
@@ -260,6 +263,8 @@ func TestBuildSecurityEventSnapshotUsesLightDTO(t *testing.T) {
 			TLSCurves:          "29,23",
 			TLSPointFormats:    "0",
 			HeaderOrder:        "Host,User-Agent",
+			GeoCountry:         "US",
+			GeoCity:            "Ashburn",
 			StatusCode:         403,
 		},
 	}
@@ -279,6 +284,9 @@ func TestBuildSecurityEventSnapshotUsesLightDTO(t *testing.T) {
 	}
 	if got[0].TLSCipherSuites != "TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384" || got[0].TLSExtensions != "0,16,43" || got[0].TLSCurves != "29,23" || got[0].TLSPointFormats != "0" {
 		t.Fatalf("security event realtime dto missed TLS shape metadata: %#v", got[0])
+	}
+	if got[0].GeoCountry != "US" || got[0].GeoCity != "Ashburn" {
+		t.Fatalf("security event realtime dto missed geo metadata: %#v", got[0])
 	}
 	raw, err := json.Marshal(got[0])
 	if err != nil {
@@ -505,6 +513,60 @@ func TestWebSocketHandlerRejectsInvalidTicket(t *testing.T) {
 	}
 	if got := jsonStringValue(resp.Body(), "error"); got != "invalid realtime ticket" {
 		t.Fatalf("invalid ticket error = %q, want invalid realtime ticket", got)
+	}
+}
+
+func TestRealtimeWSHandshakeRejectsMissingAndCrossOrigin(t *testing.T) {
+	ticket := "ticket-origin-check"
+	hub := newRealtimeTestHubWithTicket(t, ticket)
+	addr := startRealtimeTestServer(t, hub)
+
+	// 无 Origin 的升级请求必须被拒（防 CSWSH/工具直连）。
+	{
+		originTicket := "ticket-origin-missing"
+		hub.mu.Lock()
+		hub.tickets[originTicket] = time.Now().Add(time.Minute)
+		hub.mu.Unlock()
+		c, err := client.NewClient(client.WithDialer(standard.NewDialer()))
+		if err != nil {
+			t.Fatalf("create realtime http client: %v", err)
+		}
+		req, resp := protocol.AcquireRequest(), protocol.AcquireResponse()
+		defer protocol.ReleaseRequest(req)
+		defer protocol.ReleaseResponse(resp)
+		req.SetRequestURI(realtimeTestURL(addr, url.Values{"ticket": {originTicket}}))
+		req.SetMethod("GET")
+		// 构造合法升级头但不携带 Origin，模拟非浏览器与 CSWSH 场景。
+		upgrader := &websocket.ClientUpgrader{}
+		upgrader.PrepareRequest(req)
+		if err := c.Do(context.Background(), req, resp); err != nil {
+			t.Fatalf("request realtime websocket without origin: %v", err)
+		}
+		if resp.StatusCode() != consts.StatusForbidden {
+			t.Fatalf("missing origin status = %d, want %d", resp.StatusCode(), consts.StatusForbidden)
+		}
+	}
+
+	// 携带跨来源 Origin 的升级请求同样必须被拒。
+	{
+		c, err := client.NewClient(client.WithDialer(standard.NewDialer()))
+		if err != nil {
+			t.Fatalf("create realtime http client: %v", err)
+		}
+		req, resp := protocol.AcquireRequest(), protocol.AcquireResponse()
+		defer protocol.ReleaseRequest(req)
+		defer protocol.ReleaseResponse(resp)
+		req.SetRequestURI(realtimeTestURL(addr, url.Values{"ticket": {ticket}}))
+		req.SetMethod("GET")
+		upgrader := &websocket.ClientUpgrader{}
+		upgrader.PrepareRequest(req)
+		req.Header.Set("Origin", "https://evil.example.com")
+		if err := c.Do(context.Background(), req, resp); err != nil {
+			t.Fatalf("request realtime websocket with cross origin: %v", err)
+		}
+		if resp.StatusCode() != consts.StatusForbidden {
+			t.Fatalf("cross origin status = %d, want %d", resp.StatusCode(), consts.StatusForbidden)
+		}
 	}
 }
 

@@ -4,90 +4,41 @@ use sha2::{Digest, Sha256};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-
-
 const MAX_FINGERPRINT_BYTES: usize = 64 * 1024;
 
-/**
- * collect_fingerprint assembles and serializes browser observations in Rust.
- * JavaScript only transports browser API reads through wasm-bindgen; it does
- * not define fields, classify signals, hash data, or encrypt the result.
- */
-#[wasm_bindgen]
-pub fn collect_fingerprint() -> String {
-    collect_fingerprint_json()
-}
-
-/**
- * collect_and_encrypt_fingerprint creates the canonical v1 envelope in WASM.
- */
-#[wasm_bindgen]
-pub fn collect_and_encrypt_fingerprint(key_hex: &str, aad: &str) -> String {
-    let fingerprint = collect_fingerprint_json();
+/// [`internal_fingerprint_payload`] gm.rs 使用的内部入口：返回明文指纹 JSON。
+pub(crate) fn internal_fingerprint_payload() -> Option<String> {
+    let fingerprint = collect_fingerprint_json(None);
     if fingerprint.is_empty() {
-        return String::new();
+        return None;
     }
-    crate::crypto::encrypt_env_data_with_aad(&fingerprint, key_hex, aad)
+    Some(fingerprint)
 }
 
-/**
- * collect_canvas_fingerprint computes the Canvas SHA-256 digest in WASM.
- */
+/// [`internal_fingerprint_payload_with_behavior`] gm.rs 使用的内部入口：
+/// 合并 behavior 后返回明文指纹 JSON；非法 behavior 失败关闭。
+pub(crate) fn internal_fingerprint_payload_with_behavior(behavior_json: &str) -> Option<String> {
+    let fingerprint = collect_fingerprint_json(Some(behavior_json));
+    if fingerprint.is_empty() {
+        return None;
+    }
+    Some(fingerprint)
+}
+
 #[wasm_bindgen]
-pub fn collect_canvas_fingerprint() -> String {
-    let window = match web_sys::window() {
-        Some(window) => window,
-        None => return String::new(),
-    };
-    let document = match window.document() {
-        Some(document) => document,
-        None => return String::new(),
-    };
-    let canvas = match document.create_element("canvas") {
-        Ok(element) => match element.dyn_into::<web_sys::HtmlCanvasElement>() {
-            Ok(canvas) => canvas,
-            Err(_) => return String::new(),
-        },
-        Err(_) => return String::new(),
-    };
-    canvas.set_width(280);
-    canvas.set_height(60);
-    let context = match canvas.get_context("2d") {
-        Ok(Some(context)) => match context.dyn_into::<web_sys::CanvasRenderingContext2d>() {
-            Ok(context) => context,
-            Err(_) => return String::new(),
-        },
-        _ => return String::new(),
-    };
-    context.set_fill_style_str("rgb(102,204,0)");
-    context.set_font("18px Arial");
-    context.set_text_baseline("top");
-    let _ = context.fill_text("OWAF fp v1.0", 2.0, 2.0);
-    context.set_fill_style_str("rgba(100,200,50,0.7)");
-    context.fill_rect(50.0, 10.0, 100.0, 40.0);
-    context.set_fill_style_str("rgb(50,100,150)");
-    context.begin_path();
-    let _ = context.arc(150.0, 30.0, 20.0, 0.0, std::f64::consts::PI * 2.0);
-    context.fill();
-    match canvas.to_data_url() {
-        Ok(value) => sha256_hex(value.as_bytes()),
-        Err(_) => String::new(),
-    }
+pub fn gm_encrypt_fingerprint(key_hex: &str, aad: &str) -> String {
+    crate::gm::gm_encrypt_fingerprint_gcm(key_hex, aad)
 }
-
-/**
- * collect_webgl_fingerprint computes a WebGL digest in WASM from raw API values.
- */
 #[wasm_bindgen]
-pub fn collect_webgl_fingerprint() -> String {
-    let (vendor, renderer) = collect_webgl_values();
-    if vendor.is_empty() && renderer.is_empty() {
-        return String::new();
-    }
-    sha256_hex(format!("{}|{}", vendor, renderer).as_bytes())
+pub fn gm_encrypt_fingerprint_with_behavior(
+    key_hex: &str,
+    aad: &str,
+    behavior_json: &str,
+) -> String {
+    crate::gm::gm_encrypt_fingerprint_gcm_behavior(key_hex, aad, behavior_json)
 }
 
-pub(crate) fn collect_fingerprint_json() -> String {
+pub(crate) fn collect_fingerprint_json(behavior: Option<&str>) -> String {
     let window = match web_sys::window() {
         Some(window) => window,
         None => return String::new(),
@@ -142,7 +93,7 @@ pub(crate) fn collect_fingerprint_json() -> String {
         ""
     };
 
-    let fingerprint = json!({
+    let mut fingerprint = json!({
         "webdriver": webdriver,
         "chrome_present": has_property(&window_value, "chrome"),
         "plugins_count": array_length(&navigator_value, "plugins"),
@@ -239,6 +190,20 @@ pub(crate) fn collect_fingerprint_json() -> String {
         "resize_observer": has_property(&window_value, "ResizeObserver"),
         "history_api": has_property(&window_value, "history")
     });
+    if let Some(raw) = behavior {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return String::new();
+        }
+        let stats = match serde_json::from_str::<Value>(raw) {
+            Ok(stats) => stats,
+            Err(_) => return String::new(),
+        };
+        if !stats.as_object().is_some_and(|obj| !obj.is_empty()) {
+            return String::new();
+        }
+        fingerprint["behavior"] = stats;
+    }
     canonical_json(fingerprint)
 }
 
@@ -356,4 +321,45 @@ fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     crate::hex_encode(&hasher.finalize())
+}
+
+fn collect_canvas_fingerprint() -> String {
+    let window = match web_sys::window() {
+        Some(window) => window,
+        None => return String::new(),
+    };
+    let document = match window.document() {
+        Some(document) => document,
+        None => return String::new(),
+    };
+    let canvas = match document.create_element("canvas") {
+        Ok(element) => match element.dyn_into::<web_sys::HtmlCanvasElement>() {
+            Ok(canvas) => canvas,
+            Err(_) => return String::new(),
+        },
+        Err(_) => return String::new(),
+    };
+    canvas.set_width(280);
+    canvas.set_height(60);
+    let context = match canvas.get_context("2d") {
+        Ok(Some(context)) => match context.dyn_into::<web_sys::CanvasRenderingContext2d>() {
+            Ok(context) => context,
+            Err(_) => return String::new(),
+        },
+        _ => return String::new(),
+    };
+    context.set_fill_style_str("rgb(102,204,0)");
+    context.set_font("18px Arial");
+    context.set_text_baseline("top");
+    let _ = context.fill_text("OWAF fp v1.0", 2.0, 2.0);
+    context.set_fill_style_str("rgba(100,200,50,0.7)");
+    context.fill_rect(50.0, 10.0, 100.0, 40.0);
+    context.set_fill_style_str("rgb(50,100,150)");
+    context.begin_path();
+    let _ = context.arc(150.0, 30.0, 20.0, 0.0, std::f64::consts::PI * 2.0);
+    context.fill();
+    match canvas.to_data_url() {
+        Ok(value) => sha256_hex(value.as_bytes()),
+        Err(_) => String::new(),
+    }
 }

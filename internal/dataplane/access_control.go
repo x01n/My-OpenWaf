@@ -10,20 +10,30 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	goredis "github.com/redis/go-redis/v9"
 
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/accessgate"
+	"My-OpenWaf/internal/waf/pageconfig"
 )
 
-// globalAccessSessionStore 全局访问控制会话存储（跨站点共享，token 唯一）。
-var globalAccessSessionStore = accessgate.NewMemorySessionStore()
+var globalAccessSessionStore accessgate.SessionStore = accessgate.NewRedisSessionStore(nil)
 
 // globalAccessOAuthStateStore 全局 OAuth 流程 state 存储。
-var globalAccessOAuthStateStore = accessgate.NewMemoryOAuthStateStore()
+var globalAccessOAuthStateStore accessgate.OAuthStateStore = accessgate.NewRedisOAuthStateStore(nil)
 
 func init() {
 	go accessSessionCleaner()
+}
+
+func SetAccessStoreRedisClients(redisClient *goredis.Client) {
+	if sessions, ok := globalAccessSessionStore.(*accessgate.RedisSessionStore); ok {
+		sessions.SetRedis(redisClient)
+	}
+	if states, ok := globalAccessOAuthStateStore.(*accessgate.RedisOAuthStateStore); ok {
+		states.SetRedis(redisClient)
+	}
 }
 
 // accessSessionCleaner 定期清理过期会话和 OAuth state。
@@ -116,6 +126,12 @@ func handleAccessControlEndpoints(ctx context.Context, c *app.RequestContext, op
 	}
 
 	rt, host, ok := matchSiteForAccess(c, opts)
+	// matchSiteForAccess 内部已加载快照；这里再取一次当前快照供品牌化配置使用，
+	// holder 为空（测试或未初始化）时 renderAccessLoginPage 会回退到默认页配置。
+	var sn *snapshot.Snapshot
+	if holder := opts.Holder; holder != nil {
+		sn = holder.Load()
+	}
 	if !ok || rt.AccessControl == nil || !rt.AccessControl.Enabled {
 		// 站点未启用访问控制时，这些端点不存在。
 		c.String(404, "not found")
@@ -128,11 +144,11 @@ func handleAccessControlEndpoints(ctx context.Context, c *app.RequestContext, op
 	switch {
 	case path == accessLoginPath && method == "GET":
 		errMsg := string(c.QueryArgs().Peek("error"))
-		c.Data(200, "text/html; charset=utf-8", accessgate.RenderLoginPage(host, cfg, errMsg))
+		c.Data(200, "text/html; charset=utf-8", renderAccessLoginPage(host, cfg, sn, errMsg))
 		return true
 
 	case path == accessVerifyPath && method == "POST":
-		handleAccessVerify(c, opts, gate, cfg, host, &rt)
+		handleAccessVerify(c, opts, gate, cfg, host, &rt, sn)
 		return true
 
 	case path == accessLogoutPath && method == "POST":
@@ -162,7 +178,7 @@ func handleAccessControlEndpoints(ctx context.Context, c *app.RequestContext, op
  * handleAccessVerify 处理共享密码与用户名密码的登录验证。
  * 校验通过后创建会话、下发按站点隔离的 cookie，并重定向回原始 URL。
  */
-func handleAccessVerify(c *app.RequestContext, opts Options, gate *accessgate.Gate, cfg accessgate.Config, host string, rt *snapshot.SiteRuntime) {
+func handleAccessVerify(c *app.RequestContext, opts Options, gate *accessgate.Gate, cfg accessgate.Config, host string, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) {
 	authType := string(c.FormValue("auth_type"))
 	password := string(c.FormValue("password"))
 
@@ -170,7 +186,7 @@ func handleAccessVerify(c *app.RequestContext, opts Options, gate *accessgate.Ga
 	switch authType {
 	case "shared_password":
 		if !gate.VerifySharedPassword(password) {
-			renderAccessLoginError(c, host, cfg, "访问密码错误")
+			renderAccessLoginError(c, host, cfg, "访问密码错误", rt, sn)
 			return
 		}
 		identity, provider = "shared", "shared_password"
@@ -178,24 +194,24 @@ func handleAccessVerify(c *app.RequestContext, opts Options, gate *accessgate.Ga
 	case "user_password":
 		username := string(c.FormValue("username"))
 		if !gate.HasProviderType(store.AccessProviderPassword) || username == "" || password == "" || opts.AccessControlRepo == nil {
-			renderAccessLoginError(c, host, cfg, "用户名或密码错误")
+			renderAccessLoginError(c, host, cfg, "用户名或密码错误", rt, sn)
 			return
 		}
 		user, err := opts.AccessControlRepo.GetAccessUserByName(rt.Site.ID, username)
 		if err != nil || user == nil || !user.Enabled || !accessgate.VerifyUserPassword(user.PasswordHash, password) {
-			renderAccessLoginError(c, host, cfg, "用户名或密码错误")
+			renderAccessLoginError(c, host, cfg, "用户名或密码错误", rt, sn)
 			return
 		}
 		identity, provider = username, "user_password"
 
 	default:
-		renderAccessLoginError(c, host, cfg, "不支持的验证方式")
+		renderAccessLoginError(c, host, cfg, "不支持的验证方式", rt, sn)
 		return
 	}
 
 	token, err := gate.CreateSession(identity, provider)
 	if err != nil {
-		renderAccessLoginError(c, host, cfg, "会话创建失败，请重试")
+		renderAccessLoginError(c, host, cfg, "会话创建失败，请重试", rt, sn)
 		return
 	}
 	setAccessSessionCookie(c, gate.CookieName(), token, cfg.SessionTTL, rt.Site.TLSEnabled)
@@ -353,9 +369,17 @@ func enforceAccessControl(c *app.RequestContext, rt *snapshot.SiteRuntime, host 
 	return true
 }
 
-// renderAccessLoginError 以 401 状态重新渲染带错误提示的登录页。
-func renderAccessLoginError(c *app.RequestContext, host string, cfg accessgate.Config, msg string) {
-	c.Data(401, "text/html; charset=utf-8", accessgate.RenderLoginPage(host, cfg, msg))
+// renderAccessLoginPage 按当前快照的全局 Block 页 PageConfig 渲染访问控制登录页。
+// 与 WAF 拦截页同源，保证页模板自定义品牌覆盖访问门；无快照时回退默认配置。
+func renderAccessLoginPage(pageHost string, cfg accessgate.Config, sn *snapshot.Snapshot, errorMsg string) []byte {
+	pageCfg := pageconfig.DefaultPageConfig()
+	if sn != nil {
+		pageCfg = sn.BlockPage.PageConfig
+	}
+	return accessgate.RenderLoginPageWithPageConfig(pageHost, cfg, errorMsg, pageCfg)
+}
+func renderAccessLoginError(c *app.RequestContext, host string, cfg accessgate.Config, msg string, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) {
+	c.Data(401, "text/html; charset=utf-8", renderAccessLoginPage(host, cfg, sn, msg))
 }
 
 // accessReturnURL 解析验证成功后的跳转地址：优先表单 return_url，其次 Referer，否则根路径。
@@ -458,6 +482,43 @@ func clearAccessSessionCookie(c *app.RequestContext, name string, secure bool) {
 		cookie += "; Secure"
 	}
 	c.Response.Header.Add("Set-Cookie", cookie)
+}
+
+/**
+ * revokeAccessSessionIfPresent 检查请求中是否携带有效访问会话，若有则吊销。
+ * @param c  Hertz 请求上下文。
+ * @param rt 当前站点运行时。
+ * @return 是否执行了至少一次吊销，以及失败原因（无失败时为空串）。
+ */
+func revokeAccessSessionIfPresent(c *app.RequestContext, rt *snapshot.SiteRuntime) (bool, string) {
+	gate := accessgate.NewGate(accessgate.Config{Enabled: true, SiteID: rt.Site.ID}, globalAccessSessionStore)
+	cName := gate.CookieName()
+	revoked := false
+	warnMsg := ""
+	c.Request.Header.VisitAllCookie(func(key, value []byte) {
+		if string(key) != cName {
+			return
+		}
+		token := string(value)
+		if token == "" {
+			return
+		}
+		info, err := globalAccessSessionStore.Validate(token)
+		if err != nil {
+			warnMsg = err.Error()
+			return
+		}
+		if info == nil || info.SiteID != rt.Site.ID || token != info.Token {
+			return
+		}
+		if err := globalAccessSessionStore.Revoke(token); err != nil {
+			warnMsg = err.Error()
+			return
+		}
+		clearAccessSessionCookie(c, cName, rt.Site.TLSEnabled)
+		revoked = true
+	})
+	return revoked, warnMsg
 }
 
 // decryptOAuthSecret 解密 OAuth client_secret（密文为 AES-GCM base64 格式）。

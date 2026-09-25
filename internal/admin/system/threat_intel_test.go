@@ -15,6 +15,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
+	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
@@ -53,6 +54,9 @@ func invokeThreatIntelHandler(t *testing.T, handler app.HandlerFunc, method, uri
 	ctx := app.NewContext(0)
 	req.CopyTo(&ctx.Request)
 	ctx.Params = params
+	// 测试默认授予 admin 角色——认证头值遮蔽只对 non-admin 生效，
+	// 单独用例通过 ctx.Set("auth_role", ...) 覆盖为 readonly/operator。
+	ctx.Set("auth_role", auth.RoleAdmin)
 	handler(context.Background(), ctx)
 	return ctx
 }
@@ -267,6 +271,167 @@ func TestUpdateThreatIntelFeedRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+// TestCreateThreatIntelFeedAuthHeaders verifies auth_header_name/auth_header_value
+// are persisted via create and echoed back via list/update.
+func TestCreateThreatIntelFeedAuthHeaders(t *testing.T) {
+	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
+	payload := []byte(`{"name":"authed","url":"https://intel.example.test/auth.txt","kind":"blacklist","auth_header_name":"Authorization","auth_header_value":"Bearer secret-token"}`)
+
+	ctx := invokeThreatIntelHandler(t, CreateThreatIntelFeed(repo, func() error { return nil }), "POST", "/api/v1/threat-intel-feeds", nil, payload)
+	if ctx.Response.StatusCode() != 201 {
+		t.Fatalf("create status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+	}
+	var created store.ThreatIntelFeed
+	if err := json.Unmarshal(ctx.Response.Body(), &created); err != nil {
+		t.Fatalf("decode created feed: %v", err)
+	}
+	if created.AuthHeaderName != "Authorization" || created.AuthHeaderValue != "Bearer secret-token" {
+		t.Fatalf("auth header = (%q, %q), want (Authorization, Bearer secret-token)", created.AuthHeaderName, created.AuthHeaderValue)
+	}
+
+	// list 回显新字段。
+	listCtx := invokeThreatIntelHandler(t, ListThreatIntelFeeds(repo), "GET", "/api/v1/threat-intel-feeds", nil, nil)
+	var listResp struct {
+		Items []store.ThreatIntelFeed `json:"items"`
+		Total int                     `json:"total"`
+	}
+	if err := json.Unmarshal(listCtx.Response.Body(), &listResp); err != nil {
+		t.Fatalf("decode feed list: %v", err)
+	}
+	if len(listResp.Items) != 1 || listResp.Items[0].AuthHeaderValue != "Bearer secret-token" {
+		t.Fatalf("list 未回显认证头字段: %#v", listResp.Items)
+	}
+}
+
+// TestThreatIntelFeedAuthHeaderMaskingForNonAdmin 验证非 admin 角色读取列表时
+// 认证头值被遮蔽（保留前 4 位 + ***），admin 角色与仓库存储保持明文。
+func TestThreatIntelFeedAuthHeaderMaskingForNonAdmin(t *testing.T) {
+	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
+	seed := &store.ThreatIntelFeed{
+		Name: "authed", URL: "https://intel.example.test/auth.txt", Kind: "blacklist",
+		Action: "intercept", Enabled: true, SyncInterval: 600,
+		AuthHeaderName: "Authorization", AuthHeaderValue: "Bearer secret-token",
+	}
+	if err := repo.Create(seed); err != nil {
+		t.Fatalf("seed feed: %v", err)
+	}
+
+	for _, role := range []string{auth.RoleOperator, auth.RoleReadonly} {
+		// 单独构造请求上下文，把角色覆盖为 non-admin。
+		var req protocol.Request
+		req.SetMethod("GET")
+		req.SetRequestURI("/api/v1/threat-intel-feeds")
+		ctx := app.NewContext(0)
+		req.CopyTo(&ctx.Request)
+		ctx.Set("auth_role", role)
+		ListThreatIntelFeeds(repo)(context.Background(), ctx)
+		if ctx.Response.StatusCode() != 200 {
+			t.Fatalf("role %s: list status %d: %s", role, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
+		}
+		var resp struct {
+			Items []store.ThreatIntelFeed `json:"items"`
+		}
+		if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+			t.Fatalf("role %s: decode list: %v", role, err)
+		}
+		if len(resp.Items) != 1 || resp.Items[0].AuthHeaderValue != "Bear***" {
+			t.Fatalf("role %s: masked value = %#v, want Bear***", role, resp.Items)
+		}
+
+		// 仓库层仍为明文——遮蔽只作用于响应，不落库。
+		got, err := repo.Get(seed.ID)
+		if err != nil {
+			t.Fatalf("role %s: load feed: %v", role, err)
+		}
+		if got.AuthHeaderValue != "Bearer secret-token" {
+			t.Fatalf("role %s: stored value must stay plaintext, got %q", role, got.AuthHeaderValue)
+		}
+	}
+}
+
+// TestThreatIntelFeedAuthHeaderMaskingKeepsShortValueFullyMasked 验证短值
+// （长度 < 5）整体遮蔽为 ***，不泄露前几位。
+func TestThreatIntelFeedAuthHeaderMaskingKeepsShortValueFullyMasked(t *testing.T) {
+	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
+	seed := &store.ThreatIntelFeed{
+		Name: "short", URL: "https://intel.example.test/s.txt", Kind: "blacklist",
+		Action: "intercept", Enabled: true, SyncInterval: 600,
+		AuthHeaderName: "X-Token", AuthHeaderValue: "tok",
+	}
+	if err := repo.Create(seed); err != nil {
+		t.Fatalf("seed feed: %v", err)
+	}
+
+	var req protocol.Request
+	req.SetMethod("GET")
+	req.SetRequestURI("/api/v1/threat-intel-feeds")
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Set("auth_role", auth.RoleReadonly)
+	ListThreatIntelFeeds(repo)(context.Background(), ctx)
+
+	var resp struct {
+		Items []store.ThreatIntelFeed `json:"items"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].AuthHeaderValue != "***" {
+		t.Fatalf("short masked value = %#v, want ***", resp.Items)
+	}
+}
+
+// TestUpdateThreatIntelFeedAuthHeaders verifies auth_header_name/auth_header_value
+// can be updated and omitted fields are preserved.
+func TestUpdateThreatIntelFeedAuthHeaders(t *testing.T) {
+	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
+	seed := &store.ThreatIntelFeed{
+		Name: "auth-feed", URL: "https://intel.example.test/a.txt", Kind: "blacklist",
+		Action:          "intercept",
+		Enabled:         true,
+		SyncInterval:    600,
+		AuthHeaderName:  "X-Auth-Token",
+		AuthHeaderValue: "old-token",
+	}
+	if err := repo.Create(seed); err != nil {
+		t.Fatalf("seed feed: %v", err)
+	}
+	idStr := strconv.FormatUint(uint64(seed.ID), 10)
+
+	updateCtx := invokeThreatIntelHandler(t, UpdateThreatIntelFeed(repo, func() error { return nil }),
+		"POST", "/api/v1/threat-intel-feeds/"+idStr+"/update", param.Params{{Key: "id", Value: idStr}},
+		[]byte(`{"auth_header_value": "new-token"}`))
+	if updateCtx.Response.StatusCode() != 200 {
+		t.Fatalf("update status %d: %s", updateCtx.Response.StatusCode(), bytes.TrimSpace(updateCtx.Response.Body()))
+	}
+	var updated store.ThreatIntelFeed
+	if err := json.Unmarshal(updateCtx.Response.Body(), &updated); err != nil {
+		t.Fatalf("decode updated feed: %v", err)
+	}
+	if updated.AuthHeaderName != "X-Auth-Token" || updated.AuthHeaderValue != "new-token" {
+		t.Fatalf("auth header after update = (%q, %q)", updated.AuthHeaderName, updated.AuthHeaderValue)
+	}
+	// 不覆盖其他字段。
+	if updated.SyncInterval != 600 || updated.URL != "https://intel.example.test/a.txt" {
+		t.Fatalf("other fields changed: %#v", updated)
+	}
+
+	// 显式置空可删除认证头。
+	clearCtx := invokeThreatIntelHandler(t, UpdateThreatIntelFeed(repo, func() error { return nil }),
+		"POST", "/api/v1/threat-intel-feeds/"+idStr+"/update", param.Params{{Key: "id", Value: idStr}},
+		[]byte(`{"auth_header_value":"","auth_header_name":""}`))
+	if clearCtx.Response.StatusCode() != 200 {
+		t.Fatalf("clear status %d: %s", clearCtx.Response.StatusCode(), bytes.TrimSpace(clearCtx.Response.Body()))
+	}
+	got, err := repo.Get(seed.ID)
+	if err != nil {
+		t.Fatalf("load after clear: %v", err)
+	}
+	if got.AuthHeaderName != "" || got.AuthHeaderValue != "" {
+		t.Fatalf("认证头应被清空: %#v", got)
+	}
+}
+
 func TestUpdateThreatIntelFeedInvalidIDAndMissingFeed(t *testing.T) {
 	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
 
@@ -393,8 +558,8 @@ func TestSyncThreatIntelFeedErrorPaths(t *testing.T) {
 	if failing.Response.StatusCode() != 500 {
 		t.Fatalf("sync error status = %d, want 500", failing.Response.StatusCode())
 	}
-	if !bytes.Contains(failing.Response.Body(), []byte("fetch failed")) {
-		t.Fatalf("sync error body = %s, want the syncer error", bytes.TrimSpace(failing.Response.Body()))
+	if !bytes.Contains(failing.Response.Body(), []byte("同步失败")) {
+		t.Fatalf("sync error body = %s, want the summary error", bytes.TrimSpace(failing.Response.Body()))
 	}
 
 	// 同步成功但目标 feed 已不存在时降级为状态响应。

@@ -1,13 +1,11 @@
 package challenge
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"My-OpenWaf/internal/waf/challenge/gm"
 )
 
 func TestParseEnvFingerprintEmptyReturnsNil(t *testing.T) {
@@ -104,40 +102,38 @@ func TestDecryptEnvFingerprintRejectsPlaintextAndAcceptsAuthenticatedCiphertext(
 	if err != nil {
 		t.Fatalf("marshal fingerprint: %v", err)
 	}
-	aad := "owaf-env:v1|challenge|7|example.test|:443|request"
-	encrypted := encryptVersionedEnvFingerprint(t, plaintext, key, aad)
+	aad := "owaf-env:v2|challenge|7|example.test|:443|request"
+	encrypted := encryptGMEnvFingerprint(t, []byte(plaintext), key, aad)
 
 	got := DecryptEnvFingerprintWithAAD(encrypted, key, aad)
 	if got == nil || got.Languages != fp.Languages {
 		t.Fatalf("encrypted fingerprint = %+v, want language %q", got, fp.Languages)
 	}
-	if DecryptEnvFingerprintWithAAD(encrypted, key, aad+"-other") != nil {
-		t.Fatal("fingerprint authenticated for a different AAD")
-	}
-	if DecryptEnvFingerprintWithAAD(strings.TrimPrefix(encrypted, envCiphertextPrefix), key, aad) != nil {
-		t.Fatal("unversioned fingerprint must not be accepted")
+	// AAD 差异不再作为拒绝维度（绑定由 domain 字节 + 会话唯一密钥承担）；
+	// 跨用途重放仍必须被 domain 强制拒。
+	raw, _ := gm.Decode(encrypted)
+	if _, err := gm.Open(key[:16], raw, []byte(aad), gm.DomainCaptchaAnswer, false); err == nil {
+		t.Fatal("environment envelope must be rejected when opened as a captcha answer")
 	}
 	if DecryptEnvFingerprintWithAAD(string(plaintext), key, aad) != nil {
 		t.Fatal("plaintext fingerprint must not be accepted")
 	}
 }
 
+// encryptGMEnvFingerprint 用 GM v2 信封封装测试指纹（服务端权威实现）。
+func encryptGMEnvFingerprint(t *testing.T, plaintext, key []byte, aad string) string {
+	t.Helper()
+	raw, err := envEncrypt(plaintext, key, []byte(aad), gm.DomainEnv)
+	if err != nil {
+		t.Fatalf("envEncrypt: %v", err)
+	}
+	return gm.Encode(raw)
+}
+
+// encryptVersionedEnvFingerprint 用 GM v2 信封封装测试指纹（服务端权威实现）。
 func encryptVersionedEnvFingerprint(t *testing.T, plaintext, key []byte, aad string) string {
 	t.Helper()
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatalf("new AES cipher: %v", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatalf("new GCM: %v", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		t.Fatalf("random nonce: %v", err)
-	}
-	ciphertext := gcm.Seal(nil, nonce, plaintext, []byte(aad))
-	return envCiphertextPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
+	return encryptGMEnvFingerprint(t, plaintext, key, aad)
 }
 
 func TestIsSuspiciousRendererKnownVMs(t *testing.T) {
@@ -216,10 +212,10 @@ func TestValidateEnvFingerprintNoBotSignalScoresLow(t *testing.T) {
 }
 
 func TestDecryptEnvFingerprintEmptyReturnsNil(t *testing.T) {
-	if DecryptEnvFingerprintWithAAD("", []byte("key"), "owaf-env:v1|test|1|example.test|:443|session") != nil {
+	if DecryptEnvFingerprintWithAAD("", []byte("key"), "owaf-env:v2|test|1|example.test|:443|session") != nil {
 		t.Error("empty encrypted should return nil")
 	}
-	if DecryptEnvFingerprintWithAAD("data", nil, "owaf-env:v1|test|1|example.test|:443|session") != nil {
+	if DecryptEnvFingerprintWithAAD("data", nil, "owaf-env:v2|test|1|example.test|:443|session") != nil {
 		t.Error("empty key should return nil")
 	}
 }

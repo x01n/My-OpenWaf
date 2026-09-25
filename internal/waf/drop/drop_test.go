@@ -121,13 +121,16 @@ func TestDropExecutor_Reconfigure(t *testing.T) {
 	}
 }
 
-func TestDropExecutor_DefaultSourceCountsAsRule(t *testing.T) {
+func TestDropExecutor_DefaultSourceCountsAsOther(t *testing.T) {
 	executor := NewDropExecutor(true, slog.Default())
 	conn := &mockConn{}
 	executor.Execute(conn, DropReason{Source: "unknown_source", Timestamp: time.Now()})
 	stats := executor.GetStats()
-	if stats.DroppedByRule.Load() != 1 {
-		t.Errorf("unknown source should count as rule drop, DroppedByRule = %d", stats.DroppedByRule.Load())
+	if stats.DroppedByRule.Load() != 0 {
+		t.Errorf("unknown source should not count as rule drop, DroppedByRule = %d", stats.DroppedByRule.Load())
+	}
+	if stats.DroppedOther.Load() != 1 {
+		t.Errorf("unknown source should count as other drop, DroppedOther = %d", stats.DroppedOther.Load())
 	}
 }
 

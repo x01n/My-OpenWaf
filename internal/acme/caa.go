@@ -189,19 +189,20 @@ func caaRecordsAuthorizeIssuers(records []CAARecord, issuers []string, wildcard 
 
 func caaIssueRecords(records []CAARecord, wildcard bool) []CAARecord {
 	out := make([]CAARecord, 0, len(records))
+	hasIssueWild := false
 	if wildcard {
 		for _, rec := range records {
 			if strings.EqualFold(strings.TrimSpace(rec.Tag), "issuewild") {
 				out = append(out, rec)
+				hasIssueWild = true
 			}
 		}
-		if len(out) > 0 {
-			return out
-		}
 	}
-	for _, rec := range records {
-		if strings.EqualFold(strings.TrimSpace(rec.Tag), "issue") {
-			out = append(out, rec)
+	if !hasIssueWild {
+		for _, rec := range records {
+			if strings.EqualFold(strings.TrimSpace(rec.Tag), "issue") {
+				out = append(out, rec)
+			}
 		}
 	}
 	return out

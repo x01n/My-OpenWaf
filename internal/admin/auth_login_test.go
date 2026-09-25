@@ -63,8 +63,6 @@ func invokeAuthHandler(handler app.HandlerFunc, uri string, body []byte, cookie 
 	return ctx
 }
 
-// ---- LoginHandler ----
-
 func TestLoginRejectsMalformedBody(t *testing.T) {
 	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
 	ctx := invokeAuthHandler(LoginHandler(d), "/api/v1/auth/login", []byte(`not json`), "")

@@ -20,11 +20,11 @@ import (
 	hertzclient "github.com/cloudwego/hertz/pkg/app/client"
 	"github.com/cloudwego/hertz/pkg/network"
 	hertzprotocol "github.com/cloudwego/hertz/pkg/protocol"
-	http2 "github.com/hertz-contrib/http2"
-	http2config "github.com/hertz-contrib/http2/config"
-	http2factory "github.com/hertz-contrib/http2/factory"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	http2 "github.com/x01n/http2"
+	http2config "github.com/x01n/http2/config"
+	http2factory "github.com/x01n/http2/factory"
 
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/security"
@@ -764,6 +764,71 @@ func http3TransportForUpstream(rt snapshot.SiteRuntime, upstreamHost string) *ht
 	return tr
 }
 
+// http3ClientPools caches http.Client instances keyed by http3.Transport, one per
+// timeout class. The buffered path uses http3Clients (30 s total timeout) and the
+// streaming path uses http3NoTimeoutClients, mirroring the HTTP/1 transport pairs.
+var (
+	http3ClientMu         sync.RWMutex
+	http3Clients          = make(map[*http3.Transport]*http.Client)
+	http3NoTimeoutClients = make(map[*http3.Transport]*http.Client)
+)
+
+// sharedPooledClient returns a pooled http.Client for the resolved upstream
+// transport, selecting the pool by transport kind:
+//   - *http.Transport 走 sharedClient / sharedNoTimeoutClient（原缓存）；
+//   - *http3.Transport 走本文件新增的 http3Clients / http3NoTimeoutClients，
+//     与 transport 生命周期同步增减，使 UpstreamTransportPoolStats 的
+//     HTTP3Clients / HTTP3NoTimeoutClients 反映真实池规模（不再恒 0）。
+func sharedPooledClient(transport http.RoundTripper, timeout time.Duration) *http.Client {
+	var hc *http.Client
+	switch tr := transport.(type) {
+	case *http.Transport:
+		if timeout > 0 {
+			return sharedClient(tr)
+		}
+		return sharedNoTimeoutClient(tr)
+	case *http3.Transport:
+		if timeout > 0 {
+			http3ClientMu.RLock()
+			if existing, ok := http3Clients[tr]; ok {
+				http3ClientMu.RUnlock()
+				return existing
+			}
+			http3ClientMu.RUnlock()
+
+			hc = &http.Client{Transport: tr, Timeout: timeout}
+			http3ClientMu.Lock()
+			if existing, ok := http3Clients[tr]; ok {
+				http3ClientMu.Unlock()
+				return existing
+			}
+			http3Clients[tr] = hc
+			http3ClientMu.Unlock()
+			return hc
+		}
+		http3ClientMu.RLock()
+		if existing, ok := http3NoTimeoutClients[tr]; ok {
+			http3ClientMu.RUnlock()
+			return existing
+		}
+		http3ClientMu.RUnlock()
+
+		hc = &http.Client{Transport: tr, Timeout: 0}
+		http3ClientMu.Lock()
+		if existing, ok := http3NoTimeoutClients[tr]; ok {
+			http3ClientMu.Unlock()
+			return existing
+		}
+		http3NoTimeoutClients[tr] = hc
+		http3ClientMu.Unlock()
+		return hc
+	default:
+		// SSE 等经 SharedNoTimeoutClientForRoundTripper 的 RoundTripper 变体不在此列；
+		// 剩余形态无法按 transport 池化，回到原有每请求分配的保守路径。
+		return &http.Client{Transport: transport, Timeout: timeout}
+	}
+}
+
 // HTTPResponse is a buffered upstream response used by the cache path.
 type HTTPResponse struct {
 	StatusCode           int
@@ -806,6 +871,23 @@ func (fn identityResponseTransformerFunc) Transform(entity identityResponseEntit
 // 或浏览器签名挂载时，返回响应实体变换器；否则返回 nil 以跳过变换。
 func responseEntityTransformerForSite(rt snapshot.SiteRuntime) identityResponseTransformer {
 	return responseEntityTransformerForSiteWithClient(rt, nil)
+}
+
+// responseEntityTransformerForSiteAndClient 在动态保护之外并入 response
+// 阶段 JS 插件；jsPluginResponseTransformerFor 内部直接从 hertz 请求上下文
+// 读取执行器与脚本，因此即便 rt 无任何动态能力也能仅返回 JS 变换器。
+func responseEntityTransformerForSiteAndClient(rt snapshot.SiteRuntime, c *app.RequestContext, clientIP net.IP) identityResponseTransformer {
+	jsT := jsPluginResponseTransformerFor(c, rt)
+	if t := responseEntityTransformerForSiteWithClient(rt, clientIP); t != nil {
+		return identityResponseTransformerFunc(func(entity identityResponseEntity) (identityResponseEntity, error) {
+			entity, err := t.Transform(entity)
+			if err != nil || jsT == nil {
+				return entity, err
+			}
+			return jsT.Transform(entity)
+		})
+	}
+	return jsT
 }
 
 func responseEntityTransformerForSiteWithClient(rt snapshot.SiteRuntime, clientIP net.IP) identityResponseTransformer {
@@ -1187,19 +1269,22 @@ func upstreamRequestURL(c *app.RequestContext, base string) string {
 		baseLen--
 	}
 
-	var b strings.Builder
-	b.Grow(baseLen + pathLen + querySuffixLen(q))
-	b.WriteString(base[:baseLen])
+	// 用 append 直接拼装，避免 strings.Builder.Grow 的临时缓冲复制：
+	// base/path/query 三段的长度精确已知，一次分配即可，不受 Grow 的
+	// 2*cap+n 预留策略影响。
+	total := baseLen + pathLen + querySuffixLen(q)
+	p := make([]byte, 0, total)
+	p = append(p, base[:baseLen]...)
 	if len(path) > 0 {
-		b.Write(path)
+		p = append(p, path...)
 	} else {
-		b.WriteByte('/')
+		p = append(p, '/')
 	}
 	if len(q) > 0 {
-		b.WriteByte('?')
-		b.Write(q)
+		p = append(p, '?')
+		p = append(p, q...)
 	}
-	return b.String()
+	return string(p)
 }
 
 func querySuffixLen(q []byte) int {
@@ -1443,102 +1528,102 @@ func addUpstreamHeader(header http.Header, key, value []byte) {
 	switch len(key) {
 	case len("Accept"):
 		if bytes.Equal(key, []byte("Accept")) {
-			header["Accept"] = append(header["Accept"], string(value))
+			header.Add("Accept", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("Origin")) {
-			header["Origin"] = append(header["Origin"], string(value))
+			header.Add("Origin", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("Pragma")) {
-			header["Pragma"] = append(header["Pragma"], string(value))
+			header.Add("Pragma", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("Cookie")) {
-			header["Cookie"] = append(header["Cookie"], string(value))
+			header.Add("Cookie", string(value))
 			return
 		}
 	case len("Referer"):
 		if bytes.Equal(key, []byte("Referer")) {
-			header["Referer"] = append(header["Referer"], string(value))
+			header.Add("Referer", string(value))
 			return
 		}
 	case len("Sec-Ch-Ua"):
 		if bytes.Equal(key, []byte("Sec-Ch-Ua")) {
-			header["Sec-Ch-Ua"] = append(header["Sec-Ch-Ua"], string(value))
+			header.Add("Sec-Ch-Ua", string(value))
 			return
 		}
 	case len("User-Agent"):
 		if bytes.Equal(key, []byte("User-Agent")) {
-			header["User-Agent"] = append(header["User-Agent"], string(value))
+			header.Add("User-Agent", string(value))
 			return
 		}
 	case len("Content-Type"):
 		if bytes.Equal(key, []byte("Content-Type")) {
-			header["Content-Type"] = append(header["Content-Type"], string(value))
+			header.Add("Content-Type", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("X-Tingyun-Id")) {
-			header["X-Tingyun-Id"] = append(header["X-Tingyun-Id"], string(value))
+			header.Add("X-Tingyun-Id", string(value))
 			return
 		}
 	case len("Cache-Control"):
 		if bytes.Equal(key, []byte("Cache-Control")) {
-			header["Cache-Control"] = append(header["Cache-Control"], string(value))
+			header.Add("Cache-Control", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("X-Client-Data")) {
-			header["X-Client-Data"] = append(header["X-Client-Data"], string(value))
+			header.Add("X-Client-Data", string(value))
 			return
 		}
 	case len("Content-Length"):
 		if bytes.Equal(key, []byte("Content-Length")) {
-			header["Content-Length"] = append(header["Content-Length"], string(value))
+			header.Add("Content-Length", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("Sec-Fetch-Site")) {
-			header["Sec-Fetch-Site"] = append(header["Sec-Fetch-Site"], string(value))
+			header.Add("Sec-Fetch-Site", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("Sec-Fetch-Mode")) {
-			header["Sec-Fetch-Mode"] = append(header["Sec-Fetch-Mode"], string(value))
+			header.Add("Sec-Fetch-Mode", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("Sec-Fetch-Dest")) {
-			header["Sec-Fetch-Dest"] = append(header["Sec-Fetch-Dest"], string(value))
+			header.Add("Sec-Fetch-Dest", string(value))
 			return
 		}
 	case len("Accept-Encoding"):
 		if bytes.Equal(key, []byte("Accept-Encoding")) {
-			header["Accept-Encoding"] = append(header["Accept-Encoding"], string(value))
+			header.Add("Accept-Encoding", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("Accept-Language")) {
-			header["Accept-Language"] = append(header["Accept-Language"], string(value))
+			header.Add("Accept-Language", string(value))
 			return
 		}
 	case len("Sec-Ch-Ua-Mobile"):
 		if bytes.Equal(key, []byte("Sec-Ch-Ua-Mobile")) {
-			header["Sec-Ch-Ua-Mobile"] = append(header["Sec-Ch-Ua-Mobile"], string(value))
+			header.Add("Sec-Ch-Ua-Mobile", string(value))
 			return
 		}
 		if bytes.Equal(key, []byte("X-Requested-With")) {
-			header["X-Requested-With"] = append(header["X-Requested-With"], string(value))
+			header.Add("X-Requested-With", string(value))
 			return
 		}
 	case len("If-Modified-Since"):
 		if bytes.Equal(key, []byte("If-Modified-Since")) {
-			header["If-Modified-Since"] = append(header["If-Modified-Since"], string(value))
+			header.Add("If-Modified-Since", string(value))
 			return
 		}
 	case len("Sec-Ch-Ua-Platform"):
 		if bytes.Equal(key, []byte("Sec-Ch-Ua-Platform")) {
-			header["Sec-Ch-Ua-Platform"] = append(header["Sec-Ch-Ua-Platform"], string(value))
+			header.Add("Sec-Ch-Ua-Platform", string(value))
 			return
 		}
 	case len("Upgrade-Insecure-Requests"):
 		if bytes.Equal(key, []byte("Upgrade-Insecure-Requests")) {
-			header["Upgrade-Insecure-Requests"] = append(header["Upgrade-Insecure-Requests"], string(value))
+			header.Add("Upgrade-Insecure-Requests", string(value))
 			return
 		}
 	}
@@ -1641,7 +1726,7 @@ func fetchHTTPResponse(ctx context.Context, c *app.RequestContext, rt snapshot.S
 	}
 
 	transport, _ := UpstreamRoundTripperForBase(rt, base)
-	hc := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	hc := sharedPooledClient(transport, 30*time.Second)
 	resp, err := hc.Do(req)
 	if err != nil {
 		logUpstreamRequestError(ctx, "buffered", req, origHost, err)
@@ -1762,7 +1847,7 @@ func ForwardBufferedResponseForSite(c *app.RequestContext, resp *HTTPResponse, r
 }
 
 func ForwardBufferedResponseForSiteWithClientIP(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime, clientIP net.IP) {
-	forwardBufferedResponseWithOptions(c, resp, streamCompressionOptions(rt), responseEntityTransformerForSiteWithClient(rt, clientIP), clientIP)
+	forwardBufferedResponseWithOptions(c, resp, streamCompressionOptions(rt), responseEntityTransformerForSiteAndClient(rt, c, clientIP), clientIP)
 }
 
 // ForwardCapturedResponseForSite forwards a response returned by FetchHTTPLimited.
@@ -1902,7 +1987,7 @@ func ForwardBufferedResponseAsStreamForSiteWithClientIP(c *app.RequestContext, r
 	}
 	c.Status(resp.StatusCode)
 
-	body, changed, err := transformIdentityResponseBody(c, resp.StatusCode, resp.Body, responseEntityTransformerForSiteWithClient(rt, clientIP), clientIP)
+	body, changed, err := transformIdentityResponseBody(c, resp.StatusCode, resp.Body, responseEntityTransformerForSiteAndClient(rt, c, clientIP), clientIP)
 	if err != nil {
 		writeResponseTransformFailure(c)
 		return
@@ -1962,7 +2047,7 @@ func WriteCachedResponseForSite(c *app.RequestContext, method string, e *cache.R
 }
 
 func WriteCachedResponseForSiteWithClientIP(c *app.RequestContext, method string, e *cache.ResponseEntry, rt snapshot.SiteRuntime, clientIP net.IP) {
-	writeCachedResponseWithOptions(c, method, e, streamCompressionOptions(rt), responseEntityTransformerForSiteWithClient(rt, clientIP), clientIP)
+	writeCachedResponseWithOptions(c, method, e, streamCompressionOptions(rt), responseEntityTransformerForSiteAndClient(rt, c, clientIP), clientIP)
 }
 
 func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cache.ResponseEntry, opts ResponseCompressionOptions, transformer identityResponseTransformer, clientIP net.IP) {
@@ -2556,12 +2641,9 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		resp = hertzResponseToHTTPResponse(base, hresp, hreq, requestDone, cancelHertz)
 	} else {
 		transport, _ := UpstreamRoundTripperForBase(rt, base)
-		var hc *http.Client
-		if tr, ok := transport.(*http.Transport); ok {
-			hc = sharedNoTimeoutClient(tr)
-		} else {
-			hc = &http.Client{Transport: transport, Timeout: 0}
-		}
+		// 总超时 0：HTTPS 握手与响应头仍受上层 ctx 截止时间约束，与缓冲路径一致；
+		// 无客户端级总超时可避免切断 SSE / WebSocket 等长连接流。
+		hc := sharedPooledClient(transport, 0)
 		var err error
 		resp, err = hc.Do(req)
 		if err != nil {
@@ -2605,9 +2687,11 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		return nil
 	}
 
-	transformer := responseEntityTransformerForSiteWithClient(rt, clientIP)
-	if transformer != nil && shouldTransformIdentityResponse(c, resp.StatusCode) {
-		return forwardHTTPWithTransform(ctx, c, rt, resp, cancelUpstream, transformer, clientIP)
+	// response 阶段 JS 变换器只作用于身份响应实体；与 dynamic/browser sign
+	// 组合后的变换器非 nil 且满足 shouldTransform 条件时进入整体缓冲路径。
+	resolved := responseEntityTransformerForSiteAndClient(rt, c, clientIP)
+	if resolved != nil && shouldTransformIdentityResponse(c, resp.StatusCode) {
+		return forwardHTTPWithTransform(ctx, c, rt, resp, cancelUpstream, resolved, clientIP)
 	}
 
 	bodyReader, closeFn, decoded, decErr := upstreamResponseReader(resp)
@@ -3349,6 +3433,9 @@ func NewRequestConnectionHeaderStripper(c *app.RequestContext) *RequestConnectio
 		parseConnectionTokensInto(val, s.tokens)
 	}
 	parseRawHeaderConnectionTokens(c.Request.Header.RawHeaders(), s.tokens)
+	if len(s.tokens) == 0 {
+		return nil
+	}
 	return s
 }
 
@@ -3363,7 +3450,7 @@ func parseConnectionTokensInto(val []byte, tokens map[string]struct{}) {
 		}
 		part = bytes.TrimSpace(part)
 		if len(part) > 0 {
-			tokens[strings.ToLower(string(part))] = struct{}{}
+			tokens[lowerConnectionToken(part)] = struct{}{}
 		}
 	}
 }
@@ -3390,12 +3477,38 @@ func parseRawHeaderConnectionTokens(raw []byte, tokens map[string]struct{}) {
 }
 
 // ShouldStrip returns whether the given header key should be stripped.
+// Tokens are folded to lowercase when inserted, so membership is checked by
+// zero-allocation ASCII fold-compare instead of ToLower'ing each key.
 func (s *RequestConnectionHeaderStripper) ShouldStrip(key []byte) bool {
-	if s == nil || s.tokens == nil {
+	if s == nil || len(s.tokens) == 0 {
 		return false
 	}
-	_, ok := s.tokens[strings.ToLower(string(key))]
-	return ok
+	for tok := range s.tokens {
+		if asciiEqualFoldBytes(key, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// lowerConnectionToken returns the ASCII-lowercased form of a Connection
+// header token without allocating beyond the returned copy. Token bytes come
+// from the request buffer and are reused after the handler returns, so the
+// lowercased form must not alias them unless nothing changed.
+func lowerConnectionToken(raw []byte) string {
+	lower := make([]byte, len(raw))
+	changed := false
+	for i, b := range raw {
+		if 'A' <= b && b <= 'Z' {
+			b += 'a' - 'A'
+			changed = true
+		}
+		lower[i] = b
+	}
+	if !changed {
+		return string(raw)
+	}
+	return string(lower)
 }
 
 // trimASCIIHeaderSpaceBytes trims ASCII space characters from both ends of a byte slice.
@@ -3468,6 +3581,52 @@ func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 		}
 	}
 	transportMu.Unlock()
+
+	// 修剪 h3 transport 与配套 client：h3 请求路径经 UpstreamRoundTripperForBase
+	// 只对 h3:// 站点调用，与 HTTP/1 的 active transportKey 无关，须另行计算
+	// h3 transport key 的活跃集；client 池以 *http3.Transport 为键，transport
+	// 从池中移除后 client 同步移除，否则统计会虚报「已无 transport 的 client」。
+	activeH3 := make(map[http3TransportKey]struct{})
+	for _, rt := range sn.Sites {
+		base := ""
+		if len(rt.UpstreamURLs) > 0 {
+			base = rt.UpstreamURLs[0]
+		}
+		if !strings.HasPrefix(strings.ToLower(base), "h3://") {
+			continue
+		}
+		// 与 UpstreamRoundTripperForBase 一致：剥离 h3:// 前缀后取 host 部分作为 key。
+		hostPart := base[len("h3://"):]
+		if i := strings.IndexByte(hostPart, '/'); i >= 0 {
+			hostPart = hostPart[:i]
+		}
+		key := http3TransportKey{
+			upstreamHost:          hostPart,
+			tlsServerName:         rt.Site.UpstreamTLSServerName,
+			tlsSkipVerify:         rt.Site.UpstreamTLSSkipVerify,
+			clientCertFingerprint: upstreamClientCertFingerprint(*rt),
+		}
+		activeH3[key] = struct{}{}
+	}
+	http3TransportMu.Lock()
+	for key, tr := range http3TransportPool {
+		if _, ok := activeH3[key]; ok {
+			continue
+		}
+		delete(http3TransportPool, key)
+		stats.HTTP3Transports++
+		http3ClientMu.Lock()
+		if _, ok := http3Clients[tr]; ok {
+			delete(http3Clients, tr)
+			stats.HTTP3Clients++
+		}
+		if _, ok := http3NoTimeoutClients[tr]; ok {
+			delete(http3NoTimeoutClients, tr)
+			stats.HTTP3NoTimeoutClients++
+		}
+		http3ClientMu.Unlock()
+	}
+	http3TransportMu.Unlock()
 	return stats
 }
 
@@ -3531,6 +3690,8 @@ var (
 )
 
 // UpstreamTransportPoolStats holds snapshot statistics for upstream transport pools.
+// HTTP3Clients / HTTP3NoTimeoutClients 反映 http3ClientPools 的真实规模（h3 上游
+// 请求路径按 transport 池化），不再是占位常量。
 type UpstreamTransportPoolStats struct {
 	HTTPTransports           int
 	HTTP2CleartextTransports int
@@ -3564,13 +3725,18 @@ func UpstreamTransportPoolStatsSnapshot() UpstreamTransportPoolStats {
 	http3Transports := len(http3TransportPool)
 	http3TransportMu.RUnlock()
 
+	http3ClientMu.RLock()
+	http3ClientsN := len(http3Clients)
+	http3NoTimeoutClientsN := len(http3NoTimeoutClients)
+	http3ClientMu.RUnlock()
+
 	return UpstreamTransportPoolStats{
 		HTTPTransports:           httpTransports,
 		HTTP2CleartextTransports: h2cTransports,
 		HTTP3Transports:          http3Transports,
 		HTTPClients:              httpClients,
 		HTTPNoTimeoutClients:     noTimeoutClients,
-		HTTP3Clients:             0, // placeholder
-		HTTP3NoTimeoutClients:    0, // placeholder
+		HTTP3Clients:             http3ClientsN,
+		HTTP3NoTimeoutClients:    http3NoTimeoutClientsN,
 	}
 }

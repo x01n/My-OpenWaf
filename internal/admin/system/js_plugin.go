@@ -21,8 +21,7 @@ import (
 const jsMaxTimeoutMS = 1000
 
 const (
-	jsRuntimeUnavailableMessage       = "javascript runtime unavailable"
-	jsResponseStageUnavailableMessage = "response stage is unavailable because response execution is not implemented"
+	jsRuntimeUnavailableMessage = "javascript runtime unavailable"
 )
 
 var errJSRuntimeUnavailable = errors.New(jsRuntimeUnavailableMessage)
@@ -141,6 +140,13 @@ func validateEnabledJSPlugin(ctx context.Context, item *store.JSPlugin, loadEngi
 	siteID := uint(0)
 	if item.SiteID != nil {
 		siteID = *item.SiteID
+	}
+	if item.Stage == store.JSStageResponse {
+		respPlan, err := engine.ValidateResponse(ctx, script, jsplugin.CanonicalValidationResponse(siteID))
+		if err != nil {
+			return err
+		}
+		return jsplugin.ValidateResponseMutationPlan(respPlan)
 	}
 	plan, err := engine.Validate(ctx, script, jsplugin.CanonicalValidationRequest(siteID))
 	if err != nil {
@@ -337,10 +343,6 @@ func ToggleJSPlugin(repo *repository.JSPluginRepo, reload func() error, loadEngi
 		if body.Enabled != nil {
 			enabled = *body.Enabled
 		}
-		if enabled && item.Stage == store.JSStageResponse {
-			c.JSON(400, map[string]string{"error": jsResponseStageUnavailableMessage})
-			return
-		}
 		if enabled {
 			updated := *item
 			updated.Enabled = true
@@ -376,12 +378,8 @@ func ValidateJSPlugin(loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 			c.JSON(400, map[string]string{"error": "请求体格式无效"})
 			return
 		}
-		if req.Stage == store.JSStageResponse {
-			c.JSON(400, map[string]string{"error": jsResponseStageUnavailableMessage})
-			return
-		}
-		if req.Stage != store.JSStageRequest {
-			c.JSON(400, map[string]string{"error": "stage must be request"})
+		if req.Stage != store.JSStageRequest && req.Stage != store.JSStageResponse {
+			c.JSON(400, map[string]string{"error": "stage must be request or response"})
 			return
 		}
 		if req.TimeoutMS != nil && (*req.TimeoutMS < 0 || *req.TimeoutMS > jsMaxTimeoutMS) {
@@ -415,13 +413,13 @@ func ValidateJSPlugin(loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 }
 
 /**
- * DryRunJSPlugin 用样例请求真实执行一次脚本并返回请求变更计划。
+ * DryRunJSPlugin 用样例请求/响应真实执行一次脚本并返回变更计划。
  *
- * 只覆盖 request 阶段的执行闭环：response 阶段的宿主对象尚未接入，故 stage 仅
- * 参与入参校验，不改变执行路径。dry-run 与生产状态天然隔离——jsplugin 包不持
- * 有 RedisKV 或任何共享计数器，脚本除了返回 MutationPlan 无法产生副作用；此处
- * 另外用独立编译出的 *jsplugin.Script 执行，因此不会污染 snapshot 已编译脚本
- * 的 runs/failures/timeouts 计数。
+ * request 阶段用 sample_request，response 阶段用 sample_response。dry-run 与
+ * 生产状态天然隔离——jsplugin 包不持有 RedisKV 或任何共享计数器，脚本除了
+ * 返回变更计划无法产生副作用；此处另外用独立编译出的 *jsplugin.Script 执行，
+ * 因此不会污染 snapshot 已编译脚本的 runs/failures/timeouts 计数。dry-run
+ * 编译出的脚本不带 Stage 元数据，可直接走对应执行入口。
  *
  * @param engine QuickJS 执行引擎，可为 nil（未装配时返回明确错误而非 panic）。
  * @return Hertz handler。
@@ -429,10 +427,11 @@ func ValidateJSPlugin(loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 func DryRunJSPlugin(loadEngine func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
-			Stage         string         `json:"stage"`
-			Source        string         `json:"source"`
-			TimeoutMS     int            `json:"timeout_ms"`
-			SampleRequest map[string]any `json:"sample_request"`
+			Stage          string         `json:"stage"`
+			Source         string         `json:"source"`
+			TimeoutMS      int            `json:"timeout_ms"`
+			SampleRequest  map[string]any `json:"sample_request"`
+			SampleResponse map[string]any `json:"sample_response"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "请求体格式无效"})
@@ -440,10 +439,6 @@ func DryRunJSPlugin(loadEngine func() *jsplugin.Engine) app.HandlerFunc {
 		}
 		if req.Stage != store.JSStageRequest && req.Stage != store.JSStageResponse {
 			c.JSON(400, map[string]string{"error": "stage must be request or response"})
-			return
-		}
-		if req.Stage == store.JSStageResponse {
-			c.JSON(400, map[string]string{"error": jsResponseStageUnavailableMessage})
 			return
 		}
 		if req.TimeoutMS < 0 || req.TimeoutMS > jsMaxTimeoutMS {
@@ -473,32 +468,39 @@ func DryRunJSPlugin(loadEngine func() *jsplugin.Engine) app.HandlerFunc {
 			return
 		}
 
-		requestSnapshot := buildJSDryRunSnapshot(req.SampleRequest)
 		started := time.Now()
-		plan, err := engine.Execute(ctx, script, requestSnapshot)
+		var result any
+		var planErr error
+		if req.Stage == store.JSStageResponse {
+			var respPlan jsplugin.ResponseMutationPlan
+			respPlan, planErr = engine.ExecuteResponse(ctx, script, buildJSDryRunResponseSnapshot(req.SampleResponse))
+			if planErr == nil {
+				planErr = jsplugin.ValidateResponseMutationPlan(respPlan)
+			}
+			result = respPlan
+		} else {
+			var requestPlan jsplugin.MutationPlan
+			requestPlan, planErr = engine.Execute(ctx, script, buildJSDryRunSnapshot(req.SampleRequest))
+			if planErr == nil {
+				planErr = jsplugin.ValidateMutationPlan(requestPlan)
+			}
+			result = requestPlan
+		}
 		elapsed := time.Since(started)
-		if err != nil {
-			if errors.Is(err, jsplugin.ErrCGODisabled) {
+		if planErr != nil {
+			if errors.Is(planErr, jsplugin.ErrCGODisabled) {
 				c.JSON(503, map[string]any{"error": jsQuickJSDisabledMessage, "result": nil})
 				return
 			}
 			c.JSON(200, map[string]any{
-				"error":             err.Error(),
-				"result":            nil,
-				"execution_time_ms": float64(elapsed.Nanoseconds()) / 1e6,
-			})
-			return
-		}
-		if err := jsplugin.ValidateMutationPlan(plan); err != nil {
-			c.JSON(200, map[string]any{
-				"error":             err.Error(),
+				"error":             planErr.Error(),
 				"result":            nil,
 				"execution_time_ms": float64(elapsed.Nanoseconds()) / 1e6,
 			})
 			return
 		}
 		c.JSON(200, map[string]any{
-			"result":            plan,
+			"result":            result,
 			"execution_time_ms": float64(elapsed.Nanoseconds()) / 1e6,
 		})
 	}
@@ -557,6 +559,46 @@ func jsStringMapFromSample(raw any) map[string]string {
 	return result
 }
 
+/**
+ * buildJSDryRunResponseSnapshot 把样例响应映射为 jsplugin.ResponseSnapshot。
+ *
+ * 键名逐字取自 jsplugin.ResponseSnapshot 的 json tag；与
+ * buildJSDryRunSnapshot 一致，取不到目标类型的字段一律跳过而不做类型强转。
+ * SiteID 不从样例读取：dry-run 未绑定站点，留零值可让 Script.AppliesTo
+ * 对全局脚本放行。
+ *
+ * @param sample dry-run 请求里的 sample_response 对象，可为 nil。
+ * @return 已填充的只读响应快照。
+ */
+func buildJSDryRunResponseSnapshot(sample map[string]any) jsplugin.ResponseSnapshot {
+	snapshot := jsplugin.ResponseSnapshot{RequestID: "dry-run", Status: 200}
+	if len(sample) == 0 {
+		return snapshot
+	}
+	for key, target := range map[string]*string{
+		"request_id":   &snapshot.RequestID,
+		"path":         &snapshot.Path,
+		"content_type": &snapshot.ContentType,
+		"body":         &snapshot.Body,
+		"method":       &snapshot.Method,
+		"raw_query":    &snapshot.RawQuery,
+		"client_ip":    &snapshot.ClientIP,
+	} {
+		if value, ok := sample[key].(string); ok {
+			*target = value
+		}
+	}
+	if status, ok := sample["status"].(float64); ok {
+		snapshot.Status = int(status)
+	}
+	if len(snapshot.RequestID) == 0 {
+		snapshot.RequestID = "dry-run"
+	}
+	snapshot.Headers = jsStringMapFromSample(sample["headers"])
+	snapshot.RequestHeaders = jsStringMapFromSample(sample["request_headers"])
+	return snapshot
+}
+
 // GetJSPluginRuntime returns the exact executable backend and current snapshot state.
 func GetJSPluginRuntime(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, loadEngine func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -583,7 +625,7 @@ func GetJSPluginRuntime(repo *repository.JSPluginRepo, holder *snapshotpkg.Holde
 			Compiled:          compiled,
 			CompileErrors:     compileErrors,
 			RequestSupported:  true,
-			ResponseSupported: false,
+			ResponseSupported: true,
 		})
 	}
 }
@@ -648,15 +690,12 @@ func applyJSPluginRequest(item *store.JSPlugin, req jsPluginRequest, creating bo
 		return "source is required"
 	}
 	if stage := strings.TrimSpace(req.Stage); stage != "" {
-		if stage == store.JSStageResponse {
-			return jsResponseStageUnavailableMessage
-		}
-		if stage != store.JSStageRequest {
-			return "stage must be request"
+		if stage != store.JSStageRequest && stage != store.JSStageResponse {
+			return "stage must be request or response"
 		}
 		updated.Stage = stage
 	} else if creating {
-		return "stage is required (request)"
+		return "stage is required (request or response)"
 	}
 	if req.FailureMode != "" {
 		mode := strings.TrimSpace(req.FailureMode)
@@ -692,9 +731,6 @@ func applyJSPluginRequest(item *store.JSPlugin, req jsPluginRequest, creating bo
 		return err.Error()
 	} else if present {
 		updated.SiteID = siteID
-	}
-	if updated.Stage == store.JSStageResponse {
-		return jsResponseStageUnavailableMessage
 	}
 
 	*item = updated

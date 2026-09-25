@@ -81,6 +81,54 @@ func TestCheckCAAIssuanceUsesIssuewildForWildcardDomain(t *testing.T) {
 	}
 }
 
+func TestCheckCAAIssuanceWildcardFallsBackToIssue(t *testing.T) {
+	err := CheckCAAIssuance(context.Background(), "*.example.com", CAAPolicy{
+		Enabled:        true,
+		AllowedIssuers: []string{DefaultCAAAllowedIssuer},
+		Resolver: fakeCAAResolver{
+			"example.com": {records: []CAARecord{{Tag: "issue", Value: "letsencrypt.org"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CheckCAAIssuance() error = %v, want issue-based authorization", err)
+	}
+}
+
+func TestCheckCAAIssuanceWildcardIssueFallbackRejects(t *testing.T) {
+	err := CheckCAAIssuance(context.Background(), "*.example.com", CAAPolicy{
+		Enabled:        true,
+		AllowedIssuers: []string{DefaultCAAAllowedIssuer},
+		Resolver: fakeCAAResolver{
+			"example.com": {records: []CAARecord{{Tag: "issue", Value: "ca.example.test"}}},
+		},
+	})
+	if err == nil {
+		t.Fatal("CheckCAAIssuance() error = nil, want issue-based rejection")
+	}
+	if !strings.Contains(err.Error(), "does not authorize") {
+		t.Fatalf("CheckCAAIssuance() error = %v, want authorization failure", err)
+	}
+}
+
+func TestCheckCAAIssuanceWildcardIssuewildOverridesIssue(t *testing.T) {
+	err := CheckCAAIssuance(context.Background(), "*.example.com", CAAPolicy{
+		Enabled:        true,
+		AllowedIssuers: []string{DefaultCAAAllowedIssuer},
+		Resolver: fakeCAAResolver{
+			"example.com": {records: []CAARecord{
+				{Tag: "issue", Value: "letsencrypt.org"},
+				{Tag: "issuewild", Value: "ca.other.test"},
+			}},
+		},
+	})
+	if err == nil {
+		t.Fatal("CheckCAAIssuance() error = nil, want issuewild to override issue")
+	}
+	if !strings.Contains(err.Error(), "does not authorize") {
+		t.Fatalf("CheckCAAIssuance() error = %v, want authorization failure", err)
+	}
+}
+
 func TestCheckCAAIssuanceRejectsCriticalUnknownTag(t *testing.T) {
 	err := CheckCAAIssuance(context.Background(), "example.com", CAAPolicy{
 		Enabled:        true,

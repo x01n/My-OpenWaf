@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"My-OpenWaf/internal/waf/challenge/gm"
 )
 
 func init() {
@@ -30,46 +32,51 @@ func TestSetChallengeSecretTooShort(t *testing.T) {
 	}
 }
 
-// --- GenerateChallengeTokenPair / VerifyChallengeToken ---
+// --- VerifyChallengeTokenWithClaims（b0 A5：已删除未绑定身份的无 claims 版本） ---
 
-func TestGenerateChallengeTokenPairAndVerify(t *testing.T) {
-	ts, token := GenerateChallengeTokenPair("req-001")
+func TestGenerateChallengeTokenPairWithClaimsAndVerify(t *testing.T) {
+	claims := ChallengeTokenClaims{ClientIP: "192.0.2.9", Host: "example.test", SiteID: 3}
+	ts, token := GenerateChallengeTokenPairWithClaims("req-001", claims)
 	if ts == "" {
 		t.Fatal("ts should not be empty")
 	}
 	if token == "" {
 		t.Fatal("token should not be empty")
 	}
-	if !VerifyChallengeToken("req-001", ts, token, 5*time.Minute) {
+	if !VerifyChallengeTokenWithClaims("req-001", ts, token, claims, 5*time.Minute) {
 		t.Fatal("freshly generated token should verify successfully")
 	}
 }
 
 func TestVerifyChallengeTokenWrongReqID(t *testing.T) {
-	ts, token := GenerateChallengeTokenPair("req-abc")
-	if VerifyChallengeToken("req-xyz", ts, token, 5*time.Minute) {
+	claims := ChallengeTokenClaims{}
+	ts, token := GenerateChallengeTokenPairWithClaims("req-abc", claims)
+	if VerifyChallengeTokenWithClaims("req-xyz", ts, token, claims, 5*time.Minute) {
 		t.Error("token should not verify with different reqID")
 	}
 }
 
 func TestVerifyChallengeTokenExpired(t *testing.T) {
-	ts, token := GenerateChallengeTokenPair("req-002")
+	claims := ChallengeTokenClaims{}
+	ts, token := GenerateChallengeTokenPairWithClaims("req-002", claims)
 	// maxAge=1ns 立即过期
-	if VerifyChallengeToken("req-002", ts, token, 1*time.Nanosecond) {
+	if VerifyChallengeTokenWithClaims("req-002", ts, token, claims, 1*time.Nanosecond) {
 		t.Error("token should be expired with 1ns maxAge")
 	}
 }
 
 func TestVerifyChallengeTokenInvalidTS(t *testing.T) {
-	_, token := GenerateChallengeTokenPair("req-003")
-	if VerifyChallengeToken("req-003", "not-a-timestamp", token, 5*time.Minute) {
+	claims := ChallengeTokenClaims{}
+	_, token := GenerateChallengeTokenPairWithClaims("req-003", claims)
+	if VerifyChallengeTokenWithClaims("req-003", "not-a-timestamp", token, claims, 5*time.Minute) {
 		t.Error("invalid timestamp should fail verification")
 	}
 }
 
 func TestVerifyChallengeTokenTamperedToken(t *testing.T) {
-	ts, _ := GenerateChallengeTokenPair("req-004")
-	if VerifyChallengeToken("req-004", ts, "deadbeefdeadbeef", 5*time.Minute) {
+	claims := ChallengeTokenClaims{}
+	ts, _ := GenerateChallengeTokenPairWithClaims("req-004", claims)
+	if VerifyChallengeTokenWithClaims("req-004", ts, "deadbeefdeadbeef", claims, 5*time.Minute) {
 		t.Error("tampered token should fail verification")
 	}
 }
@@ -279,10 +286,10 @@ func TestChallengeEncryptDecrypt(t *testing.T) {
 }
 
 func TestChallengeEncryptFailsWhenNonceGenerationFails(t *testing.T) {
-	previousReader := challengeNonceReader
-	challengeNonceReader = strings.NewReader("")
+	previousReader := gm.NonceReader
+	gm.NonceReader = strings.NewReader("")
 	t.Cleanup(func() {
-		challengeNonceReader = previousReader
+		gm.NonceReader = previousReader
 	})
 
 	ciphertext, err := challengeEncrypt([]byte("must not be encrypted with a zero nonce"))
@@ -295,10 +302,10 @@ func TestChallengeEncryptFailsWhenNonceGenerationFails(t *testing.T) {
 }
 
 func TestSignChallengePassValueFailsClosedWhenNonceGenerationFails(t *testing.T) {
-	previousReader := challengeNonceReader
-	challengeNonceReader = strings.NewReader("")
+	previousReader := gm.NonceReader
+	gm.NonceReader = strings.NewReader("")
 	t.Cleanup(func() {
-		challengeNonceReader = previousReader
+		gm.NonceReader = previousReader
 	})
 
 	value := SignChallengePassValue("example.com", net.ParseIP("192.0.2.1"), time.Now(), time.Minute)

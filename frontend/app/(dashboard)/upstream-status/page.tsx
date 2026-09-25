@@ -1,15 +1,6 @@
 "use client"
 
-/**
- * 上游服务器状态页面
- *
- * 展示所有配置上游的健康检查结果，每 10 秒自动刷新。
- *
- * 后端契约：GET /api/v1/upstreams/status
- *   参见 internal/admin/system/upstream.go
- */
-
-import { useMemo } from "react"
+import { useEffect, useMemo } from "react"
 import { useTranslation } from "react-i18next"
 import { PageHeader } from "@/components/page-header"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -31,6 +22,7 @@ import {
 } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
 import { useUpstreamStatus } from "@/hooks/use-api"
+import { useRealtimeOverview } from "@/hooks/use-realtime"
 import { formatRelative } from "@/lib/time-format"
 import type { UpstreamStatus } from "@/lib/types"
 import { EmptyState } from "@/components/empty-state"
@@ -240,10 +232,21 @@ function MetricCell({
 
 export default function UpstreamStatusPage() {
   const { t } = useTranslation()
-  const { data, error, isLoading } = useUpstreamStatus()
+  const { data, error, isLoading, mutate } = useUpstreamStatus()
+  const realtime = useRealtimeOverview()
 
   const items: UpstreamStatus[] = useMemo(() => data?.items || [], [data])
   const total = data?.total ?? items.length
+
+  // WS 播报到达时立即把 SWR 缓存更新为实时数据；WS 播报周期 5s 快于
+  // 10s 轮询，两者不互踩，页面总能先收到 WS 版本。
+  useEffect(() => {
+    if (realtime.items.length === 0) return
+    void mutate(
+      { items: [...realtime.items], total: realtime.total },
+      { revalidate: false }
+    )
+  }, [mutate, realtime])
 
   const { healthyCount, unhealthyCount } = useMemo(() => {
     let h = 0

@@ -30,6 +30,7 @@ type ShieldConfig struct {
 	EnableJSChallenge    bool `json:"enable_js_challenge"`    // 启用 JS 挑战验证
 	EnableEnvCheck       bool `json:"enable_env_check"`       // 启用环境指纹检测
 	EnableDevToolsDetect bool `json:"enable_devtools_detect"` // 启用开发者工具检测
+	EnableBehaviorCheck  bool `json:"enable_behavior_check"`  // 启用行为心率采样（随环境指纹评分）
 }
 
 // DefaultShieldConfig 返回默认的 Shield 配置。
@@ -46,6 +47,7 @@ func DefaultShieldConfig() ShieldConfig {
 		EnableJSChallenge:    true,
 		EnableEnvCheck:       true,
 		EnableDevToolsDetect: true,
+		EnableBehaviorCheck:  false,
 	}
 }
 
@@ -101,6 +103,7 @@ type ShieldSession struct {
 	TimeoutSecs          int       `json:"timeout_secs"`
 	EnvStrictness        int       `json:"env_strictness"`
 	EnableEnvCheck       bool      `json:"enable_env_check"`
+	EnableBehaviorCheck  bool      `json:"enable_behavior_check"`
 	EnvConfigFrozen      bool      `json:"env_config_frozen"`
 	RequireHTTP2         bool      `json:"require_http2"`
 	RequireHTTP3         bool      `json:"require_http3"`
@@ -108,7 +111,8 @@ type ShieldSession struct {
 	ProtocolConfigFrozen bool      `json:"protocol_config_frozen"`
 	OriginalURL          string    `json:"original_url"`
 	RequestProtocol      string    `json:"request_protocol"`
-	EnvKey               []byte    `json:"env_key"` // AES key for env fingerprint encryption
+	EnvKey               []byte    `json:"env_key"`   // 32-byte session master key (first 16 bytes feed SM4-GCM)
+	ClientIP             string    `json:"client_ip"` // 签发请求的客户端 IP（方案 B：只读评分源）
 	CreatedAt            time.Time `json:"created_at"`
 }
 
@@ -116,7 +120,8 @@ func (s *ShieldSession) sessionTTL() time.Duration {
 	if s.TimeoutSecs > 0 {
 		return time.Duration(s.TimeoutSecs) * time.Second
 	}
-	return legacyShieldSessionTTL
+	// 强制化语义：缺超时字段的会话按立即过期处置（签发侧恒写 TimeoutSecs>0）。
+	return 0
 }
 
 func (s *ShieldSession) expiredAt(now time.Time) bool {
@@ -144,6 +149,7 @@ func decodeShieldSession(data []byte) *ShieldSession {
 	for _, field := range []string{
 		"env_strictness",
 		"enable_env_check",
+		"enable_behavior_check",
 		"env_config_frozen",
 		"require_http2",
 		"require_http3",
@@ -166,14 +172,16 @@ func decodeShieldSession(data []byte) *ShieldSession {
 // ShieldManager orchestrates 5-second shield challenges (PoW + env fingerprint).
 // Cloudflare-style: user clicks verify -> PoW runs in background -> auto-submit on success.
 type ShieldManager struct {
-	captcha  *CaptchaManager
-	redis    *goredis.Client
-	config   ShieldConfig
-	prefix   string
-	done     chan struct{}
-	once     sync.Once
-	mu       sync.RWMutex
-	sessions map[string]*ShieldSession
+	captcha   *CaptchaManager
+	redis     *goredis.Client
+	config    ShieldConfig
+	prefix    string
+	ipHistory func(ip string) (violations int64, banned bool)
+	geoAttr   func(ip string) (geoScore int, geoReasons []string)
+	done      chan struct{}
+	once      sync.Once
+	mu        sync.RWMutex
+	sessions  map[string]*ShieldSession
 }
 
 // NewShieldManager creates a new ShieldManager.
@@ -196,6 +204,44 @@ func NewShieldManager(captcha *CaptchaManager, redis *goredis.Client, difficulty
 
 func (sm *ShieldManager) Close() {
 	sm.once.Do(func() { close(sm.done) })
+}
+
+func (sm *ShieldManager) SetIPHistory(fn func(ip string) (violations int64, banned bool)) {
+	if sm == nil {
+		return
+	}
+	sm.mu.Lock()
+	sm.ipHistory = fn
+	sm.mu.Unlock()
+}
+
+func (sm *ShieldManager) ipHistoryLookup() func(ip string) (violations int64, banned bool) {
+	if sm == nil {
+		return nil
+	}
+	sm.mu.RLock()
+	fn := sm.ipHistory
+	sm.mu.RUnlock()
+	return fn
+}
+
+func (sm *ShieldManager) SetGeoAttr(fn func(ip string) (geoScore int, geoReasons []string)) {
+	if sm == nil {
+		return
+	}
+	sm.mu.Lock()
+	sm.geoAttr = fn
+	sm.mu.Unlock()
+}
+
+func (sm *ShieldManager) geoAttrLookup() func(ip string) (geoScore int, geoReasons []string) {
+	if sm == nil {
+		return nil
+	}
+	sm.mu.RLock()
+	fn := sm.geoAttr
+	sm.mu.RUnlock()
+	return fn
 }
 
 func (sm *ShieldManager) redisClient() *goredis.Client {
@@ -264,6 +310,7 @@ func (sm *ShieldManager) shieldPageConfig(session *ShieldSession) ShieldConfig {
 	cfg.TimeoutSecs = int(session.sessionTTL() / time.Second)
 	cfg.EnvStrictness = session.EnvStrictness
 	cfg.EnableEnvCheck = session.EnableEnvCheck
+	cfg.EnableBehaviorCheck = session.EnableBehaviorCheck
 	cfg.RequireHTTP2 = session.RequireHTTP2
 	cfg.RequireHTTP3 = session.RequireHTTP3
 	cfg.AllowHTTP1 = session.AllowHTTP1
@@ -275,17 +322,14 @@ func (sm *ShieldManager) GenerateChallenge(originalURL string, requestProtocol s
 	return sm.GenerateChallengeWithBinding(originalURL, requestProtocol, ChallengeSessionBinding{})
 }
 
-// GenerateChallengeWithBinding creates a shield session bound to the matched site.
 func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, requestProtocol string, binding ChallengeSessionBinding) (*ShieldSession, error) {
 	cfg := sm.Config()
 	nonce := GeneratePoWNonce()
 	sessionID := shieldGenSessionID()
-	var envKey []byte
-	if cfg.EnableEnvCheck {
-		envKey = GenerateEnvSessionKey()
-		if len(envKey) != envSessionKeySize {
-			return nil, fmt.Errorf("environment session key generation failed")
-		}
+	envKey := GenerateEnvSessionKey()
+	if len(envKey) != envSessionKeySize {
+		// 密钥生成失败（crypto/rand 异常）直接拒绝签发，不产生半配态会话。
+		return nil, fmt.Errorf("environment session key generation failed")
 	}
 	session := &ShieldSession{
 		ChallengeSessionBinding: binding.normalized(),
@@ -295,6 +339,7 @@ func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, reques
 		TimeoutSecs:             cfg.TimeoutSecs,
 		EnvStrictness:           cfg.EnvStrictness,
 		EnableEnvCheck:          cfg.EnableEnvCheck,
+		EnableBehaviorCheck:     cfg.EnableBehaviorCheck,
 		EnvConfigFrozen:         true,
 		RequireHTTP2:            cfg.RequireHTTP2,
 		RequireHTTP3:            cfg.RequireHTTP3,
@@ -303,6 +348,7 @@ func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, reques
 		OriginalURL:             originalURL,
 		RequestProtocol:         shieldProtocolValue(requestProtocol),
 		EnvKey:                  envKey,
+		ClientIP:                binding.clientIPValue(),
 		CreatedAt:               time.Now(),
 	}
 	if err := sm.saveShieldSession(session); err != nil {
@@ -365,6 +411,45 @@ func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer str
 	if session.EnvStrictness == 0 {
 		return result.Score < 100, session.OriginalURL
 	}
+	if session.EnableBehaviorCheck && session.EnvStrictness > 0 {
+		if fp.Behavior == nil {
+			// 行为开启时提交必须携带采样，否则脚本化客户端可绕过行为维度。
+			return false, session.OriginalURL
+		}
+		// 方案 B：用会话签发 IP 的只读史评分（不参与绑定排序）。
+		// 注入函数为 nil（平台未接线）时该维度评分为 0，不改变基线。
+		if history := sm.ipHistoryLookup(); history != nil && session.ClientIP != "" {
+			violations, banned := history(session.ClientIP)
+			if violations > 0 && result.Score <= 50 {
+				added := 0
+				reasons := result.Reasons
+				if banned {
+					added += 20
+					reasons = append(reasons, "behavior: source IP currently auto-banned (+20)")
+				} else if violations >= 3 {
+					added += 15
+					reasons = append(reasons, "behavior: source IP repeat violations (+15)")
+				} else {
+					added += 5
+					reasons = append(reasons, "behavior: source IP prior violation (+5)")
+				}
+				result.Score += added
+				result.Reasons = reasons
+			}
+		}
+		if geo := sm.geoAttrLookup(); geo != nil && session.ClientIP != "" && result.Score <= 50 {
+			geoScore, geoReasons := geo(session.ClientIP)
+			if geoScore > 20 {
+				geoScore = 20
+			}
+			if geoScore > 0 {
+				result.Score += geoScore
+				for _, r := range geoReasons {
+					result.Reasons = append(result.Reasons, "geoip: "+r)
+				}
+			}
+		}
+	}
 	return result.Score <= 50, session.OriginalURL
 }
 
@@ -379,16 +464,22 @@ func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, req
 	cfg := sm.shieldPageConfig(session)
 	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce)
 	envJS := ""
-	if cfg.EnableEnvCheck {
-		aad := EnvFingerprintAAD("shield", session.ID, binding)
-		envJS = EnvCheckJSEncrypted(EnvSessionKeyHex(session.EnvKey), aad)
-		if envJS == "" {
-			c.String(500, "shield environment initialization failed")
-			return
-		}
+	behaviorJS := ""
+	aad := EnvFingerprintAAD("shield", session.ID, binding)
+	envJS = EnvCheckJSEncrypted(EnvSessionKeyHex(session.EnvKey), aad)
+	if cfg.EnableEnvCheck && cfg.EnableBehaviorCheck {
+		// 行为开启时改用带行为合并的信封模板（Rust 侧
+		// collect_and_encrypt_fingerprint_with_behavior 合并 behavior 字段），
+		// 采样缺失时模板内回退到无行为信封，不阻塞挑战。
+		envJS = EnvCheckJSEncryptedWithBehavior(EnvSessionKeyHex(session.EnvKey), aad)
+		behaviorJS = shieldBehaviorSamplerJS()
+	}
+	if envJS == "" {
+		c.String(500, "shield environment initialization failed")
+		return
 	}
 
-	html := shieldPageHTMLWithConfig(session.ID, cfg, session.RequestProtocol, envJS, powScript)
+	html := shieldPageHTMLWithConfig(session.ID, cfg, session.RequestProtocol, envJS, behaviorJS, powScript)
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
@@ -406,10 +497,11 @@ type shieldPageData struct {
 	AllowHTTP1           template.JS
 	RequestProtocol      string
 	EnvJS                template.JS
+	BehaviorJS           template.JS
 	PowScript            template.JS
 }
 
-func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, requestProtocol, envJS, powScript string) string {
+func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, requestProtocol, envJS, behaviorJS, powScript string) string {
 	data := shieldPageData{
 		SessionID:            sessionID,
 		AutoStartDelay:       template.JS(strconv.Itoa(cfg.AutoStartDelay)),
@@ -422,6 +514,7 @@ func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, requestProtoco
 		AllowHTTP1:           template.JS(strconv.FormatBool(cfg.AllowHTTP1)),
 		RequestProtocol:      shieldProtocolValue(requestProtocol),
 		EnvJS:                template.JS(envJS),
+		BehaviorJS:           template.JS(behaviorJS),
 		PowScript:            template.JS(powScript),
 	}
 	var buf bytes.Buffer
@@ -432,7 +525,7 @@ func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, requestProtoco
 }
 
 func obfuscateShieldJS(html string) string {
-	v := randomVarNames(12)
+	v := randomVarNames(16)
 	r := strings.NewReplacer(
 		"var sid=", "var "+v[0]+"=",
 		",sid,", ","+v[0]+",",
@@ -450,12 +543,42 @@ func obfuscateShieldJS(html string) string {
 		"allowH1", v[9],
 		"requestProto", v[10],
 		"envMonitor", v[11],
+		"behaviorSampler", v[12],
+		"behaviorData", v[13],
+		"behaviorSeen", v[14],
+		"behaviorOff", v[15],
 	)
 	return r.Replace(html)
 }
 
-// shieldSessionTTL 是 shield 会话的有效期，Redis 与内存两条路径共用。
-const legacyShieldSessionTTL = 5 * time.Minute
+/**
+ * shieldBehaviorSamplerJS 返回盾页注入的行为心率采样脚本。
+ *
+ * 采样器在盾页存活期间工作：
+ *   1. 计数 pointermove/keydown/keypress 事件与敏感键；
+ *   2. 维护 pointermove 的位移与间隔量化序列（capped 64 个样本）；
+ *   3. 结束时输出全页共享的 Readonly 报告对象
+ *      window.__owaf_behavior_finish_then = null；
+ *     （实际由盾页提交脚本调用 window.__owaf_behavior_sample() 取聚合值）。
+ *
+ * 统计（events/jitter/zero_ratio/entropy/max_speed/action_key）由盾页提交脚本
+ * 在加密前合并进行为坑位，随 GM 环境信封提交，永不外发明文。
+ * 本函数体由 obfuscateShieldJS 只做变量名替换，不参与逻辑。
+ */
+func shieldBehaviorSamplerJS() string {
+	return `(function(){
+if(window.__owaf_behavior_sample)return;
+var ev=0,keys=0,d=0,lastX=0,moves=0,zero=0,maxMove=0,speed=0,intervals=[],lastT=0;
+function qmove(x,t){if(typeof t!=='number')return;if(lastT){var dt=t-lastT;if(intervals.length>=64)intervals.shift();intervals.push(dt)}lastT=t;if(lastX){var s=Math.abs(x-lastX);if(s>0){moves++;maxMove=Math.max(maxMove,s)}else{zero++}d+=s}lastX=x}
+window.addEventListener('pointermove',function(e){if(typeof e.clientX!=='number')return;ev++;qmove(e.clientX,typeof e.timeStamp==='number'?e.timeStamp:Date.now())},{passive:true});
+window.addEventListener('keydown',function(e){ev++;var c=e.keyCode||e.which||0;if(c===13||c===9||c===27||c===32||c===8)keys++},{passive:true});
+window.addEventListener('keypress',function(){ev++},{passive:true});
+function entropy(){var hs={},n=intervals.length;if(n<4)return 0;var i;for(i=0;i<n;i++){var k=intervals[i];hs[k]=(hs[k]||0)+1}var h=0;for(var k in hs){var p=hs[k]/n;h-=p*Math.log(p)}return h}
+window.__owaf_behavior_sample=function(){var total=moves+zero;return {events:ev,entropy:+(entropy().toFixed(3)),zero_ratio:+(total?(zero/total).toFixed(3):0),jitter:+(total?(moves/total).toFixed(3):1),max_speed:+(maxMove.toFixed(3)),action_key:keys}};
+})();`
+}
+
+// shieldSessionTTL 已被强制化删除：会话有效期只来自签发时写入的 TimeoutSecs。
 
 func (sm *ShieldManager) saveShieldSession(s *ShieldSession) error {
 	data, err := json.Marshal(s)

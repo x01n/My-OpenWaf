@@ -16,6 +16,8 @@ import (
 	quickjs "github.com/buke/quickjs-go"
 	"github.com/tdewolff/parse/v2"
 	"github.com/tdewolff/parse/v2/js"
+
+	"My-OpenWaf/internal/store"
 )
 
 // RuntimeBackend reports the JavaScript executor compiled into this binary.
@@ -234,13 +236,15 @@ type executionRequest struct {
 	ctx         context.Context
 	script      *Script
 	reqJSON     string
+	stage       string
 	recordStats bool
 	result      chan executionResult
 }
 
 type executionResult struct {
-	plan MutationPlan
-	err  error
+	reqPlan  MutationPlan
+	respPlan ResponseMutationPlan
+	err      error
 }
 
 type executionSlot struct {
@@ -371,23 +375,35 @@ func (s *executionSlot) execute(request executionRequest, opts EngineOptions) {
 		return 0
 	})
 	defer s.rt.ClearInterruptHandler()
-	plan, err := s.evaluate(request.script, request.reqJSON)
+	var (
+		reqPlan  MutationPlan
+		respPlan ResponseMutationPlan
+		err      error
+	)
+	switch request.stage {
+	case store.JSStageResponse:
+		respPlan, err = s.evaluateResponse(request.script, request.reqJSON)
+	default:
+		reqPlan, err = s.evaluate(request.script, request.reqJSON)
+	}
 	if timedOut.Load() {
 		if request.recordStats {
 			request.script.timeouts.Add(1)
 		}
 		err = ErrScriptTimeout
-		plan = MutationPlan{}
+		reqPlan = MutationPlan{}
+		respPlan = ResponseMutationPlan{}
 	} else if err != nil {
 		if request.recordStats {
 			request.script.failures.Add(1)
 		}
-		plan = MutationPlan{}
+		reqPlan = MutationPlan{}
+		respPlan = ResponseMutationPlan{}
 	}
 	if request.recordStats {
 		request.script.totalNanos.Add(time.Since(started).Nanoseconds())
 	}
-	request.result <- executionResult{plan: plan, err: err}
+	request.result <- executionResult{reqPlan: reqPlan, respPlan: respPlan, err: err}
 }
 
 func (s *executionSlot) loadCompiled(script *Script) (*quickjs.Value, bool) {
@@ -417,65 +433,19 @@ func (s *executionSlot) storeCompiled(script *Script, plugin *quickjs.Value) {
 }
 
 func (s *executionSlot) evaluate(script *Script, reqJSON string) (MutationPlan, error) {
-	plugin, ok := s.loadCompiled(script)
-	if !ok {
-		compiled, err := evaluatePlugin(s.ctx, script.source)
-		if err != nil {
-			return MutationPlan{}, err
-		}
-		if err := validatePlugin(compiled); err != nil {
-			compiled.Free()
-			return MutationPlan{}, err
-		}
-		plugin = compiled
-		s.storeCompiled(script, plugin)
+	plugin, err := s.loadOrCompilePlugin(script)
+	if err != nil {
+		return MutationPlan{}, err
 	}
-	fetch := plugin.Get("fetch")
-	if fetch == nil {
-		return MutationPlan{}, errors.New("jsplugin: default export fetch is missing")
-	}
-	defer fetch.Free()
-	requestValue := s.ctx.ParseJSON(reqJSON)
-	if requestValue == nil {
-		return MutationPlan{}, errors.New("jsplugin: request snapshot parsing failed")
-	}
-	defer requestValue.Free()
-	if requestValue.IsException() {
-		if err := s.ctx.Exception(); err != nil {
-			return MutationPlan{}, fmt.Errorf("jsplugin: request snapshot parsing failed: %w", err)
-		}
-		return MutationPlan{}, errors.New("jsplugin: request snapshot parsing failed")
-	}
-	env := s.ctx.NewObject()
-	defer env.Free()
-	hostCtx := s.ctx.NewObject()
-	defer hostCtx.Free()
-	result := fetch.Execute(plugin, requestValue, env, hostCtx)
-	if result == nil {
-		return MutationPlan{}, errors.New("jsplugin: fetch invocation failed")
-	}
-	if result.IsPromise() {
-		if result.PromiseState() == quickjs.PromisePending {
-			result.Free()
-			return MutationPlan{}, ErrAsyncPromise
-		}
-		awaited := s.ctx.Await(result)
-		if awaited == nil {
-			return MutationPlan{}, errors.New("jsplugin: failed to await Promise")
-		}
-		result = awaited
+	_, result, err := s.invokeFetch(plugin, plugin.Get("fetch"), reqJSON)
+	if err != nil || result == nil {
+		return MutationPlan{}, err
 	}
 	defer result.Free()
-	if result.IsException() {
-		if err := s.ctx.Exception(); err != nil {
-			return MutationPlan{}, err
-		}
-		return MutationPlan{}, errors.New("jsplugin: fetch raised an exception")
-	}
 	if result.IsNull() || result.IsUndefined() {
 		return MutationPlan{}, nil
 	}
-	if err := validateMutationPlanResultShape(result); err != nil {
+	if err := validateMutationPlanResultShape(result, false); err != nil {
 		return MutationPlan{}, err
 	}
 	var plan MutationPlan
@@ -488,7 +458,101 @@ func (s *executionSlot) evaluate(script *Script, reqJSON string) (MutationPlan, 
 	return plan, nil
 }
 
-func validateMutationPlanResultShape(result *quickjs.Value) error {
+// evaluateResponse 与 evaluate 结构完全对称：同一 compiled 插件实例、
+// 同一 Promise 处理，唯一区别是结果提取为 ResponseMutationPlan。
+func (s *executionSlot) evaluateResponse(script *Script, respJSON string) (ResponseMutationPlan, error) {
+	plugin, err := s.loadOrCompilePlugin(script)
+	if err != nil {
+		return ResponseMutationPlan{}, err
+	}
+	_, result, err := s.invokeFetch(plugin, plugin.Get("fetch"), respJSON)
+	if err != nil || result == nil {
+		return ResponseMutationPlan{}, err
+	}
+	defer result.Free()
+	if result.IsNull() || result.IsUndefined() {
+		return ResponseMutationPlan{}, nil
+	}
+	if err := validateMutationPlanResultShape(result, true); err != nil {
+		return ResponseMutationPlan{}, err
+	}
+	var plan ResponseMutationPlan
+	if err := s.ctx.Unmarshal(result, &plan); err != nil {
+		return ResponseMutationPlan{}, fmt.Errorf("jsplugin: invalid response mutation plan: %w", err)
+	}
+	if err := ValidateResponseMutationPlan(plan); err != nil {
+		return ResponseMutationPlan{}, err
+	}
+	return plan, nil
+}
+
+// loadOrCompilePlugin 从 compiled 缓存解析插件的默认导出对象，或按需
+// 编译并缓存；返回的 plugin 由缓存表持有，调用方不得 Free。
+func (s *executionSlot) loadOrCompilePlugin(script *Script) (*quickjs.Value, error) {
+	plugin, ok := s.loadCompiled(script)
+	if !ok {
+		compiled, err := evaluatePlugin(s.ctx, script.source)
+		if err != nil {
+			return nil, err
+		}
+		if err := validatePlugin(compiled); err != nil {
+			compiled.Free()
+			return nil, err
+		}
+		plugin = compiled
+		s.storeCompiled(script, plugin)
+	}
+	return plugin, nil
+}
+
+// invokeFetch 以 plugin 为 this 执行 fetch(request, env, ctx) 并完成
+// Promise 收敛。fetch 由 Get 获得的新引用在返回时无条件释放，调用方
+// 只负责释放 result；result 或 fetch 为 nil 表示已经失败。
+func (s *executionSlot) invokeFetch(plugin, fetch *quickjs.Value, snapshotJSON string) (*quickjs.Value, *quickjs.Value, error) {
+	if fetch == nil {
+		return nil, nil, errors.New("jsplugin: default export fetch is missing")
+	}
+	defer fetch.Free()
+	snapshotValue := s.ctx.ParseJSON(snapshotJSON)
+	if snapshotValue == nil {
+		return fetch, nil, errors.New("jsplugin: snapshot parsing failed")
+	}
+	defer snapshotValue.Free()
+	if snapshotValue.IsException() {
+		if err := s.ctx.Exception(); err != nil {
+			return fetch, nil, fmt.Errorf("jsplugin: snapshot parsing failed: %w", err)
+		}
+		return fetch, nil, errors.New("jsplugin: snapshot parsing failed")
+	}
+	env := s.ctx.NewObject()
+	defer env.Free()
+	hostCtx := s.ctx.NewObject()
+	defer hostCtx.Free()
+	result := fetch.Execute(plugin, snapshotValue, env, hostCtx)
+	if result == nil {
+		return fetch, nil, errors.New("jsplugin: fetch invocation failed")
+	}
+	if result.IsPromise() {
+		if result.PromiseState() == quickjs.PromisePending {
+			result.Free()
+			return fetch, nil, ErrAsyncPromise
+		}
+		awaited := s.ctx.Await(result)
+		if awaited == nil {
+			return fetch, nil, errors.New("jsplugin: failed to await Promise")
+		}
+		result = awaited
+	}
+	if result.IsException() {
+		if err := s.ctx.Exception(); err != nil {
+			return fetch, nil, err
+		}
+		return fetch, nil, errors.New("jsplugin: fetch raised an exception")
+	}
+	return fetch, result, nil
+}
+
+func validateMutationPlanResultShape(result *quickjs.Value, isResponse bool) error {
 	if result == nil || !result.IsObject() || result.IsArray() || result.IsFunction() {
 		return errors.New("jsplugin: fetch result must be a MutationPlan object, null, or undefined")
 	}
@@ -497,14 +561,25 @@ func validateMutationPlanResultShape(result *quickjs.Value) error {
 		return fmt.Errorf("jsplugin: inspect mutation plan fields: %w", err)
 	}
 	for _, name := range propertyNames {
-		switch name {
-		case "method", "path", "raw_query", "body", "set_headers", "delete_headers":
+		if allowedMutationPlanField(name, isResponse) {
 			continue
-		default:
-			return fmt.Errorf("jsplugin: mutation plan contains unknown field %q", name)
 		}
+		return fmt.Errorf("jsplugin: mutation plan contains unknown field %q", name)
 	}
 	return nil
+}
+
+// allowedMutationPlanField 返回字段是否属于对应阶段的计划形状。
+func allowedMutationPlanField(name string, isResponse bool) bool {
+	if isResponse {
+		return name == "status" || name == "body" || name == "set_headers" || name == "delete_headers"
+	}
+	switch name {
+	case "method", "path", "raw_query", "body", "set_headers", "delete_headers":
+		return true
+	default:
+		return false
+	}
 }
 
 // Execute implements Executor for the QuickJS engine.
@@ -514,46 +589,84 @@ func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapsho
 
 // Evaluate executes one request, returning an empty plan on every error.
 func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
-	return e.evaluate(ctx, script, req, true)
+	return e.evaluate(ctx, script, req, store.JSStageRequest, true)
 }
 
 // Validate executes a compiled script with production limits without changing
 // request-runtime counters. Snapshot and admin validation use this path.
 func (e *Engine) Validate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
-	return e.evaluate(ctx, script, req, false)
+	return e.evaluate(ctx, script, req, store.JSStageRequest, false)
 }
 
-func (e *Engine) evaluate(ctx context.Context, script *Script, req RequestSnapshot, recordStats bool) (MutationPlan, error) {
+// ExecuteResponse implements ResponseExecutor for the QuickJS engine.
+func (e *Engine) ExecuteResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
+	return e.EvaluateResponse(ctx, script, resp)
+}
+
+// EvaluateResponse executes one response, returning an empty plan on every error.
+func (e *Engine) EvaluateResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
+	return e.evaluateResponse(ctx, script, resp, true)
+}
+
+// ValidateResponse executes a compiled response script with production limits
+// without changing request-runtime counters. Snapshot and admin validation use this path.
+func (e *Engine) ValidateResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
+	return e.evaluateResponse(ctx, script, resp, false)
+}
+
+func (e *Engine) evaluate(ctx context.Context, script *Script, req RequestSnapshot, stage string, recordStats bool) (MutationPlan, error) {
+	return runExecution(e, ctx, script, req, stage, func(s RequestSnapshot) uint { return s.SiteID }, encodeRequestSnapshot, recordStats, applyExecutionResult)
+}
+
+func (e *Engine) evaluateResponse(ctx context.Context, script *Script, resp ResponseSnapshot, recordStats bool) (ResponseMutationPlan, error) {
+	return runExecution(e, ctx, script, resp, store.JSStageResponse, func(s ResponseSnapshot) uint { return s.SiteID }, encodeResponseSnapshot, recordStats, applyResponseExecutionResult)
+}
+
+// runExecution 承载两个阶段的共性编排：nil 校验、阶段校验、站点适用性、
+// 快照编码、轮转投递与结果提取；请求与响应阶段分别以 request/json 两个
+// 维度参数化，执行 slot 内部再按 stage 字段分派两种提取路径。
+func runExecution[Snapshot any, Plan any](
+	e *Engine,
+	ctx context.Context,
+	script *Script,
+	snapshot Snapshot,
+	wantStage string,
+	siteID func(Snapshot) uint,
+	encode func(Snapshot) (string, error),
+	recordStats bool,
+	apply func(executionResult) (Plan, error),
+) (Plan, error) {
+	var zero Plan
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if e == nil || script == nil {
-		return MutationPlan{}, errors.New("jsplugin: script is nil")
+		return zero, errors.New("jsplugin: script is nil")
 	}
-	if err := validateExecutionStage(script); err != nil {
-		return MutationPlan{}, err
+	if err := validateExecutionStage(script, wantStage); err != nil {
+		return zero, err
 	}
-	if !script.AppliesTo(req.SiteID) {
-		return MutationPlan{}, nil
+	if !script.AppliesTo(siteID(snapshot)) {
+		return zero, nil
 	}
-	encodedReq, err := encodeRequestSnapshot(req)
+	encodedReq, err := encode(snapshot)
 	if err != nil {
-		return MutationPlan{}, err
+		return zero, err
 	}
 	e.mu.RLock()
 	if e.closed {
 		e.mu.RUnlock()
-		return MutationPlan{}, ErrEngineClosed
+		return zero, ErrEngineClosed
 	}
 	if len(e.slots) == 0 {
 		e.mu.RUnlock()
-		return MutationPlan{}, ErrNoSlot
+		return zero, ErrNoSlot
 	}
 	if err := ctx.Err(); err != nil {
 		e.mu.RUnlock()
-		return MutationPlan{}, err
+		return zero, err
 	}
-	request := executionRequest{ctx: ctx, script: script, reqJSON: encodedReq, recordStats: recordStats, result: make(chan executionResult, 1)}
+	request := executionRequest{ctx: ctx, script: script, reqJSON: encodedReq, stage: wantStage, recordStats: recordStats, result: make(chan executionResult, 1)}
 	start := int(e.next.Add(1) % uint64(len(e.slots)))
 	queued := false
 	for i := 0; i < len(e.slots); i++ {
@@ -561,7 +674,7 @@ func (e *Engine) evaluate(ctx context.Context, script *Script, req RequestSnapsh
 		select {
 		case <-ctx.Done():
 			e.mu.RUnlock()
-			return MutationPlan{}, ctx.Err()
+			return zero, ctx.Err()
 		default:
 		}
 		select {
@@ -569,7 +682,7 @@ func (e *Engine) evaluate(ctx context.Context, script *Script, req RequestSnapsh
 			queued = true
 		case <-ctx.Done():
 			e.mu.RUnlock()
-			return MutationPlan{}, ctx.Err()
+			return zero, ctx.Err()
 		default:
 			continue
 		}
@@ -579,15 +692,25 @@ func (e *Engine) evaluate(ctx context.Context, script *Script, req RequestSnapsh
 	}
 	if !queued {
 		e.mu.RUnlock()
-		return MutationPlan{}, ErrNoSlot
+		return zero, ErrNoSlot
 	}
 	e.mu.RUnlock()
 	select {
 	case result := <-request.result:
-		return result.plan, result.err
+		return apply(result)
 	case <-ctx.Done():
-		return MutationPlan{}, ctx.Err()
+		return zero, ctx.Err()
 	}
+}
+
+// applyExecutionResult 提取请求阶段执行结果。
+func applyExecutionResult(result executionResult) (MutationPlan, error) {
+	return result.reqPlan, result.err
+}
+
+// applyResponseExecutionResult 提取响应阶段执行结果。
+func applyResponseExecutionResult(result executionResult) (ResponseMutationPlan, error) {
+	return result.respPlan, result.err
 }
 
 // Close stops all execution slots and releases every native QuickJS handle.

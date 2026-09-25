@@ -3,9 +3,7 @@ package challenge
 import (
 	"bytes"
 	"embed"
-	"encoding/base64"
 	"html/template"
-	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -19,16 +17,10 @@ var captchaPageTmpl = template.Must(template.ParseFS(challengePageFS, "templates
 
 type captchaPageData struct {
 	SessionID    string
-	Type         string
-	MasterImg    template.URL
-	ThumbImg     template.URL
-	Prompt       string
-	InputMode    string
+	CaptchaData  string
+	KeyHex       string
+	KeyPresent   bool
 	RequestID    string
-	SlideWidth   int
-	IsClick      bool
-	IsSlide      bool
-	IsRotate     bool
 	EnvJS        template.JS
 	BrandName    string
 	PageTitle    string
@@ -42,22 +34,6 @@ type captchaPageData struct {
 	CustomCSS    template.CSS
 }
 
-func captchaImageURL(raw string) template.URL {
-	prefix := ""
-	switch {
-	case strings.HasPrefix(raw, "data:image/png;base64,"):
-		prefix = "data:image/png;base64,"
-	case strings.HasPrefix(raw, "data:image/jpeg;base64,"):
-		prefix = "data:image/jpeg;base64,"
-	default:
-		return ""
-	}
-	if _, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(raw, prefix)); err != nil {
-		return ""
-	}
-	return template.URL(raw)
-}
-
 func renderCaptchaPage(challenge *CaptchaChallenge, reqID string, envJS string, cfg pageconfig.CaptchaPageConfig) []byte {
 	if challenge == nil {
 		return nil
@@ -66,19 +42,12 @@ func renderCaptchaPage(challenge *CaptchaChallenge, reqID string, envJS string, 
 	if cfg.BrandName == "" {
 		cfg = defaults
 	}
-	captchaType := CaptchaType(challenge.Type)
 	data := captchaPageData{
 		SessionID:    challenge.SessionID,
-		Type:         challenge.Type,
-		MasterImg:    captchaImageURL(challenge.MasterImg),
-		ThumbImg:     captchaImageURL(challenge.ThumbImg),
-		Prompt:       challenge.Prompt,
-		InputMode:    inputModeForCaptcha(challenge.Type),
+		CaptchaData:  challenge.CaptchaData,
+		KeyHex:       challenge.EnvKeyHex,
+		KeyPresent:   challenge.EnvKeyHex != "",
 		RequestID:    reqID,
-		SlideWidth:   firstPositiveInt(challenge.Width, 360),
-		IsClick:      captchaType == CaptchaTypeClick,
-		IsSlide:      captchaType == CaptchaTypeSlide,
-		IsRotate:     captchaType == CaptchaTypeRotate,
 		EnvJS:        template.JS(envJS),
 		BrandName:    valueOrDefault(cfg.BrandName, defaults.BrandName),
 		PageTitle:    valueOrDefault(cfg.Title, defaults.Title),
@@ -99,16 +68,25 @@ func renderCaptchaPage(challenge *CaptchaChallenge, reqID string, envJS string, 
 }
 
 func RenderCaptchaPreview(cfg pageconfig.CaptchaPageConfig) []byte {
-	const previewImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ2bHsPwAEyAJyKnolIgAAAABJRU5ErkJggg=="
-	return renderCaptchaPage(&CaptchaChallenge{
-		SessionID: "preview",
-		Type:      string(CaptchaTypeMath),
-		MasterImg: previewImage,
-		Prompt:    "CAPTCHA answer",
-		Width:     200,
-		Height:    80,
-	}, "preview-request", "", cfg)
+	return renderCaptchaSkeletonPreview(cfg)
 }
+
+func renderCaptchaSkeletonPreview(cfg pageconfig.CaptchaPageConfig) []byte {
+	defaults := pageconfig.DefaultCaptchaPageConfig()
+	if cfg.BrandName == "" {
+		cfg = defaults
+	}
+	cfg.Title = valueOrDefault(cfg.Title, defaults.Title)
+	cfg.SubmitText = valueOrDefault(cfg.SubmitText, defaults.SubmitText)
+	cfg.FooterText = valueOrDefault(cfg.FooterText, defaults.FooterText)
+	var buf bytes.Buffer
+	if err := captchaPreviewTmpl.ExecuteTemplate(&buf, "captcha_preview.html", cfg); err != nil {
+		return []byte("<!DOCTYPE html><html><body><p>Unable to render CAPTCHA preview.</p></body></html>")
+	}
+	return buf.Bytes()
+}
+
+var captchaPreviewTmpl = template.Must(template.ParseFS(challengePageFS, "templates/captcha_preview.html"))
 
 func valueOrDefault(value, fallback string) string {
 	if value != "" {
@@ -123,9 +101,6 @@ func prepareChallengeResponseHeaders(c *app.RequestContext, reqID string) {
 	c.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 }
 
-// WriteCaptchaChallengeResponse renders a standalone CAPTCHA challenge page.
-// envCheck 为 true 时为该验证码会话绑定环境指纹密钥，并在页面注入加密的
-// 浏览器/环境采集 JS，提交时携带 __waf_env_fp 供服务端校验是否为真实浏览器。
 func WriteCaptchaChallengeResponse(c *app.RequestContext, reqID string, cm *CaptchaManager, captchaType CaptchaType, envCheck bool, binding ChallengeSessionBinding, statusCode int, cfg pageconfig.CaptchaPageConfig) {
 	prepareChallengeResponseHeaders(c, reqID)
 	captchaChallenge, err := cm.GenerateWithBinding(captchaType, envCheck, binding)
@@ -134,7 +109,7 @@ func WriteCaptchaChallengeResponse(c *app.RequestContext, reqID string, cm *Capt
 		return
 	}
 	envJS := ""
-	if envCheck && captchaChallenge.EnvKeyHex != "" {
+	if captchaChallenge.EnvKeyHex != "" {
 		aad := EnvFingerprintAAD("captcha", captchaChallenge.SessionID, binding)
 		envJS = EnvCheckJSEncrypted(captchaChallenge.EnvKeyHex, aad)
 		if envJS == "" {

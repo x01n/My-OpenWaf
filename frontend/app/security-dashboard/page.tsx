@@ -43,6 +43,7 @@ import {
   useDashboardStats,
   useSecurityEvents,
 } from "@/hooks/use-api"
+import { useRealtimeEvents } from "@/hooks/use-realtime"
 import { GeoAttackDistribution } from "@/components/geo-attack-distribution"
 import { ActionBadge } from "@/components/action-badge"
 import { formatNumber } from "@/lib/utils"
@@ -159,6 +160,10 @@ export default function SecurityDashboardPage() {
     page_size: LIVE_ATTACK_LIMIT,
   }) as { data?: { items: SecurityEvent[]; total: number } }
 
+  // 实时攻击流：订阅控制面 WS 推送的 security_event_snapshot。
+  // 连接前处于空闲态，WS 未占用时回退到上面的轮询数据。
+  const { events: wsEvents, status: wsStatus } = useRealtimeEvents()
+
   // 实时时间
   const [now, setNow] = useState<Date | null>(null)
   useEffect(() => {
@@ -203,20 +208,24 @@ export default function SecurityDashboardPage() {
   // 攻击 IP -> 国家映射（利用最近事件补充地理信息）
   const ipCountryMap = useMemo(() => {
     const map = new Map<string, string>()
-    for (const ev of eventsResp?.items ?? []) {
+    const src = wsStatus === "open" && wsEvents.length > 0 ? wsEvents : eventsResp?.items ?? []
+    for (const ev of src) {
       if (ev.client_ip && ev.geo_country && !map.has(ev.client_ip)) {
         map.set(ev.client_ip, ev.geo_country)
       }
     }
     return map
-  }, [eventsResp])
+  }, [eventsResp, wsEvents, wsStatus])
 
   const topIps = (stats?.top_ips ?? []).slice(0, 5)
   const uniqueVisitors = dashboard?.unique_visitors_24h ?? 0
   const totalRequests = stats?.requests ?? 0
   const totalIntercepts = stats?.intercepts ?? 0
 
-  const liveAttacks = (eventsResp?.items ?? []).slice(0, LIVE_ATTACK_LIMIT)
+  const liveAttacks = (wsStatus === "open" && wsEvents.length > 0
+    ? wsEvents
+    : eventsResp?.items ?? []
+  ).slice(0, LIVE_ATTACK_LIMIT)
 
   const dateStr = now
     ? `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
@@ -249,6 +258,19 @@ export default function SecurityDashboardPage() {
           <h1 className="bg-gradient-to-r from-teal-300 to-cyan-200 bg-clip-text text-xl font-bold tracking-wide text-transparent md:text-2xl">
             {t("securityDashboard.title")}
           </h1>
+          <span
+            className="hidden rounded-full border border-teal-500/30 bg-teal-500/10 px-2 py-0.5 font-mono text-[11px] text-teal-300 sm:inline-block"
+            title={t("securityDashboard.realtime")}
+          >
+            {t("securityDashboard.realtime")}:{" "}
+            {wsStatus === "open"
+              ? t("securityDashboard.realtimeOpen")
+              : wsStatus === "connecting"
+                ? t("securityDashboard.realtimeConnecting")
+                : wsStatus === "closed"
+                  ? t("securityDashboard.realtimeClosed")
+                  : t("securityDashboard.realtimeIdle")}
+          </span>
         </div>
         <div className="flex items-center gap-6">
           <div className="hidden text-right md:block">
@@ -390,6 +412,11 @@ export default function SecurityDashboardPage() {
                       <span className="font-mono text-slate-200">
                         {ev.client_ip}
                       </span>
+                      {ev.created_at && (
+                        <span className="shrink-0 font-mono text-slate-500">
+                          {new Date(ev.created_at).toTimeString().slice(0, 8)}
+                        </span>
+                      )}
                       {ev.geo_country && (
                         <span className="flex items-center gap-1 text-slate-400">
                           <span aria-hidden>{countryFlag(ev.geo_country)}</span>

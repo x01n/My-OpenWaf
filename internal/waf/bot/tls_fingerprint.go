@@ -34,12 +34,6 @@ const (
 	tlsALPNProtocolHTTP11 = "http/1.1"
 )
 
-var (
-	sharedALPNProtocolsH2       = []string{tlsALPNProtocolH2}
-	sharedALPNProtocolsHTTP11   = []string{tlsALPNProtocolHTTP11}
-	sharedALPNProtocolsH2HTTP11 = []string{tlsALPNProtocolH2, tlsALPNProtocolHTTP11}
-)
-
 func TLSFingerprintFromClientHelloInfo(info *tls.ClientHelloInfo, protocol byte) TLSClientFingerprint {
 	if info == nil {
 		return TLSClientFingerprint{}
@@ -352,12 +346,6 @@ func parseRawALPN(data []byte, raw *rawClientHello) {
 	if len(data) < 2 {
 		return
 	}
-	if len(raw.alpn) == 0 {
-		if protocols := sharedALPNProtocols(data); protocols != nil {
-			raw.alpn = protocols
-			return
-		}
-	}
 	listLen := int(data[0])<<8 | int(data[1])
 	pos := 2
 	end := pos + listLen
@@ -393,29 +381,6 @@ func parseRawALPN(data []byte, raw *rawClientHello) {
 		pos += nameLen
 	}
 	raw.alpn = protocols
-}
-
-func sharedALPNProtocols(data []byte) []string {
-	switch len(data) {
-	case 5:
-		if data[0] == 0x00 && data[1] == 0x03 && data[2] == 0x02 && data[3] == 'h' && data[4] == '2' {
-			return sharedALPNProtocolsH2
-		}
-	case 11:
-		if data[0] == 0x00 && data[1] == 0x09 && data[2] == 0x08 &&
-			data[3] == 'h' && data[4] == 't' && data[5] == 't' && data[6] == 'p' &&
-			data[7] == '/' && data[8] == '1' && data[9] == '.' && data[10] == '1' {
-			return sharedALPNProtocolsHTTP11
-		}
-	case 14:
-		if data[0] == 0x00 && data[1] == 0x0c && data[2] == 0x02 &&
-			data[3] == 'h' && data[4] == '2' && data[5] == 0x08 &&
-			data[6] == 'h' && data[7] == 't' && data[8] == 't' && data[9] == 'p' &&
-			data[10] == '/' && data[11] == '1' && data[12] == '.' && data[13] == '1' {
-			return sharedALPNProtocolsH2HTTP11
-		}
-	}
-	return nil
 }
 
 func alpnProtocolString(data []byte) string {

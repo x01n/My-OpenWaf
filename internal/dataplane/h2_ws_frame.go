@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hertz-contrib/http2/hpack"
+	"github.com/x01n/http2/hpack"
 )
 
 // h2c 帧类型（RFC 9113）。

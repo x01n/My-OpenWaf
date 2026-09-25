@@ -25,9 +25,9 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/hlog"
 	hertznet "github.com/cloudwego/hertz/pkg/network"
 	"github.com/cloudwego/hertz/pkg/network/standard"
-	shconfig "github.com/hertz-contrib/http2/config"
-	shfactory "github.com/hertz-contrib/http2/factory"
 	goredis "github.com/redis/go-redis/v9"
+	shconfig "github.com/x01n/http2/config"
+	shfactory "github.com/x01n/http2/factory"
 	"golang.org/x/crypto/hkdf"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -610,6 +610,7 @@ func Run() {
 	}
 
 	// dataListenerOpts holds the shared options for creating data-plane handlers.
+	dataplane.SetAccessStoreRedisClients(rt.Redis)
 	dpOpts := dataplane.Options{
 		Holder:                rt.Snapshot,
 		Engine:                eng,
@@ -718,7 +719,7 @@ func Run() {
 				RouteTable: plan.RouteTable,
 				TLSConfig:  plan.TLSConfig,
 				Log:        log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)),
-				Allow0RTT:  newSn.TLSDefaults.SessionTicketsEnabled,
+				Allow0RTT:  h3Allow0RTT(newSn),
 			})
 			lm.AddWithTag(name, h3Srv, plan.Tag)
 			if err := lm.StartOne(name); err != nil {
@@ -1021,7 +1022,7 @@ func Run() {
 				RouteTable: plan.RouteTable,
 				TLSConfig:  plan.TLSConfig,
 				Log:        log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)),
-				Allow0RTT:  sn.TLSDefaults.SessionTicketsEnabled,
+				Allow0RTT:  h3Allow0RTT(sn),
 			})
 			lm.AddWithTag(name, h3Srv, plan.Tag)
 			log.Info("HTTP/3 QUIC listener registered",
@@ -1041,6 +1042,20 @@ func Run() {
 	lm.Start()
 	lm.WaitForSignal()
 	stopBackground()
+}
+
+func h3Allow0RTT(sn *snapshotpkg.Snapshot) bool {
+	if sn == nil {
+		return false
+	}
+	switch os.Getenv("MY_OPENWAF_H3_ALLOW_0RTT") {
+	case "1":
+		return sn.TLSDefaults.SessionTicketsEnabled
+	case "0":
+		return false
+	default:
+		return sn.TLSDefaults.SessionTicketsEnabled
+	}
 }
 
 func siteListenerName(bind string) string {
@@ -1122,6 +1137,9 @@ func applyRedisRuntimeReload(rt *core.Runtime, stored adminsystem.RedisConfig, n
 	if deps.escalationMgr != nil {
 		deps.escalationMgr.SetRedis(nextClient)
 	}
+
+	// 访问控制会话/OAuth state 存储同步切换 Redis/内存后端。
+	dataplane.SetAccessStoreRedisClients(nextClient)
 
 	if deps.reqRL != nil || deps.errRL != nil {
 		protection := store.DefaultProtectionConfig()
@@ -1489,6 +1507,7 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 	}
 	o := dpOpts
 	o.Bind = siteRT.Bind
+	o.StreamCloseNotifyDisabled = !http2Enabled
 	handler := dataplane.Handler(o)
 
 	if http3AltSvcEnabled {
@@ -1606,6 +1625,8 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 			if hello.Conn != nil {
 				setTLSHandshakeInfo(hello.Conn, tls.ConnectionState{ServerName: hello.ServerName})
 			}
+			// 早退语义不变：ALPN 无 h2、或任一版本不低于 TLS12 时返回 nil，
+			// 仅 h2+低版本组合才 Clone 去除 h2，避免在旧协议上协商 h2。
 			return tcpTLSConfigForClientHello(cfg, hello), nil
 		},
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -1763,7 +1784,7 @@ func tcpTLSConfigForClientHello(base *tls.Config, hello *tls.ClientHelloInfo) *t
 	if !alpnSliceIncludes(base.NextProtos, "h2") {
 		return nil
 	}
-	if !serverMaxTLSVersionBelow(base, tls.VersionTLS12) && !clientHelloMaxTLSVersionBelow(hello, tls.VersionTLS12) {
+	if !serverMaxTLSVersionBelow(base.MaxVersion, tls.VersionTLS12) && !clientHelloMaxTLSVersionBelow(hello.SupportedVersions, tls.VersionTLS12) {
 		return nil
 	}
 	nextProtos := removeALPNProtocol(base.NextProtos, "h2")
@@ -1775,20 +1796,20 @@ func tcpTLSConfigForClientHello(base *tls.Config, hello *tls.ClientHelloInfo) *t
 	return cfg
 }
 
-func serverMaxTLSVersionBelow(cfg *tls.Config, version uint16) bool {
-	return cfg != nil && maxTLSVersionBelow(cfg.MaxVersion, version)
+func serverMaxTLSVersionBelow(maxVersion uint16, version uint16) bool {
+	return maxTLSVersionBelow(maxVersion, version)
 }
 
 func maxTLSVersionBelow(maxVersion uint16, version uint16) bool {
 	return maxVersion != 0 && maxVersion < version
 }
 
-func clientHelloMaxTLSVersionBelow(hello *tls.ClientHelloInfo, version uint16) bool {
-	if hello == nil || len(hello.SupportedVersions) == 0 {
+func clientHelloMaxTLSVersionBelow(supportedVersions []uint16, version uint16) bool {
+	if len(supportedVersions) == 0 {
 		return false
 	}
 	maxVersion := uint16(0)
-	for _, supported := range hello.SupportedVersions {
+	for _, supported := range supportedVersions {
 		switch supported {
 		case tls.VersionTLS10, tls.VersionTLS11, tls.VersionTLS12, tls.VersionTLS13:
 			if supported > maxVersion {

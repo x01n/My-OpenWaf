@@ -12,7 +12,6 @@ FROM golang:1.27-alpine AS backend
 RUN apk add --no-cache gcc musl-dev
 WORKDIR /app
 COPY go.mod go.sum ./
-COPY third_party/hertz-contrib-http2/go.mod third_party/hertz-contrib-http2/go.sum ./third_party/hertz-contrib-http2/
 RUN go mod download
 COPY . .
 COPY --from=frontend /app/frontend/out ./internal/core/adminweb/dist

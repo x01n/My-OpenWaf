@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/hertz-contrib/http2/hpack"
+	"github.com/x01n/http2/hpack"
 )
 
 // TestIsH2ExtendedWebSocketConnect 验证扩展 CONNECT 识别只看

@@ -14,27 +14,13 @@ import (
 	"time"
 
 	adminsystem "My-OpenWaf/internal/admin/system"
+	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 
 	quicgo "github.com/quic-go/quic-go"
 	"gorm.io/gorm"
 )
 
-// TestQuicTransportLayerExploration 通过进程内探测观察进程级 h3 服务端
-// 对「会话复用 + 0-RTT」的真实行为。
-//
-// 探测逻辑原位于 temp/_tls-exp/main.go（temp/ 被 gitignore，CI 拉不到该目录），
-// 现作为 _test.go 内的辅助函数内联，与包内其它进程测试共用 harness。
-//
-// 证据来源：
-//   - http3.go:763-765  服务端 Allow0RTT 透传自 TLSDefaults.SessionTicketsEnabled
-//   - server.go:1024    初始快照 Allow0RTT 同源
-//   - http3.go:1668     SessionTicketsDisabled 为 SessionTicketsEnabled 取反
-//
-// 断言全部基于 quic.ConnectionState（客户端真实握手状态）：
-//   - 首次连接必须完整握手（resumed=false, used0rtt=false）
-//   - 第二次 DialEarly 连接必须恢复会话（resumed=true）
-//   - h1.1 keep-alive 复用连接不得重新握手，关闭空闲连接后新连接恢复会话
 func TestQuicTransportLayerExploration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping quic transport layer exploration in -short mode")
@@ -224,4 +210,45 @@ func runQuicTransportProbe(t *testing.T, tcpBind, udpBind, serverName string) {
 	}
 
 	t.Logf("tcp=%s quic=%s (h1.1 keep-alive probe completed)", tcpBind, udpBind)
+}
+
+// TestH3Allow0RTTEnvGate 钉住 h3Allow0RTT 双向开关语义：
+// env 缺失/非法值透传 SessionTicketsEnabled（与现状逐字节等价），
+// "1" 显式开、票据禁用时仍关，"0" 显式关（仅收紧重放面、不改票据配置）。
+// 本包测试未并行（沿用 server_test.go 的 t.Setenv 先例），可直接操作环境。
+func TestH3Allow0RTTEnvGate(t *testing.T) {
+	defaults := func(enabled bool) *snapshotpkg.Snapshot {
+		td := snapshotpkg.DefaultTLSDefaults()
+		td.SessionTicketsEnabled = enabled
+		return &snapshotpkg.Snapshot{TLSDefaults: td}
+	}
+
+	cases := []struct {
+		name string
+		env  string
+		sn   *snapshotpkg.Snapshot
+		want bool
+	}{
+		{name: "missing_env_tickets_on_passes_through_true", env: "", sn: defaults(true), want: true},
+		{name: "missing_env_tickets_off_passes_through_false", env: "", sn: defaults(false), want: false},
+		{name: "garbage_env_passes_through_true", env: "true", sn: defaults(true), want: true},
+		{name: "one_env_tickets_on_returns_true", env: "1", sn: defaults(true), want: true},
+		{name: "one_env_tickets_off_returns_false", env: "1", sn: defaults(false), want: false},
+		{name: "zero_env_tickets_on_returns_false", env: "0", sn: defaults(true), want: false},
+		{name: "zero_env_tickets_off_returns_false", env: "0", sn: defaults(false), want: false},
+		{name: "nil_snapshot_returns_false", env: "", sn: nil, want: false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env == "" {
+				t.Setenv("MY_OPENWAF_H3_ALLOW_0RTT", "")
+			} else {
+				t.Setenv("MY_OPENWAF_H3_ALLOW_0RTT", tt.env)
+			}
+			if got := h3Allow0RTT(tt.sn); got != tt.want {
+				t.Fatalf("h3Allow0RTT(env=%q, tickets=%v) = %v, want %v",
+					tt.env, tt.sn != nil && tt.sn.TLSDefaults.SessionTicketsEnabled, got, tt.want)
+			}
+		})
+	}
 }

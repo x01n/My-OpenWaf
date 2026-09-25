@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
@@ -106,25 +107,137 @@ func SmugglingSniff(raw []byte) SmugglingSniffResult {
 	return SmugglingSniffResult{}
 }
 
-// requestSmugglingSniff 在数据面请求入口对已解析请求头做协议违规审计兜底。
-//
-// hertz 重演已解析头为行数据（VisitAll 非原序，见 requestHeaderLines 注释），
-// 交给 SmugglingSniff 判定。正常流量下五类走私头已被协议解析层拒绝、永不命中；
-// 命中只写 observe 审计事件与指标，不拦截，拦截仍由协议层完成。
 func requestSmugglingSniff(c *app.RequestContext, opts Options, siteID uint, requestID string, host string, clientIPString string) {
 	if c == nil || opts.Writer == nil {
 		return
 	}
-	method, path, userAgent := smugglingRequestIdentity(c)
-	res := SmugglingSniff(requestHeaderLines(c))
+	if !requestHasSmugglingRelevantHeaders(c) {
+		return
+	}
+	// 用已解析的头名/值直接执行五类走私判定，重演输出的顺序不敏感
+	// （参见 requestHeaderLines 注释），避免为同样结果额外分配一整个
+	// 序列化缓冲。
+	res := SmugglingSniffRequestHeader(&c.Request.Header)
 	if !res.Detected {
 		return
 	}
+	method, path, userAgent := smugglingRequestIdentity(c)
 	writeSmugglingObserveEvent(c, opts, siteID, requestID, clientIPString, host, path, method, userAgent,
 		res.RuleID, "severity="+res.Severity+" "+res.Reason)
 	if opts.Metrics != nil {
 		opts.Metrics.RecordWAFObserve()
 	}
+}
+
+// 走私判定使用的静态字节比较目标，避免每次比较时字符串转 []byte 的分配。
+// 仅在本包内只读使用，无写入者。
+var (
+	strTransferEncoding = []byte("Transfer-Encoding")
+	strContentLength    = []byte("Content-Length")
+)
+
+/**
+ * SmugglingSniffRequestHeader 对已解析的请求头执行五类请求走私判定（RFC 9112 §6.3 +
+ * 经典走私矩阵，全部大小写不敏感）：
+ *
+ *  1. Transfer-Encoding 与 Content-Length 同存；
+ *  2. 多个 Content-Length 头且值不一致；
+ *  3. 多个 Transfer-Encoding 头行；
+ *  4. Transfer-Encoding 值不是单个 "chunked"（含 "chunked, chunked"、空值等畸形）；
+ *  5. Content-Length 值为非数字/负数/超大溢出。
+ *
+ * 注意：hertz 的 HTTP/1 解析器在请求头被送入 handler 之前，已按同样规则拒绝 TE+CL 共存、
+ * 多个 TE 行、非 chunked TE、不一致 CL 与非法 CL 值（见 hertz 依赖 pkg/protocol/http1/req/header.go
+ * 的 errBothTEAndCL / errMultipleTE / errUnsupportedTE / errDuplicateCL），HTTP/2 侧同样按 RFC 9113 裁决。因此从 handler
+ * 取得的已解析头永远命中不了这五类——本函数是防御纵深审计仪器：当上游通道（h2c、自研转发面或未来替换的解析器）
+ * 把原始走私形态漏进 handler 时，这里负责留下协议违规审计证据，而不是假装能够在解析前看到字节。
+ *
+ * @param h 已解析的请求头
+ * @returns SmugglingSniffResult 判定结果
+ */
+func SmugglingSniffRequestHeader(h *protocol.RequestHeader) SmugglingSniffResult {
+	if h == nil {
+		return SmugglingSniffResult{}
+	}
+	// 预分配使得常规请求（单个 CL、无 TE）不进行任何切片扩容。
+	clValues := make([]string, 0, 1)
+	teCount := 0
+	clCount := 0
+	teDirty := false
+	clDirty := false
+	teValue := ""
+
+	h.VisitAll(func(k, v []byte) {
+		switch {
+		case bytes.EqualFold(k, strTransferEncoding):
+			if teCount == 0 {
+				teValue = strings.TrimSpace(string(v))
+				if !strings.EqualFold(teValue, "chunked") {
+					teDirty = true
+				}
+			}
+			teCount++
+		case bytes.EqualFold(k, strContentLength):
+			clCount++
+			val := string(v)
+			if strings.HasPrefix(val, "-") {
+				clDirty = true
+			} else if _, err := strconv.ParseUint(val, 10, 64); err != nil {
+				clDirty = true
+			}
+			clValues = append(clValues, val)
+		}
+	})
+
+	if teCount > 0 && clCount > 0 {
+		return smugglingHit(smugglingRuleIDs[0], "Transfer-Encoding and Content-Length coexist", "high")
+	}
+	if teCount > 1 {
+		return smugglingHit(smugglingRuleIDs[2], "multiple Transfer-Encoding header lines", "high")
+	}
+	if teDirty {
+		return smugglingHit(smugglingRuleIDs[3], "malformed Transfer-Encoding value: "+teValue, "high")
+	}
+	if len(clValues) > 1 {
+		first := clValues[0]
+		for _, v := range clValues[1:] {
+			if v != first {
+				return smugglingHit(smugglingRuleIDs[1], "conflicting Content-Length values: "+first+" vs "+v, "medium")
+			}
+		}
+	}
+	if clDirty {
+		return smugglingHit(smugglingRuleIDs[4], "invalid Content-Length value", "low")
+	}
+	return SmugglingSniffResult{}
+}
+
+func requestHasSmugglingRelevantHeaders(c *app.RequestContext) bool {
+	if c == nil {
+		return false
+	}
+	h := &c.Request.Header
+	if len(h.ContentLengthBytes()) > 0 {
+		return true
+	}
+	if h.ConnectionClose() {
+		return true
+	}
+	found := false
+	h.VisitAllCustomHeader(func(key, _ []byte) {
+		switch key[0] | 0x20 {
+		case 't':
+			// key 由 hertz 统一规范化（首字母大写），此处大小写折叠后
+			// 与 "transfer-encoding" 全串比较即可，无任何分配。
+			found = found || bytes.EqualFold(key, []byte("transfer-encoding"))
+		case 'c':
+			found = found || bytes.EqualFold(key, []byte("content-length"))
+		}
+	})
+	if found {
+		return true
+	}
+	return len(h.Trailer().Peek("Transfer-Encoding")) > 0 || len(h.Trailer().Peek("Content-Length")) > 0
 }
 
 // smugglingRequestIdentity 抽取命中事件的请求签名上下文。

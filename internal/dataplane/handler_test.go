@@ -30,6 +30,7 @@ import (
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
+	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
@@ -37,6 +38,7 @@ import (
 	"My-OpenWaf/internal/waf/antireplay"
 	"My-OpenWaf/internal/waf/bot"
 	"My-OpenWaf/internal/waf/challenge"
+	"My-OpenWaf/internal/waf/challenge/gm"
 	"My-OpenWaf/internal/waf/challenge/powdata"
 	"My-OpenWaf/internal/waf/iprep"
 	"My-OpenWaf/internal/waf/luaplugin"
@@ -99,21 +101,88 @@ func TestHandlerSiteChallengeActionOverridesGlobal(t *testing.T) {
 	handler(context.Background(), ctx)
 
 	if got := ctx.Response.StatusCode(); got != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", got)
+		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
 	}
 	body := string(ctx.Response.Body())
 	if !strings.Contains(body, `action="/__owaf/captcha/verify"`) {
 		t.Fatalf("site challenge_action did not select captcha render: %s", body)
 	}
-	if !strings.Contains(body, `id="slide-range"`) {
-		t.Fatalf("site captcha_type did not select slide captcha: %s", body)
+	// 题目类型不再以明文 DOM（slide-range 等）下发，类型选择由加密信封承载：
+	// 解密信封里 type 必须等于站点 captcha_type（slide）。
+	if strings.Contains(body, `id="slide-range"`) || strings.Contains(body, `id="rotate-range"`) {
+		t.Fatalf("site captcha_type must not leak typed challenge DOM in plaintext: %s", body)
 	}
-	if strings.Contains(body, `id="rotate-range"`) {
-		t.Fatal("site captcha_type override was ignored, rendered global rotate instead")
+	// 解出信封校验类型：站点 slide 必须生效。
+	sessionID := extractCaptchaSessionFromPage(t, body)
+	if sessionID == "" {
+		t.Fatal("captcha page did not expose session id")
+	}
+	if got := captchaEnvelopeType(t, captchaManager, sessionID, body); got != "slide" {
+		t.Fatalf("site captcha_type did not select slide captcha: got %q", got)
 	}
 	if strings.Contains(body, "__waf_challenge_token") {
 		t.Fatal("site override fell back to generic JS challenge token")
 	}
+}
+
+// extractCaptchaSessionFromPage 从渲染后的验证码页 HTML 里提取会话 ID。
+// session 隐藏域或 JS 绑定都可能携带它；本辅助只做渲染断言，不改渲染链路。
+func extractCaptchaSessionFromPage(t *testing.T, body string) string {
+	t.Helper()
+	// __waf_captcha_session 隐藏域 value 即会话 ID。
+	idx := strings.Index(body, `name="__waf_captcha_session"`)
+	if idx < 0 {
+		return ""
+	}
+	rest := body[idx:]
+	eq := strings.Index(rest, `value=`)
+	if eq < 0 {
+		return ""
+	}
+	rest = rest[eq+len(`value=`):]
+	quote := rest[0]
+	if quote != '"' && quote != '\'' {
+		return ""
+	}
+	end := strings.Index(rest[1:], string(quote))
+	if end < 0 {
+		return ""
+	}
+	return rest[1 : 1+end]
+}
+
+// captchaEnvelopeType 从页面信封解出题目类型，与内存会话密钥对账。
+// 信封断言走真实解密链路（session EnvKey + envDecrypt），确保页面下发物可还原。
+func captchaEnvelopeType(t *testing.T, manager *challenge.CaptchaManager, sessionID, body string) string {
+	t.Helper()
+	dataIdx := strings.Index(body, `id="cap-data"`)
+	if dataIdx < 0 {
+		return ""
+	}
+	rest := body[dataIdx:]
+	eq := strings.Index(rest, `value=`)
+	if eq < 0 {
+		return ""
+	}
+	rest = rest[eq+len(`value=`):]
+	if len(rest) == 0 || (rest[0] != '"' && rest[0] != '\'') {
+		return ""
+	}
+	quote := rest[0]
+	end := strings.Index(rest[1:], string(quote))
+	if end < 0 {
+		return ""
+	}
+	envelope := rest[1 : 1+end]
+	_, envKey, _, found := challenge.CaptchaManagerPendingForTest(manager, sessionID)
+	if !found || len(envKey) != 32 {
+		t.Fatalf("pending captcha session %q env key missing", sessionID)
+	}
+	payload := challenge.DecryptChallengeData(envelope, envKey)
+	if payload == nil {
+		t.Fatal("page envelope did not decrypt with session key")
+	}
+	return payload.Type
 }
 
 // TestHandlerGlobalChallengeActionOverrides 覆盖全局质询动作优先级：
@@ -209,11 +278,16 @@ func TestHandlerRuleCaptchaTypeBeatsSiteAndSiteBeatsGlobal(t *testing.T) {
 		t.Fatalf("status = %d, want 403", got)
 	}
 	body := string(ctx.Response.Body())
-	if !strings.Contains(body, `id="rotate-range"`) {
-		t.Fatalf("rule captcha_type did not beat site/global: %s", body)
+	sessionID := extractCaptchaSessionFromPage(t, body)
+	if sessionID == "" {
+		t.Fatal("captcha page did not expose session id")
 	}
-	if strings.Contains(body, `id="slide-range"`) {
-		t.Fatalf("rule captcha_type did not beat site/global: %s", body)
+	if got := captchaEnvelopeType(t, captchaManager, sessionID, body); got != "rotate" {
+		t.Fatalf("rule captcha_type did not beat site/global: got %q, want rotate", got)
+	}
+	// 题目类型以加密信封承载，明文 DOM 不得出现类型化题目结构。
+	if strings.Contains(body, `id="rotate-range"`) || strings.Contains(body, `id="slide-range"`) {
+		t.Fatalf("rule captcha_type leaked typed challenge DOM: %s", body)
 	}
 }
 
@@ -1789,11 +1863,20 @@ func TestAntiReplayChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 			t.Fatalf("anti-replay captcha status = %d, want 403", got)
 		}
 		body := string(ctx.Response.Body())
-		if !strings.Contains(body, `id="slide-range"`) && rt.ChallengeCaptchaType == "slide" {
-			t.Fatalf("anti-replay captcha_type 站点覆盖未生效: %s", body)
+		if strings.Contains(body, `id="slide-range"`) || strings.Contains(body, `id="rotate-range"`) {
+			t.Fatal("anti-replay captcha leaked typed challenge DOM")
 		}
-		if rt.ChallengeCaptchaType == "" && strings.Contains(body, `id="slide-range"`) {
-			t.Fatal("未配置站点覆盖时不应渲染 slide")
+		// 站点覆盖落地在加密信封的题目类型上。
+		sessionID := extractCaptchaSessionFromPage(t, body)
+		if sessionID == "" {
+			t.Fatal("anti-replay captcha page did not expose session id")
+		}
+		wantType := "math"
+		if rt.ChallengeCaptchaType == "slide" {
+			wantType = "slide"
+		}
+		if got := captchaEnvelopeType(t, captchaManager, sessionID, body); got != wantType {
+			t.Fatalf("anti-replay captcha_type = %q, want %q", got, wantType)
 		}
 	}
 
@@ -1802,13 +1885,45 @@ func TestAntiReplayChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 			ctx := app.NewContext(0)
 			ctx.Request.Header.SetMethod("GET")
 			ctx.Request.SetRequestURI("/guarded?from=anti-replay")
+			ctx.Request.Header.SetHost("example.com")
+
+			pageCtx := app.NewContext(0)
+			pageCtx.Request.Header.SetMethod("GET")
+			pageCtx.Request.SetRequestURI("/guarded?from=anti-replay")
+			pageCtx.Request.Header.SetHost("example.com")
 
 			sn := &snapshot.Snapshot{Protection: baseProtection}
 			rt := &snapshot.SiteRuntime{Site: store.Site{ID: 1, Host: "example.com"}}
 			result := action.Result{Type: tc.actionName, Matched: true}
 
 			writeAntiReplayActionResponse(ctx, opts, sn, rt, "req-specific-challenge", string(tc.actionName), result, 403)
-
+			// 用与真实请求相同参数渲染一次，供网络流量模拟断言正文，
+			// 避免与既有既有 result 类型分支冲突。
+			if tc.actionName == action.CaptchaChallenge {
+				writeAntiReplayActionResponse(pageCtx, opts, sn, rt, "req-specific-challenge", string(tc.actionName), result, 403)
+				bodyProbe := string(pageCtx.Response.Body())
+				for _, deny := range []string{
+					`id="slide-range"`,
+					`id="rotate-range"`,
+					`id="cap-img"`,
+					`data:image/png;base64,`,
+					`data:image/jpeg;base64,`,
+				} {
+					if strings.Contains(bodyProbe, deny) {
+						t.Fatalf("captcha render leaked plaintext challenge DOM %q in network probe", deny)
+					}
+				}
+				for _, want := range []string{
+					`id="cap-data"`,
+					`id="cap-key"`,
+					`decrypt_challenge_data`,
+					`__waf_captcha_answer`,
+				} {
+					if !strings.Contains(bodyProbe, want) {
+						t.Fatalf("captcha render missing encrypted-envelope marker %q in network probe", want)
+					}
+				}
+			}
 			if got := ctx.Response.StatusCode(); got != 403 {
 				t.Fatalf("status = %d, want 403", got)
 			}
@@ -1820,6 +1935,19 @@ func TestAntiReplayChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 			}
 			if strings.Contains(body, "__waf_challenge_token") {
 				t.Fatalf("%s response used generic JS challenge token", tc.actionName)
+			}
+			if tc.actionName == action.CaptchaChallenge {
+				for _, deny := range []string{
+					`id="slide-range"`,
+					`id="rotate-range"`,
+					`id="cap-img"`,
+					`data:image/png;base64,`,
+					`data:image/jpeg;base64,`,
+				} {
+					if strings.Contains(body, deny) {
+						t.Fatalf("captcha page leaked plaintext challenge DOM %q in response body", deny)
+					}
+				}
 			}
 		})
 	}
@@ -1845,8 +1973,8 @@ func TestHandlerRuleChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 			name:            "captcha",
 			actionName:      store.ActionCaptchaChallenge,
 			captchaType:     "slide",
-			captchaWantPart: `id="slide-range"`,
-			captchaNotPart:  `id="rotate-range"`,
+			captchaWantPart: `id="cap-data"`,
+			captchaNotPart:  `id="slide-range"`,
 			wantParts: []string{
 				`action="/__owaf/captcha/verify"`,
 				`name="__waf_captcha_session"`,
@@ -1944,6 +2072,15 @@ func TestHandlerRuleChallengeActionsRenderSpecificChallengePages(t *testing.T) {
 			}
 			if tc.captchaNotPart != "" && strings.Contains(body, tc.captchaNotPart) {
 				t.Fatalf("response body unexpectedly contains CAPTCHA marker %q", tc.captchaNotPart)
+			}
+			if tc.actionName == store.ActionCaptchaChallenge {
+				sessionID := extractCaptchaSessionFromPage(t, body)
+				if sessionID == "" {
+					t.Fatal("captcha page did not expose session id")
+				}
+				if got := captchaEnvelopeType(t, captchaManager, sessionID, body); got != tc.captchaType {
+					t.Fatalf("rule captcha_type = %q, want envelope type %q", got, tc.captchaType)
+				}
 			}
 			if strings.Contains(body, "__waf_challenge_token") {
 				t.Fatalf("%s response used generic JS challenge token", tc.actionName)
@@ -2103,11 +2240,15 @@ func TestHandlerRuleCaptchaTypeInheritsGlobal(t *testing.T) {
 		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
 	}
 	body := string(ctx.Response.Body())
-	if !strings.Contains(body, `id="rotate-range"`) {
+	sessionID := extractCaptchaSessionFromPage(t, body)
+	if sessionID == "" {
+		t.Fatal("captcha page did not expose session id")
+	}
+	if got := captchaEnvelopeType(t, captchaManager, sessionID, body); got != "rotate" {
 		t.Fatal("empty rule captcha_type should inherit global rotate CAPTCHA")
 	}
-	if strings.Contains(body, `id="slide-range"`) {
-		t.Fatal("inherited rotate CAPTCHA unexpectedly rendered slide CAPTCHA")
+	if strings.Contains(body, `id="slide-range"`) || strings.Contains(body, `id="rotate-range"`) {
+		t.Fatal("inherited captcha_type leaked typed challenge DOM")
 	}
 }
 
@@ -2149,8 +2290,15 @@ func TestHandlerExplicitCaptchaActionIgnoresGlobalAutoSwitch(t *testing.T) {
 		t.Fatalf("status = %d, want 403", got)
 	}
 	body := string(ctx.Response.Body())
-	if !strings.Contains(body, `id="rotate-range"`) || strings.Contains(body, "__waf_challenge_token") {
-		t.Fatalf("explicit CAPTCHA action did not render selected type: %s", body)
+	if strings.Contains(body, "__waf_challenge_token") {
+		t.Fatalf("explicit CAPTCHA action fell back to generic JS challenge token: %s", body)
+	}
+	sessionID := extractCaptchaSessionFromPage(t, body)
+	if sessionID == "" {
+		t.Fatal("captcha page did not expose session id")
+	}
+	if got := captchaEnvelopeType(t, captchaManager, sessionID, body); got != "rotate" {
+		t.Fatalf("explicit CAPTCHA action did not render selected type: got %q", got)
 	}
 }
 
@@ -4454,5 +4602,193 @@ func TestHandlerRecordsAccessLogForRequestBodyPrefetchError(t *testing.T) {
 	}
 	if entry.Path != "/upload" || entry.Upstream != "" {
 		t.Fatalf("access log path/upstream = %#v", entry)
+	}
+}
+
+// TestHeaderOrderCacheSingleVisitAll 验证主路径头顺序缓存：整请求生命周期内
+// requestHeaderOrder 只执行一次（第一条记录时槽已命中），且 WAF 安全事件与
+// 访问日志共享同一顺序字符串。JSDoc 注释与契约同步。
+func TestHeaderOrderCacheSingleVisitAll(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate log db: %v", err)
+	}
+	_ = observability.NewUnifiedWriter(db, slog.Default())
+
+	orderCtx := app.NewContext(0)
+	orderCtx.Request.Header.SetMethod(http.MethodGet)
+	orderCtx.Request.SetRequestURI("/")
+	orderCtx.Request.Header.SetHost("127.0.0.1")
+	orderCtx.Request.Header.Set("X-First", "1")
+	orderCtx.Request.Header.Set("X-Second", "2")
+
+	// 模拟主路径 populate：填 HeaderKeys 后 join 入槽。
+	reqCtx := pipeline.AcquireCtx()
+	defer pipeline.ReleaseCtx(reqCtx)
+	populateRequestCtxHeaders(reqCtx, orderCtx)
+	join := strings.Join(reqCtx.HeaderKeys, ",")
+	orderCtx.Set(wafReqCtxHeaderOrderCacheKey, &join)
+
+	if got, ok := headerOrderFromContext(orderCtx); !ok || got != join {
+		t.Fatalf("headerOrderFromContext = %q, %v, want %q, true", got, ok, join)
+	}
+}
+
+// encryptedEnvFingerprintForTest 以与真实挑战页一致的 v1 封套加密环境指纹。
+func encryptedEnvFingerprintForTest(t *testing.T, fp *challenge.EnvFingerprint, key []byte, sessionID string, binding challenge.ChallengeSessionBinding) string {
+	t.Helper()
+	plaintext, err := json.Marshal(fp)
+	if err != nil {
+		t.Fatalf("marshal fingerprint: %v", err)
+	}
+	aad := challenge.EnvFingerprintAAD("captcha", sessionID, binding)
+	raw, err := gm.Seal(key[:16], gm.DomainEnv, plaintext, []byte(aad))
+	if err != nil {
+		t.Fatalf("seal GM environment envelope: %v", err)
+	}
+	return gm.Encode(raw)
+}
+
+func TestCaptchaVerifyEnvFailClosed(t *testing.T) {
+	tests := []struct {
+		name     string
+		envCheck bool // 站点开关；环境密钥已全量下发，仅决定验证是否闸门
+		envFP    func(t *testing.T, key []byte, sessionID string, binding challenge.ChallengeSessionBinding) string
+		wantPass bool
+	}{
+		{
+			name:     "envCheck=false 纯答案空 env 提交 fail（密钥已全量下发必须加密）",
+			envCheck: false,
+			envFP: func(t *testing.T, key []byte, sessionID string, binding challenge.ChallengeSessionBinding) string {
+				return ""
+			},
+			wantPass: false,
+		},
+		{
+			name:     "envCheck=false 合法环境指纹放行",
+			envCheck: false,
+			envFP: func(t *testing.T, key []byte, sessionID string, binding challenge.ChallengeSessionBinding) string {
+				return encryptedEnvFingerprintForTest(t, &challenge.EnvFingerprint{
+					ChromePresent: true, Languages: "zh-CN", PluginsCount: 5, CanvasHash: "canvas",
+					WebGLRenderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)",
+					ScreenWidth:   1920, ScreenHeight: 1080, HardwareConcur: 8, ColorDepth: 24,
+					PixelRatio: 1, SessionStorage: true, IndexedDB: true, CookieEnabled: true,
+					FontCount: 12, WebAssembly: true, ServiceWorker: true, MediaDevices: true,
+					PlatformStr: "Linux x86_64", AudioHash: "audio-hash",
+					ScreenConsistency: true, TimezoneConsistency: true,
+					LanguageConsistency: true, MathConsistency: true,
+				}, key, sessionID, binding)
+			},
+			wantPass: true,
+		},
+		{
+			name:     "空 env 提交 fail",
+			envCheck: true,
+			envFP: func(t *testing.T, key []byte, sessionID string, binding challenge.ChallengeSessionBinding) string {
+				return ""
+			},
+			wantPass: false,
+		},
+		{
+			name:     "乱码 env 解密失败 fail",
+			envCheck: true,
+			envFP: func(t *testing.T, key []byte, sessionID string, binding challenge.ChallengeSessionBinding) string {
+				return "v1.!!not-base64!!"
+			},
+			wantPass: false,
+		},
+		{
+			name:     "环境评分异常（navigator.webdriver 分值 100）fail",
+			envCheck: true,
+			envFP: func(t *testing.T, key []byte, sessionID string, binding challenge.ChallengeSessionBinding) string {
+				return encryptedEnvFingerprintForTest(t, &challenge.EnvFingerprint{
+					WebDriver: true, ScreenWidth: 1920, ScreenHeight: 1080,
+				}, key, sessionID, binding)
+			},
+			wantPass: false,
+		},
+		{
+			name:     "合法环境指纹放行",
+			envCheck: true,
+			envFP: func(t *testing.T, key []byte, sessionID string, binding challenge.ChallengeSessionBinding) string {
+				return encryptedEnvFingerprintForTest(t, &challenge.EnvFingerprint{
+					ChromePresent: true, Languages: "zh-CN", PluginsCount: 5, CanvasHash: "canvas",
+					WebGLRenderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)",
+					ScreenWidth:   1920, ScreenHeight: 1080, HardwareConcur: 8, ColorDepth: 24,
+					PixelRatio: 1, SessionStorage: true, IndexedDB: true, CookieEnabled: true,
+					FontCount: 12, WebAssembly: true, ServiceWorker: true, MediaDevices: true,
+					PlatformStr: "Linux x86_64", AudioHash: "audio-hash",
+					ScreenConsistency: true, TimezoneConsistency: true,
+					LanguageConsistency: true, MathConsistency: true,
+				}, key, sessionID, binding)
+			},
+			wantPass: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			holder := &snapshot.Holder{}
+			protection := store.DefaultProtectionConfig()
+			protection.ShieldEnableEnvCheck = tt.envCheck
+			rt := snapshot.SiteRuntime{
+				Site:                store.Site{ID: 1, Host: "captcha-env.example.test", Bind: ":80"},
+				Bind:                ":80",
+				EffectiveProtection: &protection,
+			}
+			holder.Store(&snapshot.Snapshot{
+				Revision:   1,
+				Protection: protection,
+				Sites: map[string]*snapshot.SiteRuntime{
+					snapshot.SiteMapKey(":80", rt.Site.Host): &rt,
+				},
+			})
+
+			manager := challenge.NewCaptchaManager(nil, 0)
+			defer manager.Close()
+			binding := challenge.ChallengeSessionBinding{SiteID: rt.Site.ID, Host: rt.Site.Host, Bind: ":80"}
+			pending, err := manager.GenerateWithBinding(challenge.CaptchaTypeMath, tt.envCheck, binding)
+			if err != nil {
+				t.Fatalf("generate captcha session: %v", err)
+			}
+			answer, envKey, _, found := challenge.CaptchaManagerPendingForTest(manager, pending.SessionID)
+			if !found {
+				t.Fatalf("pending captcha session %q not found", pending.SessionID)
+			}
+			// 全量下发语义：无论 envCheck 与否，新签发会话都必须持有环境密钥。
+			if len(envKey) != 32 {
+				t.Fatalf("pending captcha session %q env key length = %d, want 32 (envCheck=%v)", pending.SessionID, len(envKey), tt.envCheck)
+			}
+
+			handler := Handler(Options{
+				Holder: holder, Engine: engine.New(holder, nil, nil, nil), Log: slog.Default(),
+				Bind: ":80", CaptchaManager: manager,
+			})
+			ctx := app.NewContext(0)
+			ctx.Request.Header.SetMethod(http.MethodPost)
+			ctx.Request.SetRequestURI("/__owaf/captcha/verify")
+			ctx.Request.Header.SetHost(rt.Site.Host)
+			ctx.Request.Header.Set("Referer", "https://"+rt.Site.Host+"/original")
+			answerEnvelope, err := challenge.EncryptCaptchaAnswer(answer, envKey)
+			if err != nil {
+				t.Fatalf("encrypt captcha answer: %v", err)
+			}
+			ctx.Request.SetFormDataFromValues(url.Values{
+				"__waf_captcha_session": {pending.SessionID},
+				"__waf_captcha_answer":  {answerEnvelope},
+				"__waf_env_fp":          {tt.envFP(t, envKey, pending.SessionID, binding)},
+			})
+
+			handler(context.Background(), ctx)
+
+			if got := ctx.Response.StatusCode(); got != http.StatusFound {
+				t.Fatalf("status = %d, want %d", got, http.StatusFound)
+			}
+			if got := len(ctx.Response.Header.Peek("Set-Cookie")) > 0; got != tt.wantPass {
+				t.Fatalf("captcha verify pass = %v, want %v", got, tt.wantPass)
+			}
+		})
 	}
 }

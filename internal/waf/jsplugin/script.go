@@ -2,10 +2,9 @@ package jsplugin
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
-
-	"My-OpenWaf/internal/store"
 )
 
 // Script 是已校验的 JavaScript 策略脚本。
@@ -144,19 +143,24 @@ func (s *Script) Stats() (runs, failures, timeouts int64, average time.Duration)
 	return
 }
 
-// validateExecutionStage 在脚本进入执行器前拒绝持久化的 response 阶段脚本。
-// 当前唯一可执行的 JavaScript 阶段是 request；没有元数据的脚本仍可用于
-// dry-run 和接口级测试。
-func validateExecutionStage(script *Script) error {
-	if script != nil && script.Stage() == store.JSStageResponse {
-		return ErrResponseStageUnavailable
+// validateExecutionStage 在脚本进入执行器前校验阶段与执行入口的一致性。
+// 没有元数据的脚本仍可用于 dry-run 和接口级测试。
+func validateExecutionStage(script *Script, wantStage string) error {
+	if script != nil && script.Stage() != "" && script.Stage() != wantStage {
+		return fmt.Errorf("jsplugin: stage %s script cannot use the %s executor", script.Stage(), wantStage)
 	}
 	return nil
 }
 
-// Executor 描述脚本执行器的最小接口，便于未来接入其他后端。
+// Executor 描述请求阶段脚本执行器的最小接口，便于未来接入其他后端。
 type Executor interface {
 	Execute(context.Context, *Script, RequestSnapshot) (MutationPlan, error)
 }
 
+// ResponseExecutor 描述响应阶段脚本执行器的最小接口，便于未来接入其他后端。
+type ResponseExecutor interface {
+	ExecuteResponse(context.Context, *Script, ResponseSnapshot) (ResponseMutationPlan, error)
+}
+
 var _ Executor = (*Engine)(nil)
+var _ ResponseExecutor = (*Engine)(nil)

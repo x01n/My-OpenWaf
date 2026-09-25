@@ -17,6 +17,8 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"My-OpenWaf/internal/waf/challenge/gm"
 )
 
 // CaptchaType defines the type of CAPTCHA to generate.
@@ -55,32 +57,122 @@ type CaptchaSession struct {
 	Answer    string      `json:"answer"` // JSON-encoded expected answer
 	CreatedAt time.Time   `json:"created_at"`
 	ExpiresAt time.Time   `json:"expires_at"`
-	// EnvKey 是会话绑定的环境指纹加密密钥（32 字节）。
+	// EnvKey 是会话绑定的环境指纹加密会话主密钥（32 字节，页面下发 hex 前 64 字符）。
 	// 与 shield_challenge 一致，用于解密客户端提交的 __waf_env_fp。
-	// 为空表示该会话未启用浏览器/环境检查。
+	// 强制化语义：EnvKey 必须恒非空（否则验证直接失败），签发侧全量下发。
 	EnvKey []byte `json:"env_key,omitempty"`
+}
+
+type CaptchaItemPayload struct {
+	Type      string `json:"type"`
+	Prompt    string `json:"prompt"`
+	MasterImg string `json:"master_img,omitempty"`
+	ThumbImg  string `json:"thumb_img,omitempty"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	InputMode string `json:"input_mode,omitempty"`
 }
 
 // CaptchaChallenge is the data sent to the client.
 type CaptchaChallenge struct {
-	SessionID string `json:"session_id"`
-	Type      string `json:"type"`
-	MasterImg string `json:"master_img"` // base64 data URI
-	ThumbImg  string `json:"thumb_img"`  // base64 data URI (for click/slide)
-	Prompt    string `json:"prompt"`     // e.g. "Click the characters in order" or "Solve: 3+7=?"
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
-	Fallback  bool   `json:"fallback"`
-	// EnvKeyHex 是会话绑定环境指纹密钥的十六进制编码，供页面注入环境采集 JS。
-	// 为空表示该验证码未启用浏览器/环境检查。
-	EnvKeyHex string `json:"-"`
+	SessionID   string `json:"session_id"`
+	Type        string `json:"type"`
+	MasterImg   string `json:"master_img"`
+	ThumbImg    string `json:"thumb_img"`
+	Prompt      string `json:"prompt"` // e.g. "Click the characters in order" or "Solve: 3+7=?"
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	CaptchaData string `json:"captcha_data"`
+	EnvKeyHex   string `json:"-"`
 }
 
-func (ch *CaptchaChallenge) MarkFallback(requested CaptchaType) *CaptchaChallenge {
-	if ch != nil && requested != "" && ch.Type != string(requested) {
-		ch.Fallback = true
+// captchaItemDataAAD 是题目/答案信封的 AAD（标签生成器产物，禁止散落字面量）。
+var captchaItemDataAAD = gm.EnvelopeAAD(gm.EnvelopeLabel("captcha", gm.GMEnvelopeVersion), gm.PurposeChallengeData)
+
+const captchaItemDataMaxPlaintext = 512 * 1024
+
+func EncryptChallengeData(payload string, sessionKey []byte) (string, error) {
+	if len(sessionKey) != envSessionKeySize {
+		return "", fmt.Errorf("invalid challenge data session key length")
 	}
-	return ch
+	raw, err := envEncrypt([]byte(payload), sessionKey, []byte(captchaItemDataAAD), gm.DomainCaptchaItem)
+	if err != nil {
+		return "", err
+	}
+	return gm.Encode(raw), nil
+}
+
+func DecryptChallengeData(envelope string, sessionKey []byte) *CaptchaItemPayload {
+	if len(sessionKey) != envSessionKeySize {
+		return nil
+	}
+	raw, err := gm.Decode(envelope)
+	if err != nil {
+		return nil
+	}
+	plaintext, err := envDecrypt(raw, sessionKey, []byte(captchaItemDataAAD), gm.DomainCaptchaItem)
+	if err != nil || len(plaintext) == 0 || len(plaintext) > captchaItemDataMaxPlaintext {
+		return nil
+	}
+	var payload CaptchaItemPayload
+	if json.Unmarshal(plaintext, &payload) != nil {
+		return nil
+	}
+	return &payload
+}
+
+// EncryptCaptchaAnswer 用会话主密钥封装客户端答案提交（域 DomainCaptchaAnswer），
+// 与 WASM 侧 gm_encrypt_challenge_answer 的字面语义一致，供测试与工具路径构造提交。
+func EncryptCaptchaAnswer(payload string, sessionKey []byte) (string, error) {
+	if len(sessionKey) != envSessionKeySize {
+		return "", fmt.Errorf("invalid answer session key length")
+	}
+	raw, err := envEncrypt([]byte(payload), sessionKey, []byte(captchaItemDataAAD), gm.DomainCaptchaAnswer)
+	if err != nil {
+		return "", err
+	}
+	return gm.Encode(raw), nil
+}
+
+func newCaptchaChallenge(sessionID string, key []byte, items *CaptchaItems) (*CaptchaChallenge, error) {
+	if items == nil {
+		return nil, fmt.Errorf("captcha items not provided")
+	}
+	payload, err := json.Marshal(CaptchaItemPayload{
+		Type:      string(items.Type),
+		Prompt:    items.Prompt,
+		MasterImg: items.MasterImg,
+		ThumbImg:  items.ThumbImg,
+		Width:     items.Width,
+		Height:    items.Height,
+		InputMode: inputModeForCaptcha(string(items.Type)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	envelope, err := EncryptChallengeData(string(payload), key)
+	if err != nil {
+		return nil, err
+	}
+	return &CaptchaChallenge{
+		SessionID:   sessionID,
+		Type:        string(items.Type),
+		Prompt:      items.Prompt,
+		Width:       items.Width,
+		Height:      items.Height,
+		CaptchaData: envelope,
+		EnvKeyHex:   EnvSessionKeyHex(key),
+	}, nil
+}
+
+// CaptchaItems 是单个验证码题目的原始素材。
+type CaptchaItems struct {
+	Type      CaptchaType
+	Prompt    string
+	MasterImg string
+	ThumbImg  string
+	Width     int
+	Height    int
 }
 
 // CaptchaManager handles CAPTCHA generation and verification with Redis session storage.
@@ -94,7 +186,7 @@ type CaptchaManager struct {
 	// go-captcha 高级验证码提供器
 	goCaptcha *GoCaptchaProvider
 
-	// Fallback in-memory store when Redis is unavailable
+	// sessions 是 Redis 不可用时的内存会话库（部署形态，非兼容回退）。
 	mu       sync.RWMutex
 	sessions map[string]*CaptchaSession
 }
@@ -175,36 +267,26 @@ func (cm *CaptchaManager) Generate(captchaType CaptchaType, envCheck bool) (*Cap
 	return cm.GenerateWithBinding(captchaType, envCheck, ChallengeSessionBinding{})
 }
 
-// GenerateWithBinding creates a CAPTCHA session bound to the matched site.
 func (cm *CaptchaManager) GenerateWithBinding(captchaType CaptchaType, envCheck bool, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	binding = binding.normalized()
-	var envKey []byte
-	if envCheck {
-		envKey = GenerateEnvSessionKey()
-		if len(envKey) != envSessionKeySize {
-			return nil, fmt.Errorf("environment session key generation failed")
-		}
+	_ = envCheck
+	envKey := GenerateEnvSessionKey()
+	if len(envKey) != envSessionKeySize {
+		// 密钥生成失败（crypto/rand 异常）直接拒绝签发，不产生半配态会话。
+		return nil, fmt.Errorf("environment session key generation failed")
 	}
-	var (
-		challenge *CaptchaChallenge
-		err       error
-	)
 	switch captchaType {
 	case CaptchaTypeMath:
 		return cm.generateMath(envKey, binding)
 	case CaptchaTypeClick:
-		challenge, err = cm.generateClick(envKey, binding)
+		return cm.generateClick(envKey, binding)
 	case CaptchaTypeSlide:
-		challenge, err = cm.generateSlide(envKey, binding)
+		return cm.generateSlide(envKey, binding)
 	case CaptchaTypeRotate:
-		challenge, err = cm.generateRotate(envKey, binding)
+		return cm.generateRotate(envKey, binding)
 	default:
-		return cm.generateMath(envKey, binding)
+		return nil, fmt.Errorf("unsupported captcha type %q", captchaType)
 	}
-	if err != nil {
-		return nil, err
-	}
-	return challenge.MarkFallback(captchaType), nil
 }
 
 // Verify checks a client's CAPTCHA answer against the stored session.
@@ -225,7 +307,25 @@ func (cm *CaptchaManager) VerifyWithBinding(sessionID, answer string, binding Ch
 		return false
 	}
 
-	return constantTimeEqualString(session.Answer, answer)
+	plain := decryptAnswerEnvelope(answer, session)
+	return constantTimeEqualString(session.Answer, plain)
+}
+
+// decryptAnswerEnvelope 只接受 GM v2 答案信封（域 DomainCaptchaAnswer）。
+// 强制化语义：明文答案或旧格式密文一律拒绝（返回空字符串），不保留兼容回退。
+func decryptAnswerEnvelope(answer string, session *CaptchaSession) string {
+	if session == nil || len(session.EnvKey) != envSessionKeySize {
+		return ""
+	}
+	raw, err := gm.Decode(answer)
+	if err != nil {
+		return ""
+	}
+	plaintext, err := envDecrypt(raw, session.EnvKey, []byte(captchaItemDataAAD), gm.DomainCaptchaAnswer)
+	if err != nil || len(plaintext) == 0 || len(plaintext) > 64*1024 {
+		return ""
+	}
+	return string(plaintext)
 }
 
 // constantTimeEqualString 以常量时间比较两个字符串，避免逐字节比较泄漏答案前缀。
@@ -318,16 +418,30 @@ const (
 )
 
 // randomMathProblem 生成一道算式验证码题目，返回题面与答案。
-// 答案在 [mathAnswerMin, mathAnswerMax] 上均匀分布。
+// 答案在 [mathAnswerMin, mathAnswerMax] 上均匀分布：
+// 三种运算都按「先抽答案与第二个操作数、再反推第一个操作数」的方式出题，
+// 除法额外抽取商值反推被除数，保证整除且被除数不超过四位数、
+// 可在验证码画布内完整渲染。
+// 乘法题不进入题库：积型题面无法反推出三位数答案（11..99 之积最小 121，
+// 与答案均匀区间冲突），故题库为加减除三种；乘号字模保留在
+// getCharPattern 中以备渲染其他题面字符集时使用。
 func randomMathProblem() (expr string, answer int) {
 	answer = mathAnswerMin + randIntN(mathAnswerMax-mathAnswerMin+1)
 	operand := mathOperandMin + randIntN(mathOperandMax-mathOperandMin+1)
-	if randIntN(2) == 0 {
+	switch op := randIntN(3); op {
+	case 0:
 		// answer = a + operand
 		return fmt.Sprintf("%d + %d = ?", answer-operand, operand), answer
+	case 1:
+		// answer = a - operand
+		return fmt.Sprintf("%d - %d = ?", answer+operand, operand), answer
+	default:
+		// answer = dividend / divisor；先抽商（2..10），保证整除且除数不为零。
+		// 商上限取 10：answer≤999 时被除数≤9990，稳定在四位数以内，
+		// 「9990 ÷ 10 = ?」仍可放进 200px 画布。
+		quotient := 2 + randIntN(9)
+		return fmt.Sprintf("%d ÷ %d = ?", answer*quotient, quotient), answer
 	}
-	// answer = a - operand
-	return fmt.Sprintf("%d - %d = ?", answer+operand, operand), answer
 }
 
 // generateMath creates a simple math CAPTCHA (addition/subtraction).
@@ -352,15 +466,13 @@ func (cm *CaptchaManager) generateMath(envKey []byte, binding ChallengeSessionBi
 	// Generate a simple image with the math expression
 	imgData := cm.renderMathImage(expr)
 
-	return &CaptchaChallenge{
-		SessionID: sessionID,
-		Type:      string(CaptchaTypeMath),
-		MasterImg: "data:image/png;base64," + imgData,
+	return newCaptchaChallenge(sessionID, envKey, &CaptchaItems{
+		Type:      CaptchaTypeMath,
 		Prompt:    "请计算图中的算式",
+		MasterImg: "data:image/png;base64," + imgData,
 		Width:     200,
 		Height:    80,
-		EnvKeyHex: EnvSessionKeyHex(envKey),
-	}, nil
+	})
 }
 
 // renderMathImage creates a simple PNG image containing the math expression.
@@ -388,9 +500,59 @@ func (cm *CaptchaManager) renderMathImage(expr string) string {
 	// Draw simple text using pixel font (no external font dependency)
 	cm.drawText(img, expr, 20, 35)
 
+	// 干扰线：在文本之后绘制，采用半透明暗色，避免吞掉题面笔画。
+	// 随机端点与步长来自 crypto/rand，线条不参与答案判定。
+	const noiseLines = 2
+	lines := make([]byte, noiseLines*4)
+	_, _ = rand.Read(lines)
+	for i := 0; i < noiseLines; i++ {
+		x1 := int(lines[i*4]) * width / 256
+		y1 := int(lines[i*4+1]) * height / 256
+		x2 := int(lines[i*4+2]) * width / 256
+		y2 := int(lines[i*4+3]) * height / 256
+		drawLine(img, x1, y1, x2, y2, color.RGBA{148, 163, 184, 120})
+	}
+
 	var buf bytes.Buffer
 	_ = png.Encode(&buf, img)
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+// drawLine draws a one-pixel line between two points using Bresenham's algorithm.
+func drawLine(img *image.RGBA, x1, y1, x2, y2 int, c color.RGBA) {
+	dx := x2 - x1
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := y2 - y1
+	if dy < 0 {
+		dy = -dy
+	}
+	sx, sy := 1, 1
+	if x1 > x2 {
+		sx = -1
+	}
+	if y1 > y2 {
+		sy = -1
+	}
+	err := dx - dy
+	for {
+		if x1 >= 0 && x1 < img.Bounds().Dx() && y1 >= 0 && y1 < img.Bounds().Dy() {
+			img.Set(x1, y1, c)
+		}
+		if x1 == x2 && y1 == y2 {
+			break
+		}
+		e2 := 2 * err
+		if e2 > -dy {
+			err -= dy
+			x1 += sx
+		}
+		if e2 < dx {
+			err += dx
+			y1 += sy
+		}
+	}
 }
 
 // drawText draws text on an image using a basic pixel font.
@@ -442,44 +604,6 @@ func (cm *CaptchaManager) storeSession(session *CaptchaSession) error {
 	return nil
 }
 
-// loadSession retrieves a session from Redis or in-memory fallback.
-func (cm *CaptchaManager) loadSession(sessionID string) (*CaptchaSession, error) {
-	if redis := cm.redisClient(); redis != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		defer cancel()
-		key := cm.prefix + sessionID
-		data, err := redis.Get(ctx, key).Bytes()
-		if err == nil {
-			var session CaptchaSession
-			if json.Unmarshal(data, &session) == nil {
-				return &session, nil
-			}
-		}
-		// Fall through to in-memory on Redis error
-	}
-
-	cm.mu.RLock()
-	session, ok := cm.sessions[sessionID]
-	cm.mu.RUnlock()
-	if !ok {
-		return nil, nil
-	}
-	return session, nil
-}
-
-// deleteSession removes a session from storage.
-func (cm *CaptchaManager) deleteSession(sessionID string) {
-	if redis := cm.redisClient(); redis != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		defer cancel()
-		redis.Del(ctx, cm.prefix+sessionID)
-	}
-
-	cm.mu.Lock()
-	delete(cm.sessions, sessionID)
-	cm.mu.Unlock()
-}
-
 // cleanupLoop periodically removes expired in-memory sessions.
 func (cm *CaptchaManager) cleanupLoop() {
 	ticker := time.NewTicker(60 * time.Second)
@@ -525,6 +649,8 @@ func getCharPattern(ch rune) [][]int {
 		'9': {{1, 1, 1}, {1, 0, 1}, {1, 1, 1}, {0, 0, 1}, {1, 1, 1}},
 		'+': {{0, 0, 0}, {0, 1, 0}, {1, 1, 1}, {0, 1, 0}, {0, 0, 0}},
 		'-': {{0, 0, 0}, {0, 0, 0}, {1, 1, 1}, {0, 0, 0}, {0, 0, 0}},
+		'×': {{1, 0, 1}, {0, 1, 0}, {0, 1, 0}, {0, 1, 0}, {1, 0, 1}},
+		'÷': {{0, 0, 0}, {0, 1, 0}, {0, 0, 0}, {0, 1, 0}, {0, 0, 0}},
 		'=': {{0, 0, 0}, {1, 1, 1}, {0, 0, 0}, {1, 1, 1}, {0, 0, 0}},
 		'?': {{1, 1, 1}, {0, 0, 1}, {0, 1, 1}, {0, 0, 0}, {0, 1, 0}},
 		' ': {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
@@ -534,4 +660,26 @@ func getCharPattern(ch rune) [][]int {
 		return nil
 	}
 	return p
+}
+
+func VerifyCaptchaEnvEnvelope(envFPJSON string, session *CaptchaSession) bool {
+	if session == nil {
+		return false
+	}
+	if len(session.EnvKey) != envSessionKeySize {
+		return false
+	}
+	fp := DecryptEnvFingerprintWithAAD(
+		envFPJSON,
+		session.EnvKey,
+		EnvFingerprintAAD("captcha", session.ID, session.ChallengeSessionBinding),
+	)
+	if fp == nil {
+		return false
+	}
+	result := ValidateEnvFingerprint(fp)
+	if result.Score >= 100 || !result.Pass {
+		return false
+	}
+	return true
 }

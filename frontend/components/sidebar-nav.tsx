@@ -34,6 +34,7 @@ import {
   IconTemplate,
   IconCode,
   IconBraces,
+  IconFingerprint,
 } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 import {
@@ -241,6 +242,11 @@ function useNavGroups(): NavGroup[] {
               label: t("nav.upstreamStatus"),
               href: "/upstream-status",
               icon: IconServer,
+            },
+            {
+              label: t("nav.tlsFingerprints"),
+              href: "/tls-fingerprints",
+              icon: IconFingerprint,
             },
           ],
         },

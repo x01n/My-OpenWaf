@@ -172,6 +172,25 @@ type BanEntry struct {
 	BannedTil int64  `json:"banned_til"`
 }
 
+/**
+ * IPHistoryString 返回指定 IP 已有的违规计数与当前是否处于自动封禁期。
+ * 纯只读查询，不改变任何封禁语义或计数状态（shield 维度的 IP 史评分只依赖它）。
+ * 入参为空字符串或从未出现在 violations 中时返回 (0, false)。
+ */
+func (r *IPReputation) IPHistoryString(ip string) (violations int64, banned bool) {
+	if r == nil || ip == "" {
+		return 0, false
+	}
+	v, ok := r.violations.Load(ip)
+	if !ok {
+		return 0, false
+	}
+	vc := v.(*violationCounter)
+	vc.mu.Lock()
+	defer vc.mu.Unlock()
+	return vc.count, vc.bannedTil > time.Now().Unix()
+}
+
 func (r *IPReputation) ActiveBans() []BanEntry {
 	now := time.Now().Unix()
 	var out []BanEntry

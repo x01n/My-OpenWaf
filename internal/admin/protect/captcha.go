@@ -250,7 +250,7 @@ func TestCaptcha(repo *repository.SystemSettingsRepo, mgr *challenge.CaptchaMana
 			"height":       captchaChallenge.Height,
 			"timeout":      cfg.CaptchaTimeout,
 			"pass_ttl":     cfg.CaptchaPassTTL,
-			"fallback":     captchaChallenge.Fallback,
+			"fallback":     false,
 		})
 	}
 }

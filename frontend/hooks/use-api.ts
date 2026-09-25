@@ -1540,7 +1540,16 @@ export function useOwaspStats(params?: any | null) {
 }
 
 export function useChainSessions() {
-  return useApiQuery(["chain-sessions"], () => chainApi.getSessions())
+  return useApiQuery(["chain-sessions"], () => chainApi.getSessions(), {
+    refreshInterval: 20000,
+  })
+}
+
+export function useChainSessionDelete() {
+  return useMutation(
+    async (id: string | number) => chainApi.deleteSession(id),
+    { invalidateKeys: ["chain-sessions"] }
+  )
 }
 
 export function useHTTP2Config() {

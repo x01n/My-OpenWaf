@@ -454,6 +454,13 @@ func (a *Archiver) optimizeSQLiteContext(ctx context.Context) error {
 		a.logger().Warn("archiver: wal_checkpoint(PASSIVE) failed", slog.Any("err", err))
 		errs = append(errs, fmt.Errorf("wal_checkpoint(PASSIVE): %w", err))
 	}
+	// TRUNCATE 在常规 checkpoint 后将 WAL 文件截断归零：本归档器仅作用于 LogDB，
+	// 该库只新增（insert）不更新，长尾 WAL 页已 checkpoint 后可安全回收，
+	// 防止 WAL 体积随写入持续增长而放大后续 flush 的页活动。
+	if err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
+		a.logger().Warn("archiver: wal_checkpoint(TRUNCATE) failed", slog.Any("err", err))
+		errs = append(errs, fmt.Errorf("wal_checkpoint(TRUNCATE): %w", err))
+	}
 	return errors.Join(errs...)
 }
 

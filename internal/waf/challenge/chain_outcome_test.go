@@ -152,11 +152,11 @@ func TestProcessStepKeepsLegacyBehaviour(t *testing.T) {
 	st := chainStateOf(t, mgr, sessionID)
 	counter, hash := solveChainPoW(t, st.Nonce, st.powDifficulty(mgr.difficultyValue()))
 
-	passed, redirect, html := mgr.ProcessStep(sessionID, map[string]string{
+	outcome := mgr.ProcessStepDetailedWithBinding(sessionID, map[string]string{
 		"pow_counter": counter,
 		"pow_hash":    hash,
-	})
-	if !passed || redirect != "/x" || html != "" {
-		t.Fatalf("ProcessStep = (%v, %q, len=%d)", passed, redirect, len(html))
+	}, ChallengeSessionBinding{})
+	if !outcome.Passed || outcome.RedirectURL != "/x" || outcome.NextHTML != "" {
+		t.Fatalf("ProcessStepDetailedWithBinding = %+v", outcome)
 	}
 }

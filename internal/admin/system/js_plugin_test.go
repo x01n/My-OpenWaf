@@ -290,7 +290,7 @@ func TestUpdateJSPluginPreservesFieldsAndParsesSiteScope(t *testing.T) {
 	}
 }
 
-func TestJSPluginResponseStageCannotBeConfigured(t *testing.T) {
+func TestJSPluginResponseStageCanBeConfigured(t *testing.T) {
 	repo := newJSPluginRepoForTest(t)
 	reloaded := 0
 	reload := func() error {
@@ -298,51 +298,61 @@ func TestJSPluginResponseStageCannotBeConfigured(t *testing.T) {
 		return nil
 	}
 
+	// 引擎未装配时启用 response 阶段会在持久化前可执行契约处拒绝，不落库。
 	ctx := invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, reload, nil), "POST", "/x", nil, []byte(`{"name":"response","source":"x","stage":"response","failure_mode":"fail_open"}`))
-	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
-		t.Fatalf("create response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	if ctx.Response.StatusCode() != 503 || !bytes.Contains(ctx.Response.Body(), []byte(jsRuntimeUnavailableMessage)) {
+		t.Fatalf("create enabled response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 	items, err := repo.List()
 	if err != nil || len(items) != 0 {
 		t.Fatalf("response stage create persisted items=%d err=%v", len(items), err)
 	}
 
-	requestPlugin := store.JSPlugin{Name: "request", Source: "x", Stage: store.JSStageRequest, Enabled: true, Priority: 10, FailureMode: store.JSFailureModeOpen}
+	// 未启用（enabled=false）时无需引擎即可落库。
+	ctx = invokeThreatIntelHandler(t, CreateJSPlugin(repo, nil, reload, nil), "POST", "/x", nil, []byte(`{"name":"response","source":"x","stage":"response","failure_mode":"fail_open","enabled":false}`))
+	if ctx.Response.StatusCode() != 201 {
+		t.Fatalf("create disabled response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	items, err = repo.List()
+	if err != nil || len(items) != 1 || items[0].Stage != store.JSStageResponse {
+		t.Fatalf("disabled response stage create items=%+v err=%v", items, err)
+	}
+
+	requestPlugin := store.JSPlugin{Name: "request", Source: "x", Stage: store.JSStageRequest, Enabled: false, Priority: 10, FailureMode: store.JSFailureModeOpen}
 	if err := repo.Create(&requestPlugin); err != nil {
 		t.Fatal(err)
 	}
 	ctx = invokeThreatIntelHandler(t, UpdateJSPlugin(repo, nil, reload, nil), "POST", "/x", idParam(requestPlugin.ID), []byte(`{"stage":"response"}`))
-	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
-		t.Fatalf("update to response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	if ctx.Response.StatusCode() != 200 {
+		t.Fatalf("update to disabled response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 	got, err := repo.Get(requestPlugin.ID)
-	if err != nil || got.Stage != store.JSStageRequest {
-		t.Fatalf("request plugin changed after rejected update: %+v, err=%v", got, err)
+	if err != nil || got.Stage != store.JSStageResponse {
+		t.Fatalf("request plugin did not switch to response stage: %+v, err=%v", got, err)
 	}
 
+	// 已存在的 response 草案可直接更新非阶段字段。
 	legacyResponsePlugin := store.JSPlugin{Name: "legacy-response", Source: "x", Stage: store.JSStageResponse, Enabled: false, Priority: 10, FailureMode: store.JSFailureModeOpen}
 	if err := repo.Create(&legacyResponsePlugin); err != nil {
 		t.Fatal(err)
 	}
 	ctx = invokeThreatIntelHandler(t, UpdateJSPlugin(repo, nil, reload, nil), "POST", "/x", idParam(legacyResponsePlugin.ID), []byte(`{"priority":2}`))
-	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
+	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("update legacy response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 	got, err = repo.Get(legacyResponsePlugin.ID)
-	if err != nil || got.Priority != 10 {
-		t.Fatalf("legacy response plugin changed after rejected update: %+v, err=%v", got, err)
+	if err != nil || got.Priority != 2 {
+		t.Fatalf("legacy response plugin priority = %+v, err=%v", got, err)
 	}
 
+	// 引擎未装配时启用 response 阶段被可执行契约拒绝，状态不变。
 	ctx = invokeThreatIntelHandler(t, ToggleJSPlugin(repo, reload, nil), "POST", "/x", idParam(legacyResponsePlugin.ID), []byte(`{"enabled":true}`))
-	if ctx.Response.StatusCode() != 400 || !bytes.Contains(ctx.Response.Body(), []byte(jsResponseStageUnavailableMessage)) {
-		t.Fatalf("enable response stage = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
+	if ctx.Response.StatusCode() != 503 || !bytes.Contains(ctx.Response.Body(), []byte(jsRuntimeUnavailableMessage)) {
+		t.Fatalf("enable response stage without engine = %d %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 	got, err = repo.Get(legacyResponsePlugin.ID)
 	if err != nil || got.Enabled {
 		t.Fatalf("legacy response plugin enabled after rejected toggle: %+v, err=%v", got, err)
-	}
-	if reloaded != 0 {
-		t.Fatalf("reloaded %d times for rejected response stage requests", reloaded)
 	}
 }
 
@@ -351,7 +361,7 @@ func TestJSPluginResponseStageCannotBeConfigured(t *testing.T) {
 // 空请求体在两个端点都必须停在 400，否则未装配运行时会掩盖入参错误。
 func TestJSPluginRuntimeEndpointsRejectInvalidStage(t *testing.T) {
 	validate := invokeThreatIntelHandler(t, ValidateJSPlugin(nil), "POST", "/x", nil, []byte(`{}`))
-	if validate.Response.StatusCode() != 400 || !bytes.Contains(validate.Response.Body(), []byte("stage must be request")) {
+	if validate.Response.StatusCode() != 400 || !bytes.Contains(validate.Response.Body(), []byte("stage must be request or response")) {
 		t.Fatalf("validate response = %d %s", validate.Response.StatusCode(), validate.Response.Body())
 	}
 	dryRun := invokeThreatIntelHandler(t, DryRunJSPlugin(nil), "POST", "/x", nil, []byte(`{}`))
@@ -360,17 +370,12 @@ func TestJSPluginRuntimeEndpointsRejectInvalidStage(t *testing.T) {
 	}
 }
 
-func TestValidateJSPluginRejectsUnavailableStageAndTimeout(t *testing.T) {
+func TestValidateJSPluginRejectsInvalidStageAndTimeout(t *testing.T) {
 	cases := []struct {
 		name string
 		body []byte
 		want string
 	}{
-		{
-			name: "response stage",
-			body: []byte(`{"stage":"response","source":"export default {}"}`),
-			want: jsResponseStageUnavailableMessage,
-		},
 		{
 			name: "negative timeout",
 			body: []byte(`{"stage":"request","source":"export default {}","timeout_ms":-1}`),
@@ -436,7 +441,7 @@ func TestGetJSPluginRuntimeReportsUnavailableBackend(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.Backend != jsplugin.RuntimeBackend() || status.Available || status.EngineReady || status.Enabled != 0 || status.Compiled != 0 || status.CompileErrors != 0 || !status.RequestSupported || status.ResponseSupported {
+	if status.Backend != jsplugin.RuntimeBackend() || status.Available || status.EngineReady || status.Enabled != 0 || status.Compiled != 0 || status.CompileErrors != 0 || !status.RequestSupported || !status.ResponseSupported {
 		t.Fatalf("runtime status = %+v", status)
 	}
 }

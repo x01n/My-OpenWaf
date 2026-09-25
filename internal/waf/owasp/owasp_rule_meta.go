@@ -183,6 +183,7 @@ var xssRuleMeta = map[string]ruleMeta{
 	"owasp:xss:065": {"XSS - 净化器探测载荷", "标签或属性区出现 sanitize/purify/dompurify 字样，疑似探测净化配置"},
 	"owasp:xss:066": {"XSS - 模板字符串插值", "反引号模板字符串内 ${...} 引用 document、alert、fetch 等敏感对象"},
 	"owasp:xss:067": {"XSS - 弹窗函数 call/apply 借调", "alert/confirm/prompt 以 call/apply 方式借调执行绕过过滤"},
+	"owasp:xss:068": {"XSS - Function 构造器", "new Function(\"字符串\") 构造器把字符串编译为可执行函数体"},
 }
 
 var webshellRuleMeta = map[string]ruleMeta{
@@ -213,6 +214,7 @@ var webshellRuleMeta = map[string]ruleMeta{
 	"owasp:webshell:024": {"WebShell - PHP 流包装器", "使用 php://input、php://filter 等流包装器获读请求体或代码"},
 	"owasp:webshell:025": {"WebShell - data 文本载荷", "data://text/plain 数据 URI 承载可执行文本载荷"},
 	"owasp:webshell:026": {"WebShell - 远程文件包含", "include/require 引用 http(s) 远程 URL，实现远程文件包含"},
+	"owasp:webshell:027": {"WebShell - Python 反射导入执行", "__import__ 导入 os/subprocess 等危险模块，常见于 Jinja2/SSTI 载荷"},
 }
 
 var revshellRuleMeta = map[string]ruleMeta{
@@ -257,6 +259,16 @@ var cmdInjectRuleMeta = map[string]ruleMeta{
 	"owasp:cmd:022": {"命令注入 - 参数上下文子命令", "$(...) 形式的子命令替换出现在参数值上下文中"},
 	"owasp:cmd:023": {"命令注入 - 词内反引号拆分", "命令词中间插入反引号对（wh``oami）拆字绕过检测"},
 	"owasp:cmd:024": {"命令注入 - 反引号起始命令执行", "反引号后紧跟 ping、curl、whoami 等系统命令执行"},
+	"owasp:cmd:025": {"命令注入 - 特殊变量拆分命令名", "who$@ami、c$@at 等在命令词内插入 $@ 绕过词匹配"},
+	"owasp:cmd:026": {"命令注入 - IFS 切词接目标", "cat${IFS}/etc/passwd、ls${ifs}-la 用字段分隔符变量替代空格"},
+	"owasp:cmd:027": {"命令注入 - bash 函数导出", "export -f 导出 shell 函数后紧跟分号调用注入命令"},
+	"owasp:cmd:028": {"命令注入 - env 清空环境执行", "env -i 清空环境变量后启动 sh、bash、python 等解释器"},
+	"owasp:cmd:029": {"命令注入 - 引号反斜杠拆字", "w'h'o'a'm'i、c\\a\\t 引号或反斜杠逐字符拆分命令名"},
+	"owasp:cmd:030": {"命令注入 - 无协议本地下载", "curl/wget 直接指向 localhost、127.0.0.1 或脚本文件名下载执行"},
+	"owasp:cmd:031": {"命令注入 - 绝对路径子命令", "$(/bin/cat ...) 或 $(busybox wget ...) 绝对路径封装的子命令替换"},
+	"owasp:cmd:032": {"命令注入 - ANSI-C 连续转义串", "$'\\x63\\x61\\x74' ANSI-C 引号内三组以上十六进制转义拼装命令"},
+	"owasp:cmd:033": {"命令注入 - 执行包装词衔接解释器", "xargs sh -c、timeout bash -c、nohup python -c 等包装词启动解释器"},
+	"owasp:cmd:034": {"命令注入 - Windows 命令启动器", "cmd.exe /c、powershell -enc、pwsh -c 显式启动 Windows 命令解释器"},
 }
 
 var ssrfRuleMeta = map[string]ruleMeta{
@@ -284,6 +296,7 @@ var ssrfRuleMeta = map[string]ruleMeta{
 	"owasp:ssrf:021": {"SSRF - 重绑定域名后缀", "内网 IP 拼配 .nip.io/.xip.io/.sslip.io 域名做 DNS 重绑定"},
 	"owasp:ssrf:022": {"SSRF - URL 内 IPv6 映射", "URL 中以 [::ffff:1.2.3.4] 形式承载映射后的 IPv4 地址"},
 	"owasp:ssrf:023": {"SSRF - 九位十进制 IP", "URL 中以 9-10 位十进制整数编码 IP 如 2130706433"},
+	"owasp:ssrf:024": {"SSRF - 裸括号 IPv6 回环", "无 scheme 前缀的 [::1] 括号 IPv6 回环地址（JSON 字段值、路径参数等上下文）"},
 }
 
 var xxeRuleMeta = map[string]ruleMeta{
@@ -295,6 +308,8 @@ var xxeRuleMeta = map[string]ruleMeta{
 	"owasp:xxe:005": {"XXE - SYSTEM 危险协议", "SYSTEM 声明的 URI 使用了 file、http、expect 等危险协议"},
 	"owasp:xxe:006": {"XXE - 盲注参数实体", "<!ENTITY % 声明的参数实体，用于盲注外部实体外带"},
 	"owasp:xxe:007": {"XXE - XInclude 注入", "<xi:include> 后带 href 属性引用外部文档内容"},
+	"owasp:xxe:008": {"XXE - xsi schemaLocation 注入", "xsi:schemaLocation 或 noNamespaceSchemaLocation 属性指向站外 schema 资源"},
+	"owasp:xxe:009": {"XXE - 参数实体引用链", "两个以上参数实体引用连续外带（%pe;%xx;），递归展开放大器形态"},
 }
 
 var ldapRuleMeta = map[string]ruleMeta{
@@ -418,7 +433,6 @@ var graphqlRuleMeta = map[string]ruleMeta{
 	"owasp:graphql:006": {"GraphQL - 批量操作数组", "请求为 [{\"query\":...}] 数组形式批量执行多个操作"},
 	"owasp:graphql:007": {"GraphQL - @skip/@include 变量注入", "@skip 或 @include 指令以 $变量 作为 if 条件注入"},
 	"owasp:graphql:008": {"GraphQL - subscription 订阅滥用", "subscription 关键字发起订阅操作常驻通道探测变更"},
-	"owasp:graphql:009": {"GraphQL - 字段探测报错特征", "载荷携带 did you mean 等字段名报错特征词探测 schema"},
 }
 
 var pathTravRuleMeta = map[string]ruleMeta{
@@ -439,4 +453,6 @@ var pathTravRuleMeta = map[string]ruleMeta{
 	"owasp:path_traversal:014": {"路径穿越 - 直接 web.xml 引用", "以 web-inf 或 meta-inf 目录直接拼 web.xml 路径"},
 	"owasp:path_traversal:015": {"路径穿越 - 源码与配置外带", "引用 .git、.env、.htpasswd、config.php 等敏感文件路径"},
 	"owasp:path_traversal:016": {"路径穿越 - 越权管理目录", ".. 后接 admin、config、manager 等管理目录路径"},
+	"owasp:path_traversal:017": {"路径穿越 - 躯干点段序列", "以斜杠分隔的整段仅由三个以上点号构成（.../），对齐白名单侧尾随点丢弃等价检测"},
+	"owasp:path_traversal:018": {"路径穿越 - 点空白斜杠序列", ".. 与斜杠间夹空白（.. /、..\\space）的穿越序列变异"},
 }

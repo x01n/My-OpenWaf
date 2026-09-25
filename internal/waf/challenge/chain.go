@@ -59,10 +59,11 @@ type ChainState struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// powDifficulty 返回会话锁定的 PoW 难度，旧会话缺少该字段时回退到管理器当前难度。
+// powDifficulty 返回会话锁定的 PoW 难度。强制化语义：难度缺失/非正即本会话损坏，返回 0。
 func (s *ChainState) powDifficulty(fallback int) int {
+	_ = fallback
 	if s == nil || s.Difficulty <= 0 {
-		return ClampPoWDifficulty(fallback)
+		return 0
 	}
 	return ClampPoWDifficulty(s.Difficulty)
 }
@@ -358,13 +359,8 @@ func (cm *ChainChallengeManager) ProcessStepDetailedWithBinding(sessionID string
 	}
 }
 
-// ProcessStep handles a step submission and returns (passed, redirectURL, nextHTML).
-//
-// Deprecated: 该签名无法区分步内校验失败与正常推进，数据面请改用 ProcessStepDetailed。
-func (cm *ChainChallengeManager) ProcessStep(sessionID string, formData map[string]string) (bool, string, string) {
-	passed, redirectURL, nextHTML, _ := cm.processStepWithBinding(sessionID, formData, ChallengeSessionBinding{})
-	return passed, redirectURL, nextHTML
-}
+// ProcessStep 已被删除（b0 A 类强制化：Deprecated 且零生产调用）。
+// 数据面统一使用 ProcessStepDetailedWithBinding / ProcessStepDetailed。
 
 // processStep 是实现主体，第四个返回值标识本次提交是否校验失败。
 // 整个 “读状态 → 校验当前步骤 → 推进 → 写状态” 序列在会话级串行锁内完成，
@@ -483,14 +479,16 @@ func (cm *ChainChallengeManager) shouldRunStep(step ChainStepConfig, state *Chai
 var chainPageTmpl = template.Must(template.ParseFS(challengePageFS, "templates/chain.html"))
 
 type chainCaptchaPageData struct {
-	Type       string
-	MasterImg  template.URL
-	ThumbImg   template.URL
-	Prompt     string
-	SlideWidth int
-	IsClick    bool
-	IsSlide    bool
-	IsRotate   bool
+	Type        string
+	MasterImg   template.URL
+	ThumbImg    template.URL
+	Prompt      string
+	SlideWidth  int
+	IsClick     bool
+	IsSlide     bool
+	IsRotate    bool
+	CaptchaData string
+	KeyHex      string
 }
 
 type chainPageData struct {
@@ -507,19 +505,19 @@ type chainPageData struct {
 }
 
 func newChainCaptchaPageData(ch *CaptchaChallenge) *chainCaptchaPageData {
-	if ch == nil {
+	if ch == nil || ch.CaptchaData == "" {
 		return nil
 	}
 	captchaType := CaptchaType(ch.Type)
 	return &chainCaptchaPageData{
-		Type:       ch.Type,
-		MasterImg:  captchaImageURL(ch.MasterImg),
-		ThumbImg:   captchaImageURL(ch.ThumbImg),
-		Prompt:     ch.Prompt,
-		SlideWidth: firstPositiveInt(ch.Width, 360),
-		IsClick:    captchaType == CaptchaTypeClick,
-		IsSlide:    captchaType == CaptchaTypeSlide,
-		IsRotate:   captchaType == CaptchaTypeRotate,
+		Type:        ch.Type,
+		Prompt:      ch.Prompt,
+		SlideWidth:  firstPositiveInt(ch.Width, 360),
+		IsClick:     captchaType == CaptchaTypeClick,
+		IsSlide:     captchaType == CaptchaTypeSlide,
+		IsRotate:    captchaType == CaptchaTypeRotate,
+		CaptchaData: ch.CaptchaData,
+		KeyHex:      ch.EnvKeyHex,
 	}
 }
 

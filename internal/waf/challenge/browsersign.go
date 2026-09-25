@@ -1,15 +1,17 @@
 package challenge
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/emmansun/gmsm/sm3"
+
+	"My-OpenWaf/internal/waf/challenge/gm"
 )
 
 // 浏览器签名请求头（由站点挂载 JS 写入，WAF 侧校验）。
@@ -20,7 +22,7 @@ const (
 	BrowserSignHeaderTS      = "X-OWAF-BS-TS"
 	BrowserSignHeaderSig     = "X-OWAF-BS-S"
 	BrowserSignHeaderEnv     = "X-OWAF-BS-Env"
-	browserSignTicketVersion = "bs1"
+	browserSignTicketVersion = "bs3"
 	defaultBrowserSignTTL    = 300
 	browserSignSkewSecs      = 60
 )
@@ -30,19 +32,24 @@ type BrowserSignTicket struct {
 	Nonce     string
 	ExpiresAt int64
 	TicketMAC string
-	SignKey   string // hex，客户端用于请求 HMAC；由 challengeSecret 派生，短时效
-	// EnvKeyHex 是环境指纹 AES-256-GCM 密钥的十六进制编码，由 nonce+siteID 派生。
+	SignKey   string // hex，客户端用于请求 SM3-HMAC；由 challengeSecret 派生，短时效
+	// EnvKeyHex 是环境指纹会话主密钥的十六进制编码，由 nonce+siteID 派生。
 	// 非可选：IssueBrowserSignTicket 始终填充，且 VerifyBrowserSignHeaders 在
 	// X-OWAF-BS-Env 缺失时直接判定 "missing browser env fingerprint"。
 	EnvKeyHex string
 	EnvAAD    string // 环境指纹加密的 AAD，绑定 nonce 与 siteID，防跨会话重放
-	TTL       int
-	CSPNonce  string // 注入脚本的 CSP nonce
+	// TicketSigPub / TicketSigB64 是票据的 SM2 签名（派生式一次性身份，
+	// 主裁裁决：priv=SM3KDF(secret,"browsersign-sign")，pub 随票据明文下发，
+	// 客户端用 gm_verify_challenge 验真；不防伪造的边界已注记）。
+	TicketSigPub string
+	TicketSigB64 string
+	TTL          int
+	CSPNonce     string // 注入脚本的 CSP nonce
 }
 
-// IssueBrowserSignTicket 签发短时效 nonce+HMAC 票据。
+// IssueBrowserSignTicket 签发短时效 nonce+SM3-HMAC 票据。
 // siteID 参与 ticket MAC，避免跨站复用（不绑定 Host，兼容站点多域名）。
-// 浏览器签名始终携带以当前 nonce 和 siteID 派生的 AES-256-GCM 环境指纹密文。
+// 浏览器签名始终携带以当前 nonce 和 siteID 派生的 GM 环境指纹信封。
 func IssueBrowserSignTicket(siteID uint, ttlSecs int) BrowserSignTicket {
 	if ttlSecs <= 0 {
 		ttlSecs = defaultBrowserSignTTL
@@ -57,16 +64,39 @@ func IssueBrowserSignTicket(siteID uint, ttlSecs int) BrowserSignTicket {
 	ticketMAC := browserSignTicketMAC(nonce, exp, siteID)
 	signKey := browserSignRequestKey(nonce)
 	envKey := browserSignEnvKey(nonce, siteID)
+	// 派生式一次性身份的票据 SM2 签名（payload=MAC 输入，防篡改不防伪造）。
+	sigPub, sigB64 := browserSignTicketSig(siteID, browserSignTicketPayload(nonce, exp, siteID))
 	return BrowserSignTicket{
-		Nonce:     nonce,
-		ExpiresAt: exp,
-		TicketMAC: ticketMAC,
-		SignKey:   hex.EncodeToString(signKey),
-		EnvKeyHex: EnvSessionKeyHex(envKey),
-		EnvAAD:    browserSignEnvAAD(nonce, siteID),
-		TTL:       ttlSecs,
-		CSPNonce:  cspNonce,
+		Nonce:        nonce,
+		ExpiresAt:    exp,
+		TicketMAC:    ticketMAC,
+		SignKey:      hex.EncodeToString(signKey),
+		EnvKeyHex:    EnvSessionKeyHex(envKey),
+		EnvAAD:       browserSignEnvAAD(nonce, siteID),
+		TicketSigPub: sigPub,
+		TicketSigB64: sigB64,
+		TTL:          ttlSecs,
+		CSPNonce:     cspNonce,
 	}
+}
+
+// browserSignTicketPayload 是票据 MAC 与 SM2 签名的共同输入。
+func browserSignTicketPayload(nonce string, exp int64, siteID uint) string {
+	return fmt.Sprintf("%s|%s|%d|%d", browserSignTicketVersion, nonce, exp, siteID)
+}
+
+// browserSignTicketSig 用派生身份（CategoryBrowserSignSign）对票据载荷做标准 ZA 签名。
+func browserSignTicketSig(siteID uint, payload string) (pub, sigB64 string) {
+	secret := loadChallengeSecret()
+	pub = gm.DeriveIdentityPub(secret, gm.CategoryBrowserSignSign)
+	if pub == "" {
+		return "", ""
+	}
+	sig, err := gm.DerivedSignMessage(secret, gm.CategoryBrowserSignSign, []byte(payload))
+	if err != nil {
+		return "", ""
+	}
+	return pub, base64.StdEncoding.EncodeToString(sig)
 }
 
 // VerifyBrowserSignHeaders 校验请求头中的浏览器签名与加密环境指纹。
@@ -101,11 +131,15 @@ func VerifyBrowserSignHeaders(headers map[string]string, method, path, query str
 		return false, "浏览器签名时间戳偏移超限"
 	}
 	expectedTicket := browserSignTicketMAC(nonce, exp, siteID)
-	if !hmac.Equal([]byte(ticketMAC), []byte(expectedTicket)) {
+	if !gm.ConstTimeEqual([]byte(ticketMAC), []byte(expectedTicket)) {
 		return false, "浏览器签名票据 MAC 校验失败"
 	}
+	// 票据携带的 SM2 验签公钥不可疑改：其原料受挑战密钥 MAC 覆盖（跨门穿透会撕裂 MAC）。
+	if pub := gm.DeriveIdentityPub(loadChallengeSecret(), gm.CategoryBrowserSignSign); pub == "" {
+		return false, "浏览器签名票据公钥缺失"
+	}
 	expectedReq := browserSignRequestMAC(nonce, method, path, query, ts, envFP)
-	if !hmac.Equal([]byte(reqSig), []byte(expectedReq)) {
+	if !gm.ConstTimeEqual([]byte(reqSig), []byte(expectedReq)) {
 		return false, "浏览器签名请求 MAC 校验失败"
 	}
 	fp := DecryptEnvFingerprintWithAAD(envFP, browserSignEnvKey(nonce, siteID), browserSignEnvAAD(nonce, siteID))
@@ -119,6 +153,7 @@ func VerifyBrowserSignHeaders(headers map[string]string, method, path, query str
 }
 
 // BrowserSignInjectScript 生成注入到 HTML 的混淆签名/环境采集脚本。
+// ticket 的 pub/签名随模板注入：浏览器可用 gm_verify_challenge 验真。
 func BrowserSignInjectScript(ticket BrowserSignTicket) string {
 	envJS := EnvCheckJSEncrypted(ticket.EnvKeyHex, ticket.EnvAAD)
 	raw := fmt.Sprintf(browserSignJSTemplate,
@@ -132,6 +167,8 @@ func BrowserSignInjectScript(ticket BrowserSignTicket) string {
 		BrowserSignHeaderTS,
 		BrowserSignHeaderSig,
 		BrowserSignHeaderEnv,
+		ticket.TicketSigPub,
+		ticket.TicketSigB64,
 	)
 	combined := envJS + "\n" + raw
 	attr := ""
@@ -255,30 +292,32 @@ func IsLikelyAPIRequest(method, path string, headers map[string]string) bool {
 	return false
 }
 
+// browserSignTicketMAC 用标签派生密钥计算 SM3(key‖payload)（hex 全 32 字节）。
 func browserSignTicketMAC(nonce string, exp int64, siteID uint) string {
-	payload := fmt.Sprintf("%s|%s|%d|%d", browserSignTicketVersion, nonce, exp, siteID)
-	mac := hmac.New(sha256.New, loadChallengeSecret())
-	mac.Write([]byte(payload))
-	return hex.EncodeToString(mac.Sum(nil))
+	key := gm.KDF(loadChallengeSecret(), []byte(gm.EnvelopeAAD(gm.EnvelopeLabel(gm.CategoryBrowserSign, gm.GMEnvelopeVersion), gm.PurposeBrowserSign)))
+	sum := sm3HMAC(key, browserSignTicketPayload(nonce, exp, siteID))
+	return hex.EncodeToString(sum)
 }
 
+// browserSignRequestKey 派生 16 字节请求签名密钥（hex 32 字符下发客户端）。
 func browserSignRequestKey(nonce string) []byte {
-	mac := hmac.New(sha256.New, loadChallengeSecret())
-	mac.Write([]byte(browserSignTicketVersion + "|reqkey|" + nonce))
-	sum := mac.Sum(nil)
-	return sum[:16]
+	seed := gm.KDF(loadChallengeSecret(), []byte(gm.EnvelopeAAD(gm.EnvelopeLabel(gm.CategoryBrowserSign, gm.GMEnvelopeVersion), gm.PurposeBrowserSign)))
+	return gm.DeriveRequestKey(seed, []byte(gm.PurposeBrowserSign+"|reqkey"), []byte(nonce))
 }
 
+// browserSignEnvKey 派生 32 字节环境指纹会话主密钥。
 func browserSignEnvKey(nonce string, siteID uint) []byte {
-	mac := hmac.New(sha256.New, loadChallengeSecret())
-	fmt.Fprintf(mac, "%s|envkey|%d|%s", browserSignTicketVersion, siteID, nonce)
-	return mac.Sum(nil)
+	info := gm.EnvelopeAAD(gm.EnvelopeLabel(gm.CategoryBrowserSign, gm.GMEnvelopeVersion), gm.PurposeBrowserSign) + fmt.Sprintf(":%d:%s", siteID, nonce)
+	return gm.KDF(loadChallengeSecret(), []byte(info))
 }
 
+// browserSignEnvAAD 经标签生成函数拼接浏览器签名域的环境指纹 AAD。
 func browserSignEnvAAD(nonce string, siteID uint) string {
-	return fmt.Sprintf("owaf-env:%s|browser-sign|%d|%s", EnvFingerprintProtocolVersion, siteID, nonce)
+	label := gm.EnvelopeLabel("env", gm.GMEnvelopeVersion)
+	return gm.EnvelopeAAD(label, gm.PurposeBrowserSign) + fmt.Sprintf("|%d|%s", siteID, nonce)
 }
 
+// browserSignRequestMAC 计算 SM3-HMAC 请求签名（key 16 字节，输出全 32 字节取 hex 前 32 字符）。
 func browserSignRequestMAC(nonce, method, path, query string, ts int64, env string) string {
 	key := browserSignRequestKey(nonce)
 	method = strings.ToUpper(strings.TrimSpace(method))
@@ -296,9 +335,17 @@ func browserSignRequestMAC(nonce, method, path, query string, ts int64, env stri
 	query = strings.TrimPrefix(query, "?")
 	// query 与环境密文参与签名，防止在固定 path 上篡改查询参数或替换已验证的环境指纹。
 	payload := method + "|" + path + "|" + query + "|" + strconv.FormatInt(ts, 10) + "|" + nonce + "|" + env
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(payload))
-	return hex.EncodeToString(mac.Sum(nil))
+	return hex.EncodeToString(sm3HMAC(key, payload))
+}
+
+// sm3HMAC 计算 SM3(key||msg) 单遍变体（服务端派生密钥场景 keystream 唯一），
+// 与 WASM 侧 gm_sm3_hmac(keyhex, msg) 逐字节一致。
+func sm3HMAC(key []byte, msg string) []byte {
+	input := make([]byte, 0, len(key)+len(msg))
+	input = append(input, key...)
+	input = append(input, msg...)
+	sum := sm3.Sum(input)
+	return sum[:]
 }
 
 func lookupBrowserSignHeader(headers map[string]string, name string) (string, bool) {
@@ -348,7 +395,7 @@ func abs64(v int64) int64 {
 }
 
 func obfuscateBrowserSignJS(js string) string {
-	v := randomVarNames(10)
+	v := randomVarNames(12)
 	r := strings.NewReplacer(
 		"__owaf_bs_nonce", v[0],
 		"__owaf_bs_exp", v[1],
@@ -360,12 +407,14 @@ func obfuscateBrowserSignJS(js string) string {
 		"__owaf_bs_hts", v[7],
 		"__owaf_bs_hs", v[8],
 		"__owaf_bs_henv", v[9],
+		"__owaf_bs_sig_pub", v[10],
+		"__owaf_bs_sig_b64", v[11],
 	)
 	return r.Replace(js)
 }
 
 // browserSignJSTemplate：挂载后 hook fetch/XHR，为请求附加短时效签名头与环境指纹。
-// 使用 Web Crypto 对 method|path|query|ts|nonce 做 HMAC-SHA256。
+// 使用 WASM 侧 gm_sm3_hmac 对 method|path|query|ts|nonce|env 做 SM3-HMAC（key||msg 单遍形态）。
 const browserSignJSTemplate = `
 (function(){
 var __owaf_bs_nonce="%s";
@@ -378,6 +427,8 @@ var __owaf_bs_hm="%s";
 var __owaf_bs_hts="%s";
 var __owaf_bs_hs="%s";
 var __owaf_bs_henv="%s";
+var __owaf_bs_sig_pub="%s";
+var __owaf_bs_sig_b64="%s";
 var __owaf_bs_csp_nonce=(document.currentScript&&document.currentScript.nonce)||"";
 function loadWasm(){
 if(window.__owaf_wasm_ready)return window.__owaf_wasm_ready;
@@ -410,9 +461,9 @@ async function signHeaders(method,url){
  await __owaf_bs_wasm;
  if(!window.__owaf_env_ready||typeof window.__owaf_env_ready.then!=="function")throw new Error("browser environment fingerprint is unavailable");
  var env=await window.__owaf_env_ready;
- if(!env||typeof env!=="string"||env.indexOf("v1.")!==0)throw new Error("browser environment fingerprint is unavailable");
+ if(!env||typeof env!=="string"||env.length<32)throw new Error("browser environment fingerprint is unavailable");
  var payload=m+"|"+path+"|"+query+"|"+String(ts)+"|"+__owaf_bs_nonce+"|"+env;
- var sig=wasm_bindgen.hmac_sha256(__owaf_bs_key,payload);
+ var sig=wasm_bindgen.gm_sm3_hmac(__owaf_bs_key,payload);
  var h={};
  h[__owaf_bs_hn]=__owaf_bs_nonce;
  h[__owaf_bs_he]=String(__owaf_bs_exp);

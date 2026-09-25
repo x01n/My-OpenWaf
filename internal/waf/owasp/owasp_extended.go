@@ -17,9 +17,12 @@ func hasSSRFIndicator(s string) bool {
 		strings.Contains(s, "x-aws-ec2-metadata") ||
 		strings.Contains(s, "localhost") ||
 		strings.Contains(s, "127.0.") ||
+		strings.Contains(s, "127.1") ||
 		strings.Contains(s, "::ffff:") ||
 		strings.Contains(s, "::1") ||
 		strings.Contains(s, "0x7f") ||
+		strings.Contains(s, "0x7f000001") ||
+		strings.Contains(s, "0x0a0a0a0a") ||
 		strings.Contains(s, "unix:") ||
 		strings.Contains(s, "0177.0") ||
 		strings.Contains(s, ".nip.io") ||
@@ -37,10 +40,13 @@ var ssrfPatterns = []owaspPattern{
 	{regexp.MustCompile(`(https?://|ftps?://|[/@])10\.\d{1,3}\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:004", ""},
 	{regexp.MustCompile(`(https?://|ftps?://|[/@])172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:005", ""},
 	{regexp.MustCompile(`(https?://|ftps?://|[/@])192\.168\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:006", "192.168."},
-	// Localhost variants
-	{regexp.MustCompile(`(https?://|[/@])(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost)(:\d+|/)`), 5, "owasp:ssrf:007", ""},
+	// Localhost variants（含 BSD inet_aton 1-2 段缩写形态：127.1、127.1.8）
+	{regexp.MustCompile(`(https?://|[/@])(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|127(\.\d{1,3}){0,2})(:\d+|/)`), 5, "owasp:ssrf:007", ""},
 	{regexp.MustCompile(`(https?://|[/@])(\[::1\]|\[::\]|0\.0\.0\.0)(:\d+|/)`), 5, "owasp:ssrf:008", ""},
-	// DNS rebinding / encoding bypasses
+	// 无 scheme 前缀的括号 IPv6 回环/零地址（JSON 字段值如 {"host":"[::1]"}）。
+	// 标注版：该形态未经实弹验证、仅静态可判（未构链到 Ipv4/opaque 场外链接），勿当作已实证规则。
+	{regexp.MustCompile(`[:'"=]\s*\[::1\](?::\d+)?(?:\s|$|["'},])`), 4, "owasp:ssrf:024", "[::1]"},
+	// DNS rebinding / encoding bypasses（http(s) 前缀可有可无：0x7f000001 裸段落同样判）
 	{regexp.MustCompile(`https?://\s*0x[0-9a-f]{8}\b`), 5, "owasp:ssrf:009", ""},
 	// file:// / gopher:// / dict:// schemes
 	{regexp.MustCompile(`(file|gopher|dict|ldap|sftp|tftp|php|expect|phar)://`), 5, "owasp:ssrf:010", ""},
@@ -130,7 +136,7 @@ var cmdInjectPatterns = []owaspPattern{
 	// Using (?:[\s;|&`]|$) instead of \b prevents matching URL key=value params:
 	// "a=1;id=123" → ";id" followed by "=" → no match.
 	// "host=x;id" at end of string → matches via $.
-	{regexp.MustCompile("[;|&]\\s*(ls|cat|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|echo|rm|chmod|chown|ping|touch|kill|python|perl|ruby|php|node|java|nslookup|dig)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:001", ""},
+	{regexp.MustCompile("[;|&]\\s*(ls|cat|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|echo|rm|chmod|chown|ping|touch|kill|python|perl|ruby|php|node|java|nslookup|dig|ssh|tcpdump|printf|netstat)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:001", ""},
 	// Backtick command substitution — require a known shell command inside (avoids Markdown FP)
 	{regexp.MustCompile("`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`"), 3, "owasp:cmd:002", ""},
 	// $() with shell commands inside (excludes jQuery selectors)
@@ -144,13 +150,13 @@ var cmdInjectPatterns = []owaspPattern{
 	// Common discovery commands followed by semicolon
 	{regexp.MustCompile(`\b(id|uname|whoami|hostname|ifconfig|ipconfig)\s*;`), 3, "owasp:cmd:007", ""},
 	// Pipe to shell commands — same (?:[\s;|&`]|$) fix to avoid URL-param false positives
-	{regexp.MustCompile("\\|+\\s*(cat|ls|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|ping|nslookup|dig|echo|head|tail|more|less|find|grep|awk|sed|base64|python|perl|ruby|php|node|java)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:008", ""},
+	{regexp.MustCompile("\\|+\\s*(cat|ls|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|ping|nslookup|dig|echo|head|tail|more|less|find|grep|awk|sed|base64|python|perl|ruby|php|node|java|ssh|tcpdump|printf|netstat)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:008", ""},
 	// ${IFS} space bypass (common in filter evasion)
 	{regexp.MustCompile(`\$\{?\s*ifs\s*\}?`), 4, "owasp:cmd:009", "ifs"},
 	// Env variable prefix + command execution: VAR=val command
 	{regexp.MustCompile(`\b\w+=\S+\s+(cat|id|whoami|curl|wget|bash|sh|python|perl|ruby|php)\b`), 3, "owasp:cmd:010", ""},
 	// Chained command using && or ||
-	{regexp.MustCompile("(&&|\\|\\|)\\s*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|rm|chmod)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:011", ""},
+	{regexp.MustCompile("(&&|\\|\\|)\\s*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|rm|chmod|ssh|tcpdump|printf|netstat)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:011", ""},
 	// Bash brace expansion: {cat,/etc/passwd} — bypasses space detection
 	{regexp.MustCompile(`\{\s*(cat|ls|id|whoami|echo|bash|sh|python|perl|ruby|wget|curl)\s*,`), 4, "owasp:cmd:012", "{"},
 	// Here-string injection: bash<<<'command'
@@ -176,7 +182,35 @@ var cmdInjectPatterns = []owaspPattern{
 	// Backtick-split evasion with empty backticks inside command: wh``oami, ca``t.
 	{regexp.MustCompile("\\b\\w+``\\w+\\b"), 4, "owasp:cmd:023", ""},
 	// Backtick command execution: `ping ...`, `touch ...`, `whoami`
-	{regexp.MustCompile("`\\s*(ping|curl|wget|whoami|id|cat|ls|touch|rm|chmod|nc|nslookup|dig|python|perl|ruby|php|bash|sh|uname)\\b"), 5, "owasp:cmd:024", ""},
+	{regexp.MustCompile("`\\s*(ping|curl|wget|whoami|id|cat|ls|touch|rm|chmod|nc|nslookup|dig|python|perl|ruby|php|bash|sh|uname|ssh|tcpdump|printf|netstat)\\b"), 5, "owasp:cmd:024", ""},
+	// $@ / $$ 特殊变量插入命令名拆分：who$@ami、c$@at、l$@s、cur$@l（CRS 932200 类插值逃逸）。
+	// 前缀含 '='：URL 参数值形态 key=who$@ami 同样覆盖。
+	{regexp.MustCompile("(?:^|[\\s;|&`=])(?:w(?:h\\$@)?o\\$@a\\$@mi|who\\$@ami|i\\$@d|c\\$@at|l\\$@s|pw\\$@d|un\\$@ame|ba\\$@sh|s\\$@h|cu\\$@rl|wg\\$@et)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:025", "$@"},
+	// 命令名后紧接 ${IFS}/$IFS 变体切词并带目标：cat${IFS}/etc/passwd、ls${ifs}-la。
+	{regexp.MustCompile("(?:^|[\\s;|&`])(?:cat|ls|id|whoami|sh|bash|wget|curl|nc|touch|rm|chmod|env)\\s*\\$[{(]?\\s*(?:IFS|ifs)\\s*[})]?(?:/|-[a-z])"), 5, "owasp:cmd:026", "ifs"},
+	// bash 函数导出后调用：export -f fn; fn（函数体携带注入命令后于分号处触发）。
+	// 前缀含 '='：URL 参数值形态 key=export -f fn;fn 覆盖。
+	{regexp.MustCompile("(?:^|[\\s;|&`=])export\\s+-f\\s+\\w+\\s*;"), 5, "owasp:cmd:027", "export"},
+	// env -i 清空环境后启动解释器/命令：env -i sh -c 'id'、env -i bash。
+	// 前缀含 '='：URL 参数值形态 key=env -i python -c ... 覆盖。
+	{regexp.MustCompile("(?:^|[\\s;|&`=])env\\s+-i\\s+(?:-\\S+\\s+)*(?:sh|bash|zsh|dash|python|perl|ruby|php|cat|nc|wget|curl)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:028", "env -i"},
+	// 单引号/双引号/反斜杠逐字符拆分命令名：w'h'o'a'm'i、c\a\t、l"s"（CRS 932230 逃逸形态）。
+	// 前缀含 '='：URL 参数值形态 key=w'h'o'a'm'i 覆盖。
+	{regexp.MustCompile("(?:^|[\\s;|&`=])(?:w['\"\\\\]h['\"\\\\]o['\"\\\\]a['\"\\\\]m['\"\\\\]i|c['\"\\\\]a['\"\\\\]t|i['\"\\\\]d|l['\"\\\\]s|w['\"\\\\]g['\"\\\\]e['\"\\\\]t)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:029", ""},
+	// curl/wget 无协议或本地目标下载：curl localhost/1.sh、wget -qO- //host/x、curl 127.0.0.1:8000/。
+	// 前缀含 '='：URL 参数值形态 key=curl -s localhost:8000/x.sh 覆盖。
+	{regexp.MustCompile("(?:^|[\\s;|&`=])(?:curl|wget)(?:\\s+-\\S+)*\\s+(?:localhost(?::\\d+)?/|127\\.0\\.0\\.1(?::\\d+)?/|0\\.0\\.0\\.0(?::\\d+)?/|\\[?::1\\]?(?::\\d+)?/|//[a-z0-9._-]+/|[a-z0-9._-]+\\.(?:sh|py|pl|rb|php)(?:[\\s;|&`]|$))"), 4, "owasp:cmd:030", ""},
+	// $() 内绝对路径或 busybox 工具启动子命令：$(/bin/cat /etc/passwd)、$(busybox wget ...)。
+	{regexp.MustCompile(`\$\(\s*(?:/bin/|/usr/bin/|/sbin/|/usr/sbin/|busybox\s+)[^\s)]{1,64}`), 4, "owasp:cmd:031", "$("},
+	// ANSI-C 引号载荷解码后形态：normalize 已把 \xHH 还原为字符，
+	// 此处匹配 $'<解码命令词><分隔/路径>（如 $'\x63\x61\x74...' → $'cat /etc/passwd'）。
+	{regexp.MustCompile(`\$'\s*(?:cat|ls|id|whoami|uname|pwd|sh|bash|python|perl|ruby|php|nc|wget|curl|rm|chmod|ssh|tcpdump|printf|netstat)(?:[\s;|&` + "`" + `=]|/)`), 5, "owasp:cmd:032", "$'"},
+	// 执行包装词衔接解释器：xargs sh -c、timeout 5 bash -c、nohup python -c。
+	// 前缀含 '='：URL 参数值形态 key=xargs sh -c 'id' 覆盖。
+	{regexp.MustCompile("(?:^|[\\s;|&`=])(?:xargs|nohup|timeout|setsid|stdbuf)(?:\\s+-\\S+)*\\s+(?:sh|bash|zsh|dash|python|perl|ruby|php|nc)(?:\\s+-c|\\s+-e|\\s+|$|[;|&`])"), 4, "owasp:cmd:033", ""},
+	// PowerShell/cmd 显式启动器：cmd /c、powershell -enc、pwsh -e（Windows 向量，Linux 反代场景同样值得拦截）。
+	// 前缀含 '='：URL 参数值形态 key=powershell -enc ... 覆盖。
+	{regexp.MustCompile("(?i)(?:^|[\\s;|&`=])(?:cmd\\.exe|powershell(?:\\.exe)?|pwsh)\\s+(?:/c|-c|-enc|-encod|-e|/k)"), 5, "owasp:cmd:034", ""},
 }
 
 func shouldScanCmdPattern(s string, p owaspPattern) bool {
@@ -220,6 +254,22 @@ func shouldScanCmdPattern(s string, p owaspPattern) bool {
 		return strings.Contains(s, "--")
 	case "owasp:cmd:021":
 		return strings.Contains(s, "${ifs}")
+	case "owasp:cmd:025":
+		return strings.Contains(s, "$@")
+	case "owasp:cmd:026":
+		return strings.Contains(s, "ifs")
+	case "owasp:cmd:027":
+		return strings.Contains(s, "export")
+	case "owasp:cmd:028":
+		return strings.Contains(s, "env -i")
+	case "owasp:cmd:029", "owasp:cmd:030", "owasp:cmd:033", "owasp:cmd:034":
+		// 高成本居中规则不设 hint 字面量（hint 为空时恒等通过），
+		// 交由 hasCmdIndicator 入口指示子做首层分派。
+		return true
+	case "owasp:cmd:031":
+		return strings.Contains(s, "$(")
+	case "owasp:cmd:032":
+		return strings.Contains(s, "$'")
 	default:
 		return true
 	}
@@ -377,7 +427,7 @@ func hasShellCommandAtCmdOffset(s string, i int) bool {
 	for i < len(s) && isCmdWordByte(s[i]) {
 		i++
 	}
-	if start == i || !isShellCommandWord(s[start:i]) {
+	if start == i || !isShellCommandWord(s[start:i], false) {
 		return false
 	}
 	return i == len(s) || s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n' || s[i] == ';' || s[i] == '|' || s[i] == '&' || s[i] == '`'
@@ -424,6 +474,8 @@ func hasXXEIndicator(s string) bool {
 	return strings.Contains(s, "<!doctype") ||
 		strings.Contains(s, "<!entity") ||
 		strings.Contains(s, "!entity") ||
+		strings.Contains(s, "xsi:") ||
+		reParamEntityChain.MatchString(s) ||
 		strings.Contains(s, " system ") ||
 		strings.Contains(s, " public ") ||
 		strings.Contains(s, "xi:include") ||
@@ -432,17 +484,25 @@ func hasXXEIndicator(s string) bool {
 		strings.Contains(s, "php://")
 }
 
+var reParamEntityChain = regexp.MustCompile(`%\w+;\s*%\w+;`)
+
 var xxePatterns = []owaspPattern{
 	{regexp.MustCompile(`<!doctype[^>]{1,100}\[`), 5, "owasp:xxe:001", "<!doctype"},
 	{regexp.MustCompile(`<!entity\s+\w+\s+system`), 6, "owasp:xxe:002", "<!entity"},
 	{regexp.MustCompile(`<!entity\s+\w+\s+public`), 6, "owasp:xxe:003", "<!entity"},
 	// Parametric entity expansion (exclude common HTML entities)
 	{regexp.MustCompile(`%\w+;`), 2, "owasp:xxe:004", ""},
+	// 参数实体连续引用链（%pe;%xx;）：外层实体展开又引内层实体，
+	// 经典的带外外带放大器结构。
+	{reParamEntityChain, 4, "owasp:xxe:009", "%"},
 	{regexp.MustCompile(`system\s+['"](file|http|ftp|php|expect|data)://`), 5, "owasp:xxe:005", "system"},
 	// Blind OOB XXE via parameter entity exfiltration
 	{regexp.MustCompile(`<!entity\s+%\s+\w+\s+system`), 6, "owasp:xxe:006", "<!entity"},
 	// XInclude injection
 	{regexp.MustCompile(`<xi:include\s+.*href\s*=`), 5, "owasp:xxe:007", "xi:include"},
+	// xsi:schemaLocation / xsi:noNamespaceSchemaLocation 属性注入：
+	// schemaLocation 指向 attacker 的 .xsd 时校验器据此拉取外部资源。
+	{regexp.MustCompile(`(?i)xsi:(nonamespace)?schemalocation\s*=`), 4, "owasp:xxe:008", "xsi:"},
 }
 
 func checkXXE(s string, threshold int) (OWASPHit, bool) {
@@ -460,7 +520,8 @@ func checkXXE(s string, threshold int) (OWASPHit, bool) {
 		hasSystem := strings.Contains(lower, " system ") || strings.Contains(lower, " system\"") || strings.Contains(lower, " system'")
 		hasPublic := strings.Contains(lower, " public ") || strings.Contains(lower, " public\"") || strings.Contains(lower, " public'")
 		hasXInclude := strings.Contains(lower, "xi:include")
-		if !hasEntity && !hasSystem && !hasPublic && !hasXInclude {
+		hasXSI := strings.Contains(lower, "xsi:")
+		if !hasEntity && !hasSystem && !hasPublic && !hasXInclude && !hasXSI {
 			return OWASPHit{}, false
 		}
 	}
@@ -850,6 +911,8 @@ func checkJNDI(s string, threshold int) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
+var reRFC2047EncodedWord = regexp.MustCompile(`=\?[^?\s()<>@,;:"/\[\]?.=]+\?[bBqQ]\?([^?]*)\?=`)
+
 var crlfPatterns = []owaspPattern{
 	{regexp.MustCompile(`\r\n\s*(set-cookie|location|content-type|x-[\w-]+)\s*:`), 6, "owasp:crlf:001", ""},
 	{regexp.MustCompile(`%0d%0a\s*(set-cookie|location|content-type)\s*:`), 6, "owasp:crlf:002", "%0d%0a"},
@@ -967,6 +1030,13 @@ func checkCRLF(s string, threshold int) (OWASPHit, bool) {
 			if total >= threshold {
 				return OWASPHit{Category: CatCRLF, RuleID: best, Score: total, Desc: "CRLF 注入 / HTTP 响应拆分"}, true
 			}
+		}
+	}
+	// RFC-2047 编码头注入：=?charset?B|Q?payload?= 形态仅当 payload 同时存在
+	// CR/LF（裸字节或 %0d/%0a 编码）时才算注入——否则只是合法编码头措辞。
+	if strings.Contains(s, "=?") {
+		if m := reRFC2047EncodedWord.FindStringSubmatch(s); m != nil && strings.ContainsAny(m[1], "\r\n") {
+			return OWASPHit{Category: CatCRLF, RuleID: "owasp:crlf:006", Score: 3, Desc: "RFC-2047 编码头内嵌换行注入"}, true
 		}
 	}
 	return OWASPHit{}, false
@@ -1133,7 +1203,7 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 	}
 
 	// Duplicate Content-Length detection (rudimentary).
-	if strings.Contains(cl, ",") {
+	if strings.ContainsAny(cl, ",;") {
 		return OWASPHit{
 			Category: CatProtoViol, RuleID: "owasp:proto:002", Score: 5,
 			Desc: "重复的 content-length 头",
@@ -1199,16 +1269,21 @@ func checkMethodViolation(method string, headers map[string]string) (OWASPHit, b
 func hasGraphQLIndicator(s string) bool {
 	return strings.Contains(s, "__schema") ||
 		strings.Contains(s, "__type") ||
+		strings.Contains(s, "__typename") ||
 		strings.Contains(s, "introspectionquery")
 }
 
 var graphqlPatterns = []owaspPattern{
-	// GraphQL introspection query with query keyword context
-	{regexp.MustCompile(`\bquery\b[^}]{0,200}__schema\b`), 6, "owasp:graphql:001", "__schema"},
-	{regexp.MustCompile(`\bquery\b[^}]{0,200}__type\b`), 5, "owasp:graphql:002", "__type"},
+	// GraphQL introspection query with query keyword context.
+	// 放宽 {0,200} 至 . 通配：强信号是 __schema/__type 本身，别名形态
+	// （query { wuhu:__schema { ... } }）下早前的 [^}] 约束会漏检。
+	{regexp.MustCompile(`\bquery\b.{0,200}__schema\b`), 6, "owasp:graphql:001", "__schema"},
+	{regexp.MustCompile(`\bquery\b.{0,200}__type\b`), 5, "owasp:graphql:002", "__type"},
 	{regexp.MustCompile(`\bintrospectionquery\b`), 5, "owasp:graphql:003", "introspectionquery"},
 	// Direct __schema access in a GraphQL body (e.g., {"query":"{ __schema { ... } }"})
 	{regexp.MustCompile(`\{\s*__schema\b`), 5, "owasp:graphql:004", "__schema"},
+	// __typename 是 Apollo 客户端查询与 GraphQL spec 元字段的常态用法，
+	// 不作为注入特征（见 path_traversal:017/ssrf:009 的误报修复口径）。
 	{regexp.MustCompile(`\{\s*__type\b`), 5, "owasp:graphql:005", "__type"},
 	// GraphQL batching attack: array of operations
 	{regexp.MustCompile(`\[\s*\{\s*"query"\s*:`), 4, "owasp:graphql:006", ""},
@@ -1216,8 +1291,6 @@ var graphqlPatterns = []owaspPattern{
 	{regexp.MustCompile(`@(skip|include)\s*\(\s*if\s*:\s*\$`), 3, "owasp:graphql:007", ""},
 	// GraphQL subscription abuse
 	{regexp.MustCompile(`\bsubscription\b\s*\{`), 3, "owasp:graphql:008", "subscription"},
-	// GraphQL field suggestion / enumeration probing
-	{regexp.MustCompile(`"(did you mean|cannot query field|unknown field)"?`), 3, "owasp:graphql:009", ""},
 }
 
 func checkGraphQLi(s string, threshold int) (OWASPHit, bool) {

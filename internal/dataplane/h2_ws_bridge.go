@@ -15,7 +15,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/network"
-	"github.com/hertz-contrib/http2"
+	"github.com/x01n/http2"
 
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/snapshot"

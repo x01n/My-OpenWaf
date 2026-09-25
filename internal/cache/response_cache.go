@@ -307,7 +307,8 @@ func (rc *ResponseCache) Get(key string) *ResponseEntry {
 		rc.misses.Add(1)
 		return nil
 	}
-	if entry.IsExpired() {
+	now := time.Now()
+	if now.Unix()-entry.CachedAt > entry.TTL {
 		rc.accountingMu.Lock()
 		s.mu.Lock()
 		if current, ok := s.items[key]; ok && current == entry {
@@ -321,7 +322,7 @@ func (rc *ResponseCache) Get(key string) *ResponseEntry {
 		rc.misses.Add(1)
 		return nil
 	}
-	atomic.StoreInt64(&entry.lastAccess, time.Now().UnixNano())
+	atomic.StoreInt64(&entry.lastAccess, now.UnixNano())
 	rc.hits.Add(1)
 	return entry
 }

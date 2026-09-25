@@ -88,24 +88,16 @@ func openSQLite(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 	//   wal_autocheckpoint=1000 — checkpoint every 1000 pages to avoid long WAL stalls
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(1000)"
 	if opt.LogDB {
-		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=foreign_keys(OFF)&_pragma=wal_autocheckpoint(64000)"
+		// 日志库 append-only 且无长事务，自动 checkpoint 窗口取 2000 页（≈8MB），
+		// 避免 WAL 在两次 archiver 维护之间膨胀到数百 MB、放大只读查询并拖慢 crash 恢复。
+		// 相比原 64000 页（≈256MB），代价仅是 synchronous=NORMAL 下多几次 checkpoint fsync。
+		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=foreign_keys(OFF)&_pragma=wal_autocheckpoint(2000)"
 	}
 
 	db, err := gorm.Open(sqlite.Open(dsn), gcfg)
 	if err != nil {
 		return nil, err
 	}
-
-	// WAL 模式允许「多读者 + 单写者」并发，因此读连接不应被限制为 1：
-	// 单连接会把 dashboard 统计、访问日志分页等读操作也串行化，
-	// 实测 16 协程并发读时吞吐仅为 8 连接的约 1/4.7。
-	//
-	// 写侧的安全性由两层保证：应用层 observability.WriteQueue 把高频写归并到
-	// 单 goroutine；仍并发的写由 busy_timeout(10000) 吸收锁等待。已实测
-	// 16 协程 × 60 次并发写在 8 连接下零失败。
-	//
-	// 取 8 而非更大值：实测 8 已达吞吐平台期（16 连接无进一步收益），
-	// 更多连接只是徒增 SQLite 内部锁竞争与内存占用。
 	sqlDB, err := db.DB()
 	if err == nil {
 		sqlDB.SetMaxOpenConns(sqliteMaxOpenConns)

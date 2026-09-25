@@ -15,19 +15,21 @@ import (
 
 // CVEFeedManager manages background synchronisation of CVE data from external sources.
 type CVEFeedManager struct {
-	db           *gorm.DB
-	detector     *CVEDetector
-	syncInterval time.Duration
-	nvdAPIKey    string
-	autoApprove  bool
-	feedEnabled  bool
-	stopCh       chan struct{}
-	stopOnce     sync.Once
-	log          *slog.Logger
-	mu           sync.Mutex
-	lastSync     time.Time
-	lastError    string
-	syncing      bool
+	db                   *gorm.DB
+	detector             *CVEDetector
+	syncInterval         time.Duration
+	nvdAPIKey            string
+	nvdBaseURL           string        // 测试注入的 NVD API 基础地址；空值使用 nvdAPIBaseURL
+	nvdPageDelayOverride time.Duration // 测试注入的页间延时；0 表示按是否配置 API key 选择默认值
+	autoApprove          bool
+	feedEnabled          bool
+	stopCh               chan struct{}
+	stopOnce             sync.Once
+	log                  *slog.Logger
+	mu                   sync.Mutex
+	lastSync             time.Time
+	lastError            string
+	syncing              bool
 }
 
 // CVERuleModel is the database model for CVE rules (auto-generated or user-created).
@@ -221,6 +223,7 @@ func (m *CVEFeedManager) loadRulesIntoDetector() {
 
 type nvdResponse struct {
 	Vulnerabilities []nvdVuln `json:"vulnerabilities"`
+	TotalResults    int       `json:"totalResults"`
 }
 
 type nvdVuln struct {
@@ -256,21 +259,95 @@ type nvdWeakness struct {
 	Description []nvdDesc `json:"description"`
 }
 
+// NVD API 2.0 拉取参数与限流相关常量。
+const (
+	// nvdAPIBaseURL 是 NVD CVE API 2.0 的基础地址，测试通过 nvdBaseURL 覆盖。
+	nvdAPIBaseURL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+	// nvdResultsPerPage 是单页拉取条数。NVD 官方允许的最大值为 200，
+	// 此处保持与既有实现一致的 50 以避免单页响应体过大。
+	nvdResultsPerPage = 50
+	// nvdPageDelayNoKey 是未配置 API key 时每页之间的礼貌延时。
+	// NVD 官方文档限定无 key 请求为滚动 30 秒窗口内 5 次（等效 6 秒 1 次），
+	// 因此按 6 秒等待以保证不触发限流。
+	nvdPageDelayNoKey = 6 * time.Second
+	// nvdPageDelayWithKey 是配置 API key 时每页之间的礼貌延时。
+	// NVD 官方文档限定有 key 请求为滚动 30 秒窗口内 50 次，单次同步页数
+	// 很少，6 秒过于保守；1.2 秒既大幅低于限流又保证同步速度。
+	nvdPageDelayWithKey = 1200 * time.Millisecond
+	// nvdMaxPages 是单次同步最多拉取的页数（50 页 x 50 条 = 2500 条），
+	// 防止无 key 形态下 6s/页的延时使单次同步被无限拉长。
+	nvdMaxPages = 50
+)
+
 func (m *CVEFeedManager) fetchFromNVD() error {
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	end := time.Now().UTC()
-	start := end.Add(-24 * time.Hour) // last 24 hours
+	start := end.Add(-24 * time.Hour) // 最近 24 小时
 
-	apiURL := fmt.Sprintf(
-		"https://services.nvd.nist.gov/rest/json/cves/2.0?pubStartDate=%s&pubEndDate=%s&keywordSearch=web+application&resultsPerPage=50",
-		start.Format("2006-01-02T15:04:05.000"),
-		end.Format("2006-01-02T15:04:05.000"),
+	total := 0
+	for page := 0; page < nvdMaxPages; page++ {
+		startIndex := page * nvdResultsPerPage
+		apiURL := fmt.Sprintf(
+			"%s?pubStartDate=%s&pubEndDate=%s&keywordSearch=web+application&resultsPerPage=%d&startIndex=%d",
+			m.nvdBaseURLOrDefault(),
+			start.Format("2006-01-02T15:04:05.000"),
+			end.Format("2006-01-02T15:04:05.000"),
+			nvdResultsPerPage,
+			startIndex,
+		)
+
+		count, totalResults, done, err := m.fetchNVDPage(client, apiURL, startIndex)
+		if err != nil {
+			return err
+		}
+		total += count
+		if done {
+			m.log.Info("cve_feed: NVD sync complete",
+				slog.Int("new_rules", total),
+				slog.Int("pages", page+1),
+				slog.Int("total_results", totalResults),
+			)
+			return nil
+		}
+
+		// 仅在实际翻页前等待，最后一页无需延时。
+		time.Sleep(m.pageDelay())
+	}
+
+	m.log.Warn("cve_feed: NVD sync hit page cap",
+		slog.Int("max_pages", nvdMaxPages),
+		slog.Int("new_rules", total),
 	)
+	return nil
+}
 
+// nvdBaseURLOrDefault 返回 NVD API 基础地址，测试可注入 nvdBaseURL 覆盖。
+func (m *CVEFeedManager) nvdBaseURLOrDefault() string {
+	if m.nvdBaseURL != "" {
+		return m.nvdBaseURL
+	}
+	return nvdAPIBaseURL
+}
+
+// pageDelay 返回页间延时：测试注入优先，其次按是否配置 API key 选择默认常量。
+func (m *CVEFeedManager) pageDelay() time.Duration {
+	if m.nvdPageDelayOverride > 0 {
+		return m.nvdPageDelayOverride
+	}
+	if m.nvdAPIKey != "" {
+		return nvdPageDelayWithKey
+	}
+	return nvdPageDelayNoKey
+}
+
+// fetchNVDPage 拉取单个 startIndex 页并处理其中全部 CVE。
+// 返回：本页新增规则数、服务端报告的 totalResults、以及是否应停止翻页；
+// 任何网络/状态码/解析失败都以错误返回，绝不平滑吞页。
+func (m *CVEFeedManager) fetchNVDPage(client *http.Client, apiURL string, startIndex int) (int, int, bool, error) {
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return 0, 0, false, fmt.Errorf("build request: %w", err)
 	}
 	if m.nvdAPIKey != "" {
 		req.Header.Set("apiKey", m.nvdAPIKey)
@@ -278,23 +355,23 @@ func (m *CVEFeedManager) fetchFromNVD() error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("http get: %w", err)
+		return 0, 0, false, fmt.Errorf("http get: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("NVD returned %d: %s", resp.StatusCode, string(body))
+		return 0, 0, false, fmt.Errorf("NVD returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
 	if err != nil {
-		return fmt.Errorf("read body: %w", err)
+		return 0, 0, false, fmt.Errorf("read body: %w", err)
 	}
 
 	var nvdResp nvdResponse
 	if err := json.Unmarshal(body, &nvdResp); err != nil {
-		return fmt.Errorf("parse json: %w", err)
+		return 0, 0, false, fmt.Errorf("parse json: %w", err)
 	}
 
 	count := 0
@@ -303,8 +380,22 @@ func (m *CVEFeedManager) fetchFromNVD() error {
 			count++
 		}
 	}
-	m.log.Info("cve_feed: NVD sync complete", slog.Int("new_rules", count))
-	return nil
+
+	// 停页条件按优先级：
+	// 1. 本页为空——继续翻页只会空转或越界，立即停止。
+	// 2. 服务端 totalResults 有效且 startIndex 加本页容量已覆盖总数：
+	//    恰好整页时 startIndex+perPage == totalResults，同样停止。
+	// 3. totalResults 缺失（旧版响应为 0）时，以本页不足一页作为停止信号。
+	if len(nvdResp.Vulnerabilities) == 0 {
+		return count, nvdResp.TotalResults, true, nil
+	}
+	if nvdResp.TotalResults > 0 && startIndex+nvdResultsPerPage >= nvdResp.TotalResults {
+		return count, nvdResp.TotalResults, true, nil
+	}
+	if nvdResp.TotalResults == 0 && len(nvdResp.Vulnerabilities) < nvdResultsPerPage {
+		return count, nvdResp.TotalResults, true, nil
+	}
+	return count, nvdResp.TotalResults, false, nil
 }
 
 func (m *CVEFeedManager) processNVDCVE(cve nvdCVE) bool {
@@ -346,6 +437,10 @@ func (m *CVEFeedManager) processNVDCVE(cve nvdCVE) bool {
 	if rule == nil {
 		return false
 	}
+	// generateRule 默认 Source="auto_generated"，NVD 拉取必须显式改回 "nvd"，
+	// 否则入库来源与 processNVDCVE 的查重条件（source = "nvd"）不一致，
+	// 每次翻页同步都会重复插入同一批 CVE。
+	rule.Source = "nvd"
 
 	approved := m.autoApprove
 	rule.Approved = approved

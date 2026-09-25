@@ -9,9 +9,14 @@ import type {
   BotScoreStats,
   BotSettings,
   ChainConfig,
+  ChainSessionsResponse,
   DefaultErrorPagesResponse,
   ErrorPagePreviewRequest,
   ErrorPagePreviewResponse,
+  RealtimeTicketResponse,
+  RuleExportPayload,
+  RuleImportResponse,
+  RuleTemplate,
   SiteErrorPages,
 } from "@/lib/types"
 
@@ -675,6 +680,13 @@ export function del<T = any>(path: string): Promise<T> {
 }
 
 /**
+ * 实时推送相关 API。
+ */
+export const realtimeApi = {
+  ticket: () => get<RealtimeTicketResponse>("/realtime/ticket"),
+}
+
+/**
  * 拉取站点资源型列表的全部分页；后端单页上限为 200，最多聚合 10 页，
  * 防止异常 total 让浏览器无限请求或一次性占用不可控内存。
  */
@@ -834,9 +846,10 @@ export const ruleApi = {
   delete: (id: string | number) => post(`/rules/${id}/delete`),
   test: (data: any) => post("/rules/test", data),
   validate: (data: any) => post("/rules/validate", data),
-  import: (data: any) => post("/rules/import", data),
-  export: () => get("/rules/export"),
-  getTemplates: () => get("/rules/templates"),
+  import: (data: Partial<RuleExportPayload>) =>
+    post<RuleImportResponse>("/rules/import", data),
+  export: () => get<RuleExportPayload>("/rules/export"),
+  getTemplates: () => get<{ templates: RuleTemplate[] }>("/rules/templates"),
 }
 
 /**
@@ -974,7 +987,7 @@ export const chainApi = {
   getConfig: () => get<ChainConfig>("/chain/config"),
   updateConfig: (data: Partial<ChainConfig>) =>
     post<ChainConfig>("/chain/config", data),
-  getSessions: () => get("/chain/sessions"),
+  getSessions: () => get<ChainSessionsResponse>("/chain/sessions"),
   deleteSession: (id: string | number) => post(`/chain/sessions/${id}/delete`),
 }
 
@@ -1335,7 +1348,7 @@ export const jsPluginApi = {
  */
 export const fingerprintApi = {
   list: (params?: { page?: number; page_size?: number }) =>
-    get<{ items: any[]; total: number }>("/fingerprints", params),
+    get<{ items: TLSFingerprintSummary[]; total: number }>("/fingerprints", params),
 }
 
 // 引入类型（避免循环依赖，在文件末尾导入类型声明）
@@ -1409,4 +1422,5 @@ import type {
   EscalationConfig,
   EscalationConfigUpdate,
   RuntimeConfig,
+  TLSFingerprintSummary,
 } from "./types"

@@ -384,6 +384,20 @@ func (s *ACMEManagerStore) RenewLoop(ctx context.Context, interval time.Duration
 	}
 }
 
+// certRenewWindow 把「到期前 N 天」配置转换为窗口时长。
+// 语义与 internal/acme.ShouldRenewAt 一致：N<=0 视为未配置窗口；
+// renewDue 已在 loadACMEConfig 把 RenewBeforeDays 抬到 >=1，
+// 此处兼容直接构造配置的调用方。
+func certRenewWindow(days int) time.Duration {
+	if days <= 0 {
+		return 0
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+// renewDue 逐个检查待自动续期证书，只对进入续期窗口（到期前 RenewBeforeDays 天）
+// 或已过期的证书发起续期；窗口判定收敛到 internal/acme.ShouldRenewAt，
+// 与 internal/acme 包的自动续期循环保持同一套到期语义。
 func (s *ACMEManagerStore) renewDue(ctx context.Context) {
 	mgr, cfg, err := s.Manager()
 	if err != nil || !cfg.AutoRenew {
@@ -394,11 +408,12 @@ func (s *ACMEManagerStore) renewDue(ctx context.Context) {
 		s.log.Warn("加载待续期证书失败", slog.Any("err", err))
 		return
 	}
+	now := time.Now()
 	for _, item := range items {
 		if item.Domain == "" || item.ExpiresAt == nil {
 			continue
 		}
-		if time.Until(*item.ExpiresAt) > time.Duration(cfg.RenewBeforeDays)*24*time.Hour {
+		if !acmepkg.ShouldRenewAt(*item.ExpiresAt, now, certRenewWindow(cfg.RenewBeforeDays)) {
 			continue
 		}
 		if err := mgr.Register(ctx); err != nil {
