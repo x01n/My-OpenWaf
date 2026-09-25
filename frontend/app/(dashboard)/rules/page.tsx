@@ -181,34 +181,6 @@ export default function RulesPage() {
     }
   }
 
-  const {
-    data: policies = [],
-    isLoading: policiesLoading,
-    error: policiesError,
-  } = usePolicies()
-
-  const initialPolicyId = useMemo(() => {
-    const rawPolicyId = searchParams.get("policy_id")
-    if (!rawPolicyId) return undefined
-    const parsed = Number(rawPolicyId)
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
-  }, [searchParams])
-
-  const defaultPolicyId = useMemo(
-    () => policies.find((policy) => policy.is_default)?.id,
-    [policies]
-  )
-  const effectivePolicyId = useMemo(() => {
-    const requestedPolicyId = policyId ?? initialPolicyId
-    if (
-      requestedPolicyId &&
-      policies.some((policy) => policy.id === requestedPolicyId)
-    ) {
-      return requestedPolicyId
-    }
-    return defaultPolicyId
-  }, [defaultPolicyId, initialPolicyId, policies, policyId])
-
   useEffect(() => {
     // Auth resolves after the first render. Consume the deep-link only once
     // role and policy are known, otherwise ?create=1 is lost permanently.
