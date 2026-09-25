@@ -135,3 +135,49 @@ func TestUpstreamRoundTripperForBaseRPCAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveUpstreamBaseMilliContract(t *testing.T) {
+	rt := snapshot.SiteRuntime{}
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "tls://svc:443/a", want: "https://svc:443/a"},
+		{raw: "grpcs://svc:443/a", want: "https://svc:443/a"},
+		{raw: "grpc+tls://svc:443/a", want: "https://svc:443/a"},
+		{raw: "grpc+https://svc:443/a", want: "https://svc:443/a"},
+		{raw: "GRPCS://svc:443/a", want: "https://svc:443/a"},
+		{raw: "grpc://svc:9000/a", want: "http://svc:9000/a"},
+		{raw: "GRPC://svc:9000/a", want: "http://svc:9000/a"},
+		{raw: "h2c://svc:9000/a", want: "http://svc:9000/a"},
+		{raw: "h3://svc:443/a", want: "https://svc:443/a"},
+		{raw: "https://svc:443/a", want: "https://svc:443/a"},
+		{raw: "http://svc:80/a", want: "http://svc:80/a"},
+		{raw: "", want: ""},
+		{raw: "h2c://127.0.0.1:8080/base", want: "http://127.0.0.1:8080/base"},
+		{raw: "h3://127.0.0.1:8443/base", want: "https://127.0.0.1:8443/base"},
+		{raw: "HTTPS://svc:443/a", want: "HTTPS://svc:443/a"},
+		{raw: "grpc+https://svc:443/base", want: "https://svc:443/base"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			res := resolveUpstreamBase(rt, tt.raw)
+			if got := NormalizeUpstreamURL(tt.raw); got != tt.want {
+				t.Fatalf("NormalizeUpstreamURL(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+			if res.normalized != tt.want {
+				t.Fatalf("resolveUpstreamBase(%q).normalized = %q, want %q", tt.raw, res.normalized, tt.want)
+			}
+			tr, normalizedBase := UpstreamRoundTripperForBase(rt, tt.raw)
+			if tr == nil {
+				t.Fatalf("UpstreamRoundTripperForBase(%q) returned nil transport", tt.raw)
+			}
+			if normalizedBase != tt.want || tr != res.transport {
+				t.Fatalf("UpstreamRoundTripperForBase(%q) = (%p, %q), resolver = (%p, %q)", tt.raw, tr, normalizedBase, res.transport, res.normalized)
+			}
+			if got := shouldUseHertzUpstream(tt.raw); got != res.hertzH2C {
+				t.Fatalf("resolver hertzH2C = %v, shouldUseHertzUpstream = %v", res.hertzH2C, got)
+			}
+		})
+	}
+}

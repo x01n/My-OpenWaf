@@ -107,7 +107,12 @@ func SharedTransport(rt snapshot.SiteRuntime) *http.Transport {
 
 // SharedTransportForUpstream keys the pool by the selected upstream scheme.
 func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Transport {
-	isHTTPS := isHTTPSUpstreamBase(base)
+	return sharedTransportForUpstreamClassified(rt, isHTTPSUpstreamBase(base))
+}
+
+// sharedTransportForUpstreamClassified 是 SharedTransportForUpstream 的
+// 免归一入口：调用方已通过 resolveUpstreamBase 求得 isHTTPS，直接取池。
+func sharedTransportForUpstreamClassified(rt snapshot.SiteRuntime, isHTTPS bool) *http.Transport {
 	key := transportKey{
 		isHTTPS: isHTTPS,
 	}
@@ -651,33 +656,70 @@ func NormalizeUpstreamURL(raw string) string {
 	return raw
 }
 
-// UpstreamRoundTripperForBase returns an appropriate http.RoundTripper and
-// normalized base URL for the given upstream URL scheme.
-func UpstreamRoundTripperForBase(rt snapshot.SiteRuntime, base string) (http.RoundTripper, string) {
+// upstreamBaseResolution 是对同一 base 的一次性 scheme 分类结果：
+// normalized 与旧的 NormalizeUpstreamURL / UpstreamRoundTripperForBase
+// 归一输出逐字节相同；transport 与 hertzH2C 分别复现旧行为。
+//
+// 分类只应在本函数内做一次；任何新调用点都从这里取值，不要
+// 再对同一个 base 单独展开 RPCUpstreamAliasForURL/ToLower/前缀扫描，
+// 否则三套分支结构的数据会重新漂移。
+type upstreamBaseResolution struct {
+	normalized string            // http(s):// 形式的 URL 前缀
+	transport  http.RoundTripper // 非 Hertz 路径 transport
+	hertzH2C   bool              // == 旧的 shouldUseHertzUpstream(base)
+}
+
+func resolveUpstreamBase(rt snapshot.SiteRuntime, base string) upstreamBaseResolution {
 	lower := strings.ToLower(base)
 	if strings.HasPrefix(lower, "h2c://") {
-		normalizedBase := "http://" + base[6:]
-		tr := h2cTransportForUpstream()
-		return tr, normalizedBase
+		// 与旧 h2c 分支逐字节相同；base 切片必须切原串，
+		// 前缀折叠匹配只在判定阶段。
+		return upstreamBaseResolution{
+			normalized: "http://" + base[6:],
+			transport:  h2cTransportForUpstream(),
+			hertzH2C:   true,
+		}
 	}
 	if strings.HasPrefix(lower, "h3://") {
-		normalizedBase := "https://" + base[5:]
+		// h3Host 截断只到第一个 '/'，与 PruneInactiveUpstreamTransports
+		// 的池键构造保持一致（见该函数 h3Host 提取逻辑）。
 		h3Host := base[5:]
 		if i := strings.IndexByte(h3Host, '/'); i >= 0 {
 			h3Host = h3Host[:i]
 		}
-		tr := http3TransportForUpstream(rt, h3Host)
-		return tr, normalizedBase
+		return upstreamBaseResolution{
+			normalized: "https://" + base[5:],
+			transport:  http3TransportForUpstream(rt, h3Host),
+			hertzH2C:   false,
+		}
 	}
 	if target, rest, ok := upstream.RPCUpstreamAliasForURL(base); ok {
-		// RPC 别名与对应传输 scheme 完全同语义：https 走共享 transport，
-		// h2c(grpc) 走 h2 prior knowledge transport。
+		// 别名命中在量产数据面上不可达（snapshot 构建期已展开），语义保留。
 		if target == "h2c" {
-			return h2cTransportForUpstream(), "http://" + rest
+			return upstreamBaseResolution{
+				normalized: "http://" + rest,
+				transport:  h2cTransportForUpstream(),
+				hertzH2C:   true,
+			}
 		}
-		return SharedTransportForUpstream(rt, base), "https://" + rest
+		return upstreamBaseResolution{
+			normalized: "https://" + rest,
+			transport:  sharedTransportForUpstreamClassified(rt, true),
+			hertzH2C:   false,
+		}
 	}
-	return SharedTransportForUpstream(rt, base), base
+	return upstreamBaseResolution{
+		normalized: base,
+		transport:  sharedTransportForUpstreamClassified(rt, isHTTPSUpstreamBase(base)),
+		hertzH2C:   false,
+	}
+}
+
+// UpstreamRoundTripperForBase returns an appropriate http.RoundTripper and
+// normalized base URL for the given upstream URL scheme.
+func UpstreamRoundTripperForBase(rt snapshot.SiteRuntime, base string) (http.RoundTripper, string) {
+	res := resolveUpstreamBase(rt, base)
+	return res.transport, res.normalized
 }
 
 var (
@@ -1254,7 +1296,6 @@ func requestPath(c *app.RequestContext) string {
 }
 
 func upstreamRequestURL(c *app.RequestContext, base string) string {
-	base = NormalizeUpstreamURL(base)
 	path := c.Request.URI().PathOriginal()
 	if len(path) == 0 {
 		path = c.Path()
@@ -1696,7 +1737,8 @@ func responseConnectionTokens(h http.Header) map[string]bool {
 
 // FetchHTTP performs the upstream request and returns a buffered response.
 func fetchHTTPResponse(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*http.Response, string, error) {
-	req, err := buildUpstreamRequest(ctx, c, base, clientIP, origHost, rt.PreserveOriginalHost)
+	res := resolveUpstreamBase(rt, base)
+	req, err := buildUpstreamRequest(ctx, c, res.normalized, clientIP, origHost, rt.PreserveOriginalHost)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1707,7 +1749,7 @@ func fetchHTTPResponse(ctx context.Context, c *app.RequestContext, rt snapshot.S
 		start = time.Now()
 	}
 
-	if shouldUseHertzUpstream(base) {
+	if res.hertzH2C {
 		hresp, hreq, requestDone, cancel, err := doHertzUpstream(ctx, rt, base, req)
 		if err != nil {
 			logUpstreamRequestError(ctx, "buffered", req, origHost, err)
@@ -1725,8 +1767,7 @@ func fetchHTTPResponse(ctx context.Context, c *app.RequestContext, rt snapshot.S
 		return hertzResponseToHTTPResponse(base, hresp, hreq, requestDone, cancel), req.Method, nil
 	}
 
-	transport, _ := UpstreamRoundTripperForBase(rt, base)
-	hc := sharedPooledClient(transport, 30*time.Second)
+	hc := sharedPooledClient(res.transport, 30*time.Second)
 	resp, err := hc.Do(req)
 	if err != nil {
 		logUpstreamRequestError(ctx, "buffered", req, origHost, err)
@@ -2616,7 +2657,8 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		upstreamParentCtx = context.WithoutCancel(ctx)
 	}
 	upstreamCtx, cancelUpstream := context.WithCancel(upstreamParentCtx)
-	req, err := buildUpstreamRequest(upstreamCtx, c, base, clientIP, origHost, rt.PreserveOriginalHost)
+	res := resolveUpstreamBase(rt, base)
+	req, err := buildUpstreamRequest(upstreamCtx, c, res.normalized, clientIP, origHost, rt.PreserveOriginalHost)
 	if err != nil {
 		cancelUpstream()
 		return err
@@ -2631,7 +2673,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		start = time.Now()
 	}
 	var resp *http.Response
-	if shouldUseHertzUpstream(base) {
+	if res.hertzH2C {
 		hresp, hreq, requestDone, cancelHertz, err := doHertzUpstream(upstreamCtx, rt, base, req)
 		if err != nil {
 			cancelUpstream()
@@ -2640,10 +2682,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 		}
 		resp = hertzResponseToHTTPResponse(base, hresp, hreq, requestDone, cancelHertz)
 	} else {
-		transport, _ := UpstreamRoundTripperForBase(rt, base)
-		// 总超时 0：HTTPS 握手与响应头仍受上层 ctx 截止时间约束，与缓冲路径一致；
-		// 无客户端级总超时可避免切断 SSE / WebSocket 等长连接流。
-		hc := sharedPooledClient(transport, 0)
+		hc := sharedPooledClient(res.transport, 0)
 		var err error
 		resp, err = hc.Do(req)
 		if err != nil {

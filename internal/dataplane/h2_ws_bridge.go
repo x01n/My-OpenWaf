@@ -226,6 +226,21 @@ func bridgeH2ExtendedConnectToWebSocket(ctx context.Context, reqID string, c *ap
 		stream.Close()
 		return err
 	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		ping := []byte{0x89, 0x80, 0x00, 0x00, 0x00, 0x00}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := upConn.Write(ping); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	// 双向中继；任一方向错误/EOF 后关闭整条桥。handler 在此期间不得
 	// 返回（返回即关流，见文件头取证说明）。
@@ -234,8 +249,6 @@ func bridgeH2ExtendedConnectToWebSocket(ctx context.Context, reqID string, c *ap
 	return h2WSRelay(stream.body, upConn, writer, 32*1024)
 }
 
-// h2WSRejectUpstreamHandshake 在握手失败时向入站扩展 CONNECT 返回 502
-// 并终结流；此时尚未接管 HijackWriter，使用 hertz 标准响应通道。
 func h2WSRejectUpstreamHandshake(c *app.RequestContext, err error) error {
 	if c != nil {
 		c.SetStatusCode(http.StatusBadGateway)
@@ -310,6 +323,9 @@ func forwardH2ExtendedConnectDirect(ctx context.Context, c *app.RequestContext, 
 	if err := c.Flush(); err != nil {
 		return err
 	}
+	// h2c 直通无 h1 握手中继（帧层 raw），入站 WS 帧（含 ping/pong）
+	// 由 h2WSRelay 原始转发；空档保活在 QUIC/h2 层协商处理，这里不加
+	// 应用层 ping 以免污染 h2c 帧流语义。
 	stop := context.AfterFunc(ctx, func() {
 		_ = upStream.Close()
 		_ = inStream.Close()

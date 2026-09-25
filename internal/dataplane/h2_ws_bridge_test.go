@@ -306,3 +306,44 @@ func h2WSEncodeTestHeaders(fields [][2]string) []byte {
 	copy(frame[9:], payload)
 	return frame
 }
+
+func TestH2FramePingMalformedLengthRejected(t *testing.T) {
+	s := &h2cExtConnectStream{br: bufio.NewReader(bytes.NewReader([]byte{1, 2, 3, 4, 5})), recvConn: 65535, recvStrm: 65535}
+	if err := s.handleFrame(h2FramePing, 0, 0, 5); err == nil {
+		t.Fatal("expected malformed PING frame error")
+	}
+}
+
+func TestH2cExtConnectStreamReadTransparentlyForwardsPings(t *testing.T) {
+	// 入站方向：inW 注入上游帧，br 从 inR 读；
+	// 出站方向：strm.conn 写 ACK，测试从 outR 读回。
+	inR, inW := net.Pipe()
+	outR, outW := net.Pipe()
+	defer inR.Close()
+	defer inW.Close()
+	defer outR.Close()
+	defer outW.Close()
+
+	strm := &h2cExtConnectStream{
+		conn:          outW,
+		br:            bufio.NewReader(inR),
+		recvConn:      h2cUpstreamRecvWindow,
+		recvStrm:      h2cUpstreamRecvWindow,
+		handshakeDone: make(chan struct{}),
+		closed:        make(chan struct{}),
+		writeDone:     make(chan struct{}),
+		dataCh:        make(chan []byte, 8),
+	}
+	go strm.readLoop(context.Background())
+	go func() {
+		_, _ = inW.Write(prependH2FrameHeader(h2FramePing, 0, 0, []byte{1, 2, 3, 4, 5, 6, 7, 8}))
+	}()
+	// 读回 ACK。（帧头 9 字节：0-2 长度、3 类型、4 标志、5-8 流 ID。）
+	buf := make([]byte, 17)
+	if _, err := io.ReadFull(outR, buf); err != nil {
+		t.Fatalf("read ping ack: %v", err)
+	}
+	if buf[3] != h2FramePing || buf[4] != h2FlagAck {
+		t.Fatalf("unexpected ack frame: % x", buf)
+	}
+}

@@ -39,7 +39,7 @@ func IsWebSocketUpgrade(c *app.RequestContext) bool {
 }
 
 // IsH2ExtendedWebSocketConnect 报告入站请求是否为 RFC 8441 扩展 CONNECT
-// WebSocket 流（CONNECT 方法且携带 ":protocol" 伪头）。":protocol" 
+// WebSocket 流（CONNECT 方法且携带 ":protocol" 伪头）。":protocol"
 // 伪头值不为空表示扩展 CONNECT，空串表示非扩展 CONNECT。
 func IsH2ExtendedWebSocketConnect(c *app.RequestContext) bool {
 	if c == nil || !bytes.Equal(c.Method(), []byte(http.MethodConnect)) {
@@ -168,6 +168,28 @@ func ForwardWebSocket(ctx context.Context, reqID string, c *app.RequestContext, 
 	if _, err := io.WriteString(clientConn, respHeaders); err != nil {
 		return err
 	}
+
+	// 在可写回的上游连接上保持 WS 保活：如果 TCP 保活穿透 NAT/防火墙
+	// 超过之后仍难以为空档长链路与客户端保活，就在这里定时发 WS ping；
+	// 客户端一侧的 ping 在 inspectWebSocketClientFrames（tunnel）里透明转发。
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		// WS ping（FIN + opcode 9）；按 RFC 6455 客户端必须掩码，
+		// 掩码位 + 全零掩码键对空负载不改变任何字节，兼容严格校验的
+		// 上游实现（大部分服务器容忍未掩码 empty ping，此处一并合规）。
+		ping := []byte{0x89, 0x80, 0x00, 0x00, 0x00, 0x00}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := upConn.Write(ping); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	pipeClient, pipeUpstream := net.Pipe()
 	defer pipeClient.Close()
@@ -435,12 +457,27 @@ func inspectWebSocketClientFrames(ctx context.Context, reqID string, clientIP ne
 			}
 			return
 		}
-		if eng != nil && len(frame.Payload) > 0 && (frame.Opcode == 0x1 || frame.Opcode == 0x2) {
+		if eng != nil && len(frame.Payload) > 0 &&
+			(frame.Opcode == 0x1 || frame.Opcode == 0x2) {
 			if hit := inspectWebSocketPayload(ctx, reqID, clientIP, c, rt, eng, frame.Payload); hit.IsTerminal() {
 				_ = dst.Close()
 				_ = src.Close()
 				return
 			}
+		}
+		if frame.Opcode == 0x9 { // ping：回 pong，载荷与 ping 逐字节一致。
+			// 掩码已由 readWSFrame 解除，把 MASK 位清掉、opcode 换成 0xA，
+			// 长度取解除掩码后的载荷长（帧体上限 4096，无扩展长度形态）。
+			pongHeader := []byte{frame.Raw[0], 0}
+			pongHeader[0] &^= 0x0F
+			pongHeader[0] |= 0xA
+			pongHeader[1] = byte(len(frame.Payload))
+			pong := append(pongHeader, frame.Payload...)
+			if _, err := dst.Write(pong); err != nil {
+				result = err
+				return
+			}
+			continue
 		}
 		if _, err := dst.Write(frame.Raw); err != nil {
 			result = err

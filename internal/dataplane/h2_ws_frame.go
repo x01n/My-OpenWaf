@@ -390,9 +390,14 @@ func (s *h2cExtConnectStream) handleFrame(ftype uint8, flags uint8, streamID uin
 		if flags&h2FlagAck != 0 {
 			return nil
 		}
+		if length != 8 {
+			return errors.New("malformed PING frame")
+		}
 		ack := prependH2FrameHeader(h2FramePing, h2FlagAck, 0, payload)
-		_, err = s.conn.Write(ack)
-		return err
+		if _, err = s.conn.Write(ack); err != nil {
+			return err
+		}
+		return nil
 	case h2FrameGoAway:
 		if err := discardRead(s.br, length); err != nil {
 			return err

@@ -3084,30 +3084,47 @@ var xssIndicatorLiteralBytes = []string{
 	"oninvalid",
 	"onafterscriptexecute",
 }
-
-// hasXSSIndicator returns false when the string has no HTML/JS injection indicator.
-// Note: the previous broad strings.Contains(s,"on") was replaced with specific
-// event-handler names to eliminate false positives on words like "connection",
-// "function", "location", "on" etc. that are ubiquitous in normal requests.
-// 数据驱动形与旧实现等价：先行 '<' 检查后进入单循环，任一表项用
-// strings.Index（等价于 Contains，且对已折叠输入的第二次调用天然覆盖）。
 func hasXSSIndicator(s string) bool {
 	if containsASCIIFoldBackdoorRune(s, '<') {
 		return true
 	}
-	// 旧实现对原始串做 71 条大小写敏感 Contains；此处保持一致（不折叠），
-	// 因为 hasXSSIndicator 之后的下游电池运行在已归一化（toLowerASCII）的串上，
-	// 本层折叠会改变"哪些输入进入电池"的行为面，属非等价。
+	var seenJ, seenF, seenO bool
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 'j':
+			seenJ = true
+		case 'f':
+			seenF = true
+		case 'o':
+			seenO = true
+		}
+	}
+	if seenJ && strings.Index(s, "javascript:") >= 0 {
+		return true
+	}
+	if seenF {
+		if strings.Index(s, "fetch(") >= 0 ||
+			strings.Index(s, "frames[") >= 0 ||
+			strings.Index(s, "fromcharcode") >= 0 {
+			return true
+		}
+	}
 	for _, flagB := range xssIndicatorLiteralBytes {
 		if len(flagB) == 0 {
+			continue
+		}
+		switch flagB[0] {
+		case 'o':
+			if !seenO {
+				continue
+			}
+		case 'j', 'f':
 			continue
 		}
 		if strings.Index(s, flagB) >= 0 {
 			return true
 		}
 	}
-	// Function 构造器（new Function/Function 调用）与 eval 同风险级，
-	// 且归一化后无标点锚点，补一句词表外的哨兵避免漏入 XSS 电池。
 	if strings.Contains(s, "function(") {
 		return true
 	}

@@ -5276,13 +5276,13 @@ func TestBuildUpstreamRequestPreservesEscapedPathForExplicitProtocols(t *testing
 	}{
 		{
 			name:       "h2c escaped path",
-			base:       "h2c://origin.example:8080/base",
+			base:       "http://origin.example:8080/base",
 			wantScheme: "http",
 			wantHost:   "origin.example:8080",
 		},
 		{
 			name:       "h3 escaped path",
-			base:       "h3://origin.example:8443/base",
+			base:       "https://origin.example:8443/base",
 			wantScheme: "https",
 			wantHost:   "origin.example:8443",
 		},
@@ -5409,22 +5409,22 @@ func TestUpstreamRequestURLPreservesExplicitProtocolBasePathAndQuery(t *testing.
 	}{
 		{
 			name: "explicit h2c",
-			base: "h2c://127.0.0.1:8080/base",
+			base: "http://127.0.0.1:8080/base",
 			want: "http://127.0.0.1:8080/base/resource?x=1&y=two",
 		},
 		{
 			name: "explicit h3",
-			base: "h3://127.0.0.1:8443/base",
+			base: "https://127.0.0.1:8443/base",
 			want: "https://127.0.0.1:8443/base/resource?x=1&y=two",
 		},
 		{
 			name: "explicit h2c escaped path",
-			base: "h2c://127.0.0.1:8080/base",
+			base: "http://127.0.0.1:8080/base",
 			want: "http://127.0.0.1:8080/base/assets/a%2Fb%20c.js?x=a%2Fb&y=two",
 		},
 		{
 			name: "explicit h3 escaped path",
-			base: "h3://127.0.0.1:8443/base",
+			base: "https://127.0.0.1:8443/base",
 			want: "https://127.0.0.1:8443/base/assets/a%2Fb%20c.js?x=a%2Fb&y=two",
 		},
 	}
@@ -5746,7 +5746,7 @@ func BenchmarkBuildUpstreamRequestExplicitH3EscapedPath(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		req, err := buildUpstreamRequest(context.Background(), ctx, "h3://127.0.0.1:8443/base", nil, "proxy.example.com", false)
+		req, err := buildUpstreamRequest(context.Background(), ctx, "https://127.0.0.1:8443/base", nil, "proxy.example.com", false)
 		if err != nil {
 			b.Fatal(err)
 		}

@@ -119,3 +119,37 @@ func TestIsSensitiveLogKeyLoweredMatchesWrapper(t *testing.T) {
 		}
 	}
 }
+
+// TestContainsSensitiveLogHintFoldMatchesOldSemantics 把新扫描器与
+// 旧「ToLower + Contains」语义做逐用例等价对照，防止快路径引入漏判。
+func TestContainsSensitiveLogHintFoldMatchesOldSemantics(t *testing.T) {
+	oldStyle := func(value string) bool {
+		if value == "" {
+			return false
+		}
+		lower := strings.ToLower(value)
+		for _, hint := range sensitiveLogValueHints {
+			if strings.Contains(lower, hint) {
+				return true
+			}
+		}
+		return false
+	}
+	cases := []string{
+		"",
+		"PASSWORD=hunter2",
+		"Token: AbCdEf123456",
+		"Api-Key=xyz789",
+		"SeSsIoN=deadbeef",
+		"Mozilla/5.0 (X11; Linux x86_64) Chrome/120.0.0.0",
+		"gzip, deflate, br",
+		"x=1&y=2&z=3",
+		"safe value with code suffix",
+		"Env{\"a\":\"b\"}",
+	}
+	for _, input := range cases {
+		if got, want := containsSensitiveLogHintFold(input), oldStyle(input); got != want {
+			t.Errorf("containsSensitiveLogHintFold(%q) = %v, old semantics = %v", input, got, want)
+		}
+	}
+}

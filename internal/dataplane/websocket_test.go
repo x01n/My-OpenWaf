@@ -1773,3 +1773,51 @@ func TestWSTLSDialWebSocketUpstreamBadCertFallsBackWithoutCert(t *testing.T) {
 		t.Fatal("expected fallback to shared TLS config dial path")
 	}
 }
+
+func TestInspectWebSocketClientFramesRespondsWithPong(t *testing.T) {
+	payload := []byte("hi")
+	maskKey := [4]byte{1, 2, 3, 4}
+	raw := []byte{0x89, 0x80 | byte(len(payload))}
+	masked := append([]byte(nil), payload...)
+	for i := range masked {
+		masked[i] ^= maskKey[i%4]
+	}
+	raw = append(raw, maskKey[:]...)
+	raw = append(raw, masked...)
+
+	clientConn, proxyClientConn := net.Pipe()
+	proxyUpstreamConn, upstreamConn := net.Pipe()
+	for _, conn := range []net.Conn{clientConn, proxyClientConn, proxyUpstreamConn, upstreamConn} {
+		defer conn.Close()
+		if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("set deadline: %v", err)
+		}
+	}
+
+	done := make(chan error, 2)
+	ctx := app.NewContext(0)
+	go inspectWebSocketClientFrames(context.Background(), "", nil, proxyClientConn, proxyUpstreamConn, ctx, snapshot.SiteRuntime{}, nil, done)
+
+	go func() {
+		_, _ = clientConn.Write(raw)
+		_ = clientConn.Close()
+	}()
+
+	want := []byte{0x8A, byte(len(payload))}
+	want = append(want, payload...)
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(upstreamConn, got); err != nil {
+		t.Fatalf("read pong: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("pong = % x, want % x", got, want)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("inspectWebSocketClientFrames returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for frame inspector")
+	}
+}

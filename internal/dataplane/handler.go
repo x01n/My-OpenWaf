@@ -2119,7 +2119,10 @@ var sensitiveLogValueHints = []string{
  * @return 敏感取值已替换为 [redacted] 的文本；无敏感内容时原样返回。
  */
 func sanitizeLogText(value string) string {
-	if !containsSensitiveLogHint(value) {
+	// 快路径：只做大小写无关的字面量子串扫描（零分配），任一关键字
+	// 都不出现时三个正则必然无法匹配——尤其是 (?i)(code|env|pwd|...) 这类
+	// 短关键字正则确实会在错误的前提下全串回溯扫描。
+	if !containsSensitiveLogHintFold(value) {
 		return value
 	}
 	value = sensitiveLogHeaderLinePattern.ReplaceAllString(value, `${1} [redacted]`)
@@ -2127,19 +2130,50 @@ func sanitizeLogText(value string) string {
 	return sensitiveLogValuePattern.ReplaceAllString(value, `${1}${2}[redacted]`)
 }
 
-// containsSensitiveLogHint 判断文本是否可能含敏感取值。
-// 命中即需要跑正则；未命中则正则必然不匹配。
-func containsSensitiveLogHint(value string) bool {
+// containsSensitiveLogHintFold 与 containsSensitiveLogHint 相同，但只做
+// 大小写无关的字面量扫描：在任何关键字出现时立即返回，所有大小写
+// 形式都在扫描中处理，不需要先整体 ToLower 再逐项 Contains。
+func containsSensitiveLogHintFold(value string) bool {
 	if value == "" {
 		return false
 	}
-	lower := toLowerASCII(value)
+	l := len(value)
 	for _, hint := range sensitiveLogValueHints {
-		if strings.Contains(lower, hint) {
-			return true
+		hl := len(hint)
+		if hl == 0 || hl > l {
+			continue
+		}
+		// 首字符一次定位，避免对每个 hint 跑完整的 strings.Contains。
+		for i := 0; i+hl <= l; i++ {
+			if asciiFoldByte(value[i], hint[0]) &&
+				asciiFoldPrefix(value[i:i+hl], hint) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// asciiFoldByte 返回 b 的 ASCII 小写等价：大写字母降 0x20，其余原样。
+func asciiFoldByte(b, want byte) bool {
+	if 'A' <= b && b <= 'Z' {
+		b += 'a' - 'A'
+	}
+	return b == want
+}
+
+// asciiFoldPrefix 判断 s 是否与 lower 前缀（全小写）ASCII 大小写无关相等。
+func asciiFoldPrefix(s, lower string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if 'A' <= b && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != lower[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func truncateLogValue(value string, limit int) string {

@@ -37,7 +37,7 @@ func DefaultHTTP2Config() HTTP2Config {
 		PermitProhibitedCipherSuites: true,
 		MaxConcurrentStreams:         100,
 		MaxReadFrameSize:             64 << 10,
-		IdleTimeoutSeconds:           10,
+		IdleTimeoutSeconds:           180,
 		MaxUploadBufferPerConnection: 512 << 10,
 		MaxUploadBufferPerStream:     256 << 10,
 		MaxHeaderBytes:               1 << 20,
