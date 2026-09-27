@@ -18,7 +18,7 @@ COPY --from=frontend /app/frontend/out ./internal/core/adminweb/dist
 RUN CGO_ENABLED=1 go build -tags=quickjs -ldflags="-s -w" -o /app/bin/my-openwaf ./cmd/...
 
 # Stage 3: Runtime
-FROM alpine:3.21
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata font-dejavu
 WORKDIR /app
 COPY --from=backend /app/bin/my-openwaf /app/my-openwaf
