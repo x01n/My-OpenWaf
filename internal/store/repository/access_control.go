@@ -1,8 +1,6 @@
 package repository
 
 import (
-	"time"
-
 	"My-OpenWaf/internal/store"
 
 	"gorm.io/gorm"
@@ -78,15 +76,6 @@ func (r *AccessControlRepo) GetAccessUserByName(siteID uint, username string) (*
 	return &user, nil
 }
 
-// GetAccessProvider 按 ID 读取认证提供方，不存在时返回 gorm.ErrRecordNotFound。
-func (r *AccessControlRepo) GetAccessProvider(id uint) (*store.AccessProvider, error) {
-	var provider store.AccessProvider
-	if err := r.db.First(&provider, id).Error; err != nil {
-		return nil, err
-	}
-	return &provider, nil
-}
-
 // CreateAccessUser 创建本地用户。
 // Enabled 字段带 gorm default:true，插入 false 会被 GORM 当作零值改用默认值，
 // 因此显式禁用时需要在插入后回写该列。
@@ -145,28 +134,4 @@ func (r *AccessControlRepo) UpdateAccessPathRule(rule *store.AccessPathRule) err
 // DeleteAccessPathRule 删除路径访问控制规则。
 func (r *AccessControlRepo) DeleteAccessPathRule(id uint) error {
 	return r.db.Delete(&store.AccessPathRule{}, id).Error
-}
-
-// CreateAccessSession 创建访问控制会话。
-func (r *AccessControlRepo) CreateAccessSession(session *store.AccessSession) error {
-	return r.db.Create(session).Error
-}
-
-// GetAccessSession 按 token 读取访问控制会话，不存在时返回 gorm.ErrRecordNotFound。
-func (r *AccessControlRepo) GetAccessSession(token string) (*store.AccessSession, error) {
-	var session store.AccessSession
-	if err := r.db.Where("token = ?", token).First(&session).Error; err != nil {
-		return nil, err
-	}
-	return &session, nil
-}
-
-// DeleteExpiredAccessSessions 删除所有已过期的会话。
-func (r *AccessControlRepo) DeleteExpiredAccessSessions() error {
-	return r.db.Where("expires_at < ?", time.Now().UTC()).Delete(&store.AccessSession{}).Error
-}
-
-// DeleteAccessSessionsBySite 删除指定站点的所有会话。
-func (r *AccessControlRepo) DeleteAccessSessionsBySite(siteID uint) error {
-	return r.db.Where("site_id = ?", siteID).Delete(&store.AccessSession{}).Error
 }

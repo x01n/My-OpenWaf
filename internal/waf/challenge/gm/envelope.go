@@ -80,6 +80,7 @@ const (
 	DomainCaptchaAnswer byte = 0x03 // captcha 答案（浏览器 -> 服务端）
 	DomainBrowserSign   byte = 0x04 // browser-sign 票据（服务端签署）
 	DomainToken         byte = 0x05 // 通行 cookie / 动态保护令牌（服务端单向）
+	DomainPowShards     byte = 0x06 // PoW 代码分片载荷（服务端 -> 浏览器，WASM VM 内拼接）
 )
 
 /**

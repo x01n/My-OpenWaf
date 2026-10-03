@@ -169,6 +169,13 @@ func BrowserSignInjectScript(ticket BrowserSignTicket) string {
 		BrowserSignHeaderEnv,
 		ticket.TicketSigPub,
 		ticket.TicketSigB64,
+		// 资产 URL 用内容派生版本串（powdata），**不是写死的常量**：
+		// 历史上这里是 `?v=f54bf002` / `?v=7ad1dbac`，精确对应提交 7e5180c
+		// 那一版资产，此后资产换过多次、串从未更新 —— 在 `immutable` 缓存下
+		// 会造成「老访客拿旧 wasm」的静默失配。槽位顺序必须与模板一致：
+		// 先 wasm、后 glue（错位不会编译报错，只会静默用错串）。
+		PowWasmURL(),
+		PowGlueURL(),
 	)
 	combined := envJS + "\n" + raw
 	attr := ""
@@ -433,10 +440,10 @@ var __owaf_bs_csp_nonce=(document.currentScript&&document.currentScript.nonce)||
 function loadWasm(){
 if(window.__owaf_wasm_ready)return window.__owaf_wasm_ready;
 window.__owaf_wasm_ready=new Promise(function(ok,err){
- function initialize(){wasm_bindgen("/__owaf/pow.wasm?v=f54bf002").then(ok).catch(err)}
+ function initialize(){wasm_bindgen("%s").then(ok).catch(err)}
  if(typeof WebAssembly==="undefined"){err(new Error("WebAssembly is unavailable"));return}
  if(typeof wasm_bindgen!=="undefined"){initialize();return}
- var sc=document.createElement("script");sc.src="/__owaf/pow_glue.js?v=7ad1dbac";if(__owaf_bs_csp_nonce)sc.nonce=__owaf_bs_csp_nonce;sc.async=true;sc.onload=initialize;sc.onerror=function(){err(new Error("browser sign wasm glue load failed"))};(document.head||document.documentElement).appendChild(sc)
+ var sc=document.createElement("script");sc.src="%s";if(__owaf_bs_csp_nonce)sc.nonce=__owaf_bs_csp_nonce;sc.async=true;sc.onload=initialize;sc.onerror=function(){err(new Error("browser sign wasm glue load failed"))};(document.head||document.documentElement).appendChild(sc)
 });
 return window.__owaf_wasm_ready
 }

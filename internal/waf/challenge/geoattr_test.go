@@ -70,7 +70,7 @@ func TestShieldVerifyGeoAttrConservativeTiers(t *testing.T) {
 				EnvFingerprintAAD("shield", sess.ID, sess.ChallengeSessionBinding))
 			c, h := findShieldPoWSolution(t, sess.Nonce, sess.Difficulty)
 			ok, _ := mgr.VerifyChallengeWithBinding(
-				sess.ID, "", c, h, enc, "http/1.1", sess.ChallengeSessionBinding,
+				sess.ID, "", c, h, enc, "", "http/1.1", sess.ChallengeSessionBinding,
 			)
 			if ok != tc.wantPass {
 				t.Fatalf("attr tier %q: VerifyChallengeWithBinding = %t, want %t (attrScore=%d)", tc.name, ok, tc.wantPass, tc.attrScore)
@@ -120,7 +120,7 @@ func TestShieldVerifyGeoAttrNilAndNoIPCostZero(t *testing.T) {
 		t, marshalShieldEnvFingerprint(t, fingerprint), sess.EnvKey,
 		EnvFingerprintAAD("shield", sess.ID, sess.ChallengeSessionBinding))
 	c, h := findShieldPoWSolution(t, sess.Nonce, sess.Difficulty)
-	if ok, _ := mgr.VerifyChallengeWithBinding(sess.ID, "", c, h, enc, "http/1.1", sess.ChallengeSessionBinding); !ok {
+	if ok, _ := mgr.VerifyChallengeWithBinding(sess.ID, "", c, h, enc, "", "http/1.1", sess.ChallengeSessionBinding); !ok {
 		t.Fatal("nil attr with no issuer IP must keep baseline pass")
 	}
 
@@ -135,7 +135,7 @@ func TestShieldVerifyGeoAttrNilAndNoIPCostZero(t *testing.T) {
 		t, marshalShieldEnvFingerprint(t, fingerprint), sess2.EnvKey,
 		EnvFingerprintAAD("shield", sess2.ID, sess2.ChallengeSessionBinding))
 	c2, h2 := findShieldPoWSolution(t, sess2.Nonce, sess2.Difficulty)
-	if ok, _ := mgr.VerifyChallengeWithBinding(sess2.ID, "", c2, h2, enc2, "http/1.1", sess2.ChallengeSessionBinding); !ok {
+	if ok, _ := mgr.VerifyChallengeWithBinding(sess2.ID, "", c2, h2, enc2, "", "http/1.1", sess2.ChallengeSessionBinding); !ok {
 		t.Fatal("nil attr provider with issuer IP must keep baseline pass")
 	}
 }

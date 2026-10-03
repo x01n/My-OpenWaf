@@ -176,8 +176,12 @@ func TestBinaryBodyFalsePositivesNotFlagged(t *testing.T) {
 	}
 }
 
-// TestBinaryBodySuppressorIsTheOnlyDefence 证明这两条规则的正则在真实样本上确实匹配，
-// 即二进制目标判定是唯一防线；若判定被误改，本测试与上面的用例会同时暴露问题。
+// TestBinaryBodySuppressorIsTheOnlyDefence 记录这两条规则的正则与真实样本的关系：
+// 两条规则各自收紧后都不再命中自己的样本 —— owasp:sqli:006 由「分号后任意词字符」
+// 收紧为「分号后 SQL 语句关键字」，owasp:cmd:002 由「反引号体内任意位置含命令词子串」
+// 收紧为「命令词位于反引号体内命令位置 + 体内长度上界」——样本 1/2 由判据本身拒绝，
+// 二进制目标判定退为第二道防线（高熵目标修正命令词位置判据）。若某条正则重新命中对应
+// 样本，说明该判据回退到了旧形态，本测试即失败并提示重新评估。
 func TestBinaryBodySuppressorIsTheOnlyDefence(t *testing.T) {
 	sample1 := normalizeBodyTarget(decodeFPSample(t, falsePositiveSample1BodyB64))
 	sample2 := normalizeBodyTarget(decodeFPSample(t, falsePositiveSample2SliceB64))
@@ -196,11 +200,11 @@ func TestBinaryBodySuppressorIsTheOnlyDefence(t *testing.T) {
 	if cmd002 == nil || sqli006 == nil {
 		t.Fatal("expected owasp:cmd:002 and owasp:sqli:006 to exist")
 	}
-	if !cmd002.re.MatchString(sample1) {
-		t.Error("owasp:cmd:002 regex no longer matches sample1; test lost its meaning")
+	if cmd002.re.MatchString(sample1) {
+		t.Error("owasp:cmd:002 regex matches sample1 again; 该规则已收紧为「命令词位于反引号体内命令位置 + 体内长度上界」，若重新命中说明判据回退到「体内任意位置含命令词子串」的旧形态，二进制目标判定不再是 sample1 的唯一防线")
 	}
-	if !sqli006.re.MatchString(sample2) {
-		t.Error("owasp:sqli:006 regex no longer matches sample2; test lost its meaning")
+	if sqli006.re.MatchString(sample2) {
+		t.Error("owasp:sqli:006 regex matches sample2 again; 该规则已收紧为「分号后 SQL 语句关键字」，若重新命中说明判据回退到「分号后任意词字符」的旧形态，二进制目标判定不再是 sample2 的唯一防线")
 	}
 }
 

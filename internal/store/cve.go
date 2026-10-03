@@ -25,6 +25,11 @@ type CVERuleRecord struct {
 	Approved    bool           `gorm:"default:false" json:"approved"`
 	CVSSScore   float64        `gorm:"default:0" json:"cvss_score"`
 	CWEType     string         `gorm:"size:32" json:"cwe_type"`
+	// References 是 NVD 采集的参考链接，换行分隔；手工与自动生成的规则为空。
+	// 本模型与 cve.CVERuleModel 映射同一张 cve_rules 表，字段集必须保持一致——
+	// 本结构体负责建表/加列（AutoMigrate），cve.CVERuleModel 负责运行时读写，
+	// 只在其中一侧新增字段会导致列不存在于表中。见 model_parity_test.go。
+	References string `gorm:"type:text" json:"references"`
 }
 
 func (CVERuleRecord) TableName() string { return "cve_rules" }

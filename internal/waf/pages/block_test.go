@@ -116,7 +116,7 @@ func TestBuildErrorFallbackHTML504(t *testing.T) {
 }
 
 func TestBuildChallengeHTMLContainsTokens(t *testing.T) {
-	html := buildChallengeHTML("req-chal", "ts-value", "tok-value", "", "", pageconfig.DefaultChallengePageConfig())
+	html := buildChallengeHTML("req-chal", "ts-value", "tok-value", "", "", "", "", pageconfig.DefaultChallengePageConfig())
 	if !strings.Contains(html, "req-chal") {
 		t.Fatalf("challenge HTML missed reqID: %s", html)
 	}
@@ -130,7 +130,7 @@ func TestBuildChallengeHTMLContainsTokens(t *testing.T) {
 
 func TestBuildChallengeHTMLEscapesHTMLAndJavaScriptValues(t *testing.T) {
 	payload := `</script><script>alert("challenge")</script>`
-	html := buildChallengeHTML(payload, payload, payload, "", "", pageconfig.DefaultChallengePageConfig())
+	html := buildChallengeHTML(payload, payload, payload, "", "", "", "", pageconfig.DefaultChallengePageConfig())
 
 	if strings.Contains(html, `<script>alert("challenge")</script>`) {
 		t.Fatalf("challenge HTML reflected executable input: %s", html)
@@ -144,7 +144,7 @@ func TestBuildChallengeHTMLEscapesHTMLAndJavaScriptValues(t *testing.T) {
 }
 
 func TestBuildChallengeHTMLWithEnvJS(t *testing.T) {
-	html := buildChallengeHTML("req-env", "ts2", "tok2", "var env_injected=1;", "", pageconfig.DefaultChallengePageConfig())
+	html := buildChallengeHTML("req-env", "ts2", "tok2", "var env_injected=1;", "", "", "", pageconfig.DefaultChallengePageConfig())
 	if !strings.Contains(html, "env_injected") {
 		t.Fatalf("challenge HTML missed injected envJS: %s", html)
 	}
@@ -152,7 +152,7 @@ func TestBuildChallengeHTMLWithEnvJS(t *testing.T) {
 
 // TestBuildChallengeHTMLInjectsPoWScript 验证 WASM PoW 脚本被注入挑战页。
 func TestBuildChallengeHTMLInjectsPoWScript(t *testing.T) {
-	html := buildChallengeHTML("req-pow", "ts3", "tok3", "", "var __pow_marker=1;", pageconfig.DefaultChallengePageConfig())
+	html := buildChallengeHTML("req-pow", "ts3", "tok3", "", "var __pow_marker=1;", "", "", pageconfig.DefaultChallengePageConfig())
 	if !strings.Contains(html, "__pow_marker") {
 		t.Fatalf("challenge HTML missed injected PoW script: %s", html)
 	}
@@ -165,7 +165,7 @@ func TestBuildChallengeHTMLInjectsPoWScript(t *testing.T) {
 // 工作量证明必须只由 WASM 求解，页面内不得内联 JS 版 SHA-256 实现，
 // 否则攻击者可绕过 WASM 直接用脚本求解。
 func TestBuildChallengeHTMLHasNoJSPoWFallback(t *testing.T) {
-	html := buildChallengeHTML("req-nofb", "ts4", "tok4", "", "", pageconfig.DefaultChallengePageConfig())
+	html := buildChallengeHTML("req-nofb", "ts4", "tok4", "", "", "", "", pageconfig.DefaultChallengePageConfig())
 	// 纯 JS SHA-256 实现的特征常量（K 表首项与初始哈希值）。
 	for _, marker := range []string{"0x428a2f98", "0x6a09e667", "0x71374491"} {
 		if strings.Contains(html, marker) {
@@ -182,7 +182,7 @@ func TestBuildChallengeHTMLUsesConfigAndRejectsUnsafeValues(t *testing.T) {
 	cfg.WaitText = "Configured wait"
 	cfg.LogoURL = "data:text/html,<script>alert(1)</script>"
 	cfg.CustomCSS = `</style><script>alert(1)</script>.configured{color:red}`
-	html := buildChallengeHTML("request", "ts", "token", "", "", cfg)
+	html := buildChallengeHTML("request", "ts", "token", "", "", "", "", cfg)
 
 	for _, want := range []string{"Configured title", "Configured checking", "Configured wait", "&lt;img src=x onerror=alert(1)&gt;"} {
 		if !strings.Contains(html, want) {
@@ -288,6 +288,50 @@ func extractHiddenField(t *testing.T, body, name string) string {
 	end := strings.Index(rest, `"`)
 	if end < 0 {
 		t.Fatalf("unterminated %s literal in challenge page", varName)
+	}
+	return rest[:end]
+}
+
+// TestWriteChallengeResponseEncryptedVMShards 验证 challenge 响应默认走
+// 加密分片 v2 管线：页面必须包含信封与 keyHex 两个 hidden input、带
+// vm_assemble_shards 的引导壳、以及 (0,eval) 注入点；信封与 keyHex 值
+// 非空（可解性由 challenge 包等价锁测试以 gm.Open 覆盖）。
+func TestWriteChallengeResponseEncryptedVMShards(t *testing.T) {
+	var c app.RequestContext
+	claims := challenge.ChallengeTokenClaims{ClientIP: "203.0.113.9", UserAgent: "ua", Host: "a.example", SiteID: 3}
+	WriteChallengeResponse(&c, "req-chal-vm", nil, false, 403, pageconfig.DefaultChallengePageConfig(), claims)
+
+	body := string(c.Response.Body())
+	if c.Response.StatusCode() != 403 {
+		t.Fatalf("status = %d, want 403", c.Response.StatusCode())
+	}
+	for _, want := range []string{`id="__owaf_pow_env"`, `id="__owaf_pow_key"`, "vm_assemble_shards", "(0,eval).call(window,"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("challenge response missing %q", want)
+		}
+	}
+	env := extractInputValue(t, body, "__owaf_pow_env")
+	keyHex := extractInputValue(t, body, "__owaf_pow_key")
+	if env == "" || keyHex == "" {
+		t.Fatalf("challenge response emitted empty vm shard hidden inputs: env=%q key=%q", env, keyHex)
+	}
+	if len(keyHex) != 64 {
+		t.Fatalf("pow keyHex length = %d, want 64 hex chars", len(keyHex))
+	}
+}
+
+// extractInputValue 从 HTML 中取出指定 id 的 hidden input 的 value 属性字面量。
+func extractInputValue(t *testing.T, body, id string) string {
+	t.Helper()
+	marker := `id="` + id + `" value="`
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		t.Fatalf("hidden input %s not found: %s", id, body)
+	}
+	rest := body[idx+len(marker):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		t.Fatalf("unterminated value for hidden input %s", id)
 	}
 	return rest[:end]
 }

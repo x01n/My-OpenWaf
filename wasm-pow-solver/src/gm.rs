@@ -24,6 +24,8 @@ pub const DOMAIN_CAPTCHA_DATA: u8 = 0x02;
 pub const DOMAIN_CAPTCHA_ANSWER: u8 = 0x03;
 /// 域代号：0x04 browser-sign 票据。
 pub const DOMAIN_BROWSERSIGN: u8 = 0x04;
+/// 域代号：0x06 PoW 代码分片载荷
+pub const DOMAIN_POW_SHARDS: u8 = 0x06;
 
 // SM2 国标曲线参数（私钥区间校验）。
 const ECC_N: &str = "FFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFF7203DF6B21C6052B53BBF40939D54123";
@@ -47,7 +49,6 @@ const ECC_GY: [u8; 32] = [
     0xd0, 0xa9, 0x87, 0x7c, 0xc6, 0x2a, 0x47, 0x40, 0x02, 0xdf, 0x32, 0xe5, 0x21, 0x39, 0xf0, 0xa0,
 ];
 
-// SM4 加密 S 盒与常量（GM/T 0002-2012）。
 const SM4_SBOX: [u8; 256] = [
     0xd6, 0x90, 0xe9, 0xfe, 0xcc, 0xe1, 0x3d, 0xb7, 0x16, 0xb6, 0x14, 0xc2, 0x28, 0xfb, 0x2c, 0x05,
     0x2b, 0x67, 0x9a, 0x76, 0x2a, 0xbe, 0x04, 0xc3, 0xaa, 0x44, 0x13, 0x26, 0x49, 0x86, 0x06, 0x99,
@@ -140,20 +141,17 @@ fn sm4_l(word: u32) -> u32 {
 }
 
 fn inc32(counter: &mut [u8; 16]) {
-    let mut carry = 0u16;
-    for byte in counter.iter_mut().rev() {
-        let sum = *byte as u16 + 1 + carry;
-        *byte = (sum & 0xff) as u8;
-        carry = if sum > 0xff { 1 } else { 0 };
+    let mut carry = 1u32;
+    for i in (12..16).rev() {
+        let sum = counter[i] as u32 + carry;
+        counter[i] = (sum & 0xff) as u8;
+        carry = sum >> 8;
         if carry == 0 {
             break;
         }
     }
 }
 
-/// [`gcm_mul`] Galois 域 GF(2^128) 乘法（模 x^128+x^7+x^2+x+1）。
-/// NIST SP 800-38D 参考实现：X 按块内 MSB 优先逐位移动，V 右移并按
-/// 被移出的 LSB 决定是否并入约简多项式 R（0xe1 置于最高字节）。
 fn gcm_mul(x_in: u128, y: u128) -> u128 {
     const R: u128 = 0xe1000000000000000000000000000000;
     let mut z = 0u128;
@@ -174,7 +172,6 @@ fn gcm_mul(x_in: u128, y: u128) -> u128 {
     z
 }
 
-/// [`ghash`] GCM GHASH：零填充的 AAD || 零填充的密文 || len(AAD)*8 || len(CT)*8。
 fn ghash(aad: &[u8], ciphertext: &[u8], key: u128) -> u128 {
     let mut y = 0u128;
     let ingest = |bytes: &[u8], y: &mut u128| {
@@ -365,9 +362,6 @@ fn sm4_gcm_decrypt_with_nonce(
     Some(plaintext)
 }
 
-// ---------- 密钥与信封工具 ----------
-
-/// [`envelope_header`] 构造 8 字节头部：magic|version|domain|reserved|sig_len。
 fn envelope_header(domain: u8) -> [u8; ENVELOPE_HEADER_BYTES] {
     [
         ENVELOPE_MAGIC[0],
@@ -396,7 +390,11 @@ fn sm4_key_from_hex(key_hex: &str) -> Option<[u8; SM4_KEY_BYTES]> {
 fn domain_ok(domain: u8) -> bool {
     matches!(
         domain,
-        DOMAIN_ENV | DOMAIN_CAPTCHA_DATA | DOMAIN_CAPTCHA_ANSWER | DOMAIN_BROWSERSIGN
+        DOMAIN_ENV
+            | DOMAIN_CAPTCHA_DATA
+            | DOMAIN_CAPTCHA_ANSWER
+            | DOMAIN_BROWSERSIGN
+            | DOMAIN_POW_SHARDS
     )
 }
 
@@ -1145,10 +1143,6 @@ fn decode_pub_key(trimmed: &str) -> Option<Vec<u8>> {
     }
 }
 
-// ---------- wasm 导出（b1 第 8 条导出名） ----------
-
-/// [`gm_sm3_hmac`] b1 契约：SM3(key||msg) 输出 hex（64 字符）。
-/// key 为会话主密钥 hex（64 字符 key32），超长 key 一律拒绝。
 #[wasm_bindgen]
 pub fn gm_sm3_hmac(keyhex: &str, msg: &str) -> String {
     let mut key = match crate::crypto::hex_decode(keyhex) {
@@ -1297,6 +1291,126 @@ pub fn gm_open_verify_sig(envelope: &str, key_hex: &str, domain: u8, pub_hex: &s
     match open_raw_signed(envelope, key_hex, domain, pub_hex) {
         Some(plaintext) => plaintext,
         None => String::new(),
+    }
+}
+
+/// [`fnv1a32`] 计算字节串的 32 位 FNV-1a 校验和，与 Go 侧
+/// `internal/waf/challenge` 的 fnv1a32 逐字节同构：hash 以乘法回绕
+/// 实现 32 位截断（Rust 显式溢出行为）。
+fn fnv1a32(data: &[u8]) -> u32 {
+    let mut hash: u32 = 2166136261;
+    for &b in data {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash
+}
+
+/// [`base64url_decode_buf`] 无填充 base64url 解码（允许大小写字母、
+/// 数字、`-`、`_` 以及空白；不认标准 `+` `/` 以拒绝跨编码混淆）。
+/// 返回 None 表示字符非法或位长不可整解码。
+fn base64url_decode_buf(input: &str) -> Option<Vec<u8>> {
+    let mut buf = Vec::with_capacity(input.len());
+    for b in input.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b' ' | b'\r' | b'\n' | b'\t' => continue,
+            _ => return None,
+        };
+        buf.push(v as u32);
+    }
+    // 每 4 个 6 位符号解 3 字节；尾部符号以 0 补齐低位，
+    // 与 Go base64.RawURLEncoding.DecodeString 逐位同构。
+    let mut out = Vec::with_capacity(buf.len() / 4 * 3);
+    let mut i = 0;
+    while i + 4 <= buf.len() {
+        let n = (buf[i] << 18) | (buf[i + 1] << 12) | (buf[i + 2] << 6) | buf[i + 3];
+        out.push((n >> 16 & 0xFF) as u8);
+        out.push((n >> 8 & 0xFF) as u8);
+        out.push((n & 0xFF) as u8);
+        i += 4;
+    }
+    match buf.len() - i {
+        0 => Some(out),
+        2 => {
+            out.push((buf[i] << 2 | buf[i + 1] >> 4) as u8);
+            Some(out)
+        }
+        3 => {
+            out.push((buf[i] << 2 | buf[i + 1] >> 4) as u8);
+            out.push((buf[i + 1] << 4 | buf[i + 2] >> 2) as u8);
+            Some(out)
+        }
+        // 剩 1 个符号不足 12 有效位，非法。
+        _ => None,
+    }
+}
+
+/// [`vm_assemble_shards`] b2 契约：分片只在 WASM 内存内解码、XOR、
+/// 拼接并校验（JS 侧不接触任何中间片明文）。流程：用 0x06 域打开
+/// envelope 得到内层 JSON，逐片 base64url 解码后与单字节密钥 XOR，
+/// 顺序拼接，FNV-1a 32 比对 crc（不等返回空串），UTF-8 合法才返回
+/// 完整 code。任何异常（信封/格式/解码/校验）均返回空串。
+#[wasm_bindgen]
+pub fn vm_assemble_shards(envelope: &str, key_hex: &str) -> String {
+    let plain = match crate::crypto::base64_decode(envelope) {
+        Some(raw) => raw,
+        None => return String::new(),
+    };
+    let key = match sm4_key_from_hex(key_hex) {
+        Some(key) => key,
+        None => return String::new(),
+    };
+    let plaintext = match open_raw(DOMAIN_POW_SHARDS, &key, &plain) {
+        Some(plaintext) => plaintext,
+        None => return String::new(),
+    };
+    let parsed: serde_json::Value = match serde_json::from_slice(&plaintext) {
+        Ok(parsed) => parsed,
+        Err(_) => return String::new(),
+    };
+    let shards = match parsed.get("shards").and_then(|s| s.as_array()) {
+        Some(shards) => shards,
+        None => return String::new(),
+    };
+    if shards.is_empty() {
+        return String::new();
+    }
+    let crc = match parsed.get("crc") {
+        Some(serde_json::Value::Number(n)) => n.as_u64().filter(|c| *c <= u32::MAX as u64).map(|c| c as u32),
+        Some(serde_json::Value::String(s)) => s.parse::<u32>().ok(),
+        _ => None,
+    };
+    let crc = match crc {
+        Some(crc) => crc,
+        None => return String::new(),
+    };
+    let mut body = Vec::new();
+    for item in shards {
+        let key_byte = match item.get("k").and_then(|k| k.as_u64()) {
+            Some(k) if k <= u8::MAX as u64 => k as u8,
+            _ => return String::new(),
+        };
+        let text = match item.get("d").and_then(|d| d.as_str()) {
+            Some(text) => text,
+            None => return String::new(),
+        };
+        let piece = match base64url_decode_buf(text) {
+            Some(piece) => piece,
+            None => return String::new(),
+        };
+        body.extend(piece.iter().map(|b| b ^ key_byte));
+    }
+    if fnv1a32(&body) != crc {
+        return String::new();
+    }
+    match String::from_utf8(body) {
+        Ok(code) => code,
+        Err(_) => String::new(),
     }
 }
 
@@ -1777,5 +1891,145 @@ mod tests {
         raw2[ct_byte] ^= 0x01;
         let tampered = crate::crypto::base64url_encode(&raw2);
         assert!(gm_open_verify_sig(&tampered, KEY_HEX, DOMAIN_ENV, &pk).is_empty());
+    }
+
+    /// 用 b2 内层 JSON 契约手工构造试验数据封城 0x06 信封，
+    /// 供 vm_assemble_shards 锁测试做 Go 侧黄金向量同构的 roundtrip。
+    fn seal_shard_from_pieces(pieces: &[&[u8]], keys: &[u8], crc: u32) -> String {
+        let items: Vec<serde_json::Value> = pieces
+            .iter()
+            .zip(keys.iter())
+            .map(|(piece, key)| {
+                serde_json::json!({"k": *key, "d": pow_b64_encode(piece)})
+            })
+            .collect();
+        let payload = serde_json::json!({"v": 2, "shards": items, "crc": crc});
+        seal_envelope_text(
+            KEY_HEX,
+            &serde_json::to_string(&payload).expect("json"),
+            DOMAIN_POW_SHARDS,
+        )
+    }
+
+    /// 与 Go `base64.RawURLEncoding` 完全一致的编码器（后续两字节补齐
+    /// 零位，SEM3 全输出；crate::crypto::base64url_encode 尾部丢字符，
+    /// 不能用于生产契约数据）。
+    fn pow_b64_encode(data: &[u8]) -> String {
+        const CHARS: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+        for chunk in data.chunks(3) {
+            let a = chunk[0] as u32;
+            let b = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+            let c = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+            let t = (a << 16) | (b << 8) | c;
+            out.push(CHARS[((t >> 18) & 63) as usize] as char);
+            out.push(CHARS[((t >> 12) & 63) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(CHARS[((t >> 6) & 63) as usize] as char);
+            }
+            if chunk.len() > 2 {
+                out.push(CHARS[(t & 63) as usize] as char);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn vm_assemble_shards_roundtrip_and_tamper() {
+        // 三片明文按单字节密钥 XOR 后封城，拼回必须与原 code 一致。
+        let code = "var boot=String.fromCharCode(65,66,67);boot();";
+        let split: [&[u8]; 3] = [
+            &code.as_bytes()[..13],
+            &code.as_bytes()[13..29],
+            &code.as_bytes()[29..],
+        ];
+        let keys: [u8; 3] = [3, 200, 119];
+        let xored: Vec<Vec<u8>> = split
+            .iter()
+            .zip(keys.iter())
+            .map(|(piece, key)| piece.iter().map(|b| b ^ key).collect())
+            .collect();
+        // 黄金 crc：由 Node 独立计算锁定 = 1929764233。
+        let crc = fnv1a32(code.as_bytes());
+        assert_eq!(crc, 1929764233, "crc gold mismatch");
+        let xored_refs: Vec<&[u8]> = xored.iter().map(|v| v.as_slice()).collect();
+        let envelope = seal_shard_from_pieces(&xored_refs, &keys, crc);
+        assert!(!envelope.is_empty());
+
+        let assembled = vm_assemble_shards(&envelope, KEY_HEX);
+        assert_eq!(assembled, code);
+
+        // 其余域代号一律拒绝（跨域密文重用防护）。
+        let other = seal_envelope_text(KEY_HEX, "xx", DOMAIN_ENV);
+        assert!(vm_assemble_shards(&other, KEY_HEX).is_empty());
+        // 错误 key 拒绝。
+        let wrong = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        assert!(vm_assemble_shards(&envelope, wrong).is_empty());
+        // 非法 JSON 回空。
+        let garbage = seal_envelope_text(KEY_HEX, "not-json", DOMAIN_POW_SHARDS);
+        assert!(vm_assemble_shards(&garbage, KEY_HEX).is_empty());
+        // 非法片 base64url 回空。
+        let bad_item = serde_json::json!({"v": 2, "shards": [{"k": 1, "d": "!!!bad!!!"}], "crc": 0u32});
+        let bad_env = seal_envelope_text(
+            KEY_HEX,
+            &serde_json::to_string(&bad_item).expect("json"),
+            DOMAIN_POW_SHARDS,
+        );
+        assert!(vm_assemble_shards(&bad_env, KEY_HEX).is_empty());
+        // CRC 落后一位（篡改单个片字节）回空。
+        let mut t = xored.clone();
+        t[2][0] ^= 0x40;
+        let t_refs: Vec<&[u8]> = t.iter().map(|v| v.as_slice()).collect();
+        let bad_crc_env = seal_shard_from_pieces(&t_refs, &keys, crc);
+        assert!(vm_assemble_shards(&bad_crc_env, KEY_HEX).is_empty());
+
+        // 独立的 32 位 CRC 平台锁定：0x0A 的 FNV-1a（Node 侧独立算出）。
+        assert_eq!(fnv1a32(&[0x0a]), 252472541);
+    }
+}
+
+
+#[cfg(test)]
+mod gcm_interop_tests {
+    use super::*;
+
+    fn hex4(s: &str) -> [u8; 16] {
+        let bytes = crate::crypto::hex_decode(s).expect("hex");
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&bytes);
+        out
+    }
+
+    #[test]
+    fn gcm_ct_tag_matches_go_standard() {
+        let key = hex4("0123456789abcdeffedcba9876543210");
+        let nonce = [0u8; GM_NONCE_BYTES];
+        let pt = [0x0au8; 16];
+        let aad = crate::crypto::hex_decode("4f57564502021a0040").expect("aad hex");
+        let cipher = Sm4Cipher::new(&key);
+        let (ct, tag) = sm4_gcm_encrypt_with_nonce(&cipher, &nonce, &pt, &aad);
+        assert_eq!(
+            crate::hex_encode(&ct),
+            "b919660e449f4227456f2463452d4bc7",
+            "ct 与 Go cipher.NewGCM 黄金向量不一致"
+        );
+        assert_eq!(
+            crate::hex_encode(&tag),
+            "0df932011facf3ba7caba287a5311813",
+            "tag 与 Go cipher.NewGCM 黄金向量不一致"
+        );
+    }
+
+    #[test]
+    fn gcm_roundtrip_matches_go() {
+        let key = hex4("0123456789abcdeffedcba9876543210");
+        let nonce = [0u8; GM_NONCE_BYTES];
+        let pt = [0x0au8; 16];
+        let aad = crate::crypto::hex_decode("4f57564502021a0040").expect("aad hex");
+        let cipher = Sm4Cipher::new(&key);
+        let (ct, tag) = sm4_gcm_encrypt_with_nonce(&cipher, &nonce, &pt, &aad);
+        let opened = sm4_gcm_decrypt_with_nonce(&cipher, &nonce, &ct, &aad, &tag);
+        assert_eq!(opened.as_deref(), Some(&pt[..]));
     }
 }

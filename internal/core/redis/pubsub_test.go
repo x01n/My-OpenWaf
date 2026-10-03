@@ -13,7 +13,7 @@ import (
 
 	"log/slog"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 type testConfigSyncRedisServer struct {
@@ -130,7 +130,17 @@ func (s *testConfigSyncRedisServer) handle(conn net.Conn) {
 
 		switch strings.ToUpper(args[0]) {
 		case "HELLO":
-			_, _ = conn.Write([]byte("-ERR unknown command 'hello'\r\n"))
+			// rueidis 恒定 HELLO 3，以 RESP3 map 应答；proto 必须为整数。
+			_, _ = conn.Write([]byte("%7\r\n" +
+				"$6\r\nserver\r\n$5\r\nredis\r\n" +
+				"$7\r\nversion\r\n$5\r\n7.2.5\r\n" +
+				"$5\r\nproto\r\n:3\r\n" +
+				"$2\r\nid\r\n:1\r\n" +
+				"$4\r\nmode\r\n$10\r\nstandalone\r\n" +
+				"$4\r\nrole\r\n$6\r\nmaster\r\n" +
+				"$7\r\nmodules\r\n$0\r\n\r\n"))
+		case "CLUSTER":
+			_, _ = conn.Write([]byte("-ERR CLUSTER is not supported by mock\r\n"))
 		case "PING":
 			_, _ = conn.Write([]byte("+PONG\r\n"))
 		case "SUBSCRIBE":
@@ -141,7 +151,9 @@ func (s *testConfigSyncRedisServer) handle(conn net.Conn) {
 			for _, channel := range args[1:] {
 				s.addSubscriber(channel, c)
 				c.channels[channel] = struct{}{}
-				_, _ = fmt.Fprintf(conn, "*3\r\n$9\r\nsubscribe\r\n$%d\r\n%s\r\n:%d\r\n", len(channel), channel, len(c.channels))
+				// Rresp3 push 帧：rueidis 的 _backgroundRead 直接消费
+				// `>` 开头的推送，正好消除多响应错位。
+				_, _ = fmt.Fprintf(conn, ">3\r\n$9\r\nsubscribe\r\n$%d\r\n%s\r\n:%d\r\n", len(channel), channel, len(c.channels))
 			}
 		case "UNSUBSCRIBE":
 			channels := args[1:]
@@ -154,7 +166,7 @@ func (s *testConfigSyncRedisServer) handle(conn net.Conn) {
 			for _, channel := range channels {
 				s.removeSubscriber(channel, c)
 				delete(c.channels, channel)
-				_, _ = fmt.Fprintf(conn, "*3\r\n$11\r\nunsubscribe\r\n$%d\r\n%s\r\n:%d\r\n", len(channel), channel, len(c.channels))
+				_, _ = fmt.Fprintf(conn, ">3\r\n$11\r\nunsubscribe\r\n$%d\r\n%s\r\n:%d\r\n", len(channel), channel, len(c.channels))
 			}
 		case "PUBLISH":
 			if len(args) < 3 {
@@ -180,7 +192,8 @@ func (s *testConfigSyncRedisServer) publish(channel, payload string) int {
 func (c *testConfigSyncRedisConn) sendMessage(channel, payload string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, _ = fmt.Fprintf(c.conn, "*3\r\n$7\r\nmessage\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(channel), channel, len(payload), payload)
+	// pubsub message 走 RESP3 push 帧。
+	_, _ = fmt.Fprintf(c.conn, ">3\r\n$7\r\nmessage\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(channel), channel, len(payload), payload)
 }
 
 func readRESPArgs(r *bufio.Reader) ([]string, error) {
@@ -249,11 +262,24 @@ func TestConfigSyncSkipsOwnPublishAndAcceptsForeignPublish(t *testing.T) {
 	srv := startTestConfigSyncRedisServer(t)
 	t.Cleanup(srv.Close)
 
-	clientA := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
-	clientB := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
+	clientA, errA := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{srv.Addr()},
+		DisableCache:      true,
+		ForceSingleClient: true,
+		DisableRetry:      true,
+	})
+	clientB, errB := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{srv.Addr()},
+		DisableCache:      true,
+		ForceSingleClient: true,
+		DisableRetry:      true,
+	})
+	if clientA == nil || errA != nil || clientB == nil || errB != nil {
+		t.Fatalf("NewClient: errA=%v errB=%v", errA, errB)
+	}
 	t.Cleanup(func() {
-		_ = clientA.Close()
-		_ = clientB.Close()
+		clientA.Close()
+		clientB.Close()
 	})
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -305,8 +331,16 @@ func TestNewConfigSyncAutoGeneratesSourceID(t *testing.T) {
 	srv := startTestConfigSyncRedisServer(t)
 	t.Cleanup(srv.Close)
 
-	client := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{srv.Addr()},
+		DisableCache:      true,
+		ForceSingleClient: true,
+		DisableRetry:      true,
+	})
+	if err != nil || client == nil {
+		t.Fatalf("NewClient(err=%v)", err)
+	}
+	t.Cleanup(client.Close)
 
 	cs := NewConfigSync(client, nil, "")
 	if cs == nil {
@@ -323,8 +357,16 @@ func TestNewConfigSyncNilLoggerUsesDefault(t *testing.T) {
 	srv := startTestConfigSyncRedisServer(t)
 	t.Cleanup(srv.Close)
 
-	client := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{srv.Addr()},
+		DisableCache:      true,
+		ForceSingleClient: true,
+		DisableRetry:      true,
+	})
+	if err != nil || client == nil {
+		t.Fatalf("NewClient(err=%v)", err)
+	}
+	t.Cleanup(client.Close)
 
 	cs := NewConfigSync(client, nil, "node-default-log")
 	if cs == nil {
@@ -359,8 +401,16 @@ func TestCloseIdempotent(t *testing.T) {
 	srv := startTestConfigSyncRedisServer(t)
 	t.Cleanup(srv.Close)
 
-	client := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{srv.Addr()},
+		DisableCache:      true,
+		ForceSingleClient: true,
+		DisableRetry:      true,
+	})
+	if err != nil || client == nil {
+		t.Fatalf("NewClient(err=%v)", err)
+	}
+	t.Cleanup(client.Close)
 
 	cs := NewConfigSync(client, nil, "idempotent")
 	if cs == nil {
@@ -384,7 +434,7 @@ func TestOptionalClientNonNilWhenAddrSet(t *testing.T) {
 	if c == nil {
 		t.Error("OptionalClient with non-empty addr should return non-nil")
 	}
-	_ = c.Close()
+	c.Close()
 }
 
 // TestPingNilClientReturnsNil 验证 nil client 时 Ping 返回 nil

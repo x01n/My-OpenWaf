@@ -58,6 +58,11 @@ type http3LoopbackRequestState struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	body   *cancelableBody
+	stream any
+}
+
+type h3StreamResetter interface {
+	CancelWrite(quic.StreamErrorCode)
 }
 
 func (s *http3LoopbackRequestState) SetCancel(cancel context.CancelFunc) {
@@ -67,6 +72,36 @@ func (s *http3LoopbackRequestState) SetCancel(cancel context.CancelFunc) {
 	s.mu.Lock()
 	s.cancel = cancel
 	s.mu.Unlock()
+}
+
+func (s *http3LoopbackRequestState) SetStream(stream any) {
+	if s == nil || stream == nil {
+		return
+	}
+	s.mu.Lock()
+	s.stream = stream
+	s.mu.Unlock()
+}
+
+// ResetFn builds the closure registered as the loopback reset signal. It is
+// intentionally free of the state's cancel chain: cancel() tears down the
+// loopback request context, which is the wrong side of the proxy; the
+// closure performs CancelWrite(H3 REQUEST_CANCELED) on the quota-owned
+// stream only.
+func (s *http3LoopbackRequestState) ResetFn() func() {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	stream := s.stream
+	s.mu.Unlock()
+	resetter, ok := stream.(h3StreamResetter)
+	if !ok || resetter == nil {
+		return nil
+	}
+	return func() {
+		resetter.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+	}
 }
 
 func (s *http3LoopbackRequestState) SetBody(body *cancelableBody) {
@@ -414,24 +449,7 @@ func (w *http3CancelAwareResponseWriter) startStreamCancelWatch(ctx context.Cont
 	if w == nil || w.ResponseWriter == nil {
 		return
 	}
-	value := reflect.ValueOf(w.ResponseWriter)
-	if value.Kind() != reflect.Ptr || value.IsNil() {
-		return
-	}
-	elem := value.Elem()
-	if !elem.IsValid() || elem.Kind() != reflect.Struct {
-		return
-	}
-	field := elem.FieldByName("str")
-	if !field.IsValid() || field.IsNil() {
-		return
-	}
-	field = reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
-	stream, ok := field.Interface().(interface{ Context() context.Context })
-	if !ok {
-		return
-	}
-	streamCtx := stream.Context()
+	streamCtx := contextOfH3Stream(http3ResponseStream(w.ResponseWriter))
 	if streamCtx == nil {
 		return
 	}
@@ -444,6 +462,75 @@ func (w *http3CancelAwareResponseWriter) startStreamCancelWatch(ctx context.Cont
 			w.cancelRequest()
 		}
 	}()
+}
+
+// http3UnwrapDepthLimit 限制 ResponseWriter 解包链的遍历深度。
+// 正常链只有 cancelAware → quic-go responseWriter 两层；设上限是为了让
+// 任何异常包装器（自引用、环形引用、无限代理）都在常数步内终止。
+const http3UnwrapDepthLimit = 8
+
+// unwrapHTTP3ResponseWriter 沿 Unwrap() http.ResponseWriter 链下钻，
+// 返回链末端仍实现了 Unwrap 的那个包装器之下的对象。终止条件有三重：
+// 深度达上限、当前对象未实现 Unwrap、或下一跳为空/与当前对象相同。
+//
+// @param w 起始 ResponseWriter
+// @return 解包链终点；w 为 nil 时返回 nil
+func unwrapHTTP3ResponseWriter(w http.ResponseWriter) http.ResponseWriter {
+	for depth := 0; depth < http3UnwrapDepthLimit && w != nil; depth++ {
+		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return w
+		}
+		next := unwrapper.Unwrap()
+		if next == nil || next == w {
+			return w
+		}
+		w = next
+	}
+	return w
+}
+
+// http3ResponseStream 从 ResponseWriter 中解析出承载 QUIC 流的对象
+// （quic-go 的 *http3.responseWriter 的 str 字段）。
+//
+// 解析前先走 Unwrap 链：生产传入的是 *http3CancelAwareResponseWriter，
+// 它嵌入 http.ResponseWriter 且无 str 字段，直接反射必然返回 nil，会让
+// h3 的流级取消静默失效（SetStream(nil) → ResetFn()==nil）。
+//
+// 形状不符（非指针、非结构体、缺 str 字段、str 为 nil）一律返回 nil，
+// 与既有契约一致；调用方对 nil 均已有安全处理。
+func http3ResponseStream(w http.ResponseWriter) any {
+	w = unwrapHTTP3ResponseWriter(w)
+	if w == nil {
+		return nil
+	}
+	value := reflect.ValueOf(w)
+	if value.Kind() != reflect.Ptr || value.IsNil() {
+		return nil
+	}
+	elem := value.Elem()
+	if !elem.IsValid() || elem.Kind() != reflect.Struct {
+		return nil
+	}
+	field := elem.FieldByName("str")
+	if !field.IsValid() || field.Kind() != reflect.Ptr || field.IsNil() {
+		return nil
+	}
+	if !field.CanAddr() {
+		return nil
+	}
+	field = reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	return field.Interface()
+}
+
+func contextOfH3Stream(stream any) context.Context {
+	if stream == nil {
+		return nil
+	}
+	if s, ok := stream.(interface{ Context() context.Context }); ok && s != nil {
+		return s.Context()
+	}
+	return nil
 }
 
 func (w *http3CancelAwareResponseWriter) Close() {
@@ -690,6 +777,16 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 			pr.Out.Header.Set(dataplane.InternalHTTP3CancelTokenHeader, token)
 			context.AfterFunc(outCtx, unregister)
 		}
+		if state, ok := http3LoopbackRequestStateFromContext(pr.In.Context()); ok {
+			if resetFn := state.ResetFn(); resetFn != nil {
+				if token := dataplane.RegisterInternalHTTP3ResetToken(resetFn); token != "" {
+					pr.Out.Header.Set(dataplane.InternalHTTP3ResetTokenHeader, token)
+					context.AfterFunc(outCtx, func() {
+						dataplane.UnregisterInternalHTTP3ResetToken(token)
+					})
+				}
+			}
+		}
 		outCtx = context.WithValue(outCtx, http3LoopbackCancelContextKey{}, cancelOut)
 		pr.Out = pr.Out.WithContext(outCtx)
 
@@ -734,6 +831,7 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		cancelAware.startStreamCancelWatch(ctx)
 		cancelAware.startFlushWatch(ctx)
 		defer cancelAware.Close()
+		state.SetStream(http3ResponseStream(cancelAware))
 		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(cfg.Bind), snapshotpkg.OneDaySeconds))
 		request := r.WithContext(ctx)
 		if isHTTP3WebSocketConnect(request) {
@@ -1196,9 +1294,11 @@ func instrumentHTTP3TLSConfig(tlsCfg *tls.Config, fingerprints *http3HandshakeFi
 func clearInternalHTTP3TLSHeaders(headers http.Header) {
 	headers.Del(dataplane.InternalHTTP3ProtoHeader)
 	headers.Del(dataplane.InternalHTTP3CancelTokenHeader)
+	headers.Del(dataplane.InternalHTTP3ResetTokenHeader)
 	headers.Del(dataplane.InternalHTTP3TLSVersionHeader)
 	headers.Del(dataplane.InternalHTTP3TLSSNIHeader)
 	headers.Del(dataplane.InternalHTTP3TLSALPNHeader)
+	headers.Del(dataplane.InternalHTTP3TLSALPNRawHeader)
 	headers.Del(dataplane.InternalHTTP3TLSJA3Header)
 	headers.Del(dataplane.InternalHTTP3TLSJA3HashHeader)
 	headers.Del(dataplane.InternalHTTP3TLSJA4Header)
@@ -1221,6 +1321,9 @@ func applyHTTP3ProxyTLSHeaders(r *http.Request) {
 	}
 	if len(fp.ALPN) > 0 && strings.TrimSpace(fp.ALPN[0]) != "" {
 		r.Header.Set(dataplane.InternalHTTP3TLSALPNHeader, strings.TrimSpace(fp.ALPN[0]))
+	}
+	if declared := fp.DeclaredALPN(); len(declared) > 0 {
+		r.Header.Set(dataplane.InternalHTTP3TLSALPNRawHeader, strings.Join(declared, ","))
 	}
 	if fp.JA3 != "" {
 		r.Header.Set(dataplane.InternalHTTP3TLSJA3Header, fp.JA3)
@@ -1257,9 +1360,8 @@ func http3RequestTLSFingerprint(r *http.Request) bot.TLSClientFingerprint {
 		if sni := strings.TrimSpace(r.TLS.ServerName); sni != "" {
 			fp.SNI = sni
 		}
-		if alpn := strings.TrimSpace(r.TLS.NegotiatedProtocol); alpn != "" {
-			fp.ALPN = []string{alpn}
-		}
+		// 只写协商结果；ALPNRaw 是 ClientHello 声明列表，保持只读。
+		fp.SetNegotiatedALPN(strings.TrimSpace(r.TLS.NegotiatedProtocol))
 	}
 	return fp
 }

@@ -125,19 +125,43 @@ func MoreSevere(a, b Type) bool {
 
 // Result is the outcome of rule evaluation for a single request.
 type Result struct {
-	Type         Type               `json:"type"`
-	RuleID       uint               `json:"rule_id,omitempty"`
-	RuleIDStr    string             `json:"rule_id_str,omitempty"` // builtin rules like "owasp:sqli:001"
-	Phase        string             `json:"phase,omitempty"`
-	MatchDesc    string             `json:"match_desc,omitempty"`
-	Matched      bool               `json:"matched"`
-	Category     string             `json:"category,omitempty"`
-	StatusCode   int                `json:"status_code,omitempty"`   // custom HTTP status code (0 = use default)
-	RedirectTo   string             `json:"redirect_to,omitempty"`   // URL for redirect action
-	CaptchaType  string             `json:"captcha_type,omitempty"`  // Rule-level CAPTCHA type; empty inherits global config.
-	SetHeaders   *map[string]string `json:"set_headers,omitempty"`   // Controlled response headers from Lua
-	ResponseBody *string            `json:"response_body,omitempty"` // Controlled response body from Lua
-	Tags         *[]string          `json:"tags,omitempty"`          // Labels for observability
+	Type      Type   `json:"type"`
+	RuleID    uint   `json:"rule_id,omitempty"`
+	RuleIDStr string `json:"rule_id_str,omitempty"` // builtin rules like "owasp:sqli:001"
+	// RuleName 是内置检测规则的名称（如 "SQL UNION 联合查询注入"）。
+	// 自定义规则无注册表条目时为空。
+	RuleName string `json:"rule_name,omitempty"`
+	// RuleDesc 是内置检测规则的说明，比 MatchDesc 更完整；
+	// 用于安全事件详情展示可解释的规则信息。
+	RuleDesc string `json:"rule_desc,omitempty"`
+	// MatchScore 是 OWASP 命中时的累计风险分值；0 表示不适用。
+	MatchScore int `json:"match_score,omitempty"`
+	// MatchSnippet 是触发命中的内容片段，已按 maxSnippetLen 截断并脱敏。
+	MatchSnippet string `json:"match_snippet,omitempty"`
+	// MatchPart 是命中部位（url/body/header/cookie/all），CVE 命中时填充。
+	MatchPart string `json:"match_part,omitempty"`
+	// Severity 是危险度（critical/high/medium/low），CVE 命中时填充。
+	Severity string `json:"severity,omitempty"`
+	// Source 是规则来源（catalog/nvd/github/manual/auto_generated），CVE 命中时填充。
+	Source string `json:"source,omitempty"`
+	// CVSSScore / CWEType 是 CVE 规则的危险度明细。
+	CVSSScore float64 `json:"cvss_score,omitempty"`
+	CWEType   string  `json:"cwe_type,omitempty"`
+	// References 是 CVE 参考链接（NVD 采集），换行分隔。
+	References string `json:"references,omitempty"`
+
+	Phase       string `json:"phase,omitempty"`
+	MatchDesc   string `json:"match_desc,omitempty"`
+	Matched     bool   `json:"matched"`
+	Category    string `json:"category,omitempty"`
+	StatusCode  int    `json:"status_code,omitempty"`  // custom HTTP status code (0 = use default)
+	RedirectTo  string `json:"redirect_to,omitempty"`  // URL for redirect action
+	CaptchaType string `json:"captcha_type,omitempty"` // Rule-level CAPTCHA type; empty inherits global config.
+	// CaptchaMinutes 是规则级验证码通过有效期（分钟）；0 表示继承全局 captcha_pass_ttl。
+	CaptchaMinutes int                `json:"captcha_minutes,omitempty"`
+	SetHeaders     *map[string]string `json:"set_headers,omitempty"`   // Controlled response headers from Lua
+	ResponseBody   *string            `json:"response_body,omitempty"` // Controlled response body from Lua
+	Tags           *[]string          `json:"tags,omitempty"`          // Labels for observability
 }
 
 // IsTerminal returns true when this action must short-circuit

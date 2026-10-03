@@ -261,13 +261,36 @@ func (p *Processor) wrapFullHTML(html []byte) ([]byte, error) {
 	return renderHTMLBootstrap(env, randomNonceB64())
 }
 
-// encryptJS 加密 JS 内容，返回自解密包装脚本。
 func (p *Processor) encryptJS(js []byte) ([]byte, error) {
 	env, err := p.makeEnvelope(js)
 	if err != nil {
 		return js, err
 	}
-	return renderJSSelfDecrypt(env), nil
+	return p.renderJSSelfDecryptWithShardChain(env)
+}
+
+func (p *Processor) renderJSSelfDecryptWithShardChain(env envelope) ([]byte, error) {
+	_, assembly, err := cekJSDynamicShardChain(p.cek)
+	if err != nil {
+		return nil, err
+	}
+	body := strings.Replace(applyAssetURLs(jsSelfDecryptTemplate), "__ASSEMBLY__", assembly, 1)
+	r := strings.NewReplacer(
+		"__DATA__", env.data,
+		"__IV__", env.iv,
+		"__WRAP__", env.wrap,
+		"__KEK__", env.kek,
+		"__TICKET__", env.ticket,
+		"__KEY__", env.key,
+	)
+	body = r.Replace(body)
+	if strings.Contains(body, "__ASSEMBLY__") {
+		return nil, fmt.Errorf("dynamic: shard assembly injection incomplete")
+	}
+	if !strings.Contains(body, "vm_assemble_shards") {
+		return nil, fmt.Errorf("dynamic: shard assembly marker not injected")
+	}
+	return []byte(body), nil
 }
 
 // matchPathPatterns 检查路径是否匹配任一模式。

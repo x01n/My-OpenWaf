@@ -1,12 +1,13 @@
 package challenge
 
 import (
-	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"My-OpenWaf/internal/pkg/vmpasm"
 )
 
 func TestChainSessionManagementUsesRealState(t *testing.T) {
@@ -335,20 +336,33 @@ func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
 	}
 }
 
+// TestGeneratedPoWScriptEmbedsValidVMProgram 锁住「脚本里嵌的程序是合法 ISA 字节码」。
+//
+// # 为什么用 vmpasm.Verify 而不是手工数 opcode
+//
+// 旧实现是「固定 5 步状态机 + 随机 NOP 填充」，旧断言逐字节数 5 个 opcode
+// 与 2..5 个 NOP。新 ISA 下程序是**真实计算**（含分支与循环），
+// 「非 NOP opcode 恰好是某 5 个」这个断言不再有任何意义。
+//
+// 现在锁的机制是：**嵌入的程序必须能通过 ISA 校验器**——容器魔数/版本正确、
+// 指令编码合法、控制流可达且可终止、无恒真比较。这才是「脚本嵌的是可执行
+// 程序」的直接证据，且与 ISA 版本解耦（ISA 增删指令时本用例自动跟随）。
+//
+// # 为什么必须用位置断言而非存在性断言
+//
+// `TestPoWScriptInjectsPerAssetVersions` 的教训：`strings.Contains(script, X)`
+// 锁的是「出现过」不是「落在正确槽位」。这里同样逐位置提取：程序必须落在
+// `self.__p=` 与 `;self.__off=` 之间，且**必须是合法十六进制**。
 func TestGeneratedPoWScriptEmbedsValidVMProgram(t *testing.T) {
 	const (
 		programMarker = "self.__p="
 		programEnd    = ";self.__off="
 	)
-	wantOps := []byte{
-		vmOpLoadNonce,
-		vmOpLoadCounter,
-		vmOpConcat,
-		vmOpSHA256,
-		vmOpCheckPrefix,
-	}
 
-	for i := 0; i < 100; i++ {
+	// 程序是确定性的：同一版本下每次生成必须完全相同。
+	// 这条同时锁住「不再有随机 NOP 填充」。
+	var first string
+	for i := 0; i < 20; i++ {
 		script := GeneratePoWWASMScript(1, "nonce")
 		start := strings.Index(script, programMarker)
 		if start < 0 {
@@ -364,33 +378,25 @@ func TestGeneratedPoWScriptEmbedsValidVMProgram(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode quoted VM program %q: %v", quoted, err)
 		}
-		bytecode, err := hex.DecodeString(program)
-		if err != nil {
-			t.Fatalf("decode VM program %q: %v", program, err)
-		}
-		if len(bytecode) < len(wantOps)+2 || len(bytecode) > len(wantOps)+5 {
-			t.Fatalf("unexpected VM program length %d: %x", len(bytecode), bytecode)
+		if i == 0 {
+			first = program
+		} else if program != first {
+			t.Fatalf("VM program is not deterministic across calls:\nfirst %s\nnow   %s", first, program)
 		}
 
-		nonNops := make([]byte, 0, len(wantOps))
-		nopCount := 0
-		for _, op := range bytecode {
-			if op == vmOpNop {
-				nopCount++
-				continue
-			}
-			nonNops = append(nonNops, op)
+		raw, err := vmpasm.Unhex(program)
+		if err != nil {
+			t.Fatalf("VM program %q is not valid hex: %v", program, err)
 		}
-		if nopCount < 2 || nopCount > 5 {
-			t.Fatalf("unexpected NOP count %d: %x", nopCount, bytecode)
+		rep, err := vmpasm.Verify(raw)
+		if err != nil {
+			t.Fatalf("ISA verifier rejected the embedded program: %v\nprogram: %s", err, program)
 		}
-		if len(nonNops) != len(wantOps) {
-			t.Fatalf("unexpected non-NOP opcodes %x, want %x", nonNops, wantOps)
+		if !rep.OK() {
+			t.Fatalf("embedded program has structural errors: %+v\nprogram: %s", rep.Errors, program)
 		}
-		for j := range wantOps {
-			if nonNops[j] != wantOps[j] {
-				t.Fatalf("non-NOP opcode order %x, want %x", nonNops, wantOps)
-			}
+		if rep.Instrs < 16 {
+			t.Fatalf("embedded program has only %d instructions; a real PoW program needs branches and loops", rep.Instrs)
 		}
 	}
 }

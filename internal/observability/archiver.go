@@ -432,10 +432,6 @@ func (a *Archiver) optimizeDB() {
 	}
 }
 
-func (a *Archiver) optimizeSQLite() error {
-	return a.optimizeSQLiteContext(context.Background())
-}
-
 func (a *Archiver) optimizeSQLiteContext(ctx context.Context) error {
 	if a == nil || a.db == nil {
 		return nil
@@ -464,10 +460,6 @@ func (a *Archiver) optimizeSQLiteContext(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (a *Archiver) optimizeMySQL() error {
-	return a.optimizeMySQLContext(context.Background())
-}
-
 func (a *Archiver) optimizeMySQLContext(ctx context.Context) error {
 	if a == nil || a.db == nil {
 		return nil
@@ -489,10 +481,6 @@ func (a *Archiver) optimizeMySQLContext(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-func (a *Archiver) optimizePostgres() error {
-	return a.optimizePostgresContext(context.Background())
 }
 
 func (a *Archiver) optimizePostgresContext(ctx context.Context) error {

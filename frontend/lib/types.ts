@@ -82,6 +82,8 @@ export interface Site {
   anti_replay_enabled: boolean | null
   anti_replay_ttl: number
   anti_replay_action: string
+  /** Cookie 校验模式三态覆盖；null = 继承全局（standard/dual）。 */
+  anti_replay_cookie_mode?: string | null
 
   /** 站点级质询动作覆盖；null = 继承全局。 */
   challenge_action: string | null
@@ -284,6 +286,8 @@ export interface OWASPRuleItem {
   category: string
   name: string
   description?: string
+  pattern?: string
+  score?: number
   default_enabled: boolean
   default_action?: string
   default_sensitivity?: string
@@ -335,6 +339,8 @@ export interface CVERuleItem {
   description?: string
   category?: string
   severity?: string
+  cvss_score?: number
+  cwe_type?: string
   source?: string
   enabled: boolean
   captcha_type?: CaptchaType | ""
@@ -396,6 +402,15 @@ export interface Rule {
   redirect_to?: string
   /** 空值继承全局验证码类型，仅对 captcha_challenge 生效。 */
   captcha_type?: CaptchaType
+  /**
+   * 规则级频次限制的时间窗口（秒）。与 request_count 必须同时大于 0 才生效，
+   * 生效时规则条件被编译成 cc_rate 复合条件（窗口内按 clientIP|host 计数）。
+   */
+  window_seconds?: number
+  /** 规则级频次限制的请求次数阈值；0 表示不做频次限制。 */
+  request_count?: number
+  /** 规则级验证码通过有效期（分钟）；0 表示继承全局 captcha_pass_ttl。 */
+  captcha_minutes?: number
 }
 
 /** 普通规则列表的服务端分页与精确筛选参数。 */
@@ -448,6 +463,26 @@ export interface SecurityEvent {
 
   rule_id: number
   rule_id_str?: string
+  /** 命中规则的名称，来自内置规则注册表或 CVE 编号。 */
+  rule_name?: string
+  /** 命中规则的说明，比 match_desc 更完整。 */
+  rule_desc?: string
+  /** OWASP 命中的累计风险分值；0 表示不适用。 */
+  match_score?: number
+  /** 触发命中的内容片段，已截断并脱敏。 */
+  match_snippet?: string
+  /** 命中部位：url / body / header / cookie / all。 */
+  match_part?: string
+  /** CVE 危险度：critical / high / medium / low。 */
+  severity?: string
+  /** 规则来源：catalog / builtin / nvd / github / manual / auto_generated。 */
+  source?: string
+  /** CVE 规则的 CVSS 基础分。 */
+  cvss_score?: number
+  /** CVE 规则的 CWE 分类。 */
+  cwe_type?: string
+  /** CVE 参考链接，换行分隔。 */
+  references?: string
   phase: string
   action: string
   category: string
@@ -499,6 +534,52 @@ export interface RealtimeTicketResponse {
  */
 export interface RealtimeSecurityEventPayload {
   security_events: { items: SecurityEvent[]; total: number; page: number }
+}
+
+/**
+ * 实时推送的安全事件载荷（后端 internal/admin/system/realtime.go 的
+ * realtimeSecurityEvent）。字段是 SecurityEvent 的子集，规则解释信息
+ * （rule_name / rule_desc / match_score / match_snippet / severity ...）
+ * 与列表接口保持同名同义。
+ */
+export interface RealtimeSecurityEventItem {
+  id: number
+  created_at: string
+  site_id: number
+  request_id: string
+  client_ip: string
+  host: string
+  path: string
+  method: string
+  rule_id: number
+  rule_id_str?: string
+  rule_name?: string
+  rule_desc?: string
+  match_score?: number
+  match_snippet?: string
+  match_part?: string
+  severity?: string
+  source?: string
+  cvss_score?: number
+  cwe_type?: string
+  references?: string
+  phase: string
+  action: string
+  category: string
+  match_desc?: string
+  tls_version?: string
+  tls_sni?: string
+  tls_alpn?: string
+  tls_ja3_hash?: string
+  tls_ja4?: string
+  tls_cipher_suites?: string
+  tls_extensions?: string
+  tls_curves?: string
+  tls_point_formats?: string
+  header_order?: string
+  geo_country?: string
+  geo_city?: string
+  status_code: number
 }
 
 export interface SecurityEventStats {
@@ -634,11 +715,14 @@ export interface BotScoreLog {
   tls_alpn?: string
   header_order?: string
   total_score: number
+  ua_score: number
   geoip_score: number
   fingerprint_score: number
   behavior_score: number
   ip_rep_score: number
   is_high_risk: boolean
+  dangerous: boolean
+  danger_reasons?: string
   action: string
   details?: string
   created_at: string
@@ -1076,6 +1160,7 @@ export interface BotSettings {
   image_watermark: boolean
   anti_replay_enabled: boolean
   anti_replay_ttl: number
+  anti_replay_cookie_mode: string
   browser_sign_enabled?: boolean
   browser_sign_ttl?: number
   browser_sign_action?: string

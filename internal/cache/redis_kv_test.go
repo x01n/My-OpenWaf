@@ -1,17 +1,14 @@
 package cache
 
 import (
-	context "context"
+	"context"
 	"errors"
-	"net"
-	"os/exec"
-	"strconv"
 	"testing"
 	"time"
 
 	"My-OpenWaf/internal/waf/luaplugin"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 var _ luaplugin.ContextKVBackend = (*RedisKV)(nil)
@@ -47,9 +44,7 @@ func TestRedisKVCommandFailureMarksUnavailableAndSetClientRecovers(t *testing.T)
 		t.Fatal("RedisKV with client must be available")
 	}
 
-	if err := client.Close(); err != nil {
-		t.Fatalf("close Redis client: %v", err)
-	}
+	client.Close()
 	if _, ok := kv.Get("after-close"); ok {
 		t.Fatal("Get after closing Redis client must fail open")
 	}
@@ -71,8 +66,7 @@ func TestRedisKVCommandFailureMarksUnavailableAndSetClientRecovers(t *testing.T)
 }
 
 func TestRedisKVFailureBackoffAllowsProbeAndSuccessfulResultsRecover(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:1"})
-	t.Cleanup(func() { _ = client.Close() })
+	client := newKVTestClient(t, "127.0.0.1:1")
 	kv := NewRedisKV(client)
 
 	kv.noteCommandResult(client, errors.New("temporary redis failure"))
@@ -94,14 +88,13 @@ func TestRedisKVFailureBackoffAllowsProbeAndSuccessfulResultsRecover(t *testing.
 
 	kv.noteCommandResult(client, errors.New("temporary redis failure"))
 	kv.unavailableUntil.Store(time.Now().Add(-time.Second).UnixNano())
-	kv.noteCommandResult(client, goredis.Nil)
+	kv.noteCommandResult(client, rueidis.Nil)
 	if !kv.Available() || kv.unavailableUntil.Load() != 0 {
 		t.Fatal("redis.Nil must restore health because it is a successful Redis response")
 	}
 
 	kv.noteCommandResult(client, errors.New("temporary redis failure"))
-	replacement := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:2"})
-	t.Cleanup(func() { _ = replacement.Close() })
+	replacement := newKVTestClient(t, "127.0.0.1:2")
 	kv.SetClient(replacement)
 	if !kv.Available() || kv.unavailableUntil.Load() != 0 {
 		t.Fatal("SetClient must immediately clear the previous client's backoff")
@@ -121,7 +114,7 @@ func TestRedisKVIncrUsesFixedWindowTTL(t *testing.T) {
 	if value != 1 {
 		t.Fatalf("first increment = %d, want 1", value)
 	}
-	firstTTL, err := client.PTTL(context.Background(), redisPrefix+key).Result()
+	firstTTL, err := kvTestPTTL(client, redisPrefix+key)
 	if err != nil || firstTTL <= 0 {
 		t.Fatalf("first TTL = %v, %v; want positive TTL", firstTTL, err)
 	}
@@ -134,7 +127,7 @@ func TestRedisKVIncrUsesFixedWindowTTL(t *testing.T) {
 	if value != 2 {
 		t.Fatalf("second increment = %d, want 2", value)
 	}
-	secondTTL, err := client.PTTL(context.Background(), redisPrefix+key).Result()
+	secondTTL, err := kvTestPTTL(client, redisPrefix+key)
 	if err != nil || secondTTL <= 0 {
 		t.Fatalf("second TTL = %v, %v; want positive TTL", secondTTL, err)
 	}
@@ -143,43 +136,31 @@ func TestRedisKVIncrUsesFixedWindowTTL(t *testing.T) {
 	}
 }
 
-func startRedisServer(t *testing.T) *goredis.Client {
+// newKVTestClient constructs a rueidis test client for the given address.
+func newKVTestClient(t *testing.T, addr string) rueidis.Client {
 	t.Helper()
-	binary, err := exec.LookPath("redis-server")
-	if err != nil {
-		t.Skip("redis-server is not installed")
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve Redis port: %v", err)
-	}
-	_, port, err := net.SplitHostPort(listener.Addr().String())
-	if closeErr := listener.Close(); closeErr != nil {
-		t.Fatalf("release Redis port: %v", closeErr)
-	}
-	if err != nil {
-		t.Fatalf("parse Redis port: %v", err)
-	}
-	cmd := exec.Command(binary, "--bind", "127.0.0.1", "--port", port, "--save", "", "--appendonly", "no", "--dir", t.TempDir())
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start Redis: %v", err)
-	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{addr},
+		DisableRetry:      true,
+		DisableCache:      true,
+		ForceSingleClient: true,
 	})
-
-	client := goredis.NewClient(&goredis.Options{Addr: net.JoinHostPort("127.0.0.1", port)})
-	t.Cleanup(func() { _ = client.Close() })
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := client.Ping(context.Background()).Err(); err == nil {
-			return client
-		}
-		time.Sleep(10 * time.Millisecond)
+	if client == nil && err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("Redis did not become ready on port %s", strconv.Quote(port))
-	return nil
+	t.Cleanup(client.Close)
+	return client
+}
+
+func startRedisServer(t *testing.T) rueidis.Client {
+	t.Helper()
+	mock := startKVMiniRedis(t)
+	return newKVTestClient(t, mock.ln.Addr().String())
+}
+
+// kvTestPTTL 查询键的剩余 TTL（毫秒），rueidis 形态。
+func kvTestPTTL(client rueidis.Client, key string) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return client.Do(ctx, client.B().Pttl().Key(key).Build()).AsInt64()
 }

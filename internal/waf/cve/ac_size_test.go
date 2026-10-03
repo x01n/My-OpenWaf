@@ -1,22 +1,25 @@
 package cve
 
-import "testing"
+import (
+	"testing"
+
+	"My-OpenWaf/internal/ac"
+)
 
 /**
  * TestACStateTableSize 报告各视图自动机的状态数与转移表内存占用。
  *
- * 诊断用:acState 每状态含 [256]int32 转移表(1KB),状态数一旦上千,
+ * 诊断用:State 每状态含 [256]int32 转移表(1KB),状态数一旦上千,
  * 转移表就远超 L2/L3 缓存,逐字节随机访问会退化为持续 cache miss。
  */
 func TestACStateTableSize(t *testing.T) {
-	ac := &globalSubDetectorAC
-	report := func(name string, m *acMatcher) {
-		n := len(m.states)
+	acSet := &globalSubDetectorAC
+	report := func(name string, m *ac.Matcher) {
 		t.Logf("%-10s states=%-6d patterns=%-4d transition_table=%d KB",
-			name, n, m.numPatterns, n*256*4/1024)
+			name, m.NumStates(), m.NumPatterns(), m.NumStates()*256*4/1024)
 	}
-	// acGateMask 仅 8 个 uint64(512 位),超出 512 的 pattern index 会被
-	// set() 静默丢弃,对应 needle 永久失效。此处校验各视图 pattern 数上限。
+	// Mask 仅 8 个 uint64(512 位),超出 512 的 pattern index 会被
+	// Set() 静默丢弃,对应 needle 永久失效。此处校验各视图 pattern 数上限。
 	counts := map[string]int{}
 	for _, e := range subDetectorNeedleEntries {
 		v := e.target
@@ -28,20 +31,20 @@ func TestACStateTableSize(t *testing.T) {
 		counts[v] += len(e.needles)
 	}
 	for v, n := range counts {
-		t.Logf("view=%-9s patterns=%d over512=%v", v, n, n > 512)
+		t.Logf("view=%-9s patterns=%d over512=%v", v, n, n > ac.MaxPatterns)
 	}
 	regN := 0
 	for _, ns := range registryNeedleGroups {
 		regN += len(ns)
 	}
-	t.Logf("view=registry  patterns=%d over512=%v", regN, regN > 512)
+	t.Logf("view=registry  patterns=%d over512=%v", regN, regN > ac.MaxPatterns)
 
-	report("all", ac.allAC)
-	report("url", ac.urlAC)
-	report("body", ac.bodyAC)
-	report("header", ac.headerAC)
-	report("cookie", ac.cookieAC)
-	report("url_body", ac.urlBodyAC)
+	report("all", acSet.allAC)
+	report("url", acSet.urlAC)
+	report("body", acSet.bodyAC)
+	report("header", acSet.headerAC)
+	report("cookie", acSet.cookieAC)
+	report("url_body", acSet.urlBodyAC)
 	report("registry", registryACData.ac)
 }
 

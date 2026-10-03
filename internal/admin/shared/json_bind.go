@@ -3,6 +3,7 @@ package shared
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"My-OpenWaf/internal/store"
@@ -153,6 +154,23 @@ func bindSiteFromRaw(raw map[string]json.RawMessage, dst *store.Site) error {
 	}
 	if v, ok := raw["captcha_type"]; ok && strings.TrimSpace(string(v)) == "null" {
 		dst.SiteCaptchaType = nil
+	}
+	// anti_replay_cookie_mode 同为三态覆盖：JSON null 或空串 = 取消覆盖继承全局。
+	if v, ok := raw["anti_replay_cookie_mode"]; ok {
+		var mode string
+		if err := json.Unmarshal(v, &mode); err != nil || strings.TrimSpace(mode) == "" {
+			dst.AntiReplayCookieMode = nil
+		} else {
+			normalized, valid := ValidateAntiReplayCookieMode(mode, true)
+			if !valid {
+				return fmt.Errorf("invalid anti_replay_cookie_mode")
+			}
+			if normalized == "" {
+				dst.AntiReplayCookieMode = nil
+			} else {
+				dst.AntiReplayCookieMode = &normalized
+			}
+		}
 	}
 	return nil
 }

@@ -54,6 +54,7 @@ function toTableRows(
     host_path: `${row.host || "-"}${row.path || "/"}`,
     total_score: row.total_score,
     score_bits: [
+      roundStat(row.ua_score),
       roundStat(row.geoip_score),
       roundStat(row.fingerprint_score),
       roundStat(row.behavior_score),

@@ -338,7 +338,7 @@ Sub->>Sub : "执行本地重载"
 - 仓库与模型
   - GORM：查询、聚合、批量插入、删除旧数据
 - Redis 同步
-  - go-redis：发布/订阅
+  - rueidis：发布/订阅
 
 ```mermaid
 graph LR

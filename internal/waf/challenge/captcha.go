@@ -12,11 +12,12 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"strconv"
 
 	"sync"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 
 	"My-OpenWaf/internal/waf/challenge/gm"
 )
@@ -64,13 +65,14 @@ type CaptchaSession struct {
 }
 
 type CaptchaItemPayload struct {
-	Type      string `json:"type"`
-	Prompt    string `json:"prompt"`
-	MasterImg string `json:"master_img,omitempty"`
-	ThumbImg  string `json:"thumb_img,omitempty"`
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
-	InputMode string `json:"input_mode,omitempty"`
+	Type       string `json:"type"`
+	Prompt     string `json:"prompt"`
+	MasterImg  string `json:"master_img,omitempty"`
+	ThumbImg   string `json:"thumb_img,omitempty"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	InputMode  string `json:"input_mode,omitempty"`
+	ExecScript string `json:"exec_script,omitempty"`
 }
 
 // CaptchaChallenge is the data sent to the client.
@@ -139,13 +141,14 @@ func newCaptchaChallenge(sessionID string, key []byte, items *CaptchaItems) (*Ca
 		return nil, fmt.Errorf("captcha items not provided")
 	}
 	payload, err := json.Marshal(CaptchaItemPayload{
-		Type:      string(items.Type),
-		Prompt:    items.Prompt,
-		MasterImg: items.MasterImg,
-		ThumbImg:  items.ThumbImg,
-		Width:     items.Width,
-		Height:    items.Height,
-		InputMode: inputModeForCaptcha(string(items.Type)),
+		Type:       string(items.Type),
+		Prompt:     items.Prompt,
+		MasterImg:  items.MasterImg,
+		ThumbImg:   items.ThumbImg,
+		Width:      items.Width,
+		Height:     items.Height,
+		InputMode:  inputModeForCaptcha(string(items.Type)),
+		ExecScript: BuildCaptchaExecScript(items.Type),
 	})
 	if err != nil {
 		return nil, err
@@ -177,7 +180,7 @@ type CaptchaItems struct {
 
 // CaptchaManager handles CAPTCHA generation and verification with Redis session storage.
 type CaptchaManager struct {
-	redis   *goredis.Client
+	redis   rueidis.Client
 	prefix  string
 	timeout time.Duration
 	done    chan struct{}
@@ -193,7 +196,7 @@ type CaptchaManager struct {
 
 // NewCaptchaManager creates a new CaptchaManager.
 // redis can be nil (will use in-memory fallback).
-func NewCaptchaManager(redis *goredis.Client, timeout time.Duration) *CaptchaManager {
+func NewCaptchaManager(redis rueidis.Client, timeout time.Duration) *CaptchaManager {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
@@ -213,7 +216,7 @@ func (cm *CaptchaManager) Close() {
 	cm.once.Do(func() { close(cm.done) })
 }
 
-func (cm *CaptchaManager) redisClient() *goredis.Client {
+func (cm *CaptchaManager) redisClient() rueidis.Client {
 	if cm == nil {
 		return nil
 	}
@@ -223,7 +226,7 @@ func (cm *CaptchaManager) redisClient() *goredis.Client {
 	return client
 }
 
-func (cm *CaptchaManager) SetRedis(redis *goredis.Client) {
+func (cm *CaptchaManager) SetRedis(redis rueidis.Client) {
 	if cm == nil {
 		return
 	}
@@ -337,7 +340,7 @@ func constantTimeEqualString(a, b string) bool {
 // Redis 的 GET+DEL 若拆成两条命令，并发请求会同时读到同一会话，
 // 导致同一个验证码答案/PoW 解被重复兑换，因此必须用 Lua 保证原子性。
 // 使用 EVAL 而非 GETDEL 是为了兼容 Redis 6.2 之前的服务端。
-var takeAndDeleteBoundScript = goredis.NewScript(`
+var takeAndDeleteBoundScript = rueidis.NewLuaScript(`
 local v = redis.call('GET', KEYS[1])
 if not v then
   return ''
@@ -370,7 +373,7 @@ func (cm *CaptchaManager) takeSessionWithBinding(sessionID string, binding Chall
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		key := cm.prefix + sessionID
-		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{key}, binding.SiteID, binding.Host, binding.Bind).Text()
+		raw, err := takeAndDeleteBoundScript.Exec(ctx, redis, []string{key}, []string{strconv.FormatUint(uint64(binding.SiteID), 10), binding.Host, binding.Bind}).ToString()
 		if err != nil {
 			return nil
 		}
@@ -592,7 +595,7 @@ func (cm *CaptchaManager) storeSession(session *CaptchaSession) error {
 		defer cancel()
 		key := cm.prefix + session.ID
 		timeout := cm.timeoutValue()
-		if err := redis.Set(ctx, key, data, timeout).Err(); err != nil {
+		if err := redis.Do(ctx, redis.B().Set().Key(key).Value(string(data)).Px(timeout).Build()).Error(); err != nil {
 			return fmt.Errorf("store CAPTCHA session in Redis: %w", err)
 		}
 		return nil

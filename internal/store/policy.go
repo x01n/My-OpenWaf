@@ -84,4 +84,14 @@ type Rule struct {
 	RedirectTo string     `gorm:"size:2048" json:"redirect_to"`
 	// CaptchaType 为空时继承全局验证码类型，仅对 captcha_challenge 生效。
 	CaptchaType string `gorm:"size:16" json:"captcha_type,omitempty"`
+
+	// WindowSeconds 与 RequestCount 是规则级频次限制参数（秒 / 次数）。
+	// 二者同时大于 0 时，规则条件在快照编译期被包装成 cc_rate 复合条件：
+	// 命中本规则条件的请求按 clientIP|host 计数，窗口内达到 RequestCount
+	// 次后执行本规则的 Action。任一为 0 表示不做频次限制。
+	WindowSeconds int `gorm:"default:0" json:"window_seconds"`
+	RequestCount  int `gorm:"default:0" json:"request_count"`
+	// CaptchaMinutes 是规则级验证码通过有效期（分钟），语义与保护配置的
+	// captcha_pass_ttl 一致，但作用于单条规则；0 表示继承全局配置。
+	CaptchaMinutes int `gorm:"default:0" json:"captcha_minutes"`
 }

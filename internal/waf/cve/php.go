@@ -3,6 +3,8 @@ package cve
 import (
 	"regexp"
 	"strings"
+
+	"My-OpenWaf/internal/pkg/snippet"
 )
 
 func init() {
@@ -192,13 +194,22 @@ func NewPHPCVEDetector() *PHPCVEDetector {
 
 func shouldScanPHPRule(req *CVERequest, rule phpCVERule, hits *subDetectorHits) bool {
 	switch rule.cveID {
+	case "CVE-2016-WEBSHELL-EXT":
+		return shouldScanPHPExtUpload(req) && subDetectorACGate(rule.cveID, rule.target, hits)
 	case "CVE-2015-6835", "CVE-2018-14884", "CVE-2018-20062", "CVE-2021-3129",
-		"CVE-2016-WEBSHELL", "CVE-2016-WEBSHELL-EXT", "CVE-2018-7600",
+		"CVE-2016-WEBSHELL", "CVE-2018-7600",
 		"CVE-2017-9841", "CVE-2024-4577", "CVE-2023-41892":
 		return subDetectorACGate(rule.cveID, rule.target, hits)
 	default:
 		return true
 	}
+}
+
+func shouldScanPHPExtUpload(req *CVERequest) bool {
+	if strings.Contains(lowerCVERawTarget(req.ContentType), "multipart/form-data") {
+		return true
+	}
+	return requestTargetContainsAny(req, "all", "filename=", "content-disposition")
 }
 
 func (d *PHPCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMatch {
@@ -223,6 +234,7 @@ func (d *PHPCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMat
 						MatchedPart: part,
 						Pattern:     pat.String(),
 						Action:      "drop",
+						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					})
 					goto nextRule // one match per rule is enough
 				}
@@ -254,6 +266,7 @@ func (d *PHPCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (CV
 						MatchedPart: part,
 						Pattern:     pat.String(),
 						Action:      "drop",
+						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					}, true
 				}
 			}

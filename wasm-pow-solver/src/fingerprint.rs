@@ -5,8 +5,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 const MAX_FINGERPRINT_BYTES: usize = 64 * 1024;
-
-/// [`internal_fingerprint_payload`] gm.rs 使用的内部入口：返回明文指纹 JSON。
 pub(crate) fn internal_fingerprint_payload() -> Option<String> {
     let fingerprint = collect_fingerprint_json(None);
     if fingerprint.is_empty() {
@@ -15,8 +13,6 @@ pub(crate) fn internal_fingerprint_payload() -> Option<String> {
     Some(fingerprint)
 }
 
-/// [`internal_fingerprint_payload_with_behavior`] gm.rs 使用的内部入口：
-/// 合并 behavior 后返回明文指纹 JSON；非法 behavior 失败关闭。
 pub(crate) fn internal_fingerprint_payload_with_behavior(behavior_json: &str) -> Option<String> {
     let fingerprint = collect_fingerprint_json(Some(behavior_json));
     if fingerprint.is_empty() {
@@ -38,6 +34,35 @@ pub fn gm_encrypt_fingerprint_with_behavior(
     crate::gm::gm_encrypt_fingerprint_gcm_behavior(key_hex, aad, behavior_json)
 }
 
+fn collect_integrity_scores() -> (i64, i64) {
+    let check = js_sys::eval(
+        r#"(function(){
+        try{
+            var s=0;
+            if(window===window.window&&document.defaultView===window)s|=1;
+            if(Function.prototype.toString.toString().indexOf('native code')>=0)s|=2;
+            var dw=Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver');
+            if(!(dw&&dw.get&&dw.get.toString().indexOf('native code')<0))s|=4;
+            return s;
+        }catch(e){return null}})()"#,
+    );
+    let s = match check {
+        Ok(v) => v.as_f64().unwrap_or(-1.0) as i64,
+        Err(_) => -1,
+    };
+    if s < 0 {
+        // null（异常/严格 CSP）→ 保守满分，不扣分。
+        return (2, 2);
+    }
+    let obj = match s & 3 {
+        3 => 2,
+        0 => 0,
+        _ => 1,
+    };
+    let proto = if s & 4 != 0 { 2 } else { 0 };
+    (obj, proto)
+}
+
 pub(crate) fn collect_fingerprint_json(behavior: Option<&str>) -> String {
     let window = match web_sys::window() {
         Some(window) => window,
@@ -52,6 +77,7 @@ pub(crate) fn collect_fingerprint_json(behavior: Option<&str>) -> String {
     let navigator_value = JsValue::from(window.navigator());
     let screen_value = property(&window_value, "screen").unwrap_or(JsValue::UNDEFINED);
     let (webgl_vendor, webgl_renderer) = collect_webgl_values();
+    let (obj_integrity, proto_integrity) = collect_integrity_scores();
 
     let webdriver = bool_property(&navigator_value, "webdriver");
     let phantom = has_any_property(&window_value, &["callPhantom", "_phantom"]);
@@ -188,7 +214,9 @@ pub(crate) fn collect_fingerprint_json(behavior: Option<&str>) -> String {
         "intersection_observer": has_property(&window_value, "IntersectionObserver"),
         "mutation_observer": has_property(&window_value, "MutationObserver"),
         "resize_observer": has_property(&window_value, "ResizeObserver"),
-        "history_api": has_property(&window_value, "history")
+        "history_api": has_property(&window_value, "history"),
+        "obj_integrity": obj_integrity,
+        "proto_integrity": proto_integrity
     });
     if let Some(raw) = behavior {
         let raw = raw.trim();

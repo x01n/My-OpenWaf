@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -149,11 +148,6 @@ func (g *Gate) HasSharedPassword() bool {
 	return g.config.SharedPasswordHash != ""
 }
 
-// HasProviders 是否配置了认证提供方。
-func (g *Gate) HasProviders() bool {
-	return len(g.config.Providers) > 0
-}
-
 // HasProviderType 是否配置了指定类型的认证提供方。
 func (g *Gate) HasProviderType(providerType string) bool {
 	for _, provider := range g.config.Providers {
@@ -167,32 +161,6 @@ func (g *Gate) HasProviderType(providerType string) bool {
 // CookieName 返回当前站点的访问控制 cookie 名称（按站点隔离）。
 func (g *Gate) CookieName() string {
 	return fmt.Sprintf("__owaf_access_%d", g.config.SiteID)
-}
-
-// SetSessionCookie 设置会话 cookie。
-func (g *Gate) SetSessionCookie(w http.ResponseWriter, token string, secure bool) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     g.CookieName(),
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   g.config.SessionTTL,
-	})
-}
-
-// ClearSessionCookie 清除会话 cookie。
-func (g *Gate) ClearSessionCookie(w http.ResponseWriter, secure bool) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     g.CookieName(),
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-	})
 }
 
 // GenerateToken 生成安全随机 token。

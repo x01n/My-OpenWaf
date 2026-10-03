@@ -2,64 +2,17 @@ package detect
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"gorm.io/gorm"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
-	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 	"My-OpenWaf/internal/waf/cve"
 )
-
-// cveRuleView is the API representation of a CVE rule from the global registry.
-type cveRuleView struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	CVE         string `json:"cve"`
-	Severity    string `json:"severity"`
-	Category    string `json:"category"`
-	Enabled     bool   `json:"enabled"`
-	Sensitivity string `json:"sensitivity"`
-}
-
-// ListCVERulesFromRegistry lists all CVE rules from the global registry with filtering.
-func ListCVERulesFromRegistry(repo *repository.SystemSettingsRepo) app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		registry := cve.GetGlobalCVERuleRegistry()
-		if registry == nil {
-			c.JSON(200, map[string]any{"items": []cveRuleView{}, "total": 0})
-			return
-		}
-
-		// Get filter params
-		categoryFilter := string(c.Query("category"))
-		severityFilter := string(c.Query("severity"))
-		enabledFilter := string(c.Query("enabled"))
-
-		// Get all rules from registry
-		cfg := shared.LoadProtectionConfig(repo)
-		var overrides map[string]cve.CVERuleOverride
-		if cfg.CVERulesConfig != "" && cfg.CVERulesConfig != "{}" {
-			_ = parseJSON(cfg.CVERulesConfig, &overrides)
-		}
-
-		// We need to access the rules - use DetectAll to get info (registry doesn't have All())
-		// Since CVERuleRegistry doesn't expose All(), we work with the DB repo for listing
-		// and use the registry for stats. Return from DB-based listing.
-		c.JSON(200, map[string]any{
-			"message":         "use /api/v1/cve-rules for database-backed listing",
-			"category_filter": categoryFilter,
-			"severity_filter": severityFilter,
-			"enabled_filter":  enabledFilter,
-		})
-	}
-}
 
 // cveRuleStats summarizes effective CVE state for one resolved scope.
 type cveRuleStats struct {
@@ -223,9 +176,4 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 		}
 		c.JSON(200, map[string]any{"id": id, "scope": scope.ScopeType, "scope_id": scope.ScopeID, "override": patch})
 	}
-}
-
-// parseJSON is a helper to parse JSON strings.
-func parseJSON(s string, v interface{}) error {
-	return json.Unmarshal([]byte(s), v)
 }

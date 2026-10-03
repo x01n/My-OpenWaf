@@ -479,12 +479,6 @@ func (m *contentTypeMatcher) Match(ctx MatchCtx) bool {
 	return ok && containsFoldASCII(value, m.ctype)
 }
 
-type alwaysMatcher struct{}
-
-func (m *alwaysMatcher) Match(MatchCtx) bool {
-	return true
-}
-
 type ifElseMatcher struct {
 	condition Matcher
 	thenMatch Matcher

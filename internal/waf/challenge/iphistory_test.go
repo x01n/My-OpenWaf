@@ -45,7 +45,7 @@ func TestShieldVerifyIPHistoryAddsScoreInBehaviorField(t *testing.T) {
 		t, envJSON, session.EnvKey, EnvFingerprintAAD("shield", session.ID, session.ChallengeSessionBinding))
 	counter, hash := findShieldPoWSolution(t, session.Nonce, session.Difficulty)
 
-	if ok, _ := mgr.VerifyChallengeWithBinding(session.ID, "", counter, hash, envEnc, "http/1.1", session.ChallengeSessionBinding); !ok {
+	if ok, _ := mgr.VerifyChallengeWithBinding(session.ID, "", counter, hash, envEnc, "", "http/1.1", session.ChallengeSessionBinding); !ok {
 		t.Fatal("historyless verifier with normal behavior fingerprint: want pass")
 	}
 
@@ -71,7 +71,7 @@ func TestShieldVerifyIPHistoryAddsScoreInBehaviorField(t *testing.T) {
 				t, envJSON, sess.EnvKey, EnvFingerprintAAD("shield", sess.ID, sess.ChallengeSessionBinding))
 			c, h := findShieldPoWSolution(t, sess.Nonce, sess.Difficulty)
 			ok, _ := mgr.VerifyChallengeWithBinding(
-				sess.ID, "", c, h, enc, "http/1.1", sess.ChallengeSessionBinding,
+				sess.ID, "", c, h, enc, "", "http/1.1", sess.ChallengeSessionBinding,
 			)
 			if !ok {
 				t.Fatalf("VerifyChallengeWithBinding with %s history = false, want pass (addition <= 20 keeps score at 50)", tc.name)
@@ -106,7 +106,7 @@ func TestShieldVerifyIPHistoryOnlyInBehaviorGate(t *testing.T) {
 		t.Fatalf("GenerateChallengeWithBinding(): %v", err)
 	}
 	c, h := findShieldPoWSolution(t, sess.Nonce, sess.Difficulty)
-	if ok, _ := mgr.VerifyChallengeWithBinding(sess.ID, "", c, h, "", "http/1.1", sess.ChallengeSessionBinding); !ok {
+	if ok, _ := mgr.VerifyChallengeWithBinding(sess.ID, "", c, h, "", "", "http/1.1", sess.ChallengeSessionBinding); !ok {
 		t.Fatal("disabled behavior must keep IP history out of the verdict")
 	}
 
@@ -132,7 +132,7 @@ func TestShieldVerifyIPHistoryOnlyInBehaviorGate(t *testing.T) {
 		t, marshalShieldEnvFingerprint(t, fingerprint), sess2.EnvKey,
 		EnvFingerprintAAD("shield", sess2.ID, sess2.ChallengeSessionBinding))
 	c2, h2 := findShieldPoWSolution(t, sess2.Nonce, sess2.Difficulty)
-	if ok, _ := mgr.VerifyChallengeWithBinding(sess2.ID, "", c2, h2, enc, "http/1.1", sess2.ChallengeSessionBinding); !ok {
+	if ok, _ := mgr.VerifyChallengeWithBinding(sess2.ID, "", c2, h2, enc, "", "http/1.1", sess2.ChallengeSessionBinding); !ok {
 		t.Fatal("nil IP history provider must not alter the verdict")
 	}
 }

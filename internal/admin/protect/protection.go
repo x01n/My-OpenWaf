@@ -241,6 +241,10 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(400, map[string]string{"error": "invalid action"})
 			return
 		}
+		if _, ok := shared.ValidateAntiReplayCookieMode(cfg.AntiReplayCookieMode, false); !ok {
+			c.JSON(400, map[string]string{"error": "invalid anti_replay_cookie_mode"})
+			return
+		}
 
 		data, err := json.Marshal(cfg)
 		if err != nil {
@@ -266,6 +270,11 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			}
 			if present["anti_replay_enabled"] {
 				if err := shared.SyncProtectionAntiReplayToSettings(txRepo, cfg.AntiReplayEnabled); err != nil {
+					return err
+				}
+			}
+			if present["anti_replay_cookie_mode"] {
+				if err := shared.SyncProtectionAntiReplayCookieModeToSettings(txRepo, cfg.AntiReplayCookieMode); err != nil {
 					return err
 				}
 			}

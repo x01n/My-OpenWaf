@@ -279,7 +279,7 @@ func TestQuickJSRejectsNonMutationPlanReturnShapes(t *testing.T) {
 		wantError  string
 	}{
 		{name: "request snapshot", returnExpr: "request", wantError: "unknown field"},
-		{name: "unknown field", returnExpr: `{path: "/ok", headers: {"x-test": "value"}}`, wantError: `unknown field "headers"`},
+		{name: "unknown field", returnExpr: `{path: "/ok", unknown_plan_field: 1}`, wantError: `unknown field "unknown_plan_field"`},
 		{name: "array", returnExpr: `[]`, wantError: "must be a MutationPlan object"},
 		{name: "string", returnExpr: `"/not-a-plan"`, wantError: "must be a MutationPlan object"},
 	}

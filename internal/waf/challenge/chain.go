@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 // ChainStepType defines the type of a chain challenge step.
@@ -133,7 +133,7 @@ func (g *chainSessionGate) unlock(id string) {
 // ChainChallengeManager manages multi-step chain challenges with a state machine.
 type ChainChallengeManager struct {
 	captcha     *CaptchaManager
-	redis       *goredis.Client
+	redis       rueidis.Client
 	prefix      string
 	difficulty  int
 	captchaType CaptchaType
@@ -146,7 +146,7 @@ type ChainChallengeManager struct {
 }
 
 // NewChainChallengeManager creates a new ChainChallengeManager with default steps.
-func NewChainChallengeManager(captcha *CaptchaManager, redis *goredis.Client) *ChainChallengeManager {
+func NewChainChallengeManager(captcha *CaptchaManager, redis rueidis.Client) *ChainChallengeManager {
 	cm := &ChainChallengeManager{
 		captcha:     captcha,
 		redis:       redis,
@@ -265,7 +265,7 @@ func (cm *ChainChallengeManager) ReconfigureWithCaptchaType(steps []ChainStepCon
 	cm.mu.Unlock()
 }
 
-func (cm *ChainChallengeManager) redisClient() *goredis.Client {
+func (cm *ChainChallengeManager) redisClient() rueidis.Client {
 	if cm == nil {
 		return nil
 	}
@@ -275,7 +275,7 @@ func (cm *ChainChallengeManager) redisClient() *goredis.Client {
 	return client
 }
 
-func (cm *ChainChallengeManager) SetRedis(redis *goredis.Client) {
+func (cm *ChainChallengeManager) SetRedis(redis rueidis.Client) {
 	if cm == nil {
 		return
 	}
@@ -502,6 +502,9 @@ type chainPageData struct {
 	EnvJS     template.JS
 	PowJS     template.JS
 	Captcha   *chainCaptchaPageData
+	// WasmURL / GlueURL 带内容派生版本串（与 /__owaf/* 的 immutable 缓存配对）。
+	WasmURL string
+	GlueURL string
 }
 
 func newChainCaptchaPageData(ch *CaptchaChallenge) *chainCaptchaPageData {
@@ -531,6 +534,8 @@ func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 		Total:     len(state.Steps),
 		SessionID: state.SessionID,
 		Dots:      make([]string, len(state.Steps)),
+		WasmURL:   PowWasmURL(),
+		GlueURL:   PowGlueURL(),
 	}
 	for i := range state.Steps {
 		className := "sd"
@@ -624,18 +629,28 @@ func (cm *ChainChallengeManager) listRedisSessions() []ChainSessionInfo {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	iter := redis.Scan(ctx, 0, cm.prefix+"*", 100).Iterator()
 	sessions := make([]ChainSessionInfo, 0)
-	for iter.Next(ctx) {
-		data, err := redis.Get(ctx, iter.Val()).Bytes()
-		if err != nil {
-			continue
+	var cursor uint64
+	for {
+		entry, serr := redis.Do(ctx, redis.B().Scan().Cursor(cursor).Match(cm.prefix+"*").Count(100).Build()).AsScanEntry()
+		if serr != nil {
+			break
 		}
-		var state ChainState
-		if json.Unmarshal(data, &state) != nil {
-			continue
+		for _, k := range entry.Elements {
+			data, gerr := redis.Do(ctx, redis.B().Get().Key(k).Build()).AsBytes()
+			if gerr != nil {
+				continue
+			}
+			var state ChainState
+			if json.Unmarshal(data, &state) != nil {
+				continue
+			}
+			sessions = append(sessions, chainSessionInfoFromState(&state))
 		}
-		sessions = append(sessions, chainSessionInfoFromState(&state))
+		cursor = entry.Cursor
+		if cursor == 0 {
+			break
+		}
 	}
 	return sessions
 }
@@ -660,7 +675,7 @@ func (cm *ChainChallengeManager) saveChainState(state *ChainState) {
 		data, _ := json.Marshal(state)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if err := redis.Set(ctx, cm.prefix+state.SessionID, data, chainStateTTL).Err(); err != nil {
+		if err := redis.Do(ctx, redis.B().Set().Key(cm.prefix+state.SessionID).Value(string(data)).Px(chainStateTTL).Build()).Error(); err != nil {
 			return
 		}
 		return
@@ -675,7 +690,7 @@ func (cm *ChainChallengeManager) loadChainState(id string) *ChainState {
 	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		data, err := redis.Get(ctx, cm.prefix+id).Bytes()
+		data, err := redis.Do(ctx, redis.B().Get().Key(cm.prefix+id).Build()).AsBytes()
 		if err != nil {
 			return nil
 		}
@@ -713,7 +728,7 @@ func (cm *ChainChallengeManager) takeChainStateWithBinding(id string, binding Ch
 	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{cm.prefix + id}, binding.SiteID, binding.Host, binding.Bind).Text()
+		raw, err := takeAndDeleteBoundScript.Exec(ctx, redis, []string{cm.prefix + id}, []string{strconv.FormatUint(uint64(binding.SiteID), 10), binding.Host, binding.Bind}).ToString()
 		if err != nil || raw == "" {
 			return nil
 		}
@@ -753,7 +768,7 @@ func (cm *ChainChallengeManager) deleteChainState(id string) {
 	if redis := cm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		redis.Del(ctx, cm.prefix+id)
+		redis.Do(ctx, redis.B().Del().Key(cm.prefix+id).Build())
 	}
 	cm.mu.Lock()
 	delete(cm.states, id)

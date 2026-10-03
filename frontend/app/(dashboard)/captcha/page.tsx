@@ -82,6 +82,9 @@ const CHAIN_CAPTCHA_TYPES: Array<CaptchaConfig["captcha_type"] | ""> = [
   "rotate",
 ]
 
+/** 反重放 Cookie 校验模式集合（global bot-settings 提交），值集合与后端 ValidateAntiReplayCookieMode 一致。 */
+const ANTI_REPLAY_COOKIE_MODES = ["standard", "dual"] as const
+
 const CHAIN_STEP_TYPES: ChainStepType[] = ["env", "pow", "captcha"]
 
 const CHAIN_STEP_CONDITIONS: ChainStepCondition[] = [
@@ -133,6 +136,7 @@ type BotEditableKey =
   | "js_obfuscation"
   | "image_watermark"
   | "anti_replay_enabled"
+  | "anti_replay_cookie_mode"
   | "browser_sign_enabled"
   | "browser_sign_ttl"
   | "browser_sign_action"
@@ -1411,6 +1415,30 @@ export default function CaptchaPage() {
                       setBotValue("anti_replay_enabled", checked)
                     }
                   />
+                  <div className="space-y-2 pt-4">
+                    <Label>{t("captcha.antiReplayCookieMode")}</Label>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      {t("captcha.antiReplayCookieModeDesc")}
+                    </p>
+                    <Select
+                      value={getBotValue("anti_replay_cookie_mode", "standard")}
+                      onValueChange={(value) =>
+                        setBotValue("anti_replay_cookie_mode", value)
+                      }
+                      disabled={!canManage}
+                    >
+                      <SelectTrigger className="w-56">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {ANTI_REPLAY_COOKIE_MODES.map((mode) => (
+                          <SelectItem key={mode} value={mode}>
+                            {t(`captcha.antiReplayCookieModes.${mode}`)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </CardContent>
               </Card>
 

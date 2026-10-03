@@ -3,6 +3,7 @@ package owasp
 import (
 	"bytes"
 	"encoding/base64"
+	"math/rand"
 	"reflect"
 	"strings"
 	"testing"
@@ -749,6 +750,74 @@ func TestCheckOWASP_RevShell(t *testing.T) {
 	}
 	if hits[0].Category != CatRevShell {
 		t.Fatalf("expected revshell, got %s", hits[0].Category)
+	}
+}
+
+// TestWebshellRevshellIndicatorMaskEquivalence 锁定掩码剪枝实现与旧串联
+// Contains 链逐条等价：全字面量表 + 大量壳/垃圾字节组合逐字节断言。
+// 防止未来改桶/改必备字节破坏检测语义（600 万次随机对拍之外的守卫）。
+func TestWebshellRevshellIndicatorMaskEquivalence(t *testing.T) {
+	wsLiterals := []string{
+		"eval(", "assert(", "system(", "exec(", "shell_exec", "passthru", "popen(", "base64_decode",
+		"<?php", "<? ", "runtime.getruntime", "cmd.exe", ".exec(", "subprocess", "os.system", "response.write",
+		"server.execute", "gzinflate(", "str_rot13(", "create_function(", "preg_replace(", "hex2bin(",
+		"call_user_func", "#post_render", "#pre_render", "#lazy_builder", "<java.", "\\think\\", "invokefunction",
+		"<%eval", "<%execute", "file_put_contents", ">shell.", "connector.minimal", "php://", "data://text/",
+		"include(", "require(", "include_once(", "require_once(", "__import__(",
+	}
+	rsLiterals := []string{
+		"/dev/tcp", "bash -i", "mkfifo", "invoke-expression", "downloadstring", "| bash", "|bash", "| sh",
+		"|sh", "-e /bin/", "python -c", "python3 -c", "perl -e", "ruby -rsocket", "socat ", "ncat ",
+		" telnet ", " socket",
+	}
+	for _, lit := range wsLiterals {
+		if !hasWebshellIndicator(lit) {
+			t.Errorf("webshell 字面量漏检: %q", lit)
+		}
+		// 每个字面量砍掉任一字节后不得误报为命中（字面量自身缺失即应 false，
+		// 除非砍掉的不是它命中的必备部分——这里要求全部变体都不命中的均等断言
+		// 只针对字面量原样与“去掉尾字节”两个稳定代表）。
+		if len(lit) > 2 {
+			var sb []byte
+			sb = append(sb, lit[:len(lit)-1]...)
+			if hasWebshellIndicator(string(sb)) {
+				t.Errorf("webshell 截断误报: %q -> %q", lit, string(sb))
+			}
+		}
+	}
+	for _, lit := range rsLiterals {
+		if !hasRevShellIndicator(lit) {
+			t.Errorf("revshell 字面量漏检: %q", lit)
+		}
+	}
+	// 壳（垃圾）输入必须全部 clean。webshell 与 revshell 各自独立核算 ref。
+	shellChars := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./:?#%&*=+!@~^,;()\"'<>[]{} |$`\\\n\t"
+	rng := rand.New(rand.NewSource(93))
+	for i := 0; i < 200000; i++ {
+		n := rng.Intn(85)
+		b := make([]byte, n)
+		for j := range b {
+			b[j] = shellChars[rng.Intn(len(shellChars))]
+		}
+		s := string(b)
+		wsRef := false
+		for _, lit := range wsLiterals {
+			if strings.Contains(s, lit) {
+				wsRef = true
+			}
+		}
+		if hasWebshellIndicator(s) != wsRef {
+			t.Fatalf("webshell 掩码 vs 逐条等价破坏: s=%q", s)
+		}
+		rsRef := false
+		for _, lit := range rsLiterals {
+			if strings.Contains(s, lit) {
+				rsRef = true
+			}
+		}
+		if hasRevShellIndicator(s) != rsRef {
+			t.Fatalf("revshell 掩码 vs 逐条等价破坏: s=%q", s)
+		}
 	}
 }
 

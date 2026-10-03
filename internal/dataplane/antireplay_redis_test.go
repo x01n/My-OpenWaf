@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/snapshot"
@@ -25,16 +25,17 @@ import (
 本文件补齐 antireplay_handler_test.go 明确列为"无法覆盖"的第 1 项：
 **Redis 成功路径**在 handler 层的语义。
 
-对该"无法覆盖"结论的更正：原文称"ValidateAndRotate 只接受 *goredis.Client
-具体类型，无法注入内存假实现；redisNonceLua 依赖服务端 Lua 求值，也无法用
-协议层打桩伪造"。这一结论不成立 —— internal/waf/antireplay/antireplay_test.go:199
-已经用一个协议层 RESP mock（startAntiReplayRedisServer）覆盖了 Redis 分支。
-*goredis.Client 是具体类型不构成障碍：它连的是 TCP 地址，因此在测试里监听一个
-本地端口、按 RESP 协议应答即可，无需接口抽象。
+对该"无法覆盖"结论的更正：原文称"ValidateAndRotate 只接受具体客户端类型，
+无法注入内存假实现；redisNonceLua 依赖服务端 Lua 求值，也无法用协议层打桩
+伪造"。这一结论不成立 —— internal/waf/antireplay/antireplay_test.go:199 已经用
+一个协议层 RESP mock（startAntiReplayRedisServer）覆盖了 Redis 分支。具体
+客户端类型不构成障碍：它连的是 TCP 地址，因此在测试里监听一个本地端口、
+按 RESP 协议应答即可，无需接口抽象。迁移 rueidis 后本 mock 同步升级为
+RESP3 会话（HELLO 3 map 应答 + EVALSHA NOSCRIPT 回退路径）。
 
 本文件把同一手法搬到 dataplane 层，覆盖 handler 视角的 Redis 语义。
 antireplay 包内的 mock 是包内未导出标识符，跨包不可复用，故此处重新实现一份
-最小版本，只支持本用例所需的 HELLO/PING/EVAL 三条命令。
+最小版本，支持本用例所需的 HELLO/PING/EVAL/EVALSHA 命令。
 
 被模拟的服务端逻辑是 redisNonceLua（antireplay.go:34-45）：
   - spentKey 用 SET NX EX 抢占；抢到则写入 idemKey=newNonce 并返回 {1, newNonce}
@@ -113,10 +114,20 @@ func (m *antiReplayRedisMock) handle(conn net.Conn) {
 		}
 		switch strings.ToUpper(args[0]) {
 		case "HELLO":
-			// 拒绝 HELLO 使 go-redis 退回 RESP2，避免实现握手协商。
-			_, _ = io.WriteString(conn, "-ERR unknown command 'hello'\r\n")
+			_, _ = io.WriteString(conn, "%7\r\n"+
+				"$6\r\nserver\r\n$5\r\nredis\r\n"+
+				"$7\r\nversion\r\n$5\r\n7.2.5\r\n"+
+				"$5\r\nproto\r\n:3\r\n"+
+				"$2\r\nid\r\n:1\r\n"+
+				"$4\r\nmode\r\n$10\r\nstandalone\r\n"+
+				"$4\r\nrole\r\n$6\r\nmaster\r\n"+
+				"$7\r\nmodules\r\n$0\r\n\r\n")
+		case "CLUSTER":
+			_, _ = io.WriteString(conn, "-ERR CLUSTER is not supported by mock\r\n")
 		case "PING":
 			_, _ = io.WriteString(conn, "+PONG\r\n")
+		case "EVALSHA":
+			_, _ = io.WriteString(conn, "-NOSCRIPT No matching script. Please use EVAL.\r\n")
 		case "EVAL":
 			_, _ = io.WriteString(conn, m.eval(args))
 		default:
@@ -245,8 +256,16 @@ func newAntiReplayRedisEnv(t *testing.T, mock *antiReplayRedisMock) antiReplayCo
 		},
 	})
 
-	client := goredis.NewClient(&goredis.Options{Addr: mock.addr(), MaxRetries: -1})
-	t.Cleanup(func() { _ = client.Close() })
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{mock.addr()},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if err != nil || client == nil {
+		t.Fatalf("NewClient(err=%v)", err)
+	}
+	t.Cleanup(client.Close)
 
 	eng := engine.New(holder, nil, nil, nil)
 	mgr := antireplay.NewAntiReplayManager("antireplay-redis-test-secret", client, 5*time.Minute)

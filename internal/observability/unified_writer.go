@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/store"
@@ -22,7 +22,7 @@ import (
 // writes everything in one transaction — eliminating SQLite lock contention.
 type UnifiedWriter struct {
 	db    *gorm.DB
-	redis atomic.Pointer[goredis.Client]
+	redis atomic.Pointer[redisClientHolder]
 	log   *slog.Logger
 
 	eventCh    chan store.SecurityEvent
@@ -54,8 +54,6 @@ type UnifiedWriter struct {
 	totalFlushedRecords    atomic.Int64
 	failedRecordsTotal     atomic.Int64
 
-	// lastDropWarnUnixNano 记录上一次丢弃告警的时间，用于限流。
-	// 队列满通常是持续性背压，逐条告警会让日志本身成为故障放大器。
 	lastDropWarnUnixNano atomic.Int64
 
 	// closed 在 Close 入口置位，让 Record* 在排空开始前就停止入队。
@@ -280,9 +278,19 @@ func NewUnifiedWriterWithOptions(db *gorm.DB, log *slog.Logger, opt UnifiedWrite
 	return w
 }
 
+// redisClientHolder 包装 rueidis.Client 接口，供 atomic.Pointer 原子换装。
+// atomic.Pointer 的类型参数必须是具体指针类型，接口值不能直接放入。
+type redisClientHolder struct {
+	c rueidis.Client
+}
+
 // SetRedis enables Redis dual-write for real-time consumption.
-func (w *UnifiedWriter) SetRedis(client *goredis.Client) {
-	w.redis.Store(client)
+func (w *UnifiedWriter) SetRedis(client rueidis.Client) {
+	if client == nil {
+		w.redis.Store(nil)
+		return
+	}
+	w.redis.Store(&redisClientHolder{c: client})
 }
 
 // SetCountCacheInvalidator attaches an optional COUNT-cache invalidator.
@@ -680,8 +688,8 @@ func (w *UnifiedWriter) flushBuffered(
 	}
 
 	// Push to Redis first (low-latency path for real-time consumers).
-	if rc := w.redis.Load(); rc != nil {
-		if err := w.pushToRedis(rc, events, accessLogs, dropEvents, botScores); err != nil {
+	if h := w.redis.Load(); h != nil && h.c != nil {
+		if err := w.pushToRedis(h.c, events, accessLogs, dropEvents, botScores); err != nil {
 			failed = true
 		}
 	}
@@ -851,7 +859,7 @@ func (w *UnifiedWriter) recordFlushStats(persistedRecords, failedRecords int, du
 }
 
 func (w *UnifiedWriter) pushToRedis(
-	rc *goredis.Client,
+	rc rueidis.Client,
 	events []store.SecurityEvent,
 	accessLogs []store.AccessLog,
 	dropEvents []store.DropEvent,
@@ -859,9 +867,9 @@ func (w *UnifiedWriter) pushToRedis(
 ) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	pipe := rc.Pipeline()
 	ttl := 7 * 24 * time.Hour
+	b := rc.B()
+	cmds := make([]rueidis.Completed, 0, 24)
 
 	pushJSON := func(key string, items []any, trim int64) {
 		for _, item := range items {
@@ -869,10 +877,12 @@ func (w *UnifiedWriter) pushToRedis(
 			if err != nil {
 				continue
 			}
-			pipe.LPush(ctx, key, data)
+			cmds = append(cmds, b.Lpush().Key(key).Element(string(data)).Build())
 		}
-		pipe.LTrim(ctx, key, 0, trim)
-		pipe.Expire(ctx, key, ttl)
+		cmds = append(cmds,
+			b.Ltrim().Key(key).Start(0).Stop(trim).Build(),
+			b.Expire().Key(key).Seconds(int64(ttl/time.Second)).Build(),
+		)
 	}
 
 	if len(events) > 0 {
@@ -904,9 +914,12 @@ func (w *UnifiedWriter) pushToRedis(
 		pushJSON("openwaf:bot_scores", items, 49999)
 	}
 
-	if _, err := pipe.Exec(ctx); err != nil {
-		w.log.Warn("redis push failed", slog.Any("err", err))
-		return err
+	resps := rc.DoMulti(ctx, cmds...)
+	for _, resp := range resps {
+		if err := resp.Error(); err != nil {
+			w.log.Warn("redis push failed", slog.Any("err", err))
+			return err
+		}
 	}
 	return nil
 }

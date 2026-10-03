@@ -7,27 +7,15 @@ pub const PURPOSE_CAPTCHA: &str = "captcha";
 pub const PURPOSE_BROWSERSIGN: &str = "browsersign";
 pub const PURPOSE_PASS: &str = "pass";
 pub const PURPOSE_DYN_PROTECT: &str = "dyn-protect";
-
-/// 统一拼接模型：`envelope_label("env", PROTOCOL_VERSION)` 输出 `owaf-env:v2`。
 pub fn envelope_label(category: &str, version: u32) -> String {
     format!("owaf-{}:v{}", category, version)
 }
-
-/// 信封前缀：`prefix(PROTOCOL_VERSION, "owaf-env:v2")` 输出 `v2.owaf-env:v2`。
 pub fn prefix(version: u32, label: &str) -> String {
     format!("v{}.{}", version, label)
 }
-
-/// AAD 拼接：`aad("owaf-captcha:v2", PURPOSE_CHALLENGE_DATA)` 输出
-/// `owaf-captcha:v2|challenge-data`。
 pub fn aad(label: &str, purpose: &str) -> String {
     format!("{}|{}", label, purpose)
 }
-
-/// [`sm3_kdf`] SM3-HKDF 式密钥派生：`kdf(key, category) =
-/// SM3(key ‖ label(category, PROTOCOL_VERSION))` 截 32 字节。
-/// key 为会话主密钥的原始字节；category 走标签生成函数做域分离。
-/// 与 Go 端 b1 同规则。
 pub fn sm3_kdf(key: &[u8], category: &str) -> [u8; 32] {
     let info = envelope_label(category, PROTOCOL_VERSION);
     let mut buf = Vec::with_capacity(key.len() + info.len());

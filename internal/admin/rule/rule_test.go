@@ -743,3 +743,78 @@ func TestListSiteRulesNotFoundReturns404(t *testing.T) {
 		t.Fatalf("expected 404 for missing site, got %d", ctx.Response.StatusCode())
 	}
 }
+
+// TestRuleFrequencyAndCaptchaParamsPersistThroughHandlers 验证规则级执行参数
+// （window_seconds / request_count / captcha_minutes）在 Create 落库、Get 读回、
+// Update 显式改 0 时都能如实往返，不被模型默认值吞掉。
+func TestRuleFrequencyAndCaptchaParamsPersistThroughHandlers(t *testing.T) {
+	repo, db := newRuleRepoAndDBForHandlerTest(t)
+
+	createCtx := invokePersistedRuleHandler(t, CreateRule(repo, func() error { return nil }),
+		"/api/v1/rules", []byte(`{
+		"name":"freq","policy_id":1,"phase":"custom",
+		"pattern":"block_path:/login","action":"captcha_challenge",
+		"priority":7,"enabled":true,"captcha_type":"slide",
+		"window_seconds":60,"request_count":10,"captcha_minutes":15
+	}`))
+	if createCtx.Response.StatusCode() != 201 {
+		t.Fatalf("create status %d: %s", createCtx.Response.StatusCode(), createCtx.Response.Body())
+	}
+	var created store.Rule
+	if err := json.Unmarshal(createCtx.Response.Body(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.WindowSeconds != 60 || created.RequestCount != 10 || created.CaptchaMinutes != 15 {
+		t.Fatalf("create response params = (%d,%d,%d), want (60,10,15)",
+			created.WindowSeconds, created.RequestCount, created.CaptchaMinutes)
+	}
+
+	var stored store.Rule
+	if err := db.First(&stored, created.ID).Error; err != nil {
+		t.Fatalf("load stored rule: %v", err)
+	}
+	if stored.WindowSeconds != 60 || stored.RequestCount != 10 || stored.CaptchaMinutes != 15 {
+		t.Fatalf("stored params = (%d,%d,%d), want (60,10,15)",
+			stored.WindowSeconds, stored.RequestCount, stored.CaptchaMinutes)
+	}
+
+	updateCtx := invokePersistedRuleHandler(t, UpdateRule(repo, func() error { return nil }),
+		"/api/v1/rules/1/update", []byte(`{
+		"name":"freq","policy_id":1,"phase":"custom",
+		"pattern":"block_path:/login","action":"captcha_challenge",
+		"priority":7,"enabled":true,"captcha_type":"slide",
+		"window_seconds":0,"request_count":0,"captcha_minutes":0
+	}`))
+	updateCtx.Params = param.Params{{Key: "id", Value: strconv.FormatUint(uint64(created.ID), 10)}}
+	UpdateRule(repo, func() error { return nil })(context.Background(), updateCtx)
+	if updateCtx.Response.StatusCode() != 200 {
+		t.Fatalf("update status %d: %s", updateCtx.Response.StatusCode(), updateCtx.Response.Body())
+	}
+	if err := db.First(&stored, created.ID).Error; err != nil {
+		t.Fatalf("reload stored rule: %v", err)
+	}
+	if stored.WindowSeconds != 0 || stored.RequestCount != 0 || stored.CaptchaMinutes != 0 {
+		t.Fatalf("explicit zero params = (%d,%d,%d), want (0,0,0)",
+			stored.WindowSeconds, stored.RequestCount, stored.CaptchaMinutes)
+	}
+}
+
+// TestNormalizePersistedRuleConfigRejectsNegativeExecutionParams 验证负值参数被拒。
+func TestNormalizePersistedRuleConfigRejectsNegativeExecutionParams(t *testing.T) {
+	cases := []struct {
+		name string
+		item store.Rule
+	}{
+		{"window_seconds", store.Rule{Phase: store.PhaseCustom, Action: store.ActionIntercept, Pattern: "block_path:/x", WindowSeconds: -1}},
+		{"request_count", store.Rule{Phase: store.PhaseCustom, Action: store.ActionIntercept, Pattern: "block_path:/x", RequestCount: -1}},
+		{"captcha_minutes", store.Rule{Phase: store.PhaseCustom, Action: store.ActionCaptchaChallenge, Pattern: "block_path:/x", CaptchaMinutes: -1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := tc.item
+			if got := normalizePersistedRuleConfig(&item); got == "" {
+				t.Fatalf("negative %s should be rejected", tc.name)
+			}
+		})
+	}
+}

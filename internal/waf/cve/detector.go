@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"My-OpenWaf/internal/ac"
+	"My-OpenWaf/internal/pkg/snippet"
 )
 
 // CVEDetector orchestrates CVE-specific vulnerability detection across
@@ -48,6 +51,14 @@ type CVEMatch struct {
 	Pattern     string
 	Action      string // drop, block, log
 	CaptchaType string // rule-level CAPTCHA type; empty inherits global
+	// Source/CVSSScore/CWEType/References 来自数据库规则行（cve_rules），
+	// 供安全事件展示规则来源与危险度明细；内置注册表规则无对应行时为空。
+	Source     string
+	CVSSScore  float64
+	CWEType    string
+	References string
+	// Snippet 是触发命中的内容片段，由收口处按规则正则提取并截断。
+	Snippet string
 }
 
 // CustomCVERule is a user/auto-generated CVE rule loaded from the database.
@@ -62,6 +73,12 @@ type CustomCVERule struct {
 	CaptchaType string // rule-level CAPTCHA type; empty inherits global
 	Enabled     bool
 	Description string
+	// Source/CVSSScore/CWEType/References 是数据库规则行的展示元信息，
+	// 不参与检测判定；内置注册表规则没有数据库行。
+	Source     string
+	CVSSScore  float64
+	CWEType    string
+	References string
 }
 
 type compiledCustomRule struct {
@@ -161,7 +178,7 @@ func (r *CVERuleRegistry) DetectAll(uri, body, ua string, headers map[string]str
 	defer r.mu.RUnlock()
 	var matches []CVEMatch
 	combinedLower := registryCombinedLower(uri, body, ua, headers)
-	acHit := registryACData.ac.matchMask(combinedLower)
+	acHit := registryACData.ac.MatchMask(combinedLower)
 	for _, rule := range r.rules {
 		if !rule.Enabled {
 			continue
@@ -170,7 +187,7 @@ func (r *CVERuleRegistry) DetectAll(uri, body, ua string, headers map[string]str
 			continue
 		}
 		if m := rule.CheckFunc(uri, body, ua, headers); m != nil {
-			matches = append(matches, *m)
+			matches = append(matches, registryRuleMatch(rule, *m))
 		}
 	}
 	return matches
@@ -181,7 +198,7 @@ func (r *CVERuleRegistry) DetectFirst(uri, body, ua string, headers map[string]s
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	combinedLower := registryCombinedLower(uri, body, ua, headers)
-	acHit := registryACData.ac.matchMask(combinedLower)
+	acHit := registryACData.ac.MatchMask(combinedLower)
 	for _, rule := range r.rules {
 		if !rule.Enabled {
 			continue
@@ -190,10 +207,32 @@ func (r *CVERuleRegistry) DetectFirst(uri, body, ua string, headers map[string]s
 			continue
 		}
 		if m := rule.CheckFunc(uri, body, ua, headers); m != nil {
-			return *m, true
+			return registryRuleMatch(rule, *m), true
 		}
 	}
 	return CVEMatch{}, false
+}
+
+// registryRuleMatch 为注册表规则的命中补齐解释性信息。
+//
+// 注册表规则的检测正则封闭在各自的 CheckFunc 内，对外只返回 CVEMatch，
+// 无法回溯命中的目标串，因此这里不提取匹配片段（不引入与命中无关的
+// 上下文），只补 CVE 元信息缺省值与来源标记；来源为 builtin 表示该行
+// 不属于 cve_rules 数据库表，没有可展示的采集来源与 CVSS/CWE 明细。
+func registryRuleMatch(rule *CVERule, m CVEMatch) CVEMatch {
+	if m.Source == "" {
+		m.Source = "builtin"
+	}
+	if m.Category == "" {
+		m.Category = rule.Category
+	}
+	if m.Severity == "" {
+		m.Severity = rule.Severity
+	}
+	if m.Description == "" {
+		m.Description = rule.Description
+	}
+	return m
 }
 
 func registryCombinedLower(uri, body, ua string, headers map[string]string) string {
@@ -585,6 +624,33 @@ func hasCommvaultDeploySignalLower(value string) bool {
 		registeredCVERuleContainsAny(value, "../", "%2e%2e", "http://", "https://", "/commandcenter/webpackage.do", ".zip")
 }
 
+func hasNGINXRewriteCaptureSignalLower(value string) bool {
+	return strings.Contains(value, "$1$2") ||
+		strings.Contains(value, "$1$2$3") ||
+		(strings.Contains(value, "$1") && strings.Contains(value, "$2"))
+}
+
+func hasSharePointJWTBypassSignalLower(value string) bool {
+	if !strings.Contains(value, "/_layouts/15/metadata/json/1") {
+		return false
+	}
+	if !hasJWTSigningBypassSignalLower(value) {
+		return false
+	}
+	return strings.Contains(value, "act:") || strings.Contains(value, "actor")
+}
+
+func hasJWTSigningBypassSignalLower(lower string) bool {
+	if strings.Contains(lower, `"alg":"none`) {
+		return true
+	}
+	if i := strings.Index(lower, "alg="); i >= 0 {
+		rest := strings.ToUpper(lower[i+len("alg="):])
+		return strings.HasPrefix(rest, "NONE")
+	}
+	return false
+}
+
 func requestHasCommvaultDeploySignal(req *CVERequest) bool {
 	return lowerTargetsContainAny(req.URLTargetsLower, "deploywebpackage.do") &&
 		lowerTargetsContainAny(req.BodyTargetsLower, "commcellname") &&
@@ -657,11 +723,11 @@ func lowerTargetsHaveNoSQLInjectSignal(targets []string) bool {
 	return false
 }
 
-// shouldScanRegisteredCVERuleAC 使用 AC bitset 判定纯 OR gate,复合 helper 原样调用。
-// hit 为调用方在 for 循环外对 combinedLower 做的一次 matchMask 结果。
-func shouldScanRegisteredCVERuleAC(rule *CVERule, combinedLower string, hit *acGateMask) bool {
+func shouldScanRegisteredCVERuleAC(rule *CVERule, combinedLower string, hit *ac.Mask) bool {
+	if _, ok := registryNeedleGroups[rule.CVE]; ok {
+		return registryACGate(rule.CVE, hit)
+	}
 	switch rule.CVE {
-	// 复合 helper(含边界检查/AND/计数逻辑,不可 AC 化)——原样保留
 	case "CVE-2023-GRAPHQL":
 		return hasGraphQLIntrospectionSignalLower(combinedLower)
 	case "CVE-2025-30208":
@@ -684,12 +750,10 @@ func shouldScanRegisteredCVERuleAC(rule *CVERule, combinedLower string, hit *acG
 		return hasNoSQLInjectSignalLower(combinedLower)
 	case "CVE-2024-LOWCMD":
 		return registeredCVERuleContainsLowCmdSignal(combinedLower)
-	// 纯 OR gate——用 AC bitset 等价替代 registeredCVERuleContainsAny
-	case "CVE-2014-6271", "CVE-2025-24893", "CVE-2025-47812", "CVE-2025-4632",
-		"CVE-2025-64446", "CVE-2025-10035", "CVE-2025-41243", "CVE-2025-47916",
-		"CVE-2025-31161", "CVE-2025-32756", "CVE-2017-8046", "CVE-2021-21351",
-		"CVE-2024-REMOTECALL", "CVE-2024-XXEUTF7", "CVE-2024-LDAPI", "CVE-2024-SENSFILE":
-		return registryACGate(rule.CVE, hit)
+	case "CVE-2026-42945", "CVE-2026-9256":
+		return hasNGINXRewriteCaptureSignalLower(combinedLower)
+	case "CVE-2026-55040":
+		return hasSharePointJWTBypassSignalLower(combinedLower)
 	default:
 		return true
 	}
@@ -1411,10 +1475,16 @@ func rawBodyHasCVEByteIndicator(body []byte) bool {
 			if hasRawBodyPrefixFoldAt(body, i, "${") ||
 				hasRawBodyPrefixFoldAt(body, i, "$gt") ||
 				hasRawBodyPrefixFoldAt(body, i, "$ne") ||
+				hasRawBodyPrefixFoldAt(body, i, "$1") ||
 				hasRawBodyPrefixFoldAt(body, i, "$regex") ||
 				hasRawBodyPrefixFoldAt(body, i, "$where") ||
 				hasRawBodyPrefixFoldAt(body, i, "$or") ||
-				hasRawBodyPrefixFoldAt(body, i, "$and") {
+				hasRawBodyPrefixFoldAt(body, i, "$and") ||
+				hasRawBodyPrefixFoldAt(body, i, "$1$2") {
+				return true
+			}
+		case '"':
+			if hasRawBodyPrefixFoldAt(body, i, `"alg":"none`) {
 				return true
 			}
 		case '#':
@@ -1774,16 +1844,7 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 		}
 		target := pickTarget(req, cr.rule.Target)
 		if cr.re.MatchString(target) {
-			matches = append(matches, CVEMatch{
-				CVEID:       cr.rule.CVEID,
-				Category:    cr.rule.Category,
-				Severity:    cr.rule.Severity,
-				Description: cr.rule.Description,
-				MatchedPart: cr.rule.Target,
-				Pattern:     cr.rule.Pattern,
-				Action:      cr.rule.Action,
-				CaptchaType: cr.rule.CaptchaType,
-			})
+			matches = append(matches, newCustomCVEMatch(cr, target))
 		}
 	}
 
@@ -1850,16 +1911,7 @@ func (d *CVEDetector) DetectFirst(req *CVERequest, categorySensitivity ...map[st
 		}
 		target := pickTarget(req, cr.rule.Target)
 		if cr.re.MatchString(target) {
-			return CVEMatch{
-				CVEID:       cr.rule.CVEID,
-				Category:    cr.rule.Category,
-				Severity:    cr.rule.Severity,
-				Description: cr.rule.Description,
-				MatchedPart: cr.rule.Target,
-				Pattern:     cr.rule.Pattern,
-				Action:      cr.rule.Action,
-				CaptchaType: cr.rule.CaptchaType,
-			}, true
+			return newCustomCVEMatch(cr, target), true
 		}
 	}
 
@@ -1871,6 +1923,29 @@ func (d *CVEDetector) DetectFirst(req *CVERequest, categorySensitivity ...map[st
 	return globalCVERuleRegistry.DetectFirst(uri, req.Body, ua, req.Headers)
 }
 
+// newCustomCVEMatch 组装自定义/数据库规则的命中结果。
+//
+// 除检测判定字段外，一并透传规则行的来源与危险度元信息（Source、
+// CVSSScore、CWEType、References），并把命中的目标串交给 snippet 提取
+// 片段，使安全事件能解释"匹配到了什么"。
+func newCustomCVEMatch(cr compiledCustomRule, target string) CVEMatch {
+	return CVEMatch{
+		CVEID:       cr.rule.CVEID,
+		Category:    cr.rule.Category,
+		Severity:    cr.rule.Severity,
+		Description: cr.rule.Description,
+		MatchedPart: cr.rule.Target,
+		Pattern:     cr.rule.Pattern,
+		Action:      cr.rule.Action,
+		CaptchaType: cr.rule.CaptchaType,
+		Source:      cr.rule.Source,
+		CVSSScore:   cr.rule.CVSSScore,
+		CWEType:     cr.rule.CWEType,
+		References:  cr.rule.References,
+		Snippet:     snippet.Extract([]*regexp.Regexp{cr.re}, target),
+	}
+}
+
 // hasCVESuspiciousContent performs a cheap pre-filter to skip CVE scanning
 // for requests that are clearly clean. Checks for common exploit indicators.
 func hasCVEHighRiskPunctuation(raw, lower string) bool {
@@ -1878,7 +1953,11 @@ func hasCVEHighRiskPunctuation(raw, lower string) bool {
 		return true
 	}
 	if strings.Contains(raw, "$") {
-		return strings.Contains(lower, "${") || strings.Contains(lower, "$gt") || strings.Contains(lower, "$ne") || strings.Contains(lower, "$regex") || strings.Contains(lower, "$where") || strings.Contains(lower, "$or") || strings.Contains(lower, "$and")
+		if strings.Contains(lower, "${") || strings.Contains(lower, "$gt") || strings.Contains(lower, "$ne") || strings.Contains(lower, "$regex") || strings.Contains(lower, "$where") || strings.Contains(lower, "$or") || strings.Contains(lower, "$and") || strings.Contains(lower, "$1$2") {
+			return true
+		}
+		// NGINX rewrite 多捕获引用分离形态($1 与 $2 同视窗但不相邻)
+		return strings.Contains(lower, "$1") && strings.Contains(lower, "$2")
 	}
 	if strings.Contains(raw, "{") || strings.Contains(raw, "}") {
 		return strings.Contains(lower, "${") || strings.Contains(lower, "#{") || strings.Contains(lower, "{{") || strings.Contains(lower, "expression=") || strings.Contains(lower, "groovy") || strings.Contains(lower, "async=false") || strings.Contains(lower, "addresponseheader") || strings.Contains(lower, "unserialize") || strings.Contains(lower, "o:") || strings.Contains(lower, "a:")
@@ -1940,7 +2019,12 @@ func hasCVEKnownIndicator(lower string) bool {
 		case '$':
 			if hasPrefixAt(lower, i, "$gt") || hasPrefixAt(lower, i, "$ne") ||
 				hasPrefixAt(lower, i, "$regex") || hasPrefixAt(lower, i, "$where") ||
-				hasPrefixAt(lower, i, "$or") || hasPrefixAt(lower, i, "$and") {
+				hasPrefixAt(lower, i, "$or") || hasPrefixAt(lower, i, "$and") ||
+				hasPrefixAt(lower, i, "$1$2") {
+				return true
+			}
+		case '"':
+			if hasPrefixAt(lower, i, `"alg":"none`) {
 				return true
 			}
 		case '#':
@@ -2101,11 +2185,13 @@ func hasCVEKnownIndicator(lower string) bool {
 			if hasPrefixAt(lower, i, "php://") ||
 				hasPrefixAt(lower, i, "ping.cgi") ||
 				hasPrefixAt(lower, i, "priorityqueue") ||
-				hasPrefixAt(lower, i, "processbuilder") {
+				hasPrefixAt(lower, i, "processbuilder") ||
+				hasPrefixAt(lower, i, "psemhub") {
 				return true
 			}
 		case 'r':
 			if hasPrefixAt(lower, i, "raw??") ||
+				hasPrefixAt(lower, i, "react-server-dom-webpack") ||
 				hasPrefixAt(lower, i, "reflect.method") ||
 				hasPrefixAt(lower, i, "rememberme=") ||
 				hasPrefixAt(lower, i, "rmi://") {
@@ -2114,6 +2200,7 @@ func hasCVEKnownIndicator(lower string) bool {
 		case 's':
 			if hasPrefixAt(lower, i, "scriptengine") ||
 				hasPrefixAt(lower, i, "serializ") ||
+				hasPrefixAt(lower, i, "server actions") ||
 				hasPrefixAt(lower, i, "shift-jis") ||
 				hasPrefixAt(lower, i, "signout.aspx") ||
 				hasPrefixAt(lower, i, "solrsearch") ||

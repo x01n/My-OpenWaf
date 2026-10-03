@@ -251,6 +251,68 @@ func TestBuildLuaRequestViewNilClientIP(t *testing.T) {
 	}
 }
 
+// TestBuildLuaRequestViewRuntime 验证运行时视图被填充为 pre 阶段。
+//
+// 脚本此前完全读不到 ctx.runtime：字段在 exec.go 里暴露，但生产侧从未赋值，
+// 恒为空表且不报错。这里锁定三个键的来源——阶段、管道阶段名、请求 ID。
+func TestBuildLuaRequestViewRuntime(t *testing.T) {
+	ctx := &pipeline.RequestCtx{RequestID: "req-42"}
+	view := BuildLuaRequestView(ctx)
+
+	if view.Runtime["stage"] != "pre" {
+		t.Errorf("Runtime[stage] = %q, want pre", view.Runtime["stage"])
+	}
+	if view.Runtime["phase"] != "lua_pre" {
+		t.Errorf("Runtime[phase] = %q, want lua_pre", view.Runtime["phase"])
+	}
+	if view.Runtime["request_id"] != "req-42" {
+		t.Errorf("Runtime[request_id] = %q, want req-42", view.Runtime["request_id"])
+	}
+}
+
+// TestBuildLuaRequestViewNilContextIsSafe 验证 nil 上下文不 panic。
+func TestBuildLuaRequestViewNilContextIsSafe(t *testing.T) {
+	view := BuildLuaRequestView(nil)
+	if view.Runtime != nil {
+		t.Errorf("nil 上下文应得到 nil Runtime，得到 %+v", view.Runtime)
+	}
+}
+
+// TestBuildLuaPostRuntimeView 验证后置阶段的运行时视图与前置可区分。
+func TestBuildLuaPostRuntimeView(t *testing.T) {
+	ctx := &pipeline.RequestCtx{RequestID: "req-9"}
+	post := BuildLuaPostRuntimeView(ctx)
+	if post["stage"] != "post" || post["phase"] != "lua_post" {
+		t.Errorf("后置 Runtime = %+v", post)
+	}
+	if post["request_id"] != "req-9" {
+		t.Errorf("后置 Runtime[request_id] = %q", post["request_id"])
+	}
+
+	pre := BuildLuaRequestView(ctx).Runtime
+	if pre["phase"] == post["phase"] {
+		t.Fatal("前置与后置的阶段名必须不同，否则脚本无法区分执行时机")
+	}
+	if BuildLuaPostRuntimeView(nil) != nil {
+		t.Error("nil 上下文应得到 nil Runtime")
+	}
+}
+
+// TestBuildLuaRequestViewLeavesConfigMetricsEmpty 锁定当前事实：
+// Config 与 Metrics 在数据面无写入方，视图里保持 nil。
+//
+// 这不是「尚待补齐」的断言，而是防止无声改变：若将来有人接上数据源，此用例
+// 会失败，提示同步更新文档与前端帮助面板里对这两个字段的描述。
+func TestBuildLuaRequestViewLeavesConfigMetricsEmpty(t *testing.T) {
+	view := BuildLuaRequestView(&pipeline.RequestCtx{RequestID: "r"})
+	if view.Config != nil {
+		t.Errorf("Config 在数据面没有写入方，应为 nil，得到 %+v", view.Config)
+	}
+	if view.Metrics != nil {
+		t.Errorf("Metrics 在数据面没有写入方，应为 nil，得到 %+v", view.Metrics)
+	}
+}
+
 // TestLuaPhaseScriptErrorDoesNotBlock 验证脚本报错时请求不被拦截。
 //
 // 自定义策略故障不应导致站点不可用——这是数据面的可用性底线。

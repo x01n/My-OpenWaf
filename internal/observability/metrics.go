@@ -95,14 +95,8 @@ type UpstreamMetricsSnapshotProvider func() UpstreamMetricsSnapshot
 
 // Metrics collects WAF runtime metrics for the /metrics (Prometheus) endpoint.
 type Metrics struct {
-	RequestsTotal  atomic.Int64
-	BlocksTotal    atomic.Int64
-	ObservesTotal  atomic.Int64
-	BuiltinHits    atomic.Int64
-	CacheHits      atomic.Int64
-	CacheMisses    atomic.Int64
-	UpstreamErrors atomic.Int64
-	Uptime         time.Time
+	RequestsTotal atomic.Int64
+	Uptime        time.Time
 
 	unifiedWriterStatsProvider atomic.Value
 	writeQueueStatsProvider    atomic.Value
@@ -119,24 +113,6 @@ func NewMetrics() *Metrics {
 
 // RecordRequest increments the total request counter.
 func (m *Metrics) RecordRequest() { m.RequestsTotal.Add(1) }
-
-// RecordBlock increments the block counter.
-func (m *Metrics) RecordBlock() { m.BlocksTotal.Add(1) }
-
-// RecordObserve increments the observe counter.
-func (m *Metrics) RecordObserve() { m.ObservesTotal.Add(1) }
-
-// RecordBuiltin increments the builtin hit counter.
-func (m *Metrics) RecordBuiltin() { m.BuiltinHits.Add(1) }
-
-// RecordCacheHit increments cache hit counter.
-func (m *Metrics) RecordCacheHit() { m.CacheHits.Add(1) }
-
-// RecordCacheMiss increments cache miss counter.
-func (m *Metrics) RecordCacheMiss() { m.CacheMisses.Add(1) }
-
-// RecordUpstreamError increments upstream error counter.
-func (m *Metrics) RecordUpstreamError() { m.UpstreamErrors.Add(1) }
 
 // SetUnifiedWriterStatsProvider attaches async writer diagnostics to /metrics.
 func (m *Metrics) SetUnifiedWriterStatsProvider(provider UnifiedWriterStatsProvider) {
@@ -209,33 +185,18 @@ func PrometheusBody(m *Metrics) string {
 
 	uptimeSec := time.Since(m.Uptime).Seconds()
 
+	// 本结构体只保留「进程级」指标（请求总数、存活时长、goroutine、内存、GC）。
+	// 拦截/观察/内置命中/缓存命中未命中/上游错误这些计数器不在本结构体，
+	// 唯一真实来源是 dataplane.Metrics（prometheusDataPlaneMetrics 输出的
+	// openwaf_dataplane_* 系列）与 CacheStatsSnapshotProvider
+	// （owaf_cache_* 系列）；此处曾输出恒为 0 的同名指标，已移除。
+	//
+	// 注意：下面的 openwaf_requests_total 同样未接线——本包的 RecordRequest
+	// 没有任何生产调用点，app 只把 promMetrics 用于 Set*Provider 与 /metrics
+	// handler。真实请求数见 openwaf_dataplane_requests_total。
 	body := fmt.Sprintf(`# HELP openwaf_requests_total Total HTTP requests processed
 # TYPE openwaf_requests_total counter
 openwaf_requests_total %d
-
-# HELP openwaf_blocks_total Total requests blocked
-# TYPE openwaf_blocks_total counter
-openwaf_blocks_total %d
-
-# HELP openwaf_observes_total Total observe-only detections
-# TYPE openwaf_observes_total counter
-openwaf_observes_total %d
-
-# HELP openwaf_builtin_hits_total Total builtin OWASP rule hits
-# TYPE openwaf_builtin_hits_total counter
-openwaf_builtin_hits_total %d
-
-# HELP openwaf_cache_hits_total Response cache hits
-# TYPE openwaf_cache_hits_total counter
-openwaf_cache_hits_total %d
-
-# HELP openwaf_cache_misses_total Response cache misses
-# TYPE openwaf_cache_misses_total counter
-openwaf_cache_misses_total %d
-
-# HELP openwaf_upstream_errors_total Upstream proxy errors
-# TYPE openwaf_upstream_errors_total counter
-openwaf_upstream_errors_total %d
 
 # HELP openwaf_uptime_seconds Seconds since process start
 # TYPE openwaf_uptime_seconds gauge
@@ -258,12 +219,6 @@ openwaf_memory_sys_bytes %d
 openwaf_gc_pause_total_ns %d
 `,
 		m.RequestsTotal.Load(),
-		m.BlocksTotal.Load(),
-		m.ObservesTotal.Load(),
-		m.BuiltinHits.Load(),
-		m.CacheHits.Load(),
-		m.CacheMisses.Load(),
-		m.UpstreamErrors.Load(),
 		uptimeSec,
 		runtime.NumGoroutine(),
 		memStats.Alloc,

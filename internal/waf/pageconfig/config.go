@@ -5,7 +5,6 @@ import (
 	"html/template"
 	"net/url"
 	"strings"
-	"sync"
 )
 
 // PageConfig holds customizable branding/theme settings for WAF pages.
@@ -94,7 +93,7 @@ func DefaultBlockPageConfig() BlockPageConfig {
 	}
 }
 
-// PageTemplateManager manages page template configurations.
+// ParseCaptchaPageConfig 解析存储的 captcha 页面配置，空值或非法 JSON 时回落默认值。
 func ParseCaptchaPageConfig(raw string) CaptchaPageConfig {
 	cfg := DefaultCaptchaPageConfig()
 	if raw != "" {
@@ -118,61 +117,6 @@ func ParseBlockPageConfig(raw string) BlockPageConfig {
 	}
 	return cfg
 }
-
-type PageTemplateManager struct {
-	captchaCfg   CaptchaPageConfig
-	challengeCfg ChallengePageConfig
-	blockCfg     BlockPageConfig
-	mu           sync.RWMutex
-}
-
-// NewPageTemplateManager creates a manager with default configurations.
-func NewPageTemplateManager() *PageTemplateManager {
-	return &PageTemplateManager{
-		captchaCfg:   DefaultCaptchaPageConfig(),
-		challengeCfg: DefaultChallengePageConfig(),
-		blockCfg:     DefaultBlockPageConfig(),
-	}
-}
-
-func (m *PageTemplateManager) GetCaptchaConfig() CaptchaPageConfig {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.captchaCfg
-}
-
-func (m *PageTemplateManager) SetCaptchaConfig(cfg CaptchaPageConfig) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.captchaCfg = cfg
-}
-
-func (m *PageTemplateManager) GetChallengeConfig() ChallengePageConfig {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.challengeCfg
-}
-
-func (m *PageTemplateManager) SetChallengeConfig(cfg ChallengePageConfig) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.challengeCfg = cfg
-}
-
-func (m *PageTemplateManager) GetBlockConfig() BlockPageConfig {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.blockCfg
-}
-
-func (m *PageTemplateManager) SetBlockConfig(cfg BlockPageConfig) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.blockCfg = cfg
-}
-
-// SanitizeCSS rejects an entire custom stylesheet when it contains active or external CSS constructs.
-// Safe CSS is returned unchanged so the renderer never executes a string created by deleting attacker input.
 func SanitizeCSS(css string) string {
 	value := strings.TrimSpace(css)
 	if value == "" {

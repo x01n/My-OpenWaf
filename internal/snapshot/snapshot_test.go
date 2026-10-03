@@ -2678,3 +2678,75 @@ func TestHolderStoreIfNewerRejectsOlderRevision(t *testing.T) {
 		t.Fatalf("active snapshot revision = %v, want 2", got)
 	}
 }
+
+// TestCompileRulesAppliesRuleFrequencyLimit 验证规则自带的时间窗口/请求次数
+// 会被包装成 cc_rate 复合条件，且两个参数任一为 0 时不包装。
+func TestCompileRulesAppliesRuleFrequencyLimit(t *testing.T) {
+	base := store.Rule{
+		ID:            9,
+		Phase:         store.PhaseCustom,
+		Action:        store.ActionIntercept,
+		Pattern:       "block_path:/login",
+		Enabled:       true,
+		WindowSeconds: 60,
+		RequestCount:  10,
+	}
+	rules := compileRules([]store.Rule{base})
+	if len(rules) != 1 {
+		t.Fatalf("compiled rule count = %d, want 1", len(rules))
+	}
+	if rules[0].Kind != "compound" {
+		t.Fatalf("kind = %q, want compound", rules[0].Kind)
+	}
+	var cond struct {
+		Op        string `json:"op"`
+		Window    int64  `json:"window"`
+		Threshold int64  `json:"threshold"`
+		Children  []struct {
+			Kind string `json:"kind"`
+			Arg  string `json:"arg"`
+		} `json:"children"`
+	}
+	if err := json.Unmarshal([]byte(rules[0].Arg), &cond); err != nil {
+		t.Fatalf("unmarshal compiled arg: %v", err)
+	}
+	if cond.Op != "cc_rate" || cond.Window != 60 || cond.Threshold != 10 {
+		t.Fatalf("cc_rate envelope = %+v, want op=cc_rate window=60 threshold=10", cond)
+	}
+	if len(cond.Children) != 1 || cond.Children[0].Kind != "block_path" || cond.Children[0].Arg != "/login" {
+		t.Fatalf("cc_rate children = %+v, want single block_path:/login", cond.Children)
+	}
+
+	noWindow := base
+	noWindow.WindowSeconds = 0
+	plain := compileRules([]store.Rule{noWindow})
+	if len(plain) != 1 || plain[0].Kind != "block_path" {
+		t.Fatalf("rule without window should stay uncompounded, got %+v", plain)
+	}
+
+	compound := base
+	compound.Pattern = `{"op":"and","children":[{"kind":"block_path","arg":"/a"},{"kind":"block_method","arg":"POST"}]}`
+	untouched := compileRules([]store.Rule{compound})
+	if len(untouched) != 1 || untouched[0].Arg != compound.Pattern {
+		t.Fatalf("compound pattern must not be re-wrapped, got %+v", untouched)
+	}
+}
+
+// TestCompileRulesCarriesCaptchaMinutes 验证规则级验证码有效期随编译结果下发。
+func TestCompileRulesCarriesCaptchaMinutes(t *testing.T) {
+	rules := compileRules([]store.Rule{{
+		ID:             11,
+		Phase:          store.PhaseCustom,
+		Action:         store.ActionCaptchaChallenge,
+		Pattern:        "block_path:/guarded",
+		CaptchaType:    "slide",
+		CaptchaMinutes: 15,
+		Enabled:        true,
+	}})
+	if len(rules) != 1 {
+		t.Fatalf("compiled rule count = %d, want 1", len(rules))
+	}
+	if rules[0].CaptchaMinutes != 15 {
+		t.Fatalf("compiled captcha_minutes = %d, want 15", rules[0].CaptchaMinutes)
+	}
+}

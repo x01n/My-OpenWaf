@@ -85,6 +85,9 @@ func (c *peekConn) Read(p []byte) (int, error) {
 			if len(c.fingerprint.ALPN) == 0 {
 				c.fingerprint.ALPN = fp.ALPN
 			}
+			if len(c.fingerprint.ALPNRaw) == 0 {
+				c.fingerprint.ALPNRaw = fp.ALPNRaw
+			}
 			if len(c.fingerprint.CipherSuites) == 0 {
 				c.fingerprint.CipherSuites = fp.CipherSuites
 			}
@@ -127,10 +130,8 @@ func (c *peekConn) SetTLSHandshakeInfo(version string, sni string, alpn string) 
 	if sni != "" {
 		c.fingerprint.SNI = sni
 	}
-	c.fingerprint.ALPN = nil
-	if alpn != "" {
-		c.fingerprint.ALPN = []string{alpn}
-	}
+	// 只写协商结果（ALPN）；ALPNRaw 是 ClientHello 声明列表，保持只读。
+	c.fingerprint.SetNegotiatedALPN(alpn)
 }
 
 func (c *peekConn) TLSFingerprint() (bot.TLSClientFingerprint, bool) {

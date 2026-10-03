@@ -323,6 +323,17 @@ func normalizePersistedRuleConfig(item *store.Rule) string {
 			return "captcha_type requires captcha_challenge action"
 		}
 	}
+	// 规则级执行参数：三者都按「>= 0」持久化，0 表示未配置。负值没有语义，
+	// 且会让窗口/阈值比较在运行期静默失效，必须在写库前拦下。
+	if item.WindowSeconds < 0 {
+		return "window_seconds must be non-negative"
+	}
+	if item.RequestCount < 0 {
+		return "request_count must be non-negative"
+	}
+	if item.CaptchaMinutes < 0 {
+		return "captcha_minutes must be non-negative"
+	}
 	return ""
 }
 

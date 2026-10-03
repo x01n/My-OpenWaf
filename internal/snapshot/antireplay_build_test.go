@@ -75,6 +75,74 @@ func TestBuildAntiReplayEnabledUsesNullableSiteOverride(t *testing.T) {
 }
 
 /**
+ * TestBuildAntiReplayCookieModeThreeState 验证 Cookie 校验模式的三态合成与规范化：
+ * nil 继承全局；显式 "dual" 覆盖；非法/空值统一回落 "standard"。
+ */
+func TestBuildAntiReplayCookieModeThreeState(t *testing.T) {
+	cases := []struct {
+		name   string
+		site   *string
+		global string
+		want   string
+	}{
+		{name: "nil inherits standard global", site: nil, global: "standard", want: "standard"},
+		{name: "nil inherits dual global", site: nil, global: "dual", want: "dual"},
+		{name: "explicit dual overrides standard global", site: strPtr("dual"), global: "standard", want: "dual"},
+		{name: "explicit standard overrides dual global", site: strPtr("standard"), global: "dual", want: "standard"},
+		{name: "nil with empty global falls back to standard", site: nil, global: "", want: "standard"},
+		{name: "invalid site value falls back to standard", site: strPtr("bogus"), global: "dual", want: "standard"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _ := newSnapshotBuildDBForTest(t)
+
+			site := store.Site{
+				Host:                 "antireplay-mode.example.test",
+				Bind:                 ":80",
+				Network:              "tcp",
+				UpstreamURLs:         "http://127.0.0.1:8080",
+				Enabled:              true,
+				AntiReplayCookieMode: tc.site,
+			}
+			if err := db.Create(&site).Error; err != nil {
+				t.Fatalf("seed site: %v", err)
+			}
+
+			protection := store.DefaultProtectionConfig()
+			protection.AntiReplayCookieMode = tc.global
+			raw, err := json.Marshal(protection)
+			if err != nil {
+				t.Fatalf("marshal protection: %v", err)
+			}
+			if err := db.Create(&store.SystemSettings{Key: "protection", Value: string(raw)}).Error; err != nil {
+				t.Fatalf("seed protection setting: %v", err)
+			}
+
+			sn, err := Build(db, 1, testDynamicKeyBase)
+			if err != nil {
+				t.Fatalf("build snapshot: %v", err)
+			}
+			rt, ok := sn.MatchSite(":80", site.Host)
+			if !ok {
+				t.Fatal("site was not matched")
+			}
+			if rt.AntiReplayCookieMode != tc.want {
+				t.Fatalf("site=%v global=%q => rt.AntiReplayCookieMode = %q, want %q",
+					tc.site, tc.global, rt.AntiReplayCookieMode, tc.want)
+			}
+		})
+	}
+}
+
+/**
+ * strPtr 返回字符串指针，供三态覆盖用例构造。
+ */
+func strPtr(value string) *string {
+	return &value
+}
+
+/**
  * TestBuildAntiReplayTTLAndActionHaveNoGlobalSource 固化 TTL 与 action 的来源唯一性：
  * 两者**只有站点级**字段，ProtectionConfig 中不存在对应项，因此没有全局兜底。
  *

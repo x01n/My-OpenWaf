@@ -57,3 +57,6 @@ My-OpenWaf
 .lsp-mcp/
 *.r6bak
 main
+internal/waf/owasp/*trace*_test.go
+internal/core/rules/zz_*_test.go
+asttool

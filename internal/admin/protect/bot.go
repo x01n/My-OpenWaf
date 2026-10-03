@@ -28,6 +28,7 @@ type BotSettingsUpdate struct {
 	JSObfuscation            *bool    `json:"js_obfuscation"`
 	ImageWatermark           *bool    `json:"image_watermark"`
 	AntiReplayEnabled        *bool    `json:"anti_replay_enabled"`
+	AntiReplayCookieMode     *string  `json:"anti_replay_cookie_mode"`
 	BrowserSignEnabled       *bool    `json:"browser_sign_enabled"`
 	BrowserSignTTL           *int     `json:"browser_sign_ttl"`
 	BrowserSignAction        *string  `json:"browser_sign_action"`
@@ -42,13 +43,17 @@ type BotSettingsUpdate struct {
 func defaultBotSettingsResponse(settingsRepo *repository.SystemSettingsRepo) shared.BotSettingsResponse {
 	protectionCfg := shared.LoadProtectionConfig(settingsRepo)
 	resp := shared.BotSettingsResponse{
-		Enabled:            protectionCfg.BotDetectionEnabled,
-		ScoreThreshold:     60,
-		CaptchaEnabled:     protectionCfg.CaptchaEnabled,
-		AntiReplayEnabled:  protectionCfg.AntiReplayEnabled,
-		BrowserSignEnabled: protectionCfg.BrowserSignEnabled,
-		BrowserSignTTL:     protectionCfg.BrowserSignTTL,
-		BrowserSignAction:  protectionCfg.BrowserSignAction,
+		Enabled:              protectionCfg.BotDetectionEnabled,
+		ScoreThreshold:       60,
+		CaptchaEnabled:       protectionCfg.CaptchaEnabled,
+		AntiReplayEnabled:    protectionCfg.AntiReplayEnabled,
+		AntiReplayCookieMode: protectionCfg.AntiReplayCookieMode,
+		BrowserSignEnabled:   protectionCfg.BrowserSignEnabled,
+		BrowserSignTTL:       protectionCfg.BrowserSignTTL,
+		BrowserSignAction:    protectionCfg.BrowserSignAction,
+	}
+	if resp.AntiReplayCookieMode == "" {
+		resp.AntiReplayCookieMode = "standard"
 	}
 	if resp.BrowserSignTTL <= 0 {
 		resp.BrowserSignTTL = 300
@@ -83,7 +88,11 @@ func GetBotSettings(settingsRepo *repository.SystemSettingsRepo) app.HandlerFunc
 		prot := shared.LoadProtectionConfig(settingsRepo)
 		resp.CaptchaEnabled = prot.CaptchaEnabled
 		resp.AntiReplayEnabled = prot.AntiReplayEnabled
+		resp.AntiReplayCookieMode = prot.AntiReplayCookieMode
 		resp.BrowserSignEnabled = prot.BrowserSignEnabled
+		if resp.AntiReplayCookieMode == "" {
+			resp.AntiReplayCookieMode = "standard"
+		}
 		if prot.BrowserSignTTL > 0 {
 			resp.BrowserSignTTL = prot.BrowserSignTTL
 		}
@@ -118,6 +127,14 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		if req.DecryptCacheTTLSeconds != nil && (*req.DecryptCacheTTLSeconds < 0 || *req.DecryptCacheTTLSeconds > dynamicpkg.MaxDecryptCacheTTLSeconds) {
 			c.JSON(400, map[string]string{"error": "decrypt_cache_ttl_seconds must be between 0 and 1800"})
 			return
+		}
+		if req.AntiReplayCookieMode != nil {
+			mode, ok := shared.ValidateAntiReplayCookieMode(*req.AntiReplayCookieMode, false)
+			if !ok {
+				c.JSON(400, map[string]string{"error": "invalid anti_replay_cookie_mode"})
+				return
+			}
+			*req.AntiReplayCookieMode = mode
 		}
 
 		// Load current settings
@@ -164,6 +181,9 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		}
 		if req.AntiReplayEnabled != nil {
 			current.AntiReplayEnabled = *req.AntiReplayEnabled
+		}
+		if req.AntiReplayCookieMode != nil {
+			current.AntiReplayCookieMode = *req.AntiReplayCookieMode
 		}
 		if req.BrowserSignEnabled != nil {
 			current.BrowserSignEnabled = *req.BrowserSignEnabled
@@ -217,6 +237,11 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			}
 			if req.AntiReplayEnabled != nil {
 				if err := shared.SyncAntiReplayEnabledToProtection(txRepo, current.AntiReplayEnabled); err != nil {
+					return err
+				}
+			}
+			if req.AntiReplayCookieMode != nil {
+				if err := shared.SyncAntiReplayCookieModeToProtection(txRepo, current.AntiReplayCookieMode); err != nil {
 					return err
 				}
 			}

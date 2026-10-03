@@ -32,6 +32,10 @@ type captchaPageData struct {
 	Background   template.CSS
 	LogoURL      template.URL
 	CustomCSS    template.CSS
+	// WasmURL / GlueURL 是带内容派生版本串的资产 URL（见 powdata 包）。
+	// 直接写死 /__owaf/pow.wasm 会绕过 immutable 缓存需要的「URL 随内容变」。
+	WasmURL string
+	GlueURL string
 }
 
 func renderCaptchaPage(challenge *CaptchaChallenge, reqID string, envJS string, cfg pageconfig.CaptchaPageConfig) []byte {
@@ -59,6 +63,8 @@ func renderCaptchaPage(challenge *CaptchaChallenge, reqID string, envJS string, 
 		Background:   template.CSS(pageconfig.SafeBackground(cfg.BgGradient, defaults.BgGradient)),
 		LogoURL:      pageconfig.SafeLogoURL(cfg.LogoURL),
 		CustomCSS:    template.CSS(pageconfig.SanitizeCSS(cfg.CustomCSS)),
+		WasmURL:      PowWasmURL(),
+		GlueURL:      PowGlueURL(),
 	}
 	var buf bytes.Buffer
 	if err := captchaPageTmpl.ExecuteTemplate(&buf, "captcha.html", data); err != nil {

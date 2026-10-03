@@ -25,7 +25,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/hlog"
 	hertznet "github.com/cloudwego/hertz/pkg/network"
 	"github.com/cloudwego/hertz/pkg/network/standard"
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 	shconfig "github.com/x01n/http2/config"
 	shfactory "github.com/x01n/http2/factory"
 	"golang.org/x/crypto/hkdf"
@@ -83,7 +83,7 @@ func http2ServerFactoryOptions(cfg snapshotpkg.HTTP2Config) []shconfig.Option {
 	}
 }
 
-func buildRateLimiterBackend(client *goredis.Client, prefix string, windowSec, maxReqs int, enabled bool) ratelimit.RateLimiterBackend {
+func buildRateLimiterBackend(client rueidis.Client, prefix string, windowSec, maxReqs int, enabled bool) ratelimit.RateLimiterBackend {
 	if rl := ratelimit.NewRedisRateLimiter(client, prefix, windowSec, maxReqs, enabled); rl != nil {
 		return rl
 	}
@@ -742,7 +742,7 @@ func Run() {
 		return prot
 	}
 
-	replaceConfigSync := func(client *goredis.Client, subscribeReload func() error) {
+	replaceConfigSync := func(client rueidis.Client, subscribeReload func() error) {
 		configSyncMu.Lock()
 		old := configSync
 		configSync = coreredis.NewConfigSync(client, configSyncLog, "")
@@ -839,7 +839,7 @@ func Run() {
 		if err != nil {
 			return err
 		}
-		var nextClient *goredis.Client
+		var nextClient rueidis.Client
 		if stored.Enabled {
 			nextClient = coreredis.OptionalClient(coreredis.RedisOptions{
 				Addr:     strings.TrimSpace(stored.Addr),
@@ -850,7 +850,7 @@ func Run() {
 			defer cancel()
 			if err := coreredis.Ping(pingCtx, nextClient); err != nil {
 				if nextClient != nil {
-					_ = nextClient.Close()
+					nextClient.Close()
 				}
 				return err
 			}
@@ -871,7 +871,7 @@ func Run() {
 			currentProtection: func() store.ProtectionConfig {
 				return currentProtectionConfig()
 			},
-			replaceConfigSync: func(client *goredis.Client) {
+			replaceConfigSync: func(client rueidis.Client) {
 				replaceConfigSync(client, func() error {
 					if reloadRuntime == nil {
 						return nil
@@ -1082,10 +1082,10 @@ type redisRuntimeReloadDeps struct {
 	reqRL             *ratelimit.DynamicRateLimiter
 	errRL             *ratelimit.DynamicRateLimiter
 	currentProtection func() store.ProtectionConfig
-	replaceConfigSync func(*goredis.Client)
+	replaceConfigSync func(rueidis.Client)
 }
 
-func applyRedisRuntimeReload(rt *core.Runtime, stored adminsystem.RedisConfig, nextClient *goredis.Client, deps redisRuntimeReloadDeps) core.Config {
+func applyRedisRuntimeReload(rt *core.Runtime, stored adminsystem.RedisConfig, nextClient rueidis.Client, deps redisRuntimeReloadDeps) core.Config {
 	if rt == nil {
 		return core.Config{}
 	}
@@ -1159,7 +1159,7 @@ func applyRedisRuntimeReload(rt *core.Runtime, stored adminsystem.RedisConfig, n
 	}
 
 	if oldClient != nil && oldClient != nextClient {
-		_ = oldClient.Close()
+		oldClient.Close()
 	}
 
 	return updatedCfg

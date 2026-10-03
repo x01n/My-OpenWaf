@@ -142,41 +142,6 @@ func TestParsePageConfigsFallBackFromInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestPageTemplateManagerGetSetCaptcha(t *testing.T) {
-	m := NewPageTemplateManager()
-	orig := m.GetCaptchaConfig()
-	if orig.BrandName == "" {
-		t.Fatal("manager should return non-empty default captcha config")
-	}
-	custom := orig
-	custom.BrandName = "CustomBrand"
-	m.SetCaptchaConfig(custom)
-	got := m.GetCaptchaConfig()
-	if got.BrandName != "CustomBrand" {
-		t.Errorf("SetCaptchaConfig: got %q, want CustomBrand", got.BrandName)
-	}
-}
-
-func TestPageTemplateManagerGetSetChallenge(t *testing.T) {
-	m := NewPageTemplateManager()
-	custom := m.GetChallengeConfig()
-	custom.CheckingText = "Testing..."
-	m.SetChallengeConfig(custom)
-	if got := m.GetChallengeConfig().CheckingText; got != "Testing..." {
-		t.Errorf("SetChallengeConfig: got %q", got)
-	}
-}
-
-func TestPageTemplateManagerGetSetBlock(t *testing.T) {
-	m := NewPageTemplateManager()
-	custom := m.GetBlockConfig()
-	custom.BlockTitle = "Blocked!"
-	m.SetBlockConfig(custom)
-	if got := m.GetBlockConfig().BlockTitle; got != "Blocked!" {
-		t.Errorf("SetBlockConfig: got %q", got)
-	}
-}
-
 func TestSafeHTMLAttrEscapesSpecialChars(t *testing.T) {
 	cases := []struct{ input, wantContains string }{
 		{`<script>`, `&lt;`},

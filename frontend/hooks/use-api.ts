@@ -672,14 +672,9 @@ export function useSiteMutation() {
     }
   )
 }
-
-/**
- * 保存站点局部 protection 字段前加载当前站点，以避免在局部配置入口丢失其他字段。
- */
 export function useSiteProtectionMutation() {
   return useMutation(async ({ id, data }: { id: number; data: SiteUpdate }) => {
-    const current = await siteApi.get(id)
-    const result = await siteApi.update(id, { ...current, ...data })
+    const result = await siteApi.update(id, data)
     await invalidateSiteCaches(id).catch(() => undefined)
     return result
   })

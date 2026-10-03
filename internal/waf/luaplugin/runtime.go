@@ -54,6 +54,7 @@ const (
 	maxAPIStringBytes = 16 * 1024
 	maxHeaderValue    = 4 * 1024
 	maxResponseBody   = 16 * 1024
+	maxScriptLogMessageBytes = 2 * 1024
 
 	// decisionFromTable 的返回值会继续流入日志、响应与后续请求处理，
 	// 因此不能把 Lua 表里的字符串和条目数原样带出沙箱。
@@ -92,6 +93,42 @@ type Decision struct {
 	ResponseBody string
 	// Tags 是脚本打的标签，仅用于日志与下游观测。
 	Tags []string
+
+	// RequestMutation 是脚本对上游请求的改写；nil 表示不改写。
+	//
+	// 它只在 pre 阶段有意义：pre 在管道内、上游请求尚未发出，改写才能生效；
+	// post 阶段响应已经回完，此时的改写无处可去，宿主会忽略它。
+	RequestMutation *RequestMutation
+	// ResponseMutation 是脚本对上游响应的改写；nil 表示不改写。
+	//
+	// 与 RequestMutation 相反，它只在 post 阶段有意义：post 在代理之后由
+	// proxy 的响应变换链消费，pre 阶段还没有响应可改。
+	ResponseMutation *ResponseMutation
+}
+
+// RequestMutation 是脚本对上游请求的改写意图。
+//
+// 指针字段为 nil 表示不改；非 nil（包括指向空字符串）表示显式替换。
+// SetHeaders/DeleteHeaders 是请求头的增删。所有字段都由宿主在管道内写回
+// Hertz 请求，脚本本身拿不到请求对象。
+type RequestMutation struct {
+	Method        *string
+	Path          *string
+	RawQuery      *string
+	Body          *string
+	SetHeaders    map[string]string
+	DeleteHeaders []string
+}
+
+// ResponseMutation 是脚本对上游响应的改写意图，由 proxy 的响应变换链消费。
+//
+// StatusCode 为 0 表示不改状态码；Body 为 nil 表示不改响应体。
+type ResponseMutation struct {
+	StatusCode int
+	Body       *string
+	SetHeaders map[string]string
+	// DeleteHeaders 是脚本要求删除的响应头。
+	DeleteHeaders []string
 }
 
 // HasAction 报告脚本是否给出了判定。
@@ -135,6 +172,12 @@ type Script struct {
 
 	// timeout 允许按脚本覆盖默认超时。
 	timeout time.Duration
+
+	// logFn / debugFn 是该脚本的观测回调，由引擎在脚本装载时按脚本名与阶段
+	// 派生：脚本失败只写日志、不失败请求判定，日志是唯一的外部信号。nil 时
+	// ctx.log / ctx.debug 为安全空操作，脚本侧行为不变。
+	logFn   func(level, message string)
+	debugFn func(message string)
 
 	// 运行统计，供 /metrics 与管理端展示。
 	runs     atomic.Int64
@@ -233,6 +276,17 @@ func Compile(name string, stage Stage, source string) (*Script, error) {
 		proto:   proto,
 		timeout: defaultTimeout,
 	}, nil
+}
+
+// SetRuntimeHooks 设置该脚本的观测回调，由引擎在装载时调用。
+//
+// 两个回调都为 nil 时恢复为空操作，因此试运行与测试可以随时关掉日志。
+func (s *Script) SetRuntimeHooks(logFn func(string, string), debugFn func(string)) {
+	if s == nil {
+		return
+	}
+	s.logFn = logFn
+	s.debugFn = debugFn
 }
 
 // SetTimeout 覆盖该脚本的执行超时。非正值保留默认值，正值钳制到 1..1000ms。

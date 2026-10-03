@@ -112,6 +112,7 @@ var sqliRuleMeta = map[string]ruleMeta{
 	"owasp:sqli:052": {"MySQL 行内注释关键字", "MySQL /*! 注释 */ 包裹 UNION、SELECT、CONCAT 或 GROUP_CONCAT"},
 	"owasp:sqli:053": {"SQL 全角 SELECT 关键字", "使用全角字符拼写 SELECT 以绕过关键字匹配"},
 	"owasp:sqli:054": {"SQL 双重 URL 编码绕过", "双重编码的引号、分号或注释序列如 %2527"},
+	"owasp:sqli:055": {"SQL JSON 文档函数注入", "json_extract( 等 JSON 文档函数在查询载荷中的调用量"},
 }
 
 var xssRuleMeta = map[string]ruleMeta{
@@ -182,7 +183,10 @@ var xssRuleMeta = map[string]ruleMeta{
 	"owasp:xss:064": {"XSS - xlink:href 伪协议", "SVG 的 xlink:href 指向 javascript: 伪协议执行代码"},
 	"owasp:xss:065": {"XSS - 净化器探测载荷", "标签或属性区出现 sanitize/purify/dompurify 字样，疑似探测净化配置"},
 	"owasp:xss:066": {"XSS - 模板字符串插值", "反引号模板字符串内 ${...} 引用 document、alert、fetch 等敏感对象"},
-	"owasp:xss:067": {"XSS - 弹窗函数 call/apply 借调", "alert/confirm/prompt 以 call/apply 方式借调执行绕过过滤"},
+	"owasp:xss:067": {"XSS - 弹窗函数借调/直连调用", "alert/confirm/prompt 以 call/apply 借调或 )( 括号直连调用绕过过滤"},
+	"owasp:xss:069": {"XSS - 反引号模板实参调用", "alert/prompt/confirm 以反引号字符串作实参的模板字符串型直连调用"},
+	"owasp:xss:070": {"XSS - 可选链直连调用", "alert?.(document?.cookie) 等 ES2020 可选链调用形态绕过普通括号检测"},
+	"owasp:xss:071": {"XSS - 双尖括号 script 标签", "<<script 形态（HTML 解析器容错把多余的 < 当文本）绕过单尖括号检测"},
 	"owasp:xss:068": {"XSS - Function 构造器", "new Function(\"字符串\") 构造器把字符串编译为可执行函数体"},
 }
 
@@ -269,6 +273,8 @@ var cmdInjectRuleMeta = map[string]ruleMeta{
 	"owasp:cmd:032": {"命令注入 - ANSI-C 连续转义串", "$'\\x63\\x61\\x74' ANSI-C 引号内三组以上十六进制转义拼装命令"},
 	"owasp:cmd:033": {"命令注入 - 执行包装词衔接解释器", "xargs sh -c、timeout bash -c、nohup python -c 等包装词启动解释器"},
 	"owasp:cmd:034": {"命令注入 - Windows 命令启动器", "cmd.exe /c、powershell -enc、pwsh -c 显式启动 Windows 命令解释器"},
+	"owasp:cmd:035": {"命令注入 - cmd set 算术表达式", "set /a 批处理算术表达式形态，常配合管道符外带计算证明 RCE"},
+	"owasp:cmd:036": {"命令注入 - PHP 变量函数调用", "${@函数(实参)} PHP 变量函数调用语法，常用于无回显 RCE 证明计算"},
 }
 
 var ssrfRuleMeta = map[string]ruleMeta{
@@ -310,6 +316,8 @@ var xxeRuleMeta = map[string]ruleMeta{
 	"owasp:xxe:007": {"XXE - XInclude 注入", "<xi:include> 后带 href 属性引用外部文档内容"},
 	"owasp:xxe:008": {"XXE - xsi schemaLocation 注入", "xsi:schemaLocation 或 noNamespaceSchemaLocation 属性指向站外 schema 资源"},
 	"owasp:xxe:009": {"XXE - 参数实体引用链", "两个以上参数实体引用连续外带（%pe;%xx;），递归展开放大器形态"},
+	"owasp:xxe:010": {"XXE - XSD schema 外部载荷", "xs:include、xs:import 或 xs:schemaLocation 引入外部 XSD 资源"},
+	"owasp:xxe:011": {"XXE - 外部 DTD 声明", "DOCTYPE 声明带 SYSTEM 外部标识符引入外部 DTD 资源"},
 }
 
 var ldapRuleMeta = map[string]ruleMeta{
@@ -322,6 +330,7 @@ var ldapRuleMeta = map[string]ruleMeta{
 	"owasp:ldap:006": {"LDAP 注入 - 括号闭合 NOT 分支", ")(!( 闭合原过滤器并追加 NOT 分支取反条件"},
 	"owasp:ldap:007": {"LDAP 注入 - uid 通配枚举", "(|(uid=*)) 多层 OR 分支以 uid 通配符枚举条目"},
 	"owasp:ldap:008": {"LDAP 注入 - 属性拼接 mail 枚举", "attr=* 后接 (mail=*) 把通配枚举扩展到 mail 属性"},
+	"owasp:ldap:011": {"LDAP 注入 - 属性 OID 定位", "2.5.13.18 等 LDAP 属性 OID 定位 userPassword 等敏感属性"},
 }
 
 var nosqliRuleMeta = map[string]ruleMeta{
@@ -343,6 +352,13 @@ var nosqliRuleMeta = map[string]ruleMeta{
 	"owasp:nosql:015": {"NoSQL 注入 - 方括号操作符参数", "查询参数以 key[$ne] 等形式在方括号中注入操作符"},
 	"owasp:nosql:016": {"NoSQL 注入 - $match 聚合注入", "$match 后接对象注入聚合流水线过滤条件"},
 	"owasp:nosql:017": {"NoSQL 注入 - $where 代码载荷", "$where 值内携带 sleep、function、return 或 this. 代码片段"},
+	"owasp:nosql:018": {"NoSQL 注入 - $where 比较值", "$where 引号值内的运算/比较形态绕过 $where 单词边界"},
+	"owasp:nosql:019": {"NoSQL 注入 - JS 注入 API 调用", "injection.insert/remove/update 等 JS 注入测试桩的数据库操作调用"},
+	"owasp:nosql:020": {"NoSQL 注入 - 时间盲注忙等", "do{...}while(new Date) 时间盲注忙等循环与 var date 计时代码"},
+	"owasp:nosql:021": {"NoSQL 注入 - $where 内嵌 $function", "$where 查询体内嵌 $function 操作符实现 JS 执行"},
+	"owasp:nosql:022": {"NoSQL 注入 - 引号闭合后 $or 数组", "注入闭合字符串后的 $or 操作符数组注入形态"},
+	"owasp:nosql:023": {"NoSQL 注入 - $or 数组内嵌操作符", "$or 数组元素内嵌 $ 操作符的查询体注入形态"},
+	"owasp:nosql:024": {"NoSQL 注入 - $or 空对象数组", "$or 数组元素为空对象或裸花括号的绕过形态"},
 }
 
 var sstiRuleMeta = map[string]ruleMeta{
@@ -364,6 +380,9 @@ var sstiRuleMeta = map[string]ruleMeta{
 	"owasp:ssti:015": {"SSTI - ThinkPHP 标签调用", "{xx/xx:xx( 形式调用 ThinkPHP 模板的函数标签"},
 	"owasp:ssti:016": {"SSTI - 通用标签函数调用", "{a_b:c_d(...)} 通用模板标签后带函数调用的注入形式"},
 	"owasp:ssti:017": {"SSTI - DedeCMS runphp 标签", "{dede:标签中携带 runphp 属性在织梦模板中执行 PHP"},
+	"owasp:ssti:018": {"SSTI - 井号花括号算术探测", "#{ 数字 运算符 数字 } 算术表达式探测 JEXL/SpEL 类模板上下文"},
+	"owasp:ssti:019": {"SSTI - 美元花括号函数调用", "${ 变量( 动态函数调用形式执行模板上下文中的函数"},
+	"owasp:ssti:020": {"SSTI - 美元花括号紧凑调用", "${fn( 无空白紧凑函数调用形式绕过模板插值过滤"},
 }
 
 var jndiRuleMeta = map[string]ruleMeta{
@@ -383,6 +402,10 @@ var crlfRuleMeta = map[string]ruleMeta{
 	"owasp:crlf:002": {"CRLF 注入 - 编码换行响应头注入", "%0d%0a 后紧跟 Set-Cookie、Location 或 Content-Type 头名"},
 	"owasp:crlf:003": {"CRLF 注入 - 双重编码换行", "%0d%0a%0d%0a 连续两个编码换行结束头部区开启响应体"},
 	"owasp:crlf:004": {"CRLF 注入 - 裸双换行", "\\r\\n\\r\\n 连续两个裸换行结束头部区开启响应体"},
+	"owasp:crlf:007": {"CRLF 注入 - 乱序编码换行对", "%0a%0d、%0d%0a 等乱序百分号编码换行对拆分响应头"},
+	"owasp:crlf:009": {"CRLF 注入 - 单层编码换行接响应头", "单层残余编码 %0a/%0d 后紧跟 Set-Cookie 等响应头名"},
+	"owasp:crlf:008": {"CRLF 注入 - 邮件头/协议命令注入", "换行后紧跟 to:、cc:、RCPT TO: 等邮件头或 V1xx 协议命令实现邮件注入"},
+	"owasp:crlf:010": {"CRLF 注入 - 折叠空白后的协议命令", "解码载荷经空白折叠后残余的 V100 CAPABILITY、RCPT TO 等邮件协议命令注入"},
 }
 
 var elRuleMeta = map[string]ruleMeta{
@@ -400,6 +423,7 @@ var elRuleMeta = map[string]ruleMeta{
 	"owasp:el:011": {"表达式注入 - OGNL 对象引用", "#request、#session、#context 等 OGNL 预置对象被引用"},
 	"owasp:el:012": {"表达式注入 - 反射调用链", "getDeclaredMethods 后接 .invoke() 反射链调用任意方法"},
 	"owasp:el:013": {"表达式注入 - forName 类加载", "getClass().forName() 或 Class.forName() 动态加载类"},
+	"owasp:el:014": {"表达式注入 - YAML 反序列化载荷", "!!python、!!javax 等 YAML 标签头，PyYAML/SnakeYAML 反序列化 RCE 前奏"},
 }
 
 var deserRuleMeta = map[string]ruleMeta{
@@ -455,4 +479,5 @@ var pathTravRuleMeta = map[string]ruleMeta{
 	"owasp:path_traversal:016": {"路径穿越 - 越权管理目录", ".. 后接 admin、config、manager 等管理目录路径"},
 	"owasp:path_traversal:017": {"路径穿越 - 躯干点段序列", "以斜杠分隔的整段仅由三个以上点号构成（.../），对齐白名单侧尾随点丢弃等价检测"},
 	"owasp:path_traversal:018": {"路径穿越 - 点空白斜杠序列", ".. 与斜杠间夹空白（.. /、..\\space）的穿越序列变异"},
+	"owasp:path_traversal:019": {"路径穿越 - UNC 管理共享", "\\\\host\\c$、\\\\host\\admin$ 等 Windows UNC 管理共享路径访问"},
 }

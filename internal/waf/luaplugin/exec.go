@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -48,11 +49,11 @@ type RequestView struct {
 
 	// Response 是可选的上游响应快照；pre 阶段通常为空。
 	Response ResponseView
-	// Config 是由受信任调用方注入的只读外部配置。
+	// Config 是调用方可选注入的脚本级外部配置键值。
 	Config map[string]string
-	// Runtime 是由受信任调用方注入的只读运行时参数。
+	// Runtime 是由宿主注入的只读运行时参数。
 	Runtime map[string]string
-	// Metrics 是由受信任调用方注入的只读指标快照。
+	// Metrics 是由宿主注入的只读指标快照。
 	Metrics map[string]float64
 	// Log/Debug 只允许写入宿主统一日志；nil 时对应 Lua API 为安全空操作。
 	Log   func(level, message string)
@@ -90,6 +91,70 @@ func (r *RequestView) SetRuntimeHooks(logFn func(string, string), debugFn func(s
 	r.Debug = debugFn
 }
 
+// scriptLogger 返回脚本日志的宿主落点：引擎 logger 加上脚本名与阶段。
+//
+// 脚本名与阶段由这个 logger 携带而不是通过 Lua 上下文传递——两者是脚本自身
+// 的属性，不是请求的属性；让脚本从 ctx 自己报出脚本名，等于把日志的溯源自证
+// 交给被观测方。
+func (e *Engine) scriptLogger(s *Script) *slog.Logger {
+	if e == nil || s == nil {
+		return nil
+	}
+	base := e.log
+	if base == nil {
+		base = slog.Default()
+	}
+	return base.With(slog.String("script", s.name), slog.String("stage", string(s.stage)))
+}
+
+// loggerToRuntimeHooks 把宿主 logger 适配成 ctx.log / ctx.debug 的回调。
+//
+// ctx.log 的 level 用词与 logger 的配置级别一致（debug/info/warn/error），
+// 无法识别的 level 按 info 记录：脚本的笔误不该让整条日志消失。
+//
+// 消息同时进入记录消息与 message 属性：项目的 pretty handler 只渲染记录消息，
+// 而 slog 的记录契约要求消息在 message 属性里，两者都写才不会在换 handler
+// 时丢内容。
+func loggerToRuntimeHooks(logger *slog.Logger) (func(string, string), func(string)) {
+	if logger == nil {
+		return nil, nil
+	}
+	logFn := func(level, message string) {
+		message = sanitizeScriptLogMessage(message, maxScriptLogMessageBytes)
+		switch strings.ToLower(strings.TrimSpace(level)) {
+		case "debug":
+			logger.Debug(message, slog.String("message", message))
+		case "warn", "warning":
+			logger.Warn(message, slog.String("message", message))
+		case "error":
+			logger.Error(message, slog.String("message", message))
+		default:
+			logger.Info(message, slog.String("message", message))
+		}
+	}
+	debugFn := func(message string) {
+		message = sanitizeScriptLogMessage(message, maxScriptLogMessageBytes)
+		logger.Debug(message, slog.String("message", message))
+	}
+	return logFn, debugFn
+}
+
+// sanitizeScriptLogMessage 净化脚本写入的日志文本。
+//
+// 脚本能读到原始 Host 与请求头值，消息里因此可能带 CR/LF——条带化后才能交给
+// 宿主日志，否则一条脚本日志能伪造出多行日志条目。上限比 ctx.log 的 API 层
+// 截断更严：API 层限制的是单次调用的入参体积，这里限制的是最终落盘的行长。
+func sanitizeScriptLogMessage(message string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	message = truncateString(message, limit)
+	if strings.ContainsAny(message, "\r\n") {
+		message = strings.NewReplacer("\r", " ", "\n", " ").Replace(message)
+	}
+	return message
+}
+
 // Run 执行脚本并返回判定。
 //
 // 失败语义一律为「不判定」（返回零值 Decision 且 err 非 nil），由调用方决定是否
@@ -104,6 +169,12 @@ func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBa
 	start := time.Now()
 	s.runs.Add(1)
 	defer func() { s.totalNs.Add(int64(time.Since(start))) }()
+	// 观测回调在进入状态机前定型：优先用视图自带的（试运行与测试的注入点），
+	// 其次用脚本装载时派生的（线上路径）。两者皆无时保持 nil，ctx.log /
+	// ctx.debug 回到安全空操作——直接调用 Script.Run 而未经引擎装载即此情形。
+	if req.Log == nil && req.Debug == nil {
+		req.SetRuntimeHooks(s.logFn, s.debugFn)
+	}
 
 	L := pool.get()
 	if L == nil {
@@ -268,6 +339,14 @@ func decisionFromTable(tbl *lua.LTable) (Decision, error) {
 		if len(dec.Tags) == 0 {
 			dec.Tags = nil
 		}
+	}
+	// 请求与响应改写分别从 request / response 子表读取，互不影响：宿主按
+	// 阶段决定消费哪一个（pre 用 request，post 用 response），另一个被忽略。
+	if sub, ok := tbl.RawGetString("request").(*lua.LTable); ok {
+		dec.RequestMutation = requestMutationFromTable(sub)
+	}
+	if sub, ok := tbl.RawGetString("response").(*lua.LTable); ok {
+		dec.ResponseMutation = responseMutationFromTable(sub)
 	}
 	return dec, nil
 }

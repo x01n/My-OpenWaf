@@ -2,8 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/url"
+	"strings"
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/waf/bot"
@@ -78,6 +80,14 @@ type RequestCtx struct {
 	// observeHitsBuf is a reusable buffer for collecting observe hits during
 	// pipeline.Run, avoiding per-request slice allocation.
 	observeHitsBuf []action.Result
+
+	// requestMutation 是管道阶段产生的待应用请求改写，由数据面在 Run 返回后
+	// 写回 Hertz 请求。指针为 nil 表示本次请求没有任何改写。
+	requestMutation *RequestMutator
+
+	// responseMutations 是管道外阶段（Lua post）产生的待应用响应改写，
+	// 由数据面转交给 proxy 的响应变换链。nil 表示没有改写。
+	responseMutations []ResponseMutator
 
 	// Derived header string cache: computed once per request, reused across phases.
 	derivedALPN         string
@@ -248,9 +258,9 @@ func (ctx *RequestCtx) DerivedCipherSuites(compute func() string) string {
 	return ctx.derivedCipherSuites
 }
 
-// BotScoreInfo stores bot detection scoring details for logging purposes.
 type BotScoreInfo struct {
 	TotalScore       int
+	UAScore          int
 	GeoIPScore       int
 	FingerprintScore int
 	BehaviorScore    int
@@ -258,12 +268,220 @@ type BotScoreInfo struct {
 	IsHighRisk       bool
 	Action           string
 	Details          map[string]string
+
+	// Dangerous 表示 bot 判定已认定该请求构成「危险」——消费方必须终止，
+	// 该决定不被加权总分稀释。DangerReasons 是危险来源，供日志归因。
+	Dangerous     bool
+	DangerReasons []string
 }
 
 // Phase is one stage in the WAF processing pipeline.
 type Phase interface {
 	Name() string
 	Execute(ctx *RequestCtx) (action.Result, bool)
+}
+
+// RequestMutator 是管道阶段可选的请求改写出口。
+//
+// 阶段在管道内运行，拿不到 Hertz 请求对象（pipeline 包不认识 hertz），
+// 因此改写意图先落在 RequestCtx 上，由数据面在管道返回后写回真实请求。
+// 字段与 jsplugin.MutationPlan 同构：method/path/raw_query/body 用指针区分
+// 「不改」与「显式置空」，头变更用增删两张表。
+type RequestMutator struct {
+	Method        *string
+	Path          *string
+	RawQuery      *string
+	Body          *string
+	SetHeaders    map[string]string
+	DeleteHeaders []string
+}
+
+// SetRequestMutation 记录阶段产生的请求改写；后写覆盖先写（按阶段顺序）。
+func (ctx *RequestCtx) SetRequestMutation(mutation RequestMutator) {
+	if ctx == nil {
+		return
+	}
+	stored := mutation
+	ctx.requestMutation = &stored
+}
+
+// ApplyRequestMutation 校验改写并在管道上下文内就地生效。
+//
+// 阶段（Lua pre）在管道中途产生改写时立即调用：后续阶段因此看到改写后的
+// 请求，与「pre 在昂贵检测之前、可以改变检测对象」的定位一致。Hertz 请求
+// 的写回不在管道内做（pipeline 不认识 hertz），由数据面在管道返回后按
+// DrainRequestMutation 的意图完成。
+//
+// 先整体校验、再整体应用：任何一项非法都让整份改写失败且不留部分效果，
+// 静默生效一半会让脚本行为无法从源码推断。
+func (ctx *RequestCtx) ApplyRequestMutation(mutation RequestMutator) error {
+	if ctx == nil {
+		return nil
+	}
+	if mutation.Method != nil && !isMutationToken(*mutation.Method) {
+		return errors.New("pipeline: invalid method mutation")
+	}
+	if mutation.Path != nil && !isMutationPath(*mutation.Path) {
+		return errors.New("pipeline: invalid path mutation")
+	}
+	if mutation.RawQuery != nil {
+		if strings.ContainsAny(*mutation.RawQuery, "#\r\n") {
+			return errors.New("pipeline: invalid raw query mutation")
+		}
+		if _, err := url.ParseQuery(*mutation.RawQuery); err != nil {
+			return errors.New("pipeline: invalid raw query mutation")
+		}
+	}
+	normalizedHeaders := make(map[string]string, len(mutation.SetHeaders))
+	for name, value := range mutation.SetHeaders {
+		lower, ok := mutationHeaderName(name)
+		if !ok || strings.ContainsAny(value, "\r\n") {
+			return errors.New("pipeline: invalid header mutation")
+		}
+		normalizedHeaders[lower] = value
+	}
+	normalizedDeletes := make([]string, 0, len(mutation.DeleteHeaders))
+	for _, name := range mutation.DeleteHeaders {
+		lower, ok := mutationHeaderName(name)
+		if !ok {
+			return errors.New("pipeline: invalid header deletion")
+		}
+		normalizedDeletes = append(normalizedDeletes, lower)
+	}
+
+	if mutation.Method != nil {
+		ctx.Method = *mutation.Method
+	}
+	if mutation.Path != nil {
+		ctx.Path = *mutation.Path
+	}
+	if mutation.RawQuery != nil {
+		ctx.RawQuery = *mutation.RawQuery
+	}
+	if mutation.Body != nil {
+		ctx.Body = []byte(*mutation.Body)
+	}
+	if len(normalizedHeaders) > 0 || len(normalizedDeletes) > 0 {
+		if ctx.Headers == nil {
+			ctx.Headers = make(map[string]string, len(normalizedHeaders))
+		}
+		for name, value := range normalizedHeaders {
+			ctx.Headers[name] = value
+		}
+		for _, name := range normalizedDeletes {
+			delete(ctx.Headers, name)
+		}
+		ctx.HeadersLowercase = true
+		if value, ok := ctx.Headers["user-agent"]; ok {
+			ctx.UserAgent = value
+		}
+		if value, ok := ctx.Headers["content-type"]; ok {
+			ctx.ContentType = value
+		}
+	}
+	ctx.QueryParams = nil
+	ctx.QueryValues = nil
+	ctx.ResetMutationCaches()
+	return nil
+}
+
+// mutationHeaderName 归一化头名；非法或属于保留头时 ok=false。
+//
+// 保留头表与 jsplugin 的 isForbiddenJSHeader、luaplugin 的 allowedRequestHeader
+// 逐项一致：Host 决定路由与站点匹配，Content-Length 与 Transfer-Encoding 决定
+// 消息边界，逐跳头由传输层生成。管道阶段在改写生效前先挡住它们——这里写入的
+// Headers 会被后续阶段（规则匹配、指纹）直接读到。
+func mutationHeaderName(name string) (string, bool) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || !isMutationToken(trimmed) {
+		return "", false
+	}
+	lower := strings.ToLower(trimmed)
+	switch lower {
+	case "host", "content-length", "transfer-encoding", "connection", "keep-alive",
+		"te", "trailer", "upgrade", "proxy-authenticate", "proxy-authorization", "proxy-connection":
+		return "", false
+	}
+	return lower, true
+}
+
+// isMutationToken 报告字符串是合法 HTTP token。
+func isMutationToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isMutationPath 报告路径是合法的站内相对路径。
+func isMutationPath(path string) bool {
+	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+		return false
+	}
+	if strings.ContainsAny(path, "?#\r\n") {
+		return false
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] < 0x20 || path[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// DrainRequestMutation 取出并清空待应用的请求改写。
+func (ctx *RequestCtx) DrainRequestMutation() (RequestMutator, bool) {
+	if ctx == nil || ctx.requestMutation == nil {
+		return RequestMutator{}, false
+	}
+	mutation := *ctx.requestMutation
+	ctx.requestMutation = nil
+	return mutation, true
+}
+
+// ResponseMutator 是管道外阶段（Lua post）产生的响应改写意图。
+//
+// 与 RequestMutator 对称：post 阶段在代理之前算完，但响应体要等代理回来才有，
+// 因此意图先挂在 RequestCtx 上，由数据面转交给 proxy 的响应变换链消费。
+type ResponseMutator struct {
+	// ScriptName 是产生改写的脚本，仅用于诊断与日志。
+	ScriptName string
+	// StatusCode 为 0 表示不改状态码。
+	StatusCode int
+	// Body 为 nil 表示不改响应体。
+	Body *string
+	// SetHeaders/DeleteHeaders 是响应头的增删。
+	SetHeaders    map[string]string
+	DeleteHeaders []string
+}
+
+// AppendResponseMutation 追加一条待应用的响应改写，保持脚本执行顺序。
+func (ctx *RequestCtx) AppendResponseMutation(mutation ResponseMutator) {
+	if ctx == nil {
+		return
+	}
+	ctx.responseMutations = append(ctx.responseMutations, mutation)
+}
+
+// DrainResponseMutations 取出并清空全部待应用响应改写。
+func (ctx *RequestCtx) DrainResponseMutations() []ResponseMutator {
+	if ctx == nil || len(ctx.responseMutations) == 0 {
+		return nil
+	}
+	mutations := ctx.responseMutations
+	ctx.responseMutations = nil
+	return mutations
 }
 
 // RunResult bundles the terminal action with any observe-only hits for logging.

@@ -58,6 +58,7 @@ func tlsFingerprintCacheHash(record []byte) uint64 {
 
 func cloneTLSFingerprintForCache(fp TLSClientFingerprint) TLSClientFingerprint {
 	fp.ALPN = append([]string(nil), fp.ALPN...)
+	fp.ALPNRaw = append([]string(nil), fp.ALPNRaw...)
 	fp.CipherSuites = append([]uint16(nil), fp.CipherSuites...)
 	fp.Extensions = append([]uint16(nil), fp.Extensions...)
 	fp.Curves = append([]uint16(nil), fp.Curves...)

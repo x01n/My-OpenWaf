@@ -35,7 +35,7 @@ import (
 	happ "github.com/cloudwego/hertz/pkg/app"
 	hserver "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/glebarez/sqlite"
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 	shconfig "github.com/x01n/http2/config"
 	shfactory "github.com/x01n/http2/factory"
 	"golang.org/x/net/http2"
@@ -10142,14 +10142,20 @@ func TestApplyRedisRuntimeReloadUpdatesRuntimeAndRedisBackedCaches(t *testing.T)
 	redisSrv := startAppMockRedisServer(t)
 	t.Cleanup(redisSrv.Close)
 
-	nextClient := goredis.NewClient(&goredis.Options{Addr: redisSrv.Addr()})
-	t.Cleanup(func() {
-		_ = nextClient.Close()
+	nextClient, ncErr := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{redisSrv.Addr()},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
 	})
+	if nextClient == nil || ncErr != nil {
+		t.Fatalf("NewClient(err=%v)", ncErr)
+	}
+	t.Cleanup(nextClient.Close)
 
 	pingCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := nextClient.Ping(pingCtx).Err(); err != nil {
+	if err := nextClient.Do(pingCtx, nextClient.B().Ping().Build()).Error(); err != nil {
 		t.Fatalf("ping mock redis: %v", err)
 	}
 
@@ -10158,7 +10164,7 @@ func TestApplyRedisRuntimeReloadUpdatesRuntimeAndRedisBackedCaches(t *testing.T)
 	redisKV := cache.NewRedisKV(nil)
 	hotCache := cache.NewHotCache(nil, slog.Default())
 
-	var syncedClient *goredis.Client
+	var syncedClient rueidis.Client
 	updatedCfg := applyRedisRuntimeReload(rt, adminsystem.RedisConfig{
 		Enabled:  true,
 		Addr:     redisSrv.Addr(),
@@ -10168,7 +10174,7 @@ func TestApplyRedisRuntimeReloadUpdatesRuntimeAndRedisBackedCaches(t *testing.T)
 		runtimeStateMu: runtimeStateMu,
 		redisKV:        redisKV,
 		hotCache:       hotCache,
-		replaceConfigSync: func(client *goredis.Client) {
+		replaceConfigSync: func(client rueidis.Client) {
 			syncedClient = client
 		},
 	})
@@ -10301,7 +10307,16 @@ func (s *appMockRedisServer) handle(conn net.Conn) {
 
 		switch strings.ToUpper(args[0]) {
 		case "HELLO":
-			_, _ = conn.Write([]byte("-ERR unknown command 'hello'\r\n"))
+			_, _ = conn.Write([]byte("%7\r\n" +
+				"$6\r\nserver\r\n$5\r\nredis\r\n" +
+				"$7\r\nversion\r\n$5\r\n7.2.5\r\n" +
+				"$5\r\nproto\r\n:3\r\n" +
+				"$2\r\nid\r\n:1\r\n" +
+				"$4\r\nmode\r\n$10\r\nstandalone\r\n" +
+				"$4\r\nrole\r\n$6\r\nmaster\r\n" +
+				"$7\r\nmodules\r\n$0\r\n\r\n"))
+		case "CLUSTER":
+			_, _ = conn.Write([]byte("-ERR CLUSTER is not supported by mock\r\n"))
 		case "PING":
 			_, _ = conn.Write([]byte("+PONG\r\n"))
 		case "GET":

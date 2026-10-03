@@ -3,6 +3,8 @@ package cve
 import (
 	"regexp"
 	"strings"
+
+	"My-OpenWaf/internal/pkg/snippet"
 )
 
 func init() {
@@ -66,7 +68,15 @@ type nodeCVERule struct {
 	severity    string
 	description string
 	patterns    []*regexp.Regexp
-	target      string
+	// gates 与 patterns 一一对应:patterns[i] 命中的必要条件 DNF 门。
+	// 门为必要条件(正则命中 ⇒ 门必真),因此门前置不改变判定,只省正则。
+	target string
+	gates  []nodePatternGate
+}
+
+type nodePatternGate struct {
+	musts []string
+	alts  []string
 }
 
 // Compiled Node.js CVE patterns (init-time).
@@ -86,9 +96,16 @@ var (
 	// Node.js command injection
 	reNodeCmd1 = regexp.MustCompile(`(?i)child_process`)
 	reNodeCmd2 = regexp.MustCompile(`(?i)require\s*\(\s*['"]child_process['"]`)
-	reNodeCmd3 = regexp.MustCompile(`(?i);\s*(ls|cat|id|whoami|uname|pwd|wget|curl)\b`)
+	// 命令词后必须跟空白、shell 分隔符或串尾。仅用 \b 不够：URL 参数形态
+	// ";cat=wac-v0"（Google Analytics 批量上报）中 '=' 同样构成词边界，会被误命中。
+	// 边界口径与 owasp:cmd:001 / owasp:cmd:008 保持一致。
+	// Go RE2 不支持 lookaround，故用字符类加串尾锚点表达。
+	reNodeCmd3 = regexp.MustCompile("(?i);\\s*(ls|cat|id|whoami|uname|pwd|wget|curl)(?:[\\s;|&`]|$)")
 	reNodeCmd4 = regexp.MustCompile(`(?i)\|\s*(cat|id|whoami|uname)\s+/`)
-	reNodeCmd5 = regexp.MustCompile("(?i)`[^`]*(ls|cat|id|whoami|uname|pwd)[^`]*`") // backtick command substitution
+	// backtick command substitution：命令词两侧要求词边界，否则混淆串里偶然出现的
+	// 两字母子串（"InSlSsypULSAUx" 含 ls、"Cwtid0ulK3" 含 id）会在零边界下命中。
+	// 词边界不削弱真实形态：`ls`、`whoami`、`cat /etc/passwd`、`id` 均仍命中。
+	reNodeCmd5 = regexp.MustCompile("(?i)`[^`]*\\b(ls|cat|id|whoami|uname|pwd)\\b[^`]*`")
 
 	// Express/Koa path traversal (CVE-2017-14849, etc.)
 	reNodePathTrav1 = regexp.MustCompile(`(?i)\.\.%2[fF]`)
@@ -124,7 +141,74 @@ var (
 	reNextServerAction = regexp.MustCompile(`(?i)/_next/data/.*\.json\?.*__nextDataReq`)
 )
 
-// NewNodeCVEDetector creates a Node.js CVE detector with built-in rules.
+var nodePatternGates = [][]nodePatternGate{
+	// [0] CVE-2019-10744 (5 patterns)
+	{
+		{musts: []string{`"__proto__"`, ":"}},
+		{musts: []string{"__proto__["}},
+		{musts: []string{"__proto__="}},
+		{musts: []string{"constructor", "[", "prototype", "]"}},
+		{musts: []string{"constructor.prototype"}},
+	},
+	// [1] CVE-2020-REACT-SSR (3 patterns)
+	{
+		{musts: []string{"dangerouslysetinnerhtml"}},
+		{musts: []string{"__next_data__"}},
+		// "`...`" 间要求 ${...}:`、'$'、'{' 任一形态均以 "${" 为字面窗口,
+		// 反引号成对也是必须字面量。
+		{musts: []string{"${", "`"}},
+	},
+	// [2] CVE-2019-NODE-CMD (5 patterns)
+	{
+		{musts: []string{"child_process"}},
+		{musts: []string{"require", "(", "child_process"}},
+		{musts: []string{";"}, alts: []string{"ls", "cat", "id", "whoami", "uname", "pwd", "wget", "curl"}},
+		{musts: []string{"|", "/"}, alts: []string{"cat", "id", "whoami", "uname"}},
+		{musts: []string{"`"}, alts: []string{"ls", "cat", "id", "whoami", "uname", "pwd"}},
+	},
+	// [3] CVE-2017-14849 (4 patterns)
+	{
+		{musts: []string{"..%2f"}},
+		{musts: []string{"..%5c"}},
+		{musts: []string{".."}, alts: []string{";", "/"}},
+		{musts: []string{`..\`}},
+	},
+	// [4] CVE-2022-29078 (2 patterns)
+	{
+		{musts: []string{"<%"}, alts: []string{"include", "require", "process", "global", "root", "console"}},
+		// \s* 允许 "settings" 与 "["、"[" 与 "view" 间存在空白,拆独立字面。
+		{musts: []string{"settings", "[", "view", "options"}},
+	},
+	// [5] CVE-2023-32314 (2 patterns)
+	{
+		{musts: []string{"this.constructor.constructor"}},
+		// \s* 允许 "function" 与 "(" 间存在空白,故拆为两个独立必须字面量。
+		{musts: []string{"function", "(", "return", "process"}},
+	},
+	// [6] CVE-2024-34351 (1 pattern)
+	{
+		{musts: []string{"x-middleware-subrequest"}},
+	},
+	{
+		{musts: []string{"__proto__", "constructor"}, alts: []string{"[", "."}},
+		{musts: []string{"constructor"}, alts: []string{"[", "."}},
+		{musts: []string{"function", "("}, alts: []string{"require", "process", "child_process", "exec", "spawn"}},
+		{musts: []string{"new", "blob", "new", "response"}},
+		{musts: []string{"require", "(", "child_process"}, alts: []string{"exec", "spawn", "fork"}},
+		{musts: []string{"then", "("}, alts: []string{"eval", "function", "require"}},
+		{musts: []string{"import", "("}, alts: []string{"child_process", "fs", "net", "http", "os"}},
+	},
+	{
+		{musts: []string{"$", ":"}},
+	},
+	{
+		{musts: []string{"x-middleware-subrequest", ":", "middleware"}},
+	},
+	{
+		{musts: []string{"/_next/data/", ".json?", "__nextdatareq"}},
+	},
+}
+
 func NewNodeCVEDetector() *NodeCVEDetector {
 	d := &NodeCVEDetector{}
 	d.rules = []nodeCVERule{
@@ -133,42 +217,49 @@ func NewNodeCVEDetector() *NodeCVEDetector {
 			description: "通过 __proto__ 或 constructor.prototype 操作进行原型污染",
 			patterns:    []*regexp.Regexp{reProtoPollution1, reProtoPollution2, reProtoPollution3, reProtoPollution4, reProtoPollution5},
 			target:      "all",
+			gates:       nodePatternGates[0],
 		},
 		{
 			cveID: "CVE-2020-REACT-SSR", severity: "high",
 			description: "通过 dangerouslySetInnerHTML 或 __NEXT_DATA__ 操作进行 React SSR 注入",
 			patterns:    []*regexp.Regexp{reReactSSR1, reReactSSR2, reReactSSR3},
 			target:      "all",
+			gates:       nodePatternGates[1],
 		},
 		{
 			cveID: "CVE-2019-NODE-CMD", severity: "critical",
 			description: "通过 child_process 或 Shell 元字符进行 Node.js 命令注入",
 			patterns:    []*regexp.Regexp{reNodeCmd1, reNodeCmd2, reNodeCmd3, reNodeCmd4, reNodeCmd5},
 			target:      "all",
+			gates:       nodePatternGates[2],
 		},
 		{
 			cveID: "CVE-2017-14849", severity: "high",
 			description: "通过编码后的点点斜杠进行 Express/Koa 路径遍历",
 			patterns:    []*regexp.Regexp{reNodePathTrav1, reNodePathTrav2, reNodePathTrav3, reNodePathTrav4},
 			target:      "url",
+			gates:       nodePatternGates[3],
 		},
 		{
 			cveID: "CVE-2022-29078", severity: "high",
 			description: "EJS 服务端模板注入",
 			patterns:    []*regexp.Regexp{reEJS1, reEJS2},
 			target:      "all",
+			gates:       nodePatternGates[4],
 		},
 		{
 			cveID: "CVE-2023-32314", severity: "critical",
 			description: "通过构造器链进行 vm2 沙箱逃逸",
 			patterns:    []*regexp.Regexp{reVM2_1, reVM2_2},
 			target:      "all",
+			gates:       nodePatternGates[5],
 		},
 		{
 			cveID: "CVE-2024-34351", severity: "high",
 			description: "通过 x-middleware-subrequest 请求头进行 Next.js SSRF",
 			patterns:    []*regexp.Regexp{reNextSSRF1},
 			target:      "header",
+			gates:       nodePatternGates[6],
 		},
 		{
 			cveID: "CVE-2025-55182", severity: "critical",
@@ -178,24 +269,28 @@ func NewNodeCVEDetector() *NodeCVEDetector {
 				reRSCBlobHandler, reRSCChildProcess, reRSCPromiseExec, reRSCDynamicImport,
 			},
 			target: "body",
+			gates:  nodePatternGates[7],
 		},
 		{
 			cveID: "CVE-2025-55182", severity: "critical",
 			description: "React2Shell：Flight 协议线格式引用包含原型污染指示",
 			patterns:    []*regexp.Regexp{reRSCFlightRef},
 			target:      "body",
+			gates:       nodePatternGates[8],
 		},
 		{
 			cveID: "CVE-2025-29927", severity: "critical",
 			description: "通过 x-middleware-subrequest 进行 Next.js 中间件授权绕过",
 			patterns:    []*regexp.Regexp{reNextMiddlewareBypass},
 			target:      "header",
+			gates:       nodePatternGates[9],
 		},
 		{
 			cveID: "CVE-2025-55184", severity: "high",
 			description: "Next.js Server Actions 路径混淆",
 			patterns:    []*regexp.Regexp{reNextServerAction},
 			target:      "url",
+			gates:       nodePatternGates[10],
 		},
 	}
 	return d
@@ -206,10 +301,51 @@ func shouldScanNodeRule(req *CVERequest, rule nodeCVERule, hits *subDetectorHits
 	case "CVE-2019-10744", "CVE-2020-REACT-SSR", "CVE-2019-NODE-CMD",
 		"CVE-2017-14849", "CVE-2022-29078", "CVE-2023-32314",
 		"CVE-2024-34351", "CVE-2025-29927", "CVE-2025-55182", "CVE-2025-55184":
-		return subDetectorACGate(rule.cveID, rule.target, hits)
+		if !subDetectorACGate(rule.cveID, rule.target, hits) {
+			return false
+		}
+		return nodeRuleGate(req, rule)
 	default:
 		return true
 	}
+}
+
+func nodeRuleGate(req *CVERequest, rule nodeCVERule) bool {
+	if len(rule.gates) == 0 {
+		return true // 无必要数据时不拦截(与旧行为一致)
+	}
+	targets := resolveTargets(req, rule.target)
+	for _, g := range rule.gates {
+		possible := false
+		for _, t := range targets {
+			lt := lowerCVERawTarget(t)
+			if nodeGateSatisfied(lt, g) {
+				possible = true
+				break
+			}
+		}
+		if possible {
+			return true
+		}
+	}
+	return false
+}
+
+func nodeGateSatisfied(lower string, g nodePatternGate) bool {
+	for _, m := range g.musts {
+		if m == "" || !strings.Contains(lower, m) {
+			return false
+		}
+	}
+	if len(g.alts) == 0 {
+		return true
+	}
+	for _, a := range g.alts {
+		if strings.Contains(lower, a) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *NodeCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMatch {
@@ -234,6 +370,7 @@ func (d *NodeCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMa
 						MatchedPart: part,
 						Pattern:     pat.String(),
 						Action:      "drop",
+						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					})
 					goto nextRule
 				}
@@ -265,6 +402,7 @@ func (d *NodeCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (C
 						MatchedPart: part,
 						Pattern:     pat.String(),
 						Action:      "drop",
+						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					}, true
 				}
 			}

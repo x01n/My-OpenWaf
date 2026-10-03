@@ -76,6 +76,13 @@ func (e *Engine) Reload(scripts []*Script) {
 		if s == nil {
 			continue
 		}
+		// 观测回调随脚本集合一起发布：脚本名与阶段固定，回调也固定，
+		// 不必在每请求路径上重复派生子 logger。
+		//
+		// 这里无条件重设：脚本级回调归引擎所有，脚本装载是唯一的发布点。
+		// 需要按调用屏蔽日志的场景走视图注入（RequestView.SetRuntimeHooks），
+		// 那条路径优先级更高，不受此处影响。
+		s.SetRuntimeHooks(loggerToRuntimeHooks(e.scriptLogger(s)))
 		switch s.stage {
 		case StagePre:
 			pre = append(pre, s)
@@ -139,7 +146,11 @@ func (e *Engine) HasScripts(stage Stage) bool {
 }
 
 /**
- * Evaluate 依次执行指定阶段的脚本，返回首个给出判定的结果。
+ * Evaluate 依次执行指定阶段的脚本，返回首个「有内容」的结果。
+ *
+ * 「有内容」= 给出了判定，或给出了请求/响应改写。改写必须能被带出沙箱，
+ * 否则「只改请求不判定」的脚本等于被静默丢弃——它没有动作，却也不是
+ * 「什么都没做」。
  *
  * 失败即跳过：单个脚本报错、超时或 panic 都只记日志并继续下一个，
  * 绝不因自定义策略故障导致请求判定失败——这是数据面的可用性底线。
@@ -147,7 +158,7 @@ func (e *Engine) HasScripts(stage Stage) bool {
  * @param ctx   请求 context，取消会中断脚本。
  * @param stage 执行阶段。
  * @param req   请求视图。
- * @return 首个非空判定；无脚本判定时返回零值。
+ * @return 首个非空的判定/改写；无脚本产出时返回零值。
  */
 func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Decision {
 	if e == nil {
@@ -184,6 +195,13 @@ func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Dec
 		return Decision{}
 	}
 
+	var (
+		// accumulated 保存「只给出改写」的脚本结果：继续执行后续脚本，若最终
+		// 没有任何脚本给出判定，就把这些改写返回给宿主。
+		accumulated    Decision
+		hasAccumulated bool
+	)
+
 	for _, s := range scripts {
 		if ctx.Err() != nil {
 			return Decision{}
@@ -215,6 +233,17 @@ func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Dec
 			dec.ScriptName = s.name
 			return dec
 		}
+		// 只改请求/响应、不做判定的脚本：继续跑后续脚本，把改写累积下来。
+		// 后者若给出判定，其判定优先，但改写仍然保留——判定与改写是两条
+		// 独立通道，脚本不该因为同批次里有另一个脚本拦了请求就丢失改写。
+		if dec.RequestMutation != nil || dec.ResponseMutation != nil {
+			accumulated.RequestMutation = dec.RequestMutation
+			accumulated.ResponseMutation = dec.ResponseMutation
+			hasAccumulated = true
+		}
+	}
+	if hasAccumulated {
+		return accumulated
 	}
 	return Decision{}
 }

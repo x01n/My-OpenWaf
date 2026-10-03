@@ -8,12 +8,6 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-/**
- * 本文件集中覆盖各 handler 中「前置读取成功、写库失败」的 500 分支。
- * 这类分支无法通过缺表构造（缺表会让前置的 Get 先失败并返回 404），
- * 因此统一使用 GORM 回调注入写失败。
- */
-
 func TestUpdateSiteReturns500WhenPersistFails(t *testing.T) {
 	repo, db := newSiteRepoWithDB(t)
 	item := store.Site{Host: "update-persist-error.example", UpstreamURLs: "http://127.0.0.1:8080", Bind: ":8080", Network: "tcp", Enabled: true}

@@ -211,3 +211,40 @@ func TestV3MigrateLegacyRulePhasesWithRulesTable(t *testing.T) {
 		t.Errorf("after migration, expected 0 non-custom rows, got %d", count)
 	}
 }
+
+// TestV14MigrateRuleExecutionParamsAddsColumnsIdempotently 验证规则级执行
+// 参数三列会被补齐、历史行默认 0，且重复调用幂等。
+func TestV14MigrateRuleExecutionParamsAddsColumnsIdempotently(t *testing.T) {
+	db := openMemDB(t)
+	if err := db.Exec(`CREATE TABLE rules (id INTEGER PRIMARY KEY, name TEXT)`).Error; err != nil {
+		t.Fatalf("create rules table: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO rules (id, name) VALUES (1, 'legacy')`).Error; err != nil {
+		t.Fatalf("seed legacy rule: %v", err)
+	}
+
+	for pass := 1; pass <= 2; pass++ {
+		if err := V14MigrateRuleExecutionParams(db); err != nil {
+			t.Fatalf("migration pass %d: %v", pass, err)
+		}
+	}
+
+	table := &v14RuleExecutionParamsTable{}
+	for _, column := range []string{"WindowSeconds", "RequestCount", "CaptchaMinutes"} {
+		if !db.Migrator().HasColumn(table, column) {
+			t.Fatalf("column %s missing after migration", column)
+		}
+	}
+
+	var row struct {
+		WindowSeconds  int
+		RequestCount   int
+		CaptchaMinutes int
+	}
+	if err := db.Raw(`SELECT window_seconds, request_count, captcha_minutes FROM rules WHERE id = 1`).Scan(&row).Error; err != nil {
+		t.Fatalf("read migrated row: %v", err)
+	}
+	if row.WindowSeconds != 0 || row.RequestCount != 0 || row.CaptchaMinutes != 0 {
+		t.Fatalf("legacy row defaults = %+v, want all zero", row)
+	}
+}

@@ -25,6 +25,25 @@ type SecurityEvent struct {
 
 	RuleID    uint   `json:"rule_id"`
 	RuleIDStr string `gorm:"size:64;index:idx_se_rule_id_str" json:"rule_id_str"`
+	// RuleName/RuleDesc 是命中的内置规则名称与说明，来自规则注册表，
+	// 用于在安全事件里解释"命中了哪条规则"，而非仅类别级文案。
+	RuleName string `gorm:"size:255" json:"rule_name"`
+	RuleDesc string `gorm:"size:512" json:"rule_desc"`
+	// MatchScore 是 OWASP 命中的累计风险分值；0 表示不适用。
+	MatchScore int `gorm:"default:0" json:"match_score"`
+	// MatchSnippet 是触发命中的内容片段，已按 snippet.MaxLen 截断并脱敏。
+	MatchSnippet string `gorm:"size:256" json:"match_snippet"`
+	// MatchPart 是命中部位（url/body/header/cookie/all），CVE 命中时填充。
+	MatchPart string `gorm:"size:32" json:"match_part"`
+	// Severity 是危险度（critical/high/medium/low），CVE 命中时填充。
+	Severity string `gorm:"size:16" json:"severity"`
+	// Source 是规则来源（catalog/nvd/github/manual/auto_generated）。
+	Source string `gorm:"size:32" json:"source"`
+	// CVSSScore/CWEType 是 CVE 规则的危险度明细；References 是参考链接。
+	CVSSScore  float64 `gorm:"default:0" json:"cvss_score"`
+	CWEType    string  `gorm:"size:32" json:"cwe_type"`
+	References string  `gorm:"type:text" json:"references"`
+
 	Phase     string `gorm:"size:32" json:"phase"`
 	Action    string `gorm:"size:32;index:idx_se_action" json:"action"`
 	Category  string `gorm:"size:32;index:idx_se_category" json:"category"`
@@ -199,11 +218,14 @@ type BotScoreLog struct {
 	TLSALPN          string    `gorm:"size:128" json:"tls_alpn"`
 	HeaderOrder      string    `gorm:"size:1024" json:"header_order"`
 	TotalScore       int       `gorm:"index" json:"total_score"`
+	UAScore          int       `json:"ua_score"`
 	GeoIPScore       int       `json:"geoip_score"`
 	FingerprintScore int       `json:"fingerprint_score"`
 	BehaviorScore    int       `json:"behavior_score"`
 	IPRepScore       int       `json:"ip_rep_score"`
 	IsHighRisk       bool      `json:"is_high_risk"`
+	Dangerous        bool      `gorm:"default:false" json:"dangerous"`
+	DangerReasons    string    `gorm:"size:512" json:"danger_reasons"`
 	Action           string    `gorm:"size:32" json:"action"`
 	Details          string    `gorm:"type:text" json:"details"`
 	CreatedAt        time.Time `gorm:"index" json:"created_at"`

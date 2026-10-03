@@ -55,7 +55,34 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 
 	dec := p.engine.Evaluate(runCtx, p.stage, BuildLuaRequestView(ctx))
-	if runCtx.Err() != nil || !dec.HasAction() {
+	if runCtx.Err() != nil {
+		return action.Result{}, false
+	}
+	// 请求改写与判定是两条独立通道：脚本可以只改请求、只判定，或两者都做。
+	// pre 阶段在管道内、上游请求尚未发出，改写才有意义，因此只在此阶段应用；
+	// post 阶段响应已经回完（见 engine.applyPostLuaDecision）。
+	//
+	// 改写就地生效并立即记入管道上下文：后续阶段（OWASP/CVE/Bot 等）看到的
+	// 是改写后的请求，这正是 pre「在昂贵检测之前改变检测对象」的定位。数据面
+	// 在管道返回后再把同一份意图写回 Hertz 请求，供代理与日志使用。
+	if p.stage == luaplugin.StagePre && dec.RequestMutation != nil {
+		mutation := pipeline.RequestMutator{
+			Method:        dec.RequestMutation.Method,
+			Path:          dec.RequestMutation.Path,
+			RawQuery:      dec.RequestMutation.RawQuery,
+			Body:          dec.RequestMutation.Body,
+			SetHeaders:    dec.RequestMutation.SetHeaders,
+			DeleteHeaders: dec.RequestMutation.DeleteHeaders,
+		}
+		if err := ctx.ApplyRequestMutation(mutation); err != nil {
+			// 改写非法不改变判定语义：脚本仍可给出动作，只是改写不生效。
+			// 这里保持 fail-safe，与 Lua「脚本出错不使站点不可用」一致。
+			ctx.SetRequestMutation(pipeline.RequestMutator{})
+		} else {
+			ctx.SetRequestMutation(mutation)
+		}
+	}
+	if !dec.HasAction() {
 		return action.Result{}, false
 	}
 
@@ -106,7 +133,14 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 //
 // 传副本而非指针：脚本无法借它改写 WAF 内部状态。Body 按管道已截断的
 // 检查窗口传递，不额外读取。
+//
+// 该函数只服务前置阶段；Runtime 固定标注 lua_pre。后置脚本必须另行覆盖
+// Runtime（见 BuildLuaPostRuntimeView），否则脚本无法区分自己跑在内置判定
+// 之前还是之后。
 func BuildLuaRequestView(ctx *pipeline.RequestCtx) luaplugin.RequestView {
+	if ctx == nil {
+		return luaplugin.RequestView{}
+	}
 	if ctx.QueryParams == nil && ctx.QueryValues == nil {
 		PopulateLuaQueryParams(ctx)
 	}
@@ -126,6 +160,7 @@ func BuildLuaRequestView(ctx *pipeline.RequestCtx) luaplugin.RequestView {
 		TLSJA3:      ctx.TLS.JA3Hash,
 		TLSJA4:      ctx.TLS.JA4,
 		TLSSNI:      ctx.TLS.SNI,
+		Runtime:     buildLuaRuntimeView(ctx, "lua_pre", luaplugin.StagePre),
 	}
 	if ctx.ClientIP != nil {
 		view.ClientIP = ctx.ClientIP.String()
@@ -134,6 +169,33 @@ func BuildLuaRequestView(ctx *pipeline.RequestCtx) luaplugin.RequestView {
 		view.Body = string(ctx.Body)
 	}
 	return view
+}
+
+// buildLuaRuntimeView 构造脚本可见的只读运行时参数视图。
+//
+// 只放「由宿主确定、脚本无法自行声明」的三项：阶段、管道阶段名与请求 ID。
+// 脚本名、站点配置等脚本自身的属性不在此列——让脚本从 ctx 自报脚本名，
+// 等于把日志溯源交给被观测方。
+//
+// 返回 nil 而非空表时，脚本侧 ctx.runtime 仍是一个可索引的表（api.go 的
+// stringMapToTable 对 nil map 返回空表），访问缺失键得到 nil 而不是报错。
+func buildLuaRuntimeView(ctx *pipeline.RequestCtx, phase string, stage luaplugin.Stage) map[string]string {
+	if ctx == nil || phase == "" {
+		return nil
+	}
+	return map[string]string{
+		"stage":      string(stage),
+		"phase":      phase,
+		"request_id": ctx.RequestID,
+	}
+}
+
+// BuildLuaPostRuntimeView 构造后置阶段脚本可见的运行时参数视图。
+//
+// 导出供 engine 包在管道之外执行后置脚本时复用：后置阶段不在管道里，拿不到
+// 管道阶段对象，但阶段名对脚本必须与前置阶段可区分。
+func BuildLuaPostRuntimeView(ctx *pipeline.RequestCtx) map[string]string {
+	return buildLuaRuntimeView(ctx, "lua_post", luaplugin.StagePost)
 }
 
 // PopulateLuaQueryParams parses the raw query once for Lua request contexts.

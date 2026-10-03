@@ -84,8 +84,21 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 
+	// cve_rules 由 cve.CVERuleModel（internal/waf/cve/feed.go）定义，不在
+	// AutoMigrate 的模型清单里；启动期的 CVE catalog reconcile 会立刻写入
+	// 该表，因此必须在 reconcile 之前补齐列。
+	if err := migrations.V13MigrateCVERuleReferences(db); err != nil {
+		return err
+	}
+
 	// 访问控制表的建表与索引补齐，均为新表，幂等执行。
 	if err := migrations.V7MigrateAccessControl(db); err != nil {
+		return err
+	}
+
+	// 规则级频次/验证码有效期三列：AutoMigrate 已经覆盖，这里补一次幂等
+	// 修复，保证按历史顺序执行或跳过 AutoMigrate 步骤的库也能拿到列。
+	if err := migrations.V14MigrateRuleExecutionParams(db); err != nil {
 		return err
 	}
 
@@ -107,7 +120,10 @@ func AutoMigrateLogs(db *gorm.DB) error {
 	); err != nil {
 		return err
 	}
-	return migrations.V12MigrateAccessLogFingerprintKey(db)
+	if err := migrations.V12MigrateAccessLogFingerprintKey(db); err != nil {
+		return err
+	}
+	return migrations.V13MigrateSecurityEventRuleInfo(db)
 }
 
 func BumpRevision(db *gorm.DB) error {

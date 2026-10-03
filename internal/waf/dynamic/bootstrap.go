@@ -1,6 +1,10 @@
 package dynamic
 
-import "strings"
+import (
+	"strings"
+
+	"My-OpenWaf/internal/waf/challenge"
+)
 
 // envelope 承载交付给浏览器的一次性加密信封数据（均为 base64 编码）。
 type envelope struct {
@@ -78,7 +82,7 @@ function forget(){try{sessionStorage.removeItem("__owafDPCek")}catch(e){}g.cek=n
 function fail(text,stage,err,extra){owafRemoveStatus();var p=s&&s.parentNode,debug=owafDebugPayload(stage,err,Object.assign({envelope:owafEnvelopeInfo(x)},extra||{})),m=owafStatus(text||"内容解密失败，请刷新页面或联系站点管理员。",true,debug);if(p){if(m.parentNode!==p){p.insertBefore(m,s)}if(s.parentNode===p){p.removeChild(s)}}}
 function deny(env){fail("检测到自动化或调试浏览器，页面内容已被保护。请使用正常浏览器重新打开。","environment-blocked",null,{environment:env})}
 function activateScripts(root){var list=[];if(root&&root.tagName&&root.tagName.toLowerCase()==="script"){list=[root]}else{list=root&&root.querySelectorAll?root.querySelectorAll("script"):[]}for(var i=0;i<list.length;i++){var old=list[i],fresh=document.createElement("script");for(var j=0;j<old.attributes.length;j++){var attr=old.attributes[j];fresh.setAttribute(attr.name,attr.value)}fresh.text=old.text||old.textContent||"";old.parentNode.replaceChild(fresh,old)}}
-async function wasm(){if(g.wasm)return g.wasm;if(typeof wasm_bindgen!=="undefined"){g.wasm=await wasm_bindgen("/__owaf/pow.wasm");return g.wasm}await new Promise(function(ok,err){var sc=document.createElement("script");sc.src="/__owaf/pow_glue.js";sc.onload=ok;sc.onerror=function(){err(new Error("dynamic wasm glue load failed"))};document.head.appendChild(sc)});g.wasm=await wasm_bindgen("/__owaf/pow.wasm");return g.wasm}
+async function wasm(){if(g.wasm)return g.wasm;if(typeof wasm_bindgen!=="undefined"){g.wasm=await wasm_bindgen("__OWAF_WASM_URL__");return g.wasm}await new Promise(function(ok,err){var sc=document.createElement("script");sc.src="__OWAF_GLUE_URL__";sc.onload=ok;sc.onerror=function(){err(new Error("dynamic wasm glue load failed"))};document.head.appendChild(sc)});g.wasm=await wasm_bindgen("__OWAF_WASM_URL__");return g.wasm}
 async function cek(force){
 if(!x){throw new Error("missing dynamic envelope")}
 await wasm();var ttl=parseInt(x.owafTtl||"0",10),key=x.owafKey||x.owafWrap;
@@ -108,7 +112,7 @@ owafMaybeStatus("请稍候，正在准备安全脚本。",false);
 function u(v){var b=atob(v),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
 function b64(a){var s="",b=new Uint8Array(a);for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s)}
 function forget(){var g=window.__owafDP=window.__owafDP||{};try{sessionStorage.removeItem("__owafDPCek")}catch(e){}g.cek=null;g.cekKey=null;g.cekCached=false}
-async function wasm(){var g=window.__owafDP=window.__owafDP||{};if(g.wasm)return g.wasm;if(typeof wasm_bindgen!=="undefined"){g.wasm=await wasm_bindgen("/__owaf/pow.wasm");return g.wasm}await new Promise(function(ok,err){var sc=document.createElement("script");sc.src="/__owaf/pow_glue.js";sc.onload=ok;sc.onerror=function(){err(new Error("dynamic wasm glue load failed"))};document.head.appendChild(sc)});g.wasm=await wasm_bindgen("/__owaf/pow.wasm");return g.wasm}
+async function wasm(){var g=window.__owafDP=window.__owafDP||{};if(g.wasm)return g.wasm;if(typeof wasm_bindgen!=="undefined"){g.wasm=await wasm_bindgen("__OWAF_WASM_URL__");return g.wasm}await new Promise(function(ok,err){var sc=document.createElement("script");sc.src="__OWAF_GLUE_URL__";sc.onload=ok;sc.onerror=function(){err(new Error("dynamic wasm glue load failed"))};document.head.appendChild(sc)});g.wasm=await wasm_bindgen("__OWAF_WASM_URL__");return g.wasm}
 async function cek(force){
 var g=window.__owafDP=window.__owafDP||{},key=Q||W,ttl=parseInt(g.owafTtl||"0",10);
 await wasm();
@@ -123,12 +127,11 @@ try{
 var env=owafCheckEnvironment();if(env.blocked){owafRemoveStatus();owafStatus("检测到自动化或调试浏览器，脚本内容已被保护。请使用正常浏览器重新打开。",true,owafDebugPayload("js-environment-blocked",null,{environment:env,envelope:{dataLength:D.length,ivLength:V.length,wrapLength:W.length,ticketLength:T.length,kekLength:K.length,keyLength:Q.length}}));return}
 var pt=await decryptWithRetry();
 var code=new TextDecoder().decode(pt);
-(0,eval)(code);owafMarkRecentSuccess(300);owafRemoveStatus();
+__ASSEMBLY__owafMarkRecentSuccess(300);owafRemoveStatus();
 }catch(e){owafRemoveStatus();owafStatus("脚本解密失败，请刷新页面或联系站点管理员。",true,owafDebugPayload("js-decrypt",e,{envelope:{dataLength:D.length,ivLength:V.length,wrapLength:W.length,ticketLength:T.length,kekLength:K.length,keyLength:Q.length}}))}
 })();
 })();`
 
-// renderJSSelfDecrypt 用信封数据填充 JS 自解密模板。
 func renderJSSelfDecrypt(env envelope) []byte {
 	r := strings.NewReplacer(
 		"__DATA__", env.data,
@@ -137,6 +140,28 @@ func renderJSSelfDecrypt(env envelope) []byte {
 		"__KEK__", env.kek,
 		"__TICKET__", env.ticket,
 		"__KEY__", env.key,
+		"__ASSEMBLY__", func() string {
+			return asmPlaceholderSyntheticLegacy()
+		}(),
 	)
 	return []byte(r.Replace(jsSelfDecryptTemplate))
+}
+
+func asmPlaceholderSyntheticLegacy() string {
+	return "(0,eval)(code);"
+}
+
+// applyAssetURLs 把引导脚本里的资产 URL 占位符替换为带内容派生版本串的
+// 真实 URL（见 powdata 包）。
+//
+// 为什么不在 const 里写死 URL：`/__owaf/pow.wasm` 与 `/__owaf/pow_glue.js`
+// 用 immutable 下发，URL 必须随资产内容变，否则换资产后老访客会继续用旧文件。
+// 为什么用占位符 + 渲染期替换：本文件是 const 拼接（无 Sprintf 槽位），
+// 而版本串要在运行时取。
+func applyAssetURLs(script string) string {
+	r := strings.NewReplacer(
+		"__OWAF_WASM_URL__", challenge.PowWasmURL(),
+		"__OWAF_GLUE_URL__", challenge.PowGlueURL(),
+	)
+	return r.Replace(script)
 }

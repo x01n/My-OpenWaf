@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 )
@@ -150,6 +151,46 @@ func TestContainsSensitiveLogHintFoldMatchesOldSemantics(t *testing.T) {
 	for _, input := range cases {
 		if got, want := containsSensitiveLogHintFold(input), oldStyle(input); got != want {
 			t.Errorf("containsSensitiveLogHintFold(%q) = %v, old semantics = %v", input, got, want)
+		}
+	}
+}
+
+func TestContainsSensitiveLogHintFoldMaskEquivalence(t *testing.T) {
+	ref := func(value string) bool {
+		if value == "" {
+			return false
+		}
+		lower := strings.ToLower(value)
+		for _, hint := range sensitiveLogValueHints {
+			if strings.Contains(lower, hint) {
+				return true
+			}
+		}
+		return false
+	}
+	// 提示表逐项：原样、全大写、首字母大写、前后缀壳包裹，都必须新旧一致。
+	for _, hint := range sensitiveLogValueHints {
+		if hint == "" {
+			continue
+		}
+		upper := strings.ToUpper(hint)
+		for _, s := range []string{hint, upper, hint + "=x", "a" + hint, "a" + hint + "=x", upper + "=x"} {
+			if got, want := containsSensitiveLogHintFold(s), ref(s); got != want {
+				t.Fatalf("提示表正例不一致 hint=%q s=%q got=%v want=%v", hint, s, got, want)
+			}
+		}
+	}
+	chars := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_=:;/.,?&% +\"'[]{}"
+	rng := rand.New(rand.NewSource(20260926))
+	for i := 0; i < 120000; i++ {
+		n := rng.Intn(90)
+		b := make([]byte, n)
+		for j := range b {
+			b[j] = chars[rng.Intn(len(chars))]
+		}
+		s := string(b)
+		if got, want := containsSensitiveLogHintFold(s), ref(s); got != want {
+			t.Fatalf("随机壳等价破坏: s=%q got=%v want=%v", s, got, want)
 		}
 	}
 }

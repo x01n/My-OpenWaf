@@ -27,12 +27,22 @@ func init() {
 }
 
 // fastRequestID returns a short unique request ID without crypto/rand syscalls.
-// Format: <prefix>-<counter-hex>. Counter is atomic so concurrent calls never
-// collide. This is ~10x cheaper than uuid.NewString() on the hot path.
+// Format: <prefix>-<counter-base64url>, 11+1+11 chars. Counter is atomic so
+// concurrent calls never collide.
+//
+// 与旧实现逐字节一致：后缀仍是同一 RawURLEncoding 的输出（8 字节 → 11 位，
+// 无填充），仅把目标换成栈上 11 字节缓冲；终串在 23 字节栈缓冲合成后一次
+// 搬入堆，把每请求的 3 次小分配（两个 EncodeToString + 拼接）收敛为 1 次。
 func fastRequestID() string {
 	n := reqIDCounter.Add(1)
-	var buf [16]byte
-	binary.BigEndian.PutUint64(buf[8:], n)
-	suffix := base64.RawURLEncoding.EncodeToString(buf[8:])
-	return reqIDPrefix + "-" + suffix
+	var v [8]byte
+	binary.BigEndian.PutUint64(v[:], n)
+	var enc [11]byte
+	base64.RawURLEncoding.Encode(enc[:], v[:])
+	plen := len(reqIDPrefix) // 恒为 11：8 字节 seed 的 RawURL 编码，无边 padding
+	var buf [23]byte
+	copy(buf[:plen], reqIDPrefix)
+	buf[plen] = '-'
+	copy(buf[plen+1:], enc[:])
+	return string(buf[:])
 }

@@ -49,6 +49,8 @@ type challengePageData struct {
 	RequestID      string
 	EnvJS          template.JS
 	PowScript      template.JS
+	PowEnvelope    string
+	PowKeyHex      string
 	TimestampJS    template.JS
 	TokenJS        template.JS
 	RequestIDJS    template.JS
@@ -87,7 +89,7 @@ func executePageTemplate(name string, data any) ([]byte, error) {
 
 // RenderChallengePreview renders a safe static preview of the JS challenge page.
 func RenderChallengePreview(cfg pageconfig.ChallengePageConfig) []byte {
-	return []byte(buildChallengeHTML("preview-request", "preview-ts", "preview-token", "", "", cfg))
+	return []byte(buildChallengeHTML("preview-request", "preview-ts", "preview-token", "", "", "", "", cfg))
 }
 
 // RenderBlockPreview renders a safe preview using the same configured block renderer.

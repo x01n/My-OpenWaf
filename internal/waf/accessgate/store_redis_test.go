@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 type miniRedis struct {
@@ -98,9 +98,13 @@ func (m *miniRedis) dispatch(args []string) string {
 	}
 	switch cmd {
 	case "HELLO":
-		return "-ERR unknown command 'hello'\r\n"
+		// rueidis 恒定 HELLO 3 握手：以 RESP3 map 应答，proto 必须为整数形式。
+		return respHelloMap()
+	case "CLUSTER":
+		// 单地址探测回退：错误文本含 "CLUSTER" 时 rueidis 退回单机客户端。
+		return "-ERR CLUSTER is not supported by mock\r\n"
 	case "CLIENT":
-		// go-redis 握手阶段的 client setinfo / setname：置 OK 即可。
+		// rueidis 握手的 client setinfo / setname：置 OK 即可。
 		return "+OK\r\n"
 	case "PING":
 		return "+PONG\r\n"
@@ -360,9 +364,32 @@ func readRESPArgs(reader *bufio.Reader) ([]string, error) {
 	return args, nil
 }
 
-// newMiniRedisClient 构造指向测试替身的 go-redis 客户端。
-func newMiniRedisClient(m *miniRedis) *goredis.Client {
-	return goredis.NewClient(&goredis.Options{Addr: m.Addr()})
+// newMiniRedisClient 构造指向测试替身的 rueidis 客户端。
+func newMiniRedisClient(t *testing.T, m *miniRedis) rueidis.Client {
+	t.Helper()
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{m.Addr()},
+		DisableCache:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	return client
+}
+
+// respHelloMap 生成 RESP3 map 握手应答（proto 为整数 :3，version 行触发
+// CLUSTER SLOTS 探测；mock 会以含 "CLUSTER" 的错误将其打回单机路径）。
+func respHelloMap() string {
+	return "%7\r\n" +
+		"$6\r\nserver\r\n$5\r\nredis\r\n" +
+		"$7\r\nversion\r\n$5\r\n7.2.5\r\n" +
+		"$5\r\nproto\r\n:3\r\n" +
+		"$2\r\nid\r\n:1\r\n" +
+		"$4\r\nmode\r\n$10\r\nstandalone\r\n" +
+		"$4\r\nrole\r\n$6\r\nmaster\r\n" +
+		"$7\r\nmodules\r\n$0\r\n\r\n"
 }
 
 /**
@@ -371,11 +398,11 @@ func newMiniRedisClient(m *miniRedis) *goredis.Client {
  */
 func TestRedisSessionStoreSharedAcrossInstances(t *testing.T) {
 	m := startMiniRedis(t, "")
-	clientA := newMiniRedisClient(m)
+	clientA := newMiniRedisClient(t, m)
 	defer clientA.Close()
 
 	storeA := NewRedisSessionStore(clientA)
-	storeB := NewRedisSessionStore(newMiniRedisClient(m))
+	storeB := NewRedisSessionStore(newMiniRedisClient(t, m))
 
 	token, err := storeA.Create(7, "alice", "shared_password", 3600)
 	if err != nil || token == "" {
@@ -395,7 +422,7 @@ func TestRedisSessionStoreSharedAcrossInstances(t *testing.T) {
 	if info.Token != token {
 		t.Fatalf("Validate: token mismatch got %q want %q", info.Token, token)
 	}
-	if n, _ := clientA.Exists(context.Background(), accessSessionKey(token)).Result(); n != 1 {
+	if n, _ := clientA.Do(context.Background(), clientA.B().Exists().Key(accessSessionKey(token)).Build()).AsInt64(); n != 1 {
 		t.Fatalf("session should exist in Redis, exists=%d", n)
 	}
 }
@@ -405,8 +432,8 @@ func TestRedisSessionStoreSharedAcrossInstances(t *testing.T) {
  */
 func TestRedisSessionStoreRevokeAcrossInstances(t *testing.T) {
 	m := startMiniRedis(t, "")
-	storeA := NewRedisSessionStore(newMiniRedisClient(m))
-	storeB := NewRedisSessionStore(newMiniRedisClient(m))
+	storeA := NewRedisSessionStore(newMiniRedisClient(t, m))
+	storeB := NewRedisSessionStore(newMiniRedisClient(t, m))
 
 	token, err := storeA.Create(9, "bob", "user_password", 3600)
 	if err != nil {
@@ -429,7 +456,7 @@ func TestRedisSessionStoreRevokeAcrossInstances(t *testing.T) {
  */
 func TestRedisSessionStoreTTLExpiry(t *testing.T) {
 	m := startMiniRedis(t, "")
-	store := NewRedisSessionStore(newMiniRedisClient(m))
+	store := NewRedisSessionStore(newMiniRedisClient(t, m))
 
 	token, err := store.Create(1, "exp", "shared_password", 1)
 	if err != nil {
@@ -459,8 +486,8 @@ func TestRedisSessionStoreTTLExpiry(t *testing.T) {
  */
 func TestRedisOAuthStateStoreOneTimeConsume(t *testing.T) {
 	m := startMiniRedis(t, "")
-	storeA := NewRedisOAuthStateStore(newMiniRedisClient(m))
-	storeB := NewRedisOAuthStateStore(newMiniRedisClient(m))
+	storeA := NewRedisOAuthStateStore(newMiniRedisClient(t, m))
+	storeB := NewRedisOAuthStateStore(newMiniRedisClient(t, m))
 
 	st := &OAuthState{
 		State:        "abc123",
@@ -501,7 +528,7 @@ func TestRedisOAuthStateStoreOneTimeConsume(t *testing.T) {
  */
 func TestRedisOAuthStateStoreDelete(t *testing.T) {
 	m := startMiniRedis(t, "")
-	store := NewRedisOAuthStateStore(newMiniRedisClient(m))
+	store := NewRedisOAuthStateStore(newMiniRedisClient(t, m))
 
 	st := &OAuthState{
 		State:     "del-state",
@@ -533,7 +560,7 @@ func TestRedisOAuthStateStoreDelete(t *testing.T) {
  */
 func TestRedisSessionStoreFallbackOnCreateFailure(t *testing.T) {
 	m := startMiniRedis(t, "SET")
-	client := newMiniRedisClient(m)
+	client := newMiniRedisClient(t, m)
 	defer client.Close()
 	store := NewRedisSessionStore(client)
 
@@ -549,7 +576,7 @@ func TestRedisSessionStoreFallbackOnCreateFailure(t *testing.T) {
 		t.Fatal("fallback validation lost session")
 	}
 	// Redis 未落库（SET 被注入错误），会话应来自内存回退。
-	if n, _ := client.Exists(context.Background(), accessSessionKey(token)).Result(); n != 0 {
+	if n, _ := client.Do(context.Background(), client.B().Exists().Key(accessSessionKey(token)).Build()).AsInt64(); n != 0 {
 		t.Fatalf("session should not exist in Redis after injected SET failure, exists=%d", n)
 	}
 }
@@ -559,7 +586,7 @@ func TestRedisSessionStoreFallbackOnCreateFailure(t *testing.T) {
  */
 func TestRedisOAuthStateStoreFallbackOnSaveFailure(t *testing.T) {
 	m := startMiniRedis(t, "SET")
-	store := NewRedisOAuthStateStore(newMiniRedisClient(m))
+	store := NewRedisOAuthStateStore(newMiniRedisClient(t, m))
 
 	st := &OAuthState{
 		State:     "fb-state",
@@ -616,7 +643,7 @@ func TestRedisSessionStoreNilRedis(t *testing.T) {
  */
 func TestRedisSessionStoreExpiredValueFallback(t *testing.T) {
 	m := startMiniRedis(t, "")
-	client := newMiniRedisClient(m)
+	client := newMiniRedisClient(t, m)
 	defer client.Close()
 	store := NewRedisSessionStore(client)
 
@@ -635,7 +662,7 @@ func TestRedisSessionStoreExpiredValueFallback(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	// TTL 保持有效，绕开 Redis 层过期，走应用层字段过期路径。
-	if err := client.Set(context.Background(), accessSessionKey(token), payload, time.Hour).Err(); err != nil {
+	if err := client.Do(context.Background(), client.B().Set().Key(accessSessionKey(token)).Value(string(payload)).Px(time.Hour).Build()).Error(); err != nil {
 		t.Fatalf("seed expired session: %v", err)
 	}
 
@@ -660,14 +687,14 @@ func TestRedisSessionStoreExpiredValueFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal live: %v", err)
 	}
-	if err := client.Set(context.Background(), accessSessionKey(liveToken), livePayload, time.Hour).Err(); err != nil {
+	if err := client.Do(context.Background(), client.B().Set().Key(accessSessionKey(liveToken)).Value(string(livePayload)).Px(time.Hour).Build()).Error(); err != nil {
 		t.Fatalf("seed live session: %v", err)
 	}
 
 	if err := store.CleanExpired(); err != nil {
 		t.Fatalf("CleanExpired: %v", err)
 	}
-	if n, _ := client.Exists(context.Background(), accessSessionKey(liveToken)).Result(); n != 1 {
+	if n, _ := client.Do(context.Background(), client.B().Exists().Key(accessSessionKey(liveToken)).Build()).AsInt64(); n != 1 {
 		t.Fatalf("live session should survive CleanExpired, exists=%d", n)
 	}
 }

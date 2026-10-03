@@ -51,6 +51,8 @@ type CVERuleModel struct {
 	Approved    bool           `gorm:"default:false" json:"approved"`
 	CVSSScore   float64        `gorm:"default:0" json:"cvss_score"`
 	CWEType     string         `gorm:"size:32" json:"cwe_type"`
+	// References 是 NVD 采集的参考链接，换行分隔；手工与自动生成的规则为空。
+	References string `gorm:"type:text" json:"references"`
 }
 
 // TableName for GORM.
@@ -215,6 +217,10 @@ func (m *CVEFeedManager) loadRulesIntoDetector() {
 			CaptchaType: r.CaptchaType,
 			Enabled:     r.Enabled,
 			Description: r.Description,
+			Source:      r.Source,
+			CVSSScore:   r.CVSSScore,
+			CWEType:     r.CWEType,
+			References:  r.References,
 		}
 	}
 	m.detector.ReloadCustomRules(custom)
@@ -235,6 +241,13 @@ type nvdCVE struct {
 	Descriptions []nvdDesc     `json:"descriptions"`
 	Metrics      nvdMetrics    `json:"metrics"`
 	Weaknesses   []nvdWeakness `json:"weaknesses"`
+	References   []nvdRef      `json:"references"`
+	Published    string        `json:"published"`
+}
+
+// nvdRef 对应 NVD API 2.0 的 references 数组元素。
+type nvdRef struct {
+	URL string `json:"url"`
 }
 
 type nvdDesc struct {
@@ -441,12 +454,46 @@ func (m *CVEFeedManager) processNVDCVE(cve nvdCVE) bool {
 	// 否则入库来源与 processNVDCVE 的查重条件（source = "nvd"）不一致，
 	// 每次翻页同步都会重复插入同一批 CVE。
 	rule.Source = "nvd"
+	// 参考链接取自 NVD references 数组；发布时间并入描述尾部，不额外增加列。
+	// 链接数量与单项长度都设上限，避免把整段 NVD 响应写进规则行。
+	rule.References = formatNVDReferences(cve.References)
+	if cve.Published != "" {
+		rule.Description = truncate(rule.Description+"；发布时间 "+cve.Published, 500)
+	}
 
 	approved := m.autoApprove
 	rule.Approved = approved
 	rule.Enabled = approved
 
 	return m.db.Create(rule).Error == nil
+}
+
+// maxNVDReferenceCount / maxNVDReferenceURLLen 限制入库的参考链接数量与单项长度。
+const (
+	maxNVDReferenceCount  = 10
+	maxNVDReferenceURLLen = 512
+)
+
+// formatNVDReferences 把 NVD references 数组拼成换行分隔的链接文本。
+func formatNVDReferences(refs []nvdRef) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		url := strings.TrimSpace(ref.URL)
+		if url == "" {
+			continue
+		}
+		if len(url) > maxNVDReferenceURLLen {
+			url = url[:maxNVDReferenceURLLen]
+		}
+		out = append(out, url)
+		if len(out) >= maxNVDReferenceCount {
+			break
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 type ghAdvisory struct {

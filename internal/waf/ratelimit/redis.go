@@ -2,17 +2,16 @@ package ratelimit
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
-// RedisRateLimiter implements sliding-window rate limiting backed by Redis.
-// Suitable for distributed deployments where multiple WAF nodes share state.
 type RedisRateLimiter struct {
-	client   *goredis.Client
+	client   rueidis.Client
 	prefix   string
 	configMu sync.RWMutex
 	windowS  int64
@@ -20,9 +19,7 @@ type RedisRateLimiter struct {
 	enabled  atomic.Bool
 }
 
-// NewRedisRateLimiter creates a Redis-backed rate limiter.
-// Returns nil if client is nil (falls back to local limiter).
-func NewRedisRateLimiter(client *goredis.Client, prefix string, windowSec, maxReqs int, enabled bool) *RedisRateLimiter {
+func NewRedisRateLimiter(client rueidis.Client, prefix string, windowSec, maxReqs int, enabled bool) *RedisRateLimiter {
 	if client == nil {
 		return nil
 	}
@@ -77,9 +74,7 @@ func (rl *RedisRateLimiter) Reconfigure(windowSec, maxReqs int, enabled bool) {
 	rl.enabled.Store(enabled)
 }
 
-// Allow checks and increments the counter using a Redis Lua script for atomicity.
-// Uses sliding window with sorted sets.
-var slidingWindowScript = goredis.NewScript(`
+var slidingWindowScript = rueidis.NewLuaScript(`
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
@@ -96,7 +91,7 @@ end
 return 0
 `)
 
-var incrementWindowScript = goredis.NewScript(`
+var incrementWindowScript = rueidis.NewLuaScript(`
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
@@ -107,7 +102,7 @@ redis.call('EXPIRE', key, window + 1)
 return redis.call('ZCARD', key)
 `)
 
-var countWindowScript = goredis.NewScript(`
+var countWindowScript = rueidis.NewLuaScript(`
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
@@ -117,7 +112,6 @@ redis.call('EXPIRE', key, window + 1)
 return redis.call('ZCARD', key)
 `)
 
-// Allow returns true if the request should proceed (under limit).
 func (rl *RedisRateLimiter) Allow(key string) bool {
 	if rl == nil {
 		return true
@@ -137,7 +131,7 @@ func (rl *RedisRateLimiter) Allow(key string) bool {
 	now := time.Now().UnixMilli()
 	windowMs := windowS * 1000
 
-	result, err := slidingWindowScript.Run(ctx, rl.client, []string{redisKey}, now, windowMs, maxReqs).Int()
+	result, err := slidingWindowScript.Exec(ctx, rl.client, []string{redisKey}, []string{strconv.FormatInt(now, 10), strconv.FormatInt(windowMs, 10), strconv.FormatInt(maxReqs, 10)}).AsInt64()
 	if err != nil {
 		return true
 	}
@@ -163,7 +157,7 @@ func (rl *RedisRateLimiter) Increment(key string) int64 {
 	now := time.Now().UnixMilli()
 	windowMs := windowS * 1000
 
-	result, err := incrementWindowScript.Run(ctx, rl.client, []string{redisKey}, now, windowMs).Int64()
+	result, err := incrementWindowScript.Exec(ctx, rl.client, []string{redisKey}, []string{strconv.FormatInt(now, 10), strconv.FormatInt(windowMs, 10)}).AsInt64()
 	if err != nil {
 		return 0
 	}
@@ -190,12 +184,11 @@ func (rl *RedisRateLimiter) IsOverLimit(key string) bool {
 	now := time.Now().UnixMilli()
 	windowMs := windowS * 1000
 
-	count, err := countWindowScript.Run(ctx, rl.client, []string{redisKey}, now, windowMs).Int64()
+	count, err := countWindowScript.Exec(ctx, rl.client, []string{redisKey}, []string{strconv.FormatInt(now, 10), strconv.FormatInt(windowMs, 10)}).AsInt64()
 	if err != nil {
 		return false
 	}
 	return count > maxReqs
 }
 
-// Close is a no-op for the Redis limiter (connection managed externally).
 func (rl *RedisRateLimiter) Close() {}

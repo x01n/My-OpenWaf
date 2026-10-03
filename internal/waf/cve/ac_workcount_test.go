@@ -3,6 +3,8 @@ package cve
 import (
 	"strings"
 	"testing"
+
+	"My-OpenWaf/internal/ac"
 )
 
 /**
@@ -17,31 +19,31 @@ import (
  * @returns 实际执行的状态转移总次数
  */
 func countScanBytes(req *CVERequest, skipEmpty bool) int {
-	ac := &globalSubDetectorAC
+	acSet := &globalSubDetectorAC
 	total := 0
-	scanSlice := func(m *acMatcher, targets []string) {
-		if skipEmpty && m.empty() {
+	scanSlice := func(m *ac.Matcher, targets []string) {
+		if skipEmpty && m.Empty() {
 			return
 		}
 		for _, t := range targets {
 			total += len(t)
 		}
 	}
-	scanStr := func(m *acMatcher, s string) {
-		if skipEmpty && m.empty() {
+	scanStr := func(m *ac.Matcher, s string) {
+		if skipEmpty && m.Empty() {
 			return
 		}
 		total += len(s)
 	}
-	scanSlice(ac.allAC, req.AllTargetsLower)
-	scanSlice(ac.urlAC, req.URLTargetsLower)
-	scanSlice(ac.bodyAC, req.BodyTargetsLower)
-	scanSlice(ac.headerAC, req.HeaderTargetsLower)
+	scanSlice(acSet.allAC, req.AllTargetsLower)
+	scanSlice(acSet.urlAC, req.URLTargetsLower)
+	scanSlice(acSet.bodyAC, req.BodyTargetsLower)
+	scanSlice(acSet.headerAC, req.HeaderTargetsLower)
 	if cookie, ok := cveHeaderValueOK(req.Headers, "Cookie"); ok {
-		scanStr(ac.cookieAC, strings.ToLower(cookie))
+		scanStr(acSet.cookieAC, strings.ToLower(cookie))
 	}
-	scanSlice(ac.urlBodyAC, req.URLTargetsLower)
-	scanSlice(ac.urlBodyAC, req.BodyTargetsLower)
+	scanSlice(acSet.urlBodyAC, req.URLTargetsLower)
+	scanSlice(acSet.urlBodyAC, req.BodyTargetsLower)
 	return total
 }
 
@@ -65,15 +67,15 @@ func TestACScanWorkReduction(t *testing.T) {
 		len(reqs), before, after, saved, float64(saved)*100/float64(before))
 
 	// 逐视图列出空自动机,说明削减来源。
-	ac := &globalSubDetectorAC
+	acSet := &globalSubDetectorAC
 	views := []struct {
 		name string
-		m    *acMatcher
+		m    *ac.Matcher
 	}{
-		{"all", ac.allAC}, {"url", ac.urlAC}, {"body", ac.bodyAC},
-		{"header", ac.headerAC}, {"cookie", ac.cookieAC}, {"url_body", ac.urlBodyAC},
+		{"all", acSet.allAC}, {"url", acSet.urlAC}, {"body", acSet.bodyAC},
+		{"header", acSet.headerAC}, {"cookie", acSet.cookieAC}, {"url_body", acSet.urlBodyAC},
 	}
 	for _, v := range views {
-		t.Logf("view=%-9s patterns=%-4d empty=%v", v.name, v.m.numPatterns, v.m.empty())
+		t.Logf("view=%-9s patterns=%-4d empty=%v", v.name, v.m.NumPatterns(), v.m.Empty())
 	}
 }

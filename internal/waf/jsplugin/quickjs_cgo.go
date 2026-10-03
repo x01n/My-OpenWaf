@@ -5,8 +5,10 @@ package jsplugin
 import (
 	"container/list"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	goruntime "runtime"
 	"strings"
 	"sync"
@@ -201,11 +203,19 @@ func transformedSource(source string) (string, error) {
 
 // NewEngine creates a bounded pool of owner-goroutine QuickJS execution slots.
 func NewEngine(opts EngineOptions) (*Engine, error) {
+	return NewEngineWithLogger(opts, nil)
+}
+
+// NewEngineWithLogger 与 NewEngine 相同，额外指定脚本失败日志的落点。
+//
+// logger 为 nil 时回退 slog 默认 logger；失败汇总表始终创建，管理端因此
+// 在任何装配路径下都能读到「脚本上次执行错误」。
+func NewEngineWithLogger(opts EngineOptions, log *slog.Logger) (*Engine, error) {
 	normalized, err := opts.normalized()
 	if err != nil {
 		return nil, err
 	}
-	e := &Engine{opts: normalized}
+	e := &Engine{opts: normalized, log: log}
 	e.slots = make([]*executionSlot, normalized.PoolSize)
 	for i := range e.slots {
 		slot := &executionSlot{requests: make(chan executionRequest, 1), ready: make(chan error, 1), stop: make(chan struct{}), done: make(chan struct{})}
@@ -230,6 +240,9 @@ type Engine struct {
 	closed    bool
 	closeOnce sync.Once
 	wait      sync.WaitGroup
+
+	// log 是脚本失败日志的落点；nil 时回退 slog 默认 logger。
+	log *slog.Logger
 }
 
 type executionRequest struct {
@@ -448,8 +461,15 @@ func (s *executionSlot) evaluate(script *Script, reqJSON string) (MutationPlan, 
 	if err := validateMutationPlanResultShape(result, false); err != nil {
 		return MutationPlan{}, err
 	}
+	// 规范 JSON 是唯一抽取入口：它同时完成别名折叠与 delete_headers 的数组/对象
+	// 折叠，结果可直接反序列化进规范结构。"unexpected end of JSON input"
+	// 说明值无法 JSON 序列化（纯 BigInt 等），这与形状校验同属契约错误。
+	encoded, err := canonicalizeMutationPlan(result.JSONStringify(), false)
+	if err != nil {
+		return MutationPlan{}, err
+	}
 	var plan MutationPlan
-	if err := s.ctx.Unmarshal(result, &plan); err != nil {
+	if err := json.Unmarshal(encoded, &plan); err != nil {
 		return MutationPlan{}, fmt.Errorf("jsplugin: invalid mutation plan: %w", err)
 	}
 	if err := validateMutationPlan(plan); err != nil {
@@ -476,8 +496,12 @@ func (s *executionSlot) evaluateResponse(script *Script, respJSON string) (Respo
 	if err := validateMutationPlanResultShape(result, true); err != nil {
 		return ResponseMutationPlan{}, err
 	}
+	encoded, err := canonicalizeMutationPlan(result.JSONStringify(), true)
+	if err != nil {
+		return ResponseMutationPlan{}, err
+	}
 	var plan ResponseMutationPlan
-	if err := s.ctx.Unmarshal(result, &plan); err != nil {
+	if err := json.Unmarshal(encoded, &plan); err != nil {
 		return ResponseMutationPlan{}, fmt.Errorf("jsplugin: invalid response mutation plan: %w", err)
 	}
 	if err := ValidateResponseMutationPlan(plan); err != nil {
@@ -569,18 +593,7 @@ func validateMutationPlanResultShape(result *quickjs.Value, isResponse bool) err
 	return nil
 }
 
-// allowedMutationPlanField 返回字段是否属于对应阶段的计划形状。
-func allowedMutationPlanField(name string, isResponse bool) bool {
-	if isResponse {
-		return name == "status" || name == "body" || name == "set_headers" || name == "delete_headers"
-	}
-	switch name {
-	case "method", "path", "raw_query", "body", "set_headers", "delete_headers":
-		return true
-	default:
-		return false
-	}
-}
+// allowedMutationPlanField 见 plan_contract.go，与 mutationPlanAliases 同表同源。
 
 // Execute implements Executor for the QuickJS engine.
 func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {

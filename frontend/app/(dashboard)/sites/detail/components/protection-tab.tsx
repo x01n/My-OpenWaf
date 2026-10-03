@@ -725,7 +725,10 @@ export function ProtectionTab({ site, canManage }: ProtectionTabProps) {
               </div>
               <Select
                 value={owaspSensitivity}
-                onValueChange={(v) => setOwaspSensitivity(v)}
+                onValueChange={(v) => {
+                  setOwaspSensitivity(v)
+                  setOwaspDirty(true)
+                }}
                 disabled={owaspState === "inherit"}
               >
                 <SelectTrigger className="w-36">
@@ -770,7 +773,10 @@ export function ProtectionTab({ site, canManage }: ProtectionTabProps) {
               </div>
               <Select
                 value={owaspAction}
-                onValueChange={(v) => setOwaspAction(v)}
+                onValueChange={(v) => {
+                  setOwaspAction(v)
+                  setOwaspDirty(true)
+                }}
                 disabled={owaspState === "inherit"}
               >
                 <SelectTrigger className="w-36">
@@ -831,7 +837,10 @@ export function ProtectionTab({ site, canManage }: ProtectionTabProps) {
               </div>
               <Select
                 value={cveAction}
-                onValueChange={(v) => setCveAction(v)}
+                onValueChange={(v) => {
+                  setCveAction(v)
+                  setCveDirty(true)
+                }}
                 disabled={cveState === "inherit"}
               >
                 <SelectTrigger className="w-36">

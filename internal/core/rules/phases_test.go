@@ -123,10 +123,67 @@ func TestIPReputationPhaseExpiredSiteEntryDoesNotMatch(t *testing.T) {
 	}
 }
 
+func TestBotPhaseStoreBotScoreDerivesActionFromTier(t *testing.T) {
+	phase := &botPhase{threshold: 80}
+	for _, tc := range []struct {
+		tier     bot.BotTier
+		action   string
+		category string
+	}{
+		{bot.TierObserve, "observe", "bot_observe"},
+		{bot.TierChallenge, "challenge", "bot_challenge"},
+		{bot.TierIntercept, "intercept", "bot_intercept"},
+		{bot.TierDrop, "drop", "bot_drop"},
+	} {
+		ctx := &pipeline.RequestCtx{}
+		phase.storeBotScore(ctx, bot.BotVerdict{Tier: tc.tier, Score: 70, Category: tc.category}, bot.BotScore{Total: 70})
+		if ctx.BotScoreResult == nil {
+			t.Fatalf("tier %d: expected bot score result", tc.tier)
+		}
+		if ctx.BotScoreResult.Action != tc.action || ctx.BotScoreResult.Action != tc.tier.LogAction() {
+			t.Fatalf("tier %d: action = %q, want %q", tc.tier, ctx.BotScoreResult.Action, tc.action)
+		}
+	}
+	// pass/good 不落库：两条真实路径分别是 prescreen 通过（human）与良性爬虫（good）。
+	for _, category := range []string{"human", "good"} {
+		ctx := &pipeline.RequestCtx{}
+		phase.storeBotScore(ctx, bot.BotVerdict{Tier: bot.TierPass, Category: category}, bot.BotScore{})
+		if ctx.BotScoreResult != nil {
+			t.Fatalf("category %q should not be logged: %#v", category, ctx.BotScoreResult)
+		}
+	}
+}
+
+func TestBotPhaseVerdictToResultMapsFiveTiers(t *testing.T) {
+	phase := &botPhase{threshold: 80}
+	cases := []struct {
+		tier     bot.BotTier
+		wantType action.Type
+		wantStop bool
+		matched  bool
+		category string
+	}{
+		{bot.TierPass, action.Allow, false, false, "bot_pass"},
+		{bot.TierObserve, action.Observe, false, true, "bot_observe"},
+		{bot.TierChallenge, action.Challenge, true, true, "bot_challenge"},
+		{bot.TierIntercept, action.Intercept, true, true, "bot_intercept"},
+		{bot.TierDrop, action.Drop, true, true, "bot_drop"},
+	}
+	for _, c := range cases {
+		result, stop := phase.verdictToResult(bot.BotVerdict{IsBot: c.tier != bot.TierPass, Tier: c.tier, Reason: "x", RuleID: "bot:two_phase"}, &pipeline.RequestCtx{})
+		if result.Type != c.wantType || stop != c.wantStop || result.Matched != c.matched {
+			t.Fatalf("tier %d: result=%#v stop=%v, want type=%q stop=%v matched=%v", c.tier, result, stop, c.wantType, c.wantStop, c.matched)
+		}
+		if result.Matched && result.Category != c.category {
+			t.Fatalf("tier %d: category = %q, want %q", c.tier, result.Category, c.category)
+		}
+	}
+}
+
 func TestBotPhaseStoreBotScoreDetailsOnlyForHighRisk(t *testing.T) {
 	phase := &botPhase{threshold: 80}
 	ctx := &pipeline.RequestCtx{}
-	phase.storeBotScore(ctx, bot.BotVerdict{Category: "suspicious", Score: 50}, bot.BotScore{Total: 50, Details: map[string]string{"ua": "10"}})
+	phase.storeBotScore(ctx, bot.BotVerdict{Tier: bot.TierObserve, Score: 50, Category: "bot_observe"}, bot.BotScore{Total: 50, Details: map[string]string{"ua": "10"}})
 	if ctx.BotScoreResult == nil {
 		t.Fatal("expected bot score result")
 	}
@@ -135,11 +192,73 @@ func TestBotPhaseStoreBotScoreDetailsOnlyForHighRisk(t *testing.T) {
 	}
 
 	ctx = &pipeline.RequestCtx{}
-	phase.storeBotScore(ctx, bot.BotVerdict{Category: "malicious", Score: 90}, bot.BotScore{Total: 90, IsHighRisk: true, Details: map[string]string{"ua": "10"}})
+	phase.storeBotScore(ctx, bot.BotVerdict{Tier: bot.TierDrop, Score: 90, Category: "bot_drop"}, bot.BotScore{Total: 90, IsHighRisk: true, Details: map[string]string{"ua": "10"}})
 	if ctx.BotScoreResult == nil || len(ctx.BotScoreResult.Details) == 0 {
 		t.Fatalf("high-risk bot score should keep details: %#v", ctx.BotScoreResult)
 	}
 }
+
+func TestBotPhaseBehaviorScoreUsesLimiterWindow(t *testing.T) {
+	limiter := newBotTestLimiter(60, 10)
+	phase := &botPhase{threshold: 80, limiter: limiter, rateMax: 10}
+	ctx := &pipeline.RequestCtx{ClientIP: net.ParseIP("203.0.113.20"), Host: "example.com"}
+
+	if got := phase.behaviorScore(ctx); got != 0 {
+		t.Fatalf("first request behaviour score = %d, want 0", got)
+	}
+	for i := 0; i < 29; i++ {
+		phase.behaviorScore(ctx)
+	}
+	if got := phase.behaviorScore(ctx); got != 100 {
+		t.Fatalf("30 requests over 3x max behaviour score = %d, want 100", got)
+	}
+	if limiter.counts["203.0.113.20|example.com"] != 0 {
+		t.Fatalf("behaviour window must not reuse the rate-limit key, got %d", limiter.counts["203.0.113.20|example.com"])
+	}
+	if !limiter.enabled {
+		t.Fatal("test limiter should be enabled")
+	}
+}
+
+func TestBotPhaseBehaviorScoreDisabledWithoutLimiter(t *testing.T) {
+	phase := &botPhase{threshold: 80}
+	if got := phase.behaviorScore(&pipeline.RequestCtx{ClientIP: net.ParseIP("203.0.113.21"), Host: "example.com"}); got != 0 {
+		t.Fatalf("nil limiter behaviour score = %d, want 0", got)
+	}
+	phase = &botPhase{threshold: 80, limiter: newBotTestLimiter(60, 10)}
+	if got := phase.behaviorScore(&pipeline.RequestCtx{ClientIP: net.ParseIP("203.0.113.21"), Host: "example.com"}); got != 0 {
+		t.Fatalf("zero rateMax behaviour score = %d, want 0", got)
+	}
+}
+
+// botTestLimiter 是本包内最小可用的限流后端替身：按 key 计数并回放启用状态。
+type botTestLimiter struct {
+	window  int64
+	maxReqs int
+	enabled bool
+	counts  map[string]int
+}
+
+func newBotTestLimiter(windowSec, maxReqs int) *botTestLimiter {
+	return &botTestLimiter{window: int64(windowSec), maxReqs: maxReqs, enabled: true, counts: map[string]int{}}
+}
+
+func (l *botTestLimiter) Enabled() bool { return l.enabled }
+func (l *botTestLimiter) Reconfigure(windowSec, maxReqs int, enabled bool) {
+	l.window = int64(windowSec)
+	l.maxReqs = maxReqs
+	l.enabled = enabled
+}
+func (l *botTestLimiter) Allow(key string) bool {
+	l.counts[key]++
+	return l.counts[key] <= l.maxReqs
+}
+func (l *botTestLimiter) Increment(key string) int64 {
+	l.counts[key]++
+	return int64(l.counts[key])
+}
+func (l *botTestLimiter) IsOverLimit(key string) bool { return l.counts[key] > l.maxReqs }
+func (l *botTestLimiter) Close()                      {}
 
 func TestCtxFromPipelineAddsTLSSNIHeader(t *testing.T) {
 	ctx := &pipeline.RequestCtx{
@@ -290,10 +409,21 @@ func TestCtxFromPipelineUsesHostForHostMatchers(t *testing.T) {
 	}
 }
 
+// alwaysMatchStub 是测试专用的「无条件命中」匹配器。
+//
+// 这些用例要验证的是 phase 命中后的短路/优先级逻辑，与具体匹配器无关，
+// 因此直接注入 matcher 并留空 Kind（Kind 为空表示该 Compiled 由测试手工
+// 构造、未经 Compile 的 DSL 解析）。不要在此填任何 kind 字面量——生产
+// 编译器没有 always 这一 kind，写出来会让人误以为配置里可以这么写。
+type alwaysMatchStub struct{}
+
+// Match 恒为 true。
+func (m *alwaysMatchStub) Match(MatchCtx) bool { return true }
+
 func TestCustomPhaseKeepsObserveAuditButReturnsLaterTerminal(t *testing.T) {
 	phase := NewCustomPhasePrecompiled([]Compiled{
-		{ID: 1, Phase: "custom", Action: action.Observe, Kind: "always", matcher: &alwaysMatcher{}},
-		{ID: 2, Phase: "custom", Action: action.Intercept, Kind: "always", matcher: &alwaysMatcher{}},
+		{ID: 1, Phase: "custom", Action: action.Observe, matcher: &alwaysMatchStub{}},
+		{ID: 2, Phase: "custom", Action: action.Intercept, matcher: &alwaysMatchStub{}},
 	})
 
 	ctx := &pipeline.RequestCtx{}
@@ -319,7 +449,7 @@ func TestCustomPhaseKeepsObserveAuditButReturnsLaterTerminal(t *testing.T) {
 
 func TestCustomPhaseReturnsObserveWhenNoTerminalRuleMatches(t *testing.T) {
 	phase := NewCustomPhasePrecompiled([]Compiled{
-		{ID: 1, Phase: "custom", Action: action.Observe, Kind: "always", matcher: &alwaysMatcher{}},
+		{ID: 1, Phase: "custom", Action: action.Observe, matcher: &alwaysMatchStub{}},
 		{ID: 2, Phase: "custom", Action: action.Intercept, Kind: "never", matcher: &neverMatcher{}},
 	})
 
@@ -362,8 +492,8 @@ func TestPrecompiledPhaseInitializesRuntimeMetadataOnce(t *testing.T) {
 
 func TestACLPhaseKeepsHigherPriorityObserveBeforeLaterAllow(t *testing.T) {
 	phase := NewACLPhasePrecompiled([]Compiled{
-		{ID: 1, Phase: "acl", Action: action.Observe, Kind: "always", matcher: &alwaysMatcher{}},
-		{ID: 2, Phase: "acl", Action: action.Allow, Kind: "always", matcher: &alwaysMatcher{}},
+		{ID: 1, Phase: "acl", Action: action.Observe, matcher: &alwaysMatchStub{}},
+		{ID: 2, Phase: "acl", Action: action.Allow, matcher: &alwaysMatchStub{}},
 	})
 
 	result, stop := phase.Execute(&pipeline.RequestCtx{})
@@ -381,8 +511,8 @@ func TestACLPhaseKeepsHigherPriorityObserveBeforeLaterAllow(t *testing.T) {
 
 func TestACLPhaseAllowDoesNotStopPipeline(t *testing.T) {
 	phase := NewACLPhasePrecompiled([]Compiled{
-		{ID: 1, Phase: "acl", Action: action.Allow, Kind: "always", matcher: &alwaysMatcher{}},
-		{ID: 2, Phase: "acl", Action: action.Intercept, Kind: "always", matcher: &alwaysMatcher{}},
+		{ID: 1, Phase: "acl", Action: action.Allow, matcher: &alwaysMatchStub{}},
+		{ID: 2, Phase: "acl", Action: action.Intercept, matcher: &alwaysMatchStub{}},
 	})
 
 	result, stop := phase.Execute(&pipeline.RequestCtx{})
@@ -436,8 +566,7 @@ func TestCustomPhaseCarriesCaptchaTypeInActionResult(t *testing.T) {
 		Phase:       "custom",
 		Action:      action.CaptchaChallenge,
 		CaptchaType: "rotate",
-		Kind:        "always",
-		matcher:     &alwaysMatcher{},
+		matcher:     &alwaysMatchStub{},
 	}})
 
 	result, stop := phase.Execute(&pipeline.RequestCtx{})
@@ -516,6 +645,37 @@ func TestDedupeBodyTargetsPreservesFirstOccurrenceOrder(t *testing.T) {
 	want := []string{"a", "b", "c"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("deduped body targets = %#v, want %#v", got, want)
+	}
+}
+
+// TestOWASPPhaseMultipartContentTypeFoldASCII 锁定 Content-Type 的
+// fold-ASCII 判等语义：mixed/MIXED 大小写的 multipart/form-data 声明必须与
+// 全小写声明走同一条文件上传检测分支，无法用小写绕过文件名检查。
+func TestOWASPPhaseMultipartContentTypeFoldASCII(t *testing.T) {
+	cfg := store.DefaultProtectionConfig()
+	cfg.OWASPEnabled = true
+	cfg.OWASPSensitivity = "mid"
+	cfg.OWASPAction = "intercept"
+	phase := NewOWASPPhase(&cfg)
+
+	body, realCT := multipartRequestBody(t, "upload-shell.php", "application/octet-stream", "<?php echo 1; ?>")
+	boundary := strings.TrimPrefix(realCT, "multipart/form-data; boundary=")
+
+	// 只变换媒体类型的字母大小写；boundary 与 body 保持一致，ParseMediaType
+	// 对媒体类型大小写不敏感，判定差异只可能来自 fold-ASCII 分支本身。
+	for _, mediaType := range []string{
+		"multipart/form-data", "Multipart/Form-Data", "MULTIPART/FORM-DATA",
+	} {
+		ct := mediaType + "; boundary=" + boundary
+		result, stop := phase.Execute(&pipeline.RequestCtx{
+			Method:      http.MethodPost,
+			Path:        "/upload",
+			Body:        body,
+			ContentType: ct,
+		})
+		if !stop || !result.IsTerminal() || !strings.HasPrefix(result.RuleIDStr, "owasp:upload:") {
+			t.Fatalf("Content-Type %q: result=%#v stop=%v, want terminal upload rule", ct, result, stop)
+		}
 	}
 }
 

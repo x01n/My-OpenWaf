@@ -37,6 +37,8 @@ type owaspRuleView struct {
 	Category           string   `json:"category"`
 	Name               string   `json:"name"`
 	Description        string   `json:"description"`
+	Pattern            string   `json:"pattern"`
+	Score              int      `json:"score"`
 	DefaultEnabled     bool     `json:"default_enabled"`
 	DefaultAction      string   `json:"default_action"`
 	DefaultSensitivity string   `json:"default_sensitivity,omitempty"`

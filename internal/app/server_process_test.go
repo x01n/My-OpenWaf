@@ -1,5 +1,33 @@
 package app
 
+/*
+本包测试套件耗时说明（实测于 2026-10-02）。
+
+本包真实耗时约 10.3-10.5 分钟（四次整包实测：619.6s / 621.6s / 630.5s / 630.5s），
+**紧贴 `go test` 默认 600s 上限，必然超时**。默认超时下的 FAIL 是套件时长所致，
+不是测试失败，也不是你的改动引入的回归——已用基线对照（改动前/后各跑 600s 与 8m，
+两者超时值一致）排除。
+
+- **本地跑本包必须显式带超时**：`go test ./internal/app/ -count=1 -timeout 25m`
+- **CI 用 `-timeout=30m`**（见 .github/workflows/ci.yml），余量充足，不受影响
+
+耗时构成（`go test -v` 实测）：269 个顶层用例中，97 个 `...InSeparateProcess`
+用例合计吃掉 594.8s（占墙钟 96%），其余 172 个合计仅 26.6s，平均每个跨进程用例 6.13s。
+本包没有任何测试调用 testing.T 的 Parallel 方法，全部串行执行（此处刻意不写出该
+方法名，以免被 `grep -r 't\.Parallel\(\)'` 之类的统计误计为一次调用）。
+
+**但这 594.8s 并非进程启停成本。** 实测单用例进程冷启动到 ready 仅约 388ms
+（三轮取样 367 / 388 / 421ms，中位 388ms），最轻量的跨进程用例全耗时 730ms——
+平均 6.13s 里进程启停只占约 6%，其余是该用例自身的业务操作（多轮热重载、
+多次请求、流式断言）。用 `startAppProcessHarness*`（见本文件下部）为每个用例
+启动独立 WAF 进程，是为验证进程级行为（监听器热协调、TLS 默认值热重载、
+H2/H3 配置生效）而付的必要成本，但它不是耗时主体。
+
+**由此，「复用 helper 进程」不是可行的优化方向**：天花板约等于
+388ms × 可合并用例数（乐观上限约 9.7s，1.6%），且 HotReloads 全族依赖冷态起步、
+多数用例依赖端口独占，合并会削弱断言。同理，请勿为提速而削减等待常数。
+*/
+
 import (
 	"bytes"
 	"compress/gzip"
@@ -450,7 +478,9 @@ func TestRunUsesStoredRedisConfigOnStartupEvenWhenEnvRedisAddrIsInvalidInSeparat
 
 	appProc.waitRuntimeRedisState(t, true, redisSrv.Addr(), 13)
 	waitForAppMockRedisCommand(t, redisSrv, "PING")
-	waitForAppMockRedisCommand(t, redisSrv, "AUTH STORED-PROC-PASS")
+	// rueidis 把 AUTH/SelectDB 内联进握手批（HELLO 3 AUTH DEFAULT <pass> /
+	// SELECT 13），无独立 AUTH 命令；断言按组合后的子串匹配。
+	waitForAppMockRedisCommand(t, redisSrv, "STORED-PROC-PASS")
 	waitForAppMockRedisCommand(t, redisSrv, "SELECT 13")
 
 	var runtimeResp adminsystem.RuntimeConfigResponse

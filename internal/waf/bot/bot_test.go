@@ -71,34 +71,42 @@ func TestNewBotRequestAcceptsLowercaseHeaders(t *testing.T) {
 	}
 }
 
+// TestBotMaliciousToolUARules 覆盖工具 UA 字面识别与两阶段评分下的 UA 模块分档。
+//
+// 断言路径是生产真实入口 CheckBotTwoPhase；工具 UA 命中 PreScreen 后进入完整加权评分，
+// 单凭 UA 模块（20% 权重）不足以进入拦截档，这里钉住两件事：
+//  1. 工具 UA 永不单独到拦截/断连（用户硬约束：curl 等 UA 不应被直接拦截）；
+//  2. 明确攻击工具（危险工具）由 applyDangerFloor 保证不低于挑战档。
 func TestBotMaliciousToolUARules(t *testing.T) {
 	tests := []struct {
-		name   string
-		ua     string
-		reason string
-		ruleID string
+		name        string
+		ua          string
+		reason      string
+		ruleID      string
+		dangerous   bool
+		wantAtLeast BotTier
 	}{
-		{name: "sqlmap", ua: "sqlmap/1.7.8", reason: "sqlmap", ruleID: "bot:mal:001"},
-		{name: "nikto", ua: "Nikto/2.5.0", reason: "nikto", ruleID: "bot:mal:002"},
-		{name: "port scanner", ua: "masscan/1.3", reason: "port_scanner", ruleID: "bot:mal:003"},
-		{name: "web scanner", ua: "Burp Suite Professional", reason: "web_scanner", ruleID: "bot:mal:004"},
-		{name: "dir brute", ua: "ffuf/2.1.0", reason: "dir_bruteforcer", ruleID: "bot:mal:005"},
-		{name: "vuln scanner", ua: "Nessus Agent", reason: "vuln_scanner", ruleID: "bot:mal:006"},
-		{name: "sqli tool", ua: "Havij", reason: "sqli_tool", ruleID: "bot:mal:007"},
-		{name: "metasploit", ua: "metasploit/6.4", reason: "metasploit", ruleID: "bot:mal:008"},
-		{name: "msf", ua: "msf", reason: "metasploit", ruleID: "bot:mal:008"},
-		{name: "password cracker", ua: "THC-Hydra", reason: "password_cracker", ruleID: "bot:mal:009"},
-		{name: "nuclei", ua: "nuclei/v3", reason: "nuclei", ruleID: "bot:mal:010"},
-		{name: "zgrab", ua: "zgrab/0.x", reason: "zgrab", ruleID: "bot:mal:011"},
-		{name: "crawler", ua: "crawler4j", reason: "malicious_crawler", ruleID: "bot:mal:012"},
-		{name: "exploit", ua: "commix", reason: "exploit_tool", ruleID: "bot:mal:013"},
-		{name: "web app scanner", ua: "skipfish", reason: "web_app_scanner", ruleID: "bot:mal:014"},
-		{name: "cms scanner", ua: "wpscan", reason: "cms_scanner", ruleID: "bot:mal:015"},
-		{name: "recon", ua: "Shodan", reason: "recon_bot", ruleID: "bot:mal:016"},
-		{name: "scraper", ua: "python selenium", reason: "scraper_lib", ruleID: "bot:mal:017"},
-		{name: "http lib", ua: "python-requests/2.32", reason: "http_lib", ruleID: "bot:mal:018"},
-		{name: "cli", ua: "curl/8.7.1", reason: "cli_tool", ruleID: "bot:mal:019"},
-		{name: "api client", ua: "PostmanRuntime/7.39", reason: "api_client", ruleID: "bot:mal:020"},
+		{name: "sqlmap", ua: "sqlmap/1.7.8", reason: "sqlmap", ruleID: "bot:mal:001", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "nikto", ua: "Nikto/2.5.0", reason: "nikto", ruleID: "bot:mal:002", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "port scanner", ua: "masscan/1.3", reason: "port_scanner", ruleID: "bot:mal:003", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "web scanner", ua: "Burp Suite Professional", reason: "web_scanner", ruleID: "bot:mal:004", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "dir brute", ua: "ffuf/2.1.0", reason: "dir_bruteforcer", ruleID: "bot:mal:005", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "vuln scanner", ua: "Nessus Agent", reason: "vuln_scanner", ruleID: "bot:mal:006", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "sqli tool", ua: "Havij", reason: "sqli_tool", ruleID: "bot:mal:007", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "metasploit", ua: "metasploit/6.4", reason: "metasploit", ruleID: "bot:mal:008", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "msf", ua: "msf", reason: "metasploit", ruleID: "bot:mal:008", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "password cracker", ua: "THC-Hydra", reason: "password_cracker", ruleID: "bot:mal:009", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "nuclei", ua: "nuclei/v3", reason: "nuclei", ruleID: "bot:mal:010", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "zgrab", ua: "zgrab/0.x", reason: "zgrab", ruleID: "bot:mal:011", dangerous: false, wantAtLeast: TierObserve},
+		{name: "crawler", ua: "crawler4j", reason: "malicious_crawler", ruleID: "bot:mal:012", dangerous: false, wantAtLeast: TierObserve},
+		{name: "exploit", ua: "commix", reason: "exploit_tool", ruleID: "bot:mal:013", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "web app scanner", ua: "skipfish", reason: "web_app_scanner", ruleID: "bot:mal:014", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "cms scanner", ua: "wpscan", reason: "cms_scanner", ruleID: "bot:mal:015", dangerous: true, wantAtLeast: TierChallenge},
+		{name: "recon", ua: "Shodan", reason: "recon_bot", ruleID: "bot:mal:016", dangerous: false, wantAtLeast: TierObserve},
+		{name: "scraper", ua: "python selenium", reason: "scraper_lib", ruleID: "bot:mal:017", dangerous: false, wantAtLeast: TierObserve},
+		{name: "http lib", ua: "python-requests/2.32", reason: "http_lib", ruleID: "bot:mal:018", dangerous: false, wantAtLeast: TierPass},
+		{name: "cli", ua: "curl/8.7.1", reason: "cli_tool", ruleID: "bot:mal:019", dangerous: false, wantAtLeast: TierPass},
+		{name: "api client", ua: "PostmanRuntime/7.39", reason: "api_client", ruleID: "bot:mal:020", dangerous: false, wantAtLeast: TierPass},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,22 +114,33 @@ func TestBotMaliciousToolUARules(t *testing.T) {
 			if !PreScreen(req, nil, nil) {
 				t.Fatalf("PreScreen(%q) = false", tt.ua)
 			}
-			got := CheckBotWithLevel(req, "medium")
-			if !got.IsBot || got.Category != "malicious" || got.Score != 95 || got.Reason != tt.reason || got.RuleID != tt.ruleID {
-				t.Fatalf("CheckBotWithLevel(%q) = %+v", tt.ua, got)
+			if name, ruleID, ok := matchMaliciousToolUA(tt.ua); !ok || name != tt.reason || ruleID != tt.ruleID {
+				t.Fatalf("matchMaliciousToolUA(%q) = %q/%q/%v", tt.ua, name, ruleID, ok)
+			}
+			got, _ := CheckBotTwoPhase(req, nil, nil, 80)
+			if got.Tier >= TierIntercept {
+				t.Fatalf("工具 UA 单独不得拦截/断连：CheckBotTwoPhase(%q) = %+v", tt.ua, got)
+			}
+			if got.Dangerous != tt.dangerous {
+				t.Fatalf("CheckBotTwoPhase(%q) Dangerous = %v, want %v (%+v)", tt.ua, got.Dangerous, tt.dangerous, got)
+			}
+			if got.Tier < tt.wantAtLeast {
+				t.Fatalf("CheckBotTwoPhase(%q) tier = %d, want >= %d (%+v)", tt.ua, got.Tier, tt.wantAtLeast, got)
 			}
 		})
 	}
 }
 
+// TestBotCleanBrowserUAPassesPreScreen 验证干净浏览器不被 PreScreen 命中，
+// 因而两阶段路径直接返回 human/prescreen（不进入评分，也就不可能产生处置）。
 func TestBotCleanBrowserUAPassesPreScreen(t *testing.T) {
 	req := cleanBrowserBotRequest()
 	if PreScreen(req, nil, nil) {
 		t.Fatal("clean browser User-Agent should pass PreScreen")
 	}
-	got := CheckBotWithLevel(req, "medium")
-	if got.IsBot || got.Category != "human" || got.RuleID != "bot:heuristic" {
-		t.Fatalf("CheckBotWithLevel(clean browser) = %+v", got)
+	got, _ := CheckBotTwoPhase(req, nil, nil, 80)
+	if got.IsBot || got.Tier != TierPass || got.Category != "human" || got.RuleID != "bot:prescreen" {
+		t.Fatalf("CheckBotTwoPhase(clean browser) = %+v", got)
 	}
 }
 
@@ -135,11 +154,11 @@ func BenchmarkPreScreenCleanBrowserUA(b *testing.B) {
 	}
 }
 
-func BenchmarkCheckBotWithLevelCleanBrowserUA(b *testing.B) {
+func BenchmarkCheckBotTwoPhaseCleanBrowserUA(b *testing.B) {
 	req := cleanBrowserBotRequest()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		got := CheckBotWithLevel(req, "medium")
+		got, _ := CheckBotTwoPhase(req, nil, nil, 80)
 		if got.IsBot {
 			b.Fatalf("clean browser User-Agent should be human: %+v", got)
 		}

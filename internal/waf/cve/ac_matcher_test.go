@@ -3,15 +3,17 @@ package cve
 import (
 	"strings"
 	"testing"
+
+	"My-OpenWaf/internal/ac"
 )
 
 func TestACMatcherMatchAny(t *testing.T) {
-	b := newACBuilder()
+	b := ac.NewBuilder()
 	needles := []string{"jndi:", "ldap://", "../", "<?php", "union select"}
 	for _, n := range needles {
-		b.addPattern(n)
+		b.AddPattern(n)
 	}
-	ac := b.build()
+	m := b.Build()
 
 	cases := []struct {
 		target string
@@ -28,69 +30,69 @@ func TestACMatcherMatchAny(t *testing.T) {
 		{"jndi", false},
 	}
 	for _, c := range cases {
-		got := ac.matchAny(c.target)
+		got := m.MatchAny(c.target)
 		if got != c.want {
-			t.Errorf("matchAny(%q)=%v want %v", c.target, got, c.want)
+			t.Errorf("MatchAny(%q)=%v want %v", c.target, got, c.want)
 		}
 	}
 }
 
 func TestACMatcherMatchMask(t *testing.T) {
-	b := newACBuilder()
+	b := ac.NewBuilder()
 	needles := []string{"abc", "bcd", "xyz"}
 	indices := make([]int32, len(needles))
 	for i, n := range needles {
-		indices[i] = b.addPattern(n)
+		indices[i] = b.AddPattern(n)
 	}
-	ac := b.build()
+	m := b.Build()
 
 	target := "1abcde_xyz2"
-	hit := ac.matchMask(target)
+	hit := m.MatchMask(target)
 
-	var mask0 acGateMask
-	mask0.set(indices[0]) // "abc"
-	if !hit.intersects(&mask0) {
+	var mask0 ac.Mask
+	mask0.Set(indices[0]) // "abc"
+	if !hit.Intersects(&mask0) {
 		t.Fatal("应命中 abc")
 	}
-	var mask1 acGateMask
-	mask1.set(indices[1]) // "bcd"
-	if !hit.intersects(&mask1) {
+	var mask1 ac.Mask
+	mask1.Set(indices[1]) // "bcd"
+	if !hit.Intersects(&mask1) {
 		t.Fatal("应命中 bcd(abc 的后续)")
 	}
-	var mask2 acGateMask
-	mask2.set(indices[2]) // "xyz"
-	if !hit.intersects(&mask2) {
+	var mask2 ac.Mask
+	mask2.Set(indices[2]) // "xyz"
+	if !hit.Intersects(&mask2) {
 		t.Fatal("应命中 xyz")
 	}
 
-	miss := ac.matchMask("nothing")
-	if miss.intersects(&mask0) || miss.intersects(&mask1) || miss.intersects(&mask2) {
+	miss := m.MatchMask("nothing")
+	if miss.Intersects(&mask0) || miss.Intersects(&mask1) || miss.Intersects(&mask2) {
 		t.Fatal("不应有命中")
 	}
 }
 
 func TestACMatcherMatchMaskSliceNoCrossBoundary(t *testing.T) {
-	b := newACBuilder()
-	idx := b.addPattern("avas")
-	ac := b.build()
+	b := ac.NewBuilder()
+	idx := b.AddPattern("avas")
+	m := b.Build()
 
 	// "java" + "script" 拼起来含 "avas"(java|script → ava|s),但逐条扫不应命中。
 	targets := []string{"java", "script"}
-	hit := ac.matchMaskSlice(targets)
-	var mask acGateMask
-	mask.set(idx)
-	if hit.intersects(&mask) {
-		t.Fatal("matchMaskSlice 不应跨 target 边界拼接匹配")
+	hit := m.MatchMaskSlice(targets)
+	var mask ac.Mask
+	mask.Set(idx)
+	if hit.Intersects(&mask) {
+		t.Fatal("MatchMaskSlice 不应跨 target 边界拼接匹配")
 	}
 
 	targets2 := []string{"has avas inside"}
-	hit2 := ac.matchMaskSlice(targets2)
-	if !hit2.intersects(&mask) {
-		t.Fatal("matchMaskSlice 应在单条 target 内匹配")
+	hit2 := m.MatchMaskSlice(targets2)
+	if !hit2.Intersects(&mask) {
+		t.Fatal("MatchMaskSlice 应在单条 target 内匹配")
 	}
 }
 
-// AC matchAny vs 逐 needle strings.Contains,确保每个 target 判定一致。
+// AC MatchAny vs 逐 needle strings.Contains,确保每个 target 判定一致。
 func TestACMatcherFuzzEquivalence(t *testing.T) {
 	needles := []string{
 		"() {", "solrsearch", "media=rss", "groovy", "{{async", "{{ async",
@@ -117,11 +119,11 @@ func TestACMatcherFuzzEquivalence(t *testing.T) {
 		"<script", "javascript:", "onerror=", "onload=", "alert(",
 		"cmd=", "exec=", "command=", "run=", "/bin/sh", "/bin/bash",
 	}
-	b := newACBuilder()
+	b := ac.NewBuilder()
 	for _, n := range needles {
-		b.addPattern(n)
+		b.AddPattern(n)
 	}
-	ac := b.build()
+	m := b.Build()
 
 	naive := func(target string) bool {
 		for _, n := range needles {
@@ -155,7 +157,7 @@ func TestACMatcherFuzzEquivalence(t *testing.T) {
 		"{{async function test(){}}",
 	}
 	for _, target := range targets {
-		got := ac.matchAny(target)
+		got := m.MatchAny(target)
 		want := naive(target)
 		if got != want {
 			t.Errorf("target=%q: AC=%v naive=%v", target, got, want)

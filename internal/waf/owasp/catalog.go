@@ -1,6 +1,10 @@
 package owasp
 
 import (
+	"sort"
+	"strconv"
+	"strings"
+
 	"My-OpenWaf/internal/store"
 
 	"gorm.io/gorm"
@@ -10,9 +14,12 @@ import (
 // BuiltinRuleDefinitions returns the complete metadata inventory for every stable RuleID emitted by the detector.
 func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
 	definitions := make(map[string]store.OWASPRuleCatalog)
+	patterns := CollectRulePatterns()
 	for _, rule := range DefaultOWASPRegistry.All() {
+		info := patterns[rule.ID]
 		definitions[rule.ID] = store.OWASPRuleCatalog{
 			RuleID: rule.ID, Category: rule.Category, Name: rule.Name, Description: rule.Description,
+			Pattern: info.Pattern, Score: info.Score,
 			DefaultEnabled: rule.Enabled, DefaultAction: "intercept", BuiltinVersion: "1", Active: true,
 		}
 	}
@@ -69,6 +76,9 @@ func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
 	}
 	add("owasp:deser:012", string(CatDeserial), "URL 编码 Java 序列化魔数", "检测 URL 编码或十六进制形式的 AC ED 00 05 Java 序列化魔数；风险分值 5")
 	add("owasp:crlf:005", string(CatCRLF), "URL 路径裸 CR/LF", "检测 URL 路径中的裸回车或换行字符；风险分值 5")
+	// owasp:crlf:006 是硬编码发射点（owasp_extended.go 的 RFC-2047 编码头检查），
+	// 不属于 crlfPatterns 切片，因此只能在此登记，不能写进 builtinRuleMeta。
+	add("owasp:crlf:006", string(CatCRLF), "RFC-2047 编码头内嵌换行", "检测 RFC-2047 编码字（=?charset?B/Q?...?=）内部嵌入的换行符；风险分值 3")
 
 	items := make([]store.OWASPRuleCatalog, 0, len(definitions))
 	for _, item := range definitions {
@@ -88,11 +98,89 @@ func ReconcileBuiltinCatalog(db *gorm.DB) error {
 			item := definitions[i]
 			if err := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "rule_id"}},
-				DoUpdates: clause.AssignmentColumns([]string{"category", "name", "description", "default_enabled", "default_action", "default_sensitivity", "builtin_version", "active", "updated_at"}),
+				DoUpdates: clause.AssignmentColumns([]string{"category", "name", "description", "pattern", "score", "default_enabled", "default_action", "default_sensitivity", "builtin_version", "active", "updated_at"}),
 			}).Create(&item).Error; err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+type patternRuleGroup struct {
+	name     string
+	patterns []owaspPattern
+}
+
+func allPatternRuleGroups() []patternRuleGroup {
+	return []patternRuleGroup{
+		{"sqliPatterns", sqliPatterns},
+		{"xssPatterns", xssPatterns},
+		{"cmdInjectPatterns", cmdInjectPatterns},
+		{"ssrfPatterns", ssrfPatterns},
+		{"xxePatterns", xxePatterns},
+		{"ldapiPatterns", ldapiPatterns},
+		{"nosqliPatterns", nosqliPatterns},
+		{"tmplInjectPatterns", tmplInjectPatterns},
+		{"jndiPatterns", jndiPatterns},
+		{"crlfPatterns", crlfPatterns},
+		{"exprLangPatterns", exprLangPatterns},
+		{"deserialPatterns", deserialPatterns},
+		{"graphqlPatterns", graphqlPatterns},
+		{"webshellPatterns", webshellPatterns},
+		{"revshellPatterns", revshellPatterns},
+		{"pathTravPatterns", pathTravPatterns},
+	}
+}
+
+// rulePatternInfo bundles the display snapshot of one rule: its aggregated
+// pattern text and its risk score.
+type rulePatternInfo struct {
+	Pattern string
+	Score   int
+}
+
+/**
+ * CollectRulePatterns 汇总全部 *Patterns 切片成员的展示信息，键为规则 ID。
+ *
+ * 每个 pattern 是独立的正则，多个 pattern 共享同一规则 ID 时按给定顺序
+ * 以换行分隔聚合为多行文本：每行格式为 `regex=<re.String()> score=<n>`，
+ * 与同一 ID 中分值不同的成员互不掩盖。这是目录展示专用的快照，不是
+ * 运行时可执行的定义，也不会回读参与检测。
+ *
+ * 硬编码发射点（path/upload/proto/crlf 等非切片规则）在结果中不存在，
+ * 调用方须自行处理缺项。返回值是独立构建的纯快照，可安全并发读取。
+ */
+func CollectRulePatterns() map[string]rulePatternInfo {
+	return CollectRulePatternsFrom(allPatternRuleGroups())
+}
+
+/**
+ * CollectRulePatternsFrom 是 CollectRulePatterns 的可注入版本，测试用它
+ * 校验收集结果与 DefaultOWASPRegistry 的双向对应关系。
+ */
+func CollectRulePatternsFrom(groups []patternRuleGroup) map[string]rulePatternInfo {
+	ordering := make(map[string]struct {
+		items []string
+		score int
+	}, 128)
+	for _, group := range groups {
+		for _, pattern := range group.patterns {
+			slot := ordering[pattern.id]
+			slot.items = append(slot.items, "regex="+pattern.re.String()+" score="+strconv.Itoa(pattern.score))
+			slot.score = pattern.score
+			ordering[pattern.id] = slot
+		}
+	}
+	keys := make([]string, 0, len(ordering))
+	for id := range ordering {
+		keys = append(keys, id)
+	}
+	sort.Strings(keys)
+	collected := make(map[string]rulePatternInfo, len(keys))
+	for _, id := range keys {
+		slot := ordering[id]
+		collected[id] = rulePatternInfo{Pattern: strings.Join(slot.items, "\n"), Score: slot.score}
+	}
+	return collected
 }

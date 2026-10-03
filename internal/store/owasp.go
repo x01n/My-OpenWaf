@@ -2,13 +2,14 @@ package store
 
 import "time"
 
-// OWASPRuleCatalog stores metadata for built-in detector rules without duplicating executable patterns.
 type OWASPRuleCatalog struct {
 	ID                 uint      `gorm:"primaryKey" json:"id"`
 	RuleID             string    `gorm:"size:128;not null;uniqueIndex;index:idx_owasp_active_rule_id,priority:2;index:idx_owasp_active_category_rule_id,priority:3" json:"builtin_id"`
 	Category           string    `gorm:"size:64;not null;index;index:idx_owasp_active_category_rule_id,priority:2" json:"category"`
 	Name               string    `gorm:"size:255;not null" json:"name"`
 	Description        string    `gorm:"type:text" json:"description"`
+	Pattern            string    `gorm:"type:text" json:"pattern"`
+	Score              int       `gorm:"default:0" json:"score"`
 	DefaultEnabled     bool      `gorm:"not null;default:true" json:"default_enabled"`
 	DefaultAction      string    `gorm:"size:32;not null;default:'intercept'" json:"default_action"`
 	DefaultSensitivity string    `gorm:"size:32" json:"default_sensitivity"`

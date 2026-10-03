@@ -15,6 +15,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/pkg/vmpasm"
 	"My-OpenWaf/internal/waf/challenge/powdata"
 )
 
@@ -33,23 +34,43 @@ func gzipBytes(data []byte) []byte {
 	return buf.Bytes()
 }
 
+// PowGlueURL 返回 Gecko 侧引用的 glue 脚本 URL，带内容派生版本串。
+//
+// 版本串必须与资产内容绑定：这两个 URL 的响应带 `immutable`，浏览器在缓存
+// 窗口内不回源校验；URL 不随内容变时换资产会让老访客继续用旧文件。
+// 分开导出的原因见 ServePoWWASM 的注释。
+func PowGlueURL() string {
+	return "/__owaf/pow_glue.js?v=" + powdata.GlueVersion()
+}
+
+// PowWasmURL 返回 Gecko 侧引用的 WASM 二进制 URL，带内容派生版本串。
+func PowWasmURL() string {
+	return "/__owaf/pow.wasm?v=" + powdata.WasmVersion()
+}
+
 // ServePoWWASM serves the pre-compiled WASM binary (gzipped).
+//
+// Cache-Control 用 `immutable` + 30 天：客户端引用的 URL 带内容派生版本串
+// （见 PowWasmURL），换资产即换 URL，因此长窗口不会造成旧资产滞留。
+// 反向约束：**改这个 max-age 必须与版本串机制同批**——只调大 max-age 而
+// URL 不随内容变，会把「旧 wasm 滞留 1 小时」恶化成「滞留 30 天」。
 func ServePoWWASM(c *app.RequestContext) {
 	gzipWASMOnce.Do(func() { gzipWASM = gzipBytes(powdata.WASMBinary) })
 	c.Response.SetStatusCode(200)
 	c.Response.Header.Set("Content-Type", "application/wasm")
 	c.Response.Header.Set("Content-Encoding", "gzip")
-	c.Response.Header.Set("Cache-Control", "public,max-age=3600,immutable")
+	c.Response.Header.Set("Cache-Control", "public,max-age=2592000,immutable")
 	c.Response.SetBody(gzipWASM)
 }
 
 // ServePowGlueJS serves the Rust wasm-bindgen glue JS (gzipped).
+// max-age 与版本串的配对关系同 ServePoWWASM。
 func ServePowGlueJS(c *app.RequestContext) {
 	gzipGlueOnce.Do(func() { gzipGlueJS = gzipBytes(powdata.PowGlueJS) })
 	c.Response.SetStatusCode(200)
 	c.Response.Header.Set("Content-Type", "application/javascript")
 	c.Response.Header.Set("Content-Encoding", "gzip")
-	c.Response.Header.Set("Cache-Control", "public,max-age=3600,immutable")
+	c.Response.Header.Set("Cache-Control", "public,max-age=2592000,immutable")
 	c.Response.SetBody(gzipGlueJS)
 }
 
@@ -134,49 +155,40 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// VM opcodes for polymorphic bytecode generation.
-const (
-	vmOpNop         byte = 0x00
-	vmOpLoadNonce   byte = 0x10
-	vmOpLoadCounter byte = 0x11
-	vmOpConcat      byte = 0x12
-	vmOpSHA256      byte = 0x13
-	vmOpCheckPrefix byte = 0x14
-)
-
-// GenerateVMProgram creates a polymorphic bytecode program for the WASM VM.
-// Each call shuffles NOP padding to produce unique bytecode.
+// GenerateVMProgram 生成 PoW 程序字节码（程序容器格式，十六进制）。
+//
+// 程序内容是 `SHA-256(nonce ‖ decimal(counter))` 的完整实现 + 前导零判定，
+// 由 vmpasm 汇编成 ISA 字节码。**没有任何 PoW 专用指令**：前导零检查是
+// 「循环 + 无符号比较 + 条件跳转」（见 temp/_vmp-track/ISA.md §4.3.6）。
+//
+// # 为什么不再做多态填充
+//
+// 旧实现（固定 5 步状态机 + 随机 NOP 填充）已被删除：ISA 现在是通用指令集，
+// 程序是真实计算，多态性由**程序本身的结构**（分支、循环、变量布局）承担，
+// 而不是靠插入无操作字节。ISA 里也没有 NOP 填充这一说 —— `NOP` 是可执行
+// 指令，插进控制流会改变可达性分析，不是"无害填充"。
+//
+// 程序是**确定性**的：同一版本下所有客户端拿到相同字节码，其版本串通过
+// WASM 资产的内容派生版本机制传播（PowWasmURL / PowGlueURL）。
 func GenerateVMProgram() string {
-	base := []byte{vmOpLoadNonce, vmOpLoadCounter, vmOpConcat, vmOpSHA256, vmOpCheckPrefix}
-	nopCount := 2 + randIntN(4)
-	prog := make([]byte, 0, len(base)+nopCount)
-	inserted := 0
-	for _, op := range base {
-		for inserted < nopCount && randIntN(3) == 0 {
-			prog = append(prog, vmOpNop)
-			inserted++
-		}
-		prog = append(prog, op)
+	prog, err := vmpasm.Assemble(vmpasm.PoWProgramLayout(), vmpasm.BuildPoWProgram())
+	if err != nil {
+		// 程序是编译期常量，汇编失败只可能是代码缺陷；返回空串会让
+		// solve_pow_batched 以 vm_bad_magic 失败（可见的错误，不是静默降级）。
+		return ""
 	}
-	for inserted < nopCount {
-		prog = append(prog, vmOpNop)
-		inserted++
-	}
-	return hex.EncodeToString(prog)
+	return vmpasm.Hex(prog)
 }
 
-// GeneratePoWWASMScript returns a JS loader that spawns multiple Web Workers
-// (one per CPU core) to solve PoW in parallel using the Rust WASM module.
-// Each worker processes a different counter range via solve_pow_batched.
-// If the WASM module fails to load, an error is thrown — there is no JS fallback.
 func GeneratePoWWASMScript(difficulty int, nonce string) string {
+	return generatePoWScriptBody(difficulty, nonce)
+}
+
+func generatePoWScriptBody(difficulty int, nonce string) string {
 	difficulty = ClampPoWDifficulty(difficulty)
 	program := GenerateVMProgram()
 	v := randomVarNames(2)
 	encodedNonce := polymorphicEncode(nonce)
-	cacheBust := make([]byte, 4)
-	_, _ = rand.Read(cacheBust)
-	cb := hex.EncodeToString(cacheBust)
 
 	return fmt.Sprintf(`(function(){
 var %s=%s,%s=%d;
@@ -189,7 +201,7 @@ function cleanup(){for(var j=0;j<ws.length;j++)ws[j].terminate();ws=[]}
 function fail(msg){if(done)return;done=true;cleanup();window.__owaf_pow_last_error=msg;if(window.__owaf_pow_error){window.__owaf_pow_error(msg)}}
 window.__owaf_pow_cancel=function(){done=true;cleanup()};
 function begin(){
-var wc='importScripts("'+location.origin+'/__owaf/pow_glue.js?_=%s");wasm_bindgen({module_or_path:location.origin+"/__owaf/pow.wasm?_=%s"}).then(function(){var off=BigInt(self.__off);function batch(){if(self.__stop)return;try{var r=wasm_bindgen.solve_pow_batched(self.__n,self.__d,self.__p,self.__bs,off);var o=JSON.parse(r);if(o.found){self.postMessage(JSON.stringify({found:true,pow:r}))}else{off+=BigInt(self.__bs*self.__nc);self.postMessage(JSON.stringify({found:false}));setTimeout(batch,0)}}catch(e){self.postMessage(JSON.stringify({error:e.message||String(e)||"pow solve failed"}))}}batch()}).catch(function(e){self.postMessage(JSON.stringify({error:e.message||"wasm init failed"}))});';
+var wc='importScripts("'+location.origin+'%s");wasm_bindgen({module_or_path:location.origin+"%s"}).then(function(){var off=BigInt(self.__off);function batch(){if(self.__stop)return;try{var r=wasm_bindgen.solve_pow_batched(self.__n,self.__d,self.__p,self.__bs,off);var o=JSON.parse(r);if(o.found){self.postMessage(JSON.stringify({found:true,pow:r}))}else{off+=BigInt(self.__bs*self.__nc);self.postMessage(JSON.stringify({found:false}));setTimeout(batch,0)}}catch(e){self.postMessage(JSON.stringify({error:e.message||String(e)||"pow solve failed"}))}}batch()}).catch(function(e){self.postMessage(JSON.stringify({error:e.message||"wasm init failed"}))});';
 for(var i=0;i<nc;i++){
 var code='self.__n='+JSON.stringify(%s)+';self.__d='+%s+';self.__p=%q;self.__off='+i+'*'+bs+';self.__bs='+bs+';self.__nc='+nc+';self.__stop=false;'+wc;
 try{var b=new Blob([code],{type:'application/javascript'});var w=new Worker(URL.createObjectURL(b))}catch(e){fail("[OWAF] WASM Worker creation failed: "+(e.message||String(e)));return}
@@ -213,7 +225,7 @@ setTimeout(start,0);
 })();`,
 		v[0], encodedNonce,
 		v[1], difficulty,
-		cb, cb,
+		PowGlueURL(), PowWasmURL(),
 		v[0], v[1], program,
 		v[0], v[1],
 	)

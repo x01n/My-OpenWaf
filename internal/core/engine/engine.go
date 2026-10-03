@@ -235,7 +235,7 @@ func (e *Engine) JSPlugins() *jsplugin.Engine {
  */
 func applyPostLuaDecision(lp *luaplugin.Engine, reqCtx *pipeline.RequestCtx, builtin action.Result) action.Result {
 	view := rules.BuildLuaRequestView(reqCtx)
-	// 把内置判定暴露给脚本，使其能针对具体阶段与动作做决策。
+	view.Runtime = rules.BuildLuaPostRuntimeView(reqCtx)
 	view.Phase = builtin.Phase
 	if builtin.Matched {
 		view.Action = string(builtin.Type)
@@ -260,7 +260,19 @@ func applyPostLuaDecision(lp *luaplugin.Engine, reqCtx *pipeline.RequestCtx, bui
 	}
 
 	dec := lp.Evaluate(runCtx, luaplugin.StagePost, view)
-	if runCtx.Err() != nil || !dec.HasAction() {
+	if runCtx.Err() != nil {
+		return builtin
+	}
+	if dec.ResponseMutation != nil {
+		reqCtx.AppendResponseMutation(pipeline.ResponseMutator{
+			ScriptName:    dec.ScriptName,
+			StatusCode:    dec.ResponseMutation.StatusCode,
+			Body:          dec.ResponseMutation.Body,
+			SetHeaders:    dec.ResponseMutation.SetHeaders,
+			DeleteHeaders: dec.ResponseMutation.DeleteHeaders,
+		})
+	}
+	if !dec.HasAction() {
 		return builtin
 	}
 	act := action.Normalize(action.Type(dec.Action))
@@ -486,7 +498,12 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	}
 
 	if prot.BotDetectionEnabled {
-		addPhase(rules.NewBotPhaseWithGeo(e.ipRep, deps.geoResolver, deps.botThreshold))
+		// 行为模块需要限流窗口的请求计数；未启用限流时传 nil，行为分恒 0。
+		var botLimiter ratelimit.RateLimiterBackend
+		if deps.reqRateLimiter != nil && deps.reqRateLimiter.Enabled() {
+			botLimiter = deps.reqRateLimiter
+		}
+		addPhase(rules.NewBotPhaseWithGeoAndLimiter(e.ipRep, deps.geoResolver, deps.botThreshold, botLimiter, prot.RequestRateLimitMax))
 	}
 
 	// 浏览器签名校验：对 API 特征请求校验页面挂载 JS 写入的短时效签名头。

@@ -48,10 +48,15 @@ func (d *DropExecutor) Execute(conn net.Conn, reason DropReason) error {
 	if conn == nil {
 		return nil
 	}
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.SetLinger(0)
+	rST := func() error {
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.SetLinger(0)
+		}
+		return conn.Close()
 	}
-	err := conn.Close()
+	if err := rST(); err != nil {
+		return err
+	}
 	d.recordStats(reason)
 	if shouldLogConnectionDropCount(d.logCounter.Add(1)) {
 		d.log.Warn("connection dropped",
@@ -63,7 +68,7 @@ func (d *DropExecutor) Execute(conn net.Conn, reason DropReason) error {
 			slog.String("detail", reason.Detail),
 		)
 	}
-	return err
+	return nil
 }
 
 func shouldLogConnectionDropCount(count uint64) bool {

@@ -1,7 +1,8 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { Suspense, useCallback, useMemo, useState } from "react"
 import Link from "next/link"
+import { useSearchParams } from "next/navigation"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import {
@@ -107,10 +108,34 @@ function normalizeSensitivity(value: string | undefined): string {
   return value === "mid" ? "medium" : value || "medium"
 }
 
+/**
+ * readRuleQueryParam 读取 ?q= 作为规则目录的初始查询条件。
+ *
+ * 该 Hook 只在页面挂载时读取一次，之后的输入完全由本地状态驱动，避免
+ * URL 变化覆盖用户正在编辑的搜索词。
+ */
+function useInitialRuleQuery(): string {
+  const searchParams = useSearchParams()
+  return useMemo(() => (searchParams.get("q") || "").trim(), [searchParams])
+}
+
+/**
+ * OWASPRulesPage 外层包裹 Suspense：useRuleQueryParam 读取 useSearchParams，
+ * Next.js 16 静态导出要求使用该 Hook 的组件位于 Suspense 边界内。
+ */
 export default function OWASPRulesPage() {
+  return (
+    <Suspense fallback={null}>
+      <OWASPRulesPageContent />
+    </Suspense>
+  )
+}
+
+function OWASPRulesPageContent() {
   const { t } = useTranslation()
   const { user } = useAuth()
   const canManage = user?.role === "admin" || user?.role === "operator"
+  const initialRuleQuery = useInitialRuleQuery()
   const {
     data: policies = [],
     isLoading: policiesLoading,
@@ -118,7 +143,9 @@ export default function OWASPRulesPage() {
   } = usePolicies()
   const [policyId, setPolicyId] = useState<number | undefined>(undefined)
   const [category, setCategory] = useState("")
-  const [query, setQuery] = useState("")
+  // 安全事件详情页通过 ?q=<rule_id_str> 跳转过来；OWASP 目录按 rule_id
+  // 精确匹配，因此直接把该值作为初始查询条件（用户仍可继续编辑）。
+  const [query, setQuery] = useState(() => initialRuleQuery)
   const [page, setPage] = useState(1)
   const [editingRule, setEditingRule] = useState<OWASPRuleItem | null>(null)
   const [pendingRuleIDs, setPendingRuleIDs] = useState<Set<string>>(
@@ -479,6 +506,18 @@ export default function OWASPRulesPage() {
             <p className="line-clamp-2 text-xs break-words whitespace-normal text-muted-foreground">
               {row.description}
             </p>
+            {row.pattern ? (
+              <code className="block max-w-full break-all whitespace-normal rounded bg-muted/60 px-2 py-1 text-[11px] text-muted-foreground">
+                {row.pattern}
+              </code>
+            ) : (
+              <span className="block text-xs text-muted-foreground">-</span>
+            )}
+            {row.score !== undefined && row.score > 0 && (
+              <Badge variant="outline">
+                {t("owaspRules.score")}: {row.score}
+              </Badge>
+            )}
             {row.note && (
               <p className="line-clamp-2 rounded bg-muted/60 px-2 py-1 text-xs break-words whitespace-normal text-foreground">
                 {t("rules.policyNote", "策略备注")}：{row.note}

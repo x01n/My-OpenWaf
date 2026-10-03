@@ -138,7 +138,7 @@ func TestCaptchaEnvelopeJsonCarriesOnlyChallengeFields(t *testing.T) {
 	}
 	for field := range m {
 		switch field {
-		case "type", "prompt", "master_img", "thumb_img", "width", "height", "input_mode":
+		case "type", "prompt", "master_img", "thumb_img", "width", "height", "input_mode", "exec_script":
 		default:
 			t.Fatalf("unexpected envelope field %q (answer must never be issued)", field)
 		}

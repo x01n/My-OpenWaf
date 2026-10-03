@@ -105,11 +105,24 @@ func newSQLiteBulkFlusher(log *slog.Logger) *sqliteBulkFlusher {
 	return bf
 }
 
-// multiGroupSizeFor 是组大小与驱动参数上限的钳制公式：绑定列数越多组越小，
-// 确保 len(cols)×N 永不越过 driverMaxVariableNumber；上限极端小时退化为 1
-// （多值组路径失效，走单行长期语句——与构建期否决同级的自愈行为）。
+var testHookMultiGroupSize func() int
+
+func pendingMultiGroupSize() int {
+	h := testHookMultiGroupSize
+	testHookMultiGroupSize = nil
+	if h == nil {
+		return 0
+	}
+	return h()
+}
+
 func multiGroupSizeFor(cols int) int {
 	n := defaultMultiGroupSize
+	if h := pendingMultiGroupSize(); h > 0 {
+		// testHookMultiGroupSize 是测试组大小的运行时选择，介入仅发生在
+		// 基准构建期，生产执行永不生效。
+		n = h
+	}
 	if maxN := driverMaxVariableNumber / cols; maxN < n {
 		n = maxN
 	}
@@ -117,6 +130,10 @@ func multiGroupSizeFor(cols int) int {
 		n = 1
 	}
 	return n
+}
+
+func multiGroupSizeClamped(cols int) bool {
+	return driverMaxVariableNumber/cols < defaultMultiGroupSize
 }
 
 // disable 记录否决原因，让上层直接落回 GORM 路径。
@@ -140,13 +157,21 @@ func (bf *sqliteBulkFlusher) attachSQLDB(db *gorm.DB) error {
 }
 
 // insertSQLText 生成单行 INSERT 语句文本；首次 prepare 时生成一次。
+//
+// 列名必须按 SQLite 标识符转义：references 是 SQL 保留字，未加双引号时
+// 语句在解析阶段即报 "near \"references\": syntax error"。
 func insertSQLText(tableName string, cols []string) string {
 	var sb strings.Builder
 	sb.Grow(len(tableName) + len(cols)*16 + 32)
 	sb.WriteString("INSERT INTO ")
 	sb.WriteString(tableName)
 	sb.WriteString("(")
-	sb.WriteString(strings.Join(cols, ","))
+	for i, col := range cols {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		writeQuotedIdentifier(&sb, col)
+	}
 	sb.WriteString(") VALUES(")
 	for i := range cols {
 		if i > 0 {
@@ -166,7 +191,12 @@ func insertMultiSQLText(tableName string, cols []string, n int) string {
 	sb.WriteString("INSERT INTO ")
 	sb.WriteString(tableName)
 	sb.WriteString("(")
-	sb.WriteString(strings.Join(cols, ","))
+	for i, col := range cols {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		writeQuotedIdentifier(&sb, col)
+	}
 	sb.WriteString(") VALUES ")
 	for r := 0; r < n; r++ {
 		if r > 0 {
@@ -182,6 +212,14 @@ func insertMultiSQLText(tableName string, cols []string, n int) string {
 		sb.WriteByte(')')
 	}
 	return sb.String()
+}
+
+// writeQuotedIdentifier 输出双引号包裹的 SQL 标识符，内部双引号按 SQL 规则
+// 转义为两个双引号。列名来自 GORM schema 的 DBNames，不含用户输入。
+func writeQuotedIdentifier(sb *strings.Builder, name string) {
+	sb.WriteByte('"')
+	sb.WriteString(strings.ReplaceAll(name, `"`, `""`))
+	sb.WriteByte('"')
 }
 
 // ensureStmtFor 惰性取得某张表的长期语句。Prepare 失败时上层在本类内
@@ -388,7 +426,10 @@ func securityEventSpecValues(v any, created time.Time) []any {
 	}
 	return []any{
 		createdAt, s.SiteID, s.RequestID, s.ClientIP, s.Host, s.Path, s.QueryString,
-		s.Method, s.UserAgent, s.RuleID, s.RuleIDStr, s.Phase, s.Action, s.Category, s.MatchDesc,
+		s.Method, s.UserAgent, s.RuleID, s.RuleIDStr,
+		s.RuleName, s.RuleDesc, s.MatchScore, s.MatchSnippet, s.MatchPart,
+		s.Severity, s.Source, s.CVSSScore, s.CWEType, s.References,
+		s.Phase, s.Action, s.Category, s.MatchDesc,
 		s.RequestHeaders, s.RequestBodyPreview, s.RequestBodyTruncated, s.RequestSize,
 		s.TLSVersion, s.TLSSNI, s.TLSALPN, s.TLSJA3, s.TLSJA3Hash, s.TLSJA4,
 		s.TLSCipherSuites, s.TLSExtensions, s.TLSCurves, s.TLSPointFormats, s.HeaderOrder,
@@ -419,7 +460,7 @@ func botScoreSpecValues(v any, created time.Time) []any {
 	return []any{
 		b.SiteID, b.RequestID, b.ClientIP, b.Host, b.Path, b.UserAgent,
 		b.TLSJA3Hash, b.TLSJA4, b.TLSVersion, b.TLSSNI, b.TLSALPN, b.HeaderOrder,
-		b.TotalScore, b.GeoIPScore, b.FingerprintScore, b.BehaviorScore, b.IPRepScore,
-		b.IsHighRisk, b.Action, b.Details, createdAt,
+		b.TotalScore, b.UAScore, b.GeoIPScore, b.FingerprintScore, b.BehaviorScore, b.IPRepScore,
+		b.IsHighRisk, b.Dangerous, b.DangerReasons, b.Action, b.Details, createdAt,
 	}
 }

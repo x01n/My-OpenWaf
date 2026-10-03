@@ -2,7 +2,12 @@
 
 import { useEffect, useState, useCallback } from "react"
 import { useTranslation } from "react-i18next"
-import { useForm, Controller, useWatch } from "react-hook-form"
+import {
+  useForm,
+  Controller,
+  useWatch,
+  type FieldErrors,
+} from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 import {
@@ -134,14 +139,37 @@ function parsePattern(pattern: string): ConditionGroups {
   return parsePatternToRows(pattern)
 }
 
+/**
+ * 数字输入字段的 schema。
+ *
+ * `register()` 未配置 `valueAsNumber` 时，react-hook-form 会把 DOM 的
+ * 字符串原样写回字段值（用户一旦编辑过输入框），而 zod v4 的
+ * `z.number()` 对字符串直接判 invalid_type，导致 `handleSubmit` 连
+ * `onSubmit` 都不会进入——表现为「点了提交没有任何反应」。这里用
+ * `z.preprocess` 先做归一化：空串/未填 → undefined（走 optional），
+ * 数字字符串 → Number，其余交给 `z.number()` 判定（NaN 与负数仍报错）。
+ *
+ * @param invalidMessage i18n 键，校验失败时的提示文案
+ */
+const optionalNumberField = (invalidMessage: string) =>
+  z.preprocess(
+    (value) => {
+      if (value === undefined || value === null || value === "") {
+        return undefined
+      }
+      return typeof value === "string" ? Number(value) : value
+    },
+    z.number({ message: invalidMessage }).min(0, invalidMessage).optional()
+  )
+
 const formSchema = z.object({
   type: z.enum(["allow", "block"]),
   name: z.string().min(1, "rules.nameRequired"),
-  windowSeconds: z.number().min(0, "rules.timeWindowInvalid").optional(),
-  requestCount: z.number().min(0, "rules.countInvalid").optional(),
+  windowSeconds: optionalNumberField("rules.timeWindowInvalid"),
+  requestCount: optionalNumberField("rules.countInvalid"),
   action: z.string().min(1, "rules.actionRequired"),
   captchaType: z.enum(["", "math", "click", "slide", "rotate"]),
-  captchaMinutes: z.number().min(0, "rules.captchaMinutesInvalid").optional(),
+  captchaMinutes: optionalNumberField("rules.captchaMinutesInvalid"),
   enabled: z.boolean(),
 })
 
@@ -275,11 +303,13 @@ export function RuleFormDialog({
       reset({
         type: rule.action === "allow" ? "allow" : "block",
         name: rule.name || "",
-        windowSeconds: 60,
-        requestCount: 10,
+        // 空值保持 undefined，让输入框显示为空而不是伪造一个 0；
+        // 后端把 0 解释为「未配置」（不启用频次限制 / 继承全局验证码有效期）。
+        windowSeconds: rule.window_seconds || undefined,
+        requestCount: rule.request_count || undefined,
         action: rule.action === "allow" ? "block" : rule.action,
         captchaType: rule.captcha_type ?? "",
-        captchaMinutes: 5,
+        captchaMinutes: rule.captcha_minutes || undefined,
         enabled: rule.enabled,
       })
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -303,24 +333,47 @@ export function RuleFormDialog({
       setConditionError("")
     }
   }, [open, rule, reset])
+
+  /**
+   * 校验失败时的统一收尾：展示原因并阻止提交。
+   *
+   * 条件组状态独立于 react-hook-form，其错误不会进入 `errors`，只在表单
+   * 底部的 `conditionError` 处渲染；弹窗内容可滚动时该提示容易落在可视区
+   * 之外。这里同时弹 toast，保证「点了提交没反应」不会再次出现。
+   *
+   * @param message 已本地化的失败原因
+   * @returns 恒为 false，供调用方直接 return
+   */
+  const rejectSubmit = (message: string) => {
+    setConditionError(message)
+    toast.error(message)
+    return false
+  }
+
+  /** `handleSubmit` 的第二个回调：zod 校验失败时不会进入 onSubmit，必须在此显式提示。 */
+  const onInvalid = (formErrors: FieldErrors<FormValues>) => {
+    const firstMessage = Object.values(formErrors).find(
+      (error) => typeof error?.message === "string"
+    )?.message
+    rejectSubmit(firstMessage ? t(firstMessage) : t("error.formInvalid"))
+  }
+
   /** 校验条件组至少有一个组且每行内容不为空，且每行能映射到后端合法 matcher。 */
   const validateConditions = async (): Promise<boolean> => {
     for (const group of conditionGroups) {
       for (const row of group) {
         if (row.uneditable) {
-          setConditionError(
+          return rejectSubmit(
             t(
               "rules.conditionUneditable",
               "该规则包含当前表单无法安全编辑的条件，请保留原规则或使用支持该条件的编辑方式。"
             )
           )
-          return false
         }
         if (!row.target || !row.method || !row.content.trim()) {
-          setConditionError(
+          return rejectSubmit(
             t("rules.conditionIncomplete", "请完善所有匹配条件")
           )
-          return false
         }
       }
     }
@@ -328,8 +381,7 @@ export function RuleFormDialog({
       conditionGroups.length === 0 ||
       conditionGroups.every((g) => g.length === 0)
     ) {
-      setConditionError(t("rules.conditionRequired", "至少需要一个匹配条件"))
-      return false
+      return rejectSubmit(t("rules.conditionRequired", "至少需要一个匹配条件"))
     }
     // 二次校验：所有 (target, method) 组合都必须能映射到后端合法 matcher。
     // 否则会被后端落成 neverMatcher，等同空规则。
@@ -338,8 +390,9 @@ export function RuleFormDialog({
         allowIP: typeValue === "allow",
       })
       if (!pattern) {
-        setConditionError(t("rules.conditionRequired", "至少需要一个匹配条件"))
-        return false
+        return rejectSubmit(
+          t("rules.conditionRequired", "至少需要一个匹配条件")
+        )
       }
       const result = (await ruleApi.validate({ pattern })) as {
         valid?: boolean
@@ -347,20 +400,18 @@ export function RuleFormDialog({
         errors?: string[]
       }
       if (!result.valid) {
-        setConditionError(
+        return rejectSubmit(
           result.errors?.join("；") ||
             result.message ||
             t("rules.conditionInvalid", "规则条件无法通过后端校验")
         )
-        return false
       }
     } catch (err) {
-      setConditionError(
+      return rejectSubmit(
         err instanceof Error
           ? `条件无法编译为合法规则: ${err.message}`
           : "条件无法编译为合法规则"
       )
-      return false
     }
     setConditionError("")
     return true
@@ -383,6 +434,19 @@ export function RuleFormDialog({
           values.type === "block" && values.action === "captcha_challenge"
             ? values.captchaType
             : "",
+        // 规则级执行参数。清空输入框时 values 为 undefined，这里统一折算成 0，
+        // 与后端的「0 = 未配置」契约一致（频次限制关闭 / 继承全局验证码有效期）。
+        // 更新时同样显式下发，管理员把参数清空才能真的取消限制。
+        window_seconds: values.windowSeconds ?? 0,
+        request_count: values.requestCount ?? 0,
+        // 与同为验证码专用的 captcha_type 保持同一口径：动作不是
+        // captcha_challenge 时归一为 0（继承全局）。否则把规则从
+        // captcha_challenge 改成 intercept 会留下一段不生效的陈旧有效期，
+        // 之后改回验证码动作时会静默复活一个没人记得设置过的值。
+        captcha_minutes:
+          values.type === "block" && values.action === "captcha_challenge"
+            ? (values.captchaMinutes ?? 0)
+            : 0,
       }
 
       if (!rule) {
@@ -422,7 +486,7 @@ export function RuleFormDialog({
         </DialogHeader>
 
         <form
-          onSubmit={handleSubmit(onSubmit)}
+          onSubmit={handleSubmit(onSubmit, onInvalid)}
           className="max-h-[70vh] space-y-5 overflow-y-auto pr-1"
         >
           {/* 白名单/黑名单 单选卡片 */}

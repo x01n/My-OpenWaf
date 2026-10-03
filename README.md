@@ -24,7 +24,9 @@
 
 ## 目录
 
+- [系统架构总览](#系统架构总览)
 - [核心特性](#核心特性)
+- [检测引擎模块](#检测引擎模块)
 - [传输与协议支持矩阵](#传输与协议支持矩阵)
 - [策略动作体系](#策略动作体系)
 - [效果评估](#效果评估)
@@ -36,6 +38,35 @@
 - [开发与测试](#开发与测试)
 - [贡献与许可证](#贡献与许可证)
 
+## 系统架构总览
+
+```mermaid
+flowchart LR
+    Client([客户端]) -->|HTTP/1.1 · h2 · h3/QUIC| Listener[数据面监听器]
+    Listener --> Site[站点匹配<br/>host + bind]
+    Site --> Gate[访问控制网关<br/>密码 / OAuth / 路径规则]
+    Gate --> Pipe[WAF 检测管道]
+    Pipe -->|放行| Proxy[上游代理转发]
+    Proxy --> Up[(上游服务池)]
+
+    AdminUI[管理面板] --> API[管理 API :9443]
+    API --> Snapshot[(不可变配置快照<br/>atomic.Pointer 热替换)]
+    Snapshot -.热重载.-> Site
+    Snapshot -.热重载.-> Pipe
+    Snapshot -.热重载.-> Listener
+
+    Pipe -->|安全事件| LogQueue[异步日志通道]
+    Proxy -->|访问日志| LogQueue
+    Pipe -->|drop 事件| LogQueue
+    LogQueue --> LogDB[(waf_logs.db)]
+    Snapshot --> MainDB[(waf.db)]
+    API --> MainDB
+```
+
+- **控制面**：管理 API + 内嵌面板，改动落库即触发快照重编译与原子替换，监听器按 bind 热协调，配置变更无需重启。
+- **数据面**：请求按「监听 bind + Host」匹配站点，通过访问控制网关后进入检测管道；放行流量经代理层转发至上游池。
+- **存储**：主库（配置/规则/证书）与日志库（访问/安全/drop/bot）分离，日志写入由单 goroutine `UnifiedWriter` 收敛，避免 SQLite 写锁竞争。
+
 ## 核心特性
 
 控制面与数据面解耦：站点、规则、证书等配置经 `snapshot` 编译为不可变运行态并通过 `atomic.Pointer` 热替换，监听器按 bind 热协调（含 HTTP/3），配置变更无需重启进程。
@@ -45,9 +76,14 @@
 <details>
 <summary>规则管道阶段顺序</summary>
 
-```
-IP 信誉检查 → 防重放 → ACL 访问控制 → Lua pre 插件 → OWASP 检测 → CVE 检测
-→ Bot 检测 → 浏览器签名校验 → 请求速率限制 → 签名规则 → 自定义规则
+```mermaid
+flowchart LR
+    A[IP 信誉] --> B[防重放] --> C[ACL] --> D[Lua pre] --> E[OWASP 检测] --> F[CVE 检测] --> G[Bot 检测] --> H[浏览器签名] --> I[请求限速] --> J[签名规则] --> K[自定义规则] --> L[代理转发]
+
+    E -.终止命中.-> X([拦截/质询/drop])
+    F -.终止命中.-> X
+    G -.终止命中.-> X
+    I -.限速命中.-> X
 ```
 
 说明：IP 信誉与防重放仅在其管理器启用/站点开启时参与；Lua pre 阶段仅当存在启用的 pre 脚本时挂载，`allow` 短路后续阶段；`observe`/`tag` 命中仅落日志、不阻断转发；IP 白名单与 ACL `allow` 会短路其后的阶段。
@@ -64,6 +100,37 @@ IP 信誉检查 → 防重放 → ACL 访问控制 → Lua pre 插件 → OWASP 
 - CVE 漏洞检测引擎：NVD 订阅同步、自动生成与审批 CVE 规则（`internal/waf/cve`、`internal/admin/detect`）
 - 威胁情报：定时拉取外部 IP-CIDR 情报源并同步内核（`internal/waf/threatintel`）
 - 请求走私防线：协议层 CL+TE 拒绝语义 + 数据面原始字节嗅探（详见[传输与协议支持矩阵](#请求走私防线)）
+
+## 检测引擎模块
+
+检测引擎是数据面 CPU 热点的核心，由「OWASP 分层检测」与「CVE 检测」两套前端组成，全部包级正则预编译一次、快照构建期索引化，热路径尽量做到零分配。
+
+```mermaid
+flowchart TB
+    subgraph OWASP[OWASP 分层检测 - internal/waf/owasp]
+        direction TB
+        S1[目标收集<br/>path / query / 解码值 / 头 / body] --> S2[归一化<br/>URL/HTML/实体/Unicode 解码 + 大小写折叠]
+        S2 --> S3{可疑内容闸门<br/>hasSuspiciousContent}
+        S3 -->|clean| S4[跳过整族检测]
+        S3 -->|可疑| S5[分类指示器掩码剪枝<br/>sqli / xss / cmd / webshell / revshell]
+        S5 -->|桶未置位| S4
+        S5 -->|桶命中| S6[正则电池<br/>逐规则 hint + 信号位门]
+        S6 --> S7[误报抑制 + 阈值裁决]
+    end
+    subgraph CVE[CVE 检测 - internal/waf/cve]
+        direction TB
+        C1[CVERequest 构建<br/>多视图 target 切分] --> C2[快路径<br/>base64 / 标点嗅探]
+        C2 --> C3[AC 自动机预扫<br/>matchMaskSlice]
+        C3 --> C4[颗粒化规则 gate<br/>hint / 复合 helper]
+        C4 --> C5[正则逐一裁决]
+    end
+    OWASP --> Result[命中打分]
+    CVE --> Result
+    Result -->|超阈值| Verdict[终止动作<br/>拦截 / 质询 / drop]
+    Result -->|低于阈值| Pass[继续管道]
+```
+
+**分层剪枝（性能关键）**：每族检测前先做「必备字节掩码」单遍扫描——输入串按字节查一次 `[256]uint32` 表收集位，字面量所在桶的必备字节未出现时整桶跳过，与旧逐条 `strings.Contains` 逐输入等价。已覆盖 `hasSQLiIndicator`、`hasXSSIndicator`、`hasCmdIndicator`、`hasWebshellIndicator`、`hasRevShellIndicator`、`hasSuspiciousKeywords` 及 `collectSQLiPatternSignals`（`internal/waf/owasp/owasp.go`/`owasp_extended.go`，锁测试 `mask_equiv_test.go`/`sqlisignals_equiv_test.go`/`cmdscan_equiv_test.go`）。
 
 ### 🔒 访问控制
 
@@ -103,8 +170,8 @@ IP 信誉检查 → 防重放 → ACL 访问控制 → Lua pre 插件 → OWASP 
 
 ### 📊 可观测性
 
-- 安全事件、访问日志、drop 事件、bot 评分的统一异步写库：`UnifiedWriter` 单 goroutine 刷新消除 SQLite 锁竞争（批阈值 64，`internal/observability`）
-- `WriteQueue` 合并写入；日志库独立 SQLite 文件与专属 PRAGMA，主库/日志库互不争锁（`internal/core/database`）
+- 安全事件、访问日志、drop 事件、bot 评分的统一异步写库：`UnifiedWriter` 单 goroutine 刷新消除 SQLite 锁竞争（批阈值 256，`internal/observability`）
+- `WriteQueue` 合并写入（批阈值 64）；日志库独立 SQLite 文件与专属 PRAGMA，主库/日志库互不争锁（`internal/core/database`）
 - 分析面板聚合查询与 5s 查询缓存；访问日志采样开关 `MY_OPENWAF_ACCESSLOG_SAMPLING`（默认 1 = 全量）
 - 实时 WebSocket 推送（访问日志/安全事件/指纹汇总）、Prometheus 指标 `/metrics`、健康端点 `/healthz` `/readyz` `/status`
 - 审计日志对 `Authorization`、`Cookie`、API key 等敏感值做脱敏
@@ -193,12 +260,20 @@ TLS 指纹 JA3 / JA3Hash / JA4 在 h1 / h2 / h3 全量落库，`access_log`、`s
 | SafeLine（严格模式） | 33,669 | 76.17% | 0.22% | 99.38% |
 | **My-OpenWaf** | **33,877** | **100.00%**（658 / 658） | **0.00%**（0 / 33,219） | **100.00%** |
 
-| 指标 | CloudFlare（免费版） | ModSecurity（Level 1） | ModSecurity（Level 4） | SafeLine（平衡模式） | SafeLine（严格模式） | My-OpenWaf（同机实测） |
-| --- | --- | --- | --- | --- | --- | --- |
-| 成功样本 | 33,350 | 33,669 | 33,669 | 33,669 | 33,669 | 33,877 |
-| 错误样本 | 319 | 0 | 0 | 0 | 0 | 0 |
-| 平均耗时 | 288.96 ms | 31.15 ms | 28.89 ms | 70.05 ms | 64.34 ms | HTTP 9.00 ms / HTTPS 16.9 ms* |
-| 平均 QPS（rps） | 未公布 | 未公布 | 未公布 | 未公布 | 未公布 | **HTTP 4,099.15 / HTTPS 2,001–7,701*** |
+### 📈 性能（同机实测）
+
+以下数据取自同一台 8 核机器，上游为本地 mock（固定 1 KB 响应，消除上游网络瓶颈），`blazehttp -c 320` 压测 33,877 样本；同机负载在 3–16 之间波动，因此按窗口给出区间而不是单点数字。同负载段实测反例注记：压测机上负载是整个区间里 QPS 的第一变量——同一二进制（`r7-missionfix`）在同窗口交替场中 load 7.92 → 17.50 时 QPS 3097.97 → 2100.50（-32%，零代码变化，CSV 原始行 `/tmp/r7-rps-matrix.r722.csv`）；load 20+ 的场次QPS 可滑至 900–1350，而 load ≈5.5 时 1600、load ≈9.6 时 1910。读单点数字前先看场次记录里的 `load_at_start` 列，否则会把负载波动误读成性能退化：
+
+| 口径 | 数值 | 说明 |
+| --- | --- | --- |
+| 检出率 | 100.00%（658 / 658） | 每场全样本 |
+| 误报率 | 0.00%（0 / 33,219） | 每场全样本 |
+| 准确率 | 100.00% | 每场全样本 |
+| 错误 | 0 | 每场全样本 |
+| QPS 区间（Mock 上游） | 1,100 – 3,480 rps | 37 场交错基线/优化场全集，stdev 约 ±20–30% |
+| QPS（负载 < 3 的稳定窗口中位） | 2,100 – 2,450 rps | 多场交替中位，方向一致 |
+| 平均耗时 | 86 – 130 ms（与 QPS 反相关） | 全样本 |
+| 引擎 clean 微基准 | 1,346 ns/op（掩码化后，0 分配） | 比 HEAD 基线 1,637 ns/op 降低 17.8% |
 
 ## 快速开始
 
@@ -217,7 +292,7 @@ docker run -d \
 
 ### 🔨 从源码构建
 
-**前置要求**：Go 1.26.0+、Bun 1.3.14+、GCC（QuickJS CGO 后端）；Rust 工具链可选（仅重建 WASM PoW 时需要）
+**前置要求**：Go 1.27.1+、Bun 1.3.14+、GCC（QuickJS CGO 后端）；Rust 工具链可选（仅重建 WASM PoW 时需要）
 
 ```bash
 ./scripts/build.sh
@@ -315,12 +390,12 @@ wasm-pow-solver/         PoW 质询求解器（Rust -> WASM）
 
 | 层级 | 技术 |
 | --- | --- |
-| 后端语言 | Go 1.26.0（`go.mod`） |
+| 后端语言 | Go 1.27.1（`go.mod`） |
 | Web 框架 | [Hertz](https://github.com/cloudwego/hertz) v0.10.6 |
-| HTTP/3 | [quic-go](https://github.com/quic-go/quic-go) v0.62.0 |
+| HTTP/3 | [quic-go](https://github.com/quic-go/quic-go) v0.63.0 |
 | TLS 指纹 | [uTLS](https://github.com/refraction-networking/utls) v1.8.2 + [go-ja4](https://github.com/wu238121-a11y/go-ja4) v1.0.0 |
 | 数据库 | SQLite（纯 Go `glebarez/sqlite` v1.11.0）/ MySQL / PostgreSQL（GORM v1.31.2） |
-| 缓存 | [Ristretto](https://github.com/dgraph-io/ristretto) v0.2.0 / [go-redis](https://github.com/redis/go-redis) v9.22.0 |
+| 缓存 | [Ristretto](https://github.com/dgraph-io/ristretto) v0.2.0 / [rueidis](https://github.com/redis/rueidis) v1.0.78 |
 | 认证 | JWT（golang-jwt v5.3.1）+ bcrypt |
 | 插件 | [gopher-lua](https://github.com/yuin/gopher-lua) v1.1.2 + [quickjs-go](https://github.com/buke/quickjs-go) v0.7.7 |
 | GeoIP | [maxminddb-golang](https://github.com/oschwald/maxminddb-golang) v1.13.1 |

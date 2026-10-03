@@ -26,6 +26,8 @@ type CompiledRule struct {
 	StatusCode  int    // custom HTTP status code (0 = default)
 	RedirectTo  string // URL for redirect action
 	CaptchaType string // Rule-level CAPTCHA type; empty inherits global protection config.
+	// CaptchaMinutes 是规则级验证码通过有效期（分钟）；0 继承全局 captcha_pass_ttl。
+	CaptchaMinutes int
 }
 
 // SiteRuntime holds resolved site for routing.
@@ -75,6 +77,8 @@ type SiteRuntime struct {
 	// Anti-replay nonce protection
 	AntiReplayEnabled bool
 	AntiReplayAction  string // action when nonce invalid (default: "challenge")
+	// AntiReplayCookieMode 合并后的 Cookie 校验模式终值（standard / dual）。
+	AntiReplayCookieMode string
 
 	// Per-site protection overrides (merged from Site fields).
 	// nil = use global ProtectionConfig.

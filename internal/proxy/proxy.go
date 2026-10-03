@@ -95,16 +95,6 @@ var (
 	transportPool = make(map[transportKey]*http.Transport)
 )
 
-// SharedTransport returns a cached http.Transport for the given site runtime.
-// Transports are keyed by TLS config so connections are reused across requests.
-func SharedTransport(rt snapshot.SiteRuntime) *http.Transport {
-	base := ""
-	if len(rt.UpstreamURLs) > 0 {
-		base = rt.UpstreamURLs[0]
-	}
-	return SharedTransportForUpstream(rt, base)
-}
-
 // SharedTransportForUpstream keys the pool by the selected upstream scheme.
 func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Transport {
 	return sharedTransportForUpstreamClassified(rt, isHTTPSUpstreamBase(base))
@@ -909,27 +899,69 @@ func (fn identityResponseTransformerFunc) Transform(entity identityResponseEntit
 	return fn(entity)
 }
 
-// responseEntityTransformerForSite 在站点启用动态保护（HTML/JS 混淆或图片水印）
-// 或浏览器签名挂载时，返回响应实体变换器；否则返回 nil 以跳过变换。
-func responseEntityTransformerForSite(rt snapshot.SiteRuntime) identityResponseTransformer {
-	return responseEntityTransformerForSiteWithClient(rt, nil)
-}
-
 // responseEntityTransformerForSiteAndClient 在动态保护之外并入 response
-// 阶段 JS 插件；jsPluginResponseTransformerFor 内部直接从 hertz 请求上下文
-// 读取执行器与脚本，因此即便 rt 无任何动态能力也能仅返回 JS 变换器。
+// 阶段 JS 插件与 Lua post 脚本的响应改写；jsPluginResponseTransformerFor
+// 内部直接从 hertz 请求上下文读取执行器与脚本，因此即便 rt 无任何动态能力
+// 也能仅返回 JS 变换器。
 func responseEntityTransformerForSiteAndClient(rt snapshot.SiteRuntime, c *app.RequestContext, clientIP net.IP) identityResponseTransformer {
 	jsT := jsPluginResponseTransformerFor(c, rt)
+	luaRewrite := luaResponseRewriteTransformer(c, rt.Site.ID)
 	if t := responseEntityTransformerForSiteWithClient(rt, clientIP); t != nil {
 		return identityResponseTransformerFunc(func(entity identityResponseEntity) (identityResponseEntity, error) {
 			entity, err := t.Transform(entity)
-			if err != nil || jsT == nil {
+			if err != nil {
 				return entity, err
 			}
-			return jsT.Transform(entity)
+			return applyLuaResponseRewriteStage(c, rt.Site.ID, luaRewrite, jsT, entity)
 		})
 	}
-	return jsT
+	if jsT == nil && luaRewrite == nil {
+		return nil
+	}
+	return identityResponseTransformerFunc(func(entity identityResponseEntity) (identityResponseEntity, error) {
+		return applyLuaResponseRewriteStage(c, rt.Site.ID, luaRewrite, jsT, entity)
+	})
+}
+
+// luaResponseRewriteTransformer 报告该请求是否存在 Lua post 响应改写。
+func luaResponseRewriteTransformer(c *app.RequestContext, siteID uint) identityResponseTransformer {
+	if luaResponseRewriteLookup == nil {
+		return nil
+	}
+	if len(luaResponseRewriteLookup(c, siteID)) == 0 {
+		return nil
+	}
+	return identityResponseTransformerFunc(func(entity identityResponseEntity) (identityResponseEntity, error) {
+		return transformLuaResponseRewrites(c, siteID, entity), nil
+	})
+}
+
+// applyLuaResponseRewriteStage 组合 JS 变换与 Lua 改写。
+//
+// 顺序固定为 JS → Lua：Lua post 是策略链的最后一道，让它在自己算出的改写里
+// 看到 JS 脚本改写后的最终响应形态。两者都可能为 nil，任一存在都要生效。
+func applyLuaResponseRewriteStage(
+	c *app.RequestContext,
+	siteID uint,
+	luaRewrite identityResponseTransformer,
+	jsT identityResponseTransformer,
+	entity identityResponseEntity,
+) (identityResponseEntity, error) {
+	if jsT != nil {
+		next, err := jsT.Transform(entity)
+		if err != nil {
+			return next, err
+		}
+		entity = next
+	}
+	if luaRewrite != nil {
+		next, err := luaRewrite.Transform(entity)
+		if err != nil {
+			return next, err
+		}
+		entity = next
+	}
+	return entity, nil
 }
 
 func responseEntityTransformerForSiteWithClient(rt snapshot.SiteRuntime, clientIP net.IP) identityResponseTransformer {
@@ -1038,17 +1070,6 @@ func isHTMLContentType(contentType string) bool {
 		ct = strings.TrimSpace(ct[:i])
 	}
 	return ct == "text/html" || ct == "application/xhtml+xml"
-}
-
-func firstHostToken(raw string) string {
-	parts := strings.Split(raw, ",")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			return p
-		}
-	}
-	return strings.TrimSpace(raw)
 }
 
 func shouldTransformIdentityResponse(c *app.RequestContext, statusCode int) bool {
@@ -1883,10 +1904,6 @@ func ForwardBufferedResponse(c *app.RequestContext, resp *HTTPResponse) {
 	forwardBufferedResponseWithOptions(c, resp, DefaultResponseCompressionOptions(true), nil, nil)
 }
 
-func ForwardBufferedResponseForSite(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime) {
-	ForwardBufferedResponseForSiteWithClientIP(c, resp, rt, nil)
-}
-
 func ForwardBufferedResponseForSiteWithClientIP(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime, clientIP net.IP) {
 	forwardBufferedResponseWithOptions(c, resp, streamCompressionOptions(rt), responseEntityTransformerForSiteAndClient(rt, c, clientIP), clientIP)
 }
@@ -1993,28 +2010,6 @@ func forwardBufferedResponseWithOptions(c *app.RequestContext, resp *HTTPRespons
 	c.Response.SetBodyRaw(body)
 }
 
-// ForwardBufferedResponseAsStream writes a buffered response as a body stream
-// so Content-Length is omitted (chunked transfer).
-func ForwardBufferedResponseAsStream(c *app.RequestContext, resp *HTTPResponse) {
-	if resp == nil {
-		return
-	}
-	SetUpstreamHTTPProtocol(c, resp.UpstreamHTTPProtocol)
-	if resp.Header != nil {
-		copyResponseHeaders(c, resp.Header)
-	}
-	if resp.ContentType != "" && (resp.Header == nil || resp.Header.Get("Content-Type") == "") {
-		c.SetContentType(resp.ContentType)
-	}
-	c.Response.Header.Del("Content-Length")
-	c.Status(resp.StatusCode)
-	c.Response.SetBodyStream(bytes.NewReader(resp.Body), -1)
-}
-
-func ForwardBufferedResponseAsStreamForSite(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime) {
-	ForwardBufferedResponseAsStreamForSiteWithClientIP(c, resp, rt, nil)
-}
-
 func ForwardBufferedResponseAsStreamForSiteWithClientIP(c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime, clientIP net.IP) {
 	if resp == nil {
 		return
@@ -2081,10 +2076,6 @@ func deleteHeaderValuesFold(header http.Header, name string) {
 // WriteCachedResponse replays a cache.ResponseEntry, including stored headers when present.
 func WriteCachedResponse(c *app.RequestContext, method string, e *cache.ResponseEntry) {
 	writeCachedResponseWithOptions(c, method, e, DefaultResponseCompressionOptions(false), nil, nil)
-}
-
-func WriteCachedResponseForSite(c *app.RequestContext, method string, e *cache.ResponseEntry, rt snapshot.SiteRuntime) {
-	WriteCachedResponseForSiteWithClientIP(c, method, e, rt, nil)
 }
 
 func WriteCachedResponseForSiteWithClientIP(c *app.RequestContext, method string, e *cache.ResponseEntry, rt snapshot.SiteRuntime, clientIP net.IP) {
@@ -2339,12 +2330,6 @@ func EffectiveCacheTTL(configured int64, resp *HTTPResponse) int64 {
 	return effective
 }
 
-// SiteCacheTTL returns the configured TTL in seconds for the given rule match key (path with optional "?query").
-func SiteCacheTTL(rt snapshot.SiteRuntime, matchKey string) int64 {
-	ttl, _ := SiteCacheTTLDetails(rt, matchKey)
-	return ttl
-}
-
 // siteCacheFirstMatch returns the first matching cache rule's TTL, query-key
 // policy, and stale-if-error window. Case-insensitive matching never changes the
 // origin path stored in the cache key.
@@ -2494,11 +2479,6 @@ func buildSiteCacheStorageKeyFromParts(rt snapshot.SiteRuntime, c *app.RequestCo
 	}
 	hostKey := strings.TrimSpace(rt.Bind) + "|" + strconv.FormatUint(uint64(rt.Site.ID), 10) + "|" + snapshot.NormalizeMatchHost(string(c.Host()))
 	return cache.CacheKey(method, hostKey, p, q)
-}
-
-// SiteCacheKey builds the default cache key (full query, original path casing).
-func SiteCacheKey(rt snapshot.SiteRuntime, c *app.RequestContext) string {
-	return BuildSiteCacheStorageKey(rt, c, false, false)
 }
 
 // SiteCacheEligible reports whether this request may use the shared response

@@ -20,6 +20,27 @@ func Paginate(page, pageSize int) (offset, limit int) {
 	return (page - 1) * pageSize, pageSize
 }
 
+func SlicePage[T any](items []T, page, pageSize, def, cap int) []T {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = def
+	}
+	if pageSize > cap {
+		pageSize = cap
+	}
+	start := (page - 1) * pageSize
+	if start >= len(items) {
+		return []T{}
+	}
+	end := start + pageSize
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[start:end]
+}
+
 func ParseUint(s string) (uint, error) {
 	v, err := strconv.ParseUint(s, 10, 64)
 	return uint(v), err

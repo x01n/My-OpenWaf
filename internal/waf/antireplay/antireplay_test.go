@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 func newTestManager() *AntiReplayManager {
@@ -118,7 +118,15 @@ func TestSetRedisNilAndNonNil(t *testing.T) {
 	if m.redisClient() != nil {
 		t.Fatal("initial redis client should be nil")
 	}
-	fakeClient := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	fakeClient, ferr := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if fakeClient == nil && ferr != nil {
+		t.Fatalf("NewClient(err=%v)", ferr)
+	}
 	defer fakeClient.Close()
 	m.SetRedis(fakeClient)
 	if m.redisClient() == nil {
@@ -241,7 +249,20 @@ func (s *antiReplayRedisServer) handle(conn net.Conn) {
 		}
 		switch strings.ToUpper(args[0]) {
 		case "HELLO":
-			_, _ = io.WriteString(conn, "-ERR unknown command 'hello'\r\n")
+			_, _ = io.WriteString(conn, "%7\r\n"+
+				"$6\r\nserver\r\n$5\r\nredis\r\n"+
+				"$7\r\nversion\r\n$5\r\n7.2.5\r\n"+
+				"$5\r\nproto\r\n:3\r\n"+
+				"$2\r\nid\r\n:1\r\n"+
+				"$4\r\nmode\r\n$10\r\nstandalone\r\n"+
+				"$4\r\nrole\r\n$6\r\nmaster\r\n"+
+				"$7\r\nmodules\r\n$0\r\n\r\n")
+		case "CLUSTER":
+			_, _ = io.WriteString(conn, "-ERR CLUSTER is not supported by mock\r\n")
+		case "EVALSHA":
+			// 脚本 sha 未在 mock 中注册：回 NOSCRIPT 令 rueidis Lua.Exec
+			// 回退到 EVAL，与真实 Redis 的脚本缓存未命中行为一致。
+			_, _ = io.WriteString(conn, "-NOSCRIPT No matching script. Please use EVAL.\r\n")
 		case "EVAL":
 			response, closeAfter := s.eval(args)
 			if closeAfter {
@@ -343,11 +364,19 @@ func readAntiReplayRESPArgs(reader *bufio.Reader) ([]string, error) {
 	return args, nil
 }
 
-func newAntiReplayRedisClient(addr string) *goredis.Client {
-	return goredis.NewClient(&goredis.Options{
-		Addr:       addr,
-		MaxRetries: -1,
+func newAntiReplayRedisClient(t *testing.T, addr string) rueidis.Client {
+	t.Helper()
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{addr},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
 	})
+	if err != nil || client == nil {
+		t.Fatalf("NewClient(err=%v)", err)
+	}
+	t.Cleanup(client.Close)
+	return client
 }
 
 func assertRedisFailure(t *testing.T, m *AntiReplayManager, nonce string) {
@@ -382,8 +411,8 @@ func TestValidateAndRotateRedisMalformedResponsesFailClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := startAntiReplayRedisServer(t, tc.step)
 			t.Cleanup(srv.Close)
-			client := newAntiReplayRedisClient(srv.Addr())
-			t.Cleanup(func() { _ = client.Close() })
+			client := newAntiReplayRedisClient(t, srv.Addr())
+			t.Cleanup(client.Close)
 
 			m := NewAntiReplayManager("test-secret-key-for-unit-tests", client, 5*time.Minute)
 			assertRedisFailure(t, m, m.GenerateNonce("1.2.3.4"))
@@ -395,8 +424,8 @@ func TestValidateAndRotateRedisMalformedResponsesFailClosed(t *testing.T) {
 func TestValidateAndRotateRedisConsumedThenFailureDoesNotUseLocalLedger(t *testing.T) {
 	srv := startAntiReplayRedisServer(t, antiReplayRedisStep{}, antiReplayRedisStep{fail: true})
 	t.Cleanup(srv.Close)
-	client := newAntiReplayRedisClient(srv.Addr())
-	t.Cleanup(func() { _ = client.Close() })
+	client := newAntiReplayRedisClient(t, srv.Addr())
+	t.Cleanup(client.Close)
 
 	m := NewAntiReplayManager("test-secret-key-for-unit-tests", client, 5*time.Minute)
 	nonce := m.GenerateNonce("1.2.3.4")
@@ -411,8 +440,8 @@ func TestValidateAndRotateRedisConsumedThenFailureDoesNotUseLocalLedger(t *testi
 func TestValidateAndRotateRedisRecoversAfterInitialFailure(t *testing.T) {
 	srv := startAntiReplayRedisServer(t, antiReplayRedisStep{fail: true}, antiReplayRedisStep{})
 	t.Cleanup(srv.Close)
-	client := newAntiReplayRedisClient(srv.Addr())
-	t.Cleanup(func() { _ = client.Close() })
+	client := newAntiReplayRedisClient(t, srv.Addr())
+	t.Cleanup(client.Close)
 
 	m := NewAntiReplayManager("test-secret-key-for-unit-tests", client, 5*time.Minute)
 	nonce := m.GenerateNonce("1.2.3.4")
@@ -433,8 +462,8 @@ func TestValidateAndRotateRedisRecoversAfterInitialFailure(t *testing.T) {
 func TestValidateAndRotateRedisLostReplyAfterSetNX(t *testing.T) {
 	srv := startAntiReplayRedisServer(t, antiReplayRedisStep{loseReply: true}, antiReplayRedisStep{})
 	t.Cleanup(srv.Close)
-	client := newAntiReplayRedisClient(srv.Addr())
-	t.Cleanup(func() { _ = client.Close() })
+	client := newAntiReplayRedisClient(t, srv.Addr())
+	t.Cleanup(client.Close)
 
 	m := NewAntiReplayManager("test-secret-key-for-unit-tests", client, 5*time.Minute)
 	nonce := m.GenerateNonce("1.2.3.4")

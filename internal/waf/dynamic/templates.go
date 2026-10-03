@@ -36,7 +36,7 @@ func renderHTMLBootstrap(env envelope, cspNonce string) ([]byte, error) {
 		Ticket:    env.ticket,
 		Key:       env.key,
 		TTL:       env.ttl,
-		Bootstrap: template.JS(htmlBootstrapScript),
+		Bootstrap: template.JS(applyAssetURLs(htmlBootstrapScript)),
 	})
 	if err != nil {
 		return nil, err

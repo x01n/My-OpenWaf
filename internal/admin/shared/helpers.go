@@ -400,6 +400,51 @@ func SyncProtectionAntiReplayToSettings(settingsRepo *repository.SystemSettingsR
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
+// ValidateAntiReplayCookieMode 校验反重放 Cookie 校验模式并返回归一化值。
+// 合法值集合为 standard / dual；空串在 allowEmpty 时返回 ("", true) 表示
+// 「继承（站点 save 用）」语义，其余非法值返回 false。
+func ValidateAntiReplayCookieMode(raw string, allowEmpty bool) (string, bool) {
+	mode := strings.TrimSpace(raw)
+	switch mode {
+	case "":
+		return "", allowEmpty
+	case "standard", "dual":
+		return mode, true
+	default:
+		return "", false
+	}
+}
+
+// SyncAntiReplayCookieModeToProtection updates the global anti-replay cookie mode used by the runtime.
+func SyncAntiReplayCookieModeToProtection(settingsRepo *repository.SystemSettingsRepo, mode string) error {
+	cfg, err := LoadProtectionConfigStrict(settingsRepo)
+	if err != nil {
+		return err
+	}
+	if cfg.AntiReplayCookieMode == mode {
+		return nil
+	}
+	cfg.AntiReplayCookieMode = mode
+	return SaveProtectionConfig(settingsRepo, cfg)
+}
+
+// SyncProtectionAntiReplayCookieModeToSettings updates bot_settings.AntiReplayCookieMode from protection.
+func SyncProtectionAntiReplayCookieModeToSettings(settingsRepo *repository.SystemSettingsRepo, mode string) error {
+	current := BotSettingsResponse{ScoreThreshold: 60}
+	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
+		_ = json.Unmarshal([]byte(val), &current)
+	}
+	if current.AntiReplayCookieMode == mode {
+		return nil
+	}
+	current.AntiReplayCookieMode = mode
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
+	return settingsRepo.Set("bot_settings", string(data))
+}
+
 // SyncBrowserSignToProtection 将 bot_settings 中的浏览器签名配置同步到 protection，
 // 供引擎 phase 与 proxy HTML 注入读取。
 // SyncBrowserSignToProtection synchronizes browser signature settings from
@@ -539,6 +584,7 @@ type BotSettingsResponse struct {
 	JSObfuscation            bool     `json:"js_obfuscation"`
 	ImageWatermark           bool     `json:"image_watermark"`
 	AntiReplayEnabled        bool     `json:"anti_replay_enabled"`
+	AntiReplayCookieMode     string   `json:"anti_replay_cookie_mode"`
 	BrowserSignEnabled       bool     `json:"browser_sign_enabled"`
 	BrowserSignTTL           int      `json:"browser_sign_ttl"`
 	BrowserSignAction        string   `json:"browser_sign_action"`

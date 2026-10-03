@@ -874,13 +874,6 @@ func shouldTransformStreamingResponseBody(statusCode int, contentType string, co
 	return shouldTransformResponseMetadata(statusCode, contentType, contentEncoding, cacheControl, contentRange)
 }
 
-func shouldTransformStreamingResponseBodyBytes(statusCode int, contentType []byte, contentEncoding []byte, cacheControl []byte, contentRange []byte, bodySize int, minBytes int) bool {
-	if bodySize >= 0 {
-		return shouldTransformResponseBodyWithMinBytesBytes(statusCode, contentType, contentEncoding, cacheControl, contentRange, bodySize, minBytes)
-	}
-	return shouldTransformResponseMetadataBytes(statusCode, contentType, contentEncoding, cacheControl, contentRange)
-}
-
 func shouldTransformResponseMetadata(statusCode int, contentType string, contentEncoding string, cacheControl string, contentRange string) bool {
 	return shouldTransformResponseMetadataBytes(statusCode, []byte(contentType), []byte(contentEncoding), []byte(cacheControl), []byte(contentRange))
 }
@@ -1180,10 +1173,6 @@ func varyContainsAcceptEncodingBytes(raw []byte) bool {
 		}
 	}
 	return false
-}
-
-func normalizedContentEncoding(raw string) string {
-	return normalizedContentEncodingBytes([]byte(raw))
 }
 
 var (

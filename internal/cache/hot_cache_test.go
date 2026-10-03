@@ -4,13 +4,14 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
-func newSilentHotCache(client *goredis.Client) *HotCache {
+func newSilentHotCache(client rueidis.Client) *HotCache {
 	return NewHotCache(client, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -52,21 +53,24 @@ func TestHotCacheNilReceiverSafe(t *testing.T) {
 	}
 }
 
-// TestHotCacheRedisFailureCountsAsErrorNotMiss 是核心回归：
-// Redis 故障必须计入 errs 而非 misses。若两者混淆，Redis 整体宕机时
-// 命中率会显示为 0%，看起来像缓存策略失效而非依赖不可用，误导排障方向。
-//
-// 用一个指向无人监听端口的客户端制造确定性的连接失败。
-func TestHotCacheRedisFailureCountsAsErrorNotMiss(t *testing.T) {
-	// 127.0.0.1:1 通常无监听，拨号立即失败。
-	client := goredis.NewClient(&goredis.Options{
-		Addr:        "127.0.0.1:1",
-		DialTimeout: 200_000_000, // 200ms，避免拖慢测试
-		MaxRetries:  -1,          // 关闭重试，让失败尽快返回
+func newUnreachableRedisClient(t *testing.T) rueidis.Client {
+	t.Helper()
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:  []string{"127.0.0.1:1"},
+		Dialer:       net.Dialer{Timeout: 200 * time.Millisecond},
+		DisableRetry: true,
+		DisableCache: true,
 	})
-	defer client.Close()
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	return client
+}
 
-	h := newSilentHotCache(client)
+func TestHotCacheRedisFailureCountsAsErrorNotMiss(t *testing.T) {
+	_, h := newHotCacheFailureClient(t)
+
 	var dest map[string]string
 	if h.Get("some-key", &dest) {
 		t.Fatal("Redis 不可达时 Get 应返回 false")
@@ -86,14 +90,7 @@ func TestHotCacheRedisFailureCountsAsErrorNotMiss(t *testing.T) {
 
 // TestHotCacheGetBytesFailureCountsAsError 验证 GetBytes 与 Get 口径一致。
 func TestHotCacheGetBytesFailureCountsAsError(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{
-		Addr:        "127.0.0.1:1",
-		DialTimeout: 200_000_000,
-		MaxRetries:  -1,
-	})
-	defer client.Close()
-
-	h := newSilentHotCache(client)
+	_, h := newHotCacheFailureClient(t)
 	if h.GetBytes("k") != nil {
 		t.Fatal("Redis 不可达时 GetBytes 应返回 nil")
 	}
@@ -105,17 +102,8 @@ func TestHotCacheGetBytesFailureCountsAsError(t *testing.T) {
 	}
 }
 
-// TestHotCacheErrorLogThrottled 验证故障期间不会每次都打日志。
-// 连续多次失败后 errLogging 应保持置位，故障计数仍逐次累加。
 func TestHotCacheErrorLogThrottled(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{
-		Addr:        "127.0.0.1:1",
-		DialTimeout: 200_000_000,
-		MaxRetries:  -1,
-	})
-	defer client.Close()
-
-	h := newSilentHotCache(client)
+	_, h := newHotCacheFailureClient(t)
 	var dest string
 	h.Get("k", &dest)
 	if !h.errLogging.Load() {
@@ -142,16 +130,17 @@ func TestHotCacheErrorLogThrottled(t *testing.T) {
 }
 
 func TestHotCacheIgnoresResultsFromReplacedClient(t *testing.T) {
-	newClient := func(t *testing.T, addr string) *goredis.Client {
+	// 指针身份由 RESP3 mock 客户端承担；这两个客户端不发起任何命令，
+	// 只作 recordReadErr/noteHealthy 的当前客户端比对锚点。
+	newClient := func(t *testing.T) rueidis.Client {
 		t.Helper()
-		client := goredis.NewClient(&goredis.Options{Addr: addr})
-		t.Cleanup(func() { _ = client.Close() })
-		return client
+		mock := startKVMiniRedis(t)
+		return newKVTestClient(t, mock.ln.Addr().String())
 	}
 
 	t.Run("stale failure does not alter counters or breaker", func(t *testing.T) {
-		oldClient := newClient(t, "127.0.0.1:1")
-		replacement := newClient(t, "127.0.0.1:2")
+		oldClient := newClient(t)
+		replacement := newClient(t)
 		h := newSilentHotCache(oldClient)
 		started := make(chan struct{})
 		release := make(chan struct{})
@@ -161,7 +150,7 @@ func TestHotCacheIgnoresResultsFromReplacedClient(t *testing.T) {
 			close(started)
 			<-release
 			h.recordReadErr(oldClient, "old-error", errors.New("stale redis failure"))
-			h.recordReadErr(oldClient, "old-miss", goredis.Nil)
+			h.recordReadErr(oldClient, "old-miss", rueidis.Nil)
 			close(done)
 		}()
 
@@ -182,8 +171,8 @@ func TestHotCacheIgnoresResultsFromReplacedClient(t *testing.T) {
 	})
 
 	t.Run("stale success does not heal replacement failure or add hits", func(t *testing.T) {
-		oldClient := newClient(t, "127.0.0.1:3")
-		replacement := newClient(t, "127.0.0.1:4")
+		oldClient := newClient(t)
+		replacement := newClient(t)
 		h := newSilentHotCache(oldClient)
 		started := make(chan struct{})
 		release := make(chan struct{})

@@ -45,7 +45,6 @@ type jsPluginRequest struct {
 	FailureMode string          `json:"failure_mode"`
 }
 
-// jsPluginStatsItem 是管理端 JS 运行时统计的稳定响应结构。
 type jsPluginStatsItem struct {
 	ID       uint    `json:"id"`
 	Name     string  `json:"name"`
@@ -54,6 +53,11 @@ type jsPluginStatsItem struct {
 	Failures int64   `json:"failures"`
 	Timeouts int64   `json:"timeouts"`
 	AvgMS    float64 `json:"avg_ms"`
+
+	LastError      string `json:"last_error,omitempty"`
+	LastErrorStage string `json:"last_error_stage,omitempty"`
+	LastErrorAt    string `json:"last_error_at,omitempty"`
+	LastErrorCount int64  `json:"last_error_count,omitempty"`
 }
 
 // jsPluginRuntimeStatus 是 JavaScript 运行时只读状态，不包含脚本源码。
@@ -653,7 +657,7 @@ func GetJSPluginStats(holder *snapshotpkg.Holder) app.HandlerFunc {
 				continue
 			}
 			runs, failures, timeouts, average := script.Stats()
-			items = append(items, jsPluginStatsItem{
+			item := jsPluginStatsItem{
 				ID:       script.ID(),
 				Name:     script.Name(),
 				Stage:    script.Stage(),
@@ -661,7 +665,14 @@ func GetJSPluginStats(holder *snapshotpkg.Holder) app.HandlerFunc {
 				Failures: failures,
 				Timeouts: timeouts,
 				AvgMS:    float64(average.Nanoseconds()) / 1e6,
-			})
+			}
+			if fault := script.LastFault(); fault != nil {
+				item.LastError = fault.Message
+				item.LastErrorStage = fault.Stage
+				item.LastErrorAt = fault.At.UTC().Format(time.RFC3339)
+				item.LastErrorCount = fault.Count
+			}
+			items = append(items, item)
 		}
 		c.JSON(200, map[string]any{"items": items, "total": len(items)})
 	}

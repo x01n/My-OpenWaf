@@ -11,16 +11,9 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
-// 本文件是夜间性能优化（night-perf-db-cache）的专用基准，只追加不修改历史。
-// 每个 case 都测量“每调用”固定开销：锁获取、计数、哈希/分配等行为可省的路径。
-
-// ---------- QueryCache ----------
-
-// BenchmarkNightQueryCacheGetHit 单 goroutine 命中路径：RLock + 过期判断 +
-// hits 计数。它是控制面列表/计数查询的高频路径。
 func BenchmarkNightQueryCacheGetHit(b *testing.B) {
 	qc := NewQueryCache(time.Hour)
 	defer qc.Close()
@@ -234,7 +227,7 @@ func BenchmarkNightCacheKeyPooled(b *testing.B) {
 
 // ---------- 真实 Redis 基准（基准专用实例 6389，db5） ----------
 //
-// echo 类伪服务端在握手后行为上无法与 go-redis 完整对齐（该客户端依赖 HELLO
+// echo 类伪服务端在握手后行为上无法与真实客户端完整对齐（依赖 HELLO
 // 应答内容重新协商并放弃僵死连接），这证实了伪 conn 的强度与协议深度不够。
 // HotCache/RedisKV 的真实基线改跑本机空 db5 的 redis-server 8.10.1
 // （仅写入 "bench:" 前缀键，不影响任何既有数据）。
@@ -248,23 +241,28 @@ const (
 	nightRealKVIncrKey = "bench:kv_incr:v1"
 )
 
-func nightRealClient() *goredis.Client {
-	return goredis.NewClient(&goredis.Options{
-		Addr:     nightRealRedisAddr,
-		DB:       nightRealRedisDB,
-		PoolSize: 1,
+func nightRealClient() rueidis.Client {
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:  []string{nightRealRedisAddr},
+		SelectDB:     nightRealRedisDB,
+		DisableCache: true,
 	})
+	if err != nil {
+		panic(err)
+	}
+	return client
 }
 
 // nightSeed 向基准实例写入固定热键，使命中路径有真实的网络+协议往返。
 // 注意：HotCache.Get 实际读取 "openwaf:hot:" 前缀、RedisKV 读取 "openwaf:"
 // 前缀，seed 必须按服务端视角的完整键写入。
-func nightSeed(client *goredis.Client) {
+func nightSeed(client rueidis.Client) {
 	ctx := context.Background()
-	client.Set(ctx, "openwaf:hot:"+nightRealListKey, `{"items":[{"id":1,"action":"x","path":"/a"},{"id":2,"action":"y","path":"/b"}],"total":2}`, time.Hour)
-	client.Set(ctx, "openwaf:hot:"+nightRealGetKey, `{"a":"b"}`, time.Hour)
-	client.Set(ctx, "openwaf:"+nightRealKVGetKey, []byte("kv-value"), time.Hour)
-	client.Del(ctx, "openwaf:"+nightRealKVIncrKey)
+	b := client.B()
+	client.Do(ctx, b.Set().Key("openwaf:hot:"+nightRealListKey).Value(`{"items":[{"id":1,"action":"x","path":"/a"},{"id":2,"action":"y","path":"/b"}],"total":2}`).Px(time.Hour).Build())
+	client.Do(ctx, b.Set().Key("openwaf:hot:"+nightRealGetKey).Value(`{"a":"b"}`).Px(time.Hour).Build())
+	client.Do(ctx, b.Set().Key("openwaf:"+nightRealKVGetKey).Value("kv-value").Px(time.Hour).Build())
+	client.Do(ctx, b.Del().Key("openwaf:"+nightRealKVIncrKey).Build())
 }
 
 // BenchmarkNightHotCacheGetReal 真实 Redis 上的 HotCache.Get 命中成本
@@ -336,7 +334,7 @@ func BenchmarkNightHotCacheSetListReal(b *testing.B) {
 	}
 }
 
-// BenchmarkNightHotCacheRawGetReal 真实 Redis 上的裸 go-redis Get 对照：
+// BenchmarkNightHotCacheRawGetReal 真实 Redis 上的裸 GET 对照：
 // 用于分离包装层成本（Available、锁、超时 1s、noteHealthy、计数）。
 // 键与 HotCache.Get 的服务端视角一致（即含 "openwaf:hot:" 前缀）。
 func BenchmarkNightHotCacheRawGetReal(b *testing.B) {
@@ -344,10 +342,11 @@ func BenchmarkNightHotCacheRawGetReal(b *testing.B) {
 	defer client.Close()
 	nightSeed(client)
 	ctx := context.Background()
+	cmd := client.B().Get().Key("openwaf:hot:" + nightRealGetKey).Build()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := client.Get(ctx, "openwaf:hot:"+nightRealGetKey).Bytes(); err != nil {
+		if _, err := client.Do(ctx, cmd).AsBytes(); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -409,7 +408,7 @@ func BenchmarkNightRedisKVIncrRealParallel(b *testing.B) {
 	})
 }
 
-// ---------- 与 go-redis 无关的本地开销 ----------
+// ---------- 与 Redis 无关的本地开销 ----------
 
 // nightUnused 静默规避静态检查工具对某些 import 的告警路径保留。
 var nightUnused = struct {

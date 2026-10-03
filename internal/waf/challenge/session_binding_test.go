@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 func TestCaptchaSessionBindingRejectsOtherSiteWithoutConsumption(t *testing.T) {
@@ -120,7 +120,16 @@ func (s *challengeBindingRedisServer) handle(conn net.Conn) {
 
 		switch strings.ToUpper(args[0]) {
 		case "HELLO":
-			_, _ = io.WriteString(conn, "-ERR unknown command 'hello'\r\n")
+			_, _ = io.WriteString(conn, "%7\r\n"+
+				"$6\r\nserver\r\n$5\r\nredis\r\n"+
+				"$7\r\nversion\r\n$5\r\n7.2.5\r\n"+
+				"$5\r\nproto\r\n:3\r\n"+
+				"$2\r\nid\r\n:1\r\n"+
+				"$4\r\nmode\r\n$10\r\nstandalone\r\n"+
+				"$4\r\nrole\r\n$6\r\nmaster\r\n"+
+				"$7\r\nmodules\r\n$0\r\n\r\n")
+		case "CLUSTER":
+			_, _ = io.WriteString(conn, "-ERR CLUSTER is not supported by mock\r\n")
 		case "SET":
 			if len(args) < 3 {
 				_, _ = io.WriteString(conn, "-ERR wrong number of arguments for 'set' command\r\n")
@@ -131,6 +140,7 @@ func (s *challengeBindingRedisServer) handle(conn net.Conn) {
 			s.mu.Unlock()
 			_, _ = io.WriteString(conn, "+OK\r\n")
 		case "EVALSHA":
+			// 脚本 sha 未注册：回 NOSCRIPT 令 rueidis Lua.Exec 回退 EVAL。
 			_, _ = io.WriteString(conn, "-NOSCRIPT No matching script. Please use EVAL.\r\n")
 		case "EVAL":
 			result, err := s.takeBound(args)
@@ -226,8 +236,16 @@ func TestCaptchaRedisBindingRejectsMismatchAndConsumesOnce(t *testing.T) {
 	srv := startChallengeBindingRedisServer(t)
 	t.Cleanup(srv.Close)
 
-	client := goredis.NewClient(&goredis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{srv.Addr()},
+		DisableCache:      true,
+		ForceSingleClient: true,
+		DisableRetry:      true,
+	})
+	if err != nil || client == nil {
+		t.Fatalf("NewClient(err=%v)", err)
+	}
+	t.Cleanup(client.Close)
 
 	manager := NewCaptchaManager(nil, 0)
 	manager.SetRedis(client)

@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"My-OpenWaf/internal/core/score"
 )
 
 // hasSSRFIndicator returns true when the string contains URL schemes or known
@@ -109,23 +111,27 @@ func shouldScanSSRFPattern(s string, p owaspPattern) bool {
 }
 
 func checkSSRF(s string, threshold int) (OWASPHit, bool) {
-	if !hasSSRFIndicator(s) {
+	if !hasACIndicator(famSSRF, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则。
+	// SSRF 无独立抑制器（isSSRFFalsePositive 由调用方执行），此处只做归因替换。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range ssrfPatterns {
 		if !shouldScanSSRFPattern(s, p) {
 			continue
 		}
-		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
-			}
-			if total >= threshold {
-				return OWASPHit{Category: CatSSRF, RuleID: best, Score: total, Desc: "SSRF 特征"}, true
-			}
+		if !p.re.MatchString(s) {
+			continue
+		}
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
+		}
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatSSRF, RuleID: id, Score: total, Desc: "SSRF 特征"}, true
 		}
 	}
 	return OWASPHit{}, false
@@ -136,10 +142,17 @@ var cmdInjectPatterns = []owaspPattern{
 	// Using (?:[\s;|&`]|$) instead of \b prevents matching URL key=value params:
 	// "a=1;id=123" → ";id" followed by "=" → no match.
 	// "host=x;id" at end of string → matches via $.
-	{regexp.MustCompile("[;|&]\\s*(ls|cat|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|echo|rm|chmod|chown|ping|touch|kill|python|perl|ruby|php|node|java|nslookup|dig|ssh|tcpdump|printf|netstat)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:001", ""},
-	// Backtick command substitution — require a known shell command inside (avoids Markdown FP)
-	{regexp.MustCompile("`[^`]*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)[^`]*`"), 3, "owasp:cmd:002", ""},
-	// $() with shell commands inside (excludes jQuery selectors)
+	{regexp.MustCompile("[;|&]\\s*(ls|cat|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|echo|rm|chmod|chown|ping|touch|kill|python|perl|ruby|php|node|java|nslookup|dig|ssh|tcpdump|printf|netstat|getent|set)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:001", ""},
+	// Backtick command substitution — require a known shell command in command
+	// position inside the backticks (avoids Markdown/prose FP).
+	// 判据由「体内任意位置出现命令词」收紧为「命令词位于命令位置」，两条通用约束：
+	//   1) 词边界 \b —— 命令词后必须是非单词字符，避免自然语言词内命中（typing→ping）；
+	//   2) 命令词位于体内开头（至多 4 个空白前缀）—— shell 命令替换的执行语义要求
+	//      命令词处于命令位置；命令名前的变量赋值/重定向等前缀形态由 cmd:010 等规则覆盖。
+	// 体内长度上界 200 字节：真实命令替换是可执行命令 + 参数，合理长度远小于此；
+	// 无上界时任意长的 Markdown 反引号片段/随机数据只要含命令词子串即命中。
+	{regexp.MustCompile("`\\s{0,4}(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)\\b[^`]{0,200}`"), 3, "owasp:cmd:002", ""},
+	// 参数上下文子命令替换：$() 形态。
 	{regexp.MustCompile(`\$\([^)]*\b(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|dd|nslookup|dig|ping|sleep|kill|find|grep|awk|sed|head|tail|wc|sort|xxd|od)\b`), 4, "owasp:cmd:003", ""},
 	// Redirections that typically indicate injection
 	{regexp.MustCompile(`(>|>>)\s*/(etc|tmp|var|root|home)/`), 4, "owasp:cmd:004", ">"},
@@ -150,7 +163,7 @@ var cmdInjectPatterns = []owaspPattern{
 	// Common discovery commands followed by semicolon
 	{regexp.MustCompile(`\b(id|uname|whoami|hostname|ifconfig|ipconfig)\s*;`), 3, "owasp:cmd:007", ""},
 	// Pipe to shell commands — same (?:[\s;|&`]|$) fix to avoid URL-param false positives
-	{regexp.MustCompile("\\|+\\s*(cat|ls|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|ping|nslookup|dig|echo|head|tail|more|less|find|grep|awk|sed|base64|python|perl|ruby|php|node|java|ssh|tcpdump|printf|netstat)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:008", ""},
+	{regexp.MustCompile("\\|+\\s*(cat|ls|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|ping|nslookup|dig|echo|head|tail|more|less|find|grep|awk|sed|base64|python|perl|ruby|php|node|java|ssh|tcpdump|printf|netstat|getent|set)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:008", ""},
 	// ${IFS} space bypass (common in filter evasion)
 	{regexp.MustCompile(`\$\{?\s*ifs\s*\}?`), 4, "owasp:cmd:009", "ifs"},
 	// Env variable prefix + command execution: VAR=val command
@@ -211,11 +224,26 @@ var cmdInjectPatterns = []owaspPattern{
 	// PowerShell/cmd 显式启动器：cmd /c、powershell -enc、pwsh -e（Windows 向量，Linux 反代场景同样值得拦截）。
 	// 前缀含 '='：URL 参数值形态 key=powershell -enc ... 覆盖。
 	{regexp.MustCompile("(?i)(?:^|[\\s;|&`=])(?:cmd\\.exe|powershell(?:\\.exe)?|pwsh)\\s+(?:/c|-c|-enc|-encod|-e|/k)"), 5, "owasp:cmd:034", ""},
+	// \bset\s+/a 形态：cmd 批处理 set /a 算术形态（词头含空格的 shell 命令
+	// truncate 判法无法带空格匹配命令词，故 battery 独立补记）。
+	// score 5 单命中；反向样例 set alone、Let's set…、set /x 均不误报。
+	{regexp.MustCompile(`\bset\s+/a`), 5, "owasp:cmd:035", "set /a"},
+	// PHP 变量函数调用 ${@func(...)}：`${` + `@` + 函数名 + 实参括号。
+	// 与 cmd:003 的 $() 形态互补（gotestwaf cmd=${@print(md5(31337))} 正是此
+	// 语法）。hint `${@` 作为前置剪枝；`${@` 在自然文本与常见模板
+	// （EL/OGNL/JS 模板串）中都不是合法表达式前缀，误报面可忽略。
+	{regexp.MustCompile(`\$\{\s*@\s*\w+\s*\(`), 5, "owasp:cmd:036", "${@"},
 }
 
 func shouldScanCmdPattern(s string, p owaspPattern) bool {
 	if p.hint != "" && !strings.Contains(s, p.hint) {
 		return false
+	}
+	if strings.IndexByte(s, '`') < 0 {
+		switch p.id {
+		case "owasp:cmd:002", "owasp:cmd:018", "owasp:cmd:023", "owasp:cmd:024":
+			return false
+		}
 	}
 	switch p.id {
 	case "owasp:cmd:001":
@@ -246,8 +274,13 @@ func shouldScanCmdPattern(s string, p owaspPattern) bool {
 		return strings.Contains(s, "$'")
 	case "owasp:cmd:016":
 		return strings.ContainsAny(s, "\r\n")
-	case "owasp:cmd:018", "owasp:cmd:023":
-		return strings.Contains(s, "``")
+	case "owasp:cmd:018":
+		return hasEmptyBacktickSplit(s)
+	case "owasp:cmd:023":
+		// 收紧为「去掉空反引号对后构成命令词」（拆字绕过形态）。原前置
+		// hasEmptyBacktickSplit 与正则 \b\w+``\w+\b 等价（都只要求存在一对空
+		// 反引号），对两侧内容无任何要求，随机数据凑出 x``y 即命中。
+		return backtickPairCommandWord(s)
 	case "owasp:cmd:019":
 		return strings.Contains(s, "touch") || strings.Contains(s, "rm")
 	case "owasp:cmd:020":
@@ -262,10 +295,22 @@ func shouldScanCmdPattern(s string, p owaspPattern) bool {
 		return strings.Contains(s, "export")
 	case "owasp:cmd:028":
 		return strings.Contains(s, "env -i")
-	case "owasp:cmd:029", "owasp:cmd:030", "owasp:cmd:033", "owasp:cmd:034":
-		// 高成本居中规则不设 hint 字面量（hint 为空时恒等通过），
-		// 交由 hasCmdIndicator 入口指示子做首层分派。
-		return true
+	case "owasp:cmd:029":
+		return hasScanIndexOfSplits(s)
+	case "owasp:cmd:030":
+		return strings.Contains(s, "curl") || strings.Contains(s, "wget")
+	case "owasp:cmd:033":
+		if !containsAnyCmdWord(s, "xargs", "nohup", "timeout", "setsid", "stdbuf") {
+			return false
+		}
+		return containsAnyCmdWord(s, "sh", "bash", "zsh", "dash", "python", "perl", "ruby", "php", "nc")
+	case "owasp:cmd:034":
+		return containsASCIIFoldAny(s,
+			"cmd.exe", "powershell.exe", "powershell", "pwsh")
+	case "owasp:cmd:035":
+		return strings.Contains(s, "set") && strings.Contains(s, "/a")
+	case "owasp:cmd:036":
+		return strings.Contains(s, "${@")
 	case "owasp:cmd:031":
 		return strings.Contains(s, "$(")
 	case "owasp:cmd:032":
@@ -273,6 +318,86 @@ func shouldScanCmdPattern(s string, p owaspPattern) bool {
 	default:
 		return true
 	}
+}
+
+func hasScanIndexOfSplits(s string) bool {
+	for i := 1; i+1 < len(s); i++ {
+		c := s[i]
+		if c != '\'' && c != '"' && c != '\\' {
+			continue
+		}
+		if isASCIILetter(s[i-1]) && isASCIILetter(s[i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasEmptyBacktickSplit reports whether s contains two adjacent backtick
+// characters, the empty-backtick delimiter required by cmd:018/023.
+func hasEmptyBacktickSplit(s string) bool {
+	return strings.Contains(s, "``")
+}
+
+// backtickPairCommandWord 判断 s 中是否存在「移除空反引号对后构成命令词」的
+// 拆字绕过形态（cmd:023 的目标形态，如 wh+双反引号+oami 即 whoami）。
+//
+// 判据是「把空反引号对全部移除后，该词是否为已知 shell 命令词」（词表与
+// cmd:018/isShellCommandWord 同源），且空反引号对两侧必须紧邻词字符（与
+// cmd:023 正则的词边界形态一致）。因此随机数据里凑出的 x+双反引号+y 不再
+// 命中：它们移掉反引号后不是任何命令词；而拆字绕过形态仍然命中。
+func backtickPairCommandWord(s string) bool {
+	isWordByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+	}
+	for i := 0; i < len(s); {
+		if !isWordByte(s[i]) && s[i] != '`' {
+			i++
+			continue
+		}
+		start := i
+		for i < len(s) && (isWordByte(s[i]) || s[i] == '`') {
+			i++
+		}
+		run := s[start:i]
+		// 形态前提：存在一对「两侧都紧邻词字符」的空反引号对（与正则
+		// \b\w+``\w+\b 的命中形态一致），否则本段不是拆字候选。
+		hasPair := false
+		for k := 0; k+1 < len(run); k++ {
+			if run[k] == '`' && run[k+1] == '`' && k > 0 && isWordByte(run[k-1]) &&
+				k+2 < len(run) && isWordByte(run[k+2]) {
+				hasPair = true
+				break
+			}
+		}
+		if !hasPair {
+			continue
+		}
+		// 去掉该词里的全部反引号（含外层反引号命令替换的包裹）后仍是已知
+		// 命令词，才是拆字绕过；随机拼接出来的 mK``cuK 去掉后不是命令词。
+		if isShellCommandWord(strings.ReplaceAll(run, "`", ""), true) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnyCmdWord(s string, words ...string) bool {
+	for _, w := range words {
+		if strings.Contains(s, w) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsASCIIFoldAny(s string, words ...string) bool {
+	for _, w := range words {
+		if containsASCIIFold(s, w) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasDiscoveryCommandBeforeSemicolon(s string) bool {
@@ -350,6 +475,9 @@ func hasEnvAssignmentCommandAfter(s string, offset int) bool {
 }
 
 func hasPipeAfterCmdOutputTransform(s string) bool {
+	if strings.IndexByte(s, '|') < 0 {
+		return false
+	}
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case 'b':
@@ -437,34 +565,41 @@ func checkCmdInjection(s string, threshold int) (OWASPHit, bool) {
 	if !hasCmdIndicator(s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则；
+	// FP 抑制器前移到 Add 之前，被抑制的规则既不计分也不参与归因。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	binaryChecked, binaryTarget := false, false
 	for _, p := range cmdInjectPatterns {
 		if !shouldScanCmdPattern(s, p) {
 			continue
 		}
-		if p.re.MatchString(s) {
-			// 二进制 body（压缩流、PDF、图片）中，低分短模式的随机碰撞概率极高：
-			// owasp:cmd:002 的 `[^`]*` 无长度上界且命令词无词边界，owasp:cmd:010
-			// 的 \w+=\S+ 同理。此类目标只接受高置信度规则（如反引号紧跟命令词的
-			// owasp:cmd:024），真实攻击载荷仍能检出。
-			if p.score < binaryTargetMinCmdScore {
-				if !binaryChecked {
-					binaryTarget = isBinaryScanTarget(s)
-					binaryChecked = true
-				}
-				if binaryTarget {
-					continue
-				}
+		if !p.re.MatchString(s) {
+			continue
+		}
+		// 二进制 body（压缩流、PDF、图片）中，低分短模式的随机碰撞概率极高：
+		// owasp:cmd:002 的 `[^`]*` 无长度上界且命令词无词边界，owasp:cmd:010
+		// 的 \w+=\S+ 同理。此类目标只接受高置信度规则（如反引号紧跟命令词的
+		// owasp:cmd:024），真实攻击载荷仍能检出。
+		if p.score < binaryTargetMinCmdScore {
+			if !binaryChecked {
+				binaryTarget = isBinaryScanTarget(s)
+				binaryChecked = true
 			}
-			total += p.score
-			if best == "" {
-				best = p.id
+			if binaryTarget {
+				continue
 			}
-			if total >= threshold {
-				return OWASPHit{Category: CatCmdInject, RuleID: best, Score: total, Desc: "命令注入特征"}, true
-			}
+		}
+		if isCmdInjectionFalsePositive(s, p.id) {
+			continue
+		}
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
+		}
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatCmdInject, RuleID: id, Score: total, Desc: "命令注入特征"}, true
 		}
 	}
 	return OWASPHit{}, false
@@ -503,10 +638,15 @@ var xxePatterns = []owaspPattern{
 	// xsi:schemaLocation / xsi:noNamespaceSchemaLocation 属性注入：
 	// schemaLocation 指向 attacker 的 .xsd 时校验器据此拉取外部资源。
 	{regexp.MustCompile(`(?i)xsi:(nonamespace)?schemalocation\s*=`), 4, "owasp:xxe:008", "xsi:"},
+	// XSD schema 外部载荷：xs:include / xs:import / xs:schemaLocation。
+	{regexp.MustCompile(`(?i)xs:(include|import|schemalocation)\b`), 4, "owasp:xxe:010", "xs:"},
+	// 外部 DTD 声明：DOCTYPE + SYSTEM 标识符（<!DOCTYPE x SYSTEM "//x/x">）。
+	// 与 xxe:001 的 [ 内联子集不同，外部 system 标识符单独形态。
+	{regexp.MustCompile(`(?i)<!doctype\s+\w+\s+system\s+['"]`), 5, "owasp:xxe:011", "<!doctype"},
 }
 
 func checkXXE(s string, threshold int) (OWASPHit, bool) {
-	if !hasXXEIndicator(s) {
+	if !hasACIndicator(famXXE, s) {
 		return OWASPHit{}, false
 	}
 	// Suppress XXE detection in large JSON/analytics payloads that contain serialized
@@ -525,19 +665,21 @@ func checkXXE(s string, threshold int) (OWASPHit, bool) {
 			return OWASPHit{}, false
 		}
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range xxePatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
 		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
+			if acc == nil {
+				acc = acquireOWASPAcc(threshold)
 			}
-			if total >= threshold {
-				return OWASPHit{Category: CatXXE, RuleID: best, Score: total, Desc: "XML 外部实体特征"}, true
+			acc.Add(p.id, p.score)
+			if acc.Exceeded() {
+				id, total := acc.Attribution()
+				return OWASPHit{Category: CatXXE, RuleID: id, Score: total, Desc: "XML 外部实体特征"}, true
 			}
 		}
 	}
@@ -562,25 +704,29 @@ var ldapiPatterns = []owaspPattern{
 	{regexp.MustCompile(`\)\(!\(`), 4, "owasp:ldap:006", ""},
 	{regexp.MustCompile(`\(\|\s*\(uid=\*\)\s*\(\|`), 4, "owasp:ldap:007", "uid"},
 	{regexp.MustCompile(`\(\w+\s*=\s*\*\)\s*\(mail=\*\)`), 4, "owasp:ldap:008", "mail"},
+	// LDAP 属性 OID（userPassword 2.5.13.18 形态）。
+	{regexp.MustCompile(`2\.5\.13\.18`), 4, "owasp:ldap:011", ""},
 }
 
 func checkLDAPInjection(s string, threshold int) (OWASPHit, bool) {
-	if !hasLDAPInjectionIndicator(s) {
+	if !hasACIndicator(famLDAP, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range ldapiPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
 		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
+			if acc == nil {
+				acc = acquireOWASPAcc(threshold)
 			}
-			if total >= threshold {
-				return OWASPHit{Category: CatLDAPI, RuleID: best, Score: total, Desc: "LDAP 注入特征"}, true
+			acc.Add(p.id, p.score)
+			if acc.Exceeded() {
+				id, total := acc.Attribution()
+				return OWASPHit{Category: CatLDAPI, RuleID: id, Score: total, Desc: "LDAP 注入特征"}, true
 			}
 		}
 	}
@@ -593,6 +739,13 @@ var nosqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`\$gt\b`), 3, "owasp:nosql:003", ""},
 	{regexp.MustCompile(`\$regex\b`), 4, "owasp:nosql:004", ""},
 	{regexp.MustCompile(`\$or\b\s*:\s*\[`), 3, "owasp:nosql:005", ""},
+	{regexp.MustCompile(`['"]\s*,\s*\$or\s*:\s*\[`), 5, "owasp:nosql:022", "$or"},
+	{regexp.MustCompile(`\$or\s*:\s*\[\s*\{[^}]*\$`), 5, "owasp:nosql:023", "$or"},
+	{regexp.MustCompile(`\$or\s*:\s*\[\s*[{}]`), 4, "owasp:nosql:024", "$or"},
+	{regexp.MustCompile(`\$where\s*:\s*['"][^'"]*[!=<>=+\-*\/%\d]`), 4, "owasp:nosql:018", ""},
+	{regexp.MustCompile(`\binjection\.(?:insert|remove|update|find|delete|drop)\s*\(`), 5, "owasp:nosql:019", "injection."},
+	{regexp.MustCompile(`\b(?:do\s*\{|while\s*\(\s*new\s+date\s*\(|var\s+date\s*=\s*new\s+date)`), 4, "owasp:nosql:020", "new date"},
+	{regexp.MustCompile(`\$where\s*:\s*\{[^}]{0,100}\$function\b`), 5, "owasp:nosql:021", "$where"},
 	{regexp.MustCompile(`\$exists\b`), 3, "owasp:nosql:006", ""},
 	// MongoDB aggregation pipeline injection
 	{regexp.MustCompile(`\$lookup\b\s*:\s*\{`), 4, "owasp:nosql:007", ""},
@@ -639,23 +792,31 @@ func hasNoSQLiIndicator(s string) bool {
 }
 
 func checkNoSQLi(s string, threshold int) (OWASPHit, bool) {
-	if !hasNoSQLiIndicator(s) {
+	if !hasACIndicator(famNoSQLi, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径）：此处原先已按「过阈当前规则」
+	// 归因，L1 接线后由 Attribution() 统一提供，语义与原先一致（阈值只在累加器上
+	// 判定一次，不存在 SetThreshold 改写归因的窗口）。FP 抑制器前移到 Add 之前。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range nosqliPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
-		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
-			}
-			if total >= threshold {
-				return OWASPHit{Category: CatNoSQLi, RuleID: best, Score: total, Desc: "NoSQL 注入特征"}, true
-			}
+		if !p.re.MatchString(s) {
+			continue
+		}
+		if isNoSQLiFalsePositive(s, p.id) {
+			continue
+		}
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
+		}
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatNoSQLi, RuleID: id, Score: total, Desc: "NoSQL 注入特征"}, true
 		}
 	}
 	return OWASPHit{}, false
@@ -694,6 +855,14 @@ var tmplInjectPatterns = []owaspPattern{
 	{regexp.MustCompile(`\{[a-z_]+:[a-z_]+\([^}]{0,200}\)\}`), 4, "owasp:ssti:016", ""},
 	// DedeCMS template injection: {dede:field name='source' runphp='yes'}
 	{regexp.MustCompile(`\{dede:\w+\s+[^}]*runphp`), 5, "owasp:ssti:017", "{dede:"},
+	// #{16*8787}：SPEL/JEXL 风格数字算术模板注入（`#{` → `\d+ 运算 \d+`）。
+	{regexp.MustCompile(`#\{\s*\d+\s*[*+\-/]\s*\d+\s*\}`), 4, "owasp:ssti:018", "#{"},
+	// ${ ex("id") }：FreeMarker/Velocity 模板插值函数调用（`${` 内非引号
+	// 词根直接 `(`）。
+	{regexp.MustCompile(`\$\{\s*['"\w.]+\s*\(`), 4, "owasp:ssti:019", "${"},
+	// ${ex} 无空格紧密拼接：FreeMarker/EL 模板孤立变量调用
+	//（$/{ 由 normalize 的 unicode 解码还原为 ${）。
+	{regexp.MustCompile(`\$\{[\w.]+\(`), 4, "owasp:ssti:020", "${"},
 }
 
 // hasTemplateInjectionIndicator returns true when the string contains markers
@@ -715,26 +884,30 @@ func hasTemplateInjectionIndicator(s string) bool {
 		strings.Contains(s, "process.env") ||
 		strings.Contains(s, "{php}") ||
 		strings.Contains(s, "$self.") ||
-		strings.Contains(s, "{dede:")
+		strings.Contains(s, "{dede:") ||
+		// #{ 算术模板注入起点（#{16*8787} 形态）。
+		strings.Contains(s, "#{")
 }
 
 func checkTemplateInjection(s string, threshold int) (OWASPHit, bool) {
-	if !hasTemplateInjectionIndicator(s) {
+	if !hasACIndicator(famTemplate, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range tmplInjectPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
 		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
+			if acc == nil {
+				acc = acquireOWASPAcc(threshold)
 			}
-			if total >= threshold {
-				return OWASPHit{Category: CatTmplInject, RuleID: best, Score: total, Desc: "模板注入特征"}, true
+			acc.Add(p.id, p.score)
+			if acc.Exceeded() {
+				id, total := acc.Attribution()
+				return OWASPHit{Category: CatTmplInject, RuleID: id, Score: total, Desc: "模板注入特征"}, true
 			}
 		}
 	}
@@ -889,22 +1062,24 @@ var jndiPatterns = []owaspPattern{
 }
 
 func checkJNDI(s string, threshold int) (OWASPHit, bool) {
-	if !hasJNDIIndicator(s) {
+	if !hasACIndicator(famJNDI, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range jndiPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
 		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
+			if acc == nil {
+				acc = acquireOWASPAcc(threshold)
 			}
-			if total >= threshold {
-				return OWASPHit{Category: CatJNDI, RuleID: best, Score: total, Desc: "JNDI/Log4Shell 注入特征"}, true
+			acc.Add(p.id, p.score)
+			if acc.Exceeded() {
+				id, total := acc.Attribution()
+				return OWASPHit{Category: CatJNDI, RuleID: id, Score: total, Desc: "JNDI/Log4Shell 注入特征"}, true
 			}
 		}
 	}
@@ -918,6 +1093,24 @@ var crlfPatterns = []owaspPattern{
 	{regexp.MustCompile(`%0d%0a\s*(set-cookie|location|content-type)\s*:`), 6, "owasp:crlf:002", "%0d%0a"},
 	{regexp.MustCompile(`%0d%0a%0d%0a`), 5, "owasp:crlf:003", "%0d%0a%0d%0a"},
 	{regexp.MustCompile(`\r\n\r\n`), 4, "owasp:crlf:004", ""},
+	// 乱序双编码 CRLF（%25%30%41%25%30%44Set-cookie、%25%30%44%25%30%41… 与
+	// 各单编码组合）：%0[ad] 对必须后跟响应头名才算注入。裸编码换行对在
+	// 表单/JSON 数据体（如 %0D%0D%3A%0A%5B 格式化 JSON）中高频出现且无
+	// 响应拆分后果，不能作为独立告警面。
+	{regexp.MustCompile(`%0[ad]%0[ad]\s*(set-cookie|location|content-type|x-[\w-]+)\s*:`), 4, "owasp:crlf:007", ""},
+	// 单层残余编码 CRLF 后紧跟响应/邮件头（%25%30%41Set-cookie 经一次
+	// PathUnescape 后残余 %0a/Set-cookie 形态）。
+	{regexp.MustCompile(`%0[ad]\s*(set-cookie|location|content-type)\s*:`), 4, "owasp:crlf:009", ""},
+	// 邮件头 / 协议命令注入：行首（或换行后）出现 to:/cc:/bcc:/subject: 带
+	// 邮箱接收方、RCPT TO: 送达命令、裸 QUIT 会话终止，或 IMAP/SMTP 协议命令
+	// （V100 CAPABILITY、V101 FETCH 等）。协议词限行边界（双锁），自然文本
+	// 行首 "quit" 仅当整行只含该词才命中。
+	{regexp.MustCompile(`(?i)(?:^|[\r\n])[ \t]*(?:(?:to|cc|bcc|subject)\s*:\s*\S+@\S+|rcpt\s+to\s*:|quit[ \t]*(?:[\r\n]|$)|v\d+\s+(?:capability|fetch|select|login|logout|noop)\b)`), 4, "owasp:crlf:008", ""},
+	// 空白折叠后的协议命令：base64/URL 解码出的 \r\nV100 CAPABILITY 等经
+	// normalize 折叠为 " v100 capability ..."，行界锁失效。折叠后的行首
+	// 由空白分隔词锚定：v\d{2,3} 必须紧跟协议命令词，且前一个是空格
+	//（原行界位置）或串首。
+	{regexp.MustCompile(`(?i)(?:^|[\s])(?:v\d{2,3}\s+(?:capability|fetch|select|login|logout|noop)\b|(?:rcpt\s+to|quit)\s*(?:[;:\s]|$))`), 4, "owasp:crlf:010", ""},
 }
 
 func hasCRLFIndicator(s string) bool {
@@ -1013,23 +1206,30 @@ func hasPHPSerializedStringPairIndicator(s string) bool {
 }
 
 func checkCRLF(s string, threshold int) (OWASPHit, bool) {
-	if !hasCRLFIndicator(s) {
+	if !hasACIndicator(famCRLF, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则；
+	// FP 抑制器前移到 Add 之前，被抑制的规则既不计分也不参与归因。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range crlfPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
-		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
-			}
-			if total >= threshold {
-				return OWASPHit{Category: CatCRLF, RuleID: best, Score: total, Desc: "CRLF 注入 / HTTP 响应拆分"}, true
-			}
+		if !p.re.MatchString(s) {
+			continue
+		}
+		if isCRLFFalsePositive(s, p.id) {
+			continue
+		}
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
+		}
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatCRLF, RuleID: id, Score: total, Desc: "CRLF 注入 / HTTP 响应拆分"}, true
 		}
 	}
 	// RFC-2047 编码头注入：=?charset?B|Q?payload?= 形态仅当 payload 同时存在
@@ -1058,7 +1258,10 @@ func hasELIndicator(s string) bool {
 		strings.Contains(s, "#context") ||
 		strings.Contains(s, "%{#") ||
 		strings.Contains(s, "new java.") ||
-		strings.Contains(s, "newjava.")
+		strings.Contains(s, "newjava.") ||
+		// YAML 反序列化 RCE 载荷头（!!python/object/new:exec 等）：
+		// 双叹号在自然语言与常见 URL/form 输入中不出现，误报可忽略。
+		strings.Contains(s, "!!")
 }
 
 var exprLangPatterns = []owaspPattern{
@@ -1085,26 +1288,37 @@ var exprLangPatterns = []owaspPattern{
 	{regexp.MustCompile(`getdeclaredmethods\b.*\.invoke\s*\(`), 5, "owasp:el:012", "getdeclaredmethods"},
 	// OGNL reflection chain: getClass().forName() or Class.forName()
 	{regexp.MustCompile(`(getclass\(\)|class)\s*\.\s*forname\s*\(`), 4, "owasp:el:013", "forname"},
+	// YAML 反序列化 RCE 载荷头（!!python/object/new:exec / !!javax.script.ScriptEngineManager
+	// 等）：与 deser 族的序列化字节/协议形态（rO0AB、%ac%ed、PHP o: 等）互不重叠，
+	// 文本形态必须由 EL 族拦。gotestwaf rce 载荷 !!python/… 命中。
+	{regexp.MustCompile(`!!(?:python|ruby|perl|node|java|yaml|yml|javax|org|com)[/\w.:]*`), 4, "owasp:el:014", "!!"},
 }
 
 func checkExprLang(s string, threshold int) (OWASPHit, bool) {
-	if !hasELIndicator(s) {
+	if !hasACIndicator(famEL, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则；
+	// FP 抑制器前移到 Add 之前，被抑制的规则既不计分也不参与归因。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range exprLangPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
-		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
-			}
-			if total >= threshold {
-				return OWASPHit{Category: CatExprLang, RuleID: best, Score: total, Desc: "表达式语言注入特征"}, true
-			}
+		if !p.re.MatchString(s) {
+			continue
+		}
+		if isELFalsePositive(s, p.id) {
+			continue
+		}
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
+		}
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatExprLang, RuleID: id, Score: total, Desc: "表达式语言注入特征"}, true
 		}
 	}
 	return OWASPHit{}, false
@@ -1152,23 +1366,30 @@ func checkDeserialization(s string, threshold int) (OWASPHit, bool) {
 	if strings.Contains(s, "\xac\xed\x00\x05") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:001", Score: 5, Desc: "Java 序列化魔数"}, true
 	}
-	if !hasDeserializationIndicator(s) {
+	if !hasACIndicator(famDeser, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则；
+	// FP 抑制器前移到 Add 之前，被抑制的规则既不计分也不参与归因。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range deserialPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
-		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
-			}
-			if total >= threshold {
-				return OWASPHit{Category: CatDeserial, RuleID: best, Score: total, Desc: "反序列化攻击特征"}, true
-			}
+		if !p.re.MatchString(s) {
+			continue
+		}
+		if isDeserFalsePositive(s, p.id) {
+			continue
+		}
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
+		}
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatDeserial, RuleID: id, Score: total, Desc: "反序列化攻击特征"}, true
 		}
 	}
 	return OWASPHit{}, false
@@ -1294,22 +1515,24 @@ var graphqlPatterns = []owaspPattern{
 }
 
 func checkGraphQLi(s string, threshold int) (OWASPHit, bool) {
-	if !hasGraphQLIndicator(s) {
+	if !hasACIndicator(famGraphQL, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range graphqlPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
 		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
+			if acc == nil {
+				acc = acquireOWASPAcc(threshold)
 			}
-			if total >= threshold {
-				return OWASPHit{Category: CatGraphQLi, RuleID: best, Score: total, Desc: "GraphQL 内省/注入特征"}, true
+			acc.Add(p.id, p.score)
+			if acc.Exceeded() {
+				id, total := acc.Attribution()
+				return OWASPHit{Category: CatGraphQLi, RuleID: id, Score: total, Desc: "GraphQL 内省/注入特征"}, true
 			}
 		}
 	}

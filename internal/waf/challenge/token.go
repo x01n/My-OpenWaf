@@ -21,8 +21,7 @@ import (
 
 // NonceKey is the cookie name used for anti-replay nonces.
 const NonceKey = "__waf_nonce"
-
-// ChallengePassCookieName is the cookie name for challenge pass cookies.
+const NoncePairKey = "__waf_nonce2"
 const ChallengePassCookieName = "__waf_passed"
 
 // DynamicProtectionSessionCookieName is the cookie name for dynamic protection bypass sessions.
@@ -53,6 +52,24 @@ func loadChallengeSecret() []byte {
 
 // SetChallengeSecret allows overriding the secret (e.g. from JWT secret for consistency across restarts).
 // 同时装载 gm 包 SM2 签名身份：公钥随挑战页下发，由浏览器侧验签（b2）使用。
+//
+// ⚠️ 已知行为（有意保留，勿"顺手修"）：
+//
+//	内门条件 len(secret) == 32 在真实路径上**恒假** —— 唯一调用点
+//	internal/app/server.go 传入的是 resolveJWTSecret 的返回值，而该函数
+//	生成路径是 rand(32 字节) -> hex.EncodeToString，即 **64 字符**（环境变量
+//	与 DB 记录路径同样是原样字符串）。因此 gm.LoadIdentity 从未由本函数
+//	调用，SM2 身份实际来自本包 init() 的随机 32 字节（见上方 init）。
+//
+//	后果：**签名身份随进程重启变化**。
+//	  - 当前无影响：签名验证全部在同进程内完成（gm.Open(verifySig=true) 走
+//	    进程内 signIdent），信封不跨重启存活。
+//	  - 因此本注释首句承诺的 "consistency across restarts" 从未生效。
+//
+//	何时必须修：将来需要**跨重启验签**时（持久化信封、离线校验等）。
+//	修时注意：把身份绑定到持久 secret 会让「改 MY_OPENWAF_JWT_SECRET 即换
+//	签名身份」——这个副作用比现状更隐蔽（改 secret 的人不会知道它还兼作
+//	SM2 身份种子），需要一并解决。详见 devlog.md 的 r7.61 待办记录。
 func SetChallengeSecret(secret []byte) {
 	if len(secret) >= 16 {
 		clone := append([]byte(nil), secret...)

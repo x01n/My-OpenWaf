@@ -3,6 +3,7 @@ package jsplugin
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -25,6 +26,11 @@ type Script struct {
 	failures        atomic.Int64
 	timeouts        atomic.Int64
 	totalNanos      atomic.Int64
+
+	// faultMu 保护 fault：请求路径的执行器在脚本失败时写入，管理端读取。
+	// 失败是罕见路径，互斥锁比原子结构更直白。
+	faultMu sync.Mutex
+	fault   faultState
 }
 
 // Name 返回脚本名称。
@@ -141,6 +147,24 @@ func (s *Script) Stats() (runs, failures, timeouts int64, average time.Duration)
 		average = time.Duration(s.totalNanos.Load() / runs)
 	}
 	return
+}
+
+// ValidateExecutionStage 在脚本进入执行器前校验阶段与执行入口的一致性。
+// 没有元数据的脚本仍可用于 dry-run 和接口级测试。
+func ValidateExecutionStage(script *Script, wantStage string) error {
+	return validateExecutionStage(script, wantStage)
+}
+
+// NewScriptForTest 构造只带元数据的脚本，供无 QuickJS 的构建验证接口层行为。
+//
+// 正常路径应使用 Compile / CompileWithMetadata；这里不校验源码，调用方
+// 只应把它用于失败记录、统计与元数据相关的测试。
+func NewScriptForTest(id uint, name, stage, failureMode string) *Script {
+	script := &Script{name: name}
+	script.id = id
+	script.stage = stage
+	script.failureMode = failureMode
+	return script
 }
 
 // validateExecutionStage 在脚本进入执行器前校验阶段与执行入口的一致性。

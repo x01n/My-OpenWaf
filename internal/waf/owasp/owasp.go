@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"My-OpenWaf/internal/core/score"
 )
 
 type OWASPCategory string
@@ -65,6 +67,7 @@ type OWASPHit struct {
 	Category OWASPCategory
 	RuleID   string
 	Score    int
+	Snippet  string
 	Desc     string
 }
 
@@ -205,6 +208,18 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 
 	var hits []OWASPHit
 	lowerPath := toLowerASCII(path)
+	snippetRaw, snippetNorm, snippetDecoded := "", "", ""
+	finalizeHit := func(h OWASPHit) OWASPHit {
+		if h.Snippet != "" {
+			return h
+		}
+		for _, target := range [3]string{snippetNorm, snippetRaw, snippetDecoded} {
+			if h = AttachMatchSnippet(h, target); h.Snippet != "" {
+				return h
+			}
+		}
+		return h
+	}
 
 	// Path-aware body-scan suppression: known telemetry/API endpoints that produce
 	// false positives from binary/base64-decoded body content should skip certain
@@ -213,22 +228,14 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 	skipBodyWebshell := false
 	skipBodySSRF := false
 	skipBodySQLi := false
-	if strings.Contains(lowerPath, "/vydy5wuzjext/") ||
-		strings.Contains(lowerPath, "/restapi/soa2/") ||
-		strings.Contains(lowerPath, "/web/common") ||
-		strings.Contains(lowerPath, "/unifiedidmportal/") ||
-		strings.Contains(lowerPath, "saveloginfo") ||
-		strings.Contains(lowerPath, "savetraceinfo") {
+	if strings.Contains(lowerPath, "/restapi/soa2/") || strings.Contains(lowerPath, "/web/common") {
 		skipBodyCmd = true
 	}
-	if strings.Contains(lowerPath, "/v1:gethints") {
-		skipBodyWebshell = true
-	}
+
 	if strings.Contains(lowerPath, "/cdn-cgi/") {
 		skipBodySSRF = true
 	}
-	if strings.Contains(lowerPath, "/g/collect") ||
-		strings.Contains(lowerPath, "/vydy5wuzjext/") {
+	if strings.Contains(lowerPath, "/g/collect") {
 		skipBodySQLi = true
 	}
 	if crlfEnabled && (strings.ContainsAny(path, "\r\n\v\f") ||
@@ -289,7 +296,11 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		if len(raw) >= 30 && shouldScanUnicodeBase64Target(raw) {
 			unicodeBase64Targets = append(unicodeBase64Targets, unicodeBase64Target{raw: raw, queryPlusAsSpace: queryPlusAsSpace})
 		}
-		if isCleanTarget(raw) && !hasLikelyBase64Candidate(raw) {
+		// isCleanTarget 只判字符集：全字母数字加空格的串也"干净"，
+		// 但形如 `1e1 union select users from password` 的多词 SQL 短语
+		// 恰恰由这些字符构成，被整体跳过会漏掉 sqli:001（该规则依赖
+		// 词边界而非特殊字符）。带攻击关键词的目标不得走干净短路。
+		if isCleanTarget(raw) && !hasLikelyBase64Candidate(raw) && !hasSuspiciousKeywords(raw) {
 			return true
 		}
 
@@ -297,6 +308,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		if len(normalized) > maxTargetLen {
 			normalized = truncateTarget(normalized)
 		}
+		snippetRaw, snippetNorm, snippetDecoded = raw, normalized, raw
 
 		// Opaque-encoded attack body detection only applies to body targets.
 		// Folded into the main loop so we don't recompute normalizeWithDecode.
@@ -304,7 +316,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
 				hit := OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "无 content-type 的不透明编码请求体"}
 				if acceptsOWASPHit(accept, hit) {
-					stopHit, hasStop = hit, true
+					stopHit, hasStop = finalizeHit(hit), true
 					return false
 				}
 			}
@@ -314,23 +326,37 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			strings.Contains(raw, "aced0005") || strings.Contains(raw, "ACED0005")) {
 			hit := OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:012", Score: 5, Desc: "Java 序列化魔数（URL 编码）"}
 			if acceptsOWASPHit(accept, hit) {
-				stopHit, hasStop = hit, true
+				stopHit, hasStop = finalizeHit(hit), true
 				return false
 			}
 		}
 
 		if crlfEnabled && (strings.Contains(raw, "%0d") || strings.Contains(raw, "%0D") ||
 			strings.Contains(raw, "%0a") || strings.Contains(raw, "%0A") ||
+			strings.Contains(raw, "%25%30") ||
 			strings.ContainsAny(raw, "\r\n")) {
-			urlDec := raw
-			if d, err := url.PathUnescape(raw); err == nil {
-				urlDec = d
+			cur := raw
+			for range 3 {
+				if hit, ok := checkCRLF(strings.ToLower(cur), crlfThreshold); ok {
+					if !isCRLFFalsePositive(cur, hit.RuleID) {
+						if acceptsOWASPHit(accept, hit) {
+							stopHit, hasStop = finalizeHit(hit), true
+							return false
+						}
+					}
+				}
+				d, err := url.PathUnescape(cur)
+				if err != nil || d == cur {
+					break
+				}
+				cur = d
 			}
-			lower := strings.ToLower(urlDec)
-			if hit, ok := checkCRLF(lower, crlfThreshold); ok {
-				if !isCRLFFalsePositive(lower, hit.RuleID) {
+		}
+		if crlfEnabled {
+			if hit, ok := checkCRLF(normalized, crlfThreshold); ok {
+				if !isCRLFFalsePositive(normalized, hit.RuleID) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -343,7 +369,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		if sqliEnabled && !(isBodyTarget && skipBodySQLi) {
 			if hit, ok := nextSQLiHit(normalized, sqliThreshold); ok {
 				if acceptsOWASPHit(accept, hit) {
-					stopHit, hasStop = hit, true
+					stopHit, hasStop = finalizeHit(hit), true
 					return false
 				}
 			}
@@ -352,7 +378,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			if hit, ok := nextXSSHit(normalized, xssThreshold); ok {
 				if !isKnownTelemetryXSSFalsePositive(path, normalized, hit.RuleID, isBodyTarget) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -360,7 +386,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			if hit, decodedTarget, ok := nextDecodedXSSHit(raw, queryPlusAsSpace, xssThreshold); ok {
 				if !isKnownTelemetryXSSFalsePositive(path, decodedTarget, hit.RuleID, isBodyTarget) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -373,7 +399,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 				}
 				if !isCmdInjectionFalsePositive(normalized, hit.RuleID) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -383,7 +409,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			if hit, ok := checkWebshell(normalized, webshellThreshold); ok {
 				if !isWebshellFalsePositive(normalized, hit.RuleID) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -392,7 +418,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		if revShellEnabled {
 			if hit, ok := checkRevShell(normalized, revShellThreshold); ok {
 				if acceptsOWASPHit(accept, hit) {
-					stopHit, hasStop = hit, true
+					stopHit, hasStop = finalizeHit(hit), true
 					return false
 				}
 			}
@@ -404,7 +430,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 				}
 				if pathTravThreshold <= 2 || !isPathTravFalsePositive(normalized, hit.RuleID) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -422,7 +448,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		if xxeEnabled {
 			if hit, ok := checkXXE(normalized, xxeThreshold); ok {
 				if acceptsOWASPHit(accept, hit) {
-					stopHit, hasStop = hit, true
+					stopHit, hasStop = finalizeHit(hit), true
 					return false
 				}
 			}
@@ -436,17 +462,15 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		}
 		if nosqliEnabled {
 			if hit, ok := checkNoSQLi(normalized, nosqliThreshold); ok {
-				if !isNoSQLiFalsePositive(normalized, hit.RuleID) {
-					if acceptsOWASPHit(accept, hit) {
-						hits = append(hits, hit)
-					}
+				if acceptsOWASPHit(accept, hit) {
+					hits = append(hits, hit)
 				}
 			}
 		}
 		if templateEnabled {
 			if hit, ok := checkTemplateInjection(normalized, templateThreshold); ok {
 				if acceptsOWASPHit(accept, hit) {
-					stopHit, hasStop = hit, true
+					stopHit, hasStop = finalizeHit(hit), true
 					return false
 				}
 			}
@@ -454,7 +478,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		if jndiEnabled {
 			if hit, ok := checkJNDI(normalized, jndiThreshold); ok {
 				if acceptsOWASPHit(accept, hit) {
-					stopHit, hasStop = hit, true
+					stopHit, hasStop = finalizeHit(hit), true
 					return false
 				}
 			}
@@ -463,7 +487,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			if hit, ok := checkCRLF(normalized, crlfThreshold); ok {
 				if !isCRLFFalsePositive(normalized, hit.RuleID) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -473,7 +497,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			if hit, ok := checkExprLang(normalized, exprLangThreshold); ok {
 				if !isELFalsePositive(normalized, hit.RuleID) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -483,7 +507,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			if hit, ok := checkDeserialization(normalized, deserialThreshold); ok {
 				if !isDeserFalsePositive(normalized, hit.RuleID) {
 					if acceptsOWASPHit(accept, hit) {
-						stopHit, hasStop = hit, true
+						stopHit, hasStop = finalizeHit(hit), true
 						return false
 					}
 				}
@@ -492,14 +516,14 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		if graphqlEnabled {
 			if hit, ok := checkGraphQLi(normalized, graphqlThreshold); ok {
 				if acceptsOWASPHit(accept, hit) {
-					stopHit, hasStop = hit, true
+					stopHit, hasStop = finalizeHit(hit), true
 					return false
 				}
 			}
 		}
 		if len(hits) > 0 {
 			// 软命中（ssrf/ldap/nosqli 等）取首个作为终止结果。
-			stopHit, hasStop = hits[0], true
+			stopHit, hasStop = finalizeHit(hits[0]), true
 			return false
 		}
 		return true
@@ -532,10 +556,14 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 			tok := jsDec[start:end]
 			if decoded := decodeBase64IfSuspicious(tok); decoded != "" {
 				decodedNorm := normalize(decoded)
+				if len(decoded) > maxTargetLen {
+					decoded = truncateTarget(decoded)
+				}
+				snippetRaw, snippetNorm, snippetDecoded = decoded, decodedNorm, decoded
 				if sqliEnabled {
 					if hit, ok := nextSQLiHit(decodedNorm, sqliThreshold); ok {
 						if acceptsOWASPHit(accept, hit) {
-							deepHit, hasDeep = hit, true
+							deepHit, hasDeep = finalizeHit(hit), true
 							return false
 						}
 					}
@@ -544,7 +572,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 					if hit, ok := nextXSSHit(decodedNorm, xssThreshold); ok {
 						if !isKnownTelemetryXSSFalsePositive(path, decodedNorm, hit.RuleID, true) {
 							if acceptsOWASPHit(accept, hit) {
-								deepHit, hasDeep = hit, true
+								deepHit, hasDeep = finalizeHit(hit), true
 								return false
 							}
 						}
@@ -557,7 +585,7 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 						}
 						if !isCmdInjectionFalsePositive(decodedNorm, hit.RuleID) {
 							if acceptsOWASPHit(accept, hit) {
-								deepHit, hasDeep = hit, true
+								deepHit, hasDeep = finalizeHit(hit), true
 								return false
 							}
 						}
@@ -599,7 +627,10 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		return OWASPHit{}, false, nil
 	}
 	if len(hits) == 1 {
-		return hits[0], true, nil
+		return finalizeHit(hits[0]), true, nil
+	}
+	for i := range hits {
+		hits[i] = finalizeHit(hits[i])
 	}
 	return OWASPHit{}, false, hits
 }
@@ -743,7 +774,10 @@ func checkDangerousPath(path string) (OWASPHit, bool) {
 			Desc: "Confluence OGNL 注入端点"}, true
 	}
 	// Cisco ASA path traversal (CVE-2020-3452)
-	if containsASCIIFold(path, "+cscot+/") || containsASCIIFold(path, "+cscoe+/") || containsASCIIFold(path, "%2bcscot%2b/") || containsASCIIFold(path, "%2bcscoe%2b/") {
+	if containsASCIIFold(path, "+cscot+/") ||
+		containsASCIIFold(path, "+cscoe+/") ||
+		containsASCIIFold(path, "%2bcscot%2b/") ||
+		containsASCIIFold(path, "%2bcscoe%2b/") {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:006", Score: 5,
 			Desc: "Cisco ASA 路径遍历"}, true
 	}
@@ -1630,6 +1664,18 @@ func normalize(s string) string {
 }
 
 func normalizeTarget(s string, queryPlusAsSpace bool) string {
+	// UTF-7 预解码：query/form 上下文里 unescapeURLComponent 会把 '+' 解成空格，
+	// 等 URL 解码做完再解 UTF-7 时 +ADw- 等标记已被破坏（实测
+	// "+ADwAIQ-DOCTYPE foo+AFs" → " adwaiq-doctype foo afs"），UTF-7 编码的
+	// XML/XSS 载荷因此整体漏检。故在 URL 解码之前先解一次。
+	// 门限：仅当解码结果真的产出标记字符（< > " & ; ! / [ ]）时才采用，
+	// 否则形如 "1+AND+1=1" 的查询值会被误当作 UTF-7 解成乱码，反而丢掉
+	// "+ 当空格" 的 SQLi 形态。
+	if strings.Contains(s, "+A") {
+		if dec := decodeUTF7Sequences(s); dec != s && containsAnyRuneASCII(dec, "<>\"&;!/[]") {
+			s = dec
+		}
+	}
 	// U+2215（∕）在 Java File 等解析器中视为路径分隔符，归一为 ASCII
 	// 斜杠，避免 its 变体绕过下方的路径穿越电池。
 	if strings.ContainsRune(s, '∕') {
@@ -1640,18 +1686,29 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 		s = reOverlongDot.ReplaceAllString(s, ".")
 		s = reOverlongSlash.ReplaceAllString(s, "/")
 		s = reOverlongBackslash.ReplaceAllString(s, "\\")
+		// 紧凑形态：%C0AE（百分号后四 hex 无 % 分隔的拼接编码）。
+		// overlong 字节对 0xC0 0xAE 在合法 UTF-8 URL 编码中不出现，
+		// 只在刻意拼接的攻击载荷中出现，替换无误报面。
+		s = reOverlongDotCompact.ReplaceAllString(s, ".")
+		s = reOverlongSlashCompact.ReplaceAllString(s, "/")
 		// Overlong encodings for < and > (common in XSS bypasses).
-		// %C0%BC / %E0%80%BC / %F0%80%80%BC / %F8%80%80%80%BC / %FC%80%80%80%80%BC → <
+		// %C0%BC / %E0%80%BC / %F0%80%80%BC / %F8%80%80%80%80%BC / %FC%80%80%80%80%80%BC → <
 		// %C0%BE / %E0%80%BE / ... → >
 		s = reOverlongLT.ReplaceAllString(s, "<")
 		s = reOverlongGT.ReplaceAllString(s, ">")
+		// 字节形态 overlong 对（多层 URL 解码后 %C0 已变为 0xC0 字节 +
+		// ASCII 尾字符，如 %25C0AE 一层解码产物）：0xC0 0xAE → .、
+		// 0xC0 0xAF → /。检查在大写 AE/AF 前先剥去，避免漏掉大小写
+		// 混写（URL 编码尾字母常任意大小写）。
+		for _, c := range []struct{ from, to string }{
+			{"\xc0ae", "."}, {"\xc0AE", "."},
+			{"\xc0af", "/"}, {"\xc0AF", "/"},
+		} {
+			if strings.Contains(s, c.from) {
+				s = strings.ReplaceAll(s, c.from, c.to)
+			}
+		}
 	}
-	// Multi-pass URL decode.
-	// Pass 1 decodes %XX and only applies + → space for query/form sources.
-	// Passes 2+ use PathUnescape (only decodes %XX) to avoid mangling
-	// literal '+' characters that were produced by pass 1 (e.g. %2B → +).
-	// Without this, JSFuck payloads like (+{}+[]) lose their '+' on pass 2,
-	// and UTF-7 sequences like +ADw- lose their '+' prefix.
 	for i := range 3 {
 		var decoded string
 		var err error
@@ -1664,6 +1721,24 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 			break
 		}
 		s = decoded
+	}
+	// 解码产物二次 overlong 归一：%25C0AE 经上段多层解码后落为
+	// 字节对 0xC0 0xAE（带 % 前缀的形态已在上段处理过），此处把
+	// 新暴露的紧凑 overlong 对再归一为 ./。
+	if strings.Contains(s, "%") && containsOverlongUTF8Escape(s) {
+		s = reOverlongDot.ReplaceAllString(s, ".")
+		s = reOverlongSlash.ReplaceAllString(s, "/")
+		s = reOverlongDotCompact.ReplaceAllString(s, ".")
+		s = reOverlongSlashCompact.ReplaceAllString(s, "/")
+	}
+	// 字节对形态（多层解码产物）：0xC0 0xAE → .、0xC0 0xAF → /。
+	for _, c := range []struct{ from, to string }{
+		{"\xc0ae", "."}, {"\xc0AE", "."},
+		{"\xc0af", "/"}, {"\xc0AF", "/"},
+	} {
+		if strings.Contains(s, c.from) {
+			s = strings.ReplaceAll(s, c.from, c.to)
+		}
 	}
 	if shouldDecodeHTMLEntities(s) {
 		// Multi-pass HTML entity decode.
@@ -1704,12 +1779,43 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 		s = decodePercentU(s)
 	}
 	// 覆盖时把 U+2215 变异为斜杠的路径穿越注意点已在前段处理。
-	s = strings.ReplaceAll(s, "\x00", " ")
+	// 零字节剥离（而非替换空格）：<scr\x00ipt> 变体去掉零字节后还原
+	// <script 形态供 xss:001 命中；替换空格会让 <scr ipt 无法命中
+	// 且下方 collapseWhitespace 会把它变成 <scr ipt（单词断裂）。
+	s = strings.ReplaceAll(s, "\x00", "")
+	// 内嵌标签混淆剥离：autof<x>ocus → autofocus、alert<x>(1) → alert(1)
+	//（HTML 解析器把未知标签 <x> 视为文本丢弃，攻击者用它拆分事件名/
+	// 函数名绕过检测）。必须成对剥离（<x> 与 </x> 或 </x> 单闭），
+	// 自然文本中的 <x> 极少且此处只剥两字符短标签。
+	s = stripInlineConfusionTags(s)
 	// Strip inline SQL/C-style comments to defeat comment-splitting evasion.
 	// Empty replacement joins adjacent tokens: sel/**/ect → select, un/**/ion → union.
 	s = stripSQLCommentsPooled(s)
 	s = collapseWhitespacePooled(s)
 	return s
+}
+
+var reInlineConfusionTag = regexp.MustCompile(`</?[a-z]{1,2}>`)
+
+// containsAnyRuneASCII 判断 s 是否至少包含 chars 中的一个 ASCII 字节。
+func containsAnyRuneASCII(s, chars string) bool {
+	for i := 0; i < len(s); i++ {
+		if strings.IndexByte(chars, s[i]) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// stripInlineConfusionTags removes short inline tags (<x>, <a>, </x> etc.)
+// that HTML parsers drop as unknown elements. Attackers insert them inside
+// event handler names (autof<x>ocus) or call sites (alert<x>(1)) to evade
+// regex-based detection; removing them restores the original token.
+func stripInlineConfusionTags(s string) string {
+	if !strings.Contains(s, "<") {
+		return s
+	}
+	return reInlineConfusionTag.ReplaceAllString(s, "")
 }
 
 func shouldDecodeHTMLEntities(s string) bool {
@@ -2223,6 +2329,9 @@ func nextDecodedXSSHit(raw string, queryPlusAsSpace bool, threshold int) (OWASPH
 	if len(raw) < 8 || !hasLikelyBase64Candidate(raw) {
 		return OWASPHit{}, "", false
 	}
+	if !hasBase64Candidate(raw) {
+		return OWASPHit{}, "", false
+	}
 
 	const maxTotalBytes = 64 * 1024
 	const maxDepth = 3
@@ -2352,7 +2461,13 @@ func hasBase64Candidate(s string) bool {
 	run := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '-' || c == '_' {
+		if (c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '+' ||
+			c == '/' ||
+			c == '-' ||
+			c == '_' {
 			run++
 			if run >= 8 {
 				return true
@@ -2421,7 +2536,13 @@ func hasLikelyBase64Candidate(s string) bool {
 			i += 2
 			continue
 		}
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '-' || c == '_' {
+		if (c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '+' ||
+			c == '/' ||
+			c == '-' ||
+			c == '_' {
 			run++
 			if c < 'a' || c > 'z' {
 				hasNonLower = true
@@ -2484,8 +2605,25 @@ func forEachBase64TokenIndex(src string, limit int, fn func(start, end int) bool
 	}
 }
 
+var base64TokenByteTable [256]byte
+
+func init() {
+	for c := byte('A'); c <= 'Z'; c++ {
+		base64TokenByteTable[c] = 1
+	}
+	for c := byte('a'); c <= 'z'; c++ {
+		base64TokenByteTable[c] = 1
+	}
+	for c := byte('0'); c <= '9'; c++ {
+		base64TokenByteTable[c] = 1
+	}
+	for _, c := range []byte{'+', '/', '-', '_'} {
+		base64TokenByteTable[c] = 1
+	}
+}
+
 func isBase64TokenByte(b byte) bool {
-	return isBase64AlphaNum(b) || b == '+' || b == '/' || b == '-' || b == '_'
+	return base64TokenByteTable[b] != 0
 }
 
 // stripSQLComments removes /* ... */ style inline comments from s to defeat
@@ -2566,6 +2704,9 @@ var (
 	reOverlongDot       = regexp.MustCompile(`(?i)%c0%ae`)
 	reOverlongSlash     = regexp.MustCompile(`(?i)%c0%af`)
 	reOverlongBackslash = regexp.MustCompile(`(?i)%c1%9c`)
+	// 紧凑形态（百分号后四 hex 无分隔）：%C0AE→.、%C0AF→/。
+	reOverlongDotCompact   = regexp.MustCompile(`(?i)%c0ae`)
+	reOverlongSlashCompact = regexp.MustCompile(`(?i)%c0af`)
 	// Overlong UTF-8 encodings for < (U+003C) — used to bypass XSS filters.
 	// 2-byte: C0 BC, 3-byte: E0 80 BC, 4-byte: F0 80 80 BC, 5-byte: F8 80 80 80 BC, 6-byte: FC 80 80 80 80 BC
 	reOverlongLT = regexp.MustCompile(`(?i)(%c0%bc|%e0%80%bc|%f0%80%80%bc|%f8%80%80%80%bc|%fc%80%80%80%80%bc)`)
@@ -2573,13 +2714,17 @@ var (
 	reOverlongGT = regexp.MustCompile(`(?i)(%c0%be|%e0%80%be|%f0%80%80%be)`)
 )
 
-// decodeBase64IfSuspicious decodes a potential base64 token if it produces
-// text-like output. Uses a two-tier check: tokens ≥20 chars use a relaxed 50%
-// printability threshold (long payloads are more likely intentional), shorter
-// tokens require 70%. This prevents false negatives from binary-heavy payloads
-// like serialized objects or gzipped attack code while still rejecting random noise.
 func decodeBase64IfSuspicious(s string) string {
 	if len(s) < 8 {
+		return ""
+	}
+	// 前导 '/' 剥除：URL 路径位 b64 载荷（如 /SEG）长度 %4=1 会直接
+	// 解码失败；剥掉前导 '/' 后按纯 token 重试（攻击者在路径上放 b64
+	// 载荷的典型形态）。仅在首字符确为 '/' 且剩余部分仍 ≥8 时剥。
+	if s[0] == '/' && len(s) > 9 {
+		if dec := decodeBase64IfSuspicious(s[1:]); dec != "" {
+			return dec
+		}
 		return ""
 	}
 	var decoded []byte
@@ -2751,8 +2896,14 @@ func hasSuspiciousBase64PathSegment(s string) bool {
 }
 
 func isSuspiciousBase64PathSegment(segment string) bool {
-	if len(segment) < 16 || len(segment) > 256 || strings.Contains(segment, ".") {
+	if len(segment) < 8 || len(segment) > 256 || strings.Contains(segment, ".") {
 		return false
+	}
+	// 长度修正：8-15 字符的短 b64 段（含 (alert)(1) 类短载荷的 b64 形态）
+	// 用 hasLikelyBase64Candidate 判定，避免 cleanPath 快路径把短攻击
+	// 载荷跳过；≥16 的段沿用全 b64 字节判定。
+	if len(segment) < 16 {
+		return hasLikelyBase64Candidate(segment)
 	}
 	for i := 0; i < len(segment); i++ {
 		if !isBase64TokenByte(segment[i]) {
@@ -2873,100 +3024,156 @@ func hasSuspiciousContent(s string) bool {
 	return hasSuspiciousKeywords(s)
 }
 
-// hasSuspiciousKeywords checks for attack-relevant keywords in strings that
-// lack special characters. The input is already normalized (lowercased).
-// This closes a critical detection gap for POST body values extracted by
-// extractFormValues/extractJSONValues, which strip the '=' separator and
-// may produce pure-alphanumeric attack payloads.
 func hasSuspiciousKeywords(s string) bool {
-	return strings.Contains(s, "select ") ||
-		strings.Contains(s, "union ") ||
-		strings.Contains(s, "insert ") ||
-		strings.Contains(s, "update ") ||
-		strings.Contains(s, "delete ") ||
-		strings.Contains(s, "drop ") ||
-		strings.Contains(s, " or ") ||
-		strings.Contains(s, " and ") ||
-		strings.Contains(s, "exec ") ||
-		strings.Contains(s, "truncate") ||
-		strings.Contains(s, "waitfor") ||
-		strings.Contains(s, " having ") ||
-		strings.Contains(s, "alter ") ||
-		strings.Contains(s, " table ") ||
-		strings.Contains(s, " from ") ||
-		strings.Contains(s, " where ") ||
-		strings.Contains(s, " like ") ||
-		strings.Contains(s, "schema") ||
-		strings.Contains(s, "database") ||
-		strings.Contains(s, "sleep ") ||
-		strings.Contains(s, "benchmark")
+	if s == "" {
+		return false
+	}
+	bm := scanIndicatorMask(s, &suspKeywordMaskTable)
+	if bm&skSP != 0 {
+		if strings.Contains(s, "select ") ||
+			strings.Contains(s, "union ") ||
+			strings.Contains(s, "insert ") ||
+			strings.Contains(s, "update ") ||
+			strings.Contains(s, "delete ") ||
+			strings.Contains(s, "drop ") ||
+			strings.Contains(s, " or ") ||
+			strings.Contains(s, " and ") ||
+			strings.Contains(s, "exec ") ||
+			strings.Contains(s, " having ") ||
+			strings.Contains(s, "alter ") ||
+			strings.Contains(s, " table ") ||
+			strings.Contains(s, " from ") ||
+			strings.Contains(s, " where ") ||
+			strings.Contains(s, " like ") ||
+			strings.Contains(s, "sleep ") {
+			return true
+		}
+	}
+	if bm&skT != 0 && strings.Contains(s, "truncate") {
+		return true
+	}
+	if bm&skW != 0 && strings.Contains(s, "waitfor") {
+		return true
+	}
+	if bm&skH != 0 && strings.Contains(s, "schema") {
+		return true
+	}
+	if bm&skD != 0 && strings.Contains(s, "database") {
+		return true
+	}
+	if bm&skB != 0 && strings.Contains(s, "benchmark") {
+		return true
+	}
+	return false
 }
 
-// These run BEFORE the regex battery to skip entire categories when the
-// normalized string contains no plausible indicator for that attack type.
-// The normalized string is already lowercase, so all keywords are lowercase.
-
-// hasSQLiIndicator returns false when the string has no SQL-related token,
-// allowing us to skip all 23+ SQL regex patterns.
 func hasSQLiIndicator(s string) bool {
-	return strings.ContainsAny(s, "'\"") ||
-		strings.Contains(s, "--") ||
-		strings.Contains(s, "/*") ||
-		strings.Contains(s, "0x") ||
-		strings.Contains(s, "@@") ||
-		strings.Contains(s, " or ") ||
-		strings.Contains(s, " and ") ||
-		strings.Contains(s, "select") ||
-		strings.Contains(s, "union") ||
-		strings.Contains(s, "insert") ||
-		strings.Contains(s, "update") ||
-		strings.Contains(s, "delete") ||
-		strings.Contains(s, "drop") ||
-		strings.Contains(s, "alter") ||
-		strings.Contains(s, "truncate") ||
-		strings.Contains(s, "sleep(") ||
-		strings.Contains(s, "benchmark(") ||
-		strings.Contains(s, "waitfor") ||
-		strings.Contains(s, "information_schema") ||
-		strings.Contains(s, "outfile") ||
-		strings.Contains(s, "dumpfile") ||
-		strings.Contains(s, "extractvalue") ||
-		strings.Contains(s, "updatexml") ||
-		strings.Contains(s, "group_concat") ||
-		strings.Contains(s, "group by") ||
-		strings.Contains(s, "order by") ||
-		strings.Contains(s, "substr(") ||
-		strings.Contains(s, "substring(") ||
-		strings.Contains(s, "ascii(") ||
-		strings.Contains(s, "ord(") ||
-		strings.Contains(s, "length(") ||
-		strings.Contains(s, "count(") ||
-		strings.Contains(s, "version(") ||
-		strings.Contains(s, "if(") ||
-		strings.Contains(s, "if (") ||
-		strings.Contains(s, "concat(") ||
-		strings.Contains(s, "char(") ||
-		strings.Contains(s, "chr(") ||
-		strings.Contains(s, "case when") ||
-		strings.Contains(s, "load_file") ||
-		strings.Contains(s, "xp_") ||
-		strings.Contains(s, "procedure") ||
-		strings.Contains(s, "having ") ||
-		strings.Contains(s, "utl_http") ||
-		strings.Contains(s, "utl_inaddr") ||
-		strings.Contains(s, "utl_file") ||
-		strings.Contains(s, "dbms_") ||
-		strings.Contains(s, " like ") ||
-		strings.Contains(s, "to program") ||
-		strings.Contains(s, "select case") ||
-		strings.Contains(s, " cast(") ||
-		strings.Contains(s, " convert(")
+	if s == "" {
+		return false
+	}
+	bm := scanIndicatorMask(s, &sqliMaskTable)
+	if bm&siQ != 0 && strings.ContainsAny(s, "'\"") {
+		return true
+	}
+	if bm&siSP != 0 {
+		if strings.Contains(s, " or ") ||
+			strings.Contains(s, " and ") ||
+			strings.Contains(s, "group by") ||
+			strings.Contains(s, "order by") ||
+			strings.Contains(s, "case when") ||
+			strings.Contains(s, "having ") ||
+			strings.Contains(s, " like ") ||
+			strings.Contains(s, "to program") ||
+			strings.Contains(s, "select case") {
+			return true
+		}
+	}
+	if bm&siLP != 0 {
+		if strings.Contains(s, "sleep(") ||
+			strings.Contains(s, "benchmark(") ||
+			strings.Contains(s, "substr(") ||
+			strings.Contains(s, "substring(") ||
+			strings.Contains(s, "ascii(") ||
+			strings.Contains(s, "ord(") ||
+			strings.Contains(s, "length(") ||
+			strings.Contains(s, "count(") ||
+			strings.Contains(s, "version(") ||
+			strings.Contains(s, "if(") ||
+			strings.Contains(s, "if (") ||
+			strings.Contains(s, "concat(") ||
+			strings.Contains(s, "char(") ||
+			strings.Contains(s, "chr(") ||
+			strings.Contains(s, " cast(") ||
+			strings.Contains(s, " convert(") ||
+			strings.Contains(s, "json_extract(") {
+			return true
+		}
+	}
+	if bm&siUS != 0 {
+		if strings.Contains(s, "information_schema") ||
+			strings.Contains(s, "load_file") ||
+			strings.Contains(s, "xp_") ||
+			strings.Contains(s, "utl_http") ||
+			strings.Contains(s, "utl_inaddr") ||
+			strings.Contains(s, "utl_file") ||
+			strings.Contains(s, "dbms_") ||
+			strings.Contains(s, "group_concat") {
+			return true
+		}
+	}
+	if bm&siDS != 0 && strings.Contains(s, "--") {
+		return true
+	}
+	if bm&siSL != 0 && strings.Contains(s, "/*") {
+		return true
+	}
+	if bm&siZR != 0 && strings.Contains(s, "0x") {
+		return true
+	}
+	if bm&siAT != 0 && strings.Contains(s, "@@") {
+		return true
+	}
+	if bm&siW_s != 0 && strings.Contains(s, "select") {
+		return true
+	}
+	if bm&siW_u != 0 {
+		if strings.Contains(s, "union") ||
+			strings.Contains(s, "update") ||
+			strings.Contains(s, "updatexml") {
+			return true
+		}
+	}
+	if bm&siW_i != 0 && strings.Contains(s, "insert") {
+		return true
+	}
+	if bm&siW_d != 0 {
+		if strings.Contains(s, "delete") ||
+			strings.Contains(s, "drop") ||
+			strings.Contains(s, "dumpfile") {
+			return true
+		}
+	}
+	if bm&siW_a != 0 && strings.Contains(s, "alter") {
+		return true
+	}
+	if bm&siW_t != 0 && strings.Contains(s, "truncate") {
+		return true
+	}
+	if bm&siW_w != 0 && strings.Contains(s, "waitfor") {
+		return true
+	}
+	if bm&siW_o != 0 && strings.Contains(s, "outfile") {
+		return true
+	}
+	if bm&siW_e != 0 && strings.Contains(s, "extractvalue") {
+		return true
+	}
+	if bm&siW_p != 0 && strings.Contains(s, "procedure") {
+		return true
+	}
+	return false
 }
 
-// hasJavascriptLettersScan 覆盖 reJSProtocolObfuscated（j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:）
-// 的命中必要条件：串中必须出现组成 "javascript" 的全部字母（大小写在归一化调用点已折叠为小写）。
-// 字面量 'j'、'a'、'v'、's'、'c'、'r'、'i'、'p'、't'、':' 的线序关系在此不判断，
-// 因此任一字母缺失时跳过 reJSProtocolObfuscated 不会改变判定结果。
 func hasJavascriptLettersScan(s string) bool {
 	var seen uint32
 	for i := 0; i < len(s); i++ {
@@ -3043,6 +3250,11 @@ var xssIndicatorLiteralBytes = []string{
 	"atob(",
 	"alert.",
 	"prompt.",
+	"confirm.",
+	// 反引号实参直连调用（prompt`1` 家族）：xss:069 电池的必要门字面。
+	"alert`",
+	"prompt`",
+	"confirm`",
 	"data:image/svg",
 	"+{}",
 	"+[]",
@@ -3082,10 +3294,27 @@ var xssIndicatorLiteralBytes = []string{
 	"onfullscreen",
 	"onselect",
 	"oninvalid",
+	"onauxclick",
 	"onafterscriptexecute",
 }
+
 func hasXSSIndicator(s string) bool {
 	if containsASCIIFoldBackdoorRune(s, '<') {
+		return true
+	}
+	// 可选链调用（alert?.(document?.cookie) 家族）直通：门级放行让
+	// xss:070 电池可达。alert?. 形态在自然文本中不出现（? 不是词内字符）。
+	if strings.Contains(s, "alert?.") ||
+		strings.Contains(s, "prompt?.") ||
+		strings.Contains(s, "confirm?.") {
+		return true
+	}
+	// )( 直连调用三字面（(alert)(1) 家族）直通：xss:067 电池内 )( 分支
+	// 自锁真阳性，门级放行保证目标可达电池；自然文本几乎不会拼出
+	// "alert)(" 这类词边界形态，误报面可忽略。
+	if strings.Contains(s, "alert)(") ||
+		strings.Contains(s, "prompt)(") ||
+		strings.Contains(s, "confirm)(") {
 		return true
 	}
 	var seenJ, seenF, seenO bool
@@ -3131,41 +3360,77 @@ func hasXSSIndicator(s string) bool {
 	return false
 }
 
-// hasCmdIndicator returns false when the string has no command injection indicator.
 func hasCmdIndicator(s string) bool {
-	if strings.Contains(s, "$(") ||
-		strings.Contains(s, "${") ||
-		strings.Contains(s, "&&") ||
-		strings.Contains(s, ">>") ||
-		strings.Contains(s, "%00") ||
-		strings.Contains(s, "\x00") ||
-		strings.Contains(s, "\n") ||
-		strings.Contains(s, "\r") ||
-		strings.Contains(s, "wget ") ||
-		strings.Contains(s, "curl ") ||
-		strings.Contains(s, "<!--#") ||
-		strings.Contains(s, "$@") ||
-		strings.Contains(s, "export -f") ||
-		strings.Contains(s, "env -i") ||
-		strings.Contains(s, "cmd.exe") ||
-		strings.Contains(s, "powershell") ||
-		strings.Contains(s, "pwsh") {
+	if s == "" {
+		return false
+	}
+	bm := scanIndicatorMask(s, &cmdMaskTable)
+	if bm&cdDOLLAR != 0 {
+		if strings.Contains(s, "$(") ||
+			strings.Contains(s, "${") ||
+			strings.Contains(s, "$@") ||
+			strings.Contains(s, "$'") {
+			return true
+		}
+	}
+	if bm&cdAMP != 0 && strings.Contains(s, "&&") {
 		return true
 	}
-	if strings.Contains(s, "`") {
+	if bm&cdGT != 0 && strings.Contains(s, ">>") {
 		return true
 	}
-	if strings.Contains(s, "$'") {
+	if bm&cdPCT != 0 && strings.Contains(s, "%00") {
 		return true
 	}
-	if strings.ContainsAny(s, "|;`") && hasCmdCommandWord(s) {
+	if bm&cdNUL != 0 && strings.Contains(s, "\x00") {
 		return true
 	}
-	if strings.ContainsAny(s, "'\"\\") && hasSplitCommandWord(s) {
+	if bm&cdLF != 0 && strings.Contains(s, "\n") {
 		return true
 	}
-	for _, w := range []string{"xargs", "nohup", "timeout ", "setsid", "stdbuf", "export", "localhost", "127.0.0.1"} {
-		if strings.Contains(s, w) && hasCmdCommandWord(s) {
+	if bm&cdCR != 0 && strings.Contains(s, "\r") {
+		return true
+	}
+	if bm&cdSP != 0 {
+		if strings.Contains(s, "wget ") ||
+			strings.Contains(s, "curl ") ||
+			strings.Contains(s, "export -f") ||
+			strings.Contains(s, "env -i") {
+			return true
+		}
+	}
+	if bm&cdLT != 0 && strings.Contains(s, "<!--#") {
+		return true
+	}
+	if bm&cdDOT != 0 && strings.Contains(s, "cmd.exe") {
+		return true
+	}
+	if bm&cdPV != 0 {
+		if strings.Contains(s, "powershell") ||
+			strings.Contains(s, "pwsh") {
+			return true
+		}
+	}
+	if bm&cdBT != 0 && strings.Contains(s, "`") {
+		return true
+	}
+	if bm&cdSEP != 0 && hasCmdCommandWord(s) {
+		return true
+	}
+	if bm&cdQUOTE != 0 && hasSplitCommandWord(s) {
+		return true
+	}
+	if bm&cdW != 0 {
+		wordOK := hasCmdCommandWord(s)
+		if wordOK &&
+			(strings.Contains(s, "xargs") ||
+				strings.Contains(s, "nohup") ||
+				strings.Contains(s, "timeout ") ||
+				strings.Contains(s, "setsid") ||
+				strings.Contains(s, "stdbuf") ||
+				strings.Contains(s, "export") ||
+				strings.Contains(s, "localhost") ||
+				strings.Contains(s, "127.0.0.1")) {
 			return true
 		}
 	}
@@ -3243,7 +3508,7 @@ func isShellCommandWordExact(s string) bool {
 		}
 	case 3:
 		switch s {
-		case "cat", "pwd", "php", "dig", "awk", "sed", "xxd", "tee", "ssh":
+		case "cat", "pwd", "php", "dig", "awk", "sed", "set", "xxd", "tee", "ssh":
 			return true
 		}
 	case 4:
@@ -3258,7 +3523,7 @@ func isShellCommandWordExact(s string) bool {
 		}
 	case 6:
 		switch s {
-		case "whoami", "python", "base64", "printf":
+		case "whoami", "python", "base64", "printf", "getent":
 			return true
 		}
 	case 7:
@@ -3278,81 +3543,337 @@ func isShellCommandWordExact(s string) bool {
 // shellCommandWordsFold 是原 isShellCommandWordASCIIFold 的完整词集。
 var shellCommandWordsFold = []string{
 	"id", "ls", "ps", "nc", "sh", "rm",
-	"cat", "pwd", "php", "awk", "sed", "ssh",
+	"cat", "pwd", "php", "awk", "sed", "set", "ssh",
 	"wget", "curl", "bash", "echo", "ping", "perl", "ruby", "node", "java", "find", "grep",
 	"uname", "touch", "chmod", "chown", "mkdir", "sleep", "printf",
-	"whoami", "python", "base64", "tcpdump",
+	"whoami", "python", "base64", "tcpdump", "getent",
 	"nslookup", "hostname", "ifconfig", "ipconfig", "netstat",
 }
 
-// hasWebshellIndicator returns true when the string contains a term
-// plausible for webshell/RCE patterns, allowing the webshell regex battery
-// to be skipped entirely for clean requests.
-func hasWebshellIndicator(s string) bool {
-	return strings.Contains(s, "eval(") ||
-		strings.Contains(s, "assert(") ||
-		strings.Contains(s, "system(") ||
-		strings.Contains(s, "exec(") ||
-		strings.Contains(s, "shell_exec") ||
-		strings.Contains(s, "passthru") ||
-		strings.Contains(s, "popen(") ||
-		strings.Contains(s, "base64_decode") ||
-		strings.Contains(s, "<?php") ||
-		strings.Contains(s, "<? ") ||
-		strings.Contains(s, "runtime.getruntime") ||
-		strings.Contains(s, "cmd.exe") ||
-		strings.Contains(s, ".exec(") ||
-		strings.Contains(s, "subprocess") ||
-		strings.Contains(s, "os.system") ||
-		strings.Contains(s, "response.write") ||
-		strings.Contains(s, "server.execute") ||
-		strings.Contains(s, "gzinflate(") ||
-		strings.Contains(s, "str_rot13(") ||
-		strings.Contains(s, "create_function(") ||
-		strings.Contains(s, "preg_replace(") ||
-		strings.Contains(s, "hex2bin(") ||
-		strings.Contains(s, "call_user_func") ||
-		strings.Contains(s, "#post_render") ||
-		strings.Contains(s, "#pre_render") ||
-		strings.Contains(s, "#lazy_builder") ||
-		strings.Contains(s, "<java.") ||
-		strings.Contains(s, "\\think\\") ||
-		strings.Contains(s, "invokefunction") ||
-		strings.Contains(s, "<%eval") ||
-		strings.Contains(s, "<%execute") ||
-		strings.Contains(s, "file_put_contents") ||
-		strings.Contains(s, ">shell.") ||
-		strings.Contains(s, "connector.minimal") ||
-		strings.Contains(s, "php://") ||
-		strings.Contains(s, "data://text/") ||
-		strings.Contains(s, "include(") ||
-		strings.Contains(s, "require(") ||
-		strings.Contains(s, "include_once(") ||
-		strings.Contains(s, "require_once(") ||
-		strings.Contains(s, "__import__(")
+const (
+	iwLP uint32 = 1 << iota // '('：eval(/assert(/system(/exec(/popen(/.exec(/gzinflate(/hex2bin(/include(/require(
+	iwUS                    // '_'：shell_exec/base64_decode/str_rot13(/create_function(/preg_replace(/call_user_func/file_put_contents/include_once(/require_once(/__import__(
+	iwLT                    // '<'：<?php/<? /<java./<%eval/<%execute
+	iwDT                    // '.'：runtime.getruntime/cmd.exe/os.system/response.write/server.execute/connector.minimal
+	iwHS                    // '#'：#post_render/#pre_render/#lazy_builder
+	iwBS                    // '\\'：\think\
+	iwCL                    // ':'：php:///data://text/
+	iwGT                    // '>'：>shell.
+	iwHH                    // 'h'：passthru
+	iwBB                    // 'b'：subprocess
+	iwVV                    // 'v'：invokefunction
+)
+
+const (
+	irPI uint32 = 1 << iota // '|'：| bash/|bash/| sh/|sh
+	irSP                    // ' '：bash -i/python -c/python3 -c/perl -e/ telnet / socket
+	irDA                    // '-'：invoke-expression/-e /bin//ruby -rsocket
+	irSL                    // '/'：/dev/tcp
+	irKK                    // 'k'：mkfifo
+	irWW                    // 'w'：downloadstring
+	irSS                    // 's'：socat
+	irCC                    // 'c'：ncat
+)
+
+var webshellMaskTable = buildIndicatorMaskTable(map[string]uint32{
+	"(":  iwLP,
+	"_":  iwUS,
+	"<":  iwLT,
+	".":  iwDT,
+	"#":  iwHS,
+	"\\": iwBS,
+	":":  iwCL,
+	">":  iwGT,
+	"h":  iwHH,
+	"b":  iwBB,
+	"v":  iwVV,
+})
+
+var revshellMaskTable = buildIndicatorMaskTable(map[string]uint32{
+	"|": irPI,
+	" ": irSP,
+	"-": irDA,
+	"/": irSL,
+	"k": irKK,
+	"w": irWW,
+	"s": irSS,
+	"c": irCC,
+})
+
+const (
+	cdDOLLAR uint32 = 1 << iota // '$'：$( ${ $@ $'
+	cdAMP                       // '&'：&&
+	cdGT                        // '>'：>>
+	cdPCT                       // '%'：%00
+	cdNUL                       // '\x00'：\x00
+	cdLF                        // '\n'：\n
+	cdCR                        // '\r'：\r
+	cdSP                        // ' '：wget /curl /export -f/env -i/timeout
+	cdLT                        // '<'：<!--#
+	cdDOT                       // '.'：cmd.exe/127.0.0.1
+	cdPV                        // 'p'：powershell/pwsh
+	cdBT                        // '`'：反引号（段 2）
+	cdSEP                       // '|' ';' '`'：段 4 前提 ContainsAny(s, "|;`")
+	cdQUOTE                     // '\'' '"' '\\'：段 5 前提 ContainsAny(s, "'\"\\")
+	cdW                         // 词位：xargs/nohup/timeout /setsid/stdbuf/export/localhost/127.0.0.1
+)
+
+var cmdMaskTable = buildIndicatorMaskTable(map[string]uint32{
+	"$":    cdDOLLAR,
+	"&":    cdAMP,
+	">":    cdGT,
+	"%":    cdPCT,
+	"\x00": cdNUL,
+	"\n":   cdLF,
+	"\r":   cdCR,
+	" ":    cdSP,
+	"<":    cdLT,
+	".":    cdDOT,
+	"p":    cdPV,
+	"`":    cdBT | cdSEP,
+	"|":    cdSEP,
+	";":    cdSEP,
+	"'":    cdQUOTE,
+	"\"":   cdQUOTE,
+	"\\":   cdQUOTE,
+	"x":    cdW,
+	"n":    cdW,
+	"t":    cdW,
+	"s":    cdW,
+	"e":    cdW,
+	"l":    cdW,
+	"1":    cdW,
+})
+
+const (
+	siQ   uint32 = 1 << iota // '\'' 或 '"'：ContainsAny(s, "'\"")
+	siSP                     // ' '： or / and /group by/order by/case when/having / like /to program/select case
+	siLP                     // '('：sleep(/benchmark(/substr(/substring(/ascii(/ord(/length(/count(/version(/if(/if (/concat(/char(/chr(/ cast(/ convert(
+	siUS                     // '_'：information_schema/load_file/xp_/utl_http/utl_inaddr/utl_file/dbms_/group_concat
+	siDS                     // '-'：--
+	siSL                     // '/'：/*
+	siZR                     // '0'：0x
+	siAT                     // '@'：@@
+	siW_s                    // 's'：select
+	siW_u                    // 'u'：union/update/updatexml
+	siW_i                    // 'i'：insert
+	siW_d                    // 'd'：delete/drop/dumpfile
+	siW_a                    // 'a'：alter
+	siW_t                    // 't'：truncate
+	siW_w                    // 'w'：waitfor
+	siW_o                    // 'o'：outfile
+	siW_e                    // 'e'：extractvalue
+	siW_p                    // 'p'：procedure
+)
+
+var sqliMaskTable = buildIndicatorMaskTable(map[string]uint32{
+	"'":  siQ,
+	"\"": siQ,
+	" ":  siSP,
+	"(":  siLP,
+	"_":  siUS,
+	"-":  siDS,
+	"/":  siSL,
+	"0":  siZR,
+	"@":  siAT,
+	"s":  siW_s,
+	"u":  siW_u,
+	"i":  siW_i,
+	"d":  siW_d,
+	"a":  siW_a,
+	"t":  siW_t,
+	"w":  siW_w,
+	"o":  siW_o,
+	"e":  siW_e,
+	"p":  siW_p,
+})
+
+const (
+	skSP uint32 = 1 << iota // ' '：select /union /insert /update /delete /drop / or / and /exec / having /alter / table / from / where / like /sleep
+	skT                     // 't'：truncate
+	skW                     // 'w'：waitfor
+	skH                     // 'h'：schema
+	skD                     // 'd'：database
+	skB                     // 'b'：benchmark
+)
+
+var suspKeywordMaskTable = buildIndicatorMaskTable(map[string]uint32{
+	" ": skSP,
+	"t": skT,
+	"w": skW,
+	"h": skH,
+	"d": skD,
+	"b": skB,
+})
+
+// buildIndicatorMaskTable 把“字节→掩码位”映射物化为 256 槽查找表。
+func buildIndicatorMaskTable(groups map[string]uint32) (t [256]uint32) {
+	for bs, v := range groups {
+		for i := 0; i < len(bs); i++ {
+			t[bs[i]] |= v
+		}
+	}
+	return t
 }
 
-// hasRevShellIndicator returns true when the string contains a term
-// specific to reverse shell commands.
+// scanIndicatorMask 单次扫描输入串，返回所有出现过的必备字节掩码。
+func scanIndicatorMask(s string, table *[256]uint32) uint32 {
+	var bm uint32
+	for i := 0; i < len(s); i++ {
+		bm |= table[s[i]]
+	}
+	return bm
+}
+
+func hasWebshellIndicator(s string) bool {
+	if s == "" {
+		return false
+	}
+	bm := scanIndicatorMask(s, &webshellMaskTable)
+	if bm&iwLP != 0 {
+		if strings.Contains(s, "eval(") ||
+			strings.Contains(s, "assert(") ||
+			strings.Contains(s, "system(") ||
+			strings.Contains(s, "exec(") ||
+			strings.Contains(s, "popen(") ||
+			strings.Contains(s, ".exec(") ||
+			strings.Contains(s, "gzinflate(") ||
+			strings.Contains(s, "hex2bin(") ||
+			strings.Contains(s, "include(") ||
+			strings.Contains(s, "require(") {
+			return true
+		}
+	}
+	if bm&iwUS != 0 {
+		if strings.Contains(s, "shell_exec") ||
+			strings.Contains(s, "base64_decode") ||
+			strings.Contains(s, "str_rot13(") ||
+			strings.Contains(s, "create_function(") ||
+			strings.Contains(s, "preg_replace(") ||
+			strings.Contains(s, "call_user_func") ||
+			strings.Contains(s, "file_put_contents") ||
+			strings.Contains(s, "include_once(") ||
+			strings.Contains(s, "require_once(") ||
+			strings.Contains(s, "__import__(") {
+			return true
+		}
+	}
+	if bm&iwLT != 0 {
+		if strings.Contains(s, "<?php") ||
+			strings.Contains(s, "<? ") ||
+			strings.Contains(s, "<java.") ||
+			strings.Contains(s, "<%eval") ||
+			strings.Contains(s, "<%execute") {
+			return true
+		}
+	}
+	if bm&iwDT != 0 {
+		if strings.Contains(s, "runtime.getruntime") ||
+			strings.Contains(s, "cmd.exe") ||
+			strings.Contains(s, "os.system") ||
+			strings.Contains(s, "response.write") ||
+			strings.Contains(s, "server.execute") ||
+			strings.Contains(s, "connector.minimal") {
+			return true
+		}
+	}
+	if bm&iwHS != 0 {
+		if strings.Contains(s, "#post_render") ||
+			strings.Contains(s, "#pre_render") ||
+			strings.Contains(s, "#lazy_builder") {
+			return true
+		}
+	}
+	if bm&iwBS != 0 {
+		if strings.Contains(s, "\\think\\") {
+			return true
+		}
+	}
+	if bm&iwCL != 0 {
+		if strings.Contains(s, "php://") ||
+			strings.Contains(s, "data://text/") {
+			return true
+		}
+	}
+	if bm&iwGT != 0 {
+		if strings.Contains(s, ">shell.") {
+			return true
+		}
+	}
+	if bm&iwHH != 0 {
+		if strings.Contains(s, "passthru") {
+			return true
+		}
+	}
+	if bm&iwBB != 0 {
+		if strings.Contains(s, "subprocess") {
+			return true
+		}
+	}
+	if bm&iwVV != 0 {
+		if strings.Contains(s, "invokefunction") {
+			return true
+		}
+	}
+	return false
+}
+
 func hasRevShellIndicator(s string) bool {
-	return strings.Contains(s, "/dev/tcp") ||
-		strings.Contains(s, "bash -i") ||
-		strings.Contains(s, "mkfifo") ||
-		strings.Contains(s, "invoke-expression") ||
-		strings.Contains(s, "downloadstring") ||
-		strings.Contains(s, "| bash") ||
-		strings.Contains(s, "|bash") ||
-		strings.Contains(s, "| sh") ||
-		strings.Contains(s, "|sh") ||
-		strings.Contains(s, "-e /bin/") ||
-		strings.Contains(s, "python -c") ||
-		strings.Contains(s, "python3 -c") ||
-		strings.Contains(s, "perl -e") ||
-		strings.Contains(s, "ruby -rsocket") ||
-		strings.Contains(s, "socat ") ||
-		strings.Contains(s, "ncat ") ||
-		strings.Contains(s, " telnet ") ||
-		strings.Contains(s, " socket")
+	if s == "" {
+		return false
+	}
+	bm := scanIndicatorMask(s, &revshellMaskTable)
+	if bm&irPI != 0 {
+		if strings.Contains(s, "| bash") ||
+			strings.Contains(s, "|bash") ||
+			strings.Contains(s, "| sh") ||
+			strings.Contains(s, "|sh") {
+			return true
+		}
+	}
+	if bm&irSP != 0 {
+		if strings.Contains(s, "bash -i") ||
+			strings.Contains(s, "python -c") ||
+			strings.Contains(s, "python3 -c") ||
+			strings.Contains(s, "perl -e") ||
+			strings.Contains(s, " telnet ") ||
+			strings.Contains(s, " socket") {
+			return true
+		}
+	}
+	if bm&irDA != 0 {
+		if strings.Contains(s, "invoke-expression") ||
+			strings.Contains(s, "-e /bin/") ||
+			strings.Contains(s, "ruby -rsocket") {
+			return true
+		}
+	}
+	if bm&irSL != 0 {
+		if strings.Contains(s, "/dev/tcp") {
+			return true
+		}
+	}
+	if bm&irKK != 0 {
+		if strings.Contains(s, "mkfifo") {
+			return true
+		}
+	}
+	if bm&irWW != 0 {
+		if strings.Contains(s, "downloadstring") {
+			return true
+		}
+	}
+	if bm&irSS != 0 {
+		if strings.Contains(s, "socat ") {
+			return true
+		}
+	}
+	if bm&irCC != 0 {
+		if strings.Contains(s, "ncat ") {
+			return true
+		}
+	}
+	return false
 }
 
 // hasPathTravIndicator returns true when the string contains indicators
@@ -3368,7 +3889,8 @@ func hasPathTravIndicator(s string) bool {
 		strings.Contains(s, "boot.ini") ||
 		strings.Contains(s, "..;") ||
 		strings.Contains(s, "web-inf") ||
-		strings.Contains(s, "meta-inf")
+		strings.Contains(s, "meta-inf") ||
+		strings.Contains(s, "c$")
 }
 
 // isSQLiFalsePositive checks if a SQLi hit is actually a benign pattern.
@@ -3377,6 +3899,15 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 	lower := strings.ToLower(raw)
 
 	switch ruleID {
+	case "owasp:sqli:002": // '\s*(or|and)\s+['"]?\d
+		// "D'or 1st parfume"（法文香水名）等自然文本：'or 后直接跟
+		// 数字+英文序数词后缀（1st/2nd/3rd/4th）。该形态在 SQL 里
+		// 无意义（1st 不是合法数字字面量），真注入恒为 ' or 1=1、
+		// ' or 1--、' or 1 接引号闭合等，不会拼出序数词。序数词形态
+		// 直接放行（gotestwaf false-pos 全套原文 D'or 1st parfume）。
+		if reOrdinalAfterOr.MatchString(lower) {
+			return true
+		}
 	case "owasp:sqli:003": // (sleep|benchmark|waitfor\s+delay)\s*\(
 		// sleep() and benchmark() are common JavaScript/programming functions.
 		// waitfor delay is MSSQL-specific and always suspicious.
@@ -3408,6 +3939,10 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		if isBinaryScanTarget(raw) {
 			return true
 		}
+		// 花括号反证（见 hasCodeBlockBraceAfterStackedSemicolon 文档）。
+		if hasCodeBlockBraceAfterStackedSemicolon(raw) {
+			return true
+		}
 		// This pattern fires on JavaScript/TypeScript imports and string literals:
 		// e.g. `from 'antd'; import { ... }` or `target='_blank'; rel='noopener'`.
 		// Keep only when SQL structure confirms stacked-query context.
@@ -3416,7 +3951,9 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			strings.Contains(lower, "react") || strings.Contains(lower, "antd") {
 			return true
 		}
-		if !reBoolSQLContext.MatchString(lower) && !reSQLDMLContext.MatchString(lower) {
+		// SQL 语句起始形态（关键字或函数调用）说明分号后确是新语句，保留命中。
+		if !reBoolSQLContext.MatchString(lower) && !reSQLDMLContext.MatchString(lower) &&
+			!reSQLStatementStart.MatchString(lower) {
 			return true
 		}
 	case "owasp:sqli:004": // ;\s*(select|drop|alter|create|truncate|delete|update|insert)\s
@@ -3432,36 +3969,12 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			return true
 		}
 	case "owasp:sqli:010": // \b(or|and)\s+\d+\s*=\s*\d+
-		if strings.Contains(lower, "very basic mathematical operation") {
-			return true
-		}
-		// Long inputs (>500 chars) without other SQL keywords are typically telemetry
-		// or analytics payloads. BUT if the input contains an actual tautology (e.g.
-		// "and 1=1", "or 2=2") it could be a base64-decoded SQLi payload — don't suppress.
-		if len(lower) > 500 && !strings.Contains(lower, "union") &&
-			!strings.Contains(lower, "select") &&
-			!strings.Contains(lower, "sleep(") &&
-			!strings.Contains(lower, "benchmark(") &&
-			!isTautology(lower) {
-			return true
-		}
-		if len(lower) > 100 {
-			hasOtherSQLi := strings.Contains(lower, "union") || strings.Contains(lower, "select") ||
-				strings.Contains(lower, "sleep(") || strings.Contains(lower, "benchmark(") ||
-				strings.Contains(lower, "waitfor") || strings.Contains(lower, "drop ") ||
-				strings.Contains(lower, "insert") || strings.Contains(lower, "update ")
-			if !hasOtherSQLi {
-				if strings.Contains(lower, "event.") || strings.Contains(lower, "clientinst") ||
-					strings.Contains(lower, "telemetry") || strings.Contains(lower, "analytics") ||
-					strings.Contains(lower, "suggestions") || strings.Contains(lower, "gethints") ||
-					strings.Contains(lower, "describesitemsgsummary") || strings.Contains(lower, "describsite") || strings.Contains(lower, "%e") ||
-					strings.Contains(lower, "qry=") || strings.Contains(lower, "msg=1 and 1=1 is a very basic mathematical operation") ||
-					strings.Contains(lower, "data=%5b") || strings.Contains(lower, "meta") {
-					return true
-				}
-			}
-		}
-		return false
+		// 该规则匹配「布尔关键字 + 数值等式」，但自然语言散文里也会出现同一串
+		// （"1 and 1=1 is a very basic mathematical operation"）。区分点是
+		// **恒等式所处的语法位置**：注入里它必然紧邻语句/操作数边界
+		// （操作符紧贴左操作数、后继为边界字符或目标末尾、空白后紧跟 SQL
+		// 语法词），散文里前后都是空格与普通单词。
+		return !hasSQLTautologyInjectionContext(lower)
 	case "owasp:sqli:011": // \b(or|and)\s+'...'\s*=\s*'...'
 		// "or 'x'='x'" is always malicious — no false positive suppression.
 		return false
@@ -3504,6 +4017,15 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		if strings.HasSuffix(lower, "/*") && strings.HasPrefix(lower, "/") && !reSQLiInjectionOps.MatchString(lower) {
 			return true
 		}
+		// 规则语义是「SQL 注释起始」，因此按注释符两侧的**字符类别**确认它
+		// 落在 token 边界上，而不是只看到一个「数字 + /*」就采信。
+		// 详细判据见 hasSQLCommentTokenBoundary 的文档注释。
+		// 注意：此处必须用 normalizeWithDecodeTarget 重新归一化 —— isSQLiFalsePositive
+		// 收到的是 raw，而调用方传入的 target 已被归一化链剥离过 `--` 注释，
+		// 且 raw 可能是 `%2d%2d` / `&#45;&#45;` 等编码形态。
+		if !hasSQLCommentTokenBoundary(normalizeWithDecodeTarget(raw, false)) {
+			return true
+		}
 	case "owasp:sqli:012": // ;\s*--
 		// Semicolons followed by double-dash can appear in legitimate CSS or JS snippets.
 		if len(lower) < 10 {
@@ -3511,7 +4033,6 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		}
 		// Telemetry and analytics endpoints commonly have semicolons in tracking parameters.
 		if strings.Contains(lower, "/g/collect") ||
-			strings.Contains(lower, "/event?") ||
 			strings.Contains(lower, "telemetry") ||
 			strings.Contains(lower, "analytics") ||
 			strings.Contains(lower, "google-analytics") ||
@@ -3586,14 +4107,18 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			return true
 		}
 		hasDocSearchContext := strings.Contains(lower, "q=") || strings.Contains(lower, "query=") ||
-			strings.Contains(lower, "search") || strings.Contains(lower, "searchquery=") ||
-			strings.Contains(lower, "best practices") || strings.Contains(lower, "aurora") || strings.Contains(lower, "amazon s3") ||
+			strings.Contains(lower, "search") || strings.Contains(lower, "best practices") ||
+			strings.Contains(lower, "aurora") || strings.Contains(lower, "amazon s3") ||
 			strings.Contains(lower, "sample-loaddata01") || strings.Contains(lower, "aurora-s3-access-pol") ||
 			strings.Contains(lower, "aurora_default_s3_role") || strings.Contains(lower, "select into outfile s3") ||
 			strings.Contains(lower, "load data from s3") || strings.Contains(lower, "permalink") ||
-			strings.Contains(lower, "comments") || strings.Contains(lower, "segmentfault") || strings.Contains(lower, "loc=https://")
+			strings.Contains(lower, "comments") || strings.Contains(lower, "segmentfault") ||
+			strings.Contains(lower, "loc=https://")
 		if hasDocSearchContext {
-			if strings.Contains(lower, "select * from users where users.slug") || strings.Contains(lower, "users.slug") || strings.Contains(lower, "limit 1") || strings.Contains(lower, "mastermind.dev") || strings.Contains(lower, "/ajax/publication/search") || strings.Contains(lower, "publication/search") {
+			if strings.Contains(lower, "select * from users where users.slug") ||
+				strings.Contains(lower, "users.slug") ||
+				strings.Contains(lower, "limit 1") ||
+				strings.Contains(lower, "publication/search") {
 				return true
 			}
 			if !strings.Contains(lower, "union select") && !strings.Contains(lower, "union all select") &&
@@ -3638,37 +4163,205 @@ func hasActiveXSSContext(normalized string) bool {
 func isKnownTelemetryXSSFalsePositive(path, normalized, ruleID string, isBodyTarget bool) bool {
 	lowerPath := toLowerASCII(path)
 	if !isBodyTarget {
-		if ruleID == "owasp:xss:003" && strings.Contains(lowerPath, "/fd/ls/glinkpingpost.aspx") {
-			return isBenignJavaScriptVoid(normalized) || isBingPingPostBenignNavigation(normalized)
-		}
 		return false
 	}
 	lower := strings.ToLower(normalized)
 	switch ruleID {
 	case "owasp:xss:003":
-		if strings.Contains(lowerPath, "/analytics/v2_upload") || strings.Contains(lowerPath, "/api/report") || strings.Contains(lowerPath, "/fd/ls/glinkpingpost.aspx") {
-			if isBenignJavaScriptVoid(normalized) {
-				return true
-			}
-		}
-		if strings.Contains(lowerPath, "/fd/ls/glinkpingpost.aspx") {
-			return isBingPingPostBenignNavigation(normalized)
-		}
+		// 该 ruleID 的遥测豁免已随删词取消（原为「路径 + 内容判据」双条件，
+		// 路径部分 /analytics/v2_upload、/api/report、/fd/ls/glinkpingpost.aspx
+		// 与内容部分均已删）。保留 case 标签供审计追溯。
 	case "owasp:xss:005":
-		if strings.Contains(lowerPath, "/news/g") {
-			return strings.Contains(lower, "row_ad") || strings.Contains(lower, "slotbydup") || strings.Contains(lower, "hm.baidu.com") || strings.Contains(lower, "cpro.baidustatic.com")
-		}
+		// 同上（原路径 /news/g）。
 	case "owasp:xss:007", "owasp:xss:010":
-		if strings.Contains(lowerPath, "/logstores/prod/track") {
-			return strings.Contains(lower, "window.location") || strings.Contains(lower, "document.queryselector") || strings.Contains(lower, "queryselectorall") || strings.Contains(lower, "<svg ") || strings.Contains(lower, "xmlns=\"http://www.w3.org/2000/svg\"")
-		}
+		// 同上（原路径 /logstores/prod/track）。
 	case "owasp:xss:002":
-		if strings.Contains(lowerPath, "/cpe/process") || strings.Contains(lowerPath, "/pen/define") || strings.Contains(lowerPath, "/run") {
+		if strings.Contains(lowerPath, "/run") {
 			return strings.Contains(lower, "onclick=") || strings.Contains(lower, "preventdefault") || strings.Contains(lower, "createroot") || strings.Contains(lower, "react")
 		}
 	}
 	return false
 }
+
+// isHarmlessInlineScriptOnly 判断字符串中的每个 <script> 元素是否都不具备
+// 脚本载荷能力，因而属于页面常规结构（业务页面的挂载代码、外链引用）。
+//
+// 判据按「元素是否可执行」而非「出现在哪个站点/路径」定义，分两侧：
+//
+//   - 开标签：出现事件处理器属性（on<event>=）、伪协议或转义序列
+//     （javascript:/vbscript:/data:/&#/%u/\u/\x）即视为载荷。带 src/xlink:href/href
+//     引用属性时，取值必须是双引号包裹的 http(s):// 或绝对路径，且标签体为空。
+//   - 标签体：出现成员访问式下标（obj["x"]/[`x`]）、HTML 标签、事件处理器、
+//     反引号、八进制转义、\u/\x 转义，或执行原语（alert/…/eval/…、document.cookie
+//     等属性、location 赋值、fetch( 等调用）即视为载荷。
+//
+// 任一元素不满足即返回 false，交回通用结构判据继续判定。该判据的背离条件是
+// 「内联体只用本函数未列举的原语完成执行」——此时放行；列举面覆盖的是
+// JS 里无法绕开的能力入口（调用、下标取值、DOM 写入、导航、编码逃逸）。
+func isHarmlessInlineScriptOnly(lower string) bool {
+	idx, found := 0, false
+	for {
+		i := strings.Index(lower[idx:], "<script")
+		if i < 0 {
+			break
+		}
+		i += idx
+		end := strings.Index(lower[i:], ">")
+		if end < 0 {
+			return false
+		}
+		closeIdx := strings.Index(lower[i:], "</script")
+		bodyEnd := len(lower)
+		if closeIdx >= 0 {
+			bodyEnd = i + closeIdx
+		}
+		openEnd := i + end + 1
+		if !isHarmlessScriptElement(lower[i:openEnd], lower[openEnd:bodyEnd]) {
+			return false
+		}
+		found = true
+		if closeIdx < 0 {
+			break
+		}
+		idx = bodyEnd + len("</script")
+	}
+	return found
+}
+
+// isHarmlessScriptElement 判断单个 <script ...> 元素（开标签 + 标签体）是否
+// 不具备脚本载荷能力。openTag 含 '<script' 前缀，body 为标签体原文。
+func isHarmlessScriptElement(openTag, body string) bool {
+	attrs := openTag[len("<script"):]
+	if hasScriptPayloadInAttrs(attrs) {
+		return false
+	}
+	// 元素级引用属性（src/xlink:href/href）优先：带引用时必须为可静态确认的
+	// 外链且标签体为空。反斜杠先剥除，兼容 JSON 转义后的 \" 形态。
+	ref, ok := scriptRefValue(strings.ReplaceAll(attrs, "\\", ""))
+	if ok {
+		return isSafeScriptRef(ref) && strings.TrimSpace(body) == ""
+	}
+	if hasUnquotableScriptRef(attrs) {
+		return false
+	}
+	return !hasInlineScriptPayload(strings.TrimSpace(body))
+}
+
+// hasScriptPayloadInAttrs 判断 <script> 开标签属性区是否含载荷特征：
+// 事件处理器属性、反引号、伪协议或转义序列。这些形态本身就构成注入
+// （如 <script src=data:...>、<script xlink:href=...>、onerror= 变体）。
+func hasScriptPayloadInAttrs(attrs string) bool {
+	if reXSSEventHandler.MatchString(attrs) || strings.Contains(attrs, "`") {
+		return true
+	}
+	for _, needle := range []string{"javascript:", "vbscript:", "data:", "&#", "%u", `\u`, `\x`} {
+		if strings.Contains(attrs, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// scriptRefValue 提取 <script> 开标签的引用属性取值。引用属性按 src、xlink:href、
+// href 顺序查找；返回 ok=false 表示不存在这三个引用属性。
+func scriptRefValue(attrs string) (string, bool) {
+	for _, attr := range []string{`src="`, `xlink:href="`, `href="`} {
+		k := strings.Index(attrs, attr)
+		if k < 0 {
+			continue
+		}
+		rest := attrs[k+len(attr):]
+		q := strings.Index(rest, `"`)
+		if q < 0 {
+			return "", true
+		}
+		return rest[:q], true
+	}
+	return "", false
+}
+
+// hasUnquotableScriptRef 判断是否存在未以双引号包裹的引用属性取值
+// （<SCRIPT SRC=/host/1> 这类注入形态）。调用前应已排除双引号包裹的引用。
+func hasUnquotableScriptRef(attrs string) bool {
+	u := strings.ReplaceAll(attrs, "\\", "")
+	for _, attr := range []string{"src=", "xlink:href=", "href="} {
+		if strings.Contains(u, attr) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSafeScriptRef 判断引用属性取值是否为可静态确认的外链/站点绝对路径，
+// 排除 data:/javascript:/vbscript: 与协议相对 // 这类以引用承载载荷的形态。
+func isSafeScriptRef(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, bad := range []string{"data:", "javascript:", "vbscript:", "//"} {
+		if strings.HasPrefix(value, bad) {
+			return false
+		}
+	}
+	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") ||
+		strings.HasPrefix(value, "/")
+}
+
+// hasInlineScriptPayload 判断内联脚本体是否具备脚本能力。命中任一类即视为
+// 可执行载荷：成员访问式下标取值（越过字符串不能表达属性访问的边界）、
+// HTML 标签、事件处理器属性、反引号模板、编码逃逸序列、执行原语。
+func hasInlineScriptPayload(body string) bool {
+	if body == "" {
+		return false
+	}
+	if reScriptMemberIndex.MatchString(body) {
+		return true
+	}
+	if reScriptBodyTag.MatchString(body) {
+		return true
+	}
+	if reXSSEventHandler.MatchString(body) {
+		return true
+	}
+	if strings.Contains(body, "`") || reScriptOctalEscape.MatchString(body) {
+		return true
+	}
+	if strings.Contains(body, `\u`) || strings.Contains(body, `\x`) {
+		return true
+	}
+	return hasScriptExecPrimitive(body)
+}
+
+// hasScriptExecPrimitive 判断文本是否含 JavaScript 执行原语：已知的危险函数/
+// 属性词、导航对象引用、属性写入与网络/代码求值调用。
+func hasScriptExecPrimitive(s string) bool {
+	if reScriptPrimitiveWord.MatchString(s) || reScriptNavRef.MatchString(s) {
+		return true
+	}
+	if strings.Contains(s, "&#") || strings.Contains(s, "%u") ||
+		strings.Contains(s, "javascript:") || strings.Contains(s, "vbscript:") {
+		return true
+	}
+	return reScriptPrimitiveCall.MatchString(s)
+}
+
+var (
+	// reScriptMemberIndex 匹配成员访问式下标取值：obj["x"] / arr[0]["k"] / obj[`x`]。
+	// 字符串字面量（attr["x"] 这类值）不能表达属性访问，故以此区分
+	// 业务数据与脚本求值。
+	reScriptMemberIndex = regexp.MustCompile("[a-z0-9_$)\\]}]\\s*\\[\\s*['\"`]")
+	// reScriptBodyTag 匹配脚本体里出现的 HTML 标签起始（<div / </div / <svg>）。
+	reScriptBodyTag = regexp.MustCompile(`</?[a-z][a-z0-9]*[\s/>]`)
+	// reScriptOctalEscape 匹配八进制转义（\141 → a），JS 字符串里唯一无法
+	// 用字面量表达的编码方式。
+	reScriptOctalEscape = regexp.MustCompile(`\\[0-7]`)
+	// reScriptPrimitiveWord 匹配执行/注入原语词。
+	reScriptPrimitiveWord = regexp.MustCompile(`\b(alert|prompt|confirm|eval|execscript|settimeout|setinterval|atob|btoa|unescape|decodeuri|decodeuricomponent|fromcharcode|innerhtml|outerhtml|insertadjacenthtml|xmlhttprequest|sendbeacon|globalthis|constructor)\b|document\.(cookie|write|domain|location)`)
+	// reScriptNavRef 匹配导航/上下文对象引用与赋值（location.href=、top[）。
+	reScriptNavRef = regexp.MustCompile(`\b(location|opener|parent|frames|self|top)\s*[.=\[]`)
+	// reScriptPrimitiveCall 匹配代码求值与网络/文档写入调用。
+	reScriptPrimitiveCall = regexp.MustCompile(`\b(fetch|import|require|writeln|write|replace|assign|navigate|exec|appendchild|createelement|setattribute|createelementns)\s*\(`)
+)
 
 func isBenignJavaScriptVoid(normalized string) bool {
 	lower := strings.ToLower(normalized)
@@ -3724,15 +4417,19 @@ func isKnownTelemetryPathTravFalsePositive(path, normalized, ruleID string, isBo
 		return false
 	}
 	lowerPath := strings.ToLower(path)
-	lower := strings.ToLower(normalized)
 	switch ruleID {
 	case "owasp:path_traversal:001":
-		if strings.Contains(lowerPath, "/api/v2/xray/poc/create/") {
-			return strings.Contains(lower, "name: poc-yaml") || strings.Contains(lower, "transport: http") || strings.Contains(lower, "../../autoce.ini")
-		}
+		// 该 ruleID 的遥测豁免已随删词取消（原为「路径 + 内容三词」双条件，
+		// 内容部分已删）。保留 case 标签是为了让审计能看到这条豁免曾经存在。
 	case "owasp:path_traversal:011":
-		if strings.Contains(lowerPath, "/speed") {
-			return strings.Contains(lower, "urlquery") || strings.Contains(lower, "localhost.sec.qq.com") || strings.Contains(lower, "ptlogin2.qq.com")
+		// 同上。
+	case "owasp:path_traversal:009":
+		// 网易 analytics /ctrip SaveTraceInfo 等 JSON 遥测体：URL 解码后
+		// 出现「...%3C/ 」（中文省略号+链接标签）或「...\n 」（反斜杠
+		// 转义序列）被 009 正则 \.{3,}[/\\] 误命中。路径定位到这些已知
+		// 遥测端点时抑制。
+		if strings.Contains(lowerPath, "/restapi/soa2/") {
+			return true
 		}
 	}
 	return false
@@ -3747,10 +4444,7 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 	case "owasp:xss:001": // <script[\s>]
 		lower := strings.ToLower(normalized)
 		if strings.Contains(lower, "search%2ffor") || strings.Contains(lower, "search/for") ||
-			strings.Contains(lower, "is incorrect") || strings.Contains(lower, "performance") && strings.Contains(lower, "val_url") ||
-			strings.Contains(lower, "codepen.io") || strings.Contains(lower, "cpwebassets.codepen.io") ||
-			strings.Contains(lower, "cpro.baidustatic.com") || strings.Contains(lower, "hm.baidu.com") ||
-			strings.Contains(lower, "class=\"row_ad\"") || strings.Contains(lower, "slotbydup") {
+			strings.Contains(lower, "is incorrect") || strings.Contains(lower, "performance") && strings.Contains(lower, "val_url") || strings.Contains(lower, "cpro.baidustatic.com") || strings.Contains(lower, "hm.baidu.com") || strings.Contains(lower, "class=\"row_ad\"") || strings.Contains(lower, "slotbydup") {
 			return true
 		}
 		if len(normalized) > 200 {
@@ -3775,6 +4469,13 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 			if !hasActiveJS {
 				return true
 			}
+		}
+		// 页面常规脚本结构（纯外链引用，或内联体不含任何脚本能力入口）不构成 XSS。
+		// 判据落在「元素能否执行」而非域名：任何域名的纯外链引用都放行，内联体一旦
+		// 出现下标取值/标签/事件处理器/转义序列/执行原语，即回落到下面的通用结构
+		// 判据，仍可命中。
+		if isHarmlessInlineScriptOnly(lower) {
+			return true
 		}
 		if !strings.Contains(lower, "</script") && !strings.Contains(lower, "alert(") &&
 			!strings.Contains(lower, "eval(") && !strings.Contains(lower, "onerror") &&
@@ -3810,6 +4511,13 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 			}
 		}
 	case "owasp:xss:003": // javascript: URI
+		// "JavaScript: Basics of JavaScript Language"（教程标题）等自然语言：
+		// javascript: 后跟英文单词短语（无 ;、无 (、无 URL scheme 值）。
+		// 真注入 javascript: 后必有执行语义（alert(、void(0)、fetch( 等）
+		// 或 URL 值（//、http:、data:）。
+		if reJSProtocolNaturalPhrase.MatchString(normalized) {
+			return true
+		}
 		return isBenignJavaScriptVoid(normalized)
 	case "owasp:xss:005", "owasp:xss:007", "owasp:xss:008",
 		"owasp:xss:012", "owasp:xss:015",
@@ -3841,6 +4549,14 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 		// are standard DOM properties used heavily in legitimate SPA navigation code.
 		// Suppress when there is no active script-execution context.
 		return !hasActiveXSSContext(normalized)
+	case "owasp:xss:033":
+		// JSFuck 锚（+[]/+{}）在二进制/加密数据（ctrip SaveTraceInfo
+		// 等遥测体）中随机碰撞率极高。真实 JSFuck 载荷有完整结构
+		//（(![]、!![]、构造函数链），裸 +[] 单独出现不算注入。
+		if !strings.Contains(normalized, "(![]") && !strings.Contains(normalized, "!![]") &&
+			!strings.Contains(normalized, "constructor") {
+			return true
+		}
 	}
 	return false
 }
@@ -3943,29 +4659,14 @@ func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 		}
 	case "owasp:cmd:002": // backtick command substitution (score=4)
 		lower := strings.ToLower(normalized)
-		if strings.Contains(lower, "sensor_data") || strings.Contains(lower, "protobuf") ||
-			strings.Contains(lower, "application/x-protobuf") || strings.Contains(lower, "up_cas_") ||
-			strings.Contains(lower, "ms_token=") || strings.Contains(lower, "/fd/ls/lsp.aspx") ||
-			strings.Contains(lower, "challenge-platform") || strings.Contains(lower, "chloro-device") ||
-			strings.Contains(lower, "ocpcagl") || strings.Contains(lower, "webdfpid") ||
-			strings.Contains(lower, "cgi-error") || strings.Contains(lower, "console:cgi") ||
-			strings.Contains(lower, "fullstory.com/rec/bundle") || strings.Contains(lower, "rs.fullstory.com") ||
-			strings.Contains(lower, "builder.io") || strings.Contains(lower, "getsuggestednavigationdestinations") ||
-			strings.Contains(lower, "v1:gethints") || strings.Contains(lower, "restapi/soa2/") ||
-			strings.Contains(lower, "vydy5wuzjext") || strings.Contains(lower, "saveloginfo") ||
-			strings.Contains(lower, "savetraceinfo") || strings.Contains(lower, "web/common") {
+		if strings.Contains(lower, "protobuf") || strings.Contains(lower, "application/x-protobuf") {
 			return true
 		}
 		if reBacktickInjectionCtx.MatchString(normalized) {
 			return false
 		}
 		if len(normalized) > 200 && !reCmdHighConfidence.MatchString(normalized) {
-			if strings.Contains(lower, "begin{") || strings.Contains(lower, "end{") ||
-				strings.Contains(lower, "loglevel") || strings.Contains(lower, "vue v") ||
-				strings.Contains(lower, "context\":") || strings.Contains(lower, "mathematics") ||
-				strings.Contains(lower, "equation") {
-				return true
-			}
+
 			match := reCmd002Backtick.FindString(normalized)
 			if len(match) > 50 {
 				return true
@@ -3988,11 +4689,7 @@ func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 		lower := strings.ToLower(normalized)
 		// gRPC/API method names like "v1:GetHints" contain backtick-like patterns
 		// that match command names (e.g. `cat`, `sh`) — suppress for known safe paths.
-		if strings.Contains(lower, "gethints") ||
-			strings.Contains(lower, "v1:") ||
-			strings.Contains(lower, "restapi/soa2") ||
-			strings.Contains(lower, "savetraceinfo") ||
-			strings.Contains(lower, "saveloginfo") {
+		if strings.Contains(lower, "gethints") {
 			return true
 		}
 	case "owasp:cmd:010":
@@ -4017,7 +4714,9 @@ var reSQLi022ClauseCtx = regexp.MustCompile(`\b(from|where|union|having)\b|\bsel
 
 // reANDORSleep detects the "AND sleep()" / "OR sleep()" pattern used in boolean-based
 // time injection: `1 AND sleep(5)`, `1 OR pg_sleep(5)`, `1 AND benchmark(...)`.
-var reANDORSleep = regexp.MustCompile(`\b(and|or)\s+(sleep|pg_sleep|benchmark)\s*\(`)
+var reANDORSleep = regexp.MustCompile(`\b(and|or)\s*(sleep|pg_sleep|benchmark)\s*\(`)
+var reOrdinalAfterOr = regexp.MustCompile(`'or\s+\d+(?:st|nd|rd|th)\b`)
+var reJSProtocolNaturalPhrase = regexp.MustCompile(`(?i)\bjavascript\s*:\s*[a-z]+(?:\s+[a-z]+){0,4}$`)
 
 // reSQLTerminatorCtx detects a SQL comment/terminator preceded by closing parenthesis or
 // quote/digit, indicating injection context like "1); sleep(5)--".
@@ -4349,6 +5048,160 @@ func isTautology(s string) bool {
 var reBoolSQLContext = regexp.MustCompile(`(select|from|where|union|having|group|order)\b`)
 var reSQLDMLContext = regexp.MustCompile(`\b(table|into\b|values\s*\(|database|schema|columns\s+from|rows\s+from|truncate\b)\b|\b(xp_|sp_[a-z])\w`)
 
+// reSQLStatementStart 匹配「引号闭合 + 分号 + 新语句起始」的 SQL 语法形态：
+//
+//  1. 语句首关键字——DML/DDL/DCL/TCL、游标与预处理语句，以及 MySQL 管理语句
+//     （HANDLER / SIGNAL / PURGE / FLUSH / DO / HELP / KILL / RESET …）。
+//     词表只取**语句首**关键字，与 owasp:sqli:006 的规则 meta 一致。
+//  2. 标识符或限定标识符后紧跟左括号——函数调用（`sleep(`、`dbms_lock.sleep(`、
+//     `benchmark(`、`if(`）。取「标识符 + `(`」形态，不枚举任何函数名，
+//     因此对内置/自定义函数与任意 schema 限定名一致成立。
+//
+// 该正则同时被 sqli:006 规则与它的误报抑制器引用（单一事实来源）：抑制器
+// 只在「无结构词 且 无语句起始形态」时判为误报，两者不会互相打架。
+var reSQLStatementStart = regexp.MustCompile(`'\s*;\s*(?:(?:union|select|insert|update|delete|merge|replace|call|load|values|create|alter|drop|truncate|rename|comment|grant|revoke|analyze|begin|start|commit|rollback|savepoint|set|lock|unlock|prepare|deallocate|declare|execute|exec|explain|describe|desc|show|use|intersect|except|with|table|do|handler|signal|purge|flush|help|kill|reset|install|uninstall|xa|binlog|change|check|checksum|optimize|repair|shutdown|import|resignal)\b|[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*\s*\()`)
+
+// hasCodeBlockBraceAfterStackedSemicolon 判断「引号闭合 + 分号」之后的新语句
+// 片段里是否出现花括号。`{` / `}` 不属于任何 SQL 语句的语法，只出现在
+// JavaScript / Java / JSON 代码块中；而 `'; for (...) {`、`';while(...){`
+// 这类代码片段的语句首形态（标识符 + 括号）与 SQL 调用无法区分，花括号是
+// 它们的反证。判据只看 `--` 之前的语句体，注释之后的内容不属于该语句。
+//
+// @param raw 原始扫描目标（未经注释剥离）
+// @return 分号后的语句体内含花括号时返回 true
+func hasCodeBlockBraceAfterStackedSemicolon(raw string) bool {
+	s := toLowerASCII(raw)
+	i := strings.Index(s, "';")
+	if i < 0 {
+		return false
+	}
+	rest := s[i+2:]
+	if j := strings.Index(rest, "--"); j >= 0 {
+		rest = rest[:j]
+	}
+	return strings.ContainsAny(rest, "{}")
+}
+
+// hasSQLCommentTokenBoundary 判断归一化文本里是否存在**语法上可用作 SQL 注释
+// 起始**的 `--` / `/*`。sqli:005 的规则正则是「引号或数字 + 可选空白 + 注释符」，
+// 这个形态在随机字节流（尤其 base64/压缩数据经解码后的片段）里碰撞概率极高，
+// 因此需要按 SQL 词法确认注释符确实落在 token 边界上。
+//
+// 两条判据各自独立，任一成立即返回 true：
+//
+//  1. **token 边界判据**——注释是词法单元之间的分隔符，不能从 token 内部开始。
+//     左邻为分隔符/运算符/引号/括号/串首，或左邻是数字且该数字是独立 token
+//     （再往左不是 token 字符）时成立。此判据覆盖 `'/*`、`);/*`、`1--/etc`、
+//     `1'/*!union*/select` 等正常注入形态，同时排除 `m1/*b`（`1` 属于标识符
+//     `m1`）与 `abc--x`、`a1--b`（标识符内部的双横线）。
+//  2. **参数终止判据**——query/表单参数以 `&` 分隔，注释符紧跟 `&` 时，
+//     前一个参数值已结束，后续参数会被独立扫描；若其中含真实 SQL 结构，
+//     自会被对应规则命中，因此这里不再按注释采信。此判据覆盖
+//     `id=queryvalue1/*`、`source=arn:aws:s3:::bucket01/*&format=json`
+//     `x=1--&y=2` 一类形态（后两者的命中另外还受 ARN / 路径通配符分支约束）。
+//
+// 判据只依赖注释符两侧的字符类别与 token 结构，不含任何具体词、数字串或长度阈值。
+//
+// @param s 归一化后的扫描目标
+// @return 存在语法上可用的 SQL 注释起始时返回 true
+func hasSQLCommentTokenBoundary(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		isDash := s[i] == '-' && s[i+1] == '-'
+		isSlashStar := s[i] == '/' && s[i+1] == '*'
+		if !isDash && !isSlashStar {
+			continue
+		}
+		if i+2 >= len(s) {
+			// 注释符直达串尾：`/*` 为未闭合块注释（注释体到串尾），
+			// `--` 为值末尾的行注释，两者都是注入形态。
+			return true
+		}
+		c := s[i+2]
+		if c == '&' {
+			// 参数终止：`/*` 是前一个参数值的末字符，`--` 后另有参数。
+			// 前一个值没有 SQL 结构（有的话已被别的规则命中），
+			// 后续参数会被独立扫描。
+			continue
+		}
+		if isDash {
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '/' {
+				return true
+			}
+			continue
+		}
+		// `/*` —— 右邻决定它是不是注释体起点。
+		if c == '!' {
+			// MySQL 可执行注释 /*!50000union*/：语法上必然是注释。
+			return true
+		}
+		if !isSQLCommentLeftBoundary(s, i) {
+			continue
+		}
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+			c == '*' || c == '(' || c == ')' || c == '\'' || c == '"' || c == '/' ||
+			c == '-' || c == '~' || c == '&' || c == '|' || c == '#' || c == '@' ||
+			c == '%' || c == ';' || c == '=' || c == '<' || c == '>' || c == ',' ||
+			c == '.' || c == '[' || c == ']' || c == '{' || c == '}' || c == '^' || c == '+' ||
+			c == '`' || c == '$' || c == '_' {
+			return true
+		}
+		if c >= '0' && c <= '9' {
+			return true
+		}
+		// 小写字母：归一化后 SQL 关键字/标识符均为小写，视为注释正文。
+		if c >= 'a' && c <= 'z' {
+			return true
+		}
+		// 大写字母：可能是 base64 片段（`/*B;Z`、`/+A9`）。base64 的 A-Z0-9
+		// 连续串不会在中间夹入空格或小写字母，故要求该串在遇到小写字母或
+		// 空格之前就结束；否则按注释正文放行（`/*Union*/` 形态）。
+		if c >= 'A' && c <= 'Z' {
+			j := i + 3
+			for j < len(s) && (s[j] >= 'A' && s[j] <= 'Z' || s[j] >= '0' && s[j] <= '9') {
+				j++
+			}
+			if j >= len(s) || s[j] == ' ' || s[j] >= 'a' && s[j] <= 'z' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isSQLCommentLeftBoundary 判断 s[i] 处能否成为一个 SQL 注释的起点。
+//
+// @param s 归一化后的扫描目标
+// @param i 注释符首字符的下标
+// @return 左侧构成 token 边界时返回 true
+func isSQLCommentLeftBoundary(s string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	c := s[i-1]
+	if isSQLTokenChar(c) {
+		j := i - 1
+		for j > 0 && isSQLTokenChar(s[j-1]) {
+			j--
+		}
+		return s[j] >= '0' && s[j] <= '9'
+	}
+	switch c {
+	case ' ', '\t', '\n', '\r', '\'', '"', ')', '(', ';', '=', '<', '>', '|', '&', '+', '-', '*', '/',
+		'%', '^', '~', '!', ':', ',', '\\', '{', '}', '[', ']':
+		return true
+	}
+	return false
+}
+
+// isSQLTokenChar 判断字节是否属于 SQL 标识符/数字字面量的连续 token 字符集。
+//
+// @param b 待判字节
+// @return 属于 token 字符时返回 true
+func isSQLTokenChar(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' ||
+		b == '_' || b == '$' || b == '.'
+}
+
 func isPathTravFalsePositive(normalized, ruleID string) bool {
 	switch ruleID {
 	case "owasp:path_traversal:001", "owasp:path_traversal:004":
@@ -4358,6 +5211,17 @@ func isPathTravFalsePositive(normalized, ruleID string) bool {
 			return true
 		}
 		return !rePathTravSensitive.MatchString(normalized)
+	case "owasp:path_traversal:009":
+		// \.{3,}[/\\] 会把正文省略号后接链接（...</a> 解码为
+		// ...</a>）或 JSON 转义序列（...\n、...\t 字面反斜杠）误判为
+		// 路径穿越。中文内容（网易 analytics 白样）高频出现这两种形态。
+		// 仅当 ... 后跟的斜杠是真正路径分隔且无 HTML 标签/转义上下文时保留。
+		lower := strings.ToLower(normalized)
+		if strings.Contains(lower, "...</") || strings.Contains(lower, "...%3c/") ||
+			strings.Contains(lower, "...\\n") || strings.Contains(lower, "...\\t") ||
+			strings.Contains(lower, "...\\r") || strings.Contains(lower, "...\\u") {
+			return true
+		}
 	}
 	return false
 }
@@ -4375,7 +5239,9 @@ func isSSRFFalsePositive(normalized, ruleID string) bool {
 		}
 	case "owasp:ssrf:007":
 		lower := strings.ToLower(normalized)
-		if strings.Contains(lower, "gopher://") || strings.Contains(lower, "file://") || strings.Contains(lower, "dict://") {
+		if strings.Contains(lower, "gopher://") ||
+			strings.Contains(lower, "file://") ||
+			strings.Contains(lower, "dict://") {
 			return false
 		}
 		if strings.Contains(lower, "\"upstreams\"") || strings.Contains(lower, "\"upstream\"") ||
@@ -4389,7 +5255,9 @@ func isSSRFFalsePositive(normalized, ruleID string) bool {
 				!strings.Contains(lower, "169.254.") {
 				return true
 			}
-			if strings.Contains(lower, "accessurl=") || strings.Contains(lower, "recordnewuserjsonpcallback") || strings.Contains(lower, "localhost:8000") {
+			if strings.Contains(lower, "accessurl=") ||
+				strings.Contains(lower, "recordnewuserjsonpcallback") ||
+				strings.Contains(lower, "localhost:8000") {
 				return true
 			}
 		}
@@ -4400,11 +5268,11 @@ func isSSRFFalsePositive(normalized, ruleID string) bool {
 				return true
 			}
 		}
-		if strings.Contains(lower, "127.0.0.1") || strings.Contains(lower, "localhost") {
-			if strings.Contains(lower, "codepen.io") || strings.Contains(lower, "stackblitz.com") || strings.Contains(lower, "ant.design") || strings.Contains(lower, "\"upstreams\"") {
-				return true
-			}
-		}
+		// 此处原有一层「127.0.0.1/localhost ⊃ "upstreams"」判断。删除品牌词
+		// （codepen.io / stackblitz.com / ant.design）后，其内层条件与本 case
+		// 上方的 "upstreams" 分支同字面量互斥：能到达此处即意味着上方分支未命中，
+		// 即 lower 不含 "upstreams"，故内层恒为假、整块不可达，整体移除。
+		// 该判断原本保护的「配置体含 upstreams」误报语义已由上方分支覆盖。
 	}
 	return false
 }
@@ -4430,6 +5298,34 @@ func isNoSQLiFalsePositive(raw, ruleID string) bool {
 		}
 	case "owasp:nosql:005", "owasp:nosql:006":
 		return true
+	case "owasp:nosql:022":
+		// 引号闭合后的 $or 数组：引号前必须是被注入的值（'...')，
+		// 无前置引号则可能是对象字面量。
+		if !strings.ContainsAny(raw, "'\"") {
+			return true
+		}
+	case "owasp:nosql:023", "owasp:nosql:024":
+		// 023/024 为纯 $or 数组形态，归因于 $or 关键字的所有权；
+		// 005 与 them or operator 等 benign 文本的 FP 抑制由 022/023 负责。
+		return false
+	case "owasp:nosql:018":
+		// $where:'99 == 88' 的引号值内比较形态要求 $where 引号内出现
+		// 运算/数字；纯字面串（$where:'name'）不算注入。
+		if !strings.Contains(raw, "$where") {
+			return true
+		}
+		if i := strings.Index(raw, "$where"); i >= 0 {
+			rest := raw[i+len("$where"):]
+			if !strings.Contains(rest, "'") && !strings.Contains(rest, `"`) {
+				return true
+			}
+		}
+	case "owasp:nosql:020":
+		// 忙等形态必须同时有分号注入锚（; 或逗号隔断的表达式开始）或
+		// db/collection 上下文，避免自然叙述「new Date」误报。
+		if !strings.ContainsAny(raw, ";&(") {
+			return true
+		}
 	}
 	return false
 }
@@ -4480,14 +5376,7 @@ func isWebshellFalsePositive(normalized, ruleID string) bool {
 		return true
 	case "owasp:webshell:016":
 		lower := strings.ToLower(normalized)
-		if strings.Contains(lower, "cannot deserialize instance of") ||
-			strings.Contains(lower, "java.util.arraylist") ||
-			strings.Contains(lower, "mismatchedinputexception") ||
-			strings.Contains(lower, "circular structure to json") ||
-			strings.Contains(lower, "load success") ||
-			strings.Contains(lower, "resource.c-") ||
-			strings.Contains(lower, "tripcdn.cn") ||
-			strings.Contains(lower, "ctrip.com") {
+		if strings.Contains(lower, "java.util.arraylist") {
 			return true
 		}
 	}
@@ -4501,16 +5390,7 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 		// Bare \r\n\r\n is common in multi-line textarea values (Windows newlines),
 		// multipart form data boundaries, and binary data.
 		// Require HTTP header/status-line context after the separator to confirm injection.
-		if strings.Contains(lower, "getsuggestednavigationdestinations") ||
-			strings.Contains(lower, "console:cgi") ||
-			strings.Contains(lower, "cgi-error") ||
-			strings.Contains(lower, "fullstory.com") ||
-			strings.Contains(lower, "rs.fullstory.com") ||
-			strings.Contains(lower, "builder.io") ||
-			strings.Contains(lower, "_graphql") ||
-			strings.Contains(lower, "rec/bundle") ||
-			strings.Contains(lower, "/event?") ||
-			strings.Contains(lower, "telemetry") ||
+		if strings.Contains(lower, "telemetry") ||
 			strings.Contains(lower, "analytics") ||
 			strings.Contains(lower, "cdn-cgi") {
 			return true
@@ -4550,16 +5430,7 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 		}
 		// Telemetry, analytics, and logging POST bodies often contain \r\n + header-like
 		// patterns (e.g. "content-type:" in JSON payloads) which are not injection attempts.
-		if strings.Contains(lower, "/event?") ||
-			strings.Contains(lower, "cgi-error") ||
-			strings.Contains(lower, "console:cgi") ||
-			strings.Contains(lower, "rec/bundle") ||
-			strings.Contains(lower, "fullstory.com") ||
-			strings.Contains(lower, "rs.fullstory.com") ||
-			strings.Contains(lower, "builder.io") ||
-			strings.Contains(lower, "getsuggestednavigationdestinations") ||
-			strings.Contains(lower, "_graphql") ||
-			strings.Contains(lower, "telemetry") ||
+		if strings.Contains(lower, "telemetry") ||
 			strings.Contains(lower, "analytics") ||
 			strings.Contains(lower, "cdn-cgi") ||
 			strings.Contains(lower, "/g/collect") ||
@@ -4573,6 +5444,14 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 			!strings.Contains(lower, "location:") {
 			return true
 		}
+	case "owasp:crlf:010":
+		// 折叠态（归一化后的空格分隔）拦「整行命令」形态即可。若有内容前缀
+		// 说明来自同一行：rcpt to: 无引号上下文时可能是自然语言；
+		// capability/fetch 受 \s+（空格）锚定不会命中有前缀的词。
+		if strings.Contains(lower, "rcpt to") &&
+			!strings.Contains(lower, " rcpt to") {
+			return true
+		}
 	}
 	return false
 }
@@ -4584,12 +5463,16 @@ var sqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`(sleep|benchmark|waitfor\s+delay|pg_sleep)\s*\(`), 5, "owasp:sqli:003", ""},
 	{regexp.MustCompile(`;\s*(select|drop|alter|create|truncate|delete|update|insert)\s`), 5, "owasp:sqli:004", ""},
 	{regexp.MustCompile(`['"\d]\s*(--(?:[\s/]|$)|/\*)`), 3, "owasp:sqli:005", ""},
-	{regexp.MustCompile(`'\s*;\s*\w`), 3, "owasp:sqli:006", ""},
+	// 引号闭合 + 分号 + 新语句关键字：''; G（SQL 文档正文）、''; f（JS 的 for）
+	// 这类「分号后任意词字符」的形态不是注入，规则自身 meta（owasp:sqli:006
+	// 「引号闭合后接分号与新语句关键字」）要求的也是语句关键字。故词表取 SQL
+	// 语句首关键字（DML/DDL/DCL/TCL/游标与预处理），而非任意 \w。
+	{reSQLStatementStart, 3, "owasp:sqli:006", ""},
 	{regexp.MustCompile(`(chr|unhex|conv)\s*\(`), 3, "owasp:sqli:007", ""},
 	{regexp.MustCompile(`[,=(]\s*0x[0-9a-f]{4,}`), 2, "owasp:sqli:008", "0x"},
 	{regexp.MustCompile(`information_schema|sysobjects|sys\.\w+tables`), 5, "owasp:sqli:009", ""},
 	{regexp.MustCompile(`\b(or|and)\s*\d+\s*=\s*\d+`), 5, "owasp:sqli:010", ""},
-	{regexp.MustCompile(`\b(or|and)\s+['"]\w*['"]\s*=\s*['"]\w*['"]`), 5, "owasp:sqli:011", ""},
+	{regexp.MustCompile(`\b(or|and)\s*['"]\w*['"]\s*=\s*['"]\w*['"]`), 5, "owasp:sqli:011", ""},
 	{regexp.MustCompile(`;\s*--`), 3, "owasp:sqli:012", "--"},
 	{regexp.MustCompile(`(load_file|outfile|dumpfile)\s*\(`), 5, "owasp:sqli:013", ""},
 	{regexp.MustCompile(`@@(version|hostname|datadir|basedir)`), 5, "owasp:sqli:014", "@@"},
@@ -4638,6 +5521,9 @@ var sqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`[\x{FF33}\x{FF53}][\x{FF25}\x{FF45}][\x{FF2C}\x{FF4C}][\x{FF25}\x{FF45}][\x{FF23}\x{FF43}][\x{FF34}\x{FF54}]`), 5, "owasp:sqli:053", ""},
 	// Double URL encoding detection: %2527 (%25 = %, so %2527 = %27 = ')
 	{regexp.MustCompile(`%25(27|22|3[bB]|2[dD]2[dD])`), 5, "owasp:sqli:054", "%25"},
+	// JSON 文档函数：json_extract( 在 URL/表单上下文几乎不出现于良性输入，
+	// 是 MySQL/MariaDB 查询载荷的高置信度字面，单一命中即达 mid 阈。
+	{regexp.MustCompile(`json_extract\s*\(`), 4, "owasp:sqli:055", "json_extract"},
 }
 
 var webshellPatterns = []owaspPattern{
@@ -4696,20 +5582,27 @@ func checkWebshell(s string, threshold int) (OWASPHit, bool) {
 	if !hasWebshellIndicator(s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则；
+	// FP 抑制器前移到 Add 之前，被抑制的规则既不计分也不参与归因。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range webshellPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
-		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
-			}
-			if total >= threshold {
-				return OWASPHit{Category: CatWebshell, RuleID: best, Score: total, Desc: "WebShell/代码执行特征"}, true
-			}
+		if !p.re.MatchString(s) {
+			continue
+		}
+		if isWebshellFalsePositive(s, p.id) {
+			continue
+		}
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
+		}
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatWebshell, RuleID: id, Score: total, Desc: "WebShell/代码执行特征"}, true
 		}
 	}
 	return OWASPHit{}, false
@@ -4738,19 +5631,20 @@ func checkRevShell(s string, threshold int) (OWASPHit, bool) {
 	if !hasRevShellIndicator(s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range revshellPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
 		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
+			if acc == nil {
+				acc = acquireOWASPAcc(threshold)
 			}
-			if total >= threshold {
-				return OWASPHit{Category: CatRevShell, RuleID: best, Score: total, Desc: "反弹 Shell / 远程执行特征"}, true
+			acc.Add(p.id, p.score)
+			if acc.Exceeded() {
+				id, total := acc.Attribution()
+				return OWASPHit{Category: CatRevShell, RuleID: id, Score: total, Desc: "反弹 Shell / 远程执行特征"}, true
 			}
 		}
 	}
@@ -4758,8 +5652,11 @@ func checkRevShell(s string, threshold int) (OWASPHit, bool) {
 }
 
 var xssPatterns = []owaspPattern{
-	{regexp.MustCompile(`<script[\s>]`), 5, "owasp:xss:001", "<script"},
-	{regexp.MustCompile(`\bon(error|load|click|dblclick|mouse(over|out|down|up|enter|leave|move|wheel)|focus(in)?|blur|change|submit|toggle|input|key(down|up|press)|drag(start|end|over|enter|leave)?|drop|copy|cut|paste|pointer(over|down|up|cancel|move|enter|leave)|animation(start|end|iteration)|transition(end|start|run|cancel)|scroll|wheel|resize|contextmenu|message|hashchange|popstate|beforeunload|unload|invalid|select|fullscreenchange|touchstart|touchend|touchmove|touchcancel|beforeinput|show)\s*=`), 5, "owasp:xss:002", "on"},
+	{regexp.MustCompile(`<script[;\s>/]`), 5, "owasp:xss:001", "<script"},
+	// 零字节/零宽混淆的 script 标签：<scr\x00ipt> 剥零字节后 <script>，
+	// 但原始形态（未剥前）也可能以 </script 结尾。独立 low-score 兜底。
+	{regexp.MustCompile(`<<script[;\s>/]`), 5, "owasp:xss:071", "<script"},
+	{regexp.MustCompile(`\bon(error|load|click|dblclick|auxclick|mouse(over|out|down|up|enter|leave|move|wheel)|focus(in)?|blur|change|submit|toggle|input|key(down|up|press)|drag(start|end|over|enter|leave)?|drop|copy|cut|paste|pointer(over|down|up|cancel|move|enter|leave)|animation(start|end|iteration)|transition(end|start|run|cancel)|scroll|wheel|resize|contextmenu|message|hashchange|popstate|beforeunload|unload|invalid|select|fullscreenchange|touchstart|touchend|touchmove|touchcancel|beforeinput|show)\s*=`), 5, "owasp:xss:002", "on"},
 	{regexp.MustCompile(`javascript\s*:`), 5, "owasp:xss:003", "javascript"},
 	{regexp.MustCompile(`<img\b[^>]*(src\s*=[^>]*\s+)?onerror\s*=`), 5, "owasp:xss:004", "<img"},
 	{regexp.MustCompile(`<iframe[\s>]`), 3, "owasp:xss:005", "<iframe"},
@@ -4813,7 +5710,13 @@ var xssPatterns = []owaspPattern{
 	{regexp.MustCompile(`data\s*:\s*image/svg\+xml`), 4, "owasp:xss:051", "image/svg"},
 	{regexp.MustCompile(`\b(window|self|top|parent|frames|globalthis|this)\s*\[\s*[\(/!+\[]`), 4, "owasp:xss:052", "["},
 	{regexp.MustCompile(`\.constructor\s*\.\s*prototype\s*\.\s*\w+\s*=`), 5, "owasp:xss:053", ".constructor"},
-	{regexp.MustCompile(`\b(alert|prompt|confirm)\s*\.\s*(call|apply)\s*\(`), 5, "owasp:xss:067", ""},
+	{regexp.MustCompile("\\b(alert|prompt|confirm)\\s*(?:\\.\\s*(?:call|apply)\\s*\\(|\\)\\s*\\([\\d'\"`])"), 5, "owasp:xss:067", ""},
+	// 模板字符串型直连调用：prompt`1`（原生反引号实参调用弹窗函数，
+	// 无括号无点，绕过 xss:045/067 两分支）。
+	{regexp.MustCompile("(?i)\\b(alert|prompt|confirm)\\s*`[^`]*`"), 5, "owasp:xss:069", ""},
+	// 可选链直连调用：alert?.(document?.cookie)（ES2020 optional chaining
+	// 调用形态，无括号直连被 ?. 阻断，绕过 xss:045/067/069）。
+	{regexp.MustCompile(`\b(alert|prompt|confirm)\s*\?\.\s*\(`), 5, "owasp:xss:070", ""},
 	{regexp.MustCompile(`<a\b[^>]*\bdownload\s*=\s*['"]?\s*\w+\.\w{2,5}\b`), 4, "owasp:xss:055", "download"},
 	{regexp.MustCompile(`j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:`), 5, "owasp:xss:056", ""},
 	{regexp.MustCompile(`<(body|table|thead|td|th|tr)\b[^>]*\bbackground\s*=\s*['"]?\s*(//|https?:)`), 4, "owasp:xss:057", "background"},
@@ -4841,24 +5744,71 @@ func checkXSS(s string, threshold int) (OWASPHit, bool) {
 	if !hasXSSIndicator(s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range xssPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
 		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
+			if acc == nil {
+				acc = acquireOWASPAcc(threshold)
 			}
-			if total >= threshold {
-				return OWASPHit{Category: CatXSS, RuleID: best, Score: total, Desc: "XSS 特征"}, true
+			acc.Add(p.id, p.score)
+			if acc.Exceeded() {
+				id, total := acc.Attribution()
+				return OWASPHit{Category: CatXSS, RuleID: id, Score: total, Desc: "XSS 特征"}, true
 			}
 		}
 	}
 	return OWASPHit{}, false
 }
+
+const (
+	sgS  uint32 = 1 << iota // 's'：select/sleep/sysobjects/substr/substring
+	sgSM                    // ';'：semicolon
+	sgCM                    // '-' 或 '/'：-- / /* / /*!
+	sgO                     // 'o'：or/outfile/order/offset
+	sgA                     // 'a'：and
+	sgB                     // 'b'：benchmark
+	sgW                     // 'w'：waitfor/when
+	sgUS                    // '_'：pg_sleep/information_schema/load_file
+	sgC                     // 'c'：chr/case/copy
+	sgDT                    // '.'：sys.
+	sgD                     // 'd'：dumpfile/dbms_
+	sgI                     // 'i'：into
+	sgAT                    // '@'：@@
+	sgE                     // 'e'：extractvalue
+	sgU                     // 'u'：updatexml/utl_/utl_inaddr
+	sgM                     // 'm'：mid/master
+	sgX                     // 'x'：xp_
+	sgP                     // 'p'：procedure/program
+	sgH                     // 'h'：having
+	sgL                     // 'l'：like/limit
+	sgG                     // 'g'：group
+	sgF                     // 0xef：\xef\xbd\x93 / \xef\xbc\xb3（全角 Ｓ 首字节）
+	sgPC                    // '%'：%25
+)
+
+var sqliSignalsMaskTable = buildIndicatorMaskTable(map[string]uint32{
+	"s": sgS, ";": sgSM, "-": sgCM, "/": sgCM, "o": sgO, "a": sgA,
+	"b": sgB, "w": sgW, "_": sgUS, "c": sgC, ".": sgDT, "d": sgD,
+	"i": sgI, "@": sgAT, "e": sgE, "u": sgU, "m": sgM, "x": sgX,
+	"p": sgP, "h": sgH, "l": sgL, "g": sgG, "\xef": sgF, "%": sgPC,
+})
+
+const (
+	sfQ uint32 = 1 << iota // '\'' 或 '"'：hasSQLBooleanQuotedComparison / hasSQLBooleanEmptyQuotedComparison
+	sfF                    // 'f'：hasSQLiIfFunctionPattern（字面量 if）
+	sfH                    // 'h'：hasSQLiFunctionCallPattern("chr")
+	sfN                    // 'n'：hasSQLiFunctionCallPattern("unhex")
+	sfO                    // 'o'：hasSQLiFunctionCallPattern("conv")
+)
+
+var sqlifeatMaskTable = buildIndicatorMaskTable(map[string]uint32{
+	"'": sfQ, `"`: sfQ,
+	"f": sfF, "h": sfH, "n": sfN, "o": sfO,
+})
 
 type sqliPatternSignals struct {
 	containsSelect          bool
@@ -4905,49 +5855,63 @@ type sqliPatternSignals struct {
 }
 
 func collectSQLiPatternSignals(normalized string) sqliPatternSignals {
-	return sqliPatternSignals{
-		containsSelect:          strings.Contains(normalized, "select"),
-		containsSemicolon:       strings.Contains(normalized, ";"),
-		containsComment:         strings.Contains(normalized, "--") || strings.Contains(normalized, "/*") || strings.Contains(normalized, "/*!"),
-		containsOr:              strings.Contains(normalized, "or"),
-		containsAnd:             strings.Contains(normalized, "and"),
-		containsSleep:           strings.Contains(normalized, "sleep"),
-		containsBenchmark:       strings.Contains(normalized, "benchmark"),
-		containsWaitfor:         strings.Contains(normalized, "waitfor"),
-		containsPGSleep:         strings.Contains(normalized, "pg_sleep"),
-		containsChr:             strings.Contains(normalized, "chr"),
-		containsInformation:     strings.Contains(normalized, "information_schema"),
-		containsSysobjects:      strings.Contains(normalized, "sysobjects"),
-		containsSysDot:          strings.Contains(normalized, "sys."),
-		containsOutfile:         strings.Contains(normalized, "outfile"),
-		containsDumpfile:        strings.Contains(normalized, "dumpfile"),
-		containsLoadFile:        strings.Contains(normalized, "load_file"),
-		containsInto:            strings.Contains(normalized, "into"),
-		containsAtAt:            strings.Contains(normalized, "@@"),
-		containsExtractvalue:    strings.Contains(normalized, "extractvalue"),
-		containsUpdatexml:       strings.Contains(normalized, "updatexml"),
-		containsCase:            strings.Contains(normalized, "case"),
-		containsWhen:            strings.Contains(normalized, "when"),
-		containsOrder:           strings.Contains(normalized, "order"),
-		containsSubstr:          strings.Contains(normalized, "substr"),
-		containsSubstring:       strings.Contains(normalized, "substring"),
-		containsMid:             strings.Contains(normalized, "mid"),
-		containsXP:              strings.Contains(normalized, "xp_"),
-		containsProcedure:       strings.Contains(normalized, "procedure"),
-		containsUTL:             strings.Contains(normalized, "utl_"),
-		containsDBMS:            strings.Contains(normalized, "dbms_"),
-		containsHaving:          strings.Contains(normalized, "having"),
-		containsLike:            strings.Contains(normalized, "like"),
-		containsLimit:           strings.Contains(normalized, "limit"),
-		containsOffset:          strings.Contains(normalized, "offset"),
-		containsGroup:           strings.Contains(normalized, "group"),
-		containsCopy:            strings.Contains(normalized, "copy"),
-		containsProgram:         strings.Contains(normalized, "program"),
-		containsUTLInaddr:       strings.Contains(normalized, "utl_inaddr"),
-		containsMaster:          strings.Contains(normalized, "master"),
-		containsFullwidthS:      strings.Contains(normalized, "\xef\xbd\x93") || strings.Contains(normalized, "\xef\xbc\xb3"),
-		containsDoubleURLEncode: strings.Contains(normalized, "%25"),
+	if normalized == "" {
+		return sqliPatternSignals{}
 	}
+	bm := scanIndicatorMask(normalized, &sqliSignalsMaskTable)
+	p := func(mask uint32, lit string) bool { return bm&mask != 0 && strings.Contains(normalized, lit) }
+	return sqliPatternSignals{
+		containsSelect:          p(sgS, "select"),
+		containsSemicolon:       p(sgSM, ";"),
+		containsComment:         (bm&sgCM != 0) && (strings.Contains(normalized, "--") || strings.Contains(normalized, "/*") || strings.Contains(normalized, "/*!")),
+		containsOr:              p(sgO, "or"),
+		containsAnd:             p(sgA, "and"),
+		containsSleep:           p(sgS, "sleep"),
+		containsBenchmark:       p(sgB, "benchmark"),
+		containsWaitfor:         p(sgW, "waitfor"),
+		containsPGSleep:         p(sgUS, "pg_sleep"),
+		containsChr:             p(sgC, "chr"),
+		containsInformation:     p(sgUS, "information_schema"),
+		containsSysobjects:      p(sgS, "sysobjects"),
+		containsSysDot:          p(sgDT, "sys."),
+		containsOutfile:         p(sgO, "outfile"),
+		containsDumpfile:        p(sgD, "dumpfile"),
+		containsLoadFile:        p(sgUS, "load_file"),
+		containsInto:            p(sgI, "into"),
+		containsAtAt:            p(sgAT, "@@"),
+		containsExtractvalue:    p(sgE, "extractvalue"),
+		containsUpdatexml:       p(sgU, "updatexml"),
+		containsCase:            p(sgC, "case"),
+		containsWhen:            p(sgW, "when"),
+		containsOrder:           p(sgO, "order"),
+		containsSubstr:          p(sgS, "substr"),
+		containsSubstring:       p(sgS, "substring"),
+		containsMid:             p(sgM, "mid"),
+		containsXP:              p(sgX, "xp_"),
+		containsProcedure:       p(sgP, "procedure"),
+		containsUTL:             p(sgU, "utl_"),
+		containsDBMS:            p(sgD, "dbms_"),
+		containsHaving:          p(sgH, "having"),
+		containsLike:            p(sgL, "like"),
+		containsLimit:           p(sgL, "limit"),
+		containsOffset:          p(sgO, "offset"),
+		containsGroup:           p(sgG, "group"),
+		containsCopy:            p(sgC, "copy"),
+		containsProgram:         p(sgP, "program"),
+		containsUTLInaddr:       p(sgU, "utl_inaddr"),
+		containsMaster:          p(sgM, "master"),
+		containsFullwidthS:      (bm&sgF != 0) && (strings.Contains(normalized, "\xef\xbd\x93") || strings.Contains(normalized, "\xef\xbc\xb3")),
+		containsDoubleURLEncode: p(sgPC, "%25"),
+	}
+}
+
+func hasHighByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0xE0 {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldScanSQLiPatternWithSignals(normalized string, p owaspPattern, signals sqliPatternSignals) bool {
@@ -4966,6 +5930,9 @@ func shouldScanSQLiPatternWithSignals(normalized string, p owaspPattern, signals
 	case "owasp:sqli:006":
 		return signals.containsSemicolon && strings.Contains(normalized, "'")
 	case "owasp:sqli:007":
+		if !hasSQLiFunctionByteHint(normalized, sfH|sfN|sfO) {
+			return false
+		}
 		return hasSQLiFunctionCallPattern(normalized, "chr") ||
 			hasSQLiFunctionCallPattern(normalized, "unhex") ||
 			hasSQLiFunctionCallPattern(normalized, "conv")
@@ -4976,8 +5943,14 @@ func shouldScanSQLiPatternWithSignals(normalized string, p owaspPattern, signals
 	case "owasp:sqli:010":
 		return hasSQLBooleanNumericComparison(normalized)
 	case "owasp:sqli:011":
+		if !hasSQLiFunctionByteHint(normalized, sfQ) {
+			return false
+		}
 		return hasSQLBooleanQuotedComparison(normalized)
 	case "owasp:sqli:036":
+		if !hasSQLiFunctionByteHint(normalized, sfQ) {
+			return false
+		}
 		return hasSQLBooleanEmptyQuotedComparison(normalized)
 	case "owasp:sqli:039":
 		return (signals.containsOr || signals.containsAnd) && signals.containsSelect && strings.Contains(normalized, "(")
@@ -4996,6 +5969,9 @@ func shouldScanSQLiPatternWithSignals(normalized string, p owaspPattern, signals
 	case "owasp:sqli:021":
 		return (signals.containsSubstr || signals.containsSubstring || signals.containsMid) && strings.Contains(normalized, "(")
 	case "owasp:sqli:022":
+		if !hasSQLiFunctionByteHint(normalized, sfF) {
+			return false
+		}
 		return hasSQLiIfFunctionPattern(normalized)
 	case "owasp:sqli:023":
 		return strings.Contains(normalized, "'") && (strings.ContainsAny(normalized, "^&") || strings.Contains(normalized, "<<") || strings.Contains(normalized, ">>"))
@@ -5028,6 +6004,9 @@ func shouldScanSQLiPatternWithSignals(normalized string, p owaspPattern, signals
 	case "owasp:sqli:048":
 		return signals.containsMaster
 	case "owasp:sqli:049", "owasp:sqli:053":
+		if !hasHighByte(normalized) {
+			return false
+		}
 		return signals.containsFullwidthS
 	case "owasp:sqli:050", "owasp:sqli:051", "owasp:sqli:052":
 		return signals.containsComment
@@ -5068,6 +6047,17 @@ func hasSQLiIfFunctionPattern(normalized string) bool {
 		search = start + 1
 	}
 	return false
+}
+
+func hasSQLiFunctionByteHint(normalized string, need uint32) bool {
+	if normalized == "" {
+		return false
+	}
+	if need == 0 {
+		return true
+	}
+	bm := scanIndicatorMask(normalized, &sqlifeatMaskTable)
+	return bm&need != 0
 }
 
 func hasSQLiFunctionCallPattern(normalized, name string) bool {
@@ -5146,6 +6136,95 @@ func hasSQLBooleanNumericComparison(s string) bool {
 	return false
 }
 
+// hasSQLTautologyInjectionContext 判断「布尔关键字 + 数值等式」是否处在注入
+// 语法位置，用于 sqli:010 的误报抑制。命中任一形态即视为注入上下文：
+//
+//  1. 布尔关键字与左操作数之间无空白（and1=1）——SQL 词法允许该紧贴形态，
+//     散文不会把关键字粘到数字前。
+//  2. 等式位于目标末尾——参数值整体即注入内容。
+//  3. 等式后继字符是语句/操作数边界（& ; ' " / \ | = # 等）——参数分隔、
+//     引号闭合或注释起始。
+//  4. 等式后空白之后紧跟 SQL 语法词（select/union/and/… 或 -- # /* 注释符）
+//     ——后续子句延续，散文里空白后接的是普通单词。
+//
+// 背离条件：散文若把等式紧贴标点（如 "(and 1=1)" 这类括号引用）会被判为
+// 注入上下文，从而保留命中——这是有意保留的保守侧，避免为语言习惯放宽而
+// 放过 "id=1 and 1=1)/*" 这类括号闭合注入。
+func hasSQLTautologyInjectionContext(lower string) bool {
+	for _, m := range reTautologyInjection.FindAllStringIndex(lower, -1) {
+		start, end := m[0], m[1]
+		opLen := len("and")
+		if strings.HasPrefix(lower[start:], "or") {
+			opLen = len("or")
+		}
+		// 1) 关键字紧贴左操作数：and1=1。
+		if start+opLen < end {
+			if c := lower[start+opLen]; c != ' ' && c != '\t' {
+				return true
+			}
+		}
+		// 2) 等式位于目标末尾。
+		if end >= len(lower) {
+			return true
+		}
+		// 3) 后继为语句/操作数边界字符。
+		if isSQLTautologyBoundaryByte(lower[end]) {
+			return true
+		}
+		// 4) 空白之后紧跟 SQL 语法词或注释符。
+		if lower[end] == ' ' || lower[end] == '\t' {
+			j := end
+			for j < len(lower) && (lower[j] == ' ' || lower[j] == '\t') {
+				j++
+			}
+			if j >= len(lower) || hasSQLGrammarAt(lower, j) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reTautologyInjection 是 sqli:010 规则正则的等价形态，用于定位恒等式位置。
+var reTautologyInjection = regexp.MustCompile(`\b(or|and)\s*\d+\s*=\s*\d+`)
+
+// isSQLTautologyBoundaryByte 判断字节是否为 SQL 语句/操作数边界：
+// 参数分隔、引号闭合、注释起始、括号或运算符号。
+func isSQLTautologyBoundaryByte(b byte) bool {
+	switch b {
+	case '&', ';', '\'', '"', '`', '/', '\\', '|', '=', '#', '-', '*', '%',
+		'<', '>', '{', '}', '[', ']', ':', '!', '?', '@', '$', '^', '~', '+', '(', ')':
+		return true
+	}
+	return false
+}
+
+// sqlGrammarWords 是恒等式后续位置的 SQL 语法词与注释起始符。
+// 空白后紧跟其中任一项即说明等式仍在 SQL 语句内部。
+var sqlGrammarWords = [...]string{
+	"select", "union", "from", "where", "having", "order", "group", "limit",
+	"into", "values", "and", "or", "not", "sleep", "benchmark", "waitfor",
+	"insert", "update", "delete", "drop", "exec", "declare", "case", "when",
+	"then", "else", "end", "like", "in", "between", "exists", "all", "any",
+	"distinct", "as", "join", "on", "set", "table", "database",
+	"information_schema", "--", "#", "/*",
+}
+
+// hasSQLGrammarAt 判断 s[i:] 是否以 SQL 语法词或注释起始符开头（词尾需为
+// 非词字节，注释符与 # 除外）。
+func hasSQLGrammarAt(s string, i int) bool {
+	for _, kw := range sqlGrammarWords {
+		if !strings.HasPrefix(s[i:], kw) {
+			continue
+		}
+		j := i + len(kw)
+		if j >= len(s) || !isSQLWordByte(s[j]) {
+			return true
+		}
+	}
+	return false
+}
+
 func hasSQLBooleanQuotedComparison(s string) bool {
 	for i := 0; i < len(s); i++ {
 		end, ok := sqlBooleanOperatorEndAt(s, i)
@@ -5154,7 +6233,12 @@ func hasSQLBooleanQuotedComparison(s string) bool {
 		}
 		j := skipSQLSpaces(s, end)
 		if j == end {
-			continue
+			// 无空格紧贴形态：or"1"="1"（注释剥离 / 编码解码产物）。
+			// 引号紧跟布尔运算符且随后构成引号比较时视为注入；
+			// 自然文本不会拼出 or"word"= 的引号比较结构。
+			if s[j] != '\'' && s[j] != '"' {
+				continue
+			}
 		}
 		next, ok := scanSQLQuotedWord(s, j)
 		if !ok {
@@ -5241,39 +6325,29 @@ func nextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
 		return OWASPHit{}, false
 	}
 	signals := collectSQLiPatternSignals(normalized)
-	total := 0
+	// 归因交由 score.Accumulator（「首次跨阈」口径），不再取首个命中规则。
+	// FP 抑制器前移到 Add 之前：被判为误报的规则既不参与计分也不参与归因，
+	// 因此它后面真正跨阈的规则不会再被吞掉（旧实现的致漏报缺陷）。
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range sqliPatterns {
-		if threshold > 3 {
-			switch p.id {
-			case "owasp:sqli:028", "owasp:sqli:031", "owasp:sqli:038", "owasp:sqli:041", "owasp:sqli:046", "owasp:sqli:047":
-				if !signals.containsSelect {
-					continue
-				}
-			case "owasp:sqli:004", "owasp:sqli:006", "owasp:sqli:012", "owasp:sqli:034":
-				if !signals.containsSemicolon {
-					continue
-				}
-			case "owasp:sqli:005", "owasp:sqli:050", "owasp:sqli:051", "owasp:sqli:052":
-				if !signals.containsComment {
-					continue
-				}
-			}
-		}
 		if !shouldScanSQLiPatternWithSignals(normalized, p, signals) {
 			continue
 		}
 		if !p.re.MatchString(normalized) {
 			continue
 		}
-		total += p.score
-		if total < threshold {
+		if isSQLiFalsePositive(normalized, p.id) {
 			continue
 		}
-		hit := OWASPHit{Category: CatSQLi, RuleID: p.id, Score: total, Desc: "SQL 注入特征"}
-		if isSQLiFalsePositive(normalized, hit.RuleID) {
-			continue
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
 		}
-		return hit, true
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatSQLi, RuleID: id, Score: total, Desc: "SQL 注入特征"}, true
+		}
 	}
 	return OWASPHit{}, false
 }
@@ -5300,7 +6374,10 @@ func shouldScanXSSPattern(normalized string, p owaspPattern) bool {
 	case "owasp:xss:031":
 		return strings.Contains(normalized, "[") && strings.Contains(normalized, "]") && strings.ContainsAny(normalized, "'\"`") && (strings.Contains(normalized, "alert") || strings.Contains(normalized, "eval") || strings.Contains(normalized, "prompt") || strings.Contains(normalized, "confirm") || strings.Contains(normalized, "settimeout") || strings.Contains(normalized, "setinterval") || strings.Contains(normalized, "atob") || strings.Contains(normalized, "btoa") || strings.Contains(normalized, "fetch") || strings.Contains(normalized, "open") || strings.Contains(normalized, "execscript"))
 	case "owasp:xss:033":
-		return strings.Contains(normalized, "(![]") || strings.Contains(normalized, "(!![]") || strings.Contains(normalized, "+{}") || strings.Contains(normalized, "+[]")
+		// 强锚形态才放行扫描：完整 JSFuck 链（(![]、!![]、构造函数），
+		// 裸 +[]/+{} 不进入电池（二进制噪声碰撞面）。
+		return strings.Contains(normalized, "(![]") || strings.Contains(normalized, "(!![]") ||
+			(strings.Contains(normalized, "constructor") && (strings.Contains(normalized, "+{}") || strings.Contains(normalized, "+[]")))
 	case "owasp:xss:034":
 		return strings.Contains(normalized, "+A")
 	case "owasp:xss:042":
@@ -5320,7 +6397,25 @@ func shouldScanXSSPattern(normalized string, p owaspPattern) bool {
 	case "owasp:xss:065":
 		return strings.Contains(normalized, "<") && strings.Contains(normalized, ">") && (strings.Contains(normalized, "sanitize") || strings.Contains(normalized, "purify") || strings.Contains(normalized, "dompurify"))
 	case "owasp:xss:067":
-		return strings.Contains(normalized, ".") && strings.Contains(normalized, "(") && (strings.Contains(normalized, "alert") || strings.Contains(normalized, "prompt") || strings.Contains(normalized, "confirm"))
+		if !strings.Contains(normalized, "(") ||
+			!(strings.Contains(normalized, "alert") || strings.Contains(normalized, "prompt") || strings.Contains(normalized, "confirm")) {
+			return false
+		}
+		// alert.call/confirm.apply 走 '.'；alert)(1 走 ')(' 直连形态；
+		// (alert)(1) 走 '(' 前置包裹调用形态（IIFE 风格弹窗）。
+		return strings.Contains(normalized, ".") ||
+			strings.Contains(normalized, "alert)(") ||
+			strings.Contains(normalized, "prompt)(") ||
+			strings.Contains(normalized, "confirm)(") ||
+			strings.Contains(normalized, "(alert)(") ||
+			strings.Contains(normalized, "(prompt)(") ||
+			strings.Contains(normalized, "(confirm)(")
+	case "owasp:xss:069":
+		// 反引号模板实参形态：命中正则即已自带反引号双锁，无需额外门。
+		return strings.Contains(normalized, "`")
+	case "owasp:xss:070":
+		// 可选链调用形态：?.( 自带强锁定，无需额外门。
+		return strings.Contains(normalized, "?.")
 	case "owasp:xss:068":
 		return strings.Contains(normalized, "new") && strings.Contains(normalized, "function") && strings.ContainsAny(normalized, "'\"")
 	default:
@@ -5328,11 +6423,22 @@ func shouldScanXSSPattern(normalized string, p owaspPattern) bool {
 	}
 }
 
+func isXSSSuppressedRule(normalized, ruleID string, threshold int) bool {
+	if ruleID == "owasp:xss:002" && isXSSHandlerFunctionRef(normalized) {
+		return true
+	}
+	if ruleID == "owasp:xss:001" || ruleID == "owasp:xss:014" {
+		return isXSSFalsePositive(normalized, ruleID)
+	}
+	return threshold > 2 && isXSSFalsePositive(normalized, ruleID)
+}
+
 func nextXSSHit(normalized string, threshold int) (OWASPHit, bool) {
 	if !hasXSSIndicator(normalized) {
 		return OWASPHit{}, false
 	}
-	total := 0
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range xssPatterns {
 		if !shouldScanXSSPattern(normalized, p) {
 			continue
@@ -5340,21 +6446,17 @@ func nextXSSHit(normalized string, threshold int) (OWASPHit, bool) {
 		if !p.re.MatchString(normalized) {
 			continue
 		}
-		total += p.score
-		if total < threshold {
+		if isXSSSuppressedRule(normalized, p.id, threshold) {
 			continue
 		}
-		hit := OWASPHit{Category: CatXSS, RuleID: p.id, Score: total, Desc: "XSS 特征"}
-		if hit.RuleID == "owasp:xss:002" && isXSSHandlerFunctionRef(normalized) {
-			continue
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
 		}
-		if (hit.RuleID == "owasp:xss:001" || hit.RuleID == "owasp:xss:014") && isXSSFalsePositive(normalized, hit.RuleID) {
-			continue
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatXSS, RuleID: id, Score: total, Desc: "XSS 特征"}, true
 		}
-		if threshold > 2 && hit.RuleID != "owasp:xss:001" && hit.RuleID != "owasp:xss:014" && isXSSFalsePositive(normalized, hit.RuleID) {
-			continue
-		}
-		return hit, true
 	}
 	return OWASPHit{}, false
 }
@@ -5410,26 +6512,35 @@ var pathTravPatterns = []owaspPattern{
 	{regexp.MustCompile(`\.\.[/\\](admin|login|manager|console|config|passwd|shadow|private)`), 4, "owasp:path_traversal:016", ".."},
 	{regexp.MustCompile(`(?:^|[/\\])\s*\.{3,}[ \t]*[/\\]`), 4, "owasp:path_traversal:017", "..."},
 	{regexp.MustCompile(`\.\.\s+[/\\]`), 3, "owasp:path_traversal:018", ".."},
+	// UNC 管理共享路径：\\host\c$、\\host\admin$ 等 Windows 管理共享访问。
+	// 已有 c$ 门字面（hasPathTravIndicator/famPathTrav 同步），电池自锁
+	// 反斜杠 + 盘符 + 美元符的强形态。
+	{regexp.MustCompile(`\\\\[\w.:-]+\\(?:[a-zA-Z]|admin|ipc)\$`), 4, "owasp:path_traversal:019", "c$"},
 }
 
 func checkPathTraversal(s string, threshold int) (OWASPHit, bool) {
-	if !hasPathTravIndicator(s) {
+	if !hasACIndicator(famPathTrav, s) {
 		return OWASPHit{}, false
 	}
-	total := 0
-	best := ""
+	var acc *score.Accumulator
+	defer func() { releaseOWASPAcc(acc) }()
 	for _, p := range pathTravPatterns {
-		if p.hint != "" && !strings.Contains(s, p.hint) {
+		if !owaspPatternGatePass(p, s) {
 			continue
 		}
-		if p.re.MatchString(s) {
-			total += p.score
-			if best == "" {
-				best = p.id
-			}
-			if total >= threshold {
-				return OWASPHit{Category: CatPathTrav, RuleID: best, Score: total, Desc: "路径遍历特征"}, true
-			}
+		if !p.re.MatchString(s) {
+			continue
+		}
+		if isPathTravFalsePositive(s, p.id) {
+			continue
+		}
+		if acc == nil {
+			acc = acquireOWASPAcc(threshold)
+		}
+		acc.Add(p.id, p.score)
+		if acc.Exceeded() {
+			id, total := acc.Attribution()
+			return OWASPHit{Category: CatPathTrav, RuleID: id, Score: total, Desc: "路径遍历特征"}, true
 		}
 	}
 	return OWASPHit{}, false

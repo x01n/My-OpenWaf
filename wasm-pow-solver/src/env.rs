@@ -5,12 +5,15 @@ extern "C" {
     #[wasm_bindgen(js_name = eval)]
     fn js_eval(code: &str) -> JsValue;
 }
+
+#[allow(dead_code)]
 pub fn perf_now() -> f64 {
     let window = web_sys::window().unwrap();
     let perf = window.performance().unwrap();
     perf.now()
 }
 
+#[allow(dead_code)]
 pub fn live_monitoring() -> u32 {
     let mut score: u32 = 0;
     let t1 = perf_now();
@@ -36,6 +39,7 @@ pub fn live_monitoring() -> u32 {
     score
 }
 
+#[allow(dead_code)]
 pub fn fingerprint_hash() -> String {
     let result = js_eval(
         r#"(function(){

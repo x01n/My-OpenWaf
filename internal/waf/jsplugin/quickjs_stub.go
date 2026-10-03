@@ -4,6 +4,7 @@ package jsplugin
 
 import (
 	"context"
+	"log/slog"
 
 	"My-OpenWaf/internal/store"
 )
@@ -24,8 +25,18 @@ func NewEngine(opts EngineOptions) (*Engine, error) {
 	return nil, ErrCGODisabled
 }
 
+// NewEngineWithLogger 与 NewEngine 保持同一不可用语义。
+func NewEngineWithLogger(opts EngineOptions, log *slog.Logger) (*Engine, error) {
+	return nil, ErrCGODisabled
+}
+
 // Engine 是当前版本不可执行的占位类型。
-type Engine struct{}
+//
+// log 与真实后端同名同义：脚本失败的记录与日志路径在两种构建下共用同一份
+// 实现（recordFault 定义在 faults.go）。
+type Engine struct {
+	log *slog.Logger
+}
 
 // Execute implements Executor for the unavailable QuickJS backend.
 func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {

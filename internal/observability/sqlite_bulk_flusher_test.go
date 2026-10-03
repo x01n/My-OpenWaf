@@ -439,6 +439,7 @@ func bulkBotScoreEquivCase() bulkEquivCase {
 			TLSALPN:          "h2",
 			HeaderOrder:      "host,accept",
 			TotalScore:       88,
+			UAScore:          26,
 			GeoIPScore:       10,
 			FingerprintScore: 20,
 			BehaviorScore:    30,
@@ -794,6 +795,26 @@ func TestSQLiteMultiGroupSizeFor(t *testing.T) {
 		if got := multiGroupSizeFor(tc.cols); got != tc.want {
 			t.Errorf("multiGroupSizeFor(%d) = %d, want %d", tc.cols, got, tc.want)
 		}
+	}
+}
+
+func TestSQLiteMultiGroupSizeDefault(t *testing.T) {
+	modelCols := map[string]int{
+		"access_logs":     41,
+		"security_events": 33,
+		"drop_events":     7,
+		"bot_score_logs":  21,
+	}
+	for table, cols := range modelCols {
+		if multiGroupSizeClamped(cols) {
+			t.Errorf("%s: defaultMultiGroupSize=%d is clamped for %d bind cols", table, defaultMultiGroupSize, cols)
+		}
+		if got := multiGroupSizeFor(cols); got != defaultMultiGroupSize {
+			t.Errorf("%s: multiGroupSizeFor(%d) = %d, want default %d", table, cols, got, defaultMultiGroupSize)
+		}
+	}
+	if defaultMultiGroupSize != 8 {
+		t.Errorf("defaultMultiGroupSize = %d, want 8（16-组探针已回退，见常量注释）", defaultMultiGroupSize)
 	}
 }
 

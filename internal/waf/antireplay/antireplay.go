@@ -7,17 +7,18 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"strconv"
 	"sync"
 	"time"
 
 	"My-OpenWaf/internal/snapshot"
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 type AntiReplayManager struct {
 	secret      []byte
 	redisMu     sync.RWMutex
-	rdb         *goredis.Client
+	rdb         rueidis.Client
 	ttl         time.Duration
 	localMu     sync.Mutex
 	spentUntil  map[string]time.Time
@@ -44,7 +45,9 @@ end
 return {0}
 `
 
-func NewAntiReplayManager(secret string, rdb *goredis.Client, ttl time.Duration) *AntiReplayManager {
+var redisNonceScript = rueidis.NewLuaScript(redisNonceLua)
+
+func NewAntiReplayManager(secret string, rdb rueidis.Client, ttl time.Duration) *AntiReplayManager {
 	if secret == "" {
 		b := make([]byte, 32)
 		_, _ = rand.Read(b)
@@ -56,7 +59,7 @@ func NewAntiReplayManager(secret string, rdb *goredis.Client, ttl time.Duration)
 	return &AntiReplayManager{secret: []byte(secret), rdb: rdb, ttl: ttl, spentUntil: make(map[string]time.Time, 4096), idemRotated: make(map[string]idemEntry, 1024)}
 }
 
-func (m *AntiReplayManager) redisClient() *goredis.Client {
+func (m *AntiReplayManager) redisClient() rueidis.Client {
 	if m == nil {
 		return nil
 	}
@@ -66,7 +69,7 @@ func (m *AntiReplayManager) redisClient() *goredis.Client {
 	return client
 }
 
-func (m *AntiReplayManager) SetRedis(rdb *goredis.Client) {
+func (m *AntiReplayManager) SetRedis(rdb rueidis.Client) {
 	if m == nil {
 		return
 	}
@@ -138,28 +141,34 @@ func (m *AntiReplayManager) ValidateAndRotate(nonce string, clientIP string, ses
 		defer cancel()
 		spentKey := "waf:nonce:spent:" + nonce
 		idemKey := "waf:nonce:idem:" + nonce
-		res, err := redis.Eval(ctx, redisNonceLua, []string{spentKey, idemKey}, spentTTL, antiReplayIdemSeconds, newNonce).Result()
-		if err != nil {
+		resp := redisNonceScript.Exec(ctx, redis, []string{spentKey, idemKey}, []string{strconv.Itoa(spentTTL), strconv.Itoa(antiReplayIdemSeconds), newNonce})
+		if err := resp.Error(); err != nil {
 			return false, true, ""
 		}
-		arr, ok := res.([]any)
-		if !ok {
+		arr, err := resp.ToArray()
+		if err != nil {
 			return false, true, ""
 		}
 		switch {
 		case len(arr) == 1:
-			v, ok := arr[0].(int64)
-			if !ok || v != 0 {
+			v, err := arr[0].AsInt64()
+			if err != nil || !arr[0].IsInt64() || v != 0 {
 				return false, true, ""
 			}
 			return false, true, ""
 		case len(arr) == 2:
-			v, ok := arr[0].(int64)
-			if !ok || v != 1 && v != 2 {
+			v, err := arr[0].AsInt64()
+			// 迁移后类型判定与 go-redis 时代的 .(int64) 断言保持一致：
+			// 仅接受 RESP 整数（IsInt64），bulk string "1" 视为畸形应答，
+			// 统一走 fail-closed，避免类型混淆误放行。
+			if err != nil || !arr[0].IsInt64() || (v != 1 && v != 2) {
 				return false, true, ""
 			}
-			s, ok := arr[1].(string)
-			if !ok || s == "" {
+			s, err := arr[1].ToString()
+			if err != nil || !arr[1].IsString() {
+				return false, true, ""
+			}
+			if s == "" {
 				return false, true, ""
 			}
 			return true, false, s

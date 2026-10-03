@@ -65,6 +65,8 @@ type Site struct {
 	AntiReplayEnabled *bool  `json:"anti_replay_enabled" gorm:"default:null"`
 	AntiReplayTTL     int    `json:"anti_replay_ttl" gorm:"default:300"`
 	AntiReplayAction  string `json:"anti_replay_action" gorm:"default:'shield_challenge'"`
+	// AntiReplayCookieMode 站点级 Cookie 校验模式三态覆盖；nil = 继承全局 ProtectionConfig。
+	AntiReplayCookieMode *string `json:"anti_replay_cookie_mode,omitempty" gorm:"default:null"`
 
 	// 站点级质询策略覆盖（nil = 继承全局 ProtectionConfig）。
 	// ChallengeAction 指定命中质询类动作时实际渲染的质询页类型；

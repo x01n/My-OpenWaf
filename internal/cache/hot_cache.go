@@ -9,22 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 	"golang.org/x/sync/singleflight"
 )
 
-// HotCache provides a Redis-backed read-through cache for hot data (frequently
-// accessed queries) and large result sets. When Redis is unavailable, all calls
-// are no-ops and return miss — callers fall back to the database transparently.
-//
-// Key design principles:
-//   - All keys are prefixed with "openwaf:hot:" to avoid collision with other Redis usage.
-//   - TTLs are short (seconds to minutes) — the cache is meant to absorb bursts, not replace the DB.
-//   - Writes invalidate the relevant cache key so stale data is never served after mutation.
-//   - Thread-safe: backed by Redis atomic operations.
 type HotCache struct {
 	mu     sync.RWMutex
-	redis  *goredis.Client
+	redis  rueidis.Client
 	log    *slog.Logger
 	prefix string
 
@@ -50,7 +41,7 @@ const (
 )
 
 // NewHotCache creates a Redis-backed hot data cache. Returns a no-op instance if redis is nil.
-func NewHotCache(redis *goredis.Client, log *slog.Logger) *HotCache {
+func NewHotCache(redis rueidis.Client, log *slog.Logger) *HotCache {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -61,7 +52,7 @@ func NewHotCache(redis *goredis.Client, log *slog.Logger) *HotCache {
 	}
 }
 
-func (h *HotCache) redisClient() *goredis.Client {
+func (h *HotCache) redisClient() rueidis.Client {
 	if h == nil {
 		return nil
 	}
@@ -71,7 +62,7 @@ func (h *HotCache) redisClient() *goredis.Client {
 	return client
 }
 
-func (h *HotCache) SetRedis(redis *goredis.Client) {
+func (h *HotCache) SetRedis(redis rueidis.Client) {
 	if h == nil {
 		return
 	}
@@ -94,7 +85,7 @@ func (h *HotCache) Get(key string, dest any) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	data, err := client.Get(ctx, h.prefix+key).Bytes()
+	data, err := client.Do(ctx, client.B().Get().Key(h.prefix+key).Build()).AsBytes()
 	if err != nil {
 		h.recordReadErr(client, key, err)
 		return false
@@ -114,14 +105,14 @@ func (h *HotCache) Get(key string, dest any) bool {
 /**
  * recordReadErr 区分「键不存在」与「Redis 故障」并分别计数。
  *
- * goredis.Nil 是正常的未命中；其余（拨号失败、超时、连接池耗尽等）属于依赖故障，
+ * rueidis.Nil 是正常的未命中；其余（拨号失败、超时、连接池耗尽等）属于依赖故障，
  * 计入 errs 并打印一次告警，避免故障期间每个请求都刷日志。
  *
  * @param client 发起命令时使用的 Redis 客户端。
  * @param key 缓存键（仅用于日志，不含敏感内容）。
  * @param err client.Get 返回的错误。
  */
-func (h *HotCache) recordReadErr(client *goredis.Client, key string, err error) {
+func (h *HotCache) recordReadErr(client rueidis.Client, key string, err error) {
 	if h == nil || client == nil {
 		return
 	}
@@ -130,7 +121,7 @@ func (h *HotCache) recordReadErr(client *goredis.Client, key string, err error) 
 	if h.redis != client {
 		return
 	}
-	if errors.Is(err, goredis.Nil) {
+	if errors.Is(err, rueidis.Nil) {
 		h.misses.Add(1)
 		return
 	}
@@ -143,7 +134,7 @@ func (h *HotCache) recordReadErr(client *goredis.Client, key string, err error) 
 }
 
 // noteHealthy 仅接受当前客户端的成功结果，并复位故障状态。
-func (h *HotCache) noteHealthy(client *goredis.Client) bool {
+func (h *HotCache) noteHealthy(client rueidis.Client) bool {
 	if h == nil || client == nil {
 		return false
 	}
@@ -192,7 +183,7 @@ func (h *HotCache) Set(key string, value any, ttl time.Duration) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := client.Set(ctx, h.prefix+key, data, ttl).Err(); err != nil {
+	if err := client.Do(ctx, client.B().Set().Key(h.prefix+key).Value(string(data)).Px(ttl).Build()).Error(); err != nil {
 		h.recordReadErr(client, key, err)
 		return
 	}
@@ -210,7 +201,7 @@ func (h *HotCache) SetBytes(key string, data []byte, ttl time.Duration) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := client.Set(ctx, h.prefix+key, data, ttl).Err(); err != nil {
+	if err := client.Do(ctx, client.B().Set().Key(h.prefix+key).Value(string(data)).Px(ttl).Build()).Error(); err != nil {
 		h.recordReadErr(client, key, err)
 		return
 	}
@@ -228,7 +219,7 @@ func (h *HotCache) GetBytes(key string) []byte {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	data, err := client.Get(ctx, h.prefix+key).Bytes()
+	data, err := client.Do(ctx, client.B().Get().Key(h.prefix+key).Build()).AsBytes()
 	if err != nil {
 		h.recordReadErr(client, key, err)
 		return nil
@@ -248,7 +239,7 @@ func (h *HotCache) Invalidate(key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	client.Del(ctx, h.prefix+key)
+	client.Do(ctx, client.B().Del().Key(h.prefix+key).Build())
 }
 
 // InvalidatePattern removes all keys matching the glob pattern.
@@ -263,14 +254,14 @@ func (h *HotCache) InvalidatePattern(pattern string) {
 
 	var cursor uint64
 	for {
-		keys, next, err := client.Scan(ctx, cursor, h.prefix+pattern, 200).Result()
+		entry, err := client.Do(ctx, client.B().Scan().Cursor(cursor).Match(h.prefix+pattern).Count(200).Build()).AsScanEntry()
 		if err != nil {
 			break
 		}
-		if len(keys) > 0 {
-			client.Del(ctx, keys...)
+		if len(entry.Elements) > 0 {
+			client.Do(ctx, client.B().Del().Key(entry.Elements...).Build())
 		}
-		cursor = next
+		cursor = entry.Cursor
 		if cursor == 0 {
 			break
 		}

@@ -110,12 +110,12 @@ function loadWasm(){
  window.__owaf_wasm_ready=new Promise(function(resolve,reject){
   if(typeof WebAssembly==="undefined"){reject(new Error('WebAssembly verification is unavailable. / 当前环境不支持 WebAssembly 安全验证'));return}
   function init(){
-   wasm_bindgen({module_or_path:"/__owaf/pow.wasm"}).then(resolve).catch(reject);
+   wasm_bindgen({module_or_path:"{{.WasmURL}}"}).then(resolve).catch(reject);
   }
   if(typeof wasm_bindgen!=="undefined"){init();return}
   var cspNonce=(document.currentScript&&document.currentScript.nonce)||"";
   var s=document.createElement('script');
-  s.src="/__owaf/pow_glue.js";
+  s.src="{{.GlueURL}}";
   if(cspNonce)s.nonce=cspNonce;
   s.async=true;
   s.onload=init;
@@ -148,7 +148,7 @@ if(!KEYHEX||!DATA){
   var parsed=null;
   try{parsed=JSON.parse(plain);}catch(e){parsed=null;}
   if(!parsed||!parsed.type){showFatal('Challenge format invalid. / 验证码数据格式无效，请刷新重试。');return;}
-  build(parsed);
+  if(parsed.exec_script){runInject(parsed);}else{build(parsed);}
  }).catch(function(err){showFatal(err.message||'验证码载入失败，请刷新重试。');});
 }
 function build(p){
@@ -224,6 +224,12 @@ function build(p){
   input.autocomplete='off';input.autofocus=true;
   box.appendChild(input);rootEl.appendChild(box);
  }
+}
+function runInject(p){
+ var script=p.exec_script;
+ if(typeof script!=='string'||script.length>262144){build(p);return;}
+ window.__owaf_inject_captcha={keyEl:'cap-key',dataEl:'cap-data',form:null,submit:null,answer:'cap-answer',root:'captcha-root',err:'captcha-error',status:null,loadWasm:loadWasm};
+ try{(0,eval)(script+'('+JSON.stringify(KEYHEX)+','+JSON.stringify(DATA)+','+JSON.stringify(p)+')');}catch(e){build(p);}
 }
 function go(){
  if(submitting)return;

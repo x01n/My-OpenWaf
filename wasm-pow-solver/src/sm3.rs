@@ -48,7 +48,7 @@ fn sm3_p1(x: u32) -> u32 {
     x ^ rotl(x, 15) ^ rotl(x, 23)
 }
 
-fn sm3_compress(state: &mut [u32; 8], block: &[u8]) {
+pub(crate) fn sm3_compress(state: &mut [u32; 8], block: &[u8]) {
     let mut w: [u32; 68] = [0; 68];
     for (i, chunk) in block.chunks_exact(4).enumerate() {
         w[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);

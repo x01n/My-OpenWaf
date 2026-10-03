@@ -78,14 +78,33 @@ type SecurityEventFilter struct {
 	Until           *time.Time
 }
 
+// securityEventRuleInfoColumns 是规则解释字段（含 CVE 参考链接）。
+// references 是 SQL 保留字，不能出现在裸列清单里，故单独列出并在查询中
+// 以引号标识符选择。列表与最近事件查询都拼接该片段。
+var securityEventRuleInfoColumns = []string{
+	"rule_name", "rule_desc", "match_score", "match_snippet", "match_part",
+	"severity", "source", "cvss_score", "cwe_type",
+}
+
+// quotedIdentifier 按方言给标识符加引号：SQLite 与 PostgreSQL 使用双引号，
+// MySQL 使用反引号。仅用于列名，不接触用户输入。
+func quotedIdentifier(db *gorm.DB, name string) string {
+	if db != nil && db.Dialector != nil && strings.EqualFold(db.Dialector.Name(), "mysql") {
+		return "`" + name + "`"
+	}
+	return `"` + name + `"`
+}
+
 // securityEventListColumns excludes the large request audit payloads from list
 // and realtime polling queries. Get and FindByRequestID keep full-detail reads.
-var securityEventListColumns = []string{
+var securityEventListColumns = append(append([]string{
 	"id", "created_at", "site_id", "request_id", "client_ip", "host", "path", "query_string", "method", "user_agent",
-	"rule_id", "rule_id_str", "phase", "action", "category", "match_desc", "request_body_truncated", "request_size",
+	"rule_id", "rule_id_str",
+}, securityEventRuleInfoColumns...),
+	"phase", "action", "category", "match_desc", "request_body_truncated", "request_size",
 	"tls_version", "tls_sni", "tls_alpn", "tls_ja3", "tls_ja3_hash", "tls_ja4", "tls_cipher_suites", "tls_extensions",
 	"tls_curves", "tls_point_formats", "header_order", "geo_country", "geo_city", "status_code",
-}
+)
 
 func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]store.SecurityEvent, int64, error) {
 	f = normalizeSecurityEventFilter(f)
@@ -125,7 +144,10 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 	}
 
 	var items []store.SecurityEvent
-	if err := q.Select(securityEventListColumns).Offset(offset).Limit(limit).Order("created_at DESC, id DESC").Find(&items).Error; err != nil {
+	// references 是 SQL 保留字：裸列名会让整个 SELECT 解析失败（"near
+	// references: syntax error"），因此按方言加引号后追加在列清单末尾。
+	selectColumns := append(append([]string{}, securityEventListColumns...), quotedIdentifier(r.db, "references"))
+	if err := q.Select(selectColumns).Offset(offset).Limit(limit).Order("created_at DESC, id DESC").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 
@@ -417,11 +439,6 @@ func (r *SecurityEventRepo) Count(f SecurityEventFilter) (int64, error) {
 	return total, q.Count(&total).Error
 }
 
-func (r *SecurityEventRepo) CountBySite(siteID uint, f SecurityEventFilter) (int64, error) {
-	f.SiteID = siteID
-	return r.Count(f)
-}
-
 type CategoryStat struct {
 	Category string `json:"category"`
 	Count    int64  `json:"count"`
@@ -621,51 +638,6 @@ func (r *SecurityEventRepo) TimelineBySite(siteID uint, since, until time.Time) 
 		Order("bucket ASC").
 		Scan(&buckets).Error
 	return buckets, err
-}
-
-func (r *SecurityEventRepo) DistinctRequestCountBySite(siteID uint, since time.Time) (int64, error) {
-	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Distinct("request_id").Where("site_id = ? AND created_at >= ?", siteID, since).Count(&total).Error
-}
-
-func (r *SecurityEventRepo) DistinctRequestCount(since time.Time) (int64, error) {
-	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Distinct("request_id").Where("created_at >= ?", since).Count(&total).Error
-}
-
-func (r *SecurityEventRepo) CountTerminal(since time.Time) (int64, error) {
-	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, terminalSecurityEventActions).Count(&total).Error
-}
-
-func (r *SecurityEventRepo) CountObserve(since time.Time) (int64, error) {
-	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action = ?", since, "observe").Count(&total).Error
-}
-
-func (r *SecurityEventRepo) CountChallenge(since time.Time) (int64, error) {
-	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("created_at >= ? AND action IN ?", since, challengeSecurityEventActions).Count(&total).Error
-}
-
-func (r *SecurityEventRepo) CountChallengeBySite(siteID uint, since time.Time) (int64, error) {
-	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, challengeSecurityEventActions).Count(&total).Error
-}
-
-func (r *SecurityEventRepo) GetLatestBySite(siteID uint, limit int) ([]store.SecurityEvent, error) {
-	var items []store.SecurityEvent
-	return items, r.db.Select(securityEventListColumns).Where("site_id = ?", siteID).Order("created_at DESC, id DESC").Limit(limit).Find(&items).Error
-}
-
-func (r *SecurityEventRepo) CountTerminalBySite(siteID uint, since time.Time) (int64, error) {
-	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action IN ?", siteID, since, terminalSecurityEventActions).Count(&total).Error
-}
-
-func (r *SecurityEventRepo) CountObserveBySite(siteID uint, since time.Time) (int64, error) {
-	var total int64
-	return total, r.db.Model(&store.SecurityEvent{}).Where("site_id = ? AND created_at >= ? AND action = ?", siteID, since, "observe").Count(&total).Error
 }
 
 func applyEventFilters(q *gorm.DB, f SecurityEventFilter) *gorm.DB {

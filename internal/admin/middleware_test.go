@@ -358,10 +358,11 @@ func TestSplitRefreshCookie(t *testing.T) {
 		wantRaw string
 		wantOK  bool
 	}{
-		{"jti123:rawtoken", "jti123", "rawtoken", true},
-		{"jti:with:colons", "jti", "with:colons", true},
-		{":emptyjti", "", "emptyjti", true},
-		{"trailing:", "trailing", "", true},
+		{"jti123.rawtoken", "jti123", "rawtoken", true},
+		{"jti123%3Arawtoken", "jti123", "rawtoken", true},
+		{"jti.with.dots", "jti", "with.dots", true},
+		{".emptyjti", "", "emptyjti", true},
+		{"trailing.", "trailing", "", true},
 		{"nocolon", "", "", false},
 		{"", "", "", false},
 	}

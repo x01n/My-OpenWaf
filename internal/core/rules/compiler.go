@@ -11,19 +11,21 @@ import (
 
 // Compiled is a runtime-ready rule with a pre-built matcher.
 type Compiled struct {
-	ID            uint
-	Phase         string
-	Action        action.Type
-	Priority      int
-	Kind          string
-	Arg           string
-	StatusCode    int    // custom HTTP status code (0 = default)
-	RedirectTo    string // URL for redirect action
-	CaptchaType   string // Rule-level CAPTCHA type; empty inherits global protection config.
-	matcher       Matcher
-	runtimeAction action.Type
-	ruleIDStr     string
-	matchDesc     string
+	ID          uint
+	Phase       string
+	Action      action.Type
+	Priority    int
+	Kind        string
+	Arg         string
+	StatusCode  int    // custom HTTP status code (0 = default)
+	RedirectTo  string // URL for redirect action
+	CaptchaType string // Rule-level CAPTCHA type; empty inherits global protection config.
+	// CaptchaMinutes 是规则级验证码通过有效期（分钟）；0 继承全局 captcha_pass_ttl。
+	CaptchaMinutes int
+	matcher        Matcher
+	runtimeAction  action.Type
+	ruleIDStr      string
+	matchDesc      string
 }
 
 // Match delegates to the pre-built matcher.
@@ -50,19 +52,20 @@ func Compile(rs []store.Rule) []Compiled {
 			matcher = buildMatcher(kind, arg)
 		}
 		out = append(out, Compiled{
-			ID:            r.ID,
-			Phase:         string(r.Phase),
-			Action:        action.Type(r.Action),
-			Priority:      r.Priority,
-			Kind:          kind,
-			Arg:           arg,
-			StatusCode:    r.StatusCode,
-			RedirectTo:    r.RedirectTo,
-			CaptchaType:   r.CaptchaType,
-			matcher:       matcher,
-			runtimeAction: normalizeConfiguredAction(string(r.Action)),
-			ruleIDStr:     "rule:" + string(r.Phase) + ":" + kind,
-			matchDesc:     compiledMatchDesc(kind, arg),
+			ID:             r.ID,
+			Phase:          string(r.Phase),
+			Action:         action.Type(r.Action),
+			Priority:       r.Priority,
+			Kind:           kind,
+			Arg:            arg,
+			StatusCode:     r.StatusCode,
+			RedirectTo:     r.RedirectTo,
+			CaptchaType:    r.CaptchaType,
+			CaptchaMinutes: r.CaptchaMinutes,
+			matcher:        matcher,
+			runtimeAction:  normalizeConfiguredAction(string(r.Action)),
+			ruleIDStr:      "rule:" + string(r.Phase) + ":" + kind,
+			matchDesc:      compiledMatchDesc(kind, arg),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

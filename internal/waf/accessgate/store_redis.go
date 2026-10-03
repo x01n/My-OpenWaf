@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 // Redis key 前缀，与 challenge 线 "owaf:captcha:" 等保持体系一致。
@@ -18,7 +19,7 @@ const (
 
 const accessRedisOperationTimeout = 100 * time.Millisecond
 
-var accessCleanupScript = goredis.NewScript(`
+var accessCleanupScript = rueidis.NewLuaScript(`
 local removed = 0
 for i = 1, #KEYS do
   local v = redis.call('GET', KEYS[i])
@@ -35,7 +36,7 @@ end
 return removed
 `)
 
-var accessTakeScript = goredis.NewScript(`
+var accessTakeScript = rueidis.NewLuaScript(`
 local v = redis.call('GET', KEYS[1])
 if not v then
   return nil
@@ -54,20 +55,14 @@ type redisSessionInfo struct {
 	ExpiresAt int64   `json:"expires_at"` // Unix 毫秒
 }
 
-// RedisSessionStore 基于 Redis 的会话存储。
-//
-// Redis 可用时读写全走 Redis（TTL、原子 take、多实例共享）；Redis 未配置
-// 或单条命令瞬时失败时降级到内嵌内存库，保证单机登录不被 Redis 抖动打断。
-// 与 MemorySessionStore 语义等价：Create 生成随机 token，Validate 检查
-// 过期并惰性删除，Revoke 幂等，CleanExpired 幂等。
 type RedisSessionStore struct {
 	mu    sync.RWMutex
-	redis *goredis.Client
+	redis rueidis.Client
 	local *MemorySessionStore
 }
 
 // NewRedisSessionStore 创建会话存储。redis 为 nil 时仅内存，等价于 MemorySessionStore。
-func NewRedisSessionStore(redis *goredis.Client) *RedisSessionStore {
+func NewRedisSessionStore(redis rueidis.Client) *RedisSessionStore {
 	return &RedisSessionStore{
 		redis: redis,
 		local: NewMemorySessionStore(),
@@ -75,7 +70,7 @@ func NewRedisSessionStore(redis *goredis.Client) *RedisSessionStore {
 }
 
 // SetRedis 注入或清除 Redis 客户端，供运行时热加载切换后端。
-func (s *RedisSessionStore) SetRedis(redis *goredis.Client) {
+func (s *RedisSessionStore) SetRedis(redis rueidis.Client) {
 	if s == nil {
 		return
 	}
@@ -84,7 +79,7 @@ func (s *RedisSessionStore) SetRedis(redis *goredis.Client) {
 	s.mu.Unlock()
 }
 
-func (s *RedisSessionStore) redisClient() *goredis.Client {
+func (s *RedisSessionStore) redisClient() rueidis.Client {
 	if s == nil {
 		return nil
 	}
@@ -125,7 +120,7 @@ func (s *RedisSessionStore) Create(siteID uint, identity string, provider string
 }
 
 // createInRedis 写出会话 JSON 并设置 TTL。
-func (s *RedisSessionStore) createInRedis(redis *goredis.Client, info *SessionInfo) error {
+func (s *RedisSessionStore) createInRedis(redis rueidis.Client, info *SessionInfo) error {
 	payload, err := json.Marshal(&redisSessionInfo{
 		SiteID:    float64(info.SiteID),
 		Token:     info.Token,
@@ -138,7 +133,7 @@ func (s *RedisSessionStore) createInRedis(redis *goredis.Client, info *SessionIn
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), accessRedisOperationTimeout)
 	defer cancel()
-	return redis.Set(ctx, accessSessionKey(info.Token), payload, time.Until(info.ExpiresAt)).Err()
+	return redis.Do(ctx, redis.B().Set().Key(accessSessionKey(info.Token)).Value(string(payload)).Px(time.Until(info.ExpiresAt)).Build()).Error()
 }
 
 // Validate 校验会话 token。
@@ -165,12 +160,12 @@ func (s *RedisSessionStore) Validate(token string) (*SessionInfo, error) {
 }
 
 // validateInRedis 读会话 JSON，过期则惰性删除并返回 nil。
-func (s *RedisSessionStore) validateInRedis(redis *goredis.Client, token string) (*SessionInfo, error) {
+func (s *RedisSessionStore) validateInRedis(redis rueidis.Client, token string) (*SessionInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), accessRedisOperationTimeout)
 	defer cancel()
-	raw, err := redis.Get(ctx, accessSessionKey(token)).Bytes()
+	raw, err := redis.Do(ctx, redis.B().Get().Key(accessSessionKey(token)).Build()).AsBytes()
 	if err != nil {
-		if err == goredis.Nil {
+		if err == rueidis.Nil {
 			return nil, nil
 		}
 		return nil, err
@@ -178,11 +173,11 @@ func (s *RedisSessionStore) validateInRedis(redis *goredis.Client, token string)
 	info, werr := decodeRedisSession(raw)
 	if werr != nil {
 		// 残留损坏值：按未命中处理并清除。
-		_ = redis.Del(ctx, accessSessionKey(token)).Err()
+		_ = redis.Do(ctx, redis.B().Del().Key(accessSessionKey(token)).Build()).Error()
 		return nil, nil
 	}
 	if time.Now().After(info.ExpiresAt) {
-		_ = redis.Del(ctx, accessSessionKey(token)).Err()
+		_ = redis.Do(ctx, redis.B().Del().Key(accessSessionKey(token)).Build()).Error()
 		return nil, nil
 	}
 	return info, nil
@@ -215,7 +210,7 @@ func (s *RedisSessionStore) Revoke(token string) error {
 	if redis := s.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), accessRedisOperationTimeout)
 		defer cancel()
-		if err := redis.Del(ctx, accessSessionKey(token)).Err(); err != nil && err != goredis.Nil {
+		if err := redis.Do(ctx, redis.B().Del().Key(accessSessionKey(token)).Build()).Error(); err != nil && err != rueidis.Nil {
 			lastErr = err
 		}
 	}
@@ -234,18 +229,19 @@ func (s *RedisSessionStore) CleanExpired() error {
 }
 
 // cleanExpiredInRedis 经 SCAN+Lua 原子删除过期会话。
-func (s *RedisSessionStore) cleanExpiredInRedis(redis *goredis.Client) error {
+func (s *RedisSessionStore) cleanExpiredInRedis(redis rueidis.Client) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cursor := uint64(0)
 	nowMillis := time.Now().UnixMilli()
 	for {
-		keys, next, err := redis.Scan(ctx, cursor, accessSessionKeyPrefix+"*", 128).Result()
+		entry, err := redis.Do(ctx, redis.B().Scan().Cursor(cursor).Match(accessSessionKeyPrefix+"*").Count(128).Build()).AsScanEntry()
+		keys, next := entry.Elements, entry.Cursor
 		if err != nil {
 			return err
 		}
 		if len(keys) > 0 {
-			if err := accessCleanupScript.Run(ctx, redis, keys, nowMillis).Err(); err != nil {
+			if err := accessCleanupScript.Exec(ctx, redis, keys, []string{strconv.FormatInt(nowMillis, 10)}).Error(); err != nil {
 				return err
 			}
 		}
@@ -273,12 +269,12 @@ type redisOAuthState struct {
 // Delete/CleanExpired 幂等。
 type RedisOAuthStateStore struct {
 	mu    sync.RWMutex
-	redis *goredis.Client
+	redis rueidis.Client
 	local *MemoryOAuthStateStore
 }
 
 // NewRedisOAuthStateStore 创建 OAuth state 存储。redis 为 nil 时仅内存。
-func NewRedisOAuthStateStore(redis *goredis.Client) *RedisOAuthStateStore {
+func NewRedisOAuthStateStore(redis rueidis.Client) *RedisOAuthStateStore {
 	return &RedisOAuthStateStore{
 		redis: redis,
 		local: NewMemoryOAuthStateStore(),
@@ -286,7 +282,7 @@ func NewRedisOAuthStateStore(redis *goredis.Client) *RedisOAuthStateStore {
 }
 
 // SetRedis 注入或清除 Redis 客户端，供运行时热加载切换后端。
-func (s *RedisOAuthStateStore) SetRedis(redis *goredis.Client) {
+func (s *RedisOAuthStateStore) SetRedis(redis rueidis.Client) {
 	if s == nil {
 		return
 	}
@@ -295,7 +291,7 @@ func (s *RedisOAuthStateStore) SetRedis(redis *goredis.Client) {
 	s.mu.Unlock()
 }
 
-func (s *RedisOAuthStateStore) redisClient() *goredis.Client {
+func (s *RedisOAuthStateStore) redisClient() rueidis.Client {
 	if s == nil {
 		return nil
 	}
@@ -339,7 +335,7 @@ func (s *RedisOAuthStateStore) Save(state *OAuthState) error {
 }
 
 // saveInRedis 写出 state JSON 并设置 TTL。
-func (s *RedisOAuthStateStore) saveInRedis(redis *goredis.Client, state *OAuthState) error {
+func (s *RedisOAuthStateStore) saveInRedis(redis rueidis.Client, state *OAuthState) error {
 	payload, err := json.Marshal(&redisOAuthState{
 		State:        state.State,
 		CodeVerifier: state.CodeVerifier,
@@ -353,7 +349,7 @@ func (s *RedisOAuthStateStore) saveInRedis(redis *goredis.Client, state *OAuthSt
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), accessRedisOperationTimeout)
 	defer cancel()
-	return redis.Set(ctx, accessOAuthStateKey(state.State), payload, time.Until(state.ExpiresAt)).Err()
+	return redis.Do(ctx, redis.B().Set().Key(accessOAuthStateKey(state.State)).Value(string(payload)).Px(time.Until(state.ExpiresAt)).Build()).Error()
 }
 
 // Get 读取 OAuth state。Redis 未命中时回退本地，降级写入的
@@ -369,23 +365,23 @@ func (s *RedisOAuthStateStore) Get(stateParam string) (*OAuthState, error) {
 	return s.local.Get(stateParam)
 }
 
-func (s *RedisOAuthStateStore) getFromRedis(redis *goredis.Client, stateParam string) (*OAuthState, error) {
+func (s *RedisOAuthStateStore) getFromRedis(redis rueidis.Client, stateParam string) (*OAuthState, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), accessRedisOperationTimeout)
 	defer cancel()
-	raw, err := redis.Get(ctx, accessOAuthStateKey(stateParam)).Bytes()
+	raw, err := redis.Do(ctx, redis.B().Get().Key(accessOAuthStateKey(stateParam)).Build()).AsBytes()
 	if err != nil {
-		if err == goredis.Nil {
+		if err == rueidis.Nil {
 			return nil, nil
 		}
 		return nil, err
 	}
 	st, werr := decodeRedisOAuthState(raw)
 	if werr != nil {
-		_ = redis.Del(ctx, accessOAuthStateKey(stateParam)).Err()
+		_ = redis.Do(ctx, redis.B().Del().Key(accessOAuthStateKey(stateParam)).Build()).Error()
 		return nil, nil
 	}
 	if time.Now().After(st.ExpiresAt) {
-		_ = redis.Del(ctx, accessOAuthStateKey(stateParam)).Err()
+		_ = redis.Do(ctx, redis.B().Del().Key(accessOAuthStateKey(stateParam)).Build()).Error()
 		return nil, nil
 	}
 	return st, nil
@@ -405,14 +401,14 @@ func (s *RedisOAuthStateStore) Consume(stateParam string) (*OAuthState, error) {
 	return s.local.Consume(stateParam)
 }
 
-func (s *RedisOAuthStateStore) consumeFromRedis(redis *goredis.Client, stateParam string) (*OAuthState, error) {
+func (s *RedisOAuthStateStore) consumeFromRedis(redis rueidis.Client, stateParam string) (*OAuthState, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), accessRedisOperationTimeout)
 	defer cancel()
 	key := accessOAuthStateKey(stateParam)
-	raw, err := accessTakeScript.Run(ctx, redis, []string{key}).Text()
+	raw, err := accessTakeScript.Exec(ctx, redis, []string{key}, nil).ToString()
 	if err != nil {
-		if err == goredis.Nil {
-			// Lua nil 表示键不存在：go-redis 将其映射为 goredis.Nil。
+		if err == rueidis.Nil {
+			// Lua nil 表示键不存在：rueidis 将其映射为 rueidis.Nil。
 			return nil, nil
 		}
 		return nil, err
@@ -461,7 +457,7 @@ func (s *RedisOAuthStateStore) Delete(stateParam string) error {
 	if redis := s.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), accessRedisOperationTimeout)
 		defer cancel()
-		if err := redis.Del(ctx, accessOAuthStateKey(stateParam)).Err(); err != nil && err != goredis.Nil {
+		if err := redis.Do(ctx, redis.B().Del().Key(accessOAuthStateKey(stateParam)).Build()).Error(); err != nil && err != rueidis.Nil {
 			lastErr = err
 		}
 	}
@@ -479,12 +475,13 @@ func (s *RedisOAuthStateStore) CleanExpired() error {
 		cursor := uint64(0)
 		nowMillis := time.Now().UnixMilli()
 		for {
-			keys, next, err := redis.Scan(ctx, cursor, accessOAuthStateKeyPrefix+"*", 128).Result()
+			entry, err := redis.Do(ctx, redis.B().Scan().Cursor(cursor).Match(accessOAuthStateKeyPrefix+"*").Count(128).Build()).AsScanEntry()
+			keys, next := entry.Elements, entry.Cursor
 			if err != nil {
 				return err
 			}
 			if len(keys) > 0 {
-				if err := accessCleanupScript.Run(ctx, redis, keys, nowMillis).Err(); err != nil {
+				if err := accessCleanupScript.Exec(ctx, redis, keys, []string{strconv.FormatInt(nowMillis, 10)}).Error(); err != nil {
 					return err
 				}
 			}

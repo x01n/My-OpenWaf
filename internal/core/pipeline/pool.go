@@ -69,6 +69,8 @@ func ReleaseCtx(ctx *RequestCtx) {
 		ctx.matcherHeaders = nil
 	}
 	ctx.BotScoreResult = nil
+	ctx.requestMutation = nil
+	ctx.responseMutations = nil
 	if ctx.phaseObserveHits != nil {
 		if cap(ctx.phaseObserveHits) > maxPooledObserveHitsCap {
 			ctx.phaseObserveHits = nil

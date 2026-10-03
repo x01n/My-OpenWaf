@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/url"
 	"testing"
 	"time"
 
@@ -254,7 +255,7 @@ func TestRefreshRejectsMalformedCookie(t *testing.T) {
 
 func TestRefreshRejectsUnknownJTI(t *testing.T) {
 	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
-	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, "no-such-jti:sometoken")
+	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, "no-such-jti.sometoken")
 	if ctx.Response.StatusCode() != 401 {
 		t.Fatalf("unknown jti: want 401, got %d", ctx.Response.StatusCode())
 	}
@@ -272,7 +273,7 @@ func TestRefreshRejectsTamperedToken(t *testing.T) {
 		t.Fatalf("store refresh token: %v", err)
 	}
 
-	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":tampered-raw-token")
+	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+".tampered-raw-token")
 	if ctx.Response.StatusCode() != 401 {
 		t.Fatalf("tampered token: want 401, got %d: %s",
 			ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
@@ -291,7 +292,7 @@ func TestRefreshSucceedsWithValidCookie(t *testing.T) {
 		t.Fatalf("store refresh token: %v", err)
 	}
 
-	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":"+raw)
+	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+"."+raw)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -325,12 +326,12 @@ func TestRefreshRotatesToken(t *testing.T) {
 		t.Fatalf("store refresh token: %v", err)
 	}
 
-	first := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":"+raw)
+	first := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+"."+raw)
 	if first.Response.StatusCode() != 200 {
 		t.Fatalf("first refresh: want 200, got %d", first.Response.StatusCode())
 	}
 
-	replay := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":"+raw)
+	replay := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+"."+raw)
 	if replay.Response.StatusCode() == 200 {
 		t.Fatal("replaying a consumed refresh token must not succeed")
 	}
@@ -353,7 +354,7 @@ func TestLogoutRevokesRotatedRefreshChain(t *testing.T) {
 		t.Fatalf("rotate refresh token: %v", err)
 	}
 
-	ctx := invokeAuthHandler(LogoutHandler(d), "/api/v1/auth/logout", nil, "logout-old:old-raw")
+	ctx := invokeAuthHandler(LogoutHandler(d), "/api/v1/auth/logout", nil, "logout-old.old-raw")
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("logout: want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -396,7 +397,7 @@ func TestRefreshUsesCurrentAccountRole(t *testing.T) {
 		t.Fatalf("store refresh token: %v", err)
 	}
 
-	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":"+raw)
+	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+"."+raw)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("refresh: want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -430,7 +431,7 @@ func TestRefreshRejectsDeletedAccount(t *testing.T) {
 		t.Fatalf("store refresh token: %v", err)
 	}
 
-	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+":"+raw)
+	ctx := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, jti+"."+raw)
 	if ctx.Response.StatusCode() != 401 {
 		t.Fatalf("deleted account refresh: want 401, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -454,7 +455,7 @@ func TestRefreshKeepsSessionWhenRefreshStoreUnavailable(t *testing.T) {
 		RefreshHandler(d),
 		"/api/v1/auth/refresh",
 		nil,
-		"unavailable-jti:raw-token",
+		"unavailable-jti.raw-token",
 	)
 	if ctx.Response.StatusCode() != 503 {
 		t.Fatalf("unavailable refresh store: want 503, got %d: %s",
@@ -463,4 +464,78 @@ func TestRefreshKeepsSessionWhenRefreshStoreUnavailable(t *testing.T) {
 	if got := string(ctx.Response.Header.Peek("Set-Cookie")); got != "" {
 		t.Fatalf("unavailable refresh store must not clear the shared cookie: %q", got)
 	}
+}
+
+// TestLoginRefreshRoundTripSurvivesSetCookieEncoding 验证登录下发的 refresh cookie
+// 不依赖 percent-编码即可被服务端读回：hertz 写出时会 QueryEscape 冒号，
+// 读取时不做解码，因此 cookie 值本身不能包含需要转义的字节。
+func TestLoginRefreshRoundTripSurvivesSetCookieEncoding(t *testing.T) {
+	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
+	login := invokeAuthHandler(LoginHandler(d), "/api/v1/auth/login",
+		[]byte(`{"username":"alice","password":"password123"}`), "")
+	if login.Response.StatusCode() != 200 {
+		t.Fatalf("login: want 200, got %d", login.Response.StatusCode())
+	}
+	setCookie := string(login.Response.Header.Peek("Set-Cookie"))
+	const prefix = "my_openwaf_rt="
+	start := bytes.Index([]byte(setCookie), []byte(prefix))
+	if start < 0 {
+		t.Fatalf("missing refresh cookie in %q", setCookie)
+	}
+	rest := setCookie[start+len(prefix):]
+	end := bytes.IndexAny([]byte(rest), ";")
+	wire := rest[:end]
+	if decoded, err := url.QueryUnescape(wire); err == nil && decoded != wire {
+		t.Fatalf("refresh cookie value needs percent-decoding (%q -> %q); the server cannot read it back", wire, decoded)
+	}
+
+	refresh := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, wire)
+	if refresh.Response.StatusCode() != 200 {
+		t.Fatalf("refresh with the cookie the browser stores: want 200, got %d: %s",
+			refresh.Response.StatusCode(), bytes.TrimSpace(refresh.Response.Body()))
+	}
+}
+
+// TestRefreshRoundTripAfterRotation 验证轮换后下发的新 cookie 依然能原样读回，
+// 即「刷新页面 / 重开浏览器」依赖的续期链路在编码层面是可往返的。
+func TestRefreshRoundTripAfterRotation(t *testing.T) {
+	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
+	login := invokeAuthHandler(LoginHandler(d), "/api/v1/auth/login",
+		[]byte(`{"username":"alice","password":"password123"}`), "")
+	wire := refreshCookieValue(t, string(login.Response.Header.Peek("Set-Cookie")))
+
+	first := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, wire)
+	if first.Response.StatusCode() != 200 {
+		t.Fatalf("first refresh: want 200, got %d", first.Response.StatusCode())
+	}
+	rotated := refreshCookieValue(t, string(first.Response.Header.Peek("Set-Cookie")))
+	if decoded, err := url.QueryUnescape(rotated); err == nil && decoded != rotated {
+		t.Fatalf("rotated refresh cookie needs percent-decoding (%q -> %q)", rotated, decoded)
+	}
+
+	second := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, rotated)
+	if second.Response.StatusCode() != 200 {
+		t.Fatalf("second refresh with rotated cookie: want 200, got %d: %s",
+			second.Response.StatusCode(), bytes.TrimSpace(second.Response.Body()))
+	}
+	replay := invokeAuthHandler(RefreshHandler(d), "/api/v1/auth/refresh", nil, wire)
+	if replay.Response.StatusCode() == 200 {
+		t.Fatal("consumed refresh cookie must not be reusable")
+	}
+}
+
+// refreshCookieValue extracts the raw wire value of my_openwaf_rt from a Set-Cookie header.
+func refreshCookieValue(t *testing.T, setCookie string) string {
+	t.Helper()
+	const prefix = "my_openwaf_rt="
+	start := bytes.Index([]byte(setCookie), []byte(prefix))
+	if start < 0 {
+		t.Fatalf("missing refresh cookie in %q", setCookie)
+	}
+	rest := setCookie[start+len(prefix):]
+	end := bytes.IndexAny([]byte(rest), ";")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }

@@ -1,17 +1,6 @@
 package cve
 
-// subDetectorNeedleEntries 四子检测器(node/php/java/general)纯 OR gate 的
-// needle 字面量数据。按 cveID+target 分组编入 AC 自动机,运行时一遍扫描
-// 替代逐规则多针 strings.Contains。
-//
-// 复合 helper(含 AND 逻辑/特殊判定)不在此列,保留原始调用路径:
-//
-//	CVE-2019-SSRF, CVE-2019-CRLF, CVE-2019-HEADER-INJECT, CVE-2024-4577(general),
-//	CVE-2024-3400, CVE-2025-34028, CVE-2024-JAVAINJ, CVE-2024-DEEPPATH, CVE-2024-NOSQLI.
 var subDetectorNeedleEntries = []subDetectorNeedleEntry{
-	// ══════════════════════════════════════════════════════════════════
-	// Node.js sub-detector
-	// ══════════════════════════════════════════════════════════════════
 	{"CVE-2019-10744", "all", []string{"__proto__", "constructor.prototype", "prototype["}},
 	{"CVE-2020-REACT-SSR", "all", []string{"dangerouslysetinnerhtml", "__next_data__", "react"}},
 	{"CVE-2019-NODE-CMD", "all", []string{"child_process", "exec(", "spawn(", "process.env", "require(", "whoami", "uname", "wget", "curl", "|", "`"}},
@@ -20,12 +9,8 @@ var subDetectorNeedleEntries = []subDetectorNeedleEntry{
 	{"CVE-2023-32314", "all", []string{"vm2", "constructor", "globalthis"}},
 	{"CVE-2024-34351", "header", []string{"x-middleware", "middleware-subrequest"}},
 	{"CVE-2025-29927", "header", []string{"x-middleware", "middleware-subrequest"}},
-	{"CVE-2025-55182", "body", []string{"react.server", "rsc", "$@", "$1:", "__proto__", "child_process", "constructor", "function(", "new blob", "new response", "dynamic import"}},
+	{"CVE-2025-55182", "body", []string{"react.server", "rsc", "$@", "$1:", "__proto__", "child_process", "constructor", "function(", "new blob", "new response", "dynamic import", "react-server-dom-webpack", "server actions"}},
 	{"CVE-2025-55184", "url", []string{"server-action", "server action", "next-action", "/_next/data/", "__nextdatareq"}},
-
-	// ══════════════════════════════════════════════════════════════════
-	// PHP sub-detector
-	// ══════════════════════════════════════════════════════════════════
 	{"CVE-2015-6835", "all", []string{"unserialize", "o:", "a:"}},
 	{"CVE-2018-14884", "all", []string{"php://", "data://", "expect://", "phar://"}},
 	{"CVE-2018-20062", "all", []string{"invokefunction", "thinkphp", "think\\app", "filter[]=", "filter%5b%5d=", "call_user_func", "_method=__construct", "c=runtime", "a=getcontent"}},
@@ -36,10 +21,6 @@ var subDetectorNeedleEntries = []subDetectorNeedleEntry{
 	{"CVE-2017-9841", "url", []string{"eval-stdin", "phpunit"}},
 	{"CVE-2024-4577", "all", []string{"%ad", "auto_prepend_file", "allow_url_include", "cgi.force_redirect"}},
 	{"CVE-2023-41892", "url", []string{"conditions/render", "actions/conditions", "configobject", "craftcms", "craft cms"}},
-
-	// ══════════════════════════════════════════════════════════════════
-	// Java sub-detector
-	// ══════════════════════════════════════════════════════════════════
 	{"CVE-2021-44228", "all", []string{"${", "jndi:", "ldap://", "rmi://", "ldaps://"}},
 	{"CVE-2022-22965", "all", []string{"class.module", "classloader", "class.classloader", "spring"}},
 	{"CVE-2022-22963", "all", []string{"functionrouter", "spring.cloud.function", "spel", "#{"}},
@@ -50,10 +31,6 @@ var subDetectorNeedleEntries = []subDetectorNeedleEntry{
 	{"CVE-2023-49070", "url", []string{"webtools/control", "ofbiz", "programexport"}},
 	{"CVE-2023-46604", "body", []string{"activemq", "exceptionresponse", "classpathxml", "classpathxmlapplicationcontext", "classinfo", "org.springframework", "spring-beans"}},
 	{"CVE-2022-26134", "all", []string{"confluence", "ognl", "${"}},
-
-	// ══════════════════════════════════════════════════════════════════
-	// General sub-detector (pure OR cases only)
-	// ══════════════════════════════════════════════════════════════════
 	{"CVE-2018-XXE", "body", []string{"<!doctype", "<!entity", " system ", " public "}},
 	{"CVE-2019-PATHTRA", "url", []string{"../", "..\\", "%2e", "%5c", "%00", "....//"}},
 	{"CVE-2014-6271", "all", []string{"() {", "};"}},
@@ -66,7 +43,7 @@ var subDetectorNeedleEntries = []subDetectorNeedleEntry{
 	{"CVE-2025-3248", "all", []string{"validate/code", "__import__", "exec(", "system("}},
 	{"CVE-2025-24893", "all", []string{"solrsearch", "groovy", "media=rss"}},
 	{"CVE-2025-53770", "all", []string{"toolpane.aspx", "signout.aspx", "spinstall0.aspx", "msotlpn_dwp", "__viewstate"}},
-	{"CVE-2026-21876", "all", []string{"multipart/form-data", "charset=utf-7", "charset=utf-16", "charset=utf-32", "shift-jis", "iso-2022-jp"}},
+	{"CVE-2026-21876", "all", []string{"multipart/form-data", "charset=utf-7", "charset=utf-16", "charset=utf-32", "shift-jis", "iso-2022-jp", "+ad4-", "+adw-img"}},
 	{"CVE-2025-47812", "all", []string{"loginok.html", "%00", "io.popen", "lua"}},
 	{"CVE-2025-4632", "all", []string{"swupdatefileuploader", "filename=", "magicinfo"}},
 	{"CVE-2025-64446", "all", []string{"cgi-bin/fwbcgi", "cgiinfo", "fwbcgi"}},

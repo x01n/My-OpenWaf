@@ -18,9 +18,11 @@ import (
 const (
 	InternalHTTP3ProtoHeader           = "X-OpenWaf-Internal-Proto"
 	InternalHTTP3CancelTokenHeader     = "X-OpenWaf-Internal-Cancel-Token"
+	InternalHTTP3ResetTokenHeader      = "X-OpenWaf-Internal-Reset-Token"
 	InternalHTTP3TLSVersionHeader      = "X-OpenWaf-Internal-TLS-Version"
 	InternalHTTP3TLSSNIHeader          = "X-OpenWaf-Internal-TLS-SNI"
 	InternalHTTP3TLSALPNHeader         = "X-OpenWaf-Internal-TLS-ALPN"
+	InternalHTTP3TLSALPNRawHeader      = "X-OpenWaf-Internal-TLS-ALPN-Raw"
 	InternalHTTP3TLSJA3Header          = "X-OpenWaf-Internal-TLS-JA3"
 	InternalHTTP3TLSJA3HashHeader      = "X-OpenWaf-Internal-TLS-JA3-Hash"
 	InternalHTTP3TLSJA4Header          = "X-OpenWaf-Internal-TLS-JA4"
@@ -36,6 +38,46 @@ var internalHTTP3CancelSignals = struct {
 	sync.Mutex
 	items map[string]<-chan struct{}
 }{items: make(map[string]<-chan struct{})}
+
+var internalHTTP3ResetClosures = struct {
+	sync.Mutex
+	items map[string]func()
+}{items: make(map[string]func())}
+
+func RegisterInternalHTTP3ResetToken(reset func()) string {
+	if reset == nil {
+		return ""
+	}
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return ""
+	}
+	token := hex.EncodeToString(raw[:])
+	internalHTTP3ResetClosures.Lock()
+	internalHTTP3ResetClosures.items[token] = reset
+	internalHTTP3ResetClosures.Unlock()
+	return token
+}
+
+func UnregisterInternalHTTP3ResetToken(token string) {
+	if token == "" {
+		return
+	}
+	internalHTTP3ResetClosures.Lock()
+	delete(internalHTTP3ResetClosures.items, token)
+	internalHTTP3ResetClosures.Unlock()
+}
+
+func takeInternalHTTP3ResetClosure(token string) (func(), bool) {
+	if token == "" {
+		return nil, false
+	}
+	internalHTTP3ResetClosures.Lock()
+	reset, ok := internalHTTP3ResetClosures.items[token]
+	delete(internalHTTP3ResetClosures.items, token)
+	internalHTTP3ResetClosures.Unlock()
+	return reset, ok && reset != nil
+}
 
 func RegisterInternalHTTP3CancelSignal(done <-chan struct{}) (string, func()) {
 	if done == nil {
@@ -201,6 +243,7 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	version := trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSVersionHeader))
 	sni := trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSSNIHeader))
 	alpn := trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSALPNHeader))
+	alpnRaw := parseInternalHTTP3ALPNList(trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSALPNRawHeader)))
 	ja3 := trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSJA3Header))
 	ja3Hash := trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSJA3HashHeader))
 	ja4 := trimRequestHeaderValue(c.GetHeader(InternalHTTP3TLSJA4Header))
@@ -213,11 +256,16 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	if done, ok := takeInternalHTTP3CancelSignal(cancelToken); ok {
 		c.Set(InternalHTTP3CancelTokenHeader, done)
 	}
+	if resetToken := trimRequestHeaderValue(c.GetHeader(InternalHTTP3ResetTokenHeader)); resetToken != "" {
+		if reset, ok := takeInternalHTTP3ResetClosure(resetToken); ok {
+			c.Set(InternalHTTP3ResetTokenHeader, reset)
+		}
+	}
 	clearInternalHTTP3RequestMetadataHeaders(c)
 	c.Set(internalHTTP3ContextKey, true)
 	security.MarkTrustedInboundHTTP3(c)
 
-	if version == "" && sni == "" && alpn == "" && ja3 == "" && ja3Hash == "" && ja4 == "" &&
+	if version == "" && sni == "" && alpn == "" && len(alpnRaw) == 0 && ja3 == "" && ja3Hash == "" && ja4 == "" &&
 		len(cipherSuites) == 0 && len(extensions) == 0 && len(curves) == 0 && len(pointFormats) == 0 {
 		return
 	}
@@ -229,8 +277,12 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 	if sni != "" {
 		fp.SNI = sni
 	}
+	// ALPNRaw 是 ClientHello 声明列表，ALPN 是协商结果；两者都保留。
+	fp.ALPNRaw = alpnRaw
 	if alpn != "" {
 		fp.ALPN = []string{alpn}
+	} else if len(alpnRaw) > 0 {
+		fp.ALPN = append([]string(nil), alpnRaw...)
 	}
 	if ja3 != "" {
 		fp.JA3 = ja3
@@ -262,9 +314,11 @@ func clearInternalHTTP3RequestMetadataHeaders(c *app.RequestContext) {
 	}
 	c.Request.Header.Del(InternalHTTP3ProtoHeader)
 	c.Request.Header.Del(InternalHTTP3CancelTokenHeader)
+	c.Request.Header.Del(InternalHTTP3ResetTokenHeader)
 	c.Request.Header.Del(InternalHTTP3TLSVersionHeader)
 	c.Request.Header.Del(InternalHTTP3TLSSNIHeader)
 	c.Request.Header.Del(InternalHTTP3TLSALPNHeader)
+	c.Request.Header.Del(InternalHTTP3TLSALPNRawHeader)
 	c.Request.Header.Del(InternalHTTP3TLSJA3Header)
 	c.Request.Header.Del(InternalHTTP3TLSJA3HashHeader)
 	c.Request.Header.Del(InternalHTTP3TLSJA4Header)
@@ -350,6 +404,30 @@ func parseInternalHTTP3Uint8List(raw string) []uint8 {
 			return nil
 		}
 		values = append(values, uint8(parsed))
+	}
+	return values
+}
+
+// parseInternalHTTP3ALPNList 解析内部头里的 ALPN 声明列表。
+//
+// 与 parseInternalHTTP3Uint16List 的「任一项非法则整体丢弃」不同：ALPN 是
+// 字符串列表，且属于诊断性元数据，单个损坏项不应让整份声明列表消失。
+// 空项被跳过，全空时返回 nil。
+func parseInternalHTTP3ALPNList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		values = append(values, part)
+	}
+	if len(values) == 0 {
+		return nil
 	}
 	return values
 }

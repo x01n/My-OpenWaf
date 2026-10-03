@@ -18,20 +18,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import {
-  Pagination,
-  PaginationContent,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-  PaginationEllipsis,
-} from "@/components/ui/pagination"
+import { DataTable } from "@/components/data-table"
+import { TablePagination } from "@/components/table-pagination"
 import { Badge } from "@/components/ui/badge"
 import { ActionBadge } from "@/components/action-badge"
 import { AccessLogOriginBadge } from "@/components/access-log-origin-badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { DataTable } from "@/components/data-table"
 import { Skeleton } from "@/components/ui/skeleton"
 import { IconEye, IconFilter, IconRoute } from "@tabler/icons-react"
 import { useAccessLogs } from "@/hooks/use-api"
@@ -66,8 +58,6 @@ interface FilterDraftState {
   value: AccessLogFilters
 }
 
-type PaginationToken = number | "start-ellipsis" | "end-ellipsis"
-
 /** URL 页码只接受大于等于 1 的整数。 */
 function parsePositivePage(raw: string | null): number {
   const value = Number(raw)
@@ -87,37 +77,6 @@ function readFilters(queryString: string): AccessLogFilters {
     path: params.get("path") || "",
     site_id: params.get("site_id") || "",
   }
-}
-
-/** 生成围绕当前页的紧凑分页窗口，避免深页码时失去当前位置。 */
-function buildPaginationTokens(
-  totalPages: number,
-  currentPage: number
-): PaginationToken[] {
-  if (totalPages <= 7) {
-    return Array.from({ length: totalPages }, (_, index) => index + 1)
-  }
-
-  const pages = new Set([
-    1,
-    totalPages,
-    currentPage - 1,
-    currentPage,
-    currentPage + 1,
-  ])
-  const visible = Array.from(pages)
-    .filter((page) => page >= 1 && page <= totalPages)
-    .sort((left, right) => left - right)
-  const tokens: PaginationToken[] = []
-
-  visible.forEach((page, index) => {
-    const previous = visible[index - 1]
-    if (previous && page - previous > 1) {
-      tokens.push(previous === 1 ? "start-ellipsis" : "end-ellipsis")
-    }
-    tokens.push(page)
-  })
-  return tokens
 }
 
 /** 日期格式化失败时保留后端原值。 */
@@ -190,11 +149,6 @@ function AccessLogsContent() {
   const { data, isLoading, error } = useAccessLogs(queryParams)
   const items = useMemo<AccessLog[]>(() => data?.items || [], [data?.items])
   const total = data?.total || 0
-  const totalPages = Math.ceil(total / PAGE_SIZE) || 1
-  const paginationTokens = useMemo(
-    () => buildPaginationTokens(totalPages, page),
-    [page, totalPages]
-  )
 
   const updateQuery = useCallback(
     (updates: AccessLogQueryUpdates) => {
@@ -674,63 +628,12 @@ function AccessLogsContent() {
             emptyText={t("accessLogs.empty")}
           />
 
-          {totalPages > 1 && (
-            <div className="max-w-full overflow-x-auto pb-1">
-              <Pagination className="w-max min-w-full">
-                <PaginationContent>
-                  <PaginationItem>
-                    <PaginationPrevious
-                      aria-disabled={page <= 1}
-                      tabIndex={page <= 1 ? -1 : 0}
-                      disabled={page <= 1}
-                      onClick={() =>
-                        updateQuery({ page: String(Math.max(1, page - 1)) })
-                      }
-                      className={
-                        page <= 1
-                          ? "pointer-events-none opacity-50"
-                          : "cursor-pointer"
-                      }
-                    />
-                  </PaginationItem>
-                  {paginationTokens.map((token) =>
-                    typeof token === "number" ? (
-                      <PaginationItem key={token}>
-                        <PaginationLink
-                          isActive={page === token}
-                          className="cursor-pointer"
-                          onClick={() => updateQuery({ page: String(token) })}
-                        >
-                          {token}
-                        </PaginationLink>
-                      </PaginationItem>
-                    ) : (
-                      <PaginationItem key={token}>
-                        <PaginationEllipsis />
-                      </PaginationItem>
-                    )
-                  )}
-                  <PaginationItem>
-                    <PaginationNext
-                      aria-disabled={page >= totalPages}
-                      tabIndex={page >= totalPages ? -1 : 0}
-                      disabled={page >= totalPages}
-                      onClick={() =>
-                        updateQuery({
-                          page: String(Math.min(totalPages, page + 1)),
-                        })
-                      }
-                      className={
-                        page >= totalPages
-                          ? "pointer-events-none opacity-50"
-                          : "cursor-pointer"
-                      }
-                    />
-                  </PaginationItem>
-                </PaginationContent>
-              </Pagination>
-            </div>
-          )}
+          <TablePagination
+            page={page}
+            pageSize={PAGE_SIZE}
+            total={total}
+            onPageChange={(next) => updateQuery({ page: String(next) })}
+          />
         </CardContent>
       </Card>
 

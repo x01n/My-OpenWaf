@@ -3,7 +3,6 @@ package snapshot
 import (
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -446,6 +445,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 			ep.CVERulesConfig = raw
 		}
 		rt.AntiReplayEnabled = ep.AntiReplayEnabled
+		rt.AntiReplayCookieMode = NormalizeAntiReplayCookieMode(ep.AntiReplayCookieMode)
 		rt.EffectiveProtection = &ep
 	}
 
@@ -655,6 +655,11 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 	if site.AntiReplayEnabled != nil {
 		p.AntiReplayEnabled = *site.AntiReplayEnabled
 	}
+	// Anti-replay Cookie 校验模式：nil 继承全局，非 nil 显式覆盖，终值统一规范化。
+	if site.AntiReplayCookieMode != nil {
+		p.AntiReplayCookieMode = *site.AntiReplayCookieMode
+	}
+	p.AntiReplayCookieMode = NormalizeAntiReplayCookieMode(p.AntiReplayCookieMode)
 
 	// OWASP override
 	if site.OWASPEnabled != nil {
@@ -709,6 +714,13 @@ func maybeSiteString(v *string) string {
 		return ""
 	}
 	return *v
+}
+
+func NormalizeAntiReplayCookieMode(raw string) string {
+	if raw == "dual" {
+		return "dual"
+	}
+	return "standard"
 }
 
 // splitHosts splits a host field by comma, supporting multi-host per site.
@@ -848,13 +860,48 @@ func compileRules(rs []store.Rule) []CompiledRule {
 		if kind == "" {
 			continue
 		}
+		kind, arg = applyRuleFrequencyLimit(r, kind, arg)
 		out = append(out, CompiledRule{
 			ID: r.ID, Phase: r.Phase, Action: r.Action, Priority: r.Priority,
 			Kind: kind, Arg: arg, StatusCode: r.StatusCode, RedirectTo: r.RedirectTo,
-			CaptchaType: r.CaptchaType,
+			CaptchaType:    r.CaptchaType,
+			CaptchaMinutes: r.CaptchaMinutes,
 		})
 	}
 	return out
+}
+
+/**
+ * applyRuleFrequencyLimit 把规则自带的频次参数包装成 cc_rate 复合条件。
+ *
+ * 规则表单的「时间窗口（秒）+ 请求次数」是规则级频次限制：窗口内命中本条
+ * 条件的请求达到阈值后执行本规则的 Action。它与 CC 防护页的 cc_rules 使用
+ * 同一个 ccRateMatcher（计数键为 clientIP|host，见 internal/core/rules/matcher.go），
+ * 区别只在条件来源——这里是规则自身的 pattern。
+ *
+ * WindowSeconds 与 RequestCount 必须同时大于 0 才生效；任一为 0 或负数
+ * 表示不做频次限制，原样返回。pattern 已是复合 JSON（cc_rate 或 and/or 等）
+ * 时不叠加包装，避免生成 cc_rate 嵌套 cc_rate 这种无法从表单还原的结构。
+ *
+ * @param r    规则模型，读取 WindowSeconds / RequestCount
+ * @param kind 已解析的匹配器类型
+ * @param arg  已解析的匹配器参数
+ * @return 包装后的 kind/arg；不满足条件时原样返回
+ */
+func applyRuleFrequencyLimit(r store.Rule, kind, arg string) (string, string) {
+	if r.WindowSeconds <= 0 || r.RequestCount <= 0 || kind == "compound" {
+		return kind, arg
+	}
+	raw, err := json.Marshal(map[string]any{
+		"op":        "cc_rate",
+		"children":  []any{map[string]string{"kind": kind, "arg": arg}},
+		"window":    r.WindowSeconds,
+		"threshold": r.RequestCount,
+	})
+	if err != nil {
+		return kind, arg
+	}
+	return "compound", string(raw)
 }
 
 type ccRuleConfig struct {
@@ -1106,14 +1153,6 @@ func parseClientIPHeaderOrder(raw string) []string {
 	return append([]string(nil), inbound...)
 }
 
-func loadNetworkDefaults(db *gorm.DB) NetworkDefaults {
-	var setting store.SystemSettings
-	if err := db.Where("key = ?", "network_config").First(&setting).Error; err != nil {
-		return DefaultNetworkDefaults()
-	}
-	return LoadNetworkDefaults(setting.Value)
-}
-
 // networkDefaultsFromMap 从预加载的 settings map 中读取网络默认配置。
 func networkDefaultsFromMap(m map[string]string) NetworkDefaults {
 	v, ok := m["network_config"]
@@ -1123,14 +1162,6 @@ func networkDefaultsFromMap(m map[string]string) NetworkDefaults {
 	return LoadNetworkDefaults(v)
 }
 
-func loadTLSDefaults(db *gorm.DB) TLSDefaults {
-	var setting store.SystemSettings
-	if err := db.Where("key = ?", "tls_default_config").First(&setting).Error; err != nil {
-		return DefaultTLSDefaults()
-	}
-	return LoadTLSDefaults(setting.Value)
-}
-
 // tlsDefaultsFromMap 从预加载的 settings map 中读取 TLS 默认配置。
 func tlsDefaultsFromMap(m map[string]string) TLSDefaults {
 	v, ok := m["tls_default_config"]
@@ -1138,24 +1169,6 @@ func tlsDefaultsFromMap(m map[string]string) TLSDefaults {
 		return DefaultTLSDefaults()
 	}
 	return LoadTLSDefaults(v)
-}
-
-func loadProtectionConfig(db *gorm.DB) (store.ProtectionConfig, error) {
-	var setting store.SystemSettings
-	if err := db.Where("key = ?", "protection").First(&setting).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return store.DefaultProtectionConfig(), nil
-		}
-		return store.ProtectionConfig{}, fmt.Errorf("load protection config: %w", err)
-	}
-	cfg := store.DefaultProtectionConfig()
-	if err := json.Unmarshal([]byte(setting.Value), &cfg); err != nil {
-		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
-	}
-	if !challenge.IsValidCaptchaType(challenge.CaptchaType(cfg.CaptchaType)) {
-		return store.ProtectionConfig{}, fmt.Errorf("invalid protection captcha_type %q", cfg.CaptchaType)
-	}
-	return cfg, nil
 }
 
 // protectionConfigFromMap 从预加载的 settings map 中读取 protection 配置。
@@ -1172,13 +1185,6 @@ func protectionConfigFromMap(m map[string]string) (store.ProtectionConfig, error
 		return store.ProtectionConfig{}, fmt.Errorf("invalid protection captcha_type %q", cfg.CaptchaType)
 	}
 	return cfg, nil
-}
-func loadDynamicProtection(db *gorm.DB) dynamic.ProtectionConfig {
-	var setting store.SystemSettings
-	if err := db.Where("key = ?", "bot_settings").First(&setting).Error; err != nil {
-		return dynamic.ProtectionConfig{}
-	}
-	return parseDynamicProtection(setting.Value)
 }
 
 // parseDynamicProtection 从 bot_settings JSON 字符串解析动态保护配置。
@@ -1263,14 +1269,6 @@ func buildSiteDynamicProtection(global dynamic.ProtectionConfig, site store.Site
 	return cfg
 }
 
-func loadExcludeRecordHeaders(db *gorm.DB) []string {
-	var setting store.SystemSettings
-	if err := db.Where("key = ?", "bot_settings").First(&setting).Error; err != nil {
-		return nil
-	}
-	return parseExcludeRecordHeaders(setting.Value)
-}
-
 // parseExcludeRecordHeaders 从 bot_settings JSON 字符串解析排除记录头列表。
 func parseExcludeRecordHeaders(raw string) []string {
 	if raw == "" {
@@ -1300,38 +1298,6 @@ func http2ConfigFromMap(m map[string]string) HTTP2Config {
 		return DefaultHTTP2Config()
 	}
 	return LoadHTTP2Config(v)
-}
-
-func loadBoolSetting(db *gorm.DB, key string) bool {
-	var setting store.SystemSettings
-	if err := db.Where("key = ?", key).First(&setting).Error; err != nil {
-		return false
-	}
-	v := strings.TrimSpace(strings.ToLower(setting.Value))
-	return v == "true" || v == "1" || v == "yes"
-}
-
-func loadStringSetting(db *gorm.DB, key string, defaultValue string) string {
-	var setting store.SystemSettings
-	if err := db.Where("key = ?", key).First(&setting).Error; err != nil {
-		return defaultValue
-	}
-	if strings.TrimSpace(setting.Value) == "" {
-		return defaultValue
-	}
-	return setting.Value
-}
-
-func loadIntSetting(db *gorm.DB, key string, defaultValue int) int {
-	var setting store.SystemSettings
-	if err := db.Where("key = ?", key).First(&setting).Error; err != nil {
-		return defaultValue
-	}
-	v, err := strconv.Atoi(strings.TrimSpace(setting.Value))
-	if err != nil {
-		return defaultValue
-	}
-	return v
 }
 
 // loadAllSettings 一次性加载所有 system_settings 到 map，避免多次独立查询。

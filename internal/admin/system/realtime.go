@@ -122,6 +122,19 @@ type realtimeSecurityEvent struct {
 	GeoCountry      string    `json:"geo_country"`
 	GeoCity         string    `json:"geo_city"`
 	StatusCode      int       `json:"status_code"`
+
+	// 规则解释信息：与安全事件列表/详情一致，实时推送也携带命中规则
+	// 的名称、说明、分值、片段与 CVE 的危险度明细。
+	RuleName     string  `json:"rule_name"`
+	RuleDesc     string  `json:"rule_desc"`
+	MatchScore   int     `json:"match_score"`
+	MatchSnippet string  `json:"match_snippet"`
+	MatchPart    string  `json:"match_part"`
+	Severity     string  `json:"severity"`
+	Source       string  `json:"source"`
+	CVSSScore    float64 `json:"cvss_score"`
+	CWEType      string  `json:"cwe_type"`
+	References   string  `json:"references"`
 }
 
 type realtimeFingerprintSummary struct {
@@ -379,6 +392,16 @@ func mapSecurityEventSnapshot(items []store.SecurityEvent) []realtimeSecurityEve
 			GeoCountry:      item.GeoCountry,
 			GeoCity:         item.GeoCity,
 			StatusCode:      item.StatusCode,
+			RuleName:        item.RuleName,
+			RuleDesc:        item.RuleDesc,
+			MatchScore:      item.MatchScore,
+			MatchSnippet:    item.MatchSnippet,
+			MatchPart:       item.MatchPart,
+			Severity:        item.Severity,
+			Source:          item.Source,
+			CVSSScore:       item.CVSSScore,
+			CWEType:         item.CWEType,
+			References:      item.References,
 		})
 	}
 	return out

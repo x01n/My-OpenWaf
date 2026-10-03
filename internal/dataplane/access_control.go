@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
@@ -27,7 +27,7 @@ func init() {
 	go accessSessionCleaner()
 }
 
-func SetAccessStoreRedisClients(redisClient *goredis.Client) {
+func SetAccessStoreRedisClients(redisClient rueidis.Client) {
 	if sessions, ok := globalAccessSessionStore.(*accessgate.RedisSessionStore); ok {
 		sessions.SetRedis(redisClient)
 	}

@@ -6,61 +6,29 @@ import (
 )
 
 /**
- * computeSubDetectorHitsNoSkip 复刻空自动机短路优化之前的行为:
- * 无条件扫描全部六个字段视图,包括当前零 needle 的 url_body 视图。
+ * computeSubDetectorHitsNoSkip 保留对「跳过空自动机短路」语义的等价性基线:
+ * 生产路径 computeSubDetectorHits 对零 needle 视图直接短路,NoSkip 版无条件
+ * 扫描全部六个字段视图（普通 MatchMask 对空 matcher 同样安全返回零 mask）。
  *
- * 仅用于 A/B 基准对照与等价性验证。与 computeSubDetectorHits 在同一进程内
- * 交替计时,使两者承受相同的 CPU 竞争,在高负载机器上仍可得到可比结论。
+ * 仅用于等价性验证。与 computeSubDetectorHits 在同一进程内交替计时,
+ * 使两者承受相同的 CPU 竞争,在高负载机器上仍可得到可比结论。
  *
  * @param req 待扫描请求
  * @returns 各视图 AC 命中 mask
  */
 func computeSubDetectorHitsNoSkip(req *CVERequest) subDetectorHits {
 	var h subDetectorHits
-	ac := &globalSubDetectorAC
-	h.all = matchMaskSliceForced(ac.allAC, req.AllTargetsLower)
-	h.url = matchMaskSliceForced(ac.urlAC, req.URLTargetsLower)
-	h.body = matchMaskSliceForced(ac.bodyAC, req.BodyTargetsLower)
-	h.header = matchMaskSliceForced(ac.headerAC, req.HeaderTargetsLower)
+	acSet := &globalSubDetectorAC
+	h.all = acSet.allAC.MatchMaskSlice(req.AllTargetsLower)
+	h.url = acSet.urlAC.MatchMaskSlice(req.URLTargetsLower)
+	h.body = acSet.bodyAC.MatchMaskSlice(req.BodyTargetsLower)
+	h.header = acSet.headerAC.MatchMaskSlice(req.HeaderTargetsLower)
 	if cookie, ok := cveHeaderValueOK(req.Headers, "Cookie"); ok {
-		h.cookie = matchMaskForced(ac.cookieAC, strings.ToLower(cookie))
+		h.cookie = acSet.cookieAC.MatchMask(strings.ToLower(cookie))
 	}
-	h.urlBody = matchMaskSliceForced(ac.urlBodyAC, req.URLTargetsLower)
-	bodyHit := matchMaskSliceForced(ac.urlBodyAC, req.BodyTargetsLower)
-	for i := range h.urlBody.words {
-		h.urlBody.words[i] |= bodyHit.words[i]
-	}
+	h.urlBody = acSet.urlBodyAC.MatchMaskSlice(req.URLTargetsLower)
+	h.urlBody.MergeFrom(acSet.urlBodyAC.MatchMaskSlice(req.BodyTargetsLower))
 	return h
-}
-
-// matchMaskSliceForced 是不带空自动机短路的 matchMaskSlice(优化前实现)。
-func matchMaskSliceForced(ac *acMatcher, targets []string) acGateMask {
-	var hit acGateMask
-	nodes := ac.states
-	for _, t := range targets {
-		cur := int32(0)
-		for i := 0; i < len(t); i++ {
-			cur = nodes[cur].next[t[i]]
-			for _, idx := range nodes[cur].outputs {
-				hit.set(idx)
-			}
-		}
-	}
-	return hit
-}
-
-// matchMaskForced 是不带空自动机短路的 matchMask(优化前实现)。
-func matchMaskForced(ac *acMatcher, target string) acGateMask {
-	var hit acGateMask
-	cur := int32(0)
-	nodes := ac.states
-	for i := 0; i < len(target); i++ {
-		cur = nodes[cur].next[target[i]]
-		for _, idx := range nodes[cur].outputs {
-			hit.set(idx)
-		}
-	}
-	return hit
 }
 
 /**

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { Suspense, useCallback, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import {
@@ -10,6 +10,7 @@ import {
   IconRotateClockwise,
   IconTrash,
 } from "@tabler/icons-react"
+import { useSearchParams } from "next/navigation"
 import { PageHeader } from "@/components/page-header"
 import { DataTable } from "@/components/data-table"
 import { TablePagination } from "@/components/table-pagination"
@@ -26,6 +27,8 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { cveApi } from "@/lib/api"
 import {
   invalidateCVERuleCaches,
@@ -34,6 +37,7 @@ import {
   usePolicies,
 } from "@/hooks/use-api"
 import { useAuth } from "@/hooks/use-auth"
+import { useDebouncedValue } from "@/hooks/use-debounced-value"
 import type { CVERuleItem, CVERuleWriteInput, CVEScopeType } from "@/lib/types"
 import { categoryLabel, severityLabel } from "@/lib/attack-category"
 import { normalizeActionValue } from "@/lib/action-style"
@@ -54,13 +58,40 @@ const ACTIONS = [
   "chain_challenge",
 ]
 const SCOPE_GLOBAL = "global"
+/** 搜索输入的去抖时长：与 OWASP 目录页保持一致。 */
+const CVE_SEARCH_DEBOUNCE_MS = 300
+
 const PAGE_SIZE = 50
 
+/**
+ * useInitialCVEQuery 读取 ?q= 作为 CVE 目录的初始查询条件。
+ *
+ * useSearchParams 要求在 Suspense 边界内使用，因此本页由 CVERulesPage
+ * 统一包裹；该值只在挂载时读取一次，之后输入完全由本地状态驱动。
+ */
+function useInitialCVEQuery(): string {
+  const searchParams = useSearchParams()
+  return useMemo(() => (searchParams.get("q") || "").trim(), [searchParams])
+}
+
+/** CVERulesPage 静态导出下的 Suspense 外壳。 */
 export default function CVERulesPage() {
+  return (
+    <Suspense fallback={null}>
+      <CVERulesPageContent />
+    </Suspense>
+  )
+}
+
+function CVERulesPageContent() {
   const { t } = useTranslation()
   const { user } = useAuth()
   const canManage = user?.role === "admin" || user?.role === "operator"
   const canManageCustom = user?.role === "admin"
+  const initialRuleQuery = useInitialCVEQuery()
+  // CVE 目录的查询只覆盖 cve_id 与 description（见 cve_scope.go），
+  // 安全事件详情跳转时传入的是剥掉 cve: 前缀的 CVE 编号。
+  const [query, setQuery] = useState(() => initialRuleQuery)
   const [scope, setScope] = useState<CVEScopeType>(SCOPE_GLOBAL)
   const [policyID, setPolicyID] = useState<number | undefined>(undefined)
   const [siteID, setSiteID] = useState<number | undefined>(undefined)
@@ -92,6 +123,10 @@ export default function CVERulesPage() {
   const effectivePolicyID = policyID ?? defaultPolicyID
   const effectiveSiteID = siteID ?? sites[0]?.id
 
+  const resetPage = useCallback(() => setPage(1), [])
+  const debouncedQuery = useDebouncedValue(query, CVE_SEARCH_DEBOUNCE_MS, resetPage)
+  const querySettling = query !== debouncedQuery
+
   const params = useMemo(() => {
     const base: Record<string, unknown> = {
       scope,
@@ -100,8 +135,9 @@ export default function CVERulesPage() {
     }
     if (scope === "policy") base.policy_id = effectivePolicyID
     if (scope === "site") base.site_id = effectiveSiteID
+    if (debouncedQuery) base.q = debouncedQuery
     return base
-  }, [effectivePolicyID, effectiveSiteID, page, scope])
+  }, [debouncedQuery, effectivePolicyID, effectiveSiteID, page, scope])
   const enabled = Boolean(
     scope === "global" ||
     (scope === "policy" && effectivePolicyID) ||
@@ -379,6 +415,11 @@ export default function CVERulesPage() {
               {row.inherited_from && !isCustomRule(row) && (
                 <Badge variant="secondary">{row.inherited_from}</Badge>
               )}
+              {row.target && (
+                <Badge variant="outline">
+                  {t(`cveRules.targets.${row.target}`, row.target)}
+                </Badge>
+              )}
             </div>
             <div className="font-medium break-words">
               {row.name || row.description || row.cve_id || row.cve}
@@ -386,9 +427,23 @@ export default function CVERulesPage() {
             <p className="line-clamp-2 text-xs break-words whitespace-normal text-muted-foreground">
               {row.description}
             </p>
-            {isCustomRule(row) && row.pattern && (
-              <code className="block max-w-full truncate rounded bg-muted/60 px-2 py-1 text-[11px] text-muted-foreground">
-                {row.target}: {row.pattern}
+            {(row.cvss_score !== undefined || row.cwe_type) && (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                {row.cvss_score !== undefined && row.cvss_score > 0 && (
+                  <Badge variant="outline">
+                    {t("cveRules.cvss")}: {row.cvss_score}
+                  </Badge>
+                )}
+                {row.cwe_type && (
+                  <Badge variant="outline" title={t("cveRules.cwe")}>
+                    {row.cwe_type}
+                  </Badge>
+                )}
+              </div>
+            )}
+            {row.pattern && (
+              <code className="block max-w-full whitespace-pre-wrap break-all rounded bg-muted/60 px-2 py-1 text-[11px] text-muted-foreground">
+                {row.pattern}
               </code>
             )}
           </div>
@@ -644,6 +699,16 @@ export default function CVERulesPage() {
             </SelectContent>
           </Select>
         )}
+        <div className="space-y-1.5">
+          <Label>{t("common.search")}</Label>
+          <Input
+            value={query}
+            maxLength={256}
+            onChange={(e) => setQuery(e.target.value)}
+            className="w-64"
+            placeholder={t("rules.searchPlaceholder")}
+          />
+        </div>
         {stats && (
           <Badge variant="secondary" className="mb-2">
             {stats.enabled_count}/{stats.total} {t("common.enabled")}
@@ -653,7 +718,7 @@ export default function CVERulesPage() {
       <DataTable
         columns={columns}
         data={rules}
-        loading={(isLoading || dependencyLoading) && rules.length === 0}
+        loading={(isLoading || dependencyLoading || querySettling) && rules.length === 0}
         rowKey={(row) => row.id}
         emptyText={t("cveRules.empty")}
       />

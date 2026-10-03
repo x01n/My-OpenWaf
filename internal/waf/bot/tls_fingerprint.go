@@ -16,6 +16,15 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
+// TLSClientFingerprint 保存一次 TLS ClientHello 的完整指纹。
+//
+// ALPN 与 ALPNRaw 是两条独立通道，不得互相覆写：
+//   - ALPNRaw 是 ClientHello 中声明的完整 ALPN 列表，按客户端给出的顺序，
+//     由解析阶段填写一次，此后不再被任何握手回调改写。JA4 a 段、
+//     ALPN 一致性校验读它。
+//   - ALPN 是握手结束后协商出的单个协议（"h2" / "http/1.1" / "h3"），
+//     由 SetTLSHandshakeInfo 在握手回调中覆写。握手尚未完成（或该回调
+//     未触发）时它暂存 ALPNRaw 的值，保持「解析后即可读」的旧行为。
 type TLSClientFingerprint struct {
 	JA3          string
 	JA3Hash      string
@@ -23,6 +32,7 @@ type TLSClientFingerprint struct {
 	TLSVersion   string
 	SNI          string
 	ALPN         []string
+	ALPNRaw      []string
 	CipherSuites []uint16
 	Extensions   []uint16
 	Curves       []uint16
@@ -43,6 +53,9 @@ func TLSFingerprintFromClientHelloInfo(info *tls.ClientHelloInfo, protocol byte)
 	out.SNI = info.ServerName
 	if len(info.SupportedProtos) > 0 {
 		out.ALPN = append([]string(nil), info.SupportedProtos...)
+		// 握手回调分支拿不到协商结果，ALPNRaw 与 ALPN 同源；
+		// 后续 SetTLSHandshakeInfo 只覆写 ALPN。
+		out.ALPNRaw = append([]string(nil), info.SupportedProtos...)
 	}
 	if len(info.CipherSuites) > 0 {
 		out.CipherSuites = make([]uint16, 0, len(info.CipherSuites))
@@ -163,6 +176,8 @@ func parseTLSClientHelloWithUTLS(record []byte) (TLSClientFingerprint, error) {
 		sum := md5SumString(out.JA3)
 		out.JA3Hash = hex.EncodeToString(sum[:])
 	}
+	// 声明列表副本：ALPN 之后会被协商结果覆写，ALPNRaw 必须独立。
+	out.ALPNRaw = append([]string(nil), out.ALPN...)
 	return out, nil
 }
 
@@ -196,6 +211,7 @@ func parseTLSClientHelloRaw(record []byte) (TLSClientFingerprint, error) {
 	out.TLSVersion = tlsVersionString(version)
 	out.SNI = raw.sni
 	out.ALPN = raw.alpn
+	out.ALPNRaw = append([]string(nil), raw.alpn...)
 	out.Extensions = raw.extensions
 	out.Curves = raw.curves
 	out.PointFormats = raw.pointFormats

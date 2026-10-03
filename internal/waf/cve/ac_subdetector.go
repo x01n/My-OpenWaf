@@ -1,6 +1,10 @@
 package cve
 
-import "strings"
+import (
+	"strings"
+
+	"My-OpenWaf/internal/ac"
+)
 
 // subDetectorNeedleEntry 定义一条子检测器 gate 的 needle 组。
 type subDetectorNeedleEntry struct {
@@ -12,32 +16,32 @@ type subDetectorNeedleEntry struct {
 // subDetectorHits 一次性计算的各视图 AC 命中 mask,在 CVEDetector.DetectFirst
 // 入口对 CVERequest 计算一次,传给所有四子检测器复用。
 type subDetectorHits struct {
-	all     acGateMask
-	url     acGateMask
-	body    acGateMask
-	header  acGateMask
-	cookie  acGateMask
-	urlBody acGateMask
+	all     ac.Mask
+	url     ac.Mask
+	body    ac.Mask
+	header  ac.Mask
+	cookie  ac.Mask
+	urlBody ac.Mask
 }
 
 // subDetectorACSet 持有按字段视图分组的 AC 自动机与规则 mask。
 type subDetectorACSet struct {
-	allAC     *acMatcher
-	urlAC     *acMatcher
-	bodyAC    *acMatcher
-	headerAC  *acMatcher
-	cookieAC  *acMatcher
-	urlBodyAC *acMatcher
+	allAC     *ac.Matcher
+	urlAC     *ac.Matcher
+	bodyAC    *ac.Matcher
+	headerAC  *ac.Matcher
+	cookieAC  *ac.Matcher
+	urlBodyAC *ac.Matcher
 
 	// masks[kindIndex(target)] 是单一 target 视图上 (cveID → mask) 的索引,
 	// mask 值为构建期一次性固定、只读共享的位图。
 	masks [6]subDetectorMaskKind
 }
 
-// subDetectorMaskKind 是单一 target 视图上 (cveID → *acGateMask) 的索引。
+// subDetectorMaskKind 是单一 target 视图上 (cveID → *ac.Mask) 的索引。
 // mask 值为构建期固定、此后只读共享,绝不写回。
 type subDetectorMaskKind struct {
-	mask map[string]*acGateMask
+	mask map[string]*ac.Mask
 }
 
 var globalSubDetectorAC subDetectorACSet
@@ -48,12 +52,12 @@ func init() {
 
 func buildSubDetectorAC() {
 	type viewBuilder struct {
-		b       *acBuilder
-		byCVEID map[string]*acGateMask
+		b       *ac.Builder
+		byCVEID map[string]*ac.Mask
 	}
 	views := []*viewBuilder{
-		{b: newACBuilder()}, {b: newACBuilder()}, {b: newACBuilder()},
-		{b: newACBuilder()}, {b: newACBuilder()}, {b: newACBuilder()},
+		{b: ac.NewBuilder()}, {b: ac.NewBuilder()}, {b: ac.NewBuilder()},
+		{b: ac.NewBuilder()}, {b: ac.NewBuilder()}, {b: ac.NewBuilder()},
 	}
 
 	// 把 subDetectorNeedleEntries 归入所属视图,并按 (cveID+"|"+target) 与旧
@@ -63,27 +67,27 @@ func buildSubDetectorAC() {
 	for _, entry := range subDetectorNeedleEntries {
 		vb := views[subDetectorMaskKindIndex(entry.target)]
 		if vb.byCVEID == nil {
-			vb.byCVEID = make(map[string]*acGateMask)
+			vb.byCVEID = make(map[string]*ac.Mask)
 		}
 		mask, ok := vb.byCVEID[entry.cveID]
 		if !ok {
-			m := acGateMask{}
+			m := ac.Mask{}
 			mask = &m
 			vb.byCVEID[entry.cveID] = mask
 		}
 		for _, n := range entry.needles {
-			idx := vb.b.addPattern(n)
-			mask.set(idx)
+			idx := vb.b.AddPattern(n)
+			mask.Set(idx)
 		}
 	}
 
 	set := subDetectorACSet{
-		allAC:     views[0].b.build(),
-		urlAC:     views[1].b.build(),
-		bodyAC:    views[2].b.build(),
-		headerAC:  views[3].b.build(),
-		cookieAC:  views[4].b.build(),
-		urlBodyAC: views[5].b.build(),
+		allAC:     views[0].b.Build(),
+		urlAC:     views[1].b.Build(),
+		bodyAC:    views[2].b.Build(),
+		headerAC:  views[3].b.Build(),
+		cookieAC:  views[4].b.Build(),
+		urlBodyAC: views[5].b.Build(),
 	}
 	for i, vb := range views {
 		set.masks[i] = subDetectorMaskKind{mask: vb.byCVEID}
@@ -116,20 +120,17 @@ func subDetectorMaskKindIndex(target string) int {
 func computeSubDetectorHits(req *CVERequest) subDetectorHits {
 	var h subDetectorHits
 	ac := &globalSubDetectorAC
-	h.all = ac.allAC.matchMaskSlice(req.AllTargetsLower)
-	h.url = ac.urlAC.matchMaskSlice(req.URLTargetsLower)
-	h.body = ac.bodyAC.matchMaskSlice(req.BodyTargetsLower)
-	h.header = ac.headerAC.matchMaskSlice(req.HeaderTargetsLower)
+	h.all = ac.allAC.MatchMaskSlice(req.AllTargetsLower)
+	h.url = ac.urlAC.MatchMaskSlice(req.URLTargetsLower)
+	h.body = ac.bodyAC.MatchMaskSlice(req.BodyTargetsLower)
+	h.header = ac.headerAC.MatchMaskSlice(req.HeaderTargetsLower)
 	// cookie: 提取 + ToLower(与 requestTargetContainsAny "cookie" 分支等价)
 	if cookie, ok := cveHeaderValueOK(req.Headers, "Cookie"); ok {
-		h.cookie = ac.cookieAC.matchMask(strings.ToLower(cookie))
+		h.cookie = ac.cookieAC.MatchMask(strings.ToLower(cookie))
 	}
 	// url_body: URL targets + body targets 合并扫描
-	h.urlBody = ac.urlBodyAC.matchMaskSlice(req.URLTargetsLower)
-	bodyHit := ac.urlBodyAC.matchMaskSlice(req.BodyTargetsLower)
-	for i := range h.urlBody.words {
-		h.urlBody.words[i] |= bodyHit.words[i]
-	}
+	h.urlBody = ac.urlBodyAC.MatchMaskSlice(req.URLTargetsLower)
+	h.urlBody.MergeFrom(ac.urlBodyAC.MatchMaskSlice(req.BodyTargetsLower))
 	return h
 }
 
@@ -143,16 +144,16 @@ func subDetectorACGate(cveID, target string, hits *subDetectorHits) bool {
 	}
 	switch target {
 	case "url":
-		return hits.url.intersects(mask)
+		return hits.url.Intersects(mask)
 	case "body":
-		return hits.body.intersects(mask)
+		return hits.body.Intersects(mask)
 	case "header":
-		return hits.header.intersects(mask)
+		return hits.header.Intersects(mask)
 	case "cookie":
-		return hits.cookie.intersects(mask)
+		return hits.cookie.Intersects(mask)
 	case "url_body":
-		return hits.urlBody.intersects(mask)
+		return hits.urlBody.Intersects(mask)
 	default:
-		return hits.all.intersects(mask)
+		return hits.all.Intersects(mask)
 	}
 }

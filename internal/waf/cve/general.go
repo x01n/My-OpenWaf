@@ -3,6 +3,8 @@ package cve
 import (
 	"regexp"
 	"strings"
+
+	"My-OpenWaf/internal/pkg/snippet"
 )
 
 func init() {
@@ -357,6 +359,100 @@ func init() {
 					Description: "Fortinet hostcheck_validate 请求携带超长 AuthHash enc Cookie",
 					MatchedPart: "cookie",
 					Pattern:     "fortinet-authhash-hostcheck-rce",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-nginx-rewrite-capture",
+		Name:     "NGINX rewrite 多捕获引用",
+		CVE:      "CVE-2026-42945",
+		Severity: "high",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			combined := uri + "\n" + body + "\n" + ua + "\n" + cveHeaderValue(headers, "Content-Type")
+			caps := rewriteCaptureReferences(combined)
+			if hasCaptures(caps, "1") && hasCaptures(caps, "2") {
+				return &CVEMatch{
+					CVEID:       "CVE-2026-42945",
+					Category:    "cve_general",
+					Severity:    "high",
+					Description: "请求参数中包含 NGINX rewrite 多捕获引用拼接",
+					MatchedPart: "url",
+					Pattern:     "nginx-rewrite-capture",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-nginx-rewrite-capture",
+		Name:     "NGINX rewrite 多捕获引用",
+		CVE:      "CVE-2026-9256",
+		Severity: "high",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			caps := rewriteCaptureReferences(uri + "\n" + body + "\n" + ua + "\n" + cveHeaderValue(headers, "Content-Type"))
+			if hasCaptures(caps, "1") && hasCaptures(caps, "2") {
+				return &CVEMatch{
+					CVEID:       "CVE-2026-9256",
+					Category:    "cve_general",
+					Severity:    "high",
+					Description: "请求参数中包含 NGINX rewrite 多捕获引用拼接",
+					MatchedPart: "url",
+					Pattern:     "nginx-rewrite-capture",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-sharepoint-metadata-auth-bypass",
+		Name:     "SharePoint metadata JSON alg:none 认证绕过",
+		CVE:      "CVE-2026-55040",
+		Severity: "high",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			v := uri + "\n" + body + "\n" + ua + "\n" + cveHeaderValue(headers, "Content-Type")
+			if strings.Contains(v, "/_layouts/15/metadata/json/1") &&
+				hasJWTSigningBypassSignalLower(strings.ToLower(v)) &&
+				(strings.Contains(v, "act:") || strings.Contains(v, "actor")) {
+				return &CVEMatch{
+					CVEID:       "CVE-2026-55040",
+					Category:    "cve_general",
+					Severity:    "high",
+					Description: "SharePoint /_layouts/15/metadata/json/1 请求携带 alg:none JWT 与 act 字段",
+					MatchedPart: "all",
+					Pattern:     "sharepoint-metadata-auth-bypass",
+					Action:      "drop",
+				}
+			}
+			return nil
+		},
+	})
+	globalCVERuleRegistry.Register(&CVERule{
+		ID:       "cve-psemhub-rce",
+		Name:     "PeopleSoft PSEMHUB RCE",
+		CVE:      "CVE-2026-35273",
+		Severity: "critical",
+		Category: "cve_general",
+		Enabled:  true,
+		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
+			if rePSEMHUB.MatchString(uri + "\n" + body + "\n" + ua) {
+				return &CVEMatch{
+					CVEID:       "CVE-2026-35273",
+					Category:    "cve_general",
+					Severity:    "critical",
+					Description: "PeopleSoft PSEMHUB 组件访问载荷",
+					MatchedPart: "all",
+					Pattern:     "psemhub-rce",
 					Action:      "drop",
 				}
 			}
@@ -722,6 +818,29 @@ type GeneralCVEDetector struct {
 	rules []generalCVERule
 }
 
+func rewriteCaptureReferences(s string) []string {
+	var caps []string
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '$' || s[i+1] < '1' || s[i+1] > '9' {
+			continue
+		}
+		caps = append(caps, s[i+1:i+2])
+		i++
+	}
+	return caps
+}
+
+func hasCaptures(caps []string, n string) bool {
+	for _, c := range caps {
+		if c == n {
+			return true
+		}
+	}
+	return false
+}
+
+var rePSEMHUB = regexp.MustCompile(`(?i)psemhub`)
+
 type generalCVERule struct {
 	cveID       string
 	severity    string
@@ -801,7 +920,7 @@ var (
 	reCommvaultDeployParams = regexp.MustCompile(`(?i)(commcellName=.*servicePack=.*version=|servicePack=.*version=.*commcellName=)`)
 	reCommvaultPayload      = regexp.MustCompile(`(?i)(\.\./|%2e%2e|https?://|/commandcenter/webpackage\.do|\.zip\b)`)
 	reMultipartFormData     = regexp.MustCompile(`(?i)multipart/form-data`)
-	reDangerousCharset      = regexp.MustCompile(`(?i)charset\s*=\s*["']?(?:utf-7|utf-16|utf-32|shift[_-]?jis|euc-jp|gb2312|gbk|iso-2022-jp|x-imap4-modified-utf7)`)
+	reDangerousCharset      = regexp.MustCompile(`(?i)(?:charset\s*=\s*["']?(?:utf-7|utf-16|utf-32|shift[_-]?jis|euc-jp|gb2312|gbk|iso-2022-jp|x-imap4-modified-utf7))|(?:^|[+\s;\"])(?:\+ad4-|ad4-|\+adw-img|adw-img)`) // UTF-7 扩展:charset 侧新增 `+ad4-`/`+adw-img` OR 分支
 	reWingFTPLoginOK        = regexp.MustCompile(`(?i)/loginok\.html`)
 	reWingFTPNullLua        = regexp.MustCompile(`(?i)(%00|\x00).*(?:io\.popen|os\.execute|loadstring|dofile|local\s+\w+\s*=|%5d%5d|\]\])`)
 	reMagicINFOUploader     = regexp.MustCompile(`(?i)/MagicInfo/servlet/SWUpdateFileUploader`)
@@ -1152,6 +1271,12 @@ func requestTargetContainsSSRF(req *CVERequest, target string) bool {
 }
 
 func requestTargetContainsCRLF(req *CVERequest, target string) bool {
+	// 字面形态必要条件门:目标(含解码形态)不含 \r\n 连环或 %0d%0a 编码形态时,
+	// reCRLF_encoded / reCRLF_raw / reCRLF_header 必不可能命中,直接省去正则。
+	// 该门是等价必要条件(只省无 CRLF 输入),不改变任何含 CRLF 载荷的判定。
+	if !requestTargetContainsAny(req, target, "%0d", "%0a", "\r", "\n") {
+		return false
+	}
 	return requestTargetContainsAny(req, target, "%0d%0a", "\r\n")
 }
 
@@ -1264,6 +1389,7 @@ func (d *GeneralCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CV
 						MatchedPart: part,
 						Pattern:     pat.String(),
 						Action:      "drop",
+						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					})
 					goto nextRule
 				}
@@ -1365,6 +1491,7 @@ func (d *GeneralCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits)
 						MatchedPart: part,
 						Pattern:     pat.String(),
 						Action:      "drop",
+						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					}, true
 				}
 			}

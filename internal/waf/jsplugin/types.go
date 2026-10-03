@@ -51,6 +51,10 @@ const (
 	MaxMutationStringBytes = 16 << 10
 	// MaxMutationHeaders 限制单次请求最多变更的请求头数量。
 	MaxMutationHeaders = 128
+	// MaxMutationVerdictTags 限制裁决携带的标签数量。
+	MaxMutationVerdictTags = 32
+	// MaxMutationVerdictTagBytes 限制单个裁决标签体积。
+	MaxMutationVerdictTagBytes = 128
 	// MaxMutationHeaderValueBytes 限制单个请求头值体积。
 	MaxMutationHeaderValueBytes = 8 << 10
 	// MaxRequestSnapshotBodyBytes 限制传入脚本的请求体样本体积。
@@ -128,6 +132,10 @@ func CanonicalValidationResponse(siteID uint) ResponseSnapshot {
 // 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
 // SetHeaders 用于新增或覆盖请求头，DeleteHeaders 用于删除请求头。该计划
 // 只描述意图，不会在本包内直接修改 Hertz 或 net/http 请求。
+//
+// 计划同时可以携带裁决：Action 非空时请求不再走上游，而是按该动作终止。
+// 动作字符串经 internal/core/action 的 Normalize/IsValid 归一化与校验，
+// 与内置规则、Lua 插件共用同一套动作词汇，不另立第二套。
 type MutationPlan struct {
 	Method        *string           `json:"method,omitempty"`
 	Path          *string           `json:"path,omitempty"`
@@ -135,14 +143,28 @@ type MutationPlan struct {
 	Body          *string           `json:"body,omitempty"`
 	SetHeaders    map[string]string `json:"set_headers,omitempty"`
 	DeleteHeaders []string          `json:"delete_headers,omitempty"`
+	// Action 是请求级裁决；空表示只改请求、继续后续阶段。
+	Action *string `json:"action,omitempty"`
+	// StatusCode 覆盖裁决响应的状态码；nil 表示用该动作的默认码。
+	StatusCode *int `json:"status_code,omitempty"`
+	// ResponseBody 是裁决响应的自定义内容；nil 表示用站点配置的拦截页。
+	ResponseBody *string `json:"response_body,omitempty"`
+	// RedirectTo 仅在 Action 为 redirect 时有意义。
+	RedirectTo *string `json:"redirect_to,omitempty"`
+	// Message 是裁决的说明，进入安全事件与拦截页。
+	Message *string `json:"message,omitempty"`
+	// Tags 是裁决标签，仅用于日志与下游观测。
+	Tags *[]string `json:"tags,omitempty"`
 }
 
 // ResponseMutationPlan 是 response 阶段脚本返回的响应变更计划。
 //
 // 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
 // SetHeaders 用于新增或覆盖响应头，DeleteHeaders 用于删除响应头。该计划
-// 与 MutationPlan 一样只描述意图，由 proxy 变换链消费；response 阶段
-// 不引入裁决语义，计划中没有 action 概念。
+// 与 MutationPlan 一样只描述意图，由 proxy 变换链消费。
+//
+// 状态码取值放宽到 100..999：脚本可以直接把上游响应改写成 4xx/5xx 的自定义
+// 错误页，这是用户实测最常用的形态。
 type ResponseMutationPlan struct {
 	Status        *int              `json:"status,omitempty"`
 	Body          *string           `json:"body,omitempty"`
@@ -429,6 +451,9 @@ func ValidateMutationPlan(plan MutationPlan) error {
 		}
 	}
 	if err := validateMutationPlanHeaderEdits(plan.SetHeaders, plan.DeleteHeaders); err != nil {
+		return err
+	}
+	if err := validateMutationVerdict(plan); err != nil {
 		return err
 	}
 	return nil

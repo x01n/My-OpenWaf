@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	mathrand "math/rand"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -84,45 +86,47 @@ type EnvFingerprint struct {
 	HeadlessUA           bool           `json:"headless_ua"`
 	ChromeCDC            bool           `json:"chrome_cdc"`
 	PermNotif            string         `json:"perm_notif"`
-	UserAgentData        string         `json:"user_agent_data"`       // navigator.userAgentData JSON 序列化
-	BrowserBrand         string         `json:"browser_brand"`         // 从 userAgentData 中提取的主要品牌
-	BrowserVersion       string         `json:"browser_version"`       // 从 userAgentData 中提取的版本号
-	IsMobile             bool           `json:"is_mobile"`             // navigator.userAgentData.mobile
-	UAMismatch           bool           `json:"ua_mismatch"`           // user-agent 字符串与 userAgentData brands 不匹配
-	NavigatorProto       bool           `json:"navigator_proto"`       // navigator 原型链是否标准
-	WebGLVendor          string         `json:"webgl_vendor"`          // WEBGL_debug_renderer_info UNMASKED_VENDOR
-	CanvasToBlob         bool           `json:"canvas_to_blob"`        // canvas.toBlob 是否可用
-	WebGL2Support        bool           `json:"webgl2_support"`        // WebGL2RenderingContext 是否可用
-	SVGSupport           bool           `json:"svg_support"`           // SVGElement 是否可用
-	MediaDevices         bool           `json:"media_devices"`         // navigator.mediaDevices 是否可用
-	SpeechSynthesis      bool           `json:"speech_synthesis"`      // window.speechSynthesis 是否可用
-	ServiceWorker        bool           `json:"service_worker"`        // navigator.serviceWorker 是否可用
-	CacheAPI             bool           `json:"cache_api"`             // window.caches 是否可用
-	WebAssembly          bool           `json:"web_assembly"`          // WebAssembly 是否可用
-	SharedWorker         bool           `json:"shared_worker"`         // SharedWorker 是否可用
-	BroadcastChannel     bool           `json:"broadcast_channel"`     // BroadcastChannel 是否可用
-	PerformanceObserver  bool           `json:"performance_observer"`  // PerformanceObserver 是否可用
-	PerformanceMark      bool           `json:"performance_mark"`      // performance.mark 是否可用
-	TimingAPIDepth       int            `json:"timing_api_depth"`      // performance.getEntries 条目数量
-	PermissionAPI        bool           `json:"permission_api"`        // navigator.permissions 是否可用
-	CredentialAPI        bool           `json:"credential_api"`        // navigator.credentials 是否可用
-	CSPViolation         bool           `json:"csp_violation"`         // 指纹采集过程中是否发生 CSP 违规
-	WebDriverAdvanced    bool           `json:"webdriver_advanced"`    // 多重 webdriver 指标检测
-	CDPRuntime           bool           `json:"cdp_runtime"`           // Chrome DevTools Protocol Runtime.evaluate 痕迹
-	PuppeteerSign        bool           `json:"puppeteer_sign"`        // Puppeteer 特有痕迹
-	PlaywrightSign       bool           `json:"playwright_sign"`       // Playwright 特有痕迹
-	ElectronSign         bool           `json:"electron_sign"`         // 是否运行在 Electron 中
-	CypressSign          bool           `json:"cypress_sign"`          // Cypress 测试框架痕迹
-	ScreenConsistency    bool           `json:"screen_consistency"`    // screen 属性与 window.screen 一致性
-	TimezoneConsistency  bool           `json:"timezone_consistency"`  // Intl 时区与 getTimezoneOffset 一致性
-	LanguageConsistency  bool           `json:"language_consistency"`  // navigator.language 与 Intl 区域设置一致性
-	MathConsistency      bool           `json:"math_consistency"`      // Math 函数特定值跨次一致性
-	CSSSupportsCheck     bool           `json:"css_supports_check"`    // CSS.supports 是否可用
-	IntersectionObserver bool           `json:"intersection_observer"` // IntersectionObserver 是否可用
-	MutationObserver     bool           `json:"mutation_observer"`     // MutationObserver 是否可用
-	ResizeObserver       bool           `json:"resize_observer"`       // ResizeObserver 是否可用
-	HistoryAPI           bool           `json:"history_api"`           // history.pushState 是否可用
-	Behavior             *BehaviorStats `json:"behavior,omitempty"`    // 键鼠行为采样统计（盾页前端统计后随信封提交）
+	UserAgentData        string         `json:"user_agent_data"`           // navigator.userAgentData JSON 序列化
+	BrowserBrand         string         `json:"browser_brand"`             // 从 userAgentData 中提取的主要品牌
+	BrowserVersion       string         `json:"browser_version"`           // 从 userAgentData 中提取的版本号
+	IsMobile             bool           `json:"is_mobile"`                 // navigator.userAgentData.mobile
+	UAMismatch           bool           `json:"ua_mismatch"`               // user-agent 字符串与 userAgentData brands 不匹配
+	NavigatorProto       bool           `json:"navigator_proto"`           // navigator 原型链是否标准
+	WebGLVendor          string         `json:"webgl_vendor"`              // WEBGL_debug_renderer_info UNMASKED_VENDOR
+	CanvasToBlob         bool           `json:"canvas_to_blob"`            // canvas.toBlob 是否可用
+	WebGL2Support        bool           `json:"webgl2_support"`            // WebGL2RenderingContext 是否可用
+	SVGSupport           bool           `json:"svg_support"`               // SVGElement 是否可用
+	MediaDevices         bool           `json:"media_devices"`             // navigator.mediaDevices 是否可用
+	SpeechSynthesis      bool           `json:"speech_synthesis"`          // window.speechSynthesis 是否可用
+	ServiceWorker        bool           `json:"service_worker"`            // navigator.serviceWorker 是否可用
+	CacheAPI             bool           `json:"cache_api"`                 // window.caches 是否可用
+	WebAssembly          bool           `json:"web_assembly"`              // WebAssembly 是否可用
+	SharedWorker         bool           `json:"shared_worker"`             // SharedWorker 是否可用
+	BroadcastChannel     bool           `json:"broadcast_channel"`         // BroadcastChannel 是否可用
+	PerformanceObserver  bool           `json:"performance_observer"`      // PerformanceObserver 是否可用
+	PerformanceMark      bool           `json:"performance_mark"`          // performance.mark 是否可用
+	TimingAPIDepth       int            `json:"timing_api_depth"`          // performance.getEntries 条目数量
+	PermissionAPI        bool           `json:"permission_api"`            // navigator.permissions 是否可用
+	CredentialAPI        bool           `json:"credential_api"`            // navigator.credentials 是否可用
+	CSPViolation         bool           `json:"csp_violation"`             // 指纹采集过程中是否发生 CSP 违规
+	WebDriverAdvanced    bool           `json:"webdriver_advanced"`        // 多重 webdriver 指标检测
+	CDPRuntime           bool           `json:"cdp_runtime"`               // Chrome DevTools Protocol Runtime.evaluate 痕迹
+	PuppeteerSign        bool           `json:"puppeteer_sign"`            // Puppeteer 特有痕迹
+	PlaywrightSign       bool           `json:"playwright_sign"`           // Playwright 特有痕迹
+	ElectronSign         bool           `json:"electron_sign"`             // 是否运行在 Electron 中
+	CypressSign          bool           `json:"cypress_sign"`              // Cypress 测试框架痕迹
+	ScreenConsistency    bool           `json:"screen_consistency"`        // screen 属性与 window.screen 一致性
+	TimezoneConsistency  bool           `json:"timezone_consistency"`      // Intl 时区与 getTimezoneOffset 一致性
+	LanguageConsistency  bool           `json:"language_consistency"`      // navigator.language 与 Intl 区域设置一致性
+	MathConsistency      bool           `json:"math_consistency"`          // Math 函数特定值跨次一致性
+	CSSSupportsCheck     bool           `json:"css_supports_check"`        // CSS.supports 是否可用
+	IntersectionObserver bool           `json:"intersection_observer"`     // IntersectionObserver 是否可用
+	MutationObserver     bool           `json:"mutation_observer"`         // MutationObserver 是否可用
+	ResizeObserver       bool           `json:"resize_observer"`           // ResizeObserver 是否可用
+	HistoryAPI           bool           `json:"history_api"`               // history.pushState 是否可用
+	ObjIntegrity         *int64         `json:"obj_integrity,omitempty"`   // window/document 对象自洽与函数原生性（nil=旧信封不参与判分）
+	ProtoIntegrity       *int64         `json:"proto_integrity,omitempty"` // navigator.prototype webdriver getter 篡改检测（nil=旧信封不参与判分）
+	Behavior             *BehaviorStats `json:"behavior,omitempty"`        // 键鼠行为采样统计（盾页前端统计后随信封提交）
 }
 
 /**
@@ -153,8 +157,24 @@ type EnvCheckResult struct {
 /**
  * ValidateEnvFingerprint 分析环境指纹并返回风险评分。
  * 评分 > 50 表示可疑（机器人/自动化）。
+ * 语义等价于（且实现上就是）用全因子 gate 调用 ScoreWithMission：
+ * 无过滤时新旧路径的分数与原因序列完全一致。
  */
 func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
+	return scoreEnvFingerprint(fp, nil)
+}
+
+/**
+ * scoreEnvFingerprint 是环境评分的唯一公共核心：硬终止检查（webdriver/
+ * 自动化痕迹等）不受 gate 影响，任何过滤下都完整执行；累加类评分分支
+ * 只有在 gate 为空（无过滤）或 gate 放行该分支依赖的全部因子时才会执行。
+ * gate 由此把「本次挑战要求的环境因子集合」翻译成分支级过滤。
+ *
+ * @param fp   待评分的环境指纹。
+ * @param gate 分支因子 gate；nil 表示全部参与（旧路径等价语义）。
+ * @return     与 ValidateEnvFingerprint 同构的结果结构。
+ */
+func scoreEnvFingerprint(fp *EnvFingerprint, gate *envScoreGate) EnvCheckResult {
 	if fp == nil {
 		return EnvCheckResult{Score: 100, Reasons: []string{"no fingerprint data"}, Pass: false}
 	}
@@ -194,163 +214,176 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 		return EnvCheckResult{Score: 100, Reasons: []string{"cypress testing framework detected"}, Pass: false}
 	}
 
-	if fp.DevtoolsOpen {
+	if gateAllows(gate, "devtools_open") && fp.DevtoolsOpen {
 		score += 30
 		reasons = append(reasons, "devtools open (+30)")
 	}
 
-	if fp.DevtoolsTiming > 100 {
+	if gateAllows(gate, "devtools_timing") && fp.DevtoolsTiming > 100 {
 		score += 20
 		reasons = append(reasons, "devtools timing anomaly (+20)")
 	}
 
-	if fp.CDPRuntime {
+	if gateAllows(gate, "cdp_runtime") && fp.CDPRuntime {
 		score += 25
 		reasons = append(reasons, "Chrome DevTools Protocol runtime detected (+25)")
 	}
 
-	if fp.ElectronSign {
+	if gateAllows(gate, "electron_sign") && fp.ElectronSign {
 		score += 15
 		reasons = append(reasons, "Electron environment detected (+15)")
 	}
 
-	if !fp.ChromePresent {
+	if gateAllows(gate, "chrome_present") && !fp.ChromePresent {
 		score += 10
 		reasons = append(reasons, "chrome object missing (+10)")
 	}
 
-	if fp.PluginsCount == 0 {
-		score += 15
-		reasons = append(reasons, "zero plugins (+15)")
-	} else if fp.PluginsCount < 2 {
-		score += 5
-		reasons = append(reasons, "very few plugins (+5)")
+	if gateAllows(gate, "plugins_count") {
+		if fp.PluginsCount == 0 {
+			score += 15
+			reasons = append(reasons, "zero plugins (+15)")
+		} else if fp.PluginsCount < 2 {
+			score += 5
+			reasons = append(reasons, "very few plugins (+5)")
+		}
 	}
 
-	if fp.Languages == "" || fp.Languages == "undefined" {
+	if gateAllows(gate, "languages") && (fp.Languages == "" || fp.Languages == "undefined") {
 		score += 10
 		reasons = append(reasons, "no language preference (+10)")
 	}
 
-	if fp.CanvasHash == "" || fp.CanvasHash == "0" {
+	if gateAllows(gate, "canvas_hash") && (fp.CanvasHash == "" || fp.CanvasHash == "0") {
 		score += 10
 		reasons = append(reasons, "empty canvas hash (+10)")
 	}
 
-	if fp.WebGLRenderer == "" {
-		score += 10
-		reasons = append(reasons, "no WebGL renderer (+10)")
-	} else if isSuspiciousRenderer(fp.WebGLRenderer) {
-		score += 15
-		reasons = append(reasons, "suspicious WebGL renderer (+15)")
+	if gateAllows(gate, "webgl_renderer") {
+		if fp.WebGLRenderer == "" {
+			score += 10
+			reasons = append(reasons, "no WebGL renderer (+10)")
+		} else if isSuspiciousRenderer(fp.WebGLRenderer) {
+			score += 15
+			reasons = append(reasons, "suspicious WebGL renderer (+15)")
+		}
 	}
 
-	if fp.ScreenWidth == 0 || fp.ScreenHeight == 0 {
+	if gateAllows(gate, "screen_width", "screen_height") && (fp.ScreenWidth == 0 || fp.ScreenHeight == 0) {
 		score += 10
 		reasons = append(reasons, "zero screen dimensions (+10)")
 	}
 
-	if fp.HardwareConcur <= 1 {
+	if gateAllows(gate, "hardware_concurrency") && fp.HardwareConcur <= 1 {
 		score += 5
 		reasons = append(reasons, "low hardware concurrency (+5)")
 	}
 
-	if fp.UAMismatch {
+	if gateAllows(gate, "ua_mismatch") && fp.UAMismatch {
 		score += 20
 		reasons = append(reasons, "user-agent string mismatches userAgentData brands (+20)")
 	}
 
-	if !fp.ScreenConsistency {
+	if gateAllows(gate, "screen_consistency") && !fp.ScreenConsistency {
 		score += 15
 		reasons = append(reasons, "screen property inconsistency (+15)")
 	}
 
-	if !fp.TimezoneConsistency {
+	if gateAllows(gate, "timezone_consistency") && !fp.TimezoneConsistency {
 		score += 12
 		reasons = append(reasons, "timezone inconsistency between Intl and getTimezoneOffset (+12)")
 	}
 
-	if !fp.LanguageConsistency {
+	if gateAllows(gate, "language_consistency") && !fp.LanguageConsistency {
 		score += 10
 		reasons = append(reasons, "language inconsistency between navigator and Intl (+10)")
 	}
 
-	if !fp.MathConsistency {
+	if gateAllows(gate, "math_consistency") && !fp.MathConsistency {
 		score += 20
 		reasons = append(reasons, "Math function output tampered (+20)")
 	}
 
-	if fp.ColorDepth == 0 {
+	if gateAllows(gate, "obj_integrity") && fp.ObjIntegrity != nil && *fp.ObjIntegrity < 2 {
+		score += 20
+		reasons = append(reasons, "window/document object integrity check failed (+20)")
+	}
+	if gateAllows(gate, "proto_integrity") && fp.ProtoIntegrity != nil && *fp.ProtoIntegrity < 2 {
+		score += 20
+		reasons = append(reasons, "navigator prototype integrity check failed (+20)")
+	}
+
+	if gateAllows(gate, "color_depth") && fp.ColorDepth == 0 {
 		score += 8
 		reasons = append(reasons, "zero color depth (+8)")
 	}
 
-	if fp.PixelRatio == 0 {
+	if gateAllows(gate, "pixel_ratio") && fp.PixelRatio == 0 {
 		score += 8
 		reasons = append(reasons, "zero pixel ratio (+8)")
 	}
 
-	if fp.AudioHash == "" {
+	if gateAllows(gate, "audio_hash") && fp.AudioHash == "" {
 		score += 5
 		reasons = append(reasons, "no audio fingerprint (+5)")
 	}
 
-	if !fp.SessionStorage {
+	if gateAllows(gate, "session_storage") && !fp.SessionStorage {
 		score += 8
 		reasons = append(reasons, "sessionStorage unavailable (+8)")
 	}
 
-	if !fp.IndexedDB {
+	if gateAllows(gate, "indexed_db") && !fp.IndexedDB {
 		score += 8
 		reasons = append(reasons, "indexedDB unavailable (+8)")
 	}
 
-	if !fp.CookieEnabled {
+	if gateAllows(gate, "cookie_enabled") && !fp.CookieEnabled {
 		score += 10
 		reasons = append(reasons, "cookies disabled (+10)")
 	}
 
-	if fp.TouchSupport && fp.MaxTouchPoints == 0 {
+	if gateAllows(gate, "touch_support", "max_touch_points") && fp.TouchSupport && fp.MaxTouchPoints == 0 {
 		score += 8
 		reasons = append(reasons, "touch support inconsistency (+8)")
 	}
 
-	if fp.PlatformStr == "" {
+	if gateAllows(gate, "platform") && fp.PlatformStr == "" {
 		score += 5
 		reasons = append(reasons, "empty platform string (+5)")
 	}
 
-	if fp.FontCount == 0 {
+	if gateAllows(gate, "font_count") && fp.FontCount == 0 {
 		score += 5
 		reasons = append(reasons, "zero detectable fonts (+5)")
 	}
 
-	if !fp.WebAssembly {
+	if gateAllows(gate, "web_assembly") && !fp.WebAssembly {
 		score += 8
 		reasons = append(reasons, "WebAssembly unavailable (+8)")
 	}
 
-	if !fp.ServiceWorker {
+	if gateAllows(gate, "service_worker") && !fp.ServiceWorker {
 		score += 5
 		reasons = append(reasons, "ServiceWorker unavailable (+5)")
 	}
 
-	if !fp.MediaDevices {
+	if gateAllows(gate, "media_devices") && !fp.MediaDevices {
 		score += 5
 		reasons = append(reasons, "MediaDevices unavailable (+5)")
 	}
 
-	if !fp.IntersectionObserver && !fp.MutationObserver && !fp.ResizeObserver {
+	if gateAllows(gate, "intersection_observer", "mutation_observer", "resize_observer") && !fp.IntersectionObserver && !fp.MutationObserver && !fp.ResizeObserver {
 		score += 10
 		reasons = append(reasons, "all observers missing (Intersection+Mutation+Resize) (+10)")
 	}
 
-	if !fp.WebGL2Support && fp.WebGLRenderer == "" {
+	if gateAllows(gate, "webgl2_support", "webgl_renderer") && !fp.WebGL2Support && fp.WebGLRenderer == "" {
 		score += 12
 		reasons = append(reasons, "no WebGL2 support and no WebGL renderer (+12)")
 	}
 
-	if fp.Behavior != nil {
+	if gateAllows(gate, "behavior") && fp.Behavior != nil {
 		score += validateBehaviorStats(fp.Behavior, &reasons)
 	}
 
@@ -363,6 +396,192 @@ func ValidateEnvFingerprint(fp *EnvFingerprint) EnvCheckResult {
 		Reasons: reasons,
 		Pass:    score <= 50,
 	}
+}
+
+// envMissionFactorCountMin 与 envMissionFactorCountMax 分别是每次环境
+// mission 要求因子数量的下界与上界：从全因子清单随机抽取 32..48 个。
+const (
+	envMissionFactorCountMin = 32
+	envMissionFactorCountMax = 48
+)
+
+/**
+ * EnvMission 描述单次挑战要求检查的环境因子子集。
+ * Factor 名与 EnvFingerprint 的 json tag 同字面（见 envMissionAllFactors）。
+ * ID 为空表示「无 mission」：接线端必须回退到旧的全因子评分路径。
+ */
+type EnvMission struct {
+	ID      string   `json:"id"`      // 16 字节随机数的 hex 编码（32 字符）
+	Factors []string `json:"factors"` // 本次要求参与评分分支的因子名集合（无重复）
+}
+
+// NewEnvMission 生成一次全新的环境 mission：ID 为 16 字节 crypto/rand
+// 随机数的 hex 编码，Factors 从全因子清单随机抽取 32..48 个（随机顺序）。
+// 全因子池实际只有 len(envMissionAllFactors)=37 个，为保证每次要求的
+// 因子集恒为真子集（「每次要求不一样」），目标数量上限 clip 为
+// len(factors)-1，实际范围 32..36。crypto/rand 失败时返回空 mission
+// （ID==""），调用端据此自然回退旧路径。
+func NewEnvMission() EnvMission {
+	factors := append([]string(nil), envMissionAllFactors...)
+	mathrand.Shuffle(len(factors), func(i, j int) {
+		factors[i], factors[j] = factors[j], factors[i]
+	})
+	count := envMissionFactorCountMin + randIntN(envMissionFactorCountMax-envMissionFactorCountMin+1)
+	if count >= len(factors) {
+		count = len(factors) - 1
+	}
+	if count < 1 {
+		count = 1
+	}
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return EnvMission{}
+	}
+	return EnvMission{ID: hex.EncodeToString(idBytes), Factors: factors[:count]}
+}
+
+/**
+ * IsEnvMissionFactor 判断给定因子名（与 json tag 同字面）是否在 mission
+ * 要求内。空 mission 永远返回 true——即「无 mission 时全部因子参与」，
+ * 与旧评分路径语义一致。
+ */
+func IsEnvMissionFactor(mission EnvMission, factorJSON string) bool {
+	if mission.ID == "" {
+		return true
+	}
+	for _, f := range mission.Factors {
+		if f == factorJSON {
+			return true
+		}
+	}
+	return false
+}
+
+/**
+ * envScoreGate 把 mission 翻译为分支过滤视图：need(factor...) 返回
+ * mission 是否覆盖该评分分支依赖的全部因子；mission 为空时恒真，
+ * 等价于旧的全因子评分路径。
+ */
+type envScoreGate struct {
+	mission EnvMission
+}
+
+// gateAllows 判定给定因子组合是否被 gate 放行；nil gate 表示不过滤。
+func gateAllows(gate *envScoreGate, factors ...string) bool {
+	if gate == nil || gate.mission.ID == "" {
+		return true
+	}
+	for _, f := range factors {
+		if !IsEnvMissionFactor(gate.mission, f) {
+			return false
+		}
+	}
+	return true
+}
+
+/**
+ * ScoreWithMission 按 mission 要求的因子子集评分：
+ * 硬终止分支不受过滤（自动化/伪造迹象任何场景都完整执行），
+ * 累加类分支只有在 mission 覆盖其依赖的全部因子时才参与评分。
+ * mission.ID 为空时结果与 ValidateEnvFingerprint 完全一致。
+ */
+func ScoreWithMission(fp *EnvFingerprint, mission EnvMission) EnvCheckResult {
+	if mission.ID == "" {
+		return scoreEnvFingerprint(fp, nil)
+	}
+	return scoreEnvFingerprint(fp, &envScoreGate{mission: mission})
+}
+
+/**
+ * envMissionAllFactors 是参与「可过滤评分分支」的完整因子名清单，
+ * 字面值与 EnvFingerprint 的 json tag 一一对应（含指针扩展因子
+ * obj_integrity/proto_integrity/behavior）。硬终止检查与 mission 无关，
+ * 不在本清单内（webdriver、automation_sign、phantom、nightmare、
+ * selenium_sign、chrome_cdc、headless_ua、webdriver_advanced、
+ * puppeteer_sign、playwright_sign、cypress_sign）。
+ */
+var envMissionAllFactors = []string{
+	"devtools_open",
+	"devtools_timing",
+	"cdp_runtime",
+	"electron_sign",
+	"chrome_present",
+	"plugins_count",
+	"languages",
+	"canvas_hash",
+	"webgl_renderer",
+	"screen_width",
+	"screen_height",
+	"hardware_concurrency",
+	"ua_mismatch",
+	"screen_consistency",
+	"timezone_consistency",
+	"language_consistency",
+	"math_consistency",
+	"obj_integrity",
+	"proto_integrity",
+	"color_depth",
+	"pixel_ratio",
+	"audio_hash",
+	"session_storage",
+	"indexed_db",
+	"cookie_enabled",
+	"touch_support",
+	"max_touch_points",
+	"platform",
+	"font_count",
+	"web_assembly",
+	"service_worker",
+	"media_devices",
+	"intersection_observer",
+	"mutation_observer",
+	"resize_observer",
+	"webgl2_support",
+	"behavior",
+}
+
+/**
+ * envFingerprintAADWithAugment 构造与 EnvFingerprintAAD 同构但附带
+ * mission 约束的 AAD。mission.ID 空时输出与 EnvFingerprintAAD 逐字节相同，
+ * 因此旧会话（无 mission）与旧版本页面互解不受影响；非空时格式为：
+ * EnvFingerprintAAD(...) + "#" + mission.ID + "#" + 排序去重后的因子名
+ * （以 "," 连接）。扩展后缀仅供测试/将来页面被告知 mission 后使用——
+ * 页面在本任务不改动，仍按 EnvFingerprintAAD 的字节加密；服务端解密时
+ * 按 session 内存储的 mission 逐字节重建同一 AAD，保证互通。
+ */
+func envFingerprintAADWithAugment(mission EnvMission, scope, sessionID string, binding ChallengeSessionBinding) string {
+	base := EnvFingerprintAAD(scope, sessionID, binding)
+	if mission.ID == "" {
+		return base
+	}
+	factors := append([]string(nil), mission.Factors...)
+	sort.Strings(factors)
+	return base + "#" + mission.ID + "#" + strings.Join(factors, ",")
+}
+
+/**
+ * DecryptEnvFingerprintForMission 覆盖 R2.2 会话签名链：当会话存储了
+ * mission 时，上行信封的 AAD 是带 mission 扩展后缀的版本；旧会话（无
+ * mission）继续走 DecryptEnvFingerprintWithAAD 的原样 AAD。
+ */
+func DecryptEnvFingerprintForMission(encrypted string, sessionKey []byte, mission EnvMission, scope, sessionID string, binding ChallengeSessionBinding) *EnvFingerprint {
+	if mission.ID == "" {
+		return DecryptEnvFingerprintWithAAD(encrypted, sessionKey, EnvFingerprintAAD(scope, sessionID, binding))
+	}
+	// 带 mission 的上行信封 AAD 随 mission 变长，直接走通用解密核心；
+	// 与 DecryptEnvFingerprintWithAAD 的关键校验完全一致。
+	if len(sessionKey) != envSessionKeySize {
+		return nil
+	}
+	raw, err := gm.Decode(encrypted)
+	if err != nil {
+		return nil
+	}
+	plaintext, err := gm.Open(sessionKey[:16], raw, []byte(envFingerprintAADWithAugment(mission, scope, sessionID, binding)), gm.DomainEnv, false)
+	if err != nil || len(plaintext) == 0 || len(plaintext) > 64*1024 {
+		return nil
+	}
+	return ParseEnvFingerprint(string(plaintext))
 }
 
 func validateBehaviorStats(b *BehaviorStats, reasons *[]string) int {
@@ -671,7 +890,9 @@ func envCheckJSEncryptedWithBehavior(keyHex, aad string, withBehavior bool) stri
 	if withBehavior {
 		template = envCheckJSWithBehaviorTemplate
 	}
-	return fmt.Sprintf(template, strconv.Quote(keyHex), strconv.Quote(aad))
+	return fmt.Sprintf(template, strconv.Quote(keyHex), strconv.Quote(aad),
+		// 资产 URL 用内容派生版本串（顺序必须与模板一致：先 wasm、后 glue）。
+		PowWasmURL(), PowGlueURL())
 }
 
 const envCheckJSTemplate = `(function(){
@@ -687,11 +908,11 @@ function loadWasm(){
   window.__owaf_wasm_ready=new Promise(function(resolve,reject){
     if(typeof WebAssembly==="undefined"){reject(new Error("WebAssembly is unavailable"));return}
     function initialize(){
-      wasm_bindgen({module_or_path:"/__owaf/pow.wasm"}).then(resolve).catch(reject)
+      wasm_bindgen({module_or_path:"%s"}).then(resolve).catch(reject)
     }
     if(typeof wasm_bindgen!=="undefined"){initialize();return}
     var script=document.createElement("script");
-    script.src="/__owaf/pow_glue.js";
+    script.src="%s";
     if(cspNonce)script.nonce=cspNonce;
     script.async=true;
     script.onload=initialize;
@@ -728,11 +949,11 @@ function loadWasm(){
   window.__owaf_wasm_ready=new Promise(function(resolve,reject){
     if(typeof WebAssembly==="undefined"){reject(new Error("WebAssembly is unavailable"));return}
     function initialize(){
-      wasm_bindgen({module_or_path:"/__owaf/pow.wasm"}).then(resolve).catch(reject)
+      wasm_bindgen({module_or_path:"%s"}).then(resolve).catch(reject)
     }
     if(typeof wasm_bindgen!=="undefined"){initialize();return}
     var script=document.createElement("script");
-    script.src="/__owaf/pow_glue.js";
+    script.src="%s";
     if(cspNonce)script.nonce=cspNonce;
     script.async=true;
     script.onload=initialize;

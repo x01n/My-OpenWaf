@@ -119,6 +119,8 @@ func loadOWASPReadSnapshot(db *gorm.DB, policyID uint) (owaspReadSnapshot, error
 			Category:           item.Category,
 			Name:               item.Name,
 			Description:        item.Description,
+			Pattern:            item.Pattern,
+			Score:              item.Score,
 			DefaultEnabled:     item.DefaultEnabled,
 			DefaultAction:      item.DefaultAction,
 			DefaultSensitivity: item.DefaultSensitivity,

@@ -15,7 +15,7 @@ import (
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/redis/rueidis"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -24,7 +24,7 @@ type Runtime struct {
 	Config   Config
 	DB       *gorm.DB
 	LogDB    *gorm.DB
-	Redis    *goredis.Client
+	Redis    rueidis.Client
 	RedisKV  *cache.RedisKV
 	Snapshot *snapshot.Holder
 	Cache    *cache.Layer
@@ -96,7 +96,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	})
 	if err := redis.Ping(ctx, rcli); err != nil {
 		if rcli != nil {
-			_ = rcli.Close()
+			rcli.Close()
 			rcli = nil
 		}
 		if strings.TrimSpace(cfg.RedisAddr) != "" {
@@ -111,7 +111,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	cl, err := cache.NewLayer()
 	if err != nil {
 		if rcli != nil {
-			_ = rcli.Close()
+			rcli.Close()
 		}
 		closeRuntimeDB(db)
 		closeRuntimeDB(logDB)
@@ -283,7 +283,7 @@ func (r *Runtime) Close() error {
 		return nil
 	}
 	if r.Redis != nil {
-		_ = r.Redis.Close()
+		r.Redis.Close()
 	}
 	closeRuntimeDB(r.DB)
 	if r.LogDB != r.DB {

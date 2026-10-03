@@ -31,6 +31,9 @@ interface AdvancedTabProps {
  */
 type TriState = "inherit" | "on" | "off"
 
+/** 反重放 Cookie 校验模式三态：null 提交 = 继承全局（standard/dual）。 */
+const ANTI_REPLAY_COOKIE_MODES = ["standard", "dual"] as const
+
 /** 反重放校验失败动作白名单，见 internal/admin/shared/helpers.go 的 ValidateAntiReplayAction。 */
 const ANTI_REPLAY_ACTIONS = [
   "challenge",
@@ -147,6 +150,9 @@ export function AdvancedTab({ site, canManage }: AdvancedTabProps) {
   const [antiReplayAction, setAntiReplayAction] = useState(
     site.anti_replay_action || "shield_challenge"
   )
+  const [antiReplayModeState, setAntiReplayModeState] = useState<string>(
+    site.anti_replay_cookie_mode ?? ""
+  )
   const [challengeAction, setChallengeAction] = useState(
     site.challenge_action ?? ""
   )
@@ -227,6 +233,8 @@ export function AdvancedTab({ site, canManage }: AdvancedTabProps) {
           anti_replay_enabled: fromTriState(antiReplayState),
           anti_replay_ttl: antiReplayTtl,
           anti_replay_action: antiReplayAction,
+          // null = 继承全局（后端三态语义），不得写成字符串 ""。
+          anti_replay_cookie_mode: antiReplayModeState === "" ? null : antiReplayModeState,
           challenge_action: challengeAction === "" ? null : challengeAction,
           captcha_type: captchaType === "" ? null : captchaType,
           maintenance_enabled: maintenanceEnabled,
@@ -406,6 +414,25 @@ export function AdvancedTab({ site, canManage }: AdvancedTabProps) {
                 {ANTI_REPLAY_ACTIONS.map((action) => (
                   <option key={action} value={action}>
                     {t(`sites.detail.antiReplayActions.${action}`)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label>{t("sites.detail.antiReplayCookieMode")}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t("sites.detail.antiReplayCookieModeHint")}
+              </p>
+              <select
+                value={antiReplayModeState}
+                onChange={(e) => setAntiReplayModeState(e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              >
+                {/* "" = 继承全局，保存时提交 null；standard = 单 Cookie；dual = 双 Cookie + 首次 412。 */}
+                <option value="">{t("sites.detail.antiReplayCookieModeInherit")}</option>
+                {ANTI_REPLAY_COOKIE_MODES.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {t(`sites.detail.antiReplayCookieModes.${mode}`)}
                   </option>
                 ))}
               </select>

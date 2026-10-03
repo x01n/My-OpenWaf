@@ -8,6 +8,8 @@ import (
 	"mime/multipart"
 	"net"
 	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +58,8 @@ func fillMatchCtxFromPipeline(ctx *pipeline.RequestCtx, needsDerivedHeaders bool
 	mc.TLS = &ctx.TLS
 	mc.Body = ctx.Body
 	if needsDerivedHeaders {
+		// tls_alpn 匹配键沿用「协商结果」语义（与访问日志 TLSALPN 同源）；
+		// ClientHello 声明列表在 ctx.TLS.ALPNRaw，由需要它的判定直接读取。
 		if len(ctx.TLS.ALPN) > 0 {
 			mc.TLSALPN = ctx.DerivedALPN(func() string {
 				return strings.Join(ctx.TLS.ALPN, ",")
@@ -408,13 +412,15 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 }
 
 type botPhase struct {
-	rep       *iprep.IPReputation  // optional, for recording violations
-	geo       *bot.MaxMindResolver // optional, for GeoIP scoring
-	threshold int                  // score threshold for blocking
+	rep       *iprep.IPReputation          // optional, for recording violations
+	geo       *bot.MaxMindResolver         // optional, for GeoIP scoring
+	threshold int                          // score threshold for blocking
+	limiter   ratelimit.RateLimiterBackend // optional, for behaviour (request rate) scoring
+	rateMax   int                          // 限流窗口阈值，行为分换算基准
 }
 
-// NewBotPhase creates a bot-detection pipeline phase using the legacy
-// single-pass check (no GeoIP weighting). Kept for backward compatibility.
+// NewBotPhase creates a bot-detection pipeline phase without GeoIP weighting.
+// Kept for callers that only need the two-module (UA + fingerprint) path.
 func NewBotPhase(rep *iprep.IPReputation) pipeline.Phase {
 	return &botPhase{rep: rep, threshold: 80}
 }
@@ -422,10 +428,28 @@ func NewBotPhase(rep *iprep.IPReputation) pipeline.Phase {
 // NewBotPhaseWithGeo creates a bot-detection pipeline phase that uses the
 // two-phase PreScreen → DeepScore flow with GeoIP weighting.
 func NewBotPhaseWithGeo(rep *iprep.IPReputation, geo *bot.MaxMindResolver, threshold int) pipeline.Phase {
+	return NewBotPhaseWithGeoAndLimiter(rep, geo, threshold, nil, 0)
+}
+
+/**
+ * NewBotPhaseWithGeoAndLimiter 构造带行为模块的 bot 检测阶段。
+ *
+ * limiter 用于行为分：阶段内调用 Increment 取得窗口计数，再按
+ * bot.BehaviorScoreFromCount 以 rateMax 为基准换算行为模块原始分。
+ * limiter 为 nil/未启用，或 rateMax <= 0 时行为分恒为 0。
+ *
+ * @param rep IP 声誉服务，可为 nil。
+ * @param geo GeoIP 解析器，可为 nil。
+ * @param threshold 综合评分处置阈值；<=0 时按 80 处理。
+ * @param limiter 限流后端，可为 nil。
+ * @param rateMax 与 limiter 同窗口的请求阈值（ProtectionConfig.RequestRateLimitMax）。
+ * @return bot 检测阶段。
+ */
+func NewBotPhaseWithGeoAndLimiter(rep *iprep.IPReputation, geo *bot.MaxMindResolver, threshold int, limiter ratelimit.RateLimiterBackend, rateMax int) pipeline.Phase {
 	if threshold <= 0 {
 		threshold = 80
 	}
-	return &botPhase{rep: rep, geo: geo, threshold: threshold}
+	return &botPhase{rep: rep, geo: geo, threshold: threshold, limiter: limiter, rateMax: rateMax}
 }
 
 /**
@@ -442,6 +466,34 @@ func challengePassIdentity(ctx *pipeline.RequestCtx) (string, string) {
 
 func (p *botPhase) Name() string { return "bot_detection" }
 
+/**
+ * behaviorScore 用限流后端换算行为模块原始分。
+ *
+ * key 与 reqRateLimitPhase 同源（clientIP+"|"+host）但带独立后缀：限流阶段
+ * 的 Allow 已经给同窗口计数 +1，若行为分复用同一个 key，每个请求会被计两次，
+ * 使限流阈值实际减半。使用独立窗口既保持「同一份频率数据」的语义（同窗口
+ * 长度、同阈值基准），又不干扰限流的执行计数。
+ *
+ * @param ctx 请求上下文。
+ * @return 行为模块原始分；limiter 缺失/未启用或 rateMax 无效时返回 0。
+ */
+func (p *botPhase) behaviorScore(ctx *pipeline.RequestCtx) int {
+	limiter := p.limiter
+	if limiter == nil || !limiter.Enabled() || p.rateMax <= 0 {
+		return 0
+	}
+	key := ""
+	if ctx.ClientIP != nil {
+		key = ctx.ClientIP.String()
+	}
+	key += "|" + ctx.Host + botBehaviorKeySuffix
+	count := limiter.Increment(key)
+	return bot.BehaviorScoreFromCount(int(count), p.rateMax)
+}
+
+// botBehaviorKeySuffix 是行为分独立窗口的 key 后缀。
+const botBehaviorKeySuffix = "|bot"
+
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// Skip challenge for requests that already passed a signed verification cookie.
 	cookie, userAgent := challengePassIdentity(ctx)
@@ -457,16 +509,8 @@ func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 	br.TLS = ctx.TLS
 
-	// If GeoIP resolver is available, use the two-phase flow.
-	if p.geo != nil {
-		v, bs := bot.CheckBotTwoPhase(br, p.rep, p.geo, p.threshold)
-		p.storeBotScore(ctx, v, bs)
-		return p.verdictToResult(v, ctx)
-	}
-
-	// Fallback: legacy single-pass check.
-	v := bot.CheckBot(br)
-	p.storeBotScore(ctx, v, bot.BotScore{Total: v.Score})
+	v, bs := bot.CheckBotTwoPhaseWithBehavior(br, p.rep, p.geo, p.threshold, p.behaviorScore(ctx))
+	p.storeBotScore(ctx, v, bs)
 	return p.verdictToResult(v, ctx)
 }
 
@@ -474,28 +518,15 @@ func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs 
 	if v.Category == "human" || v.Category == "good" {
 		return // Don't log benign traffic to save DB writes
 	}
-	actionStr := "allow"
-	switch v.Category {
-	case "malicious":
-		if v.Score >= p.threshold {
-			actionStr = "drop"
-		} else {
-			actionStr = "block"
-		}
-	case "suspicious":
-		suspiciousThreshold := p.threshold * 60 / 100
-		if v.Score >= suspiciousThreshold {
-			actionStr = "challenge"
-		} else {
-			actionStr = "observe"
-		}
-	}
+	// 档位→动作的唯一映射：与 verdictToResult 共用 BotTier，避免双写。
+	actionStr := v.Tier.LogAction()
 	var details map[string]string
 	if bs.IsHighRisk && len(bs.Details) > 0 {
 		details = bs.Details
 	}
 	ctx.BotScoreResult = &pipeline.BotScoreInfo{
 		TotalScore:       bs.Total,
+		UAScore:          bs.UAScore,
 		GeoIPScore:       bs.GeoIPScore,
 		FingerprintScore: bs.FingerprintScore,
 		BehaviorScore:    bs.BehaviorScore,
@@ -503,53 +534,41 @@ func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs 
 		IsHighRisk:       bs.IsHighRisk,
 		Action:           actionStr,
 		Details:          details,
+		Dangerous:        v.Dangerous,
+		DangerReasons:    v.DangerReasons,
 	}
 }
 
 func (p *botPhase) verdictToResult(v bot.BotVerdict, ctx *pipeline.RequestCtx) (action.Result, bool) {
-	if v.Category == "malicious" {
-		if p.rep != nil && ctx.ClientIP != nil {
-			p.rep.RecordViolation(ctx.ClientIP)
-		}
-		actType := action.Type(action.Intercept)
-		if v.Score >= p.threshold {
-			actType = action.Drop
-		}
-		result := action.Result{
-			Type:      actType,
-			Phase:     "bot_detection",
-			MatchDesc: v.Reason,
-			Matched:   true,
-			Category:  "bot_malicious",
-			RuleIDStr: v.RuleID,
-		}
+	if v.IsBot && v.Tier >= bot.TierIntercept && p.rep != nil && ctx.ClientIP != nil {
+		p.rep.RecordViolation(ctx.ClientIP)
+	}
+	result := action.Result{
+		Phase:     "bot_detection",
+		MatchDesc: v.Reason,
+		RuleIDStr: v.RuleID,
+		Category:  v.Tier.Category(),
+	}
+	switch v.Tier {
+	case bot.TierDrop:
+		result.Type = action.Drop
+		result.Matched = true
 		return result, true
-	}
-	if v.Category == "suspicious" {
-		// High-score suspicious bots get a JS challenge; low-score get observe.
-		suspiciousThreshold := p.threshold * 60 / 100
-		if v.Score >= suspiciousThreshold {
-			result := action.Result{
-				Type:      action.Challenge,
-				Phase:     "bot_detection",
-				MatchDesc: v.Reason,
-				Matched:   true,
-				Category:  "bot_suspicious",
-				RuleIDStr: v.RuleID,
-			}
-			return result, true
-		}
-		result := action.Result{
-			Type:      action.Observe,
-			Phase:     "bot_detection",
-			MatchDesc: v.Reason,
-			Matched:   true,
-			Category:  "bot_suspicious",
-			RuleIDStr: v.RuleID,
-		}
+	case bot.TierIntercept:
+		result.Type = action.Intercept
+		result.Matched = true
+		return result, true
+	case bot.TierChallenge:
+		result.Type = action.Challenge
+		result.Matched = true
+		return result, true
+	case bot.TierObserve:
+		result.Type = action.Observe
+		result.Matched = true
 		return result, false
+	default:
+		return action.Pass(), false
 	}
-	return action.Pass(), false
 }
 
 type owaspPhase struct {
@@ -585,9 +604,7 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	fileUploadEnabled := p.fileUploadEnabled
 	protoEnabled := p.protoEnabled
 
-	// Check file uploads in multipart form data.
-	ct := strings.ToLower(ctx.ContentType)
-	if fileUploadEnabled && strings.Contains(ct, "multipart/form-data") && len(ctx.Body) > 0 {
+	if fileUploadEnabled && containsFoldASCII(ctx.ContentType, "multipart/form-data") && len(ctx.Body) > 0 {
 		filenames, contentTypes := extractMultipartFilenames(ctx.Body, ctx.ContentType)
 		for i, fname := range filenames {
 			fct := ""
@@ -642,16 +659,26 @@ func owaspHitResult(hit owasp.OWASPHit, cfg *store.ProtectionConfig, overrides m
 	if override.Action != "" {
 		act = normalizeConfiguredAction(override.Action)
 	}
+	// 规则名称/说明取自内置注册表：与规则目录页展示的是同一份元信息，
+	// 命中结果因此可以解释「命中了哪条规则」，而不只是类别级文案。
+	ruleName, ruleDesc := "", ""
+	if rule, ok := owasp.DefaultOWASPRegistry.Get(hit.RuleID); ok && rule != nil {
+		ruleName, ruleDesc = rule.Name, rule.Description
+	}
 	result := action.Result{
-		Type:        action.Normalize(act),
-		RuleIDStr:   hit.RuleID,
-		Phase:       "owasp_default",
-		MatchDesc:   hit.Desc,
-		Matched:     true,
-		Category:    string(hit.Category),
-		StatusCode:  override.StatusCode,
-		RedirectTo:  override.RedirectTo,
-		CaptchaType: override.CaptchaType,
+		Type:         action.Normalize(act),
+		RuleIDStr:    hit.RuleID,
+		RuleName:     ruleName,
+		RuleDesc:     ruleDesc,
+		MatchScore:   hit.Score,
+		MatchSnippet: hit.Snippet,
+		Phase:        "owasp_default",
+		MatchDesc:    hit.Desc,
+		Matched:      true,
+		Category:     string(hit.Category),
+		StatusCode:   override.StatusCode,
+		RedirectTo:   override.RedirectTo,
+		CaptchaType:  override.CaptchaType,
 	}
 	if result.Type != action.CaptchaChallenge {
 		result.CaptchaType = ""
@@ -784,15 +811,30 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 
 	result := action.Result{
-		Type:        action.Normalize(act),
-		RuleIDStr:   "cve:" + best.CVEID,
-		Phase:       "cve_detection",
-		MatchDesc:   best.Description + " [" + best.Pattern + "]",
-		Matched:     true,
-		Category:    "cve_" + best.Category,
+		Type:         action.Normalize(act),
+		RuleIDStr:    "cve:" + best.CVEID,
+		RuleName:     best.CVEID,
+		RuleDesc:     best.Description,
+		MatchScore:   0,
+		MatchSnippet: best.Snippet,
+		MatchPart:    best.MatchedPart,
+		Severity:     best.Severity,
+		Source:       best.Source,
+		CVSSScore:    best.CVSSScore,
+		CWEType:      best.CWEType,
+		References:   best.References,
+		Phase:        "cve_detection",
+		MatchDesc:    best.Description + " [" + best.Pattern + "]",
+		Matched:      true,
+		// 子检测器已产出 cve_ 前缀分类（cve_general/cve_java/...），
+		// 直接透传，避免再拼前缀得到 cve_cve_java 这类前端无标签的值。
+		Category:    best.Category,
 		StatusCode:  statusCode,
 		RedirectTo:  redirectTo,
 		CaptchaType: captchaType,
+	}
+	if result.Category == "" {
+		result.Category = "cve_general"
 	}
 	return result, result.IsTerminal()
 }
@@ -975,6 +1017,12 @@ func dedupeBodyTargets(targets []string) []string {
 // payloads via key names (e.g. `1 UNION SELECT--=x`).
 func extractFormValues(body string) []string {
 	vals := make([]string, 0, (strings.Count(body, "&")+1)*2)
+	// 整串也作为一个目标保留：按 & 拆分会切断 `&&`、`||` 这类命令链
+	// （cmd=127.0.0.1 && ls /etc → "127.0.0.1 " / "cmd" / " ls /etc"），
+	// 拆后各段都不再是完整载荷。逐段扫描与整串扫描并存，命中归因不受影响。
+	if strings.Contains(body, "&&") || strings.Contains(body, "||") {
+		vals = append(vals, body)
+	}
 	for body != "" {
 		pair := body
 		if i := strings.IndexByte(pair, '&'); i >= 0 {
@@ -1022,6 +1070,12 @@ func extractJSONValues(body []byte) []string {
 	return vals
 }
 
+// walkJSON 递归收集 JSON 中的键与字符串值。
+// 对象键按字典序遍历：Go 的 map 迭代顺序随机，若按 range 顺序产出，
+// BodyTargets 的顺序会随请求变化；而 OWASP 归因取「首个跨阈 target」，
+// 顺序即决定安全事件记录的 RuleID，同一请求会被记成不同规则。
+// 副作用：depth > 10 / len(vals) > 100 的剪枝点由「随机丢弃」变为「确定丢弃」，
+// 即超限时保留排序靠前的键，而非每次不同的子集。
 func walkJSON(v any, vals *[]string, depth int) {
 	if depth > 10 || len(*vals) > 100 {
 		return
@@ -1032,12 +1086,17 @@ func walkJSON(v any, vals *[]string, depth int) {
 			*vals = append(*vals, val)
 		}
 	case map[string]any:
-		for k, child := range val {
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
 			// Also scan keys: attackers may inject payloads via JSON key names.
 			if k != "" {
 				*vals = append(*vals, k)
 			}
-			walkJSON(child, vals, depth+1)
+			walkJSON(val[k], vals, depth+1)
 		}
 	case []any:
 		for _, child := range val {
@@ -1105,8 +1164,36 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 		if len(buf) > 0 {
 			vals = append(vals, string(buf))
 		}
+		if fn := part.FormName(); fn != "" {
+			vals = append(vals, fn)
+		}
+		if cd := part.Header.Get("Content-Disposition"); cd != "" {
+			vals = append(vals, rawDispositionNameValues(cd)...)
+		}
 	}
 	return vals
+}
+
+// reDispositionRawName 从 Content-Disposition 头部原文中取 name 值。
+// part.FormName() 走 mime 解析并对 quoted-string 做反转义（\\ → \、\" → "），
+// 反转义后的值与攻击者提交的原始字节不同：UNC 前缀 \\host 会被吞成一个
+// 反斜杠，使依赖双反斜杠形态的规则（如 path_traversal:019）失配。头部原文
+// 保留原始字节，因此额外以原文值作为扫描目标。filename 位的同类处理已由
+// CheckRawMultipartFilenames 的原文正则承担。
+var reDispositionRawName = regexp.MustCompile(`(?i)\bname="([^"]{0,512})"`)
+
+func rawDispositionNameValues(header string) []string {
+	ms := reDispositionRawName.FindAllStringSubmatch(header, 4)
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		if v := m[1]; v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 type antiReplayPhase struct {
@@ -1202,6 +1289,8 @@ func hit(c Compiled) action.Result {
 		StatusCode:  c.StatusCode,
 		RedirectTo:  c.RedirectTo,
 		CaptchaType: c.CaptchaType,
+		// 规则级验证码有效期；0 表示继承全局，由下发侧归一化。
+		CaptchaMinutes: c.CaptchaMinutes,
 	}
 }
 

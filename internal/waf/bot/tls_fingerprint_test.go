@@ -616,11 +616,12 @@ func TestParseTLSClientHelloCacheClonesStoredSlices(t *testing.T) {
 		t.Fatalf("want ParseTLSClientHello() error: %v", err)
 	}
 
-	if len(first.ALPN) == 0 || len(first.CipherSuites) == 0 || len(first.Extensions) == 0 || len(first.Curves) == 0 || len(first.PointFormats) == 0 {
+	if len(first.ALPN) == 0 || len(first.ALPNRaw) == 0 || len(first.CipherSuites) == 0 || len(first.Extensions) == 0 || len(first.Curves) == 0 || len(first.PointFormats) == 0 {
 		t.Fatalf("expected populated TLS slices, got %+v", first)
 	}
 
 	first.ALPN[0] = "mutated"
+	first.ALPNRaw[0] = "mutated-raw"
 	first.CipherSuites[0] = 0
 	first.Extensions[0] = 0
 	first.Curves[0] = 0
@@ -1403,5 +1404,73 @@ func TestALPNProtocolStringCanonicalNames(t *testing.T) {
 		if got := alpnProtocolString(tt.data); got != tt.want {
 			t.Fatalf("alpnProtocolString(%q) = %q, want %q", tt.data, got, tt.want)
 		}
+	}
+}
+
+// TestALPNRawSurvivesNegotiation covers the mixed-mode contract: the ALPN list
+// parsed from the ClientHello must survive a later SetNegotiatedALPN call from
+// the handshake callback, so "declared h2 but negotiated http/1.1" stays visible.
+func TestALPNRawSurvivesNegotiation(t *testing.T) {
+	fp, err := parseTLSClientHelloRaw(clientHelloRecordForTest(t))
+	if err != nil {
+		t.Fatalf("parseTLSClientHelloRaw() error: %v", err)
+	}
+	if want := []string{"h2", "http/1.1"}; !reflect.DeepEqual(fp.ALPNRaw, want) {
+		t.Fatalf("ALPNRaw = %+v, want %+v", fp.ALPNRaw, want)
+	}
+	if want := []string{"h2", "http/1.1"}; !reflect.DeepEqual(fp.ALPN, want) {
+		t.Fatalf("ALPN before negotiation = %+v, want %+v", fp.ALPN, want)
+	}
+
+	fp.SetNegotiatedALPN("http/1.1")
+
+	if got := fp.ALPN; !reflect.DeepEqual(got, []string{"http/1.1"}) {
+		t.Fatalf("ALPN after negotiation = %+v, want [http/1.1]", got)
+	}
+	if want := []string{"h2", "http/1.1"}; !reflect.DeepEqual(fp.ALPNRaw, want) {
+		t.Fatalf("ALPNRaw was overwritten by negotiation: %+v, want %+v", fp.ALPNRaw, want)
+	}
+	if got := fp.NegotiatedALPN(); got != "http/1.1" {
+		t.Fatalf("NegotiatedALPN() = %q, want http/1.1", got)
+	}
+	if got := fp.DeclaredALPN(); !reflect.DeepEqual(got, []string{"h2", "http/1.1"}) {
+		t.Fatalf("DeclaredALPN() = %+v, want [h2 http/1.1]", got)
+	}
+	if !fp.HasValue() {
+		t.Fatal("HasValue() = false after negotiation")
+	}
+}
+
+// TestSetNegotiatedALPNBackfillsEmptyRaw covers the exemption path where the
+// listener never peeks the ClientHello: the pre-overwrite ALPN is preserved
+// into ALPNRaw instead of being dropped.
+func TestSetNegotiatedALPNBackfillsEmptyRaw(t *testing.T) {
+	fp := TLSClientFingerprint{TLSVersion: "TLS13", ALPN: []string{"h2", "http/1.1"}}
+
+	fp.SetNegotiatedALPN("h2")
+
+	if want := []string{"h2", "http/1.1"}; !reflect.DeepEqual(fp.ALPNRaw, want) {
+		t.Fatalf("ALPNRaw = %+v, want %+v", fp.ALPNRaw, want)
+	}
+	if got := fp.ALPN; !reflect.DeepEqual(got, []string{"h2"}) {
+		t.Fatalf("ALPN = %+v, want [h2]", got)
+	}
+
+	empty := TLSClientFingerprint{TLSVersion: "TLS13"}
+	empty.SetNegotiatedALPN("")
+	if empty.ALPN != nil || empty.ALPNRaw != nil {
+		t.Fatalf("empty handshake info must not fabricate ALPN: %+v", empty)
+	}
+}
+
+// TestDeclaredALPNFallsBackToALPN keeps the declaration list readable when a
+// caller only ever populated the negotiated field.
+func TestDeclaredALPNFallsBackToALPN(t *testing.T) {
+	fp := TLSClientFingerprint{ALPN: []string{"h3"}}
+	if got := fp.DeclaredALPN(); !reflect.DeepEqual(got, []string{"h3"}) {
+		t.Fatalf("DeclaredALPN() = %+v, want [h3]", got)
+	}
+	if got := fp.NegotiatedALPN(); got != "h3" {
+		t.Fatalf("NegotiatedALPN() = %q, want h3", got)
 	}
 }

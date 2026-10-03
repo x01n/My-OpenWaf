@@ -2,6 +2,8 @@ package cve
 
 import (
 	"regexp"
+
+	"My-OpenWaf/internal/pkg/snippet"
 )
 
 func init() {
@@ -228,6 +230,7 @@ func (d *JavaCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMa
 						MatchedPart: part,
 						Pattern:     pat.String(),
 						Action:      "drop",
+						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					})
 					goto nextRule
 				}
@@ -259,6 +262,7 @@ func (d *JavaCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (C
 						MatchedPart: part,
 						Pattern:     pat.String(),
 						Action:      "drop",
+						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					}, true
 				}
 			}

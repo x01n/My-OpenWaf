@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 // ShieldConfig 定义 5s 盾的高级配置。
@@ -97,23 +97,24 @@ func shieldProtocolAllowed(cfg ShieldConfig, requestProtocol string) bool {
 // ShieldSession stores the server-side state for a pending shield challenge.
 type ShieldSession struct {
 	ChallengeSessionBinding
-	ID                   string    `json:"id"`
-	Nonce                string    `json:"nonce"`
-	Difficulty           int       `json:"difficulty"`
-	TimeoutSecs          int       `json:"timeout_secs"`
-	EnvStrictness        int       `json:"env_strictness"`
-	EnableEnvCheck       bool      `json:"enable_env_check"`
-	EnableBehaviorCheck  bool      `json:"enable_behavior_check"`
-	EnvConfigFrozen      bool      `json:"env_config_frozen"`
-	RequireHTTP2         bool      `json:"require_http2"`
-	RequireHTTP3         bool      `json:"require_http3"`
-	AllowHTTP1           bool      `json:"allow_http1"`
-	ProtocolConfigFrozen bool      `json:"protocol_config_frozen"`
-	OriginalURL          string    `json:"original_url"`
-	RequestProtocol      string    `json:"request_protocol"`
-	EnvKey               []byte    `json:"env_key"`   // 32-byte session master key (first 16 bytes feed SM4-GCM)
-	ClientIP             string    `json:"client_ip"` // 签发请求的客户端 IP（方案 B：只读评分源）
-	CreatedAt            time.Time `json:"created_at"`
+	ID                   string     `json:"id"`
+	Nonce                string     `json:"nonce"`
+	Difficulty           int        `json:"difficulty"`
+	TimeoutSecs          int        `json:"timeout_secs"`
+	EnvStrictness        int        `json:"env_strictness"`
+	EnableEnvCheck       bool       `json:"enable_env_check"`
+	EnableBehaviorCheck  bool       `json:"enable_behavior_check"`
+	EnvConfigFrozen      bool       `json:"env_config_frozen"`
+	RequireHTTP2         bool       `json:"require_http2"`
+	RequireHTTP3         bool       `json:"require_http3"`
+	AllowHTTP1           bool       `json:"allow_http1"`
+	ProtocolConfigFrozen bool       `json:"protocol_config_frozen"`
+	OriginalURL          string     `json:"original_url"`
+	RequestProtocol      string     `json:"request_protocol"`
+	EnvKey               []byte     `json:"env_key"`               // 32-byte session master key (first 16 bytes feed SM4-GCM)
+	EnvMission           EnvMission `json:"env_mission,omitempty"` // R2.2：本次挑战要求的环境因子子集
+	ClientIP             string     `json:"client_ip"`             // 签发请求的客户端 IP
+	CreatedAt            time.Time  `json:"created_at"`
 }
 
 func (s *ShieldSession) sessionTTL() time.Duration {
@@ -173,7 +174,7 @@ func decodeShieldSession(data []byte) *ShieldSession {
 // Cloudflare-style: user clicks verify -> PoW runs in background -> auto-submit on success.
 type ShieldManager struct {
 	captcha   *CaptchaManager
-	redis     *goredis.Client
+	redis     rueidis.Client
 	config    ShieldConfig
 	prefix    string
 	ipHistory func(ip string) (violations int64, banned bool)
@@ -185,7 +186,7 @@ type ShieldManager struct {
 }
 
 // NewShieldManager creates a new ShieldManager.
-func NewShieldManager(captcha *CaptchaManager, redis *goredis.Client, difficulty int) *ShieldManager {
+func NewShieldManager(captcha *CaptchaManager, redis rueidis.Client, difficulty int) *ShieldManager {
 	cfg := DefaultShieldConfig()
 	if difficulty > 0 {
 		cfg.Difficulty = ClampPoWDifficulty(difficulty)
@@ -244,7 +245,7 @@ func (sm *ShieldManager) geoAttrLookup() func(ip string) (geoScore int, geoReaso
 	return fn
 }
 
-func (sm *ShieldManager) redisClient() *goredis.Client {
+func (sm *ShieldManager) redisClient() rueidis.Client {
 	if sm == nil {
 		return nil
 	}
@@ -254,7 +255,7 @@ func (sm *ShieldManager) redisClient() *goredis.Client {
 	return client
 }
 
-func (sm *ShieldManager) SetRedis(redis *goredis.Client) {
+func (sm *ShieldManager) SetRedis(redis rueidis.Client) {
 	if sm == nil {
 		return
 	}
@@ -348,6 +349,7 @@ func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, reques
 		OriginalURL:             originalURL,
 		RequestProtocol:         shieldProtocolValue(requestProtocol),
 		EnvKey:                  envKey,
+		EnvMission:              NewEnvMission(),
 		ClientIP:                binding.clientIPValue(),
 		CreatedAt:               time.Now(),
 	}
@@ -367,6 +369,7 @@ func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCou
 		powCounter,
 		powHash,
 		envFPJSON,
+		"",
 		requestProtocol,
 		ChallengeSessionBinding{},
 	)
@@ -374,7 +377,7 @@ func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCou
 
 // VerifyChallengeWithBinding compares the matched-site binding before atomically
 // consuming the shield session.
-func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, requestProtocol string, binding ChallengeSessionBinding) (bool, string) {
+func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, probeJSON, requestProtocol string, binding ChallengeSessionBinding) (bool, string) {
 	session := sm.takeShieldSessionWithBinding(sessionID, binding)
 	if session == nil {
 		return false, ""
@@ -407,7 +410,23 @@ func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer str
 		return false, session.OriginalURL
 	}
 
-	result := ValidateEnvFingerprint(fp)
+	// R2.2：会话携带环境 mission 时按 mission 因子集评分；无 mission
+	// （旧会话/直接构造）时完全走旧路径 ValidateEnvFingerprint。
+	var result EnvCheckResult
+	if session.EnvMission.ID != "" {
+		result = ScoreWithMission(fp, session.EnvMission)
+		if full := ValidateEnvFingerprint(fp); full.Score > result.Score {
+			result = full
+		}
+	} else {
+		result = ValidateEnvFingerprint(fp)
+	}
+	// __waf_shield_probe 的 dt/auto 在此处换算为软信号加分（只加不减，
+	// 客户端抹掉字段只会丢掉软维度，无法靠伪造得分）。auto 值仅
+	// 白名单字符进 reasons 日志，防注入。
+	probeAdd, probeReasons := shieldProbeSoftScore(probeJSON)
+	result.Score += probeAdd
+	result.Reasons = append(result.Reasons, probeReasons...)
 	if session.EnvStrictness == 0 {
 		return result.Score < 100, session.OriginalURL
 	}
@@ -451,6 +470,41 @@ func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer str
 		}
 	}
 	return result.Score <= 50, session.OriginalURL
+}
+
+// shieldProbeSoftScore 把客户端采集的 __waf_shield_probe JSON 换算成服务端
+// 软信号加分。客户端只上报观测值（dt=开发者工具迹象、auto=自动化名单），
+// 评分口径完全在服务端：dt 命中 +5、auto 白名单命中 +10、剖面照记。
+// JSON 非法或缺失返回 0（宁可漏检不误封）。
+func shieldProbeSoftScore(probeJSON string) (int, []string) {
+	if probeJSON == "" {
+		return 0, nil
+	}
+	var probe struct {
+		DT   bool   `json:"dt"`
+		Auto string `json:"auto"`
+	}
+	if err := json.Unmarshal([]byte(probeJSON), &probe); err != nil {
+		return 0, nil
+	}
+	// auto 只允许字母数字与下划线段（webdriver/headless 等），防日志注入。
+	auto := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' {
+			return r
+		}
+		return -1
+	}, probe.Auto)
+	score := 0
+	var reasons []string
+	if probe.DT {
+		score += 5
+		reasons = append(reasons, "shield-probe: devtools detection (+5)")
+	}
+	if auto != "" {
+		score += 10
+		reasons = append(reasons, "shield-probe: automation marker "+auto+" (+10)")
+	}
+	return score, reasons
 }
 
 // WriteShieldChallengeResponse renders the Cloudflare-style shield HTML page.
@@ -588,7 +642,7 @@ func (sm *ShieldManager) saveShieldSession(s *ShieldSession) error {
 	if redis := sm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if err := redis.Set(ctx, sm.prefix+s.ID, data, s.sessionTTL()).Err(); err != nil {
+		if err := redis.Do(ctx, redis.B().Set().Key(sm.prefix+s.ID).Value(string(data)).Px(s.sessionTTL()).Build()).Error(); err != nil {
 			return fmt.Errorf("store Shield session in Redis: %w", err)
 		}
 		return nil
@@ -609,7 +663,7 @@ func (sm *ShieldManager) takeShieldSessionWithBinding(id string, binding Challen
 	if redis := sm.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		raw, err := takeAndDeleteBoundScript.Run(ctx, redis, []string{sm.prefix + id}, binding.SiteID, binding.Host, binding.Bind).Text()
+		raw, err := takeAndDeleteBoundScript.Exec(ctx, redis, []string{sm.prefix + id}, []string{strconv.FormatUint(uint64(binding.SiteID), 10), binding.Host, binding.Bind}).ToString()
 		data := []byte(raw)
 		if err != nil {
 			return nil

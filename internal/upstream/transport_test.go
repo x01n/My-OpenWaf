@@ -3,9 +3,6 @@ package upstream
 import (
 	"crypto/tls"
 	"testing"
-
-	"My-OpenWaf/internal/snapshot"
-	"My-OpenWaf/internal/store"
 )
 
 func TestHTTPSClientTLSConfigSupportsTLS10Upstream(t *testing.T) {
@@ -53,105 +50,6 @@ func TestHTTPSClientTLSConfigReturnsIndependentCipherSuiteSlice(t *testing.T) {
 	}
 	if next.CipherSuites[0] != firstSuite {
 		t.Fatalf("CipherSuites[0] = %#x, want independent cached copy %#x", next.CipherSuites[0], firstSuite)
-	}
-}
-
-func TestHTTPTransportUsesTLS10ForHTTPSUpstream(t *testing.T) {
-	for name, upstreamURL := range map[string]string{
-		"lowercase": "https://127.0.0.1:9443",
-		"uppercase": "HTTPS://127.0.0.1:9443",
-	} {
-		t.Run(name, func(t *testing.T) {
-			tr := HTTPTransport(snapshot.SiteRuntime{
-				Site: store.Site{
-					UpstreamTLSServerName: "origin.example.test",
-					UpstreamTLSSkipVerify: true,
-				},
-				UpstreamURLs: []string{upstreamURL},
-			})
-			if tr.TLSClientConfig == nil {
-				t.Fatal("expected HTTPS upstream TLS config")
-			}
-			if tr.TLSClientConfig.MinVersion != tls.VersionTLS10 {
-				t.Fatalf("HTTPS upstream MinVersion = %#x, want %#x", tr.TLSClientConfig.MinVersion, tls.VersionTLS10)
-			}
-			if tr.TLSClientConfig.ServerName != "origin.example.test" {
-				t.Fatalf("HTTPS upstream ServerName = %q, want %q", tr.TLSClientConfig.ServerName, "origin.example.test")
-			}
-			if !tr.TLSClientConfig.InsecureSkipVerify {
-				t.Fatal("HTTPS upstream InsecureSkipVerify should preserve site setting")
-			}
-			if tr.Protocols != nil {
-				t.Fatalf("HTTPS upstream Protocols = %#v, want nil", tr.Protocols)
-			}
-		})
-	}
-}
-
-func TestHTTPTransportEnablesUnencryptedHTTP2ForH2CUpstream(t *testing.T) {
-	for name, upstreamURL := range map[string]string{
-		"lowercase": "h2c://127.0.0.1:8080",
-		"uppercase": "H2C://127.0.0.1:8080",
-	} {
-		t.Run(name, func(t *testing.T) {
-			tr := HTTPTransport(snapshot.SiteRuntime{
-				UpstreamURLs: []string{upstreamURL},
-			})
-			if tr.TLSClientConfig != nil {
-				t.Fatalf("H2C upstream TLSClientConfig = %#v, want nil", tr.TLSClientConfig)
-			}
-			if tr.Protocols == nil {
-				t.Fatal("expected H2C upstream protocols")
-			}
-			if !tr.Protocols.UnencryptedHTTP2() {
-				t.Fatal("H2C upstream should enable unencrypted HTTP/2")
-			}
-		})
-	}
-}
-
-func TestHTTPTransportResolvesRPCUpstreamAliases(t *testing.T) {
-	tests := []struct {
-		raw          string
-		wantTLS      bool
-		wantH2CPrior bool
-	}{
-		{raw: "tls://127.0.0.1:9443", wantTLS: true},
-		{raw: "grpcs://127.0.0.1:9443", wantTLS: true},
-		{raw: "grpc+tls://127.0.0.1:9443", wantTLS: true},
-		{raw: "grpc+https://127.0.0.1:9443", wantTLS: true},
-		{raw: "GRPCS://127.0.0.1:9443", wantTLS: true},
-		{raw: "grpc://127.0.0.1:8080", wantH2CPrior: true},
-		{raw: "https://127.0.0.1:9443", wantTLS: true},
-		{raw: "h2c://127.0.0.1:8080", wantH2CPrior: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.raw, func(t *testing.T) {
-			tr := HTTPTransport(snapshot.SiteRuntime{
-				Site: store.Site{
-					UpstreamTLSServerName: "origin.example.test",
-					UpstreamTLSSkipVerify: true,
-				},
-				UpstreamURLs: []string{tt.raw},
-			})
-			if tt.wantTLS {
-				if tr.TLSClientConfig == nil {
-					t.Fatal("expected HTTPS upstream TLS config")
-				}
-				if tr.Protocols != nil {
-					t.Fatalf("HTTPS upstream Protocols = %#v, want nil", tr.Protocols)
-				}
-				return
-			}
-			if tt.wantH2CPrior {
-				if tr.TLSClientConfig != nil {
-					t.Fatalf("H2C upstream TLSClientConfig = %#v, want nil", tr.TLSClientConfig)
-				}
-				if tr.Protocols == nil || !tr.Protocols.UnencryptedHTTP2() {
-					t.Fatal("H2C upstream should enable unencrypted HTTP/2")
-				}
-			}
-		})
 	}
 }
 

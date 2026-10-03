@@ -119,7 +119,7 @@ func LoginHandler(d *AuthDeps) app.HandlerFunc {
 			d.SessionMgr.CreateSessionWithRefresh(acct.Username, accessJTI, jti, clientIP, userAgent, "", accessExp)
 		}
 
-		setRefreshCookie(c, jti+":"+rawRT, auth.RefreshTTL)
+		setRefreshCookie(c, jti+string(refreshCookieSeparator)+rawRT, auth.RefreshTTL)
 		c.JSON(200, map[string]any{
 			"access_token": accessToken,
 			"expires_at":   accessExp.Unix(),
@@ -231,7 +231,7 @@ func RefreshHandler(d *AuthDeps) app.HandlerFunc {
 			}
 		}
 
-		setRefreshCookie(c, newJTI+":"+newRaw, auth.RefreshTTL)
+		setRefreshCookie(c, newJTI+string(refreshCookieSeparator)+newRaw, auth.RefreshTTL)
 		c.JSON(200, map[string]any{
 			"access_token": accessToken,
 			"expires_at":   accessExp.Unix(),

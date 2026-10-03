@@ -34,6 +34,8 @@ h2{font-size:1.15rem;font-weight:600;color:#334155;margin-bottom:6px}
 <p class="rid">Request ID: {{.RequestID}}</p>
 <div class="footer">{{.FooterText}}</div>
 </div>
+<input type="hidden" id="__owaf_pow_env" value="{{.PowEnvelope}}">
+<input type="hidden" id="__owaf_pow_key" value="{{.PowKeyHex}}">
 <script>
 {{.EnvJS}}
 {{.PowScript}}

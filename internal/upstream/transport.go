@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"sync"
-	"time"
 
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
@@ -125,43 +123,6 @@ func TLSDialWithDialer(dialer *net.Dialer, host string, serverName string, skipV
 		dialer = &net.Dialer{}
 	}
 	return tls.DialWithDialer(dialer, "tcp", host, sharedDialTLSConfig(serverName, skipVerify))
-}
-
-// HTTPTransport returns a pooled transport suitable for reverse-proxying to the site's first upstream scheme.
-func HTTPTransport(rt snapshot.SiteRuntime) *http.Transport {
-	tr := &http.Transport{
-		MaxIdleConns:        128,
-		MaxIdleConnsPerHost: 32,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
-	}
-	if len(rt.UpstreamURLs) > 0 {
-		// 归一结果使 tls/grpcs/grpc+tls/grpc+https 与 https、grpc 与 h2c 使用同一 transport 形态。
-		first := NormalizeUpstreamURLPrefix(rt.UpstreamURLs[0])
-		if hasSchemePrefixFold(first, "https://") {
-			tr.TLSClientConfig = HTTPSClientTLSConfig(rt.Site.UpstreamTLSServerName, rt.Site.UpstreamTLSSkipVerify)
-		} else if hasSchemePrefixFold(first, "h2c://") {
-			tr.Protocols = new(http.Protocols)
-			tr.Protocols.SetUnencryptedHTTP2(true)
-		}
-	}
-	return tr
-}
-
-func hasSchemePrefixFold(raw string, scheme string) bool {
-	if len(raw) < len(scheme) {
-		return false
-	}
-	for i := 0; i < len(scheme); i++ {
-		b := raw[i]
-		if 'A' <= b && b <= 'Z' {
-			b += 'a' - 'A'
-		}
-		if b != scheme[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // UpstreamClientCertificate loads the site's upstream mTLS client certificate,

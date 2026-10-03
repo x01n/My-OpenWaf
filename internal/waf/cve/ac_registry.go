@@ -1,11 +1,10 @@
 package cve
 
-// registryACData 编译期生成的 registry gate Aho-Corasick 自动机与规则 mask。
-// 用于 shouldScanRegisteredCVERule 中纯 registeredCVERuleContainsAny gate 的
-// 等价替换:一遍 matchMask(combinedLower) 替代逐规则多针 strings.Contains。
+import "My-OpenWaf/internal/ac"
+
 var registryACData struct {
-	ac    *acMatcher
-	masks map[string]acGateMask // CVE-ID → 该规则 needle 的 bitset
+	ac    *ac.Matcher
+	masks map[string]ac.Mask // CVE-ID → 该规则 needle 的 bitset
 }
 
 func init() {
@@ -13,8 +12,9 @@ func init() {
 }
 
 // registryNeedleGroups 按 CVE-ID 分组的 gate needle,精确对应
-// shouldScanRegisteredCVERule 中纯 registeredCVERuleContainsAny 的 case。
+// shouldScanRegisteredCVERuleAC 中纯 OR gate(经 registryACGate)的 CVE。
 // 键为 CVE-ID 字符串,值为该规则的 needle 列表(小写字面量,与原 gate 一致)。
+// 走 shouldScanRegisteredCVERuleAC 的复合 helper case。
 var registryNeedleGroups = map[string][]string{
 	"CVE-2014-6271":       {"() {"},
 	"CVE-2025-24893":      {"solrsearch", "media=rss", "groovy", "{{async", "{{ async"},
@@ -32,31 +32,32 @@ var registryNeedleGroups = map[string][]string{
 	"CVE-2024-XXEUTF7":    {"utf-7", "+adw-", "+adi-", "+afw-"},
 	"CVE-2024-LDAPI":      {"objectclass=", ")(|", ")(uid=", "*)(", "ldap"},
 	"CVE-2024-SENSFILE":   {"/.env", "/.git/config", "/.htaccess", "/wp-config.php", "/web.config", "/etc/passwd"},
+	"CVE-2026-35273":      {"psemhub"},
 }
 
 func initRegistryAC() {
-	b := newACBuilder()
-	masks := make(map[string]acGateMask, len(registryNeedleGroups))
+	b := ac.NewBuilder()
+	masks := make(map[string]ac.Mask, len(registryNeedleGroups))
 
 	for cveID, needles := range registryNeedleGroups {
-		var mask acGateMask
+		var mask ac.Mask
 		for _, n := range needles {
-			idx := b.addPattern(n)
-			mask.set(idx)
+			idx := b.AddPattern(n)
+			mask.Set(idx)
 		}
 		masks[cveID] = mask
 	}
 
-	registryACData.ac = b.build()
+	registryACData.ac = b.Build()
 	registryACData.masks = masks
 }
 
 // registryACGate 使用预编译的 AC bitset 判断纯 OR gate 是否通过,
 // 等价于对应 registeredCVERuleContainsAny(combinedLower, ...needles)。
-func registryACGate(cveID string, hit *acGateMask) bool {
+func registryACGate(cveID string, hit *ac.Mask) bool {
 	mask, ok := registryACData.masks[cveID]
 	if !ok {
 		return true // 无 AC gate 的规则不拦截(与 default: return true 一致)
 	}
-	return hit.intersects(&mask)
+	return hit.Intersects(&mask)
 }

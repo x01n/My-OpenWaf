@@ -210,6 +210,9 @@ func TestApplyInternalHTTP3RequestMetadataCachesTLSFingerprintAndStripsHeaders(t
 	if got := string(ctx.GetHeader(InternalHTTP3TLSALPNHeader)); got != "" {
 		t.Fatalf("internal tls alpn header should be stripped, got %q", got)
 	}
+	if got := string(ctx.GetHeader(InternalHTTP3TLSALPNRawHeader)); got != "" {
+		t.Fatalf("internal tls alpn raw header should be stripped, got %q", got)
+	}
 	if got := string(ctx.GetHeader(InternalHTTP3TLSJA3Header)); got != "" {
 		t.Fatalf("internal tls ja3 header should be stripped, got %q", got)
 	}
@@ -241,6 +244,9 @@ func TestApplyInternalHTTP3RequestMetadataCachesTLSFingerprintAndStripsHeaders(t
 	}
 	if len(fp.ALPN) != 1 || fp.ALPN[0] != "h3" {
 		t.Fatalf("unexpected ALPN metadata: %+v", fp.ALPN)
+	}
+	if len(fp.ALPNRaw) != 0 {
+		t.Fatalf("ALPNRaw should stay empty when the raw header is absent: %+v", fp.ALPNRaw)
 	}
 	if fp.JA3 != "771,4865-4866,0-16-43,29,0" || fp.JA3Hash != "0123456789abcdef0123456789abcdef" || fp.JA4 != "q13d0511h3_fea09b2e4d67_1234567890ab" {
 		t.Fatalf("unexpected JA3/JA4 metadata: %+v", fp)

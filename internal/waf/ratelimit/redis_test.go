@@ -3,7 +3,7 @@ package ratelimit
 import (
 	"testing"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 func TestNewRedisRateLimiterNilClientReturnsNil(t *testing.T) {
@@ -14,7 +14,15 @@ func TestNewRedisRateLimiterNilClientReturnsNil(t *testing.T) {
 }
 
 func TestNewRedisRateLimiterNonNil(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 100, true)
@@ -24,7 +32,15 @@ func TestNewRedisRateLimiterNonNil(t *testing.T) {
 }
 
 func TestRedisRateLimiterEnabledDefault(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 10, true)
@@ -37,7 +53,15 @@ func TestRedisRateLimiterEnabledDefault(t *testing.T) {
 }
 
 func TestRedisRateLimiterEnabledFalse(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 10, false)
@@ -50,7 +74,15 @@ func TestRedisRateLimiterEnabledFalse(t *testing.T) {
 }
 
 func TestRedisRateLimiterReconfigure(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 10, false)
@@ -64,7 +96,15 @@ func TestRedisRateLimiterReconfigure(t *testing.T) {
 }
 
 func TestRedisRateLimiterInvalidEnabledConfigFailsOpen(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:19999"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:19999"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 	rl := NewRedisRateLimiter(client, "pfx", 60, 0, true)
 	if rl == nil {
@@ -79,7 +119,15 @@ func TestRedisRateLimiterInvalidEnabledConfigFailsOpen(t *testing.T) {
 }
 
 func TestRedisRateLimiterAllowDisabledAlwaysTrue(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 1, false)
@@ -94,7 +142,15 @@ func TestRedisRateLimiterAllowDisabledAlwaysTrue(t *testing.T) {
 }
 
 func TestRedisRateLimiterIncrementDisabledReturnsZero(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 10, false)
@@ -107,7 +163,15 @@ func TestRedisRateLimiterIncrementDisabledReturnsZero(t *testing.T) {
 }
 
 func TestRedisRateLimiterIsOverLimitDisabledAlwaysFalse(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 1, false)
@@ -121,7 +185,15 @@ func TestRedisRateLimiterIsOverLimitDisabledAlwaysFalse(t *testing.T) {
 
 func TestRedisRateLimiterAllowRedisUnavailableReturnsTrue(t *testing.T) {
 	// Redis 不可用时降级为允许（fail-open），防止误拦截
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:19999"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:19999"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 1, true)
@@ -135,7 +207,15 @@ func TestRedisRateLimiterAllowRedisUnavailableReturnsTrue(t *testing.T) {
 }
 
 func TestRedisRateLimiterIncrementRedisUnavailableReturnsZero(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:19999"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:19999"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 10, true)
@@ -148,7 +228,15 @@ func TestRedisRateLimiterIncrementRedisUnavailableReturnsZero(t *testing.T) {
 }
 
 func TestRedisRateLimiterIsOverLimitRedisUnavailableReturnsFalse(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:19999"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:19999"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 1, true)
@@ -161,7 +249,15 @@ func TestRedisRateLimiterIsOverLimitRedisUnavailableReturnsFalse(t *testing.T) {
 }
 
 func TestRedisRateLimiterCloseIsNoOp(t *testing.T) {
-	client := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if client == nil && err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	rl := NewRedisRateLimiter(client, "pfx", 60, 10, true)

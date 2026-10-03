@@ -111,12 +111,59 @@ func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.Si
 		})
 		envJS = challenge.EnvCheckJSEncrypted(envKeyHex, aad)
 	}
-	// 工作量证明一律由 Rust WASM 模块在 Web Worker 中求解，无 JS 降级路径：
-	// WASM 加载失败即抛错、挑战不通过，避免纯 JS 实现被轻易改写或跳过。
-	// 以 token 作为 nonce，使工作量与本次挑战绑定，无法预算或跨挑战复用。
-	powScript := challenge.GeneratePoWWASMScript(challenge.ChallengeProofDifficulty, token)
-	html := buildChallengeHTML(reqID, ts, token, envJS, powScript, cfg)
+	key := challenge.EnvSessionKeyFromChallengeToken(token)
+	var powScript string
+	powEnvelope := ""
+	powKeyHex := ""
+	if key != nil {
+		envelope, shell, err := challenge.GeneratePoWShardedEnvelope(challenge.ChallengeProofDifficulty, token, key)
+		if err == nil && envelope != "" && shell != "" && challenge.EnvSessionKeyHex(key) != "" {
+			powScript = shell
+			powEnvelope = envelope
+			powKeyHex = challenge.EnvSessionKeyHex(key)
+		}
+	}
+	if powScript == "" {
+		sharded := challenge.GeneratePoWShardedScript(challenge.ChallengeProofDifficulty, token)
+		powScript = sharded.PageScript
+	}
+
+	html := buildChallengeHTML(reqID, ts, token, envJS, powScript, powEnvelope, powKeyHex, cfg)
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
+}
+
+// buildChallengeHTML renders the shared JS challenge page template.
+func buildChallengeHTML(reqID, ts, token, envJS, powScript string, powEnvelope, powKeyHex string, cfg pageconfig.ChallengePageConfig) string {
+	defaults := pageconfig.DefaultChallengePageConfig()
+	if cfg.BrandName == "" {
+		cfg = defaults
+	}
+	data := challengePageData{
+		RequestID:      reqID,
+		EnvJS:          template.JS(envJS),
+		PowScript:      template.JS(powScript),
+		PowEnvelope:    powEnvelope,
+		PowKeyHex:      powKeyHex,
+		TimestampJS:    javascriptString(ts),
+		TokenJS:        javascriptString(token),
+		RequestIDJS:    javascriptString(reqID),
+		PageTitle:      valueOrFallback(cfg.Title, defaults.Title),
+		BrandName:      valueOrFallback(cfg.BrandName, defaults.BrandName),
+		CheckingText:   valueOrFallback(cfg.CheckingText, defaults.CheckingText),
+		CheckingTextZh: valueOrFallback(cfg.CheckingTextZh, defaults.CheckingTextZh),
+		WaitText:       valueOrFallback(cfg.WaitText, defaults.WaitText),
+		WaitTextZh:     valueOrFallback(cfg.WaitTextZh, defaults.WaitTextZh),
+		FooterText:     valueOrFallback(cfg.FooterText, defaults.FooterText),
+		PrimaryColor:   template.CSS(pageconfig.SafePrimaryColor(cfg.PrimaryColor, defaults.PrimaryColor)),
+		Background:     template.CSS(pageconfig.SafeBackground(cfg.BgGradient, defaults.BgGradient)),
+		LogoURL:        pageconfig.SafeLogoURL(cfg.LogoURL),
+		CustomCSS:      template.CSS(pageconfig.SanitizeCSS(cfg.CustomCSS)),
+	}
+	page, err := executePageTemplate("challenge.html", data)
+	if err != nil {
+		return "<!DOCTYPE html><html><head><title>Security Check</title></head><body><h1>Security Check</h1></body></html>"
+	}
+	return string(page)
 }
 
 // WriteUpstreamErrorResponse renders an error page for upstream failures.
@@ -253,35 +300,4 @@ func buildErrorFallbackHTML(reqID string, statusCode int) string {
 		data.Icon = template.HTML("&#9203;")
 	}
 	return renderUpstreamErrorPage(data)
-}
-
-func buildChallengeHTML(reqID, ts, token, envJS, powScript string, cfg pageconfig.ChallengePageConfig) string {
-	defaults := pageconfig.DefaultChallengePageConfig()
-	if cfg.BrandName == "" {
-		cfg = defaults
-	}
-	data := challengePageData{
-		RequestID:      reqID,
-		EnvJS:          template.JS(envJS),
-		PowScript:      template.JS(powScript),
-		TimestampJS:    javascriptString(ts),
-		TokenJS:        javascriptString(token),
-		RequestIDJS:    javascriptString(reqID),
-		PageTitle:      valueOrFallback(cfg.Title, defaults.Title),
-		BrandName:      valueOrFallback(cfg.BrandName, defaults.BrandName),
-		CheckingText:   valueOrFallback(cfg.CheckingText, defaults.CheckingText),
-		CheckingTextZh: valueOrFallback(cfg.CheckingTextZh, defaults.CheckingTextZh),
-		WaitText:       valueOrFallback(cfg.WaitText, defaults.WaitText),
-		WaitTextZh:     valueOrFallback(cfg.WaitTextZh, defaults.WaitTextZh),
-		FooterText:     valueOrFallback(cfg.FooterText, defaults.FooterText),
-		PrimaryColor:   template.CSS(pageconfig.SafePrimaryColor(cfg.PrimaryColor, defaults.PrimaryColor)),
-		Background:     template.CSS(pageconfig.SafeBackground(cfg.BgGradient, defaults.BgGradient)),
-		LogoURL:        pageconfig.SafeLogoURL(cfg.LogoURL),
-		CustomCSS:      template.CSS(pageconfig.SanitizeCSS(cfg.CustomCSS)),
-	}
-	page, err := executePageTemplate("challenge.html", data)
-	if err != nil {
-		return "<!DOCTYPE html><html><head><title>Security Check</title></head><body><h1>Security Check</h1></body></html>"
-	}
-	return string(page)
 }

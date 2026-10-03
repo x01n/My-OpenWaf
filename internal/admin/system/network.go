@@ -541,12 +541,12 @@ func probeRedisConfig(cfg RedisConfig) error {
 	defer cancel()
 	if err := coreredis.Ping(ctx, client); err != nil {
 		if client != nil {
-			_ = client.Close()
+			client.Close()
 		}
 		return fmt.Errorf("redis connection failed: %w", err)
 	}
 	if client != nil {
-		_ = client.Close()
+		client.Close()
 	}
 	return nil
 }

@@ -80,6 +80,9 @@ type ProtectionConfig struct {
 	ChallengeAction string `json:"challenge_action"`
 
 	AntiReplayEnabled bool `json:"anti_replay_enabled"`
+	// AntiReplayCookieMode 全局默认 Cookie 校验模式（standard 单 Cookie / dual 双 Cookie）。
+	// 非法或为空时按 standard 兜底（见 admin/shared.ValidateAntiReplayCookieMode）。
+	AntiReplayCookieMode string `json:"anti_replay_cookie_mode"`
 
 	ShieldEnabled           bool `json:"shield_enabled"`
 	ShieldDifficulty        int  `json:"shield_difficulty"`
@@ -194,6 +197,8 @@ func DefaultProtectionConfig() ProtectionConfig {
 		BrowserSignAction:       "challenge",
 		// 全局默认质询动作：连接旧配置（空串）时数据面回退到 challenge 兜底渲染。
 		ChallengeAction: "challenge",
+		// 反重放 Cookie 校验模式缺省为 standard：存量行为逐字节不变。
+		AntiReplayCookieMode: "standard",
 	}
 }
 

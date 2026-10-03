@@ -77,6 +77,10 @@ func DryRunNContext(ctx context.Context, stage Stage, source string, req Request
 		return DryRunBatchResult{CompileError: err.Error(), Iterations: iterations, KVAvailable: dryRunKVAvailable(ctx, kv)}
 	}
 	script.SetTimeout(timeout)
+	// 试运行不改配置、不产生线上副作用，脚本里的 ctx.log / ctx.debug 也没有
+	// 宿主 logger 可写（宿主是控制面请求，不是数据面）。两个回调都置 nil，
+	// 让 ctx.log / ctx.debug 回到安全空操作。
+	script.SetRuntimeHooks(nil, nil)
 
 	pool := newVMPool()
 	out := DryRunBatchResult{

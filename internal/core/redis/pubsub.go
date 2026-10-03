@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 const configSyncChannel = "openwaf:config:reload"
@@ -24,7 +24,7 @@ type configSyncMessage struct {
 // ConfigSync publishes and subscribes to config-reload events via Redis pub/sub.
 // Multiple WAF nodes use this to stay in sync after admin API mutations.
 type ConfigSync struct {
-	client    *goredis.Client
+	client    rueidis.Client
 	log       *slog.Logger
 	sourceID  string
 	stopCh    chan struct{}
@@ -32,7 +32,7 @@ type ConfigSync struct {
 }
 
 // NewConfigSync creates a config sync handler. Returns nil if client is nil.
-func NewConfigSync(client *goredis.Client, log *slog.Logger, sourceID string) *ConfigSync {
+func NewConfigSync(client rueidis.Client, log *slog.Logger, sourceID string) *ConfigSync {
 	if client == nil {
 		return nil
 	}
@@ -73,7 +73,7 @@ func (cs *ConfigSync) PublishReload() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := cs.client.Publish(ctx, configSyncChannel, payload).Err(); err != nil {
+	if err := cs.client.Do(ctx, cs.client.B().Publish().Channel(configSyncChannel).Message(string(payload)).Build()).Error(); err != nil {
 		cs.log.Warn("config sync publish failed", slog.Any("err", err))
 	}
 }
@@ -85,39 +85,37 @@ func (cs *ConfigSync) Subscribe(reload func() error) {
 		return
 	}
 
-	sub := cs.client.Subscribe(context.Background(), configSyncChannel)
-	ch := sub.Channel()
+	subCmd := cs.client.B().Subscribe().Channel(configSyncChannel).Build()
 
 	go func() {
 		<-cs.stopCh
-		_ = sub.Close()
+		cs.client.Close()
 	}()
-
-	for msg := range ch {
-		if msg.Payload == configSyncActionReload {
+	_ = cs.client.Receive(context.Background(), subCmd, func(msg rueidis.PubSubMessage) {
+		if msg.Message == configSyncActionReload {
 			cs.log.Info("received config sync reload")
 			if err := reload(); err != nil {
 				cs.log.Error("config sync reload failed", slog.Any("err", err))
 			}
-			continue
+			return
 		}
 
 		var event configSyncMessage
-		if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
+		if err := json.Unmarshal([]byte(msg.Message), &event); err != nil {
 			cs.log.Warn("config sync payload decode failed", slog.Any("err", err))
-			continue
+			return
 		}
 		if event.Action != configSyncActionReload {
-			continue
+			return
 		}
 		if event.SourceID != "" && event.SourceID == cs.sourceID {
-			continue
+			return
 		}
 		cs.log.Info("received config sync reload")
 		if err := reload(); err != nil {
 			cs.log.Error("config sync reload failed", slog.Any("err", err))
 		}
-	}
+	})
 }
 
 // Close stops the subscriber.

@@ -9,8 +9,7 @@ import (
 	"time"
 
 	"My-OpenWaf/internal/core/action"
-
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 type EscalationStep struct {
@@ -35,14 +34,14 @@ type localEntry struct {
 
 type EscalationManager struct {
 	redisMu     sync.RWMutex
-	redis       *goredis.Client
+	redis       rueidis.Client
 	localCache  sync.Map
 	defaultCfg  atomic.Value
 	cleanupDone chan struct{}
 	closeOnce   sync.Once
 }
 
-func NewEscalationManager(redisClient *goredis.Client) *EscalationManager {
+func NewEscalationManager(redisClient rueidis.Client) *EscalationManager {
 	m := &EscalationManager{redis: redisClient, cleanupDone: make(chan struct{})}
 	m.defaultCfg.Store(DefaultEscalationConfig())
 	go m.cleanupLoop()
@@ -50,7 +49,7 @@ func NewEscalationManager(redisClient *goredis.Client) *EscalationManager {
 }
 
 func (m *EscalationManager) SetDefaultConfig(cfg EscalationConfig) { m.defaultCfg.Store(cfg) }
-func (m *EscalationManager) SetRedis(redisClient *goredis.Client) {
+func (m *EscalationManager) SetRedis(redisClient rueidis.Client) {
 	if m == nil {
 		return
 	}
@@ -71,7 +70,7 @@ func (m *EscalationManager) Close() {
 		}
 	})
 }
-func (m *EscalationManager) redisClient() *goredis.Client {
+func (m *EscalationManager) redisClient() rueidis.Client {
 	if m == nil {
 		return nil
 	}
@@ -125,14 +124,17 @@ func (m *EscalationManager) recordHitRedis(ip string, siteID uint, windowSecs in
 	if redis == nil {
 		return false
 	}
-	pipe := redis.Pipeline()
-	incrCmd := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, time.Duration(windowSecs)*time.Second)
-	_, err := pipe.Exec(ctx)
+	pipe := redis.DoMulti(ctx, redis.B().Incr().Key(key).Build(), redis.B().Expire().Key(key).Seconds(int64(windowSecs)).Build())
+	// 多条命令任一失败即整批失败；计数只作栅栏用途，失败时不回退。
+	var err error
+	for _, r := range pipe {
+		if err = r.Error(); err != nil {
+			break
+		}
+	}
 	if err != nil {
 		return false
 	}
-	_ = incrCmd.Val()
 	return true
 }
 func (m *EscalationManager) recordHitLocal(ip string, siteID uint, windowSecs int) {
@@ -166,11 +168,11 @@ func (m *EscalationManager) getCountRedis(ip string, siteID uint) (int, bool) {
 	if redis == nil {
 		return 0, false
 	}
-	val, err := redis.Get(ctx, key).Int()
+	val, err := redis.Do(ctx, redis.B().Get().Key(key).Build()).AsInt64()
 	if err != nil {
 		return 0, false
 	}
-	return val, true
+	return int(val), true
 }
 func (m *EscalationManager) getCountLocal(ip string, siteID uint) int {
 	key := localEscalationKey(ip, siteID)
@@ -227,7 +229,7 @@ func (m *EscalationManager) ResetIP(ip string, siteID uint) {
 	if redis := m.redisClient(); redis != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		redis.Del(ctx, redisEscalationKey(ip, siteID))
+		redis.Do(ctx, redis.B().Del().Key(redisEscalationKey(ip, siteID)).Build())
 	}
 }
 func resolveAction(count int, steps []EscalationStep) string {

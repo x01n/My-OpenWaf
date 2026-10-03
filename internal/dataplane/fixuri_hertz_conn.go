@@ -161,9 +161,7 @@ func (c *fixURIHertzConn) SetTLSHandshakeInfo(version string, sni string, alpn s
 	if sni != "" {
 		c.fingerprint.SNI = sni
 	}
-	c.fingerprint.ALPN = nil
-	if alpn != "" {
-		c.fingerprint.ALPN = []string{alpn}
-	}
+	// 只写协商结果（ALPN）；ALPNRaw 是 ClientHello 声明列表，保持只读。
+	c.fingerprint.SetNegotiatedALPN(alpn)
 	setTLSHandshakeInfoOnConn(c.Conn, version, sni, alpn)
 }

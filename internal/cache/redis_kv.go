@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 const (
@@ -25,28 +25,20 @@ end
 return value
 `
 
-// RedisKV is a distributed key-value cache backed by Redis.
-// Used for cross-node shared state: API response caching, rate limit metadata,
-// IP ban synchronization, etc.
-//
-// This is intentionally separate from the snapshot Layer — snapshots are
-// process-local objects that should never be serialized to Redis.
 type RedisKV struct {
 	mu               sync.RWMutex
-	client           *goredis.Client
+	client           rueidis.Client
 	health           atomic.Bool
 	unavailableUntil atomic.Int64
 }
 
-// NewRedisKV creates a Redis KV cache. The wrapper stays usable even when the
-// underlying client is nil so runtime hot reload can attach Redis later.
-func NewRedisKV(client *goredis.Client) *RedisKV {
+func NewRedisKV(client rueidis.Client) *RedisKV {
 	r := &RedisKV{client: client}
 	r.health.Store(client != nil)
 	return r
 }
 
-func (r *RedisKV) clientValue() *goredis.Client {
+func (r *RedisKV) clientValue() rueidis.Client {
 	if r == nil {
 		return nil
 	}
@@ -56,7 +48,7 @@ func (r *RedisKV) clientValue() *goredis.Client {
 	return client
 }
 
-func (r *RedisKV) SetClient(client *goredis.Client) {
+func (r *RedisKV) SetClient(client rueidis.Client) {
 	if r == nil {
 		return
 	}
@@ -67,7 +59,6 @@ func (r *RedisKV) SetClient(client *goredis.Client) {
 	r.mu.Unlock()
 }
 
-// AvailableContext reports whether Redis is configured, healthy, and the caller context is active.
 func (r *RedisKV) AvailableContext(ctx context.Context) bool {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
@@ -88,16 +79,13 @@ func (r *RedisKV) Available() bool {
 	return until > 0 && time.Now().UnixNano() >= until
 }
 
-// noteCommandResult updates health only when client is still the active client.
-// redis.Nil is a successful Redis response (a cache miss), not a dependency
-// failure, and therefore restores health just like any other successful command.
-func (r *RedisKV) noteCommandResult(client *goredis.Client, err error) {
+func (r *RedisKV) noteCommandResult(client rueidis.Client, err error) {
 	if r == nil || client == nil {
 		return
 	}
 	r.mu.RLock()
 	if r.client == client {
-		if err == nil || errors.Is(err, goredis.Nil) {
+		if err == nil || errors.Is(err, rueidis.Nil) {
 			r.health.Store(true)
 			r.unavailableUntil.Store(0)
 		} else {
@@ -123,7 +111,7 @@ func (r *RedisKV) SetContext(ctx context.Context, key string, value []byte, ttl 
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	err := client.Set(ctx, redisPrefix+key, value, ttl).Err()
+	err := client.Do(ctx, client.B().Set().Key(redisPrefix+key).Value(rueidis.BinaryString(value)).Px(ttl).Build()).Error()
 	r.noteCommandResult(client, err)
 	return err
 }
@@ -143,7 +131,7 @@ func (r *RedisKV) GetContext(ctx context.Context, key string) ([]byte, bool) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	val, err := client.Get(ctx, redisPrefix+key).Bytes()
+	val, err := client.Do(ctx, client.B().Get().Key(redisPrefix+key).Build()).AsBytes()
 	r.noteCommandResult(client, err)
 	if err != nil {
 		return nil, false
@@ -166,7 +154,7 @@ func (r *RedisKV) DeleteContext(ctx context.Context, key string) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	r.noteCommandResult(client, client.Del(ctx, redisPrefix+key).Err())
+	r.noteCommandResult(client, client.Do(ctx, client.B().Del().Key(redisPrefix+key).Build()).Error())
 }
 
 // SetJSON marshals v to JSON and stores it with TTL.
@@ -197,9 +185,8 @@ func (r *RedisKV) Incr(key string, ttl time.Duration) (int64, error) {
 	return r.IncrContext(ctx, key, ttl)
 }
 
-// IncrContext atomically increments a fixed-window counter.
-// The first increment sets the TTL; subsequent increments leave the original
-// window unchanged.
+var incrFixedWindowLua = rueidis.NewLuaScript(incrFixedWindowScript)
+
 func (r *RedisKV) IncrContext(ctx context.Context, key string, ttl time.Duration) (int64, error) {
 	client := r.clientValue()
 	if client == nil {
@@ -207,7 +194,8 @@ func (r *RedisKV) IncrContext(ctx context.Context, key string, ttl time.Duration
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	value, err := client.Eval(ctx, incrFixedWindowScript, []string{redisPrefix + key}, ttl.Milliseconds()).Int64()
+	resp := incrFixedWindowLua.Exec(ctx, client, []string{redisPrefix + key}, []string{strconv.FormatInt(ttl.Milliseconds(), 10)})
+	value, err := resp.AsInt64()
 	r.noteCommandResult(client, err)
 	if err != nil {
 		return 0, err
@@ -223,7 +211,7 @@ func (r *RedisKV) Exists(key string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	n, err := client.Exists(ctx, redisPrefix+key).Result()
+	n, err := client.Do(ctx, client.B().Exists().Key(redisPrefix+key).Build()).AsInt64()
 	r.noteCommandResult(client, err)
 	return err == nil && n > 0
 }
@@ -252,23 +240,32 @@ func (r *RedisKV) HAggregateFlush(cntKey, metaKey string, counts map[string]int6
 	defer cancel()
 	fullCnt := redisPrefix + cntKey
 	fullMeta := redisPrefix + metaKey
-	pipe := client.Pipeline()
+	b := client.B()
+	cmds := make([]rueidis.Completed, 0, len(counts)+len(metas)+2)
 	for field, n := range counts {
-		pipe.HIncrBy(ctx, fullCnt, field, n)
+		cmds = append(cmds, b.Hincrby().Key(fullCnt).Field(field).Increment(n).Build())
 	}
 	for field, val := range metas {
-		pipe.HSet(ctx, fullMeta, field, val)
+		cmds = append(cmds, b.Hset().Key(fullMeta).FieldValue().FieldValue(field, rueidis.BinaryString(val)).Build())
 	}
-	pipe.Expire(ctx, fullCnt, ttl)
-	pipe.Expire(ctx, fullMeta, ttl)
-	_, err := pipe.Exec(ctx)
+	cmds = append(cmds,
+		b.Expire().Key(fullCnt).Seconds(int64(ttl/time.Second)).Build(),
+		b.Expire().Key(fullMeta).Seconds(int64(ttl/time.Second)).Build(),
+	)
+	resps := client.DoMulti(ctx, cmds...)
+	var err error
+	for _, resp := range resps {
+		if e := resp.Error(); e != nil {
+			err = e
+			break
+		}
+	}
 	r.noteCommandResult(client, err)
 	return err
 }
 
-// DrainAggregated 原子取出并清空计数/元数据两个 hash，返回 field->累计次数 与
-// field->元数据字节。调用方须先持有 sink 分布式锁，确保集群内同一时刻只有一个
-// 节点执行回写，避免重复 Upsert。client 为 nil 时返回空结果。
+var drainHashPairLua = rueidis.NewLuaScript(drainHashPairScript)
+
 func (r *RedisKV) DrainAggregated(cntKey, metaKey string) (map[string]int64, map[string][]byte, error) {
 	client := r.clientValue()
 	if client == nil {
@@ -276,22 +273,50 @@ func (r *RedisKV) DrainAggregated(cntKey, metaKey string) (map[string]int64, map
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	res, err := client.Eval(ctx, drainHashPairScript, []string{redisPrefix + cntKey, redisPrefix + metaKey}).Result()
+	resp := drainHashPairLua.Exec(ctx, client, []string{redisPrefix + cntKey, redisPrefix + metaKey}, nil)
+	err := resp.Error()
 	r.noteCommandResult(client, err)
 	if err != nil {
 		return nil, nil, err
 	}
-	outer, ok := res.([]interface{})
-	if !ok || len(outer) != 2 {
+	arr, err := resp.ToArray()
+	if err != nil || len(arr) != 2 {
 		return nil, nil, nil
 	}
-	counts := parseHashInt64(outer[0])
-	metas := parseHashBytes(outer[1])
+	counts := flatHashToInt64(arr[0])
+	metas := flatHashToBytes(arr[1])
 	return counts, metas, nil
 }
 
-// parseHashInt64 把 Lua 返回的扁平 HGETALL 数组（field,value,field,value,...）
-// 解析为 field->int64。非法数值字段被跳过。
+func flatHashToInt64(m rueidis.RedisMessage) map[string]int64 {
+	pairs, err := m.AsStrSlice()
+	if err != nil || len(pairs) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		n, err := strconv.ParseInt(pairs[i+1], 10, 64)
+		if err != nil {
+			continue
+		}
+		out[pairs[i]] = n
+	}
+	return out
+}
+
+func flatHashToBytes(m rueidis.RedisMessage) map[string][]byte {
+	pairs, err := m.AsStrSlice()
+	if err != nil || len(pairs) == 0 {
+		return nil
+	}
+	out := make(map[string][]byte, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		out[pairs[i]] = []byte(pairs[i+1])
+	}
+	return out
+}
+
+// parseHashInt64 保留旧名与行为（兼容既有测试引用）；新实现走 flatHashToInt64。
 func parseHashInt64(v interface{}) map[string]int64 {
 	arr, ok := v.([]interface{})
 	if !ok || len(arr) == 0 {
@@ -346,12 +371,15 @@ func (r *RedisKV) AcquireLock(key, token string, ttl time.Duration) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	ok, err := client.SetNX(ctx, redisPrefix+key, token, ttl).Result()
+	resp := client.Do(ctx, client.B().Set().Key(redisPrefix+key).Value(token).Nx().Px(ttl).Build())
+	err := resp.Error()
+	if rueidis.IsRedisNil(err) {
+		err = nil
+	}
 	r.noteCommandResult(client, err)
-	return err == nil && ok
+	return err == nil
 }
 
-// releaseLockScript 仅在锁仍归本 token 所有时删除，避免误删他人续得的锁。
 const releaseLockScript = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
@@ -359,7 +387,8 @@ end
 return 0
 `
 
-// ReleaseLock 释放由 token 持有的分布式锁。持有权不匹配时不做任何操作。
+var releaseLockLua = rueidis.NewLuaScript(releaseLockScript)
+
 func (r *RedisKV) ReleaseLock(key, token string) {
 	client := r.clientValue()
 	if client == nil {
@@ -367,5 +396,6 @@ func (r *RedisKV) ReleaseLock(key, token string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	r.noteCommandResult(client, client.Eval(ctx, releaseLockScript, []string{redisPrefix + key}, token).Err())
+	resp := releaseLockLua.Exec(ctx, client, []string{redisPrefix + key}, []string{token})
+	r.noteCommandResult(client, resp.Error())
 }

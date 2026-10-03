@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	rueidis "github.com/redis/rueidis"
 )
 
 // ---- resolveAction（纯函数） ----
@@ -366,7 +366,18 @@ func TestSetRedisUpdatesRedisClient(t *testing.T) {
 		t.Fatal("initial redisClient should be nil")
 	}
 
-	fakeClient := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:6379"})
+	// 只作 SetRedis 非 nil 判定的假客户端：不发起任何命令，
+	// rueidis 工厂在拨号失败时同样返回可用指针（ForceSingleClient）。
+	fakeClient, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:       []string{"127.0.0.1:6379"},
+		DisableCache:      true,
+		DisableRetry:      true,
+		ForceSingleClient: true,
+	})
+	if fakeClient == nil && err != nil {
+		t.Fatal(err)
+	}
+	_ = err
 	defer fakeClient.Close()
 
 	m.SetRedis(fakeClient)
