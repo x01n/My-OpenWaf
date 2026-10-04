@@ -1,4 +1,4 @@
-package detect
+package owasprules
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 func TestListOWASPRulesIncludeGroupedDefaultsToCompatibleResponse(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 
-	defaultCtx := invokeCVERuleListHandler(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules?policy_id=1&page_size=500")
+	defaultCtx := invokeOWASPGet(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules?policy_id=1&page_size=500")
 	if defaultCtx.Response.StatusCode() != 200 {
 		t.Fatalf("default status=%d body=%s", defaultCtx.Response.StatusCode(), defaultCtx.Response.Body())
 	}
@@ -20,7 +20,7 @@ func TestListOWASPRulesIncludeGroupedDefaultsToCompatibleResponse(t *testing.T) 
 		t.Fatalf("default response missing items/grouped: %v", defaultResp)
 	}
 
-	flatCtx := invokeCVERuleListHandler(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules?policy_id=1&page_size=500&include_grouped=false")
+	flatCtx := invokeOWASPGet(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules?policy_id=1&page_size=500&include_grouped=false")
 	if flatCtx.Response.StatusCode() != 200 {
 		t.Fatalf("flat status=%d body=%s", flatCtx.Response.StatusCode(), flatCtx.Response.Body())
 	}
@@ -43,7 +43,7 @@ func TestListOWASPRulesIncludeGroupedDefaultsToCompatibleResponse(t *testing.T) 
 		t.Fatalf("flat bytes=%d want less than default bytes=%d", len(flatCtx.Response.Body()), len(defaultCtx.Response.Body()))
 	}
 
-	otherCtx := invokeCVERuleListHandler(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules?policy_id=1&page_size=500&include_grouped=0")
+	otherCtx := invokeOWASPGet(t, ListOWASPRulesFromRegistry(repo), "/api/v1/owasp-rules?policy_id=1&page_size=500&include_grouped=0")
 	var otherResp map[string]json.RawMessage
 	if err := json.Unmarshal(otherCtx.Response.Body(), &otherResp); err != nil {
 		t.Fatalf("decode non-false response: %v", err)

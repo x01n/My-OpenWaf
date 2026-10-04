@@ -1,4 +1,4 @@
-package detect
+package owasprules
 
 import (
 	"encoding/json"

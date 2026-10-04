@@ -10,7 +10,8 @@ import (
 
 	"My-OpenWaf/internal/admin/access"
 	"My-OpenWaf/internal/admin/auth"
-	"My-OpenWaf/internal/admin/detect"
+	"My-OpenWaf/internal/admin/detect/cverules"
+	"My-OpenWaf/internal/admin/detect/owasprules"
 	"My-OpenWaf/internal/admin/event"
 	"My-OpenWaf/internal/admin/protect"
 	"My-OpenWaf/internal/admin/rule"
@@ -191,14 +192,14 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/bot-stats", protect.GetBotStats(r.BotScore))
 		readGroup.GET("/bot-scores", protect.GetBotScores(r.BotScore))
 
-		readGroup.GET("/cve-rules", detect.ListCVERules(r.CVERule))
-		readGroup.GET("/cve-rules/stats", detect.GetCVERuleStats(r.CVERule))
-		readGroup.GET("/cve-feed/status", detect.GetCVEFeedStatus(deps.CVEFeedMgr, r.CVERule))
+		readGroup.GET("/cve-rules", cverules.ListCVERules(r.CVERule))
+		readGroup.GET("/cve-rules/stats", cverules.GetCVERuleStats(r.CVERule))
+		readGroup.GET("/cve-feed/status", cverules.GetCVEFeedStatus(deps.CVEFeedMgr, r.CVERule))
 
-		readGroup.GET("/owasp-rules", detect.ListOWASPRulesFromRegistry(r.SystemSettings))
-		readGroup.GET("/owasp-rules/stats", detect.GetOWASPRuleStats(r.SystemSettings))
-		readGroup.GET("/policies/:policyId/owasp-rules", detect.ListOWASPRulesFromRegistry(r.SystemSettings))
-		readGroup.GET("/policies/:policyId/owasp-rules/stats", detect.GetOWASPRuleStats(r.SystemSettings))
+		readGroup.GET("/owasp-rules", owasprules.ListOWASPRulesFromRegistry(r.SystemSettings))
+		readGroup.GET("/owasp-rules/stats", owasprules.GetOWASPRuleStats(r.SystemSettings))
+		readGroup.GET("/policies/:policyId/owasp-rules", owasprules.ListOWASPRulesFromRegistry(r.SystemSettings))
+		readGroup.GET("/policies/:policyId/owasp-rules/stats", owasprules.GetOWASPRuleStats(r.SystemSettings))
 
 		readGroup.GET("/captcha/config", protect.GetCaptchaConfig(r.SystemSettings))
 
@@ -287,18 +288,18 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		opsGroup.POST("/bot-settings/update", protect.UpdateBotSettings(r.SystemSettings, reload))
 
-		opsGroup.POST("/cve-rules/:id/toggle", detect.ToggleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
-		opsGroup.POST("/cve-rules/:id/patch", detect.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
-		opsGroup.POST("/cve-rules/:id/reset", detect.ResetCVERuleOverride(r.CVERule, reload))
-		opsGroup.POST("/cve-rules/batch", detect.BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr, reload))
-		opsGroup.POST("/cve-rules/sync", detect.SyncCVERules(deps.CVEFeedMgr, r.CVERule))
+		opsGroup.POST("/cve-rules/:id/toggle", cverules.ToggleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		opsGroup.POST("/cve-rules/:id/patch", cverules.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		opsGroup.POST("/cve-rules/:id/reset", cverules.ResetCVERuleOverride(r.CVERule, reload))
+		opsGroup.POST("/cve-rules/batch", cverules.BatchUpdateCVERules(r.CVERule, deps.CVEFeedMgr, reload))
+		opsGroup.POST("/cve-rules/sync", cverules.SyncCVERules(deps.CVEFeedMgr, r.CVERule))
 
-		opsGroup.POST("/owasp-rules/:id/update", detect.UpdateSingleOWASPRule(r.SystemSettings, reload))
-		opsGroup.POST("/owasp-rules/:id/reset", detect.ResetOWASPRuleOverride(r.SystemSettings, reload))
-		opsGroup.POST("/owasp-rules/batch", detect.BatchUpdateOWASPRules(r.SystemSettings, reload))
-		opsGroup.POST("/policies/:policyId/owasp-rules/:id", detect.UpdateSingleOWASPRule(r.SystemSettings, reload))
-		opsGroup.POST("/policies/:policyId/owasp-rules/:id/reset", detect.ResetOWASPRuleOverride(r.SystemSettings, reload))
-		opsGroup.POST("/policies/:policyId/owasp-rules/batch", detect.BatchUpdateOWASPRules(r.SystemSettings, reload))
+		opsGroup.POST("/owasp-rules/:id/update", owasprules.UpdateSingleOWASPRule(r.SystemSettings, reload))
+		opsGroup.POST("/owasp-rules/:id/reset", owasprules.ResetOWASPRuleOverride(r.SystemSettings, reload))
+		opsGroup.POST("/owasp-rules/batch", owasprules.BatchUpdateOWASPRules(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/:id", owasprules.UpdateSingleOWASPRule(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/:id/reset", owasprules.ResetOWASPRuleOverride(r.SystemSettings, reload))
+		opsGroup.POST("/policies/:policyId/owasp-rules/batch", owasprules.BatchUpdateOWASPRules(r.SystemSettings, reload))
 
 		opsGroup.POST("/captcha/config", protect.UpdateCaptchaConfig(r.SystemSettings, reload))
 		opsGroup.POST("/captcha/test", protect.TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
@@ -354,7 +355,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.GET("/backup/export", system.ExportBackup(deps.DB))
 		adminGroup.POST("/backup/import", system.ImportBackup(deps.DB, reload, func() {
 			r.CVERule.InvalidateCanonicalSnapshot()
-			detect.InvalidateOWASPReadSnapshots(deps.DB)
+			owasprules.InvalidateOWASPReadSnapshots(deps.DB)
 		}))
 
 		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
@@ -375,9 +376,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		adminGroup.POST("/drop-policy/update", protect.UpdateDropPolicy(r.SystemSettings, reload))
 
-		adminGroup.POST("/cve-rules", detect.CreateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
-		adminGroup.POST("/cve-rules/:id/update", detect.UpdateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
-		adminGroup.POST("/cve-rules/:id/delete", detect.DeleteCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		adminGroup.POST("/cve-rules", cverules.CreateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		adminGroup.POST("/cve-rules/:id/update", cverules.UpdateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
+		adminGroup.POST("/cve-rules/:id/delete", cverules.DeleteCVERule(r.CVERule, deps.CVEFeedMgr, reload))
 
 		// 删除误报反馈仅 admin。
 		adminGroup.POST("/false-positives/:id/delete", event.DeleteFalsePositive(r.FalsePositive))

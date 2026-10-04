@@ -1,4 +1,4 @@
-package detect
+package owasprules
 
 import (
 	"errors"
@@ -8,13 +8,14 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"gorm.io/gorm"
 
+	"My-OpenWaf/internal/admin/detect/detectlimit"
 	"My-OpenWaf/internal/store"
 )
 
 func loadOWASPViews(db *gorm.DB, policyID uint, c *app.RequestContext) ([]owaspRuleView, error) {
 	category := strings.TrimSpace(string(c.Query("category")))
 	query := strings.TrimSpace(string(c.Query("q")))
-	if len(query) > maxRuleSearchQueryBytes {
+	if len(query) > detectlimit.MaxRuleSearchQueryBytes {
 		return nil, errors.New("q exceeds 256 bytes")
 	}
 	snapshot, err := getOWASPReadSnapshot(db, policyID)

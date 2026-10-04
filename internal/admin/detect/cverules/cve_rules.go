@@ -1,4 +1,4 @@
-package detect
+package cverules
 
 import (
 	"context"

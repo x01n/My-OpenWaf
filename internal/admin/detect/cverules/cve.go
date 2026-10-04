@@ -1,4 +1,4 @@
-package detect
+package cverules
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/admin/detect/detectlimit"
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
@@ -19,7 +20,6 @@ import (
 const (
 	maxCustomCVEPatternBytes     = 64 << 10
 	maxCustomCVEDescriptionBytes = 64 << 10
-	maxRuleSearchQueryBytes      = 256
 )
 
 func validateCustomCVERule(item *cve.CVERuleModel, requireFields bool) error {
@@ -120,7 +120,7 @@ func ListCVERules(repo *repository.CVERuleRepo) app.HandlerFunc {
 			return
 		}
 		filter := repository.CVERuleFilter{Category: c.DefaultQuery("category", ""), Severity: c.DefaultQuery("severity", ""), Source: c.DefaultQuery("source", ""), Query: c.DefaultQuery("q", "")}
-		if len(filter.Query) > maxRuleSearchQueryBytes {
+		if len(filter.Query) > detectlimit.MaxRuleSearchQueryBytes {
 			c.JSON(400, map[string]string{"error": "q exceeds 256 bytes"})
 			return
 		}
