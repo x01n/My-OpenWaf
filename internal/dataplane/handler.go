@@ -29,6 +29,7 @@ import (
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/core/rules"
+	dpstream "My-OpenWaf/internal/dataplane/stream"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/proxy"
 	"My-OpenWaf/internal/security"
@@ -213,7 +214,7 @@ func Handler(opts Options) app.HandlerFunc {
 	secLog := opts.Log.With(slog.String("section", "security"))
 	accessLog := opts.Log
 	staticFS, _ := adminweb.ResolveFS("")
-	bindCloseNotify := selectStreamCloseNotifyBinding(opts.StreamCloseNotifyDisabled)
+	bindCloseNotify := dpstream.SelectStreamCloseNotifyBinding(opts.StreamCloseNotifyDisabled)
 
 	return func(ctx context.Context, c *app.RequestContext) {
 		ctx, closeNotifyCancel := bindCloseNotify(ctx, c)

@@ -1,4 +1,4 @@
-package dataplane
+package stream
 
 import (
 	"context"

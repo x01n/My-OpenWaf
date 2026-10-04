@@ -1,4 +1,4 @@
-package dataplane
+package stream
 
 import (
 	"net"
@@ -65,7 +65,7 @@ func scanOnlyFind(v reflect.Value) bool {
 	if !v.IsValid() {
 		return false
 	}
-	v = accessibleValue(v)
+	v = AccessibleValue(v)
 	if method := v.MethodByName("CloseNotify"); method.IsValid() {
 		if _, ok := callCloseNotify(method); ok {
 			return true
@@ -98,7 +98,7 @@ func scanOnlyFindNoCall(v reflect.Value) bool {
 	if !v.IsValid() {
 		return false
 	}
-	v = accessibleValue(v)
+	v = AccessibleValue(v)
 	if method := v.MethodByName("CloseNotify"); method.IsValid() {
 		return true
 	}
@@ -175,7 +175,7 @@ func scanOnlyFindChan(v reflect.Value) (<-chan bool, bool) {
 	if !v.IsValid() {
 		return nil, false
 	}
-	v = accessibleValue(v)
+	v = AccessibleValue(v)
 	if method := v.MethodByName("CloseNotify"); method.IsValid() {
 		if ch, ok := callCloseNotify(method); ok {
 			return ch, true

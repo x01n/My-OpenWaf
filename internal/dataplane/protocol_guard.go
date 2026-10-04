@@ -4,6 +4,7 @@ import (
 	"net"
 	"reflect"
 
+	dpstream "My-OpenWaf/internal/dataplane/stream"
 	"My-OpenWaf/internal/waf/drop"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -136,7 +137,7 @@ func connLinkOrNil(conn net.Conn) net.Conn {
 	if !v.IsValid() {
 		return nil
 	}
-	v = accessibleValue(v)
+	v = dpstream.AccessibleValue(v)
 	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return nil
 	}
@@ -149,7 +150,7 @@ func connLinkOrNil(conn net.Conn) net.Conn {
 
 func firstConnField(elem reflect.Value) net.Conn {
 	for i := 0; i < elem.NumField(); i++ {
-		field := accessibleValue(elem.Field(i))
+		field := dpstream.AccessibleValue(elem.Field(i))
 		if !field.IsValid() {
 			continue
 		}

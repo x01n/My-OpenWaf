@@ -1,4 +1,4 @@
-package dataplane
+package stream
 
 import (
 	"context"
@@ -18,10 +18,10 @@ var recvOnlyBoolChanType = reflect.TypeOf((<-chan bool)(nil))
 // 与调用本身保持原样。表内只存类型级事实，不缓存任何连接/通道值。
 var closeNotifyMethodIndex sync.Map // map[reflect.Type]int
 
-// selectStreamCloseNotifyBinding 依据数据面 listener 是否具备 HTTP/2 协议栈
+// SelectStreamCloseNotifyBinding 依据数据面 listener 是否具备 HTTP/2 协议栈
 // 选择请求级 CloseNotify 绑定函数。h1/h3 listener 的 conn 永不含 CloseNotify，
 // 启用禁选时直接返回 noop，省去每请求一次的全结构体 reflect 扫描。
-func selectStreamCloseNotifyBinding(disabled bool) func(context.Context, *app.RequestContext) (context.Context, func()) {
+func SelectStreamCloseNotifyBinding(disabled bool) func(context.Context, *app.RequestContext) (context.Context, func()) {
 	if disabled {
 		return noopStreamCloseNotifyBinding
 	}
@@ -71,7 +71,7 @@ func findCloseNotifyChannel(v reflect.Value) (<-chan bool, bool) {
 	if !v.IsValid() {
 		return nil, false
 	}
-	v = accessibleValue(v)
+	v = AccessibleValue(v)
 	if idx := closeNotifyMethodIndexFor(v.Type()); idx >= 0 {
 		if ch, ok := callCloseNotifyAt(v, idx); ok {
 			return ch, true
@@ -116,7 +116,7 @@ func closeNotifyMethodIndexFor(t reflect.Type) int {
 	return idx
 }
 
-func accessibleValue(v reflect.Value) reflect.Value {
+func AccessibleValue(v reflect.Value) reflect.Value {
 	if !v.IsValid() || v.CanInterface() || !v.CanAddr() {
 		return v
 	}
