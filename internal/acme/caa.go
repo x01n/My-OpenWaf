@@ -22,19 +22,25 @@ const (
 
 var errCAANotFound = errors.New("caa records not found")
 
-// CAARecord is one DNS Certification Authority Authorization record.
+/**
+ * CAARecord 是一条 DNS 证书颁发机构授权（CAA）记录。
+ */
 type CAARecord struct {
 	Flags uint8
 	Tag   string
 	Value string
 }
 
-// CAAResolver resolves CAA records for one DNS name.
+/**
+ * CAAResolver 解析单个 DNS 名称下的 CAA 记录。
+ */
 type CAAResolver interface {
 	LookupCAA(ctx context.Context, domain string) ([]CAARecord, error)
 }
 
-// CAAPolicy controls ACME CAA preflight checks.
+/**
+ * CAAPolicy 控制 ACME 的 CAA 预检行为。
+ */
 type CAAPolicy struct {
 	Enabled        bool
 	AllowedIssuers []string
@@ -43,14 +49,22 @@ type CAAPolicy struct {
 	Resolver       CAAResolver
 }
 
-// DNSCAAResolver queries a recursive DNS server for CAA records.
+/**
+ * DNSCAAResolver 通过递归 DNS 服务器查询 CAA 记录。
+ */
 type DNSCAAResolver struct {
 	Server  string
 	Timeout time.Duration
 }
 
-// CheckCAAIssuance verifies that the discovered CAA RRSet authorizes the
-// configured issuer set for the requested domain.
+/**
+ * CheckCAAIssuance 校验查询到的 CAA RRSet 是否授权目标域名使用当前配置的颁发者集合。
+ *
+ * @param ctx 查询与取消上下文。
+ * @param domain 申请证书的域名，支持 *. 通配前缀。
+ * @param policy CAA 预检策略；策略未启用时直接放行。
+ * @return 未授权、解析失败或策略配置缺失时返回错误，否则返回 nil。
+ */
 func CheckCAAIssuance(ctx context.Context, domain string, policy CAAPolicy) error {
 	if !policy.Enabled {
 		return nil

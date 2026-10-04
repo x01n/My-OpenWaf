@@ -43,7 +43,7 @@ type Builder struct {
 
 func NewBuilder() *Builder {
 	return &Builder{
-		states: []State{{}}, // root = state 0
+		states: []State{{}}, // 根状态 = 状态 0
 	}
 }
 

@@ -10,7 +10,12 @@ var tlsVersionTokenReplacer = strings.NewReplacer(" ", "", "-", "", "_", "", "."
 
 const versionSSL30 = 0x0300
 
-// CanonicalVersionName returns the repository-wide canonical TLS version token.
+/**
+ * CanonicalVersionName 返回仓库内统一的 TLS 版本标识。
+ *
+ * @param version 版本号，取 crypto/tls 的 Version* 常量或 versionSSL30。
+ * @return 规范标识，如 TLS12、SSL3；未知版本返回空字符串。
+ */
 func CanonicalVersionName(version uint16) string {
 	switch version {
 	case versionSSL30:
@@ -28,8 +33,14 @@ func CanonicalVersionName(version uint16) string {
 	}
 }
 
-// ParseVersion accepts canonical tokens, common aliases, decimal wire values,
-// and hexadecimal wire values, then returns the matching crypto/tls constant.
+/**
+ * ParseVersion 解析配置中的 TLS 版本。
+ *
+ * 接受规范标识、常见别名、十进制线值以及十六进制线值，返回对应的 crypto/tls 常量。
+ *
+ * @param raw 原始版本串，如 "1.2"、"TLSv1.3"、"0x0303"。
+ * @return 匹配的版本常量；无法识别时返回 0。
+ */
 func ParseVersion(raw string) uint16 {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -90,14 +101,24 @@ func ParseVersion(raw string) uint16 {
 	}
 }
 
-// NormalizeVersionToken converts a raw TLS version string into the canonical
-// repository token such as TLS13 or SSL3.
+/**
+ * NormalizeVersionToken 把原始 TLS 版本串转换为仓库规范标识，如 TLS13、SSL3。
+ *
+ * @param raw 原始版本串。
+ * @return 规范标识；无法识别时返回空字符串。
+ */
 func NormalizeVersionToken(raw string) string {
 	return CanonicalVersionName(ParseVersion(raw))
 }
 
-// NormalizeRuntimeVersionToken converts a raw TLS version into a canonical
-// token accepted by crypto/tls for live server handshakes.
+/**
+ * NormalizeRuntimeVersionToken 把原始 TLS 版本转换为 crypto/tls 在真实握手时可接受的规范标识。
+ *
+ * SSL3 虽能被解析，但不能用于实际服务端握手，因此一并归入不支持范围。
+ *
+ * @param raw 原始版本串。
+ * @return 可用的规范标识；SSL3 或无法识别时返回空字符串。
+ */
 func NormalizeRuntimeVersionToken(raw string) string {
 	version := ParseVersion(raw)
 	switch version {
@@ -108,8 +129,15 @@ func NormalizeRuntimeVersionToken(raw string) string {
 	}
 }
 
-// RuntimeVersionRangeValid reports whether the live TLS version range can be
-// used by crypto/tls. Empty values are treated as inherited and valid here.
+/**
+ * RuntimeVersionRangeValid 判断实际握手使用的 TLS 版本区间是否可被 crypto/tls 接受。
+ *
+ * 空值在此视为继承配置，按有效处理。
+ *
+ * @param minRaw 最低版本串。
+ * @param maxRaw 最高版本串。
+ * @return 任一端为空或区间合法时返回 true；任一端无法识别或 min 高于 max 时返回 false。
+ */
 func RuntimeVersionRangeValid(minRaw string, maxRaw string) bool {
 	minRaw = strings.TrimSpace(minRaw)
 	maxRaw = strings.TrimSpace(maxRaw)

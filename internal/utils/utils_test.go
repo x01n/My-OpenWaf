@@ -74,7 +74,7 @@ func TestPaginate(t *testing.T) {
 		// 默认值：pageSize < 1 → 20
 		{1, 0, 0, 20},
 		{1, -1, 0, 20},
-		// pageSize > 200 → 200
+		// 上限截断：pageSize > 200 → 200
 		{1, 201, 0, 200},
 		{1, 200, 0, 200},
 		// 边界：第二页，pageSize=1

@@ -56,13 +56,25 @@ func init() {
 	})
 }
 
-// New returns a logger tagged with the given section name.
-// All loggers share the same global handler (single output stream, no duplication).
+/**
+ * New 返回一个带指定分段名标签的 logger。
+ *
+ * 所有 logger 共享同一个全局 handler，因此输出只有一个流、不会重复。
+ *
+ * @param section 分段名，作为 section 属性附着到 logger 上。
+ * @return 附带 section 属性的 logger 实例。
+ */
 func New(section string) *slog.Logger {
 	return slog.New(globalHandler).With(slog.String("section", section))
 }
 
-// SetOutput replaces the global output writer (useful for testing).
+/**
+ * SetOutput 替换全局输出写入器，便于测试接管输出。
+ *
+ * 替换后关闭颜色，避免测试断言里混入 ANSI 转义序列。
+ *
+ * @param w 新的输出目标，取代默认的 stdout 或日志文件。
+ */
 func SetOutput(w io.Writer) {
 	globalHandler = newPrettyHandler(w, globalLevel.Level(), false)
 }
@@ -176,7 +188,7 @@ func useColor() bool {
 	if v := os.Getenv("MY_OPENWAF_LOG_COLOR"); v != "" {
 		return v == "1" || strings.EqualFold(v, "true")
 	}
-	// Auto-detect: color if stdout is a terminal (char device).
+	// 自动判定：stdout 是终端（字符设备）时才上色
 	fi, err := os.Stdout.Stat()
 	if err == nil && fi.Mode()&os.ModeCharDevice != 0 {
 		return true
@@ -204,7 +216,7 @@ func (h *prettyHandler) Enabled(_ context.Context, level slog.Level) bool {
 func (h *prettyHandler) Handle(_ context.Context, r slog.Record) error {
 	var b strings.Builder
 
-	// Timestamp: 2006-01-02 15:04:05.000
+	// 时间戳，格式 "2006-01-02 15:04:05.000"
 	ts := r.Time.Format("2006-01-02 15:04:05.000")
 	if h.color {
 		b.WriteString(gray)
@@ -215,12 +227,12 @@ func (h *prettyHandler) Handle(_ context.Context, r slog.Record) error {
 	}
 	b.WriteByte(' ')
 
-	// Level badge
+	// 级别徽标
 	lvl := formatLevel(r.Level, h.color)
 	b.WriteString(lvl)
 	b.WriteByte(' ')
 
-	// Section (from pre-attached attrs)
+	// 分段名（取自预先附着的 attrs）
 	section := ""
 	for _, a := range h.attrs {
 		if a.Key == "section" {
@@ -243,7 +255,7 @@ func (h *prettyHandler) Handle(_ context.Context, r slog.Record) error {
 		b.WriteByte(' ')
 	}
 
-	// Message
+	// 消息正文
 	if h.color {
 		b.WriteString(white)
 		b.WriteString(r.Message)
@@ -252,10 +264,10 @@ func (h *prettyHandler) Handle(_ context.Context, r slog.Record) error {
 		b.WriteString(r.Message)
 	}
 
-	// Inline attrs (from pre-attached + record)
+	// 行内 attrs（预先附着的 + record 自带的）
 	writeAttrs := func(a slog.Attr) {
 		if a.Key == "section" {
-			return // already rendered as [section]
+			return // 已渲染为 [section] 前缀
 		}
 		b.WriteByte(' ')
 		if h.color {
@@ -355,8 +367,13 @@ func formatValue(v slog.Value, color bool) string {
 	}
 }
 
-// Banner prints a prominent multi-line banner for critical first-run information.
-// Not affected by log level — always printed.
+/**
+ * Banner 打印多行醒目横幅，用于首次启动的关键提示信息。
+ *
+ * 横幅不走日志级别过滤，始终直接写入 stdout，因此不受当前日志级别影响。
+ *
+ * @param lines 横幅正文，每个元素占一行。
+ */
 func Banner(lines ...string) {
 	var b strings.Builder
 	maxLen := 0

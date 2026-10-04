@@ -73,8 +73,14 @@ func registerTLSCipherSuiteAlias(aliasToCanonical map[string]string, alias, cano
 	aliasToCanonical[alias] = canonical
 }
 
-// NormalizeCipherSuiteToken converts a suite name, alias, decimal value, or
-// hexadecimal value into the repository-wide canonical cipher suite name.
+/**
+ * NormalizeCipherSuiteToken 把套件名、别名、十进制值或十六进制值转换为仓库内统一的规范套件名。
+ *
+ * 无法在目录中命中时退回大写原文，由后续解析环节判定是否可用。
+ *
+ * @param raw 原始套件标识串。
+ * @return 规范套件名；输入为空时返回空字符串。
+ */
 func NormalizeCipherSuiteToken(raw string) string {
 	token := strings.TrimSpace(raw)
 	if token == "" {
@@ -87,20 +93,34 @@ func NormalizeCipherSuiteToken(raw string) string {
 	return strings.ToUpper(token)
 }
 
-// ParseCipherSuites converts a comma-separated list of suite names, aliases,
-// decimal IDs, or hexadecimal IDs into runtime-supported cipher suite IDs.
+/**
+ * ParseCipherSuites 把逗号分隔的套件名、别名、十进制 ID 或十六进制 ID 列表转换为运行时支持的套件 ID。
+ *
+ * @param raw 逗号分隔的套件标识列表。
+ * @return 去重后的套件 ID；输入为空或全部无效时返回 nil。
+ */
 func ParseCipherSuites(raw string) []uint16 {
 	return parseCipherSuites(raw, false)
 }
 
-// ParseTLSConfigCipherSuites converts a comma-separated list into cipher suite
-// IDs that can be applied to tls.Config.CipherSuites. TLS 1.3 suites are
-// deliberately excluded because crypto/tls does not make them configurable.
+/**
+ * ParseTLSConfigCipherSuites 把逗号分隔的列表转换为可写入 tls.Config.CipherSuites 的套件 ID。
+ *
+ * TLS 1.3 套件被有意排除，因为 crypto/tls 不提供其配置入口。
+ *
+ * @param raw 逗号分隔的套件标识列表。
+ * @return 去重后且可配置的套件 ID；输入为空或全部无效时返回 nil。
+ */
 func ParseTLSConfigCipherSuites(raw string) []uint16 {
 	return parseCipherSuites(raw, true)
 }
 
-// IsTLSConfigCipherSuiteToken reports whether a token can be applied to tls.Config.CipherSuites.
+/**
+ * IsTLSConfigCipherSuiteToken 判断某个标识能否写入 tls.Config.CipherSuites。
+ *
+ * @param raw 原始套件标识串。
+ * @return 标识能解析为套件且该套件可配置时返回 true。
+ */
 func IsTLSConfigCipherSuiteToken(raw string) bool {
 	canonical := NormalizeCipherSuiteToken(raw)
 	if canonical == "" {
@@ -113,7 +133,12 @@ func IsTLSConfigCipherSuiteToken(raw string) bool {
 	return catalog.configurable[canonical]
 }
 
-// InvalidTLSConfigCipherSuiteToken returns the first token not configurable through tls.Config.CipherSuites.
+/**
+ * InvalidTLSConfigCipherSuiteToken 返回列表中第一个无法通过 tls.Config.CipherSuites 配置的标识。
+ *
+ * @param raw 逗号分隔的套件标识列表。
+ * @return 首个不可配置的标识；列表中没有任何标识时返回去空白后的原文。
+ */
 func InvalidTLSConfigCipherSuiteToken(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""
@@ -163,8 +188,14 @@ func parseCipherSuites(raw string, tlsConfigOnly bool) []uint16 {
 	return suites
 }
 
-// FormatCipherSuites converts raw numeric cipher suite IDs into a canonical,
-// comma-separated repository representation.
+/**
+ * FormatCipherSuites 把数字套件 ID 转换为仓库内统一的逗号分隔表示。
+ *
+ * 目录中不存在的 ID 用 0x 前缀的十六进制（补齐四位）表示。
+ *
+ * @param cipherSuites 待格式化的套件 ID 列表。
+ * @return 逗号分隔的规范表示；列表为空时返回空字符串。
+ */
 func FormatCipherSuites(cipherSuites []uint16) string {
 	if len(cipherSuites) == 0 {
 		return ""
