@@ -1,10 +1,15 @@
 package site
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol"
+	"github.com/cloudwego/hertz/pkg/route/param"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
@@ -83,4 +88,112 @@ func failSubsequentDeletes(t *testing.T, db *gorm.DB) {
 	}); err != nil {
 		t.Fatalf("register delete failure callback: %v", err)
 	}
+}
+
+func newSiteRepoForTest(t *testing.T) *repository.SiteRepo {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.Site{}); err != nil {
+		t.Fatalf("migrate sites: %v", err)
+	}
+	return repository.NewSiteRepo(db)
+}
+
+func newSiteAndListenerReposForTest(t *testing.T) (*repository.SiteRepo, *repository.SiteListenerRepo) {
+	siteRepo, listenerRepo, _ := newSiteAndListenerReposWithDB(t)
+	return siteRepo, listenerRepo
+}
+
+func newSiteListenerCertReposForTest(t *testing.T) (*repository.SiteRepo, *repository.SiteListenerRepo, *repository.CertificateRepo) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.Site{}, &store.SiteListener{}, &store.Certificate{}); err != nil {
+		t.Fatalf("migrate listener tables: %v", err)
+	}
+	return repository.NewSiteRepo(db), repository.NewSiteListenerRepo(db), repository.NewCertificateRepo(db)
+}
+
+func invokeCreateSiteListenerHandler(t *testing.T, handler app.HandlerFunc, siteID uint, payload []byte) *app.RequestContext {
+	t.Helper()
+	var req protocol.Request
+	req.SetMethod("POST")
+	req.SetRequestURI("/api/v1/sites/1/listeners")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBody(payload)
+
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "id", Value: strconv.FormatUint(uint64(siteID), 10)}}
+	handler(context.Background(), ctx)
+	return ctx
+}
+
+func invokeUpdateSiteListenerHandler(t *testing.T, handler app.HandlerFunc, siteID uint, listenerID uint, payload []byte) *app.RequestContext {
+	t.Helper()
+	var req protocol.Request
+	req.SetMethod("POST")
+	req.SetRequestURI("/api/v1/sites/1/listeners/1/update")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBody(payload)
+
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{
+		{Key: "id", Value: strconv.FormatUint(uint64(siteID), 10)},
+		{Key: "lid", Value: strconv.FormatUint(uint64(listenerID), 10)},
+	}
+	handler(context.Background(), ctx)
+	return ctx
+}
+
+func listenerParams(siteID, listenerID string) param.Params {
+	return param.Params{
+		{Key: "id", Value: siteID},
+		{Key: "lid", Value: listenerID},
+	}
+}
+
+func invokeSiteErrorPagesHandler(t *testing.T, handler app.HandlerFunc, siteID uint, payload []byte) *app.RequestContext {
+	t.Helper()
+	var req protocol.Request
+	req.SetMethod("POST")
+	req.SetRequestURI("/api/v1/sites/1/error-pages")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBody(payload)
+
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "id", Value: strconv.FormatUint(uint64(siteID), 10)}}
+	handler(context.Background(), ctx)
+	return ctx
+}
+
+func seedSiteWithErrorPages(t *testing.T, repo *repository.SiteRepo, pages string) *store.Site {
+	t.Helper()
+	item := &store.Site{
+		Host:             "example.test",
+		UpstreamURLs:     `["http://127.0.0.1:8080"]`,
+		Bind:             ":8081",
+		Network:          "tcp",
+		CustomErrorPages: pages,
+	}
+	if err := repo.Create(item); err != nil {
+		t.Fatalf("create site: %v", err)
+	}
+	return item
+}
+
+func seedListenerSite(t *testing.T, repo *repository.SiteRepo, host, bind string) *store.Site {
+	t.Helper()
+	item := &store.Site{Host: host, UpstreamURLs: "http://127.0.0.1:8080", Bind: bind, Network: "tcp", Enabled: true}
+	if err := repo.Create(item); err != nil {
+		t.Fatalf("seed site %s: %v", host, err)
+	}
+	return item
 }

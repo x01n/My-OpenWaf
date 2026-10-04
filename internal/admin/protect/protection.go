@@ -8,6 +8,8 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"My-OpenWaf/internal/admin/protect/captcha"
+	"My-OpenWaf/internal/admin/protect/chain"
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
@@ -182,7 +184,7 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			"shield_max_retries":      present["shield_max_retries"],
 			"shield_env_strictness":   present["shield_env_strictness"],
 		}
-		if err := validateChallengeConfig(cfg, challengePresent); err != nil {
+		if err := captcha.ValidateChallengeConfig(cfg, challengePresent); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
@@ -191,7 +193,7 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 			return
 		}
 		if present["chain_steps"] {
-			steps, ok := normalizeChainStepPayload(json.RawMessage(cfg.ChainSteps))
+			steps, ok := chain.NormalizeChainStepPayload(json.RawMessage(cfg.ChainSteps))
 			if !ok {
 				c.JSON(400, map[string]string{"error": "chain_steps contains unsupported step type or captcha_type"})
 				return

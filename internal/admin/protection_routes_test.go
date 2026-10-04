@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"My-OpenWaf/internal/admin/auth"
-	"My-OpenWaf/internal/admin/protect"
+	"My-OpenWaf/internal/admin/protect/drop"
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/admin/system"
 	"My-OpenWaf/internal/core"
@@ -1077,7 +1077,7 @@ func TestDropPolicyUpdatePostRoutePreservesSharedFieldsWhenPatchOmitsThem(t *tes
 	if err != nil {
 		t.Fatalf("load drop policy: %v", err)
 	}
-	var dropPolicy protect.DropPolicyResponse
+	var dropPolicy drop.DropPolicyResponse
 	if err := json.Unmarshal([]byte(val), &dropPolicy); err != nil {
 		t.Fatalf("decode drop policy: %v", err)
 	}

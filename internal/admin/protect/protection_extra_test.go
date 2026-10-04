@@ -6,19 +6,20 @@ import (
 	"errors"
 	"testing"
 
+	"My-OpenWaf/internal/admin/protect/drop"
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store"
 )
 
 // TestPutProtectionSettingsRejectsInvalidBody 验证请求体非法时返回 400。
 func TestPutProtectionSettingsRejectsInvalidBody(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	for _, body := range [][]byte{
 		[]byte(`{"cve_enabled":`),
 		[]byte(`[1,2,3]`),
 		[]byte(`"plain string"`),
 	} {
-		ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+		ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 		if ctx.Response.StatusCode() != 400 {
 			t.Fatalf("body=%s: expected 400, got %d: %s", body, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
@@ -26,7 +27,7 @@ func TestPutProtectionSettingsRejectsInvalidBody(t *testing.T) {
 }
 
 func TestPutProtectionSettingsRejectsInvalidEnabledRateLimit(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
@@ -35,7 +36,7 @@ func TestPutProtectionSettingsRejectsInvalidEnabledRateLimit(t *testing.T) {
 		[]byte(`{"request_ratelimit_enabled":true,"request_ratelimit_window":60,"request_ratelimit_max":0}`),
 		[]byte(`{"error_ratelimit_enabled":true,"error_ratelimit_window":-1}`),
 	} {
-		ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+		ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 		if ctx.Response.StatusCode() != 400 {
 			t.Fatalf("invalid enabled rate-limit payload status = %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
@@ -44,7 +45,7 @@ func TestPutProtectionSettingsRejectsInvalidEnabledRateLimit(t *testing.T) {
 
 // TestPutProtectionSettingsWritesAllActionFields 验证五个动作字段都被 setProtectionActionField 正确写回。
 func TestPutProtectionSettingsWritesAllActionFields(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
@@ -56,7 +57,7 @@ func TestPutProtectionSettingsWritesAllActionFields(t *testing.T) {
 		"cve_action":"shield_challenge",
 		"auto_ban_action":"drop"
 	}`)
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -83,12 +84,12 @@ func TestPutProtectionSettingsWritesAllActionFields(t *testing.T) {
 // TestPutProtectionSettingsRejectsUnsupportedAutoBanAction ensures the admin contract
 // does not persist actions that the IP reputation runtime cannot execute.
 func TestPutProtectionSettingsRejectsUnsupportedAutoBanAction(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"auto_ban_action":"chain_challenge"}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"auto_ban_action":"chain_challenge"}`))
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("unsupported auto-ban action should return 400, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -100,13 +101,13 @@ func TestPutProtectionSettingsRejectsUnsupportedAutoBanAction(t *testing.T) {
 
 // TestPutProtectionSettingsNormalizesLegacyActions 验证 block/log_only 归一化为 intercept/observe。
 func TestPutProtectionSettingsNormalizesLegacyActions(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 
 	body := []byte(`{"builtin_owasp_on_hit":"block","cve_action":"log_only"}`)
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -132,12 +133,12 @@ func TestPutProtectionSettingsRejectsInvalidActionPerField(t *testing.T) {
 	// redirect 缺少跳转目标、allow/tag 不是有效的命中动作。
 	for _, field := range fields {
 		for _, invalid := range []string{"redirect", "allow", "tag", "not_an_action"} {
-			repo := newSystemSettingsRepoForTest(t)
+			repo := newSystemSettingsRepoForProtectionTest(t)
 			if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 				t.Fatalf("seed protection: %v", err)
 			}
 			body := []byte(`{"` + field + `":"` + invalid + `"}`)
-			ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+			ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 			if ctx.Response.StatusCode() != 400 {
 				t.Errorf("%s=%q: expected 400, got %d: %s", field, invalid, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 			}
@@ -148,7 +149,7 @@ func TestPutProtectionSettingsRejectsInvalidActionPerField(t *testing.T) {
 // TestPutProtectionSettingsValidatesStoredActionWhenEnableFlagIsSent 验证仅提交启用开关时，
 // 仍会校验库里已存的动作值。
 func TestPutProtectionSettingsValidatesStoredActionWhenEnableFlagIsSent(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CVEEnabled = false
 	cfg.CVEAction = "allow"
@@ -156,7 +157,7 @@ func TestPutProtectionSettingsValidatesStoredActionWhenEnableFlagIsSent(t *testi
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cve_enabled":true}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cve_enabled":true}`))
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("expected 400 when enabling a phase whose stored action is invalid, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -164,7 +165,7 @@ func TestPutProtectionSettingsValidatesStoredActionWhenEnableFlagIsSent(t *testi
 
 // TestPutProtectionSettingsSkipsValidationForEmptyStoredAction 验证动作为空时跳过校验。
 func TestPutProtectionSettingsSkipsValidationForEmptyStoredAction(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CVEEnabled = false
 	cfg.CVEAction = ""
@@ -172,7 +173,7 @@ func TestPutProtectionSettingsSkipsValidationForEmptyStoredAction(t *testing.T) 
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cve_enabled":true}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cve_enabled":true}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -183,7 +184,7 @@ func TestPutProtectionSettingsSkipsValidationForEmptyStoredAction(t *testing.T) 
 
 // TestPutProtectionSettingsSkipsValidationWhenPhaseStaysDisabled 验证未启用且未提交动作字段时不做校验。
 func TestPutProtectionSettingsSkipsValidationWhenPhaseStaysDisabled(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CVEEnabled = false
 	cfg.CVEAction = "allow"
@@ -191,7 +192,7 @@ func TestPutProtectionSettingsSkipsValidationWhenPhaseStaysDisabled(t *testing.T
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"login_max_attempts":9}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"login_max_attempts":9}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -235,14 +236,14 @@ func TestValidateCCRuleActions(t *testing.T) {
 
 // TestPutProtectionSettingsRejectsMalformedCCRules 验证 cc_rules 不是合法 JSON 数组时返回 400。
 func TestPutProtectionSettingsRejectsMalformedCCRules(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CCRules = "[]"
 	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cc_rules":"definitely-not-json"}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cc_rules":"definitely-not-json"}`))
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("expected 400 for malformed cc_rules, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -253,7 +254,7 @@ func TestPutProtectionSettingsRejectsMalformedCCRules(t *testing.T) {
 
 // TestPutProtectionSettingsValidatesStoredCCRulesWhenCustomEnabled 验证仅打开 cc_use_custom 时校验库里已存的规则。
 func TestPutProtectionSettingsValidatesStoredCCRulesWhenCustomEnabled(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CCUseCustom = false
 	cfg.CCRules = `[{"enabled":true,"action":"redirect"}]`
@@ -261,7 +262,7 @@ func TestPutProtectionSettingsValidatesStoredCCRulesWhenCustomEnabled(t *testing
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cc_use_custom":true}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cc_use_custom":true}`))
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("expected 400 when enabling custom CC with an invalid stored action, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -269,7 +270,7 @@ func TestPutProtectionSettingsValidatesStoredCCRulesWhenCustomEnabled(t *testing
 
 // TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch 验证部分保存不清空八个 JSON blob 字段。
 func TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CCRules = `[{"enabled":true,"action":"drop"}]`
 	cfg.OWASPModules = `{"sqli":"high"}`
@@ -283,7 +284,7 @@ func TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch(t *testing.T
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"login_max_attempts":11}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"login_max_attempts":11}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -308,7 +309,7 @@ func TestPutProtectionSettingsPreservesAllJSONBlobsOnUnrelatedPatch(t *testing.T
 
 // TestPutProtectionSettingsAcceptsJSONBlobsAsObjectsAndStrings 验证 blob 字段既可传对象/数组也可传 JSON 字符串。
 func TestPutProtectionSettingsAcceptsJSONBlobsAsObjectsAndStrings(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
@@ -322,7 +323,7 @@ func TestPutProtectionSettingsAcceptsJSONBlobsAsObjectsAndStrings(t *testing.T) 
 		"cve_rules_config":{"CVE-2021-44228":{"enabled":true}},
 		"category_sensitivity":"{\"sqli\":\"strict\"}"
 	}`)
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -426,14 +427,14 @@ func TestPutProtectionSettingsHandlesSkipPathByPhase(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repo := newSystemSettingsRepoForTest(t)
+			repo := newSystemSettingsRepoForProtectionTest(t)
 			cfg := store.DefaultProtectionConfig()
 			cfg.SkipPathByPhase = original
 			if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 				t.Fatalf("seed protection: %v", err)
 			}
 			reloads := 0
-			ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error {
+			ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error {
 				reloads++
 				return nil
 			}), "POST", "/api/v1/protection-settings", tt.body)
@@ -452,12 +453,12 @@ func TestPutProtectionSettingsHandlesSkipPathByPhase(t *testing.T) {
 
 // TestPutProtectionSettingsSyncsBotDetectionEnabled 验证 bot_detection_enabled 同步写入 bot_settings。
 func TestPutProtectionSettingsSyncsBotDetectionEnabled(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := repo.Set("bot_settings", `{"enabled":false,"score_threshold":73}`); err != nil {
 		t.Fatalf("seed bot settings: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"bot_detection_enabled":true}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"bot_detection_enabled":true}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -480,7 +481,7 @@ func TestPutProtectionSettingsSyncsBotDetectionEnabled(t *testing.T) {
 
 // TestPutProtectionSettingsSyncsCaptchaProjection 验证 protection API 修改 CAPTCHA 后同步 Bot 投影。
 func TestPutProtectionSettingsSyncsCaptchaProjection(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CaptchaEnabled = false
 	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
@@ -490,7 +491,7 @@ func TestPutProtectionSettingsSyncsCaptchaProjection(t *testing.T) {
 		t.Fatalf("seed bot settings: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"captcha_enabled":true}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"captcha_enabled":true}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -509,12 +510,12 @@ func TestPutProtectionSettingsSyncsCaptchaProjection(t *testing.T) {
 
 // TestPutProtectionSettingsSyncsCVEAutoDropToDropPolicy 验证 CVE 自动丢弃开关同步写入 drop_policy。
 func TestPutProtectionSettingsSyncsCVEAutoDropToDropPolicy(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := repo.Set("drop_policy", `{"enabled":true,"bot_score_threshold":66,"cve_auto_drop_critical":true,"cve_auto_drop_high":true}`); err != nil {
 		t.Fatalf("seed drop policy: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cve_auto_drop_critical":false,"cve_auto_drop_high":false}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cve_auto_drop_critical":false,"cve_auto_drop_high":false}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -523,7 +524,7 @@ func TestPutProtectionSettingsSyncsCVEAutoDropToDropPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load drop policy: %v", err)
 	}
-	var policy DropPolicyResponse
+	var policy drop.DropPolicyResponse
 	if err := json.Unmarshal([]byte(val), &policy); err != nil {
 		t.Fatalf("decode drop policy: %v", err)
 	}
@@ -537,8 +538,8 @@ func TestPutProtectionSettingsSyncsCVEAutoDropToDropPolicy(t *testing.T) {
 
 // TestPutProtectionSettingsReloadFailureReturns500 验证 reload 失败时返回 500，但配置已落库。
 func TestPutProtectionSettingsReloadFailureReturns500(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return errors.New("reload boom") }), "POST", "/api/v1/protection-settings", []byte(`{"login_max_attempts":13}`))
+	repo := newSystemSettingsRepoForProtectionTest(t)
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return errors.New("reload boom") }), "POST", "/api/v1/protection-settings", []byte(`{"login_max_attempts":13}`))
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("expected 500 on reload failure, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}

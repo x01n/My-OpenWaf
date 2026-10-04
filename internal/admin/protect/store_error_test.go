@@ -2,12 +2,22 @@ package protect
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol"
+	"github.com/cloudwego/hertz/pkg/route/param"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
+	botpkg "My-OpenWaf/internal/admin/protect/bot"
+	"My-OpenWaf/internal/admin/protect/captcha"
+	"My-OpenWaf/internal/admin/protect/chain"
+	"My-OpenWaf/internal/admin/protect/drop"
+	"My-OpenWaf/internal/admin/protect/escalation"
+	"My-OpenWaf/internal/admin/protect/page"
+	senspkg "My-OpenWaf/internal/admin/protect/sensitivity"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
@@ -35,20 +45,20 @@ func TestHandlersReturn500WhenSettingsStoreIsUnavailable(t *testing.T) {
 	}{
 		{
 			name:    "bot_settings",
-			handler: func(r *repository.SystemSettingsRepo) app.HandlerFunc { return UpdateBotSettings(r, nil) },
+			handler: func(r *repository.SystemSettingsRepo) app.HandlerFunc { return botpkg.UpdateBotSettings(r, nil) },
 			uri:     "/api/v1/bot-settings/update",
 			body:    []byte(`{"score_threshold":50}`),
 		},
 		{
 			name:    "drop_policy",
-			handler: func(r *repository.SystemSettingsRepo) app.HandlerFunc { return UpdateDropPolicy(r, nil) },
+			handler: func(r *repository.SystemSettingsRepo) app.HandlerFunc { return drop.UpdateDropPolicy(r, nil) },
 			uri:     "/api/v1/drop-policy/update",
 			body:    []byte(`{"enabled":true}`),
 		},
 		{
 			name: "captcha_config",
 			handler: func(r *repository.SystemSettingsRepo) app.HandlerFunc {
-				return UpdateCaptchaConfig(r, func() error { return nil })
+				return captcha.UpdateCaptchaConfig(r, func() error { return nil })
 			},
 			uri:  "/api/v1/captcha/config",
 			body: []byte(`{"captcha_enabled":true}`),
@@ -56,7 +66,7 @@ func TestHandlersReturn500WhenSettingsStoreIsUnavailable(t *testing.T) {
 		{
 			name: "chain_config",
 			handler: func(r *repository.SystemSettingsRepo) app.HandlerFunc {
-				return UpdateChainConfig(r, func() error { return nil })
+				return chain.UpdateChainConfig(r, func() error { return nil })
 			},
 			uri:  "/api/v1/chain/config",
 			body: []byte(`{"chain_enabled":true}`),
@@ -72,7 +82,7 @@ func TestHandlersReturn500WhenSettingsStoreIsUnavailable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		repo := newBrokenSystemSettingsRepoForTest(t)
-		ctx := invokeProtectHandler(t, tc.handler(repo), "POST", tc.uri, tc.body)
+		ctx := invokeProtectionHandler(t, tc.handler(repo), "POST", tc.uri, tc.body)
 		if ctx.Response.StatusCode() != 500 {
 			t.Errorf("%s: expected 500 when the settings store is unavailable, got %d: %s", tc.name, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
@@ -82,7 +92,7 @@ func TestHandlersReturn500WhenSettingsStoreIsUnavailable(t *testing.T) {
 // TestUpdateEscalationConfigReturns500WhenStoreIsUnavailable 验证升级配置写入失败返回 500。
 func TestUpdateEscalationConfigReturns500WhenStoreIsUnavailable(t *testing.T) {
 	repo := newBrokenSystemSettingsRepoForTest(t)
-	ctx := invokeEscalationConfigHandler(t, UpdateEscalationConfig(repo, func() error { return nil }), []byte(`{"escalation_enabled":true}`))
+	ctx := invokeEscalationConfigHandlerForTest(t, escalation.UpdateEscalationConfig(repo, func() error { return nil }), []byte(`{"escalation_enabled":true}`))
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("expected 500 when the settings store is unavailable, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -91,7 +101,7 @@ func TestUpdateEscalationConfigReturns500WhenStoreIsUnavailable(t *testing.T) {
 // TestUpdateSensitivityConfigReturns500WhenStoreIsUnavailable 验证灵敏度写入失败返回 500。
 func TestUpdateSensitivityConfigReturns500WhenStoreIsUnavailable(t *testing.T) {
 	repo := newBrokenSystemSettingsRepoForTest(t)
-	ctx := invokeSensitivityHandler(t, UpdateSensitivityConfig(repo, func() error { return nil }), "global", []byte(`{"category_sensitivity":{"sqli":"high"}}`))
+	ctx := invokeSensitivityHandlerForTest(t, senspkg.UpdateSensitivityConfig(repo, func() error { return nil }), "global", []byte(`{"category_sensitivity":{"sqli":"high"}}`))
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("expected 500 when the settings store is unavailable, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -101,12 +111,12 @@ func TestUpdateSensitivityConfigReturns500WhenStoreIsUnavailable(t *testing.T) {
 func TestPageTemplateHandlersReturn500WhenStoreIsUnavailable(t *testing.T) {
 	repo := newBrokenSystemSettingsRepoForTest(t)
 
-	ctx := invokePageTemplateHandler(t, UpdatePageTemplate(repo, func() error { return nil }), "POST", "block", []byte(`{"brand_name":"X"}`))
+	ctx := invokePageTemplateHandlerForTest(t, page.UpdatePageTemplate(repo, func() error { return nil }), "POST", "block", []byte(`{"brand_name":"X"}`))
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("update: expected 500 when the settings store is unavailable, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
-	ctx = invokePageTemplateHandler(t, ResetPageTemplate(repo, func() error { return nil }), "POST", "block", nil)
+	ctx = invokePageTemplateHandlerForTest(t, page.ResetPageTemplate(repo, func() error { return nil }), "POST", "block", nil)
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("reset: expected 500 when the settings store is unavailable, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -144,7 +154,7 @@ func newSettingsRepoBlockingKeyForTest(t *testing.T, blockedKey string) *reposit
 func TestPutProtectionSettingsReturns500WhenBotSyncFails(t *testing.T) {
 	repo := newSettingsRepoBlockingKeyForTest(t, "bot_settings")
 	reloaded := false
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error {
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error {
 		reloaded = true
 		return nil
 	}), "POST", "/api/v1/protection-settings", []byte(`{"bot_detection_enabled":true}`))
@@ -162,7 +172,7 @@ func TestPutProtectionSettingsReturns500WhenBotSyncFails(t *testing.T) {
 // TestPutProtectionSettingsReturns500WhenCVEAutoDropSyncFails 验证同步 drop_policy 失败时返回 500。
 func TestPutProtectionSettingsReturns500WhenCVEAutoDropSyncFails(t *testing.T) {
 	repo := newSettingsRepoBlockingKeyForTest(t, "drop_policy")
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cve_auto_drop_critical":false,"cve_auto_drop_high":false}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"cve_auto_drop_critical":false,"cve_auto_drop_high":false}`))
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("expected 500 when drop_policy sync fails, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -176,7 +186,7 @@ func TestUpdateBotSettingsReturns500WhenProtectionSyncFails(t *testing.T) {
 		[]byte(`{"captcha_enabled":true}`),
 		[]byte(`{"browser_sign_enabled":true}`),
 	} {
-		ctx := invokeProtectHandler(t, UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", body)
+		ctx := invokeProtectionHandler(t, botpkg.UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", body)
 		if ctx.Response.StatusCode() != 500 {
 			t.Errorf("body=%s: expected 500 when protection sync fails, got %d: %s", body, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
@@ -186,7 +196,7 @@ func TestUpdateBotSettingsReturns500WhenProtectionSyncFails(t *testing.T) {
 // TestUpdateBotSettingsReturns500WhenDropPolicySyncFails 验证 bot 阈值反向同步 drop_policy 失败时返回 500。
 func TestUpdateBotSettingsReturns500WhenDropPolicySyncFails(t *testing.T) {
 	repo := newSettingsRepoBlockingKeyForTest(t, "drop_policy")
-	ctx := invokeProtectHandler(t, UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", []byte(`{"score_threshold":51}`))
+	ctx := invokeProtectionHandler(t, botpkg.UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", []byte(`{"score_threshold":51}`))
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("expected 500 when drop_policy sync fails, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -195,7 +205,7 @@ func TestUpdateBotSettingsReturns500WhenDropPolicySyncFails(t *testing.T) {
 // TestUpdateDropPolicyReturns500WhenBotSettingsSyncFails 验证 drop 页反向同步 bot_settings 失败时返回 500。
 func TestUpdateDropPolicyReturns500WhenBotSettingsSyncFails(t *testing.T) {
 	repo := newSettingsRepoBlockingKeyForTest(t, "bot_settings")
-	ctx := invokeProtectHandler(t, UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", []byte(`{"bot_score_threshold":59}`))
+	ctx := invokeProtectionHandler(t, drop.UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", []byte(`{"bot_score_threshold":59}`))
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("expected 500 when bot_settings sync fails, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -204,7 +214,7 @@ func TestUpdateDropPolicyReturns500WhenBotSettingsSyncFails(t *testing.T) {
 // TestUpdateDropPolicyReturns500WhenProtectionSaveFails 验证 drop 页写回 protection 失败时返回 500。
 func TestUpdateDropPolicyReturns500WhenProtectionSaveFails(t *testing.T) {
 	repo := newSettingsRepoBlockingKeyForTest(t, "protection")
-	ctx := invokeProtectHandler(t, UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", []byte(`{"enabled":true}`))
+	ctx := invokeProtectionHandler(t, drop.UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", []byte(`{"enabled":true}`))
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("expected 500 when protection save fails, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -212,15 +222,71 @@ func TestUpdateDropPolicyReturns500WhenProtectionSaveFails(t *testing.T) {
 
 // TestPutProtectionSettingsRejectsTypeMismatchedField 验证字段类型与 ProtectionConfig 不符时返回 400。
 func TestPutProtectionSettingsRejectsTypeMismatchedField(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	for _, body := range [][]byte{
 		[]byte(`{"cve_enabled":"yes"}`),
 		[]byte(`{"login_max_attempts":"many"}`),
 		[]byte(`{"builtin_owasp_on_hit":123}`),
 	} {
-		ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+		ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 		if ctx.Response.StatusCode() != 400 {
 			t.Errorf("body=%s: expected 400, got %d: %s", body, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
 	}
+}
+
+func invokeEscalationConfigHandlerForTest(t *testing.T, handler app.HandlerFunc, payload []byte) *app.RequestContext {
+	t.Helper()
+	var req protocol.Request
+	req.SetMethod("POST")
+	req.SetRequestURI("/api/v1/protection/global/escalation")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBody(payload)
+
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "id", Value: "global"}}
+	handler(context.Background(), ctx)
+	return ctx
+}
+
+func invokeSensitivityHandlerForTest(t *testing.T, handler app.HandlerFunc, id string, payload []byte) *app.RequestContext {
+	t.Helper()
+	var req protocol.Request
+	req.SetMethod("POST")
+	req.SetRequestURI("/api/v1/protection/" + id + "/sensitivity")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+		req.SetBody(payload)
+	}
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "id", Value: id}}
+	handler(context.Background(), ctx)
+	return ctx
+}
+
+/**
+ * invokePageTemplateHandlerForTest 构造带 :type 路由参数的请求上下文并调用 handler。
+ *
+ * @param handler  待调用的 Hertz handler
+ * @param method   HTTP 方法，仅使用 GET/POST
+ * @param pageType 路由参数 type 的取值
+ * @param payload  请求体，nil 表示不带请求体
+ */
+func invokePageTemplateHandlerForTest(t *testing.T, handler app.HandlerFunc, method, pageType string, payload []byte) *app.RequestContext {
+	t.Helper()
+	var req protocol.Request
+	req.SetMethod(method)
+	req.SetRequestURI("/api/v1/page-templates/" + pageType)
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+		req.SetBody(payload)
+	}
+
+	ctx := app.NewContext(0)
+	req.CopyTo(&ctx.Request)
+	ctx.Params = param.Params{{Key: "type", Value: pageType}}
+	handler(context.Background(), ctx)
+	return ctx
 }

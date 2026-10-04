@@ -21,7 +21,7 @@ import (
 
 var (
 	errInvalidSiteAction        = errors.New("invalid action")
-	errInvalidSiteNetwork       = errors.New("invalid network")
+	ErrInvalidSiteNetwork       = errors.New("invalid network")
 	errInvalidSiteXFFMode       = errors.New("invalid xff_mode")
 	errInvalidSiteTrustedCIDR   = errors.New("invalid trusted_cidr")
 	errInvalidSiteHeaderOrder   = errors.New("invalid client_ip_header_order")
@@ -450,7 +450,7 @@ func validateSiteNetwork(item *store.Site, body []byte) error {
 	}
 	normalized := snapshotpkg.NormalizeNetwork(raw)
 	if normalized == "" {
-		return errInvalidSiteNetwork
+		return ErrInvalidSiteNetwork
 	}
 	item.Network = normalized
 	return nil

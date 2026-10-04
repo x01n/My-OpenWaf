@@ -14,8 +14,18 @@ import (
 	"My-OpenWaf/internal/admin/detect/owasprules"
 	"My-OpenWaf/internal/admin/event"
 	"My-OpenWaf/internal/admin/protect"
+	"My-OpenWaf/internal/admin/protect/bot"
+	"My-OpenWaf/internal/admin/protect/captcha"
+	"My-OpenWaf/internal/admin/protect/chain"
+	"My-OpenWaf/internal/admin/protect/drop"
+	protectescalation "My-OpenWaf/internal/admin/protect/escalation"
+	pagehandler "My-OpenWaf/internal/admin/protect/page"
+	"My-OpenWaf/internal/admin/protect/sensitivity"
 	"My-OpenWaf/internal/admin/rule"
 	"My-OpenWaf/internal/admin/site"
+	"My-OpenWaf/internal/admin/site/errorpage"
+	"My-OpenWaf/internal/admin/site/listener"
+	"My-OpenWaf/internal/admin/site/observability"
 	"My-OpenWaf/internal/admin/system"
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/adminweb"
@@ -103,7 +113,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites", site.ListSites(r.Site, r.SiteListener))
 		readGroup.GET("/sites/:id", site.GetSite(r.Site))
 		readGroup.GET("/sites/:id/status", site.GetSiteStatus(r.Site))
-		readGroup.GET("/sites/:id/listeners", site.ListSiteListeners(r.Site, r.SiteListener))
+		readGroup.GET("/sites/:id/listeners", listener.ListSiteListeners(r.Site, r.SiteListener))
 
 		readGroup.GET("/certificates", system.ListCertificates(r.Certificate))
 		readGroup.GET("/certificates/:id", system.GetCertificate(r.Certificate))
@@ -162,10 +172,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		// 预置爬虫白名单预览（读端点）。
 		readGroup.GET("/preset-bot-whitelist", system.ListPresetBotWhitelist())
-		readGroup.GET("/sites/:id/access-logs", site.ListSiteAccessLogs(r.Site, r.AccessLog))
-		readGroup.GET("/sites/:id/access-logs/stats", site.SiteAccessLogStats(r.Site, r.AccessLog))
-		readGroup.GET("/sites/:id/drop-events", site.ListSiteDropEvents(r.Site, r.DropEvent))
-		readGroup.GET("/sites/:id/drop-stats", site.SiteDropStats(r.Site, r.DropEvent))
+		readGroup.GET("/sites/:id/access-logs", observability.ListSiteAccessLogs(r.Site, r.AccessLog))
+		readGroup.GET("/sites/:id/access-logs/stats", observability.SiteAccessLogStats(r.Site, r.AccessLog))
+		readGroup.GET("/sites/:id/drop-events", observability.ListSiteDropEvents(r.Site, r.DropEvent))
+		readGroup.GET("/sites/:id/drop-stats", observability.SiteDropStats(r.Site, r.DropEvent))
 		readGroup.GET("/sites/:id/rules", rule.ListSiteRules(r.Site, r.Rule))
 		readGroup.GET("/sites/:id/application-route-rules", rule.ListApplicationRouteRules(r.Site, r.AppRouteRule))
 		readGroup.GET("/sites/:id/recorded-resources", rule.ListRecordedResources(r.Site, r.RecordedResource))
@@ -188,9 +198,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))
 		readGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
 
-		readGroup.GET("/bot-settings", protect.GetBotSettings(r.SystemSettings))
-		readGroup.GET("/bot-stats", protect.GetBotStats(r.BotScore))
-		readGroup.GET("/bot-scores", protect.GetBotScores(r.BotScore))
+		readGroup.GET("/bot-settings", bot.GetBotSettings(r.SystemSettings))
+		readGroup.GET("/bot-stats", bot.GetBotStats(r.BotScore))
+		readGroup.GET("/bot-scores", bot.GetBotScores(r.BotScore))
 
 		readGroup.GET("/cve-rules", cverules.ListCVERules(r.CVERule))
 		readGroup.GET("/cve-rules/stats", cverules.GetCVERuleStats(r.CVERule))
@@ -201,29 +211,29 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/policies/:policyId/owasp-rules", owasprules.ListOWASPRulesFromRegistry(r.SystemSettings))
 		readGroup.GET("/policies/:policyId/owasp-rules/stats", owasprules.GetOWASPRuleStats(r.SystemSettings))
 
-		readGroup.GET("/captcha/config", protect.GetCaptchaConfig(r.SystemSettings))
+		readGroup.GET("/captcha/config", captcha.GetCaptchaConfig(r.SystemSettings))
 
-		readGroup.GET("/chain/config", protect.GetChainConfig(r.SystemSettings))
-		readGroup.GET("/chain/sessions", protect.ListChainSessions(deps.ChainMgr))
+		readGroup.GET("/chain/config", chain.GetChainConfig(r.SystemSettings))
+		readGroup.GET("/chain/sessions", chain.ListChainSessions(deps.ChainMgr))
 
-		readGroup.GET("/protection/:id/sensitivity", protect.GetSensitivityConfig(r.SystemSettings))
+		readGroup.GET("/protection/:id/sensitivity", sensitivity.GetSensitivityConfig(r.SystemSettings))
 
-		readGroup.GET("/protection/:id/escalation", protect.GetEscalationConfig(r.SystemSettings))
-		readGroup.GET("/escalation/status/:ip", protect.GetEscalationIPStatus(deps.EscalationMgr))
+		readGroup.GET("/protection/:id/escalation", protectescalation.GetEscalationConfig(r.SystemSettings))
+		readGroup.GET("/escalation/status/:ip", protectescalation.GetEscalationIPStatus(deps.EscalationMgr))
 
-		readGroup.GET("/sites/:id/error-pages", site.GetSiteErrorPages(r.Site))
-		readGroup.GET("/error-pages/defaults", site.GetDefaultErrorPages())
+		readGroup.GET("/sites/:id/error-pages", errorpage.GetSiteErrorPages(r.Site))
+		readGroup.GET("/error-pages/defaults", errorpage.GetDefaultErrorPages())
 
-		readGroup.GET("/drop-policy", protect.GetDropPolicy(r.SystemSettings))
-		readGroup.GET("/drop-stats", protect.GetDropStats(r.DropEvent))
-		readGroup.GET("/drop-events", protect.GetDropEvents(r.DropEvent))
+		readGroup.GET("/drop-policy", drop.GetDropPolicy(r.SystemSettings))
+		readGroup.GET("/drop-stats", drop.GetDropStats(r.DropEvent))
+		readGroup.GET("/drop-events", drop.GetDropEvents(r.DropEvent))
 		readGroup.GET("/upstreams/status", system.UpstreamStatus(deps.Upstreams))
 		readGroup.GET("/runtime-config", system.GetRuntimeConfig(deps.RuntimeState, deps.Snapshot, deps.Repos.SystemSettings))
 		readGroup.GET("/realtime/ticket", deps.Realtime.TicketHandler())
 
-		readGroup.GET("/page-templates", protect.GetPageTemplates(r.SystemSettings))
-		readGroup.GET("/page-templates/:type", protect.GetPageTemplate(r.SystemSettings))
-		readGroup.GET("/page-templates/:type/preview", protect.PreviewPageTemplate(r.SystemSettings))
+		readGroup.GET("/page-templates", pagehandler.GetPageTemplates(r.SystemSettings))
+		readGroup.GET("/page-templates/:type", pagehandler.GetPageTemplate(r.SystemSettings))
+		readGroup.GET("/page-templates/:type/preview", pagehandler.PreviewPageTemplate(r.SystemSettings))
 	}
 
 	opsGroup := api.Group("")
@@ -234,9 +244,9 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites/:id/delete", site.DeleteSite(r.Site, r.SiteListener, reload))
 		opsGroup.POST("/sites/:id/start", site.StartSite(r.Site, reload))
 		opsGroup.POST("/sites/:id/stop", site.StopSite(r.Site, reload))
-		opsGroup.POST("/sites/:id/listeners", site.CreateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
-		opsGroup.POST("/sites/:id/listeners/:lid/update", site.UpdateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
-		opsGroup.POST("/sites/:id/listeners/:lid/delete", site.DeleteSiteListener(r.Site, r.SiteListener, reload))
+		opsGroup.POST("/sites/:id/listeners", listener.CreateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/listeners/:lid/update", listener.UpdateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
+		opsGroup.POST("/sites/:id/listeners/:lid/delete", listener.DeleteSiteListener(r.Site, r.SiteListener, reload))
 
 		opsGroup.POST("/certificates", system.CreateCertificate(r.Certificate, reload))
 		opsGroup.POST("/certificates/:id/update", system.UpdateCertificate(r.Certificate, reload))
@@ -286,7 +296,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
 
-		opsGroup.POST("/bot-settings/update", protect.UpdateBotSettings(r.SystemSettings, reload))
+		opsGroup.POST("/bot-settings/update", bot.UpdateBotSettings(r.SystemSettings, reload))
 
 		opsGroup.POST("/cve-rules/:id/toggle", cverules.ToggleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
 		opsGroup.POST("/cve-rules/:id/patch", cverules.UpdateSingleCVERule(r.CVERule, deps.CVEFeedMgr, reload))
@@ -301,28 +311,28 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/policies/:policyId/owasp-rules/:id/reset", owasprules.ResetOWASPRuleOverride(r.SystemSettings, reload))
 		opsGroup.POST("/policies/:policyId/owasp-rules/batch", owasprules.BatchUpdateOWASPRules(r.SystemSettings, reload))
 
-		opsGroup.POST("/captcha/config", protect.UpdateCaptchaConfig(r.SystemSettings, reload))
-		opsGroup.POST("/captcha/test", protect.TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
+		opsGroup.POST("/captcha/config", captcha.UpdateCaptchaConfig(r.SystemSettings, reload))
+		opsGroup.POST("/captcha/test", captcha.TestCaptcha(r.SystemSettings, deps.CaptchaMgr))
 
-		opsGroup.POST("/page-templates/:type", protect.UpdatePageTemplate(r.SystemSettings, reload))
-		opsGroup.POST("/page-templates/:type/reset", protect.ResetPageTemplate(r.SystemSettings, reload))
-		opsGroup.POST("/page-templates/:type/preview", protect.PreviewPageTemplateDraft(r.SystemSettings))
+		opsGroup.POST("/page-templates/:type", pagehandler.UpdatePageTemplate(r.SystemSettings, reload))
+		opsGroup.POST("/page-templates/:type/reset", pagehandler.ResetPageTemplate(r.SystemSettings, reload))
+		opsGroup.POST("/page-templates/:type/preview", pagehandler.PreviewPageTemplateDraft(r.SystemSettings))
 
-		opsGroup.POST("/chain/config", protect.UpdateChainConfig(r.SystemSettings, reload))
-		opsGroup.POST("/chain/sessions/:id/delete", protect.DeleteChainSession(deps.ChainMgr))
+		opsGroup.POST("/chain/config", chain.UpdateChainConfig(r.SystemSettings, reload))
+		opsGroup.POST("/chain/sessions/:id/delete", chain.DeleteChainSession(deps.ChainMgr))
 
-		opsGroup.POST("/protection/:id/sensitivity", protect.UpdateSensitivityConfig(r.SystemSettings, reload))
+		opsGroup.POST("/protection/:id/sensitivity", sensitivity.UpdateSensitivityConfig(r.SystemSettings, reload))
 
-		opsGroup.POST("/protection/:id/escalation", protect.UpdateEscalationConfig(r.SystemSettings, reload))
-		opsGroup.POST("/escalation/status/:ip/reset", protect.ResetEscalationIPStatus(deps.EscalationMgr))
+		opsGroup.POST("/protection/:id/escalation", protectescalation.UpdateEscalationConfig(r.SystemSettings, reload))
+		opsGroup.POST("/escalation/status/:ip/reset", protectescalation.ResetEscalationIPStatus(deps.EscalationMgr))
 
 		opsGroup.POST("/sites/:id/application-route-rules", rule.CreateApplicationRouteRule(r.Site, r.AppRouteRule, reload))
 		opsGroup.POST("/sites/:id/application-route-rules/:rid/update", rule.UpdateApplicationRouteRule(r.Site, r.AppRouteRule, reload))
 		opsGroup.POST("/sites/:id/application-route-rules/:rid/delete", rule.DeleteApplicationRouteRule(r.Site, r.AppRouteRule, reload))
 		opsGroup.POST("/sites/:id/recorded-resources/clear", rule.ClearRecordedResources(r.Site, r.RecordedResource))
 
-		opsGroup.POST("/sites/:id/error-pages", site.UpdateSiteErrorPages(r.Site, reload))
-		opsGroup.POST("/error-pages/preview", site.PreviewErrorPage())
+		opsGroup.POST("/sites/:id/error-pages", errorpage.UpdateSiteErrorPages(r.Site, reload))
+		opsGroup.POST("/error-pages/preview", errorpage.PreviewErrorPage())
 
 		opsGroup.POST("/sites/:id/access", access.SaveAccessConfig(r.AccessControl, reload))
 		opsGroup.POST("/sites/:id/access/providers", access.CreateProvider(r.AccessControl, reload, deps.JWTSecret))
@@ -374,7 +384,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/admin-users/:id/update-role", UpdateAdminRole(r.AdminAccount, revokeCredentials))
 		adminGroup.POST("/admin-users/:id/delete", DeleteAdminUser(r.AdminAccount, revokeCredentials))
 
-		adminGroup.POST("/drop-policy/update", protect.UpdateDropPolicy(r.SystemSettings, reload))
+		adminGroup.POST("/drop-policy/update", drop.UpdateDropPolicy(r.SystemSettings, reload))
 
 		adminGroup.POST("/cve-rules", cverules.CreateCVERule(r.CVERule, deps.CVEFeedMgr, reload))
 		adminGroup.POST("/cve-rules/:id/update", cverules.UpdateCVERule(r.CVERule, deps.CVEFeedMgr, reload))

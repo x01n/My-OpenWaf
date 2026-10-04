@@ -9,12 +9,18 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/route/param"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 
+	botpkg "My-OpenWaf/internal/admin/protect/bot"
+	"My-OpenWaf/internal/admin/protect/drop"
+	senspkg "My-OpenWaf/internal/admin/protect/sensitivity"
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/repository"
 )
 
-func invokeProtectHandler(t *testing.T, handler app.HandlerFunc, method, uri string, payload []byte) *app.RequestContext {
+func invokeProtectionHandler(t *testing.T, handler app.HandlerFunc, method, uri string, payload []byte) *app.RequestContext {
 	t.Helper()
 	var req protocol.Request
 	req.SetMethod(method)
@@ -46,7 +52,7 @@ func TestProtectionResponseUsesEffectiveCategorySensitivity(t *testing.T) {
 }
 
 func TestUpdateSensitivityConfigClearsLegacyOWASPModules(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.OWASPModules = `{"sqli":"high"}`
 	cfg.SetCategorySensitivity(map[string]string{"xss": "low"})
@@ -65,7 +71,7 @@ func TestUpdateSensitivityConfigClearsLegacyOWASPModules(t *testing.T) {
 	req.CopyTo(&ctx.Request)
 	ctx.Params = param.Params{{Key: "id", Value: "global"}}
 
-	UpdateSensitivityConfig(repo, func() error { return nil })(context.Background(), ctx)
+	senspkg.UpdateSensitivityConfig(repo, func() error { return nil })(context.Background(), ctx)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -79,7 +85,7 @@ func TestUpdateSensitivityConfigClearsLegacyOWASPModules(t *testing.T) {
 		t.Fatalf("unexpected category_sensitivity after update: %#v", sensitivity)
 	}
 
-	var resp sensitivityRequest
+	var resp senspkg.SensitivityRequest
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -89,12 +95,12 @@ func TestUpdateSensitivityConfigClearsLegacyOWASPModules(t *testing.T) {
 }
 
 func TestGetProtectionSettingsDefaultsMissingCVEAutoDropFields(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := repo.Set("protection", `{"cve_enabled":true,"cve_action":"intercept"}`); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, GetProtectionSettings(repo), "GET", "/api/v1/protection-settings", nil)
+	ctx := invokeProtectionHandler(t, GetProtectionSettings(repo), "GET", "/api/v1/protection-settings", nil)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -129,7 +135,7 @@ func TestProtectionResponseDefaultsJSONFields(t *testing.T) {
 }
 
 func TestPutProtectionSettingsSyncsAntiReplayToBotSettings(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 		t.Fatal(err)
@@ -138,7 +144,7 @@ func TestPutProtectionSettingsSyncsAntiReplayToBotSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"anti_replay_enabled":true}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(`{"anti_replay_enabled":true}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -156,7 +162,7 @@ func TestPutProtectionSettingsSyncsAntiReplayToBotSettings(t *testing.T) {
 }
 
 func TestPutProtectionSettingsPartialBodyPreservesChallengeFields(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.ChainEnabled = true
 	cfg.ChainSteps = `[{"type":"captcha","condition":"all","captcha_type":"math"}]`
@@ -169,7 +175,7 @@ func TestPutProtectionSettingsPartialBodyPreservesChallengeFields(t *testing.T) 
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{"builtin_owasp_on_hit":"observe"}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{"builtin_owasp_on_hit":"observe"}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -188,26 +194,26 @@ func TestPutProtectionSettingsPartialBodyPreservesChallengeFields(t *testing.T) 
 }
 
 func TestPutProtectionSettingsRejectsRedirectWithoutTargetField(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{"request_ratelimit_action":"redirect"}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{"request_ratelimit_action":"redirect"}`))
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 }
 
 func TestPutProtectionSettingsRejectsCCRuleRedirectWithoutTargetField(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{
 		"cc_use_custom": true,
 		"cc_rules": [
 			{
@@ -223,7 +229,7 @@ func TestPutProtectionSettingsRejectsCCRuleRedirectWithoutTargetField(t *testing
 }
 
 func TestPutProtectionSettingsSavesStructuredCCRules(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CCUseCustom = false
 	cfg.CCRules = "[]"
@@ -247,7 +253,7 @@ func TestPutProtectionSettingsSavesStructuredCCRules(t *testing.T) {
 			}
 		]
 	}`)
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", body)
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", body)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -278,7 +284,7 @@ func TestPutProtectionSettingsSavesStructuredCCRules(t *testing.T) {
 }
 
 func TestPutProtectionSettingsLoginPatchPreservesSensitivityFields(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.OWASPModules = `{"sqli":"high"}`
 	cfg.SetCategorySensitivity(map[string]string{"xss": "strict"})
@@ -286,7 +292,7 @@ func TestPutProtectionSettingsLoginPatchPreservesSensitivityFields(t *testing.T)
 		t.Fatalf("seed protection: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{"login_max_attempts":7}`))
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "PUT", "/api/v1/protection-settings", []byte(`{"login_max_attempts":7}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -305,17 +311,17 @@ func TestPutProtectionSettingsLoginPatchPreservesSensitivityFields(t *testing.T)
 }
 
 func TestGetDropPolicyDefaultsMissingCVEAutoDropFields(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := repo.Set("drop_policy", `{"enabled":true,"bot_score_threshold":90}`); err != nil {
 		t.Fatalf("seed drop policy: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, GetDropPolicy(repo), "GET", "/api/v1/drop-policy", nil)
+	ctx := invokeProtectionHandler(t, drop.GetDropPolicy(repo), "GET", "/api/v1/drop-policy", nil)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
-	var got DropPolicyResponse
+	var got drop.DropPolicyResponse
 	if err := json.Unmarshal(ctx.Response.Body(), &got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -325,17 +331,17 @@ func TestGetDropPolicyDefaultsMissingCVEAutoDropFields(t *testing.T) {
 }
 
 func TestGetDropPolicyDefaultsEmptyStoredPolicy(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := repo.Set("drop_policy", `{}`); err != nil {
 		t.Fatalf("seed drop policy: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, GetDropPolicy(repo), "GET", "/api/v1/drop-policy", nil)
+	ctx := invokeProtectionHandler(t, drop.GetDropPolicy(repo), "GET", "/api/v1/drop-policy", nil)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
-	var got DropPolicyResponse
+	var got drop.DropPolicyResponse
 	if err := json.Unmarshal(ctx.Response.Body(), &got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -345,7 +351,7 @@ func TestGetDropPolicyDefaultsEmptyStoredPolicy(t *testing.T) {
 }
 
 func TestGetDropPolicyDerivesMissingSharedFieldsFromProtectionAndBotSettings(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CVEAutoDropCritical = false
 	cfg.CVEAutoDropHigh = false
@@ -356,12 +362,12 @@ func TestGetDropPolicyDerivesMissingSharedFieldsFromProtectionAndBotSettings(t *
 		t.Fatalf("seed bot settings: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, GetDropPolicy(repo), "GET", "/api/v1/drop-policy", nil)
+	ctx := invokeProtectionHandler(t, drop.GetDropPolicy(repo), "GET", "/api/v1/drop-policy", nil)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
-	var got DropPolicyResponse
+	var got drop.DropPolicyResponse
 	if err := json.Unmarshal(ctx.Response.Body(), &got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -371,7 +377,7 @@ func TestGetDropPolicyDerivesMissingSharedFieldsFromProtectionAndBotSettings(t *
 }
 
 func TestUpdateDropPolicyEnabledPatchDoesNotSyncDefaultSharedFields(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.CVEAutoDropCritical = false
 	cfg.CVEAutoDropHigh = false
@@ -382,7 +388,7 @@ func TestUpdateDropPolicyEnabledPatchDoesNotSyncDefaultSharedFields(t *testing.T
 		t.Fatalf("seed bot settings: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", []byte(`{"enabled":false}`))
+	ctx := invokeProtectionHandler(t, drop.UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", []byte(`{"enabled":false}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -408,7 +414,7 @@ func TestUpdateDropPolicyEnabledPatchDoesNotSyncDefaultSharedFields(t *testing.T
 	if err != nil {
 		t.Fatalf("load drop policy: %v", err)
 	}
-	var dropPolicy DropPolicyResponse
+	var dropPolicy drop.DropPolicyResponse
 	if err := json.Unmarshal([]byte(val), &dropPolicy); err != nil {
 		t.Fatalf("decode drop policy: %v", err)
 	}
@@ -418,7 +424,7 @@ func TestUpdateDropPolicyEnabledPatchDoesNotSyncDefaultSharedFields(t *testing.T
 }
 
 func TestGetBotSettingsDerivesMissingSettingsFromProtectionAndDropPolicy(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.BotDetectionEnabled = true
 	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
@@ -428,7 +434,7 @@ func TestGetBotSettingsDerivesMissingSettingsFromProtectionAndDropPolicy(t *test
 		t.Fatalf("seed drop policy: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, GetBotSettings(repo), "GET", "/api/v1/bot-settings", nil)
+	ctx := invokeProtectionHandler(t, botpkg.GetBotSettings(repo), "GET", "/api/v1/bot-settings", nil)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -443,7 +449,7 @@ func TestGetBotSettingsDerivesMissingSettingsFromProtectionAndDropPolicy(t *test
 }
 
 func TestUpdateBotSettingsListPatchDoesNotSyncDefaultEnabledOrThreshold(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	cfg := store.DefaultProtectionConfig()
 	cfg.BotDetectionEnabled = true
 	if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
@@ -453,7 +459,7 @@ func TestUpdateBotSettingsListPatchDoesNotSyncDefaultEnabledOrThreshold(t *testi
 		t.Fatalf("seed drop policy: %v", err)
 	}
 
-	ctx := invokeProtectHandler(t, UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", []byte(`{"high_risk_countries":["CN","RU"]}`))
+	ctx := invokeProtectionHandler(t, botpkg.UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", []byte(`{"high_risk_countries":["CN","RU"]}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -479,12 +485,12 @@ func TestUpdateBotSettingsListPatchDoesNotSyncDefaultEnabledOrThreshold(t *testi
 }
 
 func TestUpdateBotSettingsRejectsInvalidScoreThreshold(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	for _, body := range [][]byte{
 		[]byte(`{"score_threshold":0}`),
 		[]byte(`{"score_threshold":101}`),
 	} {
-		ctx := invokeProtectHandler(t, UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", body)
+		ctx := invokeProtectionHandler(t, botpkg.UpdateBotSettings(repo, func() error { return nil }), "POST", "/api/v1/bot-settings/update", body)
 		if ctx.Response.StatusCode() != 400 {
 			t.Fatalf("expected invalid score_threshold to return 400, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
@@ -495,12 +501,12 @@ func TestUpdateBotSettingsRejectsInvalidScoreThreshold(t *testing.T) {
 }
 
 func TestUpdateDropPolicyRejectsInvalidBotScoreThreshold(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	for _, body := range [][]byte{
 		[]byte(`{"bot_score_threshold":0}`),
 		[]byte(`{"bot_score_threshold":101}`),
 	} {
-		ctx := invokeProtectHandler(t, UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", body)
+		ctx := invokeProtectionHandler(t, drop.UpdateDropPolicy(repo, func() error { return nil }), "POST", "/api/v1/drop-policy/update", body)
 		if ctx.Response.StatusCode() != 400 {
 			t.Fatalf("expected invalid bot_score_threshold to return 400, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
@@ -521,11 +527,11 @@ func TestPutProtectionSettingsRejectsInvalidChallengeNumbers(t *testing.T) {
 		`{"shield_env_strictness":3}`,
 		`{"captcha_type":"drag"}`,
 	} {
-		repo := newSystemSettingsRepoForTest(t)
+		repo := newSystemSettingsRepoForProtectionTest(t)
 		if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 			t.Fatalf("seed protection: %v", err)
 		}
-		ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(body))
+		ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", []byte(body))
 		if ctx.Response.StatusCode() != 400 {
 			t.Fatalf("body=%s: expected 400, got %d: %s", body, ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 		}
@@ -533,12 +539,12 @@ func TestPutProtectionSettingsRejectsInvalidChallengeNumbers(t *testing.T) {
 }
 
 func TestPutProtectionSettingsRejectsInvalidChainCaptchaType(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 	body := []byte(`{"chain_steps":[{"type":"captcha","condition":"all","captcha_type":"drag"}]}`)
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("expected 400 for invalid chain captcha_type, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -546,13 +552,25 @@ func TestPutProtectionSettingsRejectsInvalidChainCaptchaType(t *testing.T) {
 
 // TestPutProtectionSettingsRejectsInvalidGlobalCaptchaType ensures the generic protection endpoint validates CAPTCHA mode.
 func TestPutProtectionSettingsRejectsInvalidGlobalCaptchaType(t *testing.T) {
-	repo := newSystemSettingsRepoForTest(t)
+	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {
 		t.Fatalf("seed protection: %v", err)
 	}
 	body := []byte(`{"captcha_type":"pow"}`)
-	ctx := invokeProtectHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
+	ctx := invokeProtectionHandler(t, PutProtectionSettings(repo, func() error { return nil }), "POST", "/api/v1/protection-settings", body)
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("expected 400 for invalid captcha_type, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
+}
+
+func newSystemSettingsRepoForProtectionTest(t *testing.T) *repository.SystemSettingsRepo {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.SystemSettings{}); err != nil {
+		t.Fatalf("migrate settings: %v", err)
+	}
+	return repository.NewSystemSettingsRepo(db)
 }
